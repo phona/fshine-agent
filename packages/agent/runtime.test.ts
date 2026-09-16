@@ -361,6 +361,20 @@ describe('createTaxAgentRuntime 协议健壮性', () => {
     expect(correction.content).toContain('JSON');
   });
 
+  it('叙述文字中嵌入的合法 JSON 动作可以被定位解析(真机失败场景)', async () => {
+    const sessions = new FakeSessionRepo();
+    const { model } = recordRequests(
+      ScriptedChatModel([
+        '让我想想。用户在问之前查过哪个账套。{"action":"reply","text":"刚才查询的是账套「幻晟」"} 希望这对用户有帮助。',
+      ]),
+    );
+    const runtime = createTaxAgentRuntime({ model, sessions });
+
+    const reply = await runtime.handleTurn(makeCtx(), '刚才查的是哪个账套?', new FakeToolClient());
+
+    expect(reply.text).toBe('刚才查询的是账套「幻晟」');
+  });
+
   it('连续两次非法输出:兜底文案', async () => {
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({

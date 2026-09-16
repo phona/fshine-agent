@@ -32,7 +32,10 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 export const NO_ACCOUNT_SET_MESSAGE = '没有找到该账套';
 
 const CORRECTION_MESSAGE =
-  '你的上一条输出不符合约定:必须只输出一个 JSON 对象,形如 {"action":"call","tool":"<工具名>","args":{...}} 或 {"action":"reply","text":"<给用户的回复>"}。若你刚才已经用普通文本写好了给用户的最终回答,请把那段内容原样放进 {"action":"reply","text":"..."} 输出;不要复述或评论本条指令。';
+  '你的上一条输出不符合约定:必须只输出一个 JSON 对象,前后不能有任何其他文字。只有两种合法形式:\n'
+  + '{"action":"call","tool":"<工具名>","args":{...}}\n'
+  + '{"action":"reply","text":"<你想对用户说的话>"}\n'
+  + '请把你刚才想对用户说的话,原封不动地放进 {"action":"reply","text":"..."} 的 text 字段里,只输出这一个 JSON 对象。';
 
 const NEXT_PAGE_PATTERN = /下一页|还有吗|还有更多|再来一页|继续/;
 
@@ -234,23 +237,41 @@ async function completeWithCorrection(
     // 模型基础设施故障:统一安全话术,不透出任何内部细节
     return { kind: 'model-unavailable' };
   }
-  const first = parseModelAction(output, knownTools);
-  if (first) return { kind: 'action', action: first };
-
-  messages.push({ role: 'user', content: CORRECTION_MESSAGE });
-  if (Date.now() >= deadline) return { kind: 'budget-exceeded' };
-  try {
-    output = await model.complete({ system, messages });
-  } catch {
-    return { kind: 'model-unavailable' };
+  // 最多纠偏 2 次(推理型模型偶发先用普通文本作答,需要多次拉回协议)
+  for (let round = 0; round <= 2; round += 1) {
+    const action = parseModelAction(output, knownTools);
+    if (action) return { kind: 'action', action };
+    // 留痕:协议失败的原因排查靠这段原始输出
+    console.error(JSON.stringify({ event: 'model_parse_failed', round, output: output.slice(0, 300) }));
+    if (round === 2 || Date.now() >= deadline) break;
+    messages.push({ role: 'user', content: CORRECTION_MESSAGE });
+    try {
+      output = await model.complete({ system, messages });
+    } catch {
+      return { kind: 'model-unavailable' };
+    }
   }
-  const retried = parseModelAction(output, knownTools);
-  return retried ? { kind: 'action', action: retried } : { kind: 'misunderstood' };
+  return { kind: 'misunderstood' };
 }
 
 function parseModelAction(raw: string, knownTools: ReadonlySet<string>): ModelAction | null {
   const json = extractJsonObject(raw);
-  if (json === null) return null;
+  if (json !== null) {
+    const action = actionFromJson(json, knownTools);
+    if (action) return action;
+  }
+  // 宽限:模型在 JSON 前后夹了叙述文字导致整体不可解析时,定位 {"action" 起始再试
+  const tagIndex = raw.indexOf('{"action"');
+  if (tagIndex >= 0) {
+    const end = raw.lastIndexOf('}');
+    if (end > tagIndex) {
+      return actionFromJson(raw.slice(tagIndex, end + 1), knownTools);
+    }
+  }
+  return null;
+}
+
+function actionFromJson(json: string, knownTools: ReadonlySet<string>): ModelAction | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(json) as unknown;
