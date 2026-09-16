@@ -140,7 +140,9 @@ describe('loadConfig', () => {
       .toThrowError(/maxRetries/);
   });
 
-  it('缺省 yamlPath 指向仓库根 config/agent.yaml(principal 键含占位符,应报错)', () => {
-    expect(() => loadConfig({ env: PUBLIC_URL_ENV })).toThrowError(/REPLACE_WITH/);
+  it('principal 键含占位符:报错(自造夹具,不依赖仓库模板的当前状态)', () => {
+    const yaml = VALID_YAML.replace('wecom:user_a', 'wecom:REPLACE_WITH_USERID');
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
+      .toThrowError(/REPLACE_WITH/);
   });
 });

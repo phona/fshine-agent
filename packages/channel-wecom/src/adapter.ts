@@ -91,7 +91,7 @@ export class WecomBotChannel implements ChannelAdapter {
   private backoffMs = INITIAL_BACKOFF_MS;
   private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-  private readonly pending = new Map<string, PendingRequest>();
+  private readonly pending = new Map<string, PendingRequest[]>();
 
   constructor(options: WecomBotChannelOptions = {}) {
     this.env = options.env ?? process.env;
@@ -200,8 +200,9 @@ export class WecomBotChannel implements ChannelAdapter {
         this.handleConnectionLost(ws);
         settleErr(new Error('连接在订阅完成前关闭'));
       };
-      ws.onerror = () => {
-        logError({ event: 'wecom_socket_error' });
+      ws.onerror = (event?: unknown) => {
+        const detail = event instanceof Error ? event.message : undefined;
+        logError({ event: 'wecom_socket_error', ...(detail ? { detail } : {}) });
         this.handleConnectionLost(ws);
         settleErr(new Error('连接发生错误'));
       };
@@ -228,9 +229,11 @@ export class WecomBotChannel implements ChannelAdapter {
     }
     const reqId = frame.headers?.req_id;
     if (typeof reqId !== 'string') return;
-    const entry = this.pending.get(reqId);
+    // 回执按发送顺序到达:req_id 队列的队首即当前等待的帧(同一 req_id 可有多帧,如 ack+最终回复)
+    const queue = this.pending.get(reqId);
+    const entry = queue?.shift();
     if (!entry) return;
-    this.pending.delete(reqId);
+    if (queue && queue.length === 0) this.pending.delete(reqId);
     clearTimeout(entry.timer);
     entry.onResponse(asRecord(frame) ?? {});
   }
@@ -258,6 +261,18 @@ export class WecomBotChannel implements ChannelAdapter {
     };
     const handler = this.handler;
     if (!handler) return;
+    const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
+    const ws = this.ws;
+    if (!ws) {
+      logError({ event: 'wecom_respond_skip', reason: '连接不可用,回复丢弃' });
+      return;
+    }
+    // stream 协议的标准用法:先推 finish=false 的中间帧(用户即时可见),答案就绪后以同
+    // streamId 的 finish=true 帧整体替换。ack 不等待回执、不阻塞处理(LLM/工具可能耗时数十秒)。
+    const streamId = randomUUID();
+    this.sendStreamFrame(ws, reqId, streamId, false, '收到,正在处理…').catch((error) => {
+      logError({ event: 'wecom_ack_fail', req_id: reqId, error: asError(error).message });
+    });
     let reply: string;
     try {
       reply = await handler(message);
@@ -269,7 +284,56 @@ export class WecomBotChannel implements ChannelAdapter {
       });
       reply = FALLBACK_REPLY;
     }
-    this.sendRespond(frame, reply);
+    const finalWs = this.ws;
+    if (!finalWs) {
+      logError({ event: 'wecom_respond_skip', reason: '回复就绪时连接已断开,丢弃' });
+      return;
+    }
+    await this.sendStreamFrame(finalWs, reqId, streamId, true, truncateUtf8(reply, MAX_REPLY_BYTES)).catch((error) => {
+      logError({ event: 'wecom_respond_fail', req_id: reqId, error: asError(error).message });
+    });
+  }
+
+  /** 发送一帧 stream 回复并等待回执;errcode 非 0 时 reject。同一 req_id 的帧须串行发送。 */
+  private sendStreamFrame(
+    ws: WsLike,
+    reqId: string,
+    streamId: string,
+    finish: boolean,
+    content: string,
+  ): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // 注意:timer 必须在创建后回填进 entry(对象字面量会按值拷贝,提前放会永远是 undefined,
+      // 导致超时定时器无法被清除、到点误杀连接——2026-09-16 +10s 断连事故的根因)
+      const entry: PendingRequest = {
+        onResponse: (frame) => {
+          const errcode = toErrcode(frame);
+          if (errcode !== 0) {
+            reject(new Error(`errcode=${errcode}, errmsg=${toErrmsg(frame)}`));
+            return;
+          }
+          resolve();
+        },
+        onFail: (error) => reject(error),
+        timer: null as unknown as ReturnType<typeof setTimeout>,
+      };
+      entry.timer = setTimeout(() => {
+        this.dequeue(reqId, entry);
+        reject(new Error(`等待回执超时(${PENDING_TIMEOUT_MS}ms)`));
+      }, PENDING_TIMEOUT_MS);
+      this.enqueue(reqId, entry);
+      try {
+        ws.send(JSON.stringify({
+          cmd: 'aibot_respond_msg',
+          headers: { req_id: reqId },
+          body: { msgtype: 'stream', stream: { id: streamId, finish, content } },
+        }));
+      } catch (error) {
+        this.dequeue(reqId, entry);
+        clearTimeout(entry.timer);
+        reject(asError(error));
+      }
+    });
   }
 
   private handleEventCallback(frame: WsFrame): void {
@@ -281,32 +345,6 @@ export class WecomBotChannel implements ChannelAdapter {
     }
   }
 
-  private sendRespond(frame: WsFrame, reply: string): void {
-    const ws = this.ws;
-    if (!ws) {
-      logError({ event: 'wecom_respond_skip', reason: '连接不可用,回复丢弃' });
-      return;
-    }
-    const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
-    this.safeSend(
-      ws,
-      {
-        cmd: 'aibot_respond_msg',
-        headers: { req_id: reqId },
-        body: { msgtype: 'text', text: { content: truncateUtf8(reply, MAX_REPLY_BYTES) } },
-      },
-      (frame) => {
-        const errcode = toErrcode(frame);
-        if (errcode !== 0) {
-          logError({ event: 'wecom_respond_error', errcode, errmsg: toErrmsg(frame), req_id: reqId });
-        }
-      },
-      (error) => {
-        logError({ event: 'wecom_respond_fail', req_id: reqId, error: error.message });
-      },
-    );
-  }
-
   private safeSend(
     ws: WsLike,
     frame: { cmd: string; headers: { req_id: string }; body?: Record<string, unknown> },
@@ -314,18 +352,38 @@ export class WecomBotChannel implements ChannelAdapter {
     onFail: (error: Error) => void,
   ): void {
     const reqId = frame.headers.req_id;
-    const timer = setTimeout(() => {
-      this.pending.delete(reqId);
+    // timer 创建后回填进 entry(见 sendStreamFrame 内注释的事故根因)
+    const entry: PendingRequest = {
+      onResponse,
+      onFail,
+      timer: null as unknown as ReturnType<typeof setTimeout>,
+    };
+    entry.timer = setTimeout(() => {
+      this.dequeue(reqId, entry);
       onFail(new Error(`等待 ${frame.cmd} 响应超时(${PENDING_TIMEOUT_MS}ms)`));
     }, PENDING_TIMEOUT_MS);
-    this.pending.set(reqId, { onResponse, onFail, timer });
+    this.enqueue(reqId, entry);
     try {
       ws.send(JSON.stringify(frame));
     } catch (error) {
-      this.pending.delete(reqId);
-      clearTimeout(timer);
+      this.dequeue(reqId, entry);
+      clearTimeout(entry.timer);
       onFail(asError(error));
     }
+  }
+
+  private enqueue(reqId: string, entry: PendingRequest): void {
+    const queue = this.pending.get(reqId);
+    if (queue) queue.push(entry);
+    else this.pending.set(reqId, [entry]);
+  }
+
+  private dequeue(reqId: string, entry: PendingRequest): void {
+    const queue = this.pending.get(reqId);
+    if (!queue) return;
+    const index = queue.indexOf(entry);
+    if (index >= 0) queue.splice(index, 1);
+    if (queue.length === 0) this.pending.delete(reqId);
   }
 
   private startHeartbeat(): void {
@@ -374,10 +432,12 @@ export class WecomBotChannel implements ChannelAdapter {
   }
 
   private failAllPending(error: Error): void {
-    for (const [reqId, entry] of this.pending) {
+    for (const [reqId, queue] of this.pending) {
       this.pending.delete(reqId);
-      clearTimeout(entry.timer);
-      entry.onFail(error);
+      for (const entry of queue) {
+        clearTimeout(entry.timer);
+        entry.onFail(error);
+      }
     }
   }
 }
