@@ -1,0 +1,383 @@
+import { randomUUID } from 'node:crypto';
+import type { ChannelAdapter, IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
+import { MAX_REPLY_BYTES, stripMentionPrefix, truncateUtf8 } from './text';
+
+const DEFAULT_WS_BASE_URL = 'wss://openws.work.weixin.qq.com';
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const PENDING_TIMEOUT_MS = 10_000;
+const INITIAL_BACKOFF_MS = 1_000;
+const MAX_BACKOFF_MS = 30_000;
+const CLOSE_NORMAL = 1000;
+const FALLBACK_REPLY = '处理失败,请稍后再试';
+
+interface WsMessageEvent {
+  data: unknown;
+}
+
+interface WsLike {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  onopen: (() => void) | null;
+  onmessage: ((event: WsMessageEvent) => void) | null;
+  onclose: (() => void) | null;
+  onerror: ((event?: unknown) => void) | null;
+}
+
+type WsCtor = new (url: string) => WsLike;
+
+interface WsFrame {
+  cmd?: unknown;
+  headers?: { req_id?: unknown } | undefined;
+  body?: unknown;
+}
+
+interface PendingRequest {
+  onResponse: (body: Record<string, unknown>) => void;
+  onFail: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+export interface WecomBotChannelOptions {
+  env?: Record<string, string | undefined>;
+  wsBaseUrl?: string;
+  WebSocketImpl?: unknown;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+function asError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+/** errcode 兼容两种位置:官方真机在响应顶层,W1-C 测试夹具在 body 内。 */
+function toErrcode(frame: Record<string, unknown>): number {
+  if (typeof frame['errcode'] === 'number') return frame['errcode'];
+  const body = asRecord(frame['body']);
+  return body && typeof body['errcode'] === 'number' ? body['errcode'] : -1;
+}
+
+function toErrmsg(frame: Record<string, unknown>): string {
+  if (typeof frame['errmsg'] === 'string') return frame['errmsg'];
+  const body = asRecord(frame['body']);
+  return body && typeof body['errmsg'] === 'string' ? body['errmsg'] : '';
+}
+
+function logError(payload: Record<string, unknown>): void {
+  console.error(JSON.stringify(payload));
+}
+
+function tryClose(ws: WsLike, code: number = CLOSE_NORMAL): void {
+  try {
+    ws.close(code);
+  } catch {
+    // 忽略关闭异常
+  }
+}
+
+export class WecomBotChannel implements ChannelAdapter {
+  private readonly env: Record<string, string | undefined>;
+  private readonly wsBaseUrl: string;
+  private readonly webSocketImpl: unknown;
+
+  private handler: ReplyHandler | null = null;
+  private ws: WsLike | undefined;
+  private wsCtor: WsCtor | undefined;
+  private botId = '';
+  private botSecret = '';
+  private started = false;
+  private stopped = false;
+  private backoffMs = INITIAL_BACKOFF_MS;
+  private heartbeatTimer: ReturnType<typeof setInterval> | undefined;
+  private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly pending = new Map<string, PendingRequest>();
+
+  constructor(options: WecomBotChannelOptions = {}) {
+    this.env = options.env ?? process.env;
+    this.wsBaseUrl = options.wsBaseUrl ?? DEFAULT_WS_BASE_URL;
+    this.webSocketImpl = options.WebSocketImpl;
+  }
+
+  async start(handler: ReplyHandler): Promise<void> {
+    if (this.started) throw new Error('WecomBotChannel 已启动,不要重复调用 start()');
+    const missing = ['WECOM_BOT_ID', 'WECOM_BOT_SECRET'].filter(
+      (name) => !(this.env[name] ?? '').trim(),
+    );
+    if (missing.length > 0) {
+      throw new Error(`缺少环境变量 ${missing.join('、')},无法启动机器人长连接`);
+    }
+    const impl = (this.webSocketImpl ?? globalThis.WebSocket) as WsCtor | undefined;
+    if (typeof impl !== 'function') {
+      throw new Error('当前运行环境没有可用的 WebSocket 客户端,需要 Node.js >= 24 的全局 WebSocket');
+    }
+    this.botId = (this.env['WECOM_BOT_ID'] ?? '').trim();
+    this.botSecret = (this.env['WECOM_BOT_SECRET'] ?? '').trim();
+    this.wsCtor = impl;
+    this.handler = handler;
+    this.started = true;
+    this.stopped = false;
+    try {
+      await this.connectAndSubscribe();
+    } catch (error) {
+      this.started = false;
+      this.clearReconnectTimer();
+      this.stopHeartbeat();
+      this.failAllPending(new Error('启动失败,放弃等待响应'));
+      const ws = this.ws;
+      this.ws = undefined;
+      if (ws) tryClose(ws);
+      throw error;
+    }
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true;
+    this.started = false;
+    this.handler = null;
+    this.clearReconnectTimer();
+    this.stopHeartbeat();
+    this.failAllPending(new Error('渠道已停止'));
+    const ws = this.ws;
+    this.ws = undefined;
+    if (ws) tryClose(ws);
+  }
+
+  private connectAndSubscribe(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const ctor = this.wsCtor;
+      if (!ctor) {
+        reject(new Error('WebSocket 实现不可用'));
+        return;
+      }
+      let settled = false;
+      const settleOk = () => {
+        if (!settled) {
+          settled = true;
+          resolve();
+        }
+      };
+      const settleErr = (error: Error) => {
+        if (!settled) {
+          settled = true;
+          reject(error);
+        }
+      };
+
+      const ws = new ctor(this.wsBaseUrl);
+      this.ws = ws;
+      ws.onopen = () => {
+        const reqId = randomUUID();
+        this.safeSend(
+          ws,
+          {
+            cmd: 'aibot_subscribe',
+            headers: { req_id: reqId },
+            body: { bot_id: this.botId, secret: this.botSecret },
+          },
+          (frame) => {
+            const errcode = toErrcode(frame);
+            if (errcode === 0) {
+              this.backoffMs = INITIAL_BACKOFF_MS;
+              this.startHeartbeat();
+              settleOk();
+              return;
+            }
+            settleErr(new Error(`企业微信智能机器人订阅失败: errcode=${errcode}, errmsg=${toErrmsg(frame)}`));
+            tryClose(ws);
+            this.scheduleReconnect();
+          },
+          (error) => {
+            settleErr(error);
+            tryClose(ws);
+          },
+        );
+      };
+      ws.onmessage = (event) => {
+        this.handleFrame(event.data, ws);
+      };
+      ws.onclose = () => {
+        this.handleConnectionLost(ws);
+        settleErr(new Error('连接在订阅完成前关闭'));
+      };
+      ws.onerror = () => {
+        logError({ event: 'wecom_socket_error' });
+        this.handleConnectionLost(ws);
+        settleErr(new Error('连接发生错误'));
+      };
+    });
+  }
+
+  private handleFrame(raw: unknown, ws: WsLike): void {
+    if (this.ws !== ws || typeof raw !== 'string') return;
+    let frame: WsFrame;
+    try {
+      frame = JSON.parse(raw) as WsFrame;
+    } catch {
+      logError({ event: 'wecom_frame_unparsable' });
+      return;
+    }
+    if (asRecord(frame) === undefined) return;
+    if (frame.cmd === 'aibot_msg_callback') {
+      void this.handleMessageCallback(frame);
+      return;
+    }
+    if (frame.cmd === 'aibot_event_callback') {
+      this.handleEventCallback(frame);
+      return;
+    }
+    const reqId = frame.headers?.req_id;
+    if (typeof reqId !== 'string') return;
+    const entry = this.pending.get(reqId);
+    if (!entry) return;
+    this.pending.delete(reqId);
+    clearTimeout(entry.timer);
+    entry.onResponse(asRecord(frame) ?? {});
+  }
+
+  private async handleMessageCallback(frame: WsFrame): Promise<void> {
+    const body = asRecord(frame.body);
+    if (!body || body['msgtype'] !== 'text') return;
+    const textObj = asRecord(body['text']);
+    const content = textObj?.['content'];
+    if (!textObj || typeof content !== 'string') return;
+    const from = asRecord(body['from']);
+    const userid = typeof from?.['userid'] === 'string' ? from['userid'] : undefined;
+    if (!userid) return;
+    const msgid = typeof body['msgid'] === 'string' ? body['msgid'] : '';
+    if (!msgid) return;
+    const chatType = body['chattype'] === 'group' ? 'group' : 'single';
+    const chatid = typeof body['chatid'] === 'string' && body['chatid'] !== '' ? body['chatid'] : undefined;
+    const message: IncomingChannelMessage = {
+      wecomUserId: userid,
+      conversationId: chatid ?? userid,
+      messageId: msgid,
+      chatType,
+      text: chatType === 'group' ? stripMentionPrefix(content) : content,
+      receivedAt: new Date().toISOString(),
+    };
+    const handler = this.handler;
+    if (!handler) return;
+    let reply: string;
+    try {
+      reply = await handler(message);
+    } catch (error) {
+      logError({
+        event: 'wecom_handler_error',
+        messageId: message.messageId,
+        error: asError(error).message,
+      });
+      reply = FALLBACK_REPLY;
+    }
+    this.sendRespond(frame, reply);
+  }
+
+  private handleEventCallback(frame: WsFrame): void {
+    const eventType = asRecord(frame.body)?.['eventtype'];
+    logError({ event: 'wecom_event_ignored', eventtype: typeof eventType === 'string' ? eventType : 'unknown' });
+    if (eventType === 'disconnected_event') {
+      const ws = this.ws;
+      if (ws) this.handleConnectionLost(ws);
+    }
+  }
+
+  private sendRespond(frame: WsFrame, reply: string): void {
+    const ws = this.ws;
+    if (!ws) {
+      logError({ event: 'wecom_respond_skip', reason: '连接不可用,回复丢弃' });
+      return;
+    }
+    const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
+    this.safeSend(
+      ws,
+      {
+        cmd: 'aibot_respond_msg',
+        headers: { req_id: reqId },
+        body: { msgtype: 'text', text: { content: truncateUtf8(reply, MAX_REPLY_BYTES) } },
+      },
+      (frame) => {
+        const errcode = toErrcode(frame);
+        if (errcode !== 0) {
+          logError({ event: 'wecom_respond_error', errcode, errmsg: toErrmsg(frame), req_id: reqId });
+        }
+      },
+      (error) => {
+        logError({ event: 'wecom_respond_fail', req_id: reqId, error: error.message });
+      },
+    );
+  }
+
+  private safeSend(
+    ws: WsLike,
+    frame: { cmd: string; headers: { req_id: string }; body?: Record<string, unknown> },
+    onResponse: (body: Record<string, unknown>) => void,
+    onFail: (error: Error) => void,
+  ): void {
+    const reqId = frame.headers.req_id;
+    const timer = setTimeout(() => {
+      this.pending.delete(reqId);
+      onFail(new Error(`等待 ${frame.cmd} 响应超时(${PENDING_TIMEOUT_MS}ms)`));
+    }, PENDING_TIMEOUT_MS);
+    this.pending.set(reqId, { onResponse, onFail, timer });
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch (error) {
+      this.pending.delete(reqId);
+      clearTimeout(timer);
+      onFail(asError(error));
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatTimer = setInterval(() => {
+      const ws = this.ws;
+      if (!ws) return;
+      this.safeSend(ws, { cmd: 'ping', headers: { req_id: randomUUID() } }, () => {}, () => {});
+    }, HEARTBEAT_INTERVAL_MS);
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatTimer !== undefined) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = undefined;
+    }
+  }
+
+  private handleConnectionLost(ws: WsLike): void {
+    if (this.ws !== ws) return;
+    this.ws = undefined;
+    this.stopHeartbeat();
+    this.failAllPending(new Error('连接已断开,未等到响应'));
+    if (this.started && !this.stopped) this.scheduleReconnect();
+  }
+
+  private scheduleReconnect(): void {
+    if (this.stopped || !this.started) return;
+    if (this.reconnectTimer !== undefined) return;
+    const delay = this.backoffMs;
+    this.backoffMs = Math.min(this.backoffMs * 2, MAX_BACKOFF_MS);
+    logError({ event: 'wecom_reconnect_scheduled', delayMs: delay });
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      void this.connectAndSubscribe().catch(() => {
+        this.scheduleReconnect();
+      });
+    }, delay);
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = undefined;
+    }
+  }
+
+  private failAllPending(error: Error): void {
+    for (const [reqId, entry] of this.pending) {
+      this.pending.delete(reqId);
+      clearTimeout(entry.timer);
+      entry.onFail(error);
+    }
+  }
+}
