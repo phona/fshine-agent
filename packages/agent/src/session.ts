@@ -25,6 +25,56 @@ export interface AgentSessionState {
   /** 触发澄清时的用户原始请求(选中候选后还原意图用) */
   pendingRequest?: string;
   lastVoucherQuery?: LastVoucherQuery;
+  /** 有界对话历史(仅用户消息与最终回复),供追问/指代参考 */
+  history?: TurnHistoryEntry[];
+}
+
+export interface TurnHistoryEntry {
+  role: 'user' | 'assistant';
+  content: string;
+  /** ISO 8601 */
+  at: string;
+}
+
+export const HISTORY_MAX_ENTRIES = 10;
+export const HISTORY_MAX_CHARS = 12_000;
+/** 单条回复入库上限:与渠道 2048 字节截断同量级,防止单条历史膨胀 */
+const HISTORY_ENTRY_MAX_CHARS = 2_000;
+
+/** 追加一轮回合并做有界裁剪:最多保留最近 HISTORY_MAX_ENTRIES 条,总量超限从最旧丢起 */
+export function appendTurnHistory(
+  existing: TurnHistoryEntry[] | undefined,
+  userText: string,
+  assistantText: string,
+  now = new Date(),
+): TurnHistoryEntry[] {
+  const at = now.toISOString();
+  const clip = (text: string) => (text.length > HISTORY_ENTRY_MAX_CHARS ? text.slice(0, HISTORY_ENTRY_MAX_CHARS) : text);
+  const next: TurnHistoryEntry[] = [
+    ...(existing ?? []),
+    { role: 'user', content: clip(userText), at },
+    { role: 'assistant', content: clip(assistantText), at },
+  ];
+  let kept = next.slice(-HISTORY_MAX_ENTRIES);
+  const totalChars = () => kept.reduce((sum, entry) => sum + entry.content.length, 0);
+  while (kept.length > 2 && totalChars() > HISTORY_MAX_CHARS) kept = kept.slice(2);
+  return kept;
+}
+
+function parseHistory(raw: unknown): TurnHistoryEntry[] {
+  if (!Array.isArray(raw)) return [];
+  const out: TurnHistoryEntry[] = [];
+  for (const item of raw) {
+    const record = item as { role?: unknown; content?: unknown; at?: unknown };
+    if ((record.role === 'user' || record.role === 'assistant') && typeof record.content === 'string') {
+      out.push({
+        role: record.role,
+        content: record.content,
+        at: typeof record.at === 'string' ? record.at : '',
+      });
+    }
+  }
+  return out;
 }
 
 export interface LoadedSession {
@@ -88,6 +138,8 @@ export function parseState(raw: unknown): AgentSessionState {
   }
   if (typeof obj.expiresAt === 'string' && obj.expiresAt) state.expiresAt = obj.expiresAt;
   if (typeof obj.pendingRequest === 'string' && obj.pendingRequest) state.pendingRequest = obj.pendingRequest;
+  const history = parseHistory(obj.history);
+  if (history.length > 0) state.history = history;
   const last = parseLastVoucherQuery(obj.lastVoucherQuery);
   if (last) state.lastVoucherQuery = last;
   return state;

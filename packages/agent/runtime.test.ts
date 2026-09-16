@@ -463,4 +463,33 @@ describe('createTaxAgentRuntime 工具结果保险裁剪', () => {
 
     expect(reply.text).toBe(FALLBACK_FAILURE);
   });
+
+  it('有界历史重放:第二轮请求携带上一轮的用户消息与最终回复', async () => {
+    const sessions = new FakeSessionRepo();
+    const client = new FakeToolClient({
+      search_account_sets: () => fakeOk({ accountSets: [{ id: 'as_001', name: '幻晟' }] }),
+    });
+    const { model, requests } = recordRequests(
+      ScriptedChatModel([
+        '{"action":"call","tool":"search_account_sets","args":{"query":"幻晟"}}',
+        '{"action":"reply","text":"幻晟(as_001)的当前期间是 202607。"}',
+        '{"action":"reply","text":"上一轮查询的是幻晟 202607"}',
+      ]),
+    );
+    const runtime = createTaxAgentRuntime({ model, sessions });
+
+    await runtime.handleTurn(makeCtx(), '查一下幻晟本期的凭证', client);
+    await runtime.handleTurn(makeCtx(), '刚才查的是哪个账套?', client);
+
+    // 第二轮的模型请求:历史(user + assistant)在前,当前任务在最后
+    const second = requests[requests.length - 1]!;
+    const contents = second.messages.map((message) => message.content);
+    expect(contents.some((content) => content.includes('查一下幻晟本期的凭证'))).toBe(true);
+    expect(contents.some((content) => content.includes('202607'))).toBe(true);
+    // 当前任务在历史之后
+    expect(second.messages[second.messages.length - 1]!.content).toContain('刚才查的是哪个账套?');
+
+    const state = sessions.peek('sess_1')!.state as AgentSessionState;
+    expect(state.history).toHaveLength(4); // 2 轮 × (user + assistant)
+  });
 });

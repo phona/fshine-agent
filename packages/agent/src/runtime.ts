@@ -17,6 +17,7 @@ import type { ChatModel, ChatModelMessage } from './model';
 import {
   extractAccountSetList,
   extractNextCursor,
+  appendTurnHistory,
   freshPendingCandidates,
   loadSessionState,
   matchPendingCandidate,
@@ -101,21 +102,40 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
 
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
-      const deadline = Date.now() + turnBudgetMs;
       const discovered = tools.tools();
       // 工具清单为空 = host 连接未就绪/无可用工具:此回合必然无法完成任何查询,
       // 尽早用准确的失败话术收场,而不是让模型在没有工具的对话里空转
       if (discovered.length === 0) return { text: FALLBACK_FAILURE };
-      const system = buildSystemPrompt(discovered);
-      // 只读策略:模型只能调用 tools/list 发现的工具,其余一律按协议违规处理
-      const knownTools = new Set<string>(discovered.map((tool) => tool.name));
-      const knownAccountSets = new Map<string, string>();
-
       const loaded = await loadSessionState(deps.sessions, ctx.sessionId);
       const state = loaded.state;
-      const messages: ChatModelMessage[] = [];
-
       try {
+        const reply = await runTurn(ctx, userMessage, tools, state);
+        // 有界历史重放的数据来源:仅用户消息与最终回复(工具结果不重放)
+        state.history = appendTurnHistory(state.history, userMessage, reply.text);
+        return reply;
+      } finally {
+        await saveSessionState(deps.sessions, ctx.sessionId, ctx.principalId, state, loaded.record);
+      }
+    },
+  };
+
+  async function runTurn(
+    ctx: TrustedContext,
+    userMessage: string,
+    tools: HostToolClient,
+    state: AgentSessionState,
+  ): Promise<AgentReply> {
+    const deadline = Date.now() + turnBudgetMs;
+    const system = buildSystemPrompt(tools.tools());
+    // 只读策略:模型只能调用 tools/list 发现的工具,其余一律按协议违规处理
+    const knownTools = new Set<string>(tools.tools().map((tool) => tool.name));
+    const knownAccountSets = new Map<string, string>();
+    const messages: ChatModelMessage[] = [];
+    // 有界历史重放:仅用户消息与最终回复,供追问/指代参考;以最新用户消息为当前任务
+    for (const entry of state.history ?? []) {
+      messages.push({ role: entry.role, content: entry.content });
+    }
+
         // 1) 澄清候选命中:以所选账套 + 用户原始请求继续,清候选
         const pending = freshPendingCandidates(state);
         const selected = pending.length > 0 ? matchPendingCandidate(userMessage, pending) : null;
@@ -194,11 +214,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
           messages.push({ role: 'assistant', content: toolResultMessage(action.tool, outcome) });
         }
         return { text: FALLBACK_MISUNDERSTOOD };
-      } finally {
-        await saveSessionState(deps.sessions, ctx.sessionId, ctx.principalId, state, loaded.record);
       }
-    },
-  };
 }
 
 // ---- 模型调用与协议解析 ----
@@ -335,6 +351,7 @@ function buildSystemPrompt(tools: readonly DiscoveredTool[]): string {
     '- list_vouchers 首次查询不要传任何分页参数(默认首页);只有用户要看后续页时才用上一页结果里的 nextCursor,不要自行传 pageNo。',
     '- 错误信息必须用用户能理解的话表达,绝不暴露堆栈、文件路径、凭据或原始 JSON。',
     '- 始终使用简体中文回复。',
+    '- 对话开头的「历史消息」仅供上下文参考;请以最新一条用户消息为当前任务,不要重复回答历史里已经回答过的问题。',
     `- 工具结果出现 NEEDS_LOGIN 时,回复:"${NEEDS_LOGIN_MESSAGE}"`,
   ].join('\n');
 }
