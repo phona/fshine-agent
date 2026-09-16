@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, newId, principalScopeRecords } from '@fshine/core';
 import { McpHost, type McpHostAudit } from '@fshine/mcp-host';
-import { createTaxAgentRuntime, OpenAICompatibleChatModel } from '@fshine/agent';
+import { createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { NodeWebSocketImpl, WecomBotChannel } from '@fshine/channel-wecom';
 import type { McpProfileConfig } from '@fshine/contracts';
 import { renderBarChartPng } from './chart';
@@ -30,7 +30,7 @@ async function main(): Promise<void> {
   }
 
   const runtime = createTaxAgentRuntime({
-    model: OpenAICompatibleChatModel({ env: process.env }),
+    driver: createPiTurnDriver({ env: process.env }),
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
   });

@@ -15,7 +15,7 @@ import {
   principalScopeRecords,
 } from '@fshine/core';
 import { McpHost } from '@fshine/mcp-host';
-import { createTaxAgentRuntime, OpenAICompatibleChatModel } from '@fshine/agent';
+import { createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import type { IncomingChannelMessage, McpProfileConfig, ProgressFn } from '@fshine/contracts';
 import { createMessageHandler } from '../apps/server/handler';
 
@@ -53,21 +53,10 @@ const host = new McpHost({ profile: fakeProfile });
 await host.ensureReady();
 
 const runtime = createTaxAgentRuntime({
-  model: OpenAICompatibleChatModel({ env: process.env }),
+  driver: createPiTurnDriver({ env: process.env }),
   sessions: store.sessions,
 });
-// 观测用代理:打印模型每步动作(不影响行为)
-const loggingRuntime = createTaxAgentRuntime({
-  model: {
-    complete: async (req) => {
-      const out = await OpenAICompatibleChatModel({ env: process.env }).complete(req);
-      console.log(`[model] ${out.replace(/\s+/g, ' ').slice(0, 200)}`);
-      return out;
-    },
-  },
-  sessions: store.sessions,
-});
-const handler = createMessageHandler({ store, runtime: loggingRuntime, hostFor: () => host });
+const handler = createMessageHandler({ store, runtime, hostFor: () => host });
 
 let seq = 0;
 const progressLog: string[] = [];
