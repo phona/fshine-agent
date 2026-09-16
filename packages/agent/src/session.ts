@@ -3,6 +3,7 @@
  * TTL 语义:候选过期后不复活,重新走搜索(实施决策 §5)。
  */
 import type { ConversationSessionRecord, ConversationSessionRepo } from '@fshine/contracts';
+import { createHash, randomUUID } from 'node:crypto';
 
 export type SessionStore = Pick<ConversationSessionRepo, 'get' | 'upsert'>;
 
@@ -25,8 +26,100 @@ export interface AgentSessionState {
   /** 触发澄清时的用户原始请求(选中候选后还原意图用) */
   pendingRequest?: string;
   lastVoucherQuery?: LastVoucherQuery;
+  /** 待用户确认的写入意图;仅 V1 写入流程使用,默认不设置。 */
+  pendingWriteIntent?: PendingWriteIntent;
   /** 有界对话历史(仅用户消息与最终回复),供追问/指代参考 */
   history?: TurnHistoryEntry[];
+}
+
+/**
+ * 写入确认绑定的不可变摘要。payload 本身不持久化,避免在会话状态中留下财务数据。
+ * 调用方必须在提交前重新提供完全相同的 payload 并通过 confirmWriteIntent 校验。
+ */
+export interface PendingWriteIntent {
+  toolName: string;
+  payloadHash: string;
+  accountSetId: string;
+  principalId: string;
+  expiresAt: string;
+  idempotencyKey: string;
+}
+
+export interface CreateWriteIntentInput {
+  toolName: string;
+  payload: unknown;
+  accountSetId: string;
+  principalId: string;
+  ttlMs: number;
+  idempotencyKey?: string;
+}
+
+export interface ConfirmWriteIntentInput {
+  toolName: string;
+  payload: unknown;
+  accountSetId: string;
+  principalId: string;
+}
+
+export type ConfirmWriteIntentResult =
+  | { ok: true; intent: PendingWriteIntent }
+  | { ok: false; reason: 'missing' | 'expired' | 'principal_mismatch' | 'account_set_mismatch' | 'tool_mismatch' | 'payload_mismatch' };
+
+/** Stable JSON encoding for hashing request payloads (object key order independent). */
+export function canonicalize(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(object[key])}`).join(',')}}`;
+}
+
+export function writePayloadHash(payload: unknown): string {
+  return createHash('sha256').update(canonicalize(payload)).digest('hex');
+}
+
+/** Create/replace a pending intent. Call this only after a successful validation step. */
+export function createWriteIntent(state: AgentSessionState, input: CreateWriteIntentInput, now = Date.now()): PendingWriteIntent {
+  if (!input.toolName || !input.accountSetId || !input.principalId || !Number.isFinite(input.ttlMs) || input.ttlMs <= 0) {
+    throw new Error('invalid write intent');
+  }
+  const intent: PendingWriteIntent = {
+    toolName: input.toolName,
+    payloadHash: writePayloadHash(input.payload),
+    accountSetId: input.accountSetId,
+    principalId: input.principalId,
+    expiresAt: new Date(now + input.ttlMs).toISOString(),
+    idempotencyKey: input.idempotencyKey ?? `wi_${randomUUID()}`,
+  };
+  state.pendingWriteIntent = intent;
+  return intent;
+}
+
+/** Validate and consume a pending intent. Successful confirmation is single-use. */
+export function confirmWriteIntent(state: AgentSessionState, input: ConfirmWriteIntentInput, now = Date.now()): ConfirmWriteIntentResult {
+  const intent = state.pendingWriteIntent;
+  if (!intent) return { ok: false, reason: 'missing' };
+  const expiresAt = Date.parse(intent.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    state.pendingWriteIntent = undefined;
+    return { ok: false, reason: 'expired' };
+  }
+  if (intent.principalId !== input.principalId) return { ok: false, reason: 'principal_mismatch' };
+  if (intent.accountSetId !== input.accountSetId) return { ok: false, reason: 'account_set_mismatch' };
+  if (intent.toolName !== input.toolName) return { ok: false, reason: 'tool_mismatch' };
+  if (intent.payloadHash !== writePayloadHash(input.payload)) return { ok: false, reason: 'payload_mismatch' };
+  state.pendingWriteIntent = undefined;
+  return { ok: true, intent };
+}
+
+export function freshPendingWriteIntent(state: AgentSessionState, now = Date.now()): PendingWriteIntent | null {
+  const intent = state.pendingWriteIntent;
+  if (!intent) return null;
+  const expiresAt = Date.parse(intent.expiresAt);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+    state.pendingWriteIntent = undefined;
+    return null;
+  }
+  return intent;
 }
 
 export interface TurnHistoryEntry {
@@ -142,7 +235,28 @@ export function parseState(raw: unknown): AgentSessionState {
   if (history.length > 0) state.history = history;
   const last = parseLastVoucherQuery(obj.lastVoucherQuery);
   if (last) state.lastVoucherQuery = last;
+  const writeIntent = parsePendingWriteIntent(obj.pendingWriteIntent);
+  if (writeIntent) state.pendingWriteIntent = writeIntent;
   return state;
+}
+
+function parsePendingWriteIntent(raw: unknown): PendingWriteIntent | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const item = raw as Record<string, unknown>;
+  if (typeof item.toolName !== 'string' || !item.toolName) return null;
+  if (typeof item.payloadHash !== 'string' || !/^[a-f0-9]{64}$/.test(item.payloadHash)) return null;
+  if (typeof item.accountSetId !== 'string' || !item.accountSetId) return null;
+  if (typeof item.principalId !== 'string' || !item.principalId) return null;
+  if (typeof item.expiresAt !== 'string' || !item.expiresAt || !Number.isFinite(Date.parse(item.expiresAt))) return null;
+  if (typeof item.idempotencyKey !== 'string' || !item.idempotencyKey) return null;
+  return {
+    toolName: item.toolName,
+    payloadHash: item.payloadHash,
+    accountSetId: item.accountSetId,
+    principalId: item.principalId,
+    expiresAt: item.expiresAt,
+    idempotencyKey: item.idempotencyKey,
+  };
 }
 
 function parseCandidate(raw: unknown): PendingCandidate | null {

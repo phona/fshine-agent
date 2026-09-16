@@ -75,6 +75,21 @@ rl.on('line', (line) => {
 });
 `;
 
+/** 合法 17dz spec 但返回未协商的 MCP protocolVersion。 */
+export const BAD_PROTOCOL_SERVER_SCRIPT = `
+const rl = require('node:readline').createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  let msg;
+  try { msg = JSON.parse(line); } catch { return; }
+  if (msg.method === 'initialize') {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {
+      protocolVersion: '2024-11-05', capabilities: {},
+      serverInfo: { name: 'legacy', version: '1.0.0', specVersion: '0.5', allowedAccountSets: null },
+    }}) + '\\n');
+  }
+});
+`;
+
 /** 合法 specVersion 但 tools/list 混入写工具的"越权 server":验证 V0 只读白名单硬闸。 */
 export const EXTRA_TOOL_SERVER_SCRIPT = `
 const rl = require('node:readline').createInterface({ input: process.stdin });

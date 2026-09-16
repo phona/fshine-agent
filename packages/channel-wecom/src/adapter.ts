@@ -66,7 +66,8 @@ export class WecomBotChannel implements ChannelAdapter {
     const client = this.clientFactory();
     this.client = client;
 
-    await new Promise<void>((resolve, reject) => {
+    try {
+      await new Promise<void>((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => fail(new Error('连接企微超时(30 秒)')), START_TIMEOUT_MS);
       const ok = () => {
@@ -94,7 +95,19 @@ export class WecomBotChannel implements ChannelAdapter {
         });
       });
       client.connect();
-    });
+      });
+    } catch (error) {
+      // A failed startup must leave the adapter retryable and release the
+      // failed SDK client. Only clean up our own client in case a future
+      // start has already installed another one.
+      if (this.client === client) {
+        this.started = false;
+        this.handler = null;
+        this.client = null;
+      }
+      client.disconnect();
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {

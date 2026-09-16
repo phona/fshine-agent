@@ -36,7 +36,7 @@ export type ToolOutcome =
  */
 export interface HostToolClient {
   tools(): readonly DiscoveredTool[];
-  call(tool: ReadToolName, args: Record<string, unknown>): Promise<ToolOutcome>;
+  call(tool: ReadToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
 }
 
 /** V0 回复纯文本;渠道侧负责长度截断。 */

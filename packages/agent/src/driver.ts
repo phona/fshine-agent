@@ -20,7 +20,7 @@ export interface TurnDriverInput {
   /** 阶段进度回调(埋点事实渲染 + 模型意图短语) */
   onStep: (text: string) => void;
   /** 执行工具:返回裁剪后的 data;失败时抛出面向用户的安全话术 */
-  exec: (tool: ReadToolName, args: Record<string, unknown>) => Promise<unknown>;
+  exec: (tool: ReadToolName, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   /** 回合绝对截止时间(Date.now() 基准),超时 driver 应中止并返回空文本 */
   deadline: number;
 }

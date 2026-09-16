@@ -50,6 +50,7 @@ function makePrincipal(wecomUserId: string, overrides: Partial<PrincipalScopeRec
     accountSetIds: [`as_${wecomUserId}`],
     mcpProfile: 'read-default',
     enabled: true,
+    capabilities: ['read'],
     ...overrides,
   };
 }
@@ -92,6 +93,7 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       expect(loaded?.accountSetIds).toEqual(['as_001', 'as_002']);
       expect(loaded?.mcpProfile).toBe('read-default');
       expect(loaded?.enabled).toBe(true);
+      expect(loaded?.capabilities).toEqual(['read']);
     });
 
     it('upsert 覆盖旧记录', async () => {
@@ -104,6 +106,7 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       const loaded = await store.principalScopes.get('user_a');
       expect(loaded?.accountSetIds).toEqual(['as_009']);
       expect(loaded?.enabled).toBe(false);
+      expect(loaded?.capabilities).toEqual(['read']);
       expect(await store.principalScopes.list()).toHaveLength(1);
     });
 

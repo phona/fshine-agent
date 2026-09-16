@@ -32,4 +32,13 @@ describe('parseEnvelope(验收 #8:信封解析失败用解析函数单测覆盖)
     expect(parseEnvelope(JSON.stringify({ error: { code: 'X' }, meta })).ok).toBe(false);
     expect(parseEnvelope(JSON.stringify({ meta })).ok).toBe(false);
   });
+
+  it('meta 与 error 字段类型/枚举非法时拒绝', () => {
+    expect(parseEnvelope(JSON.stringify({ data: {}, meta: { ...meta, source: 'unknown' } })).ok).toBe(false);
+    expect(parseEnvelope(JSON.stringify({ data: {}, meta: { ...meta, retrievedAt: 42 } })).ok).toBe(false);
+    expect(parseEnvelope(JSON.stringify({ data: {}, meta: { ...meta, traceId: 42 } })).ok).toBe(false);
+    expect(parseEnvelope(JSON.stringify({ error: { code: 'NOT_A_CODE', message: 'x', retryable: false }, meta })).ok).toBe(false);
+    expect(parseEnvelope(JSON.stringify({ error: { code: 'TIMEOUT', message: 'x', retryable: true, retryAfterMs: -1 }, meta })).ok).toBe(false);
+    expect(parseEnvelope(JSON.stringify({ error: { code: 'TIMEOUT', message: 'x', retryable: true, details: [] }, meta })).ok).toBe(false);
+  });
 });

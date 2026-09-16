@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import type { AppConfig, McpProfileConfig, PrincipalConfig } from '@fshine/contracts';
+import type { AppConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
 import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -31,6 +31,25 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+}
+
+const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
+
+function parseCapabilities(value: unknown, label: string): PrincipalCapability[] {
+  if (value === undefined) return ['read'];
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`配置项 ${label} 必须是非空 capabilities 数组`);
+  }
+  const capabilities = value.map((item, index) => {
+    if (typeof item !== 'string' || !CAPABILITIES.includes(item as PrincipalCapability)) {
+      throw new Error(`配置项 ${label}[${index}] 不是有效能力(可选: read, validate, write)`);
+    }
+    return item as PrincipalCapability;
+  });
+  if (new Set(capabilities).size !== capabilities.length) {
+    throw new Error(`配置项 ${label} 不能包含重复能力`);
+  }
+  return capabilities;
 }
 
 function assertNoPlaceholders(value: unknown, path: string): void {
@@ -81,6 +100,7 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
       mcpProfile: asString(item['mcpProfile']),
       accountSetIds: Array.isArray(accountSetIds) ? accountSetIds.map(String) : [],
       enabled: item['enabled'] === true,
+      capabilities: parseCapabilities(item['capabilities'], `principals.${key}.capabilities`),
     };
   }
   return principals;
@@ -179,5 +199,6 @@ export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[]
     accountSetIds: [...principal.accountSetIds],
     mcpProfile: principal.mcpProfile,
     enabled: principal.enabled,
+    capabilities: [...(principal.capabilities ?? ['read'])],
   }));
 }

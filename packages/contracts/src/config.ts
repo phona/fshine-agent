@@ -7,7 +7,11 @@ export interface PrincipalConfig {
   mcpProfile: string;
   accountSetIds: string[];
   enabled: boolean;
+  /** V1 authority capabilities. Omitted values default to read for backwards compatibility. */
+  capabilities?: PrincipalCapability[];
 }
+
+export type PrincipalCapability = 'read' | 'validate' | 'write';
 
 export interface McpProfileConfig {
   command: string;

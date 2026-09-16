@@ -120,6 +120,29 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     await fake.disconnect ?? undefined;
   });
 
+  it('启动认证失败:清理客户端并允许重试', async () => {
+    const clients: FakeSdkClient[] = [];
+    const channel = new WecomBotChannel({
+      env: ENV,
+      clientFactory: () => {
+        const client = new FakeSdkClient();
+        clients.push(client);
+        return client;
+      },
+    });
+
+    const firstStart = channel.start(async () => 'ok');
+    clients[0]!.emit('error', new Error('bad credentials'));
+    await expect(firstStart).rejects.toThrow('企微连接错误:bad credentials');
+    expect(clients[0]!.disconnected).toBe(1);
+
+    const secondStart = channel.start(async () => 'ok');
+    clients[1]!.emit('authenticated');
+    await expect(secondStart).resolves.toBeUndefined();
+    expect(clients).toHaveLength(2);
+    await channel.stop();
+  });
+
   it('单聊消息:ack 先行,handler 字段正确,最终帧 finish=true 且 req_id 透传', async () => {
     const handler = vi.fn(async (_message: IncomingChannelMessage, _progress?: unknown) => '好的,已收到');
     const { fake } = await startChannel(handler);

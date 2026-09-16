@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { McpProfileConfig, ReadToolName } from '@fshine/contracts';
-import { McpHost } from './src/index';
+import { McpHost, type McpHostOptions } from './src/index';
 import {
   AuditRecorder,
   BAD_SPEC_SERVER_SCRIPT,
+  BAD_PROTOCOL_SERVER_SCRIPT,
   EXTRA_TOOL_SERVER_SCRIPT,
   expectErr,
   expectOk,
@@ -22,6 +23,12 @@ function trackedHost(...args: Parameters<typeof makeHost>): McpHost {
 
 function trackedHostWithProfile(profile: McpProfileConfig): McpHost {
   const host = makeHostWithProfile(profile);
+  hosts.push(host);
+  return host;
+}
+
+function trackedHostWithPolicy(options: McpHostOptions): McpHost {
+  const host = new McpHost(options);
   hosts.push(host);
   return host;
 }
@@ -238,6 +245,17 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     expect(audit.ends).toHaveLength(0);
   });
 
+  it('工具参数不符合 tools/list inputSchema → CONTRACT_INVALID 且不触发 audit', { timeout: 60_000 }, async () => {
+    const audit = new AuditRecorder();
+    const host = trackedHost({}, {}, audit);
+    const client = host.clientFor('req-invalid-args', ['as_001']);
+    const outcome = expectErr(await client.call('search_account_sets', { query: '' }));
+    expect(outcome.error.code).toBe('CONTRACT_INVALID');
+    expect(outcome.error.retryable).toBe(false);
+    expect(audit.starts).toHaveLength(0);
+    expect(audit.ends).toHaveLength(0);
+  });
+
   it('specVersion 不匹配 → 连接失败且 profile 标记不可用,后续 call 直接失败', { timeout: 60_000 }, async () => {
     const host = trackedHostWithProfile({
       command: process.execPath,
@@ -263,6 +281,22 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     if (!second.ok) expect(second.error.message).toContain('specVersion');
   });
 
+  it('MCP protocolVersion 未协商到客户端版本 → 拒绝连接', { timeout: 60_000 }, async () => {
+    const host = trackedHostWithProfile({
+      command: process.execPath,
+      args: ['-e', BAD_PROTOCOL_SERVER_SCRIPT],
+      cwd: repoRoot,
+      requestTimeoutMs: 5_000,
+      maxRetries: 0,
+    });
+    const outcome = await host.clientFor('req-protocol', ['as_001']).call('get_login_status', {});
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) {
+      expect(outcome.error.retryable).toBe(false);
+      expect(outcome.error.message).toContain('protocolVersion');
+    }
+  });
+
   it('tools/list 声明白名单外工具 → 拒绝连接且标记不可用(V0 只读硬闸)', { timeout: 60_000 }, async () => {
     const host = trackedHostWithProfile({
       command: process.execPath,
@@ -285,5 +319,50 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.error.message).toContain('submit_voucher'); // 不可用原因:白名单外工具
+  });
+
+  it('V1 显式工具类别策略允许组合 server,但缺少类别的工具仍拒绝', { timeout: 60_000 }, async () => {
+    const readTools = ['get_login_status', 'search_account_sets', 'get_current_accounting_period', 'list_vouchers', 'inspect_account_set'];
+    const categories = Object.fromEntries(readTools.map((name) => [name, 'read' as const]));
+    const host = new McpHost({
+      profile: {
+        command: process.execPath,
+        args: ['-e', EXTRA_TOOL_SERVER_SCRIPT],
+        cwd: repoRoot,
+        requestTimeoutMs: 5_000,
+        maxRetries: 0,
+      },
+      toolPolicy: {
+        allowedTools: [...readTools, 'submit_voucher'],
+        categories: { ...categories, submit_voucher: 'write' },
+        allowedCategories: ['read', 'write'],
+      },
+    });
+    hosts.push(host);
+    await host.ensureReady();
+    expect(host.discoveredTools.map((tool) => tool.name)).toContain('submit_voucher');
+  });
+
+  it('V1 类别门禁在 request-scoped client 拒绝 write capability', { timeout: 60_000 }, async () => {
+    const readTools = ['get_login_status', 'search_account_sets', 'get_current_accounting_period', 'list_vouchers', 'inspect_account_set'];
+    const categories = Object.fromEntries(readTools.map((name) => [name, 'read' as const]));
+    const host = trackedHostWithPolicy({
+      profile: {
+        command: process.execPath,
+        args: ['-e', EXTRA_TOOL_SERVER_SCRIPT],
+        cwd: repoRoot,
+        requestTimeoutMs: 5_000,
+        maxRetries: 0,
+      },
+      toolPolicy: {
+        allowedTools: [...readTools, 'submit_voucher'],
+        categories: { ...categories, submit_voucher: 'write' },
+      },
+    });
+    await host.ensureReady();
+    const outcome = await host.clientFor('req-v1-policy', ['as_001'], undefined, ['read'])
+      .call('submit_voucher' as ReadToolName, {});
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.message).toContain('操作权限');
   });
 });

@@ -7,16 +7,17 @@ import type {
   AuditStore,
   ChannelReply,
   IncomingChannelMessage,
+  PrincipalCapability,
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
 import { newId } from '@fshine/core';
-import type { McpCallHooks, McpHost } from '@fshine/mcp-host';
+import type { McpCallHooks, McpHost, McpToolCategory } from '@fshine/mcp-host';
 
 export interface HandlerDeps {
   store: AuditStore;
   runtime: AgentRuntime;
-  hostFor(mcpProfile: string): McpHost;
+  hostFor(mcpProfile: string, capabilities: readonly PrincipalCapability[]): McpHost;
 }
 
 export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
@@ -29,9 +30,12 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     const queueKey = `${message.wecomUserId}:${message.conversationId}`;
     const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
     const task = prev.then(() => processMessage(message, progress));
-    sessionQueues.set(queueKey, task.catch(() => undefined));
+    // Keep a rejection-safe promise in the map so the next turn can always
+    // start, while retaining the exact identity for cleanup below.
+    const queued = task.catch(() => undefined);
+    sessionQueues.set(queueKey, queued);
     void task.catch(() => undefined).finally(() => {
-      if (sessionQueues.get(queueKey) === task) sessionQueues.delete(queueKey);
+      if (sessionQueues.get(queueKey) === queued) sessionQueues.delete(queueKey);
     });
     return task;
   };
@@ -53,7 +57,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     await store.requests.insert({ ...base, outcome: 'replied' });
 
     try {
-      const host = hostFor(scope.mcpProfile);
+      const capabilities = scope.capabilities ?? ['read'];
+      const host = hostFor(scope.mcpProfile, capabilities);
       // tools() 同步读取连接的 tools/list 结果;连接预热是异步的,必须先确保就绪,
       // 否则首个工具回合的 knownTools 为空,模型所有合法调用都会被判协议违规
       await host.ensureReady().catch(() => {});
@@ -61,7 +66,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         onRetry: (info) =>
           progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
       };
-      const client = host.clientFor(requestId, scope.accountSetIds, hooks);
+      const client = host.clientFor(requestId, scope.accountSetIds, hooks, categoriesFor(capabilities));
       const reply = await runtime.handleTurn(
         {
           requestId,
@@ -84,4 +89,11 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       return '处理失败,请稍后再试。';
     }
   }
+}
+
+function categoriesFor(capabilities: readonly PrincipalCapability[]): McpToolCategory[] {
+  const categories: McpToolCategory[] = ['read'];
+  if (capabilities.includes('validate')) categories.push('validate');
+  if (capabilities.includes('write')) categories.push('write', 'status');
+  return categories;
 }

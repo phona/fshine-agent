@@ -10,6 +10,7 @@ import type {
   ReadToolName,
   ToolOutcome,
 } from '@fshine/contracts';
+import Ajv, { type ValidateFunction } from 'ajv';
 import { READ_TOOLS } from '@fshine/contracts';
 import { McpConnection, McpTransportError, type McpConnectionOptions } from './connection';
 import { parseEnvelope } from './envelope-parse';
@@ -52,10 +53,25 @@ export interface McpCallHooks {
   onRetry?: (info: { attempt: number; maxAttempts: number; errorCode: ErrorCode }) => void;
 }
 
+/** Explicit V1 capability policy. Tool categories are configured metadata; the
+ * host never infers write authority from a tool name. */
+export type McpToolCategory = 'read' | 'validate' | 'write' | 'status';
+
+export interface McpToolPolicy {
+  /** Exact tool names allowed for this host profile. */
+  allowedTools: readonly string[];
+  /** Category for every allowed tool. */
+  categories: Readonly<Record<string, McpToolCategory>>;
+  /** Optional category-level gate (for example a read-only principal). */
+  allowedCategories?: readonly McpToolCategory[];
+}
+
 export interface McpHostOptions {
   profile: McpProfileConfig;
   /** 工具白名单:tools/list 声明了名单之外的工具即拒绝连接。V0 默认只读五件套(验收 #9 代码强制)。 */
   allowedTools?: readonly string[];
+  /** V1 explicit tool/category policy; takes precedence over allowedTools. */
+  toolPolicy?: McpToolPolicy;
   /** 渠道同步回复总预算(硬约束);重试前检查,超了就停止重试 */
   channelBudgetMs?: number;
   audit?: McpHostAudit;
@@ -74,9 +90,18 @@ export class McpHost {
   private unusable = false;
   private unusableReason = '';
   private readonly allowedTools: ReadonlySet<string>;
+  private readonly toolCategories: ReadonlyMap<string, McpToolCategory>;
+  private readonly allowedCategories: ReadonlySet<McpToolCategory> | null;
+  private readonly hasToolPolicy: boolean;
+  private readonly validators = new Map<string, ValidateFunction>();
+  private readonly ajv = new Ajv({ allErrors: true, strictSchema: false });
 
   constructor(private readonly options: McpHostOptions) {
-    this.allowedTools = new Set<string>(options.allowedTools ?? READ_TOOLS);
+    const policy = options.toolPolicy;
+    this.hasToolPolicy = policy !== undefined;
+    this.allowedTools = new Set<string>(policy?.allowedTools ?? options.allowedTools ?? READ_TOOLS);
+    this.toolCategories = new Map(Object.entries(policy?.categories ?? {}));
+    this.allowedCategories = policy?.allowedCategories ? new Set(policy.allowedCategories) : null;
   }
 
   /** 最近一次(重)连接的 tools/list 结果;连接建立前为空。 */
@@ -98,7 +123,14 @@ export class McpHost {
       throw err;
     }
     const offending = (this.connection?.discoveredTools ?? [])
-      .filter((tool) => !this.allowedTools.has(tool.name))
+      .filter((tool) => {
+        if (!this.allowedTools.has(tool.name)) return true;
+        const category = this.toolCategories.get(tool.name);
+        if (!this.hasToolPolicy) return false;
+        // A V1 host may serve principals with narrower capabilities. Verify
+        // category metadata here, then filter per principal in clientFor().
+        return !category || (this.allowedCategories !== null && !this.allowedCategories.has(category));
+      })
       .map((tool) => tool.name);
     if (offending.length > 0) {
       const err = new DisallowedToolsError(offending);
@@ -108,12 +140,17 @@ export class McpHost {
   }
 
   /** 同一 requestId 可复用同一 client。 */
-  clientFor(requestId: string, allowedAccountSetIds: readonly string[], hooks?: McpCallHooks): HostToolClient {
+  clientFor(
+    requestId: string,
+    allowedAccountSetIds: readonly string[],
+    hooks?: McpCallHooks,
+    principalCategories?: readonly McpToolCategory[],
+  ): HostToolClient {
     void this.ensureReady().catch(() => {}); // 预热连接;失败在 call 中呈现
     const host = this;
     return {
-      tools: () => host.discoveredTools,
-      call: (tool, args) => host.call(requestId, allowedAccountSetIds, tool, args, hooks),
+      tools: () => host.visibleTools(principalCategories),
+      call: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories),
     };
   }
 
@@ -155,9 +192,14 @@ export class McpHost {
     tool: ReadToolName,
     args: Record<string, unknown>,
     hooks?: McpCallHooks,
+    signal?: AbortSignal,
+    principalCategories?: readonly McpToolCategory[],
   ): Promise<ToolOutcome> {
     if (this.unusable) {
       return internalError(`MCP server 不可用: ${this.unusableReason}`);
+    }
+    if (principalCategories && !principalCategories.includes(this.toolCategories.get(tool) as McpToolCategory)) {
+      return internalError('没有该工具的操作权限');
     }
     // scope 预检:未授权账套在 MCP 调用前被拒——不发往 server,也不触发 audit onStart
     const accountSetId = args['accountSetId'];
@@ -174,6 +216,9 @@ export class McpHost {
     if (!connection.discoveredTools.some((t) => t.name === tool)) {
       return internalError('工具不存在');
     }
+    const discovered = connection.discoveredTools.find((t) => t.name === tool);
+    const validation = this.validateArguments(discovered?.inputSchema, args);
+    if (!validation.ok) return validation.outcome;
     // 契约约定 tool 参数不含凭据,args 原样即为 safeArguments
     const audit = this.options.audit;
     audit?.onStart?.call(audit, {
@@ -190,7 +235,7 @@ export class McpHost {
     let outcome: ToolOutcome = internalError('工具调用未执行');
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      outcome = await this.attemptOnce(connection, tool, args, requestTimeoutMs);
+      outcome = await this.attemptOnce(connection, tool, args, requestTimeoutMs, signal);
       if (outcome.ok) break;
       const error = outcome.error;
       if (!(error.retryable && RETRYABLE_ERROR_CODES.has(error.code))) break;
@@ -214,15 +259,21 @@ export class McpHost {
     return trimForRuntime(outcome);
   }
 
+  private visibleTools(principalCategories?: readonly McpToolCategory[]): readonly DiscoveredTool[] {
+    if (!principalCategories) return this.discoveredTools;
+    return this.discoveredTools.filter((tool) => principalCategories.includes(this.toolCategories.get(tool.name) as McpToolCategory));
+  }
+
   private async attemptOnce(
     connection: McpConnection,
     tool: ReadToolName,
     args: Record<string, unknown>,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<ToolOutcome> {
     let result: unknown;
     try {
-      result = await connection.request('tools/call', { name: tool, arguments: args }, timeoutMs);
+      result = await connection.request('tools/call', { name: tool, arguments: args }, timeoutMs, signal);
     } catch (err) {
       if (err instanceof McpTransportError) {
         if (err.kind === 'timeout') {
@@ -254,6 +305,30 @@ export class McpHost {
       event.source = outcome.meta.source;
     }
     onEnd.call(audit, event);
+  }
+
+  private validateArguments(schema: Record<string, unknown> | undefined, args: Record<string, unknown>):
+    | { ok: true }
+    | { ok: false; outcome: ToolOutcome } {
+    if (!schema) return { ok: false, outcome: internalError('工具缺少 inputSchema') };
+    let validator = this.validators.get(JSON.stringify(schema));
+    if (!validator) {
+      try {
+        validator = this.ajv.compile(schema);
+      } catch (err) {
+        return { ok: false, outcome: internalError(`工具 inputSchema 无法编译: ${errorMessage(err)}`) };
+      }
+      this.validators.set(JSON.stringify(schema), validator);
+    }
+    if (validator(args)) return { ok: true };
+    const details = validator.errors ? { errors: validator.errors } : undefined;
+    return {
+      ok: false,
+      outcome: {
+        ok: false,
+        error: { code: 'CONTRACT_INVALID', message: '工具参数不符合 inputSchema', retryable: false, details },
+      },
+    };
   }
 }
 

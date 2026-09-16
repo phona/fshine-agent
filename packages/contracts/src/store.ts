@@ -5,11 +5,15 @@
 
 export type RequestOutcome = 'replied' | 'denied' | 'failed';
 
+import type { PrincipalCapability } from './config';
+
 export interface PrincipalScopeRecord {
   wecomUserId: string;
   accountSetIds: string[];
   mcpProfile: string;
   enabled: boolean;
+  /** Effective capabilities. Legacy records are treated as read-only. */
+  capabilities?: PrincipalCapability[];
 }
 
 export interface AgentRequestRecord {

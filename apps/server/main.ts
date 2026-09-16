@@ -7,10 +7,10 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, newId, principalScopeRecords } from '@fshine/core';
-import { McpHost, type McpHostAudit } from '@fshine/mcp-host';
+import { McpHost, type McpHostAudit, type McpToolPolicy } from '@fshine/mcp-host';
 import { createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
-import type { McpProfileConfig } from '@fshine/contracts';
+import type { McpProfileConfig, PrincipalCapability } from '@fshine/contracts';
 import { renderBarChartPng } from './chart';
 import { createMessageHandler } from './handler';
 
@@ -76,11 +76,26 @@ async function main(): Promise<void> {
     return profile;
   }
 
-  function hostFor(name: string): McpHost {
-    let host = hosts.get(name);
+  const combinedToolPolicy: McpToolPolicy = {
+    allowedTools: [
+      'get_login_status', 'search_account_sets', 'get_current_accounting_period', 'list_vouchers', 'inspect_account_set',
+      'validate_voucher', 'submit_voucher', 'submit_voucher_batch', 'get_submission_status',
+    ],
+    categories: {
+      get_login_status: 'read', search_account_sets: 'read', get_current_accounting_period: 'read',
+      list_vouchers: 'read', inspect_account_set: 'read', validate_voucher: 'validate',
+      submit_voucher: 'write', submit_voucher_batch: 'write', get_submission_status: 'status',
+    },
+  };
+
+  function hostFor(name: string, capabilities: readonly PrincipalCapability[]): McpHost {
+    // The process is shared by profile; tool exposure is narrowed by the
+    // request-scoped client in the handler, never by the model.
+    const key = `${name}:${[...capabilities].sort().join(',')}`;
+    let host = hosts.get(key);
     if (!host) {
-      host = new McpHost({ profile: profileFor(name), audit });
-      hosts.set(name, host);
+      host = new McpHost({ profile: profileFor(name), audit, toolPolicy: combinedToolPolicy });
+      hosts.set(key, host);
     }
     return host;
   }

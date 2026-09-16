@@ -13,6 +13,18 @@ import { defaultStepText } from './step-text';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
+const MAX_TOOL_RESULT_CHARS = 6_000;
+
+/** Kimi coding/OpenAI-compatible endpoint's supported reasoning controls. */
+export const KIMI_THINKING_LEVEL_MAP = {
+  off: null,
+  minimal: null,
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+  xhigh: null,
+  max: null,
+} as const;
 
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
@@ -54,7 +66,10 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     provider: 'llm',
     baseUrl,
     reasoning: true,
-    compat: { supportsDeveloperRole: false },
+    // Kimi accepts reasoning_effort, but only the ordinary low/medium/high
+    // values are meaningful. Explicitly reject Pi's opt-in xhigh/max levels.
+    compat: { supportsDeveloperRole: false, supportsReasoningEffort: true },
+    thinkingLevelMap: KIMI_THINKING_LEVEL_MAP,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
@@ -92,7 +107,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       });
 
       const remaining = Math.max(1_000, input.deadline - Date.now());
-      const abortTimer = setTimeout(() => agent.abort(), remaining);
+      let timedOut = false;
+      const abortTimer = setTimeout(() => {
+        timedOut = true;
+        agent.abort();
+      }, remaining);
 
       try {
         await agent.continue();
@@ -106,11 +125,22 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         clearTimeout(abortTimer);
       }
 
+      // Aborted/error assistant messages may contain a partial streamed answer.
+      // Never expose that as a successful response.
+      if (timedOut || hasFailedAssistantMessage(agent.state.messages)) return { text: '' };
+
       // 取终结文本:最后一条 assistant 的正文;若工具以确定性话术终结(terminate),
       // 最后一条是 toolResult,取其文本
       for (let i = agent.state.messages.length - 1; i >= 0; i -= 1) {
-        const message = agent.state.messages[i] as { role?: string; content?: unknown } | undefined;
-        if (message?.role === 'assistant') return { text: textFromContent(message.content) };
+        const message = agent.state.messages[i] as {
+          role?: string;
+          content?: unknown;
+          stopReason?: string;
+        } | undefined;
+        if (message?.role === 'assistant') {
+          const text = textFromContent(message.content);
+          return { text: message.stopReason === 'stop' ? text : '' };
+        }
         if (message?.role === 'toolResult') return { text: textFromContent(message.content) };
       }
       return { text: '' };
@@ -166,15 +196,18 @@ function toAgentTool(
         },
       },
     }),
-    execute: async (_toolCallId: string, params: Record<string, unknown>) => {
+    execute: async (_toolCallId: string, params: Record<string, unknown>, signal?: AbortSignal) => {
       // progress 是给进度帧的意图短语,不进工具参数
       const { progress, ...args } = params as Record<string, unknown> & { progress?: unknown };
       const phrase = typeof progress === 'string' ? progress : '';
       input.onStep(phrase || defaultStepText(tool.name, args, names));
       try {
-        const data = await input.exec(tool.name as ReadToolName, args);
+        const data = await input.exec(tool.name as ReadToolName, args, signal);
         rememberAccountSets(tool.name, data, names);
-        return { content: [{ type: 'text' as const, text: JSON.stringify(data) }], details: {} };
+        return {
+          content: [{ type: 'text' as const, text: boundedToolResult(data) }],
+          details: {},
+        };
       } catch (error) {
         if (error instanceof ToolUserError) {
           // 确定性失败话术直接终结回合,不经模型复述
@@ -188,6 +221,32 @@ function toAgentTool(
       }
     },
   };
+}
+
+/** Keep tool output from consuming the entire model context window. */
+export function boundedToolResult(data: unknown, maxChars = MAX_TOOL_RESULT_CHARS): string {
+  if (maxChars <= 0) return '';
+  let text: string;
+  try {
+    const serialized = JSON.stringify(data);
+    text = serialized === undefined ? String(data) : serialized;
+  } catch {
+    text = String(data);
+  }
+  if (text.length <= maxChars) return text;
+  const suffix = `…[结果已截断,原始长度${text.length}字符]`;
+  if (suffix.length >= maxChars) return suffix.slice(0, maxChars);
+  return `${text.slice(0, maxChars - suffix.length)}${suffix}`;
+}
+
+function hasFailedAssistantMessage(messages: readonly unknown[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: unknown; stopReason?: unknown } | undefined;
+    if (message?.role === 'assistant') {
+      return message.stopReason === 'aborted' || message.stopReason === 'error';
+    }
+  }
+  return false;
 }
 
 function rememberAccountSets(

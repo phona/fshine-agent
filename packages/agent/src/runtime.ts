@@ -80,8 +80,8 @@ async function runTurn(
   const knownAccountSets = new Map<string, string>();
   const messages = buildMessages(state, userMessage, knownAccountSets, ctx, sessionTtlMs);
 
-  const exec = async (tool: ReadToolName, args: Record<string, unknown>): Promise<unknown> => {
-    const outcome = await tools.call(tool, args);
+  const exec = async (tool: ReadToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
+    const outcome = await tools.call(tool, args, signal);
     if (!outcome.ok) throw new ToolUserError(toUserMessage(outcome.error));
     noteToolResult(tool, args, outcome, state, knownAccountSets, userMessage, sessionTtlMs);
     return outcome.data;

@@ -58,6 +58,7 @@ describe('loadConfig', () => {
     expect(userA?.mcpProfile).toBe('read-default');
     expect(userA?.accountSetIds).toEqual(['as_001', 'as_002']);
     expect(userA?.enabled).toBe(true);
+    expect(userA?.capabilities).toEqual(['read']);
 
     const profile = config.mcpProfiles['read-default'];
     expect(profile?.command).toBe('node');
@@ -96,10 +97,27 @@ describe('loadConfig', () => {
       accountSetIds: ['as_001', 'as_002'],
       mcpProfile: 'read-default',
       enabled: true,
+      capabilities: ['read'],
     });
     const disabled = records.find((record) => record.wecomUserId === 'user_b');
     expect(disabled?.enabled).toBe(false);
     expect(disabled?.accountSetIds).toEqual([]);
+    expect(disabled?.capabilities).toEqual(['read']);
+  });
+
+  it('V1 capabilities:解析 read/validate/write 并默认旧 principal 为 read', () => {
+    const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    capabilities: [read, validate, write]');
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.principals['wecom:user_a']?.capabilities).toEqual(['read', 'validate', 'write']);
+    expect(config.principals['wecom:user_b']?.capabilities).toEqual(['read']);
+  });
+
+  it('V1 capabilities:拒绝未知值、重复值和空数组', () => {
+    for (const capabilities of ['[admin]', '[read, read]', '[]']) {
+      const yaml = VALID_YAML.replace('enabled: true', `enabled: true\n    capabilities: ${capabilities}`);
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
+        .toThrowError(/capabilities/);
+    }
   });
 
   it('mcpProfiles 的占位符不阻断启动:保留原值并成功加载(17dz 未就绪可 D17Z_USE_FAKE=1 演示)', () => {
