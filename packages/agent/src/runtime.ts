@@ -45,7 +45,40 @@ type OkToolOutcome = Extract<ToolOutcome, { ok: true }>;
 
 type ModelAction =
   | { kind: 'reply'; text: string }
-  | { kind: 'call'; tool: ReadToolName; args: Record<string, unknown> };
+  | { kind: 'call'; tool: ReadToolName; args: Record<string, unknown>; /** 模型可选的意图短语(≤60 字),仅用于进度帧,不许报结果 */ progress?: string };
+
+/** 进度帧默认模板:埋点事实渲染,开发者为每个工具维护一条(协议 §6.2) */
+function defaultStepText(
+  tool: ReadToolName,
+  args: Record<string, unknown>,
+  accountSetNames: ReadonlyMap<string, string>,
+): string {
+  const accountSetId = typeof args['accountSetId'] === 'string' ? args['accountSetId'] : '';
+  const name = accountSetId !== '' ? accountSetNames.get(accountSetId) ?? accountSetId : '';
+  switch (tool) {
+    case 'search_account_sets': {
+      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
+      return `正在检索账套:${query}…`;
+    }
+    case 'get_current_accounting_period':
+      return name ? `已定位账套「${name}」,查询当前会计期间…` : '查询当前会计期间…';
+    case 'list_vouchers': {
+      const period = typeof args['period'] === 'string' ? args['period'] : '';
+      return name ? `拉取凭证:「${name}」${period}…` : '拉取凭证中…';
+    }
+    case 'inspect_account_set':
+      return name ? `正在做账套「${name}」摸底…` : '正在做账套摸底…';
+    case 'get_login_status':
+      return '检查平台登录状态…';
+  }
+}
+
+/** 模型意图短语sanitize:去换行、压空白、截断到 60 字(只许说意图,长度可控) */
+function sanitizeProgress(raw: unknown): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw.replace(/\s+/g, ' ').trim().slice(0, 60);
+  return cleaned !== '' ? cleaned : undefined;
+}
 
 type CompletionResult =
   | { kind: 'action'; action: ModelAction }
@@ -87,6 +120,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
           state.pendingCandidates = undefined;
           state.expiresAt = undefined;
           knownAccountSets.set(selected.id, selected.name);
+          ctx.onStep?.(`已选定账套「${selected.name}」,继续查询…`);
           messages.push({
             role: 'user',
             content: `用户选择了账套「${selected.name}」(accountSetId: ${selected.id})。请围绕该账套继续处理用户请求:「${userMessage}」`,
@@ -95,6 +129,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
           // 2) 翻页快捷路径:直接用上一页游标续查,不经模型决策
           const last = state.lastVoucherQuery;
           knownAccountSets.set(last.accountSetId, last.accountSetName);
+          ctx.onStep?.(`翻页拉取凭证:「${last.accountSetName}」${last.period}…`);
           if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
           const outcome = await tools.call('list_vouchers', {
             accountSetId: last.accountSetId,
@@ -120,6 +155,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
           if (action.kind === 'reply') return { text: action.text };
 
           if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
+          // 进度埋点:模型意图短语优先,否则默认模板(只说即将做什么,事实帧由 host 重试/超时负责)
+          ctx.onStep?.(action.progress ?? defaultStepText(action.tool, action.args, knownAccountSets));
           const outcome = await tools.call(action.tool, action.args);
           if (!outcome.ok) return { text: toUserMessage(outcome.error) };
 
@@ -206,7 +243,13 @@ function parseModelAction(raw: string, knownTools: ReadonlySet<string>): ModelAc
     const args = obj.args;
     if (typeof tool !== 'string' || !knownTools.has(tool)) return null;
     if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
-    return { kind: 'call', tool: tool as ReadToolName, args: args as Record<string, unknown> };
+    const progress = sanitizeProgress(obj.progress);
+    return {
+      kind: 'call',
+      tool: tool as ReadToolName,
+      args: args as Record<string, unknown>,
+      ...(progress ? { progress } : {}),
+    };
   }
   return null;
 }
@@ -271,7 +314,7 @@ function buildSystemPrompt(tools: readonly DiscoveredTool[]): string {
     toolLines,
     '',
     '输出协议(必须严格遵守):每一轮你只能输出一个 JSON 对象,不得包含任何其他文字或代码块标记:',
-    '- 需要调用工具时:{"action":"call","tool":"<工具名>","args":{...}}',
+    '- 需要调用工具时:{"action":"call","tool":"<工具名>","args":{...},"progress":"<可选:一句话说明你即将做什么,≤60字,给用户看的进度提示;只许描述即将进行的动作,严禁出现任何结果数字>"}',
     '- 给出最终回答时:{"action":"reply","text":"<给用户的回复>"}',
     '',
     '对话中 role 为 assistant 且含 "tool" 字段的消息,是你此前工具调用的结果摘要(JSON);其中 meta.source 是数据来源,meta.retrievedAt 是取回时间。',

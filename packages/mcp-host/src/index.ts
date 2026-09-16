@@ -4,6 +4,6 @@ export type { McpConnectionOptions, McpTransportErrorKind } from './connection';
 export { parseEnvelope } from './envelope-parse';
 export type { EnvelopeParseResult } from './envelope-parse';
 export { DEFAULT_CHANNEL_BUDGET_MS, DisallowedToolsError, McpHost } from './host';
-export type { McpHostAudit, McpHostOptions, McpToolCallEndEvent, McpToolCallStartEvent } from './host';
+export type { McpCallHooks, McpHostAudit, McpHostOptions, McpToolCallEndEvent, McpToolCallStartEvent } from './host';
 export { checkServerSpecVersion, EXPECTED_SPEC_VERSION, SpecVersionMismatchError } from './spec-version';
 export { trimForRuntime } from './trim';

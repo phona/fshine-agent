@@ -388,6 +388,28 @@ describe('WecomBotChannel', () => {
     await channel.stop();
   });
 
+  it('进度帧:handler 调 progress 推 finish=false 帧,过密帧被节流', async () => {
+    const handler: ReplyHandler = async (_message, progress) => {
+      progress?.('步骤一:正在定位账套');
+      progress?.('步骤二:距上一帧不足 3 秒,应被节流');
+      return '完成';
+    };
+    const { channel, inst } = await startChannel(handler);
+
+    inst.emitFrame(msgCallbackFrame('cb-prog-1', textMsgBody({ msgid: 'msg-prog' })));
+    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
+
+    const progressTexts = inst
+      .ackRespondFrames()
+      .map((f) => (f['body'] as { stream: { content: string } }).stream.content);
+    expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']); // 步骤二被 3s 节流跳过
+    expect(inst.finalRespondFrames()[0]!['body']).toMatchObject({
+      msgtype: 'stream',
+      stream: { finish: true, content: '完成' },
+    });
+    await channel.stop();
+  });
+
   it('心跳:每 30 秒发出一帧 ping', async () => {
     vi.useFakeTimers();
     const { inst } = await startChannel();

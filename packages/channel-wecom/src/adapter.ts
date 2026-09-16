@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import type { ChannelAdapter, ChannelReply, IncomingChannelMessage, ReplyHandler, RichChannelReply } from '@fshine/contracts';
+import type { ChannelAdapter, ChannelReply, IncomingChannelMessage, ProgressFn, ReplyHandler, RichChannelReply } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateUtf8 } from './text';
 
 const DEFAULT_WS_BASE_URL = 'wss://openws.work.weixin.qq.com';
@@ -10,6 +10,8 @@ const MAX_BACKOFF_MS = 30_000;
 const CLOSE_NORMAL = 1000;
 const FALLBACK_REPLY = '处理失败,请稍后再试';
 const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
+const PROGRESS_MIN_INTERVAL_MS = 3_000;
+const MAX_PROGRESS_FRAMES = 4;
 
 interface WsMessageEvent {
   data: unknown;
@@ -282,7 +284,24 @@ export class WecomBotChannel implements ChannelAdapter {
       logError({ event: 'wecom_ack_fail', req_id: reqId, error: asError(error).message });
     });
 
-    const raw = await handler(message).catch((error) => {
+    // 阶段进度:runtime/host 的 onStep/onRetry 事件 → 节流后的 finish=false 帧
+    // (与 ack/最终帧同 streamId,最终帧整体替换全部过程内容)。限频 30 条/分钟 → 节流必须。
+    let lastProgressAt = 0;
+    let progressCount = 0;
+    const progress: ProgressFn = (text) => {
+      if (progressCount >= MAX_PROGRESS_FRAMES) return;
+      const now = Date.now();
+      if (now - lastProgressAt < PROGRESS_MIN_INTERVAL_MS) return;
+      lastProgressAt = now;
+      progressCount += 1;
+      const wsNow = this.ws;
+      if (!wsNow) return;
+      this.sendStreamFrame(wsNow, reqId, streamId, false, text).catch((error) => {
+        logError({ event: 'wecom_progress_fail', req_id: reqId, error: asError(error).message });
+      });
+    };
+
+    const raw = await handler(message, progress).catch((error) => {
       logError({
         event: 'wecom_handler_error',
         messageId: message.messageId,

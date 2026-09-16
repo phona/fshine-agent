@@ -46,6 +46,12 @@ export interface McpHostAudit {
   onEnd?(event: McpToolCallEndEvent): void;
 }
 
+/** 单次调用的运行时钩子:重试可见化(进度帧)等 */
+export interface McpCallHooks {
+  /** 每次决定退避重试时触发(attempt 为即将进行的尝试序号) */
+  onRetry?: (info: { attempt: number; maxAttempts: number; errorCode: ErrorCode }) => void;
+}
+
 export interface McpHostOptions {
   profile: McpProfileConfig;
   /** 工具白名单:tools/list 声明了名单之外的工具即拒绝连接。V0 默认只读五件套(验收 #9 代码强制)。 */
@@ -102,12 +108,12 @@ export class McpHost {
   }
 
   /** 同一 requestId 可复用同一 client。 */
-  clientFor(requestId: string, allowedAccountSetIds: readonly string[]): HostToolClient {
+  clientFor(requestId: string, allowedAccountSetIds: readonly string[], hooks?: McpCallHooks): HostToolClient {
     void this.ensureReady().catch(() => {}); // 预热连接;失败在 call 中呈现
     const host = this;
     return {
       tools: () => host.discoveredTools,
-      call: (tool, args) => host.call(requestId, allowedAccountSetIds, tool, args),
+      call: (tool, args) => host.call(requestId, allowedAccountSetIds, tool, args, hooks),
     };
   }
 
@@ -148,6 +154,7 @@ export class McpHost {
     allowedAccountSetIds: readonly string[],
     tool: ReadToolName,
     args: Record<string, unknown>,
+    hooks?: McpCallHooks,
   ): Promise<ToolOutcome> {
     if (this.unusable) {
       return internalError(`MCP server 不可用: ${this.unusableReason}`);
@@ -192,6 +199,7 @@ export class McpHost {
         typeof error.retryAfterMs === 'number' && error.retryAfterMs >= 0 ? error.retryAfterMs : DEFAULT_RETRY_AFTER_MS;
       const elapsed = Date.now() - startedAtMs;
       if (elapsed + retryAfterMs + requestTimeoutMs > channelBudgetMs) break; // 渠道总预算是硬约束
+      hooks?.onRetry?.call(hooks, { attempt: attempt + 1, maxAttempts, errorCode: error.code });
       await delay(retryAfterMs); // 契约退避;退避不占单次尝试预算
       try {
         await this.ensureReady(); // 若进程已死,这里自动重连(spawn + 握手 + tools/list)

@@ -1,10 +1,17 @@
 /**
- * 消息处理主链路:授权 → 审计 → Agent(runtime + Kimi)→ MCP host(scope 预检)→ 回复。
+ * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ MCP host(scope 预检)→ 回复。
  * 被 apps/server/main.ts 与 scripts/e2e-turn.ts 共用,保证测的就是跑的。
  */
-import type { AgentRuntime, AuditStore, IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
+import type {
+  AgentRuntime,
+  AuditStore,
+  ChannelReply,
+  IncomingChannelMessage,
+  ProgressFn,
+  ReplyHandler,
+} from '@fshine/contracts';
 import { newId } from '@fshine/core';
-import type { McpHost } from '@fshine/mcp-host';
+import type { McpCallHooks, McpHost } from '@fshine/mcp-host';
 
 export interface HandlerDeps {
   store: AuditStore;
@@ -15,7 +22,7 @@ export interface HandlerDeps {
 export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   const { store, runtime, hostFor } = deps;
 
-  return async (message: IncomingChannelMessage): Promise<string> => {
+  return async (message: IncomingChannelMessage, progress?: ProgressFn): Promise<ChannelReply> => {
     const principalId = `wecom:${message.wecomUserId}`;
     const requestId = newId('req');
     const createdAt = new Date().toISOString();
@@ -29,13 +36,18 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     await store.requests.insert({ ...base, outcome: 'replied' });
 
     try {
-      const client = hostFor(scope.mcpProfile).clientFor(requestId, scope.accountSetIds);
+      const hooks: McpCallHooks = {
+        onRetry: (info) =>
+          progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
+      };
+      const client = hostFor(scope.mcpProfile).clientFor(requestId, scope.accountSetIds, hooks);
       const reply = await runtime.handleTurn(
         {
           requestId,
           principalId,
           allowedAccountSetIds: scope.accountSetIds,
           sessionId: `${message.wecomUserId}:${message.conversationId}`,
+          onStep: progress,
         },
         message.text,
         client,

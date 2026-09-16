@@ -14,6 +14,8 @@ export interface TrustedContext {
   /** 调用者被授权的账套稳定 id;host 在每次工具调用前据此预检 */
   allowedAccountSetIds: readonly string[];
   sessionId: string;
+  /** 阶段进度回调(埋点事实渲染,非模型自由文本);渠道侧节流并转成进度帧 */
+  onStep?: (text: string) => void;
 }
 
 /** tools/list 发现的单个工具(inputSchema 为完整、自包含的 JSON Schema)。 */
