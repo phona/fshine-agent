@@ -1,0 +1,11 @@
+node_modules/
+dist/
+coverage/
+data/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# 秘密与本地部署参数,不进版本库(模板见 .env.example)
+.env
+.env.local

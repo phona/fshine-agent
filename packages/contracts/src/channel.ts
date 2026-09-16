@@ -1,0 +1,26 @@
+/**
+ * 渠道适配接口(架构 §2:WeCom adapter)。
+ * V0:回调验签 + 快速 ack + 主动推送;同步语义的 75s 预算由 host 侧预算控制,不在本层。
+ */
+
+export interface IncomingChannelMessage {
+  /** 不可变的企微成员 UserID */
+  wecomUserId: string;
+  /** 渠道会话标识;单聊可用 userid 推导 */
+  conversationId: string;
+  /** 渠道消息 id,用于幂等与审计关联 */
+  messageId: string;
+  /** 单聊 / 群聊(群聊时 text 已剥离 @机器人 前缀) */
+  chatType?: 'single' | 'group';
+  text: string;
+  /** ISO 8601 */
+  receivedAt: string;
+}
+
+/** 处理消息并返回回复文本;adapter 负责把它推送回渠道。 */
+export type ReplyHandler = (message: IncomingChannelMessage) => Promise<string>;
+
+export interface ChannelAdapter {
+  start(handler: ReplyHandler): Promise<void>;
+  stop(): Promise<void>;
+}
