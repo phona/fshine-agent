@@ -1,0 +1,289 @@
+/**
+ * tax-agent 运行时:JSON 行为协议 + 只读工具循环 + 会话澄清/翻页状态。
+ * 只依赖 contracts 接口(host 的 HostToolClient 真实现由 mcp-host 提供)。
+ */
+import type {
+  AgentReply,
+  AgentRuntime,
+  ConversationSessionRepo,
+  DiscoveredTool,
+  HostToolClient,
+  ReadToolName,
+  ToolOutcome,
+  TrustedContext,
+} from '@fshine/contracts';
+import { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
+import type { ChatModel, ChatModelMessage } from './model';
+import {
+  extractAccountSetList,
+  extractNextCursor,
+  freshPendingCandidates,
+  loadSessionState,
+  matchPendingCandidate,
+  saveSessionState,
+  type AgentSessionState,
+  type PendingCandidate,
+} from './session';
+
+export const FALLBACK_MISUNDERSTOOD = '抱歉,我没有理解这个问题,请换个说法';
+export const FALLBACK_TIMEOUT = '查询超时,请稍后再试';
+export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员';
+export const NO_ACCOUNT_SET_MESSAGE = '没有找到该账套';
+
+const CORRECTION_MESSAGE =
+  '你的上一条输出不符合约定:必须只输出一个 JSON 对象,形如 {"action":"call","tool":"<工具名>","args":{...}} 或 {"action":"reply","text":"<给用户的回复>"}。请重新输出。';
+
+const NEXT_PAGE_PATTERN = /下一页|还有吗|还有更多|再来一页|继续/;
+
+const DEFAULT_SESSION_TTL_MS = 300_000;
+const DEFAULT_TURN_BUDGET_MS = 70_000;
+const DEFAULT_MAX_STEPS = 6;
+/** 工具结果进模型上下文前的保险裁剪上限(JSON 字符数) */
+const RESULT_CLIP_LIMIT = 6_000;
+
+type OkToolOutcome = Extract<ToolOutcome, { ok: true }>;
+
+type ModelAction =
+  | { kind: 'reply'; text: string }
+  | { kind: 'call'; tool: ReadToolName; args: Record<string, unknown> };
+
+type CompletionResult =
+  | { kind: 'action'; action: ModelAction }
+  | { kind: 'misunderstood' }
+  | { kind: 'budget-exceeded' }
+  | { kind: 'model-unavailable' };
+
+export interface TaxAgentRuntimeDeps {
+  model: ChatModel;
+  sessions: Pick<ConversationSessionRepo, 'get' | 'upsert'>;
+  sessionTtlMs?: number;
+  turnBudgetMs?: number;
+  maxSteps?: number;
+}
+
+export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
+  const sessionTtlMs = deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  const turnBudgetMs = deps.turnBudgetMs ?? DEFAULT_TURN_BUDGET_MS;
+  const maxSteps = deps.maxSteps ?? DEFAULT_MAX_STEPS;
+
+  return {
+    async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
+      const deadline = Date.now() + turnBudgetMs;
+      const discovered = tools.tools();
+      const system = buildSystemPrompt(discovered);
+      // 只读策略:模型只能调用 tools/list 发现的工具,其余一律按协议违规处理
+      const knownTools = new Set<string>(discovered.map((tool) => tool.name));
+      const knownAccountSets = new Map<string, string>();
+
+      const loaded = await loadSessionState(deps.sessions, ctx.sessionId);
+      const state = loaded.state;
+      const messages: ChatModelMessage[] = [];
+
+      try {
+        // 1) 澄清候选命中:直接以所选账套继续,清候选
+        const pending = freshPendingCandidates(state);
+        const selected = pending.length > 0 ? matchPendingCandidate(userMessage, pending) : null;
+        if (selected) {
+          state.pendingCandidates = undefined;
+          state.expiresAt = undefined;
+          knownAccountSets.set(selected.id, selected.name);
+          messages.push({
+            role: 'user',
+            content: `用户选择了账套「${selected.name}」(accountSetId: ${selected.id})。请围绕该账套继续处理用户请求:「${userMessage}」`,
+          });
+        } else if (state.lastVoucherQuery?.nextCursor && NEXT_PAGE_PATTERN.test(userMessage)) {
+          // 2) 翻页快捷路径:直接用上一页游标续查,不经模型决策
+          const last = state.lastVoucherQuery;
+          knownAccountSets.set(last.accountSetId, last.accountSetName);
+          if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
+          const outcome = await tools.call('list_vouchers', {
+            accountSetId: last.accountSetId,
+            period: last.period,
+            cursor: last.nextCursor,
+          });
+          if (!outcome.ok) return { text: toUserMessage(outcome.error) };
+          recordListVoucherQuery(state, knownAccountSets, last.accountSetId, last.period, outcome);
+          messages.push({ role: 'user', content: userMessage });
+          messages.push({ role: 'assistant', content: toolResultMessage('list_vouchers', outcome) });
+        } else {
+          messages.push({ role: 'user', content: userMessage });
+        }
+
+        // 3) 协议循环:每轮一个 JSON 动作,最多 maxSteps 轮
+        for (let step = 0; step < maxSteps; step += 1) {
+          if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
+          const result = await completeWithCorrection(deps.model, system, messages, knownTools, deadline);
+          if (result.kind === 'misunderstood') return { text: FALLBACK_MISUNDERSTOOD };
+          if (result.kind === 'budget-exceeded') return { text: FALLBACK_TIMEOUT };
+          if (result.kind === 'model-unavailable') return { text: FALLBACK_FAILURE };
+          const action = result.action;
+          if (action.kind === 'reply') return { text: action.text };
+
+          if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
+          const outcome = await tools.call(action.tool, action.args);
+          if (!outcome.ok) return { text: toUserMessage(outcome.error) };
+
+          if (action.tool === 'search_account_sets') {
+            const candidates = extractAccountSetList(outcome.data);
+            for (const candidate of candidates) knownAccountSets.set(candidate.id, candidate.name);
+            if (candidates.length === 0) {
+              state.pendingCandidates = undefined;
+              state.expiresAt = undefined;
+              return { text: NO_ACCOUNT_SET_MESSAGE };
+            }
+            if (candidates.length > 1) {
+              state.pendingCandidates = candidates.map((candidate) => ({ id: candidate.id, name: candidate.name }));
+              state.expiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
+            }
+          } else if (action.tool === 'list_vouchers') {
+            recordListVoucherQuery(
+              state,
+              knownAccountSets,
+              stringArg(action.args, 'accountSetId'),
+              stringArg(action.args, 'period'),
+              outcome,
+            );
+          }
+
+          messages.push({ role: 'assistant', content: toolResultMessage(action.tool, outcome) });
+        }
+        return { text: FALLBACK_MISUNDERSTOOD };
+      } finally {
+        await saveSessionState(deps.sessions, ctx.sessionId, ctx.principalId, state, loaded.record);
+      }
+    },
+  };
+}
+
+// ---- 模型调用与协议解析 ----
+
+/** 模型输出非法时补一条纠偏 user 消息重试 1 次;仍失败返回 misunderstood。 */
+async function completeWithCorrection(
+  model: ChatModel,
+  system: string,
+  messages: ChatModelMessage[],
+  knownTools: ReadonlySet<string>,
+  deadline: number,
+): Promise<CompletionResult> {
+  let output: string;
+  try {
+    output = await model.complete({ system, messages });
+  } catch {
+    // 模型基础设施故障:统一安全话术,不透出任何内部细节
+    return { kind: 'model-unavailable' };
+  }
+  const first = parseModelAction(output, knownTools);
+  if (first) return { kind: 'action', action: first };
+
+  messages.push({ role: 'user', content: CORRECTION_MESSAGE });
+  if (Date.now() >= deadline) return { kind: 'budget-exceeded' };
+  try {
+    output = await model.complete({ system, messages });
+  } catch {
+    return { kind: 'model-unavailable' };
+  }
+  const retried = parseModelAction(output, knownTools);
+  return retried ? { kind: 'action', action: retried } : { kind: 'misunderstood' };
+}
+
+function parseModelAction(raw: string, knownTools: ReadonlySet<string>): ModelAction | null {
+  const json = extractJsonObject(raw);
+  if (json === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json) as unknown;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (obj.action === 'reply') {
+    const text = obj.text;
+    return typeof text === 'string' && text.trim().length > 0 ? { kind: 'reply', text } : null;
+  }
+  if (obj.action === 'call') {
+    const tool = obj.tool;
+    const args = obj.args;
+    if (typeof tool !== 'string' || !knownTools.has(tool)) return null;
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return null;
+    return { kind: 'call', tool: tool as ReadToolName, args: args as Record<string, unknown> };
+  }
+  return null;
+}
+
+function extractJsonObject(raw: string): string | null {
+  let text = raw.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/.exec(text);
+  if (fenced) text = (fenced[1] ?? '').trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+// ---- 工具结果摘要 ----
+
+function toolResultMessage(tool: ReadToolName, outcome: OkToolOutcome): string {
+  const summary = clipJson({ ok: true, data: outcome.data, meta: outcome.meta });
+  return `{"tool":"${tool}","result":${summary}}`;
+}
+
+function clipJson(value: unknown, limit: number = RESULT_CLIP_LIMIT): string {
+  const raw = JSON.stringify(value) ?? 'null';
+  if (raw.length <= limit) return raw;
+  return `${raw.slice(0, limit)}……[结果过长已截断]`;
+}
+
+function recordListVoucherQuery(
+  state: AgentSessionState,
+  knownAccountSets: ReadonlyMap<string, string>,
+  accountSetId: string,
+  period: string,
+  outcome: OkToolOutcome,
+): void {
+  if (!accountSetId) return;
+  const nextCursor = extractNextCursor(outcome.data);
+  state.lastVoucherQuery = {
+    accountSetId,
+    accountSetName: outcome.meta.accountSetName ?? knownAccountSets.get(accountSetId) ?? '',
+    period,
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
+  };
+}
+
+function stringArg(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (value === undefined || value === null) return '';
+  return typeof value === 'string' ? value : String(value);
+}
+
+// ---- system 提示 ----
+
+function buildSystemPrompt(tools: readonly DiscoveredTool[]): string {
+  const toolLines = tools
+    .map((tool) => `- ${tool.name}:${tool.description};inputSchema=${JSON.stringify(tool.inputSchema)}`)
+    .join('\n');
+  return [
+    '你是一个企业财务数据查询助手,只读,绝不执行或承诺任何写入、修改操作。',
+    '你绝不编造数据,所有回答只能基于工具返回的结果。',
+    '',
+    '可用工具(名称、描述、inputSchema 的紧凑 JSON):',
+    toolLines,
+    '',
+    '输出协议(必须严格遵守):每一轮你只能输出一个 JSON 对象,不得包含任何其他文字或代码块标记:',
+    '- 需要调用工具时:{"action":"call","tool":"<工具名>","args":{...}}',
+    '- 给出最终回答时:{"action":"reply","text":"<给用户的回复>"}',
+    '',
+    '对话中 role 为 assistant 且含 "tool" 字段的消息,是你此前工具调用的结果摘要(JSON);其中 meta.source 是数据来源,meta.retrievedAt 是取回时间。',
+    '',
+    '回答规则:',
+    '- 数据回复必须带上所用账套名称、会计期间(如使用)、数据来源(meta.source)与取回时间(meta.retrievedAt)。',
+    '- search_account_sets 返回多个候选账套时,必须以编号列表列出全部候选让用户选择,不得自行猜测;只返回一个候选时直接采用;没有候选时明确告知用户没有找到。',
+    '- list_vouchers 结果含 nextCursor 时,必须告知用户"还有更多,回复\'下一页\'继续"。',
+    '- list_vouchers 首次查询不要传任何分页参数(默认首页);只有用户要看后续页时才用上一页结果里的 nextCursor,不要自行传 pageNo。',
+    '- 错误信息必须用用户能理解的话表达,绝不暴露堆栈、文件路径、凭据或原始 JSON。',
+    `- 工具结果出现 NEEDS_LOGIN 时,回复:"${NEEDS_LOGIN_MESSAGE}"`,
+  ].join('\n');
+}
+
+export type { PendingCandidate, AgentSessionState };
