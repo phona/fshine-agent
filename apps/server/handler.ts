@@ -21,8 +21,25 @@ export interface HandlerDeps {
 
 export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   const { store, runtime, hostFor } = deps;
+  // 同一会话的消息串行处理(pi 的 steering/followUp 队列哲学):
+  // 并发回合会竞态会话状态(候选/游标/历史互相覆盖),必须排队
+  const sessionQueues = new Map<string, Promise<unknown>>();
 
   return async (message: IncomingChannelMessage, progress?: ProgressFn): Promise<ChannelReply> => {
+    const queueKey = `${message.wecomUserId}:${message.conversationId}`;
+    const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
+    const task = prev.then(() => processMessage(message, progress));
+    sessionQueues.set(queueKey, task.catch(() => undefined));
+    void task.catch(() => undefined).finally(() => {
+      if (sessionQueues.get(queueKey) === task) sessionQueues.delete(queueKey);
+    });
+    return task;
+  };
+
+  async function processMessage(
+    message: IncomingChannelMessage,
+    progress?: ProgressFn,
+  ): Promise<ChannelReply> {
     const principalId = `wecom:${message.wecomUserId}`;
     const requestId = newId('req');
     const createdAt = new Date().toISOString();
@@ -66,5 +83,5 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       }));
       return '处理失败,请稍后再试。';
     }
-  };
+  }
 }
