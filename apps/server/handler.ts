@@ -36,11 +36,15 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     await store.requests.insert({ ...base, outcome: 'replied' });
 
     try {
+      const host = hostFor(scope.mcpProfile);
+      // tools() 同步读取连接的 tools/list 结果;连接预热是异步的,必须先确保就绪,
+      // 否则首个工具回合的 knownTools 为空,模型所有合法调用都会被判协议违规
+      await host.ensureReady().catch(() => {});
       const hooks: McpCallHooks = {
         onRetry: (info) =>
           progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
       };
-      const client = hostFor(scope.mcpProfile).clientFor(requestId, scope.accountSetIds, hooks);
+      const client = host.clientFor(requestId, scope.accountSetIds, hooks);
       const reply = await runtime.handleTurn(
         {
           requestId,

@@ -3,6 +3,7 @@ import type { EnvelopeMeta, TrustedContext } from '@fshine/contracts';
 import { ScriptedChatModel, type ScriptedStep } from './src/model';
 import {
   createTaxAgentRuntime,
+  FALLBACK_FAILURE,
   FALLBACK_MISUNDERSTOOD,
   FALLBACK_TIMEOUT,
   NO_ACCOUNT_SET_MESSAGE,
@@ -430,5 +431,23 @@ describe('createTaxAgentRuntime 工具结果保险裁剪', () => {
     const reply = await runtime.handleTurn(makeCtx(), '登录状态', client);
 
     expect(reply.text).toBe('ok');
+  });
+
+  it('工具清单为空(host 连接未就绪):以失败话术收场,不进模型循环', async () => {
+    const sessions = new FakeSessionRepo();
+    const { model } = recordRequests(
+      ScriptedChatModel(['{"action":"reply","text":"不该被触达"}']),
+    );
+    const emptyClient = {
+      tools: () => [],
+      call: async () => {
+        throw new Error('不应被调用');
+      },
+    };
+
+    const runtime = createTaxAgentRuntime({ model, sessions });
+    const reply = await runtime.handleTurn(makeCtx(), '查一下幻晟本期的凭证', emptyClient);
+
+    expect(reply.text).toBe(FALLBACK_FAILURE);
   });
 });

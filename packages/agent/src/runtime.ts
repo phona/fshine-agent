@@ -103,6 +103,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
     async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
       const deadline = Date.now() + turnBudgetMs;
       const discovered = tools.tools();
+      // 工具清单为空 = host 连接未就绪/无可用工具:此回合必然无法完成任何查询,
+      // 尽早用准确的失败话术收场,而不是让模型在没有工具的对话里空转
+      if (discovered.length === 0) return { text: FALLBACK_FAILURE };
       const system = buildSystemPrompt(discovered);
       // 只读策略:模型只能调用 tools/list 发现的工具,其余一律按协议违规处理
       const knownTools = new Set<string>(discovered.map((tool) => tool.name));
@@ -325,6 +328,7 @@ function buildSystemPrompt(tools: readonly DiscoveredTool[]): string {
     '- list_vouchers 结果含 nextCursor 时,必须告知用户"还有更多,回复\'下一页\'继续"。',
     '- list_vouchers 首次查询不要传任何分页参数(默认首页);只有用户要看后续页时才用上一页结果里的 nextCursor,不要自行传 pageNo。',
     '- 错误信息必须用用户能理解的话表达,绝不暴露堆栈、文件路径、凭据或原始 JSON。',
+    '- 始终使用简体中文回复。',
     `- 工具结果出现 NEEDS_LOGIN 时,回复:"${NEEDS_LOGIN_MESSAGE}"`,
   ].join('\n');
 }
