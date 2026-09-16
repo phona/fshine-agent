@@ -80,3 +80,11 @@
 6. 契约测试:Fake server 补写语义(幂等状态机、dry-run 零占用、batch 子键),host 闸门行为同步加测。
 
 **V0 已落地的只读硬闸**:McpHost 增加 `allowedTools` 白名单(缺省只读五件套),`tools/list` 声明名单外工具即拒绝连接并标记 profile 不可用——"V0 无写路径"从配置约束升级为代码强制,误配 write server 也无法生效。
+
+## 8. 偏离登记(2026-09-16 事故后新增)
+
+**规则**:任何与冻结文档的偏离,发现即停、立即向用户报告并经确认才继续;严禁"先自行替代实现、日后打补丁"。
+
+**事故记录**:架构文档指定 Agent runtime 初始实现为 **Pi adapter**,但 W2-E 派发时未确认 Pi 的具体实现(pi.dev / `@earendil-works/pi-agent-core` + `pi-ai`),自行手搓了模型 HTTP 客户端、JSON 动作协议与会话历史,随 d941fa4 入库;此后协议解析加固、超时调整等补丁均叠加在偏离之上,直至用户质问 pi-agent-sdk 才暴露。
+
+**补救**:迁移至 pi-agent-core(原生 function calling)+ pi-ai(多供应商 LLM,含流式)+ pi 的 SQLite 会话后端;契约(AgentRuntime/HostToolClient)不变,仅替换 packages/agent 内部。迁移完成后本条归档。
