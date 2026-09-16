@@ -34,6 +34,17 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     throw new Error(`缺少环境变量 ${missing.join('、')},无法初始化 LLM 客户端`);
   }
 
+  // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
+  // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
+  const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+  const thinkingLevelRaw = options.env.LLM_THINKING_LEVEL ?? '';
+  if (thinkingLevelRaw !== '' && !THINKING_LEVELS.has(thinkingLevelRaw)) {
+    throw new Error(`环境变量 LLM_THINKING_LEVEL 无效:${thinkingLevelRaw}(可选 off/minimal/low/medium/high/xhigh/max)`);
+  }
+  const thinkingLevel = (thinkingLevelRaw || undefined) as
+    | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+    | undefined;
+
   // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
   // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响
   const kimiModel: Model<'openai-completions'> = {
@@ -74,6 +85,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           model,
           tools,
           messages: initialMessages,
+          ...(thinkingLevel ? { thinkingLevel } : {}),
         },
         streamFn: models.streamSimple.bind(models),
         toolExecution: 'sequential',
