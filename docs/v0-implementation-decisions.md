@@ -1,0 +1,55 @@
+# V0 实施决策记录
+
+状态:P0 已定,实现以本文为准。边界红线见 `v0-architecture.md`,功能口径见 `v0-functional-spec.md`,协议真相见 `17dz-mcp-spec.md` v0.5。
+
+## 1. 技术栈与仓库形态
+
+- Node ≥ 24 + TypeScript(strict,`noUncheckedIndexedAccess` 开启),ESM。
+- 单 npm 项目 + 路径别名(`@fshine/<pkg>`),不做 workspaces;`vitest` 跑全部测试,`tsx` 直接运行 TS。依赖统一声明在根 `package.json`,由主 agent 一次安装,**subagent 不得自行 npm install**。
+- 目录所有权(subagent / 后续开发只写自己目录):
+
+| 目录 | 内容 | owner |
+|---|---|---|
+| `packages/contracts` | 信封/错误码/tool 类型、host↔runtime、仓库、渠道接口、配置类型 | P0 冻结 |
+| `packages/mcp-fake` | Fake17dzMcpServer + 契约测试 | W1-A |
+| `packages/core` | 配置加载 + SQLite 审计存储 | W1-B |
+| `packages/channel-wecom` | 企微智能机器人 WebSocket 长连接(收消息 + respond 回复) | W1-C |
+| `packages/mcp-host` | stdio host、scope 预检、信封解析、重试 | W2-D |
+| `packages/agent` | Agent runtime(Pi adapter)+ 会话澄清状态 | W2-E |
+| `apps/` | 装配入口(main) | 集成阶段(主 agent) |
+
+## 2. 配置命名
+
+统一用架构文档的 **`mcpProfile`**(`config/agent.yaml` 的 `mcpProfiles`)。functional-spec §6 示例中的 `mcpServer: 17dz-read` 以此为准废弃。
+
+## 3. 企微接入模式(V0:智能机器人 · WebSocket 长连接)
+
+- 采用企业微信「智能机器人」的**长连接 API 模式**(官方文档:智能机器人长连接 developer.work.weixin.qq.com/document/path/101463)。URL 回调与长连接互斥,V0 只做长连接;自建应用回调模式整体 deferred。
+- 凭证:`WECOM_BOT_ID` + `WECOM_BOT_SECRET`(长连接专用 Secret)。**无公网 IP/域名要求,无消息加解密**,不存在 Token/EncodingAESKey。
+- **传输实现用 `ws` 库**(与官方 aibot-node-sdk 一致),经 `NodeWebSocketImpl` 注入 adapter:Node 24 内置 undici WebSocket 对 openws 网关握手即失败(2026-09 实测);另实测服务端对关闭握手会回非标帧(opcode 3),仅影响 stop 后的日志,不影响运行期收发。
+- 订阅/回复响应的 `errcode` 在**帧顶层**(官方真机);adapter 同时兼容 `body.errcode`(测试夹具形状)。
+- 连接:`wss://openws.work.weixin.qq.com`,订阅 `aibot_subscribe`,30s 心跳(`ping`);单机器人仅允许一条连接,断线指数退避重连(1s 起、30s 封顶);`disconnected_event`(被新连接踢掉)触发重连。
+- 收发:`aibot_msg_callback` 收消息(仅 text),回复走 `aibot_respond_msg` 并**透传回调的 req_id**;群聊消息剥离 @机器人 前缀;其余事件回调 V0 忽略。
+- 限制:每会话 30 条/分钟(V0 不排队,失败记单行日志);文本回复 ≤2048 字节(UTF-8 安全截断)。
+- **userid 明文前提**:`from.userid` 在机器人创建者为超级管理员时才是明文,否则是加密 userid,V0 的 principal(`wecom:<userid>`)无法映射。创建/配置机器人必须用超管身份;转明文的自建应用对接 deferred。
+- 流式回复、模板卡片、主动推送(`aibot_send_msg`)、welcome 消息:全部 deferred。
+- 75 秒渠道预算保留为体验上限(长连接回复窗口实际是 24 小时),由 host 侧控制,不在渠道层。
+
+## 4. 预算与重试
+
+- 单次工具调用尝试预算 60s(`requestTimeoutMs`);`PROFILE_BUSY`/`TIMEOUT` 退避按契约 `retryAfterMs`,退避不占尝试预算(17dz spec §11.6),但**渠道总预算 75s 是硬约束**——实现为:一次完整尝试 + 仅当首次快速失败(如 PROFILE_BUSY 秒回)时的一次短重试;重试耗尽前先看渠道预算。
+- 并发:V0 host 不排队,并发调用直接下发,`PROFILE_BUSY` 按契约退避(面向接口,不对 17dz 内部实现做假设)。
+- 连接:`initialize` 后校验 `serverInfo.specVersion === '0.5'`,不符拒绝使用该 server 并报运维;每次(重)连接后必须重新 `tools/list`。
+
+## 5. 会话与澄清
+
+- session key = `wecomUserId + conversationId`,由 host 推导 sessionId 存 `conversation_session`。
+- 澄清候选账套列表存 `conversation_session.state`,TTL 5 分钟(`sessionTtlMs`);过期后重新走搜索,不复活旧候选。
+- 数据回复必须带账套名、期间(如使用)、来源(`meta.source`)、取回时间(`meta.retrievedAt`)(验收 #10)。
+
+## 6. 工作方式
+
+- subagent brief 必须自包含:指定阅读文档章节、目录所有权、可依赖的 contracts 类型、完成门。
+- 契约测试(client 视角,mcp-fake 产出)同时是 mcp-host 的验收套件。
+- git:主 agent `git init`;**任何 agent 不自动 commit**,由用户决定提交时机。
+- 拿不到真实凭据时用测试双胞胎开发(如企微 API 基址可注入 stub),真实联调放 P5/P6 收尾。
