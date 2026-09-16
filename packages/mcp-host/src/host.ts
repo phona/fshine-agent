@@ -10,6 +10,7 @@ import type {
   ReadToolName,
   ToolOutcome,
 } from '@fshine/contracts';
+import { READ_TOOLS } from '@fshine/contracts';
 import { McpConnection, McpTransportError, type McpConnectionOptions } from './connection';
 import { parseEnvelope } from './envelope-parse';
 import { SpecVersionMismatchError } from './spec-version';
@@ -47,17 +48,30 @@ export interface McpHostAudit {
 
 export interface McpHostOptions {
   profile: McpProfileConfig;
+  /** 工具白名单:tools/list 声明了名单之外的工具即拒绝连接。V0 默认只读五件套(验收 #9 代码强制)。 */
+  allowedTools?: readonly string[];
   /** 渠道同步回复总预算(硬约束);重试前检查,超了就停止重试 */
   channelBudgetMs?: number;
   audit?: McpHostAudit;
+}
+
+/** V0 只读硬闸:server 声明了白名单之外的工具(如误配 write server),拒连并标记不可用。 */
+export class DisallowedToolsError extends Error {
+  constructor(readonly offendingTools: readonly string[]) {
+    super(`MCP server 声明了白名单之外的工具(${offendingTools.join(', ')}),拒绝连接`);
+    this.name = 'DisallowedToolsError';
+  }
 }
 
 export class McpHost {
   private connection: McpConnection | null = null;
   private unusable = false;
   private unusableReason = '';
+  private readonly allowedTools: ReadonlySet<string>;
 
-  constructor(private readonly options: McpHostOptions) {}
+  constructor(private readonly options: McpHostOptions) {
+    this.allowedTools = new Set<string>(options.allowedTools ?? READ_TOOLS);
+  }
 
   /** 最近一次(重)连接的 tools/list 结果;连接建立前为空。 */
   get discoveredTools(): readonly DiscoveredTool[] {
@@ -75,6 +89,14 @@ export class McpHost {
       await this.ensureConnection();
     } catch (err) {
       if (err instanceof SpecVersionMismatchError) this.markUnusable(err.message);
+      throw err;
+    }
+    const offending = (this.connection?.discoveredTools ?? [])
+      .filter((tool) => !this.allowedTools.has(tool.name))
+      .map((tool) => tool.name);
+    if (offending.length > 0) {
+      const err = new DisallowedToolsError(offending);
+      this.markUnusable(err.message);
       throw err;
     }
   }

@@ -53,3 +53,27 @@
 - 契约测试(client 视角,mcp-fake 产出)同时是 mcp-host 的验收套件。
 - git:主 agent `git init`;**任何 agent 不自动 commit**,由用户决定提交时机。
 - 拿不到真实凭据时用测试双胞胎开发(如企微 API 基址可注入 stub),真实联调放 P5/P6 收尾。
+
+## 7. V1 写路径前置:idempotencyKey 与 confirmed 的权责切分(2026-09-16 议定)
+
+协议里"确认能力"全部属于上层;17dz 只提供两个机械行为:**默认干跑**(confirmed 缺省 false,零副作用)与**按 key 去重**(台账 = (tool, key, 规范化契约))。
+
+| 职责 | 归属 |
+|---|---|
+| key 的生成与留存(host 生成 UUID、绑定业务任务,LLM 永不经手) | **host** |
+| 确认流程(dry-run 预览 → 用户点头 → 确认记录) | **host**(17dz 从不接触人) |
+| 幂等台账(同 key 重放返回快照,绝不重执行;绑定点状态机) | 17dz |
+| confirmed 默认闸(默认 false) | 17dz |
+
+台账必须在 17dz 侧:副作用发生地才知道"到底写没写进去"(retryable/bound 绑定点语义);重试跨进程,只有执行方去重才能让同 key 重试安全(同 Stripe 幂等 key 形状)。key 必须调用方生成:只有调用方能区分"重试"与"两笔合法的相同凭证"。
+
+**V1 host 待办清单(写路径开工时的必答题)**:
+
+1. 生成:每个写任务一个 UUID,从 requestId/任务派生,生成即落库;
+2. 留存:`任务 ↔ key ↔ 契约` 映射进审计库;batchKey 与 `${batchKey}:${index}` 对应由 host 维护;
+3. 复用纪律:超时/续跑必须同 key;恢复前先 `get_submission_status` 探结果;`unknown / may_have_succeeded` 禁止换新 key;
+4. 确认链:key → dry-run 预览 → 用户确认记录,三者绑定落库(承载于企微会话);
+5. 硬闸:`confirmed=true` 而无对应用户确认记录 → 发往 server 前直接拒绝;confirmed 不作为模型可自由支配的参数(schema 只暴露 false,由 host 按确认记录注入);
+6. 契约测试:Fake server 补写语义(幂等状态机、dry-run 零占用、batch 子键),host 闸门行为同步加测。
+
+**V0 已落地的只读硬闸**:McpHost 增加 `allowedTools` 白名单(缺省只读五件套),`tools/list` 声明名单外工具即拒绝连接并标记 profile 不可用——"V0 无写路径"从配置约束升级为代码强制,误配 write server 也无法生效。

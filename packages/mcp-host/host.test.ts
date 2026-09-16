@@ -4,6 +4,7 @@ import { McpHost } from './src/index';
 import {
   AuditRecorder,
   BAD_SPEC_SERVER_SCRIPT,
+  EXTRA_TOOL_SERVER_SCRIPT,
   expectErr,
   expectOk,
   makeHost,
@@ -260,5 +261,29 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     expect(Date.now() - started).toBeLessThan(1_000); // 不再尝试重连,直接失败
     expect(second.ok).toBe(false);
     if (!second.ok) expect(second.error.message).toContain('specVersion');
+  });
+
+  it('tools/list 声明白名单外工具 → 拒绝连接且标记不可用(V0 只读硬闸)', { timeout: 60_000 }, async () => {
+    const host = trackedHostWithProfile({
+      command: process.execPath,
+      args: ['-e', EXTRA_TOOL_SERVER_SCRIPT],
+      cwd: repoRoot,
+      requestTimeoutMs: 5_000,
+      maxRetries: 0,
+    });
+    const client = host.clientFor('req-allowlist', ['as_001']);
+
+    const first = await client.call('get_login_status', {});
+    expect(first.ok).toBe(false);
+    if (!first.ok) {
+      expect(first.error.code).toBe('INTERNAL');
+      expect(first.error.retryable).toBe(false);
+    }
+
+    const started = Date.now();
+    const second = await client.call('get_login_status', {});
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(second.ok).toBe(false);
+    if (!second.ok) expect(second.error.message).toContain('submit_voucher'); // 不可用原因:白名单外工具
   });
 });
