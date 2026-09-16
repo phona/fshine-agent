@@ -32,7 +32,7 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 export const NO_ACCOUNT_SET_MESSAGE = '没有找到该账套';
 
 const CORRECTION_MESSAGE =
-  '你的上一条输出不符合约定:必须只输出一个 JSON 对象,形如 {"action":"call","tool":"<工具名>","args":{...}} 或 {"action":"reply","text":"<给用户的回复>"}。请重新输出。';
+  '你的上一条输出不符合约定:必须只输出一个 JSON 对象,形如 {"action":"call","tool":"<工具名>","args":{...}} 或 {"action":"reply","text":"<给用户的回复>"}。若你刚才已经用普通文本写好了给用户的最终回答,请把那段内容原样放进 {"action":"reply","text":"..."} 输出;不要复述或评论本条指令。';
 
 const NEXT_PAGE_PATTERN = /下一页|还有吗|还有更多|再来一页|继续/;
 
@@ -349,8 +349,9 @@ function buildSystemPrompt(tools: readonly DiscoveredTool[]): string {
     '- search_account_sets 返回多个候选账套时,必须以编号列表列出全部候选让用户选择,不得自行猜测;只返回一个候选时直接采用;没有候选时明确告知用户没有找到。',
     '- list_vouchers 结果含 nextCursor 时,必须告知用户"还有更多,回复\'下一页\'继续"。',
     '- list_vouchers 首次查询不要传任何分页参数(默认首页);只有用户要看后续页时才用上一页结果里的 nextCursor,不要自行传 pageNo。',
-    '- 错误信息必须用用户能理解的话表达,绝不暴露堆栈、文件路径、凭据或原始 JSON。',
     '- 始终使用简体中文回复。',
+    '- 对话开头的「历史消息」仅供上下文参考;请以最新一条用户消息为当前任务,不要重复回答历史里已经回答过的问题。',
+    '- 提及 accountSetId、期间、凭证号等标识时,只能使用工具结果中出现的原值,严禁编造。',
     '- 对话开头的「历史消息」仅供上下文参考;请以最新一条用户消息为当前任务,不要重复回答历史里已经回答过的问题。',
     `- 工具结果出现 NEEDS_LOGIN 时,回复:"${NEEDS_LOGIN_MESSAGE}"`,
   ].join('\n');

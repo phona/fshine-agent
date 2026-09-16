@@ -16,7 +16,7 @@ import {
 } from '@fshine/core';
 import { McpHost } from '@fshine/mcp-host';
 import { createTaxAgentRuntime, OpenAICompatibleChatModel } from '@fshine/agent';
-import type { IncomingChannelMessage, McpProfileConfig } from '@fshine/contracts';
+import type { IncomingChannelMessage, McpProfileConfig, ProgressFn } from '@fshine/contracts';
 import { createMessageHandler } from '../apps/server/handler';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,6 +70,7 @@ const loggingRuntime = createTaxAgentRuntime({
 const handler = createMessageHandler({ store, runtime: loggingRuntime, hostFor: () => host });
 
 let seq = 0;
+const progressLog: string[] = [];
 function send(wecomUserId: string, text: string): Promise<string> {
   seq += 1;
   const message: IncomingChannelMessage = {
@@ -81,7 +82,11 @@ function send(wecomUserId: string, text: string): Promise<string> {
     receivedAt: new Date().toISOString(),
   };
   console.log(`\n===== [${seq}] ${wecomUserId}: ${text}`);
-  return handler(message).then(async (reply) => {
+  const progress: ProgressFn = (step) => {
+    progressLog.push(`[${seq}] ${step}`);
+    console.log(`[progress] ${step}`);
+  };
+  return handler(message, progress).then(async (reply) => {
     console.log(`----- 回复:\n${reply}`);
     const saved = await store.sessions.get('smoke_test_user:e2e');
     console.log(`[state] ${JSON.stringify(saved?.state)}`);
@@ -112,9 +117,20 @@ try {
   console.log('✓ 选定账套后返回凭证数据(真 Kimi + 真 host + 真 Fake server)');
 
   const next = await send('smoke_test_user', '下一页');
-  console.log(next.includes('请选择') || next.includes('无法确定')
-    ? '✗ 翻页未能续上'
-    : '✓ 下一页续查成功');
+  const nextOk = !next.includes('请选择') && !next.includes('无法确定') && !next.includes('没有理解');
+  if (!nextOk) throw new Error(`翻页未能续上:${next}`);
+  console.log('✓ 下一页续查成功');
+
+  const followUp = await send('smoke_test_user', '刚才查的是哪个账套?');
+  if (!followUp.includes('幻晟')) {
+    throw new Error(`历史追问失败(历史重放未生效):${followUp}`);
+  }
+  console.log('✓ 历史追问命中上一轮账套(有界历史重放生效)');
+
+  if (progressLog.length === 0) {
+    throw new Error('整个会话未产生任何进度事件');
+  }
+  console.log(`✓ 进度播报共 ${progressLog.length} 条(埋点/意图短语经节流前)`);
 
   console.log('\nE2E PASS');
 } finally {
