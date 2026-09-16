@@ -22,6 +22,8 @@ export interface AgentSessionState {
   pendingCandidates?: PendingCandidate[];
   /** pendingCandidates 的过期时间,ISO 8601 */
   expiresAt?: string;
+  /** 触发澄清时的用户原始请求(选中候选后还原意图用) */
+  pendingRequest?: string;
   lastVoucherQuery?: LastVoucherQuery;
 }
 
@@ -85,6 +87,7 @@ export function parseState(raw: unknown): AgentSessionState {
     if (candidates.length > 0) state.pendingCandidates = candidates;
   }
   if (typeof obj.expiresAt === 'string' && obj.expiresAt) state.expiresAt = obj.expiresAt;
+  if (typeof obj.pendingRequest === 'string' && obj.pendingRequest) state.pendingRequest = obj.pendingRequest;
   const last = parseLastVoucherQuery(obj.lastVoucherQuery);
   if (last) state.lastVoucherQuery = last;
   return state;

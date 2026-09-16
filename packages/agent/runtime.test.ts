@@ -171,22 +171,30 @@ describe('createTaxAgentRuntime 多候选澄清', () => {
     expect(state.pendingCandidates).toEqual(TWO);
     expect(state.expiresAt).toBeDefined();
     expect(Date.parse(state.expiresAt!)).toBeGreaterThan(Date.now());
+    expect(state.pendingRequest).toBe('查幻晟的凭证');
   });
 
-  it('第二轮回复"1":以对应 id 继续,清 pendingCandidates', async () => {
+  it('第二轮回复"1":还原原始请求,查期间并拉取凭证,清 pendingCandidates', async () => {
     const sessions = new FakeSessionRepo();
     await seedState(sessions, {
       pendingCandidates: TWO,
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      pendingRequest: '查幻晟本期的凭证',
     });
     const client = new FakeToolClient({
       get_current_accounting_period: () =>
         fakeOk({ period: '202608' }, fakeMeta({ accountSetId: 'as_001', accountSetName: '幻晟' })),
+      list_vouchers: () =>
+        fakeOk(
+          { total: 3, docs: [{ id: 'd1', type: '记', number: '001', journalDate: '2026-08-01', haveAnnex: 0, entryDtoList: [] }], nextCursor: undefined },
+          fakeMeta({ accountSetId: 'as_001', accountSetName: '幻晟', retrievedAt: '2026-09-16T12:00:00+08:00' }),
+        ),
     });
     const { model, requests } = recordRequests(
       ScriptedChatModel([
         '{"action":"call","tool":"get_current_accounting_period","args":{"accountSetId":"as_001"}}',
-        '{"action":"reply","text":"幻晟 当前会计期间是 202608。"}',
+        '{"action":"call","tool":"list_vouchers","args":{"accountSetId":"as_001","period":"202608"}}',
+        '{"action":"reply","text":"幻晟 202608 共 3 张凭证。来源:api_cache,取回时间:2026-09-16T12:00:00+08:00"}',
       ]),
     );
     const runtime = createTaxAgentRuntime({ model, sessions });
@@ -194,14 +202,19 @@ describe('createTaxAgentRuntime 多候选澄清', () => {
     const reply = await runtime.handleTurn(makeCtx(), '1', client);
 
     expect(reply.text).toContain('202608');
-    expect(client.callsOf('get_current_accounting_period')).toEqual([{ accountSetId: 'as_001' }]);
-    expect(requests[0]!.messages[0]!.role).toBe('user');
+    expect(client.calls.map((call) => call.tool)).toEqual([
+      'get_current_accounting_period',
+      'list_vouchers',
+    ]);
+    // 合成消息携带用户原始请求,模型据此知道"1"是要继续查凭证
+    expect(requests[0]!.messages[0]!.content).toContain('查幻晟本期的凭证');
     expect(requests[0]!.messages[0]!.content).toContain('as_001');
     expect(requests[0]!.messages[0]!.content).toContain('幻晟');
 
     const state = sessions.peek('sess_1')!.state as AgentSessionState;
     expect(state.pendingCandidates).toBeUndefined();
     expect(state.expiresAt).toBeUndefined();
+    expect(state.pendingRequest).toBeUndefined();
   });
 
   it('候选已过期:不复活,重新搜索并再次澄清', async () => {

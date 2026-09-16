@@ -116,17 +116,20 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
       const messages: ChatModelMessage[] = [];
 
       try {
-        // 1) 澄清候选命中:直接以所选账套继续,清候选
+        // 1) 澄清候选命中:以所选账套 + 用户原始请求继续,清候选
         const pending = freshPendingCandidates(state);
         const selected = pending.length > 0 ? matchPendingCandidate(userMessage, pending) : null;
         if (selected) {
+          // 还原意图:候选是上一轮澄清留下的,最初的请求文本存在 pendingRequest 里
+          const originalRequest = state.pendingRequest ?? userMessage;
           state.pendingCandidates = undefined;
           state.expiresAt = undefined;
+          state.pendingRequest = undefined;
           knownAccountSets.set(selected.id, selected.name);
           ctx.onStep?.(`已选定账套「${selected.name}」,继续查询…`);
           messages.push({
             role: 'user',
-            content: `用户选择了账套「${selected.name}」(accountSetId: ${selected.id})。请围绕该账套继续处理用户请求:「${userMessage}」`,
+            content: `用户此前提出请求:「${originalRequest}」,刚从候选中选定账套「${selected.name}」(accountSetId: ${selected.id})。请围绕该账套继续处理该请求,直至给出最终答复。`,
           });
         } else if (state.lastVoucherQuery?.nextCursor && NEXT_PAGE_PATTERN.test(userMessage)) {
           // 2) 翻页快捷路径:直接用上一页游标续查,不经模型决策
@@ -169,11 +172,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
             if (candidates.length === 0) {
               state.pendingCandidates = undefined;
               state.expiresAt = undefined;
+              state.pendingRequest = undefined;
               return { text: NO_ACCOUNT_SET_MESSAGE };
             }
             if (candidates.length > 1) {
               state.pendingCandidates = candidates.map((candidate) => ({ id: candidate.id, name: candidate.name }));
               state.expiresAt = new Date(Date.now() + sessionTtlMs).toISOString();
+              // 记住触发澄清的原始请求:用户选定候选后据此还原意图
+              state.pendingRequest = userMessage;
             }
           } else if (action.tool === 'list_vouchers') {
             recordListVoucherQuery(
