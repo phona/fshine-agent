@@ -31,6 +31,7 @@
 - 连接:`wss://openws.work.weixin.qq.com`,订阅 `aibot_subscribe`,30s 心跳(`ping`);单机器人仅允许一条连接,断线指数退避重连(1s 起、30s 封顶);`disconnected_event`(被新连接踢掉)触发重连。
 - 收发:`aibot_msg_callback` 收消息(仅 text),回复走 `aibot_respond_msg` 并**透传回调的 req_id**;**回复必须是 stream 类型**(单帧 `finish:true` + 完整内容,支持 markdown)——respond 通道不接受 `msgtype:text`(真机 errcode 40008,官方 SDK 亦无 replyText 方法);群聊消息剥离 @机器人 前缀;其余事件回调 V0 忽略。
 - **阶段进度帧**:埋点事实渲染(runtime `onStep` + host 重试钩子),拒绝模型自由叙述(时序盲区 + intent 幻觉);`action.progress` 允许模型提供 ≤60 字意图短语(只许说即将做什么,严禁报结果)。adapter 节流(≥3 秒、单回合 ≤4 帧,含 ack 共 ≤6 帧)后推 `finish=false` 帧,最终 `finish=true` 整体替换全部过程内容;限频 30 条/分钟安全。
+- **会话历史有界重放**(OpenClaw 转录+压缩思路的轻量版):会话状态携带 `history`(仅用户消息 + 最终回复;最多 10 条 / 12k 字符,单条截 2k),每轮注入模型上下文,支持追问与指代;工具结果不重放。system 提示声明"历史仅供参考,以最新消息为当前任务"。跨轮意图还原(澄清选候选、翻页)仍走结构化状态。
 - 限制:每会话 30 条/分钟(V0 不排队,失败记单行日志);文本回复 ≤2048 字节(UTF-8 安全截断)。
 - **userid 明文前提**:`from.userid` 在机器人创建者为超级管理员时才是明文,否则是加密 userid,V0 的 principal(`wecom:<userid>`)无法映射。创建/配置机器人必须用超管身份;转明文的自建应用对接 deferred。
 - 流式回复、模板卡片、主动推送(`aibot_send_msg`)、welcome 消息:全部 deferred。
