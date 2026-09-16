@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import type { ChannelAdapter, IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
+import { createHash, randomUUID } from 'node:crypto';
+import type { ChannelAdapter, ChannelReply, IncomingChannelMessage, ReplyHandler, RichChannelReply } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateUtf8 } from './text';
 
 const DEFAULT_WS_BASE_URL = 'wss://openws.work.weixin.qq.com';
@@ -9,6 +9,7 @@ const INITIAL_BACKOFF_MS = 1_000;
 const MAX_BACKOFF_MS = 30_000;
 const CLOSE_NORMAL = 1000;
 const FALLBACK_REPLY = '处理失败,请稍后再试';
+const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
 
 interface WsMessageEvent {
   data: unknown;
@@ -62,6 +63,13 @@ function toErrmsg(frame: Record<string, unknown>): string {
   if (typeof frame['errmsg'] === 'string') return frame['errmsg'];
   const body = asRecord(frame['body']);
   return body && typeof body['errmsg'] === 'string' ? body['errmsg'] : '';
+}
+
+/** 回执字段兼容顶层与 body 两种位置(与 toErrcode/toErrmsg 同理)。 */
+function pickValue(frame: Record<string, unknown>, key: string): unknown {
+  if (frame[key] !== undefined) return frame[key];
+  const body = asRecord(frame['body']);
+  return body?.[key];
 }
 
 function logError(payload: Record<string, unknown>): void {
@@ -273,24 +281,103 @@ export class WecomBotChannel implements ChannelAdapter {
     this.sendStreamFrame(ws, reqId, streamId, false, '收到,正在处理…').catch((error) => {
       logError({ event: 'wecom_ack_fail', req_id: reqId, error: asError(error).message });
     });
-    let reply: string;
-    try {
-      reply = await handler(message);
-    } catch (error) {
+
+    const raw = await handler(message).catch((error) => {
       logError({
         event: 'wecom_handler_error',
         messageId: message.messageId,
         error: asError(error).message,
       });
-      reply = FALLBACK_REPLY;
-    }
+      return FALLBACK_REPLY;
+    });
+    const reply: RichChannelReply = typeof raw === 'string' ? { text: raw } : raw;
+
     const finalWs = this.ws;
     if (!finalWs) {
       logError({ event: 'wecom_respond_skip', reason: '回复就绪时连接已断开,丢弃' });
       return;
     }
-    await this.sendStreamFrame(finalWs, reqId, streamId, true, truncateUtf8(reply, MAX_REPLY_BYTES)).catch((error) => {
-      logError({ event: 'wecom_respond_fail', req_id: reqId, error: asError(error).message });
+    const text = reply.text ?? '';
+    let textSent = false;
+    if (text !== '') {
+      textSent = true;
+      await this.sendStreamFrame(finalWs, reqId, streamId, true, truncateUtf8(text, MAX_REPLY_BYTES)).catch((error) => {
+        logError({ event: 'wecom_respond_fail', req_id: reqId, error: asError(error).message });
+      });
+    }
+    if (reply.image) {
+      const filename = reply.image.filename ?? 'image.png';
+      try {
+        const mediaId = await this.uploadMedia(finalWs, 'image', filename, reply.image.data);
+        await this.sendAwait(finalWs, {
+          cmd: 'aibot_respond_msg',
+          headers: { req_id: reqId },
+          body: { msgtype: 'image', image: { media_id: mediaId } },
+        });
+      } catch (error) {
+        logError({ event: 'wecom_image_fail', req_id: reqId, error: asError(error).message });
+        if (!textSent) {
+          await this.sendStreamFrame(finalWs, reqId, streamId, true, IMAGE_FAIL_REPLY).catch((sendError) => {
+            logError({ event: 'wecom_respond_fail', req_id: reqId, error: asError(sendError).message });
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * 经 WS 通道上传临时素材(init → 512KB base64 分片 → finish),返回 media_id。
+   * 协议与官方 aibot-node-sdk uploadMedia 一致。
+   */
+  private async uploadMedia(
+    ws: WsLike,
+    type: 'image' | 'voice' | 'video' | 'file',
+    filename: string,
+    data: Buffer,
+  ): Promise<string> {
+    const CHUNK_SIZE = 512 * 1024;
+    const totalChunks = Math.max(1, Math.ceil(data.length / CHUNK_SIZE));
+    if (totalChunks > 100) throw new Error(`素材过大:${data.length} 字节超过分片上限`);
+    const md5 = createHash('md5').update(data).digest('hex');
+
+    const init = await this.sendAwait(ws, {
+      cmd: 'aibot_upload_media_init',
+      headers: { req_id: randomUUID() },
+      body: { type, filename, total_size: data.length, total_chunks: totalChunks, md5 },
+    });
+    const uploadId = pickValue(init, 'upload_id');
+    if (typeof uploadId !== 'string' || uploadId === '') {
+      throw new Error(`素材上传初始化失败:未返回 upload_id`);
+    }
+
+    for (let index = 0; index < totalChunks; index += 1) {
+      const chunk = data.subarray(index * CHUNK_SIZE, Math.min((index + 1) * CHUNK_SIZE, data.length));
+      await this.sendAwait(ws, {
+        cmd: 'aibot_upload_media_chunk',
+        headers: { req_id: randomUUID() },
+        body: { upload_id: uploadId, chunk_index: index, base64_data: chunk.toString('base64') },
+      });
+    }
+
+    const finish = await this.sendAwait(ws, {
+      cmd: 'aibot_upload_media_finish',
+      headers: { req_id: randomUUID() },
+      body: { upload_id: uploadId },
+    });
+    const mediaId = pickValue(finish, 'media_id');
+    if (typeof mediaId !== 'string' || mediaId === '') {
+      throw new Error('素材上传完成但未返回 media_id');
+    }
+    return mediaId;
+  }
+
+  /** 发送一帧并等待回执;回执 errcode 非 0 时 reject。 */
+  private sendAwait(
+    ws: WsLike,
+    frame: { cmd: string; headers: { req_id: string }; body?: Record<string, unknown> },
+  ): Promise<Record<string, unknown>> {
+    return new Promise<Record<string, unknown>>((resolve, reject) => {
+      this.safeSend(ws, frame, resolve, reject);
     });
   }
 

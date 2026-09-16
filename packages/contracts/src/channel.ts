@@ -17,8 +17,23 @@ export interface IncomingChannelMessage {
   receivedAt: string;
 }
 
-/** 处理消息并返回回复文本;adapter 负责把它推送回渠道。 */
-export type ReplyHandler = (message: IncomingChannelMessage) => Promise<string>;
+/** 图片回复:原始数据经临时素材上传(WS 分片通道)换 media_id 后回传 */
+export interface OutgoingImageReply {
+  /** PNG / JPG 原始数据 */
+  data: Buffer;
+  filename?: string;
+}
+
+/** 渠道回复:纯文本,或文本 + 图片组合 */
+export interface RichChannelReply {
+  text?: string;
+  image?: OutgoingImageReply;
+}
+
+export type ChannelReply = string | RichChannelReply;
+
+/** 处理消息并返回回复;adapter 负责上传图片、文本截断与推送 */
+export type ReplyHandler = (message: IncomingChannelMessage) => Promise<ChannelReply>;
 
 export interface ChannelAdapter {
   start(handler: ReplyHandler): Promise<void>;

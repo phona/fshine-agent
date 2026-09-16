@@ -11,6 +11,10 @@ class FakeWebSocket {
   readonly url: string;
   readonly sent: Array<Record<string, unknown>> = [];
   readonly closedWith: Array<number | undefined> = [];
+  /** 每帧自动回 errcode=0 回执;测试上传等需要等待回执的流程时开启 */
+  autoReceipt = false;
+  /** 覆盖自动回执的 body(如 upload_id / media_id);返回 undefined 用默认 {errcode:0} */
+  receiptBodyFactory: ((frame: Record<string, unknown>) => Record<string, unknown> | undefined) | null = null;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: unknown }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -22,7 +26,16 @@ class FakeWebSocket {
   }
 
   send(data: string): void {
-    this.sent.push(JSON.parse(data) as Record<string, unknown>);
+    const frame = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(frame);
+    if (this.autoReceipt) {
+      const headers = frame['headers'] as { req_id?: string } | undefined;
+      const custom = this.receiptBodyFactory?.(frame);
+      const body = custom ?? { errcode: 0 };
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ cmd: frame['cmd'], headers: { req_id: headers?.req_id }, body }) });
+      });
+    }
   }
 
   close(code?: number): void {
@@ -326,6 +339,52 @@ describe('WecomBotChannel', () => {
       msgtype: 'stream',
       stream: { finish: true, content: '第二次回复' },
     });
+    await channel.stop();
+  });
+
+  it('图片回复:WS 分片上传换 media_id 后以 msgtype=image 回传,文字帧先行', async () => {
+    const handler = vi.fn(async () => ({
+      text: '图表来了',
+      image: { data: Buffer.from('fake-png-bytes'), filename: 'chart.png' },
+    }));
+    const { channel, inst } = await startChannel(handler);
+    inst.autoReceipt = true;
+    inst.receiptBodyFactory = (frame) => {
+      if (frame['cmd'] === 'aibot_upload_media_init') return { errcode: 0, upload_id: 'up-1' };
+      if (frame['cmd'] === 'aibot_upload_media_finish') return { errcode: 0, media_id: 'media-9' };
+      return undefined;
+    };
+
+    inst.emitFrame(msgCallbackFrame('cb-img-r1', textMsgBody({ msgid: 'msg-img-r1', text: { content: '发图' } })));
+    await vi.waitFor(() => {
+      const imageFrames = inst.sent.filter((f) => (f['body'] as { msgtype?: string })?.msgtype === 'image');
+      expect(imageFrames).toHaveLength(1);
+    });
+
+    const init = inst.sent.find((f) => f['cmd'] === 'aibot_upload_media_init')!;
+    expect(init['body']).toMatchObject({ type: 'image', filename: 'chart.png', total_size: 14, total_chunks: 1 });
+    const final = inst.finalRespondFrames().find((f) => (f['body'] as { stream?: { content?: string } })?.stream?.content === '图表来了');
+    expect(final).toBeTruthy();
+    const imageRespond = inst.sent.find((f) => (f['body'] as { msgtype?: string })?.msgtype === 'image')!;
+    expect(imageRespond['headers']).toEqual({ req_id: 'cb-img-r1' });
+    expect(imageRespond['body']).toEqual({ msgtype: 'image', image: { media_id: 'media-9' } });
+    await channel.stop();
+  });
+
+  it('图片上传失败且无文字:回退兜底文案', async () => {
+    const handler = vi.fn(async () => ({ image: { data: Buffer.from('x'), filename: 'x.png' } }));
+    const { channel, inst } = await startChannel(handler);
+    inst.autoReceipt = true;
+    inst.receiptBodyFactory = (frame) => {
+      if (frame['cmd'] === 'aibot_upload_media_init') return { errcode: 500, errmsg: 'boom' };
+      return undefined;
+    };
+
+    inst.emitFrame(msgCallbackFrame('cb-img-r2', textMsgBody({ msgid: 'msg-img-r2' })));
+    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
+
+    const respond = inst.finalRespondFrames()[0]!;
+    expect(respond['body']).toMatchObject({ msgtype: 'stream', stream: { content: '图片发送失败,请稍后再试' } });
     await channel.stop();
   });
 

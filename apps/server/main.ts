@@ -11,6 +11,7 @@ import { McpHost, type McpHostAudit } from '@fshine/mcp-host';
 import { createTaxAgentRuntime, OpenAICompatibleChatModel } from '@fshine/agent';
 import { NodeWebSocketImpl, WecomBotChannel } from '@fshine/channel-wecom';
 import type { McpProfileConfig } from '@fshine/contracts';
+import { renderBarChartPng } from './chart';
 import { createMessageHandler } from './handler';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -86,7 +87,22 @@ async function main(): Promise<void> {
 
   const channel = new WecomBotChannel({ env: process.env, WebSocketImpl: NodeWebSocketImpl });
 
-  await channel.start(createMessageHandler({ store, runtime, hostFor }));
+  const sharedHandler = createMessageHandler({ store, runtime, hostFor });
+  // 演示关键词:验证图片回传通道(真实场景 = 17dz artifact 截图,随 P6 接入)
+  const DEMO_IMAGE_PATTERN = /发图|测试图片|图片/;
+
+  await channel.start(async (message) => {
+    if (DEMO_IMAGE_PATTERN.test(message.text)) {
+      return {
+        text: '幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)',
+        image: {
+          data: renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200]),
+          filename: 'voucher-202607.png',
+        },
+      };
+    }
+    return sharedHandler(message);
+  });
 
   console.log(JSON.stringify({ event: 'server_started', db: dbPath, fakeMcp: useFakeMcp }));
 
