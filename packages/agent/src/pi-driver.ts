@@ -34,16 +34,16 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     throw new Error(`缺少环境变量 ${missing.join('、')},无法初始化 LLM 客户端`);
   }
 
-  // reasoning 置 false:pi 对 reasoning 模型会用 developer 角色发系统提示,
-  // kimi 的 coding 端点不接受(400 role 'developer' is not allowed)。
-  // kimi 实际仍在服务端推理,pi-ai 会把 reasoning 流解析为 thinking 块。
+  // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
+  // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响
   const kimiModel: Model<'openai-completions'> = {
     id: modelId,
     name: modelId,
     api: 'openai-completions',
     provider: 'llm',
     baseUrl,
-    reasoning: false,
+    reasoning: true,
+    compat: { supportsDeveloperRole: false },
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128_000,
