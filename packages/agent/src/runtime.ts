@@ -40,7 +40,8 @@ const CORRECTION_MESSAGE =
 const NEXT_PAGE_PATTERN = /下一页|还有吗|还有更多|再来一页|继续/;
 
 const DEFAULT_SESSION_TTL_MS = 300_000;
-const DEFAULT_TURN_BUDGET_MS = 70_000;
+/** 回合预算:进度帧让等待可感知,不再需要黑盒式硬限;LLM 单次超时 120s × 最多 6 步,靠预算截断 */
+const DEFAULT_TURN_BUDGET_MS = 150_000;
 const DEFAULT_MAX_STEPS = 6;
 /** 工具结果进模型上下文前的保险裁剪上限(JSON 字符数) */
 const RESULT_CLIP_LIMIT = 6_000;
@@ -87,8 +88,7 @@ function sanitizeProgress(raw: unknown): string | undefined {
 type CompletionResult =
   | { kind: 'action'; action: ModelAction }
   | { kind: 'misunderstood' }
-  | { kind: 'budget-exceeded' }
-  | { kind: 'model-unavailable' };
+  | { kind: 'budget-exceeded' };
 
 export interface TaxAgentRuntimeDeps {
   model: ChatModel;
@@ -176,10 +176,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
         // 3) 协议循环:每轮一个 JSON 动作,最多 maxSteps 轮
         for (let step = 0; step < maxSteps; step += 1) {
           if (Date.now() >= deadline) return { text: FALLBACK_TIMEOUT };
-          const result = await completeWithCorrection(deps.model, system, messages, knownTools, deadline);
+          let result: CompletionResult;
+          try {
+            result = await completeWithCorrection(deps.model, system, messages, knownTools, deadline);
+          } catch (error) {
+            if (error instanceof ModelUnavailableError) return { text: FALLBACK_FAILURE };
+            throw error;
+          }
           if (result.kind === 'misunderstood') return { text: FALLBACK_MISUNDERSTOOD };
           if (result.kind === 'budget-exceeded') return { text: FALLBACK_TIMEOUT };
-          if (result.kind === 'model-unavailable') return { text: FALLBACK_FAILURE };
           const action = result.action;
           if (action.kind === 'reply') return { text: action.text };
 
@@ -222,7 +227,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntime {
 
 // ---- 模型调用与协议解析 ----
 
-/** 模型输出非法时补一条纠偏 user 消息重试 1 次;仍失败返回 misunderstood。 */
+/** 模型输出非法时补纠偏 user 消息(最多 2 次);仍失败返回 misunderstood。 */
 async function completeWithCorrection(
   model: ChatModel,
   system: string,
@@ -230,13 +235,20 @@ async function completeWithCorrection(
   knownTools: ReadonlySet<string>,
   deadline: number,
 ): Promise<CompletionResult> {
-  let output: string;
-  try {
-    output = await model.complete({ system, messages });
-  } catch {
-    // 模型基础设施故障:统一安全话术,不透出任何内部细节
-    return { kind: 'model-unavailable' };
-  }
+  const callModel = async (): Promise<string> => {
+    try {
+      return await model.complete({ system, messages });
+    } catch (error) {
+      // 模型基础设施故障:对用户统一安全话术;但必须留痕,否则"查询失败"无法归因
+      console.error(JSON.stringify({
+        event: 'model_complete_failed',
+        error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+      }));
+      throw new ModelUnavailableError();
+    }
+  };
+
+  let output = await callModel();
   // 最多纠偏 2 次(推理型模型偶发先用普通文本作答,需要多次拉回协议)
   for (let round = 0; round <= 2; round += 1) {
     const action = parseModelAction(output, knownTools);
@@ -245,13 +257,17 @@ async function completeWithCorrection(
     console.error(JSON.stringify({ event: 'model_parse_failed', round, output: output.slice(0, 300) }));
     if (round === 2 || Date.now() >= deadline) break;
     messages.push({ role: 'user', content: CORRECTION_MESSAGE });
-    try {
-      output = await model.complete({ system, messages });
-    } catch {
-      return { kind: 'model-unavailable' };
-    }
+    output = await callModel();
   }
   return { kind: 'misunderstood' };
+}
+
+/** 内部标记:模型不可用(调用方统一转安全话术) */
+class ModelUnavailableError extends Error {
+  constructor() {
+    super('model unavailable');
+    this.name = 'ModelUnavailableError';
+  }
 }
 
 function parseModelAction(raw: string, knownTools: ReadonlySet<string>): ModelAction | null {

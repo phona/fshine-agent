@@ -40,6 +40,7 @@
 ## 4. 预算与重试
 
 - 单次工具调用尝试预算 60s(`requestTimeoutMs`);`PROFILE_BUSY`/`TIMEOUT` 退避按契约 `retryAfterMs`,退避不占尝试预算(17dz spec §11.6),但**渠道总预算 75s 是硬约束**——实现为:一次完整尝试 + 仅当首次快速失败(如 PROFILE_BUSY 秒回)时的一次短重试;重试耗尽前先看渠道预算。
+- LLM/回合预算:模型单次调用超时 120s(kimi-for-coding 实测思考可超 45s,曾致偶发"查询失败"),回合预算 150s——进度帧让等待可感知后,黑盒式 75s 硬限已放宽;超时最终帧仍会收场。
 - 并发:V0 host 不排队,并发调用直接下发,`PROFILE_BUSY` 按契约退避(面向接口,不对 17dz 内部实现做假设)。
 - 连接:`initialize` 后校验 `serverInfo.specVersion === '0.5'`,不符拒绝使用该 server 并报运维;每次(重)连接后必须重新 `tools/list`。
 

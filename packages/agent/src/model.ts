@@ -52,7 +52,8 @@ export interface OpenAICompatibleChatModelOptions {
   timeoutMs?: number;
 }
 
-const DEFAULT_LLM_TIMEOUT_MS = 45_000;
+// 推理型模型(kimi-for-coding 等)思考时间波动大,实测可超 45s;120s 配合回合预算 150s
+const DEFAULT_LLM_TIMEOUT_MS = 120_000;
 
 export function OpenAICompatibleChatModel(options: OpenAICompatibleChatModelOptions): ChatModel {
   const baseUrl = (options.apiBaseUrl ?? options.env.LLM_API_BASE_URL ?? '').replace(/\/+$/, '');
