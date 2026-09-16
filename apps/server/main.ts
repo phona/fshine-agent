@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, newId, principalScopeRecords } from '@fshine/core';
 import { McpHost, type McpHostAudit } from '@fshine/mcp-host';
 import { createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
-import { NodeWebSocketImpl, WecomBotChannel } from '@fshine/channel-wecom';
+import { WecomBotChannel } from '@fshine/channel-wecom';
 import type { McpProfileConfig } from '@fshine/contracts';
 import { renderBarChartPng } from './chart';
 import { createMessageHandler } from './handler';
@@ -85,7 +85,7 @@ async function main(): Promise<void> {
     return host;
   }
 
-  const channel = new WecomBotChannel({ env: process.env, WebSocketImpl: NodeWebSocketImpl });
+  const channel = new WecomBotChannel({ env: process.env });
 
   const sharedHandler = createMessageHandler({ store, runtime, hostFor });
   // 演示关键词:验证图片回传通道(真实场景 = 17dz artifact 截图,随 P6 接入)

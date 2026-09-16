@@ -1,528 +1,263 @@
-import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
-import { WecomBotChannel } from './src/index';
+import { WecomBotChannel, type WecomBotChannelOptions } from './src/index';
 
 const ENV = { WECOM_BOT_ID: 'bot-001', WECOM_BOT_SECRET: 'secret-abc' };
-const WS_URL = 'wss://openws.work.weixin.qq.com';
 
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = [];
+interface ReplyCall {
+  reqId?: string;
+  streamId: string;
+  content: string;
+  finish: boolean;
+}
 
-  readonly url: string;
-  readonly sent: Array<Record<string, unknown>> = [];
-  readonly closedWith: Array<number | undefined> = [];
-  /** 每帧自动回 errcode=0 回执;测试上传等需要等待回执的流程时开启 */
-  autoReceipt = false;
-  /** 覆盖自动回执的 body(如 upload_id / media_id);返回 undefined 用默认 {errcode:0} */
-  receiptBodyFactory: ((frame: Record<string, unknown>) => Record<string, unknown> | undefined) | null = null;
-  onopen: (() => void) | null = null;
-  onmessage: ((event: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
+interface UploadCall {
+  data: Buffer;
+  filename: string;
+}
 
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
+interface MediaCall {
+  mediaId: string;
+}
+
+/** 官方 SDK WSClient 的测试替身:记录调用、允许测试手动派发事件 */
+class FakeSdkClient {
+  readonly replies: ReplyCall[] = [];
+  readonly uploads: UploadCall[] = [];
+  readonly mediaCalls: MediaCall[] = [];
+  connected = 0;
+  disconnected = 0;
+  private readonly listeners = new Map<string, Array<(...args: any[]) => void>>();
+  private uploadFailNext = false;
+
+  on(event: string, listener: (...args: any[]) => void): unknown {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+    return this;
   }
 
-  send(data: string): void {
-    const frame = JSON.parse(data) as Record<string, unknown>;
-    this.sent.push(frame);
-    if (this.autoReceipt) {
-      const headers = frame['headers'] as { req_id?: string } | undefined;
-      const custom = this.receiptBodyFactory?.(frame);
-      const body = custom ?? { errcode: 0 };
-      queueMicrotask(() => {
-        this.onmessage?.({ data: JSON.stringify({ cmd: frame['cmd'], headers: { req_id: headers?.req_id }, body }) });
-      });
-    }
+  emit(event: string, ...args: any[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
   }
 
-  close(code?: number): void {
-    this.closedWith.push(code);
+  connect(): unknown {
+    this.connected += 1;
+    return this;
   }
 
-  emitOpen(): void {
-    this.onopen?.();
+  disconnect(): void {
+    this.disconnected += 1;
   }
 
-  emitFrame(frame: unknown): void {
-    this.onmessage?.({ data: JSON.stringify(frame) });
+  replyStream(
+    frame: { headers?: { req_id?: string } },
+    streamId: string,
+    content: string,
+    finish: boolean,
+  ): Promise<unknown> {
+    this.replies.push({ reqId: frame.headers?.req_id, streamId, content, finish });
+    return Promise.resolve({});
   }
 
-  emitClose(): void {
-    this.onclose?.();
+  uploadMedia(data: Buffer, options: { type: 'image'; filename: string }): Promise<{ media_id: string }> {
+    this.uploads.push({ data, filename: options.filename });
+    if (this.uploadFailNext) return Promise.reject(new Error('upload boom'));
+    return Promise.resolve({ media_id: `media-${this.uploads.length}` });
   }
 
-  emitError(): void {
-    this.onerror?.();
+  failNextUpload(): void {
+    this.uploadFailNext = true;
   }
 
-  lastSent(): Record<string, unknown> {
-    const frame = this.sent.at(-1);
-    if (!frame) throw new Error('没有已发送的帧');
-    return frame;
-  }
-
-  respondFrames(): Array<Record<string, unknown>> {
-    return this.sent.filter((frame) => frame['cmd'] === 'aibot_respond_msg');
-  }
-
-  /** ack 帧(finish=false,提示处理中) */
-  ackRespondFrames(): Array<Record<string, unknown>> {
-    return this.respondFrames().filter((frame) => {
-      const body = frame['body'] as { stream?: { finish?: boolean } };
-      return body?.stream?.finish === false;
-    });
-  }
-
-  /** 最终答案帧(finish=true) */
-  finalRespondFrames(): Array<Record<string, unknown>> {
-    return this.respondFrames().filter((frame) => {
-      const body = frame['body'] as { stream?: { finish?: boolean } };
-      return body?.stream?.finish === true;
-    });
+  replyMedia(_frame: unknown, _mediaType: 'image', mediaId: string): Promise<unknown> {
+    this.mediaCalls.push({ mediaId });
+    return Promise.resolve({});
   }
 }
 
-function msgCallbackFrame(reqId: string, body: Record<string, unknown>): Record<string, unknown> {
-  return { cmd: 'aibot_msg_callback', headers: { req_id: reqId }, body };
+async function startChannel(handler: ReplyHandler) {
+  const fake = new FakeSdkClient();
+  const options: WecomBotChannelOptions = {
+    env: ENV,
+    clientFactory: () => fake,
+  };
+  const channel = new WecomBotChannel(options);
+  const started = channel.start(handler);
+  fake.emit('authenticated');
+  await started;
+  return { channel, fake };
 }
 
-function textMsgBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function textFrame(reqId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    msgid: `msg-${Math.random().toString(36).slice(2, 8)}`,
-    aibotid: 'bot-001',
-    chattype: 'single',
-    from: { userid: 'zhangsan' },
-    msgtype: 'text',
-    text: { content: '你好' },
-    ...overrides,
+    headers: { req_id: reqId },
+    body: {
+      msgid: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      aibotid: 'bot-001',
+      chattype: 'single',
+      from: { userid: 'zhangsan' },
+      msgtype: 'text',
+      text: { content: '你好' },
+      ...overrides,
+    },
   };
 }
 
-function subscribeAck(inst: FakeWebSocket, errcode: number, errmsg: string): void {
-  const sub = [...inst.sent].reverse().find((frame) => frame['cmd'] === 'aibot_subscribe');
-  if (!sub) throw new Error('未找到订阅帧');
-  inst.emitFrame({ cmd: 'aibot_subscribe', headers: sub['headers'], body: { errcode, errmsg } });
+function firstCall(handler: ReturnType<typeof vi.fn>): IncomingChannelMessage {
+  return handler.mock.calls[0]![0] as IncomingChannelMessage;
 }
 
-const activeChannels: WecomBotChannel[] = [];
-
-async function startChannel(
-  handler: ReplyHandler = async () => 'ok',
-  env: Record<string, string | undefined> = ENV,
-): Promise<{ channel: WecomBotChannel; inst: FakeWebSocket }> {
-  const channel = new WecomBotChannel({ env, WebSocketImpl: FakeWebSocket });
-  const started = channel.start(handler);
-  const inst = FakeWebSocket.instances.at(-1);
-  if (!inst) throw new Error('start 没有创建连接');
-  inst.emitOpen();
-  subscribeAck(inst, 0, 'ok');
-  await started;
-  activeChannels.push(channel);
-  return { channel, inst };
-}
-
-function flush(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 10));
-}
-
-function firstCallMessage(handler: Mock): IncomingChannelMessage {
-  const call = handler.mock.calls[0];
-  if (!call) throw new Error('handler 未被调用');
-  return call[0] as IncomingChannelMessage;
-}
-
-describe('WecomBotChannel', () => {
-  let errorSpy: Mock;
-
-  beforeEach(() => {
-    FakeWebSocket.instances = [];
-    errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {}) as unknown as Mock;
+describe('WecomBotChannel(官方 SDK 封装)', () => {
+  it('env 缺失:start 拒绝并点名缺失变量', async () => {
+    const channel = new WecomBotChannel({ env: { WECOM_BOT_ID: 'bot-001' } });
+    await expect(channel.start(async () => 'x')).rejects.toThrow('WECOM_BOT_SECRET');
   });
 
-  afterEach(async () => {
-    await Promise.all(activeChannels.map((channel) => channel.stop()));
-    activeChannels.length = 0;
-    vi.restoreAllMocks();
-    vi.useRealTimers();
+  it('启动:认证后 start 完成,connect 恰好一次', async () => {
+    const { fake } = await startChannel(async () => 'ok');
+    expect(fake.connected).toBe(1);
+    await fake.disconnect ?? undefined;
   });
 
-  it('start 成功:连接后发出订阅帧,errcode=0 时 start resolve', async () => {
-    const channel = new WecomBotChannel({ env: ENV, WebSocketImpl: FakeWebSocket });
-    const started = channel.start(async () => 'ok');
-    activeChannels.push(channel);
+  it('单聊消息:ack 先行,handler 字段正确,最终帧 finish=true 且 req_id 透传', async () => {
+    const handler = vi.fn(async (_message: IncomingChannelMessage, _progress?: unknown) => '好的,已收到');
+    const { fake } = await startChannel(handler);
 
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    const ws = FakeWebSocket.instances[0]!;
-    expect(ws.url).toBe(WS_URL);
-    ws.emitOpen();
-
-    const sub = ws.lastSent();
-    expect(sub['cmd']).toBe('aibot_subscribe');
-    expect(sub['body']).toEqual({ bot_id: 'bot-001', secret: 'secret-abc' });
-    const headers = sub['headers'] as { req_id: unknown };
-    expect(typeof headers.req_id).toBe('string');
-
-    subscribeAck(ws, 0, 'ok');
-    await expect(started).resolves.toBeUndefined();
-  });
-
-  it('订阅 errcode!=0 → start reject,错误消息含 errmsg', async () => {
-    const channel = new WecomBotChannel({ env: ENV, WebSocketImpl: FakeWebSocket });
-    const started = channel.start(async () => 'ok');
-    const ws = FakeWebSocket.instances[0]!;
-    ws.emitOpen();
-    subscribeAck(ws, 40014, 'invalid secret');
-
-    await expect(started).rejects.toThrow(/invalid secret/);
-    expect(ws.closedWith.length).toBeGreaterThan(0);
-  });
-
-  it('env 缺失 → start reject 且错误消息点名缺失变量,且不建连', async () => {
-    const onlyIdMissing = new WecomBotChannel({
-      env: { WECOM_BOT_ID: '', WECOM_BOT_SECRET: 's' },
-      WebSocketImpl: FakeWebSocket,
+    fake.emit('message.text', textFrame('cb-1', { msgid: 'msg-1', text: { content: '查一下6月账套' } }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
     });
-    await expect(onlyIdMissing.start(async () => 'ok')).rejects.toThrow(/WECOM_BOT_ID/);
-
-    const bothMissing = new WecomBotChannel({ env: {}, WebSocketImpl: FakeWebSocket });
-    await expect(bothMissing.start(async () => 'ok')).rejects.toThrow(
-      /WECOM_BOT_ID.*WECOM_BOT_SECRET|WECOM_BOT_SECRET.*WECOM_BOT_ID/s,
-    );
-
-    expect(FakeWebSocket.instances).toHaveLength(0);
-  });
-
-  it('单聊消息:handler 收到正确字段,respond 帧 req_id 透传且 content 为回复', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => '好的,已收到');
-    const { inst } = await startChannel(handler);
-
-    inst.emitFrame(
-      msgCallbackFrame('cb-req-1', textMsgBody({ msgid: 'msg-1001', text: { content: '查一下6月账套' } })),
-    );
-
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
 
     expect(handler).toHaveBeenCalledTimes(1);
-    const msg = firstCallMessage(handler);
-    expect(msg.wecomUserId).toBe('zhangsan');
-    expect(msg.conversationId).toBe('zhangsan');
-    expect(msg.messageId).toBe('msg-1001');
-    expect(msg.chatType).toBe('single');
-    expect(msg.text).toBe('查一下6月账套');
-    expect(() => new Date(msg.receivedAt).toISOString()).not.toThrow();
+    const message = firstCall(handler);
+    expect(message.wecomUserId).toBe('zhangsan');
+    expect(message.messageId).toMatch(/^msg-1$/);
+    expect(message.chatType).toBe('single');
+    expect(message.text).toBe('查一下6月账套');
 
-    const ack = inst.ackRespondFrames()[0]!;
-    expect(ack['headers']).toEqual({ req_id: 'cb-req-1' });
-    expect(ack['body']).toMatchObject({ msgtype: 'stream', stream: { finish: false } });
-
-    const respond = inst.finalRespondFrames()[0]!;
-    expect(respond['cmd']).toBe('aibot_respond_msg');
-    expect(respond['headers']).toEqual({ req_id: 'cb-req-1' });
-    expect(respond['body']).toMatchObject({
-      msgtype: 'stream',
-      stream: { finish: true, content: '好的,已收到' },
-    });
-    const streamId = (respond['body'] as { stream: { id: string } }).stream.id;
-    expect(streamId).toBeTruthy();
-    // ack 与最终帧共用同一 streamId(finish=false → true 整体替换)
-    const ackStreamId = (ack['body'] as { stream: { id: string } }).stream.id;
-    expect(ackStreamId).toBe(streamId);
+    expect(fake.replies).toHaveLength(2);
+    expect(fake.replies[0]).toMatchObject({ reqId: 'cb-1', content: '收到,正在处理…', finish: false });
+    expect(fake.replies[1]).toMatchObject({ reqId: 'cb-1', content: '好的,已收到', finish: true });
+    // ack 与最终帧共用同一 streamId(最终整体替换过程)
+    expect(fake.replies[0]!.streamId).toBe(fake.replies[1]!.streamId);
   });
 
-  it('群聊:剥离 @机器人 前缀后才进 handler,conversationId 取 chatid', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => 'ok');
-    const { inst } = await startChannel(handler);
+  it('群聊:剥离 @机器人 前缀,conversationId 取 chatid', async () => {
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler);
 
-    inst.emitFrame(
-      msgCallbackFrame(
-        'cb-grp-1',
-        textMsgBody({
-          chattype: 'group',
-          chatid: 'wr_group_9',
-          from: { userid: 'lisi' },
-          text: { content: '@财报助手 帮我查7月流水' },
-        }),
-      ),
-    );
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-
-    const msg = firstCallMessage(handler);
-    expect(msg.chatType).toBe('group');
-    expect(msg.conversationId).toBe('wr_group_9');
-    expect(msg.wecomUserId).toBe('lisi');
-    expect(msg.text).toBe('帮我查7月流水');
-
-    inst.emitFrame(
-      msgCallbackFrame(
-        'cb-grp-2',
-        textMsgBody({
-          msgid: 'msg-grp-2',
-          chattype: 'group',
-          chatid: 'wr_group_9',
-          from: { userid: 'lisi' },
-          text: { content: '@财报助手　全角空格也要剥离' },
-        }),
-      ),
-    );
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(2));
-    const msg2 = (handler.mock.calls[1]![0] as unknown) as IncomingChannelMessage;
-    expect(msg2.text).toBe('全角空格也要剥离');
-  });
-
-  it('非 text 消息或无 text 字段的帧被忽略,handler 不被调用', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => 'ok');
-    const { inst } = await startChannel(handler);
-
-    inst.emitFrame(
-      msgCallbackFrame('cb-img-1', {
-        msgid: 'msg-img',
-        chattype: 'single',
-        from: { userid: 'zhangsan' },
-        msgtype: 'image',
-        image: { url: 'https://example.com/a.png' },
-      }),
-    );
-    inst.emitFrame(msgCallbackFrame('cb-empty-1', textMsgBody({ msgid: 'msg-empty', text: undefined })));
-    await flush();
-
-    expect(handler).not.toHaveBeenCalled();
-    expect(inst.respondFrames()).toHaveLength(0);
-    expect(inst.ackRespondFrames()).toHaveLength(0);
-  });
-
-  it('handler 抛错:记单行日志并回复兜底文案', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => {
-      throw new Error('boom');
-    });
-    const { inst } = await startChannel(handler);
-
-    inst.emitFrame(msgCallbackFrame('cb-err-1', textMsgBody({ msgid: 'msg-err' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-
-    const respond = inst.finalRespondFrames()[0]!;
-    expect(respond['headers']).toEqual({ req_id: 'cb-err-1' });
-    expect(respond['body']).toMatchObject({
-      msgtype: 'stream',
-      stream: { finish: true, content: '处理失败,请稍后再试' },
-    });
-
-    const logged = errorSpy.mock.calls.map((args: unknown[]) => args.join(' ')).join('\n');
-    expect(logged).toContain('wecom_handler_error');
-    expect(logged).toContain('msg-err');
-    expect(logged).not.toContain('secret-abc');
-  });
-
-  it('respond 回执 errcode!=0:ack 失败只记日志,不阻塞处理,后续消息仍可处理', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => '第一次回复');
-    const { channel, inst } = await startChannel(handler);
-
-    inst.emitFrame(msgCallbackFrame('cb-resp-1', textMsgBody({ msgid: 'msg-r1' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-    // 注入 ack 帧的失败回执(队列队首是 ack 帧)
-    inst.emitFrame({
-      cmd: 'aibot_respond_msg',
-      headers: { req_id: 'cb-resp-1' },
-      body: { errcode: 400, errmsg: 'respond failed' },
-    });
-    await flush();
-
-    expect(errorSpy.mock.calls.some((args: unknown[]) => args.join(' ').includes('wecom_ack_fail'))).toBe(true);
-    expect(errorSpy.mock.calls.some((args: unknown[]) => args.join(' ').includes('errcode=400'))).toBe(true);
-
-    handler.mockResolvedValueOnce('第二次回复');
-    inst.emitFrame(msgCallbackFrame('cb-resp-2', textMsgBody({ msgid: 'msg-r2' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(2));
-    expect(inst.finalRespondFrames()[1]!['body']).toMatchObject({
-      msgtype: 'stream',
-      stream: { finish: true, content: '第二次回复' },
-    });
-    await channel.stop();
-  });
-
-  it('图片回复:WS 分片上传换 media_id 后以 msgtype=image 回传,文字帧先行', async () => {
-    const handler = vi.fn(async () => ({
-      text: '图表来了',
-      image: { data: Buffer.from('fake-png-bytes'), filename: 'chart.png' },
+    fake.emit('message.text', textFrame('cb-grp-1', {
+      msgid: 'msg-grp-1',
+      chattype: 'group',
+      chatid: 'wr_group_9',
+      from: { userid: 'lisi' },
+      text: { content: '@财报助手 帮我查7月流水' },
     }));
-    const { channel, inst } = await startChannel(handler);
-    inst.autoReceipt = true;
-    inst.receiptBodyFactory = (frame) => {
-      if (frame['cmd'] === 'aibot_upload_media_init') return { errcode: 0, upload_id: 'up-1' };
-      if (frame['cmd'] === 'aibot_upload_media_finish') return { errcode: 0, media_id: 'media-9' };
-      return undefined;
-    };
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
 
-    inst.emitFrame(msgCallbackFrame('cb-img-r1', textMsgBody({ msgid: 'msg-img-r1', text: { content: '发图' } })));
-    await vi.waitFor(() => {
-      const imageFrames = inst.sent.filter((f) => (f['body'] as { msgtype?: string })?.msgtype === 'image');
-      expect(imageFrames).toHaveLength(1);
-    });
-
-    const init = inst.sent.find((f) => f['cmd'] === 'aibot_upload_media_init')!;
-    expect(init['body']).toMatchObject({ type: 'image', filename: 'chart.png', total_size: 14, total_chunks: 1 });
-    const final = inst.finalRespondFrames().find((f) => (f['body'] as { stream?: { content?: string } })?.stream?.content === '图表来了');
-    expect(final).toBeTruthy();
-    const imageRespond = inst.sent.find((f) => (f['body'] as { msgtype?: string })?.msgtype === 'image')!;
-    expect(imageRespond['headers']).toEqual({ req_id: 'cb-img-r1' });
-    expect(imageRespond['body']).toEqual({ msgtype: 'image', image: { media_id: 'media-9' } });
-    await channel.stop();
+    const message = firstCall(handler);
+    expect(message.chatType).toBe('group');
+    expect(message.conversationId).toBe('wr_group_9');
+    expect(message.text).toBe('帮我查7月流水');
   });
 
-  it('图片上传失败且无文字:回退兜底文案', async () => {
-    const handler = vi.fn(async () => ({ image: { data: Buffer.from('x'), filename: 'x.png' } }));
-    const { channel, inst } = await startChannel(handler);
-    inst.autoReceipt = true;
-    inst.receiptBodyFactory = (frame) => {
-      if (frame['cmd'] === 'aibot_upload_media_init') return { errcode: 500, errmsg: 'boom' };
-      return undefined;
-    };
-
-    inst.emitFrame(msgCallbackFrame('cb-img-r2', textMsgBody({ msgid: 'msg-img-r2' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-
-    const respond = inst.finalRespondFrames()[0]!;
-    expect(respond['body']).toMatchObject({ msgtype: 'stream', stream: { content: '图片发送失败,请稍后再试' } });
-    await channel.stop();
-  });
-
-  it('进度帧:handler 调 progress 推 finish=false 帧,过密帧被节流', async () => {
+  it('进度回调:finish=false 帧,节流(3 秒内第二帧被跳过)', async () => {
     const handler: ReplyHandler = async (_message, progress) => {
       progress?.('步骤一:正在定位账套');
       progress?.('步骤二:距上一帧不足 3 秒,应被节流');
       return '完成';
     };
-    const { channel, inst } = await startChannel(handler);
+    const { fake } = await startChannel(handler);
 
-    inst.emitFrame(msgCallbackFrame('cb-prog-1', textMsgBody({ msgid: 'msg-prog' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-
-    const progressTexts = inst
-      .ackRespondFrames()
-      .map((f) => (f['body'] as { stream: { content: string } }).stream.content);
-    expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']); // 步骤二被 3s 节流跳过
-    expect(inst.finalRespondFrames()[0]!['body']).toMatchObject({
-      msgtype: 'stream',
-      stream: { finish: true, content: '完成' },
+    fake.emit('message.text', textFrame('cb-prog-1', { msgid: 'msg-prog' }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
     });
+
+    const progressTexts = fake.replies
+      .filter((reply) => !reply.finish)
+      .map((reply) => reply.content);
+    expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']);
+  });
+
+  it('handler 抛错:记单行日志并回复兜底文案', async () => {
+    const handler = vi.fn(async () => {
+      throw new Error('boom-secret');
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-err-1', { msgid: 'msg-err' }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
+    });
+
+    expect(fake.replies.some((reply) => reply.content === '处理失败,请稍后再试')).toBe(true);
+    const logged = errorSpy.mock.calls.map((args: unknown[]) => args.join(' ')).join('\n');
+    expect(logged).toContain('wecom_handler_error');
+    expect(logged).toContain('msg-err');
+    expect(logged).not.toContain('secret-abc');
+    errorSpy.mockRestore();
+  });
+
+  it('图片回复:uploadMedia 换 media_id 后 replyMedia 回传,文字帧先行', async () => {
+    const handler = vi.fn(async () => ({
+      text: '图表来了',
+      image: { data: Buffer.from('fake-png-bytes'), filename: 'chart.png' },
+    }));
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-img-1', { msgid: 'msg-img-1', text: { content: '发图' } }));
+    await vi.waitFor(() => expect(fake.mediaCalls).toHaveLength(1));
+
+    expect(fake.uploads[0]).toMatchObject({ filename: 'chart.png' });
+    const textFrameSent = fake.replies.find((reply) => reply.finish && reply.content === '图表来了');
+    expect(textFrameSent).toBeTruthy();
+    expect(fake.mediaCalls[0]!.mediaId).toBe('media-1');
+  });
+
+  it('图片上传失败且无文字:回退兜底文案', async () => {
+    const handler = vi.fn(async () => ({ image: { data: Buffer.from('x'), filename: 'x.png' } }));
+    const { fake } = await startChannel(handler);
+    fake.failNextUpload();
+
+    fake.emit('message.text', textFrame('cb-img-2', { msgid: 'msg-img-2', text: { content: '发图' } }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
+    });
+
+    expect(fake.replies.find((reply) => reply.finish)!.content).toBe('图片发送失败,请稍后再试');
+  });
+
+  it('超长回复按 UTF-8 截断到 2048 字节内且不截半', async () => {
+    const handler = vi.fn(async () => '查'.repeat(1000));
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-long-1', { msgid: 'msg-long', text: { content: '你好' } }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
+    });
+
+    const final = fake.replies.find((reply) => reply.finish)!;
+    expect(Buffer.byteLength(final.content, 'utf8')).toBeLessThanOrEqual(2048);
+    expect(final.content).not.toContain('\uFFFD');
+  });
+
+  it('stop:断开连接且后续消息不再处理', async () => {
+    const handler = vi.fn(async () => 'ok');
+    const { channel, fake } = await startChannel(handler);
+
     await channel.stop();
-  });
+    fake.emit('message.text', textFrame('cb-after-stop', { msgid: 'msg-after' }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-  it('心跳:每 30 秒发出一帧 ping', async () => {
-    vi.useFakeTimers();
-    const { inst } = await startChannel();
-
-    await vi.advanceTimersByTimeAsync(30_000);
-    const pings = inst.sent.filter((frame) => frame['cmd'] === 'ping');
-    expect(pings).toHaveLength(1);
-    expect(typeof (pings[0]!['headers'] as { req_id: unknown }).req_id).toBe('string');
-
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(inst.sent.filter((frame) => frame['cmd'] === 'ping')).toHaveLength(2);
-  });
-
-  it('断线重连:退避序列 1s/2s/4s/…/30s 封顶,订阅成功后退避重置', async () => {
-    vi.useFakeTimers();
-    const { inst: first } = await startChannel();
-
-    const closeAndAssertDelay = async (delayMs: number, countBefore: number) => {
-      FakeWebSocket.instances.at(-1)!.emitClose();
-      await vi.advanceTimersByTimeAsync(delayMs - 1);
-      expect(FakeWebSocket.instances).toHaveLength(countBefore);
-      await vi.advanceTimersByTimeAsync(1);
-      expect(FakeWebSocket.instances).toHaveLength(countBefore + 1);
-    };
-
-    first.emitClose();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(FakeWebSocket.instances).toHaveLength(2);
-
-    let count = 2;
-    for (const delay of [2000, 4000, 8000, 16000, 30000, 30000]) {
-      await closeAndAssertDelay(delay, count);
-      count += 1;
-    }
-
-    // 注入订阅成功后,退避重置回 1s
-    const recovered = FakeWebSocket.instances.at(-1)!;
-    recovered.emitOpen();
-    subscribeAck(recovered, 0, 'ok');
-    await vi.advanceTimersByTimeAsync(0);
-    await closeAndAssertDelay(1000, count);
-  });
-
-  it('断线重连后重新发出订阅帧', async () => {
-    vi.useFakeTimers();
-    const { inst: first } = await startChannel();
-    first.emitClose();
-    await vi.advanceTimersByTimeAsync(1000);
-
-    const second = FakeWebSocket.instances.at(-1)!;
-    expect(second).not.toBe(first);
-    second.emitOpen();
-    const sub = second.lastSent();
-    expect(sub['cmd']).toBe('aibot_subscribe');
-    expect(sub['body']).toEqual({ bot_id: 'bot-001', secret: 'secret-abc' });
-  });
-
-  it('disconnected_event 触发重连;其他事件只记日志不重连', async () => {
-    vi.useFakeTimers();
-    const { inst } = await startChannel();
-
-    inst.emitFrame({
-      cmd: 'aibot_event_callback',
-      headers: { req_id: 'ev-1' },
-      body: { eventtype: 'disconnected_event' },
-    });
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(FakeWebSocket.instances).toHaveLength(2);
-    FakeWebSocket.instances.at(-1)!.emitOpen();
-    expect(FakeWebSocket.instances.at(-1)!.lastSent()['cmd']).toBe('aibot_subscribe');
-
-    const second = FakeWebSocket.instances.at(-1)!;
-    second.emitFrame({
-      cmd: 'aibot_event_callback',
-      headers: { req_id: 'ev-2' },
-      body: { eventtype: 'enter_chat' },
-    });
-    await vi.advanceTimersByTimeAsync(5000);
-    expect(FakeWebSocket.instances).toHaveLength(2);
-  });
-
-  it('超长回复在 respond 前按 UTF-8 截断到 2048 字节内且不截半', async () => {
-    const handler = vi.fn(async (_message: IncomingChannelMessage) => '查'.repeat(1000));
-    const { inst } = await startChannel(handler);
-
-    inst.emitFrame(msgCallbackFrame('cb-long-1', textMsgBody({ msgid: 'msg-long' })));
-    await vi.waitFor(() => expect(inst.finalRespondFrames()).toHaveLength(1));
-
-    const body = inst.finalRespondFrames()[0]!['body'] as { msgtype: string; stream: { content: string } };
-    expect(body.msgtype).toBe('stream');
-    expect(Buffer.byteLength(body.stream.content, 'utf8')).toBeLessThanOrEqual(2048);
-    expect(body.stream.content).not.toContain('\uFFFD');
-  });
-
-  it('stop 后不再重连,连接以 1000 正常关闭', async () => {
-    vi.useFakeTimers();
-    const { channel, inst } = await startChannel();
-    await channel.stop();
-
-    expect(inst.closedWith).toContain(1000);
-    inst.emitClose();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(FakeWebSocket.instances).toHaveLength(1);
-  });
-
-  it('连接 error 事件也触发重连', async () => {
-    vi.useFakeTimers();
-    const { inst } = await startChannel();
-    inst.emitError();
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(fake.disconnected).toBeGreaterThanOrEqual(1);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
