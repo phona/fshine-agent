@@ -1,15 +1,16 @@
 /**
  * 会话持久化(转录即状态)。
  * conversation_sessions.state 存完整消息转录(AgentMessage[],JSON 序列化);
- * TTL 过期后转录清零重新开始。除 TTL 外没有任何裁剪、投影或静默丢弃——
- * 模型上下文的上限治理由 driver.compact(pi 原生 compact)负责。
+ * TTL 过期时**不做静默清零**:原样返回旧转录 + expired 标记,由 runtime 决定软着陆
+ * (经 driver.compact 压成「摘要+最近尾巴」种子续会话)。除压缩外没有任何裁剪、
+ * 投影或静默丢弃——模型上下文的上限治理由 driver.compact(pi 原生 compact)负责。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ConversationSessionRepo } from '@fshine/contracts';
 
 export interface LoadedTranscript {
   messages: AgentMessage[];
-  /** 距上次更新超过 TTL:转录清零,会话重新开始 */
+  /** 距上次更新超过 TTL:messages 为过期前的旧转录,调用方应软着陆而非当全新会话 */
   expired: boolean;
 }
 
@@ -31,7 +32,9 @@ export async function loadTranscript(
 
   const updatedAt = Date.parse(record.updatedAt ?? '');
   const expired = Number.isFinite(updatedAt) && ttlMs > 0 && Date.now() - updatedAt > ttlMs;
-  if (expired) return { messages: [], expired: true };
+  if (expired) {
+    return { messages: Array.isArray(record.state) ? (record.state as AgentMessage[]) : [], expired: true };
+  }
 
   if (Array.isArray(record.state)) return { messages: record.state as AgentMessage[], expired: false };
   return { messages: [], expired: false };

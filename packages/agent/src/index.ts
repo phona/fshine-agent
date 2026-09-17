@@ -12,6 +12,7 @@ export { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 export * from './session';
 export {
   createTaxAgentRuntime,
+  ACCOUNT_SET_SEARCH_MISS,
   FALLBACK_TIMEOUT,
   FALLBACK_FAILURE,
   type TaxAgentRuntimeDeps,

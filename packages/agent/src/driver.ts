@@ -33,12 +33,9 @@ export interface TurnDriverResult {
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
-  /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。 */
-  compact?(messages: DriverMessage[]): Promise<DriverMessage[]>;
-}
-
-export interface TurnDriver {
-  run(input: TurnDriverInput): Promise<TurnDriverResult>;
+  /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。
+   *  force:true 跳过阈值判断强制压缩(会话过期软着陆用);失败时实现方应原样返回,不阻塞回合。 */
+  compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
 }
 
 /** 工具失败的确定性终结错误:message 是面向用户的安全话术,直接作为最终回复(driver 不得再喂给模型) */

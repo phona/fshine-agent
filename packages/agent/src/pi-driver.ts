@@ -154,14 +154,15 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       return { text, messages: agent.state.messages };
     },
 
-    /** 上下文压缩(pi 原生 compact):超阈值时摘要替换旧消息,保留最近尾巴。失败不阻塞回合。 */
-    async compact(messages: AgentMessage[]): Promise<AgentMessage[]> {
+    /** 上下文压缩(pi 原生 compact):超阈值时摘要替换旧消息,保留最近尾巴。失败不阻塞回合。
+     *  force:true 跳过阈值判断强制压缩(会话过期软着陆,旧转录压成摘要种子)。 */
+    async compact(messages: AgentMessage[], opts?: { force?: boolean }): Promise<AgentMessage[]> {
       const est = estimateContextTokens(messages);
-      if (!shouldCompact(est.tokens, model.contextWindow, DEFAULT_COMPACTION_SETTINGS)) return messages;
+      if (!opts?.force && !shouldCompact(est.tokens, model.contextWindow, DEFAULT_COMPACTION_SETTINGS)) return messages;
       const summary = await generateSummary(
         messages, models, model,
         DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-        '这是财务查询助手的会话压缩。摘要必须保留:1)当前使用的账套 id(as_xxx)与名称;2)会计期间;3)最近一次 list_vouchers 结果里的 nextCursor/prevCursor 原值(用户要靠它翻页);4)用户的关键业务意图与未决问题。',
+        '这是财务查询助手的会话压缩。摘要必须保留:1)当前使用的账套 id(as_xxx)与名称;2)会计期间;3)最近一次 list_vouchers 结果里的 nextCursor/prevCursor 原值(用户要靠它翻页);4)用户的关键业务意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。',
         undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT,
       );
       if (!summary.ok) {

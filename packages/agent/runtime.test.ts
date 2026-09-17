@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TurnDriverInput } from './src/driver';
 import type { DiscoveredTool, HostToolClient, ToolOutcome, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, type ScriptedTurnStep } from './src/driver';
-import { createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src';
+import { ACCOUNT_SET_SEARCH_MISS, createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src';
 import { FakeSessionRepo, FakeToolClient, fakeErr, fakeOk } from './test-helpers';
 
 function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
@@ -97,18 +97,46 @@ describe('createTaxAgentRuntime(转录即状态)', () => {
     expect(secondTurn).not.toContain('page-data');
   });
 
-  it('TTL 过期 → 转录清零,会话重新开始', async () => {
+  it('TTL 过期 → 旧转录经 compact 强制压成种子续用(软着陆,不失忆)', async () => {
     const sessions = new FakeSessionRepo();
-    const { driver, inputs } = recordingDriver([{ text: '第一轮' }, { text: '过期后' }]);
+    const base = ScriptedTurnDriver([{ text: '第一轮' }, { text: '过期后' }]);
+    const inputs: TurnDriverInput[] = [];
+    const forcedCompacts: number[] = [];
+    const SEED = '【此前会话摘要】用户此前在查幻晟 as_001 202608 的凭证';
+    const driver: import('./src/driver').TurnDriver = {
+      run: async (input) => {
+        inputs.push(input);
+        return base.run(input);
+      },
+      compact: async (_messages, opts) => {
+        if (opts?.force) forcedCompacts.push(1);
+        return [{ role: 'user', content: SEED, timestamp: Date.now() } as unknown as import('./src/driver').DriverMessage];
+      },
+    };
     const runtime = createTaxAgentRuntime({ driver, sessions, sessionTtlMs: 300_000 });
     await runtime.handleTurn(makeCtx(), '第一句话', client());
     // 把 updatedAt 拨回 10 分钟前 → 超过 5 分钟 TTL
     const record = sessions.peek('sess_1')!;
     sessions.upsert({ ...record, updatedAt: new Date(Date.now() - 600_000).toISOString() });
 
+    await runtime.handleTurn(makeCtx(), '继续看', client());
+    expect(forcedCompacts).toHaveLength(1); // 只有过期那回合强制压缩
+    const secondTurnContext = inputs[1]!.messages as Array<{ role: string; content: string }>;
+    expect(secondTurnContext.some((m) => m.content === SEED)).toBe(true);
+    expect(secondTurnContext[secondTurnContext.length - 1]!.content).toBe('继续看');
+  });
+
+  it('TTL 过期 + driver 无 compact 能力 → 旧转录原样续用(宁可带旧上下文,不做静默清零)', async () => {
+    const sessions = new FakeSessionRepo();
+    const { driver, inputs } = recordingDriver([{ text: '第一轮' }, { text: '过期后' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions, sessionTtlMs: 300_000 });
+    await runtime.handleTurn(makeCtx(), '第一句话', client());
+    const record = sessions.peek('sess_1')!;
+    sessions.upsert({ ...record, updatedAt: new Date(Date.now() - 600_000).toISOString() });
+
     await runtime.handleTurn(makeCtx(), '还在吗', client());
     const secondTurnContext = inputs[1]!.messages as Array<{ role: string; content: string }>;
-    expect(secondTurnContext.some((m) => m.content === '第一句话')).toBe(false);
+    expect(secondTurnContext.some((m) => m.content === '第一句话')).toBe(true);
   });
 
   it('NEEDS_LOGIN 工具错误 → 确定性话术终结', async () => {
@@ -132,6 +160,41 @@ describe('createTaxAgentRuntime(转录即状态)', () => {
     expect(reply.text).toBe(FALLBACK_FAILURE);
     const state = sessions.peek('sess_1')!.state as Array<{ role: string }>;
     expect(state.length).toBeGreaterThan(0);
+  });
+
+  it('本轮账套搜索无结果时,阻止沿用历史账套 ID 查询', async () => {
+    const sessions = new FakeSessionRepo();
+    let voucherCalls = 0;
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ toolCalls: [
+        { tool: 'search_account_sets', args: { query: '幻辰' } },
+        { tool: 'list_vouchers', args: { accountSetId: 'as_001', period: '202608' } },
+      ], text: '不应到达' }]),
+      sessions,
+    });
+    const reply = await runtime.handleTurn(makeCtx(), '查幻辰的应收', client({
+      search_account_sets: () => fakeOk({ accountSets: [] }),
+      list_vouchers: () => { voucherCalls += 1; return fakeOk({}); },
+    }));
+
+    expect(voucherCalls).toBe(0);
+    expect(reply.text).toBe(ACCOUNT_SET_SEARCH_MISS);
+  });
+
+  it('本轮账套搜索无结果时,覆盖模型基于历史上下文编造的最终回复', async () => {
+    const sessions = new FakeSessionRepo();
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ toolCalls: [
+        { tool: 'search_account_sets', args: { query: '幻辰' } },
+        // The model may stop after the miss and answer from stale transcript.
+      ], text: '幻晟账套中没有幻辰，应收为 0 元。' }]),
+      sessions,
+    });
+    const reply = await runtime.handleTurn(makeCtx(), '查幻辰的应收', client({
+      search_account_sets: () => fakeOk({ accountSets: [] }),
+    }));
+
+    expect(reply.text).toBe(ACCOUNT_SET_SEARCH_MISS);
   });
 
   it('无可用工具 → 直接兜底', async () => {
