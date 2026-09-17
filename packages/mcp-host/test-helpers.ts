@@ -1,7 +1,15 @@
 import { fileURLToPath } from 'node:url';
 import type { ToolOutcome } from '@fshine/contracts';
 import type { McpProfileConfig } from '@fshine/contracts';
-import { McpHost, type McpHostAudit, type McpHostOptions, type McpToolCallEndEvent, type McpToolCallStartEvent } from './src/index';
+import {
+  McpHost,
+  type McpHostAudit,
+  type McpHostOptions,
+  type McpResourceReadEndEvent,
+  type McpResourceReadStartEvent,
+  type McpToolCallEndEvent,
+  type McpToolCallStartEvent,
+} from './src/index';
 
 export const repoRoot = fileURLToPath(new URL('../..', import.meta.url));
 
@@ -36,11 +44,19 @@ export function makeHostWithProfile(profile: McpProfileConfig, audit?: McpHostAu
 export class AuditRecorder implements McpHostAudit {
   readonly starts: McpToolCallStartEvent[] = [];
   readonly ends: McpToolCallEndEvent[] = [];
+  readonly resourceStarts: McpResourceReadStartEvent[] = [];
+  readonly resourceEnds: McpResourceReadEndEvent[] = [];
   readonly onStart = (event: McpToolCallStartEvent): void => {
     this.starts.push(event);
   };
   readonly onEnd = (event: McpToolCallEndEvent): void => {
     this.ends.push(event);
+  };
+  readonly onResourceReadStart = (event: McpResourceReadStartEvent): void => {
+    this.resourceStarts.push(event);
+  };
+  readonly onResourceReadEnd = (event: McpResourceReadEndEvent): void => {
+    this.resourceEnds.push(event);
   };
 }
 

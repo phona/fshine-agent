@@ -46,6 +46,23 @@ const DEFAULT_PAGE_SIZE = 4; // 对齐真实 17dz:页大小即模型视野,翻�
 const ALL_PAGES_PAGE_SIZE = 100;
 const ALL_PAGES_SERVER_CAP = 1000;
 
+const FAKE_RESOURCES = [
+  {
+    uri: '17dz://domains/voucher/templates',
+    name: 'voucher templates',
+    description: '凭证业务模板',
+    mimeType: 'text/markdown',
+    text: '# voucher templates\n\nFake resource for MCP host tests.\n',
+  },
+  {
+    uri: '17dz://domains/voucher/mechanisms',
+    name: 'voucher mechanisms',
+    description: '凭证域执行机制',
+    mimeType: 'text/markdown',
+    text: '# voucher mechanisms\n\nFake resource for MCP host tests.\n',
+  },
+] as const;
+
 export interface FakeServerOptions {
   /** 场景注入用 env;缺省回落到 process.env */
   env?: Record<string, string | undefined>;
@@ -161,6 +178,7 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
   const scenario = envOf('FAKE_SCENARIO')?.trim() || undefined;
   const slowMs = parseNonNegativeInt(envOf('FAKE_SLOW_MS')) ?? 0;
   const crashAfter = parseNonNegativeInt(envOf('FAKE_CRASH_AFTER_N_CALLS'));
+  const enableResources = envOf('FAKE_ENABLE_RESOURCES') === '1';
 
   const activeTools = enableWrite ? TOOL_DEFINITIONS : TOOL_DEFINITIONS.filter((tool) => (READ_TOOLS as readonly string[]).includes(tool.name));
   const serverInfo = {
@@ -568,12 +586,36 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
           id,
           result: {
             protocolVersion: PROTOCOL_VERSION,
-            capabilities: { tools: {} },
+            capabilities: { tools: {}, ...(enableResources ? { resources: {} } : {}) },
             serverInfo,
           },
         };
       case 'tools/list':
         return { jsonrpc: '2.0', id, result: { tools: activeTools } };
+      case 'resources/list':
+        if (!enableResources) return errorResponse(id, -32601, '方法不存在: resources/list');
+        return {
+          jsonrpc: '2.0',
+          id,
+          result: {
+            resources: FAKE_RESOURCES.map(({ text: _text, ...resource }) => resource),
+          },
+        };
+      case 'resources/read':
+        if (!enableResources) return errorResponse(id, -32601, '方法不存在: resources/read');
+        if (typeof params !== 'object' || params === null || Array.isArray(params) || typeof (params as Record<string, unknown>)['uri'] !== 'string') {
+          return errorResponse(id, -32602, 'resources/read 的 params 必须包含 uri');
+        }
+        {
+          const uri = (params as Record<string, unknown>)['uri'] as string;
+          const resource = FAKE_RESOURCES.find((candidate) => candidate.uri === uri);
+          if (!resource) return errorResponse(id, -32602, `资源不存在: ${uri}`);
+          return {
+            jsonrpc: '2.0',
+            id,
+            result: { contents: [{ uri: resource.uri, mimeType: resource.mimeType, text: resource.text }] },
+          };
+        }
       case 'tools/call':
         return handleToolCall(id, params);
       case 'ping':

@@ -62,6 +62,43 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     expect(listVouchers?.inputSchema).toHaveProperty('oneOf'); // inputSchema 自包含原样保留
   });
 
+  it('resources/list 发现并按显式 URI allowlist 读取资源，读取事件可审计', { timeout: 60_000 }, async () => {
+    const audit = new AuditRecorder();
+    const uri = '17dz://domains/voucher/templates';
+    const host = trackedHost(
+      { FAKE_ENABLE_RESOURCES: '1' },
+      { allowedResourceUris: [uri] },
+      audit,
+    );
+    await host.ensureReady();
+    expect(host.discoveredResources.map((resource) => resource.uri)).toEqual([
+      '17dz://domains/voucher/templates',
+      '17dz://domains/voucher/mechanisms',
+    ]);
+    const client = host.clientFor('req-resource', ['as_001']);
+    expect(client.resources?.()).toHaveLength(1);
+    expect(client.resources?.()[0]?.uri).toBe(uri);
+
+    const read = await client.readResource?.(uri);
+    expect(read?.ok).toBe(true);
+    if (!read || !read.ok) throw new Error('resource read failed');
+    expect(read.data.contents[0]).toMatchObject({ uri, mimeType: 'text/markdown' });
+    expect(read.data.contents[0]?.text).toContain('Fake resource');
+    expect(audit.resourceStarts).toEqual([expect.objectContaining({ requestId: 'req-resource', uri })]);
+    expect(audit.resourceEnds).toEqual([expect.objectContaining({ requestId: 'req-resource', uri, status: 'ok' })]);
+
+    const denied = await client.readResource?.('17dz://domains/voucher/mechanisms');
+    expect(denied?.ok).toBe(false);
+    if (denied?.ok === false) expect(denied.error.message).toContain('allowlist');
+    expect(audit.resourceStarts).toHaveLength(1);
+  });
+
+  it('无资源能力的旧 MCP server 不会在握手时调用 resources/list', { timeout: 60_000 }, async () => {
+    const host = trackedHost({}, { allowedResourceUris: ['17dz://domains/voucher/templates'] });
+    await host.ensureReady();
+    expect(host.discoveredResources).toEqual([]);
+  });
+
   it('验收 #2:成功链路 search → period → list_vouchers,meta.traceId/retrievedAt/source 透传', { timeout: 120_000 }, async () => {
     const audit = new AuditRecorder();
     const host = trackedHost({}, {}, audit);

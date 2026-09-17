@@ -128,6 +128,9 @@ function parseMcpProfiles(raw: unknown): Record<string, McpProfileConfig> {
     const profileEnv: Record<string, string> | undefined = isRecord(envRaw)
       ? Object.fromEntries(Object.entries(envRaw).map(([k, v]) => [k, asString(v)]))
       : undefined;
+    const allowedResourceUris = Array.isArray(item['allowedResourceUris'])
+      ? item['allowedResourceUris'].map(String)
+      : undefined;
     profiles[name] = {
       command: asString(item['command']),
       ...(args ? { args } : {}),
@@ -135,6 +138,7 @@ function parseMcpProfiles(raw: unknown): Record<string, McpProfileConfig> {
       requestTimeoutMs: Number(item['requestTimeoutMs']),
       maxRetries: Number(item['maxRetries']),
       ...(profileEnv ? { env: profileEnv } : {}),
+      ...(allowedResourceUris ? { allowedResourceUris } : {}),
     };
   }
   return profiles;

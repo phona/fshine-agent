@@ -23,6 +23,7 @@ mcpProfiles:
     cwd: /opt/17dz-platform
     requestTimeoutMs: 60000
     maxRetries: 2
+    allowedResourceUris: ["17dz://domains/voucher/templates"]
     env:
       ALLOWED_ACCOUNT_SETS: "as_001,as_002"
 `;
@@ -66,6 +67,7 @@ describe('loadConfig', () => {
     expect(profile?.cwd).toBe('/opt/17dz-platform');
     expect(profile?.requestTimeoutMs).toBe(60000);
     expect(profile?.maxRetries).toBe(2);
+    expect(profile?.allowedResourceUris).toEqual(['17dz://domains/voucher/templates']);
     expect(profile?.env).toEqual({ ALLOWED_ACCOUNT_SETS: 'as_001,as_002' });
   });
 

@@ -1,10 +1,10 @@
 /**
  * McpConnection:单 server 的 stdio JSON-RPC 2.0 连接(17dz-mcp-spec §5/§11.1)。
- * 进程死亡后可懒重连:下一次 ensureReady 重新 spawn + 握手 + tools/list。
+ * 进程死亡后可懒重连:下一次 ensureReady 重新 spawn + 握手 + tools/list/resources/list。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import type { DiscoveredTool } from '@fshine/contracts';
+import type { DiscoveredResource, DiscoveredTool, ResourceContent } from '@fshine/contracts';
 import { checkServerSpecVersion } from './spec-version';
 import { isRecord } from './utils';
 
@@ -57,6 +57,7 @@ export class McpConnection {
   private nextId = 1;
   private readyPromise: Promise<void> | null = null;
   private toolsCache: DiscoveredTool[] = [];
+  private resourcesCache: DiscoveredResource[] = [];
   private stopped = false;
   private recyclePromise: Promise<void> | null = null;
 
@@ -64,6 +65,10 @@ export class McpConnection {
 
   get discoveredTools(): readonly DiscoveredTool[] {
     return this.toolsCache;
+  }
+
+  get discoveredResources(): readonly DiscoveredResource[] {
+    return this.resourcesCache;
   }
 
   get alive(): boolean {
@@ -163,7 +168,7 @@ export class McpConnection {
     createInterface({ input: child.stdout }).on('line', (line: string) => this.handleLine(line));
     createInterface({ input: child.stderr }).on('line', (line: string) => this.forwardStderr(line));
 
-    // 握手:initialize → 校验 specVersion → notifications/initialized → tools/list
+    // 握手:initialize → 校验 specVersion → notifications/initialized → tools/list → (可选)resources/list
     const handshakeTimeoutMs = Math.max(this.options.requestTimeoutMs, MIN_HANDSHAKE_TIMEOUT_MS);
     try {
       const initResult = await this.request('initialize', {
@@ -178,6 +183,17 @@ export class McpConnection {
       this.notify('notifications/initialized');
       const listResult = await this.request('tools/list', undefined, handshakeTimeoutMs);
       this.toolsCache = parseDiscoveredTools(listResult);
+      const capabilities = isRecord(initResult) && isRecord(initResult['capabilities'])
+        ? initResult['capabilities']
+        : undefined;
+      // resources/list is optional in MCP. Avoid probing servers that did not
+      // advertise resources, preserving compatibility with V0 servers.
+      if (capabilities && isRecord(capabilities['resources'])) {
+        const resourceListResult = await this.request('resources/list', undefined, handshakeTimeoutMs);
+        this.resourcesCache = parseDiscoveredResources(resourceListResult);
+      } else {
+        this.resourcesCache = [];
+      }
     } catch (err) {
       this.cleanupChild(child, err instanceof McpTransportError ? err : new McpTransportError('closed', errorText(err), true));
       throw err;
@@ -325,4 +341,71 @@ function parseDiscoveredTools(listResult: unknown): DiscoveredTool[] {
     });
   }
   return tools;
+}
+
+function parseDiscoveredResources(listResult: unknown): DiscoveredResource[] {
+  if (!isRecord(listResult) || !Array.isArray(listResult['resources'])) {
+    throw new McpTransportError('jsonrpc_error', 'resources/list 响应缺少 resources 数组', false);
+  }
+  const resources: DiscoveredResource[] = [];
+  const uris = new Set<string>();
+  for (const raw of listResult['resources']) {
+    if (!isRecord(raw) || typeof raw['uri'] !== 'string' || raw['uri'].trim() === '') {
+      throw new McpTransportError('jsonrpc_error', 'resources/list 包含无效资源定义(uri 必须是非空字符串)', false);
+    }
+    const uri = raw['uri'];
+    if (uris.has(uri)) {
+      throw new McpTransportError('jsonrpc_error', `resources/list 包含重复资源 URI: ${uri}`, false);
+    }
+    if ('name' in raw && typeof raw['name'] !== 'string') {
+      throw new McpTransportError('jsonrpc_error', `资源 ${uri} 的 name 无效`, false);
+    }
+    if ('description' in raw && typeof raw['description'] !== 'string') {
+      throw new McpTransportError('jsonrpc_error', `资源 ${uri} 的 description 无效`, false);
+    }
+    if ('mimeType' in raw && typeof raw['mimeType'] !== 'string') {
+      throw new McpTransportError('jsonrpc_error', `资源 ${uri} 的 mimeType 无效`, false);
+    }
+    if ('size' in raw && (typeof raw['size'] !== 'number' || !Number.isSafeInteger(raw['size']) || raw['size'] < 0)) {
+      throw new McpTransportError('jsonrpc_error', `资源 ${uri} 的 size 无效`, false);
+    }
+    resources.push({
+      uri,
+      ...(typeof raw['name'] === 'string' ? { name: raw['name'] } : {}),
+      ...(typeof raw['description'] === 'string' ? { description: raw['description'] } : {}),
+      ...(typeof raw['mimeType'] === 'string' ? { mimeType: raw['mimeType'] } : {}),
+      ...(typeof raw['size'] === 'number' ? { size: raw['size'] } : {}),
+      ...(isRecord(raw['annotations']) ? { annotations: raw['annotations'] } : {}),
+    });
+    uris.add(uri);
+  }
+  return resources;
+}
+
+export function parseResourceReadResult(result: unknown): { ok: true; data: { contents: readonly ResourceContent[] } } | { ok: false; message: string } {
+  if (!isRecord(result) || !Array.isArray(result['contents']) || result['contents'].length === 0) {
+    return { ok: false, message: 'resources/read 响应缺少 contents 数组' };
+  }
+  const contents: ResourceContent[] = [];
+  for (const raw of result['contents']) {
+    if (!isRecord(raw) || typeof raw['uri'] !== 'string' || raw['uri'].trim() === '') {
+      return { ok: false, message: 'resources/read 包含无效内容(uri 必须是非空字符串)' };
+    }
+    const hasText = typeof raw['text'] === 'string';
+    const hasBlob = typeof raw['blob'] === 'string';
+    if (hasText === hasBlob) {
+      return { ok: false, message: `资源 ${raw['uri']} 必须且只能包含 text 或 blob` };
+    }
+    if ('mimeType' in raw && typeof raw['mimeType'] !== 'string') {
+      return { ok: false, message: `资源 ${raw['uri']} 的 mimeType 无效` };
+    }
+    const common = {
+      uri: raw['uri'],
+      ...(typeof raw['mimeType'] === 'string' ? { mimeType: raw['mimeType'] } : {}),
+    };
+    contents.push(hasText
+      ? { ...common, text: raw['text'] as string }
+      : { ...common, blob: raw['blob'] as string });
+  }
+  return { ok: true, data: { contents } };
 }

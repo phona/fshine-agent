@@ -4,17 +4,19 @@
  * 工具结果原样透传给 runtime,分页与否由模型依据工具契约自行决策。
  */
 import type {
+  DiscoveredResource,
   DiscoveredTool,
   ErrorCode,
   HostToolClient,
   McpProfileConfig,
   McpToolName,
+  ResourceOutcome,
   ToolOutcome,
 } from '@fshine/contracts';
 import Ajv, { type ValidateFunction } from 'ajv';
 import { createHash } from 'node:crypto';
 import { READ_TOOLS } from '@fshine/contracts';
-import { McpConnection, McpTransportError, type McpConnectionOptions } from './connection';
+import { McpConnection, McpTransportError, parseResourceReadResult, type McpConnectionOptions } from './connection';
 import { parseEnvelope } from './envelope-parse';
 import { SpecVersionMismatchError } from './spec-version';
 import { delay, errorMessage, isRecord } from './utils';
@@ -43,9 +45,25 @@ export interface McpToolCallEndEvent {
   artifactId?: string;
 }
 
+export interface McpResourceReadStartEvent {
+  requestId: string;
+  uri: string;
+  startedAt: string;
+}
+
+export interface McpResourceReadEndEvent {
+  requestId: string;
+  uri: string;
+  finishedAt: string;
+  status: 'ok' | 'error';
+  errorMessage?: string;
+}
+
 export interface McpHostAudit {
   onStart?(event: McpToolCallStartEvent): void;
   onEnd?(event: McpToolCallEndEvent): void;
+  onResourceReadStart?(event: McpResourceReadStartEvent): void;
+  onResourceReadEnd?(event: McpResourceReadEndEvent): void;
 }
 
 /** 单次调用的运行时钩子:重试可见化(进度帧)等 */
@@ -76,6 +94,8 @@ export interface McpHostOptions {
   allowedTools?: readonly string[];
   /** V1 explicit tool/category policy; takes precedence over allowedTools. */
   toolPolicy?: McpToolPolicy;
+  /** Explicit resource URI allowlist. Resources are never readable unless listed here. */
+  allowedResourceUris?: readonly string[];
   /** 渠道同步回复总预算(硬约束);重试前检查,超了就停止重试 */
   channelBudgetMs?: number;
   audit?: McpHostAudit;
@@ -94,6 +114,7 @@ export class McpHost {
   private unusable = false;
   private unusableReason = '';
   private readonly allowedTools: ReadonlySet<string>;
+  private readonly allowedResourceUris: ReadonlySet<string>;
   private readonly toolCategories: ReadonlyMap<string, McpToolCategory>;
   private readonly allowedCategories: ReadonlySet<McpToolCategory> | null;
   private readonly hasToolPolicy: boolean;
@@ -105,6 +126,7 @@ export class McpHost {
     const policy = options.toolPolicy;
     this.hasToolPolicy = policy !== undefined;
     this.allowedTools = new Set<string>(policy?.allowedTools ?? options.allowedTools ?? READ_TOOLS);
+    this.allowedResourceUris = new Set(options.allowedResourceUris ?? options.profile.allowedResourceUris ?? []);
     this.toolCategories = new Map(Object.entries(policy?.categories ?? {}));
     this.allowedCategories = policy?.allowedCategories ? new Set(policy.allowedCategories) : null;
     // Conversation state contains account IDs/cursors. It must never cross
@@ -120,6 +142,11 @@ export class McpHost {
   /** 最近一次(重)连接的 tools/list 结果;连接建立前为空。 */
   get discoveredTools(): readonly DiscoveredTool[] {
     return this.connection?.discoveredTools ?? [];
+  }
+
+  /** 最近一次(重)连接的 resources/list 结果;连接建立前为空。 */
+  get discoveredResources(): readonly DiscoveredResource[] {
+    return this.connection?.discoveredResources ?? [];
   }
 
   get connected(): boolean {
@@ -164,8 +191,10 @@ export class McpHost {
     const host = this;
     return {
       tools: () => host.visibleTools(principalCategories),
+      resources: () => host.visibleResources(),
       call: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, false, accountSetScope),
       callApprovedWrite: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, true, accountSetScope),
+      readResource: (uri, signal) => host.readResource(requestId, uri, signal),
     };
   }
 
@@ -285,6 +314,45 @@ export class McpHost {
     return this.discoveredTools.filter((tool) => principalCategories.includes(this.toolCategories.get(tool.name) as McpToolCategory));
   }
 
+  private visibleResources(): readonly DiscoveredResource[] {
+    return this.discoveredResources.filter((resource) => this.allowedResourceUris.has(resource.uri));
+  }
+
+  private async readResource(requestId: string, uri: string, signal?: AbortSignal): Promise<ResourceOutcome> {
+    if (!this.allowedResourceUris.has(uri)) {
+      return resourceError('知识资源未列入 host allowlist');
+    }
+    if (this.unusable) return resourceError(`MCP server 不可用: ${this.unusableReason}`);
+    try {
+      await this.ensureReady();
+    } catch (err) {
+      return resourceError(`MCP 连接失败: ${errorMessage(err)}`);
+    }
+    const connection = this.connection;
+    if (!connection) return resourceError('MCP 连接不可用');
+    if (!connection.discoveredResources.some((resource) => resource.uri === uri)) {
+      return resourceError('知识资源不存在或未由 MCP 声明');
+    }
+    const audit = this.options.audit;
+    audit?.onResourceReadStart?.call(audit, { requestId, uri, startedAt: new Date().toISOString() });
+    let outcome: ResourceOutcome;
+    try {
+      const result = await connection.request('resources/read', { uri }, this.options.profile.requestTimeoutMs, signal);
+      const parsed = parseResourceReadResult(result);
+      outcome = parsed.ok ? parsed : resourceError(parsed.message);
+    } catch (err) {
+      outcome = resourceError(errorMessage(err));
+    }
+    audit?.onResourceReadEnd?.call(audit, {
+      requestId,
+      uri,
+      finishedAt: new Date().toISOString(),
+      status: outcome.ok ? 'ok' : 'error',
+      ...(!outcome.ok ? { errorMessage: outcome.error.message } : {}),
+    });
+    return outcome;
+  }
+
   private async attemptOnce(
     connection: McpConnection,
     tool: McpToolName,
@@ -391,5 +459,9 @@ function formatError(): ToolOutcome {
 }
 
 function internalError(message: string): ToolOutcome {
+  return { ok: false, error: { code: 'INTERNAL', message, retryable: false } };
+}
+
+function resourceError(message: string): ResourceOutcome {
   return { ok: false, error: { code: 'INTERNAL', message, retryable: false } };
 }

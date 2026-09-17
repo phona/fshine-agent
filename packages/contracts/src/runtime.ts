@@ -25,6 +25,32 @@ export interface DiscoveredTool {
   inputSchema: Record<string, unknown>;
 }
 
+/** MCP resources/list 发现的资源。资源 URI 是 server 声明的 opaque identifier。 */
+export interface DiscoveredResource {
+  uri: string;
+  name?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+  annotations?: Record<string, unknown>;
+}
+
+/** MCP resources/read 的单个内容块。 */
+export interface ResourceContent {
+  uri: string;
+  mimeType?: string;
+  text?: string;
+  blob?: string;
+}
+
+export interface ResourceReadResult {
+  contents: readonly ResourceContent[];
+}
+
+export type ResourceOutcome =
+  | { ok: true; data: ResourceReadResult }
+  | { ok: false; error: McpError };
+
 export type ToolOutcome =
   | { ok: true; data: unknown; meta: EnvelopeMeta }
   | { ok: false; error: McpError; meta?: EnvelopeMeta };
@@ -36,11 +62,15 @@ export type ToolOutcome =
  */
 export interface HostToolClient {
   tools(): readonly DiscoveredTool[];
+  /** resources/list 发现的、且通过 host resource allowlist 暴露的资源。 */
+  resources?(): readonly DiscoveredResource[];
   /** Ordinary model-originated call. confirmed=true writes are rejected. */
   call(tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
   /** Host-only confirmation path. Runtime calls this only after a persisted
    * pending intent is matched to an explicit user confirmation. */
   callApprovedWrite?(tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
+  /** 仅允许读取当前 MCP 声明且 host 显式 allowlist 的 URI。 */
+  readResource?(uri: string, signal?: AbortSignal): Promise<ResourceOutcome>;
 }
 
 /** V0 回复纯文本;渠道侧负责长度截断。 */

@@ -26,6 +26,8 @@ export interface McpProfileConfig {
   maxRetries: number;
   /** 传给 server 进程的 env(如 ALLOWED_ACCOUNT_SETS);凭据类 env 禁止 */
   env?: Record<string, string>;
+  /** MCP resources/read 的显式 URI allowlist；未配置时禁止读取资源。 */
+  allowedResourceUris?: string[];
 }
 
 export interface AppConfig {
