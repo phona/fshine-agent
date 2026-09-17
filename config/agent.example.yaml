@@ -37,6 +37,14 @@ mcpProfiles:
     env:
       # 部署级账套白名单(可选;留空 = 不设限)
       ALLOWED_ACCOUNT_SETS: ""
+    # 只读知识资源白名单；账套决策资源由 Host 按授权账套控制。
+    allowedResourceUris:
+      - "17dz://domains/voucher/mechanisms"
+      - "17dz://domains/voucher/templates"
+      - "17dz://domains/voucher/contract-schema"
+      - "17dz://domains/payroll/mechanisms"
+      - "17dz://domains/payroll/templates"
+      - "17dz://domains/payroll/contract-schema"
 
 # ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
 # channel:
