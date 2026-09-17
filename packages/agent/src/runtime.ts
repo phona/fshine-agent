@@ -8,7 +8,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { loadTranscript, saveTranscript } from './session';
 import { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 import { ToolUserError, type TurnDriver } from './driver';
-import type { AgentReply, ConversationSessionRepo, HostToolClient, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, ConversationSessionRepo, DiscoveredResource, DiscoveredTool, HostToolClient, TrustedContext } from '@fshine/contracts';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000; // 24h:财务助手"上午查账、下午接着问",分钟级 TTL 会造成静默失忆
 /** 回合预算:超时 driver 中止并返回空文本 */
@@ -19,6 +19,7 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 /** Deterministic response when this turn's explicit account-set lookup found no match. */
 export const ACCOUNT_SET_SEARCH_MISS = '未找到匹配的账套，无法继续查询。请提供完整的账套名称或更具体的名称后重试。';
 /** Direct balance/ledger requests must not be answered by scanning vouchers. */
+export const READ_KNOWLEDGE_RESOURCE_TOOL = 'read_knowledge_resource';
 
 export interface TaxAgentRuntimeDeps {
   driver: TurnDriver;
@@ -34,7 +35,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
 
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
-      const discovered = tools.tools();
+      const resources = tools.resources?.() ?? [];
+      const allowedResourceUris = new Set(resources.map((resource) => resource.uri));
+      const discovered = withKnowledgeResourceTool(tools.tools(), resources);
       // 无可用工具 = host 未就绪/无权限:此回合必然无法完成任何查询,尽早收场
       if (discovered.length === 0) return { text: FALLBACK_FAILURE };
 
@@ -63,6 +66,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
         exec: async (tool, args, signal) => {
           if (accountSetSearchMiss && hasAccountSetId(args)) {
             throw new ToolUserError('本轮搜索未找到匹配账套，不能沿用历史账套。请提供正确的账套名称或更具体的名称后重试。');
+          }
+          if (tool === READ_KNOWLEDGE_RESOURCE_TOOL) {
+            const uri = args['uri'];
+            if (typeof uri !== 'string') throw new ToolUserError('知识资源 URI 无效。');
+            if (!allowedResourceUris.has(uri)) throw new ToolUserError('该知识资源未被当前数据源声明或授权。');
+            if (!tools.readResource) throw new ToolUserError('当前数据源不支持读取知识资源。');
+            const resource = await tools.readResource(uri, signal);
+            if (!resource.ok) throw new ToolUserError(toUserMessage(resource.error));
+            return resource.data;
           }
           const outcome = await tools.call(tool, args, signal);
           if (!outcome.ok) throw new ToolUserError(toUserMessage(outcome.error));
@@ -128,4 +140,34 @@ function isEmptyAccountSetSearch(data: unknown): boolean {
   if (!data || typeof data !== 'object') return false;
   const accountSets = (data as { accountSets?: unknown }).accountSets;
   return Array.isArray(accountSets) && accountSets.length === 0;
+}
+
+/**
+ * Resources are exposed to the model as one constrained virtual tool. The
+ * URI enum is built from the host's already-filtered resources, while the
+ * host still re-checks the URI at read time. This keeps resource access
+ * discoverable without granting the model arbitrary resources/read access.
+ */
+function withKnowledgeResourceTool(
+  tools: readonly DiscoveredTool[],
+  resources: readonly DiscoveredResource[],
+): readonly DiscoveredTool[] {
+  if (resources.length === 0 || tools.some((tool) => tool.name === READ_KNOWLEDGE_RESOURCE_TOOL)) return tools;
+  const uris = [...new Set(resources.map((resource) => resource.uri).filter((uri) => uri.trim() !== ''))];
+  if (uris.length === 0) return tools;
+  return [
+    ...tools,
+    {
+      name: READ_KNOWLEDGE_RESOURCE_TOOL,
+      description: '读取当前 MCP 已发现且已授权的知识资源。只能使用下列 URI；资源由数据源维护，读取后再按其契约调用相关工具。',
+      inputSchema: {
+        type: 'object',
+        required: ['uri'],
+        additionalProperties: false,
+        properties: {
+          uri: { type: 'string', enum: uris },
+        },
+      },
+    },
+  ];
 }

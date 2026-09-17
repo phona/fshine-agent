@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TurnDriverInput } from './src/driver';
-import type { DiscoveredTool, HostToolClient, ToolOutcome, TrustedContext } from '@fshine/contracts';
+import type { DiscoveredResource, DiscoveredTool, HostToolClient, ResourceOutcome, ToolOutcome, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, type ScriptedTurnStep } from './src/driver';
 import { ACCOUNT_SET_SEARCH_MISS, createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src';
 import { FakeSessionRepo, FakeToolClient, fakeErr, fakeOk } from './test-helpers';
@@ -206,6 +206,58 @@ describe('createTaxAgentRuntime(转录即状态)', () => {
     const noTools: HostToolClient = { tools: () => [], call: async () => fakeOk({}) };
     const reply = await runtime.handleTurn(makeCtx(), '查一下', noTools);
     expect(reply.text).toBe(FALLBACK_FAILURE);
+  });
+
+  it('当前 MCP 资源通过受控虚拟工具读取，不能绕过 resources/read 客户端', async () => {
+    const sessions = new FakeSessionRepo();
+    const resource: DiscoveredResource = {
+      uri: '17dz://domain/voucher/templates',
+      name: 'voucher templates',
+      mimeType: 'text/markdown',
+    };
+    const reads: string[] = [];
+    const resourceClient: HostToolClient = {
+      tools: () => READ_TOOLS,
+      resources: () => [resource],
+      call: async () => fakeOk({}),
+      readResource: async (uri): Promise<ResourceOutcome> => {
+        reads.push(uri);
+        return { ok: true, data: { contents: [{ uri, mimeType: 'text/markdown', text: '# template' }] } };
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{
+        toolCalls: [{ tool: 'read_knowledge_resource', args: { uri: resource.uri } }],
+        text: '已读取凭证模板。',
+      }]),
+      sessions,
+    });
+    const reply = await runtime.handleTurn(makeCtx(), '读取凭证模板', resourceClient);
+    expect(reply.text).toBe('已读取凭证模板。');
+    expect(reads).toEqual([resource.uri]);
+  });
+
+  it('资源虚拟工具拒绝未被当前 MCP 资源目录声明的 URI', async () => {
+    const sessions = new FakeSessionRepo();
+    let reads = 0;
+    const resourceClient: HostToolClient = {
+      tools: () => READ_TOOLS,
+      resources: () => [{ uri: '17dz://domain/voucher/templates' }],
+      call: async () => fakeOk({}),
+      readResource: async (): Promise<ResourceOutcome> => {
+        reads += 1;
+        return { ok: true, data: { contents: [{ uri: '17dz://secret', text: 'should not read' }] } };
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{
+        toolCalls: [{ tool: 'read_knowledge_resource', args: { uri: '17dz://secret' } }],
+      }]),
+      sessions,
+    });
+    const reply = await runtime.handleTurn(makeCtx(), '读取秘密资源', resourceClient);
+    expect(reply.text).toContain('未被当前数据源声明或授权');
+    expect(reads).toBe(0);
   });
 
   it('超时(空文本+过期deadline) → FALLBACK_TIMEOUT', async () => {

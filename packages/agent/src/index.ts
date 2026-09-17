@@ -13,6 +13,7 @@ export * from './session';
 export {
   createTaxAgentRuntime,
   ACCOUNT_SET_SEARCH_MISS,
+  READ_KNOWLEDGE_RESOURCE_TOOL,
   FALLBACK_TIMEOUT,
   FALLBACK_FAILURE,
   type TaxAgentRuntimeDeps,
