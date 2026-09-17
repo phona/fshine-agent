@@ -126,6 +126,17 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     expect(audit.starts).toHaveLength(1);
   });
 
+  it('scope 过滤搜索结果:模型看不到未授权账套', { timeout: 60_000 }, async () => {
+    const host = trackedHost();
+    const client = host.clientFor('req-search-scope', ['as_001']);
+
+    const matched = expectOk(await client.call('search_account_sets', { query: '幻晟' }));
+    expect(matched.data).toEqual({ accountSets: [{ id: 'as_001', name: '幻晟' }] });
+
+    const inaccessible = expectOk(await client.call('search_account_sets', { query: '易晟' }));
+    expect(inaccessible.data).toEqual({ accountSets: [] });
+  });
+
   it('验收 #4a:FAKE_SCENARIO=needs_login → ok:false NEEDS_LOGIN,get_login_status 本身仍可用', { timeout: 60_000 }, async () => {
     const audit = new AuditRecorder();
     const host = trackedHost({ FAKE_SCENARIO: 'needs_login' }, {}, audit);

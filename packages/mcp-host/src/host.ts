@@ -270,6 +270,7 @@ export class McpHost {
       }
     }
 
+    outcome = filterSearchAccountSetOutcome(tool, allowedAccountSetIds, outcome);
     this.emitEnd(requestId, tool, outcome);
     const bounded = trimForRuntime(outcome);
     if (!bounded.ok && outcome.ok) {
@@ -361,6 +362,27 @@ function outcomeFromToolResult(result: unknown): ToolOutcome {
   const envelope = parsed.envelope;
   if ('error' in envelope) return { ok: false, error: envelope.error, meta: envelope.meta };
   return { ok: true, data: envelope.data, meta: envelope.meta };
+}
+
+/**
+ * The upstream server may apply an instance-level account-set scope, but the
+ * host owns the caller's principal-level scope.  Search has no accountSetId
+ * argument for the normal preflight gate, so enforce that scope on its result
+ * before it is exposed to the model.
+ */
+function filterSearchAccountSetOutcome(
+  tool: McpToolName,
+  allowedAccountSetIds: readonly string[],
+  outcome: ToolOutcome,
+): ToolOutcome {
+  if (tool !== 'search_account_sets' || !outcome.ok || !isRecord(outcome.data) || !Array.isArray(outcome.data['accountSets'])) {
+    return outcome;
+  }
+  const allowed = new Set(allowedAccountSetIds);
+  const accountSets = outcome.data['accountSets'].filter((accountSet) => (
+    isRecord(accountSet) && typeof accountSet['id'] === 'string' && allowed.has(accountSet['id'])
+  ));
+  return { ...outcome, data: { ...outcome.data, accountSets } };
 }
 
 function formatError(): ToolOutcome {
