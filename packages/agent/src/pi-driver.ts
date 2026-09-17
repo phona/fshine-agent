@@ -3,18 +3,17 @@
  * 模型走原生 function calling(无自定义 JSON 协议);流式响应;空闲超时。
  * 事实类进度(重试等)由 host 钩子负责;工具级进度在本驱动的 execute 内渲染。
  */
-import { Agent, type AgentMessage, type AgentTool } from '@earendil-works/pi-agent-core';
+import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummary, shouldCompact, type AgentMessage } from '@earendil-works/pi-agent-core';
+import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/context';
 import { createModels, createProvider, envApiKeyAuth, type Model } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { Type } from 'typebox';
-import type { DiscoveredTool, ReadToolName } from '@fshine/contracts';
+import type { DiscoveredTool, McpToolName } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { defaultStepText } from './step-text';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
-const MAX_TOOL_RESULT_CHARS = 6_000;
-
 /** Kimi coding/OpenAI-compatible endpoint's supported reasoning controls. */
 export const KIMI_THINKING_LEVEL_MAP = {
   off: null,
@@ -92,7 +91,8 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const names = new Map<string, string>();
       const tools = input.tools.map((tool) => toAgentTool(tool, input, names)) as unknown as AgentTool<any, any>[];
-      const initialMessages = input.messages.map((message) => toPiMessage(message, modelId));
+      // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
+      const initialMessages = input.messages;
 
       const agent = new Agent({
         initialState: {
@@ -120,17 +120,20 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           event: 'pi_driver_error',
           error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
         }));
-        return { text: '' };
+        return { text: '', messages: agent.state.messages };
       } finally {
         clearTimeout(abortTimer);
       }
 
       // Aborted/error assistant messages may contain a partial streamed answer.
       // Never expose that as a successful response.
-      if (timedOut || hasFailedAssistantMessage(agent.state.messages)) return { text: '' };
+      if (timedOut || hasFailedAssistantMessage(agent.state.messages)) {
+        return { text: '', messages: agent.state.messages };
+      }
 
       // 取终结文本:最后一条 assistant 的正文;若工具以确定性话术终结(terminate),
       // 最后一条是 toolResult,取其文本
+      let text = '';
       for (let i = agent.state.messages.length - 1; i >= 0; i -= 1) {
         const message = agent.state.messages[i] as {
           role?: string;
@@ -138,12 +141,44 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           stopReason?: string;
         } | undefined;
         if (message?.role === 'assistant') {
-          const text = textFromContent(message.content);
-          return { text: message.stopReason === 'stop' ? text : '' };
+          text = textFromContent(message.content);
+          if (message.stopReason !== 'stop') text = '';
+          break;
         }
-        if (message?.role === 'toolResult') return { text: textFromContent(message.content) };
+        if (message?.role === 'toolResult') {
+          text = textFromContent(message.content);
+          break;
+        }
       }
-      return { text: '' };
+      // 转录交还 runtime 持久化:包含本回合全部用户消息/工具调用/结果
+      return { text, messages: agent.state.messages };
+    },
+
+    /** 上下文压缩(pi 原生 compact):超阈值时摘要替换旧消息,保留最近尾巴。失败不阻塞回合。 */
+    async compact(messages: AgentMessage[]): Promise<AgentMessage[]> {
+      const est = estimateContextTokens(messages);
+      if (!shouldCompact(est.tokens, model.contextWindow, DEFAULT_COMPACTION_SETTINGS)) return messages;
+      const summary = await generateSummary(
+        messages, models, model,
+        DEFAULT_COMPACTION_SETTINGS.reserveTokens,
+        '这是财务查询助手的会话压缩。摘要必须保留:1)当前使用的账套 id(as_xxx)与名称;2)会计期间;3)最近一次 list_vouchers 结果里的 nextCursor/prevCursor 原值(用户要靠它翻页);4)用户的关键业务意图与未决问题。',
+        undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT,
+      );
+      if (!summary.ok) {
+        console.warn(JSON.stringify({ event: 'context_compact_failed', error: String(summary.error).slice(0, 200) }));
+        return messages;
+      }
+      const kept: AgentMessage[] = [];
+      let keptTokens = 0;
+      for (let i = messages.length - 1; i >= 0 && keptTokens < DEFAULT_COMPACTION_SETTINGS.keepRecentTokens; i -= 1) {
+        kept.unshift(messages[i]!);
+        keptTokens += estimateTokens(messages[i]!);
+      }
+      console.log(JSON.stringify({ event: 'context_compacted', tokensBefore: est.tokens, keptMessages: kept.length }));
+      return [
+        { role: 'user', content: `【此前会话摘要】\n${summary.value}\n(以上为此前对话的压缩摘要;具体数据请以重新调用工具的结果为准)`, timestamp: Date.now() } as unknown as AgentMessage,
+        ...kept,
+      ];
     },
   };
 }
@@ -202,10 +237,10 @@ function toAgentTool(
       const phrase = typeof progress === 'string' ? progress : '';
       input.onStep(phrase || defaultStepText(tool.name, args, names));
       try {
-        const data = await input.exec(tool.name as ReadToolName, args, signal);
+        const data = await input.exec(tool.name as McpToolName, args, signal);
         rememberAccountSets(tool.name, data, names);
         return {
-          content: [{ type: 'text' as const, text: boundedToolResult(data) }],
+          content: [{ type: 'text' as const, text: JSON.stringify(data) }],
           details: {},
         };
       } catch (error) {
@@ -221,22 +256,6 @@ function toAgentTool(
       }
     },
   };
-}
-
-/** Keep tool output from consuming the entire model context window. */
-export function boundedToolResult(data: unknown, maxChars = MAX_TOOL_RESULT_CHARS): string {
-  if (maxChars <= 0) return '';
-  let text: string;
-  try {
-    const serialized = JSON.stringify(data);
-    text = serialized === undefined ? String(data) : serialized;
-  } catch {
-    text = String(data);
-  }
-  if (text.length <= maxChars) return text;
-  const suffix = `…[结果已截断,原始长度${text.length}字符]`;
-  if (suffix.length >= maxChars) return suffix.slice(0, maxChars);
-  return `${text.slice(0, maxChars - suffix.length)}${suffix}`;
 }
 
 function hasFailedAssistantMessage(messages: readonly unknown[]): boolean {

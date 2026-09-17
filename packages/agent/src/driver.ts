@@ -1,26 +1,25 @@
 /**
  * TurnDriver:一次回合的模型驱动抽象。
  * 生产实现走 pi-agent-core + pi-ai(pi-driver.ts);测试用 ScriptedTurnDriver(本文件)。
- * 这层缝的存在使"换模型/换 Agent 框架"不波及 runtime 的业务状态机与测试。
+ * 上下文模型:转录即状态——messages 是包含工具调用与结果的完整转录,回合结束时
+ * driver 返回更新后的转录,由 runtime 持久化。不做任何投影或裁剪。
  */
-import type { DiscoveredTool, ReadToolName } from '@fshine/contracts';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { DiscoveredTool, McpToolName } from '@fshine/contracts';
 
-/** 模型上下文消息(仅 user/assistant 文本;工具结果由 agent 框架管理) */
-export interface DriverMessage {
-  role: 'user' | 'assistant';
-  content: string;
-}
+/** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
+export type DriverMessage = AgentMessage;
 
 export interface TurnDriverInput {
   systemPrompt: string;
   /** host tools/list 发现的工具(含 inputSchema),driver 据此构造原生工具定义 */
   tools: readonly DiscoveredTool[];
-  /** 完整模型上下文:历史重放 + 当前用户消息(最后一条) */
+  /** 完整转录:历史全部消息(不含本条新用户消息,由 runtime 在调用前 push) */
   messages: DriverMessage[];
   /** 阶段进度回调(埋点事实渲染 + 模型意图短语) */
   onStep: (text: string) => void;
-  /** 执行工具:返回裁剪后的 data;失败时抛出面向用户的安全话术 */
-  exec: (tool: ReadToolName, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+  /** 执行工具:返回 data(原样进入转录);失败时抛出面向用户的安全话术 */
+  exec: (tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   /** 回合绝对截止时间(Date.now() 基准),超时 driver 应中止并返回空文本 */
   deadline: number;
 }
@@ -28,6 +27,14 @@ export interface TurnDriverInput {
 export interface TurnDriverResult {
   /** 最终给用户的回复文本;空字符串表示本次模型调用未产出可用回复 */
   text: string;
+  /** 更新后的完整转录(含本回合全部消息),由 runtime 持久化 */
+  messages: DriverMessage[];
+}
+
+export interface TurnDriver {
+  run(input: TurnDriverInput): Promise<TurnDriverResult>;
+  /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。 */
+  compact?(messages: DriverMessage[]): Promise<DriverMessage[]>;
 }
 
 export interface TurnDriver {
@@ -44,7 +51,7 @@ export class ToolUserError extends Error {
 
 export interface ScriptedTurnStep {
   /** 本次模型调用回放的原生工具调用(依次真实执行 exec) */
-  toolCalls?: Array<{ tool: ReadToolName; args: Record<string, unknown> }>;
+  toolCalls?: Array<{ tool: McpToolName; args: Record<string, unknown> }>;
   /** 本次调用的回复文本(不回放工具调用时即最终答案) */
   text?: string;
 }
@@ -69,12 +76,23 @@ export function ScriptedTurnDriver(steps: ScriptedTurnStep[]): TurnDriver {
             await input.exec(call.tool, call.args);
           }
         } catch (error) {
-          if (error instanceof ToolUserError) return { text: error.message };
+          if (error instanceof ToolUserError) {
+            // 测试驱动产出的 assistant 消息为简化形状,转录由 runtime 原样透传,不做解释
+            return {
+              text: error.message,
+              messages: [...input.messages, { role: 'assistant', content: error.message, timestamp: Date.now() } as unknown as DriverMessage],
+            };
+          }
           throw error;
         }
-        if (step.text !== undefined) return { text: step.text };
+        if (step.text !== undefined) {
+          return {
+            text: step.text,
+            messages: [...input.messages, { role: 'assistant', content: step.text, timestamp: Date.now() } as unknown as DriverMessage],
+          };
+        }
       }
-      return { text: '' };
+      return { text: '', messages: [...input.messages] };
     },
   };
 }
