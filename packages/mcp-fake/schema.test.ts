@@ -88,14 +88,14 @@ describe('inputSchema 保真(spec §6.2)', () => {
     const oneOf = schema['oneOf'] as Array<Record<string, unknown>>;
     expect(oneOf).toHaveLength(4);
     expect(oneOf.map((b) => b['comment'])).toEqual([
-      '默认模式:不传任何分页参数 = 首页 20 张',
+      '默认模式:不传任何分页参数 = 首页 4 张',
       '手动翻页',
       '拉全(allPages 仅 const true 命中,false 不算数)',
       '游标续翻',
     ]);
     const props = schema['properties'] as Record<string, Record<string, unknown>>;
     expect(props['period']).toEqual({ type: 'string', pattern: '^\\d{6}$' });
-    expect(props['pageSize']).toEqual({ type: 'integer', minimum: 1, maximum: 100, default: 20 });
+    expect(props['pageSize']).toEqual({ type: 'integer', minimum: 1, maximum: 20, default: 4 });
     expect(schema['required']).toEqual(['accountSetId', 'period']);
   });
 
@@ -123,7 +123,7 @@ describe('ajv 参数校验 → JSON-RPC -32602', () => {
   it('pageNo 与 cursor 同传(oneOf 互斥)被拒绝', async () => {
     await expectInvalidParams('tools/call', {
       name: 'list_vouchers',
-      arguments: { accountSetId: 'as_001', period: '202607', pageNo: 1, cursor: 'eyJwYWdlTm8iOjF9' },
+      arguments: { accountSetId: 'as_001', period: '202607', pageNo: 1, cursor: 'eyJvZmZzZXQiOjF9' },
     });
   });
 
@@ -167,8 +167,8 @@ describe('ajv 参数校验 → JSON-RPC -32602', () => {
       { ...base, pageNo: 0 },
       { ...base, pageNo: 1, pageSize: 10 },
       { ...base, allPages: true },
-      { ...base, cursor: Buffer.from(JSON.stringify({ pageNo: 1 })).toString('base64url') },
-      { ...base, cursor: Buffer.from(JSON.stringify({ pageNo: 1 })).toString('base64url'), pageSize: 5 },
+      { ...base, cursor: Buffer.from(JSON.stringify({ offset: 1 })).toString('base64url') },
+      { ...base, cursor: Buffer.from(JSON.stringify({ offset: 1 })).toString('base64url'), pageSize: 5 },
     ]) {
       const { envelope, isError } = await callTool(transport, 201, 'list_vouchers', args);
       expect(isError, `参数应通过 schema: ${JSON.stringify(args)}`).toBe(false);

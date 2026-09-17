@@ -13,6 +13,111 @@ export const READ_TOOLS = [
 
 export type ReadToolName = (typeof READ_TOOLS)[number];
 
+/** MCP tools/list names are runtime-discovered.  ReadToolName remains useful
+ * for the V0 fake, while the host/agent boundary must also carry V1 tools. */
+export type McpToolName = string;
+
+export type WriteToolName = 'validate_voucher' | 'submit_voucher' | 'submit_voucher_batch' | 'get_submission_status';
+
+export interface VoucherContractEntry {
+  summary: string;
+  subjectCode: string;
+  assistantName?: string;
+  debit?: number;
+  credit?: number;
+}
+
+/** V1 write contract (spec §7). Amounts are decimal numbers in the fake. */
+export interface VoucherContract {
+  accountSetId: string;
+  date?: string;
+  template?: string;
+  voucherNo?: string;
+  entries: VoucherContractEntry[];
+}
+
+export interface ValidateVoucherArgs { contract: VoucherContract }
+export interface ValidateVoucherResult { ok: boolean; errors?: string[] }
+
+export interface SubmitVoucherArgs {
+  contract: VoucherContract;
+  idempotencyKey: string;
+  confirmed?: boolean;
+}
+
+export interface VoucherPreview {
+  accountSetId: string;
+  accountSetName: string;
+  date: string;
+  voucherNo: string;
+  entries: Array<{
+    summary: string;
+    subjectCode: string;
+    assistantName?: string;
+    debit: number;
+    credit: number;
+  }>;
+  totalDebit: number;
+  totalCredit: number;
+}
+
+export interface SubmitVoucherDryRunResult {
+  dryRun: true;
+  preview: VoucherPreview;
+  precheckFlags: Array<{ level: 'warn' | 'info'; message: string }>;
+}
+
+export interface SubmitVoucherResult {
+  dryRun: false;
+  voucherNo: string;
+  docId: string;
+  verified: boolean;
+}
+
+export interface SubmitVoucherBatchArgs {
+  contracts: VoucherContract[];
+  idempotencyKey: string;
+  confirmed?: boolean;
+}
+
+export interface SubmitVoucherBatchDryRunResult {
+  dryRun: true;
+  previews: Array<
+    | { index: number; ok: true; preview: VoucherPreview; precheckFlags: Array<{ level: 'warn' | 'info'; message: string }> }
+    | { index: number; ok: false; errors: string[] }
+  >;
+}
+
+export interface SubmissionResultEntry {
+  index: number;
+  ok: boolean;
+  voucherNo?: string;
+  docId?: string;
+  verified?: boolean;
+  error?: { code: string; details?: Record<string, unknown> };
+}
+
+export interface SubmitVoucherBatchResult {
+  dryRun: false;
+  batchKey: string;
+  summary: { total: number; succeeded: number; failed: number };
+  results: SubmissionResultEntry[];
+}
+
+export interface GetSubmissionStatusArgs {
+  tool: 'submit_voucher' | 'submit_voucher_batch';
+  idempotencyKey: string;
+}
+
+export interface GetSubmissionStatusResult {
+  status: 'not_found' | 'retryable' | 'bound';
+  executionState: 'not_started' | 'succeeded' | 'failed' | 'unknown' | 'may_have_succeeded';
+  boundStep?: string;
+  result?: Record<string, unknown>;
+  error?: Record<string, unknown>;
+  batch?: { batchKey: string; index: number; total: number };
+}
+
 export interface AccountSet {
   /** 稳定 id,server 注册表维护;权限、缓存、审计一律用它 */
   id: string;
@@ -88,7 +193,11 @@ export interface VoucherDoc {
 export interface ListVouchersResult {
   total: number;
   docs: VoucherDoc[];
-  /** 仅在还有后续页时返回;allPages 模式不返回 */
+  /** 本页起始的全局偏移(0 起) */
+  offset?: number;
+  /** 存在前驱页时返回;用户说"上一页"时原样传入 cursor */
+  prevCursor?: string;
+  /** 存在后继页时返回;用户说"下一页"时原样传入 cursor */
   nextCursor?: string;
 }
 

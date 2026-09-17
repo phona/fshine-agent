@@ -4,7 +4,7 @@
  */
 import type { EnvelopeMeta } from './envelope';
 import type { McpError } from './envelope';
-import type { ReadToolName } from './tools';
+import type { McpToolName } from './tools';
 
 /** 请求级可信执行上下文。字段一律由 host 从配置与渠道事实生成,LLM 永不参与。 */
 export interface TrustedContext {
@@ -36,7 +36,11 @@ export type ToolOutcome =
  */
 export interface HostToolClient {
   tools(): readonly DiscoveredTool[];
-  call(tool: ReadToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
+  /** Ordinary model-originated call. confirmed=true writes are rejected. */
+  call(tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
+  /** Host-only confirmation path. Runtime calls this only after a persisted
+   * pending intent is matched to an explicit user confirmation. */
+  callApprovedWrite?(tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
 }
 
 /** V0 回复纯文本;渠道侧负责长度截断。 */

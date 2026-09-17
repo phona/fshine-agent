@@ -61,7 +61,24 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       const host = hostFor(scope.mcpProfile, capabilities);
       // tools() 同步读取连接的 tools/list 结果;连接预热是异步的,必须先确保就绪,
       // 否则首个工具回合的 knownTools 为空,模型所有合法调用都会被判协议违规
-      await host.ensureReady().catch(() => {});
+      try {
+        await host.ensureReady();
+      } catch (error) {
+        await store.requests.setOutcome(requestId, 'failed');
+        console.error(JSON.stringify({
+          event: 'mcp_connection_failed',
+          requestId,
+          profile: scope.mcpProfile,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        return '数据服务连接失败，请稍后再试或联系管理员。';
+      }
+      console.info(JSON.stringify({
+        event: 'mcp_ready',
+        requestId,
+        profile: scope.mcpProfile,
+        tools: (host.discoveredTools ?? []).map((tool) => tool.name),
+      }));
       const hooks: McpCallHooks = {
         onRetry: (info) =>
           progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
@@ -72,7 +89,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           requestId,
           principalId,
           allowedAccountSetIds: scope.accountSetIds,
-          sessionId: `${message.wecomUserId}:${message.conversationId}`,
+          // Do not reuse candidates/cursors/history when the MCP backend
+          // changes (notably Fake MCP → the real 17dz deployment).
+          sessionId: `${host.conversationNamespace}:${message.wecomUserId}:${message.conversationId}`,
           onStep: progress,
         },
         message.text,

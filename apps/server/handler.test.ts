@@ -46,6 +46,7 @@ function fakeRuntime(order: string[], delayMs: number): AgentRuntime {
 const hostFor = () => ({
   ensureReady: async () => {},
   clientFor: () => ({}),
+  conversationNamespace: 'backend_test',
 } as unknown as McpHost);
 
 describe('createMessageHandler', () => {
@@ -78,7 +79,7 @@ describe('createMessageHandler', () => {
 
     const starts = order.filter((entry) => entry.startsWith('start:')).length;
     expect(starts).toBe(2);
-    expect(order.indexOf('start:user_a:c')).toBeLessThan(order.indexOf('end:user_a:c'));
-    expect(order.indexOf('end:user_a:c')).toBeLessThan(order.lastIndexOf('start:user_a:c'));
+    expect(order.indexOf('start:backend_test:user_a:c')).toBeLessThan(order.indexOf('end:backend_test:user_a:c'));
+    expect(order.indexOf('end:backend_test:user_a:c')).toBeLessThan(order.lastIndexOf('start:backend_test:user_a:c'));
   });
 });

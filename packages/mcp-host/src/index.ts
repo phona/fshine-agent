@@ -11,5 +11,5 @@ export {
   type McpToolPolicy,
 } from './host';
 export type { McpCallHooks, McpHostAudit, McpHostOptions, McpToolCallEndEvent, McpToolCallStartEvent } from './host';
-export { checkServerSpecVersion, EXPECTED_SPEC_VERSION, SpecVersionMismatchError } from './spec-version';
-export { trimForRuntime } from './trim';
+export { checkServerSpecVersion, EXPECTED_SPEC_VERSION, SUPPORTED_SPEC_VERSIONS, SpecVersionMismatchError } from './spec-version';
+export { RESULT_BUDGET_CHARS, trimForRuntime } from './trim';

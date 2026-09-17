@@ -7,10 +7,11 @@ import type {
   ErrorCode,
   HostToolClient,
   McpProfileConfig,
-  ReadToolName,
+  McpToolName,
   ToolOutcome,
 } from '@fshine/contracts';
 import Ajv, { type ValidateFunction } from 'ajv';
+import { createHash } from 'node:crypto';
 import { READ_TOOLS } from '@fshine/contracts';
 import { McpConnection, McpTransportError, type McpConnectionOptions } from './connection';
 import { parseEnvelope } from './envelope-parse';
@@ -93,6 +94,7 @@ export class McpHost {
   private readonly toolCategories: ReadonlyMap<string, McpToolCategory>;
   private readonly allowedCategories: ReadonlySet<McpToolCategory> | null;
   private readonly hasToolPolicy: boolean;
+  private readonly sessionNamespace: string;
   private readonly validators = new Map<string, ValidateFunction>();
   private readonly ajv = new Ajv({ allErrors: true, strictSchema: false });
 
@@ -102,6 +104,14 @@ export class McpHost {
     this.allowedTools = new Set<string>(policy?.allowedTools ?? options.allowedTools ?? READ_TOOLS);
     this.toolCategories = new Map(Object.entries(policy?.categories ?? {}));
     this.allowedCategories = policy?.allowedCategories ? new Set(policy.allowedCategories) : null;
+    // Conversation state contains account IDs/cursors. It must never cross
+    // from a fake MCP process to a real deployment (or another profile).
+    const profileIdentity = JSON.stringify({ command: options.profile.command, args: options.profile.args ?? [], cwd: options.profile.cwd });
+    this.sessionNamespace = createHash('sha256').update(profileIdentity).digest('hex').slice(0, 16);
+  }
+
+  get conversationNamespace(): string {
+    return this.sessionNamespace;
   }
 
   /** 最近一次(重)连接的 tools/list 结果;连接建立前为空。 */
@@ -151,6 +161,7 @@ export class McpHost {
     return {
       tools: () => host.visibleTools(principalCategories),
       call: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories),
+      callApprovedWrite: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, true),
     };
   }
 
@@ -189,17 +200,21 @@ export class McpHost {
   private async call(
     requestId: string,
     allowedAccountSetIds: readonly string[],
-    tool: ReadToolName,
+    tool: McpToolName,
     args: Record<string, unknown>,
     hooks?: McpCallHooks,
     signal?: AbortSignal,
     principalCategories?: readonly McpToolCategory[],
+    approvedWrite = false,
   ): Promise<ToolOutcome> {
     if (this.unusable) {
       return internalError(`MCP server 不可用: ${this.unusableReason}`);
     }
     if (principalCategories && !principalCategories.includes(this.toolCategories.get(tool) as McpToolCategory)) {
       return internalError('没有该工具的操作权限');
+    }
+    if (this.toolCategories.get(tool) === 'write' && args['confirmed'] === true && !approvedWrite) {
+      return internalError('写入尚未获得用户确认');
     }
     // scope 预检:未授权账套在 MCP 调用前被拒——不发往 server,也不触发 audit onStart
     const accountSetId = args['accountSetId'];
@@ -256,7 +271,12 @@ export class McpHost {
     }
 
     this.emitEnd(requestId, tool, outcome);
-    return trimForRuntime(outcome);
+    const bounded = trimForRuntime(outcome);
+    if (!bounded.ok && outcome.ok) {
+      // 契约破坏告警:生产者返回了超预算结果(分页契约未被遵守),fail-loud 拒绝进入上下文
+      console.warn(JSON.stringify({ event: 'result_over_budget', tool, requestId, hint: bounded.error.message }));
+    }
+    return bounded;
   }
 
   private visibleTools(principalCategories?: readonly McpToolCategory[]): readonly DiscoveredTool[] {
@@ -266,7 +286,7 @@ export class McpHost {
 
   private async attemptOnce(
     connection: McpConnection,
-    tool: ReadToolName,
+    tool: McpToolName,
     args: Record<string, unknown>,
     timeoutMs: number,
     signal?: AbortSignal,

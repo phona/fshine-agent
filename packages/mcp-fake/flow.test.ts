@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { ListVouchersResult, SearchAccountSetsResult, VoucherDoc } from '@fshine/contracts';
 import { asSuccess, callTool, makeTransport, rpc, type RpcResponse } from './test-helpers';
 
-function cursorOf(pageNo: number): string {
-  return Buffer.from(JSON.stringify({ pageNo }), 'utf8').toString('base64url');
+function cursorOf(offset: number): string {
+  return Buffer.from(JSON.stringify({ offset }), 'utf8').toString('base64url');
 }
 
 async function initialize(transport: ReturnType<typeof makeTransport>): Promise<RpcResponse> {
@@ -53,7 +53,7 @@ describe('查询链路 search → period → list_vouchers', () => {
     expect(success.meta.accountSetName).toBe('幻晟');
   });
 
-  it('list_vouchers 默认首页:total 45,docs 20 张,有 nextCursor,docDto 结构正确', async () => {
+  it('list_vouchers 默认首页:total 45,docs 4 张(契约页大小),有 nextCursor,docDto 结构正确', async () => {
     const { isError, envelope } = await callTool(transport, 6, 'list_vouchers', {
       accountSetId: 'as_001',
       period: '202607',
@@ -63,8 +63,10 @@ describe('查询链路 search → period → list_vouchers', () => {
     const data = success.data as ListVouchersResult;
     listResult = data;
     expect(data.total).toBe(45);
-    expect(data.docs).toHaveLength(20);
-    expect(data.nextCursor).toBe(cursorOf(1));
+    expect(data.docs).toHaveLength(4);
+    expect(data.offset).toBe(0);
+    expect(data.nextCursor).toBe(cursorOf(4));
+    expect(data.docs).toHaveLength(4);
 
     const first = data.docs[0]!;
     expect(first).toEqual({
@@ -89,26 +91,35 @@ describe('查询链路 search → period → list_vouchers', () => {
     expect(success.meta.accountSetId).toBe('as_001');
   });
 
-  it('cursor 续翻第 2、3 页,nextCursor 在末页终止', async () => {
+  it('cursor 续翻第 2、3 页,末页(第 12 页)nextCursor 终止', async () => {
     const next1 = listResult.nextCursor!;
     const page2 = await callTool(transport, 7, 'list_vouchers', { accountSetId: 'as_001', period: '202607', cursor: next1 });
     const data2 = asSuccess(page2.envelope).data as ListVouchersResult;
     expect(data2.total).toBe(45);
-    expect(data2.docs).toHaveLength(20);
-    expect(data2.docs[0]!.id).toBe('doc_202607_0021');
-    expect(data2.nextCursor).toBe(cursorOf(2));
+    expect(data2.docs).toHaveLength(4);
+    expect(data2.docs[0]!.id).toBe('doc_202607_0005');
+    expect(data2.offset).toBe(4);
+    expect(data2.prevCursor).toBe(cursorOf(0));
+    expect(data2.nextCursor).toBe(cursorOf(8));
 
     const page3 = await callTool(transport, 8, 'list_vouchers', { accountSetId: 'as_001', period: '202607', cursor: data2.nextCursor! });
     const data3 = asSuccess(page3.envelope).data as ListVouchersResult;
-    expect(data3.docs).toHaveLength(5);
+    expect(data3.docs).toHaveLength(4);
     expect(data3.docs.map((d) => d.id)).toEqual([
-      'doc_202607_0041',
-      'doc_202607_0042',
-      'doc_202607_0043',
-      'doc_202607_0044',
-      'doc_202607_0045',
+      'doc_202607_0009',
+      'doc_202607_0010',
+      'doc_202607_0011',
+      'doc_202607_0012',
     ]);
-    expect(data3.nextCursor).toBeUndefined();
+    expect(data3.nextCursor).toBe(cursorOf(12));
+
+    // 末页(第 12 页,pageNo=11):仅剩 1 张,nextCursor 终止
+    const lastPage = await callTool(transport, 9, 'list_vouchers', { accountSetId: 'as_001', period: '202607', cursor: cursorOf(44) });
+    const dataLast = asSuccess(lastPage.envelope).data as ListVouchersResult;
+    expect(dataLast.docs).toHaveLength(1);
+    expect(dataLast.docs[0]!.id).toBe('doc_202607_0045');
+    expect(dataLast.prevCursor).toBe(cursorOf(40));
+    expect(dataLast.nextCursor).toBeUndefined();
   });
 
   it('allPages=true 一次拉全 45 张且不返回 nextCursor', async () => {
@@ -123,7 +134,7 @@ describe('查询链路 search → period → list_vouchers', () => {
     expect(data.nextCursor).toBeUndefined();
   });
 
-  it('pageNo 手动翻页 + pageSize 生效', async () => {
+  it('pageNo 手动翻页 + pageSize 生效(pageNo*pageSize=offset)', async () => {
     const { envelope } = await callTool(transport, 10, 'list_vouchers', {
       accountSetId: 'as_001',
       period: '202607',
@@ -134,7 +145,8 @@ describe('查询链路 search → period → list_vouchers', () => {
     expect(data.docs.map((d) => d.id)).toEqual(
       Array.from({ length: 10 }, (_, i) => `doc_202607_${String(i + 11).padStart(4, '0')}`),
     );
-    expect(data.nextCursor).toBe(cursorOf(2));
+    expect(data.offset).toBe(10);
+    expect(data.nextCursor).toBe(cursorOf(20));
   });
 
   it('超出末页的 pageNo 返回空 docs、无 nextCursor', async () => {
@@ -178,6 +190,34 @@ describe('查询链路 search → period → list_vouchers', () => {
     expect(data.recentVouchers.length).toBeGreaterThan(0);
     expect(success.meta.accountSetId).toBe('as_003');
     expect(success.meta.accountSetName).toBe('易晟汽车');
+  });
+});
+
+describe('V1 写入确认链路', () => {
+  const contract = {
+    accountSetId: 'as_001',
+    entries: [
+      { summary: '测试录入', subjectCode: '1001', debit: 100, credit: 0 },
+      { summary: '测试录入', subjectCode: '2202', debit: 0, credit: 100 },
+    ],
+  };
+
+  it('validate → dry-run 不落库 → confirmed 执行，并按相同 key 重放', async () => {
+    const transport = makeTransport({ env: { FAKE_ENABLE_WRITE: '1' } });
+    const validation = await callTool(transport, 901, 'validate_voucher', { contract });
+    expect((asSuccess(validation.envelope).data as { ok: boolean }).ok).toBe(true);
+
+    const key = 'test-write-key';
+    const preview = await callTool(transport, 902, 'submit_voucher', { contract, idempotencyKey: key, confirmed: false });
+    expect(asSuccess(preview.envelope).data).toMatchObject({ dryRun: true, preview: { accountSetId: 'as_001' } });
+    const before = await callTool(transport, 903, 'get_submission_status', { tool: 'submit_voucher', idempotencyKey: key });
+    expect(asSuccess(before.envelope).data).toMatchObject({ status: 'not_found', executionState: 'not_started' });
+
+    const submitted = await callTool(transport, 904, 'submit_voucher', { contract, idempotencyKey: key, confirmed: true });
+    const result = asSuccess(submitted.envelope).data as { dryRun: boolean; voucherNo: string };
+    expect(result.dryRun).toBe(false);
+    const replay = await callTool(transport, 905, 'submit_voucher', { contract, idempotencyKey: key, confirmed: true });
+    expect(asSuccess(replay.envelope).data).toEqual(result);
   });
 });
 

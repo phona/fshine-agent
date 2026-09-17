@@ -58,17 +58,17 @@ export function buildVoucherDoc(period: string, n: number): VoucherDoc {
   };
 }
 
-/** 游标编码:base64url({"pageNo":N}),与 spec 示例 eyJwYWdlTm8iOjF9 同构。 */
-export function encodeCursor(pageNo: number): string {
-  return Buffer.from(JSON.stringify({ pageNo }), 'utf8').toString('base64url');
+/** 游标编码:base64url({"offset":N}),与真实 17dz 的 offset 游标同构。 */
+export function encodeCursor(offset: number): string {
+  return Buffer.from(JSON.stringify({ offset }), 'utf8').toString('base64url');
 }
 
 export function decodeCursor(cursor: string): number | null {
   try {
     const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    if (typeof parsed === 'object' && parsed !== null && 'pageNo' in parsed) {
-      const pageNo = (parsed as { pageNo?: unknown }).pageNo;
-      if (typeof pageNo === 'number' && Number.isInteger(pageNo) && pageNo >= 0) return pageNo;
+    if (typeof parsed === 'object' && parsed !== null && 'offset' in parsed) {
+      const offset = (parsed as { offset?: unknown }).offset;
+      if (typeof offset === 'number' && Number.isInteger(offset) && offset >= 0) return offset;
     }
     return null;
   } catch {

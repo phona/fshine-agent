@@ -60,7 +60,7 @@ async function main(): Promise<void> {
   const hosts = new Map<string, McpHost>();
   const useFakeMcp = process.env['D17Z_USE_FAKE'] === '1';
 
-  function profileFor(name: string): McpProfileConfig {
+  function profileFor(name: string, capabilities: readonly PrincipalCapability[] = []): McpProfileConfig {
     if (useFakeMcp) {
       return {
         command: process.execPath,
@@ -68,7 +68,10 @@ async function main(): Promise<void> {
         cwd: repoRoot,
         requestTimeoutMs: 60_000,
         maxRetries: 2,
-        env: { FAKE_ALLOWED_ACCOUNT_SETS: process.env['D17Z_ALLOWED_ACCOUNT_SETS'] ?? '' },
+        env: {
+          FAKE_ALLOWED_ACCOUNT_SETS: process.env['D17Z_ALLOWED_ACCOUNT_SETS'] ?? '',
+          ...(capabilities.some((capability) => capability === 'validate' || capability === 'write') ? { FAKE_ENABLE_WRITE: '1' } : {}),
+        },
       };
     }
     const profile = config.mcpProfiles[name];
@@ -94,7 +97,7 @@ async function main(): Promise<void> {
     const key = `${name}:${[...capabilities].sort().join(',')}`;
     let host = hosts.get(key);
     if (!host) {
-      host = new McpHost({ profile: profileFor(name), audit, toolPolicy: combinedToolPolicy });
+      host = new McpHost({ profile: profileFor(name, capabilities), audit, toolPolicy: combinedToolPolicy });
       hosts.set(key, host);
     }
     return host;

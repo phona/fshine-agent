@@ -80,8 +80,8 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     const data = vouchers.data as Record<string, unknown>;
     expect(data['total']).toBe(45);
     expect(Array.isArray(data['docs'])).toBe(true);
-    expect(data['docs']).toHaveLength(10); // 运行时视图已经 trimForRuntime 裁剪
-    expect(data['_docsTruncated']).toBe('总数20');
+    expect(data['docs']).toHaveLength(4); // fake 按契约首页 4 张,预算内不触发裁剪
+    expect(data['_docsTruncated']).toBeUndefined();
     expect(vouchers.meta.retrievedAt).toMatch(/\+08:00$/);
     expect(vouchers.meta.source).toBe('api_cache');
 
@@ -364,5 +364,18 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
       .call('submit_voucher' as ReadToolName, {});
     expect(outcome.ok).toBe(false);
     if (!outcome.ok) expect(outcome.error.message).toContain('操作权限');
+  });
+
+  it('普通 client 不能自行把 confirmed 设为 true', { timeout: 60_000 }, async () => {
+    const readTools = ['get_login_status', 'search_account_sets', 'get_current_accounting_period', 'list_vouchers', 'inspect_account_set'];
+    const categories = Object.fromEntries(readTools.map((name) => [name, 'read' as const]));
+    const host = trackedHostWithPolicy({
+      profile: { command: process.execPath, args: ['-e', EXTRA_TOOL_SERVER_SCRIPT], cwd: repoRoot, requestTimeoutMs: 5_000, maxRetries: 0 },
+      toolPolicy: { allowedTools: [...readTools, 'submit_voucher'], categories: { ...categories, submit_voucher: 'write' } },
+    });
+    const outcome = await host.clientFor('req-confirm-gate', ['as_001'], undefined, ['read', 'write'])
+      .call('submit_voucher', { confirmed: true });
+    expect(outcome.ok).toBe(false);
+    if (!outcome.ok) expect(outcome.error.message).toContain('尚未获得用户确认');
   });
 });

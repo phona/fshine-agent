@@ -2,6 +2,8 @@ import { randomBytes } from 'node:crypto';
 import Ajv, { type ValidateFunction } from 'ajv';
 import {
   READ_TOOLS,
+  type GetSubmissionStatusArgs,
+  type GetSubmissionStatusResult,
   type AccountSet,
   type EnvelopeMeta,
   type ErrorCode,
@@ -16,6 +18,11 @@ import {
   type SearchAccountSetsArgs,
   type SearchAccountSetsResult,
   type SuccessEnvelope,
+  type SubmitVoucherArgs,
+  type SubmitVoucherBatchArgs,
+  type VoucherContract,
+  type VoucherPreview,
+  type WriteToolName,
 } from '@fshine/contracts';
 import { TOOL_DEFINITIONS } from './schemas';
 import {
@@ -31,10 +38,11 @@ import {
 
 export const PROTOCOL_VERSION = '2025-06-18';
 export const SERVER_NAME = '17dz-read';
+export const WRITE_SERVER_NAME = '17dz-write';
 export const SERVER_VERSION = '0.1.0';
 export const SPEC_VERSION = '0.5';
 
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 4; // 对齐真实 17dz:页大小即模型视野,翻页由用户驱动
 const ALL_PAGES_PAGE_SIZE = 100;
 const ALL_PAGES_SERVER_CAP = 1000;
 
@@ -99,10 +107,10 @@ function formatBeijingIso(date: Date): string {
   return shifted.toISOString().replace(/\.\d{3}Z$/, '+08:00');
 }
 
-function buildMeta(account?: { id: string; name?: string }): EnvelopeMeta {
+function buildMeta(account?: { id: string; name?: string }, now: Date = new Date()): EnvelopeMeta {
   const meta: EnvelopeMeta = {
     traceId: `trc_${randomBytes(8).toString('hex')}`,
-    retrievedAt: formatBeijingIso(new Date()),
+    retrievedAt: formatBeijingIso(now),
     source: 'api_cache',
   };
   if (account) {
@@ -113,7 +121,16 @@ function buildMeta(account?: { id: string; name?: string }): EnvelopeMeta {
 }
 
 function metaAccountFor(rawArgs: Record<string, unknown>): { id: string; name?: string } | undefined {
-  const id = rawArgs['accountSetId'];
+  const direct = rawArgs['accountSetId'];
+  const contract = rawArgs['contract'];
+  const contractId = contract !== null && typeof contract === 'object'
+    ? (contract as Record<string, unknown>)['accountSetId']
+    : undefined;
+  const contracts = rawArgs['contracts'];
+  const batchId = Array.isArray(contracts) && contracts[0] !== null && typeof contracts[0] === 'object'
+    ? (contracts[0] as Record<string, unknown>)['accountSetId']
+    : undefined;
+  const id = direct ?? contractId ?? batchId;
   if (typeof id !== 'string') return undefined;
   const name = accountSetById(id)?.name;
   return name === undefined ? { id } : { id, name };
@@ -140,24 +157,41 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
   const nowFn = options.now ?? (() => new Date());
 
   const allowed = parseAllowed(envOf('FAKE_ALLOWED_ACCOUNT_SETS'));
+  const enableWrite = envOf('FAKE_ENABLE_WRITE') === '1';
   const scenario = envOf('FAKE_SCENARIO')?.trim() || undefined;
   const slowMs = parseNonNegativeInt(envOf('FAKE_SLOW_MS')) ?? 0;
   const crashAfter = parseNonNegativeInt(envOf('FAKE_CRASH_AFTER_N_CALLS'));
 
+  const activeTools = enableWrite ? TOOL_DEFINITIONS : TOOL_DEFINITIONS.filter((tool) => (READ_TOOLS as readonly string[]).includes(tool.name));
   const serverInfo = {
-    name: SERVER_NAME,
+    name: enableWrite ? WRITE_SERVER_NAME : SERVER_NAME,
     version: SERVER_VERSION,
     specVersion: SPEC_VERSION,
     allowedAccountSets: allowed ? [...allowed] : null,
   };
 
-  const validators = new Map<ReadToolName, ValidateFunction>();
-  const ajv = new Ajv({ allErrors: true, strictSchema: false });
-  for (const tool of READ_TOOLS) {
-    const definition = TOOL_DEFINITIONS.find((t) => t.name === tool);
-    if (!definition) throw new Error(`缺少 tool 定义: ${tool}`);
-    validators.set(tool, ajv.compile(definition.inputSchema));
+  const validators = new Map<string, ValidateFunction>();
+  // Ajv's core package does not ship the optional format vocabulary. Register
+  // the protocol's date format here; business validation below enforces the
+  // actual YYYY-MM-DD shape as well.
+  const ajv = new Ajv({ allErrors: true, strictSchema: false, formats: { date: true } });
+  for (const tool of activeTools) {
+    validators.set(tool.name, ajv.compile(tool.inputSchema));
   }
+
+  type LedgerEntry = {
+    tool: 'submit_voucher' | 'submit_voucher_batch';
+    idempotencyKey: string;
+    contractCanonical: string;
+    status: 'retryable' | 'bound';
+    executionState: 'not_started' | 'succeeded' | 'failed' | 'unknown' | 'may_have_succeeded';
+    boundStep?: string;
+    result?: Record<string, unknown>;
+    error?: Record<string, unknown>;
+    batch?: { batchKey: string; index: number; total: number };
+  };
+  const ledger = new Map<string, LedgerEntry>();
+  let nextVoucherNumber = 46;
 
   let toolCallCount = 0;
   let crashPending = false;
@@ -194,7 +228,7 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
     return known;
   }
 
-  function scenarioBizError(tool: ReadToolName): BizError | null {
+  function scenarioBizError(tool: ReadToolName | WriteToolName): BizError | null {
     switch (scenario) {
       case 'needs_login':
         if (tool === 'get_login_status') return null;
@@ -222,7 +256,122 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
     }
   }
 
-  function dispatchTool(tool: ReadToolName, rawArgs: Record<string, unknown>): unknown {
+  function canonicalize(value: unknown): string {
+    if (Array.isArray(value)) return `[${value.map(canonicalize).join(',')}]`;
+    if (value !== null && typeof value === 'object') {
+      const record = value as Record<string, unknown>;
+      return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalize(record[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  function ledgerKey(tool: 'submit_voucher' | 'submit_voucher_batch', key: string): string {
+    return `${tool}:${key}`;
+  }
+
+  function validateContract(contract: VoucherContract): { account: AccountSet; errors: string[] } {
+    const account = resolveAccount(contract.accountSetId);
+    const errors: string[] = [];
+    let debitTotal = 0;
+    let creditTotal = 0;
+    contract.entries.forEach((entry, index) => {
+      const debit = entry.debit ?? 0;
+      const credit = entry.credit ?? 0;
+      if (debit === 0 && credit === 0) errors.push(`entries[${index}]: 借贷不能同时为零`);
+      if (debit > 0 && credit > 0) errors.push(`entries[${index}]: 借贷不能同时有值`);
+      debitTotal += debit;
+      creditTotal += credit;
+    });
+    if (Math.abs(debitTotal - creditTotal) > 0.000001) errors.push(`借贷不平衡: debit=${debitTotal}, credit=${creditTotal}`);
+    if (contract.date !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(contract.date)) errors.push('date: 必须是 YYYY-MM-DD');
+    return { account, errors };
+  }
+
+  function previewFor(contract: VoucherContract, account: AccountSet): VoucherPreview {
+    const date = contract.date ?? formatBeijingIso(nowFn()).slice(0, 10);
+    const voucherNo = contract.voucherNo ?? `记-${String(nextVoucherNumber).padStart(3, '0')}`;
+    const entries = contract.entries.map((entry) => {
+      const output: VoucherPreview['entries'][number] = {
+        summary: entry.summary,
+        subjectCode: entry.subjectCode,
+        debit: entry.debit ?? 0,
+        credit: entry.credit ?? 0,
+      };
+      if (entry.assistantName !== undefined) output.assistantName = entry.assistantName;
+      return output;
+    });
+    return {
+      accountSetId: account.id,
+      accountSetName: account.name,
+      date,
+      voucherNo,
+      entries,
+      totalDebit: entries.reduce((sum, entry) => sum + entry.debit, 0),
+      totalCredit: entries.reduce((sum, entry) => sum + entry.credit, 0),
+    };
+  }
+
+  function contractValidationError(errors: string[]): BizError {
+    return new BizError('CONTRACT_INVALID', '凭证契约校验失败，请根据 errors 修改后重试', false, { errors });
+  }
+
+  function existingLedger(tool: 'submit_voucher' | 'submit_voucher_batch', key: string, contract: unknown): LedgerEntry | undefined {
+    const existing = ledger.get(ledgerKey(tool, key));
+    if (!existing) return undefined;
+    if (existing.contractCanonical !== canonicalize(contract)) {
+      throw new BizError('IDEMPOTENCY_CONFLICT', `同一 idempotencyKey 已绑定不同契约: ${key}`, false);
+    }
+    return existing;
+  }
+
+  function resultFromLedger(entry: LedgerEntry): GetSubmissionStatusResult {
+    const result: GetSubmissionStatusResult = {
+      status: entry.status,
+      executionState: entry.executionState,
+    };
+    if (entry.boundStep !== undefined) result.boundStep = entry.boundStep;
+    if (entry.result !== undefined) result.result = entry.result;
+    if (entry.error !== undefined) result.error = entry.error;
+    if (entry.batch !== undefined) result.batch = entry.batch;
+    return result;
+  }
+
+  function executeVoucher(contract: VoucherContract, key: string, batch?: { batchKey: string; index: number; total: number }): Record<string, unknown> {
+    const canonical = canonicalize(contract);
+    const old = existingLedger('submit_voucher', key, contract);
+    if (old) {
+      if (old.status === 'bound') return old.result ?? { error: old.error };
+      // retryable entries are deliberately re-entered below with the same key.
+    }
+    const entry: LedgerEntry = old ?? {
+      tool: 'submit_voucher', idempotencyKey: key, contractCanonical: canonical,
+      status: 'retryable', executionState: 'not_started', batch,
+    };
+    if (batch !== undefined) entry.batch = batch;
+    ledger.set(ledgerKey('submit_voucher', key), entry);
+
+    const failIndex = envOf('FAKE_BATCH_FAIL_INDEX');
+    const retryableIndex = envOf('FAKE_BATCH_RETRYABLE_INDEX');
+    const isBatchIndex = batch !== undefined ? String(batch.index) : undefined;
+    if ((isBatchIndex !== undefined && isBatchIndex === retryableIndex) || (!batch && envOf('FAKE_EXECUTION_RETRYABLE') === '1')) {
+      throw new BizError('EXECUTION_FAILED', 'Fake 执行尚未到达保存动作', true, {
+        executionState: 'not_started', step: 'fill_entries',
+      });
+    }
+    if ((isBatchIndex !== undefined && isBatchIndex === failIndex) || (!batch && envOf('FAKE_EXECUTION_FAILED') === '1')) {
+      const error = { code: 'EXECUTION_FAILED', details: { executionState: 'failed', boundStep: 'save_click', step: 'save', diff: 'fake 注入执行失败' } };
+      entry.status = 'bound'; entry.executionState = 'failed'; entry.boundStep = 'save_click'; entry.error = error;
+      throw new BizError('EXECUTION_FAILED', 'Fake 执行失败', false, error.details);
+    }
+    const allocatedNumber = nextVoucherNumber;
+    const number = contract.voucherNo ?? `记-${String(allocatedNumber).padStart(3, '0')}`;
+    if (contract.voucherNo === undefined) nextVoucherNumber += 1;
+    const result = { dryRun: false, voucherNo: number, docId: `doc_fake_${String(allocatedNumber).padStart(4, '0')}`, verified: true };
+    entry.status = 'bound'; entry.executionState = 'succeeded'; entry.boundStep = 'save_click'; entry.result = result;
+    return result;
+  }
+
+  function dispatchTool(tool: ReadToolName | WriteToolName, rawArgs: Record<string, unknown>): unknown {
     switch (tool) {
       case 'get_login_status':
         return { loggedIn: scenario !== 'needs_login' };
@@ -248,39 +397,112 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
         const account = resolveAccount(args.accountSetId);
         return inspectAccountSet(account);
       }
+      case 'validate_voucher': {
+        const contract = (rawArgs as { contract: VoucherContract }).contract;
+        const validation = validateContract(contract);
+        return validation.errors.length === 0
+          ? { ok: true }
+          : { ok: false, errors: validation.errors };
+      }
+      case 'submit_voucher': {
+        const args = rawArgs as unknown as SubmitVoucherArgs;
+        const validation = validateContract(args.contract);
+        if (validation.errors.length > 0) throw contractValidationError(validation.errors);
+        const preview = previewFor(args.contract, validation.account);
+        if (args.confirmed !== true) {
+          return { dryRun: true, preview, precheckFlags: [] };
+        }
+        const existing = existingLedger('submit_voucher', args.idempotencyKey, args.contract);
+        if (existing?.status === 'bound') {
+          if (existing.error !== undefined) throw new BizError('EXECUTION_FAILED', '返回既有执行失败记录', false, existing.error['details'] as Record<string, unknown>);
+          return existing.result;
+        }
+        return executeVoucher(args.contract, args.idempotencyKey);
+      }
+      case 'submit_voucher_batch': {
+        const args = rawArgs as unknown as SubmitVoucherBatchArgs;
+        const validations = args.contracts.map((contract, index) => ({ index, contract, result: validateContract(contract) }));
+        const invalid = validations.filter((item) => item.result.errors.length > 0);
+        if (args.confirmed !== true) {
+          return {
+            dryRun: true,
+            previews: validations.map((item) => item.result.errors.length > 0
+              ? { index: item.index, ok: false, errors: item.result.errors }
+              : { index: item.index, ok: true, preview: previewFor(item.contract, item.result.account), precheckFlags: [] }),
+          };
+        }
+        if (invalid.length > 0) {
+          throw contractValidationError(invalid.flatMap((item) => item.result.errors.map((error) => `contracts[${item.index}]: ${error}`)));
+        }
+        const existing = existingLedger('submit_voucher_batch', args.idempotencyKey, args.contracts);
+        if (existing?.status === 'bound') {
+          if (existing.error !== undefined) throw new BizError('EXECUTION_FAILED', '返回既有批量执行失败记录', false, existing.error['details'] as Record<string, unknown>);
+          return existing.result;
+        }
+        const batchEntry: LedgerEntry = existing ?? {
+          tool: 'submit_voucher_batch', idempotencyKey: args.idempotencyKey,
+          contractCanonical: canonicalize(args.contracts), status: 'retryable', executionState: 'not_started',
+        };
+        ledger.set(ledgerKey('submit_voucher_batch', args.idempotencyKey), batchEntry);
+        const results: Array<Record<string, unknown>> = [];
+        for (const item of validations) {
+          const key = `${args.idempotencyKey}:${item.index}`;
+          try {
+            const result = executeVoucher(item.contract, key, { batchKey: args.idempotencyKey, index: item.index, total: args.contracts.length });
+            results.push({ index: item.index, ok: true, voucherNo: result['voucherNo'], docId: result['docId'], verified: result['verified'] });
+          } catch (error) {
+            if (error instanceof BizError) {
+              const executionState = (error.details?.['executionState'] as string | undefined) ?? 'failed';
+              results.push({ index: item.index, ok: false, error: { code: error.code, details: { ...(error.details ?? {}), executionState } } });
+            } else {
+              results.push({ index: item.index, ok: false, error: { code: 'EXECUTION_FAILED', details: { executionState: 'unknown', boundStep: 'save_click' } } });
+            }
+          }
+        }
+        const succeeded = results.filter((result) => result['ok'] === true).length;
+        const result = { dryRun: false, batchKey: args.idempotencyKey, summary: { total: results.length, succeeded, failed: results.length - succeeded }, results };
+        batchEntry.status = 'bound'; batchEntry.executionState = 'succeeded'; batchEntry.boundStep = 'save_click'; batchEntry.result = result;
+        return result;
+      }
+      case 'get_submission_status': {
+        const args = rawArgs as unknown as GetSubmissionStatusArgs;
+        const entry = ledger.get(ledgerKey(args.tool, args.idempotencyKey));
+        if (!entry) return { status: 'not_found', executionState: 'not_started' } satisfies GetSubmissionStatusResult;
+        return resultFromLedger(entry) satisfies GetSubmissionStatusResult;
+      }
     }
   }
 
   function listVouchersData(args: ListVouchersArgs): ListVouchersResult {
     const total = voucherTotalFor(args.period);
-    let pageNo: number;
+    let offset: number;
     let pageSize: number;
     let allPages = false;
 
     if (args.cursor !== undefined) {
       const decoded = decodeCursor(args.cursor);
       if (decoded === null) throw new InvalidParamsError(`cursor 无法解析: ${args.cursor}`);
-      pageNo = decoded;
+      offset = decoded;
       pageSize = args.pageSize ?? DEFAULT_PAGE_SIZE;
     } else if (args.allPages === true) {
       allPages = true;
-      pageNo = 0;
+      offset = 0;
       pageSize = ALL_PAGES_PAGE_SIZE;
     } else {
-      pageNo = args.pageNo ?? 0;
+      offset = (args.pageNo ?? 0) * (args.pageSize ?? DEFAULT_PAGE_SIZE);
       pageSize = args.pageSize ?? DEFAULT_PAGE_SIZE;
     }
 
     const effectiveTotal = allPages ? Math.min(total, ALL_PAGES_SERVER_CAP) : total;
-    const start = pageNo * pageSize;
     const docs: ListVouchersResult['docs'] = [];
-    for (let i = 0; i < pageSize && start + i < effectiveTotal; i++) {
-      docs.push(buildVoucherDoc(args.period, start + i + 1));
+    for (let i = 0; i < pageSize && offset + i < effectiveTotal; i++) {
+      docs.push(buildVoucherDoc(args.period, offset + i + 1));
     }
-    const result: ListVouchersResult = { total: effectiveTotal, docs };
-    if (!allPages && (pageNo + 1) * pageSize < effectiveTotal) {
-      result.nextCursor = encodeCursor(pageNo + 1);
-    }
+    const hasPrev = offset > 0;
+    const hasNext = offset + docs.length < effectiveTotal;
+    const result: ListVouchersResult = { total: effectiveTotal, docs, offset };
+    if (!allPages && hasPrev) result.prevCursor = encodeCursor(Math.max(0, offset - pageSize));
+    if (!allPages && hasNext) result.nextCursor = encodeCursor(offset + docs.length);
     return result;
   }
 
@@ -289,10 +511,10 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
       return errorResponse(id, -32602, 'tools/call 的 params 必须是含 name/arguments 的对象');
     }
     const params = rawParams as { name?: unknown; arguments?: unknown };
-    if (typeof params.name !== 'string' || !(READ_TOOLS as readonly string[]).includes(params.name)) {
+    if (typeof params.name !== 'string' || !activeTools.some((definition) => definition.name === params.name)) {
       return errorResponse(id, -32602, `未知的 tool: ${String(params.name)}`);
     }
-    const tool = params.name as ReadToolName;
+    const tool = params.name as ReadToolName | WriteToolName;
     let rawArgs: Record<string, unknown>;
     if (params.arguments === undefined) {
       rawArgs = {};
@@ -309,7 +531,7 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
       return errorResponse(id, -32602, `${tool} 参数不符合 inputSchema: ${formatAjvErrors(validate.errors)}`);
     }
 
-    const meta = buildMeta(metaAccountFor(rawArgs));
+    const meta = buildMeta(metaAccountFor(rawArgs), nowFn());
     try {
       const injected = scenarioBizError(tool);
       if (injected) throw injected;
@@ -351,7 +573,7 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
           },
         };
       case 'tools/list':
-        return { jsonrpc: '2.0', id, result: { tools: TOOL_DEFINITIONS } };
+        return { jsonrpc: '2.0', id, result: { tools: activeTools } };
       case 'tools/call':
         return handleToolCall(id, params);
       case 'ping':
