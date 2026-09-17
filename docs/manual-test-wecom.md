@@ -104,3 +104,77 @@
 - 同一问题两次回答措辞不同：LLM 正常方差，只要求事实一致
 - 连发消息的回复顺序 = 发送顺序（串行队列）：设计行为
 - 金额与本文示例不同：活账套，真实会计可能已改账
+
+## 10. 真实 E2E 回归（AI 主执行，企微抽样）
+
+真实 E2E 默认由 AI 直接向同一消息处理链发送数据；企业微信只做关键场景抽样，验证真实通道收发和渲染。
+
+### 10.1 AI 入口
+
+AI 入口调用与企微相同的 `createMessageHandler`，只替换消息来源，不得绕过 Agent 直接调用 17dz 页面或数据库：
+
+```json
+{
+  "wecomUserId": "真实用户 ID",
+  "conversationId": "real-e2e-20260917",
+  "messageId": "e2e-msg-001",
+  "chatType": "single",
+  "text": "幻辰的应收账款还有多少",
+  "receivedAt": "2026-09-17T00:00:00.000Z"
+}
+```
+
+同一场景的追问复用 `conversationId`，每条消息必须有新的 `messageId`。AI 回归必须记录 `requestId`、工具调用、参数、状态、traceId 和最终回复。
+
+### 10.2 读场景
+
+| 用例 | 输入 | 必须核验 |
+|---|---|---|
+| R1 | `帮我查一下幻辰的应收账款还有多少` | 账套 `as_003`；期间以工具返回为准；调用 `get_subject_balance(1122)`；返回期末余额和来源；不得用凭证净发生额代替余额 |
+| R2 | `幻东机械在幻辰账套还欠多少？` | 调用 `get_auxiliary_balance`；客户、账套、期间、期末余额可复核 |
+| R3 | `幻辰 2026 年 8 月应收账款发生了哪些变化？` | 可以调用凭证/明细事件工具；回复必须标明“发生额”，不能说成期末余额 |
+| R4 | `列出幻辰 2026 年 8 月的凭证` → `下一页` | cursor 原样续用；不重复、不编造；说明展示范围 |
+| R5 | `幻晟的科目体系大概有哪些一级科目？` | 基于当前账套查询结果回答；不能把历史缓存当当前事实 |
+| R6 | 读取 voucher 域知识资源 | 只能读取 MCP 声明且 Host allowlist 放行的资源；禁止读取 auth、selector、执行源码和任意路径 |
+
+### 10.3 写接口前置回归（禁止提交）
+
+AI 可以测试写接口的校验、预览和 Workflow 状态，但默认禁止调用：
+
+```text
+submit_voucher
+submit_voucher_batch
+workflow.confirm
+```
+
+| 用例 | 输入 | 必须核验 |
+|---|---|---|
+| W1 | 合法汇票契约，调用 `validate_voucher` | 借贷平衡、结构合法；不产生凭证号或 docId |
+| W2 | 借方 100、贷方 80 的契约 | 返回 `CONTRACT_INVALID` 或等价借贷不平错误 |
+| W3 | `workflow.start(voucher.bill_batch)` | 进入 `needs_input` 或 `ready_for_confirmation`；返回 NEEDS/预览；不执行保存 |
+| W4 | 同一 Workflow 重复使用 idempotencyKey | 返回同一 taskId，不重复预检或执行 |
+| W5 | 重启 MCP 后调用 `workflow.status(taskId)` | status、revision、needs、preview、input 和幂等关系保持 |
+
+### 10.4 企业微信抽样
+
+AI 回归通过后，人工抽样发送：
+
+1. `幻辰的应收账款还有多少`
+2. `幻东机械在幻辰账套还欠多少？`
+3. `列出幻辰 2026 年 8 月的凭证`，随后 `下一页`
+4. 合法凭证“先校验和预览，不要提交”
+
+人工抽样重点看：回复完整、账套和期间正确、来源显示、Markdown 正常渲染、无内部 JSON/trace、无未授权数据。
+
+### 10.5 本地与真实回归边界
+
+```text
+npm run test:e2e
+  进程内 Fake MCP，快速、无网络、无真实写入
+
+真实 AI E2E
+  直接发送消息数据，使用真实 MCP，默认只读/校验/预览
+
+企业微信抽样
+  验证真实渠道收发和渲染，不承担完整回归覆盖
+```
