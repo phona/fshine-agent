@@ -83,7 +83,13 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         onRetry: (info) =>
           progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
       };
-      const client = host.clientFor(requestId, scope.accountSetIds, hooks, categoriesFor(capabilities));
+      const client = host.clientFor(
+        requestId,
+        scope.accountSetIds,
+        hooks,
+        categoriesFor(capabilities),
+        scope.accountSetScope ?? 'allowlist',
+      );
       const reply = await runtime.handleTurn(
         {
           requestId,

@@ -1,6 +1,7 @@
 /**
  * McpHost:runtime 侧唯一的 MCP 入口(架构 §4/§6,17dz-mcp-spec §11)。
- * 职责:连接生命周期、scope 预检、信封解析、可重试错误重试、渠道预算、结果裁剪、审计事件。
+ * 职责:连接生命周期、scope 预检、信封解析、可重试错误重试、渠道预算、审计事件。
+ * 工具结果原样透传给 runtime,分页与否由模型依据工具契约自行决策。
  */
 import type {
   DiscoveredTool,
@@ -16,7 +17,6 @@ import { READ_TOOLS } from '@fshine/contracts';
 import { McpConnection, McpTransportError, type McpConnectionOptions } from './connection';
 import { parseEnvelope } from './envelope-parse';
 import { SpecVersionMismatchError } from './spec-version';
-import { trimForRuntime } from './trim';
 import { delay, errorMessage, isRecord } from './utils';
 
 export const DEFAULT_CHANNEL_BUDGET_MS = 75_000;
@@ -57,6 +57,9 @@ export interface McpCallHooks {
 /** Explicit V1 capability policy. Tool categories are configured metadata; the
  * host never infers write authority from a tool name. */
 export type McpToolCategory = 'read' | 'validate' | 'write' | 'status';
+
+/** Principal-level account-set discovery/authorization mode. */
+export type AccountSetScope = 'all' | 'allowlist';
 
 export interface McpToolPolicy {
   /** Exact tool names allowed for this host profile. */
@@ -155,13 +158,14 @@ export class McpHost {
     allowedAccountSetIds: readonly string[],
     hooks?: McpCallHooks,
     principalCategories?: readonly McpToolCategory[],
+    accountSetScope: AccountSetScope = 'allowlist',
   ): HostToolClient {
     void this.ensureReady().catch(() => {}); // 预热连接;失败在 call 中呈现
     const host = this;
     return {
       tools: () => host.visibleTools(principalCategories),
-      call: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories),
-      callApprovedWrite: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, true),
+      call: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, false, accountSetScope),
+      callApprovedWrite: (tool, args, signal) => host.call(requestId, allowedAccountSetIds, tool, args, hooks, signal, principalCategories, true, accountSetScope),
     };
   }
 
@@ -206,6 +210,7 @@ export class McpHost {
     signal?: AbortSignal,
     principalCategories?: readonly McpToolCategory[],
     approvedWrite = false,
+    accountSetScope: AccountSetScope = 'allowlist',
   ): Promise<ToolOutcome> {
     if (this.unusable) {
       return internalError(`MCP server 不可用: ${this.unusableReason}`);
@@ -218,7 +223,7 @@ export class McpHost {
     }
     // scope 预检:未授权账套在 MCP 调用前被拒——不发往 server,也不触发 audit onStart
     const accountSetId = args['accountSetId'];
-    if (typeof accountSetId === 'string' && !allowedAccountSetIds.includes(accountSetId)) {
+    if (accountSetScope !== 'all' && typeof accountSetId === 'string' && !allowedAccountSetIds.includes(accountSetId)) {
       return { ok: false, error: { code: 'ACCOUNT_SET_FORBIDDEN', message: '没有该账套的访问权限', retryable: false } };
     }
     try {
@@ -270,14 +275,9 @@ export class McpHost {
       }
     }
 
-    outcome = filterSearchAccountSetOutcome(tool, allowedAccountSetIds, outcome);
+    outcome = filterSearchAccountSetOutcome(tool, allowedAccountSetIds, outcome, accountSetScope);
     this.emitEnd(requestId, tool, outcome);
-    const bounded = trimForRuntime(outcome);
-    if (!bounded.ok && outcome.ok) {
-      // 契约破坏告警:生产者返回了超预算结果(分页契约未被遵守),fail-loud 拒绝进入上下文
-      console.warn(JSON.stringify({ event: 'result_over_budget', tool, requestId, hint: bounded.error.message }));
-    }
-    return bounded;
+    return outcome;
   }
 
   private visibleTools(principalCategories?: readonly McpToolCategory[]): readonly DiscoveredTool[] {
@@ -374,8 +374,9 @@ function filterSearchAccountSetOutcome(
   tool: McpToolName,
   allowedAccountSetIds: readonly string[],
   outcome: ToolOutcome,
+  accountSetScope: AccountSetScope = 'allowlist',
 ): ToolOutcome {
-  if (tool !== 'search_account_sets' || !outcome.ok || !isRecord(outcome.data) || !Array.isArray(outcome.data['accountSets'])) {
+  if (accountSetScope === 'all' || tool !== 'search_account_sets' || !outcome.ok || !isRecord(outcome.data) || !Array.isArray(outcome.data['accountSets'])) {
     return outcome;
   }
   const allowed = new Set(allowedAccountSetIds);

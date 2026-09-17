@@ -7,9 +7,9 @@ export {
   DEFAULT_CHANNEL_BUDGET_MS,
   DisallowedToolsError,
   McpHost,
+  type AccountSetScope,
   type McpToolCategory,
   type McpToolPolicy,
 } from './host';
 export type { McpCallHooks, McpHostAudit, McpHostOptions, McpToolCallEndEvent, McpToolCallStartEvent } from './host';
 export { checkServerSpecVersion, EXPECTED_SPEC_VERSION, SUPPORTED_SPEC_VERSIONS, SpecVersionMismatchError } from './spec-version';
-export { RESULT_BUDGET_CHARS, trimForRuntime } from './trim';

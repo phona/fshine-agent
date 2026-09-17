@@ -4,8 +4,8 @@
 # 结构对应 @fshine/contracts 的 AppConfig(架构 §8)。
 #
 # 【与 .env 的边界】本文件管"结构与授权"(谁能用、连哪个数据源、授权哪些账套);
-# .env 只管"秘密与连接"(企微凭证、LLM key/model)。账套白名单的真正防线是
-# 每用户的 accountSetIds(本文件);mcpProfiles.env 仅做 17dz 服务端部署级兜底。
+# .env 只管"秘密与连接"(企微凭证、LLM key/model)。账套访问范围由 accountSetScope 控制；
+# allowlist 模式下才需要每用户维护 accountSetIds;mcpProfiles.env 仅做 17dz 服务端部署级兜底。
 # ============================================================
 
 # ---- 授权名单:key = wecom:<企微 UserID> ----
@@ -15,8 +15,10 @@ principals:
   "wecom:<你的企微UserID>":
     # 绑定的 MCP profile(下方 mcpProfiles 的 key)
     mcpProfile: read-default
-    # 授权账套 id 白名单(以 17dz search_account_sets 返回的 as_xxx 为准)
-    accountSetIds: ["as_001"]
+    # 账套范围:all=允许动态搜索全部账套;allowlist=仅允许 accountSetIds(旧配置默认 allowlist)
+    accountSetScope: all
+    # allowlist 模式下填写授权账套 id(以 17dz search_account_sets 返回的 as_xxx 为准)
+    # accountSetIds: ["as_001"]
     enabled: true
     # 能力集(可选,缺省 read):read=只读;validate/write 开启写链路(V1)
     # capabilities: ["read"]
@@ -42,8 +44,8 @@ mcpProfiles:
 #   publicUrl: https://your-domain
 #   callbackPath: /wecom/callback
 
-# ---- 会话状态 TTL(可选,ms):闲置超时后转录清零、会话重新开始 ----
-# sessionTtlMs: 300000
+# ---- 会话状态 TTL(可选,ms):闲置超过该时长后,旧转录压缩成「摘要+最近尾巴」种子续会话(软着陆,不清零失忆) ----
+# sessionTtlMs: 86400000  # 默认 24 小时
 
 # ---- 秘密(WECOM_BOT_ID/WECOM_BOT_SECRET/LLM_*)见 .env.example,放 .env ----
 # ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 DZ_PHONE + ~/.config/17dz/password ----

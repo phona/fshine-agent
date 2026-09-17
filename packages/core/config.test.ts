@@ -52,7 +52,7 @@ describe('loadConfig', () => {
       publicUrl: 'https://tax.example.com',
       callbackPath: '/wecom/callback',
     });
-    expect(config.sessionTtlMs).toBe(300000);
+    expect(config.sessionTtlMs).toBe(86_400_000); // 默认 24h:TTL 过期走软着陆,不再分钟级清零失忆
 
     const userA = config.principals['wecom:user_a'];
     expect(userA?.mcpProfile).toBe('read-default');
@@ -78,13 +78,13 @@ describe('loadConfig', () => {
     expect(config.channel.callbackPath).toBe('/custom/callback');
   });
 
-  it('sessionTtlMs 可由 yaml 提供,否则缺省 300000', () => {
+  it('sessionTtlMs 可由 yaml 提供,否则缺省 24h', () => {
     const withTtl = loadConfig({
       yamlPath: writeFixture(`${VALID_YAML}\nsessionTtlMs: 60000\n`),
       env: PUBLIC_URL_ENV,
     });
     expect(withTtl.sessionTtlMs).toBe(60000);
-    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV }).sessionTtlMs).toBe(300000);
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV }).sessionTtlMs).toBe(86_400_000);
   });
 
   it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录', () => {

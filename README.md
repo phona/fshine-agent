@@ -35,4 +35,4 @@ npm run smoke:wecom  # 企微长连接冒烟:连接→订阅成功→断开
 | 位置 | 内容 |
 |---|---|
 | `.env` | `WECOM_BOT_ID` / `WECOM_BOT_SECRET` / `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` |
-| `config/agent.yaml` | principal 键换成真实 `wecom:<你的企微 UserID>`,`accountSetIds` 填真实授权账套;接真 17dz 时填 `mcpProfiles.read-default.cwd` |
+| `config/agent.yaml` | principal 键换成真实 `wecom:<你的企微 UserID>`；`accountSetScope: all` 可动态搜索全部账套，精细授权时改为 `allowlist` 并填写 `accountSetIds`;接真 17dz 时填 `mcpProfiles.read-default.cwd` |

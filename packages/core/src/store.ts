@@ -25,6 +25,7 @@ const SCHEMA = `
 CREATE TABLE IF NOT EXISTS principal_scopes (
   wecom_user_id TEXT PRIMARY KEY,
   account_set_ids TEXT NOT NULL,
+  account_set_scope TEXT NOT NULL DEFAULT 'allowlist',
   mcp_profile TEXT NOT NULL,
   enabled INTEGER NOT NULL,
   capabilities TEXT NOT NULL DEFAULT '["read"]'
@@ -73,6 +74,7 @@ CREATE INDEX IF NOT EXISTS idx_conversation_sessions_principal_id
 interface PrincipalScopeRow {
   wecom_user_id: string;
   account_set_ids: string;
+  account_set_scope: string | null;
   mcp_profile: string;
   enabled: number;
   capabilities: string | null;
@@ -113,6 +115,7 @@ function rowToPrincipalScope(row: PrincipalScopeRow): PrincipalScopeRecord {
   return {
     wecomUserId: row.wecom_user_id,
     accountSetIds: JSON.parse(row.account_set_ids) as string[],
+    ...(row.account_set_scope === 'all' ? { accountSetScope: 'all' as const } : {}),
     mcpProfile: row.mcp_profile,
     enabled: row.enabled === 1,
     capabilities: row.capabilities ? JSON.parse(row.capabilities) as PrincipalScopeRecord['capabilities'] : ['read'],
@@ -180,25 +183,28 @@ export function createSqliteStore(dbPath: string): AuditStore {
   if (!principalColumns.some((column) => column.name === 'capabilities')) {
     db.exec(`ALTER TABLE principal_scopes ADD COLUMN capabilities TEXT NOT NULL DEFAULT '["read"]'`);
   }
+  if (!principalColumns.some((column) => column.name === 'account_set_scope')) {
+    db.exec(`ALTER TABLE principal_scopes ADD COLUMN account_set_scope TEXT NOT NULL DEFAULT 'allowlist'`);
+  }
 
   const principalScopes: PrincipalScopeRepo = {
     async get(wecomUserId) {
       const row = db
-        .prepare('SELECT wecom_user_id, account_set_ids, mcp_profile, enabled, capabilities FROM principal_scopes WHERE wecom_user_id = ?')
+        .prepare('SELECT wecom_user_id, account_set_ids, account_set_scope, mcp_profile, enabled, capabilities FROM principal_scopes WHERE wecom_user_id = ?')
         .get(wecomUserId) as PrincipalScopeRow | undefined;
       return row ? rowToPrincipalScope(row) : null;
     },
     async list() {
       const rows = db
-        .prepare('SELECT wecom_user_id, account_set_ids, mcp_profile, enabled, capabilities FROM principal_scopes ORDER BY rowid')
+        .prepare('SELECT wecom_user_id, account_set_ids, account_set_scope, mcp_profile, enabled, capabilities FROM principal_scopes ORDER BY rowid')
         .all() as PrincipalScopeRow[];
       return rows.map(rowToPrincipalScope);
     },
     async upsert(record) {
       db.prepare(
-        'INSERT INTO principal_scopes (wecom_user_id, account_set_ids, mcp_profile, enabled, capabilities) VALUES (?, ?, ?, ?, ?) '
-        + 'ON CONFLICT (wecom_user_id) DO UPDATE SET account_set_ids = excluded.account_set_ids, mcp_profile = excluded.mcp_profile, enabled = excluded.enabled, capabilities = excluded.capabilities',
-      ).run(record.wecomUserId, JSON.stringify(record.accountSetIds), record.mcpProfile, record.enabled ? 1 : 0, JSON.stringify(record.capabilities ?? ['read']));
+        'INSERT INTO principal_scopes (wecom_user_id, account_set_ids, account_set_scope, mcp_profile, enabled, capabilities) VALUES (?, ?, ?, ?, ?, ?) '
+        + 'ON CONFLICT (wecom_user_id) DO UPDATE SET account_set_ids = excluded.account_set_ids, account_set_scope = excluded.account_set_scope, mcp_profile = excluded.mcp_profile, enabled = excluded.enabled, capabilities = excluded.capabilities',
+      ).run(record.wecomUserId, JSON.stringify(record.accountSetIds), record.accountSetScope ?? 'allowlist', record.mcpProfile, record.enabled ? 1 : 0, JSON.stringify(record.capabilities ?? ['read']));
     },
   };
 

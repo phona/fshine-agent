@@ -5,11 +5,13 @@
 
 export type RequestOutcome = 'replied' | 'denied' | 'failed';
 
-import type { PrincipalCapability } from './config';
+import type { AccountSetScope, PrincipalCapability } from './config';
 
 export interface PrincipalScopeRecord {
   wecomUserId: string;
   accountSetIds: string[];
+  /** 旧持久化记录缺省按 allowlist 解释。 */
+  accountSetScope?: AccountSetScope;
   mcpProfile: string;
   enabled: boolean;
   /** Effective capabilities. Legacy records are treated as read-only. */

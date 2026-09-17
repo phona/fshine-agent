@@ -80,7 +80,7 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
     const data = vouchers.data as Record<string, unknown>;
     expect(data['total']).toBe(45);
     expect(Array.isArray(data['docs'])).toBe(true);
-    expect(data['docs']).toHaveLength(4); // fake 按契约首页 4 张,预算内不触发裁剪
+    expect(data['docs']).toHaveLength(4); // fake 按契约首页 4 张,结果原样透传
     expect(data['_docsTruncated']).toBeUndefined();
     expect(vouchers.meta.retrievedAt).toMatch(/\+08:00$/);
     expect(vouchers.meta.source).toBe('api_cache');
@@ -135,6 +135,20 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
 
     const inaccessible = expectOk(await client.call('search_account_sets', { query: '易晟' }));
     expect(inaccessible.data).toEqual({ accountSets: [] });
+  });
+
+  it('all scope exposes search results without an account-set allowlist', { timeout: 60_000 }, async () => {
+    const host = trackedHost();
+    const client = host.clientFor('req-search-all', [], undefined, undefined, 'all');
+
+    const matched = expectOk(await client.call('search_account_sets', { query: '幻晟' }));
+    expect(matched.data).toEqual({ accountSets: [
+      { id: 'as_001', name: '幻晟' },
+      { id: 'as_002', name: '幻晟' },
+    ] });
+
+    const period = expectOk(await client.call('get_current_accounting_period', { accountSetId: 'as_003' }));
+    expect((period.data as { period: string }).period).toBe('202607');
   });
 
   it('验收 #4a:FAKE_SCENARIO=needs_login → ok:false NEEDS_LOGIN,get_login_status 本身仍可用', { timeout: 60_000 }, async () => {

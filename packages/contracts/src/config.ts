@@ -6,10 +6,14 @@
 export interface PrincipalConfig {
   mcpProfile: string;
   accountSetIds: string[];
+  /** 账套发现/授权范围；旧配置缺省为 allowlist。 */
+  accountSetScope?: AccountSetScope;
   enabled: boolean;
   /** V1 authority capabilities. Omitted values default to read for backwards compatibility. */
   capabilities?: PrincipalCapability[];
 }
+
+export type AccountSetScope = 'all' | 'allowlist';
 
 export type PrincipalCapability = 'read' | 'validate' | 'write';
 

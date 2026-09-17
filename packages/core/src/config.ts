@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import type { AppConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
+import type { AccountSetScope, AppConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
 import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -16,7 +16,9 @@ export interface LoadConfigOptions {
 const DEFAULT_YAML_PATH = fileURLToPath(new URL('../../../config/agent.yaml', import.meta.url));
 const DEFAULT_PORT = 3000;
 const DEFAULT_CALLBACK_PATH = '/wecom/callback';
-const DEFAULT_SESSION_TTL_MS = 300_000;
+// 24h:财务助手"上午查账、下午接着问"是常态,分钟级 TTL 会造成静默失忆。
+// 过期本身不做清零(agent 层软着陆:压缩成摘要种子续会话),TTL 只决定"多久进入软着陆"。
+const DEFAULT_SESSION_TTL_MS = 86_400_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -34,6 +36,15 @@ function asString(value: unknown): string {
 }
 
 const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
+const ACCOUNT_SET_SCOPES: readonly AccountSetScope[] = ['all', 'allowlist'];
+
+function parseAccountSetScope(value: unknown, label: string): AccountSetScope {
+  if (value === undefined) return 'allowlist';
+  if (typeof value !== 'string' || !ACCOUNT_SET_SCOPES.includes(value as AccountSetScope)) {
+    throw new Error(`配置项 ${label} 不是有效账套范围(可选: all, allowlist)`);
+  }
+  return value as AccountSetScope;
+}
 
 function parseCapabilities(value: unknown, label: string): PrincipalCapability[] {
   if (value === undefined) return ['read'];
@@ -99,6 +110,7 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
     principals[key] = {
       mcpProfile: asString(item['mcpProfile']),
       accountSetIds: Array.isArray(accountSetIds) ? accountSetIds.map(String) : [],
+      accountSetScope: parseAccountSetScope(item['accountSetScope'], `principals.${key}.accountSetScope`),
       enabled: item['enabled'] === true,
       capabilities: parseCapabilities(item['capabilities'], `principals.${key}.capabilities`),
     };
@@ -150,7 +162,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     if (!(principal.mcpProfile in mcpProfiles)) {
       throw new Error(`principal ${key} 引用的 mcpProfile "${principal.mcpProfile}" 未在 mcpProfiles 中定义`);
     }
-    if (principal.enabled && principal.accountSetIds.length < 1) {
+    if (principal.enabled && principal.accountSetScope !== 'all' && principal.accountSetIds.length < 1) {
       throw new Error(`principal ${key} 已启用但未配置任何 accountSetIds,至少需要 1 个账套`);
     }
   }
@@ -197,6 +209,7 @@ export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[]
   return Object.entries(config.principals).map(([key, principal]) => ({
     wecomUserId: key.startsWith('wecom:') ? key.slice('wecom:'.length) : key,
     accountSetIds: [...principal.accountSetIds],
+    ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
     mcpProfile: principal.mcpProfile,
     enabled: principal.enabled,
     capabilities: [...(principal.capabilities ?? ['read'])],
