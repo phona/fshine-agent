@@ -1,6 +1,6 @@
 /**
  * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ MCP host(scope 预检)→ 回复。
- * 被 apps/server/main.ts 与 scripts/e2e-turn.ts 共用,保证测的就是跑的。
+ * 被 apps/server/main.ts 与 tests/e2e 共用,保证测的就是跑的。
  */
 import type {
   AgentRuntime,

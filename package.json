@@ -7,7 +7,7 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "node --import tsx scripts/e2e-fake-no-submit.ts",
+    "test:e2e": "vitest run tests/e2e",
     "start": "node --env-file=.env --import tsx apps/server/main.ts",
     "smoke:wecom": "node --env-file=.env --import tsx scripts/smoke-wecom.ts"
   },
