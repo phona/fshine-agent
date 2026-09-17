@@ -1,0 +1,49 @@
+# ============================================================
+# V0 部署配置模板(agent.yaml 的同名模板)。复制为 config/agent.yaml 后填写;
+# config/agent.yaml 不进版本库(本地部署参数),秘密一律放 .env。
+# 结构对应 @fshine/contracts 的 AppConfig(架构 §8)。
+#
+# 【与 .env 的边界】本文件管"结构与授权"(谁能用、连哪个数据源、授权哪些账套);
+# .env 只管"秘密与连接"(企微凭证、LLM key/model)。账套白名单的真正防线是
+# 每用户的 accountSetIds(本文件);mcpProfiles.env 仅做 17dz 服务端部署级兜底。
+# ============================================================
+
+# ---- 授权名单:key = wecom:<企微 UserID> ----
+#UserID 来源:企微后台通讯录,或机器人收到的 from.userid(明文)。
+#只有列在这里且 enabled 的用户才能使用机器人。
+principals:
+  "wecom:<你的企微UserID>":
+    # 绑定的 MCP profile(下方 mcpProfiles 的 key)
+    mcpProfile: read-default
+    # 授权账套 id 白名单(以 17dz search_account_sets 返回的 as_xxx 为准)
+    accountSetIds: ["as_001"]
+    enabled: true
+    # 能力集(可选,缺省 read):read=只读;validate/write 开启写链路(V1)
+    # capabilities: ["read"]
+
+# ---- MCP 数据源 profile ----
+mcpProfiles:
+  read-default:
+    # 17dz MCP server 启动命令(npm run mcp = node src/mcp/src/server.js)
+    command: npm
+    args: ["run", "mcp"]
+    # 17dz-platform 仓库根目录(本机绝对路径)
+    cwd: /path/to/17dz-platform
+    # 单次工具调用尝试预算(ms)
+    requestTimeoutMs: 60000
+    maxRetries: 2
+    env:
+      # 部署级账套白名单(可选;留空 = 不设限)
+      ALLOWED_ACCOUNT_SETS: ""
+
+# ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
+# channel:
+#   port: 3000
+#   publicUrl: https://your-domain
+#   callbackPath: /wecom/callback
+
+# ---- 会话状态 TTL(可选,ms):闲置超时后转录清零、会话重新开始 ----
+# sessionTtlMs: 300000
+
+# ---- 秘密(WECOM_BOT_ID/WECOM_BOT_SECRET/LLM_*)见 .env.example,放 .env ----
+# ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 DZ_PHONE + ~/.config/17dz/password ----

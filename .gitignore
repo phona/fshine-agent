@@ -9,3 +9,6 @@ data/
 # 秘密与本地部署参数,不进版本库(模板见 .env.example)
 .env
 .env.local
+
+# 本地部署配置(含企微 UserID 与本机路径),模板见 config/agent.example.yaml
+config/agent.yaml
