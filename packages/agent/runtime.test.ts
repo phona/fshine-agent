@@ -54,6 +54,38 @@ function client(handlers: Partial<Record<string, TestHandler>> = {}): HostToolCl
 }
 
 describe('createTaxAgentRuntime(转录即状态)', () => {
+  it('injects skill metadata and serves the controlled read_skill tool', async () => {
+    const sessions = new FakeSessionRepo();
+    let observedPrompt = '';
+    const driver: import('./src/driver').TurnDriver = {
+      run: async (input) => {
+        observedPrompt = input.systemPrompt;
+        expect(input.tools.some((tool) => tool.name === 'read_skill')).toBe(true);
+        const body = await input.exec('read_skill', { name: 'finance' });
+        expect(body).toContain('backend-neutral');
+        return {
+          text: '已按财务规范处理。',
+          messages: [...input.messages, { role: 'assistant', content: '已按财务规范处理。', timestamp: Date.now() } as never],
+        };
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      skillRegistry: {
+        discover: async () => [{ name: 'finance', description: '财务规范', path: '/virtual/finance/SKILL.md' }],
+        read: async () => ({
+          name: 'finance', description: '财务规范', path: '/virtual/finance/SKILL.md',
+          content: '# Finance backend-neutral',
+        }),
+      },
+    });
+    const reply = await runtime.handleTurn(makeCtx(), '查账', fullClient());
+    expect(reply.text).toBe('已按财务规范处理。');
+    expect(observedPrompt).toContain('finance:财务规范');
+    expect(observedPrompt).toContain('read_skill');
+  });
+
   it('回合结束后转录持久化:含用户消息与最终回复', async () => {
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({

@@ -7,6 +7,18 @@ export type {
   ScriptedTurnStep,
 } from './driver';
 export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
+export {
+  FileSkillRegistry,
+  createSkillRegistry,
+  discoverSkills,
+  parseFrontmatter,
+  readSkill,
+  READ_SKILL_TOOL,
+  type FileSkillRegistryOptions,
+  type LoadedSkill,
+  type SkillMetadata,
+  type SkillRegistry,
+} from './skills';
 export { defaultStepText } from './step-text';
 export { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 export * from './session';

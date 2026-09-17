@@ -8,6 +8,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { loadTranscript, saveTranscript } from './session';
 import { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 import { ToolUserError, type TurnDriver } from './driver';
+import { createSkillRegistry, READ_SKILL_TOOL, type SkillMetadata, type SkillRegistry } from './skills';
 import type { AgentReply, ConversationSessionRepo, DiscoveredResource, DiscoveredTool, HostToolClient, TrustedContext } from '@fshine/contracts';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000; // 24h:财务助手"上午查账、下午接着问",分钟级 TTL 会造成静默失忆
@@ -26,20 +27,28 @@ export interface TaxAgentRuntimeDeps {
   sessions: Pick<ConversationSessionRepo, 'get' | 'upsert'>;
   sessionTtlMs?: number;
   turnBudgetMs?: number;
+  /** Optional Pi-compatible skill-directory registry. */
+  skillRegistry?: SkillRegistry;
 }
 
 /** 账套授权 + 工具编排全在工具面内;模型看到的转录就是全部事实。 */
 export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeShape {
   const sessionTtlMs = deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
   const turnBudgetMs = deps.turnBudgetMs ?? DEFAULT_TURN_BUDGET_MS;
+  // This is deliberately separate from pi-agent-core.  The service uses the
+  // core loop directly, while this registry provides the small part of the Pi
+  // coding-agent skill protocol that is useful to a non-interactive service.
+  const skillRegistry = deps.skillRegistry ?? createSkillRegistry();
 
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
       const resources = tools.resources?.() ?? [];
       const allowedResourceUris = new Set(resources.map((resource) => resource.uri));
-      const discovered = withKnowledgeResourceTool(tools.tools(), resources);
+      const skills = await discoverSkillMetadata(skillRegistry);
+      const discoveredHostTools = withKnowledgeResourceTool(tools.tools(), resources);
       // 无可用工具 = host 未就绪/无权限:此回合必然无法完成任何查询,尽早收场
-      if (discovered.length === 0) return { text: FALLBACK_FAILURE };
+      if (discoveredHostTools.length === 0) return { text: FALLBACK_FAILURE };
+      const discovered = withSkillTool(discoveredHostTools, skills);
 
       const { messages: loaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
       // 过期软着陆:旧转录压成「摘要+最近尾巴」种子续用,不做静默清零。
@@ -59,7 +68,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
       // 重新搜索并命中，则解除此保护。这样保留历史上下文，同时避免串账套。
       let accountSetSearchMiss = false;
       const result = await deps.driver.run({
-        systemPrompt: SYSTEM_PROMPT(discovered),
+        systemPrompt: SYSTEM_PROMPT(discovered, skills),
         tools: discovered,
         messages: context,
         onStep: ctx.onStep ?? (() => {}),
@@ -75,6 +84,18 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
             const resource = await tools.readResource(uri, signal);
             if (!resource.ok) throw new ToolUserError(toUserMessage(resource.error));
             return resource.data;
+          }
+          if (tool === READ_SKILL_TOOL) {
+            const name = args['name'];
+            if (typeof name !== 'string' || !skills.some((skill) => skill.name === name)) {
+              throw new ToolUserError('该技能未被当前运行时发现或授权。');
+            }
+            try {
+              const skill = await skillRegistry.read(name);
+              return skill.content;
+            } catch (error) {
+              throw new ToolUserError(error instanceof Error ? `技能读取失败:${error.message}` : '技能读取失败。');
+            }
           }
           const outcome = await tools.call(tool, args, signal);
           if (!outcome.ok) throw new ToolUserError(toUserMessage(outcome.error));
@@ -111,7 +132,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
 type AgentRuntimeShape = import('@fshine/contracts').AgentRuntime;
 
 /** 系统提示:身份 + 工具面 + 纪律规则。规则全部对应实测故障,勿随意删除。 */
-function SYSTEM_PROMPT(tools: readonly { name: string; description: string; inputSchema: unknown }[]): string {
+function SYSTEM_PROMPT(
+  tools: readonly { name: string; description: string; inputSchema: unknown }[],
+  skills: readonly SkillMetadata[] = [],
+): string {
   const toolLines = tools
     .map((tool) => `- ${tool.name}:${tool.description};inputSchema=${JSON.stringify(tool.inputSchema)}`)
     .join('\n');
@@ -122,6 +146,8 @@ function SYSTEM_PROMPT(tools: readonly { name: string; description: string; inpu
     '可用工具(名称、描述、inputSchema 的紧凑 JSON):',
     toolLines,
     '',
+    skillPrompt(skills),
+    '',
     '回答规则:',
     '- 数据回复必须带上所用账套名称、会计期间(如使用)与数据来源。',
     '- accountSetId 只能使用工具返回的 as_xxx 原值,严禁用账套名称代替或编造。',
@@ -129,6 +155,30 @@ function SYSTEM_PROMPT(tools: readonly { name: string; description: string; inpu
     '- list_vouchers 结果含 nextCursor 时,告知用户可回复"下一页"继续;用户说"下一页"时把 nextCursor 原样传入 cursor 参数,说"上一页"时把 prevCursor 原样传入;已在第一页则如实说明。',
     '- 工具结果出现 NEEDS_LOGIN 时,回复:"' + NEEDS_LOGIN_MESSAGE + '"',
     '- 始终使用简体中文回复。',
+  ].join('\n');
+}
+
+async function discoverSkillMetadata(registry: SkillRegistry): Promise<readonly SkillMetadata[]> {
+  try {
+    return await registry.discover();
+  } catch (error) {
+    // A broken optional skill must not take down a data-query turn.  The
+    // registry itself remains responsible for strict read-time containment.
+    console.warn(JSON.stringify({
+      event: 'skill_discovery_failed',
+      error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+    }));
+    return [];
+  }
+}
+
+function skillPrompt(skills: readonly SkillMetadata[]): string {
+  if (skills.length === 0) return '可用技能:无。';
+  const lines = skills.map((skill) => `- ${skill.name}:${skill.description}`);
+  return [
+    '可用技能(只提供领域指令，不是事实数据):',
+    ...lines,
+    `需要使用某项技能时，必须调用 ${READ_SKILL_TOOL} 并传入精确的 name；不要猜测未列出的技能。`,
   ].join('\n');
 }
 
@@ -166,6 +216,33 @@ function withKnowledgeResourceTool(
         additionalProperties: false,
         properties: {
           uri: { type: 'string', enum: uris },
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * Expose skill metadata and a constrained virtual reader to Pi.  The model
+ * never receives a filesystem path; runtime.exec validates the name again and
+ * the registry performs the final realpath containment check before reading.
+ */
+function withSkillTool(
+  tools: readonly DiscoveredTool[],
+  skills: readonly SkillMetadata[],
+): readonly DiscoveredTool[] {
+  if (skills.length === 0 || tools.some((tool) => tool.name === READ_SKILL_TOOL)) return tools;
+  return [
+    ...tools,
+    {
+      name: READ_SKILL_TOOL,
+      description: '按名称读取当前运行时已发现且已授权的 SKILL.md 领域指令。只能使用技能目录中列出的 name。',
+      inputSchema: {
+        type: 'object',
+        required: ['name'],
+        additionalProperties: false,
+        properties: {
+          name: { type: 'string', enum: skills.map((skill) => skill.name) },
         },
       },
     },
