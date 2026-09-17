@@ -247,7 +247,13 @@ export class McpHost {
     if (principalCategories && !principalCategories.includes(this.toolCategories.get(tool) as McpToolCategory)) {
       return internalError('没有该工具的操作权限');
     }
-    if (this.toolCategories.get(tool) === 'write' && args['confirmed'] === true && !approvedWrite) {
+    // Workflow confirmation is itself the irreversible authorization boundary:
+    // it has no `confirmed` argument to inspect, so it must never be reachable
+    // through the model-originated call path.  The host/application must use
+    // callApprovedWrite only after matching an explicit user confirmation.
+    if (this.toolCategories.get(tool) === 'write'
+      && !approvedWrite
+      && (args['confirmed'] === true || tool === 'workflow.confirm')) {
       return internalError('写入尚未获得用户确认');
     }
     // scope 预检:未授权账套在 MCP 调用前被拒——不发往 server,也不触发 audit onStart
