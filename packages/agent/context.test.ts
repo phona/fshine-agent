@@ -3,7 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, DiscoveredTool, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
-import { ScriptedTurnDriver, ToolUserError } from './src/driver';
+import { ScriptedTurnDriver, ToolUserError, type TurnDriver } from './src/driver';
 import { createContextTaskRunner, type ContextToolProvider } from './src/context';
 import { createWorkspaceToolProvider } from './src/workspace-tools';
 import { createTaxAgentRuntime } from './src/runtime';
@@ -50,7 +50,7 @@ async function profileRoot(): Promise<string> {
   return root;
 }
 
-function runner(root: string, tasks: MemoryTasks, driver: ReturnType<typeof ScriptedTurnDriver>, capabilityProvider?: ContextToolProvider) {
+function runner(root: string, tasks: MemoryTasks, driver: TurnDriver, capabilityProvider?: ContextToolProvider) {
   const profiles: Record<string, ContextProfileConfig> = {
     '17dz': { root, skillRoots: ['.agents/skills'] },
   };
@@ -160,6 +160,24 @@ describe('trusted context worker', () => {
     );
     expect(result.status).toBe('completed');
     expect(calls).toEqual([{ query: '幻辰' }]);
+  });
+
+  it('Worker system prompt 同时加载通用 Finance Skill 和 profile 平台 Skill', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    let prompt = '';
+    const scripted = ScriptedTurnDriver([{ text: '已按平台和财务规范完成。' }]);
+    const worker = runner(root, tasks, {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return scripted.run(input);
+      },
+    }, provider([]));
+    const result = await worker.run({ request: '查账' }, { trusted: trusted() });
+    expect(result.status).toBe('completed');
+    expect(prompt).toContain('finance');
+    expect(prompt).toContain('17dz');
+    expect(prompt).toContain('可复核证据');
   });
 
   it('无显式 provider 时自动挂载 workspace tools，且固定 root', async () => {

@@ -11,7 +11,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import { ToolUserError } from './driver';
-import { FileSkillRegistry, type SkillMetadata, type SkillRegistry } from './skills';
+import { createSkillRegistry, FileSkillRegistry, type SkillMetadata, type SkillRegistry } from './skills';
 import type {
   ContextProfileConfig,
   DiscoveredTool,
@@ -56,6 +56,8 @@ export interface ContextTaskRunnerOptions {
   tasks: PlatformTaskRepo;
   /** Main and worker drivers are separate in production; tests may provide a queue. */
   workerDriver: TurnDriver;
+  /** Generic fshine skills (Finance by default) loaded before profile skills. */
+  commonSkillRegistry?: SkillRegistry;
   /** Optional in-process capability provider supplied by the deployment. */
   provider?: ContextToolProvider;
   /** Set false only for deployments that intentionally provide no worker tools. */
@@ -133,7 +135,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       };
       await options.tasks.upsert(running);
 
-      const skillRegistry = new CompositeSkillRegistry(profile.skillRoots);
+      const skillRegistry = new CompositeSkillRegistry([
+        options.commonSkillRegistry ?? createSkillRegistry(),
+        ...profile.skillRoots.map((root) => new FileSkillRegistry({ rootDir: root })),
+      ]);
       const skills = await skillRegistry.discover();
       const skillText = await readSkills(skillRegistry, skills);
       const provider = ctx.provider
@@ -221,20 +226,21 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 class CompositeSkillRegistry implements SkillRegistry {
-  private readonly registries: FileSkillRegistry[];
-  constructor(roots: readonly string[]) { this.registries = roots.map((root) => new FileSkillRegistry({ rootDir: root })); }
+  private readonly registries: SkillRegistry[];
+  constructor(registries: readonly SkillRegistry[]) { this.registries = [...registries]; }
   async discover(): Promise<readonly SkillMetadata[]> {
     const all = (await Promise.all(this.registries.map((registry) => registry.discover()))).flat();
     const names = new Set<string>();
     return all.filter((skill) => !names.has(skill.name) && names.add(skill.name));
   }
   async read(name: string) {
-    const matches = (await Promise.all(this.registries.map(async (registry) => {
-      try { return await registry.read(name); } catch { return undefined; }
-    }))).filter((skill): skill is Awaited<ReturnType<FileSkillRegistry['read']>> => Boolean(skill));
-    if (matches.length === 0) throw new Error(`未找到技能:${name}`);
-    if (matches.length > 1) throw new Error(`技能名称重复:${name}`);
-    return matches[0]!;
+    // Common fshine skills have precedence when a profile happens to mount a
+    // directory containing the same name. Discovery still de-duplicates the
+    // visible metadata, so a duplicate cannot expand the prompt.
+    for (const registry of this.registries) {
+      try { return await registry.read(name); } catch { /* try the next root */ }
+    }
+    throw new Error(`未找到技能:${name}`);
   }
 }
 
