@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentReply, AgentRuntime, AuditStore, TrustedContext } from '@fshine/contracts';
-import type { McpHost } from '@fshine/mcp-host';
 import { createMessageHandler } from './handler';
 
 const USER = 'user_a';
@@ -10,7 +9,7 @@ function fakeStore(): AuditStore {
   return {
     principalScopes: {
       get: async (userId: string) =>
-        userId === USER ? { wecomUserId: USER, accountSetIds: ['as_001'], mcpProfile: 'p', enabled: true } : null,
+        userId === USER ? { wecomUserId: USER, accountSetIds: ['as_001'], enabled: true } : null,
       list: async () => [],
       upsert: async () => {},
     },
@@ -43,19 +42,12 @@ function fakeRuntime(order: string[], delayMs: number): AgentRuntime {
   };
 }
 
-const hostFor = () => ({
-  ensureReady: async () => {},
-  clientFor: () => ({}),
-  conversationNamespace: 'backend_test',
-} as unknown as McpHost);
-
 describe('createMessageHandler', () => {
   it('未授权用户:拒绝并提示(带其 principalId)', async () => {
     const store = fakeStore();
     const handler = createMessageHandler({
       store,
       runtime: fakeRuntime([], 0),
-      hostFor,
     });
     const reply = await handler(
       { wecomUserId: 'stranger', conversationId: 'c', messageId: 'm1', text: 'hi', receivedAt: '' },
@@ -70,7 +62,6 @@ describe('createMessageHandler', () => {
     const handler = createMessageHandler({
       store,
       runtime: fakeRuntime(order, 30),
-      hostFor,
     });
 
     const first = handler({ wecomUserId: USER, conversationId: 'c', messageId: 'm1', text: '第一条', receivedAt: '' });
@@ -79,7 +70,7 @@ describe('createMessageHandler', () => {
 
     const starts = order.filter((entry) => entry.startsWith('start:')).length;
     expect(starts).toBe(2);
-    expect(order.indexOf('start:backend_test:user_a:c')).toBeLessThan(order.indexOf('end:backend_test:user_a:c'));
-    expect(order.indexOf('end:backend_test:user_a:c')).toBeLessThan(order.lastIndexOf('start:backend_test:user_a:c'));
+    expect(order.indexOf('start:wecom:user_a:c')).toBeLessThan(order.indexOf('end:wecom:user_a:c'));
+    expect(order.indexOf('end:wecom:user_a:c')).toBeLessThan(order.lastIndexOf('start:wecom:user_a:c'));
   });
 });

@@ -82,6 +82,6 @@ export interface AgentRuntime {
   handleTurn(
     ctx: TrustedContext,
     userMessage: string,
-    tools: HostToolClient,
+    tools?: HostToolClient,
   ): Promise<AgentReply>;
 }

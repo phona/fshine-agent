@@ -2,11 +2,10 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { ContextProfileConfig, DiscoveredTool, HostToolClient, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
+import type { ContextProfileConfig, DiscoveredTool, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, ToolUserError } from './src/driver';
-import { createContextTaskRunner } from './src/context';
+import { createContextTaskRunner, type ContextToolProvider } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
-import { fakeOk } from './test-helpers';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -35,10 +34,10 @@ function trusted(sessionId = 'session-1'): TrustedContext {
   return { requestId: 'req-1', principalId: 'wecom:user-1', allowedAccountSetIds: [], sessionId };
 }
 
-function host(calls: Array<Record<string, unknown>>): HostToolClient {
+function provider(calls: Array<Record<string, unknown>>): ContextToolProvider {
   return {
     tools: () => [tool],
-    call: async (_name, args) => { calls.push(args); return fakeOk({ accountSets: [{ id: 'as_003', name: '幻辰' }] }); },
+    call: async (_name, args) => { calls.push(args); return { accountSets: [{ id: 'as_003', name: '幻辰' }] }; },
   };
 }
 
@@ -50,11 +49,11 @@ async function profileRoot(): Promise<string> {
   return root;
 }
 
-function runner(root: string, tasks: MemoryTasks, driver: ReturnType<typeof ScriptedTurnDriver>) {
+function runner(root: string, tasks: MemoryTasks, driver: ReturnType<typeof ScriptedTurnDriver>, capabilityProvider?: ContextToolProvider) {
   const profiles: Record<string, ContextProfileConfig> = {
     '17dz': { root, skillRoots: ['.agents/skills'], allowedTools: ['search_account_sets'] },
   };
-  return createContextTaskRunner({ profiles, tasks, workerDriver: driver });
+  return createContextTaskRunner({ profiles, tasks, workerDriver: driver, provider: capabilityProvider });
 }
 
 describe('trusted context worker', () => {
@@ -67,7 +66,7 @@ describe('trusted context worker', () => {
       text: '已找到幻辰账套 as_003。',
     }]));
 
-    const result = await worker.run({ request: '查找幻辰账套' }, { trusted: trusted(), host: host(calls) });
+    const result = await worker.run({ request: '查找幻辰账套' }, { trusted: trusted(), provider: provider(calls) });
     expect(result.status).toBe('completed');
     expect(result.taskId).toMatch(/^task_/);
     expect(calls).toEqual([{ query: '幻辰' }]);
@@ -82,10 +81,10 @@ describe('trusted context worker', () => {
       { text: '找到两个客户，请选择幻州幻东机械有限公司。' },
       { text: '已查询完成，应收余额为 686985.49 元。' },
     ]));
-    const first = await worker.run({ request: '幻东在幻辰还欠多少' }, { trusted: trusted(), host: host(calls) });
+    const first = await worker.run({ request: '幻东在幻辰还欠多少' }, { trusted: trusted(), provider: provider(calls) });
     expect(first.status).toBe('needs_input');
     expect(first.questions).toHaveLength(1);
-    const second = await worker.run({ taskId: first.taskId, request: '继续', answer: '选择幻州幻东机械有限公司' }, { trusted: trusted(), host: host(calls) });
+    const second = await worker.run({ taskId: first.taskId, request: '继续', answer: '选择幻州幻东机械有限公司' }, { trusted: trusted(), provider: provider(calls) });
     expect(second.status).toBe('completed');
     expect((await tasks.get(first.taskId))?.workerMessages.length).toBeGreaterThan(1);
   });
@@ -94,9 +93,9 @@ describe('trusted context worker', () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
     const firstRunner = runner(root, tasks, ScriptedTurnDriver([{ text: '请补充客户名称。' }]));
-    const first = await firstRunner.run({ request: '查客户' }, { trusted: trusted(), host: host([]) });
+    const first = await firstRunner.run({ request: '查客户' }, { trusted: trusted(), provider: provider([]) });
     const secondRunner = runner(root, tasks, ScriptedTurnDriver([{ text: '恢复后已完成。' }]));
-    const second = await secondRunner.run({ taskId: first.taskId, request: '继续', answer: '幻州幻东机械有限公司' }, { trusted: trusted(), host: host([]) });
+    const second = await secondRunner.run({ taskId: first.taskId, request: '继续', answer: '幻州幻东机械有限公司' }, { trusted: trusted(), provider: provider([]) });
     expect(second.status).toBe('completed');
     expect((await tasks.get(first.taskId))?.status).toBe('completed');
   });
@@ -109,14 +108,14 @@ describe('trusted context worker', () => {
       tasks,
       workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
     });
-    await expect(worker.run({ request: '读取任意路径', ...( { root: '/' } as unknown as Record<string, unknown>) }, { trusted: trusted(), host: host([]) })).rejects.toBeInstanceOf(ToolUserError);
+    await expect(worker.run({ request: '读取任意路径', ...( { root: '/' } as unknown as Record<string, unknown>) }, { trusted: trusted(), provider: provider([]) })).rejects.toBeInstanceOf(ToolUserError);
     expect(tasks.records.size).toBe(0);
   });
 
   it('启用 context worker 后主 Agent 只看到 run_17dz_task，并能委托完成', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
-    const platform = runner(root, tasks, ScriptedTurnDriver([{ text: '17dz 查询已完成，余额为 686985.49 元。' }]));
+    const platform = runner(root, tasks, ScriptedTurnDriver([{ text: '17dz 查询已完成，余额为 686985.49 元。' }]), provider([]));
     const observedToolNames: string[][] = [];
     const mainScript = ScriptedTurnDriver([{
       toolCalls: [{ tool: 'run_17dz_task', args: { request: '查询幻辰的应收账款' } }],
@@ -133,9 +132,46 @@ describe('trusted context worker', () => {
       sessions: new MemorySessions(),
       platformTask: platform,
     });
-    const reply = await runtime.handleTurn(trusted(), '查幻辰的应收账款', host([]));
+    const reply = await runtime.handleTurn(trusted(), '查幻辰的应收账款');
     expect(reply.text).toBe('已完成平台查询。');
     expect(observedToolNames).toEqual([[ 'run_17dz_task' ]]);
     expect([...tasks.records.values()][0]?.status).toBe('completed');
+  });
+
+  it('Worker 优先使用 ContextToolProvider，不依赖 HostToolClient', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    const calls: Array<Record<string, unknown>> = [];
+    const provider: ContextToolProvider = {
+      tools: () => [tool],
+      call: async (_name, args) => { calls.push(args); return { accountSets: [{ id: 'as_003', name: '幻辰' }] }; },
+    };
+    const worker = runner(root, tasks, ScriptedTurnDriver([{
+      toolCalls: [{ tool: 'search_account_sets', args: { query: '幻辰' } }],
+      text: '已通过 ContextToolProvider 完成。',
+    }]));
+    const result = await worker.run(
+      { request: '查找幻辰' },
+      {
+        trusted: trusted(),
+        provider,
+      },
+    );
+    expect(result.status).toBe('completed');
+    expect(calls).toEqual([{ query: '幻辰' }]);
+  });
+
+  it('上下文没有通用执行能力时直接 blocked，不尝试 MCP/Host fallback', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    const worker = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      tasks,
+      workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
+    });
+    const result = await worker.run({ request: '查找幻辰' }, { trusted: trusted() });
+    expect(result.status).toBe('blocked');
+    expect(result.error).toContain('CAPABILITY_UNAVAILABLE');
+    expect((await tasks.get(result.taskId))?.status).toBe('blocked');
   });
 });

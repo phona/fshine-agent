@@ -1,225 +1,84 @@
-import { strict as assert } from 'node:assert';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
+import type { ContextProfileConfig, ContextToolProvider, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from '@fshine/core';
-import { createTaxAgentRuntime, ScriptedTurnDriver, type TurnDriver, type TurnDriverInput } from '@fshine/agent';
+import { createContextTaskRunner, createTaxAgentRuntime, ScriptedTurnDriver, ToolUserError } from '@fshine/agent';
 import { createMessageHandler } from '../../apps/server/handler';
-import type { McpHost } from '@fshine/mcp-host';
-import { InProcessFakeMcpClient } from './fake-mcp';
 
 const stores: ReturnType<typeof createSqliteStore>[] = [];
+afterEach(() => { for (const store of stores.splice(0)) closeStore(store); });
 
-afterEach(() => {
-  for (const store of stores.splice(0)) closeStore(store);
-});
+function trusted(sessionId = 'e2e-context'): TrustedContext {
+  return { requestId: newId('req'), principalId: 'wecom:e2e_user', allowedAccountSetIds: [], sessionId };
+}
 
-function context(sessionId = `e2e-${Math.random().toString(16).slice(2)}`): TrustedContext {
+function message(text: string): IncomingChannelMessage {
+  return { wecomUserId: 'e2e_user', conversationId: 'e2e', messageId: newId('msg'), chatType: 'single', text, receivedAt: new Date().toISOString() };
+}
+
+function provider(): ContextToolProvider {
   return {
-    requestId: newId('req'),
-    principalId: 'wecom:e2e_user',
-    allowedAccountSetIds: ['as_001'],
-    sessionId,
+    tools: () => [{ name: 'search_account_sets', description: '搜索账套', inputSchema: { type: 'object' } }],
+    call: async () => ({ accountSets: [{ id: 'as_003', name: '幻辰' }] }),
   };
 }
 
-function message(wecomUserId: string, text: string, conversationId = 'e2e'): IncomingChannelMessage {
-  return {
-    wecomUserId,
-    conversationId,
-    messageId: newId('msg'),
-    chatType: 'single',
-    text,
-    receivedAt: new Date().toISOString(),
+function runner(store: ReturnType<typeof createSqliteStore>, workerDriver: ReturnType<typeof ScriptedTurnDriver>) {
+  const profiles: Record<string, ContextProfileConfig> = {
+    '17dz': { root: process.cwd(), skillRoots: ['.agents/skills'] },
   };
+  return createContextTaskRunner({ profiles, tasks: store.platformTasks!, workerDriver, provider: provider() });
 }
 
-/** Minimal in-process host shape accepted by the message handler. */
-function fakeHost(client: InProcessFakeMcpClient): McpHost {
-  const host = {
-    conversationNamespace: 'in-process-fake-mcp',
-    discoveredTools: client.tools(),
-    ensureReady: async () => undefined,
-    clientFor: () => client,
-  };
-  return host as unknown as McpHost;
-}
-
-function makeStore(user = 'e2e_user') {
-  const store = createSqliteStore(':memory:');
-  stores.push(store);
-  return { store, user };
-}
-
-describe('本地 E2E × 进程内 Fake MCP', () => {
-  it('未授权用户被拒绝，且不会触发 Fake MCP', async () => {
-    const client = await InProcessFakeMcpClient.create();
-    const { store } = makeStore();
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ text: '不应执行' }]),
+describe('本地 E2E × Context Worker（进程内 Fake Provider）', () => {
+  it('主 Agent 只委托 run_17dz_task，首次任务完成', async () => {
+    const store = createSqliteStore(':memory:');
+    stores.push(store);
+    await store.principalScopes.upsert({ wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', mcpProfile: 'unused', enabled: true });
+    const platform = runner(store, ScriptedTurnDriver([{ text: '已查询幻辰，应收余额为 686985.49 元。' }]));
+    const main = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ toolCalls: [{ tool: 'run_17dz_task', args: { request: '查幻辰的应收账款' } }], text: '已完成平台查询。' }]),
       sessions: store.sessions,
+      platformTask: platform,
     });
-    const handler = createMessageHandler({
-      store,
-      runtime,
-      hostFor: () => fakeHost(client),
-    });
-
-    const reply = await handler(message('stranger_404', '查一下幻晟本期的凭证'));
-    expect(reply).toContain('未开通查询权限');
-    expect(client.calls).toEqual([]);
+    const handler = createMessageHandler({ store, runtime: main });
+    expect(await handler(message('查幻辰的应收账款'))).toContain('已完成平台查询');
   });
 
-  it('账套搜索出现两个候选，选择后使用稳定 id 查询并续接凭证', async () => {
-    const client = await InProcessFakeMcpClient.create({ env: { FAKE_ENABLE_WRITE: '1' } });
-    const { store } = makeStore();
-    await store.principalScopes.upsert({
-      wecomUserId: 'e2e_user', accountSetIds: ['as_001'], mcpProfile: 'fake', enabled: true,
-    });
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([
-        {
-          toolCalls: [{ tool: 'search_account_sets', args: { query: '幻晟' } }],
-          text: '找到两个候选：1. 幻晟；2. 幻晟(深圳)，请回复序号。',
-        },
-        {
-          toolCalls: [
-            { tool: 'get_current_accounting_period', args: { accountSetId: 'as_001' } },
-            { tool: 'list_vouchers', args: { accountSetId: 'as_001', period: '202607', pageSize: 4 } },
-          ],
-          text: '已选择幻晟（as_001），本期有凭证，可回复“下一页”继续。',
-        },
-      ]),
-      sessions: store.sessions,
-    });
-    const handler = createMessageHandler({ store, runtime, hostFor: () => fakeHost(client) });
-
-    const first = await handler(message('e2e_user', '查一下幻晟本期的凭证'));
-    const second = await handler(message('e2e_user', '1'));
-    expect(first).toContain('两个候选');
-    expect(second).toContain('as_001');
-    expect(client.callsOf('search_account_sets')).toEqual([{ query: '幻晟' }]);
-    expect(client.callsOf('get_current_accounting_period')).toEqual([{ accountSetId: 'as_001' }]);
-    expect(client.callsOf('list_vouchers')[0]).toMatchObject({ accountSetId: 'as_001', period: '202607' });
+  it('needs_input 续接、重新创建 Runner 后恢复为 completed', async () => {
+    const store = createSqliteStore(':memory:');
+    stores.push(store);
+    const first = runner(store, ScriptedTurnDriver([{ text: '找到两个客户，请选择幻州幻东机械有限公司。' }]));
+    const pending = await first.run({ request: '幻东在幻辰还欠多少' }, { trusted: trusted() });
+    expect(pending.status).toBe('needs_input');
+    const resumed = runner(store, ScriptedTurnDriver([{ text: '已恢复任务并查询完成。' }]));
+    const done = await resumed.run({ taskId: pending.taskId, request: '继续', answer: '选择幻州幻东机械有限公司' }, { trusted: trusted() });
+    expect(done.status).toBe('completed');
+    expect((await store.platformTasks!.get(pending.taskId))?.status).toBe('completed');
   });
 
-  it('Fake MCP 分页返回游标，下一页从 offset=4 开始', async () => {
-    const client = await InProcessFakeMcpClient.create();
-    const first = await client.call('list_vouchers', { accountSetId: 'as_001', period: '202607', pageSize: 4 });
-    assert(first.ok);
-    const firstData = first.data as { docs: unknown[]; nextCursor?: string; offset?: number };
-    expect(firstData.docs).toHaveLength(4);
-    expect(firstData.offset).toBe(0);
-    expect(firstData.nextCursor).toBeTruthy();
-
-    const second = await client.call('list_vouchers', {
-      accountSetId: 'as_001', period: '202607', cursor: firstData.nextCursor,
+  it('Context Profile 越权路径被拒绝', async () => {
+    const store = createSqliteStore(':memory:');
+    stores.push(store);
+    const task = createContextTaskRunner({
+      profiles: { '17dz': { root: process.cwd(), skillRoots: ['../outside'] } },
+      tasks: store.platformTasks!,
+      workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
+      provider: provider(),
     });
-    assert(second.ok);
-    const secondData = second.data as { docs: unknown[]; offset?: number; prevCursor?: string };
-    expect(secondData.docs).toHaveLength(4);
-    expect(secondData.offset).toBe(4);
-    expect(secondData.prevCursor).toBeTruthy();
+    await expect(task.run({ request: '读取任意路径' }, { trusted: trusted() })).rejects.toBeInstanceOf(ToolUserError);
   });
 
-  it('跨轮追问保留账套上下文，并通过 Fake MCP 获取下一页', async () => {
-    const client = await InProcessFakeMcpClient.create();
-    const inputs: TurnDriverInput[] = [];
-    const base = ScriptedTurnDriver([
-      {
-        toolCalls: [{ tool: 'search_account_sets', args: { query: '幻晟' } }],
-        text: '幻晟本期凭证第一页已返回，请回复下一页。',
-      },
-      {
-        toolCalls: [{ tool: 'list_vouchers', args: { accountSetId: 'as_001', period: '202607', pageSize: 4 } }],
-        text: '幻晟的下一页凭证已返回。',
-      },
-      { text: '刚才查的是幻晟账套（as_001）。' },
-    ]);
-    const driver: TurnDriver = {
-      run: async (input) => {
-        inputs.push(input);
-        return base.run(input);
-      },
-    };
-    const runtime = createTaxAgentRuntime({ driver, sessions: new InProcessSessionRepo() });
-    const ctx = context('follow-up');
-    await runtime.handleTurn(ctx, '查幻晟本期凭证', client);
-    await runtime.handleTurn(ctx, '下一页', client);
-    const reply = await runtime.handleTurn(ctx, '刚才查的是哪个账套？', client);
-
-    expect(reply.text).toContain('幻晟');
-    expect(inputs[2]?.messages.some((entry) => JSON.stringify(entry).includes('幻晟本期凭证第一页'))).toBe(true);
-    expect(client.callsOf('list_vouchers')).toHaveLength(1);
-  });
-
-  it('validate_voucher 可读写校验，但 submit_voucher、batch 和 workflow.confirm 从未调用', async () => {
-    const client = await InProcessFakeMcpClient.create({ env: { FAKE_ENABLE_WRITE: '1' } });
-    const contract = {
-      accountSetId: 'as_001', date: '2026-07-31', template: 'bill.receive',
-      entries: [
-        { summary: 'E2E 收票', subjectCode: '1121', debit: 100 },
-        { summary: 'E2E 收票', subjectCode: '1122', assistantName: '客户甲', credit: 100 },
-      ],
-    };
-    const valid = await client.call('validate_voucher', { contract });
-    const invalid = await client.call('validate_voucher', { contract: { ...contract, entries: [contract.entries[0]] } });
-    assert(valid.ok);
-    assert(invalid.ok);
-    expect((valid.data as { ok: boolean }).ok).toBe(true);
-    expect((invalid.data as { ok: boolean }).ok).toBe(false);
-    expect(client.calls.map((call) => call.tool)).toEqual(['validate_voucher', 'validate_voucher']);
-    expect(client.calls.some((call) => ['submit_voucher', 'submit_voucher_batch', 'workflow.confirm'].includes(call.tool))).toBe(false);
-  });
-
-  it('Fake MCP resources 与 inspect_account_set 可用，且资源读取受已发现 URI 限制', async () => {
-    const client = await InProcessFakeMcpClient.create({ env: { FAKE_ENABLE_RESOURCES: '1' } });
-    const resources = client.resources();
-    expect(resources.map((resource) => resource.uri)).toContain('17dz://domains/voucher/templates');
-    const resource = await client.readResource('17dz://domains/voucher/templates');
-    assert(resource.ok);
-    expect(resource.data.contents[0]?.text).toContain('voucher templates');
-    const inspect = await client.call('inspect_account_set', { accountSetId: 'as_001' });
-    assert(inspect.ok);
-    expect((inspect.data as { subjects: Array<{ code: string }> }).subjects.map((subject) => subject.code)).toContain('1122');
-  });
-
-  it('Fake MCP tools/list 含 search_references，host schema 校验通过并记录调用参数', async () => {
-    const client = await InProcessFakeMcpClient.create();
-    expect(client.tools().map((tool) => tool.name)).toContain('search_references');
-    const schema = client.tools().find((tool) => tool.name === 'search_references')?.inputSchema as Record<string, unknown>;
-    expect(schema).toMatchObject({ type: 'object', required: ['accountSetId', 'referenceType', 'query'] });
-
-    const matched = await client.call('search_references', {
-      accountSetId: 'as_003', referenceType: 'assistant', query: '幻东', filters: { subjectCode: '1122' },
+  it('没有通用执行能力时返回 capability_unavailable 并保存 blocked 状态', async () => {
+    const store = createSqliteStore(':memory:');
+    stores.push(store);
+    const task = createContextTaskRunner({
+      profiles: { '17dz': { root: process.cwd(), skillRoots: ['.agents/skills'] } },
+      tasks: store.platformTasks!,
+      workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
     });
-    assert(matched.ok);
-    const data = matched.data as { status: string; candidates: Array<{ id: string; name: string; type: string }> };
-    expect(data.status).toBe('matched');
-    expect(data.candidates[0]).toMatchObject({ id: '283655291', type: 'customer' });
-
-    // referenceType 不在支持范围也通过 schema(开放字符串),业务层返回 unavailable
-    const unavailable = await client.call('search_references', {
-      accountSetId: 'as_003', referenceType: 'employee', query: '张三',
-    });
-    assert(unavailable.ok);
-    expect((unavailable.data as { status: string }).status).toBe('unavailable');
-
-    expect(client.callsOf('search_references')).toEqual([
-      { accountSetId: 'as_003', referenceType: 'assistant', query: '幻东', filters: { subjectCode: '1122' } },
-      { accountSetId: 'as_003', referenceType: 'employee', query: '张三' },
-    ]);
+    const result = await task.run({ request: '查幻辰账套' }, { trusted: trusted('capability') });
+    expect(result.status).toBe('blocked');
+    expect(result.error).toContain('CAPABILITY_UNAVAILABLE');
+    expect((await store.platformTasks!.get(result.taskId))?.status).toBe('blocked');
   });
 });
-
-/** Tiny deterministic session repository for runtime-only E2E scenarios. */
-class InProcessSessionRepo {
-  private readonly records = new Map<string, { sessionId: string; principalId: string; channelConversationId: string; updatedAt: string; state?: unknown }>();
-
-  async get(sessionId: string) {
-    return this.records.get(sessionId) ?? null;
-  }
-
-  async upsert(record: { sessionId: string; principalId: string; channelConversationId: string; updatedAt: string; state?: unknown }) {
-    this.records.set(record.sessionId, { ...record });
-  }
-}

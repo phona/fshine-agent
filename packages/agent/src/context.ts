@@ -3,8 +3,8 @@
  *
  * A context profile is operator configuration, never model input.  It gives a
  * fresh Pi worker a working directory and skill roots while task state stays
- * in fshine's SQLite store.  The worker uses the existing host tool adapter;
- * this module deliberately does not introduce a second platform protocol.
+ * in fshine's SQLite store. Tool execution is supplied by a tiny provider
+ * contract; the existing host adapter is only a compatibility fallback.
  */
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -15,7 +15,6 @@ import { FileSkillRegistry, type SkillMetadata, type SkillRegistry } from './ski
 import type {
   ContextProfileConfig,
   DiscoveredTool,
-  HostToolClient,
   PlatformTaskRecord,
   PlatformTaskRepo,
   PlatformTaskStatus,
@@ -56,12 +55,22 @@ export interface ContextTaskRunnerOptions {
   tasks: PlatformTaskRepo;
   /** Main and worker drivers are separate in production; tests may provide a queue. */
   workerDriver: TurnDriver;
+  /** Optional in-process capability provider supplied by the deployment. */
+  provider?: ContextToolProvider;
   profileId?: string;
 }
 
 export interface ContextTaskExecutionContext {
   trusted: TrustedContext;
-  host: HostToolClient;
+  /** Optional generic execution capability supplied by the mounted context. */
+  provider?: ContextToolProvider;
+}
+
+/** The only optional execution contract a mounted context needs. */
+export interface ContextToolProvider {
+  tools(): readonly DiscoveredTool[];
+  call(name: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown>;
+  close?(): void | Promise<void>;
 }
 
 export interface ContextTaskRunner {
@@ -124,9 +133,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const skillRegistry = new CompositeSkillRegistry(profile.skillRoots);
       const skills = await skillRegistry.discover();
       const skillText = await readSkills(skillRegistry, skills);
-      const workerTools = scopedTools(ctx.host, profile.allowedTools);
+      const provider = ctx.provider ?? options.provider;
+      if (!provider) {
+        return await finish(options.tasks, running, {
+          status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文未提供可执行能力。',
+        });
+      }
+      const workerTools = scopedTools(provider, profile.allowedTools);
       if (workerTools.length === 0) {
-        return await finish(options.tasks, running, { status: 'blocked', taskId, error: '当前 17dz 上下文没有可用工具。' });
+        return await finish(options.tasks, running, { status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文没有可用工具。' });
       }
       const messages = [...(existing?.workerMessages ?? []), { role: 'user', content: args.answer ? `${args.request}\n用户补充：${args.answer}` : args.request, timestamp: Date.now() } as unknown as DriverMessage];
       const deadline = Date.now() + 150_000;
@@ -140,9 +155,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             if (!workerTools.some((tool) => tool.name === name)) {
               throw new ToolUserError('该工具未被 17dz 上下文授权。');
             }
-            const outcome = await ctx.host.call(name, toolArgs, signal);
-            if (!outcome.ok) throw new ToolUserError(`17dz 工具调用失败:${outcome.error.message}`);
-            return outcome.data;
+            try {
+              return await provider.call(name, toolArgs, signal);
+            } catch (error) {
+              if (error instanceof ToolUserError) throw error;
+              throw new ToolUserError(error instanceof Error ? error.message : String(error));
+            }
           },
           deadline,
         });
@@ -197,8 +215,8 @@ function isInside(root: string, candidate: string): boolean {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-function scopedTools(host: HostToolClient, allowed?: readonly string[]): readonly DiscoveredTool[] {
-  const tools = host.tools();
+function scopedTools(provider: ContextToolProvider, allowed?: readonly string[]): readonly DiscoveredTool[] {
+  const tools = provider.tools();
   if (!allowed || allowed.length === 0) return tools;
   const set = new Set(allowed);
   return tools.filter((tool) => set.has(tool.name));

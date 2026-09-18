@@ -30,6 +30,7 @@ export {
   type ContextTaskRunner,
   type ContextTaskRunnerOptions,
   type ContextTaskExecutionContext,
+  type ContextToolProvider,
   type PlatformTaskResult,
   type Run17dzTaskArgs,
 } from './context';

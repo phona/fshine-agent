@@ -1,5 +1,5 @@
 /**
- * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ MCP host(scope 预检)→ 回复。
+ * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ Context Worker → 回复。
  * 被 apps/server/main.ts 与 tests/e2e 共用,保证测的就是跑的。
  */
 import type {
@@ -7,21 +7,18 @@ import type {
   AuditStore,
   ChannelReply,
   IncomingChannelMessage,
-  PrincipalCapability,
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
 import { newId } from '@fshine/core';
-import type { McpCallHooks, McpHost, McpToolCategory } from '@fshine/mcp-host';
 
 export interface HandlerDeps {
   store: AuditStore;
   runtime: AgentRuntime;
-  hostFor(mcpProfile: string, capabilities: readonly PrincipalCapability[]): McpHost;
 }
 
 export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
-  const { store, runtime, hostFor } = deps;
+  const { store, runtime } = deps;
   // 同一会话的消息串行处理(pi 的 steering/followUp 队列哲学):
   // 并发回合会竞态会话状态(候选/游标/历史互相覆盖),必须排队
   const sessionQueues = new Map<string, Promise<unknown>>();
@@ -57,51 +54,15 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     await store.requests.insert({ ...base, outcome: 'replied' });
 
     try {
-      const capabilities = scope.capabilities ?? ['read'];
-      const host = hostFor(scope.mcpProfile, capabilities);
-      // tools() 同步读取连接的 tools/list 结果;连接预热是异步的,必须先确保就绪,
-      // 否则首个工具回合的 knownTools 为空,模型所有合法调用都会被判协议违规
-      try {
-        await host.ensureReady();
-      } catch (error) {
-        await store.requests.setOutcome(requestId, 'failed');
-        console.error(JSON.stringify({
-          event: 'mcp_connection_failed',
-          requestId,
-          profile: scope.mcpProfile,
-          error: error instanceof Error ? error.message : String(error),
-        }));
-        return '数据服务连接失败，请稍后再试或联系管理员。';
-      }
-      console.info(JSON.stringify({
-        event: 'mcp_ready',
-        requestId,
-        profile: scope.mcpProfile,
-        tools: (host.discoveredTools ?? []).map((tool) => tool.name),
-      }));
-      const hooks: McpCallHooks = {
-        onRetry: (info) =>
-          progress?.(`系统繁忙,自动重试中(${info.attempt}/${info.maxAttempts})…`),
-      };
-      const client = host.clientFor(
-        requestId,
-        scope.accountSetIds,
-        hooks,
-        categoriesFor(capabilities),
-        scope.accountSetScope ?? 'allowlist',
-      );
       const reply = await runtime.handleTurn(
         {
           requestId,
           principalId,
           allowedAccountSetIds: scope.accountSetIds,
-          // Do not reuse candidates/cursors/history when the MCP backend
-          // changes (notably Fake MCP → the real 17dz deployment).
-          sessionId: `${host.conversationNamespace}:${message.wecomUserId}:${message.conversationId}`,
+          sessionId: `wecom:${message.wecomUserId}:${message.conversationId}`,
           onStep: progress,
         },
         message.text,
-        client,
       );
       return reply.text;
     } catch (error) {
@@ -114,11 +75,4 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       return '处理失败,请稍后再试。';
     }
   }
-}
-
-function categoriesFor(capabilities: readonly PrincipalCapability[]): McpToolCategory[] {
-  const categories: McpToolCategory[] = ['read'];
-  if (capabilities.includes('validate')) categories.push('validate');
-  if (capabilities.includes('write')) categories.push('write', 'status');
-  return categories;
 }

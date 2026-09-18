@@ -120,6 +120,7 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
 }
 
 function parseMcpProfiles(raw: unknown): Record<string, McpProfileConfig> {
+  if (raw === undefined) return {};
   const entries = asRecord(raw, 'mcpProfiles');
   const profiles: Record<string, McpProfileConfig> = {};
   for (const [name, value] of Object.entries(entries)) {
@@ -190,7 +191,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   warnMcpProfilePlaceholders(mcpProfiles);
 
   for (const [key, principal] of Object.entries(principals)) {
-    if (!(principal.mcpProfile in mcpProfiles)) {
+    if (principal.mcpProfile && !(principal.mcpProfile in mcpProfiles)) {
       throw new Error(`principal ${key} 引用的 mcpProfile "${principal.mcpProfile}" 未在 mcpProfiles 中定义`);
     }
     if (principal.enabled && principal.accountSetScope !== 'all' && principal.accountSetIds.length < 1) {

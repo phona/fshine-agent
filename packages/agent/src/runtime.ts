@@ -44,13 +44,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
   const skillRegistry = deps.skillRegistry ?? createSkillRegistry();
 
   return {
-    async handleTurn(ctx: TrustedContext, userMessage: string, tools: HostToolClient): Promise<AgentReply> {
-      const resources = tools.resources?.() ?? [];
+    async handleTurn(ctx: TrustedContext, userMessage: string, tools?: HostToolClient): Promise<AgentReply> {
+      const toolClient: HostToolClient = tools ?? { tools: () => [], call: async () => ({ ok: false, error: { code: 'CAPABILITY_UNAVAILABLE', message: '未配置平台能力' } } as never) };
+      const resources = toolClient.resources?.() ?? [];
       const allowedResourceUris = new Set(resources.map((resource) => resource.uri));
       const skills = await discoverSkillMetadata(skillRegistry);
       const baseHostTools = deps.platformTask
         ? []
-        : [...tools.tools()];
+        : [...toolClient.tools()];
       // Skill/resource virtual helpers do not constitute a data capability.
       // Preserve the existing fail-closed behavior when the host exposes no
       // tools at all; the context task itself is the only exception.
@@ -98,8 +99,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
             const uri = args['uri'];
             if (typeof uri !== 'string') throw new ToolUserError('知识资源 URI 无效。');
             if (!allowedResourceUris.has(uri)) throw new ToolUserError('该知识资源未被当前数据源声明或授权。');
-            if (!tools.readResource) throw new ToolUserError('当前数据源不支持读取知识资源。');
-            const resource = await tools.readResource(uri, signal);
+            if (!toolClient.readResource) throw new ToolUserError('当前数据源不支持读取知识资源。');
+            const resource = await toolClient.readResource(uri, signal);
             if (!resource.ok) throw new ToolUserError(toUserMessage(resource.error));
             return resource.data;
           }
@@ -120,10 +121,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
               request: String(args['request'] ?? ''),
               ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
               ...(typeof args['answer'] === 'string' ? { answer: args['answer'] } : {}),
-            }, { trusted: ctx, host: tools });
+            }, { trusted: ctx });
             return result;
           }
-          const outcome = await tools.call(tool, args, signal);
+          const outcome = await toolClient.call(tool, args, signal);
           if (!outcome.ok) throw new ToolUserError(toUserMessage(outcome.error));
           if (tool === 'search_account_sets') {
             accountSetSearchMiss = isEmptyAccountSetSearch(outcome.data);

@@ -5,7 +5,7 @@
 #
 # 【与 .env 的边界】本文件管"结构与授权"(谁能用、连哪个数据源、授权哪些账套);
 # .env 只管"秘密与连接"(企微凭证、LLM key/model)。账套访问范围由 accountSetScope 控制；
-# allowlist 模式下才需要每用户维护 accountSetIds;mcpProfiles.env 仅做 17dz 服务端部署级兜底。
+# allowlist 模式下才需要每用户维护 accountSetIds。
 # ============================================================
 
 # ---- 授权名单:key = wecom:<企微 UserID> ----
@@ -13,8 +13,6 @@
 #只有列在这里且 enabled 的用户才能使用机器人。
 principals:
   "wecom:<你的企微UserID>":
-    # 绑定的 MCP profile(下方 mcpProfiles 的 key)
-    mcpProfile: read-default
     # 账套范围:all=允许动态搜索全部账套;allowlist=仅允许 accountSetIds(旧配置默认 allowlist)
     accountSetScope: all
     # allowlist 模式下填写授权账套 id(以 17dz search_account_sets 返回的 as_xxx 为准)
@@ -23,52 +21,11 @@ principals:
     # 能力集(可选,缺省 read):read=只读;validate/write 开启写链路(V1)
     # capabilities: ["read"]
 
-# ---- MCP 数据源 profile ----
-mcpProfiles:
-  read-default:
-    # 17dz MCP server 启动命令(npm run mcp = node src/mcp/src/server.js)
-    command: npm
-    args: ["run", "mcp"]
-    # 17dz-platform 仓库根目录(本机绝对路径)
-    cwd: /path/to/17dz-platform
-    # 单次工具调用尝试预算(ms)
-    requestTimeoutMs: 60000
-    maxRetries: 2
-    env:
-      # 部署级账套白名单(可选;留空 = 不设限)
-      ALLOWED_ACCOUNT_SETS: ""
-    # 只读知识资源白名单；账套决策资源由 Host 按授权账套控制。
-    allowedResourceUris:
-      - "17dz://domains/voucher/mechanisms"
-      - "17dz://domains/voucher/templates"
-      - "17dz://domains/voucher/contract-schema"
-      - "17dz://domains/payroll/mechanisms"
-      - "17dz://domains/payroll/templates"
-      - "17dz://domains/payroll/contract-schema"
-
 # ---- 通用 Worker 的受信上下文(路径只能由管理员配置,模型不能传入) ----
 contextProfiles:
   17dz:
     root: /path/to/17dz-platform
     skillRoots: [".agents/skills"]
-    allowedTools:
-      - get_login_status
-      - search_account_sets
-      - get_current_accounting_period
-      - list_vouchers
-      - inspect_account_set
-      - search_references
-      - get_subject_balance
-      - get_auxiliary_balance
-      - workflow.start
-      - workflow.resume
-      - workflow.status
-      - workflow.confirm
-      - workflow.cancel
-      - validate_voucher
-      - submit_voucher
-      - submit_voucher_batch
-      - get_submission_status
 
 # ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
 # channel:
