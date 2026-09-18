@@ -12,7 +12,7 @@ describe('Pi driver safety helpers', () => {
     expect(KIMI_THINKING_LEVEL_MAP.max).toBeNull();
   });
 
-  it('maps MCP names with dots to provider-safe names while preserving valid names', () => {
+  it('maps domain tool names with dots to provider-safe names while preserving valid names', () => {
     const tools: DiscoveredTool[] = [
       { name: 'workflow.start', description: 'start', inputSchema: { type: 'object' } },
       { name: 'search_references', description: 'search', inputSchema: { type: 'object' } },
@@ -40,7 +40,7 @@ describe('Pi driver safety helpers', () => {
     expect(names.get('workflow.start')).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
   });
 
-  it('restores the original MCP name when the provider-safe tool executes', async () => {
+  it('restores the original domain tool name when the provider-safe tool executes', async () => {
     const calls: Array<{ tool: string; args: Record<string, unknown> }> = [];
     const input = {
       exec: async (tool: string, args: Record<string, unknown>) => {
@@ -61,7 +61,7 @@ describe('Pi driver safety helpers', () => {
     expect(calls).toEqual([{ tool: 'workflow.start', args: { accountSetId: 'as_003' } }]);
   });
 
-  it('keeps long and non-ASCII MCP names within provider limits', () => {
+  it('keeps long and non-ASCII domain tool names within provider limits', () => {
     const original = `${'超长工具名'.repeat(20)}.start`;
     const names = createProviderToolNameMap([{
       name: original,

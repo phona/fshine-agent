@@ -16,8 +16,6 @@
     "paths": {
       "@fshine/contracts": ["packages/contracts/src/index.ts"],
       "@fshine/core": ["packages/core/src/index.ts"],
-      "@fshine/mcp-fake": ["packages/mcp-fake/src/index.ts"],
-      "@fshine/mcp-host": ["packages/mcp-host/src/index.ts"],
       "@fshine/agent": ["packages/agent/src/index.ts"],
       "@fshine/channel-wecom": ["packages/channel-wecom/src/index.ts"]
     }

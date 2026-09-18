@@ -5,7 +5,7 @@
  * driver 返回更新后的转录,由 runtime 持久化。不做任何投影或裁剪。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { DiscoveredTool, McpToolName } from '@fshine/contracts';
+import type { DiscoveredTool } from '@fshine/contracts';
 
 /** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
 export type DriverMessage = AgentMessage;
@@ -19,7 +19,7 @@ export interface TurnDriverInput {
   /** 阶段进度回调(埋点事实渲染 + 模型意图短语) */
   onStep: (text: string) => void;
   /** 执行工具:返回 data(原样进入转录);失败时抛出面向用户的安全话术 */
-  exec: (tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
+  exec: (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   /** 回合绝对截止时间(Date.now() 基准),超时 driver 应中止并返回空文本 */
   deadline: number;
   /** Optional trusted cwd for a higher-level coding-agent driver. */
@@ -28,6 +28,8 @@ export interface TurnDriverInput {
   skillRoots?: readonly string[];
   /** Stable worker/session id used by a resumable driver. */
   sessionId?: string;
+  /** Parent cancellation propagated into a delegated agent turn. */
+  signal?: AbortSignal;
 }
 
 export interface TurnDriverResult {
@@ -39,8 +41,6 @@ export interface TurnDriverResult {
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
-  /** True when the driver owns its native tools (for example pi-coding-agent). */
-  readonly managesNativeTools?: boolean;
   /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。
    *  force:true 跳过阈值判断强制压缩(会话过期软着陆用);失败时实现方应原样返回,不阻塞回合。 */
   compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
@@ -56,7 +56,7 @@ export class ToolUserError extends Error {
 
 export interface ScriptedTurnStep {
   /** 本次模型调用回放的原生工具调用(依次真实执行 exec) */
-  toolCalls?: Array<{ tool: McpToolName; args: Record<string, unknown> }>;
+  toolCalls?: Array<{ tool: string; args: Record<string, unknown> }>;
   /** 本次调用的回复文本(不回放工具调用时即最终答案) */
   text?: string;
 }

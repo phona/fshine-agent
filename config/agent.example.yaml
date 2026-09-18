@@ -28,8 +28,6 @@ contextProfiles:
     skillRoots: [".agents/skills"]
     # Worker 单次任务预算(可选，默认 10 分钟)
     workerTimeoutMs: 600000
-    # workspace run_command 默认预算(可选，默认 5 分钟)
-    commandTimeoutMs: 300000
 
 # ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
 # channel:

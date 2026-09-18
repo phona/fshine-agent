@@ -1,5 +1,5 @@
 /**
- * SQLite 审计存储:contracts/store.ts 四个仓库的 better-sqlite3 实现。
+ * SQLite 审计存储:contracts/store.ts 仓库的 better-sqlite3 实现。
  * better-sqlite3 为同步 API,按契约包成 async 签名;数组/对象字段以 JSON TEXT 存储,时间为 ISO 8601 TEXT。
  */
 import { randomUUID } from 'node:crypto';
@@ -133,16 +133,9 @@ interface SessionRow {
 
 interface PlatformTaskRow {
   task_id: string;
-  plugin_id: string;
   parent_session_id: string;
   principal_id: string;
-  status: string;
   worker_messages: string;
-  current_step: string | null;
-  pending_questions: string | null;
-  last_result: string | null;
-  evidence: string | null;
-  skill_version: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -152,7 +145,6 @@ function rowToPrincipalScope(row: PrincipalScopeRow): PrincipalScopeRecord {
     wecomUserId: row.wecom_user_id,
     accountSetIds: JSON.parse(row.account_set_ids) as string[],
     ...(row.account_set_scope === 'all' ? { accountSetScope: 'all' as const } : {}),
-    mcpProfile: row.mcp_profile,
     enabled: row.enabled === 1,
     capabilities: row.capabilities ? JSON.parse(row.capabilities) as PrincipalScopeRecord['capabilities'] : ['read'],
   };
@@ -197,16 +189,9 @@ function rowToSession(row: SessionRow): ConversationSessionRecord {
 function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
   return {
     taskId: row.task_id,
-    pluginId: row.plugin_id,
     parentSessionId: row.parent_session_id,
     principalId: row.principal_id,
-    status: row.status as PlatformTaskRecord['status'],
     workerMessages: JSON.parse(row.worker_messages) as unknown[],
-    ...(row.current_step === null ? {} : { currentStep: row.current_step }),
-    ...(row.pending_questions === null ? {} : { pendingQuestions: JSON.parse(row.pending_questions) }),
-    ...(row.last_result === null ? {} : { lastResult: JSON.parse(row.last_result) }),
-    ...(row.evidence === null ? {} : { evidence: JSON.parse(row.evidence) }),
-    ...(row.skill_version === null ? {} : { skillVersion: row.skill_version }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -256,9 +241,11 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
     async upsert(record) {
       db.prepare(
+        // mcp_profile is a legacy NOT NULL column. Keep writing an empty
+        // compatibility value while it remains in old SQLite databases.
         'INSERT INTO principal_scopes (wecom_user_id, account_set_ids, account_set_scope, mcp_profile, enabled, capabilities) VALUES (?, ?, ?, ?, ?, ?) '
-        + 'ON CONFLICT (wecom_user_id) DO UPDATE SET account_set_ids = excluded.account_set_ids, account_set_scope = excluded.account_set_scope, mcp_profile = excluded.mcp_profile, enabled = excluded.enabled, capabilities = excluded.capabilities',
-      ).run(record.wecomUserId, JSON.stringify(record.accountSetIds), record.accountSetScope ?? 'allowlist', record.mcpProfile, record.enabled ? 1 : 0, JSON.stringify(record.capabilities ?? ['read']));
+        + 'ON CONFLICT (wecom_user_id) DO UPDATE SET account_set_ids = excluded.account_set_ids, account_set_scope = excluded.account_set_scope, enabled = excluded.enabled, capabilities = excluded.capabilities',
+      ).run(record.wecomUserId, JSON.stringify(record.accountSetIds), record.accountSetScope ?? 'allowlist', '', record.enabled ? 1 : 0, JSON.stringify(record.capabilities ?? ['read']));
     },
   };
 
@@ -357,27 +344,31 @@ export function createSqliteStore(dbPath: string): AuditStore {
   const platformTasks: PlatformTaskRepo = {
     async get(taskId) {
       const row = db.prepare(
-        'SELECT task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at FROM platform_tasks WHERE task_id = ?',
+        'SELECT task_id, parent_session_id, principal_id, worker_messages, created_at, updated_at FROM platform_tasks WHERE task_id = ?',
       ).get(taskId) as PlatformTaskRow | undefined;
       return row ? rowToPlatformTask(row) : null;
     },
     async upsert(record) {
       db.prepare(
+        // The columns after worker_messages are retained for compatibility
+        // with databases created before the subagent task model. They are no
+        // longer part of PlatformTaskRecord and are deliberately ignored on
+        // reads and updates.
         'INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at) '
         + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
-        + 'ON CONFLICT (task_id) DO UPDATE SET plugin_id = excluded.plugin_id, parent_session_id = excluded.parent_session_id, principal_id = excluded.principal_id, status = excluded.status, worker_messages = excluded.worker_messages, current_step = excluded.current_step, pending_questions = excluded.pending_questions, last_result = excluded.last_result, evidence = excluded.evidence, skill_version = excluded.skill_version, updated_at = excluded.updated_at',
+        + 'ON CONFLICT (task_id) DO UPDATE SET parent_session_id = excluded.parent_session_id, principal_id = excluded.principal_id, worker_messages = excluded.worker_messages, updated_at = excluded.updated_at',
       ).run(
         record.taskId,
-        record.pluginId,
+        '',
         record.parentSessionId,
         record.principalId,
-        record.status,
+        'active',
         JSON.stringify(record.workerMessages),
-        record.currentStep ?? null,
-        record.pendingQuestions === undefined ? null : JSON.stringify(record.pendingQuestions),
-        record.lastResult === undefined ? null : JSON.stringify(record.lastResult),
-        record.evidence === undefined ? null : JSON.stringify(record.evidence),
-        record.skillVersion ?? null,
+        null,
+        null,
+        null,
+        null,
+        null,
         record.createdAt,
         record.updatedAt,
       );

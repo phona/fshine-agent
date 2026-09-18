@@ -4,7 +4,6 @@
  */
 
 export interface PrincipalConfig {
-  mcpProfile: string;
   accountSetIds: string[];
   /** 账套发现/授权范围；旧配置缺省为 allowlist。 */
   accountSetScope?: AccountSetScope;
@@ -17,20 +16,7 @@ export type AccountSetScope = 'all' | 'allowlist';
 
 export type PrincipalCapability = 'read' | 'validate' | 'write';
 
-export interface McpProfileConfig {
-  command: string;
-  args?: string[];
-  cwd: string;
-  /** 单次工具调用尝试预算(ms);退避等待不占此预算,但受渠道总预算约束 */
-  requestTimeoutMs: number;
-  maxRetries: number;
-  /** 传给 server 进程的 env(如 ALLOWED_ACCOUNT_SETS);凭据类 env 禁止 */
-  env?: Record<string, string>;
-  /** MCP resources/read 的显式 URI allowlist；未配置时禁止读取资源。 */
-  allowedResourceUris?: string[];
-}
-
-/** Trusted filesystem context mounted for a generic platform worker. */
+/** Trusted filesystem context mounted for the platform subagent. */
 export interface ContextProfileConfig {
   /** Absolute path configured by the operator; never supplied by the model. */
   root: string;
@@ -38,14 +24,11 @@ export interface ContextProfileConfig {
   skillRoots: string[];
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
-  /** Maximum wall-clock budget for one generic workspace command. Defaults to 5 minutes. */
-  commandTimeoutMs?: number;
 }
 
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
-  mcpProfiles: Record<string, McpProfileConfig>;
-  /** Trusted worker context profiles. */
+  /** Trusted platform subagent context profiles. */
   contextProfiles: Record<string, ContextProfileConfig>;
   channel: {
     port: number;

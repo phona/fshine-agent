@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import path from 'node:path';
-import type { AccountSetScope, AppConfig, ContextProfileConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
+import type { AccountSetScope, AppConfig, ContextProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
 import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -86,22 +86,6 @@ function assertNoPlaceholders(value: unknown, path: string): void {
   }
 }
 
-/** mcpProfiles 的占位符只警告不阻断启动:17dz 未就绪时允许 D17Z_USE_FAKE=1 全链路演示。 */
-function warnMcpProfilePlaceholders(profiles: Record<string, McpProfileConfig>): void {
-  for (const [name, profile] of Object.entries(profiles)) {
-    const offending = [profile.command, profile.cwd, ...(profile.args ?? [])].find((value) =>
-      value.includes('REPLACE_WITH'),
-    );
-    if (offending !== undefined) {
-      console.warn(JSON.stringify({
-        event: 'config_placeholder_warning',
-        profile: name,
-        hint: 'mcpProfile 的 command/args/cwd 含占位符,真实调用会失败;演示可设 D17Z_USE_FAKE=1',
-      }));
-    }
-  }
-}
-
 function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
   const entries = asRecord(raw, 'principals');
   const principals: Record<string, PrincipalConfig> = {};
@@ -109,7 +93,6 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
     const item = asRecord(value, `principals.${key}`);
     const accountSetIds = item['accountSetIds'];
     principals[key] = {
-      mcpProfile: asString(item['mcpProfile']),
       accountSetIds: Array.isArray(accountSetIds) ? accountSetIds.map(String) : [],
       accountSetScope: parseAccountSetScope(item['accountSetScope'], `principals.${key}.accountSetScope`),
       enabled: item['enabled'] === true,
@@ -117,33 +100,6 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
     };
   }
   return principals;
-}
-
-function parseMcpProfiles(raw: unknown): Record<string, McpProfileConfig> {
-  if (raw === undefined) return {};
-  const entries = asRecord(raw, 'mcpProfiles');
-  const profiles: Record<string, McpProfileConfig> = {};
-  for (const [name, value] of Object.entries(entries)) {
-    const item = asRecord(value, `mcpProfiles.${name}`);
-    const args = Array.isArray(item['args']) ? item['args'].map(String) : undefined;
-    const envRaw = item['env'];
-    const profileEnv: Record<string, string> | undefined = isRecord(envRaw)
-      ? Object.fromEntries(Object.entries(envRaw).map(([k, v]) => [k, asString(v)]))
-      : undefined;
-    const allowedResourceUris = Array.isArray(item['allowedResourceUris'])
-      ? item['allowedResourceUris'].map(String)
-      : undefined;
-    profiles[name] = {
-      command: asString(item['command']),
-      ...(args ? { args } : {}),
-      cwd: asString(item['cwd']),
-      requestTimeoutMs: Number(item['requestTimeoutMs']),
-      maxRetries: Number(item['maxRetries']),
-      ...(profileEnv ? { env: profileEnv } : {}),
-      ...(allowedResourceUris ? { allowedResourceUris } : {}),
-    };
-  }
-  return profiles;
 }
 
 function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig> {
@@ -162,18 +118,13 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
     if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
     const workerTimeoutMs = item['workerTimeoutMs'] === undefined ? undefined : Number(item['workerTimeoutMs']);
-    const commandTimeoutMs = item['commandTimeoutMs'] === undefined ? undefined : Number(item['commandTimeoutMs']);
     if (workerTimeoutMs !== undefined && (!Number.isFinite(workerTimeoutMs) || workerTimeoutMs <= 0)) {
       throw new Error(`配置项 contextProfiles.${name}.workerTimeoutMs 必须大于 0`);
-    }
-    if (commandTimeoutMs !== undefined && (!Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0)) {
-      throw new Error(`配置项 contextProfiles.${name}.commandTimeoutMs 必须大于 0`);
     }
     profiles[name] = {
       root,
       skillRoots,
       ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
-      ...(commandTimeoutMs === undefined ? {} : { commandTimeoutMs }),
     };
   }
   return profiles;
@@ -190,29 +141,15 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     throw new Error(`无法读取配置文件 ${yamlPath}:${err instanceof Error ? err.message : String(err)}`);
   }
   const root = asRecord(raw, 'config');
-  // principals 是授权边界,占位符一律启动失败;mcpProfiles 允许带占位符启动(仅警告)。
+  // principals 是授权边界,占位符一律启动失败。
   assertNoPlaceholders(root['principals'], 'principals');
 
   const principals = parsePrincipals(root['principals']);
-  const mcpProfiles = parseMcpProfiles(root['mcpProfiles']);
   const contextProfiles = parseContextProfiles(root['contextProfiles']);
-  warnMcpProfilePlaceholders(mcpProfiles);
 
   for (const [key, principal] of Object.entries(principals)) {
-    if (principal.mcpProfile && !(principal.mcpProfile in mcpProfiles)) {
-      throw new Error(`principal ${key} 引用的 mcpProfile "${principal.mcpProfile}" 未在 mcpProfiles 中定义`);
-    }
     if (principal.enabled && principal.accountSetScope !== 'all' && principal.accountSetIds.length < 1) {
       throw new Error(`principal ${key} 已启用但未配置任何 accountSetIds,至少需要 1 个账套`);
-    }
-  }
-
-  for (const [name, profile] of Object.entries(mcpProfiles)) {
-    if (!(profile.requestTimeoutMs > 0)) {
-      throw new Error(`mcpProfile ${name} 的 requestTimeoutMs 必须大于 0(当前:${asString(profile.requestTimeoutMs)})`);
-    }
-    if (!(profile.maxRetries >= 0)) {
-      throw new Error(`mcpProfile ${name} 的 maxRetries 不能为负数(当前:${asString(profile.maxRetries)})`);
     }
   }
 
@@ -238,7 +175,6 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
   return {
     principals,
-    mcpProfiles,
     contextProfiles,
     channel: { port, publicUrl, callbackPath },
     sessionTtlMs,
@@ -251,7 +187,6 @@ export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[]
     wecomUserId: key.startsWith('wecom:') ? key.slice('wecom:'.length) : key,
     accountSetIds: [...principal.accountSetIds],
     ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
-    mcpProfile: principal.mcpProfile,
     enabled: principal.enabled,
     capabilities: [...(principal.capabilities ?? ['read'])],
   }));

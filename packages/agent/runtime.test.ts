@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import type { TurnDriverInput } from './src/driver';
-import type { DiscoveredResource, DiscoveredTool, HostToolClient, ResourceOutcome, ToolOutcome, TrustedContext } from '@fshine/contracts';
-import { ScriptedTurnDriver, type ScriptedTurnStep } from './src/driver';
-import { ACCOUNT_SET_SEARCH_MISS, createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src';
-import { FakeSessionRepo, FakeToolClient, fakeErr, fakeOk } from './test-helpers';
+import type { TrustedContext } from '@fshine/contracts';
+import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
+import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
+import { ScriptedTurnDriver, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput } from './src/driver';
+import { createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src/runtime';
+import { FakeSessionRepo } from './test-helpers';
 
 function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
   return {
@@ -15,291 +16,125 @@ function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
   };
 }
 
-/** 记录每次 driver.run 收到的模型上下文,便于断言转录跨回合传递 */
+function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
+  return {
+    tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+    run: run ?? (async (): Promise<SubagentTaskResult> => ({ taskId: 'task_1', text: '子 Agent 完成。' })),
+  };
+}
+
 function recordingDriver(script: ScriptedTurnStep[]) {
   const base = ScriptedTurnDriver(script);
   const inputs: TurnDriverInput[] = [];
-  return {
-    driver: {
-      run: async (input: TurnDriverInput) => {
-        inputs.push(input);
-        return base.run(input);
-      },
-      compact: undefined,
-    } as import('./src/driver').TurnDriver,
-    inputs,
-  };
-}
-
-const READ_TOOLS: DiscoveredTool[] = [
-  { name: 'search_account_sets', description: '搜账套', inputSchema: { type: 'object', properties: {} } },
-  { name: 'list_vouchers', description: '查凭证', inputSchema: { type: 'object', properties: {} } },
-];
-
-function fullClient(): HostToolClient {
-  return { tools: () => READ_TOOLS, call: async () => fakeOk({}) };
-}
-
-type TestHandler = (args: Record<string, unknown>) => ToolOutcome;
-
-function client(handlers: Partial<Record<string, TestHandler>> = {}): HostToolClient {
-  const table = new Map(Object.entries(handlers));
-  return {
-    tools: () => READ_TOOLS,
-    call: async (tool: Parameters<HostToolClient['call']>[0], args: Record<string, unknown>) => {
-      const handler = table.get(tool as string);
-      return handler ? handler(args) : fakeOk({});
+  const driver: TurnDriver = {
+    run: async (input) => {
+      inputs.push(input);
+      return base.run(input);
     },
   };
+  return { driver, inputs };
 }
 
-describe('createTaxAgentRuntime(转录即状态)', () => {
-  it('injects skill metadata and serves the controlled read_skill tool', async () => {
-    const sessions = new FakeSessionRepo();
-    let observedPrompt = '';
-    const driver: import('./src/driver').TurnDriver = {
+describe('createTaxAgentRuntime', () => {
+  it('主 Agent 只暴露 run_17dz_task，并取得子 Agent 自然语言结果', async () => {
+    const calls: Array<{ request: string; taskId?: string }> = [];
+    let toolResult: unknown;
+    const platformTask = subagent(async (args) => {
+      calls.push(args);
+      return { taskId: 'task_1', text: '请向用户确认客户名称。' };
+    });
+    const driver: TurnDriver = {
       run: async (input) => {
-        observedPrompt = input.systemPrompt;
-        expect(input.tools.some((tool) => tool.name === 'read_skill')).toBe(true);
-        const body = await input.exec('read_skill', { name: 'finance' });
-        expect(body).toContain('backend-neutral');
+        expect(input.tools.map((tool) => tool.name)).toEqual(['run_17dz_task']);
+        toolResult = await input.exec('run_17dz_task', { request: '查询客户余额' });
         return {
-          text: '已按财务规范处理。',
-          messages: [...input.messages, { role: 'assistant', content: '已按财务规范处理。', timestamp: Date.now() } as never],
+          text: '请问您指的是哪一家客户？',
+          messages: [...input.messages, { role: 'assistant', content: '请问您指的是哪一家客户？', timestamp: Date.now() } as never],
         };
       },
     };
-    const runtime = createTaxAgentRuntime({
-      driver,
-      sessions,
-      skillRegistry: {
-        discover: async () => [{ name: 'finance', description: '财务规范', path: '/virtual/finance/SKILL.md' }],
-        read: async () => ({
-          name: 'finance', description: '财务规范', path: '/virtual/finance/SKILL.md',
-          content: '# Finance backend-neutral',
-        }),
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    const reply = await runtime.handleTurn(makeCtx(), '查询幻东余额');
+
+    expect(calls).toEqual([{ request: '查询客户余额' }]);
+    expect(toolResult).toEqual({ taskId: 'task_1', text: '请向用户确认客户名称。' });
+    expect(reply.text).toBe('请问您指的是哪一家客户？');
+  });
+
+  it('继续委派时透传 taskId 和外层 AbortSignal', async () => {
+    let observedSignal: AbortSignal | undefined;
+    const platformTask = subagent(async (args, _ctx, signal) => {
+      observedSignal = signal;
+      expect(args).toEqual({ request: '用户选择 A 公司', taskId: 'task_1' });
+      return { taskId: 'task_1', text: '查询完成。' };
+    });
+    const controller = new AbortController();
+    const driver: TurnDriver = {
+      run: async (input) => {
+        await input.exec('run_17dz_task', { request: '用户选择 A 公司', taskId: 'task_1' }, controller.signal);
+        return { text: '最终答复', messages: input.messages };
       },
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '查账', fullClient());
-    expect(reply.text).toBe('已按财务规范处理。');
-    expect(observedPrompt).toContain('finance:财务规范');
-    expect(observedPrompt).toContain('read_skill');
+    };
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    await runtime.handleTurn(makeCtx(), 'A 公司');
+    expect(observedSignal).toBe(controller.signal);
   });
 
-  it('回合结束后转录持久化:含用户消息与最终回复', async () => {
-    const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ text: '好的,已查询。' }]),
-      sessions,
-    });
-    await runtime.handleTurn(makeCtx(), '你好', client());
-
-    const state = sessions.peek('sess_1')!.state as Array<{ role: string; content: string }>;
-    expect(Array.isArray(state)).toBe(true);
-    expect(state).toHaveLength(2);
-    expect(state[0]).toMatchObject({ role: 'user', content: '你好' });
-    expect(state[1]!.role).toBe('assistant');
-  });
-
-  it('跨回合:第二轮模型上下文包含第一轮的完整对话', async () => {
+  it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
     const { driver, inputs } = recordingDriver([{ text: '第一轮回复' }, { text: '第二轮回复' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions });
-    await runtime.handleTurn(makeCtx(), '第一句话', client());
-    await runtime.handleTurn(makeCtx(), '第二句话', client());
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
+    await runtime.handleTurn(makeCtx(), '第一句话');
+    await runtime.handleTurn(makeCtx(), '第二句话');
 
-    const secondTurnContext = inputs[1]!.messages as Array<{ role: string; content: string }>;
-    expect(secondTurnContext.some((m) => m.role === 'user' && m.content === '第一句话')).toBe(true);
-    expect(secondTurnContext.some((m) => m.role === 'assistant' && m.content === '第一轮回复')).toBe(true);
-    expect(secondTurnContext[secondTurnContext.length - 1]!.content).toBe('第二句话');
+    const second = inputs[1]!.messages as Array<{ role: string; content: string }>;
+    expect(second.some((message) => message.role === 'user' && message.content === '第一句话')).toBe(true);
+    expect(second.some((message) => message.role === 'assistant' && message.content === '第一轮回复')).toBe(true);
+    expect(second.at(-1)?.content).toBe('第二句话');
   });
 
-  it('工具结果留在回合内:第二轮上下文不包含上一轮的 list_vouchers 原始结果', async () => {
+  it('TTL 过期时通过 driver.compact 软着陆', async () => {
     const sessions = new FakeSessionRepo();
-    const client_ = client({ list_vouchers: () => fakeOk({ total: 15, docs: [{ secret: 'page-data' }] }) });
-    const { driver, inputs } = recordingDriver([
-      { toolCalls: [{ tool: 'list_vouchers', args: {} }], text: '第一页结果' },
-      { text: '收到' },
-    ]);
-    const runtime = createTaxAgentRuntime({ driver, sessions });
-    await runtime.handleTurn(makeCtx(), '查凭证', client_);
-    await runtime.handleTurn(makeCtx(), '收到没', client_);
-
-    const secondTurn = JSON.stringify(inputs[1]!.messages);
-    expect(secondTurn).not.toContain('page-data');
-  });
-
-  it('TTL 过期 → 旧转录经 compact 强制压成种子续用(软着陆,不失忆)', async () => {
-    const sessions = new FakeSessionRepo();
-    const base = ScriptedTurnDriver([{ text: '第一轮' }, { text: '过期后' }]);
+    const base = ScriptedTurnDriver([{ text: '第一轮' }, { text: '恢复后' }]);
+    const forced: boolean[] = [];
     const inputs: TurnDriverInput[] = [];
-    const forcedCompacts: number[] = [];
-    const SEED = '【此前会话摘要】用户此前在查幻晟 as_001 202608 的凭证';
-    const driver: import('./src/driver').TurnDriver = {
-      run: async (input) => {
-        inputs.push(input);
-        return base.run(input);
-      },
-      compact: async (_messages, opts) => {
-        if (opts?.force) forcedCompacts.push(1);
-        return [{ role: 'user', content: SEED, timestamp: Date.now() } as unknown as import('./src/driver').DriverMessage];
+    const driver: TurnDriver = {
+      run: async (input) => { inputs.push(input); return base.run(input); },
+      compact: async (messages, opts) => {
+        if (!opts?.force) return messages;
+        forced.push(true);
+        return [{ role: 'user', content: '【此前摘要】正在查幻辰余额', timestamp: Date.now() } as never];
       },
     };
-    const runtime = createTaxAgentRuntime({ driver, sessions, sessionTtlMs: 300_000 });
-    await runtime.handleTurn(makeCtx(), '第一句话', client());
-    // 把 updatedAt 拨回 10 分钟前 → 超过 5 分钟 TTL
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent(), sessionTtlMs: 300_000 });
+    await runtime.handleTurn(makeCtx(), '第一句话');
     const record = sessions.peek('sess_1')!;
-    sessions.upsert({ ...record, updatedAt: new Date(Date.now() - 600_000).toISOString() });
+    await sessions.upsert({ ...record, updatedAt: new Date(Date.now() - 600_000).toISOString() });
+    await runtime.handleTurn(makeCtx(), '继续');
 
-    await runtime.handleTurn(makeCtx(), '继续看', client());
-    expect(forcedCompacts).toHaveLength(1); // 只有过期那回合强制压缩
-    const secondTurnContext = inputs[1]!.messages as Array<{ role: string; content: string }>;
-    expect(secondTurnContext.some((m) => m.content === SEED)).toBe(true);
-    expect(secondTurnContext[secondTurnContext.length - 1]!.content).toBe('继续看');
+    expect(forced).toHaveLength(1);
+    expect(JSON.stringify(inputs[1]!.messages)).toContain('此前摘要');
   });
 
-  it('TTL 过期 + driver 无 compact 能力 → 旧转录原样续用(宁可带旧上下文,不做静默清零)', async () => {
-    const sessions = new FakeSessionRepo();
-    const { driver, inputs } = recordingDriver([{ text: '第一轮' }, { text: '过期后' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions, sessionTtlMs: 300_000 });
-    await runtime.handleTurn(makeCtx(), '第一句话', client());
-    const record = sessions.peek('sess_1')!;
-    sessions.upsert({ ...record, updatedAt: new Date(Date.now() - 600_000).toISOString() });
-
-    await runtime.handleTurn(makeCtx(), '还在吗', client());
-    const secondTurnContext = inputs[1]!.messages as Array<{ role: string; content: string }>;
-    expect(secondTurnContext.some((m) => m.content === '第一句话')).toBe(true);
-  });
-
-  it('NEEDS_LOGIN 工具错误 → 确定性话术终结', async () => {
-    const sessions = new FakeSessionRepo();
-    const client_ = client({ get_login_status: () => fakeErr('NEEDS_LOGIN', '登录失效') });
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ toolCalls: [{ tool: 'get_login_status', args: {} }], text: '占位' }]),
-      sessions,
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '查一下', client_);
-    expect(reply.text).toContain('登录');
-  });
-
-  it('空文本 → FALLBACK_FAILURE,转录仍保存', async () => {
+  it('空回复使用失败兜底并保存当前转录', async () => {
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ toolCalls: [{ tool: 'search_account_sets', args: { query: '幻晟' } }] }]),
+      driver: { run: async (input) => ({ text: '', messages: input.messages }) },
       sessions,
+      platformTask: subagent(),
     });
-    const reply = await runtime.handleTurn(makeCtx(), '查一下幻晟', client({ search_account_sets: () => fakeOk({ accountSets: [] }) }));
+    const reply = await runtime.handleTurn(makeCtx(), '查一下');
     expect(reply.text).toBe(FALLBACK_FAILURE);
-    const state = sessions.peek('sess_1')!.state as Array<{ role: string }>;
-    expect(state.length).toBeGreaterThan(0);
+    expect((sessions.peek('sess_1')?.state as unknown[]).length).toBeGreaterThan(0);
   });
 
-  it('本轮账套搜索无结果时,阻止沿用历史账套 ID 查询', async () => {
-    const sessions = new FakeSessionRepo();
-    let voucherCalls = 0;
+  it('截止时间已过且无回复时使用超时兜底', async () => {
     const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ toolCalls: [
-        { tool: 'search_account_sets', args: { query: '幻辰' } },
-        { tool: 'list_vouchers', args: { accountSetId: 'as_001', period: '202608' } },
-      ], text: '不应到达' }]),
-      sessions,
+      driver: { run: async () => ({ text: '', messages: [] }) },
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      turnBudgetMs: -1,
     });
-    const reply = await runtime.handleTurn(makeCtx(), '查幻辰的应收', client({
-      search_account_sets: () => fakeOk({ accountSets: [] }),
-      list_vouchers: () => { voucherCalls += 1; return fakeOk({}); },
-    }));
-
-    expect(voucherCalls).toBe(0);
-    expect(reply.text).toBe(ACCOUNT_SET_SEARCH_MISS);
-  });
-
-  it('本轮账套搜索无结果时,覆盖模型基于历史上下文编造的最终回复', async () => {
-    const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ toolCalls: [
-        { tool: 'search_account_sets', args: { query: '幻辰' } },
-        // The model may stop after the miss and answer from stale transcript.
-      ], text: '幻晟账套中没有幻辰，应收为 0 元。' }]),
-      sessions,
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '查幻辰的应收', client({
-      search_account_sets: () => fakeOk({ accountSets: [] }),
-    }));
-
-    expect(reply.text).toBe(ACCOUNT_SET_SEARCH_MISS);
-  });
-
-  it('无可用工具 → 直接兜底', async () => {
-    const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ text: '不应到达' }]),
-      sessions,
-    });
-    const noTools: HostToolClient = { tools: () => [], call: async () => fakeOk({}) };
-    const reply = await runtime.handleTurn(makeCtx(), '查一下', noTools);
-    expect(reply.text).toBe(FALLBACK_FAILURE);
-  });
-
-  it('当前 MCP 资源通过受控虚拟工具读取，不能绕过 resources/read 客户端', async () => {
-    const sessions = new FakeSessionRepo();
-    const resource: DiscoveredResource = {
-      uri: '17dz://domain/voucher/templates',
-      name: 'voucher templates',
-      mimeType: 'text/markdown',
-    };
-    const reads: string[] = [];
-    const resourceClient: HostToolClient = {
-      tools: () => READ_TOOLS,
-      resources: () => [resource],
-      call: async () => fakeOk({}),
-      readResource: async (uri): Promise<ResourceOutcome> => {
-        reads.push(uri);
-        return { ok: true, data: { contents: [{ uri, mimeType: 'text/markdown', text: '# template' }] } };
-      },
-    };
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{
-        toolCalls: [{ tool: 'read_knowledge_resource', args: { uri: resource.uri } }],
-        text: '已读取凭证模板。',
-      }]),
-      sessions,
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '读取凭证模板', resourceClient);
-    expect(reply.text).toBe('已读取凭证模板。');
-    expect(reads).toEqual([resource.uri]);
-  });
-
-  it('资源虚拟工具拒绝未被当前 MCP 资源目录声明的 URI', async () => {
-    const sessions = new FakeSessionRepo();
-    let reads = 0;
-    const resourceClient: HostToolClient = {
-      tools: () => READ_TOOLS,
-      resources: () => [{ uri: '17dz://domain/voucher/templates' }],
-      call: async () => fakeOk({}),
-      readResource: async (): Promise<ResourceOutcome> => {
-        reads += 1;
-        return { ok: true, data: { contents: [{ uri: '17dz://secret', text: 'should not read' }] } };
-      },
-    };
-    const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{
-        toolCalls: [{ tool: 'read_knowledge_resource', args: { uri: '17dz://secret' } }],
-      }]),
-      sessions,
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '读取秘密资源', resourceClient);
-    expect(reply.text).toContain('未被当前数据源声明或授权');
-    expect(reads).toBe(0);
-  });
-
-  it('超时(空文本+过期deadline) → FALLBACK_TIMEOUT', async () => {
-    const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({
-      driver: { run: async () => ({ text: '', messages: [] }), compact: undefined },
-      sessions,
-      turnBudgetMs: -1, // deadline 已过
-    });
-    const reply = await runtime.handleTurn(makeCtx(), '查一下', fullClient());
-    expect(reply.text).toBe(FALLBACK_TIMEOUT);
+    expect((await runtime.handleTurn(makeCtx(), '查一下')).text).toBe(FALLBACK_TIMEOUT);
   });
 });

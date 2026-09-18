@@ -12,7 +12,6 @@ export interface PrincipalScopeRecord {
   accountSetIds: string[];
   /** 旧持久化记录缺省按 allowlist 解释。 */
   accountSetScope?: AccountSetScope;
-  mcpProfile: string;
   enabled: boolean;
   /** Effective capabilities. Legacy records are treated as read-only. */
   capabilities?: PrincipalCapability[];
@@ -52,7 +51,7 @@ export interface ConversationSessionRecord {
   channelConversationId: string;
   /** ISO 8601 */
   updatedAt: string;
-  /** 瞬态会话状态(如澄清候选账套列表),JSON 序列化;过期由 host 按 sessionTtlMs 判定 */
+  /** Main Agent transcript, serialized as JSON; runtime applies session TTL. */
   state?: unknown;
 }
 
@@ -80,29 +79,12 @@ export interface ConversationSessionRepo {
   upsert(record: ConversationSessionRecord): Promise<void>;
 }
 
-export type PlatformTaskStatus =
-  | 'created'
-  | 'running'
-  | 'needs_input'
-  | 'preview'
-  | 'completed'
-  | 'blocked'
-  | 'cancelled'
-  | 'failed';
-
 export interface PlatformTaskRecord {
   taskId: string;
-  pluginId: string;
   parentSessionId: string;
   principalId: string;
-  status: PlatformTaskStatus;
   /** Pi AgentMessage[]; kept opaque at the contracts boundary. */
   workerMessages: unknown[];
-  currentStep?: string;
-  pendingQuestions?: unknown;
-  lastResult?: unknown;
-  evidence?: unknown;
-  skillVersion?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -112,7 +94,7 @@ export interface PlatformTaskRepo {
   upsert(record: PlatformTaskRecord): Promise<void>;
 }
 
-/** 仓库聚合;host/runtime 只依赖此接口,不接触 SQL。 */
+/** Repository aggregate used by the application and Agent adapters. */
 export interface AuditStore {
   principalScopes: PrincipalScopeRepo;
   requests: AgentRequestRepo;

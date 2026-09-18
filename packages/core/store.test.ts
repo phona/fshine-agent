@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { AgentRequestRecord, AuditStore, ConversationSessionRecord, PrincipalScopeRecord, ToolCallRecord } from '@fshine/contracts';
+import type { AgentRequestRecord, AuditStore, ConversationSessionRecord, PlatformTaskRecord, PrincipalScopeRecord, ToolCallRecord } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from './src/index';
 
 const DB_MODES = [':memory:', 'file'] as const;
@@ -48,9 +48,20 @@ function makePrincipal(wecomUserId: string, overrides: Partial<PrincipalScopeRec
   return {
     wecomUserId,
     accountSetIds: [`as_${wecomUserId}`],
-    mcpProfile: 'read-default',
     enabled: true,
     capabilities: ['read'],
+    ...overrides,
+  };
+}
+
+function makePlatformTask(overrides: Partial<PlatformTaskRecord> = {}): PlatformTaskRecord {
+  return {
+    taskId: newId('task'),
+    parentSessionId: 'wecom:user_a:conv_1',
+    principalId: 'wecom:user_a',
+    workerMessages: [{ role: 'user', content: '查账' }],
+    createdAt: '2026-09-15T08:00:00.000Z',
+    updatedAt: '2026-09-15T08:05:00.000Z',
     ...overrides,
   };
 }
@@ -82,7 +93,6 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
     it('upsert → get 字段逐个往返无损', async () => {
       const record = makePrincipal('user_a', {
         accountSetIds: ['as_001', 'as_002'],
-        mcpProfile: 'read-default',
         enabled: true,
       });
       await store.principalScopes.upsert(record);
@@ -91,7 +101,6 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       expect(loaded).not.toBeNull();
       expect(loaded?.wecomUserId).toBe('user_a');
       expect(loaded?.accountSetIds).toEqual(['as_001', 'as_002']);
-      expect(loaded?.mcpProfile).toBe('read-default');
       expect(loaded?.enabled).toBe(true);
       expect(loaded?.capabilities).toEqual(['read']);
     });
@@ -271,6 +280,28 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       const loaded = await store.sessions.get(record.sessionId);
       expect(loaded?.state).toBeUndefined();
       expect(await store.sessions.get('sess_missing')).toBeNull();
+    });
+  });
+
+  describe('platformTasks', () => {
+    it('只持久化可恢复 Pi transcript 的最小字段', async () => {
+      const record = makePlatformTask();
+      await store.platformTasks!.upsert(record);
+
+      expect(await store.platformTasks!.get(record.taskId)).toEqual(record);
+    });
+
+    it('同 taskId upsert 更新 transcript 与时间', async () => {
+      const taskId = newId('task');
+      await store.platformTasks!.upsert(makePlatformTask({ taskId }));
+      const updated = makePlatformTask({
+        taskId,
+        workerMessages: [{ role: 'assistant', content: '已完成' }],
+        updatedAt: '2026-09-15T08:06:00.000Z',
+      });
+      await store.platformTasks!.upsert(updated);
+
+      expect(await store.platformTasks!.get(taskId)).toEqual(updated);
     });
   });
 });

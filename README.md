@@ -1,38 +1,47 @@
 # fshine-agent
 
-Tax Agent V0:企微员工通过机器人只读查询有权限的账套数据(经 17dz read MCP)。
+基于 Pi 的企微财税助手。Main Agent 负责理解用户请求和组织对话；需要访问 17dz 实时数据时，通过 `run_17dz_task` 委派给一个位于 `17dz-platform` 工作目录的 Pi 子 Agent。子 Agent 使用 `17dz-platform` 的 Skills 和领域脚本执行任务，并以自然语言返回结果，Main Agent 决定直接回答、向用户追问，或继续同一个子任务。
 
-- 设计文档:`docs/`(架构 / 功能规格 / MCP 契约 / 实施决策)
-- 部署参数:复制 `.env.example` 填 `​.env`(秘密);账套授权与 MCP 进程配置在 `config/agent.yaml`
+```text
+WeCom
+  -> Main Pi Agent (fshine-agent)
+  -> run_17dz_task
+  -> Pi subagent (cwd = ../17dz-platform)
+  -> domain Skills/scripts
+  -> natural-language result
+  -> Main Agent reply / follow-up / resume
+```
 
 ## 目录
 
 | 目录 | 内容 |
 |---|---|
-| `packages/contracts` | 信封、错误码、tool、host↔runtime、仓库、渠道接口(P0 冻结) |
-| `packages/mcp-fake` | Fake17dzMcpServer + 契约测试 |
-| `packages/core` | 配置加载 + SQLite 审计存储 |
-| `packages/channel-wecom` | 企微回调验签 + 主动推送 |
-| `packages/mcp-host` | stdio host:生命周期、scope 预检、信封解析、重试 |
-| `packages/agent` | Agent runtime(Pi adapter)+ 会话澄清状态 |
-| `apps/` | 装配入口(集成阶段) |
+| `packages/agent` | Main Agent、`run_17dz_task` 委派工具和 Pi 子 Agent adapter |
+| `packages/contracts` | 主流程、会话、任务和渠道接口 |
+| `packages/core` | 配置加载与 SQLite 审计/任务存储 |
+| `packages/channel-wecom` | 企微机器人 WebSocket 长连接与回复 |
+| `apps/server` | 服务装配入口 |
+| `docs` | 架构、功能规格、实施决策和手工验收说明 |
 
 ## 命令
 
 ```bash
-npm install          # 依赖统一在根声明
+npm install
 npm run typecheck
-npm test             # vitest run
+npm test
 
-npm start            # 启动服务(企微长连接;需先填 .env 与 config/agent.yaml)
-D17Z_USE_FAKE=1 npm start            # 17dz 未就绪时,接 Fake server 全链路演示
-AGENT_CONFIG_PATH=xxx npm start      # 覆盖配置文件路径(默认 config/agent.yaml)
-npm run smoke:wecom  # 企微长连接冒烟:连接→订阅成功→断开
+npm start                         # 启动企微长连接服务
+AGENT_CONFIG_PATH=xxx npm start  # 覆盖配置文件路径
+npm run smoke:wecom              # 企微长连接冒烟测试
 ```
+
+本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。
 
 ## 上线前必填
 
 | 位置 | 内容 |
 |---|---|
-| `.env` | `WECOM_BOT_ID` / `WECOM_BOT_SECRET` / `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` |
-| `config/agent.yaml` | principal 键换成真实 `wecom:<你的企微 UserID>`；`accountSetScope: all` 可动态搜索全部账套，精细授权时改为 `allowlist` 并填写 `accountSetIds`;接真 17dz 时填 `mcpProfiles.read-default.cwd` |
+| `.env` | `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`LLM_API_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` |
+| `config/agent.yaml` | 配置企微 principal；在 `contextProfiles.17dz.root` 填写 `17dz-platform` 根目录，并确认 `skillRoots` 指向其 Skills 目录 |
+
+`contextProfiles.17dz.root` 是受信的子 Agent 工作目录，不由用户输入或模型生成。子 Agent 的会话通过任务 ID 恢复，并绑定到发起它的企微用户和主 Agent 会话。

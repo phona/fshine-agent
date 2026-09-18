@@ -8,7 +8,7 @@ import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/contex
 import { createModels, createProvider, envApiKeyAuth, type Model } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { Type } from 'typebox';
-import type { DiscoveredTool, McpToolName } from '@fshine/contracts';
+import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { defaultStepText } from './step-text';
 
@@ -113,19 +113,20 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         streamFn: models.streamSimple.bind(models),
       });
 
-      const remaining = Math.max(1_000, input.deadline - Date.now());
+      const remaining = input.deadline - Date.now();
+      if (remaining <= 0) return { text: '', messages: agent.state.messages };
       let timedOut = false;
       const abortTimer = setTimeout(() => {
         timedOut = true;
         agent.abort();
-      }, remaining);
+      }, Math.max(1, remaining));
 
       try {
         await agent.continue();
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_driver_error',
-          error: error instanceof Error ? error.message.slice(0, 200) : String(error).slice(0, 200),
+          errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
         return { text: '', messages: agent.state.messages };
       } finally {
@@ -216,9 +217,9 @@ function toPiMessage(
 }
 
 /**
- * Build the provider-facing names independently from MCP names.
+ * Build provider-facing names independently from domain tool names.
  *
- * MCP permits names such as `workflow.start`, while OpenAI-compatible
+ * Domain tools may use names such as `workflow.start`, while OpenAI-compatible
  * function calling only accepts `[A-Za-z0-9_-]{1,64}`.  Keep ordinary names
  * unchanged for backwards-compatible transcripts, and only rewrite names
  * that the provider cannot accept.  The returned map is deliberately one-way:
@@ -241,7 +242,7 @@ export function createProviderToolNameMap(tools: readonly DiscoveredTool[]): Map
   for (const tool of tools) {
     if (result.has(tool.name)) continue;
 
-    const base = tool.name.replace(/[^A-Za-z0-9_-]/g, '_') || 'mcp_tool';
+    const base = tool.name.replace(/[^A-Za-z0-9_-]/g, '_') || 'domain_tool';
     let candidate = fitProviderToolName(base, tool.name);
     if (used.has(candidate)) {
       const suffix = `_${stableNameHash(tool.name)}`;
@@ -271,7 +272,7 @@ function fitProviderToolName(base: string, original: string): string {
 
 function stableNameHash(value: string): string {
   // Small deterministic FNV-1a hash; this is only a collision suffix, not a
-  // security boundary or identifier exposed to the MCP server.
+  // security boundary or identifier exposed to the domain implementation.
   let hash = 0x811c9dc5;
   for (let i = 0; i < value.length; i += 1) {
     hash ^= value.charCodeAt(i);
@@ -311,7 +312,7 @@ export function toAgentTool(
       const phrase = typeof progress === 'string' ? progress : '';
       input.onStep(phrase || defaultStepText(tool.name, args, names));
       try {
-        const data = await input.exec(tool.name as McpToolName, args, signal);
+        const data = await input.exec(tool.name, args, signal);
         rememberAccountSets(tool.name, data, names);
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(data) }],

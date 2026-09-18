@@ -50,8 +50,6 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
   let modelPromise: Promise<CodingModelConfig> | undefined;
 
   return {
-    managesNativeTools: true,
-
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       if (!input.cwd) throw new ToolUserError('Context Worker 缺少受信工作目录。');
       const { runtime, model, thinkingLevel } = await (modelPromise ??= createCodingModel(options));
@@ -68,12 +66,24 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // TaskStore remains the source of truth.  Restore its transcript into
       // the SDK Agent rather than persisting a second session file in 17dz.
       session.agent.state.messages = input.messages;
+      const remaining = input.deadline - Date.now();
+      if (remaining <= 0) {
+        const messages = session.agent.state.messages;
+        session.dispose();
+        return { text: '', messages };
+      }
       let timedOut = false;
-      const remaining = Math.max(1_000, input.deadline - Date.now());
+      let cancelled = input.signal?.aborted === true;
+      const cancel = () => {
+        cancelled = true;
+        void session.agent.abort();
+      };
+      input.signal?.addEventListener('abort', cancel, { once: true });
+      if (cancelled) cancel();
       const abortTimer = setTimeout(() => {
         timedOut = true;
         session.agent.abort();
-      }, remaining);
+      }, Math.max(1, remaining));
       const unsubscribe = session.subscribe((event) => {
         if (event.type === 'tool_execution_start') {
           input.onStep(`worker_tool:${event.toolName}`);
@@ -88,24 +98,25 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // message to input.messages. Calling the underlying Agent avoids
         // duplicating it through AgentSession.prompt().
         await session.agent.continue();
+        if (timedOut || cancelled || session.agent.state.errorMessage) {
+          return { text: '', messages: session.agent.state.messages };
+        }
+        return {
+          text: lastAssistantText(session.agent.state.messages),
+          messages: session.agent.state.messages,
+        };
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_coding_worker_error',
-          error: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300),
+          errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
         return { text: '', messages: session.agent.state.messages };
       } finally {
         clearTimeout(abortTimer);
+        input.signal?.removeEventListener('abort', cancel);
         unsubscribe();
         session.dispose();
       }
-      if (timedOut || session.agent.state.errorMessage) {
-        return { text: '', messages: session.agent.state.messages };
-      }
-      return {
-        text: lastAssistantText(session.agent.state.messages),
-        messages: session.agent.state.messages,
-      };
     },
   };
 }

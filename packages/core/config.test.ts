@@ -9,23 +9,11 @@ const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
 const VALID_YAML = `
 principals:
   "wecom:user_a":
-    mcpProfile: read-default
     accountSetIds: ["as_001", "as_002"]
     enabled: true
   "wecom:user_b":
-    mcpProfile: read-default
     accountSetIds: []
     enabled: false
-mcpProfiles:
-  read-default:
-    command: node
-    args: ["automation/mcp/src/server-read.js"]
-    cwd: /opt/17dz-platform
-    requestTimeoutMs: 60000
-    maxRetries: 2
-    allowedResourceUris: ["17dz://domains/voucher/templates"]
-    env:
-      ALLOWED_ACCOUNT_SETS: "as_001,as_002"
 `;
 
 describe('loadConfig', () => {
@@ -56,19 +44,9 @@ describe('loadConfig', () => {
     expect(config.sessionTtlMs).toBe(86_400_000); // 默认 24h:TTL 过期走软着陆,不再分钟级清零失忆
 
     const userA = config.principals['wecom:user_a'];
-    expect(userA?.mcpProfile).toBe('read-default');
     expect(userA?.accountSetIds).toEqual(['as_001', 'as_002']);
     expect(userA?.enabled).toBe(true);
     expect(userA?.capabilities).toEqual(['read']);
-
-    const profile = config.mcpProfiles['read-default'];
-    expect(profile?.command).toBe('node');
-    expect(profile?.args).toEqual(['automation/mcp/src/server-read.js']);
-    expect(profile?.cwd).toBe('/opt/17dz-platform');
-    expect(profile?.requestTimeoutMs).toBe(60000);
-    expect(profile?.maxRetries).toBe(2);
-    expect(profile?.allowedResourceUris).toEqual(['17dz://domains/voucher/templates']);
-    expect(profile?.env).toEqual({ ALLOWED_ACCOUNT_SETS: 'as_001,as_002' });
   });
 
   it('env 覆盖:APP_PORT / APP_CALLBACK_PATH', () => {
@@ -89,35 +67,31 @@ describe('loadConfig', () => {
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV }).sessionTtlMs).toBe(86_400_000);
   });
 
-  it('context profile 解析 Worker 与 command 预算', () => {
+  it('context profile 解析 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
   17dz:
     root: /opt/17dz-platform
     skillRoots: [".agents/skills"]
     workerTimeoutMs: 600000
-    commandTimeoutMs: 300000
 `;
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
     expect(config.contextProfiles['17dz']).toMatchObject({
       root: '/opt/17dz-platform',
       skillRoots: ['.agents/skills'],
       workerTimeoutMs: 600000,
-      commandTimeoutMs: 300000,
     });
   });
 
-  it('context profile 拒绝非正预算', () => {
-    for (const key of ['workerTimeoutMs', 'commandTimeoutMs']) {
-      const yaml = `${VALID_YAML}
+  it('context profile 拒绝非正 Worker 预算', () => {
+    const yaml = `${VALID_YAML}
 contextProfiles:
   17dz:
     root: /opt/17dz-platform
     skillRoots: [".agents/skills"]
-    ${key}: 0
+    workerTimeoutMs: 0
 `;
-      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(new RegExp(key));
-    }
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(/workerTimeoutMs/);
   });
 
   it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录', () => {
@@ -128,7 +102,6 @@ contextProfiles:
     expect(records[0]).toEqual({
       wecomUserId: 'user_a',
       accountSetIds: ['as_001', 'as_002'],
-      mcpProfile: 'read-default',
       enabled: true,
       capabilities: ['read'],
     });
@@ -153,18 +126,6 @@ contextProfiles:
     }
   });
 
-  it('mcpProfiles 的占位符不阻断启动:保留原值并成功加载(17dz 未就绪可 D17Z_USE_FAKE=1 演示)', () => {
-    const yaml = VALID_YAML.replace('cwd: /opt/17dz-platform', 'cwd: /REPLACE_WITH_PATH_TO/17dz-platform');
-    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.mcpProfiles['read-default']?.cwd).toBe('/REPLACE_WITH_PATH_TO/17dz-platform');
-  });
-
-  it('principal 引用不存在的 mcpProfile:报错并指出 profile 名', () => {
-    const yaml = VALID_YAML.replace('mcpProfile: read-default', 'mcpProfile: no-such-profile');
-    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
-      .toThrowError(/no-such-profile/);
-  });
-
   it('enabled 的 principal 无账套:报错并指出 principal key', () => {
     const yaml = VALID_YAML.replace(
       `accountSetIds: ["as_001", "as_002"]\n    enabled: true`,
@@ -179,16 +140,6 @@ contextProfiles:
     expect(config.channel.publicUrl).toBe('');
     expect(config.channel.port).toBe(3000);
     expect(config.channel.callbackPath).toBe('/wecom/callback');
-  });
-
-  it('requestTimeoutMs 必须大于 0;maxRetries 不能为负', () => {
-    const badTimeout = VALID_YAML.replace('requestTimeoutMs: 60000', 'requestTimeoutMs: 0');
-    expect(() => loadConfig({ yamlPath: writeFixture(badTimeout), env: PUBLIC_URL_ENV }))
-      .toThrowError(/requestTimeoutMs/);
-
-    const badRetries = VALID_YAML.replace('maxRetries: 2', 'maxRetries: -1');
-    expect(() => loadConfig({ yamlPath: writeFixture(badRetries), env: PUBLIC_URL_ENV }))
-      .toThrowError(/maxRetries/);
   });
 
   it('principal 键含占位符:报错(自造夹具,不依赖仓库模板的当前状态)', () => {

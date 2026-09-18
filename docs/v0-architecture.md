@@ -1,161 +1,86 @@
-# Tax Agent V0 Architecture (Frozen)
+# fshine-agent 架构
 
-Status: **frozen for V0 implementation**  
-Scope: read-only WeCom accounting queries  
-Related contract: [`17dz-mcp-spec.md`](17dz-mcp-spec.md), v0.5
+状态：当前实现基线（Main Agent + 单个 17dz 子 Agent）
 
-## 1. Goal
+## 1. 目标
 
-V0 proves one dependable, auditable path:
+提供一条简单、可恢复的企微财税查询链路：Main Pi Agent 负责理解请求和对话编排；需要真实 17dz 数据时，调用唯一的 `run_17dz_task` 工具，把完整任务交给 17dz 子 Agent。
 
 ```text
-WeCom employee
-  -> tax-agent
-  -> 17dz read MCP server
-  -> YiQiYing / 17dz-platform
-  -> tax-agent
-  -> WeCom reply
+企微
+  -> Main Pi Agent（fshine-agent）
+  -> run_17dz_task(request, taskId?)
+  -> Pi 子 Agent（cwd = 17dz-platform）
+  -> 17dz-platform Skills / 领域脚本
+  -> 自然语言结果
+  -> Main Agent 决定回答、追问或继续委派
 ```
 
-The product may answer questions about the account sets the caller is configured to access. It does not make business changes.
+当前只需要一个领域子 Agent，不引入通用的 subagent registry、复杂结果协议或多 Agent 聚合层。将来增加独立领域时，再抽象注册和路由。
 
-## 2. Boundaries
+## 2. 组件边界
 
-```text
-┌──────────┐    ┌─────────────────────────────────┐    ┌──────────────────────┐
-│  WeCom   │ -> │ tax-agent                       │ -> │ 17dz read MCP server │
-│ channel  │ <- │                                 │ <- │                      │
-└──────────┘    │ Channel adapter                 │    │ Read-only tools      │
-                │ Identity + scope config         │    │ Account-set allowlist│
-                │ Agent runtime + tool policy     │    │ YiQiYing adapter     │
-                │ MCP stdio host                  │    └──────────────────────┘
-                │ Session + audit storage         │
-                └─────────────────────────────────┘
-```
-
-| Component | Owns | Must not own |
+| 组件 | 负责 | 不负责 |
 |---|---|---|
-| WeCom adapter | receive/reply, message identity | business authorization or browser automation |
-| Identity/scope config | map WeCom user to allowed account sets | LLM-generated identity or role data |
-| Agent runtime (Pi adapter in the initial implementation) | understand request, decide read tools, compose reply | selectors, browser state, credentials |
-| MCP host | stdio lifecycle, discovery, timeout, result parsing | business implementation |
-| 17dz read MCP | account-set lookup and read business tools | WeCom identity, LLM prompt, credentials input |
-| 17dz-platform | reliable YiQiYing/API/browser adaptation | channel-specific conversation handling |
-| Audit storage | evidence of request and execution | source of financial truth |
+| 企微 channel | 收发消息、用户和会话标识、进度/最终回复 | 领域查询、浏览器自动化 |
+| Main Agent | 理解用户意图、决定是否委派、组织最终自然语言回复 | 直接读取 17dz 工作区、猜测实时数据 |
+| `run_17dz_task` | 校验请求、创建/恢复任务、绑定主会话和用户、调用子 Agent | 解析子 Agent 自然语言并猜流程状态 |
+| Pi 子 Agent | 在受信 `17dz-platform` cwd 中加载 Skills，执行领域脚本，返回自然语言 | 替 Main Agent 决定如何向用户回复 |
+| `17dz-platform` | 领域脚本、平台适配、登录态和财税数据获取 | 企微会话和 Main Agent 对话编排 |
+| SQLite store | principal、会话、子任务和审计记录 | 财务数据源、模型决策 |
 
-## 3. Security model for V0
+## 3. 子 Agent 运行边界
 
-V0 uses static, deployment-level scope configuration rather than full RBAC.
+`contextProfiles.17dz.root` 是部署配置提供的受信绝对路径，例如 `/home/fictional-user/fictional-projects/fictional-execution-layer`。它不来自用户输入，也不允许由模型修改。`skillRoots` 必须是该 root 内的相对路径，并在启动任务前通过 realpath 校验。
 
-```text
-WeCom user -> configured accountSetIds -> configured read MCP instance
-```
+子 Agent 使用官方 `pi-coding-agent` 的 headless `AgentSession`，由 adapter 设置：
 
-The host rejects a requested account set outside the caller's configured scope. The 17dz server may additionally enforce `ALLOWED_ACCOUNT_SETS`; this is defense in depth, not a replacement for future user-level authorization.
+- `cwd`：配置的 `17dz-platform` 根目录；
+- Skills：配置的 `skillRoots`；
+- session：使用任务 ID 恢复上下文；
+- deadline / abort：由 Main Agent 请求和 worker timeout 统一控制。
 
-Rules:
+子 Agent 返回给工具调用方的是自然语言文本。Main Agent 不通过正则或自定义状态 JSON 解析它：如果子 Agent 需要信息，Main Agent 可以把问题转达给用户；用户补充后，携带原任务 ID 再调用 `run_17dz_task`。
 
-- The LLM never supplies or changes a caller identity, account scope, server command, or environment configuration.
-- Only the read MCP server is spawned in V0. The process has no write tools.
-- Account sets are addressed by `accountSetId` returned by `search_account_sets`; names are display-only.
-- No credentials are passed through messages, prompts, or MCP tool arguments.
+## 4. 请求流程
 
-## 4. Request flow
+1. 企微 channel 接收消息，得到不可变的用户 ID、会话 ID 和消息 ID。
+2. Main Agent 判断是否需要实时 17dz 数据。需要时必须调用 `run_17dz_task`，不能凭历史对话猜账套、科目或余额。
+3. 委派工具验证 request，解析受信 context profile，并创建或恢复一个只属于当前用户和主会话的任务。
+4. 子 Agent 在 `17dz-platform` 中按相关 Skill 执行领域脚本。实时结果必须来自脚本，不得从源码或上下文猜测。
+5. 子 Agent 返回自然语言结果。Main Agent 选择直接回答、向用户追问，或用同一 task ID 继续任务。
+6. store 记录请求、子 Agent 转录和最终回复；企微发送最终回复。
 
-1. WeCom adapter receives a message and extracts the immutable WeCom user ID and message ID.
-2. Identity resolver loads the caller's configured account-set scope.
-3. Agent runtime receives the user message plus a trusted execution context. It can only use read tools. The runtime is behind an adapter so Pi can be replaced later without changing the host or 17dz contract.
-4. MCP host starts or reuses the configured stdio server, performs `initialize`, `notifications/initialized`, and `tools/list` after each new connection.
-5. Before calling a tool with `accountSetId`, the host verifies it belongs to the trusted scope.
-6. Host parses MCP `content[0].text` as the v0.5 JSON envelope, records the raw result, and provides a bounded summary to the runtime.
-7. Agent produces a reply based only on returned data. WeCom adapter sends it to the caller.
-8. Host records the request, tool calls, response summary, error code, and correlation IDs.
+## 5. 权限与安全
 
-## 5. V0 MCP capabilities
+- principal 由可信的企微用户 ID 解析，模型不得改变用户身份或授权配置。
+- 任务恢复必须同时匹配 `principalId` 和主会话 ID，不能跨用户或跨会话接管任务。
+- 工作目录和 Skills 路径只来自部署配置，并通过路径边界校验。
+- credentials 不通过用户消息或模型参数传递；由 `17dz-platform` 的受控运行环境管理。
+- Main Agent 不直接执行 `17dz-platform` 命令；命令和脚本选择由子 Agent 的平台 Skills 约束。
+- 领域脚本仍必须自行执行账套范围、只读/写权限、用户确认和幂等等业务硬约束；自然语言提示不是安全边界。
+- 审计记录不得写入 API key、密码、未授权账套数据或完整敏感页面内容。
 
-The real server and the Fake server expose the current read contract:
-
-```text
-get_login_status
-search_account_sets
-get_current_accounting_period
-list_vouchers
-inspect_account_set
-```
-
-`tools/list` is the runtime source of truth. The host must not assume that a connected server has a particular tool set.
-
-## 6. Failure handling
-
-| MCP outcome | V0 host behavior |
-|---|---|
-| `NEEDS_LOGIN` | notify an operator; tell the caller the query cannot proceed yet |
-| `PROFILE_BUSY` / `TIMEOUT` | bounded retry with server-provided backoff; then report failure |
-| `ACCOUNT_SET_NOT_FOUND` / `ACCOUNT_SET_AMBIGUOUS` | re-search or ask the caller to disambiguate |
-| `ACCOUNT_SET_FORBIDDEN` | deny without retrying or revealing other account sets |
-| `NEEDS_USER_INPUT` | ask a focused follow-up question |
-| other error | return a safe failure message; retain trace and artifact reference for operators |
-
-V0 does not expose browser control to users. An artifact ID is retained in audit data; its retrieval follows the deployment's shared-volume convention in the MCP specification.
-
-## 7. Minimal persistent records
-
-The implementation may choose any database, but must preserve these logical records:
+## 6. 任务和会话
 
 ```text
-principal_scope
-  wecomUserId, accountSetIds, enabled
-
-agent_request
-  requestId, wecomMessageId, principalId, input, createdAt, outcome
-
-tool_call
-  requestId, traceId, toolName, safeArguments, source, startedAt, finishedAt,
-  status, errorCode, artifactId
-
 conversation_session
   sessionId, principalId, channelConversationId, updatedAt
+
+platform_task
+  taskId, parentSessionId, principalId,
+  workerMessages, createdAt, updatedAt
 ```
 
-Raw MCP responses are audit evidence and must not be blindly copied into the LLM context or sent to WeCom.
+`taskId` 是跨轮继续子 Agent 的 opaque handle。新任务不复用旧 task ID；不存在的任务不能恢复，且每次恢复都重新校验 principal 和父会话。
 
-## 8. V0 deployment decisions
+## 7. 时间和失败处理
 
-The following are implementation decisions for V0, not extensions to the MCP contract:
+- 企微回复保持同步体验，但 worker timeout 必须是明确配置项。
+- 外层 `AbortSignal` 取消时，子 Agent 必须停止当前回合并释放 session 资源。
+- 子 Agent 空回复、模型错误、脚本失败或超时都作为工具错误返回；Main Agent 负责给用户一条安全、自然语言的降级说明。
+- 不把子 Agent 的内部堆栈、绝对路径、凭据或原始页面内容发送给用户。
 
-```yaml
-principals:
-  wecom:<user-id>:
-    mcpProfile: read-default
-    accountSetIds: [as_001]
-    enabled: true
+## 8. 明确不做
 
-mcpProfiles:
-  read-default:
-    command: node automation/mcp/src/server-read.js
-    cwd: /path/to/17dz-platform
-    requestTimeoutMs: 60000
-    maxRetries: 2
-```
-
-- Session key: `wecomUserId + conversationId`.
-- V0 uses synchronous replies only. The channel-facing request budget is 75 seconds; an MCP read-tool call is limited to 60 seconds.
-- V0 development persistence uses SQLite behind a repository interface. Migration to a production database is not an architectural change.
-- Production retention and desensitization policy must be configured before any non-test financial data is retained. Credentials, filesystem paths, and unauthorized account-set data are never recorded in ordinary application logs.
-
-## 9. Deliberately deferred
-
-The following are not V0 requirements and must not expand the implementation scope:
-
-```text
-write MCP server, voucher submission, drafts and confirmation
-full Principal / role / permission RBAC
-Job Manager, checkpointing, scheduler, proactive tasks
-Browser worker pool, noVNC, human takeover workflow
-RAG, vector database, persistent memory, case learning
-HTTP MCP transport and MCP resources
-```
-
-## 10. Change control
-
-Changes to the read-tool schema, envelope, error codes, or account-set identity convention require a versioned update to `17dz-mcp-spec.md` and matching Fake-server contract tests. New V0 application features may be added only if they do not weaken the boundaries above.
+当前不做：MCP server/host、Fake MCP 全链路、通用多 Agent registry、跨领域结果聚合、写凭证工作流、审批、调度、浏览器人工接管和长期记忆。

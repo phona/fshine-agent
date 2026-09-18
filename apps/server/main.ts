@@ -43,7 +43,9 @@ async function main(): Promise<void> {
     driver,
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000,
+    // Leave time for the Main Agent to interpret the subagent's final text
+    // after the delegated turn reaches its own deadline.
+    turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
     platformTask,
   });
 

@@ -28,7 +28,6 @@ export {
   type SkillRegistry,
 } from './skills';
 export { defaultStepText } from './step-text';
-export { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 export * from './session';
 export {
   createContextTaskRunner,
@@ -38,15 +37,11 @@ export {
   type ContextTaskRunner,
   type ContextTaskRunnerOptions,
   type ContextTaskExecutionContext,
-  type ContextToolProvider,
-  type PlatformTaskResult,
+  type SubagentTaskResult,
   type Run17dzTaskArgs,
 } from './context';
-export { createWorkspaceToolProvider } from './workspace-tools';
 export {
   createTaxAgentRuntime,
-  ACCOUNT_SET_SEARCH_MISS,
-  READ_KNOWLEDGE_RESOURCE_TOOL,
   FALLBACK_TIMEOUT,
   FALLBACK_FAILURE,
   type TaxAgentRuntimeDeps,

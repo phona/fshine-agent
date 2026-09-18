@@ -40,20 +40,6 @@ export async function loadTranscript(
   return { messages: [], expired: false };
 }
 
-/** 从 McpError details 中容错解析候选账套列表(errors.ts 多账套话术用)。 */
-export function parseAccountSetArray(raw: unknown): Array<{ id: string; name: string }> {
-  if (!Array.isArray(raw)) return [];
-  const out: Array<{ id: string; name: string }> = [];
-  for (const item of raw) {
-    if (item && typeof item === 'object') {
-      const id = (item as { id?: unknown }).id;
-      const name = (item as { name?: unknown }).name;
-      if (typeof id === 'string' && id && typeof name === 'string' && name) out.push({ id, name });
-    }
-  }
-  return out;
-}
-
 /** 保存转录。失败不阻塞回合(转录属瞬态优化),但必须留痕。 */
 export async function saveTranscript(
   sessions: Pick<ConversationSessionRepo, 'upsert'>,
