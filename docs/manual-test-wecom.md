@@ -128,10 +128,14 @@ AI 入口调用与企微相同的 `createMessageHandler`，只替换消息来源
 
 ### 10.2 读场景
 
+涉及账套、科目或客户简称时，必须先通过对应的模糊解析接口取得稳定 ID；
+只有唯一匹配后才能调用余额/明细接口。出现 `ambiguous` 必须让用户选择，
+`not_found` 与 `unavailable` 必须如实说明，禁止猜 ID 或退回凭证净发生额推算。
+
 | 用例 | 输入 | 必须核验 |
 |---|---|---|
-| R1 | `帮我查一下幻辰的应收账款还有多少` | 账套 `as_003`；期间以工具返回为准；调用 `get_subject_balance(1122)`；返回期末余额和来源；不得用凭证净发生额代替余额 |
-| R2 | `幻东机械在幻辰账套还欠多少？` | 调用 `get_auxiliary_balance`；客户、账套、期间、期末余额可复核 |
+| R1 | `帮我查一下幻辰的应收账款还有多少` | 先搜索账套并唯一确定 `as_003`，再以 `search_references(referenceType="subject", query="应收账款")` 解析科目（核对 `1122`），随后按工具返回期间调用 `get_subject_balance(accountSetId, subjectCode="1122", period)`；返回期末余额和来源；不得用凭证净发生额代替余额 |
+| R2 | `幻东机械在幻辰账套还欠多少？` | 先调用 `search_references(referenceType="assistant", filters.subjectCode="1122")` 解析客户；唯一匹配后用返回的 `assistantId` 调用 `get_auxiliary_balance(accountSetId, subjectCode="1122", period, assistantId)`；客户、账套、期间、期末余额可复核 |
 | R3 | `幻辰 2026 年 8 月应收账款发生了哪些变化？` | 可以调用凭证/明细事件工具；回复必须标明“发生额”，不能说成期末余额 |
 | R4 | `列出幻辰 2026 年 8 月的凭证` → `下一页` | cursor 原样续用；不重复、不编造；说明展示范围 |
 | R5 | `幻晟的科目体系大概有哪些一级科目？` | 基于当前账套查询结果回答；不能把历史缓存当当前事实 |
