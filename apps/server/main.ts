@@ -42,6 +42,7 @@ async function main(): Promise<void> {
     driver,
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
+    turnBudgetMs: config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000,
     platformTask,
   });
 
