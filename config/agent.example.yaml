@@ -46,6 +46,30 @@ mcpProfiles:
       - "17dz://domains/payroll/templates"
       - "17dz://domains/payroll/contract-schema"
 
+# ---- 通用 Worker 的受信上下文(路径只能由管理员配置,模型不能传入) ----
+contextProfiles:
+  17dz:
+    root: /path/to/17dz-platform
+    skillRoots: [".agents/skills"]
+    allowedTools:
+      - get_login_status
+      - search_account_sets
+      - get_current_accounting_period
+      - list_vouchers
+      - inspect_account_set
+      - search_references
+      - get_subject_balance
+      - get_auxiliary_balance
+      - workflow.start
+      - workflow.resume
+      - workflow.status
+      - workflow.confirm
+      - workflow.cancel
+      - validate_voucher
+      - submit_voucher
+      - submit_voucher_batch
+      - get_submission_status
+
 # ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
 # channel:
 #   port: 3000

@@ -10,6 +10,7 @@ import { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 import { ToolUserError, type TurnDriver } from './driver';
 import { createSkillRegistry, READ_SKILL_TOOL, type SkillMetadata, type SkillRegistry } from './skills';
 import type { AgentReply, ConversationSessionRepo, DiscoveredResource, DiscoveredTool, HostToolClient, TrustedContext } from '@fshine/contracts';
+import { RUN_17DZ_TASK_TOOL, type ContextTaskRunner } from './context';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000; // 24h:财务助手"上午查账、下午接着问",分钟级 TTL 会造成静默失忆
 /** 回合预算:超时 driver 中止并返回空文本 */
@@ -29,6 +30,8 @@ export interface TaxAgentRuntimeDeps {
   turnBudgetMs?: number;
   /** Optional Pi-compatible skill-directory registry. */
   skillRegistry?: SkillRegistry;
+  /** Optional trusted context worker. When present, low-level host tools stay worker-only. */
+  platformTask?: ContextTaskRunner;
 }
 
 /** 账套授权 + 工具编排全在工具面内;模型看到的转录就是全部事实。 */
@@ -45,10 +48,25 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
       const resources = tools.resources?.() ?? [];
       const allowedResourceUris = new Set(resources.map((resource) => resource.uri));
       const skills = await discoverSkillMetadata(skillRegistry);
-      const discoveredHostTools = withKnowledgeResourceTool(tools.tools(), resources);
-      // 无可用工具 = host 未就绪/无权限:此回合必然无法完成任何查询,尽早收场
-      if (discoveredHostTools.length === 0) return { text: FALLBACK_FAILURE };
-      const discovered = withSkillTool(discoveredHostTools, skills);
+      const baseHostTools = deps.platformTask
+        ? []
+        : [...tools.tools()];
+      // Skill/resource virtual helpers do not constitute a data capability.
+      // Preserve the existing fail-closed behavior when the host exposes no
+      // tools at all; the context task itself is the only exception.
+      if (!deps.platformTask && baseHostTools.length === 0) return { text: FALLBACK_FAILURE };
+      const discoveredHostTools = withKnowledgeResourceTool(baseHostTools, resources);
+      // With a context worker mounted, the main Agent only needs the single
+      // delegation tool.  Skill loading is a Worker concern in this mode;
+      // exposing read_skill here would make the platform boundary porous.
+      const skillAwareTools = deps.platformTask
+        ? discoveredHostTools
+        : withSkillTool(discoveredHostTools, skills);
+      const discovered = withPlatformTaskTool(skillAwareTools, deps.platformTask);
+      // 无可用工具 = host 未就绪/无权限:此回合必然无法完成任何查询,尽早收场。
+      // platformTask itself is a valid capability even though its low-level
+      // host tools are intentionally hidden from the main Agent.
+      if (discovered.length === 0) return { text: FALLBACK_FAILURE };
 
       const { messages: loaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
       // 过期软着陆:旧转录压成「摘要+最近尾巴」种子续用,不做静默清零。
@@ -96,6 +114,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): AgentRuntimeSh
             } catch (error) {
               throw new ToolUserError(error instanceof Error ? `技能读取失败:${error.message}` : '技能读取失败。');
             }
+          }
+          if (tool === RUN_17DZ_TASK_TOOL && deps.platformTask) {
+            const result = await deps.platformTask.run({
+              request: String(args['request'] ?? ''),
+              ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
+              ...(typeof args['answer'] === 'string' ? { answer: args['answer'] } : {}),
+            }, { trusted: ctx, host: tools });
+            return result;
           }
           const outcome = await tools.call(tool, args, signal);
           if (!outcome.ok) throw new ToolUserError(toUserMessage(outcome.error));
@@ -220,6 +246,14 @@ function withKnowledgeResourceTool(
       },
     },
   ];
+}
+
+function withPlatformTaskTool(
+  tools: readonly DiscoveredTool[],
+  runner: ContextTaskRunner | undefined,
+): readonly DiscoveredTool[] {
+  if (!runner || tools.some((tool) => tool.name === RUN_17DZ_TASK_TOOL)) return tools;
+  return [...tools, runner.tool];
 }
 
 /**

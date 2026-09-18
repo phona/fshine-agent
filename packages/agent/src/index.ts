@@ -23,6 +23,17 @@ export { defaultStepText } from './step-text';
 export { NEEDS_LOGIN_MESSAGE, toUserMessage } from './errors';
 export * from './session';
 export {
+  createContextTaskRunner,
+  RUN_17DZ_TASK_TOOL,
+  RUN_17DZ_TASK_DESCRIPTION,
+  RUN_17DZ_TASK_SCHEMA,
+  type ContextTaskRunner,
+  type ContextTaskRunnerOptions,
+  type ContextTaskExecutionContext,
+  type PlatformTaskResult,
+  type Run17dzTaskArgs,
+} from './context';
+export {
   createTaxAgentRuntime,
   ACCOUNT_SET_SEARCH_MISS,
   READ_KNOWLEDGE_RESOURCE_TOOL,

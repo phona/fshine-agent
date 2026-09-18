@@ -5,7 +5,8 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
-import type { AccountSetScope, AppConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
+import path from 'node:path';
+import type { AccountSetScope, AppConfig, ContextProfileConfig, McpProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
 import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -144,6 +145,31 @@ function parseMcpProfiles(raw: unknown): Record<string, McpProfileConfig> {
   return profiles;
 }
 
+function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig> {
+  if (raw === undefined) return {};
+  const entries = asRecord(raw, 'contextProfiles');
+  const profiles: Record<string, ContextProfileConfig> = {};
+  for (const [name, value] of Object.entries(entries)) {
+    const item = asRecord(value, `contextProfiles.${name}`);
+    const root = asString(item['root']).trim();
+    if (!root) throw new Error(`配置项 contextProfiles.${name}.root 不能为空`);
+    if (!path.isAbsolute(root)) throw new Error(`配置项 contextProfiles.${name}.root 必须是绝对路径`);
+    const skillRootsRaw = item['skillRoots'];
+    if (!Array.isArray(skillRootsRaw) || skillRootsRaw.length === 0) {
+      throw new Error(`配置项 contextProfiles.${name}.skillRoots 必须是非空数组`);
+    }
+    const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
+    if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
+    const allowedToolsRaw = item['allowedTools'];
+    profiles[name] = {
+      root,
+      skillRoots,
+      ...(Array.isArray(allowedToolsRaw) ? { allowedTools: allowedToolsRaw.map(String) } : {}),
+    };
+  }
+  return profiles;
+}
+
 export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const yamlPath = options.yamlPath ?? DEFAULT_YAML_PATH;
   const env = options.env ?? process.env;
@@ -160,6 +186,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
   const principals = parsePrincipals(root['principals']);
   const mcpProfiles = parseMcpProfiles(root['mcpProfiles']);
+  const contextProfiles = parseContextProfiles(root['contextProfiles']);
   warnMcpProfilePlaceholders(mcpProfiles);
 
   for (const [key, principal] of Object.entries(principals)) {
@@ -203,6 +230,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   return {
     principals,
     mcpProfiles,
+    contextProfiles,
     channel: { port, publicUrl, callbackPath },
     sessionTtlMs,
   };

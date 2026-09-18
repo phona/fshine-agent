@@ -15,6 +15,8 @@ import type {
   RequestOutcome,
   ToolCallRecord,
   ToolCallRepo,
+  PlatformTaskRecord,
+  PlatformTaskRepo,
 } from '@fshine/contracts';
 
 export function newId(prefix: string): string {
@@ -69,6 +71,24 @@ CREATE INDEX IF NOT EXISTS idx_conversation_sessions_channel_conversation_id
   ON conversation_sessions (channel_conversation_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_sessions_principal_id
   ON conversation_sessions (principal_id);
+
+CREATE TABLE IF NOT EXISTS platform_tasks (
+  task_id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL,
+  parent_session_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  worker_messages TEXT NOT NULL,
+  current_step TEXT,
+  pending_questions TEXT,
+  last_result TEXT,
+  evidence TEXT,
+  skill_version TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_platform_tasks_parent_session_id
+  ON platform_tasks (parent_session_id);
 `;
 
 interface PrincipalScopeRow {
@@ -109,6 +129,22 @@ interface SessionRow {
   channel_conversation_id: string;
   updated_at: string;
   state: string | null;
+}
+
+interface PlatformTaskRow {
+  task_id: string;
+  plugin_id: string;
+  parent_session_id: string;
+  principal_id: string;
+  status: string;
+  worker_messages: string;
+  current_step: string | null;
+  pending_questions: string | null;
+  last_result: string | null;
+  evidence: string | null;
+  skill_version: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 function rowToPrincipalScope(row: PrincipalScopeRow): PrincipalScopeRecord {
@@ -155,6 +191,24 @@ function rowToSession(row: SessionRow): ConversationSessionRecord {
     channelConversationId: row.channel_conversation_id,
     updatedAt: row.updated_at,
     ...(row.state === null ? {} : { state: JSON.parse(row.state) as unknown }),
+  };
+}
+
+function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
+  return {
+    taskId: row.task_id,
+    pluginId: row.plugin_id,
+    parentSessionId: row.parent_session_id,
+    principalId: row.principal_id,
+    status: row.status as PlatformTaskRecord['status'],
+    workerMessages: JSON.parse(row.worker_messages) as unknown[],
+    ...(row.current_step === null ? {} : { currentStep: row.current_step }),
+    ...(row.pending_questions === null ? {} : { pendingQuestions: JSON.parse(row.pending_questions) }),
+    ...(row.last_result === null ? {} : { lastResult: JSON.parse(row.last_result) }),
+    ...(row.evidence === null ? {} : { evidence: JSON.parse(row.evidence) }),
+    ...(row.skill_version === null ? {} : { skillVersion: row.skill_version }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }
 
@@ -300,7 +354,37 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const store: AuditStore = { principalScopes, requests, toolCalls, sessions };
+  const platformTasks: PlatformTaskRepo = {
+    async get(taskId) {
+      const row = db.prepare(
+        'SELECT task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at FROM platform_tasks WHERE task_id = ?',
+      ).get(taskId) as PlatformTaskRow | undefined;
+      return row ? rowToPlatformTask(row) : null;
+    },
+    async upsert(record) {
+      db.prepare(
+        'INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+        + 'ON CONFLICT (task_id) DO UPDATE SET plugin_id = excluded.plugin_id, parent_session_id = excluded.parent_session_id, principal_id = excluded.principal_id, status = excluded.status, worker_messages = excluded.worker_messages, current_step = excluded.current_step, pending_questions = excluded.pending_questions, last_result = excluded.last_result, evidence = excluded.evidence, skill_version = excluded.skill_version, updated_at = excluded.updated_at',
+      ).run(
+        record.taskId,
+        record.pluginId,
+        record.parentSessionId,
+        record.principalId,
+        record.status,
+        JSON.stringify(record.workerMessages),
+        record.currentStep ?? null,
+        record.pendingQuestions === undefined ? null : JSON.stringify(record.pendingQuestions),
+        record.lastResult === undefined ? null : JSON.stringify(record.lastResult),
+        record.evidence === undefined ? null : JSON.stringify(record.evidence),
+        record.skillVersion ?? null,
+        record.createdAt,
+        record.updatedAt,
+      );
+    },
+  };
+
+  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, platformTasks };
   handles.set(store, db);
   return store;
 }

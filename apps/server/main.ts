@@ -8,7 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, newId, principalScopeRecords } from '@fshine/core';
 import { McpHost, type McpHostAudit, type McpToolPolicy } from '@fshine/mcp-host';
-import { createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
+import { createContextTaskRunner, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import type { McpProfileConfig, PrincipalCapability } from '@fshine/contracts';
 import { renderBarChartPng } from './chart';
@@ -29,10 +29,22 @@ async function main(): Promise<void> {
     await store.principalScopes.upsert(record);
   }
 
+  const driver = createPiTurnDriver({ env: process.env });
+  const platformTask = createContextTaskRunner({
+    profiles: config.contextProfiles,
+    tasks: store.platformTasks ?? {
+      async get() { return null; },
+      async upsert() { throw new Error('SQLite platform task store 未启用'); },
+    },
+    workerDriver: driver,
+    profileId: '17dz',
+  });
+
   const runtime = createTaxAgentRuntime({
-    driver: createPiTurnDriver({ env: process.env }),
+    driver,
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
+    platformTask,
   });
 
   const audit: McpHostAudit = {

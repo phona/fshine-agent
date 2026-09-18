@@ -30,9 +30,21 @@ export interface McpProfileConfig {
   allowedResourceUris?: string[];
 }
 
+/** Trusted filesystem context mounted for a generic platform worker. */
+export interface ContextProfileConfig {
+  /** Absolute path configured by the operator; never supplied by the model. */
+  root: string;
+  /** Paths relative to root containing Pi-compatible SKILL.md files. */
+  skillRoots: string[];
+  /** Optional allowlist for tools visible to workers using this context. */
+  allowedTools?: string[];
+}
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   mcpProfiles: Record<string, McpProfileConfig>;
+  /** Trusted worker context profiles. */
+  contextProfiles: Record<string, ContextProfileConfig>;
   channel: {
     port: number;
     publicUrl: string;

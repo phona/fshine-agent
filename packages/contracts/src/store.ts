@@ -80,10 +80,44 @@ export interface ConversationSessionRepo {
   upsert(record: ConversationSessionRecord): Promise<void>;
 }
 
+export type PlatformTaskStatus =
+  | 'created'
+  | 'running'
+  | 'needs_input'
+  | 'preview'
+  | 'completed'
+  | 'blocked'
+  | 'cancelled'
+  | 'failed';
+
+export interface PlatformTaskRecord {
+  taskId: string;
+  pluginId: string;
+  parentSessionId: string;
+  principalId: string;
+  status: PlatformTaskStatus;
+  /** Pi AgentMessage[]; kept opaque at the contracts boundary. */
+  workerMessages: unknown[];
+  currentStep?: string;
+  pendingQuestions?: unknown;
+  lastResult?: unknown;
+  evidence?: unknown;
+  skillVersion?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlatformTaskRepo {
+  get(taskId: string): Promise<PlatformTaskRecord | null>;
+  upsert(record: PlatformTaskRecord): Promise<void>;
+}
+
 /** 仓库聚合;host/runtime 只依赖此接口,不接触 SQL。 */
 export interface AuditStore {
   principalScopes: PrincipalScopeRepo;
   requests: AgentRequestRepo;
   toolCalls: ToolCallRepo;
   sessions: ConversationSessionRepo;
+  /** Optional for backwards-compatible test stores and deployments. */
+  platformTasks?: PlatformTaskRepo;
 }
