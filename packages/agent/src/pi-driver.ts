@@ -305,6 +305,10 @@ function defaultStep(
     }
     case 'inspect_account_set':
       return name ? `正在做账套「${name}」摸底…` : '正在做账套摸底…';
+    case 'search_references': {
+      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
+      return name ? `在账套「${name}」中检索「${query}」的档案…` : `正在检索档案:${query}…`;
+    }
     case 'get_login_status':
       return '检查平台登录状态…';
     default:

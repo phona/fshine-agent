@@ -17,6 +17,8 @@ import {
   type ReadToolName,
   type SearchAccountSetsArgs,
   type SearchAccountSetsResult,
+  type SearchReferencesArgs,
+  type SearchReferencesResult,
   type SuccessEnvelope,
   type SubmitVoucherArgs,
   type SubmitVoucherBatchArgs,
@@ -33,6 +35,7 @@ import {
   decodeCursor,
   encodeCursor,
   inspectAccountSet,
+  searchReferences,
   voucherTotalFor,
 } from './registry';
 
@@ -414,6 +417,11 @@ export function createFakeServerTransport(options: FakeServerOptions = {}): Fake
         const args = rawArgs as unknown as InspectAccountSetArgs;
         const account = resolveAccount(args.accountSetId);
         return inspectAccountSet(account);
+      }
+      case 'search_references': {
+        const args = rawArgs as unknown as SearchReferencesArgs;
+        const account = resolveAccount(args.accountSetId);
+        return searchReferences(account, args) satisfies SearchReferencesResult;
       }
       case 'validate_voucher': {
         const contract = (rawArgs as { contract: VoucherContract }).contract;

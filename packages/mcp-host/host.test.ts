@@ -48,7 +48,7 @@ afterEach(async () => {
 });
 
 describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts)', () => {
-  it('验收 #1:握手成功并经 tools/list 发现 5 个工具', { timeout: 60_000 }, async () => {
+  it('验收 #1:握手成功并经 tools/list 发现 6 个工具', { timeout: 60_000 }, async () => {
     const host = trackedHost();
     await host.ensureReady();
     expect(host.discoveredTools.map((t) => t.name)).toEqual([
@@ -57,6 +57,7 @@ describe('McpHost × Fake server 子进程(npx tsx packages/mcp-fake/src/main.ts
       'get_current_accounting_period',
       'list_vouchers',
       'inspect_account_set',
+      'search_references',
     ]);
     const listVouchers = host.discoveredTools.find((t) => t.name === 'list_vouchers');
     expect(listVouchers?.inputSchema).toHaveProperty('oneOf'); // inputSchema 自包含原样保留

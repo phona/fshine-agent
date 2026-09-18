@@ -317,6 +317,54 @@ text 内解析结果统一为**信封格式**：
 }
 ```
 
+#### search_references
+
+把用户输入的名称/简称/编码/关键字模糊解析成当前账套内的稳定 id（只读，用平台真实档案，绝不猜 id）。数据来自当前账套的全量科目表与客户/供应商档案（非 inspect 概览样本），不允许跨账套。
+
+```json
+{
+  "name": "search_references",
+  "description": "把用户输入的名称/简称/编码/关键字模糊解析成当前账套内的稳定 id（只读，用平台真实档案，绝不猜 id）。referenceType：subject=科目（候选含 id/code/name/useAssistant/assistantType），assistant=客户/供应商辅助档案（候选含 id/code/name/type）。返回统一形状 {referenceType, status, query, candidates, details?}；status：matched 唯一匹配（可直接拿 id 查余额/明细）；ambiguous 多候选（列出候选让用户选，不要自动挑）；not_found 无匹配；unavailable 该 referenceType 平台暂不支持。filters.assistantType=customer/supplier、filters.subjectCode 可收窄候选。推荐流程：search_references(referenceType=\"assistant\") → assistantId → get_auxiliary_balance(assistantId)。",
+  "inputSchema": {
+    "type": "object",
+    "required": ["accountSetId", "referenceType", "query"],
+    "additionalProperties": false,
+    "properties": {
+      "accountSetId": { "type": "string", "minLength": 1 },
+      "referenceType": { "type": "string", "minLength": 1, "description": "第一阶段支持 subject | assistant；其他值（如 employee）返回 status=unavailable" },
+      "query": { "type": "string", "minLength": 1 },
+      "filters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "subjectCode": { "type": "string", "pattern": "^\\d{4,}$", "description": "assistant 查询限定科目（按科目辅助核算类型收窄客户/供应商）" },
+          "assistantType": { "enum": ["customer", "supplier", "employee", "other"] }
+        }
+      }
+    }
+  }
+}
+```
+
+匹配规则：优先精确匹配 code/id/name，再做大小写/空格归一化后的包含匹配；多候选一律 ambiguous（中文简称只生成候选、不自动选择）；同名但类型不同（客户/供应商）无过滤时 ambiguous，用 filters 收窄。
+
+返回（唯一匹配）：
+
+```json
+{
+  "data": {
+    "referenceType": "assistant",
+    "status": "matched",
+    "query": "幻东",
+    "candidates": [
+      { "id": "283655291", "code": "1122-00002", "name": "幻州幻东机械制造有限公司", "type": "customer" }
+    ]
+  }
+}
+```
+
+`status=unavailable` 时附 `details.supportedTypes`（如 `["subject", "assistant"]`）；`not_found` 因过滤条件导致时附 `details.reason`。
+
 ### 6.3 V1 tool 清单（write server 增量）
 
 #### validate_voucher

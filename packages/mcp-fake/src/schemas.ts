@@ -85,6 +85,25 @@ const INSPECT_ACCOUNT_SET_INPUT_SCHEMA: JsonSchema = {
   },
 };
 
+const SEARCH_REFERENCES_INPUT_SCHEMA: JsonSchema = {
+  type: 'object',
+  required: ['accountSetId', 'referenceType', 'query'],
+  additionalProperties: false,
+  properties: {
+    accountSetId: { type: 'string', minLength: 1 },
+    referenceType: { type: 'string', minLength: 1, description: '第一阶段支持 subject | assistant;其他值(如 employee)返回 status=unavailable' },
+    query: { type: 'string', minLength: 1, description: '名称/简称/编码/关键字,非空' },
+    filters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        subjectCode: { type: 'string', pattern: '^\\d{4,}$', description: 'assistant 查询限定科目(按科目的辅助核算类型收窄客户/供应商)' },
+        assistantType: { enum: ['customer', 'supplier', 'employee', 'other'] },
+      },
+    },
+  },
+};
+
 const VOUCHER_CONTRACT_SCHEMA: JsonSchema = {
   type: 'object',
   required: ['accountSetId', 'entries'],
@@ -192,8 +211,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: 'inspect_account_set',
     description:
-      '账套摸底:科目表 + 辅助核算档案 + 近期历史凭证。用于『这家账套的科目/对手方怎么记』这类只能现查的问题。meta.source=cache 表示命中缓存未重新抓取。数据是平台当前现状,会随时间变化,不要长期留存当作不变事实。',
+      '账套摸底:科目表 + 辅助核算档案 + 近期历史凭证。用于『这家账套的科目/对手方怎么记』这类只能现查的问题。meta.source=cache 表示命中缓存未重新抓取。数据是平台当前现状,会随时间变化,不要长期留存当作不变事实。摸底样本不完整,解析具体科目/客户/供应商稳定 id 请用 search_references。',
     inputSchema: INSPECT_ACCOUNT_SET_INPUT_SCHEMA,
+  },
+  {
+    name: 'search_references',
+    description:
+      '把用户输入的名称/简称/编码/关键字模糊解析成当前账套内的稳定 id(只读,用平台真实档案,绝不猜 id)。referenceType:subject=科目(候选含 id/code/name/useAssistant/assistantType),assistant=客户/供应商辅助档案(候选含 id/code/name/type)。返回统一形状 {referenceType, status, query, candidates, details?};status:matched 唯一匹配(可直接拿 id 查余额/明细),ambiguous 多候选(列出候选让用户选,不要自动挑),not_found 无匹配,unavailable 该 referenceType 平台暂不支持。filters.assistantType=customer/supplier、filters.subjectCode 可收窄候选。推荐流程:search_references(referenceType="assistant") → assistantId → get_auxiliary_balance(assistantId)。',
+    inputSchema: SEARCH_REFERENCES_INPUT_SCHEMA,
   },
   ...WRITE_TOOL_DEFINITIONS,
 ];

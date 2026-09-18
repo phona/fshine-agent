@@ -30,11 +30,12 @@ const config = loadConfig({ env: process.env, yamlPath });
 const toolPolicy: McpToolPolicy = {
   allowedTools: [
     'get_login_status', 'search_account_sets', 'get_current_accounting_period', 'list_vouchers', 'inspect_account_set',
+    'search_references',
     'validate_voucher', 'submit_voucher', 'submit_voucher_batch', 'get_submission_status',
   ],
   categories: {
     get_login_status: 'read', search_account_sets: 'read', get_current_accounting_period: 'read',
-    list_vouchers: 'read', inspect_account_set: 'read', validate_voucher: 'validate',
+    list_vouchers: 'read', inspect_account_set: 'read', search_references: 'read', validate_voucher: 'validate',
     submit_voucher: 'write', submit_voucher_batch: 'write', get_submission_status: 'status',
   },
 };

@@ -36,7 +36,7 @@ describe('生命周期握手(进程内)', () => {
     expect(serverInfo['allowedAccountSets']).toEqual(['as_001', 'as_002']);
   });
 
-  it('tools/list 返回 5 个 read tool,名字与 READ_TOOLS 一致', async () => {
+  it('tools/list 返回 6 个 read tool,名字与 READ_TOOLS 一致', async () => {
     const transport = makeTransport({ env: {} });
     await rpc(transport, 1, 'initialize', {});
     const response = await rpc(transport, 2, 'tools/list');
@@ -60,7 +60,7 @@ describe('inputSchema 保真(spec §6.2)', () => {
 
   it('所有 tool 的 inputSchema 都是 object + additionalProperties:false', async () => {
     const tools = await listTools();
-    expect(tools).toHaveLength(5);
+    expect(tools).toHaveLength(6);
     for (const tool of tools) {
       expect(tool.inputSchema['type']).toBe('object');
       expect(tool.inputSchema['additionalProperties']).toBe(false);

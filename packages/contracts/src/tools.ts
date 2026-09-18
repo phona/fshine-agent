@@ -9,6 +9,7 @@ export const READ_TOOLS = [
   'get_current_accounting_period',
   'list_vouchers',
   'inspect_account_set',
+  'search_references',
 ] as const;
 
 export type ReadToolName = (typeof READ_TOOLS)[number];
@@ -228,6 +229,48 @@ export interface InspectAccountSetResult {
   recentVouchers: Array<Record<string, unknown>>;
 }
 
+// ---- search_references ----
+
+export interface SearchReferencesArgs {
+  accountSetId: string;
+  /** 第一阶段支持 subject | assistant;其他值(如 employee)返回 status=unavailable */
+  referenceType: string;
+  /** 名称/简称/编码/关键字,非空 */
+  query: string;
+  filters?: {
+    /** assistant 查询限定科目(按科目的辅助核算类型收窄客户/供应商) */
+    subjectCode?: string;
+    assistantType?: 'customer' | 'supplier' | 'employee' | 'other';
+  };
+}
+
+export interface SubjectReferenceCandidate {
+  id: string;
+  code: string;
+  name: string;
+  useAssistant: boolean;
+  /** 归一化: customer / supplier / employee / other / null */
+  assistantType: 'customer' | 'supplier' | 'employee' | 'other' | null;
+}
+
+export interface AssistantReferenceCandidate {
+  id: string;
+  code: string | null;
+  name: string;
+  type: 'customer' | 'supplier';
+}
+
+export type SearchReferenceCandidate = SubjectReferenceCandidate | AssistantReferenceCandidate;
+
+export interface SearchReferencesResult {
+  referenceType: string;
+  status: 'matched' | 'ambiguous' | 'not_found' | 'unavailable';
+  query: string;
+  candidates: SearchReferenceCandidate[];
+  /** unavailable/not_found 时给原因与支持范围 */
+  details?: Record<string, unknown>;
+}
+
 // ---- 按名字取参/取结果的映射 ----
 
 export interface ReadToolArgsMap {
@@ -236,6 +279,7 @@ export interface ReadToolArgsMap {
   get_current_accounting_period: GetCurrentAccountingPeriodArgs;
   list_vouchers: ListVouchersArgs;
   inspect_account_set: InspectAccountSetArgs;
+  search_references: SearchReferencesArgs;
 }
 
 export interface ReadToolResultMap {
@@ -244,4 +288,5 @@ export interface ReadToolResultMap {
   get_current_accounting_period: GetCurrentAccountingPeriodResult;
   list_vouchers: ListVouchersResult;
   inspect_account_set: InspectAccountSetResult;
+  search_references: SearchReferencesResult;
 }

@@ -182,6 +182,33 @@ describe('本地 E2E × 进程内 Fake MCP', () => {
     assert(inspect.ok);
     expect((inspect.data as { subjects: Array<{ code: string }> }).subjects.map((subject) => subject.code)).toContain('1122');
   });
+
+  it('Fake MCP tools/list 含 search_references，host schema 校验通过并记录调用参数', async () => {
+    const client = await InProcessFakeMcpClient.create();
+    expect(client.tools().map((tool) => tool.name)).toContain('search_references');
+    const schema = client.tools().find((tool) => tool.name === 'search_references')?.inputSchema as Record<string, unknown>;
+    expect(schema).toMatchObject({ type: 'object', required: ['accountSetId', 'referenceType', 'query'] });
+
+    const matched = await client.call('search_references', {
+      accountSetId: 'as_003', referenceType: 'assistant', query: '幻东', filters: { subjectCode: '1122' },
+    });
+    assert(matched.ok);
+    const data = matched.data as { status: string; candidates: Array<{ id: string; name: string; type: string }> };
+    expect(data.status).toBe('matched');
+    expect(data.candidates[0]).toMatchObject({ id: '283655291', type: 'customer' });
+
+    // referenceType 不在支持范围也通过 schema(开放字符串),业务层返回 unavailable
+    const unavailable = await client.call('search_references', {
+      accountSetId: 'as_003', referenceType: 'employee', query: '张三',
+    });
+    assert(unavailable.ok);
+    expect((unavailable.data as { status: string }).status).toBe('unavailable');
+
+    expect(client.callsOf('search_references')).toEqual([
+      { accountSetId: 'as_003', referenceType: 'assistant', query: '幻东', filters: { subjectCode: '1122' } },
+      { accountSetId: 'as_003', referenceType: 'employee', query: '张三' },
+    ]);
+  });
 });
 
 /** Tiny deterministic session repository for runtime-only E2E scenarios. */

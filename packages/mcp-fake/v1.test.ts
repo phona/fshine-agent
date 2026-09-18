@@ -13,7 +13,7 @@ const contract = {
 describe('V1 fake write tools', () => {
   it('write server discovers four V1 tools and read server remains V0 compatible', async () => {
     const read = await rpc(makeTransport({ env: {} }), 1, 'tools/list');
-    expect((read.result as { tools: Array<{ name: string }> }).tools).toHaveLength(5);
+    expect((read.result as { tools: Array<{ name: string }> }).tools).toHaveLength(6);
     const write = await rpc(makeTransport({ env: { FAKE_ENABLE_WRITE: '1' } }), 2, 'tools/list');
     expect((write.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name).slice(-4)).toEqual([
       'validate_voucher', 'submit_voucher', 'submit_voucher_batch', 'get_submission_status',
