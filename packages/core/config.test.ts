@@ -89,6 +89,37 @@ describe('loadConfig', () => {
     expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV }).sessionTtlMs).toBe(86_400_000);
   });
 
+  it('context profile 解析 Worker 与 command 预算', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    skillRoots: [".agents/skills"]
+    workerTimeoutMs: 600000
+    commandTimeoutMs: 300000
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['17dz']).toMatchObject({
+      root: '/opt/17dz-platform',
+      skillRoots: ['.agents/skills'],
+      workerTimeoutMs: 600000,
+      commandTimeoutMs: 300000,
+    });
+  });
+
+  it('context profile 拒绝非正预算', () => {
+    for (const key of ['workerTimeoutMs', 'commandTimeoutMs']) {
+      const yaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    skillRoots: [".agents/skills"]
+    ${key}: 0
+`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(new RegExp(key));
+    }
+  });
+
   it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录', () => {
     const config = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV });
     const records = principalScopeRecords(config);
