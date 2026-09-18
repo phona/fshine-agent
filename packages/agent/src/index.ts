@@ -8,6 +8,14 @@ export type {
 } from './driver';
 export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
 export {
+  createPiCodingTurnDriver,
+  createPiCodingWorkerSession,
+  type PiCodingTurnDriverOptions,
+  type PiCodingWorkerSession,
+  type PiCodingWorkerSessionOptions,
+  type PiCodingWorkerTool,
+} from './pi-coding-driver';
+export {
   FileSkillRegistry,
   createSkillRegistry,
   discoverSkills,

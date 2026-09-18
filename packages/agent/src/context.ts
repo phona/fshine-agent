@@ -148,13 +148,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         ?? (options.genericWorkspaceTools === false ? undefined : createWorkspaceToolProvider(profile.root, {
           commandTimeoutMs: profile.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
         }));
-      if (!provider) {
+      const nativeTools = options.workerDriver.managesNativeTools === true;
+      if (!provider && !nativeTools) {
         return await finish(options.tasks, running, {
           status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文未提供可执行能力。',
         });
       }
-      const workerTools = provider.tools();
-      if (workerTools.length === 0) {
+      const workerTools = provider?.tools() ?? [];
+      if (workerTools.length === 0 && !nativeTools) {
         return await finish(options.tasks, running, { status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文没有可用工具。' });
       }
       const messages = [...(existing?.workerMessages ?? []), { role: 'user', content: args.answer ? `${args.request}\n用户补充：${args.answer}` : args.request, timestamp: Date.now() } as unknown as DriverMessage];
@@ -164,8 +165,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           systemPrompt: workerSystemPrompt(profile.root, skills, skillText, workerTools),
           tools: workerTools,
           messages: messages as DriverMessage[],
+          cwd: profile.root,
+          skillRoots: profile.skillRoots,
+          sessionId: taskId,
           onStep: ctx.trusted.onStep ?? (() => {}),
           exec: async (name, toolArgs, signal) => {
+            if (!provider) throw new ToolUserError('当前 Worker 未配置外部工具执行器。');
             if (!workerTools.some((tool) => tool.name === name)) {
               throw new ToolUserError('该工具未被 17dz 上下文授权。');
             }

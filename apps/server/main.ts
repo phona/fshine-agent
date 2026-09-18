@@ -7,7 +7,7 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
-import { createContextTaskRunner, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
+import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { renderBarChartPng } from './chart';
 import { createMessageHandler } from './handler';
@@ -28,13 +28,14 @@ async function main(): Promise<void> {
   }
 
   const driver = createPiTurnDriver({ env: process.env });
+  const workerDriver = createPiCodingTurnDriver({ env: process.env });
   const platformTask = createContextTaskRunner({
     profiles: config.contextProfiles,
     tasks: store.platformTasks ?? {
       async get() { return null; },
       async upsert() { throw new Error('SQLite platform task store 未启用'); },
     },
-    workerDriver: driver,
+    workerDriver,
     profileId: '17dz',
   });
 

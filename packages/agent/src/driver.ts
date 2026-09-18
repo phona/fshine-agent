@@ -22,6 +22,12 @@ export interface TurnDriverInput {
   exec: (tool: McpToolName, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
   /** 回合绝对截止时间(Date.now() 基准),超时 driver 应中止并返回空文本 */
   deadline: number;
+  /** Optional trusted cwd for a higher-level coding-agent driver. */
+  cwd?: string;
+  /** Optional skill roots mounted by the trusted context profile. */
+  skillRoots?: readonly string[];
+  /** Stable worker/session id used by a resumable driver. */
+  sessionId?: string;
 }
 
 export interface TurnDriverResult {
@@ -33,6 +39,8 @@ export interface TurnDriverResult {
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;
+  /** True when the driver owns its native tools (for example pi-coding-agent). */
+  readonly managesNativeTools?: boolean;
   /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。
    *  force:true 跳过阈值判断强制压缩(会话过期软着陆用);失败时实现方应原样返回,不阻塞回合。 */
   compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
