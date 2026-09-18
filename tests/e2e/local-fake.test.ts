@@ -63,6 +63,7 @@ describe('本地 E2E × Context Worker（进程内 Fake Provider）', () => {
       profiles: { '17dz': { root: process.cwd(), skillRoots: ['../outside'] } },
       tasks: store.platformTasks!,
       workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
+      genericWorkspaceTools: false,
       provider: provider(),
     });
     await expect(task.run({ request: '读取任意路径' }, { trusted: trusted() })).rejects.toBeInstanceOf(ToolUserError);
@@ -75,6 +76,7 @@ describe('本地 E2E × Context Worker（进程内 Fake Provider）', () => {
       profiles: { '17dz': { root: process.cwd(), skillRoots: ['.agents/skills'] } },
       tasks: store.platformTasks!,
       workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
+      genericWorkspaceTools: false,
     });
     const result = await task.run({ request: '查幻辰账套' }, { trusted: trusted('capability') });
     expect(result.status).toBe('blocked');

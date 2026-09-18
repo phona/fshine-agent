@@ -36,8 +36,6 @@ export interface ContextProfileConfig {
   root: string;
   /** Paths relative to root containing Pi-compatible SKILL.md files. */
   skillRoots: string[];
-  /** Optional allowlist for tools visible to workers using this context. */
-  allowedTools?: string[];
 }
 
 export interface AppConfig {

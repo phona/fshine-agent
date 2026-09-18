@@ -34,6 +34,7 @@ export {
   type PlatformTaskResult,
   type Run17dzTaskArgs,
 } from './context';
+export { createWorkspaceToolProvider } from './workspace-tools';
 export {
   createTaxAgentRuntime,
   ACCOUNT_SET_SEARCH_MISS,

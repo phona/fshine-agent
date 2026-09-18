@@ -4,7 +4,7 @@
  * A context profile is operator configuration, never model input.  It gives a
  * fresh Pi worker a working directory and skill roots while task state stays
  * in fshine's SQLite store. Tool execution is supplied by a tiny provider
- * contract; the existing host adapter is only a compatibility fallback.
+ * contract; the default implementation exposes generic workspace tools.
  */
 import { randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
@@ -20,6 +20,7 @@ import type {
   PlatformTaskStatus,
   TrustedContext,
 } from '@fshine/contracts';
+import { createWorkspaceToolProvider } from './workspace-tools';
 
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
 
@@ -57,6 +58,8 @@ export interface ContextTaskRunnerOptions {
   workerDriver: TurnDriver;
   /** Optional in-process capability provider supplied by the deployment. */
   provider?: ContextToolProvider;
+  /** Set false only for deployments that intentionally provide no worker tools. */
+  genericWorkspaceTools?: boolean;
   profileId?: string;
 }
 
@@ -133,13 +136,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const skillRegistry = new CompositeSkillRegistry(profile.skillRoots);
       const skills = await skillRegistry.discover();
       const skillText = await readSkills(skillRegistry, skills);
-      const provider = ctx.provider ?? options.provider;
+      const provider = ctx.provider
+        ?? options.provider
+        ?? (options.genericWorkspaceTools === false ? undefined : createWorkspaceToolProvider(profile.root));
       if (!provider) {
         return await finish(options.tasks, running, {
           status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文未提供可执行能力。',
         });
       }
-      const workerTools = scopedTools(provider, profile.allowedTools);
+      const workerTools = provider.tools();
       if (workerTools.length === 0) {
         return await finish(options.tasks, running, { status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文没有可用工具。' });
       }
@@ -205,21 +210,14 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
     if (!resolved || !isInside(root, resolved)) throw new ToolUserError('17dz skillRoots 未通过路径安全校验。');
     skillRoots.push(resolved);
   }
-  return { root, skillRoots, allowedTools: configured.allowedTools };
+  return { root, skillRoots };
 }
 
-interface ResolvedContextProfile { root: string; skillRoots: string[]; allowedTools?: string[] }
+interface ResolvedContextProfile { root: string; skillRoots: string[] }
 
 function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
-}
-
-function scopedTools(provider: ContextToolProvider, allowed?: readonly string[]): readonly DiscoveredTool[] {
-  const tools = provider.tools();
-  if (!allowed || allowed.length === 0) return tools;
-  const set = new Set(allowed);
-  return tools.filter((tool) => set.has(tool.name));
 }
 
 class CompositeSkillRegistry implements SkillRegistry {

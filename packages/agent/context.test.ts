@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, DiscoveredTool, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, ToolUserError } from './src/driver';
 import { createContextTaskRunner, type ContextToolProvider } from './src/context';
+import { createWorkspaceToolProvider } from './src/workspace-tools';
 import { createTaxAgentRuntime } from './src/runtime';
 
 const roots: string[] = [];
@@ -51,7 +52,7 @@ async function profileRoot(): Promise<string> {
 
 function runner(root: string, tasks: MemoryTasks, driver: ReturnType<typeof ScriptedTurnDriver>, capabilityProvider?: ContextToolProvider) {
   const profiles: Record<string, ContextProfileConfig> = {
-    '17dz': { root, skillRoots: ['.agents/skills'], allowedTools: ['search_account_sets'] },
+    '17dz': { root, skillRoots: ['.agents/skills'] },
   };
   return createContextTaskRunner({ profiles, tasks, workerDriver: driver, provider: capabilityProvider });
 }
@@ -161,6 +162,30 @@ describe('trusted context worker', () => {
     expect(calls).toEqual([{ query: '幻辰' }]);
   });
 
+  it('无显式 provider 时自动挂载 workspace tools，且固定 root', async () => {
+    const root = await profileRoot();
+    const marker = path.join(root, 'marker.txt');
+    await writeFile(marker, 'workspace-ok\n');
+    const tasks = new MemoryTasks();
+    const worker = runner(root, tasks, ScriptedTurnDriver([{
+      toolCalls: [
+        { tool: 'read_file', args: { path: 'marker.txt' } },
+        { tool: 'run_command', args: { command: 'pwd' } },
+      ],
+      text: '已读取工作目录并执行命令。',
+    }]));
+    const result = await worker.run({ request: '读取 marker 并确认工作目录' }, { trusted: trusted() });
+    expect(result.status).toBe('completed');
+  });
+
+  it('workspace tools 拒绝越界路径并中止超时命令', async () => {
+    const root = await profileRoot();
+    const provider = createWorkspaceToolProvider(root, { commandTimeoutMs: 20 });
+    await expect(provider.call('read_file', { path: '../outside' })).rejects.toThrow('路径不能越出');
+    const result = await provider.call('run_command', { command: 'sleep 1' });
+    expect(result).toMatchObject({ timedOut: true });
+  });
+
   it('上下文没有通用执行能力时直接 blocked，不尝试 MCP/Host fallback', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
@@ -168,6 +193,7 @@ describe('trusted context worker', () => {
       profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
       tasks,
       workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
+      genericWorkspaceTools: false,
     });
     const result = await worker.run({ request: '查找幻辰' }, { trusted: trusted() });
     expect(result.status).toBe('blocked');

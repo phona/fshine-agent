@@ -161,11 +161,9 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
     if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
-    const allowedToolsRaw = item['allowedTools'];
     profiles[name] = {
       root,
       skillRoots,
-      ...(Array.isArray(allowedToolsRaw) ? { allowedTools: allowedToolsRaw.map(String) } : {}),
     };
   }
   return profiles;
