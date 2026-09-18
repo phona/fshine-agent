@@ -111,7 +111,6 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           ...(thinkingLevel ? { thinkingLevel } : {}),
         },
         streamFn: models.streamSimple.bind(models),
-        toolExecution: 'sequential',
       });
 
       const remaining = Math.max(1_000, input.deadline - Date.now());
