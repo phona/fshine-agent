@@ -136,11 +136,6 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // Native SDK tools are intentionally owned by this Worker driver.
     tools: ['read', 'bash', 'grep', 'find', 'ls'],
   });
-  // Domain scripts may own a shared browser profile. Keep ordinary file
-  // inspection available, but never let two bash/browser workflows race.
-  session.agent.state.tools = session.agent.state.tools.map((tool) =>
-    tool.name === 'bash' ? { ...tool, executionMode: 'sequential' as const } : tool,
-  );
   const loaded = loader.getSkills().skills.map((skill) => ({
     name: skill.name,
     description: skill.description,
