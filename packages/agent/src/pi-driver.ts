@@ -14,6 +14,8 @@ import { defaultStepText } from './step-text';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
+const PROVIDER_TOOL_NAME_MAX_LENGTH = 64;
+const PROVIDER_TOOL_NAME_RE = /^[A-Za-z0-9_-]+$/;
 /** Kimi coding/OpenAI-compatible endpoint's supported reasoning controls. */
 export const KIMI_THINKING_LEVEL_MAP = {
   off: null,
@@ -90,7 +92,13 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const names = new Map<string, string>();
-      const tools = input.tools.map((tool) => toAgentTool(tool, input, names)) as unknown as AgentTool<any, any>[];
+      const providerToolNames = createProviderToolNameMap(input.tools);
+      const tools = input.tools.map((tool) => toAgentTool(
+        tool,
+        input,
+        names,
+        providerToolNames.get(tool.name)!,
+      )) as unknown as AgentTool<any, any>[];
       // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
       const initialMessages = input.messages;
 
@@ -208,13 +216,79 @@ function toPiMessage(
   return { role: 'user', content: message.content, timestamp: Date.now() } as unknown as AgentMessage;
 }
 
-function toAgentTool(
+/**
+ * Build the provider-facing names independently from MCP names.
+ *
+ * MCP permits names such as `workflow.start`, while OpenAI-compatible
+ * function calling only accepts `[A-Za-z0-9_-]{1,64}`.  Keep ordinary names
+ * unchanged for backwards-compatible transcripts, and only rewrite names
+ * that the provider cannot accept.  The returned map is deliberately one-way:
+ * execution always closes over the original discovered tool name.
+ */
+export function createProviderToolNameMap(tools: readonly DiscoveredTool[]): Map<string, string> {
+  const result = new Map<string, string>();
+  const used = new Set<string>();
+
+  // Reserve names that can be sent unchanged first. This prevents an
+  // invalid name such as `workflow.start` from stealing an existing
+  // `workflow_start` function name.
+  for (const tool of tools) {
+    if (isProviderToolName(tool.name)) {
+      result.set(tool.name, tool.name);
+      used.add(tool.name);
+    }
+  }
+
+  for (const tool of tools) {
+    if (result.has(tool.name)) continue;
+
+    const base = tool.name.replace(/[^A-Za-z0-9_-]/g, '_') || 'mcp_tool';
+    let candidate = fitProviderToolName(base, tool.name);
+    if (used.has(candidate)) {
+      const suffix = `_${stableNameHash(tool.name)}`;
+      candidate = fitProviderToolName(`${base}${suffix}`, tool.name);
+      let n = 2;
+      while (used.has(candidate)) {
+        candidate = fitProviderToolName(`${base}${suffix}_${n}`, tool.name);
+        n += 1;
+      }
+    }
+    result.set(tool.name, candidate);
+    used.add(candidate);
+  }
+  return result;
+}
+
+function isProviderToolName(name: string): boolean {
+  return name.length > 0 && name.length <= PROVIDER_TOOL_NAME_MAX_LENGTH && PROVIDER_TOOL_NAME_RE.test(name);
+}
+
+function fitProviderToolName(base: string, original: string): string {
+  if (base.length <= PROVIDER_TOOL_NAME_MAX_LENGTH && isProviderToolName(base)) return base;
+  const suffix = `_${stableNameHash(original)}`;
+  const prefixLength = Math.max(1, PROVIDER_TOOL_NAME_MAX_LENGTH - suffix.length);
+  return `${base.slice(0, prefixLength)}${suffix}`;
+}
+
+function stableNameHash(value: string): string {
+  // Small deterministic FNV-1a hash; this is only a collision suffix, not a
+  // security boundary or identifier exposed to the MCP server.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+export function toAgentTool(
   tool: DiscoveredTool,
   input: TurnDriverInput,
   names: Map<string, string>,
+  providerName = tool.name,
 ) {
   return {
-    name: tool.name,
+    name: providerName,
     label: tool.name,
     description: tool.description,
     // host tools/list 的 inputSchema 是标准 JSON Schema,typebox 兼容该子集;
