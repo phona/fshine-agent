@@ -36,6 +36,10 @@ export interface ContextProfileConfig {
   root: string;
   /** Paths relative to root containing Pi-compatible SKILL.md files. */
   skillRoots: string[];
+  /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
+  workerTimeoutMs?: number;
+  /** Maximum wall-clock budget for one generic workspace command. Defaults to 5 minutes. */
+  commandTimeoutMs?: number;
 }
 
 export interface AppConfig {

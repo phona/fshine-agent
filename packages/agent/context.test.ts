@@ -204,6 +204,30 @@ describe('trusted context worker', () => {
     expect(result).toMatchObject({ timedOut: true });
   });
 
+  it('Context Profile 的 Worker/command budget 覆盖默认值', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    let deadline = 0;
+    const started = Date.now();
+    const scripted: TurnDriver = {
+      run: async (input) => {
+        deadline = input.deadline;
+        const result = await input.exec('run_command', { command: 'sleep 1' });
+        expect(result).toMatchObject({ timedOut: true });
+        return { text: '预算生效。', messages: [...input.messages, { role: 'assistant', content: '预算生效。', timestamp: Date.now() } as never] };
+      },
+    };
+    const worker = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'], workerTimeoutMs: 1234, commandTimeoutMs: 20 } },
+      tasks,
+      workerDriver: scripted,
+    });
+    const result = await worker.run({ request: '测试预算' }, { trusted: trusted() });
+    expect(result.status).toBe('completed');
+    expect(deadline - started).toBeGreaterThan(900);
+    expect(deadline - started).toBeLessThan(3000);
+  });
+
   it('上下文没有通用执行能力时直接 blocked，不尝试 MCP/Host fallback', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();

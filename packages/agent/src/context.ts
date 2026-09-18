@@ -23,6 +23,8 @@ import type {
 import { createWorkspaceToolProvider } from './workspace-tools';
 
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
+const DEFAULT_WORKER_TIMEOUT_MS = 600_000;
+const DEFAULT_COMMAND_TIMEOUT_MS = 300_000;
 
 export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时调用本工具。',
@@ -143,7 +145,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const skillText = await readSkills(skillRegistry, skills);
       const provider = ctx.provider
         ?? options.provider
-        ?? (options.genericWorkspaceTools === false ? undefined : createWorkspaceToolProvider(profile.root));
+        ?? (options.genericWorkspaceTools === false ? undefined : createWorkspaceToolProvider(profile.root, {
+          commandTimeoutMs: profile.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
+        }));
       if (!provider) {
         return await finish(options.tasks, running, {
           status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文未提供可执行能力。',
@@ -154,7 +158,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         return await finish(options.tasks, running, { status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文没有可用工具。' });
       }
       const messages = [...(existing?.workerMessages ?? []), { role: 'user', content: args.answer ? `${args.request}\n用户补充：${args.answer}` : args.request, timestamp: Date.now() } as unknown as DriverMessage];
-      const deadline = Date.now() + 150_000;
+      const deadline = Date.now() + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
         const result = await options.workerDriver.run({
           systemPrompt: workerSystemPrompt(profile.root, skills, skillText, workerTools),
@@ -215,10 +219,20 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
     if (!resolved || !isInside(root, resolved)) throw new ToolUserError('17dz skillRoots 未通过路径安全校验。');
     skillRoots.push(resolved);
   }
-  return { root, skillRoots };
+  return {
+    root,
+    skillRoots,
+    workerTimeoutMs: configured.workerTimeoutMs,
+    commandTimeoutMs: configured.commandTimeoutMs,
+  };
 }
 
-interface ResolvedContextProfile { root: string; skillRoots: string[] }
+interface ResolvedContextProfile {
+  root: string;
+  skillRoots: string[];
+  workerTimeoutMs?: number;
+  commandTimeoutMs?: number;
+}
 
 function isInside(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);

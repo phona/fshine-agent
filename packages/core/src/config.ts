@@ -161,9 +161,19 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
     if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
+    const workerTimeoutMs = item['workerTimeoutMs'] === undefined ? undefined : Number(item['workerTimeoutMs']);
+    const commandTimeoutMs = item['commandTimeoutMs'] === undefined ? undefined : Number(item['commandTimeoutMs']);
+    if (workerTimeoutMs !== undefined && (!Number.isFinite(workerTimeoutMs) || workerTimeoutMs <= 0)) {
+      throw new Error(`配置项 contextProfiles.${name}.workerTimeoutMs 必须大于 0`);
+    }
+    if (commandTimeoutMs !== undefined && (!Number.isFinite(commandTimeoutMs) || commandTimeoutMs <= 0)) {
+      throw new Error(`配置项 contextProfiles.${name}.commandTimeoutMs 必须大于 0`);
+    }
     profiles[name] = {
       root,
       skillRoots,
+      ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
+      ...(commandTimeoutMs === undefined ? {} : { commandTimeoutMs }),
     };
   }
   return profiles;
