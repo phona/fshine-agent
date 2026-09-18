@@ -29,9 +29,10 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 300_000;
 export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时调用本工具。',
   '',
-  '支持的任务包括：查找和确认账套、会计期间、科目、客户、供应商等平台档案；查询科目余额和辅助余额；查询记账凭证及分页；查看账套科目体系和平台信息；以及平台内的财税任务、校验、预览和需要确认的流程。',
+  '支持的任务包括：查找和确认账套、会计期间、科目、客户、供应商等平台档案；查询科目余额和辅助余额；查询记账凭证及分页；查看账套科目体系和平台信息；以及平台内由领域脚本实现的财税任务、校验、预览和需要确认的流程。',
   '',
-  '调用后，幻账平台 Worker 会加载受信的平台工作目录和 Skill，自行完成必要的查询、分析和后续操作。涉及 17dz 实时数据时不要凭历史对话或常识作答，也不要在主 Agent 中猜测账套 ID、科目编码或客户 ID。',
+  '调用后，幻账平台 Worker 会加载受信的平台工作目录和 Skill，按 Skill 指定的领域脚本完成必要的查询、分析和后续操作。涉及 17dz 实时数据时不要凭历史对话或常识作答，也不要在主 Agent 中猜测账套 ID、科目编码或客户 ID。',
+  '领域脚本是平台能力的唯一执行入口：不要调用通用任务分发器、旧的 agent CLI 或自行拼装内部工具 JSON；不要读取源码后猜 ID、批量枚举候选或用 shell 循环代替领域脚本。若当前领域没有覆盖该任务，直接说明能力缺失。',
   '',
   '不支持：普通会计知识解释、与 17dz 实时数据无关的计算、任意代码执行，以及未经用户明确确认的破坏性操作。',
   '',
@@ -143,12 +144,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       ]);
       const skills = await skillRegistry.discover();
       const skillText = await readSkills(skillRegistry, skills);
-      const provider = ctx.provider
+      const nativeTools = options.workerDriver.managesNativeTools === true;
+      // A native coding-agent worker owns its cwd-bound tools. Do not mount
+      // the legacy generic workspace provider as a second, contradictory tool
+      // surface; domain Skills/scripts are the only platform capability.
+      const provider = nativeTools ? undefined : ctx.provider
         ?? options.provider
         ?? (options.genericWorkspaceTools === false ? undefined : createWorkspaceToolProvider(profile.root, {
           commandTimeoutMs: profile.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
         }));
-      const nativeTools = options.workerDriver.managesNativeTools === true;
       if (!provider && !nativeTools) {
         return await finish(options.tasks, running, {
           status: 'blocked', taskId, error: 'CAPABILITY_UNAVAILABLE: 当前 17dz 上下文未提供可执行能力。',
@@ -273,6 +277,8 @@ function workerSystemPrompt(root: string, skills: readonly SkillMetadata[], skil
     '你是 幻账平台任务 Worker。你在受信工作目录中为主 Agent 执行一项具体任务。',
     `平台工作目录：${root}`,
     '只能基于工具结果和工作目录中的平台知识回答；实时账务数据必须调用可用工具，不得编造。',
+    '先读取与当前任务相关的 SKILL.md、领域 MECHANISMS.md 和契约说明，再按其中指定的领域脚本入口执行。领域脚本负责账套模糊匹配、期间解析、内部 ID 解析、分页、浏览器生命周期、串行化和证据汇总；Worker 不得自行重实现这些流程。',
+    '禁止调用通用任务分发器、旧的 agent CLI 或自行拼装内部工具 JSON；禁止读取源码后猜 ID、批量枚举候选、用 shell 循环替代领域脚本。没有对应领域脚本时应直接报告能力缺失，不要硬做。',
     '遇到缺少选择或需要用户确认时，明确提出问题；不要自行提交写操作。',
     `可用工具：${tools.map((tool) => `${tool.name}:${tool.description}`).join('\n')}`,
     `已加载技能：${skills.map((skill) => skill.name).join(', ') || '无'}`,

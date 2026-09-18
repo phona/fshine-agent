@@ -178,6 +178,9 @@ describe('trusted context worker', () => {
     expect(prompt).toContain('finance');
     expect(prompt).toContain('17dz');
     expect(prompt).toContain('可复核证据');
+    expect(prompt).toContain('领域脚本入口');
+    expect(prompt).toContain('不得自行重实现这些流程');
+    expect(prompt).toContain('禁止调用通用任务分发器');
   });
 
   it('无显式 provider 时自动挂载 workspace tools，且固定 root', async () => {

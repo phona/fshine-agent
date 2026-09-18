@@ -49,7 +49,7 @@ export function createWorkspaceToolProvider(
     },
     {
       name: 'run_command',
-      description: '在受信工作目录中运行受控命令。命令 cwd 固定为工作目录，不能通过参数改变。',
+      description: '在受信工作目录中运行 Skill 指定的领域脚本。命令 cwd 固定为工作目录，不能通过参数改变；不得调用通用任务分发器、旧 agent CLI、内部工具 JSON 或 shell 循环代替领域脚本。',
       inputSchema: {
         type: 'object', required: ['command'], additionalProperties: false,
         properties: { command: { type: 'string', minLength: 1 }, timeoutMs: { type: 'integer', minimum: 1, maximum: commandTimeoutMs } },
