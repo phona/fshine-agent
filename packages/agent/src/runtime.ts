@@ -49,11 +49,21 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       const { messages: loaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
       let context = loaded;
+      // 压缩异常不得失败回合：宁可带着旧上下文，也不让用户撞上 500（设计承诺）。
+      const compactSafe = async (msgs: AgentMessage[], force?: boolean): Promise<AgentMessage[]> => {
+        if (!deps.driver.compact) return msgs;
+        try {
+          return await deps.driver.compact(msgs, force ? { force: true } : undefined);
+        } catch (error) {
+          console.error(JSON.stringify({ event: 'context_compact_threw', sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+          return msgs;
+        }
+      };
       if (expired && loaded.length > 0) {
         console.info(JSON.stringify({ event: 'session_resume_seeding', sessionId: ctx.sessionId, staleMessages: loaded.length }));
-        context = deps.driver.compact ? await deps.driver.compact(loaded, { force: true }) : loaded;
+        context = await compactSafe(loaded, true);
       }
-      if (deps.driver.compact) context = await deps.driver.compact(context);
+      context = await compactSafe(context);
       context.push({ role: 'user', content: userMessage, timestamp: Date.now() } as unknown as AgentMessage);
 
       const deadline = Date.now() + turnBudgetMs;
