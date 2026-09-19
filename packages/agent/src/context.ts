@@ -86,6 +86,12 @@ export interface ContextTaskRunnerOptions {
   maxBatchCount?: number;
   /** 意图有效期，默认 10 分钟。 */
   intentTtlMs?: number;
+  /**
+   * submit 是否允许（默认 false = 演练模式）：false 时确认码只走通流程并归档
+   * 为 confirmed_dry，绝不触发 --save——"走到 submit 前可以，submit 不允许"。
+   * 启用：FSHINE_SUBMIT_ENABLED=1 + 重启。
+   */
+  submitEnabled?: boolean;
   /** 测试注入点。 */
   generateCode?: () => string;
   hashCode?: (code: string) => string;
@@ -228,12 +234,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     };
     await ci.create(record);
     const ttlMinutes = Math.round(intentTtlMs / 60_000);
+    const confirmLine = options.submitEnabled
+      ? `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`
+      : `回复「确认 ${code}」完成确认流程（当前为演练模式——不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
     return stop([
       '已收到录入提案并通过预检（dry-run）：',
       `- 账套：${proposal.accountSet}`,
       `- 期间：${proposal.period}`,
       `- 凭证：${proposal.summary.count} 张，借贷合计各 ${proposal.summary.credit} 元`,
-      `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`,
+      confirmLine,
     ].join('\n'));
   }
 
@@ -256,6 +265,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (confirmM) {
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hashCode(confirmM[1]!), now);
         if (!rec) return null;
+        if (!options.submitEnabled) {
+          await ci.updateStatus(rec.intentId, 'confirmed_dry', { note: 'submit disabled (rehearsal mode)' });
+          return { text: '确认已收到。当前为演练模式，落账执行未启用——本次未写入任何数据，提案已归档。' };
+        }
         const commitRunner = options.commitRunner;
         if (!commitRunner) {
           await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });

@@ -69,6 +69,8 @@ async function main(): Promise<void> {
       changeIntents: store.changeIntents,
       prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
       commitRunner: createCommitRunner({ platformRoot, gateSecret }),
+      // submit 熔断开关：默认演练模式（确认流程走通、零写入）；启用 = .env 设 FSHINE_SUBMIT_ENABLED=1 并重启
+      submitEnabled: process.env.FSHINE_SUBMIT_ENABLED === '1',
     } : {}),
   });
 
