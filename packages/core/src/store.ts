@@ -17,6 +17,8 @@ import type {
   ToolCallRepo,
   PlatformTaskRecord,
   PlatformTaskRepo,
+  ChangeIntentRecord,
+  ChangeIntentRepo,
 } from '@fshine/contracts';
 
 export function newId(prefix: string): string {
@@ -89,6 +91,27 @@ CREATE TABLE IF NOT EXISTS platform_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_platform_tasks_parent_session_id
   ON platform_tasks (parent_session_id);
+
+CREATE TABLE IF NOT EXISTS change_intents (
+  intent_id TEXT PRIMARY KEY,
+  principal_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  account_set TEXT NOT NULL,
+  period TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  confirm_code_hash TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  decided_at TEXT,
+  result TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_change_intents_session_status
+  ON change_intents (principal_id, session_id, status);
+CREATE INDEX IF NOT EXISTS idx_change_intents_confirm
+  ON change_intents (principal_id, session_id, confirm_code_hash, status);
 `;
 
 interface PrincipalScopeRow {
@@ -138,6 +161,42 @@ interface PlatformTaskRow {
   worker_messages: string;
   created_at: string;
   updated_at: string;
+}
+
+interface ChangeIntentRow {
+  intent_id: string;
+  principal_id: string;
+  session_id: string;
+  kind: string;
+  account_set: string;
+  period: string;
+  payload: string;
+  summary: string;
+  confirm_code_hash: string;
+  status: string;
+  created_at: string;
+  expires_at: string;
+  decided_at: string | null;
+  result: string | null;
+}
+
+function rowToChangeIntent(row: ChangeIntentRow): ChangeIntentRecord {
+  return {
+    intentId: row.intent_id,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    kind: row.kind as ChangeIntentRecord['kind'],
+    accountSet: row.account_set,
+    period: row.period,
+    payload: JSON.parse(row.payload),
+    summary: JSON.parse(row.summary),
+    confirmCodeHash: row.confirm_code_hash,
+    status: row.status as ChangeIntentRecord['status'],
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.decided_at ? { decidedAt: row.decided_at } : {}),
+    ...(row.result ? { result: JSON.parse(row.result) } : {}),
+  };
 }
 
 function rowToPrincipalScope(row: PrincipalScopeRow): PrincipalScopeRecord {
@@ -375,7 +434,57 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, platformTasks };
+  const changeIntents: ChangeIntentRepo = {
+    async create(record) {
+      db.prepare(
+        'INSERT INTO change_intents (intent_id, principal_id, session_id, kind, account_set, period, payload, summary, confirm_code_hash, status, created_at, expires_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        record.intentId,
+        record.principalId,
+        record.sessionId,
+        record.kind,
+        record.accountSet,
+        record.period,
+        JSON.stringify(record.payload),
+        JSON.stringify(record.summary),
+        record.confirmCodeHash,
+        record.status,
+        record.createdAt,
+        record.expiresAt,
+      );
+    },
+    async get(intentId) {
+      const row = db.prepare('SELECT * FROM change_intents WHERE intent_id = ?').get(intentId) as ChangeIntentRow | undefined;
+      return row ? rowToChangeIntent(row) : null;
+    },
+    async findPendingByConfirm(principalId, sessionId, codeHash, now) {
+      const row = db.prepare(
+        'SELECT * FROM change_intents WHERE principal_id = ? AND session_id = ? AND confirm_code_hash = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
+      ).get(principalId, sessionId, codeHash, 'pending') as ChangeIntentRow | undefined;
+      if (!row) return null;
+      const record = rowToChangeIntent(row);
+      if (new Date(record.expiresAt).getTime() <= now.getTime()) {
+        db.prepare('UPDATE change_intents SET status = ?, decided_at = ? WHERE intent_id = ? AND status = ?')
+          .run('expired', now.toISOString(), record.intentId, 'pending');
+        record.status = 'expired';
+        return null;
+      }
+      return record;
+    },
+    async findPendingBySession(principalId, sessionId) {
+      const row = db.prepare(
+        'SELECT * FROM change_intents WHERE principal_id = ? AND session_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
+      ).get(principalId, sessionId, 'pending') as ChangeIntentRow | undefined;
+      return row ? rowToChangeIntent(row) : null;
+    },
+    async updateStatus(intentId, status, result) {
+      db.prepare('UPDATE change_intents SET status = ?, decided_at = ?, result = ? WHERE intent_id = ?')
+        .run(status, new Date().toISOString(), result === undefined ? null : JSON.stringify(result), intentId);
+    },
+  };
+
+  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, platformTasks, changeIntents };
   handles.set(store, db);
   return store;
 }

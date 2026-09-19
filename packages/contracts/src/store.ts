@@ -94,6 +94,41 @@ export interface PlatformTaskRepo {
   upsert(record: PlatformTaskRecord): Promise<void>;
 }
 
+/**
+ * 变更意图（两步确认写开放的持久化状态机）。
+ * 模型只准备（提案 payload 冻结于此），用户凭确认码签名，服务端代码执行——
+ * 确认码哈希存储，明文只出现在发给用户的预览消息里。
+ */
+export interface ChangeIntentRecord {
+  intentId: string;
+  principalId: string;
+  /** 主会话 id（wecom:<user>:<conversation>），确认码绑定于此 */
+  sessionId: string;
+  kind: 'voucher.batch';
+  accountSet: string;
+  period: string;
+  /** 冻结提案：{type, domain, accountSet, period, contracts, summary} */
+  payload: unknown;
+  summary: { count: number; debit: number; credit: number };
+  confirmCodeHash: string;
+  status: 'pending' | 'committed' | 'expired' | 'cancelled' | 'superseded' | 'failed';
+  createdAt: string;
+  expiresAt: string;
+  decidedAt?: string;
+  /** commit 结果（读回校验输出摘要） */
+  result?: unknown;
+}
+
+export interface ChangeIntentRepo {
+  create(record: ChangeIntentRecord): Promise<void>;
+  get(intentId: string): Promise<ChangeIntentRecord | null>;
+  /** 命中确认码的未过期意图；过期意图就地标记 expired 后返回 null */
+  findPendingByConfirm(principalId: string, sessionId: string, codeHash: string, now: Date): Promise<ChangeIntentRecord | null>;
+  /** 该会话当前的 pending 意图（新提案创建前将其置 superseded） */
+  findPendingBySession(principalId: string, sessionId: string): Promise<ChangeIntentRecord | null>;
+  updateStatus(intentId: string, status: ChangeIntentRecord['status'], result?: unknown): Promise<void>;
+}
+
 /** Repository aggregate used by the application and Agent adapters. */
 export interface AuditStore {
   principalScopes: PrincipalScopeRepo;
@@ -102,4 +137,6 @@ export interface AuditStore {
   sessions: ConversationSessionRepo;
   /** Optional for backwards-compatible test stores and deployments. */
   platformTasks?: PlatformTaskRepo;
+  /** Optional：缺省时写流程整体禁用（提案按普通回答处理）。 */
+  changeIntents?: ChangeIntentRepo;
 }

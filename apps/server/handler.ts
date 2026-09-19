@@ -59,6 +59,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           requestId,
           principalId,
           allowedAccountSetIds: scope.accountSetIds,
+          capabilities: scope.capabilities,
           sessionId: `wecom:${message.wecomUserId}:${message.conversationId}`,
           onStep: progress,
         },

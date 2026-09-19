@@ -304,6 +304,63 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       expect(await store.platformTasks!.get(taskId)).toEqual(updated);
     });
   });
+
+  describe('changeIntents', () => {
+    const base = {
+      intentId: newId('intent'),
+      principalId: 'wecom:u1',
+      sessionId: 'wecom:u1:c1',
+      kind: 'voucher.batch' as const,
+      accountSet: '幻州市幻晟财务代理有限公司',
+      period: '202608',
+      payload: { type: 'change_proposal', contracts: [{ a: 1 }] },
+      summary: { count: 1, debit: 100, credit: 100 },
+      confirmCodeHash: 'hash-d3f2k9',
+      status: 'pending' as const,
+      createdAt: '2026-09-19T08:00:00.000Z',
+      expiresAt: '2026-09-19T08:10:00.000Z',
+    };
+
+    it('create/get 往返完整', async () => {
+      await store.changeIntents!.create(base);
+      expect(await store.changeIntents!.get(base.intentId)).toEqual(base);
+    });
+
+    it('确认码命中未过期意图', async () => {
+      await store.changeIntents!.create(base);
+      const hit = await store.changeIntents!.findPendingByConfirm(
+        base.principalId, base.sessionId, base.confirmCodeHash, new Date('2026-09-19T08:05:00.000Z'));
+      expect(hit?.intentId).toBe(base.intentId);
+    });
+
+    it('过期意图就地置 expired 并返回 null', async () => {
+      await store.changeIntents!.create(base);
+      const hit = await store.changeIntents!.findPendingByConfirm(
+        base.principalId, base.sessionId, base.confirmCodeHash, new Date('2026-09-19T08:11:00.000Z'));
+      expect(hit).toBeNull();
+      expect((await store.changeIntents!.get(base.intentId))?.status).toBe('expired');
+    });
+
+    it('确认码绑定 principal 与 session，他人不可用', async () => {
+      await store.changeIntents!.create(base);
+      expect(await store.changeIntents!.findPendingByConfirm(
+        'wecom:other', base.sessionId, base.confirmCodeHash, new Date('2026-09-19T08:05:00.000Z'))).toBeNull();
+      expect(await store.changeIntents!.findPendingByConfirm(
+        base.principalId, 'wecom:u1:other', base.confirmCodeHash, new Date('2026-09-19T08:05:00.000Z'))).toBeNull();
+    });
+
+    it('findPendingBySession 命中 pending；committed 后不再命中', async () => {
+      await store.changeIntents!.create(base);
+      expect((await store.changeIntents!.findPendingBySession(base.principalId, base.sessionId))?.intentId)
+        .toBe(base.intentId);
+      await store.changeIntents!.updateStatus(base.intentId, 'committed', { saved: 1 });
+      expect(await store.changeIntents!.findPendingBySession(base.principalId, base.sessionId)).toBeNull();
+      const done = await store.changeIntents!.get(base.intentId);
+      expect(done?.status).toBe('committed');
+      expect(done?.result).toEqual({ saved: 1 });
+      expect(done?.decidedAt).toBeTruthy();
+    });
+  });
 });
 
 describe('createSqliteStore 文件库持久化', () => {

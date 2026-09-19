@@ -8,6 +8,8 @@ export interface TrustedContext {
   /** Retained for domain authorization; models must not change this scope. */
   allowedAccountSetIds: readonly string[];
   sessionId: string;
+  /** Effective capabilities of the principal（写开放按此裁决；缺省视为只读）。 */
+  capabilities?: readonly string[];
   onStep?: (text: string) => void;
 }
 

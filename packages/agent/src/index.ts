@@ -39,6 +39,11 @@ export {
   type ContextTaskExecutionContext,
   type SubagentTaskResult,
   type Run17dzTaskArgs,
+  type ChangeProposal,
+  type PrepareRequest,
+  type PrepareResult,
+  type CommitRequest,
+  type CommitResult,
 } from './context';
 export {
   createTaxAgentRuntime,

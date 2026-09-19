@@ -10,6 +10,7 @@ import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from
 import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { renderBarChartPng } from './chart';
+import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createMessageHandler } from './handler';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -27,10 +28,13 @@ async function main(): Promise<void> {
     await store.principalScopes.upsert(record);
   }
 
-  // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及 V1 服务端
-  // 直调的 commit 都受平台 serve.sh 网关与 withPlatform 守卫的矩阵裁决。
+  // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端
+  // 直调的 dry-run/commit 都受平台 serve.sh 网关与 withPlatform 守卫的矩阵裁决。
   // 开发者的交互式 shell 不在本树内，不受影响。
   process.env.FSHINE_MODE = 'serve';
+  // HMAC 密钥进程内生成：重启使未决 commit 自然失效（pending 本就 10 分钟过期）。
+  const gateSecret = newGateSecret();
+  process.env.FSHINE_GATE_SECRET = gateSecret;
 
   const driver = createPiTurnDriver({ env: process.env });
   const workerDriver = createPiCodingTurnDriver({
@@ -51,6 +55,7 @@ async function main(): Promise<void> {
       });
     },
   });
+  const platformRoot = config.contextProfiles['17dz']?.root;
   const platformTask = createContextTaskRunner({
     profiles: config.contextProfiles,
     tasks: store.platformTasks ?? {
@@ -59,6 +64,12 @@ async function main(): Promise<void> {
     },
     workerDriver,
     profileId: '17dz',
+    // 两步确认写开放：执行器存在即启用；缺任一执行器时写流程自动禁用
+    ...(platformRoot ? {
+      changeIntents: store.changeIntents,
+      prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
+      commitRunner: createCommitRunner({ platformRoot, gateSecret }),
+    } : {}),
   });
 
   const runtime = createTaxAgentRuntime({

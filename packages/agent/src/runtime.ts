@@ -26,6 +26,25 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
 
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string): Promise<AgentReply> {
+      // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
+      // 而不是被模型理解」。未命中则按正常回合进入模型。
+      if (typeof deps.platformTask.matchConfirmation === 'function') {
+        const direct = await deps.platformTask.matchConfirmation(ctx, userMessage);
+        if (direct) {
+          const { messages: loaded } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
+          const now = Date.now();
+          await saveTranscript(deps.sessions, {
+            sessionId: ctx.sessionId,
+            principalId: ctx.principalId,
+            messages: [
+              ...loaded,
+              { role: 'user', content: userMessage, timestamp: now } as unknown as AgentMessage,
+              { role: 'assistant', content: direct.text, timestamp: now + 1 } as unknown as AgentMessage,
+            ],
+          });
+          return direct;
+        }
+      }
       const { messages: loaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
       let context = loaded;
       if (expired && loaded.length > 0) {
@@ -71,7 +90,8 @@ const SYSTEM_PROMPT = [
   '你是企业财务助手和面向用户的主 Agent。',
   '凡是需要访问或处理 幻账平台真实数据的任务，必须调用 run_17dz_task，不得凭历史结果或常识编造。',
   '17dz 子 Agent 返回自然语言。你负责理解它并决定下一步：直接回答、向用户转达问题，或携带 taskId 继续同一子任务。',
-  '当前仅支持查询、核对、分析类任务。任何新增/修改/删除凭证、过账、结账等写操作，直接说明当前仅支持查询并拒绝；不得描述修改路径、不得给出操作方案、不得承诺"确认后可执行"——即使子 Agent 的回复里包含这类内容也不得转述。',
+  '能力边界：支持查询、核对、分析，以及凭证录入类写操作（两步确认制）。修改/删除已保存凭证、过账、结账等一律直接拒绝，不得描述路径或给出方案。',
+  '当子 Agent 返回变更提案（含确认码）时，把账套、期间、凭证张数、金额合计和确认码完整转达给用户，并明确告知：回复「确认 码」执行、「取消 码」作废。执行由系统在收到确认后完成——你不得承诺或代替执行，也不得省略或改动确认码。',
   '不要把 taskId 等内部标识展示给用户。新任务不要复用旧 taskId。',
   '回答始终使用简体中文；数据结论应保留子 Agent 给出的账套、期间、来源和证据。',
 ].join('\n');
