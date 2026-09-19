@@ -478,6 +478,12 @@ export function createSqliteStore(dbPath: string): AuditStore {
       ).get(principalId, sessionId, 'pending') as ChangeIntentRow | undefined;
       return row ? rowToChangeIntent(row) : null;
     },
+    async findByCodeHash(principalId, sessionId, codeHash) {
+      const row = db.prepare(
+        'SELECT * FROM change_intents WHERE principal_id = ? AND session_id = ? AND confirm_code_hash = ? ORDER BY created_at DESC LIMIT 1',
+      ).get(principalId, sessionId, codeHash) as ChangeIntentRow | undefined;
+      return row ? rowToChangeIntent(row) : null;
+    },
     async updateStatus(intentId, status, result) {
       db.prepare('UPDATE change_intents SET status = ?, decided_at = ?, result = ? WHERE intent_id = ?')
         .run(status, new Date().toISOString(), result === undefined ? null : JSON.stringify(result), intentId);

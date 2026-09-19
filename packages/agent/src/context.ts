@@ -255,34 +255,64 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
 
       const cancelM = message.match(CANCEL_RE);
       if (cancelM) {
-        const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hashCode(cancelM[1]!), now);
-        if (!rec) return null;
-        await ci.updateStatus(rec.intentId, 'cancelled');
-        return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 张）未执行。` };
+        const hash = hashCode(cancelM[1]!);
+        const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
+        if (rec) {
+          await ci.updateStatus(rec.intentId, 'cancelled');
+          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 张）未执行。` };
+        }
+        const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
+        if (!stale) return null;
+        const why: Record<ChangeIntentRecord['status'], string> = {
+          pending: '仍在等待确认',
+          committed: '已完成录入',
+          confirmed_dry: '已走完确认流程（演练模式，未写入数据）',
+          expired: '已过期',
+          cancelled: '已作废',
+          superseded: '已被更新的提案取代',
+          failed: '执行失败',
+        };
+        return { text: `该确认码对应的提案${why[stale.status]}，无需取消。` };
       }
 
       const confirmM = message.match(CONFIRM_RE);
       if (confirmM) {
-        const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hashCode(confirmM[1]!), now);
-        if (!rec) return null;
-        if (!options.submitEnabled) {
-          await ci.updateStatus(rec.intentId, 'confirmed_dry', { note: 'submit disabled (rehearsal mode)' });
-          return { text: '确认已收到。当前为演练模式，落账执行未启用——本次未写入任何数据，提案已归档。' };
+        const hash = hashCode(confirmM[1]!);
+        const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
+        if (rec) {
+          if (!options.submitEnabled) {
+            await ci.updateStatus(rec.intentId, 'confirmed_dry', { note: 'submit disabled (rehearsal mode)' });
+            return { text: '确认已收到。当前为演练模式，落账执行未启用——本次未写入任何数据，提案已归档。' };
+          }
+          const commitRunner = options.commitRunner;
+          if (!commitRunner) {
+            await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });
+            return { text: '执行失败：落账执行器未配置，请联系管理员。' };
+          }
+          const contracts = (rec.payload as ChangeProposal).contracts;
+          const out = await commitRunner({ intentId: rec.intentId, accountSet: rec.accountSet, period: rec.period, contracts });
+          if (!out.ok) {
+            console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
+            await ci.updateStatus(rec.intentId, 'failed', { output: out.output.slice(0, 2000), error: out.error });
+            return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。' };
+          }
+          await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
+          return { text: `已完成：${rec.summary.count} 张凭证已录入（${rec.accountSet} ${rec.period}），读回校验通过。` };
         }
-        const commitRunner = options.commitRunner;
-        if (!commitRunner) {
-          await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });
-          return { text: '执行失败：落账执行器未配置，请联系管理员。' };
-        }
-        const contracts = (rec.payload as ChangeProposal).contracts;
-        const out = await commitRunner({ intentId: rec.intentId, accountSet: rec.accountSet, period: rec.period, contracts });
-        if (!out.ok) {
-          console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
-          await ci.updateStatus(rec.intentId, 'failed', { output: out.output.slice(0, 2000), error: out.error });
-          return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。' };
-        }
-        await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
-        return { text: `已完成：${rec.summary.count} 张凭证已录入（${rec.accountSet} ${rec.period}），读回校验通过。` };
+        // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
+        // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
+        const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
+        if (!stale) return null;
+        const why: Record<ChangeIntentRecord['status'], string> = {
+          pending: '仍在等待确认',
+          committed: '已完成录入',
+          confirmed_dry: '已走完确认流程（演练模式，未写入数据）',
+          expired: '已过期（超过有效期），请重新发起录入',
+          cancelled: '已作废',
+          superseded: '已被更新的提案取代，确认最新的提案即可',
+          failed: '执行失败，请联系管理员核对后重新发起',
+        };
+        return { text: `该确认码对应的提案${why[stale.status]}。` };
       }
       return null;
     },

@@ -60,6 +60,15 @@ function fakeIntents() {
       }
       return null;
     },
+    async findByCodeHash(principalId, sessionId, codeHash) {
+      let latest: ChangeIntentRecord | null = null;
+      for (const r of rows.values()) {
+        if (r.principalId === principalId && r.sessionId === sessionId && r.confirmCodeHash === codeHash) {
+          if (!latest || r.createdAt > latest.createdAt) latest = r;
+        }
+      }
+      return latest;
+    },
     async updateStatus(id, status, result) {
       const r = rows.get(id);
       if (r) { r.status = status; r.decidedAt = new Date().toISOString(); if (result !== undefined) r.result = result; }
@@ -185,12 +194,30 @@ describe('两步确认状态机', () => {
     expect([...intents.rows.values()][0]!.status).toBe('cancelled');
   });
 
-  it('确认码过期 → null（正常流程），意图标记 expired', async () => {
-    const { runner, intents, testCtx } = setup();
+  it('过期确认码 → 确定性答复（不落模型），意图标记 expired', async () => {
+    const { runner, intents, commitCalls, testCtx } = setup();
     await runner.run({ request: '录一张凭证' }, testCtx);
     const rec = [...intents.rows.values()][0]!;
     rec.expiresAt = new Date(Date.now() - 1000).toISOString();
-    expect(await runner.matchConfirmation!(testCtx.trusted, '确认 D3F2K9')).toBeNull();
+    const reply = await runner.matchConfirmation!(testCtx.trusted, '确认 D3F2K9');
+    expect(reply?.text).toContain('已过期');
     expect(rec.status).toBe('expired');
+    expect(commitCalls).toHaveLength(0);
+  });
+
+  it('未知确认码 → null 走模型（普通对话不误触）', async () => {
+    const { runner, testCtx } = setup();
+    await runner.run({ request: '录一张凭证' }, testCtx);
+    expect(await runner.matchConfirmation!(testCtx.trusted, '确认 ZZZ999')).toBeNull();
+  });
+
+  it('取消码用于已终结提案 → 确定性答复', async () => {
+    const { runner, intents, testCtx } = setup();
+    await runner.run({ request: '录一张凭证' }, testCtx);
+    const rec = [...intents.rows.values()][0]!;
+    rec.status = 'committed';
+    const reply = await runner.matchConfirmation!(testCtx.trusted, '取消 D3F2K9');
+    expect(reply?.text).toContain('已完成录入');
+    expect(rec.status).toBe('committed');
   });
 });

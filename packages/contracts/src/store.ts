@@ -126,6 +126,8 @@ export interface ChangeIntentRepo {
   findPendingByConfirm(principalId: string, sessionId: string, codeHash: string, now: Date): Promise<ChangeIntentRecord | null>;
   /** 该会话当前的 pending 意图（新提案创建前将其置 superseded） */
   findPendingBySession(principalId: string, sessionId: string): Promise<ChangeIntentRecord | null>;
+  /** 按确认码哈希查最新意图（任意状态）——过期/已完成/作废的确定性答复用 */
+  findByCodeHash(principalId: string, sessionId: string, codeHash: string): Promise<ChangeIntentRecord | null>;
   updateStatus(intentId: string, status: ChangeIntentRecord['status'], result?: unknown): Promise<void>;
 }
 
