@@ -27,8 +27,30 @@ async function main(): Promise<void> {
     await store.principalScopes.upsert(record);
   }
 
+  // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及 V1 服务端
+  // 直调的 commit 都受平台 serve.sh 网关与 withPlatform 守卫的矩阵裁决。
+  // 开发者的交互式 shell 不在本树内，不受影响。
+  process.env.FSHINE_MODE = 'serve';
+
   const driver = createPiTurnDriver({ env: process.env });
-  const workerDriver = createPiCodingTurnDriver({ env: process.env });
+  const workerDriver = createPiCodingTurnDriver({
+    env: process.env,
+    // G1 工具门留痕：放行与拦截都进 tool_calls 审计（requestId 串查平台侧）。
+    serveGateAudit: (event) => {
+      const now = new Date().toISOString();
+      void store.toolCalls.insert({
+        requestId: event.requestId ?? '',
+        toolName: `serve_gate:${event.tool}`,
+        safeArguments: { detail: event.detail ?? '' },
+        startedAt: now,
+        finishedAt: now,
+        status: event.allowed ? 'ok' : 'error',
+        errorCode: event.allowed ? undefined : 'GATE_BLOCKED',
+      }).catch((error) => {
+        console.warn(JSON.stringify({ event: 'serve_gate_audit_failed', error: String(error) }));
+      });
+    },
+  });
   const platformTask = createContextTaskRunner({
     profiles: config.contextProfiles,
     tasks: store.platformTasks ?? {

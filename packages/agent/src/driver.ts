@@ -28,6 +28,8 @@ export interface TurnDriverInput {
   skillRoots?: readonly string[];
   /** Stable worker/session id used by a resumable driver. */
   sessionId?: string;
+  /** 请求级关联 id（审计串查 fshine ↔ 平台门控记录用）。 */
+  requestId?: string;
   /** Parent cancellation propagated into a delegated agent turn. */
   signal?: AbortSignal;
 }

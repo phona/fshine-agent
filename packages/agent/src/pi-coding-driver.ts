@@ -18,11 +18,14 @@ import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
+import { createServeGate, type ServeGateEvent } from './serve-gate';
 
 export interface PiCodingTurnDriverOptions {
   env: Record<string, string | undefined>;
   /** Keep SDK auth/session files outside the mounted platform workspace. */
   agentDir?: string;
+  /** G1 工具门事件留痕（放行与拦截都上报，落 tool_calls 审计）。 */
+  serveGateAudit?: (event: ServeGateEvent) => void;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -30,8 +33,10 @@ export interface PiCodingWorkerSessionOptions {
   skillRoots: readonly string[];
   systemPrompt: string;
   sessionId?: string;
+  requestId?: string;
   agentDir: string;
   modelConfig: CodingModelConfig;
+  serveGateAudit?: (event: ServeGateEvent) => void;
 }
 
 export interface PiCodingWorkerSession {
@@ -59,8 +64,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
         sessionId: input.sessionId,
+        requestId: input.requestId,
         agentDir,
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
+        serveGateAudit: options.serveGateAudit,
       });
 
       // TaskStore remains the source of truth.  Restore its transcript into
@@ -129,6 +136,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   const loader = new DefaultResourceLoader({
     cwd: options.cwd,
     agentDir: options.agentDir,
+    // 只认显式 skillRoots（.agents/skills-serve）；关闭 cwd/.agents/skills 默认
+    // 发现，建造技能对运行 agent 不可见——法域的知识面由挂载声明决定。
+    noSkills: true,
     additionalSkillPaths: [...options.skillRoots],
     systemPrompt: options.systemPrompt,
     noExtensions: true,
@@ -147,6 +157,17 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // Native SDK tools are intentionally owned by this Worker driver.
     tools: ['read', 'bash', 'grep', 'find', 'ls'],
   });
+  // G1 工具门：bash 仅许 serve.sh，read 类拒敏感路径；放行与拦截都留痕。
+  const gate = createServeGate((event) => {
+    options.serveGateAudit?.({ ...event, requestId: options.requestId });
+  });
+  session.agent.beforeToolCall = (ctx) =>
+    Promise.resolve(gate({
+      name: ctx.toolCall.name,
+      arguments: (typeof ctx.args === 'object' && ctx.args !== null
+        ? ctx.args
+        : ctx.toolCall.arguments) as Record<string, unknown>,
+    }));
   const loaded = loader.getSkills().skills.map((skill) => ({
     name: skill.name,
     description: skill.description,
