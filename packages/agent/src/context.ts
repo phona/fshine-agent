@@ -12,7 +12,7 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
-import { ToolUserError } from './driver';
+import { ToolUserError, type TurnDriverResult } from './driver';
 import type {
   AgentReply,
   ChangeIntentRecord,
@@ -303,8 +303,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         ...((existing?.workerMessages ?? []) as DriverMessage[]),
         { role: 'user', content: args.request, timestamp: Date.now() } as unknown as DriverMessage,
       ];
+      let result: TurnDriverResult | undefined;
+      const delegationStart = Date.now();
+      const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
-        const result = await options.workerDriver.run({
+        result = await options.workerDriver.run({
           systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds),
           tools: [],
           messages,
@@ -314,7 +317,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           requestId: ctx.trusted.requestId,
           onStep: ctx.trusted.onStep ?? (() => {}),
           exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
-          deadline: Date.now() + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS),
+          deadline,
           signal,
         });
         if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
@@ -326,6 +329,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          const outcome = handled.text.includes('未开放写入权限') ? 'proposal_declined'
+            : handled.text.includes('未通过预检') ? 'proposal_precheck_failed'
+            : 'proposal_created';
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome }));
           return handled;
         }
         const final: SubagentTaskResult = { taskId, text: result.text };
@@ -334,15 +341,32 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           workerMessages: result.messages as unknown[],
           updatedAt: new Date().toISOString(),
         });
+        console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok' }));
         return final;
       } catch (error) {
+        const failureClass = signal?.aborted ? 'cancelled'
+          : Date.now() >= deadline ? 'timeout'
+          : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
+          : 'executor_error';
+        console.info(JSON.stringify({
+          event: 'delegation_span',
+          requestId: ctx.trusted.requestId,
+          taskId,
+          durationMs: Date.now() - delegationStart,
+          outcome: 'failed',
+          failureClass,
+        }));
         console.error(JSON.stringify({
           event: 'subagent_task_failed',
           taskId,
+          failureClass,
           errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
+        // 超时/失败也持久化本轮已产生的中间转录：taskId 续跑从断点继续，
+        // 而不是从零重付全部时间与浏览器占用（长任务业务稳定性的关键）。
         await options.tasks.upsert({
           ...running,
+          ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
           updatedAt: new Date().toISOString(),
         });
         throw new ToolUserError(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子任务执行失败，请稍后再试。');

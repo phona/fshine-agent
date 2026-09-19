@@ -28,6 +28,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
     async handleTurn(ctx: TrustedContext, userMessage: string): Promise<AgentReply> {
       // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
       // 而不是被模型理解」。未命中则按正常回合进入模型。
+      const turnStart = Date.now();
       if (typeof deps.platformTask.matchConfirmation === 'function') {
         const direct = await deps.platformTask.matchConfirmation(ctx, userMessage);
         if (direct) {
@@ -42,6 +43,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               { role: 'assistant', content: direct.text, timestamp: now + 1 } as unknown as AgentMessage,
             ],
           });
+          console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: direct.text.includes('已作废') ? 'confirm_cancelled' : 'confirm_executed' }));
           return direct;
         }
       }
@@ -79,8 +81,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       if (!result.text.trim()) {
         const reason = Date.now() >= deadline ? 'turn_timeout' : 'empty_reply';
         console.info(JSON.stringify({ event: 'fallback_reply', requestId: ctx.requestId, reason }));
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason }));
         return { text: Date.now() >= deadline ? FALLBACK_TIMEOUT : FALLBACK_FAILURE };
       }
+      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'ok' }));
       return { text: result.text };
     },
   };
