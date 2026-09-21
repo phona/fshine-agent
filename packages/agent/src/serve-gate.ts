@@ -2,10 +2,11 @@
  * G1：serve worker 原生工具门（fshine 侧，挂在 SDK Agent 的 beforeToolCall）。
  *
  * 三层门里本门最靠前，管 worker 的原生工具面：
- *   - bash 仅允许 serve.sh（首词规则，env 前缀天然被拒，法域声明无法剥离）
+ *   - bash 仅允许 bin/17dz（首词规则，env 前缀天然被拒，法域声明无法剥离）
  *   - read/grep/find/ls 拒绝敏感路径（凭据、会话态、浏览器登录态）
  *   - 其余放行；工具集本就不含写类工具
- * 平台侧 G2（serve.sh 网关）与 G3（withPlatform 守卫）负责执行器层面的裁决。
+ * 平台侧 G2（bin/17dz 网关：operations.json 清单 + query/prepare/commit 矩阵 +
+ * commit 令牌）与 G3（serve-policy/withPlatform 守卫）负责执行器层面的裁决。
  *
  * 已知残余：grep/find/ls 不带 path 参数时为仓库根全扫，可能遍历 .runtime/
  * 内容——同一登录态 worker 本就经执行器使用该会话，V0 接受并留痕。
@@ -39,13 +40,13 @@ const SENSITIVE_PATH = [
 ];
 const PATH_ARGS = ['file_path', 'path'];
 
-/** 首词规则：[bash|sh] [路径/]serve.sh；env 前缀（FOO=bar serve.sh）天然不匹配 */
-export function isServeShInvocation(command: string): boolean {
+/** 首词规则：[bash|sh] [路径/]bin/17dz；env 前缀（FOO=bar bin/17dz）天然不匹配 */
+export function isServeCliInvocation(command: string): boolean {
   const tokens = command.trim().split(/\s+/).filter(Boolean);
   if (tokens[0] === 'bash' || tokens[0] === 'sh') tokens.shift();
   const head = tokens[0];
   if (!head) return false;
-  return head.split('/').pop() === 'serve.sh';
+  return /(^|\/)bin\/17dz$/.test(head);
 }
 
 function sensitiveHit(value: string): string | null {
@@ -65,8 +66,8 @@ export function createServeGate(onEvent?: (event: ServeGateEvent) => void) {
     if (name === 'bash') {
       const command = String(args['command'] ?? '').trim();
       detail = command;
-      if (!isServeShInvocation(command)) {
-        verdict = { block: true, reason: '运行态 bash 仅允许调用 serve.sh（平台执行器网关）；知识检索用 read/grep 工具' };
+      if (!isServeCliInvocation(command)) {
+        verdict = { block: true, reason: '运行态 bash 仅允许调用 bin/17dz（平台执行器网关）；知识检索用 read/grep 工具' };
       }
     } else {
       for (const key of PATH_ARGS) {

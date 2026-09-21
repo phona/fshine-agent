@@ -7,7 +7,15 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
-import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
+import {
+  createContextTaskRunner,
+  createPiCodingTurnDriver,
+  createPiTurnDriver,
+  createTaxAgentRuntime,
+  ensureMockStatePath,
+  isCommitEnabled,
+  isPlatformMock,
+} from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
 import { renderBarChartPng } from './chart';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
@@ -20,6 +28,7 @@ async function main(): Promise<void> {
     env: process.env,
     yamlPath: process.env['AGENT_CONFIG_PATH'] || undefined,
   });
+  const platformRoot = config.contextProfiles['17dz']?.root;
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
   const dbPath = process.env['DB_PATH'] ?? path.join(repoRoot, 'data/agent.db');
   const store = createSqliteStore(dbPath);
@@ -29,12 +38,19 @@ async function main(): Promise<void> {
   }
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端
-  // 直调的 dry-run/commit 都受平台 serve.sh 网关与 withPlatform 守卫的矩阵裁决。
+  // 直调的 dry-run/commit 都受平台 bin/17dz 网关与 serve-policy 守卫的矩阵裁决。
   // 开发者的交互式 shell 不在本树内，不受影响。
   process.env.FSHINE_MODE = 'serve';
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效（pending 本就 10 分钟过期）。
   const gateSecret = newGateSecret();
   process.env.FSHINE_GATE_SECRET = gateSecret;
+
+  // 平台 mock 控制面（FSHINE_EXECUTOR=mock 时网关换 mock 应答器，gate 照真）：
+  // 兜底状态路径必须在 worker/commit 子进程产生前写入本进程 env（全树继承）。
+  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
+  if (isPlatformMock()) {
+    console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
+  }
 
   const driver = createPiTurnDriver({ env: process.env });
   const workerDriver = createPiCodingTurnDriver({
@@ -55,7 +71,6 @@ async function main(): Promise<void> {
       });
     },
   });
-  const platformRoot = config.contextProfiles['17dz']?.root;
   const platformTask = createContextTaskRunner({
     profiles: config.contextProfiles,
     tasks: store.platformTasks ?? {
@@ -69,8 +84,8 @@ async function main(): Promise<void> {
       changeIntents: store.changeIntents,
       prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
       commitRunner: createCommitRunner({ platformRoot, gateSecret }),
-      // submit 熔断开关：默认演练模式（确认流程走通、零写入）；启用 = .env 设 FSHINE_SUBMIT_ENABLED=1 并重启
-      submitEnabled: process.env.FSHINE_SUBMIT_ENABLED === '1',
+      // 落账总闸（派生规则）：mock 之下写假状态默认放开；真平台须显式 FSHINE_REAL_COMMIT=1。
+      commitEnabled: isCommitEnabled(),
     } : {}),
   });
 

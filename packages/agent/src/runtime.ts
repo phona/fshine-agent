@@ -40,7 +40,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             messages: [
               ...loaded,
               { role: 'user', content: userMessage, timestamp: now } as unknown as AgentMessage,
-              { role: 'assistant', content: direct.text, timestamp: now + 1 } as unknown as AgentMessage,
+              // 必须是原生形状(含 api/usage/stopReason):裸字符串消息会让下一模型回合内部报错
+              deps.driver.synthesizeAssistant
+                ? deps.driver.synthesizeAssistant(direct.text)
+                : ({ role: 'assistant', content: direct.text, timestamp: now + 1 } as unknown as AgentMessage),
             ],
           });
           console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: direct.text.includes('已作废') ? 'confirm_cancelled' : 'confirm_executed' }));

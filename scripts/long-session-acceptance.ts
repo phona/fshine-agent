@@ -65,7 +65,7 @@ async function main(): Promise<void> {
     changeIntents: store.changeIntents,
     prepareRunner: async () => ({ ok: false, output: 'long-session test 不落账' }),
     commitRunner: async () => ({ ok: false, output: 'long-session test 不落账' }),
-    submitEnabled: false,
+    commitEnabled: false,
   });
   const runtime = createTaxAgentRuntime({
     driver: createPiTurnDriver({ env: process.env }),

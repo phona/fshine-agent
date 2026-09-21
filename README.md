@@ -33,6 +33,20 @@ npm test
 npm start                         # 启动企微长连接服务
 AGENT_CONFIG_PATH=xxx npm start  # 覆盖配置文件路径
 npm run smoke:wecom              # 企微长连接冒烟测试
+npm run smoke:commit:mock        # mock 保护下两步写链路冒烟（非 mock 拒跑）
+```
+
+## mock 联调（平台侧 fake 保护）
+
+`.env` 设 `FSHINE_EXECUTOR=mock`（默认已设）后，幻账平台执行器被替换为 mock
+应答器：不开浏览器、不触网，gate 矩阵/commit 令牌/审计照真生效，落账写进
+mock 状态文件（默认 `<17dz-platform>/.runtime/mock-state.json`，删文件即重置）。
+此模式下落账全链路默认放开（写的是假状态）；切回真平台后落账默认拒绝，
+须显式 `FSHINE_REAL_COMMIT=1`。
+
+```bash
+npm run acceptance                 # mock 保护下全量验收（含 5.x 写链路、6.x 污染用例）
+FSHINE_EXECUTOR= npm run acceptance  # 临时切真平台只读回归（真环境变量优先于 .env）
 ```
 
 本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。

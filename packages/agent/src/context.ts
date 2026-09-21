@@ -45,7 +45,7 @@ export interface SubagentTaskResult {
   text: string;
 }
 
-/** 服务端预检（dry-run）注入点：默认实现由部署层提供（spawn serve.sh prepare）。 */
+/** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关 bin/17dz prepare）。 */
 export interface PrepareRequest {
   intentId: string;
   accountSet: string;
@@ -87,11 +87,12 @@ export interface ContextTaskRunnerOptions {
   /** 意图有效期，默认 10 分钟。 */
   intentTtlMs?: number;
   /**
-   * submit 是否允许（默认 false = 演练模式）：false 时确认码只走通流程并归档
-   * 为 confirmed_dry，绝不触发 --save——"走到 submit 前可以，submit 不允许"。
-   * 启用：FSHINE_SUBMIT_ENABLED=1 + 重启。
+   * 落账总闸（派生规则，由部署层经 isCommitEnabled() 计算，默认 false = 拒绝 commit）：
+   * mock 模式下写的是假状态，部署层应传 true 放开全链联调；
+   * 真平台下须显式 FSHINE_REAL_COMMIT=1 才传 true。false 时确认码得到
+   * 确定性拒绝（意图保持 pending 至过期/取消），绝不触发 --save。
    */
-  submitEnabled?: boolean;
+  commitEnabled?: boolean;
   /** 测试注入点。 */
   generateCode?: () => string;
   hashCode?: (code: string) => string;
@@ -234,9 +235,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     };
     await ci.create(record);
     const ttlMinutes = Math.round(intentTtlMs / 60_000);
-    const confirmLine = options.submitEnabled
+    const confirmLine = options.commitEnabled
       ? `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`
-      : `回复「确认 ${code}」完成确认流程（当前为演练模式——不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
+      : `回复「确认 ${code}」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
     return stop([
       '已收到录入提案并通过预检（dry-run）：',
       `- 账套：${proposal.accountSet}`,
@@ -266,7 +267,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const why: Record<ChangeIntentRecord['status'], string> = {
           pending: '仍在等待确认',
           committed: '已完成录入',
-          confirmed_dry: '已走完确认流程（演练模式，未写入数据）',
           expired: '已过期',
           cancelled: '已作废',
           superseded: '已被更新的提案取代',
@@ -280,9 +280,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const hash = hashCode(confirmM[1]!);
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
-          if (!options.submitEnabled) {
-            await ci.updateStatus(rec.intentId, 'confirmed_dry', { note: 'submit disabled (rehearsal mode)' });
-            return { text: '确认已收到。当前为演练模式，落账执行未启用——本次未写入任何数据，提案已归档。' };
+          if (!options.commitEnabled) {
+            return { text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。' };
           }
           const commitRunner = options.commitRunner;
           if (!commitRunner) {
@@ -306,7 +305,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const why: Record<ChangeIntentRecord['status'], string> = {
           pending: '仍在等待确认',
           committed: '已完成录入',
-          confirmed_dry: '已走完确认流程（演练模式，未写入数据）',
           expired: '已过期（超过有效期），请重新发起录入',
           cancelled: '已作废',
           superseded: '已被更新的提案取代，确认最新的提案即可',
@@ -457,7 +455,7 @@ function workerSystemPrompt(root: string, allowedAccountSetIds: readonly string[
     '先按 Pi 的 Skill 机制读取与任务相关的 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本。',
     '实时账务数据必须来自领域脚本结果，不得编造；不要读取源码后猜内部 ID，也不要自行重实现平台流程。',
     '本链路支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 技能产出变更提案）。写操作由服务端在用户确认后执行——你不得也不需要执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
-    '调用网关直接使用 `bash serve.sh …`，不要加 cd/env 等前缀。',
+    '调用网关直接使用 `bin/17dz <query|prepare> …`（平台统一网关，mode 决定裁决矩阵），不要加 cd/env 等前缀。',
     scope,
     '缺少信息时直接用自然语言说明需要用户补充什么；完成时直接返回可供主 Agent 使用的自然语言结果和必要证据。',
     '不要替主 Agent 决定如何回复用户，也不要输出状态 JSON 或控制协议。',

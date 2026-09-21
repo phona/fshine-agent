@@ -1,25 +1,28 @@
-import { describe, expect, it, vi } from 'vitest';
-import { createServeGate, isServeShInvocation, type ServeGateEvent } from './src/serve-gate';
+import { describe, expect, it } from 'vitest';
+import { createServeGate, isServeCliInvocation, type ServeGateEvent } from './src/serve-gate';
 
-describe('isServeShInvocation（首词规则）', () => {
-  it('放行 serve.sh 的合法形态', () => {
-    expect(isServeShInvocation('serve.sh query src/voucher/scripts/query-saved.js 幻晟 202609')).toBe(true);
-    expect(isServeShInvocation('./serve.sh query x')).toBe(true);
-    expect(isServeShInvocation('bash serve.sh query x')).toBe(true);
-    expect(isServeShInvocation('bash /home/fictional-user/fictional-projects/fictional-execution-layer/serve.sh query x')).toBe(true);
-    expect(isServeShInvocation('/usr/bin/env bash serve.sh query x')).toBe(false); // /usr/bin/env 不是 serve.sh
+describe('isServeCliInvocation（首词规则）', () => {
+  it('放行 bin/17dz 的合法形态', () => {
+    expect(isServeCliInvocation('bin/17dz query src/voucher/scripts/query-saved.js 幻晟 202609')).toBe(true);
+    expect(isServeCliInvocation('bin/17dz query query-saved.js 幻晟 202609')).toBe(true);
+    expect(isServeCliInvocation('./bin/17dz prepare src/voucher/scripts/fill.js c.json --batch')).toBe(true);
+    expect(isServeCliInvocation('bash bin/17dz query x')).toBe(true);
+    expect(isServeCliInvocation('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz query x')).toBe(true);
+    expect(isServeCliInvocation('/usr/bin/env bash bin/17dz query x')).toBe(false); // /usr/bin/env 前缀不放行
   });
 
   it('拒绝 env 前缀注入（法域声明不可剥离）', () => {
-    expect(isServeShInvocation('FSHINE_MODE=build serve.sh commit fill.js --save')).toBe(false);
-    expect(isServeShInvocation('env -u FSHINE_MODE serve.sh query x')).toBe(false);
+    expect(isServeCliInvocation('FSHINE_MODE=build bin/17dz commit src/voucher/scripts/fill.js --save')).toBe(false);
+    expect(isServeCliInvocation('env -u FSHINE_MODE bin/17dz query x')).toBe(false);
   });
 
-  it('拒绝非 serve.sh 命令', () => {
-    expect(isServeShInvocation('node src/voucher/scripts/fill.js --save x.json')).toBe(false);
-    expect(isServeShInvocation('bash -c "serve.sh query x"')).toBe(false);
-    expect(isServeShInvocation('cat /home/fictional-user/fictional-projects/fictional-orchestrator/.env')).toBe(false);
-    expect(isServeShInvocation('')).toBe(false);
+  it('拒绝非 bin/17dz 命令（含历史 serve.sh——平台已删除该入口）', () => {
+    expect(isServeCliInvocation('serve.sh query x')).toBe(false);
+    expect(isServeCliInvocation('17dz query x')).toBe(false); // 必须带 bin/ 前缀
+    expect(isServeCliInvocation('node src/voucher/scripts/fill.js --save x.json')).toBe(false);
+    expect(isServeCliInvocation('bash -c "bin/17dz query x"')).toBe(false);
+    expect(isServeCliInvocation('cat /home/fictional-user/fictional-projects/fictional-orchestrator/.env')).toBe(false);
+    expect(isServeCliInvocation('')).toBe(false);
   });
 });
 
@@ -40,8 +43,8 @@ describe('createServeGate（G1 工具门）', () => {
     expect(events[0]?.detail).toContain('node fill.js');
   });
 
-  it('serve.sh 调用放行并留痕', () => {
-    const cmd = `serve.sh query ${script} 幻晟 202609`;
+  it('bin/17dz 调用放行并留痕', () => {
+    const cmd = `bin/17dz query ${script} 幻晟 202609`;
     const { verdict, events } = gateCall('bash', { command: cmd });
     expect(verdict).toBeUndefined();
     expect(events[0]?.allowed).toBe(true);

@@ -90,8 +90,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   if (!model) throw new Error(`LLM 模型 ${modelId} 注册失败`);
 
   return {
-    async run(input: TurnDriverInput): Promise<TurnDriverResult> {
-      const names = new Map<string, string>();
+    async run(input: TurnDriverInput): Promise<TurnDriverResult> {      const names = new Map<string, string>();
       const providerToolNames = createProviderToolNameMap(input.tools);
       const tools = input.tools.map((tool) => toAgentTool(
         tool,
@@ -189,6 +188,9 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         ...kept,
       ];
     },
+    // 服务端确定性回复(确认码直执)合成原生形状 assistant 消息,防止毒化下一模型回合
+    synthesizeAssistant: (text: string): AgentMessage =>
+      toPiMessage({ role: 'assistant', content: text }, modelId),
   };
 }
 

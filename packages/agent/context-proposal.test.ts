@@ -97,7 +97,7 @@ describe('extractChangeProposal', () => {
 });
 
 describe('两步确认状态机', () => {
-  function setup(opts?: { capabilities?: string[]; prepareOk?: boolean; submitEnabled?: boolean }) {
+  function setup(opts?: { capabilities?: string[]; prepareOk?: boolean; commitEnabled?: boolean }) {
     const intents = fakeIntents();
     const prepareCalls: PrepareRequest[] = [];
     const commitCalls: CommitRequest[] = [];
@@ -119,7 +119,7 @@ describe('两步确认状态机', () => {
       generateCode: () => 'D3F2K9',
       intentTtlMs: 10 * 60_000,
       maxBatchCount: 50,
-      submitEnabled: opts?.submitEnabled ?? false,
+      commitEnabled: opts?.commitEnabled ?? false,
     });
     const testCtx = opts?.capabilities
       ? { trusted: { ...ctx.trusted, capabilities: opts.capabilities } }
@@ -144,21 +144,20 @@ describe('两步确认状态机', () => {
     expect(intents.rows.size).toBe(0);
   });
 
-  it('演练模式（默认）：预览声明不写入；确认 → confirmed_dry，commitRunner 零调用', async () => {
+  it('落账未启用（默认，如真平台未声明 FSHINE_REAL_COMMIT）：确认 → 确定性拒绝，commitRunner 零调用，意图保持 pending', async () => {
     const { runner, intents, commitCalls, testCtx } = setup();
     const r = await runner.run({ request: '录一张凭证' }, testCtx);
-    expect(r.text).toContain('演练模式');
-    expect(r.text).toContain('不会写入任何数据');
     expect(r.text).toContain('确认 D3F2K9');
+    expect(r.text).toContain('落账执行未启用');
     const reply = await runner.matchConfirmation!(testCtx.trusted, '确认 D3F2K9');
-    expect(reply?.text).toContain('演练模式');
+    expect(reply?.text).toContain('落账执行未启用');
     expect(reply?.text).toContain('未写入任何数据');
     expect(commitCalls).toHaveLength(0);
-    expect([...intents.rows.values()][0]!.status).toBe('confirmed_dry');
+    expect([...intents.rows.values()][0]!.status).toBe('pending');
   });
 
-  it('启用 submit：pending 创建 + 确认 → commit → committed', async () => {
-    const { runner, intents, prepareCalls, commitCalls, testCtx } = setup({ submitEnabled: true });
+  it('commitEnabled（mock 或显式 FSHINE_REAL_COMMIT=1）：pending 创建 + 确认 → commit → committed', async () => {
+    const { runner, intents, prepareCalls, commitCalls, testCtx } = setup({ commitEnabled: true });
     const r = await runner.run({ request: '录一张凭证' }, testCtx);
     expect(r.text).toContain('确认 D3F2K9');
     expect(r.text).toContain('幻州市幻晟财务代理有限公司');

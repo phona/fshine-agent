@@ -111,7 +111,7 @@ export interface ChangeIntentRecord {
   payload: unknown;
   summary: { count: number; debit: number; credit: number };
   confirmCodeHash: string;
-  status: 'pending' | 'committed' | 'confirmed_dry' | 'expired' | 'cancelled' | 'superseded' | 'failed';
+  status: 'pending' | 'committed' | 'expired' | 'cancelled' | 'superseded' | 'failed';
   createdAt: string;
   expiresAt: string;
   decidedAt?: string;

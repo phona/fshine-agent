@@ -157,7 +157,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // Native SDK tools are intentionally owned by this Worker driver.
     tools: ['read', 'bash', 'grep', 'find', 'ls'],
   });
-  // G1 工具门：bash 仅许 serve.sh，read 类拒敏感路径；放行与拦截都留痕。
+  // G1 工具门：bash 仅许 bin/17dz，read 类拒敏感路径；放行与拦截都留痕。
   const gate = createServeGate((event) => {
     options.serveGateAudit?.({ ...event, requestId: options.requestId });
   });

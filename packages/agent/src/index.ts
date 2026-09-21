@@ -28,6 +28,14 @@ export {
   type SkillRegistry,
 } from './skills';
 export { defaultStepText } from './step-text';
+export {
+  MOCK_EXECUTOR_ENV,
+  MOCK_STATE_ENV,
+  REAL_COMMIT_ENV,
+  ensureMockStatePath,
+  isCommitEnabled,
+  isPlatformMock,
+} from './platform-mock';
 export * from './session';
 export {
   createContextTaskRunner,

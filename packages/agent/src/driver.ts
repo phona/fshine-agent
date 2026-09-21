@@ -46,6 +46,13 @@ export interface TurnDriver {
   /** 上下文压缩(SDK compact)。超阈值时替换旧消息为摘要+保留最近尾巴;未超限原样返回。
    *  force:true 跳过阈值判断强制压缩(会话过期软着陆用);失败时实现方应原样返回,不阻塞回合。 */
   compact?(messages: DriverMessage[], opts?: { force?: boolean }): Promise<DriverMessage[]>;
+  /**
+   * 服务端确定性回复(确认码直执等)合成原生 assistant 消息:必须带完整内部形状
+   * (api/provider/model/usage/stopReason),否则该转录进入下一模型回合时
+   * pi-ai 结算会内部报错(stopReason='error' 被静默吞掉,2026-09-20 实测)。
+   * 未实现时 runtime 回退为简化形状(仅测试驱动可接受)。
+   */
+  synthesizeAssistant?(text: string): DriverMessage;
 }
 
 /** 工具失败的确定性终结错误:message 是面向用户的安全话术,直接作为最终回复(driver 不得再喂给模型) */
