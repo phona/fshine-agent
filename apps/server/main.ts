@@ -40,12 +40,12 @@ async function main(): Promise<void> {
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端
   // 直调的 dry-run/commit 都受平台 bin/17dz 网关与 serve-policy 守卫的矩阵裁决。
   // 开发者的交互式 shell 不在本树内，不受影响。
-  process.env.FSHINE_MODE = 'serve';
+  process.env.DZ_SERVE = '1'; // 平台 serve 法域（E4 命名；旧名由平台双读兼容）
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效（pending 本就 10 分钟过期）。
   const gateSecret = newGateSecret();
-  process.env.FSHINE_GATE_SECRET = gateSecret;
+  process.env.DZ_GATE_SECRET = gateSecret; // 平台令牌验签密钥（E4 命名）
 
-  // 平台 mock 控制面（FSHINE_EXECUTOR=mock 时网关换 mock 应答器，gate 照真）：
+  // 平台 mock 控制面（DZ_EXECUTOR=mock 时网关换 mock 应答器，gate 照真）：
   // 兜底状态路径必须在 worker/commit 子进程产生前写入本进程 env（全树继承）。
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
   if (isPlatformMock()) {

@@ -121,10 +121,14 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     if (workerTimeoutMs !== undefined && (!Number.isFinite(workerTimeoutMs) || workerTimeoutMs <= 0)) {
       throw new Error(`配置项 contextProfiles.${name}.workerTimeoutMs 必须大于 0`);
     }
+    const knowledgePaths = parseStringArray(item['knowledgePaths']);
+    const sensitivePaths = parseStringArray(item['sensitivePaths']);
     profiles[name] = {
       root,
       skillRoots,
       ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
+      ...(knowledgePaths ? { knowledgePaths } : {}),
+      ...(sensitivePaths ? { sensitivePaths } : {}),
     };
   }
   return profiles;
@@ -190,4 +194,12 @@ export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[]
     enabled: principal.enabled,
     capabilities: [...(principal.capabilities ?? ['read'])],
   }));
+}
+
+function parseStringArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new Error('路径规则必须是字符串数组');
+  }
+  return value as string[];
 }

@@ -36,6 +36,30 @@ export {
   isCommitEnabled,
   isPlatformMock,
 } from './platform-mock';
+export {
+  HARD_MAX_GATE_CALLS,
+  MAX_PERIODS_WITHOUT_JUSTIFICATION,
+  OP_COST_SECONDS,
+  PLAN_CONFIRM_THRESHOLD,
+  PLAN_EXAMPLE,
+  PlanBudget,
+  estimateWeight,
+  loadOpCatalog,
+  parsePlanCommand,
+  validatePlan,
+  type ExecutionPlan,
+  type OpCatalog,
+  type PlanEstimate,
+  type PlanVerdict,
+} from './execution-plan';
+export {
+  PLATFORM_OPERATIONS,
+  parseEnvelope,
+  parsePrepareOutcome,
+  parseVerifyCount,
+  type PlatformEnvelope,
+  type PrepareOutcome,
+} from './platform-contract';
 export * from './session';
 export {
   createContextTaskRunner,

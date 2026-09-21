@@ -32,6 +32,10 @@ export interface TurnDriverInput {
   requestId?: string;
   /** Parent cancellation propagated into a delegated agent turn. */
   signal?: AbortSignal;
+  /** 平台仓知识面规则（worker read/ls 白名单；缺省用 G1 内置）。 */
+  knowledgePaths?: readonly string[];
+  /** 平台仓敏感路径规则（worker 禁读；缺省用 G1 内置）。 */
+  sensitivePaths?: readonly string[];
 }
 
 export interface TurnDriverResult {
@@ -39,6 +43,8 @@ export interface TurnDriverResult {
   text: string;
   /** 更新后的完整转录(含本回合全部消息),由 runtime 持久化 */
   messages: DriverMessage[];
+  /** 执行面回执（worker 驱动专有）：本轮网关调用数/预算，供上层委派方感知重量 */
+  footprint?: string;
 }
 
 export interface TurnDriver {

@@ -360,6 +360,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
           deadline,
           signal,
+          ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
+          ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
         });
         if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
         const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
@@ -376,7 +378,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome }));
           return handled;
         }
-        const final: SubagentTaskResult = { taskId, text: result.text };
+        const final: SubagentTaskResult = {
+          taskId,
+          // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
+          // 必须拼在 extractChangeProposal 之后——尾部注脚会破坏"整段纯 JSON"提案候选。
+          text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
+        };
         await options.tasks.upsert({
           ...running,
           workerMessages: result.messages as unknown[],
@@ -431,13 +438,21 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
     if (!resolved || !isInside(root, resolved)) throw new ToolUserError('17dz skillRoots 未通过路径安全校验。');
     skillRoots.push(resolved);
   }
-  return { root, skillRoots, workerTimeoutMs: configured.workerTimeoutMs };
+  return {
+    root,
+    skillRoots,
+    workerTimeoutMs: configured.workerTimeoutMs,
+    ...(configured.knowledgePaths ? { knowledgePaths: configured.knowledgePaths } : {}),
+    ...(configured.sensitivePaths ? { sensitivePaths: configured.sensitivePaths } : {}),
+  };
 }
 
 interface ResolvedContextProfile {
   root: string;
   skillRoots: string[];
   workerTimeoutMs?: number;
+  knowledgePaths?: string[];
+  sensitivePaths?: string[];
 }
 
 function isInside(root: string, candidate: string): boolean {
@@ -456,6 +471,9 @@ function workerSystemPrompt(root: string, allowedAccountSetIds: readonly string[
     '实时账务数据必须来自领域脚本结果，不得编造；不要读取源码后猜内部 ID，也不要自行重实现平台流程。',
     '本链路支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 技能产出变更提案）。写操作由服务端在用户确认后执行——你不得也不需要执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
     '调用网关直接使用 `bin/17dz <query|prepare> …`（平台统一网关，mode 决定裁决矩阵），不要加 cd/env 等前缀。',
+    '执行前必须先提交执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","account_sets":["账套"],"periods":["202607"],"read":["query-saved"],"max_gate_calls":6,"completion":["list_reported"]}（read 填脚本短名）。审批结果以拦截消息返回，三种都是正常流程：PLAN APPROVED 按预算执行；PLAN DECLINED 按原因修正后原样重提，不要换其他命令试探；PLAN NEEDS_USER_CONFIRM 表示方案重量超过自动审批阈值——立即结束回合向用户转达预估调用数/耗时并请求确认，用户同意后重报同一方案并附 "user_confirmed": true，不要擅自缩小或放弃，也不要未经确认继续调用。',
+    '方案即预算：只调用 authority.read 里申报的脚本，预算用尽就收尾汇总已有信息，不要反复试探；确需扩大执行面就重报方案并说明理由。',
+    '知识只经 read 读取固定知识面：技能 SKILL.md、src/<域>/MECHANISMS.md、*.schema.json；实现源码不可读也不需要读（工具面无 grep/find）。',
     scope,
     '缺少信息时直接用自然语言说明需要用户补充什么；完成时直接返回可供主 Agent 使用的自然语言结果和必要证据。',
     '不要替主 Agent 决定如何回复用户，也不要输出状态 JSON 或控制协议。',

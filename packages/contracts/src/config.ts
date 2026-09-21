@@ -24,6 +24,10 @@ export interface ContextProfileConfig {
   skillRoots: string[];
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
+  /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */
+  knowledgePaths?: string[];
+  /** 平台仓敏感路径（worker 禁读）；缺省 = .env/.runtime//auth.json/.browser-profile// */
+  sensitivePaths?: string[];
 }
 
 export interface AppConfig {

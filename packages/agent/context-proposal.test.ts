@@ -210,6 +210,38 @@ describe('两步确认状态机', () => {
     expect(await runner.matchConfirmation!(testCtx.trusted, '确认 ZZZ999')).toBeNull();
   });
 
+  it('执行面回执：普通结果尾部拼接系统注脚', async () => {
+    const runner = createContextTaskRunner({
+      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      tasks: noopTasks,
+      workerDriver: {
+        run: async () => ({ text: '幻晟本期凭证 0 张。', messages: [], footprint: '3/6 次 bin/17dz 调用' }),
+      },
+    });
+    const r = await runner.run({ request: '查凭证' }, ctx);
+    expect(r.text.startsWith('幻晟本期凭证 0 张。')).toBe(true);
+    expect(r.text).toContain('〔本轮执行面：3/6 次 bin/17dz 调用〕');
+  });
+
+  it('提案路径不拼回执（注脚不得污染确认流程文本）', async () => {
+    const intents = fakeIntents();
+    const runner = createContextTaskRunner({
+      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      tasks: noopTasks,
+      workerDriver: {
+        run: async () => ({ text: proposalText, messages: [], footprint: '4/6 次 bin/17dz 调用' }),
+      },
+      changeIntents: intents.repo,
+      prepareRunner: async () => ({ ok: true, output: 'dry-run' }),
+      commitRunner: async () => ({ ok: true, output: 'ok' }),
+      generateCode: () => 'D3F2K9',
+      commitEnabled: true,
+    });
+    const r = await runner.run({ request: '录一张凭证' }, ctx);
+    expect(r.text).toContain('确认 D3F2K9');
+    expect(r.text).not.toContain('本轮执行面');
+  });
+
   it('取消码用于已终结提案 → 确定性答复', async () => {
     const { runner, intents, testCtx } = setup();
     await runner.run({ request: '录一张凭证' }, testCtx);

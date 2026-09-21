@@ -10,7 +10,7 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import type { CommitRequest, CommitResult, PrepareRequest, PrepareResult } from '@fshine/agent';
+import { parsePrepareOutcome, parseVerifyCount, PLATFORM_OPERATIONS, type CommitRequest, type CommitResult, type PrepareRequest, type PrepareResult } from '@fshine/agent';
 
 const execFileAsync = promisify(execFile);
 const TOKEN_TTL_MS = 10 * 60_000;
@@ -53,7 +53,7 @@ async function runGate(root: string, args: string[], extraEnv: Record<string, st
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
-      // bin/17dz 的 query|prepare|commit 首词即网关兼容壳（gate 语义）。
+      // bin/17dz 的 query|prepare|commit 首词即网关兼容壳（gate 语义）；脚本用注册操作名（E1）。
       [path.join(root, 'bin', '17dz'), ...args],
       { cwd: root, env: { ...process.env, ...extraEnv }, maxBuffer: 4 * 1024 * 1024, timeout: 12 * 60_000 },
     );
@@ -65,16 +65,16 @@ async function runGate(root: string, args: string[], extraEnv: Record<string, st
 }
 
 function parseCount(stdout: string): number | null {
-  const m = stdout.match(/^COUNT (\d+)$/m);
-  return m ? Number(m[1]) : null;
+  return parseVerifyCount(stdout);
 }
 
 export function createPrepareRunner(opts: CommitRunnerOptions) {
   return async (req: PrepareRequest): Promise<PrepareResult> => {
     const contractFile = stageContract(opts.platformRoot, req.intentId, req.contracts);
-    // fill.js 默认 dry-run（页面真实预填但不保存）——预检即真实演练
-    const r = await runGate(opts.platformRoot, ['prepare', 'src/voucher/scripts/fill.js', contractFile, '--batch']);
-    const ok = r.code === 0 && /dry-run/.test(r.stdout);
+    // prepare 默认 dry-run（页面真实预填但不保存）——预检即真实演练
+    const r = await runGate(opts.platformRoot, ['prepare', PLATFORM_OPERATIONS.voucherPrepare, contractFile, '--batch']);
+    const outcome = parsePrepareOutcome(r.stdout);
+    const ok = outcome.ok && outcome.dryRun;
     return {
       ok,
       output: `${r.stdout}\n${r.stderr}`.trim().slice(-2000),
@@ -86,23 +86,24 @@ export function createPrepareRunner(opts: CommitRunnerOptions) {
 export function createCommitRunner(opts: CommitRunnerOptions) {
   return async (req: CommitRequest): Promise<CommitResult> => {
     const contractFile = stageContract(opts.platformRoot, req.intentId, req.contracts);
-    const scriptRel = 'src/voucher/scripts/fill.js';
+    // E1：令牌与调用统一绑定注册操作名（平台双绑定过渡期同时兼容旧路径绑定）
+    const operation = PLATFORM_OPERATIONS.voucherCommit;
     // 读回基线必须在 commit 之前采集——否则 after-before 恒为 0，校验永假。
-    const before = await runGate(opts.platformRoot, ['query', 'src/voucher/scripts/verify-saved.js', req.accountSet, req.period]);
+    const before = await runGate(opts.platformRoot, ['query', PLATFORM_OPERATIONS.voucherVerifySaved, req.accountSet, req.period]);
     const token = signCommitToken(
-      { intentId: req.intentId, script: scriptRel, expiresAt: new Date(Date.now() + TOKEN_TTL_MS).toISOString() },
+      { intentId: req.intentId, script: operation, expiresAt: new Date(Date.now() + TOKEN_TTL_MS).toISOString() },
       opts.gateSecret,
     );
     const r = await runGate(
       opts.platformRoot,
-      ['commit', scriptRel, contractFile, '--batch', '--save'],
-      { FSHINE_COMMIT_TOKEN: token, FSHINE_GATE_SECRET: opts.gateSecret },
+      ['commit', operation, contractFile, '--batch', '--save'],
+      { DZ_COMMIT_TOKEN: token, DZ_GATE_SECRET: opts.gateSecret },
     );
     if (r.code !== 0) {
       return { ok: false, output: `${r.stdout}\n${r.stderr}`.trim().slice(-2000), error: `落账命令失败（exit ${r.code}）` };
     }
     // 读回校验：落账前后账套期内凭证 COUNT 差 ≥ 提案张数
-    const after = await runGate(opts.platformRoot, ['query', 'src/voucher/scripts/verify-saved.js', req.accountSet, req.period]);
+    const after = await runGate(opts.platformRoot, ['query', PLATFORM_OPERATIONS.voucherVerifySaved, req.accountSet, req.period]);
     const beforeCount = before.code === 0 ? parseCount(before.stdout) : null;
     const afterCount = after.code === 0 ? parseCount(after.stdout) : null;
     const verified = afterCount !== null && (beforeCount === null || afterCount - beforeCount >= req.contracts.length);

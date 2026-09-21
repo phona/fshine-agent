@@ -56,7 +56,7 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
     });
     expect(worker.session.sessionManager.getCwd()).toBe(root);
-    expect(worker.session.getActiveToolNames()).toEqual(['read', 'bash', 'grep', 'find', 'ls']);
+    expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash']);
     expect(worker.skills.map((skill) => skill.name)).toContain('17dz-platform');
     expect(worker.session.systemPrompt).toContain('worker-system-prompt');
     worker.session.agent.state.messages = [{ role: 'user', content: '恢复任务', timestamp: Date.now() } as never];

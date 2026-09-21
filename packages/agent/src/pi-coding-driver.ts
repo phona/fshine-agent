@@ -21,6 +21,10 @@ import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 
 export interface PiCodingTurnDriverOptions {
+  /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
+  knowledgePaths?: readonly string[];
+  sensitivePaths?: readonly string[];
+
   env: Record<string, string | undefined>;
   /** Keep SDK auth/session files outside the mounted platform workspace. */
   agentDir?: string;
@@ -29,6 +33,9 @@ export interface PiCodingTurnDriverOptions {
 }
 
 export interface PiCodingWorkerSessionOptions {
+  knowledgePaths?: readonly string[];
+  sensitivePaths?: readonly string[];
+
   cwd: string;
   skillRoots: readonly string[];
   systemPrompt: string;
@@ -59,6 +66,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       if (!input.cwd) throw new ToolUserError('Context Worker 缺少受信工作目录。');
       const { runtime, model, thinkingLevel } = await (modelPromise ??= createCodingModel(options));
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
+      // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
+      let gateCalls = 0;
+      let budgetLimit: number | null = null;
       const { session } = await createPiCodingWorkerSession({
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
@@ -67,8 +77,16 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         requestId: input.requestId,
         agentDir,
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
-        serveGateAudit: options.serveGateAudit,
+        serveGateAudit: (event) => {
+          if (event.tool === 'bash' && event.allowed) gateCalls += 1;
+          if (event.budget) budgetLimit = event.budget.limit;
+          options.serveGateAudit?.({ ...event, requestId: input.requestId });
+        },
+        knowledgePaths: input.knowledgePaths,
+        sensitivePaths: input.sensitivePaths,
       });
+      const footprint = (): string =>
+        budgetLimit != null ? `${gateCalls}/${budgetLimit} 次 bin/17dz 调用` : `${gateCalls} 次 bin/17dz 调用`;
 
       // TaskStore remains the source of truth.  Restore its transcript into
       // the SDK Agent rather than persisting a second session file in 17dz.
@@ -106,18 +124,19 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // duplicating it through AgentSession.prompt().
         await session.agent.continue();
         if (timedOut || cancelled || session.agent.state.errorMessage) {
-          return { text: '', messages: session.agent.state.messages };
+          return { text: '', messages: session.agent.state.messages, footprint: footprint() };
         }
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
+          footprint: footprint(),
         };
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_coding_worker_error',
           errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
-        return { text: '', messages: session.agent.state.messages };
+        return { text: '', messages: session.agent.state.messages, footprint: footprint() };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -155,11 +174,18 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     resourceLoader: loader,
     sessionManager,
     // Native SDK tools are intentionally owned by this Worker driver.
-    tools: ['read', 'bash', 'grep', 'find', 'ls'],
+    // 无 grep/find：代码扫描失去工具入口（知识面经 read 白名单可达）。
+    tools: ['read', 'ls', 'bash'],
   });
-  // G1 工具门：bash 仅许 bin/17dz，read 类拒敏感路径；放行与拦截都留痕。
-  const gate = createServeGate((event) => {
-    options.serveGateAudit?.({ ...event, requestId: options.requestId });
+  // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
+  // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
+  const gate = createServeGate({
+    onEvent: (event) => {
+      options.serveGateAudit?.({ ...event, requestId: options.requestId });
+    },
+    platformRoot: options.cwd,
+    knowledgePaths: options.knowledgePaths,
+    sensitivePaths: options.sensitivePaths,
   });
   session.agent.beforeToolCall = (ctx) =>
     Promise.resolve(gate({
