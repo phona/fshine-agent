@@ -4,14 +4,19 @@
  * 四层治理里本门最靠前，管 worker 的原生工具面与执行面预算：
  *   - 首条 bash 必须是 `bin/17dz plan` + YAML 执行方案；G1 拦截定价（不下发平台），
  *     审批结果经拦截消息回给模型（协议约定：这是正常流程，不是错误）
- *   - bash 仅允许 bin/17dz（首词规则，env 前缀天然被拒，法域声明无法剥离）
+ *   - bash 仅允许 bin/17dz（首词规则 + shell 元字符白名单：env 前缀、命令拼接、
+ *     命令替换、重定向均被拒；法域声明无法剥离）
  *   - 方案内记账：每次 gate 调用消耗预算，超限剪断；未申报脚本拒绝
  *   - read/ls 限知识面（*.md、*.schema.json、.agents/、docs/）——实现源码不可读；
- *     worker 工具面已无 grep/find，代码扫描失去入口
+ *     worker 工具面已无 grep/find，代码扫描失去入口。路径经 workspaceRelPath
+ *     规范化后判定（platformRoot 即 worker cwd）：../ 穿越、绝对路径越界、
+ *     符号链接逃逸一律拒，子串规则只作兜底
  * 平台侧 G2（bin/17dz 网关）与 G3（serve-policy/withPlatform 守卫）负责执行器裁决。
  *
  * 已知残余：ls 不带 path 时仅见根目录名，信息量低，放行留痕。
  */
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 import {
   HARD_MAX_GATE_CALLS,
   PLAN_CONFIRM_THRESHOLD,
@@ -64,6 +69,41 @@ function matchesAny(value: string, rules: readonly string[]): boolean {
   return rules.some((rule) => value.includes(rule) || value.endsWith(rule));
 }
 
+/** 知识面匹配：子串规则之外，目录本身恰是知识根（docs ↔ 规则 docs/）也放行 */
+function knowledgeMatch(value: string, rules: readonly string[]): boolean {
+  return matchesAny(value, rules) || rules.some((rule) => rule.endsWith('/') && rule.slice(0, -1) === value);
+}
+
+/**
+ * 把 read/ls 的参数解析为工作区内相对路径；越界返回 null。
+ * 词法层挡 ../ 与绝对路径穿越；再沿最近存在祖先做 realpath，挡符号链接逃逸
+ * （如 docs -> /etc 时 docs/../ 词法上仍在内、内核解析却出界）。
+ */
+export function workspaceRelPath(root: string, value: string): string | null {
+  if (value.includes('\0')) return null;
+  const abs = path.resolve(root, value);
+  const rel = path.relative(root, abs);
+  if (rel === '..' || rel.startsWith('..' + path.sep) || path.isAbsolute(rel)) return null;
+  let probe = abs;
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      const real = realpathSync(probe);
+      const full = suffix.length ? path.join(real, ...suffix) : real;
+      const realRel = path.relative(root, full);
+      if (realRel === '..' || realRel.startsWith('..' + path.sep) || path.isAbsolute(realRel)) return null;
+      return realRel;
+    } catch (e) {
+      // 目标不存在：符号链接无从指向真实文件，词法检查已够；其余错误（权限/循环）拒绝
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') return null;
+      const parent = path.dirname(probe);
+      if (parent === probe) return null;
+      suffix.unshift(path.basename(probe));
+      probe = parent;
+    }
+  }
+}
+
 /** 首词规则：[bash|sh] [路径/]bin/17dz；env 前缀（FOO=bar bin/17dz）天然不匹配 */
 export function isServeCliInvocation(command: string): boolean {
   const tokens = command.trim().split(/\s+/).filter(Boolean);
@@ -71,6 +111,14 @@ export function isServeCliInvocation(command: string): boolean {
   const head = tokens[0];
   if (!head) return false;
   return /(^|\/)bin\/17dz$/.test(head);
+}
+
+// 命令拼接/替换/重定向/管道：worker bash 经 shell 执行，放行这些字符等于放行任意命令
+const SHELL_METACHAR_RE = /[;&|<>`$()\n\r]/;
+
+/** 命令含 shell 元字符（; & | < > ` $ ( ) 或换行）→ true。bin/17dz 的合法参数（账套名、期间、脚本路径、flag）不含这些字符 */
+export function hasShellMetachars(command: string): boolean {
+  return SHELL_METACHAR_RE.test(command);
 }
 
 /** 从网关调用中提取脚本参数（bin/17dz <mode> <script> …），非查询型返回 null */
@@ -150,6 +198,8 @@ export function createServeGate(options: ServeGateOptions = {}) {
         verdict = { block: true, reason: handlePlanSubmission(planCommand) };
       } else if (!isServeCliInvocation(command)) {
         verdict = { block: true, reason: '运行态 bash 仅允许调用 bin/17dz（平台执行器网关）；知识检索用 read 工具' };
+      } else if (hasShellMetachars(command)) {
+        verdict = { block: true, reason: '命令含 shell 元字符（; & | < > ` $ ( ) 或换行），禁止命令拼接/替换/重定向。多次查询请分多次 bin/17dz 调用' };
       } else if (!budget) {
         verdict = awaitingConfirm
           ? { block: true, reason: '方案待用户确认（PLAN NEEDS_USER_CONFIRM）：先结束回合向用户转达执行重量并请求确认；用户同意后重报方案附 "user_confirmed": true' }
@@ -173,17 +223,27 @@ export function createServeGate(options: ServeGateOptions = {}) {
       }
     } else {
       for (const key of PATH_ARGS) {
-        const value = args[key];
-        if (typeof value !== 'string') continue;
-        detail = value;
+        const raw = args[key];
+        if (typeof raw !== 'string') continue;
+        detail = raw;
+        // 解析后判定：穿越/越界/符号链接逃逸在此被拒；platformRoot 缺省时退回子串兜底
+        let value = raw;
+        if (platformRoot) {
+          const rel = workspaceRelPath(platformRoot, raw);
+          if (rel === null) {
+            verdict = { block: true, reason: `运行态禁止读取工作区外路径（${raw}）` };
+            break;
+          }
+          value = rel;
+        }
         if (matchesAny(value, sensitivePaths)) {
-          verdict = { block: true, reason: `运行态禁止读取敏感路径（${value}）` };
+          verdict = { block: true, reason: `运行态禁止读取敏感路径（${raw}）` };
           break;
         }
         if (name === 'read' || (name === 'ls' && key === 'path')) {
           // read 全面限知识面；ls 仅在有 path 时约束（无 path 仅见根目录名）
-          if (!matchesAny(value, knowledgePaths)) {
-            verdict = knowledgeBlock(value);
+          if (!knowledgeMatch(value, knowledgePaths)) {
+            verdict = knowledgeBlock(raw);
             break;
           }
         }

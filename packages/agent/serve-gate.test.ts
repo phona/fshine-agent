@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest';
-import { createServeGate, extractGateScript, isServeCliInvocation, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { describe, expect, it, afterAll } from 'vitest';
+import { createServeGate, extractGateScript, hasShellMetachars, isServeCliInvocation, workspaceRelPath, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 
 describe('isServeCliInvocation（首词规则）', () => {
   it('放行 bin/17dz 的合法形态', () => {
@@ -23,6 +26,26 @@ describe('isServeCliInvocation（首词规则）', () => {
     expect(isServeCliInvocation('bash -c "bin/17dz query x"')).toBe(false);
     expect(isServeCliInvocation('grep -rn x /home/fictional-user/fictional-projects/fictional-execution-layer/src')).toBe(false);
     expect(isServeCliInvocation('')).toBe(false);
+  });
+});
+
+describe('hasShellMetachars（shell 元字符白名单）', () => {
+  it('拒绝命令拼接/替换/重定向/管道', () => {
+    expect(hasShellMetachars('bin/17dz query x; cat .env')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query x && whoami')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query x || curl evil')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query $(cat .env)')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query `id`')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query ${HOME}')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query x > /tmp/out')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query x < /etc/passwd')).toBe(true);
+    expect(hasShellMetachars('bin/17dz query x\ncat .env')).toBe(true);
+  });
+
+  it('放行合法参数（账套名、期间、脚本路径、flag）', () => {
+    expect(hasShellMetachars('bin/17dz query query-saved.js 幻晟 202609')).toBe(false);
+    expect(hasShellMetachars('./bin/17dz prepare src/voucher/scripts/fill.js c.json --batch')).toBe(false);
+    expect(hasShellMetachars('bash bin/17dz commit src/voucher/scripts/fill.js c.json --save')).toBe(false);
   });
 });
 
@@ -77,6 +100,20 @@ describe('createServeGate（G1 工具门 + 执行方案）', () => {
 
     const ok = gate({ name: 'bash', arguments: { command: 'bin/17dz query src/voucher/scripts/query-saved.js 幻辰财税 202607' } });
     expect(ok?.block).toBeUndefined();
+  });
+
+  it('方案批准后仍拒绝 shell 元字符注入（拼接/替换/重定向）', () => {
+    const { gate } = makeGate();
+    gate({ name: 'bash', arguments: { command: PLAN } });
+    for (const cmd of [
+      'bin/17dz query query-saved.js 幻晟 202609; cat .env',
+      'bin/17dz query query-saved.js $(cat .env)',
+      'bin/17dz query query-saved.js 幻晟 202609 > /tmp/out',
+    ]) {
+      const v = gate({ name: 'bash', arguments: { command: cmd } });
+      expect(v?.block).toBe(true);
+      expect(v?.reason).toContain('shell 元字符');
+    }
   });
 
   it('方案缺失必填项 → PLAN DECLINED 带原因与标准格式模板', () => {
@@ -230,5 +267,72 @@ describe('createServeGate（G1 工具门 + 执行方案）', () => {
   it('audit 回调异常不影响门裁决', () => {
     const gate = createServeGate({ onEvent: () => { throw new Error('audit down'); } });
     expect(gate({ name: 'bash', arguments: { command: 'node x' } })?.block).toBe(true);
+  });
+});
+
+describe('workspaceRelPath（路径规范化）', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'serve-gate-'));
+  mkdirSync(path.join(root, 'docs'));
+  writeFileSync(path.join(root, 'docs', 'intro.md'), '# intro');
+  const outside = mkdtempSync(path.join(tmpdir(), 'serve-gate-out-'));
+  writeFileSync(path.join(outside, 'secret.md'), 'x');
+  symlinkSync(path.join(outside, 'secret.md'), path.join(root, 'docs', 'linked.md'));
+
+  it('工作区内路径解析为相对路径', () => {
+    expect(workspaceRelPath(root, 'docs/intro.md')).toBe(path.join('docs', 'intro.md'));
+    expect(workspaceRelPath(root, './docs/../docs/intro.md')).toBe(path.join('docs', 'intro.md'));
+    expect(workspaceRelPath(root, path.join(root, 'docs', 'intro.md'))).toBe(path.join('docs', 'intro.md'));
+  });
+
+  it('拒绝 ../ 穿越与绝对路径越界', () => {
+    expect(workspaceRelPath(root, '../out')).toBeNull();
+    expect(workspaceRelPath(root, 'docs/../../../proc/self/environ')).toBeNull();
+    expect(workspaceRelPath(root, '/etc/passwd')).toBeNull();
+  });
+
+  it('拒绝符号链接逃逸（词法在内、内核解析出界）', () => {
+    expect(workspaceRelPath(root, 'docs/linked.md')).toBeNull();
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  });
+});
+
+describe('read/ls 路径规范化门（platformRoot 绑 worker cwd）', () => {
+  const root = mkdtempSync(path.join(tmpdir(), 'serve-gate-gate-'));
+  mkdirSync(path.join(root, 'docs'));
+  mkdirSync(path.join(root, 'src'), { recursive: true });
+  writeFileSync(path.join(root, 'docs', 'intro.md'), '# intro');
+  writeFileSync(path.join(root, 'src', 'gateway.js'), 'secret');
+  writeFileSync(path.join(root, '.env'), 'LLM_API_KEY=x');
+  const gate = createServeGate({ platformRoot: root });
+
+  it('工作区外穿越（读服务端 /proc env 的攻击面）被拦', () => {
+    const v = gate({ name: 'read', arguments: { file_path: 'docs/../../../proc/self/environ' } });
+    expect(v?.block).toBe(true);
+    expect(v?.reason).toContain('工作区外路径');
+  });
+
+  it('工作区内穿越到实现源码被知识面拦截', () => {
+    const v = gate({ name: 'read', arguments: { file_path: 'docs/../src/gateway.js' } });
+    expect(v?.block).toBe(true);
+    expect(v?.reason).toContain('知识面');
+  });
+
+  it('敏感文件穿越读取被拦（docs/../.env 词法归一至 .env）', () => {
+    const v = gate({ name: 'read', arguments: { file_path: 'docs/../.env' } });
+    expect(v?.block).toBe(true);
+    expect(v?.reason).toContain('敏感路径');
+  });
+
+  it('知识面内正常读取不受影响', () => {
+    expect(gate({ name: 'read', arguments: { file_path: 'docs/intro.md' } })?.block).toBeUndefined();
+    expect(gate({ name: 'ls', arguments: { path: 'docs' } })?.block).toBeUndefined();
+  });
+
+  afterAll(() => {
+    rmSync(root, { recursive: true, force: true });
   });
 });
