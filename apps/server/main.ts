@@ -42,8 +42,10 @@ async function main(): Promise<void> {
   // 开发者的交互式 shell 不在本树内，不受影响。
   process.env.DZ_SERVE = '1'; // 平台 serve 法域（E4 命名；旧名由平台双读兼容）
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效（pending 本就 10 分钟过期）。
+  // 注意：DZ_GATE_SECRET 故意不进 process.env——worker 与服务端同进程，
+  // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。密钥只经 commit.ts
+  // 单次 spawn 的 extraEnv 传给落账子进程（worker 路径本就不需要它）。
   const gateSecret = newGateSecret();
-  process.env.DZ_GATE_SECRET = gateSecret; // 平台令牌验签密钥（E4 命名）
 
   // 平台 mock 控制面（DZ_EXECUTOR=mock 时网关换 mock 应答器，gate 照真）：
   // 兜底状态路径必须在 worker/commit 子进程产生前写入本进程 env（全树继承）。
