@@ -14,6 +14,8 @@ export type TaskIntent =
     periods?: Array<{ value: string; quote: string }>;
     searchQuery?: string;
     question?: string;
+    /** Continue an existing 17dz subagent task (host re-validates ownership). */
+    continueTaskId?: string;
   };
 
 export const ROUTE_CURRENT_TURN_TOOL_NAME = 'route_current_turn';
@@ -38,6 +40,7 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
       customerQueries: { type: 'array', items: { type: 'string' } },
       periods: { type: 'array', items: { type: 'object', properties: { value: { type: 'string' }, quote: { type: 'string' } }, required: ['value', 'quote'], additionalProperties: false } },
       searchQuery: { type: 'string' },
+      continueTaskId: { type: 'string', description: '仅在用户补充了子 Agent 索要的信息、需要继续同一个 17dz 子任务时使用' },
     },
     required: ['kind'],
     additionalProperties: false,
@@ -47,6 +50,23 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
 export interface TaskIntentResult {
   intent: TaskIntent;
   error?: string;
+}
+
+/**
+ * Host-side entry for a route_current_turn tool call: parse the structured declaration,
+ * then validate that every scope claim is backed by the current user message. Fails closed
+ * to a clarification instead of trusting the model.
+ */
+export function applyRouteDeclaration(
+  args: Record<string, unknown>,
+  currentUserMessage: string,
+  history: DriverMessage[],
+): TaskIntent {
+  const parsed = parseTaskIntent(JSON.stringify(args));
+  if (!parsed) {
+    return { kind: 'clarify', question: '我没能理解本轮要做什么，请告诉我要查询的账套和期间。' };
+  }
+  return validateTaskIntentEvidence(parsed, currentUserMessage, history);
 }
 
 export function validatePlanAgainstTaskIntent(
@@ -105,6 +125,7 @@ export function parseTaskIntent(value: string): TaskIntent | null {
   if (item.customerQueries !== undefined && (!Array.isArray(item.customerQueries) || item.customerQueries.some((value) => typeof value !== 'string'))) return null;
   if (item.periods !== undefined && (!Array.isArray(item.periods) || item.periods.some((value) => !value || typeof value !== 'object' || typeof (value as { value?: unknown }).value !== 'string' || typeof (value as { quote?: unknown }).quote !== 'string'))) return null;
   if (item.searchQuery !== undefined && typeof item.searchQuery !== 'string') return null;
+  if (item.continueTaskId !== undefined && (typeof item.continueTaskId !== 'string' || !item.continueTaskId.trim())) return null;
   if (item.question !== undefined && typeof item.question !== 'string') return null;
   return {
     kind: 'platform_query', taskType,
@@ -114,6 +135,7 @@ export function parseTaskIntent(value: string): TaskIntent | null {
     ...(Array.isArray(item.customerQueries) ? { customerQueries: item.customerQueries as string[] } : {}),
     ...(Array.isArray(item.periods) ? { periods: item.periods as Array<{ value: string; quote: string }> } : {}),
     ...(typeof item.searchQuery === 'string' ? { searchQuery: item.searchQuery } : {}),
+    ...(typeof item.continueTaskId === 'string' ? { continueTaskId: item.continueTaskId.trim() } : {}),
     ...(typeof item.question === 'string' ? { question: item.question.slice(0, 300) } : {}),
   };
 }

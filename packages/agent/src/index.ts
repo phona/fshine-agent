@@ -94,5 +94,15 @@ export {
   createTaxAgentRuntime,
   FALLBACK_TIMEOUT,
   FALLBACK_FAILURE,
+  NO_EXECUTION_CLARIFICATION,
   type TaxAgentRuntimeDeps,
 } from './runtime';
+export {
+  ROUTE_CURRENT_TURN_TOOL,
+  ROUTE_CURRENT_TURN_TOOL_NAME,
+  applyRouteDeclaration,
+  parseTaskIntent,
+  validatePlanAgainstTaskIntent,
+  validateTaskIntentEvidence,
+  type TaskIntent,
+} from './task-intent';

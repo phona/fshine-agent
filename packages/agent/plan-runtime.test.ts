@@ -41,7 +41,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'trusted_task_7',
       runCli: async ({ args }) => { requests.push(args); return { code: 0, stdout: JSON.stringify({ taskId: 'trusted_task_7', planId: 'plan_saved', version: 4, status: 'active' }), stderr: '' }; },
     });
-    expect(active).toBe('plan_saved');
+    expect(active).toEqual({ planId: 'plan_saved', version: 4 });
     expect(requests).toEqual([['plan', 'current', '--task-id', 'trusted_task_7']]);
   });
 

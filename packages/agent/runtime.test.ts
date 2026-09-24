@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
-import { ScriptedTurnDriver, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput } from './src/driver';
+import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src/runtime';
 import { FakeSessionRepo } from './test-helpers';
 
@@ -31,6 +31,30 @@ function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
   };
 }
 
+/** A turn where the Main Agent declares an ordinary conversation before answering. */
+function declareConversation(steps: ScriptedTurnStep[]): ScriptedTurnStep[] {
+  return [{ toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] }, ...steps];
+}
+
+/**
+ * Mirrors the production driver contract: exec may terminate the turn by throwing
+ * ToolUserError, in which case its message becomes the final reply and the model
+ * never gets to rewrite it.
+ */
+async function declareAndTerminate(
+  input: TurnDriverInput,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<TurnDriverResult | null> {
+  try {
+    await input.exec('route_current_turn', args, signal);
+  } catch (error) {
+    if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
+    throw error;
+  }
+  return null;
+}
+
 function recordingDriver(script: ScriptedTurnStep[]) {
   const base = ScriptedTurnDriver(script);
   const inputs: TurnDriverInput[] = [];
@@ -44,6 +68,96 @@ function recordingDriver(script: ScriptedTurnStep[]) {
 }
 
 describe('createTaxAgentRuntime', () => {
+  // ── 回合契约 + 执行凭证 ────────────────────────────────────────────
+  // 这三类故障都真实复现过：Main Agent 拿旧 tool_result 直接回答实时查询、
+  // 声明了实时查询但本轮零平台执行、申报的账套不来自当前消息。
+
+  it('R1 重复提问实时数据时必须产生本轮平台执行，不能重放旧 tool_result', async () => {
+    const question = '帮我查一下幻辰财税账套里猫一杯的应收账款';
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: question, timestamp: 1 },
+        { role: 'assistant', content: '旧结果：幻辰 202609 应收余额为 42 元。', timestamp: 2 },
+      ] as never,
+    });
+    const delegated: Array<{ request: string }> = [];
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] } }] },
+      { text: '旧结果：幻辰 202609 应收余额为 42 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      platformTask: subagent(async (args) => {
+        delegated.push({ request: args.request });
+        return { taskId: 'task_live', text: '本轮实时查询：幻辰 202609 应收余额为 51 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_repeat_live' }), question);
+
+    expect(delegated).toHaveLength(1);
+    expect(delegated[0]?.request).toBe(question);
+    expect(reply.text).toBe('本轮实时查询：幻辰 202609 应收余额为 51 元。');
+    expect(reply.text).not.toContain('42 元');
+  });
+
+  it('R2 声明实时查询但本轮零平台执行时，不外发模型文本', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] } }] },
+      { text: '幻辰 202609 应收余额大概是 42 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 子 Agent 直接给出财务结论，但没有任何平台执行痕迹
+      platformTask: subagent(async () => ({ taskId: 'task_fake', text: '幻辰 202609 应收余额大概是 42 元。' })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_no_execution' }), '查幻辰财税账套里猫一杯的应收账款');
+
+    expect(reply.text).not.toContain('42 元');
+    expect(reply.text).toContain('没有产生任何平台查询');
+  });
+
+  it('R3 Main Agent 跳过 route_current_turn 时重试一次，再跳过则失败关闭', async () => {
+    let attempts = 0;
+    const driver: TurnDriver = {
+      run: async (input) => {
+        attempts += 1;
+        return { text: '直接回答：应收余额 42 元。', messages: [...input.messages, { role: 'assistant', content: '直接回答：应收余额 42 元。', timestamp: attempts } as never] };
+      },
+    };
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_skip_declaration' }), '查幻辰财税账套的应收');
+
+    expect(attempts).toBe(2);
+    expect(reply.text).not.toContain('42 元');
+    expect(reply.text).toContain('没有产生任何平台查询');
+  });
+
+  it('R4 申报的账套不逐字来自当前消息时降级为澄清，且不委派', async () => {
+    const delegated: unknown[] = [];
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] } }] },
+      { text: '幻东应收 42 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => { delegated.push(args); return { taskId: 'task_scope', text: 'x' }; }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_scope_evidence' }), '帮我查一下猫一杯的应收账款还有多少');
+
+    expect(delegated).toHaveLength(0);
+    expect(reply.text).toContain('账套');
+    expect(reply.text).not.toContain('42 元');
+  });
+
   it('records the raw user/final messages and exposes trusted history tools to Main Agent', async () => {
     const events: Array<{ eventId: string; principalId: string; sessionId: string; kind: string; content?: string; createdAt: string; requestId?: string }> = [];
     const states: Array<{ principalId: string; sessionId: string; updatedAt: string; throughEventId: string; reducerVersion: number; state: unknown }> = [];
@@ -61,6 +175,7 @@ describe('createTaxAgentRuntime', () => {
     const driver: TurnDriver = {
       run: async (input) => {
         discovered = input.tools.map((tool) => tool.name);
+        await input.exec('route_current_turn', { kind: 'conversation' });
         searchOutput = await input.exec('search_history', { query: '三月' });
         return { text: '之前你选了三月。', messages: [...input.messages, { role: 'assistant', content: '之前你选了三月。', timestamp: 123 } as never] };
       },
@@ -83,14 +198,18 @@ describe('createTaxAgentRuntime', () => {
     const events: ConversationEventRecord[] = [];
     const runtime = createTaxAgentRuntime({
       driver: {
-        run: async (input) => ({
-          text: '幻辰本期应收为 42 元。',
+        run: async (input) => {
+          await input.exec('route_current_turn', { kind: 'conversation' });
+          return {
+            text: '幻辰本期应收为 42 元。',
           messages: [
-            ...input.messages,
-            { role: 'toolResult', toolName: RUN_17DZ_TASK_TOOL, toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元"}' }], timestamp: 10 } as never,
-            { role: 'assistant', content: '幻辰本期应收为 42 元。', timestamp: 11 } as never,
-          ],
-        }),
+              ...input.messages,
+              { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'route_current_turn', arguments: { kind: 'platform_query' } }], timestamp: 9 } as never,
+              { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元"}' }], timestamp: 10 } as never,
+              { role: 'assistant', content: '幻辰本期应收为 42 元。', timestamp: 11 } as never,
+            ],
+          };
+        },
       },
       sessions: new FakeSessionRepo(), platformTask: subagent(),
       conversationLog: {
@@ -284,7 +403,7 @@ describe('createTaxAgentRuntime', () => {
     const delay = new Promise<void>((resolve) => { releaseExtractor = resolve; });
     let observed: TurnDriverInput | undefined;
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { observed = input; return { text: '会记住你的偏好。', messages: input.messages }; } },
+      driver: { run: async (input) => { observed = input; await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '会记住你的偏好。', messages: input.messages }; } },
       sessions: new FakeSessionRepo(), platformTask: subagent(),
       conversationLog: {
         append: async (event) => { eventLog.push(event); },
@@ -388,7 +507,7 @@ describe('createTaxAgentRuntime', () => {
     await sessions.upsert({ sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(), state: transcript });
     let observed: Array<{ role?: string; content?: unknown }> = [];
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { observed = input.messages; return { text: '答复', messages: input.messages }; } },
+      driver: { run: async (input) => { observed = input.messages; await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '答复', messages: input.messages }; } },
       sessions, platformTask: subagent(), recentTurns: 1,
     });
     await runtime.handleTurn(makeCtx(), '继续');
@@ -396,6 +515,35 @@ describe('createTaxAgentRuntime', () => {
     expect(rendered).not.toContain('孤立结果');
     expect(rendered).toContain('工具证据');
     expect(observed.at(-1)?.content).toBe('继续');
+  });
+
+  it('给最近回合追加历史资料说明，且该说明不落入持久化转录', async () => {
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: '查幻辰应收', timestamp: 1 },
+        { role: 'assistant', content: '旧答复：幻辰 202609 应收余额为 42 元。', timestamp: 2 },
+      ] as never,
+    });
+    let observed = '';
+    const runtime = createTaxAgentRuntime({
+      driver: {
+        run: async (input) => {
+          observed = JSON.stringify(input.messages);
+          await input.exec('route_current_turn', { kind: 'conversation' });
+          return { text: '好的', messages: input.messages };
+        },
+      },
+      sessions, platformTask: subagent(),
+    });
+    await runtime.handleTurn(makeCtx(), '继续');
+
+    // 旧财务结论仍可读，但被明确标注为历史资料
+    expect(observed).toContain('不得作为本轮实时结果引用');
+    expect(observed).toContain('旧答复：幻辰 202609 应收余额为 42 元。');
+    // 说明只进模型上下文，不随转录持久化（否则会逐轮叠加）
+    expect(JSON.stringify(sessions.peek('sess_1')?.state)).not.toContain('不得作为本轮实时结果引用');
   });
 
   it('appends the exact user event before running the model and preserves it when the driver throws', async () => {
@@ -415,7 +563,7 @@ describe('createTaxAgentRuntime', () => {
     await sessions.upsert({ sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(), state: transcript });
     let observed: Array<{ role?: string; content?: unknown }> = [];
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { observed = input.messages; return { text: '答复', messages: input.messages }; } },
+      driver: { run: async (input) => { observed = input.messages; await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '答复', messages: input.messages }; } },
       sessions, platformTask: subagent(), contextMode: 'transcript',
     });
     await runtime.handleTurn(makeCtx(), '继续');
@@ -425,7 +573,7 @@ describe('createTaxAgentRuntime', () => {
   it('continues answering and keeps the raw log available when Context State persistence fails', async () => {
     const events: unknown[] = [];
     const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ text: '我会继续处理。' }]),
+      driver: ScriptedTurnDriver(declareConversation([{ text: '我会继续处理。' }])),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
       conversationLog: {
@@ -443,53 +591,62 @@ describe('createTaxAgentRuntime', () => {
     expect(events).toHaveLength(2);
   });
 
-  it('主 Agent 只暴露 run_17dz_task，并取得子 Agent 自然语言结果', async () => {
-    const calls: Array<{ request: string; taskId?: string }> = [];
-    let toolResult: unknown;
+  it('主 Agent 只暴露 route_current_turn，宿主据申报直接委派并采用子 Agent 自然语言结果', async () => {
+    const calls: Array<{ request: string; taskId?: string; taskIntent?: unknown }> = [];
+    let exposed: string[] = [];
     const platformTask = subagent(async (args) => {
       calls.push(args);
-      return { taskId: 'task_1', text: '请向用户确认客户名称。' };
+      return { taskId: 'task_1', text: '请向用户确认客户名称。', execution: { planId: 'plan_1', version: 1, calls: 1 } };
     });
     const driver: TurnDriver = {
       run: async (input) => {
-        expect(input.tools.map((tool) => tool.name)).toEqual(['run_17dz_task']);
-        toolResult = await input.exec('run_17dz_task', { request: '查询客户余额' });
-        return {
-          text: '请问您指的是哪一家客户？',
-          messages: [...input.messages, { role: 'assistant', content: '请问您指的是哪一家客户？', timestamp: Date.now() } as never],
-        };
+        exposed = input.tools.map((tool) => tool.name);
+        return (await declareAndTerminate(input, { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] }))
+          ?? { text: '这条文本不应外发', messages: input.messages };
       },
     };
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
     const reply = await runtime.handleTurn(makeCtx(), '查询幻东余额');
 
-    expect(calls).toEqual([{ request: '查询客户余额' }]);
-    expect(toolResult).toEqual({ taskId: 'task_1', text: '请向用户确认客户名称。' });
-    expect(reply.text).toBe('请问您指的是哪一家客户？');
+    expect(exposed).toEqual(['route_current_turn']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({ request: '查询幻东余额' });
+    expect(calls[0]?.taskIntent).toMatchObject({ kind: 'platform_query', taskType: 'balance', accountQueries: ['幻东'] });
+    expect(reply.text).toBe('请向用户确认客户名称。');
   });
 
   it('继续委派时透传 taskId 和外层 AbortSignal', async () => {
     let observedSignal: AbortSignal | undefined;
     const platformTask = subagent(async (args, _ctx, signal) => {
       observedSignal = signal;
-      expect(args).toEqual({ request: '用户选择 A 公司', taskId: 'task_1' });
-      return { taskId: 'task_1', text: '查询完成。' };
+      expect(args).toMatchObject({ request: 'A 公司', taskId: 'task_1' });
+      return { taskId: 'task_1', text: '查询完成。', execution: { planId: 'plan_1', version: 1, calls: 1 } };
     });
     const controller = new AbortController();
+    // 指代解析需要上下文里真的出现过该账套，否则 fail-closed 降级为澄清。
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: '查幻东账套的应收账款', timestamp: 1 },
+        { role: 'assistant', content: '幻东有两个客户，请选择。', timestamp: 2 },
+      ] as never,
+    });
     const driver: TurnDriver = {
-      run: async (input) => {
-        await input.exec('run_17dz_task', { request: '用户选择 A 公司', taskId: 'task_1' }, controller.signal);
-        return { text: '最终答复', messages: input.messages };
-      },
+      run: async (input) => (await declareAndTerminate(
+        input,
+        { kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻东'], referenceQuote: 'A 公司', continueTaskId: 'task_1' },
+        controller.signal,
+      )) ?? { text: '最终答复', messages: input.messages },
     };
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
     await runtime.handleTurn(makeCtx(), 'A 公司');
     expect(observedSignal).toBe(controller.signal);
   });
 
   it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
-    const { driver, inputs } = recordingDriver([{ text: '第一轮回复' }, { text: '第二轮回复' }]);
+    const { driver, inputs } = recordingDriver(declareConversation([{ text: '第一轮回复' }, { text: '第二轮回复' }]));
     const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
     await runtime.handleTurn(makeCtx(), '第一句话');
     await runtime.handleTurn(makeCtx(), '第二句话');
@@ -502,7 +659,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('TTL 过期时通过 driver.compact 软着陆', async () => {
     const sessions = new FakeSessionRepo();
-    const base = ScriptedTurnDriver([{ text: '第一轮' }, { text: '恢复后' }]);
+    const base = ScriptedTurnDriver(declareConversation([{ text: '第一轮' }, { text: '恢复后' }]));
     const forced: boolean[] = [];
     const inputs: TurnDriverInput[] = [];
     const driver: TurnDriver = {
@@ -526,7 +683,7 @@ describe('createTaxAgentRuntime', () => {
   it('空回复使用失败兜底并保存当前转录', async () => {
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => ({ text: '', messages: input.messages }) },
+      driver: { run: async (input) => { await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '', messages: input.messages }; } },
       sessions,
       platformTask: subagent(),
     });
@@ -537,7 +694,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('截止时间已过且无回复时使用超时兜底', async () => {
     const runtime = createTaxAgentRuntime({
-      driver: { run: async () => ({ text: '', messages: [] }) },
+      driver: { run: async (input) => { await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '', messages: input.messages }; } },
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
       turnBudgetMs: -1,

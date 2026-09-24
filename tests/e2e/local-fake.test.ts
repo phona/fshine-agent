@@ -26,7 +26,14 @@ function runner(store: ReturnType<typeof createSqliteStore>, workerDriver: TurnD
   const profiles: Record<string, ContextProfileConfig> = {
     '17dz': { root: process.cwd(), skillRoots: ['.agents/skills'] },
   };
-  return createContextTaskRunner({ profiles, tasks: store.platformTasks!, workerDriver });
+  const inner = createContextTaskRunner({ profiles, tasks: store.platformTasks!, workerDriver });
+  return {
+    ...inner,
+    run: async (args: Parameters<typeof inner.run>[0], ctx: Parameters<typeof inner.run>[1], signal?: AbortSignal) => ({
+      ...(await inner.run(args, ctx, signal)),
+      execution: { planId: 'plan_fake', version: 1, calls: 1 },
+    }),
+  };
 }
 
 function workerDriver(responses: string[], observed: TurnDriverInput[] = []): TurnDriver {
@@ -46,22 +53,23 @@ function workerDriver(responses: string[], observed: TurnDriverInput[] = []): Tu
 }
 
 describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
-  it('主 Agent 委托 run_17dz_task，并原样透传子 Agent 自然语言', async () => {
+  it('Main Agent 申报本轮动作后宿主委派，并透传子 Agent 自然语言', async () => {
     const store = createSqliteStore(':memory:');
     stores.push(store);
     await store.principalScopes.upsert({ wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true });
     const workerInputs: TurnDriverInput[] = [];
     const workerText = '找到两个客户，请选择幻州幻东机械有限公司。';
     const platform = runner(store, workerDriver([workerText], workerInputs));
-    let delegatedResult: unknown;
     const mainDriver: TurnDriver = {
       run: async (input) => {
-        expect(input.tools.map((tool) => tool.name)).toEqual(['run_17dz_task']);
-        delegatedResult = await input.exec('run_17dz_task', { request: '查幻辰的应收账款' });
-        return {
-          text: (delegatedResult as { text: string }).text,
-          messages: [...input.messages, { role: 'assistant', content: (delegatedResult as { text: string }).text, timestamp: Date.now() } as never],
-        };
+        expect(input.tools.map((tool) => tool.name)).toEqual(['route_current_turn']);
+        try {
+          await input.exec('route_current_turn', { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰'] });
+        } catch (error) {
+          if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
+          throw error;
+        }
+        return { text: '这条文本不应外发', messages: input.messages };
       },
     };
     const main = createTaxAgentRuntime({
@@ -71,7 +79,6 @@ describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
     });
     const handler = createMessageHandler({ store, runtime: main });
     expect(await handler(message('查幻辰的应收账款'))).toBe(workerText);
-    expect(delegatedResult).toMatchObject({ taskId: expect.stringMatching(/^task_/), text: workerText });
     expect(workerInputs).toHaveLength(1);
     expect(workerInputs[0]?.cwd).toBe(process.cwd());
     expect(workerInputs[0]?.tools).toEqual([]);
@@ -88,7 +95,7 @@ describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
     const resumedInputs: TurnDriverInput[] = [];
     const resumed = runner(store, workerDriver(['已恢复任务并查询完成。'], resumedInputs));
     const done = await resumed.run({ taskId: pending.taskId, request: '选择幻州幻东机械有限公司后继续查询' }, { trusted: trusted() });
-    expect(done).toEqual({ taskId: pending.taskId, text: '已恢复任务并查询完成。' });
+    expect(done).toMatchObject({ taskId: pending.taskId, text: '已恢复任务并查询完成。' });
     expect(resumedInputs[0]?.sessionId).toBe(pending.taskId);
     expect(resumedInputs[0]?.cwd).toBe(process.cwd());
     expect(resumedInputs[0]?.messages).toEqual(expect.arrayContaining([

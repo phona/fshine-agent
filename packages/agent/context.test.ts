@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
-import { createContextTaskRunner } from './src/context';
+import { createContextTaskRunner, type ContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
 
 const roots: string[] = [];
@@ -241,25 +241,38 @@ describe('17dz Pi subagent adapter', () => {
       .rejects.toThrow('17dz 子任务执行失败，请稍后再试。');
   });
 
-  it('Main Agent 只看到委派工具，并自行决定如何回复子 Agent 的问题', async () => {
+  it('Main Agent 只申报本轮动作，宿主据申报委派并采用子 Agent 自然语言结果', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
-    const subagent = runner(root, tasks, ScriptedTurnDriver([{ text: '找到两个客户，请让用户选择。' }]));
-    let toolResult: unknown;
+    const scripted = runner(root, tasks, ScriptedTurnDriver([{ text: '找到两个客户，请让用户选择。' }]));
+    // 脚本化 worker 不经计划门，所以由替身补上执行凭证——否则宿主按"零执行"失败关闭。
+    const subagent: ContextTaskRunner = {
+      tool: scripted.tool,
+      run: async (args, ctx, signal) => ({
+        ...(await scripted.run(args, ctx, signal)),
+        execution: { planId: 'plan_test', version: 1, calls: 1 },
+      }),
+    };
+    let exposed: string[] = [];
     const mainDriver: TurnDriver = {
       run: async (input) => {
-        expect(input.tools.map((tool) => tool.name)).toEqual(['run_17dz_task']);
-        toolResult = await input.exec('run_17dz_task', { request: '查询幻东余额' });
+        exposed = input.tools.map((tool) => tool.name);
+        try {
+          await input.exec('route_current_turn', { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] });
+        } catch (error) {
+          if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
+          throw error;
+        }
         return {
-          text: '找到两个同名客户，请问您指哪一个？',
-          messages: [...input.messages, { role: 'assistant', content: '找到两个同名客户，请问您指哪一个？', timestamp: Date.now() } as never],
+          text: '这条文本不应外发',
+          messages: [...input.messages, { role: 'assistant', content: '这条文本不应外发', timestamp: Date.now() } as never],
         };
       },
     };
     const runtime = createTaxAgentRuntime({ driver: mainDriver, sessions: new MemorySessions(), platformTask: subagent });
     const reply = await runtime.handleTurn(trusted(), '查幻东余额');
 
-    expect(toolResult).toMatchObject({ text: '找到两个客户，请让用户选择。' });
-    expect(reply.text).toBe('找到两个同名客户，请问您指哪一个？');
+    expect(exposed).toEqual(['route_current_turn']);
+    expect(reply.text).toBe('找到两个客户，请让用户选择。');
   });
 });

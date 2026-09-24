@@ -53,6 +53,11 @@ export interface TurnDriverResult {
   footprint?: string;
   /** Platform plan pending for a host-side user confirmation flow. */
   pendingPlan?: PendingPlanConfirmation;
+  /**
+   * Host-verified proof that this turn really reached the platform: an activated plan plus at
+   * least one executed call. Absent this, the host must not let the turn's text reach the user.
+   */
+  execution?: { planId: string; version: number; calls: number };
 }
 
 export interface TurnDriver {

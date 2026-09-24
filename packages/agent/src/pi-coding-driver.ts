@@ -59,6 +59,8 @@ export interface PiCodingWorkerSessionOptions {
 export interface PiCodingWorkerSession {
   session: AgentSession;
   skills: readonly { name: string; description: string; filePath: string }[];
+  /** Currently activated plan for this worker task, if any. */
+  currentPlan: () => { planId: string; version: number } | null;
 }
 
 interface CodingModelConfig {
@@ -79,7 +81,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
       let pendingPlan: PendingPlanConfirmation | undefined;
-      const { session } = await createPiCodingWorkerSession({
+      const { session, currentPlan } = await createPiCodingWorkerSession({
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
@@ -100,6 +102,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         taskIntent: input.taskIntent,
       });
       const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
+      // Host-verifiable proof that this delegated turn really executed against the platform:
+      // an activated plan plus at least one allowed bin/17dz invocation.
+      const execution = (): { planId: string; version: number; calls: number } | undefined => {
+        const plan = currentPlan();
+        return plan && gateCalls > 0 ? { planId: plan.planId, version: plan.version, calls: gateCalls } : undefined;
+      };
 
       // TaskStore remains the source of truth.  Restore its transcript into
       // the SDK Agent rather than persisting a second session file in 17dz.
@@ -137,12 +145,15 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // duplicating it through AgentSession.prompt().
         await session.agent.continue();
         if (timedOut || cancelled || session.agent.state.errorMessage) {
-          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(pendingPlan ? { pendingPlan } : {}) };
+          const proof = execution();
+          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
         }
+        const proof = execution();
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
+          ...(proof ? { execution: proof } : {}),
           ...(pendingPlan ? { pendingPlan } : {}),
         };
       } catch (error) {
@@ -150,7 +161,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           event: 'pi_coding_worker_error',
           errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
-        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(pendingPlan ? { pendingPlan } : {}) };
+        const proof = execution();
+        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -179,19 +191,20 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   });
   await loader.reload();
   const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
-  let activePlanId: string | null = null;
+  let activePlan: { planId: string; version: number } | null = null;
   if (options.sessionId) {
     try {
-      activePlanId = await loadCurrentActivePlan({
+      activePlan = await loadCurrentActivePlan({
         platformRoot: options.cwd,
         taskId: options.sessionId,
         runCli: options.planCliRunner,
       });
     } catch {
       // Fail closed; resumed queries remain blocked until the worker obtains a host-approved plan.
-      activePlanId = null;
+      activePlan = null;
     }
   }
+  const activePlanId = (): string | null => activePlan?.planId ?? null;
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: options.agentDir,
@@ -204,7 +217,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 无 grep/find：代码扫描失去工具入口（知识面经 read 白名单可达）。
     tools: ['read', 'ls', 'bash'],
     customTools: [createBashToolDefinition(options.cwd, {
-      spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId) }),
+      spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
     }) as never],
   });
   // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
@@ -216,7 +229,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     platformRoot: options.cwd,
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
-    planActive: () => activePlanId !== null,
+    planActive: () => activePlan !== null,
   });
   session.agent.beforeToolCall = async (ctx) => {
     const args = (typeof ctx.args === 'object' && ctx.args !== null
@@ -230,12 +243,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         if (options.taskIntent) {
           const scopeError = validatePlanAgainstTaskIntent(options.taskIntent, parsed.calls);
           if (scopeError) {
-            activePlanId = null;
+            activePlan = null;
             return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮宿主意图执行或向用户澄清。` };
           }
         }
-        const previousPlanId = activePlanId;
-        activePlanId = null;
+        const previousPlan = activePlan;
+        activePlan = null;
         try {
           const plan = await evaluateAndActivatePlan({
             platformRoot: options.cwd,
@@ -248,14 +261,14 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
             activationSecret: options.planActivationSecret,
           });
           if (plan.status === 'active') {
-            activePlanId = plan.planId;
+            activePlan = { planId: plan.planId, version: plan.version };
             return { block: true, reason: `PLAN ACTIVE（${plan.planId} v${plan.version}）：按已提交 calls 执行；平台会逐次校验本计划。` };
           }
           if (plan.status === 'confirm') {
             options.onPendingPlan?.(plan.pending);
             return { block: true, reason: `PLAN NEEDS_USER_CONFIRM\n${plan.message}\n已暂停执行，等待宿主验证用户确认。` };
           }
-          activePlanId = previousPlanId;
+          activePlan = previousPlan;
           return { block: true, reason: `PLAN STOP\n${plan.message}` };
         } catch (error) {
           return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
@@ -269,7 +282,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     description: skill.description,
     filePath: skill.filePath,
   }));
-  return { session, skills: loaded };
+  return { session, skills: loaded, currentPlan: () => activePlan };
 }
 
 async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<CodingModelConfig> {

@@ -48,6 +48,8 @@ export interface SubagentTaskResult {
   taskId: string;
   text: string;
   pendingPlan?: PendingPlanConfirmation;
+  /** Host-verified proof that this delegated turn executed at least one platform call. */
+  execution?: { planId: string; version: number; calls: number };
 }
 
 /** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关 bin/17dz prepare）。 */
@@ -395,7 +397,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             userText: result.pendingPlan.userText,
           });
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending' }));
-          return { taskId, text: result.text, pendingPlan };
+          return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}) };
         }
         const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
         if (proposal) {
@@ -413,6 +415,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         }
         const final: SubagentTaskResult = {
           taskId,
+          ...(result.execution ? { execution: result.execution } : {}),
           // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
           // 必须拼在 extractChangeProposal 之后——尾部注脚会破坏"整段纯 JSON"提案候选。
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
