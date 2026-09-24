@@ -80,6 +80,7 @@ export function validatePlanAgainstTaskIntent(
     }
     return null;
   }
+  if (intent.taskType === 'voucher') return validateVoucherPlan(intent, calls);
   if (intent.taskType !== 'balance') return null;
   const accounts = intent.accountQueries ?? [];
   const customers = intent.customerQueries ?? [];
@@ -103,6 +104,35 @@ export function validatePlanAgainstTaskIntent(
     expected.delete(JSON.stringify([account, customer ?? '', period]));
   }
   return expected.size ? '余额计划漏掉了宿主解析出的请求范围。' : null;
+}
+
+/** Voucher scripts take the period positionally (account, YYYYMM); flag form is also accepted. */
+function voucherPeriod(args: readonly unknown[]): string {
+  const flagged = optionValue(args, '--period') ?? optionValue(args, '--month');
+  if (flagged) return flagged;
+  const positional = args[1];
+  return typeof positional === 'string' && /^\d{6}$/.test(positional) ? positional : '';
+}
+
+/**
+ * Voucher queries are scope-checked too: the plan may only touch the voucher domain and the
+ * periods the current request actually named. Everything else stays with the platform gate.
+ */
+function validateVoucherPlan(
+  intent: Extract<TaskIntent, { kind: 'platform_query' }>,
+  calls: readonly { operation: string; args: readonly unknown[] }[],
+): string | null {
+  const periods = intent.periods?.map((period) => period.value) ?? [];
+  for (const call of calls) {
+    if (!call.operation.startsWith('voucher.')) {
+      return '凭证任务只能调用 voucher 域操作，不能用余额或账套搜索代替。';
+    }
+    const period = voucherPeriod(call.args);
+    if (periods.length && period && !periods.includes(period)) {
+      return '凭证计划加入了当前请求未指定的期间。';
+    }
+  }
+  return null;
 }
 
 export function parseTaskIntent(value: string): TaskIntent | null {

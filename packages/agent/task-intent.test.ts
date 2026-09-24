@@ -40,6 +40,22 @@ describe('semantic task intent router', () => {
     expect(parseTaskIntent('我觉得上次的结果可以沿用。')).toBeNull();
   });
 
+  it('binds a voucher plan to the voucher domain and the periods the request named', () => {
+    const intent: TaskIntent = {
+      kind: 'platform_query', taskType: 'voucher', accountResolution: 'explicit',
+      accountQueries: ['威德盛'], periods: [{ value: '202609', quote: '九月' }],
+    };
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'voucher.query-saved', args: ['威德盛', '202609'] },
+    ])).toBeNull();
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '威德盛'] },
+    ])).toContain('voucher 域');
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'voucher.query-saved', args: ['威德盛', '202601'] },
+    ])).toContain('期间');
+  });
+
   it('binds a balance plan to the router-approved accounts, customers, and periods', () => {
     const intent: TaskIntent = {
       kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
