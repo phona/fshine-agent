@@ -1,19 +1,20 @@
 # fshine-agent 架构
 
-状态：当前实现基线（Main Agent + 单个 17dz 子 Agent）
+状态：当前实现基线（Main Agent + 单个 17dz 子 Agent + 计划重量反馈）
 
 ## 1. 目标
 
-提供一条简单、可恢复的企微财税查询链路：Main Pi Agent 负责理解请求和对话编排；需要真实 17dz 数据时，调用唯一的 `run_17dz_task` 工具，把完整任务交给 17dz 子 Agent。
+提供一条简单、可恢复的企微财税查询链路：宿主先用结构化意图路由模型判断本轮是闲聊、需要澄清还是实时平台查询；实时查询直接交给 17dz 子 Agent，闲聊再进入 Main Pi Agent。
 
 ```text
 企微
-  -> Main Pi Agent（fshine-agent）
-  -> run_17dz_task(request, taskId?)
-  -> Pi 子 Agent（cwd = 17dz-platform）
-  -> 17dz-platform Skills / 领域脚本
-  -> 自然语言结果
-  -> Main Agent 决定回答、追问或继续委派
+  -> Semantic Intent Router（仅当前消息 + 有来源的近期上下文）
+     ├─ clarify -> 宿主直接追问，不运行查询
+     ├─ platform_query -> run_17dz_task(request, taskId?)
+     │  -> Pi 子 Agent（cwd = 17dz-platform）
+     │  -> 17dz-platform Skills / 领域脚本
+     └─ conversation -> Main Pi Agent（fshine-agent）
+        -> 自然语言回复
 ```
 
 当前只需要一个领域子 Agent，不引入通用的 subagent registry、复杂结果协议或多 Agent 聚合层。将来增加独立领域时，再抽象注册和路由。
@@ -23,11 +24,14 @@
 | 组件 | 负责 | 不负责 |
 |---|---|---|
 | 企微 channel | 收发消息、用户和会话标识、进度/最终回复 | 领域查询、浏览器自动化 |
-| Main Agent | 理解用户意图、决定是否委派、组织最终自然语言回复 | 直接读取 17dz 工作区、猜测实时数据 |
+| Semantic Intent Router | 将当前消息分类为对话、澄清或实时平台查询；为账套/期间指代给出有依据的结构化解析 | 输出财务答案、调用平台、将历史账套转成当前范围 |
+| Main Agent | 处理普通对话、组织非平台问题的自然语言回复 | 决定是否跳过实时查询、重放历史财务结果 |
 | `run_17dz_task` | 校验请求、创建/恢复任务、绑定主会话和用户、调用子 Agent | 解析子 Agent 自然语言并猜流程状态 |
 | Pi 子 Agent | 在受信 `17dz-platform` cwd 中加载 Skills，执行领域脚本，返回自然语言 | 替 Main Agent 决定如何向用户回复 |
 | `17dz-platform` | 领域脚本、平台适配、登录态和财税数据获取 | 企微会话和 Main Agent 对话编排 |
 | SQLite store | principal、会话、子任务和审计记录 | 财务数据源、模型决策 |
+
+计划重量与领域参数由 `17dz-platform` 的纯 CLI 评估和执行门负责。fshine 只保存会话、转发结构化计划、等待企微通知/确认，并把宿主激活凭据交给 CLI；worker 不持有激活密钥。
 
 ## 3. 子 Agent 运行边界
 
@@ -45,11 +49,12 @@
 ## 4. 请求流程
 
 1. 企微 channel 接收消息，得到不可变的用户 ID、会话 ID 和消息 ID。
-2. Main Agent 判断是否需要实时 17dz 数据。需要时必须调用 `run_17dz_task`，不能凭历史对话猜账套、科目或余额。
-3. 委派工具验证 request，解析受信 context profile，并创建或恢复一个只属于当前用户和主会话的任务。
-4. 子 Agent 在 `17dz-platform` 中按相关 Skill 执行领域脚本。实时结果必须来自脚本，不得从源码或上下文猜测。
-5. 子 Agent 返回自然语言结果。Main Agent 选择直接回答、向用户追问，或用同一 task ID 继续任务。
-6. store 记录请求、子 Agent 转录和最终回复；企微发送最终回复。
+2. Semantic Intent Router 用当前用户消息和带来源的近期上下文产生严格 JSON 意图。重复提出的实时数据请求必须判为新查询，不能复用旧助手回答。
+3. 闲聊交给 Main Agent；账套、客户余额、凭证等实时数据请求交给 `run_17dz_task`；缺少或无法唯一确定账套时，宿主先澄清，不调用平台。
+4. 委派工具创建一个只属于当前用户和主会话的新任务。仅显式引用旧任务时才恢复 task ID。
+5. 子 Agent 在 `17dz-platform` 中按相关 Skill 执行领域脚本。结果必须来自本轮脚本，不得从源码或历史结果猜测；预算计划由 17dz CLI 评估并逐次绑定。
+6. 子 Agent 返回自然语言结果；host 直接采用受信执行结果或进行受限整理，不把旧的 pending 计划重新当成本轮任务。
+7. store 记录请求、意图、子 Agent 转录和最终回复；企微发送最终回复。
 
 ## 5. 权限与安全
 
@@ -59,6 +64,7 @@
 - credentials 不通过用户消息或模型参数传递；由 `17dz-platform` 的受控运行环境管理。
 - Main Agent 不直接执行 `17dz-platform` 命令；命令和脚本选择由子 Agent 的平台 Skills 约束。
 - 领域脚本仍必须自行执行账套范围、只读/写权限、用户确认和幂等等业务硬约束；自然语言提示不是安全边界。
+- 只读计划通过 `plan evaluate` 计算预计调用数、耗时和范围变化；实际调用绑定激活计划并由平台累计计量，重计划不重置累计用量。
 - 审计记录不得写入 API key、密码、未授权账套数据或完整敏感页面内容。
 
 ## 6. 任务和会话
@@ -83,4 +89,4 @@ platform_task
 
 ## 8. 明确不做
 
-当前不做：MCP server/host、Fake MCP 全链路、通用多 Agent registry、跨领域结果聚合、写凭证工作流、审批、调度、浏览器人工接管和长期记忆。
+当前不做：MCP server/host、Fake MCP 全链路、通用多 Agent registry、跨领域结果聚合、调度和浏览器人工接管。Conversation Log、短期 Context State、按需历史检索和带来源的长期 Memory Records 已接入 fshine；长期整理在后台低频运行，财务任务范围不作为长期授权记忆。

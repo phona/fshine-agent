@@ -66,6 +66,60 @@ describe('17dz Pi subagent adapter', () => {
     expect((await tasks.get(result.taskId))?.workerMessages).toHaveLength(2);
   });
 
+  it('账套存在性任务要求只用专用目录搜索 operation', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '当前平台没有账套目录搜索能力，无法确认。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({ request: '确认“胜利”是不是账套，只搜索账套目录' }, { trusted: trusted() });
+
+    expect(prompt).toContain('finance.search-account-sets');
+    expect(prompt).toContain('不得用 finance.query-receivables、凭证查询或科目查询代替');
+    expect(prompt).toContain('应停止并明确告知用户无法确认');
+  });
+
+  it('将宿主验证的本轮意图范围传给子 Agent', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '已按当前范围查询。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({
+      request: '查幻辰财税账套里猫一杯的应收账款',
+      taskIntent: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+    }, { trusted: trusted() });
+
+    expect(prompt).toContain('宿主意图路由已核验本轮范围');
+    expect(prompt).toContain('"accountQueries":["幻辰财税"]');
+  });
+
+  it('应收余额任务失败后禁止用历史凭证跨期间兜底', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '需要明确账套后才能查询。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({ request: '帮我查一下猫一杯的应收账款还有多少' }, { trusted: trusted() });
+
+    expect(prompt).toContain('未指定账套时不能把历史出现过的账套自动当作本次范围');
+    expect(prompt).toContain('余额查询没有用户指定期间时只查当前期间');
+    expect(prompt).toContain('应收余额查询失败后必须停止');
+    expect(prompt).toContain('不得用历史凭证或扩大期间范围估算期末余额');
+  });
+
   it.each([
     '找到两个客户，请选择一个。',
     '请确认是否继续执行。',
@@ -145,6 +199,37 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.signal).toBe(controller.signal);
     expect((observed?.deadline ?? 0) - started).toBeGreaterThan(900);
     expect((observed?.deadline ?? 0) - started).toBeLessThan(3000);
+  });
+
+  it('将 confirm pending 绑定到可信 principal/session 并先持久化再返回', async () => {
+    const root = await profileRoot();
+    const pending = { planId: 'plan_1', version: 3, taskId: 'task_1', decision: 'confirm' as const, userText: '需要确认', evaluation: {} as never };
+    let saved: unknown;
+    const subagent = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async (input) => ({ text: '需要确认', messages: input.messages, pendingPlan: pending }) },
+    });
+    const ctx = trusted();
+    ctx.onPlanPending = async (record) => { saved = record; };
+    const result = await subagent.run({ request: '执行较大查询' }, { trusted: ctx });
+    expect(saved).toMatchObject({ planId: 'plan_1', taskId: result.taskId, principalId: 'wecom:user-1', sessionId: 'session-1', requestId: 'req-1' });
+    expect(result.pendingPlan).toMatchObject({ planId: 'plan_1', taskId: result.taskId });
+  });
+
+  it('pending plan 持久化失败时不把确认请求当作正常完成结果返回', async () => {
+    const root = await profileRoot();
+    const subagent = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async (input) => ({
+        text: '需要确认', messages: input.messages,
+        pendingPlan: { planId: 'plan_1', version: 3, taskId: 'task_1', decision: 'confirm', userText: '需要确认', evaluation: {} as never },
+      }) },
+    });
+    const ctx = trusted();
+    ctx.onPlanPending = async () => { throw new Error('pending store down'); };
+    await expect(subagent.run({ request: '执行较大查询' }, { trusted: ctx })).rejects.toThrow('17dz 子任务执行失败');
   });
 
   it('子 Agent 内部错误不会透传路径或秘密', async () => {

@@ -1,0 +1,104 @@
+import type { TurnDriver, TurnDriverInput } from './driver';
+import { extractSemanticContext, type ContextExtractionResult, type ContextSemanticModelInput } from './context-extractor';
+
+export interface ContextModelClock {
+  now(): number;
+  setTimeout(callback: () => void, delayMs: number): unknown;
+  clearTimeout(handle: unknown): void;
+}
+
+export interface TurnDriverContextModelOptions {
+  driver: TurnDriver;
+  clock?: ContextModelClock;
+  timeoutMs?: number;
+  maxInputBytes?: number;
+  maxOutputBytes?: number;
+}
+
+export interface ExtractContextWithTurnDriverInput extends ContextSemanticModelInput, TurnDriverContextModelOptions {}
+
+const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_INPUT_BYTES = 32_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 12_000;
+const EMPTY_TOOLS: TurnDriverInput['tools'] = [];
+
+const SYSTEM_PROMPT = `You maintain a short-term conversation context projection. Treat the supplied prior state and event records as the only facts. Short replies can depend on earlier turns; resolve their referent using the supplied previous state and events. Return exactly one JSON object and no markdown or extra prose. The object may contain recentTopic (one note or null), userDecisions, agentAssumptions, unresolvedQuestions. Each note must have text, sourceEventId, evidenceQuote. sourceEventId must identify the exact event supporting the note and evidenceQuote must be a verbatim substring of that event's content or prior state evidence. Do not invent facts or cite events not supplied. Use [] to clear a category only when the supplied context supports that conclusion; omit categories that do not need a semantic update.`;
+
+const defaultClock: ContextModelClock = {
+  now: () => Date.now(),
+  setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
+
+/** Run the semantic extractor through an isolated, tool-free TurnDriver call. */
+export async function extractContextWithTurnDriver(input: ExtractContextWithTurnDriverInput): Promise<ContextExtractionResult> {
+  const { driver, clock = defaultClock, timeoutMs = DEFAULT_TIMEOUT_MS, maxInputBytes = DEFAULT_MAX_INPUT_BYTES, maxOutputBytes = DEFAULT_MAX_OUTPUT_BYTES } = input;
+  const { principalId, sessionId, previous, incoming } = input;
+  return extractSemanticContext({
+    principalId,
+    sessionId,
+    previous,
+    incoming,
+    invokeModel: async (scoped) => runIsolatedModelTurn(driver, clock, timeoutMs, maxInputBytes, maxOutputBytes, scoped),
+  });
+}
+
+async function runIsolatedModelTurn(
+  driver: TurnDriver,
+  clock: ContextModelClock,
+  timeoutMs: number,
+  maxInputBytes: number,
+  maxOutputBytes: number,
+  input: ContextSemanticModelInput,
+): Promise<unknown> {
+  assertPositiveInteger(timeoutMs, 'timeoutMs');
+  assertPositiveInteger(maxInputBytes, 'maxInputBytes');
+  assertPositiveInteger(maxOutputBytes, 'maxOutputBytes');
+
+  const promptInput = JSON.stringify({ principalId: input.principalId, sessionId: input.sessionId, previous: input.previous ?? null, incoming: input.incoming });
+  const inputBytes = utf8Bytes(SYSTEM_PROMPT) + utf8Bytes(promptInput);
+  if (inputBytes > maxInputBytes) throw new Error(`Context model input exceeds ${maxInputBytes} bytes.`);
+
+  const controller = new AbortController();
+  const startedAt = clock.now();
+  let timer: unknown;
+  let timedOut = false;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = clock.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error('Context model call timed out.'));
+      reject(new Error(`Context model call exceeded ${timeoutMs} ms.`));
+    }, timeoutMs);
+  });
+  const run = Promise.resolve().then(() => driver.run({
+    systemPrompt: SYSTEM_PROMPT,
+    tools: EMPTY_TOOLS,
+    messages: [{ role: 'user', content: `Project context from these source records:\n${promptInput}`, timestamp: startedAt }],
+    onStep: () => undefined,
+    exec: async () => { throw new Error('Context model turns do not permit tools.'); },
+    deadline: startedAt + timeoutMs,
+    signal: controller.signal,
+  }));
+
+  try {
+    const result = await Promise.race([run, timeout]);
+    if (timedOut || clock.now() > startedAt + timeoutMs) throw new Error(`Context model call exceeded ${timeoutMs} ms.`);
+    if (!result.text.trim()) throw new Error('Context model returned an empty response.');
+    if (utf8Bytes(result.text) > maxOutputBytes) throw new Error(`Context model output exceeds ${maxOutputBytes} bytes.`);
+    try {
+      return JSON.parse(result.text) as unknown;
+    } catch {
+      throw new Error('Context model output must be strict JSON without markdown or surrounding prose.');
+    }
+  } finally {
+    clock.clearTimeout(timer);
+  }
+}
+
+function utf8Bytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function assertPositiveInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive safe integer.`);
+}

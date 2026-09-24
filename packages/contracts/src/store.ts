@@ -79,6 +79,79 @@ export interface ConversationSessionRepo {
   upsert(record: ConversationSessionRecord): Promise<void>;
 }
 
+export type ConversationEventKind = 'user_message' | 'assistant_message' | 'tool_result' | 'plan_event';
+
+/** Append-only message/tool/plan event. Keep only safe, searchable text or an artifact reference. */
+export interface ConversationEventRecord {
+  eventId: string;
+  principalId: string;
+  sessionId: string;
+  kind: ConversationEventKind;
+  content?: string;
+  artifactRef?: string;
+  createdAt: string;
+  requestId?: string;
+}
+
+export interface ConversationLogQuery {
+  principalId: string;
+  sessionId?: string;
+  query?: string;
+  /** Return events after this append-order cursor (used by state rebuild/catch-up). */
+  afterEventId?: string;
+  before?: string;
+  limit: number;
+}
+
+export interface ConversationLogRepo {
+  /** Repeating an identical eventId/content is a no-op; reusing an id for different data is an error. */
+  append(record: ConversationEventRecord): Promise<void>;
+  list(query: ConversationLogQuery): Promise<ConversationEventRecord[]>;
+  search(query: ConversationLogQuery & { query: string }): Promise<ConversationEventRecord[]>;
+}
+
+export interface ContextStateRecord {
+  principalId: string;
+  sessionId: string;
+  updatedAt: string;
+  throughEventId: string;
+  reducerVersion: number;
+  state: unknown;
+}
+
+export interface ContextStateRepo {
+  get(principalId: string, sessionId: string): Promise<ContextStateRecord | null>;
+  upsert(record: ContextStateRecord): Promise<void>;
+}
+
+export type MemoryRecordType = 'preference' | 'fact';
+export type MemoryRecordStatus = 'active' | 'conflicted' | 'superseded' | 'deleted';
+
+/** Durable long-memory fact with immutable source-event references and optimistic versioning. */
+export interface MemoryRecordRecord {
+  memoryId: string;
+  principalId: string;
+  key: string;
+  type: MemoryRecordType;
+  content: string;
+  status: MemoryRecordStatus;
+  sourceEventIds: string[];
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface MemoryRecordRepo {
+  listByPrincipal(principalId: string): Promise<MemoryRecordRecord[]>;
+  /** Last successfully consolidated user source event; null means not started. */
+  getCursor(principalId: string): Promise<string | null>;
+  /**
+   * Atomically compare the principal cursor and record versions, write the full principal snapshot,
+   * then move the cursor. Returns false without writes on stale cursor/version data.
+   */
+  commit(principalId: string, expectedCursor: string | null, nextCursor: string | null, records: readonly MemoryRecordRecord[]): Promise<boolean>;
+}
+
 export interface PlatformTaskRecord {
   taskId: string;
   parentSessionId: string;
@@ -137,6 +210,10 @@ export interface AuditStore {
   requests: AgentRequestRepo;
   toolCalls: ToolCallRepo;
   sessions: ConversationSessionRepo;
+  conversationLog: ConversationLogRepo;
+  contextStates: ContextStateRepo;
+  /** Optional for older test stores and deployments. */
+  memoryRecords?: MemoryRecordRepo;
   /** Optional for backwards-compatible test stores and deployments. */
   platformTasks?: PlatformTaskRepo;
   /** Optional：缺省时写流程整体禁用（提案按普通回答处理）。 */

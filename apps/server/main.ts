@@ -6,9 +6,11 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
+import { closeStore, createSqlitePendingPlanConfirmationRepo, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
 import {
   createContextTaskRunner,
+  createLongMemoryCandidateExtractor,
+  createMemoryCandidateModel,
   createPiCodingTurnDriver,
   createPiTurnDriver,
   createTaxAgentRuntime,
@@ -17,9 +19,10 @@ import {
   isPlatformMock,
 } from '@fshine/agent';
 import { WecomBotChannel } from '@fshine/channel-wecom';
-import { renderBarChartPng } from './chart';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createMessageHandler } from './handler';
+import { createServerReplyHandler } from './reply';
+import { asAgentPendingRepo, createPlanConfirmationRoute } from './plan-confirmation-route';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -32,6 +35,7 @@ async function main(): Promise<void> {
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
   const dbPath = process.env['DB_PATH'] ?? path.join(repoRoot, 'data/agent.db');
   const store = createSqliteStore(dbPath);
+  const pendingPlanRepo = createSqlitePendingPlanConfirmationRepo(dbPath);
 
   for (const record of principalScopeRecords(config)) {
     await store.principalScopes.upsert(record);
@@ -46,6 +50,7 @@ async function main(): Promise<void> {
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。密钥只经 commit.ts
   // 单次 spawn 的 extraEnv 传给落账子进程（worker 路径本就不需要它）。
   const gateSecret = newGateSecret();
+  const planActivationSecret = process.env['DZ_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
 
   // 平台 mock 控制面（DZ_EXECUTOR=mock 时网关换 mock 应答器，gate 照真）：
   // 兜底状态路径必须在 worker/commit 子进程产生前写入本进程 env（全树继承）。
@@ -55,8 +60,10 @@ async function main(): Promise<void> {
   }
 
   const driver = createPiTurnDriver({ env: process.env });
+  const memoryCandidateExtractor = createLongMemoryCandidateExtractor(createMemoryCandidateModel(driver, { timeoutMs: 15_000 }));
   const workerDriver = createPiCodingTurnDriver({
     env: process.env,
+    planActivationSecret,
     // G1 工具门留痕：放行与拦截都进 tool_calls 审计（requestId 串查平台侧）。
     serveGateAudit: (event) => {
       const now = new Date().toISOString();
@@ -91,9 +98,36 @@ async function main(): Promise<void> {
     } : {}),
   });
 
+  const confirmationRoute = createPlanConfirmationRoute({
+    repo: asAgentPendingRepo(pendingPlanRepo),
+    activate: async (pending) => {
+      if (!platformRoot) throw new Error('幻账平台根目录未配置');
+      const { activatePendingPlan } = await import('@fshine/agent');
+      await activatePendingPlan({
+        platformRoot,
+        planId: pending.planId,
+        evidence: 'user-confirmed',
+        activationSecret: planActivationSecret,
+      });
+    },
+  });
+  const planConfirmation = {
+    handle: confirmationRoute.handle,
+    savePending: async (pending: { planId: string; version: number; taskId: string; principalId: string; sessionId: string; requestId: string; userText: string }) => {
+      await pendingPlanRepo.savePending({ ...pending, decision: 'confirm', expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), evaluation: {} });
+    },
+  };
+
   const runtime = createTaxAgentRuntime({
     driver,
+    intentDriver: driver,
+    // Context State extraction is a separate tool-free background turn using the same provider/model.
+    contextModelDriver: driver,
     sessions: store.sessions,
+    conversationLog: store.conversationLog,
+    contextStates: store.contextStates,
+    memoryRecords: store.memoryRecords,
+    memoryCandidateExtractor,
     sessionTtlMs: config.sessionTtlMs,
     // Leave time for the Main Agent to interpret the subagent's final text
     // after the delegated turn reaches its own deadline.
@@ -103,28 +137,15 @@ async function main(): Promise<void> {
 
   const channel = new WecomBotChannel({ env: process.env });
 
-  const sharedHandler = createMessageHandler({ store, runtime });
-  // 演示关键词:验证图片回传通道(真实场景 = 17dz artifact 截图,随 P6 接入)
-  const DEMO_IMAGE_PATTERN = /发图|测试图片|图片/;
-
-  await channel.start(async (message) => {
-    if (DEMO_IMAGE_PATTERN.test(message.text)) {
-      return {
-        text: '幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)',
-        image: {
-          data: renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200]),
-          filename: 'voucher-202607.png',
-        },
-      };
-    }
-    return sharedHandler(message);
-  });
+  const sharedHandler = createMessageHandler({ store, runtime, planConfirmation });
+  await channel.start(createServerReplyHandler(sharedHandler));
 
   console.log(JSON.stringify({ event: 'server_started', db: dbPath, contextProfiles: Object.keys(config.contextProfiles) }));
 
   const shutdown = async (signal: string): Promise<void> => {
     console.log(JSON.stringify({ event: 'shutting_down', signal }));
     await channel.stop();
+    pendingPlanRepo.close();
     closeStore(store);
     process.exit(0);
   };

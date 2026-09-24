@@ -9,6 +9,7 @@ import type {
   ChannelAdapter,
   ChannelReply,
   IncomingChannelMessage,
+  NoticeFn,
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
@@ -154,13 +155,25 @@ export class WecomBotChannel implements ChannelAdapter {
       progressCount += 1;
       void this.reply(frame, reqId, streamId, text, false);
     };
+    const notice: NoticeFn = async (text) => {
+      try {
+        await client.replyStream(frame, streamId, truncateUtf8(text, MAX_REPLY_BYTES), false);
+      } catch (error) {
+        console.error(JSON.stringify({
+          event: 'wecom_notice_fail',
+          req_id: reqId,
+          error: error instanceof Error ? error.message : String(error),
+        }));
+        throw error;
+      }
+    };
 
     // 秒回 ack:用户即时可见;最终答案以同 streamId 的 finish=true 帧整体替换
     void this.reply(frame, reqId, streamId, ACK_TEXT, false);
 
     let reply: ChannelReply;
     try {
-      reply = await handler(message, progress);
+      reply = await handler(message, progress, notice);
     } catch (error) {
       console.error(JSON.stringify({
         event: 'wecom_handler_error',

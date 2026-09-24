@@ -12,6 +12,7 @@ import {
   DefaultResourceLoader,
   ModelRuntime,
   SessionManager,
+  createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
@@ -19,6 +20,8 @@ import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { validatePlanAgainstTaskIntent } from './task-intent';
 
 export interface PiCodingTurnDriverOptions {
   /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
@@ -30,6 +33,8 @@ export interface PiCodingTurnDriverOptions {
   agentDir?: string;
   /** G1 工具门事件留痕（放行与拦截都上报，落 tool_calls 审计）。 */
   serveGateAudit?: (event: ServeGateEvent) => void;
+  planCliRunner?: PlanCliRunner;
+  planActivationSecret?: string;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -44,6 +49,11 @@ export interface PiCodingWorkerSessionOptions {
   agentDir: string;
   modelConfig: CodingModelConfig;
   serveGateAudit?: (event: ServeGateEvent) => void;
+  onNotice?: (text: string) => Promise<void>;
+  planCliRunner?: PlanCliRunner;
+  planActivationSecret?: string;
+  onPendingPlan?: (plan: PendingPlanConfirmation) => void;
+  taskIntent?: TurnDriverInput['taskIntent'];
 }
 
 export interface PiCodingWorkerSession {
@@ -68,7 +78,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
-      let budgetLimit: number | null = null;
+      let pendingPlan: PendingPlanConfirmation | undefined;
       const { session } = await createPiCodingWorkerSession({
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
@@ -79,14 +89,17 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
         serveGateAudit: (event) => {
           if (event.tool === 'bash' && event.allowed) gateCalls += 1;
-          if (event.budget) budgetLimit = event.budget.limit;
           options.serveGateAudit?.({ ...event, requestId: input.requestId });
         },
         knowledgePaths: input.knowledgePaths,
         sensitivePaths: input.sensitivePaths,
+        onNotice: input.onNotice,
+        planCliRunner: options.planCliRunner,
+        planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
+        onPendingPlan: (plan) => { pendingPlan = plan; },
+        taskIntent: input.taskIntent,
       });
-      const footprint = (): string =>
-        budgetLimit != null ? `${gateCalls}/${budgetLimit} 次 bin/17dz 调用` : `${gateCalls} 次 bin/17dz 调用`;
+      const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
 
       // TaskStore remains the source of truth.  Restore its transcript into
       // the SDK Agent rather than persisting a second session file in 17dz.
@@ -124,19 +137,20 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // duplicating it through AgentSession.prompt().
         await session.agent.continue();
         if (timedOut || cancelled || session.agent.state.errorMessage) {
-          return { text: '', messages: session.agent.state.messages, footprint: footprint() };
+          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(pendingPlan ? { pendingPlan } : {}) };
         }
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
+          ...(pendingPlan ? { pendingPlan } : {}),
         };
       } catch (error) {
         console.error(JSON.stringify({
           event: 'pi_coding_worker_error',
           errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
-        return { text: '', messages: session.agent.state.messages, footprint: footprint() };
+        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(pendingPlan ? { pendingPlan } : {}) };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -165,6 +179,19 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   });
   await loader.reload();
   const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
+  let activePlanId: string | null = null;
+  if (options.sessionId) {
+    try {
+      activePlanId = await loadCurrentActivePlan({
+        platformRoot: options.cwd,
+        taskId: options.sessionId,
+        runCli: options.planCliRunner,
+      });
+    } catch {
+      // Fail closed; resumed queries remain blocked until the worker obtains a host-approved plan.
+      activePlanId = null;
+    }
+  }
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: options.agentDir,
@@ -176,6 +203,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // Native SDK tools are intentionally owned by this Worker driver.
     // 无 grep/find：代码扫描失去工具入口（知识面经 read 白名单可达）。
     tools: ['read', 'ls', 'bash'],
+    customTools: [createBashToolDefinition(options.cwd, {
+      spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId) }),
+    }) as never],
   });
   // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
@@ -186,14 +216,54 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     platformRoot: options.cwd,
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
+    planActive: () => activePlanId !== null,
   });
-  session.agent.beforeToolCall = (ctx) =>
-    Promise.resolve(gate({
-      name: ctx.toolCall.name,
-      arguments: (typeof ctx.args === 'object' && ctx.args !== null
-        ? ctx.args
-        : ctx.toolCall.arguments) as Record<string, unknown>,
-    }));
+  session.agent.beforeToolCall = async (ctx) => {
+    const args = (typeof ctx.args === 'object' && ctx.args !== null
+      ? ctx.args
+      : ctx.toolCall.arguments) as Record<string, unknown>;
+    if (ctx.toolCall.name === 'bash') {
+      let parsed: ReturnType<typeof parsePlanCallsCommand>;
+      try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
+      catch (error) { return { block: true, reason: `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}` }; }
+      if (parsed) {
+        if (options.taskIntent) {
+          const scopeError = validatePlanAgainstTaskIntent(options.taskIntent, parsed.calls);
+          if (scopeError) {
+            activePlanId = null;
+            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮宿主意图执行或向用户澄清。` };
+          }
+        }
+        const previousPlanId = activePlanId;
+        activePlanId = null;
+        try {
+          const plan = await evaluateAndActivatePlan({
+            platformRoot: options.cwd,
+            taskId: options.sessionId ?? 'task_unknown',
+            requestId: options.requestId,
+            calls: parsed.calls,
+            onNotice: options.onNotice,
+            userConfirmed: parsed.userConfirmed,
+            runCli: options.planCliRunner,
+            activationSecret: options.planActivationSecret,
+          });
+          if (plan.status === 'active') {
+            activePlanId = plan.planId;
+            return { block: true, reason: `PLAN ACTIVE（${plan.planId} v${plan.version}）：按已提交 calls 执行；平台会逐次校验本计划。` };
+          }
+          if (plan.status === 'confirm') {
+            options.onPendingPlan?.(plan.pending);
+            return { block: true, reason: `PLAN NEEDS_USER_CONFIRM\n${plan.message}\n已暂停执行，等待宿主验证用户确认。` };
+          }
+          activePlanId = previousPlanId;
+          return { block: true, reason: `PLAN STOP\n${plan.message}` };
+        } catch (error) {
+          return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
+        }
+      }
+    }
+    return gate({ name: ctx.toolCall.name, arguments: args });
+  };
   const loaded = loader.getSkills().skills.map((skill) => ({
     name: skill.name,
     description: skill.description,

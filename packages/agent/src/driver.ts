@@ -6,6 +6,8 @@
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
+import type { PendingPlanConfirmation } from './plan-runtime';
+import type { TaskIntent } from './task-intent';
 
 /** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
 export type DriverMessage = AgentMessage;
@@ -32,10 +34,14 @@ export interface TurnDriverInput {
   requestId?: string;
   /** Parent cancellation propagated into a delegated agent turn. */
   signal?: AbortSignal;
+  /** Host-validated semantic scope for directly routed platform tasks. */
+  taskIntent?: Extract<TaskIntent, { kind: 'platform_query' }>;
   /** 平台仓知识面规则（worker read/ls 白名单；缺省用 G1 内置）。 */
   knowledgePaths?: readonly string[];
   /** 平台仓敏感路径规则（worker 禁读；缺省用 G1 内置）。 */
   sensitivePaths?: readonly string[];
+  /** Trusted host notice callback, awaited before any notify-required plan activates. */
+  onNotice?: (text: string) => Promise<void>;
 }
 
 export interface TurnDriverResult {
@@ -45,6 +51,8 @@ export interface TurnDriverResult {
   messages: DriverMessage[];
   /** 执行面回执（worker 驱动专有）：本轮网关调用数/预算，供上层委派方感知重量 */
   footprint?: string;
+  /** Platform plan pending for a host-side user confirmation flow. */
+  pendingPlan?: PendingPlanConfirmation;
 }
 
 export interface TurnDriver {

@@ -6,6 +6,7 @@
 
 - Node 24+、TypeScript strict、ESM；单 npm 项目，不使用 workspaces。
 - Main Agent 使用 `pi-agent-core` 的轻量 driver。
+- 当前消息先经独立的语义意图路由模型，返回严格结构化的 conversation / clarify / platform_query 决策；财务查询不会先让 Main Agent 自由作答后再猜是否调用工具。
 - 17dz 子 Agent 使用官方 `pi-coding-agent` 的 headless `AgentSession`，由 adapter 固定 cwd、Skills、模型和生命周期。
 - 依赖统一声明在根 `package.json`，子 Agent 不在运行时安装依赖。
 - SQLite 通过 repository 接口保存 principal、会话、任务和审计数据。
@@ -21,6 +22,15 @@
 | `apps/server` | 生产装配和进程生命周期 |
 | `docs` | 设计和验收基线 |
 
+## 2.1 当前回合意图路由
+
+每条消息由单独的无工具模型回合判断为普通对话、需要澄清或实时平台查询。路由器只把历史作为明确指代的证据；重复的实时数据问题仍必须重新委派，不复用上一条助手答案或旧的待确认计划。
+
+- 余额请求没有可唯一确定的账套时，宿主先询问账套，不调用查询工具。
+- 实时平台任务由宿主用当前原始用户消息直接启动 `run_17dz_task`；Main Agent 不再有机会用旧结果跳过本轮执行。
+- 账套/期间来自当前消息时，路由结果要给出原文证据；来自上下文时，要给出当前消息中的指代和上下文证据。证据无法验证或 JSON 不合法时失败关闭并澄清。
+- 平台结果作为本轮结果返回；普通聊天再进入 Main Agent。
+
 ## 3. 委派接口
 
 主 Agent 只暴露一个 17dz 委派工具：
@@ -32,7 +42,7 @@ run_17dz_task({
 })
 ```
 
-工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测状态。Main Agent 自己决定是否回答用户、转达问题或继续调用工具。
+工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测子 Agent 状态。结构化意图路由器先决定任务类型；实时任务由宿主委派，Main Agent 只处理普通对话和受限结果整理。
 
 任务存储负责 transcript、绑定和恢复：任务只能由创建它的 principal 和主会话恢复；用户补充信息时复用 task ID，新请求创建新任务。
 
@@ -68,6 +78,16 @@ contextProfiles:
 领域脚本是实时财税数据和副作用的边界。它必须执行账套范围、只读/写能力、用户确认、幂等和凭据保护；Main Agent 的提示词和自然语言结果不能替代这些硬约束。
 
 V0 只验收只读查询。任何未来写路径都必须先实现领域侧的 dry-run、确认记录和幂等语义，并单独验收，不通过增加 Main Agent 文本状态分类来实现。
+
+### 7.1 计划重量反馈
+
+Agent 提交精确 operation 调用草案，不能自行批准预算。`17dz-platform` 通过 `plan evaluate` 根据操作目录计算调用数、预计耗时、范围变化和累计用量，并返回 `execute`、`notify`、`confirm` 或 `stop`。`notify` 必须先由 fshine 等待企微通知送达再激活；`confirm` 只能由宿主依据真实企微用户消息激活。模型提交的 `user_confirmed` 字段不是授权凭据。
+
+计划状态跨进程持久化，实际 query/operation run 逐次核对计划、参数和累计预算。计划激活密钥只在宿主激活子进程中使用，不进入 worker 环境。
+
+### 7.2 会话上下文分层
+
+Pi transcript 仍作为兼容和恢复状态保存；默认 Main 上下文使用带来源的 Context State、当前消息和少量完整近期回合。原始 Conversation Log 追加保存并支持受 principal/session 限制的历史工具检索。语义 Context State 提取失败时回退确定性 reducer，不阻塞主回复。
 
 ## 8. 测试与工作方式
 

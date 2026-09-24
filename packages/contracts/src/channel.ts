@@ -35,10 +35,14 @@ export type ChannelReply = string | RichChannelReply;
 /** 进度回调:adapter 提供(节流 + finish=false 流帧),handler/runtime 在阶段节点调用 */
 export type ProgressFn = (text: string) => void;
 
+/** 重要计划通知：发送完成后调用方才可继续执行；失败必须向调用方抛出。 */
+export type NoticeFn = (text: string) => Promise<void>;
+
 /** 处理消息并返回回复;adapter 负责上传图片、文本截断与推送 */
 export type ReplyHandler = (
   message: IncomingChannelMessage,
   progress?: ProgressFn,
+  notice?: NoticeFn,
 ) => Promise<ChannelReply>;
 
 export interface ChannelAdapter {

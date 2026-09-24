@@ -7,6 +7,7 @@
  */
 
 export const PLATFORM_OPERATIONS = {
+  financeSearchAccountSets: 'finance.search-account-sets',
   voucherPrepare: 'voucher.prepare',
   voucherCommit: 'voucher.commit',
   voucherQuerySaved: 'voucher.query-saved',
@@ -17,7 +18,7 @@ export const PLATFORM_OPERATIONS = {
 export interface PlatformEnvelope {
   v: 1;
   op: string;
-  status: 'completed' | 'failed' | 'needs_input';
+  status: 'completed' | 'failed' | 'needs_input' | 'not_found';
   data: Record<string, unknown> | null;
   error: { code: string; message: string } | null;
 }

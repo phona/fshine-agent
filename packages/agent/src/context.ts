@@ -12,6 +12,8 @@ import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
+import type { PendingPlanConfirmation } from './plan-runtime';
+import type { TaskIntent } from './task-intent';
 import { ToolUserError, type TurnDriverResult } from './driver';
 import type {
   AgentReply,
@@ -38,11 +40,14 @@ export const RUN_17DZ_TASK_DESCRIPTION = [
 export interface Run17dzTaskArgs {
   request: string;
   taskId?: string;
+  /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
+  taskIntent?: Extract<TaskIntent, { kind: 'platform_query' }>;
 }
 
 export interface SubagentTaskResult {
   taskId: string;
   text: string;
+  pendingPlan?: PendingPlanConfirmation;
 }
 
 /** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关 bin/17dz prepare）。 */
@@ -349,7 +354,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
         result = await options.workerDriver.run({
-          systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds),
+          systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.taskIntent),
           tools: [],
           messages,
           cwd: profile.root,
@@ -360,10 +365,38 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
           deadline,
           signal,
+          ...(args.taskIntent ? { taskIntent: args.taskIntent } : {}),
           ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
           ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
+          ...(ctx.trusted.onNotice ? { onNotice: ctx.trusted.onNotice } : {}),
         });
         if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
+        if (result.pendingPlan) {
+          const pendingPlan: PendingPlanConfirmation = {
+            ...result.pendingPlan,
+            taskId,
+            principalId: ctx.trusted.principalId,
+            sessionId: ctx.trusted.sessionId,
+            requestId: ctx.trusted.requestId,
+          };
+          await options.tasks.upsert({
+            ...running,
+            workerMessages: result.messages as unknown[],
+            updatedAt: new Date().toISOString(),
+          });
+          if (!ctx.trusted.onPlanPending) throw new Error('平台计划待确认，但宿主未配置安全持久化回调。');
+          await ctx.trusted.onPlanPending({
+            planId: pendingPlan.planId,
+            version: pendingPlan.version,
+            taskId,
+            principalId: ctx.trusted.principalId,
+            sessionId: ctx.trusted.sessionId,
+            requestId: ctx.trusted.requestId,
+            userText: result.pendingPlan.userText,
+          });
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending' }));
+          return { taskId, text: result.text, pendingPlan };
+        }
         const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
         if (proposal) {
           const handled = await finalizeProposal(proposal, ctx, taskId);
@@ -460,7 +493,11 @@ function isInside(root: string, candidate: string): boolean {
   return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
-function workerSystemPrompt(root: string, allowedAccountSetIds: readonly string[]): string {
+function workerSystemPrompt(
+  root: string,
+  allowedAccountSetIds: readonly string[],
+  taskIntent?: Extract<TaskIntent, { kind: 'platform_query' }>,
+): string {
   const scope = allowedAccountSetIds.length > 0
     ? `调用者的应用层账套 allowlist：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外账套。`
     : '应用层未提供账套 allowlist；账套访问范围必须以平台领域脚本的权限校验为准。';
@@ -471,8 +508,12 @@ function workerSystemPrompt(root: string, allowedAccountSetIds: readonly string[
     '实时账务数据必须来自领域脚本结果，不得编造；不要读取源码后猜内部 ID，也不要自行重实现平台流程。',
     '本链路支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 技能产出变更提案）。写操作由服务端在用户确认后执行——你不得也不需要执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
     '调用网关直接使用 `bin/17dz <query|prepare> …`（平台统一网关，mode 决定裁决矩阵），不要加 cd/env 等前缀。',
-    '执行前必须先提交执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","account_sets":["账套"],"periods":["202607"],"read":["query-saved"],"max_gate_calls":6,"completion":["list_reported"]}（read 填脚本短名）。审批结果以拦截消息返回，三种都是正常流程：PLAN APPROVED 按预算执行；PLAN DECLINED 按原因修正后原样重提，不要换其他命令试探；PLAN NEEDS_USER_CONFIRM 表示方案重量超过自动审批阈值——立即结束回合向用户转达预估调用数/耗时并请求确认，用户同意后重报同一方案并附 "user_confirmed": true，不要擅自缩小或放弃，也不要未经确认继续调用。',
-    '方案即预算：只调用 authority.read 里申报的脚本，预算用尽就收尾汇总已有信息，不要反复试探；确需扩大执行面就重报方案并说明理由。',
+    '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[{"operation":"voucher.query-saved","args":["账套名","期间"]}]}。calls 必须逐项列出你准备执行的平台注册 operation 及其原生参数；照 Skill/operation 文档填写，禁止自行把账套、期间映射成参数。平台返回 PLAN ACTIVE 后才能查询。',
+    '计划由平台 CLI 评估并在每次调用时校验。PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主收到并验证真实用户确认/通知，不得凭模型字段或用户消息转述自行激活。PLAN STOP 时直接说明停止原因。计划范围扩大时必须重新提交完整精确 calls。',
+    '用户只问账套是否存在或要查账套候选时，只能调用 finance.search-account-sets，并且只提交这一项调用。不得用 finance.query-receivables、凭证查询或科目查询代替，也不得继续查期间、余额或客户。若平台 operation 清单或 Skill 中没有 finance.search-account-sets，或它明确报告能力不可用，应停止并明确告知用户无法确认；不得用其它查询接口试探。',
+    '未指定账套时不能把历史出现过的账套自动当作本次范围；如果当前请求和紧邻上下文不能唯一确定账套，先向用户询问要查哪个账套，不得并行遍历历史账套。',
+    '余额查询没有用户指定期间时只查当前期间。应收余额查询失败后必须停止并如实报告；不得用历史凭证或扩大期间范围估算期末余额。历史凭证查询只用于用户明确要求的凭证明细或期间核对，不能替代余额表。',
+    ...(taskIntent ? [`宿主意图路由已核验本轮范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(taskIntent)}`] : []),
     '知识只经 read 读取固定知识面：技能 SKILL.md、src/<域>/MECHANISMS.md、*.schema.json；实现源码不可读也不需要读（工具面无 grep/find）。',
     scope,
     '缺少信息时直接用自然语言说明需要用户补充什么；完成时直接返回可供主 Agent 使用的自然语言结果和必要证据。',
