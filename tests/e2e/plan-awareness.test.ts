@@ -5,6 +5,7 @@
  *
  * The suite owns a private DZ_PLAN_STATE file and never touches live platform data.
  */
+import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { closeSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -13,12 +14,14 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRequest, type PlanCliRunner, type PlanEvaluation } from '../../packages/agent/src/plan-runtime';
 
-const platformRoot = process.env['DZ_PLATFORM_ROOT'];
-const integration = describe.skipIf(!platformRoot)('fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
+/** Sibling platform repo by default so this suite runs in a normal `npm test`. */
+const platformRoot = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
+const cliPath = path.join(platformRoot, 'bin', '17dz');
+// Never silently skip: a missing CLI is an explicit failure, not a green run.
+const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
   let stateDir: string;
   let env: NodeJS.ProcessEnv;
   let subprocessSequence = 0;
-  const cliPath = path.join(platformRoot!, 'bin', '17dz');
 
   beforeAll(() => {
     stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-plan-acceptance-'));

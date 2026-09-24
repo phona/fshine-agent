@@ -10,7 +10,6 @@ import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
-import { routeTaskIntent } from './task-intent';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
@@ -20,8 +19,6 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 
 export interface TaxAgentRuntimeDeps {
   driver: TurnDriver;
-  /** Semantic intent router; production sets this to the configured model driver. */
-  intentDriver?: TurnDriver;
   sessions: Pick<ConversationSessionRepo, 'get' | 'upsert'>;
   platformTask: ContextTaskRunner;
   /** Durable, append-only raw conversation log; separate from compactable Pi transcript. */
@@ -165,39 +162,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       const historyTools = deps.conversationLog
         ? createHistoryTools(deps.conversationLog, { principalId: ctx.principalId, sessionId: ctx.sessionId })
         : [];
-      if (deps.intentDriver) {
-        const intent = await routeTaskIntent({
-          driver: deps.intentDriver,
-          messages: context,
-          currentUserMessage: userMessage,
-          onStep: ctx.onStep ?? (() => {}),
-          deadline: Date.now() + Math.min(turnBudgetMs, 30_000),
-        });
-        console.info(JSON.stringify({ event: 'task_intent_route', requestId: ctx.requestId, kind: intent.intent.kind, ...(intent.intent.kind === 'platform_query' ? { taskType: intent.intent.taskType } : {}), ...(intent.error ? { error: intent.error } : {}) }));
-        if (intent.intent.kind === 'clarify') {
-          return await finishDirectReply(intent.intent.question, 'task_intent_clarification');
-        }
-        if (intent.intent.kind === 'platform_query') {
-          try {
-            const result = await deps.platformTask.run({ request: userMessage, taskIntent: intent.intent }, { trusted: ctx });
-            return await finishDirectReply(result.text.trim() || FALLBACK_FAILURE, 'platform_task_routed', result.text);
-          } catch (error) {
-            console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
-            return await finishDirectReply(FALLBACK_FAILURE, 'platform_task_route_failed');
-          }
-        }
-      }
       const tools = [
-        ...(!deps.intentDriver ? [deps.platformTask.tool] : []),
+        deps.platformTask.tool,
         ...historyTools.map((tool) => tool.definition),
       ];
 
       const deadline = Date.now() + turnBudgetMs;
       const initialMessageCount = context.length;
       const result = await deps.driver.run({
-        systemPrompt: deps.intentDriver
-          ? `${SYSTEM_PROMPT}\n\n本轮已由宿主语义路由判定为普通对话，因此本回合不提供 17dz 执行工具。历史财务结果不是当前事实；若用户实际想查询实时数据，请向用户询问查询范围，不要编造或重放旧答复。`
-          : SYSTEM_PROMPT,
+        systemPrompt: SYSTEM_PROMPT,
         tools,
         messages: context,
         onStep: ctx.onStep ?? (() => {}),

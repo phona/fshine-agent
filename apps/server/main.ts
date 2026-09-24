@@ -120,7 +120,6 @@ async function main(): Promise<void> {
 
   const runtime = createTaxAgentRuntime({
     driver,
-    intentDriver: driver,
     // Context State extraction is a separate tool-free background turn using the same provider/model.
     contextModelDriver: driver,
     sessions: store.sessions,
