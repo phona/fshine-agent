@@ -9,6 +9,8 @@ import type { SqlitePendingPlanConfirmationRepo, StoredPendingPlanConfirmation }
 export interface PlanConfirmationRouteOptions {
   repo: PendingPlanConfirmationRepo | SqlitePendingPlanConfirmationRepo;
   activate: (pending: PendingPlanConfirmationRecord, evidence: { messageId: string; principalId: string; sessionId: string; text: string; receivedAt: string }) => Promise<void>;
+  /** Host-side pre-check against the platform, so a stale confirmation is explained, not generic-failed. */
+  verifyActivatable?: (pending: PendingPlanConfirmationRecord) => Promise<void>;
 }
 
 /** Host-only bridge from a trusted channel message to the durable confirmation matcher. */
@@ -20,6 +22,7 @@ export function createPlanConfirmationRoute(options: PlanConfirmationRouteOption
         message,
         repo,
         activate: options.activate,
+        ...(options.verifyActivatable ? { verifyActivatable: options.verifyActivatable } : {}),
         ...(now ? { now } : {}),
       });
     },

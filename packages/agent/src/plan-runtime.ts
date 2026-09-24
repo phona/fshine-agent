@@ -76,6 +76,20 @@ export async function loadCurrentActivePlan(options: {
   return { planId: current.planId, version: typeof current.version === 'number' ? current.version : 0 };
 }
 
+/** Current platform-side status of one specific plan, used to detect stale confirmations. */
+export async function loadPlanStatus(options: {
+  platformRoot: string;
+  planId: string;
+  runCli?: PlanCliRunner;
+  env?: NodeJS.ProcessEnv;
+}): Promise<{ planId: string; version: number | null; status: string } | null> {
+  const result = await runJson<{ planId: string; version: number | null; status: string }>(
+    options.runCli ?? defaultCliRunner,
+    { platformRoot: options.platformRoot, args: ['plan', 'status', '--plan-id', options.planId], env: options.env },
+  );
+  return result && typeof result.status === 'string' ? result : null;
+}
+
 const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
   const child = spawn(path.join(platformRoot, 'bin', '17dz'), args, {
     cwd: platformRoot,

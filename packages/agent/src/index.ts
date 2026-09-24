@@ -46,6 +46,7 @@ export {
   createPlanScopedWorkerEnv,
   evaluateAndActivatePlan,
   formatPlanMessage,
+  loadPlanStatus,
   loadCurrentActivePlan,
   parsePlanCallsCommand,
   validateCalls,
@@ -59,6 +60,7 @@ export {
 } from './plan-runtime';
 export {
   matchAndResolvePlanConfirmation,
+  PlanSupersededError,
   type PendingPlanConfirmationRecord,
   type PendingPlanConfirmationRepo,
   type PlanConfirmationEvidence,

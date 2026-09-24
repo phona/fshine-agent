@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   matchAndResolvePlanConfirmation,
+  PlanSupersededError,
   type PendingPlanConfirmationRecord,
   type PendingPlanConfirmationRepo,
 } from './src/plan-confirmation';
@@ -50,6 +51,27 @@ describe('跨轮计划确认', () => {
       messageId: 'msg_1', principalId: 'wecom:user_a', sessionId: 'chat_a', text: '确认继续', receivedAt: now,
     });
     expect(repo.audit).toEqual([{ messageId: 'msg_1', resolution: 'confirmed' }]);
+  });
+
+  it('R9 平台已取代该计划时返回 superseded，不激活也不落审计', async () => {
+    const repo = new MemoryPendingRepo([pending()]);
+    const activate = vi.fn(async () => {});
+    const result = await matchAndResolvePlanConfirmation({
+      message: incoming(), repo, activate, now,
+      verifyActivatable: async () => { throw new PlanSupersededError('plan_1', 2, 'task_1'); },
+    });
+    expect(result).toEqual({ status: 'superseded', planId: 'plan_1', version: 2, taskId: 'task_1', messageId: 'msg_1' });
+    expect(activate).not.toHaveBeenCalled();
+    expect(repo.audit).toEqual([]);
+    expect(repo.records).toHaveLength(1); // 被取代的计划不应被消费，交由过期或显式作废收尾
+  });
+
+  it('verifyActivatable 的非取代类错误照常抛出', async () => {
+    const repo = new MemoryPendingRepo([pending()]);
+    await expect(matchAndResolvePlanConfirmation({
+      message: incoming(), repo, activate: vi.fn(async () => {}), now,
+      verifyActivatable: async () => { throw new Error('platform unavailable'); },
+    })).rejects.toThrow('platform unavailable');
   });
 
   it('接受明确取消并消费 pending，但不调用激活', async () => {

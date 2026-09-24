@@ -97,6 +97,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           const resumed = await runtime.handleTurn({ ...trusted, resumeTaskId: confirmation.taskId }, message.text);
           return resumed.text;
         }
+        if (confirmation.status === 'superseded') return '这项扩大查询已经被更新的计划取代，之前的确认不再有效。请重新发起查询，我会按新的范围再问你一次。';
         if (confirmation.status === 'cancelled') return '已取消本次扩大查询。';
         if (confirmation.status === 'ambiguous') return '当前有多个待确认查询，请先说明要继续哪一个。';
         if (confirmation.status === 'expired') return '这项查询确认已过期，请重新发起查询。';

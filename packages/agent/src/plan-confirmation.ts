@@ -41,14 +41,32 @@ export interface WecomUserConfirmationMessage extends PlanConfirmationEvidence {
 export type ConfirmationMatchResult =
   | { status: 'activated'; planId: string; version: number; taskId: string; messageId: string }
   | { status: 'cancelled'; planId: string; version: number; taskId: string; messageId: string }
+  | { status: 'superseded'; planId: string; version: number; taskId: string; messageId: string }
   | { status: 'ignored' }
   | { status: 'ambiguous' }
   | { status: 'expired'; planId: string; version: number };
+
+/**
+ * The platform no longer considers this plan activatable because a newer plan replaced it.
+ * Surfaced as its own outcome so the user gets a deterministic explanation instead of a
+ * generic failure when a stale "确认继续" arrives.
+ */
+export class PlanSupersededError extends Error {
+  constructor(readonly planId: string, readonly version: number, readonly taskId: string) {
+    super(`PLAN_SUPERSEDED:${planId}:v${version}`);
+    this.name = 'PlanSupersededError';
+  }
+}
 
 export async function matchAndResolvePlanConfirmation(input: {
   message: WecomUserConfirmationMessage;
   repo: PendingPlanConfirmationRepo;
   activate: (pending: PendingPlanConfirmationRecord, evidence: PlanConfirmationEvidence) => Promise<void>;
+  /**
+   * Host-side pre-check that the platform still accepts this plan. Throwing PlanSupersededError
+   * turns the outcome into `superseded` instead of a generic activation failure.
+   */
+  verifyActivatable?: (pending: PendingPlanConfirmationRecord) => Promise<void>;
   now?: string;
 }): Promise<ConfirmationMatchResult> {
   const { message } = input;
@@ -74,6 +92,16 @@ export async function matchAndResolvePlanConfirmation(input: {
   if (active.length !== 1) return { status: 'ambiguous' };
 
   const pending = active[0]!;
+  if (input.verifyActivatable) {
+    try {
+      await input.verifyActivatable(pending);
+    } catch (error) {
+      if (error instanceof PlanSupersededError) {
+        return { status: 'superseded', planId: pending.planId, version: pending.version, taskId: pending.taskId, messageId: message.messageId };
+      }
+      throw error;
+    }
+  }
   const evidence: PlanConfirmationEvidence = {
     messageId: message.messageId,
     principalId: message.principalId,

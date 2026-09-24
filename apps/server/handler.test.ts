@@ -62,6 +62,25 @@ describe('createMessageHandler', () => {
     expect(seen[0]?.resumeTaskId).toBe('task_1');
   });
 
+  it('R9 待确认计划已被新计划取代时给出确定性解释，不再落到通用失败', async () => {
+    const seen: TrustedContext[] = [];
+    const runtime: AgentRuntime = {
+      handleTurn: async (ctx) => { seen.push(ctx); return { text: '不应继续执行。' }; },
+    };
+    const handler = createMessageHandler({
+      store: fakeStore(),
+      runtime,
+      planConfirmation: {
+        handle: async () => ({ status: 'superseded', planId: 'plan_old', version: 2, taskId: 'task_1' }),
+      },
+    });
+    const reply = await handler({ wecomUserId: USER, conversationId: 'c', messageId: 'm2', text: '确认继续', receivedAt: '2026-09-24T00:00:00.000Z' });
+
+    expect(reply).toContain('已经被更新的计划取代');
+    expect(reply).not.toContain('处理失败');
+    expect(seen).toHaveLength(0);
+  });
+
   it('记录已送达的执行计划通知到可检索历史', async () => {
     const events: Array<{ eventId: string; kind: string; content?: string }> = [];
     const store = {

@@ -100,6 +100,16 @@ async function main(): Promise<void> {
 
   const confirmationRoute = createPlanConfirmationRoute({
     repo: asAgentPendingRepo(pendingPlanRepo),
+    // 激活前先问平台这条计划是否还有效：被新计划取代时给用户确定性的解释，
+    // 而不是把 PLAN_NOT_PENDING 吞成一句"处理失败"。
+    verifyActivatable: async (pending) => {
+      if (!platformRoot) throw new Error('幻账平台根目录未配置');
+      const { loadPlanStatus, PlanSupersededError } = await import('@fshine/agent');
+      const status = await loadPlanStatus({ platformRoot, planId: pending.planId });
+      if (status && status.status !== 'pending') {
+        throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
+      }
+    },
     activate: async (pending) => {
       if (!platformRoot) throw new Error('幻账平台根目录未配置');
       const { activatePendingPlan } = await import('@fshine/agent');
