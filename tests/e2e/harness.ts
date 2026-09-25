@@ -1,5 +1,5 @@
 /**
- * 离线全链 e2e：把消息直接灌进生产装配，断言用户最终会收到什么。
+ * 离线全链 e2e 共享替身：tests/e2e/turn-loop-*.test.ts 四个文件共用。
  *
  * 与手工企微测试的差别只有两处是假的：
  *   - 模型（Main Agent 与 17dz 子 Agent 都用脚本化驱动回放）
@@ -10,12 +10,16 @@
  *
  * 子 Agent 替身不复刻模型行为，但复刻它的门禁行为：提交计划走真实的
  * evaluateAndActivatePlan，执行走真实的 operation run + DZ_PLAN_ID 绑定。
+ *
+ * 并行安全：每个导入本模块的测试文件各得一份模块实例（独立 stateDir 与 counter），
+ * 文件内每个用例再按编号分到独立的平台状态文件；vitest 线程池给每个文件独立的
+ * process.env 副本，四个文件并行跑不会串味。
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -159,7 +163,7 @@ function silentDriver() {
   };
 }
 
-type WorkerStep =
+export type WorkerStep =
   | { plan: PlanCall[]; stopAtConfirm?: boolean }
   | { execute: PlanCall[] }
   | { text: string };
@@ -377,218 +381,18 @@ function growingPlan(n: number): PlanCall[] {
   }));
 }
 
-// ── 场景 ────────────────────────────────────────────────────────────────
-
-describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
-  it('1.6 不问账套的实时余额问题先追问，不调用平台', async () => {
-    const before = totalActualCalls();
-    const { send, sdk, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'missing', accountQueries: [], question: '要查哪个账套？' }]),
-      worker: gatedWorker([{ text: '不应执行' }]),
-    });
-    const reply = await send('帮我查一下猫一杯的应收账款还有多少');
-    expect(reply).toContain('账套');
-    expect(sdk.noticeTexts()).toHaveLength(0);
-    expect(totalActualCalls()).toBe(before);
-    await assembly.close();
-  });
-
-  it('1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复', async () => {
-    const worker = () => gatedWorker([
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 51 元。' },
-    ]);
-    const main = () => mainDriver([
-      { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-    ]);
-
-    const first = await boot({ main: main(), worker: worker() });
-    const firstReply = await first.send('查一下幻辰财税的应收账款');
-    expect(firstReply).toContain('51 元');
-    expect(firstReply).not.toContain('不应外发');
-    const callsAfterFirst = totalActualCalls();
-    expect(callsAfterFirst).toBeGreaterThan(0);
-    await first.assembly.close();
-
-    // 同一问题重问：宿主会话里已经有旧答复，但仍必须重新查询
-    const second = await boot({ main: main(), worker: worker() });
-    const secondReply = await second.send('查一下幻辰财税的应收账款');
-    expect(secondReply).toContain('51 元');
-    expect(totalActualCalls()).toBeGreaterThan(callsAfterFirst);
-    await second.assembly.close();
-  });
-
-  it('1.6/5.4 申报夹带历史账套时降级为澄清，不委派', async () => {
-    const before = totalActualCalls();
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] }]),
-      worker: gatedWorker([{ text: '幻东应收 42 元。' }]),
-    });
-    const reply = await send('帮我查一下猫一杯的应收账款还有多少');
-    expect(reply).toContain('账套');
-    expect(reply).not.toContain('幻东');
-    expect(reply).not.toContain('42 元');
-    expect(totalActualCalls()).toBe(before);
-    await assembly.close();
-  });
-
-  it('2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论', async () => {
-    const before = totalActualCalls();
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
-      // 子 Agent 直接给结论，没有任何计划激活与平台调用
-      worker: gatedWorker([{ text: '幻辰财税 202609 应收余额大概是 42 元。' }]),
-    });
-    const reply = await send('查一下幻辰财税的应收账款');
-    expect(reply).toContain('没有产生任何平台查询');
-    expect(reply).not.toContain('42 元');
-    expect(totalActualCalls()).toBe(before);
-    await assembly.close();
-  });
-
-  it('2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行', async () => {
-    const { send, sdk, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
-      worker: gatedWorker([{ plan: nineMonthPlan() }]),
-    });
-    const reply = await send('查幻辰财税账套 1 到 9 月的应收账款');
-
-    const notices = sdk.noticeTexts();
-    expect(notices.length).toBeGreaterThan(0);
-    expect(notices.join('\n')).toContain('2026年01月至2026年09月');
-    // 通知帧必须早于最终回复帧
-    const noticeIndex = sdk.frames.findIndex((frame) => frame.content.startsWith('计划通知：'));
-    const finalIndex = sdk.frames.map((frame) => frame.finish).lastIndexOf(true);
-    expect(noticeIndex).toBeGreaterThanOrEqual(0);
-    expect(noticeIndex).toBeLessThan(finalIndex);
-    // 通知放行后，跨月查询真的执行了
-    expect(reply).toContain('query-receivables');
-    expect(totalActualCalls()).toBeGreaterThan(0);
-    await assembly.close();
-  });
-
-  it('2.6 计划通知投递失败时不激活、不执行扩展查询', async () => {
-    const before = totalActualCalls();
-    const { send, sdk, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
-      worker: gatedWorker([{ plan: nineMonthPlan() }]),
-    });
-    sdk.failNotice = '2026年01月至2026年09月';
-    const reply = await send('查幻辰财税账套 1 到 9 月的应收账款');
-
-    expect(sdk.noticeTexts().length).toBeGreaterThan(0);
-    expect(reply).not.toContain('query-receivables');
-    expect(reply).toContain('失败');
-    expect(totalActualCalls()).toBe(before);
-    await assembly.close();
-  });
-
-  it('2.7 高重量计划等用户确认，确认后激活并续跑原任务', async () => {
-    const resumeInputs: string[] = [];
-    const { send, sdk, assembly } = await boot({
-      main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-      ], (input) => resumeInputs.push(JSON.stringify(input.messages))),
-      worker: gatedWorker([{ plan: heavyPlan(), stopAtConfirm: true }, { execute: heavyPlan() }, { text: '已按你确认的范围查完 1 至 9 月。' }]),
-    });
-    const asked = await send('查幻辰财税账套全年的应收账款');
-    expect(asked).toContain('确认继续');
-    expect(totalActualCalls()).toBe(0);
-
-    const done = await send('确认继续');
-    expect(done).toContain('整理完成');
-    expect(resumeInputs.join('')).toContain('已按你确认的范围查完');
-    expect(totalActualCalls()).toBeGreaterThan(0);
-    await assembly.close();
-  });
-
-  it('2.7 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
-    const { send, assembly } = await boot({
-      main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-      ]),
-      worker: gatedWorker([{ plan: heavyPlan() }, { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) }]),
-    });
-    await send('查幻辰财税账套全年的应收账款');
-    // 同一任务再提一个轻量计划：平台把旧计划标记为 superseded
-    await send('只查本月幻辰财税的应收账款');
-    const stale = await send('确认继续');
-
-    expect(stale).toContain('已经被更新的计划取代');
-    expect(stale).not.toContain('处理失败');
-    await assembly.close();
-  });
-
-  it('2.8 同一任务内反复通知后升级为必须等用户确认', async () => {
-    // 计数器按 taskId 记账：必须是同一个任务里连续改口径，才能观察到升级。
-    const { send, sdk, assembly } = await boot({
-      main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-      ]),
-      worker: gatedWorker([{ plan: growingPlan(4) }, { plan: growingPlan(6) }, { plan: growingPlan(8) }]),
-    });
-    const reply = await send('查幻辰财税账套的应收账款');
-
-    // 前两次是 notify 档通知，第三次是升级后的确认询问（confirm 也会先告知用户）
-    expect(sdk.noticeTexts()).toHaveLength(3);
-    expect(sdk.noticeTexts().at(-1)).toContain('确认继续');
-    expect(reply).toContain('确认继续');
-    await assembly.close();
-  });
-
-  it('1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测', async () => {
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'account_search', searchQuery: '胜利' }]),
-      worker: gatedWorker([
-        { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] }] },
-        { text: '现有接口没有账套目录搜索能力返回"胜利"，我无法确认这个账套是否存在。' },
-      ]),
-    });
-    const reply = await send('只查账套目录，看看有没有胜利这个帐套');
-
-    expect(reply).toContain('无法确认');
-    // 平台账本里这个任务只登记了目录搜索，没有余额/凭证调用
-    const tasks = Object.values(ledger().tasks ?? {});
-    const last = tasks.at(-1) as { actual?: { calls?: number } } | undefined;
-    expect(last?.actual?.calls ?? 0).toBe(1);
-    await assembly.close();
-  });
-
-  it('1.4 未授权用户被安全拒绝，不泄露其他用户或账套信息', async () => {
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'conversation' }]),
-      worker: gatedWorker([{ text: '不应执行' }]),
-    });
-    const reply = await send('查一下幻辰财税的应收账款', { userid: 'stranger' });
-
-    expect(reply).toContain('未开通查询权限');
-    expect(reply).not.toContain('幻辰');
-    await assembly.close();
-  });
-
-  it('5.x 群聊消息剥离开头 @机器人 后照常处理', async () => {
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'account_search', searchQuery: '幻辰' }]),
-      worker: gatedWorker([
-        { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '幻辰'] }] },
-        { text: '账套目录中没有"幻辰"。' },
-      ]),
-    });
-    // 适配器只剥离开头 @ 段；@ 之后的正文才是用户请求
-    const reply = await send('只查账套目录，看看有没有幻辰这个帐套', { group: true });
-
-    expect(reply).toContain('幻辰');
-    expect(reply).not.toContain('@');
-    await assembly.close();
-  });
-
-  it('宿主保证 Main Agent 跳过申报时失败关闭，不外发其文本（无对手工用例）', async () => {
-    const { send, assembly } = await boot({ main: silentDriver(), worker: gatedWorker([{ text: '不应执行' }]) });
-    const reply = await send('查一下幻辰财税的应收账款');
-    expect(reply).toContain('没有产生任何平台查询');
-    expect(reply).not.toContain('42 元');
-    await assembly.close();
-  });
-});
+export {
+  RecordingSdkClient,
+  mainDriver,
+  silentDriver,
+  gatedWorker,
+  boot,
+  ledger,
+  totalActualCalls,
+  balanceCalls,
+  CURRENT_PERIOD,
+  nineMonthPlan,
+  heavyPlan,
+  growingPlan,
+};
+export type { Boot };

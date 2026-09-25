@@ -1,11 +1,15 @@
 /**
  * 真实模型探针：把消息直接注入生产装配，跑真实 LLM + 真实 17dz 计划门禁 + mock 执行器。
  *
- * 与 tests/e2e/turn-loop.acceptance.test.ts 的差别只有一点：那里的 Main Agent 和
+ * 与 tests/e2e/turn-loop-*.test.ts 的差别只有一点：那里的 Main Agent 和
  * 17dz 子 Agent 是脚本化驱动，这里用真实 pi driver。企微仍由假 SDK 替代（不起长连接）。
  *
  * 用法：
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts [--only A1,B2]
+ *   node --env-file=.env --import tsx scripts/probe-real-agent.ts --quick
+ *
+ * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
+ * 全量约 25 分钟。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
  *
  * 关注四件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
@@ -299,15 +303,23 @@ const CASES: Case[] = [
   },
 ];
 
+/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。 */
+const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
+
 async function main(): Promise<void> {
   const only = process.argv.includes('--only')
     ? new Set(process.argv[process.argv.indexOf('--only') + 1]!.split(','))
     : null;
+  const quick = process.argv.includes('--quick');
+  if (only && quick) throw new Error('--only 与 --quick 互斥：--quick 本身就是固定子集');
+  const selected = only ? CASES.filter((c) => only.has(c.id))
+    : quick ? CASES.filter((c) => QUICK_CASE_IDS.has(c.id))
+    : CASES;
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-probe-'));
   savedEnv = { ...process.env };
 
   const results: CaseResult[] = [];
-  for (const item of (only ? CASES.filter((c) => only.has(c.id)) : CASES)) {
+  for (const item of selected) {
     console.log(`\n=== ${item.id} ${item.intent} ===`);
     const before = ledgerCalls();
     try {
@@ -350,7 +362,8 @@ async function main(): Promise<void> {
     }
   }
   const bad = results.filter((result) => !result.ok);
-  console.log(`\n${results.length - bad.length}/${results.length} 无异常；明细 ${report}`);
+  const scope = only ? `--only ${[...only].join(',')}` : quick ? '--quick' : '全量';
+  console.log(`\n[${scope}] ${results.length - bad.length}/${results.length} 无异常；明细 ${report}`);
   process.env = savedEnv;
   rmSync(stateDir, { recursive: true, force: true });
 }

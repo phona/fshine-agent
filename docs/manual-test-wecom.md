@@ -2,7 +2,7 @@
 
 目的：验证真实企微收发、Main Agent 与 17dz Pi 子 Agent 的委派、多轮恢复和回答质量。真实账套数据会变化，金额只要求与本次查询结果一致。
 
-> **大部分行为断言已经有离线全链 e2e 覆盖**（`tests/e2e/turn-loop.acceptance.test.ts`，把消息直接注入与企微相同的 handler 链路，不起企微连接）。标 ✅ 的用例跑 `npm test` 即可，不需要在企微里手工发消息；本文档剩下要人工做的是**真实收发、Markdown 渲染和真实数据口径**。映射见 §8。
+> **大部分行为断言已经有离线全链 e2e 覆盖**（`tests/e2e/turn-loop-*.test.ts`，把消息直接注入与企微相同的 handler 链路，不起企微连接）。标 ✅ 的用例跑 `npm test` 即可，不需要在企微里手工发消息；本文档剩下要人工做的是**真实收发、Markdown 渲染和真实数据口径**。映射见 §8。
 
 ## 0. 前置检查
 
@@ -91,35 +91,45 @@
 
 ### 8.1 离线全链 e2e（`npm test`，不需要企微连接）
 
-`tests/e2e/turn-loop.acceptance.test.ts` 把消息直接注入与企微相同的 handler 链路：
+`tests/e2e/turn-loop-*.test.ts` 把消息直接注入与企微相同的 handler 链路：
 假 SDK 发一条企微文本帧 → 真实 `WecomBotChannel` 适配器 → `createServerReplyHandler`
 → `createMessageHandler` → `createTaxAgentRuntime` → 真 spawn 的 `bin/17dz`
 （plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定、mock executor）。
+共享替身在 `tests/e2e/harness.ts`，四个文件按主题拆分、并行执行。
 
 只有两样是假的：**模型**（Main Agent 与子 Agent 用脚本化驱动回放）和**平台执行器**
 （`DZ_EXECUTOR=mock`）。企微投递语义、计划门禁、跨进程账本全是生产代码。
 
 ```bash
-npm test -- tests/e2e/turn-loop.acceptance.test.ts
+npm test -- tests/e2e/turn-loop
 ```
 
 ### 8.2 手工用例 → 自动化用例映射
 
-| 手工用例 | 自动化用例（同文件内） |
+自动化用例按主题拆在四个文件里（共享替身 `tests/e2e/harness.ts`）：
+
+| 文件 | 覆盖 |
 |---|---|
-| 1.4 未授权用户 | `1.4 未授权用户被安全拒绝，不泄露其他用户或账套信息` |
-| 1.5 账套目录搜索 | `1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测` |
-| 1.6 缺少账套先追问 | `1.6 不问账套的实时余额问题先追问，不调用平台` |
-| 1.3 / 5.4 重复提问 | `1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复` |
-| 5.4 旧范围不渗入 | `1.6/5.4 申报夹带历史账套时降级为澄清，不委派` |
-| 2.6 扩范围先通知 | `2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行` |
-| 2.6 通知失败不执行 | `2.6 计划通知投递失败时不激活、不执行扩展查询` |
-| 2.6 零执行不外发 | `2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论` |
-| 2.7 确认后续跑 | `2.7 高重量计划等用户确认，确认后激活并续跑原任务` |
-| 2.7 旧确认被取代 | `2.7 待确认计划被新计划取代后，旧确认得到确定性解释` |
-| 2.8 反复试探收口 | `2.8 同一任务内反复通知后升级为必须等用户确认` |
-| 5.5 群聊 @机器人 | `5.x 群聊消息剥离开头 @机器人 后照常处理` |
-| （无对手工用例） | `宿主保证 Main Agent 跳过申报时失败关闭，不外发其文本` |
+| `turn-loop-routing.test.ts` | 申报分类、缺账套追问、旧范围不渗入、未授权用户、群聊 @剥离、跳过申报失败关闭 |
+| `turn-loop-execution.test.ts` | 重复提问必须重查、零执行不外发、账套目录搜索 |
+| `turn-loop-plan-gate.test.ts` | 扩范围先通知、通知失败不执行、高重量等确认后续跑 |
+| `turn-loop-confirmation.test.ts` | 旧确认被新计划取代、notify 反复后升级确认 |
+
+| 手工用例 | 自动化用例（文件名 > 用例名） |
+|---|---|
+| 1.4 未授权用户 | `turn-loop-routing.test.ts` > `1.4 未授权用户被安全拒绝，不泄露其他用户或账套信息` |
+| 1.5 账套目录搜索 | `turn-loop-execution.test.ts` > `1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测` |
+| 1.6 缺少账套先追问 | `turn-loop-routing.test.ts` > `1.6 不问账套的实时余额问题先追问，不调用平台` |
+| 1.3 / 5.4 重复提问 | `turn-loop-execution.test.ts` > `1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复` |
+| 5.4 旧范围不渗入 | `turn-loop-routing.test.ts` > `1.6/5.4 申报夹带历史账套时降级为澄清，不委派` |
+| 2.6 扩范围先通知 | `turn-loop-plan-gate.test.ts` > `2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行` |
+| 2.6 通知失败不执行 | `turn-loop-plan-gate.test.ts` > `2.6 计划通知投递失败时不激活、不执行扩展查询` |
+| 2.6 零执行不外发 | `turn-loop-execution.test.ts` > `2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论` |
+| 2.7 确认后续跑 | `turn-loop-plan-gate.test.ts` > `2.7 高重量计划等用户确认，确认后激活并续跑原任务` |
+| 2.7 旧确认被取代 | `turn-loop-confirmation.test.ts` > `2.7 待确认计划被新计划取代后，旧确认得到确定性解释` |
+| 2.8 反复试探收口 | `turn-loop-confirmation.test.ts` > `2.8 同一任务内反复通知后升级为必须等用户确认` |
+| 5.5 群聊 @机器人 | `turn-loop-routing.test.ts` > `5.x 群聊消息剥离开头 @机器人 后照常处理` |
+| （无对手工用例） | `turn-loop-routing.test.ts` > `宿主保证 Main Agent 跳过申报时失败关闭，不外发其文本` |
 
 ### 8.3 仍需人工的部分
 
