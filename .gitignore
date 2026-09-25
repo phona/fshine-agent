@@ -12,3 +12,6 @@ data/
 
 # 本地部署配置(含企微 UserID 与本机路径),模板见 config/agent.example.yaml
 config/agent.yaml
+
+# 本地运行产物（探针报告、平台 mock 状态等）
+.runtime/
