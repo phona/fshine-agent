@@ -10,7 +10,7 @@ import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type TaskIntent } from './task-intent';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, looksLikeReference, previousTurnText, reviewRouteDeclaration, type TaskIntent } from './task-intent';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
@@ -224,7 +224,25 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 ...(intent.searchQuery ? { searchQuery: intent.searchQuery } : {}),
               } : {}),
             }));
-            if (intent.kind === 'clarify') throw new ToolUserError(intent.question);
+            if (intent.kind === 'clarify') {
+              // 模型退了澄清，但当前消息像在用指代（"这个账套 202608 呢？"）：宿主不替它
+              // 判断，只把上一轮原文作为证据回给它，让它自己改走 referenced。实测模型对
+              // referenced 的使用很不稳定，这一手能把无谓的澄清变成真查询。
+              if (looksLikeReference(userMessage)) {
+                const previousTurn = previousTurnText(context, userMessage);
+                if (previousTurn.trim()) {
+                  console.info(JSON.stringify({ event: 'route_reference_hint', requestId: ctx.requestId }));
+                  return {
+                    error: [
+                      '当前消息疑似在使用指代，但你的申报里没有可确定的账套。',
+                      `上一轮对话原文如下：\n${previousTurn.slice(0, 900)}`,
+                      '若能从中唯一确定账套，请改用 accountResolution=referenced、把该账套名填进 accountQueries、指代原词填进 referenceQuote，然后重新调用 route_current_turn；确实无法确定再选 clarify。',
+                    ].join('\n'),
+                  };
+                }
+              }
+              throw new ToolUserError(intent.question);
+            }
             if (intent.kind === 'platform_query') {
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
