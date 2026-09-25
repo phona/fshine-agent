@@ -19,6 +19,7 @@ import {
   isPlatformMock,
 } from '@fshine/agent';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from '../apps/server/commit';
+import { loadBusinessSkill } from '../apps/server/business-skill';
 import { createMessageHandler } from '../apps/server/handler';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
@@ -49,7 +50,10 @@ async function main(): Promise<void> {
   const dbPath = path.join(repoRoot, 'data', `ask-${Date.now()}.db`);
   const store = createSqliteStore(dbPath);
   for (const record of principalScopeRecords(config)) await store.principalScopes.upsert(record);
-
+  const businessSkill = await loadBusinessSkill(process.env);
+  console.log(JSON.stringify(businessSkill.text
+    ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
+    : { event: 'business_skill_skipped', path: businessSkill.path }));
   const driver = createPiTurnDriver({ env: process.env });
   const workerDriver = createPiCodingTurnDriver({ env: process.env });
   const platformTask = createContextTaskRunner({
@@ -70,6 +74,9 @@ async function main(): Promise<void> {
     sessionTtlMs: config.sessionTtlMs,
     turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
     platformTask,
+    // 与生产装配同一条加载链：业务 skill（架构 §5）存在才注入
+    ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
+    ...(store.taskPlans ? { taskPlans: store.taskPlans } : {}),
   });
   const handler = createMessageHandler({ store, runtime });
 
