@@ -268,9 +268,30 @@ function gatedWorker(script: WorkerStep[]) {
 // ── 装配辅助 ────────────────────────────────────────────────────────────
 
 interface Boot {
-  send(text: string): Promise<string>;
+  /** 以指定企微用户身份发一句话，返回用户最终看到的文本。 */
+  send(text: string, options?: { userid?: string; group?: boolean }): Promise<string>;
   sdk: RecordingSdkClient;
   assembly: ServerAssembly;
+}
+
+/** 构造一条企微文本消息帧（与官方 SDK 投给适配器的形状一致）。 */
+function wecomText(userid: string, content: string, options: { group?: boolean } = {}): {
+  headers: { req_id: string };
+  body: Record<string, unknown>;
+} {
+  const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+  const mentioned = options.group ? `@幻晟记账助手 ${content}` : content;
+  return {
+    headers: { req_id: `req_${messageId}` },
+    body: {
+      msgtype: 'text',
+      from: { userid },
+      msgid: messageId,
+      chattype: options.group ? 'group' : 'single',
+      ...(options.group ? { chatid: 'grp_e2e' } : {}),
+      text: { content: mentioned },
+    },
+  };
 }
 
 async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> {
@@ -295,12 +316,9 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
   return {
     sdk,
     assembly,
-    send: async (text: string) => {
+    send: async (text: string, options: { userid?: string; group?: boolean } = {}) => {
       const before = sdk.frames.filter((frame) => frame.finish).length;
-      sdk.emit('message.text', {
-        headers: { req_id: `req_${counter}_${before}` },
-        body: { msgtype: 'text', from: { userid: 'e2e_user' }, msgid: `msg_${counter}_${before}`, chattype: 'single', text: { content: text } },
-      });
+      sdk.emit('message.text', wecomText(options.userid ?? 'e2e_user', text, { group: options.group }));
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
@@ -362,7 +380,7 @@ function growingPlan(n: number): PlanCall[] {
 // ── 场景 ────────────────────────────────────────────────────────────────
 
 describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
-  it('S2 不问账套的实时余额问题先追问，不调用平台', async () => {
+  it('1.6 不问账套的实时余额问题先追问，不调用平台', async () => {
     const before = totalActualCalls();
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'missing', accountQueries: [], question: '要查哪个账套？' }]),
@@ -375,7 +393,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S1 重复提问实时数据必须产生本轮平台执行，不能重放旧答复', async () => {
+  it('1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复', async () => {
     const worker = () => gatedWorker([
       { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
       { text: '幻辰财税 202609 应收余额为 51 元。' },
@@ -400,7 +418,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await second.assembly.close();
   });
 
-  it('S3 申报夹带历史账套时降级为澄清，不委派', async () => {
+  it('1.6/5.4 申报夹带历史账套时降级为澄清，不委派', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] }]),
@@ -414,7 +432,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('R2 申报实时查询但子 Agent 零执行时，不外发其财务结论', async () => {
+  it('2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
@@ -428,7 +446,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S4 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行', async () => {
+  it('2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行', async () => {
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
       worker: gatedWorker([{ plan: nineMonthPlan() }]),
@@ -449,7 +467,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S5 计划通知投递失败时不激活、不执行扩展查询', async () => {
+  it('2.6 计划通知投递失败时不激活、不执行扩展查询', async () => {
     const before = totalActualCalls();
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
@@ -465,7 +483,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S6/S7 高重量计划等用户确认，确认后激活并续跑原任务', async () => {
+  it('2.7 高重量计划等用户确认，确认后激活并续跑原任务', async () => {
     const resumeInputs: string[] = [];
     const { send, sdk, assembly } = await boot({
       main: mainDriver([
@@ -485,7 +503,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S8 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
+  it('2.7 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
     const { send, assembly } = await boot({
       main: mainDriver([
         { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
@@ -503,7 +521,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S9 同一任务内反复通知后升级为必须等用户确认', async () => {
+  it('2.8 同一任务内反复通知后升级为必须等用户确认', async () => {
     // 计数器按 taskId 记账：必须是同一个任务里连续改口径，才能观察到升级。
     const { send, sdk, assembly } = await boot({
       main: mainDriver([
@@ -520,7 +538,7 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('S10 账套不存在时只走目录搜索，不用余额或凭证接口探测', async () => {
+  it('1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测', async () => {
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'platform_query', taskType: 'account_search', searchQuery: '胜利' }]),
       worker: gatedWorker([
@@ -538,7 +556,35 @@ describe('离线全链 e2e：直接发消息给 fshine-agent', () => {
     await assembly.close();
   });
 
-  it('R3 Main Agent 跳过申报时失败关闭，不外发其文本', async () => {
+  it('1.4 未授权用户被安全拒绝，不泄露其他用户或账套信息', async () => {
+    const { send, assembly } = await boot({
+      main: mainDriver([{ kind: 'conversation' }]),
+      worker: gatedWorker([{ text: '不应执行' }]),
+    });
+    const reply = await send('查一下幻辰财税的应收账款', { userid: 'stranger' });
+
+    expect(reply).toContain('未开通查询权限');
+    expect(reply).not.toContain('幻辰');
+    await assembly.close();
+  });
+
+  it('5.x 群聊消息剥离开头 @机器人 后照常处理', async () => {
+    const { send, assembly } = await boot({
+      main: mainDriver([{ kind: 'platform_query', taskType: 'account_search', searchQuery: '幻辰' }]),
+      worker: gatedWorker([
+        { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '幻辰'] }] },
+        { text: '账套目录中没有"幻辰"。' },
+      ]),
+    });
+    // 适配器只剥离开头 @ 段；@ 之后的正文才是用户请求
+    const reply = await send('只查账套目录，看看有没有幻辰这个帐套', { group: true });
+
+    expect(reply).toContain('幻辰');
+    expect(reply).not.toContain('@');
+    await assembly.close();
+  });
+
+  it('宿主保证 Main Agent 跳过申报时失败关闭，不外发其文本（无对手工用例）', async () => {
     const { send, assembly } = await boot({ main: silentDriver(), worker: gatedWorker([{ text: '不应执行' }]) });
     const reply = await send('查一下幻辰财税的应收账款');
     expect(reply).toContain('没有产生任何平台查询');
