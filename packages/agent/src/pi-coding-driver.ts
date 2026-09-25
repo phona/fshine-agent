@@ -21,7 +21,7 @@ import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverRe
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
-import { validatePlanAgainstTurnDeclaration } from './turn-contract';
+import { validatePlanEntities } from './turn-contract';
 
 export interface PiCodingTurnDriverOptions {
   /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
@@ -54,6 +54,8 @@ export interface PiCodingWorkerSessionOptions {
   planActivationSecret?: string;
   onPendingPlan?: (plan: PendingPlanConfirmation) => void;
   turnDeclaration?: TurnDriverInput['turnDeclaration'];
+  /** 领域无关的实体来源：宿主注入，供计划校验做逐字包含判定（架构 §2 第 9 条）。 */
+  entitySources?: TurnDriverInput['entitySources'];
 }
 
 export interface PiCodingWorkerSession {
@@ -100,6 +102,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
         turnDeclaration: input.turnDeclaration,
+        entitySources: input.entitySources,
       });
       const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
       // Host-verifiable proof that this delegated turn really executed against the platform:
@@ -240,11 +243,21 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
       catch (error) { return { block: true, reason: `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}` }; }
       if (parsed) {
-        if (options.turnDeclaration) {
-          const scopeError = validatePlanAgainstTurnDeclaration(options.turnDeclaration, parsed.calls);
+        if (options.entitySources) {
+          // 领域无关的实体来源校验（架构 §2 第 9 条）：计划里的每个实体都必须能在
+          // 「当前消息 / 检索证据 / 本任务迄今的平台响应」里逐字找到。平台响应从当前
+          // 会话已产生的 tool_result 里收集——执行层调目录查询拿到的唯一候选名就
+          // 逐字住在这里面，宿主不需要懂业务就能放行"合法解析出来的实体"。
+          const scopeError = validatePlanEntities(parsed.calls, {
+            ...options.entitySources,
+            platformResponses: [
+              ...(options.entitySources.platformResponses ?? []),
+              ...collectPlatformResponses(session.agent.state.messages),
+            ],
+          });
           if (scopeError) {
             activePlan = null;
-            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮宿主申报的范围执行，或向用户澄清。` };
+            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮请求的范围执行，或向用户澄清。` };
           }
         }
         const previousPlan = activePlan;
@@ -324,6 +337,21 @@ async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<Co
   const model = runtime.getModel('llm', modelId);
   if (!model) throw new Error(`pi-coding-agent Worker 模型注册失败:${modelId}`);
   return { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) };
+}
+
+/**
+ * 本任务迄今的平台响应：会话转录里的 tool_result 正文。它们既是"上一轮查到了什么"的
+ * 载体，也是计划实体来源校验的第三个来源——执行层调目录查询拿到的唯一候选名逐字来自
+ * 这里，宿主因此不需要懂业务就能判"这是合法解析出来的"。
+ */
+function collectPlatformResponses(messages: readonly AgentMessage[]): string[] {
+  const responses: string[] = [];
+  for (const message of messages) {
+    if ((message as { role?: string }).role !== 'toolResult') continue;
+    const text = textFromContent((message as { content?: unknown }).content);
+    if (text.trim()) responses.push(text);
+  }
+  return responses;
 }
 
 function lastAssistantText(messages: readonly AgentMessage[]): string {

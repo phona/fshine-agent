@@ -6,7 +6,7 @@ import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, Truste
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
 import { createContextTaskRunner, type ContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
-import { validatePlanAgainstTurnDeclaration, type TurnDeclaration } from './src/turn-contract';
+import { validatePlanEntities } from './src/turn-contract';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -68,30 +68,31 @@ describe('17dz Pi subagent adapter', () => {
   });
 
   it('账套存在性任务要求只用专用目录搜索 operation', async () => {
-    // 规则落点已从提示词下沉到宿主代码断言（docs/rule-landing.md C6）：
-    // account_search 的计划必须且只能是一次 finance.search-account-sets，
-    // 不得改用余额/凭证/科目查询探测——worker 提示词里不再枚举该场景。
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'account_search', accountResolution: 'explicit', searchQuery: '胜利',
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
-    ])).toBeNull();
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '胜利'] },
-    ])).toContain('finance.search-account-sets');
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
-      { operation: 'finance.query-receivables', args: ['--query', '胜利'] },
-    ])).toContain('finance.search-account-sets');
+    // Phase 3 起宿主不再做领域判别：操作与任务类型的匹配归执行层 SKILL 与平台门禁
+    // （17dz src/execution/plan.js 的 PLAN_CALL_MISMATCH + 17dz-query SKILL.md）。
+    // 宿主只保留领域无关的实体来源校验——这里断言新语义：目录检索计划放行，
+    // 且越权实体仍被拒。
+    // 单次目录检索：实体来自当前消息 → 放行
+    expect(validatePlanEntities(
+      [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] }],
+      { currentMessage: '只查有没有胜利这个帐套' },
+    )).toBeNull();
+    // 混入本轮请求里没有的实体 → 仍然拒（实体来源校验不弱于原来）
+    expect(validatePlanEntities(
+      [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
+        { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
+      { currentMessage: '只查有没有胜利这个帐套' },
+    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
   });
 
   it('将宿主验证的本轮意图范围传给子 Agent', async () => {
     const root = await profileRoot();
     let prompt = '';
+    let observed: TurnDriverInput | undefined;
     const subagent = runner(root, new MemoryTasks(), {
       run: async (input) => {
         prompt = input.systemPrompt;
+        observed = input;
         return { text: '已按当前范围查询。', messages: input.messages };
       },
     });
@@ -99,25 +100,54 @@ describe('17dz Pi subagent adapter', () => {
     await subagent.run({
       request: '查幻辰财税账套里猫一杯的应收账款',
       turnDeclaration: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+      entitySources: { currentMessage: '查幻辰财税账套里猫一杯的应收账款', referenceEvidence: '【宿主主动回溯】幻东 202609 余额 51 元' },
     }, { trusted: trusted() });
 
     expect(prompt).toContain('宿主已核验本轮申报范围');
     expect(prompt).toContain('"accountQueries":["幻辰财税"]');
+    // 领域无关的实体来源原样透传到 worker 驱动（宿主不懂业务，只做字符串包含）
+    expect(observed?.entitySources).toEqual({
+      currentMessage: '查幻辰财税账套里猫一杯的应收账款',
+      referenceEvidence: '【宿主主动回溯】幻东 202609 余额 51 元',
+    });
+  });
+
+  it('宿主未注入实体来源时不向 worker 驱动传该字段（老路径不做实体校验）', async () => {
+    const root = await profileRoot();
+    let observed: TurnDriverInput | undefined;
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        observed = input;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({ request: '查询余额' }, { trusted: trusted() });
+
+    expect(observed?.entitySources).toBeUndefined();
+    expect(observed?.turnDeclaration).toBeUndefined();
   });
 
   it('应收余额任务失败后禁止用历史凭证跨期间兜底', () => {
-    // 规则落点已从提示词下沉到宿主代码断言（docs/rule-landing.md C7/C8）：
-    // 余额计划只能调 finance.query-receivables，且不得带未申报的期间——
-    // "失败后停止并如实报告"的行为面在 17dz-query SKILL.md 查询边界（S2）。
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'],
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'voucher.query-saved', args: ['幻辰财税', '202601'] },
-    ])).toContain('不能代替余额表');
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] },
-    ])).toContain('期间');
+    // Phase 3 起宿主不再做领域判别（"只能调某个操作""不得带未申报期间"归执行层 SKILL
+    // 与平台门禁）。保留的是实体来源校验：本轮请求里没有的实体一律拒——
+    // 拿历史实体兜底在这里被挡下，与旧分支的越权判定等价。
+    const sources = { currentMessage: '查一下幻辰财税账套本期的应收' };
+    // 越权实体（历史里出现过、本轮请求里没有）→ 拒
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.query-saved', args: ['幻辰财税', '202601'] }],
+      sources,
+    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    // 平台自己返回的候选/期间 → 放行（search→query 场景，宿主不懂业务）
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] }],
+      { ...sources, platformResponses: ['当前期间为 202601'] },
+    )).toBeNull();
+    // 本轮请求里逐字出现的实体 → 放行，不管 operation 是什么
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
+      sources,
+    )).toBeNull();
   });
 
   it.each([

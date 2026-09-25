@@ -40,7 +40,7 @@ describe('主动回溯：宿主申报前注入指代证据', () => {
     expect(evidence!.text).toContain('eventId=evt_2');
     expect(evidence!.text).toContain('新兴五金');
     // 铁律必须写在材料里：证据只用于指代消解，不扩大本轮范围
-    expect(evidence!.text).toContain('不得把材料里其他的账套/期间/客户擅自纳入本轮范围');
+    expect(evidence!.text).toContain('不得把材料里其他的实体擅自纳入本轮范围');
   });
 
   it('没有指代线索时不检索、不注入', async () => {

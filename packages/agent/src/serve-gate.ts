@@ -103,7 +103,7 @@ export function isServeCliInvocation(command: string): boolean {
 // 命令拼接/替换/重定向/管道：worker bash 经 shell 执行，放行这些字符等于放行任意命令
 const SHELL_METACHAR_RE = /[;&|<>`$()\n\r]/;
 
-/** 命令含 shell 元字符（; & | < > ` $ ( ) 或换行）→ true。bin/17dz 的合法参数（账套名、期间、脚本路径、flag）不含这些字符 */
+/** 命令含 shell 元字符（; & | < > ` $ ( ) 或换行）→ true。bin/17dz 的合法参数（名称、时间范围、脚本路径、flag）不含这些字符 */
 export function hasShellMetachars(command: string): boolean {
   return SHELL_METACHAR_RE.test(command);
 }

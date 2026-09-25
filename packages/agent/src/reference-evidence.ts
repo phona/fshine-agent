@@ -5,7 +5,7 @@
  *
  * 铁律（违反了会给 Phase 3 的包含校验打洞）：
  * 检索证据只允许支撑**指代消解**，不允许**扩大实体范围**。本轮申报范围仍然只能
- * 逐字来自当前消息（宿主校验兜底）；证据的作用是把"这个账套"对应到哪个实体，
+ * 逐字来自当前消息（宿主校验兜底）；证据的作用是把消息里的指代词对应到哪个实体，
  * 不是"计划里可以出现历史上出现过的实体"。
  */
 import type { ConversationEventRecord, ConversationLogRepo } from '@fshine/contracts';
@@ -64,8 +64,8 @@ function renderEvidence(events: ConversationEventRecord[], truncated: boolean): 
   const tail = truncated ? '\n（证据过多已按上限截断；更早的历史不在本材料内。）' : '';
   return [
     '【宿主主动回溯：指代消解证据。用法：把当前消息里的指代词（这个/那个/它/刚才/上次）对应到实体——',
-    '只有当指代能唯一对应到紧邻上一轮出现过的实体时，才按 referenced 申报（账套名填 accountQueries、指代原词填 referenceQuote）；',
-    '不得把材料里其他的账套/期间/客户擅自纳入本轮范围。无法唯一对应时选择 clarify 问用户。】',
+    '只有当指代能唯一对应到紧邻上一轮出现过的实体时，才按 referenced 申报（名称填 accountQueries、指代原词填 referenceQuote）；',
+    '不得把材料里其他的实体擅自纳入本轮范围。无法唯一对应时选择 clarify 问用户。】',
     lines,
     tail,
   ].filter(Boolean).join('\n');

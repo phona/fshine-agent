@@ -112,22 +112,25 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 3 — 领域判别下沉
 
-**目标**：编排层不再做领域判别。这是解耦真正发生的一步。
+**状态：已完成**（由两个并行 subagent 实施：fshine 编排层改造 + 17dz SKILL 去重补全，主代理验收）。编排层不再做领域判别——这是解耦真正发生的一步。
 
-**改动**：
-- `workerSystemPrompt` 的业务条目 → 17dz 的 `SKILL.md`（大部分已在那，去重即可）
-- `SYSTEM_PROMPT` 的业务条目 → 删（编排层不需要知道）
-- `validatePlanAgainstTaskIntent` 的 balance/voucher/account_search 领域分支 → 换成架构文档 §2 第 9 条的**领域无关包含校验**：
-  > 计划里每个实体（账号 / 期间 / 关键词）必须能在「当前消息 / 检索证据 / 本轮平台响应」里逐字找到。
-  
-  「本轮平台响应」一项很关键：执行层调目录查询拿到唯一候选，那个候选就是合法解析出来的，宿主不需要懂业务。
+**改动（实际落地）**：
+- `validatePlanAgainstTurnDeclaration` 的 balance/voucher/account_search 三分支 → 领域无关的 `validatePlanEntities(calls, sources)`（`turn-contract.ts`）：每个 call 的 args 里所有字符串（`-` 开头 flag 除外）必须能在「① 当前用户消息 ② 本轮注入的指代消解证据 ③ 本任务迄今的平台响应」并集里逐字找到。来源全部由宿主持有、经 `platformTask.run → TurnDriverInput.entitySources` 注入，**不从申报契约字段推导**（活过 Phase 4）；平台响应在驱动拦截点从会话 tool_result 汇总，"目录查询拿唯一候选 → 按候选名查"天然放行
+- 两个提示词的业务条目改为领域无关表述（能力边界与确认码转达协议保留、不再点名业务动作）；`ROUTE_CURRENT_TURN_TOOL.description` 移除领域判别教学（taskType 业务含义、名称/科目/客户区分、业务示例），8 字段一个没删（Phase 4 才瘦身）
+- 17dz `skills-serve` 两个 SKILL.md 成为 worker 领域规则唯一事实源：补"查询口径（操作与问题类型匹配只由 SKILL+平台门禁保证）""实体参数溯源（三来源逐字，口癖名靠平台候选对齐）"；高危写边界补进 prepare 技能
+- 规则落点同步登记：`docs/rule-landing.md` C6–C9 改指新校验、新增 C20；进度/压缩提示词、`NO_EXECUTION_CLARIFICATION` 等领域措辞一并中和
 
-**验收**：
-- `grep -ri "应收\|凭证\|科目\|账套\|期间" packages/agent/src/` 只命中契约枚举与日志字段，不命中任何规则文案
-- 17dz `test-plan/test-consistency/test-operations` 全绿
-- 探针 `--quick` 无回归；跨仓 mock E2E 全绿
+**验收（按实际达成记录）**：
+- `grep -ri "应收\|凭证\|科目\|账套\|期间" packages/agent/src/` 规则文案**清零**；剩余 4 处均为执行机制字面量（长期记忆防泄漏过滤正则、上下文矛盾词表），理由见 `rule-landing.md` §5 ✓
+- 17dz 全量测试 **ALL PASS**（20/20 套件，含 consistency/operations/plan/skills-serve-canary；干净环境下复跑确认）+ `lint:operations` 通过 ✓
+- 探针 `--quick` 无回归 ✓：A1 2 次调用（重问必重查）、A4 1 次（只搜目录）、A5 0 次（闲聊不委派）与基线一致；A2 变 2 次是设计内的松动——worker 先用目录查询解析用户给的"猫一杯"（not_found）再追问，旧账套零渗入；B1 的 ⚠ 与基线同性质（探针把回复措辞里的数字也抽来比，5 轮数据全为 0）
+- 跨仓 mock E2E（`plan-awareness`/`local-fake`）全绿；`npm test` 301 全绿、typecheck 0 错误 ✓
 
-**风险**：包含校验比原来的精确范围弱。缓解：靠上面那条约束 + 「本轮平台响应」补足；漏网时执行层自己的 SKILL 规则和平台参数校验仍在前线。
+**已知行为变化（包含校验"更弱"的另一面：对派生值更严）**：
+- 派生期间值不再放行："1 到 9 月"推不出 202601–202608（不在三个来源里）。实测 D1：worker 目录解析账套后查当前期间，并**如实说明平台只支持单期间查询、提议逐月查**——优雅降级而非胡编。逐月查询需用户明确给出期间（或未来平台提供期间枚举 operation，使其成为合法"平台响应"来源）。这是 §2 第 9 条"逐字找到"的既定语义，未改设计
+- 操作与任务类型的匹配（存在性只搜索、余额只查余额接口）不再由宿主强制，归执行层 SKILL + 平台门禁；SKILL 已把这组规则写成硬规则
+
+**风险（原记录，实际验证）**：包含校验比原来的精确范围弱——已按预期发生并被执行层前线接住（A4/A2 实测）；search→query 候选名放行有驱动级单测覆盖。
 
 ---
 

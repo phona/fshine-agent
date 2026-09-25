@@ -3,7 +3,7 @@
  * platform workspace. The subagent returns natural language; the main Agent
  * decides whether to answer, ask the user, or resume the same session.
  *
- * 写开放（两步确认）：worker 产出变更提案 JSON → 本层做 capability/账套
+ * 写开放（两步确认）：worker 产出变更提案 JSON → 本层做 capability/授权名单
  * 代码级校验 + 服务端 dry-run 预检 → 创建 pending intent（确认码哈希存储）
  * → 主代理转达预览。用户回复「确认 码」由 matchConfirmation 直接匹配执行
  * （绕过模型）；「取消 码」作废；新提案使旧 pending 作废（superseded）。
@@ -13,7 +13,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
-import type { TurnDeclaration } from './turn-contract';
+import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type TurnDriverResult } from './driver';
 import type {
   AgentReply,
@@ -33,7 +33,7 @@ export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
   '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
   '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
-  '涉及 17dz 实时数据时必须调用本工具，不得凭历史对话猜测账套 ID、科目编码、客户 ID 或实时结果。',
+  '涉及 17dz 实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
   '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
 ].join('\n');
 
@@ -42,6 +42,11 @@ export interface Run17dzTaskArgs {
   taskId?: string;
   /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>;
+  /**
+   * 领域无关的实体来源（宿主注入）：计划里的每个实体必须能在「当前消息 / 检索证据 /
+   * 本轮平台响应」里逐字找到。同样不进入 Main Agent 工具 schema。
+   */
+  entitySources?: PlanEntitySources;
 }
 
 export interface SubagentTaskResult {
@@ -89,7 +94,7 @@ export interface ContextTaskRunnerOptions {
   prepareRunner?: (req: PrepareRequest) => Promise<PrepareResult>;
   /** 服务端确认后落账（写流程启用时必填）。 */
   commitRunner?: (req: CommitRequest) => Promise<CommitResult>;
-  /** 单提案凭证张数上限，默认 50。 */
+  /** 单提案条目数上限，默认 50。 */
   maxBatchCount?: number;
   /** 意图有效期，默认 10 分钟。 */
   intentTtlMs?: number;
@@ -207,10 +212,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     if (!capabilities.includes('write')) {
       return stop('已收到录入提案，但当前账号未开放写入权限，已停止。请联系管理员开通后重试。');
     }
-    // allowlist principal 的授权以账套 id 表达，而提案携带平台账套名——
+    // allowlist principal 的授权以对象 id 表达，而提案携带平台侧名称——
     // 名称到 id 的映射不在 fshine 侧，V1 仅对 scope=all 的账号开放写。
     if (ctx.trusted.allowedAccountSetIds.length > 0) {
-      return stop('已收到录入提案，但当前账号为账套白名单授权模式，写开放暂不支持该模式，已停止。');
+      return stop('已收到录入提案，但当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。');
     }
 
     const active = await options.changeIntents!.findPendingBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
@@ -247,9 +252,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       : `回复「确认 ${code}」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
     return stop([
       '已收到录入提案并通过预检（dry-run）：',
-      `- 账套：${proposal.accountSet}`,
-      `- 期间：${proposal.period}`,
-      `- 凭证：${proposal.summary.count} 张，借贷合计各 ${proposal.summary.credit} 元`,
+      `- 对象：${proposal.accountSet}`,
+      `- 时间：${proposal.period}`,
+      `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元`,
       confirmLine,
     ].join('\n'));
   }
@@ -267,7 +272,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
           await ci.updateStatus(rec.intentId, 'cancelled');
-          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 张）未执行。` };
+          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 条）未执行。` };
         }
         const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
         if (!stale) return null;
@@ -303,7 +308,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。' };
           }
           await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
-          return { text: `已完成：${rec.summary.count} 张凭证已录入（${rec.accountSet} ${rec.period}），读回校验通过。` };
+          return { text: `已完成：${rec.summary.count} 条已录入（${rec.accountSet} ${rec.period}），读回校验通过。` };
         }
         // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
         // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
@@ -368,6 +373,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           deadline,
           signal,
           ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
+          ...(args.entitySources ? { entitySources: args.entitySources } : {}),
           ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
           ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
           ...(ctx.trusted.onNotice ? { onNotice: ctx.trusted.onNotice } : {}),
@@ -502,13 +508,13 @@ function workerSystemPrompt(
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>,
 ): string {
   const scope = allowedAccountSetIds.length > 0
-    ? `调用者的应用层账套 allowlist：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外账套。`
-    : '应用层未提供账套 allowlist；账套访问范围必须以平台领域脚本的权限校验为准。';
+    ? `调用者的应用层授权名单：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外对象。`
+    : '应用层未提供授权名单；访问范围必须以平台领域脚本的权限校验为准。';
   return [
     '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。最终回复会原样展示给最终用户——直接对用户说话；不要输出内部协议文案（"给主 Agent 的说明"、宿主、委派、route_current_turn、PLAN ACTIVE/DECLINED 等字样和状态 JSON 不允许）。',
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
-    '本链路只支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 产出变更提案），写操作由服务端在用户确认后执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
+    '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',
     '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数，照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。',
     ...(turnDeclaration ? [`宿主已核验本轮申报范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(turnDeclaration)}`] : []),
     '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',

@@ -229,7 +229,7 @@ describe('createTaxAgentRuntime', () => {
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_scope_evidence' }), '帮我查一下猫一杯的应收账款还有多少');
 
     expect(delegated).toHaveLength(0);
-    expect(reply.text).toContain('账套');
+    expect(reply.text).toContain('不能从旧对话补入');
     expect(reply.text).not.toContain('42 元');
   });
 
@@ -667,7 +667,7 @@ describe('createTaxAgentRuntime', () => {
   });
 
   it('主 Agent 只暴露 route_current_turn，宿主据申报直接委派并采用子 Agent 自然语言结果', async () => {
-    const calls: Array<{ request: string; taskId?: string; turnDeclaration?: unknown }> = [];
+    const calls: Array<{ request: string; taskId?: string; turnDeclaration?: unknown; entitySources?: unknown }> = [];
     let exposed: string[] = [];
     const platformTask = subagent(async (args) => {
       calls.push(args);
@@ -687,6 +687,8 @@ describe('createTaxAgentRuntime', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ request: '查询幻东余额' });
     expect(calls[0]?.turnDeclaration).toMatchObject({ kind: 'platform_query', taskType: 'balance', accountQueries: ['幻东'] });
+    // 领域无关的实体来源：当前消息必给，无指代线索时不给检索证据
+    expect(calls[0]?.entitySources).toEqual({ currentMessage: '查询幻东余额' });
     expect(reply.text).toBe('请向用户确认客户名称。');
   });
 

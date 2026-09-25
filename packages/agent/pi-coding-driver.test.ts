@@ -134,7 +134,7 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
-  it('blocks a platform plan that exceeds the semantic scope contract before calling the CLI evaluator', async () => {
+  it('blocks a platform plan whose entities appear in none of the three sources before calling the CLI evaluator', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-intent-scope-'));
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
@@ -151,7 +151,10 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
-      turnDeclaration: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [] },
+      entitySources: {
+        currentMessage: '查一下幻辰财税账套里猫一杯的应收',
+        referenceEvidence: '【宿主主动回溯】tool_result：幻东 202609 余额 51 元',
+      },
     });
     const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司","--customer","猫一杯"]},{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
@@ -162,8 +165,83 @@ describe('pi-coding-agent context worker', () => {
     });
 
     expect(verdict?.block).toBe(true);
-    expect(verdict?.reason).toContain('账套');
+    expect(verdict?.reason).toContain('未在当前请求、检索证据或平台响应中出现的参数');
     expect(calls).toEqual([['plan', 'current', '--task-id', 'task_scope']]);
+    worker.session.dispose();
+  });
+
+  it('lets a plan through when its entities come from this task\'s platform responses (search→query)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-intent-scope-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const evaluated: string[][] = [];
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      evaluated.push(args);
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'intent scope test',
+      sessionId: 'task_scope',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      entitySources: { currentMessage: '只查有没有胜利这个帐套' },
+    });
+    // 本任务此前的目录查询响应：唯一候选名逐字来自平台，宿主不懂业务也必须放行
+    worker.session.agent.state.messages = [{
+      role: 'toolResult',
+      toolCallId: 'call_search',
+      content: [{ type: 'text', text: 'RESULT {"op":"finance.search-account-sets","data":{"accountSets":[{"id":"as_1","name":"胜利五金有限责任公司"}]}}' }],
+      timestamp: 1,
+    } as never];
+    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    expect(verdict?.block).toBe(true);
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
+    worker.session.dispose();
+  });
+
+  it('skips entity validation when the host injects no sources', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-no-sources-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const evaluated: string[][] = [];
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      evaluated.push(args);
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'no sources test',
+      sessionId: 'task_scope',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+    });
+    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","任何名称"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    // 宿主没有注入来源（老路径）→ 不做实体校验，计划照常进平台评估
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(verdict?.reason).not.toContain('未在当前请求');
+    expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
     worker.session.dispose();
   });
 

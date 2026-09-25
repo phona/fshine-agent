@@ -223,7 +223,7 @@ Main Agent 申报 delegate
 | 项 | 现状 | 目标 |
 |---|---|---|
 | 申报契约 | 8 字段，含 taskType / accountQueries / periods / accountResolution | 3 字段（§4） |
-| 领域判别 | 散在 `SYSTEM_PROMPT`、`workerSystemPrompt`、`validatePlanAgainstTaskIntent` | 全部下沉执行层；编排层只做包含校验（§2 第 9 条） |
+| 领域判别 | 已下沉：`validatePlanEntities` 领域无关包含校验（三来源逐字）；提示词只剩协议与原则；worker 领域规则以 17dz `skills-serve` SKILL.md 为唯一事实源 | 同左（已达成）；操作与任务类型匹配归执行层 SKILL + 平台门禁 |
 | 业务 skill | 不存在；编排层的领域知识以提示词散文形式存在 | §5 的程序性知识清单 |
 | 长任务拆解 | 无；一次申报一次委派 | §3 的规划者/执行者分工 + 任务计划状态 |
 | Subagent 报错回路 | 委派失败即整轮失败 | 结构化回报"缺什么/为什么做不了"，Main Agent 交互补齐 |

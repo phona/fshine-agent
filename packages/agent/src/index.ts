@@ -107,7 +107,8 @@ export {
   reviewRouteDeclaration,
   isSelfContradictoryDeclaration,
   parseTurnDeclaration,
-  validatePlanAgainstTurnDeclaration,
+  validatePlanEntities,
   validateTurnDeclarationEvidence,
+  type PlanEntitySources,
   type TurnDeclaration,
 } from './turn-contract';

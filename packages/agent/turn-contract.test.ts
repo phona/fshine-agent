@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseTurnDeclaration, validatePlanAgainstTurnDeclaration, validateTurnDeclarationEvidence, type TurnDeclaration } from './src/turn-contract';
+import { parseTurnDeclaration, validatePlanEntities, validateTurnDeclarationEvidence, type TurnDeclaration } from './src/turn-contract';
 
 describe('semantic task intent router', () => {
   it('treats a repeated live-data request as fresh and asks for a missing account', () => {
@@ -82,83 +82,103 @@ describe('semantic task intent router', () => {
     expect(parseTurnDeclaration('我觉得上次的结果可以沿用。')).toBeNull();
   });
 
-  it('账套名按包含判定：用户口癖与平台规范名的词缀差异不阻断执行', () => {
-    // 真实复现：用户说"幻辰财税账套"，平台账套名是"幻辰财税"。
-    // 全等比对会把 PLAN DECLINED 拒死，导致最常见的查询形态完全跑不通。
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
-      accountQueries: ['幻辰财税账套'],
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
-    ])).toBeNull();
-    // 反向：申报规范名、worker 用简称也同样放行
-    expect(validatePlanAgainstTurnDeclaration(
-      { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰'] }],
+  it('计划实体来源校验：实体逐字来自当前消息即放行', () => {
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202608'] }],
+      { currentMessage: '查一下幻辰财税账套 202608 的应收' },
     )).toBeNull();
-    // 但仍然挡得住真正无关的账套
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻东'] },
-    ])).toContain('账套');
   });
 
-  it('夹带申报范围外的账套被逐次包含判定挡下', () => {
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
-      accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [{ value: '202609', quote: '九月' }],
-    };
-    // 第二个调用夹带了"新兴五金"——不在申报范围内，逐次校验直接拒
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯', '--period', '202609'] },
-      { operation: 'finance.query-receivables', args: ['--query', '新兴五金', '--customer', '猫一杯', '--period', '202609'] },
-    ])).toContain('账套');
+  it('以 - 开头的是 flag 不是实体，跳过；非字符串参数不参与判定', () => {
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer'] }],
+      { currentMessage: '查一下幻辰财税账套' },
+    )).toBeNull();
+    expect(validatePlanEntities(
+      [{ operation: 'any.operation', args: [10, true, null, { nested: 'object' }] }],
+      { currentMessage: '查一下' },
+    )).toBeNull();
   });
 
-  it('申报里混入科目名时不阻断执行（精确基数校验会把它拒死）', () => {
-    // 真实模型会把"应收账款"填进 accountQueries；按 账套 × 客户 × 期间 算基数就对不上。
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
-      accountQueries: ['幻辰财税', '应收账款'],
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
-    ])).toBeNull();
+  it('检索证据里的实体放行（指代消解的产物就是合法实体）', () => {
+    // referenced 申报把上一轮的名称解析出来，计划按它查——证据是三个合法来源之一。
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻东'] }],
+      {
+        currentMessage: '这个账套 202608 呢？',
+        referenceEvidence: '【宿主主动回溯】tool_result：幻东 202609 余额 51 元',
+      },
+    )).toBeNull();
   });
 
-  it('binds a voucher plan to the voucher domain and the periods the request named', () => {
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'voucher', accountResolution: 'explicit',
-      accountQueries: ['威德盛'], periods: [{ value: '202609', quote: '九月' }],
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'voucher.query-saved', args: ['威德盛', '202609'] },
-    ])).toBeNull();
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '威德盛'] },
-    ])).toContain('voucher 域');
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'voucher.query-saved', args: ['威德盛', '202601'] },
-    ])).toContain('期间');
+  it('search→query：候选名逐字来自本轮平台响应时放行', () => {
+    // roadmap 点名场景：执行层先目录查询拿到唯一候选、再用候选名查。候选名不在用户
+    // 消息里，但逐字来自本轮平台响应——宿主不懂业务也必须放行。
+    const searchCall = { operation: 'finance.search-account-sets', args: ['--query', '胜利'] };
+    expect(validatePlanEntities([searchCall], { currentMessage: '只查有没有胜利这个帐套' })).toBeNull();
+    const candidateResponse = 'RESULT {"op":"finance.search-account-sets","status":"completed","data":{"accountSets":[{"id":"as_1","name":"胜利五金有限责任公司"}]}}';
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金有限责任公司'] }],
+      { currentMessage: '只查有没有胜利这个帐套', platformResponses: [candidateResponse] },
+    )).toBeNull();
+    // 换一个响应里没有的写法照样拒——只有逐字来自响应才放行
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金集团'] }],
+      { currentMessage: '只查有没有胜利这个帐套', platformResponses: [candidateResponse] },
+    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
   });
 
-  it('binds a balance plan to the router-approved accounts, customers, and periods', () => {
-    const intent: TurnDeclaration = {
-      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
-      accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'],
-      periods: [{ value: '202609', quote: '2026年9月' }],
-    };
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯', '--period', '202609'] },
-    ])).toBeNull();
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻州幻东制造有限公司', '--customer', '猫一杯', '--period', '202609'] },
-    ])).toContain('账套');
-    expect(validatePlanAgainstTurnDeclaration(intent, [
-      { operation: 'voucher.query-saved', args: ['幻辰财税', '202601'] },
-    ])).toContain('不能代替余额表');
-    expect(validatePlanAgainstTurnDeclaration({ ...intent, periods: [] }, [
-      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯', '--period', '202601'] },
-    ])).toContain('期间');
+  it('越权实体（三个来源里都没有）被拒，错误消息领域无关', () => {
+    const error = validatePlanEntities(
+      [
+        { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯'] },
+        { operation: 'finance.query-receivables', args: ['--query', '新兴五金'] },
+      ],
+      { currentMessage: '查一下幻辰财税账套的应收' },
+    );
+    expect(error).toContain('猫一杯');
+    expect(error).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    // 报第一个越权值即可：worker 修正后重新提交完整 calls，逐次暴露
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
+        { operation: 'finance.query-receivables', args: ['--query', '新兴五金'] }],
+      { currentMessage: '查一下幻辰财税账套的应收' },
+    )).toContain('新兴五金');
+  });
+
+  it('来源并集为空时 fail-closed：任何实体都不放行', () => {
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
+      { currentMessage: '' },
+    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+  });
+
+  it('taskType 不再影响计划校验：操作与任务类型的匹配归执行层 SKILL 与平台门禁', () => {
+    // Phase 3 起宿主不再做领域判别：同样的 calls 与来源，四种 taskType 判定一致。
+    const calls = [
+      { operation: 'voucher.query-saved', args: ['幻辰财税', '202608'] },
+      { operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] },
+    ];
+    for (const taskType of ['account_search', 'balance', 'voucher', 'other'] as const) {
+      expect(validatePlanEntities(calls, { currentMessage: '查一下幻辰财税 202608' })).toBeNull();
+    }
+    // account_search 也不再被强制"只能一次 search 调用"
+    expect(validatePlanEntities(
+      [
+        { operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] },
+        { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
+      ],
+      { currentMessage: '查一下幻辰财税账套' },
+    )).toBeNull();
+  });
+
+  it('多个平台响应全部纳入来源，最近的响应也能放行新候选', () => {
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻东'] }],
+      {
+        currentMessage: '这个呢？',
+        platformResponses: ['更早的响应：提到了新兴五金', '更近的响应：幻东 202609 余额 51 元'],
+      },
+    )).toBeNull();
   });
 });

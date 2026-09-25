@@ -169,7 +169,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       const summary = await generateSummary(
         messages, models, model,
         DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-        '这是财务查询助手的会话压缩。摘要必须保留:1)当前使用的账套 id(as_xxx)与名称;2)会计期间;3)最近一次 list_vouchers 结果里的 nextCursor/prevCursor 原值(用户要靠它翻页);4)用户的关键业务意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。',
+        '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的时间范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。',
         undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT,
       );
       if (!summary.ok) {
@@ -358,37 +358,6 @@ function rememberAccountSets(
     if (typeof record.id === 'string' && typeof record.name === 'string') {
       names.set(record.id, record.name);
     }
-  }
-}
-
-function defaultStep(
-  toolName: string,
-  args: Record<string, unknown>,
-  names: Map<string, string>,
-): string {
-  const accountSetId = typeof args['accountSetId'] === 'string' ? args['accountSetId'] : '';
-  const name = accountSetId !== '' ? names.get(accountSetId) ?? accountSetId : '';
-  switch (toolName) {
-    case 'search_account_sets': {
-      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
-      return `正在检索账套:${query}…`;
-    }
-    case 'get_current_accounting_period':
-      return name ? `已定位账套「${name}」,查询当前会计期间…` : '查询当前会计期间…';
-    case 'list_vouchers': {
-      const period = typeof args['period'] === 'string' ? args['period'] : '';
-      return name ? `拉取凭证:「${name}」${period}…` : '拉取凭证中…';
-    }
-    case 'inspect_account_set':
-      return name ? `正在做账套「${name}」摸底…` : '正在做账套摸底…';
-    case 'search_references': {
-      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
-      return name ? `在账套「${name}」中检索「${query}」的档案…` : `正在检索档案:${query}…`;
-    }
-    case 'get_login_status':
-      return '检查平台登录状态…';
-    default:
-      return `正在调用 ${toolName}…`;
   }
 }
 

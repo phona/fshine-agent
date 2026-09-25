@@ -7,7 +7,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { PendingPlanConfirmation } from './plan-runtime';
-import type { TurnDeclaration } from './turn-contract';
+import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 
 /** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
 export type DriverMessage = AgentMessage;
@@ -36,6 +36,12 @@ export interface TurnDriverInput {
   signal?: AbortSignal;
   /** Host-validated semantic scope for directly routed platform tasks. */
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>;
+  /**
+   * 领域无关的实体来源集合（架构 §2 第 9 条）：宿主注入，供驱动在校验提交的计划时
+   * 做逐字包含判定。缺省表示宿主没有可注入的来源（如未经宿主演派的任务），
+   * 驱动不做实体来源校验。
+   */
+  entitySources?: PlanEntitySources;
   /** 平台仓知识面规则（worker read/ls 白名单；缺省用 G1 内置）。 */
   knowledgePaths?: readonly string[];
   /** 平台仓敏感路径规则（worker 禁读；缺省用 G1 内置）。 */
