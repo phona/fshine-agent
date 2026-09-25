@@ -22,6 +22,7 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
 const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
@@ -135,27 +136,63 @@ class RecordingSdkClient implements SdkClientLike {
  * conversation 申报后返回的文本就是用户可见回复——模型文本即回复，无需宿主转述；
  * delegate 申报走 terminate 语义，用户看到的是子 Agent 的文本，这里的 text 不参与外发
  * （只在申报被宿主退回时用于兜底，见 catch 分支）。
+ *
+ * 多声明对话：申报被宿主接受且没有 terminate 时（纠错环——宿主把"缺什么"作为工具结果
+ * 交还模型），模型继续同一回合并消费下一条声明；脚本耗尽仍未给出 text → 停嘴。
  */
 function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (input: { messages: unknown[] }) => void) {
   let cursor = 0;
   return {
     run: async (input: {
+      tools: unknown[];
       messages: unknown[];
       exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
     }) => {
+      observe?.(input);
       // 宿主续跑路径不带工具：Main Agent 只整理已完成的执行结果，不再申报
       if (input.tools.length === 0) {
-        observe?.(input);
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
-      const { text, ...declaration } = declarations[Math.min(cursor, declarations.length - 1)]!;
-      cursor += 1;
-      try {
-        await input.exec('route_current_turn', declaration);
-      } catch (error) {
-        return { text: (error as Error).message, messages: input.messages };
+      // 与生产驱动一致：申报是原生工具调用，转录里留下 assistant(toolCall) + toolResult
+      // （ToolResultMessage 的原生形状：toolCallId + toolName + content 分段）。
+      // delegate 轮次经 ToolUserError terminate、needs 回路轮次经工具结果继续——两者都因此
+      // 成为"被 toolResult 终结的完整轮次"，下一轮仍留在最近轮次窗口里（C19）。
+      const transcript: unknown[] = [...input.messages];
+      for (;;) {
+        const entry = declarations[Math.min(cursor, declarations.length - 1)]!;
+        const exhausted = cursor >= declarations.length;
+        const { text, ...declaration } = entry;
+        if (exhausted && typeof text !== 'string') {
+          return { text: '主 Agent 自由文本：不应外发', messages: transcript };
+        }
+        cursor += 1;
+        const callId = `call_${cursor}`;
+        transcript.push({
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+          timestamp: Date.now(),
+        } as never);
+        try {
+          const outcome = await input.exec('route_current_turn', declaration);
+          transcript.push({
+            role: 'toolResult',
+            toolCallId: callId,
+            toolName: 'route_current_turn',
+            content: [{ type: 'text', text: JSON.stringify(outcome) }],
+            timestamp: Date.now(),
+          } as never);
+          if (typeof text === 'string') return { text, messages: transcript };
+        } catch (error) {
+          transcript.push({
+            role: 'toolResult',
+            toolCallId: callId,
+            toolName: 'route_current_turn',
+            content: [{ type: 'text', text: (error as Error).message }],
+            timestamp: Date.now(),
+          } as never);
+          return { text: (error as Error).message, messages: transcript };
+        }
       }
-      return { text: typeof text === 'string' ? text : '主 Agent 自由文本：不应外发', messages: input.messages };
     },
   };
 }
@@ -173,6 +210,8 @@ function silentDriver() {
 export type WorkerStep =
   | { plan: PlanCall[]; stopAtConfirm?: boolean }
   | { execute: PlanCall[] }
+  | { need: SubagentNeeds; text?: string }
+  | { end: true }
   | { text: string };
 
 /**
@@ -202,10 +241,23 @@ function gatedWorker(script: WorkerStep[]) {
       // 就是这份凭证，由子 Agent 替身如实回报（真实 worker 由 pi-coding-driver 合成）。
       let proof: { planId: string; version: number; calls: number } | undefined;
       let pendingPlan: { planId: string; version: number; taskId: string; decision: 'confirm'; userText: string; evaluation: unknown } | undefined;
+      // 纠错环（架构 §3）：执行不了就回报"缺什么/为什么/建议用户提供什么"，不执行任何调用。
+      let needs: SubagentNeeds | undefined;
       for (let step = 0; step < script.length; step += 1) {
         const current = script[Math.min(cursor, script.length - 1)]!;
         cursor += 1;
         if ('text' in current) { parts.push(current.text); continue; }
+        if ('need' in current) {
+          // 结构化线索直接产出（真实 worker 由 pi-coding-driver 从平台确定性拒绝原因派生）；
+          // 宿主据此不 terminate 整轮，任务保持可续。
+          needs = current.need;
+          parts.push(typeof current.text === 'string' ? current.text : current.need.reason);
+          break;
+        }
+        if ('end' in current) {
+          // worker 收手：本回合到此结束，剩下的步骤留给下一次委派（多轮脚本的分段点）。
+          break;
+        }
         if ('execute' in current) {
           // 用户确认后宿主激活计划并续跑原任务：worker 按平台当前 active 计划执行，
           // 不再重新评估（重新评估会再次撞上确认门）。
@@ -271,6 +323,7 @@ function gatedWorker(script: WorkerStep[]) {
         messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
         ...(proof ? { execution: proof } : {}),
         ...(pendingPlan ? { pendingPlan } : {}),
+        ...(needs ? { needs } : {}),
       };
     },
   };

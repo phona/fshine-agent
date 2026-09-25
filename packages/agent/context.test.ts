@@ -113,6 +113,9 @@ describe('17dz Pi subagent adapter', () => {
     });
     // 申报契约三字段原样透传，宿主不加工不补字段
     expect(observed?.turnDeclaration).toEqual({ kind: 'delegate', request: '查幻辰财税账套里猫一杯的应收账款' });
+    // 纠错环规程（Phase 5）：执行不了时报"缺什么/为什么/建议用户提供什么"，
+    // 与既有总结原则同一份表述，不新增场景枚举
+    expect(prompt).toContain('缺什么、为什么做不了、建议用户提供什么');
   });
 
   it('宿主未注入实体来源时不向 worker 驱动传该字段（老路径不做实体校验）', async () => {
@@ -129,6 +132,27 @@ describe('17dz Pi subagent adapter', () => {
 
     expect(observed?.entitySources).toBeUndefined();
     expect(observed?.turnDeclaration).toBeUndefined();
+  });
+
+  it('worker 回报"缺什么"时结构化线索原样上交，任务记录保持可续', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    const subagent = runner(root, tasks, {
+      run: async (input) => ({
+        text: '平台要求必须显式给出期间。',
+        messages: input.messages,
+        needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' },
+      }),
+    });
+
+    const result = await subagent.run({ request: '查余额' }, { trusted: trusted() });
+
+    expect(result.needs).toEqual({ missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' });
+    // 没有执行凭证（这一轮零执行），线索本身就是给宿主的信号
+    expect(result.execution).toBeUndefined();
+    // taskId 已知会宿主侧，且 worker 转录已落库：用户补充后经 continueTaskId 从断点续跑
+    expect(result.taskId).toMatch(/^task_/);
+    expect((await tasks.get(result.taskId))?.workerMessages).toHaveLength(1);
   });
 
   it('应收余额任务失败后禁止用历史凭证跨期间兜底', () => {

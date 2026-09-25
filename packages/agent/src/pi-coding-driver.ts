@@ -17,10 +17,11 @@ import {
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { parseEnvelope } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
 export interface PiCodingTurnDriverOptions {
@@ -63,6 +64,11 @@ export interface PiCodingWorkerSession {
   skills: readonly { name: string; description: string; filePath: string }[];
   /** Currently activated plan for this worker task, if any. */
   currentPlan: () => { planId: string; version: number } | null;
+  /**
+   * 本任务迄今累积的「确定性拒绝」线索（宿主计划拦截的原因原文），没有则 null。
+   * 驱动用它派生"缺什么"交还规划者——只认确定性原因，不看 worker 的自由文本。
+   */
+  needsClue: () => SubagentNeeds | null;
 }
 
 interface CodingModelConfig {
@@ -83,7 +89,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
       let pendingPlan: PendingPlanConfirmation | undefined;
-      const { session, currentPlan } = await createPiCodingWorkerSession({
+      const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
@@ -110,6 +116,13 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const execution = (): { planId: string; version: number; calls: number } | undefined => {
         const plan = currentPlan();
         return plan && gateCalls > 0 ? { planId: plan.planId, version: plan.version, calls: gateCalls } : undefined;
+      };
+      // 纠错环（架构 §3）：执行不了就回报"缺什么"。只在**没有执行痕迹**时派生——
+      // 真执行过的回合不缺信息，把成功的结果拖进无谓的追问只会打扰用户。
+      // 两个来源都是确定性的：宿主计划拦截的原因原文、平台 RESULT 信封的错误码。
+      const needs = (): SubagentNeeds | undefined => {
+        if (execution()) return undefined;
+        return needsClue() ?? needsFromPlatformResponses(session.agent.state.messages) ?? undefined;
       };
 
       // TaskStore remains the source of truth.  Restore its transcript into
@@ -152,12 +165,14 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
         }
         const proof = execution();
+        const clue = needs();
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
           ...(proof ? { execution: proof } : {}),
           ...(pendingPlan ? { pendingPlan } : {}),
+          ...(clue ? { needs: clue } : {}),
         };
       } catch (error) {
         console.error(JSON.stringify({
@@ -208,6 +223,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     }
   }
   const activePlanId = (): string | null => activePlan?.planId ?? null;
+  // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
+  // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
+  // 只在此处记录，绝不扫描 worker 的自然语言回复。
+  const needsClues: SubagentNeeds[] = [];
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: options.agentDir,
@@ -257,6 +276,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           });
           if (scopeError) {
             activePlan = null;
+            needsClues.push({ missing: ['请求中未给出的对象'], reason: scopeError });
             return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮请求的范围执行，或向用户澄清。` };
           }
         }
@@ -295,7 +315,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     description: skill.description,
     filePath: skill.filePath,
   }));
-  return { session, skills: loaded, currentPlan: () => activePlan };
+  return { session, skills: loaded, currentPlan: () => activePlan, needsClue: () => needsClues.at(-1) ?? null };
 }
 
 async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<CodingModelConfig> {
@@ -352,6 +372,53 @@ function collectPlatformResponses(messages: readonly AgentMessage[]): string[] {
     if (text.trim()) responses.push(text);
   }
   return responses;
+}
+
+/**
+ * 平台"输入不足"类确定性错误码：词元级精确匹配（INVALID_PERIOD / ACCOUNT_SET_NOT_FOUND /
+ * ACCOUNT_SET_AMBIGUOUS / MISSING_* …），不做自由文本模糊匹配。
+ * 计划门裁决码（PLAN_*）不算：那类停止原因不是"缺用户信息"，Main Agent 补不了，
+ * 拿去问用户也得不到答案——它们仍按原路径由 worker 说明并停止。
+ */
+const INPUT_INSUFFICIENT_CODE_RE = /(?:^|_)(?:MISSING|INVALID|AMBIGUOUS|REQUIRED)(?:_|$)|NOT_FOUND/;
+/** 错误码里的判定修饰词：剥掉之后剩下的才是"缺的那个东西"。 */
+const CODE_MODIFIER_TOKENS = new Set(['INVALID', 'AMBIGUOUS', 'MISSING', 'REQUIRED', 'NOT', 'FOUND', 'ERROR', 'FAILED', 'UNKNOWN']);
+
+/** 平台错误码是否表示"输入不足"（缺参数 / 参数不合法 / 多候选 / 查无此项）。 */
+export function isInputInsufficientCode(code: string): boolean {
+  return !code.startsWith('PLAN_') && INPUT_INSUFFICIENT_CODE_RE.test(code);
+}
+
+/**
+ * 平台错误码 → 缺失项标签：机械切分，不含任何领域词表（编排层不懂业务，
+ * 也不该为某个域维护一张"错误码 → 中文名"的表——那是执行层的知识）。
+ */
+export function missingLabelFromCode(code: string): string {
+  const tokens = code.split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const subject = tokens.filter((token) => !CODE_MODIFIER_TOKENS.has(token.toUpperCase()));
+  return (subject.length ? subject : tokens).join(' ').toLowerCase() || code.toLowerCase();
+}
+
+/**
+ * 从本任务迄今的平台响应派生"缺什么"：只认 RESULT 信封里的确定性错误码
+ * （`platform-contract.ts` 是唯一契约适配层）。没有信封、没有错误码 → null，
+ * 绝不退化成对 worker 自然语言的猜测。取最近一条命中。
+ *
+ * Public only for tests: the derivation is pure and its determinism is the whole point.
+ */
+export function needsFromPlatformResponses(messages: readonly AgentMessage[]): SubagentNeeds | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i] as { role?: string; content?: unknown } | undefined;
+    if (message?.role !== 'toolResult') continue;
+    const envelope = parseEnvelope(textFromContent(message.content));
+    const error = envelope?.error;
+    if (!error?.code || !isInputInsufficientCode(error.code)) continue;
+    return {
+      missing: [missingLabelFromCode(error.code)],
+      reason: `${error.message || error.code}（平台返回 ${error.code}）`,
+    };
+  }
+  return null;
 }
 
 function lastAssistantText(messages: readonly AgentMessage[]): string {

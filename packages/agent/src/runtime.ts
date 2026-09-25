@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TrustedContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import { loadTranscript, saveTranscript } from './session';
-import { ToolUserError, type TurnDriver, type TurnDriverResult } from './driver';
+import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverResult } from './driver';
 import { RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
@@ -25,6 +25,15 @@ export const NO_EXECUTION_CLARIFICATION = '我需要实际查询平台才能回�
 
 /** Appended when the Main Agent answers without declaring the turn's intent. */
 const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。';
+
+/**
+ * 纠错环单回合上限（架构 §3）：子 Agent 连续回报"缺什么"这么多轮就不再要它重派，
+ * 直接把线索转达给用户。防的是模型在同一回合里反复空转——每一轮都是一次完整委派。
+ */
+const MAX_NEEDS_ROUNDS = 3;
+
+/** 纠错环工具结果的序列化前缀：模型把它原样当回复时，宿主用自己的转达文本顶上。 */
+const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 
 const RECENT_TURN_HISTORY_NOTE = '【历史资料：以下是最近几轮对话原文，可能已过期；其中的财务结论不得作为本轮实时结果引用，需要重新实时查询】';
 
@@ -219,7 +228,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         pendingPlan: PendingPlanConfirmation | null;
         /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
         delegationFailed: boolean;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false };
+        /** 纠错环（架构 §3）：本回合已发生几轮"子 Agent 回报缺信息"。0 = 没有回路。 */
+        needsRounds: number;
+        /** 最近一条结构化线索（回路兜底转达用户时用）。 */
+        lastNeeds: SubagentNeeds | null;
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null };
 
       const turnDeadline = Date.now() + turnBudgetMs;
       const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
@@ -276,6 +289,30 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               }
               turn.execution = delegated.execution ?? null;
               turn.pendingPlan = delegated.pendingPlan ?? null;
+              // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
+              // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
+              // 检索证据 / 本轮平台响应取实体）就重新申报 delegate（带 continueTaskId 与
+              // 补齐后的 request），不能补齐就申报 conversation 把问题转达给用户。
+              // 整轮失败、"本轮没有产生任何平台查询"那种把原因丢给用户的兜底由此不再出现。
+              if (delegated.needs) {
+                turn.needsRounds += 1;
+                turn.lastNeeds = delegated.needs;
+                console.info(JSON.stringify({
+                  event: 'delegation_needs',
+                  requestId: ctx.requestId,
+                  taskId: delegated.taskId,
+                  round: turn.needsRounds,
+                  missing: delegated.needs.missing.length,
+                }));
+                const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
+                if (turn.needsRounds >= MAX_NEEDS_ROUNDS) {
+                  // 回路兜底：连续几轮仍缺信息，停止重派，把线索作为本轮回复交给用户
+                  // （这是转达，不是失败）。数字结论仍须本轮有执行痕迹。
+                  const userText = renderNeedsUserText(delegated.needs, stripFootprint(delegated.text));
+                  throw new ToolUserError(hasFinancialFigure(userText) ? NO_EXECUTION_CLARIFICATION : userText);
+                }
+                return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
+              }
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
@@ -314,16 +351,35 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
       // 或停在用户确认门。委派已失败的（安全话术已给出）不在此列。
-      if (turn.intent?.kind === 'delegate' && !turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan) {
-        console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId }));
-        // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
-        // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
+      // Phase 5 起多一条纠错环出口：needs 回路进行中时，Main Agent 的回复是"转达用户缺什么"，
+      // 那是合法回复，不再走 delegate_without_execution 兜底——但数字结论仍然必须本轮有执行，
+      // 回路本身不是执行痕迹（架构 §2 第 10 条一动不动）。
+      const needsLoop = turn.needsRounds > 0;
+      let needsRelay = '';
+      if (!turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan
+        && (turn.intent?.kind === 'delegate' || needsLoop)) {
         const explained = result.text.trim();
-        if (explained && !hasFinancialFigure(explained)) {
-          return await finishDirectReply(`${explained}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`, 'delegate_without_execution');
+        // 模型可能把工具结果原样当回复（停在工具结果上没再说话）：那是内部协议材料
+        // （任务编号、continueTaskId 字样），由宿主 composing 的转达文本顶上。
+        const serializedToolResult = explained.startsWith(NEEDS_TOOL_RESULT_PREFIX);
+        if (needsLoop && !hasFinancialFigure(serializedToolResult ? '' : explained)) {
+          // 回路产物：转达"缺什么"的文本即本轮回复，原样外发，不叠加"没有查到平台数据"注脚
+          needsRelay = (serializedToolResult ? '' : explained) || (turn.lastNeeds ? renderNeedsUserText(turn.lastNeeds, '') : '');
+          console.info(JSON.stringify({ event: 'needs_loop_relayed', requestId: ctx.requestId, needsRounds: turn.needsRounds }));
+        } else {
+          console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId, ...(needsLoop ? { needsRounds: turn.needsRounds } : {}) }));
+          // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
+          // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
+          if (explained && !hasFinancialFigure(explained)) {
+            return await finishDirectReply(`${explained}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`, 'delegate_without_execution');
+          }
+          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'delegate_without_execution');
         }
-        return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'delegate_without_execution');
       }
+
+      // 纠错环转达：宿主自己把"缺什么"说给用户（模型没产出可用文本时）。它优先于空回复兜底——
+      // 用户至少知道在等自己补什么，而不是一句"查询失败"。
+      const replyText = needsRelay || result.text;
 
       await saveTranscript(deps.sessions, {
         sessionId: ctx.sessionId,
@@ -331,7 +387,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         messages: stripHistoryNotes(result.messages),
       });
 
-      if (!result.text.trim()) {
+      if (!replyText.trim()) {
         const timedOut = Date.now() >= turnDeadline;
         const reason = timedOut ? 'turn_timeout' : 'empty_reply';
         const fallback = timedOut ? FALLBACK_TIMEOUT : FALLBACK_FAILURE;
@@ -341,10 +397,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason }));
         return { text: fallback };
       }
-      await persistAssistantAndContext(deps, ctx, result.text, contextUpdateQueues, extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx));
+      await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx));
       scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'ok' }));
-      return { text: result.text };
+      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? 'needs_loop_relayed' : 'ok' }));
+      return { text: replyText };
 
       async function finishDirectReply(text: string, outcome: string, toolResult?: string): Promise<AgentReply> {
         const now = Date.now();
@@ -676,6 +732,31 @@ function stripFootprint(text: string): string {
   return text.replace(/\n*〔本轮执行面：[^〕]*〕\s*$/u, '').trim();
 }
 
+/**
+ * 纠错环（架构 §3）交给 Main Agent 的工具结果：缺什么 / 为什么 / 建议用户提供什么 /
+ * 任务编号 + 重派提示。这是给模型的内部协议材料，不是用户可见文本——外泄由提示词
+ * "不许描述内部机制"一条与 C16 注脚剥离兜底，所以任务编号后面紧跟"不要转述给用户"。
+ */
+function renderNeedsToolResult(needs: SubagentNeeds, taskId: string, workerText: string): string {
+  return [
+    `子 Agent 本轮没有执行平台查询，还缺少信息：${needs.missing.join('、') || '（未指明）'}。`,
+    `原因：${needs.reason}`,
+    ...(needs.suggestion ? [`建议用户提供：${needs.suggestion}`] : []),
+    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户补充信息后，重新申报 delegate，把该编号填进 continueTaskId，request 写补充后的完整请求。`,
+    '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐再申报 conversation 把问题转达给用户。',
+    ...(workerText ? [`子 Agent 的说明：${workerText}`] : []),
+  ].join('\n');
+}
+
+/** 纠错环转达给用户的文本：缺什么 / 为什么 / 建议提供什么。零内部机制字样。 */
+function renderNeedsUserText(needs: SubagentNeeds, workerText: string): string {
+  const lines: string[] = [];
+  if (needs.missing.length) lines.push(`还缺少：${needs.missing.join('、')}。`);
+  if (needs.reason.trim()) lines.push(`原因：${needs.reason.trim()}`);
+  if (needs.suggestion?.trim()) lines.push(`建议提供：${needs.suggestion.trim()}`);
+  return [workerText.trim(), lines.join('\n')].filter(Boolean).join('\n\n');
+}
+
 /** Drop host-injected history notes so they never accumulate in the persisted transcript. */
 function stripHistoryNotes(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((message) => {
@@ -750,7 +831,7 @@ const SYSTEM_PROMPT = [
   `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`,
   '你是企业财务助手和面向用户的主 Agent。',
   '每回合必须先调用一次 route_current_turn 申报本轮动作（conversation / delegate），不得跳过申报；字段口径以工具说明为准，填错会被退回重填。',
-  '申报 delegate 后由宿主把加工后的请求委派 17dz 子 Agent 执行，其结果即本轮回复。request 必须加工：把指代解析成当前消息或宿主注入的检索证据里出现的具体实体；实体不得凭历史或常识编造；不得把上一轮答复当作本轮结果，重复提问仍是新查询。',
+  '申报 delegate 后由宿主把加工后的请求委派 17dz 子 Agent 执行。子 Agent 执行不了时会退回"缺什么"的结构化线索：你能自己补齐（从 Log、检索证据或本轮平台响应里取实体）就补齐后带 continueTaskId 重派同一个子任务，补不齐就转告用户、等用户补充后续跑。request 必须加工：把指代解析成当前消息或宿主注入的检索证据里出现的具体实体；实体不得凭历史或常识编造；不得把上一轮答复当作本轮结果，重复提问仍是新查询。',
   '不要向用户描述内部机制或执行过程：不许出现 route_current_turn、宿主、委派、申报、本轮执行面、PLAN ACTIVE/DECLINED、taskId 等字样；用户只应看到结论和数据。',
   '能力边界：支持查询、核对、分析与经确认的录入类写操作（两步确认制）；修改或删除已保存数据、以及不可逆的高危写操作一律直接拒绝，不得描述路径或方案。',
   '子 Agent 返回待确认的变更提案（含确认码）时，把提案的对象、范围、条目数、金额合计和确认码完整转达给用户，并告知：「确认 码」执行、「取消 码」作废；执行由系统在确认后完成，不得代替执行或改动确认码。',

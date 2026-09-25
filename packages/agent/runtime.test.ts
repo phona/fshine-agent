@@ -774,6 +774,208 @@ describe('createTaxAgentRuntime', () => {
     expect(JSON.stringify(observed[1]?.messages)).toContain('幻东 202609 应收余额为 51 元。');
   });
 
+  // ── 纠错环（架构 §3 / roadmap Phase 5）─────────────────────────────
+  // 子 Agent 执行不了就回报"缺什么"，宿主不 terminate 整轮：Main Agent 能补齐的补齐后
+  // 带 continueTaskId 重派，不能补齐的转告用户。出口校验只认"本轮有没有执行"。
+
+  /** 多声明对话驱动：申报被宿主接受且未 terminate 时，模型继续同一回合。 */
+  function needsLoopDriver(declarations: Array<Record<string, unknown> & { text?: string }>, observed: unknown[] = []) {
+    return {
+      run: async (input: TurnDriverInput) => {
+        // 与生产驱动一致：申报是原生工具调用，转录里留下 assistant(toolCall) + toolResult
+        const messages = [...input.messages];
+        for (const [index, { text, ...declaration }] of declarations.entries()) {
+          const callId = `call_${index + 1}`;
+          messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }], timestamp: index } as never);
+          try {
+            const outcome = await input.exec('route_current_turn', declaration);
+            observed.push(outcome);
+            messages.push({ role: 'toolResult', toolName: 'route_current_turn', toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            messages.push({ role: 'toolResult', toolName: 'route_current_turn', toolCallId: callId, content: [{ type: 'text', text: error.message }], timestamp: index } as never);
+            return { text: error.message, messages };
+          }
+          if (text !== undefined) {
+            messages.push({ role: 'assistant', content: text, timestamp: index } as never);
+            return { text, messages };
+          }
+        }
+        return { text: '主 Agent 停嘴：没有给出回复文本', messages };
+      },
+    } as TurnDriver;
+  }
+
+  it('P5.1 委派回报"缺什么"时宿主不 terminate，线索作为工具结果交还 Main Agent', async () => {
+    const delegated: Array<{ request: string; taskId?: string }> = [];
+    const toolResults: unknown[] = [];
+    const driver = needsLoopDriver([
+      { kind: 'delegate', request: '查询幻东账套的应收账款' },
+      { kind: 'delegate', request: '查询幻东账套 202608 的应收账款', continueTaskId: 'task_needs' },
+    ], toolResults);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        delegated.push({ request: args.request, ...(args.taskId ? { taskId: args.taskId } : {}) });
+        return delegated.length === 1
+          // 第一轮：执行不了，回报结构化线索
+          ? { taskId: 'task_needs', text: '平台要求必须显式给出期间，本次请求没有给。', needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' } }
+          // 第二轮：用户补充后续跑原任务，真实执行
+          : { taskId: 'task_needs', text: '幻东 202608 应收余额为 51 元。', execution: { planId: 'plan_2', version: 1, calls: 1 } };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_loop' }), '查幻东账套的应收账款');
+
+    // 宿主把线索交还模型（缺什么/为什么/建议 + 任务编号 + 重派提示），模型自己继续本回合
+    const relay = JSON.stringify(toolResults[0]);
+    expect(relay).toContain('期间');
+    expect(relay).toContain('平台要求必须显式给出期间');
+    expect(relay).toContain('请给出要查的期间');
+    expect(relay).toContain('task_needs');
+    expect(relay).toContain('continueTaskId');
+    // 第二轮是同一个子任务：带 continueTaskId + 补齐后的完整请求
+    expect(delegated).toHaveLength(2);
+    expect(delegated[1]).toMatchObject({ request: '查询幻东账套 202608 的应收账款', taskId: 'task_needs' });
+    expect(reply.text).toBe('幻东 202608 应收余额为 51 元。');
+  });
+
+  it('P5.2 补不齐时 Main Agent 申报 conversation 转达用户，该文本即本轮回复', async () => {
+    const driver = needsLoopDriver([
+      { kind: 'delegate', request: '查询幻东账套的应收账款' },
+      { kind: 'conversation', text: '这次查询需要你补充要查的期间，告诉我是哪个月我就接着查。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({ taskId: 'task_needs', text: '平台要求必须显式给出期间。', needs: { missing: ['期间'], reason: '平台要求必须显式给出期间' } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_ask' }), '查幻东账套的应收账款');
+
+    // 转达用户的问题即本轮回复：不再出现"本轮没有产生任何平台查询"这种把原因丢掉的兜底
+    expect(reply.text).toBe('这次查询需要你补充要查的期间，告诉我是哪个月我就接着查。');
+    expect(reply.text).not.toContain('没有产生任何平台查询');
+    expect(reply.text).not.toContain('没有真正查到平台数据');
+  });
+
+  it('P5.3 纠错回路本身不是执行凭证：拿数字结论充数仍被出口校验挡住', async () => {
+    const driver = needsLoopDriver([
+      { kind: 'delegate', request: '查询幻东账套的应收账款' },
+      { kind: 'conversation', text: '幻东 202608 应收余额大概是 42 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({ taskId: 'task_needs', text: '平台要求必须显式给出期间。', needs: { missing: ['期间'], reason: '平台要求必须显式给出期间' } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_figure' }), '查幻东账套的应收账款');
+
+    expect(reply.text).not.toContain('42 元');
+    expect(reply.text).toContain('没有产生任何平台查询');
+  });
+
+  it('P5.4 连续多轮仍缺信息时宿主停止重派，把线索转达给用户（转达不是失败）', async () => {
+    let delegations = 0;
+    const driver: TurnDriver = {
+      run: async (input) => {
+        for (;;) {
+          try {
+            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            return { text: error.message, messages: input.messages };
+          }
+        }
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => {
+        delegations += 1;
+        return { taskId: 'task_needs', text: '平台要求必须显式给出期间。', needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' } };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_cap' }), '查幻东账套的应收账款');
+
+    // 回路有上限：不再无限重派，且用户看到的是"缺什么"，不是失败话术
+    expect(delegations).toBe(3);
+    expect(reply.text).toContain('期间');
+    expect(reply.text).toContain('平台要求必须显式给出期间');
+    expect(reply.text).toContain('请给出要查的期间');
+    expect(reply.text).not.toContain('没有产生任何平台查询');
+  });
+
+  it('P5.5 needs 回路把"缺什么"留进 Conversation Log，任务编号脱敏', async () => {
+    const events: ConversationEventRecord[] = [];
+    const driver = needsLoopDriver([
+      { kind: 'delegate', request: '查询幻东账套的应收账款' },
+      { kind: 'conversation', text: '请补充要查的期间。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_01234567-89ab-cdef-0123-456789abcdef',
+        text: '平台要求必须显式给出期间。',
+        needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' },
+      })),
+      conversationLog: {
+        append: async (event) => { events.push(event); },
+        list: async () => events,
+        search: async () => events,
+      },
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_needs_log' }), '查幻东账套的应收账款');
+
+    // 下一轮回溯时看得见"上一轮为什么没查"：原因进了 tool_result 事件，任务编号被脱敏
+    const toolEvent = events.find((event) => event.kind === 'tool_result');
+    expect(toolEvent?.content).toContain('平台要求必须显式给出期间');
+    expect(toolEvent?.content).toContain('期间');
+    expect(toolEvent?.content).not.toContain('task_01234567');
+  });
+
+  it('P5.6 模型停在工具结果上没说话时，不外发工具结果的 JSON', async () => {
+    const driver: TurnDriver = {
+      run: async (input) => {
+        const outcome = await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+        const payload = JSON.stringify(outcome);
+        // 生产驱动在"模型不再说话"时会把最后的 toolResult 正文当作 text 交还——
+        // 那是内部协议材料（任务编号、continueTaskId 字样），绝不能落到用户眼前。
+        return {
+          text: payload,
+          messages: [
+            ...input.messages,
+            { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'route_current_turn', arguments: { kind: 'delegate' } }], timestamp: 1 } as never,
+            { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: payload }], timestamp: 2 } as never,
+          ],
+        };
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_01234567-89ab-cdef-0123-456789abcdef',
+        text: '平台要求必须显式给出期间。',
+        needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_silent' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toContain('还缺少：期间');
+    expect(reply.text).toContain('请给出要查的期间');
+    expect(reply.text).not.toContain('continueTaskId');
+    expect(reply.text).not.toContain('task_01234567');
+    expect(reply.text).not.toContain('recorded');
+  });
+
   it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
     const { driver, inputs } = recordingDriver(declareConversation([{ text: '第一轮回复' }, { text: '第二轮回复' }]));

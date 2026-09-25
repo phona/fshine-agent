@@ -14,7 +14,7 @@ import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
-import { ToolUserError, type TurnDriverResult } from './driver';
+import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
 import type {
   AgentReply,
   ChangeIntentRecord,
@@ -55,7 +55,14 @@ export interface SubagentTaskResult {
   pendingPlan?: PendingPlanConfirmation;
   /** Host-verified proof that this delegated turn executed at least one platform call. */
   execution?: { planId: string; version: number; calls: number };
+  /**
+   * 子 Agent 执行不了时的结构化线索（架构 §3 纠错环）。有它表示本轮缺信息、任务可续：
+   * 宿主不把这一轮当失败，而是把线索交还 Main Agent 决定补齐还是问用户。
+   */
+  needs?: SubagentNeeds;
 }
+
+export type { SubagentNeeds };
 
 /** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关 bin/17dz prepare）。 */
 export interface PrepareRequest {
@@ -405,6 +412,19 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending' }));
           return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}) };
         }
+        // 纠错环（架构 §3）：worker 执行不了，回报"缺什么/为什么/建议用户提供什么"。
+        // 任务记录保持可续（taskId 已知会宿主侧，用户补充后经 continueTaskId 重派），
+        // 线索原样上交，由 Main Agent 决定自己补齐还是转告用户。这一轮零执行，
+        // 因此没有执行面注脚可拼（注脚只描述真实发生过的网关调用）。
+        if (result.needs) {
+          await options.tasks.upsert({
+            ...running,
+            workerMessages: result.messages as unknown[],
+            updatedAt: new Date().toISOString(),
+          });
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input' }));
+          return { taskId, text: result.text, needs: result.needs };
+        }
         const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
         if (proposal) {
           const handled = await finalizeProposal(proposal, ctx, taskId);
@@ -519,7 +539,7 @@ function workerSystemPrompt(
     ...(turnDeclaration ? [`宿主已核验本轮请求；严格按此执行，不得扩大范围或从其他历史内容补范围：${turnDeclaration.request}`] : []),
     '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',
     scope,
-    '缺少信息时直接用自然语言向用户说明需要补充什么；完成时直接给出结论、数据和来源证据。',
+    '缺少信息或执行不了时，直接用自然语言向用户说明缺什么、为什么做不了、建议用户提供什么；完成时直接给出结论、数据和来源证据。',
     '只能执行宿主批准的计划内的调用。能力不足、结果不确定或计划被拒时，如实说明看到的事实并停止；不要换口径试探，也不要代替用户做选择。',
   ].join('\n\n');
 }

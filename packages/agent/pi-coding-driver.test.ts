@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
-import { createPiCodingWorkerSession } from './src/pi-coding-driver';
+import { createPiCodingWorkerSession, isInputInsufficientCode, missingLabelFromCode, needsFromPlatformResponses } from './src/pi-coding-driver';
 import type { PlanCliRunner } from './src/plan-runtime';
 
 const roots: string[] = [];
@@ -243,6 +243,80 @@ describe('pi-coding-agent context worker', () => {
     expect(verdict?.reason).not.toContain('未在当前请求');
     expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
     worker.session.dispose();
+  });
+
+  // ── 纠错环：从确定性拒绝原因派生"缺什么"（roadmap Phase 5）──────────
+
+  it('records a structured clue when the host declines a plan for out-of-scope entities', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-needs-clue-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const planCliRunner: PlanCliRunner = async ({ args }) => ({
+      code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
+    });
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'needs clue test',
+      sessionId: 'task_scope',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      entitySources: { currentMessage: '查一下幻东的应收' },
+    });
+    expect(worker.needsClue()).toBeNull();
+
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command: 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' } } as never,
+      args: { command: 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' },
+      context: {} as never,
+    });
+
+    expect(verdict?.block).toBe(true);
+    // 原因原文就是事实：宿主确定性拦截的理由，交给 Main Agent 决定澄清还是重派
+    expect(worker.needsClue()).toMatchObject({ missing: ['请求中未给出的对象'] });
+    expect(worker.needsClue()?.reason).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    worker.session.dispose();
+  });
+
+  it('derives the missing item from a platform error code, never from free text', async () => {
+    // RESULT 信封里的确定性错误码才是线索来源；自由文本一律忽略（那是猜，不是事实）
+    const envelope = (code: string, message: string) => [{
+      role: 'toolResult',
+      toolCallId: 'call_1',
+      content: [{ type: 'text', text: `stdout noise\nRESULT {"v":1,"op":"finance.query-receivables","status":"failed","data":null,"error":{"code":"${code}","message":"${message}"}}` }],
+      timestamp: 1,
+    } as never];
+
+    expect(needsFromPlatformResponses(envelope('INVALID_PERIOD', '--period 须为 YYYYMM'))).toEqual({
+      missing: ['period'],
+      reason: '--period 须为 YYYYMM（平台返回 INVALID_PERIOD）',
+    });
+    expect(needsFromPlatformResponses(envelope('ACCOUNT_SET_NOT_FOUND', '未找到匹配账套: 猫一杯'))).toEqual({
+      missing: ['account set'],
+      reason: '未找到匹配账套: 猫一杯（平台返回 ACCOUNT_SET_NOT_FOUND）',
+    });
+    expect(needsFromPlatformResponses(envelope('ASSISTANT_AMBIGUOUS', '客户匹配到多个候选，请选择'))).toMatchObject({ missing: ['assistant'] });
+
+    // 计划门裁决码不是"缺用户信息"：Main Agent 补不了，问用户也没有答案
+    expect(needsFromPlatformResponses(envelope('PLAN_CALL_MISMATCH', '实际调用与激活计划不一致'))).toBeNull();
+    expect(needsFromPlatformResponses(envelope('PLAN_OPERATION_NOT_READ_ONLY', '计划只能含只读操作'))).toBeNull();
+    // 没有信封、没有错误码 → 没有线索，绝不退化成对 worker 自然语言的猜测
+    expect(needsFromPlatformResponses([{ role: 'toolResult', toolCallId: 'c', content: [{ type: 'text', text: '子 Agent：我觉得可能是期间的问题' }], timestamp: 1 } as never])).toBeNull();
+    expect(needsFromPlatformResponses([])).toBeNull();
+  });
+
+  it('maps error codes to missing-item labels mechanically', () => {
+    expect(isInputInsufficientCode('INVALID_PERIOD')).toBe(true);
+    expect(isInputInsufficientCode('ACCOUNT_SET_NOT_FOUND')).toBe(true);
+    expect(isInputInsufficientCode('SUBJECT_AMBIGUOUS')).toBe(true);
+    expect(isInputInsufficientCode('MISSING_ESTIMATE')).toBe(true);
+    expect(isInputInsufficientCode('PLAN_CALL_MISMATCH')).toBe(false);
+    expect(isInputInsufficientCode('PLAN_HARD_LIMIT')).toBe(false);
+    expect(missingLabelFromCode('INVALID_PERIOD')).toBe('period');
+    expect(missingLabelFromCode('ACCOUNT_SET_NOT_FOUND')).toBe('account set');
+    expect(missingLabelFromCode('ASSISTANT_AMBIGUOUS')).toBe('assistant');
   });
 
 });

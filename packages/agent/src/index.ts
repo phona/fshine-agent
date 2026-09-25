@@ -5,11 +5,15 @@ export type {
   TurnDriverInput,
   TurnDriverResult,
   ScriptedTurnStep,
+  SubagentNeeds,
 } from './driver';
 export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
 export {
   createPiCodingTurnDriver,
   createPiCodingWorkerSession,
+  isInputInsufficientCode,
+  missingLabelFromCode,
+  needsFromPlatformResponses,
   type PiCodingTurnDriverOptions,
   type PiCodingWorkerSession,
   type PiCodingWorkerSessionOptions,

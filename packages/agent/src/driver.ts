@@ -50,6 +50,26 @@ export interface TurnDriverInput {
   onNotice?: (text: string) => Promise<void>;
 }
 
+/**
+ * 子 Agent 执行不了时的结构化线索（架构 §3 纠错环，roadmap Phase 5）。
+ *
+ * 两个来源，都必须是确定性的：
+ *   1. 脚本化替身（离线 e2e）直接产出；
+ *   2. 真实 worker 由驱动从「平台确定性拒绝原因」派生——RESULT 信封里的错误码、
+ *      宿主计划拦截的原因原文。**禁止对 worker 自由文本做模糊匹配**：那是猜，不是事实。
+ *
+ * 宿主拿到它时不 terminate 整轮，而是把线索交还 Main Agent：能自己补的补（从 Log /
+ * 检索证据 / 本轮平台响应取实体），不能补的转告用户，然后用 continueTaskId 重派原任务。
+ */
+export interface SubagentNeeds {
+  /** 缺什么（领域无关的条目：来自平台错误码的主体词，或宿主拦截原因所指的对象）。 */
+  missing: string[];
+  /** 为什么做不了（确定性原因原文，不是自由文本猜测）。 */
+  reason: string;
+  /** 建议用户提供什么（可选）。 */
+  suggestion?: string;
+}
+
 export interface TurnDriverResult {
   /** 最终给用户的回复文本;空字符串表示本次模型调用未产出可用回复 */
   text: string;
@@ -59,6 +79,11 @@ export interface TurnDriverResult {
   footprint?: string;
   /** Platform plan pending for a host-side user confirmation flow. */
   pendingPlan?: PendingPlanConfirmation;
+  /**
+   * 子 Agent 执行不了时的结构化线索。有它表示这一轮缺信息、任务可续，
+   * 宿主应把线索交还规划者而不是以失败收尾。
+   */
+  needs?: SubagentNeeds;
   /**
    * Host-verified proof that this turn really reached the platform: an activated plan plus at
    * least one executed call. Absent this, the host must not let the turn's text reach the user.
