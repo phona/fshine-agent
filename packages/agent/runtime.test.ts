@@ -196,6 +196,24 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).not.toContain('bin/17dz');
   });
 
+  it('零执行但子 Agent 诚实汇报能力边界时，标注来源转发而非整段丢弃', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'voucher', accountResolution: 'explicit', accountQueries: ['新兴五金'] } }] },
+      { text: '不应到达' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 子 Agent 查不了（平台要求凭证必须带期间），如实说明，没有编造数字
+      platformTask: subagent(async () => ({ taskId: 'task_1', text: '平台校验要求凭证查询必须显式给出期间（YYYYMM），不接受缺省。本次请求没有指定期间，我不能自行猜一个期间。' })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_capability' }), '把新兴五金的凭证也列一下');
+
+    expect(reply.text).toContain('必须显式给出期间');
+    expect(reply.text).toContain('本轮没有真正查到平台数据');
+  });
+
   it('R4 申报的账套不逐字来自当前消息时降级为澄清，且不委派', async () => {
     const delegated: unknown[] = [];
     const { driver } = recordingDriver([

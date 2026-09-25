@@ -38,7 +38,7 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
     '· taskType：balance=应收/科目余额，voucher=凭证，account_search=账套目录，other=其他平台数据。',
     '· customerQueries 只填客户名称；periods 只填用户明确要求的期间，value 用 YYYYMM，quote 逐字摘录当前消息；空数组表示按平台当前期间查，此时不要让子 Agent 传 --period。',
     '',
-    '【指代解析】"这个账套""它""那个""刚才那个"这类指代，只要紧邻的上文刚查过某个账套，就填那个账套名、把指代原词填进 referenceQuote、accountResolution 填 referenced。例：上一轮查了新兴五金，本轮"这个账套 202608 呢？"→ accountResolution:"referenced", accountQueries:["新兴五金"], referenceQuote:"这个账套"。只有上下文里确实找不到唯一账套时才选 missing/ambiguous。',
+    '【指代解析】"这个账套""它""那个""刚才那个"这类指代，只要紧邻的上一轮出现过且只有一个账套名，就必须按 referenced 处理：把那个账套名填进 accountQueries、指代原词填进 referenceQuote。例：上一轮查了新兴五金，本轮"这个账套 202608 呢？"→ accountResolution:"referenced", accountQueries:["新兴五金"], referenceQuote:"这个账套"。上一轮刚查过账套时选 clarify 属于过度澄清，会被宿主判为无效申报。只有上一轮完全没有账套、或出现多个候选时才选 missing/ambiguous。',
     '',
     '【不要代替用户追问】消息里已经写了账套名就直接按它申报——平台自己会返回候选列表或明确报错，那才是给用户的事实依据。也不要因为"可能有同名账套"就提前追问。',
   ].join('\n'),
