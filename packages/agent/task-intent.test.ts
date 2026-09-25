@@ -25,6 +25,24 @@ describe('semantic task intent router', () => {
       .toMatchObject({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻辰财税'] });
   });
 
+  it('指代校验只看上一轮，不把当前消息算进去', () => {
+    const current = '这个账套的凭证有多少张？';
+    const history = [
+      { role: 'user', content: '查一下幻辰财税的应收', timestamp: 1 },
+      { role: 'assistant', content: '幻辰财税 202609 应收余额 86,000 元。', timestamp: 2 },
+      { role: 'user', content: current, timestamp: 3 },
+    ] as never[];
+    // 上一轮只有幻辰财税；申报一个只在更早上下文出现过的账套 → 拒绝
+    expect(validateTaskIntentEvidence(
+      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['新兴五金'], referenceQuote: '这个账套' },
+      current, history,
+    )).toMatchObject({ kind: 'clarify' });
+    expect(validateTaskIntentEvidence(
+      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '这个账套' },
+      current, history,
+    )).toMatchObject({ kind: 'platform_query' });
+  });
+
   it('指代只绑定紧邻的那一轮，不拿上下文里顺带提过的账套顶替', () => {
     const current = '这个账套 202609 的凭证有多少张？';
     const history = [

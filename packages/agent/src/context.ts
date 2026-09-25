@@ -505,7 +505,7 @@ function workerSystemPrompt(
     ? `调用者的应用层账套 allowlist：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外账套。`
     : '应用层未提供账套 allowlist；账套访问范围必须以平台领域脚本的权限校验为准。';
   return [
-    '你是 幻账平台任务子 Agent。你在受信工作目录中为主 Agent 执行一项具体任务。',
+    '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。你的最终回复会原样展示给最终用户——请直接对用户说话。',
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取与任务相关的 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本。',
     '实时账务数据必须来自领域脚本结果，不得编造；不要读取源码后猜内部 ID，也不要自行重实现平台流程。',
@@ -519,7 +519,7 @@ function workerSystemPrompt(
     ...(taskIntent ? [`宿主意图路由已核验本轮范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(taskIntent)}`] : []),
     '知识只经 read 读取固定知识面：技能 SKILL.md、src/<域>/MECHANISMS.md、*.schema.json；实现源码不可读也不需要读（工具面无 grep/find）。',
     scope,
-    '缺少信息时直接用自然语言说明需要用户补充什么；完成时直接返回可供主 Agent 使用的自然语言结果和必要证据。',
-    '不要替主 Agent 决定如何回复用户，也不要输出状态 JSON 或控制协议。',
+    '缺少信息时直接用自然语言向用户说明需要补充什么；完成时直接给出结论、数据和来源证据。',
+    '不要输出内部协议文案：不许出现"以下是给主 Agent 的说明/结果"、"已按要求先申报"、"宿主"、"委派"、"route_current_turn"、"PLAN ACTIVE/DECLINED"这类字样，也不要输出状态 JSON。用户只应看到结论、数据和来源。',
   ].join('\n\n');
 }

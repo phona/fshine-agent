@@ -269,8 +269,12 @@ export function validateTaskIntentEvidence(intent: TaskIntent, current: string, 
     // 放宽到整段可见历史会把上一轮顺带提过的别家账套当成指代目标——实测就把
     // "这个账套"解析成了两轮前提过的新兴建材，而上一轮刚查的是幻辰财税。
     const previousTurn = previousTurnText(history, current);
-    if (intent.accountQueries.length !== 1 || !intent.referenceQuote || !current.includes(intent.referenceQuote)
-      || !previousTurn.trim() || intent.accountQueries.some((name) => !previousTurn.includes(name))) {
+    const rejected = intent.accountQueries.length !== 1 || !intent.referenceQuote || !current.includes(intent.referenceQuote)
+      || !previousTurn.trim() || intent.accountQueries.some((name) => !previousTurn.includes(name));
+    if (typeof process !== 'undefined' && process.env?.DZ_DEBUG_REFERENCE === '1') {
+      console.info(JSON.stringify({ event: 'reference_check', current, declared: intent.accountQueries, rejected, previousTurn: previousTurn.slice(0, 400) }));
+    }
+    if (rejected) {
       return { kind: 'clarify', question: '我无法从上一轮对话唯一确定你指的账套，请告诉我账套名称。' };
     }
   }
@@ -282,11 +286,15 @@ export function validateTaskIntentEvidence(intent: TaskIntent, current: string, 
  * 所以按内容排除当前消息，再取它前面最近的那个 user 起点。
  */
 function previousTurnText(history: DriverMessage[], current: string): string {
+  // 生产里 context 以当前用户消息结尾；先把它排除在搜索范围外，
+  // 否则 slice 会把它又带回来（指代校验就变成了"当前消息里有没有这个账套名"）。
+  const last = history.length - 1;
+  const end = last >= 0 && messageContentText(history[last]!) === current ? last : history.length;
   const texts = history.map(messageContentText);
-  for (let index = history.length - 1; index >= 0; index -= 1) {
+  for (let index = end - 1; index >= 0; index -= 1) {
     if ((history[index] as { role?: string }).role !== 'user') continue;
     if (texts[index] === current) continue;
-    return history.slice(index).map(messageContentText).join('\n');
+    return history.slice(index, end).map(messageContentText).join('\n');
   }
   return '';
 }

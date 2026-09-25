@@ -264,6 +264,9 @@ const CASES: Case[] = [
       const notes: string[] = [];
       const slow = turns.filter((turn) => turn.ms > 120_000);
       if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
+      // 内部协议泄漏：用户不该看到宿主/申报/主 Agent 这类字样
+      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先申报|宿主|PLAN (ACTIVE|DECLINED|NEEDS)/.test(turn.reply));
+      if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
       const drift = turns.filter((turn) => /新兴五金/.test(turn.text) === false && /新兴五金/.test(turn.reply) && !/目录|账套/.test(turn.text));
       if (drift.length) notes.push(`${drift.length} 轮回复带上了用户没问的账套`);
       return { turns, notes };
