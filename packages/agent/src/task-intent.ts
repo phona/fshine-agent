@@ -75,8 +75,8 @@ export function validatePlanAgainstTaskIntent(
 ): string | null {
   if (intent.taskType === 'account_search') {
     if (calls.length !== 1 || calls[0]?.operation !== 'finance.search-account-sets'
-      || optionValue(calls[0].args, '--query') !== intent.searchQuery) {
-      return '账套搜索计划必须且只能按路由器给出的关键词调用 finance.search-account-sets。';
+      || !inScope(optionValue(calls[0].args, '--query'), intent.searchQuery ? [intent.searchQuery] : [])) {
+      return '账套搜索计划必须且只能按本轮给出的关键词调用 finance.search-account-sets。';
     }
     return null;
   }
@@ -91,19 +91,48 @@ export function validatePlanAgainstTaskIntent(
   if (calls.length !== accounts.length * customerScope.length * periodScope.length) {
     return '余额计划调用数量超出了宿主确认的账套和期间范围。';
   }
-  const expected = new Set<string>();
-  for (const account of accounts) for (const customer of customerScope) for (const period of periodScope) expected.add(JSON.stringify([account, customer, period]));
+  // 每个申报组合都必须被至少一次调用覆盖（用包含判定对应，见 inScope 注释）
+  const required: Array<{ account: string; customer: string; period: string }> = [];
+  for (const account of accounts) for (const customer of customerScope) for (const period of periodScope) required.push({ account, customer, period });
+  const covered = new Set<number>();
   for (const call of calls) {
     if (call.operation !== 'finance.query-receivables') return '余额任务只能调用 finance.query-receivables；凭证历史不能代替余额表。';
     const account = optionValue(call.args, '--query');
     const customer = optionValue(call.args, '--customer');
     const period = optionValue(call.args, '--period') ?? '';
-    if (!account || !accounts.includes(account)) return '余额计划加入了宿主未确认的账套。';
-    if (customers.length ? (!customer || !customers.includes(customer)) : Boolean(customer)) return '余额计划客户范围与宿主解析的当前请求不一致。';
-    if (periods.length ? !periods.includes(period) : Boolean(period)) return '余额计划加入了当前请求未指定的期间。';
-    expected.delete(JSON.stringify([account, customer ?? '', period]));
+    if (!account || !inScope(account, accounts)) return '余额计划加入了宿主未确认的账套。';
+    if (customers.length ? (!customer || !inScope(customer, customers)) : Boolean(customer)) return '余额计划客户范围与宿主解析的当前请求不一致。';
+    if (periods.length ? !periods.includes(period) : Boolean(period)) {
+      return '余额计划加入了当前请求未指定的期间；用户未指定期间时请不要带 --period，由平台按当前期间查。';
+    }
+    for (const [slot, want] of required.entries()) {
+      if (covered.has(slot)) continue;
+      if (!inScope(account, [want.account])) continue;
+      if (want.customer && !inScope(customer, [want.customer])) continue;
+      if (want.period && period !== want.period) continue;
+      covered.add(slot);
+      break;
+    }
   }
-  return expected.size ? '余额计划漏掉了宿主解析出的请求范围。' : null;
+  return covered.size === required.length ? null : '余额计划漏掉了宿主解析出的请求范围。';
+}
+
+/**
+ * 业务实体名匹配：平台上的规范名与用户口癖常有词缀差异（用户说"幻辰财税账套"，
+ * 平台账套名是"幻辰财税"；用户说"幻辰"，规范名是"幻辰财税"）。这里用双向包含
+ * 判定"属于本轮申报范围"，不做全等字符串比较——全等会把最常见的查询形态直接拒死。
+ *
+ * 防越权靠的是另外两件事：申报本身必须逐字来自当前消息（validateTaskIntentEvidence），
+ * 以及调用数量必须等于 账套 × 客户 × 期间 的笛卡尔积（多查一个账套就对不上）。
+ */
+function inScope(value: string | null, scope: readonly string[]): boolean {
+  if (!value) return false;
+  const query = value.trim();
+  if (!query) return false;
+  return scope.some((name) => {
+    const declared = name.trim();
+    return declared === query || declared.includes(query) || query.includes(declared);
+  });
 }
 
 /** Voucher scripts take the period positionally (account, YYYYMM); flag form is also accepted. */

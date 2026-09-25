@@ -139,6 +139,28 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('没有产生任何平台查询');
   });
 
+  it('子 Agent 文本尾部的执行面注脚不外发给用户', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] } }] },
+      { text: '不应到达' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_1',
+        text: '幻辰财税 202609 应收余额为 51 元。\n\n〔本轮执行面：3 次 bin/17dz 调用〕',
+        execution: { planId: 'plan_1', version: 1, calls: 3 },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_footnote' }), '查幻辰财税账套本期的应收账款');
+
+    expect(reply.text).toBe('幻辰财税 202609 应收余额为 51 元。');
+    expect(reply.text).not.toContain('本轮执行面');
+    expect(reply.text).not.toContain('bin/17dz');
+  });
+
   it('R4 申报的账套不逐字来自当前消息时降级为澄清，且不委派', async () => {
     const delegated: unknown[] = [];
     const { driver } = recordingDriver([

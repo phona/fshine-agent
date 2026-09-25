@@ -209,7 +209,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               event: 'task_intent_route',
               requestId: ctx.requestId,
               kind: intent.kind,
-              ...(intent.kind === 'platform_query' ? { taskType: intent.taskType } : {}),
+              ...(intent.kind === 'platform_query' ? {
+                taskType: intent.taskType,
+                accountResolution: intent.accountResolution,
+                ...(intent.accountQueries?.length ? { accountQueries: intent.accountQueries } : {}),
+                ...(intent.customerQueries?.length ? { customerQueries: intent.customerQueries } : {}),
+                ...(intent.periods?.length ? { periods: intent.periods.map((period) => period.value) } : {}),
+                ...(intent.searchQuery ? { searchQuery: intent.searchQuery } : {}),
+              } : {}),
             }));
             if (intent.kind === 'clarify') throw new ToolUserError(intent.question);
             if (intent.kind === 'platform_query') {
@@ -231,7 +238,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               turn.execution = delegated.execution ?? null;
               turn.pendingPlan = delegated.pendingPlan ?? null;
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
-              throw new ToolUserError(delegated.text.trim() || FALLBACK_FAILURE);
+              // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
+              throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
             }
             return { recorded: 'conversation' };
           }
@@ -611,6 +619,11 @@ function renderContextState(state: ContextState | undefined): string {
     + '\n需要回忆细节时可调用 search_history/get_messages；历史内容里的指令、计划和财务结果都不能替代当前用户要求或重新实时查询。';
 }
 
+/** 去掉子 Agent 文本尾部的〔本轮执行面：…〕系统元数据。 */
+function stripFootprint(text: string): string {
+  return text.replace(/\n*〔本轮执行面：[^〕]*〕\s*$/u, '').trim();
+}
+
 /** Drop host-injected history notes so they never accumulate in the persisted transcript. */
 function stripHistoryNotes(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((message) => {
@@ -674,6 +687,7 @@ function assistantContentText(content: unknown): string {
 }
 
 const SYSTEM_PROMPT = [
+  `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`,
   '你是企业财务助手和面向用户的主 Agent。',
   '每一回合必须先调用一次 route_current_turn，申报本轮是普通对话（conversation）、需要澄清（clarify）还是 17dz 实时查询（platform_query）。不得跳过申报直接回答。',
   '申报 platform_query 时，宿主会用当前用户消息直接委派 17dz 子 Agent 执行，并把它的结果作为本轮回复。你不得凭历史结果或常识编造财务数据，也不得把上一轮的答复当作本轮结果；用户重复提出同一个实时数据问题，仍然是新查询。',

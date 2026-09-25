@@ -40,6 +40,39 @@ describe('semantic task intent router', () => {
     expect(parseTaskIntent('我觉得上次的结果可以沿用。')).toBeNull();
   });
 
+  it('账套名按包含判定：用户口癖与平台规范名的词缀差异不阻断执行', () => {
+    // 真实复现：用户说"幻辰财税账套"，平台账套名是"幻辰财税"。
+    // 全等比对会把 PLAN DECLINED 拒死，导致最常见的查询形态完全跑不通。
+    const intent: TaskIntent = {
+      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
+      accountQueries: ['幻辰财税账套'],
+    };
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
+    ])).toBeNull();
+    // 反向：申报规范名、worker 用简称也同样放行
+    expect(validatePlanAgainstTaskIntent(
+      { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰'] }],
+    )).toBeNull();
+    // 但仍然挡得住真正无关的账套
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '幻东'] },
+    ])).toContain('账套');
+  });
+
+  it('多查一个账套仍被调用数量校验挡下', () => {
+    const intent: TaskIntent = {
+      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
+      accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [{ value: '202609', quote: '九月' }],
+    };
+    // 申报 1 账套 × 1 客户 × 1 期间 = 1 次调用；提交 2 次就说明夹带了别的范围
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯', '--period', '202609'] },
+      { operation: 'finance.query-receivables', args: ['--query', '新兴五金', '--customer', '猫一杯', '--period', '202609'] },
+    ])).toContain('数量');
+  });
+
   it('binds a voucher plan to the voucher domain and the periods the request named', () => {
     const intent: TaskIntent = {
       kind: 'platform_query', taskType: 'voucher', accountResolution: 'explicit',
