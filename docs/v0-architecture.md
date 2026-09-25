@@ -229,7 +229,7 @@ Main Agent 申报 delegate
 | Subagent 报错回路 | 委派失败即整轮失败 | 结构化回报"缺什么/为什么做不了"，Main Agent 交互补齐 |
 | 主动回溯 | `route_reference_hint`（判断后补救） | 宿主在申报前注入检索证据 |
 | 执行层记忆 | 无 | §6 执行层自己的持久化 |
-| 提示词面积 | `SYSTEM_PROMPT` 1408 字符，一半以上是业务 if-else | 只保留协议与原则；业务规则要么进代码断言，要么进执行层 SKILL |
+| 提示词面积 | `SYSTEM_PROMPT` 908 字符 / `workerSystemPrompt` 885 字符，只剩协议与原则（Phase 1 已去冗余，见 `rule-landing.md`）；残留业务条目：指代规则（Phase 2 删）、工具描述字段口径（Phase 4 重写）、worker 业务条目（Phase 3 下沉） | 只保留协议与原则；业务规则要么进代码断言，要么进执行层 SKILL |
 
 **改造顺序的原则**：先删"代码已保证"的提示词冗余，再做主动回溯，最后才动申报契约本体——因为契约一改，前面所有的调试基线都会变。分阶段计划、每步验收与验证协议见 [`roadmap.md`](roadmap.md)。
 

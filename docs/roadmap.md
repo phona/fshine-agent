@@ -47,13 +47,23 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 1 — 提示词去冗余
 
-**目标**：把"代码已经保证"的规则从提示词里删掉，缩小要维护的面积。
+**状态：已完成**（见 `docs/rule-landing.md`）。产出物即该清单：代码断言 C1–C17、SKILL 事实 S1–S8、两个提示词的逐条落点表，作为唯一事实源索引随代码走。
 
-**方法**：对 `SYSTEM_PROMPT`（19 条 / 1408 字符）和 `workerSystemPrompt`（17 条）逐条对照代码断言。已确认可删的（代码里有对应保证）：
+**结果**：`SYSTEM_PROMPT` 18 条/1491 字符 → 11 条/908；`workerSystemPrompt` 16 条/1545 字符 → 10 条/885；合计 3036→1793（**−40.9%**）。删掉的条目全部有代码断言或 SKILL 落点；剩余场景枚举合成一条原则（只执行宿主批准的计划内的调用；能力不足/不确定/被拒时如实说明并停止，不换口径试探，不代替用户做选择——全项目唯一一份在 workerSystemPrompt，Main Agent 侧对应"口径不可履行选 clarify"）。指代规则（SYSTEM_PROMPT 173 字符）按计划留给 Phase 2。
+
+**验收（按实际达成记录）**：
+- 合计字符数 −40.9%（要求 ≥40%）✓
+- 清单每条规则有代码/SKILL 落点；提示词无清单外新规则 ✓
+- `npm test` 287 全绿、typecheck 0 错误 ✓
+- 探针 `--quick` 与改前基线对比无回归 ✓（A2/A4/A5 调用数与基线一致；A1 改后首跑复现一次 `executor_error` 环境抖动，`--only A1` 重跑 2 次调用两轮均真实查询；B1 的 ⚠ 与基线同性质——5 轮数据全为 0，是探针把回复措辞里的数字也抽来比对导致的误报）
+
+两个原提示词文本断言用例（`context.test.ts`）已改为断言代码落点（C6/C7/C8），其中 account_search 计划限制此前只有提示词层覆盖、无代码层测试，本次补上。
+
+### 已确认可删的（代码里有对应保证）
 
 | 提示词条目 | 代码保证 |
 |---|---|
-| 只问账套存在性 → 只能调 `search-account-sets` | `validatePlanAgainstTaskIntent` account_search 分支 |
+| 只问账套存在性 → 只能调 `search-account-sets` | `validatePlanAgainstTurnDeclaration` account_search 分支 |
 | 余额任务不能夹带凭证查询 | balance 分支 |
 | 不能查申报范围外的账套 / 期间 | `inScope` + periods 检查 |
 | 计划必须只读 | 平台 `PLAN_OPERATION_NOT_READ_ONLY` |
@@ -63,17 +73,6 @@ Phase 0 测试并行化        （不动架构，纯提速）
 | worker bash 只能 `bin/17dz`、禁元字符、无计划拒绝 | `serve-gate.ts` |
 | 不读 `.runtime/` / `.env` / auth | serve-gate `sensitivePaths` |
 | 申报必须带证据 / 自相矛盾退回 / 零执行不外发 | 三个确定性校验 |
-
-**剩下的场景枚举合成一条原则**：
-
-> 只能执行宿主批准的计划内的调用。能力不足、结果不确定或计划被拒时，如实说明看到的事实并停止；不要换口径试探，也不要代替用户做选择。
-
-**产出物**：一份「规则 → 落点」清单（代码断言 / SKILL 事实），作为唯一事实源索引，随代码走。
-
-**验收**：
-- `SYSTEM_PROMPT` + `workerSystemPrompt` 合计字符数下降 ≥40%
-- 清单里每条规则都能在代码或 SKILL 里找到落点；提示词里不出现清单外的新规则
-- `npm test` 全绿；探针 `--quick` 业务层无回归（删的全是冗余，预期零行为变化）
 
 ---
 

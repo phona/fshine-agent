@@ -505,21 +505,15 @@ function workerSystemPrompt(
     ? `调用者的应用层账套 allowlist：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外账套。`
     : '应用层未提供账套 allowlist；账套访问范围必须以平台领域脚本的权限校验为准。';
   return [
-    '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。你的最终回复会原样展示给最终用户——请直接对用户说话。',
+    '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。最终回复会原样展示给最终用户——直接对用户说话；不要输出内部协议文案（"给主 Agent 的说明"、宿主、委派、route_current_turn、PLAN ACTIVE/DECLINED 等字样和状态 JSON 不允许）。',
     `平台工作目录：${root}`,
-    '先按 Pi 的 Skill 机制读取与任务相关的 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本。',
-    '实时账务数据必须来自领域脚本结果，不得编造；不要读取源码后猜内部 ID，也不要自行重实现平台流程。',
-    '本链路支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 技能产出变更提案）。写操作由服务端在用户确认后执行——你不得也不需要执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
-    '调用网关直接使用 `bin/17dz <query|prepare> …`（平台统一网关，mode 决定裁决矩阵），不要加 cd/env 等前缀。',
-    '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[{"operation":"voucher.query-saved","args":["账套名","期间"]}]}。calls 必须逐项列出你准备执行的平台注册 operation 及其原生参数；照 Skill/operation 文档填写，禁止自行把账套、期间映射成参数。平台返回 PLAN ACTIVE 后才能查询。',
-    '计划由平台 CLI 评估并在每次调用时校验。PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主收到并验证真实用户确认/通知，不得凭模型字段或用户消息转述自行激活。PLAN STOP 时直接说明停止原因。计划范围扩大时必须重新提交完整精确 calls。',
-    '用户只问账套是否存在或要查账套候选时，只能调用 finance.search-account-sets，并且只提交这一项调用。不得用 finance.query-receivables、凭证查询或科目查询代替，也不得继续查期间、余额或客户。若平台 operation 清单或 Skill 中没有 finance.search-account-sets，或它明确报告能力不可用，应停止并明确告知用户无法确认；不得用其它查询接口试探。',
-    '未指定账套时不能把历史出现过的账套自动当作本次范围；如果当前请求和紧邻上下文不能唯一确定账套，先向用户询问要查哪个账套，不得并行遍历历史账套。',
-    '余额查询没有用户指定期间时只查当前期间。应收余额查询失败后必须停止并如实报告；不得用历史凭证或扩大期间范围估算期末余额。历史凭证查询只用于用户明确要求的凭证明细或期间核对，不能替代余额表。',
+    '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
+    '本链路只支持只读查询与录入类准备（按 17dz-bookkeeping-prepare 产出变更提案），写操作由服务端在用户确认后执行；修改/删除已保存凭证、过账、结账类请求直接报告能力边界。',
+    '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数，照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。',
     ...(turnDeclaration ? [`宿主已核验本轮申报范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(turnDeclaration)}`] : []),
-    '知识只经 read 读取固定知识面：技能 SKILL.md、src/<域>/MECHANISMS.md、*.schema.json；实现源码不可读也不需要读（工具面无 grep/find）。',
+    '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',
     scope,
     '缺少信息时直接用自然语言向用户说明需要补充什么；完成时直接给出结论、数据和来源证据。',
-    '不要输出内部协议文案：不许出现"以下是给主 Agent 的说明/结果"、"已按要求先申报"、"宿主"、"委派"、"route_current_turn"、"PLAN ACTIVE/DECLINED"这类字样，也不要输出状态 JSON。用户只应看到结论、数据和来源。',
+    '只能执行宿主批准的计划内的调用。能力不足、结果不确定或计划被拒时，如实说明看到的事实并停止；不要换口径试探，也不要代替用户做选择。',
   ].join('\n\n');
 }

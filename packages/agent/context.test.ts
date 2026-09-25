@@ -6,6 +6,7 @@ import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, Truste
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
 import { createContextTaskRunner, type ContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
+import { validatePlanAgainstTurnDeclaration, type TurnDeclaration } from './src/turn-contract';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -67,20 +68,22 @@ describe('17dz Pi subagent adapter', () => {
   });
 
   it('账套存在性任务要求只用专用目录搜索 operation', async () => {
-    const root = await profileRoot();
-    let prompt = '';
-    const subagent = runner(root, new MemoryTasks(), {
-      run: async (input) => {
-        prompt = input.systemPrompt;
-        return { text: '当前平台没有账套目录搜索能力，无法确认。', messages: input.messages };
-      },
-    });
-
-    await subagent.run({ request: '确认“胜利”是不是账套，只搜索账套目录' }, { trusted: trusted() });
-
-    expect(prompt).toContain('finance.search-account-sets');
-    expect(prompt).toContain('不得用 finance.query-receivables、凭证查询或科目查询代替');
-    expect(prompt).toContain('应停止并明确告知用户无法确认');
+    // 规则落点已从提示词下沉到宿主代码断言（docs/rule-landing.md C6）：
+    // account_search 的计划必须且只能是一次 finance.search-account-sets，
+    // 不得改用余额/凭证/科目查询探测——worker 提示词里不再枚举该场景。
+    const intent: TurnDeclaration = {
+      kind: 'platform_query', taskType: 'account_search', accountResolution: 'explicit', searchQuery: '胜利',
+    };
+    expect(validatePlanAgainstTurnDeclaration(intent, [
+      { operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
+    ])).toBeNull();
+    expect(validatePlanAgainstTurnDeclaration(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '胜利'] },
+    ])).toContain('finance.search-account-sets');
+    expect(validatePlanAgainstTurnDeclaration(intent, [
+      { operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
+      { operation: 'finance.query-receivables', args: ['--query', '胜利'] },
+    ])).toContain('finance.search-account-sets');
   });
 
   it('将宿主验证的本轮意图范围传给子 Agent', async () => {
@@ -102,22 +105,19 @@ describe('17dz Pi subagent adapter', () => {
     expect(prompt).toContain('"accountQueries":["幻辰财税"]');
   });
 
-  it('应收余额任务失败后禁止用历史凭证跨期间兜底', async () => {
-    const root = await profileRoot();
-    let prompt = '';
-    const subagent = runner(root, new MemoryTasks(), {
-      run: async (input) => {
-        prompt = input.systemPrompt;
-        return { text: '需要明确账套后才能查询。', messages: input.messages };
-      },
-    });
-
-    await subagent.run({ request: '帮我查一下猫一杯的应收账款还有多少' }, { trusted: trusted() });
-
-    expect(prompt).toContain('未指定账套时不能把历史出现过的账套自动当作本次范围');
-    expect(prompt).toContain('余额查询没有用户指定期间时只查当前期间');
-    expect(prompt).toContain('应收余额查询失败后必须停止');
-    expect(prompt).toContain('不得用历史凭证或扩大期间范围估算期末余额');
+  it('应收余额任务失败后禁止用历史凭证跨期间兜底', () => {
+    // 规则落点已从提示词下沉到宿主代码断言（docs/rule-landing.md C7/C8）：
+    // 余额计划只能调 finance.query-receivables，且不得带未申报的期间——
+    // "失败后停止并如实报告"的行为面在 17dz-query SKILL.md 查询边界（S2）。
+    const intent: TurnDeclaration = {
+      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'],
+    };
+    expect(validatePlanAgainstTurnDeclaration(intent, [
+      { operation: 'voucher.query-saved', args: ['幻辰财税', '202601'] },
+    ])).toContain('不能代替余额表');
+    expect(validatePlanAgainstTurnDeclaration(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] },
+    ])).toContain('期间');
   });
 
   it.each([
