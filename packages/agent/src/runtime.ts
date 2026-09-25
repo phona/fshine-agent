@@ -546,6 +546,26 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 用户至少知道在等自己补什么，而不是一句"查询失败"。
       const replyText = needsRelay || result.text;
 
+      // 数值溯源探查（只记录，不拦截）：零执行轮次的回复若含"千分位小数"格式的金额，
+      // 而该数值在历史转录/检索证据/当前消息里都逐字找不到，记一条告警。
+      // 为什么不拦截：模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在
+      // "算术"与"编造"之间做确定性区分——那道线由探针（E1/F1 的金额判定）和人工守。
+      // E1 实测：模型会在零执行轮次编造凭证明细（rule-landing.md §9），此日志让运维看得见。
+      if (!turn.execution && !turn.pendingPlan) {
+        const amounts = new Set<number>();
+        for (const match of replyText.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?/g)) {
+          amounts.add(Number(match[0].replace(/,/g, '')));
+        }
+        if (amounts.size > 0) {
+          const history = JSON.stringify(result.messages.slice(0, -1));
+          const haystack = `${history}\n${referenceEvidence?.text ?? ''}\n${userMessage}`;
+          const unsourced = [...amounts].filter((value) => !haystack.includes(String(value)) && !haystack.includes(value.toLocaleString('en-US')));
+          if (unsourced.length > 0) {
+            console.warn(JSON.stringify({ event: 'conversation_unsourced_amounts', requestId: ctx.requestId, count: unsourced.length, needsRounds: turn.needsRounds }));
+          }
+        }
+      }
+
       await saveTranscript(deps.sessions, {
         sessionId: ctx.sessionId,
         principalId: ctx.principalId,

@@ -227,6 +227,8 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 **探针本身的能力**：`scripts/probe-real-agent.ts`，真实 LLM + 真 `bin/17dz` + mock 执行器，`--only` 选用例、`--quick` 快速子集。
 
+**覆盖增强（roadmap 之外，验收补强）**：多任务交织与探索型会话两类场景——e2e `turn-loop-interleaved.test.ts` 4 例 + 探针 E1/F1（`--only E1,F1`，不进 quick）。真实模型首测发现与处置记录于 `rule-landing.md` §9：探索型达到设计意图（澄清/不编造）；交织场景抓到 4 类模型/worker 侧失效（零执行轮次编造数据、请求加工 mangling、召回退化、worker 调用形式错误），宿主契约全部正确履职；相应地补了 `conversation_unsourced_amounts` 只记录不拦截的探查器与 17dz SKILL 的相对期间硬规则。
+
 **从 StepCode 环境跑探针的坑**：harness 进程自带 `LLM_*` 环境变量（指向它自己用的模型），Node `--env-file` 不覆盖已存在变量——直接跑会静默用 harness 的配置而不是 `.env`。正确姿势：`env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL node --env-file=.env --import tsx scripts/probe-real-agent.ts …`。
 
 ---

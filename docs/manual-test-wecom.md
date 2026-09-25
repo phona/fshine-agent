@@ -96,7 +96,7 @@
 假 SDK 发一条企微文本帧 → 真实 `WecomBotChannel` 适配器 → `createServerReplyHandler`
 → `createMessageHandler` → `createTaxAgentRuntime` → 真 spawn 的 `bin/17dz`
 （plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定、mock executor）。
-共享替身在 `tests/e2e/harness.ts`，四个文件按主题拆分、并行执行。
+共享替身在 `tests/e2e/harness.ts`，七个文件按主题拆分、并行执行。
 
 只有两样是假的：**模型**（Main Agent 与子 Agent 用脚本化驱动回放）和**平台执行器**
 （`DZ_EXECUTOR=mock`）。企微投递语义、计划门禁、跨进程账本全是生产代码。
@@ -107,7 +107,7 @@ npm test -- tests/e2e/turn-loop
 
 ### 8.2 手工用例 → 自动化用例映射
 
-自动化用例按主题拆在五个文件里（共享替身 `tests/e2e/harness.ts`）：
+自动化用例按主题拆在七个文件里（共享替身 `tests/e2e/harness.ts`）：
 
 | 文件 | 覆盖 |
 |---|---|
@@ -117,6 +117,7 @@ npm test -- tests/e2e/turn-loop
 | `turn-loop-confirmation.test.ts` | 旧确认被新计划取代、notify 反复后升级确认 |
 | `turn-loop-needs.test.ts` | Subagent 报错回路（缺信息 → 转达用户 → 续跑原任务 / 自己补充分支 / 回路不是凭证） |
 | `turn-loop-plan-steps.test.ts` | 长任务拆解（多步派单、同任务续跑、任一步失败不阻塞、通知带「第 N/M 步」） |
+| `turn-loop-interleaved.test.ts` | 多任务交织后按 continueTaskId 回到旧任务、召回走对话零调用而重查才委派、探索型请求先澄清、平台没有的能力如实说明边界 |
 
 | 手工用例 | 自动化用例（文件名 > 用例名） |
 |---|---|
@@ -138,6 +139,10 @@ npm test -- tests/e2e/turn-loop
 | 2.4 回路不是凭证 | `turn-loop-needs.test.ts` > `5.3 纠错回路里拿数字结论充数仍被出口校验挡住（回路不是执行凭证）` |
 | 2.9 多步拆解（长任务） | `turn-loop-plan-steps.test.ts` > `6.1 「核对 3 个账套」全链：逐步派单、同任务续跑、失败步骤在汇总里如实报告` |
 | 2.9 任一步失败不阻塞 | `turn-loop-plan-steps.test.ts` > `6.2 任一步失败不阻塞：第 2 步回报缺信息，Main Agent 继续第 3 步并如实汇总` |
+| 2.3 换话题回旧任务 | `turn-loop-interleaved.test.ts` > `2.3 两个委派任务交织后，按 continueTaskId 回到第一个任务` |
+| 1.3 召回不重查 | `turn-loop-interleaved.test.ts` > `1.3 召回旧结果走对话零平台调用，"再查一次"才重新委派` |
+| 1.6 探索型澄清 | `turn-loop-interleaved.test.ts` > `1.6 目标不明的探索请求先澄清，用户补齐账套和期间后才委派` |
+| 4.4 能力边界诚实 | `turn-loop-interleaved.test.ts` > `4.4 平台没有的分析能力如实说明边界，不编造任何金额` |
 
 ### 8.3 仍需人工的部分
 

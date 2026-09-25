@@ -976,6 +976,47 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).not.toContain('recorded');
   });
 
+  it('零执行轮次出现历史里没有的金额时记 conversation_unsourced_amounts（只记录不拦截）', async () => {
+    const warnings: Array<Record<string, unknown>> = [];
+    const original = console.warn;
+    console.warn = (line: string) => { try { warnings.push(JSON.parse(line)); } catch { /* 非 JSON 告警忽略 */ } };
+    try {
+      const driver = ScriptedTurnDriver([
+        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+        { text: '查过了：新兴五金 2025-12 共有 4 笔、金额 40,000.00 元。' },
+      ]);
+      const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
+      const reply = await runtime.handleTurn(makeCtx(), '新兴五金那凭证后来查了吗？');
+      // 回复不外发拦截：纯对话轮，文本原样给用户（拦截线在探针与人工，不在宿主）
+      expect(reply.text).toContain('40,000.00');
+      expect(warnings.some((w) => w['event'] === 'conversation_unsourced_amounts' && w['count'] === 1)).toBe(true);
+    } finally {
+      console.warn = original;
+    }
+  });
+
+  it('零执行轮次复述历史里已有的金额不告警', async () => {
+    const warnings: Array<Record<string, unknown>> = [];
+    const original = console.warn;
+    console.warn = (line: string) => { try { warnings.push(JSON.parse(line)); } catch { /* 非 JSON 告警忽略 */ } };
+    try {
+      // 第一轮真查询拿到 51 元，第三轮对话复述它——数值在转录里，不告警
+      const driver = ScriptedTurnDriver([
+        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东 202609 的应收' } }] },
+        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+        { text: '刚才查到：幻东 202609 应收余额为 51,000.00 元。' },
+      ]);
+      const platformTask = subagent(async () => ({ taskId: 'task_1', text: '幻东 202609 应收余额为 51,000.00 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } }));
+      const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+      await runtime.handleTurn(makeCtx(), '查幻东 202609 的应收');
+      const reply = await runtime.handleTurn(makeCtx(), '刚才查出来多少？');
+      expect(reply.text).toContain('51,000.00');
+      expect(warnings.some((w) => w['event'] === 'conversation_unsourced_amounts')).toBe(false);
+    } finally {
+      console.warn = original;
+    }
+  });
+
   it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
     const { driver, inputs } = recordingDriver(declareConversation([{ text: '第一轮回复' }, { text: '第二轮回复' }]));
