@@ -215,8 +215,9 @@ const CASES: Case[] = [
       const notes: string[] = [];
       const calls = ledgerCalls();
       if (calls < 5) notes.push(`5 轮只产生 ${calls} 次平台调用——有轮次没真查`);
-      const bodies = new Set(turns.map((turn) => turn.reply.replace(/\s+/g, '')));
-      if (bodies.size > 1) notes.push('5 轮回复文本不一致');
+      // 比数据口径，不比措辞：抽取所有数字，5 轮必须一致（开场白本来就会变）
+      const numbers = turns.map((turn) => (turn.reply.match(/[\d,]+\.?\d*/g) ?? []).join('|'));
+      if (new Set(numbers).size > 1) notes.push(`5 轮数据口径不一致：${JSON.stringify(numbers)}`);
       return { turns, notes };
     },
   },
