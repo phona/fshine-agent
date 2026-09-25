@@ -179,22 +179,28 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 6 — 长任务拆解
 
-**目标**：Main Agent 做业务拆解与派单，Subagent 只做单步执行。
+**状态：已完成**。架构 §3 的规划者/执行者分工落地：Main Agent 拆解 → 逐步派单 → 汇总，Subagent 只做单步执行。规则落点见 `docs/rule-landing.md` C24–C30。
 
-**改动**：
-- 新增**任务计划状态**存储（append-only 事实 + 可重建投影，与 Log/Context State 同一套机制，不新造存储形态）
-- 业务 skill 落地（架构文档 §5 草案，约 400 字，只含程序性知识）
-- Main Agent 拆解 → 逐步派单 → 汇总；任一步失败不阻塞其他步骤
-- 计划门支持"N/M 步"的上报，让用户的通知带全局观，闸口能做全局预算
+**改动（实际落地）**：
+- **计划模式协议**（`packages/agent/src/plan-steps.ts`）：delegate 的 request 以「第N/M步：」开头即多步拆解的一步，宿主用正则机械解析（零业务匹配）。**无前缀 = 单步，行为与 Phase 5 之前逐字相同**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent（复用 Phase 5 的"交还"机制），由它继续下一步或申报 conversation 汇总。非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀）按单步处理。**申报契约仍 3 字段，一个都没加**
+- **步骤 2..M 经 continueTaskId 在同一 17dz 子任务内续跑**：平台累计账本因此跨步累积——闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）
+- **任一步失败不阻塞**（含 needs / 零执行的错误结果）：宿主照常派后续步骤，汇总如实报告失败步；纠错环上限在计划模式下**按步计**（同一步反复重报才收口，收口方式是"跳过这一步"而非终止整轮）
+- **任务计划状态**（消费并行 stream 的 `TaskPlanRepo`）：每步委派前 append `started`，结果回来后按步补 `done`/`failed`/`needs`，taskId 写该步最后一条事实；planId 由宿主在第一步生成（`plan_${requestId}`），跨回合经 `latestOpenPlan` 找回（步号接得上且总步数一致）。deps 可选，缺省 = 不落计划状态、功能降级不报错
+- **通知带「第 N/M 步」**：步骤标签经委派参数 `stepLabel` 透传到 `context.ts` 的 onNotice 交付处，前缀插在「计划通知：」标记之后（渠道与 e2e 替身仍按该标记识别通知帧）
+- **业务 skill 落地**（架构 §5）：新增 `docs/business-skill.md`（草案原文 + 一条派单协议），`config/agent.yaml` 增可选 `businessSkillPath`，`apps/server/business-skill.ts` 启动时读文件（存在才读）注入 runtime deps，每回合追加进系统提示词；文件缺失 = 跳过
+- e2e 新增 `turn-loop-plan-steps.test.ts` 2 例；单测新增 `plan-steps.test.ts`（5 例）+ `plan-mode.test.ts`（10 例），`turn-contract.test.ts` / `context.test.ts` 各增补
 
-**验收**：e2e 覆盖「核对 3 个账套」全链；其中一个账套失败时其他两个照常完成并在汇总里如实报告；用户收到的通知含"第 N/M 步"。
+**验收（按实际达成记录）**：
+- e2e 6.1「核对 3 个账套」全链：三次委派、后两步 taskId 与第一步相同、汇总含三个账套结果且**如实包含第 2 步的失败**（平台 not_found）、`sdk.noticeTexts()` 含"第 1/3 步"、账本调用数跨步累积（3+1+1）✓
+- e2e 6.2 任一步失败不阻塞：第 2 步回报 needs → Main Agent 不卡住，继续第 3 步并在汇总如实报告缺信息 ✓
+- `npm test` 372 全绿（+20）、typecheck 0 错误；业务词 grep 仍 4 处、零新增 ✓
+- **真实模型验证（部分）**：探针 `--quick` 在 Phase 6 全栈下与基线一致（A1 重查/A4 只搜目录/A5 零调用，A2/B1 为已记录项）✓；D1/D2 长任务场景的复验被 **Kimi API 每周配额耗尽（403）**阻断——首轮 D1 出现 worker 空转 5 分钟后 executor_error，已由收敛上限（同任务计划被拒 >5 次即 PLAN STOP，C21a）兜底；提示词侧补了"M 未知/范围不可溯源"的退路规程。**配额恢复后需重跑 `--only D1,D2`**（见 `rule-landing.md` §8 验证缺口）
 
 ---
 
 ## Phase 7 — 执行层记忆
 
 **状态：已完成**。17dz 持久化自己的领域记忆，跨任务生效；编排层零改动。
-
 **改动（实际落地，17dz 仓）**：
 - 新增 `bin/17dz memory <get|put|list|delete>`（与 plan 组同风格：单行 JSON、MEMORY_REFUSE 走 stderr exit 3），存储为平台状态目录 JSON（`DZ_MEMORY_STATE` 可覆盖，默认 `.runtime/memory.json`），scope 白名单 global/customer/accountSet（后两者必须带平台规范名 id），key kebab-case、value ≤2000 字符，机器强制
 - 跨进程安全复刻 plan.js 失败模型：'wx' 独占锁 + 原子 rename；状态损坏 **fail-closed**（MEMORY_STATE_CORRUPT，不静默重置）

@@ -137,11 +137,18 @@ class RecordingSdkClient implements SdkClientLike {
  * delegate 申报走 terminate 语义，用户看到的是子 Agent 的文本，这里的 text 不参与外发
  * （只在申报被宿主退回时用于兜底，见 catch 分支）。
  *
- * 多声明对话：申报被宿主接受且没有 terminate 时（纠错环——宿主把"缺什么"作为工具结果
- * 交还模型），模型继续同一回合并消费下一条声明；脚本耗尽仍未给出 text → 停嘴。
+ * 多声明对话：申报被宿主接受且没有 terminate 时（纠错环、计划模式的每一步——宿主把
+ * 步骤结果作为工具结果交还模型），模型继续同一回合并消费下一条声明；脚本耗尽仍未给出
+ * text → 停嘴。
+ *
+ * `continueTaskId` 写 `LAST_TASK_ID_TOKEN` 时，由替身用上一条申报的工具结果里的 taskId
+ * 代填：计划模式的步骤 2..M 要带上一步的子任务编号，而编号要等上一步真跑完才知道。
  */
+export const LAST_TASK_ID_TOKEN = '@lastTaskId';
+
 function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (input: { messages: unknown[] }) => void) {
   let cursor = 0;
+  let lastTaskId = '';
   return {
     run: async (input: {
       tools: unknown[];
@@ -162,6 +169,7 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         const entry = declarations[Math.min(cursor, declarations.length - 1)]!;
         const exhausted = cursor >= declarations.length;
         const { text, ...declaration } = entry;
+        if (declaration['continueTaskId'] === LAST_TASK_ID_TOKEN) declaration['continueTaskId'] = lastTaskId;
         if (exhausted && typeof text !== 'string') {
           return { text: '主 Agent 自由文本：不应外发', messages: transcript };
         }
@@ -174,6 +182,8 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         } as never);
         try {
           const outcome = await input.exec('route_current_turn', declaration);
+          const observedTaskId = (outcome as { taskId?: unknown } | null)?.taskId;
+          if (typeof observedTaskId === 'string') lastTaskId = observedTaskId;
           transcript.push({
             role: 'toolResult',
             toolCallId: callId,

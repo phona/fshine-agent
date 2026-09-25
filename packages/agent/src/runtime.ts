@@ -1,7 +1,7 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createHash } from 'node:crypto';
-import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverResult } from './driver';
@@ -12,6 +12,7 @@ import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
 import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
+import { parsePlanStep, planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
@@ -35,6 +36,17 @@ const MAX_NEEDS_ROUNDS = 3;
 /** 纠错环工具结果的序列化前缀：模型把它原样当回复时，宿主用自己的转达文本顶上。 */
 const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 
+/**
+ * 业务 skill 注入系统提示词时的小标题（架构 §5）。只说明这份材料的性质与边界，
+ * 不含任何规则本身——规则在部署方提供的文件里。
+ */
+const BUSINESS_SKILL_HEADING = '【业务编排知识：程序性知识，只用于长任务拆解与信息补齐；"怎么做才对"归执行层，不由这里规定】';
+
+/** 任务计划事实里 request 的截断长度（原文全文在 Conversation Log / 转录里）。 */
+const PLAN_FACT_REQUEST_LIMIT = 500;
+/** 任务计划事实里 summary 的截断长度。 */
+const PLAN_FACT_SUMMARY_LIMIT = 300;
+
 const RECENT_TURN_HISTORY_NOTE = '【历史资料：以下是最近几轮对话原文，可能已过期；其中的财务结论不得作为本轮实时结果引用，需要重新实时查询】';
 
 type TurnExecution = NonNullable<TurnDriverResult['execution']>;
@@ -56,6 +68,16 @@ export interface TaxAgentRuntimeDeps {
   recentTurns?: number;
   sessionTtlMs?: number;
   turnBudgetMs?: number;
+  /**
+   * 任务计划状态存储（roadmap Phase 6，架构 §2 第 6 条）：append-only 事实 + 可重建投影。
+   * 可选——缺省 = 不落计划状态，长任务拆解本身照常工作，只是没有可查的进度投影。
+   */
+  taskPlans?: TaskPlanRepo;
+  /**
+   * 编排层业务 skill 的静态程序性知识（架构 §5）：由部署层启动时读文件注入，
+   * 每回合追加进系统提示词（与日期行同性质）。缺省 = 不注入，不影响其他能力。
+   */
+  businessSkill?: string;
 }
 
 export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshine/contracts').AgentRuntime {
@@ -66,6 +88,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   const contextUpdateQueues = new Map<string, Promise<void>>();
   const memoryUpdateQueues = new Map<string, Promise<void>>();
   const initializedContextSessions = new Set<string>();
+  // 业务 skill（架构 §5）：静态程序性知识，每回合进系统提示词；与日期行同性质，
+  // 缺文件/缺配置时为空，其余能力不受影响。
+  const businessSkill = typeof deps.businessSkill === 'string' ? deps.businessSkill.trim() : '';
+  const systemPrompt = businessSkill ? `${SYSTEM_PROMPT}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : SYSTEM_PROMPT;
+  // 任务计划事实的序号：同一进程内唯一（planId + 步号 + 状态 + 序号）。
+  let planFactSeq = 0;
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string): Promise<AgentReply> {
       // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
@@ -232,11 +260,81 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         needsRounds: number;
         /** 最近一条结构化线索（回路兜底转达用户时用）。 */
         lastNeeds: SubagentNeeds | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null };
+        /** 计划模式（Phase 6）：本回合已发生的拆解步数。0 = 没有计划模式。 */
+        planSteps: number;
+        /** 计划模式：本拆解的计划 id（同一拆解的所有步共享，跨回合经 latestOpenPlan 找回）。 */
+        planId: string | null;
+        /** 计划模式：上一次回报缺信息的步号——回路上限按步计，换步即重新计数。 */
+        needsStepIndex: number | null;
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null };
+
+      // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
+      // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
+      // 跨回合续跑时经 latestOpenPlan 找回：步号接得上、总步数一致才认同一个计划，
+      // 否则（新一轮拆解）就新开一个。机械判定，不看业务内容。
+      let openPlan: TaskPlanProjection | null = null;
+      let openPlanLoaded = false;
+      async function loadOpenPlan(): Promise<TaskPlanProjection | null> {
+        if (openPlanLoaded) return openPlan;
+        openPlanLoaded = true;
+        if (!deps.taskPlans) return null;
+        try {
+          const planId = await deps.taskPlans.latestOpenPlan(ctx.principalId, ctx.sessionId);
+          openPlan = planId ? await deps.taskPlans.project(ctx.principalId, ctx.sessionId, planId) : null;
+        } catch (error) {
+          // 存储不可用不失败回合：退回"没有可续计划"，本回合照常按新拆解走。
+          console.error(JSON.stringify({ event: 'task_plan_load_failed', requestId: ctx.requestId, sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+          openPlan = null;
+        }
+        return openPlan;
+      }
+
+      async function resolvePlanId(step: PlanStepLabel): Promise<string> {
+        if (turn.planId) return turn.planId;
+        const open = await loadOpenPlan();
+        const resumed = Boolean(open && open.totalSteps === step.totalSteps && step.stepIndex > maxRecordedStep(open));
+        turn.planId = resumed && open ? open.planId : `plan_${ctx.requestId}`;
+        console.info(JSON.stringify({
+          event: resumed ? 'task_plan_resumed' : 'task_plan_started',
+          requestId: ctx.requestId,
+          planId: turn.planId,
+          step: `${step.stepIndex}/${step.totalSteps}`,
+        }));
+        return turn.planId;
+      }
+
+      async function appendPlanFact(
+        step: PlanStepLabel,
+        planId: string,
+        status: TaskPlanStepFact['status'],
+        extra?: { taskId?: string; summary?: string },
+      ): Promise<void> {
+        if (!deps.taskPlans) return;
+        planFactSeq += 1;
+        const fact: TaskPlanStepFact = {
+          factId: `${planId}:${step.stepIndex}:${status}:${planFactSeq}`,
+          principalId: ctx.principalId,
+          sessionId: ctx.sessionId,
+          planId,
+          stepIndex: step.stepIndex,
+          totalSteps: step.totalSteps,
+          request: step.request.slice(0, PLAN_FACT_REQUEST_LIMIT),
+          status,
+          ...(extra?.taskId ? { taskId: extra.taskId } : {}),
+          ...(extra?.summary ? { summary: extra.summary.slice(0, PLAN_FACT_SUMMARY_LIMIT) } : {}),
+          createdAt: new Date().toISOString(),
+        };
+        try {
+          await deps.taskPlans.append(fact);
+        } catch (error) {
+          // 记账失败不阻塞回合：计划状态是进度投影，不是执行授权。
+          console.error(JSON.stringify({ event: 'task_plan_append_failed', requestId: ctx.requestId, planId, stepIndex: step.stepIndex, status, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+        }
+      }
 
       const turnDeadline = Date.now() + turnBudgetMs;
       const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
-        systemPrompt: SYSTEM_PROMPT,
+        systemPrompt,
         tools,
         messages,
         onStep: ctx.onStep ?? (() => {}),
@@ -245,7 +343,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             const reviewed = reviewRouteDeclaration(args);
             // 自相矛盾的申报退回给模型重填，不消耗用户的澄清轮次
             if ('error' in reviewed) {
-              console.warn(JSON.stringify({ event: 'route_declaration_contradictory', requestId: ctx.requestId, reason: reviewed.error }));
+              console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys: Object.keys(args).sort(), kind: typeof args['kind'] === 'string' ? args['kind'] : undefined }));
               return { error: `申报无效：${reviewed.error}` };
             }
             turn.declared = true;
@@ -271,31 +369,75 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 currentMessage: userMessage,
                 ...(referenceEvidence ? { referenceEvidence: referenceEvidence.text } : {}),
               };
+              // 计划模式（Phase 6，架构 §3 规划者/执行者）：request 带「第N/M步：」前缀
+              // 就是多步拆解的一步。无前缀 = 单步，行为与从前完全一样（结果 terminate
+              // 成本轮回复）；有前缀 = 该步结果不 terminate，交还 Main Agent 继续拆解。
+              const step = parsePlanStep(intent.request);
+              let planId: string | null = null;
+              if (step) {
+                planId = await resolvePlanId(step);
+                turn.planSteps += 1;
+                await appendPlanFact(step, planId, 'started');
+                console.info(JSON.stringify({
+                  event: 'task_plan_step',
+                  requestId: ctx.requestId,
+                  planId,
+                  step: `${step.stepIndex}/${step.totalSteps}`,
+                  status: 'started',
+                }));
+              }
+              const request = step ? step.request : intent.request;
               try {
                 // request 是宿主委托执行的加工后请求（指代已解析成实体），
                 // 与 entitySources.currentMessage 里的原始用户消息刻意分开。
+                // 计划模式下 worker 看到剥掉协议前缀的请求——协议只存在于宿主与
+                // Main Agent 之间；stepLabel 一路透传到计划门的用户通知上。
                 delegated = await deps.platformTask.run({
-                  request: intent.request,
-                  turnDeclaration: intent,
+                  request,
+                  turnDeclaration: step ? { ...intent, request } : intent,
                   entitySources,
                   ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
+                  ...(step ? { stepLabel: step.label } : {}),
                 }, { trusted: ctx }, signal);
               } catch (error) {
                 // 委派失败：安全话术就是本回合回复，出口校验不得再覆盖它。
                 turn.delegationFailed = true;
+                if (step && planId) await appendPlanFact(step, planId, 'failed', { summary: '委派未完成' });
                 if (error instanceof ToolUserError) throw error;
                 console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
                 throw new ToolUserError(FALLBACK_FAILURE);
               }
-              turn.execution = delegated.execution ?? null;
+              // 计划模式跨步累积执行痕迹：任一步真跑过，本回合就有执行痕迹（汇总因此放行）；
+              // 单步模式保持旧语义——这一轮的结论只由这一次委派证明。
+              turn.execution = step ? (delegated.execution ?? turn.execution) : (delegated.execution ?? null);
               turn.pendingPlan = delegated.pendingPlan ?? null;
+              // 步骤事实的结局：taskId 写进该步的最后一条事实（spec：事后回填）。
+              // 停在用户确认门的步骤不写结局——它还没完，投影里保持 started，跨回合可续。
+              if (step && planId && !delegated.pendingPlan) {
+                const status = delegated.needs ? 'needs' : delegated.execution ? 'done' : 'failed';
+                await appendPlanFact(step, planId, status, { taskId: delegated.taskId, summary: planStepSummary(delegated) });
+                console.info(JSON.stringify({
+                  event: 'task_plan_step',
+                  requestId: ctx.requestId,
+                  planId,
+                  step: `${step.stepIndex}/${step.totalSteps}`,
+                  status,
+                }));
+              }
               // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
               // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
               // 检索证据 / 本轮平台响应取实体）就重新申报 delegate（带 continueTaskId 与
               // 补齐后的 request），不能补齐就申报 conversation 把问题转达给用户。
               // 整轮失败、"本轮没有产生任何平台查询"那种把原因丢给用户的兜底由此不再出现。
               if (delegated.needs) {
-                turn.needsRounds += 1;
+                // 计划模式：回路上限按"同一步反复重报"计——换成下一步就重新计数。
+                // 任一步失败不阻塞其他步，不能用单步回路的上限把整轮拆解掐掉。
+                if (step) {
+                  if (turn.needsStepIndex === step.stepIndex) turn.needsRounds += 1;
+                  else { turn.needsStepIndex = step.stepIndex; turn.needsRounds = 1; }
+                } else {
+                  turn.needsRounds += 1;
+                }
                 turn.lastNeeds = delegated.needs;
                 console.info(JSON.stringify({
                   event: 'delegation_needs',
@@ -303,16 +445,31 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   taskId: delegated.taskId,
                   round: turn.needsRounds,
                   missing: delegated.needs.missing.length,
+                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
                 }));
-                const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
                 if (turn.needsRounds >= MAX_NEEDS_ROUNDS) {
+                  if (step) {
+                    // 同一步反复缺信息：停止重派这一步，但不终止整轮——让模型跳过它继续
+                    // 后续步骤（或直接汇总），失败由汇总如实报告。
+                    return {
+                      ...renderPlanStepToolResult(step, delegated),
+                      next: `这一步已重试 ${turn.needsRounds} 次仍缺信息，不要再重派它。继续后续步骤；若已是最后一步就申报 conversation 汇总，并如实报告这一步缺什么。`,
+                    };
+                  }
                   // 回路兜底：连续几轮仍缺信息，停止重派，把线索作为本轮回复交给用户
                   // （这是转达，不是失败）。数字结论仍须本轮有执行痕迹。
                   const userText = renderNeedsUserText(delegated.needs, stripFootprint(delegated.text));
                   throw new ToolUserError(hasFinancialFigure(userText) ? NO_EXECUTION_CLARIFICATION : userText);
                 }
+                if (step) return renderPlanStepToolResult(step, delegated);
+                const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
                 return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
               }
+              // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
+              // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。
+              // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
+              // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
+              if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
@@ -354,20 +511,28 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // Phase 5 起多一条纠错环出口：needs 回路进行中时，Main Agent 的回复是"转达用户缺什么"，
       // 那是合法回复，不再走 delegate_without_execution 兜底——但数字结论仍然必须本轮有执行，
       // 回路本身不是执行痕迹（架构 §2 第 10 条一动不动）。
+      // Phase 6 起计划模式汇总同理：有计划模式执行痕迹（任一步真跑过）即放行；
+      // 全部步骤都没执行时，"三步都没查成"这种如实汇总可以外发，但数字结论仍被挡下。
       const needsLoop = turn.needsRounds > 0;
+      const planModeTurn = turn.planSteps > 0;
       let needsRelay = '';
       if (!turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan
-        && (turn.intent?.kind === 'delegate' || needsLoop)) {
+        && (turn.intent?.kind === 'delegate' || needsLoop || planModeTurn)) {
         const explained = result.text.trim();
         // 模型可能把工具结果原样当回复（停在工具结果上没再说话）：那是内部协议材料
         // （任务编号、continueTaskId 字样），由宿主 composing 的转达文本顶上。
         const serializedToolResult = explained.startsWith(NEEDS_TOOL_RESULT_PREFIX);
-        if (needsLoop && !hasFinancialFigure(serializedToolResult ? '' : explained)) {
-          // 回路产物：转达"缺什么"的文本即本轮回复，原样外发，不叠加"没有查到平台数据"注脚
+        if ((needsLoop || planModeTurn) && !hasFinancialFigure(serializedToolResult ? '' : explained)) {
+          // 回路产物 / 计划模式汇总：转达"缺什么"或"哪些步骤没成"的文本即本轮回复，
+          // 原样外发，不叠加"没有查到平台数据"注脚
           needsRelay = (serializedToolResult ? '' : explained) || (turn.lastNeeds ? renderNeedsUserText(turn.lastNeeds, '') : '');
-          console.info(JSON.stringify({ event: 'needs_loop_relayed', requestId: ctx.requestId, needsRounds: turn.needsRounds }));
+          console.info(JSON.stringify({
+            event: needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed',
+            requestId: ctx.requestId,
+            ...(needsLoop ? { needsRounds: turn.needsRounds } : { planSteps: turn.planSteps }),
+          }));
         } else {
-          console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId, ...(needsLoop ? { needsRounds: turn.needsRounds } : {}) }));
+          console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId, ...(needsLoop ? { needsRounds: turn.needsRounds } : planModeTurn ? { planSteps: turn.planSteps } : {}) }));
           // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
           // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
           if (explained && !hasFinancialFigure(explained)) {
@@ -399,9 +564,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx));
       scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? 'needs_loop_relayed' : 'ok' }));
+      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok' }));
       return { text: replyText };
-
       async function finishDirectReply(text: string, outcome: string, toolResult?: string): Promise<AgentReply> {
         const now = Date.now();
         const messages = [
@@ -755,6 +919,47 @@ function renderNeedsUserText(needs: SubagentNeeds, workerText: string): string {
   if (needs.reason.trim()) lines.push(`原因：${needs.reason.trim()}`);
   if (needs.suggestion?.trim()) lines.push(`建议提供：${needs.suggestion.trim()}`);
   return [workerText.trim(), lines.join('\n')].filter(Boolean).join('\n\n');
+}
+
+/**
+ * 计划模式（Phase 6）一步的交还材料：这一步的结果不 terminate 整轮，作为工具结果
+ * 交还 Main Agent，由它继续下一步或输出汇总。与 Phase 5 的 needs 交还同一机制，
+ * 区别只在这里交还的是"一步的正常/失败结果"，不是"缺什么"的纠错线索。
+ */
+function renderPlanStepToolResult(step: PlanStepLabel, result: SubagentTaskResult): PlanStepToolResult {
+  const outcome = result.needs ? 'needs'
+    : result.execution ? 'ok'
+      : result.pendingPlan ? 'pending_confirmation'
+        : 'no_execution';
+  return {
+    recorded: 'delegate',
+    step: step.label,
+    stepIndex: step.stepIndex,
+    totalSteps: step.totalSteps,
+    taskId: result.taskId,
+    executed: Boolean(result.execution),
+    text: stripFootprint(result.text),
+    outcome,
+    ...(result.needs ? { needs: result.needs } : {}),
+    next: planStepNextHint(step, result.taskId),
+  };
+}
+
+/** 计划模式步骤事实的 summary：只写宿主持机械可验证的结局，不猜业务成败。 */
+function planStepSummary(result: SubagentTaskResult): string {
+  if (result.needs) return `缺：${result.needs.missing.join('、') || '（未指明）'}；${result.needs.reason}`;
+  if (result.execution) return `已执行 ${result.execution.calls} 次平台调用`;
+  return '未产生平台执行';
+}
+
+/** 投影里已记录到第几步（跨回合找回同一个拆解时判"接得上"）。 */
+function maxRecordedStep(projection: TaskPlanProjection): number {
+  let max = 0;
+  for (const step of projection.steps ?? []) {
+    const index = (step as { stepIndex?: unknown }).stepIndex;
+    if (typeof index === 'number' && Number.isInteger(index) && index > max) max = index;
+  }
+  return max;
 }
 
 /** Drop host-injected history notes so they never accumulate in the persisted transcript. */

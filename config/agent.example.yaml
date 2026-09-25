@@ -38,5 +38,10 @@ contextProfiles:
 # ---- 会话状态 TTL(可选,ms):闲置超过该时长后,旧转录压缩成「摘要+最近尾巴」种子续会话(软着陆,不清零失忆) ----
 # sessionTtlMs: 86400000  # 默认 24 小时
 
+# ---- 编排层业务 skill(可选,架构 §5):只含程序性知识(任务类别与拆解表/每类必需信息/拆解原则),
+#      用于长任务拆解与信息补齐;不含任何执行口径(那归执行层 SKILL)。
+#      相对仓库根目录或绝对路径;文件缺失 = 跳过,不影响启动。范文见 docs/business-skill.md。
+# businessSkillPath: docs/business-skill.md
+
 # ---- 秘密(WECOM_BOT_ID/WECOM_BOT_SECRET/LLM_*)见 .env.example,放 .env ----
 # ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 DZ_PHONE + ~/.config/17dz/password ----

@@ -86,6 +86,7 @@ export {
   RUN_17DZ_TASK_TOOL,
   RUN_17DZ_TASK_DESCRIPTION,
   RUN_17DZ_TASK_SCHEMA,
+  withStepLabel,
   type ContextTaskRunner,
   type ContextTaskRunnerOptions,
   type ContextTaskExecutionContext,
@@ -114,3 +115,10 @@ export {
   type PlanEntitySources,
   type TurnDeclaration,
 } from './turn-contract';
+export {
+  PLAN_STEP_PREFIX_PATTERN,
+  parsePlanStep,
+  planStepNextHint,
+  type PlanStepLabel,
+  type PlanStepToolResult,
+} from './plan-steps';

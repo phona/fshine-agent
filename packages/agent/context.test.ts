@@ -134,8 +134,47 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.turnDeclaration).toBeUndefined();
   });
 
-  it('worker 回报"缺什么"时结构化线索原样上交，任务记录保持可续', async () => {
+  it('计划模式的步骤标签透传给子 Agent 驱动，用户通知带「第 N/M 步」前缀', async () => {
     const root = await profileRoot();
+    let observed: TurnDriverInput | undefined;
+    const notices: string[] = [];
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        observed = input;
+        // 复刻平台计划门的通知：固定标记在前，宿主在这一层加步骤前缀
+        await input.onNotice?.('计划通知：本次需新增 3 次查询，预计约 1 分钟。通知送达后将继续执行。');
+        return { text: '已完成。', messages: input.messages };
+      },
+    });
+    const ctx = trusted();
+    ctx.onNotice = async (text) => { notices.push(text); };
+
+    await subagent.run({ request: '查某个对象 202609', stepLabel: '第 1/3 步' }, { trusted: ctx });
+
+    // 前缀插在固定标记之后：渠道与测试替身仍能识别这是计划通知帧
+    expect(notices).toEqual(['计划通知：【第 1/3 步】本次需新增 3 次查询，预计约 1 分钟。通知送达后将继续执行。']);
+    // 步骤标签只走通知链路，不进 worker 驱动输入
+    expect(observed?.onNotice).toBeTypeOf('function');
+  });
+
+  it('没有步骤标签（单步模式）时通知原样交付，不加前缀', async () => {
+    const root = await profileRoot();
+    const notices: string[] = [];
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        await input.onNotice?.('计划通知：本次需新增 3 次查询。');
+        return { text: '已完成。', messages: input.messages };
+      },
+    });
+    const ctx = trusted();
+    ctx.onNotice = async (text) => { notices.push(text); };
+
+    await subagent.run({ request: '查某个对象 202609' }, { trusted: ctx });
+
+    expect(notices).toEqual(['计划通知：本次需新增 3 次查询。']);
+  });
+
+  it('worker 回报"缺什么"时结构化线索原样上交，任务记录保持可续', async () => {    const root = await profileRoot();
     const tasks = new MemoryTasks();
     const subagent = runner(root, tasks, {
       run: async (input) => ({

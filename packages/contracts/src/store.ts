@@ -124,6 +124,41 @@ export interface ContextStateRepo {
   upsert(record: ContextStateRecord): Promise<void>;
 }
 
+/** 任务计划的一步事实（append-only）。一次长任务拆解的所有 step 共享 planId。 */
+export interface TaskPlanStepFact {
+  factId: string;              // append-order 唯一 id
+  principalId: string;
+  sessionId: string;
+  planId: string;              // 一次拆解的标识（宿主持有；跨回合续跑同一拆解时不变）
+  stepIndex: number;           // 1-based
+  totalSteps: number;          // N；来自 request 的「第N/M步」标记，未知为 0
+  taskId?: string;             // 该步委派的 17dz 子任务（宿主回填）
+  request: string;             // 该步加工后的请求原文
+  status: 'started' | 'done' | 'failed' | 'needs';
+  summary?: string;            // 结果摘要（宿主截断，≤500 字）
+  createdAt: string;           // ISO
+}
+
+export interface TaskPlanProjection {
+  planId: string;
+  sessionId: string;
+  totalSteps: number;
+  started: number;
+  done: number;
+  failed: number;
+  needs: number;
+  steps: Array<{ stepIndex: number; status: TaskPlanStepFact['status']; taskId?: string; summary?: string }>;
+  updatedAt: string;
+}
+
+export interface TaskPlanRepo {
+  append(fact: TaskPlanStepFact): Promise<void>;
+  /** 由 facts 重建投影（同 Context State 的可重建投影语义）；没有事实返回 null。 */
+  project(principalId: string, sessionId: string, planId: string): Promise<TaskPlanProjection | null>;
+  /** 该会话最近一个未完成（有 started/done 之外悬挂步骤）的 planId；没有返回 null。供跨回合续跑。 */
+  latestOpenPlan(principalId: string, sessionId: string): Promise<string | null>;
+}
+
 export type MemoryRecordType = 'preference' | 'fact';
 export type MemoryRecordStatus = 'active' | 'conflicted' | 'superseded' | 'deleted';
 
@@ -212,6 +247,8 @@ export interface AuditStore {
   sessions: ConversationSessionRepo;
   conversationLog: ConversationLogRepo;
   contextStates: ContextStateRepo;
+  /** 任务计划状态：append-only 步骤事实 + 可重建投影（长任务拆解）。 */
+  taskPlans: TaskPlanRepo;
   /** Optional for older test stores and deployments. */
   memoryRecords?: MemoryRecordRepo;
   /** Optional for backwards-compatible test stores and deployments. */

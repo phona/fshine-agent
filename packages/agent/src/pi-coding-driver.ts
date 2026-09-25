@@ -24,6 +24,13 @@ import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePl
 import { parseEnvelope } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
+/**
+ * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
+ * （实体越权 / 格式无效），反复重提只会空转模型预算——超过上限即 terminal block，
+ * 让 worker 收手向用户说明缺什么。5 次宽容正常试错，合法流程不会触碰。
+ */
+const MAX_DECLINED_PLANS_PER_TASK = 5;
+
 export interface PiCodingTurnDriverOptions {
   /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
   knowledgePaths?: readonly string[];
@@ -210,6 +217,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   await loader.reload();
   const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
   let activePlan: { planId: string; version: number } | null = null;
+  /** 同任务内计划被拒次数：收敛保护，防 worker 反复重提被拒计划空转整回合。 */
+  let declinedPlans = 0;
   if (options.sessionId) {
     try {
       activePlan = await loadCurrentActivePlan({
@@ -244,8 +253,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   });
   // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
-  const gate = createServeGate({
-    onEvent: (event) => {
+  const gate = createServeGate({    onEvent: (event) => {
       options.serveGateAudit?.({ ...event, requestId: options.requestId });
     },
     platformRoot: options.cwd,
@@ -262,6 +270,16 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
       catch (error) { return { block: true, reason: `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}` }; }
       if (parsed) {
+        // 同任务内计划被连续拒绝的收敛保护：计划被拒是确定性信号（实体越权/格式无效），
+        // 反复重提同一请求只会空转模型预算。超过上限就terminal block，让 worker 收手
+        // 向用户说明，而不是把回合拖到 executor 超时（实测 D1 类请求空转 5 分钟后崩溃）。
+        declinedPlans += 1;
+        if (declinedPlans > MAX_DECLINED_PLANS_PER_TASK) {
+          return {
+            block: true,
+            reason: `PLAN STOP：本任务的执行计划已被连续拒绝 ${declinedPlans} 次（原因均为实体不在本轮请求/检索证据/平台响应内）。停止重新提交计划，直接用自然语言向用户说明缺什么、建议提供什么。`,
+          };
+        }
         if (options.entitySources) {
           // 领域无关的实体来源校验（架构 §2 第 9 条）：计划里的每个实体都必须能在
           // 「当前消息 / 检索证据 / 本任务迄今的平台响应」里逐字找到。平台响应从当前

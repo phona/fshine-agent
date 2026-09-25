@@ -189,8 +189,13 @@ export function createActivationToken(
   return `${body}.${signature}`;
 }
 
-export function formatPlanMessage(evaluation: PlanEvaluation): string {
-  const minutes = Math.round((evaluation.estimate.seconds / 60) * 10) / 10;
+/**
+ * 计划门通知的固定前缀：让用户在企微里能把"系统通知"和普通进度区分开，
+ * 也让宿主/测试能稳定识别这条帧（渠道适配器与 e2e 替身都按它过滤）。
+ */
+export const PLAN_NOTICE_PREFIX = '计划通知：';
+
+export function formatPlanMessage(evaluation: PlanEvaluation): string {  const minutes = Math.round((evaluation.estimate.seconds / 60) * 10) / 10;
   const addedCalls = typeof evaluation.delta.addedCalls === 'number' ? evaluation.delta.addedCalls : evaluation.estimate.calls;
   const platformSummary = evaluation.noticeText ?? evaluation.summary ?? evaluation.scopeSummary;
   const scope = platformSummary
@@ -198,7 +203,7 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {
     : `本次需新增 ${addedCalls} 次查询，预计约 ${minutes} 分钟。`;
   const confirm = evaluation.decision === 'confirm' ? '请回复“确认继续”后再执行；当前已暂停。' : '通知送达后将继续执行。';
   // 前缀让用户在企微里能把"系统通知"和普通进度区分开，也让宿主/测试能稳定识别这条帧。
-  return `计划通知：${scope}${confirm}`;
+  return `${PLAN_NOTICE_PREFIX}${scope}${confirm}`;
 }
 
 export function validateCalls(calls: readonly PlanCall[]): void {

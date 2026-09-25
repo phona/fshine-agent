@@ -11,6 +11,9 @@ import type { DiscoveredTool } from '@fshine/contracts';
  * 编排者做领域判别（区分哪类名称、知道什么必须带什么），正是知识污染的来源。需要澄清时
  * 也不再申报"澄清"：申报 conversation，模型文本即回复。
  *
+ * 多步拆解（roadmap Phase 6）同样**不加字段**：「第N/M步：」前缀写在 request 里，
+ * 宿主机械解析（`plan-steps.ts`）。协议在描述里教，schema 一动不动。
+ *
  * 本文件只做两件领域无关的事：
  * 1. **结构校验**（`parseTurnDeclaration` / `isSelfContradictoryDeclaration` /
  *    `reviewRouteDeclaration`）：填错退回模型重填，不消耗用户的澄清轮次。
@@ -42,9 +45,16 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
     '· 指代要解析成实体再写进 request。例：用户说"这个 202608 呢？"，上一轮的实体是某个对象 → 写「查询<上一轮的实体> 202608」。',
     '· 用户说"继续" → 写「继续 <taskId>：<子 Agent 上次索要的信息>」，并填 continueTaskId。',
     '· 保留用户要求的时间范围与筛选条件，不扩大也不收窄。',
-    '· 实体只能从当前消息、或宿主注入的【主动回溯】证据里取；取不到就选 conversation 问用户，不要猜。用户另起新话题（新的查询对象）时，不得把上一轮的实体顺带沿用。',
+    '· 实体（对象名称）只能从当前消息、或宿主注入的【主动回溯】证据里取；取不到就选 conversation 问用户，不要猜。用户说的时间范围按原样写进 request（如"2026 年 1 到 9 月"），具体编码由执行层解析。用户另起新话题（新的查询对象）时，不得把上一轮的实体顺带沿用。',
     '',
-    '【continueTaskId】仅在用户补充了子 Agent 索要的信息、需要继续同一个子任务时使用。',
+    '【continueTaskId】用于在同一个子任务里续跑：用户补充了子 Agent 索要的信息时用它；多步拆解的后续步骤也用它（见下）。新任务不要复用旧编号。',
+    '',
+    '【计划模式：多步拆解】用户的一个请求要分成几步独立执行时（按业务 skill 的拆解表判断），每一步单独申报一次 delegate，request 以「第N/M步：」开头，N 是第几步、M 是共几步。例：`第2/3步：查询<某个对象> <某个时间范围>`。',
+    '· 无前缀的 delegate 就是单步：行为和从前完全一样，子 Agent 的结果直接作为本轮回复。',
+    '· 带前缀的步骤，结果不会直接展示给用户，而是交还给你：你继续申报下一步（delegate），全部步骤派完后申报 conversation 输出汇总。',
+    '· 步骤 2..M 的 continueTaskId 填上一步返回的子任务编号：同一个子任务内续跑，执行重量跨步累计，用户看到的通知带「第 N/M 步」。',
+    '· 任一步失败（包括执行不了、退回"缺什么"）都不阻塞其他步骤：照常推进后续步骤，汇总时如实报告失败或缺信息的那几步，不掩盖、不用估计值填充。',
+    '· 汇总申报 conversation：把每一步的结果整理成一段完整回复；其中的数字结论必须来自真实执行过的步骤。',
     '',
     '【委派被退回时】委派可能没有执行就返回"缺什么"的线索(缺什么 / 为什么做不了 / 建议用户提供什么 / 子任务编号)。这时本回合还没结束：能自己补齐就重新申报 delegate，填 continueTaskId 并把补齐后的完整请求写进 request(实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取)；补不齐就申报 conversation，把缺什么、为什么转达给用户。不要回复"本轮没有产生任何平台查询"这种把原因丢给用户的话。',
     '',
@@ -55,7 +65,7 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
     properties: {
       kind: { type: 'string', enum: ['conversation', 'delegate'] },
       request: { type: 'string' },
-      continueTaskId: { type: 'string', description: '仅在用户补充了子 Agent 索要的信息、需要继续同一个子任务时使用' },
+      continueTaskId: { type: 'string', description: '继续同一个子任务时使用：用户补充了子 Agent 索要的信息，或多步拆解的后续步骤续跑上一步' },
     },
     required: ['kind'],
     additionalProperties: false,

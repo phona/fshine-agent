@@ -280,6 +280,43 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  it('converges after repeated plan rejections in one task instead of letting the worker spin', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-decline-cap-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const planCliRunner: PlanCliRunner = async ({ args }) => ({
+      code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
+    });
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'decline cap test',
+      sessionId: 'task_scope',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      entitySources: { currentMessage: '查一下幻东的应收' },
+    });
+    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}';
+    const submit = () => worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_cap', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+    // 前 5 次是普通 PLAN DECLINED（宽容试错）；第 6 次起 terminal block，worker 收手向用户说明
+    for (let i = 0; i < 5; i += 1) {
+      const verdict = await submit();
+      expect(verdict?.block).toBe(true);
+      expect(verdict?.reason).toContain('PLAN DECLINED');
+    }
+    const verdict = await submit();
+    expect(verdict?.block).toBe(true);
+    expect(verdict?.reason).toContain('PLAN STOP');
+    expect(verdict?.reason).toContain('停止重新提交计划');
+    worker.session.dispose();
+  });
+
   it('derives the missing item from a platform error code, never from free text', async () => {
     // RESULT 信封里的确定性错误码才是线索来源；自由文本一律忽略（那是猜，不是事实）
     const envelope = (code: string, message: string) => [{

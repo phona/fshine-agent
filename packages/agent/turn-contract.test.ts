@@ -104,6 +104,25 @@ describe('申报契约：route_current_turn 三字段', () => {
     expect(ROUTE_CURRENT_TURN_TOOL.name).toBe('route_current_turn');
   });
 
+  it('工具描述含计划模式协议，且多步拆解不加 schema 字段（仍 3 个）', () => {
+    // roadmap Phase 6：长任务拆解靠 request 里的「第N/M步：」前缀，契约一动不动
+    const description = ROUTE_CURRENT_TURN_TOOL.description;
+    expect(description).toContain('第N/M步：');
+    expect(description).toContain('计划模式');
+    // 无前缀 = 单步行为不变；有前缀 = 交还模型继续下一步；汇总用 conversation
+    expect(description).toContain('无前缀的 delegate 就是单步');
+    expect(description).toContain('交还给你');
+    expect(description).toContain('申报 conversation 输出汇总');
+    // 步骤 2..M 用 continueTaskId 在同一子任务内续跑；任一步失败不阻塞
+    expect(description).toContain('continueTaskId');
+    expect(description).toContain('不阻塞');
+    expect(description).toContain('如实报告');
+    // 字段数没变：多步协议全部写在 request 与描述里
+    const properties = ROUTE_CURRENT_TURN_TOOL.inputSchema.properties as Record<string, unknown>;
+    expect(Object.keys(properties)).toHaveLength(3);
+    expect(Object.keys(properties).sort()).toEqual(['continueTaskId', 'kind', 'request']);
+  });
+
   it('工具描述与契约源码全文无业务词（编排层零业务知识）', () => {
     const business = /应收|凭证|科目|账套|期间/u;
     expect(ROUTE_CURRENT_TURN_TOOL.description).not.toMatch(business);

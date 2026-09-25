@@ -29,11 +29,12 @@ import {
   type TurnDriver,
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
-import type { AuditStore } from '@fshine/contracts';
+import type { AuditStore, TaskPlanRepo } from '@fshine/contracts';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createMessageHandler } from './handler';
 import { createServerReplyHandler } from './reply';
 import { asAgentPendingRepo, createPlanConfirmationRoute } from './plan-confirmation-route';
+import { loadBusinessSkill } from './business-skill';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -90,6 +91,14 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   if (isPlatformMock()) {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
+
+  // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
+  const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
+  // 业务 skill（架构 §5）：读文件失败/文件缺失都只记日志，不影响启动。
+  const businessSkill = await loadBusinessSkill(env);
+  console.log(JSON.stringify(businessSkill.text
+    ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
+    : { event: 'business_skill_skipped', path: businessSkill.path }));
 
   const driver = overrides.driver ?? createPiTurnDriver({ env });
   const contextModelDriver = overrides.contextModelDriver ?? driver;
@@ -174,6 +183,10 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // after the delegated turn reaches its own deadline.
     turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
     platformTask,
+    // 任务计划状态（Phase 6）：存储未启用时缺省，长任务拆解照常、只是没有进度投影。
+    ...(taskPlans ? { taskPlans } : {}),
+    // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。
+    ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
   });
 
   const channel = new WecomBotChannel({ env, ...(overrides.channelClientFactory ? { clientFactory: overrides.channelClientFactory } : {}) });

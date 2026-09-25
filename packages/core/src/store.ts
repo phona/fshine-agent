@@ -25,6 +25,9 @@ import type {
   ChangeIntentRepo,
   MemoryRecordRecord,
   MemoryRecordRepo,
+  TaskPlanProjection,
+  TaskPlanRepo,
+  TaskPlanStepFact,
 } from '@fshine/contracts';
 
 export function newId(prefix: string): string {
@@ -105,6 +108,25 @@ CREATE TABLE IF NOT EXISTS conversation_context_states (
   state TEXT NOT NULL,
   PRIMARY KEY (principal_id, session_id)
 );
+
+CREATE TABLE IF NOT EXISTS task_plan_steps (
+  fact_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  fact_id TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  plan_id TEXT NOT NULL,
+  step_index INTEGER NOT NULL,
+  total_steps INTEGER NOT NULL,
+  task_id TEXT,
+  request TEXT NOT NULL,
+  status TEXT NOT NULL,
+  summary TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_plan_steps_scope_time
+  ON task_plan_steps (principal_id, session_id, plan_id, created_at, fact_id);
+CREATE INDEX IF NOT EXISTS idx_task_plan_steps_session_time
+  ON task_plan_steps (principal_id, session_id, created_at, fact_id);
 
 CREATE TABLE IF NOT EXISTS long_memory_records (
   memory_id TEXT PRIMARY KEY,
@@ -224,6 +246,20 @@ interface ContextStateRow {
   through_event_id: string;
   reducer_version: number;
   state: string;
+}
+
+interface TaskPlanStepRow {
+  fact_id: string;
+  principal_id: string;
+  session_id: string;
+  plan_id: string;
+  step_index: number;
+  total_steps: number;
+  task_id: string | null;
+  request: string;
+  status: string;
+  summary: string | null;
+  created_at: string;
 }
 
 interface MemoryRecordRow {
@@ -352,6 +388,36 @@ function rowToContextState(row: ContextStateRow): ContextStateRecord {
     reducerVersion: row.reducer_version,
     state: JSON.parse(row.state) as unknown,
   };
+}
+
+function rowToTaskPlanStepFact(row: TaskPlanStepRow): TaskPlanStepFact {
+  return {
+    factId: row.fact_id,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    planId: row.plan_id,
+    stepIndex: row.step_index,
+    totalSteps: row.total_steps,
+    ...(row.task_id === null ? {} : { taskId: row.task_id }),
+    request: row.request,
+    status: row.status as TaskPlanStepFact['status'],
+    ...(row.summary === null ? {} : { summary: row.summary }),
+    createdAt: row.created_at,
+  };
+}
+
+function sameTaskPlanStepFact(a: TaskPlanStepFact, b: TaskPlanStepFact): boolean {
+  return a.factId === b.factId
+    && a.principalId === b.principalId
+    && a.sessionId === b.sessionId
+    && a.planId === b.planId
+    && a.stepIndex === b.stepIndex
+    && a.totalSteps === b.totalSteps
+    && a.taskId === b.taskId
+    && a.request === b.request
+    && a.status === b.status
+    && a.summary === b.summary
+    && a.createdAt === b.createdAt;
 }
 
 function rowToMemoryRecord(row: MemoryRecordRow): MemoryRecordRecord {
@@ -603,6 +669,95 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
+  const taskPlans: TaskPlanRepo = {
+    async append(fact) {
+      const existing = db.prepare('SELECT * FROM task_plan_steps WHERE fact_id = ?')
+        .get(fact.factId) as TaskPlanStepRow | undefined;
+      if (existing) {
+        if (!sameTaskPlanStepFact(rowToTaskPlanStepFact(existing), fact)) throw new Error(`factId collision: ${fact.factId}`);
+        return;
+      }
+      db.prepare(
+        'INSERT INTO task_plan_steps (fact_id, principal_id, session_id, plan_id, step_index, total_steps, task_id, request, status, summary, created_at) '
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        fact.factId,
+        fact.principalId,
+        fact.sessionId,
+        fact.planId,
+        fact.stepIndex,
+        fact.totalSteps,
+        fact.taskId ?? null,
+        fact.request,
+        fact.status,
+        fact.summary ?? null,
+        fact.createdAt,
+      );
+    },
+    async project(principalId, sessionId, planId) {
+      // 全量重建：不裁剪、不分页（与 Context State 重建同语义）。单 plan 步数有界。
+      const rows = db.prepare(
+        'SELECT fact_id, principal_id, session_id, plan_id, step_index, total_steps, task_id, request, status, summary, created_at '
+        + 'FROM task_plan_steps WHERE principal_id = ? AND session_id = ? AND plan_id = ? ORDER BY fact_seq',
+      ).all(principalId, sessionId, planId) as TaskPlanStepRow[];
+      if (!rows.length) return null;
+
+      let totalSteps = 0;
+      let updatedAt = '';
+      const counts: Record<TaskPlanStepFact['status'], number> = { started: 0, done: 0, failed: 0, needs: 0 };
+      // 正序遍历，后写覆盖先写 —— 每个 stepIndex 只保留最后一条事实（重试会追加新事实）。
+      const lastByStep = new Map<number, TaskPlanStepFact>();
+      for (const row of rows) {
+        const fact = rowToTaskPlanStepFact(row);
+        totalSteps = Math.max(totalSteps, fact.totalSteps);
+        counts[fact.status] += 1;
+        lastByStep.set(fact.stepIndex, fact);
+        updatedAt = fact.createdAt;
+      }
+
+      const steps: TaskPlanProjection['steps'] = [...lastByStep.values()]
+        .sort((a, b) => a.stepIndex - b.stepIndex)
+        .map((fact) => ({
+          stepIndex: fact.stepIndex,
+          status: fact.status,
+          ...(fact.taskId === undefined ? {} : { taskId: fact.taskId }),
+          ...(fact.summary === undefined ? {} : { summary: fact.summary }),
+        }));
+      return {
+        planId,
+        sessionId,
+        totalSteps,
+        started: counts.started,
+        done: counts.done,
+        failed: counts.failed,
+        needs: counts.needs,
+        steps,
+        updatedAt,
+      };
+    },
+    async latestOpenPlan(principalId, sessionId) {
+      // 按 append 顺序倒序扫本会话事实；Map 插入序即"最近 plan 优先"。
+      const rows = db.prepare(
+        'SELECT plan_id, step_index, status FROM task_plan_steps WHERE principal_id = ? AND session_id = ? ORDER BY fact_seq DESC',
+      ).all(principalId, sessionId) as Array<Pick<TaskPlanStepRow, 'plan_id' | 'step_index' | 'status'>>;
+      const plans = new Map<string, { started: Set<number>; closed: Set<number> }>();
+      for (const row of rows) {
+        let entry = plans.get(row.plan_id);
+        if (!entry) {
+          entry = { started: new Set<number>(), closed: new Set<number>() };
+          plans.set(row.plan_id, entry);
+        }
+        if (row.status === 'started') entry.started.add(row.step_index);
+        else entry.closed.add(row.step_index);
+      }
+      for (const [planId, entry] of plans) {
+        // 悬挂 = 该 index 有过 started，且从没有终态（done/failed/needs）事实。
+        if ([...entry.started].some((stepIndex) => !entry.closed.has(stepIndex))) return planId;
+      }
+      return null;
+    },
+  };
+
   const memoryRecords: MemoryRecordRepo = {
     async listByPrincipal(principalId) {
       const rows = db.prepare(
@@ -758,7 +913,7 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, contextStates, memoryRecords, platformTasks, changeIntents };
+  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, contextStates, taskPlans, memoryRecords, platformTasks, changeIntents };
   handles.set(store, db);
   return store;
 }

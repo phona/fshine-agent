@@ -13,6 +13,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
+import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
 import type {
@@ -40,6 +41,12 @@ export const RUN_17DZ_TASK_DESCRIPTION = [
 export interface Run17dzTaskArgs {
   request: string;
   taskId?: string;
+  /**
+   * 计划模式（Phase 6）的步骤标签（「第 N/M 步」），由宿主从 request 的协议前缀解析出来。
+   * 只用于给这一步委派过程中平台计划门产出的用户通知加前缀，让用户看到全局进度；
+   * 不进 Main Agent 工具 schema，也不进 worker 提示词。
+   */
+  stepLabel?: string;
   /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>;
   /**
@@ -348,6 +355,16 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         throw new ToolUserError('无权继续该 17dz 任务。');
       }
 
+      // 计划模式（Phase 6）：这一步的计划门通知带上「第 N/M 步」前缀交付用户——
+      // 用户因此看到"现在在拆解的第几步"，而不是一条没有上下文的孤立通知。
+      // 前缀插在固定标记之后，渠道与 e2e 替身仍按「计划通知：」识别这是通知帧。
+      const stepLabel = typeof args.stepLabel === 'string' ? args.stepLabel.trim() : '';
+      const trustedNotice = ctx.trusted.onNotice;
+      const onNotice = trustedNotice
+        ? stepLabel
+          ? async (text: string) => { await trustedNotice(withStepLabel(text, stepLabel)); }
+          : trustedNotice
+        : undefined;
       const taskId = existing?.taskId ?? `task_${randomUUID()}`;
       const running: PlatformTaskRecord = {
         taskId,
@@ -383,7 +400,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           ...(args.entitySources ? { entitySources: args.entitySources } : {}),
           ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
           ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
-          ...(ctx.trusted.onNotice ? { onNotice: ctx.trusted.onNotice } : {}),
+          ...(onNotice ? { onNotice } : {}),
         });
         if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
         if (result.pendingPlan) {
@@ -483,6 +500,17 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       }
     },
   };
+}
+
+/**
+ * 给计划门通知加步骤前缀（计划模式）。固定标记保持在最前——渠道适配器与测试替身
+ * 都按它识别"这是一条计划通知"；步骤标签紧跟其后，用户先看到"第几步"再看范围。
+ */
+export function withStepLabel(text: string, stepLabel: string): string {
+  const tag = `【${stepLabel}】`;
+  if (!stepLabel) return text;
+  if (!text.startsWith(PLAN_NOTICE_PREFIX)) return `${tag}${text}`;
+  return `${PLAN_NOTICE_PREFIX}${tag}${text.slice(PLAN_NOTICE_PREFIX.length)}`;
 }
 
 function truncate(text: string, max: number): string {
