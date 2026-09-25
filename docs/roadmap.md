@@ -1,0 +1,202 @@
+# 落地路线
+
+架构目标见 [`v0-architecture.md`](v0-architecture.md)，差距清单在它 §10。本文只回答一件事：**按什么顺序改、每步怎么验、什么时候能停。**
+
+## 总原则
+
+- **每个 Phase 独立可交付、可随时停。** 任何一步做完，系统都是可运行、可测试、可回滚的状态。
+- **先删后建。** 能靠代码保证的先从提示词里删掉，再加新能力——否则新能力会建在漂移的基线上。
+- **验证成本前置。** Phase 0 先把测试和探针提速，后面每一步都受益。
+- **红线**：任何 Phase 结束后，`npm test` 全绿 + typecheck 0 错误。涉及申报/指代的 Phase 额外跑真实模型探针。
+
+---
+
+## 阶段总览
+
+```text
+Phase 0 测试并行化        （不动架构，纯提速）
+   └─> Phase 1 提示词去冗余   （只删，不改行为）
+        └─> Phase 2 主动回溯   （宿主申报前注入证据）
+             └─> Phase 3 领域判别下沉（解耦的关键一步）
+                  └─> Phase 4 申报契约瘦身（8 字段 → 3 字段）
+                       ├─> Phase 5 Subagent 报错回路
+                       └─> Phase 6 长任务拆解 + 业务 skill + 任务计划状态
+                            └─> Phase 7 执行层记忆（可选）
+```
+
+预估：Phase 0–4 约 7 天，Phase 5–6 约 5 天，Phase 7 约 2 天。
+
+---
+
+## Phase 0 — 测试并行化
+
+**目标**：`npm test` 8s → ≤3s；探针日常迭代从 25 分钟降到 3 分钟。
+
+**现状**：33 文件 287 用例 8s。`turn-loop.acceptance.test.ts` 5.3s（13 用例串行）、`plan-awareness.test.ts` 1.2s，其余 31 个文件均 <350ms。vitest 8 线程按**文件**并行，墙时间被最慢文件卡住。
+
+**已验证**：线程池给每个文件独立的 `process.env` 副本，拆文件不会串味。
+
+**改动**：
+- 拆 `turn-loop.acceptance.test.ts` 为 4 个按主题的文件，共享替身抽到 `tests/e2e/harness.ts`：
+  - `turn-loop-routing.test.ts`（申报分类、缺账套追问、旧范围不渗入、未授权用户、群聊 @剥离、跳过申报）
+  - `turn-loop-execution.test.ts`（重复提问必须重查、零执行不外发、目录搜索、注脚不外泄）
+  - `turn-loop-plan-gate.test.ts`（扩范围先通知、通知失败不执行、高重量等确认）
+  - `turn-loop-confirmation.test.ts`（旧确认被取代、notify 反复升级）
+- 探针脚本加 `--quick`（只跑 A1/A2/A4/A5 + B1）。
+
+**验收**：三次计时 ≤3s；用例数不减少；`describe` 名保留手工用例编号；`docs/manual-test-wecom.md` §8.2 映射表同步文件名。
+
+---
+
+## Phase 1 — 提示词去冗余
+
+**目标**：把"代码已经保证"的规则从提示词里删掉，缩小要维护的面积。
+
+**方法**：对 `SYSTEM_PROMPT`（19 条 / 1408 字符）和 `workerSystemPrompt`（17 条）逐条对照代码断言。已确认可删的（代码里有对应保证）：
+
+| 提示词条目 | 代码保证 |
+|---|---|
+| 只问账套存在性 → 只能调 `search-account-sets` | `validatePlanAgainstTaskIntent` account_search 分支 |
+| 余额任务不能夹带凭证查询 | balance 分支 |
+| 不能查申报范围外的账套 / 期间 | `inScope` + periods 检查 |
+| 计划必须只读 | 平台 `PLAN_OPERATION_NOT_READ_ONLY` |
+| 实际调用必须匹配激活计划 | 平台 `PLAN_CALL_MISMATCH` |
+| 超重 → 通知/确认/停止/试探上限 | 平台 `decision()` + 两个计数器 |
+| 写操作必须服务端确认后执行 | commit token + serve-policy |
+| worker bash 只能 `bin/17dz`、禁元字符、无计划拒绝 | `serve-gate.ts` |
+| 不读 `.runtime/` / `.env` / auth | serve-gate `sensitivePaths` |
+| 申报必须带证据 / 自相矛盾退回 / 零执行不外发 | 三个确定性校验 |
+
+**剩下的场景枚举合成一条原则**：
+
+> 只能执行宿主批准的计划内的调用。能力不足、结果不确定或计划被拒时，如实说明看到的事实并停止；不要换口径试探，也不要代替用户做选择。
+
+**产出物**：一份「规则 → 落点」清单（代码断言 / SKILL 事实），作为唯一事实源索引，随代码走。
+
+**验收**：
+- `SYSTEM_PROMPT` + `workerSystemPrompt` 合计字符数下降 ≥40%
+- 清单里每条规则都能在代码或 SKILL 里找到落点；提示词里不出现清单外的新规则
+- `npm test` 全绿；探针 `--quick` 业务层无回归（删的全是冗余，预期零行为变化）
+
+---
+
+## Phase 2 — 主动回溯
+
+**目标**：把"按需回溯"从模型发起改成宿主发起，解决指代解析不可靠。
+
+**现状**：`route_reference_hint` 是模型申报错了才把上一轮原文回给它——判断后补救，四轮 C1 实测指代成功率 3/5、5/5、0/5、又错。
+
+**改动**：
+- 申报**之前**，宿主检测指代/回溯线索（这个 / 那个 / 它 / 刚才 / 上次 / 我之前说过），从 Conversation Log 检索并注入 context 头部，带来源 eventId，与 Context State 并列
+- 硬上限：最近 3–5 条 tool_result + 关键词命中 ≤3 条，超了截断并记日志
+- **删除**：`route_reference_hint` 整套、`SYSTEM_PROMPT` 里 173 字符的指代规则
+
+**关键约束（必须遵守，否则会打出洞）**：
+> 检索证据只允许支撑**指代消解**，不允许**扩大实体范围**。即：消息里出现的实体才是候选；检索证据的作用是"把消息里的指代词对应到哪个实体"，不是"允许计划里出现历史上出现过的实体"。
+
+不设这条约束，Phase 3 的包含校验会被检索证据打穿——历史里提过幻东，计划就能查幻东。
+
+**验收**：
+- 单测：有线索时注入、无线征时不注入、内容带 eventId、limit 生效、超出截断
+- 探针 `--only C1` 连续两轮指代成功率 ≥4/5
+- 上下文不膨胀（注入条数有上限且有日志）
+
+---
+
+## Phase 3 — 领域判别下沉
+
+**目标**：编排层不再做领域判别。这是解耦真正发生的一步。
+
+**改动**：
+- `workerSystemPrompt` 的业务条目 → 17dz 的 `SKILL.md`（大部分已在那，去重即可）
+- `SYSTEM_PROMPT` 的业务条目 → 删（编排层不需要知道）
+- `validatePlanAgainstTaskIntent` 的 balance/voucher/account_search 领域分支 → 换成架构文档 §2 第 9 条的**领域无关包含校验**：
+  > 计划里每个实体（账号 / 期间 / 关键词）必须能在「当前消息 / 检索证据 / 本轮平台响应」里逐字找到。
+  
+  「本轮平台响应」一项很关键：执行层调目录查询拿到唯一候选，那个候选就是合法解析出来的，宿主不需要懂业务。
+
+**验收**：
+- `grep -ri "应收\|凭证\|科目\|账套\|期间" packages/agent/src/` 只命中契约枚举与日志字段，不命中任何规则文案
+- 17dz `test-plan/test-consistency/test-operations` 全绿
+- 探针 `--quick` 无回归；跨仓 mock E2E 全绿
+
+**风险**：包含校验比原来的精确范围弱。缓解：靠上面那条约束 + 「本轮平台响应」补足；漏网时执行层自己的 SKILL 规则和平台参数校验仍在前线。
+
+---
+
+## Phase 4 — 申报契约瘦身
+
+**目标**：8 字段 → 3 字段，编排层零业务知识。
+
+**改动**：
+- `route_current_turn` 只保留 `kind`（conversation / delegate）、`request`、`continueTaskId`
+- 删 `taskType` / `accountQueries` / `customerQueries` / `periods` / `accountResolution` / `searchQuery` / `referenceQuote`
+- 范围守卫完全靠 Phase 3 的包含校验
+- `turn-contract.ts` 大幅瘦身；相关单测全部重写
+
+**验收**：
+- `turn-contract.ts` 与 `ROUTE_CURRENT_TURN_TOOL.description` 里无任何业务词
+- schema 属性数 = 3
+- `npm test` 全绿；探针 `--quick` 无回归；`--only C1` 指代不劣化
+
+**这是全线风险最高的一步**——契约一改，前面所有调试基线都变。所以它排在第 4，前面三步先把能删的删掉、把该给的证据给上，再动本体。
+
+---
+
+## Phase 5 — Subagent 报错回路
+
+**目标**：执行不了就回报"缺什么"，Main Agent 补齐后重派，不再整轮失败。
+
+**改动**：
+- 子 Agent 的失败回报带上结构化线索：缺哪个信息 / 为什么做不了 / 建议用户提供什么
+- Main Agent 收到后：能自己补的补（从 Log 取实体），不能补的问用户，然后用 `continueTaskId` 重派
+- 宿主出口校验不变
+
+**验收**：e2e 覆盖「缺期间 → 问用户 → 用户补上 → 续跑原任务」全链；不再出现"本轮没有产生任何平台查询"这种把原因丢掉的兜底。
+
+---
+
+## Phase 6 — 长任务拆解
+
+**目标**：Main Agent 做业务拆解与派单，Subagent 只做单步执行。
+
+**改动**：
+- 新增**任务计划状态**存储（append-only 事实 + 可重建投影，与 Log/Context State 同一套机制，不新造存储形态）
+- 业务 skill 落地（架构文档 §5 草案，约 400 字，只含程序性知识）
+- Main Agent 拆解 → 逐步派单 → 汇总；任一步失败不阻塞其他步骤
+- 计划门支持"N/M 步"的上报，让用户的通知带全局观，闸口能做全局预算
+
+**验收**：e2e 覆盖「核对 3 个账套」全链；其中一个账套失败时其他两个照常完成并在汇总里如实报告；用户收到的通知含"第 N/M 步"。
+
+---
+
+## Phase 7 — 执行层记忆（可选）
+
+**目标**：17dz 持久化自己的领域记忆（客户录入格式差异、录汇票规则等），跨任务生效。
+
+**边界**：归执行层自己存储和使用，编排层不存、不转发、不理解。
+
+**验收**：跨任务说"跟上次一样"时，执行层能取到自己的口径记忆，不需要编排层转手。
+
+---
+
+## 验证协议
+
+| 阶段 | 必跑 | 涉及申报/指代时加跑 |
+|---|---|---|
+| 每个 Phase 结束 | `npm run typecheck` + `npm test` | — |
+| Phase 1 | 探针 `--quick`（对比业务层有无回归） | — |
+| Phase 2 / 4 | — | 探针 `--only C1` 两轮 |
+| Phase 3 / 5 / 6 | 17dz `test-plan` / `test-consistency` / `test-operations` | 探针 `--quick` |
+| 里程碑（Phase 4、6 完成） | 探针全量 | — |
+
+**探针本身的能力**：`scripts/probe-real-agent.ts`，真实 LLM + 真 `bin/17dz` + mock 执行器，`--only` 选用例、`--quick` 快速子集。
+
+---
+
+## 明确不做
+
+- 通用多 Agent registry、跨域结果聚合（等真有第二个域再做）
+- 业务 skill 从 operation 清单自动派生（先手写，等第二个域出现再看）
+- 长期记忆定时生产调度、`MEMORY.md` 落盘、store schema 版本管理
+- `DZ_PLAN_*` 阈值精调（等真实执行数据积累）
