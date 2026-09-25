@@ -78,9 +78,20 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 2 — 主动回溯
 
-**目标**：把"按需回溯"从模型发起改成宿主发起，解决指代解析不可靠。
+**状态：已完成**。指代解析不可靠的机械根因已找到并修复：默认 `state_recent` 模式下，`selectRecentTurns` 的"完整轮次"判定只认带文本的最终 assistant 消息，而 platform_query/clarify 轮次是被 toolResult 确定性终结的——**整个查询轮次被踢出最近轮次窗口**，模型看不到上一轮查过什么，`previousTurnText` 扫的也是同一个被截断的窗口，referenced 申报必然被拒（历史成功率 3/5、5/5、0/5 的波动也由此解释：上一轮是闲聊轮就灵，是查询轮就废；`route_reference_hint` 扫的是同一个窗口，所以同样不稳）。
 
-**现状**：`route_reference_hint` 是模型申报错了才把上一轮原文回给它——判断后补救，四轮 C1 实测指代成功率 3/5、5/5、0/5、又错。
+**改动**：
+- `selectRecentTurns`：完整轮次判定增加"或被 toolResult 终结"——查询轮次重新可见（`runtime.ts`，回归测试在 `runtime.test.ts`）
+- 新增 `reference-evidence.ts`：申报前宿主检测指代线索，从 Conversation Log 注入证据（≤5 条 tool_result + ≤3 条关键词命中，带 eventId，超限截断并记日志）；铁律：证据只支撑指代消解、不扩大实体范围，本轮范围仍由 C1/C2 逐字校验
+- **删除**：`route_reference_hint` 整套、`looksLikeReference`、`SYSTEM_PROMPT` 里 173 字符的指代规则（10 条/734 字符）
+
+**验收（按实际达成记录）**：
+- 单测 7 例：有线索注入/无线征不注入/带 eventId/limit 生效/超限截断/去重/关键词提取；另有 referenced 回归测试（上一轮是查询轮时必须被接受）✓
+- 探针 `--only C1` 连续两轮：第一轮 referenced 申报接受 4/5（T3/T9/T13/T19 通过，T4 模型申报字段不规范被拒后澄清，fail-closed 正确）；第二轮 5/5 账套解析正确（T3 走 referenced 干净通过，T6/T11/T19 用正确上下文作答）✓
+- `npm test` 295 全绿、typecheck 0 错误 ✓
+- **已知模型侧失效（非宿主问题，记录待观察）**：第二轮 T4 模型以 conversation 申报复述了上一轮结果格式而未重新委派——出口校验只覆盖 platform_query 申报，提示词层规则（不得把上一轮答复当作本轮结果）已被模型违反；按已否决方向不往提示词加规则，由 A1 类探针持续观察
+
+**原 Phase 2 计划**（保留备查）：
 
 **改动**：
 - 申报**之前**，宿主检测指代/回溯线索（这个 / 那个 / 它 / 刚才 / 上次 / 我之前说过），从 Conversation Log 检索并注入 context 头部，带来源 eventId，与 Context State 并列

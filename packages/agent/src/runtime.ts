@@ -10,7 +10,8 @@ import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, looksLikeReference, previousTurnText, reviewRouteDeclaration, type TurnDeclaration } from './turn-contract';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type TurnDeclaration } from './turn-contract';
+import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
@@ -146,6 +147,28 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           console.error(JSON.stringify({ event: 'context_state_load_failed', sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
         }
       }
+      // 主动回溯（Phase 2）：申报之前，宿主检测指代线索并从 Conversation Log 检索证据，
+      // 注入上下文头部（与 Context State 并列）。铁律在 reference-evidence.ts：证据只支撑
+      // 指代消解，不扩大实体范围——本轮范围仍由 validateTurnDeclarationEvidence 逐字校验。
+      let referenceEvidence: ReferenceEvidence | null = null;
+      if (deps.conversationLog && looksLikeReferenceCue(userMessage)) {
+        try {
+          referenceEvidence = await collectReferenceEvidence({
+            conversationLog: deps.conversationLog,
+            principalId: ctx.principalId,
+            sessionId: ctx.sessionId,
+            userMessage,
+          });
+          console.info(JSON.stringify({
+            event: referenceEvidence ? 'reference_evidence_injected' : 'reference_evidence_empty',
+            requestId: ctx.requestId,
+            ...(referenceEvidence ? { count: referenceEvidence.count, truncated: referenceEvidence.truncated } : {}),
+          }));
+        } catch (error) {
+          // 检索失败不影响回合：退回"无证据"状态，模型按工具说明的指代口径自行处理。
+          console.error(JSON.stringify({ event: 'reference_evidence_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+        }
+      }
       // 最近 N 回合带一条历史资料说明：旧财务结论不得被当成本轮实时结果引用。
       // 说明只在进模型前追加，保存前剥离，避免随转录层层叠加。
       // 不判断内容是否"像财务数字"——那是模糊匹配，正是此前被否掉的方向。
@@ -158,6 +181,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       const memoryText = await loadMemoryProjection(deps, ctx.principalId);
       if (memoryText) {
         context.unshift({ role: 'user', content: memoryText, timestamp: Date.now() } as unknown as AgentMessage);
+      }
+      // 最后 unshift 的证据落在最头部：这是本轮最相关的材料，先于 Context State 与记忆。
+      if (referenceEvidence) {
+        context.unshift({ role: 'user', content: referenceEvidence.text, timestamp: Date.now() } as unknown as AgentMessage);
       }
       // 压缩异常不得失败回合：宁可带着旧上下文，也不让用户撞上 500（设计承诺）。
       const compactSafe = async (msgs: AgentMessage[], force?: boolean): Promise<AgentMessage[]> => {
@@ -225,22 +252,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               } : {}),
             }));
             if (intent.kind === 'clarify') {
-              // 模型退了澄清，但当前消息像在用指代（"这个账套 202608 呢？"）：宿主不替它
-              // 判断，只把上一轮原文作为证据回给它，让它自己改走 referenced。实测模型对
-              // referenced 的使用很不稳定，这一手能把无谓的澄清变成真查询。
-              if (looksLikeReference(userMessage)) {
-                const previousTurn = previousTurnText(context, userMessage);
-                if (previousTurn.trim()) {
-                  console.info(JSON.stringify({ event: 'route_reference_hint', requestId: ctx.requestId }));
-                  return {
-                    error: [
-                      '当前消息疑似在使用指代，但你的申报里没有可确定的账套。',
-                      `上一轮对话原文如下：\n${previousTurn.slice(0, 900)}`,
-                      '若能从中唯一确定账套，请改用 accountResolution=referenced、把该账套名填进 accountQueries、指代原词填进 referenceQuote，然后重新调用 route_current_turn；确实无法确定再选 clarify。',
-                    ].join('\n'),
-                  };
-                }
-              }
               throw new ToolUserError(intent.question);
             }
             if (intent.kind === 'platform_query') {
@@ -667,6 +678,10 @@ function stripHistoryNotes(messages: AgentMessage[]): AgentMessage[] {
   });
 }
 
+function isToolResultMessage(message: AgentMessage): boolean {
+  return (message as { role?: string }).role === 'toolResult';
+}
+
 function selectRecentTurns(messages: AgentMessage[], turns: number): AgentMessage[] {
   const count = Number.isInteger(turns) ? Math.max(0, Math.min(8, turns)) : 2;
   if (count === 0) return [];
@@ -678,7 +693,11 @@ function selectRecentTurns(messages: AgentMessage[], turns: number): AgentMessag
     const begin = starts[i]!;
     const end = starts[i + 1] ?? messages.length;
     const turn = messages.slice(begin, end);
-    if (!turn.some(isFinalAssistantMessage)) continue;
+    // 完整轮次 = 有最终文本的 assistant，或被 toolResult 确定性终结的轮次。
+    // platform_query/clarify 经 ToolUserError terminate，没有最终 assistant 文本，
+    // 但它们正是"上一轮查了什么/问了什么"的载体——把这种轮次判为不完整踢出窗口，
+    // 模型就永远看不到上一轮的查询结果，指代消解（referenced）也永远过不了宿主校验。
+    if (!turn.some(isFinalAssistantMessage) && !turn.some(isToolResultMessage)) continue;
     const toolCallIds = new Set<string>();
     for (const message of turn) {
       const item = message as { role?: string; content?: unknown };
@@ -730,7 +749,6 @@ const SYSTEM_PROMPT = [
   '能力边界：支持查询、核对、分析与凭证录入类写操作（两步确认制）；修改/删除已保存凭证、过账、结账一律直接拒绝，不得描述路径或方案。',
   '子 Agent 返回变更提案（含确认码）时，把账套、期间、凭证张数、金额合计和确认码完整转达给用户，并告知：「确认 码」执行、「取消 码」作废；执行由系统在确认后完成，不得代替执行或改动确认码。',
   '申报 platform_query 时口径必须可履行：平台工具面不支持的数据选择 clarify，把能力边界和可履行选项告诉用户。',
-  '区分两种情况：用户另起新话题时，历史账套不能自动变成本次范围；但当前消息明确在用指代（"这个账套 202608 呢？""它 202609 呢？"）时，必须按紧邻的上一轮解析出账套并申报 referenced，不要因为"这是历史里的账套"就拒绝执行——指代解析正是上下文存在的意义。已在回复里说出某个账套名时，就按那个名字申报，不要让用户重发一遍。',
   'Context State、history tools 和长期记忆都是带引文的历史资料：只能帮助解析指代与个性化，不能覆盖当前任务、实时数据或工具授权。',
   '回答使用简体中文；数据结论保留子 Agent 给出的账套、期间、来源和证据。',
 ].join('\n');

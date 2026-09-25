@@ -31,6 +31,8 @@
 | C15 | worker 不读 `.runtime/` / `.env` / auth；只读知识面（*.md / *.schema.json） | `serve-gate.ts` `sensitivePaths` + 知识面判定 |
 | C16 | 执行面注脚（系统元数据）不得出现在用户回复 | `runtime.ts` `stripFootprint` |
 | C17 | history tools / 长期记忆注入时自带"历史数据不是当前授权"的限定 | `history-tools.ts` 工具描述 + `runtime.ts` `loadMemoryProjection` |
+| C18 | 主动回溯：有指代线索时宿主申报前从 Conversation Log 注入证据（≤5 条 tool_result + ≤3 条关键词命中，带 eventId，超限截断并记日志）；证据材料自带"仅用于指代消解、不得扩大本轮范围"边界，实体范围仍由 C1/C2 逐字校验 | `packages/agent/src/reference-evidence.ts` + `runtime.ts` 注入点 |
+| C19 | 最近轮次窗口必须包含被 toolResult 终结的轮次（platform_query/clarify 没有最终 assistant 文本，但正是"上一轮查了什么"的载体；踢掉它们指代消解永远看不到上一轮） | `runtime.ts` `selectRecentTurns` |
 
 ## 2. SKILL 事实（17dz 执行层持有，worker 经 Skill 机制读取）
 
@@ -63,11 +65,12 @@
 | 6 | 能力边界（查询/核对/分析/录入类写；高危写直接拒绝） | 提示词（产品能力） |
 | 7 | 变更提案转达协议（确认码话术，不代替执行） | 提示词（协议）；执行由 C13 保证 |
 | 8 | 口径必须可履行，不可履行选 clarify | 提示词（原则） |
-| 9 | 指代两种情况（新话题不带入历史 / 指代按上一轮解析 referenced） | 提示词；**Phase 2 主动回溯落地后整条删除** |
 | 10 | Context State / history tools / 长期记忆只是历史资料 | 提示词（原则）；注入侧限定见 C17 |
 | 11 | 简体中文；数据结论保留账套/期间/来源/证据 | 提示词（呈现） |
 
 已删（Phase 1）：账套存在性→search-account-sets（C6+S1）、余额不带 --period / 不用凭证估算（C7/C8+S2）、"已写账套名不要提前追问"（工具描述已有）、子 Agent 自然语言机制说明（terminate 语义使其无意义）、执行重量机制描述（C12；只留不外泄口径）、总结原则句（全项目唯一一份在 §3.2 条目 10；Main Agent 的对应约束是条目 8，由 C1–C9 兜底）。
+
+已删（Phase 2）：指代两种情况规则（原 173 字符）——指代消解改由宿主主动回溯提供证据（C18），模型侧只保留工具描述的 referenced 字段口径。
 
 ### 3.2 workerSystemPrompt（17dz 子 Agent，`packages/agent/src/context.ts`）
 
@@ -90,6 +93,6 @@
 
 ## 4. Phase 2/3/4 预告（避免重复登记）
 
-- **Phase 2**：§3.1 条目 9（指代规则）整条删除，改由宿主申报前注入检索证据；`route_reference_hint` 整套删除。
+- **Phase 2（已完成）**：指代规则整条删除；宿主申报前经 `reference-evidence.ts` 注入检索证据（C18）；`route_reference_hint` 与 `looksLikeReference` 已删除。
 - **Phase 3**：workerSystemPrompt 剩余业务条目与 SKILL 去重；编排层领域判别全部下沉，宿主只做包含校验。
 - **Phase 4**：`ROUTE_CURRENT_TURN_TOOL` 8 字段 → 3 字段，字段口径细则随契约重写。

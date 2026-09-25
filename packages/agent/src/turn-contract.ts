@@ -281,14 +281,6 @@ export function validateTurnDeclarationEvidence(intent: TurnDeclaration, current
   return intent;
 }
 
-/** 当前消息是否像在使用指代，需要借上一轮才能理解。 */
-const REFERENCE_HINT_RE = /这个|那个|^它|它的|刚才那个|上面那个|前述|同上|这边/u;
-
-/** 导出给宿主：模型退回澄清时，若当前消息像指代，宿主把上一轮原文作为证据回给它。 */
-export function looksLikeReference(currentUserMessage: string): boolean {
-  return REFERENCE_HINT_RE.test(currentUserMessage);
-}
-
 /**
  * 上一轮对话的文本。生产里 context 以当前用户消息结尾，测试里 history 不含它，
  * 所以按内容排除当前消息，再取它前面最近的那个 user 起点。

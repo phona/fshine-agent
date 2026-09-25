@@ -719,6 +719,51 @@ describe('createTaxAgentRuntime', () => {
     expect(observedSignal).toBe(controller.signal);
   });
 
+  it('上一轮是平台查询轮时，本轮指代申报 referenced 能被宿主接受（查询轮不被踢出最近窗口）', async () => {
+    // 复刻 pi 驱动形状：platform_query 轮次以 assistant(toolCall) + toolResult 终结，
+    // 没有"带文本的最终 assistant 消息"。selectRecentTurns 曾因此把整个查询轮踢出
+    // 最近轮次窗口——模型看不到上一轮查过什么，referenced 申报必被拒（C1 指代失败的机械根因）。
+    const calls: Array<{ request: string; turnDeclaration?: unknown }> = [];
+    const platformTask = subagent(async (args) => {
+      calls.push(args);
+      return { taskId: 'task_1', text: '幻东 202609 应收余额为 51 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } };
+    });
+    const sessions = new FakeSessionRepo();
+    let turn = 0;
+    const driver: TurnDriver = {
+      run: async (input) => {
+        turn += 1;
+        const declaration = turn === 1
+          ? { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] }
+          : { kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻东'], referenceQuote: '这个账套' };
+        try {
+          await input.exec('route_current_turn', declaration);
+        } catch (error) {
+          if (!(error instanceof ToolUserError)) throw error;
+          return {
+            text: error.message,
+            messages: [
+              ...input.messages,
+              { role: 'assistant', content: [{ type: 'toolCall', id: `call_${turn}`, name: 'route_current_turn', arguments: declaration }], timestamp: turn } as never,
+              { role: 'toolResult', toolCallId: `call_${turn}`, content: error.message, timestamp: turn } as never,
+            ],
+          };
+        }
+        return { text: '这条文本不应外发', messages: input.messages };
+      },
+    };
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+
+    const first = await runtime.handleTurn(makeCtx(), '查幻东账套的应收账款');
+    expect(first.text).toBe('幻东 202609 应收余额为 51 元。');
+
+    const second = await runtime.handleTurn(makeCtx(), '这个账套 202608 呢？');
+    // 指代被接受：宿主据 referenced 申报再次委派，而不是退回澄清
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.turnDeclaration).toMatchObject({ accountResolution: 'referenced', accountQueries: ['幻东'] });
+    expect(second.text).toBe('幻东 202609 应收余额为 51 元。');
+  });
+
   it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
     const { driver, inputs } = recordingDriver(declareConversation([{ text: '第一轮回复' }, { text: '第二轮回复' }]));
