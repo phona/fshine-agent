@@ -1,6 +1,8 @@
 # V0 实施决策记录
 
-状态：当前实现基线。架构边界见 [`v0-architecture.md`](v0-architecture.md)，用户行为见 [`v0-functional-spec.md`](v0-functional-spec.md)。
+状态：**决策记录**。架构边界见 [`v0-architecture.md`](v0-architecture.md)（那份是目标架构，与当前代码的差距列在它 §10）；用户行为见 [`v0-functional-spec.md`](v0-functional-spec.md)。
+
+本文只记录"为什么这么定"，不重复架构正文。已废弃的决策保留标题并标注废弃原因，避免有人再走回去。
 
 ## 1. 技术栈与仓库形态
 
@@ -15,7 +17,7 @@
 
 | 目录 | 职责 |
 |---|---|
-| `packages/agent` | Main Agent、Pi driver、`run_17dz_task` 和子 Agent adapter |
+| `packages/agent` | 编排层：Main Agent、Pi driver、委派与子 Agent adapter、通用闸口 |
 | `packages/contracts` | Agent、task、session、channel 和配置类型 |
 | `packages/core` | 配置加载与 SQLite store |
 | `packages/channel-wecom` | 企微智能机器人 WebSocket 长连接 |
@@ -26,28 +28,39 @@
 
 Main Agent 每回合先调用 `route_current_turn` 申报本轮动作；宿主记录申报、校验证据、记录执行凭证，并在出口做一次纯确定性检查。
 
-- **申报**：`conversation` / `clarify` / `platform_query`（含 taskType、账套、客户、期间、搜索词）。`clarify` 由宿主直接追问；`platform_query` 由宿主用当前原始用户消息直接委派，子 Agent 结果经 `ToolUserError` 的 terminate 语义成为本轮最终回复。
-- **证据 fail-closed**：账套/期间/搜索词必须逐字来自当前消息；`referenced` 必须能在上下文唯一解析。不成立就降级为澄清，不委派。
-- **执行凭证**：申报 `platform_query` 就必须有"激活计划 + 至少一次平台调用"，或停在用户确认门。两者都没有就不外发模型文本，替换为确定性澄清。
+- **申报**：宿主用当前消息直接委派子 Agent，子 Agent 结果经 `ToolUserError` 的 terminate 语义成为本轮最终回复——Main Agent 看不到结果，因此没有机会拿旧答案收尾。
+- **执行凭证**：申报委派就必须有"激活计划 + 至少一次平台调用"，或停在用户确认门。两者都没有就不外发模型文本。子 Agent 诚实汇报能力边界（无财务数字）时，带来源标注转发，不整段丢弃。
 - **跳过申报**：丢弃自由文本重试一次；仍跳过则失败关闭。
+- **申报自相矛盾**：声称 explicit 却不填账套、account_search 无关键词等，退回工具结果让模型在同一回合重填，不消耗用户的澄清轮次。
 - **近期回合降级**：`state_recent` 模式下最近 N 回合前置一条历史资料说明，保存前剥离，避免旧财务结论被当成本轮结果，也避免说明随转录叠加。
 
-为什么不用第二个路由模型：它不解决根因（路由器也会误判，误判后同样重放旧答案，还多一次模型调用），却把语义判断拆给两个模型；真正拦住坏结果的是出口那道确定性校验。
+### 为什么不用第二个路由模型（已废弃方向）
+
+曾加过一个独立的语义意图路由模型做回合分流。**已删除**，原因：它不解决根因（路由器也会误判，误判后同样重放旧答案，还多一次模型调用），却把语义判断拆给两个模型；真正拦住坏结果的是出口那道确定性校验。教训是**宿主多记住一个事实，模型就少做一个判断**——而不是再加一个模型。
+
+### 申报字段的演进方向（未落地）
+
+当前申报含 taskType / accountQueries / periods / accountResolution 等领域字段，要求编排者做领域判别（区分账套名与科目名、知道凭证必须带期间）。真实模型探针反复出现填表错误，根因就在这里。目标形态见 `v0-architecture.md` §4：三个字段，零业务知识，领域判别全部下沉执行层。
 
 ## 3. 委派接口
 
-主 Agent 只暴露一个 17dz 委派工具：
+宿主在 `route_current_turn` 申报为委派时，用当前消息直接调用子 Agent，不经过 Main Agent 转发：
 
 ```ts
 run_17dz_task({
-  request: "查询幻辰账套 2026 年 8 月的应收账款余额",
-  taskId?: "继续同一任务时填写"
+  request: string,           // 宿主加工后的用户请求
+  taskId?: string,           // 继续同一任务时填写
+  turnDeclaration?: ...,     // 宿主持有的结构化范围，用于校验子 Agent 提交的计划
 })
 ```
 
-工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测子 Agent 状态。`route_current_turn` 先申报任务类型；实时任务由宿主委派，Main Agent 只处理普通对话和受限结果整理。
+工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。**不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测子 Agent 状态**——这条是踩过坑定下来的：早期做过状态分类，结果只是把自然语言解析换个名字。
 
 任务存储负责 transcript、绑定和恢复：任务只能由创建它的 principal 和主会话恢复；用户补充信息时复用 task ID，新请求创建新任务。
+
+### 子 Agent 报错回路（目标，未落地）
+
+执行不了时应回报"缺什么信息/为什么做不了"，由 Main Agent 交互补齐后重派。当前实现是委派失败即整轮失败，见 `v0-architecture.md` §10。
 
 ## 4. 子 Agent 配置
 
@@ -98,3 +111,5 @@ Pi transcript 仍作为兼容和恢复状态保存；默认 Main 上下文使用
 - 子 Agent 的 cwd、Skill 发现、task 恢复、取消和自然语言透传必须有自动化测试。
 - 脚本化 Pi driver 只用于单元测试；真实平台回归从 AI 消息入口开始，企微只做通道抽样。
 - 不维护第二套平台协议；平台行为由 `17dz-platform` 的 Skills 和领域脚本定义。
+- **业务规则只允许有两个落点**：代码里的断言，或执行层的 SKILL.md。不允许第三种存在形态——提示词散文。判据见 `v0-architecture.md` §1。
+- 提示词只写原则，不枚举场景。"如果用户只问 X 那么只准调 Y"这类分支必须下沉成代码断言；枚举场景等于在提示词里写 if-else，不可测、会漂移。
