@@ -28,7 +28,7 @@ describe('离线全链 e2e：申报路由与安全边界', () => {
       worker: gatedWorker([{ text: '幻东应收 42 元。' }]),
     });
     const reply = await send('帮我查一下猫一杯的应收账款还有多少');
-    expect(reply).toContain('账套');
+    expect(reply).toContain('对象');
     expect(reply).not.toContain('幻东');
     expect(reply).not.toContain('42 元');
     expect(totalActualCalls()).toBe(before);
