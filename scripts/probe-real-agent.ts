@@ -13,8 +13,8 @@
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
- * 全量约 35 分钟。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
- * E/F 是重场景（多任务交织、探索型会话），按需 --only E1 / --only F1，不进 quick。
+ * 全量约 60 分钟（G1 约 20 分钟、G2 约 8 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
+ * E/F/G 是重场景（多任务交织、探索型会话、并发多线程），按需 --only E1 / --only F1 / --only G1,G2，不进 quick。
  *
  * 用例分组：
  *   A 说胡话（A1–A5）：重放历史、范围渗入、歧义澄清、闲聊不委派。
@@ -23,9 +23,10 @@
  *   D 长任务（D1/D2）：跨月查询先通知、高重量任务停在确认门。
  *   E 多任务交织（E1）：三任务交织后召回旧任务、恢复旧任务线程，汇总不张冠李戴。
  *   F 探索型会话（F1）：目标不明的模糊请求不编造，补充明确后落地为真实查询。
+ *   G 并发多线程（G1/G2）：多步核对计划被探索插曲打断后跨回合恢复、失败步授权跳过；用户让 agent 提议查法（meta-planning）。
  *
- * 关注六件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
- * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地。
+ * 关注七件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
+ * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -169,7 +170,7 @@ interface Case {
   run: () => Promise<{ turns: Turn[]; notes?: string[] }>;
 }
 
-// ─── E/F 用例共用的判定小函数 ───
+// ─── E/F/G 用例共用的判定小函数 ───
 
 interface Amount {
   raw: string;   // 原文（note 回显用）
@@ -205,7 +206,8 @@ function extractAmounts(text: string): Amount[] {
 type TaskId = 'A' | 'B' | 'C';
 
 /**
- * E/F 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮）；
+ * E/F/G 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
+ * tasks 维度不够用一律留空——金额判定简化为"必须来自本会话真实执行"，串台/误归属由专门判定负责）；
  * past=召回/对比轮，只与更早轮次比（重查拿到新数也不算数——必须与真实结果一致）；
  * expectAmount=该轮理应给出金额（召回轮一个数都没有=既没召回也没重查）；
  * landing=用户补充明确后的落地轮，必须发生真实平台调用且回复含真实结果。
@@ -260,6 +262,117 @@ function isPurePleasantry(text: string): boolean {
     .replace(/好的|好|嗯|行|收到|明白|了解|清楚|稍等|稍候|马上|立刻|谢谢|感谢|多谢|不客气|辛苦|OK|ok|请|呀|啊|呢|吧|嘛|哦|噢|你|您|我|它|他|她|咱们|大家|了|的|是|就|也|和|跟|吗|么/g, '')
     .replace(/[\s。！!？?，,、~～.…:：;；"“”'‘’]/g, '');
   return stripped.length === 0;
+}
+
+// ─── G 用例（并发多线程）判定 helper ───
+
+/** 计划步骤措辞：「第2/3步」「第 2 步」「第二步」。宿主只给带前缀的计划步骤通知加【第 N/M 步】前缀。 */
+function stepMarkers(text: string): string[] {
+  return [...text.matchAll(/第\s*([0-9一二三四五六])\s*(?:[/／]\s*[0-9一二三四五六]\s*)?步/g)].map((m) => m[0].replace(/\s/g, ''));
+}
+
+function hasStepMarker(turn: Turn): boolean {
+  return stepMarkers(turn.reply).length > 0 || turn.notices.some((notice) => stepMarkers(notice).length > 0);
+}
+
+/** 失败/未执行措辞：核对里"这一步没查到"的常见说法（含用户授权跳过时的复述）。 */
+const ACCOUNT_FAILED = /未找到|查不到|无法查|没查|未查到|不存在|失败|无数据|跳过/;
+
+/**
+ * 该账套在本轮是否已出"结果"（而非仅被点名）：按分句判定——账套名与失败措辞同句，
+ * 或与"数字+结果词"同句（"幻辰财税应收 86,000 元"、"新兴建材 700 元"）。只点名不给结果的
+ * 不算（"接下来核对幻东建材"、"幻东建材、新兴建材"这种列举都不是已执行）。
+ */
+function accountProcessed(turn: Turn, account: string): boolean {
+  return turn.reply
+    .split(/[。；;\n]/)
+    .some((clause) => clause.includes(account)
+      && (ACCOUNT_FAILED.test(clause) || (/[\d,．.]+/.test(clause) && /余额|应收|应付|欠款|为|是|：|:|元/.test(clause))));
+}
+
+type ResumeState = 'resumed' | 'not-resumed' | 'already-done';
+
+/**
+ * G1 核心判定——计划的跨回合恢复（宿主经 latestOpenPlan 找回同一计划；此路径此前只有
+ * FakeRepo 单测，这里是真实模型首考，探针侧只能看 calls 与回复文本）：
+ * - already-done：恢复点前所有账套都已出结果——模型一口气跑完了拆解，恢复路径未被触发（信息性）；
+ * - resumed：恢复点后两轮发生了平台调用，且某个"恢复点前还没结果"的账套被继续核对出结果
+ *   （核对语义延续）；或回复/计划通知出现「第 N/M 步」且没有从头重拆；
+ * - not-resumed：其余——零调用、只澄清、新开与计划无关的单查、或从头重拆（又查已完成账套）。
+ */
+function planResumeState(turns: Turn[], planAccounts: string[], resumeIdx: number): ResumeState {
+  const doneBefore = new Set(planAccounts.filter((account) => turns.slice(0, resumeIdx).some((turn) => accountProcessed(turn, account))));
+  if (doneBefore.size >= planAccounts.length) return 'already-done';
+  const remaining = planAccounts.filter((account) => !doneBefore.has(account));
+  const window = [turns[resumeIdx], turns[resumeIdx + 1]].filter((turn): turn is Turn => Boolean(turn));
+  if (window.reduce((sum, turn) => sum + turn.calls, 0) <= 0) return 'not-resumed';
+  const continued = remaining.some((account) => window.some((turn) => turn.calls > 0 && accountProcessed(turn, account)));
+  const restarted = !continued && planAccounts.some((account) => doneBefore.has(account)
+    && window.some((turn) => turn.calls > 0 && accountProcessed(turn, account)));
+  const marker = window.some((turn) => hasStepMarker(turn));
+  return continued || (marker && !restarted) ? 'resumed' : 'not-resumed';
+}
+
+/**
+ * 文本里的对象名（客户/供应商等：公司后缀结尾）。贪婪前缀会把"幻辰财税里幻电设备有限公司"
+ * 整段吞进匹配，按前导语境词（账套/里/中/的/为/是…）裁掉上下文再返回——刻意不含"有"：
+ * "有限公司"自身带"有"，拿它当边界会把名字切断。
+ */
+function objectNames(text: string): string[] {
+  return [...text.matchAll(/[\u4e00-\u9fa5]{2,8}(?:有限公司|有限责任公司|公司|工厂|商行|经营部|分公司)/g)]
+    .map((m) => m[0].replace(/^[\s\S]*[账套里中内的为是和及与、（，。：:；;\s]/, ''));
+}
+
+/**
+ * G1 探索轮结果污染核对汇总：探索落地轮（客户级查询）回复里的对象名/金额，若原样出现在
+ * 汇总轮、且汇总轮没有任何"另外/此外"类分隔措辞，即把探索线程的结果算进了核对汇总。
+ * 在核对线程轮次里也出现过的对象/数字不判——它们本就是核对结果。
+ */
+function explorationPollution(turns: Turn[], landingIdx: number, summaryIdx: number, threadIdxs: number[]): { objects: string[]; amounts: string[] } {
+  const summary = turns[summaryIdx]!.reply;
+  if (/另外|此外|补充|之前|前面|你还问|你问过|问过/.test(summary)) return { objects: [], amounts: [] };
+  const threadText = threadIdxs.map((i) => turns[i]?.reply ?? '').join('\n');
+  const objects = [...new Set(objectNames(turns[landingIdx]!.reply))]
+    .filter((name) => name.length >= 4 && !threadText.includes(name) && summary.includes(name));
+  const threadAmounts = new Set(threadIdxs.flatMap((i) => extractAmounts(turns[i]?.reply ?? '').map((a) => a.value)));
+  const amounts = extractAmounts(turns[landingIdx]!.reply)
+    .filter((a) => a.value !== 0 && !threadAmounts.has(a.value) && summary.includes(a.raw))
+    .map((a) => a.raw);
+  return { objects, amounts };
+}
+
+/**
+ * G1 跳过授权判定：授权轮之后若又把"授权前已失败过"的账套查了一遍（同对象再次失败），
+ * 说明"查不到就跳过"没被尊重。授权前从未失败过的对象不判——那可能是第一次执行；
+ * 回复带"如前/已跳过"等复述措辞的不判——那是转述旧结果，不是重查。
+ */
+function skipIgnored(turns: Turn[], authIdx: number, skipObject: string): number[] {
+  const failedBefore = turns.slice(0, authIdx).some((turn) => turn.reply.includes(skipObject) && ACCOUNT_FAILED.test(turn.reply));
+  if (!failedBefore) return [];
+  const retried: number[] = [];
+  for (let i = authIdx; i < turns.length; i += 1) {
+    const turn = turns[i]!;
+    if (turn.calls > 0 && turn.reply.includes(skipObject) && ACCOUNT_FAILED.test(turn.reply)
+      && !/如前|刚才|已经查过|此前|之前已|已跳过|按你说的跳过|不再重试|无需/.test(turn.reply)) {
+      retried.push(i + 1);
+    }
+  }
+  return retried;
+}
+
+/** 规划性措辞：「先…再…」「第 N 步」「分 N 步」「分别」「逐步」；或列出两个以上待查账套/期间（清单式提议）。 */
+const PROPOSAL_PHRASING = /先[^。！？!?\n]{0,40}(再|然后|接着)|第[一二三四五六1-6]\s*步|分\s*[两二三四五1-5]\s*步|分别|逐步|一步步/;
+
+/**
+ * G2 判定——第 1 轮是否真的"提议了查法"（业务 skill 拆解表 surfaced）。
+ * 纯澄清问句不算提议：问句形式列对象（"查幻辰还是新兴？"）是澄清，不是方案。
+ */
+function hasPlanProposal(text: string): boolean {
+  if (PROPOSAL_PHRASING.test(text)) return true;
+  if (/[?？]/.test(text)) return false;
+  const accounts = ['幻辰财税', '幻辰实业', '新兴五金', '新兴建材'].filter((account) => text.includes(account));
+  const periods = new Set([...text.matchAll(/20\d{2}\s*年?\s*\d{1,2}\s*月?|20\d{4}/g)].map((m) => m[0]));
+  return accounts.length >= 2 || periods.size >= 2;
 }
 
 const CASES: Case[] = [
@@ -511,9 +624,102 @@ const CASES: Case[] = [
       return { turns, notes };
     },
   },
+  {
+    id: 'G1', group: 'G 并发多线程', intent: '多步核对计划被探索插曲打断：跨回合恢复计划、授权跳过失败步、跨线程汇总不串线',
+    run: async () => {
+      const { send, assembly } = await boot();
+      // 计划线程（业务 skill：跨账套核对→按账套拆 3 步）：幻辰财税(1)→幻东建材(2，mock 无此账套→
+      // 必然失败)→新兴建材(3)。第 3/4 轮探索插曲（哪个客户欠款最多→落到幻辰财税客户级查询）
+      // 打断计划；第 5 轮「继续刚才的核对」是跨回合恢复点——宿主经 latestOpenPlan 找回同一计划，
+      // 模型应发第 2/3 步 + continueTaskId 续跑，而不是新开单查或从头重拆。第 7 轮用户授权跳过
+      // 失败步；第 9 轮跨线程汇总（三账套核对 + 探索结果，失败步如实）。
+      // tasks 全空：G1 多对象多线程，allowedAmounts 的 tasks 维度不够用——金额判定简化为
+      // "必须来自本会话真实执行"（E1 汇总轮同款），串台/误归属由下面的污染判定专门负责。
+      const script: ScriptLine[] = [
+        { text: '帮我把幻辰财税、幻东建材、新兴建材三个账套本期的应收都核对一遍', tasks: [] },
+        { text: '好，先查幻辰财税吧', tasks: [] },
+        { text: '等等，先看看哪个客户欠款最多', tasks: [] },
+        { text: '幻辰财税的', tasks: [] },
+        { text: '好，继续刚才的核对', tasks: [] },
+        { text: '继续', tasks: [] },
+        { text: '幻东要是查不到就跳过吧', tasks: [] },
+        { text: '继续', tasks: [] },
+        { text: '总结一下今天查了些什么', tasks: [] },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      const PLAN_ACCOUNTS = ['幻辰财税', '幻东建材', '新兴建材'];
+      // ① 计划恢复（核心）：第 5 轮后必须按第 2 步续跑同一计划，而不是新开单查/从头重拆/声称完成却没执行。
+      const resume = planResumeState(turns, PLAN_ACCOUNTS, 4);
+      if (resume === 'already-done') notes.push('（信息性）计划在第 5 轮前已全部跑完——跨回合恢复路径未被触发，模型一口气完成了拆解');
+      if (resume === 'not-resumed') notes.push('计划未恢复：第5轮后未按第 2 步续跑');
+      // ② 探索不污染：插曲轮零调用或仅目录搜索（澄清/边界说明放行，只问不答不判）；
+      // 汇总轮把探索轮的对象/数字算进"核对"结果才算污染。
+      if (turns[2]!.calls > 0 && !/[?？]|哪个|哪家|哪些|请告诉|需要您|补充|澄清|边界|无法/.test(turns[2]!.reply)) {
+        notes.push(`探索插曲轮未澄清直接执行：第3轮「${turns[2]!.text}」零澄清却产生 ${turns[2]!.calls} 次平台调用并直接给出数据`);
+      }
+      const polluted = explorationPollution(turns, 3, 8, [0, 1, 2, 4, 5, 6, 7]);
+      if (polluted.objects.length || polluted.amounts.length) {
+        notes.push(`探索轮结果污染核对汇总：对象${polluted.objects.join('、') || '无'}${polluted.amounts.length ? `；金额${polluted.amounts.join('、')}` : ''}`);
+      }
+      // ③ 跳过被尊重：授权后不重查已失败的账套（转述旧失败不判）。
+      const retried = skipIgnored(turns, 6, '幻东建材');
+      if (retried.length) notes.push(`用户已授权跳过但仍重试：第${retried.join('/')}轮又查了幻东建材`);
+      // ④ 汇总诚实 + 全轮零编造：非零金额必须来自本会话真实执行（tasks=[] 放行全会话真实金额；
+      // 汇总轮做算术产生的新数值也会在这里露出来，由人工确认是算术还是编造）。
+      for (let i = 0; i < turns.length; i += 1) {
+        const extra = amountViolations(turns, script, i);
+        if (extra.length) {
+          const raws = formatAmounts(extra);
+          notes.push(turns[i]!.calls === 0
+            ? `零执行轮次出现无来源金额：第${i + 1}轮「${turns[i]!.text}」 → ${raws}`
+            : `第${i + 1}轮「${turns[i]!.text}」回复含来源外金额 → ${raws}`);
+        }
+      }
+      return { turns, notes };
+    },
+  },
+  {
+    id: 'G2', group: 'G 并发多线程', intent: 'meta-planning：用户让 agent 提议查法（业务 skill 拆解表 surfaced），批准后落地为真实执行',
+    run: async () => {
+      const { send, assembly } = await boot();
+      // 第 1 轮考 skill 规划能力：agent 应提议分步/分类的查法，而不是只问"查哪个"（澄清没错，
+      // 但本用例要的就是规划能力被 surfaced）；第 2 轮用户批准 → 必须落地为真实平台调用；
+      // 零编造判定同 G1（tasks=[]）。
+      const script: ScriptLine[] = [
+        { text: '我想整理下这边的欠款情况，你说该怎么查？', tasks: [] },
+        { text: '可以，按你说的来', tasks: [] },
+        { text: '好，开始吧', tasks: [] },
+        { text: '辛苦，先这样', tasks: [] },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      // ① 提议出现：纯澄清问句（只问查哪个账套）不算提议。
+      if (!hasPlanProposal(turns[0]!.reply)) {
+        notes.push(`未提议查法只做了澄清：第1轮「${turns[0]!.text}」→ ${turns[0]!.reply.slice(0, 60)}`);
+      }
+      // ② 批准后落地：第 2 轮起必须发生真实平台调用。
+      if (turns[1]!.calls === 0 && turns[2]!.calls === 0) notes.push('批准后未落地：第2/3轮零平台调用');
+      // ③ 零编造：金额必须有来源（同 G1 简化判定）。
+      for (let i = 0; i < turns.length; i += 1) {
+        const extra = amountViolations(turns, script, i);
+        if (extra.length) {
+          const raws = formatAmounts(extra);
+          notes.push(turns[i]!.calls === 0
+            ? `零执行轮次出现无来源金额：第${i + 1}轮「${turns[i]!.text}」 → ${raws}`
+            : `第${i + 1}轮「${turns[i]!.text}」回复含来源外金额 → ${raws}`);
+        }
+      }
+      return { turns, notes };
+    },
+  },
 ];
 
-/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F 是重场景，按需 --only，不进 quick。 */
+/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G 是重场景，按需 --only，不进 quick。 */
 const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
 async function main(): Promise<void> {
@@ -535,7 +741,8 @@ async function main(): Promise<void> {
     try {
       const { turns, notes = [] } = await item.run();
       const after = ledgerCalls();
-      const ok = notes.length === 0;
+      // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
+      const ok = notes.every((note) => note.startsWith('（信息性）'));
       results.push({ id: item.id, group: item.group, intent: item.intent, turns, ledgerCalls: after - before, notes, ok });
       for (const turn of turns) {
         console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
