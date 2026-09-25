@@ -250,11 +250,13 @@ export function validateTaskIntentEvidence(intent: TaskIntent, current: string, 
     }
     return intent;
   }
-  if (intent.taskType !== 'balance') return intent;
+  // 账套证据校验对所有 taskType 生效。曾经把它放在 balance 分支之后，导致
+  // taskType=voucher 提前 return、指代校验对整个凭证类完全没生效——长会话里
+  // "这个账套的凭证有多少张"就这样被解析成了上文顺带提过的别家账套。
   if (intent.accountResolution === 'missing' || intent.accountResolution === 'ambiguous') {
-    return { kind: 'clarify', question: intent.question || '请告诉我要查哪个账套的应收余额？' };
+    return { kind: 'clarify', question: intent.question || '请告诉我要查哪个账套？' };
   }
-  if (!intent.accountQueries?.length) return { kind: 'clarify', question: '请告诉我要查哪个账套的应收余额？' };
+  if (!intent.accountQueries?.length) return { kind: 'clarify', question: '请告诉我要查哪个账套？' };
   if (intent.customerQueries?.some((name) => !current.includes(name))) return { kind: 'clarify', question: '请确认要查询的客户名称。' };
   if (intent.periods?.some((period) => !period.value.trim() || !period.quote.trim() || !current.includes(period.quote))) {
     return { kind: 'clarify', question: '请确认要查询的会计期间。' };
@@ -263,13 +265,30 @@ export function validateTaskIntentEvidence(intent: TaskIntent, current: string, 
     return { kind: 'clarify', question: '请直接告诉我要查哪个账套；我不能从旧对话补入账套范围。' };
   }
   if (intent.accountResolution === 'referenced') {
-    const historyText = history.map(messageContentText).join('\n');
+    // "这个账套/它"绑定的是紧邻的那一轮，不是上下文里出现过的任何一个账套。
+    // 放宽到整段可见历史会把上一轮顺带提过的别家账套当成指代目标——实测就把
+    // "这个账套"解析成了两轮前提过的新兴建材，而上一轮刚查的是幻辰财税。
+    const previousTurn = previousTurnText(history, current);
     if (intent.accountQueries.length !== 1 || !intent.referenceQuote || !current.includes(intent.referenceQuote)
-      || intent.accountQueries.some((name) => !historyText.includes(name))) {
-      return { kind: 'clarify', question: '我无法从当前对话唯一确定你指的账套，请告诉我账套名称。' };
+      || !previousTurn.trim() || intent.accountQueries.some((name) => !previousTurn.includes(name))) {
+      return { kind: 'clarify', question: '我无法从上一轮对话唯一确定你指的账套，请告诉我账套名称。' };
     }
   }
   return intent;
+}
+
+/**
+ * 上一轮对话的文本。生产里 context 以当前用户消息结尾，测试里 history 不含它，
+ * 所以按内容排除当前消息，再取它前面最近的那个 user 起点。
+ */
+function previousTurnText(history: DriverMessage[], current: string): string {
+  const texts = history.map(messageContentText);
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if ((history[index] as { role?: string }).role !== 'user') continue;
+    if (texts[index] === current) continue;
+    return history.slice(index).map(messageContentText).join('\n');
+  }
+  return '';
 }
 
 function messageContentText(message: DriverMessage): string {

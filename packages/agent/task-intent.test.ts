@@ -17,8 +17,32 @@ describe('semantic task intent router', () => {
     const current = '用刚才那个账套，查猫一杯的应收';
     const intent = parseTaskIntent(JSON.stringify({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '刚才那个账套' }));
     expect(intent).not.toBeNull();
-    expect(validateTaskIntentEvidence(intent!, current, [{ role: 'assistant', content: '刚才查的是幻辰财税账套。', timestamp: 1 }, { role: 'user', content: current, timestamp: 2 }] as never[]))
+    expect(validateTaskIntentEvidence(intent!, current, [
+      { role: 'user', content: '查一下幻辰财税的应收', timestamp: 1 },
+      { role: 'assistant', content: '刚才查的是幻辰财税账套。', timestamp: 2 },
+      { role: 'user', content: current, timestamp: 3 },
+    ] as never[]))
       .toMatchObject({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻辰财税'] });
+  });
+
+  it('指代只绑定紧邻的那一轮，不拿上下文里顺带提过的账套顶替', () => {
+    const current = '这个账套 202609 的凭证有多少张？';
+    const history = [
+      { role: 'user', content: '刚才查的是哪个账套？', timestamp: 1 },
+      { role: 'assistant', content: '刚才上下文里提到的是「新兴建材」这个账套。', timestamp: 2 },
+      { role: 'user', content: '帮我查一下幻辰财税的应收账款', timestamp: 3 },
+      { role: 'assistant', content: '幻辰财税 202609 应收余额为 86,000 元。', timestamp: 4 },
+    ] as never[];
+    // 上一轮是幻辰财税：解析成它 → 放行
+    expect(validateTaskIntentEvidence(
+      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '这个账套' },
+      current, history,
+    )).toMatchObject({ kind: 'platform_query' });
+    // 解析成更早提过的新兴建材 → 拒绝（这正是实测中的漂移）
+    expect(validateTaskIntentEvidence(
+      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['新兴建材'], referenceQuote: '这个账套' },
+      current, history,
+    )).toMatchObject({ kind: 'clarify' });
   });
 
   it('rejects a referenced account that cannot be evidenced in context', () => {
