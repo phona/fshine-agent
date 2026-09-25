@@ -219,22 +219,47 @@ describe.each(DB_MODES)('taskPlans(dbPath=%s)', (mode) => {
 
       await store.taskPlans.append(stepSeq(newer, 1, 'done'));
       await store.taskPlans.append(stepSeq(newer, 2, 'needs', { summary: '缺期间' }));
-      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+      // 已记 2 步但 totalSteps=3：拆解被中断在步间，仍算未完成（跨回合可续跑第 3 步）
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(newer);
+
+      // 第 3 步接满后整个计划关闭；更老的 abandoned 计划（只记了 1/3）成为唯一未完成
+      await store.taskPlans.append(stepSeq(newer, 3, 'done'));
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(older);
     });
 
-    it('同 index 只要出现过终态事实即视为关闭（钉死语义：同 index 没有终态事实才算悬挂）', async () => {
+    it('步级终态优先（投影去重）；计划级看步号是否接满 totalSteps', async () => {
       const planId = 'plan_terminal_wins';
       await store.taskPlans.append(stepSeq(planId, 1, 'started'));
       await store.taskPlans.append(stepSeq(planId, 1, 'done'));
-      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+      // 投影：同 index 后写的终态覆盖先写的 started
+      const projection = await store.taskPlans.project(PRINCIPAL, SESSION, planId);
+      expect(projection?.steps).toEqual([expect.objectContaining({ stepIndex: 1, status: 'done' })]);
+      // 计划级：只记了 1/3 步 → 未完成，可跨回合续跑
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(planId);
 
-      // 之后再 started 也不会重开：该 index 已有终态事实
+      await store.taskPlans.append(stepSeq(planId, 2, 'started'));
+      await store.taskPlans.append(stepSeq(planId, 2, 'failed'));
+      await store.taskPlans.append(stepSeq(planId, 3, 'started'));
+      await store.taskPlans.append(stepSeq(planId, 3, 'done'));
+      // 3 步接满 → 计划关闭
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+      // 之后再 started 也不会重开：步号已接满（同 index 终态在投影里仍优先）
       await store.taskPlans.append(stepSeq(planId, 1, 'started'));
       expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+    });
 
-      // 全新 index 的 started 才构成悬挂
-      await store.taskPlans.append(stepSeq(planId, 2, 'started'));
+    it('中断后续跑：第 1 步 done 后计划仍开着，第 2 步能接回同一 planId（修复planId 裂开）', async () => {
+      const planId = 'plan_interrupted';
+      await store.taskPlans.append(stepSeq(planId, 1, 'started'));
+      await store.taskPlans.append(stepSeq(planId, 1, 'done'));
+      // 用户换话题打断了拆解：已记 1/3，计划必须仍可找回
       expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(planId);
+      await store.taskPlans.append(stepSeq(planId, 2, 'started'));
+      await store.taskPlans.append(stepSeq(planId, 2, 'done'));
+      await store.taskPlans.append(stepSeq(planId, 3, 'done'));
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+      const projection = await store.taskPlans.project(PRINCIPAL, SESSION, planId);
+      expect(projection?.steps.map((step) => step.stepIndex)).toEqual([1, 2, 3]);
     });
 
     it('只扫本 principal 本会话，他人会话不泄漏', async () => {
@@ -243,7 +268,8 @@ describe.each(DB_MODES)('taskPlans(dbPath=%s)', (mode) => {
       await store.taskPlans.append(stepSeq(foreign, 1, 'started', { principalId: 'wecom:user_b' }));
       await store.taskPlans.append(stepSeq('plan_mine', 1, 'done'));
 
-      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
+      // 自己的计划只记了 1/3 步：新语义下合法地开着；关键是绝不返回他人的计划
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe('plan_mine');
       expect(await store.taskPlans.latestOpenPlan('wecom:user_b', SESSION)).toBe(foreign);
       expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, 'wecom:user_a:conv_2')).toBe(foreign);
     });
@@ -264,6 +290,9 @@ describe.each(DB_MODES)('taskPlans(dbPath=%s)', (mode) => {
       ];
       for (const fact of facts) await store.taskPlans.append(fact);
 
+      // 记到的最大步号 4 < 声明过的最大 totalSteps 5：拆解未接满，计划仍开着
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(planId);
+
       const expected = {
         planId,
         sessionId: SESSION,
@@ -282,11 +311,12 @@ describe.each(DB_MODES)('taskPlans(dbPath=%s)', (mode) => {
       expect(await store.taskPlans.project(PRINCIPAL, SESSION, planId)).toEqual(expected);
       // 重复重建必须逐字节一致（投影是纯函数）
       expect(await store.taskPlans.project(PRINCIPAL, SESSION, planId)).toEqual(expected);
-      // 三个 index 都出现过终态事实 → 无悬挂
-      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
-      // 追加一个全新 index 的 started 才构成悬挂
-      await store.taskPlans.append(stepSeq(planId, 5, 'started', { totalSteps: 5, createdAt: '2026-09-25T10:00:07.000Z' }));
+      // 记到的最大步号 4 < totalSteps 5：未接满，计划仍开着（中断在步间）
       expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(planId);
+      // 第 5 步接满后计划关闭
+      await store.taskPlans.append(stepSeq(planId, 5, 'started', { totalSteps: 5, createdAt: '2026-09-25T10:00:07.000Z' }));
+      await store.taskPlans.append(stepSeq(planId, 5, 'done', { totalSteps: 5, createdAt: '2026-09-25T10:00:08.000Z' }));
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBeNull();
     });
 
     it('跨回合续跑：同一 planId 继续追加事实，投影只增不减', async () => {

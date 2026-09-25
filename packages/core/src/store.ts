@@ -738,21 +738,24 @@ export function createSqliteStore(dbPath: string): AuditStore {
     async latestOpenPlan(principalId, sessionId) {
       // 按 append 顺序倒序扫本会话事实；Map 插入序即"最近 plan 优先"。
       const rows = db.prepare(
-        'SELECT plan_id, step_index, status FROM task_plan_steps WHERE principal_id = ? AND session_id = ? ORDER BY fact_seq DESC',
-      ).all(principalId, sessionId) as Array<Pick<TaskPlanStepRow, 'plan_id' | 'step_index' | 'status'>>;
-      const plans = new Map<string, { started: Set<number>; closed: Set<number> }>();
+        'SELECT plan_id, step_index, status, total_steps FROM task_plan_steps WHERE principal_id = ? AND session_id = ? ORDER BY fact_seq DESC',
+      ).all(principalId, sessionId) as Array<Pick<TaskPlanStepRow, 'plan_id' | 'step_index' | 'status' | 'total_steps'>>;
+      const plans = new Map<string, { maxStep: number; totalSteps: number }>();
       for (const row of rows) {
         let entry = plans.get(row.plan_id);
         if (!entry) {
-          entry = { started: new Set<number>(), closed: new Set<number>() };
+          entry = { maxStep: 0, totalSteps: 0 };
           plans.set(row.plan_id, entry);
         }
-        if (row.status === 'started') entry.started.add(row.step_index);
-        else entry.closed.add(row.step_index);
+        entry.maxStep = Math.max(entry.maxStep, row.step_index);
+        entry.totalSteps = Math.max(entry.totalSteps, row.total_steps);
       }
       for (const [planId, entry] of plans) {
-        // 悬挂 = 该 index 有过 started，且从没有终态（done/failed/needs）事实。
-        if ([...entry.started].some((stepIndex) => !entry.closed.has(stepIndex))) return planId;
+        // 未完成 = 已记录的步号还没接满总步数（拆解被中断在步间）。悬挂步（started 无终态）
+        // 是它的子集——步 2 停在确认门时 maxStep=2 < totalSteps，同样判未完成。
+        // 全部步都有终态且步号接满 → 已完成，不再续跑（确认门步骤不写终态也不会让计划
+        // 永远开着：maxStep 接满即关闭，投影里它恒为 started 只是显示问题）。
+        if (entry.maxStep < entry.totalSteps) return planId;
       }
       return null;
     },

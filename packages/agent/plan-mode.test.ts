@@ -66,15 +66,16 @@ class FakeTaskPlanRepo implements TaskPlanRepo {
   }
 
   async latestOpenPlan(_principalId: string, _sessionId: string): Promise<string | null> {
-    const plans = new Map<string, { started: Set<number>; closed: Set<number> }>();
+    // 与 SQLite 实现同语义：未完成 = 已记录步号未接满总步数（中断在步间）。
+    const plans = new Map<string, { maxStep: number; totalSteps: number }>();
     for (const fact of [...this.facts].reverse()) {
       let entry = plans.get(fact.planId);
-      if (!entry) { entry = { started: new Set(), closed: new Set() }; plans.set(fact.planId, entry); }
-      if (fact.status === 'started') entry.started.add(fact.stepIndex);
-      else entry.closed.add(fact.stepIndex);
+      if (!entry) { entry = { maxStep: 0, totalSteps: 0 }; plans.set(fact.planId, entry); }
+      entry.maxStep = Math.max(entry.maxStep, fact.stepIndex);
+      entry.totalSteps = Math.max(entry.totalSteps, fact.totalSteps);
     }
     for (const [planId, entry] of plans) {
-      if ([...entry.started].some((stepIndex) => !entry.closed.has(stepIndex))) return planId;
+      if (entry.maxStep < entry.totalSteps) return planId;
     }
     return null;
   }

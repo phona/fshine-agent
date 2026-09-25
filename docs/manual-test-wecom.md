@@ -107,7 +107,7 @@ npm test -- tests/e2e/turn-loop
 
 ### 8.2 手工用例 → 自动化用例映射
 
-自动化用例按主题拆在七个文件里（共享替身 `tests/e2e/harness.ts`）：
+自动化用例按主题拆在八个文件里（共享替身 `tests/e2e/harness.ts`）：
 
 | 文件 | 覆盖 |
 |---|---|
@@ -118,6 +118,7 @@ npm test -- tests/e2e/turn-loop
 | `turn-loop-needs.test.ts` | Subagent 报错回路（缺信息 → 转达用户 → 续跑原任务 / 自己补充分支 / 回路不是凭证） |
 | `turn-loop-plan-steps.test.ts` | 长任务拆解（多步派单、同任务续跑、任一步失败不阻塞、通知带「第 N/M 步」） |
 | `turn-loop-interleaved.test.ts` | 多任务交织后按 continueTaskId 回到旧任务、召回走对话零调用而重查才委派、探索型请求先澄清、平台没有的能力如实说明边界 |
+| `turn-loop-concurrent.test.ts` | 并发会话里的多步计划：跨回合中断/恢复、计划中插入探索轮不污染投影、用户跳过失败步、计划步骤撞用户确认门后的去留（characterization） |
 
 | 手工用例 | 自动化用例（文件名 > 用例名） |
 |---|---|
@@ -143,6 +144,10 @@ npm test -- tests/e2e/turn-loop
 | 1.3 召回不重查 | `turn-loop-interleaved.test.ts` > `1.3 召回旧结果走对话零平台调用，"再查一次"才重新委派` |
 | 1.6 探索型澄清 | `turn-loop-interleaved.test.ts` > `1.6 目标不明的探索请求先澄清，用户补齐账套和期间后才委派` |
 | 4.4 能力边界诚实 | `turn-loop-interleaved.test.ts` > `4.4 平台没有的分析能力如实说明边界，不编造任何金额` |
+| 2.9 计划被打断后续跑 | `turn-loop-concurrent.test.ts` > `7.1 多步计划被打断后跨回合恢复：同任务续跑、步号接得上、账本跨回合累计`（跨回合经 `latestOpenPlan` 接回同一 planId，`task_plan_resumed` 打点，投影不裂） |
+| 2.9 计划中插入探索 | `turn-loop-concurrent.test.ts` > `7.2 计划进行中插入探索轮：零调用澄清、探索落地点是新任务、不污染计划投影` |
+| 2.9 跳过失败步 | `turn-loop-concurrent.test.ts` > `7.3 用户跳过失败步：真执行真失败的步骤在宿主账本里是 done，成败由汇总如实呈现` |
+| 2.7 确认门后的去留 | `turn-loop-concurrent.test.ts` > `7.4（characterization）计划步骤撞用户确认门：该步等确认后由宿主续跑，剩余步骤不自动继续`（characterization：确认只续该步，剩余步骤要用户再说"继续"；且累计重量越高，后续每一步都会再撞一次确认门） |
 
 ### 8.3 仍需人工的部分
 
