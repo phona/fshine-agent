@@ -8,6 +8,10 @@
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts [--only A1,B2]
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts --quick
  *
+ * 注意：若从 StepCode（step）进程衍生的 shell 里跑，harness 自带的 LLM_* 环境变量会
+ * 压过 --env-file（Node 不覆盖已存在变量），静默用到 harness 的模型而不是 .env 的。
+ * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
+ *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 25 分钟。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
  *

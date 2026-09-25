@@ -194,7 +194,8 @@ Phase 0 测试并行化        （不动架构，纯提速）
 - e2e 6.1「核对 3 个账套」全链：三次委派、后两步 taskId 与第一步相同、汇总含三个账套结果且**如实包含第 2 步的失败**（平台 not_found）、`sdk.noticeTexts()` 含"第 1/3 步"、账本调用数跨步累积（3+1+1）✓
 - e2e 6.2 任一步失败不阻塞：第 2 步回报 needs → Main Agent 不卡住，继续第 3 步并在汇总如实报告缺信息 ✓
 - `npm test` 372 全绿（+20）、typecheck 0 错误；业务词 grep 仍 4 处、零新增 ✓
-- **真实模型验证（部分）**：探针 `--quick` 在 Phase 6 全栈下与基线一致（A1 重查/A4 只搜目录/A5 零调用，A2/B1 为已记录项）✓；D1/D2 长任务场景的复验被 **Kimi API 每周配额耗尽（403）**阻断——首轮 D1 出现 worker 空转 5 分钟后 executor_error，已由收敛上限（同任务计划被拒 >5 次即 PLAN STOP，C21a）兜底；提示词侧补了"M 未知/范围不可溯源"的退路规程。**配额恢复后需重跑 `--only D1,D2`**（见 `rule-landing.md` §8 验证缺口）
+- **真实模型验证（完成）**：D1/D2 已复跑通过（`--only D1,D2` 2/2 ✓）——D1 的 worker 在 1、2 月后被包含校验连续拒绝，收敛上限（PLAN STOP）触发，worker 如实报告"只取到 1、2 月、3–9 月未查询、原因与建议"，通知正常；D2 按 skill 的"M 未知先枚举候选"走目录搜索并明确结论"平台没有列出全部账套的接口"、向用户索要关键词。最终 `--quick` 与基线同构：A1 重查/A4 只搜目录/A5 零调用 ✓，A2 为已记录模型侧观察项（新话题沿用上一轮实体，worker 如实带出来源行），B1 的 ⚠ 为探针把"0"与"0.00"措辞差异当口径不一致的已知误报（五轮数据实际一致）
+- **模型已切换**：`LLM_*` 现指向 StepFun step_plan 网关的 `step-5-preview`（上述探针均在新模型下完成；新模型单轮明显慢于 Kimi，B1 五轮 ~9 分钟）
 
 ---
 
@@ -225,6 +226,8 @@ Phase 0 测试并行化        （不动架构，纯提速）
 | 里程碑（Phase 4、6 完成） | 探针全量 | — |
 
 **探针本身的能力**：`scripts/probe-real-agent.ts`，真实 LLM + 真 `bin/17dz` + mock 执行器，`--only` 选用例、`--quick` 快速子集。
+
+**从 StepCode 环境跑探针的坑**：harness 进程自带 `LLM_*` 环境变量（指向它自己用的模型），Node `--env-file` 不覆盖已存在变量——直接跑会静默用 harness 的配置而不是 `.env`。正确姿势：`env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL node --env-file=.env --import tsx scripts/probe-real-agent.ts …`。
 
 ---
 
