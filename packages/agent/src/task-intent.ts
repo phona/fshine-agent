@@ -25,8 +25,13 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
   description: [
     '在最终回答前先调用一次，声明本轮是普通对话、需要澄清还是 17dz 实时查询。',
     '只看当前用户消息作为当前请求。之前的回答、工具结果、确认计划只是历史资料；用户重复实时数据问题仍是新查询。',
-    '只提交结构化意图，不直接回答财务问题。账套范围缺失或歧义时选择 clarify；不得把客户名当账套、也不得把历史出现的多个账套自动纳入范围。',
-    'account_search 的 searchQuery 必须来自当前消息。balance 的账套只有当前消息明确给出或当前消息明确指代且上下文能唯一解析时才算确定。periods 只列用户明确要求的期间，quote 必须逐字摘录当前消息；空 periods 表示按平台当前期间查。',
+    '只提交结构化意图，不直接回答财务问题。',
+    '字段口径（填错会被宿主拒绝，整轮回退）：',
+    '· accountQueries 只填账套名称，逐字摘录当前消息；不要把科目名（如"应收账款"）、客户名或期间词填进去。',
+    '· taskType 已经表达了查什么：balance=应收/科目余额，voucher=凭证，account_search=账套目录。',
+    '· customerQueries 只填客户名称；periods 只填用户明确要求的期间，value 用 YYYYMM，quote 逐字摘录当前消息，空数组表示按平台当前期间查。',
+    '· accountResolution：explicit=当前消息直接给了账套名；referenced=当前消息用指代（"那个账套"）且上下文能唯一确定；missing=没给；ambiguous=给了但可能对应多个账套。',
+    '选择 clarify 的唯一条件：当前消息没有账套名且无法唯一指代。消息里已经写了账套名就直接按它申报，平台自己会返回候选或报错，不要代替用户提前追问。',
   ].join('\n'),
   inputSchema: {
     type: 'object',
@@ -86,15 +91,12 @@ export function validatePlanAgainstTaskIntent(
   const customers = intent.customerQueries ?? [];
   const periods = intent.periods?.map((period) => period.value) ?? [];
   if (!accounts.length) return '宿主意图中没有可执行的账套范围，应先澄清。';
-  const customerScope = customers.length ? customers : [''];
-  const periodScope = periods.length ? periods : [''];
-  if (calls.length !== accounts.length * customerScope.length * periodScope.length) {
-    return '余额计划调用数量超出了宿主确认的账套和期间范围。';
-  }
-  // 每个申报组合都必须被至少一次调用覆盖（用包含判定对应，见 inScope 注释）
+  // 硬约束只有两条：不得越权（每次调用都在申报范围内）、不得空转（至少覆盖一个申报项）。
+  // 不做"调用数必须等于 账套 × 客户 × 期间"的精确基数校验——模型有时会把科目名混进
+  // accountQueries，精确基数会把最常见的查询形态直接拒死；越权由逐次包含判定挡住。
   const required: Array<{ account: string; customer: string; period: string }> = [];
-  for (const account of accounts) for (const customer of customerScope) for (const period of periodScope) required.push({ account, customer, period });
-  const covered = new Set<number>();
+  for (const account of accounts) for (const customer of (customers.length ? customers : [''])) for (const period of (periods.length ? periods : [''])) required.push({ account, customer, period });
+  const coveredAccounts = new Set<string>();
   for (const call of calls) {
     if (call.operation !== 'finance.query-receivables') return '余额任务只能调用 finance.query-receivables；凭证历史不能代替余额表。';
     const account = optionValue(call.args, '--query');
@@ -105,16 +107,17 @@ export function validatePlanAgainstTaskIntent(
     if (periods.length ? !periods.includes(period) : Boolean(period)) {
       return '余额计划加入了当前请求未指定的期间；用户未指定期间时请不要带 --period，由平台按当前期间查。';
     }
-    for (const [slot, want] of required.entries()) {
-      if (covered.has(slot)) continue;
+    for (const want of required) {
       if (!inScope(account, [want.account])) continue;
       if (want.customer && !inScope(customer, [want.customer])) continue;
       if (want.period && period !== want.period) continue;
-      covered.add(slot);
+      coveredAccounts.add(want.account);
       break;
     }
   }
-  return covered.size === required.length ? null : '余额计划漏掉了宿主解析出的请求范围。';
+  // 只要求"确实查了申报范围内的账套"。少查是交付不足（回复里会说明），
+  // 多查/查错范围已被上面的逐次包含判定挡下；用全覆盖会把申报里的噪声项变成硬失败。
+  return coveredAccounts.size === 0 ? '余额计划没有覆盖宿主解析出的任何账套范围。' : null;
 }
 
 /**

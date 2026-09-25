@@ -61,16 +61,27 @@ describe('semantic task intent router', () => {
     ])).toContain('账套');
   });
 
-  it('多查一个账套仍被调用数量校验挡下', () => {
+  it('夹带申报范围外的账套被逐次包含判定挡下', () => {
     const intent: TaskIntent = {
       kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
       accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [{ value: '202609', quote: '九月' }],
     };
-    // 申报 1 账套 × 1 客户 × 1 期间 = 1 次调用；提交 2 次就说明夹带了别的范围
+    // 第二个调用夹带了"新兴五金"——不在申报范围内，逐次校验直接拒
     expect(validatePlanAgainstTaskIntent(intent, [
       { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--customer', '猫一杯', '--period', '202609'] },
       { operation: 'finance.query-receivables', args: ['--query', '新兴五金', '--customer', '猫一杯', '--period', '202609'] },
-    ])).toContain('数量');
+    ])).toContain('账套');
+  });
+
+  it('申报里混入科目名时不阻断执行（精确基数校验会把它拒死）', () => {
+    // 真实模型会把"应收账款"填进 accountQueries；按 账套 × 客户 × 期间 算基数就对不上。
+    const intent: TaskIntent = {
+      kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit',
+      accountQueries: ['幻辰财税', '应收账款'],
+    };
+    expect(validatePlanAgainstTaskIntent(intent, [
+      { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
+    ])).toBeNull();
   });
 
   it('binds a voucher plan to the voucher domain and the periods the request named', () => {
