@@ -1,88 +1,132 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { parseTurnDeclaration, validatePlanEntities, validateTurnDeclarationEvidence, type TurnDeclaration } from './src/turn-contract';
+import {
+  ROUTE_CURRENT_TURN_TOOL,
+  isSelfContradictoryDeclaration,
+  parseTurnDeclaration,
+  reviewRouteDeclaration,
+  validatePlanEntities,
+} from './src/turn-contract';
 
-describe('semantic task intent router', () => {
-  it('treats a repeated live-data request as fresh and asks for a missing account', () => {
-    const current = '帮我查一下猫一杯的应收账款还有多少';
-    const oldMessages = [
-      { role: 'assistant', content: '旧回答：请确认继续查询幻东和幻辰九个月的凭证。', timestamp: 1 },
-      { role: 'user', content: current, timestamp: 2 },
-    ] as never[];
-    const intent = parseTurnDeclaration(JSON.stringify({ kind: 'platform_query', taskType: 'balance', accountResolution: 'missing', accountQueries: [], question: '要查哪个账套？' }));
-    expect(intent).not.toBeNull();
-    expect(validateTurnDeclarationEvidence(intent!, current, oldMessages)).toEqual({ kind: 'clarify', question: '要查哪个账套？' });
+/** 申报契约（架构 §4）：三个字段，零业务知识。 */
+describe('申报契约：route_current_turn 三字段', () => {
+  it('解析 conversation 申报', () => {
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'conversation' }))).toEqual({ kind: 'conversation' });
   });
 
-  it('accepts a uniquely identified account from a clear current reference', () => {
-    const current = '用刚才那个账套，查猫一杯的应收';
-    const intent = parseTurnDeclaration(JSON.stringify({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '刚才那个账套' }));
-    expect(intent).not.toBeNull();
-    expect(validateTurnDeclarationEvidence(intent!, current, [
-      { role: 'user', content: '查一下幻辰财税的应收', timestamp: 1 },
-      { role: 'assistant', content: '刚才查的是幻辰财税账套。', timestamp: 2 },
-      { role: 'user', content: current, timestamp: 3 },
-    ] as never[]))
-      .toMatchObject({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻辰财税'] });
+  it('解析 delegate 申报：request 必填，continueTaskId 可选', () => {
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '查询新兴五金账套 202608 的应收余额' })))
+      .toEqual({ kind: 'delegate', request: '查询新兴五金账套 202608 的应收余额' });
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '继续上一个任务', continueTaskId: 'task_1' })))
+      .toEqual({ kind: 'delegate', request: '继续上一个任务', continueTaskId: 'task_1' });
+    // continueTaskId 首尾空白去掉；空串视为没填
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '继续', continueTaskId: ' task_1 ' })))
+      .toEqual({ kind: 'delegate', request: '继续', continueTaskId: 'task_1' });
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '继续', continueTaskId: '   ' }))).toBeNull();
   });
 
-  it('指代校验只看上一轮，不把当前消息算进去', () => {
-    const current = '这个账套的凭证有多少张？';
-    const history = [
-      { role: 'user', content: '查一下幻辰财税的应收', timestamp: 1 },
-      { role: 'assistant', content: '幻辰财税 202609 应收余额 86,000 元。', timestamp: 2 },
-      { role: 'user', content: current, timestamp: 3 },
-    ] as never[];
-    // 上一轮只有幻辰财税；申报一个只在更早上下文出现过的账套 → 拒绝
-    expect(validateTurnDeclarationEvidence(
-      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['新兴五金'], referenceQuote: '这个账套' },
-      current, history,
-    )).toMatchObject({ kind: 'clarify' });
-    expect(validateTurnDeclarationEvidence(
-      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '这个账套' },
-      current, history,
-    )).toMatchObject({ kind: 'platform_query' });
+  it('delegate 缺 request、request 为空或非字符串时解析失败', () => {
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: '   ' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: 42 }))).toBeNull();
   });
 
-  it('指代只绑定紧邻的那一轮，不拿上下文里顺带提过的账套顶替', () => {
-    const current = '这个账套 202609 的凭证有多少张？';
-    const history = [
-      { role: 'user', content: '刚才查的是哪个账套？', timestamp: 1 },
-      { role: 'assistant', content: '刚才上下文里提到的是「新兴建材」这个账套。', timestamp: 2 },
-      { role: 'user', content: '帮我查一下幻辰财税的应收账款', timestamp: 3 },
-      { role: 'assistant', content: '幻辰财税 202609 应收余额为 86,000 元。', timestamp: 4 },
-    ] as never[];
-    // 上一轮是幻辰财税：解析成它 → 放行
-    expect(validateTurnDeclarationEvidence(
-      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['幻辰财税'], referenceQuote: '这个账套' },
-      current, history,
-    )).toMatchObject({ kind: 'platform_query' });
-    // 解析成更早提过的新兴建材 → 拒绝（这正是实测中的漂移）
-    expect(validateTurnDeclarationEvidence(
-      { kind: 'platform_query', taskType: 'voucher', accountResolution: 'referenced', accountQueries: ['新兴建材'], referenceQuote: '这个账套' },
-      current, history,
-    )).toMatchObject({ kind: 'clarify' });
+  it('kind 缺失或不在枚举内时解析失败（clarify 种类已取消）', () => {
+    expect(parseTurnDeclaration(JSON.stringify({}))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'typo', request: '查询' }))).toBeNull();
+    // 取消的 kind：需要澄清/说明能力边界时申报 conversation，模型文本即回复
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'clarify', question: '要查哪个账套？' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'conversation', question: '要查哪个账套？' }))).toBeNull();
   });
 
-  it('rejects a referenced account that cannot be evidenced in context', () => {
-    const current = '用刚才那个账套，查猫一杯的应收';
-    const intent = parseTurnDeclaration(JSON.stringify({ kind: 'platform_query', taskType: 'balance', accountResolution: 'referenced', accountQueries: ['幻东公司'], referenceQuote: '刚才那个账套' }));
-    expect(intent).not.toBeNull();
-    expect(validateTurnDeclarationEvidence(intent!, current, [{ role: 'assistant', content: '刚才提到幻辰财税。', timestamp: 1 }, { role: 'user', content: current, timestamp: 2 }] as never[]))
-      .toMatchObject({ kind: 'clarify' });
+  it('conversation 申报多一个字段就拒收：这一枝只有 kind', () => {
+    // 旧契约的业务字段与任何未知键都意味着"另一份契约"（schema additionalProperties:false 同语义）
+    for (const extra of ['question', 'periods', 'taskId', 'accountSet'] as const) {
+      expect(parseTurnDeclaration(JSON.stringify({ kind: 'conversation', [extra]: 'x' }))).toBeNull();
+    }
   });
 
-  it('requires the account-search keyword to come from the current request', () => {
-    const intent = parseTurnDeclaration(JSON.stringify({ kind: 'platform_query', taskType: 'account_search', searchQuery: '胜利' } satisfies TurnDeclaration));
-    expect(intent).not.toBeNull();
-    expect(validateTurnDeclarationEvidence(intent!, '只查有没有这个账套', [{ role: 'user', content: '只查有没有这个账套', timestamp: 1 }] as never[]))
-      .toMatchObject({ kind: 'clarify' });
+  it('delegate 申报只认三个字段，未知字段被归一掉', () => {
+    // 宿主只据 kind/request/continueTaskId 行动：未知键没有语义，归一后丢弃，
+    // 不会变成委派参数或范围依据（范围守卫在计划层 validatePlanEntities）。
+    expect(parseTurnDeclaration(JSON.stringify({
+      kind: 'delegate', request: '查询新兴五金账套的应收余额', question: '要查哪个账套？', periods: [{ value: '202608', quote: '202608' }],
+    }))).toEqual({ kind: 'delegate', request: '查询新兴五金账套的应收余额' });
+    expect(reviewRouteDeclaration({ kind: 'delegate', request: '查询新兴五金账套的应收余额', taskId: 'task_1' }))
+      .toEqual({ intent: { kind: 'delegate', request: '查询新兴五金账套的应收余额' } });
   });
 
-  it('fails closed when the Main Agent does not return the intent contract', () => {
-    expect(parseTurnDeclaration('我觉得上次的结果可以沿用。')).toBeNull();
+  it('非 JSON、非对象、数组都解析失败', () => {
+    expect(parseTurnDeclaration('我觉得可以直接回答。')).toBeNull();
+    expect(parseTurnDeclaration('```json\n{"kind":"conversation"}\n```')).toEqual({ kind: 'conversation' });
+    expect(parseTurnDeclaration('[{"kind":"conversation"}]')).toBeNull();
+    expect(parseTurnDeclaration('null')).toBeNull();
+    expect(parseTurnDeclaration('"conversation"')).toBeNull();
   });
 
-  it('计划实体来源校验：实体逐字来自当前消息即放行', () => {
+  it('自相矛盾申报只有一种：delegate 的 request 为空', () => {
+    // 契约瘦身后唯一的结构性矛盾：声称委派却不给加工后的请求
+    expect(isSelfContradictoryDeclaration({ kind: 'delegate', request: '' })).toContain('request');
+    expect(isSelfContradictoryDeclaration({ kind: 'delegate', request: '   ' })).toContain('request');
+    expect(isSelfContradictoryDeclaration({ kind: 'delegate', request: '查询新兴五金账套的应收余额' })).toBeNull();
+    // conversation 申报没有可矛盾的字段
+    expect(isSelfContradictoryDeclaration({ kind: 'conversation' })).toBeNull();
+  });
+
+  it('reviewRouteDeclaration：合法申报直接放行，结构错误原样退回', () => {
+    expect(reviewRouteDeclaration({ kind: 'conversation' })).toEqual({ intent: { kind: 'conversation' } });
+    expect(reviewRouteDeclaration({ kind: 'delegate', request: '查询新兴五金账套 202608 的应收余额' }))
+      .toEqual({ intent: { kind: 'delegate', request: '查询新兴五金账套 202608 的应收余额' } });
+
+    // 单参数入口：宿主只做结构校验，不再拿申报字段与当前消息做证据比对
+    for (const bad of [
+      { kind: 'delegate' },
+      { kind: 'delegate', request: '  ' },
+      {},
+      { kind: 'delegate', request: '查询', continueTaskId: '' },
+    ]) {
+      const reviewed = reviewRouteDeclaration(bad);
+      expect('error' in reviewed).toBe(true);
+      if ('error' in reviewed) expect(reviewed.error.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('工具 schema 恰好三个属性：kind / request / continueTaskId', () => {
+    const schema = ROUTE_CURRENT_TURN_TOOL.inputSchema;
+    const properties = schema.properties as Record<string, { enum?: string[] }>;
+    expect(Object.keys(properties).sort()).toEqual(['continueTaskId', 'kind', 'request']);
+    expect(Object.keys(properties)).toHaveLength(3);
+    expect(properties['kind']?.enum).toEqual(['conversation', 'delegate']);
+    // 入口就挡掉多余字段；parse 那一侧的归一只是兜底
+    expect(schema.additionalProperties).toBe(false);
+    expect(ROUTE_CURRENT_TURN_TOOL.name).toBe('route_current_turn');
+  });
+
+  it('工具描述与契约源码全文无业务词（编排层零业务知识）', () => {
+    const business = /应收|凭证|科目|账套|期间/u;
+    expect(ROUTE_CURRENT_TURN_TOOL.description).not.toMatch(business);
+    const source = readFileSync(path.resolve(__dirname, 'src', 'turn-contract.ts'), 'utf8');
+    expect(source).not.toMatch(business);
+  });
+
+  it('request 的加工在模型侧：宿主持有的确定性部分只是"必须非空"', () => {
+    // 加工（指代消解成实体、续跑补任务 id、保留时间范围与筛选）全是模型侧的事，
+    // 契约核心没有对应的可测纯函数；宿主能确定性保证的只有"delegate 必须给出 request"，
+    // 以及"request 原样透传给子 Agent"（后者见 runtime.test.ts 的委派参数断言）。
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate' }))).toBeNull();
+    expect(isSelfContradictoryDeclaration({ kind: 'delegate', request: '' })).toContain('request');
+  });
+});
+
+/**
+ * 计划实体来源校验（架构 §2 第 9 条，领域无关）：Phase 3 落地，与申报契约瘦身无关，
+ * 契约字段消失后它靠宿主持有的三个来源独立存活。原申报层证据校验（C1/C2）已整体取消，
+ * 实体范围守卫完全由这一层承担。
+ */
+describe('计划实体来源校验：三来源逐字包含', () => {
+  it('实体逐字来自当前消息即放行', () => {
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202608'] }],
       { currentMessage: '查一下幻辰财税账套 202608 的应收' },
@@ -101,7 +145,6 @@ describe('semantic task intent router', () => {
   });
 
   it('检索证据里的实体放行（指代消解的产物就是合法实体）', () => {
-    // referenced 申报把上一轮的名称解析出来，计划按它查——证据是三个合法来源之一。
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻东'] }],
       {
@@ -153,16 +196,14 @@ describe('semantic task intent router', () => {
     )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
   });
 
-  it('taskType 不再影响计划校验：操作与任务类型的匹配归执行层 SKILL 与平台门禁', () => {
-    // Phase 3 起宿主不再做领域判别：同样的 calls 与来源，四种 taskType 判定一致。
+  it('计划校验只看实体来源，与申报契约的字段无关', () => {
+    // 契约瘦身后宿主不再从申报字段推导任何范围：同样的 calls 与来源，判定只由三个来源决定。
     const calls = [
       { operation: 'voucher.query-saved', args: ['幻辰财税', '202608'] },
       { operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] },
     ];
-    for (const taskType of ['account_search', 'balance', 'voucher', 'other'] as const) {
-      expect(validatePlanEntities(calls, { currentMessage: '查一下幻辰财税 202608' })).toBeNull();
-    }
-    // account_search 也不再被强制"只能一次 search 调用"
+    expect(validatePlanEntities(calls, { currentMessage: '查一下幻辰财税 202608' })).toBeNull();
+    // 目录查询与后续查询混排也不再被强制"只能一次 search 调用"
     expect(validatePlanEntities(
       [
         { operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] },

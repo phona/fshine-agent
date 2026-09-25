@@ -64,7 +64,7 @@ describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
       run: async (input) => {
         expect(input.tools.map((tool) => tool.name)).toEqual(['route_current_turn']);
         try {
-          await input.exec('route_current_turn', { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰'] });
+          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻辰的应收账款余额' });
         } catch (error) {
           if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
           throw error;

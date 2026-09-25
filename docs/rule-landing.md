@@ -14,10 +14,10 @@
 
 | # | 规则 | 落点 |
 |---|---|---|
-| C1 | 申报的实体（账套/客户/期间/搜索词）必须逐字来自当前消息；explicit 账套不在当前消息里 → 降级澄清 | `packages/agent/src/turn-contract.ts` `validateTurnDeclarationEvidence` |
-| C2 | referenced 指代必须绑定紧邻上一轮（单账套 + 指代原词在上一轮出现） | 同上，`referenced` 分支 |
-| C3 | 自相矛盾申报（explicit 却不填账套、account_search 无关键词）退回模型重填，不消耗用户澄清轮次 | `turn-contract.ts` `isSelfContradictoryDeclaration` + `runtime.ts` 路由处 |
-| C4 | 申报 platform_query 但零执行（无激活计划、无平台调用、无待确认计划）→ 不外发财务结论 | `packages/agent/src/runtime.ts` 出口校验（`platform_query_without_execution`） |
+| C1 | （Phase 4 起删除）申报层实体证据校验随契约瘦身取消——实体范围守卫完全后移到计划层 C20；申报层只剩结构校验（C3） | 历史落点 `validateTurnDeclarationEvidence` 已删除；现由 C20 全权负责 |
+| C2 | （Phase 4 起删除）referenced 分支随 8 字段契约取消。指代消解改为：宿主申报前注入证据（C18）→ 模型把实体加工进 request → 计划层 C20 逐字校验实体来源 | 现由 C18+C20 组合保证 |
+| C3 | 自相矛盾申报退回模型重填，不消耗用户澄清轮次。Phase 4 后唯一检查：delegate 的 request 必须非空（把用户请求加工成自包含的一句话） | `turn-contract.ts` `isSelfContradictoryDeclaration` + `runtime.ts` 路由处 |
+| C4 | 申报 platform_query 但零执行（无激活计划、无平台调用、无待确认计划）→ 不外发财务结论 | `packages/agent/src/runtime.ts` 出口校验（`delegate_without_execution`） |
 | C5 | Main Agent 跳过申报 → 重试一次，仍跳过则失败关闭，丢弃自由文本 | `runtime.ts`（`route_declaration_missing`） |
 | C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 17dz-query SKILL.md） |
 | C7 | ~~余额计划只能调 `finance.query-receivables`；不得夹带凭证查询~~ → 同上（操作匹配归执行层；实体越权仍由 C20 挡下） | 同 C6 |
@@ -60,12 +60,12 @@
 |---|---|---|
 | 1 | 当前日期注入 | 无（动态事实） |
 | 2 | 身份：企业财务助手 / 主 Agent | 提示词（框架） |
-| 3 | 每回合先申报 `route_current_turn`，字段口径以工具说明为准 | 提示词（协议）；细则在工具描述 |
-| 4 | 委派机制 + 不得凭历史编造 / 不得重放旧答复 | 提示词（原则）；执行由 C1/C4 保证 |
+| 3 | 每回合先申报 `route_current_turn`（conversation / delegate），字段口径以工具说明为准 | 提示词（协议）；细则在工具描述（3 字段契约） |
+| 4 | delegate 委派机制 + request 加工要求（指代解析成实体、实体只从当前消息或宿主注入的检索证据取）+ 不得凭历史或常识编造实体 / 不得重放旧答复 | 提示词（原则）；执行由 C4 保证；实体越权由 C20 挡下 |
 | 5 | 内部机制不外泄（route_current_turn/宿主/委派/PLAN/taskId 等字样） | 提示词（原则）；注脚泄漏另由 C16 兜底 |
 | 6 | 能力边界：查询/核对/分析 + 经确认的录入类写；修改或删除已保存数据、不可逆高危写一律拒绝 | 提示词（产品能力，Phase 3 改为领域无关表述，能力边界本身不变） |
 | 7 | 待确认变更提案转达协议（对象/范围/条目数/金额合计/确认码 + 确认取消话术，不代替执行） | 提示词（协议）；执行由 C13 保证 |
-| 8 | 口径必须可履行，不可履行选 clarify | 提示词（原则） |
+| 8 | 口径必须可履行，不可履行选 conversation 回复并说明能力边界（clarify 种类已随契约取消） | 提示词（原则） |
 | 9 | Context State / history tools / 长期记忆只是历史资料 | 提示词（原则）；注入侧限定见 C17 |
 | 10 | 简体中文；数据结论保留对象、范围、来源和证据 | 提示词（呈现，Phase 3 去掉领域词） |
 
@@ -74,6 +74,8 @@
 已删（Phase 2）：指代两种情况规则（原 173 字符）——指代消解改由宿主主动回溯提供证据（C18），模型侧只保留工具描述的 referenced 字段口径。
 
 已改（Phase 3）：条目 6/7 的业务枚举改为领域无关表述（能力边界与确认码转达协议原样保留，只是不再点名具体业务动作）；条目 10 的"账套、期间"改为"对象、范围"。同轮中和的还有 `NO_EXECUTION_CLARIFICATION`、长期记忆注入尾句、`RUN_17DZ_TASK_DESCRIPTION` 的"不得猜测平台 ID"一句。
+
+已改（Phase 4）：条目 3 的 kinds 改（conversation / delegate）；条目 4 改为 delegate 委派 + request 加工四项要求；条目 8 的 clarify 改 conversation。申报层证据校验（C1/C2）整体删除，实体范围守卫完全靠计划层 C20；"用户另起新话题不得沿用上一轮实体"以原则句落在工具描述的 request 加工节（原 C1 的 explicit 分支曾结构性盖住，见 §6）。
 
 ### 3.2 workerSystemPrompt（17dz 子 Agent，`packages/agent/src/context.ts`）
 
@@ -84,7 +86,7 @@
 | 3 | 先读 SKILL/MECHANISMS 再调脚本；数据必须来自脚本结果 | 提示词（机制） |
 | 4 | 按平台 SKILL 与 operation 文档声明的能力边界执行；超边界直接如实报告 | 提示词（能力边界，Phase 3 下沉：细则归 17dz SKILL.md）；执行由 C13 保证 |
 | 5 | 计划协议：先提交 plan JSON，PLAN ACTIVE 后才能查询；DECLINED 重提 / NEEDS_USER_CONFIRM 收手 / STOP 说明原因 | 提示词（协议）；门禁裁决由 C10–C12 保证 |
-| 6 | 宿主已核验的申报范围（turnDeclaration 注入） | 宿主可信上下文 |
+| 6 | 宿主已核验的本轮请求（turnDeclaration.request 注入，不再序列化 JSON） | 宿主可信上下文 |
 | 7 | 知识只经 read 读固定知识面 | 提示词（机制）；阻断由 C15 保证 |
 | 8 | 应用层授权名单（allowedAccountSetIds） | 宿主可信上下文（Phase 3 去掉领域词） |
 | 9 | 缺信息直接问用户；完成给结论/数据/来源 | 提示词（原则） |
@@ -100,7 +102,7 @@
 
 - **Phase 2（已完成）**：指代规则整条删除；宿主申报前经 `reference-evidence.ts` 注入检索证据（C18）；`route_reference_hint` 与 `looksLikeReference` 已删除。
 - **Phase 3（已完成）**：`validatePlanAgainstTurnDeclaration` 的 balance/voucher/account_search 三分支换成领域无关的 `validatePlanEntities`（C20）；两个提示词的业务条目改为领域无关表述；`ROUTE_CURRENT_TURN_TOOL.description` 的领域判别教学移除；`reference-evidence.ts` 注入材料与进度/压缩提示词同步中和。宿主不再做领域判别，操作与任务类型的匹配归执行层 SKILL 与平台门禁。
-- **Phase 4**：`ROUTE_CURRENT_TURN_TOOL` 8 字段 → 3 字段，字段口径细则随契约重写；C1/C2/C3 与申报契约一并收缩，范围守卫完全靠 C20。
+- **Phase 4（已完成）**：`ROUTE_CURRENT_TURN_TOOL` 8 字段 → 3 字段（kind/request/continueTaskId，schema 属性数=3）；`validateTurnDeclarationEvidence`/`previousTurnText`/`applyRouteDeclaration`/clarify 种类全部删除；委派 request 用加工后的 `intent.request`（原始消息只留在 `entitySources.currentMessage`）；申报层只剩结构校验，范围守卫完全靠 C20。
 
 ## 5. Phase 3 验收 grep 的剩余命中（为什么允许）
 
@@ -112,3 +114,12 @@
 | `context-extractor.ts` `hasContradiction` 的 oppositeTerms | "更多期间 / 当前期间"等反义词表 | 代码断言（短期上下文矛盾检测的词表） |
 
 申报契约（C1）explicit 分支的澄清话术原也含领域词且被 `tests/e2e` 1.6/5.4 逐字断言，验收时已一并中和为"请直接告诉我要查询的对象；我不能从旧对话补入范围"，e2e 断言同步改为 `toContain('对象')`（测试名保留手工用例编号）——规则文案现已清零。
+## 6. Phase 4 验收记录：新话题实体沿用（模型侧失效）
+
+**现象**（探针 `--quick` A2）：用户新话题「帮我查一下猫一杯的应收账款还有多少」，Main Agent 把上一轮的账套实体顺带加工进 request（"在幻辰财税里查猫一杯"），worker 先目录搜到该账套（平台响应含该实体）再查客户 → C20 全部放行，回复带上了旧账套。
+
+**根因**：Phase 4 删除申报层实体校验（C1）后，"新话题不得沿用旧实体"失去结构性防线；C20 挡不住它——worker 的目录搜索响应会让该实体变成"平台解析出来的合法实体"。这是"实体只从当前消息/证据取"原则的模型侧违反，不是宿主契约漏洞。
+
+**审计证据**（复刻探针保留 stateDir 后查 17dz audit.jsonl）：渗入轮的 worker 调用是 `query-receivables --query 幻辰财税`——即 Main Agent 把上一轮实体加工进了 request，宿主不再拦截（C1 已删），worker 的目录搜索响应又让该实体成为 C20 的合法"平台响应"来源。宿主契约无洞：C20 正确校验了实体**来源**，但按设计无法区分"解析用户的指代"与"沿用上一轮实体"——后者是 request 加工质量，归模型。
+
+**处置与实测**：工具描述 request 加工节补原则句"用户另起新话题（新的查询对象）时，不得把上一轮的实体顺带沿用"（一行原则，非场景枚举——Phase 1 原则 3）。复测结果为**偶发**：同一代码下两次 A2，一次仍渗入（模型把幻辰加工进 request），一次worker 直接 `--query 猫一杯` 被平台以 ACCOUNT_SET_NOT_FOUND 拒并如实追问（零渗入）。与历史结论一致：提示词原则降低概率但不根除，归类为**模型侧已知失效**，由 A2/C1 类探针持续观察；若后续要结构性收敛，方向在 Phase 5 纠错环或宿主对 request 的轻量范围锚，不在提示词加规则。

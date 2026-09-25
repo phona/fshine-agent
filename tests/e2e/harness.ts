@@ -128,7 +128,14 @@ class RecordingSdkClient implements SdkClientLike {
 
 // ── 模型替身 ────────────────────────────────────────────────────────────
 
-/** Main Agent：按脚本申报本轮动作；宿主给出的文本经 terminate 成为最终回复。 */
+/**
+ * Main Agent：按脚本申报本轮动作（申报契约：kind / request / continueTaskId）。
+ *
+ * 声明条目可带可选 `text`：申报之后返回的回复文本（缺省为'主 Agent 自由文本：不应外发'）。
+ * conversation 申报后返回的文本就是用户可见回复——模型文本即回复，无需宿主转述；
+ * delegate 申报走 terminate 语义，用户看到的是子 Agent 的文本，这里的 text 不参与外发
+ * （只在申报被宿主退回时用于兜底，见 catch 分支）。
+ */
 function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (input: { messages: unknown[] }) => void) {
   let cursor = 0;
   return {
@@ -141,14 +148,14 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         observe?.(input);
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
-      const declaration = declarations[Math.min(cursor, declarations.length - 1)]!;
+      const { text, ...declaration } = declarations[Math.min(cursor, declarations.length - 1)]!;
       cursor += 1;
       try {
         await input.exec('route_current_turn', declaration);
       } catch (error) {
         return { text: (error as Error).message, messages: input.messages };
       }
-      return { text: '主 Agent 自由文本：不应外发', messages: input.messages };
+      return { text: typeof text === 'string' ? text : '主 Agent 自由文本：不应外发', messages: input.messages };
     },
   };
 }

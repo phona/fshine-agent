@@ -39,8 +39,12 @@ describe('主动回溯：宿主申报前注入指代证据', () => {
     expect(evidence!.text).toContain('eventId=evt_1');
     expect(evidence!.text).toContain('eventId=evt_2');
     expect(evidence!.text).toContain('新兴五金');
-    // 铁律必须写在材料里：证据只用于指代消解，不扩大本轮范围
-    expect(evidence!.text).toContain('不得把材料里其他的实体擅自纳入本轮范围');
+    // 铁律必须写在材料里：证据只用于指代消解（加工 request 时把指代词对应到实体），
+    // 不扩大本轮范围。契约瘦身后材料不再教任何旧契约字段名（"填 XX 字段"那套口径），
+    // 只留边界关键词——用"不得出现带引号的驼峰字段名"断言旧字段教学已清除。
+    expect(evidence!.text).toContain('实体');
+    expect(evidence!.text).toContain('范围');
+    expect(evidence!.text).not.toMatch(/"[a-z][A-Za-z]+":/u);
   });
 
   it('没有指代线索时不检索、不注入', async () => {

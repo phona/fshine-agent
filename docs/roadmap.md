@@ -136,20 +136,26 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 4 — 申报契约瘦身
 
-**目标**：8 字段 → 3 字段，编排层零业务知识。
+**状态：已完成**（三个并行 subagent 实施：契约核心 / 宿主装配 / 全部测试重写，主代理验收）。8 字段 → 3 字段，编排层零业务知识。
 
-**改动**：
-- `route_current_turn` 只保留 `kind`（conversation / delegate）、`request`、`continueTaskId`
-- 删 `taskType` / `accountQueries` / `customerQueries` / `periods` / `accountResolution` / `searchQuery` / `referenceQuote`
-- 范围守卫完全靠 Phase 3 的包含校验
-- `turn-contract.ts` 大幅瘦身；相关单测全部重写
+**改动（实际落地）**：
+- `route_current_turn` 只保留 `kind`（conversation / delegate）、`request`、`continueTaskId`；删 `taskType`/`accountQueries`/`customerQueries`/`periods`/`accountResolution`/`searchQuery`/`referenceQuote`；`clarify` 种类取消（澄清=conversation，模型文本即回复）
+- 删除 `validateTurnDeclarationEvidence`/`previousTurnText`/`applyRouteDeclaration`；申报层只剩结构校验（delegate 的 request 非空）；范围守卫完全靠 Phase 3 的包含校验
+- 委派 request 用加工后的 `intent.request`（指代解析成实体，实体只从当前消息或宿主注入的检索证据取）；原始消息只留在 `entitySources.currentMessage`
+- `turn-contract.ts` 与工具描述重写，零业务词；工具描述新增 request 加工教学（架构 §4 的加工表）
+- 相关单测与 13 个 e2e 用例全部重写；schema 属性数=3 有断言；`manual-test-wecom.md` §8.2 映射同步
 
-**验收**：
-- `turn-contract.ts` 与 `ROUTE_CURRENT_TURN_TOOL.description` 里无任何业务词
-- schema 属性数 = 3
-- `npm test` 全绿；探针 `--quick` 无回归；`--only C1` 指代不劣化
+**验收（按实际达成记录）**：
+- `turn-contract.ts` 与 `ROUTE_CURRENT_TURN_TOOL.description` 无任何业务词 ✓；schema 属性数 = 3 ✓
+- `npm test` 306 全绿、typecheck 0 错误 ✓；旧契约字段全仓零残留 ✓
+- 探针 `--only C1`：指代轮次经新的 request 加工路径正确解析（T3「这个账套 202608 呢？」→ 查到新兴五金 202608 真实数据），不劣化 ✓；T19 一轮零执行（voucher 期间家族的老摩擦，Phase 2 同场景也失败过）、T17 一轮模型泄漏协议文案——均为模型侧波动
+- 探针 `--quick`：A1/A4/A5 与基线一致（A1 重问重查、A4 只搜目录、A5 闲聊零调用）；B1 五轮全真查（⚠ 为探针把措辞数字抽来比对的误报，数据全一致）
 
-**这是全线风险最高的一步**——契约一改，前面所有调试基线都变。所以它排在第 4，前面三步先把能删的删掉、把该给的证据给上，再动本体。
+**已知模型侧失效（Phase 4 的结构性取舍，记录待观察）**：A2「新话题不得沿用上一轮实体」失去了申报层的结构性防线（C1 随契约删除），偶发复现——模型把上一轮账套加工进 request，C20 挡不住（worker 目录搜索响应会让该实体成为合法来源）。已处置：工具描述补一行原则句（用户另起新话题不得顺带沿用上一轮实体）；实测降概率但不根除（两次 A2 一次渗入、一次 worker 直接以客户名查询被平台拒并如实追问）。审计证据与后续方向见 `docs/rule-landing.md` §6。同类：申报 conversation 复述上一轮数据结论无代码兜底。
+
+**行为代价**：宿主不再预校验账套，worker 每轮自行目录解析——单次查询从 1 次平台调用变为「搜目录+查询」2 次（B1 实测 5 轮 8–9 次调用）；派生期间值（"1 到 9 月"）仍被 C20 挡下、worker 如实说明并提议逐月查（Phase 3 已记录）。
+
+**这是全线风险最高的一步**——契约一改，前面所有调试基线都变。它排在第 4，前面三步先把能删的删掉、把该给的证据给上，再动本体。
 
 ---
 

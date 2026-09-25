@@ -110,7 +110,7 @@ npm test -- tests/e2e/turn-loop
 
 | 文件 | 覆盖 |
 |---|---|
-| `turn-loop-routing.test.ts` | 申报分类、缺账套追问、旧范围不渗入、未授权用户、群聊 @剥离、跳过申报失败关闭 |
+| `turn-loop-routing.test.ts` | 申报分类、缺账套追问、申报即委派并透传加工后的请求、未授权用户、群聊 @剥离、跳过申报失败关闭 |
 | `turn-loop-execution.test.ts` | 重复提问必须重查、零执行不外发、账套目录搜索 |
 | `turn-loop-plan-gate.test.ts` | 扩范围先通知、通知失败不执行、高重量等确认后续跑 |
 | `turn-loop-confirmation.test.ts` | 旧确认被新计划取代、notify 反复后升级确认 |
@@ -121,7 +121,7 @@ npm test -- tests/e2e/turn-loop
 | 1.5 账套目录搜索 | `turn-loop-execution.test.ts` > `1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测` |
 | 1.6 缺少账套先追问 | `turn-loop-routing.test.ts` > `1.6 不问账套的实时余额问题先追问，不调用平台` |
 | 1.3 / 5.4 重复提问 | `turn-loop-execution.test.ts` > `1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复` |
-| 5.4 旧范围不渗入 | `turn-loop-routing.test.ts` > `1.6/5.4 申报夹带历史账套时降级为澄清，不委派` |
+| 5.4 旧范围不渗入 | `turn-loop-routing.test.ts` > `1.6/5.4 申报夹带历史账套时按 delegate 申报委派，worker 收到加工后的请求`（申报层的"降级澄清"保护已移至计划层实体来源校验：`pi-coding-driver.test.ts` > `blocks a platform plan whose entities appear in none of the three sources before calling the CLI evaluator`、`turn-contract.test.ts` > 计划实体来源校验） |
 | 2.6 扩范围先通知 | `turn-loop-plan-gate.test.ts` > `2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行` |
 | 2.6 通知失败不执行 | `turn-loop-plan-gate.test.ts` > `2.6 计划通知投递失败时不激活、不执行扩展查询` |
 | 2.6 零执行不外发 | `turn-loop-execution.test.ts` > `2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论` |

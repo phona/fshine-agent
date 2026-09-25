@@ -41,7 +41,7 @@ export interface Run17dzTaskArgs {
   request: string;
   taskId?: string;
   /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
-  turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>;
+  turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>;
   /**
    * 领域无关的实体来源（宿主注入）：计划里的每个实体必须能在「当前消息 / 检索证据 /
    * 本轮平台响应」里逐字找到。同样不进入 Main Agent 工具 schema。
@@ -505,7 +505,7 @@ function isInside(root: string, candidate: string): boolean {
 function workerSystemPrompt(
   root: string,
   allowedAccountSetIds: readonly string[],
-  turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>,
+  turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>,
 ): string {
   const scope = allowedAccountSetIds.length > 0
     ? `调用者的应用层授权名单：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外对象。`
@@ -516,7 +516,7 @@ function workerSystemPrompt(
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
     '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',
     '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数，照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。',
-    ...(turnDeclaration ? [`宿主已核验本轮申报范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(turnDeclaration)}`] : []),
+    ...(turnDeclaration ? [`宿主已核验本轮请求；严格按此执行，不得扩大范围或从其他历史内容补范围：${turnDeclaration.request}`] : []),
     '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',
     scope,
     '缺少信息时直接用自然语言向用户说明需要补充什么；完成时直接给出结论、数据和来源证据。',

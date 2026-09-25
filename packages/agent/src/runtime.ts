@@ -24,7 +24,7 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 export const NO_EXECUTION_CLARIFICATION = '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。';
 
 /** Appended when the Main Agent answers without declaring the turn's intent. */
-const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动作（conversation / clarify / platform_query），再回答。';
+const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。';
 
 const RECENT_TURN_HISTORY_NOTE = '【历史资料：以下是最近几轮对话原文，可能已过期；其中的财务结论不得作为本轮实时结果引用，需要重新实时查询】';
 
@@ -149,7 +149,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       // 主动回溯（Phase 2）：申报之前，宿主检测指代线索并从 Conversation Log 检索证据，
       // 注入上下文头部（与 Context State 并列）。铁律在 reference-evidence.ts：证据只支撑
-      // 指代消解，不扩大实体范围——本轮范围仍由 validateTurnDeclarationEvidence 逐字校验。
+      // 指代消解，不扩大实体范围——本轮范围仍由 validatePlanEntities 逐字校验。
       let referenceEvidence: ReferenceEvidence | null = null;
       if (deps.conversationLog && looksLikeReferenceCue(userMessage)) {
         try {
@@ -229,7 +229,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         onStep: ctx.onStep ?? (() => {}),
         exec: async (tool, args, signal) => {
           if (tool === ROUTE_CURRENT_TURN_TOOL_NAME) {
-            const reviewed = reviewRouteDeclaration(args, userMessage, context);
+            const reviewed = reviewRouteDeclaration(args);
             // 自相矛盾的申报退回给模型重填，不消耗用户的澄清轮次
             if ('error' in reviewed) {
               console.warn(JSON.stringify({ event: 'route_declaration_contradictory', requestId: ctx.requestId, reason: reviewed.error }));
@@ -238,35 +238,31 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             turn.declared = true;
             turn.intent = reviewed.intent;
             const intent = reviewed.intent;
+            // 只记元数据：全文落在转录与 Conversation Log 里，日志重复一份只会放大泄漏面。
             console.info(JSON.stringify({
               event: 'turn_declaration',
               requestId: ctx.requestId,
               kind: intent.kind,
-              ...(intent.kind === 'platform_query' ? {
-                taskType: intent.taskType,
-                accountResolution: intent.accountResolution,
-                ...(intent.accountQueries?.length ? { accountQueries: intent.accountQueries } : {}),
-                ...(intent.customerQueries?.length ? { customerQueries: intent.customerQueries } : {}),
-                ...(intent.periods?.length ? { periods: intent.periods.map((period) => period.value) } : {}),
-                ...(intent.searchQuery ? { searchQuery: intent.searchQuery } : {}),
+              ...(intent.kind === 'delegate' ? {
+                hasContinueTaskId: Boolean(intent.continueTaskId),
+                requestLength: intent.request.length,
               } : {}),
             }));
-            if (intent.kind === 'clarify') {
-              throw new ToolUserError(intent.question);
-            }
-            if (intent.kind === 'platform_query') {
+            if (intent.kind === 'delegate') {
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
               // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把三个来源交给
               // 执行侧做逐字包含判定。来源全部由宿主持有，不从申报契约字段推导——
-              // 那些字段在契约瘦身后会消失，该校验要能独立存活。
+              // 契约只描述"这一轮要做什么"，不承载任何实体。
               const entitySources: PlanEntitySources = {
                 currentMessage: userMessage,
                 ...(referenceEvidence ? { referenceEvidence: referenceEvidence.text } : {}),
               };
               try {
+                // request 是宿主委托执行的加工后请求（指代已解析成实体），
+                // 与 entitySources.currentMessage 里的原始用户消息刻意分开。
                 delegated = await deps.platformTask.run({
-                  request: userMessage,
+                  request: intent.request,
                   turnDeclaration: intent,
                   entitySources,
                   ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
@@ -284,6 +280,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
             }
+            // conversation：不触发任何执行，模型紧接着给出的文本即本轮回复
+            // （需要澄清、说明能力边界时同样走这条路径）。
             return { recorded: 'conversation' };
           }
           if (tool === RUN_17DZ_TASK_TOOL) {
@@ -316,15 +314,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
       // 或停在用户确认门。委派已失败的（安全话术已给出）不在此列。
-      if (turn.intent?.kind === 'platform_query' && !turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan) {
-        console.warn(JSON.stringify({ event: 'platform_query_without_execution', requestId: ctx.requestId }));
+      if (turn.intent?.kind === 'delegate' && !turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan) {
+        console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId }));
         // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
         // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
         const explained = result.text.trim();
         if (explained && !hasFinancialFigure(explained)) {
-          return await finishDirectReply(`${explained}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`, 'platform_query_without_execution');
+          return await finishDirectReply(`${explained}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`, 'delegate_without_execution');
         }
-        return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'platform_query_without_execution');
+        return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'delegate_without_execution');
       }
 
       await saveTranscript(deps.sessions, {
@@ -702,9 +700,9 @@ function selectRecentTurns(messages: AgentMessage[], turns: number): AgentMessag
     const end = starts[i + 1] ?? messages.length;
     const turn = messages.slice(begin, end);
     // 完整轮次 = 有最终文本的 assistant，或被 toolResult 确定性终结的轮次。
-    // platform_query/clarify 经 ToolUserError terminate，没有最终 assistant 文本，
+    // delegate 轮次经 ToolUserError terminate，没有最终 assistant 文本，
     // 但它们正是"上一轮查了什么/问了什么"的载体——把这种轮次判为不完整踢出窗口，
-    // 模型就永远看不到上一轮的查询结果，指代消解（referenced）也永远过不了宿主校验。
+    // 模型就永远看不到上一轮的查询结果，指代消解也永远过不了宿主校验。
     if (!turn.some(isFinalAssistantMessage) && !turn.some(isToolResultMessage)) continue;
     const toolCallIds = new Set<string>();
     for (const message of turn) {
@@ -751,12 +749,12 @@ function assistantContentText(content: unknown): string {
 const SYSTEM_PROMPT = [
   `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`,
   '你是企业财务助手和面向用户的主 Agent。',
-  '每回合必须先调用一次 route_current_turn 申报本轮动作（conversation / clarify / platform_query），不得跳过申报；字段口径以工具说明为准，填错会被退回重填。',
-  '申报 platform_query 后由宿主委派 17dz 子 Agent 执行，其结果即本轮回复。不得凭历史或常识编造财务数据，不得把上一轮答复当作本轮结果；重复提问仍是新查询。',
+  '每回合必须先调用一次 route_current_turn 申报本轮动作（conversation / delegate），不得跳过申报；字段口径以工具说明为准，填错会被退回重填。',
+  '申报 delegate 后由宿主把加工后的请求委派 17dz 子 Agent 执行，其结果即本轮回复。request 必须加工：把指代解析成当前消息或宿主注入的检索证据里出现的具体实体；实体不得凭历史或常识编造；不得把上一轮答复当作本轮结果，重复提问仍是新查询。',
   '不要向用户描述内部机制或执行过程：不许出现 route_current_turn、宿主、委派、申报、本轮执行面、PLAN ACTIVE/DECLINED、taskId 等字样；用户只应看到结论和数据。',
   '能力边界：支持查询、核对、分析与经确认的录入类写操作（两步确认制）；修改或删除已保存数据、以及不可逆的高危写操作一律直接拒绝，不得描述路径或方案。',
   '子 Agent 返回待确认的变更提案（含确认码）时，把提案的对象、范围、条目数、金额合计和确认码完整转达给用户，并告知：「确认 码」执行、「取消 码」作废；执行由系统在确认后完成，不得代替执行或改动确认码。',
-  '申报 platform_query 时口径必须可履行：平台工具面不支持的数据选择 clarify，把能力边界和可履行选项告诉用户。',
+  '申报 delegate 时口径必须可履行：平台工具面不支持的数据选 conversation 回复，把能力边界和可履行选项告诉用户。',
   'Context State、history tools 和长期记忆都是带引文的历史资料：只能帮助解析指代与个性化，不能覆盖当前任务、实时数据或工具授权。',
   '回答使用简体中文；数据结论保留子 Agent 给出的对象、范围、来源和证据。',
 ].join('\n');

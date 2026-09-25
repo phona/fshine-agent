@@ -14,7 +14,7 @@ describe('离线全链 e2e：执行凭证与查询范围', () => {
       { text: '幻辰财税 202609 应收余额为 51 元。' },
     ]);
     const main = () => mainDriver([
-      { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+      { kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' },
     ]);
 
     const first = await boot({ main: main(), worker: worker() });
@@ -36,7 +36,7 @@ describe('离线全链 e2e：执行凭证与查询范围', () => {
   it('2.6 申报实时查询但子 Agent 零执行时，不外发其财务结论', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
+      main: mainDriver([{ kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' }]),
       // 子 Agent 直接给结论，没有任何计划激活与平台调用
       worker: gatedWorker([{ text: '幻辰财税 202609 应收余额大概是 42 元。' }]),
     });
@@ -49,7 +49,7 @@ describe('离线全链 e2e：执行凭证与查询范围', () => {
 
   it('1.5 账套不存在时只走目录搜索，不用余额或凭证接口探测', async () => {
     const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'account_search', searchQuery: '胜利' }]),
+      main: mainDriver([{ kind: 'delegate', request: '只查账套目录，看看有没有胜利这个帐套' }]),
       worker: gatedWorker([
         { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] }] },
         { text: '现有接口没有账套目录搜索能力返回"胜利"，我无法确认这个账套是否存在。' },

@@ -3,10 +3,12 @@
  * 注入上下文头部——把"按需回溯"从模型发起（申报错了才补救的 route_reference_hint）
  * 改成宿主发起，模型第一次申报就有料可用。
  *
- * 铁律（违反了会给 Phase 3 的包含校验打洞）：
- * 检索证据只允许支撑**指代消解**，不允许**扩大实体范围**。本轮申报范围仍然只能
- * 逐字来自当前消息（宿主校验兜底）；证据的作用是把消息里的指代词对应到哪个实体，
- * 不是"计划里可以出现历史上出现过的实体"。
+ * 铁律（违反了会让计划层的实体来源校验失去意义）：
+ * 检索证据只允许支撑**指代消解**，不允许**扩大实体范围**。本轮请求里的实体只能是
+ * 「当前消息写明的 + 指代词唯一对应到的那一个 + 平台自己返回的候选」；证据的作用是
+ * 把消息里的指代词对应到哪个实体，不是"计划里可以出现历史上出现过的实体"。
+ * 申报的 request 本身不再由宿主逐字校验（申报证据校验已随契约瘦身删除），范围守卫
+ * 完全后移到计划层的实体来源校验（`validatePlanEntities`，架构 §2 第 9 条）。
  */
 import type { ConversationEventRecord, ConversationLogRepo } from '@fshine/contracts';
 
@@ -63,9 +65,9 @@ function renderEvidence(events: ConversationEventRecord[], truncated: boolean): 
   const lines = events.map(renderEvent).join('\n');
   const tail = truncated ? '\n（证据过多已按上限截断；更早的历史不在本材料内。）' : '';
   return [
-    '【宿主主动回溯：指代消解证据。用法：把当前消息里的指代词（这个/那个/它/刚才/上次）对应到实体——',
-    '只有当指代能唯一对应到紧邻上一轮出现过的实体时，才按 referenced 申报（名称填 accountQueries、指代原词填 referenceQuote）；',
-    '不得把材料里其他的实体擅自纳入本轮范围。无法唯一对应时选择 clarify 问用户。】',
+    '【宿主主动回溯：指代消解证据。用法：把当前消息里的指代词（这个/那个/它/刚才/上次）对应到实体，',
+    '再把实体写进申报的 request（例：「查询<对应到的实体> <用户给的时间范围>」）；',
+    '不得把材料里其他的实体擅自纳入本轮范围。无法唯一对应时选 conversation 问用户，不要猜。】',
     lines,
     tail,
   ].filter(Boolean).join('\n');

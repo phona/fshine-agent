@@ -11,8 +11,8 @@ describe('离线全链 e2e：跨轮确认语义', () => {
   it('2.7 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
     const { send, assembly } = await boot({
       main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+        { kind: 'delegate', request: '查幻辰财税账套全年的应收账款' },
+        { kind: 'delegate', request: '只查本月幻辰财税的应收账款' },
       ]),
       worker: gatedWorker([{ plan: heavyPlan() }, { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) }]),
     });
@@ -30,7 +30,7 @@ describe('离线全链 e2e：跨轮确认语义', () => {
     // 计数器按 taskId 记账：必须是同一个任务里连续改口径，才能观察到升级。
     const { send, sdk, assembly } = await boot({
       main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+        { kind: 'delegate', request: '查幻辰财税账套的应收账款' },
       ]),
       worker: gatedWorker([{ plan: growingPlan(4) }, { plan: growingPlan(6) }, { plan: growingPlan(8) }]),
     });

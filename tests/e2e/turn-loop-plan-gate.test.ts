@@ -10,7 +10,7 @@ import { boot, gatedWorker, heavyPlan, mainDriver, nineMonthPlan, totalActualCal
 describe('离线全链 e2e：计划门（通知与确认）', () => {
   it('2.6 扩大查询范围前用户先收到范围与耗时通知，通知送达后才执行', async () => {
     const { send, sdk, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
+      main: mainDriver([{ kind: 'delegate', request: '查幻辰财税账套 1 到 9 月的应收账款' }]),
       worker: gatedWorker([{ plan: nineMonthPlan() }]),
     });
     const reply = await send('查幻辰财税账套 1 到 9 月的应收账款');
@@ -32,7 +32,7 @@ describe('离线全链 e2e：计划门（通知与确认）', () => {
   it('2.6 计划通知投递失败时不激活、不执行扩展查询', async () => {
     const before = totalActualCalls();
     const { send, sdk, assembly } = await boot({
-      main: mainDriver([{ kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] }]),
+      main: mainDriver([{ kind: 'delegate', request: '查幻辰财税账套 1 到 9 月的应收账款' }]),
       worker: gatedWorker([{ plan: nineMonthPlan() }]),
     });
     sdk.failNotice = '2026年01月至2026年09月';
@@ -49,8 +49,8 @@ describe('离线全链 e2e：计划门（通知与确认）', () => {
     const resumeInputs: string[] = [];
     const { send, sdk, assembly } = await boot({
       main: mainDriver([
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
-        { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+        { kind: 'delegate', request: '查幻辰财税账套全年的应收账款' },
+        { kind: 'delegate', request: '查幻辰财税账套全年的应收账款' },
       ], (input) => resumeInputs.push(JSON.stringify(input.messages))),
       worker: gatedWorker([{ plan: heavyPlan(), stopAtConfirm: true }, { execute: heavyPlan() }, { text: '已按你确认的范围查完 1 至 9 月。' }]),
     });

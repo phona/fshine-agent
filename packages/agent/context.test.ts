@@ -85,7 +85,7 @@ describe('17dz Pi subagent adapter', () => {
     )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
   });
 
-  it('将宿主验证的本轮意图范围传给子 Agent', async () => {
+  it('将宿主核验后的申报契约与实体来源传给子 Agent', async () => {
     const root = await profileRoot();
     let prompt = '';
     let observed: TurnDriverInput | undefined;
@@ -99,17 +99,20 @@ describe('17dz Pi subagent adapter', () => {
 
     await subagent.run({
       request: '查幻辰财税账套里猫一杯的应收账款',
-      turnDeclaration: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+      turnDeclaration: { kind: 'delegate', request: '查幻辰财税账套里猫一杯的应收账款' },
       entitySources: { currentMessage: '查幻辰财税账套里猫一杯的应收账款', referenceEvidence: '【宿主主动回溯】幻东 202609 余额 51 元' },
     }, { trusted: trusted() });
 
-    expect(prompt).toContain('宿主已核验本轮申报范围');
-    expect(prompt).toContain('"accountQueries":["幻辰财税"]');
+    expect(prompt).toContain('宿主已核验本轮请求');
+    // 加工后的 request 随申报一起进 worker 提示词（宿主不再做领域判别，只透传请求本身）
+    expect(prompt).toContain('查幻辰财税账套里猫一杯的应收账款');
     // 领域无关的实体来源原样透传到 worker 驱动（宿主不懂业务，只做字符串包含）
     expect(observed?.entitySources).toEqual({
       currentMessage: '查幻辰财税账套里猫一杯的应收账款',
       referenceEvidence: '【宿主主动回溯】幻东 202609 余额 51 元',
     });
+    // 申报契约三字段原样透传，宿主不加工不补字段
+    expect(observed?.turnDeclaration).toEqual({ kind: 'delegate', request: '查幻辰财税账套里猫一杯的应收账款' });
   });
 
   it('宿主未注入实体来源时不向 worker 驱动传该字段（老路径不做实体校验）', async () => {
@@ -288,7 +291,7 @@ describe('17dz Pi subagent adapter', () => {
       run: async (input) => {
         exposed = input.tools.map((tool) => tool.name);
         try {
-          await input.exec('route_current_turn', { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻东'] });
+          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻东的应收账款余额' });
         } catch (error) {
           if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
           throw error;

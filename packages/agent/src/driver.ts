@@ -35,7 +35,7 @@ export interface TurnDriverInput {
   /** Parent cancellation propagated into a delegated agent turn. */
   signal?: AbortSignal;
   /** Host-validated semantic scope for directly routed platform tasks. */
-  turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>;
+  turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>;
   /**
    * 领域无关的实体来源集合（架构 §2 第 9 条）：宿主注入，供驱动在校验提交的计划时
    * 做逐字包含判定。缺省表示宿主没有可注入的来源（如未经宿主演派的任务），
