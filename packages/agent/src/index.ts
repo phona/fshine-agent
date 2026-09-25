@@ -104,6 +104,8 @@ export {
   ROUTE_CURRENT_TURN_TOOL,
   ROUTE_CURRENT_TURN_TOOL_NAME,
   applyRouteDeclaration,
+  reviewRouteDeclaration,
+  isSelfContradictoryDeclaration,
   parseTaskIntent,
   validatePlanAgainstTaskIntent,
   validateTaskIntentEvidence,

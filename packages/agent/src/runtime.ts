@@ -10,7 +10,7 @@ import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, applyRouteDeclaration, type TaskIntent } from './task-intent';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type TaskIntent } from './task-intent';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
@@ -202,9 +202,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         onStep: ctx.onStep ?? (() => {}),
         exec: async (tool, args, signal) => {
           if (tool === ROUTE_CURRENT_TURN_TOOL_NAME) {
+            const reviewed = reviewRouteDeclaration(args, userMessage, context);
+            // 自相矛盾的申报退回给模型重填，不消耗用户的澄清轮次
+            if ('error' in reviewed) {
+              console.warn(JSON.stringify({ event: 'route_declaration_contradictory', requestId: ctx.requestId, reason: reviewed.error }));
+              return { error: `申报无效：${reviewed.error}` };
+            }
             turn.declared = true;
-            const intent = applyRouteDeclaration(args, userMessage, context);
-            turn.intent = intent;
+            turn.intent = reviewed.intent;
+            const intent = reviewed.intent;
             console.info(JSON.stringify({
               event: 'task_intent_route',
               requestId: ctx.requestId,

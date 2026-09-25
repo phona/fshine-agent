@@ -139,6 +139,41 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('没有产生任何平台查询');
   });
 
+  it('申报自相矛盾时退回模型重填，不消耗用户的澄清轮次', async () => {
+    const delegated: unknown[] = [];
+    let toolFeedback = '';
+    const { driver } = recordingDriver([
+      // 第一次：声称 explicit 却不填 accountQueries
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', periods: [{ value: '202607', quote: '202607' }] } }] },
+      // 第二次：补齐后放行
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['新兴建材'], periods: [{ value: '202607', quote: '202607' }] } }] },
+      { text: '不应到达' },
+    ]);
+    // 记录宿主退回的工具反馈
+    const wrapped = {
+      run: async (input: Parameters<typeof driver.run>[0]) => {
+        const originalExec = input.exec;
+        const proxied = { ...input, exec: async (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+          const out = await originalExec(tool, args, signal);
+          if (tool === 'route_current_turn' && out && typeof out === 'object' && 'error' in (out as object)) toolFeedback = String((out as { error: unknown }).error);
+          return out;
+        } };
+        return driver.run(proxied as Parameters<typeof driver.run>[0]);
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: wrapped as never,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => { delegated.push(args); return { taskId: 'task_1', text: '新兴建材 202607 应收余额为 0 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } }; }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_contradiction' }), '查一下新兴建材账套 202607 的应收账款余额');
+
+    expect(toolFeedback).toContain('accountQueries 为空');
+    expect(delegated).toHaveLength(1);
+    expect(reply.text).toBe('新兴建材 202607 应收余额为 0 元。');
+  });
+
   it('子 Agent 文本尾部的执行面注脚不外发给用户', async () => {
     const { driver } = recordingDriver([
       { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] } }] },

@@ -58,20 +58,51 @@ export interface TaskIntentResult {
 }
 
 /**
- * Host-side entry for a route_current_turn tool call: parse the structured declaration,
- * then validate that every scope claim is backed by the current user message. Fails closed
- * to a clarification instead of trusting the model.
+ * A declaration that contradicts itself is a form-filling mistake, not missing user input:
+ * the model claims the account is explicit yet filed no account. The host should send it back
+ * for another attempt instead of spending one of the user's clarification rounds.
  */
+export function isSelfContradictoryDeclaration(intent: TaskIntent): string | null {
+  if (intent.kind !== 'platform_query') return null;
+  if (!intent.taskType) return '缺少 taskType（account_search / balance / voucher / other）。';
+  if (intent.taskType === 'account_search' && !intent.searchQuery?.trim()) {
+    return 'account_search 必须给出 searchQuery，且逐字来自当前消息。';
+  }
+  if (intent.taskType === 'balance' && (intent.accountResolution === 'explicit' || intent.accountResolution === 'referenced') && !intent.accountQueries?.length) {
+    return `accountResolution=${intent.accountResolution} 但 accountQueries 为空：请把当前消息里的账套名称逐字填进 accountQueries。`;
+  }
+  return null;
+}
+
+/**
+ * Host-side entry for a route_current_turn tool call.
+ *
+ * Order matters: a self-contradictory declaration is the model's form-filling mistake and must
+ * be sent back for another attempt, while a merely unsupported scope claim is a genuine
+ * clarification for the user. Checking contradiction first keeps those two apart.
+ */
+export function reviewRouteDeclaration(
+  args: Record<string, unknown>,
+  currentUserMessage: string,
+  history: DriverMessage[],
+): { intent: TaskIntent } | { error: string } {
+  const parsed = parseTaskIntent(JSON.stringify(args));
+  if (!parsed) {
+    return { error: '申报不是合法的结构化意图。请按 schema 重新调用 route_current_turn。' };
+  }
+  const contradiction = isSelfContradictoryDeclaration(parsed);
+  if (contradiction) return { error: contradiction };
+  return { intent: validateTaskIntentEvidence(parsed, currentUserMessage, history) };
+}
+
+/** @deprecated use reviewRouteDeclaration, which separates model mistakes from user clarifications. */
 export function applyRouteDeclaration(
   args: Record<string, unknown>,
   currentUserMessage: string,
   history: DriverMessage[],
 ): TaskIntent {
-  const parsed = parseTaskIntent(JSON.stringify(args));
-  if (!parsed) {
-    return { kind: 'clarify', question: '我没能理解本轮要做什么，请告诉我要查询的账套和期间。' };
-  }
-  return validateTaskIntentEvidence(parsed, currentUserMessage, history);
+  const reviewed = reviewRouteDeclaration(args, currentUserMessage, history);
+  return 'intent' in reviewed ? reviewed.intent : { kind: 'clarify', question: '我没能理解本轮要做什么，请告诉我要查询的账套和期间。' };
 }
 
 export function validatePlanAgainstTaskIntent(
