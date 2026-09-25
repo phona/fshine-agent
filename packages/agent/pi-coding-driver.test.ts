@@ -151,7 +151,7 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
-      taskIntent: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [] },
+      turnDeclaration: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'], customerQueries: ['猫一杯'], periods: [] },
     });
     const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司","--customer","猫一杯"]},{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({

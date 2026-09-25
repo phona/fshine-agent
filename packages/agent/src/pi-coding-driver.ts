@@ -21,7 +21,7 @@ import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverRe
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
-import { validatePlanAgainstTaskIntent } from './task-intent';
+import { validatePlanAgainstTurnDeclaration } from './turn-contract';
 
 export interface PiCodingTurnDriverOptions {
   /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
@@ -53,7 +53,7 @@ export interface PiCodingWorkerSessionOptions {
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
   onPendingPlan?: (plan: PendingPlanConfirmation) => void;
-  taskIntent?: TurnDriverInput['taskIntent'];
+  turnDeclaration?: TurnDriverInput['turnDeclaration'];
 }
 
 export interface PiCodingWorkerSession {
@@ -99,7 +99,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         planCliRunner: options.planCliRunner,
         planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
-        taskIntent: input.taskIntent,
+        turnDeclaration: input.turnDeclaration,
       });
       const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
       // Host-verifiable proof that this delegated turn really executed against the platform:
@@ -240,11 +240,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
       catch (error) { return { block: true, reason: `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}` }; }
       if (parsed) {
-        if (options.taskIntent) {
-          const scopeError = validatePlanAgainstTaskIntent(options.taskIntent, parsed.calls);
+        if (options.turnDeclaration) {
+          const scopeError = validatePlanAgainstTurnDeclaration(options.turnDeclaration, parsed.calls);
           if (scopeError) {
             activePlan = null;
-            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮宿主意图执行或向用户澄清。` };
+            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮宿主申报的范围执行，或向用户澄清。` };
           }
         }
         const previousPlan = activePlan;

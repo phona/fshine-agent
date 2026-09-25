@@ -1,7 +1,7 @@
 import type { DriverMessage } from './driver';
 import type { DiscoveredTool } from '@fshine/contracts';
 
-export type TaskIntent =
+export type TurnDeclaration =
   | { kind: 'conversation' }
   | { kind: 'clarify'; question: string }
   | {
@@ -61,8 +61,8 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
   },
 };
 
-export interface TaskIntentResult {
-  intent: TaskIntent;
+export interface TurnDeclarationResult {
+  intent: TurnDeclaration;
   error?: string;
 }
 
@@ -71,7 +71,7 @@ export interface TaskIntentResult {
  * the model claims the account is explicit yet filed no account. The host should send it back
  * for another attempt instead of spending one of the user's clarification rounds.
  */
-export function isSelfContradictoryDeclaration(intent: TaskIntent): string | null {
+export function isSelfContradictoryDeclaration(intent: TurnDeclaration): string | null {
   if (intent.kind !== 'platform_query') return null;
   if (!intent.taskType) return '缺少 taskType（account_search / balance / voucher / other）。';
   if (intent.taskType === 'account_search' && !intent.searchQuery?.trim()) {
@@ -94,14 +94,14 @@ export function reviewRouteDeclaration(
   args: Record<string, unknown>,
   currentUserMessage: string,
   history: DriverMessage[],
-): { intent: TaskIntent } | { error: string } {
-  const parsed = parseTaskIntent(JSON.stringify(args));
+): { intent: TurnDeclaration } | { error: string } {
+  const parsed = parseTurnDeclaration(JSON.stringify(args));
   if (!parsed) {
     return { error: '申报不是合法的结构化意图。请按 schema 重新调用 route_current_turn。' };
   }
   const contradiction = isSelfContradictoryDeclaration(parsed);
   if (contradiction) return { error: contradiction };
-  return { intent: validateTaskIntentEvidence(parsed, currentUserMessage, history) };
+  return { intent: validateTurnDeclarationEvidence(parsed, currentUserMessage, history) };
 }
 
 /** @deprecated use reviewRouteDeclaration, which separates model mistakes from user clarifications. */
@@ -109,13 +109,13 @@ export function applyRouteDeclaration(
   args: Record<string, unknown>,
   currentUserMessage: string,
   history: DriverMessage[],
-): TaskIntent {
+): TurnDeclaration {
   const reviewed = reviewRouteDeclaration(args, currentUserMessage, history);
   return 'intent' in reviewed ? reviewed.intent : { kind: 'clarify', question: '我没能理解本轮要做什么，请告诉我要查询的账套和期间。' };
 }
 
-export function validatePlanAgainstTaskIntent(
-  intent: Extract<TaskIntent, { kind: 'platform_query' }>,
+export function validatePlanAgainstTurnDeclaration(
+  intent: Extract<TurnDeclaration, { kind: 'platform_query' }>,
   calls: readonly { operation: string; args: readonly unknown[] }[],
 ): string | null {
   if (intent.taskType === 'account_search') {
@@ -130,7 +130,7 @@ export function validatePlanAgainstTaskIntent(
   const accounts = intent.accountQueries ?? [];
   const customers = intent.customerQueries ?? [];
   const periods = intent.periods?.map((period) => period.value) ?? [];
-  if (!accounts.length) return '宿主意图中没有可执行的账套范围，应先澄清。';
+  if (!accounts.length) return '本轮申报中没有可执行的账套范围，应先澄清。';
   // 硬约束只有两条：不得越权（每次调用都在申报范围内）、不得空转（至少覆盖一个申报项）。
   // 不做"调用数必须等于 账套 × 客户 × 期间"的精确基数校验——模型有时会把科目名混进
   // accountQueries，精确基数会把最常见的查询形态直接拒死；越权由逐次包含判定挡住。
@@ -142,8 +142,8 @@ export function validatePlanAgainstTaskIntent(
     const account = optionValue(call.args, '--query');
     const customer = optionValue(call.args, '--customer');
     const period = optionValue(call.args, '--period') ?? '';
-    if (!account || !inScope(account, accounts)) return '余额计划加入了宿主未确认的账套。';
-    if (customers.length ? (!customer || !inScope(customer, customers)) : Boolean(customer)) return '余额计划客户范围与宿主解析的当前请求不一致。';
+    if (!account || !inScope(account, accounts)) return '余额计划加入了本轮申报范围外的账套。';
+    if (customers.length ? (!customer || !inScope(customer, customers)) : Boolean(customer)) return '余额计划客户范围与本轮申报的当前请求不一致。';
     if (periods.length ? !periods.includes(period) : Boolean(period)) {
       return '余额计划加入了当前请求未指定的期间；用户未指定期间时请不要带 --period，由平台按当前期间查。';
     }
@@ -157,7 +157,7 @@ export function validatePlanAgainstTaskIntent(
   }
   // 只要求"确实查了申报范围内的账套"。少查是交付不足（回复里会说明），
   // 多查/查错范围已被上面的逐次包含判定挡下；用全覆盖会把申报里的噪声项变成硬失败。
-  return coveredAccounts.size === 0 ? '余额计划没有覆盖宿主解析出的任何账套范围。' : null;
+  return coveredAccounts.size === 0 ? '余额计划没有覆盖本轮申报的任何账套范围。' : null;
 }
 
 /**
@@ -165,7 +165,7 @@ export function validatePlanAgainstTaskIntent(
  * 平台账套名是"幻辰财税"；用户说"幻辰"，规范名是"幻辰财税"）。这里用双向包含
  * 判定"属于本轮申报范围"，不做全等字符串比较——全等会把最常见的查询形态直接拒死。
  *
- * 防越权靠的是另外两件事：申报本身必须逐字来自当前消息（validateTaskIntentEvidence），
+ * 防越权靠的是另外两件事：申报本身必须逐字来自当前消息（validateTurnDeclarationEvidence），
  * 以及调用数量必须等于 账套 × 客户 × 期间 的笛卡尔积（多查一个账套就对不上）。
  */
 function inScope(value: string | null, scope: readonly string[]): boolean {
@@ -191,7 +191,7 @@ function voucherPeriod(args: readonly unknown[]): string {
  * periods the current request actually named. Everything else stays with the platform gate.
  */
 function validateVoucherPlan(
-  intent: Extract<TaskIntent, { kind: 'platform_query' }>,
+  intent: Extract<TurnDeclaration, { kind: 'platform_query' }>,
   calls: readonly { operation: string; args: readonly unknown[] }[],
 ): string | null {
   const periods = intent.periods?.map((period) => period.value) ?? [];
@@ -207,7 +207,7 @@ function validateVoucherPlan(
   return null;
 }
 
-export function parseTaskIntent(value: string): TaskIntent | null {
+export function parseTurnDeclaration(value: string): TurnDeclaration | null {
   const text = value.trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return null; }
@@ -220,7 +220,7 @@ export function parseTaskIntent(value: string): TaskIntent | null {
       : null;
   }
   if (item.kind !== 'platform_query' || !['account_search', 'balance', 'voucher', 'other'].includes(String(item.taskType))) return null;
-  const taskType = item.taskType as Extract<TaskIntent, { kind: 'platform_query' }>['taskType'];
+  const taskType = item.taskType as Extract<TurnDeclaration, { kind: 'platform_query' }>['taskType'];
   if (item.accountResolution !== undefined && !['explicit', 'referenced', 'missing', 'ambiguous'].includes(String(item.accountResolution))) return null;
   if (item.accountQueries !== undefined && (!Array.isArray(item.accountQueries) || item.accountQueries.some((value) => typeof value !== 'string'))) return null;
   if (item.referenceQuote !== undefined && typeof item.referenceQuote !== 'string') return null;
@@ -231,7 +231,7 @@ export function parseTaskIntent(value: string): TaskIntent | null {
   if (item.question !== undefined && typeof item.question !== 'string') return null;
   return {
     kind: 'platform_query', taskType,
-    ...(item.accountResolution !== undefined ? { accountResolution: item.accountResolution as Extract<TaskIntent, { kind: 'platform_query' }>['accountResolution'] } : {}),
+    ...(item.accountResolution !== undefined ? { accountResolution: item.accountResolution as Extract<TurnDeclaration, { kind: 'platform_query' }>['accountResolution'] } : {}),
     ...(Array.isArray(item.accountQueries) ? { accountQueries: item.accountQueries as string[] } : {}),
     ...(typeof item.referenceQuote === 'string' ? { referenceQuote: item.referenceQuote } : {}),
     ...(Array.isArray(item.customerQueries) ? { customerQueries: item.customerQueries as string[] } : {}),
@@ -242,7 +242,7 @@ export function parseTaskIntent(value: string): TaskIntent | null {
   };
 }
 
-export function validateTaskIntentEvidence(intent: TaskIntent, current: string, history: DriverMessage[]): TaskIntent {
+export function validateTurnDeclarationEvidence(intent: TurnDeclaration, current: string, history: DriverMessage[]): TurnDeclaration {
   if (intent.kind !== 'platform_query') return intent;
   if (intent.taskType === 'account_search') {
     if (!intent.searchQuery || !current.includes(intent.searchQuery)) {

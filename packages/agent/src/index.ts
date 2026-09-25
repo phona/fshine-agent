@@ -106,8 +106,8 @@ export {
   applyRouteDeclaration,
   reviewRouteDeclaration,
   isSelfContradictoryDeclaration,
-  parseTaskIntent,
-  validatePlanAgainstTaskIntent,
-  validateTaskIntentEvidence,
-  type TaskIntent,
-} from './task-intent';
+  parseTurnDeclaration,
+  validatePlanAgainstTurnDeclaration,
+  validateTurnDeclarationEvidence,
+  type TurnDeclaration,
+} from './turn-contract';

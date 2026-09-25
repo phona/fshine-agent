@@ -13,7 +13,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
-import type { TaskIntent } from './task-intent';
+import type { TurnDeclaration } from './turn-contract';
 import { ToolUserError, type TurnDriverResult } from './driver';
 import type {
   AgentReply,
@@ -41,7 +41,7 @@ export interface Run17dzTaskArgs {
   request: string;
   taskId?: string;
   /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
-  taskIntent?: Extract<TaskIntent, { kind: 'platform_query' }>;
+  turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>;
 }
 
 export interface SubagentTaskResult {
@@ -356,7 +356,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
         result = await options.workerDriver.run({
-          systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.taskIntent),
+          systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration),
           tools: [],
           messages,
           cwd: profile.root,
@@ -367,7 +367,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
           deadline,
           signal,
-          ...(args.taskIntent ? { taskIntent: args.taskIntent } : {}),
+          ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
           ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
           ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
           ...(ctx.trusted.onNotice ? { onNotice: ctx.trusted.onNotice } : {}),
@@ -499,7 +499,7 @@ function isInside(root: string, candidate: string): boolean {
 function workerSystemPrompt(
   root: string,
   allowedAccountSetIds: readonly string[],
-  taskIntent?: Extract<TaskIntent, { kind: 'platform_query' }>,
+  turnDeclaration?: Extract<TurnDeclaration, { kind: 'platform_query' }>,
 ): string {
   const scope = allowedAccountSetIds.length > 0
     ? `调用者的应用层账套 allowlist：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外账套。`
@@ -516,7 +516,7 @@ function workerSystemPrompt(
     '用户只问账套是否存在或要查账套候选时，只能调用 finance.search-account-sets，并且只提交这一项调用。不得用 finance.query-receivables、凭证查询或科目查询代替，也不得继续查期间、余额或客户。若平台 operation 清单或 Skill 中没有 finance.search-account-sets，或它明确报告能力不可用，应停止并明确告知用户无法确认；不得用其它查询接口试探。',
     '未指定账套时不能把历史出现过的账套自动当作本次范围；如果当前请求和紧邻上下文不能唯一确定账套，先向用户询问要查哪个账套，不得并行遍历历史账套。',
     '余额查询没有用户指定期间时只查当前期间。应收余额查询失败后必须停止并如实报告；不得用历史凭证或扩大期间范围估算期末余额。历史凭证查询只用于用户明确要求的凭证明细或期间核对，不能替代余额表。',
-    ...(taskIntent ? [`宿主意图路由已核验本轮范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(taskIntent)}`] : []),
+    ...(turnDeclaration ? [`宿主已核验本轮申报范围；严格按此结构化意图执行，不得扩大或从其他历史内容补范围：${JSON.stringify(turnDeclaration)}`] : []),
     '知识只经 read 读取固定知识面：技能 SKILL.md、src/<域>/MECHANISMS.md、*.schema.json；实现源码不可读也不需要读（工具面无 grep/find）。',
     scope,
     '缺少信息时直接用自然语言向用户说明需要补充什么；完成时直接给出结论、数据和来源证据。',

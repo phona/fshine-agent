@@ -667,7 +667,7 @@ describe('createTaxAgentRuntime', () => {
   });
 
   it('主 Agent 只暴露 route_current_turn，宿主据申报直接委派并采用子 Agent 自然语言结果', async () => {
-    const calls: Array<{ request: string; taskId?: string; taskIntent?: unknown }> = [];
+    const calls: Array<{ request: string; taskId?: string; turnDeclaration?: unknown }> = [];
     let exposed: string[] = [];
     const platformTask = subagent(async (args) => {
       calls.push(args);
@@ -686,7 +686,7 @@ describe('createTaxAgentRuntime', () => {
     expect(exposed).toEqual(['route_current_turn']);
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ request: '查询幻东余额' });
-    expect(calls[0]?.taskIntent).toMatchObject({ kind: 'platform_query', taskType: 'balance', accountQueries: ['幻东'] });
+    expect(calls[0]?.turnDeclaration).toMatchObject({ kind: 'platform_query', taskType: 'balance', accountQueries: ['幻东'] });
     expect(reply.text).toBe('请向用户确认客户名称。');
   });
 

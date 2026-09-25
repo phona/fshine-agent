@@ -126,7 +126,7 @@ npm test -- tests/e2e/turn-loop.acceptance.test.ts
 - 真实企微收发、长连接稳定性、Markdown 渲染（5.2）
 - 真实账套数据的口径与金额一致性（§3 全部）
 - 写操作两步确认的真实落账（§4.1/4.2，需 `FSHINE_REAL_COMMIT=1`）
-- 真实模型下的申报合规率：日志关注 `task_intent_route` 与 `route_declaration_missing`
+- 真实模型下的申报合规率：日志关注 `turn_declaration`、`route_declaration_missing` 与 `route_reference_hint`
 
 同一场景的追问复用 `conversationId`，每条消息使用新的 `messageId`。验收记录至少包含
 `requestId`、主会话、`taskId`（如有）、子 Agent 执行结果和最终回复。不要要求或记录 MCP

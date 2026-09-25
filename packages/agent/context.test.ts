@@ -95,10 +95,10 @@ describe('17dz Pi subagent adapter', () => {
 
     await subagent.run({
       request: '查幻辰财税账套里猫一杯的应收账款',
-      taskIntent: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
+      turnDeclaration: { kind: 'platform_query', taskType: 'balance', accountResolution: 'explicit', accountQueries: ['幻辰财税'] },
     }, { trusted: trusted() });
 
-    expect(prompt).toContain('宿主意图路由已核验本轮范围');
+    expect(prompt).toContain('宿主已核验本轮申报范围');
     expect(prompt).toContain('"accountQueries":["幻辰财税"]');
   });
 

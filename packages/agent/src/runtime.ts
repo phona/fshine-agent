@@ -10,7 +10,7 @@ import { reduceContextState, type ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, looksLikeReference, previousTurnText, reviewRouteDeclaration, type TaskIntent } from './task-intent';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, looksLikeReference, previousTurnText, reviewRouteDeclaration, type TurnDeclaration } from './turn-contract';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
@@ -187,7 +187,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 用对象承载，避免闭包赋值被控制流分析窄化成 never。
       const turn: {
         declared: boolean;
-        intent: TaskIntent | null;
+        intent: TurnDeclaration | null;
         execution: TurnExecution | null;
         pendingPlan: PendingPlanConfirmation | null;
         /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
@@ -212,7 +212,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             turn.intent = reviewed.intent;
             const intent = reviewed.intent;
             console.info(JSON.stringify({
-              event: 'task_intent_route',
+              event: 'turn_declaration',
               requestId: ctx.requestId,
               kind: intent.kind,
               ...(intent.kind === 'platform_query' ? {
@@ -249,7 +249,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               try {
                 delegated = await deps.platformTask.run({
                   request: userMessage,
-                  taskIntent: intent,
+                  turnDeclaration: intent,
                   ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
                 }, { trusted: ctx }, signal);
               } catch (error) {
