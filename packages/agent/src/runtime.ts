@@ -190,7 +190,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         intent: TaskIntent | null;
         execution: TurnExecution | null;
         pendingPlan: PendingPlanConfirmation | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null };
+        /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
+        delegationFailed: boolean;
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false };
 
       const turnDeadline = Date.now() + turnBudgetMs;
       const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
@@ -220,6 +222,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
                 }, { trusted: ctx }, signal);
               } catch (error) {
+                // 委派失败：安全话术就是本回合回复，出口校验不得再覆盖它。
+                turn.delegationFailed = true;
                 if (error instanceof ToolUserError) throw error;
                 console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
                 throw new ToolUserError(FALLBACK_FAILURE);
@@ -260,8 +264,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         result = retried;
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
-      // 或停在用户确认门；否则不外发模型文本。
-      if (turn.intent?.kind === 'platform_query' && !turn.execution && !turn.pendingPlan && !result.pendingPlan) {
+      // 或停在用户确认门；否则不外发模型文本。委派已收口的（含失败话术）不在此列。
+      if (turn.intent?.kind === 'platform_query' && !turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan) {
         console.warn(JSON.stringify({ event: 'platform_query_without_execution', requestId: ctx.requestId }));
         return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'platform_query_without_execution');
       }

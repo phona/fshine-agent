@@ -32,6 +32,7 @@ export { reduceContextState, CONTEXT_REDUCER_VERSION, type ContextState, type Co
 export { createHistoryTools, type HistoryTool } from './history-tools';
 export { createMemoryCandidateModel, type MemoryModelOptions } from './memory-model';
 export { createLongMemoryCandidateExtractor, type MemoryCandidateModel, type MemoryCandidateModelRequest } from './memory-candidate-extractor';
+export type { CandidateExtractor } from './memory-consolidator';
 export {
   MOCK_EXECUTOR_ENV,
   MOCK_STATE_ENV,

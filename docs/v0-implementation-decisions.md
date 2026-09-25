@@ -6,7 +6,7 @@
 
 - Node 24+、TypeScript strict、ESM；单 npm 项目，不使用 workspaces。
 - Main Agent 使用 `pi-agent-core` 的轻量 driver。
-- 当前消息先经独立的语义意图路由模型，返回严格结构化的 conversation / clarify / platform_query 决策；财务查询不会先让 Main Agent 自由作答后再猜是否调用工具。
+- 每回合由 Main Agent 先调用 `route_current_turn` 申报结构化动作；宿主校验证据并决定分流。不引入第二个路由模型——多一次模型调用，且让上下文更少的模型替上下文更多的模型做判断。
 - 17dz 子 Agent 使用官方 `pi-coding-agent` 的 headless `AgentSession`，由 adapter 固定 cwd、Skills、模型和生命周期。
 - 依赖统一声明在根 `package.json`，子 Agent 不在运行时安装依赖。
 - SQLite 通过 repository 接口保存 principal、会话、任务和审计数据。
@@ -22,14 +22,17 @@
 | `apps/server` | 生产装配和进程生命周期 |
 | `docs` | 设计和验收基线 |
 
-## 2.1 当前回合意图路由
+## 2.1 回合契约与执行凭证
 
-每条消息由单独的无工具模型回合判断为普通对话、需要澄清或实时平台查询。路由器只把历史作为明确指代的证据；重复的实时数据问题仍必须重新委派，不复用上一条助手答案或旧的待确认计划。
+Main Agent 每回合先调用 `route_current_turn` 申报本轮动作；宿主记录申报、校验证据、记录执行凭证，并在出口做一次纯确定性检查。
 
-- 余额请求没有可唯一确定的账套时，宿主先询问账套，不调用查询工具。
-- 实时平台任务由宿主用当前原始用户消息直接启动 `run_17dz_task`；Main Agent 不再有机会用旧结果跳过本轮执行。
-- 账套/期间来自当前消息时，路由结果要给出原文证据；来自上下文时，要给出当前消息中的指代和上下文证据。证据无法验证或 JSON 不合法时失败关闭并澄清。
-- 平台结果作为本轮结果返回；普通聊天再进入 Main Agent。
+- **申报**：`conversation` / `clarify` / `platform_query`（含 taskType、账套、客户、期间、搜索词）。`clarify` 由宿主直接追问；`platform_query` 由宿主用当前原始用户消息直接委派，子 Agent 结果经 `ToolUserError` 的 terminate 语义成为本轮最终回复。
+- **证据 fail-closed**：账套/期间/搜索词必须逐字来自当前消息；`referenced` 必须能在上下文唯一解析。不成立就降级为澄清，不委派。
+- **执行凭证**：申报 `platform_query` 就必须有"激活计划 + 至少一次平台调用"，或停在用户确认门。两者都没有就不外发模型文本，替换为确定性澄清。
+- **跳过申报**：丢弃自由文本重试一次；仍跳过则失败关闭。
+- **近期回合降级**：`state_recent` 模式下最近 N 回合前置一条历史资料说明，保存前剥离，避免旧财务结论被当成本轮结果，也避免说明随转录叠加。
+
+为什么不用第二个路由模型：它不解决根因（路由器也会误判，误判后同样重放旧答案，还多一次模型调用），却把语义判断拆给两个模型；真正拦住坏结果的是出口那道确定性校验。
 
 ## 3. 委派接口
 
@@ -42,7 +45,7 @@ run_17dz_task({
 })
 ```
 
-工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测子 Agent 状态。结构化意图路由器先决定任务类型；实时任务由宿主委派，Main Agent 只处理普通对话和受限结果整理。
+工具结果只包含 `taskId` 和子 Agent 的自然语言 `text`。不定义额外的 `completed`、`needs_input`、`preview` 或 `blocked` 协议，也不使用中文正则猜测子 Agent 状态。`route_current_turn` 先申报任务类型；实时任务由宿主委派，Main Agent 只处理普通对话和受限结果整理。
 
 任务存储负责 transcript、绑定和恢复：任务只能由创建它的 principal 和主会话恢复；用户补充信息时复用 task ID，新请求创建新任务。
 

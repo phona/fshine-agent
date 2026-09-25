@@ -1,21 +1,28 @@
 # fshine-agent 架构
 
-状态：当前实现基线（Main Agent + 单个 17dz 子 Agent + 计划重量反馈）
+状态：当前实现基线（回合契约 + 单个 17dz 子 Agent + 平台计划重量反馈）
 
 ## 1. 目标
 
-提供一条简单、可恢复的企微财税查询链路：宿主先用结构化意图路由模型判断本轮是闲聊、需要澄清还是实时平台查询；实时查询直接交给 17dz 子 Agent，闲聊再进入 Main Pi Agent。
+提供一条简单、可恢复的企微财税查询链路，并保证三件事：
+
+1. **真实性**：任何财务结论必须来自本轮真实执行（激活计划 + 至少一次平台调用），不能来自历史重放。
+2. **边界**：账套/期间只能来自当前消息，或当前消息明确指代且上下文能唯一解析；旧任务范围不能自动继承。
+3. **重量感知**：执行面扩大时用户先看到，超过更高门槛先等确认，反复试探有上限。
 
 ```text
 企微
-  -> Semantic Intent Router（仅当前消息 + 有来源的近期上下文）
-     ├─ clarify -> 宿主直接追问，不运行查询
-     ├─ platform_query -> run_17dz_task(request, taskId?)
-     │  -> Pi 子 Agent（cwd = 17dz-platform）
-     │  -> 17dz-platform Skills / 领域脚本
-     └─ conversation -> Main Pi Agent（fshine-agent）
-        -> 自然语言回复
+  -> Main Pi Agent（fshine-agent）
+     ├─ route_current_turn 申报本轮动作（conversation / clarify / platform_query）
+     │    · clarify        -> 宿主直接追问，不调用平台
+     │    · platform_query -> 宿主用当前消息直接委派子 Agent，结果经 terminate 成为本轮回复
+     │    · conversation   -> Main Agent 正常回答
+     └─ history tools（search_history / get_messages）按需回溯
+        -> Pi 子 Agent（cwd = 17dz-platform）
+        -> 17dz-platform Skills / 领域脚本
 ```
+
+**语义判断归 Main Agent，宿主负责强制。** 不为分流引入第二个模型：那既多一次模型调用，也让上下文更少的模型替上下文更多的模型做判断。宿主做三件确定性的事——校验申报的证据（fail-closed 到澄清）、记录执行凭证、在出口拒绝"申报了实时查询却零执行"的回复。
 
 当前只需要一个领域子 Agent，不引入通用的 subagent registry、复杂结果协议或多 Agent 聚合层。将来增加独立领域时，再抽象注册和路由。
 
@@ -24,8 +31,8 @@
 | 组件 | 负责 | 不负责 |
 |---|---|---|
 | 企微 channel | 收发消息、用户和会话标识、进度/最终回复 | 领域查询、浏览器自动化 |
-| Semantic Intent Router | 将当前消息分类为对话、澄清或实时平台查询；为账套/期间指代给出有依据的结构化解析 | 输出财务答案、调用平台、将历史账套转成当前范围 |
-| Main Agent | 处理普通对话、组织非平台问题的自然语言回复 | 决定是否跳过实时查询、重放历史财务结果 |
+| Main Agent | 每回合先申报本轮动作；处理普通对话、组织自然语言回复 | 跳过申报直接回答；把历史财务结论当成本轮结果 |
+| 宿主回合校验 | 校验申报的证据、记录执行凭证、出口拒绝零执行的实时查询回复 | 替模型做语义判断 |
 | `run_17dz_task` | 校验请求、创建/恢复任务、绑定主会话和用户、调用子 Agent | 解析子 Agent 自然语言并猜流程状态 |
 | Pi 子 Agent | 在受信 `17dz-platform` cwd 中加载 Skills，执行领域脚本，返回自然语言 | 替 Main Agent 决定如何向用户回复 |
 | `17dz-platform` | 领域脚本、平台适配、登录态和财税数据获取 | 企微会话和 Main Agent 对话编排 |
@@ -49,8 +56,8 @@
 ## 4. 请求流程
 
 1. 企微 channel 接收消息，得到不可变的用户 ID、会话 ID 和消息 ID。
-2. Semantic Intent Router 用当前用户消息和带来源的近期上下文产生严格 JSON 意图。重复提出的实时数据请求必须判为新查询，不能复用旧助手回答。
-3. 闲聊交给 Main Agent；账套、客户余额、凭证等实时数据请求交给 `run_17dz_task`；缺少或无法唯一确定账套时，宿主先澄清，不调用平台。
+2. Main Agent 先调用 `route_current_turn` 申报本轮动作。账套/期间/搜索词必须逐字来自当前消息，或由当前消息明确指代且上下文能唯一解析；证据不成立就失败关闭为澄清。重复提出的实时数据请求必须判为新查询，不能复用旧助手回答。
+3. 闲聊由 Main Agent 回答；账套、客户余额、凭证等实时数据由宿主用当前消息直接委派 `run_17dz_task`；缺少或无法唯一确定账套时，宿主先澄清，不调用平台。
 4. 委派工具创建一个只属于当前用户和主会话的新任务。仅显式引用旧任务时才恢复 task ID。
 5. 子 Agent 在 `17dz-platform` 中按相关 Skill 执行领域脚本。结果必须来自本轮脚本，不得从源码或历史结果猜测；预算计划由 17dz CLI 评估并逐次绑定。
 6. 子 Agent 返回自然语言结果；host 直接采用受信执行结果或进行受限整理，不把旧的 pending 计划重新当成本轮任务。

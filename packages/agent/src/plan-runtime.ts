@@ -197,7 +197,8 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {
     ? `${sanitizeSummary(platformSummary)} `
     : `本次需新增 ${addedCalls} 次查询，预计约 ${minutes} 分钟。`;
   const confirm = evaluation.decision === 'confirm' ? '请回复“确认继续”后再执行；当前已暂停。' : '通知送达后将继续执行。';
-  return `${scope}${confirm}`;
+  // 前缀让用户在企微里能把"系统通知"和普通进度区分开，也让宿主/测试能稳定识别这条帧。
+  return `计划通知：${scope}${confirm}`;
 }
 
 export function validateCalls(calls: readonly PlanCall[]): void {

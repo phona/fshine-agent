@@ -13,19 +13,9 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
-import {
-  createContextTaskRunner,
-  createPiCodingTurnDriver,
-  createPiTurnDriver,
-  createTaxAgentRuntime,
-  ensureMockStatePath,
-  isCommitEnabled,
-  isPlatformMock,
-  MOCK_STATE_ENV,
-} from '@fshine/agent';
-import { createCommitRunner, createPrepareRunner, newGateSecret } from '../apps/server/commit';
-import { createMessageHandler } from '../apps/server/handler';
+import { loadConfig } from '@fshine/core';
+import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV } from '@fshine/agent';
+import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -208,7 +198,6 @@ function lastAssistantText(workerMessages: unknown): string | null {
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/17dz 网关与守卫真实生效）。
   process.env.DZ_SERVE = '1'; // 平台 serve 法域
-  const gateSecret = newGateSecret();
   let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
   if (faultMode) {
     configPath = path.join(dataDir, `acceptance-fault-${runId}.yaml`);
@@ -238,50 +227,15 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 
-  const dbPath = path.join(dataDir, `acceptance-${runId}.db`);
-  const store = createSqliteStore(dbPath);
-  for (const record of principalScopeRecords(config)) await store.principalScopes.upsert(record);
-
-  const driver = createPiTurnDriver({ env: process.env });
-  const workerDriver = createPiCodingTurnDriver({
+  // 与生产共用同一份装配：避免验收脚本和生产各写一遍、悄悄漂移。
+  const assembly = await createServerAssembly({
     env: process.env,
-    // 与生产 main.ts 一致：G1 门事件落验收库 tool_calls
-    serveGateAudit: (event) => {
-      const now = new Date().toISOString();
-      void store.toolCalls.insert({
-        requestId: event.requestId ?? '',
-        toolName: `serve_gate:${event.tool}`,
-        safeArguments: { detail: event.detail ?? '' },
-        startedAt: now,
-        finishedAt: now,
-        status: event.allowed ? 'ok' : 'error',
-        errorCode: event.allowed ? undefined : 'GATE_BLOCKED',
-      }).catch(() => {});
-    },
+    dbPath: path.join(dataDir, `acceptance-${runId}.db`),
   });
-  const platformTask = createContextTaskRunner({
-    profiles: config.contextProfiles,
-    tasks: store.platformTasks ?? { async get() { return null; }, async upsert() { throw new Error('no store'); } },
-    workerDriver,
-    profileId: '17dz',
-    // 与生产 main.ts 一致：接通两步确认写链路（mock 下落假状态；真平台受
-    // FSHINE_REAL_COMMIT 门控，缺省时确认码得到确定性拒绝、零写入）。
-    ...(platformRoot ? {
-      changeIntents: store.changeIntents,
-      prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
-      commitRunner: createCommitRunner({ platformRoot, gateSecret }),
-      commitEnabled: isCommitEnabled(),
-    } : {}),
-  });
-  const runtime = createTaxAgentRuntime({
-    driver,
-    sessions: store.sessions,
-    sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
-    platformTask,
-  });
-  const handler = createMessageHandler({ store, runtime });
-  const auditDb = new Database(dbPath);
+  const store = assembly.store;
+  const handler = assembly.handler;
+  const platformRoot = assembly.platformRoot;
+  const auditDb = new Database(path.join(dataDir, `acceptance-${runId}.db`));
 
   const records: CaseRecord[] = [];
   const repliesById = new Map<string, string>();
@@ -362,7 +316,7 @@ async function main(): Promise<void> {
     }));
   }
 
-  closeStore(store);
+  await assembly.close();
   auditDb.close();
 
   const reportPath = path.join(dataDir, `acceptance-report-${runId}.md`);
