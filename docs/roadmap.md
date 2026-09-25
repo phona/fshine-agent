@@ -30,21 +30,18 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 0 — 测试并行化
 
-**目标**：`npm test` 8s → ≤3s；探针日常迭代从 25 分钟降到 3 分钟。
+**状态：已完成**（commit `4643c7b`）。共享替身抽到 `tests/e2e/harness.ts`，13 个用例原样拆进 `turn-loop-routing / -execution / -plan-gate / -confirmation` 四个文件并行执行；探针加 `--quick`（只跑 A1/A2/A4/A5 + B1）。36 文件 / 287 用例全绿，typecheck 0 错误。
 
-**现状**：33 文件 287 用例 8s。`turn-loop.acceptance.test.ts` 5.3s（13 用例串行）、`plan-awareness.test.ts` 1.2s，其余 31 个文件均 <350ms。vitest 8 线程按**文件**并行，墙时间被最慢文件卡住。
+**目标（实测口径）**：`npm test` 6.8s → ~5.2s；探针日常迭代从 25 分钟降到约 3 分钟。
 
-**已验证**：线程池给每个文件独立的 `process.env` 副本，拆文件不会串味。
+**原定 ≤3s 未达成，是结构性下限而非拆分不到位**（已实测否决 5 文件拆分、E2E-first 调度、`--silent`/forks 池/12 workers/编译缓存，均无实质收益）：
 
-**改动**：
-- 拆 `turn-loop.acceptance.test.ts` 为 4 个按主题的文件，共享替身抽到 `tests/e2e/harness.ts`：
-  - `turn-loop-routing.test.ts`（申报分类、缺账套追问、旧范围不渗入、未授权用户、群聊 @剥离、跳过申报）
-  - `turn-loop-execution.test.ts`（重复提问必须重查、零执行不外发、目录搜索、注脚不外泄）
-  - `turn-loop-plan-gate.test.ts`（扩范围先通知、通知失败不执行、高重量等确认）
-  - `turn-loop-confirmation.test.ts`（旧确认被取代、notify 反复升级）
-- 探针脚本加 `--quick`（只跑 A1/A2/A4/A5 + B1）。
+- 每次运行固定开销 ~1.4s：vitest 启动 + 每个 worker 导入真实 assembly（express 导入 464ms，冷启 1.57s）
+- 最慢单用例「2.7 高重量等确认」1.85s：1 次 boot + 24 次真实 CLI spawn（每次 50ms）
 
-**验收**：三次计时 ≤3s；用例数不减少；`describe` 名保留手工用例编号；`docs/manual-test-wecom.md` §8.2 映射表同步文件名。
+两者相加已 ~3.2s。压到 3s 内只能动 Phase 0 禁止的两件事（削减用例真实执行数 / 生产代码懒加载），经确认**不做**——Phase 0 保持行为零变化。后续若要做，单列性能任务。
+
+**验收（按实际达成记录）**：三次计时 ~5.2s；用例数 287 不减少；typecheck 0 错误；`describe`/`it` 名带手工用例编号；`docs/manual-test-wecom.md` §8.2 映射表已同步四个文件名。
 
 ---
 
