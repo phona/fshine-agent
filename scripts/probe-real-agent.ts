@@ -267,8 +267,10 @@ const CASES: Case[] = [
       // 内部协议泄漏：用户不该看到宿主/申报/主 Agent 这类字样
       const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先申报|宿主|PLAN (ACTIVE|DECLINED|NEEDS)/.test(turn.reply));
       if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
-      const drift = turns.filter((turn) => /新兴五金/.test(turn.text) === false && /新兴五金/.test(turn.reply) && !/目录|账套/.test(turn.text));
-      if (drift.length) notes.push(`${drift.length} 轮回复带上了用户没问的账套`);
+      // 只在"回复把某个账套当成本轮已查结果"时才算漂移；在澄清问句里点名账套是正确行为
+      const drift = turns.filter((turn) => /新兴五金/.test(turn.text) === false && /新兴五金/.test(turn.reply)
+        && /已查|查到|余额为|凭证\s*\d|结果如下/.test(turn.reply));
+      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果`);
       return { turns, notes };
     },
   },
