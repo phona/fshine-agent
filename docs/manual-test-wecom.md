@@ -107,7 +107,7 @@ npm test -- tests/e2e/turn-loop
 
 ### 8.2 手工用例 → 自动化用例映射
 
-自动化用例按主题拆在八个文件里（共享替身 `tests/e2e/harness.ts`）：
+自动化用例按主题拆在九个文件里（共享替身 `tests/e2e/harness.ts`）：
 
 | 文件 | 覆盖 |
 |---|---|
@@ -119,6 +119,7 @@ npm test -- tests/e2e/turn-loop
 | `turn-loop-plan-steps.test.ts` | 长任务拆解（多步派单、同任务续跑、任一步失败不阻塞、通知带「第 N/M 步」） |
 | `turn-loop-interleaved.test.ts` | 多任务交织后按 continueTaskId 回到旧任务、召回走对话零调用而重查才委派、探索型请求先澄清、平台没有的能力如实说明边界 |
 | `turn-loop-concurrent.test.ts` | 并发会话里的多步计划：跨回合中断/恢复、计划中插入探索轮不污染投影、用户跳过失败步、计划步骤撞用户确认门后的去留（characterization） |
+| `turn-loop-pingpong.test.ts` | 多任务乒乓路由（三个任务 A→B→C→A→B→C 每回合续回指名的旧任务、worker 转录不串台、账本按子任务累计；续跑编号拿错——别人的任务/失效编号——零执行被拒且会话不卡死）与探索线程延续（只答一半→再澄清→补齐才委派；线程被打断后开头仍在窗口、落地是新任务，问句可经历史工具召回——characterization） |
 
 | 手工用例 | 自动化用例（文件名 > 用例名） |
 |---|---|
@@ -148,6 +149,10 @@ npm test -- tests/e2e/turn-loop
 | 2.9 计划中插入探索 | `turn-loop-concurrent.test.ts` > `7.2 计划进行中插入探索轮：零调用澄清、探索落地点是新任务、不污染计划投影` |
 | 2.9 跳过失败步 | `turn-loop-concurrent.test.ts` > `7.3 用户跳过失败步：真执行真失败的步骤在宿主账本里是 done，成败由汇总如实呈现` |
 | 2.7 确认门后的去留 | `turn-loop-concurrent.test.ts` > `7.4（characterization）计划步骤撞用户确认门：该步等确认后由宿主续跑，剩余步骤不自动继续`（characterization：确认只续该步，剩余步骤要用户再说"继续"；且累计重量越高，后续每一步都会再撞一次确认门） |
+| 2.3 多任务乒乓路由 | `turn-loop-pingpong.test.ts` > `8.1 三个任务来回乒乓：每回合按 continueTaskId 续回指名的旧任务，worker 转录不串台`（两任务交替的加量版：A→B→C→A→B→C 六回合，每次显式续回指名的旧子任务，不被最近任务卡住；账本按子任务累计，轻量委派不触发计划通知） |
+| （无对手工用例） | `turn-loop-pingpong.test.ts` > `8.2 续跑编号拿错被宿主拒绝：无权继续别人的任务、找不到失效编号——零执行且会话不被卡死`（越权/失效 continueTaskId 的全链形状：拒绝执行、不外发数字、不悄悄新开任务；原样再问即恢复） |
+| 1.6 探索线程跨轮延续 | `turn-loop-pingpong.test.ts` > `8.3 探索线程跨两轮澄清：用户只答一半时再澄清（仍零调用），补齐后才委派`（线程"开到哪了"由 Context State 的未决问题承载，用户半截答复原文留在最近轮次窗口） |
+| 1.6 探索线程被打断 | `turn-loop-pingpong.test.ts` > `8.4 探索线程被别的话题打断后回来：线程开头仍在窗口，落地的是新子任务`（characterization：归约器把新用户轮次当作旧澄清已答，问句原文被窗口挤出但仍在 Conversation Log，可经 search_history/get_messages 召回） |
 
 ### 8.3 仍需人工的部分
 
