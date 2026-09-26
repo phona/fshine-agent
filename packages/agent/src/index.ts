@@ -18,6 +18,7 @@ export {
   needsFromPlatformResponses,
   operationStepText,
   serveGateStepText,
+  PLAN_ACTIVATED_NUDGE,
   PLAN_SUBMIT_STEP,
   type PiCodingTurnDriverOptions,
   type PiCodingWorkerSession,
@@ -113,6 +114,7 @@ export {
   createTaxAgentRuntime,
   FALLBACK_TIMEOUT,
   FALLBACK_FAILURE,
+  ACTIVATED_PLAN_NOT_EXECUTED,
   NO_EXECUTION_CLARIFICATION,
   type TaxAgentRuntimeDeps,
 } from './runtime';

@@ -63,6 +63,11 @@ export interface SubagentTaskResult {
   /** Host-verified proof that this delegated turn executed at least one platform call. */
   execution?: { planId: string; version: number; calls: number };
   /**
+   * 方案已获批准（计划已激活）但本次零平台调用（P1 收尾兜底）。宿主据此说出真实状态
+   * （批准了没执行、缺的是执行），而不是让用户补充早就给过的查询范围。
+   */
+  activatedPlan?: { planId: string; version: number };
+  /**
    * 子 Agent 执行不了时的结构化线索（架构 §3 纠错环）。有它表示本轮缺信息、任务可续：
    * 宿主不把这一轮当失败，而是把线索交还 Main Agent 决定补齐还是问用户。
    */
@@ -489,6 +494,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const final: SubagentTaskResult = {
           taskId,
           ...(result.execution ? { execution: result.execution } : {}),
+          // 收尾兜底（P1）：批准了但零执行，原样上交——宿主需要这个事实才能说对状态
+          ...(result.activatedPlan ? { activatedPlan: result.activatedPlan } : {}),
           // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
           // 必须拼在 extractChangeProposal 之后——尾部注脚会破坏"整段纯 JSON"提案候选。
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,

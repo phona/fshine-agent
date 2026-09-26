@@ -302,3 +302,13 @@
 **同轮修掉的相邻缺陷**：① `operation list | head` EPIPE 崩溃（printList 裸写，同步抛掷 + 异步 error 事件双面，safeWrite + main 里 process.stdout 守卫，`303a0db` 后修）；② 验收脚本 `delegated` 判定原依赖 `worker_tool:` 文本，改判 `PLAN_SUBMIT_STEP`（宿主代提交方案帧是"真委派了"的确定性信号）；③ lint 测试"只减不增"曾实现成精确相等（合理收缩被误判），改子集断言。
 
 **已知边界**：帧预算 4 帧（phrase/计划/调用1/调用2）下，超时心跳帧最坏情况被挤掉——用户嫌企微进度烦不烦决定 `MAX_PROGRESS_FRAMES` 是否上调（一行常数）；e2e harness 未接 onStep，帧路径目前由驱动单测驱动生产接线覆盖（"测的就是跑的在接线级成立，渠道级未接"）。
+
+## 17. 收尾事实兜底：批准了但没执行（2026-09-26 真实平台实测 T5r）
+
+背景：真实平台 ask.ts 多轮脚本 T5r——用户问"本期的应收呢？"，worker 提交执行方案 → 平台批准（PLAN ACTIVE）→ 计划通知帧正常送达用户 → 此后 worker **零平台调用**就结束了回合。问题双重：① 执行闭环断裂（批准了、通知送到了，却没执行）；② 收尾文案误导——出口校验给的是 `NO_EXECUTION_CLARIFICATION`，让用户"告诉我要查询的对象和范围"，而用户早就给过了，真实状态缺的是执行不是 specification。
+
+**决策**：分两层兜，都不猜模型、都只说确定性事实。① **driver 侧补一刀**（`pi-coding-driver.ts`）：主回合成功返回后，`activePlan !== null && gateCalls === 0 && !pendingPlan` 时，向转录追加一条 user 消息 `PLAN_ACTIVATED_NUDGE` 并再跑一轮——**每回合最多补一次**（标志是 `run()` 内的局部 boolean，不是 driver 闭包的：生产上一个服务进程只有一个 driver 实例管所有回合，"生命周期一次"会让第二次同样故障永远不再追问，用户只能手动回复"继续" → 下一回合重新委派 → 重新计划通知 → 再坏 → 再说"继续"，一个把用户卷进去的重试循环；而补一刀多花的只是一个模型轮，比它替代的手动循环便宜得多。系统性故障的根由 `activated_plan_not_executed` 告警日志交给运维，不需要用"只补一次"当信号。回合内仍然只补一次：内联单次，绝不在同一回合里反复推同一个模型）。消息形状与宿主注入本轮用户消息完全一致（`role/content/timestamp`，content 为字符串），SDK 的 `continue()` 因此照常接上（末条是 assistant 时它本就拒绝续跑）。补刀后仍零执行 → 结果带新字段 `activatedPlan: { planId, version }`（与 `execution` 互斥）。② **runtime 侧确定性文案**（`runtime.ts`）：`turn.activatedPlan` 存在时，在 C25 出口校验的"子 Agent 说明 + 注脚"与 `NO_EXECUTION_CLARIFICATION` **之间**插入新状态分支，回复 `ACTIVATED_PLAN_NOT_EXECUTED`（说清真实状态 + 给下一步"回复继续按已批准计划重跑"）；worker 留了有价值的说明（非空、无财务数字、且不是那句通用兜底本身）才附在后面。event `activated_plan_not_executed` 与 `delegate_without_execution` 同样式留痕。
+
+**验收**：47 文件 439 用例基线 → 49 文件 455 用例（新增 16 例：driver 补一刀 9 例——补刀生效/无效/同 driver 第二次仍补一刀（每回合独立）/确认门不补/超时不补/取消不补/模型出错不补/追问轮自己失败仍上报事实/无计划不补；runtime 5 例——纯状态文案、说明附后、注脚剥离、通用兜底不附、有 execution 走正常路径；e2e 3 例——真 SQLite 全链：通知已送达+零执行、说明带数字不附注、回复"继续"后重新执行闭环合上）。driver 单测只替身 SDK 的 `createAgentSession`（假 agent 回放每轮 bash），G1 门、计划 CLI 替身、`gateCalls` 计数、`execution/activatedPlan` 合成都走生产代码。
+
+**已知边界**：① 补一刀以**每回合**为界（标志在 `run()` 内）：同一进程里下一个回合再遇到同样形态仍然会追问一次，只有同一回合内不重复追问——手动重试循环比一个模型轮贵；② 计划模式下若模型随后自行汇总（`planModeTurn` 且无财务数字），走的是既有的"计划步骤转达"分支，新分支不抢先——C25 既有行为一动不动；③ `conversation_unsourced_amounts` 探测器在计划模式汇总路径下仍可达（那里不提前 return），该状态下金额同样无来源，探测价值不变，故未加 `!turn.activatedPlan`；④ "继续"之后由 Main Agent 重新委派同一请求（同一 calls 重新评估即再激活），不依赖宿主记住 taskId。

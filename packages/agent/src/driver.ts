@@ -89,6 +89,12 @@ export interface TurnDriverResult {
    * least one executed call. Absent this, the host must not let the turn's text reach the user.
    */
   execution?: { planId: string; version: number; calls: number };
+  /**
+   * 方案已获批准（计划已激活）但本次没有执行任何平台调用（P1 收尾兜底）。
+   * 与 execution 互斥：有 execution 就说明真执行过。宿主据此给出确定性收尾文案
+   * （"批准了但没执行，回复继续重跑"），而不是让用户补充早就给过的查询范围。
+   */
+  activatedPlan?: { planId: string; version: number };
 }
 
 export interface TurnDriver {

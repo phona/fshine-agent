@@ -17,7 +17,7 @@ import {
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type DriverMessage, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationLabels, type OperationLabels } from './operation-labels';
@@ -37,6 +37,15 @@ const MAX_DECLINED_PLANS_PER_TASK = 5;
  * （不出现任何领域词），用户在 60-180s 的单轮里由此知道"卡在哪一步"。
  */
 export const PLAN_SUBMIT_STEP = '正在向平台提交执行方案…';
+
+/**
+ * 计划已激活却零执行的确定性补一刀（P1 收尾事实兜底，2026-09-26 真实平台实测）。
+ * 实测形态：方案已批准、计划通知已送达用户，worker 却不再发起任何平台调用就结束回合
+ * ——主 Agent 只能给出"本轮没有产生任何平台查询"的兜底，反过来要求用户补充早就给过的
+ * 查询范围。宿主在此追问一次，把"批准了但没执行"这个真实状态推回执行面。
+ * 措辞与业务无关（不出现任何领域词）：只陈述确定性事实与明确指令，不代平台说话。
+ */
+export const PLAN_ACTIVATED_NUDGE = '宿主已批准你的执行方案（计划已激活）。请立即按方案中的 calls 执行查询，不要再次提交方案。如确实无法执行，说明具体阻碍。';
 
 /**
  * 参数摘要拼接：多个用 · 分隔，没有参数就是空串。
@@ -162,6 +171,14 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      // 「计划已激活却零执行」的补一刀边界：**每回合一次**，不是整个 driver 生命周期一次。
+      // 生产上一个服务进程只有一个 driver 实例管所有回合，"生命周期一次"会让第二次同样故障
+      // （可能一小时后、另一个用户）永远不再追问，用户只能手动回复"继续" → 下一回合重新委派
+      // → 重新计划通知 → 再坏 → 再说"继续"，一个把用户卷进去的重试循环；而补一刀多花的只
+      // 是一个模型轮，比它替代的那条手动循环便宜得多。系统性故障的根由
+      // activated_plan_not_executed 告警日志交给运维，不需要用"只补一次"当信号。
+      // 回合内仍然只补一次（内联单次，见下方 if）：绝不在同一回合里反复推同一个模型。
+      let activatedPlanNudged = false;
       let pendingPlan: PendingPlanConfirmation | undefined;
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         cwd: input.cwd,
@@ -236,13 +253,46 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           const proof = execution();
           return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
         }
+        // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
+        // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
+        // 就如实上报 activatedPlan，由宿主把真实状态说给用户；绝不在同一回合里反复推同一个
+        // 模型。等用户确认门（pendingPlan）不补：那一步本来就停在"等确认"，不是执行面断裂。
+        if (!activatedPlanNudged && !pendingPlan && gateCalls === 0 && currentPlan() !== null) {
+          activatedPlanNudged = true;
+          // 消息形状与宿主注入本轮用户消息时完全一致（role / content / timestamp 三个键），
+          // 转录里既有 user 消息就是这个形状，SDK 的消息转换因此走同一条路。
+          session.agent.state.messages.push({
+            role: 'user',
+            content: PLAN_ACTIVATED_NUDGE,
+            timestamp: Date.now(),
+          } as unknown as DriverMessage);
+          // 沿用现有 abortTimer/deadline：这一轮若超时/取消，按上面的 timedOut/cancelled 路径返回
+          try {
+            await session.agent.continue();
+          } catch (error) {
+            // 追问这一轮自己失败（网络/模型抖动）不吞掉事实：仍然走下面的结果计算，
+            // 由 activatedPlan 把"批准了没执行"交还宿主——用户看到的不是笼统的失败话术。
+            console.error(JSON.stringify({
+              event: 'pi_coding_worker_error',
+              stage: 'activated_plan_nudge',
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+            }));
+          }
+          if (timedOut || cancelled || session.agent.state.errorMessage) {
+            const proof = execution();
+            return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+          }
+        }
         const proof = execution();
         const clue = needs();
+        const plan = currentPlan();
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
           ...(proof ? { execution: proof } : {}),
+          // 补刀后仍是"计划激活 + 零调用"：执行闭环断裂的事实，交给宿主说清状态
+          ...(!proof && plan ? { activatedPlan: { planId: plan.planId, version: plan.version } } : {}),
           ...(pendingPlan ? { pendingPlan } : {}),
           ...(clue ? { needs: clue } : {}),
         };

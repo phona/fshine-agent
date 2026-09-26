@@ -24,6 +24,15 @@ export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员'
 /** Fail-closed reply whenever a turn claims real-time data but produced no platform execution. */
 export const NO_EXECUTION_CLARIFICATION = '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。';
 
+/**
+ * 方案已获批准但查询没有执行时的确定性收尾文案（P1 收尾事实兜底）。
+ * 与 NO_EXECUTION_CLARIFICATION 的区别是事实本身：用户早就给过查询对象和范围，缺的是
+ * 执行不是 specification——再让用户"补充范围"就是误导。因此这里只说真实状态
+ * （批准了、通知送到了、查询没跑），并给出明确的下一步（回复"继续"按已批准计划重跑）。
+ * 措辞与业务无关（不出现任何领域词），重启执行的动作由用户一句话触发。
+ */
+export const ACTIVATED_PLAN_NOT_EXECUTED = '执行方案已获批准（通知已送达），但查询没有执行。请回复“继续”，我按已批准的计划重新执行；如想改查询范围，直接告诉我。';
+
 /** Appended when the Main Agent answers without declaring the turn's intent. */
 const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。';
 
@@ -275,6 +284,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         intent: TurnDeclaration | null;
         execution: TurnExecution | null;
         pendingPlan: PendingPlanConfirmation | null;
+        /** 方案已获批准但本次零执行（P1 收尾兜底）：真实状态是"批准了没执行"。 */
+        activatedPlan: { planId: string; version: number } | null;
         /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
         delegationFailed: boolean;
         /** 纠错环（架构 §3）：本回合已发生几轮"子 Agent 回报缺信息"。0 = 没有回路。 */
@@ -289,7 +300,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         needsStepIndex: number | null;
         /** 消歧回合：用户从多个未完成任务中选定的计划。绑定由宿主强制，模型不可改绑。 */
         preferredPlanId: string | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, preferredPlanId: planChoice?.planId ?? null };
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, activatedPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, preferredPlanId: planChoice?.planId ?? null };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -475,6 +486,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 单步模式保持旧语义——这一轮的结论只由这一次委派证明。
               turn.execution = step ? (delegated.execution ?? turn.execution) : (delegated.execution ?? null);
               turn.pendingPlan = delegated.pendingPlan ?? null;
+              // 收尾兜底（P1）：批准了但零执行。按"事实持续"累积而不是每轮重置——计划在平台侧
+              // 仍然激活着，本回合任一步报过这个事实，它就一直成立。
+              turn.activatedPlan = delegated.activatedPlan ?? turn.activatedPlan;
               // 步骤事实的结局：taskId 写进该步的最后一条事实（spec：事后回填）。
               // 停在用户确认门的步骤不写结局——它还没完，投影里保持 started，跨回合可续。
               if (step && planId && !delegated.pendingPlan) {
@@ -597,6 +611,22 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           }));
         } else {
           console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId, ...(needsLoop ? { needsRounds: turn.needsRounds } : planModeTurn ? { planSteps: turn.planSteps } : {}) }));
+          // 方案已获批准但查询没执行（P1 收尾兜底）：先于下面两条转达/兜底。真实状态是
+          // "批准了、通知送到了、查询没跑"，缺的是执行——不能再让用户补充早就给过的范围。
+          if (turn.activatedPlan) {
+            // worker 可能顺手留了一句有价值的说明（具体阻碍）：带上，但只在不带财务数字、
+            // 且不是那句通用兜底时才算"有价值"——否则附在状态文案后面只会稀释它。
+            const note = stripFootprint(result.text).trim();
+            const useful = Boolean(note) && !hasFinancialFigure(note) && note !== NO_EXECUTION_CLARIFICATION;
+            console.warn(JSON.stringify({
+              event: 'activated_plan_not_executed',
+              requestId: ctx.requestId,
+              planId: turn.activatedPlan.planId,
+              version: turn.activatedPlan.version,
+              ...(useful ? { withWorkerNote: true } : {}),
+            }));
+            return await finishDirectReply(useful ? `${ACTIVATED_PLAN_NOT_EXECUTED}\n\n${note}` : ACTIVATED_PLAN_NOT_EXECUTED, 'activated_plan_not_executed');
+          }
           // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
           // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
           if (explained && !hasFinancialFigure(explained)) {

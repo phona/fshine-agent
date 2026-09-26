@@ -218,7 +218,7 @@ function silentDriver() {
 }
 
 export type WorkerStep =
-  | { plan: PlanCall[]; stopAtConfirm?: boolean }
+  | { plan: PlanCall[]; stopAtConfirm?: boolean; stopAfterActivate?: boolean }
   | { execute: PlanCall[] }
   | { need: SubagentNeeds; text?: string }
   | { end: true }
@@ -253,6 +253,9 @@ function gatedWorker(script: WorkerStep[]) {
       let pendingPlan: { planId: string; version: number; taskId: string; decision: 'confirm'; userText: string; evaluation: unknown } | undefined;
       // 纠错环（架构 §3）：执行不了就回报"缺什么/为什么/建议用户提供什么"，不执行任何调用。
       let needs: SubagentNeeds | undefined;
+      // 收尾兜底（P1）：方案已批准但零执行。真实 worker 由 pi-coding-driver 补一刀后
+      // 仍然零调用，才把这个事实上报宿主——这里直接复刻那个终局状态。
+      let activatedPlan: { planId: string; version: number } | undefined;
       for (let step = 0; step < script.length; step += 1) {
         const current = script[Math.min(cursor, script.length - 1)]!;
         cursor += 1;
@@ -310,6 +313,12 @@ function gatedWorker(script: WorkerStep[]) {
           continue;
         }
         if (plan.status !== 'active') { parts.push(plan.message); continue; }
+        if (current.stopAfterActivate) {
+          // 计划已激活（通知已送达）但一个调用都不发起：执行闭环断裂的终局
+          activatedPlan = { planId: plan.planId, version: plan.version };
+          parts.push(plan.message);
+          continue;
+        }
         proof = { planId: plan.planId, version: plan.version, calls: 0 };
         for (const call of current.plan) {
           // 与真实 worker 一致：bash 只允许 bin/17dz，且必须走网关形式——
@@ -332,6 +341,7 @@ function gatedWorker(script: WorkerStep[]) {
         text,
         messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
         ...(proof ? { execution: proof } : {}),
+        ...(activatedPlan ? { activatedPlan } : {}),
         ...(pendingPlan ? { pendingPlan } : {}),
         ...(needs ? { needs } : {}),
       };

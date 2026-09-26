@@ -3,7 +3,7 @@ import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
-import { createTaxAgentRuntime, FALLBACK_FAILURE, FALLBACK_TIMEOUT } from './src/runtime';
+import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION } from './src/runtime';
 import { FakeSessionRepo } from './test-helpers';
 
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -121,6 +121,96 @@ describe('createTaxAgentRuntime', () => {
 
     expect(reply.text).not.toContain('42 元');
     expect(reply.text).toContain('没有产生任何平台查询');
+  });
+
+  // ── P1 收尾兜底：方案已批准但查询没有执行 ────────────────────────────
+  // 2026-09-26 真实平台实测：方案已批准、计划通知已送达用户，worker 却零平台调用就结束
+  // 回合。那时的真实状态是"批准了没执行"——缺的是执行，不是用户早就给过的查询范围。
+  // 因此这条状态分支必须先于"子 Agent 说明 + 注脚"和 NO_EXECUTION_CLARIFICATION。
+
+  it('P1.1 方案已批准但零执行时，说清真实状态而不是让用户补充查询范围', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { text: '幻东 202608 应收余额大概是 42 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 方案已批准（计划激活）但一个调用都没发起；worker 的文本还带着编造的数字
+      platformTask: subagent(async () => ({ taskId: 'task_activated', text: '幻东 202608 应收余额大概是 42 元。', activatedPlan: { planId: 'plan_active', version: 3 } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_plan' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toBe(ACTIVATED_PLAN_NOT_EXECUTED);
+    expect(reply.text).not.toContain('没有产生任何平台查询');
+    expect(reply.text).not.toContain('42 元');
+  });
+
+  it('P1.2 worker 说明了具体阻碍时，说明附在状态文案后面', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({ taskId: 'task_activated', text: '计划已批准，但平台侧连接被拒，本轮没有发起查询。', activatedPlan: { planId: 'plan_active', version: 3 } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_note' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toBe(`${ACTIVATED_PLAN_NOT_EXECUTED}\n\n计划已批准，但平台侧连接被拒，本轮没有发起查询。`);
+  });
+
+  it('P1.3 执行面注脚不外发：附上的说明剥掉〔本轮执行面〕', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({ taskId: 'task_activated', text: '计划已批准但执行入口无响应。\n\n〔本轮执行面：0 次 bin/17dz 调用〕', activatedPlan: { planId: 'plan_active', version: 3 } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_footprint' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toBe(`${ACTIVATED_PLAN_NOT_EXECUTED}\n\n计划已批准但执行入口无响应。`);
+    expect(reply.text).not.toContain('本轮执行面');
+  });
+
+  it('P1.4 worker 只复述通用兜底时不附注：那句话对用户没有信息量', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({ taskId: 'task_activated', text: NO_EXECUTION_CLARIFICATION, activatedPlan: { planId: 'plan_active', version: 3 } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_generic' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toBe(ACTIVATED_PLAN_NOT_EXECUTED);
+  });
+
+  it('P1.5 补刀生效（有 execution）时走正常路径，不再说"批准了没执行"', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 同一回合里先激活后执行：execution 与 activatedPlan 不会同时出现（driver 侧互斥）
+      platformTask: subagent(async () => ({ taskId: 'task_done', text: '幻东 202608 应收余额为 51 元。', execution: { planId: 'plan_active', version: 3, calls: 1 } })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_executed' }), '查幻东账套的应收账款');
+
+    expect(reply.text).toBe('幻东 202608 应收余额为 51 元。');
   });
 
   it('R3 Main Agent 跳过 route_current_turn 时重试一次，再跳过则失败关闭', async () => {
