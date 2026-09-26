@@ -15,3 +15,4 @@ config/agent.yaml
 
 # 本地运行产物（探针报告、平台 mock 状态等）
 .runtime/
+.env.real
