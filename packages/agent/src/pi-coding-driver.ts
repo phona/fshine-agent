@@ -171,6 +171,14 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      // 第一个被放行的 bash 调用发生时的计划身份（latch，见 onAllowedBash）。
+      // 为什么不在结果时刻读 currentPlan()：worker 常常在真实调用之后继续重提方案——
+      // beforeToolCall 里 activePlan 先置空再 evaluateAndActivatePlan，后续提交可能 scope
+      // 识别失败/被拒，最终 activePlan 停在上一次提交后的 null。那时调用真发生过
+      // （gateCalls > 0）但 currentPlan() 已是 null。执行足迹要回答的是"本轮有没有真实
+      // 触达平台、当时挂在哪份计划下"，与回合收尾时计划恰好是什么状态无关，所以身份在
+      // 放行瞬间 latch 下来，而不是结果时刻现读。
+      let executedPlan: { planId: string; version: number } | null = null;
       // 「计划已激活却零执行」的补一刀边界：**每回合一次**，不是整个 driver 生命周期一次。
       // 生产上一个服务进程只有一个 driver 实例管所有回合，"生命周期一次"会让第二次同样故障
       // （可能一小时后、另一个用户）永远不再追问，用户只能手动回复"继续" → 下一回合重新委派
@@ -194,7 +202,19 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           onStep: input.onStep,
           requestId: input.requestId,
           audit: options.serveGateAudit,
-          onAllowedBash: () => { gateCalls += 1; },
+          onAllowedBash: () => {
+            gateCalls += 1;
+            // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
+            // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
+            // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
+            // （放行不变量被破坏的漏洞），不强行造身份、也不在此绕过——保持 executedPlan
+            // 为空，execution() 会退回 currentPlan() 并把 calls 如实报成 gateCalls，
+            // "执行发生过"这个事实不因身份空缺被抹掉。
+            if (!executedPlan) {
+              const active = currentPlan();
+              if (active) executedPlan = active;
+            }
+          },
         }),
         onStep: input.onStep,
         knowledgePaths: input.knowledgePaths,
@@ -207,14 +227,31 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         entitySources: input.entitySources,
       });
       const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
-      // Host-verifiable proof that this delegated turn really executed against the platform:
-      // an activated plan plus at least one allowed bin/17dz invocation.
+      // Host-verifiable proof that this delegated turn really executed against the platform.
+      // 判据只有一条：至少一次被放行的 bin/17dz 调用（gateCalls > 0）。
+      //
+      // 为什么 gateCalls > 0 即充分、不再要求"结果时刻计划仍激活"：G1 门对 bash 的放行
+      // 分支以 planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），因此每一个
+      // 被计数的调用都发生在"当时有活跃计划"的瞬间——放行本身就是计划活跃的证明。worker
+      // 完全可能在真实调用之后继续重提方案并被拒（activePlan 停在上次提交后的 null），但
+      // "调用发生过"是既成事实，与回合收尾时计划恰好是什么状态无关。旧实现
+      // `plan && gateCalls > 0` 把结果时刻的计划状态当成执行与否的条件，真实调用过后计划
+      // 被重置时就误判为空——2026-09-26 实测 A3/A4：search-account-sets / query-receivables
+      // 真实 exit 0，回复却是"本轮没有产生任何平台查询"（C25 兜底误发）。
+      //
+      // 计划身份用放行瞬间 latch 的 executedPlan；latch 为空（门的放行不变量被破坏，理论
+      // 不可达）时退回 currentPlan()，再为空则 planId 记 ''、version 记 0——calls 仍如实
+      // 报 gateCalls，"执行发生过"这个事实绝不被计划身份的空缺抹掉。
       const execution = (): { planId: string; version: number; calls: number } | undefined => {
-        const plan = currentPlan();
-        return plan && gateCalls > 0 ? { planId: plan.planId, version: plan.version, calls: gateCalls } : undefined;
+        if (gateCalls <= 0) return undefined;
+        const plan = executedPlan ?? currentPlan();
+        return { planId: plan?.planId ?? '', version: plan?.version ?? 0, calls: gateCalls };
       };
       // 纠错环（架构 §3）：执行不了就回报"缺什么"。只在**没有执行痕迹**时派生——
-      // 真执行过的回合不缺信息，把成功的结果拖进无谓的追问只会打扰用户。
+      // execution() 为真（≥1 次被放行的调用）即认为执行面跑过，那类回合不缺信息，把已经
+      // 取到的结果拖进无谓的追问只会打扰用户。这与"足迹以 gateCalls > 0 为准"是同一语义：
+      // 调用发生过就是执行过，与收尾时计划状态无关。修复后真实执行过的回合（哪怕计划随后
+      // 被重置）不再派生 needs 线索——执行面跑过的回合确实不缺信息。
       // 两个来源都是确定性的：宿主计划拦截的原因原文、平台 RESULT 信封的错误码。
       const needs = (): SubagentNeeds | undefined => {
         if (execution()) return undefined;
@@ -291,7 +328,11 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           messages: session.agent.state.messages,
           footprint: footprint(),
           ...(proof ? { execution: proof } : {}),
-          // 补刀后仍是"计划激活 + 零调用"：执行闭环断裂的事实，交给宿主说清状态
+          // 补刀后仍是"计划激活 + 零调用"：执行闭环断裂的事实，交给宿主说清状态。
+          // 与 execution 互斥：proof 为真当且仅当 gateCalls > 0（见 execution()），此时
+          // `!proof` 为假，本分支必然不进——真实执行过的回合（哪怕计划随后被重置、currentPlan()
+          // 已为 null）带 execution 而不带 activatedPlan。activatedPlan 只在零调用且计划仍激活
+          // 时出现，"批准了但没执行"这个事实因此不会被 execution 稀释或重复上报。
           ...(!proof && plan ? { activatedPlan: { planId: plan.planId, version: plan.version } } : {}),
           ...(pendingPlan ? { pendingPlan } : {}),
           ...(clue ? { needs: clue } : {}),
