@@ -374,7 +374,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
 
       const profile = await resolveContextProfile(options.profiles, profileId);
       const existing = args.taskId ? await options.tasks.get(args.taskId) : null;
-      if (args.taskId && !existing) throw new ToolUserError('未找到可继续的 17dz 任务。');
+      if (args.taskId && !existing) throw new ToolUserError('未找到可继续的 17dz 任务：编号无效或已过期。请告诉我要查的账套和期间，我重新查一次。');
       if (existing && (existing.principalId !== ctx.trusted.principalId || existing.parentSessionId !== ctx.trusted.sessionId)) {
         throw new ToolUserError('无权继续该 17dz 任务。');
       }
