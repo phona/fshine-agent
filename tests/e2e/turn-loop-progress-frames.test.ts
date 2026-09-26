@@ -1,0 +1,179 @@
+/**
+ * 离线全链 e2e：一次委派回合产生的进度帧（D1）。共享替身见 ./harness.ts。
+ *
+ * 背景：harness 以前只把消息喂给渠道适配器，从不校验 handler 收到的 progress——
+ * 生产企微 adapter 是传的（channel-wecom adapter.ts 的 dispatchMessage），帧级行为
+ * 因此完全没有离线覆盖。这里把采集点补在 handler 入口（见 harness.ts 的 Turn）。
+ *
+ * 链路保真度：真 SQLite、真 assembly、真 ContextTaskRunner/runtime、真 G1 工具门与
+ * 计划门；假的只有两处——pi-coding-agent 的 AgentSession（脚本化假 agent 回放每轮
+ * 发起哪些 bash）与平台计划 CLI 的应答（提交即激活的 execute 档）。帧的文本由生产
+ * 渲染层合成（operationStepText + 平台清单第 5 列派生的 label 表），测试不写死措辞。
+ *
+ * 守三件事：
+ *   ① 委派回合真的产出 `正在…` 形态的用户可见帧（不是内部事件名）；
+ *   ② 内部事件名（SDK 会话事件的 worker_ 前缀形态）不出厂；
+ *   ③ 连续重复帧被压制：worker 连发两次相同调用只外发一帧——生产企微 progress 只有
+ *      4 帧硬顶，重复帧会挤占真实进度帧的预算（真实平台战斗测试实测的 churn）。
+ */
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import { createPiCodingTurnDriver, PLAN_SUBMIT_STEP } from '../../packages/agent/src/pi-coding-driver';
+import { boot, mainDriver, type Turn } from './harness';
+
+/** 假 agent 的单个模型回合：要发起哪些 bash、收尾文本。 */
+type FakeTurn = { bash?: string[]; text?: string };
+
+const fake = vi.hoisted(() => {
+  type SessionRecord = { turns: FakeTurn[]; rounds: number; messages: unknown[] };
+  const records: SessionRecord[] = [];
+  let script: FakeTurn[] = [];
+  return {
+    records,
+    setScript: (turns: FakeTurn[]) => { script = turns; },
+    makeSession: () => {
+      const record: SessionRecord = { turns: script, rounds: 0, messages: [] };
+      records.push(record);
+      const state: { errorMessage?: string; messages: unknown[] } = {
+        errorMessage: undefined,
+        // driver 会整块替换 messages（恢复宿主转录）：代理到同一个数组，两边看到同一份
+        get messages() { return record.messages; },
+        set messages(next: unknown[]) { record.messages = next; },
+      };
+      const agent = {
+        state,
+        beforeToolCall: undefined as unknown,
+        abort: () => {},
+        continue: async () => {
+          record.rounds += 1;
+          const turn = record.turns[Math.min(record.rounds - 1, record.turns.length - 1)];
+          if (!turn) return;
+          let index = 0;
+          for (const command of turn.bash ?? []) {
+            index += 1;
+            const ctx = {
+              assistantMessage: {},
+              toolCall: { id: `call_${record.rounds}_${index}`, type: 'toolCall', name: 'bash', arguments: { command } },
+              args: { command },
+              context: {},
+            };
+            // 走生产接线：G1 计划门 + serve gate（放行/拦截都留痕，放行才计 gateCalls）
+            const verdict = await (agent.beforeToolCall as (c: unknown) => Promise<{ block?: boolean; reason?: string } | undefined>)(ctx);
+            record.messages.push({
+              role: 'toolResult',
+              toolCallId: ctx.toolCall.id,
+              toolName: 'bash',
+              content: [{ type: 'text', text: verdict?.block ? (verdict.reason ?? '') : 'RESULT {"v":1,"op":"finance.query-receivables","status":"completed","data":{"ok":true},"error":null}' }],
+              isError: Boolean(verdict?.block),
+              timestamp: Date.now(),
+            });
+          }
+          if (turn.text) {
+            record.messages.push({ role: 'assistant', content: [{ type: 'text', text: turn.text }], stopReason: 'stop', timestamp: Date.now() });
+          }
+        },
+      };
+      return { session: { agent, dispose: () => {} } };
+    },
+  };
+});
+
+vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, createAgentSession: async () => fake.makeSession() };
+});
+
+const agentDirs: string[] = [];
+afterEach(() => { for (const dir of agentDirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+
+/** 首条 bash：提交 JSON calls 方案（实体都在用户消息里，逐字包含判定放行）。 */
+const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202606"]}]}';
+/** 真实平台查询：计划已激活 → G1 放行 → 按 label 表出帧。 */
+const QUERY_COMMAND = 'bin/17dz query query-receivables.js --query 幻辰财税 --period 202606';
+/** 换一个期间的同类查询：帧文本不同，用来在两条相同帧之间"插一件事"。 */
+const QUERY_COMMAND_2 = 'bin/17dz query query-receivables.js --query 幻辰财税 --period 202607';
+
+/** label 表直接注入（平台清单第 5 列的替身）：单测里绝不 spawn 平台 CLI 派生。 */
+const OPERATION_LABELS = new Map([['query-receivables', '读取余额']]);
+const QUERY_STEP = '正在读取余额「幻辰财税」·202606…';
+const QUERY_STEP_2 = '正在读取余额「幻辰财税」·202607…';
+
+/** 计划 CLI 替身：本任务没有既有计划，提交即激活（execute 档，无需通知/确认）。 */
+const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
+  if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_frames', planId: null, version: null, status: 'none' }), stderr: '' };
+  if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
+    planId: 'plan_frames', version: 3, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
+  }), stderr: '' };
+  throw new Error(`unexpected CLI call: ${args.join(' ')}`);
+};
+
+/** 真 driver（只替身 SDK 会话与计划 CLI）：帧的合成走生产代码。 */
+function workerDriver() {
+  const agentDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-frames-'));
+  agentDirs.push(agentDir);
+  return createPiCodingTurnDriver({
+    env: process.env,
+    agentDir,
+    operationLabels: OPERATION_LABELS,
+    planCliRunner: activatingPlanRunner,
+  });
+}
+
+/** 一次委派回合：主 Agent 申报 delegate，worker 按脚本回放 bash。 */
+async function delegatedTurn(turns: FakeTurn[]): Promise<Turn> {
+  fake.setScript(turns);
+  const booted = await boot({
+    main: mainDriver([{ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额' }]),
+    worker: workerDriver(),
+  });
+  const turn = await booted.turn('查一下幻辰财税 202606 的应收账款余额');
+  // 真 driver 真的跑了一个 worker 会话（替身只替换 SDK 会话与计划 CLI 应答）
+  expect(fake.records.length).toBeGreaterThan(0);
+  return turn;
+}
+
+describe('离线全链 e2e：委派回合的进度帧', () => {
+  it('①② 委派回合产出「正在…」形态的用户可见帧，内部事件名不出厂', async () => {
+    const turn = await delegatedTurn([
+      { bash: [PLAN_COMMAND, QUERY_COMMAND], text: '幻辰财税 202606 应收账款余额为 61000 元。' },
+    ]);
+
+    // 帧的形状是生产模板 operationStepText：正在${label}${参数摘要}…
+    expect(turn.steps).toContain(QUERY_STEP);
+    expect(turn.steps.every((step) => /^正在.+…$/.test(step))).toBe(true);
+    // 内部事件名（SDK 会话事件 / 计划协议状态）不出厂：用户只看得到人类可读短语
+    for (const step of turn.steps) {
+      expect(step).not.toContain('worker_');
+      expect(step).not.toMatch(/tool_execution_start|agent_start|agent_end|PLAN (ACTIVE|DECLINED|STOP)/);
+      expect(step).not.toContain('query-receivables.js');
+    }
+    // 回复本身不带帧文本的重复堆叠：帧走流式通道，finish 帧只给结论
+    expect(turn.text).toContain('61000 元');
+    expect(turn.text).not.toContain('正在读取余额');
+    // 单次调用的轻量委派不走计划通知门（通知帧由计划门的用例覆盖）
+    expect(turn.notices).toEqual([]);
+  });
+
+  it('③ 连续重复帧被压制：连发两次相同调用只外发一帧', async () => {
+    const turn = await delegatedTurn([
+      // worker 重提同一方案两次 + 对同一对象连发两次相同查询：四种发射各只有一条唯一文本
+      { bash: [PLAN_COMMAND, PLAN_COMMAND, QUERY_COMMAND, QUERY_COMMAND], text: '幻辰财税 202606 应收账款余额为 61000 元。' },
+    ]);
+
+    // 提交帧两次 → 一帧；查询帧两次 → 一帧。真实进度帧的预算（企微 4 帧硬顶）不被 churn 挤占
+    expect(turn.steps).toEqual([PLAN_SUBMIT_STEP, QUERY_STEP]);
+  });
+
+  it('③ 补：中间插过别的帧后相同文本放行（连续去重不是永久去重）', async () => {
+    const turn = await delegatedTurn([
+      { bash: [PLAN_COMMAND, PLAN_COMMAND, QUERY_COMMAND, QUERY_COMMAND_2, PLAN_COMMAND, QUERY_COMMAND], text: '幻辰财税两个期间都查完了。' },
+    ]);
+
+    // 最后一次查询与第一次文本相同，但中间插过别的帧——那是合法的新动作，必须放行
+    expect(turn.steps).toEqual([PLAN_SUBMIT_STEP, QUERY_STEP, QUERY_STEP_2, PLAN_SUBMIT_STEP, QUERY_STEP]);
+  });
+});

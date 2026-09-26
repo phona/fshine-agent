@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
+import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -354,16 +355,38 @@ function gatedWorker(script: WorkerStep[]) {
 interface Boot {
   /** 以指定企微用户身份发一句话，返回用户最终看到的文本。 */
   send(text: string, options?: { userid?: string; group?: boolean }): Promise<string>;
+  /** 同上，同时带回这一回合产生的进度帧与计划通知帧（帧级断言用）。 */
+  turn(text: string, options?: { userid?: string; group?: boolean }): Promise<Turn>;
   sdk: RecordingSdkClient;
   assembly: ServerAssembly;
 }
 
+/**
+ * 一次企微回合的结果：用户看到的回复 + 这一回合产生的进度帧与计划通知帧。
+ *
+ * `steps` 采集点在 handler 入口（replyHandler 外层）：生产企微 adapter 就是把
+ * progress 传给 handler 的，harness 以前不走这条路，帧级断言只能看 adapter 投递
+ * 出来的那一帧——那是保真缺口。渠道侧的节流（3s 最小间隔 + 4 帧硬顶）是投递策略，
+ * 不是产生策略，所以采集必须贴在 handler 上，才能看到这一回合真正产生了哪些帧。
+ */
+export interface Turn {
+  /** 用户最终看到的回复文本（finish 帧内容，与 send() 的返回值一字不差）。 */
+  text: string;
+  /** 进度帧原文（未经渠道节流）。 */
+  steps: string[];
+  /** 计划通知帧原文（与 sdk.noticeTexts() 同源，按回合归集）。 */
+  notices: string[];
+}
+
+/** 帧采集按 messageId 归集：并发会话的各个回合互不串味。 */
+const turnFrames = new Map<string, { steps: string[]; notices: string[] }>();
+
 /** 构造一条企微文本消息帧（与官方 SDK 投给适配器的形状一致）。 */
-function wecomText(userid: string, content: string, options: { group?: boolean } = {}): {
+function wecomText(userid: string, content: string, options: { group?: boolean; messageId?: string } = {}): {
   headers: { req_id: string };
   body: Record<string, unknown>;
 } {
-  const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+  const messageId = options.messageId ?? `msg_${Math.random().toString(36).slice(2, 10)}`;
   const mentioned = options.group ? `@幻晟记账助手 ${content}` : content;
   return {
     headers: { req_id: `req_${messageId}` },
@@ -394,15 +417,31 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
   await assembly.store.principalScopes.upsert({
     wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true,
   });
-  const starting = assembly.channel.start(assembly.replyHandler);
+  // 生产保真：adapter 把 progress/notice 传给 handler（channel-wecom adapter.ts 的
+  // dispatchMessage）。这里只在外面包一层记录，生产链路一行不改——notices 的送达屏障
+  // （失败必须抛给调用方）原样保留，进度帧也照常送给 adapter 投递。
+  const recordingHandler: ReplyHandler = async (message, progress, notice) => {
+    const frames = turnFrames.get(message.messageId) ?? { steps: [], notices: [] };
+    turnFrames.set(message.messageId, frames);
+    const recordingProgress: ProgressFn | undefined = progress
+      ? (text) => { frames.steps.push(text); progress(text); }
+      : undefined;
+    const recordingNotice: NoticeFn | undefined = notice
+      ? async (text) => { frames.notices.push(text); await notice(text); }
+      : undefined;
+    return assembly.replyHandler(message, recordingProgress, recordingNotice);
+  };
+  const starting = assembly.channel.start(recordingHandler);
   sdk.emit('authenticated');
   await starting;
-  return {
-    sdk,
-    assembly,
-    send: async (text: string, options: { userid?: string; group?: boolean } = {}) => {
-      const before = sdk.frames.filter((frame) => frame.finish).length;
-      sdk.emit('message.text', wecomText(options.userid ?? 'e2e_user', text, { group: options.group }));
+  /** 发一句话并等到这一回合的 finish 帧；帧采集按 messageId 预先登记同一份对象。 */
+  const deliver = (text: string, options: { userid?: string; group?: boolean } = {}): { done: Promise<string>; frames: { steps: string[]; notices: string[] }; messageId: string } => {
+    const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+    const frames = { steps: [] as string[], notices: [] as string[] };
+    turnFrames.set(messageId, frames);
+    const before = sdk.frames.filter((frame) => frame.finish).length;
+    sdk.emit('message.text', wecomText(options.userid ?? 'e2e_user', text, { group: options.group, messageId }));
+    const done = (async () => {
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
@@ -410,7 +449,21 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
         await new Promise((resolve) => setTimeout(resolve, 10));
       }
       throw new Error(`等待最终回复超时；已收帧: ${JSON.stringify(sdk.frames)}`);
-    },
+    })();
+    return { done, frames, messageId };
+  };
+  const turn = async (text: string, options: { userid?: string; group?: boolean } = {}): Promise<Turn> => {
+    const { done, frames, messageId } = deliver(text, options);
+    const reply = await done;
+    turnFrames.delete(messageId);
+    return { text: reply, steps: [...frames.steps], notices: [...frames.notices] };
+  };
+  return {
+    sdk,
+    assembly,
+    // send 只是 turn 的回复部分：既有断言一行不用改，帧级断言用 turn。
+    send: async (text, options) => (await turn(text, options)).text,
+    turn,
   };
 }
 
@@ -475,4 +528,4 @@ export {
   heavyPlan,
   growingPlan,
 };
-export type { Boot };
+export type { Boot, Turn };
