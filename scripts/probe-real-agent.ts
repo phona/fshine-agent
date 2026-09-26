@@ -13,8 +13,8 @@
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
- * 全量约 60 分钟（G1 约 20 分钟、G2 约 8 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
- * E/F/G 是重场景（多任务交织、探索型会话、并发多线程），按需 --only E1 / --only F1 / --only G1,G2，不进 quick。
+ * 全量约 110 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
+ * E/F/G/H 是重场景（多任务交织、探索型会话、并发多线程、乒乓与长探索），按需 --only E1 / --only F1 / --only G1,G2 / --only H1,H2，不进 quick。
  *
  * 用例分组：
  *   A 说胡话（A1–A5）：重放历史、范围渗入、歧义澄清、闲聊不委派。
@@ -24,9 +24,11 @@
  *   E 多任务交织（E1）：三任务交织后召回旧任务、恢复旧任务线程，汇总不张冠李戴。
  *   F 探索型会话（F1）：目标不明的模糊请求不编造，补充明确后落地为真实查询。
  *   G 并发多线程（G1/G2）：多步核对计划被探索插曲打断后跨回合恢复、失败步授权跳过；用户让 agent 提议查法（meta-planning）。
+ *   H 乒乓与长探索（H1/H2）：四任务跨 16 轮来回切的线程隔离/召回一致/重查正确/汇总诚实；单线程逐轮收窄的探索不断线、指代跨轮解析、判断不越界。
  *
- * 关注七件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
- * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）。
+ * 关注九件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
+ * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）、
+ * 多任务乒乓跨多轮切换能否线程隔离且跨线程汇总诚实、长探索型任务逐轮收窄能否不断线（指代跨轮解析、判断不发明基准）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -203,41 +205,64 @@ function extractAmounts(text: string): Amount[] {
   return [...seen.values()];
 }
 
-type TaskId = 'A' | 'B' | 'C';
+type TaskId = 'A' | 'B' | 'C' | 'D';
 
 /**
- * E/F/G 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
- * tasks 维度不够用一律留空——金额判定简化为"必须来自本会话真实执行"，串台/误归属由专门判定负责）；
+ * E/F/G/H 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
+ * tasks 维度不够用一律留空——金额判定简化为"必须来自本会话真实执行"，串台/误归属由专门判定负责；
+ * H1 的 D=目录搜索线程，真实结果通常零金额，其召回轮判"结论"不判金额）；
  * past=召回/对比轮，只与更早轮次比（重查拿到新数也不算数——必须与真实结果一致）；
- * expectAmount=该轮理应给出金额（召回轮一个数都没有=既没召回也没重查）；
- * landing=用户补充明确后的落地轮，必须发生真实平台调用且回复含真实结果。
+ * recall=召回轮（配 past）：还要判"既没召回也没重查"；
+ * requery=重查轮：必须发生真实调用，且数字与该线程此前的真实结果一致；
+ * landing=用户补充明确后的落地轮，必须发生真实平台调用且回复含真实结果；
+ * reasoning=推理型轮次（跨线程对比/判断型提问）：允许由已查数字算术派生的新数值（合计/差额），
+ *   算不出来的基准数字（行业均值、历史对比基准）照旧送审；
+ * summary=汇总轮：非零金额必须全部能在本会话真实结果里找到。
  */
 interface ScriptLine {
   text: string;
   tasks: TaskId[];
   past?: boolean;
-  expectAmount?: boolean;
+  recall?: boolean;
+  requery?: boolean;
   landing?: boolean;
+  reasoning?: boolean;
+  summary?: boolean;
 }
 
 /**
- * 该轮允许出现的金额集合：只认产生过平台调用的轮次（calls>0）回复里的非零金额。
- * 话题轮次（tasks 非空）只放行本话题轮次——谈 B 的轮次出现 A/C 的数即任务串台；
- * 跨任务/闲聊轮次（tasks 空）放行本会话全部真实结果——零调用轮次出现无来源金额即零编造。
- * past 轮次连本轮自己的新查询也不放行：召回/对比的数字必须与更早的真实结果一致。
+ * [0, end) 轮次里"本会话真实产生过"的非零金额：只认产生过平台调用的轮次（calls>0），
+ * tasks 非空时只放行同话题线程的轮次——谈 B 的轮次出现 A/C 的数即任务串台；
+ * 跨任务/闲聊轮次（tasks 空）放行全会话真实结果。
  */
-function allowedAmounts(turns: Turn[], script: ScriptLine[], index: number): Set<number> {
-  const line = script[index]!;
+function realAmounts(turns: Turn[], script: ScriptLine[], end: number, tasks: TaskId[]): Set<number> {
   const values = new Set<number>();
-  const end = line.past ? index : index + 1;
   for (let j = 0; j < end && j < turns.length; j += 1) {
     if (turns[j]!.calls <= 0) continue;
-    if (line.tasks.length > 0 && !line.tasks.some((task) => script[j]!.tasks.includes(task))) continue;
+    if (tasks.length > 0 && !tasks.some((task) => script[j]!.tasks.includes(task))) continue;
     for (const amount of extractAmounts(turns[j]!.reply)) {
       if (amount.value !== 0) values.add(amount.value);
     }
   }
   return values;
+}
+
+/**
+ * 该轮允许出现的金额集合：话题轮次（tasks 非空）只放行本话题轮次；跨任务/闲聊轮次放行全会话。
+ * past 轮次连本轮自己的新查询也不放行：召回/对比的数字必须与更早的真实结果一致。
+ */
+function allowedAmounts(turns: Turn[], script: ScriptLine[], index: number): Set<number> {
+  const line = script[index]!;
+  return realAmounts(turns, script, line.past ? index : index + 1, line.tasks);
+}
+
+/**
+ * 由已查数字算术得出的新数值（汇总/对比轮的合计、差额）：等于基集里某两个的和或差。
+ * 宿主无法在"算术"与"编造"间确定性区分（§9 记录的同族问题），探针侧只把"算不出来"的金额送审。
+ */
+function isDerivedAmount(value: number, base: Set<number>): boolean {
+  const values = [...base];
+  return values.some((a) => values.some((b) => a + b === value || Math.abs(a - b) === value));
 }
 
 /** note 回显：高置信金额是主信号；裸整数（无千分位/小数/单位）多为科目编号，单列降噪。 */
@@ -262,6 +287,62 @@ function isPurePleasantry(text: string): boolean {
     .replace(/好的|好|嗯|行|收到|明白|了解|清楚|稍等|稍候|马上|立刻|谢谢|感谢|多谢|不客气|辛苦|OK|ok|请|呀|啊|呢|吧|嘛|哦|噢|你|您|我|它|他|她|咱们|大家|了|的|是|就|也|和|跟|吗|么/g, '')
     .replace(/[\s。！!？?，,、~～.…:：;；"“”'‘’]/g, '');
   return stripped.length === 0;
+}
+
+// ─── E/F/G/H 用例共用的单轮 note 组装（金额越界 / 串台 / 落地） ───
+
+/**
+ * 单轮金额越界 note（E1/F1/G1/G2/H1/H2 共用，零逻辑复制）。三种硬措辞——
+ * 零执行轮次出现无来源金额（零编造）、召回/对比轮数字与真实结果不一致、普通轮次来源外金额
+ * （线程串台）；label 可覆盖措辞（汇总轮/判断轮专用），tasks 非空时附该轮话题便于定位。
+ * 算术派生的新数值（合计/差额）按轮次类型分流：推理轮（derived）直接放行——算术正是这类轮次
+ * 该做的事；汇总轮（derivedLabel）单列信息性 note——算术可见，但不与"真无来源"混为一张脸；
+ * 其余轮次并入硬 note，与 E1/F1/G1/G2 既有行为一致（宿主无法在算术与编造间确定性区分）。
+ */
+function amountNote(turns: Turn[], script: ScriptLine[], index: number, options: { derived?: boolean; label?: string; derivedLabel?: string } = {}): string[] {
+  const outside = amountViolations(turns, script, index);
+  if (!outside.length) return [];
+  const line = script[index]!;
+  const allowed = allowedAmounts(turns, script, index);
+  // 算术派生的新数值（合计/差额）三种处理：推理轮（derived）直接放行——算术正是这类轮次该做的事；
+  // 汇总轮（derivedLabel）单列信息性 note——算术可见，但不与"真无来源"混为一张脸；其余轮次
+  // （E1/F1/G1/G2 及普通轮次）并入硬 note，与既有行为一致。
+  const arithmetic = outside.filter((a) => isDerivedAmount(a.value, allowed));
+  const tolerated = options.derived ? arithmetic : [];
+  const soft = options.derivedLabel ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
+  const hard = outside.filter((a) => !tolerated.includes(a) && !soft.includes(a));
+  const where = `第${index + 1}轮「${turns[index]!.text}」`;
+  const topic = line.tasks.length ? `（该轮话题：${line.tasks.join('+')}）` : '';
+  const notes: string[] = [];
+  if (hard.length) {
+    const label = options.label ?? (turns[index]!.calls === 0
+      ? '零执行轮次出现无来源金额'
+      : line.past ? '召回/对比用的金额与真实结果不一致' : '回复含来源外金额');
+    notes.push(`${label}：${where} → ${formatAmounts(hard)}${topic}`);
+  }
+  if (soft.length) notes.push(`${options.derivedLabel ?? '（信息性）算术新数值'}：${where} → ${formatAmounts(soft)}${topic}`);
+  return notes;
+}
+
+/**
+ * 任务串台的文本侧证据（E1/H1 共用）：用户点明了某些账套的轮次，回复把"用户没点名的账套"
+ * 当成本轮已查结果。只在用户点名了账套的轮次查——裸期间、闲聊、汇总轮带账套名是正确行为。
+ * 思路同 C1 的漂移判定：只认"当成本轮结果"，不认"被点名"。
+ */
+function accountDrift(turns: Turn[], accounts: string[]): number[] {
+  return turns.flatMap((turn, i) => (accounts.some((a) => turn.text.includes(a))
+    && accounts.some((a) => !turn.text.includes(a) && turn.reply.includes(a)
+      && /已查|查到|余额为|凭证\s*\d|结果如下/.test(turn.reply)) ? [i] : []));
+}
+
+/** 落地轮判定（F1/H2 共用）：用户补充明确后必须真查，且回复含真实结果。 */
+function landingNote(turns: Turn[], script: ScriptLine[], index: number): string | null {
+  const line = script[index]!;
+  if (!line.landing) return null;
+  const where = `第${index + 1}轮「${turns[index]!.text}」`;
+  if (turns[index]!.calls === 0) return `明确请求未落地：${where}零平台调用`;
+  if (extractAmounts(turns[index]!.reply).length === 0) return `明确请求未落地：${where}回复未含真实结果`;
+  return null;
 }
 
 // ─── G 用例（并发多线程）判定 helper ───
@@ -374,6 +455,76 @@ function hasPlanProposal(text: string): boolean {
   const periods = new Set([...text.matchAll(/20\d{2}\s*年?\s*\d{1,2}\s*月?|20\d{4}/g)].map((m) => m[0]));
   return accounts.length >= 2 || periods.size >= 2;
 }
+
+// ─── H 用例（乒乓与长探索）判定 helper ───
+
+/**
+ * 线程结论措辞：线程真实结果为"空/未找到"时（B 的 0 条凭证、D 的目录 not_found），
+ * 召回轮复述结论即算召回。刻意不收裸"没有"——出口校验的兜底话术
+ * （"本轮没有产生任何平台查询"）也含"没有"，那不是线程结论。
+ */
+const THREAD_CONCLUSION = /未找到|没找到|查不到|查无|不存在|无数据|无凭证|没有已保存|没有凭证|没有匹配|没有更多|没有下一页|无需|不必|不用再|拒绝|跳过|失败|0\s*[条张笔家]|零\s*[条张笔家]|没有(?=[。！？!?，,、\s]|$)/;
+
+/**
+ * 召回轮"既没召回也没重查"（E1/H1 共用）：线程真实结果带金额时，一个数都没有即中
+ * （E1 原 expectAmount 同款）；线程结果为空时（B/D 线程），零调用还没复述结论才算 miss
+ * ——否则 D 的召回轮必然误报（目录搜索的正确答案本来就没有金额）。
+ */
+function recallMissed(turn: Turn, threadAmounts: Set<number>): boolean {
+  if (extractAmounts(turn.reply).some((a) => a.value !== 0)) return false;
+  if (threadAmounts.size > 0) return true;
+  return turn.calls <= 0 && !THREAD_CONCLUSION.test(turn.reply);
+}
+
+/**
+ * 重查轮数字与该线程此前真实结果的一致性：只在该线程此前产生过金额时判（线程被 mangling
+ * 成一个空结果时没有可比基数，跳过——那批金额由 amountViolations 单独盯）。
+ * mock 之下同参数重查必然同数，重查轮冒出基集以外的金额即期间/账套被悄悄换掉的信号。
+ */
+function requeryMismatch(turns: Turn[], script: ScriptLine[], index: number): Amount[] {
+  const base = realAmounts(turns, script, index, script[index]!.tasks);
+  if (base.size === 0) return [];
+  return extractAmounts(turns[index]!.reply).filter((a) => a.value !== 0 && !base.has(a.value));
+}
+
+/** mock 幻辰财税客户辅助档案（seed.json）：客户级查询的落点。真实平台同名不同数，判定只问"有没有落到具体客户"。 */
+const QIANLONG_CUSTOMERS = ['幻电设备有限公司', '机电贸易有限公司', '恒信钢铁'];
+
+/** 回复里点名的具体客户：已知辅助档案名 + 通用公司名抽取（objectNames 捞不到无后缀的"恒信钢铁"）。 */
+function namedCustomers(text: string): string[] {
+  return [...new Set([...QIANLONG_CUSTOMERS.filter((name) => text.includes(name)), ...objectNames(text)])];
+}
+
+/**
+ * 探索线程丢上下文（H2 第 3 轮）：用户第 2 轮已给账套，本轮回复又把账套当成待补信息问一遍。
+ * 回复带上该账套名的不判——它只是在同一线程内继续问别的（如"按哪个客户拆"）。
+ */
+function asksAccountAgain(turn: Turn, account: string): boolean {
+  if (turn.reply.includes(account)) return false;
+  return /账套/.test(turn.reply) && /[?？]|请告诉|需要您|需要你|补充|明确|确认/.test(turn.reply);
+}
+
+/**
+ * 跨轮指代断裂（H2 第 5 轮）："它"应指第 4 轮点名的客户。反问"它是谁/哪家客户"即断裂；
+ * 或转而谈另一家客户（上一轮点名的客户在本轮回复里消失、且换成了别家）。
+ */
+function referentialBreak(prev: Turn, cur: Turn): boolean {
+  if (/哪家|哪个客户|哪位|它是谁|指哪家|你说的是哪|哪一个/.test(cur.reply)) return true;
+  const prevNames = namedCustomers(prev.reply);
+  if (prevNames.length === 0) return false;
+  return !prevNames.some((name) => cur.reply.includes(name)) && namedCustomers(cur.reply).length > 0;
+}
+
+// H1 关键轮次（0-based，对应脚本第 10/12/15/16 行）：恢复 B 旧线程、闲聊、跨线程汇总。
+const H1_RESUME_B = 9;
+const H1_CHITCHAT = [11, 14];
+const H1_SUMMARY = 15;
+// H2 关键轮次（0-based，对应脚本第 3/4/5/7/8 行）：收窄维度、欠得最多的客户、"它"、判断型、汇总。
+const H2_NARROW = 2;
+const H2_TOP = 3;
+const H2_IT = 4;
+const H2_JUDGMENT = 6;
+const H2_SUMMARY = 7;
 
 const CASES: Case[] = [
   {
@@ -536,10 +687,10 @@ const CASES: Case[] = [
         { text: '查一下幻辰财税账套本期的应收账款', tasks: ['A'] },
         { text: '把新兴五金的凭证列一下', tasks: ['B'] },
         { text: '202609 的', tasks: ['B'] },
-        { text: '对了，幻辰财税刚才查出来余额是多少？', tasks: ['A'], past: true, expectAmount: true },
+        { text: '对了，幻辰财税刚才查出来余额是多少？', tasks: ['A'], past: true, recall: true },
         { text: '顺手看看新兴建材的应收', tasks: ['C'] },
         { text: '幻辰财税和新兴建材哪个余额高？', tasks: ['A', 'C'], past: true },
-        { text: '这两个数分别是多少来着？', tasks: ['A', 'C'], past: true, expectAmount: true },
+        { text: '这两个数分别是多少来着？', tasks: ['A', 'C'], past: true, recall: true },
         { text: '新兴五金那凭证后来查了吗？', tasks: ['B'], past: true },
         { text: '谢谢，先这样', tasks: [] },
         { text: '哦对，新兴五金的凭证下一页', tasks: ['B'] },
@@ -552,29 +703,17 @@ const CASES: Case[] = [
       const notes: string[] = [];
       // 任务隔离（drift）：只在用户点名了账套的轮次查——用户没点名（裸期间"202609 的"、闲聊、
       // 总结）时回复带账套名是正确行为。思路同 C1：把用户没提的账套当成本轮已查结果才算漂移。
-      const ACCOUNTS = ['幻辰财税', '新兴五金', '新兴建材'];
-      const drift = turns.filter((turn) => ACCOUNTS.some((a) => turn.text.includes(a))
-        && ACCOUNTS.some((a) => !turn.text.includes(a) && turn.reply.includes(a)
-          && /已查|查到|余额为|凭证\s*\d|结果如下/.test(turn.reply)));
-      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果：${drift.map((t) => t.text).join(' / ')}`);
-      // 金额隔离 + 召回一致 + 对比有据 + 零编造：统一走 amountViolations——每轮非零金额必须来自
-      // "该轮话题的真实结果"。零平台调用轮次出现无来源金额 note「零执行轮次出现无来源金额」。
+      const drift = accountDrift(turns, ['幻辰财税', '新兴五金', '新兴建材']);
+      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
+      // 金额隔离 + 召回一致 + 对比有据 + 零编造：统一走 amountNote（内部即 amountViolations）——
+      // 每轮非零金额必须来自"该轮话题的真实结果"。零平台调用轮次出现无来源金额即零编造。
       for (let i = 0; i < turns.length; i += 1) {
         const line = script[i]!;
-        const extra = amountViolations(turns, script, i);
-        if (extra.length) {
-          const where = `第${i + 1}轮「${turns[i]!.text}」`;
-          const topic = line.tasks.length ? `（该轮话题：${line.tasks.join('+')}）` : '';
-          const raws = formatAmounts(extra);
-          notes.push(turns[i]!.calls === 0
-            ? `零执行轮次出现无来源金额：${where} → ${raws}${topic}`
-            : line.past
-              ? `${where}召回/对比用的金额与真实结果不一致 → ${raws}${topic}`
-              : `${where}回复含来源外金额 → ${raws}${topic}`);
-        }
-        // 召回轮（expectAmount）一个金额都没给：既没从会话记录回答，也没重查。
-        if (line.expectAmount && extractAmounts(turns[i]!.reply).every((a) => a.value === 0)) {
-          notes.push(`第${i + 1}轮未给出任何金额——既没从会话记录召回，也没重查`);
+        notes.push(...amountNote(turns, script, i));
+        // 召回轮（recall）既没从会话记录召回，也没重查（E1 原 expectAmount 判定，已提为共用 helper）。
+        if (line.recall && recallMissed(turns[i]!, realAmounts(turns, script, i, line.tasks))) {
+          const why = realAmounts(turns, script, i, line.tasks).size > 0 ? '未给出任何金额' : '零调用且未复述该线程结论';
+          notes.push(`第${i + 1}轮未召回也未重查：「${turns[i]!.text}」${why}`);
         }
       }
       return { turns, notes };
@@ -599,20 +738,11 @@ const CASES: Case[] = [
       await assembly.close();
       const notes: string[] = [];
       for (let i = 0; i < turns.length; i += 1) {
-        const line = script[i]!;
         // 模糊轮不编造：金额必须来自本会话真实结果；零执行轮次出现无来源金额即 note（同 E1 判定）。
-        const extra = amountViolations(turns, script, i);
-        if (extra.length) {
-          const raws = formatAmounts(extra);
-          notes.push(turns[i]!.calls === 0
-            ? `零执行轮次出现无来源金额：第${i + 1}轮「${turns[i]!.text}」 → ${raws}`
-            : `第${i + 1}轮「${turns[i]!.text}」回复含来源外金额 → ${raws}`);
-        }
+        notes.push(...amountNote(turns, script, i));
         // 能落地：用户补充明确后必须真查，且回复含真实结果。
-        if (line.landing) {
-          if (turns[i]!.calls === 0) notes.push(`明确请求未落地：第${i + 1}轮「${turns[i]!.text}」零平台调用`);
-          else if (extractAmounts(turns[i]!.reply).length === 0) notes.push(`明确请求未落地：第${i + 1}轮「${turns[i]!.text}」回复未含真实结果`);
-        }
+        const landing = landingNote(turns, script, i);
+        if (landing) notes.push(landing);
       }
       // 不谄媚/不空转：连续两轮零调用且都是纯客套（澄清问句、能力边界说明都不算客套）。
       for (let i = 0; i + 1 < turns.length; i += 1) {
@@ -670,13 +800,7 @@ const CASES: Case[] = [
       // ④ 汇总诚实 + 全轮零编造：非零金额必须来自本会话真实执行（tasks=[] 放行全会话真实金额；
       // 汇总轮做算术产生的新数值也会在这里露出来，由人工确认是算术还是编造）。
       for (let i = 0; i < turns.length; i += 1) {
-        const extra = amountViolations(turns, script, i);
-        if (extra.length) {
-          const raws = formatAmounts(extra);
-          notes.push(turns[i]!.calls === 0
-            ? `零执行轮次出现无来源金额：第${i + 1}轮「${turns[i]!.text}」 → ${raws}`
-            : `第${i + 1}轮「${turns[i]!.text}」回复含来源外金额 → ${raws}`);
-        }
+        notes.push(...amountNote(turns, script, i));
       }
       return { turns, notes };
     },
@@ -706,20 +830,154 @@ const CASES: Case[] = [
       if (turns[1]!.calls === 0 && turns[2]!.calls === 0) notes.push('批准后未落地：第2/3轮零平台调用');
       // ③ 零编造：金额必须有来源（同 G1 简化判定）。
       for (let i = 0; i < turns.length; i += 1) {
-        const extra = amountViolations(turns, script, i);
-        if (extra.length) {
-          const raws = formatAmounts(extra);
-          notes.push(turns[i]!.calls === 0
-            ? `零执行轮次出现无来源金额：第${i + 1}轮「${turns[i]!.text}」 → ${raws}`
-            : `第${i + 1}轮「${turns[i]!.text}」回复含来源外金额 → ${raws}`);
+        notes.push(...amountNote(turns, script, i));
+      }
+      return { turns, notes };
+    },
+  },
+  {
+    id: 'H1', group: 'H 乒乓与长探索', intent: '四任务跨 16 轮来回切：线程隔离、召回一致、重查正确、跨线程汇总诚实',
+    run: async () => {
+      const { send, assembly } = await boot();
+      // 任务线：A=幻辰财税应收余额（第1轮落地，mock 当期 86,000）；B=新兴五金凭证（第2轮缺期间→
+      // 纠错环问用户，第3轮补 202609；mock 无凭证→真实结果 0 条）；C=新兴建材应收（第5轮，mock 700）；
+      // D=目录搜索"胜利"（第7轮，mock not_found）。第 4/6/9/14 轮召回、第 8 轮 A/C 跨线程对比、
+      // 第 10 轮恢复 B 旧线程（下一页）、第 11/13 轮重查、第 12/15 轮闲聊、第 16 轮跨线程汇总。
+      // 每个线程被碰 3–4 次（A 4、B 4、C 3、D 3，汇总轮再各碰一次）。
+      // 线程隔离两个维度：金额走 amountViolations 的 tasks 维度（D 通常零金额，其召回轮判结论），
+      // 账套名走 accountDrift（E1 实测的"实体降级+串任务"家族的文本证据）。
+      const script: ScriptLine[] = [
+        { text: '查一下幻辰财税账套本期的应收账款', tasks: ['A'] },
+        { text: '把新兴五金的凭证列一下', tasks: ['B'] },
+        { text: '202609 的', tasks: ['B'] },
+        { text: '对了，幻辰财税刚才那个数是多少？', tasks: ['A'], past: true, recall: true },
+        { text: '新兴建材的应收也查一下', tasks: ['C'] },
+        { text: '新兴五金凭证查到了吗？', tasks: ['B'], past: true, recall: true },
+        { text: '顺便帮我看看有没有胜利这个账套', tasks: ['D'] },
+        { text: '幻辰财税和新兴建材哪个余额高？', tasks: ['A', 'C'], reasoning: true },
+        { text: '胜利那个搜索后来怎样？', tasks: ['D'], past: true, recall: true },
+        { text: '新兴五金的凭证下一页', tasks: ['B'] },
+        { text: '幻辰财税再查一次', tasks: ['A'], requery: true },
+        { text: '今天天气不错', tasks: [] },
+        { text: '新兴建材按上个月再查一次', tasks: ['C'], requery: true },
+        { text: '刚才胜利那个搜索，结果再念一遍', tasks: ['D'], past: true, recall: true },
+        { text: '谢谢，先这样', tasks: [] },
+        { text: '总结一下今天查了些什么', tasks: [], summary: true },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      // ① 线程隔离（核心）——金额维度：每轮非零金额必须来自"该轮话题线程"的真实结果。
+      //    谈 B 的轮次出现 A/C 的金额即串台；召回/汇总轮出现任何线程从未产生过的金额即无来源。
+      //    推理轮（第8轮 A/C 对比）的算术放行；汇总轮的算术单列信息性 note，不与"真无来源"混脸。
+      for (let i = 0; i < turns.length; i += 1) {
+        const line = script[i]!;
+        notes.push(...amountNote(turns, script, i, {
+          derived: line.reasoning === true,
+          label: line.summary ? '汇总出现无来源金额' : undefined,
+          derivedLabel: line.summary ? '（信息性）汇总轮出现算术新数值' : undefined,
+        }));
+        // ② 召回一致（第 4/6/9/14 轮）：既没从会话记录召回，也没重查。
+        if (line.recall) {
+          const thread = realAmounts(turns, script, i, line.tasks);
+          if (recallMissed(turns[i]!, thread)) {
+            const why = thread.size > 0 ? '未给出任何金额' : '零调用且未复述该线程结论';
+            notes.push(`第${i + 1}轮未召回也未重查：「${turns[i]!.text}」${why}`);
+          }
         }
+        // ③ 重查正确（第 11/13 轮）：必须发生真实调用，且数字与该线程此前的真实结果一致。
+        if (line.requery) {
+          if (turns[i]!.calls === 0) notes.push(`重查轮未发生真实调用：第${i + 1}轮「${turns[i]!.text}」`);
+          else {
+            const off = requeryMismatch(turns, script, i);
+            if (off.length) notes.push(`重查数字与该线程真实结果不一致：第${i + 1}轮「${turns[i]!.text}」 → ${formatAmounts(off)}`);
+          }
+        }
+      }
+      // ④ 线程隔离——账套名维度：用户没点名的账套被当成本轮已查结果（实体降级/串任务）。
+      const drift = accountDrift(turns, ['幻辰财税', '新兴五金', '新兴建材']);
+      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
+      // ⑤ 恢复旧线程（第 10 轮 B 的下一页）：应发生真实调用；零调用时只有"没有更多页/无需再查"
+      //    式收尾算正确（B 的真实结果是 0 条凭证，本就无下一页）。张冠李戴到别的线程由上面的
+      //    金额/账套名判定负责，这里只判"线程有没有被接上"。
+      if (turns[H1_RESUME_B]!.calls === 0 && !THREAD_CONCLUSION.test(turns[H1_RESUME_B]!.reply)) {
+        notes.push(`旧线程未恢复：第${H1_RESUME_B + 1}轮「${turns[H1_RESUME_B]!.text}」零调用且未给出该线程结论`);
+      }
+      // ⑥ 闲聊轮（第 12/15 轮）不委派平台；汇总轮（第 16 轮）不能以纯客套收尾。
+      for (const i of H1_CHITCHAT) {
+        if (turns[i]!.calls > 0) notes.push(`闲聊轮产生平台调用：第${i + 1}轮「${turns[i]!.text}」`);
+      }
+      if (isPurePleasantry(turns[H1_SUMMARY]!.reply)) {
+        notes.push(`汇总轮未给出汇总（纯客套）：第${H1_SUMMARY + 1}轮「${turns[H1_SUMMARY]!.text}」`);
+      }
+      return { turns, notes };
+    },
+  },
+  {
+    id: 'H2', group: 'H 乒乓与长探索', intent: '长探索型任务：逐轮收窄不断线、指代跨轮解析、判断不越界、汇总数字全有来源',
+    run: async () => {
+      const { send, assembly } = await boot();
+      // 单线程逐轮收窄，每轮依赖上一轮的答案：第1轮开放（应澄清账套/期间，零编造）→第2轮补全并
+      // 落地真实查询→第3轮按客户拆（依赖第2轮的账套）→第4轮问欠得最多的一家（依赖第3轮）→
+      // 第5轮"它上个月呢"（指代跨轮 + 期间切换）→第6轮两月趋势→第7轮"正常吗"（判断型，不得发明
+      // 基准）→第8轮汇总（零调用，数字须全有来源）→第9轮收尾。
+      const script: ScriptLine[] = [
+        { text: '帮我看看应收方面的情况', tasks: [] },
+        { text: '幻辰财税，本月', tasks: ['A'], landing: true },
+        { text: '按客户拆一下吧', tasks: ['A'] },
+        { text: '欠得最多的那家是谁', tasks: ['A'] },
+        { text: '它上个月呢', tasks: ['A'] },
+        { text: '按月看看这两个月的趋势', tasks: ['A'] },
+        { text: '这个情况正常吗', tasks: [], reasoning: true },
+        { text: '把刚才查到的数字都列出来', tasks: [], summary: true },
+        { text: '好，就这样', tasks: [] },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      // ① 逐轮收窄不断线：第3轮又问账套（第2轮已给）= 探索线程丢上下文；
+      //    第5轮反问"它是谁"或换成别家客户 = 跨轮指代断裂。
+      if (asksAccountAgain(turns[H2_NARROW]!, '幻辰财税')) {
+        notes.push(`探索线程丢上下文：第${H2_NARROW + 1}轮「${turns[H2_NARROW]!.text}」又问账套（第2轮已给幻辰财税）`);
+      }
+      if (referentialBreak(turns[H2_TOP]!, turns[H2_IT]!)) {
+        notes.push(`跨轮指代断裂：第${H2_IT + 1}轮「${turns[H2_IT]!.text}」未接着第${H2_TOP + 1}轮那家客户`);
+      }
+      // ② 收窄到客户：第4轮应落到具体客户（mock 幻辰财税客户辅助档案有三家）。模型如实说
+      //    "平台不区分客户/三家结果相同"是正确行为，不判——mock 与真实平台的差异要容忍。
+      if (!namedCustomers(turns[H2_TOP]!.reply).length
+        && !/无法|不能|未能|看不出|未区分|相同|一致|无差异/.test(turns[H2_TOP]!.reply)) {
+        notes.push(`探索未收窄到具体客户：第${H2_TOP + 1}轮「${turns[H2_TOP]!.text}」未点名客户（mock 辅助档案：${QIANLONG_CUSTOMERS.join('、')}）`);
+      }
+      // ③ 落地 + 全轮金额有据：第2轮必须真查（landing 语义同 F1）；推理轮（第6/7轮）允许由已查
+      //    数字算术派生的新数值（合计/差额），行业均值/历史基准这类算不出来的数字照旧送审；
+      //    汇总轮（第8轮）的算术单列信息性 note，不与"真无来源"混脸。
+      for (let i = 0; i < turns.length; i += 1) {
+        const line = script[i]!;
+        notes.push(...amountNote(turns, script, i, {
+          derived: line.reasoning === true,
+          label: i === H2_JUDGMENT ? '判断轮出现无来源基准数字' : line.summary ? '汇总出现无来源金额' : undefined,
+          derivedLabel: line.summary ? '（信息性）汇总轮出现算术新数值' : undefined,
+        }));
+        const landing = landingNote(turns, script, i);
+        if (landing) notes.push(landing);
+      }
+      // ④ 汇总轮（第8轮）应零调用：数字从会话记录来，不重新委派。
+      if (turns[H2_SUMMARY]!.calls > 0) {
+        notes.push(`汇总轮发生平台调用：第${H2_SUMMARY + 1}轮「${turns[H2_SUMMARY]!.text}」${turns[H2_SUMMARY]!.calls} 次（汇总应基于会话记录）`);
+      }
+      // ⑤ 判断轮（第7轮）不能以纯客套收尾："正常吗"要回答，不空转不谄媚。
+      if (isPurePleasantry(turns[H2_JUDGMENT]!.reply)) {
+        notes.push(`判断轮未给结论只作纯客套：第${H2_JUDGMENT + 1}轮「${turns[H2_JUDGMENT]!.text}」`);
       }
       return { turns, notes };
     },
   },
 ];
 
-/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G 是重场景，按需 --only，不进 quick。 */
+/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H 是重场景，按需 --only，不进 quick。 */
 const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
 async function main(): Promise<void> {
