@@ -88,7 +88,10 @@ async function main(): Promise<void> {
     text: question,
   };
   const started = Date.now();
-  const reply = await handler(message, () => {});
+  // notice 与生产渠道语义一致：送达后才继续执行；ask.ts 无渠道，打印即"送达"。
+  const reply = await handler(message, () => {}, async (text) => {
+    console.log('\n===== 计划通知 =====\n' + text + '\n');
+  });
   const text = replyText(reply);
   console.log('\n===== 回复 =====\n' + text);
   console.log(`\n(${((Date.now() - started) / 1000).toFixed(1)}s · db: ${dbPath})`);
