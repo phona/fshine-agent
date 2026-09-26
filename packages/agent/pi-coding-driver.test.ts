@@ -1,10 +1,21 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
-import { createPiCodingWorkerSession, isInputInsufficientCode, missingLabelFromCode, needsFromPlatformResponses } from './src/pi-coding-driver';
+import {
+  createPiCodingWorkerSession,
+  createServeGateAuditSink,
+  isInputInsufficientCode,
+  keyArgsFragment,
+  missingLabelFromCode,
+  needsFromPlatformResponses,
+  operationStepText,
+  PLAN_SUBMIT_STEP,
+  serveGateStepText,
+} from './src/pi-coding-driver';
+import type { ServeGateEvent } from './src/serve-gate';
 import type { PlanCliRunner } from './src/plan-runtime';
 
 const roots: string[] = [];
@@ -356,4 +367,173 @@ describe('pi-coding-agent context worker', () => {
     expect(missingLabelFromCode('ASSISTANT_AMBIGUOUS')).toBe('assistant');
   });
 
+});
+
+// ── 平台调用 → 用户可见进度帧（label 数据驱动，内部事件名禁出 progress） ──
+
+/** 已有活跃计划时的计划 CLI 替身：恢复 current 即激活，其余一律视为意外调用。 */
+const activePlanRunner: PlanCliRunner = async ({ args }) => {
+  if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_progress', planId: 'plan_progress', version: 1, status: 'active' }), stderr: '' };
+  throw new Error(`unexpected CLI call: ${args.join(' ')}`);
+};
+
+/** 评估即激活的计划 CLI 替身（用于计划提交帧）。 */
+const evaluatingPlanRunner: PlanCliRunner = async ({ args }) => {
+  if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_progress', planId: null, version: null, status: 'none' }), stderr: '' };
+  if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
+    planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
+  }), stderr: '' };
+  throw new Error(`unexpected CLI call: ${args.join(' ')}`);
+};
+
+/**
+ * 驱动一次 worker 会话里的 bash 工具调用（现有替身模式），回收宿主侧看到的
+ * 审计事件与进度帧。进度帧走的是生产接线 createServeGateAuditSink——
+ * 测试不另写一套渲染。
+ */
+async function driveBash(options: {
+  command: string;
+  operationLabels?: Map<string, string>;
+  planCliRunner?: PlanCliRunner;
+}): Promise<{ steps: string[]; events: ServeGateEvent[]; verdict: { block?: boolean; reason?: string } | undefined }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-progress-'));
+  roots.push(root);
+  const modelConfig = await fakeModelRuntime();
+  const steps: string[] = [];
+  const events: ServeGateEvent[] = [];
+  const worker = await createPiCodingWorkerSession({
+    cwd: root,
+    skillRoots: [],
+    systemPrompt: 'progress frame test',
+    sessionId: 'task_progress',
+    agentDir: path.join(root, '.fshine-agent'),
+    modelConfig,
+    ...(options.operationLabels ? { operationLabels: options.operationLabels } : {}),
+    onStep: (text) => steps.push(text),
+    serveGateAudit: createServeGateAuditSink({
+      onStep: (text) => steps.push(text),
+      requestId: 'req_progress',
+      audit: (event) => events.push(event),
+    }),
+    planCliRunner: options.planCliRunner ?? activePlanRunner,
+  });
+  try {
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_progress', type: 'toolCall', name: 'bash', arguments: { command: options.command } } as never,
+      args: { command: options.command },
+      context: {} as never,
+    });
+    return { steps, events, verdict };
+  } finally {
+    worker.session.dispose();
+  }
+}
+
+describe('进度帧渲染器（唯一模板，零 per-operation 分支）', () => {
+  it('任意 label + 任意 keyArgs 都严格匹配同一条模板', () => {
+    const pieces = ['查询', 'A', '「', '」', '…', '·', ' ', 'x', '1', '平台操作'];
+    let seed = 20260930 >>> 0;
+    const rand = (bound: number): number => {
+      seed = (seed + 0x6d2b79f5) >>> 0;
+      let t = seed;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) % bound;
+    };
+    const randomText = (max: number): string => Array.from({ length: rand(max) }, () => pieces[rand(pieces.length)]!).join('');
+    const seen = new Set<string>();
+    for (let i = 0; i < 400; i += 1) {
+      const label = randomText(4);
+      const keyArgs = Array.from({ length: rand(4) }, () => randomText(3));
+      const frame = operationStepText(label, keyArgs);
+      seen.add(frame);
+      // 唯一模板：正在 + label + 参数摘要 + …
+      expect(frame).toBe(`正在${label}${keyArgsFragment(keyArgs)}…`);
+      expect(frame.startsWith('正在')).toBe(true);
+      expect(frame.endsWith('…')).toBe(true);
+      expect(frame.slice(2, -1)).toBe(`${label}${keyArgsFragment(keyArgs)}`);
+    }
+    expect(seen.size).toBeGreaterThan(300); // 确实扫到了多样化输入，不是同一用例反复跑
+  });
+
+  it('参数摘要：无参数空串，多个用 · 分隔，不按内容分支', () => {
+    expect(keyArgsFragment(undefined)).toBe('');
+    expect(keyArgsFragment([])).toBe('');
+    expect(keyArgsFragment(['「甲」', '202609'])).toBe('「甲」·202609');
+    expect(keyArgsFragment(['「甲」'])).toBe('「甲」');
+  });
+
+  it('空 label → 不发帧（安全缺省，不回退脚本名/操作名）', () => {
+    expect(serveGateStepText({ label: '', keyArgs: ['「甲」'] })).toBeNull();
+    expect(serveGateStepText({ keyArgs: ['202609'] })).toBeNull();
+    expect(serveGateStepText({})).toBeNull();
+  });
+});
+
+describe('防泄漏：内部事件名不出现在用户可见进度帧里', () => {
+  it('驱动一次带 bash 工具调用的 worker session：帧形如「正在…」，无 worker_ 前缀', async () => {
+    const { steps, events } = await driveBash({
+      command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609',
+      operationLabels: new Map([['query-receivables', '读取余额']]),
+    });
+    expect(steps).toEqual(['正在读取余额「猫一杯」·202609…']);
+    for (const step of steps) {
+      expect(step).not.toMatch(/^worker_/);
+      expect(step).not.toMatch(/tool_execution_start|agent_started|agent_finished|toolName/);
+      expect(step).toMatch(/^正在.+…$/);
+    }
+    expect(events.at(-1)?.allowed).toBe(true);
+  });
+
+  it('驱动源码里不再发射内部事件名进度帧', async () => {
+    const source = await readFile(path.join(__dirname, 'src', 'pi-coding-driver.ts'), 'utf8');
+    expect(source).not.toMatch(/worker_(?:tool|agent)/);
+    expect(source).not.toMatch(/onStep\(\s*['"`]worker/);
+  });
+
+  it('计划提交帧与业务无关，宿主评估方案前发出', async () => {
+    const { steps, verdict } = await driveBash({
+      command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]}]}',
+      planCliRunner: evaluatingPlanRunner,
+    });
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(steps).toEqual([PLAN_SUBMIT_STEP]);
+    expect(steps[0]).not.toMatch(/^worker_/);
+  });
+});
+
+describe('降级：没有 label 就零进度帧，审计字段一字不少', () => {
+  it('operationLabels 空表 → 零帧，审计事件四个既有字段照旧', async () => {
+    const command = 'bin/17dz query query-receivables.js --query 甲 --period 202609';
+    const { steps, events } = await driveBash({ command, operationLabels: new Map() });
+    expect(steps).toEqual([]);
+    expect(events.at(-1)).toEqual({
+      tool: 'bash',
+      allowed: true,
+      reason: undefined,
+      detail: command,
+      label: undefined,
+      keyArgs: undefined,
+      requestId: 'req_progress',
+    });
+  });
+
+  it('未注入 label 表且平台根没有 CLI → 派生为空表，零帧', async () => {
+    const { steps, events } = await driveBash({ command: 'bin/17dz query query-receivables.js --query 甲 --period 202609' });
+    expect(steps).toEqual([]);
+    expect(events.at(-1)?.allowed).toBe(true);
+    expect(events.at(-1)?.label).toBeUndefined();
+  });
+
+  it('被拦的调用既不留 label 也不发帧', async () => {
+    const { steps, events } = await driveBash({
+      command: 'bin/17dz query query-receivables.js --query 甲; cat .env',
+      operationLabels: new Map([['query-receivables', '读取余额']]),
+    });
+    expect(steps).toEqual([]);
+    expect(events.at(-1)?.allowed).toBe(false);
+    expect(events.at(-1)?.label).toBeUndefined();
+  });
 });

@@ -13,6 +13,7 @@ import {
   createPiCodingTurnDriver,
   createPiTurnDriver,
   createTaxAgentRuntime,
+  PLAN_SUBMIT_STEP,
 } from '@fshine/agent';
 import { createMessageHandler } from '../apps/server/handler';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
@@ -89,7 +90,7 @@ async function main(): Promise<void> {
   ].join('\n'));
   console.log(JSON.stringify({
     event: 'acceptance_case_done', case: '2.2-supplement', durationMs,
-    delegated: steps.some((s) => s.startsWith('worker_tool:')) || Boolean(taskRow),
+    delegated: steps.includes(PLAN_SUBMIT_STEP) || Boolean(taskRow),
     report: reportPath,
   }));
 }

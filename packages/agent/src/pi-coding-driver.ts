@@ -20,6 +20,7 @@ import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
+import { loadOperationLabels, type OperationLabels } from './operation-labels';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseEnvelope } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
@@ -31,16 +32,67 @@ import { validatePlanEntities } from './turn-contract';
  */
 const MAX_DECLINED_PLANS_PER_TASK = 5;
 
+/**
+ * 计划提交进度帧：宿主替 worker 调平台评估方案时发一帧。措辞与业务无关
+ * （不出现任何领域词），用户在 60-180s 的单轮里由此知道"卡在哪一步"。
+ */
+export const PLAN_SUBMIT_STEP = '正在向平台提交执行方案…';
+
+/**
+ * 参数摘要拼接：多个用 · 分隔，没有参数就是空串。
+ * 渲染层唯一一条模板，按参数个数/内容零分支。
+ */
+export function keyArgsFragment(keyArgs: readonly string[] | undefined): string {
+  return keyArgs && keyArgs.length > 0 ? keyArgs.join('·') : '';
+}
+
+/** 平台操作 → 用户可见进度帧：`正在${label}${参数摘要}…`（唯一模板）。 */
+export function operationStepText(label: string, keyArgs?: readonly string[]): string {
+  return `正在${label}${keyArgsFragment(keyArgs)}…`;
+}
+
+/**
+ * G1 放行事件 → 进度帧。没有 label（平台清单没给这一列 / 查不到这个操作）→ null：
+ * 安全缺省是静默不发帧，绝不回退显示脚本名或操作名——内部事件名同理永不出厂。
+ */
+export function serveGateStepText(event: Pick<ServeGateEvent, 'label' | 'keyArgs'>): string | null {
+  return event.label ? operationStepText(event.label, event.keyArgs) : null;
+}
+
+/**
+ * 驱动侧 G1 事件出口：审计留痕 + 用户可见进度帧，一处接线。
+ * 抽成函数是为了让测试能用同一条生产接线驱动替身会话——帧的产生逻辑只有一份，
+ * 不存在"测试里另写一套渲染"。
+ */
+export function createServeGateAuditSink(sink: {
+  onStep: (text: string) => void;
+  audit?: (event: ServeGateEvent) => void;
+  requestId?: string;
+  /** 放行的平台调用计数（执行面回执用）。 */
+  onAllowedBash?: () => void;
+}): (event: ServeGateEvent) => void {
+  return (event) => {
+    if (event.tool === 'bash' && event.allowed) sink.onAllowedBash?.();
+    const step = serveGateStepText(event);
+    if (step) sink.onStep(step);
+    sink.audit?.({ ...event, requestId: sink.requestId });
+  };
+}
+
 export interface PiCodingTurnDriverOptions {
   /** 知识面/敏感路径规则（由 context profile 传入 G1）。 */
   knowledgePaths?: readonly string[];
   sensitivePaths?: readonly string[];
 
   env: Record<string, string | undefined>;
+  /** 平台根路径：label 表经公共 CLI 在此派生一次（缺省用每回合 worker cwd）。 */
+  platformRoot?: string;
   /** Keep SDK auth/session files outside the mounted platform workspace. */
   agentDir?: string;
   /** G1 工具门事件留痕（放行与拦截都上报，落 tool_calls 审计）。 */
   serveGateAudit?: (event: ServeGateEvent) => void;
+  /** script → label 查找表（测试替身注入点）；缺省经平台 CLI 派生。 */
+  operationLabels?: OperationLabels;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
 }
@@ -57,6 +109,8 @@ export interface PiCodingWorkerSessionOptions {
   agentDir: string;
   modelConfig: CodingModelConfig;
   serveGateAudit?: (event: ServeGateEvent) => void;
+  /** 用户可见进度帧出口（宿主 → 渠道）：平台操作帧与计划提交帧都走这里。 */
+  onStep?: (text: string) => void;
   onNotice?: (text: string) => Promise<void>;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
@@ -64,6 +118,8 @@ export interface PiCodingWorkerSessionOptions {
   turnDeclaration?: TurnDriverInput['turnDeclaration'];
   /** 领域无关的实体来源：宿主注入，供计划校验做逐字包含判定（架构 §2 第 9 条）。 */
   entitySources?: TurnDriverInput['entitySources'];
+  /** script → label 查找表（平台 CLI 派生，驱动侧缓存后传入）；缺省本会话自派生一次。 */
+  operationLabels?: OperationLabels;
 }
 
 export interface PiCodingWorkerSession {
@@ -87,6 +143,17 @@ interface CodingModelConfig {
 /** Create a headless pi-coding-agent driver for trusted context workers. */
 export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): TurnDriver {
   let modelPromise: Promise<CodingModelConfig> | undefined;
+  // label 表按平台根路径各派生一次并缓存：绝不每条命令 spawn 一次 CLI。
+  const labelCache = new Map<string, Promise<OperationLabels>>();
+  const operationLabelsFor = (workerCwd: string): Promise<OperationLabels> => {
+    if (options.operationLabels) return Promise.resolve(options.operationLabels);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = labelCache.get(root);
+    if (cached) return cached;
+    const loading = loadOperationLabels(root).catch(() => new Map<string, string>());
+    labelCache.set(root, loading);
+    return loading;
+  };
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
@@ -104,10 +171,15 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         requestId: input.requestId,
         agentDir,
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
-        serveGateAudit: (event) => {
-          if (event.tool === 'bash' && event.allowed) gateCalls += 1;
-          options.serveGateAudit?.({ ...event, requestId: input.requestId });
-        },
+        operationLabels: await operationLabelsFor(input.cwd),
+        // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
+        serveGateAudit: createServeGateAuditSink({
+          onStep: input.onStep,
+          requestId: input.requestId,
+          audit: options.serveGateAudit,
+          onAllowedBash: () => { gateCalls += 1; },
+        }),
+        onStep: input.onStep,
         knowledgePaths: input.knowledgePaths,
         sensitivePaths: input.sensitivePaths,
         onNotice: input.onNotice,
@@ -153,15 +225,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         timedOut = true;
         session.agent.abort();
       }, Math.max(1, remaining));
-      const unsubscribe = session.subscribe((event) => {
-        if (event.type === 'tool_execution_start') {
-          input.onStep(`worker_tool:${event.toolName}`);
-        } else if (event.type === 'agent_start') {
-          input.onStep('worker_agent_started');
-        } else if (event.type === 'agent_end') {
-          input.onStep('worker_agent_finished');
-        }
-      });
+      // SDK 会话事件（tool_execution_start / agent_start / agent_end）是内部协议名，
+      // 一律不当进度帧外发：用户可见的进度只由 G1 放行事件经 label 驱动产生。
       try {
         // The current ContextTaskRunner already appends the current user
         // message to input.messages. Calling the underlying Agent avoids
@@ -191,7 +256,6 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
-        unsubscribe();
         session.dispose();
       }
     },
@@ -232,6 +296,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     }
   }
   const activePlanId = (): string | null => activePlan?.planId ?? null;
+  // label 表（平台清单第 5 列）：驱动侧已缓存则直接传入，否则本会话派生一次。
+  // 派生失败/平台还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
+  const operationLabels = options.operationLabels ?? (await loadOperationLabels(options.cwd));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处记录，绝不扫描 worker 的自然语言回复。
@@ -253,10 +320,13 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   });
   // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
-  const gate = createServeGate({    onEvent: (event) => {
+  // label 表（平台清单第 5 列）在此传入：放行的平台调用才有人类可读进度帧。
+  const gate = createServeGate({
+    onEvent: (event) => {
       options.serveGateAudit?.({ ...event, requestId: options.requestId });
     },
     platformRoot: options.cwd,
+    operationLabels,
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
@@ -300,6 +370,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         }
         const previousPlan = activePlan;
         activePlan = null;
+        // 宿主替 worker 向平台提交方案：单轮里最长的等待之一，先给用户一帧。
+        options.onStep?.(PLAN_SUBMIT_STEP);
         try {
           const plan = await evaluateAndActivatePlan({
             platformRoot: options.cwd,

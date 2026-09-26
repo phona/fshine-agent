@@ -106,6 +106,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ?? createLongMemoryCandidateExtractor(createMemoryCandidateModel(contextModelDriver, { timeoutMs: 15_000 }));
   const workerDriver = overrides.workerDriver ?? createPiCodingTurnDriver({
     env,
+    // label 表派生根：平台操作的人类可读名来自平台公共 CLI 的第 5 列
+    ...(platformRoot ? { platformRoot } : {}),
     planActivationSecret,
     // G1 工具门留痕：放行与拦截都进 tool_calls 审计（requestId 串查平台侧）。
     serveGateAudit: (event) => {

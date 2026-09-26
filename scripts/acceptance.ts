@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { loadConfig } from '@fshine/core';
-import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV } from '@fshine/agent';
+import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
@@ -312,7 +312,8 @@ async function main(): Promise<void> {
     });
     console.log(JSON.stringify({
       event: 'acceptance_case_done', case: spec.id, durationMs,
-      delegated: steps.some((s) => s.startsWith('worker_tool:')) || Boolean(taskRow),
+      // 委派判定：宿主代 worker 向平台提交方案那一帧（worker 内部事件名已不外发）
+      delegated: steps.includes(PLAN_SUBMIT_STEP) || Boolean(taskRow),
     }));
   }
 

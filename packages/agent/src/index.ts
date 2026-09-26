@@ -11,14 +11,25 @@ export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
 export {
   createPiCodingTurnDriver,
   createPiCodingWorkerSession,
+  createServeGateAuditSink,
   isInputInsufficientCode,
+  keyArgsFragment,
   missingLabelFromCode,
   needsFromPlatformResponses,
+  operationStepText,
+  serveGateStepText,
+  PLAN_SUBMIT_STEP,
   type PiCodingTurnDriverOptions,
   type PiCodingWorkerSession,
   type PiCodingWorkerSessionOptions,
   type PiCodingWorkerTool,
 } from './pi-coding-driver';
+export {
+  loadOperationLabels,
+  operationLabel,
+  parseOperationLabels,
+  type OperationLabels,
+} from './operation-labels';
 export {
   FileSkillRegistry,
   createSkillRegistry,

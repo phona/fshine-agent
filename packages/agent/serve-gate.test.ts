@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll } from 'vitest';
-import { createServeGate, extractGateScript, hasShellMetachars, isServeCliInvocation, workspaceRelPath, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, extractGateScript, hasShellMetachars, isServeCliInvocation, KEY_ARG_FLAGS, workspaceRelPath, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 
 describe('isServeCliInvocation（首词规则）', () => {
   it('放行 bin/17dz 的合法形态', () => {
@@ -126,6 +126,106 @@ describe('createServeGate（通用执行安全门）', () => {
     expect(events.map((event) => event.allowed)).toEqual([true, false]);
     const brokenAudit = createServeGate({ planActive: () => true, onEvent: () => { throw new Error('audit down'); } });
     expect(brokenAudit({ name: 'bash', arguments: { command: 'bin/17dz query q A 202609' } })?.block).toBeUndefined();
+  });
+});
+
+describe('describeKeyArgs（声明式 flag 名单）', () => {
+  it('flag 名单是唯一口径：新参数只改名单，不加分支', () => {
+    expect([...KEY_ARG_FLAGS]).toEqual(['--query', '--period', '--subject-code']);
+  });
+
+  it('只摘名单内的 flag：名称类加书名号，编号/时间类原样，按命令出现顺序', () => {
+    expect(describeKeyArgs('bin/17dz query query-saved.js 幻晟 202609')).toEqual([]);
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609')).toEqual(['「猫一杯」', '202609']);
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --subject-code 1122 --query 猫一杯')).toEqual(['1122', '「猫一杯」']);
+    expect(describeKeyArgs('bin/17dz operation run finance.query-receivables --query 猫一杯 --customer 狗二')).toEqual(['「猫一杯」']);
+  });
+
+  it('名单外 flag / 布尔开关 / 超长取值都不进摘要', () => {
+    expect(describeKeyArgs('bin/17dz commit fill.js c.json --batch --save')).toEqual([]);
+    expect(describeKeyArgs('bin/17dz query x.js --query --period 202609')).toEqual(['202609']);
+    expect(describeKeyArgs(`bin/17dz query x.js --query ${'名'.repeat(40)}`)).toEqual([`「${'名'.repeat(24)}」`]);
+  });
+
+  it('bash 前缀与空命令同样走同一套词法', () => {
+    expect(describeKeyArgs('bash bin/17dz query x.js --query 甲')).toEqual(['「甲」']);
+    expect(describeKeyArgs('')).toEqual([]);
+  });
+});
+
+describe('createServeGate（平台调用的人类可读投影）', () => {
+  const labels = new Map([['query-saved', '查询已存档记录'], ['query-receivables', '读取应收余额']]);
+
+  it('放行的平台调用挂上 label 与参数摘要（数据查表，无分支）', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609' } })?.block).toBeUndefined();
+    expect(events.at(-1)).toMatchObject({
+      tool: 'bash',
+      allowed: true,
+      label: '读取应收余额',
+      keyArgs: ['「猫一杯」', '202609'],
+    });
+  });
+
+  it('脚本路径/裸名/操作名三种写法命中同一条 label', () => {
+    for (const command of [
+      'bin/17dz query query-saved.js A 202609',
+      'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
+      'bin/17dz operation run voucher.query-saved A 202609',
+    ]) {
+      const events: ServeGateEvent[] = [];
+      const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+      expect(gate({ name: 'bash', arguments: { command } })?.block).toBeUndefined();
+      expect(events.at(-1)?.label).toBe('查询已存档记录');
+    }
+  });
+
+  it('label 表缺省/查不到 → 不挂字段（绝不回退脚本名或操作名）', () => {
+    for (const extra of [{}, { operationLabels: labels }, { operationLabels: new Map() }]) {
+      const events: ServeGateEvent[] = [];
+      const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event), ...extra });
+      expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query smoke.js A 202609' } })?.block).toBeUndefined();
+      expect(events.at(-1)?.label).toBeUndefined();
+      expect(events.at(-1)?.keyArgs).toBeUndefined();
+      expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'reason', 'tool']);
+    }
+  });
+
+  it('被拦的调用没有 label（进度帧只属于真实发生的平台调用）', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js; cat .env' } });
+    gate({ name: 'bash', arguments: { command: 'cat .env' } });
+    gate({ name: 'read', arguments: { file_path: 'src/private.ts' } });
+    for (const event of events) {
+      expect(event.allowed).toBe(false);
+      expect(event.label).toBeUndefined();
+    }
+  });
+
+  it('describeArgs 替身可注入（测试不需要真平台词表）', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({
+      planActive: () => true,
+      operationLabels: labels,
+      describeArgs: () => ['替身'],
+      onEvent: (event) => events.push(event),
+    });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
+    expect(events.at(-1)).toMatchObject({ label: '查询已存档记录', keyArgs: ['替身'] });
+  });
+
+  it('既有审计字段与 tool_calls 消费者不受新字段影响', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
+    gate({ name: 'bash', arguments: { command: 'cat .env' } });
+    // assembly.ts 的 serveGateAudit 只读这四个字段
+    expect(events.map((event) => [event.requestId, event.tool, event.allowed, event.detail])).toEqual([
+      [undefined, 'bash', true, 'bin/17dz query query-saved.js A 202609'],
+      [undefined, 'bash', false, 'cat .env'],
+    ]);
   });
 });
 
