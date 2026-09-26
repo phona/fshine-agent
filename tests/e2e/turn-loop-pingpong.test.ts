@@ -7,14 +7,15 @@
  * 这里补真实会话里更耗人的两种形状：
  *   ① 乒乓路由：三个以上委派任务跨多回合来回切换（A→B→C→A→B→C）。宿主按申报的
  *      continueTaskId 把执行续回指名的旧子任务——不被最近的新任务卡住，worker 拿到
- *      的转录也只带那个任务的历史；续跑编号拿错（别人的任务 / 不存在的编号）时宿主
- *      拒绝执行，本轮零调用、不外发任何数字，且会话不被卡死（原样再问即可）。
+ *      的转录也只带那个任务的历史；编号拿错时按边界处理：越权（别人的任务）拒绝执行，
+ *      本轮零调用、不外发任何数字；不存在的编号（模型幻觉）在会话恰一个开放任务时被
+ *      兜底接回那个任务续跑，零个开放任务才报错——两种都不会把会话卡死（原样再问即可）。
  *   ② 探索线程延续：目标不明的请求先澄清；用户只答一半（有账套没期间）时线程不断——
  *      模型再澄清一轮（仍是零平台调用），补齐后才委派；澄清线程被别的话题打断后回来，
  *      线程开头仍在最近轮次窗口里、落地的是新子任务而不是续跑旧任务（问句原文被窗口
  *      挤出后仍在 Conversation Log，可经宿主提供的历史工具召回——characterization）。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ServerAssembly } from '../../apps/server/assembly';
 import { balanceCalls, boot, gatedWorker, ledger, mainDriver, totalActualCalls, type WorkerStep } from './harness';
 
@@ -34,6 +35,19 @@ async function awaitContextState(assembly: ServerAssembly, expected: string): Pr
     if (Date.now() >= deadline) throw new Error(`等待 Context State 落库超时（未出现：${expected}）`);
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+/** 侦测 C2 兜底留痕（写法同 turn-loop-disambiguation 的 capturePlanLog）。 */
+function captureTaskFallbackLog() {
+  const events: Array<{ event: string; requestId?: string; requestedTaskId?: string; boundTaskId?: string }> = [];
+  const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {
+    if (typeof line !== 'string') return;
+    try {
+      const parsed = JSON.parse(line) as { event?: string };
+      if (parsed?.event === 'task_id_fallback_bound') events.push(parsed as never);
+    } catch { /* 非 JSON 行忽略 */ }
+  });
+  return { events, restore: () => spy.mockRestore() };
 }
 
 /** 记录 worker 每次实际收到的委派请求、taskId 与完整转录（路由对不对要看转录串不串台）。 */
@@ -156,13 +170,17 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     await assembly.close();
   });
 
-  it('8.2 续跑编号拿错被宿主拒绝：无权继续别人的任务、找不到失效编号——零执行且会话不被卡死', async () => {
+  it('8.2 续跑编号拿错：越权与多候选仍被拒，唯一开放任务被兜底接回，会话不被卡死', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
       { plan: balanceCalls('幻辰财税', '202606') },
       { text: '幻辰财税 202606 应收账款余额为 61000 元。' },
       { end: true },
-      // 失效编号被拒之后，用户原样再问一次：全新子任务照常执行
+      // C2 兜底把失效编号接回唯一的开放任务：同一个子任务重新执行
+      { plan: balanceCalls('幻辰财税', '202606') },
+      { text: '幻辰财税 202606 应收账款余额仍是 61000 元（兜底续跑重新查的）。' },
+      { end: true },
+      // 兜底之后用户原样再问：全新子任务照常执行
       { plan: balanceCalls('幻辰财税', '202606') },
       { text: '幻辰财税 202606 应收账款余额仍是 61000 元（这次是重新查的）。' },
     ]);
@@ -173,6 +191,8 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     // 第二个企微用户同样开通权限：他的会话里出现第一个用户的 taskId（模型侧串台或
     // 泄漏）时，宿主必须按 principal+session 归属拒绝，而不是把执行送进别人的子任务
     await assembly.store.principalScopes.upsert({ wecomUserId: 'e2e_user2', accountSetIds: [], accountSetScope: 'all', enabled: true });
+    // 第三个用户什么任务都没开过：用来验证"零个开放任务"时兜底不放行
+    await assembly.store.principalScopes.upsert({ wecomUserId: 'e2e_user3', accountSetIds: [], accountSetScope: 'all', enabled: true });
 
     await send('查一下幻辰财税 202606 的应收账款余额');
     expect(worker.taskIds).toHaveLength(1);
@@ -189,23 +209,45 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     expect(totalActualCalls()).toBe(afterFirst);
     expect(sdk.noticeTexts()).toHaveLength(0);
 
-    // 失效编号：taskId 根本不存在（猜的/已过期的），同样拒绝执行，
-    // 而不是悄悄按新任务放行——那会让"续跑"悄无声息地换了子任务
+    // C2 兜底（2026-09-26 真实平台战斗测试实测）：模型幻觉出一个不存在的编号填进
+    // continueTaskId。这个会话恰好只有一个开放任务 → 宿主绑定它从断点续跑，流程不断。
+    const fallback = captureTaskFallbackLog();
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额', continueTaskId: 'task_ghost_404' });
     const ghost = await send('查一下幻辰财税 202606 的应收账款余额');
-    expect(ghost).toContain('未找到可继续');
-    expect(ghost).not.toContain('61000');
-    expect(worker.taskIds).toHaveLength(1);
-    expect(totalActualCalls()).toBe(afterFirst);
-    expect(sdk.noticeTexts()).toHaveLength(0);
+    try {
+      // 续的是原来那个子任务（不是新开任务），查询真的又跑了一次
+      expect(ghost).toContain('61000 元');
+      expect(worker.taskIds).toHaveLength(2);
+      expect(worker.taskIds[1]).toBe(worker.taskIds[0]);
+      expect(totalActualCalls()).toBe(afterFirst + 1);
+      // 留痕：requestId + 原（幻觉）编号 + 绑定到的编号
+      expect(fallback.events).toHaveLength(1);
+      expect(fallback.events[0]).toMatchObject({
+        event: 'task_id_fallback_bound',
+        requestedTaskId: 'task_ghost_404',
+        boundTaskId: worker.taskIds[0],
+      });
+      expect(fallback.events[0]?.requestId).toMatch(/^req_/);
+    } finally {
+      fallback.restore();
+    }
+
+    // 零个开放任务：失效编号依旧被拒，绝不悄悄按新任务放行——
+    // 那会让"续跑"悄无声息地换了子任务（兜底只在"恰一个"时生效）
+    declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额', continueTaskId: 'task_ghost_404' });
+    const noOpenTask = await send('查一下幻辰财税 202606 的应收账款余额', { userid: 'e2e_user3' });
+    expect(noOpenTask).toContain('未找到可继续');
+    expect(noOpenTask).not.toContain('61000');
+    expect(totalActualCalls()).toBe(afterFirst + 1);
 
     // 会话不被卡死：用户原样再问，宿主按新任务正常执行
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额' });
     const retried = await send('查一下幻辰财税 202606 的应收账款余额');
     expect(retried).toContain('61000 元');
-    expect(worker.taskIds).toHaveLength(2);
-    expect(worker.taskIds[1]).not.toBe(worker.taskIds[0]);
-    expect(totalActualCalls()).toBe(afterFirst + 1);
+    // 三次委派：第一次、兜底续跑（同一子任务）、重问（新子任务）
+    expect(worker.taskIds).toHaveLength(3);
+    expect(worker.taskIds[2]).not.toBe(worker.taskIds[0]);
+    expect(totalActualCalls()).toBe(afterFirst + 2);
     await assembly.close();
   });
 

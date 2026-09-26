@@ -889,6 +889,16 @@ export function createSqliteStore(dbPath: string): AuditStore {
         record.updatedAt,
       );
     },
+    async listOpenBySession(principalId, sessionId) {
+      // 开放 = status 为 active：upsert 是唯一写入路径且只写 active，没有任何终态转换，
+      // 所以"这个会话下还存在"即"还能续跑"（与 PlatformTaskRepo 接口注释同一语义）。
+      // 按最近活跃倒序：宿主留痕与排查时先看到刚跑过的那条。
+      const rows = db.prepare(
+        'SELECT task_id, parent_session_id, principal_id, worker_messages, created_at, updated_at FROM platform_tasks '
+        + 'WHERE principal_id = ? AND parent_session_id = ? AND status = ? ORDER BY updated_at DESC',
+      ).all(principalId, sessionId, 'active') as PlatformTaskRow[];
+      return rows.map(rowToPlatformTask);
+    },
   };
 
   const changeIntents: ChangeIntentRepo = {

@@ -130,6 +130,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     tasks: store.platformTasks ?? {
       async get() { return null; },
       async upsert() { throw new Error('SQLite platform task store 未启用'); },
+      // 没有任务存储就没有开放任务：C2 兜底在此保持惰性（维持"编号无效"原报错）。
+      async listOpenBySession() { return []; },
     },
     workerDriver,
     profileId: '17dz',

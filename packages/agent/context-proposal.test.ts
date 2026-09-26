@@ -22,7 +22,12 @@ const proposal: ChangeProposal = {
 const proposalText = `已洗好契约。\n\`\`\`json\n${JSON.stringify(proposal, null, 2)}\n\`\`\`\n请确认。`;
 
 const noopTool: DiscoveredTool = { name: 'x', description: '', inputSchema: {} };
-const noopTasks: PlatformTaskRepo = { get: async () => null, upsert: async () => {} };
+const noopTasks: PlatformTaskRepo = {
+  get: async () => null,
+  upsert: async () => {},
+  // 提案流程不涉及续跑：没有开放任务可供 C2 兜底绑定。
+  listOpenBySession: async () => [],
+};
 const workerReturning = (text: string): TurnDriver => ({
   run: async (_input: TurnDriverInput): Promise<TurnDriverResult> => ({ text, messages: [] }),
 });

@@ -302,6 +302,43 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     ].join('\n'));
   }
 
+  /**
+   * C2 兜底绑定：模型填了不存在的 continueTaskId 时，只在"这个会话恰好有一个开放平台
+   * 任务"时把它绑上，否则返回 null（调用方维持原报错）。
+   *
+   * 为什么允许猜这一个：任务编号是模型生成的字符串，而"会话里有几个开放任务"是宿主持
+   * 有的确定性事实——恰一个时编号写错也不影响"要续的就是它"。零个（没有可续任务）和
+   * 多个（多任务并发/乒乓）都没有这种唯一性：多个时猜错就是把用户的问题送进别的子任务，
+   * 那正是多任务消歧要防的事，所以这里必须维持原报错。
+   *
+   * 列举失败（存储抛错）同样返回 null：兜底是增益，不能把"编号无效"升级成新的失败形态。
+   */
+  async function bindSoleOpenTask(requestedTaskId: string, ctx: ContextTaskExecutionContext): Promise<PlatformTaskRecord | null> {
+    let open: PlatformTaskRecord[];
+    try {
+      open = await options.tasks.listOpenBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'task_id_fallback_list_failed',
+        requestId: ctx.trusted.requestId,
+        sessionId: ctx.trusted.sessionId,
+        error: error instanceof Error ? error.message.slice(0, 160) : String(error),
+      }));
+      return null;
+    }
+    if (open.length !== 1) return null;
+    const bound = open[0]!;
+    // 留痕必须带齐三个 id：requestId 串平台侧审计，原编号证明这是兜底而非正常续跑，
+    // 绑定到的编号说明执行最终落在哪个任务上。
+    console.info(JSON.stringify({
+      event: 'task_id_fallback_bound',
+      requestId: ctx.trusted.requestId,
+      requestedTaskId,
+      boundTaskId: bound.taskId,
+    }));
+    return bound;
+  }
+
   return {
     tool,
     matchConfirmation: async (ctx, message) => {
@@ -378,8 +415,19 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       }
 
       const profile = await resolveContextProfile(options.profiles, profileId);
-      const existing = args.taskId ? await options.tasks.get(args.taskId) : null;
+      let existing = args.taskId ? await options.tasks.get(args.taskId) : null;
+      // C2 兜底：模型会幻觉出一个不存在的任务编号填进 continueTaskId（真实平台战斗测试实测），
+      // 按原语义这一轮直接报错、流程断在这里。编号是猜的，但"这个会话现在有几个开放平台任务"
+      // 是宿主自己的事实：恰一个就绑定它，把断掉的流程接上；零个或多个都维持原报错——
+      // 多个正是多任务场景，猜哪一个都是把用户的问题派到别的任务上，必须继续让用户说清楚。
+      //
+      // 分工边界：兜底只在工具层。runtime 的 resolvePlanId / C31 消歧一行不动（反查不到
+      // 就新开计划，计划绑定不猜）——任务续跑可以因"只有一个"而唯一确定，计划归属没有这种
+      // 唯一性，混在一起猜就会把步骤记到错误的计划上。
+      if (args.taskId && !existing) existing = await bindSoleOpenTask(args.taskId, ctx);
       if (args.taskId && !existing) throw new ToolUserError('未找到可继续的 17dz 任务：编号无效或已过期。请直接告诉我要查什么，我重新查一次。');
+      // 归属校验对兜底绑定的任务同样生效：列举本身就按 (principalId, sessionId) 过滤，
+      // 等价成立，但代码路径必须走同一道检查——不因为"反正过滤过了"就另开一条短路。
       if (existing && (existing.principalId !== ctx.trusted.principalId || existing.parentSessionId !== ctx.trusted.sessionId)) {
         throw new ToolUserError('无权继续该 17dz 任务。');
       }

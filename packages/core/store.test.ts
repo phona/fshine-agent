@@ -312,6 +312,26 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
 
       expect(await store.platformTasks!.get(taskId)).toEqual(updated);
     });
+
+    it('listOpenBySession 只列该 principal/会话的开放任务，最近活跃在前', async () => {
+      const mine = makePlatformTask({ taskId: newId('task'), updatedAt: '2026-09-15T08:00:00.000Z' });
+      const mineNewer = makePlatformTask({ taskId: newId('task'), updatedAt: '2026-09-15T09:00:00.000Z' });
+      // 别人的 principal、别人的会话：都不该出现在这个会话的开放任务里
+      const otherPrincipal = makePlatformTask({ taskId: newId('task'), principalId: 'wecom:user_b' });
+      const otherSession = makePlatformTask({ taskId: newId('task'), parentSessionId: 'wecom:user_a:conv_2' });
+      for (const record of [mine, mineNewer, otherPrincipal, otherSession]) {
+        await store.platformTasks!.upsert(record);
+      }
+
+      const open = await store.platformTasks!.listOpenBySession('wecom:user_a', 'wecom:user_a:conv_1');
+      expect(open.map((record) => record.taskId)).toEqual([mineNewer.taskId, mine.taskId]);
+      // 记录原样带回（C2 兜底要拿它续跑，字段不能丢）
+      expect(open[0]).toEqual(mineNewer);
+      // 换会话只看到那个会话的任务；没有任何任务的 principal 得到空数组
+      expect((await store.platformTasks!.listOpenBySession('wecom:user_a', 'wecom:user_a:conv_2'))
+        .map((record) => record.taskId)).toEqual([otherSession.taskId]);
+      expect(await store.platformTasks!.listOpenBySession('wecom:user_c', 'wecom:user_a:conv_1')).toEqual([]);
+    });
   });
 
   describe('changeIntents', () => {
