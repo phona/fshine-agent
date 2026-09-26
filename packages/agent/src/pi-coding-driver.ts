@@ -188,6 +188,38 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 回合内仍然只补一次（内联单次，见下方 if）：绝不在同一回合里反复推同一个模型。
       let activatedPlanNudged = false;
       let pendingPlan: PendingPlanConfirmation | undefined;
+      // ── 进度帧 / 计划通知的连续重复压制（2026-09-26 真实平台战斗测试实测）──────────
+      // worker 在真实调用之后常继续重提执行方案（beforeToolCall 里 activePlan 置空再
+      // evaluateAndActivatePlan，后续提交可能 scope 识别失败被拒），每次重提都触发同一帧
+      // PLAN_SUBMIT_STEP（"正在向平台提交执行方案…"）与同一条平台计划通知：实测单回合
+      // 5-6 帧重复、两条一模一样的通知。生产企微侧 progress 有 4 帧硬顶，重复帧挤占真实
+      // 进度帧的预算；重复通知则是直接的用户噪音——同一 worker 回合内用户无法做确认操作，
+      // 连续相同文本的通知只可能是重提同一方案的 churn。
+      //
+      // 语义是**连续重复**（相邻相同即丢弃），不是永久去重：进度流里同一句话中间插过别的
+      // 帧，说明 worker 又干了别的事，此时重复文本是合法的新动作（重新查询同一对象、再次
+      // 提交同一方案都真实发生过），必须放行——只压"连发两次同一句话"，不压合法重复动作。
+      //
+      // 两个记忆都是 run() 局部的：每回合独立重置。通知尤其如此——跨回合（新 run）用户
+      // 有机会做确认操作，计划门的通知必须在每个新回合重新送达，不能因上一个回合送达过
+      // 同样文本就被吞掉。
+      let lastStep: string | null = null;
+      const stepOnce = (text: string): void => {
+        if (text === lastStep) return;
+        lastStep = text;
+        input.onStep?.(text);
+      };
+      let lastNotice: string | null = null;
+      // 宿主没配 onNotice 时保持 undefined：plan-runtime 里"未配置即暂停执行"的 fail-closed
+      // 守卫原样生效——去重层不把"没有通知出口"伪装成"有出口但跳过"（那会让通知未经送达
+      // 就放行激活，而通知送达本是激活授权的一部分）。
+      const noticeOnce = input.onNotice
+        ? async (text: string): Promise<void> => {
+          if (text === lastNotice) return;
+          lastNotice = text;
+          await input.onNotice?.(text);
+        }
+        : undefined;
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
@@ -199,7 +231,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         operationLabels: await operationLabelsFor(input.cwd),
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
-          onStep: input.onStep,
+          onStep: stepOnce,
           requestId: input.requestId,
           audit: options.serveGateAudit,
           onAllowedBash: () => {
@@ -216,10 +248,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             }
           },
         }),
-        onStep: input.onStep,
+        onStep: stepOnce,
         knowledgePaths: input.knowledgePaths,
         sensitivePaths: input.sensitivePaths,
-        onNotice: input.onNotice,
+        onNotice: noticeOnce,
         planCliRunner: options.planCliRunner,
         planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
