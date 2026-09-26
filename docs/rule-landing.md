@@ -290,3 +290,15 @@
 - e2e `turn-loop-disambiguation.test.ts` 9.1/9.2：真 SQLite 全链——两条计划撞车出题 → "2"续跑正确计划（`task_plan_resumed` 归属 + 真库投影 planId 正确）；非编号回复按新请求单步落地、旧计划不动。
 
 **已知边界**（如实记录，不假装已修）：模型**显式**填错 `continueTaskId`（H1 的洗白形态）不是"歧义"，编号问题不会触发——宿主按 C25 忠实路由；模型压根不申报 delegate 的召回失效也不在此列。这两个都是模型侧抉择，宿主契约只保证"绑定永远有机械依据"。
+
+## 16. 用户可见进度帧：label 数据驱动 + 防散射合约（2026-09-26）
+
+背景：真实平台单轮 60-180s（mock 15-90s），用户全程黑箱；progress 管道（企微 adapter ≤4 帧/≥3s → handler `trusted.onStep` → driver）早已全通，但 worker 驱动外发的是内部事件名（`worker_tool:bash` / `worker_agent_*`）——用户直接看到协议泄漏，watch list 里"meta-talk tic"的机制根源即此。
+
+**决策**（用户确认，含防散射要求）：进度帧的业务措辞**只有一个来源**——平台 `operations.json` 的 `label` 字段，经公共 CLI `bin/17dz operation list` 第 5 列派生。防散射合约四条：① 映射只有一份且是数据不是代码（fshine 零 per-operation 分支，渲染器唯一模板 `正在${label}${keyArgs.join('·')}…`）；② 内部事件名永不出厂（SDK 会话事件的 subscribe 接线整体删除）；③ 解析只发生一次（serve gate 既有 `extractGateScript` + 新抽 `splitCommandTokens` 共用，参数摘要是声明式 flag 名单 `--query/--period/--subject-code` + 样式表）；④ 守卫进 CI——`platform-leak-lint.test.ts` 业务词命中集**只减不增**（子集断言；窄口径基线 5 行：memory-candidate-extractor ×3 执行层正则、context-extractor ×1 scope 检测、context.ts ×1 时间义注释）。安全缺省：无 label（旧平台/CLI 失败/operation 没起名）→ 静默不发帧，**绝不回退显示脚本名或操作名**。label 表按平台根路径缓存派生一次（3s 超时），绝不每条命令 spawn CLI。计划提交帧 `正在向平台提交执行方案…`（无业务词）在宿主 evaluateAndActivatePlan 前发射。主 agent 模型自述帧（pi-driver phrase，用用户原话）保持原状——最快的确认，占用 4 帧预算里的第 1 帧。
+
+**验收**：47 文件 439 用例全绿（新增 30 例：渲染器属性 400 随机例严格匹配唯一模板、替身 session 驱动生产接线 `createServeGateAuditSink` 断言帧全形如「正在…」且无 `worker_` 前缀、空表/无 CLI 降级零帧且审计字段一字不少、TSV 解析/超时/非零退出）；mock 实测帧序：模型自述 → 计划提交 → `正在检索账套目录「幻辰财税」…` → `正在查应收账款余额「幻辰财税」…`。17dz 侧 `303a0db`（13 个 read operation 起 label + TSV 第 5 列）、fshine 侧 `1aa51c4`。
+
+**同轮修掉的相邻缺陷**：① `operation list | head` EPIPE 崩溃（printList 裸写，同步抛掷 + 异步 error 事件双面，safeWrite + main 里 process.stdout 守卫，`303a0db` 后修）；② 验收脚本 `delegated` 判定原依赖 `worker_tool:` 文本，改判 `PLAN_SUBMIT_STEP`（宿主代提交方案帧是"真委派了"的确定性信号）；③ lint 测试"只减不增"曾实现成精确相等（合理收缩被误判），改子集断言。
+
+**已知边界**：帧预算 4 帧（phrase/计划/调用1/调用2）下，超时心跳帧最坏情况被挤掉——用户嫌企微进度烦不烦决定 `MAX_PROGRESS_FRAMES` 是否上调（一行常数）；e2e harness 未接 onStep，帧路径目前由驱动单测驱动生产接线覆盖（"测的就是跑的在接线级成立，渠道级未接"）。
