@@ -42,6 +42,16 @@ const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动
  */
 const MAX_NEEDS_ROUNDS = 3;
 
+/**
+ * 计划模式熔断阈值：连续这么多拆解步"既无执行痕迹也无 needs 交还"就停止后续步骤。
+ *
+ * 真实平台 12 步计划实测的形状：每一步都是 worker 启动+读 skill+提计划被拒+把方案
+ * 当文本打印，步步零执行（每步约 11s 空转），全部步骤 failed。合法步骤不可能零执行
+ * ——真跑过必然有 execution，执行不了必然有 needs 交还——所以只熔"连续零执行"不会
+ * 误伤合法拆解；中间任何一步有执行或交还就重置计数（见委派分支里的记账）。
+ */
+const MAX_PLAN_ZERO_EXEC_STEPS = 3;
+
 /** 纠错环工具结果的序列化前缀：模型把它原样当回复时，宿主用自己的转达文本顶上。 */
 const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 
@@ -298,9 +308,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         planId: string | null;
         /** 计划模式：上一次回报缺信息的步号——回路上限按步计，换步即重新计数。 */
         needsStepIndex: number | null;
+        /** 计划模式熔断：连续零执行（既无 execution 也无 needs 交还）的步数；合法一步即重置。 */
+        planZeroExecSteps: number;
+        /** 计划模式熔断汇总：本回合已派步骤的结局（与刚写的计划事实同源，只机械陈述）。 */
+        planStepOutcomes: Array<{ label: string; outcome: 'done' | 'needs' | 'failed' }>;
         /** 消歧回合：用户从多个未完成任务中选定的计划。绑定由宿主强制，模型不可改绑。 */
         preferredPlanId: string | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, activatedPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, preferredPlanId: planChoice?.planId ?? null };
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, activatedPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, planZeroExecSteps: 0, planStepOutcomes: [], preferredPlanId: planChoice?.planId ?? null };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -501,6 +515,31 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   step: `${step.stepIndex}/${step.totalSteps}`,
                   status,
                 }));
+              }
+              // 计划模式熔断记账：零执行 = 既无 execution 也无 needs 交还（worker 空转的
+              // 形状：提计划被拒/把方案当文本打印）。有执行或交还即重置——合法步骤必然
+              // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
+              // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
+              if (step && planId && !delegated.pendingPlan) {
+                const outcome = delegated.needs ? 'needs' : delegated.execution ? 'done' : 'failed';
+                turn.planStepOutcomes.push({ label: step.label, outcome });
+                turn.planZeroExecSteps = outcome === 'failed' ? turn.planZeroExecSteps + 1 : 0;
+                if (turn.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS) {
+                  // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
+                  // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
+                  // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
+                  turn.delegationFailed = true;
+                  console.info(JSON.stringify({
+                    event: 'plan_steps_circuit_break',
+                    requestId: ctx.requestId,
+                    planId,
+                    consecutiveZeroExecSteps: turn.planZeroExecSteps,
+                    completedSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').length,
+                    totalSteps: step.totalSteps,
+                    stoppedAt: `${step.stepIndex}/${step.totalSteps}`,
+                  }));
+                  throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps));
+                }
               }
               // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
               // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
@@ -1064,6 +1103,29 @@ function planStepSummary(result: SubagentTaskResult): string {
   if (result.needs) return `缺：${result.needs.missing.join('、') || '（未指明）'}；${result.needs.reason}`;
   if (result.execution) return `已执行 ${result.execution.calls} 次平台调用`;
   return '未产生平台执行';
+}
+
+/**
+ * 计划模式熔断汇总：只陈述计划事实（哪些步成了、从哪一步起连续失败已停），不猜业务语义。
+ *
+ * 步骤结局与刚写入的计划事实同源（done/needs/failed），文本因此只有步号与计数、
+ * 不含财务数字——出口校验的"零执行轮次数字结论"拦截不会覆盖这段回复。
+ */
+function renderPlanCircuitBreak(
+  outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
+  consecutive: number,
+  totalSteps: number,
+): string {
+  const done = outcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label);
+  const needs = outcomes.filter((entry) => entry.outcome === 'needs').map((entry) => entry.label);
+  const firstFailed = outcomes[outcomes.length - consecutive];
+  const lines = [
+    `计划执行已停止：自「${firstFailed?.label ?? '上一步'}」起连续 ${consecutive} 步没有产生任何平台执行（本次共 ${totalSteps} 步），后续步骤不再派发。`,
+    done.length > 0 ? `已执行成功的步骤：${done.join('、')}。` : '本次拆解没有执行成功的步骤。',
+  ];
+  if (needs.length > 0) lines.push(`缺信息未执行的步骤：${needs.join('、')}。`);
+  lines.push('可以回复“继续”重跑未完成的步骤，或直接告诉我要调整的范围。');
+  return lines.join('\n');
 }
 
 /**

@@ -144,4 +144,36 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
     expect(totalActualCalls()).toBeGreaterThan(before);
     await assembly.close();
   });
+
+  it('6.3 连续 3 步零执行熔断：第 3 步后停止派发，用户收到计划事实汇总', async () => {
+    const worker = recordingWorker([
+      // 三步都只打印文本：无计划提交、无平台调用、无 needs（真实平台 12 步实测的空转形状）
+      { text: '这一步没有发起任何平台调用。' }, { end: true },
+      { text: '这一步没有发起任何平台调用。' }, { end: true },
+      { text: '这一步没有发起任何平台调用。' }, { end: true },
+      { text: '这一步不应该再被派发。' }, { end: true },
+    ]);
+    const { send, assembly } = await boot({
+      main: mainDriver([
+        { kind: 'delegate', request: '第1/4步：查幻辰财税账套 202601 的应收余额' },
+        { kind: 'delegate', request: '第2/4步：查幻东建材账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+        { kind: 'delegate', request: '第3/4步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+        { kind: 'delegate', request: '第4/4步：查丁账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+        { kind: 'conversation', text: '主 Agent 自由文本：不应外发' },
+      ]),
+      worker: worker.driver,
+    });
+
+    const reply = await send('逐个核对这四个账套的应收余额：幻辰财税、幻东建材、新兴建材、丁');
+
+    // 第 3 步后熔断：第 4 步没有再派，模型汇总被宿主的熔断汇总顶上
+    expect(worker.requests).toHaveLength(3);
+    expect(reply).toContain('第 1/4 步');
+    expect(reply).toContain('连续 3 步');
+    expect(reply).toContain('没有产生任何平台执行');
+    expect(reply).not.toContain('不应外发');
+    // 三步都没真执行：平台侧一次调用都没发生
+    expect(totalActualCalls()).toBe(0);
+    await assembly.close();
+  });
 });

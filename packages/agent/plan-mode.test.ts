@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
@@ -154,6 +154,19 @@ function subagent(script: Array<(args: { request: string; taskId?: string; stepL
 }
 
 const DONE = (taskId: string, text: string): SubagentTaskResult => ({ taskId, text, execution: { planId: 'plan_platform', version: 1, calls: 1 } });
+
+/** 侦测宿主计划模式熔断事件（console.info 上是 JSON 行，写法同 tests/e2e 的 capturePlanLog）。 */
+function capturePlanLog() {
+  const events: Array<Record<string, unknown>> = [];
+  const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {
+    if (typeof line !== 'string') return;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (parsed['event'] === 'plan_steps_circuit_break') events.push(parsed);
+    } catch { /* 非 JSON 行忽略 */ }
+  });
+  return { events, restore: () => spy.mockRestore() };
+}
 
 describe('长任务拆解：计划模式与任务计划状态', () => {
   it('P6.1 三步拆解全链：每步单独委派、后两步续跑同一子任务、汇总由 conversation 产出', async () => {
@@ -581,6 +594,150 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const started = taskPlans.facts.filter((fact) => fact.status === 'started' && fact.stepIndex === 2);
     expect(started).toHaveLength(1);
     expect(started[0]?.planId).toBe('plan_req_p615_a');
+  });
+
+  it('P6.16 连续 3 步零执行熔断：第 3 步后停止派发，回复只陈述计划事实', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const log = capturePlanLog();
+    try {
+      // 4 步拆解，替身每步都零执行（既无 execution 也无 needs——worker 空转的形状）
+      const task = subagent([() => ({ taskId: 'task_break', text: '这一步没有产生任何平台执行。' })]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/4步：查对象甲' },
+          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_break' },
+          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_break' },
+          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_break' },
+          { kind: 'conversation', text: '主 Agent 汇总：不应外发。' },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+        taskPlans,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_break' }), '逐个核对甲乙丙丁');
+
+      // 第 3 步后熔断：第 4 步没有再派，模型的汇总文本被宿主的熔断汇总顶上
+      expect(task.calls).toHaveLength(3);
+      expect(reply.text).toContain('第 1/4 步');
+      expect(reply.text).toContain('连续 3 步');
+      expect(reply.text).toContain('没有产生任何平台执行');
+      expect(reply.text).toContain('没有执行成功的步骤');
+      expect(reply.text).not.toContain('不应外发');
+      // 计划事实照旧落库：3 个 started + 3 个 failed（熔断不篡改投影）
+      expect(taskPlans.facts.filter((fact) => fact.status === 'started')).toHaveLength(3);
+      expect(taskPlans.facts.filter((fact) => fact.status === 'failed')).toHaveLength(3);
+      // 熔断事件：requestId/planId/连续失败数/已完成数
+      expect(log.events).toHaveLength(1);
+      expect(log.events[0]).toMatchObject({
+        event: 'plan_steps_circuit_break',
+        requestId: 'req_break',
+        planId: 'plan_req_break',
+        consecutiveZeroExecSteps: 3,
+        completedSteps: 0,
+        totalSteps: 4,
+        stoppedAt: '3/4',
+      });
+    } finally {
+      log.restore();
+    }
+  });
+
+  it('P6.17 中间有成功步骤时熔断汇总说清哪些步成了、从哪步起停', async () => {
+    const log = capturePlanLog();
+    try {
+      const task = subagent([
+        () => DONE('task_part', '第一步真执行了。'),
+        () => ({ taskId: 'task_part', text: '这一步没有产生任何平台执行。' }),
+      ]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/4步：查对象甲' },
+          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_part' },
+          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_part' },
+          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_part' },
+          { kind: 'conversation', text: '主 Agent 汇总：不应外发。' },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_part' }), '逐个核对甲乙丙丁');
+
+      expect(task.calls).toHaveLength(4);
+      expect(reply.text).toContain('已执行成功的步骤：第 1/4 步');
+      expect(reply.text).toContain('第 2/4 步」起连续 3 步');
+      expect(log.events[0]).toMatchObject({ completedSteps: 1, consecutiveZeroExecSteps: 3 });
+    } finally {
+      log.restore();
+    }
+  });
+
+  it('P6.18 中间一步有执行就重置计数：不熔断，汇总由模型产出', async () => {
+    const log = capturePlanLog();
+    try {
+      const task = subagent([
+        () => ({ taskId: 'task_reset', text: '第一步空转。' }),
+        () => DONE('task_reset', '第二步真执行了。'),
+        () => ({ taskId: 'task_reset', text: '第三步空转。' }),
+        () => ({ taskId: 'task_reset', text: '第四步空转。' }),
+      ]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/4步：查对象甲' },
+          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_reset' },
+          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_reset' },
+          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_reset' },
+          { kind: 'conversation', text: '汇总：第二步查到了，其余步骤未执行。' },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_reset' }), '逐个核对甲乙丙丁');
+
+      // 第 2 步的执行把连续计数清零：后面的两步零执行只到 2，够不到阈值
+      expect(task.calls).toHaveLength(4);
+      expect(reply.text).toBe('汇总：第二步查到了，其余步骤未执行。');
+      expect(log.events).toHaveLength(0);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it('P6.19 needs 交还也重置计数：缺信息步骤不算空转，不熔断', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const log = capturePlanLog();
+    try {
+      const task = subagent([
+        () => ({ taskId: 'task_needs', text: '第一步空转。' }),
+        () => ({ taskId: 'task_needs', text: '平台要求必须显式给出范围。', needs: { missing: ['范围'], reason: '平台要求必须显式给出范围' } }),
+        () => ({ taskId: 'task_needs', text: '第三步空转。' }),
+        () => ({ taskId: 'task_needs', text: '第四步空转。' }),
+      ]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/4步：查对象甲' },
+          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_needs' },
+          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_needs' },
+          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_needs' },
+          { kind: 'conversation', text: '汇总：第二步缺范围，其余步骤未执行。' },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+        taskPlans,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_reset' }), '逐个核对甲乙丙丁');
+
+      expect(task.calls).toHaveLength(4);
+      expect(reply.text).toBe('汇总：第二步缺范围，其余步骤未执行。');
+      expect(log.events).toHaveLength(0);
+      // needs 步骤的事实终态仍是 needs（熔断记账不改投影语义）
+      expect(taskPlans.facts.filter((fact) => fact.stepIndex === 2).map((fact) => fact.status)).toEqual(['started', 'needs']);
+    } finally {
+      log.restore();
+    }
   });
 });
 
