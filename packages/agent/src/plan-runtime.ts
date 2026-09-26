@@ -227,9 +227,39 @@ export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePl
   return env;
 }
 
+/**
+ * 剥掉模型给命令加的"包装"再交协议解析：markdown 代码围栏、外层成对引号。
+ *
+ * 为什么宿主侧必须兼容：计划 JSON 是机器解析的协议，而围栏/引号是模型的格式习惯、
+ * 不是内容。真实平台 12 步计划实测里，worker 把 `bin/17dz plan {…}` 用 ```json 围栏
+ * 包起来（甚至多行美化），协议正则只认行首裸命令 → 解析落空 → 控制流掉进 serve-gate
+ * 的 plan 拒绝分支，每一步都空转。格式习惯会波动，宿主不能指望模型永远守规矩，
+ * 因此在协议解析前确定性剥包装。
+ *
+ * 边界：剥包装只改包装、不放宽任何协议语义——剥完仍走原正则与原 calls 结构校验，
+ * JSON 残缺/结构非法一律维持现有 throw；剥不动（围栏未闭合、引号不成对）原样返回，
+ * 由调用方维持现有解析失败行为。
+ */
+function stripCommandWrapping(command: string): string {
+  let text = command.trim();
+  // 模型可能套两层（围栏里再裹引号）：每轮只剥一层最外包装，不再变化即收敛
+  for (let round = 0; round < 4; round += 1) {
+    const before = text;
+    const fence = text.match(/^```[^\n`]*\n?([\s\S]*?)\n?```$/);
+    if (fence) text = fence[1]!.trim();
+    if (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
+      text = text.slice(1, -1).trim();
+    }
+    if (text === before) break;
+  }
+  return text;
+}
+
 /** Parse the worker's intercepted `bin/17dz plan { ... }` JSON command. */
 export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; userConfirmed?: boolean } | null {
-  const match = command.trim().match(/^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s+([\s\S]+))?$/);
+  // 先剥模型包装（代码围栏/外层引号）再按原协议解析：JSON 允许多行，现有正则的
+  // `[\s\S]+` 本就接得住多行 body，这里只是让围栏版命令能走到它面前。
+  const match = stripCommandWrapping(command).match(/^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s+([\s\S]+))?$/);
   if (!match) return null;
   let body: unknown;
   try { body = JSON.parse(match[1] ?? ''); } catch { throw new Error('plan 命令只接受由宿主截获的 JSON calls 方案；不得直接调用 evaluate/activate。'); }

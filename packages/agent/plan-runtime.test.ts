@@ -28,6 +28,31 @@ describe('platform-backed execution plan runtime', () => {
     expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('不得直接调用 evaluate/activate');
   });
 
+  it('容忍模型给命令加的包装：代码围栏（单行/多行）与外层引号解析出同一份 calls', () => {
+    const expected = [{ operation: 'voucher.query-saved', args: ['A', '202609'] }];
+    const bare = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}';
+    // 围栏 + 语言标签，单行
+    expect(parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)?.calls).toEqual(expected);
+    // 围栏无标签 + 多行美化（JSON 本体跨行，正则的 [\s\S]+ 接得住）
+    expect(parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202609"] }\n  ]\n}\n```')?.calls).toEqual(expected);
+    // 外层成对引号（双引号/单引号）
+    expect(parsePlanCallsCommand(`"${bare}"`)?.calls).toEqual(expected);
+    expect(parsePlanCallsCommand(`'${bare}'`)?.calls).toEqual(expected);
+    // 裸命令照旧（剥包装对合法命令是恒等）
+    expect(parsePlanCallsCommand(bare)?.calls).toEqual(expected);
+    // user_confirmed 字段在围栏版里同样保留（只作审计，不作授权）
+    expect(parsePlanCallsCommand('```json\nbin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}\n```')).toEqual({
+      calls: [{ operation: 'voucher.query-saved', args: [] }],
+      userConfirmed: true,
+    });
+  });
+
+  it('围栏剥得掉但 JSON 残缺：协议校验照旧 throw，不放宽', () => {
+    expect(() => parsePlanCallsCommand('```json\nbin/17dz plan {"calls":[\n```')).toThrow('JSON calls 方案');
+    // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
+    expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
+  });
+
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
     expect(createPlanScopedWorkerEnv({ DZ_PLAN_ACTIVATION_SECRET: 'secret', DZ_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
       .toEqual({ DZ_REQUIRE_PLAN: '1', DZ_PLAN_ID: 'plan_host', OTHER: 'ok' });
