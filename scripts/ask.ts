@@ -32,7 +32,17 @@ function replyText(reply: ChannelReply): string {
 }
 
 async function main(): Promise<void> {
-  const question = process.argv.slice(2).join(' ').trim();
+  // --conversation <id>：固定会话 id 供多轮脚本复用同一会话（指代/召回测试）；缺省随机。
+  const convIdx = process.argv.indexOf('--conversation');
+  const conversationId = convIdx >= 0 && process.argv[convIdx + 1]
+    ? process.argv[convIdx + 1]!
+    : `ask-${randomUUID().slice(0, 8)}`;
+  const questionArgs = process.argv.slice(2).filter((arg, i, arr) => {
+    if (arg === '--conversation' || arg === '--db') return false;
+    const prev = arr[i - 1];
+    return prev !== '--conversation' && prev !== '--db';
+  });
+  const question = questionArgs.join(' ').trim();
   if (!question) {
     console.error('用法：npm run ask -- "要问的问题"');
     process.exit(2);
@@ -47,7 +57,11 @@ async function main(): Promise<void> {
   }
 
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
-  const dbPath = path.join(repoRoot, 'data', `ask-${Date.now()}.db`);
+  // --db <path>：固定库文件供多轮脚本跨进程复用会话历史；缺省独立时间戳库。
+  const dbIdx = process.argv.indexOf('--db');
+  const dbPath = dbIdx >= 0 && process.argv[dbIdx + 1]
+    ? path.resolve(process.argv[dbIdx + 1]!)
+    : path.join(repoRoot, 'data', `ask-${Date.now()}.db`);
   const store = createSqliteStore(dbPath);
   for (const record of principalScopeRecords(config)) await store.principalScopes.upsert(record);
   const businessSkill = await loadBusinessSkill(process.env);
@@ -82,7 +96,7 @@ async function main(): Promise<void> {
 
   const message: IncomingChannelMessage = {
     wecomUserId: AUTHORIZED_USER,
-    conversationId: `ask-${randomUUID().slice(0, 8)}`,
+    conversationId,
     messageId: `ask_${randomUUID()}`,
     chatType: 'single',
     text: question,

@@ -35,6 +35,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
+import { isPlatformMock } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 
@@ -105,8 +106,9 @@ function isolatePlatformState(): void {
     DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
     DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
     DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
-    // 网关限流有 17dz 专项测试；探针要跑长任务，放宽 burst 以免被限流挡住主线
-    DZ_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }),
+    // 网关限流有 17dz 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
+    // 真实平台保持生产限流（"别让下游平台有感知"）：探针节奏天然低于限额，被限就是信号。
+    ...(isPlatformMock() ? { DZ_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
   });
 }
 
