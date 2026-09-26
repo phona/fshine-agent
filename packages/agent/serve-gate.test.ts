@@ -95,6 +95,25 @@ describe('createServeGate（通用执行安全门）', () => {
     }
   });
 
+  it('plan 拒绝消息教正确提交形式：单行原始命令，不要代码块/外层引号/多行', () => {
+    const gate = createServeGate({ planActive: () => true });
+    // 围栏版计划命令（真实平台实测的误导来源）与裸 evaluate 都拿到同一条教学消息
+    for (const command of [
+      '```json\nbin/17dz plan {"calls":[{"operation":"probe.query","args":[]}]}\n```',
+      'bin/17dz plan evaluate --task-id forged --stdin',
+    ]) {
+      const reason = gate({ name: 'bash', arguments: { command } })?.reason ?? '';
+      // 可行动的方向：唯一合法形式 + 三种常见错误包装
+      expect(reason).toContain('单行');
+      expect(reason).toContain('bin/17dz plan');
+      expect(reason).toContain('不要');
+      expect(reason).toContain('宿主');
+      // 措辞纪律：不出现业务词（platform-leak-lint 同款预算），不出现平台脚本文件名
+      for (const word of ['应收', '凭证', '科目', '账套', '期间', '目录']) expect(reason).not.toContain(word);
+      expect(reason).not.toMatch(/[\w-]+\.js/);
+    }
+  });
+
   it('计划未激活时拒绝平台调用，宿主激活后允许网关调用', () => {
     const inactive = createServeGate({ planActive: () => false });
     expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } })?.reason).toContain('宿主激活');
