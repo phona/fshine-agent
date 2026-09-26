@@ -161,12 +161,22 @@ export function describeKeyArgs(command: string): string[] {
   const args: string[] = [];
   for (let i = 0; i < tokens.length; i += 1) {
     const flag = tokens[i];
-    if (flag === undefined || !KEY_ARG_FLAG_SET.has(flag)) continue;
-    const value = tokens[i + 1];
-    if (!value || value.startsWith('--')) continue;
-    const text = value.slice(0, KEY_ARG_MAX_CHARS);
-    args.push(KEY_ARG_STYLES[flag] === 'name' ? `「${text}」` : text);
-    i += 1;
+    if (flag === undefined) continue;
+    // 两种写法都认：--flag 值 / --flag=值（worker 两种都用过）。
+    let value: string | undefined;
+    if (KEY_ARG_FLAG_SET.has(flag)) {
+      value = tokens[i + 1];
+      if (value && !value.startsWith('--')) i += 1;
+      else value = undefined;
+    } else {
+      const eq = flag.indexOf('=');
+      if (eq > 0 && KEY_ARG_FLAG_SET.has(flag.slice(0, eq))) value = flag.slice(eq + 1);
+    }
+    if (!value) continue;
+    // 值可能自带引号（worker 传参把引号嵌进了值里）：剥掉再套书名号，避免 「"X"」。
+    const text = value.replace(/^["']+|["']+$/g, '').slice(0, KEY_ARG_MAX_CHARS);
+    if (!text) continue;
+    args.push(KEY_ARG_STYLES[flag.split('=')[0] ?? ''] === 'name' ? `「${text}」` : text);
   }
   return args;
 }

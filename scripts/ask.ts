@@ -103,7 +103,10 @@ async function main(): Promise<void> {
   };
   const started = Date.now();
   // notice 与生产渠道语义一致：送达后才继续执行；ask.ts 无渠道，打印即"送达"。
-  const reply = await handler(message, () => {}, async (text) => {
+  // progress 同义：打印平台调用进度帧（生产中经企微流式帧送达）。
+  const reply = await handler(message, (text) => {
+    console.log('\n===== 进度 =====\n' + text);
+  }, async (text) => {
     console.log('\n===== 计划通知 =====\n' + text + '\n');
   });
   const text = replyText(reply);

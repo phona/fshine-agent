@@ -55,10 +55,11 @@ describe('平台泄漏预算 lint', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 
-  it('编排层业务词预算：命中集冻结，只减不增', () => {
+  it('编排层业务词预算：命中集只减不增（新增任意一行即失败）', () => {
     const hits = businessWordHits(path.join(REPO_ROOT, 'packages/agent/src'));
-    expect(hits, `新增了业务词（进度帧措辞只能来自平台清单第 5 列）：\n${hits.filter((hit) => !BUSINESS_WORD_BASELINE.includes(hit)).join('\n')}`)
-      .toEqual(BUSINESS_WORD_BASELINE);
+    // 子集断言：当前命中必须全部在冻结基线内（新增 → 红）；收敛（删词）直接通过。
+    const added = hits.filter((hit) => !BUSINESS_WORD_BASELINE.includes(hit));
+    expect(added, `新增了业务词（进度帧措辞只能来自平台清单第 5 列）：\n${added.join('\n')}`).toEqual([]);
   });
 });
 
