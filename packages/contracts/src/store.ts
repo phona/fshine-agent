@@ -151,12 +151,35 @@ export interface TaskPlanProjection {
   updatedAt: string;
 }
 
+/** 未完成计划的可读摘要（按最近活跃在前），供跨回合续跑召回与多任务消歧。 */
+export interface TaskPlanSummary {
+  planId: string;
+  totalSteps: number;
+  /** 已记录的最大步号（判"续跑步号接得上"用）。 */
+  maxRecordedStep: number;
+  started: number;
+  done: number;
+  failed: number;
+  needs: number;
+  /** 拆解第一步的加工后请求（截断），用于生成用户可读的选项标签。 */
+  firstRequest: string;
+  /** 该计划最后一条事实的时间（ISO）。 */
+  updatedAt: string;
+}
+
 export interface TaskPlanRepo {
   append(fact: TaskPlanStepFact): Promise<void>;
   /** 由 facts 重建投影（同 Context State 的可重建投影语义）；没有事实返回 null。 */
   project(principalId: string, sessionId: string, planId: string): Promise<TaskPlanProjection | null>;
-  /** 该会话最近一个未完成（有 started/done 之外悬挂步骤）的 planId；没有返回 null。供跨回合续跑。 */
+  /**
+   * 全部未完成（已记录步号 < totalSteps）的计划，最近活跃在前；没有返回空数组。
+   * 跨回合续跑的召回器：恰一个候选可机械续跑，多个候选由宿主把歧义抛给用户。
+   */
+  openPlans(principalId: string, sessionId: string): Promise<TaskPlanSummary[]>;
+  /** 最近一个未完成计划的 planId；openPlans()[0] 的便捷形式，没有返回 null。 */
   latestOpenPlan(principalId: string, sessionId: string): Promise<string | null>;
+  /** 某 17dz 子任务所属的计划（taskId 记录在步骤终态事实上）；没有返回 null。 */
+  planIdForTask(principalId: string, sessionId: string, taskId: string): Promise<string | null>;
 }
 
 export type MemoryRecordType = 'preference' | 'fact';

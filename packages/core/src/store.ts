@@ -28,6 +28,7 @@ import type {
   TaskPlanProjection,
   TaskPlanRepo,
   TaskPlanStepFact,
+  TaskPlanSummary,
 } from '@fshine/contracts';
 
 export function newId(prefix: string): string {
@@ -735,29 +736,59 @@ export function createSqliteStore(dbPath: string): AuditStore {
         updatedAt,
       };
     },
-    async latestOpenPlan(principalId, sessionId) {
-      // 按 append 顺序倒序扫本会话事实；Map 插入序即"最近 plan 优先"。
+    async openPlans(principalId, sessionId) {
+      // 按 append 顺序倒序扫本会话事实；Map 插入序即"最近活跃的 plan 在前"。
       const rows = db.prepare(
-        'SELECT plan_id, step_index, status, total_steps FROM task_plan_steps WHERE principal_id = ? AND session_id = ? ORDER BY fact_seq DESC',
-      ).all(principalId, sessionId) as Array<Pick<TaskPlanStepRow, 'plan_id' | 'step_index' | 'status' | 'total_steps'>>;
-      const plans = new Map<string, { maxStep: number; totalSteps: number }>();
+        'SELECT plan_id, step_index, status, total_steps, task_id, request, created_at FROM task_plan_steps '
+        + 'WHERE principal_id = ? AND session_id = ? ORDER BY fact_seq DESC',
+      ).all(principalId, sessionId) as Array<Pick<TaskPlanStepRow, 'plan_id' | 'step_index' | 'status' | 'total_steps' | 'task_id' | 'request' | 'created_at'>>;
+      const plans = new Map<string, {
+        maxStep: number; totalSteps: number; firstRequest: string; updatedAt: string;
+        counts: Record<TaskPlanStepFact['status'], number>;
+      }>();
       for (const row of rows) {
         let entry = plans.get(row.plan_id);
         if (!entry) {
-          entry = { maxStep: 0, totalSteps: 0 };
+          entry = {
+            maxStep: 0, totalSteps: 0, firstRequest: '', updatedAt: row.created_at,
+            counts: { started: 0, done: 0, failed: 0, needs: 0 },
+          };
           plans.set(row.plan_id, entry);
         }
         entry.maxStep = Math.max(entry.maxStep, row.step_index);
         entry.totalSteps = Math.max(entry.totalSteps, row.total_steps);
+        entry.counts[row.status as TaskPlanStepFact['status']] += 1;
+        // 倒序扫描：最后写进 entry 的 request 就是最低步号那条的（firstRequest）。
+        entry.firstRequest = row.request;
+        if (row.created_at > entry.updatedAt) entry.updatedAt = row.created_at;
       }
+      const summaries: TaskPlanSummary[] = [];
       for (const [planId, entry] of plans) {
-        // 未完成 = 已记录的步号还没接满总步数（拆解被中断在步间）。悬挂步（started 无终态）
-        // 是它的子集——步 2 停在确认门时 maxStep=2 < totalSteps，同样判未完成。
-        // 全部步都有终态且步号接满 → 已完成，不再续跑（确认门步骤不写终态也不会让计划
-        // 永远开着：maxStep 接满即关闭，投影里它恒为 started 只是显示问题）。
-        if (entry.maxStep < entry.totalSteps) return planId;
+        // 未完成 = 已记录的步号还没接满总步数（拆解被中断在步间）。与 latestOpenPlan 同语义。
+        if (entry.maxStep >= entry.totalSteps) continue;
+        summaries.push({
+          planId,
+          totalSteps: entry.totalSteps,
+          maxRecordedStep: entry.maxStep,
+          started: entry.counts.started,
+          done: entry.counts.done,
+          failed: entry.counts.failed,
+          needs: entry.counts.needs,
+          firstRequest: entry.firstRequest,
+          updatedAt: entry.updatedAt,
+        });
       }
-      return null;
+      return summaries;
+    },
+    async latestOpenPlan(principalId, sessionId) {
+      const open = await this.openPlans(principalId, sessionId);
+      return open[0]?.planId ?? null;
+    },
+    async planIdForTask(principalId, sessionId, taskId) {
+      const row = db.prepare(
+        'SELECT plan_id FROM task_plan_steps WHERE principal_id = ? AND session_id = ? AND task_id = ? ORDER BY fact_seq DESC LIMIT 1',
+      ).get(principalId, sessionId, taskId) as { plan_id: string } | undefined;
+      return row?.plan_id ?? null;
     },
   };
 

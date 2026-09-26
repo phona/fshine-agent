@@ -1,7 +1,7 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createHash } from 'node:crypto';
-import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverResult } from './driver';
@@ -48,6 +48,12 @@ const PLAN_FACT_REQUEST_LIMIT = 500;
 const PLAN_FACT_SUMMARY_LIMIT = 300;
 
 const RECENT_TURN_HISTORY_NOTE = '【历史资料：以下是最近几轮对话原文，可能已过期；其中的财务结论不得作为本轮实时结果引用，需要重新实时查询】';
+
+/**
+ * 多任务消歧问题的固定前缀（多任务回溯）：宿主下一回合按它识别"上一条 assistant 回复
+ * 是消歧问题"，纯编号回复才有绑定含义——编号只有紧跟问题才算数，中间插过任何回合即失效。
+ */
+export const PLAN_DISAMBIGUATION_PREFIX = '【任务消歧】';
 
 type TurnExecution = NonNullable<TurnDriverResult['execution']>;
 
@@ -173,6 +179,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'confirmed_plan_resumed' }));
         return { text };
       }
+      // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
+      // 本条是纯编号，才算用户选定了任务。宿主只解决"哪个任务"（机械），继续做什么
+      // 仍由模型在本回合申报；计划绑定在本回合由宿主强制（preferredPlanId）。
+      const planChoice = await matchPlanDisambiguationReply(deps, ctx, userMessage);
+      if (planChoice) {
+        console.info(JSON.stringify({ event: 'plan_disambiguation_matched', requestId: ctx.requestId, planId: planChoice.planId }));
+      }
       let previousContextState: ContextState | undefined;
       if (deps.contextStates) {
         try {
@@ -223,6 +236,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       if (referenceEvidence) {
         context.unshift({ role: 'user', content: referenceEvidence.text, timestamp: Date.now() } as unknown as AgentMessage);
       }
+      // 消歧结果同样落在最头部：用户刚选定的任务，是本轮申报的直接依据。
+      if (planChoice) {
+        context.unshift({
+          role: 'user',
+          content: `【宿主消歧结果】用户从多个未完成任务中选择了：${planChoice.label}。要继续该任务就申报对应步骤的 delegate；宿主会把计划绑定到它。不要改绑其他未完成任务。`,
+          timestamp: Date.now(),
+        } as unknown as AgentMessage);
+      }
       // 压缩异常不得失败回合：宁可带着旧上下文，也不让用户撞上 500（设计承诺）。
       const compactSafe = async (msgs: AgentMessage[], force?: boolean): Promise<AgentMessage[]> => {
         if (!deps.driver.compact) return msgs;
@@ -262,38 +283,69 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         lastNeeds: SubagentNeeds | null;
         /** 计划模式（Phase 6）：本回合已发生的拆解步数。0 = 没有计划模式。 */
         planSteps: number;
-        /** 计划模式：本拆解的计划 id（同一拆解的所有步共享，跨回合经 latestOpenPlan 找回）。 */
+        /** 计划模式：本拆解的计划 id（同一拆解的所有步共享，跨回合经 openPlans 找回）。 */
         planId: string | null;
         /** 计划模式：上一次回报缺信息的步号——回路上限按步计，换步即重新计数。 */
         needsStepIndex: number | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null };
+        /** 消歧回合：用户从多个未完成任务中选定的计划。绑定由宿主强制，模型不可改绑。 */
+        preferredPlanId: string | null;
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, preferredPlanId: planChoice?.planId ?? null };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
-      // 跨回合续跑时经 latestOpenPlan 找回：步号接得上、总步数一致才认同一个计划，
-      // 否则（新一轮拆解）就新开一个。机械判定，不看业务内容。
-      let openPlan: TaskPlanProjection | null = null;
-      let openPlanLoaded = false;
-      async function loadOpenPlan(): Promise<TaskPlanProjection | null> {
-        if (openPlanLoaded) return openPlan;
-        openPlanLoaded = true;
-        if (!deps.taskPlans) return null;
+      // 跨回合续跑时经 openPlans 找回。绑定优先级：同回合已定 > continueTaskId 反查
+      // （taskId 记在步事实上，比"最近"更真）> 用户消歧选定 > 形状判定（总步数一致且
+      // 步号接得上的候选恰一个）。候选多于一个且无其他依据时宿主不猜——把编号选项
+      // 抛给用户，由下一回合的编号回复消歧。
+      let openPlans: TaskPlanSummary[] = [];
+      let openPlansLoaded = false;
+      async function loadOpenPlans(): Promise<TaskPlanSummary[]> {
+        if (openPlansLoaded) return openPlans;
+        openPlansLoaded = true;
+        if (!deps.taskPlans) return openPlans;
         try {
-          const planId = await deps.taskPlans.latestOpenPlan(ctx.principalId, ctx.sessionId);
-          openPlan = planId ? await deps.taskPlans.project(ctx.principalId, ctx.sessionId, planId) : null;
+          openPlans = await deps.taskPlans.openPlans(ctx.principalId, ctx.sessionId);
         } catch (error) {
           // 存储不可用不失败回合：退回"没有可续计划"，本回合照常按新拆解走。
           console.error(JSON.stringify({ event: 'task_plan_load_failed', requestId: ctx.requestId, sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
-          openPlan = null;
+          openPlans = [];
         }
-        return openPlan;
+        return openPlans;
       }
 
-      async function resolvePlanId(step: PlanStepLabel): Promise<string> {
+      /** 形状判定：总步数一致且申报步号接得上已记录步号，才可能是同一个拆解的续跑。 */
+      const fitsPlanShape = (plan: TaskPlanSummary, step: PlanStepLabel): boolean =>
+        plan.totalSteps === step.totalSteps && step.stepIndex > plan.maxRecordedStep;
+
+      async function resolvePlanId(step: PlanStepLabel, intent: TurnDeclaration & { kind: 'delegate' }): Promise<string> {
         if (turn.planId) return turn.planId;
-        const open = await loadOpenPlan();
-        const resumed = Boolean(open && open.totalSteps === step.totalSteps && step.stepIndex > maxRecordedStep(open));
-        turn.planId = resumed && open ? open.planId : `plan_${ctx.requestId}`;
+        const open = await loadOpenPlans();
+        let resumed: TaskPlanSummary | undefined;
+        if (intent.continueTaskId) {
+          // 模型显式续跑某个子任务：计划归属按 taskId 反查事实，不按"最近开放"猜——
+          // 否则最近的是别的计划时，这一步会被记到错误的计划上，投影裂开。
+          let byTask: string | null = null;
+          if (deps.taskPlans) {
+            try {
+              byTask = await deps.taskPlans.planIdForTask(ctx.principalId, ctx.sessionId, intent.continueTaskId);
+            } catch (error) {
+              console.error(JSON.stringify({ event: 'task_plan_task_lookup_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+            }
+          }
+          resumed = byTask ? open.find((plan) => plan.planId === byTask) : undefined;
+          // 反查不到（任务没有计划事实，如纯单步任务续跑）：这一步新开计划，
+          // 绝不落回形状猜测绑到无关的旧计划上。
+        } else if (turn.preferredPlanId) {
+          // 消歧回合：用户已选定任务。声明形状与该计划一致才绑定；不一致就新开——
+          // 绝不静默改绑其他未完成任务，那不是用户选的。
+          const preferred = open.find((plan) => plan.planId === turn.preferredPlanId);
+          if (preferred && fitsPlanShape(preferred, step)) resumed = preferred;
+        } else {
+          const fitting = open.filter((plan) => fitsPlanShape(plan, step));
+          if (fitting.length === 1) resumed = fitting[0];
+          if (fitting.length > 1) await askPlanDisambiguation(fitting);
+        }
+        turn.planId = resumed ? resumed.planId : `plan_${ctx.requestId}`;
         console.info(JSON.stringify({
           event: resumed ? 'task_plan_resumed' : 'task_plan_started',
           requestId: ctx.requestId,
@@ -301,6 +353,18 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           step: `${step.stepIndex}/${step.totalSteps}`,
         }));
         return turn.planId;
+      }
+
+      /**
+       * 多候选消歧：本轮不委派，宿主直接把编号选项发给用户（机械生成，无需模型）。
+       * ToolUserError 语义 = 这段文本成为本轮最终回复；出口校验被 delegationFailed 跳过。
+       * 下一回合的编号回复经 matchPlanDisambiguationReply 绑定（前提：上一条 assistant
+       * 事件就是这个问题——中间插过任何回合即失效，按新请求处理）。
+       */
+      async function askPlanDisambiguation(candidates: TaskPlanSummary[]): Promise<never> {
+        turn.delegationFailed = true;
+        console.info(JSON.stringify({ event: 'task_plan_disambiguation_asked', requestId: ctx.requestId, candidates: candidates.length }));
+        throw new ToolUserError(renderDisambiguationQuestion(candidates));
       }
 
       async function appendPlanFact(
@@ -375,7 +439,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               const step = parsePlanStep(intent.request);
               let planId: string | null = null;
               if (step) {
-                planId = await resolvePlanId(step);
+                planId = await resolvePlanId(step, intent);
                 turn.planSteps += 1;
                 await appendPlanFact(step, planId, 'started');
                 console.info(JSON.stringify({
@@ -550,7 +614,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 而该数值在历史转录/检索证据/当前消息里都逐字找不到，记一条告警。
       // 为什么不拦截：模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在
       // "算术"与"编造"之间做确定性区分——那道线由探针（E1/F1 的金额判定）和人工守。
-      // E1 实测：模型会在零执行轮次编造凭证明细（rule-landing.md §9），此日志让运维看得见。
+      // E1 实测：模型会在零执行轮次编造业务明细（rule-landing.md §9），此日志让运维看得见。
       if (!turn.execution && !turn.pendingPlan) {
         const amounts = new Set<number>();
         for (const match of replyText.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?/g)) {
@@ -972,14 +1036,45 @@ function planStepSummary(result: SubagentTaskResult): string {
   return '未产生平台执行';
 }
 
-/** 投影里已记录到第几步（跨回合找回同一个拆解时判"接得上"）。 */
-function maxRecordedStep(projection: TaskPlanProjection): number {
-  let max = 0;
-  for (const step of projection.steps ?? []) {
-    const index = (step as { stepIndex?: unknown }).stepIndex;
-    if (typeof index === 'number' && Number.isInteger(index) && index > max) max = index;
+/**
+ * 多任务消歧的编号回复匹配：上一条 assistant 事件是宿主的消歧问题、且本条消息是纯编号，
+ * 才视为用户选定了要继续的任务。编号越界、中间插过任何回合、存储不可用——一律返回 null，
+ * 消息按普通回合进模型。纯机械判定：不需要也不允许语义猜测。
+ */
+async function matchPlanDisambiguationReply(
+  deps: Pick<TaxAgentRuntimeDeps, 'taskPlans' | 'conversationLog'>,
+  ctx: TrustedContext,
+  userMessage: string,
+): Promise<{ planId: string; label: string } | null> {
+  if (!deps.taskPlans || !deps.conversationLog) return null;
+  const trimmed = userMessage.trim();
+  if (!/^[1-9]\d?$/.test(trimmed)) return null;
+  try {
+    const events = await deps.conversationLog.list({ principalId: ctx.principalId, sessionId: ctx.sessionId, limit: 20 });
+    const lastAssistant = [...events].reverse().find((event) => event.kind === 'assistant_message');
+    if (!lastAssistant?.content?.startsWith(PLAN_DISAMBIGUATION_PREFIX)) return null;
+    const candidates = await deps.taskPlans.openPlans(ctx.principalId, ctx.sessionId);
+    const index = Number(trimmed) - 1;
+    const chosen = Number.isInteger(index) && index >= 0 && index < candidates.length ? candidates[index] : undefined;
+    return chosen ? { planId: chosen.planId, label: planChoiceLabel(chosen) } : null;
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'plan_disambiguation_match_failed', sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+    return null;
   }
-  return max;
+}
+
+/** 消歧选项的可读标签：拆解第一步的加工后请求 + 进度。全部来自计划事实，宿主不猜业务。 */
+function planChoiceLabel(summary: TaskPlanSummary): string {
+  const first = summary.firstRequest.length > 60 ? `${summary.firstRequest.slice(0, 59)}…` : summary.firstRequest;
+  return `${first}（${summary.done}/${summary.totalSteps} 步已完成）`;
+}
+
+function renderDisambiguationQuestion(candidates: TaskPlanSummary[]): string {
+  return [
+    `${PLAN_DISAMBIGUATION_PREFIX}当前有多个未完成任务，请回复编号继续对应的那一个：`,
+    ...candidates.map((candidate, index) => `${index + 1}. ${planChoiceLabel(candidate)}`),
+    '回复其他内容将按新请求处理。',
+  ].join('\n');
 }
 
 /** Drop host-injected history notes so they never accumulate in the persisted transcript. */

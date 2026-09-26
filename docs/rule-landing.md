@@ -40,11 +40,12 @@
 | C23 | 出口校验（C4 的 Phase 5 修订）：`delegate` + 无执行 + 无 pending + **无 needs 回路进行中** → 才走 `delegate_without_execution` 兜底；needs 回路进行中时，Main Agent 转达用户的文本即本轮回复（不叠加"本轮没有真正查到平台数据"注脚），但**含数字结论仍须本轮有执行痕迹**——回路本身不是执行痕迹 | `runtime.ts` 出口校验：`needsLoop` / `needsRelay` / `needs_loop_relayed` 埋点 |
 | C24 | 计划模式协议（roadmap Phase 6）：delegate 的 request 以「第N/M步：」开头 = 多步拆解的第 N 步（共 M 步）；**无前缀 = 单步模式，行为与 Phase 5 之前完全一样**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent 继续下一步或申报 conversation 汇总。前缀由宿主用正则**机械**解析（`plan-steps.ts`），不做任何业务匹配；非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀没有正文）按单步处理——协议层 fail-open，fail-closed 仍在出口校验 | `plan-steps.ts` `PLAN_STEP_PREFIX_PATTERN` / `parsePlanStep` + `runtime.ts` delegate 分支；协议教学在 `ROUTE_CURRENT_TURN_TOOL.description`（**契约仍 3 字段，一个都没加**） |
 | C25 | 计划模式的步骤 2..M 经 `continueTaskId` 在上一步返回的同一个 17dz 子任务内续跑（宿主透传为 taskId）：平台累计账本因此跨步累积，闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）。宿主不强制该字段——与 request 加工同属模型侧，协议在工具描述里教 | `runtime.ts` 委派参数透传 + `turn-contract.ts` continueTaskId 说明；e2e `turn-loop-plan-steps.test.ts` 6.1/6.2 断言三步 taskId 相同、账本调用数跨步累积 |
-| C26 | 任务计划状态（架构 §2 第 6 条）：计划模式每步委派前 append `started` 事实（含 request/stepIndex/totalSteps），委派结果回来后按步补 `done`/`failed`/`needs` 终态事实，**taskId 写进该步的最后一条事实**（事前不知、事后回填）；停在用户确认门的步骤不写终态（投影保持 started，计划"打开"可跨回合续跑）。planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；跨回合续跑经 `latestOpenPlan` 找回（步号接得上且总步数一致才认同一个计划，否则新开）。状态只取宿主持机械可验证的信号：needs→needs、有执行痕迹→done、两者皆无→failed——**"这一步业务上成没成"由 Main Agent 汇总如实呈现，宿主不猜**。存储不可用/未注入 = 不落计划状态，功能降级但不报错 | `runtime.ts` `resolvePlanId` / `appendPlanFact` / `planStepSummary` + deps `taskPlans?: TaskPlanRepo`；事实与投影契约在 `packages/contracts/src/store.ts`（并行 stream），SQLite 实现在 `packages/core/src/store.ts` |
+| C26 | 任务计划状态（架构 §2 第 6 条）：计划模式每步委派前 append `started` 事实（含 request/stepIndex/totalSteps），委派结果回来后按步补 `done`/`failed`/`needs` 终态事实，**taskId 写进该步的最后一条事实**（事前不知、事后回填）；停在用户确认门的步骤不写终态（投影保持 started，计划"打开"可跨回合续跑）。planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；跨回合续跑的计划绑定按 C31 的优先级机械判定（`openPlans` 候选召回，`latestOpenPlan` 是其便捷形式）。状态只取宿主持机械可验证的信号：needs→needs、有执行痕迹→done、两者皆无→failed——**"这一步业务上成没成"由 Main Agent 汇总如实呈现，宿主不猜**。存储不可用/未注入 = 不落计划状态，功能降级但不报错 | `runtime.ts` `resolvePlanId` / `appendPlanFact` / `planStepSummary` + deps `taskPlans?: TaskPlanRepo`；事实与投影契约在 `packages/contracts/src/store.ts`（并行 stream），SQLite 实现在 `packages/core/src/store.ts` |
 | C27 | 计划模式通知前缀：该步委派过程中平台计划门产出的 notify 文本，交付用户时加「第 N/M 步」前缀，让用户看到拆解的全局进度。前缀插在固定标记「计划通知：」**之后**——渠道适配器与 e2e 替身都按该标记识别通知帧；步骤标签由 runtime 从协议前缀解析，经委派参数 `stepLabel` 透传，宿主不进 Main Agent 工具 schema、不进 worker 提示词 | `runtime.ts` 委派参数 + `context.ts` `withStepLabel`（包装 `ctx.trusted.onNotice`）+ `plan-runtime.ts` `PLAN_NOTICE_PREFIX`；e2e 6.1 断言 `sdk.noticeTexts()` 含"第 1/3 步" |
 | C28 | 汇总回合出口校验（C4/C23 的 Phase 6 扩展）：有计划模式执行痕迹（任一步真跑过）即放行汇总；**全部步骤都零执行时**，"三步都没查成"这种不含数字结论的如实汇总可以外发（不叠加"没有查到平台数据"注脚，埋点 `plan_steps_relayed`），但汇总里带数字结论仍被 `delegate_without_execution` 挡下——回路/拆解本身不是执行痕迹 | `runtime.ts` 出口校验：`planModeTurn` / `plan_steps_relayed`；单测 P6.9 |
 | C29 | 业务 skill 只含程序性知识（架构 §5：任务类别与拆解表、每类必需信息、拆解原则、派单协议），**零执行口径**；由部署配置 `businessSkillPath`（默认 `docs/business-skill.md`）指向，启动时读文件注入 runtime deps，每回合追加进系统提示词（与日期行同性质）。文件缺失/读失败 = 跳过，不报错。删掉其中任意一条只会让编排变笨，不会产生错误数据结论（架构 §1 分层判据） | `docs/business-skill.md` + `apps/server/business-skill.ts`（唯一加载链，`assembly.ts` 与 `scripts/ask.ts` 共用）+ `runtime.ts` `businessSkill` / `BUSINESS_SKILL_HEADING` |
 | C30 | 任一步失败不阻塞其他步骤（架构 §3）：单步失败（含 needs/零执行的错误结果）时宿主照常把后续步骤派出去，由汇总如实报告失败或缺信息的步骤。回路上限（`MAX_NEEDS_ROUNDS`）在计划模式下**按步计**——同一步反复重报才收口（收口方式是"跳过这一步继续后续步骤"，不是终止整轮），换一步即重新计数 | `runtime.ts` needs 分支 `needsStepIndex` / 计划模式 `renderPlanStepToolResult`；e2e 6.2 + 单测 P6.5 |
+| C31 | 多任务回溯消歧（歧义抛给用户）：跨回合续跑的计划绑定按优先级**机械**判定——① 同回合已定 > ② 显式 `continueTaskId` 按 taskId 反查所属计划（taskId 记在步事实上，比"最近开放"更真；旧代码此处按 latestOpenPlan 猜，最近的计划会抢走续跑事实）> ③ 用户消歧选定（`preferredPlanId`，宿主强制，模型声明与该计划形状不一致就新开、绝不改绑其他计划）> ④ 形状判定（总步数一致且步号接得上的候选**恰一个**时自动续跑）。候选多于一个且无其他依据 → 宿主不绑不出猜，直接发编号消歧问题（`【任务消歧】` 前缀，选项与进度由计划事实机械生成），本回合零委派零新事实；**紧跟问题的纯编号回复**才绑定——判定依据是"上一条 assistant 事件就是该问题"（中间插过任何回合即失效，按新请求处理），宿主不持久化任何 pending 状态（问题文本 + 计划事实即可完全重建消歧现场）。绑定后宿主注入选定证据，模型重新申报"做什么"，本回合计划绑定由宿主强制。宿主不解任务语义，不引入第二个判别模型 | `runtime.ts` `resolvePlanId` / `askPlanDisambiguation` / `matchPlanDisambiguationReply` / `PLAN_DISAMBIGUATION_PREFIX`；召回与反查在 `TaskPlanRepo.openPlans` / `planIdForTask`（contracts + SQLite）；单测 P6.11–P6.15 + e2e `turn-loop-disambiguation.test.ts` 9.1/9.2 |
 
 ## 2. SKILL 事实（17dz 执行层持有，worker 经 Skill 机制读取）
 
@@ -268,3 +269,22 @@
 - 汇总轮跨线程诚实（含未完成部分的说明）
 
 **新发现的编造变种（§9 #1 的加重形态）**：探索落地轮在真实数据（86,000）**旁边**编造了“另一期间 202606 余额 61,000”——用保留审计日志的复现验证：该场景全链路无任何 202606 查询，确属模型无中生有。比“无数据时编造”更危险：伪装成补充信息、混在真实结果里，且会传播进后续汇总轮。`conversation_unsourced_amounts` 日志抓不到它（该轮有真实执行，且 61,000 不在转录里——探查器只查零执行轮）。**处置建议**：把探查器扩展到“有执行但出现历史/证据外金额”也记录（当前只覆盖零执行轮）——待用户确认是否值得。
+
+## 15. 多任务回溯消歧（编号出题）落地记录（2026-09-26）
+
+背景：H1（§13）抓到的"续错任务被旧转录洗白"与外部评审点名的 `latestOpenPlan` 风险同源——绑定的**身份**没有机械依据时宿主在猜（`latestOpenPlan` 只会返回最近一个开放计划，其余开放计划经续跑路径不可达；反过来用户说"继续幻辰的"，宿主也可能静默绑到最近的新兴计划上）。
+
+**决策**（用户确认）：多任务需要回溯时，把歧义抛给用户选 1/2/3——宿主机械出题，不引入语义判别（第二个路由模型是已否决方向）。绑定的其余场合全部用机械信号：
+
+1. **同回合已定**：同一回合的后续步骤共享 planId（原有语义）。
+2. **taskId 反查**（新修的宿主缺陷）：模型显式 `continueTaskId` 时，计划归属按 `planIdForTask` 从步事实反查——此前这里按 `latestOpenPlan` 猜，最近的是别的计划时，这一步会被记到错误的计划上、投影裂开。
+3. **用户消歧选定**：紧跟消歧问题的纯编号回复。问题文本（含选项与进度）由计划事实机械生成；判定"紧跟"的依据是上一条 assistant 事件以 `【任务消歧】` 开头——中间插过任何回合即失效，编号按普通消息进模型。绑定后宿主注入证据，模型重新申报本步（做什么仍归模型），本回合计划绑定由宿主强制（声明与所选计划形状不一致就新开，绝不改绑其他未完成任务）。
+4. **形状判定**：`openPlans` 候选里总步数一致且步号接得上的**恰一个** → 照旧自动续跑（常见路径零变化、不出题）；零个 → 新开计划。
+
+**验收**（45 文件 406 用例全绿，其中新增 17 例）：
+
+- store 单测（`packages/core/task-plan.test.ts`）：`openPlans` 返回全部未接满计划且最近活跃在前、`firstRequest` 取最早事实、`planIdForTask` 反查与 scope 隔离、`latestOpenPlan` = `openPlans()[0]`。
+- 运行时单测 P6.11–P6.15：多候选出题零委派零新事实；编号"2"绑定较旧计划且事实记对 planId；问题后插回合编号失效重新出题；continueTaskId 反查不被最近的计划抢走；形状唯一时照旧自动续跑不出题。
+- e2e `turn-loop-disambiguation.test.ts` 9.1/9.2：真 SQLite 全链——两条计划撞车出题 → "2"续跑正确计划（`task_plan_resumed` 归属 + 真库投影 planId 正确）；非编号回复按新请求单步落地、旧计划不动。
+
+**已知边界**（如实记录，不假装已修）：模型**显式**填错 `continueTaskId`（H1 的洗白形态）不是"歧义"，编号问题不会触发——宿主按 C25 忠实路由；模型压根不申报 delegate 的召回失效也不在此列。这两个都是模型侧抉择，宿主契约只保证"绑定永远有机械依据"。

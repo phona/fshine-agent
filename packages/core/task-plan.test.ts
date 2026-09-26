@@ -275,6 +275,76 @@ describe.each(DB_MODES)('taskPlans(dbPath=%s)', (mode) => {
     });
   });
 
+  describe('openPlans 与 planIdForTask', () => {
+    it('空会话返回空数组', async () => {
+      expect(await store.taskPlans.openPlans(PRINCIPAL, SESSION)).toEqual([]);
+    });
+
+    it('返回全部未完成计划，最近活跃在前；接满的不返回', async () => {
+      const older = 'plan_older_open';
+      const closed = 'plan_closed';
+      const newer = 'plan_newer_open';
+      await store.taskPlans.append(stepSeq(older, 1, 'started', { createdAt: '2026-09-25T08:00:00.000Z' }));
+      await store.taskPlans.append(stepSeq(older, 1, 'done', { taskId: 'task_old', createdAt: '2026-09-25T08:00:01.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 1, 'started', { createdAt: '2026-09-25T08:00:02.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 1, 'done', { createdAt: '2026-09-25T08:00:03.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 2, 'started', { createdAt: '2026-09-25T08:00:04.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 2, 'done', { createdAt: '2026-09-25T08:00:05.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 3, 'started', { createdAt: '2026-09-25T08:00:06.000Z' }));
+      await store.taskPlans.append(stepSeq(closed, 3, 'done', { createdAt: '2026-09-25T08:00:07.000Z' }));
+      await store.taskPlans.append(stepSeq(newer, 1, 'started', { createdAt: '2026-09-25T09:00:00.000Z' }));
+      await store.taskPlans.append(stepSeq(newer, 1, 'done', { taskId: 'task_new', createdAt: '2026-09-25T09:00:01.000Z' }));
+
+      const open = await store.taskPlans.openPlans(PRINCIPAL, SESSION);
+      // 3/3 接满的 closed 不出现；newer 比 older 更近活跃，排第一
+      expect(open.map((plan) => plan.planId)).toEqual([newer, older]);
+      expect(open[0]).toEqual({
+        planId: newer,
+        totalSteps: 3,
+        maxRecordedStep: 1,
+        started: 1,
+        done: 1,
+        failed: 0,
+        needs: 0,
+        firstRequest: '核对幻晟 202608 的科目余额',
+        updatedAt: '2026-09-25T09:00:01.000Z',
+      });
+      // latestOpenPlan = openPlans()[0] 的便捷形式
+      expect(await store.taskPlans.latestOpenPlan(PRINCIPAL, SESSION)).toBe(newer);
+    });
+
+    it('firstRequest 取该计划最早一条事实的 request（第一步的加工后请求）', async () => {
+      const planId = 'plan_first_request';
+      await store.taskPlans.append(stepSeq(planId, 1, 'started', { request: '查询甲账套 202609 应收余额', createdAt: '2026-09-25T08:00:00.000Z' }));
+      await store.taskPlans.append(stepSeq(planId, 1, 'done', { request: '查询甲账套 202609 应收余额', taskId: 'task_1', createdAt: '2026-09-25T08:00:01.000Z' }));
+      await store.taskPlans.append(stepSeq(planId, 2, 'started', { request: '查询乙账套 202609 应收余额', createdAt: '2026-09-25T08:00:02.000Z' }));
+
+      const open = await store.taskPlans.openPlans(PRINCIPAL, SESSION);
+      expect(open).toHaveLength(1);
+      expect(open[0]?.firstRequest).toBe('查询甲账套 202609 应收余额');
+    });
+
+    it('planIdForTask：按 taskId 反查所属计划；无命中返回 null；scope 隔离', async () => {
+      await store.taskPlans.append(stepSeq('plan_a', 1, 'started'));
+      await store.taskPlans.append(stepSeq('plan_a', 1, 'done', { taskId: 'task_a' }));
+      await store.taskPlans.append(stepSeq('plan_b', 1, 'started', { sessionId: 'wecom:user_a:conv_2' }));
+      await store.taskPlans.append(stepSeq('plan_b', 1, 'done', { taskId: 'task_b', sessionId: 'wecom:user_a:conv_2' }));
+
+      expect(await store.taskPlans.planIdForTask(PRINCIPAL, SESSION, 'task_a')).toBe('plan_a');
+      expect(await store.taskPlans.planIdForTask(PRINCIPAL, SESSION, 'task_b')).toBeNull();
+      expect(await store.taskPlans.planIdForTask(PRINCIPAL, 'wecom:user_a:conv_2', 'task_b')).toBe('plan_b');
+      expect(await store.taskPlans.planIdForTask(PRINCIPAL, SESSION, 'task_missing')).toBeNull();
+    });
+
+    it('openPlans 只扫本 principal 本会话，他人会话不泄漏', async () => {
+      await store.taskPlans.append(stepSeq('plan_foreign', 1, 'started', { sessionId: 'wecom:user_a:conv_2' }));
+      await store.taskPlans.append(stepSeq('plan_mine', 1, 'started', { totalSteps: 2 }));
+
+      expect((await store.taskPlans.openPlans(PRINCIPAL, SESSION)).map((plan) => plan.planId)).toEqual(['plan_mine']);
+      expect((await store.taskPlans.openPlans(PRINCIPAL, 'wecom:user_a:conv_2')).map((plan) => plan.planId)).toEqual(['plan_foreign']);
+    });
+  });
+
   describe('投影与 facts 的一致性', () => {
     it('乱序 status 写入后，重建结果确定且可重复', async () => {
       const planId = 'plan_scrambled';

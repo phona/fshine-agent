@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
+import type { TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { ScriptedTurnDriver } from './src/driver';
@@ -65,19 +65,49 @@ class FakeTaskPlanRepo implements TaskPlanRepo {
     };
   }
 
-  async latestOpenPlan(_principalId: string, _sessionId: string): Promise<string | null> {
-    // 与 SQLite 实现同语义：未完成 = 已记录步号未接满总步数（中断在步间）。
-    const plans = new Map<string, { maxStep: number; totalSteps: number }>();
+  async openPlans(_principalId: string, _sessionId: string): Promise<TaskPlanSummary[]> {
+    // 与 SQLite 实现同语义：未完成 = 已记录步号未接满总步数；按"最后一条事实"倒序（最近活跃在前）。
+    const plans = new Map<string, {
+      maxStep: number; totalSteps: number; firstRequest: string; updatedAt: string;
+      counts: Record<TaskPlanStepFact['status'], number>;
+    }>();
     for (const fact of [...this.facts].reverse()) {
       let entry = plans.get(fact.planId);
-      if (!entry) { entry = { maxStep: 0, totalSteps: 0 }; plans.set(fact.planId, entry); }
+      if (!entry) {
+        entry = { maxStep: 0, totalSteps: 0, firstRequest: '', updatedAt: fact.createdAt, counts: { started: 0, done: 0, failed: 0, needs: 0 } };
+        plans.set(fact.planId, entry);
+      }
       entry.maxStep = Math.max(entry.maxStep, fact.stepIndex);
       entry.totalSteps = Math.max(entry.totalSteps, fact.totalSteps);
+      entry.counts[fact.status] += 1;
+      entry.firstRequest = fact.request;
+      if (fact.createdAt > entry.updatedAt) entry.updatedAt = fact.createdAt;
     }
+    const summaries: TaskPlanSummary[] = [];
     for (const [planId, entry] of plans) {
-      if (entry.maxStep < entry.totalSteps) return planId;
+      if (entry.maxStep >= entry.totalSteps) continue;
+      summaries.push({
+        planId,
+        totalSteps: entry.totalSteps,
+        maxRecordedStep: entry.maxStep,
+        started: entry.counts.started,
+        done: entry.counts.done,
+        failed: entry.counts.failed,
+        needs: entry.counts.needs,
+        firstRequest: entry.firstRequest,
+        updatedAt: entry.updatedAt,
+      });
     }
-    return null;
+    return summaries;
+  }
+
+  async latestOpenPlan(_principalId: string, _sessionId: string): Promise<string | null> {
+    return (await this.openPlans(_principalId, _sessionId))[0]?.planId ?? null;
+  }
+
+  async planIdForTask(_principalId: string, _sessionId: string, taskId: string): Promise<string | null> {
+    const hit = [...this.facts].reverse().find((fact) => fact.taskId === taskId);
+    return hit?.planId ?? null;
   }
 }
 
@@ -376,8 +406,7 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     expect(relayed.text).not.toContain('没有产生任何平台查询');
   });
 
-  it('P6.10 业务 skill 每回合进系统提示词，与日期行同性质', async () => {
-    const capture = (): { seen: () => string; driver: TurnDriver } => {
+  it('P6.10 业务 skill 每回合进系统提示词，与日期行同性质', async () => {    const capture = (): { seen: () => string; driver: TurnDriver } => {
       const state = { seen: '' };
       const base = ScriptedTurnDriver([{ toolCalls: [{ tool: ROUTE_CURRENT_TURN_TOOL_NAME, args: { kind: 'conversation' } }] }, { text: '你好。' }]);
       return {
@@ -404,7 +433,172 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     await plain.handleTurn(makeCtx({ requestId: 'req_skill_none' }), '你好');
     expect(withoutSkill.seen()).not.toContain('业务编排知识');
   });
+
+  it('P6.11 两个未完成计划形状撞车：宿主不猜，发编号消歧问题且不委派', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
+    // 第一回合：计划 A 的第 1 步（1/3，done，计划保持打开）
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p611_a' }), '逐个核对甲乙丙');
+    // 第二回合：计划 B 的第 1 步（同样 1/3）
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p611_b' }), '再核对丁戊己');
+
+    // 第三回合：第 2/3 步与两个计划都接得上 → 消歧问题，不委派
+    const task2 = subagent([() => DONE('task_x', '不应被调用。')]);
+    const reply = await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p611_ask' }), '继续');
+
+    expect(reply.text).toContain('【任务消歧】');
+    expect(reply.text).toContain('1. 查对象丁（1/3 步已完成）');
+    expect(reply.text).toContain('2. 查对象甲（1/3 步已完成）');
+    expect(reply.text).toContain('回复其他内容将按新请求处理');
+    // 消歧回合零委派、零新事实（两个计划都保持各自的 1/3）
+    expect(task2.calls).toHaveLength(0);
+    expect(taskPlans.facts).toHaveLength(4);
+  });
+
+  it('P6.12 紧跟消歧问题的编号回复绑定所选计划，事实记在正确的 planId 上', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p612_a' }), '逐个核对甲乙丙');
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p612_b' }), '再核对丁戊己');
+
+    // 消歧问题（同 P6.11），然后用户回复「2」（= 较旧的对象甲计划）
+    const asked = await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      sessions: new FakeSessionRepo(), platformTask: subagent([() => DONE('task_x', '不应被调用。')]), taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p612_ask' }), '继续');
+    expect(asked.text).toContain('【任务消歧】');
+
+    const task3 = subagent([() => DONE('task_a2', '对象甲第二步成功。')]);
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象甲' }]),
+      sessions: new FakeSessionRepo(), platformTask: task3, taskPlans,
+      conversationLog: fakeConversationLog([
+        { kind: 'assistant_message', content: asked.text },
+        { kind: 'user_message', content: '2' },
+      ]),
+    }).handleTurn(makeCtx({ requestId: 'req_p612_pick' }), '2');
+
+    // 编号 2 = 对象甲的计划：第 2 步事实记在 plan_req_p612_a 下，对象丁的计划原封不动
+    expect(task3.calls).toHaveLength(1);
+    const started = taskPlans.facts.filter((fact) => fact.status === 'started' && fact.stepIndex === 2);
+    expect(started).toHaveLength(1);
+    expect(started[0]?.planId).toBe('plan_req_p612_a');
+    expect(started[0]?.request).toBe('查对象甲');
+    expect(taskPlans.facts.filter((fact) => fact.planId === 'plan_req_p612_b')).toHaveLength(2);
+  });
+
+  it('P6.13 消歧问题后插入别的回合，编号回复失效：不绑定，多候选仍重新出题', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p613_a' }), '逐个核对甲乙丙');
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p613_b' }), '再核对丁戊己');
+
+    // 上一条 assistant 不是消歧问题（中间插过回合/问题已过期）：编号"1"不产生绑定
+    const task2 = subagent([() => DONE('task_x', '不应被调用。')]);
+    const stale = await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
+      conversationLog: fakeConversationLog([
+        { kind: 'assistant_message', content: '别的回复文本。' },
+        { kind: 'user_message', content: '1' },
+      ]),
+    }).handleTurn(makeCtx({ requestId: 'req_p613_stale' }), '1');
+
+    // 无依据时宿主不猜：再次出题，仍然零委派、零新事实
+    expect(stale.text).toContain('【任务消歧】');
+    expect(task2.calls).toHaveLength(0);
+    expect(taskPlans.facts).toHaveLength(4);
+  });
+
+  it('P6.14 显式 continueTaskId 反查计划：续跑旧任务绑旧计划，不被最近的计划抢走', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p614_a' }), '逐个核对甲乙丙');
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p614_b' }), '再核对丁戊己');
+
+    // 模型显式续跑对象甲的子任务：计划归属按 taskId 反查（对象甲），即便对象丁的计划更"近"
+    const task2 = subagent([() => DONE('task_a', '甲第二步成功。')]);
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_a' }]),
+      sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p614_pick' }), '继续核对甲乙丙');
+
+    const started = taskPlans.facts.filter((fact) => fact.status === 'started' && fact.stepIndex === 2);
+    expect(started).toHaveLength(1);
+    expect(started[0]?.planId).toBe('plan_req_p614_a');
+  });
+
+  it('P6.15 多个未完成计划但形状唯一接得上：照旧自动续跑，不出题', async () => {
+    const taskPlans = new FakeTaskPlanRepo();
+    const task = subagent([
+      () => DONE('task_a', '甲第一步成功。'),
+      () => DONE('task_b', '两步任务第一步成功。'),
+      () => DONE('task_a2', '甲第二步成功。'),
+    ]);
+    // 计划 A：3 步只完成 1 步；计划 B：2 步只完成 1 步（更近）
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p615_a' }), '逐个核对甲乙丙');
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第1/2步：查对象丁', text: '完成。' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p615_b' }), '核对丁戊');
+
+    // 第 2/3 步只与计划 A 接得上（B 总步数不同）→ 自动续跑 A，不打扰用户
+    await createTaxAgentRuntime({
+      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象乙' }]),
+      sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
+    }).handleTurn(makeCtx({ requestId: 'req_p615_pick' }), '继续核对甲乙丙');
+
+    const started = taskPlans.facts.filter((fact) => fact.status === 'started' && fact.stepIndex === 2);
+    expect(started).toHaveLength(1);
+    expect(started[0]?.planId).toBe('plan_req_p615_a');
+  });
 });
+
+/** 内存版 Conversation Log：只支撑消歧匹配需要的 list 语义（升序返回）。 */
+function fakeConversationLog(events: Array<{ kind: 'user_message' | 'assistant_message'; content: string }>): Pick<import('@fshine/contracts').ConversationLogRepo, 'append' | 'list' | 'search'> {
+  return {
+    append: async () => {},
+    list: async () => events.map((event, index) => ({
+      eventId: `e_${index}`,
+      principalId: 'wecom:user_a',
+      sessionId: 'sess_plan',
+      kind: event.kind,
+      content: event.content,
+      createdAt: new Date(Date.UTC(2026, 8, 26, index)).toISOString(),
+    })),
+    search: async () => [],
+  };
+}
 
 /** 记录驱动输入，便于断言系统提示词等宿主侧注入。 */
 function recordingDriver(script: ScriptedTurnStep[]) {

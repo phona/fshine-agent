@@ -230,6 +230,7 @@ Main Agent 申报 delegate
 | 主动回溯 | 已落地：宿主申报前注入检索证据（`reference-evidence.ts`，≤5+3 条带 eventId，超限截断记日志）；`route_reference_hint` 已删除。根因修复：查询轮次曾被 `selectRecentTurns` 踢出最近窗口 | 同左（已达成） |
 | 执行层记忆 | 已落地：17dz `bin/17dz memory`（scope 隔离 + 锁 + fail-closed），SKILL 读写规程；编排层不存不转发不理解 | 同左（已达成） |
 | 提示词面积 | `SYSTEM_PROMPT` 908 字符 / `workerSystemPrompt` 885 字符，只剩协议与原则（Phase 1 已去冗余，见 `rule-landing.md`）；残留业务条目：指代规则（Phase 2 删）、工具描述字段口径（Phase 4 重写）、worker 业务条目（Phase 3 下沉） | 只保留协议与原则；业务规则要么进代码断言，要么进执行层 SKILL |
+| 多任务回溯绑定 | 已落地（rule-landing C31）：续跑计划绑定按优先级机械判定——`continueTaskId` 按 taskId 反查 > 用户编号消歧 > 形状唯一自动续跑；多候选且无依据时宿主发编号消歧问题（`【任务消歧】`，选项由计划事实机械生成），**紧跟问题**的纯编号回复才绑定（中间插过回合即失效）。宿主持有绑定权，模型只申报"做什么"；不解任务语义、不引入判别模型 | 同左（已达成） |
 
 **改造顺序的原则**：先删"代码已保证"的提示词冗余，再做主动回溯，最后才动申报契约本体——因为契约一改，前面所有的调试基线都会变。分阶段计划、每步验收与验证协议见 [`roadmap.md`](roadmap.md)。
 

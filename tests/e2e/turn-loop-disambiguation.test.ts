@@ -1,0 +1,190 @@
+/**
+ * 离线全链 e2e：多任务回溯歧义——宿主把"继续哪个任务"抛给用户（编号消歧）。共享替身见 ./harness.ts。
+ *
+ * turn-loop-concurrent.test.ts 覆盖的是单条计划线的中断/恢复；这里覆盖两条计划都开着、
+ * 申报的步骤与两条都接得上时的宿主行为：
+ *   ① 宿主不猜——直接发编号消歧问题（选项由计划事实机械生成），零委派零新事实；
+ *   ② 紧跟问题的编号回复绑定所选计划，后续事实记在正确的 planId 上；
+ *   ③ 非编号回复按新请求正常处理，不产生绑定。
+ *
+ * 绑定合法性全在宿主侧：preferredPlanId 由宿主持有，模型申报只提供"做什么"，
+ * 提供"继续哪个"的编号语义只有紧跟宿主问题时才成立（中间插过任何回合即失效）。
+ */
+import { describe, expect, it, vi } from 'vitest';
+import {
+  balanceCalls,
+  boot,
+  gatedWorker,
+  mainDriver,
+  totalActualCalls,
+  type WorkerStep,
+} from './harness';
+
+/** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
+const PRINCIPAL_ID = 'wecom:e2e_user';
+const SESSION_ID = 'wecom:e2e_user:e2e_user';
+
+/** 记录 worker 实际收到的委派请求与 taskId（宿主透传剥掉协议前缀的 request）。 */
+function recordingWorker(script: WorkerStep[]) {
+  const inner = gatedWorker(script);
+  const requests: string[] = [];
+  const taskIds: string[] = [];
+  return {
+    requests,
+    taskIds,
+    driver: {
+      run: async (input: { sessionId?: string; messages: Array<{ role: string; content: string }> }) => {
+        taskIds.push(String(input.sessionId ?? ''));
+        requests.push(String(input.messages.at(-1)?.content ?? ''));
+        return inner.run(input as never);
+      },
+    },
+  };
+}
+
+interface PlanLogEvent {
+  event: string;
+  requestId?: string;
+  planId?: string;
+  step?: string;
+  status?: string;
+}
+
+/** 侦测宿主计划模式的结构化日志（写法同 turn-loop-concurrent 的 capturePlanLog）。 */
+function capturePlanLog() {
+  const events: PlanLogEvent[] = [];
+  const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {
+    if (typeof line !== 'string') return;
+    try {
+      const parsed = JSON.parse(line) as PlanLogEvent;
+      if (typeof parsed?.event === 'string' && parsed.event.startsWith('task_plan')) events.push(parsed);
+    } catch { /* 非 JSON 行忽略 */ }
+  });
+  return {
+    events,
+    ownership: () => events.filter((entry) => entry.event === 'task_plan_resumed' || entry.event === 'task_plan_started'),
+    restore: () => spy.mockRestore(),
+  };
+}
+
+describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
+  it('9.1 两个未完成计划形状撞车 → 宿主出题；编号"2"绑定较旧的那个计划续跑', async () => {
+    const before = totalActualCalls();
+    const worker = recordingWorker([
+      // 甲（第 1 回合，计划 A 的第 1 步）
+      { plan: balanceCalls('甲账套', '202609') },
+      { text: '甲账套 202609 应收余额为 0 元。' },
+      { end: true },
+      // 丁（第 2 回合，计划 B 的第 1 步）
+      { plan: balanceCalls('丁账套', '202609') },
+      { text: '丁账套 202609 应收余额为 0 元。' },
+      { end: true },
+      // 乙（第 4 回合，用户选"2"后计划 A 的第 2 步）
+      { plan: balanceCalls('乙账套', '202609') },
+      { text: '乙账套 202609 应收余额为 700 元。' },
+    ]);
+    const declarations: Array<Record<string, unknown>> = [
+      { kind: 'delegate', request: '第1/3步：查甲账套 202609 的应收余额', text: '第 1 步完成：甲账套 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查丁账套 202609 的应收余额', text: '第 1 步完成：丁账套 0 元。共 3 步，先停在这。' },
+      // 与两条计划都接得上 → 宿主 ToolUserError 出消歧问题，回合在此结束
+      { kind: 'delegate', request: '第2/3步：继续核对' },
+      // 用户选"2"（较旧的对象甲计划）：宿主注入消歧结果，模型重新申报本步
+      { kind: 'delegate', request: '第2/3步：查乙账套 202609 的应收余额' },
+      { kind: 'conversation', text: '甲乙两条核对完了，丁那条还差两步。' },
+    ];
+    const { send, sdk, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
+    const log = capturePlanLog();
+    try {
+      const first = await send('逐个核对甲乙丙三个账套的应收余额');
+      expect(first).toContain('甲账套 0 元');
+
+      const second = await send('再核对丁戊己三个账套的应收余额');
+      expect(second).toContain('丁账套 0 元');
+      expect(worker.taskIds).toHaveLength(2);
+      expect(totalActualCalls()).toBe(before + 2);
+
+      // 「继续」撞上两个 1/3 的未完成计划：宿主不猜，出编号题，零委派
+      const noticesBeforeAsk = sdk.noticeTexts().length;
+      const asked = await send('继续');
+      expect(asked).toContain('【任务消歧】');
+      expect(asked).toContain('1. 查丁账套 202609 的应收余额（1/3 步已完成）');
+      expect(asked).toContain('2. 查甲账套 202609 的应收余额（1/3 步已完成）');
+      expect(asked).not.toContain('不应外发');
+      expect(worker.taskIds).toHaveLength(2);
+      expect(totalActualCalls()).toBe(before + 2);
+      expect(sdk.noticeTexts()).toHaveLength(noticesBeforeAsk);
+
+      // 紧跟问题的"2"：绑定较旧的对象甲计划（选项 2），第 2 步照常委派
+      const picked = await send('2');
+      expect(picked).toContain('甲乙两条核对完了');
+      expect(picked).not.toContain('不应外发');
+      expect(worker.taskIds).toHaveLength(3);
+      expect(worker.requests[2]).toContain('乙账套');
+      expect(worker.requests[2]).not.toContain('第2/3步');
+      expect(totalActualCalls()).toBe(before + 3);
+
+      // planId 归属：A、B 各开一次，第 4 回合续跑的是 A（用户选的那个），不是最近的 B
+      const ownership = log.ownership();
+      expect(ownership.map((entry) => entry.event)).toEqual(['task_plan_started', 'task_plan_started', 'task_plan_resumed']);
+      const planA = ownership[0]?.planId ?? '';
+      const planB = ownership[1]?.planId ?? '';
+      expect(planA).not.toBe(planB);
+      expect(ownership[2]?.planId).toBe(planA);
+
+      // 事实归属：第 2 步记在计划 A 上；两个计划都仍开着（A 2/3、B 1/3）
+      const open = await assembly.store.taskPlans.openPlans(PRINCIPAL_ID, SESSION_ID);
+      expect(open.map((plan) => plan.planId)).toEqual([planA, planB]);
+      expect(open[0]).toEqual(expect.objectContaining({ maxRecordedStep: 2, done: 2, totalSteps: 3 }));
+      expect(open[1]).toEqual(expect.objectContaining({ maxRecordedStep: 1, done: 1, totalSteps: 3 }));
+      // 选项标签来自计划事实：消歧问题里的"查甲账套…"就是计划 A 第 1 步的 request
+      expect(open[0]?.firstRequest).toContain('甲账套');
+      expect(await assembly.store.taskPlans.latestOpenPlan(PRINCIPAL_ID, SESSION_ID)).toBe(planA);
+    } finally {
+      log.restore();
+    }
+    await assembly.close();
+  });
+
+  it('9.2 消歧问题后的非编号回复按新请求处理：正常单步委派，不产生绑定', async () => {
+    const before = totalActualCalls();
+    const worker = recordingWorker([
+      { plan: balanceCalls('甲账套', '202609') },
+      { text: '甲账套 202609 应收余额为 0 元。' },
+      { end: true },
+      { plan: balanceCalls('丁账套', '202609') },
+      { text: '丁账套 202609 应收余额为 0 元。' },
+      { end: true },
+      // 非编号回复落地成单步委派（无前缀）：新任务、不绑任何计划
+      { plan: balanceCalls('戊账套', '202609') },
+      { text: '戊账套 202609 应收余额为 300 元。' },
+    ]);
+    const declarations: Array<Record<string, unknown>> = [
+      { kind: 'delegate', request: '第1/3步：查甲账套 202609 的应收余额', text: '第 1 步完成：甲账套 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查丁账套 202609 的应收余额', text: '第 1 步完成：丁账套 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第2/3步：继续核对' },
+      // 用户没答编号，换了个新查询：单步委派照常，两个旧计划不受影响
+      { kind: 'delegate', request: '查询戊账套 202609 的应收余额' },
+    ];
+    const { send, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
+    try {
+      await send('逐个核对甲乙丙三个账套的应收余额');
+      await send('再核对丁戊己三个账套的应收余额');
+      const asked = await send('继续');
+      expect(asked).toContain('【任务消歧】');
+
+      const answered = await send('先查戊账套的吧');
+      expect(answered).toContain('300 元');
+      expect(worker.taskIds).toHaveLength(3);
+      expect(worker.requests[2]).toContain('戊账套');
+      expect(worker.requests[2]).not.toContain('第2/3步');
+      expect(totalActualCalls()).toBe(before + 3);
+
+      // 两个旧计划原封不动：仍然各是 1/3，没有多出第 2 步事实
+      const open = await assembly.store.taskPlans.openPlans(PRINCIPAL_ID, SESSION_ID);
+      expect(open).toHaveLength(2);
+      expect(open.every((plan) => plan.maxRecordedStep === 1 && plan.totalSteps === 3)).toBe(true);
+    } finally {
+      await assembly.close();
+    }
+  });
+});
