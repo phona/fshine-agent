@@ -208,6 +208,30 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   const intentTtlMs = options.intentTtlMs ?? 10 * 60_000;
   const generateCode = options.generateCode ?? defaultGenerateCode;
   const hashCode = options.hashCode ?? defaultHashCode;
+  // ── 下游平台保护（并发闸）────────────────────────────────────────────
+  // 真实平台的浏览器是共享登录态的持久 profile（launchPersistentContext）：
+  // 并发委派会多开 Chrome 抢同一 profile——那正是"被平台感知"的典型方式
+  // （会话互踢、登录态竞争、行为像自动化）。默认全局串行，可用
+  // FSHINE_PLATFORM_CONCURRENCY 放宽。排队只增加等待，不影响正确性；
+  // 速率另由平台侧 DZ_RATE_LIMIT 令牌桶控制（read/global/api 分类）。
+  const platformLimit = Math.max(1, Number.parseInt(process.env.FSHINE_PLATFORM_CONCURRENCY ?? '', 10) || 1);
+  let platformActive = 0;
+  const platformWaiters: Array<() => void> = [];
+  function releasePlatformSlot(): void {
+    platformActive -= 1;
+    const next = platformWaiters.shift();
+    if (next) next();
+  }
+  async function acquirePlatformSlot(requestId: string, queuedSince: number): Promise<() => void> {
+    if (platformActive < platformLimit) {
+      platformActive += 1;
+      return releasePlatformSlot;
+    }
+    await new Promise<void>((resolve) => platformWaiters.push(resolve));
+    platformActive += 1; // 取走 releaser 刚释放的份额
+    console.info(JSON.stringify({ event: 'platform_delegation_queued', requestId, waitedMs: Date.now() - queuedSince }));
+    return releasePlatformSlot;
+  }
   const tool: DiscoveredTool = {
     name: RUN_17DZ_TASK_TOOL,
     description: RUN_17DZ_TASK_DESCRIPTION,
@@ -384,24 +408,30 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const delegationStart = Date.now();
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
-        result = await options.workerDriver.run({
-          systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration),
-          tools: [],
-          messages,
-          cwd: profile.root,
-          skillRoots: profile.skillRoots,
-          sessionId: taskId,
-          requestId: ctx.trusted.requestId,
-          onStep: ctx.trusted.onStep ?? (() => {}),
-          exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
-          deadline,
-          signal,
-          ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
-          ...(args.entitySources ? { entitySources: args.entitySources } : {}),
-          ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
-          ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
-          ...(onNotice ? { onNotice } : {}),
-        });
+        // 并发闸：worker 会话期间独占下游平台（默认全局串行，见文件顶部说明）
+        const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
+        try {
+          result = await options.workerDriver.run({
+            systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration),
+            tools: [],
+            messages,
+            cwd: profile.root,
+            skillRoots: profile.skillRoots,
+            sessionId: taskId,
+            requestId: ctx.trusted.requestId,
+            onStep: ctx.trusted.onStep ?? (() => {}),
+            exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
+            deadline,
+            signal,
+            ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
+            ...(args.entitySources ? { entitySources: args.entitySources } : {}),
+            ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
+            ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
+            ...(onNotice ? { onNotice } : {}),
+          });
+        } finally {
+          release();
+        }
         if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
         if (result.pendingPlan) {
           const pendingPlan: PendingPlanConfirmation = {

@@ -372,3 +372,70 @@ describe('17dz Pi subagent adapter', () => {
     expect(reply.text).toBe('找到两个客户，请让用户选择。');
   });
 });
+
+describe('下游平台保护：委派并发闸', () => {
+  /** 记录并发进出：driver 执行期间 Active 数 > 1 即说明闸门失效。 */
+  function concurrencyProbe(delayMs: number) {
+    let active = 0;
+    let maxActive = 0;
+    const driver: TurnDriver = {
+      run: async (input: TurnDriverInput) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        active -= 1;
+        return { text: '查完了', messages: input.messages };
+      },
+    };
+    return { driver, peak: () => maxActive };
+  }
+
+  it('默认全局串行：两个委派不会同时进入下游平台', async () => {
+    const root = await profileRoot();
+    const probe = concurrencyProbe(80);
+    const task = runner(root, new MemoryTasks(), probe.driver);
+    const [a, b] = await Promise.all([
+      task.run({ request: '查A' }, { trusted: trusted() }),
+      task.run({ request: '查B' }, { trusted: trusted() }),
+    ]);
+    expect(a.text).toBe('查完了');
+    expect(b.text).toBe('查完了');
+    expect(probe.peak()).toBe(1);
+  });
+
+  it('FSHINE_PLATFORM_CONCURRENCY=2 时允许两个并行', async () => {
+    const previous = process.env.FSHINE_PLATFORM_CONCURRENCY;
+    process.env.FSHINE_PLATFORM_CONCURRENCY = '2';
+    try {
+      const root = await profileRoot();
+      const probe = concurrencyProbe(80);
+      const task = runner(root, new MemoryTasks(), probe.driver);
+      await Promise.all([
+        task.run({ request: '查A' }, { trusted: trusted() }),
+        task.run({ request: '查B' }, { trusted: trusted() }),
+      ]);
+      expect(probe.peak()).toBe(2);
+    } finally {
+      if (previous === undefined) delete process.env.FSHINE_PLATFORM_CONCURRENCY;
+      else process.env.FSHINE_PLATFORM_CONCURRENCY = previous;
+    }
+  });
+
+  it('worker 抛错也释放闸门：后续委派不被卡死', async () => {
+    const root = await profileRoot();
+    let calls = 0;
+    const flaky: TurnDriver = {
+      run: async (input: TurnDriverInput) => {
+        calls += 1;
+        if (calls === 1) throw new Error('平台侧抽风');
+        return { text: '恢复后查完了', messages: input.messages };
+      },
+    };
+    const task = runner(root, new MemoryTasks(), flaky);
+    // worker 原始错误被 runner 转成面向用户的安全话术（既有行为）；关键是它reject了
+    await expect(task.run({ request: '查A' }, { trusted: trusted() })).rejects.toThrow('17dz 子任务执行失败');
+    // 闸门已释放：第二次委派照常进行，没有被第一次的异常卡死
+    const second = await task.run({ request: '查B' }, { trusted: trusted() });
+    expect(second.text).toBe('恢复后查完了');
+  });
+});
