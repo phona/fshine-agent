@@ -19,6 +19,8 @@ import {
   isPlatformMock,
 } from '@fshine/agent';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from '../apps/server/commit';
+import { asAgentPendingRepo, createPlanConfirmationRoute } from '../apps/server/plan-confirmation-route';
+import { createSqlitePendingPlanConfirmationRepo } from '@fshine/core';
 import { loadBusinessSkill } from '../apps/server/business-skill';
 import { createMessageHandler } from '../apps/server/handler';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
@@ -69,7 +71,11 @@ async function main(): Promise<void> {
     ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
     : { event: 'business_skill_skipped', path: businessSkill.path }));
   const driver = createPiTurnDriver({ env: process.env });
-  const workerDriver = createPiCodingTurnDriver({ env: process.env });
+  // 与生产装配同构：计划激活密钥进 worker 驱动，确认门（confirm 档）的待确认计划
+  // 经 SQLite 持久化——否则真实平台上一触到 confirm 门就抛"宿主未配置安全持久化
+  // 回调"，冒烟链路覆盖不到计划门最关键的等待确认路径。
+  const planActivationSecret = newGateSecret();
+  const workerDriver = createPiCodingTurnDriver({ env: process.env, planActivationSecret });
   const platformTask = createContextTaskRunner({
     profiles: config.contextProfiles,
     tasks: store.platformTasks ?? {
@@ -97,7 +103,40 @@ async function main(): Promise<void> {
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
     ...(store.taskPlans ? { taskPlans: store.taskPlans } : {}),
   });
-  const handler = createMessageHandler({ store, runtime });
+  // 计划确认门（与 apps/server/assembly.ts 同构）：待确认计划落 SQLite，
+  // 用户下一条消息带"确认继续"即激活续跑——单进程 CLI 因此也能覆盖 confirm 档。
+  const pendingPlanRepo = createSqlitePendingPlanConfirmationRepo(dbPath);
+  const confirmationRoute = createPlanConfirmationRoute({
+    repo: asAgentPendingRepo(pendingPlanRepo),
+    verifyActivatable: async (pending) => {
+      if (!platformRoot) throw new Error('幻账平台根目录未配置');
+      const { loadPlanStatus, PlanSupersededError } = await import('@fshine/agent');
+      const status = await loadPlanStatus({ platformRoot, planId: pending.planId });
+      if (status && status.status !== 'pending') {
+        throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
+      }
+    },
+    activate: async (pending) => {
+      if (!platformRoot) throw new Error('幻账平台根目录未配置');
+      const { activatePendingPlan } = await import('@fshine/agent');
+      await activatePendingPlan({
+        platformRoot,
+        planId: pending.planId,
+        evidence: 'user-confirmed',
+        activationSecret: planActivationSecret,
+      });
+    },
+  });
+  const handler = createMessageHandler({
+    store,
+    runtime,
+    planConfirmation: {
+      handle: confirmationRoute.handle,
+      savePending: async (pending: { planId: string; version: number; taskId: string; principalId: string; sessionId: string; requestId: string; userText: string }) => {
+        await pendingPlanRepo.savePending({ ...pending, decision: 'confirm', expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), evaluation: {} });
+      },
+    },
+  });
 
   const message: IncomingChannelMessage = {
     wecomUserId: AUTHORIZED_USER,
