@@ -56,17 +56,19 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- **网关名 `bin/17dz`：33 行 / 8 文件**（基线，只减不增）。8 文件：`pi-coding-driver.ts`(3)、`context.ts`(3)、`error-codes.ts`(7)、`plan-runtime.ts`(7)、`operation-labels.ts`(1)、`serve-gate.ts`(8)、`apps/server/commit.ts`(3)、`apps/server/assembly.ts`(1)。目标退到 ≤1（配置派生）。
-- **plan 形状散文副本**（跨仓逐字核实，真实位置如下）：
-  - fshine `packages/agent/src/error-codes.ts` 计划门错误表——`CORRECT_PLAN_SHAPE`（第 54 行）+ 5 处 `correctForm`/`text`（62/66/72/80/84/190），同一形状字符串在错误表里重复。
+- **网关名 `bin/17dz`：已收敛至 1（配置缺省值）**——非测试 src 里只剩 `packages/agent/src/platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，其余全部由它派生（消息文本与提示词不再各抄一份）。历史窗口内曾 20→35 增长（+15，+75%，违反只减不增），增长源=错误码表与提示词的消息文本（`error-codes.ts` 0→7、`plan-runtime.ts` 1→7、`operation-labels.ts` 0→1、`context.ts` 2→3）——已由配置派生修复。
+- **plan 草案形状的教学副本 6 处且自相矛盾（D-011）**（跨仓逐字核实，真实位置如下）：
+  - fshine `packages/agent/src/error-codes.ts` 计划门错误表 5 处——`CORRECT_PLAN_SHAPE`（第 55 行）、`PLAN_SUBCOMMAND_RESERVED`（73）、`PLAN_JSON_NOT_OBJECT`（81）、`PLAN_CALLS_NOT_ARRAY`（85）、`PLAN_SHAPE_GATE_TEACHING`（194）。其中 `PLAN_JSON_NOT_OBJECT` 教无 goal 形 `{"calls":[…]}`（唯一与平台一致的一处），**另四处教带 goal 形 `{"goal":"…","calls":[…]}`**。
   - fshine `packages/agent/src/context.ts:693` worker 系统提示词的教学句（`bin/17dz plan {"goal":"…","calls":[…]}…`）。
-  - 17dz `.agents/skills/automation-orchestrator/SKILL.md:36` 草案教学（`` `{"calls":[{"operation":"voucher.query-saved","args":["账套名","YYYYMM"]}]}` ``）。
-  - > **核实注记（执行纪律①的现场示例）**：方案初稿记「含 platform-contract.ts 注释里那处」，**跨仓 grep 证伪**——`platform-contract.ts`（唯一契约适配层）只持 RESULT **输出**信封与错误码 / 选择码集合（自第 5 行起），零 `plan`/`goal`/`calls`；计划**输入**形状的散文副本不在该文件。真实副本是上列三处。不跨仓核实，就会把"应该在哪儿"当成"实际在哪儿"写进宪章。
+  - 17dz `.agents/skills/automation-orchestrator/SKILL.md:36` 草案教学（`` `{"calls":[{"operation":"voucher.query-saved","args":["账套名","YYYYMM"]}]}` ``）——**已被 Lane B④（17dz `f4c1c66`）删除**，不再是副本。
+  - 矛盾的要害：宿主教 `{"goal":"…","calls":[…]}`，而平台 `plan.js` evaluate 只读 `calls` + `requestId`（`goal` 字段在平台侧不存在，`grep -rn goal src/` 0 命中）。同一张错误码表给出两种形状，正是「模型静默选一份信」的机制（D-011 根因）。
+  - 平台已声明唯一 schema：17dz `src/execution/plan-schema.json`——`calls` 必填（PlanCall 数组）、`requestId`/`goal` 为声明过的可选元数据、`additionalProperties:false`；`plan.js` evaluate 入口按它校验（未声明顶层字段以 `PLAN_UNKNOWN_FIELD` 拒绝）。
+  - > **核实注记（执行纪律①的现场示例）**：方案初稿记「plan 形状 4 份散文（含 platform-contract.ts 注释里那处）」，**跨仓 grep 证伪**——`platform-contract.ts`（唯一契约适配层）只持 RESULT **输出**信封与错误码 / 选择码集合（自第 5 行起），零 `plan`/`goal`/`calls`；计划**输入**形状的散文副本不在该文件。D0 复核实测：宿主侧现存 6 处（`error-codes.ts` 5 + `context.ts` 1），17dz SKILL 那 1 处已由 Lane B④ 删除。不跨仓核实，就会把"应该在哪儿"当成"实际在哪儿"写进宪章。
 - **错误码表镜像**：`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。
 - **KEY_ARG_FLAGS 镜像**：`serve-gate.ts:72`。
 - **ask.ts 复刻装配层**：`scripts/ask.ts`（第 104–137 行）把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。
 
-**闭环判据**：**示例 / 教学描述 0 份**；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；网关名 ≤1（配置派生）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
+**闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；网关名 ≤1（配置派生）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
 
 ---
 
