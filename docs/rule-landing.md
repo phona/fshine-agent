@@ -312,3 +312,16 @@
 **验收**：47 文件 439 用例基线 → 49 文件 455 用例（新增 16 例：driver 补一刀 9 例——补刀生效/无效/同 driver 第二次仍补一刀（每回合独立）/确认门不补/超时不补/取消不补/模型出错不补/追问轮自己失败仍上报事实/无计划不补；runtime 5 例——纯状态文案、说明附后、注脚剥离、通用兜底不附、有 execution 走正常路径；e2e 3 例——真 SQLite 全链：通知已送达+零执行、说明带数字不附注、回复"继续"后重新执行闭环合上）。driver 单测只替身 SDK 的 `createAgentSession`（假 agent 回放每轮 bash），G1 门、计划 CLI 替身、`gateCalls` 计数、`execution/activatedPlan` 合成都走生产代码。
 
 **已知边界**：① 补一刀以**每回合**为界（标志在 `run()` 内）：同一进程里下一个回合再遇到同样形态仍然会追问一次，只有同一回合内不重复追问——手动重试循环比一个模型轮贵；② 计划模式下若模型随后自行汇总（`planModeTurn` 且无财务数字），走的是既有的"计划步骤转达"分支，新分支不抢先——C25 既有行为一动不动；③ `conversation_unsourced_amounts` 探测器在计划模式汇总路径下仍可达（那里不提前 return），该状态下金额同样无来源，探测价值不变，故未加 `!turn.activatedPlan`；④ "继续"之后由 Main Agent 重新委派同一请求（同一 calls 重新评估即再激活），不依赖宿主记住 taskId。
+
+## 17. 调用方输入卫生批修（2026-09-27，双仓库只读审计后）
+
+背景：一天内抓到三同族事故——① 计划命令形状不符收到权限话术（答非所问）② 17dz 驼峰 flag 静默回落默认科目（静默错答）③ 宿主替模型猜（剥围栏/C2 兜底）。用户拍板架构：**宿主只保证错误诚实可行动 + 爆炸有界，重试智慧归模型，不建容忍层**。据此删了 stripCommandWrapping 与 C2（`95b584b`/`348648e`），计划命令改结构化期望/实际错误（`9fcbf4c`）。
+
+随后双 subagent 只读审计同一把尺子（静默回落/答非所问/宿主代猜/只说不做），fshine 9 项、17dz 14 项。**已修（读路径 live 批）**：
+
+- 17dz `3707bac`：S1 共用取 token 三态（多候选账套 fail-loud 列候选，绝不再 `.first()` 代选——旧形态会拿别家账套 token 且读回校验盖 verified:true）；S6 期间格式 lib 收口（`queryVoucherPage` 一處断言 YYYYMM+月份，BAD_PERIOD）；S5 `parseCountFlag`+`driftVerdict`（NaN→非 0 退出；`checked===0` → NO_SAMPLES+exit 2，**零样本不是无漂移**）；S8 计划范围摘要诚实化（SCOPE_FORMS 声明形态，flag token 绝不当账套名，customer/subject-code 入摘要，认不出计 unknownScopeCalls；与脚本 LEGAL_FLAGS 机械对齐）；S11 UNKNOWN_DOMAIN exit 2；S13 login-pwd 滤 flag。
+- fshine `1e8f2ec`：F4 计划模式复读工具结果不再外发协议 JSON（needsRelay 兜底=步骤事实汇总，守夜事件 plan_steps_relayed_fallback）；F5 恢复路径回落过 stripFootprint（含 durable tool_result）；F6 内部工具名不上进度帧（INTERNAL_TOOLS 静默 + 模型短语钳制，泄漏特征形状判定）；F7 failureClass→用户话术（auth 类可行动："平台登录态过期，需要重新登录后才能继续查询"）；F8 计划恢复路径补执行痕迹校验（零执行不再被整理成"已完成"）。
+
+**遗留（写路径 latent 批，生产写开放前必修）**：17dz S2（fill.js 批量契约只用 contracts[0].accountSet，其余静默丢→凭证落错账套）、S3（gen-from-journal 账户下拉子串+.first() 多候选不歧义）、S4（--direction/--date-mode 无枚举白名单，过滤空转报"无符合条件"+exit 0）、S5③（fill --start-no NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串+stripCity 静默采纳简称，写路径）、S10（parse-tianren-bills creditRules 未命中静默回落 1122，未裁决口径可能落库）；fshine F1（extractChangeProposal 剥 ```json 围栏——与被删的 stripCommandWrapping 同族，写提案路径）。另：17dz 新错误码（ACCOUNT_SET_AMBIGUOUS/BAD_PERIOD/INVALID_LIMIT/INVALID_COUNT/NO_SAMPLES/UNKNOWN_DOMAIN）尚未登域文档；fshine F4 残留（回合真有过执行时出口校验跳过，模型复读仍可能外发——待单独一刀）。
+
+**审计的结构性结论**（值得记住）：17dz 执行层"单点极高、面状不及格"——flag-guard 是全网最高水准但止步于 flag 名，值校验/positional 语义/参数间一致性全靠每个脚本作者当时的警惕（同文件自相矛盾：验 --merge 不验 --direction、验三个查询的期间不验 queryAllVouchers）。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套/漂移检测器报无漂移），而执行层是唯一能同时防住两边的一侧。方向：把"值校验+三态+不代选"下沉为共用入口卫生，别再依赖个体警惕。
