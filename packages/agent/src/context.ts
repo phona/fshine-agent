@@ -30,6 +30,22 @@ import type {
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
 const DEFAULT_WORKER_TIMEOUT_MS = 600_000;
 
+/**
+ * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
+ *
+ * 原来四类失败（auth / timeout / executor_error / cancelled）只有日志里有分别，
+ * 用户统一收到"执行失败，请稍后再试"——登录态过期这种**唯一需要用户动手**的
+ * 类别因此被埋掉，用户只能盲目重试。这里按可行动性分流：
+ *   · auth：必须重新登录，不说"稍后再试"（那是错指令，重试多少次都没用）；
+ *   · timeout：平台侧慢，稍后重试是对的动作；
+ *   · executor_error / cancelled：维持原话术。
+ * 全部与业务无关（不出现任何领域词），只陈述状态与下一步动作。
+ */
+export const DELEGATION_AUTH_FAILURE = '平台登录态过期，需要重新登录后才能继续查询。';
+export const DELEGATION_TIMEOUT_FAILURE = '平台响应超时，请稍后重试。';
+export const DELEGATION_EXECUTOR_FAILURE = '17dz 子任务执行失败，请稍后再试。';
+export const DELEGATION_CANCELLED = '17dz 子任务已取消。';
+
 export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
   '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
@@ -513,6 +529,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok' }));
         return final;
       } catch (error) {
+        // 失败分类的判定顺序即优先级：取消（用户/上层主动中止）先于超时（时间到了），
+        // 再看登录态。同一时刻可能多个条件成立，取最贴近用户动作的那个。
         const failureClass = signal?.aborted ? 'cancelled'
           : Date.now() >= deadline ? 'timeout'
           : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
@@ -538,7 +556,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
           updatedAt: new Date().toISOString(),
         });
-        throw new ToolUserError(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子任务执行失败，请稍后再试。');
+        throw new ToolUserError(signal?.aborted ? DELEGATION_CANCELLED
+          : failureClass === 'auth' ? DELEGATION_AUTH_FAILURE
+          : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
+          : DELEGATION_EXECUTOR_FAILURE);
       }
     },
   };

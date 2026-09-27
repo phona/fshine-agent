@@ -4,8 +4,14 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
-import { createContextTaskRunner, type ContextTaskRunner } from './src/context';
-import { createTaxAgentRuntime } from './src/runtime';
+import {
+  DELEGATION_AUTH_FAILURE,
+  DELEGATION_CANCELLED,
+  DELEGATION_EXECUTOR_FAILURE,
+  DELEGATION_TIMEOUT_FAILURE,
+  createContextTaskRunner,
+  type ContextTaskRunner,
+} from './src/context';import { createTaxAgentRuntime } from './src/runtime';
 import { validatePlanEntities } from './src/turn-contract';
 
 const roots: string[] = [];
@@ -481,5 +487,54 @@ describe('下游平台保护：委派并发闸', () => {
     // 闸门已释放：第二次委派照常进行，没有被第一次的异常卡死
     const second = await task.run({ request: '查B' }, { trusted: trusted() });
     expect(second.text).toBe('恢复后查完了');
+  });
+});
+
+/**
+ * 委派失败分类话术（F7）：failureClass 原来只进日志，用户统一收到"执行失败请稍后再试"，
+ * 于是唯一需要用户动手的一类（登录态过期）被埋掉。这里按类钉住话术。
+ */
+describe('委派失败分类的用户话术', () => {
+  function failingRunner(root: string, message: string, workerTimeoutMs?: number) {
+    const profiles: Record<string, ContextProfileConfig> = {
+      '17dz': { root, skillRoots: ['.agents/skills'], ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }) },
+    };
+    return createContextTaskRunner({
+      profiles,
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async () => { throw new Error(message); } },
+    });
+  }
+
+  it('登录态过期：给出需要用户动手的话术，而不是"稍后再试"', async () => {
+    const task = failingRunner(await profileRoot(), '平台登录已过期，请重新登录');
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_AUTH_FAILURE);
+    // 错指令比没有指令更糟：这类失败绝不能伴随"稍后重试"
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.not.toThrow(/稍后/u);
+  });
+
+  it('平台响应超时：与执行器错误区分开，话术是"稍后重试"', async () => {
+    // workerTimeoutMs=0 → 截止时间即起点，任何耗时都算超时
+    const task = failingRunner(await profileRoot(), 'whatever', 0);
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_TIMEOUT_FAILURE);
+  });
+
+  it('执行器错误：维持原话术，原始错误内容不得透出', async () => {
+    const task = failingRunner(await profileRoot(), 'secret=/private/credentials');
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_EXECUTOR_FAILURE);
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.not.toThrow(/secret/u);
+  });
+
+  it('取消：维持原话术，且优先于超时判定', async () => {
+    const task = failingRunner(await profileRoot(), 'boom', 0);
+    const controller = new AbortController();
+    controller.abort();
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }, controller.signal))
+      .rejects.toThrow(DELEGATION_CANCELLED);
   });
 });

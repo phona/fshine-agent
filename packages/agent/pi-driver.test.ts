@@ -74,3 +74,55 @@ describe('Pi driver safety helpers', () => {
     expect(providerName).toMatch(/^[A-Za-z0-9_-]+$/);
   });
 });
+
+/**
+ * 进度帧的生产接线（F6）：toAgentTool 是 driver 构造原生工具并调用 onStep 的
+ * 唯一位置。这里用生产函数驱动替身执行，钉住"内部工具不出帧"与"短语钳制"——
+ * 空串进度帧会在渠道上投出一条空消息，所以 driver 侧必须整体跳过 onStep。
+ */
+describe('Pi driver 进度帧接线', () => {
+  function stepRecorder() {
+    const steps: string[] = [];
+    const input = {
+      exec: async () => ({ ok: true }),
+      onStep: (text: string) => { steps.push(text); },
+    } as unknown as TurnDriverInput;
+    return { steps, input };
+  }
+
+  function toolFor(name: string): DiscoveredTool {
+    return { name, description: name, inputSchema: { type: 'object', properties: {} } };
+  }
+
+  it('宿主内部工具调用不发进度帧（默认帧与模型短语都不发）', async () => {
+    for (const name of ['route_current_turn', 'search_history', 'get_messages']) {
+      const { steps, input } = stepRecorder();
+      const agentTool = toAgentTool(toolFor(name), input, new Map(), name);
+      // 模型照样可能自填 progress——内部工具对帧整体静默
+      await agentTool.execute('call_1', { progress: '申报本轮动作' });
+      expect(steps, name).toEqual([]);
+    }
+  });
+
+  it('平台工具调用仍出帧：模型短语优先，泄漏/超长短语被钳制后回落默认帧', async () => {
+    const clean = stepRecorder();
+    await toAgentTool(toolFor('get_login_status'), clean.input, new Map(), 'get_login_status')
+      .execute('call_1', { progress: '检查登录状态' });
+    expect(clean.steps).toEqual(['检查登录状态']);
+
+    // 复读了协议材料 → 整条丢弃，回落到该工具的默认帧
+    const leaky = stepRecorder();
+    await toAgentTool(toolFor('get_login_status'), leaky.input, new Map(), 'get_login_status')
+      .execute('call_1', { progress: '{"recorded":"delegate","step":"第 1/2 步"}' });
+    expect(leaky.steps).toEqual(['检查平台登录状态…']);
+
+    // 超长 → 截断到 50 字符
+    const long = stepRecorder();
+    const phrase = `正在核对${'x'.repeat(60)}`;
+    await toAgentTool(toolFor('get_login_status'), long.input, new Map(), 'get_login_status')
+      .execute('call_1', { progress: phrase });
+    expect(long.steps).toHaveLength(1);
+    expect(long.steps[0]).toHaveLength(51);
+    expect(long.steps[0]?.endsWith('…')).toBe(true);
+  });
+});

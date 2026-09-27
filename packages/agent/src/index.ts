@@ -43,7 +43,7 @@ export {
   type SkillMetadata,
   type SkillRegistry,
 } from './skills';
-export { defaultStepText } from './step-text';
+export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
 export { reduceContextState, CONTEXT_REDUCER_VERSION, type ContextState, type ContextEvidence } from './context-state';
 export { createHistoryTools, type HistoryTool } from './history-tools';
 export { createMemoryCandidateModel, type MemoryModelOptions } from './memory-model';

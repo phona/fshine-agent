@@ -10,7 +10,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
-import { defaultStepText } from './step-text';
+import { renderToolStepText } from './step-text';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
@@ -304,7 +304,7 @@ export function toAgentTool(
         progress: {
           type: 'string',
           description:
-            '一句话说明你即将做什么(≤60 字),作为给用户看的进度提示;只许描述即将进行的动作,严禁包含任何结果数字',
+            '一句话说明你即将做什么(≤50 字),作为给用户看的进度提示;只许描述即将进行的动作,严禁包含任何结果数字、编号或协议字段',
         },
       },
     }),
@@ -312,7 +312,10 @@ export function toAgentTool(
       // progress 是给进度帧的意图短语,不进工具参数
       const { progress, ...args } = params as Record<string, unknown> & { progress?: unknown };
       const phrase = typeof progress === 'string' ? progress : '';
-      input.onStep(phrase || defaultStepText(tool.name, args, names));
+      // 帧文本由 renderToolStepText 一处合成：内部工具与协议材料复读都不出帧；
+      // 返回 null 时静默跳过——空串会在渠道上投出一条空进度帧,比不发帧更糟。
+      const step = renderToolStepText(tool.name, args, names, phrase);
+      if (step) input.onStep(step);
       try {
         const data = await input.exec(tool.name, args, signal);
         rememberAccountSets(tool.name, data, names);

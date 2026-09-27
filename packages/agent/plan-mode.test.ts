@@ -741,6 +741,123 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
   });
 });
 
+/** 侦测任意宿主事件（console.info 上是 JSON 行）。 */
+function captureHostEvents(names: readonly string[]) {
+  const events: Array<Record<string, unknown>> = [];
+  const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {
+    if (typeof line !== 'string') return;
+    try {
+      const parsed = JSON.parse(line) as Record<string, unknown>;
+      if (typeof parsed['event'] === 'string' && names.includes(parsed['event'])) events.push(parsed);
+    } catch { /* 非 JSON 行忽略 */ }
+  });
+  return { events, restore: () => spy.mockRestore() };
+}
+
+/**
+ * 复读形状（F4，2026-09 真实平台实测）：两步计划、两步都零执行无 needs，worker 把方案
+ * 当文本打印；模型最后把上一步的工具结果原样当回复。那段 JSON 是宿主与模型之间的内部
+ * 协议材料（任务编号、「不要转述给用户」的 next 提示），绝不能外发。
+ */
+const SERIALIZED_STEP_TOOL_RESULT = '{"recorded":"delegate","step":"第 1/2 步","stepIndex":1,"totalSteps":2,"taskId":"task_replay","executed":false,"text":"这一步没有发起任何平台调用。","outcome":"no_execution","next":"继续申报下一步：request 以「第2/2步：」开头，continueTaskId 填 task_replay（不要转述给用户）。任一步失败都不阻塞后续步骤。"}';
+
+describe('计划模式：模型复读工具结果时的外发兜底', () => {
+  it('P6.20 复读协议 JSON 不外发：宿主用步骤事实汇总顶上，并记守夜事件', async () => {
+    const log = captureHostEvents(['plan_steps_relayed_fallback', 'plan_steps_relayed']);
+    try {
+      const task = subagent([() => ({ taskId: 'task_replay', text: '这一步没有发起任何平台调用。' })]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/2步：查对象甲' },
+          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_replay' },
+          // 模型停在工具结果上没再说话：把协议 JSON 原样当回复
+          { kind: 'conversation', text: SERIALIZED_STEP_TOOL_RESULT },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_replay' }), '核对甲乙');
+
+      // 两步都派了，也都零执行
+      expect(task.calls).toHaveLength(2);
+      // 回复只说步骤事实与下一步：协议材料一个字都不外发
+      expect(reply.text).toContain('本轮拆解的进度如下');
+      expect(reply.text).toContain('本次拆解没有执行成功的步骤');
+      expect(reply.text).toContain('没有产生平台执行的步骤：第 1/2 步、第 2/2 步');
+      expect(reply.text).toContain('可以回复“继续”重跑未完成的步骤');
+      expect(reply.text).not.toContain('recorded');
+      expect(reply.text).not.toContain('task_replay');
+      expect(reply.text).not.toContain('continueTaskId');
+      expect(reply.text).not.toContain('不要转述给用户');
+      expect(reply.text).not.toContain('"step"');
+      // 守夜事件：复读被兜底截住（不是普通的计划汇总放行）
+      expect(log.events).toHaveLength(1);
+      expect(log.events[0]).toMatchObject({
+        event: 'plan_steps_relayed_fallback',
+        requestId: 'req_replay',
+        reason: 'serialized_tool_result',
+        planSteps: 2,
+        dispatchedSteps: 2,
+      });
+    } finally {
+      log.restore();
+    }
+  });
+
+  it('P6.21 复读但有 needs 可转达时优先转达"缺什么"，仍不外发协议 JSON', async () => {
+    const log = captureHostEvents(['plan_steps_relayed_fallback']);
+    try {
+      const task = subagent([
+        () => ({ taskId: 'task_replay_needs', text: '平台要求必须显式给出范围。', needs: { missing: ['范围'], reason: '平台要求必须显式给出范围', suggestion: '请告诉我要查的范围' } }),
+      ]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/2步：查对象甲' },
+          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_replay_needs' },
+          { kind: 'conversation', text: SERIALIZED_STEP_TOOL_RESULT },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_replay_needs' }), '核对甲乙');
+
+      expect(reply.text).toContain('还缺少：范围');
+      expect(reply.text).toContain('建议提供：请告诉我要查的范围');
+      expect(reply.text).not.toContain('recorded');
+      expect(reply.text).not.toContain('task_replay_needs');
+      expect(log.events).toHaveLength(1);
+    } finally {
+      log.restore();
+    }
+  });
+
+  it('P6.22 模型自己产出诚实汇总时仍走原路：不被兜底改写', async () => {
+    const log = captureHostEvents(['plan_steps_relayed_fallback']);
+    try {
+      const task = subagent([() => ({ taskId: 'task_honest', text: '这一步没有发起任何平台调用。' })]);
+      const runtime = createTaxAgentRuntime({
+        driver: planDriver([
+          { kind: 'delegate', request: '第1/2步：查对象甲' },
+          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_honest' },
+          { kind: 'conversation', text: '两步都没能执行，请补充查询范围后我重跑。' },
+        ]),
+        sessions: new FakeSessionRepo(),
+        platformTask: task,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_honest' }), '核对甲乙');
+
+      expect(reply.text).toBe('两步都没能执行，请补充查询范围后我重跑。');
+      // 没有复读就没有兜底事件
+      expect(log.events).toHaveLength(0);
+    } finally {
+      log.restore();
+    }
+  });
+});
+
 /** 内存版 Conversation Log：只支撑消歧匹配需要的 list 语义（升序返回）。 */
 function fakeConversationLog(events: Array<{ kind: 'user_message' | 'assistant_message'; content: string }>): Pick<import('@fshine/contracts').ConversationLogRepo, 'append' | 'list' | 'search'> {
   return {

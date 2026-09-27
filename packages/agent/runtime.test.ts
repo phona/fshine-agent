@@ -403,7 +403,8 @@ describe('createTaxAgentRuntime', () => {
     const delegated: Array<{ request: string; taskId?: string }> = [];
     const platformTask = subagent(async (args) => {
       delegated.push(args);
-      return { taskId: args.taskId ?? 'task_confirmed', text: '幻辰 202609 应收余额为 42 元。' };
+      // 确认后真的重跑了：执行痕迹在，恢复路径才允许放行（判据见 F8 的两个新用例）
+      return { taskId: args.taskId ?? 'task_confirmed', text: '幻辰 202609 应收余额为 42 元。', execution: { planId: 'plan_confirmed', version: 2, calls: 3 } };
     });
     const { driver, inputs } = recordingDriver([{ text: '202609 应收余额为 42 元。' }]);
     const sessions = new FakeSessionRepo();
@@ -422,6 +423,154 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('42 元');
     const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string }>;
     expect(transcript.filter((message) => message.role === 'assistant')).toHaveLength(1);
+  });
+
+  // ── 计划恢复路径（resumeTaskId）：注脚剥离 + 执行痕迹判据 ─────────────────
+  // 这条路径绕过 route_current_turn：用户确认码 → 宿主激活计划 → worker 重跑 →
+  // 整理模型转述。正常 delegate 路径的出口校验它一条都没继承，两个缺口都在这里补：
+  // F5 回落不过滤执行面注脚；F8 确认后零执行被整理模型总结成"已完成"直接外发。
+
+  /** 恢复路径的 durable log 替身：收回 tool_result 事件供断言。 */
+  function resumeLog() {
+    const events: ConversationEventRecord[] = [];
+    return {
+      events,
+      repo: {
+        append: async (event: ConversationEventRecord) => { events.push(event); },
+        list: async () => events,
+        search: async () => events,
+      },
+    };
+  }
+
+  it('F5 整理模型停嘴时回落 worker 文本：执行面注脚被剥掉，不上屏也不进 durable log', async () => {
+    const platformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_resumed',
+      text: '幻辰 202609 应收余额为 42 元。\n\n〔本轮执行面：3 次 bin/17dz 调用〕',
+      execution: { planId: 'plan_resumed', version: 2, calls: 3 },
+    }));
+    // 整理模型什么都没说 → 走 resumed.text 回落
+    const { driver } = recordingDriver([{ text: '' }]);
+    const sessions = new FakeSessionRepo();
+    const log = resumeLog();
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, conversationLog: log.repo });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_footprint', resumeTaskId: 'task_resumed' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toBe('幻辰 202609 应收余额为 42 元。');
+    expect(reply.text).not.toContain('本轮执行面');
+    expect(reply.text).not.toContain('bin/17dz');
+    // durable log 里的 tool_result 事件同样不带注脚（它会被 search_history 再喂回上下文）
+    const toolResult = log.events.find((event) => event.kind === 'tool_result');
+    expect(toolResult?.content).toBe('幻辰 202609 应收余额为 42 元。');
+    // 落进转录的 assistant 消息同样干净（注脚是给模型的重量反馈，只该出现在喂给
+    // 整理模型的那条 user 材料里，不该出现在任何用户可见/可检索的产物上）
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+    const assistantText = transcript
+      .filter((message) => message.role === 'assistant')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    expect(assistantText).not.toContain('本轮执行面');
+    expect(assistantText).toContain('幻辰 202609 应收余额为 42 元。');
+  });
+
+  it('F8.1 确认后重跑零执行：整理模型的"整理完成"不上屏，改说真实状态', async () => {
+    const platformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_zero',
+      text: '计划已批准，但平台侧连接被拒，本轮没有发起查询。',
+    }));
+    const { driver, inputs } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
+    const sessions = new FakeSessionRepo();
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_zero', resumeTaskId: 'task_zero' }),
+      '确认继续',
+    );
+
+    expect(reply.text).not.toContain('整理完成');
+    expect(reply.text).not.toContain('已完成');
+    expect(reply.text).toContain('本轮没有真正查到平台数据');
+    // worker 留下的无数字说明按既有"子 Agent 说明 + 注脚"模式附上
+    expect(reply.text).toContain('平台侧连接被拒');
+    // 整理模型的输入里带宿主事实：它没有机会把零执行总结成"已完成"
+    expect(JSON.stringify(inputs[0]?.messages)).toContain('没有产生任何平台执行');
+    // 转录里也不留那句总结：后续回合与 Context State 读的是这份转录
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+    const assistantText = transcript
+      .filter((message) => message.role === 'assistant')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    expect(assistantText).not.toContain('整理完成');
+    expect(assistantText).toContain('本轮没有真正查到平台数据');
+  });
+
+  it('F8.2 确认后零执行且方案已批准：说"批准了没执行"，邀请回复继续', async () => {
+    const platformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_activated',
+      text: '计划已批准，但执行入口无响应。',
+      activatedPlan: { planId: 'plan_active', version: 3 },
+    }));
+    const { driver } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_activated', resumeTaskId: 'task_activated' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toBe(`${ACTIVATED_PLAN_NOT_EXECUTED}\n\n计划已批准，但执行入口无响应。`);
+    expect(reply.text).not.toContain('整理完成');
+    expect(reply.text).not.toContain('没有产生任何平台查询');
+  });
+
+  it('F8.3 worker 只留下带数字的文本时不附注：数字结论不能当"说明"外发', async () => {
+    const platformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_number',
+      text: '大概是 42 元。',
+    }));
+    const { driver } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_number', resumeTaskId: 'task_number' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toBe(NO_EXECUTION_CLARIFICATION);
+    expect(reply.text).not.toContain('42 元');
+  });
+
+  it('F8.4 确认后真有执行：整理模型的汇总优先，worker 文本只在它停嘴时兜底', async () => {
+    const speaking = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_ok',
+      text: 'worker 原文：幻辰 202609 应收余额为 42 元。',
+      execution: { planId: 'plan_ok', version: 1, calls: 3 },
+    }));
+    const { driver } = recordingDriver([{ text: '汇总：42 元。' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: speaking });
+
+    const summarized = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_ok', resumeTaskId: 'task_ok' }),
+      '确认继续',
+    );
+    expect(summarized.text).toBe('汇总：42 元。');
+
+    const silentPlatformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_ok',
+      text: 'worker 原文：幻辰 202609 应收余额为 42 元。',
+      execution: { planId: 'plan_ok', version: 1, calls: 3 },
+    }));
+    const silent = recordingDriver([{ text: '' }]);
+    const silentRuntime = createTaxAgentRuntime({ driver: silent.driver, sessions: new FakeSessionRepo(), platformTask: silentPlatformTask });
+    const fallback = await silentRuntime.handleTurn(
+      makeCtx({ requestId: 'req_resume_silent', resumeTaskId: 'task_ok' }),
+      '确认继续',
+    );
+    expect(fallback.text).toBe('worker 原文：幻辰 202609 应收余额为 42 元。');
   });
 
   it('returns the user reply without waiting for the semantic Context State model', async () => {

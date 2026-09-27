@@ -159,32 +159,54 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           request: '宿主已收到用户对待确认计划的真实确认。请继续执行已激活计划中的剩余查询，不要扩大计划范围。',
           taskId: ctx.resumeTaskId,
         }, { trusted: ctx });
+        // 恢复路径的执行痕迹判据与正常 delegate 路径同一把尺（F8）：用户确认码 →
+        // 计划激活 → worker 重跑之后仍是零平台调用时，不得无条件放行。needs /
+        // pendingPlan 是另外两种合法终局（缺信息可续 / 又停在确认门），照旧放行。
+        const resumedBlocked = !resumed.execution && !resumed.needs && !resumed.pendingPlan;
+        // 宿主事实行进整理模型的输入：它因此不能说"已完成"，转录里也不会留下一句
+        // 与真实状态相反的总结（后续回合与 Context State 都读这份转录）。
+        const hostFact = resumedBlocked
+          ? '【宿主事实：本次确认后没有产生任何平台执行。不得宣称已完成或已查到，只能如实说明没有执行，并邀请用户回复“继续”重跑或直接告诉要调整的范围。】\n'
+          : '';
         const base = effectiveContextMode === 'transcript' ? loaded : selectRecentTurns(loaded, recentTurns);
         const messages = [
           ...base,
           { role: 'user', content: userMessage, timestamp: Date.now() } as unknown as AgentMessage,
-          { role: 'user', content: `【宿主已执行计划的结果；仅作为本轮答复依据】\n${resumed.text}`, timestamp: Date.now() + 1 } as unknown as AgentMessage,
+          { role: 'user', content: `${hostFact}【宿主已执行计划的结果；仅作为本轮答复依据】\n${resumed.text}`, timestamp: Date.now() + 1 } as unknown as AgentMessage,
         ];
         const deadline = Date.now() + Math.min(turnBudgetMs, 60_000);
         const answer = await deps.driver.run({
-          systemPrompt: `${SYSTEM_PROMPT}\n\n本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。`,
+          systemPrompt: `${SYSTEM_PROMPT}\n\n${resumedBlocked
+            ? '本轮 17dz 子任务按用户确认重跑后没有产生任何平台执行。'
+            : '本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。`,
           tools: [],
           messages,
           onStep: ctx.onStep ?? (() => {}),
           exec: async () => { throw new ToolUserError('本轮只负责整理已完成的计划结果。'); },
           deadline,
         });
-        const text = answer.text.trim() || resumed.text;
+        // 零执行收尾：回复由宿主确定性给出（与 delegate 路径的收尾兜底同一族话术），
+        // worker 留下的无数字说明按"子 Agent 说明 + 注脚"模式附上。
+        const note = usefulWorkerNote(resumed.text);
+        const text = resumedBlocked
+          ? resumed.activatedPlan
+            ? (note ? `${ACTIVATED_PLAN_NOT_EXECUTED}\n\n${note}` : ACTIVATED_PLAN_NOT_EXECUTED)
+            : (note ? `${note}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）` : NO_EXECUTION_CLARIFICATION)
+          // 正常路径：整理模型的文本优先；它没说话时回落 worker 文本——执行面注脚
+          // 是给模型的系统元数据，回落不过滤就会直接上屏并进转录（F5）。
+          : (answer.text.trim() || stripFootprint(resumed.text));
         const latestAssistant = [...answer.messages].reverse().find((message) => (message as { role?: string }).role === 'assistant') as { content?: unknown } | undefined;
         const latestText = assistantContentText(latestAssistant?.content).trim();
-        const savedMessages = latestText === text
-          ? answer.messages
-          : [
-            ...answer.messages,
-            deps.driver.synthesizeAssistant
-              ? deps.driver.synthesizeAssistant(text)
-              : ({ role: 'assistant', content: text, timestamp: Date.now() } as unknown as AgentMessage),
-          ];
+        const synthesized = deps.driver.synthesizeAssistant
+          ? deps.driver.synthesizeAssistant(text)
+          : ({ role: 'assistant', content: text, timestamp: Date.now() } as unknown as AgentMessage);
+        // 零执行时整理模型的文本既不上屏也不进转录：它最常见的形状正是把零执行
+        // 总结成"已完成"，留在转录里会污染后续回合。用宿主收尾文案整体替换。
+        const savedMessages = resumedBlocked
+          ? [...messages, synthesized]
+          : latestText === text
+            ? answer.messages
+            : [...answer.messages, synthesized];
         await saveTranscript(deps.sessions, {
           sessionId: ctx.sessionId,
           principalId: ctx.principalId,
@@ -192,10 +214,19 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         });
         await persistAssistantAndContext(deps, ctx, text, contextUpdateQueues, [{
           eventId: `${ctx.requestId}:confirmed_tool_result`, principalId: ctx.principalId, sessionId: ctx.sessionId,
-          kind: 'tool_result', content: redactInternalIds(redactSensitiveText(resumed.text)), createdAt: new Date().toISOString(), requestId: ctx.requestId,
+          kind: 'tool_result', content: redactInternalIds(redactSensitiveText(stripFootprint(resumed.text))), createdAt: new Date().toISOString(), requestId: ctx.requestId,
         }]);
         scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'confirmed_plan_resumed' }));
+        if (resumedBlocked) {
+          console.warn(JSON.stringify({
+            event: 'confirmed_plan_not_executed',
+            requestId: ctx.requestId,
+            taskId: ctx.resumeTaskId,
+            ...(resumed.activatedPlan ? { planId: resumed.activatedPlan.planId, version: resumed.activatedPlan.version } : {}),
+            ...(note ? { withWorkerNote: true } : {}),
+          }));
+        }
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : 'confirmed_plan_resumed' }));
         return { text };
       }
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
@@ -640,13 +671,20 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         // （任务编号、continueTaskId 字样），由宿主 composing 的转达文本顶上。
         const serializedToolResult = explained.startsWith(NEEDS_TOOL_RESULT_PREFIX);
         if ((needsLoop || planModeTurn) && !hasFinancialFigure(serializedToolResult ? '' : explained)) {
-          // 回路产物 / 计划模式汇总：转达"缺什么"或"哪些步骤没成"的文本即本轮回复，
-          // 原样外发，不叠加"没有查到平台数据"注脚
-          needsRelay = (serializedToolResult ? '' : explained) || (turn.lastNeeds ? renderNeedsUserText(turn.lastNeeds, '') : '');
+          // 复读时 explained 一律不可用：它是宿主与模型之间的内部协议材料（任务编号、
+          // 「不要转述给用户」的 next 提示），只能由宿主自己重述事实。
+          const relayed = serializedToolResult ? '' : explained;
+          const needsText = turn.lastNeeds ? renderNeedsUserText(turn.lastNeeds, '') : '';
+          // 计划模式兜底：没有 needs 线索可转达时，用宿主持有的步骤事实机械汇总顶上
+          // （与熔断汇总同一份步骤结局）——绝不让协议 JSON 外发。
+          const planFallback = planModeTurn ? renderPlanStepsRelayFallback(turn.planStepOutcomes) : '';
+          needsRelay = relayed || needsText || planFallback;
+          const usedFallback = serializedToolResult && !relayed;
           console.info(JSON.stringify({
-            event: needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed',
+            event: usedFallback ? 'plan_steps_relayed_fallback' : needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed',
             requestId: ctx.requestId,
             ...(needsLoop ? { needsRounds: turn.needsRounds } : { planSteps: turn.planSteps }),
+            ...(usedFallback ? { reason: 'serialized_tool_result', dispatchedSteps: turn.planStepOutcomes.length } : {}),
           }));
         } else {
           console.warn(JSON.stringify({ event: 'delegate_without_execution', requestId: ctx.requestId, ...(needsLoop ? { needsRounds: turn.needsRounds } : planModeTurn ? { planSteps: turn.planSteps } : {}) }));
@@ -655,8 +693,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           if (turn.activatedPlan) {
             // worker 可能顺手留了一句有价值的说明（具体阻碍）：带上，但只在不带财务数字、
             // 且不是那句通用兜底时才算"有价值"——否则附在状态文案后面只会稀释它。
-            const note = stripFootprint(result.text).trim();
-            const useful = Boolean(note) && !hasFinancialFigure(note) && note !== NO_EXECUTION_CLARIFICATION;
+            const note = usefulWorkerNote(result.text);
+            const useful = Boolean(note);
             console.warn(JSON.stringify({
               event: 'activated_plan_not_executed',
               requestId: ctx.requestId,
@@ -1050,6 +1088,17 @@ function stripFootprint(text: string): string {
 }
 
 /**
+ * worker 文本里"有价值的无数字说明"：剥掉执行面注脚后非空、不含财务数字、也不是
+ * 宿主的通用兜底——这种说明才配附在状态文案后面，否则只会稀释它。
+ * 恢复路径（确认后零执行）与 delegate 路径的收尾兜底共用同一把尺。
+ */
+function usefulWorkerNote(text: string): string {
+  const note = stripFootprint(text).trim();
+  if (!note || hasFinancialFigure(note) || note === NO_EXECUTION_CLARIFICATION || note === ACTIVATED_PLAN_NOT_EXECUTED) return '';
+  return note;
+}
+
+/**
  * 纠错环（架构 §3）交给 Main Agent 的工具结果：缺什么 / 为什么 / 建议用户提供什么 /
  * 任务编号 + 重派提示。这是给模型的内部协议材料，不是用户可见文本——外泄由提示词
  * "不许描述内部机制"一条与 C16 注脚剥离兜底，所以任务编号后面紧跟"不要转述给用户"。
@@ -1106,26 +1155,62 @@ function planStepSummary(result: SubagentTaskResult): string {
 }
 
 /**
+ * 计划步骤结局的用户可读行（熔断汇总与复读兜底共用的事实源）：只陈述步号与结局，
+ * 不猜业务语义，因此不含财务数字——出口校验的"零执行轮次数字结论"拦截不会覆盖它。
+ *
+ * 与 turn.planStepOutcomes 同源，而后者与刚写入任务计划存储的事实同源：哪些步
+ * done / needs / failed 是宿主持有的机械事实，不是模型的叙述。
+ */
+function renderPlanStepOutcomeLines(
+  outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
+): string[] {
+  const pick = (kind: 'done' | 'needs' | 'failed'): string[] =>
+    outcomes.filter((entry) => entry.outcome === kind).map((entry) => entry.label);
+  const done = pick('done');
+  const needs = pick('needs');
+  const failed = pick('failed');
+  const lines = [done.length > 0 ? `已执行成功的步骤：${done.join('、')}。` : '本次拆解没有执行成功的步骤。'];
+  if (needs.length > 0) lines.push(`缺信息未执行的步骤：${needs.join('、')}。`);
+  if (failed.length > 0) lines.push(`没有产生平台执行的步骤：${failed.join('、')}。`);
+  return lines;
+}
+
+/**
  * 计划模式熔断汇总：只陈述计划事实（哪些步成了、从哪一步起连续失败已停），不猜业务语义。
  *
- * 步骤结局与刚写入的计划事实同源（done/needs/failed），文本因此只有步号与计数、
- * 不含财务数字——出口校验的"零执行轮次数字结论"拦截不会覆盖这段回复。
+ * 开头那句"后续步骤不再派发"是熔断独有的确定性事实（宿主确实停止了派发），因此
+ * 与复读兜底不共用开头——后者没有这个事实可陈，不能借来声称宿主停止过什么。
  */
 function renderPlanCircuitBreak(
   outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
   consecutive: number,
   totalSteps: number,
 ): string {
-  const done = outcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label);
-  const needs = outcomes.filter((entry) => entry.outcome === 'needs').map((entry) => entry.label);
   const firstFailed = outcomes[outcomes.length - consecutive];
   const lines = [
     `计划执行已停止：自「${firstFailed?.label ?? '上一步'}」起连续 ${consecutive} 步没有产生任何平台执行（本次共 ${totalSteps} 步），后续步骤不再派发。`,
-    done.length > 0 ? `已执行成功的步骤：${done.join('、')}。` : '本次拆解没有执行成功的步骤。',
+    ...renderPlanStepOutcomeLines(outcomes),
   ];
-  if (needs.length > 0) lines.push(`缺信息未执行的步骤：${needs.join('、')}。`);
   lines.push('可以回复“继续”重跑未完成的步骤，或直接告诉我要调整的范围。');
   return lines.join('\n');
+}
+
+/**
+ * 计划模式复读兜底（F4）：模型把步骤工具结果原样当回复时（停在工具结果上没再说话），
+ * 那段 JSON 是内部协议材料——任务编号、「不要转述给用户」的 next 提示——绝不能外发。
+ * 宿主持有的步骤事实机械汇总顶上：只说步骤事实与下一步，不含任何协议字段。
+ *
+ * 与 renderPlanCircuitBreak 共用 renderPlanStepOutcomeLines 这一份事实源；差别只在
+ * 复读没有"连续零执行已停派"这个事实，所以不说"已停止"，只说进度。
+ */
+function renderPlanStepsRelayFallback(
+  outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
+): string {
+  return [
+    '本轮拆解的进度如下：',
+    ...renderPlanStepOutcomeLines(outcomes),
+    '可以回复“继续”重跑未完成的步骤，或直接告诉我要调整的范围。',
+  ].join('\n');
 }
 
 /**
