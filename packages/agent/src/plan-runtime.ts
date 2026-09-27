@@ -255,16 +255,59 @@ function stripCommandWrapping(command: string): string {
   return text;
 }
 
+/** 计划管理子命令：worker 不得直达，只由宿主调用。 */
+const PLAN_SUBCOMMANDS = ['evaluate', 'activate', 'current', 'status'];
+
+/**
+ * 计划命令形状不符时的诊断：说清检测到的形状问题 + 正确形状。
+ * 只描述"怎么提交"这一件机械事实，不猜业务、不放宽协议。
+ */
+function describePlanShapeProblem(command: string): string {
+  const problems: string[] = [];
+  if (command.includes('```')) problems.push('markdown 代码围栏');
+  if (/^\s*["']/.test(command)) problems.push('外层引号');
+  if (/\n/.test(command)) problems.push('拆成了多行');
+  // 命令不是以 bin/17dz plan 开头却含着它：前后加了别的内容（"请提交这个计划：…谢谢"）
+  if (!/^\s*(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(command)) problems.push('前后有多余内容');
+  const detail = problems.length > 0 ? `（检测到：${problems.join('、')}）` : '';
+  return `命令里有 bin/17dz plan 但不符合提交形状${detail}。方案必须作为 bash 工具的单行原始命令提交：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行里，前后不要加别的内容。`;
+}
+
 /** Parse the worker's intercepted `bin/17dz plan { ... }` JSON command. */
 export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; userConfirmed?: boolean } | null {
   // 先剥模型包装（代码围栏/外层引号）再按原协议解析：JSON 允许多行，现有正则的
   // `[\s\S]+` 本就接得住多行 body，这里只是让围栏版命令能走到它面前。
-  const match = stripCommandWrapping(command).match(/^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s+([\s\S]+))?$/);
-  if (!match) return null;
-  let body: unknown;
-  try { body = JSON.parse(match[1] ?? ''); } catch { throw new Error('plan 命令只接受由宿主截获的 JSON calls 方案；不得直接调用 evaluate/activate。'); }
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('计划 JSON 顶层必须是对象。');
-  const value = body as Record<string, unknown>;
+  const normalized = stripCommandWrapping(command.trim());
+  const match = normalized.match(/^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s+([\s\S]+))?$/);
+  if (!match) {
+    // 三态分辨，不能一律返回 null：
+    //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
+    //   ② 有令牌却匹配不上协议形状 → 这是解析错误，必须响亮抛出。
+    // 此前②也返回 null，控制流落进 serve-gate 的 plan 拒绝分支，门的理由是
+    // "计划管理命令由宿主控制"——用权限话术答复格式问题，worker 收到的答非所问，
+    // 无从自愈（真实平台实测：被误导到把方案 JSON 打印成助手文本，12 步全空转）。
+    // throw 在 beforeToolCall 里变成 PLAN DECLINED：<可行动消息>——正确的诊断
+    // 本身就是自愈通道：说清形状哪里不对、正确形状长什么样，worker 下一轮就能改。
+    if (/(?:^|[\s:：，,。.、；;！!？?])(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(normalized)) {
+      throw new Error(describePlanShapeProblem(normalized));
+    }
+    return null;
+  }
+  const body = match[1] ?? '';
+  const subcommand = body.trim().split(/\s+/)[0] ?? '';
+  if (PLAN_SUBCOMMANDS.includes(subcommand)) {
+    throw new Error(`plan ${subcommand} 由宿主调用，worker 不得直接调用 evaluate/activate；只提交 JSON calls 方案——单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}`);
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); }
+  catch (error) {
+    // JSON 坏了要说 JSON 哪坏了：带解析器原文（截断）+ 正确形状。旧消息只说
+    // "不得直接调用 evaluate/activate"——那是隔壁问题的答案，答非所问。
+    const reason = (error instanceof Error ? error.message : String(error)).slice(0, 120);
+    throw new Error(`计划 JSON 解析失败：${reason}。方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放进行命，不要代码块/引号/多行拆分。`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('计划 JSON 顶层必须是对象。');
+  const value = parsed as Record<string, unknown>;
   if (!Array.isArray(value.calls)) throw new Error('计划必须声明精确 calls 数组。');
   const calls = value.calls.map((raw, index) => {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`计划 calls[${index}] 必须是对象。`);

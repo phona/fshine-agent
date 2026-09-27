@@ -47,10 +47,18 @@ describe('platform-backed execution plan runtime', () => {
     });
   });
 
-  it('围栏剥得掉但 JSON 残缺：协议校验照旧 throw，不放宽', () => {
-    expect(() => parsePlanCallsCommand('```json\nbin/17dz plan {"calls":[\n```')).toThrow('JSON calls 方案');
+  it('围栏剥得掉但 JSON 残缺：解析错误带真实原因与正确形状，不放宽', () => {
+    expect(() => parsePlanCallsCommand('```json\nbin/17dz plan {"calls":[\n```')).toThrow(/计划 JSON 解析失败：.*Unexpected end of JSON/);
     // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
     expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
+  });
+
+  it('有 plan 令牌但形状不符：抛解析错误（说清形状问题），不再落进门的权限话术', () => {
+    // 前后加了别的内容：剥不掉也匹配不上协议正则——这是格式问题，必须报解析错误
+    expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[]} 谢谢')).toThrow(/不符合提交形状（检测到：/);
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}')).not.toThrow(); // 对照：形状正确不抛
+    // 直接调子命令：仍是"宿主专属"语义（保留关键词），但带上正确形状
+    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow(/不得直接调用 evaluate\/activate/);
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
