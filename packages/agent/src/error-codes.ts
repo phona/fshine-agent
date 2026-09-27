@@ -32,6 +32,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
+import { GATEWAY_INVOCATION } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -51,7 +52,7 @@ interface MessageCodeEntry {
 type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
 
 /** 计划提交的正确形状：形状类错误共用的 correctForm（静态词进表）。 */
-const CORRECT_PLAN_SHAPE = '方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行命令里。';
+const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${GATEWAY_INVOCATION} plan {"goal":"…","calls":[…]}，JSON 原样放在这一行命令里。`;
 
 const TABLE: Record<string, CodeEntry> = {
   // ── 门/计划类：worker 提交方案的形状与范围（PLAN DECLINED 的自愈通道）──
@@ -59,17 +60,17 @@ const TABLE: Record<string, CodeEntry> = {
   // 诊断本身就是自愈通道——真实平台实测里用权限话术答复格式问题，worker 被误导到
   // 把方案 JSON 打印成助手文本，12 步全空转；此后形状错误一律响亮抛出。
   PLAN_SHAPE_PREFIX: {
-    expected: 'bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）',
+    expected: `${GATEWAY_INVOCATION} plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）`,
     correctForm: CORRECT_PLAN_SHAPE,
   },
   PLAN_SHAPE_PAYLOAD: {
-    expected: 'bin/17dz plan 之后紧跟单行 JSON 方案',
+    expected: `${GATEWAY_INVOCATION} plan 之后紧跟单行 JSON 方案`,
     actual: 'plan 之后没有任何内容',
     correctForm: CORRECT_PLAN_SHAPE,
   },
   PLAN_SUBCOMMAND_RESERVED: {
     expected: 'worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用',
-    correctForm: 'bin/17dz plan {"goal":"…","calls":[…]}（单行原始命令）',
+    correctForm: `${GATEWAY_INVOCATION} plan {"goal":"…","calls":[…]}（单行原始命令）`,
   },
   PLAN_JSON_PARSE: {
     expected: '方案是合法 JSON',
@@ -77,11 +78,11 @@ const TABLE: Record<string, CodeEntry> = {
   },
   PLAN_JSON_NOT_OBJECT: {
     expected: '方案 JSON 顶层是对象',
-    correctForm: 'bin/17dz plan {"calls":[…]}（顶层为对象，calls 是数组）',
+    correctForm: `${GATEWAY_INVOCATION} plan {"calls":[…]}（顶层为对象，calls 是数组）`,
   },
   PLAN_CALLS_NOT_ARRAY: {
     expected: '方案声明 calls 数组',
-    correctForm: 'bin/17dz plan {"goal":"…","calls":[…]}',
+    correctForm: `${GATEWAY_INVOCATION} plan {"goal":"…","calls":[…]}`,
   },
   PLAN_CALLS_EMPTY: {
     expected: 'calls 至少包含一个操作',
@@ -187,7 +188,7 @@ const TABLE: Record<string, CodeEntry> = {
 
   // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──
   PLAN_SHAPE_GATE_TEACHING: {
-    text: '计划必须经 bash 工具作为单行原始命令提交：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。',
+    text: `计划必须经 bash 工具作为单行原始命令提交：${GATEWAY_INVOCATION} plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。`,
   },
 };
 

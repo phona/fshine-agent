@@ -1,7 +1,7 @@
 /**
  * 平台操作的人类可读名（label）派生层。
  *
- * 进度帧里的业务措辞只有一个来源：平台公共 CLI `bin/17dz operation list` 的
+ * 进度帧里的业务措辞只有一个来源：平台公共 CLI 的 `operation list` 子命令
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
  * 平台数据，经本模块读进来后只做查表。
  *
@@ -14,7 +14,7 @@
  * 测试因此可以直接塞替身表，不需要真平台。
  */
 import { spawn } from 'node:child_process';
-import path from 'node:path';
+import { gatewayExecPath } from './platform-contract';
 
 /** script → label 查找表。script 与操作名两种写法都收录（命令里两种都合法）。 */
 export type OperationLabels = Map<string, string>;
@@ -56,7 +56,7 @@ export function parseOperationLabels(stdout: string): OperationLabels {
  */
 export function loadOperationLabels(platformRoot?: string): Promise<OperationLabels> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = path.join(platformRoot, 'bin', '17dz');
+  const cli = gatewayExecPath(platformRoot);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (labels: OperationLabels): void => {

@@ -17,7 +17,7 @@ import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
-import { isPlatformAuthError, type SelectionClarification } from './platform-contract';
+import { GATEWAY_INVOCATION, isPlatformAuthError, type SelectionClarification } from './platform-contract';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -104,7 +104,7 @@ export interface SubagentTaskResult {
 
 export type { SubagentNeeds };
 
-/** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关 bin/17dz prepare）。 */
+/** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关的 prepare 子命令）。 */
 export interface PrepareRequest {
   intentId: string;
   accountSet: string;
@@ -690,11 +690,11 @@ function workerSystemPrompt(
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
     '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',
-    '执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——bin/17dz plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数（args 为字符串数组，即命令行原样参数，如 ["--query","某公司全称","--period","202609"]），照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。',
+    `执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——${GATEWAY_INVOCATION} plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数（args 为字符串数组，即命令行原样参数，如 ["--query","某公司全称","--period","202609"]），照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。`,
     // 调用形式纪律（B1-fshine）：平台调用只认网关这一种形状。这里刻意只给占位符——
     // 具体脚本路径以平台 Skill 文档为准，写死任何一条示例都会随平台演进过期，
     // 也会把平台实现细节带进编排层（泄漏 lint 的 FORBIDDEN 名单）。
-    '平台调用必须走网关形式 `bin/17dz query <脚本路径> --<flag> 值`：脚本路径用平台 Skill/operation 文档给出的完整相对路径（带域目录前缀，照文档逐字抄），flag 用 kebab-case 短横线；不要写裸名、驼峰或 `--flag=值` 之类等号变形，也不要绕过网关直调脚本。',
+    `平台调用必须走网关形式 \`${GATEWAY_INVOCATION} query <脚本路径> --<flag> 值\`：脚本路径用平台 Skill/operation 文档给出的完整相对路径（带域目录前缀，照文档逐字抄），flag 用 kebab-case 短横线；不要写裸名、驼峰或 \`--flag=值\` 之类等号变形，也不要绕过网关直调脚本。`,
     ...(turnDeclaration ? [`宿主已核验本轮请求；严格按此执行，不得扩大范围或从其他历史内容补范围：${turnDeclaration.request}`] : []),
     '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',
     scope,

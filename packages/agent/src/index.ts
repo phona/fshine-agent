@@ -85,6 +85,8 @@ export {
   type ConfirmationMatchResult,
 } from './plan-confirmation';
 export {
+  GATEWAY_INVOCATION,
+  gatewayExecPath,
   PLATFORM_OPERATIONS,
   PLATFORM_AUTH_ERROR_CODES,
   parseEnvelope,

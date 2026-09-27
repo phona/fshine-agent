@@ -2,14 +2,14 @@
  * G1：serve worker 原生工具门（fshine 侧，挂在 SDK Agent 的 beforeToolCall）。
  *
  * 四层治理里本门负责 worker 的通用原生工具安全：
- *   - bash 仅允许 bin/17dz（首词规则 + shell 元字符白名单：env 前缀、命令拼接、
+ *   - bash 仅允许网关调用（首词规则 + shell 元字符白名单：env 前缀、命令拼接、
  *     命令替换、重定向均被拒；法域声明无法剥离）
  *   - 平台计划命令只允许 host 管理；活跃计划由平台执行入口逐次校验
  *   - read/ls 限知识面（*.md、*.schema.json、.agents/、docs/）——实现源码不可读；
  *     worker 工具面已无 grep/find，代码扫描失去入口。路径经 workspaceRelPath
  *     规范化后判定（platformRoot 即 worker cwd）：../ 穿越、绝对路径越界、
  *     符号链接逃逸一律拒，子串规则只作兜底
- * 平台侧 G2（bin/17dz 网关）与 G3（serve-policy/withPlatform 守卫）负责执行器裁决。
+ * 平台侧 G2（网关）与 G3（serve-policy/withPlatform 守卫）负责执行器裁决。
  *
  * 已知残余：ls 不带 path 时仅见根目录名，信息量低，放行留痕。
  */
@@ -17,6 +17,7 @@ import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
 import { operationLabel, type OperationLabels } from './operation-labels';
+import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface ServeGateEvent {
   tool: string;
@@ -119,17 +120,28 @@ export function workspaceRelPath(root: string, value: string): string | null {
   }
 }
 
-/** 首词规则：[bash|sh] [路径/]bin/17dz；env 前缀（FOO=bar bin/17dz）天然不匹配 */
+/**
+ * 首词规则（警职执法）：识别"这条 bash 是不是一次平台网关调用"——首 token 须为网关
+ * 可执行文件（可带路径前缀）。模式从配置值 GATEWAY_INVOCATION 构造，不硬编码网关名
+ * （平台改网关名只改 platform-contract.ts 那一处）。env 前缀（FOO=bar …）天然不匹配。
+ */
+const SERVE_CLI_INVOCATION_RE = new RegExp(`(^|/)${GATEWAY_INVOCATION}$`);
+/**
+ * 网关 plan 提交识别（警职执法）：命中即走"教学式拒绝"分支（真形状见 error-codes 的
+ * PLAN_SHAPE_GATE_TEACHING），而非 merely block。模式同样从配置值 GATEWAY_INVOCATION
+ * 构造——与 plan-runtime 的 locatePlanSubmission 共用同一网关名来源，不存在第二份抄写。
+ */
+const SERVE_CLI_PLAN_RE = new RegExp(`(?:^|\\s)(?:[^\\s]+/)?${GATEWAY_INVOCATION}\\s+plan(?:\\s|$)`);
 export function isServeCliInvocation(command: string): boolean {
   const head = splitCommandTokens(command)[0];
   if (!head) return false;
-  return /(^|\/)bin\/17dz$/.test(head);
+  return SERVE_CLI_INVOCATION_RE.test(head);
 }
 
 // 命令拼接/替换/重定向/管道：worker bash 经 shell 执行，放行这些字符等于放行任意命令
 const SHELL_METACHAR_RE = /[;&|<>`$()\n\r]/;
 
-/** 命令含 shell 元字符（; & | < > ` $ ( ) 或换行）→ true。bin/17dz 的合法参数（名称、时间范围、脚本路径、flag）不含这些字符 */
+/** 命令含 shell 元字符（; & | < > ` $ ( ) 或换行）→ true。网关调用的合法参数（名称、时间范围、脚本路径、flag）不含这些字符 */
 export function hasShellMetachars(command: string): boolean {
   return SHELL_METACHAR_RE.test(command);
 }
@@ -144,7 +156,7 @@ export function splitCommandTokens(command: string): string[] {
   return tokens;
 }
 
-/** 从网关调用中提取脚本参数（bin/17dz <mode> <script> …），非查询型返回 null */
+/** 从网关调用中提取脚本参数（网关 <mode> <script> …），非查询型返回 null */
 export function extractGateScript(command: string): string | null {
   const tokens = splitCommandTokens(command);
   if (tokens[1] === 'operation' && tokens[2] === 'run') return tokens[3] ?? null;
@@ -190,7 +202,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
 
   const knowledgeBlock = (value: string): ServeGateVerdict => ({
     block: true,
-    reason: `运行态仅可读知识面（*.md、*.schema.json、.agents/、docs/），不可读实现源码或运行产物（${value}）。需要平台能力时走 bin/17dz 网关`,
+    reason: `运行态仅可读知识面（*.md、*.schema.json、.agents/、docs/），不可读实现源码或运行产物（${value}）。需要平台能力时走 ${GATEWAY_INVOCATION} 网关`,
   });
 
   return (toolCall: ServeGateToolCall): ServeGateVerdict | undefined => {
@@ -205,7 +217,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
     if (name === 'bash') {
       const command = String(args['command'] ?? '').trim();
       detail = command;
-      if (/(?:^|\s)(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(command)) {
+      if (SERVE_CLI_PLAN_RE.test(command)) {
         // 教学而非 merely 拒绝：真实平台实测里旧消息（"只能提交 JSON calls 方案"）
         // 没说怎么提交，worker 被拒后理解成"把 JSON 打印出来"，步步空转。因此这里直接
         // 给出唯一合法形式——bash 工具里的单行原始命令，并点名三种常见错误包装。
@@ -216,9 +228,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
           reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING'),
         };
       } else if (!isServeCliInvocation(command)) {
-        verdict = { block: true, reason: '运行态 bash 仅允许调用 bin/17dz（平台执行器网关）；知识检索用 read 工具' };
+        verdict = { block: true, reason: `运行态 bash 仅允许调用 ${GATEWAY_INVOCATION}（平台执行器网关）；知识检索用 read 工具` };
       } else if (hasShellMetachars(command)) {
-        verdict = { block: true, reason: '命令含 shell 元字符（; & | < > ` $ ( ) 或换行），禁止命令拼接/替换/重定向。多次查询请分多次 bin/17dz 调用' };
+        verdict = { block: true, reason: `命令含 shell 元字符（; & | < > \` $ ( ) 或换行），禁止命令拼接/替换/重定向。多次查询请分多次 ${GATEWAY_INVOCATION} 调用` };
       } else if (!options.planActive?.()) {
         verdict = { block: true, reason: '尚无宿主激活的平台计划；先提交 JSON calls 方案等待宿主评估。' };
       } else {

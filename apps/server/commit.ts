@@ -1,6 +1,6 @@
 /**
  * 服务端落账执行器（两步确认的第二步，②d 默认实现）：
- * 提案通过 capability/账套校验后，由 fshine 服务端直调平台统一网关 bin/17dz——
+ * 提案通过 capability/账套校验后，由 fshine 服务端直调平台统一网关（见 GATEWAY_INVOCATION）——
  * dry-run 预检、--save 落账、verify-saved 读回。全程不经任何模型；
  * commit 以 HMAC 令牌授权（平台 G2/G3 验签），密钥进程内生成、仅经 env 传给子进程。
  * 契约文件由服务端物化到 data/intents/<intentId>/contract.json（worker 零写）。
@@ -10,13 +10,13 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { promisify } from 'node:util';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { parsePrepareOutcome, parseVerifyCount, PLATFORM_OPERATIONS, type CommitRequest, type CommitResult, type PrepareRequest, type PrepareResult } from '@fshine/agent';
+import { gatewayExecPath, parsePrepareOutcome, parseVerifyCount, PLATFORM_OPERATIONS, type CommitRequest, type CommitResult, type PrepareRequest, type PrepareResult } from '@fshine/agent';
 
 const execFileAsync = promisify(execFile);
 const TOKEN_TTL_MS = 10 * 60_000;
 
 export interface CommitRunnerOptions {
-  /** 17dz-platform 仓库根（bin/17dz 统一网关所在）。 */
+  /** 17dz-platform 仓库根（统一网关可执行文件所在，路径由 GATEWAY_INVOCATION 派生）。 */
   platformRoot: string;
   /** HMAC 密钥：进程内生成，仅通过 env 传给 commit 子进程。 */
   gateSecret: string;
@@ -53,8 +53,8 @@ async function runGate(root: string, args: string[], extraEnv: Record<string, st
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
-      // bin/17dz 的 query|prepare|commit 首词即网关兼容壳（gate 语义）；脚本用注册操作名（E1）。
-      [path.join(root, 'bin', '17dz'), ...args],
+      // 网关的 query|prepare|commit 首词即网关兼容壳（gate 语义）；脚本用注册操作名（E1）。
+      [gatewayExecPath(root), ...args],
       { cwd: root, env: { ...process.env, ...extraEnv }, maxBuffer: 4 * 1024 * 1024, timeout: 12 * 60_000 },
     );
     return { code: 0, stdout, stderr };

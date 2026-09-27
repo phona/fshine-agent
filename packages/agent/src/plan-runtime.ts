@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { errorFor } from './error-codes';
+import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -231,14 +232,14 @@ export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePl
 /** 计划管理子命令：worker 不得直达，只由宿主调用。 */
 const PLAN_SUBCOMMANDS = ['evaluate', 'activate', 'current', 'status'];
 
-/** `bin/17dz plan` 之前允许出现的内容：空 / bash|sh / 路径前缀，以及 bash|sh + 路径前缀。 */
+/** 网关 plan 之前允许出现的内容：空 / bash|sh / 路径前缀，以及 bash|sh + 路径前缀。 */
 const ALLOWED_PLAN_PREFIX_RE = /^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?$/;
 
 /** 报错里回显"多出来的内容"时的截断长度：够模型认出自己加了什么，又不把消息撑爆。 */
 const EXTRA_PREFIX_MAX_CHARS = 120;
 
 /**
- * 在命令里结构定位 `bin/17dz plan` 令牌：返回 bin/17dz 之前的原始前缀与 plan 之后的 payload。
+ * 在命令里结构定位网关 plan 令牌：返回网关名之前的原始前缀与 plan 之后的 payload。
  * 找不到该令牌返回 null（真不是计划命令）。
  *
  * 为什么用定位而不是一条大正则 + 症状嗅探：宿主只保证两件事——错误永远诚实可行动、
@@ -252,11 +253,11 @@ const EXTRA_PREFIX_MAX_CHARS = 120;
 function locatePlanSubmission(command: string): { prefix: string; payload: string } | null {
   let from = 0;
   for (;;) {
-    const at = command.indexOf('bin/17dz', from);
+    const at = command.indexOf(GATEWAY_INVOCATION, from);
     if (at < 0) return null;
-    from = at + 'bin/17dz'.length;
-    // 该 bin/17dz 必须紧跟 plan 子命令（空白分隔，且 plan 自身是一个完整令牌）才算计划提交；
-    // 否则只是别处提到了 bin/17dz（如 bin/17dz query），继续找下一个位置。
+    from = at + GATEWAY_INVOCATION.length;
+    // 该网关名必须紧跟 plan 子命令（空白分隔，且 plan 自身是一个完整令牌）才算计划提交；
+    // 否则只是别处提到了网关（如网关 query），继续找下一个位置。
     const plan = /^\s+plan(?=\s|$)/.exec(command.slice(from));
     if (!plan) continue;
     return { prefix: command.slice(0, at), payload: command.slice(from + plan[0].length).trim() };
@@ -268,7 +269,7 @@ function collapseExtra(text: string): string {
   return text.trim().replace(/\s+/g, ' ').slice(0, EXTRA_PREFIX_MAX_CHARS);
 }
 
-/** Parse the worker's intercepted `bin/17dz plan { ... }` JSON command. */
+/** Parse the worker's intercepted gateway `plan { ... }` JSON command. */
 export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; userConfirmed?: boolean } | null {
   const trimmed = command.trim();
   // 三态分辨，不能一律返回 null：

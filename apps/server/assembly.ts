@@ -80,7 +80,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   }
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
-  // dry-run/commit 都受平台 bin/17dz 网关与 serve-policy 守卫的矩阵裁决。
+  // dry-run/commit 都受平台网关与 serve-policy 守卫的矩阵裁决。
   env.DZ_SERVE = '1';
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效。DZ_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。

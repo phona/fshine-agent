@@ -23,7 +23,7 @@ import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationLabels, type OperationLabels } from './operation-labels';
 import { messageFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
-import { parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
+import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
 /**
@@ -259,9 +259,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         turnDeclaration: input.turnDeclaration,
         entitySources: input.entitySources,
       });
-      const footprint = (): string => `${gateCalls} 次 bin/17dz 调用`;
+      const footprint = (): string => `${gateCalls} 次 ${GATEWAY_INVOCATION} 调用`;
       // Host-verifiable proof that this delegated turn really executed against the platform.
-      // 判据只有一条：至少一次被放行的 bin/17dz 调用（gateCalls > 0）。
+      // 判据只有一条：至少一次被放行的网关调用（gateCalls > 0）。
       //
       // 为什么 gateCalls > 0 即充分、不再要求"结果时刻计划仍激活"：G1 门对 bash 的放行
       // 分支以 planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），因此每一个
@@ -460,7 +460,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
     }) as never],
   });
-  // G1 工具门：首条 bash 须为 bin/17dz plan（方案定价+预算），bash 仅许 bin/17dz，
+  // G1 工具门：首条 bash 须为网关 plan（方案定价+预算），bash 仅许网关调用，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
   // label 表（平台清单第 5 列）在此传入：放行的平台调用才有人类可读进度帧。
   const gate = createServeGate({

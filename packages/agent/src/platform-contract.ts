@@ -8,6 +8,26 @@
  * 两类码级判定收口在这里：登录态失败（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
  * （SELECTION_CLARIFICATION_CODES）——码是数据，消息文案不是，平台演进只改集合不改编排层。
  */
+import path from 'node:path';
+
+/**
+ * L2（跨仓协议单一来源）：平台网关的调用形式（相对平台根目录）。
+ *
+ * 这是宿主侧**唯一**允许出现网关名字面量的地方——即"配置缺省值"：网关可执行文件
+ * 固定在平台仓 bin/ 下，名字与 config/agent.yaml 的 contextProfiles['17dz'] profile id
+ * 一致；其绝对路径 = platformRoot（来自该 profile 的 root）+ 本常量（见 gatewayExecPath）。
+ * worker 的 cwd 即 platformRoot，故命令与消息里出现的都是本相对形式。
+ *
+ * 消息文本（error-codes 的 correctForm、worker 提示词、门的拒绝理由）与警职解析器
+ * （plan 令牌定位、serve CLI 首词/拦截正则）全部从这里取值构造，不各自硬编码——平台若
+ * 改名/迁移网关，只改这一处。泄漏 lint 把网关名字面量的预算压到只剩本常量这一处。
+ */
+export const GATEWAY_INVOCATION = 'bin/17dz';
+
+/** 网关可执行文件的绝对路径 = platformRoot + GATEWAY_INVOCATION（供 spawn 用，配置派生）。 */
+export function gatewayExecPath(platformRoot: string): string {
+  return path.join(platformRoot, ...GATEWAY_INVOCATION.split('/'));
+}
 
 export const PLATFORM_OPERATIONS = {
   financeSearchAccountSets: 'finance.search-account-sets',
