@@ -844,3 +844,37 @@
 | operations.json args 规格 + 三方机械锁 / not_found 带 query / 错误信封带 correctForm / orchestrator SKILL 两节 / 17dz 测试出向自封 | **已关** | 均为 Wave 1 Lane B 交付（bb03f03..6ac62e1）：24 operation/45 flag/41 位置参数，三方锁+style↺吃值锁；四种信封 correctForm + not_found query；SKILL 删旧形状教程改引用；裸 `npm test` 不再需手工 unset |
 
 **仍未关（Wave 2+ 认领）**：D-011 残留的宿主教学收敛、D-010/D-015/D-016/D-021/D-055（半成品迁移五条）、D-012~D-014/D-017/D-065（双真相复刻五条）、D-022（注释不符）、D-052/D-006/D-061 之外的测试钉错三条、D-063/D-020/D-062 之外的无测试新路径、D-004/D-005/D-064（守卫洞三条）、P2 结构化事实、F4 残留、ask.ts 复刻、FSHINE_* 退役、§17 七项（归 Wave 3）、Tier-1 打分器（Wave 4）。
+
+---
+
+## Wave 2 关账记录（2026-09-27，主 agent 验收后登记）
+
+**Lane D（fshine，6 commits：9123e63/d0d13f8/09eb696/bf0a6d9/df3a6b7/4e39ec4，62 文件 617 例两环境全绿）**
+
+| 条目 | 状态 | 关账证据 |
+|---|---|---|
+| D-012（KEY_ARG_FLAGS 镜像） | **已关** | 硬编码表删除，`describeKeyArgs` 查平台 `operation list --json` 的 args 规格（name/code 样式从数据来）；无规格→不发摘要（安全缺省）；grep：KEY_ARG_FLAGS 在 src 零命中 |
+| D-011（plan 教学 6 处副本） | **已关** | `planDraftExample()` 唯一教学源（与平台 plan-schema.json 一致：goal 是声明过的可选元数据），error-codes 5 处+worker 提示词全部派生；`plan-teaching.test.ts` 跨仓机械锁（形态合法+解析器认同一形状+源文件零第二种字面量）。判据修订登记：原"grep goal→0"作废（schema 收编 goal 后教学合法含 goal） |
+| D-013（ask.ts 复刻装配层） | **已关** | `createPlanConfirmationWiring` 工厂收编 assembly/ask.ts，TTL 单处 |
+| D-014（workerTimeoutMs 五处） | **已关** | `turnBudgetMsFor` 收编公式 |
+| D-020（F4 残留） | **已关** | `looksLikeProtocolMaterial` 复读检测不依赖 execution（有执行也拦），顺带盖上 `{"recorded":"conversation"}` 回显泄漏；守夜事件 `execution_language_leak`。判据修订登记：未采纳全量指纹硬拦（误伤合法数据答案），用协议 JSON 首字段精确子集 |
+| D-021（notice 无声截断） | **已关** | notice 路径换 `truncateReply`（截断带标记）+ 守夜事件 |
+| D-022（注释写 2048） | **已关** | 改 20480 实情 |
+| D-055（技能复活路径） | **已关** | 模板 skillRoots 改运行态技能面 + config 机械锁 |
+| D-063（装配接线无测试） | **已关** | wiring 测试（真工厂+真 SQLite+假平台 CLI，含 superseded 路径）；变异锁随 D-013 迁移 |
+| D-004（lint 范围缺 apps/） | **已关** | 业务词预算扩到 apps/（scripts 显式排除），存量命中逐条四标签归类 |
+| D-005（伪装形抓不到） | **已关** | 词表 6→15 + 同义改写对照表（时间范围→期间/记录档案→凭证/摸底→域操作）；存量归类；D-006 按闭环判据挂"显式接受的夹具数据"决策 |
+| D-017（三 FSHINE_* 名不在禁绝集） | **已关** | 进 lint 登记锁（挂遗留待清） |
+| D-065（P2 结构化事实） | **已关（带已知边界）** | platform_tasks +6 字段 + listBySession（SQLite 前向迁移）；填充点全是委派时确定性信息（calls 来自宿主解析的计划命令、accountSet/period 按平台规格声明名机械提取、label 取平台清单）；execution-facts 渲染结构化条目（原文仍附后保数值）。**已知边界**：`--query` 检索词不当 accountSet（finance 账套常留空）、计划模式跨步只保留末次 calls 快照、旧记录降级原文 |
+| 宿主错误镜像表 | **已退化为渲染层** | NOT_FOUND_SELECTION 拆为结构+`{hint}`，hint 优先取信封 correctForm（平台数据），宿主兜底挂"遗留待清"；AMBIGUOUS_SELECTION 刻意不消费 correctForm（平台给的是解析方规则不上屏——代码注释与台账均记明此判断） |
+
+**17dz 并行小 lane（4 commits：bc498f8/8f78a7f/824cddd/0da1d29，27 文件 ALL PASS）**
+
+| 条目 | 状态 | 关账证据 |
+|---|---|---|
+| D-064（错误码登域文档） | **半关** | 五码按消费点归属登记（ voucher MECHANISMS×3 / lib README×2）+ 登记机械锁（两面：码在表里文档无解释→红；文档复述三要素全文→红）。**残留**：TABLE 还有 5 码未登任何域文档（AUTH_REDIRECTED_TO_LOGIN/AUTH_WORKBENCH_NOT_READY/AUTH_UNKNOWN/PLAN_CALLS_NOT_ARRAY/PLAN_FIELD_TYPE）——已在锁注释里写明范围，建议后续 lane 单列 |
+| D-015（mock fill flag 手抄） | **已关** | 纳入三方机械锁（mock 集合 == operations.json 规格 == 源码派生），覆盖 respond.js 全部 7 键，按目标脚本归组钉死"别把 voucher flag 安到 finance operation"；4 向变异全红 |
+| D-016（FSHINE_* 退役） | **半关（写入侧已拆）** | 全仓+跨仓核查：读点只剩 dz-env 回退、写点只剩平台自己→写入侧安全移除（setServe 只写 DZ_SERVE、gateway 只铸 DZ_INVOCATION），5 条写入面锁；读取侧宽判定保留（旧宿主构建兼容）。退役计划写实进 dz-env 头：条件=两条机器可验事件（宿主 grep 零命中——已被宿主 lint 机械兜住；平台侧只剩回退）+ **时间锚点 2026-10-27 复核，不许无限期续期** |
+| plan schema 暴露 | **已关** | `bin/17dz plan --schema` 逐字打印 schema 文件（md5 一致，cwd 无关）；三层测试（进程内两种写法+真实 spawn）；宿主 SKILL 的空头教导（指向宿主读不到的文件路径）已改为指向 CLI 出口 |
+
+**仍未关（Wave 3+ 认领）**：D-010（网关名历史增长，已随 Lane C 收敛关闭其未来面）、D-064 残留 5 码、D-016 读取侧回退（2026-10-27 锚点）、半成品迁移其余四条（D-015/D-016/D-021/D-055 已关，D-010 部分）、双真相复刻其余（D-012/D-013/D-014/D-017 已关，D-065 已关）、D-022 已关、P2 已知边界（ finance 账套留空）、§17 七项（Wave 3）、Tier-1 打分器（Wave 4）。
