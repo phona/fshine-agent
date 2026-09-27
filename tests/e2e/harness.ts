@@ -83,6 +83,11 @@ beforeAll(() => {
     LLM_API_BASE_URL: 'http://127.0.0.1:9',
     LLM_API_KEY: 'unused-in-offline-harness',
     LLM_MODEL: 'unused',
+    // 入向密封：WecomBotChannel.start() 硬性要求 WECOM_BOT_ID/SECRET 非空，否则抛错、
+    // boot() 失败——17 个 turn-loop 文件全红。这里装确定性假凭据；channel 已注入假 SDK
+    // client（channelClientFactory），绝不真连企微。无凭据环境（env -u）因此可复现。
+    WECOM_BOT_ID: 'e2e-bot-id-offline',
+    WECOM_BOT_SECRET: 'e2e-bot-secret-offline',
   });
 });
 
