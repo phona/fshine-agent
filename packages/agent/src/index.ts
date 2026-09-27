@@ -92,8 +92,13 @@ export {
   parseVerifyCount,
   isPlatformAuthError,
   platformErrorCodeOf,
+  SELECTION_CLARIFICATION_CODES,
+  selectionClarificationOf,
+  selectionClarificationFromResponses,
+  textFromContent,
   type PlatformEnvelope,
   type PrepareOutcome,
+  type SelectionClarification,
 } from './platform-contract';
 export * from './session';
 export {
@@ -126,10 +131,13 @@ export {
   ACTIVATED_PLAN_NOT_EXECUTED,
   NO_EXECUTION_CLARIFICATION,
   RESUMED_PLAN_NOT_EXECUTED,
+  EXECUTION_LANGUAGE_FINGERPRINTS,
+  executionLanguageFingerprints,
   type TaxAgentRuntimeDeps,
 } from './runtime';
 export {
   UNKNOWN_ERROR_CODE,
+  clarificationTextFor,
   errorFor,
   has,
   messageFor,

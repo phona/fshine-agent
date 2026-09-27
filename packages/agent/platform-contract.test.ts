@@ -8,9 +8,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   PLATFORM_AUTH_ERROR_CODES,
+  SELECTION_CLARIFICATION_CODES,
   isPlatformAuthError,
   parseEnvelope,
   platformErrorCodeOf,
+  selectionClarificationFromResponses,
+  selectionClarificationOf,
 } from './src/platform-contract';
 
 describe('平台登录态错误码集合（唯一适配层）', () => {
@@ -49,5 +52,68 @@ describe('平台登录态错误码集合（唯一适配层）', () => {
     const envelope = parseEnvelope('RESULT {"v":1,"op":"finance.query-receivables","status":"failed","data":null,"error":{"code":"AUTH_EXPIRED","message":"…"}}');
     expect(envelope?.error?.code).toBe('AUTH_EXPIRED');
     expect(isPlatformAuthError(envelope?.error)).toBe(true);
+  });
+});
+
+// ── 选择类澄清提取（2026-09-27 Stage 3 事故根治包，任务 1）────────────────────
+//
+// 为什么由宿主持有：模型是执行语言与用户语言之间唯一的翻译器，压力下翻译退化，脚本路径/
+// 错误码/门的规则就漏进最终回复（实测：一次结构化歧义被翻译成 1201 字符技术报告）。
+// 提取因此只认契约数据（码 + status + data.candidates[].name），候选名只取平台返回的。
+
+/** 一条 tool_result 消息（原生形状的最小构造：role + content 分段）。 */
+function toolResult(text: string): { role: string; content: Array<{ type: 'text'; text: string }> } {
+  return { role: 'toolResult', content: [{ type: 'text', text }] };
+}
+
+const AMBIGUOUS_ENVELOPE = 'RESULT {"v":1,"op":"finance.search-account-sets","status":"needs_input","data":{"query":"幻辰","candidates":[{"name":"幻辰财税"},{"name":"幻辰实业有限公司"}],"exactMatch":false},"error":{"code":"ACCOUNT_SET_AMBIGUOUS","message":"命中多个候选：幻辰财税、幻辰实业有限公司"}}';
+const NOT_FOUND_ENVELOPE = 'RESULT {"v":1,"op":"finance.search-account-sets","status":"not_found","data":{"query":"胜利","candidates":[],"exactMatch":false},"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"未命中任何账套"}}';
+
+describe('选择类澄清提取（唯一信封适配层）', () => {
+  it('歧义信封 → {code, query, candidates}，候选名只取平台返回的', () => {
+    expect(selectionClarificationOf(parseEnvelope(AMBIGUOUS_ENVELOPE))).toEqual({
+      code: 'ACCOUNT_SET_AMBIGUOUS',
+      query: '幻辰',
+      candidates: ['幻辰财税', '幻辰实业有限公司'],
+    });
+  });
+
+  it('未找到信封 → 同一形状，候选为空数组（不是 undefined）', () => {
+    expect(selectionClarificationOf(parseEnvelope(NOT_FOUND_ENVELOPE))).toEqual({
+      code: 'ACCOUNT_SET_NOT_FOUND',
+      query: '胜利',
+      candidates: [],
+    });
+  });
+
+  it('从 tool_result 提取：本回合最后一条带信封的平台响应决定收尾状态', () => {
+    expect(selectionClarificationFromResponses([
+      toolResult('stdout noise\n' + AMBIGUOUS_ENVELOPE),
+    ])).toEqual({ code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] });
+    // 早先歧义之后重查成功（completed）：收尾状态是数据答案，不能被旧信封劫持成澄清问句
+    expect(selectionClarificationFromResponses([
+      toolResult(AMBIGUOUS_ENVELOPE),
+      toolResult('RESULT {"v":1,"op":"finance.query-receivables","status":"completed","data":{"query":"幻辰财税"},"error":null}'),
+    ])).toBeUndefined();
+  });
+
+  it('其他状态一律 undefined：completed 数据答案 / 其他错误码 / 没有信封 / 空转录', () => {
+    // 同一选择类码但 status 不是选择类（契约矛盾）→ 不认
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"failed","data":{"query":"幻辰","candidates":[{"name":"幻辰财税"}]},"error":{"code":"ACCOUNT_SET_AMBIGUOUS","message":"…"}}'))).toBeUndefined();
+    // 登录态/输入不足类码不是选择类（各有既有路径）
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"failed","data":null,"error":{"code":"AUTH_EXPIRED","message":"…"}}'))).toBeUndefined();
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"failed","data":null,"error":{"code":"INVALID_PERIOD","message":"…"}}'))).toBeUndefined();
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"needs_input","data":{"customer":"猫一杯","candidates":[{"name":"某客户"}]},"error":{"code":"ASSISTANT_AMBIGUOUS","message":"…"}}'))).toBeUndefined();
+    // 数据完整性前置：信封没带 query（query-receivables 的 not_found 分支 data 为 null）时
+    // 组装不出"没有找到匹配X的对象"，宁可不挂——行为零变化，不出指代不清的占位问句
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"finance.query-receivables","status":"not_found","data":null,"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"…"}}'))).toBeUndefined();
+    // 没有信封（worker 自由文本）、没有 data、空消息列表 → 全部 undefined
+    expect(selectionClarificationFromResponses([toolResult('子 Agent：平台说匹配到多个候选，请选择')])).toBeUndefined();
+    expect(selectionClarificationFromResponses([])).toBeUndefined();
+    expect(selectionClarificationOf(null)).toBeUndefined();
+  });
+
+  it('码集合可扩：先登记这两个，新增选择类模式往集合里加码', () => {
+    expect([...SELECTION_CLARIFICATION_CODES].sort()).toEqual(['ACCOUNT_SET_AMBIGUOUS', 'ACCOUNT_SET_NOT_FOUND']);
   });
 });

@@ -3,8 +3,8 @@ import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
-import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './src/runtime';
-import { toolUserErrorFor } from './src/error-codes';
+import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints } from './src/runtime';
+import { clarificationTextFor, toolUserErrorFor } from './src/error-codes';
 import { DELEGATION_AUTH_FAILURE } from './src/context';
 import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
 import type { PlanEntitySources } from './src/turn-contract';
@@ -1586,5 +1586,134 @@ describe('createTaxAgentRuntime', () => {
       turnBudgetMs: -1,
     });
     expect((await runtime.handleTurn(makeCtx(), '查一下')).text).toBe(FALLBACK_TIMEOUT);
+  });
+
+  // ── 结构化歧义/未找到 → 宿主机械组装澄清（2026-09-27 Stage 3 事故根治包）────
+  // 事故形状：worker 真调了平台（execution 为真）拿到 ACCOUNT_SET_AMBIGUOUS，却把信封
+  // 翻译成 1201 字符技术报告（脚本路径 + 错误码 + 门的规则引述全上屏）。行为全对、呈现
+  // 全错。修法：宿主持信封数据机械组装澄清问题，模型不为"状态转换"发音。
+
+  /** 事故里的技术报告：执行语言指纹齐全，正是绝不允许上屏的那一份。 */
+  const AMBIGUOUS_TECH_REPORT = '平台返回 ACCOUNT_SET_AMBIGUOUS，candidates: [幻辰财税, 幻辰实业有限公司]。依据 src/finance/scripts/query-receivables.js 的门的规则，实体参数必须逐字来自…';
+  const QIANLONG_CLARIFICATION = { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] };
+
+  it('S1 结构化歧义 → 宿主机械组装澄清问题；技术报告（模型文本）不上屏', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 事故形状：目录搜索这类调用真的发生过（execution 为真），但平台请用户"选一个"
+      platformTask: subagent(async () => ({
+        taskId: 'task_ambiguous',
+        text: AMBIGUOUS_TECH_REPORT,
+        execution: { planId: 'plan_active', version: 2, calls: 1 },
+        clarification: QIANLONG_CLARIFICATION,
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_ambiguous' }), '查一下幻辰的应收账款');
+
+    expect(reply.text).toBe(clarificationTextFor(QIANLONG_CLARIFICATION.code, QIANLONG_CLARIFICATION));
+    expect(reply.text).toContain('幻辰财税');
+    expect(reply.text).toContain('你要查哪个');
+    // 执行语言绝迹：脚本路径 / 错误码 / JSON 片段一个都不能出现
+    expect(executionLanguageFingerprints(reply.text)).toEqual([]);
+    expect(reply.text).not.toContain('不应外发');
+  });
+
+  it('S2 not_found 同样走宿主组装：给出"没有找到"与请用户确认准确名称', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查账套目录里有没有胜利' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_not_found',
+        text: AMBIGUOUS_TECH_REPORT,
+        execution: { planId: 'plan_active', version: 1, calls: 1 },
+        clarification: { code: 'ACCOUNT_SET_NOT_FOUND', query: '胜利', candidates: [] },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_not_found' }), '看看有没有胜利这个帐套');
+
+    expect(reply.text).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '胜利', candidates: [] }));
+    expect(executionLanguageFingerprints(reply.text)).toEqual([]);
+  });
+
+  it('S3 worker 留下干净说明时才附后；带执行语言指纹的"说明"是协议材料，不附', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_ambiguous',
+        text: '这一轮没有查到数据，等您确认账套后我再查。',
+        execution: { planId: 'plan_active', version: 2, calls: 1 },
+        clarification: QIANLONG_CLARIFICATION,
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_ambiguous_note' }), '查一下幻辰的应收账款');
+
+    expect(reply.text).toBe(`${clarificationTextFor(QIANLONG_CLARIFICATION.code, QIANLONG_CLARIFICATION)}\n\n这一轮没有查到数据，等您确认账套后我再查。`);
+  });
+
+  it('S4 没有 clarification 时行为零变化：数据答案照常上屏', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_done',
+        text: '幻辰财税 202609 应收余额为 51 元。',
+        execution: { planId: 'plan_active', version: 1, calls: 1 },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_no_clarification' }), '查一下幻辰财税的应收账款');
+
+    expect(reply.text).toBe('幻辰财税 202609 应收余额为 51 元。');
+  });
+
+  it('S5 计划模式某步带 clarification → 停止后续步骤，澄清问题成为本轮回复', async () => {
+    const dispatched: string[] = [];
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      // 第二步本会被派出去；澄清终止回合后它不该发生
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+      { text: '汇总：两步都查完了。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        dispatched.push(args.request);
+        return {
+          taskId: 'task_plan_step',
+          text: AMBIGUOUS_TECH_REPORT,
+          execution: { planId: 'plan_active', version: 1, calls: 1 },
+          clarification: QIANLONG_CLARIFICATION,
+        };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_plan_clarification' }), '查幻辰和新兴五金的应收账款');
+
+    expect(reply.text).toBe(clarificationTextFor(QIANLONG_CLARIFICATION.code, QIANLONG_CLARIFICATION));
+    // 用户要先回答"查哪个"：后续步骤不再派发
+    expect(dispatched).toEqual(['查询幻辰的应收账款']);
+    expect(executionLanguageFingerprints(reply.text)).toEqual([]);
   });
 });

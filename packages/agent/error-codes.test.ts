@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   UNKNOWN_ERROR_CODE,
+  clarificationTextFor,
   errorFor,
   has,
   messageFor,
@@ -17,6 +18,7 @@ import {
   toolUserErrorFor,
 } from './src/error-codes';
 import { ToolUserError } from './src/driver';
+import { SELECTION_CLARIFICATION_CODES } from './src/platform-contract';
 import {
   DELEGATION_AUTH_FAILURE,
   DELEGATION_CANCELLED,
@@ -103,5 +105,62 @@ describe('fshine 错误码表（错误即数据）', () => {
     for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING']) {
       expect(messageFor(code), code).not.toMatch(business);
     }
+  });
+});
+
+// ── 选择类澄清模板（2026-09-27 Stage 3 事故根治包，任务 1 渲染层）──────────────
+//
+// 宿主持信封数据机械组装澄清问题，模型不当翻译器。模板零业务词（候选名是数据不是措辞），
+// 领域换了域一个字都不用改——泄漏 lint 的业务词预算守这一条。
+
+describe('选择类澄清消息模板（宿主机械组装，模型不翻译）', () => {
+  it('两条模板已登记，且与平台选择类码集合一一对应（漏登记任何一侧都会红）', () => {
+    expect(has('AMBIGUOUS_SELECTION')).toBe(true);
+    expect(has('NOT_FOUND_SELECTION')).toBe(true);
+    // 平台侧码集合 ↔ 本表模板：两边必须覆盖同一批码（测试即那条"唯一的一条线"的锁）
+    for (const code of SELECTION_CLARIFICATION_CODES) {
+      expect(() => clarificationTextFor(code, { query: '某关键词', candidates: ['某候选'] }), code).not.toThrow();
+    }
+    // 不在集合内的码 fail-loud：绝不静默 fallback 到通用问句
+    expect(() => clarificationTextFor('ASSISTANT_AMBIGUOUS', { query: 'x', candidates: ['y'] })).toThrow(UNKNOWN_ERROR_CODE);
+  });
+
+  it('两条模板措辞零业务词（候选名是数据，不是措辞）', () => {
+    const business = /应收|凭证|科目|账套|期间|目录/u;
+    // 业务词只放进候选名：模板本体仍然干净（泄漏 lint 同款预算）
+    expect(clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '某关键词', candidates: ['幻辰财税'] })).not.toMatch(business);
+    expect(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '某关键词', candidates: [] })).not.toMatch(business);
+  });
+
+  it('歧义模板：候选 1 个 / 多个 / 超长截断，查询词与序号原样进消息', () => {
+    expect(clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '幻辰', candidates: ['幻辰财税'] }))
+      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税你要查哪个？告诉我名称或序号即可。');
+    expect(clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] }))
+      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰实业有限公司你要查哪个？告诉我名称或序号即可。');
+    // 超长截断：超过 8 个候选只列前 8 个并说明总数（澄清问题不是目录页）
+    const many = Array.from({ length: 12 }, (_, i) => `候选${i + 1}`);
+    const rendered = clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '某词', candidates: many });
+    expect(rendered).toContain('平台上有 12 个名字相近的');
+    expect(rendered).toContain('8. 候选8');
+    expect(rendered).not.toContain('9. 候选9');
+    expect(rendered).toContain('…等 12 个');
+    // 单个超长候选名按数据卫生截断，不撑爆消息
+    const long = clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '某词', candidates: ['x'.repeat(60)] });
+    expect(long).toContain(`1. ${'x'.repeat(40)}…`);
+  });
+
+  it('未找到模板：只要查询词，候选为空也渲染（没有"平台上有"段）', () => {
+    expect(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '胜利', candidates: [] }))
+      .toBe('没有找到匹配“胜利”的对象。请确认准确名称（或编号/税号）后我再查。');
+  });
+
+  it('查询词缺失时用领域无关的占位（信封没给 query 也不出裸引号）', () => {
+    expect(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '  ', candidates: [] }))
+      .toContain('没有找到匹配“您指定的对象”的对象');
+  });
+
+  it('误用 fail-loud：未登记的码（含 fshine 自己的错误类码）走不了澄清渲染', () => {
+    expect(() => clarificationTextFor('TASK_NOT_FOUND', { query: 'x', candidates: [] })).toThrow(UNKNOWN_ERROR_CODE);
+    expect(() => clarificationTextFor('TOTALLY_NEW_CODE', { query: 'x', candidates: [] })).toThrow(UNKNOWN_ERROR_CODE);
   });
 });

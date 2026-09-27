@@ -23,7 +23,7 @@ import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationLabels, type OperationLabels } from './operation-labels';
 import { messageFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
-import { parseEnvelope } from './platform-contract';
+import { parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
 /**
@@ -290,10 +290,26 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         if (execution()) return undefined;
         return needsClue() ?? needsFromPlatformResponses(session.agent.state.messages) ?? undefined;
       };
-
       // TaskStore remains the source of truth.  Restore its transcript into
       // the SDK Agent rather than persisting a second session file in 17dz.
       session.agent.state.messages = input.messages;
+      // 本回合新增消息的起点（之后只增不减）：选择类状态只在本回合的平台交互里找——
+      // 上一回合遗留的信封不能越权替这一回合提问（早先歧义、用户补全后重查成功的回合
+      // 绝不能被旧信封劫持成澄清问句）。
+      const initialMessageCount = session.agent.state.messages.length;
+      // 结构化歧义/未找到（Stage 3 事故根治包）：本回合的平台交互以"选择类"状态收尾时，
+      // 把信封事实挂上结果，由宿主机械组装澄清问题——模型是执行语言与用户语言之间唯一的
+      // 翻译器，压力下翻译退化，脚本路径/错误码/门的规则就漏进最终回复（2026-09-27 实测：
+      // 1201 字符技术报告）。发音权因此收归宿主：模型只为"数据答案"发声。
+      //
+      // 判据是**收尾状态**而不是"有没有调用"：目录搜索这类调用真的发生过（gateCalls > 0、
+      // execution 为真），但它返回的是"请用户选一个"而不是数据答案。若按"无 execution"
+      // 设闸门，实测事故形状（一次 search 调用拿到 ACCOUNT_SET_AMBIGUOUS / NOT_FOUND）
+      // 会完全漏装，技术报告照样上屏——那就不是根治。反过来，收尾信封是 completed
+      // （数据答案）或其他错误码时一律不挂：那类回合的模型文本是数据答案或既有失败路径，
+      // 行为零变化。needs 的闸门保持不变（它产的是"缺什么"，不是"选哪个"）。
+      const clarification = (): SelectionClarification | undefined =>
+        selectionClarificationFromResponses(session.agent.state.messages.slice(initialMessageCount));
       const remaining = input.deadline - Date.now();
       if (remaining <= 0) {
         const messages = session.agent.state.messages;
@@ -356,6 +372,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const proof = execution();
         const clue = needs();
         const plan = currentPlan();
+        const choice = clarification();
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
@@ -369,6 +386,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           ...(!proof && plan ? { activatedPlan: { planId: plan.planId, version: plan.version } } : {}),
           ...(pendingPlan ? { pendingPlan } : {}),
           ...(clue ? { needs: clue } : {}),
+          ...(choice ? { clarification: choice } : {}),
         };
       } catch (error) {
         console.error(JSON.stringify({
@@ -646,14 +664,6 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
     return textFromContent(message.content);
   }
   return '';
-}
-
-function textFromContent(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  return content.filter((item): item is { type: 'text'; text: string } =>
-    Boolean(item && typeof item === 'object' && (item as { type?: unknown }).type === 'text' && typeof (item as { text?: unknown }).text === 'string'),
-  ).map((item) => item.text).join('');
 }
 
 // Keep the imported type visible in emitted declarations while documenting

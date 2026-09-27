@@ -14,7 +14,9 @@
  *     必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）。
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
- *     语义照旧，只是不再有第二份手抄本。
+ *     语义照旧，只是不再有第二份手抄本。个别条目（选择类澄清）的 `{query}`/`{n}`/`{list}`
+ *     占位符由 `clarificationTextFor` 用平台信封数据填充——动态部分是数据不是措辞，
+ *     模板本身仍然零业务词。
  *
  * 纪律（与 17dz 表相同）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
@@ -145,6 +147,17 @@ const TABLE: Record<string, CodeEntry> = {
     text: '平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。',
   },
 
+  // ── 选择类澄清：结构化歧义/未找到（2026-09-27 Stage 3 事故根治包）──────────
+  // 模型是执行语言与用户语言之间唯一的翻译器，压力下翻译退化，脚本路径/错误码/门的
+  // 规则就漏进最终回复。这两条模板让宿主直接持信封数据机械组装澄清问题——模板零业务词
+  // （候选名是数据不是措辞，泄漏 lint 同款预算守这条），领域换了域一个字都不用改。
+  AMBIGUOUS_SELECTION: {
+    text: '没有找到唯一匹配“{query}”的对象。平台上有 {n} 个名字相近的：{list}你要查哪个？告诉我名称或序号即可。',
+  },
+  NOT_FOUND_SELECTION: {
+    text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。',
+  },
+
   // ── 收尾类：用户可见的状态话术（不是错误——码 → 文本一一对应，语义照旧）──
   NO_EXECUTION_CLARIFICATION: {
     text: '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。',
@@ -228,6 +241,56 @@ export function messageFor(code: string, actual?: unknown, correctForm?: string)
 /** 消息模板类码的文本（错误类码误用此处同样 fail-loud，由 render 分流）。 */
 export function messageTextFor(code: string): string {
   return render(code);
+}
+
+/** 选择类澄清候选清单的渲染上限：平台一次可能返回很多相近名，全列会把澄清问题变成一张长清单。 */
+const SELECTION_CANDIDATE_LIMIT = 8;
+/** 单个候选名的长度上限：数据卫生（超长名字截断），不是措辞。 */
+const SELECTION_CANDIDATE_NAME_LIMIT = 40;
+
+/**
+ * 平台选择类码 → 本表消息模板码。选择类码集合在 platform-contract.ts（唯一信封适配层），
+ * 用户可见措辞在本表；这张索引是两者之间唯一的一条线。新增选择类模式时两处各加一行，
+ * error-codes.test.ts 机械锁两条线覆盖一致——漏登记任何一侧都会红。
+ */
+const SELECTION_CLARIFICATION_TEMPLATES: Readonly<Record<string, string>> = {
+  ACCOUNT_SET_AMBIGUOUS: 'AMBIGUOUS_SELECTION',
+  ACCOUNT_SET_NOT_FOUND: 'NOT_FOUND_SELECTION',
+};
+
+/**
+ * 选择类澄清消息：表内模板 + 平台信封数据机械组装（任务 1 的渲染出口）。
+ *
+ * 与 messageFor 的分流：动态部分是**数据**（用户查询词、平台候选名），不是三要素里的
+ * "实际值"——它们要进用户回复，因此不给消息模板传 actual（那会 fail-loud，见 render）。
+ * 入参是**平台错误码**（信封里的那个），模板码经 SELECTION_CLARIFICATION_TEMPLATES 解析；
+ * 未登记的码 fail-loud（与未知码同纪律：绝不静默 fallback 到通用问句）。
+ * 占位符替换用函数式 replacement：查询词里的 `$&` 之类序列不会被当成替换pattern。
+ */
+export function clarificationTextFor(code: string, data: { query: string; candidates: readonly string[] }): string {
+  const templateCode = SELECTION_CLARIFICATION_TEMPLATES[code];
+  if (!templateCode) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的选择类澄清码: ${code}——平台侧新增选择类模式时，往 packages/agent/src/platform-contract.ts 的 SELECTION_CLARIFICATION_CODES 加码，并往本表加对应消息模板`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  const entry = entryOf(templateCode);
+  if (!('text' in entry)) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 选择类澄清只接受消息模板类码（它没有三要素）: ${templateCode}`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: templateCode },
+    );
+  }
+  const names = data.candidates.slice(0, SELECTION_CANDIDATE_LIMIT).map((name, index) => {
+    const shown = name.length > SELECTION_CANDIDATE_NAME_LIMIT ? `${name.slice(0, SELECTION_CANDIDATE_NAME_LIMIT)}…` : name;
+    return `${index + 1}. ${shown}`;
+  });
+  if (data.candidates.length > SELECTION_CANDIDATE_LIMIT) names.push(`…等 ${data.candidates.length} 个`);
+  return entry.text
+    .replace('{query}', () => data.query.trim() || '您指定的对象')
+    .replace('{n}', () => String(data.candidates.length))
+    .replace('{list}', () => names.join(' '));
 }
 
 /** throw 站点专用：三要素消息 + 原码挂回 error.code（调用方继续认码）。 */

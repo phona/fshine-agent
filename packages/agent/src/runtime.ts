@@ -15,7 +15,8 @@ import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence
 import { collectExecutionFacts, EXECUTION_FACTS_MARKER, type ExecutionFacts } from './execution-facts';
 import { parsePlanStep, planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import type { PendingPlanConfirmation } from './plan-runtime';
-import { messageTextFor } from './error-codes';
+import type { SelectionClarification } from './platform-contract';
+import { clarificationTextFor, messageTextFor } from './error-codes';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
@@ -47,6 +48,30 @@ export const RESUMED_PLAN_NOT_EXECUTED = messageTextFor('RESUMED_PLAN_NOT_EXECUT
 
 /** Appended when the Main Agent answers without declaring the turn's intent. */
 const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
+
+/**
+ * 执行语言指纹：最终回复里出现任意一条，就说明"模型在翻译执行语言"（2026-09-27 Stage 3
+ * 手机实测的形态——一次结构化歧义被翻译成 1201 字符技术报告）。三条判据都是**形状**，
+ * 不是内容嗅探：
+ *   · 脚本路径（`src/...js`）：平台实现细节，编排层禁运（泄漏 lint 同款名单）；
+ *   · 错误码形态（全大写且含下划线，如 ACCOUNT_SET_AMBIGUOUS）：要求含下划线是防误伤——
+ *     正常英文词不会全大写，YYYYMM 这类编码没有下划线；
+ *   · JSON 片段（`candidates:` 或花括号）：信封/方案原文复读。
+ *
+ * 这把尺有两处使用者：worker 说明的准入（usefulWorkerNote：带指纹的"说明"是协议材料，
+ * 不附在状态文案后面）与真实模型探针的断言（probe-real-agent.ts 对歧义/not_found 用例）。
+ * 导出一处定义，两边认同一份。
+ */
+export const EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+  { label: '脚本路径', pattern: /src\/[^\s）)，,，；;]*\.js/ },
+  { label: '错误码', pattern: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/ },
+  { label: 'JSON 片段', pattern: /candidates\s*:|[{}]/ },
+];
+
+/** 文本命中的执行语言指纹标签（空数组 = 干净）。 */
+export function executionLanguageFingerprints(text: string): string[] {
+  return EXECUTION_LANGUAGE_FINGERPRINTS.filter(({ pattern }) => pattern.test(text)).map(({ label }) => label);
+}
 
 /**
  * 纠错环单回合上限（架构 §3）：子 Agent 连续回报"缺什么"这么多轮就不再要它重派，
@@ -224,10 +249,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           exec: async () => { throw new ToolUserError('本轮只负责整理已完成的计划结果。'); },
           deadline,
         });
+        // 选择类澄清（任务 1）：确认后重跑撞上结构化歧义/未找到时，回复同样由宿主机械组装
+        // ——整理模型的文本是对协议材料的翻译，不上屏也不进转录（与 delegate 路径同一修法）。
+        const clarificationReply = resumed.clarification
+          ? composeClarificationReply(resumed.clarification, resumed.text)
+          : '';
         // 零执行收尾：回复由宿主确定性给出（与 delegate 路径的收尾兜底同一族话术），
         // worker 留下的无数字说明按"子 Agent 说明 + 注脚"模式附上。
         const note = usefulWorkerNote(resumed.text);
-        const text = resumedBlocked
+        const text = clarificationReply || (resumedBlocked
           ? resumed.activatedPlan
             ? (note ? `${ACTIVATED_PLAN_NOT_EXECUTED}\n\n${note}` : ACTIVATED_PLAN_NOT_EXECUTED)
             // ③-5b：非 activatedPlan 的零执行也用 resume 专用话术。用户刚确认过操作，
@@ -236,7 +266,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             : (note ? `${RESUMED_PLAN_NOT_EXECUTED}\n\n${note}` : RESUMED_PLAN_NOT_EXECUTED)
           // 正常路径：整理模型的文本优先；它没说话时回落 worker 文本——执行面注脚
           // 是给模型的系统元数据，回落不过滤就会直接上屏并进转录（F5）。
-          : (answer.text.trim() || stripFootprint(resumed.text));
+          : (answer.text.trim() || stripFootprint(resumed.text)));
         const latestAssistant = [...answer.messages].reverse().find((message) => (message as { role?: string }).role === 'assistant') as { content?: unknown } | undefined;
         const latestText = assistantContentText(latestAssistant?.content).trim();
         const synthesized = deps.driver.synthesizeAssistant
@@ -244,7 +274,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           : ({ role: 'assistant', content: text, timestamp: Date.now() } as unknown as AgentMessage);
         // 零执行时整理模型的文本既不上屏也不进转录：它最常见的形状正是把零执行
         // 总结成"已完成"，留在转录里会污染后续回合。用宿主收尾文案整体替换。
-        const savedMessages = resumedBlocked
+        // 澄清回合同理：整理模型那一轮是对协议材料的翻译，整体替换掉。
+        const savedMessages = clarificationReply || resumedBlocked
           ? [...messages, synthesized]
           : latestText === text
             ? answer.messages
@@ -259,6 +290,16 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           kind: 'tool_result', content: redactInternalIds(redactSensitiveText(stripFootprint(resumed.text))), createdAt: new Date().toISOString(), requestId: ctx.requestId,
         }]);
         scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
+        if (resumed.clarification) {
+          console.info(JSON.stringify({
+            event: 'delegation_clarification',
+            requestId: ctx.requestId,
+            taskId: ctx.resumeTaskId,
+            code: resumed.clarification.code,
+            candidates: resumed.clarification.candidates.length,
+            stage: 'resume',
+          }));
+        }
         if (resumedBlocked) {
           console.warn(JSON.stringify({
             event: 'confirmed_plan_not_executed',
@@ -268,7 +309,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             ...(note ? { withWorkerNote: true } : {}),
           }));
         }
-        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : 'confirmed_plan_resumed' }));
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : clarificationReply ? 'confirmed_plan_clarification' : 'confirmed_plan_resumed' }));
         return { text };
       }
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
@@ -416,9 +457,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         planZeroExecSteps: number;
         /** 计划模式熔断汇总：本回合已派步骤的结局（与刚写的计划事实同源，只机械陈述）。 */
         planStepOutcomes: Array<{ label: string; outcome: 'done' | 'needs' | 'failed' }>;
+        /** 结构化歧义/未找到（Stage 3 根治包）：本回合的选择类澄清事实，宿主机械组装用。 */
+        clarification: SelectionClarification | null;
+        /** 澄清问题的最终措辞（模板+信封数据+干净说明一次组装；终止与兜底共用同一份）。 */
+        clarificationReply: string | null;
         /** 消歧回合：用户从多个未完成任务中选定的计划。绑定由宿主强制，模型不可改绑。 */
         preferredPlanId: string | null;
-      } = { declared: false, intent: null, execution: null, pendingPlan: null, activatedPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, planZeroExecSteps: 0, planStepOutcomes: [], preferredPlanId: planChoice?.planId ?? null };
+      } = { declared: false, intent: null, execution: null, pendingPlan: null, activatedPlan: null, delegationFailed: false, needsRounds: 0, lastNeeds: null, planSteps: 0, planId: null, needsStepIndex: null, planZeroExecSteps: 0, planStepOutcomes: [], clarification: null, clarificationReply: null, preferredPlanId: planChoice?.planId ?? null };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -553,6 +598,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               } : {}),
             }));
             if (intent.kind === 'delegate') {
+              // 澄清收口（任务 1）：本回合已经进入"平台请用户选一个"的收口，任何再次委派都在
+              // 此拦住——计划模式的后续步骤、单步模式的重新派单都不该发生（用户要先回答）。
+              // 抛出的是宿主已组装好的澄清问题：它经驱动的 terminate 语义成为本轮文本，
+              // 再由收口处的优先分支落成最终回复（模型那一轮的翻译体由此不上屏）。
+              if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
               // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把三个来源交给
@@ -607,10 +657,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 收尾兜底（P1）：批准了但零执行。按"事实持续"累积而不是每轮重置——计划在平台侧
               // 仍然激活着，本回合任一步报过这个事实，它就一直成立。
               turn.activatedPlan = delegated.activatedPlan ?? turn.activatedPlan;
+              // 选择类澄清事实与 execution 同模式积累：计划模式跨步累积（任一步撞上歧义，
+              // 本回合就以澄清收口），单步模式随本轮结果（没有就没有）。
+              turn.clarification = step ? (delegated.clarification ?? turn.clarification) : (delegated.clarification ?? null);
               // 步骤事实的结局：taskId 写进该步的最后一条事实（spec：事后回填）。
               // 停在用户确认门的步骤不写结局——它还没完，投影里保持 started，跨回合可续。
+              // 选择类澄清记 'needs'：这一步缺的是"用户选哪个"，与缺参数同族（都不是失败）。
               if (step && planId && !delegated.pendingPlan) {
-                const status = delegated.needs ? 'needs' : delegated.execution ? 'done' : 'failed';
+                const status = delegated.needs || delegated.clarification ? 'needs' : delegated.execution ? 'done' : 'failed';
                 await appendPlanFact(step, planId, status, { taskId: delegated.taskId, summary: planStepSummary(delegated) });
                 console.info(JSON.stringify({
                   event: 'task_plan_step',
@@ -625,7 +679,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
               // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
               if (step && planId && !delegated.pendingPlan) {
-                const outcome = delegated.needs ? 'needs' : delegated.execution ? 'done' : 'failed';
+                const outcome = delegated.needs || delegated.clarification ? 'needs' : delegated.execution ? 'done' : 'failed';
                 turn.planStepOutcomes.push({ label: step.label, outcome });
                 turn.planZeroExecSteps = outcome === 'failed' ? turn.planZeroExecSteps + 1 : 0;
                 if (turn.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS) {
@@ -644,6 +698,35 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   }));
                   throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps));
                 }
+              }
+              // 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"。**不 terminate**——
+              // 作为工具结果交还 Main Agent（与 needs 同一机制），本轮回复由收口处的优先分支
+              // 用宿主机械组装的澄清问题整体替换：模型这一轮的翻译体（脚本路径/错误码/门的
+              // 规则）存在但不被使用。计划模式的后续步骤由委派入口的守卫拦住——用户要先回答
+              // "查哪个"，继续拆解只会空转。
+              if (delegated.clarification) {
+                turn.clarification = delegated.clarification;
+                turn.clarificationReply = composeClarificationReply(delegated.clarification, delegated.text);
+                // 出口校验不得覆盖宿主的澄清问题（与消歧问题/熔断汇总同一处理）
+                turn.delegationFailed = true;
+                console.info(JSON.stringify({
+                  event: 'delegation_clarification',
+                  requestId: ctx.requestId,
+                  taskId: delegated.taskId,
+                  code: delegated.clarification.code,
+                  candidates: delegated.clarification.candidates.length,
+                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+                }));
+                const relay = renderClarificationToolResult(delegated.clarification, delegated.taskId);
+                if (step) {
+                  return {
+                    ...renderPlanStepToolResult(step, delegated),
+                    outcome: 'needs',
+                    text: relay,
+                    next: '不要继续申报后续步骤——停止拆解，等用户回答（用户看到的是宿主组装的澄清问题，不要自己复述）。',
+                  };
+                }
+                return { recorded: 'delegate', text: relay, taskId: delegated.taskId };
               }
               // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
               // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
@@ -731,6 +814,24 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing');
         }
         result = retried;
+      }
+      // 选择类澄清兜底（任务 1）：宿主机械组装的澄清问题**优先于模型文本**。委派分支把
+      // "平台请用户选一个"作为工具结果交还模型（与 needs 同一机制），模型这一轮无论说什么
+      // 都是对协议材料的翻译；这里用模板+信封数据组装的那一份整体替换——翻译体不上屏也不进
+      // 转录，后续回合与 Context State 读到的才是真实状态。模型真的又申报委派时，委派入口
+      // 的守卫会先抛出同一段文本终止回合（计划模式的后续步骤由此停止），最终仍落到这里。
+      if (turn.clarification && turn.clarificationReply) {
+        console.info(JSON.stringify({
+          event: 'selection_clarification_relayed',
+          requestId: ctx.requestId,
+          code: turn.clarification.code,
+          candidates: turn.clarification.candidates.length,
+        }));
+        return await finishDirectReply(
+          turn.clarificationReply,
+          'selection_clarification',
+          `平台澄清 ${turn.clarification.code}：候选 ${turn.clarification.candidates.length} 个`,
+        );
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
       // 或停在用户确认门。委派已失败的（安全话术已给出）不在此列。
@@ -1166,14 +1267,39 @@ function stripFootprint(text: string): string {
 }
 
 /**
- * worker 文本里"有价值的无数字说明"：剥掉执行面注脚后非空、不含财务数字、也不是
+ * worker 文本里"有价值的无数字说明"：剥掉执行面注脚后非空、不含财务数字、不含执行语言
+ * 指纹（脚本路径/错误码/JSON 片段——那是模型在翻译协议材料，不是给用户的说明），也不是
  * 宿主的通用兜底——这种说明才配附在状态文案后面，否则只会稀释它。
  * 恢复路径（确认后零执行）与 delegate 路径的收尾兜底共用同一把尺。
  */
 function usefulWorkerNote(text: string): string {
   const note = stripFootprint(text).trim();
   if (!note || hasFinancialFigure(note) || note === NO_EXECUTION_CLARIFICATION || note === ACTIVATED_PLAN_NOT_EXECUTED || note === RESUMED_PLAN_NOT_EXECUTED) return '';
+  if (executionLanguageFingerprints(note).length > 0) return '';
   return note;
+}
+
+/**
+ * 选择类澄清的本轮回复：表内模板 + 平台信封数据机械组装（宿主发音，模型不参与）；
+ * worker 留下的干净说明（无财务数字、非协议材料——判据复用 usefulWorkerNote）才附后。
+ */
+function composeClarificationReply(clarification: SelectionClarification, workerText: string): string {
+  const question = clarificationTextFor(clarification.code, clarification);
+  const note = usefulWorkerNote(workerText);
+  return note ? `${question}\n\n${note}` : question;
+}
+
+/**
+ * 选择类澄清交给 Main Agent 的工具结果（内部协议材料，不是用户可见文本）：平台请用户
+ * "选一个"，宿主已直接把澄清问题发给用户。因此本轮不要再委派、也不要自己复述——
+ * 自己复述正是要消灭的"模型翻译执行语言"（Stage 3 事故的 1201 字符技术报告）。
+ */
+function renderClarificationToolResult(clarification: SelectionClarification, taskId: string): string {
+  return [
+    `平台返回选择类状态 ${clarification.code}（候选 ${clarification.candidates.length} 个），宿主已把澄清问题直接发给用户。`,
+    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户回答后重新申报 delegate，把该编号填进 continueTaskId，request 写用户选定的对象。`,
+    '本轮不要再委派、不要自己复述澄清问题。',
+  ].join('\n');
 }
 
 /**
@@ -1207,7 +1333,7 @@ function renderNeedsUserText(needs: SubagentNeeds, workerText: string): string {
  * 区别只在这里交还的是"一步的正常/失败结果"，不是"缺什么"的纠错线索。
  */
 function renderPlanStepToolResult(step: PlanStepLabel, result: SubagentTaskResult): PlanStepToolResult {
-  const outcome = result.needs ? 'needs'
+  const outcome = result.needs || result.clarification ? 'needs'
     : result.execution ? 'ok'
       : result.pendingPlan ? 'pending_confirmation'
         : 'no_execution';
@@ -1228,6 +1354,8 @@ function renderPlanStepToolResult(step: PlanStepLabel, result: SubagentTaskResul
 /** 计划模式步骤事实的 summary：只写宿主持机械可验证的结局，不猜业务成败。 */
 function planStepSummary(result: SubagentTaskResult): string {
   if (result.needs) return `缺：${result.needs.missing.join('、') || '（未指明）'}；${result.needs.reason}`;
+  // 选择类澄清：平台给了候选、等用户选。summary 只记码与候选数（候选名是数据，事实里不抄）。
+  if (result.clarification) return `平台澄清：${result.clarification.code}（候选 ${result.clarification.candidates.length} 个）`;
   if (result.execution) return `已执行 ${result.execution.calls} 次平台调用`;
   return '未产生平台执行';
 }

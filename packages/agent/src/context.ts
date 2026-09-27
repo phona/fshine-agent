@@ -17,7 +17,7 @@ import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
-import { isPlatformAuthError } from './platform-contract';
+import { isPlatformAuthError, type SelectionClarification } from './platform-contract';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -92,6 +92,14 @@ export interface SubagentTaskResult {
    * 宿主不把这一轮当失败，而是把线索交还 Main Agent 决定补齐还是问用户。
    */
   needs?: SubagentNeeds;
+  /**
+   * 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"的澄清事实。宿主据此
+   * 用模板+信封数据机械组装澄清问题——模型是执行语言与用户语言之间唯一的翻译器，
+   * 压力下翻译退化就会把脚本路径/错误码/门的规则漏进最终回复，所以状态转换的发音权
+   * 收归宿主。与 execution 的出现不互斥（目录搜索这类调用真的发生过），但与 needs
+   * 分工：一个是"缺什么"，一个是"选哪个"。
+   */
+  clarification?: SelectionClarification;
 }
 
 export type { SubagentNeeds };
@@ -552,6 +560,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           ...(result.execution ? { execution: result.execution } : {}),
           // 收尾兜底（P1）：批准了但零执行，原样上交——宿主需要这个事实才能说对状态
           ...(result.activatedPlan ? { activatedPlan: result.activatedPlan } : {}),
+          // 结构化歧义/未找到：平台请用户"选一个"的澄清事实，原样上交——宿主据此机械
+          // 组装澄清问题（与 needs 同一族的结构化上交，模型不参与翻译）。
+          ...(result.clarification ? { clarification: result.clarification } : {}),
           // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
           // 必须拼在 extractChangeProposal 之后——尾部注脚会破坏"整段纯 JSON"提案候选。
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
@@ -670,6 +681,12 @@ function workerSystemPrompt(
     : '应用层未提供授权名单；访问范围必须以平台领域脚本的权限校验为准。';
   return [
     '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。最终回复会原样展示给最终用户——直接对用户说话；不要输出内部协议文案（"给主 Agent 的说明"、宿主、委派、route_current_turn、PLAN ACTIVE/DECLINED 等字样和状态 JSON 不允许）。',
+    // 回复语域契约（2026-09-27 Stage 3 事故根治包）：格式规范，不是行为恳求。你的工作上下文
+    // 全部泡在执行语言里（协议命令 / SKILL 文档 / 信封错误码），你是执行语言与用户语言之间
+    // 唯一的翻译器——压力下翻译退化，执行语言就越界进最终回复（实测：一次结构化歧义被写成
+    // 1201 字符技术报告，脚本路径、原始错误码、门的规则引述全上屏）。宿主已改为替你把结构化
+    // 平台状态组装成用户消息；你只需要为"数据答案"发声，别把内部语言带进回复。
+    '最终回复面向用户——只说结论和需要用户给什么；脚本路径、错误码、JSON、平台门的规则是内部语言，不得出现在回复里；证据最多一行来源标注。',
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
     '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',

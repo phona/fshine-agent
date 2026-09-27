@@ -6,6 +6,7 @@
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
+import type { SelectionClarification } from './platform-contract';
 import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 
@@ -95,6 +96,15 @@ export interface TurnDriverResult {
    * （"批准了但没执行，回复继续重跑"），而不是让用户补充早就给过的查询范围。
    */
   activatedPlan?: { planId: string; version: number };
+  /**
+   * 结构化歧义/未找到（2026-09-27 Stage 3 事故根治包）：本回合的平台交互以"选择类"
+   * 状态收尾（平台请用户选一个），信封事实由宿主持有。有它表示本轮回复是澄清问题而不是
+   * 数据答案——宿主用模板+数据机械组装，模型不得翻译（脚本路径/错误码/门的规则由此绝迹）。
+   *
+   * 与 needs 的分工：needs 是"缺什么、任务可续"的纠错线索；clarification 是"平台给了候选、
+   * 用户必须选一个"的澄清事实。两者可以同时缺省，也可以同时出现（宿主优先 clarification）。
+   */
+  clarification?: SelectionClarification;
 }
 
 export interface TurnDriver {

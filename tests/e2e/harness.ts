@@ -24,6 +24,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
+import { selectionClarificationFromResponses, type SelectionClarification } from '../../packages/agent/src/platform-contract';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
 const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
@@ -257,6 +258,10 @@ function gatedWorker(script: WorkerStep[]) {
       // 收尾兜底（P1）：方案已批准但零执行。真实 worker 由 pi-coding-driver 补一刀后
       // 仍然零调用，才把这个事实上报宿主——这里直接复刻那个终局状态。
       let activatedPlan: { planId: string; version: number } | undefined;
+      // 结构化歧义/未找到：真实 worker 由 pi-coding-driver 从本回合的 tool_result 信封派生
+      // （platform-contract 的 selectionClarificationFromResponses）。替身走同一条生产函数
+      // ——派生逻辑只有一份，不存在"测试里另写一套提取"。
+      const platformOutputs: string[] = [];
       for (let step = 0; step < script.length; step += 1) {
         const current = script[Math.min(cursor, script.length - 1)]!;
         cursor += 1;
@@ -286,7 +291,9 @@ function gatedWorker(script: WorkerStep[]) {
               env: { ...process.env, DZ_PLAN_ID: active.planId, DZ_REQUIRE_PLAN: '1' },
             });
             if (proof) proof = { ...proof, calls: proof.calls + 1 };
-            parts.push(`执行 ${call.operation}: ${(out.stdout ?? '').trim() || (out.stderr ?? '').trim()}`);
+            const body = (out.stdout ?? '').trim() || (out.stderr ?? '').trim();
+            platformOutputs.push(body);
+            parts.push(`执行 ${call.operation}: ${body}`);
           }
           continue;
         }
@@ -331,6 +338,7 @@ function gatedWorker(script: WorkerStep[]) {
             env: { ...process.env, DZ_PLAN_ID: plan.planId, DZ_REQUIRE_PLAN: '1' },
           });
           const body = (out.stdout ?? '').trim() || (out.stderr ?? '').trim();
+          platformOutputs.push(body);
           if (proof) proof = { ...proof, calls: proof.calls + 1 };
           parts.push(`执行 ${call.operation}: ${body}`);
         }
@@ -338,6 +346,12 @@ function gatedWorker(script: WorkerStep[]) {
       // 有计划停在确认门时，用户看到的是那条确认询问，而不是中间的探索输出
       // （真实 worker 也会在 PLAN NEEDS_USER_CONFIRM 处收手）。
       const text = pendingPlan ? pendingPlan.userText : parts.join('\n');
+      // 本回合最后一条带信封的平台响应决定收尾状态：选择类码才挂 clarification
+      // （与 pi-coding-driver 同一函数、同一"只看本回合"边界——platformOutputs 是本次
+      // run 的局部收集，上一回合遗留的信封不会越权替这一回合提问）。
+      const clarification: SelectionClarification | undefined = selectionClarificationFromResponses(
+        platformOutputs.map((body) => ({ role: 'toolResult', content: [{ type: 'text', text: body }] })),
+      );
       return {
         text,
         messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
@@ -345,6 +359,7 @@ function gatedWorker(script: WorkerStep[]) {
         ...(activatedPlan ? { activatedPlan } : {}),
         ...(pendingPlan ? { pendingPlan } : {}),
         ...(needs ? { needs } : {}),
+        ...(clarification ? { clarification } : {}),
       };
     },
   };
