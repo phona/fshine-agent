@@ -24,7 +24,9 @@ function message(text: string): IncomingChannelMessage {
 
 function runner(store: ReturnType<typeof createSqliteStore>, workerDriver: TurnDriver) {
   const profiles: Record<string, ContextProfileConfig> = {
-    '17dz': { root: process.cwd(), skillRoots: ['.agents/skills'] },
+    // skillRoots 只需是 root 内一个真实存在的目录（worker 是脚本替身，不真读技能）。
+    // fshine 自带的 .agents/skills 已随 L6 死技能清理删除，故用 docs/ 作占位挂载点。
+    '17dz': { root: process.cwd(), skillRoots: ['docs'] },
   };
   const inner = createContextTaskRunner({ profiles, tasks: store.platformTasks!, workerDriver });
   return {
