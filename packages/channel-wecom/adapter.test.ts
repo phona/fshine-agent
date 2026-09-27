@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
 import { WecomBotChannel, type WecomBotChannelOptions } from './src/index';
+import { MAX_REPLY_BYTES, REPLY_TRUNCATED_MARK } from './src/index';
 
 const ENV = { WECOM_BOT_ID: 'bot-001', WECOM_BOT_SECRET: 'secret-abc' };
 
@@ -257,8 +258,8 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(fake.replies.find((reply) => reply.finish)!.content).toBe('图片发送失败,请稍后再试');
   });
 
-  it('超长回复按 UTF-8 截断到 2048 字节内且不截半', async () => {
-    const handler = vi.fn(async () => '查'.repeat(1000));
+  it('超长回复截到上限内、不截半、且带截断标记', async () => {
+    const handler = vi.fn(async () => '查'.repeat(30000));
     const { fake } = await startChannel(handler);
 
     fake.emit('message.text', textFrame('cb-long-1', { msgid: 'msg-long', text: { content: '你好' } }));
@@ -268,8 +269,23 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     });
 
     const final = fake.replies.find((reply) => reply.finish)!;
-    expect(Buffer.byteLength(final.content, 'utf8')).toBeLessThanOrEqual(2048);
+    expect(Buffer.byteLength(final.content, 'utf8')).toBeLessThanOrEqual(MAX_REPLY_BYTES);
     expect(final.content).not.toContain('\uFFFD');
+    expect(final.content.endsWith(REPLY_TRUNCATED_MARK)).toBe(true);
+  });
+
+  it('正常长度回复原样发送,不加截断标记', async () => {
+    const handler = vi.fn(async () => '查'.repeat(1000));
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-long-2', { msgid: 'msg-long-2', text: { content: '你好' } }));
+    await vi.waitFor(() => {
+      const finals = fake.replies.filter((reply) => reply.finish);
+      expect(finals).toHaveLength(1);
+    });
+
+    const final = fake.replies.find((reply) => reply.finish)!;
+    expect(final.content).toBe('查'.repeat(1000));
   });
 
   it('stop:断开连接且后续消息不再处理', async () => {

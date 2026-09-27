@@ -13,7 +13,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
-import { MAX_REPLY_BYTES, stripMentionPrefix, truncateUtf8 } from './text';
+import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply, truncateUtf8 } from './text';
 
 const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
@@ -187,7 +187,17 @@ export class WecomBotChannel implements ChannelAdapter {
     let textSent = false;
     if (rich.text !== undefined && rich.text !== '') {
       textSent = true;
-      void this.reply(frame, reqId, streamId, truncateUtf8(rich.text, MAX_REPLY_BYTES), true);
+      // 用户可见的最终回复：超上限时截断并带标记（守夜事件 wecom_reply_truncated 记录被截过）。
+      const bounded = truncateReply(rich.text);
+      if (bounded.truncated) {
+        console.warn(JSON.stringify({
+          event: 'wecom_reply_truncated',
+          req_id: reqId,
+          bytes: Buffer.byteLength(rich.text, 'utf8'),
+          limit: MAX_REPLY_BYTES,
+        }));
+      }
+      void this.reply(frame, reqId, streamId, bounded.text, true);
     }
     if (rich.image) {
       try {
