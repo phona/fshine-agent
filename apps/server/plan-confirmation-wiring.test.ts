@@ -6,7 +6,7 @@
  * 这条链此前只有底层单测（替身 stub），没有任何测试断言 assembly/ask.ts 真的把
  * `loadPlanStatus` 接进了 `verifyActivatable`——删掉那三行接线，全库依旧全绿。
  *
- * 本测试因此走**真工厂 + 真仓库 + 假平台 CLI**（临时目录里的 bin/17dz 壳脚本，不触网、
+ * 本测试因此走**真工厂 + 真仓库 + 假平台 CLI**（临时目录里的网关壳脚本，不触网、
  * 不开浏览器），并带一条变异锁：接线必须真的向平台发起 `plan status` 查询（把注入删掉
  * 即红），被取代的计划不得进入 `plan activate`。
  */
@@ -22,7 +22,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-/** 假平台根：bin/17dz 按预置文件应答 plan status / plan activate，并把每次调用记进 calls.log。 */
+/** 假平台根：网关可执行文件按预置文件应答 plan status / plan activate，并把每次调用记进 calls.log。 */
 function fakePlatformRoot(): { root: string; calls: () => string[]; setStatus: (status: string) => void } {
   const root = mkdtempSync(path.join(tmpdir(), 'plan-confirm-wiring-'));
   roots.push(root);
