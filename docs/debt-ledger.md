@@ -241,7 +241,20 @@
 - **律法归属**：L2。
 - **闭环判据**：6 处散文收敛为 1 处（正确形状从 17dz SKILL 或平台 JSON schema 派生，宿主只持指针/常量）；`grep -rn 'plan {"goal"' packages/*/src apps scripts` → 0 命中；`error-codes.ts` 全部 `correctForm` 与平台 `plan.js` 的 `canonicalCall` 实际接受形状逐字一致（测试断言，不是人眼比对）。
 - **建议波次**：Wave 2（与 Lane B④「SKILL 两节删改」同批——本条的权威源正是那一节）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`error-codes.ts` 新增唯一教学源 `planDraftExample()`——内容与平台
+  `src/execution/plan-schema.json` 声明一致（`{"goal":"…","calls":[{"operation":"…","args":[…]}]}`，
+  calls 必填、goal 是声明过的可选元数据）；error-codes 表内 5 处（CORRECT_PLAN_SHAPE /
+  PLAN_SUBCOMMAND_RESERVED / PLAN_JSON_NOT_OBJECT / PLAN_CALLS_NOT_ARRAY /
+  PLAN_SHAPE_GATE_TEACHING）与 context.ts worker 提示词 1 处**全部**由它派生。
+  **闭环判据的修订**：原判据 `grep 'plan {"goal"'` → 0 命中已作废——Lane B 交付的
+  plan-schema.json 把 goal **收编为声明过的可选元数据**（平台判断"宿主已经在教它，
+  声明 + 校验比否决更符合单一来源"），教学示例因此合法地含 goal。新锁是机械的：
+  `packages/agent/plan-teaching.test.ts` 跨仓读平台 schema 断言①顶字段全在声明内
+  （additionalProperties:false 镜像）、calls 必填、goal 在 properties 里（不是幻影字段）；
+  ②宿主解析器 parsePlanCallsCommand 认同一形状（教学与解析不打架）；③两个源文件里
+  除 planDraftExample 外零第二种草案形状字面量。`bin/17dz plan --schema` CLI 形态平台
+  未提供（plan 只有 evaluate/current/status/activate），按方案许可读平台文件核验。
 
 ### D-012 · `KEY_ARG_FLAGS` 镜像：17dz `operations.json` 无 args 规格
 
@@ -273,7 +286,14 @@
 - **律法归属**：L2。
 - **闭环判据**：`planConfirmation` 对象从装配层导出（如 `createPlanConfirmationWiring(deps)`），`ask.ts` 与 `assembly.ts` 都调它；两文件中不再出现 `savePending` 的字面量实现；`10 * 60_000` 的 TTL 只有一处定义（可命名 `PLAN_CONFIRMATION_TTL_MS`）。
 - **建议波次**：Wave 2（方案已列为夹带小刀）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`apps/server/plan-confirmation-route.ts` 新增导出工厂
+  `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`——仓库创建、
+  verifyActivatable（loadPlanStatus → PlanSupersededError）/ activate（activatePendingPlan）
+  两个平台回调、savePending 落库形状全部收在这一处；assembly.ts 与 scripts/ask.ts 都调它
+  （ask.ts 退出前多调一次 wiring.close()，行为等价于原来的进程退出）。TTL 收敛为
+  `PLAN_CONFIRMATION_TTL_MS`（一处定义）。行为逐字不变：决策仍固定 'confirm'、
+  evaluation 仍为 {}、verify 仍先问平台计划状态。装配接线的测试覆盖见 D-063（同波补齐）。
 
 ### D-014 · `workerTimeoutMs` 默认值 600_000 在 5 处各写一遍
 
@@ -282,7 +302,15 @@
 - **律法归属**：L2。
 - **闭环判据**：公式收敛为一个导出函数（如 `turnBudgetMsFor(profile)`），`grep -rn "600_000" packages apps scripts | grep -v test` → ≤1 处（常量定义）。
 - **建议波次**：Wave 2。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`packages/contracts/src/config.ts` 导出 `DEFAULT_WORKER_TIMEOUT_MS` +
+  `TURN_BUDGET_MARGIN_MS` + `turnBudgetMsFor(profile)`（公式 = worker 超时 + 2 分钟余量，
+  一处定义）；context.ts 的本地常量与 assembly/ask/long-session-acceptance/
+  acceptance-22-supplement 四处公式全部改为调它。
+  grep 现状（非测试 src）：`600_000` 只剩两处**命名常量定义**——contracts 的
+  DEFAULT_WORKER_TIMEOUT_MS 与 probe-real-agent.ts 的 PROBE_REPLY_WAIT_MS（后者是探针
+  自己的回复轮询地平线，故意不随配置漂移，已注释说明；D-014 收敛的是 worker 超时公式，
+  不是这个等待）。公式字面量零残留。
 
 ### D-015 · 17dz mock 的 `fill.js` flag 清单是手抄，无机械锁
 

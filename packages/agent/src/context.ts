@@ -16,7 +16,7 @@ import type { PendingPlanConfirmation } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
-import { messageTextFor, toolUserErrorFor } from './error-codes';
+import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
 import { GATEWAY_INVOCATION, isPlatformAuthError, type SelectionClarification } from './platform-contract';
 import type {
   ChangeIntentRecord,
@@ -27,9 +27,9 @@ import type {
   PlatformTaskRepo,
   TrustedContext,
 } from '@fshine/contracts';
+import { DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
 
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
-const DEFAULT_WORKER_TIMEOUT_MS = 600_000;
 
 /**
  * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
@@ -690,7 +690,7 @@ function workerSystemPrompt(
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
     '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',
-    `执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——${GATEWAY_INVOCATION} plan {"goal":"…","calls":[…]}，calls 逐项列出准备执行的 operation 及原生参数（args 为字符串数组，即命令行原样参数，如 ["--query","某公司全称","--period","202609"]），照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。`,
+    `执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——${planDraftExample()}，calls 逐项列出准备执行的 operation 及原生参数（args 为字符串数组，即命令行原样参数，如 ["--query","某公司全称","--period","202609"]），照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。`,
     // 调用形式纪律（B1-fshine）：平台调用只认网关这一种形状。这里刻意只给占位符——
     // 具体脚本路径以平台 Skill 文档为准，写死任何一条示例都会随平台演进过期，
     // 也会把平台实现细节带进编排层（泄漏 lint 的 FORBIDDEN 名单）。

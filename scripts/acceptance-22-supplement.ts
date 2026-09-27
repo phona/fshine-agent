@@ -16,6 +16,7 @@ import {
   PLAN_SUBMIT_STEP,
 } from '@fshine/agent';
 import { createMessageHandler } from '../apps/server/handler';
+import { turnBudgetMsFor } from '@fshine/contracts';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -41,7 +42,7 @@ async function main(): Promise<void> {
     driver: createPiTurnDriver({ env: process.env }),
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
     platformTask: createContextTaskRunner({
       profiles: config.contextProfiles,
       tasks: store.platformTasks!,

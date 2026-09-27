@@ -34,7 +34,7 @@ import {
 } from './src/runtime';
 describe('fshine 错误码表（错误即数据）', () => {
   it('错误类码渲染三要素：码 + 期望/实际/正确形态，动态 actual 由拒绝点填', () => {
-    expect(messageFor('PLAN_SHAPE_PREFIX', '```json')).toBe('PLAN_SHAPE_PREFIX: 期望 bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 ```json；正确形态 方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行命令里。');
+    expect(messageFor('PLAN_SHAPE_PREFIX', '```json')).toBe('PLAN_SHAPE_PREFIX: 期望 bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 ```json；正确形态 方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里。');
     // 索引类 actual 原样进消息（第几项出错要点得出来）
     expect(messageFor('PLAN_CALL_NOT_OBJECT', 2)).toContain('实际 2；');
     // 稳定实际形态的码不传 actual 也有"实际"段

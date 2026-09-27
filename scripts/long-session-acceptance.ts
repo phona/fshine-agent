@@ -7,6 +7,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { closeStore, createSqliteStore, loadConfig, principalScopeRecords, newId } from '@fshine/core';
+import { turnBudgetMsFor } from '@fshine/contracts';
 import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { estimateContextTokens, type AgentMessage } from '@earendil-works/pi-agent-core';
 
@@ -71,7 +72,7 @@ async function main(): Promise<void> {
     driver: createPiTurnDriver({ env: process.env }),
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
     platformTask,
   });
 

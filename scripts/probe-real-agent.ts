@@ -97,6 +97,13 @@ let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
 let counter = 0;
 
+/**
+ * 探针等一条最终回复的轮询上限（10 分钟）。与 DEFAULT_WORKER_TIMEOUT_MS 数值相同是
+ * 巧合而非同源：这是探针自己的等待地平线（必须 ≥ 一个回合预算，否则会在回合自然结束
+ * 前放弃轮询），故意不随配置漂移——D-014 收敛的是 worker 超时公式，不是这个等待。
+ */
+const PROBE_REPLY_WAIT_MS = 600_000;
+
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
@@ -150,7 +157,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
       const callsBefore = ledgerCalls();
       const startedAt = Date.now();
       sdk.emit('message.text', wecomText(PRINCIPAL_USER, text));
-      const deadline = Date.now() + 600_000;
+      const deadline = Date.now() + PROBE_REPLY_WAIT_MS;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
         if (finals.length > before) {

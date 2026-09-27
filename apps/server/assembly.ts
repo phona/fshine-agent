@@ -9,7 +9,6 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   closeStore,
-  createSqlitePendingPlanConfirmationRepo,
   createSqliteStore,
   loadConfig,
   principalScopeRecords,
@@ -30,9 +29,10 @@ import {
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { AuditStore, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
+import { turnBudgetMsFor } from '@fshine/contracts';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createMessageHandler } from './handler';
-import { asAgentPendingRepo, createPlanConfirmationRoute } from './plan-confirmation-route';
+import { createPlanConfirmationWiring } from './plan-confirmation-route';
 import { loadBusinessSkill } from './business-skill';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -72,7 +72,6 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const platformRoot = config.contextProfiles['17dz']?.root;
   const dbPath = overrides.dbPath ?? path.join(repoRoot, 'data/agent.db');
   const store = createSqliteStore(dbPath);
-  const pendingPlanRepo = createSqlitePendingPlanConfirmationRepo(dbPath);
 
   for (const record of principalScopeRecords(config)) {
     await store.principalScopes.upsert(record);
@@ -140,36 +139,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     } : {}),
   });
 
-  const confirmationRoute = createPlanConfirmationRoute({
-    repo: asAgentPendingRepo(pendingPlanRepo),
-    // 激活前先问平台这条计划是否还有效：被新计划取代时给用户确定性的解释，
-    // 而不是把 PLAN_NOT_PENDING 吞成一句"处理失败"。
-    verifyActivatable: async (pending) => {
-      if (!platformRoot) throw new Error('幻账平台根目录未配置');
-      const { loadPlanStatus, PlanSupersededError } = await import('@fshine/agent');
-      const status = await loadPlanStatus({ platformRoot, planId: pending.planId });
-      if (status && status.status !== 'pending') {
-        throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
-      }
-    },
-    activate: async (pending) => {
-      if (!platformRoot) throw new Error('幻账平台根目录未配置');
-      const { activatePendingPlan } = await import('@fshine/agent');
-      await activatePendingPlan({
-        platformRoot,
-        planId: pending.planId,
-        evidence: 'user-confirmed',
-        activationSecret: planActivationSecret,
-      });
-    },
-  });
-  const planConfirmation = {
-    handle: confirmationRoute.handle,
-    savePending: async (pending: { planId: string; version: number; taskId: string; principalId: string; sessionId: string; requestId: string; userText: string }) => {
-      await pendingPlanRepo.savePending({ ...pending, decision: 'confirm', expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(), evaluation: {} });
-    },
-  };
-
+  // 计划确认门接线收敛到 apps/server/plan-confirmation-route.ts 的工厂（D-013）：
+  // assembly 与 scripts/ask.ts 共用同一份装配，不再逐字复刻。
+  const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret });
   const runtime = createTaxAgentRuntime({
     driver,
     // Context State extraction is a separate tool-free background turn using the same provider/model.
@@ -182,7 +154,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     sessionTtlMs: config.sessionTtlMs,
     // Leave time for the Main Agent to interpret the subagent's final text
     // after the delegated turn reaches its own deadline.
-    turnBudgetMs: (config.contextProfiles['17dz']?.workerTimeoutMs ?? 600_000) + 120_000,
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
     platformTask,
     // 任务计划状态（Phase 6）：存储未启用时缺省，长任务拆解照常、只是没有进度投影。
     ...(taskPlans ? { taskPlans } : {}),
@@ -203,7 +175,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(platformRoot ? { platformRoot } : {}),
     planActivationSecret,
     close: async () => {
-      pendingPlanRepo.close();
+      planConfirmation.close();
       closeStore(store);
     },
   };
