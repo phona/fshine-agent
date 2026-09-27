@@ -75,7 +75,7 @@ export function asAgentPendingRepo(repo: SqlitePendingPlanConfirmationRepo): Pen
 export function createPlanConfirmationWiring(options: {
   /** SQLite 库文件路径（待确认计划与审计库同一个文件，跟随其生命周期）。 */
   dbPath: string;
-  /** 平台根目录；缺省 = 平台未配置，verify/activate fail-loud。 */
+  /** 平台根路径；缺省 = 平台未配置，verify/activate fail-loud。 */
   platformRoot?: string;
   /** 宿主计划激活密钥（进程级机密，不进 worker env）。 */
   planActivationSecret: string;
@@ -84,14 +84,14 @@ export function createPlanConfirmationWiring(options: {
   const confirmationRoute = createPlanConfirmationRoute({
     repo: asAgentPendingRepo(pendingPlanRepo),
     verifyActivatable: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根目录未配置');
+      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
       const status = await loadPlanStatus({ platformRoot: options.platformRoot, planId: pending.planId });
       if (status && status.status !== 'pending') {
         throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
       }
     },
     activate: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根目录未配置');
+      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
       await activatePendingPlan({
         platformRoot: options.platformRoot,
         planId: pending.planId,

@@ -76,7 +76,7 @@ export function parsePrepareOutcome(stdout: string): PrepareOutcome {
   return { ok: env.status === 'completed', dryRun: mode === 'dry-run' };
 }
 
-/** verify-saved 读回的期内记录条数：仅认 RESULT 信封。 */
+/** verify-saved 读回的期内条数：仅认 RESULT 信封。 */
 export function parseVerifyCount(stdout: string): number | null {
   const env = parseEnvelope(stdout);
   if (!env || env.op !== PLATFORM_OPERATIONS.voucherVerifySaved) return null;

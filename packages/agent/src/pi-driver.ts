@@ -168,7 +168,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       const summary = await generateSummary(
         messages, models, model,
         DEFAULT_COMPACTION_SETTINGS.reserveTokens,
-        '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的时间范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。',
+        '这是助手会话的压缩。摘要必须保留:1)当前正在处理的对象标识与名称;2)当前的处理范围;3)最近一次工具结果里的分页游标原值(用户要靠它翻页);4)用户的关键意图与未决问题;5)已得出的中间结论与未完成的步骤(长任务靠它续跑)。',
         undefined, undefined, undefined, undefined, BACKGROUND_CONTEXT,
       );
       if (!summary.ok) {

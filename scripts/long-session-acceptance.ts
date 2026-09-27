@@ -4,6 +4,13 @@
  *   --mode=auto  自校准种子到超过自动压缩阈值(111,616 tokens) → 非强制触发
  * 都用真 LLM：compact 摘要与探针回复全部真实产出。
  * 用法: node --env-file=.env --import tsx scripts/long-session-acceptance.ts --mode=ttl|auto
+ *
+ * 【夹具声明（D-006 显式决策，登记于 docs/debt-ledger.md）】
+ * 本文件是**验收夹具**：round() 里的账套名/期间/张数/金额/游标全部是按索引算术生成的
+ * **编造数据**，用于给压缩与记忆探针提供"真实感"的输入材料。这些数字**不得作为期望值
+ * 引用**（不是任何平台查询的结果，也不构成对平台口径的陈述）；L1 的业务词预算把
+ * scripts/ 显式排除在扫描范围外正是基于这一条（领域词在夹具里是测试数据，不是宿主替
+ * 平台说话）。若要把其中任何数字当断言用，先换成平台真实规范名与真实返回值。
  */
 import { randomUUID } from 'node:crypto';
 import { closeStore, createSqliteStore, loadConfig, principalScopeRecords, newId } from '@fshine/core';

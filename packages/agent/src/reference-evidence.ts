@@ -66,7 +66,7 @@ function renderEvidence(events: ConversationEventRecord[], truncated: boolean): 
   const tail = truncated ? '\n（证据过多已按上限截断；更早的历史不在本材料内。）' : '';
   return [
     '【宿主主动回溯：指代消解证据。用法：把当前消息里的指代词（这个/那个/它/刚才/上次）对应到实体，',
-    '再把实体写进申报的 request（例：「查询<对应到的实体> <用户给的时间范围>」）；',
+    '再把实体写进申报的 request（例：「查询<对应到的实体> <用户给的范围>」）；',
     '不得把材料里其他的实体擅自纳入本轮范围。无法唯一对应时选 conversation 问用户，不要猜。】',
     lines,
     tail,

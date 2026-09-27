@@ -31,7 +31,7 @@ export interface PlanStepLabel {
 /**
  * 解析计划模式前缀。返回 null = 单步模式（含"前缀非法"这种退化情形）。
  *
- * 例：`第2/3步：查某对象 202609 的余额` → `{ stepIndex: 2, totalSteps: 3, label: '第 2/3 步', request: '查某对象 202609 的余额' }`
+ * 例：`第2/3步：查某对象 202609 的数据` → `{ stepIndex: 2, totalSteps: 3, label: '第 2/3 步', request: '查某对象 202609 的数据' }`
  */
 export function parsePlanStep(request: string): PlanStepLabel | null {
   const text = request.trim();

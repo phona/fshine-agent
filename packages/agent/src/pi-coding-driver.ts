@@ -463,7 +463,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
-  // 只在此处记录，绝不扫描 worker 的自然语言回复。
+  // 只在此处留痕，绝不扫描 worker 的自然语言回复。
   const needsClues: SubagentNeeds[] = [];
   const { session } = await createAgentSession({
     cwd: options.cwd,

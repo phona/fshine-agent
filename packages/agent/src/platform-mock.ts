@@ -20,7 +20,7 @@ export function isPlatformMock(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * 落账总闸（派生规则，取代旧 FSHINE_SUBMIT_ENABLED 演练开关）：
+ * 落账总闸（派生规则，取代旧演练开关——那个开关名已退役，不再引用）：
  *   - mock 之下写的是假状态，落账全链路默认放开（这正是 mock 联调的价值）；
  *   - 真平台之下默认拒绝 commit，须显式 FSHINE_REAL_COMMIT=1 才放行真写。
  */

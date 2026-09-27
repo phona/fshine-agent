@@ -4,17 +4,27 @@
  * 平台侧契约演进（E1 操作名 / E2 信封 / E3 权重）落地后，白名单应持续收窄。
  *
  * 第二条预算（L1 业务词归属）：业务词不得以**非防御**形态进入宿主 src。进度帧里的
- * 业务措辞只能由平台清单第 5 列提供（见 operation-labels.ts）。词表九词（应收/凭证/
- * 科目/账套/期间/目录/税号/财务/借贷）；命中项按**四标签归属制度**登记（警职执法/
- * 防御排除/平台下发/遗留待清），断言"非防御命中=0"——每个命中必须在允许集里且挂标签，
- * 未挂标签的命中即红。防御排除项（记忆提取财务正则、hasFinancialFigure 等）删它=防御
- * 变聋，100% 挂「防御排除」并注释理由。
+ * 业务措辞只能由平台清单第 5 列提供（见 operation-labels.ts）。词表十五词（应收/凭证/
+ * 科目/账套/期间/目录/税号/财务/借贷/余额/往来/时间范围/记录/档案/摸底）；命中项按
+ * **四标签归属制度**登记（警职执法/防御排除/平台下发/遗留待清），断言"非防御命中=0"——
+ * 每个命中必须在允许集里且挂标签，未挂标签的命中即红。防御排除项（记忆提取财务正则、
+ * hasFinancialFigure 等）删它=防御变聋，100% 挂「防御排除」并注释理由。
+ *
+ * 词表收词纪律（D-005）：**同义改写抓不到**——进度帧曾用"时间范围/记录/档案/摸底"
+ * 一类伪装形绕过了最初的六词表。收词因此按"领域概念"而不是"最显而易见的词"：
+ * 时间范围→期间、记录/档案→凭证、摸底→域操作（对照表见 BUSINESS_WORD_RE 上方）。
+ * 命中即现形，再逐条按四标签归属——伪装形的正确出路是改中性措辞或挂标签，
+ * 不是继续换一个词。
  *
  * 第三条预算：字面量 if 预算——禁止新增"针对具体输入值的字面量比较分支"
  * （出事点 if-else / 症状嗅探，2026-09 用户点名：不希望再看到针对具体模型输入的
  * 一堆 if-else）。哲学与业务词预算相同：扫出当前命中集 → 冻结为基线 → 只减不增
  * （新增即红，收敛直接通过）。模式定义、三轮收窄过程与白名单理由见文件底部
  * LITERAL_IF_* 常量块。
+ *
+ * 第四条预算（D-017）：FSHINE_* 命名空间登记锁——治理六名已由第一条预算禁绝，
+ * 剩下三个"有意保留"的 FSHINE_* 名字必须显式登记（挂标签 + 理由），未登记的新名字
+ * 即红。命名空间从此只有两种状态：禁绝或已登记，没有"没决定"。
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -37,7 +47,6 @@ const FORBIDDEN: Array<{ label: string; pattern: RegExp }> = [
   { label: '已废弃入口 serve.sh', pattern: /serve\.sh/ },
   { label: '旧消费者命名（E4 后应全量 DZ_*）', pattern: /FSHINE_(MODE|INVOCATION|COMMIT_TOKEN|GATE_SECRET|EXECUTOR|MOCK_STATE)/ },
 ];
-
 function* walk(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
@@ -65,7 +74,10 @@ describe('平台泄漏预算 lint', () => {
   });
 
   it('编排层业务词归属预算：非防御命中=0 且防御项 100% 挂「防御排除」', () => {
-    const hits = businessWordHits(path.join(REPO_ROOT, 'packages/agent/src'));
+    // D-004：扫描范围与字面量 if 预算对齐（packages/agent/src + apps）——生产装配与落账
+    // 执行器（apps/server）也属编排层，曾整目录在守卫之外；scripts 的排除是显式常量
+    // （见 BUSINESS_WORD_EXCLUDED_DIRS），不是"忘了传这个目录"。
+    const hits = BUSINESS_WORD_SCAN_DIRS.flatMap((dir) => businessWordHits(path.join(REPO_ROOT, dir)));
     // 判据一（非防御命中=0）：命中项必须在允许集里且挂标签；未挂标签的命中即红。
     const untagged = hits.filter((hit) => !BUSINESS_WORD_ALLOWLIST.has(hit));
     expect(untagged, [
@@ -81,6 +93,26 @@ describe('平台泄漏预算 lint', () => {
     }
   });
 
+  it('D-017 FSHINE_* 命名空间登记锁：禁绝集之外的名字必须显式登记（未登记即红）', () => {
+    const found = new Set<string>();
+    for (const dir of SCAN_DIRS) {
+      for (const file of walk(path.join(REPO_ROOT, dir))) {
+        for (const match of readFileSync(file, 'utf8').matchAll(/\bFSHINE_[A-Z0-9_]+/g)) found.add(match[0]!);
+      }
+    }
+    const unregistered = [...found].filter((name) => !FSHINE_NAME_REGISTRY.has(name)).sort();
+    expect(unregistered, [
+      '出现了未登记的 FSHINE_* 名字（E4 命名统一后只允许两种状态：禁绝或已登记）：',
+      ...unregistered,
+      '新名字 → 统一改 DZ_*；确有必要保留 → 在 FSHINE_NAME_REGISTRY 登记并挂四标签之一 + 理由。',
+    ].join('\n')).toEqual([]);
+    // 登记项必须挂标签（与业务词预算同纪律：没有标签的命中既不许默默保留也不许当违例删）
+    for (const [name, entry] of FSHINE_NAME_REGISTRY) {
+      expect(entry.tag, name).toMatch(/警职执法|防御排除|平台下发|遗留待清/);
+      expect(entry.reason.length, name).toBeGreaterThan(0);
+    }
+  });
+
   it('字面量 if 预算：针对具体输入值的字面量比较分支只减不增（新增即红）', () => {
     const hits = literalIfHits();
     // 子集断言：当前命中必须全部在冻结基线内（新增 → 红）；收敛（删分支）直接通过。
@@ -93,8 +125,29 @@ describe('平台泄漏预算 lint', () => {
   });
 });
 
-/** 编排层业务词（中文领域词，九词）：出现即说明 fshine 可能在替平台说话。 */
-const BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷/g;
+/**
+ * 编排层业务词（中文领域词）：出现即说明 fshine 可能在替平台说话。
+ *
+ * 收词纪律（D-005）：按**领域概念**收，不按"最显而易见的词"收——泄漏的真实形状是
+ * 同义改写。显式对照表（伪伪装形 → 真实领域概念）：
+ *   时间范围 → 期间      （进度帧/提示词用它绕开"期间"）
+ *   记录 / 档案 → 凭证   （"拉取记录""检索档案"实为查凭证）
+ *   摸底     → 域操作    （"正在做摸底"实为平台域检索）
+ * 余额 / 往来 是财务口径本身（应收账款的附属概念），同样只住执行层。
+ * 词表只增不减：新增词会让一批存量命中现形，逐条按四标签归属（见下方允许集），
+ * 真违例改中性措辞、防御项挂标签——不许为了让灯绿把词从表里删掉。
+ */
+const BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g;
+
+/**
+ * 业务词预算的扫描目录（D-004）：与第三条预算（字面量 if）对齐——编排层生产代码 =
+ * packages/agent/src + apps/server。scripts/ 的排除必须显式：D-005 附条判其 144 处命中
+ * 为"接受不修"（验收夹具与探针替身，领域词是测试数据不是宿主替平台说话），纳入
+ * "只减不增"预算会冻结 144 行。**排除是决策不是遗漏**——若 scripts/ 下新增非夹具用途
+ * 文件（把验收逻辑提升为生产代码），该文件须并入扫描范围（台账 D-005 附条复核条件）。
+ */
+const BUSINESS_WORD_SCAN_DIRS = ['packages/agent/src', 'apps'];
+const BUSINESS_WORD_EXCLUDED_DIRS = ['scripts'];
 
 /**
  * 四标签归属类型（docs/architecture-laws.md 归属标签制度）：
@@ -115,7 +168,9 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/memory-candidate-extractor.ts: 应收', { tag: '防御排除', reason: 'FINANCIAL_RESULT_RE（五条财务识别正则之一）：拦"把临时财务事实存进长期记忆"，删=防沉积防御变聋' }],
   ['packages/agent/src/memory-candidate-extractor.ts: 科目', { tag: '防御排除', reason: 'BALANCE_RE（科目余额…）：同上财务识别防御正则' }],
   ['packages/agent/src/memory-candidate-extractor.ts: 账套', { tag: '防御排除', reason: 'ACCOUNT_SET_RE：同上财务识别防御正则（PERIOD_RE/CURRENCY_AMOUNT_RE 两条不含九词，故不命中）' }],
+  ['packages/agent/src/memory-candidate-extractor.ts: 余额', { tag: '防御排除', reason: 'BALANCE_RE 的"科目余额…"模式（D-005 扩词后现形）：财务事实识别正则的一部分，删=记忆提取器对余额类事实变聋' }],
   ['packages/agent/src/runtime.ts: 财务', { tag: '防御排除', reason: 'hasFinancialFigure 及周边"财务数字"检测（区分编造结论 vs 能力边界说明）+ 历史资料防串（旧财务结论不当本轮实时结果）：删=出口校验/防串防御变聋' }],
+  ['packages/agent/src/runtime.ts: 余额', { tag: '防御排除', reason: 'hasFinancialFigure 正则的"余额"分支（D-005 扩词后现形）：检测"回复是否带财务数字"的出口校验尺，删=编造结论识别变聋' }],
   // ── 警职执法：守卫/校验器识别业务模式，其存在就是为了识别 ──
   ['packages/agent/src/context-extractor.ts: 期间', { tag: '警职执法', reason: 'hasContradiction 范围意图识别（更多期间/当前期间配对）：识别业务词以判定用户范围意图，是识别器不是泄漏' }],
   ['packages/agent/src/serve-gate.ts: 目录', { tag: '警职执法', reason: 'G1 门知识面/根目录的路径安全判定：门守卫自身引用它约束的知识面' }],
@@ -123,6 +178,15 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/pi-coding-driver.ts: 目录', { tag: '警职执法', reason: '计划实体来源收集：账套检索结果作为执行痕迹/候选名来源的识别' }],
   // ── 遗留待清：已知该走还没走，挂账限期 ──
   ['packages/agent/src/context.ts: 借贷', { tag: '遗留待清', reason: '写路径确认摘要渲染"借贷合计"（L4 违例）：Wave 3 迁到平台盖章 summary，宿主不再渲染业务字段' }],
+  // D-004 扩范围后 apps/ 生产代码的首批命中（原有 6 处里的 3 处；reply.ts 彩蛋已随 Wave 1
+  // 删除，assembly.ts 两处注释已先行改中性）。commit.ts 是写路径执行器（L4 违例家族）：
+  // 业务词在注释与 ops 面向的错误串里，Wave 3 写路径保险箱重构后整体迁出编排层。
+  ['apps/server/commit.ts: 账套', { tag: '遗留待清', reason: '写路径落账执行器的账套校验/读回注释（L4：业务字段住编排层）：Wave 3 保险箱重构（D-030/D-031）后迁平台，届时本条关闭' }],
+  ['apps/server/commit.ts: 凭证', { tag: '遗留待清', reason: '写路径读回校验的注释与 ops 面向错误串（"期内凭证数变化"）：同 D-030 家族，用户话术不含该串（context.ts 固定文案），随 Wave 3 一并了结' }],
+  // D-005 扩词后 execution-facts.ts 现形的两词：文件头数据源取舍注释正在描述 D-065 欠账
+  // 本身（platform_tasks 无账套/期间/calls），同波任务组5 补结构化字段时此段重写。
+  ['packages/agent/src/execution-facts.ts: 时间范围', { tag: '遗留待清', reason: '文件头"没有对象、没有时间范围、没有调用次数"描述 D-065 欠账现状：Wave 2 Lane D 任务组5（D-065）补 accountSet/period/calls 结构化字段后此段重写，届时本条关闭' }],
+  ['packages/agent/src/execution-facts.ts: 记录', { tag: '遗留待清', reason: '文件头/渲染注释里的"执行记录/记录原文"（Conversation Log 条目的通称）：随 D-065 结构化渲染改造（同波任务组5）一并清理，届时本条关闭' }],
   ['packages/agent/src/context.ts: 目录', { tag: '遗留待清', reason: 'worker 系统提示词的工作目录/账套检索/域目录前缀描述：理想应收敛为平台 SKILL 指针（Wave 2 D）' }],
   ['packages/agent/src/context.ts: 期间', { tag: '遗留待清', reason: '并发注释"会话期间"的时间描述（非业务期间口径）：待改写成中性"过程/时间"' }],
   ['packages/agent/src/history-tools.ts: 财务', { tag: '遗留待清', reason: '通用历史工具描述误用"财务"限定（search_history/get_messages 领域无关）：待改成"实时数据/历史结果"中性措辞' }],
@@ -134,8 +198,24 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
   'packages/agent/src/memory-candidate-extractor.ts: 应收',
   'packages/agent/src/memory-candidate-extractor.ts: 科目',
   'packages/agent/src/memory-candidate-extractor.ts: 账套',
+  'packages/agent/src/memory-candidate-extractor.ts: 余额',
   'packages/agent/src/runtime.ts: 财务',
+  'packages/agent/src/runtime.ts: 余额',
 ];
+
+/**
+ * FSHINE_* 名字登记表（D-017：E4 治理六名已禁绝，剩下三个"有意保留"的必须显式登记）。
+ *
+ * 为什么不是统统禁绝：这三个不是治理接口（那六名已收敛到 DZ_*），而是宿主自己的安全
+ * 开关/运行参数——改名要联动 17dz 侧读取端与部署文档，且 FSHINE_REAL_COMMIT 是真写
+ * 放行总闸（比治理接口更危险），在双仓协同改名落地前"已登记"优于"没决定"。
+ * 每条挂且仅挂一类标签 + 限期；17dz 侧 dz-env 退役（D-016）后复审判定是跟进 DZ_* 还是续期。
+ */
+const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }> = new Map([
+  ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：17dz 侧 LEAKY_EXACT 已预留 DZ_REAL_COMMIT，双仓协同改名属 D-016 退役批次；此前面向生产的"显式声明"语义不变' }],
+  ['FSHINE_PI_AGENT_DIR', { tag: '遗留待清', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；随 DZ_* 统一批次改名' }],
+  ['FSHINE_PLATFORM_CONCURRENCY', { tag: '遗留待清', reason: '委派并发闸（context.ts，默认 1）：.env.example 已文档化，改 DZ_* 需同步部署文档；随 DZ_* 统一批次改名' }],
+]);
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：
 //   · runtime.ts hasFinancialFigure：正则用 余额/金额/发生额（不在九词表）检测"财务数字"。

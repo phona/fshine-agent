@@ -16,7 +16,7 @@ export interface MemoryCandidateModel {
 
 const SYSTEM_PROMPT = `你负责从用户原始消息中提取适合长期保存的稳定信息。只返回 JSON 对象 {"candidates":[...]}，每条包含 key、type(preference|fact)、content、sourceEventIds、action(assert|correct|delete)，纠正或删除还要提供 supersedesMemoryIds。
 
-只记录用户明确表达且未来对话会持续有用的偏好或稳定事实。每条都必须引用输入中真实的 user_message eventId。不要把助手推测、工具结果、临时任务、一次性数据、报表数字或本次查询结果存入长期记忆。对于“改正/以后改用/不再记得/删除”等明确表达，分别输出 correct 或 delete，并提供被替代/删除记录 ID；不得把更正或删除改写成普通 assert。证据不足时返回空 candidates。不得从输入以外的记忆投影补充事实。`;
+只留存用户明确表达且未来对话会持续有用的偏好或稳定事实。每条都必须引用输入中真实的 user_message eventId。不要把助手推测、工具结果、临时任务、一次性数据、报表数字或本次查询结果存入长期记忆。对于“改正/以后改用/不再记得/删除”等明确表达，分别输出 correct 或 delete，并提供被替代/删除的记忆 ID；不得把更正或删除改写成普通 assert。证据不足时返回空 candidates。不得从输入以外的记忆投影补充事实。`;
 
 const PERIOD_RE = /(?:(?<!\d)20\d{2}(?:0[1-9]|1[0-2])(?!\d)|20\d{2}\s*(?:年\s*(?:0?[1-9]|1[0-2])\s*月|[-/.]\s*(?:0?[1-9]|1[0-2])\b|年?[-/.]?\s*[Qq][1-4])|[一二三四1-4]季度)/u;
 const ACCOUNT_SET_RE = /(?:账套(?:名称|编号)?\s*[:：]?\s*[\p{L}\p{N}_-]+|account\s*set\s*[:#-]?\s*[\w-]+)/iu;

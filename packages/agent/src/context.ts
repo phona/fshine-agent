@@ -530,7 +530,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}) };
         }
         // 纠错环（架构 §3）：worker 执行不了，回报"缺什么/为什么/建议用户提供什么"。
-        // 任务记录保持可续（taskId 已知会宿主侧，用户补充后经 continueTaskId 重派），
+        // 任务保持可续（taskId 已知会宿主侧，用户补充后经 continueTaskId 重派），
         // 线索原样上交，由 Main Agent 决定自己补齐还是转告用户。这一轮零执行，
         // 因此没有执行面注脚可拼（注脚只描述真实发生过的网关调用）。
         if (result.needs) {
