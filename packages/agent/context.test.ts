@@ -21,6 +21,11 @@ class MemoryTasks implements PlatformTaskRepo {
   readonly records = new Map<string, PlatformTaskRecord>();
   async get(taskId: string) { return this.records.get(taskId) ?? null; }
   async upsert(record: PlatformTaskRecord) { this.records.set(record.taskId, structuredClone(record)); }
+  async listBySession(principalId: string, sessionId: string) {
+    return [...this.records.values()]
+      .filter((record) => record.principalId === principalId && record.parentSessionId === sessionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
 }
 
 class MemorySessions {

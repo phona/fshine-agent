@@ -16,7 +16,7 @@
  * 变成红（不是"换个说法还能过"）。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, gatedWorker, totalActualCalls } from './harness';
+import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, totalActualCalls } from './harness';
 
 const FACTS_MARKER = '【宿主执行事实：';
 
@@ -207,6 +207,38 @@ describe('离线全链 e2e：召回事实注入（执行台账）', () => {
     // 没有台账就没有任何数字结论可复述
     expect(reply).not.toMatch(/\d+\s*[元万亿]/);
     expect(sdk.noticeTexts()).toHaveLength(0);
+    await assembly.close();
+  });
+});
+
+describe('离线全链 e2e：结构化召回条目（D-065 P2）', () => {
+  it('10.4 有计划的委派 → 召回条目带结构化事实（期间/平台label/结局）且原文数值仍在', async () => {
+    const worker = gatedWorker([
+      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
+      { text: '幻辰财税 202609 应收余额为 51 元。' },
+      { end: true },
+    ]);
+    const observed: string[] = [];
+    const { send, assembly } = await boot({
+      main: recallDriver(
+        [
+          { kind: 'delegate', request: '查询幻辰财税账套本期的应收账款余额' },
+          { kind: 'conversation' },
+        ],
+        recallFromFacts,
+        (messages) => observed.push(JSON.stringify(messages)),
+      ),
+      worker,
+    });
+
+    await send('查一下幻辰财税 202609 的应收账款余额');
+    const recalled = await send('刚才查出来是多少钱？');
+
+    // 结构化条目：时间｜<期间> <平台中文label> → <done>｜原文（数值只能在原文里）
+    expect(recalled).toContain(`${CURRENT_PERIOD} 查应收账款余额 → done`);
+    expect(recalled).toContain('51');
+    // 归因不串：条目里没有本轮之外的对象
+    expect(recalled).not.toContain('新兴五金');
     await assembly.close();
   });
 });

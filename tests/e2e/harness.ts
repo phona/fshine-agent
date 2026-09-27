@@ -22,7 +22,8 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
-import { evaluateAndActivatePlan, loadCurrentActivePlan, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import { loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, type SelectionClarification } from '../../packages/agent/src/platform-contract';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -33,6 +34,10 @@ const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
 let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
 let counter = 0;
+// 平台 args 规格与 label 表（D-065 结构化事实的取值来源）：一次性派生，测试替身与真实
+// 驱动读同一份平台数据（不镜像、不手抄）。
+const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT);
+const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
@@ -263,6 +268,9 @@ function gatedWorker(script: WorkerStep[]) {
       // 收尾兜底（P1）：方案已批准但零执行。真实 worker 由 pi-coding-driver 补一刀后
       // 仍然零调用，才把这个事实上报宿主——这里直接复刻那个终局状态。
       let activatedPlan: { planId: string; version: number } | undefined;
+      // 结构化事实（D-065）：与真实驱动走同一条生产函数——calls 取脚本里提交的计划，
+      // 取值按平台 args 规格的声明名机械提取，label 取平台清单第 5 列。
+      let plannedCalls: PlanCall[] = [];
       // 结构化歧义/未找到：真实 worker 由 pi-coding-driver 从本回合的 tool_result 信封派生
       // （platform-contract 的 selectionClarificationFromResponses）。替身走同一条生产函数
       // ——派生逻辑只有一份，不存在"测试里另写一套提取"。
@@ -326,6 +334,7 @@ function gatedWorker(script: WorkerStep[]) {
           continue;
         }
         if (plan.status !== 'active') { parts.push(plan.message); continue; }
+        plannedCalls = current.plan;
         if (current.stopAfterActivate) {
           // 计划已激活（通知已送达）但一个调用都不发起：执行闭环断裂的终局
           activatedPlan = { planId: plan.planId, version: plan.version };
@@ -357,9 +366,21 @@ function gatedWorker(script: WorkerStep[]) {
       const clarification: SelectionClarification | undefined = selectionClarificationFromResponses(
         platformOutputs.map((body) => ({ role: 'toolResult', content: [{ type: 'text', text: body }] })),
       );
+      const facts = plannedCalls.length > 0
+        ? (() => {
+          const { accountSet, period, label } = planCallFacts(plannedCalls, argSpecs, operationLabels);
+          return {
+            calls: plannedCalls.map((call) => ({ operation: call.operation, args: call.args })),
+            ...(accountSet ? { accountSet } : {}),
+            ...(period ? { period } : {}),
+            ...(label ? { label } : {}),
+          };
+        })()
+        : undefined;
       return {
         text,
         messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
+        ...(facts ? { planFacts: facts } : {}),
         ...(proof ? { execution: proof } : {}),
         ...(activatedPlan ? { activatedPlan } : {}),
         ...(pendingPlan ? { pendingPlan } : {}),

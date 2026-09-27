@@ -81,6 +81,7 @@ async function main(): Promise<void> {
     tasks: store.platformTasks ?? {
       async get() { return null; },
       async upsert() { throw new Error('no store'); },
+      async listBySession() { return []; },
     },
     workerDriver,
     profileId: '17dz',
@@ -97,6 +98,7 @@ async function main(): Promise<void> {
     sessionTtlMs: config.sessionTtlMs,
     turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
     platformTask,
+    ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
     // 与生产装配同一条加载链：业务 skill（架构 §5）存在才注入
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
     ...(store.taskPlans ? { taskPlans: store.taskPlans } : {}),

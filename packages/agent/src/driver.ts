@@ -7,7 +7,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { SelectionClarification } from './platform-contract';
-import type { PendingPlanConfirmation } from './plan-runtime';
+import type { PendingPlanConfirmation, PlanCall } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 
 /** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
@@ -52,8 +52,27 @@ export interface TurnDriverInput {
 }
 
 /**
- * 子 Agent 执行不了时的结构化线索（架构 §3 纠错环，roadmap Phase 5）。
+ * 计划调用的结构化事实（D-065，P2）：宿主从 worker 提交的计划命令**机械解析**出的调用
+ * 与平台 args 规格声明名对应的取值。
  *
+ * 为什么由驱动产出：只有驱动同时持有这两样确定性材料——worker 提交的计划命令（宿主
+ * 自己解析的 calls）与平台 args 规格 / label 表（驱动侧派生）。**绝不从 worker 文本
+ * 解析**：转录里"提过"不等于"执行过"。字段缺失（本回合没提计划 / 规格对不上）时整项
+ * 缺省，消费方（platform_tasks 的结构化字段）据此降级，不猜不补。
+ */
+export interface PlanCallFacts {
+  /** 本回合宿主解析出的计划调用（原样，未经任何加工）。 */
+  calls: readonly PlanCall[];
+  /** 平台 args 规格声明名为 accountSet 的取值（平台规范名/检索关键词）。 */
+  accountSet?: string;
+  /** 平台 args 规格声明名为 period 的取值（YYYYMM）。 */
+  period?: string;
+  /** 首个 operation 的中文标签（平台清单第 5 列）。 */
+  label?: string;
+}
+
+/**
+ * 子 Agent 执行不了时的结构化线索（架构 §3 纠错环，roadmap Phase 5）。 *
  * 两个来源，都必须是确定性的：
  *   1. 脚本化替身（离线 e2e）直接产出；
  *   2. 真实 worker 由驱动从「平台确定性拒绝原因」派生——RESULT 信封里的错误码、
@@ -90,6 +109,11 @@ export interface TurnDriverResult {
    * least one executed call. Absent this, the host must not let the turn's text reach the user.
    */
   execution?: { planId: string; version: number; calls: number };
+  /**
+   * 本回合计划调用的结构化事实（D-065）：宿主机械解析的计划命令 + 平台 args 规格取值。
+   * 与 execution 的分工：execution 证明"执行发生过"，planFacts 写清"执行的是什么"。
+   */
+  planFacts?: PlanCallFacts;
   /**
    * 方案已获批准（计划已激活）但本次没有执行任何平台调用（P1 收尾兜底）。
    * 与 execution 互斥：有 execution 就说明真执行过。宿主据此给出确定性收尾文案

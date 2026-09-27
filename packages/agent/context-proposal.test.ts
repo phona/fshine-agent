@@ -22,7 +22,7 @@ const proposal: ChangeProposal = {
 const proposalText = `已洗好契约。\n\`\`\`json\n${JSON.stringify(proposal, null, 2)}\n\`\`\`\n请确认。`;
 
 const noopTool: DiscoveredTool = { name: 'x', description: '', inputSchema: {} };
-const noopTasks: PlatformTaskRepo = { get: async () => null, upsert: async () => {} };
+const noopTasks: PlatformTaskRepo = { get: async () => null, upsert: async () => {}, listBySession: async () => [] };
 const workerReturning = (text: string): TurnDriver => ({
   run: async (_input: TurnDriverInput): Promise<TurnDriverResult> => ({ text, messages: [] }),
 });

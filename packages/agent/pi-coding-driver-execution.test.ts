@@ -246,6 +246,11 @@ class FakePlatformTaskRepo implements PlatformTaskRepo {
   private readonly records = new Map<string, PlatformTaskRecord>();
   async get(taskId: string): Promise<PlatformTaskRecord | null> { return this.records.get(taskId) ?? null; }
   async upsert(record: PlatformTaskRecord): Promise<void> { this.records.set(record.taskId, structuredClone(record)); }
+  async listBySession(principalId: string, sessionId: string): Promise<PlatformTaskRecord[]> {
+    return [...this.records.values()]
+      .filter((record) => record.principalId === principalId && record.parentSessionId === sessionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
 }
 
 /**

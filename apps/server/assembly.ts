@@ -128,6 +128,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     tasks: store.platformTasks ?? {
       async get() { return null; },
       async upsert() { throw new Error('SQLite platform task store 未启用'); },
+      async listBySession() { return []; },
     },
     workerDriver,
     profileId: '17dz',
@@ -156,6 +157,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // after the delegated turn reaches its own deadline.
     turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
     platformTask,
+    // 召回事实台账的结构化事实源（D-065）：存储未启用时不注入（静默降级）。
+    ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
     // 任务计划状态（Phase 6）：存储未启用时缺省，长任务拆解照常、只是没有进度投影。
     ...(taskPlans ? { taskPlans } : {}),
     // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。

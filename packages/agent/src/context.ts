@@ -177,6 +177,15 @@ export interface ContextTaskRunner {
    * 会把"取消一个已作废的码"误记成 confirm_cancelled——那一轮什么都没发生）。
    */
   matchConfirmation?(ctx: TrustedContext, message: string): Promise<ConfirmationReply | null>;
+  /**
+   * 把一次委派的**用户可见结果文本**回写任务条目（D-065 结构化事实的兜底渲染源）。
+   *
+   * 为什么由 runtime 调：这段文本与 Conversation Log 的 tool_result 事件同文（宿主组装
+   * 的转达/交还材料），只有 runtime 知道最终形态；任务条目由此自含"这次委派用户看到了
+   * 什么"，召回台账才能在结构化字段缺失时降级渲染它。存储失败只记日志——事实回写是
+   * 增强，不回写不该让回合失败。
+   */
+  recordTaskResult?(taskId: string, facts: { resultText: string }): Promise<void>;
 }
 
 /**
@@ -257,6 +266,34 @@ export function extractChangeProposal(text: string, maxBatchCount: number): Chan
     } catch { /* 下一个候选 */ }
   }
   return null;
+}
+
+/**
+ * 把驱动上报的结构化事实（D-065）合并进任务条目：calls/accountSet/period/label 取本次
+ * 委派的快照（替换式——任务的最新范围），resultText 追加（同一任务多次委派的结果 trail，
+ * 上限见 RESULT_TEXT_MAX_CHARS），outcome 由委派结局定。全部字段可选——缺一个就不写一个，
+ * 消费方据此降级，不猜不补。
+ */
+const RESULT_TEXT_MAX_CHARS = 2_000;
+
+function withExecutionFacts(
+  running: PlatformTaskRecord,
+  result: TurnDriverResult,
+  outcome: PlatformTaskRecord['outcome'],
+): PlatformTaskRecord {
+  const facts = result.planFacts;
+  const resultText = [running.resultText, result.text.trim()].filter(Boolean).join('\n').slice(-RESULT_TEXT_MAX_CHARS);
+  return {
+    ...running,
+    outcome,
+    ...(facts ? {
+      calls: facts.calls.map((call) => ({ operation: call.operation, args: call.args })),
+      ...(facts.accountSet ? { accountSet: facts.accountSet } : {}),
+      ...(facts.period ? { period: facts.period } : {}),
+      ...(facts.label ? { label: facts.label } : {}),
+    } : {}),
+    ...(resultText ? { resultText } : {}),
+  };
 }
 
 export function createContextTaskRunner(options: ContextTaskRunnerOptions): ContextTaskRunner {
@@ -364,6 +401,18 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
 
   return {
     tool,
+    // D-065：结果原文回写。get→合并→upsert（保留结构化字段，只补 resultText）；
+    // 失败只记日志——事实回写是增强，不该让回合失败。
+    recordTaskResult: async (taskId, facts) => {
+      try {
+        const existing = await options.tasks.get(taskId);
+        if (!existing) return;
+        const appended = [existing.resultText, facts.resultText.trim()].filter(Boolean).join('\n').slice(-RESULT_TEXT_MAX_CHARS);
+        await options.tasks.upsert({ ...existing, ...(appended ? { resultText: appended } : {}), updatedAt: new Date().toISOString() });
+      } catch (error) {
+        console.warn(JSON.stringify({ event: 'platform_task_result_record_failed', taskId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+      }
+    },
     matchConfirmation: async (ctx, message): Promise<ConfirmationReply | null> => {
       const ci = options.changeIntents;
       if (!ci) return null;
@@ -535,7 +584,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 因此没有执行面注脚可拼（注脚只描述真实发生过的网关调用）。
         if (result.needs) {
           await options.tasks.upsert({
-            ...running,
+            ...withExecutionFacts(running, result, 'needs'),
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
@@ -568,7 +617,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
         };
         await options.tasks.upsert({
-          ...running,
+          ...withExecutionFacts(running, result, result.execution ? 'done' : 'failed'),
           workerMessages: result.messages as unknown[],
           updatedAt: new Date().toISOString(),
         });
@@ -610,7 +659,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 超时/失败也持久化本轮已产生的中间转录：taskId 续跑从断点继续，
         // 而不是从零重付全部时间与浏览器占用（长任务业务稳定性的关键）。
         await options.tasks.upsert({
-          ...running,
+          ...withExecutionFacts(running, result ?? { text: '', messages: [] }, 'failed'),
           ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
           updatedAt: new Date().toISOString(),
         });

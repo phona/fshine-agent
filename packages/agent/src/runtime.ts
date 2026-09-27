@@ -1,7 +1,7 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createHash } from 'node:crypto';
-import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, ContextStateRepo, ConversationEventRecord, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, type SubagentNeeds, type TurnDriver, type TurnDriverResult } from './driver';
@@ -131,6 +131,8 @@ export interface TaxAgentRuntimeDeps {
   driver: TurnDriver;
   sessions: Pick<ConversationSessionRepo, 'get' | 'upsert'>;
   platformTask: ContextTaskRunner;
+  /** 平台任务条目的结构化执行事实源（D-065：召回事实台账的列举入口，消费者=execution-facts）。 */
+  platformTasks?: Pick<PlatformTaskRepo, 'listBySession'>;
   /** Durable, append-only raw conversation log; separate from compactable Pi transcript. */
   conversationLog?: Pick<ConversationLogRepo, 'append' | 'search' | 'list'>;
   contextStates?: Pick<ContextStateRepo, 'get' | 'upsert'>;
@@ -367,15 +369,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }
       }
       // 召回事实注入（支柱 C）：与主动回溯共用同一把线索尺——用户消息带召回线索时，宿主把
-      // "本会话迄今真实发生过的平台执行"从 Conversation Log 的执行底账渲染成台账，注入上下文
-      // 头部。为什么必须读结构化底账而不是让模型从转录自由回忆：T3r 实测里模型把两个不同
-      // 对象/范围的查询混成"刚才两次查询"（归因串轮），转录里"提过"不等于"真的执行过"；
-      // 台账只机械陈述，比较与解释仍归模型。取舍与边界见 execution-facts.ts 文件头。
+      // "本会话迄今真实发生过的平台执行"从 platform_tasks 的结构化事实渲染成台账，注入上下文
+      // 头部。为什么必须读宿主持有的结构化底账而不是让模型从转录自由回忆：T3r 实测里模型把
+      // 两个不同对象/范围的查询混成"刚才两次查询"（归因串轮），转录里"提过"不等于"真的执行过"；
+      // 台账只机械陈述，比较与解释仍归模型。取舍与边界见 execution-facts.ts 文件头（D-065）。
       let executionFacts: ExecutionFacts | null = null;
-      if (deps.conversationLog && looksLikeReferenceCue(userMessage)) {
+      if (deps.platformTasks && looksLikeReferenceCue(userMessage)) {
         try {
           executionFacts = await collectExecutionFacts({
-            conversationLog: deps.conversationLog,
+            platformTasks: deps.platformTasks,
             principalId: ctx.principalId,
             sessionId: ctx.sessionId,
             userMessage,
@@ -974,7 +976,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason }));
         return { text: fallback };
       }
-      await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx));
+      const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx);
+      await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, toolResultEvents);
+      // D-065：结果文本回写任务条目（结构化字段缺失时召回台账的兜底渲染源）。与 Log 同文、
+      // 同样脱敏；失败不影响回合（recordTaskResult 内部已兜底）。
+      for (const { taskId, resultText } of taskResults) {
+        void deps.platformTask.recordTaskResult?.(taskId, { resultText })?.catch(() => undefined);
+      }
       scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
       console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok' }));
       return { text: replyText };
@@ -1093,19 +1101,28 @@ async function persistAssistantAndContext(
   }
 }
 
-function extract17dzToolResultEvents(messages: readonly AgentMessage[], ctx: TrustedContext): ConversationEventRecord[] {
+function extract17dzToolResultEvents(
+  messages: readonly AgentMessage[],
+  ctx: TrustedContext,
+): { events: ConversationEventRecord[]; taskResults: Array<{ taskId: string; resultText: string }> } {
   const events: ConversationEventRecord[] = [];
+  // D-065：同一次委派在 Conversation Log 里的 tool_result 文本，回写任务条目做召回
+  // 台账的兜底渲染源（recordTaskResult）。taskId 取自工具结果的原始 JSON（写进内容前），
+  // 只用于存储侧串联，不进任何模型可见文本。
+  const taskResults: Array<{ taskId: string; resultText: string }> = [];
   for (const [index, message] of messages.entries()) {
     const item = message as { role?: string; toolName?: string; toolCallId?: unknown; content?: unknown; timestamp?: unknown };
     if (item.role !== 'toolResult') continue;
     if (item.toolName !== RUN_17DZ_TASK_TOOL && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
     let content = messageText(item.content);
     // The tool result is usually a JSON envelope. Keep only its user-facing text field.
+    let taskId: string | undefined;
     try {
-      const parsed = JSON.parse(content) as { text?: unknown; recorded?: unknown };
+      const parsed = JSON.parse(content) as { text?: unknown; recorded?: unknown; taskId?: unknown };
       if (typeof parsed?.text === 'string') content = parsed.text;
       // A plain conversation declaration carries no result worth recalling later.
       else if (parsed?.recorded === 'conversation') continue;
+      if (typeof parsed?.taskId === 'string' && parsed.taskId) taskId = parsed.taskId;
     } catch { /* A plain natural-language result is already safe to reduce below. */ }
     content = redactInternalIds(redactSensitiveText(content)).slice(0, 20_000);
     if (!content.trim()) continue;
@@ -1119,8 +1136,9 @@ function extract17dzToolResultEvents(messages: readonly AgentMessage[], ctx: Tru
       createdAt: new Date(timestamp).toISOString(),
       requestId: ctx.requestId,
     });
+    if (taskId) taskResults.push({ taskId, resultText: content });
   }
-  return events;
+  return { events, taskResults };
 }
 
 function redactInternalIds(text: string): string {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from '@fshine/contracts';
+import type { ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
@@ -132,19 +132,25 @@ describe('createTaxAgentRuntime', () => {
   // 时间范围的查询混成"刚才两次查询"。宿主在召回线索命中时把执行底账渲染成台账，
   // 归因因此有据可依；台账只做归因，不扩大实体范围（C20 的并集不变）。
 
-  /** 一条历史执行底账（真库里由 extract17dzToolResultEvents 写入，taskId 已脱敏）。 */
-  function pastExecution(): ConversationEventRecord[] {
+  /**
+   * 一条历史执行底账（D-065 起真库由 platform_tasks 持有：结构化字段 + 结果原文）。
+   * 这条是没有结构化字段的旧记录形状——降级渲染原文，行为与 Log 时代一致。
+   */
+  function pastExecution(): PlatformTaskRecord[] {
     return [{
-      eventId: 'old_tool', principalId: 'wecom:user_a', sessionId: 'sess_1', kind: 'tool_result',
-      content: '幻辰财税 202606 应收账款余额为 61000 元。', createdAt: '2026-09-26T10:31:00.000Z',
+      taskId: 'task_old', parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+      workerMessages: [], createdAt: '2026-09-26T10:31:00.000Z', updatedAt: '2026-09-26T10:31:00.000Z',
+      resultText: '幻辰财税 202606 应收账款余额为 61000 元。',
     }];
   }
 
-  function factsLog(events: ConversationEventRecord[]) {
+  function factsTasks(records: PlatformTaskRecord[]) {
     return {
-      append: async () => {},
-      list: async ({ limit }: { limit: number }) => events.slice(-Math.max(1, limit)),
-      search: async () => events,
+      async listBySession(principalId: string, sessionId: string) {
+        return records
+          .filter((record) => record.principalId === principalId && record.parentSessionId === sessionId)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      },
     };
   }
 
@@ -161,7 +167,7 @@ describe('createTaxAgentRuntime', () => {
         entitySources = args.entitySources;
         return { taskId: 'task_live', text: '幻辰财税 202609 应收余额为 51 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
       }),
-      conversationLog: factsLog(pastExecution()),
+      platformTasks: factsTasks(pastExecution()),
     });
 
     await runtime.handleTurn(makeCtx({ requestId: 'req_execution_facts' }), '刚才那个账套 202609 呢？');
@@ -184,7 +190,7 @@ describe('createTaxAgentRuntime', () => {
       driver,
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      conversationLog: factsLog(pastExecution()),
+      platformTasks: factsTasks(pastExecution()),
     });
 
     await runtime.handleTurn(makeCtx({ requestId: 'req_no_recall_cue' }), '查一下幻辰财税的应收账款');
@@ -201,10 +207,8 @@ describe('createTaxAgentRuntime', () => {
       driver,
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      conversationLog: {
-        append: async () => {},
-        list: async () => { throw new Error('disk unavailable'); },
-        search: async () => [],
+      platformTasks: {
+        async listBySession() { throw new Error('disk unavailable'); },
       },
     });
 
@@ -224,7 +228,7 @@ describe('createTaxAgentRuntime', () => {
       driver,
       sessions,
       platformTask: subagent(),
-      conversationLog: factsLog(pastExecution()),
+      platformTasks: factsTasks(pastExecution()),
     });
 
     await runtime.handleTurn(makeCtx({ requestId: 'req_facts_strip' }), '刚才查出来是多少钱？');

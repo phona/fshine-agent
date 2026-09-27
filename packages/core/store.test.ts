@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs';
+import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -312,6 +313,66 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
 
       expect(await store.platformTasks!.get(taskId)).toEqual(updated);
     });
+
+    // ── P2 结构化执行事实（D-065）──────────────────────────────────────────
+    it('结构化事实原样往返：accountSet/period/calls/label/outcome/resultText', async () => {
+      const record = makePlatformTask({
+        accountSet: '幻州市幻晟财务代理有限公司',
+        period: '202609',
+        calls: [{ operation: 'voucher.query-saved', args: ['幻州市幻晟财务代理有限公司', '202609'] }],
+        label: '查凭证列表',
+        outcome: 'done',
+        resultText: '共 12 张凭证。',
+      });
+      await store.platformTasks!.upsert(record);
+
+      expect(await store.platformTasks!.get(record.taskId)).toEqual(record);
+    });
+
+    it('结构化字段缺失时不猜不补：记录里没有的字段读回时也不出现', async () => {
+      const record = makePlatformTask();
+      await store.platformTasks!.upsert(record);
+
+      const loaded = (await store.platformTasks!.get(record.taskId))!;
+      expect(loaded).toEqual(record);
+      expect('accountSet' in loaded).toBe(false);
+      expect('period' in loaded).toBe(false);
+      expect('calls' in loaded).toBe(false);
+      expect('outcome' in loaded).toBe(false);
+      expect('resultText' in loaded).toBe(false);
+    });
+
+    it('同 taskId upsert 替换结构化事实（不含"保留旧值"的隐式合并）', async () => {
+      const taskId = newId('task');
+      await store.platformTasks!.upsert(makePlatformTask({
+        taskId, accountSet: '甲', period: '202601', outcome: 'done', resultText: '第一次',
+      }));
+      await store.platformTasks!.upsert(makePlatformTask({
+        taskId, accountSet: '乙', period: '202602', outcome: 'needs',
+      }));
+
+      const loaded = (await store.platformTasks!.get(taskId))!;
+      expect(loaded).toMatchObject({ accountSet: '乙', period: '202602', outcome: 'needs' });
+      // resultText 由调用方（context.ts 的 withExecutionFacts）决定累不累加，存储不替它保留
+      expect('resultText' in loaded).toBe(false);
+    });
+
+    it('listBySession 按会话列举、时间正序，且不串其他 principal/会话', async () => {
+      const older = makePlatformTask({ taskId: 'task_old', createdAt: '2026-09-15T08:00:00.000Z', resultText: '较早' });
+      const newer = makePlatformTask({ taskId: 'task_new', createdAt: '2026-09-15T08:05:00.000Z', resultText: '较晚' });
+      await store.platformTasks!.upsert(newer);
+      await store.platformTasks!.upsert(older);
+      // 别的会话/principal 的同名任务不许混进来
+      await store.platformTasks!.upsert(makePlatformTask({
+        taskId: 'task_other_session', parentSessionId: 'wecom:user_a:conv_2', resultText: '旁路',
+      }));
+      await store.platformTasks!.upsert(makePlatformTask({
+        taskId: 'task_other_user', principalId: 'wecom:user_b', resultText: '旁路',
+      }));
+
+      const rows = await store.platformTasks!.listBySession('wecom:user_a', 'wecom:user_a:conv_1');
+      expect(rows.map((row) => row.taskId)).toEqual(['task_old', 'task_new']);
+    });
   });
 
   describe('changeIntents', () => {
@@ -482,5 +543,61 @@ describe('newId', () => {
     expect(a).toMatch(/^req_[0-9a-f-]{36}$/);
     expect(a).not.toBe(b);
     expect(newId('sess').startsWith('sess_')).toBe(true);
+  });
+});
+
+// ── P2 结构化事实的前向迁移（D-065）：旧库打开即补列，旧行读回时没有新字段 ──────────
+describe('platform_tasks 结构化事实列的前向迁移', () => {
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('旧库（无结构化列）打开后自动补列，旧行读回不带新字段、新写入照常往返', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fshine-core-migrate-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'legacy.db');
+    // 按迁移前的形状建库并写入一行（只到 updated_at 为止，没有结构化列）
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE IF NOT EXISTS platform_tasks (
+        task_id TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        parent_session_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        worker_messages TEXT NOT NULL,
+        current_step TEXT,
+        pending_questions TEXT,
+        last_result TEXT,
+        evidence TEXT,
+        skill_version TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, created_at, updated_at)
+      VALUES ('task_legacy', '', 'wecom:user_a:conv_1', 'wecom:user_a', 'active', '[]', '2026-09-15T08:00:00.000Z', '2026-09-15T08:05:00.000Z');
+    `);
+    legacy.close();
+
+    // 用新代码打开同一文件：迁移补列 + 既有数据可读
+    const store = createSqliteStore(dbPath);
+    try {
+      const legacyRow = (await store.platformTasks!.get('task_legacy'))!;
+      expect(legacyRow.taskId).toBe('task_legacy');
+      // 旧行没有结构化字段：读回时一个都不出现（消费方据此降级，不猜不补）
+      expect('accountSet' in legacyRow).toBe(false);
+      expect('resultText' in legacyRow).toBe(false);
+      expect(await store.platformTasks!.listBySession('wecom:user_a', 'wecom:user_a:conv_1')).toHaveLength(1);
+
+      // 新写入照常往返（补列后的同一张表）
+      await store.platformTasks!.upsert(makePlatformTask({
+        taskId: 'task_new', accountSet: '甲', period: '202601', outcome: 'done', resultText: '新行',
+      }));
+      const fresh = (await store.platformTasks!.get('task_new'))!;
+      expect(fresh).toMatchObject({ accountSet: '甲', period: '202601', outcome: 'done', resultText: '新行' });
+    } finally {
+      closeStore(store);
+    }
   });
 });

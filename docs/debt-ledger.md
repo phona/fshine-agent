@@ -715,7 +715,32 @@
 - **律法归属**：L2（宿主在抄写平台执行事实，而非机器可读地持有）。
 - **闭环判据**：`PlatformTaskRecord` 增加 `accountSet?` / `period?` / `calls?`（由 worker 出口的结构化数据回填，不是从转录解析）；`PlatformTaskRepo` 增加 `listBySession(principalId, sessionId)`；执行台账改为读结构化字段（原文仅作兜底并标注）；测试钉住"结构化字段缺失时不猜、不解析原文"。
 - **建议波次**：Wave 2 或 Wave 3（视 Lane B① 的 operations.json args 规格进度定—— args 规格落地后回填成本最低）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；Lane B① 的 args 规格已交付，回填走规格查表）。
+  关闭方式（字段与填充点比方案描述的略窄，宁缺勿猜）：
+  - `PlatformTaskRecord` 增 `accountSet?` / `period?` / `calls?` / `label?` / `outcome?` /
+    `resultText?`（最小集 + 渲染必需的 label/outcome/兜底原文）；`PlatformTaskRepo` 增
+    `listBySession(principalId, sessionId)`（时间正序，注释注明消费者=execution-facts）。
+  - 填充点全部在**委派时的确定性信息**上：`calls` 来自宿主自己解析的 worker 计划命令
+    （pi-coding-driver latch `parsePlanCallsCommand` 的结果，随 TurnDriverResult.planFacts
+    上交）；`accountSet`/`period` 按平台 `operation list --json` 的 args 规格**声明名**机械
+    提取（位置参数按序、flag 按平台自己的 kebab→camel 归一）——`--query` 推导出的 query
+    **不**当作 accountSet（检索关键词 ≠ 已解析规范名，宁缺勿猜）；`label` 是平台清单第 5 列；
+    `resultText` 由 runtime 在落 Conversation Log 的同一处以 `recordTaskResult` 回写
+    （与 Log 的 tool_result 同文同脱敏）；`outcome` 由委派结局（done/needs/failed）定。
+    **没有任何一步从 worker 文本解析。**
+  - `execution-facts.ts` 改为枚举 `listBySession`：有结构化字段 → 机械条目
+    「<时间>｜<账套> <期间> <平台label> → <done/缺信息/失败>」，**结果原文仍附在其后**
+    （数值结论只能来自原文——结构化条目管归因不管数值，这也是 e2e 10.1/10.2 既有断言
+    不被打弱的原因）；字段缺失 → 降级为原文（现有行为）；两者都没有的条目不进台账。
+  - 测试：execution-facts.test.ts 重写为任务仓库形态（结构化渲染 / 结局机械映射 / 旧任务
+    降级 / 混合 / 零业务词 / 上限截断 / 存储抛错）；store.test.ts 钉结构化字段往返、缺失
+    不补、upsert 替换语义、listBySession 隔离与正序、**旧库前向迁移**（无结构化列的库打开
+    即补列、旧行读回不带新字段）；plan-runtime.test.ts 钉 planCallFacts 的规格查表提取
+    （位置参数/flag 声明名、--query 不当账套、规格缺失不猜）；e2e 10.4 走真链路钉结构化
+    条目 + 原文数值并存（harness 替身与真实驱动共用同一个 planCallFacts）。
+  - 已知边界（登记在案）：升级前的旧任务记录没有任何结构化字段也没有 resultText，不进
+    台账（Conversation Log 仍是完整档案）；计划模式跨步委派只保留最后一次提交的 calls
+    快照（resultText 追加，保留完整结果 trail）。
 
 ---
 

@@ -162,7 +162,14 @@ CREATE TABLE IF NOT EXISTS platform_tasks (
   evidence TEXT,
   skill_version TEXT,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  -- P2 结构化执行事实（D-065）：委派时的确定性信息回填，不从 worker 文本解析。
+  account_set TEXT,
+  period TEXT,
+  calls TEXT,
+  label TEXT,
+  outcome TEXT,
+  result_text TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_platform_tasks_parent_session_id
   ON platform_tasks (parent_session_id);
@@ -283,6 +290,12 @@ interface PlatformTaskRow {
   worker_messages: string;
   created_at: string;
   updated_at: string;
+  account_set: string | null;
+  period: string | null;
+  calls: string | null;
+  label: string | null;
+  outcome: string | null;
+  result_text: string | null;
 }
 
 interface ChangeIntentRow {
@@ -462,7 +475,31 @@ function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
     workerMessages: JSON.parse(row.worker_messages) as unknown[],
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // 结构化字段：旧库/缺列时一律不出现在记录里（消费方据此降级，不猜不补）。
+    ...(row.account_set ? { accountSet: row.account_set } : {}),
+    ...(row.period ? { period: row.period } : {}),
+    ...(row.calls ? { calls: JSON.parse(row.calls) as PlatformTaskRecord['calls'] } : {}),
+    ...(row.label ? { label: row.label } : {}),
+    ...(row.outcome === 'done' || row.outcome === 'needs' || row.outcome === 'failed' ? { outcome: row.outcome } : {}),
+    ...(row.result_text ? { resultText: row.result_text } : {}),
   };
+}
+
+/** 结构化事实列 ↔ 记录字段（upsert 的写入面与 get/list 的读回面共用同一份映射）。 */
+const PLATFORM_TASK_FACT_COLUMNS: ReadonlyArray<{ field: keyof PlatformTaskRecord; column: string }> = [
+  { field: 'accountSet', column: 'account_set' },
+  { field: 'period', column: 'period' },
+  { field: 'calls', column: 'calls' },
+  { field: 'label', column: 'label' },
+  { field: 'outcome', column: 'outcome' },
+  { field: 'resultText', column: 'result_text' },
+];
+
+/** 结构化事实的 SQL 值（calls 序列化为 JSON；undefined → NULL，即"这个任务没有这个事实"）。 */
+function platformTaskFactValue(field: keyof PlatformTaskRecord, value: unknown): string | null {
+  if (value === undefined || value === null) return null;
+  if (field === 'calls') return JSON.stringify(value);
+  return String(value);
 }
 
 type FinishPatch = Partial<Omit<ToolCallRecord, 'requestId' | 'toolName' | 'safeArguments' | 'startedAt'>>;
@@ -492,6 +529,17 @@ export function createSqliteStore(dbPath: string): AuditStore {
   }
   if (!principalColumns.some((column) => column.name === 'account_set_scope')) {
     db.exec(`ALTER TABLE principal_scopes ADD COLUMN account_set_scope TEXT NOT NULL DEFAULT 'allowlist'`);
+  }
+
+  // Forward-compatible migration for databases created before the P2 structured
+  // execution facts (D-065): platform_tasks gained account_set/period/calls/label/
+  // outcome/result_text. Older rows simply read back as records without those
+  // fields (consumers degrade to the raw text instead of guessing).
+  const taskColumns = db.prepare('PRAGMA table_info(platform_tasks)').all() as Array<{ name: string }>;
+  for (const column of ['account_set', 'period', 'calls', 'label', 'outcome', 'result_text']) {
+    if (!taskColumns.some((existing) => existing.name === column)) {
+      db.exec(`ALTER TABLE platform_tasks ADD COLUMN ${column} TEXT`);
+    }
   }
 
   const principalScopes: PrincipalScopeRepo = {
@@ -857,22 +905,27 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
+  const TASK_FACT_SELECT = PLATFORM_TASK_FACT_COLUMNS.map(({ column }) => column).join(', ');
   const platformTasks: PlatformTaskRepo = {
     async get(taskId) {
       const row = db.prepare(
-        'SELECT task_id, parent_session_id, principal_id, worker_messages, created_at, updated_at FROM platform_tasks WHERE task_id = ?',
+        `SELECT task_id, parent_session_id, principal_id, worker_messages, created_at, updated_at, ${TASK_FACT_SELECT} FROM platform_tasks WHERE task_id = ?`,
       ).get(taskId) as PlatformTaskRow | undefined;
       return row ? rowToPlatformTask(row) : null;
     },
     async upsert(record) {
+      const factColumns = PLATFORM_TASK_FACT_COLUMNS.map(({ column }) => column).join(', ');
+      const factValues = PLATFORM_TASK_FACT_COLUMNS.map(({ field }) => platformTaskFactValue(field, record[field]));
+      const factAssignments = PLATFORM_TASK_FACT_COLUMNS.map(({ column }) => `${column} = excluded.${column}`).join(', ');
       db.prepare(
-        // The columns after worker_messages are retained for compatibility
-        // with databases created before the subagent task model. They are no
-        // longer part of PlatformTaskRecord and are deliberately ignored on
-        // reads and updates.
-        'INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at) '
-        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
-        + 'ON CONFLICT (task_id) DO UPDATE SET parent_session_id = excluded.parent_session_id, principal_id = excluded.principal_id, worker_messages = excluded.worker_messages, updated_at = excluded.updated_at',
+        // The columns after worker_messages (current_step…skill_version) are retained for
+        // compatibility with databases created before the subagent task model. They are no
+        // longer part of PlatformTaskRecord and are deliberately ignored on reads and updates.
+        // The trailing columns are the P2 structured facts (D-065): absent fields write NULL
+        // (this task has no such fact) rather than keeping a stale value.
+        `INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, current_step, pending_questions, last_result, evidence, skill_version, created_at, updated_at, ${factColumns}) `
+        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?' + ', ?'.repeat(factValues.length) + ') '
+        + `ON CONFLICT (task_id) DO UPDATE SET parent_session_id = excluded.parent_session_id, principal_id = excluded.principal_id, worker_messages = excluded.worker_messages, updated_at = excluded.updated_at, ${factAssignments}`,
       ).run(
         record.taskId,
         '',
@@ -887,7 +940,16 @@ export function createSqliteStore(dbPath: string): AuditStore {
         null,
         record.createdAt,
         record.updatedAt,
+        ...factValues,
       );
+    },
+    async listBySession(principalId, sessionId) {
+      // 时间正序（召回台账按"迄今执行过哪些"的正序呈现）；同一任务多次委派只有一行
+      // （upsert 语义），行的 structured facts 是最近一次委派的快照。
+      const rows = db.prepare(
+        `SELECT task_id, parent_session_id, principal_id, worker_messages, created_at, updated_at, ${TASK_FACT_SELECT} FROM platform_tasks WHERE principal_id = ? AND parent_session_id = ? ORDER BY created_at ASC, task_id ASC`,
+      ).all(principalId, sessionId) as PlatformTaskRow[];
+      return rows.map(rowToPlatformTask);
     },
   };
 

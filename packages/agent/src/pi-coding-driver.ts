@@ -17,12 +17,12 @@ import {
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type DriverMessage, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type DriverMessage, type PlanCallFacts, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
-import { loadOperationArgStyles, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationLabels } from './operation-labels';
+import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
 import { messageFor } from './error-codes';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
@@ -105,6 +105,8 @@ export interface PiCodingTurnDriverOptions {
   operationLabels?: OperationLabels;
   /** flag → 取值样式表（平台 args 规格，测试替身注入点）；缺省经平台 CLI 派生。 */
   operationArgStyles?: KeyArgStyles;
+  /** 整份 args 规格（位置参数声明名 + flag 样式，结构化事实提取用，测试替身注入点）。 */
+  operationArgSpecs?: OperationArgsSpecs;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
 }
@@ -134,6 +136,11 @@ export interface PiCodingWorkerSessionOptions {
   operationLabels?: OperationLabels;
   /** flag → 取值样式表（平台 args 规格 CLI 派生）；缺省本会话自派生一次。 */
   operationArgStyles?: KeyArgStyles;
+  /**
+   * worker 每提交一次（被宿主解析的）计划方案时的回调（D-065 结构化事实源）。
+   * calls 是宿主自己解析的命令参数，不是 worker 文本；最后一次提交即本回合实际执行的范围。
+   */
+  onPlanSubmitted?: (calls: readonly PlanCall[]) => void;
 }
 
 export interface PiCodingWorkerSession {
@@ -152,6 +159,25 @@ interface CodingModelConfig {
   runtime: ModelRuntime;
   model: Model<any>;
   thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+}
+
+/**
+ * 本回合的结构化事实（D-065）：没提过计划 → undefined（调用方不挂字段，任务降级渲染）。
+ * 取值提取在 planCallFacts（平台 args 规格查表 + 平台 label，零 worker 文本解析）。
+ */
+function planFactsOf(
+  specs: OperationArgsSpecs,
+  calls: readonly PlanCall[],
+  labels: OperationLabels,
+): PlanCallFacts | undefined {
+  if (calls.length === 0) return undefined;
+  const { accountSet, period, label } = planCallFacts(calls, specs, labels);
+  return {
+    calls: calls.map((call) => ({ operation: call.operation, args: call.args })),
+    ...(accountSet ? { accountSet } : {}),
+    ...(period ? { period } : {}),
+    ...(label ? { label } : {}),
+  };
 }
 
 /** Create a headless pi-coding-agent driver for trusted context workers. */
@@ -180,6 +206,17 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     argStyleCache.set(root, loading);
     return loading;
   };
+  // 整份规格（位置参数声明名 + flag 样式）：结构化事实（D-065）的取值依据，同样按根缓存。
+  const argSpecCache = new Map<string, Promise<OperationArgsSpecs>>();
+  const operationArgSpecsFor = (workerCwd: string): Promise<OperationArgsSpecs> => {
+    if (options.operationArgSpecs) return Promise.resolve(options.operationArgSpecs);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = argSpecCache.get(root);
+    if (cached) return cached;
+    const loading = loadOperationArgSpecs(root).catch(() => new Map<string, never>());
+    argSpecCache.set(root, loading);
+    return loading;
+  };
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
@@ -196,6 +233,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 触达平台、当时挂在哪份计划下"，与回合收尾时计划恰好是什么状态无关，所以身份在
       // 放行瞬间 latch 下来，而不是结果时刻现读。
       let executedPlan: { planId: string; version: number } | null = null;
+      // 本回合宿主解析出的计划调用（D-065 结构化事实源）：worker 每提交一次方案就刷新——
+      // 与 executedPlan 同一 latch 哲学，取"本回合最后提交的那份 calls"（范围扩大时重提
+      // 完整 calls，最后一份就是本回合实际执行的范围）。
+      let plannedCalls: readonly PlanCall[] = [];
       // 「计划已激活却零执行」的补一刀边界：**每回合一次**，不是整个 driver 生命周期一次。
       // 生产上一个服务进程只有一个 driver 实例管所有回合，"生命周期一次"会让第二次同样故障
       // （可能一小时后、另一个用户）永远不再追问，用户只能手动回复"继续" → 下一回合重新委派
@@ -237,7 +278,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           await input.onNotice?.(text);
         }
         : undefined;
+      const argSpecs = await operationArgSpecsFor(input.cwd);
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
+        onPlanSubmitted: (calls) => { plannedCalls = calls; },
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
@@ -354,7 +397,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         await session.agent.continue();
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
-          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+          const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
+          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
         }
         // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
         // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
@@ -383,17 +427,20 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           }
           if (timedOut || cancelled || session.agent.state.errorMessage) {
             const proof = execution();
-            return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+            const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
+            return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
           }
         }
         const proof = execution();
         const clue = needs();
         const plan = currentPlan();
         const choice = clarification();
+        const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
         return {
           text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
+          ...(facts ? { planFacts: facts } : {}),
           ...(proof ? { execution: proof } : {}),
           // 补刀后仍是"计划激活 + 零调用"：执行闭环断裂的事实，交给宿主说清状态。
           // 与 execution 互斥：proof 为真当且仅当 gateCalls > 0（见 execution()），此时
@@ -411,7 +458,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           errorType: error instanceof Error ? error.name : 'UnknownError',
         }));
         const proof = execution();
-        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+        const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
+        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -503,6 +551,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
       catch (error) { return { block: true, reason: `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}` }; }
       if (parsed) {
+        // 结构化事实（D-065）：calls 是宿主自己解析的不是 worker 文本——上报给驱动侧
+        // latch，结果时刻随 TurnDriverResult.planFacts 上交（规格声明名机械提取取值）。
+        options.onPlanSubmitted?.(parsed.calls);
         // 同任务内计划被连续拒绝的收敛保护：计划被拒是确定性信号（实体越权/格式无效），
         // 反复重提同一请求只会空转模型预算。超过上限就terminal block，让 worker 收手
         // 向用户说明，而不是把回合拖到 executor 超时（实测 D1 类请求空转 5 分钟后崩溃）。

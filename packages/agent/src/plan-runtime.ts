@@ -2,6 +2,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { errorFor } from './error-codes';
+import { operationLabel, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
 import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface PlanCall {
@@ -208,6 +209,77 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {  const m
   return `${PLAN_NOTICE_PREFIX}${scope}${confirm}`;
 }
 
+/**
+ * 平台 args 规格里我们机械提取的两个声明名（D-065）：accountSet/period。
+ *
+ * 为什么是这两个：召回事实要回答"本会话迄今对哪个对象、哪个时间窗执行过什么"——这两个
+ * 是平台自己在 args 规格里声明的参数名（voucher.query-saved 的位置参数、finance 的
+ * --period），取它们是查表不是猜。flag 的声明名按平台自己的 kebab→camel 归一推导
+ * （--period → period；平台 flag-guard 同一套归一），--query 推导出的 query **不是**
+ * accountSet（那是检索关键词，不一定等于规范名）——宁缺勿猜。
+ */
+const STRUCTURED_ARG_NAMES: ReadonlySet<string> = new Set(['accountSet', 'period']);
+
+/** flag → 声明名（平台 kebab→camel 归一：--subject-code → subjectCode）。 */
+function flagArgName(flag: string): string {
+  return flag.replace(/^--/, '').replace(/-([a-z0-9])/g, (_match, char: string) => char.toUpperCase());
+}
+
+/** 单个取值的卫生：剥引号、截断（结构化事实是短字段，不是长文）。 */
+function cleanArgValue(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/^["']+|["']+$/g, '').trim().slice(0, 40);
+  return text || undefined;
+}
+
+/**
+ * 从计划调用机械提取结构化事实（D-065）：accountSet / period / 首个 operation 的中文标签。
+ *
+ * 全部是**宿主可见的机械事实**：calls 是宿主自己从 worker 提交的计划命令解析出来的，
+ * 取值按平台 args 规格的声明名逐位对应（位置参数按序、flag 按 kebab→camel 声明名），
+ * label 是平台清单第 5 列。**绝不从 worker 文本解析**——转录里"提过"不等于"执行过"，
+ * 模糊匹配正是 execution-facts 要替代的东西。规格缺失 / 声明名对不上 → 该字段不出项
+ * （宁缺勿猜），调用方据此降级渲染。
+ */
+export function planCallFacts(
+  calls: readonly PlanCall[],
+  specs: OperationArgsSpecs | undefined,
+  labels: OperationLabels | undefined,
+): { accountSet?: string; period?: string; label?: string } {
+  const facts: { accountSet?: string; period?: string; label?: string } = {};
+  for (const call of calls) {
+    const spec = specs?.get(call.operation);
+    const args = call.args.map((value) => (typeof value === 'string' ? value : String(value)));
+    const declared: Array<{ name: string; value: string }> = [];
+    let positionalIndex = 0;
+    for (let index = 0; index < args.length; index += 1) {
+      const token = args[index]!;
+      if (token.startsWith('--')) {
+        const name = flagArgName(token);
+        const next = args[index + 1];
+        if (next !== undefined && !next.startsWith('--')) {
+          declared.push({ name, value: next });
+          index += 1;
+        }
+        continue;
+      }
+      // 位置参数按序对应规格的 positionalNames（第几个位置参数就是第几个声明名）
+      declared.push({ name: spec?.positionalNames[positionalIndex] ?? '', value: token });
+      positionalIndex += 1;
+    }
+    for (const { name, value } of declared) {
+      if (!STRUCTURED_ARG_NAMES.has(name)) continue;
+      const cleaned = cleanArgValue(value);
+      if (!cleaned) continue;
+      if (name === 'accountSet' && !facts.accountSet) facts.accountSet = cleaned;
+      if (name === 'period' && !facts.period) facts.period = cleaned;
+    }
+  }
+  const label = operationLabel(labels, calls[0]?.operation);
+  if (label) facts.label = label;
+  return facts;
+}
+
 export function validateCalls(calls: readonly PlanCall[]): void {
   if (!Array.isArray(calls) || calls.length === 0) throw errorFor('PLAN_CALLS_EMPTY');
   for (const [index, call] of calls.entries()) {
@@ -231,10 +303,8 @@ export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePl
 
 /** 计划管理子命令：worker 不得直达，只由宿主调用。 */
 const PLAN_SUBCOMMANDS = ['evaluate', 'activate', 'current', 'status'];
-
 /** 网关 plan 之前允许出现的内容：空 / bash|sh / 路径前缀，以及 bash|sh + 路径前缀。 */
 const ALLOWED_PLAN_PREFIX_RE = /^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?$/;
-
 /** 报错里回显"多出来的内容"时的截断长度：够模型认出自己加了什么，又不把消息撑爆。 */
 const EXTRA_PREFIX_MAX_CHARS = 120;
 

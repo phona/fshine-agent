@@ -40,7 +40,6 @@ export type KeyArgStyles = ReadonlyMap<string, KeyArgStyle>;
 const LABEL_CLI_TIMEOUT_MS = 3_000;
 /** label 长度上限：进度帧是短句，不是长文。 */
 const LABEL_MAX_CHARS = 40;
-
 /** 控制字符/换行一律剥掉：label 要能安全进一行进度帧。 */
 function sanitizeLabel(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, LABEL_MAX_CHARS);
@@ -107,28 +106,75 @@ export function loadOperationLabels(platformRoot?: string): Promise<OperationLab
 }
 
 /**
- * 解析 `operation list --json` 的 args 规格：取每个 operation 的
- * `args.flags[].flag` 与 `style`，只收 name/code 两种**有取值**的样式
- * （none = 布尔开关，没有取值可摘）。
+ * 单个 operation 的 args 规格（`operation list --json` 的 `args` 列，平台机器可读面）。
+ *   · positionalNames：位置参数名（按序）——平台**声明名**（accountSet/period/…），
+ *     宿主据此机械取值，不猜第几个参数是什么；
+ *   · flagStyles：flag → 取值样式（name/code；none 布尔开关不入表）。
+ */
+export interface OperationArgsSpec {
+  positionalNames: readonly string[];
+  flagStyles: ReadonlyMap<string, KeyArgStyle>;
+}
+
+/** operation 注册名（也收 command 裸名）→ args 规格。 */
+export type OperationArgsSpecs = ReadonlyMap<string, OperationArgsSpec>;
+
+/** 收 flag 样式（name/code 两种有取值的；none 布尔开关没有取值可摘）。 */
+function collectFlagStyles(flags: unknown): Map<string, KeyArgStyle> {
+  const styles = new Map<string, KeyArgStyle>();
+  if (!Array.isArray(flags)) return styles;
+  for (const flag of flags) {
+    const name = (flag as { flag?: unknown } | null)?.flag;
+    const style = (flag as { style?: unknown } | null)?.style;
+    if (typeof name !== 'string' || !name.startsWith('--')) continue;
+    if (style !== 'name' && style !== 'code') continue;
+    if (!styles.has(name)) styles.set(name, style);
+  }
+  return styles;
+}
+
+/** 收位置参数名（按序，只收非空字符串）。 */
+function collectPositionalNames(positional: unknown): string[] {
+  if (!Array.isArray(positional)) return [];
+  return positional
+    .map((item) => (item as { name?: unknown } | null)?.name)
+    .filter((name): name is string => typeof name === 'string' && name.length > 0);
+}
+
+/**
+ * 解析 `operation list --json` 的 args 规格：按 operation 收 positionalNames + flagStyles。
+ * 键同时收注册名（voucher.query-saved）与 command 裸名（query-saved）——命令里两种
+ * 写法都合法，规格查找因此两种都命中。
+ */
+export function parseOperationArgSpecs(stdout: string): OperationArgsSpecs {
+  const specs: Map<string, OperationArgsSpec> = new Map();
+  let operations: unknown;
+  try { operations = JSON.parse(stdout); } catch { return specs; }
+  if (!Array.isArray(operations)) return specs;
+  for (const operation of operations) {
+    const name = (operation as { name?: unknown } | null)?.name;
+    const command = (operation as { command?: unknown } | null)?.command;
+    const args = (operation as { args?: unknown } | null)?.args as { positional?: unknown; flags?: unknown } | null | undefined;
+    if (!args) continue;
+    const spec: OperationArgsSpec = { positionalNames: collectPositionalNames(args.positional), flagStyles: collectFlagStyles(args.flags) };
+    for (const key of [name, command]) {
+      if (typeof key === 'string' && key && !specs.has(key)) specs.set(key, spec);
+    }
+  }
+  return specs;
+}
+
+/**
+ * 从整份规格派生全局 flag→样式表（参数摘要的消费面，D-012）。
  *
- * 同一 flag 在多个 operation 里样式一致（平台规格纪律）；万一不一致，先登记者
- * 生效并在注释里点明——取"先"而不是"后"是为了让表只依赖输入顺序确定，不靠
- * "最后一个覆盖"的隐式规则。
+ * 同一 flag 在多个 operation 里样式一致（平台规格纪律）；万一不一致，先登记者生效——
+ * 取"先"而不是"后"是为了让表只依赖输入顺序确定，不靠"最后一个覆盖"的隐式规则。
  */
 export function parseOperationArgStyles(stdout: string): KeyArgStyles {
-  const styles: Map<string, KeyArgStyle> = new Map();
-  let operations: unknown;
-  try { operations = JSON.parse(stdout); } catch { return styles; }
-  if (!Array.isArray(operations)) return styles;
-  for (const operation of operations) {
-    const args = (operation as { args?: unknown } | null)?.args as { flags?: unknown } | null | undefined;
-    if (!args || !Array.isArray(args.flags)) continue;
-    for (const flag of args.flags) {
-      const name = (flag as { flag?: unknown } | null)?.flag;
-      const style = (flag as { style?: unknown } | null)?.style;
-      if (typeof name !== 'string' || !name.startsWith('--')) continue;
-      if (style !== 'name' && style !== 'code') continue;
-      if (!styles.has(name)) styles.set(name, style);
+  const styles = new Map<string, KeyArgStyle>();
+  for (const spec of parseOperationArgSpecs(stdout).values()) {
+    for (const [flag, style] of spec.flagStyles) {
+      if (!styles.has(flag)) styles.set(flag, style);
     }
   }
   return styles;
@@ -172,6 +218,48 @@ export function loadOperationArgStyles(platformRoot?: string): Promise<KeyArgSty
     child.once('close', (code) => {
       clearTimeout(timer);
       settle(code === 0 ? parseOperationArgStyles(Buffer.concat(stdout).toString('utf8')) : new Map());
+    });
+  });
+}
+
+/**
+ * 经公共 CLI 派生整份 args 规格（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与 loadOperationLabels / loadOperationArgStyles 完全一致：platformRoot 未配、
+ * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
+ * 不是前提；没有规格就不提取结构化事实（宁缺勿猜），绝不用宿主硬编码位置猜。
+ */
+export function loadOperationArgSpecs(platformRoot?: string): Promise<OperationArgsSpecs> {
+  if (!platformRoot) return Promise.resolve(new Map());
+  const cli = gatewayExecPath(platformRoot);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (specs: OperationArgsSpecs): void => {
+      if (settled) return;
+      settled = true;
+      resolve(specs);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(new Map());
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(new Map());
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseOperationArgSpecs(Buffer.concat(stdout).toString('utf8')) : new Map());
     });
   });
 }

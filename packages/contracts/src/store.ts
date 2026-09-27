@@ -210,6 +210,15 @@ export interface MemoryRecordRepo {
   commit(principalId: string, expectedCursor: string | null, nextCursor: string | null, records: readonly MemoryRecordRecord[]): Promise<boolean>;
 }
 
+/**
+ * 一次计划调用（宿主从 worker 提交的计划命令机械解析出来的形状，**不是**从 worker
+ * 文本解析）：operation 是平台注册名，args 是命令行原样参数数组。
+ */
+export interface PlatformTaskCall {
+  operation: string;
+  args: unknown[];
+}
+
 export interface PlatformTaskRecord {
   taskId: string;
   parentSessionId: string;
@@ -218,11 +227,36 @@ export interface PlatformTaskRecord {
   workerMessages: unknown[];
   createdAt: string;
   updatedAt: string;
+  // ── P2 结构化执行事实（D-065）───────────────────────────────────────────
+  // 全部由委派时的**确定性信息**回填：plan calls 是宿主自己解析的（worker 提交的计划
+  // 命令），取值按平台 args 规格的声明名机械提取——绝不从 worker 文本解析。字段缺失
+  // （旧任务 / 无计划的委派）时消费方降级，不猜、不补。
+  /** 平台 args 规格声明名为 accountSet 的取值（账套规范名/关键词）。 */
+  accountSet?: string;
+  /** 平台 args 规格声明名为 period 的取值（YYYYMM）。 */
+  period?: string;
+  /** 本任务迄今提交过的计划调用（宿主解析，机械事实）。 */
+  calls?: PlatformTaskCall[];
+  /** 首个 operation 的中文标签（平台清单第 5 列，写入时解析一次）。 */
+  label?: string;
+  /** 委派结局：done=有平台执行 / needs=缺信息可续 / failed=失败。 */
+  outcome?: 'done' | 'needs' | 'failed';
+  /** 用户可见的结果原文（与 Conversation Log 的 tool_result 同文，召回渲染的兜底源）。 */
+  resultText?: string;
 }
 
 export interface PlatformTaskRepo {
   get(taskId: string): Promise<PlatformTaskRecord | null>;
   upsert(record: PlatformTaskRecord): Promise<void>;
+  /**
+   * 按 principal/会话列举平台任务（时间正序）。
+   *
+   * 消费者 = `packages/agent/src/execution-facts.ts` 的召回事实台账（D-065）：召回轮
+   * 要回答"本会话迄今执行过哪些/结果是什么"，需要按会话列举 + 结构化字段。语义是
+   * "存在即记录"（任务记录没有终态字段，与已删除的 listOpenBySession 同）——失败/缺
+   * 信息的任务同样在册，结局由 record.outcome 表达。
+   */
+  listBySession(principalId: string, sessionId: string): Promise<PlatformTaskRecord[]>;
 }
 
 /**

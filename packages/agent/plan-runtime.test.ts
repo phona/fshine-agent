@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, formatPlanMessage, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner } from './src/plan-runtime';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, formatPlanMessage, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, type PlanCliRunner } from './src/plan-runtime';
+import { parseOperationArgSpecs, type OperationArgsSpecs } from './src/operation-labels';
 
 const approved = {
   planId: 'plan_123', version: 2, decision: 'notify',
@@ -194,5 +195,82 @@ describe('platform-backed execution plan runtime', () => {
       calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
       runCli,
     })).rejects.toThrow('onNotice');
+  });
+});
+
+// ── 结构化事实提取（D-065：宿主机械解析，绝不从 worker 文本解析）────────────────
+
+/** 与平台 `operation list --json` 同形的预置规格（节选）。 */
+const SPECS: OperationArgsSpecs = parseOperationArgSpecs(JSON.stringify([
+  {
+    name: 'finance.query-receivables', command: 'query-receivables',
+    args: {
+      positional: [],
+      flags: [
+        { flag: '--query', required: true, style: 'name' },
+        { flag: '--customer', required: false, style: 'name' },
+        { flag: '--subject-code', required: false, style: 'code' },
+        { flag: '--period', required: false, style: 'code' },
+      ],
+    },
+  },
+  {
+    name: 'voucher.query-saved', command: 'query-saved',
+    args: {
+      positional: [
+        { name: 'accountSet', required: true, style: 'name' },
+        { name: 'period', required: true, style: 'code' },
+      ],
+      flags: [],
+    },
+  },
+]));
+
+// 与 parseOperationLabels 的入表口径一致：script 裸名与注册名两种键都收
+const LABELS = new Map([
+  ['query-receivables', '查应收账款余额'],
+  ['finance.query-receivables', '查应收账款余额'],
+  ['query-saved', '查凭证列表'],
+  ['voucher.query-saved', '查凭证列表'],
+]);
+
+describe('planCallFacts（平台 args 规格声明名机械提取）', () => {
+  it('位置参数按声明名取：voucher.query-saved 的 accountSet/period', () => {
+    expect(planCallFacts(
+      [{ operation: 'voucher.query-saved', args: ['幻州市幻晟财务代理有限公司', '202609'] }],
+      SPECS, LABELS,
+    )).toEqual({
+      accountSet: '幻州市幻晟财务代理有限公司',
+      period: '202609',
+      label: '查凭证列表',
+    });
+  });
+
+  it('flag 按平台 kebab→camel 声明名取：--period 取得到，--query 不当作 accountSet', () => {
+    const facts = planCallFacts(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻晟', '--period', '202609', '--subject-code', '1122'] }],
+      SPECS, LABELS,
+    );
+    // 宁缺勿猜：--query 是检索关键词（平台规范名先搜出来），不等于已解析的账套名
+    expect(facts).toEqual({ period: '202609', label: '查应收账款余额' });
+  });
+
+  it('多个调用时取首个命中的声明名取值（不合并、不猜）', () => {
+    const facts = planCallFacts([
+      { operation: 'finance.query-receivables', args: ['--query', '甲', '--period', '202601'] },
+      { operation: 'voucher.query-saved', args: ['乙', '202602'] },
+    ], SPECS, LABELS);
+    expect(facts).toMatchObject({ accountSet: '乙', period: '202601', label: '查应收账款余额' });
+  });
+
+  it('规格缺失 / 声明名对不上 → 该字段不出现（不猜位置语义）', () => {
+    expect(planCallFacts([{ operation: 'voucher.query-saved', args: ['A', '202609'] }], undefined, LABELS))
+      .toEqual({ label: '查凭证列表' });
+    expect(planCallFacts([{ operation: 'unknown.operation', args: ['A', '202609'] }], SPECS, LABELS))
+      .toEqual({});
+  });
+
+  it('空 calls → 空事实（没提过计划的委派不挂结构化字段）', () => {
+    expect(planCallFacts([], SPECS, LABELS)).toEqual({});
   });
 });

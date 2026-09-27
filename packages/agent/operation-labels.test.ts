@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadOperationArgStyles, loadOperationLabels, operationLabel, parseOperationArgStyles, parseOperationLabels } from './src/operation-labels';
+import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, operationLabel, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels } from './src/operation-labels';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -183,4 +183,49 @@ describe('loadOperationArgStyles（经公共 CLI 派生一次）', () => {
     expect((await loadOperationArgStyles(empty)).size).toBe(0);
     expect((await loadOperationArgStyles(await fakePlatformRootWithJson('', { hang: true }))).size).toBe(0);
   }, 15_000);
+});
+
+describe('parseOperationArgSpecs（整份规格：位置参数声明名 + flag 样式）', () => {
+  it('按 operation 收录 positionalNames 与 flagStyles，注册名与 command 裸名同表', () => {
+    const specs = parseOperationArgSpecs(LIST_JSON);
+    expect([...specs.keys()].sort()).toEqual([
+      'fill', 'finance.query-receivables', 'finance.search-account-sets', 'query-receivables',
+      'query-saved', 'search-account-sets', 'voucher.fill', 'voucher.query-saved',
+    ]);
+    expect(specs.get('voucher.query-saved')).toEqual({
+      positionalNames: ['accountSet', 'period'],
+      flagStyles: new Map(),
+    });
+    expect(specs.get('query-receivables')?.flagStyles).toEqual(new Map([
+      ['--query', 'name'], ['--customer', 'name'], ['--subject-code', 'code'], ['--period', 'code'],
+    ]));
+    // 位置参数声明名是机械取值的依据（host 不猜第几个参数是什么）
+    expect(specs.get('voucher.query-saved')?.positionalNames).toEqual(['accountSet', 'period']);
+  });
+
+  it('布尔开关（style none）不入 flagStyles；无 args 列的 operation 不入表', () => {
+    const specs = parseOperationArgSpecs(LIST_JSON);
+    expect(specs.has('voucher.fill')).toBe(true);
+    expect(specs.get('voucher.fill')?.flagStyles.size).toBe(0);
+    expect(specs.get('voucher.fill')?.positionalNames).toEqual([]);
+  });
+
+  it('空输出/非 JSON/非数组/缺 args 列都得到空表（与样式表同一套安全缺省）', () => {
+    expect(parseOperationArgSpecs('').size).toBe(0);
+    expect(parseOperationArgSpecs('not json').size).toBe(0);
+    expect(parseOperationArgSpecs('{"operations":[]}').size).toBe(0);
+    expect(parseOperationArgSpecs('[{"name":"x"}]').size).toBe(0);
+  });
+});
+
+describe('loadOperationArgSpecs（经公共 CLI 派生整份规格）', () => {
+  it('CLI 正常 → 解析出规格表；非零退出 → 空表', async () => {
+    const root = await fakePlatformRootWithJson(LIST_JSON);
+    expect(await loadOperationArgSpecs(root)).toEqual(parseOperationArgSpecs(LIST_JSON));
+    expect((await loadOperationArgSpecs(await fakePlatformRootWithJson(LIST_JSON, { exitCode: 3 }))).size).toBe(0);
+  });
+
+  it('platformRoot 缺省 → 空表（不 spawn，宁缺勿猜）', async () => {
+    expect((await loadOperationArgSpecs()).size).toBe(0);
+  });
 });
