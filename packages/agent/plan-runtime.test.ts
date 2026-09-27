@@ -28,35 +28,61 @@ describe('platform-backed execution plan runtime', () => {
     expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('不得直接调用 evaluate/activate');
   });
 
-  it('容忍模型给命令加的包装：代码围栏（单行/多行）与外层引号解析出同一份 calls', () => {
-    const expected = [{ operation: 'voucher.query-saved', args: ['A', '202609'] }];
-    const bare = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}';
-    // 围栏 + 语言标签，单行
-    expect(parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)?.calls).toEqual(expected);
-    // 围栏无标签 + 多行美化（JSON 本体跨行，正则的 [\s\S]+ 接得住）
-    expect(parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202609"] }\n  ]\n}\n```')?.calls).toEqual(expected);
-    // 外层成对引号（双引号/单引号）
-    expect(parsePlanCallsCommand(`"${bare}"`)?.calls).toEqual(expected);
-    expect(parsePlanCallsCommand(`'${bare}'`)?.calls).toEqual(expected);
-    // 裸命令照旧（剥包装对合法命令是恒等）
+  it('围栏/外层引号包装不再被容忍：抛结构错误，宿主不 absorbing 格式波动', () => {
+    const bare = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]}';
+    const expected = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
+    // 对照：同样的内容去掉包装就是合法命令（围栏/引号是唯一差别）
     expect(parsePlanCallsCommand(bare)?.calls).toEqual(expected);
-    // user_confirmed 字段在围栏版里同样保留（只作审计，不作授权）
-    expect(parsePlanCallsCommand('```json\nbin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}\n```')).toEqual({
+    // markdown 围栏（带语言标签、单行）
+    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)).toThrow('形状不符');
+    // 围栏无标签 + 多行美化（JSON 本体跨行）
+    expect(() => parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202606"] }\n  ]\n}\n```')).toThrow('形状不符');
+    // 外层成对引号（双引号/单引号）
+    expect(() => parsePlanCallsCommand(`"${bare}"`)).toThrow('形状不符');
+    expect(() => parsePlanCallsCommand(`'${bare}'`)).toThrow('形状不符');
+    // 报错必须说清"前面多了什么"并给出正确形状——这是模型下一轮自愈的唯一依据
+    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``))
+      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：```json');
+    // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
+    expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
+  });
+
+  it('plan 之后没有 JSON 方案：抛形状错误', () => {
+    expect(() => parsePlanCallsCommand('bin/17dz plan')).toThrow('计划提交形状不符：bin/17dz plan 之后没有 JSON 方案');
+    expect(() => parsePlanCallsCommand('bash /abs/path/bin/17dz plan   ')).toThrow('计划提交形状不符：bin/17dz plan 之后没有 JSON 方案');
+  });
+
+  it('bash/sh 与任意路径前缀照常放行，user_confirmed 只作审计', () => {
+    const calls = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
+    const json = JSON.stringify({ calls });
+    for (const prefix of ['', 'bash ', 'sh ', 'bash /abs/path/', 'sh /abs/path/', '/abs/path/']) {
+      expect(parsePlanCallsCommand(`${prefix}bin/17dz plan ${json}`)?.calls).toEqual(calls);
+    }
+    expect(parsePlanCallsCommand('bin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}')).toEqual({
       calls: [{ operation: 'voucher.query-saved', args: [] }],
       userConfirmed: true,
     });
   });
 
-  it('围栏剥得掉但 JSON 残缺：解析错误带真实原因与正确形状，不放宽', () => {
-    expect(() => parsePlanCallsCommand('```json\nbin/17dz plan {"calls":[\n```')).toThrow(/计划 JSON 解析失败：.*Unexpected end of JSON/);
-    // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
-    expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
+  it('没有 plan 令牌：返回 null（真不是计划命令，交 serve-gate 常规检查）', () => {
+    expect(parsePlanCallsCommand('bin/17dz query --saved-vouchers --account-set A --period 202606')).toBeNull();
+    expect(parsePlanCallsCommand('ls -la')).toBeNull();
+    expect(parsePlanCallsCommand('')).toBeNull();
   });
 
-  it('有 plan 令牌但形状不符：抛解析错误（说清形状问题），不再落进门的权限话术', () => {
-    // 前后加了别的内容：剥不掉也匹配不上协议正则——这是格式问题，必须报解析错误
-    expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[]} 谢谢')).toThrow(/不符合提交形状（检测到：/);
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}')).not.toThrow(); // 对照：形状正确不抛
+  it('JSON 残缺：抛带 JSON.parse 真实原因的错误', () => {
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow(/计划 JSON 解析失败：Unexpected end of JSON input/);
+  });
+
+  it('前后有多余内容：抛结构错误并点出前面多出的 token', () => {
+    // 前后加了别的内容（"请提交这个计划：…谢谢"）——不是合法前缀，报期望/实际
+    expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]} 谢谢'))
+      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：请提交这个计划：');
+    // 多 token 的前缀同样逐字点出
+    expect(() => parsePlanCallsCommand('echo hi && bin/17dz plan {"calls":[]}'))
+      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：echo hi &&');
+    // 对照：形状正确不抛
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}')).not.toThrow();
     // 直接调子命令：仍是"宿主专属"语义（保留关键词），但带上正确形状
     expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow(/不得直接调用 evaluate\/activate/);
   });

@@ -227,84 +227,82 @@ export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePl
   return env;
 }
 
-/**
- * 剥掉模型给命令加的"包装"再交协议解析：markdown 代码围栏、外层成对引号。
- *
- * 为什么宿主侧必须兼容：计划 JSON 是机器解析的协议，而围栏/引号是模型的格式习惯、
- * 不是内容。真实平台 12 步计划实测里，worker 把 `bin/17dz plan {…}` 用 ```json 围栏
- * 包起来（甚至多行美化），协议正则只认行首裸命令 → 解析落空 → 控制流掉进 serve-gate
- * 的 plan 拒绝分支，每一步都空转。格式习惯会波动，宿主不能指望模型永远守规矩，
- * 因此在协议解析前确定性剥包装。
- *
- * 边界：剥包装只改包装、不放宽任何协议语义——剥完仍走原正则与原 calls 结构校验，
- * JSON 残缺/结构非法一律维持现有 throw；剥不动（围栏未闭合、引号不成对）原样返回，
- * 由调用方维持现有解析失败行为。
- */
-function stripCommandWrapping(command: string): string {
-  let text = command.trim();
-  // 模型可能套两层（围栏里再裹引号）：每轮只剥一层最外包装，不再变化即收敛
-  for (let round = 0; round < 4; round += 1) {
-    const before = text;
-    const fence = text.match(/^```[^\n`]*\n?([\s\S]*?)\n?```$/);
-    if (fence) text = fence[1]!.trim();
-    if (text.length >= 2 && ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith("'") && text.endsWith("'")))) {
-      text = text.slice(1, -1).trim();
-    }
-    if (text === before) break;
-  }
-  return text;
-}
-
 /** 计划管理子命令：worker 不得直达，只由宿主调用。 */
 const PLAN_SUBCOMMANDS = ['evaluate', 'activate', 'current', 'status'];
 
+/** `bin/17dz plan` 之前允许出现的内容：空 / bash|sh / 路径前缀，以及 bash|sh + 路径前缀。 */
+const ALLOWED_PLAN_PREFIX_RE = /^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?$/;
+
+/** 报错里回显"多出来的内容"时的截断长度：够模型认出自己加了什么，又不把消息撑爆。 */
+const EXTRA_PREFIX_MAX_CHARS = 120;
+
+const CORRECT_PLAN_SHAPE = '方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行里。';
+
 /**
- * 计划命令形状不符时的诊断：说清检测到的形状问题 + 正确形状。
- * 只描述"怎么提交"这一件机械事实，不猜业务、不放宽协议。
+ * 在命令里结构定位 `bin/17dz plan` 令牌：返回 bin/17dz 之前的原始前缀与 plan 之后的 payload。
+ * 找不到该令牌返回 null（真不是计划命令）。
+ *
+ * 为什么用定位而不是一条大正则 + 症状嗅探：宿主只保证两件事——错误永远诚实可行动、
+ * 爆炸永远有界。格式波动（markdown 围栏、外层引号、前后加客套话、多行拆分）是模型的
+ * 习惯，不是内容；替它猜"这其实是同一个命令"就是在建容忍层，而猜错的代价是模型收到
+ * 一句答非所问的话，于是它开始瞎试（真实平台实测：被误导到把方案 JSON 打印成助手文本，
+ * 12 步全空转）。因此这里只做确定性定位：令牌在哪、前面剩什么、后面剩什么——剩下的
+ * 一律算形状不符，抛一条说清"期望什么、实际什么"的结构错误，让模型下一轮自己改。
+ * 重试是模型的职责，宿主不替它 absorbing。
  */
-function describePlanShapeProblem(command: string): string {
-  const problems: string[] = [];
-  if (command.includes('```')) problems.push('markdown 代码围栏');
-  if (/^\s*["']/.test(command)) problems.push('外层引号');
-  if (/\n/.test(command)) problems.push('拆成了多行');
-  // 命令不是以 bin/17dz plan 开头却含着它：前后加了别的内容（"请提交这个计划：…谢谢"）
-  if (!/^\s*(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(command)) problems.push('前后有多余内容');
-  const detail = problems.length > 0 ? `（检测到：${problems.join('、')}）` : '';
-  return `命令里有 bin/17dz plan 但不符合提交形状${detail}。方案必须作为 bash 工具的单行原始命令提交：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行里，前后不要加别的内容。`;
+function locatePlanSubmission(command: string): { prefix: string; payload: string } | null {
+  let from = 0;
+  for (;;) {
+    const at = command.indexOf('bin/17dz', from);
+    if (at < 0) return null;
+    from = at + 'bin/17dz'.length;
+    // 该 bin/17dz 必须紧跟 plan 子命令（空白分隔，且 plan 自身是一个完整令牌）才算计划提交；
+    // 否则只是别处提到了 bin/17dz（如 bin/17dz query），继续找下一个位置。
+    const plan = /^\s+plan(?=\s|$)/.exec(command.slice(from));
+    if (!plan) continue;
+    return { prefix: command.slice(0, at), payload: command.slice(from + plan[0].length).trim() };
+  }
+}
+
+/** 把"多出来的内容"压成一行可读文本：折叠空白 + 截断。 */
+function collapseExtra(text: string): string {
+  return text.trim().replace(/\s+/g, ' ').slice(0, EXTRA_PREFIX_MAX_CHARS);
 }
 
 /** Parse the worker's intercepted `bin/17dz plan { ... }` JSON command. */
 export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; userConfirmed?: boolean } | null {
-  // 先剥模型包装（代码围栏/外层引号）再按原协议解析：JSON 允许多行，现有正则的
-  // `[\s\S]+` 本就接得住多行 body，这里只是让围栏版命令能走到它面前。
-  const normalized = stripCommandWrapping(command.trim());
-  const match = normalized.match(/^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s+([\s\S]+))?$/);
-  if (!match) {
-    // 三态分辨，不能一律返回 null：
-    //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
-    //   ② 有令牌却匹配不上协议形状 → 这是解析错误，必须响亮抛出。
-    // 此前②也返回 null，控制流落进 serve-gate 的 plan 拒绝分支，门的理由是
-    // "计划管理命令由宿主控制"——用权限话术答复格式问题，worker 收到的答非所问，
-    // 无从自愈（真实平台实测：被误导到把方案 JSON 打印成助手文本，12 步全空转）。
-    // throw 在 beforeToolCall 里变成 PLAN DECLINED：<可行动消息>——正确的诊断
-    // 本身就是自愈通道：说清形状哪里不对、正确形状长什么样，worker 下一轮就能改。
-    if (/(?:^|[\s:：，,。.、；;！!？?])(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(normalized)) {
-      throw new Error(describePlanShapeProblem(normalized));
-    }
-    return null;
+  const trimmed = command.trim();
+  // 三态分辨，不能一律返回 null：
+  //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
+  //   ② 有令牌但形状不符 → 这是解析错误，必须响亮抛出。
+  // 此前②也返回 null，控制流落进 serve-gate 的 plan 拒绝分支，门的理由是
+  // "计划管理命令由宿主控制"——用权限话术答复格式问题，worker 收到的答非所问，
+  // 无从自愈（真实平台实测：被误导到把方案 JSON 打印成助手文本，12 步全空转）。
+  // throw 在 beforeToolCall 里变成 PLAN DECLINED：<可行动消息>——正确的诊断
+  // 本身就是自愈通道：说清形状哪里不对、正确形状长什么样，worker 下一轮就能改。
+  const located = locatePlanSubmission(trimmed);
+  if (!located) return null;
+  const { prefix, payload } = located;
+
+  // 前缀只允许 bash/sh 与路径前缀。围栏、外层引号、"请提交这个计划：…谢谢"这类包装
+  // 一律不算合法前缀——宿主不 absorbing 格式波动，直接说清前面多了什么。
+  if (!ALLOWED_PLAN_PREFIX_RE.test(prefix)) {
+    throw new Error(`计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：${collapseExtra(prefix)}。${CORRECT_PLAN_SHAPE}`);
   }
-  const body = match[1] ?? '';
-  const subcommand = body.trim().split(/\s+/)[0] ?? '';
+  if (!payload) {
+    throw new Error(`计划提交形状不符：bin/17dz plan 之后没有 JSON 方案。${CORRECT_PLAN_SHAPE}`);
+  }
+  const subcommand = payload.split(/\s+/)[0] ?? '';
   if (PLAN_SUBCOMMANDS.includes(subcommand)) {
     throw new Error(`plan ${subcommand} 由宿主调用，worker 不得直接调用 evaluate/activate；只提交 JSON calls 方案——单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}`);
   }
   let parsed: unknown;
-  try { parsed = JSON.parse(body); }
+  try { parsed = JSON.parse(payload); }
   catch (error) {
     // JSON 坏了要说 JSON 哪坏了：带解析器原文（截断）+ 正确形状。旧消息只说
     // "不得直接调用 evaluate/activate"——那是隔壁问题的答案，答非所问。
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-    throw new Error(`计划 JSON 解析失败：${reason}。方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放进行命，不要代码块/引号/多行拆分。`);
+    throw new Error(`计划 JSON 解析失败：${reason}。${CORRECT_PLAN_SHAPE}`);
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('计划 JSON 顶层必须是对象。');
   const value = parsed as Record<string, unknown>;
