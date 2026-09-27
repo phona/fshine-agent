@@ -5,13 +5,21 @@
  * turn-loop-interleaved.test.ts 是两个单步任务交替。这里补真实会话里最常见的四种形状：
  *   ① 多步计划跑一半被别的事情打断，过几轮再回来续跑（跨回合恢复）；
  *   ② 计划进行中插入一轮探索对话，探索不得污染计划投影；
- *   ③ 某一步真执行了但平台没查到，用户说"跳过它"——宿主不猜成败，由汇总如实呈现；
+ *   ③ 某一步真执行了但平台没查到（not_found）——宿主把信封数据机械组装成澄清问题直接问
+ *      用户，该步在账本里记 needs（缺"用户选哪个"）；用户跳过后，后续步骤接回同一计划；
  *   ④ 计划步骤撞上用户确认门后，该步与剩余步骤的实际去留（characterization）。
  *
  * 与手工企微测试的差别同样只有模型与平台执行器是假的；e2e 的 store 是真 SQLite
  * （boot 走 createServerAssembly），TaskPlanRepo 因此是真库路径，不是 mock。
+ *
+ * 夹具口径（Wave 1 收尾）：除 7.3 这一例**主旨就是"平台说没有"**（保留捏造名幻东建材，
+ * 断言改成宿主组装澄清的形态）之外，账套名一律用 mock 种子状态里真实存在的规范名
+ * （`17dz-platform/src/execution/mocks/fixtures/seed.json`）。捏造名会撞上平台 not_found
+ * 信封（带 data.query）→ 宿主结构化澄清收口，把本来要测的中断/恢复主线掐断。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
+import { clarificationTextFor } from '../../packages/agent/src/error-codes';
 import {
   LAST_TASK_ID_TOKEN,
   balanceCalls,
@@ -103,8 +111,8 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
       { end: true },
       // 第 2 步（第 3 回合）：用户插过一轮无关对话后回来续跑
-      { plan: balanceCalls('幻东建材', '202609') },
-      { text: '幻东建材 202609 应收账款余额为 0 元。' },
+      { plan: balanceCalls('新兴五金', '202609') },
+      { text: '新兴五金 202609 应收账款余额为 0 元。' },
       { end: true },
       // 第 3 步（同一回合内继续派）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
@@ -119,14 +127,14 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       },
       // 第 2 回合：用户插入的无关对话——零平台调用、零委派
       { kind: 'conversation', text: '好，下周三之前交报表这件事我记下了。' },
-      { kind: 'delegate', request: '第2/3步：查幻东建材账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+      { kind: 'delegate', request: '第2/3步：查新兴五金账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
       { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-      { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；幻东建材 202609 也是 0 元；新兴建材当前期间为 700 元。' },
+      { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金 202609 也是 0 元；新兴建材当前期间为 700 元。' },
     ];
     const { send, sdk, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     const log = capturePlanLog();
     try {
-      const first = await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
+      const first = await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
       expect(first).toContain('0 元');
       expect(first).not.toContain('不应外发');
 
@@ -148,7 +156,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       expect(worker.taskIds[1]).toBe(worker.taskIds[0]);
       expect(worker.taskIds[2]).toBe(worker.taskIds[0]);
       // 协议前缀不透传给子 Agent
-      expect(worker.requests[1]).toContain('幻东建材');
+      expect(worker.requests[1]).toContain('新兴五金');
       expect(worker.requests[1]).not.toContain('第2/3步');
       expect(worker.requests[2]).toContain('新兴建材');
       // 账本调用数跨回合累计：3 + 1 + 1
@@ -197,8 +205,8 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       { text: '幻辰财税本期应收账款余额为 86000 元。' },
       { end: true },
       // 第 2 步（第 4 回合）：回到计划续跑
-      { plan: balanceCalls('幻东建材', '202609') },
-      { text: '幻东建材 202609 应收账款余额为 0 元。' },
+      { plan: balanceCalls('新兴五金', '202609') },
+      { text: '新兴五金 202609 应收账款余额为 0 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       {
@@ -214,7 +222,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     const { send, sdk, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     const log = capturePlanLog();
     try {
-      await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
+      await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
       expect(worker.taskIds).toHaveLength(1);
       expect(totalActualCalls()).toBe(before + 3);
 
@@ -239,12 +247,12 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       // 回到计划：申报第 2 步并显式带回第 1 步的 taskId（不是最近那个探索任务）
       declarations.push({
         kind: 'delegate',
-        request: '第2/3步：查幻东建材账套 202609 的应收余额',
+        request: '第2/3步：查新兴五金账套 202609 的应收余额',
         continueTaskId: worker.taskIds[0],
       });
-      declarations.push({ kind: 'conversation', text: '核对继续：幻辰财税 202601–202603 的应收余额均为 0 元；幻东建材 202609 也是 0 元。' });
+      declarations.push({ kind: 'conversation', text: '核对继续：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金 202609 也是 0 元。' });
       const backOnPlan = await send('继续核对');
-      expect(backOnPlan).toContain('幻东建材');
+      expect(backOnPlan).toContain('新兴五金');
       expect(backOnPlan).not.toContain('不应外发');
 
       // 计划步的 taskId 与第 1 步相同；探索那个新任务没有混进计划
@@ -274,28 +282,30 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     await assembly.close();
   });
 
-  it('7.3 用户跳过失败步：真执行真失败的步骤在宿主账本里是 done，成败由汇总如实呈现', async () => {
+  it('7.3 计划步骤真执行但平台没找到：宿主组装澄清收口（步记 needs），用户跳过后后续步骤接回同一计划', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步：执行成功
       { plan: threePeriodPlan('幻辰财税') },
       { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
       { end: true },
-      // 第 2 步：真执行了，但平台对这个对象返回 not_found——有执行痕迹的错误结果
+      // 第 2 步：真执行了，但平台对这个对象返回 not_found——有执行痕迹的错误结果。
+      // mock 目录里没有「幻东建材」，not_found 信封带 data.query（17dz 517d952）→ 激活宿主的
+      // 结构化澄清：这正是本例的主旨，夹具因此刻意保留这个 mock 里不存在的名字。
       { plan: balanceCalls('幻东建材', '202609') },
       { text: '平台未找到「幻东建材」对应的账套（ACCOUNT_SET_NOT_FOUND），这一步没有查到数据。' },
       { end: true },
-      // 第 3 步：执行成功
+      // 第 3 步：用户跳过后执行成功
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'delegate', request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额' },
       { kind: 'delegate', request: '第2/3步：查幻东建材账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-      {
-        kind: 'conversation',
-        text: '第 1 步查到了：幻辰财税 202601–202603 的应收余额都是 0 元。第 2 步平台没找到「幻东建材」对应的账套，没查到数据。还剩第 3 步，你说跳过第 2 步我就接着查最后的。',
-      },
+      // 澄清收口后模型仍想接着拆第 3 步：宿主在委派入口拦住（用户要先回答"查哪个"），
+      // 抛出的就是已组装好的澄清问题——它经 terminate 语义成为本轮最终回复
+      { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+      // 用户说"跳过它"（没有补名称）：模型不再重派失败的那一步，直接申报最后一步
       { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
       {
         kind: 'conversation',
@@ -305,9 +315,20 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     const { send, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     const log = capturePlanLog();
     try {
-      // 第 1 回合：前两步跑完，第 2 步如实回报"没查到"后由模型收嘴
+      // 第 1 回合：前两步都真执行了，第 2 步撞 not_found → 宿主澄清收口，第 3 步没派出去
       const first = await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
-      expect(first).toContain('没查到');
+      // 用户看到的是宿主持信封数据机械组装的那一份：零候选 + 请确认准确名称的问句
+      expect(first).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '幻东建材', candidates: [] }));
+      expect(first).toContain('没有找到匹配“幻东建材”的对象');
+      expect(first).toContain('确认准确名称');
+      // 反向断言：worker 那条捏造文本（连原始错误码一起）与后续步骤的数字一个都不上屏
+      expect(first).not.toContain('ACCOUNT_SET_NOT_FOUND');
+      expect(first).not.toContain('平台未找到');
+      expect(first).not.toContain('这一步没有查到数据');
+      expect(first).not.toContain('700 元');
+      expect(first).not.toContain('不应外发');
+      expect(executionLanguageFingerprints(first)).toEqual([]);
+      // 两步都委派了（第 2 步真调了平台），第 3 步被委派入口的守卫拦住
       expect(worker.taskIds).toHaveLength(2);
 
       // 用户说"跳过它"：不再重派失败的那一步，直接续下一步
@@ -325,16 +346,16 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       // 账本累计：3 + 1 + 1
       expect(totalActualCalls()).toBe(before + 5);
 
-      // 第 2 步的宿主记账是 done 而不是 failed：worker 真调用了、平台真回答了
-      // （ACCOUNT_SET_NOT_FOUND 是平台的确定性应答，不是没执行）。业务成败由汇总呈现，
-      // 宿主不猜（rule-landing.md C26 / §8 取舍 3）。
+      // 第 2 步的宿主记账是 needs 而不是 failed：worker 真调用了、平台真回答了
+      // （ACCOUNT_SET_NOT_FOUND 是平台的确定性应答，不是没执行），这一步缺的是"用户选哪个"，
+      // 与缺参数同族（rule-landing.md C26 / §8 取舍 3）。业务成败由汇总如实呈现，宿主不猜。
       const stepTwo = log.steps().filter((entry) => entry.step === '2/3');
-      expect(stepTwo.map((entry) => entry.status)).toEqual(['started', 'done']);
+      expect(stepTwo.map((entry) => entry.status)).toEqual(['started', 'needs']);
       const planIdOfStepTwo = stepTwo[0]?.planId ?? '';
       const plan = await assembly.store.taskPlans.project(PRINCIPAL_ID, SESSION_ID, planIdOfStepTwo);
       // 同一 planId 贯穿三个步骤
-      // 用户说"跳过"之后的第 3 步也经 latestOpenPlan 接回同一计划（2/3 未接满→仍开），投影一份、三步都 done
-      expect(plan?.steps.map((entry) => [entry.stepIndex, entry.status])).toEqual([[1, 'done'], [2, 'done'], [3, 'done']]);
+      // 用户说"跳过"之后的第 3 步也经 latestOpenPlan 接回同一计划（2/3 未接满→仍开），投影一份
+      expect(plan?.steps.map((entry) => [entry.stepIndex, entry.status])).toEqual([[1, 'done'], [2, 'needs'], [3, 'done']]);
     } finally {
       log.restore();
     }

@@ -9,6 +9,12 @@
  *
  * 绑定合法性全在宿主侧：preferredPlanId 由宿主持有，模型申报只提供"做什么"，
  * 提供"继续哪个"的编号语义只有紧跟宿主问题时才成立（中间插过任何回合即失效）。
+ *
+ * 夹具口径（Wave 1 收尾）：账套名一律用 mock 种子状态里**真实存在**的规范名
+ * （`17dz-platform/src/execution/mocks/fixtures/seed.json`：幻辰财税 / 新兴五金 /
+ * 新兴建材 / 幻辰实业有限公司）。本文件的主旨是编号消歧，不是"平台说没有"——用捏造名
+ * （甲乙丙账套）时，平台 not_found 信封带 data.query 会激活宿主的结构化澄清
+ * （selectionClarificationOf），澄清问题整体覆盖 worker 的捏造文本，消歧主线根本走不到。
  */
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -71,35 +77,35 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.1 两个未完成计划形状撞车 → 宿主出题；编号"2"绑定较旧的那个计划续跑', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      // 甲（第 1 回合，计划 A 的第 1 步）
-      { plan: balanceCalls('甲账套', '202609') },
-      { text: '甲账套 202609 应收余额为 0 元。' },
+      // 幻辰财税（第 1 回合，计划 A 的第 1 步；mock 202609 应收余额 0）
+      { plan: balanceCalls('幻辰财税', '202609') },
+      { text: '幻辰财税 202609 应收余额为 0 元。' },
       { end: true },
-      // 丁（第 2 回合，计划 B 的第 1 步）
-      { plan: balanceCalls('丁账套', '202609') },
-      { text: '丁账套 202609 应收余额为 0 元。' },
+      // 新兴五金（第 2 回合，计划 B 的第 1 步；mock 202609 应收余额 0）
+      { plan: balanceCalls('新兴五金', '202609') },
+      { text: '新兴五金 202609 应收余额为 0 元。' },
       { end: true },
-      // 乙（第 4 回合，用户选"2"后计划 A 的第 2 步）
-      { plan: balanceCalls('乙账套', '202609') },
-      { text: '乙账套 202609 应收余额为 700 元。' },
+      // 新兴建材（第 4 回合，用户选"2"后计划 A 的第 2 步；mock 当前期间应收余额 700）
+      { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
+      { text: '新兴建材当前期间应收余额为 700 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
-      { kind: 'delegate', request: '第1/3步：查甲账套 202609 的应收余额', text: '第 1 步完成：甲账套 0 元。共 3 步，先停在这。' },
-      { kind: 'delegate', request: '第1/3步：查丁账套 202609 的应收余额', text: '第 1 步完成：丁账套 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 0 元。共 3 步，先停在这。' },
       // 与两条计划都接得上 → 宿主 ToolUserError 出消歧问题，回合在此结束
       { kind: 'delegate', request: '第2/3步：继续核对' },
-      // 用户选"2"（较旧的对象甲计划）：宿主注入消歧结果，模型重新申报本步
-      { kind: 'delegate', request: '第2/3步：查乙账套 202609 的应收余额' },
-      { kind: 'conversation', text: '甲乙两条核对完了，丁那条还差两步。' },
+      // 用户选"2"（较旧的计划 A）：宿主注入消歧结果，模型重新申报本步
+      { kind: 'delegate', request: '第2/3步：查新兴建材账套当前期间的应收余额' },
+      { kind: 'conversation', text: '幻辰财税和新兴建材这两项核对完了，新兴五金还差两步。' },
     ];
     const { send, sdk, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     const log = capturePlanLog();
     try {
-      const first = await send('逐个核对甲乙丙三个账套的应收余额');
-      expect(first).toContain('甲账套 0 元');
+      const first = await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
+      expect(first).toContain('幻辰财税 0 元');
 
-      const second = await send('再核对丁戊己三个账套的应收余额');
-      expect(second).toContain('丁账套 0 元');
+      const second = await send('再核对这三个账套的应收余额：新兴五金、幻辰实业有限公司、新兴建材');
+      expect(second).toContain('新兴五金 0 元');
       expect(worker.taskIds).toHaveLength(2);
       expect(totalActualCalls()).toBe(before + 2);
 
@@ -107,19 +113,19 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
       const noticesBeforeAsk = sdk.noticeTexts().length;
       const asked = await send('继续');
       expect(asked).toContain('【任务消歧】');
-      expect(asked).toContain('1. 查丁账套 202609 的应收余额（1/3 步已完成）');
-      expect(asked).toContain('2. 查甲账套 202609 的应收余额（1/3 步已完成）');
+      expect(asked).toContain('1. 查新兴五金 202609 的应收余额（1/3 步已完成）');
+      expect(asked).toContain('2. 查幻辰财税 202609 的应收余额（1/3 步已完成）');
       expect(asked).not.toContain('不应外发');
       expect(worker.taskIds).toHaveLength(2);
       expect(totalActualCalls()).toBe(before + 2);
       expect(sdk.noticeTexts()).toHaveLength(noticesBeforeAsk);
 
-      // 紧跟问题的"2"：绑定较旧的对象甲计划（选项 2），第 2 步照常委派
+      // 紧跟问题的"2"：绑定较旧的计划 A（选项 2），第 2 步照常委派
       const picked = await send('2');
-      expect(picked).toContain('甲乙两条核对完了');
+      expect(picked).toContain('幻辰财税和新兴建材这两项核对完了');
       expect(picked).not.toContain('不应外发');
       expect(worker.taskIds).toHaveLength(3);
-      expect(worker.requests[2]).toContain('乙账套');
+      expect(worker.requests[2]).toContain('新兴建材');
       expect(worker.requests[2]).not.toContain('第2/3步');
       expect(totalActualCalls()).toBe(before + 3);
 
@@ -136,8 +142,8 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
       expect(open.map((plan) => plan.planId)).toEqual([planA, planB]);
       expect(open[0]).toEqual(expect.objectContaining({ maxRecordedStep: 2, done: 2, totalSteps: 3 }));
       expect(open[1]).toEqual(expect.objectContaining({ maxRecordedStep: 1, done: 1, totalSteps: 3 }));
-      // 选项标签来自计划事实：消歧问题里的"查甲账套…"就是计划 A 第 1 步的 request
-      expect(open[0]?.firstRequest).toContain('甲账套');
+      // 选项标签来自计划事实：消歧问题里的"查幻辰财税…"就是计划 A 第 1 步的 request
+      expect(open[0]?.firstRequest).toContain('幻辰财税');
       expect(await assembly.store.taskPlans.latestOpenPlan(PRINCIPAL_ID, SESSION_ID)).toBe(planA);
     } finally {
       log.restore();
@@ -148,34 +154,34 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.2 消歧问题后的非编号回复按新请求处理：正常单步委派，不产生绑定', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      { plan: balanceCalls('甲账套', '202609') },
-      { text: '甲账套 202609 应收余额为 0 元。' },
+      { plan: balanceCalls('幻辰财税', '202609') },
+      { text: '幻辰财税 202609 应收余额为 0 元。' },
       { end: true },
-      { plan: balanceCalls('丁账套', '202609') },
-      { text: '丁账套 202609 应收余额为 0 元。' },
+      { plan: balanceCalls('新兴五金', '202609') },
+      { text: '新兴五金 202609 应收余额为 0 元。' },
       { end: true },
       // 非编号回复落地成单步委派（无前缀）：新任务、不绑任何计划
-      { plan: balanceCalls('戊账套', '202609') },
-      { text: '戊账套 202609 应收余额为 300 元。' },
+      { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
+      { text: '新兴建材当前期间应收余额为 700 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
-      { kind: 'delegate', request: '第1/3步：查甲账套 202609 的应收余额', text: '第 1 步完成：甲账套 0 元。共 3 步，先停在这。' },
-      { kind: 'delegate', request: '第1/3步：查丁账套 202609 的应收余额', text: '第 1 步完成：丁账套 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 0 元。共 3 步，先停在这。' },
       { kind: 'delegate', request: '第2/3步：继续核对' },
       // 用户没答编号，换了个新查询：单步委派照常，两个旧计划不受影响
-      { kind: 'delegate', request: '查询戊账套 202609 的应收余额' },
+      { kind: 'delegate', request: '查询新兴建材账套当前期间的应收余额' },
     ];
     const { send, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     try {
-      await send('逐个核对甲乙丙三个账套的应收余额');
-      await send('再核对丁戊己三个账套的应收余额');
+      await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
+      await send('再核对这三个账套的应收余额：新兴五金、幻辰实业有限公司、新兴建材');
       const asked = await send('继续');
       expect(asked).toContain('【任务消歧】');
 
-      const answered = await send('先查戊账套的吧');
-      expect(answered).toContain('300 元');
+      const answered = await send('先查新兴建材的吧');
+      expect(answered).toContain('700 元');
       expect(worker.taskIds).toHaveLength(3);
-      expect(worker.requests[2]).toContain('戊账套');
+      expect(worker.requests[2]).toContain('新兴建材');
       expect(worker.requests[2]).not.toContain('第2/3步');
       expect(totalActualCalls()).toBe(before + 3);
 

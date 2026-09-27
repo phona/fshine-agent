@@ -4,6 +4,13 @@
  * Main Agent 拆解 → 逐步派单 → 汇总；任一步失败不阻塞其他步骤；用户通知带「第 N/M 步」。
  * 三步续跑同一个 17dz 子任务（continueTaskId），平台累计账本因此跨步累积——闸口看到的是
  * 全局重量，这是"闸口能做全局预算"的落地。
+ *
+ * 夹具口径（Wave 1 收尾）：账套名一律用 mock 种子状态里**真实存在**的规范名
+ * （`17dz-platform/src/execution/mocks/fixtures/seed.json`）。本文件的主旨是长任务拆解
+ * 本身（逐步派单 / 同任务续跑 / 步号接续），不是"平台说没有"——用捏造名时，平台 not_found
+ * 信封带 data.query 会激活宿主的结构化澄清（selectionClarificationOf），澄清问题把回合
+ * 收口，后续步骤根本派不出去。计划步骤的失败面由 6.2（needs）、7.3（平台没找到→宿主澄清）
+ * 与 turn-loop-clarification 的 C2 覆盖，不靠 6.1 顺带覆盖。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { PlanCall } from '@fshine/agent';
@@ -56,16 +63,16 @@ const NEEDS_PERIOD = {
 };
 
 describe('离线全链 e2e：长任务拆解（计划模式）', () => {
-  it('6.1 「核对 3 个账套」全链：逐步派单、同任务续跑、失败步骤在汇总里如实报告', async () => {
+  it('6.1 「核对 3 个账套」全链：逐步派单、同任务续跑、每步结果如实进汇总', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步：3 次调用的计划（越过自动档 → 先通知用户），执行成功
       { plan: threePeriodPlan('幻辰财税') },
       { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
       { end: true },
-      // 第 2 步：真执行了，但平台对这个对象返回 not_found——有执行痕迹的错误结果
-      { plan: balanceCalls('幻东建材', '202609') },
-      { text: '平台未找到「幻东建材」对应的账套（ACCOUNT_SET_NOT_FOUND），这一步没有查到数据。' },
+      // 第 2 步：真执行了，mock 当前期间应收余额 500（seed 真实数据）
+      { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴五金'] }] },
+      { text: '新兴五金当前期间应收余额为 500 元。' },
       { end: true },
       // 第 3 步：执行成功
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
@@ -74,14 +81,14 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
     const { send, sdk, assembly } = await boot({
       main: mainDriver([
         { kind: 'delegate', request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额' },
-        { kind: 'delegate', request: '第2/3步：查幻东建材账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
+        { kind: 'delegate', request: '第2/3步：查新兴五金账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
         { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；幻东建材平台未找到对应账套，这一步没查到；新兴建材当前期间应收余额为 700 元。' },
+        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金当前期间为 500 元；新兴建材当前期间应收余额为 700 元。' },
       ]),
       worker: worker.driver,
     });
 
-    const reply = await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
+    const reply = await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
 
     // 三次委派都发生了，且第 2/3 步起续跑同一个子任务（累计账本跨步累积）
     expect(worker.taskIds).toHaveLength(3);
@@ -91,11 +98,11 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
     expect(worker.requests[0]).toContain('幻辰财税');
     expect(worker.requests[0]).not.toContain('第1/3步');
     expect(worker.requests[1]).not.toContain('第2/3步');
-    // 汇总覆盖三个账套，且如实包含第 2 步的失败（不粉藏）
+    // 汇总覆盖三个账套，三步结果一条不落
     expect(reply).toContain('幻辰财税');
-    expect(reply).toContain('幻东建材');
+    expect(reply).toContain('新兴五金');
+    expect(reply).toContain('500 元');
     expect(reply).toContain('700 元');
-    expect(reply).toContain('没查到');
     expect(reply).not.toContain('不应外发');
     // 用户收到的计划通知带「第 N/M 步」
     const notices = sdk.noticeTexts();
