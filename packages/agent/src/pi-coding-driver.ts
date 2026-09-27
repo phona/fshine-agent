@@ -21,6 +21,7 @@ import { ToolUserError, type DriverMessage, type SubagentNeeds, type TurnDriver,
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationLabels, type OperationLabels } from './operation-labels';
+import { messageFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseEnvelope } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
@@ -470,7 +471,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         if (declinedPlans > MAX_DECLINED_PLANS_PER_TASK) {
           return {
             block: true,
-            reason: `PLAN STOP：本任务的执行计划已被连续拒绝 ${declinedPlans} 次（原因均为实体不在本轮请求/检索证据/平台响应内）。停止重新提交计划，直接用自然语言向用户说明缺什么、建议提供什么。`,
+            // 收敛原因收口在 error-codes.ts（三要素：码 + 期望/实际/正确形态）；
+            // PLAN STOP 是协议前缀（worker 提示词认它），原因本体来自表。
+            reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `已被连续拒绝 ${declinedPlans} 次`)}`,
           };
         }
         if (options.entitySources) {
@@ -488,7 +491,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           if (scopeError) {
             activePlan = null;
             needsClues.push({ missing: ['请求中未给出的对象'], reason: scopeError });
-            return { block: true, reason: `PLAN DECLINED：${scopeError} 请严格按本轮请求的范围执行，或向用户澄清。` };
+            // 实体越权原因收口在 error-codes.ts（三要素）；PLAN DECLINED 是协议前缀。
+            return { block: true, reason: `PLAN DECLINED：${messageFor('ENTITY_OUT_OF_SCOPE', scopeError)}` };
           }
         }
         const previousPlan = activePlan;

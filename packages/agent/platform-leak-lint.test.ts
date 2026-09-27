@@ -139,6 +139,8 @@ function businessWordHits(dir: string): string[] {
 //   ③ `case` 从句额外把"长度≥8 的标识符形"也算具体值——switch 按具体值逐分支
 //      正是"一堆 if-else"的原型形状。既有 6 条全是已退役工具名，进白名单。
 // 最终：12 命中 = 3 基线（真气味，只减不增）+ 9 白名单（合法/死代码，逐条注释）。
+// 2026-09 第二波：3 条真气味已收敛（结构化 outcome 取代回复文本嗅探），基线清空，
+// 命中集 = 9 白名单。新增任何字面量 if 即红（白名单外），收敛继续直接通过。
 
 /** 字面量比较的出现位置（一行一扫，与业务词预算同样的行扫哲学）。 */
 const LITERAL_IF_SITES: ReadonlyArray<{ re: RegExp; isCaseClause?: boolean }> = [
@@ -227,16 +229,13 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
 /**
  * 当前命中集（`文件: 字面量`）——冻结基线，新增任意一行即失败。
  *
- * 三条全是同一个气味家族：拿自己刚生成的回复文本 includes 一句中文来给日志
- * outcome 分类（嗅探，不是数据判据）。收敛方向：让 finalizeProposal /
- * matchConfirmation 直接返回结构化 outcome，日志从数据里取——删掉这几处即绿。
- * 记账按 文件+字面量（与业务词预算同风格：行号漂移不影响预算；行号只作注释）。
+ * 原三条（context.ts 嗅探自己生成的回复文本给日志 outcome 分类 ×2、runtime.ts
+ * 嗅探'已作废'给 turn_span 分类 ×1）已于 2026-09 第二波收敛：finalizeProposal /
+ * matchConfirmation 改为返回结构化 outcome（{kind:'proposal_declined'} 一族），
+ * 日志从数据里取，includes 断言整体删除。收敛直接通过（子集断言只减不增），
+ * 基线相应清空——再出现同类嗅探即红。
  */
-const LITERAL_IF_BASELINE: readonly string[] = [
-  'packages/agent/src/context.ts: 未开放写入权限',   // context.ts:509 提案被拒的日志分类
-  'packages/agent/src/context.ts: 未通过预检',       // context.ts:510 预检失败的日志分类
-  'packages/agent/src/runtime.ts: 已作废',           // runtime.ts:153 确认码取消的 turn_span 分类
-];
+const LITERAL_IF_BASELINE: readonly string[] = [];
 
 /** 第三条预算的扫描范围：编排层源码（测试文件豁免——夹具演示被拦形态）。 */
 const LITERAL_IF_SCAN_DIRS = ['packages/agent/src', 'apps'];

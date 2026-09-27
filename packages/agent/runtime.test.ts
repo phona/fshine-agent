@@ -3,7 +3,9 @@ import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
-import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION } from './src/runtime';
+import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './src/runtime';
+import { toolUserErrorFor } from './src/error-codes';
+import { DELEGATION_AUTH_FAILURE } from './src/context';
 import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
 import type { PlanEntitySources } from './src/turn-contract';
 import { FakeSessionRepo } from './test-helpers';
@@ -602,7 +604,10 @@ describe('createTaxAgentRuntime', () => {
 
     expect(reply.text).not.toContain('整理完成');
     expect(reply.text).not.toContain('已完成');
-    expect(reply.text).toContain('本轮没有真正查到平台数据');
+    // ③-5b：resume 零执行用专用话术（与 activatedPlan 解耦）——用户刚确认过操作，
+    // 不再问"要查询的对象和范围"（NO_EXECUTION_CLARIFICATION 的问法）
+    expect(reply.text).toBe(`${RESUMED_PLAN_NOT_EXECUTED}\n\n计划已批准，但平台侧连接被拒，本轮没有发起查询。`);
+    expect(reply.text).toContain('没有产生任何平台执行');
     // worker 留下的无数字说明按既有"子 Agent 说明 + 注脚"模式附上
     expect(reply.text).toContain('平台侧连接被拒');
     // 整理模型的输入里带宿主事实：它没有机会把零执行总结成"已完成"
@@ -614,7 +619,7 @@ describe('createTaxAgentRuntime', () => {
       .map((message) => String(message.content ?? ''))
       .join('\n');
     expect(assistantText).not.toContain('整理完成');
-    expect(assistantText).toContain('本轮没有真正查到平台数据');
+    expect(assistantText).toContain('没有产生任何平台执行');
   });
 
   it('F8.2 确认后零执行且方案已批准：说"批准了没执行"，邀请回复继续', async () => {
@@ -649,7 +654,8 @@ describe('createTaxAgentRuntime', () => {
       '确认继续',
     );
 
-    expect(reply.text).toBe(NO_EXECUTION_CLARIFICATION);
+    // ③-5b：resume 零执行（无 activatedPlan）也用专用话术，不再问"要查什么"
+    expect(reply.text).toBe(RESUMED_PLAN_NOT_EXECUTED);
     expect(reply.text).not.toContain('42 元');
   });
 
@@ -680,6 +686,94 @@ describe('createTaxAgentRuntime', () => {
       '确认继续',
     );
     expect(fallback.text).toBe('worker 原文：幻辰 202609 应收余额为 42 元。');
+  });
+
+  // ── ③-1：恢复路径的 ToolUserError 穿透修复 ───────────────────────────────
+  // resumeTaskId 路径绕过 route_current_turn：确认码 → 计划激活 → worker 重跑全部
+  // 在宿主内完成。此前 platformTask.run 抛出的 ToolUserError（如 DELEGATION_AUTH_FAILURE）
+  // 会一路穿透到 handler.ts 顶层 catch，被换成"处理失败，请稍后再试"——对 auth 类
+  // 是错指令（重试多少次都没用）。现在按 delegate 路径同样收尾：ToolUserError 经
+  // finishDirectReply 成为本轮回复。
+
+  it('③-1 恢复路径委派抛出 auth 类 ToolUserError：用户收到"需要重新登录"，不是"处理失败"', async () => {
+    const platformTask = subagent(async () => {
+      throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');
+    });
+    // 整理模型不应被调用：收尾在委派失败处已确定性给出
+    let organizeCalls = 0;
+    const driver: TurnDriver = {
+      run: async (input) => { organizeCalls += 1; return { text: '整理完成', messages: input.messages }; },
+    };
+    const sessions = new FakeSessionRepo();
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_auth', resumeTaskId: 'task_resumed' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toBe(DELEGATION_AUTH_FAILURE);
+    expect(reply.text).toContain('需要重新登录');
+    // 错指令比没有指令更糟：这类回复不能伴随"稍后再试"
+    expect(reply.text).not.toContain('稍后');
+    expect(reply.text).not.toContain('处理失败');
+    // 收尾是确定性的：不再劳烦整理模型，转录里也只留这一句
+    expect(organizeCalls).toBe(0);
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+    const assistantText = transcript
+      .filter((message) => message.role === 'assistant')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    expect(assistantText).toBe(DELEGATION_AUTH_FAILURE);
+  });
+
+  it('③-1 补：非 ToolUserError 维持既有兜底（继续上抛给 handler 顶层）', async () => {
+    const platformTask = subagent(async () => { throw new Error('worker 进程崩溃'); });
+    const { driver } = recordingDriver([{ text: '整理完成' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+
+    await expect(runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_crash', resumeTaskId: 'task_resumed' }),
+      '确认继续',
+    )).rejects.toThrow('worker 进程崩溃');
+  });
+
+  // ── 任务4：确认码回合的 turn_span outcome 从结构化字段取 ───────────────────
+  // 旧实现嗅探回复文本（includes('已作废')）：取消一个"已作废"的码会被误记成
+  // confirm_cancelled——那一轮什么都没发生。现在 matchConfirmation 直接给结构化结局。
+
+  it('任务4 确认码作废：turn_span outcome = confirm_cancelled（来自结构化字段）', async () => {
+    const spans: Array<Record<string, unknown>> = [];
+    const original = console.info;
+    console.info = (line: string) => { try { const parsed = JSON.parse(line); if (parsed['event'] === 'turn_span') spans.push(parsed); } catch { /* 非 JSON 行 */ } };
+    try {
+      const platformTask: ContextTaskRunner = {
+        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        matchConfirmation: async () => ({ text: '已作废：甲账套 202608 的录入提案（1 条）未执行。', outcome: 'confirm_cancelled' }),
+        run: async () => ({ taskId: 'task_1', text: '不该被叫到' }),
+      };
+      const runtime = createTaxAgentRuntime({ driver: recordingDriver([{ text: 'x' }]).driver, sessions: new FakeSessionRepo(), platformTask });
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_confirm_cancel' }), '取消 D3F2K9');
+      expect(reply.text).toContain('已作废');
+    } finally { console.info = original; }
+    expect(spans.map((span) => span['outcome'])).toEqual(['confirm_cancelled']);
+  });
+
+  it('任务4 取消已作废的码：turn_span outcome = confirm_stale（不再被回复文本误导）', async () => {
+    const spans: Array<Record<string, unknown>> = [];
+    const original = console.info;
+    console.info = (line: string) => { try { const parsed = JSON.parse(line); if (parsed['event'] === 'turn_span') spans.push(parsed); } catch { /* 非 JSON 行 */ } };
+    try {
+      const platformTask: ContextTaskRunner = {
+        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        // 回复里确实带"已作废"三个字（提案早就作废了）——但这一轮没有任何状态变化
+        matchConfirmation: async () => ({ text: '该确认码对应的提案已作废，无需取消。', outcome: 'confirm_stale' }),
+        run: async () => ({ taskId: 'task_1', text: '不该被叫到' }),
+      };
+      const runtime = createTaxAgentRuntime({ driver: recordingDriver([{ text: 'x' }]).driver, sessions: new FakeSessionRepo(), platformTask });
+      await runtime.handleTurn(makeCtx({ requestId: 'req_confirm_stale' }), '取消 D3F2K9');
+    } finally { console.info = original; }
+    expect(spans.map((span) => span['outcome'])).toEqual(['confirm_stale']);
   });
 
   it('returns the user reply without waiting for the semantic Context State model', async () => {
@@ -1256,6 +1350,77 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('平台要求必须显式给出期间');
     expect(reply.text).toContain('请给出要查的期间');
     expect(reply.text).not.toContain('没有产生任何平台查询');
+  });
+
+  it('P5.4b ③-5 worker 文本带财务数字：只丢 workerText，"还缺少什么"的线索照常转达', async () => {
+    let delegations = 0;
+    const driver: TurnDriver = {
+      run: async (input) => {
+        for (;;) {
+          try {
+            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            return { text: error.message, messages: input.messages };
+          }
+        }
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => {
+        delegations += 1;
+        return {
+          taskId: 'task_needs',
+          // worker 自由文本里夹带财务数字：零执行轮次它不可信，不能整段外发
+          text: '幻东 202608 应收余额大概是 42 元。',
+          needs: { missing: ['期间'], reason: '平台要求必须显式给出期间', suggestion: '请给出要查的期间' },
+        };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_figure_relay' }), '查幻东账套的应收账款');
+
+    expect(delegations).toBe(3);
+    // ③-5：旧实现整段换成 NO_EXECUTION_CLARIFICATION，"还缺少什么"被连坐丢掉；
+    // 现在 needs 的结构化线索（missing/reason/suggestion）照发
+    expect(reply.text).toContain('还缺少：期间');
+    expect(reply.text).toContain('平台要求必须显式给出期间');
+    expect(reply.text).toContain('建议提供：请给出要查的期间');
+    // 不安全的 worker 文本不外发，也不退化成泛泛澄清
+    expect(reply.text).not.toContain('42 元');
+    expect(reply.text).not.toContain('没有产生任何平台查询');
+  });
+
+  it('P5.4c ③-5 边界：needs 线索自身带财务数字时仍失败关闭到泛泛澄清', async () => {
+    const driver: TurnDriver = {
+      run: async (input) => {
+        for (;;) {
+          try {
+            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            return { text: error.message, messages: input.messages };
+          }
+        }
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_needs',
+        text: '执行不了。',
+        needs: { missing: ['期间'], reason: '平台要求必须显式给出期间（大约 42 元的范围）' },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_needs_figure_in_needs' }), '查幻东账套的应收账款');
+
+    // 数字结论零执行轮次一律不外发：线索本身被污染时只能泛泛澄清
+    expect(reply.text).toBe(NO_EXECUTION_CLARIFICATION);
+    expect(reply.text).not.toContain('42 元');
   });
 
   it('P5.5 needs 回路把"缺什么"留进 Conversation Log，任务编号脱敏', async () => {

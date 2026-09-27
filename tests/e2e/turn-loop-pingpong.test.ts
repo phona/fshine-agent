@@ -182,7 +182,8 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     // 越权续跑：拿着 A 的编号在别人的会话里申报 delegate
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额', continueTaskId: worker.taskIds[0] });
     const crossUser = await send('查一下幻辰财税 202606 的应收账款余额', { userid: 'e2e_user2' });
-    expect(crossUser).toContain('无权继续');
+    // 拒绝措辞收口在 error-codes.ts（TASK_FORBIDDEN 三要素：归属不匹配 + 下一步）
+    expect(crossUser).toContain('TASK_FORBIDDEN');
     expect(crossUser).not.toContain('61000');
     // 零执行：worker 未被再叫、账本没有新增、没有计划通知
     expect(worker.taskIds).toHaveLength(1);
@@ -194,7 +195,7 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     // 宿主只保证错误诚实可行动 + 爆炸有界：说清编号无效并给出下一步，模型自己下一轮改。
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额', continueTaskId: 'task_ghost_404' });
     const ghost = await send('查一下幻辰财税 202606 的应收账款余额');
-    expect(ghost).toContain('未找到可继续');
+    expect(ghost).toContain('TASK_NOT_FOUND');
     expect(ghost).not.toContain('61000');
     expect(worker.taskIds).toHaveLength(1);
     expect(totalActualCalls()).toBe(afterFirst);

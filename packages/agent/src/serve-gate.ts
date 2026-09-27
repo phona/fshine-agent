@@ -15,6 +15,7 @@
  */
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
+import { messageTextFor } from './error-codes';
 import { operationLabel, type OperationLabels } from './operation-labels';
 
 export interface ServeGateEvent {
@@ -205,13 +206,14 @@ export function createServeGate(options: ServeGateOptions = {}) {
       const command = String(args['command'] ?? '').trim();
       detail = command;
       if (/(?:^|\s)(?:[^\s]+\/)?bin\/17dz\s+plan(?:\s|$)/.test(command)) {
-        // 教学而非 merely 拒绝：真实平台实测里这条旧消息（"只能提交 JSON calls 方案"）
+        // 教学而非 merely 拒绝：真实平台实测里旧消息（"只能提交 JSON calls 方案"）
         // 没说怎么提交，worker 被拒后理解成"把 JSON 打印出来"，步步空转。因此这里直接
         // 给出唯一合法形式——bash 工具里的单行原始命令，并点名三种常见错误包装。
-        // 措辞保持领域无关（业务词预算见 platform-leak-lint），也不出现平台脚本文件名。
+        // 措辞收口在 error-codes.ts（PLAN_SHAPE_GATE_TEACHING）：领域无关（业务词预算见
+        // platform-leak-lint），也不出现平台脚本文件名。
         verdict = {
           block: true,
-          reason: '计划必须经 bash 工具作为单行原始命令提交：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。',
+          reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING'),
         };
       } else if (!isServeCliInvocation(command)) {
         verdict = { block: true, reason: '运行态 bash 仅允许调用 bin/17dz（平台执行器网关）；知识检索用 read 工具' };

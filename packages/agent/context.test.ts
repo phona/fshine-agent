@@ -260,9 +260,9 @@ describe('17dz Pi subagent adapter', () => {
     const first = await subagent.run({ request: '第一次' }, { trusted: trusted() });
 
     await expect(subagent.run({ request: '越权', taskId: first.taskId }, { trusted: trusted('session-1', 'wecom:other') }))
-      .rejects.toThrow('无权继续');
+      .rejects.toThrow('TASK_FORBIDDEN');
     await expect(subagent.run({ request: '跨会话', taskId: first.taskId }, { trusted: trusted('session-2') }))
-      .rejects.toThrow('无权继续');
+      .rejects.toThrow('TASK_FORBIDDEN');
   });
 
   it('未知 taskId 和越界 skillRoots 在运行 Worker 前被拒绝', async () => {
@@ -287,7 +287,8 @@ describe('17dz Pi subagent adapter', () => {
   // 两件事——错误永远诚实可行动、爆炸永远有界。"这个会话里有几个开放任务"宿主知道，
   // 但"模型想续的是哪一个"只有模型知道；替它猜（哪怕恰一个时猜对）就是把重试的职责
   // 从模型手里拿回来，猜错时用户的问题会被静默送进别的子任务。因此一律抛 ToolUserError，
-  // 消息说清编号无效 + 下一步动作，让模型下一轮自己改。
+  // 消息说清编号无效 + 下一步动作（三要素措辞收口在 error-codes.ts 的 TASK_NOT_FOUND），
+  // 让模型下一轮自己改。
   describe('continueTaskId 查不到时：抛"未找到可继续"，不静默按新任务放行', () => {
     it('幻觉编号：直接抛"未找到可继续"，worker 一次都不叫', async () => {
       const root = await profileRoot();
@@ -295,7 +296,7 @@ describe('17dz Pi subagent adapter', () => {
       let called = false;
       const subagent = runner(root, tasks, { run: async () => { called = true; throw new Error('不应执行'); } });
       await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
-        .rejects.toThrow('未找到可继续的 17dz 任务：编号无效或已过期。请直接告诉我要查什么，我重新查一次。');
+        .rejects.toThrow('TASK_NOT_FOUND');
       expect(called).toBe(false);
     });
 
@@ -309,7 +310,7 @@ describe('17dz Pi subagent adapter', () => {
 
       // 两个候选一个都不绑：猜哪一个都是把用户的问题派到别的子任务上
       await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
-        .rejects.toThrow('未找到可继续');
+        .rejects.toThrow('TASK_NOT_FOUND');
     });
 
     it('合法 taskId 精确命中：照常续跑同一个子任务', async () => {
@@ -376,6 +377,26 @@ describe('17dz Pi subagent adapter', () => {
     const ctx = trusted();
     ctx.onPlanPending = async () => { throw new Error('pending store down'); };
     await expect(subagent.run({ request: '执行较大查询' }, { trusted: ctx })).rejects.toThrow('17dz 子任务执行失败');
+  });
+
+  it('③-3 宿主未配置 onPlanPending：用户话术指向管理员，不说"执行失败请稍后再试"', async () => {
+    const root = await profileRoot();
+    const subagent = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async (input) => ({
+        text: '需要确认', messages: input.messages,
+        pendingPlan: { planId: 'plan_1', version: 3, taskId: 'task_1', decision: 'confirm', userText: '需要确认', evaluation: {} as never },
+      }) },
+    });
+    // trusted() 默认不带 onPlanPending：计划停在确认门却没人接盘——这是部署漏配，
+    // 不是用户能重试好的事。旧实现落进 C5 catch 说"17dz 子任务执行失败，请稍后再试"，
+    // 把配置故障伪装成平台抖动（③-3：宿主不猜但也没对齐用户）。
+    const failure = await subagent.run({ request: '执行较大查询' }, { trusted: trusted() }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(ToolUserError);
+    expect((failure as Error).message).toBe('平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。');
+    expect((failure as Error).message).not.toContain('稍后');
+    expect((failure as Error).message).not.toContain('执行失败');
   });
 
   it('子 Agent 内部错误不会透传路径或秘密', async () => {
@@ -536,5 +557,59 @@ describe('委派失败分类的用户话术', () => {
     controller.abort();
     await expect(task.run({ request: '查A' }, { trusted: trusted() }, controller.signal))
       .rejects.toThrow(DELEGATION_CANCELLED);
+  });
+});
+/**
+ * 任务3（2026-09 第二波）：auth 判定去嗅探——以码判定，不依赖中文文案。
+ *
+ * 旧判据是 `/平台登录已过期/` 正则嗅探错误原文：平台改文案即退化成 executor_error，
+ * 而"请稍后再试"对 auth 是错指令（重试多少次都没用）。现在信封/挂码/码前缀先行
+ * （platform-contract.ts 的 auth 码集合），正则只作过渡兜底。
+ */
+describe('委派失败分类：登录态按错误码判定（不嗅探文案）', () => {
+  function codeFailingRunner(root: string, error: Error) {
+    const profiles: Record<string, ContextProfileConfig> = {
+      '17dz': { root, skillRoots: ['.agents/skills'] },
+    };
+    return createContextTaskRunner({
+      profiles,
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async () => { throw error; } },
+    });
+  }
+
+  it('挂码 / 消息码前缀的 auth 码 → auth 话术（AUTH_EXPIRED 等，与中文措辞无关）', async () => {
+    const root = await profileRoot();
+    const authErrors = [
+      // 17dz errorFor 挂码的载体
+      Object.assign(new Error('平台会话已失效'), { code: 'AUTH_EXPIRED' }),
+      // 17dz messageFor 渲染：消息以码开头（契约的一部分，不是文案嗅探）
+      new Error('AUTH_REDIRECTED_TO_LOGIN: 期望 导航后仍留在平台页面；实际 被重定向到登录页，会话已过期；正确形态 用户完成登录后重试'),
+      // 领域脚本对 AuthExpiredError 的归一码
+      Object.assign(new Error('需要登录'), { code: 'NEEDS_LOGIN' }),
+      Object.assign(new Error('工作台未就绪'), { code: 'AUTH_WORKBENCH_NOT_READY' }),
+      Object.assign(new Error('无会话 cookie'), { code: 'AUTH_UNKNOWN' }),
+    ];
+    for (const error of authErrors) {
+      const task = codeFailingRunner(root, error);
+      // 消息里没有任何"平台登录已过期"字样——判定全部来自码
+      expect(error.message).not.toContain('平台登录已过期');
+      await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+        .rejects.toThrow(DELEGATION_AUTH_FAILURE);
+    }
+  });
+
+  it('非 auth 码不误判：SUBJECT_NOT_FOUND 等仍是 executor_error', async () => {
+    const root = await profileRoot();
+    const task = codeFailingRunner(root, Object.assign(new Error('科目编码不存在'), { code: 'SUBJECT_NOT_FOUND' }));
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_EXECUTOR_FAILURE);
+  });
+
+  it('过渡正则仍兜底：auth.js 自动重登录失败消息（暂无码）不退化', async () => {
+    const root = await profileRoot();
+    const task = codeFailingRunner(root, new Error('平台登录已过期，自动登录失败——login.sh 退出码 1'));
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_AUTH_FAILURE);
   });
 });

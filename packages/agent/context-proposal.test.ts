@@ -96,37 +96,38 @@ describe('extractChangeProposal', () => {
   });
 });
 
-describe('两步确认状态机', () => {
-  function setup(opts?: { capabilities?: string[]; prepareOk?: boolean; commitEnabled?: boolean }) {
-    const intents = fakeIntents();
-    const prepareCalls: PrepareRequest[] = [];
-    const commitCalls: CommitRequest[] = [];
-    const runner = createContextTaskRunner({
-      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
-      tasks: noopTasks,
-      workerDriver: workerReturning(proposalText),
-      changeIntents: intents.repo,
-      prepareRunner: async (req: PrepareRequest): Promise<PrepareResult> => {
-        prepareCalls.push(req);
-        return opts?.prepareOk === false
-          ? { ok: false, output: '科目不存在：库存现金2', error: 'precheck fail' }
-          : { ok: true, output: 'BATCH {"count":1} mode: dry-run' };
-      },
-      commitRunner: async (req: CommitRequest): Promise<CommitResult> => {
-        commitCalls.push(req);
-        return { ok: true, output: '已保存' };
-      },
-      generateCode: () => 'D3F2K9',
-      intentTtlMs: 10 * 60_000,
-      maxBatchCount: 50,
-      commitEnabled: opts?.commitEnabled ?? false,
-    });
-    const testCtx = opts?.capabilities
-      ? { trusted: { ...ctx.trusted, capabilities: opts.capabilities } }
-      : ctx;
-    return { runner, intents, prepareCalls, commitCalls, testCtx };
-  }
+/** 提案/确认流的标准装配（模块级：两个 describe 共用）。 */
+function setup(opts?: { capabilities?: string[]; prepareOk?: boolean; commitEnabled?: boolean }) {
+  const intents = fakeIntents();
+  const prepareCalls: PrepareRequest[] = [];
+  const commitCalls: CommitRequest[] = [];
+  const runner = createContextTaskRunner({
+    profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+    tasks: noopTasks,
+    workerDriver: workerReturning(proposalText),
+    changeIntents: intents.repo,
+    prepareRunner: async (req: PrepareRequest): Promise<PrepareResult> => {
+      prepareCalls.push(req);
+      return opts?.prepareOk === false
+        ? { ok: false, output: '科目不存在：库存现金2', error: 'precheck fail' }
+        : { ok: true, output: 'BATCH {"count":1} mode: dry-run' };
+    },
+    commitRunner: async (req: CommitRequest): Promise<CommitResult> => {
+      commitCalls.push(req);
+      return { ok: true, output: '已保存' };
+    },
+    generateCode: () => 'D3F2K9',
+    intentTtlMs: 10 * 60_000,
+    maxBatchCount: 50,
+    commitEnabled: opts?.commitEnabled ?? false,
+  });
+  const testCtx = opts?.capabilities
+    ? { trusted: { ...ctx.trusted, capabilities: opts.capabilities } }
+    : ctx;
+  return { runner, intents, prepareCalls, commitCalls, testCtx };
+}
 
+describe('两步确认状态机', () => {
   it('无 write capability → 提案被拒，不创建 intent', async () => {
     const { runner, intents, prepareCalls, testCtx } = setup({ capabilities: ['read'] });
     const r = await runner.run({ request: '录一张凭证' }, testCtx);
@@ -250,5 +251,104 @@ describe('两步确认状态机', () => {
     const reply = await runner.matchConfirmation!(testCtx.trusted, '取消 D3F2K9');
     expect(reply?.text).toContain('已完成录入');
     expect(rec.status).toBe('committed');
+  });
+});
+
+/**
+ * 任务4（2026-09 第二波）：结构化 outcome 取代回复文本嗅探。
+ *
+ * 旧实现拿自己刚生成的回复文本 includes 两句中文给日志 outcome 分类——
+ *   · 授权名单限制模式的拒绝文本两个关键词都不含 → 误记 proposal_created（日志说谎）；
+ *   · 取消一个"已作废"的码 → 回复含"已作废" → 误记 confirm_cancelled（那一轮什么都没发生）。
+ * 现在 finalizeProposal / matchConfirmation 直接返回结构化结局，日志从数据里取。
+ */
+describe('结构化 outcome：日志分类从数据里取，不嗅探回复文本', () => {
+  /** 捕获 delegation_span 的 outcome 字段（console.info 的 JSON 行）。 */
+  function captureSpans(): { spans: Array<Record<string, unknown>>; restore: () => void } {
+    const spans: Array<Record<string, unknown>> = [];
+    const original = console.info;
+    console.info = (line: string) => {
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (parsed['event'] === 'delegation_span') spans.push(parsed);
+      } catch { /* 非 JSON 行忽略 */ }
+    };
+    return { spans, restore: () => { console.info = original; } };
+  }
+
+  it('提案结局三种：declined / precheck_failed / created 各归各位', async () => {
+    const declined = captureSpans();
+    try {
+      const { runner, testCtx } = setup({ capabilities: ['read'] });
+      await runner.run({ request: '录一张凭证' }, testCtx);
+    } finally { declined.restore(); }
+    expect(declined.spans.map((span) => span['outcome'])).toEqual(['proposal_declined']);
+
+    const precheck = captureSpans();
+    try {
+      const { runner, testCtx } = setup({ prepareOk: false });
+      await runner.run({ request: '录一张凭证' }, testCtx);
+    } finally { precheck.restore(); }
+    expect(precheck.spans.map((span) => span['outcome'])).toEqual(['proposal_precheck_failed']);
+
+    const created = captureSpans();
+    try {
+      const { runner, testCtx } = setup();
+      await runner.run({ request: '录一张凭证' }, testCtx);
+    } finally { created.restore(); }
+    expect(created.spans.map((span) => span['outcome'])).toEqual(['proposal_created']);
+  });
+
+  it('授权名单限制模式同归 proposal_declined（旧实现误记 proposal_created）', async () => {
+    const { runner, intents, prepareCalls, testCtx } = setup();
+    const allowlistCtx = { trusted: { ...testCtx.trusted, allowedAccountSetIds: ['as_001'] } };
+    const capture = captureSpans();
+    let text = '';
+    try {
+      text = (await runner.run({ request: '录一张凭证' }, allowlistCtx)).text;
+    } finally { capture.restore(); }
+    expect(text).toContain('授权名单限制模式');
+    // 结构化 outcome：确定性拒绝，不是"已创建待确认任务"
+    expect(capture.spans.map((span) => span['outcome'])).toEqual(['proposal_declined']);
+    expect(intents.rows.size).toBe(0);
+    expect(prepareCalls).toHaveLength(0);
+  });
+
+  it('确认码结局：executed / held / failed / stale 由结构化字段给出', async () => {
+    const executed = (await setup({ commitEnabled: true })).runner;
+    await executed.run({ request: '录一张凭证' }, ctx);
+    expect((await executed.matchConfirmation!(ctx.trusted, '确认 D3F2K9'))?.outcome).toBe('confirm_executed');
+
+    const held = setup().runner;
+    await held.run({ request: '录一张凭证' }, ctx);
+    expect((await held.matchConfirmation!(ctx.trusted, '确认 D3F2K9'))?.outcome).toBe('confirm_held');
+
+    const cancelled = setup().runner;
+    await cancelled.run({ request: '录一张凭证' }, ctx);
+    expect((await cancelled.matchConfirmation!(ctx.trusted, '取消 D3F2K9'))?.outcome).toBe('confirm_cancelled');
+
+    const failed = createContextTaskRunner({
+      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      tasks: noopTasks,
+      workerDriver: workerReturning(proposalText),
+      changeIntents: fakeIntents().repo,
+      prepareRunner: async () => ({ ok: true, output: 'dry-run' }),
+      commitRunner: async () => ({ ok: false, output: '', error: '落账拒绝' }),
+      generateCode: () => 'D3F2K9',
+      commitEnabled: true,
+    });
+    await failed.run({ request: '录一张凭证' }, ctx);
+    expect((await failed.matchConfirmation!(ctx.trusted, '确认 D3F2K9'))?.outcome).toBe('confirm_failed');
+  });
+
+  it('取消一个已作废的码 → confirm_stale（旧实现按回复含"已作废"误记 confirm_cancelled）', async () => {
+    const { runner, intents, testCtx } = setup();
+    await runner.run({ request: '录一张凭证' }, testCtx);
+    await runner.matchConfirmation!(testCtx.trusted, '取消 D3F2K9');
+    expect([...intents.rows.values()][0]!.status).toBe('cancelled');
+    // 第二发取消码：提案早已终结，这一轮没有任何状态变化
+    const stale = await runner.matchConfirmation!(testCtx.trusted, '取消 D3F2K9');
+    expect(stale?.text).toContain('已作废');
+    expect(stale?.outcome).toBe('confirm_stale');
   });
 });

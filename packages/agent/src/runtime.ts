@@ -15,15 +15,18 @@ import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence
 import { collectExecutionFacts, EXECUTION_FACTS_MARKER, type ExecutionFacts } from './execution-facts';
 import { parsePlanStep, planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import type { PendingPlanConfirmation } from './plan-runtime';
+import { messageTextFor } from './error-codes';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
 
-export const FALLBACK_TIMEOUT = '查询超时,请稍后再试';
-export const FALLBACK_FAILURE = '查询失败,请稍后再试或联系管理员';
+// 收尾/兜底话术全部收口在 error-codes.ts（消息模板类：码 → 文本一一对应）；
+// 这里的常量是同一份表值的再导出，测试与调用方继续认常量。
+export const FALLBACK_TIMEOUT = messageTextFor('FALLBACK_TIMEOUT');
+export const FALLBACK_FAILURE = messageTextFor('FALLBACK_FAILURE');
 
 /** Fail-closed reply whenever a turn claims real-time data but produced no platform execution. */
-export const NO_EXECUTION_CLARIFICATION = '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。';
+export const NO_EXECUTION_CLARIFICATION = messageTextFor('NO_EXECUTION_CLARIFICATION');
 
 /**
  * 方案已获批准但查询没有执行时的确定性收尾文案（P1 收尾事实兜底）。
@@ -32,10 +35,18 @@ export const NO_EXECUTION_CLARIFICATION = '我需要实际查询平台才能回�
  * （批准了、通知送到了、查询没跑），并给出明确的下一步（回复"继续"按已批准计划重跑）。
  * 措辞与业务无关（不出现任何领域词），重启执行的动作由用户一句话触发。
  */
-export const ACTIVATED_PLAN_NOT_EXECUTED = '执行方案已获批准（通知已送达），但查询没有执行。请回复“继续”，我按已批准的计划重新执行；如想改查询范围，直接告诉我。';
+export const ACTIVATED_PLAN_NOT_EXECUTED = messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED');
+
+/**
+ * 恢复路径（resumeTaskId）重跑后零执行的收尾文案（③-5b）。
+ * 与 ACTIVATED_PLAN_NOT_EXECUTED 的分工：后者有"方案已获批准、通知已送达"这个事实
+ * （activatedPlan 为真）；前者覆盖其余零执行形状——用户刚确认过操作，缺的是执行，
+ * 不能再问"要查询的对象和范围"（那是 NO_EXECUTION_CLARIFICATION 的问句，早就答过）。
+ */
+export const RESUMED_PLAN_NOT_EXECUTED = messageTextFor('RESUMED_PLAN_NOT_EXECUTED');
 
 /** Appended when the Main Agent answers without declaring the turn's intent. */
-const ROUTE_RETRY_NUDGE = '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。';
+const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
 
 /**
  * 纠错环单回合上限（架构 §3）：子 Agent 连续回报"缺什么"这么多轮就不再要它重派，
@@ -151,15 +162,42 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           });
           await persistAssistantAndContext(deps, ctx, direct.text, contextUpdateQueues);
           scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-          console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: direct.text.includes('已作废') ? 'confirm_cancelled' : 'confirm_executed' }));
+          // turn_span 的 outcome 从 matchConfirmation 的结构化结局取（2026-09 第二波）：
+          // 不再嗅探自己刚生成的回复文本（includes('已作废') 会把"取消已作废的码"
+          // 误记成 confirm_cancelled——那一轮什么都没发生）。
+          console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: direct.outcome }));
           return direct;
         }
       }
       if (ctx.resumeTaskId) {
-        const resumed = await deps.platformTask.run({
-          request: '宿主已收到用户对待确认计划的真实确认。请继续执行已激活计划中的剩余查询，不要扩大计划范围。',
-          taskId: ctx.resumeTaskId,
-        }, { trusted: ctx });
+        // ③-1：恢复路径与 delegate 路径同样收尾。此前 platformTask.run 抛出的
+        // ToolUserError（如 DELEGATION_AUTH_FAILURE"平台登录态过期，需要重新登录后
+        // 才能继续查询"）会一路穿透到 handler.ts 顶层 catch，被换成"处理失败，请稍后
+        // 再试"——对 auth 类是错指令（重试多少次都没用），用户拿到的是误导。
+        // ToolUserError 的语义本就是"这段文本成为本轮回复"（driver.ts 契约），这里
+        // 经 finishDirectReply 精确直达；非 ToolUserError 是真正的意外，维持既有兜底
+        // （继续上抛给 handler 顶层）。
+        let resumed: SubagentTaskResult;
+        try {
+          resumed = await deps.platformTask.run({
+            request: '宿主已收到用户对待确认计划的真实确认。请继续执行已激活计划中的剩余查询，不要扩大计划范围。',
+            taskId: ctx.resumeTaskId,
+          }, { trusted: ctx });
+        } catch (error) {
+          if (error instanceof ToolUserError) {
+            // 码来自 error-codes.ts 的 toolUserErrorFor 挂载（context.ts 各拒绝点）；
+            // 没有挂码时只记事件与 taskId，不猜。
+            const code = (error as { code?: unknown }).code;
+            console.warn(JSON.stringify({
+              event: 'confirmed_plan_resume_failed',
+              requestId: ctx.requestId,
+              taskId: ctx.resumeTaskId,
+              ...(typeof code === 'string' ? { code } : {}),
+            }));
+            return await finishDirectReply(error.message, 'confirmed_plan_resume_failed');
+          }
+          throw error;
+        }
         // 恢复路径的执行痕迹判据与正常 delegate 路径同一把尺（F8）：用户确认码 →
         // 计划激活 → worker 重跑之后仍是零平台调用时，不得无条件放行。needs /
         // pendingPlan 是另外两种合法终局（缺信息可续 / 又停在确认门），照旧放行。
@@ -192,7 +230,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         const text = resumedBlocked
           ? resumed.activatedPlan
             ? (note ? `${ACTIVATED_PLAN_NOT_EXECUTED}\n\n${note}` : ACTIVATED_PLAN_NOT_EXECUTED)
-            : (note ? `${note}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）` : NO_EXECUTION_CLARIFICATION)
+            // ③-5b：非 activatedPlan 的零执行也用 resume 专用话术。用户刚确认过操作，
+            // NO_EXECUTION_CLARIFICATION 那句"请告诉我要查询的对象和范围"问的是早就
+            // 答过的问题——与 activatedPlan 解耦后，两种零执行形状各自说准自己的事实。
+            : (note ? `${RESUMED_PLAN_NOT_EXECUTED}\n\n${note}` : RESUMED_PLAN_NOT_EXECUTED)
           // 正常路径：整理模型的文本优先；它没说话时回落 worker 文本——执行面注脚
           // 是给模型的系统元数据，回落不过滤就会直接上屏并进转录（F5）。
           : (answer.text.trim() || stripFootprint(resumed.text));
@@ -638,8 +679,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   }
                   // 回路兜底：连续几轮仍缺信息，停止重派，把线索作为本轮回复交给用户
                   // （这是转达，不是失败）。数字结论仍须本轮有执行痕迹。
-                  const userText = renderNeedsUserText(delegated.needs, stripFootprint(delegated.text));
-                  throw new ToolUserError(hasFinancialFigure(userText) ? NO_EXECUTION_CLARIFICATION : userText);
+                  // ③-5：旧实现把 worker 文本拼进转达，一旦其中带财务数字就整段换成
+                  // NO_EXECUTION_CLARIFICATION——"还缺少什么"的唯一线索被连坐丢掉。
+                  // 现在只丢 workerText（零执行轮次它不可信），needs 的 missing/reason/
+                  // suggestion 是宿主与平台信封的结构化事实，照常转达（先例：
+                  // renderNeedsUserText(needs, '')）。
+                  const needsOnly = renderNeedsUserText(delegated.needs, '');
+                  throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly);
                 }
                 if (step) return renderPlanStepToolResult(step, delegated);
                 const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
@@ -1126,7 +1172,7 @@ function stripFootprint(text: string): string {
  */
 function usefulWorkerNote(text: string): string {
   const note = stripFootprint(text).trim();
-  if (!note || hasFinancialFigure(note) || note === NO_EXECUTION_CLARIFICATION || note === ACTIVATED_PLAN_NOT_EXECUTED) return '';
+  if (!note || hasFinancialFigure(note) || note === NO_EXECUTION_CLARIFICATION || note === ACTIVATED_PLAN_NOT_EXECUTED || note === RESUMED_PLAN_NOT_EXECUTED) return '';
   return note;
 }
 

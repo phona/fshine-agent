@@ -16,8 +16,9 @@ import type { PendingPlanConfirmation } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
+import { messageTextFor, toolUserErrorFor } from './error-codes';
+import { isPlatformAuthError } from './platform-contract';
 import type {
-  AgentReply,
   ChangeIntentRecord,
   ChangeIntentRepo,
   ContextProfileConfig,
@@ -40,11 +41,14 @@ const DEFAULT_WORKER_TIMEOUT_MS = 600_000;
  *   · timeout：平台侧慢，稍后重试是对的动作；
  *   · executor_error / cancelled：维持原话术。
  * 全部与业务无关（不出现任何领域词），只陈述状态与下一步动作。
+ *
+ * 措辞收口在 error-codes.ts（消息模板类：码 → 文本一一对应）；这里的常量是同一份
+ * 表值的再导出，测试与调用方继续认常量。
  */
-export const DELEGATION_AUTH_FAILURE = '平台登录态过期，需要重新登录后才能继续查询。';
-export const DELEGATION_TIMEOUT_FAILURE = '平台响应超时，请稍后重试。';
-export const DELEGATION_EXECUTOR_FAILURE = '17dz 子任务执行失败，请稍后再试。';
-export const DELEGATION_CANCELLED = '17dz 子任务已取消。';
+export const DELEGATION_AUTH_FAILURE = messageTextFor('DELEGATION_AUTH_FAILURE');
+export const DELEGATION_TIMEOUT_FAILURE = messageTextFor('DELEGATION_TIMEOUT_FAILURE');
+export const DELEGATION_EXECUTOR_FAILURE = messageTextFor('DELEGATION_EXECUTOR_FAILURE');
+export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
 
 export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
@@ -159,8 +163,32 @@ export interface ContextTaskRunner {
   /**
    * 确认码/取消码匹配：命中则由服务端直接执行或作废并返回回复（绕过模型）；
    * 未命中返回 null，消息按正常流程进入模型。
+   *
+   * 回复带结构化 outcome（2026-09 第二波）：turn_span 的日志分类从数据里取，
+   * 不再嗅探自己刚生成的回复文本（旧实现拿回复 includes 一句"已作废"来分类，
+   * 会把"取消一个已作废的码"误记成 confirm_cancelled——那一轮什么都没发生）。
    */
-  matchConfirmation?(ctx: TrustedContext, message: string): Promise<AgentReply | null>;
+  matchConfirmation?(ctx: TrustedContext, message: string): Promise<ConfirmationReply | null>;
+}
+
+/**
+ * 确认码匹配的结构化结局（替代回复文本嗅探）：
+ *   · confirm_executed：确认码命中待确认提案且落账完成；
+ *   · confirm_cancelled：取消码命中待确认提案且作废完成；
+ *   · confirm_failed：确认/落账链路失败（执行器未配置或落账未完成，意图置 failed）；
+ *   · confirm_held：确认收到但落账执行未启用，提案保持待确认（无状态变化）；
+ *   · confirm_stale：码已终结，给出确定性解释（无状态变化）。
+ */
+export type ConfirmationOutcome =
+  | 'confirm_executed'
+  | 'confirm_cancelled'
+  | 'confirm_failed'
+  | 'confirm_held'
+  | 'confirm_stale';
+
+export interface ConfirmationReply {
+  text: string;
+  outcome: ConfirmationOutcome;
 }
 
 export const RUN_17DZ_TASK_SCHEMA: Record<string, unknown> = {
@@ -259,22 +287,30 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     inputSchema: RUN_17DZ_TASK_SCHEMA,
   };
 
+  /**
+   * 提案落账前的宿主持结构化结局（2026-09 第二波）：日志分类从数据里取，
+   * 不再嗅探回复文本（旧实现拿回复 includes 两句中文来分类）。授权名单限制模式与
+   * 未开放写入权限同归 proposal_declined——两者都是确定性拒绝，旧实现把前者算成
+   * proposal_created（文本里两个关键词都不含），日志因此说谎。
+   */
+  type ProposalOutcome = 'proposal_declined' | 'proposal_precheck_failed' | 'proposal_created';
+
   async function finalizeProposal(
     proposal: ChangeProposal,
     ctx: ContextTaskExecutionContext,
     taskId: string,
-  ): Promise<SubagentTaskResult> {
+  ): Promise<{ result: SubagentTaskResult; outcome: ProposalOutcome }> {
     const ci = options.changeIntents!;
-    const stop = (text: string) => ({ taskId, text });
+    const stop = (text: string, outcome: ProposalOutcome) => ({ result: { taskId, text }, outcome });
 
     const capabilities = ctx.trusted.capabilities ?? [];
     if (!capabilities.includes('write')) {
-      return stop('已收到录入提案，但当前账号未开放写入权限，已停止。请联系管理员开通后重试。');
+      return stop('已收到录入提案，但当前账号未开放写入权限，已停止。请联系管理员开通后重试。', 'proposal_declined');
     }
     // allowlist principal 的授权以对象 id 表达，而提案携带平台侧名称——
     // 名称到 id 的映射不在 fshine 侧，V1 仅对 scope=all 的账号开放写。
     if (ctx.trusted.allowedAccountSetIds.length > 0) {
-      return stop('已收到录入提案，但当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。');
+      return stop('已收到录入提案，但当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。', 'proposal_declined');
     }
 
     const active = await options.changeIntents!.findPendingBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
@@ -284,7 +320,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     const prep = await prepareRunner({ intentId, accountSet: proposal.accountSet, period: proposal.period, contracts: proposal.contracts });
     if (!prep.ok) {
       console.warn(JSON.stringify({ event: 'change_proposal_precheck_failed', intentId, taskId }));
-      return stop(`变更提案未通过预检（dry-run），未创建待确认任务。原因摘要：${truncate(prep.error || prep.output, 300)}`);
+      return stop(`变更提案未通过预检（dry-run），未创建待确认任务。原因摘要：${truncate(prep.error || prep.output, 300)}`, 'proposal_precheck_failed');
     }
     if (active) await ci.updateStatus(active.intentId, 'superseded');
 
@@ -315,12 +351,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       `- 时间：${proposal.period}`,
       `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元`,
       confirmLine,
-    ].join('\n'));
+    ].join('\n'), 'proposal_created');
   }
 
   return {
     tool,
-    matchConfirmation: async (ctx, message) => {
+    matchConfirmation: async (ctx, message): Promise<ConfirmationReply | null> => {
       const ci = options.changeIntents;
       if (!ci) return null;
       const now = new Date();
@@ -331,7 +367,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
           await ci.updateStatus(rec.intentId, 'cancelled');
-          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 条）未执行。` };
+          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 条）未执行。`, outcome: 'confirm_cancelled' };
         }
         const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
         if (!stale) return null;
@@ -343,7 +379,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           superseded: '已被更新的提案取代',
           failed: '执行失败',
         };
-        return { text: `该确认码对应的提案${why[stale.status]}，无需取消。` };
+        return { text: `该确认码对应的提案${why[stale.status]}，无需取消。`, outcome: 'confirm_stale' };
       }
 
       const confirmM = message.match(CONFIRM_RE);
@@ -352,22 +388,22 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
           if (!options.commitEnabled) {
-            return { text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。' };
+            return { text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。', outcome: 'confirm_held' };
           }
           const commitRunner = options.commitRunner;
           if (!commitRunner) {
             await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });
-            return { text: '执行失败：落账执行器未配置，请联系管理员。' };
+            return { text: '执行失败：落账执行器未配置，请联系管理员。', outcome: 'confirm_failed' };
           }
           const contracts = (rec.payload as ChangeProposal).contracts;
           const out = await commitRunner({ intentId: rec.intentId, accountSet: rec.accountSet, period: rec.period, contracts });
           if (!out.ok) {
             console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
             await ci.updateStatus(rec.intentId, 'failed', { output: out.output.slice(0, 2000), error: out.error });
-            return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。' };
+            return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。', outcome: 'confirm_failed' };
           }
           await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
-          return { text: `已完成：${rec.summary.count} 条已录入（${rec.accountSet} ${rec.period}），读回校验通过。` };
+          return { text: `已完成：${rec.summary.count} 条已录入（${rec.accountSet} ${rec.period}），读回校验通过。`, outcome: 'confirm_executed' };
         }
         // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
         // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
@@ -381,16 +417,16 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           superseded: '已被更新的提案取代，确认最新的提案即可',
           failed: '执行失败，请联系管理员核对后重新发起',
         };
-        return { text: `该确认码对应的提案${why[stale.status]}。` };
+        return { text: `该确认码对应的提案${why[stale.status]}。`, outcome: 'confirm_stale' };
       }
       return null;
     },
     async run(args, ctx, signal) {
       if (!args || typeof args.request !== 'string' || args.request.trim() === '') {
-        throw new ToolUserError('17dz 任务不能为空。');
+        throw toolUserErrorFor('TASK_REQUEST_EMPTY');
       }
       if (args.taskId !== undefined && (typeof args.taskId !== 'string' || args.taskId.trim() === '')) {
-        throw new ToolUserError('17dz taskId 无效。');
+        throw toolUserErrorFor('TASK_ID_INVALID');
       }
 
       const profile = await resolveContextProfile(options.profiles, profileId);
@@ -398,11 +434,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       // 错误永远诚实可行动、爆炸永远有界。"这个会话里有几个开放任务"宿主确实知道，
       // 但"模型想续的是哪一个"只有模型知道；替它猜（哪怕恰一个时猜对）就是把重试的
       // 职责从模型手里拿回来，猜错时用户的问题会被静默送进别的子任务。编号无效时说清
-      // 编号无效、并给出下一步动作，模型下一轮自己改。
+      // 编号无效、并给出下一步动作（措辞在 error-codes.ts 表里），模型下一轮自己改。
       const existing = args.taskId ? await options.tasks.get(args.taskId) : null;
-      if (args.taskId && !existing) throw new ToolUserError('未找到可继续的 17dz 任务：编号无效或已过期。请直接告诉我要查什么，我重新查一次。');
+      if (args.taskId && !existing) throw toolUserErrorFor('TASK_NOT_FOUND');
       if (existing && (existing.principalId !== ctx.trusted.principalId || existing.parentSessionId !== ctx.trusted.sessionId)) {
-        throw new ToolUserError('无权继续该 17dz 任务。');
+        throw toolUserErrorFor('TASK_FORBIDDEN');
       }
 
       // 计划模式（Phase 6）：这一步的计划门通知带上「第 N/M 步」前缀交付用户——
@@ -472,7 +508,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
-          if (!ctx.trusted.onPlanPending) throw new Error('平台计划待确认，但宿主未配置安全持久化回调。');
+          if (!ctx.trusted.onPlanPending) throw toolUserErrorFor('PLAN_PENDING_PERSIST_MISSING');
           await ctx.trusted.onPlanPending({
             planId: pendingPlan.planId,
             version: pendingPlan.version,
@@ -506,11 +542,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
-          const outcome = handled.text.includes('未开放写入权限') ? 'proposal_declined'
-            : handled.text.includes('未通过预检') ? 'proposal_precheck_failed'
-            : 'proposal_created';
-          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome }));
-          return handled;
+          // 日志分类从结构化 outcome 取（2026-09 第二波）：不再嗅探回复文本
+          // （旧实现拿回复 includes 两句中文给 outcome 分类，连字面量 if 预算都报了）。
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: handled.outcome }));
+          return handled.result;
         }
         const final: SubagentTaskResult = {
           taskId,
@@ -529,10 +564,22 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok' }));
         return final;
       } catch (error) {
+        // 已经是面向用户的安全话术（ToolUserError 语义 = 这段文本成为本轮回复）时
+        // 原样抛出：配置故障（如 onPlanPending 缺失）有自己精确的话术，再套一层
+        // "执行失败请稍后再试"就是把部署漏配伪装成平台抖动——用户重试多少次都不会好
+        // （③-3：宿主不猜但也没对齐用户的那类去向）。
+        if (error instanceof ToolUserError) throw error;
         // 失败分类的判定顺序即优先级：取消（用户/上层主动中止）先于超时（时间到了），
         // 再看登录态。同一时刻可能多个条件成立，取最贴近用户动作的那个。
+        // 登录态判定以**码**为准（isPlatformAuthError：信封/挂码/码前缀，见
+        // platform-contract.ts 的 auth 码集合）。下面那条中文正则是**过渡**：平台
+        // auth.js 的自动重登录失败消息（"平台登录已过期，自动登录失败——…"）是既有
+        // 唯一不带码前缀的形态，17dz 侧尚未给它挂码；在平台收口之前先留正则兜底，
+        // 否则那一条会退化成 executor_error——而"请稍后再试"对 auth 是错指令。
+        // 平台侧该消息一带码（走 messageFor），这行即可删除。
         const failureClass = signal?.aborted ? 'cancelled'
           : Date.now() >= deadline ? 'timeout'
+          : isPlatformAuthError(error) ? 'auth'
           : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
           : 'executor_error';
         console.info(JSON.stringify({

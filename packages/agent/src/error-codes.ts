@@ -1,0 +1,241 @@
+/**
+ * fshine 侧错误码表（镜像 17dz `src/lib/error-codes.js` 的结构与纪律：错误即数据）。
+ *
+ * 为什么收口：fshine 的拒绝/兜底消息曾是各出事点现场手拼——同一个"计划形状不符"
+ * 在 plan-runtime 六个 throw 站点六种写法；"零执行"兜底在 runtime 三处各写一遍；
+ * 委派失败的四档话术散在 context.ts 顶部。消息在出事点随手拼，拼出什么结构全看
+ * 当时心情，缺"期望什么 / 实际收到什么 / 正确形态是什么"三要素时，调用方对不上
+ * 就无从改起。现在消息模板只有这一张表：新失败模式 = 新错误码（往表里加一行），
+ * 不在出事点加分支、不现场拼消息。
+ *
+ * 两类条目（一张表，两种形态）：
+ *   · 错误类 `{expected, actual?, correctForm}`：参数问题 / 形状问题 / 配置故障。
+ *     渲染 `<CODE>: 期望 <expected>；实际 <actual>；正确形态 <correctForm>`——
+ *     必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）。
+ *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
+ *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
+ *     语义照旧，只是不再有第二份手抄本。
+ *
+ * 纪律（与 17dz 表相同）：
+ *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
+ *   - 未知码 fail-loud（UNKNOWN_ERROR_CODE）：绝不静默 fallback 到通用消息——那会把
+ *     "忘了登记新码"伪装成"已知的普通失败"，正是本表要消灭的事故形态。误用
+ *     （给消息模板传 actual / 给错误码少传动态实际值之外的参数）同样 fail-loud。
+ *   - 措辞与业务无关（不出现任何领域词，业务词预算见 platform-leak-lint）：
+ *     执行层持有领域词，这正是边界。
+ *
+ * 渲染格式：`<CODE>: 期望 <expected>；实际 <actual>；正确形态 <correctForm>`。
+ * actual 绝大多数是拒绝点动态填（收到的脏输入 / 候选清单 / 第几项出错）；个别码
+ * 有稳定实际形态，在条目里给 actual 缺省。correctForm 第三参仅用于需要调用方
+ * 上下文的动态部分；静态措辞一律在表里。
+ */
+import { ToolUserError } from './driver';
+
+export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
+
+/** 错误类条目：三要素（期望 / 实际 / 正确形态）。 */
+interface ErrorCodeEntry {
+  expected: string;
+  /** 稳定的实际形态缺省；动态实际值由拒绝点传参覆盖。 */
+  actual?: string;
+  correctForm: string;
+}
+
+/** 消息模板类条目：用户可见的状态话术（不是错误，码 → 文本一一对应）。 */
+interface MessageCodeEntry {
+  text: string;
+}
+
+type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
+
+/** 计划提交的正确形状：形状类错误共用的 correctForm（静态词进表）。 */
+const CORRECT_PLAN_SHAPE = '方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行命令里。';
+
+const TABLE: Record<string, CodeEntry> = {
+  // ── 门/计划类：worker 提交方案的形状与范围（PLAN DECLINED 的自愈通道）──
+  // 措辞是给 worker 的诊断：说清期望什么、实际收到什么、正确形态是什么。正确的
+  // 诊断本身就是自愈通道——真实平台实测里用权限话术答复格式问题，worker 被误导到
+  // 把方案 JSON 打印成助手文本，12 步全空转；此后形状错误一律响亮抛出。
+  PLAN_SHAPE_PREFIX: {
+    expected: 'bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）',
+    correctForm: CORRECT_PLAN_SHAPE,
+  },
+  PLAN_SHAPE_PAYLOAD: {
+    expected: 'bin/17dz plan 之后紧跟单行 JSON 方案',
+    actual: 'plan 之后没有任何内容',
+    correctForm: CORRECT_PLAN_SHAPE,
+  },
+  PLAN_SUBCOMMAND_RESERVED: {
+    expected: 'worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用',
+    correctForm: 'bin/17dz plan {"goal":"…","calls":[…]}（单行原始命令）',
+  },
+  PLAN_JSON_PARSE: {
+    expected: '方案是合法 JSON',
+    correctForm: CORRECT_PLAN_SHAPE,
+  },
+  PLAN_JSON_NOT_OBJECT: {
+    expected: '方案 JSON 顶层是对象',
+    correctForm: 'bin/17dz plan {"calls":[…]}（顶层为对象，calls 是数组）',
+  },
+  PLAN_CALLS_NOT_ARRAY: {
+    expected: '方案声明 calls 数组',
+    correctForm: 'bin/17dz plan {"goal":"…","calls":[…]}',
+  },
+  PLAN_CALLS_EMPTY: {
+    expected: 'calls 至少包含一个操作',
+    correctForm: '把本次要执行的 operation 逐项列进 calls，不空手提交',
+  },
+  PLAN_CALL_NOT_OBJECT: {
+    expected: 'calls 的每一项是对象',
+    correctForm: '{"operation":"…","args":[…]}',
+  },
+  PLAN_CALL_FIELDS: {
+    expected: 'calls 的每一项都含 operation 和 args 两个字段',
+    correctForm: '{"operation":"…","args":[…]}',
+  },
+  PLAN_CALL_OPERATION_EMPTY: {
+    expected: 'operation 是非空字符串',
+    correctForm: '平台清单注册名（operation list 可查），不猜名称',
+  },
+  PLAN_CALL_ARGS_NOT_ARRAY: {
+    expected: 'args 是数组',
+    correctForm: 'args 为字符串数组，即命令行原样参数（如 ["--query","某名称","--period","202609"]）',
+  },
+  PLAN_CALL_ARGS_NOT_JSON: {
+    expected: 'args 是 JSON 值',
+    correctForm: '字符串 / 数字 / 布尔 / null；不含函数、循环引用等不可序列化值',
+  },
+  // 计划实体来源校验（宿主侧 C20）的拒绝原因：实际 = 校验器点名的越权参数，
+  // 由 pi-coding-driver 以 PLAN DECLINED 协议前缀交付 worker。
+  ENTITY_OUT_OF_SCOPE: {
+    expected: '计划的每个参数都能在当前请求、检索证据或平台响应里逐字找到',
+    correctForm: '严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls',
+  },
+  // 同任务内计划被连续拒绝的收敛（PLAN STOP）：实际 = 已拒绝次数。
+  DECLINED_PLAN_LIMIT: {
+    expected: '同一任务的计划提交逐次通过形状与实体来源校验',
+    correctForm: '停止重新提交计划，直接用自然语言向用户说明缺什么、建议提供什么',
+  },
+
+  // ── 任务类：委派入口的参数卫生（参数问题，绝不报成权限问题）──
+  TASK_REQUEST_EMPTY: {
+    expected: 'request 为非空字符串（把用户请求加工成自包含的一句话）',
+    correctForm: '写明做什么、对谁、什么范围，再委派',
+  },
+  TASK_ID_INVALID: {
+    expected: 'taskId 为非空字符串',
+    actual: 'taskId 为空或不是字符串',
+    correctForm: '继续此前的子任务才传 taskId；新任务不传',
+  },
+  TASK_NOT_FOUND: {
+    expected: 'taskId 是本会话里未完成、未过期的子任务编号',
+    actual: '该编号查不到对应任务（编号无效或已过期）',
+    correctForm: '直接告诉我要查什么，我重新查一次',
+  },
+  TASK_FORBIDDEN: {
+    expected: '子任务属于当前用户与当前会话',
+    actual: '任务归属不匹配（用户或会话对不上）',
+    correctForm: '改用本会话产生的任务编号，或直接告诉我要查什么',
+  },
+
+  // ── 配置类：宿主部署故障（话术指向管理员/部署方，用户无需操作）──
+  // 计划停在用户确认门却没人接盘：这是部署漏配，不是用户能重试好的事——说成
+  // "执行失败请稍后再试"是把部署故障伪装成平台抖动（③-3）。
+  PLAN_PENDING_PERSIST_MISSING: {
+    text: '平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。',
+  },
+
+  // ── 收尾类：用户可见的状态话术（不是错误——码 → 文本一一对应，语义照旧）──
+  NO_EXECUTION_CLARIFICATION: {
+    text: '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。',
+  },
+  ACTIVATED_PLAN_NOT_EXECUTED: {
+    text: '执行方案已获批准（通知已送达），但查询没有执行。请回复“继续”，我按已批准的计划重新执行；如想改查询范围，直接告诉我。',
+  },
+  // 恢复路径（resumeTaskId）零执行的专用话术（③-5b）：与 ACTIVATED_PLAN_NOT_EXECUTED
+  // 的区别是事实本身——用户刚确认过操作，缺的是执行不是 specification，再让用户
+  // "告诉我要查询的对象和范围"（NO_EXECUTION_CLARIFICATION）就是问一个早就答过的问题。
+  RESUMED_PLAN_NOT_EXECUTED: {
+    text: '按您刚才确认的操作没有产生任何平台执行。请回复“继续”重跑，或直接告诉我要调整的范围。',
+  },
+  FALLBACK_TIMEOUT: { text: '查询超时,请稍后再试' },
+  FALLBACK_FAILURE: { text: '查询失败,请稍后再试或联系管理员' },
+  // 委派失败四档（按 failureClass 分流，2026-09 审计 F7）：auth 是唯一需要用户
+  // 动手的一类，不说"稍后再试"（那是错指令，重试多少次都没用）。
+  DELEGATION_AUTH_FAILURE: { text: '平台登录态过期，需要重新登录后才能继续查询。' },
+  DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
+  DELEGATION_EXECUTOR_FAILURE: { text: '17dz 子任务执行失败，请稍后再试。' },
+  DELEGATION_CANCELLED: { text: '17dz 子任务已取消。' },
+
+  // ── 路由类：申报缺失时的重试指令（给模型，不上屏）──
+  ROUTE_RETRY_NUDGE: {
+    text: '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。',
+  },
+
+  // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──
+  PLAN_SHAPE_GATE_TEACHING: {
+    text: '计划必须经 bash 工具作为单行原始命令提交：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。',
+  },
+};
+
+/** 码是否已登记。 */
+export function has(code: string): boolean {
+  return Object.prototype.hasOwnProperty.call(TABLE, code);
+}
+
+/** 取条目；未知码 fail-loud（绝不静默 fallback 到通用消息）。 */
+function entryOf(code: string): CodeEntry {
+  const entry = TABLE[code];
+  if (!entry) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 错误码未登记: ${code}——新失败模式先往 packages/agent/src/error-codes.ts 加码（错误类给 expected + correctForm，状态话术给 text），绝不在出事点拼消息、绝不静默 fallback 到通用消息`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  return entry;
+}
+
+/** 实际值渲染：字符串原样，其余 JSON 化（脏输入要可辨认）；缺省给（未提供）。 */
+function show(value: unknown): string {
+  if (value === undefined || value === null) return '（未提供）';
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function render(code: string, actual?: unknown, correctForm?: string): string {
+  const entry = entryOf(code);
+  if ('text' in entry) {
+    // 消息模板不是错误：给它传 actual/correctForm 是调用方误用，fail-loud——
+    // 静默忽略会把"话术被悄悄加了动态部分"藏起来。
+    if (actual !== undefined || correctForm !== undefined) {
+      throw Object.assign(
+        new Error(`${UNKNOWN_ERROR_CODE}: 消息模板类码不接受 actual/correctForm（它不是错误，没有三要素）: ${code}`),
+        { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+      );
+    }
+    return entry.text;
+  }
+  const actualText = actual === undefined ? show(entry.actual) : show(actual);
+  const form = correctForm === undefined ? entry.correctForm : correctForm;
+  return `${code}: 期望 ${entry.expected}；实际 ${actualText}；正确形态 ${form}`;
+}
+
+/** 统一入口（镜像 17dz 的 messageFor）：错误类走三要素，模板类走文本。 */
+export function messageFor(code: string, actual?: unknown, correctForm?: string): string {
+  return render(code, actual, correctForm);
+}
+
+/** 消息模板类码的文本（错误类码误用此处同样 fail-loud，由 render 分流）。 */
+export function messageTextFor(code: string): string {
+  return render(code);
+}
+
+/** throw 站点专用：三要素消息 + 原码挂回 error.code（调用方继续认码）。 */
+export function errorFor(code: string, actual?: unknown, correctForm?: string): Error {
+  return Object.assign(new Error(messageFor(code, actual, correctForm)), { code });
+}
+
+/** ToolUserError 站点专用：消息来自表，原码挂回 error.code（语义 = 该文本成本轮回复）。 */
+export function toolUserErrorFor(code: string, actual?: unknown, correctForm?: string): ToolUserError {
+  return Object.assign(new ToolUserError(messageFor(code, actual, correctForm)), { code });
+}

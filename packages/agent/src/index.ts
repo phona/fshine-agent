@@ -86,9 +86,12 @@ export {
 } from './plan-confirmation';
 export {
   PLATFORM_OPERATIONS,
+  PLATFORM_AUTH_ERROR_CODES,
   parseEnvelope,
   parsePrepareOutcome,
   parseVerifyCount,
+  isPlatformAuthError,
+  platformErrorCodeOf,
   type PlatformEnvelope,
   type PrepareOutcome,
 } from './platform-contract';
@@ -99,12 +102,18 @@ export {
   RUN_17DZ_TASK_DESCRIPTION,
   RUN_17DZ_TASK_SCHEMA,
   withStepLabel,
+  DELEGATION_AUTH_FAILURE,
+  DELEGATION_TIMEOUT_FAILURE,
+  DELEGATION_EXECUTOR_FAILURE,
+  DELEGATION_CANCELLED,
   type ContextTaskRunner,
   type ContextTaskRunnerOptions,
   type ContextTaskExecutionContext,
   type SubagentTaskResult,
   type Run17dzTaskArgs,
   type ChangeProposal,
+  type ConfirmationOutcome,
+  type ConfirmationReply,
   type PrepareRequest,
   type PrepareResult,
   type CommitRequest,
@@ -116,8 +125,17 @@ export {
   FALLBACK_FAILURE,
   ACTIVATED_PLAN_NOT_EXECUTED,
   NO_EXECUTION_CLARIFICATION,
+  RESUMED_PLAN_NOT_EXECUTED,
   type TaxAgentRuntimeDeps,
 } from './runtime';
+export {
+  UNKNOWN_ERROR_CODE,
+  errorFor,
+  has,
+  messageFor,
+  messageTextFor,
+  toolUserErrorFor,
+} from './error-codes';
 export {
   ROUTE_CURRENT_TURN_TOOL,
   ROUTE_CURRENT_TURN_TOOL_NAME,

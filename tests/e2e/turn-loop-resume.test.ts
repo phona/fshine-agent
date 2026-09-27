@@ -12,6 +12,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { boot, gatedWorker, heavyPlan, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { RESUMED_PLAN_NOT_EXECUTED } from '../../packages/agent/src/runtime';
 
 /**
  * 给 gatedWorker 的执行面包上执行面注脚（真实 worker 的 footprint 由 pi-coding-driver
@@ -42,6 +43,25 @@ function resumeMainDriver(request: string, organizeText: string) {
         ? { text: organizeText, messages: input.messages }
         : inner.run(input as never)
     ),
+  };
+}
+
+/**
+ * ③-1 替身：第一次委派（计划停在确认门）照常走真实计划门；第二次 run 是确认后的
+ * 重跑——抛出带 auth 错误码的错误（平台登录态失效）。真实链路上 context.ts 的
+ * catch 按码分类成 auth，抛出 ToolUserError（DELEGATION_AUTH_FAILURE）。
+ */
+function authFailingOnResume(script: WorkerStep[]) {
+  const inner = gatedWorker(script);
+  let runs = 0;
+  return {
+    driver: {
+      run: async (input: { sessionId?: string; messages: unknown[] }) => {
+        runs += 1;
+        if (runs >= 2) throw Object.assign(new Error('平台登录态已失效'), { code: 'AUTH_EXPIRED' });
+        return inner.run(input as never);
+      },
+    },
   };
 }
 
@@ -89,7 +109,9 @@ describe('离线全链 e2e：计划恢复路径（注脚剥离 + 执行痕迹判
 
     expect(confirmed).not.toContain('整理完成');
     expect(confirmed).not.toContain('已完成');
-    expect(confirmed).toContain('本轮没有真正查到平台数据');
+    // ③-5b：resume 零执行（无 activatedPlan）的专用话术——不再问"要查询的对象和范围"
+    expect(confirmed).toBe(`${RESUMED_PLAN_NOT_EXECUTED}\n\n计划已批准，但平台侧连接被拒，本轮没有发起查询。`);
+    expect(confirmed).not.toContain('请告诉我要查询的对象和范围');
     // worker 留下的无数字说明按"子 Agent 说明 + 注脚"模式附上
     expect(confirmed).toContain('平台侧连接被拒');
     // 确认后一次平台调用都没发生：诚实状态不是客气话
@@ -112,7 +134,33 @@ describe('离线全链 e2e：计划恢复路径（注脚剥离 + 执行痕迹判
 
     expect(confirmed).not.toContain('42 元');
     expect(confirmed).not.toContain('整理完成');
-    expect(confirmed).toContain('没有产生任何平台查询');
+    expect(confirmed).toBe(RESUMED_PLAN_NOT_EXECUTED);
+    expect(confirmed).not.toContain('请告诉我要查询的对象和范围');
+    await assembly.close();
+  });
+
+  it('③-1 确认后重跑遇登录态过期：用户收到"需要重新登录"，不是"处理失败"', async () => {
+    const before = totalActualCalls();
+    const { send, assembly } = await boot({
+      main: resumeMainDriver('查一下幻辰财税账套 1 至 9 月的应收账款', '已按你确认的范围整理完成。'),
+      worker: authFailingOnResume([
+        { plan: heavyPlan(), stopAtConfirm: true },
+        // 确认后的重跑根本走不到这一步：worker 驱动先抛了 auth 类错误
+        { execute: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] }] },
+        { end: true },
+      ]).driver,
+    });
+
+    await send('查一下幻辰财税账套 1 至 9 月的应收账款');
+    const confirmed = await send('确认继续');
+
+    // 修复前：ToolUserError 穿透到 handler 顶层 catch，被换成"处理失败，请稍后再试"
+    // ——对 auth 类是错指令（重试多少次都没用）。现在精确直达。
+    expect(confirmed).toBe('平台登录态过期，需要重新登录后才能继续查询。');
+    expect(confirmed).not.toContain('处理失败');
+    expect(confirmed).not.toContain('稍后');
+    // 重跑没有发生：确认后一次平台调用都没多
+    expect(totalActualCalls()).toBe(before);
     await assembly.close();
   });
 });

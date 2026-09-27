@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { errorFor } from './error-codes';
 
 export interface PlanCall {
   operation: string;
@@ -207,13 +208,13 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {  const m
 }
 
 export function validateCalls(calls: readonly PlanCall[]): void {
-  if (!Array.isArray(calls) || calls.length === 0) throw new Error('计划 calls 必须至少包含一个操作。');
+  if (!Array.isArray(calls) || calls.length === 0) throw errorFor('PLAN_CALLS_EMPTY');
   for (const [index, call] of calls.entries()) {
     if (!call || typeof call.operation !== 'string' || !call.operation.trim()) {
-      throw new Error(`计划 calls[${index}].operation 必须是非空字符串。`);
+      throw errorFor('PLAN_CALL_OPERATION_EMPTY', index);
     }
-    if (!Array.isArray(call.args)) throw new Error(`计划 calls[${index}].args 必须是数组。`);
-    try { JSON.stringify(call.args); } catch { throw new Error(`计划 calls[${index}].args 必须是 JSON 值。`); }
+    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index);
+    try { JSON.stringify(call.args); } catch { throw errorFor('PLAN_CALL_ARGS_NOT_JSON', index); }
   }
 }
 
@@ -235,8 +236,6 @@ const ALLOWED_PLAN_PREFIX_RE = /^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?$/;
 
 /** 报错里回显"多出来的内容"时的截断长度：够模型认出自己加了什么，又不把消息撑爆。 */
 const EXTRA_PREFIX_MAX_CHARS = 120;
-
-const CORRECT_PLAN_SHAPE = '方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}，JSON 原样放在这一行里。';
 
 /**
  * 在命令里结构定位 `bin/17dz plan` 令牌：返回 bin/17dz 之前的原始前缀与 plan 之后的 payload。
@@ -287,31 +286,30 @@ export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; use
   // 前缀只允许 bash/sh 与路径前缀。围栏、外层引号、"请提交这个计划：…谢谢"这类包装
   // 一律不算合法前缀——宿主不 absorbing 格式波动，直接说清前面多了什么。
   if (!ALLOWED_PLAN_PREFIX_RE.test(prefix)) {
-    throw new Error(`计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：${collapseExtra(prefix)}。${CORRECT_PLAN_SHAPE}`);
+    throw errorFor('PLAN_SHAPE_PREFIX', collapseExtra(prefix));
   }
   if (!payload) {
-    throw new Error(`计划提交形状不符：bin/17dz plan 之后没有 JSON 方案。${CORRECT_PLAN_SHAPE}`);
+    throw errorFor('PLAN_SHAPE_PAYLOAD');
   }
   const subcommand = payload.split(/\s+/)[0] ?? '';
   if (PLAN_SUBCOMMANDS.includes(subcommand)) {
-    throw new Error(`plan ${subcommand} 由宿主调用，worker 不得直接调用 evaluate/activate；只提交 JSON calls 方案——单行原始命令：bin/17dz plan {"goal":"…","calls":[…]}`);
+    throw errorFor('PLAN_SUBCOMMAND_RESERVED', subcommand);
   }
   let parsed: unknown;
   try { parsed = JSON.parse(payload); }
   catch (error) {
-    // JSON 坏了要说 JSON 哪坏了：带解析器原文（截断）+ 正确形状。旧消息只说
-    // "不得直接调用 evaluate/activate"——那是隔壁问题的答案，答非所问。
+    // JSON 坏了要说 JSON 哪坏了：带解析器原文（截断）+ 正确形状。
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-    throw new Error(`计划 JSON 解析失败：${reason}。${CORRECT_PLAN_SHAPE}`);
+    throw errorFor('PLAN_JSON_PARSE', reason);
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('计划 JSON 顶层必须是对象。');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw errorFor('PLAN_JSON_NOT_OBJECT');
   const value = parsed as Record<string, unknown>;
-  if (!Array.isArray(value.calls)) throw new Error('计划必须声明精确 calls 数组。');
+  if (!Array.isArray(value.calls)) throw errorFor('PLAN_CALLS_NOT_ARRAY');
   const calls = value.calls.map((raw, index) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error(`计划 calls[${index}] 必须是对象。`);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw errorFor('PLAN_CALL_NOT_OBJECT', index);
     const call = raw as Record<string, unknown>;
-    if (typeof call.operation !== 'string' || !('args' in call)) throw new Error(`计划 calls[${index}] 必须包含 operation 和 args。`);
-    if (!Array.isArray(call.args)) throw new Error(`计划 calls[${index}].args 必须是数组。`);
+    if (typeof call.operation !== 'string' || !('args' in call)) throw errorFor('PLAN_CALL_FIELDS', index);
+    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index);
     return { operation: call.operation, args: call.args };
   });
   validateCalls(calls);

@@ -19,13 +19,14 @@ function fakeCli(outputs: unknown[], calls: Array<{ args: string[]; input?: stri
 
 describe('platform-backed execution plan runtime', () => {
   it('only accepts the virtual JSON plan submission and rejects direct evaluate/activate CLI calls', () => {
-    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('不得直接调用 evaluate/activate');
-    expect(() => parsePlanCallsCommand('bin/17dz plan activate --plan-id forged --evidence notification-delivered --token forged')).toThrow('不得直接调用 evaluate/activate');
+    // 措辞收口在 error-codes.ts 表（三要素：码 + 期望/实际/正确形态）
+    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
+    expect(() => parsePlanCallsCommand('bin/17dz plan activate --plan-id forged --evidence notification-delivered --token forged')).toThrow('PLAN_SUBCOMMAND_RESERVED');
     expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}')?.calls).toEqual([
       { operation: 'voucher.query-saved', args: ['A', '202609'] },
     ]);
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":{"account":"A"}}]}')).toThrow('args 必须是数组');
-    expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('不得直接调用 evaluate/activate');
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":{"account":"A"}}]}')).toThrow('PLAN_CALL_ARGS_NOT_ARRAY');
+    expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
   });
 
   it('围栏/外层引号包装不再被容忍：抛结构错误，宿主不 absorbing 格式波动', () => {
@@ -34,22 +35,23 @@ describe('platform-backed execution plan runtime', () => {
     // 对照：同样的内容去掉包装就是合法命令（围栏/引号是唯一差别）
     expect(parsePlanCallsCommand(bare)?.calls).toEqual(expected);
     // markdown 围栏（带语言标签、单行）
-    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)).toThrow('形状不符');
+    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)).toThrow('PLAN_SHAPE_PREFIX');
     // 围栏无标签 + 多行美化（JSON 本体跨行）
-    expect(() => parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202606"] }\n  ]\n}\n```')).toThrow('形状不符');
+    expect(() => parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202606"] }\n  ]\n}\n```')).toThrow('PLAN_SHAPE_PREFIX');
     // 外层成对引号（双引号/单引号）
-    expect(() => parsePlanCallsCommand(`"${bare}"`)).toThrow('形状不符');
-    expect(() => parsePlanCallsCommand(`'${bare}'`)).toThrow('形状不符');
+    expect(() => parsePlanCallsCommand(`"${bare}"`)).toThrow('PLAN_SHAPE_PREFIX');
+    expect(() => parsePlanCallsCommand(`'${bare}'`)).toThrow('PLAN_SHAPE_PREFIX');
     // 报错必须说清"前面多了什么"并给出正确形状——这是模型下一轮自愈的唯一依据
+    // （三要素：期望/实际/正确形态；实际即多出来的内容，逐字点出）
     expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``))
-      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：```json');
+      .toThrow('实际 ```json；正确形态');
     // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
     expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
   });
 
   it('plan 之后没有 JSON 方案：抛形状错误', () => {
-    expect(() => parsePlanCallsCommand('bin/17dz plan')).toThrow('计划提交形状不符：bin/17dz plan 之后没有 JSON 方案');
-    expect(() => parsePlanCallsCommand('bash /abs/path/bin/17dz plan   ')).toThrow('计划提交形状不符：bin/17dz plan 之后没有 JSON 方案');
+    expect(() => parsePlanCallsCommand('bin/17dz plan')).toThrow('PLAN_SHAPE_PAYLOAD');
+    expect(() => parsePlanCallsCommand('bash /abs/path/bin/17dz plan   ')).toThrow('PLAN_SHAPE_PAYLOAD');
   });
 
   it('bash/sh 与任意路径前缀照常放行，user_confirmed 只作审计', () => {
@@ -71,20 +73,21 @@ describe('platform-backed execution plan runtime', () => {
   });
 
   it('JSON 残缺：抛带 JSON.parse 真实原因的错误', () => {
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow(/计划 JSON 解析失败：Unexpected end of JSON input/);
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow('PLAN_JSON_PARSE');
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow(/实际 Unexpected end of JSON input/);
   });
 
   it('前后有多余内容：抛结构错误并点出前面多出的 token', () => {
     // 前后加了别的内容（"请提交这个计划：…谢谢"）——不是合法前缀，报期望/实际
     expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]} 谢谢'))
-      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：请提交这个计划：');
+      .toThrow('实际 请提交这个计划：；正确形态');
     // 多 token 的前缀同样逐字点出
     expect(() => parsePlanCallsCommand('echo hi && bin/17dz plan {"calls":[]}'))
-      .toThrow('计划提交形状不符：bin/17dz plan 之前只允许 bash/sh 与路径前缀，实际前面还有：echo hi &&');
+      .toThrow('实际 echo hi &&；正确形态');
     // 对照：形状正确不抛
     expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}')).not.toThrow();
-    // 直接调子命令：仍是"宿主专属"语义（保留关键词），但带上正确形状
-    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow(/不得直接调用 evaluate\/activate/);
+    // 直接调子命令：宿主专属语义（保留关键词），码与正确形状都在表里
+    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
