@@ -700,3 +700,22 @@
 ---
 
 *本台账由 Wave 1 Lane D0 生成。只读审计，未修改任何 src/test/config/脚本。下一动作：Wave 1 Lane B/C 按「建议波次」列认领；Wave 4 收口时逐条过闭环判据。*
+
+---
+
+## Wave 1 关账记录（2026-09-27，主 agent 验收后登记）
+
+| 条目 | 状态 | 关账证据 |
+|---|---|---|
+| D-061（17dz 测试与共享状态耦合，agent-pipeline RED） | **已关** | `test-all.js` 隔离六类状态文件到 per-run 临时目录（含 TOKEN_CACHE_PATH/RUNTIME_DIR）；`test-serve-e2e.js` 审计读取改认 DZ_AUDIT_PATH。耗桶实验：真实四桶耗零后裸 `npm test` 仍 ALL PASS，同态单跑不隔离即 RATE_LIMITED——绿是隔离给的。连跑两次 + 五个真实状态文件字节级未变 |
+| D-062（fshine 无凭据环境 52 例红） | **已关** | e2e harness beforeAll 装确定性假 WECOM_BOT_ID/SECRET（不用 loadEnv——那会让 `env -u` 验证形同虚设）；出向由 tests/vitest.setup.ts unset 六个泄漏变量。正常/无凭据两环境均 60 文件 572 例全绿 |
+| D-011（plan 形状 6 处散文且自相矛盾） | **半关** | 平台侧已认领：`src/execution/plan-schema.json` 声明 `calls` 必填 + `requestId?`/`goal?` 可选 + `additionalProperties:false`，`evaluate()` 按它校验（未声明字段 → PLAN_UNKNOWN_FIELD，correctForm 按 schema 动态带合法清单），SKILL 补指向 schema 的引用。**矛盾已仲裁**（goal 收编为合法可选元数据，宿主教学不再与平台冲突）；**残留**：宿主 6 处教学示例尚未从 schema 派生收敛为 1 处——归 Wave 2 Lane D |
+| B/C 耦合的 5 例 e2e 红（不在原台账，Wave 1 新生） | **已关** | 根因：平台 not_found 信封补 query 后激活宿主澄清机制，捏造账套名 fixtures 的透传路径断。修法：4 例换 mock seed 真实规范名（幻辰财税/新兴五金/新兴建材，数字对齐 mock 当期真实值）、1 例（7.3 主旨就是"平台说没有"）改断言为宿主组装澄清形态 + 反向断言（无错误码/无捏造文本/指纹为空）；另修 7.2 同根因的假绿（断言被澄清文本里的账套名满足）。澄清机制/计划门/消歧逻辑零改动 |
+| L6 沉积清单（mcp 空壳×2、reply.ts 彩蛋+chart.ts+其测试、step-text 退役工具死簇、finance 死技能、.env.real、17dz 465KB 会话日志） | **已关** | 逐项 grep 零引用后删；17dz 侧加 `codex-session-*.md` gitignore 防复发；step-text 死簇连专属死代码（names/rememberAccountSets）整簇删，同步删 lint 白名单 6 条 |
+| L2 网关名 35 处字面量 | **已关** | 配置派生（`GATEWAY_INVOCATION` 常量 + `gatewayExecPath(platformRoot)`），残留 1（配置缺省值）；警职解析器正则从配置值构造并挂标签 |
+| L1 两处业务词违例（persona/税号） | **已关** | persona 改"面向用户的主 Agent"（亲和力移交 business skill）；税号措辞降级中性，注释标明 Wave 2 由平台 correctForm 作数据加回 |
+| L1 守卫升级（词表 6→9 + 四标签归属） | **已关** | leak-lint 断言改"非防御命中=0 + 防御项 100% 挂防御排除"；13 条命中逐条归属；变异双向验证（插词红/删防御标签红） |
+| SCOPE_FORMS 覆盖 5→11 条 | **已关** | 从 operations.json args 规格机械派生补全 + "规格即来源"锁；`payroll.fetch-staff`（customerId 非账套名）与 `voucher.smoke`（无范围要素）刻意不登记，测试断言"未登记的只读 operation 必须只有这两个"防漏 |
+| operations.json args 规格 + 三方机械锁 / not_found 带 query / 错误信封带 correctForm / orchestrator SKILL 两节 / 17dz 测试出向自封 | **已关** | 均为 Wave 1 Lane B 交付（bb03f03..6ac62e1）：24 operation/45 flag/41 位置参数，三方锁+style↺吃值锁；四种信封 correctForm + not_found query；SKILL 删旧形状教程改引用；裸 `npm test` 不再需手工 unset |
+
+**仍未关（Wave 2+ 认领）**：D-011 残留的宿主教学收敛、D-010/D-015/D-016/D-021/D-055（半成品迁移五条）、D-012~D-014/D-017/D-065（双真相复刻五条）、D-022（注释不符）、D-052/D-006/D-061 之外的测试钉错三条、D-063/D-020/D-062 之外的无测试新路径、D-004/D-005/D-064（守卫洞三条）、P2 结构化事实、F4 残留、ask.ts 复刻、FSHINE_* 退役、§17 七项（归 Wave 3）、Tier-1 打分器（Wave 4）。
