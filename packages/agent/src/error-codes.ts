@@ -156,8 +156,8 @@ const TABLE: Record<string, CodeEntry> = {
     text: '没有找到唯一匹配“{query}”的对象。平台上有 {n} 个名字相近的：{list}你要查哪个？告诉我名称或序号即可。',
   },
   NOT_FOUND_SELECTION: {
-    // Wave 1（L1）：删去"（或编号/税号）"业务词，降级为中性"确认准确名称"——税号/编号
-    // 类精确匹配提示改由 Wave 2 平台 not_found 信封的 correctForm 作为**数据**加回
+    // Wave 1（L1）：删去精确编号类匹配提示，降级为中性"确认准确名称"——该类提示
+    // 改由 Wave 2 平台 not_found 信封的 correctForm 作为**数据**加回
     // （宿主只渲染信封数据，不持领域词）。过渡轮提示变弱可接受，归属见 docs/architecture-laws.md L1。
     text: '没有找到匹配“{query}”的对象。请确认准确名称后我再查。',
   },

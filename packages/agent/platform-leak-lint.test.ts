@@ -3,9 +3,12 @@
  * 白名单 = platform-contract.ts（唯一契约适配层）。
  * 平台侧契约演进（E1 操作名 / E2 信封 / E3 权重）落地后，白名单应持续收窄。
  *
- * 第二条预算：业务词不得进入编排层。进度帧里的业务措辞只能由平台清单第 5 列
- * 提供（见 operation-labels.ts），fshine 侧新增一个业务词就是一次泄漏——
- * 因此把当前命中集整体冻结，只减不增。
+ * 第二条预算（L1 业务词归属）：业务词不得以**非防御**形态进入宿主 src。进度帧里的
+ * 业务措辞只能由平台清单第 5 列提供（见 operation-labels.ts）。词表九词（应收/凭证/
+ * 科目/账套/期间/目录/税号/财务/借贷）；命中项按**四标签归属制度**登记（警职执法/
+ * 防御排除/平台下发/遗留待清），断言"非防御命中=0"——每个命中必须在允许集里且挂标签，
+ * 未挂标签的命中即红。防御排除项（记忆提取财务正则、hasFinancialFigure 等）删它=防御
+ * 变聋，100% 挂「防御排除」并注释理由。
  *
  * 第三条预算：字面量 if 预算——禁止新增"针对具体输入值的字面量比较分支"
  * （出事点 if-else / 症状嗅探，2026-09 用户点名：不希望再看到针对具体模型输入的
@@ -61,11 +64,24 @@ describe('平台泄漏预算 lint', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 
-  it('编排层业务词预算：命中集只减不增（新增任意一行即失败）', () => {
+  it('编排层业务词归属预算：每个命中必须挂四标签之一（未挂标签即红）', () => {
     const hits = businessWordHits(path.join(REPO_ROOT, 'packages/agent/src'));
-    // 子集断言：当前命中必须全部在冻结基线内（新增 → 红）；收敛（删词）直接通过。
-    const added = hits.filter((hit) => !BUSINESS_WORD_BASELINE.includes(hit));
-    expect(added, `新增了业务词（进度帧措辞只能来自平台清单第 5 列）：\n${added.join('\n')}`).toEqual([]);
+    // 非防御命中=0：命中项必须在允许集里且挂标签；未挂标签的命中即红。
+    const untagged = hits.filter((hit) => !BUSINESS_WORD_ALLOWLIST.has(hit));
+    expect(untagged, [
+      '新增了未归属的业务词（宿主 src 业务词非防御命中必须=0）：',
+      ...untagged,
+      '合法命中 → 在 BUSINESS_WORD_ALLOWLIST 登记并挂四标签之一 + 理由；',
+      '真违例 → 改为平台数据下发或删除，不进白名单。',
+    ].join('\n')).toEqual([]);
+  });
+
+  it('防御排除项 100% 挂「防御排除」标签（删条目/改标签即红）', () => {
+    // L1：防御机制的字面量删它=防御变聋，必须挂且仅挂「防御排除」。这里正向钉住，
+    // 与上一条断言互补——删某防御项的白名单条目，上一条会因它变成未归属命中而红。
+    for (const key of DEFENSIVE_EXCLUSION_KEYS) {
+      expect(BUSINESS_WORD_ALLOWLIST.get(key)?.tag, key).toBe('防御排除');
+    }
   });
 
   it('字面量 if 预算：针对具体输入值的字面量比较分支只减不增（新增即红）', () => {
@@ -80,47 +96,68 @@ describe('平台泄漏预算 lint', () => {
   });
 });
 
-/** 编排层业务词（中文领域词）：出现即说明 fshine 在替平台说话。 */
-const BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录/g;
+/** 编排层业务词（中文领域词，九词）：出现即说明 fshine 可能在替平台说话。 */
+const BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷/g;
 
-/** 当前命中集（file: 词）——冻结基线，新增任意一行即失败。 */
-const BUSINESS_WORD_BASELINE: readonly string[] = [
-  'packages/agent/src/context-extractor.ts: 期间',
-  'packages/agent/src/context.ts: 期间',
-  'packages/agent/src/context.ts: 目录',
-  'packages/agent/src/context.ts: 目录',
-  'packages/agent/src/context.ts: 目录',
-  'packages/agent/src/context.ts: 目录',
-  'packages/agent/src/context.ts: 目录',
-  'packages/agent/src/context.ts: 账套',
-  'packages/agent/src/context.ts: 账套,期间',
+/**
+ * 四标签归属类型（docs/architecture-laws.md 归属标签制度）：
+ *   · 警职执法：守卫/解析器/校验器本身，其存在就是为了识别或阻挡被禁模式；
+ *   · 防御排除：防御机制的字面量，删它=防御变聋；
+ *   · 平台下发：文本由执行层数据携带，宿主只是渲染（label / correctForm / 候选名）；
+ *   · 遗留待清：已知该走但还没走的，挂账限期。
+ */
+type LeakTag = '警职执法' | '防御排除' | '平台下发' | '遗留待清';
+
+/**
+ * 业务词命中允许集（`文件: 词` → 标签 + 理由）。宿主 src 的每个业务词命中必须在此
+ * 登记、挂且仅挂一类标签；未登记即红（见上方"非防御命中=0"断言）。位置无关：只按
+ * 文件与词记账，行号漂移不影响归属。
+ */
+const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: string }> = new Map([
+  // ── 防御排除：删它=防御变聋，不得当违例删 ──
+  ['packages/agent/src/memory-candidate-extractor.ts: 应收', { tag: '防御排除', reason: 'FINANCIAL_RESULT_RE（五条财务识别正则之一）：拦"把临时财务事实存进长期记忆"，删=防沉积防御变聋' }],
+  ['packages/agent/src/memory-candidate-extractor.ts: 科目', { tag: '防御排除', reason: 'BALANCE_RE（科目余额…）：同上财务识别防御正则' }],
+  ['packages/agent/src/memory-candidate-extractor.ts: 账套', { tag: '防御排除', reason: 'ACCOUNT_SET_RE：同上财务识别防御正则（PERIOD_RE/CURRENCY_AMOUNT_RE 两条不含九词，故不命中）' }],
+  ['packages/agent/src/runtime.ts: 财务', { tag: '防御排除', reason: 'hasFinancialFigure 及周边"财务数字"检测（区分编造结论 vs 能力边界说明）+ 历史资料防串（旧财务结论不当本轮实时结果）：删=出口校验/防串防御变聋' }],
+  // ── 警职执法：守卫/校验器识别业务模式，其存在就是为了识别 ──
+  ['packages/agent/src/context-extractor.ts: 期间', { tag: '警职执法', reason: 'hasContradiction 范围意图识别（更多期间/当前期间配对）：识别业务词以判定用户范围意图，是识别器不是泄漏' }],
+  ['packages/agent/src/serve-gate.ts: 目录', { tag: '警职执法', reason: 'G1 门知识面/根目录的路径安全判定：门守卫自身引用它约束的知识面' }],
+  ['packages/agent/src/turn-contract.ts: 目录', { tag: '警职执法', reason: 'validatePlanEntities 实体来源校验：平台响应（含账套检索结果）是受认实体来源，校验器说明其为何天然放行' }],
+  ['packages/agent/src/pi-coding-driver.ts: 目录', { tag: '警职执法', reason: '计划实体来源收集：账套检索结果作为执行痕迹/候选名来源的识别' }],
+  // ── 遗留待清：已知该走还没走，挂账限期 ──
+  ['packages/agent/src/context.ts: 借贷', { tag: '遗留待清', reason: '写路径确认摘要渲染"借贷合计"（L4 违例）：Wave 3 迁到平台盖章 summary，宿主不再渲染业务字段' }],
+  ['packages/agent/src/context.ts: 目录', { tag: '遗留待清', reason: 'worker 系统提示词的工作目录/账套检索/域目录前缀描述：理想应收敛为平台 SKILL 指针（Wave 2 D）' }],
+  ['packages/agent/src/context.ts: 期间', { tag: '遗留待清', reason: '并发注释"会话期间"的时间描述（非业务期间口径）：待改写成中性"过程/时间"' }],
+  ['packages/agent/src/history-tools.ts: 财务', { tag: '遗留待清', reason: '通用历史工具描述误用"财务"限定（search_history/get_messages 领域无关）：待改成"实时数据/历史结果"中性措辞' }],
+  ['packages/agent/src/platform-mock.ts: 目录', { tag: '遗留待清', reason: 'mock 状态路径注释"该目录已 gitignore"（文件系统目录）：待改成"路径"' }],
+]);
+
+/** 防御排除类命中（L1：必须 100% 挂「防御排除」，删条目/改标签即红，见上方第二条断言）。 */
+const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
   'packages/agent/src/memory-candidate-extractor.ts: 应收',
   'packages/agent/src/memory-candidate-extractor.ts: 科目',
   'packages/agent/src/memory-candidate-extractor.ts: 账套',
-  'packages/agent/src/pi-coding-driver.ts: 目录',
-  'packages/agent/src/pi-coding-driver.ts: 目录',
-  'packages/agent/src/pi-coding-driver.ts: 目录',
-  'packages/agent/src/platform-mock.ts: 目录',
-  'packages/agent/src/serve-gate.ts: 目录',
-  'packages/agent/src/serve-gate.ts: 目录',
-  'packages/agent/src/serve-gate.ts: 目录',
-  'packages/agent/src/serve-gate.ts: 目录',
-  'packages/agent/src/step-text.ts: 目录',
-  'packages/agent/src/turn-contract.ts: 目录',
-  'packages/agent/src/turn-contract.ts: 目录',
+  'packages/agent/src/runtime.ts: 财务',
 ];
 
-/** 逐行收集业务词命中（位置无关：只按文件与词记账，行号漂移不影响预算）。 */
+// 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：
+//   · runtime.ts hasFinancialFigure：正则用 余额/金额/发生额（不在九词表）检测"财务数字"。
+//   · serve-gate.ts KEY_ARG_FLAGS（--query/--period/--subject-code）：Wave 2 前从平台
+//     operations.json args 规格派生前的宿主侧镜像（参数摘要提取用），非中文业务词。
+
+/** 逐词收集业务词命中（位置无关：按文件与词去重记账，行号漂移不影响归属）。 */
 function businessWordHits(dir: string): string[] {
-  const hits: string[] = [];
+  const seen = new Set<string>();
   for (const file of walk(dir)) {
+    const rel = path.relative(REPO_ROOT, file);
     const lines = readFileSync(file, 'utf8').split('\n');
     for (const line of lines) {
-      const words = [...line.matchAll(BUSINESS_WORD_RE)].map((match) => match[0]);
-      if (words.length > 0) hits.push(`${path.relative(REPO_ROOT, file)}: ${[...new Set(words)].join(',')}`);
+      for (const match of line.matchAll(BUSINESS_WORD_RE)) {
+        seen.add(`${rel}: ${match[0]}`);
+      }
     }
   }
-  return hits.sort();
+  return [...seen].sort();
 }
 
 // ── 第三条预算：字面量 if（针对具体输入值的字面量比较分支）────────────────────
