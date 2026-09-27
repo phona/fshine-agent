@@ -37,12 +37,12 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 - **真违例（3 处，扩词后即被守卫抓到，须清）**：
   - `packages/agent/src/runtime.ts:1539` — `'你是企业财务助手和面向用户的主 Agent。'`（**财务**）。Lane C 本波清。
-  - `packages/agent/src/error-codes.ts:158` — `text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。'`（**税号**；直角引号 `“”` 为原文）。Lane C 本波清。
+  - ~~`packages/agent/src/error-codes.ts:158` — `text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。'`（**税号**；直角引号 `“”` 为原文）。Lane C 本波清。~~ **已关**（2026-09-27 Wave 2 Lane D）：模板退化为纯结构 `没有找到匹配“{query}”的对象。{hint}我再查。`，`{hint}` 由平台信封 `error.correctForm` 作为**平台下发**数据填充；宿主只存"信封没带时的兜底"（挂"遗留待清"）。见 debt-ledger D-002。
   - `packages/agent/src/context.ts:360` — `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**）。同时是 L4 违例，Wave 3 结构性了结。
 - **防御排除（不得删、须挂标签）**：
   - `memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE`（第 21 行）、`ACCOUNT_SET_RE`（22）、`BALANCE_RE`（23）、`CURRENCY_AMOUNT_RE`（24）、`FINANCIAL_RESULT_RE`（25）。删任何一条 = 记忆提取器对财务事实变聋。
   - `hasFinancialFigure`（`runtime.ts:1260` 定义，用于 771/852/888/1277 的出口校验）。
-  - Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts:72`，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。
+  - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts:72`，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
 
 **闭环判据**：**非防御命中 = 0；防御项 100% 挂"防御排除"标签**（`hasFinancialFigure`、五条正则逐条在册）。
 
@@ -64,8 +64,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
   - 矛盾的要害：宿主教 `{"goal":"…","calls":[…]}`，而平台 `plan.js` evaluate 只读 `calls` + `requestId`（`goal` 字段在平台侧不存在，`grep -rn goal src/` 0 命中）。同一张错误码表给出两种形状，正是「模型静默选一份信」的机制（D-011 根因）。
   - 平台已声明唯一 schema：17dz `src/execution/plan-schema.json`——`calls` 必填（PlanCall 数组）、`requestId`/`goal` 为声明过的可选元数据、`additionalProperties:false`；`plan.js` evaluate 入口按它校验（未声明顶层字段以 `PLAN_UNKNOWN_FIELD` 拒绝）。
   - > **核实注记（执行纪律①的现场示例）**：方案初稿记「plan 形状 4 份散文（含 platform-contract.ts 注释里那处）」，**跨仓 grep 证伪**——`platform-contract.ts`（唯一契约适配层）只持 RESULT **输出**信封与错误码 / 选择码集合（自第 5 行起），零 `plan`/`goal`/`calls`；计划**输入**形状的散文副本不在该文件。D0 复核实测：宿主侧现存 6 处（`error-codes.ts` 5 + `context.ts` 1），17dz SKILL 那 1 处已由 Lane B④ 删除。不跨仓核实，就会把"应该在哪儿"当成"实际在哪儿"写进宪章。
-- **错误码表镜像**：`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。
-- **KEY_ARG_FLAGS 镜像**：`serve-gate.ts:72`。
+- **错误码表镜像**：~~`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。~~ **已退化为渲染层**（2026-09-27 Wave 2 Lane D）：`NOT_FOUND_SELECTION` 只拼结构，措辞槽位优先取信封 `error.correctForm`；宿主表仅存"信封没带时的兜底"并挂"遗留待清"（D-002）。`AMBIGUOUS_SELECTION` 的用户可见事实已全部来自信封数据，平台给它的 correctForm 是解析方规则、不上屏。
+- **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts:72`。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
 - **ask.ts 复刻装配层**：`scripts/ask.ts`（第 104–137 行）把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。
 
 **闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；网关名 ≤1（配置派生）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。

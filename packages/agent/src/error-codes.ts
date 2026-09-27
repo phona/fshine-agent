@@ -47,6 +47,12 @@ interface ErrorCodeEntry {
 /** 消息模板类条目：用户可见的状态话术（不是错误，码 → 文本一一对应）。 */
 interface MessageCodeEntry {
   text: string;
+  /**
+   * 选择类澄清专用：模板里 `{hint}` 占位符的**兜底**取值（信封没带平台 correctForm 时用）。
+   * 挂「遗留待清」——平台全域携带 correctForm 后，这两个兜底字符串即删（L2：宿主镜像表
+   * 退化为渲染层，只存"信封没带时的兜底"，不持平台措辞的唯一真相）。
+   */
+  hintFallback?: string;
 }
 
 type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
@@ -152,14 +158,21 @@ const TABLE: Record<string, CodeEntry> = {
   // 模型是执行语言与用户语言之间唯一的翻译器，压力下翻译退化，脚本路径/错误码/门的
   // 规则就漏进最终回复。这两条模板让宿主直接持信封数据机械组装澄清问题——模板零业务词
   // （候选名是数据不是措辞，泄漏 lint 同款预算守这条），领域换了域一个字都不用改。
+  //
+  // Wave 2（L2，D-002/D-012 一族）：宿主镜像表退化为**渲染层**——"该怎么改"的领域
+  // 措辞由平台信封的 error.correctForm 作为**数据**携带（platform-contract 解析），
+  // 宿主只拼结构。NOT_FOUND_SELECTION 因此只有 `{hint}` 一个措辞槽位：信封带了就
+  // 原样渲染平台的，没带才用下面的宿主兜底（hintFallback，挂「遗留待清」）。
+  // AMBIGUOUS_SELECTION 不设措辞槽位：它的用户可见事实（查询词/候选名/个数）已经
+  // 全部来自信封，平台给它的 correctForm 是给**解析方**的行动规则（"绝不代选、绝不
+  // 点第一行"），不是给用户的问句——渲染它只会把内部规则念给用户听。
   AMBIGUOUS_SELECTION: {
     text: '没有找到唯一匹配“{query}”的对象。平台上有 {n} 个名字相近的：{list}你要查哪个？告诉我名称或序号即可。',
   },
   NOT_FOUND_SELECTION: {
-    // Wave 1（L1）：删去精确编号类匹配提示，降级为中性"确认准确名称"——该类提示
-    // 改由 Wave 2 平台 not_found 信封的 correctForm 作为**数据**加回
-    // （宿主只渲染信封数据，不持领域词）。过渡轮提示变弱可接受，归属见 docs/architecture-laws.md L1。
-    text: '没有找到匹配“{query}”的对象。请确认准确名称后我再查。',
+    // {hint} = 平台 correctForm（数据）；宿主兜底挂「遗留待清」：平台全量携带后即删。
+    text: '没有找到匹配“{query}”的对象。{hint}我再查。',
+    hintFallback: '请确认准确名称后',
   },
 
   // ── 收尾类：用户可见的状态话术（不是错误——码 → 文本一一对应，语义照旧）──
@@ -265,13 +278,18 @@ const SELECTION_CLARIFICATION_TEMPLATES: Readonly<Record<string, string>> = {
 /**
  * 选择类澄清消息：表内模板 + 平台信封数据机械组装（任务 1 的渲染出口）。
  *
- * 与 messageFor 的分流：动态部分是**数据**（用户查询词、平台候选名），不是三要素里的
- * "实际值"——它们要进用户回复，因此不给消息模板传 actual（那会 fail-loud，见 render）。
- * 入参是**平台错误码**（信封里的那个），模板码经 SELECTION_CLARIFICATION_TEMPLATES 解析；
- * 未登记的码 fail-loud（与未知码同纪律：绝不静默 fallback 到通用问句）。
+ * 与 messageFor 的分流：动态部分是**数据**（用户查询词、平台候选名、平台 correctForm），
+ * 不是三要素里的"实际值"——它们要进用户回复，因此不给消息模板传 actual（那会 fail-loud，
+ * 见 render）。入参是**平台错误码**（信封里的那个），模板码经 SELECTION_CLARIFICATION_TEMPLATES
+ * 解析；未登记的码 fail-loud（与未知码同纪律：绝不静默 fallback 到通用问句）。
  * 占位符替换用函数式 replacement：查询词里的 `$&` 之类序列不会被当成替换pattern。
+ *
+ * `{hint}` 槽位（L2 渲染层）：优先取信封携带的平台 correctForm（**平台下发**数据，
+ * 宿主不持其措辞）；信封没带时才用表内 hintFallback（宿主兜底，挂「遗留待清」）。
+ * 两者都缺（未登记兜底的码，如 AMBIGUOUS_SELECTION）→ 空串，模板其余部分照常成立，
+ * 不出现空泛占位符。
  */
-export function clarificationTextFor(code: string, data: { query: string; candidates: readonly string[] }): string {
+export function clarificationTextFor(code: string, data: { query: string; candidates: readonly string[]; correctForm?: string }): string {
   const templateCode = SELECTION_CLARIFICATION_TEMPLATES[code];
   if (!templateCode) {
     throw Object.assign(
@@ -291,10 +309,12 @@ export function clarificationTextFor(code: string, data: { query: string; candid
     return `${index + 1}. ${shown}`;
   });
   if (data.candidates.length > SELECTION_CANDIDATE_LIMIT) names.push(`…等 ${data.candidates.length} 个`);
+  const hint = data.correctForm?.trim() || entry.hintFallback || '';
   return entry.text
     .replace('{query}', () => data.query.trim() || '您指定的对象')
     .replace('{n}', () => String(data.candidates.length))
-    .replace('{list}', () => names.join(' '));
+    .replace('{list}', () => names.join(' '))
+    .replace('{hint}', () => hint);
 }
 
 /** throw 站点专用：三要素消息 + 原码挂回 error.code（调用方继续认码）。 */

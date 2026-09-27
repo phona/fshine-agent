@@ -27,6 +27,7 @@ import { createPiCodingTurnDriver, PLAN_SUBMIT_STEP } from './src/pi-coding-driv
 import { PLAN_NOTICE_PREFIX } from './src/plan-runtime';
 import type { DriverMessage, TurnDriver, TurnDriverInput } from './src/driver';
 import type { PlanCliRunner } from './src/plan-runtime';
+import type { KeyArgStyle } from './src/operation-labels';
 
 /** 假 agent 的单个模型回合：要发起哪些 bash、收尾文本。 */
 type FakeTurn = { bash?: string[]; text?: string };
@@ -104,6 +105,8 @@ const QUERY_COMMAND_2 = 'bin/17dz query probe-query.js --query 某公司 --perio
 
 /** label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单（P0 的 label 数据驱动不变）。 */
 const OPERATION_LABELS = new Map([['probe-query', '读取余额']]);
+/** 平台 args 规格（flag → 样式）同样直接注入：与 label 表同一条数据链（D-012 后无宿主名单）。 */
+const OPERATION_ARG_STYLES: ReadonlyMap<string, KeyArgStyle> = new Map([['--query', 'name'], ['--period', 'code']]);
 const QUERY_STEP = '正在读取余额「某公司」·202609…';
 const QUERY_STEP_2 = '正在读取余额「某公司」·202610…';
 
@@ -153,6 +156,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: OPERATION_LABELS,
+      operationArgStyles: OPERATION_ARG_STYLES,
       planCliRunner,
     }),
   };

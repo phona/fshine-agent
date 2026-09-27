@@ -5,7 +5,7 @@
  * 账套不存在时只走目录搜索。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, ledger, mainDriver, totalActualCalls } from './harness';
+import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, ledger, mainDriver, platformCorrectForm, totalActualCalls } from './harness';
 
 describe('离线全链 e2e：执行凭证与查询范围', () => {
   it('1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复', async () => {
@@ -58,11 +58,13 @@ describe('离线全链 e2e：执行凭证与查询范围', () => {
     const reply = await send('只查账套目录，看看有没有胜利这个帐套');
 
     // 平台确定性应答 not_found（ACCOUNT_SET_NOT_FOUND）由宿主持信封数据机械组装成
-    // 用户消息（2026-09-27 Stage 3 根治包）：点名查不到的对象 + 请用户确认准确名称。
+    // 用户消息（2026-09-27 Stage 3 根治包 + Wave 2 L2 退化）：点名查不到的对象 + 平台
+    // correctForm 数据（"该怎么改"由平台拥有，宿主不镜像措辞；信封没带时才用宿主兜底）。
     // 旧实现让模型把信封翻译成技术报告（脚本路径/错误码/candidates: [] 全上屏），
     // 那句话本身还是错的（"没有目录搜索能力"）——行为全对、呈现全错，正是要根治的形状。
     expect(reply).toContain('没有找到匹配“胜利”的对象');
-    expect(reply).toContain('请确认准确名称');
+    expect(reply).toContain(platformCorrectForm('ACCOUNT_SET_NOT_FOUND'));
+    expect(reply).toContain('我再查');
     // 平台账本里这个任务只登记了目录搜索，没有余额/凭证调用
     const tasks = Object.values(ledger().tasks ?? {});
     const last = tasks.at(-1) as { actual?: { calls?: number } } | undefined;

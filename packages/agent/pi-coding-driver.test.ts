@@ -395,6 +395,7 @@ const evaluatingPlanRunner: PlanCliRunner = async ({ args }) => {
 async function driveBash(options: {
   command: string;
   operationLabels?: Map<string, string>;
+  operationArgStyles?: Map<string, 'name' | 'code'>;
   planCliRunner?: PlanCliRunner;
 }): Promise<{ steps: string[]; events: ServeGateEvent[]; verdict: { block?: boolean; reason?: string } | undefined }> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-progress-'));
@@ -410,6 +411,7 @@ async function driveBash(options: {
     agentDir: path.join(root, '.fshine-agent'),
     modelConfig,
     ...(options.operationLabels ? { operationLabels: options.operationLabels } : {}),
+    ...(options.operationArgStyles ? { operationArgStyles: options.operationArgStyles } : {}),
     onStep: (text) => steps.push(text),
     serveGateAudit: createServeGateAuditSink({
       onStep: (text) => steps.push(text),
@@ -477,6 +479,9 @@ describe('防泄漏：内部事件名不出现在用户可见进度帧里', () =
     const { steps, events } = await driveBash({
       command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609',
       operationLabels: new Map([['query-receivables', '读取余额']]),
+      // 平台 args 规格（flag → 样式）：生产中经 `operation list --json` 派生后注入，
+      // 与 label 表同一条数据链；缺规格就不渲染参数摘要（D-012 后的安全缺省）。
+      operationArgStyles: new Map([['--query', 'name'], ['--period', 'code']]),
     });
     expect(steps).toEqual(['正在读取余额「猫一杯」·202609…']);
     for (const step of steps) {

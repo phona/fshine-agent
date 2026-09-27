@@ -27,6 +27,7 @@ import {
   gatedWorker,
   heavyPlan,
   mainDriver,
+  platformCorrectForm,
   totalActualCalls,
   type WorkerStep,
 } from './harness';
@@ -317,10 +318,14 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     try {
       // 第 1 回合：前两步都真执行了，第 2 步撞 not_found → 宿主澄清收口，第 3 步没派出去
       const first = await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
-      // 用户看到的是宿主持信封数据机械组装的那一份：零候选 + 请确认准确名称的问句
-      expect(first).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '幻东建材', candidates: [] }));
+      // 用户看到的是宿主持信封数据机械组装的那一份：零候选 + 平台 correctForm 数据
+      // （Wave 2 L2：宿主只拼结构，"该怎么改"由平台信封携带，宿主兜底仅在信封没带时用）
+      expect(first).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', {
+        query: '幻东建材', candidates: [], correctForm: platformCorrectForm('ACCOUNT_SET_NOT_FOUND'),
+      }));
       expect(first).toContain('没有找到匹配“幻东建材”的对象');
-      expect(first).toContain('确认准确名称');
+      expect(first).toContain(platformCorrectForm('ACCOUNT_SET_NOT_FOUND'));
+      expect(first).toContain('我再查');
       // 反向断言：worker 那条捏造文本（连原始错误码一起）与后续步骤的数字一个都不上屏
       expect(first).not.toContain('ACCOUNT_SET_NOT_FOUND');
       expect(first).not.toContain('平台未找到');

@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll } from 'vitest';
-import { createServeGate, describeKeyArgs, extractGateScript, hasShellMetachars, isServeCliInvocation, KEY_ARG_FLAGS, workspaceRelPath, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, extractGateScript, hasShellMetachars, isServeCliInvocation, workspaceRelPath, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import type { KeyArgStyles } from './src/operation-labels';
 
 describe('isServeCliInvocation（首词规则）', () => {
   it('放行 bin/17dz 的合法形态', () => {
@@ -148,36 +149,58 @@ describe('createServeGate（通用执行安全门）', () => {
   });
 });
 
-describe('describeKeyArgs（声明式 flag 名单）', () => {
-  it('flag 名单是唯一口径：新参数只改名单，不加分支', () => {
-    expect([...KEY_ARG_FLAGS]).toEqual(['--query', '--period', '--subject-code']);
+describe('describeKeyArgs（平台 args 规格消费，无宿主 flag 名单）', () => {
+  // 规格即数据：与 parseOperationArgStyles 从 `operation list --json` 派生出来的表同形
+  // （真实派生见 operation-labels.test.ts）。宿主零 flag 名单——平台加 flag 这边自动看得见。
+  const styles: KeyArgStyles = new Map([
+    ['--query', 'name'],
+    ['--period', 'code'],
+    ['--subject-code', 'code'],
+    ['--customer', 'name'],
+  ]);
+
+  it('规格是唯一口径：名单外的 flag 不进摘要，宿主不另立第二份名单', () => {
+    // D-012：KEY_ARG_FLAGS 硬编码表已删——这里钉住"规格里没有就不渲染"，防止回退。
+    expect([...styles.keys()].sort()).not.toContain('--batch');
+    expect(describeKeyArgs('bin/17dz commit fill.js c.json --batch --save', styles)).toEqual([]);
   });
 
-  it('只摘名单内的 flag：名称类加书名号，编号/时间类原样，按命令出现顺序', () => {
-    expect(describeKeyArgs('bin/17dz query query-saved.js 幻晟 202609')).toEqual([]);
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609')).toEqual(['「猫一杯」', '202609']);
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --subject-code 1122 --query 猫一杯')).toEqual(['1122', '「猫一杯」']);
-    expect(describeKeyArgs('bin/17dz operation run finance.query-receivables --query 猫一杯 --customer 狗二')).toEqual(['「猫一杯」']);
+  it('只摘规格内的 flag：名称类加书名号，编号/时间类原样，按命令出现顺序', () => {
+    expect(describeKeyArgs('bin/17dz query query-saved.js 幻晟 202609', styles)).toEqual([]);
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609', styles)).toEqual(['「猫一杯」', '202609']);
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --subject-code 1122 --query 猫一杯', styles)).toEqual(['1122', '「猫一杯」']);
+    expect(describeKeyArgs('bin/17dz operation run finance.query-receivables --query 猫一杯 --customer 狗二', styles)).toEqual(['「猫一杯」', '「狗二」']);
   });
 
-  it('名单外 flag / 布尔开关 / 超长取值都不进摘要', () => {
-    expect(describeKeyArgs('bin/17dz commit fill.js c.json --batch --save')).toEqual([]);
-    expect(describeKeyArgs('bin/17dz query x.js --query --period 202609')).toEqual(['202609']);
-    expect(describeKeyArgs(`bin/17dz query x.js --query ${'名'.repeat(40)}`)).toEqual([`「${'名'.repeat(24)}」`]);
+  it('等号写法同样认（--flag=值），样式照样从规格读', () => {
+    expect(describeKeyArgs('bin/17dz query x.js --query=猫一杯 --period=202609', styles)).toEqual(['「猫一杯」', '202609']);
+  });
+
+  it('规格缺失 / 查不到这个 flag → 不进摘要（安全缺省，不回退硬编码名单）', () => {
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609')).toEqual([]);
+    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609', new Map())).toEqual([]);
+    // 布尔开关（平台样式 none，不入表）与后随 flag 的取值都不进摘要
+    expect(describeKeyArgs('bin/17dz query x.js --query --period 202609', styles)).toEqual(['202609']);
+  });
+
+  it('超长取值截断到 24 字符（进度帧不是长文）', () => {
+    expect(describeKeyArgs(`bin/17dz query x.js --query ${'名'.repeat(40)}`, styles)).toEqual([`「${'名'.repeat(24)}」`]);
   });
 
   it('bash 前缀与空命令同样走同一套词法', () => {
-    expect(describeKeyArgs('bash bin/17dz query x.js --query 甲')).toEqual(['「甲」']);
+    expect(describeKeyArgs('bash bin/17dz query x.js --query 甲', styles)).toEqual(['「甲」']);
     expect(describeKeyArgs('')).toEqual([]);
   });
 });
 
 describe('createServeGate（平台调用的人类可读投影）', () => {
   const labels = new Map([['query-saved', '查询已存档记录'], ['query-receivables', '读取应收余额']]);
+  // 平台 args 规格（flag → 样式）：与 label 表一样由调用方注入，门只查表不持名单。
+  const argStyles: KeyArgStyles = new Map([['--query', 'name'], ['--period', 'code']]);
 
   it('放行的平台调用挂上 label 与参数摘要（数据查表，无分支）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, operationArgStyles: argStyles, onEvent: (event) => events.push(event) });
     expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609' } })?.block).toBeUndefined();
     expect(events.at(-1)).toMatchObject({
       tool: 'bash',
@@ -209,6 +232,14 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
       expect(events.at(-1)?.keyArgs).toBeUndefined();
       expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'reason', 'tool']);
     }
+  });
+
+  it('args 规格缺省/查不到 flag → 参数摘要为空数组（有 label 也不硬编码名单）', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query query-receivables.js --query 猫一杯' } })?.block).toBeUndefined();
+    expect(events.at(-1)?.label).toBe('读取应收余额');
+    expect(events.at(-1)?.keyArgs).toEqual([]);
   });
 
   it('被拦的调用没有 label（进度帧只属于真实发生的平台调用）', () => {

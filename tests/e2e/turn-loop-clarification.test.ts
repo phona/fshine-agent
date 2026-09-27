@@ -13,7 +13,7 @@
 import { describe, expect, it } from 'vitest';
 import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
 import { clarificationTextFor } from '../../packages/agent/src/error-codes';
-import { boot, gatedWorker, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { boot, gatedWorker, mainDriver, platformCorrectForm, totalActualCalls, type WorkerStep } from './harness';
 
 /** 事故里的技术报告：执行语言指纹齐全（脚本路径 + 错误码 + JSON 片段）。 */
 const TECH_REPORT = '平台返回 ACCOUNT_SET_AMBIGUOUS，candidates: [幻辰财税, 幻辰实业有限公司]；依据 src/finance/scripts/query-receivables.js 的门的规则，实体参数必须逐字来自用户消息。';
@@ -108,7 +108,7 @@ describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () =
     await assembly.close();
   });
 
-  it('C3 not_found 同样走宿主组装：只给"没有找到"与请用户确认准确名称', async () => {
+  it('C3 not_found 同样走宿主组装：只给"没有找到"与平台 correctForm 数据', async () => {
     const worker = recordingWorker([
       { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] }] },
       { text: '查询完成：候选清单为空（candidates: []），状态 not_found（ACCOUNT_SET_NOT_FOUND），来源 src/finance/scripts/search-account-sets.js。' },
@@ -122,7 +122,8 @@ describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () =
 
     const reply = await send('只查账套目录，看看有没有胜利这个帐套');
 
-    expect(reply).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '胜利', candidates: [] }));
+    // 宿主只拼结构（"没有找到匹配X的对象。{平台措辞}我再查。"），领域提示是平台 correctForm 数据
+    expect(reply).toBe(`没有找到匹配“胜利”的对象。${platformCorrectForm('ACCOUNT_SET_NOT_FOUND')}我再查。`);
     expect(reply).toContain('没有找到匹配“胜利”的对象');
     expect(executionLanguageFingerprints(reply)).toEqual([]);
     await assembly.close();

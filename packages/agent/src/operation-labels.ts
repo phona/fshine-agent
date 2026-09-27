@@ -1,5 +1,5 @@
 /**
- * 平台操作的人类可读名（label）派生层。
+ * 平台操作的人类可读名（label）与参数规格（args spec）派生层。
  *
  * 进度帧里的业务措辞只有一个来源：平台公共 CLI 的 `operation list` 子命令
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
@@ -10,6 +10,12 @@
  * 第 5 列缺失或为空（旧版平台 / 平台没给这个操作起名）→ 该操作不进表 → 没有帧。
  * 这正是安全缺省：没有人类可读名就不发帧，绝不回退显示脚本名或操作名。
  *
+ * 参数规格同理（L2：flag→样式由平台机器可读地拥有）：同一子命令的 `--json`
+ * 输出带 `args` 规格（位置参数名 + 合法 flag + 必填性 + 取值样式）。平台刻意把
+ * 规格只放 --json（TSV 维持 5 列纪律，人读列数一动 `operation list | awk`
+ * 一类下游全断），所以这里分两次 spawn 同一子命令：TSV 取 label、JSON 取规格。
+ * 两份都是**只读消费**——宿主不镜像 flag 名单，平台加了 flag 这边自动看得见。
+ *
  * 纯数据 + 显式传表：无单例、无进程级缓存，调用方持有 Map 并注入，
  * 测试因此可以直接塞替身表，不需要真平台。
  */
@@ -18,6 +24,17 @@ import { gatewayExecPath } from './platform-contract';
 
 /** script → label 查找表。script 与操作名两种写法都收录（命令里两种都合法）。 */
 export type OperationLabels = Map<string, string>;
+
+/**
+ * flag → 取值样式（平台 args 规格的 `style` 列，数据不是逻辑）：
+ *   · name：名称类取值，进度帧里加书名号；
+ *   · code：编号/时间类取值，原样；
+ *   · none：布尔开关（无取值）——不进参数摘要。
+ * 查不到样式（旧版平台 / 平台没给这个 flag 起样式）→ 不进摘要（安全缺省，
+ * 与 label 缺失同族：没有规格就不渲染，绝不回退到宿主硬编码名单）。
+ */
+export type KeyArgStyle = 'name' | 'code';
+export type KeyArgStyles = ReadonlyMap<string, KeyArgStyle>;
 
 /** CLI 派生超时：平台起不来时不能拖住 worker 的第一条命令。 */
 const LABEL_CLI_TIMEOUT_MS = 3_000;
@@ -85,6 +102,76 @@ export function loadOperationLabels(platformRoot?: string): Promise<OperationLab
     child.once('close', (code) => {
       clearTimeout(timer);
       settle(code === 0 ? parseOperationLabels(Buffer.concat(stdout).toString('utf8')) : new Map());
+    });
+  });
+}
+
+/**
+ * 解析 `operation list --json` 的 args 规格：取每个 operation 的
+ * `args.flags[].flag` 与 `style`，只收 name/code 两种**有取值**的样式
+ * （none = 布尔开关，没有取值可摘）。
+ *
+ * 同一 flag 在多个 operation 里样式一致（平台规格纪律）；万一不一致，先登记者
+ * 生效并在注释里点明——取"先"而不是"后"是为了让表只依赖输入顺序确定，不靠
+ * "最后一个覆盖"的隐式规则。
+ */
+export function parseOperationArgStyles(stdout: string): KeyArgStyles {
+  const styles: Map<string, KeyArgStyle> = new Map();
+  let operations: unknown;
+  try { operations = JSON.parse(stdout); } catch { return styles; }
+  if (!Array.isArray(operations)) return styles;
+  for (const operation of operations) {
+    const args = (operation as { args?: unknown } | null)?.args as { flags?: unknown } | null | undefined;
+    if (!args || !Array.isArray(args.flags)) continue;
+    for (const flag of args.flags) {
+      const name = (flag as { flag?: unknown } | null)?.flag;
+      const style = (flag as { style?: unknown } | null)?.style;
+      if (typeof name !== 'string' || !name.startsWith('--')) continue;
+      if (style !== 'name' && style !== 'code') continue;
+      if (!styles.has(name)) styles.set(name, style);
+    }
+  }
+  return styles;
+}
+
+/**
+ * 经公共 CLI 派生 flag 样式表（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与 loadOperationLabels 完全一致：platformRoot 未配、CLI 不存在/
+ * 不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
+ * 不是前提；没有规格就不发参数摘要，绝不用宿主硬编码名单顶替。
+ */
+export function loadOperationArgStyles(platformRoot?: string): Promise<KeyArgStyles> {
+  if (!platformRoot) return Promise.resolve(new Map());
+  const cli = gatewayExecPath(platformRoot);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (styles: KeyArgStyles): void => {
+      if (settled) return;
+      settled = true;
+      resolve(styles);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(new Map());
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(new Map());
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseOperationArgStyles(Buffer.concat(stdout).toString('utf8')) : new Map());
     });
   });
 }

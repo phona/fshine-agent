@@ -122,7 +122,16 @@
 - **律法归属**：L1。
 - **闭环判据**：模板文案零领域词；「或编号/税号」改由平台信封 correctForm 携带，宿主渲染层零业务词（测试：`clarificationTextFor` 两条模板不匹配 `/应收|凭证|科目|账套|期间|目录|税号|财务/`）。
 - **建议波次**：Wave 1 先降级为中性；Wave 2 由平台 correctForm 作为数据加回。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`error-codes.ts` 的 NOT_FOUND_SELECTION 退化为纯结构模板
+  `没有找到匹配“{query}”的对象。{hint}我再查。`——`{hint}` 槽位优先取平台信封
+  `error.correctForm`（platform-contract 的 `selectionClarificationOf` 解析，带控制字符
+  清洗 + 200 字截断），宿主表只存"信封没带时的兜底"（`hintFallback: '请确认准确名称后'`，
+  挂「遗留待清」）。测试：`error-codes.test.ts` 钉住"带 correctForm 渲染平台措辞 / 不带
+  用宿主兜底且不出现空泛占位"；e2e `turn-loop-clarification.test.ts` C3 走真 mock 信封
+  （期望值经 harness 的 `platformCorrectForm` 跨仓读平台错误码表，不抄第二份台词）。
+  复核条件：平台若给 ACCOUNT_SET_NOT_FOUND 的 correctForm 带上领域词，那是**平台下发**
+  数据（宪章四标签之"平台下发"），不算宿主违例；宿主兜底字符串在平台全域携带后删除。
 
 ### D-003 · 写路径确认摘要在编排层渲染"借贷合计"
 
@@ -244,7 +253,17 @@
 - **律法归属**：L2。
 - **闭环判据**：17dz `operations.json` 每 operation 有 `args` 规格（Lane B① 交付）→ 宿主 `KEY_ARG_FLAGS` 删除，改为读平台清单；删除后 `serve-gate.test.ts:153` 的名单断言改为"从 operations.json 派生"。
 - **建议波次**：Wave 2（**依赖 Lane B①**，B 不落地则本条顺延）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；Lane B① 已交付 args 规格）。
+  关闭方式：`operation-labels.ts` 新增 `parseOperationArgStyles` / `loadOperationArgStyles`——
+  经同一公共 CLI 的 `operation list --json`（平台把 args 规格只放机器消费面，TSV 维持 5 列
+  纪律取 label）派生 flag→样式表；`serve-gate.ts` 的 `KEY_ARG_FLAGS`/`KEY_ARG_STYLES`
+  硬编码表**已删**，`describeKeyArgs(command, styles)` 改为查规格渲染：规格里没有的 flag
+  / 无规格 → 不进摘要（与 label 缺失同族的安全缺省，绝不回退硬编码名单）。
+  `pi-coding-driver` 按平台根缓存派生并注入（测试替身注入点同名保留）。
+  测试：`serve-gate.test.ts` 原"名单断言"改为"规格是唯一口径"（含"无规格 → 空摘要"反向
+  断言，防回退硬编码）；`operation-labels.test.ts` 新增规格解析/派生两面用例（含 none
+  布尔开关不入表、CLI 失败三态空表）。
+  变异验证：把 `describeKeyArgs` 改回硬编码名单 → 上述反向断言红。
 
 ### D-013 · `ask.ts` 逐字复刻装配层的 `planConfirmation.savePending`
 

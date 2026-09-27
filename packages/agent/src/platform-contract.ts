@@ -43,7 +43,12 @@ export interface PlatformEnvelope {
   op: string;
   status: 'completed' | 'failed' | 'needs_input' | 'not_found';
   data: Record<string, unknown> | null;
-  error: { code: string; message: string } | null;
+  /**
+   * 平台错误（L2）：码 + 消息 + **平台拥有的正确形态指引**。correctForm 由平台
+   * 错误码表静态列随信封出得去（17dz `lib/envelope.js` 的 emit 出口统一收口），
+   * 宿主按字段原样渲染"该怎么改"，不在自己仓里镜像一份词表（镜像即分叉）。
+   */
+  error: { code: string; message: string; correctForm?: string } | null;
 }
 
 /** 解析 stdout 末行 RESULT 信封（v2）；缺席或非法返回 null。 */
@@ -96,6 +101,13 @@ export interface SelectionClarification {
   query: string;
   /** 平台返回的候选名（只取 data.candidates 的 name——列表外的名字由此绝迹）。 */
   candidates: string[];
+  /**
+   * 平台正确形态指引（信封 error.correctForm，**平台下发**数据）：宿主渲染层据此
+   * 把"该怎么改"说给用户，自己不持领域措辞（L2/D-002：选择类提示曾是宿主镜像的
+   * 平台文案，现退化为"信封带了就渲染信封的，没带才用宿主兜底"）。可选：旧版平台
+   * / 未登记码的信封不带这一字段。
+   */
+  correctForm?: string;
 }
 
 /**
@@ -113,6 +125,17 @@ export const SELECTION_CLARIFICATION_CODES: ReadonlySet<string> = new Set([
  * not_found 零候选）。completed / failed 不是选择类——前者是数据答案，后者是故障。
  */
 const SELECTION_STATUSES: ReadonlySet<string> = new Set(['needs_input', 'not_found']);
+
+/** correctForm 的长度上限：它是进用户消息的数据，平台文案再长也不能撑爆澄清问题。 */
+const CORRECT_FORM_MAX_CHARS = 200;
+
+/** 信封 correctForm 的取用卫生：剥控制字符/折叠空白后截断；非字符串或空串 → undefined。 */
+function correctFormOf(envelope: PlatformEnvelope): string | undefined {
+  const raw = envelope.error?.correctForm;
+  if (typeof raw !== 'string') return undefined;
+  const text = raw.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, CORRECT_FORM_MAX_CHARS);
+  return text || undefined;
+}
 
 /**
  * 信封 → 选择类状态。判据只有码与 status（都是契约数据），候选名只取平台返回的
@@ -134,7 +157,8 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
       .map((item) => ((item && typeof item === 'object') ? (item as { name?: unknown }).name : undefined))
       .filter((name): name is string => typeof name === 'string' && name.length > 0)
     : [];
-  return { code, query, candidates };
+  const correctForm = correctFormOf(envelope);
+  return { code, query, candidates, ...(correctForm ? { correctForm } : {}) };
 }
 
 /** 转录消息的结构判据（不依赖具体驱动类型：只要 role 与 content 两个键）。 */

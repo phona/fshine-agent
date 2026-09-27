@@ -534,6 +534,17 @@ function growingPlan(n: number): PlanCall[] {
   }));
 }
 
+/**
+ * 平台错误码表的 correctForm（跨仓读平台文件：L2 单一来源在平台侧，e2e 按**数据**核期望，
+ * 不在 fshine 仓抄一份期望台词——平台改措辞这边自动跟着变，抄了就成了第二份真相）。
+ */
+export function platformCorrectForm(code: string): string {
+  const table = readFileSync(path.join(PLATFORM_ROOT, 'src', 'lib', 'error-codes.js'), 'utf8');
+  const match = new RegExp(`${code}:\\s*\\{[^}]*correctForm:\\s*'([^']+)'`).exec(table);
+  if (!match) throw new Error(`平台错误码表里找不到 ${code} 的 correctForm（跨仓契约漂移？）`);
+  return match[1]!;
+}
+
 export {
   RecordingSdkClient,
   mainDriver,

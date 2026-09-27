@@ -86,6 +86,23 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
     });
   });
 
+  it('平台 correctForm 随信封提取（L2：宿主渲染数据，不镜像措辞）', () => {
+    const withForm = 'RESULT {"v":1,"op":"finance.search-account-sets","status":"not_found","data":{"query":"胜利","candidates":[]},"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"…","correctForm":"先用 search-account-sets 搜出平台规范名再查，不猜简称"}}';
+    expect(selectionClarificationOf(parseEnvelope(withForm))).toEqual({
+      code: 'ACCOUNT_SET_NOT_FOUND',
+      query: '胜利',
+      candidates: [],
+      correctForm: '先用 search-account-sets 搜出平台规范名再查，不猜简称',
+    });
+    // 卫生：控制字符剥掉、空白折叠、超长截断；空串/非字符串 → 不挂这个键
+    const messy = 'RESULT {"v":1,"op":"x","status":"not_found","data":{"query":"q","candidates":[]},"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"…","correctForm":"  A\\u0000B\\nC  "}}';
+    expect(selectionClarificationOf(parseEnvelope(messy))?.correctForm).toBe('A B C');
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"not_found","data":{"query":"q","candidates":[]},"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"…","correctForm":"   "}}'))?.correctForm).toBeUndefined();
+    expect(selectionClarificationOf(parseEnvelope('RESULT {"v":1,"op":"x","status":"not_found","data":{"query":"q","candidates":[]},"error":{"code":"ACCOUNT_SET_NOT_FOUND","message":"…","correctForm":42}}'))?.correctForm).toBeUndefined();
+    // 从 tool_result 走同一条提取（生产路径）
+    expect(selectionClarificationFromResponses([toolResult(withForm)])?.correctForm).toBe('先用 search-account-sets 搜出平台规范名再查，不猜简称');
+  });
+
   it('从 tool_result 提取：本回合最后一条带信封的平台响应决定收尾状态', () => {
     expect(selectionClarificationFromResponses([
       toolResult('stdout noise\n' + AMBIGUOUS_ENVELOPE),

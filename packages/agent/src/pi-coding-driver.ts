@@ -20,7 +20,7 @@ import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
-import { loadOperationLabels, type OperationLabels } from './operation-labels';
+import { loadOperationArgStyles, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationLabels } from './operation-labels';
 import { messageFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
@@ -103,6 +103,8 @@ export interface PiCodingTurnDriverOptions {
   serveGateAudit?: (event: ServeGateEvent) => void;
   /** script → label 查找表（测试替身注入点）；缺省经平台 CLI 派生。 */
   operationLabels?: OperationLabels;
+  /** flag → 取值样式表（平台 args 规格，测试替身注入点）；缺省经平台 CLI 派生。 */
+  operationArgStyles?: KeyArgStyles;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
 }
@@ -130,6 +132,8 @@ export interface PiCodingWorkerSessionOptions {
   entitySources?: TurnDriverInput['entitySources'];
   /** script → label 查找表（平台 CLI 派生，驱动侧缓存后传入）；缺省本会话自派生一次。 */
   operationLabels?: OperationLabels;
+  /** flag → 取值样式表（平台 args 规格 CLI 派生）；缺省本会话自派生一次。 */
+  operationArgStyles?: KeyArgStyles;
 }
 
 export interface PiCodingWorkerSession {
@@ -162,6 +166,18 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     if (cached) return cached;
     const loading = loadOperationLabels(root).catch(() => new Map<string, string>());
     labelCache.set(root, loading);
+    return loading;
+  };
+  // args 规格（flag → 样式）同样按平台根路径缓存一次：与 label 表分开两次 spawn
+  // 同一子命令（TSV 取 label、--json 取规格——平台刻意把规格只放机器消费面）。
+  const argStyleCache = new Map<string, Promise<KeyArgStyles>>();
+  const operationArgStylesFor = (workerCwd: string): Promise<KeyArgStyles> => {
+    if (options.operationArgStyles) return Promise.resolve(options.operationArgStyles);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = argStyleCache.get(root);
+    if (cached) return cached;
+    const loading = loadOperationArgStyles(root).catch(() => new Map<string, KeyArgStyle>());
+    argStyleCache.set(root, loading);
     return loading;
   };
 
@@ -230,6 +246,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         agentDir,
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
         operationLabels: await operationLabelsFor(input.cwd),
+        operationArgStyles: await operationArgStylesFor(input.cwd),
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
           onStep: stepOnce,
@@ -441,6 +458,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // label 表（平台清单第 5 列）：驱动侧已缓存则直接传入，否则本会话派生一次。
   // 派生失败/平台还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
   const operationLabels = options.operationLabels ?? (await loadOperationLabels(options.cwd));
+  // args 规格（flag → 样式）：放行的平台调用才有人类可读参数摘要，规格同样只在
+  // 放行分支消费。派生失败/旧版平台 → 空表 → 零参数摘要（安全缺省，不外泄、不猜）。
+  const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处记录，绝不扫描 worker 的自然语言回复。
@@ -469,6 +489,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     },
     platformRoot: options.cwd,
     operationLabels,
+    operationArgStyles,
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,

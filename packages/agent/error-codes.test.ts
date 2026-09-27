@@ -154,6 +154,26 @@ describe('选择类澄清消息模板（宿主机械组装，模型不翻译）'
       .toBe('没有找到匹配“胜利”的对象。请确认准确名称后我再查。');
   });
 
+  it('未找到模板的措辞槽位：信封带平台 correctForm 时优先渲染它（宿主不镜像措辞）', () => {
+    const withForm = clarificationTextFor('ACCOUNT_SET_NOT_FOUND', {
+      query: '胜利', candidates: [], correctForm: '先用 search-account-sets 搜出平台规范名再查，不猜简称',
+    });
+    // 平台措辞作为**数据**进回复（L2/D-002：宿主表只存"信封没带时的兜底"）
+    expect(withForm).toBe('没有找到匹配“胜利”的对象。先用 search-account-sets 搜出平台规范名再查，不猜简称我再查。');
+    // 信封没带 → 宿主兜底（挂「遗留待清」），且不出现空泛占位符
+    const withoutForm = clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '胜利', candidates: [] });
+    expect(withoutForm).toBe('没有找到匹配“胜利”的对象。请确认准确名称后我再查。');
+    expect(withoutForm).not.toContain('{');
+    expect(withoutForm).not.toContain('undefined');
+  });
+
+  it('歧义模板不消费 correctForm：用户可见事实已全部来自信封，平台的正确形态指引是给解析方的规则', () => {
+    const rendered = clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', {
+      query: '幻辰', candidates: ['幻辰财税'], correctForm: '把候选呈现给用户选择——绝不代选',
+    });
+    expect(rendered).toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税你要查哪个？告诉我名称或序号即可。');
+  });
+
   it('查询词缺失时用领域无关的占位（信封没给 query 也不出裸引号）', () => {
     expect(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', { query: '  ', candidates: [] }))
       .toContain('没有找到匹配“您指定的对象”的对象');

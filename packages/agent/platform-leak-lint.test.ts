@@ -139,8 +139,9 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：
 //   · runtime.ts hasFinancialFigure：正则用 余额/金额/发生额（不在九词表）检测"财务数字"。
-//   · serve-gate.ts KEY_ARG_FLAGS（--query/--period/--subject-code）：Wave 2 前从平台
-//     operations.json args 规格派生前的宿主侧镜像（参数摘要提取用），非中文业务词。
+//   · serve-gate.ts 的参数摘要：Wave 2 Lane D 已把 KEY_ARG_FLAGS 硬编码名单删掉，改为从
+//     平台 `operation list --json` 的 args 规格消费（flag→style 是平台数据，见
+//     operation-labels.ts）——镜像表不复存在，这里留档防"再立第二份名单"复发。
 
 /** 逐词收集业务词命中（位置无关：按文件与词去重记账，行号漂移不影响归属）。 */
 function businessWordHits(dir: string): string[] {

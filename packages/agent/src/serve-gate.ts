@@ -16,7 +16,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
-import { operationLabel, type OperationLabels } from './operation-labels';
+import { operationLabel, type KeyArgStyles, type OperationLabels } from './operation-labels';
 import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface ServeGateEvent {
@@ -58,7 +58,9 @@ export interface ServeGateOptions {
   planActive?: () => boolean;
   /** script → label 查找表（平台 CLI 派生，调用方持有并注入）。缺省即不挂 label。 */
   operationLabels?: OperationLabels;
-  /** 参数摘要提取器（测试替身注入点）；缺省用内置声明式 flag 名单 describeKeyArgs。 */
+  /** flag → 取值样式表（平台 args 规格 CLI 派生，调用方持有并注入）。缺省即不挂参数摘要。 */
+  operationArgStyles?: KeyArgStyles;
+  /** 参数摘要提取器（测试替身注入点）；缺省用内置 describeKeyArgs（查平台 args 规格）。 */
   describeArgs?: (command: string) => string[];
 }
 
@@ -66,18 +68,6 @@ const DEFAULT_SENSITIVE_PATHS = ['.env', '.runtime/', 'auth.json', '.browser-pro
 const DEFAULT_KNOWLEDGE_PATHS = ['.md', '.schema.json', '.agents/', 'docs/'];
 const PATH_ARGS = ['file_path', 'path'];
 
-/**
- * 参数摘要的 flag 名单：只摘这几类"用户认得出"的参数，其余一律不进进度帧。
- * 纯名单 + 通用扫描，不按 operation 分支——新操作无需改这里。
- */
-export const KEY_ARG_FLAGS: readonly string[] = ['--query', '--period', '--subject-code'];
-const KEY_ARG_FLAG_SET = new Set(KEY_ARG_FLAGS);
-/** flag → 取值样式：名称类加书名号，编号/时间类原样（数据表，不是分支）。 */
-const KEY_ARG_STYLES: Record<string, 'name' | 'code'> = {
-  '--query': 'name',
-  '--period': 'code',
-  '--subject-code': 'code',
-};
 /** 单个取值截断：参数摘要不许把进度帧撑成长文。 */
 const KEY_ARG_MAX_CHARS = 24;
 
@@ -165,31 +155,39 @@ export function extractGateScript(command: string): string | null {
 }
 
 /**
- * 参数摘要（默认声明式实现）：按 KEY_ARG_FLAGS 名单扫一遍命令，命中即取下一个
- * token 作为取值，按样式表格式化。通用 join、无 operation 分支；flag 不带值
- * （布尔开关）或后随另一个 flag 时跳过。
+ * 参数摘要（默认声明式实现）：按**平台 args 规格**（operation-labels 的
+ * parseOperationArgStyles 从 `operation list --json` 派生）扫一遍命令——规格里
+ * 的 flag 才摘，样式（name 加书名号 / code 原样）也从规格读，宿主不持任何
+ * flag 名单（镜像即分叉：平台加了 flag 而宿主名单没同步就退化成渲染层，D-012）。
+ *
+ * 安全缺省与 label 同族：没有规格 / 规格里查不到这个 flag → 不进摘要，绝不回退
+ * 到硬编码名单或"把所有 --flag 都摘上"。flag 不带值（布尔开关，样式 none 本来
+ * 就不入表）或后随另一个 flag 时跳过；`--flag 值` 与 `--flag=值` 两种写法都认。
  */
-export function describeKeyArgs(command: string): string[] {
+export function describeKeyArgs(command: string, styles?: KeyArgStyles): string[] {
   const tokens = splitCommandTokens(command);
   const args: string[] = [];
   for (let i = 0; i < tokens.length; i += 1) {
-    const flag = tokens[i];
-    if (flag === undefined) continue;
+    const token = tokens[i];
+    if (token === undefined) continue;
     // 两种写法都认：--flag 值 / --flag=值（worker 两种都用过）。
+    let flag = token;
     let value: string | undefined;
-    if (KEY_ARG_FLAG_SET.has(flag)) {
-      value = tokens[i + 1];
-      if (value && !value.startsWith('--')) i += 1;
-      else value = undefined;
+    if (token.startsWith('--') && token.includes('=')) {
+      const eq = token.indexOf('=');
+      flag = token.slice(0, eq);
+      value = token.slice(eq + 1);
     } else {
-      const eq = flag.indexOf('=');
-      if (eq > 0 && KEY_ARG_FLAG_SET.has(flag.slice(0, eq))) value = flag.slice(eq + 1);
+      value = tokens[i + 1];
+      if (!value || value.startsWith('--')) value = undefined;
+      else i += 1;
     }
-    if (!value) continue;
+    const style = styles?.get(flag);
+    if (!style || !value) continue;
     // 值可能自带引号（worker 传参把引号嵌进了值里）：剥掉再套书名号，避免 「"X"」。
     const text = value.replace(/^["']+|["']+$/g, '').slice(0, KEY_ARG_MAX_CHARS);
     if (!text) continue;
-    args.push(KEY_ARG_STYLES[flag.split('=')[0] ?? ''] === 'name' ? `「${text}」` : text);
+    args.push(style === 'name' ? `「${text}」` : text);
   }
   return args;
 }
@@ -198,7 +196,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
   const { onEvent, platformRoot } = options;
   const sensitivePaths = options.sensitivePaths ?? DEFAULT_SENSITIVE_PATHS;
   const knowledgePaths = options.knowledgePaths ?? DEFAULT_KNOWLEDGE_PATHS;
-  const describeArgs = options.describeArgs ?? describeKeyArgs;
+  const describeArgs = options.describeArgs ?? ((command) => describeKeyArgs(command, options.operationArgStyles));
 
   const knowledgeBlock = (value: string): ServeGateVerdict => ({
     block: true,
@@ -210,8 +208,8 @@ export function createServeGate(options: ServeGateOptions = {}) {
     const args = (toolCall.arguments ?? {}) as Record<string, unknown>;
     let verdict: ServeGateVerdict | undefined;
     let detail = '';
-    // 放行的平台调用才有人类可读投影：label 来自平台清单（数据），参数摘要来自
-    // 声明式 flag 名单。查不到 label 就不挂——调用方没有帧可发，静默降级。
+    // 放行的平台调用才有人类可读投影：label 与参数摘要都来自平台数据（清单第 5 列 /
+    // args 规格），查不到 label 就不挂——调用方没有帧可发，静默降级。
     let progress: { label: string; keyArgs: string[] } | undefined;
 
     if (name === 'bash') {
