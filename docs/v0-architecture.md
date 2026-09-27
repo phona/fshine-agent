@@ -59,6 +59,8 @@ fshine-agent 是**编排运行时**，不是财税系统。它把用户的自然
 
 **第 9 条不需要领域知识**：宿主不需要知道"幻辰财税"是不是账套，只需要做字符串包含。而"本轮平台响应"这一项很关键——执行层调目录查询拿到唯一候选，那个候选就是合法解析出来的。
 
+**写路径的边界（保险箱条款）**：写提案在编排层是**不透明 payload**——提案结构、域校验、确认摘要文案、commit 执行与读回，全归执行层；编排层只持一套**通用确认状态机**（确认码 / 有效期 / principal / 计划版本绑定，均不可由模型填写）。§2 第 9 条的领域无关包含校验可留编排层；一旦要懂「voucher 必须带账套 + 期间」这类口径，就是越界——那归执行层。判据见 [architecture-laws.md](architecture-laws.md) L4。
+
 ---
 
 ## 3. 两个 Agent 的分工
@@ -209,7 +211,7 @@ Main Agent 申报 delegate
 - 工作目录与 skill 路径只来自部署配置，启动前 realpath 校验。
 - credentials 不经用户消息或模型参数传递。
 - Main Agent 不直接执行平台命令；命令与脚本选择由执行层约束。
-- 只读计划才能过计划门；写操作继续走服务端两步确认。
+- 只读计划才能过计划门。**写提案在编排层是不透明 payload**：提案 schema、域校验、确认摘要文案、commit 执行与读回全归执行层；编排层只持通用确认状态机（确认码 / 有效期 / principal / 计划版本绑定）。判据见 [architecture-laws.md](architecture-laws.md) L4。
 - 审计不写 API key、密码、未授权数据或完整页面内容。
 
 ---
@@ -220,8 +222,11 @@ Main Agent 申报 delegate
 
 尚未按本文档实现的部分：
 
+> 写路径违规此前不可见，即因本表缺一行——业务字段住进编排层这类越界，若不在此显式列项就会一直藏在已落地的叙事里。
+
 | 项 | 现状 | 目标 |
 |---|---|---|
+| 写路径 | 业务字段住编排层：`ChangeIntentRecord`（`packages/contracts/src/store.ts:238` `kind:'voucher.batch'` / `accountSet` / `period` / `summary`）+ `context.ts:360` 由编排层拼写确认摘要（借贷合计） | 保险箱：写提案在编排层是不透明 payload，schema / 域校验 / 确认摘要 / commit 读回全归执行层，编排层只持通用确认状态机；判据 = 走查「新增 payroll 写路径 fshine 改动 = 0」+ 写 e2e 全绿 + §17 七项有守卫（见 [architecture-laws.md](architecture-laws.md) L4） |
 | 申报契约 | 已瘦身：`route_current_turn` 3 字段（kind/request/continueTaskId），零业务知识；申报层只剩结构校验，范围守卫靠计划层包含校验（§2 第 9 条） | 同左（已达成） |
 | 领域判别 | 已下沉：`validatePlanEntities` 领域无关包含校验（三来源逐字）；提示词只剩协议与原则；worker 领域规则以 17dz `skills-serve` SKILL.md 为唯一事实源 | 同左（已达成）；操作与任务类型匹配归执行层 SKILL + 平台门禁 |
 | 业务 skill | 已落地：`docs/business-skill.md`（§5 草案原文 + 派单协议，约 400 字，只含程序性知识）；`config/agent.yaml` 可选 `businessSkillPath` 指向，启动时读文件注入系统提示词，文件缺失 = 跳过 | 同左（已达成） |
