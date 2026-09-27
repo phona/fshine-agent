@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
 import { createContextTaskRunner, type ContextTaskRunner } from './src/context';
@@ -13,48 +13,8 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 
 class MemoryTasks implements PlatformTaskRepo {
   readonly records = new Map<string, PlatformTaskRecord>();
-  /** 列举调用计数：合法 taskId 不该触发兜底列举。 */
-  listCalls = 0;
   async get(taskId: string) { return this.records.get(taskId) ?? null; }
   async upsert(record: PlatformTaskRecord) { this.records.set(record.taskId, structuredClone(record)); }
-  /**
-   * 开放任务 = 该 principal/会话下的全部任务（与 SQLite 实现同语义：任务记录没有终态，
-   * upsert 之后一直可续跑）。测试直接灌记录来构造"恰一个 / 零个 / 两个"三种局面。
-   */
-  async listOpenBySession(principalId: string, sessionId: string) {
-    this.listCalls += 1;
-    return [...this.records.values()]
-      .filter((record) => record.principalId === principalId && record.parentSessionId === sessionId)
-      .map((record) => structuredClone(record));
-  }
-}
-
-/** 会说谎的存储：列举返回与请求方无关的任务——用来证明兜底没有绕开归属校验。 */
-class StrangerTasks extends MemoryTasks {
-  constructor(private readonly forged: PlatformTaskRecord[]) { super(); }
-  override async listOpenBySession(): Promise<PlatformTaskRecord[]> {
-    return this.forged.map((record) => structuredClone(record));
-  }
-}
-
-interface TaskFallbackLogEvent {
-  event: string;
-  requestId?: string;
-  requestedTaskId?: string;
-  boundTaskId?: string;
-}
-
-/** 侦测 C2 兜底留痕（写法同 tests/e2e 的 capturePlanLog）。 */
-function captureTaskFallbackLog() {
-  const events: TaskFallbackLogEvent[] = [];
-  const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {
-    if (typeof line !== 'string') return;
-    try {
-      const parsed = JSON.parse(line) as TaskFallbackLogEvent;
-      if (parsed?.event === 'task_id_fallback_bound' || parsed.event === 'task_id_fallback_list_failed') events.push(parsed);
-    } catch { /* 非 JSON 行忽略 */ }
-  });
-  return { events, restore: () => spy.mockRestore() };
 }
 
 class MemorySessions {
@@ -316,114 +276,47 @@ describe('17dz Pi subagent adapter', () => {
     expect(called).toBe(false);
   });
 
-  // ── C2：continueTaskId 幻觉编号的"唯一开放任务"兜底 ──────────────────────
-  // 真实平台战斗测试实测：模型会编一个不存在的任务编号填进 continueTaskId，原语义直接
-  // 报错、流程断在这里。兜底只在"这个会话恰好有一个开放平台任务"时生效——编号是猜的，
-  // 任务归属不能猜；零个和多个都维持原报错（多个正是多任务场景，交给用户消歧）。
-  describe('continueTaskId 查不到时：会话恰一个开放任务才兜底绑定', () => {
-    it('幻觉编号 + 会话恰一个开放任务：绑定该任务从断点续跑，不断流程', async () => {
-      const root = await profileRoot();
-      const tasks = new MemoryTasks();
-      const first = await runner(root, tasks, ScriptedTurnDriver([{ text: '找到两个客户，请用户选择。' }]))
-        .run({ request: '查询幻东余额' }, { trusted: trusted() });
-
-      let resumedMessages: TurnDriverInput['messages'] = [];
-      const log = captureTaskFallbackLog();
-      try {
-        const second = await runner(root, tasks, {
-          run: async (input) => {
-            resumedMessages = input.messages;
-            return ScriptedTurnDriver([{ text: '已按用户选择查询完成。' }]).run(input);
-          },
-        }).run({ taskId: 'task_hallucinated_404', request: '用户选择幻州幻东机械有限公司' }, { trusted: trusted() });
-
-        expect(second.text).toBe('已按用户选择查询完成。');
-        // 绑定的是会话里那个开放任务：不新开 taskId，worker 拿到的也是它的转录
-        expect(second.taskId).toBe(first.taskId);
-        expect(resumedMessages).toHaveLength(3);
-        expect(resumedMessages.at(-1)).toMatchObject({ role: 'user', content: '用户选择幻州幻东机械有限公司' });
-        // 留痕三要素：requestId、原（幻觉）编号、绑定到的编号
-        expect(log.events).toEqual([{
-          event: 'task_id_fallback_bound',
-          requestId: 'req-1',
-          requestedTaskId: 'task_hallucinated_404',
-          boundTaskId: first.taskId,
-        }]);
-      } finally {
-        log.restore();
-      }
-    });
-
-    it('幻觉编号 + 零个开放任务：维持原报错，且不静默按新任务放行', async () => {
+  // ── continueTaskId 查不到：冒泡，不猜绑定 ────────────────────────────────
+  // 真实平台战斗测试实测：模型会编一个不存在的任务编号填进 continueTaskId。宿主只保证
+  // 两件事——错误永远诚实可行动、爆炸永远有界。"这个会话里有几个开放任务"宿主知道，
+  // 但"模型想续的是哪一个"只有模型知道；替它猜（哪怕恰一个时猜对）就是把重试的职责
+  // 从模型手里拿回来，猜错时用户的问题会被静默送进别的子任务。因此一律抛 ToolUserError，
+  // 消息说清编号无效 + 下一步动作，让模型下一轮自己改。
+  describe('continueTaskId 查不到时：抛"未找到可继续"，不静默按新任务放行', () => {
+    it('幻觉编号：直接抛"未找到可继续"，worker 一次都不叫', async () => {
       const root = await profileRoot();
       const tasks = new MemoryTasks();
       let called = false;
       const subagent = runner(root, tasks, { run: async () => { called = true; throw new Error('不应执行'); } });
-      const log = captureTaskFallbackLog();
-      try {
-        await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
-          .rejects.toThrow('未找到可继续');
-        expect(called).toBe(false);
-        expect(log.events).toEqual([]);
-      } finally {
-        log.restore();
-      }
+      await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
+        .rejects.toThrow('未找到可继续的 17dz 任务：编号无效或已过期。请直接告诉我要查什么，我重新查一次。');
+      expect(called).toBe(false);
     });
 
-    it('幻觉编号 + 两个开放任务：维持原报错（多任务歧义仍由用户消歧）', async () => {
+    it('会话里已经有多个任务也不猜：编号对不上就报错（多任务歧义交给用户）', async () => {
       const root = await profileRoot();
       const tasks = new MemoryTasks();
       const subagent = runner(root, tasks, ScriptedTurnDriver([{ text: '第一个任务。' }, { text: '第二个任务。' }]));
       await subagent.run({ request: '查 A' }, { trusted: trusted() });
       await subagent.run({ request: '查 B' }, { trusted: trusted() });
-      expect(await tasks.listOpenBySession('wecom:user-1', 'session-1')).toHaveLength(2);
+      expect(tasks.records.size).toBe(2);
 
-      const log = captureTaskFallbackLog();
-      try {
-        await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
-          .rejects.toThrow('未找到可继续');
-        // 两个候选一个都不绑：绑定日志一次都没有
-        expect(log.events).toEqual([]);
-      } finally {
-        log.restore();
-      }
+      // 两个候选一个都不绑：猜哪一个都是把用户的问题派到别的子任务上
+      await expect(subagent.run({ request: '继续', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
+        .rejects.toThrow('未找到可继续');
     });
 
-    it('合法 taskId 走原路径：不列举、不兜底', async () => {
+    it('合法 taskId 精确命中：照常续跑同一个子任务', async () => {
       const root = await profileRoot();
       const tasks = new MemoryTasks();
       const first = await runner(root, tasks, ScriptedTurnDriver([{ text: '找到两个客户，请用户选择。' }]))
         .run({ request: '查询幻东余额' }, { trusted: trusted() });
-      // 同一个会话再开一个任务：此时有两个开放任务，合法编号仍必须精确命中
+      // 同一个会话再开一个任务：有两个候选在，合法编号仍必须精确命中
       await runner(root, tasks, ScriptedTurnDriver([{ text: '另一个任务。' }])).run({ request: '查 B' }, { trusted: trusted() });
 
-      const log = captureTaskFallbackLog();
-      try {
-        const second = await runner(root, tasks, ScriptedTurnDriver([{ text: '已按用户选择查询完成。' }]))
-          .run({ taskId: first.taskId, request: '用户选择幻州幻东机械有限公司' }, { trusted: trusted() });
-        expect(second.taskId).toBe(first.taskId);
-        expect(tasks.listCalls).toBe(0);
-        expect(log.events).toEqual([]);
-      } finally {
-        log.restore();
-      }
-    });
-
-    it('兜底绑定的任务仍过归属校验：列举返回别人的任务照样被拒', async () => {
-      // 兜底列举本身就按 (principalId, sessionId) 过滤，与归属校验等价成立；这里用一个
-      // "会说谎"的存储证明代码路径没有另开短路——绑定到的记录依旧要走同一道检查。
-      const root = await profileRoot();
-      const forged: PlatformTaskRecord = {
-        taskId: 'task_stranger',
-        parentSessionId: 'session-1',
-        principalId: 'wecom:other',
-        workerMessages: [],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const subagent = runner(root, new StrangerTasks([forged]), ScriptedTurnDriver([{ text: '不应执行' }]));
-      await expect(subagent.run({ request: '越权', taskId: 'task_hallucinated_404' }, { trusted: trusted() }))
-        .rejects.toThrow('无权继续');
+      const second = await runner(root, tasks, ScriptedTurnDriver([{ text: '已按用户选择查询完成。' }]))
+        .run({ taskId: first.taskId, request: '用户选择幻州幻东机械有限公司' }, { trusted: trusted() });
+      expect(second.taskId).toBe(first.taskId);
     });
   });
 

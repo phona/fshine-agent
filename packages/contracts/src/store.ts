@@ -223,15 +223,6 @@ export interface PlatformTaskRecord {
 export interface PlatformTaskRepo {
   get(taskId: string): Promise<PlatformTaskRecord | null>;
   upsert(record: PlatformTaskRecord): Promise<void>;
-  /**
-   * 该 principal/会话下的开放平台任务（最近活跃在前）；没有返回空数组。
-   *
-   * "开放"按存储现状语义：任务记录没有终态字段，upsert 只把 status 列写成 active，
-   * 也没有任何地方把它改写成终态——因此这个会话下存在即开放（可续跑）。
-   * 用途只有一个：模型填了不存在的 continueTaskId 时，宿主判断"这个会话是不是恰好
-   * 还有一个开放任务"（恰一个才兜底绑定，零个/多个都维持原报错）。
-   */
-  listOpenBySession(principalId: string, sessionId: string): Promise<PlatformTaskRecord[]>;
 }
 
 /**
