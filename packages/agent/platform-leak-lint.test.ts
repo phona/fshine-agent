@@ -64,9 +64,9 @@ describe('平台泄漏预算 lint', () => {
     expect(violations, violations.join('\n')).toEqual([]);
   });
 
-  it('编排层业务词归属预算：每个命中必须挂四标签之一（未挂标签即红）', () => {
+  it('编排层业务词归属预算：非防御命中=0 且防御项 100% 挂「防御排除」', () => {
     const hits = businessWordHits(path.join(REPO_ROOT, 'packages/agent/src'));
-    // 非防御命中=0：命中项必须在允许集里且挂标签；未挂标签的命中即红。
+    // 判据一（非防御命中=0）：命中项必须在允许集里且挂标签；未挂标签的命中即红。
     const untagged = hits.filter((hit) => !BUSINESS_WORD_ALLOWLIST.has(hit));
     expect(untagged, [
       '新增了未归属的业务词（宿主 src 业务词非防御命中必须=0）：',
@@ -74,11 +74,8 @@ describe('平台泄漏预算 lint', () => {
       '合法命中 → 在 BUSINESS_WORD_ALLOWLIST 登记并挂四标签之一 + 理由；',
       '真违例 → 改为平台数据下发或删除，不进白名单。',
     ].join('\n')).toEqual([]);
-  });
-
-  it('防御排除项 100% 挂「防御排除」标签（删条目/改标签即红）', () => {
-    // L1：防御机制的字面量删它=防御变聋，必须挂且仅挂「防御排除」。这里正向钉住，
-    // 与上一条断言互补——删某防御项的白名单条目，上一条会因它变成未归属命中而红。
+    // 判据二（防御项 100% 挂「防御排除」）：删条目/改标签即红。与判据一互补——判据一抓
+    // "漏挂"，判据二抓"把防御项降级成非防御标签"（那会让它被后续当违例清理掉）。
     for (const key of DEFENSIVE_EXCLUSION_KEYS) {
       expect(BUSINESS_WORD_ALLOWLIST.get(key)?.tag, key).toBe('防御排除');
     }
