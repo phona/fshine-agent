@@ -4,6 +4,9 @@
  * 这条线是"用户不该看见内部机制"的最后一道渲染关：系统提示词明令不许出现
  * route_current_turn 等字样，而默认模板的兜底分支恰恰会把工具名原样拼进帧文本
  * （"正在调用 route_current_turn…"）。这里把判定做成纯函数，测试直接钉住。
+ *
+ * L6 沉积清理后：直接平台工具（search_account_sets / get_login_status 等）已退役，
+ * 其具名帧与 accountSetId→名称查找随之删除；剩余非内部工具一律回退通用工具名模板。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -13,22 +16,19 @@ import {
   renderToolStepText,
 } from './src/step-text';
 
-const NAMES = new Map<string, string>();
-
 describe('进度帧渲染：内部工具与短语钳制', () => {
   it('宿主内部工具不发默认进度帧（工具名本身就是内部机制字样）', () => {
     for (const tool of ['route_current_turn', 'search_history', 'get_messages']) {
-      expect(defaultStepText(tool, {}, NAMES)).toBeNull();
+      expect(defaultStepText(tool)).toBeNull();
       // 模型自填短语同样不发：这些工具描述的是宿主编排机制，没有用户可见动作
-      expect(renderToolStepText(tool, {}, NAMES, '正在检索历史对话')).toBeNull();
-      expect(renderToolStepText(tool, {}, NAMES, '')).toBeNull();
+      expect(renderToolStepText(tool, '正在检索历史对话')).toBeNull();
+      expect(renderToolStepText(tool, '')).toBeNull();
     }
   });
 
-  it('平台工具仍照常出默认帧，未知工具回退到工具名模板', () => {
-    expect(defaultStepText('search_account_sets', { query: '幻辰' }, NAMES)).toBe('正在检索目录:幻辰…');
-    expect(defaultStepText('get_login_status', {}, NAMES)).toBe('检查平台登录状态…');
-    expect(defaultStepText('some_future_tool', {}, NAMES)).toBe('正在调用 some_future_tool…');
+  it('非内部工具回退到通用工具名模板（直接平台工具已退役，不再有具名帧）', () => {
+    expect(defaultStepText('run_17dz_task')).toBe('正在调用 run_17dz_task…');
+    expect(defaultStepText('some_future_tool')).toBe('正在调用 some_future_tool…');
   });
 
   it('模型短语超长被截断到上限', () => {
@@ -63,13 +63,13 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
   });
 
   it('短语被丢弃时回落默认帧；默认帧也没有（内部工具）时返回 null', () => {
-    // 平台工具 + 泄漏短语 → 回落到该工具的默认帧
-    expect(renderToolStepText('get_login_status', {}, NAMES, '{"recorded":"delegate"}')).toBe('检查平台登录状态…');
-    // 平台工具 + 空短语 → 默认帧
-    expect(renderToolStepText('get_login_status', {}, NAMES, '   ')).toBe('检查平台登录状态…');
-    // 平台工具 + 可用短语 → 短语优先
-    expect(renderToolStepText('get_login_status', {}, NAMES, '检查登录状态')).toBe('检查登录状态');
+    // 非内部工具 + 泄漏短语 → 回落到通用工具名帧
+    expect(renderToolStepText('run_17dz_task', '{"recorded":"delegate"}')).toBe('正在调用 run_17dz_task…');
+    // 非内部工具 + 空短语 → 通用帧
+    expect(renderToolStepText('run_17dz_task', '   ')).toBe('正在调用 run_17dz_task…');
+    // 非内部工具 + 可用短语 → 短语优先
+    expect(renderToolStepText('run_17dz_task', '查询往来记录')).toBe('查询往来记录');
     // 内部工具 + 泄漏短语 → null（driver 侧必须因此跳过 onStep）
-    expect(renderToolStepText('search_history', {}, NAMES, 'task_1 续跑')).toBeNull();
+    expect(renderToolStepText('search_history', 'task_1 续跑')).toBeNull();
   });
 });

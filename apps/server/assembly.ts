@@ -29,10 +29,9 @@ import {
   type TurnDriver,
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
-import type { AuditStore, TaskPlanRepo } from '@fshine/contracts';
+import type { AuditStore, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createMessageHandler } from './handler';
-import { createServerReplyHandler } from './reply';
 import { asAgentPendingRepo, createPlanConfirmationRoute } from './plan-confirmation-route';
 import { loadBusinessSkill } from './business-skill';
 
@@ -60,7 +59,7 @@ export interface ServerAssembly {
   /** Shared handler: the exact entry the WeCom channel feeds messages into. */
   handler: ReturnType<typeof createMessageHandler>;
   /** Production channel wiring: progress + awaited plan notices are not dropped. */
-  replyHandler: ReturnType<typeof createServerReplyHandler>;
+  replyHandler: ReplyHandler;
   channel: WecomBotChannel;
   platformRoot?: string;
   planActivationSecret: string;
@@ -199,7 +198,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     runtime,
     platformTask,
     handler,
-    replyHandler: createServerReplyHandler(handler),
+    replyHandler: handler,
     channel,
     ...(platformRoot ? { platformRoot } : {}),
     planActivationSecret,

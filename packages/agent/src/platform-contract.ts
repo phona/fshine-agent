@@ -11,7 +11,7 @@
 import path from 'node:path';
 
 /**
- * L2（跨仓协议单一来源）：平台网关的调用形式（相对平台根目录）。
+ * L2（跨仓协议单一来源）：平台网关的调用形式（相对平台根路径）。
  *
  * 这是宿主侧**唯一**允许出现网关名字面量的地方——即"配置缺省值"：网关可执行文件
  * 固定在平台仓 bin/ 下，名字与 config/agent.yaml 的 contextProfiles['17dz'] profile id

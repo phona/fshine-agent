@@ -44,38 +44,18 @@ export function clampProgressPhrase(phrase: string): string {
   return text.length > PROGRESS_PHRASE_LIMIT ? `${text.slice(0, PROGRESS_PHRASE_LIMIT)}…` : text;
 }
 
-export function defaultStepText(
-  toolName: string,
-  args: Record<string, unknown>,
-  names: Map<string, string>,
-): string | null {
-  const accountSetId = typeof args['accountSetId'] === 'string' ? args['accountSetId'] : '';
-  const name = accountSetId !== '' ? names.get(accountSetId) ?? accountSetId : '';
-  switch (toolName) {
-    case 'search_account_sets': {
-      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
-      return `正在检索目录:${query}…`;
-    }
-    case 'get_current_accounting_period':
-      return name ? `已定位「${name}」,查询当前时间范围…` : '查询当前时间范围…';
-    case 'list_vouchers': {
-      const period = typeof args['period'] === 'string' ? args['period'] : '';
-      return name ? `拉取记录:「${name}」${period}…` : '拉取记录中…';
-    }
-    case 'inspect_account_set':
-      return name ? `正在做「${name}」摸底…` : '正在摸底…';
-    case 'search_references': {
-      const query = typeof args['query'] === 'string' ? args['query'].slice(0, 30) : '';
-      return name ? `在「${name}」中检索「${query}」的档案…` : `正在检索档案:${query}…`;
-    }
-    case 'get_login_status':
-      return '检查平台登录状态…';
-    default:
-      // 宿主内部工具没有"用户可见动作"：静默，绝不回退成"正在调用 <内部工具名>…"
-      // ——那正是系统提示词点名不许出现的字样。
-      if (INTERNAL_TOOLS.has(toolName)) return null;
-      return `正在调用 ${toolName}…`;
-  }
+/**
+ * 默认进度帧（L6 沉积清理后）：主 Agent 工具面早已只剩宿主内部工具
+ * （route_current_turn / search_history / get_messages）与 run_17dz_task 委派——
+ * 直接平台工具（search_account_sets 等）已退役，其具名帧与 accountSetId→名称
+ * 查找（rememberAccountSets）随之删除。剩余工具一律回退到通用工具名模板；
+ * 宿主内部工具仍静默（null）。帧文本仍由 renderToolStepText 一处合成。
+ */
+export function defaultStepText(toolName: string): string | null {
+  // 宿主内部工具没有"用户可见动作"：静默，绝不回退成"正在调用 <内部工具名>…"
+  // ——那正是系统提示词点名不许出现的字样。
+  if (INTERNAL_TOOLS.has(toolName)) return null;
+  return `正在调用 ${toolName}…`;
 }
 
 /**
@@ -85,12 +65,7 @@ export function defaultStepText(
  * 返回 null 时 driver 必须跳过 onStep——空串进度帧会在渠道上投出一条空消息，
  * 比不发帧更糟（渠道侧只做节流与硬顶，不过滤空文本）。
  */
-export function renderToolStepText(
-  toolName: string,
-  args: Record<string, unknown>,
-  names: Map<string, string>,
-  phrase: string,
-): string | null {
+export function renderToolStepText(toolName: string, phrase: string): string | null {
   if (INTERNAL_TOOLS.has(toolName)) return null;
-  return clampProgressPhrase(phrase) || defaultStepText(toolName, args, names);
+  return clampProgressPhrase(phrase) || defaultStepText(toolName);
 }

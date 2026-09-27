@@ -55,7 +55,7 @@ describe('Pi driver safety helpers', () => {
       inputSchema: { type: 'object', properties: {} },
     };
 
-    const agentTool = toAgentTool(tool, input, new Map(), 'workflow_start');
+    const agentTool = toAgentTool(tool, input, 'workflow_start');
     await agentTool.execute('call_1', { accountSetId: 'as_003', progress: '启动工作流' });
 
     expect(calls).toEqual([{ tool: 'workflow.start', args: { accountSetId: 'as_003' } }]);
@@ -97,7 +97,7 @@ describe('Pi driver 进度帧接线', () => {
   it('宿主内部工具调用不发进度帧（默认帧与模型短语都不发）', async () => {
     for (const name of ['route_current_turn', 'search_history', 'get_messages']) {
       const { steps, input } = stepRecorder();
-      const agentTool = toAgentTool(toolFor(name), input, new Map(), name);
+      const agentTool = toAgentTool(toolFor(name), input, name);
       // 模型照样可能自填 progress——内部工具对帧整体静默
       await agentTool.execute('call_1', { progress: '申报本轮动作' });
       expect(steps, name).toEqual([]);
@@ -106,20 +106,20 @@ describe('Pi driver 进度帧接线', () => {
 
   it('平台工具调用仍出帧：模型短语优先，泄漏/超长短语被钳制后回落默认帧', async () => {
     const clean = stepRecorder();
-    await toAgentTool(toolFor('get_login_status'), clean.input, new Map(), 'get_login_status')
-      .execute('call_1', { progress: '检查登录状态' });
-    expect(clean.steps).toEqual(['检查登录状态']);
+    await toAgentTool(toolFor('run_17dz_task'), clean.input, 'run_17dz_task')
+      .execute('call_1', { progress: '查询往来记录' });
+    expect(clean.steps).toEqual(['查询往来记录']);
 
-    // 复读了协议材料 → 整条丢弃，回落到该工具的默认帧
+    // 复读了协议材料 → 整条丢弃，回落到通用工具名帧
     const leaky = stepRecorder();
-    await toAgentTool(toolFor('get_login_status'), leaky.input, new Map(), 'get_login_status')
+    await toAgentTool(toolFor('run_17dz_task'), leaky.input, 'run_17dz_task')
       .execute('call_1', { progress: '{"recorded":"delegate","step":"第 1/2 步"}' });
-    expect(leaky.steps).toEqual(['检查平台登录状态…']);
+    expect(leaky.steps).toEqual(['正在调用 run_17dz_task…']);
 
     // 超长 → 截断到 50 字符
     const long = stepRecorder();
     const phrase = `正在核对${'x'.repeat(60)}`;
-    await toAgentTool(toolFor('get_login_status'), long.input, new Map(), 'get_login_status')
+    await toAgentTool(toolFor('run_17dz_task'), long.input, 'run_17dz_task')
       .execute('call_1', { progress: phrase });
     expect(long.steps).toHaveLength(1);
     expect(long.steps[0]).toHaveLength(51);

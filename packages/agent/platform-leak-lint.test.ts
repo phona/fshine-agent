@@ -214,16 +214,9 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
   // YAML frontmatter 标量去引号：判断"是不是被引号包住"——结构形状检查，非内容嗅探。
   ['packages/agent/src/skills.ts:"', 'frontmatter 标量去引号（结构形状检查）'],
   ["packages/agent/src/skills.ts:'", 'frontmatter 标量去引号（结构形状检查）'],
-  // 以下六条是已退役的直接平台工具名：主 Agent 工具面早已只剩
-  // route_current_turn / search_history / get_messages，这些 case 不可达（死代码）。
-  // 进白名单而非基线：它们没有"长出来"的风险、只有"该删"的债务——删一处即可
-  // 移除对应白名单条目；任何新的具名 case 不在表内，照样红。
-  ['packages/agent/src/step-text.ts:search_account_sets', '已退役工具名（死代码：主 Agent 工具面已无直接平台工具）'],
-  ['packages/agent/src/step-text.ts:get_current_accounting_period', '已退役工具名（死代码，同上）'],
-  ['packages/agent/src/step-text.ts:list_vouchers', '已退役工具名（死代码，同上）'],
-  ['packages/agent/src/step-text.ts:inspect_account_set', '已退役工具名（死代码，同上）'],
-  ['packages/agent/src/step-text.ts:search_references', '已退役工具名（死代码，同上）'],
-  ['packages/agent/src/step-text.ts:get_login_status', '已退役工具名（死代码，同上）'],
+  // L6：step-text.ts 的 6 个已退役直接平台工具名 case（search_account_sets 等）已随
+  // 沉积清理删除，对应白名单条目一并移除——主 Agent 工具面早已只剩宿主内部工具与
+  // run_17dz_task 委派，任何新的具名 case 不在表内，照样红。
 ]);
 
 /**

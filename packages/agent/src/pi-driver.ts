@@ -90,12 +90,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   if (!model) throw new Error(`LLM 模型 ${modelId} 注册失败`);
 
   return {
-    async run(input: TurnDriverInput): Promise<TurnDriverResult> {      const names = new Map<string, string>();
+    async run(input: TurnDriverInput): Promise<TurnDriverResult> {
       const providerToolNames = createProviderToolNameMap(input.tools);
       const tools = input.tools.map((tool) => toAgentTool(
         tool,
         input,
-        names,
         providerToolNames.get(tool.name)!,
       )) as unknown as AgentTool<any, any>[];
       // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
@@ -286,7 +285,6 @@ function stableNameHash(value: string): string {
 export function toAgentTool(
   tool: DiscoveredTool,
   input: TurnDriverInput,
-  names: Map<string, string>,
   providerName = tool.name,
 ) {
   return {
@@ -314,11 +312,10 @@ export function toAgentTool(
       const phrase = typeof progress === 'string' ? progress : '';
       // 帧文本由 renderToolStepText 一处合成：内部工具与协议材料复读都不出帧；
       // 返回 null 时静默跳过——空串会在渠道上投出一条空进度帧,比不发帧更糟。
-      const step = renderToolStepText(tool.name, args, names, phrase);
+      const step = renderToolStepText(tool.name, phrase);
       if (step) input.onStep(step);
       try {
         const data = await input.exec(tool.name, args, signal);
-        rememberAccountSets(tool.name, data, names);
         return {
           content: [{ type: 'text' as const, text: JSON.stringify(data) }],
           details: {},
@@ -346,22 +343,6 @@ function hasFailedAssistantMessage(messages: readonly unknown[]): boolean {
     }
   }
   return false;
-}
-
-function rememberAccountSets(
-  toolName: string,
-  data: unknown,
-  names: Map<string, string>,
-): void {
-  if (toolName !== 'search_account_sets' || !data || typeof data !== 'object') return;
-  const accountSets = (data as { accountSets?: unknown }).accountSets;
-  if (!Array.isArray(accountSets)) return;
-  for (const item of accountSets) {
-    const record = item as { id?: unknown; name?: unknown };
-    if (typeof record.id === 'string' && typeof record.name === 'string') {
-      names.set(record.id, record.name);
-    }
-  }
 }
 
 function textFromContent(content: unknown): string {
