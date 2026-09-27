@@ -48,6 +48,7 @@
 | C31 | 多任务回溯消歧（歧义抛给用户）：跨回合续跑的计划绑定按优先级**机械**判定——① 同回合已定 > ② 显式 `continueTaskId` 按 taskId 反查所属计划（taskId 记在步事实上，比"最近开放"更真；旧代码此处按 latestOpenPlan 猜，最近的计划会抢走续跑事实）> ③ 用户消歧选定（`preferredPlanId`，宿主强制，模型声明与该计划形状不一致就新开、绝不改绑其他计划）> ④ 形状判定（总步数一致且步号接得上的候选**恰一个**时自动续跑）。候选多于一个且无其他依据 → 宿主不绑不出猜，直接发编号消歧问题（`【任务消歧】` 前缀，选项与进度由计划事实机械生成），本回合零委派零新事实；**紧跟问题的纯编号回复**才绑定——判定依据是"上一条 assistant 事件就是该问题"（中间插过任何回合即失效，按新请求处理），宿主不持久化任何 pending 状态（问题文本 + 计划事实即可完全重建消歧现场）。绑定后宿主注入选定证据，模型重新申报"做什么"，本回合计划绑定由宿主强制。宿主不解任务语义，不引入第二个判别模型 | `runtime.ts` `resolvePlanId` / `askPlanDisambiguation` / `matchPlanDisambiguationReply` / `PLAN_DISAMBIGUATION_PREFIX`；召回与反查在 `TaskPlanRepo.openPlans` / `planIdForTask`（contracts + SQLite）；单测 P6.11–P6.15 + e2e `turn-loop-disambiguation.test.ts` 9.1/9.2 |
 
 | C32 | 下游平台保护（生产受控上线三件套）：① **写关闭**——`config/agent.yaml` 的 `capabilities: ["read"]`，录入提案在宿主 `finalizeProposal` 被确定性拒绝（"未开放写入权限"，零 prepare 零写入）；`FSHINE_REAL_COMMIT` 空 = 真平台 commit 同样拒绝（双闸）。② **并发闸**——`createContextTaskRunner` 内信号量（默认 `FSHINE_PLATFORM_CONCURRENCY=1` 全局串行）：真实平台是 `launchPersistentContext` 共享登录态 profile，并发委派会多开 Chrome 抢同一 profile——那是"被平台感知"的典型方式；闸门只包 `workerDriver.run`（平台访问都在其内），抛错经 finally 释放，排队埋点 `platform_delegation_queued`。③ **限流显式化**——`.env` 声明 `DZ_RATE_LIMIT`（与 17dz 默认一致：read 桶5/3s、global 桶8/2s、api 2/s），防止测试环境放宽值被带进生产。三件套在 mock 下同样生效（串行无害），真实平台切换只需 `DZ_EXECUTOR=` 置空 | `context.ts` 并发闸 + `config/agent.yaml` capabilities + `.env` / `.env.example`；单测：context.test.ts 并发闸 3 例（串行/可配并行/抛错释放）、context-proposal.test.ts 写拒绝 |
+| C33 | 召回事实注入（支柱 C：分层知识单一读写契约）：召回线索命中时（与 C18 同一把尺，省 token）宿主把"本会话迄今真实发生过的平台执行"渲染成**执行台账**注入上下文头部。数据源唯一：Conversation Log 的 `tool_result` 事件（每次委派的结果恰好一条，append-only、按会话隔离、时间有序——宿主写下的执行底账）。**不读** `platform_tasks`：任务记录不存对象/时间范围/调用次数，`workerMessages` 是 worker 原始转录，渲染它就是重新注入"转录里偶然提到的文本"（P2 要替代的正是它）。**不并** `task_plan_steps`：每一步在 Log 里已有一条 tool_result，两侧合并会把同一次执行渲染两遍——那正是 T3r"混成两次查询"的形状，且步骤事实里的 taskId 在事件里已脱敏、无从串联。`plan_event` 是查询范围的预告不是执行结果，不收。台账只机械陈述（不解释、不排名、不比较——"哪个余额最高"让模型基于条目自己做），渲染模板零业务词，查不到执行记录 → 不注入（静默降级）。台账**不进** `entitySources`：实体来源并集一个字都不加，否则历史对象会被计划层放行——那是扩大范围不是消解（C18/C20 铁律）。保存转录前按 `【宿主执行事实：` 标记剥离：台账每回合重算，旧副本与新台账并列就是串轮 | `packages/agent/src/execution-facts.ts` + `runtime.ts` 注入点（埋点 `execution_facts_injected` / `execution_facts_empty` / `execution_facts_failed`）；单测 `execution-facts.test.ts` 9 例 + `runtime.test.ts` R6–R9；e2e `turn-loop-recall-facts.test.ts` 10.1–10.3 |
 
 ## 2. SKILL 事实（17dz 执行层持有，worker 经 Skill 机制读取）
 
@@ -325,3 +326,31 @@
 **遗留（写路径 latent 批，生产写开放前必修）**：17dz S2（fill.js 批量契约只用 contracts[0].accountSet，其余静默丢→凭证落错账套）、S3（gen-from-journal 账户下拉子串+.first() 多候选不歧义）、S4（--direction/--date-mode 无枚举白名单，过滤空转报"无符合条件"+exit 0）、S5③（fill --start-no NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串+stripCity 静默采纳简称，写路径）、S10（parse-tianren-bills creditRules 未命中静默回落 1122，未裁决口径可能落库）；fshine F1（extractChangeProposal 剥 ```json 围栏——与被删的 stripCommandWrapping 同族，写提案路径）。另：17dz 新错误码（ACCOUNT_SET_AMBIGUOUS/BAD_PERIOD/INVALID_LIMIT/INVALID_COUNT/NO_SAMPLES/UNKNOWN_DOMAIN）尚未登域文档；fshine F4 残留（回合真有过执行时出口校验跳过，模型复读仍可能外发——待单独一刀）。
 
 **审计的结构性结论**（值得记住）：17dz 执行层"单点极高、面状不及格"——flag-guard 是全网最高水准但止步于 flag 名，值校验/positional 语义/参数间一致性全靠每个脚本作者当时的警惕（同文件自相矛盾：验 --merge 不验 --direction、验三个查询的期间不验 queryAllVouchers）。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套/漂移检测器报无漂移），而执行层是唯一能同时防住两边的一侧。方向：把"值校验+三态+不代选"下沉为共用入口卫生，别再依赖个体警惕。
+
+## 18. 召回事实注入：召回轮次读执行台账（支柱 C 第一刀，2026-09-27）
+
+背景（T3r 复发形状）：真实平台多轮实测里，用户问"刚才查出来是多少钱"，模型从**原始转录自由回忆**，把两个不同对象、不同时间范围的查询混成"刚才两次查询"——归因串轮。同类形状还有在真实数据旁边编造一个从未查过的对象（§14）。根因不在模型"记性差"，而在**召回轮次没有权威材料**：state_recent 模式下转录窗口只有最近 2 轮，更早的执行对模型不可见；C18 的检索证据只管指代消解，且不声称"这就是全部执行"。模型只能从窗口里偶然提到的文本自由拼凑——"提过"被当成"执行过"。
+
+**决策**（支柱 C：分层知识单一读写契约）：召回线索命中时（复用 C18 的线索尺，省 token），宿主把执行底账渲染成**执行台账**注入上下文头部，与检索证据分工——证据管指代消解，台账管执行归因。
+
+数据源逐个读过 store.ts 之后的诚实结论（宁少勿猜）：
+
+| 候选来源 | 实际存了什么 | 结论 |
+|---|---|---|
+| `platform_tasks` | taskId / 归属会话 / worker 原始转录 / 时间戳。**没有对象、没有时间范围、没有调用次数**；接口也只有 get/upsert，没有按会话列举的入口 | 不贡献任何事实。想要"每任务：对象×时间范围×calls"就得先改契约落库——那是另一刀，本刀不猜字段 |
+| `task_plan_steps` | 步骤事实（request / status / taskId / summary），**只有多步拆解才写** | 不作第二来源：每一步在 Log 里已有一条 tool_result，合并即把一次执行渲染两遍（正是要修的串轮形状），且 taskId 在事件里已脱敏、没有可串联的键 |
+| Conversation Log `tool_result` | 每次委派的结果恰好一条（terminate / needs / 计划步三种路径都由 `extract17dzToolResultEvents` 写），append-only、按会话隔离、时间有序 | **唯一事实源**：无缺口也无重复 |
+| `plan_event` | 计划门给用户的通知（查询范围预告） | 不收：把"准备查"当"查过"注入是另一种归因错误 |
+
+因此事实块采用保守渲染：`① <时间>｜<记录原文>`（一条目一次委派、按时间正序、超 300 字截断、最多 5 条并标记截断），**不解析**记录里的对象/时间范围/操作名——那是对业务文本做模糊匹配，正是 C21 禁掉的"猜"。模板零业务词（泄漏预算第二条），业务词只可能作为数据出现在记录原文里。
+
+**边界纪律**：台账不进 `entitySources`（C20 的并集不变——否则历史对象会被计划层放行，那是扩大范围不是消解）；保存转录前按 `【宿主执行事实：` 标记剥离（台账每回合重算，旧副本与新台账并列就是串轮）；查不到执行记录 → 不注入（静默降级，安全缺省）；存储抛错 → 不影响回合（`execution_facts_failed` 埋点）。A2（新问题渗进旧账套）是模型侧纪律，本刀治不了，仍由实体门 + 申报 Scope 兜着。
+
+**验收**（56 → 58 文件 / 511 → 527 例全绿，typecheck 0 错误，leak-lint 3 例通过；文件/用例基数为含并行 stream `cced78e` 的 HEAD）：
+
+- 单测 `execution-facts.test.ts` 9 例：多任务正序渲染、混合终态按原文渲染（不发明状态词）、模板零业务词、无线索不注入、无执行记录返回 null、空内容不计入、超上限截断、单条超长截断、存储抛错上抛。
+- 运行时单测 R6–R9：注入形态 + 台账不进实体来源、无线索不注入、底账不可用静默降级、台账不落转录。
+- e2e `turn-loop-recall-facts.test.ts` 10.1–10.3（真 SQLite 全链、假 SDK/worker）：① 一次真实委派后召回，答案的对象/时间范围/结果数值与任务事实一致且不含本轮之外的对象、零新增平台调用；② 两个任务（A 成功、B needs 没执行）后问"刚才哪些查到了"，回复把两者分开说且 B 的行里没有 A 的数字（T3r 翻车形状回归）；③ 会话里没有平台执行时不注入台账，只能说没有记录、不编数字。
+- **变异验证**：把注入关掉 → R6 + 10.1 + 10.2 红（3 例）；渲染函数里混入一条从未执行的对象 → 单测条目数断言 + 10.1 的"不含本轮之外对象"断言红（3 例）。
+
+**已知边界（如实记录）**：台账条目内容是 Log 里的记录原文（生产=worker 最终答复；harness 的替身 worker 会把原始平台输出并进最终文本，所以 e2e 断言落在截断后仍在的事实上）。零执行且走宿主兜底文案的委派（`delegate_without_execution` / `activated_plan_not_executed`）不写 tool_result 事件，因此不在台账里——那类轮次没有平台执行可归因，转录里的兜底文案仍可见。台账回答"执行过哪些/结果是什么"，不回答"哪个余额最高"——比较让模型基于条目自己做。

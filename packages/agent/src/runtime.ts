@@ -12,6 +12,7 @@ import { extractContextWithTurnDriver } from './context-model';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
 import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
+import { collectExecutionFacts, EXECUTION_FACTS_MARKER, type ExecutionFacts } from './execution-facts';
 import { parsePlanStep, planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import type { PendingPlanConfirmation } from './plan-runtime';
 
@@ -269,6 +270,30 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           console.error(JSON.stringify({ event: 'reference_evidence_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
         }
       }
+      // 召回事实注入（支柱 C）：与主动回溯共用同一把线索尺——用户消息带召回线索时，宿主把
+      // "本会话迄今真实发生过的平台执行"从 Conversation Log 的执行底账渲染成台账，注入上下文
+      // 头部。为什么必须读结构化底账而不是让模型从转录自由回忆：T3r 实测里模型把两个不同
+      // 对象/时间范围的查询混成"刚才两次查询"（归因串轮），转录里"提过"不等于"真的执行过"；
+      // 台账只机械陈述，比较与解释仍归模型。取舍与边界见 execution-facts.ts 文件头。
+      let executionFacts: ExecutionFacts | null = null;
+      if (deps.conversationLog && looksLikeReferenceCue(userMessage)) {
+        try {
+          executionFacts = await collectExecutionFacts({
+            conversationLog: deps.conversationLog,
+            principalId: ctx.principalId,
+            sessionId: ctx.sessionId,
+            userMessage,
+          });
+          console.info(JSON.stringify({
+            event: executionFacts ? 'execution_facts_injected' : 'execution_facts_empty',
+            requestId: ctx.requestId,
+            ...(executionFacts ? { count: executionFacts.count, truncated: executionFacts.truncated } : {}),
+          }));
+        } catch (error) {
+          // 台账渲染失败不影响回合：退回"无台账"状态，模型按现有材料自行处理。
+          console.error(JSON.stringify({ event: 'execution_facts_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+        }
+      }
       // 最近 N 回合带一条历史资料说明：旧财务结论不得被当成本轮实时结果引用。
       // 说明只在进模型前追加，保存前剥离，避免随转录层层叠加。
       // 不判断内容是否"像财务数字"——那是模糊匹配，正是此前被否掉的方向。
@@ -285,6 +310,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 最后 unshift 的证据落在最头部：这是本轮最相关的材料，先于 Context State 与记忆。
       if (referenceEvidence) {
         context.unshift({ role: 'user', content: referenceEvidence.text, timestamp: Date.now() } as unknown as AgentMessage);
+      }
+      // 执行台账紧随检索证据之后（更贴近头部）：召回归因是召回轮次回答的直接依据。
+      // 与检索证据分工不同——证据管指代消解，台账管执行归因；因此台账**不进**
+      // entitySources：实体来源一旦含台账，历史对象就能被计划层放行，那是扩大范围
+      // 不是消解（reference-evidence.ts 的铁律，C20 的并集一个字都不改）。
+      if (executionFacts) {
+        context.unshift({ role: 'user', content: executionFacts.text, timestamp: Date.now() } as unknown as AgentMessage);
       }
       // 消歧结果同样落在最头部：用户刚选定的任务，是本轮申报的直接依据。
       if (planChoice) {
@@ -1255,10 +1287,14 @@ function renderDisambiguationQuestion(candidates: TaskPlanSummary[]): string {
 }
 
 /** Drop host-injected history notes so they never accumulate in the persisted transcript. */
+const INJECTED_NOTE_PREFIXES: readonly string[] = [RECENT_TURN_HISTORY_NOTE, EXECUTION_FACTS_MARKER];
+
 function stripHistoryNotes(messages: AgentMessage[]): AgentMessage[] {
   return messages.filter((message) => {
     const content = (message as { content?: unknown }).content;
-    return typeof content !== 'string' || !content.startsWith(RECENT_TURN_HISTORY_NOTE);
+    // 执行台账每回合重算：旧副本若留在转录里，会和下一回合的新台账并列——模型看到两份
+    // 不同的"刚才执行过哪些"，正是串轮的形状，所以保存前一律剥掉（与历史资料说明同理）。
+    return typeof content !== 'string' || !INJECTED_NOTE_PREFIXES.some((prefix) => content.startsWith(prefix));
   });
 }
 

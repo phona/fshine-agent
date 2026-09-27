@@ -4,6 +4,8 @@ import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION } from './src/runtime';
+import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
+import type { PlanEntitySources } from './src/turn-contract';
 import { FakeSessionRepo } from './test-helpers';
 
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -121,6 +123,113 @@ describe('createTaxAgentRuntime', () => {
 
     expect(reply.text).not.toContain('42 元');
     expect(reply.text).toContain('没有产生任何平台查询');
+  });
+
+  // ── 召回事实注入（支柱 C）：召回轮次读执行台账，不从转录自由回忆 ──────────
+  // T3r 实测形状：用户问"刚才查出来是多少钱"，模型从转录自由回忆，把两个不同对象/
+  // 时间范围的查询混成"刚才两次查询"。宿主在召回线索命中时把执行底账渲染成台账，
+  // 归因因此有据可依；台账只做归因，不扩大实体范围（C20 的并集不变）。
+
+  /** 一条历史执行底账（真库里由 extract17dzToolResultEvents 写入，taskId 已脱敏）。 */
+  function pastExecution(): ConversationEventRecord[] {
+    return [{
+      eventId: 'old_tool', principalId: 'wecom:user_a', sessionId: 'sess_1', kind: 'tool_result',
+      content: '幻辰财税 202606 应收账款余额为 61000 元。', createdAt: '2026-09-26T10:31:00.000Z',
+    }];
+  }
+
+  function factsLog(events: ConversationEventRecord[]) {
+    return {
+      append: async () => {},
+      list: async ({ limit }: { limit: number }) => events.slice(-Math.max(1, limit)),
+      search: async () => events,
+    };
+  }
+
+  it('R6 召回线索命中时注入执行台账，且台账不进实体来源', async () => {
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    let entitySources: PlanEntitySources | undefined;
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        entitySources = args.entitySources;
+        return { taskId: 'task_live', text: '幻辰财税 202609 应收余额为 51 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+      conversationLog: factsLog(pastExecution()),
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_execution_facts' }), '刚才那个账套 202609 呢？');
+
+    const rendered = JSON.stringify(inputs[0]?.messages);
+    expect(rendered).toContain(EXECUTION_FACTS_MARKER);
+    expect(rendered).toContain('只能依据这些条目陈述');
+    // 台账是归因材料，不是实体来源：C20 的并集一个字都没加
+    // （否则历史对象就能被计划层放行——那是扩大范围，不是指代消解）
+    expect(entitySources?.referenceEvidence ?? '').not.toContain(EXECUTION_FACTS_MARKER);
+    expect(entitySources?.currentMessage).toBe('刚才那个账套 202609 呢？');
+  });
+
+  it('R7 没有召回线索时不注入执行台账', async () => {
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '好的。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      conversationLog: factsLog(pastExecution()),
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_no_recall_cue' }), '查一下幻辰财税的应收账款');
+
+    expect(JSON.stringify(inputs[0]?.messages)).not.toContain(EXECUTION_FACTS_MARKER);
+  });
+
+  it('R8 执行底账不可用时静默降级：不注入、不失败回合', async () => {
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '刚才的执行记录我这边取不到，请告诉我要查什么，我重新查。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      conversationLog: {
+        append: async () => {},
+        list: async () => { throw new Error('disk unavailable'); },
+        search: async () => [],
+      },
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_facts_down' }), '刚才查出来是多少钱？');
+
+    expect(reply.text).toContain('取不到');
+    expect(JSON.stringify(inputs[0]?.messages)).not.toContain(EXECUTION_FACTS_MARKER);
+  });
+
+  it('R9 执行台账不落转录：每回合重算，旧副本不会和新台账并列', async () => {
+    const sessions = new FakeSessionRepo();
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '刚才查到 61000 元。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      platformTask: subagent(),
+      conversationLog: factsLog(pastExecution()),
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_facts_strip' }), '刚才查出来是多少钱？');
+
+    const transcript = JSON.stringify(sessions.peek('sess_1')?.state ?? []);
+    expect(transcript).not.toContain(EXECUTION_FACTS_MARKER);
+    expect(transcript).toContain('刚才查到 61000 元。');
   });
 
   // ── P1 收尾兜底：方案已批准但查询没有执行 ────────────────────────────
