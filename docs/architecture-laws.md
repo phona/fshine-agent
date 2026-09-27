@@ -75,9 +75,9 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 **当前违例**：
 
 - **写确认摘要**：`context.ts` 的 `proposal_created` 分支（第 355–362 行）由宿主渲染提案摘要——随 L4 一并迁到执行层产出的不透明 payload。
-- **F4 残留**：回合真有过执行时，出口校验被跳过，模型复读的协议 JSON 仍可能外发（`rule-landing.md:326`：「fshine F4 残留（回合真有过执行时出口校验跳过，模型复读仍可能外发——待单独一刀）」）。
+- ~~**F4 残留**：回合真有过执行时，出口校验被跳过，模型复读的协议 JSON 仍可能外发~~ **已关**（2026-09-27 Wave 2 Lane D）：`runtime.ts` 的复读检测（`looksLikeProtocolMaterial`，协议 JSON 首字段 recorded/step/next 的形状判据）**不依赖 execution**——有执行也拦，用宿主步骤事实/needs 线索替换，守夜事件 `execution_language_leak`（D-020；判据修订：未采纳"全量过 executionLanguageFingerprints 硬拦"，理由见台账）。
 
-**闭环判据**：全部状态类回复走**码表 + 信封数据**（模型不发音）；F4 补齐出口校验。
+**闭环判据**：全部状态类回复走**码表 + 信封数据**（模型不发音）；F4 补齐出口校验（已达成：复读检测不依赖 execution，`runtime.test.ts` F4.1–F4.4 钉住）。
 
 ---
 
@@ -121,7 +121,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 - `step-text.ts` 6 个退役工具名死分支：`search_account_sets`/`get_current_accounting_period`/`list_vouchers`/`inspect_account_set`/`search_references`/`get_login_status`（现挂在 leak-lint 的字面量 if 白名单，`platform-leak-lint.test.ts:221-226`，属"遗留待清"）。
 - 17dz 仓根 465KB 会话日志：`codex-session-01a0bd75-38f6-79f3-91ed-617ba8fe5ce9.md`（465137 字节，**已被 git 跟踪**）。
 - `.env.real` 残留（fshine 仓根，1635 字节，已被 `.gitignore`——本地沉积、非主干，但有泄露面）。
-- fshine `.agents/skills/finance` 死技能（`name: finance`；运行态 `skillRoots` 指向 `.agents/skills-serve`、`businessSkillPath` 指向 `docs/business-skill.md`，零引用）。
+- ~~fshine `.agents/skills/finance` 死技能（`name: finance`；运行态 `skillRoots` 指向 `.agents/skills-serve`、`businessSkillPath` 指向 `docs/business-skill.md`，零引用）。~~ 技能本体已删（Wave 1 `4362cef`）；**会复活它的配置模板引用已清**（2026-09-27 Wave 2 Lane D：`config/agent.example.yaml` 的 skillRoots 改指 `.agents/skills-serve` + `config.test.ts` 机械锁，D-055）。
 
 **闭环判据**：清单清空（每一项要么删、要么有守卫 + 标签 + 限期）。
 

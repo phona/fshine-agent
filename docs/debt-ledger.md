@@ -376,7 +376,21 @@
 - **律法归属**：L3。
 - **闭环判据**：`execution === true` 的最终回复也过 `executionLanguageFingerprints`（命中即记守夜事件 `execution_language_leak` 并回落宿主兜底文案，不放行）；测试：构造"execution 为真 + 模型复读协议 JSON"的用例，断言不外发（现有 S1-S5 全部是 `clarification` 挂载路径，需补一条无 clarification 的）。
 - **建议波次**：Wave 2（方案已列为夹带小刀）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`runtime.ts` 新增 `looksLikeProtocolMaterial(text)`——内部协议材料的**形状**判据
+  （开头是协议 JSON 且首字段是 recorded/step/next，含 NEEDS_TOOL_RESULT_PREFIX），不嗅探
+  内容。复读检测由此**不依赖 execution**：零执行分支的判定同步换成这把尺（顺带盖上
+  `{"recorded":"conversation"}` 回显的泄漏），并在出口处独立补一道——有执行也拦，用宿主
+  步骤事实汇总（计划模式）/ needs 线索转达替换，守夜事件 `execution_language_leak`
+  （reason=protocol_material_replay）。可达性说明：单步委派的执行结果以 ToolUserError
+  终止回合（模型说不上话），needs 与 execution 互斥，故"有执行+复读"只可能是计划模式，
+  替换文本因此总能落到步骤事实；末级 NO_EXECUTION_CLARIFICATION 只服务零执行形状。
+  **判据修订**：原判据的"最终回复全量过 executionLanguageFingerprints"未采纳为硬拦——
+  指纹模式（花括号/全大写下划线码）会误伤合法数据答案，且这把尺的既有职责是"注脚准入"
+  不是"整回复准入"；复读检测是同一事故形状的更精确子集（协议 JSON 必含花括号，但含
+  花括号的不一定是协议 JSON）。守夜事件名沿用原判据的 `execution_language_leak`。
+  测试：`runtime.test.ts` F4.1–F4.4（形状判据不误判数据答案 / 计划模式有执行+复读 →
+  步骤事实汇总 / needs 回路复读回归 / 零执行申报回显 → 不外发协议 JSON）。
 
 ### D-021 · 企微 notice 路径仍用无声截断：cef97c9 只改了最终回复路径
 
@@ -388,7 +402,14 @@
 - **律法归属**：L3（状态消息呈现卫生）+ L6（改了一半）。
 - **闭环判据**：`truncateUtf8` 在 `adapter.ts` 中不再被直接调用（三个出口统一走 `truncateReply` 或等价"看得见的截断"）；补测试：notice 超长 → 带标记 + 守夜事件（现有 `notice.acceptance.test.ts` 只测送达语义，无长度用例）。
 - **建议波次**：Wave 1（与 675bd15 同属渠道层，改动小）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`adapter.ts` 的 notice 路径从 `truncateUtf8(text, MAX_REPLY_BYTES)`（无声硬切）
+  换成 `truncateReply(text)`（超限带 REPLY_TRUNCATED_MARK）+ 守夜事件
+  `wecom_reply_truncated`（与 final 同一事件线，新增 `frame` 字段区分出口：notice/final）；
+  `truncateUtf8` 的 import 随之删除。progress 路径（第三条出口）仍不截断——它有 4 帧
+  硬顶且每帧是平台 label 驱动的短句，登记为既有行为不属本条范围。
+  测试：`notice.acceptance.test.ts` 新增长度用例（超长 notice → 带标记 + ≤20480 字节 +
+  守夜事件 JSON 断言）。
 
 ### D-022 · `adapter.ts` 文件头注释仍写"2048 字节截断"
 
@@ -399,7 +420,11 @@
 - **律法归属**：L3（呈现层的注释与代码不符归此；亦可归 L6 化石）。
 - **闭环判据**：`grep -rn "2048" packages apps scripts tests | grep -v "历史事故\|W1 曾"` → 0 命中（`text.ts:4` 的事故记述除外，它是故意的历史记录）。
 - **建议波次**：Wave 1。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：`adapter.ts` 文件头注释"2048 字节截断"改为实情（MAX_REPLY_BYTES = 20480）
+  并指向 `text.ts` 常量与"改值前先核 SDK README"的事故记述。grep 判据实测：
+  `grep -rn "2048" packages apps scripts tests` 仅剩 `text.ts` 文件头两处故意的历史记录
+  （事故记述 + "W1 曾把它写成 2048"）。
 
 ---
 
@@ -542,7 +567,14 @@
 - **律法归属**：L6（死技能）+ L2（配置默认值双真相）。
 - **闭环判据**：`.agents/skills/finance` 删除；`config/agent.example.yaml` 的 `skillRoots` 改为 `.agents/skills-serve` 并加注释说明与建造技能面互斥；新增测试或 lint 断言模板与生产示例一致（或模板值必须在合法集合内）。
 - **建议波次**：Wave 1 · Lane C②（模板那一行建议同批改，属于一行修复）。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；死技能本体已由 Wave 1 `4362cef` 删除）。
+  关闭方式：`config/agent.example.yaml:28` 的 `skillRoots: [".agents/skills"]` 改为
+  `[".agents/skills-serve"]` 并加注释（与建造技能面互斥、noSkills 只认显式 skillRoots、
+  指错面会静默失效）；新增机械锁 `packages/core/config.test.ts` 的 D-055 用例——读模板
+  YAML 断言 17dz profile 的 skillRoots 必须等于 `['.agents/skills-serve']`（模板回退到
+  建造面即红）。运行期加载链核实：worker `noSkills:true` + `additionalSkillPaths` 只认
+  显式 skillRoots，`.agents/skills` 无任何加载入口（`discoverSkills/createSkillRegistry`
+  运行期零调用），删除配置引用不会复活死技能。
 
 ### D-056 · 17dz `src/voucher/scripts/` 下住着 5 个测试夹具，其中 2 个已孤儿化
 
@@ -629,7 +661,16 @@
 - **律法归属**：L7。
 - **闭环判据**：至少一个测试（单测或 e2e）断言"装配层确实注入了 `verifyActivatable`，且平台返回 `superseded` 时用户收到 `superseded` 解释而非激活/通用失败"；变异验证：删掉 `assembly.ts:150-153` 的注入 → 该测试红。
 - **建议波次**：Wave 2。
-- **状态**：待办。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+  关闭方式：新增 `apps/server/plan-confirmation-wiring.test.ts`——走**真工厂**
+  （D-013 收敛后的 `createPlanConfirmationWiring`，assembly 与 ask.ts 共用同一份接线，
+  测工厂即测两个入口）+ 真 SQLite 仓库 + 假平台 CLI（临时目录 bin/17dz 壳脚本，记录每次
+  调用）。三条用例：① 平台 status 非 pending → `superseded` 结局、且调用日志里确有
+  `plan status --plan-id`（**变异锁**：删掉 verifyActivatable 注入即红）、没有 `plan activate`；
+  ② status 为 pending → 放行并真激活；③ savePending 落库形状（decision 固定 confirm、
+  evaluation 为 {}、TTL = PLAN_CONFIRMATION_TTL_MS 单一来源）。
+  注：原判据的"删掉 assembly.ts:150-153 的注入"已不适用——那三行在 D-013 里收敛进工厂，
+  注入只有一处；变异锁改为"删工厂里的 verifyActivatable 传参 → 本测试红"。
 
 ### D-064 · 17dz 五个错误码未登域文档（纠正"六个"的说法）
 

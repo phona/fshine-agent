@@ -1,7 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { loadConfig, principalScopeRecords } from './src/index';
 
 const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
@@ -146,5 +148,20 @@ contextProfiles:
     const yaml = VALID_YAML.replace('wecom:user_a', 'wecom:REPLACE_WITH_USERID');
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
       .toThrowError(/REPLACE_WITH/);
+  });
+
+  // ── D-055：配置模板不许指向会"静默失效"的技能面 ──────────────────────────
+  //
+  // 模板 agent.example.yaml 是新部署者的复制源。它曾写着建造期技能面 .agents/skills——
+  // 而 worker 驱动 noSkills:true 只加载显式 skillRoots（.agents/skills-serve），照模板
+  // 配出来的部署"技能注入静默失效"：不报错、只是规则没进去。这里把模板值与运行态合法
+  // 集合对上，防止"生产改了、模板没改"的新旧并存复发。
+  it('D-055 模板 skillRoots 必须是运行态技能面(.agents/skills-serve),不许指建造面', () => {
+    const templatePath = fileURLToPath(new URL('../../config/agent.example.yaml', import.meta.url));
+    const template = parseYaml(readFileSync(templatePath, 'utf8')) as {
+      contextProfiles?: Record<string, { skillRoots?: unknown }>;
+    };
+    const skillRoots = template.contextProfiles?.['17dz']?.skillRoots;
+    expect(skillRoots, '模板必须显式声明 17dz profile 的 skillRoots').toEqual(['.agents/skills-serve']);
   });
 });

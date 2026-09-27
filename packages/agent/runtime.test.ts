@@ -3,7 +3,7 @@ import type { ContextStateRecord, ConversationEventRecord, TrustedContext } from
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
-import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints } from './src/runtime';
+import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints, looksLikeProtocolMaterial } from './src/runtime';
 import { clarificationTextFor, toolUserErrorFor } from './src/error-codes';
 import { DELEGATION_AUTH_FAILURE } from './src/context';
 import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
@@ -1715,5 +1715,86 @@ describe('createTaxAgentRuntime', () => {
     // 用户要先回答"查哪个"：后续步骤不再派发
     expect(dispatched).toEqual(['查询幻辰的应收账款']);
     expect(executionLanguageFingerprints(reply.text)).toEqual([]);
+  });
+
+  // ── F4 残留修复（D-020）：有执行也拦协议材料复读 ───────────────────────────
+  //
+  // Stage 3 实测事故的形状：目录搜索真的发生过（execution 为真、gateCalls>0），模型却把
+  // 信封/工具结果翻译成技术报告。此前的出口校验以 `!turn.execution` 为总闸，这类回合
+  // 的模型文本一路直发。下面三例钉住"复读检测不依赖 execution"。
+
+  it('F4.1 looksLikeProtocolMaterial：只认协议 JSON 的形状，不嗅探内容', () => {
+    // 宿主与模型之间的内部协议材料：纠错环交还 / 计划步骤交还 / 回合申报回执
+    expect(looksLikeProtocolMaterial('{"recorded":"delegate","text":"…","taskId":"task_1","needs":{}}')).toBe(true);
+    expect(looksLikeProtocolMaterial('  \n {"recorded":"conversation"}')).toBe(true);
+    expect(looksLikeProtocolMaterial('{"step":"第 1/2 步","recorded":"delegate","next":"不要转述给用户"}')).toBe(true);
+    // 正常回复（含数据答案、带花括号的说明、错误码提及）一律不误判
+    expect(looksLikeProtocolMaterial('幻辰财税 202609 应收余额为 51 元。')).toBe(false);
+    expect(looksLikeProtocolMaterial('结果：{"balance":51000} 元。')).toBe(false);
+    expect(looksLikeProtocolMaterial('平台返回 ACCOUNT_SET_AMBIGUOUS，请用户选择。')).toBe(false);
+    expect(looksLikeProtocolMaterial('')).toBe(false);
+  });
+
+  it('F4.2 计划模式有执行 + 模型复读步骤工具结果：不外发，宿主步骤事实汇总顶上', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      // 模型停在工具结果上没再说话：把内部协议材料（recorded/step/next 字段齐全）原样当回复
+      { text: '{"recorded":"delegate","step":"第 1/2 步","stepIndex":1,"totalSteps":2,"taskId":"task_step","executed":true,"text":"…","outcome":"ok","next":"继续申报下一步：…（不要转述给用户）"}' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      // 这一步真跑过（execution 为真）——F4 残留的闸门漏洞正是"这种回合整体跳过出口校验"
+      platformTask: subagent(async () => ({
+        taskId: 'task_step',
+        text: '幻辰 202609 应收余额为 51 元。',
+        execution: { planId: 'plan_active', version: 1, calls: 1 },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_f4_plan_replay' }), '查幻辰和新兴五金的应收账款');
+
+    // 与零执行复读同一收尾家族：宿主持有的步骤事实机械汇总，协议 JSON 绝迹
+    expect(reply.text).toContain('本轮拆解的进度如下');
+    expect(reply.text).toContain('第 1/2 步');
+    expect(reply.text).not.toContain('recorded');
+    expect(reply.text).not.toContain('taskId');
+    expect(reply.text).not.toContain('不要转述给用户');
+    expect(executionLanguageFingerprints(reply.text)).toEqual([]);
+  });
+
+  it('F4.3 零执行 needs 回路复读：行为不变，needs 线索转达（回归）', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询某个对象的余额' } }] },
+      { text: '{"recorded":"delegate","text":"…","taskId":"task_needs","needs":{"missing":["查询对象"],"reason":"用户没有给出要查的对象"}}' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_needs',
+        text: '还缺少信息',
+        needs: { missing: ['查询对象'], reason: '用户没有给出要查的对象' },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_f4_needs_replay' }), '查一下余额');
+
+    expect(reply.text).toContain('还缺少：查询对象');
+    expect(reply.text).toContain('用户没有给出要查的对象');
+    expect(reply.text).not.toContain('recorded');
+  });
+
+  it('F4.4 零执行 + 复读申报回执：同样不外发协议 JSON（兜底 NO_EXECUTION_CLARIFICATION）', async () => {
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '{"recorded":"conversation"}' },
+    ]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_f4_conversation_echo' }), '你好');
+
+    expect(reply.text).toBe(NO_EXECUTION_CLARIFICATION);
+    expect(reply.text).not.toContain('recorded');
   });
 });

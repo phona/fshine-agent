@@ -93,6 +93,20 @@ const MAX_PLAN_ZERO_EXEC_STEPS = 3;
 const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 
 /**
+ * 内部协议材料的复读判据（D-020 / F4 残留）：模型把工具结果原样当回复时，那段文本是
+ * 宿主与模型之间的内部协议材料——纠错环交还（`{"recorded":"delegate",…}`）、计划步骤
+ * 交还（同族，recorded/step/next 是协议字段）、回合申报回执（`{"recorded":"conversation"}`）。
+ *
+ * 判据只有**形状**（开头是协议 JSON 且首字段是协议字段名），不嗅探内容：正常回复不可
+ * 能以这几个字段开头，误判面为零。导出供测试直接钉形状。
+ */
+export function looksLikeProtocolMaterial(text: string): boolean {
+  const trimmed = text.trimStart();
+  return trimmed.startsWith(NEEDS_TOOL_RESULT_PREFIX)
+    || /^\{\s*"(?:recorded|step|next)"\s*:/.test(trimmed);
+}
+
+/**
  * 业务 skill 注入系统提示词时的小标题（架构 §5）。只说明这份材料的性质与边界，
  * 不含任何规则本身——规则在部署方提供的文件里。
  */
@@ -842,13 +856,18 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 全部步骤都没执行时，"三步都没查成"这种如实汇总可以外发，但数字结论仍被挡下。
       const needsLoop = turn.needsRounds > 0;
       const planModeTurn = turn.planSteps > 0;
+      // F4 残留修复（D-020）：协议材料复读的形状判据**不依赖 execution**。此前的出口校验
+      // 以 `!turn.execution` 为总闸——回合真有过执行时，模型文本不经任何检测直接外发；
+      // 而 Stage 3 实测事故的形状恰恰是 execution 为真（检索类调用真的发生过、gateCalls>0）
+      // 而模型把内部协议材料原样当回复。判据只有形状（协议 JSON 的字段名），不嗅探内容。
+      const protocolReplay = looksLikeProtocolMaterial(result.text);
       let needsRelay = '';
       if (!turn.delegationFailed && !turn.execution && !turn.pendingPlan && !result.pendingPlan
         && (turn.intent?.kind === 'delegate' || needsLoop || planModeTurn)) {
         const explained = result.text.trim();
         // 模型可能把工具结果原样当回复（停在工具结果上没再说话）：那是内部协议材料
         // （任务编号、continueTaskId 字样），由宿主 composing 的转达文本顶上。
-        const serializedToolResult = explained.startsWith(NEEDS_TOOL_RESULT_PREFIX);
+        const serializedToolResult = protocolReplay;
         if ((needsLoop || planModeTurn) && !hasFinancialFigure(serializedToolResult ? '' : explained)) {
           // 复读时 explained 一律不可用：它是宿主与模型之间的内部协议材料（任务编号、
           // 「不要转述给用户」的 next 提示），只能由宿主自己重述事实。
@@ -885,11 +904,34 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           }
           // 子 Agent 可能诚实汇报了"平台要求凭单查询必须显式给出时间范围"这类能力边界——那是有用信息，
           // 不能整段丢掉。带上来源标注转发，用户既看到原因，也知道这不是实时查询结果。
-          if (explained && !hasFinancialFigure(explained)) {
+          if (explained && !hasFinancialFigure(explained) && !protocolReplay) {
             return await finishDirectReply(`${explained}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`, 'delegate_without_execution');
           }
           return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'delegate_without_execution');
         }
+      }
+
+      // F4 残留修复（D-020）：上面那块出口校验以 `!turn.execution` 为闸门，真有过执行的
+      // 回合模型文本一路直发。复读检测因此在这里独立补一道——**有执行也拦**：内部协议
+      // 材料（任务编号、"不要转述给用户"的 next 提示）绝不能外发。替换文本与零执行收尾
+      // 同一家族：计划模式用宿主持有的步骤事实汇总，其余用 needs 线索转达。
+      // 最后一级（NO_EXECUTION_CLARIFICATION）只可能被零执行形状走到——有执行 ⟹ 计划
+      // 模式（单步委派的执行结果以 ToolUserError 终止回合，模型根本说不上话）⟹ 步骤
+      // 事实非空；needs 与 execution 互斥（驱动侧 needs 只在零执行时派生）。所以这一级
+      // 不会把"执行过"说成"没执行"。
+      // 与澄清分支互斥：选择类澄清在上面已整体替换过回复，到不了这里。
+      if (protocolReplay && !needsRelay && !turn.delegationFailed && !turn.pendingPlan && !result.pendingPlan) {
+        const planFallback = planModeTurn ? renderPlanStepsRelayFallback(turn.planStepOutcomes) : '';
+        const needsText = turn.lastNeeds ? renderNeedsUserText(turn.lastNeeds, '') : '';
+        needsRelay = planFallback || needsText || NO_EXECUTION_CLARIFICATION;
+        console.warn(JSON.stringify({
+          event: 'execution_language_leak',
+          requestId: ctx.requestId,
+          reason: 'protocol_material_replay',
+          executed: Boolean(turn.execution),
+          ...(planModeTurn ? { planSteps: turn.planSteps } : {}),
+          ...(needsText ? { withNeeds: true } : {}),
+        }));
       }
 
       // 纠错环转达：宿主自己把"缺什么"说给用户（模型没产出可用文本时）。它优先于空回复兜底——

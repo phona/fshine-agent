@@ -1,7 +1,9 @@
 /**
  * 企微智能机器人渠道适配:官方 @wecom/aibot-node-sdk 的薄封装。
  * 连接/订阅/心跳/指数退避重连由官方 SDK 管理;本层只做:
- * env 校验、消息归一化(剥离 @机器人)、进度与最终回复的 stream 帧、2048 字节截断、图片上传回传。
+ * env 校验、消息归一化(剥离 @机器人)、进度/通知/最终回复的 stream 帧、回复字节上限
+ * 截断（MAX_REPLY_BYTES = 20480，见 text.ts——历史事故:W1 曾把它写成 2048，改值前先核
+ * SDK README）、图片上传回传。
  */
 import { randomUUID } from 'node:crypto';
 import { WSClient } from '@wecom/aibot-node-sdk';
@@ -13,7 +15,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
-import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply, truncateUtf8 } from './text';
+import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
 
 const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
@@ -157,7 +159,21 @@ export class WecomBotChannel implements ChannelAdapter {
     };
     const notice: NoticeFn = async (text) => {
       try {
-        await client.replyStream(frame, streamId, truncateUtf8(text, MAX_REPLY_BYTES), false);
+        // 计划通知是三个出口里最可能超长的一个：平台 noticeText 由账套/期间/客户/科目
+        // 多个集合 join 而成、无条数上限（17dz plan.js 的 scope 摘要）。与最终回复同一
+        // 纪律——超限时**看得见地**截断（带标记）+ 记守夜事件（D-021：cef97c9 只改了
+        // final 一条路，notice 还在用无声硬切，用户拿到半句话而不自知）。
+        const bounded = truncateReply(text);
+        if (bounded.truncated) {
+          console.warn(JSON.stringify({
+            event: 'wecom_reply_truncated',
+            req_id: reqId,
+            frame: 'notice',
+            bytes: Buffer.byteLength(text, 'utf8'),
+            limit: MAX_REPLY_BYTES,
+          }));
+        }
+        await client.replyStream(frame, streamId, bounded.text, false);
       } catch (error) {
         console.error(JSON.stringify({
           event: 'wecom_notice_fail',
@@ -193,6 +209,7 @@ export class WecomBotChannel implements ChannelAdapter {
         console.warn(JSON.stringify({
           event: 'wecom_reply_truncated',
           req_id: reqId,
+          frame: 'final',
           bytes: Buffer.byteLength(rich.text, 'utf8'),
           limit: MAX_REPLY_BYTES,
         }));
