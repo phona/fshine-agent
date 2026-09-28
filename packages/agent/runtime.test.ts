@@ -239,6 +239,36 @@ describe('createTaxAgentRuntime', () => {
     expect(transcript).toContain('刚才查到 61000 元。');
   });
 
+  it('R10 总结轮也注入执行台账：多账套会话的总结不塌缩成最后一个（D-071）', async () => {
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '今天查了新兴五金和幻辰财税两个账套。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      // 跨三个账套的长会话底账：时间正序，最后一条是幻辰财税
+      platformTasks: factsTasks([
+        { taskId: 't1', parentSessionId: 'sess_1', principalId: 'wecom:user_a', workerMessages: [], createdAt: '2026-09-26T10:31:00.000Z', updatedAt: '2026-09-26T10:31:00.000Z', accountSet: '新兴五金', period: '202609', label: '查应收账款余额', outcome: 'done', resultText: '新兴五金 202609 应收余额 51 元。' },
+        { taskId: 't2', parentSessionId: 'sess_1', principalId: 'wecom:user_a', workerMessages: [], createdAt: '2026-09-26T10:35:00.000Z', updatedAt: '2026-09-26T10:35:00.000Z', accountSet: '新兴建材', period: '202607', label: '查应收账款余额', outcome: 'done', resultText: '新兴建材 202607 应收余额 20 元。' },
+        { taskId: 't3', parentSessionId: 'sess_1', principalId: 'wecom:user_a', workerMessages: [], createdAt: '2026-09-26T10:40:00.000Z', updatedAt: '2026-09-26T10:40:00.000Z', accountSet: '幻辰财税', period: '202606', label: '查已存档凭证', outcome: 'done', resultText: '幻辰财税 202606 应收余额 61000 元。' },
+      ]),
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_summary_cue' }), '总结一下我们今天查了些什么');
+
+    const rendered = JSON.stringify(inputs[0]?.messages);
+    // "总结"命中召回线索 → 台账在场，三个账套的条目一条不落（塌缩形状正是只有最后一条）
+    expect(rendered).toContain(EXECUTION_FACTS_MARKER);
+    expect(rendered).toContain('新兴五金');
+    expect(rendered).toContain('新兴建材');
+    expect(rendered).toContain('幻辰财税');
+    // 注入内容只含机械事实：结构化条目 + 结果原文 + 纪律头，没有解释与排名
+    expect(rendered).toContain('只能依据这些条目陈述');
+    expect(rendered).not.toMatch(/最高|最多|建议/u);
+  });
+
   // ── P1 收尾兜底：方案已批准但查询没有执行 ────────────────────────────
   // 2026-09-26 真实平台实测：方案已批准、计划通知已送达用户，worker 却零平台调用就结束
   // 回合。那时的真实状态是"批准了没执行"——缺的是执行，不是用户早就给过的查询范围。
@@ -1069,11 +1099,17 @@ describe('createTaxAgentRuntime', () => {
     });
     await runtime.handleTurn(makeCtx(), '继续');
 
-    // 旧财务结论仍可读，但被明确标注为历史资料
-    expect(observed).toContain('不得作为本轮实时结果引用');
+    // 旧结论仍可读，但被明确标注为历史资料
+    // 禁止面（D-070）：用户没要求回顾时，不得把历史结论当成本轮实时查询结果主动呈现
+    expect(observed).toContain('不得把它们当成本轮实时查询结果主动呈现');
+    // 放开面：用户明确要求召回时可以复述历史查询结果，但必须带框定
+    expect(observed).toContain('可以复述这些历史查询结果');
+    expect(observed).toContain('本会话早前查询的结果');
+    expect(observed).toContain('不是本轮实时查询');
     expect(observed).toContain('旧答复：幻辰 202609 应收余额为 42 元。');
     // 说明只进模型上下文，不随转录持久化（否则会逐轮叠加）
-    expect(JSON.stringify(sessions.peek('sess_1')?.state)).not.toContain('不得作为本轮实时结果引用');
+    expect(JSON.stringify(sessions.peek('sess_1')?.state)).not.toContain('不得把它们当成本轮实时查询结果主动呈现');
+    expect(JSON.stringify(sessions.peek('sess_1')?.state)).not.toContain('可以复述这些历史查询结果');
   });
 
   it('appends the exact user event before running the model and preserves it when the driver throws', async () => {

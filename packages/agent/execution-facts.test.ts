@@ -151,6 +151,51 @@ describe('召回事实注入：执行台账（platform_tasks 结构化事实）'
     expect(facts).toBeNull();
   });
 
+  // D-071：总结轮也是召回轮。C1 第 20 轮（20 轮跨三个账套）与真实平台 X8 的总结都塌缩成
+  // 最后一个账套/期间——总结词不在线索表里，模型从转录自由回忆，而转录里"最近"的恰恰是
+  // 最后那一件事。修法是把"总结/汇总/回顾/梳理"收进线索表（reference-evidence.ts）。
+  it('总结/汇总/回顾/梳理类消息也是召回线索：注入执行台账（D-071 总结塌缩）', async () => {
+    for (const summary of ['总结一下我们今天查了些什么', '汇总一下今天查了什么', '回顾下之前的查询', '梳理一下这次查了哪些']) {
+      const facts = await collectExecutionFacts({
+        platformTasks: fakeTasks([
+          task({ taskId: 't1', accountSet: '新兴五金', period: '202609', label: '查应收账款余额', outcome: 'done', resultText: '新兴五金 202609 应收余额 51 元。' }),
+          task({ taskId: 't2', createdAt: '2026-09-26T10:40:00.000Z', accountSet: '幻辰财税', period: '202606', label: '查已存档凭证', outcome: 'done', resultText: '幻辰财税 202606 应收余额 61000 元。' }),
+        ]),
+        ...SCOPE,
+        userMessage: summary,
+      });
+      // 总结轮拿到底账：两个账套的条目都在，不会被塌缩成最后一个
+      expect(facts, summary).not.toBeNull();
+      expect(entries(facts!.text)).toHaveLength(2);
+      expect(facts!.text).toContain('新兴五金');
+      expect(facts!.text).toContain('幻辰财税');
+    }
+  });
+
+  it('总结轮注入的台账只含机械事实：结构化条目 + 结果原文，无解释无排名（防误扩）', async () => {
+    const facts = await collectExecutionFacts({
+      platformTasks: fakeTasks([
+        task({ taskId: 't1', accountSet: '新兴五金', period: '202609', label: '查应收账款余额', outcome: 'done', resultText: '新兴五金 202609 应收余额 51 元。' }),
+        task({ taskId: 't2', createdAt: '2026-09-26T10:40:00.000Z', accountSet: '幻辰财税', period: '202606', label: '查已存档凭证', outcome: 'done', resultText: '幻辰财税 202606 应收余额 61000 元。' }),
+      ]),
+      ...SCOPE,
+      userMessage: '总结一下我们今天查了些什么',
+    });
+
+    // ① 形态是机械条目：时间｜对象 时间窗 平台label → 结局｜原文，一条目一次委派
+    const lines = entries(facts!.text);
+    expect(lines[0]).toContain('2026-09-26 10:31｜新兴五金 202609 查应收账款余额 → done');
+    expect(lines[1]).toContain('2026-09-26 10:40｜幻辰财税 202606 查已存档凭证 → done');
+    // ② 数值只能来自结果原文（结构化条目管归因，不管数值）
+    expect(lines[0]).toContain('51 元');
+    expect(lines[1]).toContain('61000 元');
+    // ③ 纪律头不变：只依据条目陈述、不得混列、没有的结论不得填充
+    expect(facts!.text).toContain('只能依据这些条目陈述');
+    expect(facts!.text).toContain('不得把不同条目混称为一次查询');
+    // ④ 比较与解释仍归模型：材料里不出现"最高/最多/最"这类排名词，也不出现建议
+    expect(facts!.text).not.toMatch(/最高|最多|最[好差]|建议|应该/u);
+  });
+
   it('没有任何可渲染记录时返回 null（空库 / 只有空原文的旧记录）', async () => {
     expect(await collectExecutionFacts({ platformTasks: fakeTasks([]), ...SCOPE, userMessage: RECALL })).toBeNull();
     expect(await collectExecutionFacts({

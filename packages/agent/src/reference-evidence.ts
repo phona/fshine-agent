@@ -12,8 +12,25 @@
  */
 import type { ConversationEventRecord, ConversationLogRepo } from '@fshine/contracts';
 
-/** 指代/回溯线索词：命中才检索，避免无谓注入。 */
-const REFERENCE_CUE_RE = /这个|那个|它|刚才|上次|之前(?:说|讲|提)过|同上|前述/u;
+/**
+ * 指代/回溯线索词：命中才检索，避免无谓注入。
+ *
+ * 为什么收"总结/汇总/回顾/梳理"这一类（D-071）：2026-09-28 长会话实测里，探针 C1 第 20 轮
+ * （20 轮跨三个不同对象）与真实平台 X8（一个回合里做了 6 件事）的总结都塌缩成最后一个
+ * 对象/时间窗——总结词不在线索表里，召回轮拿不到宿主持有的执行底账，模型只能从转录自由
+ * 回忆，而转录里"最近"的恰恰是最后那一件事。总结轮是召回轮的一种：用户要的是"本会话迄今
+ * 发生过什么"的机械清单，不是最后一条的放大镜。
+ *
+ * 两个消费者共用这把尺，加词对两者同时生效——**这是想要的**：总结轮既该有执行台账
+ * （execution-facts，管"真实发生过哪些执行"的归因），也该有指代证据（本文件，管"这个/
+ * 刚才指的是哪个实体"的消解）。两者都只机械陈述、都不扩大本轮范围（见各自文件头的铁律），
+ * 注入面随词表扩大而变的是"哪些轮次拿到底账"，不是底账的内容口径。
+ *
+ * 防误扩的边界：词表只收"用户在要一份历史清单"的形状，不收"用户在新查询里顺带提到
+ * 这些字"——真出现了，多注入的也只是本会话真实执行过的机械条目（断言见
+ * execution-facts.test.ts：注入内容只有结构化条目与结果原文，没有解释与排名）。
+ */
+const REFERENCE_CUE_RE = /这个|那个|它|刚才|上次|之前(?:说|讲|提)过|同上|前述|总结|汇总|回顾|梳理/u;
 /** replace 专用副本：非全局正则只替换第一个命中，会把"刚才/那个"漏成半个。 */
 const REFERENCE_CUE_RE_GLOBAL = new RegExp(REFERENCE_CUE_RE.source, 'gu');
 
@@ -33,7 +50,7 @@ export interface ReferenceEvidence {
   truncated: boolean;
 }
 
-/** 当前消息是否在使用指代/回溯，需要宿主主动检索证据。 */
+/** 当前消息是否在使用指代/回溯/总结，需要宿主主动检索证据。 */
 export function looksLikeReferenceCue(userMessage: string): boolean {
   return REFERENCE_CUE_RE.test(userMessage);
 }

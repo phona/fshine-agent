@@ -101,11 +101,21 @@ describe('主动回溯：宿主申报前注入指代证据', () => {
     expect(looksLikeReferenceCue('这个账套 202608 呢？')).toBe(true);
     expect(looksLikeReferenceCue('它 202609 呢？')).toBe(true);
     expect(looksLikeReferenceCue('刚才查的是哪个账套？')).toBe(true);
+    // 总结/汇总/回顾/梳理类也是召回线索（D-071）：总结轮要的是"本会话迄今发生过什么"的
+    // 机械清单，不是最后一条的放大镜——不收这些词，召回轮就拿不到执行底账。
+    expect(looksLikeReferenceCue('总结一下我们今天查了些什么')).toBe(true);
+    expect(looksLikeReferenceCue('汇总一下今天查了什么')).toBe(true);
+    expect(looksLikeReferenceCue('回顾下之前的查询')).toBe(true);
+    expect(looksLikeReferenceCue('梳理一下这次查了哪些')).toBe(true);
+    // 反例：新查询（哪怕带着历史会话里出现过的词）不是召回线索
     expect(looksLikeReferenceCue('查一下幻辰财税的应收账款')).toBe(false);
+    expect(looksLikeReferenceCue('帮我查一下猫一杯的应收账款还有多少')).toBe(false);
 
     expect(keywordsFrom('这个账套 202608 呢？')).toEqual(['账套', '202608']);
     expect(keywordsFrom('刚才我让你查的那三个期间，哪个余额最高？')).toEqual(['我让你查的那三个期间', '哪个余额最高']);
     // 上限 3 个关键词
     expect(keywordsFrom('那个账套 期间 科目 客户 摘要 金额')).toHaveLength(3);
+    // 线索词被剥掉后不占关键词位：总结轮的检索词是消息里剩下的实词
+    expect(keywordsFrom('总结一下我们今天查了些什么')).toEqual(['一下我们今天查了些什么']);
   });
 });
