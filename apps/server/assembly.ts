@@ -23,6 +23,7 @@ import {
   ensureMockStatePath,
   isCommitEnabled,
   isPlatformMock,
+  loadOperationArgSpecs,
   type CandidateExtractor,
   type ContextTaskRunner,
   type TurnDriver,
@@ -143,6 +144,10 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   // 计划确认门接线收敛到 apps/server/plan-confirmation-route.ts 的工厂（D-013）：
   // assembly 与 scripts/ask.ts 共用同一份装配，不再逐字复刻。
   const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret });
+  // 平台 args 规格（任务 1 会话实体的查表依据）：与 worker 驱动同一份平台数据源，一次性
+  // 派生后显式传表（operation-labels 的"纯数据 + 显式传表"纪律——调用方持有 Map 并注入）。
+  // 派生失败/未配平台根 → 空表 → runtime 不提取得会话实体（安全缺省，判定回退三个来源）。
+  const operationArgSpecs = platformRoot ? await loadOperationArgSpecs(platformRoot) : undefined;
   const runtime = createTaxAgentRuntime({
     driver,
     // Context State extraction is a separate tool-free background turn using the same provider/model.
@@ -159,6 +164,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     platformTask,
     // 召回事实台账的结构化事实源（D-065）：存储未启用时不注入（静默降级）。
     ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
+    // 会话实体提取的规格查表依据（任务 1）：空表/未配平台根时不注入（安全缺省）。
+    ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgSpecs } : {}),
     // 任务计划状态（Phase 6）：存储未启用时缺省，长任务拆解照常、只是没有进度投影。
     ...(taskPlans ? { taskPlans } : {}),
     // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。

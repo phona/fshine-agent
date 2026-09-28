@@ -18,7 +18,7 @@ import {
   toolUserErrorFor,
 } from './src/error-codes';
 import { ToolUserError } from './src/driver';
-import { SELECTION_CLARIFICATION_CODES } from './src/platform-contract';
+import { PLATFORM_OPERATIONS, SELECTION_CLARIFICATION_CODES } from './src/platform-contract';
 import {
   DELEGATION_AUTH_FAILURE,
   DELEGATION_CANCELLED,
@@ -107,6 +107,19 @@ describe('fshine 错误码表（错误即数据）', () => {
     for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED']) {
       expect(messageFor(code), code).not.toMatch(business);
     }
+  });
+
+  it('ENTITY_OUT_OF_SCOPE 的 correctForm 带正路径：名称检索指引 + 会话既有实体有效（任务 1/2）', () => {
+    // 标定修复（2026-09-27 实体门事故）：负指令之外必须给被拦方（worker）可执行的自愈
+    // 动作——先名称检索让平台响应携带规范名再提交；本会话早前用户亲自提供/确认过的实体
+    // 同样是合法来源（第四来源 sessionEntities）。检索操作名取平台契约常量，不硬编码。
+    const rendered = messageFor('ENTITY_OUT_OF_SCOPE', '某个越权参数');
+    expect(rendered).toContain(PLATFORM_OPERATIONS.financeSearchAccountSets);
+    expect(rendered).toContain('名称检索');
+    expect(rendered).toContain('平台响应');
+    expect(rendered).toContain('同样有效');
+    // expected 与四来源并集一致（标定描述不能说成三个来源）
+    expect(rendered).toContain('本会话已确立实体');
   });
 });
 

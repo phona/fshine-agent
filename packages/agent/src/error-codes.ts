@@ -32,7 +32,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { GATEWAY_INVOCATION } from './platform-contract';
+import { GATEWAY_INVOCATION, PLATFORM_OPERATIONS } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -134,9 +134,16 @@ const TABLE: Record<string, CodeEntry> = {
   },
   // 计划实体来源校验（宿主侧 C20）的拒绝原因：实际 = 校验器点名的越权参数，
   // 由 pi-coding-driver 以 PLAN DECLINED 协议前缀交付 worker。
+  //
+  // correctForm 的正路径（任务 1 补）：原来只有负指令（"严格按本轮请求的范围执行，或向
+  // 用户澄清"），被拦方（worker）没有可执行的自愈动作——2026-09-27 事故里它反复重提
+  // 同一请求直到收敛上限。正路径两条：① 先执行一次名称检索让平台响应携带规范名，再按
+  // 响应里的名字提交（"名称检索拿唯一候选 → 按候选名查"天然放行正是这条）；② 本会话
+  // 早前用户亲自提供/确认过的实体同样是合法来源（第四来源 sessionEntities，见
+  // turn-contract.ts）。检索操作名取平台契约常量（PLATFORM_OPERATIONS，L2 消费不抄写）。
   ENTITY_OUT_OF_SCOPE: {
-    expected: '计划的每个参数都能在当前请求、检索证据或平台响应里逐字找到',
-    correctForm: '严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls',
+    expected: '计划的每个参数都能在当前请求、检索证据、平台响应或本会话已确立实体里逐字找到',
+    correctForm: `严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索（如 ${PLATFORM_OPERATIONS.financeSearchAccountSets}）使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效`,
   },
   // 同任务内计划被连续拒绝的收敛（PLAN STOP）：实际 = 已拒绝次数。
   DECLINED_PLAN_LIMIT: {

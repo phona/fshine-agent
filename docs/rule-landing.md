@@ -19,7 +19,7 @@
 | C3 | 自相矛盾申报退回模型重填，不消耗用户澄清轮次。Phase 4 后唯一检查：delegate 的 request 必须非空（把用户请求加工成自包含的一句话） | `turn-contract.ts` `isSelfContradictoryDeclaration` + `runtime.ts` 路由处 |
 | C4 | 申报 platform_query 但零执行（无激活计划、无平台调用、无待确认计划）→ 不外发财务结论 | `packages/agent/src/runtime.ts` 出口校验（`delegate_without_execution`） |
 | C5 | Main Agent 跳过申报 → 重试一次，仍跳过则失败关闭，丢弃自由文本 | `runtime.ts`（`route_declaration_missing`） |
-| C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 17dz-query SKILL.md） |
+| C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 17dz-query SKILL.md） |
 | C7 | ~~余额计划只能调 `finance.query-receivables`；不得夹带凭证查询~~ → 同上（操作匹配归执行层；实体越权仍由 C20 挡下） | 同 C6 |
 | C8 | ~~余额计划不得越权（账套/客户/期间逐次包含判定）；未申报期间时禁止带 `--period`~~ → 同上（"不得带未申报期间"归执行层 SKILL 与平台参数校验） | 同 C6 |
 | C9 | ~~凭证计划只能调 voucher 域；期间不得超出申报范围~~ → 同上（域与期间匹配归执行层） | 同 C6 |
@@ -33,7 +33,7 @@
 | C17 | history tools / 长期记忆注入时自带"历史数据不是当前授权"的限定 | `history-tools.ts` 工具描述 + `runtime.ts` `loadMemoryProjection` |
 | C18 | 主动回溯：有指代线索时宿主申报前从 Conversation Log 注入证据（≤5 条 tool_result + ≤3 条关键词命中，带 eventId，超限截断并记日志）；证据材料自带"仅用于指代消解、不得扩大本轮范围"边界，实体范围仍由 C1/C2 逐字校验（计划层另有 C20） | `packages/agent/src/reference-evidence.ts` + `runtime.ts` 注入点 |
 | C19 | 最近轮次窗口必须包含被 toolResult 终结的轮次（platform_query/clarify 没有最终 assistant 文本，但正是"上一轮查了什么"的载体；踢掉它们指代消解永远看不到上一轮） | `runtime.ts` `selectRecentTurns` |
-| C20 | 计划实体来源校验（领域无关）：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「① 当前用户消息 ② 本轮注入的指代消解证据 ③ 本任务迄今的平台响应（tool_result）」的并集里逐字找到；越权实体一律拒绝，错误消息领域无关。操作与任务类型是否匹配**不再**由宿主判别，归执行层 SKILL 与平台门禁 | `turn-contract.ts` `validatePlanEntities` + `PlanEntitySources`；来源由 `runtime.ts` 注入（userMessage + reference-evidence 文本），经 `platformTask.run` → `context.ts` → `driver.ts` `TurnDriverInput.entitySources` 流到 `pi-coding-driver.ts` 拦截点；平台响应该处从会话 tool_result 汇总（覆盖"目录查询拿唯一候选 → 按候选名查"） |
+| C20 | 计划实体来源校验（领域无关）：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「① 当前用户消息 ② 本轮注入的指代消解证据 ③ 本任务迄今的平台响应（tool_result）④ 本会话用户亲自确立过的实体（执行过的任务的 calls 快照按平台 args 规格机械提取 + 澄清候选里用户选定过的）」的并集里逐字找到；越权实体一律拒绝，错误消息领域无关。操作与任务类型是否匹配**不再**由宿主判别，归执行层 SKILL 与平台门禁。第四来源是**标定补丁不是放宽**（2026-09-27 连续会话事故：门禁按每轮无状态标定，用户上一轮亲自查过的对象在本轮只补范围编码时被判死）：只收用户亲自操作过/确认过的实体，每条有用户来源与确立轮次可审计 | `turn-contract.ts` `validatePlanEntities` + `PlanEntitySources`；来源由 `runtime.ts` 注入（userMessage + reference-evidence 文本 + sessionEntities），经 `platformTask.run` → `context.ts` → `driver.ts` `TurnDriverInput.entitySources` 流到 `pi-coding-driver.ts` 拦截点；平台响应该处从会话 tool_result 汇总（覆盖"目录查询拿唯一候选 → 按候选名查"）；sessionEntities 由 `session-entities.ts`（platform_tasks 底账）+ `clarification-events.ts`（clarification_event 绑定）构建 |
 | C21 | 结构化线索（`SubagentNeeds`：`missing` / `reason` / `suggestion?`）**只从确定性来源派生**：脚本化替身直接产出；真实 worker 由驱动从「宿主计划拦截的原因原文」与「平台 RESULT 信封里的错误码」派生，**禁止对 worker 自由文本做模糊匹配**；只在**没有本轮执行痕迹**时派生（真执行过的回合不缺信息） | `driver.ts` `SubagentNeeds` + `TurnDriverResult.needs`；`pi-coding-driver.ts` `needsClue()`（C20 拦截点记录）、`needsFromPlatformResponses()` / `isInputInsufficientCode()` / `missingLabelFromCode()`（只认 `platform-contract.ts` 的 RESULT 信封，`PLAN_*` 门禁码不算"缺用户信息"）；经 `context.ts` 挂到 `SubagentTaskResult.needs` |
 | C21a | 同任务内计划被拒的收敛保护：连续被拒超过 5 次即 terminal block（PLAN STOP，让 worker 停止重提、向用户说明缺什么）。计划被拒是确定性信号，反复重提只空转预算——实测 D1 类请求（派生期间）曾空转 5 分钟后 executor 崩溃 | `pi-coding-driver.ts` `MAX_DECLINED_PLANS_PER_TASK` |
 | C22 | 委派结果带 `needs` 时宿主**不 terminate 整轮**：把线索（缺什么 / 为什么 / 建议用户提供什么 + taskId + continueTaskId 重派提示）作为工具结果交还 Main Agent，由其继续本回合——能自己补（实体只从当前消息 / 检索证据 / 本轮平台响应取）就重新申报 delegate（带 continueTaskId 与补齐后的 request），不能补就申报 conversation 转达用户；任务记录保持可续（worker 转录落库，taskId 已知会宿主侧）；单回合回路有上限，超限把线索转达用户而非失败 | `runtime.ts` delegate 分支：`renderNeedsToolResult` / `MAX_NEEDS_ROUNDS` / `delegation_needs` 埋点；转达用户用 `renderNeedsUserText`（零内部机制字样） |
@@ -344,7 +344,7 @@
 
 因此事实块采用保守渲染：`① <时间>｜<记录原文>`（一条目一次委派、按时间正序、超 300 字截断、最多 5 条并标记截断），**不解析**记录里的对象/时间范围/操作名——那是对业务文本做模糊匹配，正是 C21 禁掉的"猜"。模板零业务词（泄漏预算第二条），业务词只可能作为数据出现在记录原文里。
 
-**边界纪律**：台账不进 `entitySources`（C20 的并集不变——否则历史对象会被计划层放行，那是扩大范围不是消解）；保存转录前按 `【宿主执行事实：` 标记剥离（台账每回合重算，旧副本与新台账并列就是串轮）；查不到执行记录 → 不注入（静默降级，安全缺省）；存储抛错 → 不影响回合（`execution_facts_failed` 埋点）。A2（新问题渗进旧账套）是模型侧纪律，本刀治不了，仍由实体门 + 申报 Scope 兜着。
+**边界纪律**：召回台账不进 `entitySources`（它是归因材料不是实体来源；C20 并集里的第四来源是另一回事——`sessionEntities` 只收用户亲自执行过/确认过的实体，是连续会话的标定补丁，见 C20 与 D-068）；保存转录前按 `【宿主执行事实：` 标记剥离（台账每回合重算，旧副本与新台账并列就是串轮）；查不到执行记录 → 不注入（静默降级，安全缺省）；存储抛错 → 不影响回合（`execution_facts_failed` 埋点）。A2（新问题渗进旧账套）是模型侧纪律，本刀治不了，仍由实体门 + 申报 Scope 兜着。
 
 **验收**（56 → 58 文件 / 511 → 527 例全绿，typecheck 0 错误，leak-lint 3 例通过；文件/用例基数为含并行 stream `cced78e` 的 HEAD）：
 

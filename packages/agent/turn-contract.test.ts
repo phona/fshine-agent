@@ -187,7 +187,7 @@ describe('计划实体来源校验：三来源逐字包含', () => {
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金集团'] }],
       { currentMessage: '只查有没有胜利这个帐套', platformResponses: [candidateResponse] },
-    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    )).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
   });
 
   it('越权实体（三个来源里都没有）被拒，错误消息领域无关', () => {
@@ -199,7 +199,7 @@ describe('计划实体来源校验：三来源逐字包含', () => {
       { currentMessage: '查一下幻辰财税账套的应收' },
     );
     expect(error).toContain('猫一杯');
-    expect(error).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    expect(error).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
     // 报第一个越权值即可：worker 修正后重新提交完整 calls，逐次暴露
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] },
@@ -212,7 +212,7 @@ describe('计划实体来源校验：三来源逐字包含', () => {
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
       { currentMessage: '' },
-    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    )).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
   });
 
   it('计划校验只看实体来源，与申报契约的字段无关', () => {
@@ -239,6 +239,49 @@ describe('计划实体来源校验：三来源逐字包含', () => {
         currentMessage: '这个呢？',
         platformResponses: ['更早的响应：提到了新兴五金', '更近的响应：幻东 202609 余额 51 元'],
       },
+    )).toBeNull();
+  });
+
+  // ── 第四来源：本会话确立过的实体（任务 1 标定修复，2026-09-27 连续会话事故）────────
+  //
+  // 事故形状：用户"查完某个对象"之后只补一个范围编码（本轮消息里没有对象名）——三个来源
+  // 全空，查询被门禁判死。第四来源把标定从"单轮"修正为"本会话用户亲自确立过的"。
+
+  it('sessionEntities 里的实体放行：事故形状（本轮只有范围编码，对象在早前回合执行过）', () => {
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202609'] }],
+      { currentMessage: '202609', sessionEntities: ['幻辰财税', '202606'] },
+    )).toBeNull();
+  });
+
+  it('防幻觉功能不变：sessionEntities 之外的实体照样被拒（幻觉名进不了任何来源）', () => {
+    // 模型幻觉出一个用户从未操作过的对象名：即使本会话确立过别的实体，也一律拒绝
+    const error = validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻觉出来的对象', '--period', '202609'] }],
+      { currentMessage: '202609', sessionEntities: ['幻辰财税'] },
+    );
+    expect(error).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
+    expect(error).toContain('幻觉出来的对象');
+  });
+
+  it('sessionEntities 为空/未传时判定与从前一字不差（老路径不受影响）', () => {
+    const calls = [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }];
+    expect(validatePlanEntities(calls, { currentMessage: '查幻辰财税', sessionEntities: [] })).toBeNull();
+    expect(validatePlanEntities(calls, { currentMessage: '202609' })).toContain('未在当前请求');
+    expect(validatePlanEntities(calls, { currentMessage: '202609', sessionEntities: [] })).toContain('未在当前请求');
+  });
+
+  it('第四来源纳入条数上限：只保留最近确立的（haystack 是判定材料不是仓库）', () => {
+    const many = Array.from({ length: 45 }, (_, index) => `对象${index}`);
+    // 最后一个在截断窗口外 → 拒（上限 40，保留最近 40 个）
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '对象0'] }],
+      { currentMessage: '202609', sessionEntities: many },
+    )).toContain('未在当前请求');
+    // 最近的确立 → 放行
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '对象44'] }],
+      { currentMessage: '202609', sessionEntities: many },
     )).toBeNull();
   });
 });

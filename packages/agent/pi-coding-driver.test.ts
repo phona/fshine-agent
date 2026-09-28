@@ -215,7 +215,7 @@ describe('pi-coding-agent context worker', () => {
     });
 
     expect(verdict?.block).toBe(true);
-    expect(verdict?.reason).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    expect(verdict?.reason).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
     expect(calls).toEqual([['plan', 'current', '--task-id', 'task_scope']]);
     worker.session.dispose();
   });
@@ -326,7 +326,7 @@ describe('pi-coding-agent context worker', () => {
     expect(verdict?.block).toBe(true);
     // 原因原文就是事实：宿主确定性拦截的理由，交给 Main Agent 决定澄清还是重派
     expect(worker.needsClue()).toMatchObject({ missing: ['请求中未给出的对象'] });
-    expect(worker.needsClue()?.reason).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    expect(worker.needsClue()?.reason).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
     worker.session.dispose();
   });
 

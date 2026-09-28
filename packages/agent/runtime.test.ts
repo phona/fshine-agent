@@ -7,6 +7,7 @@ import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, F
 import { clarificationTextFor, toolUserErrorFor } from './src/error-codes';
 import { DELEGATION_AUTH_FAILURE } from './src/context';
 import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
+import { parseOperationArgSpecs } from './src/operation-labels';
 import type { PlanEntitySources } from './src/turn-contract';
 import { FakeSessionRepo } from './test-helpers';
 
@@ -1721,8 +1722,199 @@ describe('createTaxAgentRuntime', () => {
     expect(executionLanguageFingerprints(reply.text)).toEqual([]);
   });
 
-  // ── F4 残留修复（D-020）：有执行也拦协议材料复读 ───────────────────────────
+  // ── 会话实体：实体门禁第四来源的 runtime 接线（任务 1 标定修复）──────────────
   //
+  // 2026-09-27 真实企微通话事故：回合① 查询成功（platform_tasks 有记录）→ 回合③ 用户
+  // 只发期间编码 → 实体门拒绝（对象名不在本轮消息/证据/平台响应任一里）→ 查询死局。
+  // 修法：sessionEntities 第四来源——来源 A = 本会话执行过的任务的 calls 快照（平台
+  // args 规格机械提取），来源 B = 澄清候选里用户选定过的。下面钉接线与降级。
+
+  /** 与平台 `operation list --json` 同形的预置规格（节选，替身注入）。 */
+  const ARG_SPECS_STUB = parseOperationArgSpecs(JSON.stringify([
+    {
+      name: 'finance.query-receivables', command: 'query-receivables',
+      args: { positional: [], flags: [{ flag: '--query', required: true, style: 'name' }, { flag: '--period', required: false, style: 'code' }] },
+    },
+  ]));
+
+  /** 一条执行过的任务底账（calls 快照来自宿主自己解析的计划命令）。 */
+  function executedTask(): PlatformTaskRecord[] {
+    return [{
+      taskId: 'task_past', parentSessionId: 'sess_1', principalId: 'wecom:user_a', workerMessages: [],
+      createdAt: '2026-09-27T10:00:00.000Z', updatedAt: '2026-09-27T10:00:00.000Z',
+      outcome: 'done',
+      calls: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202606'] }],
+      resultText: '幻辰财税 202606 应收账款余额为 61000 元。',
+    }];
+  }
+
+  it('SE1 来源 A：本会话执行过的任务的 calls 快照进 sessionEntities（本轮只有范围编码也放行）', async () => {
+    let entitySources: PlanEntitySources | undefined;
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税 202609 的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        entitySources = args.entitySources;
+        return { taskId: 'task_live', text: '幻辰财税 202609 应收余额为 51 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+      platformTasks: factsTasks(executedTask()),
+      operationArgSpecs: ARG_SPECS_STUB,
+    });
+
+    // 事故形状：本轮消息只有期间编码，对象名在早前回合执行过
+    await runtime.handleTurn(makeCtx({ requestId: 'req_session_entities' }), '202609');
+
+    expect(entitySources?.currentMessage).toBe('202609');
+    expect(entitySources?.sessionEntities).toEqual(['幻辰财税', '202606']);
+    // 执行台账仍不进实体来源（归因材料不是实体来源；第四来源只收执行/确认过的）
+    expect(entitySources?.referenceEvidence ?? '').not.toContain('宿主执行事实');
+  });
+
+  it('SE2 来源 B：裸编号答复被宿主绑定到候选，selected 进 sessionEntities 且注入模型上下文', async () => {
+    const events: ConversationEventRecord[] = [
+      // 早前回合：宿主发出澄清（issued）+ 同回合的澄清问题（assistant，requestId 相同）
+      {
+        eventId: 'req_ask:clarification_issued', principalId: 'wecom:user_a', sessionId: 'sess_1',
+        kind: 'clarification_event', createdAt: '2026-09-27T10:00:00.000Z', requestId: 'req_ask',
+        content: JSON.stringify({ status: 'issued', code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'], requestId: 'req_ask' }),
+      },
+      {
+        eventId: 'req_ask:assistant', principalId: 'wecom:user_a', sessionId: 'sess_1',
+        kind: 'assistant_message', createdAt: '2026-09-27T10:00:01.000Z', requestId: 'req_ask',
+        content: '没有找到唯一匹配“幻辰”的对象。你要查哪个？',
+      },
+    ];
+    let entitySources: PlanEntitySources | undefined;
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税本期的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        entitySources = args.entitySources;
+        return { taskId: 'task_live', text: '幻辰财税本期应收余额为 86,000 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+      conversationLog: {
+        append: async (event) => { events.push(event); },
+        list: async (query) => events.filter((event) => event.principalId === query.principalId && event.sessionId === query.sessionId).slice(-query.limit),
+        search: async () => [],
+      },
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_answer' }), '1');
+
+    // 绑定落账：resolved 事件（selected 逐字来自候选，requestId 关联到 issued 那一回合）
+    const resolved = events.find((event) => event.eventId === 'req_answer:clarification_resolved');
+    expect(resolved?.kind).toBe('clarification_event');
+    expect(JSON.parse(resolved?.content ?? '{}')).toEqual({ status: 'resolved', selected: '幻辰财税', requestId: 'req_ask' });
+    // selected 进本轮实体来源（实体门因此放行"用户亲自选过的"）
+    expect(entitySources?.sessionEntities).toEqual(['幻辰财税']);
+    // 绑定结果注入模型上下文：裸编号不再由模型解释（实测：模型把"1"猜成范围编码）
+    expect(JSON.stringify(inputs[0]?.messages)).toContain('【宿主澄清绑定】用户从平台澄清的候选里选定了：幻辰财税');
+  });
+
+  it('SE3 非编号/非名称消息不误绑：无 resolved 事件、无 sessionEntities、无绑定注入', async () => {
+    const events: ConversationEventRecord[] = [
+      {
+        eventId: 'req_ask:clarification_issued', principalId: 'wecom:user_a', sessionId: 'sess_1',
+        kind: 'clarification_event', createdAt: '2026-09-27T10:00:00.000Z', requestId: 'req_ask',
+        content: JSON.stringify({ status: 'issued', code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'], requestId: 'req_ask' }),
+      },
+      {
+        eventId: 'req_ask:assistant', principalId: 'wecom:user_a', sessionId: 'sess_1',
+        kind: 'assistant_message', createdAt: '2026-09-27T10:00:01.000Z', requestId: 'req_ask',
+        content: '没有找到唯一匹配“幻辰”的对象。你要查哪个？',
+      },
+    ];
+    let entitySources: PlanEntitySources | undefined;
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税 202609 的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        entitySources = args.entitySources;
+        return { taskId: 'task_live', text: '幻辰财税 202609 应收余额为 51 元。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+      conversationLog: {
+        append: async (event) => { events.push(event); },
+        list: async (query) => events.filter((event) => event.principalId === query.principalId && event.sessionId === query.sessionId).slice(-query.limit),
+        search: async () => [],
+      },
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_full_sentence' }), '查一下幻辰财税 202609 的应收');
+
+    expect(events.some((event) => event.eventId === 'req_full_sentence:clarification_resolved')).toBe(false);
+    expect(entitySources?.sessionEntities).toBeUndefined();
+    expect(JSON.stringify(inputs[0]?.messages)).not.toContain('【宿主澄清绑定】');
+    // 实体在本轮消息里逐字出现：三个来源照旧放行（老路径一字不变）
+    expect(entitySources?.currentMessage).toBe('查一下幻辰财税 202609 的应收');
+  });
+
+  it('SE4 宿主发出澄清时落 issued 事件（两个收口路径同一模式）', async () => {
+    const events: ConversationEventRecord[] = [];
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_ambiguous', text: '技术报告：不应外发',
+        execution: { planId: 'plan_active', version: 2, calls: 1 },
+        clarification: QIANLONG_CLARIFICATION,
+      })),
+      conversationLog: {
+        append: async (event) => { events.push(event); },
+        list: async () => [],
+        search: async () => [],
+      },
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_ask' }), '查一下幻辰的应收账款');
+
+    const issued = events.find((event) => event.eventId === 'req_ask:clarification_issued');
+    expect(issued?.kind).toBe('clarification_event');
+    expect(JSON.parse(issued?.content ?? '{}')).toMatchObject({
+      status: 'issued', code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰',
+      candidates: ['幻辰财税', '幻辰实业有限公司'], requestId: 'req_ask',
+    });
+  });
+
+  it('SE5 规格缺失/底账不可用 → 不挂 sessionEntities（安全缺省，判定回退三个来源）', async () => {
+    let entitySources: PlanEntitySources | undefined;
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税的应收账款余额' } }] },
+      { text: '不应外发' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async (args) => {
+        entitySources = args.entitySources;
+        return { taskId: 'task_live', text: '完成。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+      // 有底账但没注入规格：规格拿不到 → 不提取得会话实体（宁缺勿猜）
+      platformTasks: factsTasks(executedTask()),
+    });
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_no_specs' }), '查一下幻辰财税的应收账款');
+
+    expect(entitySources?.sessionEntities).toBeUndefined();
+    expect(entitySources?.currentMessage).toBe('查一下幻辰财税的应收账款');
+  });
+
+  // ── F4 残留修复（D-020）：有执行也拦协议材料复读 ───────────────────────────
   // Stage 3 实测事故的形状：目录搜索真的发生过（execution 为真、gateCalls>0），模型却把
   // 信封/工具结果翻译成技术报告。此前的出口校验以 `!turn.execution` 为总闸，这类回合
   // 的模型文本一路直发。下面三例钉住"复读检测不依赖 execution"。

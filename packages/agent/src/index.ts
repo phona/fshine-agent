@@ -27,8 +27,12 @@ export {
 } from './pi-coding-driver';
 export {
   loadOperationLabels,
+  loadOperationArgSpecs,
   operationLabel,
   parseOperationLabels,
+  parseOperationArgSpecs,
+  type OperationArgsSpec,
+  type OperationArgsSpecs,
   type OperationLabels,
 } from './operation-labels';
 export {
@@ -156,6 +160,22 @@ export {
   type PlanEntitySources,
   type TurnDeclaration,
 } from './turn-contract';
+export {
+  collectSessionEntities,
+  mergeSessionEntities,
+  sessionEntitiesFromRecords,
+} from './session-entities';
+export {
+  CLARIFICATION_EVENT_KIND,
+  clarificationIssuedRecord,
+  clarificationResolvedRecord,
+  matchClarificationBinding,
+  parseClarificationEvent,
+  type ClarificationBinding,
+  type ClarificationEventPayload,
+  type ClarificationIssuedPayload,
+  type ClarificationResolvedPayload,
+} from './clarification-events';
 export {
   PLAN_STEP_PREFIX_PATTERN,
   parsePlanStep,

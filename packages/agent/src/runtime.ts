@@ -13,6 +13,14 @@ import { consolidateLongMemory, type CandidateExtractor } from './memory-consoli
 import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
 import { collectExecutionFacts, EXECUTION_FACTS_MARKER, type ExecutionFacts } from './execution-facts';
+import { collectSessionEntities, mergeSessionEntities } from './session-entities';
+import {
+  clarificationIssuedRecord,
+  clarificationResolvedRecord,
+  matchClarificationBinding,
+  type ClarificationBinding,
+} from './clarification-events';
+import type { OperationArgsSpecs } from './operation-labels';
 import { parsePlanStep, planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import type { PendingPlanConfirmation } from './plan-runtime';
 import type { SelectionClarification } from './platform-contract';
@@ -185,6 +193,14 @@ export interface TaxAgentRuntimeDeps {
   platformTask: ContextTaskRunner;
   /** 平台任务条目的结构化执行事实源（D-065：召回事实台账的列举入口，消费者=execution-facts）。 */
   platformTasks?: Pick<PlatformTaskRepo, 'listBySession'>;
+  /**
+   * 平台 args 规格（`operation list --json` 派生，assembly 注入；测试替身可直接传表）。
+   *
+   * 会话实体（任务 1 实体门禁第四来源的来源 A）的查表依据：按规格声明机械提取"执行过的
+   * 任务"的实体承载参数取值，零硬编码参数名。缺省 = 规格拿不到 → 不提取得会话实体
+   * （安全缺省，与 label/argStyles 派生同一纪律：没有规格就不提取）。
+   */
+  operationArgSpecs?: OperationArgsSpecs;
   /** Durable, append-only raw conversation log; separate from compactable Pi transcript. */
   conversationLog?: Pick<ConversationLogRepo, 'append' | 'search' | 'list'>;
   contextStates?: Pick<ContextStateRepo, 'get' | 'upsert'>;
@@ -322,6 +338,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         const clarificationReply = resumed.clarification
           ? composeClarificationReply(resumed.clarification, resumed.text)
           : '';
+        // 澄清事件（任务 1 来源 B）：宿主发出"选一个"的澄清时落 issued——下一回合的裸编号/
+        // 候选名答复才能被宿主机械绑定（selected 进实体来源，实体门放行选过的对象）。
+        if (resumed.clarification) await appendClarificationIssued(deps, ctx, resumed.clarification);
         // 零执行收尾：回复由宿主确定性给出（与 delegate 路径的收尾兜底同一族话术），
         // worker 留下的无数字说明按"子 Agent 说明 + 注脚"模式附上。
         const note = usefulWorkerNote(resumed.text);
@@ -386,6 +405,30 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       const planChoice = await matchPlanDisambiguationReply(deps, ctx, userMessage);
       if (planChoice) {
         console.info(JSON.stringify({ event: 'plan_disambiguation_matched', requestId: ctx.requestId, planId: planChoice.planId }));
+      }
+      // 澄清选择的宿主机械绑定（任务 1 来源 B）：用户的裸编号/候选名答复不再过模型解释
+      // （实测：模型把"1"猜成范围编码，查询带着猜错的范围执行）。与上面的多任务消歧
+      // **并列不合并**——那个解"继续哪个任务"，这个解"用户选了哪个候选"；绑定成功后
+      // selected 进本轮实体来源（实体门放行"用户亲自选过的"实体）。
+      let clarificationSelected: string | null = null;
+      if (deps.conversationLog) {
+        try {
+          const events = await deps.conversationLog.list({ principalId: ctx.principalId, sessionId: ctx.sessionId, limit: 20 });
+          const binding = matchClarificationBinding(events, userMessage);
+          if (binding) {
+            clarificationSelected = binding.selected;
+            await appendClarificationResolved(deps, ctx, binding);
+            console.info(JSON.stringify({
+              event: 'clarification_reply_bound',
+              requestId: ctx.requestId,
+              issuedRequestId: binding.requestId,
+              selectedLength: binding.selected.length,
+            }));
+          }
+        } catch (error) {
+          // 绑定失败不影响回合：退回"无绑定"，消息按普通回合进模型（与消歧匹配同族降级）
+          console.error(JSON.stringify({ event: 'clarification_binding_failed', sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+        }
       }
       let previousContextState: ContextState | undefined;
       if (deps.contextStates) {
@@ -473,6 +516,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         context.unshift({
           role: 'user',
           content: `【宿主消歧结果】用户从多个未完成任务中选择了：${planChoice.label}。要继续该任务就申报对应步骤的 delegate；宿主会把计划绑定到它。不要改绑其他未完成任务。`,
+          timestamp: Date.now(),
+        } as unknown as AgentMessage);
+      }
+      // 澄清绑定结果同样落在最头部：用户刚从平台澄清的候选里选定的对象，是本轮申报的
+      // 直接依据（宿主绑定，模型不再解释编号答复）。
+      if (clarificationSelected) {
+        context.unshift({
+          role: 'user',
+          content: `【宿主澄清绑定】用户从平台澄清的候选里选定了：${clarificationSelected}。本轮按它执行（把选定名称写进 request）；不得把用户的编号答复解释成其他内容，也不得改选其他候选。`,
           timestamp: Date.now(),
         } as unknown as AgentMessage);
       }
@@ -638,6 +690,26 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }
       }
 
+      /**
+       * 会话实体（任务 1 来源 A）：读 platform_tasks 底账按平台 args 规格提取。存储未注入
+       * / 抛错 / 规格缺失 → 空数组（安全缺省：判定回退到三个来源，不失败回合——与执行台账
+       * 不可用时的降级同族）。
+       */
+      async function collectSessionEntitiesSafely(): Promise<string[]> {
+        if (!deps.platformTasks) return [];
+        try {
+          return await collectSessionEntities({
+            platformTasks: deps.platformTasks,
+            ...(deps.operationArgSpecs ? { operationArgSpecs: deps.operationArgSpecs } : {}),
+            principalId: ctx.principalId,
+            sessionId: ctx.sessionId,
+          });
+        } catch (error) {
+          console.error(JSON.stringify({ event: 'session_entities_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+          return [];
+        }
+      }
+
       const turnDeadline = Date.now() + turnBudgetMs;
       const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
         systemPrompt,
@@ -673,12 +745,22 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
-              // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把三个来源交给
+              // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把四个来源交给
               // 执行侧做逐字包含判定。来源全部由宿主持有，不从申报契约字段推导——
               // 契约只描述"这一轮要做什么"，不承载任何实体。
+              //
+              // 第四来源（sessionEntities，任务 1 标定修复）：连续会话里用户亲自确立过
+              // 的实体。来源 A = 本会话执行过的任务的 calls 快照（平台 args 规格机械
+              // 提取，只取执行过的不取搜索结果候选）；来源 B = 本轮澄清绑定选定的候选。
+              // 两个来源都为空时不挂字段——老路径的判定一字不变。
+              const sessionEntities = mergeSessionEntities(
+                clarificationSelected ? [clarificationSelected] : [],
+                await collectSessionEntitiesSafely(),
+              );
               const entitySources: PlanEntitySources = {
                 currentMessage: userMessage,
                 ...(referenceEvidence ? { referenceEvidence: referenceEvidence.text } : {}),
+                ...(sessionEntities.length > 0 ? { sessionEntities } : {}),
               };
               // 计划模式（Phase 6，架构 §3 规划者/执行者）：request 带「第N/M步：」前缀
               // 就是多步拆解的一步。无前缀 = 单步，行为与从前完全一样（结果 terminate
@@ -775,6 +857,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               if (delegated.clarification) {
                 turn.clarification = delegated.clarification;
                 turn.clarificationReply = composeClarificationReply(delegated.clarification, delegated.text);
+                // 澄清事件（任务 1 来源 B）：宿主发出"选一个"的澄清时落 issued（与 resume
+                // 路径同一落点）。下一回合的裸编号/候选名答复经 matchClarificationBinding
+                // 机械绑定，selected 进本轮实体来源。
+                await appendClarificationIssued(deps, ctx, delegated.clarification);
                 // 出口校验不得覆盖宿主的澄清问题（与消歧问题/熔断汇总同一处理）
                 turn.delegationFailed = true;
                 console.info(JSON.stringify({
@@ -1117,6 +1203,36 @@ function scheduleMemoryConsolidation(
   void next.finally(() => {
     if (queues.get(principalId) === next) queues.delete(principalId);
   });
+}
+
+/**
+ * 澄清事件落账（任务 1 来源 B）：宿主发出/绑定澄清时写 Conversation Log。
+ * 失败只记日志——绑定机制因此降级（下一回合绑不上），不该让回合失败。
+ */
+async function appendClarificationIssued(
+  deps: TaxAgentRuntimeDeps,
+  ctx: TrustedContext,
+  clarification: { code: string; query: string; candidates: readonly string[] },
+): Promise<void> {
+  if (!deps.conversationLog) return;
+  try {
+    await deps.conversationLog.append(clarificationIssuedRecord(ctx, clarification));
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'clarification_event_append_failed', sessionId: ctx.sessionId, status: 'issued', error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+  }
+}
+
+async function appendClarificationResolved(
+  deps: TaxAgentRuntimeDeps,
+  ctx: TrustedContext,
+  binding: ClarificationBinding,
+): Promise<void> {
+  if (!deps.conversationLog) return;
+  try {
+    await deps.conversationLog.append(clarificationResolvedRecord(ctx, binding));
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'clarification_event_append_failed', sessionId: ctx.sessionId, status: 'resolved', error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+  }
 }
 
 async function appendUserEvent(deps: TaxAgentRuntimeDeps, ctx: TrustedContext, userMessage: string): Promise<void> {

@@ -744,6 +744,42 @@
 
 ---
 
+### D-066 · 账套读授权是软控制：名单模式下读路径仅提示词约束
+
+- **位置**：`fshine-agent/packages/agent/src/context.ts` 的 `workerSystemPrompt`——`allowedAccountSetIds.length > 0` 时只拼一句提示词（"调用者的应用层授权名单：…。不得查询或操作名单外对象。"）。同场景写路径是**硬门**：同文件 `finalizeProposal` 对 capability 不含 write、名单非空两种形态确定性拒绝（`proposal_declined`）。
+  核实：`grep -n "allowedAccountSetIds" packages/agent/src apps/server --include=*.ts | grep -v test` → 消费点只有三处：提示词拼接（软）、写路径拒绝（硬）、handler 的可信上下文装配（透传）。
+- **根因**：读路径授权从第一天就是提示词约束——Stage 1–3 单用户全量授权（`accountSetScope: 'all'`，e2e 亦如此）下"够用"，从未按多用户标定。提示词是**软控制**：模型压力下可绕过、可遗忘，名单外读操作当前没有任何代码级拦截。软控制与硬控制的差别不是强度是**性质**（见 architecture-laws.md「控制的标定审查」）。
+- **律法归属**：L4（授权边界硬门化家族；写路径已硬门化，读路径欠账）。
+- **闭环判据**：读路径硬门——宿主或平台对**读操作**的实体按 `allowedAccountSetIds` 做确定性校验，名单外即拒；测试钉"名单外主体的读计划被确定性拒绝（不是提示词劝阻）"。
+- **建议波次**：Stage 4 多用户上线前（激活条件 = principal 配 `accountSetScope` 名单模式且 `accountSetIds` 非空）。
+- **状态**：待办（watch：当前单用户全量授权，未激活；上线多用户前必须闭环）。
+
+### D-067 · 模型机制 confabulation：内部控制状态被编成"说明"交给用户
+
+- **位置**：`fshine-agent/packages/agent/src/runtime.ts` 的 `EXECUTION_LANGUAGE_FINGERPRINTS`（"内部控制词"一族：额度/配额/熔断/计划门/拒绝上限/重试上限）+ `context.ts` worker 提示词第②条 + 探针断言（`scripts/probe-real-agent.ts` 对歧义/not_found 用例）。
+  核实：`grep -rn "额度\|配额\|熔断" packages/agent/src --include=*.ts | grep -v test` → 指纹表一处、提示词两处（守卫自身，挂"警职执法/防御排除"）。
+- **根因**：真实通话里模型把宿主/平台的内部控制状态编成给用户的"说明"（"本次已用满平台的查询计划额度"）。禁词汇已修（2026-09-27 第三波：内部控制词进指纹表 + 提示词明令），但 confabulation 是**模型机制**不是词表问题——换个说法（"今天的查询次数到顶了"）机械防不住。当前防线 = 指纹形状 + 探针断言 + 人工守夜，没有确定性拦截（也不该有：合法数据答案与编造说明无法用形状完全区分）。
+- **律法归属**：L3（模型发音权：内部控制不上屏）+ L7（证据靠探针基线累积，不靠审计轮次）。
+- **闭环判据**：watch 项，**不设机械关闭判据**——新形态现形即登记（进指纹表或词表，附真实用例）；靠探针指纹 + 真实使用攒案，每条新说法都要有一次真实出处。
+- **建议波次**：持续（每波探针跑分时复核；Stage 4 前结合真实使用记录复审一次）。
+- **状态**：待办（watch）。
+
+### D-068 · 实体门按每轮无状态标定：连续会话里"用户亲自查过的对象"被误拦（已关）
+
+- **位置**：事故形状 = 2026-09-27 一次真实企微通话：回合① 用户查某对象 → 宿主发澄清（两个候选）→ 回合② 用户"1" → 查询执行成功（platform_tasks 有记录）→ 回合③ 用户只发期间编码 → `validatePlanEntities`（`packages/agent/src/turn-contract.ts`）拒绝：对象名不在「本轮消息 / 宿主证据 / 平台响应」任一里 → 查询死局，用户被要求重新报名字。
+  修复位置：`PlanEntitySources.sessionEntities`（第四来源）、`session-entities.ts`（来源 A：执行过的任务的 calls 快照按平台 args 规格机械提取）、`clarification-events.ts`（来源 B：`clarification_event` 的 issued/resolved 与裸编号/候选名绑定）、`runtime.ts` 接线、`error-codes.ts` 的 `ENTITY_OUT_OF_SCOPE.correctForm` 正路径。
+- **根因**：实体门按**每轮无状态**标定，产品是**连续会话**——标定范围错位。门禁防幻觉的功能必须保留（flash 模型真幻觉过对象名），错的是出处范围不是门本身。用户已明确否决"拆安全机制"方案：只做标定与接线，零拆除。
+- **律法归属**：L3（宿主持事实、模型不发音的同族守卫）+ architecture-laws.md「控制的标定审查」（现形案例）。
+- **闭环判据**（已达成）：
+  1. e2e 复刻事故形状：回合1 查询成功（task 落库）→ 回合2 用户只发期间编码（无线索词）→ 门禁放行、查询执行、回复不含"请确认账套"；
+  2. 单测：来源 A 提取（按规格 / 只取执行过的 / 规格缺失降级）、澄清 issued→resolved 绑定（纯数字 / 逐字名称 / 非编号不误绑 / 插回合失效）、haystack 合并去重；
+  3. 变异三项全红：sessionEntities 注入短路 → e2e 红；correctForm 删"检索"指引 → 钉措辞的测试红；裸编号绑定关掉 → 绑定测试红；
+  4. `npm test` 全量只增不减；platform-leak-lint 通过。
+- **建议波次**：本波（Wave 3 任务 1/2）。
+- **状态**：**已关**（证据 = 本波任务 1/2 的测试；边界随 D-065 已知边界：`--query` 检索词与位置参数一并进 haystack——门禁要回答"用户本会话亲自确立过吗"，检索词同样算数；计划模式跨步只保留末次 calls 快照）。
+
+---
+
 ## 附录 A · 审查范围圈法
 
 **圈法规则（两条同时满足）**：

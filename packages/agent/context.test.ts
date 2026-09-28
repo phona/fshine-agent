@@ -93,7 +93,7 @@ describe('17dz Pi subagent adapter', () => {
       [{ operation: 'finance.search-account-sets', args: ['--query', '胜利'] },
         { operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
       { currentMessage: '只查有没有胜利这个帐套' },
-    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    )).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
   });
 
   it('将宿主核验后的申报契约与实体来源传给子 Agent', async () => {
@@ -214,7 +214,7 @@ describe('17dz Pi subagent adapter', () => {
     expect(validatePlanEntities(
       [{ operation: 'voucher.query-saved', args: ['幻辰财税', '202601'] }],
       sources,
-    )).toContain('未在当前请求、检索证据或平台响应中出现的参数');
+    )).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
     // 平台自己返回的候选/期间 → 放行（search→query 场景，宿主不懂业务）
     expect(validatePlanEntities(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] }],

@@ -18,9 +18,9 @@ import type { DiscoveredTool } from '@fshine/contracts';
  * 1. **结构校验**（`parseTurnDeclaration` / `isSelfContradictoryDeclaration` /
  *    `reviewRouteDeclaration`）：填错退回模型重填，不消耗用户的澄清轮次。
  * 2. **范围守卫**（`validatePlanEntities`，架构 §2 第 9 条，Phase 3 已落地）：计划里每个
- *    实体都必须能在「① 当前消息 ② 本轮检索证据 ③ 本任务迄今的平台响应」的并集里逐字
- *    找到。三个来源全部由宿主持有并注入，**不从申报契约的字段推导**——所以契约瘦身之后
- *    它原样存活，范围守卫完全靠它。
+ *    实体都必须能在「① 当前消息 ② 本轮检索证据 ③ 本任务迄今的平台响应 ④ 本会话用户
+ *    亲自确立过的实体」的并集里逐字找到。来源全部由宿主持有并注入，**不从申报契约的
+ *    字段推导**——所以契约瘦身之后它原样存活，范围守卫完全靠它。
  */
 
 export type TurnDeclaration =
@@ -106,9 +106,9 @@ export function reviewRouteDeclaration(
 
 /**
  * 领域无关的实体来源集合（架构 §2 第 9 条）。宿主不懂业务，只做字符串包含：
- * 计划里每个实体都必须能在三个来源的并集里逐字找到。
+ * 计划里每个实体都必须能在四个来源的并集里逐字找到。
  *
- * 三个来源全部由调用方注入——**不从申报契约的字段推导**。申报契约已经瘦身成
+ * 四个来源全部由调用方注入——**不从申报契约的字段推导**。申报契约已经瘦身成
  * kind/request/continueTaskId，这个校验正是为独立于它而写的，原样存活。
  */
 export interface PlanEntitySources {
@@ -118,23 +118,44 @@ export interface PlanEntitySources {
   referenceEvidence?: string;
   /** ③ 本任务迄今的平台响应（tool_result 内容，逐条）。 */
   platformResponses?: readonly string[];
+  /**
+   * ④ 本会话确立过的实体（用户亲自执行过查询 / 选定过澄清候选）——连续会话的标定补丁。
+   *
+   * 为什么需要它（2026-09-27 真实企微通话事故）：实体门按**每轮无状态**标定，而这个
+   * 产品是**连续会话**——用户"查完某个对象"之后只补一个范围编码（本轮消息里没有那个
+   * 对象名）时，对象不在①②③任一来源里，查询被门禁判死，用户被要求重新报名字。第四
+   * 来源把标定从"单轮"修正为"本会话用户亲自确立过的"。
+   *
+   * 边界（这是**标定**，不是放宽）：只收"用户亲自操作过（执行过）/确认过（选过）"的
+   * 实体——来源 A = 本会话执行过的任务的 calls 快照（平台 args 规格机械提取），来源 B =
+   * 澄清候选里用户选定过的那一个。散文里提过但从未操作的实体**不**收（宿主不做领域
+   * 解析），那条路由 correctForm 的检索指引兜底。防幻觉功能不变：进 haystack 的每条
+   * 都有用户来源与确立轮次可审计（Conversation Log 的 clarification_event / platform_tasks）。
+   */
+  sessionEntities?: readonly string[];
 }
 
 /** 单条平台响应纳入包含判定的截断长度（与宿主留存 tool_result 的截断一致）。 */
 const PLATFORM_RESPONSE_LIMIT = 20_000;
 /** 纳入判定的平台响应条数上限：覆盖"目录查询拿到唯一候选、再按候选名查"这类跨计划解析。 */
 const PLATFORM_RESPONSE_MAX = 20;
+/** 纳入判定的会话实体条数上限：haystack 是判定材料不是仓库，长会话只保留最近确立的。 */
+const SESSION_ENTITY_MAX = 40;
 
 /**
  * 计划实体来源校验（架构 §2 第 9 条，领域无关）。
  *
  * 每个 call 的 args 里所有字符串都要逐一检查：以 `-` 开头的是 flag 不是实体，跳过；
- * 其余字符串必须能在「当前消息 / 检索证据 / 本轮平台响应」的并集里逐字找到。
+ * 其余字符串必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」的并集里
+ * 逐字找到。
  *
  * 与旧的领域分支的差别（roadmap 明确接受）：宿主不再强制"某类任务只能调某个操作"，
  * 操作与任务类型是否匹配归执行层 SKILL 与平台门禁。但实体来源校验不弱于原来——
- * 不在三个来源里的字符串参数一律拒绝。执行层调目录查询拿到的唯一候选名逐字来自
+ * 不在四个来源里的字符串参数一律拒绝。执行层调目录查询拿到的唯一候选名逐字来自
  * 本轮平台响应，因此天然放行，宿主不需要懂业务就能判"这是合法解析出来的"。
+ *
+ * 第四来源（sessionEntities）是连续会话的标定补丁而非放松：它只携带用户亲自执行过/
+ * 确认过的实体，flash 模型幻觉出的对象名仍然被挡（幻觉名不在任何来源里）。
  */
 export function validatePlanEntities(
   calls: readonly { operation: string; args: readonly unknown[] }[],
@@ -145,6 +166,7 @@ export function validatePlanEntities(
     sources.currentMessage,
     sources.referenceEvidence ?? '',
     ...responses.map((response) => response.slice(0, PLATFORM_RESPONSE_LIMIT)),
+    ...(sources.sessionEntities ?? []).slice(-SESSION_ENTITY_MAX),
   ].join('\n');
   for (const call of calls) {
     for (const value of call.args) {
@@ -154,7 +176,7 @@ export function validatePlanEntities(
       if (!token || token.startsWith('-')) continue;
       if (!haystack.includes(token)) {
         // 只报第一个越权值并截断：worker 修正后重新提交完整 calls，逐次暴露即可
-        return `计划包含未在当前请求、检索证据或平台响应中出现的参数：${token.slice(0, 80)}`;
+        return `计划包含未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数：${token.slice(0, 80)}`;
       }
     }
   }

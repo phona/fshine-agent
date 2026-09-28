@@ -71,7 +71,7 @@ export interface Run17dzTaskArgs {
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>;
   /**
    * 领域无关的实体来源（宿主注入）：计划里的每个实体必须能在「当前消息 / 检索证据 /
-   * 本轮平台响应」里逐字找到。同样不进入 Main Agent 工具 schema。
+   * 本轮平台响应 / 本会话已确立实体」里逐字找到。同样不进入 Main Agent 工具 schema。
    */
   entitySources?: PlanEntitySources;
 }

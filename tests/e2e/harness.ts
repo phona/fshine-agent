@@ -24,6 +24,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
+import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, type SelectionClarification } from '../../packages/agent/src/platform-contract';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -239,8 +240,13 @@ export type WorkerStep =
 /**
  * 17dz 子 Agent 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
  * 计划激活后按 calls 真跑 operation run（mock executor、真 DZ_PLAN_ID 绑定）。
+ *
+ * `enforceEntityScope`（显式开启）：复刻真实驱动的实体门禁——计划参数必须逐字来自宿主
+ * 注入的实体来源 + 本任务平台响应，越权即确定性拒绝（PLAN DECLINED → needs）。默认关闭：
+ * 既有共享夹具先于门禁存在，参数并非都逐字可溯源（见下方拦截处的说明）。
  */
-function gatedWorker(script: WorkerStep[]) {
+function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean }) {
+  const enforceEntityScope = options?.enforceEntityScope === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
     const child = spawnSync(path.join(platformRoot, 'bin', '17dz'), args, {
@@ -255,6 +261,8 @@ function gatedWorker(script: WorkerStep[]) {
       sessionId?: string;
       requestId?: string;
       onNotice?: (text: string) => Promise<void>;
+      /** 宿主注入的实体来源（架构 §2 第 9 条）：替身按它复刻真实驱动的计划门禁。 */
+      entitySources?: PlanEntitySources;
       messages: unknown[];
     }) => {
       const taskId = input.sessionId ?? 'task_unknown';
@@ -309,6 +317,26 @@ function gatedWorker(script: WorkerStep[]) {
             parts.push(`执行 ${call.operation}: ${body}`);
           }
           continue;
+        }
+        // 实体门禁复刻（与真实驱动 pi-coding-driver 同一把尺，测试显式开启）：
+        // 宿主注入的实体来源 + 本任务迄今的平台响应（替身自己收集的 platformOutputs，
+        // 对应真实驱动的会话 tool_result 汇总）做逐字包含判定。越权 → 确定性拒绝：
+        // 零执行 + needs 线索（missing 与 reason 的形状与真实驱动一致——宿主计划拦截的
+        // 原因原文）。
+        // 为什么默认不 enforce：共享替身的既有夹具先于门禁存在，脚本里的计划参数并非
+        // 都逐字来自当轮消息（如 --period 202609 在消息里没有——真实驱动同样会拒）。
+        // 把那批夹具改到"逐字可溯源"是另一件保真工作，不在本包范围；需要门禁的测试
+        // （turn-loop-session-entities 的事故复刻）显式打开。
+        if (enforceEntityScope && input.entitySources) {
+          const scopeError = validatePlanEntities(current.plan, {
+            ...input.entitySources,
+            platformResponses: [...(input.entitySources.platformResponses ?? []), ...platformOutputs],
+          });
+          if (scopeError) {
+            needs = { missing: ['请求中未给出的对象'], reason: scopeError };
+            parts.push(`PLAN DECLINED：${scopeError}`);
+            break;
+          }
         }
         const plan = await evaluateAndActivatePlan({
           platformRoot: PLATFORM_ROOT,

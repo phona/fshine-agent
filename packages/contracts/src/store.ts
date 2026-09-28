@@ -79,9 +79,16 @@ export interface ConversationSessionRepo {
   upsert(record: ConversationSessionRecord): Promise<void>;
 }
 
-export type ConversationEventKind = 'user_message' | 'assistant_message' | 'tool_result' | 'plan_event';
+export type ConversationEventKind = 'user_message' | 'assistant_message' | 'tool_result' | 'plan_event' | 'clarification_event';
 
-/** Append-only message/tool/plan event. Keep only safe, searchable text or an artifact reference. */
+/**
+ * Append-only message/tool/plan event. Keep only safe, searchable text or an artifact reference.
+ *
+ * `clarification_event`（选择类澄清的状态留痕，宿主机械绑定用）：内容是结构化 JSON——
+ * `{status:'issued', code, query, candidates, requestId}`（宿主发出澄清时）与
+ * `{status:'resolved', selected, requestId}`（用户的裸编号/候选名答复被宿主绑定到时）。
+ * 绑定判据只认这两个状态与候选名本身（数据），不解析任何用户自然语言。
+ */
 export interface ConversationEventRecord {
   eventId: string;
   principalId: string;

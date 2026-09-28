@@ -568,9 +568,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         }
         if (options.entitySources) {
           // 领域无关的实体来源校验（架构 §2 第 9 条）：计划里的每个实体都必须能在
-          // 「当前消息 / 检索证据 / 本任务迄今的平台响应」里逐字找到。平台响应从当前
-          // 会话已产生的 tool_result 里收集——执行层调目录查询拿到的唯一候选名就
-          // 逐字住在这里面，宿主不需要懂业务就能放行"合法解析出来的实体"。
+          // 「当前消息 / 检索证据 / 本任务迄今的平台响应 / 本会话用户亲自确立过的实体」
+          // 里逐字找到。平台响应从当前会话已产生的 tool_result 里收集——执行层调目录
+          // 查询拿到的唯一候选名就逐字住在这里面，宿主不需要懂业务就能放行"合法解析出来
+          // 的实体"。第四来源（sessionEntities）由宿主在委派时注入，见 runtime.ts。
           const scopeError = validatePlanEntities(parsed.calls, {
             ...options.entitySources,
             platformResponses: [
