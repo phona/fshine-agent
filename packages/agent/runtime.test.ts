@@ -1801,4 +1801,28 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toBe(NO_EXECUTION_CLARIFICATION);
     expect(reply.text).not.toContain('recorded');
   });
+
+  // ── 执行语言指纹扩类（2026-09-27 第三波：operation 名 + 内部控制词）──────────
+  //
+  // 手机实测的两处更细漏出：数据来源标注写成"平台只读应收查询接口 finance.query-receivables"
+  // （用户是财务，不需要接口标识符），"本次已用满平台的查询计划额度"被当成说明交给用户
+  // （宿主计划门的内部控制状态）。行为全对话术漏——尺子随 runtime.ts 同扩，探针断言复用。
+  // 命中要红；已知误伤家族必须绿（误伤比漏报更糟——探针误红一次整条断言就没人信了）。
+
+  it('指纹扩类：operation 名与内部控制词命中，已知误伤家族不误红', () => {
+    // 命中：小写点分 operation 名（第三波实测原句）
+    expect(executionLanguageFingerprints('数据来源：平台只读应收查询接口 finance.query-receivables')).toEqual(['operation 名']);
+    expect(executionLanguageFingerprints('依据 voucher.query-saved 的返回')).toEqual(['operation 名']);
+    // 命中：内部控制词（实测原句："查询计划额度"是宿主计划门的限额记账，不是用户事实）
+    expect(executionLanguageFingerprints('（说明：本次已用满平台的查询计划额度，未能再交叉核对）')).toEqual(['内部控制词']);
+    expect(executionLanguageFingerprints('后续因熔断停止')).toEqual(['内部控制词']);
+    // 防误伤：正常英文句子——点后无连字符段（e.g./i.e.）或点后是数字（v1.2/no.1）
+    expect(executionLanguageFingerprints('请按 e.g. 与 i.e. 的写法，参考 v1.2 与 no.1')).toEqual([]);
+    // 防误伤：账套名里的点（中文名不以小写字母开头）与 YYYYMM（无点）
+    expect(executionLanguageFingerprints('幻辰.财税 202609 的余额')).toEqual([]);
+    // 防误伤：脚本名连字符在点前（query-receivables.js），归脚本路径模式与泄漏 lint 守
+    expect(executionLanguageFingerprints('见 query-receivables.js 说明')).toEqual([]);
+    // 防误伤：内部控制的近形结论词不是机制词（"已被拒绝"是结局，"拒绝上限"才是参数）
+    expect(executionLanguageFingerprints('该请求已被拒绝')).toEqual([]);
+  });
 });

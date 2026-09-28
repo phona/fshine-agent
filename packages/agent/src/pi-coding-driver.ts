@@ -21,7 +21,7 @@ import { ToolUserError, type DriverMessage, type PlanCallFacts, type SubagentNee
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
-import { messageFor } from './error-codes';
+import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
@@ -611,6 +611,19 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           activePlan = previousPlan;
           return { block: true, reason: `PLAN STOP\n${plan.message}` };
         } catch (error) {
+          // 计划门对"计划里含非 read operation"的确定性拒绝：平台 canonicalCall 在
+          // evaluate 时抛 PLAN_OPERATION_NOT_READ_ONLY（CLI exit 3，stderr 原样带出）。
+          // 这不是"等用户确认"的暂停（PLAN PAUSED 的语义），是写未开放的事实——
+          // 拒绝原因必须换成用户可行动的写关闭话术（error-codes.ts 唯一来源，与提案
+          // 路径的 capability 检查同一句），协议前缀用 PLAN STOP（worker 提示词认它
+          // = 直接说明停止原因）。此前这里原样透传 CLI 失败串，worker 只能汇报卡点，
+          // "未开放写入权限"到不了用户（2026-09-27 第三波实测）。
+          // 判据是平台的确定性错误码，不是自由文本嗅探（与 needsFromPlatformResponses
+          // 同一纪律）。既有活跃计划照常恢复：被拒的是新提交，不是已激活的范围。
+          if (error instanceof Error && error.message.includes('PLAN_OPERATION_NOT_READ_ONLY')) {
+            activePlan = previousPlan;
+            return { block: true, reason: `PLAN STOP\n${messageTextFor('WRITE_NOT_ENABLED')}` };
+          }
           return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
         }
       }

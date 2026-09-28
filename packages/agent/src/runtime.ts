@@ -51,26 +51,78 @@ const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
 
 /**
  * 执行语言指纹：最终回复里出现任意一条，就说明"模型在翻译执行语言"（2026-09-27 Stage 3
- * 手机实测的形态——一次结构化歧义被翻译成 1201 字符技术报告）。三条判据都是**形状**，
+ * 手机实测的形态——一次结构化歧义被翻译成 1201 字符技术报告）。判据都是**形状**，
  * 不是内容嗅探：
  *   · 脚本路径（`src/...js`）：平台实现细节，编排层禁运（泄漏 lint 同款名单）；
  *   · 错误码形态（全大写且含下划线，如 ACCOUNT_SET_AMBIGUOUS）：要求含下划线是防误伤——
  *     正常英文词不会全大写，YYYYMM 这类编码没有下划线；
- *   · JSON 片段（`candidates:` 或花括号）：信封/方案原文复读。
+ *   · JSON 片段（`candidates:` 或花括号）：信封/方案原文复读；
+ *   · operation 名（小写点分，如 finance.query-receivables）：2026-09-27 第三波实测——
+ *     回复里"数据来源：平台只读查询接口 finance.query-receivables"，用户不需要知道
+ *     接口标识符（语域契约①，见 context.ts worker 提示词）；
+ *   · 内部控制词（额度/配额/熔断/计划门/拒绝上限/重试上限）：同波实测——"本次已用满
+ *     平台的查询计划额度"被当成说明交给用户，那是宿主计划门的内部控制状态（语域契约②）。
+ *
+ * operation 名的防误伤（误伤比漏报更糟——探针误红一次，整条断言就没人信了）：
+ * 形状要求"小写字母开头 + 至少一个点 + 点后小写连字符段"三条同时成立——
+ *   · 正常英文句子没有这个形状："e.g."/"i.e." 没有连字符段；"v1.2"/"no.1" 点后是数字；
+ *   · 名称里的点：中文名不以小写字母开头（"幻辰.财税"直接不匹配），点后的中文段
+ *     也不是 [a-z]；
+ *   · YYYYMM（202609）没有点；日期/时间（2026.09、14.30）以数字开头。
+ * 连字符段必须在**点之后**（lookahead 逐段判定）："query-receivables.js" 这类脚本名
+ * 连字符在点前，不命中本模式（它由脚本路径模式与泄漏 lint 的 .js 名单各自守）。
+ * 白名单是逃生阀：形状命中但经人工判定不是执行语言的 token 才能进，每条附理由；
+ * 当前为空——已知误伤家族全部被形状要求挡在门外。
+ *
+ * 内部控制词为什么是内部控制（不是业务词）：额度/配额是宿主计划门的限额记账，
+ * 熔断/计划门是执行流的控制机制，拒绝上限（MAX_DECLINED_PLANS_PER_TASK）/重试上限
+ * 是收敛保护参数——它们描述的是"宿主怎么管模型"，没有一个是用户做决策需要的事实。
+ * 用户可行动的版本是"本次查询未能继续 + 请重新发起"（语域契约②），机制一词不提。
  *
  * 这把尺有两处使用者：worker 说明的准入（usefulWorkerNote：带指纹的"说明"是协议材料，
  * 不附在状态文案后面）与真实模型探针的断言（probe-real-agent.ts 对歧义/not_found 用例）。
  * 导出一处定义，两边认同一份。
  */
-export const EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
+/**
+ * operation 名指纹的白名单（逃生阀，不是预设备份）：形状命中但确认真实回复里会出现、
+ * 且不是执行语言的 token 才能进，每条注释为什么合法。收词纪律与业务词预算同族——
+ * 只收有真实场景证据的项；当前为空（已知误伤家族全被形状要求挡掉，见上方防误伤注释）。
+ * 声明须早于指纹表：表里 operation 名那一项挂的是它本身（同一处定义，不复制）。
+ */
+const OPERATION_NAME_WHITELIST: ReadonlySet<string> = new Set<string>();
+
+export const EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp; whitelist?: ReadonlySet<string> }> = [
   { label: '脚本路径', pattern: /src\/[^\s）)，,，；;]*\.js/ },
   { label: '错误码', pattern: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/ },
   { label: 'JSON 片段', pattern: /candidates\s*:|[{}]/ },
+  {
+    label: 'operation 名',
+    // lookahead 先验"点后存在小写连字符段"，本体再匹配"小写字母开头的点分 token"。
+    pattern: /\b(?=(?:[a-z0-9-]*\.)+[a-z0-9-]*-)[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+\b/,
+    whitelist: OPERATION_NAME_WHITELIST,
+  },
+  { label: '内部控制词', pattern: /额度|配额|熔断|计划门|拒绝上限|重试上限/ },
 ];
 
-/** 文本命中的执行语言指纹标签（空数组 = 干净）。 */
+/**
+ * 文本命中的执行语言指纹标签（空数组 = 干净）。
+ *
+ * 白名单只作用于挂了它的那类形状（当前=operation 名），且是 **token 级**排除：一段话
+ * 同时混着白名单 token 和真 operation 名时，后者照旧命中——逃生阀掩掉的是单个 token，
+ * 不是整段文本。用可选字段而不是标签名比较做分流：标签是给用户读的文案，不该承担
+ * 结构化判据的职责（也不该为它立一条中文字面量 if）。
+ */
 export function executionLanguageFingerprints(text: string): string[] {
-  return EXECUTION_LANGUAGE_FINGERPRINTS.filter(({ pattern }) => pattern.test(text)).map(({ label }) => label);
+  const hits: string[] = [];
+  for (const { label, pattern, whitelist } of EXECUTION_LANGUAGE_FINGERPRINTS) {
+    if (!whitelist) {
+      if (pattern.test(text)) hits.push(label);
+      continue;
+    }
+    const tokens = text.match(new RegExp(pattern.source, 'g')) ?? [];
+    if (tokens.some((token) => !whitelist.has(token))) hits.push(label);
+  }
+  return hits;
 }
 
 /**

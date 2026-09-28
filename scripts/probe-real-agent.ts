@@ -29,8 +29,9 @@
  * 关注九件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
  * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）、
  * 多任务乒乓跨多轮切换能否线程隔离且跨线程汇总诚实、长探索型任务逐轮收窄能否不断线（指代跨轮解析、判断不发明基准）、
- * 歧义/未找到回复是否零执行语言指纹（脚本路径/错误码/JSON——2026-09-27 Stage 3 事故：一次结构化歧义被模型翻译成
- * 1201 字符技术报告；宿主改为机械组装澄清问题后，这条由 A2/A3/A4/D1 的断言守）。
+ * 歧义/未找到回复是否零执行语言指纹（脚本路径/错误码/JSON/operation 名/内部控制词——2026-09-27 Stage 3 事故：一次结构化歧义被模型翻译成
+ * 1201 字符技术报告；宿主改为机械组装澄清问题后，这条由 A2/A3/A4/D1 的断言守。第三波实测又漏过
+ * operation 名（"数据来源：…finance.query-receivables"）与内部控制词（"查询计划额度"）两类，尺子随 runtime.ts 同扩）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -541,9 +542,11 @@ const H2_SUMMARY = 7;
 
 /**
  * 回复里的执行语言指纹（宿主侧同一把尺：runtime.ts 的 EXECUTION_LANGUAGE_FINGERPRINTS）：
- * 脚本路径 / 错误码形态（全大写且含下划线）/ JSON 片段。2026-09-27 Stage 3 实测：模型把
- * 一次结构化歧义翻译成 1201 字符技术报告，三类指纹全中。宿主改为持信封数据机械组装澄清
- * 问题后，这类指纹在歧义/未找到回复里必须绝迹——这是防回归的硬断言。
+ * 脚本路径 / 错误码形态（全大写且含下划线）/ JSON 片段 / 小写点分 operation 名 / 内部控制词
+ * （额度/配额/熔断/计划门/拒绝上限/重试上限）。2026-09-27 Stage 3 实测：模型把一次结构化歧义
+ * 翻译成 1201 字符技术报告，前三类指纹全中；第三波实测又漏 operation 名（数据来源标注带接口
+ * 标识符）与内部控制词（"查询计划额度"当说明交出去）。宿主改为持信封数据机械组装澄清问题后，
+ * 这类指纹在歧义/未找到回复里必须绝迹——这是防回归的硬断言。
  */
 function execLanguageLeakNotes(turn: Turn): string[] {
   const leaks = executionLanguageFingerprints(turn.reply);
@@ -610,7 +613,7 @@ const CASES: Case[] = [
       await assembly.close();
       const notes: string[] = [];
       // Stage 3 事故原型：平台返回 ACCOUNT_SET_AMBIGUOUS（候选：幻辰财税 / 幻辰实业有限公司）。
-      // 回复必须是澄清问句（候选清单 + 问句），且零执行语言指纹（脚本路径/错误码/JSON）。
+      // 回复必须是澄清问句（候选清单 + 问句），且零执行语言指纹（五类，见 execLanguageLeakNotes）。
       notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, QIANLONG_AMBIGUOUS_CANDIDATES));
       return { turns, notes };
     },

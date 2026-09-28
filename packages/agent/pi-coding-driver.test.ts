@@ -145,6 +145,45 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  it('计划门拒绝含写 operation 的计划：拒绝原因是用户可行动的写关闭话术，不是 CLI 失败串', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-closed-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write', planId: null, version: null, status: 'none' }), stderr: '' };
+      // 平台 canonicalCall 的确定性拒绝：计划里含非 read operation（CLI exit 3，stderr 原样带出）
+      if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY:voucher.batch\n' };
+      throw new Error('unexpected CLI call');
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'write closed test',
+      sessionId: 'task_write',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+    });
+    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.batch","args":["幻辰财税","202609"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_write', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    expect(verdict?.block).toBe(true);
+    // 拒绝原因即用户可行动的话术：写未开放 + 找管理员（与提案路径 capability 检查同一句）
+    expect(verdict?.reason).toContain('PLAN STOP');
+    expect(verdict?.reason).toContain('当前未开放写入权限');
+    expect(verdict?.reason).toContain('请联系管理员开通');
+    // 不再是"等宿主验证确认"的暂停语义；平台内部错误码与 operation 名也不得透传上屏
+    expect(verdict?.reason).not.toContain('PLAN PAUSED');
+    expect(verdict?.reason).not.toContain('PLAN_OPERATION_NOT_READ_ONLY');
+    expect(verdict?.reason).not.toContain('voucher.batch');
+    worker.session.dispose();
+  });
+
   it('blocks a platform plan whose entities appear in none of the three sources before calling the CLI evaluator', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-intent-scope-'));
     roots.push(root);

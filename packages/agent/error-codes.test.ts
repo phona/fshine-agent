@@ -53,6 +53,8 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(messageTextFor('DELEGATION_CANCELLED')).toBe('17dz 子任务已取消。');
     expect(messageTextFor('ROUTE_RETRY_NUDGE')).toContain('route_current_turn');
     expect(messageTextFor('PLAN_PENDING_PERSIST_MISSING')).toBe('平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。');
+    // 写关闭话术（唯一来源：提案路径 capability 检查与计划门写拒绝共用同一句）
+    expect(messageTextFor('WRITE_NOT_ENABLED')).toBe('当前未开放写入权限，如有需要请联系管理员开通。');
     // runtime/context 的导出常量就是表值（同一份来源，测试与调用方继续认常量）
     expect(NO_EXECUTION_CLARIFICATION).toBe(messageTextFor('NO_EXECUTION_CLARIFICATION'));
     expect(ACTIVATED_PLAN_NOT_EXECUTED).toBe(messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED'));
@@ -102,7 +104,7 @@ describe('fshine 错误码表（错误即数据）', () => {
   it('表级纪律：全部条目措辞零业务词（泄漏 lint 同款预算）', () => {
     // 镜像 platform-leak-lint 的业务词集合：执行层持有领域词，编排层不替平台说话
     const business = /应收|凭证|科目|账套|期间|目录/u;
-    for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING']) {
+    for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED']) {
       expect(messageFor(code), code).not.toMatch(business);
     }
   });
@@ -134,9 +136,9 @@ describe('选择类澄清消息模板（宿主机械组装，模型不翻译）'
 
   it('歧义模板：候选 1 个 / 多个 / 超长截断，查询词与序号原样进消息', () => {
     expect(clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '幻辰', candidates: ['幻辰财税'] }))
-      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税你要查哪个？告诉我名称或序号即可。');
+      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税。你要查哪个？告诉我名称或序号即可。');
     expect(clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] }))
-      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰实业有限公司你要查哪个？告诉我名称或序号即可。');
+      .toBe('没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰实业有限公司。你要查哪个？告诉我名称或序号即可。');
     // 超长截断：超过 8 个候选只列前 8 个并说明总数（澄清问题不是目录页）
     const many = Array.from({ length: 12 }, (_, i) => `候选${i + 1}`);
     const rendered = clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', { query: '某词', candidates: many });
@@ -171,7 +173,7 @@ describe('选择类澄清消息模板（宿主机械组装，模型不翻译）'
     const rendered = clarificationTextFor('ACCOUNT_SET_AMBIGUOUS', {
       query: '幻辰', candidates: ['幻辰财税'], correctForm: '把候选呈现给用户选择——绝不代选',
     });
-    expect(rendered).toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税你要查哪个？告诉我名称或序号即可。');
+    expect(rendered).toBe('没有找到唯一匹配“幻辰”的对象。平台上有 1 个名字相近的：1. 幻辰财税。你要查哪个？告诉我名称或序号即可。');
   });
 
   it('查询词缺失时用领域无关的占位（信封没给 query 也不出裸引号）', () => {

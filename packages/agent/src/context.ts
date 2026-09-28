@@ -350,7 +350,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
 
     const capabilities = ctx.trusted.capabilities ?? [];
     if (!capabilities.includes('write')) {
-      return stop('已收到录入提案，但当前账号未开放写入权限，已停止。请联系管理员开通后重试。', 'proposal_declined');
+      // 写关闭话术唯一来源在 error-codes.ts（WRITE_NOT_ENABLED）：与计划门拒绝路径
+      // （pi-coding-driver 的 evaluate 失败分支）共用同一句，不造第二份。
+      return stop(`已收到录入提案，但${messageTextFor('WRITE_NOT_ENABLED')}`, 'proposal_declined');
     }
     // allowlist principal 的授权以对象 id 表达，而提案携带平台侧名称——
     // 名称到 id 的映射不在 fshine 侧，V1 仅对 scope=all 的账号开放写。
@@ -744,6 +746,21 @@ function workerSystemPrompt(
     // 具体脚本路径以平台 Skill 文档为准，写死任何一条示例都会随平台演进过期，
     // 也会把平台实现细节带进编排层（泄漏 lint 的 FORBIDDEN 名单）。
     `平台调用必须走网关形式 \`${GATEWAY_INVOCATION} query <脚本路径> --<flag> 值\`：脚本路径用平台 Skill/operation 文档给出的完整相对路径（带域目录前缀，照文档逐字抄），flag 用 kebab-case 短横线；不要写裸名、驼峰或 \`--flag=值\` 之类等号变形，也不要绕过网关直调脚本。`,
+    // 回复语域契约三条（2026-09-27 第三波，手机实测补漏）：Stage 3 根治包只挡住了"协议命令/
+    // 信封错误码/JSON"那几条粗漏，实测里更细的三样执行层语言仍会越界进最终回复——operation
+    // 名当数据来源标注、宿主计划门的内部控制状态当"说明"、用户没问的能力边界主动交代。
+    // 三条都是格式规范（说什么形状的话），不是行为恳求；宿主侧同一把尺由 runtime.ts 的
+    // EXECUTION_LANGUAGE_FINGERPRINTS 与探针断言机械执行。
+    // ① 来源标注纪律：用户不需要知道接口标识符。"平台实时查询"已足够证明数据
+    //    不是编的；写出 operation 名/接口名/脚本名只会把内部语言带上屏。
+    '来源标注纪律：回复里标注数据来源时只能说“平台实时查询”这类中性表述，不得出现 operation 名、接口名或脚本名（如 finance.query-receivables、query-receivables.js）。',
+    // ② 内部控制不上屏：计划额度、拒绝次数、熔断、计划门、重试上限是宿主/平台的内部
+    //    控制状态，对用户"下一步做什么"没有任何帮助——实测里它被当成"说明"交出去，
+    //    反而像在推卸。因内部限制停顿时只说事实与出路，不说机制。
+    '内部控制不上屏：计划额度、拒绝次数、熔断、计划门、重试上限等宿主或平台的内部控制状态不得出现在回复里；因内部限制停顿时，说“本次查询未能继续”并告诉用户能做什么（如“请重新发起”），不得说明内部机制。',
+    // ③ 不主动交代表能力边界：诚实不等于全说。用户没问到的口径，接口不支持就不是他
+    //    需要知道的事——主动交代整段边界说明只是噪音；问到该口径时才如实说明。
+    '不主动交代表能力边界：只回答用户问到的内容；接口能力边界（不支持某口径）仅在用户问到该口径时才说明。',
     ...(turnDeclaration ? [`宿主已核验本轮请求；严格按此执行，不得扩大范围或从其他历史内容补范围：${turnDeclaration.request}`] : []),
     '知识只经 read 读取固定知识面：SKILL.md、MECHANISMS.md、*.schema.json；实现源码不可读。',
     scope,

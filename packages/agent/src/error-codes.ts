@@ -184,8 +184,10 @@ const TABLE: Record<string, CodeEntry> = {
   // AMBIGUOUS_SELECTION 不设措辞槽位：它的用户可见事实（查询词/候选名/个数）已经
   // 全部来自信封，平台给它的 correctForm 是给**解析方**的行动规则（"绝不代选、绝不
   // 点第一行"），不是给用户的问句——渲染它只会把内部规则念给用户听。
+  // {list} 后句号（2026-09-27 第三波）：候选清单与问句之间必须断句，否则渲染成
+  // "…等 25 个你要查哪个？"——清单尾巴和问句粘成一句，用户读起来像病句。
   AMBIGUOUS_SELECTION: {
-    text: '没有找到唯一匹配“{query}”的对象。平台上有 {n} 个名字相近的：{list}你要查哪个？告诉我名称或序号即可。',
+    text: '没有找到唯一匹配“{query}”的对象。平台上有 {n} 个名字相近的：{list}。你要查哪个？告诉我名称或序号即可。',
   },
   NOT_FOUND_SELECTION: {
     // {hint} = 平台 correctForm（数据）；宿主兜底挂「遗留待清」：平台全量携带后即删。
@@ -214,6 +216,15 @@ const TABLE: Record<string, CodeEntry> = {
   DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
   DELEGATION_EXECUTOR_FAILURE: { text: '17dz 子任务执行失败，请稍后再试。' },
   DELEGATION_CANCELLED: { text: '17dz 子任务已取消。' },
+
+  // ── 能力类：写未开放（capability 声明，用户可行动）──────────────────────────
+  // 唯一来源纪律：写关闭话术只有这一份。两个消费方共用——提案落账前的 capability 检查
+  // （context.ts finalizeProposal）与计划门对"计划里含非 read operation"的拒绝
+  // （pi-coding-driver 的计划 evaluate 失败分支：平台 canonicalCall 抛
+  // PLAN_OPERATION_NOT_READ_ONLY，CLI exit 3）。第三波实测：写尝试被计划门挡下时，
+  // 汇报里只有卡点没有"未开放写入权限"，用户不知道该找谁——那句话必须到达用户。
+  // 与 DELEGATION_* 同族（消息模板类，码 → 文本一一对应），不新造第二份手抄本。
+  WRITE_NOT_ENABLED: { text: '当前未开放写入权限，如有需要请联系管理员开通。' },
 
   // ── 路由类：申报缺失时的重试指令（给模型，不上屏）──
   ROUTE_RETRY_NUDGE: {
