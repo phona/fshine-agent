@@ -1924,6 +1924,13 @@ describe('createTaxAgentRuntime', () => {
     expect(looksLikeProtocolMaterial('{"recorded":"delegate","text":"…","taskId":"task_1","needs":{}}')).toBe(true);
     expect(looksLikeProtocolMaterial('  \n {"recorded":"conversation"}')).toBe(true);
     expect(looksLikeProtocolMaterial('{"step":"第 1/2 步","recorded":"delegate","next":"不要转述给用户"}')).toBe(true);
+    // 平台 RESULT 信封（D-069）：v:1 + op 首字段的固定形状，与协议 JSON 同族
+    expect(looksLikeProtocolMaterial('{"v":1,"op":"finance.query-receivables","status":"completed","data":null,"error":null}')).toBe(true);
+    expect(looksLikeProtocolMaterial('{ "v" : 1 , "op" : "voucher.commit" }')).toBe(true);
+    // 近似形状不外溢：版本号不是 1、字段名近似、op 不在首字段都不算
+    expect(looksLikeProtocolMaterial('{"v":2,"op":"finance.query-receivables"}')).toBe(false);
+    expect(looksLikeProtocolMaterial('{"version":1,"op":"finance.query-receivables"}')).toBe(false);
+    expect(looksLikeProtocolMaterial('{"op":"finance.query-receivables","v":1}')).toBe(false);
     // 正常回复（含数据答案、带花括号的说明、错误码提及）一律不误判
     expect(looksLikeProtocolMaterial('幻辰财税 202609 应收余额为 51 元。')).toBe(false);
     expect(looksLikeProtocolMaterial('结果：{"balance":51000} 元。')).toBe(false);

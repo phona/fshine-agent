@@ -153,9 +153,17 @@ const MAX_PLAN_ZERO_EXEC_STEPS = 3;
 const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 
 /**
- * 内部协议材料的复读判据（D-020 / F4 残留）：模型把工具结果原样当回复时，那段文本是
- * 宿主与模型之间的内部协议材料——纠错环交还（`{"recorded":"delegate",…}`）、计划步骤
- * 交还（同族，recorded/step/next 是协议字段）、回合申报回执（`{"recorded":"conversation"}`）。
+ * 内部协议材料的复读判据（D-020 / F4 残留；D-069 补平台 RESULT 信封形态）：模型把工具
+ * 结果原样当回复时，那段文本是宿主与模型之间的内部协议材料——纠错环交还
+ * （`{"recorded":"delegate",…}`）、计划步骤交还（同族，recorded/step/next 是协议字段）、
+ * 回合申报回执（`{"recorded":"conversation"}`）、平台 RESULT 信封（`{"v":1,"op":…}`）。
+ *
+ * 为什么信封复读与协议 JSON 复读同族：信封是宿主与**平台**之间的输出契约
+ * （platform-contract.ts 的 PlatformEnvelope，字段形状以那里的信封解析为准），和宿主与
+ * 模型之间的协议 JSON 一样都是机器传递的结构化材料，不是给用户读的话；原样外发等于把
+ * operation 名、status、错误码等执行层语言怼到用户眼前——与执行语言指纹尺防的是同一族
+ * 泄漏，只是那道尺不在终稿硬闸上（见债务台账 D-069）。前缀按信封的固定形状写死
+ * （v:1 + op 首字段），形状之外的内容不嗅探。
  *
  * 判据只有**形状**（开头是协议 JSON 且首字段是协议字段名），不嗅探内容：正常回复不可
  * 能以这几个字段开头，误判面为零。导出供测试直接钉形状。
@@ -163,7 +171,8 @@ const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
 export function looksLikeProtocolMaterial(text: string): boolean {
   const trimmed = text.trimStart();
   return trimmed.startsWith(NEEDS_TOOL_RESULT_PREFIX)
-    || /^\{\s*"(?:recorded|step|next)"\s*:/.test(trimmed);
+    || /^\{\s*"(?:recorded|step|next)"\s*:/.test(trimmed)
+    || /^\{\s*"v"\s*:\s*1\s*,\s*"op"\s*:/.test(trimmed);
 }
 
 /**
