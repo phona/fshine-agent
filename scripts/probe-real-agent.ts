@@ -13,8 +13,8 @@
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
- * 全量约 110 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
- * E/F/G/H 是重场景（多任务交织、探索型会话、并发多线程、乒乓与长探索），按需 --only E1 / --only F1 / --only G1,G2 / --only H1,H2，不进 quick。
+ * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 3 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
+ * E/F/G/H/X/Y 是重场景（多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
  *
  * 用例分组：
  *   A 说胡话（A1–A5）：重放历史、范围渗入、歧义澄清、闲聊不委派。
@@ -25,12 +25,16 @@
  *   F 探索型会话（F1）：目标不明的模糊请求不编造，补充明确后落地为真实查询。
  *   G 并发多线程（G1/G2）：多步核对计划被探索插曲打断后跨回合恢复、失败步授权跳过；用户让 agent 提议查法（meta-planning）。
  *   H 乒乓与长探索（H1/H2）：四任务跨 16 轮来回切的线程隔离/召回一致/重查正确/汇总诚实；单线程逐轮收窄的探索不断线、指代跨轮解析、判断不越界。
+ *   X 复杂任务会话（X1/X2）：8 轮连续会话复刻今日真实平台实测（跨期计划/中途换账套/跨轮召回/歧义简称/编号选择/换期间/写尝试/总结，D-070/071/072 全形态）；L0 探索型问题（客户/供应商/税率）不编造、不域混淆、数据在手不踢回给用户（D-073）。
+ *   Y 纠错与错误态（Y1/Y2）：用户纠错回合旧范围干净丢弃、新旧数字不混、期间沿用、切回不混淆；平台错误态（not_found/歧义/科目不存在）失败诚实性的机械断言（说真原因、不给数、给可行补救、无内部控制词、不引发重试风暴）。
  *
- * 关注九件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
+ * 关注十一件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
  * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）、
  * 多任务乒乓跨多轮切换能否线程隔离且跨线程汇总诚实、长探索型任务逐轮收窄能否不断线（指代跨轮解析、判断不发明基准）、
+ * 复杂任务会话跨轮连续（跨期计划数字链、召回给数且带框定、总结不塌缩、名称类请求不被会话实体代解析）与 L0 探索的数据呈现（查到的数据不踢回给用户）、
+ * 用户纠错与平台错误态的失败诚实性（旧范围干净丢弃、说真原因、不给数、给可行补救）、
  * 歧义/未找到回复是否零执行语言指纹（脚本路径/错误码/JSON/operation 名/内部控制词——2026-09-27 Stage 3 事故：一次结构化歧义被模型翻译成
- * 1201 字符技术报告；宿主改为机械组装澄清问题后，这条由 A2/A3/A4/D1 的断言守。第三波实测又漏过
+ * 1201 字符技术报告；宿主改为机械组装澄清问题后，这条由 A2/A3/A4/D1/X1/Y2 的断言守。第三波实测又漏过
  * operation 名（"数据来源：…finance.query-receivables"）与内部控制词（"查询计划额度"）两类，尺子随 runtime.ts 同扩）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
@@ -574,6 +578,212 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
 /** mock 账套目录里"幻辰"的两个候选（seed.json）：A3 歧义场景的期望候选集。 */
 const QIANLONG_AMBIGUOUS_CANDIDATES = ['幻辰财税', '幻辰实业有限公司'];
 
+// ─── X/Y 用例（复杂任务会话 / 纠错与错误态）的 mock 事实源与判定 helper ───
+//
+// mock 事实（2026-09-29 从 /home/fictional-user/fictional-projects/fictional-execution-layer/.runtime/mock-state.json 读出；
+// 探针每用例的 DZ_MOCK_STATE 指向临时空文件，mock 应答器自动从同仓 fixtures 的种子状态播种，
+// 两份余额事实一致——此处以种子为准，改动任何数字前先重读状态文件）：
+//   · 账套目录 4 个：幻辰财税 / 幻辰实业有限公司 / 新兴五金 / 新兴建材。匹配语义是
+//     「平台名 includes 查询词」子串——"幻辰"命中前两个 → ACCOUNT_SET_AMBIGUOUS；
+//     "幻辰实业"唯一命中；"胜利"零命中 → ACCOUNT_SET_NOT_FOUND。
+//   · 1122 应收账款余额：幻辰财税 current=86,000、202606=61,000（其余期间键缺失 → 回落 0）；
+//     幻辰实业 current=12,000；新兴五金 current=500；新兴建材 current=700。
+//   · 客户辅助档案：幻辰财税 3 家（幻电设备有限公司 / 机电贸易有限公司 / 恒信钢铁）、
+//     幻辰实业 1 家（恒信钢铁）、新兴五金与新兴建材无。
+//   · scenarios.closedPeriods=["202606"] 只挡写路径（保存拒绝），读路径不拦；query-receivables
+//     也无期间格式校验（202613 六位数字合法，只是查无此键 → 回落 0）——Y2 原稿的"关闭期间/
+//     非法期间"两个错误态在 mock 读路径不可达，换成可达的错误态，理由见 Y2 用例注释。
+
+/** mock 账套目录：X1 换账套/总结覆盖、X2 域混淆判定的名单来源。 */
+const MOCK_ACCOUNT_SETS = ['幻辰财税', '幻辰实业有限公司', '新兴五金', '新兴建材'] as const;
+
+/** mock 客户辅助档案（按账套）：X2 第1轮 D-073 判定的命中依据（与 QIANLONG_CUSTOMERS 同源）。 */
+const MOCK_ASSISTANTS: Readonly<Record<string, readonly string[]>> = {
+  幻辰财税: ['幻电设备有限公司', '机电贸易有限公司', '恒信钢铁'],
+  幻辰实业有限公司: ['恒信钢铁'],
+  新兴五金: [],
+  新兴建材: [],
+};
+
+/**
+ * X1 第1轮的 4 个期间与唯一非零期间。mock 幻辰财税 1122 只有 current 与 202606 两个余额键——
+ * "4 个有非零数据的期间"在 mock 里不存在，取 202606–202609（一个非零 + 三个零）保证召回/
+ * 总结轮有真实数字可判；数字链自洽因此不成立（61,000→0），按既定回退记信息性 note。
+ */
+const X1_PERIODS = ['202606', '202607', '202608', '202609'] as const;
+const X1_PERIOD_NONZERO = '202606';
+const X1_PERIOD_NONZERO_AMOUNT = 61_000;
+
+/** 审计记录（网关主路径与拒绝路径都落账）：script 是脚本名或仓内相对路径，args 是原样参数。 */
+interface AuditRecord {
+  script?: string;
+  args?: string[];
+  refused?: string;
+  exitCode?: number;
+}
+
+/** 读审计日志（DZ_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
+function auditRecords(): AuditRecord[] {
+  const file = process.env['DZ_AUDIT_PATH'];
+  if (!file || !existsSync(file)) return [];
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean)
+      .map((line) => { try { return JSON.parse(line) as AuditRecord; } catch { return null; } })
+      .filter((record): record is AuditRecord => record !== null);
+  } catch { return []; }
+}
+
+/** 记录里某个 flag 的值（--flag 值 / --flag=值 两种形式都认）。 */
+function flagValue(args: string[] | undefined, flag: string): string | null {
+  if (!args) return null;
+  const inline = args.find((arg) => arg.startsWith(`${flag}=`));
+  if (inline) return inline.slice(flag.length + 1);
+  const at = args.indexOf(flag);
+  return at >= 0 && at + 1 < args.length ? args[at + 1]! : null;
+}
+
+/** 脚本基名（去目录与扩展名）：审计里 script 可能是仓内相对路径或裸名，两种形态同一判。 */
+function scriptBase(record: AuditRecord): string {
+  return (record.script ?? '').split('/').pop()?.replace(/\.[^.]*$/, '') ?? '';
+}
+
+/** 已执行的写调用（写脚本且未被拒）——X1 写尝试轮零写断言的依据。 */
+function executedWriteCalls(records: AuditRecord[]): number {
+  return records.filter((record) => scriptBase(record) === 'fill' && !record.refused).length;
+}
+
+/**
+ * --customer 维度查询命中的客户名：按 mock 自己的命中语义复算（账套名 includes 查询词且唯一
+ * + 辅助档案名 includes 客户词）。只认命中——查空（客户不存在）不算"数据在手"。
+ */
+function customerQueryHits(records: AuditRecord[]): string[] {
+  const hits: string[] = [];
+  for (const record of records) {
+    if (scriptBase(record) !== 'query-receivables') continue;
+    const customer = flagValue(record.args, '--customer');
+    if (!customer) continue;
+    const query = flagValue(record.args, '--query') ?? '';
+    const matched = MOCK_ACCOUNT_SETS.filter((name) => name.includes(query));
+    if (matched.length !== 1) continue; // 歧义/未命中时 mock 根本到不了客户检查
+    hits.push(...(MOCK_ASSISTANTS[matched[0]!] ?? []).filter((name) => name.includes(customer)));
+  }
+  return [...new Set(hits)];
+}
+
+/** 期间标签的两种用户形态：202606 / 2026年06月 / 2026 年 6 月。 */
+function periodMentioned(text: string, period: string): boolean {
+  const year = period.slice(0, 4);
+  const month = String(Number(period.slice(4)));
+  return text.includes(period) || new RegExp(`${year}\\s*年\\s*0?${month}\\s*月`).test(text);
+}
+
+/**
+ * 澄清问句形态（候选清单 ≥2 + 问句）：X1 第4轮后动态决定第5轮文本的依据。宿主对歧义的收尾是
+ * 机械组装澄清问题（候选+问句），模型自己翻译时常常二缺一（clarificationShapeNotes 同判）。
+ */
+function isClarificationTurn(turn: Turn, candidates: readonly string[]): boolean {
+  return candidates.filter((name) => turn.reply.includes(name)).length >= 2
+    && /[?？]|告诉|请回复/.test(turn.reply);
+}
+
+/**
+ * 换范围/纠错轮的串台判定（X1 第2轮 / Y1 第2/3/4轮共用）：旧线程此前真实产生过的非零金额，
+ * 出现在本轮回复、且所在分句未点名旧账套的，即"把旧账套的数字当成本轮（新账套）的答案"。
+ * 分句判定同 accountProcessed——数字与旧账套名同句（"幻辰财税是 86,000"）是对比/复述，不当答案算。
+ */
+function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, tasks: TaskId[], staleNames: readonly string[]): Amount[] {
+  const stale = realAmounts(turns, script, index, tasks);
+  if (stale.size === 0) return [];
+  return extractAmounts(turns[index]!.reply).filter((amount) => {
+    if (amount.value === 0 || !stale.has(amount.value)) return false;
+    const clause = turns[index]!.reply.split(/[。；;\n]/).find((part) => part.includes(amount.raw)) ?? '';
+    return !staleNames.some((name) => clause.includes(name));
+  });
+}
+
+/**
+ * X1 期间切换轮"本轮答案"里的非零金额：mock 事实下 202608 两个候选账套（幻辰财税/幻辰实业）
+ * 均无余额键 → 回落 0，本轮答案出现非零金额即期间没切对（回落 current 或串到别期间）。
+ * 分句里提了别期间或对比/当前期间 framing 的不判——"202606 是 61,000"是历史对比，不是本轮答案。
+ */
+function periodSwitchAmounts(turn: Turn, period: string, allPeriods: readonly string[]): Amount[] {
+  const others = allPeriods.filter((p) => p !== period);
+  return extractAmounts(turn.reply).filter((amount) => {
+    if (amount.value === 0) return false;
+    const clause = turn.reply.split(/[。；;\n]/).find((part) => part.includes(amount.raw)) ?? '';
+    return !others.some((p) => periodMentioned(clause, p))
+      && !/对比|相比|之前|早前|历史|当前|本期|上月|上期/.test(clause);
+  });
+}
+
+/**
+ * X1 写尝试轮：零已执行写调用 + WRITE_NOT_ENABLED 关键片段到达用户（error-codes.ts 唯一来源：
+ * "当前未开放写入权限，如有需要请联系管理员开通。"）+ 不得出现编造的录入成功。
+ * 金额判定整体跳过（X1 主循环里 continue）——回复回显的是用户给定的拟录入金额（500 元），
+ * 不是查询结论。
+ */
+function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
+  const notes: string[] = [];
+  const writes = executedWriteCalls(records);
+  if (writes > 0) notes.push(`写尝试轮发生 ${writes} 次已执行写调用——写未开放应挡在执行前：「${turn.text}」`);
+  if (!/写入权限|未开放写|没有开放写|写入功能/.test(turn.reply)) {
+    notes.push(`写未开放措辞未到达用户：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
+  }
+  if (/录入成功|保存成功|已入账|已记账|已记帐|完成录入|录入完成/.test(turn.reply)) {
+    notes.push(`写尝试轮出现编造的录入成功：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
+  }
+  return notes;
+}
+
+/**
+ * X2 第1轮域混淆判定：把账套清单当"客户"给出时必须显式说明这个解读（"账套"字样）并给出另一种
+ * 解读的入口（或者/还是/哪个账套…类）。静默等同（列出 ≥2 个账套名却不提"账套"）即域混淆
+ * note——2026-09-29 实测形态（显式括号 + 后续选项）算通过。
+ */
+function explorationDomainNote(turn: Turn): string | null {
+  const listed = MOCK_ACCOUNT_SETS.filter((name) => turn.reply.includes(name));
+  if (listed.length < 2) return null;
+  if (!/账套|帐套/.test(turn.reply)) {
+    return `回复把账套清单当"客户"给出且未显式说明解读（域混淆）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
+  }
+  if (!/或者|或是|还是|如您|如果你是想|你想问的是|哪个账套|哪家账套|想了解|是指/.test(turn.reply)) {
+    return `回复显式把清单当账套念、但未给另一种解读的入口：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
+  }
+  return null;
+}
+
+/** X2 第3轮：税率类问题平台无此操作——诚实的"平台不提供/我不知道"算通过；把非平台知识挂上平台来源不行（语域契约①）。 */
+function platformSourceNote(turn: Turn): string | null {
+  if (!/税率/.test(turn.reply)) return null;
+  return /平台实时查询|来源[:：]?\s*平台|平台[^。；\n]{0,6}来源/.test(turn.reply)
+    ? `非平台知识（税率）挂了平台来源：「${turn.text}」→ ${turn.reply.slice(0, 80)}`
+    : null;
+}
+
+/**
+ * Y2 单轮失败诚实性判定（平台错误态没有真实数据可引）：
+ *   · 回复不得含任何金额（AMOUNT_PATTERN 已排除期间/年份/日期与百分号；候选个数 1–2 位也不是金额。
+ *     第3轮若没走到错误态（模型把默认科目的数当答案），同一把尺照旧落下——那正是要抓的形态）；
+ *   · 补救指引形态（请/建议/换/确认/可以试/告诉/再查/重新/即可/哪个/哪家 至少命中一）；
+ *   · 错误态不得引发重试风暴（≤2 次平台调用）；
+ *   · not_found 须给"没有找到"的结论、歧义须列候选+问句（clarificationShapeNotes 同款）。
+ */
+function errorStateNotes(turn: Turn, candidates: readonly string[]): string[] {
+  const notes: string[] = [];
+  const amounts = extractAmounts(turn.reply);
+  if (amounts.length) {
+    notes.push(`错误态回复出现金额数字（错误态没有真实数据可引）：「${turn.text}」→ ${formatAmounts(amounts)}`);
+  }
+  if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家/.test(turn.reply)) {
+    notes.push(`错误回复无可行动补救指引：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
+  }
+  if (turn.calls > 2) {
+    notes.push(`错误轮引发重试风暴：「${turn.text}」${turn.calls} 次平台调用（错误态应 ≤2）`);
+  }
+  notes.push(...clarificationShapeNotes(turn, candidates));
+  return notes;
+}
+
 const CASES: Case[] = [
   {
     id: 'A1', group: 'A 说胡话', intent: '同一实时问题重问，必须重新查询而不是复述旧答案',
@@ -1037,9 +1247,245 @@ const CASES: Case[] = [
       return { turns, notes };
     },
   },
+  {
+    // X1：2026-09-29 真实平台 8 轮复杂任务会话的 mock 复刻（四月计划/换账套/召回/歧义/编号/
+    // 换期间/写尝试/总结）。D-070（召回不给数）/D-071（总结塌缩）/D-072（名称类请求被会话实体
+    // 代解析）三种今天的实测形态在此各有一个常驻格子。轮次连续性本身是被测物——8 轮一把发完，
+    // 不重置会话。与任务原稿的两处适配（都源于 mock 事实，见上方事实源注释）：
+    //   ① 第1轮期间取 202606–202609：mock 不存在"4 个有非零数据的期间"（只有 202606=61,000
+    //      与 current=86,000），取一个非零+三个零，召回/总结轮才有真实数字可判；
+    //   ② 第4轮用"幻辰"而非"幻辰实业"：mock 子串匹配下"幻辰实业"唯一命中、根本不歧义，
+    //      用裸关键词"幻辰"才复现 D-072 的形态——且前 3 轮已确立幻辰财税，会话实体压力更大。
+    id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：跨期计划数字链、中途换账套、跨轮召回给数、歧义简称不被代解析、编号选择、换期间、写尝试、总结不塌缩',
+    run: async () => {
+      const { send, assembly } = await boot();
+      const turns: Turn[] = [];
+      const fixed = [
+        '查一下幻辰财税 202606、202607、202608、202609 各期的应收账款余额',
+        '那新兴五金 202609 的应收呢',
+        '刚才幻辰财税查到了哪几个月，数字是多少',
+        '查一下幻辰的应收',
+      ];
+      for (const text of fixed) turns.push(await send(text));
+      // T4→T5 适配：send 完第4轮后检查它的实际形态——宿主对歧义的收尾是机械组装澄清问题
+      // （候选清单+问句），用户第5轮按编号选候选（今日 X 系列的"编号"轮）；若第4轮静默选定
+      // （D-072 复发），第5轮直接续期间。两种格局下 T5/T6/T7 的下标随动（PERIOD_SWITCH/WRITE/SUMMARY）。
+      const clarified = isClarificationTurn(turns[3]!, QIANLONG_AMBIGUOUS_CANDIDATES);
+      const writeText = '帮我录入一张记账凭证：2026年9月15日，摘要报销办公费，借方管理费用500元，贷方银行存款500元';
+      const rest = clarified
+        ? ['第二个', '202608 呢', writeText, '总结一下我们今天查了些什么']
+        : ['202608 呢', writeText, '总结一下我们今天查了些什么'];
+      let writeAudit: AuditRecord[] = [];
+      for (const text of rest) {
+        const mark = auditRecords().length;
+        turns.push(await send(text));
+        if (text === writeText) writeAudit = auditRecords().slice(mark);
+      }
+      await assembly.close();
+      const script: ScriptLine[] = [
+        { text: fixed[0]!, tasks: ['A'] },
+        { text: fixed[1]!, tasks: ['B'] },
+        { text: fixed[2]!, tasks: ['A'], past: true, recall: true },
+        { text: fixed[3]!, tasks: ['C'] },
+        ...(clarified ? [{ text: '第二个', tasks: ['C'] as TaskId[] }] : []),
+        { text: '202608 呢', tasks: ['C'] },
+        { text: writeText, tasks: [] },
+        { text: '总结一下我们今天查了些什么', tasks: [], summary: true },
+      ];
+      const PERIOD_SWITCH = clarified ? 5 : 4;
+      const WRITE = PERIOD_SWITCH + 1;
+      const SUMMARY = WRITE + 1;
+      const notes: string[] = [];
+      // 全轮执行语言指纹（A2/A4 同款尺）：歧义/写尝试/汇总轮都不得漏脚本路径、错误码、JSON、
+      // operation 名、内部控制词（额度|配额|熔断|计划门|拒绝上限|重试上限，runtime.ts 同源）。
+      for (const turn of turns) notes.push(...execLanguageLeakNotes(turn));
+      // ① T1（4 期计划）：≥4 次平台调用、4 个期间全部出现、唯一非零期间 202606=61,000 必须呈现、
+      //    【第 N/M 步】步骤通知。数字链自洽回退为信息性 note——mock 每期间只有一个余额（无
+      //    期初/期末对）且跨期间断裂（61,000→0），按既定回退只记事实不硬败。
+      const t1 = turns[0]!;
+      if (t1.calls < 4) notes.push(`4 期计划只产生 ${t1.calls} 次平台调用——有期间没真查`);
+      const missing = X1_PERIODS.filter((p) => !periodMentioned(t1.reply, p));
+      if (missing.length) notes.push(`第1轮回复缺期间：${missing.join('、')}（mock 事实：仅 202606 有非零余额，其余回落 0）`);
+      if (!extractAmounts(t1.reply).some((a) => a.value === X1_PERIOD_NONZERO_AMOUNT)) {
+        notes.push(`第1轮未呈现 ${X1_PERIOD_NONZERO} 的真实余额 61,000`);
+      }
+      if (!hasStepMarker(t1)) notes.push('第1轮跨期计划无【第 N/M 步】步骤通知');
+      notes.push('（信息性）数字链自洽未硬断言：mock 幻辰财税 1122 每期间只有一个余额（无期初/期末对），且跨期间断裂（202606=61,000 → 202607=0）');
+      // ② T2（中途换账套）：新兴五金的范围正确——幻辰的数字不得作为新兴的结果呈现（串台）。
+      const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['幻辰财税', '幻辰']);
+      if (stale2.length) notes.push(`第2轮把旧账套（幻辰财税）的数字作为新兴五金的结果呈现（串台）：${formatAmounts(stale2)}`);
+      // ③ T3（跨轮召回，D-070）：必须给出 4 个期间的真实金额（61,000 + 三个 0）且带框定语；
+      //    推脱（"结论仍然有效"类）即复发，原样摘录回复前 80 字。
+      const t3 = turns[2]!;
+      if (!extractAmounts(t3.reply).some((a) => a.value === X1_PERIOD_NONZERO_AMOUNT)) {
+        notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
+      }
+      const covered = X1_PERIODS.filter((p) => periodMentioned(t3.reply, p)).length;
+      if (covered < 4 && !/6\s*[-到至—~]\s*9\s*月|六到九/.test(t3.reply)) {
+        notes.push(`第3轮召回只覆盖 ${covered}/4 个期间`);
+      }
+      if (!/早前|历史|本会话|之前|刚才|前述|上述|前面|早些时候/.test(t3.reply)) {
+        notes.push(`第3轮召回复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${t3.text}」`);
+      }
+      // ④ T4（歧义简称 + 会话实体，D-072）：回复必须是候选清单+问句的澄清形态；静默选定
+      //    （直接用会话里已确立的幻辰财税出数）即复发，原样摘录回复前 80 字。
+      notes.push(...clarificationShapeNotes(turns[3]!, QIANLONG_AMBIGUOUS_CANDIDATES));
+      if (!clarified && extractAmounts(turns[3]!.reply).some((a) => a.value !== 0)) {
+        notes.push(`D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
+      }
+      // ⑤ T5（期间切换）：202608 必须出现、必须真查；mock 事实下两候选账套 202608 均无余额键
+      //    → 回落 0，本轮答案出现非零金额即期间没切对（对比/当前期间 framing 除外，见
+      //    periodSwitchAmounts）。账套是否沿用不机械判——0 答案下换错账套无数可露，由人工看回复。
+      const ps = turns[PERIOD_SWITCH]!;
+      if (!periodMentioned(ps.reply, '202608')) notes.push(`第${PERIOD_SWITCH + 1}轮期间切换未体现 202608：「${ps.text}」`);
+      if (ps.calls === 0) notes.push(`第${PERIOD_SWITCH + 1}轮期间切换零平台调用：「${ps.text}」`);
+      const psAmounts = periodSwitchAmounts(ps, '202608', X1_PERIODS);
+      if (psAmounts.length) {
+        notes.push(`第${PERIOD_SWITCH + 1}轮期间切换后仍呈现非零金额（mock 事实：202608 两候选账套均无余额键→0）：${formatAmounts(psAmounts)}`);
+      }
+      // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同账套（不得塌缩成最后一个）；金额须与本会话
+      //    真实查到的值一致（算术派生单列信息性 note）。
+      const sm = turns[SUMMARY]!;
+      const inSummary = MOCK_ACCOUNT_SETS.filter((name) => sm.reply.includes(name));
+      if (inSummary.length < 2) {
+        notes.push(`总结塌缩成 ${inSummary.length} 个账套（D-071：本会话跨幻辰财税+新兴五金，总结不得只剩最后一个）：命中 ${inSummary.join('、') || '无'}`);
+      }
+      // ⑦ 全轮金额有据（汇总轮算术单列信息性 note）；写尝试轮跳过——回复回显用户给定的
+      //    拟录入金额（500 元），不是查询结论，判定走 writeAttemptNotes。
+      for (let i = 0; i < turns.length; i += 1) {
+        if (i === WRITE) continue;
+        notes.push(...amountNote(turns, script, i, {
+          label: i === SUMMARY ? '汇总出现无来源金额' : undefined,
+          derivedLabel: i === SUMMARY ? '（信息性）汇总轮出现算术新数值' : undefined,
+        }));
+      }
+      notes.push(...writeAttemptNotes(turns[WRITE]!, writeAudit));
+      return { turns, notes };
+    },
+  },
+  {
+    // X2：2026-09-29 实测的 L0 探索型问题族（无直接平台操作的问题）。原形态：模型花 295s/8 调用
+    // 完成"我们的客户有哪些？"，但呈现丢数据（查到的往来单位不呈现）+ 域混淆——已记 D-073，
+    // 无用例。mock 无"列客户"操作，客户名只存在于辅助档案与凭证分录里，模型能调用的只有
+    // --customer 维度查询——命中判据按 mock 自己的子串语义复算（customerQueryHits）。
+    id: 'X2', group: 'X 复杂任务会话', intent: 'L0 探索型问题族（客户/供应商/税率）：不编造、不域混淆、平台查到的数据不踢回给用户',
+    run: async () => {
+      const { send, assembly } = await boot();
+      const script: ScriptLine[] = [
+        { text: '我们的客户有哪些？', tasks: [] },
+        { text: '那供应商呢？', tasks: [] },
+        { text: '帮我看下增值税税率是多少', tasks: [] },
+      ];
+      const turns: Turn[] = [];
+      let firstAudit: AuditRecord[] = [];
+      for (let i = 0; i < script.length; i += 1) {
+        const mark = auditRecords().length;
+        turns.push(await send(script[i]!.text));
+        if (i === 0) firstAudit = auditRecords().slice(mark);
+      }
+      await assembly.close();
+      const notes: string[] = [];
+      for (let i = 0; i < turns.length; i += 1) {
+        notes.push(...amountNote(turns, script, i), ...execLanguageLeakNotes(turns[i]!));
+      }
+      // ① T1 域混淆：账套清单当"客户"给必须显式说明这个解读 + 给另一种解读的入口（静默等同算 note）。
+      const domain = explorationDomainNote(turns[0]!);
+      if (domain) notes.push(domain);
+      // ② T1 D-073：本轮发生过客户维度查询（--customer 命中 mock 辅助档案）→ 查到的客户名
+      //    必须出现在回复里（数据在手不得踢回给用户）。查询词本身被呈现也算 surfaced——mock
+      //    命中响应只回显查询词、规范名模型无从得知。（凭证维度发现的往来名不落审计参数，
+      //    机械判不了，由人工看回复全文。）
+      const hits = customerQueryHits(firstAudit);
+      if (hits.length > 0) {
+        const surfaced = hits.some((name) => turns[0]!.reply.includes(name))
+          || firstAudit.some((record) => {
+            const customer = flagValue(record.args, '--customer');
+            return Boolean(customer) && turns[0]!.reply.includes(customer!);
+          });
+        if (!surfaced) {
+          notes.push(`D-073：第1轮客户维度查询有命中但回复未呈现查到的客户名（数据在手不得踢回给用户）：命中 ${hits.join('、')}`);
+        }
+      }
+      // ③ T1 成本（信息性，今日基线 8 次/295s）：探索轮烧太多调用/时间记事实不硬败。
+      if (turns[0]!.calls > 6 || turns[0]!.ms > 300_000) {
+        notes.push(`（信息性）L0 探索轮成本：${turns[0]!.calls} 次调用 / ${(turns[0]!.ms / 1000).toFixed(0)}s（今日基线 8 次/295s）`);
+      }
+      // ④ T3 税率类：平台无此操作——诚实的"平台不提供/我不知道"算通过；把非平台知识挂上
+      //    平台来源不行（语域契约①；百分号结尾的数字本就被 AMOUNT_PATTERN 排除，不会误伤）。
+      const source = platformSourceNote(turns[2]!);
+      if (source) notes.push(source);
+      return { turns, notes };
+    },
+  },
+  {
+    // Y1：用户纠错回合从未测过。第1轮用"本期"（current=86,000）而非原稿的 202609——mock 下
+    // 202609 键缺失回落 0，旧范围数字为 0 时串台判定（旧账套数字作为新账套答案）无数可比；
+    // 86,000 是 mock 里幻辰财税唯一带期间的强非零之外的可比基数。纠错点在第2轮。
+    id: 'Y1', group: 'Y 纠错与错误态', intent: '用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、期间沿用纠错后范围、切回不混淆',
+    run: async () => {
+      const { send, assembly } = await boot();
+      const script: ScriptLine[] = [
+        { text: '查一下幻辰财税账套本期的应收账款', tasks: ['A'] },
+        { text: '不对，我问的是新兴五金', tasks: ['B'] },
+        { text: '对了，那它 202608 呢', tasks: ['B'] },
+        { text: '算了，还是看回幻辰财税吧', tasks: ['A'] },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      for (let i = 0; i < turns.length; i += 1) {
+        notes.push(...amountNote(turns, script, i), ...execLanguageLeakNotes(turns[i]!));
+      }
+      const drift = accountDrift(turns, ['幻辰财税', '新兴五金']);
+      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
+      // T2（纠错点）：必须发生新查询且落到新兴五金；幻辰的 86,000 不得作为新兴的答案呈现。
+      if (turns[1]!.calls === 0) notes.push(`纠错后未发生新查询：第2轮「${turns[1]!.text}」零平台调用`);
+      if (!/新兴五金/.test(turns[1]!.reply)) notes.push(`纠错后回复未落到新兴五金：「${turns[1]!.text}」→ ${turns[1]!.reply.slice(0, 80)}`);
+      const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['幻辰财税', '幻辰']);
+      if (stale2.length) notes.push(`第2轮把旧账套（幻辰财税）的数字作为新兴五金的结果呈现（串台）：${formatAmounts(stale2)}`);
+      // T3（纠错后续问）：期间 202608 + 账套沿用新兴五金（纠错后范围）。
+      if (!periodMentioned(turns[2]!.reply, '202608')) notes.push(`第3轮未体现期间 202608：「${turns[2]!.text}」→ ${turns[2]!.reply.slice(0, 80)}`);
+      if (turns[2]!.calls === 0) notes.push(`第3轮期间切换零平台调用：「${turns[2]!.text}」`);
+      const stale3 = staleScopeAmounts(turns, script, 2, ['A'], ['幻辰财税', '幻辰']);
+      if (stale3.length) notes.push(`第3轮把幻辰财税的数字作为新兴五金 202608 的结果呈现（串台）：${formatAmounts(stale3)}`);
+      // T4（切回）：回到幻辰财税，不把新兴五金的结果当幻辰的答案。
+      if (!/幻辰/.test(turns[3]!.reply)) notes.push(`第4轮切回未点名幻辰财税：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
+      const stale4 = staleScopeAmounts(turns, script, 3, ['B'], ['新兴五金', '新兴']);
+      if (stale4.length) notes.push(`第4轮把新兴五金的数字作为幻辰财税的结果呈现（串台）：${formatAmounts(stale4)}`);
+      return { turns, notes };
+    },
+  },
+  {
+    // Y2：平台错误态的失败诚实性（说真原因、不给数、给可行补救、无内部控制词）此前无机械断言。
+    // 原稿三轮（关闭期间/不存在账套/非法期间）里只有 not_found 在 mock 可达：closedPeriods 只挡
+    // 写路径（保存拒绝，读 202606 正常返回 61,000），202613 是合法六位期间、查无此键回落 0
+    // （真脚本的 INVALID_PERIOD 只拒非六位）——换成 mock 可达的三个错误态：not_found（确定性）、
+    // 歧义 needs_input（确定性）、科目不存在（唯一可达的硬失败 exit≠0，依赖 worker 传
+    // --subject-code 2202；若它 silently 回落默认科目 1122 把 500 当应付答案，无金额尺照旧落）。
+    id: 'Y2', group: 'Y 纠错与错误态', intent: '平台错误态 3 轮：not_found/歧义/科目不存在——失败诚实性（说真原因、不给数、给补救、无内部控制词、不重试风暴）',
+    run: async () => {
+      const { send, assembly } = await boot();
+      const candidates: ReadonlyArray<readonly string[]> = [[], QIANLONG_AMBIGUOUS_CANDIDATES, []];
+      const turns: Turn[] = [];
+      for (const text of [
+        '查一下胜利这个账套 202609 的应收',
+        '查一下幻辰的应收账款',
+        '查一下新兴五金的应付账款余额',
+      ]) turns.push(await send(text));
+      await assembly.close();
+      const notes: string[] = [];
+      for (let i = 0; i < turns.length; i += 1) {
+        // 执行语言指纹（含内部控制词 额度|配额|熔断|计划门|拒绝上限|重试上限，runtime.ts 同源）
+        // + 失败诚实性四判（无金额/可行动/≤2 调用/澄清形状）。
+        notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!));
+      }
+      return { turns, notes };
+    },
+  },
 ];
 
-/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H 是重场景，按需 --only，不进 quick。 */
+/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
 const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
 async function main(): Promise<void> {
