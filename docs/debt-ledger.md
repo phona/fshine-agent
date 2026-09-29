@@ -1008,3 +1008,19 @@
 | **归因不准（新）** | ⚠️ 回复说“账号密码校验未通过”，**真因是平台登录页改版**：手机号输入框前多了一道“欢迎使用”页+下拉框（截图 .runtime/screens/login-pwd-fail.png），登录自动化卡在旧选择器。平台登录层把页面结构失败归因为凭据错误，用户被导向“查密码”而真解是“更新登录自动化” |
 | **D-076 平台登录页改版** | **待办（17dz）**：登录流程需适配新页面（欢迎页下拉→手机号表单）。修好前真实模式所有查询均为诚实失败。这正是 web-automation-bootstrap 技能设计的“页面改版”场景 |
 | 瞬时崩溃场景参照 | Lane C 冒烟集 Run1（6 次调用全 exit 1 Page crashed）：模型每轮约 2 次尝试、轮轮诚实报告、零编造——瞬时失败有轮内有界重试，持续失败一次即报 |
+
+---
+
+## 三路并行收尾记录（2026-09-29 晚，D-076+平台健康+mock 无数据）
+
+**总验收：三路全收，真实模式端到端打通。**
+
+| 项 | 结果 |
+|---|---|
+| **D-076 登录适配** | ✅ **已关**。17dz `08f6b6a`：登录页是 JS hydrate 渲染，旧脚本显式等待不足即报“元素缺失”（15:52 的“改版”判断含网络抖动成分）；login-pwd.js +153 适配，失败分因 `LOGIN_PAGE_CHANGED`/`AUTH_REJECTED` 进 error-codes.js（test-auth.js +49）。实证：LOGIN_STILL_VALID + 真实查询返回真数（幻亨纸业 202609 应收 1,234,567.89，与冒烟集一致） |
+| **平台健康信号** | ✅ 已关。fshine `11a9a50`：连续 AUTH 类失败（码级判据，PLATFORM_AUTH_ERROR_CODES 七码）≥2 → 会话冷却 10 分钟（`FSHINE_PLATFORM_COOLDOWN_MS`）+ 宿主合成 PLATFORM_UNAVAILABLE 终稿，冷却期零平台调用；18 单测+e2e+双向变异。`fcb68ae` 补纳两个新登录码 |
+| **mock 无数据期间** | ✅ 已关。17dz `f7eea14`：键缺失 → `not_found + PERIOD_NO_DATA` + availablePeriods；键在值为零仍 completed（不变性有测试）。fshine `021d706` 校准探针/e2e。X1 复跑：模型改口“202608 无记录，平台未返回该期间数据”，无一处把无数据说成 0 |
+| **D-077（新）企微同账号连接即杀** | **watch（平台行为）** | 17:16 并行 lane 期间第二个同 bot 凭据连接建立，生产服务按企微规则被踢下线且**无人重启**（直到我 20 分钟后发现）。杀因看清（日志 `a new connection has been established`），非代码缺陷；但它证明**进程守护不是可选项**——服务死了不会自己回来 |
+| 满载 flake | watch | `pi-coding-driver-activation`“超时不补刀”（40ms deadline）满载时偶发红，单独跑/复跑均过，基线本身同样 flake |
+
+**遗留小尾巴**（lane 报告，均不急）：e2e 夹具叙述体还写“余额为 0 元”（约 10 处，与新语义不符但断言不查）；`availablePeriods` 把内部 token `current` 漏到用户面前；`EXECUTION_FACT_CONTENT_LIMIT=300` 对无数据信封偏紧；mock 的 PERIOD_NO_DATA(not_found) 与真脚本 SUBJECT_NOT_FOUND(failed) 码不同族；D-075 多步计划单步写关闭走模型转述；D-073 探索型 SKILL 映射未做。
