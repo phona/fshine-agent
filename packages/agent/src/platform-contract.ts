@@ -5,7 +5,7 @@
  * 平台输出契约 = RESULT 单行 JSON 信封（schema v1，E2；行协议已随 E2 退役，解析仅认信封）；
  * 操作调用统一使用 operations.json 注册名（E1），不引用脚本文件路径。
  *
- * 两类码级判定收口在这里：登录态失败（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
+ * 两类码级判定收口在这里：平台不可用族（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
  * （SELECTION_CLARIFICATION_CODES）——码是数据，消息文案不是，平台演进只改集合不改编排层。
  */
 import path from 'node:path';
@@ -162,29 +162,29 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
 }
 
 /**
- * 平台健康判据（Lane 2 治标补法）：本回合的平台交互是否以**登录/凭据类失败**收尾。
+ * 平台健康判据（Lane 2 治标补法）：本回合的平台交互是否以**平台侧不可用**收尾。
  *
  * 机械判据（不猜、不嗅探文案）：平台错误信封的 `error.code ∈ PLATFORM_AUTH_ERROR_CODES`。
  * 这一个判据同时覆盖两句话——
  *   ① "平台返回 AUTH_* 类错误码"：17dz 错误码表「登录态」一组的四档（AUTH_EXPIRED /
  *      AUTH_REDIRECTED_TO_LOGIN / AUTH_WORKBENCH_NOT_READY / AUTH_UNKNOWN，表源：
  *      17dz `src/lib/error-codes.js` 的登录态段）；
- *   ② "exit 非零且错误信封属登录/凭据族"：领域脚本把 AuthExpiredError 归一为
+ *   ② "exit 非零且错误信封属平台不可用族"：领域脚本把 AuthExpiredError 归一为
  *      NEEDS_LOGIN（`query-receivables.js` 的 errorCodeOf），该信封随网关 exit 1 出得去
  *      （runner.js：信封非 ok 即 code 1）——码在信封里，"exit 非零"是同一事实的另一面，
  *      所以信封码判定即覆盖该分句，不需要在宿主侧重判退出码。
  * 码集合本身收口在 platform-contract（唯一适配层）：平台演进只改集合，不改编排层。
  *
  * 只看**收尾那一条**信封（与 selectionClarificationFromResponses 同一边界）：早先的
- * 登录抖动若随后成功（completed），平台健康已恢复，旧失败不得计入本轮——否则一次
+ * 平台抖动若随后成功（completed），平台健康已恢复，旧失败不得计入本轮——否则一次
  * runWithAuth 自动重登录自愈会把会话误判成"平台异常"，冷却也就失去了事实依据。
  */
 export interface PlatformAuthFailure {
-  /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合内七码之一。 */
+  /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合（平台不可用族）内八码之一。 */
   code: string;
 }
 
-/** 信封 → 登录/凭据类失败事实；码不在集合内 / 没有信封 → undefined。 */
+/** 信封 → 平台侧不可用事实；码不在集合内 / 没有信封 → undefined。 */
 export function platformAuthFailureOf(envelope: PlatformEnvelope | null): PlatformAuthFailure | undefined {
   const code = envelope?.error?.code;
   if (!envelope || !code || !PLATFORM_AUTH_ERROR_CODES.has(code)) return undefined;
@@ -192,7 +192,7 @@ export function platformAuthFailureOf(envelope: PlatformEnvelope | null): Platfo
 }
 
 /**
- * tool_result 正文 → 登录/凭据类失败事实：**本回合最后一条带信封的平台响应**决定收尾
+ * tool_result 正文 → 平台侧不可用事实：**本回合最后一条带信封的平台响应**决定收尾
  * 状态（与 selectionClarificationFromResponses 同一把尺、同一边界）。收尾信封是 completed
  * （数据答案）或其他错误码 → undefined：那类回合平台健康没有坏到要冷却。
  */
@@ -240,9 +240,10 @@ export function selectionClarificationFromResponses(
 }
 
 /**
- * 平台登录态类错误码集合（17dz `src/lib/error-codes.js` 的 AUTH_* 四档 + 脚本层
- * 归一码 NEEDS_LOGIN）。**码是数据，消息文案不是**——平台改文案不影响判定，
- * 新增登录态失败模式时往这里加码（收口在唯一适配层）。
+ * 平台**不可用族**错误码集合（17dz `src/lib/error-codes.js` 的 AUTH_* 四档 + 脚本层
+ * 归一码 NEEDS_LOGIN + D-076 登录流程两码 + 平台页面响应超时 PLATFORM_TIMEOUT）。
+ * **码是数据，消息文案不是**——平台改文案不影响判定，新增平台侧不可用模式时往这里
+ * 加码（收口在唯一适配层）。
  *
  *   · AUTH_EXPIRED：未登录或登录已过期（runWithAuth 自动重登录也失败）；
  *   · AUTH_REDIRECTED_TO_LOGIN：导航后被踢到登录页，会话已过期；
@@ -250,8 +251,26 @@ export function selectionClarificationFromResponses(
  *   · AUTH_UNKNOWN：无会话 cookie，视为未登录；
  *   · NEEDS_LOGIN：领域脚本对上述 AuthExpiredError 的归一（errorCodeOf）。
  *   · LOGIN_PAGE_CHANGED / AUTH_REJECTED：登录流程自身的两类失败（D-076：平台登录页
- *   改版后元素等不到 vs 元素在但凭据被拒）——都是"登录态拿不到"的收尾形态，计入平台
- *   健康；分因信息在消息里由平台错误码自带，宿主只判族。
+ *     改版后元素等不到 vs 元素在但凭据被拒）——都是"登录态拿不到"的收尾形态，计入平台
+ *     健康；分因信息在消息里由平台错误码自带，宿主只判族。
+ *   · PLATFORM_TIMEOUT：平台页面在 N 秒内没渲染出结果/空态（17dz 对 playwright
+ *     Timeout Error 的码级映射，见 query-receivables 的 errorCodeOf）。
+ *
+ * 为什么超时与登录失效同族（进同一个集合、触发同一套冷却）：两者都是**平台侧不可用**
+ * ——平台这一趟没给出可用答数，且原因在执行层之外（会话失效 / 页面不响应），调用方改
+ * 自己的输入改不好。宿主可采取的动作也完全相同：暂停逐轮重试（每次重试都真发起一次
+ * 浏览器自动化 + 一个限流令牌 + 用户 10-60s 等待，而结论早已确定），冷却期内由宿主合成
+ * PLATFORM_UNAVAILABLE 消息（零内部控制词、零错误码），不把技术码漏给用户。
+ * 2026-09-29 真实模式实测正是这条缺口：一次空等 25s 超时被包成 INTERNAL 兜底码，本族
+ * 不认它 → 模型继续跑计划里的下一步 → 又超时一次 → 用户干等 3 分钟拿到一句归错因的
+ * "平台侧环境问题"。纳入本族后，同类超时第二次即进冷却，回合级拦截。
+ *
+ * 与**不**进本族的码的边界（判据是"谁改得动"，不是消息长短）：
+ *   · 输入类（INVALID_PERIOD / QUERY_REQUIRED / INVALID_FLAG…）：调用方改对参数就能成，
+ *     重试有意义，冷却只会挡住本该成功的调用；
+ *   · 数据三态（ACCOUNT_SET_NOT_FOUND / ACCOUNT_SET_AMBIGUOUS / SUBJECT_NOT_FOUND…）：
+ *     平台答得又准又确定，是成功收尾不是故障；
+ *   · 兜底码（INTERNAL 等）：无平台侧语义，既不该冷却也不该冒充平台不可用。
  */
 export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'AUTH_EXPIRED',
@@ -261,6 +280,7 @@ export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'NEEDS_LOGIN',
   'LOGIN_PAGE_CHANGED',
   'AUTH_REJECTED',
+  'PLATFORM_TIMEOUT',
 ]);
 
 /**
@@ -279,7 +299,7 @@ export function platformErrorCodeOf(error: unknown): string | null {
   return prefixed ? prefixed[1]! : null;
 }
 
-/** 是否登录态类失败：信封/挂码/码前缀判定，不依赖任何中文文案。 */
+/** 是否平台不可用族失败：信封/挂码/码前缀判定，不依赖任何中文文案。 */
 export function isPlatformAuthError(error: unknown): boolean {
   const code = platformErrorCodeOf(error);
   return code !== null && PLATFORM_AUTH_ERROR_CODES.has(code);

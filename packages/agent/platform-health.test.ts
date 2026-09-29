@@ -6,7 +6,7 @@
  * 钉住四件事：
  *   ① 计数推进：1 次失败不冷却 / 2 次连续失败进冷却 / 冷却后探测成功清零 / 探测失败再冷却；
  *   ② 冷却期宿主前置拦截：零平台委派（不是"委派了再失败"），终稿是宿主合成消息；
- *   ③ 判据机械：只认平台错误信封的码（AUTH_* / NEEDS_LOGIN）与委派层挂码，不嗅探文本；
+ *   ③ 判据机械：只认平台错误信封的码（AUTH_* / NEEDS_LOGIN / PLATFORM_TIMEOUT 一族）与委派层挂码，不嗅探文本；
  *   ④ 措辞纪律：合成消息零内部控制词、零业务词、零执行语言指纹（生产指纹尺）。
  *
  * 时钟注入（deps.clock）让"冷却中 / 已到期"可确定性地推，不需要真等 10 分钟。
@@ -161,13 +161,24 @@ describe('AUTH 类失败的机械判据（码级，不嗅探文本）', () => {
     expect(isAuthDelegationFailure(null)).toBe(false);
   });
 
-  it('信封判据 = 平台错误码 ∈ 登录/凭据族集合（AUTH_* 四档 + NEEDS_LOGIN 归一码 + D-076 登录流程两码）', () => {
+  it('信封判据 = 平台错误码 ∈ 平台不可用族集合（AUTH_* 四档 + NEEDS_LOGIN 归一码 + D-076 登录流程两码 + 平台页面响应超时 PLATFORM_TIMEOUT）', () => {
     expect([...PLATFORM_AUTH_ERROR_CODES].sort()).toEqual([
-      'AUTH_EXPIRED', 'AUTH_REDIRECTED_TO_LOGIN', 'AUTH_REJECTED', 'AUTH_UNKNOWN', 'AUTH_WORKBENCH_NOT_READY', 'LOGIN_PAGE_CHANGED', 'NEEDS_LOGIN',
+      'AUTH_EXPIRED', 'AUTH_REDIRECTED_TO_LOGIN', 'AUTH_REJECTED', 'AUTH_UNKNOWN', 'AUTH_WORKBENCH_NOT_READY', 'LOGIN_PAGE_CHANGED', 'NEEDS_LOGIN', 'PLATFORM_TIMEOUT',
     ]);
     for (const code of PLATFORM_AUTH_ERROR_CODES) {
       expect(platformAuthFailureOf(parseEnvelope(authEnvelope(code)))).toEqual({ code });
     }
+  });
+
+  it('PLATFORM_TIMEOUT 信封 → 平台不可用事实（超时与登录失效同族，冷却行为相同）', () => {
+    // 2026-09-29 真实模式实测缺口：页面等待超时旧形态落 INTERNAL 兜底码，本族不认 →
+    // 模型继续跑下一步又超时，用户干等 3 分钟。纳入本族后第二次即进冷却。
+    expect(platformAuthFailureFromResponses([toolResult(authEnvelope('PLATFORM_TIMEOUT'))])).toEqual({ code: 'PLATFORM_TIMEOUT' });
+    // 早先超时之后重查成功（completed）：平台健康已恢复，旧信封不得劫持本回合
+    expect(platformAuthFailureFromResponses([
+      toolResult(authEnvelope('PLATFORM_TIMEOUT')),
+      toolResult('RESULT {"v":1,"op":"finance.query-receivables","status":"completed","data":{"balance":42},"error":null}'),
+    ])).toBeUndefined();
   });
 
   it('platformAuthFailureFromResponses：只看收尾那一条信封（恢复即不算失败）', () => {
@@ -198,10 +209,10 @@ function delegateScript(): ScriptedTurnStep[] {
   return [{ toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: DELEGATE_REQUEST } }] }];
 }
 
-/** 可切换结局的平台委派替身：auth = 登录族失败信封路径；ok = 正常执行路径。 */
-function platformStub(initial: 'auth' | 'ok' = 'auth') {
+/** 可切换结局的平台委派替身：auth = 登录族失败信封路径；timeout = 平台页面响应超时信封路径；ok = 正常执行路径。 */
+function platformStub(initial: 'auth' | 'timeout' | 'ok' = 'auth') {
   let calls = 0;
-  let mode: 'auth' | 'ok' = initial;
+  let mode: 'auth' | 'timeout' | 'ok' = initial;
   const runner: ContextTaskRunner = {
     tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
     run: async (): Promise<SubagentTaskResult> => {
@@ -216,6 +227,16 @@ function platformStub(initial: 'auth' | 'ok' = 'auth') {
           authFailure: { code: 'NEEDS_LOGIN' },
         };
       }
+      if (mode === 'timeout') {
+        // 平台不可用族的另一支：页面等待超时（PLATFORM_TIMEOUT，17dz 对 playwright
+        // Timeout Error 的码级映射）——与登录失效同族，冷却行为相同。
+        return {
+          taskId: `task_${calls}`,
+          text: '本轮查询超时，没有取到任何数据。',
+          execution: { planId: 'plan_x', version: 1, calls: 1 },
+          authFailure: { code: 'PLATFORM_TIMEOUT' },
+        };
+      }
       return {
         taskId: `task_${calls}`,
         text: '本轮实时查询：幻辰财税 202609 应收余额为 51 元。',
@@ -223,7 +244,7 @@ function platformStub(initial: 'auth' | 'ok' = 'auth') {
       };
     },
   };
-  return { runner, calls: () => calls, setMode: (next: 'auth' | 'ok') => { mode = next; } };
+  return { runner, calls: () => calls, setMode: (next: 'auth' | 'timeout' | 'ok') => { mode = next; } };
 }
 
 /** 委派即抛挂码 ToolUserError 的替身（context.ts 失败分类路径，恢复路径用）。 */
@@ -272,6 +293,30 @@ describe('runtime 平台健康接线：计数推进', () => {
     expect(second.text).toBe('平台登录态校验未通过，本轮没有取到任何数据。');
   });
 
+  it('平台页面响应超时（PLATFORM_TIMEOUT）与登录失效同一把尺：第 2 次即进冷却、第三回合零委派', async () => {
+    // 同族判据的落点：超时不是登录问题，但"平台侧不可用 + 调用方改不好 + 重试代价高"
+    // 三条全中，冷却动作必须与 AUTH 族一致（2026-09-29 事故：超时落 INTERNAL 兜底码，
+    // 本族不认 → 模型继续跑下一步又超时 → 用户干等 3 分钟）。
+    const { clock } = fakeClock();
+    const platform = platformStub('timeout');
+    const runtime = runtimeWith({ platformTask: platform.runner, clock });
+
+    const first = await runtime.handleTurn(makeCtx({ requestId: 'req_h28' }), '查一下幻辰财税');
+    expect(first.text).toBe('本轮查询超时，没有取到任何数据。');
+    expect(platform.calls()).toBe(1);
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_h29' }), '再查');
+    expect(platform.calls()).toBe(2);
+
+    const third = await runtime.handleTurn(makeCtx({ requestId: 'req_h30' }), '还查');
+
+    // 冷却期内宿主前置拦截：零平台委派；终稿 = 宿主合成消息（零执行语言指纹）
+    expect(platform.calls()).toBe(2);
+    expect(third.text).toBe(platformUnavailableTextFor(10));
+    expect(executionLanguageFingerprints(third.text)).toEqual([]);
+    expect(third.text).not.toContain('PLATFORM_TIMEOUT');
+  });
+
   it('2 次连续 AUTH 失败进冷却：第三回合零平台委派，终稿是宿主合成消息', async () => {
     const { clock } = fakeClock();
     const platform = platformStub('auth');
@@ -292,8 +337,7 @@ describe('runtime 平台健康接线：计数推进', () => {
     expect(third.text).not.toContain('NEEDS_LOGIN');
   });
 
-  it('非 AUTH 成功回合清零：失败 → 成功 → 失败 不累积到阈值', async () => {
-    const { clock } = fakeClock();
+  it('非 AUTH 成功回合清零：失败 → 成功 → 失败 不累积到阈值', async () => {    const { clock } = fakeClock();
     const platform = platformStub('auth');
     const runtime = runtimeWith({ platformTask: platform.runner, clock });
 
