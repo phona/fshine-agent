@@ -1024,3 +1024,17 @@
 | 满载 flake | watch | `pi-coding-driver-activation`“超时不补刀”（40ms deadline）满载时偶发红，单独跑/复跑均过，基线本身同样 flake |
 
 **遗留小尾巴**（lane 报告，均不急）：e2e 夹具叙述体还写“余额为 0 元”（约 10 处，与新语义不符但断言不查）；`availablePeriods` 把内部 token `current` 漏到用户面前；`EXECUTION_FACT_CONTENT_LIMIT=300` 对无数据信封偏紧；mock 的 PERIOD_NO_DATA(not_found) 与真脚本 SUBJECT_NOT_FOUND(failed) 码不同族；D-075 多步计划单步写关闭走模型转述；D-073 探索型 SKILL 映射未做。
+
+---
+
+## D 堆 hygiene 收尾记录（2026-09-29 晚，两路并行）
+
+| 项 | 结果 |
+|---|---|
+| **current token 泄漏** | ✅ 已关。17dz `64e8bf3`：信封三个用户可见期间字段统一走 `periodLabel()`，`current` 映射为“平台当前期间”；completed 信封的 `data.period` 一并收口（宿主零消费方）。实证：无数据信封 current 原文 0 次，`availablePeriods:["202606","平台当前期间"]`；机读判据（status/code/correctForm）一字未动 |
+| **台账截断偏紧** | ✅ 已关。fshine `9930e79`：`EXECUTION_FACT_CONTENT_LIMIT` 300→1000（一个无数据信封 ≈760 + 叙述体 + 余量）+ 留头也留结论尾（头 880 + 尾句 120）。有界性未破：最坏 5×(60+1002)≈5.3KB 常数。诊断比预想重：旧 300 窗连一个信封都装不下，10.1/10.2 的 `toContain('61000')` 当时靠信封 JSON 凑巧过 |
+| **e2e 夹具叙述体漂移** | ✅ 已关。8 文件 20 处：“…应收余额为 0 元”→“…平台未返回该期间数据”（判定依据=种子键集）。**刻意不改**：合法零余额（1121/2201 current）、真值（61000/86000）、query-saved 的“0 条”（真空列表）、非零负面样本、runtime.test.ts:404 逐字钉的串（留文件 owner） |
+| **多账套真实批量** | ✅ 已跑（L3 升“高”信度）。2 步计划：幻亨纸业真数 1,234,567.89 + 创驰贸易诚实失败（“科目 1122 不存在，**这不代表余额为零**”+补救路径），汇总两者都覆盖、失败步不阻塞、4 次全 read 调用零写零拒 |
+| **C2 三十轮用例** | ✅ 已建未跑（`78192fb`）。30 轮/4 账套/4 次话题切换/2 次澄清-选择/5+1 次召回（带框定断言）/跨轮总结/1 次 not_found；静态自检+运行时两层形态断言 |
+| **观察1：首步无计划通知** | 确认无异常。2 步计划首步累计 2 次调用= AUTO_CALLS 阈值内直接执行，第 2 步累计 4 次超阈才通知——配置行为非缺陷 |
+| **观察2（新）：tsconfig 不含 scripts/** | **待办（小）** | 项目 `tsconfig.json` 的 include 只有 `packages/**`+`apps/**`，探针文件（800+ 行）**不进项目类型检查**——Lane F 靠临时 config 单独检才抓到 4 个真实错误（常量先于声明使用）。修法：tsconfig include 加 scripts/ 或建 scripts/tsconfig（需评估既有 21 个存量 error 的处置，不是加一行就好） |
