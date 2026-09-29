@@ -180,7 +180,7 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
  * runWithAuth 自动重登录自愈会把会话误判成"平台异常"，冷却也就失去了事实依据。
  */
 export interface PlatformAuthFailure {
-  /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合内五码之一。 */
+  /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合内七码之一。 */
   code: string;
 }
 
@@ -249,6 +249,9 @@ export function selectionClarificationFromResponses(
  *   · AUTH_WORKBENCH_NOT_READY：工作台 20s 内没渲染出搜索框，会话可能已过期；
  *   · AUTH_UNKNOWN：无会话 cookie，视为未登录；
  *   · NEEDS_LOGIN：领域脚本对上述 AuthExpiredError 的归一（errorCodeOf）。
+ *   · LOGIN_PAGE_CHANGED / AUTH_REJECTED：登录流程自身的两类失败（D-076：平台登录页
+ *   改版后元素等不到 vs 元素在但凭据被拒）——都是"登录态拿不到"的收尾形态，计入平台
+ *   健康；分因信息在消息里由平台错误码自带，宿主只判族。
  */
 export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'AUTH_EXPIRED',
@@ -256,6 +259,8 @@ export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'AUTH_WORKBENCH_NOT_READY',
   'AUTH_UNKNOWN',
   'NEEDS_LOGIN',
+  'LOGIN_PAGE_CHANGED',
+  'AUTH_REJECTED',
 ]);
 
 /**

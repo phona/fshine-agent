@@ -161,9 +161,9 @@ describe('AUTH 类失败的机械判据（码级，不嗅探文本）', () => {
     expect(isAuthDelegationFailure(null)).toBe(false);
   });
 
-  it('信封判据 = 平台错误码 ∈ 登录/凭据族集合（AUTH_* 四档 + NEEDS_LOGIN 归一码）', () => {
+  it('信封判据 = 平台错误码 ∈ 登录/凭据族集合（AUTH_* 四档 + NEEDS_LOGIN 归一码 + D-076 登录流程两码）', () => {
     expect([...PLATFORM_AUTH_ERROR_CODES].sort()).toEqual([
-      'AUTH_EXPIRED', 'AUTH_REDIRECTED_TO_LOGIN', 'AUTH_UNKNOWN', 'AUTH_WORKBENCH_NOT_READY', 'NEEDS_LOGIN',
+      'AUTH_EXPIRED', 'AUTH_REDIRECTED_TO_LOGIN', 'AUTH_REJECTED', 'AUTH_UNKNOWN', 'AUTH_WORKBENCH_NOT_READY', 'LOGIN_PAGE_CHANGED', 'NEEDS_LOGIN',
     ]);
     for (const code of PLATFORM_AUTH_ERROR_CODES) {
       expect(platformAuthFailureOf(parseEnvelope(authEnvelope(code)))).toEqual({ code });

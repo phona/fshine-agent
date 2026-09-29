@@ -17,12 +17,14 @@ import {
 } from './src/platform-contract';
 
 describe('平台登录态错误码集合（唯一适配层）', () => {
-  it('覆盖 17dz 侧 AUTH_* 四档 + 脚本层归一码 NEEDS_LOGIN', () => {
+  it('覆盖 17dz 侧 AUTH_* 四档 + 脚本层归一码 NEEDS_LOGIN + D-076 登录流程两码', () => {
     expect([...PLATFORM_AUTH_ERROR_CODES].sort()).toEqual([
       'AUTH_EXPIRED',
       'AUTH_REDIRECTED_TO_LOGIN',
+      'AUTH_REJECTED',
       'AUTH_UNKNOWN',
       'AUTH_WORKBENCH_NOT_READY',
+      'LOGIN_PAGE_CHANGED',
       'NEEDS_LOGIN',
     ]);
   });
