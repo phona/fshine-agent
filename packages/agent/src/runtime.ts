@@ -974,11 +974,15 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 形状：提计划被拒/把方案当文本打印）。有执行或交还即重置——合法步骤必然
               // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
               // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
+              // 写关闭步骤不计入熔断：它的零执行是"部署没开放写"的终局事实，不是 worker
+              // 空转——那句话必须由宿主说给用户（见下方 writeClosed 分支），而被熔断汇总
+              // 顶上就永远说不出来了；且熔断汇总结尾的"可以回复继续重跑未完成的步骤"在
+              // 写计划下是假承诺（写类步骤永远不会被放行）。
               if (step && planId && !delegated.pendingPlan) {
                 const outcome = delegated.needs || delegated.clarification ? 'needs' : delegated.execution ? 'done' : 'failed';
                 turn.planStepOutcomes.push({ label: step.label, outcome });
                 turn.planZeroExecSteps = outcome === 'failed' ? turn.planZeroExecSteps + 1 : 0;
-                if (turn.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS) {
+                if (turn.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS && !delegated.writeClosed) {
                   // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
                   // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
                   // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
@@ -1074,11 +1078,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
                 return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
               }
-              // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
-              // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。
-              // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
-              // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
-              if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
               // 写关闭 disclosure（D-075）：本回合的计划被宿主以"部署未开放写入"拦下
               // （计划里出现写类 operation 而能力声明不含 write），delegated.text 是宿主
               // 合成的写关闭话术而非 worker 文本——T7 事故形态（模型停在"录入准备"阶段、
@@ -1087,13 +1086,20 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 校验的零执行标注（"以上是子 Agent 的说明；本轮没有真正查到平台数据"）
               // 也不得覆盖或误标其来源——那句话是宿主说的确定性事实，不是子 Agent 的
               // 说明。delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
-              // 计划模式的步骤结果走上面的 renderPlanStepToolResult 交还模型（那一步的
-              // 事实进工具结果，由 Main Agent 汇总时转述），不在此终结。
+              // 单步与多步同一机械保证：本检查必须在计划模式步骤交还
+              // （renderPlanStepToolResult）**之前**——多步计划里写关闭那一步一旦走交还链，
+              // 宿主原句就只是工具结果里的一段文本，终稿变成 Main Agent 的转述版，
+              // "用户一定知道写权限是关闭的"这个机械保证随之失效（D-075 残留）。
               if (delegated.writeClosed) {
                 turn.delegationFailed = true;
-                console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId }));
-                throw new ToolUserError(stripFootprint(delegated.text) || messageTextFor('WRITE_NOT_ENABLED'));
+                console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId, ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}) }));
+                throw new ToolUserError(renderWriteClosureReply(step, delegated, turn.planStepOutcomes));
               }
+              // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
+              // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。
+              // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
+              // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
+              if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
@@ -1806,6 +1812,31 @@ function renderPlanStepsRelayFallback(
     ...renderPlanStepOutcomeLines(outcomes),
     '可以回复“继续”重跑未完成的步骤，或直接告诉我要调整的范围。',
   ].join('\n');
+}
+
+/**
+ * 写关闭终稿（D-075）：宿主原句终结该轮，多步计划附步骤事实汇总。
+ *
+ * 单步：原句即终稿，一字不差（e2e turn-loop-write-closure 钉住）——与 D-075 主体
+ * 修复的行为完全一致，不因多步支持而漂移。
+ *
+ * 多步计划：写关闭往往只是拆解中的一步（写请求的前置步都是读）。原句必须出现且不被
+ * 转述稀释，所以它整体在前、其余一字不来自模型；前序步骤的真实发生由宿主持有的步骤
+ * 事实汇总兜底——与熔断汇总/复读兜底同一份事实源（renderPlanStepOutcomeLines），只
+ * 陈述步号与结局、不含业务数据，因此也不含财务数字（出口校验的零执行数字拦截不会
+ * 误伤它）。写关闭一步自身按机械事实记 'failed'（确实零平台执行），一并列出。
+ *
+ * 不附"可以回复继续重跑未完成的步骤"（熔断/复读兜底的那句）：写关闭是部署级终局
+ * 事实，写类步骤永远不会被放行，那句提示在写计划下是假承诺——宿主不陈无根据的下一步。
+ */
+function renderWriteClosureReply(
+  step: PlanStepLabel | null,
+  delegated: SubagentTaskResult,
+  outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
+): string {
+  const sentence = stripFootprint(delegated.text) || messageTextFor('WRITE_NOT_ENABLED');
+  if (!step) return sentence;
+  return [sentence, '', '本轮拆解的进度如下：', ...renderPlanStepOutcomeLines(outcomes)].join('\n');
 }
 
 /**
