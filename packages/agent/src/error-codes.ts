@@ -14,9 +14,10 @@
  *     必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）。
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
- *     语义照旧，只是不再有第二份手抄本。个别条目（选择类澄清）的 `{query}`/`{n}`/`{list}`
- *     占位符由 `clarificationTextFor` 用平台信封数据填充——动态部分是数据不是措辞，
- *     模板本身仍然零业务词。
+ *     语义照旧，只是不再有第二份手抄本。个别条目带占位符（选择类澄清的
+ *     `{query}`/`{n}`/`{list}` 由 `clarificationTextFor` 用平台信封数据填充，平台健康
+ *     冷却的 `{minutes}` 由 `platformUnavailableTextFor` 用宿主时钟数据填充）——动态
+ *     部分是数据不是措辞，模板本身仍然零业务词。
  *
  * 纪律（与 17dz 表相同）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
@@ -202,6 +203,20 @@ const TABLE: Record<string, CodeEntry> = {
     hintFallback: '请确认准确名称后',
   },
 
+  // ── 平台健康类：连续登录/环境异常后的冷却期话术（Lane 2 治标补法）──────────
+  // 与 DELEGATION_AUTH_FAILURE 的分工：那句说"这一轮失败了、要重新登录"（一次性、
+  // 可行动）；这句说"宿主已暂停自动重试、约 N 分钟后自动恢复"（连续失败后的状态）。
+  // {minutes} 占位符由 platformUnavailableTextFor 用宿主时钟数据填充（与选择类澄清的
+  // {query}/{n}/{list} 同族：动态部分是数据不是措辞，因此不经 messageFor 的 actual
+  // 通道——消息模板给它传 actual 会 fail-loud，纪律不变）。
+  // 措辞纪律：只陈述平台侧异常与下一步动作——不出现任何内部控制词（额度/配额/熔断/
+  // 计划门/拒绝上限/重试上限是宿主机制，用户不需要知道），也不编造原因（登录页改版、
+  // 凭据过期这类归因平台登录层都判不准，宿主更不该猜；"与你的查询内容无关"是唯一
+  // 被陈述的归因边界）。零业务词（泄漏 lint 同款预算）：领域换了域一个字都不用改。
+  PLATFORM_UNAVAILABLE: {
+    text: '平台侧登录或环境异常，与你的查询内容无关。已暂停自动重试，约 {minutes} 分钟后自动恢复尝试；持续异常请联系管理员。',
+  },
+
   // ── 收尾类：用户可见的状态话术（不是错误——码 → 文本一一对应，语义照旧）──
   NO_EXECUTION_CLARIFICATION: {
     text: '我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。',
@@ -351,6 +366,27 @@ export function clarificationTextFor(code: string, data: { query: string; candid
     .replace('{n}', () => String(data.candidates.length))
     .replace('{list}', () => names.join(' '))
     .replace('{hint}', () => hint);
+}
+
+/**
+ * 平台健康冷却话术（Lane 2）：表内模板 + 剩余分钟数机械组装。
+ *
+ * 分钟数是**宿主时钟数据**（冷却剩余量），与澄清模板的信封数据同族——动态部分是数据
+ * 不是措辞，因此不经 messageFor 的 actual 通道（消息模板传 actual 会 fail-loud，纪律
+ * 不变）。取整规则：向上取整且至少 1（"约 0 分钟"不是人话）；非有限值按 1 兜底——
+ * 宿主自己算的数不值得为此失败一个回合，但 NaN 也绝不能渲染给用户。
+ */
+export function platformUnavailableTextFor(minutes: number): string {
+  const entry = entryOf('PLATFORM_UNAVAILABLE');
+  if (!('text' in entry)) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 平台健康话术只接受消息模板类码（它没有三要素）: PLATFORM_UNAVAILABLE`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: 'PLATFORM_UNAVAILABLE' },
+    );
+  }
+  const shown = Number.isFinite(minutes) ? Math.max(1, Math.ceil(minutes)) : 1;
+  // 函数式 replacement：分钟数是数字，没有 $& 之类的替换pattern 歧义（与澄清模板同一写法）
+  return entry.text.replace('{minutes}', () => String(shown));
 }
 
 /** throw 站点专用：三要素消息 + 原码挂回 error.code（调用方继续认码）。 */

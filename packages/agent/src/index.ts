@@ -102,11 +102,14 @@ export {
   parsePrepareOutcome,
   parseVerifyCount,
   isPlatformAuthError,
+  platformAuthFailureOf,
+  platformAuthFailureFromResponses,
   platformErrorCodeOf,
   SELECTION_CLARIFICATION_CODES,
   selectionClarificationOf,
   selectionClarificationFromResponses,
   textFromContent,
+  type PlatformAuthFailure,
   type PlatformEnvelope,
   type PrepareOutcome,
   type SelectionClarification,
@@ -147,12 +150,23 @@ export {
   type TaxAgentRuntimeDeps,
 } from './runtime';
 export {
+  DEFAULT_PLATFORM_AUTH_FAILURE_THRESHOLD,
+  DEFAULT_PLATFORM_COOLDOWN_MS,
+  createPlatformHealthTracker,
+  isAuthDelegationFailure,
+  type PlatformHealthClock,
+  type PlatformHealthSnapshot,
+  type PlatformHealthTracker,
+  type PlatformHealthTrackerOptions,
+} from './platform-health';
+export {
   UNKNOWN_ERROR_CODE,
   clarificationTextFor,
   errorFor,
   has,
   messageFor,
   messageTextFor,
+  platformUnavailableTextFor,
   toolUserErrorFor,
 } from './error-codes';
 export {

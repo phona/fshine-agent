@@ -161,6 +161,54 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
   return { code, query, candidates, ...(correctForm ? { correctForm } : {}) };
 }
 
+/**
+ * 平台健康判据（Lane 2 治标补法）：本回合的平台交互是否以**登录/凭据类失败**收尾。
+ *
+ * 机械判据（不猜、不嗅探文案）：平台错误信封的 `error.code ∈ PLATFORM_AUTH_ERROR_CODES`。
+ * 这一个判据同时覆盖两句话——
+ *   ① "平台返回 AUTH_* 类错误码"：17dz 错误码表「登录态」一组的四档（AUTH_EXPIRED /
+ *      AUTH_REDIRECTED_TO_LOGIN / AUTH_WORKBENCH_NOT_READY / AUTH_UNKNOWN，表源：
+ *      17dz `src/lib/error-codes.js` 的登录态段）；
+ *   ② "exit 非零且错误信封属登录/凭据族"：领域脚本把 AuthExpiredError 归一为
+ *      NEEDS_LOGIN（`query-receivables.js` 的 errorCodeOf），该信封随网关 exit 1 出得去
+ *      （runner.js：信封非 ok 即 code 1）——码在信封里，"exit 非零"是同一事实的另一面，
+ *      所以信封码判定即覆盖该分句，不需要在宿主侧重判退出码。
+ * 码集合本身收口在 platform-contract（唯一适配层）：平台演进只改集合，不改编排层。
+ *
+ * 只看**收尾那一条**信封（与 selectionClarificationFromResponses 同一边界）：早先的
+ * 登录抖动若随后成功（completed），平台健康已恢复，旧失败不得计入本轮——否则一次
+ * runWithAuth 自动重登录自愈会把会话误判成"平台异常"，冷却也就失去了事实依据。
+ */
+export interface PlatformAuthFailure {
+  /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合内五码之一。 */
+  code: string;
+}
+
+/** 信封 → 登录/凭据类失败事实；码不在集合内 / 没有信封 → undefined。 */
+export function platformAuthFailureOf(envelope: PlatformEnvelope | null): PlatformAuthFailure | undefined {
+  const code = envelope?.error?.code;
+  if (!envelope || !code || !PLATFORM_AUTH_ERROR_CODES.has(code)) return undefined;
+  return { code };
+}
+
+/**
+ * tool_result 正文 → 登录/凭据类失败事实：**本回合最后一条带信封的平台响应**决定收尾
+ * 状态（与 selectionClarificationFromResponses 同一把尺、同一边界）。收尾信封是 completed
+ * （数据答案）或其他错误码 → undefined：那类回合平台健康没有坏到要冷却。
+ */
+export function platformAuthFailureFromResponses(
+  messages: readonly TranscriptMessageLike[],
+): PlatformAuthFailure | undefined {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message?.role !== 'toolResult') continue;
+    const envelope = parseEnvelope(textFromContent(message.content));
+    if (!envelope) continue;
+    return platformAuthFailureOf(envelope);
+  }
+  return undefined;
+}
+
 /** 转录消息的结构判据（不依赖具体驱动类型：只要 role 与 content 两个键）。 */
 interface TranscriptMessageLike {
   role?: unknown;

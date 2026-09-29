@@ -6,7 +6,7 @@
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
-import type { SelectionClarification } from './platform-contract';
+import type { PlatformAuthFailure, SelectionClarification } from './platform-contract';
 import type { PendingPlanConfirmation, PlanCall } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 
@@ -143,6 +143,14 @@ export interface TurnDriverResult {
    * 与澄清问题/熔断汇总同一家族：宿主持有并发音的话术不经模型翻译、不经出口校验改写。
    */
   writeClosed?: boolean;
+  /**
+   * 平台健康信号（Lane 2）：本回合的平台交互以登录/凭据类失败收尾——驱动从平台错误
+   * 信封**机械派生**（error.code ∈ PLATFORM_AUTH_ERROR_CODES，判据在 platform-contract，
+   * 绝不嗅探 worker 文本）。与 execution 不互斥：失败的那次网关调用真发生过
+   * （gateCalls > 0），"调用发生过"与"调用失败了"是两个事实。宿主据此做会话级连续
+   * 失败记账与冷却（platform-health.ts）。
+   */
+  authFailure?: PlatformAuthFailure;
 }
 
 export interface TurnDriver {

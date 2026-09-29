@@ -227,6 +227,7 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：17dz 侧 LEAKY_EXACT 已预留 DZ_REAL_COMMIT，双仓协同改名属 D-016 退役批次；此前面向生产的"显式声明"语义不变' }],
   ['FSHINE_PI_AGENT_DIR', { tag: '遗留待清', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；随 DZ_* 统一批次改名' }],
   ['FSHINE_PLATFORM_CONCURRENCY', { tag: '遗留待清', reason: '委派并发闸（context.ts，默认 1）：.env.example 已文档化，改 DZ_* 需同步部署文档；随 DZ_* 统一批次改名' }],
+  ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '遗留待清', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
 ]);
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：

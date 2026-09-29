@@ -17,7 +17,7 @@ import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
 import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
-import { GATEWAY_INVOCATION, isPlatformAuthError, type SelectionClarification } from './platform-contract';
+import { GATEWAY_INVOCATION, isPlatformAuthError, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -107,6 +107,12 @@ export interface SubagentTaskResult {
    * 覆盖或误标其来源（与澄清问题同一家族：宿主持有并发音）。
    */
   writeClosed?: boolean;
+  /**
+   * 平台健康信号（Lane 2，驱动侧 authFailure 的透传）：本回合平台交互以登录/凭据类
+   * 失败收尾（驱动从平台错误信封机械派生，判据在 platform-contract）。宿主据此做
+   * 会话级连续失败记账与冷却；与 execution 不互斥——失败的那次调用真发生过。
+   */
+  authFailure?: PlatformAuthFailure;
 }
 
 export type { SubagentNeeds };
@@ -619,6 +625,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const final: SubagentTaskResult = {
           taskId,
           ...(result.execution ? { execution: result.execution } : {}),
+          // 平台健康信号（Lane 2）：登录/凭据类失败的事实原样上交——宿主据此记账与冷却。
+          // 与 execution 不互斥（失败的那次调用真发生过），所以两条并列挂载。
+          ...(result.authFailure ? { authFailure: result.authFailure } : {}),
           // 写关闭终稿标记（D-075）：text 是宿主合成的确定性话术，原样上交——宿主据此
           // 直接终结本轮，不经模型翻译、不经出口校验标注。
           ...(result.writeClosed ? { writeClosed: true } : {}),
@@ -678,8 +687,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
           updatedAt: new Date().toISOString(),
         });
+        // auth 类经 toolUserErrorFor 挂码抛出（消息一字不改）：宿主侧的平台健康信号
+        // （platform-health.ts 的连续失败记账）认这个码——码级判据，不嗅探回复文本。
+        // 其余三类维持原样（没有第二类失败需要宿主跨回合记账）。
+        if (failureClass === 'auth') throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');
         throw new ToolUserError(signal?.aborted ? DELEGATION_CANCELLED
-          : failureClass === 'auth' ? DELEGATION_AUTH_FAILURE
           : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
           : DELEGATION_EXECUTOR_FAILURE);
       }

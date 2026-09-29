@@ -93,6 +93,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
   const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
+  // 平台健康冷却时长（Lane 2 治标补法）：连续 AUTH 类平台失败达阈值后，会话在此时长内
+  // 不再发起平台调用（宿主前置拦截 + 合成终稿）。部署侧可用 FSHINE_PLATFORM_COOLDOWN_MS
+  // 覆盖；非法/缺省值忽略并用默认 10 分钟（platform-health.ts 的唯一定义）。
+  const cooldownRaw = Number.parseInt(env['FSHINE_PLATFORM_COOLDOWN_MS'] ?? '', 10);
+  const platformCooldownMs = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : undefined;
   // 业务 skill（架构 §5）：读文件失败/文件缺失都只记日志，不影响启动。
   const businessSkill = await loadBusinessSkill(env);
   console.log(JSON.stringify(businessSkill.text
@@ -170,6 +175,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(taskPlans ? { taskPlans } : {}),
     // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
+    // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后会话进入冷却，冷却期内不再
+    // 发起平台调用。时长经 env 覆盖（见上），阈值固定 2（platform-health.ts 缺省）。
+    ...(platformCooldownMs ? { platformCooldownMs } : {}),
   });
 
   const channel = new WecomBotChannel({ env, ...(overrides.channelClientFactory ? { clientFactory: overrides.channelClientFactory } : {}) });

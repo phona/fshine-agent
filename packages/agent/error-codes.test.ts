@@ -15,6 +15,7 @@ import {
   has,
   messageFor,
   messageTextFor,
+  platformUnavailableTextFor,
   toolUserErrorFor,
 } from './src/error-codes';
 import { ToolUserError } from './src/driver';
@@ -31,6 +32,7 @@ import {
   FALLBACK_TIMEOUT,
   NO_EXECUTION_CLARIFICATION,
   RESUMED_PLAN_NOT_EXECUTED,
+  executionLanguageFingerprints,
 } from './src/runtime';
 describe('fshine 错误码表（错误即数据）', () => {
   it('错误类码渲染三要素：码 + 期望/实际/正确形态，动态 actual 由拒绝点填', () => {
@@ -107,8 +109,9 @@ describe('fshine 错误码表（错误即数据）', () => {
     for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED']) {
       expect(messageFor(code), code).not.toMatch(business);
     }
+    // 平台健康冷却话术（Lane 2）：占位符用分钟数填充后同样零业务词
+    expect(platformUnavailableTextFor(10)).not.toMatch(business);
   });
-
   it('ENTITY_OUT_OF_SCOPE 的 correctForm 带正路径：名称检索指引 + 会话既有实体有效（任务 1/2）', () => {
     // 标定修复（2026-09-27 实体门事故）：负指令之外必须给被拦方（worker）可执行的自愈
     // 动作——先名称检索让平台响应携带规范名再提交；本会话早前用户亲自提供/确认过的实体
@@ -197,5 +200,43 @@ describe('选择类澄清消息模板（宿主机械组装，模型不翻译）'
   it('误用 fail-loud：未登记的码（含 fshine 自己的错误类码）走不了澄清渲染', () => {
     expect(() => clarificationTextFor('TASK_NOT_FOUND', { query: 'x', candidates: [] })).toThrow(UNKNOWN_ERROR_CODE);
     expect(() => clarificationTextFor('TOTALLY_NEW_CODE', { query: 'x', candidates: [] })).toThrow(UNKNOWN_ERROR_CODE);
+  });
+});
+
+// ── 平台健康冷却话术（PLATFORM_UNAVAILABLE，Lane 2 治标补法）────────────────
+//
+// 连续 AUTH 类平台失败达阈值后，宿主在冷却期内合成这段确定性话术终结回合。与
+// DELEGATION_AUTH_FAILURE 的分工：那句说"这一轮失败了、要重新登录"（一次性、可行动），
+// 这段说"已暂停自动重试、约 N 分钟后恢复"（连续失败后的状态）。措辞纪律：只说平台侧
+// 异常与下一步动作，零内部控制词、零业务词、零执行语言指纹，也不编造原因。
+
+describe('平台健康冷却话术（PLATFORM_UNAVAILABLE，宿主合成）', () => {
+  it('模板带 {minutes} 占位符，渲染出口用宿主时钟数据填充（与澄清模板同族）', () => {
+    // 表内文本是模板：占位符只经专用出口填充（动态部分是数据不是措辞）
+    expect(messageTextFor('PLATFORM_UNAVAILABLE')).toContain('{minutes}');
+    expect(platformUnavailableTextFor(10)).toBe('平台侧登录或环境异常，与你的查询内容无关。已暂停自动重试，约 10 分钟后自动恢复尝试；持续异常请联系管理员。');
+  });
+
+  it('分钟数向上取整且至少 1（"约 0 分钟"不是人话；宿主自己算的数不值得失败回合）', () => {
+    expect(platformUnavailableTextFor(1)).toContain('约 1 分钟');
+    expect(platformUnavailableTextFor(0.4)).toContain('约 1 分钟');
+    expect(platformUnavailableTextFor(0)).toContain('约 1 分钟');
+    expect(platformUnavailableTextFor(9.2)).toContain('约 10 分钟');
+    expect(platformUnavailableTextFor(600)).toContain('约 600 分钟');
+  });
+
+  it('措辞纪律：零内部控制词、零业务词、零执行语言指纹（生产指纹尺）', () => {
+    const text = platformUnavailableTextFor(10);
+    // 内部控制词（宿主机制，用户不需要知道）：额度/配额/熔断/计划门/拒绝上限/重试上限
+    for (const word of ['额度', '配额', '熔断', '计划门', '拒绝上限', '重试上限']) {
+      expect(text, word).not.toContain(word);
+    }
+    expect(text).not.toMatch(/应收|凭证|科目|账套|期间|目录/u);
+    expect(executionLanguageFingerprints(text)).toEqual([]);
+    // 不编造原因：只说"平台侧登录或环境异常"，不指定登录页改版/凭据过期任一归因
+    expect(text).toContain('与你的查询内容无关');
+    expect(text).toContain('已暂停自动重试');
+    expect(text).toContain('自动恢复尝试');
+    expect(text).toContain('请联系管理员');
   });
 });

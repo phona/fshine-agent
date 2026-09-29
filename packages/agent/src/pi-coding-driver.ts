@@ -23,7 +23,7 @@ import { createServeGate, type ServeGateEvent } from './serve-gate';
 import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationAccesses, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationAccesses, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
 import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
-import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
+import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
 /**
@@ -422,6 +422,15 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 行为零变化。needs 的闸门保持不变（它产的是"缺什么"，不是"选哪个"）。
       const clarification = (): SelectionClarification | undefined =>
         selectionClarificationFromResponses(session.agent.state.messages.slice(initialMessageCount));
+      // 平台健康信号（Lane 2）：本回合平台交互是否以登录/凭据类失败收尾。判据只有平台
+      // 错误信封的码（platform-contract 唯一适配层，exit 非零 + 登录族信封码），与
+      // clarification 同一边界（只看本回合新增消息）——上一回合遗留的失败信封不会越权
+      // 替这一回合报警。真实形态：网关调用 exit 1 + NEEDS_LOGIN/AUTH_* 信封，worker
+      // 诚实报告"登录凭据已过期"；宿主据此记账，连续失败即冷却，不再逐轮重试式重查。
+      const authFailureResult = (): { authFailure: PlatformAuthFailure } | Record<string, never> => {
+        const failure = platformAuthFailureFromResponses(session.agent.state.messages.slice(initialMessageCount));
+        return failure ? { authFailure: failure } : {};
+      };
       const remaining = input.deadline - Date.now();
       if (remaining <= 0) {
         const messages = session.agent.state.messages;
@@ -450,7 +459,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
           const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
+          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
         }
         // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
         // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
@@ -480,7 +489,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           if (timedOut || cancelled || session.agent.state.errorMessage) {
             const proof = execution();
             const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
+            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
           }
         }
         const proof = execution();
@@ -505,6 +514,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           ...(pendingPlan ? { pendingPlan } : {}),
           ...(clue ? { needs: clue } : {}),
           ...(choice ? { clarification: choice } : {}),
+          // 平台健康信号（Lane 2）：登录/凭据类失败的回合照样可能有执行痕迹（那次失败
+          // 的网关调用真发生过），所以本字段与 execution 并列挂载，不互相替代。
+          ...authFailureResult(),
         };
       } catch (error) {
         console.error(JSON.stringify({
@@ -513,7 +525,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }));
         const proof = execution();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-        return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
+        return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
