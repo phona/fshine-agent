@@ -13,13 +13,13 @@
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
- * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
- * E/F/G/H/X/Y 是重场景（多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
+ * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
+ * C2/E/F/G/H/X/Y 是重场景（30 轮超长会话、多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only C2 / --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
  *
  * 用例分组：
  *   A 说胡话（A1–A5）：重放历史、范围渗入、歧义澄清、闲聊不委派。
  *   B 稳定性（B1/B2）：连发重查口径一致、期间口径体现在回复。
- *   C 长会话（C1）：20 轮混合对话的漂移、变慢与旧范围渗入。
+ *   C 长会话（C1/C2）：20/30 轮混合对话的漂移、变慢与旧范围渗入；C2 在 C1 形态上加码——4 个 mock 账套轮转、查询↔闲聊话题切换、两次歧义澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩。
  *   D 长任务（D1/D2）：跨月查询先通知、高重量任务停在确认门。
  *   E 多任务交织（E1）：三任务交织后召回旧任务、恢复旧任务线程，汇总不张冠李戴。
  *   F 探索型会话（F1）：目标不明的模糊请求不编造，补充明确后落地为真实查询。
@@ -28,7 +28,7 @@
  *   X 复杂任务会话（X1/X2）：8 轮连续会话复刻今日真实平台实测（跨期计划/中途换账套/跨轮召回/歧义简称/编号选择/换期间/写尝试/总结，D-070/071/072 全形态）；L0 探索型问题（客户/供应商/税率）不编造、不域混淆、数据在手不踢回给用户（D-073）。
  *   Y 纠错与错误态（Y1/Y2）：用户纠错回合旧范围干净丢弃、新旧数字不混、期间沿用、切回不混淆；平台错误态（not_found/歧义/科目不存在）失败诚实性的机械断言（说真原因、金额有所属、给可行补救、无内部控制词、不引发重试风暴）。
  *
- * 关注十一件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
+ * 关注十一件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移（C1 20 轮，C2 30 轮加码：账套轮转+话题切换+澄清选择+召回+总结）、长任务是否收口、
  * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）、
  * 多任务乒乓跨多轮切换能否线程隔离且跨线程汇总诚实、长探索型任务逐轮收窄能否不断线（指代跨轮解析、判断不发明基准）、
  * 复杂任务会话跨轮连续（跨期计划数字链、召回给数且带框定、总结不塌缩、名称类请求不被会话实体代解析）与 L0 探索的数据呈现（查到的数据不踢回给用户）、
@@ -229,7 +229,13 @@ function extractAmounts(text: string): Amount[] {
   return [...seen.values()];
 }
 
-type TaskId = 'A' | 'B' | 'C' | 'D';
+/**
+ * 话题线程代号。C1/C2 各线程一个字母（C2：A=幻辰财税、B=新兴五金、C=新兴建材、D=幻辰实业有限公司）。
+ * 'E' 是 C2 的 not_found 错误态轮专用：该轮真实结果为空，给它一个从未产生过结果的线程代号 +
+ * past 标记，allowedAmounts 因此为空集——错误态回复出现任何非零金额都算无所属（A2/A4 同族
+ * 判据，那里靠人眼看，这里机械化）。tasks 留空的轮次（闲聊/汇总/跨线程）放行全会话真实结果。
+ */
+type TaskId = 'A' | 'B' | 'C' | 'D' | 'E';
 
 /**
  * E/F/G/H 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
@@ -550,6 +556,103 @@ const H2_IT = 4;
 const H2_JUDGMENT = 6;
 const H2_SUMMARY = 7;
 
+// ─── C2（30 轮超长会话）判定 helper ───
+
+/**
+ * 召回轮"给数带框定"（X1 第3轮同款判据，C2 五轮召回共用）：召回轮必须给出该线程的真实金额
+ * （"既没召回也没重查"由 recallMissed 判），且复述旧结果须带"本会话早前查询"类框定语——
+ * 否则用户分不清这是刚查的还是先前查到的。D-070 的两种复发形态（承认查过但拒绝给数、
+ * 无框定复述）都落在这一条上，故与 recallMissed 配对使用、缺一即 note。
+ */
+function recallFramingNote(turn: Turn): string | null {
+  if (/早前|历史|本会话|之前|刚才|前述|上述|前面|早些时候|此前/.test(turn.reply)) return null;
+  return `召回轮复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
+}
+
+/**
+ * 澄清-选择轮（C2 第 8/15 轮）：用户按"第一个/第二个"选择后，回复必须落到被选中的账套。
+ * 静默选另一个、或又反问他"指哪一个"（选择未被尊重），都让这一次澄清-选择失去意义——
+ * 与 clarificationShapeNotes（候选清单+问句）分别守"问得对"与"选得对"两侧。
+ */
+function selectionNote(turn: Turn, expected: string): string | null {
+  if (turn.reply.includes(expected)) return null;
+  return `澄清后选择未落到「${expected}」：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
+}
+
+/**
+ * 话题切换计数（查询→闲聊→查询）：只有"左侧已发生过真实调用、右侧也还会发生"的闲聊轮
+ * 才算一次切换——开场白与结束语不算。C2 的设计指标是 ≥3 次，这里机械计数供断言自证，
+ * 不靠人肉数脚本。
+ */
+function topicSwitches(turns: Turn[], chitchat: readonly number[]): number {
+  return chitchat.filter((i) => turns.slice(0, i).some((t) => t.calls > 0)
+    && turns.slice(i + 1).some((t) => t.calls > 0)).length;
+}
+
+/**
+ * C2 设计指标自检（纯静态：只看脚本与常量，不依赖运行结果）。30 轮是硬指标（>20 轮超长
+ * 会话的覆盖项本体），其余五项按 Lane F 要求逐一核：账套轮转 ≥4、话题切换点 ≥3、
+ * 澄清-选择 ≥2、召回 ≥2、总结 ≥1。索引越界一律红——长脚本的常量与 script 数组错位是
+ * 最难从结果反推的一类错，宁可在这里提前炸。
+ */
+function c2DesignNotes(input: {
+  script: ScriptLine[];
+  chitchat: readonly number[];
+  clarify: ReadonlyArray<{ index: number }>;
+  select: ReadonlyArray<{ index: number; expected: string }>;
+  recall: readonly number[];
+  notFound: number;
+  summary: number;
+}): string[] {
+  const { script, chitchat, clarify, select, recall, notFound, summary } = input;
+  const notes: string[] = [];
+  if (script.length !== 30) notes.push(`C2 脚本 ${script.length} 轮（设计 30）`);
+  if (chitchat.length < 3) notes.push(`C2 闲聊轮只有 ${chitchat.length} 个（话题切换点设计 ≥3）`);
+  if (clarify.length < 2) notes.push(`C2 澄清轮只有 ${clarify.length} 个（设计 ≥2）`);
+  if (select.length < 2) notes.push(`C2 选择轮只有 ${select.length} 个（设计 ≥2）`);
+  if (recall.length < 2) notes.push(`C2 召回轮只有 ${recall.length} 个（设计 ≥2）`);
+  if (!script.some((line) => line.summary)) notes.push('C2 无总结轮（设计 ≥1）');
+  const rotated = MOCK_ACCOUNT_SETS.filter((name) => script.some((line) => line.text.includes(name))
+    || select.some((item) => item.expected === name));
+  if (rotated.length < 4) notes.push(`C2 账套轮转只覆盖 ${rotated.length}/4 个 mock 账套：${rotated.join('、') || '无'}`);
+  const marks = [...chitchat, ...clarify.map((c) => c.index), ...select.map((s) => s.index), ...recall, notFound, summary];
+  for (const i of marks) {
+    if (i < 0 || i >= script.length) notes.push(`C2 关键轮次索引 ${i} 越界（脚本 ${script.length} 轮）`);
+  }
+  return notes;
+}
+
+/**
+ * C2 运行时形态自检（依赖真实调用记录）：账套轮转与话题切换是"真的发生了"才算——
+ * 轮次文本里写了四个账套名，模型却一个都没查，那是另一回事。澄清-选择与召回各有逐轮
+ * 判定（clarificationShapeNotes/selectionNote/recallMissed），此处只补两个聚合量。
+ */
+function c2RunNotes(turns: Turn[], chitchat: readonly number[], summaryIdx: number): string[] {
+  const notes: string[] = [];
+  const rotated = MOCK_ACCOUNT_SETS.filter((name) => turns.some((t) => t.calls > 0 && t.reply.includes(name)));
+  if (rotated.length < 4) notes.push(`账套轮转只真实覆盖 ${rotated.length}/4 个 mock 账套：${rotated.join('、') || '无'}`);
+  const switches = topicSwitches(turns, chitchat);
+  if (switches < 3) notes.push(`查询↔闲聊话题切换只有 ${switches} 次（设计 ≥3）`);
+  const inSummary = MOCK_ACCOUNT_SETS.filter((name) => turns[summaryIdx]!.reply.includes(name));
+  if (inSummary.length < 2) {
+    notes.push(`总结塌缩成 ${inSummary.length} 个账套（本会话跨 4 个账套，总结不得只剩最后一个）：命中 ${inSummary.join('、') || '无'}`);
+  }
+  return notes;
+}
+
+// C2 关键轮次（0-based，与用例内 script 数组逐行对应）：
+// 闲聊/开场收尾、两次歧义澄清、两次选择、五轮召回、not_found 错误态轮、跨轮总结。
+const C2_CHITCHAT = [0, 4, 9, 17, 22, 29];
+const C2_SELECT: ReadonlyArray<{ index: number; expected: string }> = [
+  { index: 7, expected: '新兴五金' },
+  { index: 14, expected: '幻辰财税' },
+];
+const C2_RECALL = [5, 10, 19, 23, 26];
+const C2_NOT_FOUND = 20;
+const C2_SUMMARY = 28;
+/** 跨轮账套名单召回轮（0-based）："查过哪几个账套"——答案天然是名单，不走金额型召回判据。 */
+const C2_ROSTER_RECALL = 18;
+
 // ─── 歧义 / not_found 用例的执行语言指纹断言（Stage 3 事故根治包） ───
 
 /**
@@ -585,6 +688,25 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
 
 /** mock 账套目录里"幻辰"的两个候选（seed.json）：A3 歧义场景的期望候选集。 */
 const QIANLONG_AMBIGUOUS_CANDIDATES = ['幻辰财税', '幻辰实业有限公司'];
+
+/**
+ * mock 账套目录里"新兴"的两个候选（seed.json 键序：幻辰财税 / 幻辰实业有限公司 / 新兴五金 /
+ * 新兴建材）。与"幻辰"同为目录内关键词重叠制造的歧义，C2 用它做第二次澄清-选择——
+ * 两次歧义走不同关键词，避免同一歧义样本反复考同一条路径。候选顺序即
+ * Object.keys(accountSets) 顺序（mock 应答器按目录键序过滤），"第一个/第二个"因此可预期。
+ */
+const XINXING_AMBIGUOUS_CANDIDATES = ['新兴五金', '新兴建材'];
+
+/**
+ * C2 的两次歧义澄清点（0-based 轮次 + 该轮期望候选集）。用两个不同关键词（"新兴"/"幻辰"）
+ * 考同一条澄清路径，第二次发生在会话已单独查过两个幻辰账套之后——D-072"名称类请求被会话
+ * 实体静默代解析"的复现窗口。候选顺序 = Object.keys(accountSets)（mock 应答器按目录键序
+ * 过滤），"第一个"因此可预期，C2_SELECT 的期望账套名才站得住。
+ */
+const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }> = [
+  { index: 6, candidates: XINXING_AMBIGUOUS_CANDIDATES },
+  { index: 13, candidates: QIANLONG_AMBIGUOUS_CANDIDATES },
+];
 
 // ─── X/Y 用例（复杂任务会话 / 纠错与错误态）的 mock 事实源与判定 helper ───
 //
@@ -1019,6 +1141,130 @@ const CASES: Case[] = [
       const drift = turns.filter((turn) => /新兴五金/.test(turn.text) === false && /新兴五金/.test(turn.reply)
         && /已查|查到|余额为|凭证\s*\d|结果如下/.test(turn.reply));
       if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果`);
+      return { turns, notes };
+    },
+  },
+  {
+    // C2：>20 轮超长会话无用例（C1 是 20 轮天花板）。C1 已证明 20 轮内不漂移，但"更长会不会
+    // 慢到不可用/旧范围会不会渗进来/跨 4 个账套的线程还会不会混"没有数据。C2 把 C1 的混合
+    // 形态拉到 30 轮并加码到 C1 没有的四个维度，每条都能机械判：
+    //   ① 4 个 mock 账套轮转（幻辰财税/新兴五金/新兴建材/幻辰实业）——线程隔离的量纲比 C1 的
+    //     两个账套大一倍，金额归因走 amountNote 的 tasks 维度；
+    //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用（A5 同款），也不得
+    //     把查询线程的结论当闲聊内容倒出来；
+    //   ③ 两次歧义澄清-选择（"新兴"→新兴五金/新兴建材、"幻辰"→幻辰财税/幻辰实业有限公司，
+    //     都是 mock 目录内关键词重叠制造的确定性歧义，候选顺序 = Object.keys(accountSets) 键序）。
+    //     问得对（候选清单+问句）与选得对（落到被选中账套）分别由 clarificationShapeNotes 与
+    //     selectionNote 守；第二次歧义发生在会话已单独查过两个幻辰账套之后，正是 D-072
+    //     "名称类请求被会话实体静默代解析"的复现窗口——若模型不再搜索直接用会话实体出数，
+    //     澄清形状判定会红，那是要报的发现而不是脚本错误。
+    //   ④ 跨轮召回：金额型召回 5 次（第 6/11/20/24/27 轮）+ 账套名单召回 1 次（第 19 轮）。
+    //      召回轮必须给真实数且带框定语（recallMissed + recallFramingNote，X1 第3轮同款），
+    //      名单召回轮必须报得出此前真实查过的账套，总结轮必须覆盖 ≥2 个账套（X1 第7轮同款）。
+    // 无数据语义：mock 只有 current 与幻辰财税 202606 有余额键，其余期间一律 PERIOD_NO_DATA。
+    // 按 2026-09-29 校准原则，回复说"该期间无数据"是合法且更好的行为——脚本里刻意安排 2 个
+    // 无数据期间（第 3 轮幻辰财税 202608、第 9 轮新兴五金 202607，均无余额键），金额尺只抓
+    // 非零（出现非零才是期间没切对），不要求"必须给 0"；第 6 轮"刚才那两期哪个余额高"因此是
+    // 无数据期间与有数据期间的对比，正是这条校准要护住的形态。
+    id: 'C2', group: 'C 长会话', intent: '30 轮混合对话：4 账套轮转的线程隔离、话题切换、澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩',
+    run: async () => {
+      const { send, assembly } = await boot();
+      // 线程：A=幻辰财税、B=新兴五金、C=新兴建材、D=幻辰实业有限公司、E=not_found 错误态。
+      // 轮次文案照 C1 的写法（短句、口语、"账套/本期/刚才"、先查后聊）。
+      const script: ScriptLine[] = [
+        { text: '你好，你能做什么？', tasks: [] },
+        { text: '查一下幻辰财税账套本期的应收账款', tasks: ['A'] },
+        { text: '这个账套 202608 呢？', tasks: ['A'] },
+        { text: '那把 202606 也看一下', tasks: ['A'] },
+        { text: '辛苦了，先聊点别的：现在几月份了？', tasks: [] },
+        { text: '刚才那两期哪个余额高？', tasks: ['A'], past: true, recall: true },
+        { text: '帮我查一下新兴的应收账款', tasks: ['B', 'C'] },
+        { text: '第一个', tasks: ['B'] },
+        { text: '那把 202607 也看一下', tasks: ['B'] },
+        { text: '谢谢，换个话题：今天星期几？', tasks: [] },
+        { text: '对了，新兴五金刚才查出来是多少？', tasks: ['B'], past: true, recall: true },
+        { text: '新兴建材的呢？', tasks: ['C'] },
+        { text: '新兴五金和新兴建材哪个余额高？', tasks: ['B', 'C'], past: true },
+        { text: '那幻辰的银行存款有多少？', tasks: ['A', 'D'] },
+        { text: '第一个', tasks: ['A'] },
+        { text: '幻辰实业有限公司的银行存款呢', tasks: ['D'] },
+        { text: '把幻辰财税 202607 的凭证列一下', tasks: ['A'] },
+        { text: '辛苦了，先聊点别的：你能帮我写周报吗？', tasks: [] },
+        { text: '今天我们查过哪几个账套？', tasks: ['A', 'B', 'C'], past: true },
+        { text: '把它们本期的应收余额报一遍', tasks: ['A', 'B', 'C'], past: true, recall: true },
+        { text: '查一下幻东建材的应收账款', tasks: ['E'], past: true },
+        { text: '那幻辰财税的应付账款呢', tasks: ['A'] },
+        { text: '辛苦了，先聊点别的：给我讲个笑话', tasks: [] },
+        { text: '回到正事，幻辰财税 202606 的应收是多少来着', tasks: ['A'], past: true, recall: true },
+        { text: '幻辰财税和新兴五金哪个余额高？', tasks: ['A', 'B'], past: true },
+        { text: '再帮我查一次新兴建材本期的应收', tasks: ['C'] },
+        { text: '和刚才的结果一样吗？', tasks: ['C'], past: true, recall: true },
+        { text: '如果不一样以哪次为准？', tasks: ['C'], past: true },
+        { text: '把今天查过的账套和结论整理一下', tasks: [], summary: true },
+        { text: '谢谢你，辛苦了', tasks: [] },
+      ];
+      const turns: Turn[] = [];
+      for (const line of script) turns.push(await send(line.text));
+      await assembly.close();
+      const notes: string[] = [];
+      // ── C1 同款三条基线（保持与 C1 可比：漂移/变慢/内部协议泄漏）──
+      const slow = turns.filter((turn) => turn.ms > 120_000);
+      if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
+      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先申报|宿主|PLAN (ACTIVE|DECLINED|NEEDS)/.test(turn.reply));
+      if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
+      // 漂移尺从 C1 的单一账套扩到全部 4 个 mock 账套（accountDrift 只查"用户点名了账套"的轮次，
+      // 闲聊/召回/总结轮点名账套是正确行为，天然不误伤）。
+      const drift = accountDrift(turns, [...MOCK_ACCOUNT_SETS]);
+      if (drift.length) notes.push(`${drift.length} 轮把用户没问的账套当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
+      // ── 设计指标自证（静态）+ 运行时形态（轮转/切换真发生了才算）──
+      notes.push(...c2DesignNotes({ script, chitchat: C2_CHITCHAT, clarify: C2_CLARIFY, select: C2_SELECT, recall: C2_RECALL, notFound: C2_NOT_FOUND, summary: C2_SUMMARY }));
+      notes.push(...c2RunNotes(turns, C2_CHITCHAT, C2_SUMMARY));
+      // ── 闲聊轮：零调用 + 不空转（A5/F1 同款）──
+      for (const i of C2_CHITCHAT) {
+        if (turns[i]!.calls > 0) notes.push(`闲聊轮产生了平台调用：第${i + 1}轮「${turns[i]!.text}」`);
+      }
+      for (let i = 0; i + 1 < turns.length; i += 1) {
+        if (turns[i]!.calls === 0 && turns[i + 1]!.calls === 0
+          && isPurePleasantry(turns[i]!.reply) && isPurePleasantry(turns[i + 1]!.reply)) {
+          notes.push(`连续两轮零调用纯客套——长会话空转：「${turns[i]!.text}」→「${turns[i + 1]!.text}」`);
+        }
+      }
+      // ── 每轮通用尺：金额有据（线程归因）+ 零执行语言指纹 ──
+      for (let i = 0; i < turns.length; i += 1) {
+        notes.push(...amountNote(turns, script, i, {
+          label: i === C2_SUMMARY ? '汇总出现无来源金额' : undefined,
+          derivedLabel: i === C2_SUMMARY ? '（信息性）汇总轮出现算术新数值' : undefined,
+        }), ...execLanguageLeakNotes(turns[i]!));
+      }
+      // ── 澄清-选择：问得对（候选清单+问句）与选得对（落到被选中账套）──
+      for (const { index, candidates } of C2_CLARIFY) {
+        notes.push(...clarificationShapeNotes(turns[index]!, candidates));
+      }
+      for (const { index, expected } of C2_SELECT) {
+        const note = selectionNote(turns[index]!, expected);
+        if (note) notes.push(note);
+      }
+      // ── 金额型召回 5 轮：给真实数（recallMissed）+ 带框定（recallFramingNote）──
+      for (const i of C2_RECALL) {
+        const line = script[i]!;
+        if (recallMissed(turns[i]!, realAmounts(turns, script, i, line.tasks))) {
+          const why = realAmounts(turns, script, i, line.tasks).size > 0 ? '未给出任何金额' : '零调用且未复述该线程结论';
+          notes.push(`第${i + 1}轮未召回也未重查：「${turns[i]!.text}」${why}`);
+        }
+        const framing = recallFramingNote(turns[i]!);
+        if (framing) notes.push(framing);
+      }
+      // ── not_found 错误态轮（第 21 轮，幻东建材不在 mock 目录）：必须给"没有找到"的结论，
+      //    且零执行语言指纹（A2/A4 同款尺）；金额无所属由该轮 tasks=['E']+past 的空 allowedAmounts 判。
+      notes.push(...clarificationShapeNotes(turns[C2_NOT_FOUND]!, []));
+      // ── 跨轮账套名单召回（第 19 轮）：问到"查过哪几个账套"必须报得出此前真实查过的大部分。
+      //    金额型召回判据（recallMissed）不适用于它——答案天然是名单不是数字，故单列一条。
+      const queriedBefore = MOCK_ACCOUNT_SETS.filter((name) =>
+        turns.slice(0, C2_ROSTER_RECALL).some((t) => t.calls > 0 && t.reply.includes(name)));
+      const inRoster = MOCK_ACCOUNT_SETS.filter((name) => turns[C2_ROSTER_RECALL]!.reply.includes(name));
+      if (inRoster.length < Math.min(3, queriedBefore.length)) {
+        notes.push(`第${C2_ROSTER_RECALL + 1}轮跨轮召回账套名单只覆盖 ${inRoster.length}/${queriedBefore.length}（此前真实查过：${queriedBefore.join('、') || '无'}）：命中 ${inRoster.join('、') || '无'}`);
+      }
       return { turns, notes };
     },
   },
