@@ -205,12 +205,20 @@ interface Amount {
  */
 const AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*[万亿]|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])|(?<![\d.])0(?![\d.])/g;
 
+/**
+ * mock 科目表里的科目代码（读自 mock-state.json 各账套 subjects.code）。
+ * 串台/无源金额判定会把裸整数当金额，而科目代码（1122 应收账款/1002 银行存款/2202 应付账款…）
+ * 在每个账套的回复里都出现——旧账套的代码出现在新账套回复里是正常的，不是串台。
+ */
+const MOCK_SUBJECT_CODES = new Set(['1001', '1002', '1121', '1122', '2201', '2202']);
+
 function extractAmounts(text: string): Amount[] {
   const seen = new Map<number, Amount>();
   for (const match of text.matchAll(AMOUNT_PATTERN)) {
     const raw = match[0]!;
     if (/^(?:19|20)\d{2}(?:\.\d{1,2})?$/.test(raw)) continue; // 年份/年.月不是金额
     if (/^20\d{4}$/.test(raw)) continue;                     // YYYYMM 期间不是金额
+    if (MOCK_SUBJECT_CODES.has(raw)) continue;               // 科目代码不是金额（X1 首跑：1122 被当旧账套金额判串台，误报）
     const value = /[万亿]/.test(raw)
       ? parseFloat(raw) * (raw.includes('亿') ? 1e8 : 1e4)
       : parseFloat(raw.replace(/,/g, ''));
