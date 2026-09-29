@@ -333,7 +333,7 @@ const FIXTURE_BAD: Turn[] = [
   },
   {
     text: SCRIPT[2]!,
-    reply: '202608 的余额要查“查询计划额度”才能继续，脚本 src/finance/scripts/query-receivables.js 报 ERR_RATE_LIMITED。',
+    reply: '202608 的余额要查“查询计划额度”才能继续，脚本 src/finance/scripts/query-receivables.js 报 ERR_RATE_LIMITED。', // leak-lint: fixture 负面夹具：故意含平台脚本路径，测指纹尺会响
     ms: 1, notices: [], calls: 1,
   },
 ];
@@ -350,7 +350,7 @@ function selftest(guards: string[]): string[] {
   const auditGood = auditNotes([{ mode: 'query', script: 's.js', exitCode: 0 }, { mode: 'query', script: 's.js', refused: 'PLAN_REFUSE: x' }])
     .filter((n) => !n.startsWith('（信息性）'));
   if (auditGood.length) problems.push(`干净审计被误报：${auditGood.join('; ')}`);
-  const auditBad = auditNotes([{ mode: 'commit', script: 'fill.js' }, { mode: 'query', refused: 'RATE_LIMITED: a' }, { mode: 'query', refused: 'RATE_LIMITED: b' }])
+  const auditBad = auditNotes([{ mode: 'commit', script: 'fill.js' }, { mode: 'query', refused: 'RATE_LIMITED: a' }, { mode: 'query', refused: 'RATE_LIMITED: b' }]) // leak-lint: fixture 负面夹具：故意含平台脚本名，测审计尺会拦 write
     .filter((n) => !n.startsWith('（信息性）'));
   if (!auditBad.some((n) => n.includes('非 read 模式'))) problems.push('审计尺不挡 write 模式调用');
   if (!auditBad.some((n) => n.includes('限流连续触发'))) problems.push('审计尺不挡连续限流');

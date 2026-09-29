@@ -32,6 +32,8 @@ import { describe, expect, it } from 'vitest';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const SCAN_DIRS = ['packages', 'apps', 'scripts'];
+/** 负面夹具行标签：scripts/ 的验收夹具故意含平台细节（测探测器），挂此签的行不扫描。 */
+const FIXTURE_TAG = 'leak-lint: fixture';
 // 白名单：platform-contract.ts 是唯一契约适配层（*.test.ts 豁免——夹具演示被拦形态）
 const ALLOWLIST = new Set([
   path.join(REPO_ROOT, 'packages/agent/src/platform-contract.ts'),
@@ -64,13 +66,23 @@ describe('平台泄漏预算 lint', () => {
     for (const dir of SCAN_DIRS) {
       for (const file of walk(path.join(REPO_ROOT, dir))) {
         if (ALLOWLIST.has(file)) continue;
-        const content = readFileSync(file, 'utf8');
+        // 夹具行豁免：开发脚本（scripts/）的负面夹具必须原样含平台细节——坏回复样本要含
+        // 脚本路径、坏审计条目要含 fill.js，否则探测器失效。与业务词预算的「防御排除」
+        // 同族：命中行须显式挂签，未挂标签的命中照旧红（摘掉标签即回到违例）。
+        const content = readFileSync(file, 'utf8')
+          .split('\n')
+          .filter((line) => !line.includes(FIXTURE_TAG))
+          .join('\n');
         for (const { label, pattern } of FORBIDDEN) {
           if (pattern.test(content)) violations.push(`${path.relative(REPO_ROOT, file)}: ${label}`);
         }
       }
     }
-    expect(violations, violations.join('\n')).toEqual([]);
+    expect(violations, [
+      ...violations,
+      '开发脚本的负面夹具命中 → 在该行挂 `// leak-lint: fixture` 标签（故意含平台细节才测到探测器）；',
+      '生产代码（packages/agent/src、apps）命中 → 真违例，改平台数据下发或删除，不打标签。',
+    ].join('\n')).toEqual([]);
   });
 
   it('编排层业务词归属预算：非防御命中=0 且防御项 100% 挂「防御排除」', () => {
