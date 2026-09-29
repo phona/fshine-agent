@@ -45,9 +45,11 @@ describe('离线全链 e2e：会话实体（实体门禁第四来源）', () => 
       { text: '幻辰财税 202606 应收账款余额为 61000 元。' },
       { end: true },
       // 回合2：用户只发"202609"。模型按上轮结果把对象解析进 request（生产形状），
-      // worker 提交的计划带 --query 幻辰财税——它只应来自本会话执行底账（来源 A）
+      // worker 提交的计划带 --query 幻辰财税——它只应来自本会话执行底账（来源 A）。
+      // 202609 在 mock 里无余额键（幻辰财税 1122 只有 202606/current）→ 平台回
+      // not_found + PERIOD_NO_DATA，叙述体按平台口径说无数据而非"余额为 0"
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收余额为 0 元。' },
+      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额' },
@@ -92,8 +94,9 @@ describe('离线全链 e2e：会话实体（实体门禁第四来源）', () => 
       { text: '幻辰财税本期应收余额为 86,000 元。' },
       { end: true },
       // 回合3：用户只发"202609"——对象名此时来自回合2 执行过的 task（来源 A）
+      // 同口径：202609 无余额键 → PERIOD_NO_DATA，不是"余额为 0"
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收余额为 0 元。' },
+      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'delegate', request: '查询幻辰的应收账款余额' },

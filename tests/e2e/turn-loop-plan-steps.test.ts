@@ -67,8 +67,9 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步：3 次调用的计划（越过自动档 → 先通知用户），执行成功
+      // 202601–202603 在 mock 里都没有余额键 → 平台回 PERIOD_NO_DATA，不是"余额为 0"
       { plan: threePeriodPlan('幻辰财税') },
-      { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
+      { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 第 2 步：真执行了，mock 当前期间应收余额 500（seed 真实数据）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴五金'] }] },
@@ -83,7 +84,7 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
         { kind: 'delegate', request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额' },
         { kind: 'delegate', request: '第2/3步：查新兴五金账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
         { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金当前期间为 500 元；新兴建材当前期间应收余额为 700 元。' },
+        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 平台均未返回该期间数据；新兴五金当前期间为 500 元；新兴建材当前期间应收余额为 700 元。' },
       ]),
       worker: worker.driver,
     });
@@ -116,9 +117,9 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
   it('6.2 任一步失败不阻塞：第 2 步回报缺信息，Main Agent 继续第 3 步并如实汇总', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      // 第 1 步：执行成功
+      // 第 1 步：执行成功（202601–202603 无余额键 → PERIOD_NO_DATA，不是"余额为 0"）
       { plan: threePeriodPlan('幻辰财税') },
-      { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
+      { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 第 2 步：执行不了，回报结构化线索（Phase 5 纠错环），不产生任何平台调用
       { need: NEEDS_PERIOD },
@@ -131,7 +132,7 @@ describe('离线全链 e2e：长任务拆解（计划模式）', () => {
         { kind: 'delegate', request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额' },
         { kind: 'delegate', request: '第2/3步：查幻东建材账套的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
         { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；幻东建材需要你补充要查的期间，这一步没查；新兴建材当前期间应收余额为 700 元。' },
+        { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 平台均未返回该期间数据；幻东建材需要你补充要查的期间，这一步没查；新兴建材当前期间应收余额为 700 元。' },
       ]),
       worker: worker.driver,
     });

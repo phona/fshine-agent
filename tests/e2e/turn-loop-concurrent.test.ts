@@ -108,12 +108,14 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步（第 1 回合）：3 次调用的计划越过自动档 → 先通知用户，然后执行成功
+      // 202601–202603 在 mock 里都没有余额键 → 平台回 PERIOD_NO_DATA，不是"余额为 0"
       { plan: threePeriodPlan('幻辰财税') },
-      { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
+      { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 第 2 步（第 3 回合）：用户插过一轮无关对话后回来续跑
+      // 新兴五金 1122 只有 current 键 → 202609 无数据，同口径
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收账款余额为 0 元。' },
+      { text: '新兴五金 202609 应收账款平台未返回该期间数据。' },
       { end: true },
       // 第 3 步（同一回合内继续派）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
@@ -124,19 +126,19 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
         kind: 'delegate',
         request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额',
         // 计划步的结果不 terminate 整轮；模型在这里自行收嘴，回合停在"第 1 步做完"
-        text: '第 1 步查完了：幻辰财税 202601–202603 的应收余额都是 0 元。共 3 步，先停在这，你说继续我再接着查。',
+        text: '第 1 步查完了：幻辰财税 202601–202603 平台都未返回该期间数据。共 3 步，先停在这，你说继续我再接着查。',
       },
       // 第 2 回合：用户插入的无关对话——零平台调用、零委派
       { kind: 'conversation', text: '好，下周三之前交报表这件事我记下了。' },
       { kind: 'delegate', request: '第2/3步：查新兴五金账套 202609 的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
       { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
-      { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金 202609 也是 0 元；新兴建材当前期间为 700 元。' },
+      { kind: 'conversation', text: '三个账套核对完成：幻辰财税 202601–202603 平台均未返回该期间数据；新兴五金 202609 也未返回；新兴建材当前期间为 700 元。' },
     ];
     const { send, sdk, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
     const log = capturePlanLog();
     try {
       const first = await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
-      expect(first).toContain('0 元');
+      expect(first).toContain('未返回该期间数据');
       expect(first).not.toContain('不应外发');
 
       // 插入轮：宿主不因计划未完成就拒绝普通对话——这一轮零调用、零新通知、worker 未被再叫
@@ -198,22 +200,23 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步（第 1 回合）：执行成功
+      // 202601–202603 无余额键 → PERIOD_NO_DATA，不是"余额为 0"
       { plan: threePeriodPlan('幻辰财税') },
-      { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
+      { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 探索的落地点（第 3 回合）：无前缀的单步委派——不是计划步
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }] },
       { text: '幻辰财税本期应收账款余额为 86000 元。' },
       { end: true },
-      // 第 2 步（第 4 回合）：回到计划续跑
+      // 第 2 步（第 4 回合）：回到计划续跑（新兴五金 202609 无余额键）
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收账款余额为 0 元。' },
+      { text: '新兴五金 202609 应收账款平台未返回该期间数据。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       {
         kind: 'delegate',
         request: '第1/3步：查幻辰财税账套 202601 至 202603 的应收余额',
-        text: '第 1 步查完了：幻辰财税 202601–202603 的应收余额都是 0 元。共 3 步，先停在这。',
+        text: '第 1 步查完了：幻辰财税 202601–202603 平台都未返回该期间数据。共 3 步，先停在这。',
       },
       // 探索轮：目标不明，申报 conversation 澄清，不强行委派
       { kind: 'conversation', text: '要查哪个账套、哪个期间的应收欠款？告诉我账套和期间，我就去查。' },
@@ -251,7 +254,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
         request: '第2/3步：查新兴五金账套 202609 的应收余额',
         continueTaskId: worker.taskIds[0],
       });
-      declarations.push({ kind: 'conversation', text: '核对继续：幻辰财税 202601–202603 的应收余额均为 0 元；新兴五金 202609 也是 0 元。' });
+      declarations.push({ kind: 'conversation', text: '核对继续：幻辰财税 202601–202603 平台均未返回该期间数据；新兴五金 202609 也未返回。' });
       const backOnPlan = await send('继续核对');
       expect(backOnPlan).toContain('新兴五金');
       expect(backOnPlan).not.toContain('不应外发');
@@ -287,8 +290,9 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 第 1 步：执行成功
+      // 202601–202603 无余额键 → PERIOD_NO_DATA，不是"余额为 0"
       { plan: threePeriodPlan('幻辰财税') },
-      { text: '幻辰财税 202601、202602、202603 的应收余额均为 0 元。' },
+      { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 第 2 步：真执行了，但平台对这个对象返回 not_found——有执行痕迹的错误结果。
       // mock 目录里没有「幻东建材」，not_found 信封带 data.query（17dz 517d952）→ 激活宿主的
@@ -310,7 +314,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       { kind: 'delegate', request: '第3/3步：查新兴建材账套当前期间的应收余额', continueTaskId: LAST_TASK_ID_TOKEN },
       {
         kind: 'conversation',
-        text: '三个账套核对完成：幻辰财税 202601–202603 的应收余额均为 0 元；幻东建材平台未找到对应账套，这一步没查到；新兴建材当前期间应收余额为 700 元。',
+        text: '三个账套核对完成：幻辰财税 202601–202603 平台均未返回该期间数据；幻东建材平台未找到对应账套，这一步没查到；新兴建材当前期间应收余额为 700 元。',
       },
     ];
     const { send, assembly } = await boot({ main: mainDriver(declarations), worker: worker.driver });
@@ -346,7 +350,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       expect(worker.taskIds[1]).toBe(worker.taskIds[0]);
       expect(worker.taskIds[2]).toBe(worker.taskIds[0]);
       // 汇总同时含成功步结果与失败步的如实表述，不粉藏
-      expect(reply).toContain('0 元');
+      expect(reply).toContain('平台均未返回该期间数据');
       expect(reply).toContain('没查到');
       // 账本累计：3 + 1 + 1
       expect(totalActualCalls()).toBe(before + 5);

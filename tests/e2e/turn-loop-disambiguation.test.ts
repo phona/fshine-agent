@@ -77,21 +77,21 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.1 两个未完成计划形状撞车 → 宿主出题；编号"2"绑定较旧的那个计划续跑', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      // 幻辰财税（第 1 回合，计划 A 的第 1 步；mock 202609 应收余额 0）
+      // 幻辰财税（第 1 回合，计划 A 的第 1 步；202609 无余额键 → PERIOD_NO_DATA）
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收余额为 0 元。' },
+      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
       { end: true },
-      // 新兴五金（第 2 回合，计划 B 的第 1 步；mock 202609 应收余额 0）
+      // 新兴五金（第 2 回合，计划 B 的第 1 步；202609 同样无余额键）
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收余额为 0 元。' },
+      { text: '新兴五金 202609 应收平台未返回该期间数据。' },
       { end: true },
       // 新兴建材（第 4 回合，用户选"2"后计划 A 的第 2 步；mock 当前期间应收余额 700）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
-      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 0 元。共 3 步，先停在这。' },
-      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 202609 平台未返回该期间数据。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 202609 平台未返回该期间数据。共 3 步，先停在这。' },
       // 与两条计划都接得上 → 宿主 ToolUserError 出消歧问题，回合在此结束
       { kind: 'delegate', request: '第2/3步：继续核对' },
       // 用户选"2"（较旧的计划 A）：宿主注入消歧结果，模型重新申报本步
@@ -102,10 +102,10 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
     const log = capturePlanLog();
     try {
       const first = await send('逐个核对这三个账套的应收余额：幻辰财税、新兴五金、新兴建材');
-      expect(first).toContain('幻辰财税 0 元');
+      expect(first).toContain('幻辰财税 202609 平台未返回该期间数据');
 
       const second = await send('再核对这三个账套的应收余额：新兴五金、幻辰实业有限公司、新兴建材');
-      expect(second).toContain('新兴五金 0 元');
+      expect(second).toContain('新兴五金 202609 平台未返回该期间数据');
       expect(worker.taskIds).toHaveLength(2);
       expect(totalActualCalls()).toBe(before + 2);
 
@@ -154,19 +154,20 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.2 消歧问题后的非编号回复按新请求处理：正常单步委派，不产生绑定', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
+      // 202609 两个账套都无余额键 → PERIOD_NO_DATA，不是"余额为 0"
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收余额为 0 元。' },
+      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
       { end: true },
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收余额为 0 元。' },
+      { text: '新兴五金 202609 应收平台未返回该期间数据。' },
       { end: true },
       // 非编号回复落地成单步委派（无前缀）：新任务、不绑任何计划
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
-      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 0 元。共 3 步，先停在这。' },
-      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 0 元。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查幻辰财税 202609 的应收余额', text: '第 1 步完成：幻辰财税 202609 平台未返回该期间数据。共 3 步，先停在这。' },
+      { kind: 'delegate', request: '第1/3步：查新兴五金 202609 的应收余额', text: '第 1 步完成：新兴五金 202609 平台未返回该期间数据。共 3 步，先停在这。' },
       { kind: 'delegate', request: '第2/3步：继续核对' },
       // 用户没答编号，换了个新查询：单步委派照常，两个旧计划不受影响
       { kind: 'delegate', request: '查询新兴建材账套当前期间的应收余额' },

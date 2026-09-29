@@ -92,8 +92,9 @@ describe('离线全链 e2e：手机事故对话回归（连续 + 呈现）', () 
       { text: '幻辰财税本期应收余额为 86,000 元（借方）。' },
       { end: true },
       // 回合3：用户只发"202609"——事故轮：旧行为是实体门死锁 + 要求重新报名字
+      // 202609 在 mock 里无余额键 → 平台回 not_found + PERIOD_NO_DATA，叙述体说无数据
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收余额为 0 元。' },
+      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
     ] as WorkerStep[], { enforceEntityScope: true });
 
     const declarations: Array<Record<string, unknown>> = [
@@ -115,7 +116,7 @@ describe('离线全链 e2e：手机事故对话回归（连续 + 呈现）', () 
     expect(picked).not.toContain('没有找到唯一匹配');
 
     // ── 回合3：期间追问不死锁（事故轮）──
-    declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额', text: '幻辰财税 202609 应收余额为 0 元。' });
+    declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额', text: '幻辰财税 202609 应收平台未返回该期间数据。' });
     const followed = await send('202609');
     // 先剥掉替身拼进 worker 文本的平台信封段（harness 已知保真度边界，见 withoutPlatformEnvelope）：
     // 平台自己的中文 correctForm 含"请确认期间编码"、错误码 PERIOD_NO_DATA 是平台码，

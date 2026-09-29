@@ -24,8 +24,28 @@ import { looksLikeReferenceCue } from './reference-evidence';
 
 /** 台账条目上限：召回轮次要的是"本会话执行过哪些"，不是全部历史。 */
 export const MAX_EXECUTION_FACTS = 5;
-/** 单条结果原文的截断长度（字符）——全文在 Conversation Log 里，可检索。 */
-const EXECUTION_FACT_CONTENT_LIMIT = 300;
+/**
+ * 单条结果原文的截断长度（字符，含结论尾）——全文在 Conversation Log 里，可检索。
+ *
+ * 300 → 1000 的来历（2026-09-29 Lane E）：worker 文本的形状是「平台信封在前、人话结论
+ * 在后」，而单轮平台信封本身就 300–760 字符（无数据信封带候选清单 + 中文三要素消息，
+ * 实测 RESULT 行 734 字节，比 completed 信封的 277 字节长一倍多）。300 的窗连一个信封
+ * 都装不下，留头截断于是每次都把结论整段挤出去、只留半段 JSON——数值（结论唯一的承载）
+ * 没了， Execution Language 反倒全额进场。1000 = 一个无数据信封（≈760）+ 一段叙述体
+ * （≈30）+ 200 余量，单轮平台执行装得下；余量给更长的叙述体，装不下的走结论尾。
+ *
+ * 上限仍是上限：条目数 ≤ MAX_EXECUTION_FACTS、单条正文 ≤ 本常量 + 2，整份材料的
+ * 最坏尺寸是常数（5 × (结构化头 ≈ 60 + 1000 + 2) ≈ 5.3KB），不随会话长度生长。
+ */
+export const EXECUTION_FACT_CONTENT_LIMIT = 1000;
+/**
+ * 结论尾预算（字符）：截断时除留头外，再把末句按这个小预算补回来。
+ *
+ * 为什么必须留尾：只留头结构性地产出"前半段机器输出"，而结论在尾。真实驱动里模型也
+ * 习惯先复述平台返回再给结论（X1 实测：叙述体引用信封内容），harness 的替身更是把
+ * `执行 <op>: RESULT {…}` 拼在叙述体前面。所以"留头"不等于"留结论"。
+ */
+const EXECUTION_FACT_TAIL_LIMIT = 120;
 
 /**
  * 台账文本的起始标记。两个用途：测试断言注入形态；runtime 保存转录前按它剥离
@@ -87,10 +107,28 @@ function formatFactTime(createdAt: string): string {
   return new Date(stamp).toISOString().slice(0, 16).replace('T', ' ');
 }
 
-/** 结果正文：折叠空白后截断——台账是紧凑材料，全文在 Log 里可检索。 */
+/**
+ * 结果正文：折叠空白后截断——台账是紧凑材料，全文在 Log 里可检索。
+ *
+ * 截断策略（两者结合，不是单纯放大窗口）：
+ *   ① 窗口放大到 1000：单轮平台信封（无数据形态 ≈760 字符）装得下，结论不再被挤出去；
+ *   ② 仍然溢出时**留头也留尾**：头部队额 = 总量 − 结论尾预算，尾部队额取末句。结构化
+ *      事实（时间/对象/结局）在渲染头部、本来就不受正文预算影响，截断动不到它。
+ * 有界性：正文总长 ≤ EXECUTION_FACT_CONTENT_LIMIT + 2（省略号与分隔空格），尾句超预算照样切。
+ */
 function factBody(content: string): string {
   const body = content.replace(/\s+/g, ' ').trim();
-  return body.length > EXECUTION_FACT_CONTENT_LIMIT ? `${body.slice(0, EXECUTION_FACT_CONTENT_LIMIT)}…` : body;
+  if (body.length <= EXECUTION_FACT_CONTENT_LIMIT) return body;
+  const head = body.slice(0, EXECUTION_FACT_CONTENT_LIMIT - EXECUTION_FACT_TAIL_LIMIT);
+  const tail = conclusionTail(body);
+  return tail ? `${head}… ${tail}` : `${head}…`;
+}
+
+/** 末句（结论所在）：按句末标号切，超预算按预算切；全文没有句末标号时取尾部一截。 */
+function conclusionTail(body: string): string {
+  const sentences = body.split(/(?<=[。！？!?])/u).map((s) => s.trim()).filter(Boolean);
+  const last = sentences.at(-1) ?? body.slice(-EXECUTION_FACT_TAIL_LIMIT);
+  return last.length > EXECUTION_FACT_TAIL_LIMIT ? last.slice(0, EXECUTION_FACT_TAIL_LIMIT) : last;
 }
 
 /**

@@ -10,7 +10,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { PlatformTaskRecord, PlatformTaskRepo } from '@fshine/contracts';
-import { collectExecutionFacts, EXECUTION_FACTS_MARKER, MAX_EXECUTION_FACTS } from './src/execution-facts';
+import { collectExecutionFacts, EXECUTION_FACTS_MARKER, EXECUTION_FACT_CONTENT_LIMIT, MAX_EXECUTION_FACTS } from './src/execution-facts';
 
 function task(overrides: Partial<PlatformTaskRecord> & { taskId: string }): PlatformTaskRecord {
   return {
@@ -223,15 +223,55 @@ describe('召回事实注入：执行台账（platform_tasks 结构化事实）'
     expect(facts!.text).toContain('更早的执行不在本材料内');
   });
 
-  it('单条原文超长时截断并留省略号（全文仍在 Log 里可检索）', async () => {
+  it('单轮平台信封 + 叙述体装得下截断窗：结论不再被挤出去（300 → 1000）', async () => {
+    // 2026-09-29 Lane E 实测形状：worker 文本 = 「平台信封在前、叙述体在后」。无数据信封
+    // （带期间清单 + 中文三要素消息）RESULT 行 734 字节，completed 只有 277——旧 300 的窗
+    // 连一个信封都装不下，留头截断把叙述体整段挤掉，只剩半段 JSON：数值（结论唯一承载）
+    // 没了，执行语言反倒进了台账。现在 1000 装得下一整个无数据信封 + 叙述体。
+    const envelope = `执行 finance.query-receivables: RESULT ${JSON.stringify({
+      v: 1, op: 'finance.query-receivables', status: 'not_found',
+      data: { query: '幻辰财税', period: '202608', availablePeriods: ['202606', '平台当前期间'] },
+      error: {
+        code: 'PERIOD_NO_DATA',
+        message: 'PERIOD_NO_DATA: 期望 所查期间在该账套余额数据里存在；实际 期间 202608 无余额数据；正确形态 该期间平台无数据，请确认期间编码或改查其他期间',
+      },
+    })}`;
     const facts = await collectExecutionFacts({
-      platformTasks: fakeTasks([task({ taskId: 't', resultText: '长'.repeat(500) })]),
+      platformTasks: fakeTasks([task({
+        taskId: 't', accountSet: '幻辰财税', period: '202608', label: '查应收账款余额', outcome: 'done',
+        resultText: `${envelope}\n幻辰财税 202608 应收余额为 61000 元。`,
+      })]),
       ...SCOPE,
       userMessage: RECALL,
     });
+
     const line = entries(facts!.text)[0]!;
-    expect(line.endsWith('…')).toBe(true);
-    expect(line.length).toBeLessThan(400);
+    expect(line).not.toContain('…');                 // 没触发截断
+    expect(line).toContain('202608 查应收账款余额 → done'); // 结构化头照旧
+    expect(line.endsWith('幻辰财税 202608 应收余额为 61000 元。')).toBe(true); // 叙述体整段在场
+    expect(line).toContain('61000');
+  });
+
+  it('仍然超长时留头也留结论尾，且总量有界（上限仍是上限）', async () => {
+    // 溢出路径：头 = 上限 − 结论尾预算，尾 = 末句。只留头的旧形态会把末句（结论所在）
+    // 整段丢掉——worker 文本的形状是"机器输出在前、人话结论在后"。
+    const padding = Array.from({ length: 30 }, (_, i) => `第 ${i} 段内容 ${'冗'.repeat(40)}`).join('。');
+    const facts = await collectExecutionFacts({
+      platformTasks: fakeTasks([task({
+        taskId: 't',
+        resultText: `${padding}。结论：最终数值是 61000 元。`,
+      })]),
+      ...SCOPE,
+      userMessage: RECALL,
+    });
+
+    const line = entries(facts!.text)[0]!;
+    expect(line).toContain('…');
+    expect(line).toContain('第 0 段内容');            // 头部保留
+    expect(line).not.toContain('第 29 段内容');        // 超窗内容确实被截掉
+    expect(line).toContain('结论：最终数值是 61000 元'); // 结论尾补回来了
+    // 有界性：降级形态条目 = "① " + 时间 + "｜" + 正文，正文 ≤ 上限 + 省略号
+    expect(line.length).toBeLessThanOrEqual(EXECUTION_FACT_CONTENT_LIMIT + 40);
   });
 
   it('存储不可用时抛错，由调用方兜底（不失败回合）', async () => {

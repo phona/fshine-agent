@@ -88,8 +88,9 @@ describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () =
       { text: TECH_REPORT },
       { end: true },
       // 第二步若被派出去才会用到；澄清终止回合后它不该发生
+      // （新兴五金 202609 在 mock 里无余额键 → 若真跑会是 PERIOD_NO_DATA，不是"余额为 0"）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴五金', '--period', '202609'] }] },
-      { text: '新兴五金 202609 应收余额为 0 元。' },
+      { text: '新兴五金 202609 应收平台未返回该期间数据。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' },
