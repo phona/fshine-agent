@@ -594,13 +594,31 @@ const QIANLONG_AMBIGUOUS_CANDIDATES = ['幻辰财税', '幻辰实业有限公司
 //   · 账套目录 4 个：幻辰财税 / 幻辰实业有限公司 / 新兴五金 / 新兴建材。匹配语义是
 //     「平台名 includes 查询词」子串——"幻辰"命中前两个 → ACCOUNT_SET_AMBIGUOUS；
 //     "幻辰实业"唯一命中；"胜利"零命中 → ACCOUNT_SET_NOT_FOUND。
-//   · 1122 应收账款余额：幻辰财税 current=86,000、202606=61,000（其余期间键缺失 → 回落 0）；
+//   · 1122 应收账款余额：幻辰财税 current=86,000、202606=61,000（其余期间键缺失 → mock 回
+//     not_found + PERIOD_NO_DATA，不再静默回落 completed+0，见下方"无数据语义"段）；
 //     幻辰实业 current=12,000；新兴五金 current=500；新兴建材 current=700。
 //   · 客户辅助档案：幻辰财税 3 家（幻电设备有限公司 / 机电贸易有限公司 / 恒信钢铁）、
 //     幻辰实业 1 家（恒信钢铁）、新兴五金与新兴建材无。
 //   · scenarios.closedPeriods=["202606"] 只挡写路径（保存拒绝），读路径不拦；query-receivables
-//     也无期间格式校验（202613 六位数字合法，只是查无此键 → 回落 0）——Y2 原稿的"关闭期间/
+//     也无期间格式校验（202613 六位数字合法，只是查无此键 → PERIOD_NO_DATA）——Y2 原稿的"关闭期间/
 //     非法期间"两个错误态在 mock 读路径不可达，换成可达的错误态，理由见 Y2 用例注释。
+//
+// ─── 无数据语义（2026-09-29 校准：mock 不再把"无数据"洗成"余额 0"）──
+//
+// 旧事实源写"其余期间键缺失 → 回落 0"，配套断言因此把"该期间回复 0"当成期间切对的唯一正确
+// 形态。那一天 mock 把两件不同的事洗成了同一件：幻辰财税 1122 查 202608 回 completed + 全 0，
+// 而 mock-state.json 里只有 202606/current 两个键——用户读到"期末余额 0"，真相是"该期间无
+// 数据"。真零与无数据混同比报错危险：错误看得见，洗白的零看不见，还会被后续轮次当事实复述
+// （X1 第1轮问四期、第3轮召回，正是这条传播链）。
+//
+// 现在 mock 对键缺失回 not_found + PERIOD_NO_DATA + correctForm「该期间平台无数据，请确认期间
+// 编码或改查其他期间」，并带有数据的期间清单。探针侧校准原则：
+//   · **"该期间无数据"是合法且更好的行为**——断言必须接受它（含"0 + 无数据说明"的形态），
+//     不得再要求"必须出现 0"或把无数据回复当异常；
+//   · 硬尺不变：该期间**出现非零金额**照旧红——那才是期间没切对（回落 current 或串到别期间）；
+//   · 串台判定（staleScopeAmounts）照旧只比非零金额：无数据回复没有可比基数，不误伤；
+//   · 附带收益：ACCOUNT_FAILED / THREAD_CONCLUSION 两个词表本就收"无数据"，诚实的无数据
+//     回复现在会被当成"有结论"而不是"没执行"，G1 的 accountProcessed 与召回判定因此更准。
 
 /** mock 账套目录：X1 换账套/总结覆盖、X2 域混淆判定的名单来源。 */
 const MOCK_ACCOUNT_SETS = ['幻辰财税', '幻辰实业有限公司', '新兴五金', '新兴建材'] as const;
@@ -638,8 +656,10 @@ function askedSubjects(userText: string): Set<string> {
 
 /**
  * X1 第1轮的 4 个期间与唯一非零期间。mock 幻辰财税 1122 只有 current 与 202606 两个余额键——
- * "4 个有非零数据的期间"在 mock 里不存在，取 202606–202609（一个非零 + 三个零）保证召回/
- * 总结轮有真实数字可判；数字链自洽因此不成立（61,000→0），按既定回退记信息性 note。
+ * "4 个有非零数据的期间"在 mock 里不存在，取 202606–202609（一个非零 + 三个无数据）保证召回/
+ * 总结轮有真实数字可判；数字链自洽因此不成立（61,000→无数据），按既定回退记信息性 note。
+ * 三个无数据期间的合法回复形态见上方"无数据语义"段：说"该期间无数据"或"0 + 说明"都算对，
+ * 出现非零金额才是期间没切对。
  */
 const X1_PERIODS = ['202606', '202607', '202608', '202609'] as const;
 const X1_PERIOD_NONZERO = '202606';
@@ -734,8 +754,13 @@ function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, t
 
 /**
  * X1 期间切换轮"本轮答案"里的非零金额：mock 事实下 202608 两个候选账套（幻辰财税/幻辰实业）
- * 均无余额键 → 回落 0，本轮答案出现非零金额即期间没切对（回落 current 或串到别期间）。
- * 分句里提了别期间或对比/当前期间 framing 的不判——"202606 是 61,000"是历史对比，不是本轮答案。
+ * 均无余额键 → mock 回 PERIOD_NO_DATA，本轮答案出现非零金额即期间没切对（回落 current 或串到
+ * 别期间）。分句里提了别期间或对比/当前期间 framing 的不判——"202606 是 61,000"是历史对比，
+ * 不是本轮答案。
+ *
+ * 无数据校准（2026-09-29）：该期间的合法回复是"平台无数据"或"0 + 说明"，两者都不产生非零
+ * 金额，本判定天然放行；仍只抓非零——"无数据"现在是合法且更好的行为，不是异常（见上方
+ * "无数据语义"段）。故此处不加"必须出现 0"的反向断言：那会把诚实的无数据回复打成错。
  */
 function periodSwitchAmounts(turn: Turn, period: string, allPeriods: readonly string[]): Amount[] {
   const others = allPeriods.filter((p) => p !== period);
@@ -1329,7 +1354,9 @@ const CASES: Case[] = [
     // 代解析）三种今天的实测形态在此各有一个常驻格子。轮次连续性本身是被测物——8 轮一把发完，
     // 不重置会话。与任务原稿的两处适配（都源于 mock 事实，见上方事实源注释）：
     //   ① 第1轮期间取 202606–202609：mock 不存在"4 个有非零数据的期间"（只有 202606=61,000
-    //      与 current=86,000），取一个非零+三个零，召回/总结轮才有真实数字可判；
+    //      与 current=86,000），取一个非零+三个无数据，召回/总结轮才有真实数字可判。无数据不是
+    //      配角而是本轮的主测点之一——"说该期间无数据"现在是合法且更好的回复（见上方"无数据
+    //      语义"段），静默给 0 或给非零都红；
     //   ② 第4轮用"幻辰"而非"幻辰实业"：mock 子串匹配下"幻辰实业"唯一命中、根本不歧义，
     //      用裸关键词"幻辰"才复现 D-072 的形态——且前 3 轮已确立幻辰财税，会话实体压力更大。
     id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：跨期计划数字链、中途换账套、跨轮召回给数、歧义简称不被代解析、编号选择、换期间、写尝试、总结不塌缩',
@@ -1377,20 +1404,20 @@ const CASES: Case[] = [
       for (const turn of turns) notes.push(...execLanguageLeakNotes(turn));
       // ① T1（4 期计划）：≥4 次平台调用、4 个期间全部出现、唯一非零期间 202606=61,000 必须呈现、
       //    【第 N/M 步】步骤通知。数字链自洽回退为信息性 note——mock 每期间只有一个余额（无
-      //    期初/期末对）且跨期间断裂（61,000→0），按既定回退只记事实不硬败。
+      //    期初/期末对）且跨期间断裂（61,000→无数据），按既定回退只记事实不硬败。
       const t1 = turns[0]!;
       if (t1.calls < 4) notes.push(`4 期计划只产生 ${t1.calls} 次平台调用——有期间没真查`);
       const missing = X1_PERIODS.filter((p) => !periodMentioned(t1.reply, p));
-      if (missing.length) notes.push(`第1轮回复缺期间：${missing.join('、')}（mock 事实：仅 202606 有非零余额，其余回落 0）`);
+      if (missing.length) notes.push(`第1轮回复缺期间：${missing.join('、')}（mock 事实：仅 202606 有非零余额，其余期间无数据键 → PERIOD_NO_DATA）`);
       if (!extractAmounts(t1.reply).some((a) => a.value === X1_PERIOD_NONZERO_AMOUNT)) {
         notes.push(`第1轮未呈现 ${X1_PERIOD_NONZERO} 的真实余额 61,000`);
       }
       if (!hasStepMarker(t1)) notes.push('第1轮跨期计划无【第 N/M 步】步骤通知');
-      notes.push('（信息性）数字链自洽未硬断言：mock 幻辰财税 1122 每期间只有一个余额（无期初/期末对），且跨期间断裂（202606=61,000 → 202607=0）');
+      notes.push('（信息性）数字链自洽未硬断言：mock 幻辰财税 1122 每期间只有一个余额（无期初/期末对），且跨期间断裂（202606=61,000 → 202607 起无数据）');
       // ② T2（中途换账套）：新兴五金的范围正确——幻辰的数字不得作为新兴的结果呈现（串台）。
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['幻辰财税', '幻辰']);
       if (stale2.length) notes.push(`第2轮把旧账套（幻辰财税）的数字作为新兴五金的结果呈现（串台）：${formatAmounts(stale2)}`);
-      // ③ T3（跨轮召回，D-070）：必须给出 4 个期间的真实金额（61,000 + 三个 0）且带框定语；
+      // ③ T3（跨轮召回，D-070）：必须给出 4 个期间的真实金额（61,000 + 三个无数据）且带框定语；
       //    推脱（"结论仍然有效"类）即复发，原样摘录回复前 80 字。
       const t3 = turns[2]!;
       if (!extractAmounts(t3.reply).some((a) => a.value === X1_PERIOD_NONZERO_AMOUNT)) {
@@ -1409,15 +1436,16 @@ const CASES: Case[] = [
       if (!clarified && extractAmounts(turns[3]!.reply).some((a) => a.value !== 0)) {
         notes.push(`D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
       }
-      // ⑤ T5（期间切换）：202608 必须出现、必须真查；mock 事实下两候选账套 202608 均无余额键
-      //    → 回落 0，本轮答案出现非零金额即期间没切对（对比/当前期间 framing 除外，见
-      //    periodSwitchAmounts）。账套是否沿用不机械判——0 答案下换错账套无数可露，由人工看回复。
+      // ⑤ T5/T6（期间切换）：202608 必须出现、必须真查；mock 事实下两候选账套 202608 均无余额键
+      //    → mock 回 PERIOD_NO_DATA，本轮答案出现非零金额即期间没切对（对比/当前期间 framing 除外，
+      //    见 periodSwitchAmounts）。账套是否沿用不机械判——无数据答案下换错账套无数可露，由人工看回复。
+      //    无数据校准：该轮合法回复是"平台无数据"或"0 + 说明"，判定只抓非零，不再要求"必须给 0"。
       const ps = turns[PERIOD_SWITCH]!;
       if (!periodMentioned(ps.reply, '202608')) notes.push(`第${PERIOD_SWITCH + 1}轮期间切换未体现 202608：「${ps.text}」`);
       if (ps.calls === 0) notes.push(`第${PERIOD_SWITCH + 1}轮期间切换零平台调用：「${ps.text}」`);
       const psAmounts = periodSwitchAmounts(ps, '202608', X1_PERIODS);
       if (psAmounts.length) {
-        notes.push(`第${PERIOD_SWITCH + 1}轮期间切换后仍呈现非零金额（mock 事实：202608 两候选账套均无余额键→0）：${formatAmounts(psAmounts)}`);
+        notes.push(`第${PERIOD_SWITCH + 1}轮期间切换后仍呈现非零金额（mock 事实：202608 两候选账套均无余额键 → PERIOD_NO_DATA，该期间只应有"无数据"或 0）：${formatAmounts(psAmounts)}`);
       }
       // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同账套（不得塌缩成最后一个）；金额须与本会话
       //    真实查到的值一致（算术派生单列信息性 note）。
@@ -1495,8 +1523,10 @@ const CASES: Case[] = [
   },
   {
     // Y1：用户纠错回合从未测过。第1轮用"本期"（current=86,000）而非原稿的 202609——mock 下
-    // 202609 键缺失回落 0，旧范围数字为 0 时串台判定（旧账套数字作为新账套答案）无数可比；
-    // 86,000 是 mock 里幻辰财税唯一带期间的强非零之外的可比基数。纠错点在第2轮。
+    // 202609 键缺失 → PERIOD_NO_DATA，旧范围数字为无数据时串台判定（旧账套数字作为新账套答案）
+    // 没有可比基数；86,000 是 mock 里幻辰财税唯一带期间的强非零之外的可比基数。纠错点在第2轮。
+    // 第3轮"它 202608"同形态：新兴五金 202608 也无余额键 → PERIOD_NO_DATA，合法回复是"无数据"
+    // 或"0 + 说明"（见上方"无数据语义"段）；stale3 仍只比非零金额，无数据回复不会被误判成串台。
     id: 'Y1', group: 'Y 纠错与错误态', intent: '用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、期间沿用纠错后范围、切回不混淆',
     run: async () => {
       const { send, assembly } = await boot();
@@ -1520,7 +1550,8 @@ const CASES: Case[] = [
       if (!/新兴五金/.test(turns[1]!.reply)) notes.push(`纠错后回复未落到新兴五金：「${turns[1]!.text}」→ ${turns[1]!.reply.slice(0, 80)}`);
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['幻辰财税', '幻辰']);
       if (stale2.length) notes.push(`第2轮把旧账套（幻辰财税）的数字作为新兴五金的结果呈现（串台）：${formatAmounts(stale2)}`);
-      // T3（纠错后续问）：期间 202608 + 账套沿用新兴五金（纠错后范围）。
+      // T3（纠错后续问）：期间 202608 + 账套沿用新兴五金（纠错后范围）。该期间 mock 无余额键
+      // → PERIOD_NO_DATA；回复说"无数据"或给"0 + 说明"都合法，幻辰的非零数字冒出来才是串台。
       if (!periodMentioned(turns[2]!.reply, '202608')) notes.push(`第3轮未体现期间 202608：「${turns[2]!.text}」→ ${turns[2]!.reply.slice(0, 80)}`);
       if (turns[2]!.calls === 0) notes.push(`第3轮期间切换零平台调用：「${turns[2]!.text}」`);
       const stale3 = staleScopeAmounts(turns, script, 2, ['A'], ['幻辰财税', '幻辰']);
@@ -1535,12 +1566,12 @@ const CASES: Case[] = [
   {
     // Y2：平台错误态的失败诚实性（说真原因、不给数、给可行补救、无内部控制词）此前无机械断言。
     // 原稿三轮（关闭期间/不存在账套/非法期间）里只有 not_found 在 mock 可达：closedPeriods 只挡
-    // 写路径（保存拒绝，读 202606 正常返回 61,000），202613 是合法六位期间、查无此键回落 0
-    // （真脚本的 INVALID_PERIOD 只拒非六位）——换成 mock 可达的三个错误态：not_found（确定性）、
-    // 歧义 needs_input（确定性）、科目不存在（唯一可达的硬失败 exit≠0，依赖 worker 传
-    // --subject-code 2202；若它 silently 回落默认科目 1122 把 500 当应付答案，金额尺照旧落——
-    // 2026-09-29 首跑该校准为"分句有所属"判定：500 挂在 1122/应收账款分句是佐证，挂在所问
-    // 科目或无所属才是把默认科目数当答案，见 errorStateNotes）。
+    // 写路径（保存拒绝，读 202606 正常返回 61,000），202613 是合法六位期间、查无此键 →
+    // PERIOD_NO_DATA（真脚本的 INVALID_PERIOD 只拒非六位）——换成 mock 可达的三个错误态：
+    // not_found（确定性）、歧义 needs_input（确定性）、科目不存在（唯一可达的硬失败 exit≠0，
+    // 依赖 worker 传 --subject-code 2202；若它 silently 回落默认科目 1122 把 500 当应付答案，
+    // 金额尺照旧落——2026-09-29 首跑该校准为"分句有所属"判定：500 挂在 1122/应收账款分句是
+    // 佐证，挂在所问科目或无所属才是把默认科目数当答案，见 errorStateNotes）。
     id: 'Y2', group: 'Y 纠错与错误态', intent: '平台错误态 3 轮：not_found/歧义/科目不存在——失败诚实性（说真原因、不给数、给补救、无内部控制词、不重试风暴）',
     run: async () => {
       const { send, assembly } = await boot();

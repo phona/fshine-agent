@@ -22,7 +22,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { executionLanguageFingerprints } from '@fshine/agent';
-import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
 
 /**
  * 信封复读型 Main Agent（D-069 的形状）：按脚本申报计划步骤，脚本派完后不组织终稿，
@@ -117,15 +117,19 @@ describe('离线全链 e2e：手机事故对话回归（连续 + 呈现）', () 
     // ── 回合3：期间追问不死锁（事故轮）──
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额', text: '幻辰财税 202609 应收余额为 0 元。' });
     const followed = await send('202609');
-    expect(followed).toContain('幻辰财税');
-    expect(followed).not.toContain('请确认');
-    expect(followed).not.toContain('没有产生任何平台查询');
+    // 先剥掉替身拼进 worker 文本的平台信封段（harness 已知保真度边界，见 withoutPlatformEnvelope）：
+    // 平台自己的中文 correctForm 含"请确认期间编码"、错误码 PERIOD_NO_DATA 是平台码，
+    // 都不是模型说漏嘴——要判的是 worker 叙述体。
+    expect(withoutPlatformEnvelope(followed)).toContain('幻辰财税');
+    expect(withoutPlatformEnvelope(followed)).not.toContain('请确认');
+    expect(withoutPlatformEnvelope(followed)).not.toContain('没有产生任何平台查询');
 
     // ── 呈现卫生（追问轮，fixture 保真度内的判据）：事故原声的泄漏形态全部缺席 ──
     for (const [label, reply] of [['编号', picked], ['追问', followed]] as const) {
-      expect(reply, `${label} 回复漏脚本路径`).not.toMatch(/src\/[^\s）)，,，；;]*\.js/);
-      expect(reply, `${label} 回复漏错误码`).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/);
-      expect(reply, `${label} 回复漏内部控制词`).not.toMatch(/额度|配额|熔断|计划门|拒绝上限|重试上限/);
+      const said = withoutPlatformEnvelope(reply);
+      expect(said, `${label} 回复漏脚本路径`).not.toMatch(/src\/[^\s）)，,，；;]*\.js/);
+      expect(said, `${label} 回复漏错误码`).not.toMatch(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/);
+      expect(said, `${label} 回复漏内部控制词`).not.toMatch(/额度|配额|熔断|计划门|拒绝上限|重试上限/);
     }
 
     // 三个回合各一次真实平台调用（事故里回合③ 零执行 + 要求重新报名字）

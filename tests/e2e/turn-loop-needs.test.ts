@@ -7,7 +7,7 @@
  *   以及 Main Agent 自己从 Log 证据补齐后直接重派（不问用户）的分支。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
 
 /** 记录 worker 实际收到的委派请求与 taskId（宿主透传 intent.request，不做二次加工）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -112,8 +112,10 @@ describe('离线全链 e2e：Subagent 报错回路', () => {
     expect(observed[3]).toContain('202609');
     expect(worker.requests[2]).toContain('202609');
     expect(worker.taskIds[2]).toBe(worker.taskIds[0]);
-    expect(done).toContain('52 元');
-    expect(done).not.toContain('期间');
+    expect(withoutPlatformEnvelope(done)).toContain('52 元');
+    // 同剥信封：平台 correctForm「该期间平台无数据，请确认期间编码…」自带"期间"二字，
+    // 不是宿主在问用户要期间（harness 已知保真度边界，见 withoutPlatformEnvelope）。
+    expect(withoutPlatformEnvelope(done)).not.toContain('期间');
     expect(totalActualCalls()).toBeGreaterThan(0);
     await assembly.close();
   });

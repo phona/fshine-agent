@@ -578,6 +578,23 @@ function balanceCalls(account: string, period: string): PlanCall[] {
   return [{ operation: 'finance.query-receivables', args: ['--query', account, '--period', period] }];
 }
 
+/**
+ * 剥掉共享替身拼进 worker 文本的平台信封段（`执行 <op>: RESULT {…}` 整行）。
+ *
+ * 这是 harness 的已知保真度边界（turn-loop-phone-incident 篇首注释写明）：真实驱动里主模型
+ * 自行组织终稿，worker 文本夹带的信封不会原样外发；替身脚本耗尽时它才拼进 parts 成为回复。
+ * 断言"模型不得泄漏执行语言 / 不得把用户没问的对象当答案"必须先剥掉它——否则**平台自己的**
+ * 中文 correctForm 与错误码会被当成模型泄漏。2026-09-29 mock 起对无数据期间回
+ * not_found + PERIOD_NO_DATA + 中文三要素消息（17dz `src/lib/error-codes.js`），这层
+ * "completed 信封恰好无中文无下划线码"的偶然性就被揭穿了：`请确认`/`期间` 出自 correctForm，
+ * `PERIOD_NO_DATA` 是平台码，都不是模型说漏嘴。真实平台回中文三要素消息时同样如此。
+ *
+ * 只剥整行信封段，不动 worker 的叙述体——要判的正是叙述体。
+ */
+function withoutPlatformEnvelope(text: string): string {
+  return text.replace(/^执行 \S+: RESULT \{.*\}$/gm, '').replace(/\n{2,}/g, '\n').trim();
+}
+
 /** operation 名 → 平台脚本文件名（网关 query 形式按脚本寻址）。 */
 const SCRIPTS: Record<string, string> = {
   'finance.query-receivables': 'query-receivables.js',
@@ -635,5 +652,6 @@ export {
   nineMonthPlan,
   heavyPlan,
   growingPlan,
+  withoutPlatformEnvelope,
 };
 export type { Boot, Turn };

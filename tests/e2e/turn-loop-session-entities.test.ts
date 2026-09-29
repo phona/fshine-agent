@@ -19,7 +19,7 @@
  * 参数并非都逐字可溯源，那批夹具的保真改造不在本包范围（见 harness.ts 拦截处说明）。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
 
 /** 记录宿主注入给 worker 的实体来源（门禁判定就在它上面做）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -64,9 +64,11 @@ describe('离线全链 e2e：会话实体（实体门禁第四来源）', () => 
 
     // 门禁放行 + 查询真执行（两个回合各一次平台调用）
     expect(totalActualCalls()).toBe(before + 2);
-    // 回复是数据答案，不是"请确认账套"式的死局转达
-    expect(second).toContain('幻辰财税');
-    expect(second).not.toContain('请确认');
+    // 回复是数据答案，不是"请确认账套"式的死局转达。先剥掉替身拼进 worker 文本的平台信封段
+    // （harness 已知保真度边界，见 withoutPlatformEnvelope）——平台自己的中文 correctForm
+    // 含"请确认期间编码"，不是模型把死局转达给用户。
+    expect(withoutPlatformEnvelope(second)).toContain('幻辰财税');
+    expect(withoutPlatformEnvelope(second)).not.toContain('请确认');
     expect(second).not.toContain('没有找到唯一匹配');
     expect(second).not.toContain('没有产生任何平台查询');
     expect(second).not.toContain('不应外发');
@@ -116,8 +118,8 @@ describe('离线全链 e2e：会话实体（实体门禁第四来源）', () => 
     // ③ 期间追问：门禁放行（对象名来自本会话执行过的 task），查询落地
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额' });
     const followed = await send('202609');
-    expect(followed).toContain('幻辰财税');
-    expect(followed).not.toContain('请确认');
+    expect(withoutPlatformEnvelope(followed)).toContain('幻辰财税');
+    expect(withoutPlatformEnvelope(followed)).not.toContain('请确认');
     expect(followed).not.toContain('没有找到唯一匹配');
     // 三个回合各一次真实平台调用（事故里回合③ 是死局：零执行 + 要求重新报名字）
     expect(totalActualCalls()).toBe(before + 3);

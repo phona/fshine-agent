@@ -16,7 +16,7 @@
  * 变成红（不是"换个说法还能过"）。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, totalActualCalls } from './harness';
+import { balanceCalls, boot, gatedWorker, totalActualCalls } from './harness';
 
 const FACTS_MARKER = '【宿主执行事实：';
 
@@ -213,9 +213,14 @@ describe('离线全链 e2e：召回事实注入（执行台账）', () => {
 
 describe('离线全链 e2e：结构化召回条目（D-065 P2）', () => {
   it('10.4 有计划的委派 → 召回条目带结构化事实（期间/平台label/结局）且原文数值仍在', async () => {
+    // 期间取 202606（mock 有余额键）而非 CURRENT_PERIOD：本条断言的是"结构化头 + 原文数值
+    // 仍在"，而 resultText 在 execution-facts 里按 300 字截断。无数据期间的平台信封是
+    // not_found + PERIOD_NO_DATA + 中文三要素消息，比 completed 信封长得多，会把 worker 的
+    // 叙述体数值挤出截断窗（2026-09-29 mock 改语义后实测）。数值在场由 10.1/10.2 的
+    // 202606 路径盯；无数据期间进台账的形状见 X1 第3轮召回（probe-real-agent）。
     const worker = gatedWorker([
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 51 元。' },
+      { plan: balanceCalls('幻辰财税', '202606') },
+      { text: '幻辰财税 202606 应收余额为 61000 元。' },
       { end: true },
     ]);
     const observed: string[] = [];
@@ -231,12 +236,12 @@ describe('离线全链 e2e：结构化召回条目（D-065 P2）', () => {
       worker,
     });
 
-    await send('查一下幻辰财税 202609 的应收账款余额');
+    await send('查一下幻辰财税 202606 的应收账款余额');
     const recalled = await send('刚才查出来是多少钱？');
 
     // 结构化条目：时间｜<期间> <平台中文label> → <done>｜原文（数值只能在原文里）
-    expect(recalled).toContain(`${CURRENT_PERIOD} 查应收账款余额 → done`);
-    expect(recalled).toContain('51');
+    expect(recalled).toContain('202606 查应收账款余额 → done');
+    expect(recalled).toContain('61000');
     // 归因不串：条目里没有本轮之外的对象
     expect(recalled).not.toContain('新兴五金');
     await assembly.close();
