@@ -13,7 +13,7 @@
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
- * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 3 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
+ * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及申报/指代的 Phase 按 roadmap 验证协议加跑 --only C1。
  * E/F/G/H/X/Y 是重场景（多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
  *
  * 用例分组：
@@ -26,7 +26,7 @@
  *   G 并发多线程（G1/G2）：多步核对计划被探索插曲打断后跨回合恢复、失败步授权跳过；用户让 agent 提议查法（meta-planning）。
  *   H 乒乓与长探索（H1/H2）：四任务跨 16 轮来回切的线程隔离/召回一致/重查正确/汇总诚实；单线程逐轮收窄的探索不断线、指代跨轮解析、判断不越界。
  *   X 复杂任务会话（X1/X2）：8 轮连续会话复刻今日真实平台实测（跨期计划/中途换账套/跨轮召回/歧义简称/编号选择/换期间/写尝试/总结，D-070/071/072 全形态）；L0 探索型问题（客户/供应商/税率）不编造、不域混淆、数据在手不踢回给用户（D-073）。
- *   Y 纠错与错误态（Y1/Y2）：用户纠错回合旧范围干净丢弃、新旧数字不混、期间沿用、切回不混淆；平台错误态（not_found/歧义/科目不存在）失败诚实性的机械断言（说真原因、不给数、给可行补救、无内部控制词、不引发重试风暴）。
+ *   Y 纠错与错误态（Y1/Y2）：用户纠错回合旧范围干净丢弃、新旧数字不混、期间沿用、切回不混淆；平台错误态（not_found/歧义/科目不存在）失败诚实性的机械断言（说真原因、金额有所属、给可行补救、无内部控制词、不引发重试风暴）。
  *
  * 关注十一件事：会不会说胡话（重放历史/范围渗入）、每次是否稳定、长会话是否漂移、长任务是否收口、
  * 多任务交织后能否召回与恢复、探索型会话能否不编造并落地、并发多线程下计划能否跨回合恢复（授权跳过被尊重、agent 能提议查法）、
@@ -614,6 +614,29 @@ const MOCK_ASSISTANTS: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * mock 科目表（读自 mock-state.json 各账套 subjects 的并集：幻辰财税 6 个、幻辰实业 2 个、
+ * 新兴五金/新兴建材 各 1 个——码与名成对，Y2 错误态金额判定的"有所属"依据）。
+ */
+const MOCK_SUBJECTS: ReadonlyArray<{ code: string; name: string }> = [
+  { code: '1001', name: '库存现金' },
+  { code: '1002', name: '银行存款' },
+  { code: '1121', name: '应收票据' },
+  { code: '1122', name: '应收账款' },
+  { code: '2201', name: '应付票据' },
+  { code: '2202', name: '应付账款' },
+];
+
+/** 用户这句话问到的科目（码与名都收）：错误态金额判定的"所问科目"依据（名字命中了就连带上码）。 */
+function askedSubjects(userText: string): Set<string> {
+  const asked = new Set<string>();
+  for (const subject of MOCK_SUBJECTS) {
+    if (userText.includes(subject.name)) { asked.add(subject.code); asked.add(subject.name); }
+    if (userText.includes(subject.code)) asked.add(subject.code);
+  }
+  return asked;
+}
+
+/**
  * X1 第1轮的 4 个期间与唯一非零期间。mock 幻辰财税 1122 只有 current 与 202606 两个余额键——
  * "4 个有非零数据的期间"在 mock 里不存在，取 202606–202609（一个非零 + 三个零）保证召回/
  * 总结轮有真实数字可判；数字链自洽因此不成立（61,000→0），按既定回退记信息性 note。
@@ -747,6 +770,16 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
  * X2 第1轮域混淆判定：把账套清单当"客户"给出时必须显式说明这个解读（"账套"字样）并给出另一种
  * 解读的入口（或者/还是/哪个账套…类）。静默等同（列出 ≥2 个账套名却不提"账套"）即域混淆
  * note——2026-09-29 实测形态（显式括号 + 后续选项）算通过。
+ *
+ * 第二判（另一种解读的入口）词汇表按两次实弹校准（2026-09-29，X2 跑两轮）：
+ *   · 初版只收"或者/还是/哪个账套/哪家账套/想了解/是指/如您…"，X2 首跑误报——本轮回复
+ *     "检索平台账套目录后…需要你确认指哪一个…请回复你要查的账套全名，我即拉取该账套下的
+ *     全部客户清单"把候选显式框成账套、给选择问句、承诺拉另一类对象，正是本判要放的形态，
+ *     却不在词汇表里（候选框架 + 选择 + 承诺三要素俱全，用户不会被误导成交账套名单）。
+ *     补两类合法入口：指代问句（指哪一个/哪一个/哪一家）与选择后承诺
+ *     （拉取|列出|导出|整理|汇总…客户|供应商|清单|名单|档案）。
+ *   · 放宽度仍以第一判（必须出现"账套"字样）为闸：静默等同（不提账套、直接报名单）照旧
+ *     第一判就红，第二判的放宽不会放过它。
  */
 function explorationDomainNote(turn: Turn): string | null {
   const listed = MOCK_ACCOUNT_SETS.filter((name) => turn.reply.includes(name));
@@ -754,7 +787,7 @@ function explorationDomainNote(turn: Turn): string | null {
   if (!/账套|帐套/.test(turn.reply)) {
     return `回复把账套清单当"客户"给出且未显式说明解读（域混淆）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
   }
-  if (!/或者|或是|还是|如您|如果你是想|你想问的是|哪个账套|哪家账套|想了解|是指/.test(turn.reply)) {
+  if (!/或者|或是|还是|如您|如果你是想|你想问的是|哪个账套|哪家账套|想了解|是指|指哪一个|哪一[家个]|(?:拉取|列出|导出|整理|汇总)[^。；\n]{0,12}(?:客户|供应商|清单|名单|档案)/.test(turn.reply)) {
     return `回复显式把清单当账套念、但未给另一种解读的入口：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
   }
   return null;
@@ -769,24 +802,59 @@ function platformSourceNote(turn: Turn): string | null {
 }
 
 /**
- * Y2 单轮失败诚实性判定（平台错误态没有真实数据可引）：
- *   · 回复不得含任何金额（AMOUNT_PATTERN 已排除期间/年份/日期与百分号；候选个数 1–2 位也不是金额。
- *     第3轮若没走到错误态（模型把默认科目的数当答案），同一把尺照旧落下——那正是要抓的形态）；
+ * Y2 单轮失败诚实性判定（平台错误态的机械四判）：
+ *   · 金额判定（2026-09-29 首跑校准）：原 blanket"错误态零金额"的隐含假设"错误态没有真实
+ *     数据可引"只对选择类错误态（not_found/歧义，宿主机械组装澄清问题）成立；科目不存在是
+ *     **真实查询的硬失败**，同账套其他科目的余额是真实可引的佐证。误报实录：T3 回复"该账套
+ *     没有应付账款（2202）科目……只有 1122 应收账款……余额 500"——500 全程有所属，却被
+ *     "出现金额数字"一条红。校准为分句归属（staleScopeAmounts 同款切句）：金额所在分句
+ *     点名了**用户所问科目之外**的科目（码或名）即佐证，不当答案算；无所属或挂在所问科目上
+ *     照旧红——"silently 回落默认科目 1122 把 500 当应付答案"正是要抓的形态，尺子不松这条。
+ *     零值照文件惯例不算金额（0/0.00 是平台回复的格式噪声，amountViolations 同款排除）；
+ *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "2202"、"500" 命中进 "1500"。
  *   · 补救指引形态（请/建议/换/确认/可以试/告诉/再查/重新/即可/哪个/哪家 至少命中一）；
- *   · 错误态不得引发重试风暴（≤2 次平台调用）；
+ *   · 重试风暴（2026-09-29 首跑校准）：原判据"总调用 >2"数的是总调用数，把硬失败态的合法
+ *     佐证调用一并红掉——T3 的 3 次调用是 2202 探针（科目不存在）→ 科目表核对 → 1122 余额
+ *     佐证，每次目的不同、零重复，86s 收口，不是风暴。校准为按 (script, args) 分组计
+ *     **已执行**调用（refused 是计划门拒绝、没到平台，不计；与 turn.calls 同口径）：同一
+ *     调用重复 ≥3 次才算风暴（与宿主纠错环 MAX_NEEDS_ROUNDS=3 同阈）。总调用数只作信息性
+ *     披露（附分脚本计数，校准依据自证）。
  *   · not_found 须给"没有找到"的结论、歧义须列候选+问句（clarificationShapeNotes 同款）。
  */
-function errorStateNotes(turn: Turn, candidates: readonly string[]): string[] {
+function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[]): string[] {
   const notes: string[] = [];
-  const amounts = extractAmounts(turn.reply);
-  if (amounts.length) {
-    notes.push(`错误态回复出现金额数字（错误态没有真实数据可引）：「${turn.text}」→ ${formatAmounts(amounts)}`);
+  const asked = askedSubjects(turn.text);
+  const unattributed = extractAmounts(turn.reply).filter((amount) => {
+    if (amount.value === 0) return false;
+    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
+    const clause = turn.reply.split(/[。；;\n]/).find((part) => boundary.test(part)) ?? '';
+    return !MOCK_SUBJECTS.some((subject) => !asked.has(subject.code)
+      && (clause.includes(subject.code) || clause.includes(subject.name)));
+  });
+  if (unattributed.length) {
+    notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
   }
   if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家/.test(turn.reply)) {
     notes.push(`错误回复无可行动补救指引：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
+  const executed = records.filter((record) => !record.refused);
+  const repeats = new Map<string, number>();
+  for (const record of executed) {
+    const key = `${scriptBase(record)}|${JSON.stringify(record.args ?? [])}`;
+    repeats.set(key, (repeats.get(key) ?? 0) + 1);
+  }
+  const byScript = new Map<string, number>();
+  for (const record of executed) {
+    const base = scriptBase(record);
+    byScript.set(base, (byScript.get(base) ?? 0) + 1);
+  }
+  const worst = Math.max(0, ...repeats.values());
+  if (worst >= 3) {
+    notes.push(`错误轮同一调用重复 ${worst} 次（重试风暴）：「${turn.text}」`);
+  }
   if (turn.calls > 2) {
-    notes.push(`错误轮引发重试风暴：「${turn.text}」${turn.calls} 次平台调用（错误态应 ≤2）`);
+    const breakdown = [...byScript].map(([base, count]) => `${base}×${count}`).join('、') || '无审计记录';
+    notes.push(`（信息性）错误轮平台调用数：${turn.calls} 次（${breakdown}；同一调用最多重复 ${worst} 次，重复 ≥3 才判风暴）`);
   }
   notes.push(...clarificationShapeNotes(turn, candidates));
   return notes;
@@ -1470,23 +1538,30 @@ const CASES: Case[] = [
     // 写路径（保存拒绝，读 202606 正常返回 61,000），202613 是合法六位期间、查无此键回落 0
     // （真脚本的 INVALID_PERIOD 只拒非六位）——换成 mock 可达的三个错误态：not_found（确定性）、
     // 歧义 needs_input（确定性）、科目不存在（唯一可达的硬失败 exit≠0，依赖 worker 传
-    // --subject-code 2202；若它 silently 回落默认科目 1122 把 500 当应付答案，无金额尺照旧落）。
+    // --subject-code 2202；若它 silently 回落默认科目 1122 把 500 当应付答案，金额尺照旧落——
+    // 2026-09-29 首跑该校准为"分句有所属"判定：500 挂在 1122/应收账款分句是佐证，挂在所问
+    // 科目或无所属才是把默认科目数当答案，见 errorStateNotes）。
     id: 'Y2', group: 'Y 纠错与错误态', intent: '平台错误态 3 轮：not_found/歧义/科目不存在——失败诚实性（说真原因、不给数、给补救、无内部控制词、不重试风暴）',
     run: async () => {
       const { send, assembly } = await boot();
       const candidates: ReadonlyArray<readonly string[]> = [[], QIANLONG_AMBIGUOUS_CANDIDATES, []];
       const turns: Turn[] = [];
+      const audits: AuditRecord[][] = [];
       for (const text of [
         '查一下胜利这个账套 202609 的应收',
         '查一下幻辰的应收账款',
         '查一下新兴五金的应付账款余额',
-      ]) turns.push(await send(text));
+      ]) {
+        const mark = auditRecords().length;
+        turns.push(await send(text));
+        audits.push(auditRecords().slice(mark));
+      }
       await assembly.close();
       const notes: string[] = [];
       for (let i = 0; i < turns.length; i += 1) {
         // 执行语言指纹（含内部控制词 额度|配额|熔断|计划门|拒绝上限|重试上限，runtime.ts 同源）
-        // + 失败诚实性四判（无金额/可行动/≤2 调用/澄清形状）。
-        notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!));
+        // + 失败诚实性四判（金额有所属/可行动/同参重复判风暴/澄清形状；审计切片供风暴分组）。
+        notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!));
       }
       return { turns, notes };
     },
