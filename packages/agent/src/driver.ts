@@ -49,6 +49,12 @@ export interface TurnDriverInput {
   sensitivePaths?: readonly string[];
   /** Trusted host notice callback, awaited before any notify-required plan activates. */
   onNotice?: (text: string) => Promise<void>;
+  /**
+   * 当前委托主体的有效能力（宿主持有的部署能力声明，TrustedContext.capabilities）。
+   * 写关闭判据（D-075）的输入之一：计划里出现写类 operation 而能力不含 write 时，
+   * 宿主在计划评估前就合成写关闭话术终结该轮，不等模型走到提案路径。缺省视为只读。
+   */
+  capabilities?: readonly string[];
 }
 
 /**
@@ -129,6 +135,14 @@ export interface TurnDriverResult {
    * 用户必须选一个"的澄清事实。两者可以同时缺省，也可以同时出现（宿主优先 clarification）。
    */
   clarification?: SelectionClarification;
+  /**
+   * 写关闭终稿标记（D-075）：本回合宿主拦下过含写类 operation 的计划（部署未开放 write），
+   * `text` 是宿主合成的写关闭话术而非 worker 文本（T7 形态：模型停在准备阶段永不抵达
+   * 提案步，宿主要保证用户一定知道写权限是关闭的）。宿主据此把这段文本当**确定性话术**
+   * 处理——出口校验的零执行标注（"以上是子 Agent 的说明…"）不得覆盖或误标其来源，
+   * 与澄清问题/熔断汇总同一家族：宿主持有并发音的话术不经模型翻译、不经出口校验改写。
+   */
+  writeClosed?: boolean;
 }
 
 export interface TurnDriver {

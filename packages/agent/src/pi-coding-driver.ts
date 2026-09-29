@@ -20,9 +20,9 @@ import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { createServeGate, type ServeGateEvent } from './serve-gate';
-import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
+import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationAccesses, loadOperationLabels, type KeyArgStyles, type KeyArgStyle, type OperationAccesses, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
 import { messageFor, messageTextFor } from './error-codes';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, selectionClarificationFromResponses, textFromContent, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
@@ -107,6 +107,12 @@ export interface PiCodingTurnDriverOptions {
   operationArgStyles?: KeyArgStyles;
   /** 整份 args 规格（位置参数声明名 + flag 样式，结构化事实提取用，测试替身注入点）。 */
   operationArgSpecs?: OperationArgsSpecs;
+  /**
+   * operation → access 类别表（平台 `operation list --json` 的 access 列，测试替身注入点）。
+   * 写关闭判据（D-075）的机械来源：宿主据此在计划评估前判定"这份计划含写类 operation"，
+   * 不在自己仓里另立 operation 名单（L2）。缺省经平台 CLI 派生一次。
+   */
+  operationAccesses?: OperationAccesses;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
 }
@@ -141,6 +147,17 @@ export interface PiCodingWorkerSessionOptions {
    * calls 是宿主自己解析的命令参数，不是 worker 文本；最后一次提交即本回合实际执行的范围。
    */
   onPlanSubmitted?: (calls: readonly PlanCall[]) => void;
+  /**
+   * 当前委托主体的有效能力（宿主注入，TurnDriverInput.capabilities 的透传）。
+   * 写关闭判据（D-075）的输入：计划含写类 operation 且能力不含 write 时，宿主在
+   * 计划评估前拦截并合成写关闭话术。缺省视为只读。
+   */
+  capabilities?: readonly string[];
+  /**
+   * operation → access 类别表（平台 `operation list --json` 派生，测试替身注入点）；
+   * 缺省本会话自派生一次（失败 = 空表 = 写关闭前置判定不生效，平台门禁照旧兜底）。
+   */
+  operationAccesses?: OperationAccesses;
 }
 
 export interface PiCodingWorkerSession {
@@ -153,6 +170,13 @@ export interface PiCodingWorkerSession {
    * 驱动用它派生"缺什么"交还规划者——只认确定性原因，不看 worker 的自由文本。
    */
   needsClue: () => SubagentNeeds | null;
+  /**
+   * 本回合是否发生过写关闭拦截（D-075）：worker 提交过含写类 operation 的计划而部署
+   * 未开放 write 能力，宿主在计划评估前当场拦下。驱动据此在结果时刻用宿主合成的写关闭
+   * 话术整体替换终稿——T7 事故形态（模型停在准备阶段、承诺"即可产出录入提案"却永不
+   * 抵达提案步）下，worker 文本不能原样成为用户回复。
+   */
+  writeClosed: () => boolean;
 }
 
 interface CodingModelConfig {
@@ -217,6 +241,18 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     argSpecCache.set(root, loading);
     return loading;
   };
+  // access 类别表（写关闭前置判定 D-075 的机械来源）：同样按平台根路径缓存一次，
+  // 绝不每条命令 spawn 一次 CLI。派生失败 → 空表 → 前置判定不生效（平台门禁兜底）。
+  const accessCache = new Map<string, Promise<OperationAccesses>>();
+  const operationAccessesFor = (workerCwd: string): Promise<OperationAccesses> => {
+    if (options.operationAccesses) return Promise.resolve(options.operationAccesses);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = accessCache.get(root);
+    if (cached) return cached;
+    const loading = loadOperationAccesses(root).catch(() => new Map<string, string>());
+    accessCache.set(root, loading);
+    return loading;
+  };
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
@@ -279,7 +315,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }
         : undefined;
       const argSpecs = await operationArgSpecsFor(input.cwd);
-      const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
+      const { session, currentPlan, needsClue, writeClosed } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
@@ -290,6 +326,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
         operationLabels: await operationLabelsFor(input.cwd),
         operationArgStyles: await operationArgStylesFor(input.cwd),
+        // access 类别表（D-075 写关闭前置判据的平台数据面）与能力声明（宿主持有）
+        // 一起进会话：beforeToolCall 里对提交的计划做写类扫描。
+        operationAccesses: await operationAccessesFor(input.cwd),
+        capabilities: input.capabilities,
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
           onStep: stepOnce,
@@ -320,6 +360,18 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         entitySources: input.entitySources,
       });
       const footprint = (): string => `${gateCalls} 次 ${GATEWAY_INVOCATION} 调用`;
+      // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
+      // 时，委派结果的文本由宿主合成的话术整体替换。为什么必须在结果时刻合成而不是只给
+      // worker 一条 PLAN STOP：T7 事故形态——模型走了完整的"录入准备"流程（行为优秀），
+      // 然后停在准备阶段、承诺"即可产出录入提案"，永不抵达提案步。若只把写关闭话术当作
+      // 拦截理由交给 worker，终稿就是 worker 的准备过程与承诺——用户永远不知道写权限是
+      // 关闭的。宿主在此直接把确定性话说清楚，措辞复用 error-codes.ts 的 WRITE_NOT_ENABLED
+      // 唯一来源（与计划门拒绝、提案路径 capability 检查同一句），不新写第二份。
+      // 等用户确认门（pendingPlan）不替换：那一轮的真实状态是"等宿主验证真实确认"，
+      // 确认机制不被这层覆盖。结构化字段（planFacts/execution/activatedPlan…）原样保留
+      // ——它们是宿主机械事实，与终稿文本的替换互不相干。
+      const closureText = (): string | null =>
+        writeClosed() && !pendingPlan ? messageTextFor('WRITE_NOT_ENABLED') : null;
       // Host-verifiable proof that this delegated turn really executed against the platform.
       // 判据只有一条：至少一次被放行的网关调用（gateCalls > 0）。
       //
@@ -398,7 +450,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
           const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
         }
         // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
         // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
@@ -428,7 +480,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           if (timedOut || cancelled || session.agent.state.errorMessage) {
             const proof = execution();
             const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-            return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
           }
         }
         const proof = execution();
@@ -436,8 +488,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const plan = currentPlan();
         const choice = clarification();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
+        const closed = closureText();
         return {
-          text: lastAssistantText(session.agent.state.messages),
+          text: closed ?? lastAssistantText(session.agent.state.messages),
+          ...(closed ? { writeClosed: true } : {}),
           messages: session.agent.state.messages,
           footprint: footprint(),
           ...(facts ? { planFacts: facts } : {}),
@@ -459,7 +513,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }));
         const proof = execution();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-        return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}) };
+        return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}) };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -490,6 +544,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   let activePlan: { planId: string; version: number } | null = null;
   /** 同任务内计划被拒次数：收敛保护，防 worker 反复重提被拒计划空转整回合。 */
   let declinedPlans = 0;
+  /** 写关闭拦截标志（D-075）：本回合拦过含写类 operation 的计划即置位，驱动据此替换终稿。 */
+  let writeClosed = false;
   if (options.sessionId) {
     try {
       activePlan = await loadCurrentActivePlan({
@@ -509,6 +565,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // args 规格（flag → 样式）：放行的平台调用才有人类可读参数摘要，规格同样只在
   // 放行分支消费。派生失败/旧版平台 → 空表 → 零参数摘要（安全缺省，不外泄、不猜）。
   const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd));
+  // access 类别表（平台 `operation list --json` 的 access 列）：写关闭前置判定（D-075）的
+  // 机械来源。派生失败/旧版平台 → 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案
+  // 路径的既有拒绝照旧兜底），绝不回退到宿主硬编码 operation 名单。
+  const operationAccesses = options.operationAccesses ?? (await loadOperationAccesses(options.cwd));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
@@ -554,6 +614,30 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // 结构化事实（D-065）：calls 是宿主自己解析的不是 worker 文本——上报给驱动侧
         // latch，结果时刻随 TurnDriverResult.planFacts 上交（规格声明名机械提取取值）。
         options.onPlanSubmitted?.(parsed.calls);
+        // ── 写关闭前置拦截（D-075，计划扫描）────────────────────────────────────
+        // 为什么拦在这里（而不是等平台计划门拒绝、或等模型走到提案步）：这是宿主已机械
+        // 解析出 calls 的 operation 名、且尚未放模型执行的最早一点。真实平台 T7 事故——
+        // 用户发起录入请求，模型走了完整的"录入准备"流程（逐一核实范围、日期与平衡关系），
+        // 行为优秀，但停在准备阶段、承诺"即可产出录入提案"却永不抵达提案步。写关闭话术
+        // （WRITE_NOT_ENABLED）原先只挂在提案路径的 capability 检查与平台计划门拒绝上，
+        // 模型不走到那儿，用户就永远不知道写权限是关闭的。计划里出现写类 operation 而
+        // 本部署能力不含 write 时，这份计划注定跑不完——宿主当场合成写关闭话术终结该轮，
+        // 不依赖模型自觉披露。
+        // 判据是机械的：calls（宿主解析）× access 表（平台清单数据）× capabilities
+        // （宿主持有），三个输入没有一个字节从 worker 文本解析。拦截理由复用
+        // error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源（与平台门拒绝/提案路径同一句），
+        // 不新写措辞；PLAN STOP 是协议前缀（worker 提示词认它 = 直接说明停止原因）。
+        // 与实体门禁并列不合并：那个管"参数越权"（可自愈的诊断），这个管"部署没开放写"
+        // （终局事实，无可自愈动作）。拦在 evaluate 之前：零平台调用、零写尝试。
+        if (planWriteClosed(parsed.calls, operationAccesses, options.capabilities)) {
+          writeClosed = true;
+          console.info(JSON.stringify({
+            event: 'plan_write_not_enabled',
+            requestId: options.requestId,
+            operations: parsed.calls.map((call) => call.operation).length,
+          }));
+          return { block: true, reason: `PLAN STOP\n${messageTextFor('WRITE_NOT_ENABLED')}` };
+        }
         // 同任务内计划被连续拒绝的收敛保护：计划被拒是确定性信号（实体越权/格式无效），
         // 反复重提同一请求只会空转模型预算。超过上限就terminal block，让 worker 收手
         // 向用户说明，而不是把回合拖到 executor 超时（实测 D1 类请求空转 5 分钟后崩溃）。
@@ -636,7 +720,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     description: skill.description,
     filePath: skill.filePath,
   }));
-  return { session, skills: loaded, currentPlan: () => activePlan, needsClue: () => needsClues.at(-1) ?? null };
+  return { session, skills: loaded, currentPlan: () => activePlan, needsClue: () => needsClues.at(-1) ?? null, writeClosed: () => writeClosed };
 }
 
 async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<CodingModelConfig> {

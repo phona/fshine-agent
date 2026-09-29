@@ -1,5 +1,5 @@
 /**
- * 平台操作的人类可读名（label）与参数规格（args spec）派生层。
+ * 平台操作的人类可读名（label）、参数规格（args spec）与访问类别（access）派生层。
  *
  * 进度帧里的业务措辞只有一个来源：平台公共 CLI 的 `operation list` 子命令
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
@@ -262,6 +262,99 @@ export function loadOperationArgSpecs(platformRoot?: string): Promise<OperationA
       settle(code === 0 ? parseOperationArgSpecs(Buffer.concat(stdout).toString('utf8')) : new Map());
     });
   });
+}
+
+/**
+ * operation → access 类别表（平台 `operation list --json` 的 `access` 列，数据不是逻辑）。
+ *
+ * 为什么单独一张表：access 是平台对每个 operation 的**访问类声明**（平台清单的权威字段），
+ * 宿主消费它做能力裁决（计划里出现写类 operation 而部署未开放 write 能力时，宿主自己就能
+ * 判定，不必等平台计划门拒绝——那正是 D-075 的机械来源）。与 label/args 规格同纪律：
+ * 只读消费，宿主不镜像、不猜；键同时收注册名与 command 裸名（命令里两种写法都合法）。
+ *
+ * 缺表（CLI 派生失败 / 旧版平台）= 空表 = 判据不成立（宁缺勿猜）：查不到 access 的
+ * operation 绝不触发写关闭判定，由平台门禁按既有路径拒绝。
+ */
+export type OperationAccesses = ReadonlyMap<string, string>;
+
+/**
+ * 解析 `operation list --json` 的 access 列：按 operation 收 access 类别。
+ * 键同时收注册名（voucher.prepare）与 command 裸名（prepare）——与规格表同口径。
+ * access 缺失/非字符串的条目不进表（该 operation 不参与能力裁决）。
+ */
+export function parseOperationAccesses(stdout: string): OperationAccesses {
+  const accesses: Map<string, string> = new Map();
+  let operations: unknown;
+  try { operations = JSON.parse(stdout); } catch { return accesses; }
+  if (!Array.isArray(operations)) return accesses;
+  for (const operation of operations) {
+    const name = (operation as { name?: unknown } | null)?.name;
+    const command = (operation as { command?: unknown } | null)?.command;
+    const access = (operation as { access?: unknown } | null)?.access;
+    if (typeof access !== 'string' || !access) continue;
+    for (const key of [name, command]) {
+      if (typeof key === 'string' && key && !accesses.has(key)) accesses.set(key, access);
+    }
+  }
+  return accesses;
+}
+
+/**
+ * 经公共 CLI 派生 access 表（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与 loadOperationLabels / loadOperationArgStyles 完全一致：platformRoot 未配、
+ * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
+ * 不是前提；没有 access 表就不做写关闭前置判定（平台门禁照旧兜底），绝不用宿主硬编码
+ * operation 名单顶替（那违反 L2：宿主另立一份名单即分叉）。
+ */
+export function loadOperationAccesses(platformRoot?: string): Promise<OperationAccesses> {
+  if (!platformRoot) return Promise.resolve(new Map());
+  const cli = gatewayExecPath(platformRoot);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (accesses: OperationAccesses): void => {
+      if (settled) return;
+      settled = true;
+      resolve(accesses);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(new Map());
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(new Map());
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseOperationAccesses(Buffer.concat(stdout).toString('utf8')) : new Map());
+    });
+  });
+}
+
+/**
+ * access 类别是否属写类（平台 access 语义，见 17dz `lib/operations.js` 的声明）：
+ *   · write      该 operation 具备平台写副作用；
+ *   · write-flag 默认安全，携带 writeFlag 时产生平台写（如落账）；
+ *   · read       只读平台数据；local 纯本地处理（不触平台会话）——两者都不是写类。
+ *
+ * 用前缀判定而不是枚举具体值：平台的 access 词汇表由平台自己持有（ACCESS 白名单校验），
+ * 宿主列举 'write'/'write-flag' 两个具体值就是在镜像平台词表（L2）；前缀覆盖整个写家族
+ * （含平台未来新增的 write-* 类），且读/本地两类天然排除。缺 access（旧版平台/未登记）
+ * → false：不触发布防，交给平台门禁既有路径。
+ */
+export function isWriteAccess(access: string | undefined): boolean {
+  return typeof access === 'string' && access.startsWith('write');
 }
 
 /**

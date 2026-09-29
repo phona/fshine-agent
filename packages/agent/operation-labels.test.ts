@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, operationLabel, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels } from './src/operation-labels';
+import { isWriteAccess, loadOperationAccesses, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, operationLabel, parseOperationAccesses, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels } from './src/operation-labels';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -227,5 +227,83 @@ describe('loadOperationArgSpecs（经公共 CLI 派生整份规格）', () => {
 
   it('platformRoot 缺省 → 空表（不 spawn，宁缺勿猜）', async () => {
     expect((await loadOperationArgSpecs()).size).toBe(0);
+  });
+});
+
+// ── access 类别（D-075：写关闭判据的平台数据面，宿主消费不镜像）────────────────
+//
+// access 是平台对每个 operation 的访问类声明（平台清单权威字段，词汇表由平台自己校验）。
+// 宿主只读消费：写关闭前置判定据此在计划评估前识别"这份计划含写类 operation"，
+// 不在自己仓里另立 operation 名单（L2）。
+
+/** 与平台 `operation list --json` 同形的预置输出（节选：四类 access 各至少一条）。 */
+const ACCESS_LIST_JSON = JSON.stringify([
+  { name: 'finance.query-receivables', command: 'query-receivables', access: 'read' },
+  { name: 'voucher.query-saved', command: 'query-saved', access: 'read' },
+  { name: 'voucher.precheck', command: 'precheck', access: 'local' },
+  { name: 'voucher.prepare', command: 'prepare', access: 'write-flag' },
+  { name: 'voucher.commit', command: 'commit', access: 'write-flag' },
+  { name: 'voucher.fix-summary', command: 'fix-summary', access: 'write' },
+]);
+
+describe('parseOperationAccesses（--json 的 access 列）', () => {
+  it('按 operation 收录 access，注册名与 command 裸名同表', () => {
+    const accesses = parseOperationAccesses(ACCESS_LIST_JSON);
+    expect([...accesses.entries()]).toEqual([
+      ['finance.query-receivables', 'read'],
+      ['query-receivables', 'read'],
+      ['voucher.query-saved', 'read'],
+      ['query-saved', 'read'],
+      ['voucher.precheck', 'local'],
+      ['precheck', 'local'],
+      ['voucher.prepare', 'write-flag'],
+      ['prepare', 'write-flag'],
+      ['voucher.commit', 'write-flag'],
+      ['commit', 'write-flag'],
+      ['voucher.fix-summary', 'write'],
+      ['fix-summary', 'write'],
+    ]);
+  });
+
+  it('空输出/非 JSON/非数组/缺 access 列都得到空表（与规格表同一套安全缺省）', () => {
+    expect(parseOperationAccesses('').size).toBe(0);
+    expect(parseOperationAccesses('not json').size).toBe(0);
+    expect(parseOperationAccesses('{"operations":[]}').size).toBe(0);
+    expect(parseOperationAccesses('[{"name":"x"}]').size).toBe(0);
+    expect(parseOperationAccesses('[{"name":"x","access":""}]').size).toBe(0);
+    expect(parseOperationAccesses('[{"name":"x","access":7}]').size).toBe(0);
+  });
+});
+
+describe('loadOperationAccesses（经公共 CLI 派生一次）', () => {
+  it('platformRoot 缺省 → 空表（不 spawn，宁缺勿猜）', async () => {
+    expect((await loadOperationAccesses()).size).toBe(0);
+  });
+
+  it('CLI 正常 → 解析出 access 表；非零退出 → 空表', async () => {
+    const root = await fakePlatformRootWithJson(ACCESS_LIST_JSON);
+    expect(await loadOperationAccesses(root)).toEqual(parseOperationAccesses(ACCESS_LIST_JSON));
+    expect((await loadOperationAccesses(await fakePlatformRootWithJson(ACCESS_LIST_JSON, { exitCode: 3 }))).size).toBe(0);
+  });
+
+  it('CLI 不存在 / 挂住 → 空表（与 label/规格派生同一套失败语义）', async () => {
+    const empty = await mkdtemp(path.join(os.tmpdir(), 'op-access-empty-'));
+    roots.push(empty);
+    expect((await loadOperationAccesses(empty)).size).toBe(0);
+    expect((await loadOperationAccesses(await fakePlatformRootWithJson('', { hang: true }))).size).toBe(0);
+  }, 15_000);
+});
+
+describe('isWriteAccess（平台 access 语义：写家族判定）', () => {
+  it('write / write-flag 属写类；read / local 不是', () => {
+    expect(isWriteAccess('write')).toBe(true);
+    expect(isWriteAccess('write-flag')).toBe(true);
+    expect(isWriteAccess('read')).toBe(false);
+    expect(isWriteAccess('local')).toBe(false);
+  });
+
+  it('缺 access（旧版平台/未登记）→ false：不触发布防，交给平台门禁既有路径', () => {
+    expect(isWriteAccess(undefined)).toBe(false);
+    expect(isWriteAccess('')).toBe(false);
   });
 });

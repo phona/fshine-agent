@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, formatPlanMessage, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, type PlanCliRunner } from './src/plan-runtime';
-import { parseOperationArgSpecs, type OperationArgsSpecs } from './src/operation-labels';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, formatPlanMessage, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCliRunner } from './src/plan-runtime';
+import { parseOperationAccesses, parseOperationArgSpecs, type OperationAccesses, type OperationArgsSpecs } from './src/operation-labels';
 
 const approved = {
   planId: 'plan_123', version: 2, decision: 'notify',
@@ -272,5 +272,54 @@ describe('planCallFacts（平台 args 规格声明名机械提取）', () => {
 
   it('空 calls → 空事实（没提过计划的委派不挂结构化字段）', () => {
     expect(planCallFacts([], SPECS, LABELS)).toEqual({});
+  });
+});
+
+// ── 写关闭判据（D-075：calls × access 表 × capabilities，三个输入都非 worker 文本）──
+
+/** 与平台 `operation list --json` 的 access 列同形的预置表（四类 access 各一条）。 */
+const ACCESSES: OperationAccesses = parseOperationAccesses(JSON.stringify([
+  { name: 'finance.query-receivables', command: 'query-receivables', access: 'read' },
+  { name: 'voucher.query-saved', command: 'query-saved', access: 'read' },
+  { name: 'voucher.precheck', command: 'precheck', access: 'local' },
+  { name: 'voucher.prepare', command: 'prepare', access: 'write-flag' },
+  { name: 'voucher.commit', command: 'commit', access: 'write' },
+]));
+
+describe('planWriteClosed（写关闭的机械判据）', () => {
+  it('计划含写类 operation（write / write-flag）且能力不含 write →  true', () => {
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A', '202609'] }], ACCESSES, ['read'])).toBe(true);
+    expect(planWriteClosed([{ operation: 'voucher.commit', args: ['A', '202609'] }], ACCESSES, ['read'])).toBe(true);
+    // 混在只读调用里同样命中：准备流程中的写步骤让整份计划注定跑不完
+    expect(planWriteClosed([
+      { operation: 'voucher.query-saved', args: ['A', '202609'] },
+      { operation: 'voucher.prepare', args: ['A', '202609'] },
+    ], ACCESSES, ['read'])).toBe(true);
+  });
+
+  it('能力含 write → 不触发布防（写开放部署照常走平台计划门）', () => {
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], ACCESSES, ['read', 'write'])).toBe(false);
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], ACCESSES, ['write'])).toBe(false);
+  });
+
+  it('纯只读 / local 计划 → 不触发（read 与 local 都不是写类）', () => {
+    expect(planWriteClosed([
+      { operation: 'voucher.query-saved', args: ['A', '202609'] },
+      { operation: 'voucher.precheck', args: [] },
+    ], ACCESSES, ['read'])).toBe(false);
+  });
+
+  it('缺 access 表 / operation 查不到 access / capabilities 缺省 → 不触发（宁缺勿猜）', () => {
+    // CLI 派生失败（空表）：前置判定整体不生效，平台计划门与提案路径照旧兜底
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], undefined, ['read'])).toBe(false);
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], new Map(), ['read'])).toBe(false);
+    // 未登记的 operation：平台会以 UNKNOWN_OPERATION 拒绝，不猜它的访问类
+    expect(planWriteClosed([{ operation: 'voucher.batch', args: ['A'] }], ACCESSES, ['read'])).toBe(false);
+    // capabilities 缺省视为只读（与契约层同语义）：写类 operation 仍然触发
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], ACCESSES, undefined)).toBe(true);
+  });
+
+  it('command 裸名写法同样命中（命令里两种写法都合法，键双收）', () => {
+    expect(planWriteClosed([{ operation: 'prepare', args: ['A'] }], ACCESSES, ['read'])).toBe(true);
   });
 });

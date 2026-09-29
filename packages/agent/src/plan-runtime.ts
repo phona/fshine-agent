@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { errorFor } from './error-codes';
-import { operationLabel, type OperationArgsSpecs, type OperationLabels } from './operation-labels';
+import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationAccesses, type OperationLabels } from './operation-labels';
 import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface PlanCall {
@@ -289,6 +289,35 @@ export function validateCalls(calls: readonly PlanCall[]): void {
     if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index);
     try { JSON.stringify(call.args); } catch { throw errorFor('PLAN_CALL_ARGS_NOT_JSON', index); }
   }
+}
+
+/**
+ * 写关闭判据（D-075）：计划里出现写类 operation，而本部署的能力声明不含 write。
+ *
+ * 为什么必须是机械判据（而不是等模型走到提案步）：2026-09-29 真实平台 T7 事故——用户
+ * 发起录入请求，模型走了完整的"录入准备"流程（行为优秀），然后停在准备阶段，承诺"即可
+ * 产出录入提案"却永不抵达提案步。WRITE_NOT_ENABLED 原先只挂在提案路径的 capability
+ * 检查（context.ts finalizeProposal）与平台计划门拒绝上，模型不走到那儿，用户就永远
+ * 不知道写权限是关闭的。计划成形时（宿主已机械解析出 calls 的 operation 名）就能判：
+ * 这份计划注定跑不完，因为部署没开放写。
+ *
+ * 三个输入全是宿主/平台已有的确定性材料，没有一个字节从 worker 文本解析：
+ *   · calls：宿主自己从计划命令解析出来的（parsePlanCallsCommand）；
+ *   · accesses：平台 `operation list --json` 的 access 列（operation-labels 派生）；
+ *   · capabilities：宿主持有的部署能力声明（TrustedContext.capabilities，缺省只读）。
+ *
+ * 宁缺勿猜：access 表缺失（CLI 派生失败/旧版平台）或 operation 查不到 access 时，
+ * 该 operation 不算写类——不触发布防，平台计划门与提案路径的既有拒绝照旧兜底。
+ * 空 capabilities 视为只读（与契约层同语义：缺省视为只读）。
+ */
+export function planWriteClosed(
+  calls: readonly PlanCall[],
+  accesses: OperationAccesses | undefined,
+  capabilities: readonly string[] | undefined,
+): boolean {
+  if (capabilities?.includes('write')) return false;
+  if (!accesses || accesses.size === 0) return false;
+  return calls.some((call) => isWriteAccess(accesses.get(call.operation)));
 }
 
 /** Build the per-command environment for a worker bash subprocess. */

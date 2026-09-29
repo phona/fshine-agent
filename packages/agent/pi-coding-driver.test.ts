@@ -184,6 +184,140 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  // ── 写关闭前置拦截（D-075：计划扫描）────────────────────────────────────
+  // T7 事故形态的机械版：用户发起录入请求，模型停在"录入准备"阶段、承诺"即可产出录入
+  // 提案"，永不抵达提案步——写关闭话术原先只挂在提案路径与平台计划门拒绝上，模型不
+  // 走到那儿用户就永远不知道。宿主在计划评估前（calls 已机械解析、尚未放模型执行的
+  // 最早一点）自己判定：这份计划含写类 operation 而部署未开放 write，注定跑不完。
+
+  /** 平台 `operation list --json` 的 access 列同形预置表（read / local / write-flag）。 */
+  const ACCESS_TABLE = new Map<string, string>([
+    ['query-receivables', 'read'],
+    ['finance.query-receivables', 'read'],
+    ['query-saved', 'read'],
+    ['voucher.query-saved', 'read'],
+    ['precheck', 'local'],
+    ['voucher.precheck', 'local'],
+    ['prepare', 'write-flag'],
+    ['voucher.prepare', 'write-flag'],
+    ['commit', 'write'],
+    ['voucher.commit', 'write'],
+  ]);
+
+  /** 写关闭部署：计划含写类 operation 时宿主在 evaluate 前拦截，拒绝理由即写关闭话术。 */
+  it('write-closed deployment: a plan with a write-class operation is blocked before the evaluator runs', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-scan-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const calls: string[][] = [];
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      calls.push(args);
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_scan', planId: null, version: null, status: 'none' }), stderr: '' };
+      throw new Error('写关闭拦截后不得再调平台计划门');
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'write scan test',
+      sessionId: 'task_write_scan',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      operationAccesses: ACCESS_TABLE,
+      capabilities: ['read'],
+    });
+    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_scan', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    expect(verdict?.block).toBe(true);
+    // 拒绝理由复用 error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源（与平台门拒绝/提案路径同一句）
+    expect(verdict?.reason).toContain('PLAN STOP');
+    expect(verdict?.reason).toContain('当前未开放写入权限');
+    expect(verdict?.reason).toContain('请联系管理员开通');
+    // 拦在 evaluate 之前：平台计划门从未被调用（本任务只有会话创建时的 plan current）
+    expect(calls.filter((args) => args[1] === 'evaluate')).toEqual([]);
+    // 拦截事实上抛给驱动侧：结果时刻据此合成终稿
+    expect(worker.writeClosed()).toBe(true);
+    worker.session.dispose();
+  });
+
+  it('write-enabled deployment or read-only plan: the scan does not fire and evaluation proceeds', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-open-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const evaluated: string[][] = [];
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: null, version: null, status: 'none' }), stderr: '' };
+      evaluated.push(args);
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 2, seconds: 20 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'write open test',
+      sessionId: 'task_write_open',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      operationAccesses: ACCESS_TABLE,
+      // 写开放：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
+      capabilities: ['read', 'write'],
+    });
+    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.prepare","args":["A","202609"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_open', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(evaluated).toHaveLength(1);
+    expect(worker.writeClosed()).toBe(false);
+    worker.session.dispose();
+  });
+
+  it('write-closed deployment but operation not in the access table: no pre-emptive block (宁缺勿猜)', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-unknown-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const evaluated: string[][] = [];
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: null, version: null, status: 'none' }), stderr: '' };
+      evaluated.push(args);
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'write unknown test',
+      sessionId: 'task_write_unknown',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      operationAccesses: ACCESS_TABLE,
+      capabilities: ['read'],
+    });
+    // 未登记的 operation：查不到 access 就不猜它是写类——平台计划门按既有路径裁决
+    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.batch","args":["A","202609"]}]}';
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_unknown', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(evaluated).toHaveLength(1);
+    expect(worker.writeClosed()).toBe(false);
+    worker.session.dispose();
+  });
+
   it('blocks a platform plan whose entities appear in none of the three sources before calling the CLI evaluator', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-intent-scope-'));
     roots.push(root);

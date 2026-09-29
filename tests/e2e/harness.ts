@@ -22,8 +22,9 @@ import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
-import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
+import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import { loadOperationAccesses, loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
+import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, type SelectionClarification } from '../../packages/agent/src/platform-contract';
@@ -39,6 +40,9 @@ let counter = 0;
 // 驱动读同一份平台数据（不镜像、不手抄）。
 const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT);
 const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
+// access 类别表（D-075 写关闭判据的平台数据面）：与真实驱动同源派生（operation list --json
+// 的 access 列），替身复刻计划扫描时查同一份表，不在测试里另立 operation 名单。
+const operationAccesses = await loadOperationAccesses(PLATFORM_ROOT);
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
@@ -244,9 +248,17 @@ export type WorkerStep =
  * `enforceEntityScope`（显式开启）：复刻真实驱动的实体门禁——计划参数必须逐字来自宿主
  * 注入的实体来源 + 本任务平台响应，越权即确定性拒绝（PLAN DECLINED → needs）。默认关闭：
  * 既有共享夹具先于门禁存在，参数并非都逐字可溯源（见下方拦截处的说明）。
+ *
+ * `enforceWriteClosure`（显式开启）：复刻真实驱动的写关闭计划扫描（D-075）——宿主解析出
+ * 的 calls 含写类 operation（access=write/write-flag，平台清单数据）而宿主注入的能力
+ * 不含 write 时，在 evaluate **之前**终结该轮：终稿是宿主合成的 WRITE_NOT_ENABLED
+ * （error-codes.ts 唯一来源），worker 的准备/承诺文本不会成为终稿（T7 形态的机械版），
+ * 零平台调用发生。与实体门禁同性质：真实驱动的扫描在 pi-coding-driver 的 beforeToolCall，
+ * 单测钉拦截点与理由，这里钉宿主级终稿行为。
  */
-function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean }) {
+function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean }) {
   const enforceEntityScope = options?.enforceEntityScope === true;
+  const enforceWriteClosure = options?.enforceWriteClosure === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
     const child = spawnSync(path.join(platformRoot, 'bin', '17dz'), args, {
@@ -263,6 +275,8 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       onNotice?: (text: string) => Promise<void>;
       /** 宿主注入的实体来源（架构 §2 第 9 条）：替身按它复刻真实驱动的计划门禁。 */
       entitySources?: PlanEntitySources;
+      /** 宿主注入的能力声明（D-075）：替身按它复刻真实驱动的写关闭计划扫描。 */
+      capabilities?: readonly string[];
       messages: unknown[];
     }) => {
       const taskId = input.sessionId ?? 'task_unknown';
@@ -337,6 +351,20 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
             parts.push(`PLAN DECLINED：${scopeError}`);
             break;
           }
+        }
+        // 写关闭计划扫描（D-075）：与真实驱动 beforeToolCall 同一把机械尺——calls（宿主
+        // 解析）× access 表（平台清单数据）× capabilities（宿主注入）。命中即在 evaluate
+        // 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型停在"录入准备"阶段
+        // 永不抵达提案步，这句话必须由宿主说，且 worker 的准备/承诺文本不得外发。
+        if (enforceWriteClosure && planWriteClosed(current.plan, operationAccesses, input.capabilities)) {
+          const text = messageTextFor('WRITE_NOT_ENABLED');
+          return {
+            text,
+            messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
+            // 与真实驱动一致：终稿标记随结果上交——宿主据此把这段确定性话术直接作为
+            // 本轮回复（出口校验的零执行标注不覆盖它）。
+            writeClosed: true,
+          };
         }
         const plan = await evaluateAndActivatePlan({
           platformRoot: PLATFORM_ROOT,

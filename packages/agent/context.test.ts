@@ -145,6 +145,51 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.turnDeclaration).toBeUndefined();
   });
 
+  // ── 能力信封（D-075 软层）：worker 系统提示词里的当前能力声明 ─────────────────
+  // 第 1 层（计划扫描）是机械兜底，但 T7 形态里模型的计划可能全程只含只读的"录入准备"
+  // 调用——机械扫描无事可做，能否披露全靠 worker 自己知道写权限是关闭的。这一层把能力
+  // 声明作为框架事实注入提示词。**诚实报告：没有机械锁**，与 D-072 的技能条同性质。
+
+  it('写关闭（capabilities 不含 write）时 worker 提示词含能力信封句与必须告知的义务', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+
+    // capabilities 缺省同样视为只读（与契约层同语义）：信封句照常注入
+    await subagent.run({ request: '查一下余额' }, { trusted: trusted() });
+    expect(prompt).toContain('能力信封：本部署未开放写入能力（只读）');
+    expect(prompt).toContain('当前未开放写入权限，如有需要请联系管理员开通。');
+    expect(prompt).toContain('不得承诺可以完成写入');
+
+    await subagent.run({ request: '查一下余额' }, { trusted: { ...trusted(), capabilities: ['read'] } });
+    expect(prompt).toContain('能力信封：本部署未开放写入能力（只读）');
+  });
+
+  it('写开放时 worker 提示词含已开放能力信封句，且不出现未开放措辞', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    let observed: TurnDriverInput | undefined;
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        observed = input;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({ request: '查一下余额' }, { trusted: { ...trusted(), capabilities: ['read', 'write'] } });
+
+    expect(prompt).toContain('能力信封：本部署已开放写入能力');
+    expect(prompt).not.toContain('本部署未开放写入能力');
+    // 能力声明同时透传到 worker 驱动（写关闭判据 D-075 的宿主持有输入）
+    expect(observed?.capabilities).toEqual(['read', 'write']);
+  });
+
   it('计划模式的步骤标签透传给子 Agent 驱动，用户通知带「第 N/M 步」前缀', async () => {
     const root = await profileRoot();
     let observed: TurnDriverInput | undefined;

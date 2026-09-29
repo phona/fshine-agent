@@ -959,6 +959,21 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
               // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
               if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
+              // 写关闭 disclosure（D-075）：本回合的计划被宿主以"部署未开放写入"拦下
+              // （计划里出现写类 operation 而能力声明不含 write），delegated.text 是宿主
+              // 合成的写关闭话术而非 worker 文本——T7 事故形态（模型停在"录入准备"阶段、
+              // 承诺"即可产出录入提案"却永不抵达提案步）里，这是用户唯一能知道写权限关闭
+              // 的通道。它以确定性话术终结该轮：不经模型翻译（与澄清问题同家族），出口
+              // 校验的零执行标注（"以上是子 Agent 的说明；本轮没有真正查到平台数据"）
+              // 也不得覆盖或误标其来源——那句话是宿主说的确定性事实，不是子 Agent 的
+              // 说明。delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
+              // 计划模式的步骤结果走上面的 renderPlanStepToolResult 交还模型（那一步的
+              // 事实进工具结果，由 Main Agent 汇总时转述），不在此终结。
+              if (delegated.writeClosed) {
+                turn.delegationFailed = true;
+                console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId }));
+                throw new ToolUserError(stripFootprint(delegated.text) || messageTextFor('WRITE_NOT_ENABLED'));
+              }
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);

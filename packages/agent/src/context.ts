@@ -100,6 +100,13 @@ export interface SubagentTaskResult {
    * 分工：一个是"缺什么"，一个是"选哪个"。
    */
   clarification?: SelectionClarification;
+  /**
+   * 写关闭终稿标记（D-075，驱动侧 writeClosed 的透传）：本回合宿主拦下过含写类
+   * operation 的计划（部署未开放 write），text 是宿主合成的写关闭话术而非 worker
+   * 文本。宿主据此把这段确定性话术直接作为本轮回复——出口校验的零执行标注不得
+   * 覆盖或误标其来源（与澄清问题同一家族：宿主持有并发音）。
+   */
+  writeClosed?: boolean;
 }
 
 export type { SubagentNeeds };
@@ -533,7 +540,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
         try {
           result = await options.workerDriver.run({
-            systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration),
+            systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration, ctx.trusted.capabilities),
             tools: [],
             messages,
             cwd: profile.root,
@@ -549,6 +556,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
             ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
             ...(onNotice ? { onNotice } : {}),
+            // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而能力不含
+            // write 时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读。
+            capabilities: ctx.trusted.capabilities,
           });
         } finally {
           release();
@@ -609,6 +619,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const final: SubagentTaskResult = {
           taskId,
           ...(result.execution ? { execution: result.execution } : {}),
+          // 写关闭终稿标记（D-075）：text 是宿主合成的确定性话术，原样上交——宿主据此
+          // 直接终结本轮，不经模型翻译、不经出口校验标注。
+          ...(result.writeClosed ? { writeClosed: true } : {}),
           // 收尾兜底（P1）：批准了但零执行，原样上交——宿主需要这个事实才能说对状态
           ...(result.activatedPlan ? { activatedPlan: result.activatedPlan } : {}),
           // 结构化歧义/未找到：平台请用户"选一个"的澄清事实，原样上交——宿主据此机械
@@ -726,10 +739,23 @@ function workerSystemPrompt(
   root: string,
   allowedAccountSetIds: readonly string[],
   turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>,
+  capabilities?: readonly string[],
 ): string {
   const scope = allowedAccountSetIds.length > 0
     ? `调用者的应用层授权名单：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外对象。`
     : '应用层未提供授权名单；访问范围必须以平台领域脚本的权限校验为准。';
+  // 能力信封（D-075 软层）：把本部署的能力声明作为框架事实告诉 worker——"写入/只读"
+  // 是通用能力词，不是业务词（不触泄漏 lint 的业务词预算）。为什么需要这一层：第 1 层
+  // （计划扫描）是机械兜底，但 T7 事故形态里模型的计划可能全程只含只读的"录入准备"
+  // 调用——机械扫描无事可做，能否披露全靠 worker 自己知道写权限是关闭的。具备领域知识
+  // 的 worker 在这一句的提示下能在准备阶段自行披露。**诚实报告：这层没有机械锁**，
+  // 与 D-072 的技能条同性质——软提示，不保证模型一定说；保证用户一定知道的是第 1 层
+  // （计划含写类 operation 时宿主直接合成 WRITE_NOT_ENABLED 终稿）。
+  // 未开放时给 worker 的确切措辞插值自 error-codes.ts 的 WRITE_NOT_ENABLED（唯一来源），
+  // 不在这里造第二份手抄本；开放时只陈述"写入由服务端在用户确认后执行"这一既有事实。
+  const capabilityEnvelope = capabilities?.includes('write')
+    ? '能力信封：本部署已开放写入能力；写入由服务端在用户确认后执行，你不得自行落库。'
+    : `能力信封：本部署未开放写入能力（只读）。用户提出写入类请求时，必须在准备或执行前如实告知——${messageTextFor('WRITE_NOT_ENABLED')}不得承诺可以完成写入。`;
   return [
     '你是 幻账平台任务子 Agent，在受信工作目录中执行一项具体任务。最终回复会原样展示给最终用户——直接对用户说话；不要输出内部协议文案（"给主 Agent 的说明"、宿主、委派、route_current_turn、PLAN ACTIVE/DECLINED 等字样和状态 JSON 不允许）。',
     // 回复语域契约（2026-09-27 Stage 3 事故根治包）：格式规范，不是行为恳求。你的工作上下文
@@ -741,6 +767,7 @@ function workerSystemPrompt(
     `平台工作目录：${root}`,
     '先按 Pi 的 Skill 机制读取相关 SKILL.md、MECHANISMS.md 和契约说明，再调用其中指定的领域脚本；实时数据必须来自领域脚本结果，不得编造。',
     '按平台 SKILL 与 operation 文档声明的能力边界执行：只做 Skill 与 operation 文档支持的操作，超出能力边界的请求直接如实报告，不要换口径试探。写操作由服务端在用户确认后执行。',
+    capabilityEnvelope,
     `执行前必须先提交精确执行方案：第一条 bash 命令为单行 JSON——${planDraftExample()}，calls 逐项列出准备执行的 operation 及原生参数（args 为字符串数组，即命令行原样参数，如 ["--query","某公司全称","--period","202609"]），照 Skill/operation 文档填写。PLAN ACTIVE 后才能查询；PLAN DECLINED 可按平台原因修正后重提；PLAN NEEDS_USER_CONFIRM 或 PLAN PAUSED 必须结束回合，等待宿主验证真实用户确认；PLAN STOP 直接说明停止原因。范围扩大时重新提交完整 calls。`,
     // 调用形式纪律（B1-fshine）：平台调用只认网关这一种形状。这里刻意只给占位符——
     // 具体脚本路径以平台 Skill 文档为准，写死任何一条示例都会随平台演进过期，

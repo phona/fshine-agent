@@ -129,6 +129,9 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
       agentDir: path.join(cwd, '.fshine-agent'),
       // label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单
       operationLabels: new Map(),
+      // access 表同样直接注入（D-075）：否则每回合多一次 CLI spawn，会把 40ms 极限
+      // deadline 的超时用例挤到会话创建阶段就提前返回（rounds=0），测不到补刀边界。
+      operationAccesses: new Map(),
       planCliRunner,
     }),
   };
