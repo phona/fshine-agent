@@ -1067,3 +1067,22 @@
 | **测试门** | 两仓全绿：fshine 69 文件 703 例（唯一红=已知满载 flake，单独跑 9/9 过）；17dz ALL PASS；tsc 0 error；leak-lint 4/4 |
 
 **仍开的**（如实登记）：① D-075 软层依旧无锁——纯只读准备流程+模型不披露+不提写计划的组合，宿主无机可扫（靠 X 系列盯）；② needs/clarification 与 writeClosed 同现时优先级未动（澄清>needs>writeClosed），该组合披露推迟到下次派发；③ 宿主 `AMBIGUOUS_SELECTION` 模板列候选不点明对象类型（X2 首轮误报之源——要修得在用户话术里加“账套”，但那是业务词，需先定归属标签）；④ 写关闭步在计划投影里记 failed 但不特化原因。
+
+---
+
+## 补充记录（2026-09-30，P1 stop 裁决修复顺手核实的四笔债）
+
+P1 修复（`plan evaluate` exit 3 双语义：`runJson` 对非零 exit 一律抛错使 stop 分支成死代码，见 `packages/agent/src/plan-runtime.ts` 的 `runPlanEvaluation`/`tryParseEvaluation`）不改下列各条，仅做文档登记与对账。任务单第 2、3 条与既有条目同债，确认后不重复登记。
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| **D-080（新）确认路径无 capability 复核：收回 write 后确认码仍可触发 commit** | **待办** | **背景**：capability 只在提案步检查一次——`packages/agent/src/context.ts` 的 `finalizeProposal`（context.ts:364-368）对 capability 不含 write 确定性拒绝；而确认码路径 `matchConfirmation`（context.ts:431-495）的 confirm 分支（context.ts:457-479）从码哈希命中到 commit 执行全程不查 capabilities。**现状**：提案成立后将 principal 的 write 收回，「确认 码」仍走完 commit 路径（结局 failed/committed，而非 WRITE_NOT_ENABLED）。tripwire 钉住当前行为：`tests/e2e/turn-loop-security.test.ts` D3 入口③「缺口钉住：确认写码路径无 capability 复核，收回 write 后确认仍走 commit」（:405 起；任务单写的 turn-loop-write-chain.test.ts 经核实不确，实际在该文件，如实更正）。**迁移方向**：confirm 分支复用 finalizeProposal 同一把 capability 尺（按确认时点的 capabilities 复核，不是提案时的快照——提案到确认之间能力被收回正是本条缺口形状）；修缺口时把 tripwire 断言翻转为写关闭话术。注意该确认路径本身是 AGENTS.md 点名的遗留写路径（待迁移，不作新域模板）。 |
+| **D-081（新）DZ_REQUIRE_PLAN=1 严格模式会挡住服务端 commit 的 verify-saved 读回** | **待办（部署前置条件）** | **背景**：`apps/server/commit.ts` 的 `runGate`（commit.ts:52-65）以 `env: { ...process.env, ...extraEnv }` 起网关子进程——server 进程的 env 原样继承。平台计划硬闸（17dz `src/execution/gateway.js:118`、`src/execution/runner.js:42`）在 `serve && planEligible && DZ_REQUIRE_PLAN === '1' && !DZ_PLAN_ID` 时拒 `PLAN_REQUIRED`；`voucher.verify-saved` 是 read/effects=[read]，`isPlannableOperation` 判真（17dz `src/execution/plan.js:146-149`）。**现状**：生产当前不带该 env，无碍；但严格模式部署（或 server 进程带 DZ_REQUIRE_PLAN=1）时，commit 前后的读回基线与读回校验被 PLAN_REQUIRED 拒——`before`/`after` 计数拿不到，`verified` 恒假，落账路径整体瘫痪（且这是"已落账但报失败"的最坏形态）。`runGate` 既不剥 DZ_REQUIRE_PLAN 也不注入宿主侧 DZ_PLAN_ID。**迁移方向**：遗留写路径迁移/严格模式上线时一并解决——服务端直调读回显式声明法域（如 runGate 剥 DZ_REQUIRE_PLAN，或平台侧给宿主直调读回一个豁免判据）；上线前补机械锁：e2e 在 server 进程带 DZ_REQUIRE_PLAN=1 的环境下跑 commit 全链仍绿。 |
+| 任务单第 2 条（allowlist 读路径仅提示词约束） | 同债不重复 | 即 **D-066**（读路径授权软控制，watch 待办）。tripwire 确认：`tests/e2e/turn-loop-security.test.ts` D2 组（文件头 :10-12 明示"读路径的范围约束只存在于 worker 提示词层——覆盖缺口"）。D-066 条目本身未改动。 |
+| 任务单第 3 条（终稿无执行语言指纹硬闸） | 同债不重复，补引用 | 即 **D-069** 关闭记录里登记的残留（"执行语言指纹尺也不在终稿硬闸上，只在 worker 说明准入与探针用"）。补测试引用：除 D-069 已列的 `runtime.test.ts` F4.1 与 `turn-loop-phone-incident.test.ts` PHONE-2 外，**`tests/e2e/turn-loop-security.test.ts` D4 corpus 五条 ★ 污染塑形用例**（:463 起，伪造信封行/网关路径/内部错误码/taskId 注入物原样到达用户）同样是这条缺口的 tripwire，且已在测试注释里反向引用 D-069。生产补终稿指纹硬闸后，这些 ★ 用例的断言应翻转为零命中。 |
+
+## 补充记录（2026-09-30 第二批，长会话不变量设施发现）
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| **D-082（新）commit 成功路径不回写 platform_tasks 终态：写任务终身"无终态"** | **待办** | **背景**：确认闭环成功时 `matchConfirmation` 的 committed 分支（`packages/agent/src/context.ts:471-478`）只 `ci.updateStatus(rec.intentId,'committed',…)` 后返回；产生该提案的委派任务在 platform_tasks 里 outcome 永远为空。对照：任务失败路径（context.ts:688）会 upsert 任务记录写 failed——成功路径缺了对称的一环。**现状**：任何"任务终态无悬挂"类审计（含新落地的 `tests/e2e/invariant-checker.ts` L1）都必须为 commit 任务开例外；执行可观测性（架构 §4：区分调用获准/实际执行/执行成功）在遗留写路径上缺"执行成功"回写。**tripwire**：invariant-checker L1 的 `expectedOpenTasks` 例外即钉住此现状；`tests/e2e/turn-loop-long-session-invariants.test.ts` S1 场景的写链全程依赖该例外。**迁移方向**：committed 与 confirm_failed 两个分支都在 commit 后 upsert originating 任务 outcome（done/failed）并关联 intentId；修复后撤掉检查器例外，转为硬断言。该路径本身是 AGENTS.md 点名的遗留写路径（待迁移，不作新域模板）。 |
