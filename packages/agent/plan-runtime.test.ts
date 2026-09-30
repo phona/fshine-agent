@@ -196,6 +196,83 @@ describe('platform-backed execution plan runtime', () => {
       runCli,
     })).rejects.toThrow('onNotice');
   });
+
+  // ── evaluate 退出码双语义（平台 src/cli/index.js：stop 裁决 exit 3 + stdout 合法 JSON；
+  //    写关闭拒绝也 exit 3 但 stdout 为空、stderr PLAN_REFUSE）────────────────────
+
+  const stopped = {
+    planId: 'plan_stop', version: 3, decision: 'stop',
+    estimate: { calls: 60, seconds: 3600 }, delta: { addedCalls: 60, addedSeconds: 3600 },
+    cumulative: { calls: 120, seconds: 7200 }, reasonCode: 'HARD_LIMIT', status: 'stopped',
+    noticeText: '累计查询已达本任务硬上限。',
+  } as const;
+
+  it('真实 CLI 形态 stop 裁决（exit 3 + decision JSON）走结构化 stop 分支，不是抛错', async () => {
+    // 平台对 decision === 'stop' 返回 exit 3、stdout 仍是合法 PlanEvaluation JSON（cli/index.js）。
+    // 裸 runJson 对非零 exit 一律抛错时，这个 stop 分支是死代码——真实 CLI 下不可达。
+    const runCli: PlanCliRunner = async () => ({
+      code: 3, stdout: `${JSON.stringify(stopped)}\n`, stderr: '',
+    });
+    const result = await evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
+      runCli,
+    });
+    expect(result.status).toBe('stop');
+    if (result.status !== 'stop') throw new Error('expected a structured stop result');
+    // 消息是 formatPlanMessage 的结构化输出（计划通知前缀 + 平台安全摘要），不是泛化 exit 3 串
+    expect(result.message).toBe(formatPlanMessage(stopped));
+    expect(result.message).toContain('计划通知：');
+    expect(result.message).toContain('累计查询已达本任务硬上限');
+    expect(result.message).not.toContain('exit 3');
+    expect(result.evaluation).toEqual(stopped);
+  });
+
+  it('写关闭拒绝（exit 3 + stdout 为空 + stderr PLAN_REFUSE）维持既有抛错，供驱动映射写关闭话术', async () => {
+    // 平台 canonicalCall 对含写操作的 evaluate 拒绝：stderr PLAN_REFUSE，stdout 为空（cli/index.js）。
+    // 判据是 stdout 拿不出带 decision 的结构化裁决 → 维持今天的行为：抛错串里含平台确定性
+    // 错误码，pi-coding-driver catch 分支据此映射 WRITE_NOT_ENABLED（e2e 闸③逐字钉住）。
+    const runCli: PlanCliRunner = async () => ({
+      code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY:voucher.commit\n',
+    });
+    await expect(evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
+      runCli,
+    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    await expect(evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
+      runCli,
+    })).rejects.toThrow('PLAN_OPERATION_NOT_READ_ONLY');
+  });
+
+  it('exit 非零且 stdout 无 decision 字段（合法 JSON 但非裁决）不当作结构化结果', async () => {
+    // stdout 能解析但不是裁决形状（如未来的错误详情 JSON）：拒绝被静默吞成 stop/执行。
+    const runCli: PlanCliRunner = async () => ({
+      code: 3, stdout: JSON.stringify({ error: 'PLAN_OPERATION_NOT_READ_ONLY' }), stderr: '',
+    });
+    await expect(evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
+      runCli,
+    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+  });
+
+  it('exit 非零且 stdout 残缺 JSON / 崩溃（exit 1）：维持既有抛错形态', async () => {
+    const partial: PlanCliRunner = async () => ({ code: 3, stdout: '{"planId":"plan_x","decisi', stderr: '' });
+    await expect(evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
+      runCli: partial,
+    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    const crashed: PlanCliRunner = async () => ({ code: 1, stdout: '', stderr: '' });
+    await expect(evaluateAndActivatePlan({
+      platformRoot: '/platform', taskId: 'task_1',
+      calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
+      runCli: crashed,
+    })).rejects.toThrow('exit 1');
+  });
 });
 
 // ── 结构化事实提取（D-065：宿主机械解析，绝不从 worker 文本解析）────────────────

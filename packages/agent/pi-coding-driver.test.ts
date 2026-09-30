@@ -145,6 +145,50 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  it('真实 CLI 形态的 stop 裁决（exit 3 + decision JSON）到达结构化 stop 分支，平台摘要透传给 worker', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-stop-exit3-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    // 平台对 decision === 'stop' 返回 exit 3、stdout 仍是合法 PlanEvaluation JSON（cli/index.js）。
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_stop3', planId: null, version: null, status: 'none' }), stderr: '' };
+      if (args[1] === 'evaluate') return {
+        code: 3,
+        stdout: `${JSON.stringify({
+          planId: 'plan_stop', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600 },
+          delta: { addedCalls: 60, addedSeconds: 3600 }, cumulative: { calls: 120, seconds: 7200 },
+          reasonCode: 'HARD_LIMIT', status: 'stopped', noticeText: '累计查询已达本任务硬上限。',
+        })}\n`,
+        stderr: '',
+      };
+      throw new Error('unexpected CLI call');
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'stop exit3 test',
+      sessionId: 'task_stop3',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+    });
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_stop3', type: 'toolCall', name: 'bash', arguments: { command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' } } as never,
+      args: { command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' },
+      context: {} as never,
+    });
+    // 走到结构化 stop 分支：PLAN STOP + formatPlanMessage 输出（计划通知前缀 + 平台安全摘要），
+    // 而不是 catch 分支的泛化 "PLAN PAUSED：17dz plan CLI 失败（...）exit 3"
+    expect(verdict?.block).toBe(true);
+    expect(verdict?.reason).toContain('PLAN STOP');
+    expect(verdict?.reason).toContain('计划通知：');
+    expect(verdict?.reason).toContain('累计查询已达本任务硬上限');
+    expect(verdict?.reason).not.toContain('exit 3');
+    expect(verdict?.reason).not.toContain('PLAN PAUSED');
+    worker.session.dispose();
+  });
+
   it('计划门拒绝含写 operation 的计划：拒绝原因是用户可行动的写关闭话术，不是 CLI 失败串', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-closed-'));
     roots.push(root);

@@ -115,7 +115,7 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env }) => 
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
   const runCli = options.runCli ?? defaultCliRunner;
   validateCalls(options.calls);
-  const evaluation = await runJson<PlanEvaluation>(runCli, {
+  const evaluation = await runPlanEvaluation(runCli, {
     platformRoot: options.platformRoot,
     args: ['plan', 'evaluate', '--task-id', options.taskId, '--stdin'],
     input: JSON.stringify({ calls: options.calls, ...(options.requestId ? { requestId: options.requestId } : {}) }),
@@ -419,6 +419,36 @@ export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; use
 
 function sanitizeSummary(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+/**
+ * 平台 `plan evaluate` 的退出码承载两种语义（平台 src/cli/index.js）：
+ *   · stdout 是带 `decision` 字段的合法 PlanEvaluation JSON —— 无论 exit 0（execute/notify/
+ *     confirm）还是 exit 3（stop 裁决：HARD_LIMIT / REPLAN_LIMIT），都是结构化结果；
+ *   · exit 非零且 stdout 拿不出结构化裁决 —— 拒绝/失败形态（如写关闭
+ *     PLAN_OPERATION_NOT_READ_ONLY：stderr PLAN_REFUSE，stdout 为空），维持既有抛错，
+ *     由驱动 catch 分支按平台确定性错误码映射（e2e 闸③钉住该映射）。
+ * 若对 exit 3 一律抛错，stop 分支（plan-runtime 结构化 stop 消息）在真实 CLI 下不可达。
+ */
+async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest): Promise<PlanEvaluation> {
+  const result = await runCli(request);
+  if (result.code !== 0) {
+    const evaluation = tryParseEvaluation(result.stdout);
+    if (evaluation) return evaluation;
+    throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
+  }
+  try { return JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+}
+
+/** exit 非零时区分"stop 裁决"与"拒绝/失败"的唯一判据：stdout 能解析出带合法 decision 的 JSON。 */
+function tryParseEvaluation(stdout: string): PlanEvaluation | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(stdout); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const decision = (parsed as Record<string, unknown>).decision;
+  return decision === 'execute' || decision === 'notify' || decision === 'confirm' || decision === 'stop'
+    ? parsed as PlanEvaluation
+    : null;
 }
 
 async function runJson<T = unknown>(runCli: PlanCliRunner, request: PlanCliRequest): Promise<T> {
