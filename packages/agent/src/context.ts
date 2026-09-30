@@ -620,7 +620,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 日志分类从结构化 outcome 取（2026-09 第二波）：不再嗅探回复文本
           // （旧实现拿回复 includes 两句中文给 outcome 分类，连字面量 if 预算都报了）。
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: handled.outcome }));
-          return handled.result;
+          // 提案预览必须带上本轮执行痕迹：finalizeProposal 的 stop() 只回 {taskId,text}，
+          // 丢掉 execution 会让出口校验误判"委派+零执行"，用 NO_EXECUTION_CLARIFICATION
+          // 顶掉含确认码的预览——写链路因此端到端不可达（4dd7490 回归）。
+          return { ...handled.result, ...(result.execution ? { execution: result.execution } : {}) };
         }
         const final: SubagentTaskResult = {
           taskId,
