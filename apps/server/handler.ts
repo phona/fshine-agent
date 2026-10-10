@@ -48,29 +48,137 @@ export interface HandlerDeps {
 
 
 /**
- * 取本会话迄今可用的附件：内存优先，DB 兜底（重启恢复）。
+ * 池内附件：契约附件 + **何时到达**。
  *
- * 三条纪律：① 去重按 path（同一文件不因"内存有、DB 也有"而重复进请求）；② 只保留最新
+ * 为什么必须记住到达时刻：交付集按"自上次委派开始以来新到达的"算（规则一，见
+ * selectDeliveredAttachments），没有时刻就分不出"这轮新给的"与"上轮已经交付过的"——
+ * 而那正是同日多任务串味的根源：10:00 交 工资.xlsx 做工资表，11:30 交 进项票.xlsx
+ * 做下一批，第二轮把两个文件一起交付，worker 没有任何线索知道哪个属于本次任务，
+ * 于是安静地产出错误结果（P0：算错钱）。
+ */
+interface PooledAttachment extends IncomingAttachment {
+  /**
+   * 到达时刻（进程内同一把严格递增的钟，毫秒见 nextArrivalStamp）。
+   *
+   * `undefined` = 来自审计库恢复、到达时刻未知（服务重启后内存池失记时的兜底来源）。
+   * 未知一律按"未消费"算——宁可多给，不可漏：漏一个文件会让 worker 回"没有数据"，
+   * 而多给一个至少有规则二的披露兜底（用户几秒内就能看到本轮用了哪些文件）。
+   */
+  arrivedAt: number | undefined;
+}
+
+/**
+ * 会话级委派账本：上次委派**开始**的时刻，以及那次交付了哪些文件。
+ *
+ * 只活在进程内存里，不落库：服务重启后按"全部未消费"降级（见 restoreAttachments），
+ * 而 24h 窗口内的附件仍可由审计库恢复，方向是宁可多给。
+ */
+interface DelegationLedger {
+  lastDelegationStartedAt: number;
+  lastDelegationDelivered: IncomingAttachment[];
+}
+
+/**
+ * 严格递增的到达时刻。
+ *
+ * 为什么不能直接存 `Date.now()`：① 时钟粒度是毫秒，而"附件到达"与"委派开始"完全可能
+ * 落在同一毫秒里（测试里必然如此；生产上防抖 + 排队也只把差距拉到毫秒量级）。同毫秒时
+ * `>` 分不出先后，而分错的代价是静默的——用户刚发的文件被当成"上次已交付"丢掉，或者
+ * 旧文件在后续每一轮都被当成新到达。② `Date.now()` 本身也不严格单调（NTP 步进会回退）。
+ * 所以每取一次都钳成"至少比上一次大 1"：值仍是毫秒墙钟（日志里看得懂、能与
+ * lastDelegationStartedAt 对齐），序关系严格可靠。
+ */
+let arrivalClock = 0;
+function nextArrivalStamp(): number {
+  arrivalClock = Math.max(Date.now(), arrivalClock + 1);
+  return arrivalClock;
+}
+
+/**
+ * 规则一：本轮交付集 = 自「上次委派开始」以来新到达的附件。
+ *
+ * 三种收尾，缺一不可：
+ *   ① 有新到达的            → 用它们（同日多任务的第二个任务因此只拿到自己那几个）；
+ *   ② 没有新到达的          → 沿用上次委派的交付集（纠正/重试流："社保填错了，重做"
+ *                              时文件当然还是上轮那些，不能因为"没有新附件"就交空集）；
+ *   ③ 两次都空              → 空。
+ *
+ * 为什么界取"委派**开始**"而不是"委派完成"：用完成时刻的话，委派执行过程中（可能 10 分钟）
+ * 到达的附件会被算进这一轮，而它们其实是给下一轮的。附件后到因此被正确归到下一轮。
+ */
+function selectDeliveredAttachments(
+  candidates: readonly PooledAttachment[],
+  ledger: DelegationLedger | undefined,
+): IncomingAttachment[] {
+  // 从未委派过（全新会话，或重启后账本失记）：全部按未消费交付。
+  if (!ledger) return [...candidates];
+  const fresh = candidates.filter(
+    (file) => file.arrivedAt === undefined || file.arrivedAt > ledger.lastDelegationStartedAt,
+  );
+  if (fresh.length > 0) return fresh;
+  // ② 纠正/重试流：直接沿用上次交付的那一批（仍要过存在性检查——tmp/ 可能已被清理）。
+  return ledger.lastDelegationDelivered.filter((file) => existsSync(file.path));
+}
+
+/**
+ * 规则二的措辞：本轮用了哪些文件，只说事实。
+ *
+ * 纪律：短；只列**文件名**不列路径（路径刷屏对用户没有任何信息量，且属于实现细节）；
+ * 文件多时截断到前几个 + 总数，进度/通知帧是短消息，不是清单。
+ */
+/** 披露里最多列几个文件名（再多只给总数）。 */
+const DELIVERY_NOTICE_NAME_LIMIT = 3;
+
+export function describeDeliveredFiles(files: readonly IncomingAttachment[]): string {
+  if (files.length === 0) return '';
+  const listed = files.slice(0, DELIVERY_NOTICE_NAME_LIMIT);
+  // 同名文件（不同路径）只列一次：清单是给人看的，重复一行没有信息量
+  const names = [...new Set(listed.map((file) => file.filename))];
+  const rest = files.length - listed.length;
+  return `本轮使用文件：${names.join('、')}${rest > 0 ? ` 等 ${files.length} 个` : ''}`;
+}
+
+/**
+ * 取本轮要交付给 worker 的附件：内存优先，DB 兜底（重启恢复），**按委派边界取**。
+ *
+ * 四条纪律：① 去重按 path（同一文件不因"内存有、DB 也有"而重复进请求）；② 只保留最新
  * N 个（与暂存上限同一个数，避免无限增长把每个回合的输入撑爆）；③ 只保留**仍在盘上**的
- * ——tmp/ 会被 24h 清理回收，路径失效就该安静退出，而不是让 worker 拿一个打不开的路径。
+ * ——tmp/ 会被 24h 清理回收，路径失效就该安静退出，而不是让 worker 拿一个打不开的路径；
+ * ④ 交付集按规则一算，不是"会话里累积的全部"。
+ *
+ * ④ 与内存池的分工：池子记"这个会话有过哪些文件"（含已被委派交付过的），账本记"哪些
+ * 已经被哪次委派用过"。交付从池子里按账本挑，池子本身不因交付而清空——纠正/重试流
+ * 要靠它回看上一步。
  */
 async function restoreAttachments(
   sessionKey: string,
   message: IncomingChannelMessage,
   store: HandlerDeps['store'],
-  sessionAttachments: Map<string, IncomingAttachment[]>,
+  sessionAttachments: Map<string, PooledAttachment[]>,
+  ledger: DelegationLedger | undefined,
 ): Promise<IncomingAttachment[]> {
   const fromMemory = sessionAttachments.get(sessionKey) ?? [];
   const fromDb = await loadRecentAttachments(store, message.wecomUserId, sessionKey);
-  const merged = new Map<string, IncomingAttachment>();
-  // DB 在前、内存在后：同 path 时内存覆盖 DB（内存是更新的那份）
-  for (const file of [...fromDb, ...fromMemory, ...(message.attachments ?? [])]) merged.set(file.path, file);
-  const existing = [...merged.values()]
+  const merged = new Map<string, PooledAttachment>();
+  // DB 在前、内存在后：同 path 时内存覆盖 DB（内存是更新的那份，且带着到达时刻）
+  for (const file of fromDb) merged.set(file.path, { ...file, arrivedAt: undefined });
+  for (const file of fromMemory) merged.set(file.path, file);
+  // 与正文同一条消息到达的附件当然是本轮的
+  for (const file of message.attachments ?? []) merged.set(file.path, { ...file, arrivedAt: nextArrivalStamp() });
+  const candidates = [...merged.values()];
+  // 池子：这个会话迄今有过的文件（含已交付过的），上限与暂存上限同一个数。
+  // DB 恢复来的文件没有到达时刻，落池时补一个"现在"——它自此被记作"这次委派已见过"，
+  // 否则重启恢复的那批会在后续每一轮都被当成新到达（规则一被绕过）。
+  const pooled = [...candidates]
+    .sort((a, b) => a.path.localeCompare(b.path))
+    .slice(-MAX_PENDING_ATTACHMENTS)
+    .filter((file) => existsSync(file.path))
+    .map((file) => ({ ...file, arrivedAt: file.arrivedAt ?? nextArrivalStamp() }));
+  if (pooled.length > 0) sessionAttachments.set(sessionKey, pooled);
+  return selectDeliveredAttachments(candidates, ledger)
     .sort((a, b) => a.path.localeCompare(b.path))
     .slice(-MAX_PENDING_ATTACHMENTS)
     .filter((file) => existsSync(file.path));
-  if (existing.length > 0) sessionAttachments.set(sessionKey, existing);
-  return existing;
 }
 
 /**
@@ -217,7 +325,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   // 并发回合会竞态会话状态(候选/游标/历史互相覆盖),必须排队
   const sessionQueues = new Map<string, Promise<unknown>>();
   /**
-   * 会话级附件集：用户"先发文件、再发指令"时，文件消息只登记不启回合。
+   * 会话级附件池：用户"先发文件、再发指令"时，文件消息只登记不启回合。
    *
    * 否则 N 个文件 = N 次 LLM 调用，且串行堵住队列——真正带指令的那条排在后面出不来。
    * 2026-10-07 实测：3 个文件 + 1 条指令 → 4 个 ack、0 个最终回复，第一条文件回合在
@@ -226,11 +334,25 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
    * 上限 8 个，FIFO 逐出最旧的（逐出要告知：用户不知道自己最早发的那个已不算数）。
    * 不设上限会把后续每个回合的输入撑爆，而那正是它要避免的问题。
    *
-   * **累积而不消费**：用户心智是"我在这个对话里上传过文件"，不是"文件只对下一句指令有效"。
-   * 最初实现成"文字回合取走即清空"，结果用户重复指令时集子已空，机器人回"没收到数据"而
-   * 用户完全无法理解（2026-10-07 实测）。现在文字回合拿到本会话迄今的全部附件。
+   * **池子只记"这个会话有过哪些文件、各自何时到达"**，"哪些已经被哪次委派用过"是
+   * sessionDelegations 的账本。2026-10-07 曾把两者混为一谈：池子即交付集、整批交付且
+   * 永不清空，于是同一天的第二个任务会拿到第一个任务的文件（10:00 交 工资.xlsx 做工资表、
+   * 11:30 交 进项票.xlsx 做下一批，第二轮两个都交付）——worker 没有任何线索分辨归属，
+   * 可能两个都读（浪费时间）、读错那个（做错），安静地产出错误结果。现在交付由账本按
+   * 委派边界挑（规则一），池子不清空（纠正/重试流要靠它回看）。
    */
-  const sessionAttachments = new Map<string, IncomingAttachment[]>();
+  const sessionAttachments = new Map<string, PooledAttachment[]>();
+  /**
+   * 会话级委派账本（规则一的另一本账）：上次委派何时开始、交付了哪些文件。
+   *
+   * 为什么必须有"交付了哪些文件"这一列：本轮没有新附件时（纠正/重试流）要能沿用上一步
+   * 的那批，否则用户说"社保填错了，重做"会拿到一个空集——那正是 2026-10-07 "取走即清空"
+   * 被翻案的原因（机器人回"没收到数据"，用户完全无法理解）。
+   *
+   * 只在进程内存里，不落库：重启后账本失记 → 按"全部未消费"降级（宁可多给，不可漏），
+   * 24h 窗口内的附件仍由审计库恢复（restoreAttachments 的 DB 那条路）。
+   */
+  const sessionDelegations = new Map<string, DelegationLedger>();
   /**
    * 会话是否已经跑过带正文的回合。
    *
@@ -298,7 +420,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 最初分两条路写（先看出能不能装下本轮），结果一批超限时保留了**最先**的 N 个、
       // 丢掉最后发的——与"逐出最旧"自相矛盾，且丢的是最新那份。
       const before = sessionAttachments.get(sessionKey) ?? [];
-      const combined = [...before, ...message.attachments];
+      // 到达时刻在这里打：规则一靠它分辨"这轮新到的"与"上次委派已交付过的"。
+      const arriving: PooledAttachment[] = message.attachments.map((file) => ({ ...file, arrivedAt: nextArrivalStamp() }));
+      const combined = [...before, ...arriving];
       const kept = combined.slice(-MAX_PENDING_ATTACHMENTS);
       const dropped = combined.slice(0, combined.length - kept.length);
       if (kept.length > 0) sessionAttachments.set(sessionKey, kept);
@@ -317,11 +441,14 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     }
 
     seenTextTurn.add(sessionKey);
-    // 本会话迄今的全部附件；**不清空**（累积语义，见 sessionAttachments 注释）。
+    // 本轮交付集（规则一）：自上次委派开始以来新到达的附件；没有新到来的才沿用上次交付的
+    // 那批（纠正/重试流）。池子本身不清空，见 sessionAttachments / sessionDelegations 注释。
     // 另外并入 DB 里 Recent 的附件接收行——内存关联会随服务重启失记（2026-10-07 实测：
     // 连重启三次后，用户早先上传的文件还在盘上，但请求里一个路径都没有，worker 只能回
     // "没有数据"）。落库数据因此不只是审计，也是重启后的恢复源。
-    const attachments = await restoreAttachments(sessionKey, message, store, sessionAttachments);
+    const attachments = await restoreAttachments(
+      sessionKey, message, store, sessionAttachments, sessionDelegations.get(sessionKey),
+    );
 
     const input = withAttachmentPaths(message.text, attachments);
     const base = { requestId, wecomMessageId: message.messageId, principalId, input, createdAt };
@@ -358,6 +485,46 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           console.warn(JSON.stringify({ event: 'plan_notice_log_failed', requestId, error: error instanceof Error ? error.message : String(error) }));
         }
       } : undefined;
+      // 规则一的账本在这里落：本次委派从这一刻开始。晚于它到达的附件属于下一轮，
+      // 早于它的一律视为"已经交付过"——同日多任务因此不会把上一个任务的文件带进来。
+      //
+      // 界也从 nextArrivalStamp() 取而不是 Date.now()：它必须严格大于本回合之前打上的
+      // 所有到达时刻，否则同一毫秒里到达的文件会被误判成"上次已交付"而静默丢掉
+      // （2026-10-09 实测：附件到达与委派开始同在 982ms，`>` 比分不出先后）。
+      // 与 delegatedAt（产物回传的 since）标的是同一时刻，只是各用各的尺子——那边比
+      // tmp/ 里文件的 mtime，这边比附件到达时刻；两把尺子不能互换，也不必互换。
+      sessionDelegations.set(sessionKey, {
+        lastDelegationStartedAt: nextArrivalStamp(),
+        lastDelegationDelivered: attachments,
+      });
+      // 规则二：把"本轮用了哪些文件"说给用户听。
+      //
+      // 为什么这一条和规则一同样重要：规则一的假设可能错（用户以为文件跟着"这个对话"走，
+      // 我们按"跟着这次任务"算）。假设错误时，用户在几秒内看到清单就能纠正；不说，就要
+      // 等 10 分钟后拿到一份安静算错的结果——那时连"它读的是哪个文件"都难以复盘。
+      //
+      // 措辞纪律：短、只说事实、只列文件名不列路径（见 describeDeliveredFiles）。
+      const announceDeliveredFiles = async (): Promise<void> => {
+        const text = describeDeliveredFiles(attachments);
+        if (!text) return;                                   // 本轮没有附件：无可披露
+        try {
+          // notice 优先：它被 await、不被渠道节流，且与计划通知走同一条审计轨迹
+          // （契约里没有单独的事件种类，可检索历史因此仍是一处）。
+          // 没有 notice 时才退到 progress：进度帧有最小间隔与帧数硬顶，可能被丢掉，
+          // 但总比完全不披露好。
+          if (onNotice) await onNotice(text);
+          else progress?.(text);
+        } catch (error) {
+          // 披露是增强，不是门：送达失败不能让这一轮失败（与计划通知的授权语义不同——
+          // 那个必须送达后才激活，这个只是让假设可见）。
+          console.warn(JSON.stringify({
+            event: 'attachment_scope_notice_failed',
+            requestId,
+            error: error instanceof Error ? error.message : String(error),
+          }));
+        }
+      };
+      await announceDeliveredFiles();
       const trusted = {
         requestId,
         principalId,

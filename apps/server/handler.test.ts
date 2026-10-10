@@ -4,10 +4,11 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { validatePlanEntities } from '@fshine/agent';
-import type { AgentReply, AgentRuntime, AuditStore, IncomingAttachment, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, AgentRuntime, AuditStore, ChannelReply, IncomingAttachment, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
 import {
   collectProducedFiles,
   createMessageHandler,
+  describeDeliveredFiles,
   parseAttachmentEnvelope,
   withAttachmentPaths,
 } from './handler';
@@ -262,7 +263,7 @@ describe('附件-only 消息的暂存与交付', () => {
     expect(inserted[0]!.input).toContain(file('a.xlsx').path);
   });
 
-  it('暂存的附件在带正文的回合被交付，并消费掉', async () => {
+  it('暂存的附件在带正文的回合被交付', async () => {
     const { handler, seen } = probe();
     await handler(msg({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xls')] }));
     await handler(msg({ text: '帮我做工资表' }));
@@ -272,9 +273,13 @@ describe('附件-only 消息的暂存与交付', () => {
     expect(seen[0]!.request).toContain(file('b.xls').path);
   });
 
-  // 2026-10-07 翻案：曾有"取走即清空"的实现，于是用户重复指令时附件集已空，机器人回
-  // "没收到数据"而用户完全无法理解——用户心智是"我在这个对话里上传过文件"。
-  it('附件在会话内累积:后续每个正文回合都带上(不清空)', async () => {
+  // 2026-10-09 改写：这一条原本写作「附件在会话内累积:后续每个正文回合都带上(不清空)」，
+  // 它钉住的是"池子永不清空 + 每轮整批交付"的旧设计——而那正是同日多任务串味的根源
+  // （11:30 的凭证任务拿到 10:00 的工资表，worker 无从分辨归属，安静算错钱）。
+  // 现在交付按委派边界取（见下方「附件交付边界」组）：本轮没有新附件时**沿用上次委派
+  // 交付的那一批**，而不是"把会话里累积的整批再交一遍"。断言一字未减（两轮都带上
+  // a.xlsx），变的是理由——不再是"累积"，而是"沿用上次交付集"。
+  it('纠正/重试流:没有新附件时沿用上次委派的交付集(不清空)', async () => {
     const { handler, seen } = probe();
     await handler(msg({ attachmentOnly: true, attachments: [file('a.xlsx')] }));
     await handler(msg({ text: '第一句' }));
@@ -512,6 +517,233 @@ describe('附件关联：跨重启恢复与会话隔离', () => {
     await handler(msg({ attachmentOnly: true, attachments: [a] }));
     await handler(msg({ text: '做工资表' }));
     expect(seen[0]).toContain(a.path);
+  });
+});
+
+// ── 附件交付边界：按「自上次委派以来新到达的」算（2026-10-09）──────────────────
+//
+// 事故形状（P0：安静地算出错钱）：
+//   10:00  用户丢 工资.xlsx   「帮我做工资表」→ 成功，附件仍在池里
+//   11:30  用户丢 进项票.xlsx 「把凭证也做了」→ 这一轮交付 {工资.xlsx, 进项票.xlsx}
+// worker 看到 2 个附件，没有任何机制告诉它哪个属于本次任务：可能两个都读（浪费时间）、
+// 读错那个（做错）、或者触发 needs。根因是"池子即交付集、整批交付且永不清空"——那条
+// 行为曾被 `附件在会话内累积:后续每个正文回合都带上(不清空)` 一条测试锁定。
+//
+// 规则一：交付集 = 自「上次委派开始」以来新到达的附件；为空则沿用上次委派的交付集
+//         （纠正/重试流）；两次都空则空。界取"开始"不取"完成"——委派执行期间（可能
+//         10 分钟）到达的附件其实属于下一轮。
+// 规则二：委派启动时把"本轮用了哪些文件"说给用户听，假设错误时几秒内可纠正，而不是
+//         10 分钟后拿到一份错结果。
+describe('附件交付边界：按委派算，不按会话累积', () => {
+  const scratch = mkdtempSync(path.join(tmpdir(), 'attach-scope-'));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const file = (name: string): IncomingAttachment => {
+    const p = path.join(scratch, name);
+    writeFileSync(p, 'x');
+    return { filename: name, path: p, bytes: 1 };
+  };
+  function msg(over: Partial<IncomingChannelMessage>, userId = USER): IncomingChannelMessage {
+    return { wecomUserId: userId, conversationId: userId, messageId: `m_${Math.random().toString(36).slice(2, 8)}`, text: '', receivedAt: new Date().toISOString(), ...over };
+  }
+
+  /** 交付集 = 请求文本里的文件名清单（排序后）。一眼看出这一轮到底带了哪些文件。 */
+  const deliveredNames = (request: string): string[] =>
+    request.split('\n')
+      .filter((line) => line.startsWith('- '))
+      .map((line) => line.slice(2).split('：')[0]!)
+      .sort();
+
+  /**
+   * 最小装配：可注入 DB 存量行（模拟重启前的审计库），并捕获请求文本、通知帧与
+   * "通知 vs 委派"的先后。防抖置 0——本组只验交付边界，不想把 2s 防抖算进每条用例。
+   */
+  function probe(dbRows: Array<{ input: string }> = []) {
+    const base = fakeStore();
+    const store = {
+      ...base,
+      principalScopes: { ...base.principalScopes, get: async (userId: string) => ({ wecomUserId: userId, accountSetIds: ['as_001'], enabled: true }) },
+      requests: { ...base.requests, listRecentAttachments: async () => dbRows },
+      conversationLog: { append: async () => {}, list: async () => [], search: async () => [] },
+    } as unknown as AuditStore;
+    const seen: string[] = [];
+    const notices: string[] = [];
+    const order: string[] = [];
+    const runtime: AgentRuntime = {
+      handleTurn: async (_ctx: TrustedContext, request: string): Promise<AgentReply> => {
+        order.push('delegate');
+        seen.push(request);
+        return { text: 'ok' };
+      },
+    };
+    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime, inboundDebounceMs: 0 });
+    const send = (over: Partial<IncomingChannelMessage>, userId = USER): Promise<ChannelReply> =>
+      handler(msg(over, userId), undefined, async (text: string) => { order.push('notice'); notices.push(text); });
+    return { send, seen, notices, order };
+  }
+
+  // ── 规则一：四种场景 ────────────────────────────────────────────────────────
+  it('正常流:A,B,C 先到,再发指令 → 三个都交付', async () => {
+    const { send, seen } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xlsx'), file('c.xls')] });
+    await send({ text: '帮我做工资表' });
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx', 'b.xlsx', 'c.xls']);
+  });
+
+  // 这一条就是本次要修的事故：上一个任务的文件不得进下一个任务。
+  it('同日多任务:上次委派已开始,新来的 D + 新指令 → 只交付 {D}', async () => {
+    const { send, seen } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xlsx'), file('c.xls')] });
+    await send({ text: '帮我做工资表' });
+    await send({ attachmentOnly: true, attachments: [file('d.xlsx')] });
+    await send({ text: '把凭证也做了' });
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx', 'b.xlsx', 'c.xls']);
+    expect(deliveredNames(seen[1]!)).toEqual(['d.xlsx']);   // A/B/C 已用过,丢弃
+  });
+
+  it('纠正/重试流:没有新附件 → 沿用上次委派的交付集', async () => {
+    const { send, seen } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xls')] });
+    await send({ text: '帮我做工资表' });
+    await send({ text: '社保填错了,重做' });                 // 一个字附件都没有
+    expect(deliveredNames(seen[1]!)).toEqual(['a.xlsx', 'b.xls']);
+  });
+
+  it('附件后到:指令先跑,C 才到 → C 不属于已开始的那次委派,下一条指令才带', async () => {
+    const { send, seen } = probe();
+    await send({ text: '帮我做工资表' });                    // 此刻池子里什么都没有
+    expect(deliveredNames(seen[0]!)).toEqual([]);
+    await send({ attachmentOnly: true, attachments: [file('c.xls')] });
+    await send({ text: '把工资表补上' });
+    expect(deliveredNames(seen[1]!)).toEqual(['c.xls']);
+  });
+
+  it('与正文同条消息到达的附件永远算本轮的', async () => {
+    const { send, seen } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx')] });
+    await send({ text: '做工资表' });                          // 第一回合:交付 {a}
+    await send({ text: '看这个', attachments: [file('d.xlsx')] });   // 第二回合
+    expect(deliveredNames(seen[1]!)).toEqual(['d.xlsx']);
+  });
+
+  it('同一会话里交付集随委派前移,不累积', async () => {
+    const { send, seen } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx')] });
+    await send({ text: '第一句' });                          // 交付 {a}
+    await send({ attachmentOnly: true, attachments: [file('b.xlsx')] });
+    await send({ text: '第二句' });                          // 新到达 {b} → 只交付 {b}
+    await send({ text: '第三句' });                          // 无新到达 → 沿用 {b}
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx']);
+    expect(deliveredNames(seen[1]!)).toEqual(['b.xlsx']);
+    expect(deliveredNames(seen[2]!)).toEqual(['b.xlsx']);
+  });
+
+  // ── 规则二：把假设说出来 ────────────────────────────────────────────────────
+  it('委派启动时告知本轮用了哪些文件(在委派之前,用户几秒内就能看到)', async () => {
+    const { send, seen, notices, order } = probe();
+    await send({ attachmentOnly: true, attachments: [file('工资.xlsx'), file('进项票.xlsx')] });
+    await send({ text: '把凭证也做了' });
+    expect(seen).toHaveLength(1);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('工资.xlsx');
+    expect(notices[0]).toContain('进项票.xlsx');
+    // 先披露再委派：等工作跑完再说就来不及纠正了
+    expect(order).toEqual(['notice', 'delegate']);
+  });
+
+  it('披露只说文件名,不把整条路径刷上屏(也不出现任何平台实现细节)', async () => {
+    const { send, notices } = probe();
+    const target = file('工资.xlsx');
+    await send({ attachmentOnly: true, attachments: [target] });
+    await send({ text: '帮我做工资表' });
+    expect(notices[0]).toContain('工资.xlsx');
+    expect(notices[0]).not.toContain(target.path);
+    expect(notices[0]).not.toContain(scratch);
+    expect(notices[0]).not.toContain('handler');
+    expect(notices[0]).not.toContain('sessionAttachments');
+  });
+
+  it('文件多时截断到前几个 + 总数,不刷屏', async () => {
+    const { send, notices } = probe();
+    const many = Array.from({ length: 5 }, (_, i) => file(`f${i}.xlsx`));   // 未超暂存上限
+    await send({ attachmentOnly: true, attachments: many });
+    await send({ text: '做工资表' });
+    expect(notices[0]).toContain('f0.xlsx');
+    expect(notices[0]).toContain('f1.xlsx');
+    expect(notices[0]).toContain('5 个');                   // 总数点得出"还有"
+    expect(notices[0]).not.toContain('f3.xlsx');            // 第 4 个起不逐名列
+    expect(notices[0]).not.toContain('f4.xlsx');
+  });
+
+  it('本轮没有附件 → 不发披露(不制造噪音)', async () => {
+    const { send, seen, notices } = probe();
+    await send({ text: '在吗' });
+    expect(seen).toHaveLength(1);
+    expect(notices).toEqual([]);
+  });
+
+  it('披露送达失败不影响本轮结果(披露是增强,不是门)', async () => {
+    const base = fakeStore();
+    const store = {
+      ...base,
+      principalScopes: { ...base.principalScopes, get: async (userId: string) => ({ wecomUserId: userId, accountSetIds: ['as_001'], enabled: true }) },
+      requests: { ...base.requests, listRecentAttachments: async () => [] },
+      conversationLog: { append: async () => {}, list: async () => [], search: async () => [] },
+    } as unknown as AuditStore;
+    const runtime: AgentRuntime = { handleTurn: async () => ({ text: '做完了' }) };
+    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime, inboundDebounceMs: 0 });
+    const reply = await handler(
+      msg({ text: '帮我做工资表', attachments: [file('工资.xlsx')] }),
+      undefined,
+      async () => { throw new Error('WeCom notice delivery failed'); },
+    );
+    expect(reply).toBe('做完了');
+  });
+
+  it('describeDeliveredFiles:措辞纪律(空集不发、只列文件名、多了给总数)', () => {
+    const f = (filename: string) => ({ filename, path: `/tmp/x/${filename}`, bytes: 1 });
+    expect(describeDeliveredFiles([])).toBe('');                       // 调用方据此不发帧
+    expect(describeDeliveredFiles([f('工资.xlsx')])).toBe('本轮使用文件：工资.xlsx');
+    expect(describeDeliveredFiles([f('a.xlsx'), f('b.xls')])).toBe('本轮使用文件：a.xlsx、b.xls');
+    // 4 个起不逐名列，只给前 3 + 总数：帧是短消息，不是清单
+    expect(describeDeliveredFiles([f('a'), f('b'), f('c'), f('d')])).toBe('本轮使用文件：a、b、c 等 4 个');
+    // 同一文件名重复只列一次（去重按 path，重名文件在文本里仍会出现两次）
+    expect(describeDeliveredFiles([f('a.xlsx'), { ...f('a.xlsx'), path: '/tmp/y/a.xlsx' }]))
+      .toBe('本轮使用文件：a.xlsx');
+  });
+
+  // ── 重启降级：账本失记 → 全部未消费（宁可多给,不可漏）─────────────────────
+  it('重启降级:新实例没有账本 → DB 里的存量全部交付,一个不漏', async () => {
+    const a = file('a.xlsx'); const b = file('b.xls'); const c = file('c.xls');
+    const rows = [a, b, c].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}:${USER}`) }));
+    const { send, seen, notices } = probe(rows);
+    await send({ text: '帮我做工资表' });
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx', 'b.xls', 'c.xls']);
+    // 降级方向是"多给",所以规则二的披露必须还在——用户看得见本轮到底用了哪些文件
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain('a.xlsx');
+  });
+
+  it('重启降级只一次性:重启后第一次委派重新立账,此后的新任务只拿新文件', async () => {
+    const a = file('a.xlsx'); const b = file('b.xls');
+    const rows = [a, b].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}:${USER}`) }));
+    const { send, seen } = probe(rows);
+    await send({ text: '帮我做工资表' });                    // 重启后第一轮:全部未消费
+    await send({ attachmentOnly: true, attachments: [file('d.xlsx')] });
+    await send({ text: '把凭证也做了' });                    // 账本已立:只交付新到的
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx', 'b.xls']);
+    expect(deliveredNames(seen[1]!)).toEqual(['d.xlsx']);
+  });
+
+  it('重启降级不会把 DB 存量永久当成新到达(否则规则一被绕过)', async () => {
+    const a = file('a.xlsx');
+    const rows = [{ input: withAttachmentPaths('', [a], `${USER}:${USER}`) }];
+    const { send, seen } = probe(rows);
+    await send({ text: '第一句' });                          // 交付 {a},并立账
+    await send({ text: '第二句' });                          // 无新到达 → 沿用 {a},不是"又新到达一次"
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx']);
+    expect(deliveredNames(seen[1]!)).toEqual(['a.xlsx']);
+    await send({ text: '第三句' });
+    expect(deliveredNames(seen[2]!)).toEqual(['a.xlsx']);
   });
 });
 
