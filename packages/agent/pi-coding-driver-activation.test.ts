@@ -249,8 +249,11 @@ describe('P1 收尾兜底：计划已激活却零执行的补一刀', () => {
   it('超时不补刀：沿用现有 timedOut 路径返回', async () => {
     const { driver, cwd } = await makeDriver();
     fake.setScript([{ bash: [PLAN_COMMAND], hangMs: 400 }]);
-
-    const result = await driver.run(runInput(cwd, { deadline: Date.now() + 40 }));
+    // deadline 必须远小于 hangMs（400ms）才能测到"挂起中被超时拦下"，但也要盖过
+    // driver.run 在 continue() 之前的前置耗时：2026-10-10 共享机器 load 7 实测，
+    // 40ms 预算会被 CPU 争抢吃穿，remaining<=0 直接返回 rounds=0（竞态红，与本例
+    // 要测的 timedOut 路径无关）。150ms 仍稳超 400ms 挂起窗口的 2.5 倍安全边际。
+    const result = await driver.run(runInput(cwd, { deadline: Date.now() + 150 }));
 
     const record = fake.records.at(-1)!;
     expect(record.rounds).toBe(1);

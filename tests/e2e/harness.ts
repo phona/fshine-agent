@@ -129,6 +129,27 @@ afterAll(() => {
   rmSync(stateDir, { recursive: true, force: true });
 });
 
+// ── 装配台账（2026-10-10 资源边界整改）─────────────────────────────────
+//
+// 事故复盘：boot() 每个都建一个真 assembly（真 SQLite 库 + planConfirmation 接线 +
+// channel.start()）。此前只有"测试自己记得调 assembly.close()"这一条路——turn-loop-
+// progress-frames 三个用例一个都没关，SQLite 句柄与接线滞留到 worker 进程退出；
+// 换 threads 池或 isolate:false 时同类泄漏会跨文件累积。这里给每个 boot 登记，
+// afterEach 统一收掉"测试没关的"：测试显式关过的从台账移除（不双关，closeStore
+// 本身幂等），没收的一律兜底 close + channel.stop()——start() 过的就必须有配对的
+// 停止动作，不依赖人记得。
+const liveAssemblies = new Set<ServerAssembly>();
+
+afterEach(async () => {
+  for (const assembly of [...liveAssemblies]) {
+    liveAssemblies.delete(assembly);
+    try {
+      // 走的是包装后的 close：先停 channel 再关库（见 boot() 内的包装）
+      await assembly.close();
+    } catch { /* 收尾失败不掩盖用例本身的结果：兜底清理尽力而为 */ }
+  }
+});
+
 // ── 企微替身 ────────────────────────────────────────────────────────────
 
 class RecordingSdkClient implements SdkClientLike {
@@ -541,6 +562,20 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
   await assembly.store.principalScopes.upsert({
     wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true,
   });
+  // 登记 + 包装 close：测试显式调 close() 时把自己从台账移除（afterEach 只收没人关的），
+  // 漏关的由 afterEach 兜底。closeStore 本身幂等，双关也不会炸，但台账让语义确定。
+  // 包装里一并 stop channel：start() 过的就必须有配对的停止动作，测试自己关的路径
+  // 与兜底路径行为一致（注入的是假 SDK client，disconnect 是 no-op；将来若注入真
+  // client，漏 stop 就是真长连接泄漏）。
+  liveAssemblies.add(assembly);
+  const closeAssembly = assembly.close.bind(assembly);
+  assembly.close = async () => {
+    liveAssemblies.delete(assembly);
+    try {
+      await assembly.channel.stop();
+    } catch { /* 停止渠道失败不阻塞关库 */ }
+    await closeAssembly();
+  };
   // 生产保真：adapter 把 progress/notice 传给 handler（channel-wecom adapter.ts 的
   // dispatchMessage）。这里只在外面包一层记录，生产链路一行不改——notices 的送达屏障
   // （失败必须抛给调用方）原样保留，进度帧也照常送给 adapter 投递。
