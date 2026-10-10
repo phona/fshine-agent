@@ -7,7 +7,7 @@
  * 模型不走到那儿，用户就永远不知道写权限是关闭的。
  *
  * 这里守四件事：
- *   1. 计划里出现写类 operation（access=write/write-flag）而部署未开放 write：宿主在
+ *   1. 计划里出现要用户确认的 operation（平台语义表 confirm=true）而部署未开放 write：宿主在
  *      **计划评估前**拦截（平台计划门 CLI 一次都没被调用），拦截理由复用 error-codes.ts
  *      的 WRITE_NOT_ENABLED 唯一来源；
  *   2. 终稿由宿主合成的话术整体替换——worker 的准备/承诺文本没有成为用户回复
@@ -99,14 +99,16 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-/** 平台 `operation list --json` 的 access 列同形表（read / local / write-flag）。 */
-const ACCESS_TABLE = new Map<string, string>([
-  ['query-saved', 'read'],
-  ['voucher.query-saved', 'read'],
-  ['precheck', 'local'],
-  ['voucher.precheck', 'local'],
-  ['prepare', 'write-flag'],
-  ['voucher.prepare', 'write-flag'],
+/** 平台 `operation list --json` 的语义表同形替身（read / scratch / write 三列由平台声明）。 */
+const SEMANTICS_TABLE = new Map<string, { plan: boolean; confirm: boolean; mock: boolean }>([
+  ['query-saved', { plan: true, confirm: false, mock: true }],
+  ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
+  ['precheck', { plan: false, confirm: false, mock: false }],
+  ['voucher.precheck', { plan: false, confirm: false, mock: false }],
+  ['prepare', { plan: true, confirm: true, mock: true }],
+  ['voucher.prepare', { plan: true, confirm: true, mock: true }],
+  ['commit', { plan: true, confirm: true, mock: true }],
+  ['voucher.commit', { plan: true, confirm: true, mock: true }],
 ]);
 
 /** T7 形态的 worker 脚本：准备流程（只读摸底）+ 含写类 operation 的计划 + 停在准备阶段的承诺。 */
@@ -125,7 +127,7 @@ async function makeDriver(options: { planCliRunner: PlanCliRunner }): Promise<{ 
       operationLabels: new Map(),
       operationArgStyles: new Map(),
       operationArgSpecs: new Map(),
-      operationAccesses: ACCESS_TABLE,
+      operationSemantics: SEMANTICS_TABLE,
       planCliRunner: options.planCliRunner,
     }),
   };

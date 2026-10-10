@@ -33,8 +33,16 @@ const taskRows = db.prepare(
 ).all(like) as { created_at: string; updated_at: string }[];
 const durations = taskRows.map((r) => Date.parse(r.updated_at) - Date.parse(r.created_at)).filter((ms) => ms >= 0);
 
+// 门拦截与计划提交分开计数：两者都落 tool_calls、都带 status='error'，但不是一回事——
+// 门拦截是"这一跳不许真调平台"，计划提交是"方案被评估后给出的裁决"（PLAN ACTIVE /
+// NEEDS_USER_CONFIRM / STOP 的含义都是暂停执行，不是工具被拒）。合成一个数会让
+// "门拦了多少次"和"计划被退了多少次"互相污染，两个都看不准。
 const gateBlocked = db.prepare(
-  "SELECT COUNT(*) AS n FROM tool_calls WHERE started_at LIKE ? AND tool_name LIKE 'serve_gate:%' AND status = 'error'",
+  "SELECT COUNT(*) AS n FROM tool_calls WHERE started_at LIKE ? AND tool_name LIKE 'serve_gate:%' AND tool_name != 'serve_gate:plan_submit' AND status = 'error'",
+).get(like) as { n: number };
+
+const planSubmitted = db.prepare(
+  "SELECT COUNT(*) AS n FROM tool_calls WHERE started_at LIKE ? AND tool_name = 'serve_gate:plan_submit'",
 ).get(like) as { n: number };
 
 const gateAllowed = db.prepare(
@@ -58,7 +66,7 @@ const summary = {
     durationMs: { p50: percentile(durations, 50), p95: percentile(durations, 95), max: percentile(durations, 100) },
     slowest: slowest.map((s) => ({ taskId: s.task_id.slice(0, 24), durationMs: s.duration_ms })),
   },
-  serveGate: { allowed: gateAllowed.n, blocked: gateBlocked.n },
+  serveGate: { allowed: gateAllowed.n, blocked: gateBlocked.n, planSubmitted: planSubmitted.n },
   changeIntents: Object.fromEntries(intents.map((r) => [r.status, r.n])),
 };
 

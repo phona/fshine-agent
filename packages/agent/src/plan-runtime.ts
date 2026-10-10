@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { errorFor } from './error-codes';
-import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationAccesses, type OperationLabels } from './operation-labels';
+import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { GATEWAY_INVOCATION } from './platform-contract';
 
 export interface PlanCall {
@@ -303,21 +303,22 @@ export function validateCalls(calls: readonly PlanCall[]): void {
  *
  * 三个输入全是宿主/平台已有的确定性材料，没有一个字节从 worker 文本解析：
  *   · calls：宿主自己从计划命令解析出来的（parsePlanCallsCommand）；
- *   · accesses：平台 `operation list --json` 的 access 列（operation-labels 派生）；
+ *   · semantics：平台 `operation list --json` 的 access 语义表（operation-labels 派生，
+ *     判据是平台声明的 confirm 列——要不要用户确认）；
  *   · capabilities：宿主持有的部署能力声明（TrustedContext.capabilities，缺省只读）。
  *
- * 宁缺勿猜：access 表缺失（CLI 派生失败/旧版平台）或 operation 查不到 access 时，
- * 该 operation 不算写类——不触发布防，平台计划门与提案路径的既有拒绝照旧兜底。
+ * 宁缺勿猜：语义表缺失（CLI 派生失败 / 平台还没下发 accessSemantics）或 operation 查不到
+ * 语义时，该 operation 不算写类——不触发布防，平台计划门与提案路径的既有拒绝照旧兜底。
  * 空 capabilities 视为只读（与契约层同语义：缺省视为只读）。
  */
 export function planWriteClosed(
   calls: readonly PlanCall[],
-  accesses: OperationAccesses | undefined,
+  semantics: OperationSemantics | undefined,
   capabilities: readonly string[] | undefined,
 ): boolean {
   if (capabilities?.includes('write')) return false;
-  if (!accesses || accesses.size === 0) return false;
-  return calls.some((call) => isWriteAccess(accesses.get(call.operation)));
+  if (!semantics || semantics.size === 0) return false;
+  return calls.some((call) => isWriteAccess(semantics.get(call.operation)));
 }
 
 /** Build the per-command environment for a worker bash subprocess. */

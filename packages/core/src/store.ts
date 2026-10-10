@@ -577,6 +577,13 @@ export function createSqliteStore(dbPath: string): AuditStore {
         .get(requestId) as AgentRequestRow | undefined;
       return row ? rowToAgentRequest(row) : null;
     },
+    // 附件恢复：只认"只发附件、没有指令"的登记行（见契约注释）。按时间倒序取最近若干条，
+    // 由调用方解析 input 里的附件信封。索引已覆盖 principal 维度则足够。
+    async listRecentAttachments(principalId, sinceIso) {
+      return db
+        .prepare('SELECT input FROM agent_requests WHERE principal_id = ? AND outcome = ? AND created_at >= ? ORDER BY created_at DESC LIMIT 32')
+        .all(principalId, 'attachment_received', sinceIso) as Array<{ input: string }>;
+    },
     async findByWecomMessageId(wecomMessageId) {
       const row = db
         .prepare('SELECT request_id, wecom_message_id, principal_id, input, created_at, outcome FROM agent_requests WHERE wecom_message_id = ? ORDER BY rowid DESC LIMIT 1')

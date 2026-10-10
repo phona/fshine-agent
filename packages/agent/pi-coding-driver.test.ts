@@ -16,6 +16,7 @@ import {
   serveGateStepText,
 } from './src/pi-coding-driver';
 import type { ServeGateEvent } from './src/serve-gate';
+import { messageTextFor } from './src/error-codes';
 import type { PlanCliRunner } from './src/plan-runtime';
 
 const roots: string[] = [];
@@ -68,7 +69,14 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
     });
     expect(worker.session.sessionManager.getCwd()).toBe(root);
-    expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash']);
+    // 2026-10-07 加 'write'。worker 与 coding agent 的差别是"审计更多、权限更窄"，不是"更笨"：
+    // 没有 write 且 bash 禁重定向，它产出的中间产物（契约/mapping/临时抽取脚本）只能塞进回复
+    // 让宿主持盘，等于逼宿主为每种产物写一条 protocol。边界不在工具面，在 serve-gate 的
+    // write 分支（只准 tmp/、禁敏感路径、有体积上限）——那条才是防线。
+    // 2026-10-08 加 'edit'：实测 worker 的 11KB 脚本崩在 KeyError，只想改一行却没有 edit
+    // （原话 "No edit tool"），bash 门又只准网关调用（用不了 sed），只能整份重写——33 秒
+    // 生成，而写 11KB 不可能一次对。edit 与 write 共用 decideFileWrite 那一份边界。
+    expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash', 'write', 'edit']);
     expect(worker.skills.map((skill) => skill.name)).toContain('17dz-platform');
     expect(worker.session.systemPrompt).toContain('worker-system-prompt');
     worker.session.agent.state.messages = [{ role: 'user', content: '恢复任务', timestamp: Date.now() } as never];
@@ -189,14 +197,15 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
-  it('计划门拒绝含写 operation 的计划：拒绝原因是用户可行动的写关闭话术，不是 CLI 失败串', async () => {
+  it('计划门拒绝含"要用户确认"operation 的计划：拒绝原因是用户可行动的写关闭话术，不是 CLI 失败串', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-closed-'));
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
+    const evaluated: string[][] = [];
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write', planId: null, version: null, status: 'none' }), stderr: '' };
-      // 平台 canonicalCall 的确定性拒绝：计划里含非 read operation（CLI exit 3，stderr 原样带出）
-      if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY:voucher.batch\n' };
+      // 平台 canonicalCall 的确定性拒绝：计划里含非只读 operation（CLI exit 3，stderr 原样带出）
+      if (args[1] === 'evaluate') { evaluated.push(args); return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY:voucher.fill\n' }; }
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
@@ -207,8 +216,12 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
+      operationSemantics: SEMANTICS_TABLE,
+      // 写开放：前置扫描不触发，这句话必须来自 evaluate 失败分支（平台门真的被咨询了）
+      capabilities: ['read', 'write'],
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.batch","args":["幻辰财税","202609"]}]}';
+    // 平台语义表说 voucher.fill 要用户确认（confirm=true）→ 部署没开放写的事实
+    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.fill","args":["幻辰财税","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_write', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -224,7 +237,95 @@ describe('pi-coding-agent context worker', () => {
     // 不再是"等宿主验证确认"的暂停语义；平台内部错误码与 operation 名也不得透传上屏
     expect(verdict?.reason).not.toContain('PLAN PAUSED');
     expect(verdict?.reason).not.toContain('PLAN_OPERATION_NOT_READ_ONLY');
-    expect(verdict?.reason).not.toContain('voucher.batch');
+    expect(verdict?.reason).not.toContain('voucher.fill');
+    // 平台门确实被咨询了（不是前置扫描拦的）
+    expect(evaluated).toHaveLength(1);
+    worker.session.dispose();
+  });
+
+  // ── 平台拒绝分流：按语义表的 confirm 列，不按错误码名 ────────────────────────
+  // 平台按"是不是只读"拒绝计划，而拒绝名单里混着两类调用：要用户确认的写类调用
+  // （部署没开放写 → WRITE_NOT_ENABLED）与根本不需要计划的本地处理（不该进计划 →
+  // PLAN_NOT_PLANNABLE）。第二类曾被第一类的话术答复——纯本地处理被用户看到"请联系
+  // 管理员开通写入权限"（已实证的误导）。匹配平台错误码只为定位失败点，语义判断读表。
+  const NOT_READ_ONLY_REJECTION: PlanCliRunner = async ({ args }) => {
+    if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_split', planId: null, version: null, status: 'none' }), stderr: '' };
+    if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY\n' };
+    throw new Error('unexpected CLI call');
+  };
+
+  /** 造一个注入了语义表的 worker 会话（计划提交走平台拒绝替身）。 */
+  async function rejectingWorker(
+    taskId: string,
+    semantics: Map<string, { plan: boolean; confirm: boolean; mock: boolean }>,
+    counter: { evaluates: number },
+  ) {
+    const root = await mkdtemp(path.join(os.tmpdir(), `fshine-pi-split-${taskId}-`));
+    roots.push(root);
+    const planCliRunner: PlanCliRunner = async (request) => {
+      if (request.args[1] === 'evaluate') counter.evaluates += 1;
+      return NOT_READ_ONLY_REJECTION(request);
+    };
+    return createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'plan split test',
+      sessionId: taskId,
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig: await fakeModelRuntime(),
+      planCliRunner,
+      operationSemantics: semantics,
+      // 写开放：前置扫描（D-075）不触发，裁决完全落到平台计划门——否则写类计划在
+      // evaluate 之前就被拦下，测不到 evaluate 失败分支的分流。
+      capabilities: ['read', 'write'],
+    });
+  }
+
+  async function submitPlan(worker: Awaited<ReturnType<typeof createPiCodingWorkerSession>>, calls: string): Promise<string | undefined> {
+    const command = `bin/17dz plan {"calls":[${calls}]}`;
+    const verdict = await worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_split', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+    return verdict?.reason;
+  }
+
+  it('计划含 scratch（本地处理）类 operation 被平台拒绝 → PLAN_NOT_PLANNABLE，不是写未开放', async () => {
+    // payroll.transform 是纯本地处理（plan=false / confirm=false）：它不该进计划，
+    // 用户不该被要求"联系管理员开通写入权限"——那是已实证的误导。
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_split', SEMANTICS_TABLE, counter);
+    const reason = await submitPlan(worker, '{"operation":"payroll.transform","args":["A","202609"]}');
+    // 前置扫描没拦（scratch 不要用户确认）：平台门真的被咨询了，分流发生在 evaluate 失败分支
+    expect(counter.evaluates).toBe(1);
+    expect(reason).toContain('PLAN STOP');
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
+    expect(reason).not.toContain('当前未开放写入权限');
+    expect(reason).not.toContain('请联系管理员开通');
+    worker.session.dispose();
+  });
+
+  it('计划含 write（要用户确认）类 operation 被平台拒绝 → WRITE_NOT_ENABLED', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_split', SEMANTICS_TABLE, counter);
+    const reason = await submitPlan(worker, '{"operation":"voucher.commit","args":["A","202609"]}');
+    // 写开放部署：前置扫描不触发，这句话来自 evaluate 失败分支的分流（不是前置拦截）
+    expect(counter.evaluates).toBe(1);
+    expect(reason).toContain('PLAN STOP');
+    expect(reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    expect(reason).not.toContain('该调用不需要计划');
+    worker.session.dispose();
+  });
+
+  it('拿不到语义表（平台还没下发 / 派生失败）→ 按"不该进计划"说，不猜是写未开放', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_split', new Map(), counter);
+    const reason = await submitPlan(worker, '{"operation":"voucher.commit","args":["A","202609"]}');
+    expect(counter.evaluates).toBe(1);
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
+    expect(reason).not.toContain('当前未开放写入权限');
     worker.session.dispose();
   });
 
@@ -232,20 +333,27 @@ describe('pi-coding-agent context worker', () => {
   // T7 事故形态的机械版：用户发起录入请求，模型停在"录入准备"阶段、承诺"即可产出录入
   // 提案"，永不抵达提案步——写关闭话术原先只挂在提案路径与平台计划门拒绝上，模型不
   // 走到那儿用户就永远不知道。宿主在计划评估前（calls 已机械解析、尚未放模型执行的
-  // 最早一点）自己判定：这份计划含写类 operation 而部署未开放 write，注定跑不完。
+  // 最早一点）自己判定：这份计划含"要用户确认"的 operation 而部署未开放 write，注定跑不完。
+  // 判据是平台 access 语义表的 confirm 列（要不要用户确认），不是 access 字符串前缀。
 
-  /** 平台 `operation list --json` 的 access 列同形预置表（read / local / write-flag）。 */
-  const ACCESS_TABLE = new Map<string, string>([
-    ['query-receivables', 'read'],
-    ['finance.query-receivables', 'read'],
-    ['query-saved', 'read'],
-    ['voucher.query-saved', 'read'],
-    ['precheck', 'local'],
-    ['voucher.precheck', 'local'],
-    ['prepare', 'write-flag'],
-    ['voucher.prepare', 'write-flag'],
-    ['commit', 'write'],
-    ['voucher.commit', 'write'],
+  /** 平台 `operation list --json` 的语义表同形替身（三列由平台声明，宿主只读消费）。 */
+  const SEMANTICS_TABLE = new Map<string, { plan: boolean; confirm: boolean; mock: boolean }>([
+    ['query-receivables', { plan: true, confirm: false, mock: true }],
+    ['finance.query-receivables', { plan: true, confirm: false, mock: true }],
+    ['query-saved', { plan: true, confirm: false, mock: true }],
+    ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
+    ['precheck', { plan: false, confirm: false, mock: false }],
+    ['voucher.precheck', { plan: false, confirm: false, mock: false }],
+    ['prepare', { plan: true, confirm: true, mock: true }],
+    ['voucher.prepare', { plan: true, confirm: true, mock: true }],
+    ['commit', { plan: true, confirm: true, mock: true }],
+    ['voucher.commit', { plan: true, confirm: true, mock: true }],
+    // 本地处理（scratch：不进计划、不要确认）与另一支写类（fill）分别覆盖两条分流
+    ['transform', { plan: false, confirm: false, mock: false }],
+    ['payroll.transform', { plan: false, confirm: false, mock: false }],
+    ['fill', { plan: true, confirm: true, mock: true }],
+    ['voucher.fill', { plan: true, confirm: true, mock: true }],
+    // voucher.batch 故意不登记：未登记的 operation 不猜语义（宁缺勿猜那条用例要用）
   ]);
 
   /** 写关闭部署：计划含写类 operation 时宿主在 evaluate 前拦截，拒绝理由即写关闭话术。 */
@@ -267,7 +375,7 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
-      operationAccesses: ACCESS_TABLE,
+      operationSemantics: SEMANTICS_TABLE,
       capabilities: ['read'],
     });
     const command = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
@@ -308,7 +416,7 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
-      operationAccesses: ACCESS_TABLE,
+      operationSemantics: SEMANTICS_TABLE,
       // 写开放：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
       capabilities: ['read', 'write'],
     });
@@ -344,7 +452,7 @@ describe('pi-coding-agent context worker', () => {
       agentDir: path.join(root, '.fshine-agent'),
       modelConfig,
       planCliRunner,
-      operationAccesses: ACCESS_TABLE,
+      operationSemantics: SEMANTICS_TABLE,
       capabilities: ['read'],
     });
     // 未登记的 operation：查不到 access 就不猜它是写类——平台计划门按既有路径裁决
@@ -724,8 +832,39 @@ describe('防泄漏：内部事件名不出现在用户可见进度帧里', () =
     expect(steps).toEqual([PLAN_SUBMIT_STEP]);
     expect(steps[0]).not.toMatch(/^worker_/);
   });
-});
 
+  it('计划提交落审计：tool_calls 里查得到"worker 提交了什么方案"（operation 名 + args 摘要）', async () => {
+    // 计划分支提前 return、不经 gate()，serve-gate 的 onEvent 不会触发——宿主必须自己
+    // 上报一次，否则排查时对不上（已实证的审计缺口）。detail 是摘要不是计划 JSON 全文。
+    const { events, verdict } = await driveBash({
+      command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]},{"operation":"voucher.prepare","args":["甲","202609"]}]}',
+      planCliRunner: evaluatingPlanRunner,
+    });
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    // 审计事件由宿主在计划分支上报（G1 门的 onEvent 这条路径不触发）
+    expect(events).toHaveLength(1);
+    const event = events[0]!;
+    // tool 必须独立于所有门事件：否则落库后这一行与被门拦下的 bash 命令
+    // 完全无法区分（同 tool_name、同 status，detail 还长得像命令）——
+    // 2026-10-10 实证：行一直在 tool_calls 里，但 `safe_arguments like '%plan%'`
+    // 查不到，人眼也分不出哪行是计划提交。assembly 据此落成
+    // `serve_gate:plan_submit`，"本轮提交过计划吗"才成为一条 SQL。
+    expect(event.tool).toBe('plan_submit');
+    // 计划分支的每个出口都是 block：记的是判定结果，不是放行
+    expect(event.allowed).toBe(false);
+    expect(event.reason).toContain('PLAN ACTIVE');
+    // operation 名 + args 摘要：两个 calls 都在，参数可辨
+    expect(event.detail).toBe('voucher.query-saved 甲 202609 ; voucher.prepare 甲 202609');
+    // 计划 JSON 全文绝不进审计（一份方案可以很长，全文会把 tool_calls 撑爆）
+    expect(event.detail).not.toContain('"calls"');
+    expect(event.detail).not.toContain('{');
+    expect(event.detail).not.toContain('}');
+    // 既不留 label 也不发帧：计划提交的进度帧只有 PLAN_SUBMIT_STEP 那一帧
+    expect(event.label).toBeUndefined();
+    expect(event.keyArgs).toBeUndefined();
+    expect(event.requestId).toBe('req_progress');
+  });
+});
 describe('降级：没有 label 就零进度帧，审计字段一字不少', () => {
   it('operationLabels 空表 → 零帧，审计事件四个既有字段照旧', async () => {
     const command = 'bin/17dz query query-receivables.js --query 甲 --period 202609';

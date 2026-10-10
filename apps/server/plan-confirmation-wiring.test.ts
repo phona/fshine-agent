@@ -112,7 +112,11 @@ describe('计划确认门装配接线（D-063：verifyActivatable 真的接上�
     expect(pending[0]).toMatchObject({ planId: 'plan_1', version: 3, decision: 'confirm', evaluation: {} });
     const ttlMs = Date.parse(pending[0]!.expiresAt) - before;
     expect(ttlMs).toBeGreaterThan(9 * 60_000);
-    expect(ttlMs).toBeLessThanOrEqual(10 * 60_000);
+    // 上界必须留执行耗时余量：expiresAt 由实现侧 `new Date(Date.now() + TTL)` 算出，
+    // 那个 Date.now() 必然 ≥ 这里的 before——只要两者跨过 1 毫秒，ttlMs 就是 600001，
+    // 顶穿 600000。机器有负载时稳定复现（2026-10-10 连跑全量两次皆红），是测试自身的
+    // 取时竞态，不是 TTL 变长。断言要锁的是"TTL 是 10 分钟、没有被放大"，不是"调用零耗时"。
+    expect(ttlMs).toBeLessThanOrEqual(10 * 60_000 + 5_000);
     rows.close();
     wiring.close();
   });

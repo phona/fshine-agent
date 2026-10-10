@@ -3,7 +3,15 @@
  * 实现选 SQLite,但逻辑记录形状不变;迁移生产库不是架构变更。
  */
 
-export type RequestOutcome = 'replied' | 'denied' | 'failed';
+/**
+ * 请求结局。
+ *
+ * `attachment_received`（2026-10-07 新增）：用户只发了附件、没有正文。这类消息不启 Agent
+ * 回合（否则"先发文件再发指令"会变成 N 次 LLM 调用并串行堵住队列），只暂存附件等后续指令，
+ * 但仍要落审计——"这一轮用户给了什么"正是排查时最缺的证据。它与 replied 的区别是**没有产生
+ * 任何回答**，统计与排查时不能混为一谈。
+ */
+export type RequestOutcome = 'replied' | 'denied' | 'failed' | 'attachment_received';
 
 import type { AccountSetScope, PrincipalCapability } from './config';
 
@@ -66,6 +74,16 @@ export interface AgentRequestRepo {
   get(requestId: string): Promise<AgentRequestRecord | null>;
   findByWecomMessageId(wecomMessageId: string): Promise<AgentRequestRecord | null>;
   setOutcome(requestId: string, outcome: RequestOutcome): Promise<void>;
+  /**
+   * 本 principal 最近登记的附件接收记录（outcome='attachment_received'）。
+   *
+   * 为什么需要：附件关联若只在进程内存里，服务一重启就失记——用户早先上传的文件还在盘上，
+   * 但 worker 拿到的请求里一个路径都没有，于是它如实回"没有数据"而用户无法理解。落库的
+   * 登记因此不只是审计，也是重启后的恢复源。取 input 由调用方解析（附件信封）。
+   *
+   * 可选：旧库/测试替身没有它时，恢复静默退化为"只用内存"。
+   */
+  listRecentAttachments?(principalId: string, sinceIso: string): Promise<Array<Pick<AgentRequestRecord, 'input'>>>;
 }
 
 export interface ToolCallRepo {

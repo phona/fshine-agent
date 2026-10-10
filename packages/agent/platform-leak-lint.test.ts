@@ -186,6 +186,10 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   // ── 警职执法：守卫/校验器识别业务模式，其存在就是为了识别 ──
   ['packages/agent/src/context-extractor.ts: 期间', { tag: '警职执法', reason: 'hasContradiction 范围意图识别（更多期间/当前期间配对）：识别业务词以判定用户范围意图，是识别器不是泄漏' }],
   ['packages/agent/src/serve-gate.ts: 目录', { tag: '警职执法', reason: 'G1 门知识面/根目录的路径安全判定：门守卫自身引用它约束的知识面' }],
+  // SERVE_WRITE_NO_PLATFORM_ROOT 的拒绝理由随 serve 门拒绝理由收口（error-codes.ts 唯一来源）
+  // 从 serve-gate.ts 迁到本表：同一条措辞、同一个"平台工作目录 = worker cwd，write 落点裁决的
+  // 前提"语义，只是不再有第二份手抄本。文件系统义的目录，不是领域检索动作。
+  ['packages/agent/src/error-codes.ts: 目录', { tag: '警职执法', reason: 'SERVE_WRITE_NO_PLATFORM_ROOT「未配置平台工作目录」（随 serve 门拒绝理由收口自 serve-gate.ts 迁入）：平台工作目录是 write/edit 落点裁决的前提，门守卫自身引用它' }],
   ['packages/agent/src/turn-contract.ts: 目录', { tag: '警职执法', reason: 'validatePlanEntities 实体来源校验：平台响应（含账套检索结果）是受认实体来源，校验器说明其为何天然放行' }],
   ['packages/agent/src/pi-coding-driver.ts: 目录', { tag: '警职执法', reason: '计划实体来源收集：账套检索结果作为执行痕迹/候选名来源的识别' }],
   // ── 遗留待清：已知该走还没走，挂账限期 ──
@@ -199,7 +203,7 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   // 本身（platform_tasks 无账套/期间/calls），同波任务组5 补结构化字段时此段重写。
   ['packages/agent/src/execution-facts.ts: 时间范围', { tag: '遗留待清', reason: '文件头"没有对象、没有时间范围、没有调用次数"描述 D-065 欠账现状：Wave 2 Lane D 任务组5（D-065）补 accountSet/period/calls 结构化字段后此段重写，届时本条关闭' }],
   ['packages/agent/src/execution-facts.ts: 记录', { tag: '遗留待清', reason: '文件头/渲染注释里的"执行记录/记录原文"（Conversation Log 条目的通称）：随 D-065 结构化渲染改造（同波任务组5）一并清理，届时本条关闭' }],
-  ['packages/agent/src/context.ts: 目录', { tag: '遗留待清', reason: 'worker 系统提示词的工作目录/账套检索/域目录前缀描述：理想应收敛为平台 SKILL 指针（Wave 2 D）' }],
+  ['packages/agent/src/context.ts: 目录', { tag: '遗留待清', reason: 'worker 系统提示词与文件注释里的"工作目录"（文件系统义，非领域检索动作）：2026-10-08 重构已清掉提示词中的账套检索/域目录前缀描述，只剩 cwd 告知；理想形态（Wave 2 D）是把 cwd 也收敛为平台 SKILL 指针，届时本条关闭' }],
   ['packages/agent/src/context.ts: 期间', { tag: '遗留待清', reason: '并发注释"会话期间"的时间描述（非业务期间口径）：待改写成中性"过程/时间"' }],
   ['packages/agent/src/history-tools.ts: 财务', { tag: '遗留待清', reason: '通用历史工具描述误用"财务"限定（search_history/get_messages 领域无关）：待改成"实时数据/历史结果"中性措辞' }],
   ['packages/agent/src/platform-mock.ts: 目录', { tag: '遗留待清', reason: 'mock 状态路径注释"该目录已 gitignore"（文件系统目录）：待改成"路径"' }],
@@ -227,7 +231,9 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：17dz 侧 LEAKY_EXACT 已预留 DZ_REAL_COMMIT，双仓协同改名属 D-016 退役批次；此前面向生产的"显式声明"语义不变' }],
   ['FSHINE_PI_AGENT_DIR', { tag: '遗留待清', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；随 DZ_* 统一批次改名' }],
   ['FSHINE_PLATFORM_CONCURRENCY', { tag: '遗留待清', reason: '委派并发闸（context.ts，默认 1）：.env.example 已文档化，改 DZ_* 需同步部署文档；随 DZ_* 统一批次改名' }],
+  ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '遗留待清', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '遗留待清', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
+  ['FSHINE_ATTACHMENT_DIR', { tag: '遗留待清', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 DZ_*（那是平台命名空间，会把"宿主把用户文件存哪"误记成平台协议）；.env.example 已文档化，随 DZ_* 统一批次改名' }],
 ]);
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：

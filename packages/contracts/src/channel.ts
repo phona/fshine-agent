@@ -3,6 +3,22 @@
  * V0:回调验签 + 快速 ack + 主动推送;同步语义的 75s 预算由 host 侧预算控制,不在本层。
  */
 
+/**
+ * 渠道传来的附件（已由渠道层落盘）。
+ *
+ * 为什么契约里只放**路径**不放 Buffer：宿主与 worker 跨进程，附件要进 worker 的决策
+ * 上下文只能以路径形式出现在请求文本里（worker 再把它作为 operation 的位置参数传给
+ * 执行层）。Buffer 进不了上下文，也没有第二个消费者。
+ */
+export interface IncomingAttachment {
+  /** 落盘后的文件名（已 basename 化，不含路径分隔符） */
+  filename: string;
+  /** 落盘后的绝对路径；宿主与 worker 按这个路径引用同一份文件 */
+  path: string;
+  /** 字节数；超限附件不会出现在这里（渠道层直接拒收） */
+  bytes: number;
+}
+
 export interface IncomingChannelMessage {
   /** 不可变的企微成员 UserID */
   wecomUserId: string;
@@ -13,6 +29,24 @@ export interface IncomingChannelMessage {
   /** 单聊 / 群聊(群聊时 text 已剥离 @机器人 前缀) */
   chatType?: 'single' | 'group';
   text: string;
+  /**
+   * 本条消息携带的附件（企微 file 消息）。
+   *
+   * 2026-10-07 之前没有这个字段，渠道层只放行 `msgtype === 'text'`，用户发的 Excel
+   * 连下载都没有——"帮我做工资表"这类请求永远拿不到上游数据，而下游执行层（17dz
+   * 薪酬域）恰恰要求先吸收多份 Excel 才能产出 PayrollContract。
+   */
+  attachments?: readonly IncomingAttachment[];
+  /**
+   * 本条消息**只有附件、没有用户正文**（企微 file 消息）。
+   *
+   * 为什么宿主需要这个标志：用户的自然用法是"先发文件，再发指令"。若每条文件消息都启一个
+   * Agent 回合，N 个文件就是 N 次 LLM 调用，而且它们会串行堵住会话队列——真正带指令的那条
+   * 排在后面出不来（2026-10-07 实测：发 3 个文件 + 1 条指令，只见 4 个 ack、0 个最终回复，
+   * 第一条文件回合卡在 LLM 上 10 分钟预算内不返回）。
+   * 所以附件-only 消息只暂存、不启回合；等带正文的那条到达，再把暂存的附件一起交给它。
+   */
+  attachmentOnly?: boolean;
   /** ISO 8601 */
   receivedAt: string;
 }
@@ -24,10 +58,23 @@ export interface OutgoingImageReply {
   filename?: string;
 }
 
-/** 渠道回复:纯文本,或文本 + 图片组合 */
+/** 文件回复:原始字节 + 文件名（企微临时素材上传换 media_id 后回传） */
+export interface OutgoingFileReply {
+  data: Buffer;
+  filename: string;
+}
+
+/**
+ * 渠道回复:纯文本,或文本 + 图片/文件组合。
+ *
+ * `file` 是 2026-10-08 补的最后一环：worker 在平台 tmp/ 下产出 xlsx（如工资表），
+ * 此前渠道只会把它说成一段 markdown——12 人的工资表被塞进 20KB 文本上限里截断，
+ * 用户既拿不到文件也看不完。SDK 的 uploadMedia/replyMedia 本就支持 file 类型。
+ */
 export interface RichChannelReply {
   text?: string;
   image?: OutgoingImageReply;
+  file?: OutgoingFileReply;
 }
 
 export type ChannelReply = string | RichChannelReply;

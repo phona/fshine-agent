@@ -36,6 +36,7 @@ class NoticeSdkClient implements SdkClientLike {
   }
   async uploadMedia(): Promise<{ media_id: string }> { return { media_id: 'unused' }; }
   async replyMedia(): Promise<unknown> { return {}; }
+  async downloadFile(): Promise<{ buffer: Buffer; filename?: string }> { return { buffer: Buffer.from('x') }; }
 }
 
 async function start(handler: ReplyHandler) {

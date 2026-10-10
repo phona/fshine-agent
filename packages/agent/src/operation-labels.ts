@@ -1,5 +1,5 @@
 /**
- * 平台操作的人类可读名（label）、参数规格（args spec）与访问类别（access）派生层。
+ * 平台操作的人类可读名（label）、参数规格（args spec）与访问语义（access semantics）派生层。
  *
  * 进度帧里的业务措辞只有一个来源：平台公共 CLI 的 `operation list` 子命令
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
@@ -15,6 +15,11 @@
  * 规格只放 --json（TSV 维持 5 列纪律，人读列数一动 `operation list | awk`
  * 一类下游全断），所以这里分两次 spawn 同一子命令：TSV 取 label、JSON 取规格。
  * 两份都是**只读消费**——宿主不镜像 flag 名单，平台加了 flag 这边自动看得见。
+ *
+ * access 语义同理（本模块的第三份只读消费）：`--json` 的顶层 `accessSemantics`
+ * 表声明每个 access 取值的 plan/confirm/mock 三列，宿主据此判"这个调用要不要
+ * 用户确认"（= 是不是写）。语义只活在平台的那张表里，宿主一个字节都不猜——
+ * 拿不到表就什么都不算写（fail-closed，与 label/规格缺失同族的安全缺省）。
  *
  * 纯数据 + 显式传表：无单例、无进程级缓存，调用方持有 Map 并注入，
  * 测试因此可以直接塞替身表，不需要真平台。
@@ -142,15 +147,30 @@ function collectPositionalNames(positional: unknown): string[] {
 }
 
 /**
+ * `operation list --json` 的顶层文档 → operations 数组。
+ *
+ * 平台从"裸数组"演进到"对象信封"（新增顶层 `accessSemantics` 表）时，只认数组的
+ * 解析器会**整份返回空表**——那正是必须宽容的形状：信封是平台契约演进，不是脏输入。
+ * 因此两种顶层形状都收：数组原样、`{operations:[…]}` 取数组；其余（非 JSON /
+ * 对象里没有 operations 数组）返回 null = 与旧版同一套安全缺省（空表）。
+ */
+function operationsArrayOf(stdout: string): unknown[] | null {
+  let document: unknown;
+  try { document = JSON.parse(stdout); } catch { return null; }
+  if (Array.isArray(document)) return document;
+  const operations = (document as { operations?: unknown } | null)?.operations;
+  return Array.isArray(operations) ? operations : null;
+}
+
+/**
  * 解析 `operation list --json` 的 args 规格：按 operation 收 positionalNames + flagStyles。
  * 键同时收注册名（voucher.query-saved）与 command 裸名（query-saved）——命令里两种
  * 写法都合法，规格查找因此两种都命中。
  */
 export function parseOperationArgSpecs(stdout: string): OperationArgsSpecs {
   const specs: Map<string, OperationArgsSpec> = new Map();
-  let operations: unknown;
-  try { operations = JSON.parse(stdout); } catch { return specs; }
-  if (!Array.isArray(operations)) return specs;
+  const operations = operationsArrayOf(stdout);
+  if (!operations) return specs;
   for (const operation of operations) {
     const name = (operation as { name?: unknown } | null)?.name;
     const command = (operation as { command?: unknown } | null)?.command;
@@ -265,57 +285,97 @@ export function loadOperationArgSpecs(platformRoot?: string): Promise<OperationA
 }
 
 /**
- * operation → access 类别表（平台 `operation list --json` 的 `access` 列，数据不是逻辑）。
+ * 平台 access 语义（`operation list --json` 顶层 `accessSemantics` 表的一行，数据不是逻辑）：
+ *   · plan    要不要过计划门（进计划、被记账）；
+ *   · confirm 要不要用户确认（确认码 + commit token）——**是不是写**的唯一判据；
+ *   · mock    联调时执行器替身换不换掉。
  *
- * 为什么单独一张表：access 是平台对每个 operation 的**访问类声明**（平台清单的权威字段），
- * 宿主消费它做能力裁决（计划里出现写类 operation 而部署未开放 write 能力时，宿主自己就能
- * 判定，不必等平台计划门拒绝——那正是 D-075 的机械来源）。与 label/args 规格同纪律：
- * 只读消费，宿主不镜像、不猜；键同时收注册名与 command 裸名（命令里两种写法都合法）。
- *
- * 缺表（CLI 派生失败 / 旧版平台）= 空表 = 判据不成立（宁缺勿猜）：查不到 access 的
- * operation 绝不触发写关闭判定，由平台门禁按既有路径拒绝。
+ * 为什么宿主不再自己认 access 取值：语义只活在平台的这张表里。宿主曾用
+ * `access.startsWith('write')` 判写家族——平台加一个同族取值（如批量写）就静默
+ * 算写，而"要不要用户确认"这件事只有平台说了算。现在判据只有一列：confirm。
+ * 三列缺一项/不是布尔一律按 false（宁缺勿猜：判据不成立时绝不放大权限）。
  */
-export type OperationAccesses = ReadonlyMap<string, string>;
+export interface AccessSemantics {
+  plan: boolean;
+  confirm: boolean;
+  mock: boolean;
+}
+
+/** operation 注册名（也收 command 裸名）→ 平台声明的 access 语义。 */
+export type OperationSemantics = ReadonlyMap<string, AccessSemantics>;
+
+/** access 取值 → 平台声明的语义（`accessSemantics` 顶层表原样）。 */
+export type AccessSemanticsTable = ReadonlyMap<string, AccessSemantics>;
 
 /**
- * 解析 `operation list --json` 的 access 列：按 operation 收 access 类别。
- * 键同时收注册名（voucher.prepare）与 command 裸名（prepare）——与规格表同口径。
- * access 缺失/非字符串的条目不进表（该 operation 不参与能力裁决）。
+ * 顶层 `accessSemantics` 表 → access → 语义。
+ *
+ * 键是平台的 access 取值（宿主不列举、不校验取值集合——词汇表由平台自己持有）；
+ * 值是对象且三列各自按布尔收取（缺列/非布尔 → false）。缺表（旧版平台 / 平台还没
+ * 下发这张表）→ 空表 = 判据不成立（宁缺勿猜）：查不到语义的 operation 绝不触发
+ * 写类判定，由平台门禁按既有路径拒绝。
  */
-export function parseOperationAccesses(stdout: string): OperationAccesses {
-  const accesses: Map<string, string> = new Map();
-  let operations: unknown;
-  try { operations = JSON.parse(stdout); } catch { return accesses; }
-  if (!Array.isArray(operations)) return accesses;
+export function parseAccessSemantics(stdout: string): AccessSemanticsTable {
+  const table: Map<string, AccessSemantics> = new Map();
+  let document: unknown;
+  try { document = JSON.parse(stdout); } catch { return table; }
+  const raw = Array.isArray(document) ? undefined : (document as { accessSemantics?: unknown } | null)?.accessSemantics;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return table;
+  for (const [access, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!access || !value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const row = value as Record<string, unknown>;
+    table.set(access, { plan: row.plan === true, confirm: row.confirm === true, mock: row.mock === true });
+  }
+  return table;
+}
+
+/**
+ * 解析 `operation list --json` 的语义表：按 operation 收**平台声明的语义对象**。
+ *
+ * 两个平台数据面的机械连接，没有一步是宿主判断：
+ *   ① operation 的 `access` 列（连接键，平台清单权威字段）；
+ *   ② 顶层 `accessSemantics` 表（access → plan/confirm/mock）。
+ * 键同时收注册名（voucher.prepare）与 command 裸名（prepare）——与规格表同口径。
+ * access 缺失 / 语义表里查不到该 access（旧版平台、平台未登记）→ 该 operation
+ * 不进表：它不参与写类判定（宁缺勿猜），平台门禁与提案路径的既有拒绝照旧兜底。
+ */
+export function parseOperationSemantics(stdout: string): OperationSemantics {
+  const semantics: Map<string, AccessSemantics> = new Map();
+  const operations = operationsArrayOf(stdout);
+  const table = parseAccessSemantics(stdout);
+  if (!operations || table.size === 0) return semantics;
   for (const operation of operations) {
     const name = (operation as { name?: unknown } | null)?.name;
     const command = (operation as { command?: unknown } | null)?.command;
     const access = (operation as { access?: unknown } | null)?.access;
     if (typeof access !== 'string' || !access) continue;
+    const entry = table.get(access);
+    if (!entry) continue;
     for (const key of [name, command]) {
-      if (typeof key === 'string' && key && !accesses.has(key)) accesses.set(key, access);
+      if (typeof key === 'string' && key && !semantics.has(key)) semantics.set(key, entry);
     }
   }
-  return accesses;
+  return semantics;
 }
 
 /**
- * 经公共 CLI 派生 access 表（cwd=platformRoot，`operation list --json`）。
+ * 经公共 CLI 派生 operation → 语义表（cwd=platformRoot，`operation list --json`）。
  *
  * 失败语义与 loadOperationLabels / loadOperationArgStyles 完全一致：platformRoot 未配、
- * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
- * 不是前提；没有 access 表就不做写关闭前置判定（平台门禁照旧兜底），绝不用宿主硬编码
- * operation 名单顶替（那违反 L2：宿主另立一份名单即分叉）。
+ * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON、平台还没下发 accessSemantics
+ * ——一律返回空 Map。派生是增强，不是前提；没有语义表就不做写类判定（平台门禁照旧
+ * 兜底），绝不用宿主硬编码 operation 名单或 access 词表顶替（那违反 L2：宿主另立
+ * 一份名单/词表即分叉）。
  */
-export function loadOperationAccesses(platformRoot?: string): Promise<OperationAccesses> {
+export function loadOperationSemantics(platformRoot?: string): Promise<OperationSemantics> {
   if (!platformRoot) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot);
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (accesses: OperationAccesses): void => {
+    const settle = (semantics: OperationSemantics): void => {
       if (settled) return;
       settled = true;
-      resolve(accesses);
+      resolve(semantics);
     };
     let child: ReturnType<typeof spawn>;
     try {
@@ -337,24 +397,24 @@ export function loadOperationAccesses(platformRoot?: string): Promise<OperationA
     child.once('error', () => { clearTimeout(timer); settle(new Map()); });
     child.once('close', (code) => {
       clearTimeout(timer);
-      settle(code === 0 ? parseOperationAccesses(Buffer.concat(stdout).toString('utf8')) : new Map());
+      settle(code === 0 ? parseOperationSemantics(Buffer.concat(stdout).toString('utf8')) : new Map());
     });
   });
 }
 
 /**
- * access 类别是否属写类（平台 access 语义，见 17dz `lib/operations.js` 的声明）：
- *   · write      该 operation 具备平台写副作用；
- *   · write-flag 默认安全，携带 writeFlag 时产生平台写（如落账）；
- *   · read       只读平台数据；local 纯本地处理（不触平台会话）——两者都不是写类。
+ * 该 operation 是否属写类——判据只有一列：平台声明的 `confirm`（要不要用户确认）。
  *
- * 用前缀判定而不是枚举具体值：平台的 access 词汇表由平台自己持有（ACCESS 白名单校验），
- * 宿主列举 'write'/'write-flag' 两个具体值就是在镜像平台词表（L2）；前缀覆盖整个写家族
- * （含平台未来新增的 write-* 类），且读/本地两类天然排除。缺 access（旧版平台/未登记）
- * → false：不触发布防，交给平台门禁既有路径。
+ * 为什么"要不要用户确认"就是"是不是写"：平台对每个 access 取值声明三列语义，其中
+ * confirm 正是"这个调用要确认码 + commit token"的那一列——要用户确认的调用就是有
+ * 平台写副作用的调用。宿主不再前缀匹配 access 字符串（加个同族取值就静默算写），
+ * 也不再列举平台的 access 词表（L2：词汇表由平台自己持有）。
+ *
+ * 拿不到语义（缺表 / 该 operation 未登记 / 平台还没下发这张表）→ false：fail-closed
+ * 到什么都不算写，与 label/规格缺失同纪律——不触发布防，交给平台门禁既有路径。
  */
-export function isWriteAccess(access: string | undefined): boolean {
-  return typeof access === 'string' && access.startsWith('write');
+export function isWriteAccess(semantics: AccessSemantics | undefined): boolean {
+  return semantics?.confirm === true;
 }
 
 /**
@@ -363,11 +423,17 @@ export function isWriteAccess(access: string | undefined): boolean {
  */
 export function operationLabel(labels: OperationLabels | undefined, script: string | null | undefined): string | undefined {
   if (!labels || labels.size === 0 || !script) return undefined;
-  return labels.get(labelKey(script));
+  return labels.get(operationReferenceKey(script));
 }
 
-/** 引用归一：取末段 → 去脚本后缀 → 去域前缀（voucher.query-saved → query-saved）。 */
-function labelKey(reference: string): string {
+/**
+ * 引用归一：取末段 → 去脚本后缀 → 去域前缀（voucher.query-saved → query-saved）。
+ *
+ * 导出只为一把尺子量所有查表面：label、args 规格、access 语义三张表的键都是
+ * "注册名 + command 裸名"，而命令里引用一个 operation 有注册名 / 裸名 / 脚本路径
+ * 三种合法写法。归一只此一份——在调用方各写一遍就是第二套命令解析，必然分叉。
+ */
+export function operationReferenceKey(reference: string): string {
   const base = reference.split(/[/\\]/).pop() ?? reference;
   const bare = base.replace(/\.(?:js|py)$/i, '');
   const dot = bare.indexOf('.');

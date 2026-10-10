@@ -23,7 +23,7 @@ import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationAccesses, loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
+import { loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
@@ -40,9 +40,32 @@ let counter = 0;
 // 驱动读同一份平台数据（不镜像、不手抄）。
 const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT);
 const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
-// access 类别表（D-075 写关闭判据的平台数据面）：与真实驱动同源派生（operation list --json
-// 的 access 列），替身复刻计划扫描时查同一份表，不在测试里另立 operation 名单。
-const operationAccesses = await loadOperationAccesses(PLATFORM_ROOT);
+// access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
+// 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。
+// 为什么这里注入替身而不是经平台 CLI 派生：语义表是**判据**不是普通数据，平台侧正在并行
+// 改造（顶层 accessSemantics 表尚未下发），此刻派生只会得到空表 = 写关闭扫描静默不生效
+// （假绿）。替身与单测同口径（见 packages/agent/plan-runtime.test.ts 的 SEMANTICS）；
+// 平台下发该表后可换回 loadOperationSemantics(PLATFORM_ROOT)。
+const operationSemantics = new Map<string, { plan: boolean; confirm: boolean; mock: boolean }>([
+  ['query-receivables', { plan: true, confirm: false, mock: true }],
+  ['finance.query-receivables', { plan: true, confirm: false, mock: true }],
+  ['query-saved', { plan: true, confirm: false, mock: true }],
+  ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
+  ['search-account-sets', { plan: true, confirm: false, mock: true }],
+  ['finance.search-account-sets', { plan: true, confirm: false, mock: true }],
+  ['validate', { plan: false, confirm: false, mock: false }],
+  ['payroll.validate', { plan: false, confirm: false, mock: false }],
+  ['transform', { plan: false, confirm: false, mock: false }],
+  ['payroll.transform', { plan: false, confirm: false, mock: false }],
+  ['precheck', { plan: false, confirm: false, mock: false }],
+  ['voucher.precheck', { plan: false, confirm: false, mock: false }],
+  ['prepare', { plan: true, confirm: true, mock: true }],
+  ['voucher.prepare', { plan: true, confirm: true, mock: true }],
+  ['fill', { plan: true, confirm: true, mock: true }],
+  ['voucher.fill', { plan: true, confirm: true, mock: true }],
+  ['commit', { plan: true, confirm: true, mock: true }],
+  ['voucher.commit', { plan: true, confirm: true, mock: true }],
+]);
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
@@ -250,11 +273,11 @@ export type WorkerStep =
  * 既有共享夹具先于门禁存在，参数并非都逐字可溯源（见下方拦截处的说明）。
  *
  * `enforceWriteClosure`（显式开启）：复刻真实驱动的写关闭计划扫描（D-075）——宿主解析出
- * 的 calls 含写类 operation（access=write/write-flag，平台清单数据）而宿主注入的能力
- * 不含 write 时，在 evaluate **之前**终结该轮：终稿是宿主合成的 WRITE_NOT_ENABLED
- * （error-codes.ts 唯一来源），worker 的准备/承诺文本不会成为终稿（T7 形态的机械版），
- * 零平台调用发生。与实体门禁同性质：真实驱动的扫描在 pi-coding-driver 的 beforeToolCall，
- * 单测钉拦截点与理由，这里钉宿主级终稿行为。
+ * 的 calls 含"要用户确认"的 operation（平台 access 语义表的 confirm 列，替身注入）而宿主
+ * 注入的能力不含 write 时，在 evaluate **之前**终结该轮：终稿是宿主合成的
+ * WRITE_NOT_ENABLED（error-codes.ts 唯一来源），worker 的准备/承诺文本不会成为终稿
+ * （T7 形态的机械版），零平台调用发生。与实体门禁同性质：真实驱动的扫描在
+ * pi-coding-driver 的 beforeToolCall，单测钉拦截点与理由，这里钉宿主级终稿行为。
  */
 function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean }) {
   const enforceEntityScope = options?.enforceEntityScope === true;
@@ -353,10 +376,10 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           }
         }
         // 写关闭计划扫描（D-075）：与真实驱动 beforeToolCall 同一把机械尺——calls（宿主
-        // 解析）× access 表（平台清单数据）× capabilities（宿主注入）。命中即在 evaluate
-        // 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型停在"录入准备"阶段
+        // 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。命中即在
+        // evaluate 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型停在"录入准备"阶段
         // 永不抵达提案步，这句话必须由宿主说，且 worker 的准备/承诺文本不得外发。
-        if (enforceWriteClosure && planWriteClosed(current.plan, operationAccesses, input.capabilities)) {
+        if (enforceWriteClosure && planWriteClosed(current.plan, operationSemantics, input.capabilities)) {
           const text = messageTextFor('WRITE_NOT_ENABLED');
           return {
             text,
@@ -501,7 +524,11 @@ function wecomText(userid: string, content: string, options: { group?: boolean; 
 async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const assembly = await createServerAssembly({
-    env: process.env,
+    // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（平台冷却、限流窗口）的时序
+    // 整体后移。本批用例用 2s 冷却夹具，2s 防抖就足以让冷却过期、该拦截的轮次放行
+    // （2026-10-08 实测：invocations 从 6 变 7）。生产上冷却 10 分钟、防抖 2 秒可忽略，
+    // 但离线夹具必须把旋钮归零才能验时序本身。防抖自身的行为由 handler 单测覆盖。
+    env: { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' },
     dbPath: path.join(stateDir, `agent-${counter}.db`),
     driver: options.main as never,
     workerDriver: options.worker as never,

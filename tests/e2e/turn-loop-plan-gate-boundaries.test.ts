@@ -23,7 +23,8 @@
  *          对整句相等断言）；
  *       ③ 平台计划门兜底（真 createPiCodingWorkerSession + 真 CLI：capabilities 声明
  *          含 write 使宿主前置扫描不触发，voucher.commit 被平台 canonicalCall 以
- *          PLAN_OPERATION_NOT_READ_ONLY exit 3 拒绝，驱动 catch 分支换成写关闭话术）。
+ *          PLAN_OPERATION_NOT_READ_ONLY exit 3 拒绝，驱动 catch 分支按平台语义表的
+ *          confirm 列分流——要用户确认 → 写关闭话术）。
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -97,6 +98,8 @@ interface SessionExtra {
   sessionId: string;
   entitySources?: PlanEntitySources;
   capabilities?: readonly string[];
+  /** 平台 access 语义表替身（判据是平台数据：不在测试里跑 CLI 派生它）。 */
+  operationSemantics?: ReadonlyMap<string, { plan: boolean; confirm: boolean; mock: boolean }>;
 }
 
 async function makeWorkerSession(counter: { evaluates: number }, extra: SessionExtra): Promise<PiCodingWorkerSession> {
@@ -111,6 +114,7 @@ async function makeWorkerSession(counter: { evaluates: number }, extra: SessionE
     modelConfig,
     planCliRunner: countingCliRunner(counter),
     ...extra,
+    ...(extra.operationSemantics ? { operationSemantics: extra.operationSemantics } : {}),
   });
 }
 
@@ -367,6 +371,14 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
     const worker = await makeWorkerSession(counter, {
       sessionId: 'task_platform_write_gate',
       capabilities: ['read', 'write'],
+      // 平台语义表替身：voucher.commit 要用户确认（confirm=true）。为什么不经平台 CLI 派生：
+      // 语义表是**判据**不是普通数据，平台侧顶层 accessSemantics 正在并行改造、尚未下发，
+      // 此刻派生只会得到空表——宿主 fail-closed 到"不该进计划"（PLAN_NOT_PLANNABLE），
+      // 这条"平台门兜底 → 写关闭话术"的断言就静默失真。平台下发该表后可换回派生。
+      operationSemantics: new Map([
+        ['commit', { plan: true, confirm: true, mock: true }],
+        ['voucher.commit', { plan: true, confirm: true, mock: true }],
+      ]),
     });
     try {
       const command = 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻辰财税","202609"]}]}';

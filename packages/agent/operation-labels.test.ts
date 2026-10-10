@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isWriteAccess, loadOperationAccesses, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, operationLabel, parseOperationAccesses, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels } from './src/operation-labels';
+import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationSemantics, operationLabel, parseAccessSemantics, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels, parseOperationSemantics } from './src/operation-labels';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -203,6 +203,14 @@ describe('parseOperationArgSpecs（整份规格：位置参数声明名 + flag �
     expect(specs.get('voucher.query-saved')?.positionalNames).toEqual(['accountSet', 'period']);
   });
 
+  it('顶层新增未知键（如 accessSemantics 信封）不破坏既有解析', () => {
+    // 平台把 `operation list --json` 从裸数组演进成对象信封时，只认数组的解析器会整份
+    // 返回空表——那正是必须宽容的形状。信封与裸数组必须解析出同一份规格。
+    const enveloped = JSON.stringify({ operations: JSON.parse(LIST_JSON), accessSemantics: { read: { plan: true, confirm: false, mock: true } } });
+    expect(parseOperationArgSpecs(enveloped)).toEqual(parseOperationArgSpecs(LIST_JSON));
+    expect(parseOperationArgStyles(enveloped)).toEqual(parseOperationArgStyles(LIST_JSON));
+  });
+
   it('布尔开关（style none）不入 flagStyles；无 args 列的 operation 不入表', () => {
     const specs = parseOperationArgSpecs(LIST_JSON);
     expect(specs.has('voucher.fill')).toBe(true);
@@ -230,80 +238,149 @@ describe('loadOperationArgSpecs（经公共 CLI 派生整份规格）', () => {
   });
 });
 
-// ── access 类别（D-075：写关闭判据的平台数据面，宿主消费不镜像）────────────────
+// ── access 语义（平台 accessSemantics 表：写类判据的平台数据面，宿主消费不镜像）──────
 //
-// access 是平台对每个 operation 的访问类声明（平台清单权威字段，词汇表由平台自己校验）。
-// 宿主只读消费：写关闭前置判定据此在计划评估前识别"这份计划含写类 operation"，
-// 不在自己仓里另立 operation 名单（L2）。
+// 语义只活在平台的顶层 `accessSemantics` 表里：宿主查 confirm 列判"要不要用户确认"
+// （= 是不是写），不再前缀匹配 access 字符串，也不列举平台的 access 词表（L2）。
 
-/** 与平台 `operation list --json` 同形的预置输出（节选：四类 access 各至少一条）。 */
-const ACCESS_LIST_JSON = JSON.stringify([
-  { name: 'finance.query-receivables', command: 'query-receivables', access: 'read' },
-  { name: 'voucher.query-saved', command: 'query-saved', access: 'read' },
-  { name: 'voucher.precheck', command: 'precheck', access: 'local' },
-  { name: 'voucher.prepare', command: 'prepare', access: 'write-flag' },
-  { name: 'voucher.commit', command: 'commit', access: 'write-flag' },
-  { name: 'voucher.fix-summary', command: 'fix-summary', access: 'write' },
-]);
+/** 与平台 `operation list --json` 同形的预置输出（新信封形状：operations + accessSemantics）。 */
+const SEMANTICS_LIST_JSON = JSON.stringify({
+  operations: [
+    { name: 'finance.query-receivables', command: 'query-receivables', access: 'read' },
+    { name: 'voucher.query-saved', command: 'query-saved', access: 'read' },
+    { name: 'voucher.precheck', command: 'precheck', access: 'scratch' },
+    { name: 'payroll.transform', command: 'transform', access: 'scratch' },
+    { name: 'voucher.prepare', command: 'prepare', access: 'write' },
+    { name: 'voucher.commit', command: 'commit', access: 'write' },
+    { name: 'voucher.unregistered', command: 'unregistered', access: 'read' },
+  ],
+  accessSemantics: {
+    read: { plan: true, confirm: false, mock: true },
+    scratch: { plan: false, confirm: false, mock: false },
+    write: { plan: true, confirm: true, mock: true },
+  },
+});
 
-describe('parseOperationAccesses（--json 的 access 列）', () => {
-  it('按 operation 收录 access，注册名与 command 裸名同表', () => {
-    const accesses = parseOperationAccesses(ACCESS_LIST_JSON);
-    expect([...accesses.entries()]).toEqual([
-      ['finance.query-receivables', 'read'],
-      ['query-receivables', 'read'],
-      ['voucher.query-saved', 'read'],
-      ['query-saved', 'read'],
-      ['voucher.precheck', 'local'],
-      ['precheck', 'local'],
-      ['voucher.prepare', 'write-flag'],
-      ['prepare', 'write-flag'],
-      ['voucher.commit', 'write-flag'],
-      ['commit', 'write-flag'],
-      ['voucher.fix-summary', 'write'],
-      ['fix-summary', 'write'],
+/** 平台声明之外的自造 access 取值：语义表里查不到 → 该 operation 不进表（宁缺勿猜）。 */
+const SEMANTICS_WITH_UNKNOWN_ACCESS = JSON.stringify({
+  operations: [{ name: 'voucher.batch', command: 'batch', access: 'write-batch' }],
+  accessSemantics: { read: { plan: true, confirm: false, mock: true } },
+});
+
+describe('parseAccessSemantics（顶层 accessSemantics 表）', () => {
+  it('按 access 取值收三列语义（plan/confirm/mock 都是平台数据）', () => {
+    expect([...parseAccessSemantics(SEMANTICS_LIST_JSON).entries()]).toEqual([
+      ['read', { plan: true, confirm: false, mock: true }],
+      ['scratch', { plan: false, confirm: false, mock: false }],
+      ['write', { plan: true, confirm: true, mock: true }],
     ]);
   });
 
-  it('空输出/非 JSON/非数组/缺 access 列都得到空表（与规格表同一套安全缺省）', () => {
-    expect(parseOperationAccesses('').size).toBe(0);
-    expect(parseOperationAccesses('not json').size).toBe(0);
-    expect(parseOperationAccesses('{"operations":[]}').size).toBe(0);
-    expect(parseOperationAccesses('[{"name":"x"}]').size).toBe(0);
-    expect(parseOperationAccesses('[{"name":"x","access":""}]').size).toBe(0);
-    expect(parseOperationAccesses('[{"name":"x","access":7}]').size).toBe(0);
+  it('缺列/非布尔一律按 false（判据不成立时绝不放大权限）', () => {
+    const table = parseAccessSemantics(JSON.stringify({
+      accessSemantics: {
+        read: { plan: true, confirm: false, mock: true },
+        partial: { confirm: true },
+        broken: { plan: 'yes', confirm: 1, mock: null },
+        notObject: 'read',
+      },
+    }));
+    expect([...table.entries()]).toEqual([
+      ['read', { plan: true, confirm: false, mock: true }],
+      ['partial', { plan: false, confirm: true, mock: false }],
+      ['broken', { plan: false, confirm: false, mock: false }],
+    ]);
+  });
+
+  it('空输出/非 JSON/旧版裸数组/缺 accessSemantics 键都得到空表（安全缺省）', () => {
+    expect(parseAccessSemantics('').size).toBe(0);
+    expect(parseAccessSemantics('not json').size).toBe(0);
+    expect(parseAccessSemantics('[{"name":"x","access":"write"}]').size).toBe(0);
+    expect(parseAccessSemantics('{"operations":[]}').size).toBe(0);
+    expect(parseAccessSemantics('{"accessSemantics":[]}').size).toBe(0);
+    expect(parseAccessSemantics('{"accessSemantics":null}').size).toBe(0);
   });
 });
 
-describe('loadOperationAccesses（经公共 CLI 派生一次）', () => {
+describe('parseOperationSemantics（--json 的 access 列 × 顶层语义表）', () => {
+  it('按 operation 收录语义对象，注册名与 command 裸名同表', () => {
+    const semantics = parseOperationSemantics(SEMANTICS_LIST_JSON);
+    expect([...semantics.entries()]).toEqual([
+      ['finance.query-receivables', { plan: true, confirm: false, mock: true }],
+      ['query-receivables', { plan: true, confirm: false, mock: true }],
+      ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
+      ['query-saved', { plan: true, confirm: false, mock: true }],
+      ['voucher.precheck', { plan: false, confirm: false, mock: false }],
+      ['precheck', { plan: false, confirm: false, mock: false }],
+      ['payroll.transform', { plan: false, confirm: false, mock: false }],
+      ['transform', { plan: false, confirm: false, mock: false }],
+      ['voucher.prepare', { plan: true, confirm: true, mock: true }],
+      ['prepare', { plan: true, confirm: true, mock: true }],
+      ['voucher.commit', { plan: true, confirm: true, mock: true }],
+      ['commit', { plan: true, confirm: true, mock: true }],
+      ['voucher.unregistered', { plan: true, confirm: false, mock: true }],
+      ['unregistered', { plan: true, confirm: false, mock: true }],
+    ]);
+  });
+
+  it('access 取值在语义表里查不到 → 该 operation 不进表（不猜它的语义）', () => {
+    const semantics = parseOperationSemantics(SEMANTICS_WITH_UNKNOWN_ACCESS);
+    expect(semantics.size).toBe(0);
+  });
+
+  it('缺 access 列的 operation / 空输出 / 非 JSON / 裸数组都得到空表', () => {
+    expect(parseOperationSemantics(JSON.stringify([
+      { name: 'x' },
+      { name: 'y', access: '' },
+      { name: 'z', access: 7 },
+    ])).size).toBe(0);
+    expect(parseOperationSemantics('').size).toBe(0);
+    expect(parseOperationSemantics('not json').size).toBe(0);
+    expect(parseOperationSemantics('{"operations":[]}').size).toBe(0);
+    expect(parseOperationSemantics('{"accessSemantics":{"write":{"confirm":true}}}').size).toBe(0);
+  });
+});
+
+describe('loadOperationSemantics（经公共 CLI 派生一次）', () => {
   it('platformRoot 缺省 → 空表（不 spawn，宁缺勿猜）', async () => {
-    expect((await loadOperationAccesses()).size).toBe(0);
+    expect((await loadOperationSemantics()).size).toBe(0);
+    expect((await loadOperationSemantics('')).size).toBe(0);
   });
 
-  it('CLI 正常 → 解析出 access 表；非零退出 → 空表', async () => {
-    const root = await fakePlatformRootWithJson(ACCESS_LIST_JSON);
-    expect(await loadOperationAccesses(root)).toEqual(parseOperationAccesses(ACCESS_LIST_JSON));
-    expect((await loadOperationAccesses(await fakePlatformRootWithJson(ACCESS_LIST_JSON, { exitCode: 3 }))).size).toBe(0);
+  it('CLI 正常 → 解析出语义表；非零退出 → 空表', async () => {
+    const root = await fakePlatformRootWithJson(SEMANTICS_LIST_JSON);
+    expect(await loadOperationSemantics(root)).toEqual(parseOperationSemantics(SEMANTICS_LIST_JSON));
+    expect((await loadOperationSemantics(await fakePlatformRootWithJson(SEMANTICS_LIST_JSON, { exitCode: 3 }))).size).toBe(0);
   });
 
-  it('CLI 不存在 / 挂住 → 空表（与 label/规格派生同一套失败语义）', async () => {
-    const empty = await mkdtemp(path.join(os.tmpdir(), 'op-access-empty-'));
+  it('CLI 不存在 / 挂住 / 平台还没下发 accessSemantics → 空表（fail-closed）', async () => {
+    const empty = await mkdtemp(path.join(os.tmpdir(), 'op-semantics-empty-'));
     roots.push(empty);
-    expect((await loadOperationAccesses(empty)).size).toBe(0);
-    expect((await loadOperationAccesses(await fakePlatformRootWithJson('', { hang: true }))).size).toBe(0);
+    expect((await loadOperationSemantics(empty)).size).toBe(0);
+    // 旧版平台（裸数组、没有语义表）：写类判定整体不生效，平台门禁照旧兜底
+    expect((await loadOperationSemantics(await fakePlatformRootWithJson(JSON.stringify([{ name: 'voucher.prepare', command: 'prepare', access: 'write-flag' }])))).size).toBe(0);
+    expect((await loadOperationSemantics(await fakePlatformRootWithJson('', { hang: true }))).size).toBe(0);
   }, 15_000);
 });
 
-describe('isWriteAccess（平台 access 语义：写家族判定）', () => {
-  it('write / write-flag 属写类；read / local 不是', () => {
-    expect(isWriteAccess('write')).toBe(true);
-    expect(isWriteAccess('write-flag')).toBe(true);
-    expect(isWriteAccess('read')).toBe(false);
-    expect(isWriteAccess('local')).toBe(false);
+describe('isWriteAccess（平台 access 语义：confirm 列是唯一判据）', () => {
+  const semantics = parseOperationSemantics(SEMANTICS_LIST_JSON);
+
+  it('write（confirm=true）属写类；read / scratch 不是', () => {
+    expect(isWriteAccess(semantics.get('voucher.prepare'))).toBe(true);
+    expect(isWriteAccess(semantics.get('commit'))).toBe(true);
+    expect(isWriteAccess(semantics.get('voucher.query-saved'))).toBe(false);
+    // 纯本地处理（scratch：plan=false / confirm=false）绝不是写类
+    expect(isWriteAccess(semantics.get('payroll.transform'))).toBe(false);
+    expect(isWriteAccess(semantics.get('precheck'))).toBe(false);
   });
 
-  it('缺 access（旧版平台/未登记）→ false：不触发布防，交给平台门禁既有路径', () => {
+  it('拿不到语义表 → 什么都不算写（fail-closed，交给平台门禁既有路径）', () => {
+    // 语义表整体缺失（平台还没下发 / CLI 派生失败 / 旧版平台）
     expect(isWriteAccess(undefined)).toBe(false);
-    expect(isWriteAccess('')).toBe(false);
+    expect(isWriteAccess(new Map().get('voucher.prepare'))).toBe(false);
+    // 表在但该 operation 未登记 / access 取值不在语义表里
+    expect(isWriteAccess(parseOperationSemantics(SEMANTICS_WITH_UNKNOWN_ACCESS).get('voucher.batch'))).toBe(false);
+    expect(isWriteAccess(parseOperationSemantics('{"operations":[],"accessSemantics":{}}').get('x'))).toBe(false);
   });
 });

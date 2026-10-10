@@ -1,0 +1,84 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
+import { isScratchDirName, newScratchDirName, sweepScratchDirs } from './src/scratch-cleanup';
+
+const root = mkdtempSync(path.join(tmpdir(), 'scratch-sweep-'));
+afterAll(() => rmSync(root, { recursive: true, force: true }));
+const mk = (name: string, ageMs: number) => {
+  const full = path.join(root, 'tmp', name);
+  mkdirSync(full, { recursive: true });
+  writeFileSync(path.join(full, 'artifact.json'), '{}');
+  const past = new Date(Date.now() - ageMs);
+  // mtime 直接设（utimesSync 不引入额外 import 的情况下用 writeFileSync 后再调）
+  const { utimesSync } = require('node:fs');
+  utimesSync(full, past, past);
+  return full;
+};
+
+describe('isScratchDirName', () => {
+  it('只认 req_<uuid>', () => {
+    expect(isScratchDirName(newScratchDirName())).toBe(true);
+    expect(isScratchDirName('req_018f0d2a-1111-2222-3333-444455556666')).toBe(true);
+  });
+  it('平台自己的产物一律不算(宁可漏删不可误删)', () => {
+    for (const n of ['excels', 'contract-2026-07.json', '整理好的2026年07月工资表.xlsx',
+                     'req_short', 'reqx_018f0d2a-1111-2222-3333-444455556666', 'REQ_018f0d2a-1111-2222-3333-444455556666',
+                     'req_018f0d2a111122223333444455556666', 'probe-out']) {
+      expect(isScratchDirName(n), n).toBe(false);
+    }
+  });
+});
+
+describe('sweepScratchDirs', () => {
+  it('只删超龄的 req_ 目录;平台产物与未超龄的原样不动', () => {
+    const old = mk(newScratchDirName(), 48 * 3600 * 1000);
+    const fresh = mk(newScratchDirName(), 60 * 1000);
+    const platformDir = mk('excels', 48 * 3600 * 1000);
+    const platformFile = path.join(root, 'tmp', 'contract-2026-07.json');
+    writeFileSync(platformFile, '{}');
+
+    const r = sweepScratchDirs(root, Date.now(), 24 * 3600 * 1000);
+    expect(r.removed).toEqual([path.basename(old)]);
+    expect(r.kept).toEqual([path.basename(fresh)]);
+    expect(r.errors).toEqual([]);
+    const { existsSync } = require('node:fs');
+    expect(existsSync(old)).toBe(false);
+    expect(existsSync(fresh)).toBe(true);
+    expect(existsSync(platformDir)).toBe(true);
+    expect(existsSync(platformFile)).toBe(true);
+  });
+
+  it('tmp/ 下同名的散文件不删(只删目录)', () => {
+    const name = newScratchDirName();
+    const file = path.join(root, 'tmp', name);
+    writeFileSync(file, 'not a dir');
+    const r = sweepScratchDirs(root, Date.now(), 24 * 3600 * 1000);
+    expect(r.removed).toEqual([]);
+    const { existsSync } = require('node:fs');
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it('ttlMs<=0 全清(排障用),但仍只清自己的命名', () => {
+    const { readdirSync } = require('node:fs');
+    // 前几个用例可能留下了未超龄的 req_ 目录；ttl<=0 时它们也该被清。
+    // 所以先快照"当前所有 req_ 目录"，预期 = 快照 ∪ 本次新建，避免用例间顺序耦合。
+    const { statSync } = require('node:fs');
+    const before = readdirSync(path.join(root, 'tmp'))
+      .filter((n: string) => isScratchDirName(n) && statSync(path.join(root, 'tmp', n)).isDirectory());
+    const a = mk(newScratchDirName(), 0);
+    const b = mk(newScratchDirName(), 0);
+    mk('excels', 0);
+    const r = sweepScratchDirs(root, Date.now(), 0);
+    expect(r.removed.sort()).toEqual([...before, path.basename(a), path.basename(b)].sort());
+    const { existsSync } = require('node:fs');
+    expect(existsSync(path.join(root, 'tmp', 'excels'))).toBe(true);
+  });
+
+  it('tmp/ 不存在时安静返回', () => {
+    const empty = mkdtempSync(path.join(tmpdir(), 'scratch-empty-'));
+    expect(sweepScratchDirs(empty, Date.now(), 1000)).toEqual({ removed: [], kept: [], errors: [] });
+    rmSync(empty, { recursive: true, force: true });
+  });
+});

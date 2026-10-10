@@ -1,3 +1,6 @@
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
 import { WecomBotChannel, type WecomBotChannelOptions } from './src/index';
@@ -75,13 +78,30 @@ class FakeSdkClient {
     this.mediaCalls.push({ mediaId });
     return Promise.resolve({});
   }
+
+  /** 附件下载替身：默认把调用记下来并按注入内容返回 */
+  downloadCalls: Array<{ url: string; aesKey?: string }> = [];
+  downloadResult: { buffer: Buffer; filename?: string } | Error = { buffer: Buffer.from('x'), filename: 'f.bin' };
+  async downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }> {
+    this.downloadCalls.push({ url, ...(aesKey === undefined ? {} : { aesKey }) });
+    if (this.downloadResult instanceof Error) throw this.downloadResult;
+    return this.downloadResult;
+  }
 }
 
-async function startChannel(handler: ReplyHandler) {
+/**
+ * 启动渠道。root 同时充当平台工作区，附件目录按生产布局落在 root/tmp/attachments——
+ * 附件必须在平台工作区内，否则 worker 的路径守卫会把每个附件判成"工作区外"
+ * （2026-10-07 实测的 bug）。顺带让启动自检在这批用例里也生效。
+ */
+async function startChannel(handler: ReplyHandler, root?: string) {
   const fake = new FakeSdkClient();
+  const platformRoot = root ?? mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
   const options: WecomBotChannelOptions = {
     env: ENV,
     clientFactory: () => fake,
+    platformRoot,
+    attachmentDir: path.join(platformRoot, 'tmp', 'attachments'),
   };
   const channel = new WecomBotChannel(options);
   const started = channel.start(handler);
@@ -100,6 +120,21 @@ function textFrame(reqId: string, overrides: Record<string, unknown> = {}): Reco
       from: { userid: 'zhangsan' },
       msgtype: 'text',
       text: { content: '你好' },
+      ...overrides,
+    },
+  };
+}
+
+function fileFrame(reqId: string, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    headers: { req_id: reqId },
+    body: {
+      msgid: `msg-${Math.random().toString(36).slice(2, 8)}`,
+      aibotid: 'bot-001',
+      chattype: 'single',
+      from: { userid: 'zhangsan' },
+      msgtype: 'file',
+      file: { url: 'https://example.invalid/a.xlsx', aeskey: 'AESKEY' },
       ...overrides,
     },
   };
@@ -298,5 +333,141 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
 
     expect(fake.disconnected).toBeGreaterThanOrEqual(1);
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+// ── 附件链路（2026-10-07）───────────────────────────────────────────────────────
+// 背景：此前只监听 message.text，`body['msgtype'] !== 'text'` 直接 return——用户发的
+// Excel 连下载都没有。而 17dz 薪酬域要求先吸收多份 Excel 才能产出 PayrollContract，
+// "帮我做工资表"因此永远无输入。这里锁住 file/mixed 三条路径 + 三条纪律。
+describe('WecomBotChannel 附件(file 消息)', () => {
+  it('file 消息:下载落盘,路径与文件名进上下文,正文给占位说明', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const dir = path.join(root, 'tmp', 'attachments');
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler, root);
+    fake.downloadResult = { buffer: Buffer.from('PK\u0003fake-xlsx'), filename: '2026年8月工资（幻骥达）.xlsx' };
+    fake.emit('message.file', fileFrame('req-file-1'));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+
+    const msg = firstCall(handler);
+    expect(fake.downloadCalls).toEqual([{ url: 'https://example.invalid/a.xlsx', aesKey: 'AESKEY' }]);
+    expect(msg.attachments).toHaveLength(1);
+    const att = msg.attachments![0]!;
+    expect(att.filename).toBe('2026年8月工资（幻骥达）.xlsx');
+    expect(att.bytes).toBe(Buffer.from('PK\u0003fake-xlsx').length);
+    expect(att.path.startsWith(dir)).toBe(true);
+    expect(path.dirname(att.path)).toBe(dir);
+    expect(existsSync(att.path)).toBe(true);
+    expect(msg.text).toContain('[附件:2026年8月工资（幻骥达）.xlsx]');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('纪律①:filename 做 basename 化,拒绝路径穿越写出目录', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const dir = path.join(root, 'tmp', 'attachments');
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler, root);
+    for (const evil of ['../../../../etc/passwd', '/etc/passwd', '..']) {
+      handler.mockClear();
+      fake.downloadResult = { buffer: Buffer.from('x'), filename: evil };
+      fake.emit('message.file', fileFrame('req-evil'));
+      await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+      const att = firstCall(handler).attachments![0]!;
+      expect(path.dirname(att.path)).toBe(dir);
+      expect(att.path.includes('..')).toBe(false);
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('纪律②:超限附件不落盘,降级为文字说明而不是静默丢弃', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const dir = path.join(root, 'tmp', 'attachments');
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler, root);
+    fake.downloadResult = { buffer: Buffer.alloc(33 * 1024 * 1024), filename: 'big.xlsx' };
+    fake.emit('message.file', fileFrame('req-big'));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+    const msg = firstCall(handler);
+    expect(msg.attachments).toBeUndefined();
+    expect(msg.text).toContain('附件下载失败');
+    expect(msg.text).toContain('big.xlsx');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('纪律③:下载抛错不吞掉整条消息,正文照常送达', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const dir = path.join(root, 'tmp', 'attachments');
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler, root);
+    fake.downloadResult = new Error('url expired');
+    fake.emit('message.file', fileFrame('req-err'));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+    const msg = firstCall(handler);
+    expect(msg.text).toContain('附件下载失败');
+    expect(msg.text).toContain('url expired');
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('mixed 消息:文字部分进正文,图片项忽略但不丢字', async () => {
+    const handler = vi.fn(async () => 'ok');
+    await startChannel(handler);
+    handler.mockClear();
+    // mixed 不走 dispatchMessage 的 file 分支，直接用 fake 的 text 通道模拟 mixed 帧
+    const frame = {
+      headers: { req_id: 'req-mixed' },
+      body: {
+        msgid: 'msg-mixed', aibotid: 'bot-001', chattype: 'single',
+        from: { userid: 'zhangsan' }, msgtype: 'mixed',
+        mixed: { msg_item: [
+          { msgtype: 'text', text: { content: '这是8月工资' } },
+          { msgtype: 'image', image: { url: 'https://example.invalid/p.png' } },
+          { msgtype: 'text', text: { content: '第二段' } },
+        ] },
+      },
+    };
+    const { fake } = await startChannel(handler);
+    handler.mockClear();
+    fake.emit('message.mixed', frame);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+    expect(firstCall(handler).text).toBe('这是8月工资\n第二段');
+  });
+
+  // 默认落点必须在平台工作区内（root/tmp/attachments）。这是生产实际走的那条路径——
+  // 上面所有用例都显式传了 attachmentDir，若不测默认值，"改回宿主 data/ 目录"这种回归
+  // 会静默通过（变异验证实测抓到过）。
+  it('不配 attachmentDir 时,默认落在平台工作区的 tmp/attachments', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const fake = new FakeSdkClient();
+    const handler = vi.fn(async () => 'ok');
+    // 必须裸构造且**不传** attachmentDir——经 startChannel 就走不到默认值那条路
+    // （变异验证实测：传了目录，把默认改回宿主 data/ 也静默通过）。
+    const channel = new WecomBotChannel({ env: ENV, clientFactory: () => fake, platformRoot: root });
+    const started = channel.start(handler);
+    fake.emit('authenticated');
+    await started;
+    fake.downloadResult = { buffer: Buffer.from('PK-data'), filename: 'a.xlsx' };
+    fake.emit('message.file', fileFrame('req-default-dir'));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalled());
+    const att = firstCall(handler).attachments![0]!;
+    expect(path.dirname(att.path)).toBe(path.join(root, 'tmp', 'attachments'));
+    expect(att.path.startsWith(root)).toBe(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // 2026-10-07 实测 bug 的守卫：附件目录若配到平台工作区外，每个附件都会被 worker 的
+  // 路径守卫判"工作区外"，症状是指代不清的"读不到附件"——那要等用户真发文件才暴露。
+  // 所以启动即断言，把配置错误前移到部署时。
+  it('附件目录在平台工作区外:启动即拒(不等用户发文件才发现)', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const outside = mkdtempSync(path.join(tmpdir(), 'wecom-outside-'));
+    const handler = vi.fn(async () => 'ok');
+    const channel = new WecomBotChannel({
+      env: ENV, clientFactory: () => new FakeSdkClient(),
+      platformRoot: root, attachmentDir: outside,
+    });
+    await expect(channel.start(handler)).rejects.toThrow(/必须在平台工作区内/);
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
   });
 });

@@ -19,6 +19,16 @@
  *     冷却的 `{minutes}` 由 `platformUnavailableTextFor` 用宿主时钟数据填充）——动态
  *     部分是数据不是措辞，模板本身仍然零业务词。
  *
+ * 第三种形态（serve 门拒绝理由收口后新增）：**声明了 `params` 的参数化消息模板**
+ * （`SERVE_*` 一族）。门的拒绝理由曾是十几处 inline 字符串散在 serve-gate.ts 各出事点，
+ * 同一件事（"这是工作区外路径"）按工具分两种写法、按路径分无数种拼法——改一句措辞要
+ * 全文搜，测试各写一遍中文字面量，泄漏 lint 也审不到它们（不在白名单，却出现在发给
+ * worker 的消息里）。现在它们全在本表：码 → 文本一一对应，动态部分（动作动词 / 目标
+ * 路径 / 字节数）是**数据**，经 `messageTextFor(code, params)` 的 `{name}` 占位符机械
+ * 填充——不为每个路径拼一条消息。占位符名单必须在条目里声明：漏声明 = 调用方误用
+ * （fail-loud），多给/少给参数同样 fail-loud（静默忽略会把"话术被悄悄加了动态部分"
+ * 藏起来，与消息模板传 actual 同纪律）。
+ *
  * 纪律（与 17dz 表相同）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
  *   - 未知码 fail-loud（UNKNOWN_ERROR_CODE）：绝不静默 fallback 到通用消息——那会把
@@ -48,6 +58,12 @@ interface ErrorCodeEntry {
 /** 消息模板类条目：用户可见的状态话术（不是错误，码 → 文本一一对应）。 */
 interface MessageCodeEntry {
   text: string;
+  /**
+   * 参数化模板的占位符名单（`{name}` 形）：声明了它，`messageTextFor(code, params)` 才
+   * 接受参数并机械填充；没声明而传参数 = 调用方误用（fail-loud）。名单即契约——少一个
+   * 名字，模板里就会留下一个空泛占位符；多一个名字，参数就是白给（同样 fail-loud）。
+   */
+  params?: readonly string[];
   /**
    * 选择类澄清专用：模板里 `{hint}` 占位符的**兜底**取值（信封没带平台 correctForm 时用）。
    * 挂「遗留待清」——平台全域携带 correctForm 后，这两个兜底字符串即删（L2：宿主镜像表
@@ -79,6 +95,14 @@ export function planDraftExample(): string {
 
 /** 计划提交的正确形状：形状类错误共用的 correctForm（静态词进表）。 */
 const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${planDraftExample()}，JSON 原样放在这一行命令里。`;
+
+/**
+ * shell 元字符拒绝理由的公共前缀：同一事实（放行这些字符 = 放行任意命令）只说一遍，
+ * 三条 SERVE_BASH_METACHAR_* 只差收尾那句"该怎么拆"。分叉的那一侧就是攻击面——
+ * 前缀若各写一份，补一条边界只补一处，另一侧静默腐烂。
+ */
+const SHELL_METACHAR_REASON = '命令含 shell 元字符（; & | < > ` $ ( ) 或换行），禁止命令拼接/替换/重定向';
+
 const TABLE: Record<string, CodeEntry> = {
   // ── 门/计划类：worker 提交方案的形状与范围（PLAN DECLINED 的自愈通道）──
   // 措辞是给 worker 的诊断：说清期望什么、实际收到什么、正确形态是什么。正确的
@@ -247,6 +271,13 @@ const TABLE: Record<string, CodeEntry> = {
   // 汇报里只有卡点没有"未开放写入权限"，用户不知道该找谁——那句话必须到达用户。
   // 与 DELEGATION_* 同族（消息模板类，码 → 文本一一对应），不新造第二份手抄本。
   WRITE_NOT_ENABLED: { text: '当前未开放写入权限，如有需要请联系管理员开通。' },
+  // 同一次平台拒绝（PLAN_OPERATION_NOT_READ_ONLY）的另一种真相：**这个调用不该进计划**。
+  // 为什么必须分开：平台按"是不是只读"拒绝计划，而拒绝名单里混着两类调用——要用户确认的
+  // 写类调用（部署没开放写 → WRITE_NOT_ENABLED）与根本不需要计划的本地处理（曾经被用户
+  // 看到"请联系管理员开通写入权限"，已实证的误导）。判据是平台 access 语义表的 confirm 列
+  // （要不要用户确认），不是错误码名——宿主不按码名猜语义。措辞只说该怎么做，不出现平台
+  // 实现形状（类名/路径/脚本名一律不进消息）。
+  PLAN_NOT_PLANNABLE: { text: '该调用不需要计划、也不要放进计划，直接调用即可。' },
 
   // ── 路由类：申报缺失时的重试指令（给模型，不上屏）──
   ROUTE_RETRY_NUDGE: {
@@ -256,6 +287,103 @@ const TABLE: Record<string, CodeEntry> = {
   // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──
   PLAN_SHAPE_GATE_TEACHING: {
     text: `计划必须经 bash 工具作为单行原始命令提交：${planDraftExample()}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。`,
+  },
+
+  // ── serve 门类：G1 原生工具门的拒绝理由（唯一来源，原 serve-gate.ts 各出事点 inline）──
+  //
+  // 为什么收口：这些理由曾经是出事点现场手拼的字符串——同一个"工作区外路径"在 write 与
+  // read 两条分支两种写法，措辞改动要全文搜，测试各写一遍中文字面量，而泄漏 lint 扫不到
+  // 它们（不在白名单，却出现在发给 worker 的消息里）。收口后它们与 PLAN_SHAPE_* 同表：
+  // 新失败模式 = 新错误码（往这里加一行），不在出事点拼消息。
+  //
+  // 两条纪律（与计划门同族）：
+  //   ① 动态值是数据不是措辞：动词（写入/修改）、目标路径、字节数经 `{name}` 占位符由
+  //      `messageTextFor` 填充——不为每个路径拼一条消息。
+  //   ② **不复述平台调用形状**：宿主曾把网关可执行名与知识面名单（*.md、*.schema.json、
+  //      .agents/、docs/）抄进拒绝理由，而那正是系统提示词刚清零的东西——worker 在**做错
+  //      的那一刻**看到它，最把这句话当真相，于是照着一个可能已过期的形状去撞门。形状的
+  //      唯一真来源是平台技能文档的「serve 运行态的调用形态」一节（四种 mode、local 用途、
+  //      `operation list --json` 发现、禁止项都在那里）；宿主只给"去哪看"的指针。
+  //      **复述即分叉**：平台改了暴露面而宿主这份抄写没同步，worker 拿到的就是假真相。
+  //      措辞纪律照旧：零业务词、零平台实现细节（平台脚本名/路径/清单文件一律不出现）。
+
+  // ── 写入类（write / edit 共用同一组边界，见 serve-gate 的 decideFileWrite）──
+  // 没有 platformRoot 就无从判断落点，宁可不放（放在路径规范化之前）。
+  SERVE_WRITE_NO_PLATFORM_ROOT: {
+    text: '未配置平台工作目录，无法裁决写入位置',
+  },
+  SERVE_WRITE_PATH_MISSING: {
+    text: 'write 需要非空的 path 参数',
+  },
+  SERVE_EDIT_PATH_MISSING: {
+    text: 'edit 需要非空的 path 参数',
+  },
+  SERVE_EDIT_EDITS_MISSING: {
+    text: 'edit 需要非空的 edits 数组（至少一处替换）',
+  },
+  // {verb} = 写入 / 修改：判据只有一份（write 与 edit 共用），但理由要说清模型刚才想干什么
+  // ——它传的是 edits 而回答里说"写入"，模型会以为门没认出它的工具。
+  SERVE_WRITE_OUTSIDE_WORKSPACE: {
+    text: '运行态禁止{verb}工作区外路径（{target}）',
+    params: ['verb', 'target'],
+  },
+  SERVE_WRITE_SENSITIVE_PATH: {
+    text: '运行态禁止{verb}敏感路径（{target}）',
+    params: ['verb', 'target'],
+  },
+  // tmp/ 是草稿不是系统：放整个工作区就等于给了改执行层的权限，那正是必须守住的线。
+  SERVE_WRITE_OUTSIDE_DRAFT_ROOT: {
+    text: '运行态只允许{verb} tmp/ 草稿区（契约、mapping、临时脚本）；{rel} 不在其内。执行层与配置不可由 worker {verb}',
+    params: ['verb', 'rel'],
+  },
+  // 每请求一个子目录是机械边界不是约定：tmp/ 是共享草稿区，并发会话写同名产物会互相覆盖，
+  // 而覆盖后的产物看不出被谁污染。{scratchDir} 由宿主按 requestId 派生（worker 无随机手段）。
+  SERVE_WRITE_OUTSIDE_REQUEST_SCRATCH: {
+    text: '本轮只允许{verb} {scratchDir}（每请求独立草稿区，避免并发会话互相覆盖）；{rel} 不在其内',
+    params: ['verb', 'scratchDir', 'rel'],
+  },
+  // {limitKB} 是上限本身（数据），{bytes} 是这次实际带进来的字节数（脏输入要可辨认）。
+  SERVE_WRITE_TOO_LARGE: {
+    text: '{verb}内容超过 {limitKB}KB 上限（{bytes} 字节）',
+    params: ['verb', 'limitKB', 'bytes'],
+  },
+
+  // ── 读取类（read 内容层限知识面；ls 只受 workspace 边界与敏感路径约束）──
+  SERVE_READ_OUTSIDE_WORKSPACE: {
+    text: '运行态禁止读取工作区外路径（{target}）',
+    params: ['target'],
+  },
+  SERVE_READ_SENSITIVE_PATH: {
+    text: '运行态禁止读取敏感路径（{target}）',
+    params: ['target'],
+  },
+  // 知识面判据（*.md、*.schema.json、.agents/、docs/）是宿主实现细节：它随部署配置变，
+  // 抄进消息就是第二份真相。只说"只能读知识面文档"，去哪看形状指平台技能文档。
+  SERVE_READ_NOT_KNOWLEDGE: {
+    text: `运行态只能读知识面文档，不可读实现源码或运行产物（{target}）。需要平台能力时，调用形态以运行态技能文档「serve 运行态的调用形态」一节为准`,
+    params: ['target'],
+  },
+
+  // ── bash 类：shell 元字符白名单（放行拼接/替换/重定向 = 放行任意命令）──
+  // 三条共一个前缀（同一次拒绝、三种收尾）：local 只陈述被拒事实；元数据查询与多次查询
+  // 各自补一句"该怎么拆"——worker 被拒后要能直接改成合法形态，不需要猜。
+  SERVE_BASH_METACHAR_LOCAL: { text: SHELL_METACHAR_REASON },
+  SERVE_BASH_METACHAR_METADATA: { text: `${SHELL_METACHAR_REASON}。元数据查询请单独一次调用` },
+  SERVE_BASH_METACHAR_QUERY: { text: `${SHELL_METACHAR_REASON}。多次查询请分多次调用` },
+  // 不点网关可执行名（平台实现形状）：只陈述"平台能力走统一入口"，形状指技能文档。
+  SERVE_BASH_NOT_GATEWAY: {
+    text: `运行态 bash 只允许经统一入口调用平台能力；知识检索用 read 工具。调用形态以运行态技能文档「serve 运行态的调用形态」一节为准`,
+  },
+  // local 模式的目标不在本轮放行根内。为什么必须有这一条：local 打到根之外时，命令形状
+  // 仍是合法网关调用，会落穿到通用分支（只问"是不是网关 + 有没有计划"）而被放行——
+  // 2026-10-09 验收实证：planActive=true 时别人的 req_ 目录、tmp/ 散脚本、../ 穿越全部放行。
+  // 文本不提路径名单（宿主实现细节，且随部署变），只说"本轮草稿目录或辅助技能面"。
+  SERVE_LOCAL_OUTSIDE_SCRATCH: {
+    text: '本地执行只允许跑本轮你自己的草稿目录、或辅助技能面暴露的脚本；其他位置一律不放行（跨会话与平台实现都不可触）。需要平台能力时走统一入口，形态以运行态技能文档「serve 运行态的调用形态」一节为准',
+  },
+  // 计划前置：worker 不得在宿主评估前直调平台执行入口。状态字（PLAN ACTIVE）在系统提示词。
+  SERVE_PLAN_NOT_ACTIVE: {
+    text: '尚无宿主激活的平台计划；先提交 JSON calls 方案等待宿主评估。',
   },
 };
 
@@ -283,7 +411,7 @@ function show(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
-function render(code: string, actual?: unknown, correctForm?: string): string {
+function render(code: string, actual?: unknown, correctForm?: string, params?: Readonly<Record<string, string | number>>): string {
   const entry = entryOf(code);
   if ('text' in entry) {
     // 消息模板不是错误：给它传 actual/correctForm 是调用方误用，fail-loud——
@@ -294,6 +422,15 @@ function render(code: string, actual?: unknown, correctForm?: string): string {
         { code: UNKNOWN_ERROR_CODE, unknownCode: code },
       );
     }
+    // 声明了 params 的条目必须经参数出口渲染（漏传/多传/少传都 fail-loud，见 fillParams）；
+    // 没声明的条目传参数同样是误用——它没有占位符，参数只会被静默丢掉。
+    if (entry.params) return fillParams(code, entry, params);
+    if (params !== undefined) {
+      throw Object.assign(
+        new Error(`${UNKNOWN_ERROR_CODE}: 该消息模板未声明占位符，不接受参数: ${code}（要加动态部分先在本表条目里声明 params）`),
+        { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+      );
+    }
     return entry.text;
   }
   const actualText = actual === undefined ? show(entry.actual) : show(actual);
@@ -301,14 +438,57 @@ function render(code: string, actual?: unknown, correctForm?: string): string {
   return `${code}: 期望 ${entry.expected}；实际 ${actualText}；正确形态 ${form}`;
 }
 
+/** `{name}` 占位符：声明过的名字一个不能少，没声明的名字给了也是误用。 */
+const PLACEHOLDER_RE = /\{(\w+)\}/g;
+
+/**
+ * 参数化消息模板渲染（serve 门拒绝理由一族）：表内模板 + 调用方数据机械组装。
+ *
+ * 与选择类澄清（clarificationTextFor）/平台健康（platformUnavailableTextFor）同族——动态
+ * 部分是**数据**不是措辞，因此不经 messageFor 的 actual 通道（消息模板传 actual 会 fail-loud）。
+ * 差别只在通用性：那两条各有专用出口（信封数据 / 宿主时钟），这一条给门用，占位符名单
+ * 声明在条目里，一个出口覆盖全部 SERVE_* 码——不为每个路径拼一条消息。
+ *
+ * fail-loud 三条（静默忽略会把"话术缺了动态部分"藏起来，而那正是拒不出理由的事故形态）：
+ * 漏传参数对象、少给某个占位符、多给未声明的占位符。
+ */
+function fillParams(code: string, entry: MessageCodeEntry, params?: Readonly<Record<string, string | number>>): string {
+  const declared = entry.params ?? [];
+  if (!params) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 参数化消息模板必须带参数: ${code}（占位符：${declared.join(' / ')}）`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  const extra = Object.keys(params).filter((key) => !declared.includes(key));
+  if (extra.length > 0) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 参数化消息模板收到未声明的参数: ${code}（未声明：${extra.join(' / ')}；已声明：${declared.join(' / ')}）`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  const missing = declared.filter((name) => params[name] === undefined);
+  if (missing.length > 0) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 参数化消息模板缺少参数: ${code}（缺：${missing.join(' / ')}）`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  // 函数式 replacement：路径里的 `$&` / `$1` 不会被当成替换 pattern（与澄清模板同一写法）
+  return entry.text.replace(PLACEHOLDER_RE, (_match, name: string) => String(params[name]));
+}
+
 /** 统一入口（镜像 17dz 的 messageFor）：错误类走三要素，模板类走文本。 */
 export function messageFor(code: string, actual?: unknown, correctForm?: string): string {
   return render(code, actual, correctForm);
 }
 
-/** 消息模板类码的文本（错误类码误用此处同样 fail-loud，由 render 分流）。 */
-export function messageTextFor(code: string): string {
-  return render(code);
+/**
+ * 消息模板类码的文本（错误类码误用此处同样 fail-loud，由 render 分流）。
+ * 条目声明了 params 时才接受第二个参数：动态值（动词/路径/字节数）是数据，机械填充。
+ */
+export function messageTextFor(code: string, params?: Readonly<Record<string, string | number>>): string {
+  return render(code, undefined, undefined, params);
 }
 
 /** 选择类澄清候选清单的渲染上限：平台一次可能返回很多相近名，全列会把澄清问题变成一张长清单。 */

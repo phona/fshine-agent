@@ -7,6 +7,7 @@
  */
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFileSync } from 'node:child_process';
 import {
   closeStore,
   createSqliteStore,
@@ -37,6 +38,53 @@ import { createPlanConfirmationWiring } from './plan-confirmation-route';
 import { loadBusinessSkill } from './business-skill';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+
+/**
+ * 接口完整性硬门：平台自己的 operations lint 不过，服务就不起。
+ *
+ * 为什么卡在启动而不是跑到一半：无人值守服务"起不来"比"跑到一半才发现能力不可达"好。
+ * 2026-10-08 实证：一个执行域的 validator 不可达，worker 只能自己写校验脚本重造校验，
+ * 而执行层文档里那句 node -e 又被 serve 的 bash 门拦死——白烧一轮还发出误导帧。域声明了
+ * contract.js 却没有可达的校验 operation、UI 域缺 prepare/commit/verify 之类，都在这个
+ * 门的射程内（判据归平台 lint 所有，宿主只负责"不过就不起"，不在这里复刻任何一条规则）。
+ *
+ * 语义：非零退出、exec 自身失败（脚本缺失/不可执行/超时）一律转成带 lint 输出的 Error
+ * 抛出，拒绝启动；stdout 与 stderr 全进错误信息——人要能从这里看出缺什么。platformRoot
+ * 未配时不跑这个门：没有根就无从判断（与 loadOperationArgSpecs 的"未配即空表"同一立场：
+ * 缺的是判据，不是放行）。
+ */
+function assertPlatformOperationsHealthy(platformRoot: string): void {
+  const script = path.join(platformRoot, 'scripts', 'lint-operations.js');
+  try {
+    const stdout = execFileSync(process.execPath, [script], { cwd: platformRoot, encoding: 'utf8' });
+    const detail = typeof stdout === 'string' ? stdout.trim() : '';
+    if (detail) console.log(JSON.stringify({ event: 'platform_operations_lint_passed', detail }));
+  } catch (error) {
+    const failure = error as {
+      status?: number | null;
+      stdout?: string | Buffer | null;
+      stderr?: string | Buffer | null;
+      message?: string;
+    };
+    const stdout = chunkText(failure.stdout);
+    const stderr = chunkText(failure.stderr);
+    throw new Error([
+      `平台接口完整性检查未通过，服务拒绝启动（根 ${platformRoot}，退出码 ${failure.status ?? 'n/a'}）。`,
+      '平台接口完整性 lint 输出（缺什么从这里看）：',
+      stdout || '(stdout 空)',
+      stderr || '(stderr 空)',
+      // exec 自身失败（脚本缺失/不可执行/被杀）时 lint 没吐字，才需要底层异常文本；
+      // lint 红着退出时它的输出已经在上两行，再抄一遍只是噪音。
+      ...(stdout || stderr ? [] : [failure.message ? `执行检查本身失败：${failure.message}` : '']),
+    ].filter((line) => line !== '').join('\n'));
+  }
+}
+
+/** exec 失败的 stdio 块取文本（字符串/Buffer/缺失三态都收）。 */
+function chunkText(chunk: string | Buffer | null | undefined): string {
+  if (typeof chunk === 'string') return chunk.trim();
+  return chunk ? chunk.toString('utf8').trim() : '';
+}
 
 export interface ServerAssemblyOverrides {
   /** Process environment used for config, platform wiring and every spawned subprocess. */
@@ -71,6 +119,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const env = overrides.env ?? process.env;
   const config = loadConfig({ env, yamlPath: env['AGENT_CONFIG_PATH'] || undefined });
   const platformRoot = config.contextProfiles['17dz']?.root;
+  // 接口完整性硬门：lint 红就抛错、拒绝启动（不建存储、不接渠道），判据与输出见上方函数注释。
+  if (platformRoot) assertPlatformOperationsHealthy(platformRoot);
   const dbPath = overrides.dbPath ?? path.join(repoRoot, 'data/agent.db');
   const store = createSqliteStore(dbPath);
 
@@ -119,7 +169,10 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       void store.toolCalls.insert({
         requestId: event.requestId ?? '',
         toolName: `serve_gate:${event.tool}`,
-        safeArguments: { detail: event.detail ?? '' },
+        // detail 是摘要（命令原文 / 路径 / 计划 calls 摘要）；reason 是被拦原因
+        // （门的拒绝理由 / 计划裁决）。两者都落：只有 detail 的行看得见
+        // "发生了什么"、看不见"为什么"，排查时还要回去拿 worker 转录。
+        safeArguments: { detail: event.detail ?? '', ...(event.reason ? { reason: event.reason } : {}) },
         startedAt: now,
         finishedAt: now,
         status: event.allowed ? 'ok' : 'error',
@@ -180,8 +233,14 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(platformCooldownMs ? { platformCooldownMs } : {}),
   });
 
-  const channel = new WecomBotChannel({ env, ...(overrides.channelClientFactory ? { clientFactory: overrides.channelClientFactory } : {}) });
-  const handler = createMessageHandler({ store, runtime, planConfirmation });
+  // platformRoot 必须传给渠道：附件要落在平台工作区内，否则 worker 的路径守卫会把每个
+  // 附件都判成"工作区外"，症状是"读不到附件"这种指代不清的报错（2026-10-07 实测）。
+  const channel = new WecomBotChannel({
+    env,
+    ...(platformRoot ? { platformRoot } : {}),
+    ...(overrides.channelClientFactory ? { clientFactory: overrides.channelClientFactory } : {}),
+  });
+  const handler = createMessageHandler({ store, runtime, planConfirmation, env, ...(platformRoot ? { platformRoot } : {}) });
 
   return {
     store,

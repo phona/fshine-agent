@@ -8,11 +8,31 @@
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { sweepScratchDirs } from '@fshine/agent';
 import { createServerAssembly, repoRoot } from './assembly';
+
+/** 草稿保留时长：默认 24h。跨轮续跑的任务仍要用上一轮的产物，所以不能按回合删。 */
+const SCRATCH_TTL_MS = 24 * 60 * 60 * 1000;
+/** 清理周期：启动时跑一次，之后每 6h 一次（不依赖重启）。 */
+const SCRATCH_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 async function main(): Promise<void> {
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
   const assembly = await createServerAssembly({ env: process.env });
+
+  // 清理：只扫 tmp/req_<uuid>（我们自己的命名），平台自己的 tmp/ 产物一律不碰。
+  if (assembly.platformRoot) {
+    const sweep = () => {
+      const r = sweepScratchDirs(assembly.platformRoot!, Date.now(), SCRATCH_TTL_MS);
+      if (r.removed.length > 0 || r.errors.length > 0) {
+        console.log(JSON.stringify({ event: 'scratch_sweep', removed: r.removed.length, kept: r.kept.length, errors: r.errors.length }));
+        for (const e of r.errors) console.warn(JSON.stringify({ event: 'scratch_sweep_error', name: e.name, error: e.error }));
+      }
+    };
+    sweep();
+    const timer = setInterval(sweep, SCRATCH_SWEEP_INTERVAL_MS);
+    timer.unref?.(); // 不因这个定时器挡住进程退出
+  }
 
   await assembly.channel.start(assembly.replyHandler);
   console.log(JSON.stringify({

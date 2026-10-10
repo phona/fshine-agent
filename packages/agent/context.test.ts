@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
+import type { TurnDeclaration } from './src/turn-contract';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
 import {
   DELEGATION_AUTH_FAILURE,
@@ -126,7 +127,208 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.turnDeclaration).toEqual({ kind: 'delegate', request: '查幻辰财税账套里猫一杯的应收账款' });
     // 纠错环规程（Phase 5）：执行不了时报"缺什么/为什么/建议用户提供什么"，
     // 与既有总结原则同一份表述，不新增场景枚举
-    expect(prompt).toContain('缺什么、为什么做不了、建议用户提供什么');
+    expect(prompt).toContain('缺什么、为什么、建议提供什么');
+  });
+
+  // ── fail-loud 规程（2026-10-08 实测补漏）：同一障碍撞两次就停，别留到第三次 ──────
+  // 上面那条只覆盖"缺信息"（缺什么/为什么/建议提供什么），覆盖不了实测里的"越挫越试"：
+  // 同一个拒绝理由连着出现五次，每次只换个姿势再试，预算烧光后超时且主产出没回到用户
+  // 手上。这一组断言钉住阈值判据、交付顺序与位置（与"缺信息"条目相邻）。
+
+  it('fail-loud 规程进 worker 提示词：同类错误第二次即停 + 先交付已确定部分', async () => {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({ request: '查询一下' }, { trusted: trusted() });
+
+    // 阈值判据：同类错误第二次出现就停（不是"再试一次看看"）
+    expect(prompt).toContain('同一障碍最多撞两次');
+    expect(prompt).toContain('第二次出现时就停止重试');
+    // 换姿势绕过不算新尝试：被拒后改写法/换路径/换参数形态仍是同一次障碍
+    expect(prompt).toContain('换写法、换路径、换参数形态再试不算新尝试');
+    // 交付顺序：先交付已确定的部分，存疑项一次列全，不为次要产出阻塞主产出
+    expect(prompt).toContain('先交付已经确定的部分');
+    expect(prompt).toContain('不要为次要产出阻塞主产出');
+    // 位置：与其它判断类原则同属「工作原则」一节。重构后提示词按"身份/原则/硬边界/
+    // 输出纪律"四类分节，这一条是**行为判据**（阈值+交付顺序）而不是某个场景的
+    // annex——断言它没被踢出原则节，仍与"拿不到就说缺什么"相邻。
+    const principles = prompt.slice(prompt.indexOf('## 工作原则'), prompt.indexOf('## 硬边界'));
+    expect(principles).toContain('同一障碍最多撞两次');
+    expect(principles).toContain('拿不到就说缺什么');
+    expect(principles).toContain('先交付已经确定的部分');
+
+    // 领域无关：只取这一条本身，断言它零业务词——编排层通用规则不该带任何域知识，
+    // 换域一个字都不用改（重构后整份提示词零业务词，见下方"四类结构"那条的全局断言）
+    const start = prompt.indexOf('同一障碍最多撞两次');
+    const rule = prompt.slice(start, prompt.indexOf('\n\n', start));
+    expect(rule).toContain('先交付已经确定的部分');
+    expect(rule).not.toMatch(/应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/u);
+  });
+
+  // ── worker 系统提示词四类结构（2026-10-08 重构）：身份 / 原则 / 硬边界 / 输出纪律 ──
+  // 每条断言对应一次事故补丁或一条通用约束；删句即红（措辞可压缩，语义不许消失）。
+  // 反向断言同时钉住"平台实现细节与文件格式名不进通用提示词"（律法 L2：协议事实
+  // 平台拥有，宿主读 operation list --json 不抄写）。
+
+  /** 取一次委派的 worker 系统提示词（读关闭 + 有 scratchDir + 有宿主申报的标准形态）。 */
+  async function capturePrompt(request = '查一下余额', turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>): Promise<string> {
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+    await subagent.run({ request, ...(turnDeclaration ? { turnDeclaration } : {}) }, { trusted: trusted() });
+    return prompt;
+  }
+
+  it('四类分节：身份与职责 / 工作原则 / 硬边界 / 输出纪律，按此顺序', async () => {
+    const prompt = await capturePrompt();
+    const headings = ['## 身份与职责', '## 工作原则', '## 硬边界', '## 输出纪律'];
+    const at = headings.map((heading) => prompt.indexOf(heading));
+    for (const index of at) expect(index).toBeGreaterThanOrEqual(0);
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    // 判断类规则（原则）与机械类规则（硬边界）分开：混在一处时模型分不清哪条能通融
+    expect(prompt.slice(at[1]!, at[2]!)).not.toContain('可写位置');
+    expect(prompt.slice(at[2]!, at[3]!)).toContain('可写位置');
+  });
+
+  it('工作原则：优先复用平台确定性子过程，不要自己实现', async () => {
+    const prompt = await capturePrompt();
+    // 治"自己写渲染器/自己洗数据"：平台有确定性子过程（校验、渲染、格式转换）而 worker
+    // 重造一份——重造那份与平台口径漂移，产出不可复核
+    expect(prompt).toContain('优先复用');
+    expect(prompt).toContain('必须调用，不要自己实现');
+    // 自写代码的唯一合法位置是上游吸收：格式不稳定、需要判断的那一步
+    expect(prompt).toContain('自写代码只用于上游吸收');
+  });
+
+  it('工作原则：交付前自检，不过校验就停下报告', async () => {
+    const prompt = await capturePrompt();
+    // 治"不过校验直接交付"：域提供的校验入口被跳过，错数据直达用户
+    expect(prompt).toContain('交付前自检');
+    expect(prompt).toContain('必须过一遍再交付');
+    expect(prompt).toContain('不改不跳过');
+  });
+
+  it('工作原则：只做被要求的事，范围外发现要报告', async () => {
+    const prompt = await capturePrompt();
+    // 治"自作主张扩大产出"：用户只要一件事，worker 顺手多做一件没人要的
+    expect(prompt).toContain('只做被要求的事');
+    expect(prompt).toContain('发现范围外的产出或前置动作，报告，不要自作主张');
+  });
+
+  it('工作原则：经济性——一次调用能拿到的不要写脚本绕', async () => {
+    const prompt = await capturePrompt();
+    // 治"为绕一次调用写整套脚本"：脚本比调用更贵、更容易错，且绕过平台的口径校验
+    expect(prompt).toContain('经济性');
+    expect(prompt).toContain('一次调用能拿到的不要写脚本绕');
+  });
+
+  it('输出纪律：内部语言不上屏 + 来源标注中性表述', async () => {
+    const prompt = await capturePrompt();
+    // Stage 3 事故根治包：脚本路径/错误码/JSON/门的规则引述不得进最终回复
+    expect(prompt).toContain('内部语言不上屏');
+    expect(prompt).toContain('脚本路径、错误码、JSON、协议状态、接口名、门的规则');
+    // 2026-09-27 第三波：来源标注只能说"平台实时查询"，不许出现接口标识符
+    expect(prompt).toContain('平台实时查询');
+    expect(prompt).toContain('不出现 operation 名、接口名或脚本名');
+  });
+
+  it('输出纪律：内部控制不上屏 + 不主动交代表能力边界', async () => {
+    const prompt = await capturePrompt();
+    // 同波补漏：计划额度/拒绝次数/熔断/计划门/重试上限是内部控制状态，不是"说明"
+    expect(prompt).toContain('内部控制不上屏');
+    expect(prompt).toContain('计划额度、拒绝次数、熔断、计划门、重试上限');
+    // 诚实不等于全说：用户没问到的口径，接口不支持就不是他需要知道的事
+    expect(prompt).toContain('不主动交代表能力边界');
+  });
+
+  it('输出纪律：名称类请求先经平台检索 + 已取结果必须呈现', async () => {
+    const prompt = await capturePrompt();
+    // D-072：会话已确立实体只回答"只给参数的续问"，新名称一律重新检索（防张冠李戴）
+    expect(prompt).toContain('名称类请求仍须先经平台检索确认规范名称');
+    expect(prompt).toContain('即使用户本会话已经用过某个对象');
+    // D-073：数据在手时把用户推回重新发起 = 球踢回给用户
+    expect(prompt).toContain('本轮已经取到的执行结果必须呈现在终稿里');
+    expect(prompt).toContain('明示缺席原因');
+  });
+
+  it('硬边界：知识面含技能指向的程序文档，实现源码不可读', async () => {
+    const prompt = await capturePrompt();
+    // 门禁：知识只经 read 读固定知识面。"技能指向的程序文档"是本次重构新加入知识面的
+    // 一项——SOP 类文档（WORKFLOW.md 一类）此前被排除在外，worker 于是从不读 SOP。
+    expect(prompt).toContain('知识只经 read');
+    expect(prompt).toContain('及技能指向的程序文档');
+    expect(prompt).toContain('实现源码不可读');
+    // 先读知识面再调平台能力，数据必须来自平台返回（治编造数据）
+    expect(prompt).toContain('先读知识面再调用平台能力');
+    expect(prompt).toContain('不得编造');
+  });
+
+  it('硬边界：计划门协议保留状态字，草案形状由单一来源派生', async () => {
+    const prompt = await capturePrompt();
+    // 执行前先提交方案（宿主协议）：状态字是宿主协议的一部分，压缩措辞但五个状态都在
+    expect(prompt).toContain('执行前先提交方案');
+    for (const state of ['PLAN ACTIVE', 'PLAN DECLINED', 'PLAN NEEDS_USER_CONFIRM', 'PLAN PAUSED', 'PLAN STOP']) {
+      expect(prompt, `计划门状态字 ${state} 必须留在提示词里`).toContain(state);
+    }
+    // 范围扩大时重新提交完整 calls（防止"计划外执行"）
+    expect(prompt).toContain('范围变化时重提完整 calls');
+  });
+
+  it('硬边界：可写位置与读不到上游内容时的自写脚本边界', async () => {
+    const prompt = await capturePrompt();
+    // 机械边界：只有 scratchDir 写得进去，不说 worker 只能猜，猜错就白跑一轮
+    expect(prompt).toContain('可写位置：tmp/req-1');
+    expect(prompt).toContain('其他路径不可写');
+    // D-083（用户明确批准）：读不到上游内容时可自写解析脚本，但必须落在可写目录内
+    expect(prompt).toContain('读不到上游内容时');
+    expect(prompt).toContain('自写解析脚本');
+    expect(prompt).toContain('经统一入口本地执行');
+  });
+
+  it('平台调用形状以清单为准：不手抄网关形状、不限定单一模式', async () => {
+    const prompt = await capturePrompt();
+    // 律法 L2：协议事实平台拥有，宿主读数据（operation list --json）不抄写——手抄那份
+    // 随平台演进过期，而模型会照着手抄那份去撞门
+    expect(prompt).toContain('平台调用走统一入口');
+    expect(prompt).toContain('operation list --json');
+    // 反向：网关调用形状（脚本路径/flag 纪律/等号变形）与"只教 query 一种模式"都不在
+    expect(prompt).not.toContain('--<flag>');
+    expect(prompt).not.toContain('kebab-case');
+    expect(prompt).not.toContain('--flag=值');
+    expect(prompt).not.toContain('bin/17dz query');
+  });
+
+  it('反向：提示词不含文件格式名与具体 operation 名', async () => {
+    const prompt = await capturePrompt();
+    // 文件格式名是域知识：Excel/xlsx 一类只该出现在技能文档里，通用提示词不提
+    expect(prompt).not.toMatch(/Excel|xlsx|csv|pdf|docx/i);
+    // 具体 operation 名同理：出现即把平台实现细节带进编排层（泄漏 lint 的 FORBIDDEN 家族）
+    expect(prompt).not.toContain('finance.query-receivables');
+    expect(prompt).not.toMatch(/query-receivables|search-account-sets|query-saved|subject-list/);
+    // 平台脚本文件名与脚本目录路径同样不上屏
+    expect(prompt).not.toMatch(/\.js\b/);
+    expect(prompt).not.toContain('src/finance/scripts');
+  });
+
+  it('反向：整份提示词零业务词（编排层通用规则不带域知识）', async () => {
+    const prompt = await capturePrompt();
+    // 插值的 request 是用户原话（夹具里就带"余额"），不算宿主措辞，先剥掉再查
+    const host = prompt.split('\n').filter((line) => !line.startsWith('宿主已核验本轮请求')).join('\n');
+    expect(host).not.toMatch(/应收|凭证|科目|账套|期间|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/u);
+    // "目录"是泄漏 lint 允许集里 context.ts 的遗留待清项（理想形态应收敛为平台 SKILL
+    // 指针）：提示词只把它用在文件系统意义上（工作目录），不用它指任何领域检索动作
+    expect(host.replace(/工作目录/g, '')).not.toContain('目录');
   });
 
   it('宿主未注入实体来源时不向 worker 驱动传该字段（老路径不做实体校验）', async () => {

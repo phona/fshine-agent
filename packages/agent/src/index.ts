@@ -17,6 +17,7 @@ export {
   missingLabelFromCode,
   needsFromPlatformResponses,
   operationStepText,
+  planNotReadOnlyCode,
   serveGateStepText,
   PLAN_ACTIVATED_NUDGE,
   PLAN_SUBMIT_STEP,
@@ -28,17 +29,21 @@ export {
 export {
   loadOperationLabels,
   loadOperationArgSpecs,
-  loadOperationAccesses,
+  loadOperationSemantics,
   operationLabel,
   parseOperationLabels,
   parseOperationArgSpecs,
-  parseOperationAccesses,
+  parseAccessSemantics,
+  parseOperationSemantics,
   isWriteAccess,
-  type OperationAccesses,
+  type AccessSemantics,
+  type AccessSemanticsTable,
   type OperationArgsSpec,
   type OperationArgsSpecs,
   type OperationLabels,
+  type OperationSemantics,
 } from './operation-labels';
+export * from './scratch-cleanup';
 export {
   FileSkillRegistry,
   createSkillRegistry,

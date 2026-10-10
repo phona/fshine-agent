@@ -57,6 +57,8 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(messageTextFor('PLAN_PENDING_PERSIST_MISSING')).toBe('平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。');
     // 写关闭话术（唯一来源：提案路径 capability 检查与计划门写拒绝共用同一句）
     expect(messageTextFor('WRITE_NOT_ENABLED')).toBe('当前未开放写入权限，如有需要请联系管理员开通。');
+    // 同一次平台拒绝的另一种真相：该调用不该进计划（与写未开放分工，措辞零平台实现形状）
+    expect(messageTextFor('PLAN_NOT_PLANNABLE')).toBe('该调用不需要计划、也不要放进计划，直接调用即可。');
     // runtime/context 的导出常量就是表值（同一份来源，测试与调用方继续认常量）
     expect(NO_EXECUTION_CLARIFICATION).toBe(messageTextFor('NO_EXECUTION_CLARIFICATION'));
     expect(ACTIVATED_PLAN_NOT_EXECUTED).toBe(messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED'));
@@ -106,7 +108,7 @@ describe('fshine 错误码表（错误即数据）', () => {
   it('表级纪律：全部条目措辞零业务词（泄漏 lint 同款预算）', () => {
     // 镜像 platform-leak-lint 的业务词集合：执行层持有领域词，编排层不替平台说话
     const business = /应收|凭证|科目|账套|期间|目录/u;
-    for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED']) {
+    for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED', 'PLAN_NOT_PLANNABLE']) {
       expect(messageFor(code), code).not.toMatch(business);
     }
     // 平台健康冷却话术（Lane 2）：占位符用分钟数填充后同样零业务词
