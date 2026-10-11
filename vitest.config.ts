@@ -7,6 +7,13 @@ import { defineConfig } from 'vitest/config';
  * 注意：vitest 3 的 projects **不继承**根级 test 选项（实测：setupFiles 放根下，
  * 两个 project 都收不到），共享项必须逐项展开进每个 project——这里收敛成单一
  * 来源，避免两处漂移。
+ *
+ * ⚠️ 但有两个例外，**根级设置是生效的**（实测，别被上面这句话误导成"根级都没用"）：
+ *   1) `maxWorkers` —— 根级生效，project 内不生效（见下方并发边界段）。
+ *   2) `globalSetup` —— 根级生效，且 projects 结构下只在主进程触发一次
+ *      （实测：2 个 project，globalSetup 记录到 1 次，pid 为主 vitest 进程）。
+ *      注意它和 setupFiles 的继承行为不一样，别"顺手"把它也逐 project 展开——
+ *      展开后会装两遍守卫（幂等，但日志会重复）。
  */
 const ALIAS = [
   {
@@ -33,29 +40,49 @@ const SHARED = {
   hookTimeout: 20_000,
 } as const;
 
-/**
- * 2026-10-10 测试资源边界整改（事故复盘：全量跑后 6 个 tinypool worker 成孤儿，
- * 各 0.6-1.2GB 忙循环 27 分钟不退出，整机内存+swap 濒临耗尽）：
- *
- * 1) 显式 pool: 'forks'。⚠️ 这里原写"每 project 显式 maxWorkers … unit 3 / e2e 2"
- *    **没有生效**：vitest 3.2.7 不读 project 内的 maxWorkers（实测单跑 unit 仍 7 个
- *    worker），且依据数据有误——e2e 单 worker 实测峰值 284MB，不是 1.2GB（那是主
- *    进程 + 全部 worker 合计被当成了单 worker），所以"7×1.2GB 打到 swap"不成立。
- *    实际做到的是：孤儿链入口被移除（不再有外层 timeout）+ 坏钩子有兜底超时 +
- *    harness 台账兜底关 assembly。并发边界待重新设计，见提交信息。
- * 2) teardownTimeout / hookTimeout 显式值：收尾阶段不再无限等，配合 testTimeout
- *    让任何单点劣化在 vitest 内部爆雷，而不是拖到外层墙钟预算（删掉对外层
- *    `timeout` 兜底的依赖——timeout 只杀直接子进程，主进程一死 worker 就成孤儿
- *    自旋，2026-10-10 已实验复现：SIGKILL 主进程 → 4 个 worker PPid=1、R 状态、
- *    各 1.2GB、100% CPU 永转）。
- * 3) projects 串行执行（实测确认）：unit 与 e2e 先后跑，不是同时开两套池。
- *    ⚠️ 但别由此推出"峰值 = max(两类)"——那依赖下面每个 project 的 maxWorkers
- *    生效，而它不生效（见下方两处 ⚠️）。当前实际跑的是默认 7 并发，实测全量
- *    峰值 1869MB / 56s / 953 全绿 / 退出后 0 残留，四项都达标；并发边界是
- *    还没做的事，不是已经做到的事。
- */
 export default defineConfig({
   test: {
+    /**
+     * worker 生命周期兜底（2026-10-11 落地，本仓自持，不依赖上游）。
+     *
+     * 事故形状：主进程猝死 → tinypool worker 无父亡检测 → 孤儿无限自旋。上游两条路
+     * 都指望不上——disconnect 兜底要 vitest/tinypool 改代码且只治"事件循环还活着"的
+     * 空闲孤儿；PDEATHSIG 才是唯一能治同步忙循环孤儿的解，但 Node 不暴露 prctl。
+     * 守卫脚本覆盖我们控制的三条路径：主进程收到可捕获信号时先带走全家再退出、
+     * 任何退出路径清扫自己的残留 worker、每次跑测试清扫上次猝死留下的 PPid=1 孤儿。
+     * 详见 scripts/vitest-orphan-guard.ts 顶部注释与安全边界。
+     */
+    globalSetup: ['scripts/vitest-orphan-guard.ts'],
+
+    /**
+     * 并发边界 —— **这是全文件唯一生效的 worker 上限**，2026-10-11 实测。
+     *
+     * 原设计是"unit 3 / e2e 2 分类给"，**没有实现**：vitest 3.2.7 不读 project 内的
+     * maxWorkers（实测单跑 --project unit 仍开 7 个 worker），根级 maxWorkers 才对
+     * unit/e2e 一视同仁。要分类得拆成两条 vitest run 命令或 workspace 配置，
+     * 仍未做——下面两个 project 里那两行已删，不再留"写着但不生效"的假配置。
+     *
+     * 为什么取 3（实测，全量 78 文件 / 987 测试 / exit=0）：
+     *   并发        全量墙钟    峰值 RSS(worker 合计)    孤儿最坏内存
+     *   7（默认）    54.95s      1869MB                  7×~1.2GB ≈ 8.4GB（打穿整机）
+     *   3（本次）    63.58s       765MB                  3×~1.2GB ≈ 3.6GB（可承受）
+     * 即 +16% 墙钟换 −59% 内存。机器可用内存约 5.4GB（共享机，实测），7 并发的孤儿
+     * 最坏值直接超过可用量——10-10 那次（6 孤儿 / 27 分钟 / 内存+swap 濒临耗尽）
+     * 就是这么来的；3 并发下同样的事故只掉到 3.6GB，不惊动别的租户。
+     *
+     * ⚠️ 拼写陷阱（2026-10-11 实测，别改错）：顶层 `maxForks` 在 vitest 3.2.7 是
+     * **死别名**，根级和 project 内都不生效、且不报错不警告：
+     *   project 内 maxForks: 2 → 实测仍 7 worker
+     *   根级     maxForks: 2 → 实测仍 7 worker
+     *   根级     maxWorkers: 2 → 实测 2 worker ✅
+     *   根级     poolOptions.forks.maxForks: 2 → 实测 2 worker ✅
+     * 原因在源码解析链（vitest/dist/chunks/coverage.DfSpMS-b.js:2612，forks 池路径）：
+     *   `poolOptions.maxForks ?? vitest.config.maxWorkers ?? threadsCount`
+     * 兜底读的是 config.maxWorkers，**从来没有 config.maxForks**。所以要么写根级
+     * maxWorkers，要么写 poolOptions.forks.maxForks，且必须放根级。
+     */
+    maxWorkers: 3,
+
     projects: [
       {
         // alias 同样不继承（实测：根级 resolve.alias 对 project 不可见，
@@ -65,13 +92,6 @@ export default defineConfig({
           name: 'unit',
           include: ['packages/**/*.test.ts', 'apps/**/*.test.ts'],
           ...SHARED,
-          // ⚠️ 这一行**当前不生效**，留着但别信：vitest 3.2.7 不读 project 内的
-          // maxWorkers（实测单跑 --project unit 仍开 7 个 worker；根级 maxWorkers
-          // 才生效，但它对 unit/e2e 一视同仁，做不到分类给）。unit/e2e 并发分开
-          // 需要拆成两条 vitest run 命令或 workspace 配置——待重新设计，见提交信息。
-          // 原先这里写的"单 worker 峰值 ~0.4GB、取 3 并发"依据不实：实测单 worker
-          // 峰值约 250-284MB，且并发根本没被限制住。
-          maxWorkers: 3,
         },
       },
       {
@@ -80,11 +100,6 @@ export default defineConfig({
           name: 'e2e',
           include: ['tests/e2e/**/*.test.ts'],
           ...SHARED,
-          // ⚠️ 同上：这一行也不生效，依据数据同样不实。原先写的"单 worker 峰值实测
-          // 1.16-1.23GB、只开 2 并发"——实测 e2e 单 worker 峰值只有 284MB（那个
-          // 1.2GB 是主进程 + 全部 worker 的合计被当成了单 worker），所以"7×1.2GB
-          // 会打到 swap"这个推论不成立：全量实测峰值 1869MB，离 4GB 目标很宽。
-          maxWorkers: 2,
         },
       },
     ],
