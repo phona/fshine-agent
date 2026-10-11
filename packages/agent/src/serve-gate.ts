@@ -59,6 +59,14 @@ export interface ServeGateEvent {
   label?: string;
   /** 参数摘要（已按声明式 flag 名单提取并格式化），渲染层直接拼接，不再解析命令。 */
   keyArgs?: string[];
+  /**
+   * 这次调用的形态族（仅 bash；宿主按命令词法机械分类，见 gateInvocationKind）。
+   *
+   * 为什么必须随事件出来：执行面回执数的是"所有被放行的 bash"，local 与元数据查询
+   * 一并计入——只凭它分不出"真调过平台执行器"与"整轮只在本地跑脚本"，而后者正是
+   * 要披露的偏离（A1）。放行的与拦截的都挂：被拦的形态同样是"它想怎么调"的证据。
+   */
+  invocation?: GateInvocationKind;
 }
 
 export interface ServeGateVerdict {
@@ -260,6 +268,22 @@ const SERVE_METADATA_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * 宿主认得的**非执行器 CLI 组**（只用于形态识别，与计划门豁免是两件事）。
+ *
+ * 为什么必须单列：`operation list` / `plan --schema` 经 SERVE_METADATA_COMMANDS 免计划前置，
+ * 而 `memory`（领域记忆读写）今天**不免**——它仍要宿主激活的计划才准调，这个现状一字不改。
+ * 但两者都必须是"认得的平台形态"：认不出就会被形态分支以 SERVE_INVOCATION_FORM_UNKNOWN 拒掉，
+ * 而 memory 是平台技能文档写明给 serve worker 用的出口（记忆读写只经它），拒它等于把一条
+ * 合法能力关掉——那不是本次要堵的东西（本次堵的是"猜一个形状"）。
+ *
+ * 与 SERVE_METADATA_COMMANDS 的分工：那个答"要不要计划前置"，这个答"是不是平台的调用形态"。
+ * 平台新增出口时两处各按自己的判据决定加不加——加进这里只是"认得其形态"，加进那里才是
+ * "免计划前置"。两个集合因此**不要求一致**，也不该为了省事合并（合并要么放松计划门，
+ * 要么把 memory 关掉）。
+ */
+const SERVE_NON_EXECUTOR_GROUPS: ReadonlySet<string> = new Set(['memory']);
+
+/**
  * local 执行的根：**本轮 scratchDir**（宿主自己的概念），以及辅助技能面暴露的技能脚本。
  *
  * 为什么从平台目录名换成宿主的 scratchDir：原先凭平台目录名 `tmp/` 放行，于是
@@ -355,6 +379,35 @@ export function extractGateScript(command: string): string | null {
   const tokens = splitCommandTokens(command);
   if (tokens[1] === 'operation' && tokens[2] === 'run') return tokens[3] ?? null;
   if (['query', 'prepare', 'commit'].includes(tokens[1] ?? '')) return tokens[2] ?? null;
+  return null;
+}
+
+/**
+ * 一次网关调用的**形态族**（宿主按命令词法机械分类，不猜内容）：
+ *   · `executor`  —— 经计划门放行的平台执行调用（query / prepare / commit / operation run）；
+ *   · `local`     —— 本地执行（纯本地计算，不触平台会话，见 isLocalScratchRun）；
+ *   · `auxiliary` —— 平台的辅助出口（能力面/计划形状元数据、领域记忆）：不执行任何业务
+ *                    操作，因此**不计入**"本轮有没有调过平台执行器"；
+ *   · `null`      —— 三种都认不出来：缺 mode、缺脚本路径、或用了未注册的形式。
+ *
+ * 为什么必须有这一问：执行面回执（`execution.calls`）数的是**所有**被放行的 bash，
+ * local 与辅助出口一并计数——于是"整轮只有 local 调用"在足迹里与"真调过平台执行器"
+ * 完全同形，**绕开平台执行器因此不可观测**（A1 实测：一次"成功"的委派，平台审计里
+ * validate / transform 一次没经网关，而足迹只写着 1 次网关调用）。分类因此必须存在，
+ * 且只能从命令自己的词法得出。
+ *
+ * 不引入第二套命令解析：各族由既有的唯一判据判定（serveMetadataCommand / localModeTarget /
+ * extractGateScript / SERVE_NON_EXECUTOR_GROUPS），这里只把它们的结论汇成一个族名——平台
+ * 改了模式面，改那几处即可，不存在"族名表"要同步的第五份名单。
+ */
+export type GateInvocationKind = 'executor' | 'local' | 'auxiliary';
+
+export function gateInvocationKind(command: string): GateInvocationKind | null {
+  if (serveMetadataCommand(command)) return 'auxiliary';
+  if (localModeTarget(command) !== null) return 'local';
+  if (extractGateScript(command) !== null) return 'executor';
+  const tokens = splitCommandTokens(command);
+  if (tokens[1] && SERVE_NON_EXECUTOR_GROUPS.has(tokens[1])) return 'auxiliary';
   return null;
 }
 
@@ -577,6 +630,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
     const args = (toolCall.arguments ?? {}) as Record<string, unknown>;
     let verdict: ServeGateVerdict | undefined;
     let detail = '';
+    // 形态族（仅 bash）：放行的与拦截的都随审计事件出来，供执行面把"所有被放行的 bash"
+    // 拆成本地执行 / 平台执行 / 元数据三族——绕开平台执行器要可观测，缺它就只有总数。
+    let invocation: GateInvocationKind | null = null;
     // 放行的平台调用才有人类可读投影：label 与参数摘要都来自平台数据（清单第 5 列 /
     // args 规格），查不到 label 就不挂——调用方没有帧可发，静默降级。
     let progress: { label: string; keyArgs: string[] } | undefined;
@@ -584,6 +640,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
     if (name === 'bash') {
       const command = String(args['command'] ?? '').trim();
       detail = command;
+      invocation = gateInvocationKind(command);
       // 元数据查询先行（且必须排在 SERVE_CLI_PLAN_RE 教学分支之前）：
       // `plan --schema` 字面上含 `plan`，会被那条正则判成"worker 在提交方案"而吃到
       // PLAN_SHAPE_GATE_TEACHING——可它恰恰是平台给宿主的机器可读出口，不是方案提交。
@@ -628,6 +685,16 @@ export function createServeGate(options: ServeGateOptions = {}) {
         verdict = { block: true, reason: messageTextFor('SERVE_BASH_NOT_GATEWAY') };
       } else if (hasShellMetachars(command)) {
         verdict = { block: true, reason: messageTextFor('SERVE_BASH_METACHAR_QUERY') };
+      } else if (invocation === null) {
+        // 形态解析不出 operation：缺 mode、缺脚本路径、或用了未注册的形式（A1 实测形态
+        // 是 worker 猜出来的调用——平台清单的 command 与真实脚本名不一致，它无从机械构造
+        // 命令，只能猜一个形状）。走到这里说明首词确是网关、没有元字符、也不是 local 与
+        // 元数据出口，于是门答不出"这是哪个 operation"：该不该计划、挂哪条 label 都无从
+        // 判断。旧行为是放行后让平台网关去拒、或在本门吃一条"尚无激活计划"——两条都没告诉
+        // 它正确形状从哪来，于是它猜第二次、第三次，最后绕开平台自己包 wrapper。
+        // 这里只指路（措辞见 error-codes 的 SERVE_INVOCATION_FORM_UNKNOWN）：不复述形状、
+        // 不出现网关名，把推导留给它做。
+        verdict = { block: true, reason: messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN') };
       } else if (!options.planActive?.() && !planExempt(command, options.operationSemantics)) {
         // 计划前置：先问"这个调用要不要计划"（平台语义表 plan 列），再问"有没有计划"。
         // plan=false 的调用走到这里即放行（不设 verdict），继续受平台侧裁决；plan=true
@@ -722,6 +789,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
         detail: detail.slice(0, AUDIT_DETAIL_MAX_CHARS),
         // 只增补字段：既有消费者（审计留痕）读的那几个字段一字未动
         ...(progress ? { label: progress.label, keyArgs: progress.keyArgs } : {}),
+        ...(invocation ? { invocation } : {}),
       });
     } catch {}
     return verdict;

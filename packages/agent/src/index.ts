@@ -18,6 +18,7 @@ export {
   needsFromPlatformResponses,
   operationStepText,
   planNotReadOnlyCode,
+  platformExecutorBypassed,
   serveGateStepText,
   PLAN_ACTIVATED_NUDGE,
   PLAN_SUBMIT_STEP,
@@ -25,6 +26,7 @@ export {
   type PiCodingWorkerSession,
   type PiCodingWorkerSessionOptions,
   type PiCodingWorkerTool,
+  type PlatformExecutorBypassedEvent,
 } from './pi-coding-driver';
 export {
   loadOperationLabels,

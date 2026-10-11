@@ -877,6 +877,8 @@ describe('降级：没有 label 就零进度帧，审计字段一字不少', () 
       detail: command,
       label: undefined,
       keyArgs: undefined,
+      // 形态族（A1 披露判据的输入）：既有消费者读的字段一字未动，只多这一个
+      invocation: 'executor',
       requestId: 'req_progress',
     });
   });

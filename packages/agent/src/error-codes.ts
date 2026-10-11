@@ -385,6 +385,24 @@ const TABLE: Record<string, CodeEntry> = {
   SERVE_PLAN_NOT_ACTIVE: {
     text: '尚无宿主激活的平台计划；先提交 JSON calls 方案等待宿主评估。',
   },
+  // 形态解析不出 operation：缺 mode、缺脚本路径、或用了未注册的形式。门答不出"这是哪个
+  // operation"，于是也答不出该不该计划、挂哪条 label——而这个形状恰恰是 worker **猜**出来
+  // 的（A1 实测根因：平台清单的 command 与真实脚本名不一致，它无从机械构造命令，只能猜
+  // `<网关> payroll.validate <路径>`，被连拦五次后放弃平台、自己包 wrapper 跑执行器）。
+  //
+  // 为什么旧理由不够用：它只说"形状不合法 / 尚无激活计划"，没告诉 worker 正确形状从哪来，
+  // 于是它猜第二次、第三次，最后绕开平台。这里**只指路**——每个 operation 的脚本路径与开放
+  // mode 都在平台清单的机器可读面（`operation list --json` 的 script / serve 字段），推导
+  // 留给调用方做。
+  //
+  // 三条纪律（本表头部纪律②的延伸，缺一即第二份真相）：
+  //   ① 不出现网关可执行名（唯一真相在平台契约常量与技能文档，不在拒绝理由里）；
+  //   ② 不复述完整调用形状——抄进来的那一份随平台演进过期，而 worker 在**做错的那一刻**
+  //      看到它，最把这句话当真相，于是照着一个过期形状撞门；
+  //   ③ 零业务词、零平台实现细节（脚本名/路径/清单文件一律不进消息）。
+  SERVE_INVOCATION_FORM_UNKNOWN: {
+    text: '该调用形态解析不出 operation（缺 mode、缺脚本路径，或用了未注册的形式）。每个 operation 的脚本路径与可用 mode 以平台清单（operation list --json）的 script / serve 字段为准，据此组装后再调用',
+  },
 };
 
 /** 码是否已登记。 */

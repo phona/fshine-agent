@@ -19,7 +19,7 @@ import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
-import { createServeGate, describePlanCalls, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { createServeGate, describePlanCalls, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
@@ -47,6 +47,53 @@ export const PLAN_SUBMIT_STEP = '正在向平台提交执行方案…';
  * 措辞与业务无关（不出现任何领域词）：只陈述确定性事实与明确指令，不代平台说话。
  */
 export const PLAN_ACTIVATED_NUDGE = '宿主已批准你的执行方案（计划已激活）。请立即按方案中的 calls 执行查询，不要再次提交方案。如确实无法执行，说明具体阻碍。';
+
+/**
+ * A1：绕开平台执行器的披露判据（**告警，不是门**）。
+ *
+ * 实测形态（同一个任务两个样本）：平台把"算工资表"拆成两半——worker 吸收脏输入洗出契约
+ * （该它做），再交给平台执行器渲染（该平台做）。第二个样本里 worker 自己包了一个 wrapper
+ * 调平台脚本：整轮只有本地执行，平台审计里 validate / transform 一次没经网关，而执行足迹
+ * 只写着"1 次网关调用"（本地执行也计数）——一次看起来成功的委派。用户的顾虑正是这条：
+ * "副作用无法评估"。
+ *
+ * 判据三条件同时成立才告警：
+ *   ① 本轮有本地执行（localCalls > 0）——真在跑自己的代码；
+ *   ② 本轮零计划门放行的平台执行调用（executorCalls === 0）——平台的校验/渲染一步没经
+ *      网关（元数据查询不算：它不执行任何东西，见 serve-gate 的 SERVE_METADATA_COMMANDS）；
+ *   ③ 本轮落盘了产物（producedFiles 非空）——委派确实产出了东西，不是空转。
+ * ③ 是降噪阀：只写草稿脚本、没产出办公文件的回合不告警（那是合法的上游吸收，D-083）。
+ *
+ * 为什么这条判据可靠：三个输入全是宿主自己的机械留痕——门的形态族分类（按命令词法，
+ * 见 gateInvocationKind）与 write/edit 的放行留痕（detail 即落点路径）。没有一步从
+ * worker 文本解析，也不读平台侧运行产物（跨仓读对方的 .runtime 既耦合又无法按请求归属）。
+ *
+ * 已知边界（如实记账，不伪装成完备检查）：本地子进程**自己**写盘的文件宿主看不见
+ * （wrapper 里 subprocess 写出的成品不走 write 门），所以 producedFiles 是"宿主放行写入
+ * 的文件"，不是"盘上多出来的全部文件"。告警因此是"足够触发人工看一眼"的信号，不是
+ * "盘上差异的完备清单"。
+ */
+export function platformExecutorBypassed(signal: {
+  localCalls: number;
+  executorCalls: number;
+  producedFiles: readonly string[];
+}): boolean {
+  return signal.localCalls > 0 && signal.executorCalls === 0 && signal.producedFiles.length > 0;
+}
+
+/** 绕开平台执行器的告警事件（宿主侧结构化留痕，只披露、不改回合结果）。 */
+export interface PlatformExecutorBypassedEvent {
+  requestId: string;
+  taskId: string;
+  /** 本轮本地执行调用数。 */
+  localCalls: number;
+  /** 本轮经计划门放行的平台执行调用数（query / prepare / commit / operation run）。 */
+  planGateCalls: number;
+  /** 本轮辅助出口调用数（能力面/计划形状元数据、领域记忆：不执行业务操作）。 */
+  auxiliaryCalls: number;
+  /** 本轮宿主放行写入的文件清单。 */
+  producedFiles: readonly string[];
+}
 
 /**
  * 参数摘要拼接：多个用 · 分隔，没有参数就是空串。
@@ -78,11 +125,17 @@ export function createServeGateAuditSink(sink: {
   onStep: (text: string) => void;
   audit?: (event: ServeGateEvent) => void;
   requestId?: string;
-  /** 放行的平台调用计数（执行面回执用）。 */
-  onAllowedBash?: () => void;
+  /**
+   * 放行的平台调用计数（执行面回执用），参数是**形态族**（serve-gate 的
+   * gateInvocationKind）：回执的 calls 仍数所有被放行的 bash（语义一字未动），族名只供
+   * "整轮有没有真调平台执行器"这条披露判据分流——绕开平台执行器要可观测，缺它就只有总数，
+   * 而总数里本地执行与平台执行完全同形（A1 实测：足迹写着 1 次网关调用，平台审计里
+   * validate/transform 一次没经网关）。
+   */
+  onAllowedBash?: (kind: GateInvocationKind) => void;
 }): (event: ServeGateEvent) => void {
   return (event) => {
-    if (event.tool === 'bash' && event.allowed) sink.onAllowedBash?.();
+    if (event.tool === 'bash' && event.allowed && event.invocation) sink.onAllowedBash?.(event.invocation);
     const step = serveGateStepText(event);
     if (step) sink.onStep(step);
     sink.audit?.({ ...event, requestId: sink.requestId });
@@ -139,6 +192,11 @@ export interface PiCodingTurnDriverOptions {
   operationSemantics?: OperationSemantics;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
+  /**
+   * A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
+   * 判据见 platformExecutorBypassed；调用方只负责留痕（审计/日志），不得据此改回合结果。
+   */
+  onExecutorBypassed?: (event: PlatformExecutorBypassedEvent) => void;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -286,6 +344,16 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
+      // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
+      // 因此不变）；这里只把它拆成三个族并记下本轮落盘的文件——拆分只服务于告警披露，
+      // 不参与任何裁决。三个族由门按命令词法分类（gateInvocationKind），宿主不猜内容。
+      let executorCalls = 0;
+      let localCalls = 0;
+      let auxiliaryCalls = 0;
+      // 本轮宿主放行写入的文件（write/edit 放行时 detail 即落点路径）。本地子进程自己写盘
+      // 的文件宿主看不见——边界如实记在 platformExecutorBypassed 的注释里。
+      const producedFiles: string[] = [];
       // 第一个被放行的 bash 调用发生时的计划身份（latch，见 onAllowedBash）。
       // 为什么不在结果时刻读 currentPlan()：worker 常常在真实调用之后继续重提方案——
       // beforeToolCall 里 activePlan 先置空再 evaluateAndActivatePlan，后续提交可能 scope
@@ -359,9 +427,19 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         serveGateAudit: createServeGateAuditSink({
           onStep: stepOnce,
           requestId: input.requestId,
-          audit: options.serveGateAudit,
-          onAllowedBash: () => {
+          audit: (event) => {
+            // 本轮产物清单：write/edit 放行时 detail 即落点路径（门自己的留痕，不另解析）。
+            // 与 A1 披露判据的第三个条件同源——"委派产出了文件"由宿主放行留痕说话。
+            if (event.allowed && (event.tool === 'write' || event.tool === 'edit') && event.detail) {
+              producedFiles.push(event.detail);
+            }
+            options.serveGateAudit?.(event);
+          },
+          onAllowedBash: (kind) => {
             gateCalls += 1;
+            if (kind === 'executor') executorCalls += 1;
+            else if (kind === 'local') localCalls += 1;
+            else auxiliaryCalls += 1;
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
             // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
@@ -457,9 +535,31 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         return failure ? { authFailure: failure } : {};
       };
       const remaining = input.deadline - Date.now();
+      // A1 披露：离开本回合时判定一次"整轮只有本地执行却产出了文件"。
+      // 为什么放在这里与下方 finally 两处（而不是每个 return 前）：run() 的出口有五六条
+      // （超时/取消/补刀后收尾/异常/正常），漏挂任何一条都是静默不披露——那正是本次要
+      // 消灭的事故形态。finally 覆盖 try 内的全部出口，这里只补 try 之前那条"进回合就没
+      // 预算了"的早退；两个调用点都是"离开 run()"，判定本身只有一份。
+      const reportExecutorBypass = (): void => {
+        if (!platformExecutorBypassed({ localCalls, executorCalls, producedFiles })) return;
+        try {
+          options.onExecutorBypassed?.({
+            requestId: input.requestId ?? '',
+            taskId: input.sessionId ?? '',
+            localCalls,
+            planGateCalls: executorCalls,
+            auxiliaryCalls,
+            producedFiles: [...producedFiles],
+          });
+        } catch {
+          // 告警出口故障不得影响回合结果（与 G1 门"审计故障不影响裁决"同纪律）：
+          // 披露是增强不是门，出口挂了只是这一条没留下痕。
+        }
+      };
       if (remaining <= 0) {
         const messages = session.agent.state.messages;
         session.dispose();
+        reportExecutorBypass();
         return { text: '', messages };
       }
       let timedOut = false;
@@ -555,6 +655,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
         session.dispose();
+        // A1 披露（只告警、不改回合结果）：上面每个 return 之前都不必记得调它——finally
+        // 覆盖 try 内全部出口，超时/取消/异常/正常收尾一视同仁。
+        reportExecutorBypass();
       }
     },
   };

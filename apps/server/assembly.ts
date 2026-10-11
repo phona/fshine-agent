@@ -163,6 +163,31 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // label 表派生根：平台操作的人类可读名来自平台公共 CLI 的第 5 列
     ...(platformRoot ? { platformRoot } : {}),
     planActivationSecret,
+    // A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
+    // 判据在 platformExecutorBypassed：整轮只有本地执行、零计划门放行的平台执行调用、
+    // 却又落盘了产物。落两处：结构化日志行给运维实时看，tool_calls 一行给事后按请求串查
+    // （平台审计在另一个仓，宿主不跨仓读它）。
+    onExecutorBypassed: (event) => {
+      console.warn(JSON.stringify({ event: 'platform_executor_bypassed', ...event }));
+      const now = new Date().toISOString();
+      void store.toolCalls.insert({
+        requestId: event.requestId,
+        toolName: 'platform_executor_bypassed',
+        safeArguments: {
+          taskId: event.taskId,
+          localCalls: event.localCalls,
+          planGateCalls: event.planGateCalls,
+          auxiliaryCalls: event.auxiliaryCalls,
+          producedFiles: event.producedFiles,
+        },
+        startedAt: now,
+        finishedAt: now,
+        status: 'ok',
+        errorCode: 'PLATFORM_EXECUTOR_BYPASSED',
+      }).catch((error) => {
+        console.warn(JSON.stringify({ event: 'executor_bypassed_audit_failed', error: String(error) }));
+      });
+    },
     // G1 工具门留痕：放行与拦截都进 tool_calls 审计（requestId 串查平台侧）。
     serveGateAudit: (event) => {
       const now = new Date().toISOString();

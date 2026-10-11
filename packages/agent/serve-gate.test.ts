@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
 
 describe('isServeCliInvocation（首词规则）', () => {
@@ -340,6 +341,151 @@ describe('createServeGate（通用执行安全门）', () => {
   });
 });
 
+// ── A1 任务一：形态解析不出 operation 时，拒绝理由指向数据源 ────────────────────
+//
+// 实测根因：平台清单不吐 script 字段，而清单里的 command 与真实脚本名不一致，worker 无从
+// 机械构造命令，只能猜一个形状（缺 mode、缺脚本路径）。旧理由只说"形状不合法 / 尚无激活
+// 计划"——没告诉它正确形状从哪来，于是它猜第二次、第三次，最后绕开平台自己包 wrapper
+// （平台审计里 validate/transform 一次没经网关，而足迹只写着"1 次网关调用"）。
+//
+// 这里守四件事：
+//   ① 猜的形状拿不到放行（计划已激活也拒）——堵住"猜一个形状让平台去拒"的空转；
+//   ② 理由不含网关名字面量（唯一真相在平台契约常量与技能文档，刚花了一轮才清出去）；
+//   ③ 理由不复述完整调用形状（第二份真相会随平台演进漂移）；
+//   ④ 理由指出数据源：每个 operation 的脚本路径与开放 mode 见清单机器可读面的 script / serve。
+describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 任务一）', () => {
+  /** A1 实测形态：worker 猜出来的调用（缺 mode、缺脚本路径）。 */
+  const GUESSED = [
+    'bin/17dz payroll.validate tmp/req_x/contract.json',
+    'bin/17dz payroll.transform tmp/req_x/contract.json out.xlsx',
+    'bin/17dz validate tmp/req_x/contract.json',
+    'bin/17dz operation',
+    'bin/17dz operation run',
+    'bin/17dz query',
+    'bin/17dz',
+    'bash bin/17dz payroll.validate tmp/req_x/contract.json',
+  ];
+
+  it('猜的形状一律被拒：计划已激活也拒（堵住"猜一个形状让平台去拒"的空转）', () => {
+    const gate = createServeGate({ planActive: () => true });
+    for (const command of GUESSED) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBe(true);
+    }
+  });
+
+  it('既有拒绝理由语义不变：新码只收"解析不出 operation"这一种', () => {
+    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x' });
+    // 根本不是网关调用
+    expect(gate({ name: 'bash', arguments: { command: 'python src/payroll/scripts/transform.py a b' } })?.reason)      .toBe(messageTextFor('SERVE_BASH_NOT_GATEWAY'));
+    // shell 元字符（元数据 / local / 查询三条各自照旧）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query a b; cat .env' } })?.reason)
+      .toBe(messageTextFor('SERVE_BASH_METACHAR_QUERY'));
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list\nrm -rf /' } })?.reason)
+      .toBe(messageTextFor('SERVE_BASH_METACHAR_METADATA'));
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/x.py && whoami' } })?.reason)
+      .toBe(messageTextFor('SERVE_BASH_METACHAR_LOCAL'));
+    // local 打到放行根之外（跨会话执行面）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local src/payroll/scripts/transform.py' } })?.reason)
+      .toBe(messageTextFor('SERVE_LOCAL_OUTSIDE_SCRATCH'));
+    // 计划提交形状教学（worker 直达 evaluate/activate）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz plan activate --stdin' } })?.reason)
+      .toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING'));
+    // 计划未激活（形态合法、只是还没计划）
+    const inactive = createServeGate({ planActive: () => false });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz query q.js A 202609' } })?.reason)
+      .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+    // 元数据查询与合法 local 照旧放行（新码没有把豁免开成拒绝）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list --json' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/run.py' } })?.block).toBeUndefined();
+  });
+
+  it('领域记忆组的计划门行为一字不改（形态认得出来，但今天仍要激活的计划）', () => {
+    // 回归锁：memory 是平台技能文档写明给 worker 的出口。新码只堵"猜形状"，不许顺手把它
+    // 关掉，也不许为了让它过而放松计划门——两侧现状都必须原样。
+    const active = createServeGate({ planActive: () => true });
+    expect(active({ name: 'bash', arguments: { command: 'bin/17dz memory list --scope customer --id 甲' } })?.block).toBeUndefined();
+    const inactive = createServeGate({ planActive: () => false });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz memory list --scope customer --id 甲' } })?.reason)
+      .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+  });
+
+  it('形态合法时照旧放行且不因新码变严（query/prepare/commit/operation run 四种）', () => {
+    const gate = createServeGate({ planActive: () => true });
+    for (const command of [
+      'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
+      'bin/17dz prepare src/payroll/scripts/transform.py c.json out',
+      'bin/17dz commit src/voucher/scripts/fill.js c.json --save',
+      'bin/17dz operation run payroll.transform c.json',
+    ]) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+    }
+  });
+
+  it('拒绝理由指向数据源，且不含网关名、不含完整调用形状', () => {
+    const gate = createServeGate({ planActive: () => true });
+    for (const command of GUESSED) {
+      const reason = gate({ name: 'bash', arguments: { command } })?.reason ?? '';
+      // 指向数据源：每个 operation 的脚本路径与开放 mode 见清单机器可读面
+      expect(reason, command).toContain('operation list --json');
+      expect(reason, command).toContain('script');
+      expect(reason, command).toContain('serve');
+      // 不出现网关名字面量（纪律：唯一真相不在拒绝理由里）
+      expect(reason, command).not.toContain('bin/17dz');
+      // 不复述完整调用形状：没有 mode 清单拼装、没有脚本路径、没有脚本文件名
+      expect(reason, command).not.toMatch(/query\s*\/\s*prepare|prepare\s*\/\s*commit/);
+      expect(reason, command).not.toMatch(/src\/[^/\s]+\/scripts/);
+      expect(reason, command).not.toMatch(/[\w-]+\.(js|py)/);
+      // 零业务词（泄漏 lint 同款预算，十五词全表）
+      for (const word of ['应收', '凭证', '科目', '账套', '期间', '目录', '税号', '财务', '借贷', '余额', '往来', '时间范围', '记录', '档案', '摸底']) {
+        expect(reason, `${command} / ${word}`).not.toContain(word);
+      }
+    }
+  });
+});
+
+// ── A1 任务二：形态族分类（绕开平台执行器的披露判据输入）───────────────────────
+describe('gateInvocationKind（形态族：本地执行 / 平台执行 / 辅助出口）', () => {
+  it('三种族各认得出，判据只来自命令词法', () => {
+    expect(gateInvocationKind('bin/17dz local tmp/req_x/run.py')).toBe('local');
+    expect(gateInvocationKind('bin/17dz query src/voucher/scripts/query-saved.js A 202609')).toBe('executor');
+    expect(gateInvocationKind('bin/17dz prepare src/payroll/scripts/transform.py c.json out')).toBe('executor');
+    expect(gateInvocationKind('bin/17dz commit src/voucher/scripts/fill.js c.json --save')).toBe('executor');
+    expect(gateInvocationKind('bin/17dz operation run payroll.transform c.json')).toBe('executor');
+    expect(gateInvocationKind('bin/17dz operation list --json')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/17dz plan --schema')).toBe('auxiliary');
+  });
+
+  it('领域记忆组也是认得的平台形态（形态分支不得把合法出口关掉）', () => {
+    // 平台技能文档写明：serve worker 的领域记忆读写只经 memory 组。认不出它就会被
+    // SERVE_INVOCATION_FORM_UNKNOWN 拒掉——那是把一条合法能力关掉，不是堵"猜形状"。
+    expect(gateInvocationKind('bin/17dz memory list --scope customer --id 甲')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/17dz memory get --key entry-format --scope customer --id 甲')).toBe('auxiliary');
+  });
+
+  it('认不出的形态返回 null（缺 mode / 缺脚本路径 / 未注册形式 / 根本不是网关调用）', () => {
+    expect(gateInvocationKind('bin/17dz payroll.validate tmp/x.json')).toBeNull();
+    expect(gateInvocationKind('bin/17dz operation run')).toBeNull();
+    expect(gateInvocationKind('bin/17dz query')).toBeNull();
+    expect(gateInvocationKind('bin/17dz')).toBeNull();
+    expect(gateInvocationKind('python src/payroll/scripts/transform.py a b')).toBeNull();
+  });
+
+  it('bash 前缀与路径前缀走同一套词法（命令解析只此一份）', () => {
+    expect(gateInvocationKind('bash bin/17dz local tmp/req_x/run.py')).toBe('local');
+    expect(gateInvocationKind('/opt/17dz/bin/17dz query q.js A')).toBe('executor');
+  });
+
+  it('放行的调用把形态族挂进审计事件（执行面据此把"所有被放行的 bash"拆族）', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x', onEvent: (e) => events.push(e) });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz query q.js A 202609' } });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/run.py' } });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz operation list --json' } });
+    gate({ name: 'write', arguments: { path: 'tmp/req_x/out.txt', content: 'x' } });
+    expect(events.map((e) => e.invocation)).toEqual(['executor', 'local', 'auxiliary', undefined]);
+  });
+});
+
 describe('describeKeyArgs（平台 args 规格消费，无宿主 flag 名单）', () => {
   // 规格即数据：与 parseOperationArgStyles 从 `operation list --json` 派生出来的表同形
   // （真实派生见 operation-labels.test.ts）。宿主零 flag 名单——平台加 flag 这边自动看得见。
@@ -421,7 +567,7 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
       expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query smoke.js A 202609' } })?.block).toBeUndefined();
       expect(events.at(-1)?.label).toBeUndefined();
       expect(events.at(-1)?.keyArgs).toBeUndefined();
-      expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'reason', 'tool']);
+      expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'invocation', 'reason', 'tool']);
     }
   });
 
