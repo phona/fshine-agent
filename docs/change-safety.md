@@ -303,9 +303,37 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 
 **A 波的一个标定选择（影响 B 波）**：`voucher.proposal` 声明为 `access: scratch`（它改的是本轮私有草稿，不是平台数据），因此 `confirm` 列为假、宿主 `isWriteAccess` 判它**不是写**。代价是 D-075 那道"计划里出现 write 类 operation 就前置合成写关闭话术"的机械兜底对提案步不触发——所以 **B 波的拦截点必须自己做 capability 复核**（宿主持有的授权，Generic，不依赖 operation 名），不成立时当场合成写关闭话术。这比靠计划扫描猜更准：宿主确切知道"正在创建提案"这一刻。
 
-### B 波（fshine）
+### A 波已落地（2026-10-12，17dz 侧，未 commit）
 
-新 `packages/agent/src/proposal-runtime.ts`（≈150 行，镜像 plan-runtime）+ `pi-coding-driver.ts` `beforeToolCall` 加一支 + `ChangeIntentRecord` 瘦成 `{intentId, principalId, sessionId, taskId, proposalId, payloadRef, status, expiresAt, decidedAt, result}` + 删 `ChangeProposal` 接口与业务校验(`context.ts:234-282`) + 删宿主拼的确认摘要(`context.ts:405-414`) + `commit.ts` 瘦成薄执行器（删 staging/before-after，令牌改 HMAC over `{proposalId, expiresAt}`）。
+平台侧 7 项交付物全部完成，我独立复验：`npm test` ALL PASS（317）+ `lint:operations` 通过；mock 下实跑 `prepare voucher.proposal <file>` → `RESULT {proposalId, summaryText, status:completed}`，`commit voucher.commit --proposal-id <id>` → `{ok:true, verified:true, readBack:{before:1,after:2,delta:1}}`；三个 fixtures 独立复现（账套不存在 → `RESOLVE_INVALID`；辅助缺名 → `needs_input`；已结账期 create 通过、commit → `SAVE_REJECTED` exit 2 且提案保持 pending 可重试）；`operation list --json` 确实带出 `protocol` 列（`voucher.proposal → proposal.create`、`voucher.commit → proposal.commit`，其余 24 个为 null）。
+
+`test-args-spec.js` 的"规格必须逐字等于脚本真实面"锁被改成三条更细的判据（规格 ⊆ 脚本面 ∪ 脚本之上被消费的 flag；非刻意子集仍逐字相等；两张显式偏离表 `ABOVE_SCRIPT_FLAGS` / `DELIBERATE_SUBSETS` 本身也是锁）——这是**细化不是放宽**：`--proposal-id` 由网关层摘掉、域脚本看不到，`voucher.proposal` 刻意不暴露不可达的 `--save`。
+
+**给 B 波的契约提示（A 波实证的限制）**：
+1. 协议角色 operation 必须按 **operation 名**寻址（`bin/17dz prepare voucher.proposal <file>`）。按脚本路径寻址（`prepare src/voucher/scripts/fill.js <payload>`）会解析成 `voucher.fill` 并报 `CONTRACT_INVALID`——形态错被说成数据错。平台无法在不嗅探文件内容的前提下区分（本仓禁止内容嗅探），已对 runner / `operation run` / 建造模式寻址加 protocol-keyed 形态守卫。**B 波的拦截判据因此认 operation 名 + protocol 列，不认脚本路径。**
+2. `--batch` 的语义是"payload **文件**是提案数组"，一次创建多个提案（返回 `proposals[]`）。
+3. **未做 period ↔ contracts 日期的一致性校验**（A 波范围外）："声明录 7 月、契约日期在 8 月"的 payload 会真的落账，然后读回按 payload.period 计数得增量 0 → `PROPOSAL_VERIFY_SHORT` + 提案转终态（防二次落账）。响亮失败而非静默错，但更便宜是在 create 挡掉。**列为 B 波切流的前置项**（或至少在开真平台写之前关掉）。
+4. `docs/proposal.schema.json`（V1 文档冻结副本）保留未删——skills-serve README 不变量 3 与 `test-agent-pipeline` 消费它。运行时唯一权威是 `src/voucher/proposal.schema.json`，两者一致性有机械锁（漂移即红）；副本随 B/C 波宿主不再解析 payload 而退役。
+
+**纪律事件（必须记住）**：A 波子任务排练验收时用 `env $ENV ./bin/17dz …` 传环境变量，**zsh 不做无引号变量的词分割**，导致一条命令没带上 `DZ_EXECUTOR=mock`，真 `fill.js` 以 build 模式起来了一次（`invocations.jsonl` 留痕：`2026-10-12T01:54:59`，`serve:false`，无 mock 标志，exitCode 1，931ms）。现场取证：无残留进程；`.browser-profile`（Sep 29）、`.runtime/auth.json`（Oct 10）、`.runtime/screens/`（Sep 29）**均未被写过**；当天唯一一条非 mock 且未被拒的调用就是它，且以 exit 1 结束——没有任何平台状态变动。教训与纪律：**本机 shell 是 zsh，批量传 env 必须字面写进命令行**；"我们以为它无害地失败了"永远不能作为依赖。
+
+### B 波（fshine，带开关与影子双跑）
+
+**开关**：`FSHINE_PROPOSAL_VIA_GATEWAY` 默认**关** = 走今天的主本文本路径；开 = 走网关提案路径。影子期两条路都在：开开关时，旧文本路径仍然跑一遍但**只记录不一致**（`proposal_shadow_mismatch` 事件），不生效。
+
+**判别只有一个**：意图记录带不带 `proposalId`。带 → 新路径（平台 create/commit）；不带 → 旧路径（`commit.ts`）。确认状态机只有一套（`matchConfirmation` 原样），两条执行后端按记录形状分流——C 波删旧路径时这个分支自然塌掉。
+
+| # | 交付物 | 要点 |
+|---|---|---|
+| B1 | `packages/agent/src/proposal-runtime.ts`（新，≈150 行，镜像 plan-runtime） | `parseProposalCommand(command)`：网关首词 + `prepare` 模式 + operation 引用，**按 `protocol` 列判是不是提案创建**（A 波实证：按脚本路径寻址会解析成 `voucher.fill` 并报数据错，所以判据认 operation 名 + protocol 列，不认脚本路径）。`operation-labels.ts` 加 `protocol` 列的解析与加载（拿不到表 → 空 → 不拦截，与 label/args 规格同一失败语义）。纯函数 + 单测，不起 harness |
+| B2 | `ChangeIntentRecord` 瘦身 + store 迁移 | 契约形状改为 `{intentId, principalId, sessionId, taskId?, proposalId, status, expiresAt, createdAt, decidedAt?, result?}`——**零业务字段、零 payload**。`change_intents` 加 `proposal_id` 列；旧行业（有 kind/account_set 的无 proposalId）**一律按过期处理**（W5：单测钉"旧行读回 → `confirm_stale`，不 commit"） |
+| B3 | 拦截与提案流 | `pi-coding-driver.ts` `beforeToolCall` 在 plan 解析之后、gate 之前加一支：① **capability 复核**（宿主持有的授权，Generic——A 波标定：`voucher.proposal` 是 `access: scratch`，D-075 那道计划扫描兜底对提案步不触发，所以这一刀必须宿主自己下）；不成立 → 当场合成写关闭话术，`writeClosed` 语义与 D-075 一致。② 成立 → 宿主办调 `bin/17dz prepare voucher.proposal <file>`（serve 法域、剥 `DZ_REQUIRE_PLAN`，修 D-081），解析 RESULT 信封：completed → 落 B2 的记录 + 生成确认码，用户可见文本 = **平台 `summaryText` 原样 + 通用确认行**（宿主的借贷合计渲染在新路径上一行不写）；`needs_input` → 按确定性线索交还 worker；failed → 交还错误码 |
+| B4 | 新 commit 后端 + 三笔债 | `apps/server/proposal-commit.ts`（新，薄）：`bin/17dz commit voucher.commit --proposal-id <id>`，令牌 = HMAC over `{proposalId, expiresAt}`（不绑脚本名/业务字段）。`matchConfirmation` 按 `proposalId` 分流到新后端。**D-080**：confirm 分支按**确认时点**复核 capability（提案到确认之间能力被收回正是该缺口形状）；**D-081**：宿主直调显式剥 `DZ_REQUIRE_PLAN`；**D-082**：committed 与 confirm_failed 两个分支都 upsert originating `platform_tasks` 的 outcome |
+| B5 | 测试 | `proposal-runtime.test.ts`（B1，不起 harness）；`proposal-flow.test.ts`/e2e 写链路改走新路径（mock）：create→确认→commit→读回四态 + needs_input + 写关闭 + 影子不一致事件 + W5 旧行 fail-closed + W4 三态翻转（都是"现在红、修完绿"） |
+
+**B 波明确不做**：不删旧文本路径与 `commit.ts` 遗留 runner（C 波）、不清 leak-lint 三条"遗留待清"（`context.ts: 借贷` 在新路径上不再产生，但旧路径仍在使用它，C 波一起清）、不碰真平台。
+
+**B 波前置项（A 波实证）**：period ↔ 契约日期一致性校验未做（声明 7 月、契约 8 月会真落账后读回增量 0 → `PROPOSAL_VERIFY_SHORT` 响亮失败）。切流前要么平台在 create 挡掉，要么宿主侧加一道通用前置（不解释业务语义，只把平台返回的拒绝透传）。
 
 ### C 波（收口）
 
