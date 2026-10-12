@@ -10,14 +10,19 @@
  */
 import { createHash, randomInt, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
+import type { PlanCliRunner } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
-import { ToolUserError, type SubagentNeeds, type TurnDriverResult } from './driver';
+import { ToolUserError, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult } from './driver';
 import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
-import { isPlatformAuthError, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
+import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification } from './platform-contract';
+import { gatewayExecPath, parseEnvelope } from './platform-contract';
+import type { ProposalCreateCall } from './proposal-runtime';
+import { proposalViaGateway } from './platform-mock';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -113,6 +118,13 @@ export interface SubagentTaskResult {
    * 会话级连续失败记账与冷却；与 execution 不互斥——失败的那次调用真发生过。
    */
   authFailure?: PlatformAuthFailure;
+  /**
+   * 提案已登记（方案 1 · B 波 B3 网关提案路径，驱动侧 proposalCreated 的透传）：`text` 是
+   * **宿主持有的确定性文本**（平台 `summaryText` 原样 + 通用确认行）。宿主据此把这段文本
+   * 作为本轮回复——与 writeClosed 同一家族：出口校验的零执行标注不得覆盖它（提案这一步
+   * 可能零网关执行，而"提案已登记、等用户确认"是真实状态）。
+   */
+  proposalCreated?: { proposalId: string };
 }
 
 export type { SubagentNeeds };
@@ -143,6 +155,34 @@ export interface CommitResult {
   error?: string;
 }
 
+/**
+ * 新路径（提案归平台）的落账请求与结局（方案 1 · B 波 B4）。
+ *
+ * 与旧路径 CommitRequest/CommitResult 的分工：那个必须带业务字段（对象/时间/明细），因为
+ * 落账参数是宿主从 worker 提案文本里解出来的；这个**只有一个不透明提案号**——payload 全程
+ * 住在执行层自己的状态库里，宿主连"这次提交的是什么业务"都不知道（L4：宿主不该知道）。
+ * 用户可见文本因此只有两个来源：平台 `summaryText` 原样 + 宿主通用状态行。
+ */
+export interface ProposalCommitRequest {
+  /** 平台提案引用（取物单），创建时由平台 completed 信封给出。 */
+  proposalId: string;
+}
+/** 落账前平台取问的三种"提案已不可用"形态——都不是执行失败（一次写入都没发生）。 */
+export type ProposalUnavailableKind = 'expired' | 'not_pending' | 'unreadable';
+export interface ProposalCommitResult {
+  ok: boolean;
+  /** 平台读回校验是否通过（信封 verified 列）。 */
+  verified: boolean;
+  /** 平台渲染的用户可见摘要（成败都由平台执笔）；宿主只原样转述，不拼不改。 */
+  summaryText: string;
+  /** 审计留痕（信封原文 + 读回计数行）：进 change_intents.result，不上屏。 */
+  output: string;
+  /** 运维侧原因（平台错误码/退出码）；上屏话术由宿主通用文案承担。 */
+  error?: string;
+  /** 提案在平台侧已不可用：给用户确定性解释，不落账、不谎称执行失败。 */
+  unavailable?: ProposalUnavailableKind;
+}
+
 export interface ContextTaskRunnerOptions {
   profiles: Record<string, ContextProfileConfig>;
   tasks: PlatformTaskRepo;
@@ -168,6 +208,24 @@ export interface ContextTaskRunnerOptions {
   /** 测试注入点。 */
   generateCode?: () => string;
   hashCode?: (code: string) => string;
+  /**
+   * 提案创建网关调用（方案 1 · B 波 B3）的执行注入点：宿主办调平台 `prepare <operation>
+   * <payloadPath>`（cwd = platformRoot，serve 法域）。缺省用内置 spawn 实现；测试塞替身，
+   * 因此不起平台也能钉住三态分流与 env 纪律。
+   */
+  proposalGatewayRunner?: PlanCliRunner;
+  /**
+   * 新路径的落账后端是否已接（B4 接线后由部署层置真）。false 时给用户的确认行明说
+   * "确认不会写入任何数据"——不承诺还没接上的事：承诺了而确认步只会 fail-closed，是把
+   * 用户往一句谎话上引。
+   */
+  proposalCommitEnabled?: boolean;
+  /**
+   * 新路径的落账后端（B4）：确认码命中带 proposalId 的条目时，由服务端直调平台 commit
+   * （cwd = platformRoot，serve 法域）。缺省 = 未接线；此时 proposalCommitEnabled 也必须
+   * 为假（接线与开关同进同退），确认步只到达"确认收到但不写"。
+   */
+  proposalCommitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
 }
 
 export interface ContextTaskExecutionContext {
@@ -241,10 +299,109 @@ export interface ChangeProposal {
   summary: { count: number; debit: number; credit: number };
 }
 
+/**
+ * 旧文本路径的条目形状（方案 1 · B 波后的私有承载）。
+ *
+ * contracts 的 ChangeIntentRecord 已瘦身成"零业务字段、零 payload"：提案载荷归执行层
+ * 自己的提案状态库，宿主持有的只剩取物单 proposalId。影子期两条路并存——旧文本路径仍要
+ * 按自己的形状建条目、读条目，所以旧字段只在本文件内以这个私有接口承载，**不回填
+ * contracts**（回填就等于把业务字段请回编排层，L4 违例复发）。
+ *
+ * 字段一律可选：B 波后宿主库不再往返它们（store 的 rowToChangeIntent 只映射新字段），
+ * 读回来的条目可能一个都不带这些字段。写路径照旧填全（fake 存储与旧库历史行都还看得到），读
+ * 路径据此降级。C 波删旧路径时本接口随之消失。
+ */
+interface LegacyChangeIntentRecord extends ChangeIntentRecord {
+  kind?: 'voucher.batch';
+  accountSet?: string;
+  period?: string;
+  payload?: ChangeProposal;
+  summary?: { count: number; debit: number; credit: number };
+}
+
+/**
+ * 旧路径意图的用户可读标签。业务字段不在宿主库往返后可能缺失——那时降级成中性表述，
+ * 不把 undefined 渲染给用户。
+ */
+function legacyIntentLabel(record: LegacyChangeIntentRecord): string {
+  if (!record.summary) return '本次录入提案';
+  return `${record.accountSet} ${record.period} 的录入提案（${record.summary.count} 条）`;
+}
+
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 6;
 const CONFIRM_RE = /确认\s*([A-Z0-9]{6})/;
 const CANCEL_RE = /取消\s*([A-Z0-9]{6})/;
+
+/** 平台提案摘要进用户消息的长度上限：它是数据不是长文，超长按预算截断（不编辑含义）。 */
+const SUMMARY_TEXT_MAX_CHARS = 500;
+
+/**
+ * 落账未完成的用户话术（协议文本，唯一来源）：只说事实与下一步，不猜平台内部状态。
+ * 旧文件路径落账与新平台落账共用一句——两条路的失败对用户是同一件事。
+ */
+const COMMIT_FAILED_LINE = '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。';
+
+/**
+ * 新路径落账成功的宿主通用状态行（协议文本，唯一来源）：只陈述确认码的结局，不重复平台
+ * 摘要已经说过的内容（张数/合计由平台执笔，宿主拼一行就是第二份摘要）。
+ */
+const COMMIT_DONE_LINE = '确认码已核销，落账已完成。';
+
+/**
+ * 落账前平台取问说"提案已不可用"时的用户话术（按形态分流，都是确定性解释）。
+ *
+ * 为什么与"执行失败"分开：这三种形态下一次写入都没有发生，说"执行失败请联系管理员"是
+ * 把"请重新发起"这条唯一可行动的路藏了起来；而平台读不到状态时也不能假装知道原因。
+ */
+const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
+  expired: '该确认码对应的提案已过期（超过有效期），请重新发起录入。',
+  not_pending: '该确认码对应的提案已终结，无需重复确认；本次未写入任何数据。',
+  unreadable: '该确认码对应的提案当前不可用（平台侧读不到有效状态），本次未写入任何数据；请重新发起录入。',
+};
+
+/**
+ * 宿主直调平台网关的环境（serve 法域）：**显式剥 `DZ_REQUIRE_PLAN`**、显式声明 `DZ_SERVE`。
+ *
+ * 修 D-081：那个 mandate 是给 worker 的 bash 子进程的（每个 worker 命令都带它，见
+ * createPlanScopedWorkerEnv），服务进程自己并不带。宿主直调是"服务端替 worker 办一件事"，
+ * 不该被 worker 的计划门拦——否则同一份部署里服务端调得动、worker 调不动，或反过来，
+ * 取决于进程 env 恰好有什么。剥显式表达"这里不过计划门"，不靠继承来的 env 碰巧为空。
+ *
+ * 导出共认一份：宿主直调平台的两处（提案创建、提案落账，B 波 B3/B4）用同一把尺——
+ *  env 纪律在两处各写一遍，就是给"某一处忘了剥"留门。
+ */
+export function hostGatewayEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  delete env.DZ_REQUIRE_PLAN;
+  env.DZ_SERVE = '1';
+  return env;
+}
+
+/**
+ * 宿主直调平台网关的缺省实现（`prepare <operation> <payloadPath>`，cwd = platformRoot）。
+ *
+ * 与 plan-runtime 的 defaultCliRunner 同一形状（spawn + 收 stdout/stderr + 30s 超时），
+ * 因此测试可以塞同一个 PlanCliRunner 替身。超时/ spawn 失败按非零退出 + stderr 交还，
+ * 由调用方走"平台拒绝"分支——宿主不猜平台内部状态。
+ */
+const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env }) => new Promise((resolve, reject) => {
+  const child = spawn(gatewayExecPath(platformRoot), args, {
+    cwd: platformRoot,
+    env: { ...process.env, ...env },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stdout: Buffer[] = [];
+  const stderr: Buffer[] = [];
+  child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+  child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+  const timer = setTimeout(() => child.kill('SIGTERM'), 30_000);
+  child.once('error', (error) => { clearTimeout(timer); reject(error); });
+  child.once('close', (code) => {
+    clearTimeout(timer);
+    resolve({ code, stdout: Buffer.concat(stdout).toString('utf8'), stderr: Buffer.concat(stderr).toString('utf8') });
+  });
+});
 
 function defaultGenerateCode(): string {
   let out = '';
@@ -353,6 +510,265 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    */
   type ProposalOutcome = 'proposal_declined' | 'proposal_precheck_failed' | 'proposal_created';
 
+  /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。两条路同一把尺。 */
+  function confirmLineFor(code: string, commitLive: boolean): string {
+    const ttlMinutes = Math.round(intentTtlMs / 60_000);
+    return commitLive
+      ? `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`
+      : `回复「确认 ${code}」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
+  }
+
+  /**
+   * 平台 `summaryText` 的取用卫生（进用户消息的数据）：剥控制字符、折叠空白、截断。
+   *
+   * 为什么不是"原样拼上"：它是进用户回复的**数据**，与平台 correctForm / 候选名同一族
+   * （platform-contract 的 correctFormOf 同一套卫生）。截断是预算不是编辑——平台的提案
+   * 摘要是一句话，正常形态远低于上限；控制字符则一律不该进用户消息。
+   */
+  function summaryTextOf(value: unknown): string {
+    if (typeof value !== 'string') return '';
+    return value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, SUMMARY_TEXT_MAX_CHARS);
+  }
+
+  /**
+   * 平台 `needs_input` 信封 → 纠错环线索（确定性，零 worker 文本解析）。
+   *
+   * missing 只取平台结构化 `data.needs[].name`——那是平台自己说"还缺哪个对象"的字段；
+   * reason 用信封的码与消息。信封两者都不给时降级成中性标签，绝不猜。
+   */
+  function proposalNeedsOf(envelope: PlatformEnvelope): SubagentNeeds {
+    const data = envelope.data as { needs?: unknown } | null;
+    const names = Array.isArray(data?.needs)
+      ? data.needs
+        .map((item) => (item && typeof item === 'object' ? (item as { name?: unknown }).name : undefined))
+        .filter((name): name is string => typeof name === 'string' && name.length > 0)
+      : [];
+    const code = envelope.error?.code;
+    const message = envelope.error?.message;
+    const reason = [code, message].filter((part) => typeof part === 'string' && part).join('：');
+    return {
+      missing: names.length > 0 ? names : ['平台要求的补充信息'],
+      reason: `${reason || '平台需要更多信息才能创建提案'}（平台返回 needs_input）`,
+    };
+  }
+
+  /**
+   * 网关提案路径（方案 1 · B 波 B3）：worker 的提案创建网关调用被驱动拦下后，由宿主办调
+   * 平台 create，把结局三态交还驱动。
+   *
+   * 与旧文本路径（finalizeProposal）的分工：那条解析 worker 终稿里的提案 JSON、自己渲染
+   * 业务摘要；这条**不解析 payload**——payload 全程不进宿主，宿主持有的只剩平台返回的
+   * 取物单 proposalId + 通用确认状态。用户可见文本因此只有两个来源：平台 `summaryText`
+   * 原样 + 宿主通用确认行，不写任何业务摘要。
+   *
+   * 顺序即安全：capability 复核（宿主持有的授权）→ 授权名单复核 → 办调平台 → 落意图条目
+   * → 生成确认码。能力不成立时**零平台调用**（不办调），当场合成写关闭话术。
+   */
+  async function createProposalViaGateway(
+    call: ProposalCreateCall,
+    ctx: ContextTaskExecutionContext,
+    taskId: string,
+    platformRoot: string,
+  ): Promise<ProposalCreationOutcome> {
+    const capabilities = ctx.trusted.capabilities ?? [];
+    // ① capability 复核（Generic，不依赖任何 operation 名）：A 波标定——创建提案的
+    // operation 声明为 access: scratch，平台 `confirm` 列为假，所以 D-075 那道"计划里出现
+    // 写类 operation 就前置合成"的机械兜底对提案步不触发；这一刀必须宿主自己下，而宿主
+    // 确切知道"正在创建提案"这一刻。话术唯一来源在 error-codes.ts（WRITE_NOT_ENABLED），
+    // 与计划门拒绝、旧提案路径同一句。
+    if (!capabilities.includes('write')) {
+      const text = messageTextFor('WRITE_NOT_ENABLED');
+      return { status: 'write_closed', userText: text, workerText: text };
+    }
+    // ② 授权名单限制模式（host-held scope，与旧路径同判据）：名称到 id 的映射不在 fshine 侧，
+    // V1 仅对 scope=all 的账号开放写。payload 不透明不等于这条可以丢——丢了就是把允许名单
+    // 受限主体的写面放大。
+    if (ctx.trusted.allowedAccountSetIds.length > 0) {
+      const text = '当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。';
+      return { status: 'write_closed', userText: text, workerText: text };
+    }
+    // ③ 办调平台（serve 法域；env 显式剥 DZ_REQUIRE_PLAN——修 D-081：宿主直调不该被
+    // worker 的计划门拦，那个 mandate 是给 worker 子进程的）。operation 名来自驱动拦截时
+    // 从命令里取到的目标 token（平台 protocol 列已声明它扮演创建提案角色），宿主不另持
+    // 一份业务 operation 名单。
+    const result = await (options.proposalGatewayRunner ?? defaultProposalGatewayRunner)({
+      platformRoot,
+      args: ['prepare', call.operation, call.payloadPath],
+      env: hostGatewayEnv(),
+    });
+    const envelope = parseEnvelope(result.stdout);
+    if (!envelope) {
+      return { status: 'failed', workerText: `平台未返回 RESULT 信封（exit ${result.code}）：${(result.stderr || result.stdout).trim().slice(0, 300)}` };
+    }
+    if (envelope.status === 'completed') {
+      const data = envelope.data as { proposalId?: unknown; summaryText?: unknown } | null;
+      const proposalId = typeof data?.proposalId === 'string' ? data.proposalId.trim() : '';
+      const summaryText = summaryTextOf(data?.summaryText);
+      // 平台说 completed 却不给取物单或摘要：不能建条目（没有 proposalId 就无法在确认后
+      // 定位提案），也不能把一句空摘要发给用户。按失败处理，原因说清缺什么。
+      if (!proposalId || !summaryText) {
+        return { status: 'failed', workerText: `平台的 completed 信封缺少 proposalId/summaryText（proposalId=${proposalId || '空'}），未创建待确认任务。` };
+      }
+      const ci = options.changeIntents;
+      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
+      // 新提案使旧 pending 作废（与旧路径同一语义）：会话里同时只留一个待确认提案。
+      const active = await ci.findPendingBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
+      if (active) await ci.updateStatus(active.intentId, 'superseded');
+      const code = generateCode();
+      const now = new Date();
+      // 新形状：零业务字段、零 payload——proposalId（取物单）+ taskId（关联执行事实）+
+      // 确认状态机必需的通用字段。
+      await ci.create({
+        intentId: `intent_${randomUUID()}`,
+        principalId: ctx.trusted.principalId,
+        sessionId: ctx.trusted.sessionId,
+        taskId,
+        proposalId,
+        confirmCodeHash: hashCode(code),
+        status: 'pending',
+        createdAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + intentTtlMs).toISOString(),
+      });
+      console.info(JSON.stringify({
+        event: 'proposal_created',
+        requestId: ctx.trusted.requestId,
+        taskId,
+        gateway: 'on',
+      }));
+      return {
+        status: 'completed',
+        proposalId,
+        // 用户可见文本 = 平台 summaryText 原样 + 通用确认行（宿主不拼任何业务摘要）。
+        userText: [summaryText, confirmLineFor(code, options.proposalCommitEnabled === true)].join('\n'),
+        // 给 worker 的确定性消息：提案已登记 + 等用户确认，**不含确认码**。
+        workerText: '提案已在平台登记，等待用户确认。本回合到此结束：不要再输出提案 JSON，也不要尝试提交或确认。',
+      };
+    }
+    if (envelope.status === 'needs_input') {
+      const needs = proposalNeedsOf(envelope);
+      return { status: 'needs_input', needs, workerText: `平台还需要更多信息才能创建提案：${needs.reason}` };
+    }
+    const errorCode = envelope.error?.code;
+    const errorMessage = envelope.error?.message;
+    const detail = [errorCode, errorMessage].filter((part) => typeof part === 'string' && part).join('：');
+    return {
+      status: 'failed',
+      workerText: `平台拒绝创建提案：${detail || `status=${envelope.status}`}（exit ${result.code}）`,
+      ...(errorCode ? { errorCode } : {}),
+    };
+  }
+
+  /**
+   * 发起提案的子任务结局回写（D-082）：committed 与 confirm_failed 两个分支都把 originating
+   * `platform_tasks` 的 outcome 推到终态。
+   *
+   * 为什么必须有：落账是这一轮的终点，而任务条目是"这次委派发生了什么"的自含事实源
+   * （D-065）。不回写时条目永远停在创建时的样子，召回台账与不变量检查器看到的是一个
+   * 悬挂任务——"写成功了但任务没结局"于是只能靠例外清单放行（invariant-checker L1 的
+   * expectedOpenTasks 即此形状，B 波后已撤）。
+   *
+   * 失败只记日志：回写是事实投影的补全，不该让已经结束的落账回合翻红。
+   */
+  async function writeBackTaskOutcome(taskId: string | undefined, outcome: PlatformTaskRecord['outcome']): Promise<void> {
+    if (!taskId) return;
+    try {
+      const existing = await options.tasks.get(taskId);
+      if (!existing) return;
+      await options.tasks.upsert({ ...existing, outcome, updatedAt: new Date().toISOString() });
+    } catch (error) {
+      console.warn(JSON.stringify({
+        event: 'platform_task_outcome_writeback_failed',
+        taskId,
+        outcome,
+        error: error instanceof Error ? error.message.slice(0, 160) : String(error),
+      }));
+    }
+  }
+
+  /**
+   * 新路径（带 proposalId 的条目）的确认落账（方案 1 · B 波 B4）：确认码命中后由服务端
+   * 直调平台 commit，全程不经任何模型。
+   *
+   * 与旧路径（finalizeProposal + legacy commitRunner）的分工：那条自己解提案、自己渲染
+   * 业务摘要、自己拿冻结载荷落账；这条**只持有一个取物单**——payload 在平台侧，宿主连
+   * "在提交什么业务"都不知道。用户可见文本因此只有两个来源：平台 `summaryText` 原样 +
+   * 宿主通用状态行。
+   *
+   * 三笔债的落点：
+   *   · D-080 第 ① 步：capability 按**确认时点**复核，不认提案时的快照（"提案成立后
+   *     收回写权限"正是这个缺口的形状）；
+   *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 DZ_REQUIRE_PLAN）；
+   *   · D-082 由 writeBackTaskOutcome 承担（committed / confirm_failed 都回写终态）。
+   */
+  async function confirmProposalViaGateway(
+    rec: ChangeIntentRecord,
+    proposalId: string,
+    ctx: TrustedContext,
+  ): Promise<ConfirmationReply> {
+    const ci = options.changeIntents!;
+    // ① D-080：确认时点复核 capability。判据与提案时那一刀完全相同（宿主持有的授权，
+    // Generic，不依赖任何 operation 名）——差别只在**时点**：授权可能在提案与确认之间被
+    // 收回（运维关了写、principal 权限变更），那时这个码必须被拒。不通过 → 意图保持
+    // pending：提案还在平台侧有效，用户修好权限或作废后仍可继续，不借"过期"说谎。
+    if (!(ctx.capabilities ?? []).includes('write')) {
+      console.warn(JSON.stringify({
+        event: 'change_intent_confirm_declined',
+        intentId: rec.intentId,
+        reason: 'capability_revoked_at_confirm',
+      }));
+      return {
+        text: `确认已收到，但${messageTextFor('WRITE_NOT_ENABLED')}本次未写入任何数据，提案保持待确认。`,
+        outcome: 'confirm_held',
+      };
+    }
+    // ② 落账后端未接（部署开关关着）：确认收到但不写——与 legacy 的 commitEnabled 同语义。
+    // 承诺必须与能力对齐：说了"确认即录入"而这一步只会 fail-closed，是把用户往谎话上引。
+    if (options.proposalCommitEnabled !== true) {
+      return {
+        text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。',
+        outcome: 'confirm_held',
+      };
+    }
+    const commitRunner = options.proposalCommitRunner;
+    if (!commitRunner) {
+      // 开关说接了、后端却没注入 = 配置故障。fail-closed：不猜一个执行器出来。
+      console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, reason: 'proposal_commit_runner_missing' }));
+      await ci.updateStatus(rec.intentId, 'failed', { error: 'proposal commit runner 未配置' });
+      await writeBackTaskOutcome(rec.taskId, 'failed');
+      return { text: '执行失败：落账执行器未配置，请联系管理员。', outcome: 'confirm_failed' };
+    }
+    const out = await commitRunner({ proposalId });
+    // 平台摘要进用户消息前过同一把卫生尺（剥控制字符/折叠空白/截断）：它是数据不是长文。
+    const summaryText = summaryTextOf(out.summaryText);
+    // ③ 提案在平台侧已不可用：确定性解释 + 意图归档，一次写入都没发生（不是执行失败）。
+    // 意图按"这个确认码已经不能再用"归档成 expired——平台侧 payload 的实际结局以平台
+    // 状态库为准，用户话术不代平台宣布写入结果。
+    if (out.unavailable) {
+      console.warn(JSON.stringify({
+        event: 'change_intent_confirm_declined',
+        intentId: rec.intentId,
+        reason: `proposal_${out.unavailable}`,
+      }));
+      await ci.updateStatus(rec.intentId, 'expired', { output: out.output.slice(0, 2000), ...(out.error ? { error: out.error } : {}) });
+      return { text: PROPOSAL_UNAVAILABLE_TEXT[out.unavailable], outcome: 'confirm_stale' };
+    }
+    if (!out.ok) {
+      console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
+      await ci.updateStatus(rec.intentId, 'failed', {
+        output: out.output.slice(0, 2000),
+        verified: out.verified,
+        ...(out.error ? { error: out.error } : {}),
+      });
+      await writeBackTaskOutcome(rec.taskId, 'failed');
+      return { text: summaryText ? [summaryText, COMMIT_FAILED_LINE].join('\n') : COMMIT_FAILED_LINE, outcome: 'confirm_failed' };
+    }
+    await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000), verified: out.verified });
+    await writeBackTaskOutcome(rec.taskId, 'done');
+    // 用户可见文本 = 平台 summaryText 原样 + 宿主通用状态行。平台没给摘要时只发状态行
+    // （平台自己说 ok/verified，宿主据实陈述确认码结局，不替它补一句摘要）。
+    return { text: summaryText ? [summaryText, COMMIT_DONE_LINE].join('\n') : COMMIT_DONE_LINE, outcome: 'confirm_executed' };
+  }
+
   async function finalizeProposal(
     proposal: ChangeProposal,
     ctx: ContextTaskExecutionContext,
@@ -386,7 +802,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
 
     const code = generateCode();
     const now = new Date();
-    const record: ChangeIntentRecord = {
+    const record: LegacyChangeIntentRecord = {
       intentId,
       principalId: ctx.trusted.principalId,
       sessionId: ctx.trusted.sessionId,
@@ -439,7 +855,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
           await ci.updateStatus(rec.intentId, 'cancelled');
-          return { text: `已作废：${rec.accountSet} ${rec.period} 的录入提案（${rec.summary.count} 条）未执行。`, outcome: 'confirm_cancelled' };
+          return { text: `已作废：${legacyIntentLabel(rec as LegacyChangeIntentRecord)}未执行。`, outcome: 'confirm_cancelled' };
         }
         const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
         if (!stale) return null;
@@ -459,23 +875,39 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const hash = hashCode(confirmM[1]!);
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
+          // 按条目形状分流（B 波唯一的判别）：带 proposalId → 新路径（平台 commit 后端，
+          // B4）；不带 → 旧文本路径（legacy runner，C 波删）。确认状态机只有这一套。
+          if (rec.proposalId) return confirmProposalViaGateway(rec, rec.proposalId, ctx);
           if (!options.commitEnabled) {
             return { text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。', outcome: 'confirm_held' };
           }
           const commitRunner = options.commitRunner;
           if (!commitRunner) {
             await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });
+            await writeBackTaskOutcome(rec.taskId, 'failed');
             return { text: '执行失败：落账执行器未配置，请联系管理员。', outcome: 'confirm_failed' };
           }
-          const contracts = (rec.payload as ChangeProposal).contracts;
-          const out = await commitRunner({ intentId: rec.intentId, accountSet: rec.accountSet, period: rec.period, contracts });
+          // 本分支只服务"不带 proposalId"的旧路径条目（带引用的新路径由 B4 分流到平台
+          // commit 后端）。旧路径的冻结载荷已不在宿主库往返（B 波：契约零 payload、store
+          // 不再读写旧列），所以**拿不到载荷就不能落账**——没有冻结参数就 commit 等于盲写。
+          // 与 W5 同一条判据：旧行业（有 kind/account_set、无 proposalId）一律按过期处理。
+          const frozen = (rec as LegacyChangeIntentRecord).payload;
+          if (!frozen) {
+            console.warn(JSON.stringify({ event: 'change_intent_commit_declined', intentId: rec.intentId, reason: 'no_frozen_payload' }));
+            await ci.updateStatus(rec.intentId, 'expired');
+            return { text: '该确认码对应的提案已过期（超过有效期），请重新发起录入。', outcome: 'confirm_stale' };
+          }
+          const out = await commitRunner({ intentId: rec.intentId, accountSet: frozen.accountSet, period: frozen.period, contracts: frozen.contracts });
           if (!out.ok) {
             console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
             await ci.updateStatus(rec.intentId, 'failed', { output: out.output.slice(0, 2000), error: out.error });
-            return { text: '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。', outcome: 'confirm_failed' };
+            // D-082：失败分支同样回写 originating 任务终态（与新路径同一把尺）。
+            await writeBackTaskOutcome(rec.taskId, 'failed');
+            return { text: COMMIT_FAILED_LINE, outcome: 'confirm_failed' };
           }
           await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
-          return { text: `已完成：${rec.summary.count} 条已录入（${rec.accountSet} ${rec.period}），读回校验通过。`, outcome: 'confirm_executed' };
+          await writeBackTaskOutcome(rec.taskId, 'done');
+          return { text: `已完成：${frozen.summary.count} 条已录入（${frozen.accountSet} ${frozen.period}），读回校验通过。`, outcome: 'confirm_executed' };
         }
         // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
         // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
@@ -541,6 +973,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       let result: TurnDriverResult | undefined;
       const delegationStart = Date.now();
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
+      // 网关提案路径开关（W2）：开 = 驱动拦截提案命令并经下方 onCreateProposal 办调平台；
+      // 关 = 不注入回调、驱动不拦截，走今天的文本路径（finalizeProposal）。读一次，本回合
+      // 的审计与影子判定都用这一份，不存在"驱动说开、宿主说关"的两个真相。
+      const gatewayProposals = proposalViaGateway();
+      // 开关状态每回合留痕（W2 一键回滚的取证）：回滚之后要能回答"这一回合走的是哪条路"。
+      // 与 delegation_span 同一族的结构化日志（每委派一次一行）；拦截发生处另有 tool_calls
+      // 一行（驱动侧 reportProposalInterception，tool = proposal_create）。
+      console.info(JSON.stringify({ event: 'delegation_gateway_state', requestId: ctx.trusted.requestId, taskId, proposalGateway: gatewayProposals }));
       try {
         // 并发闸：worker 会话期间独占下游平台（默认全局串行，见文件顶部说明）
         const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
@@ -565,6 +1005,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而能力不含
             // write 时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读。
             capabilities: ctx.trusted.capabilities,
+            // 提案创建网关路径（B 波 B3）：只在开关开着时注入。没注入 = 驱动不拦截，
+            // 提案走文本路径。宿主持有办调权：读文件、校验、落意图条目、发确认码全在
+            // 服务端，worker 只提供 payload 路径。
+            ...(gatewayProposals && options.changeIntents ? {
+              onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
+            } : {}),
           });
         } finally {
           release();
@@ -609,8 +1055,33 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input' }));
           return { taskId, text: result.text, needs: result.needs };
         }
+        // 提案已登记（网关路径，B 波 B3）：宿主持有的确定性文本（平台 summaryText + 确认行）
+        // 原样上交，任务条目照常落（这一轮的转录与执行事实要能续跑）。必须**先于**下面的
+        // 文本路径判定：新路径下 worker 终稿里不该再有提案 JSON，若仍有（影子期旧形态），
+        // 那是要留痕的不一致，不是要执行的提案。
+        if (result.proposalCreated) {
+          await options.tasks.upsert({
+            ...withExecutionFacts(running, result, 'done'),
+            workerMessages: result.messages as unknown[],
+            updatedAt: new Date().toISOString(),
+          });
+          console.info(JSON.stringify({
+            event: 'delegation_span',
+            requestId: ctx.trusted.requestId,
+            taskId,
+            durationMs: Date.now() - delegationStart,
+            outcome: 'proposal_created',
+            proposalGateway: true,
+          }));
+          return {
+            taskId,
+            text: result.text,
+            proposalCreated: result.proposalCreated,
+            ...(result.execution ? { execution: result.execution } : {}),
+          };
+        }
         const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
-        if (proposal) {
+        if (proposal && !gatewayProposals) {
           const handled = await finalizeProposal(proposal, ctx, taskId);
           await options.tasks.upsert({
             ...running,
@@ -624,6 +1095,19 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 丢掉 execution 会让出口校验误判"委派+零执行"，用 NO_EXECUTION_CLARIFICATION
           // 顶掉含确认码的预览——写链路因此端到端不可达（4dd7490 回归）。
           return { ...handled.result, ...(result.execution ? { execution: result.execution } : {}) };
+        }
+        if (proposal && gatewayProposals) {
+          // 影子不一致（W1）：开关开着，而 worker 终稿里仍带旧形态的提案 JSON。**只留痕**——
+          // 不生效、不解析、不落库。为什么必须把旧路径整个关掉而不是"两条都建"：旧路径的
+          // `ci.create` + "把旧 pending 置 superseded" 会把新路径刚建的 pending 条目作废掉
+          // （B 波第 1 批实证），用户手里的确认码随之失效。关掉旧路径，这一轮就只是一条
+          // 供比对的事件留痕。
+          console.warn(JSON.stringify({
+            event: 'proposal_shadow_mismatch',
+            requestId: ctx.trusted.requestId,
+            taskId,
+            proposalChars: result.text.length,
+          }));
         }
         const final: SubagentTaskResult = {
           taskId,

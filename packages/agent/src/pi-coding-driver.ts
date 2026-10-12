@@ -17,12 +17,14 @@ import {
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type DriverMessage, type PlanCallFacts, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
-import { createServeGate, describePlanCalls, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
-import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
+import { proposalViaGateway } from './platform-mock';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities } from './turn-contract';
 
@@ -190,8 +192,20 @@ export interface PiCodingTurnDriverOptions {
    * operation 名单（L2）。缺省经平台 CLI 派生一次。
    */
   operationSemantics?: OperationSemantics;
+  /**
+   * operation → 平台协议角色表（`operation list --json` 的 `protocol` 列，A 波新增；测试
+   * 替身注入点）。提案创建拦截的机械来源：宿主据此认出"这个 operation 在写流程里扮演
+   * 创建提案的角色"，不认业务 operation 名、不认脚本路径。缺省经平台 CLI 派生一次
+   * （失败 = 空表 = 不拦截，平台门禁照旧兜底）。
+   */
+  operationProtocols?: OperationProtocols;
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
+  /**
+   * 提案创建网关路径开关（W2；测试替身注入点）。缺省经 options.env 读
+   * `FSHINE_PROPOSAL_VIA_GATEWAY`（默认关 = 不拦截，走今天的文本路径）。
+   */
+  proposalViaGateway?: boolean;
   /**
    * A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
    * 判据见 platformExecutorBypassed；调用方只负责留痕（审计/日志），不得据此改回合结果。
@@ -240,6 +254,26 @@ export interface PiCodingWorkerSessionOptions {
    * 缺省本会话自派生一次（失败 = 空表 = 写类判定不生效，平台门禁照旧兜底）。
    */
   operationSemantics?: OperationSemantics;
+  /**
+   * operation → 平台协议角色表（`operation list --json` 的 `protocol` 列）：提案创建拦截
+   * 的机械来源（B 波 B3）。缺省本会话自派生一次（失败 = 空表 = 不拦截，落回 serve 门）。
+   */
+  operationProtocols?: OperationProtocols;
+  /**
+   * 提案创建网关路径的宿主出口（B 波 B3）：宿主经它办调平台 create，驱动按返回的三态处理。
+   * 缺省 = 不拦截（fail-closed 到"宿主不认这条路"，门与平台照旧裁决）。
+   */
+  onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
+  /**
+   * 开关状态（W2，宿主注入）：false = 本会话完全不拦截提案命令（今天的文本路径）。
+   * 缺省读进程 env 的 `FSHINE_PROPOSAL_VIA_GATEWAY`（默认关）。
+   */
+  proposalViaGateway?: boolean;
+  /**
+   * 提案创建拦截的结局出口（驱动侧 latch 用，与 onPendingPlan 同族）：completed /
+   * write_closed 时调用，驱动据此在结果时刻用宿主持有的文本终结本回合。
+   */
+  onProposalOutcome?: (outcome: Extract<ProposalCreationOutcome, { status: 'completed' | 'write_closed' }>) => void;
 }
 
 export interface PiCodingWorkerSession {
@@ -336,6 +370,19 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     semanticsCache.set(root, loading);
     return loading;
   };
+  // 协议角色表（提案创建拦截的机械来源，B 波 B3）：与 label/规格/语义三张表同一手法——按
+  // 平台根路径缓存一次，绝不每条命令 spawn 一次 CLI。派生失败/平台还没下发 protocol 列
+  // → 空表 → 不拦截（fail-closed 到"这不是提案调用"），门与平台照旧裁决。
+  const protocolCache = new Map<string, Promise<OperationProtocols>>();
+  const operationProtocolsFor = (workerCwd: string): Promise<OperationProtocols> => {
+    if (options.operationProtocols) return Promise.resolve(options.operationProtocols);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = protocolCache.get(root);
+    if (cached) return cached;
+    const loading = loadOperationProtocols(root).catch(() => new Map<string, string>());
+    protocolCache.set(root, loading);
+    return loading;
+  };
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
@@ -375,6 +422,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 回合内仍然只补一次（内联单次，见下方 if）：绝不在同一回合里反复推同一个模型。
       let activatedPlanNudged = false;
       let pendingPlan: PendingPlanConfirmation | undefined;
+      // 提案创建拦截的结局（B 波 B3）：宿主办调平台成功后本回合以此终结，所以它必须
+      // latch 在 run() 作用域里——beforeToolCall 在会话里跑，结果时刻才读它。
+      let proposalOutcome: Extract<ProposalCreationOutcome, { status: 'completed' | 'write_closed' }> | undefined;
       // ── 进度帧 / 计划通知的连续重复压制（2026-09-26 真实平台战斗测试实测）──────────
       // worker 在真实调用之后常继续重提执行方案（beforeToolCall 里 activePlan 置空再
       // evaluateAndActivatePlan，后续提交可能 scope 识别失败被拒），每次重提都触发同一帧
@@ -422,6 +472,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
+        // 协议角色表（提案创建拦截的机械来源）与开关状态、宿主出口一起进会话。
+        operationProtocols: await operationProtocolsFor(input.cwd),
+        proposalViaGateway: options.proposalViaGateway ?? proposalViaGateway(options.env),
+        ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
         capabilities: input.capabilities,
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
@@ -459,6 +513,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         planCliRunner: options.planCliRunner,
         planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
+        onProposalOutcome: (outcome) => { proposalOutcome = outcome; },
         turnDeclaration: input.turnDeclaration,
         entitySources: input.entitySources,
       });
@@ -475,6 +530,30 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // ——它们是宿主机械事实，与终稿文本的替换互不相干。
       const closureText = (): string | null =>
         writeClosed() && !pendingPlan ? messageTextFor('WRITE_NOT_ENABLED') : null;
+      // 提案创建拦截的终稿（B 波 B3）：宿主办调平台 create 成功（或宿主写授权不成立）时，
+      // 本回合以此终结，`text` 是宿主持有的确定性文本——平台 summaryText 原样 + 通用确认行
+      // （completed）或写关闭话术（write_closed）。为什么必须整体替换而不是让 worker 接着说：
+      // 用户这一刻需要的是"提案已登记 + 确认码"，worker 的后续叙述只会稀释它；而确认码**只**
+      // 出现在这段文本里（给 worker 的拦截理由不含码），所以终稿必须来自这里而不是转录。
+      // 结构化字段（planFacts/execution）照常带上：它们是宿主机械事实。
+      // 优先于 closureText()：写关闭那一态的文本由宿主按具体原因合成（能力关闭 / 授权名单
+      // 限制模式），不是一句通用 WRITE_NOT_ENABLED。
+      const proposalReply = async (): Promise<TurnDriverResult | null> => {
+        const outcome = proposalOutcome;
+        if (!outcome) return null;
+        // input.cwd 的窄化在闭包里不保留（上面已抛过空 cwd），这里取一次局部值。
+        const workerCwd = input.cwd ?? '';
+        const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(workerCwd));
+        const proof = execution();
+        return {
+          text: outcome.userText,
+          messages: session.agent.state.messages,
+          footprint: footprint(),
+          ...(facts ? { planFacts: facts } : {}),
+          ...(proof ? { execution: proof } : {}),
+          ...(outcome.status === 'completed' ? { proposalCreated: { proposalId: outcome.proposalId } } : { writeClosed: true }),
+        };
+      };
       // Host-verifiable proof that this delegated turn really executed against the platform.
       // 判据只有一条：至少一次被放行的网关调用（gateCalls > 0）。
       //
@@ -581,6 +660,11 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // message to input.messages. Calling the underlying Agent avoids
         // duplicating it through AgentSession.prompt().
         await session.agent.continue();
+        // 提案创建拦截成功（B 波 B3）：本回合以此终结——先于超时/取消/补刀等一切收尾检查。
+        // 提案登记是既成事实（平台侧已有提案、宿主已建意图条目），worker 之后说了什么、
+        // 这一轮是否超时都不改变它；用户要的是确认码，不是后续叙述。
+        const settled = await proposalReply();
+        if (settled) return settled;
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
           const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
@@ -623,7 +707,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const choice = clarification();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
         const closed = closureText();
-        return {
+        // 补刀那一轮里拦截成功也要发声（提案可能在补刀轮才抵达）：与上面同一个理由——
+        // 确认码只在这段文本里。恒为 null 时走原有收尾，行为一字不变。
+        const settledAfterNudge = await proposalReply();
+        return settledAfterNudge ?? {
           text: closed ?? lastAssistantText(session.agent.state.messages),
           ...(closed ? { writeClosed: true } : {}),
           messages: session.agent.state.messages,
@@ -650,7 +737,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }));
         const proof = execution();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-        return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
+        // 异常出口也要让拦截成功的提案发声：提案已登记是既成事实，会话随后抛什么不改变它，
+        // 而确认码只在这段文本里——丢了用户就永远拿不到码。
+        const settledAfterError = await proposalReply();
+        return settledAfterError ?? { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
       } finally {
         clearTimeout(abortTimer);
         input.signal?.removeEventListener('abort', cancel);
@@ -710,6 +800,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案路径的既有拒绝照旧兜底），
   // 绝不回退到宿主硬编码 operation 名单或 access 词表。
   const operationSemantics = options.operationSemantics ?? (await loadOperationSemantics(options.cwd));
+  // 协议角色表（平台 `operation list --json` 的 protocol 列）：提案创建拦截的机械来源
+  // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
+  // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
+  const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd));
+  // 开关状态（W2）：关 = 本会话完全不拦提案命令，走今天的文本路径。缺省读进程 env。
+  const proposalGateway = options.proposalViaGateway ?? proposalViaGateway();
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
@@ -837,9 +933,79 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           reportPlanSubmission({ reason: reason || '计划评估未返回判定', detail: describePlanCalls(parsed.calls) });
         }
       }
+      // ── 提案创建拦截（方案 1 · B 波 B3）────────────────────────────────────────
+      // 位置：计划解析之后、gate() 之前。为什么必须在 gate 之前：这条路径**提前 return**，
+      // 若落进 gate，worker 的网关调用就真的打到平台——平台会创建提案，而宿主持有的意图
+      // 条目、确认码、用户可见摘要全都不存在，用户拿不到确认码（A 波标定的缺口形状）。
+      //
+      // 开关关着时整支不出现（proposalGateway）：影子期两条路都在，关 = 回今天的文本路径。
+      const proposalCall = proposalGateway
+        ? parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols)
+        : null;
+      if (proposalCall) return decideProposalCreation(proposalCall);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });
   };
+
+  /**
+   * 提案创建网关调用的宿主裁决（B 波 B3）：文件边界检查 → 宿主办调平台 → 三态分流 → 审计。
+   *
+   * 为什么独立成函数（与 decidePlanSubmission 同一理由）：这条路径提前 return，不经 gate()，
+   * 门的 onEvent 一次都不触发，审计必须由宿主自己上报。出口有四条（越界 / 缺回调 / 办调三态），
+   * 漏挂任何一条都是静默不落账。
+   */
+  async function decideProposalCreation(call: ProposalCreateCall): Promise<ServeGateVerdict> {
+    // payload 路径的通用文件边界检查（安全，非业务）：路径经 workspaceRelPath 解析后必须
+    // 落在本轮 scratchDir（tmp/<requestId>）内。理由：payload 路径来自 worker 命令，不检查
+    // 就等于让 worker 指使平台去读工作区里任意文件、再把错误信息带回来看——那是一道通用
+    // 读取面，与提案业务无关。判据与 write 门同一把尺（workspaceRelPath + isInsideScratch），
+    // 不存在第二份路径解析。
+    const scratchDir = options.requestId ? `tmp/${options.requestId}` : null;
+    const rel = scratchDir ? workspaceRelPath(options.cwd, call.payloadPath) : null;
+    if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
+      const reason = `PROPOSAL REFUSED：payload 路径越界（只准本轮可写位置 ${scratchDir ?? '（未分配）'} 内），未调用平台。`;
+      reportProposalInterception({ reason, detail: call.payloadPath });
+      return { block: true, reason };
+    }
+    const create = options.onCreateProposal;
+    // 没配宿主出口 = 配置故障，fail-closed：拦下而不放行。放行等于让平台建一个宿主持不
+    // 住确认码的提案（用户永远拿不到码），那正是本支要关掉的缺口。
+    if (!create) {
+      const reason = 'PROPOSAL REFUSED：宿主未配置提案创建出口，已停止（未调用平台）。';
+      reportProposalInterception({ reason, detail: `${call.operation} ${call.payloadPath}` });
+      return { block: true, reason };
+    }
+    const outcome = await create(call);
+    // completed / write_closed 两种结局交给驱动侧 latch：本回合以此终结，结果时刻的文本
+    // 由宿主持有（平台 summaryText + 确认行 / 写关闭话术），不是 worker 文本。
+    if (outcome.status === 'completed' || outcome.status === 'write_closed') {
+      if (outcome.status === 'write_closed') writeClosed = true;
+      options.onProposalOutcome?.(outcome);
+    }
+    // 给 worker 的确定性消息（**绝不含确认码**：码只出现在给用户的文本里，见 driver 侧
+    // proposalReply 的 userText）。措辞是宿主协议前缀 + 平台错误码 / 平台状态，不解释业务。
+    const reason = outcome.status === 'completed' ? `PROPOSAL CREATED：${outcome.workerText}`
+      : outcome.status === 'write_closed' ? `PROPOSAL WRITE_CLOSED：${outcome.workerText}`
+        : outcome.status === 'needs_input' ? `PROPOSAL NEEDS_INPUT：${outcome.workerText}`
+          : `PROPOSAL FAILED：${outcome.workerText}`;
+    // needs_input 的线索进纠错环（与宿主计划拦截同一机制）：missing/reason 来自平台信封的
+    // 结构化字段，**绝不**对 worker 自由文本做模糊匹配。
+    if (outcome.status === 'needs_input') needsClues.push(outcome.needs);
+    reportProposalInterception({ reason, detail: `${call.operation} ${call.payloadPath}` });
+    return { block: true, reason };
+  }
+
+  /** 提案拦截审计（与 G1 门同一口径：一行 tool_calls，errorCode 由 assembly 落 GATE_BLOCKED）。 */
+  function reportProposalInterception(event: { reason: string; detail: string }): void {
+    options.serveGateAudit?.({
+      tool: 'proposal_create',
+      // 每个出口都是 block（越界 / 缺回调 / 三态交还的含义都是"这一跳不许真调平台"），
+      // 所以 allowed 恒 false：记的是判定结果，不是放行。
+      allowed: false,
+      reason: event.reason,
+      detail: event.detail.slice(0, AUDIT_DETAIL_MAX_CHARS),
+    });
+  }
 
   /**
    * 计划提交的宿主裁决：写关闭前置扫描 → 拒次收敛 → 实体来源校验 → 平台 evaluate。

@@ -380,20 +380,27 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       intentId: newId('intent'),
       principalId: 'wecom:u1',
       sessionId: 'wecom:u1:c1',
-      kind: 'voucher.batch' as const,
-      accountSet: '幻州市幻晟财务代理有限公司',
-      period: '202608',
-      payload: { type: 'change_proposal', contracts: [{ a: 1 }] },
-      summary: { count: 1, debit: 100, credit: 100 },
       confirmCodeHash: 'hash-d3f2k9',
       status: 'pending' as const,
       createdAt: '2026-09-19T08:00:00.000Z',
       expiresAt: '2026-09-19T08:10:00.000Z',
     };
 
-    it('create/get 往返完整', async () => {
+    it('create/get 往返完整（零业务字段：kind/accountSet/period/payload/summary 一律不入库）', async () => {
       await store.changeIntents!.create(base);
       expect(await store.changeIntents!.get(base.intentId)).toEqual(base);
+    });
+
+    it('proposalId/taskId 新列往返，缺省时不出现', async () => {
+      const withRef = { ...base, intentId: newId('intent'), proposalId: 'prop_abc', taskId: 'task_1' };
+      await store.changeIntents!.create(withRef);
+      const loaded = await store.changeIntents!.get(withRef.intentId);
+      expect(loaded).toEqual(withRef);
+
+      await store.changeIntents!.create(base);
+      const bare = await store.changeIntents!.get(base.intentId);
+      expect('proposalId' in bare!).toBe(false);
+      expect('taskId' in bare!).toBe(false);
     });
 
     it('确认码命中未过期意图', async () => {
@@ -598,6 +605,99 @@ describe('platform_tasks 结构化事实列的前向迁移', () => {
       expect(fresh).toMatchObject({ accountSet: '甲', period: '202601', outcome: 'done', resultText: '新行' });
     } finally {
       closeStore(store);
+    }
+  });
+});
+
+// ── change_intents 的前向迁移（方案 1 · B 波 W5）──────────────────────────────
+// 旧库有 kind/account_set 历史列、没有 proposal_id 时：
+//   ① 开库即补列（缺列即补，与 capabilities / platform_tasks 同一写法）；
+//   ② 旧行读回**不带 proposalId**（上层据此判过期，不 commit）；
+//   ③ 新写入只碰新列，历史列不再被写。
+describe('change_intents 前向迁移（旧库历史行）', () => {
+  const base = {
+    intentId: newId('intent'),
+    principalId: 'wecom:u1',
+    sessionId: 'wecom:u1:c1',
+    confirmCodeHash: 'hash-d3f2k9',
+    status: 'pending' as const,
+    createdAt: '2026-09-19T08:00:00.000Z',
+    expiresAt: '2026-09-19T08:10:00.000Z',
+  };
+
+  /** 造一个"迁移前"的库：旧五列齐全、没有 proposal_id/task_id，并塞一行旧数据。 */
+  function seedLegacyDatabase(file: string): void {
+    const legacy = new Database(file);
+    try {
+      legacy.exec(
+        'CREATE TABLE change_intents ('
+        + 'intent_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, session_id TEXT NOT NULL, '
+        + 'kind TEXT NOT NULL, account_set TEXT NOT NULL, period TEXT NOT NULL, payload TEXT NOT NULL, '
+        + 'summary TEXT NOT NULL, confirm_code_hash TEXT NOT NULL, status TEXT NOT NULL, '
+        + 'created_at TEXT NOT NULL, expires_at TEXT NOT NULL, decided_at TEXT, result TEXT)',
+      );
+      legacy.prepare(
+        'INSERT INTO change_intents (intent_id, principal_id, session_id, kind, account_set, period, payload, summary, '
+        + 'confirm_code_hash, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'intent_legacy', 'wecom:u1', 'wecom:u1:c1', 'voucher.batch', '幻州市幻晟财务代理有限公司', '202608',
+        '{"type":"change_proposal"}', '{"count":1,"debit":100,"credit":100}', 'hash-legacy', 'pending',
+        '2026-09-19T08:00:00.000Z', '2026-09-19T08:10:00.000Z',
+      );
+    } finally {
+      legacy.close();
+    }
+  }
+
+  it('缺列即补：开库后 proposal_id/task_id 存在，旧行读回不带 proposalId', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-store-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    try {
+      seedLegacyDatabase(legacyPath);
+      const legacyStore = createSqliteStore(legacyPath);
+      try {
+        const columns = (new Database(legacyPath).prepare('PRAGMA table_info(change_intents)').all() as Array<{ name: string }>)
+          .map((column) => column.name);
+        expect(columns).toContain('proposal_id');
+        expect(columns).toContain('task_id');
+
+        // 旧行：只映射新字段——业务字段一个都不读回来（W5：上层据此判过期）
+        const legacy = await legacyStore.changeIntents!.get('intent_legacy');
+        expect(legacy).toMatchObject({ intentId: 'intent_legacy', status: 'pending', confirmCodeHash: 'hash-legacy' });
+        expect('proposalId' in legacy!).toBe(false);
+        for (const field of ['kind', 'accountSet', 'period', 'payload', 'summary']) {
+          expect(field in legacy!).toBe(false);
+        }
+
+        // 开库后可继续写入（旧库的历史列 NOT NULL 无缺省，由空串兼容值顶着）
+        await legacyStore.changeIntents!.create({ ...base, intentId: newId('intent'), proposalId: 'prop_new' });
+        expect((await legacyStore.changeIntents!.get('intent_legacy'))?.status).toBe('pending');
+      } finally {
+        closeStore(legacyStore);
+      }
+    } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+
+  it('历史列不被新写入污染：create 之后 kind/account_set/period/payload/summary 仍是空串', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-store-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    try {
+      seedLegacyDatabase(legacyPath);
+      const legacyStore = createSqliteStore(legacyPath);
+      try {
+        const intentId = newId('intent');
+        await legacyStore.changeIntents!.create({ ...base, intentId, proposalId: 'prop_new' });
+        const row = new Database(legacyPath)
+          .prepare('SELECT kind, account_set, period, payload, summary FROM change_intents WHERE intent_id = ?')
+          .get(intentId) as Record<string, string>;
+        expect(row).toEqual({ kind: '', account_set: '', period: '', payload: '', summary: '' });
+      } finally {
+        closeStore(legacyStore);
+      }
+    } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
     }
   });
 });

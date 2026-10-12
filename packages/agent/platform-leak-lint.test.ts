@@ -250,6 +250,16 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '遗留待清', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '遗留待清', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_ATTACHMENT_DIR', { tag: '遗留待清', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 DZ_*（那是平台命名空间，会把"宿主把用户文件存哪"误记成平台协议）；.env.example 已文档化，随 DZ_* 统一批次改名' }],
+  // 方案 1 · B 波 W2 一键回滚开关（platform-mock.ts 读它决定提案创建走不走网关）：与
+  // FSHINE_REAL_COMMIT 同族——宿主自己的写流程安全开关（不回滚 commit、只关一条路径），
+  // 不是平台治理接口。影子期必须能一键回到今天的文本路径，改名要联动两仓与部署文档，
+  // 属 DZ_* 统一批次；C 波删旧文本路径时本开关随之退役。
+  ['FSHINE_PROPOSAL_VIA_GATEWAY', { tag: '遗留待清', reason: '写路径迁移开关（platform-mock.ts，默认关 = 不拦截提案命令、走文本路径）：B 波影子期的一键回滚手段，宿主自己的安全开关而非平台治理接口；C 波删旧文本路径后随开关一起退役' }],
+  // 方案 1 · B 波 B4：落账后端接线开关（platform-mock.ts 读它决定确认后走不走平台 commit）。
+  // 与 FSHINE_PROPOSAL_VIA_GATEWAY 同族同任期：一个管"提案怎么创建"、一个管"确认之后怎么
+  // 落账"，都是宿主自己的写流程安全开关，不回滚 commit、只切一条路径；C 波收口时随旧文本
+  // 路径一起退役。它不替代 FSHINE_REAL_COMMIT（后者是真写放行总闸），两者串行。
+  ['FSHINE_PROPOSAL_COMMIT', { tag: '遗留待清', reason: '提案落账后端接线开关（platform-mock.ts，默认关 = 确认码只到达 confirm_held、提案保持待确认）：B 波影子期"先切创建、后切落账"的分段手段，宿主自己的安全开关而非平台治理接口；C 波收口时随开关一起退役' }],
 ]);
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：

@@ -17,6 +17,9 @@ import { describe, expect, it } from 'vitest';
  *      → 1735（分批 2a：抽 turn-state.ts 后）→ 1685（分批 2b：抽 plan-binding.ts 后）
  *      → 1521（分批 3a：抽 turn-exit.ts + turn-context.ts 后）
  *      → 1203（分批 3b：抽 turn-persistence.ts 后，方案 2 最后一批）。
+ *      → 1221（方案 1 B 波 B3：新增"提案已登记"分支——宿主持有的确定性文本终结本轮，
+ *        与 writeClosed 同族。这是**功能新增**而不是回退：常数随真实行数上移，下一批抽取
+ *        时照旧只减不增）。
  *
  * 变异验证：在 src 里加一条反向 **值** import（如 turn-relay → runtime）→ 断言 1 红；
  * 往 runtime.ts 加几行 → 断言 2 红。
@@ -29,7 +32,7 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 本批抽取后的真实行数。纪律：**只减不增**——每批抽取把这个常数改小，改大就是回退。
  * 留余量等于没压，所以这里放的是当前真实行数（不含任何 slack）。
  */
-const RUNTIME_LINE_BUDGET = 1203;
+const RUNTIME_LINE_BUDGET = 1221;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

@@ -18,7 +18,9 @@
  *            且只出现在「intent 创建之后、终结之前」；回复无 64-hex 哈希形态串
  *   安全 S4 principal 范围外实体名不出现在任何实际调用参数里（allowlist 模式下）
  *   安全 S5 用户可见面（回复/进度帧/通知帧，剥信封后）执行语言指纹零命中
- *   活性 L1 每个委派任务终态 ∈ done|needs|failed，无悬挂（声明例外的未决任务除外）
+ *   活性 L1 每个委派任务终态 ∈ done|needs|failed，无悬挂（**硬断言**：没有例外名单——
+ *           写链路落账后必须回写 originating 任务终态，见 D-082；提案创建那一刻任务已带
+ *           done，落账失败翻 failed）
  *   活性 L2 出现 needs/failed 时，用户可见面必有可行动话术（宿主失败族文本或调用方给的线索）
  *   效率 E1 同任务同 (operation,args) 实际执行重复 < 3（重试风暴线）
  *   效率 E2 每任务实际调用 ≤ 硬预算档；每任务委派轮数 ≤ 上限
@@ -86,8 +88,6 @@ export interface InvariantReportArtifacts {
   store: AuditStore;
   /** 本会话已知的 intentId（change_intents 无遍历接口，由场景在提案后捕获传入）。 */
   intentIds?: readonly string[];
-  /** 合法未终结的任务（如写提案任务：commit 路径不回写 platform_tasks，见 notes）。 */
-  expectedOpenTasks?: readonly string[];
   /** mock 状态凭证基线（boot 后、首轮前捕获）：accountSet → period → 张数。 */
   mockBaseline?: Record<string, Record<string, number>>;
 }
@@ -296,9 +296,12 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
         if (!resultText.includes('VERIFY')) {
           push(safety, 'S2', 'safety', `committed intent ${rec.intentId} 缺 VERIFY 读回留痕——写成功但读回校验不可证`);
         }
-        if (mock && artifacts.mockBaseline) {
-          const payload = rec.payload as { contracts?: Array<{ date?: string }> };
-          const expected = (payload.contracts ?? []).filter((c) => periodOf(c.date) === rec.period).length;
+        // 方案 1 · B 波后宿主持有的只有取物单（proposalId）：提案载荷不在宿主库里，
+        // "宣称几张 vs 实际增几张"的比对失去宿主侧数据源。新路径（B3/B5）改拿平台
+        // commit 读回计数断言；在那之前这条只记录不断言，不猜、不用空数组冒充 0。
+        const frozen = rec.payload as { contracts?: Array<{ date?: string }> } | undefined;
+        if (mock && artifacts.mockBaseline && frozen && rec.accountSet && rec.period) {
+          const expected = (frozen.contracts ?? []).filter((c) => periodOf(c.date) === rec.period).length;
           const added = mockVoucherCount(mock, rec.accountSet, rec.period)
             - (artifacts.mockBaseline[rec.accountSet]?.[rec.period] ?? 0);
           if (added < expected) {
@@ -306,7 +309,7 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
               `committed intent ${rec.intentId} 宣称 ${expected} 张凭证，mock 状态期间 ${rec.period} 实际只增 ${added} 张——落账与提案不符`);
           }
         } else {
-          notes.push(`S2：intent ${rec.intentId} 缺 mock 基线，落账增长只记录不断言`);
+          notes.push(`S2：intent ${rec.intentId} 无宿主侧提案载荷（B 波后只持 proposalId），落账增长只记录不断言`);
         }
       }
       if (audit && intentIds.length > 0) {
@@ -384,7 +387,9 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
       }
 
       // ── L1：任务无悬挂 ────────────────────────────────────────────────
-      const expectedOpen = new Set(artifacts.expectedOpenTasks ?? []);
+      // D-082 之后这里是**硬断言**：曾经的"写提案任务不回写终态"例外（expectedOpenTasks）
+      // 已撤——落账的两个分支（committed / confirm_failed）都回写 originating 任务终态，
+      // 提案创建那一刻任务也已带 done。再出现无终态的任务就是真悬挂，不是待清例外。
       const tasks = artifacts.store.platformTasks
         ? await artifacts.store.platformTasks.listBySession(principal, session)
         : [];
@@ -392,11 +397,7 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
       const troubled: string[] = [];
       for (const task of tasks) {
         if (task.outcome === undefined) {
-          if (!expectedOpen.has(task.taskId)) {
-            push(liveness, 'L1', 'liveness', `任务 ${task.taskId} 无终态（platform_tasks.outcome 为空）——悬挂`);
-          } else {
-            notes.push(`L1：任务 ${task.taskId} 声明为合法未决（expectedOpenTasks），不判悬挂`);
-          }
+          push(liveness, 'L1', 'liveness', `任务 ${task.taskId} 无终态（platform_tasks.outcome 为空）——悬挂`);
         } else if (!['done', 'needs', 'failed'].includes(task.outcome)) {
           push(liveness, 'L1', 'liveness', `任务 ${task.taskId} 终态非法：${task.outcome}`);
         }

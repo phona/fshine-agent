@@ -25,6 +25,7 @@ import {
   isCommitEnabled,
   isPlatformMock,
   loadOperationArgSpecs,
+  proposalCommitWired,
   type CandidateExtractor,
   type ContextTaskRunner,
   type TurnDriver,
@@ -33,6 +34,7 @@ import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { AuditStore, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
 import { turnBudgetMsFor } from '@fshine/contracts';
 import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
+import { createProposalCommitRunner } from './proposal-commit';
 import { createMessageHandler } from './handler';
 import { createPlanConfirmationWiring } from './plan-confirmation-route';
 import { loadBusinessSkill } from './business-skill';
@@ -221,6 +223,12 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
       commitRunner: createCommitRunner({ platformRoot, gateSecret }),
       commitEnabled: isCommitEnabled(),
+      // 新提案落账后端（B 波 B4）：接线开关（FSHINE_PROPOSAL_COMMIT，默认关）∧ 落账放行
+      // （isCommitEnabled：mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1）。两个条件串成
+      // proposalCommitEnabled——少一个，确认码都只到达"确认收到但不写"，不承诺没接上的事。
+      // 后端本体只在接线时注入：没接线就没有可调用的执行器（fail-closed 到 confirm_held）。
+      ...(proposalCommitWired(env) ? { proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }) } : {}),
+      proposalCommitEnabled: proposalCommitWired(env) && isCommitEnabled(env),
     } : {}),
   });
 

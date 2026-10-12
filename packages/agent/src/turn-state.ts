@@ -126,18 +126,21 @@ export function noteNeedsRound(state: TurnState, stepIndex: number | null): bool
  *   · 写关闭步骤（writeClosed）：它的零执行是"部署没开放写"的终局事实，不是 worker
  *     空转——那句话必须由宿主说给用户（见 runtime 的 writeClosed 分支），而被熔断汇总
  *     顶上就永远说不出来了；且熔断汇总结尾的"可以回复继续重跑未完成的步骤"在写计划下
- *     是假承诺（写类步骤永远不会被放行）。
+ *     是假承诺（写类步骤永远不会被放行）；
+ *   · 提案已登记步骤（proposalCreated，B 波 B3）：同族——它的零执行是"提案在平台侧建好、
+ *     等用户确认"的终局事实，用户要的是确认码；被熔断汇总顶上，确认码就永远到不了用户。
  *
  * 返回 true = 已达熔断阈值且不属豁免，调用方停止派发后续步骤、用计划事实机械汇总收尾。
  */
 export function noteZeroExecStep(state: TurnState, outcome: {
   failed: boolean;
   writeClosed?: boolean;
+  proposalCreated?: boolean;
   pendingPlan?: boolean;
 }): boolean {
   if (outcome.pendingPlan) return false;
   state.planZeroExecSteps = outcome.failed ? state.planZeroExecSteps + 1 : 0;
-  return state.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS && !outcome.writeClosed;
+  return state.planZeroExecSteps >= MAX_PLAN_ZERO_EXEC_STEPS && !outcome.writeClosed && !outcome.proposalCreated;
 }
 
 /** 步骤结局追加进熔断/复读兜底共用的事实源（与刚写的计划事实同源，只机械陈述）。 */

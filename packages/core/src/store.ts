@@ -178,17 +178,26 @@ CREATE TABLE IF NOT EXISTS change_intents (
   intent_id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  account_set TEXT NOT NULL,
-  period TEXT NOT NULL,
-  payload TEXT NOT NULL,
-  summary TEXT NOT NULL,
+  -- 方案 1 · B 波新增的两列（缺列即补的前向迁移，见 createSqliteStore）：平台提案引用
+  -- 与发起提案的子任务。旧行没有它们 → 读回时不带这两个字段（上层据此判过期）。
+  proposal_id TEXT,
+  task_id TEXT,
   confirm_code_hash TEXT NOT NULL,
   status TEXT NOT NULL,
   created_at TEXT NOT NULL,
   expires_at TEXT NOT NULL,
   decided_at TEXT,
-  result TEXT
+  result TEXT,
+  -- ── 以下五列是迁移前的历史列（kind/account_set/period/payload/summary）──────────
+  -- B 波起契约零业务字段、零 payload（提案载荷归执行层提案状态库，宿主持有取物单
+  -- proposalId），因此这五列**不再被读、也不再被写**——列留着做历史，不删表。
+  -- 旧库里它们是 NOT NULL 且无缺省，故插入时补空串兼容值（与 principal_scopes 的
+  -- mcp_profile 同一手法）；新库在此声明 DEFAULT '' 让形状自明。
+  kind TEXT NOT NULL DEFAULT '',
+  account_set TEXT NOT NULL DEFAULT '',
+  period TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_change_intents_session_status
   ON change_intents (principal_id, session_id, status);
@@ -298,15 +307,19 @@ interface PlatformTaskRow {
   result_text: string | null;
 }
 
+/**
+ * change_intents 的行形状：**只声明新字段**。
+ *
+ * 旧列（kind/account_set/period/payload/summary）不出现在这里——B 波起不再读它们，
+ * 声明了就等于给"读业务字段"留了一个类型合法的入口。SELECT * 仍会把它们带回来，
+ * 但没有任何映射会碰它们（列留着做历史）。
+ */
 interface ChangeIntentRow {
   intent_id: string;
   principal_id: string;
   session_id: string;
-  kind: string;
-  account_set: string;
-  period: string;
-  payload: string;
-  summary: string;
+  proposal_id: string | null;
+  task_id: string | null;
   confirm_code_hash: string;
   status: string;
   created_at: string;
@@ -315,16 +328,20 @@ interface ChangeIntentRow {
   result: string | null;
 }
 
+/**
+ * 历史列（不再读/不再写，只为旧库的 NOT NULL 约束补空串兼容值）。
+ * 与 principal_scopes.mcp_profile 同一手法：旧库里没有 DEFAULT，插入必须给值。
+ */
+const CHANGE_INTENT_LEGACY_COLUMNS: readonly string[] = ['kind', 'account_set', 'period', 'payload', 'summary'];
+
 function rowToChangeIntent(row: ChangeIntentRow): ChangeIntentRecord {
   return {
     intentId: row.intent_id,
     principalId: row.principal_id,
     sessionId: row.session_id,
-    kind: row.kind as ChangeIntentRecord['kind'],
-    accountSet: row.account_set,
-    period: row.period,
-    payload: JSON.parse(row.payload),
-    summary: JSON.parse(row.summary),
+    // 新列缺列即补：旧行/缺列时这两个字段不出现在记录里（消费方据此降级，不猜不补）。
+    ...(row.proposal_id ? { proposalId: row.proposal_id } : {}),
+    ...(row.task_id ? { taskId: row.task_id } : {}),
     confirmCodeHash: row.confirm_code_hash,
     status: row.status as ChangeIntentRecord['status'],
     createdAt: row.created_at,
@@ -539,6 +556,17 @@ export function createSqliteStore(dbPath: string): AuditStore {
   for (const column of ['account_set', 'period', 'calls', 'label', 'outcome', 'result_text']) {
     if (!taskColumns.some((existing) => existing.name === column)) {
       db.exec(`ALTER TABLE platform_tasks ADD COLUMN ${column} TEXT`);
+    }
+  }
+
+  // Forward-compatible migration for databases created before the proposal-reference
+  // intent record (方案 1 · B 波): change_intents gained proposal_id/task_id. Older rows
+  // simply read back as records without those fields (consumers treat them as expired),
+  // and the legacy business columns stay in place as history — never read, never written.
+  const intentColumns = db.prepare('PRAGMA table_info(change_intents)').all() as Array<{ name: string }>;
+  for (const column of ['proposal_id', 'task_id']) {
+    if (!intentColumns.some((existing) => existing.name === column)) {
+      db.exec(`ALTER TABLE change_intents ADD COLUMN ${column} TEXT`);
     }
   }
 
@@ -962,22 +990,23 @@ export function createSqliteStore(dbPath: string): AuditStore {
 
   const changeIntents: ChangeIntentRepo = {
     async create(record) {
+      const columns = ['intent_id', 'principal_id', 'session_id', 'proposal_id', 'task_id', 'confirm_code_hash', 'status', 'created_at', 'expires_at'];
+      const placeholders = columns.map(() => '?').join(', ');
       db.prepare(
-        'INSERT INTO change_intents (intent_id, principal_id, session_id, kind, account_set, period, payload, summary, confirm_code_hash, status, created_at, expires_at) '
-        + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        `INSERT INTO change_intents (${columns.join(', ')}, ${CHANGE_INTENT_LEGACY_COLUMNS.join(', ')}) `
+        + `VALUES (${placeholders}${', ?'.repeat(CHANGE_INTENT_LEGACY_COLUMNS.length)})`,
       ).run(
         record.intentId,
         record.principalId,
         record.sessionId,
-        record.kind,
-        record.accountSet,
-        record.period,
-        JSON.stringify(record.payload),
-        JSON.stringify(record.summary),
+        record.proposalId ?? null,
+        record.taskId ?? null,
         record.confirmCodeHash,
         record.status,
         record.createdAt,
         record.expiresAt,
+        // 历史列只补空串兼容值（旧库 NOT NULL 无缺省）；业务数据一行都不再进宿主库。
+        ...CHANGE_INTENT_LEGACY_COLUMNS.map(() => ''),
       );
     },
     async get(intentId) {

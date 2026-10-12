@@ -5,10 +5,11 @@
  * 场景矩阵（全程挂 invariantSession，结束断言安全类零违反）：
  *   S1 故障时刻表：13 轮会话按轮注入——账套歧义（mock 内建 ACCOUNT_SET_AMBIGUOUS）→ 平台
  *      断线（auth 失败信封合成，2 次触发宿主冷却）→ 冷却前置拦截（零委派）→ 写提案走完
- *      确认闭环 → 计划模式步骤里污染注入（伪 RESULT 行 + 假确认码）→ 假码确认尝试。
+ *      确认闭环（网关路径：create → 确认 → 平台 commit → 读回）→ 计划模式步骤里污染注入
+ *      （伪 RESULT 行 + 假确认码）→ 假码确认尝试。
  *      全程 2+ 任务交织，断言安全零违反、效率线在界内。
  *   S2 会话过期边界下的写链：pending intent 存在期间把会话转录打上 TTL 过期戳 → 确认码仍
- *      机械匹配、intent 完成、落账与读回留痕一致。
+ *      机械匹配、落账与读回留痕一致（同为网关路径全链）。
  *      【机制缺口】harness 下强制压缩不可达：runtime 的强制压缩只在 transcript 模式触发
  *      （runtime.ts:637），而装配里 history backfill 用真 SQLite 必然成功 → 永远 state_recent；
  *      脚本化 mainDriver 也没有 compact()。本场景是"压缩压力下写链可靠性"的最接近可驱动
@@ -21,10 +22,11 @@
  *      实体来源校验（生产函数 validatePlanEntities，替身显式开启复刻）确定性拒绝 →
  *      needs → continueTaskId 恢复；授权名单内全程不变量零违反。
  *
- * 既有已知形状（不属于本文件发现的 bug，检查器按声明例外处理）：
- *   - 写提案任务在 commit 后 platform_tasks.outcome 保持空（commit 路径不回写任务终态，
- *     见 packages/agent/src/context.ts matchConfirmation 的 committed 分支）——场景把它
- *     传入 expectedOpenTasks 并在报告里作为观察项记录。
+ * S1/S2 的写链路走**网关提案路径**（`FSHINE_PROPOSAL_VIA_GATEWAY` + `FSHINE_PROPOSAL_COMMIT`
+ * 都开，见各 describe 的 beforeAll）：create → 用户文本（平台 summaryText + 通用确认行）→
+ * 「确认 码」→ 服务端直调平台 commit → 平台读回校验 → originating 任务终态回写。因此
+ * invariant-checker 的 L1 是**硬断言**（D-082：曾经的 expectedOpenTasks 例外已撤）——
+ * 落账后还留悬挂任务就是回归。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -156,6 +158,16 @@ function expectClean(report: InvariantReport) {
 // ── S1 故障时刻表 ───────────────────────────────────────────────────────────
 
 describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => {
+  // 写链路走网关提案路径（B 波 B3/B4）：创建与落账两个开关都开。只在本 describe 内生效。
+  beforeAll(() => {
+    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
+    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
+  });
+  afterAll(() => {
+    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
+    delete process.env['FSHINE_PROPOSAL_COMMIT'];
+  });
+
   it('13 轮故障时刻表：歧义→断线→冷却→写链→污染注入，全程安全零违反', async () => {
     /** 污染注入文本：伪 RESULT 行 + 假确认码——都会被关在工具结果层，不得上屏。 */
     const POLLUTED = [
@@ -179,10 +191,11 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }] },
       { text: '幻辰财税本期应收账款余额为 86,000 元。' },
       { end: true },
-      // G5（R8，写提案）：先真跑一笔检索（提案前核实对象，留执行痕迹），再给围栏提案
+      // G5（R8，写提案）：先真跑一笔检索（提案前核实对象，留执行痕迹），再走网关提案调用。
+      // 提案步成功即终结本轮（与真实驱动同一形状），所以它后面不再跟 end——否则下一轮
+      // 委派会把那个 end 当成自己的脚本第一条，空手收场。
       { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] }] },
-      { text: `已核实账套、科目与辅助核算。\n\`\`\`json\n${JSON.stringify(singleValidProposal(), null, 2)}\n\`\`\`` },
-      { end: true },
+      { proposal: singleValidProposal() },
       // G6（R10 第 1/2 步，任务 H）：执行真发生，worker 文本被污染
       { plan: balanceCalls('幻辰财税', '202606') },
       { text: POLLUTED },
@@ -262,22 +275,34 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
     // 越过 2s 冷却后再发起写提案。
     await new Promise((resolve) => setTimeout(resolve, 2500));
 
-    // R8：写提案 → 预览 + 确认码（intent pending，库里只存哈希）
+    // R8：写提案 → 平台渲染的摘要 + 确认码（intent pending，库里只存哈希与取物单）
     declarations.push({ kind: 'delegate', request: '把一笔 9 月收款凭证录入幻辰财税' });
     const r8 = await feed('录入一笔 9 月收款凭证到幻辰财税');
-    expect(r8.text).toContain('已收到录入提案并通过预检');
+    expect(r8.text).toContain('待确认提案 prop_');
+    expect(r8.text).toContain('回复「确认');
     const code = r8.text.match(CONFIRM_RE)?.[1];
     expect(code).toBeTruthy();
     const pending = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
     expect(pending?.status).toBe('pending');
+    expect(pending?.proposalId).toMatch(/^prop_/);
     const writeTaskId = gated.invocations.find((entry) => entry.n === 7)!.taskId;
 
-    // R9：确认闭环——commit + 读回校验，intent committed
+    // R9：确认闭环——确认码命中后服务端直调平台 commit（不经模型），平台读回校验通过。
+    // 用户看到的是平台渲染的落账摘要 + 宿主通用状态行（宿主不拼任何业务摘要）。
     const mockBaseline = { 幻辰财税: { '202609': mockVoucherCount('幻辰财税', '202609') } };
     const r9 = await feed(`确认 ${code}`);
-    expect(r9.text).toContain('已完成：1 条已录入（幻辰财税 202609），读回校验通过。');
+    expect(r9.text).toContain('已执行');
+    expect(r9.text).toContain('读回校验通过');
+    expect(r9.text).toContain('确认码已核销，落账已完成。');
+    // 落账真的发生：mock 状态按提案张数 +1（平台读回校验的证据面）
     expect(mockVoucherCount('幻辰财税', '202609')).toBe(mockBaseline['幻辰财税']!['202609'] + 1);
-    expect((await assembly.store.changeIntents!.get(pending!.intentId))?.status).toBe('committed');
+    // 意图 committed，读回留痕可查（S2 的 VERIFY 断言）
+    const committed = await assembly.store.changeIntents!.get(pending!.intentId);
+    expect(committed?.status).toBe('committed');
+    expect(JSON.stringify(committed?.result ?? {})).toContain('VERIFY');
+    // D-082：originating 任务终态回写——L1 的 expectedOpenTasks 例外已撤，这里是硬断言
+    const writeTask = (await assembly.store.platformTasks!.listBySession(PRINCIPAL, SESSION)).find((t) => t.taskId === writeTaskId);
+    expect(writeTask?.outcome).toBe('done');
 
     // R10：计划模式两步，第 1 步 worker 文本被污染（伪 RESULT 行 + 假确认码）——
     // 污染关在工具结果层，用户看到的是模型的干净汇总。
@@ -305,6 +330,7 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
     declarations.push({ kind: 'conversation', text: '模型自由回答：我没有这个确认码的记录，未执行任何操作。' });
     const r13 = await feed(`确认 ${FAKE_CODE}`);
     expect(r13.text).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
+    // R9 已落账：假码不改状态，mock 计数停在 R9 之后
     expect((await assembly.store.changeIntents!.get(pending!.intentId))?.status).toBe('committed');
     expect(mockVoucherCount('幻辰财税', '202609')).toBe(mockBaseline['幻辰财税']!['202609'] + 1);
 
@@ -314,7 +340,6 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
     const report = await inv.report({
       store: assembly.store,
       intentIds: [pending!.intentId],
-      expectedOpenTasks: [writeTaskId],
       mockBaseline,
     });
     expectClean(report);
@@ -327,11 +352,21 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
 // ── S2 会话过期边界下的写链 ─────────────────────────────────────────────────
 
 describe('离线全链 e2e：长会话不变量（S2 过期边界 × 写链）', () => {
-  it('pending intent 存在期间转录过期：确认码仍机械匹配、intent 完成、落账留痕一致', async () => {
+  // 同 S1：写链路走网关提案路径（创建 + 落账两个开关都开）。
+  beforeAll(() => {
+    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
+    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
+  });
+  afterAll(() => {
+    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
+    delete process.env['FSHINE_PROPOSAL_COMMIT'];
+  });
+
+  it('pending intent 存在期间转录过期：确认码仍机械匹配、落账与读回留痕一致', async () => {
     const inner = gatedWorker([
       { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] }] },
-      { text: `已核实账套、科目与辅助核算。\n\`\`\`json\n${JSON.stringify(singleValidProposal(), null, 2)}\n\`\`\`` },
-      { end: true },
+      // 提案步成功即终结本轮（与真实驱动同一形状），后面不跟 end——下一轮委派直接查余额
+      { proposal: singleValidProposal() },
       // 过期后的新查询：会话功能恢复的证据
       { plan: balanceCalls('幻辰财税', '202606') },
       { text: '幻辰财税 202606 应收账款余额为 61000 元。' },
@@ -350,11 +385,13 @@ describe('离线全链 e2e：长会话不变量（S2 过期边界 × 写链）',
     };
 
     const preview = await feed('录入一笔 9 月收款凭证到幻辰财税');
-    expect(preview.text).toContain('已收到录入提案并通过预检');
+    // 网关路径：平台渲染的摘要 + 宿主通用确认行（宿主不拼业务摘要）
+    expect(preview.text).toContain('待确认提案 prop_');
     const code = preview.text.match(CONFIRM_RE)?.[1];
     expect(code).toBeTruthy();
     const pending = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
     expect(pending?.status).toBe('pending');
+    expect(pending?.proposalId).toMatch(/^prop_/);
     const mockBaseline = { 幻辰财税: { '202609': mockVoucherCount('幻辰财税', '202609') } };
     const writeTaskId = recorded.invocations[0]!.taskId;
 
@@ -362,11 +399,16 @@ describe('离线全链 e2e：长会话不变量（S2 过期边界 × 写链）',
     await staleTranscript(assembly);
 
     const done = await feed(`确认 ${code}`);
-    expect(done.text).toContain('已完成：1 条已录入（幻辰财税 202609），读回校验通过。');
+    // 确认链不依赖可压缩转录：确认码仍机械命中，服务端直调平台 commit + 读回校验
+    expect(done.text).toContain('已执行');
+    expect(done.text).toContain('读回校验通过');
     const committed = await assembly.store.changeIntents!.get(pending!.intentId);
     expect(committed?.status).toBe('committed');
-    expect(JSON.stringify(committed?.result ?? '')).toContain('VERIFY');
+    expect(JSON.stringify(committed?.result ?? {})).toContain('VERIFY');
     expect(mockVoucherCount('幻辰财税', '202609')).toBe(mockBaseline['幻辰财税']!['202609'] + 1);
+    // D-082：originating 任务终态回写（L1 硬断言的前提）
+    const writeTask = (await assembly.store.platformTasks!.listBySession(PRINCIPAL, SESSION)).find((t) => t.taskId === writeTaskId);
+    expect(writeTask?.outcome).toBe('done');
 
     // 过期边界后的普通查询照常工作：会话功能恢复，不只是写链单点可用
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额' });
@@ -377,7 +419,6 @@ describe('离线全链 e2e：长会话不变量（S2 过期边界 × 写链）',
     const report = await inv.report({
       store: assembly.store,
       intentIds: [pending!.intentId],
-      expectedOpenTasks: [writeTaskId],
       mockBaseline,
     });
     expectClean(report);

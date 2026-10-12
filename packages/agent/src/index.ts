@@ -6,6 +6,7 @@ export type {
   TurnDriverResult,
   ScriptedTurnStep,
   SubagentNeeds,
+  ProposalCreationOutcome,
 } from './driver';
 export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
 export {
@@ -31,10 +32,12 @@ export {
 export {
   loadOperationLabels,
   loadOperationArgSpecs,
+  loadOperationProtocols,
   loadOperationSemantics,
   operationLabel,
   parseOperationLabels,
   parseOperationArgSpecs,
+  parseOperationProtocols,
   parseAccessSemantics,
   parseOperationSemantics,
   isWriteAccess,
@@ -43,6 +46,7 @@ export {
   type OperationArgsSpec,
   type OperationArgsSpecs,
   type OperationLabels,
+  type OperationProtocols,
   type OperationSemantics,
 } from './operation-labels';
 export * from './scratch-cleanup';
@@ -67,10 +71,14 @@ export type { CandidateExtractor } from './memory-consolidator';
 export {
   MOCK_EXECUTOR_ENV,
   MOCK_STATE_ENV,
+  PROPOSAL_COMMIT_ENV,
+  PROPOSAL_VIA_GATEWAY_ENV,
   REAL_COMMIT_ENV,
   ensureMockStatePath,
   isCommitEnabled,
   isPlatformMock,
+  proposalCommitWired,
+  proposalViaGateway,
 } from './platform-mock';
 export {
   activatePendingPlan,
@@ -101,6 +109,12 @@ export {
   type ConfirmationMatchResult,
 } from './plan-confirmation';
 export {
+  PROPOSAL_COMMIT_PROTOCOL,
+  PROPOSAL_CREATE_PROTOCOL,
+  parseProposalCommand,
+  type ProposalCreateCall,
+} from './proposal-runtime';
+export {
   GATEWAY_INVOCATION,
   gatewayExecPath,
   PLATFORM_OPERATIONS,
@@ -124,6 +138,7 @@ export {
 export * from './session';
 export {
   createContextTaskRunner,
+  hostGatewayEnv,
   RUN_17DZ_TASK_TOOL,
   RUN_17DZ_TASK_DESCRIPTION,
   RUN_17DZ_TASK_SCHEMA,
@@ -144,6 +159,9 @@ export {
   type PrepareResult,
   type CommitRequest,
   type CommitResult,
+  type ProposalCommitRequest,
+  type ProposalCommitResult,
+  type ProposalUnavailableKind,
 } from './context';
 export {
   createTaxAgentRuntime,

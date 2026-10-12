@@ -855,7 +855,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               if (step && planId && !delegated.pendingPlan) {
                 const outcome = stepOutcomeOf(delegated);
                 notePlanStepOutcome(turn, step.label, outcome);
-                if (noteZeroExecStep(turn, { failed: outcome === 'failed', writeClosed: delegated.writeClosed, pendingPlan: Boolean(delegated.pendingPlan) })) {
+                if (noteZeroExecStep(turn, { failed: outcome === 'failed', writeClosed: delegated.writeClosed, proposalCreated: Boolean(delegated.proposalCreated), pendingPlan: Boolean(delegated.pendingPlan) })) {
                   // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
                   // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
                   // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
@@ -962,6 +962,24 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 turn.delegationFailed = true;
                 console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId, ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}) }));
                 throw new ToolUserError(renderWriteClosureReply(step, delegated, turn.planStepOutcomes));
+              }
+              // 提案已登记（B 波 B3 网关提案路径）：与写关闭同一家族——delegated.text 是
+              // **宿主持有的确定性文本**（平台 summaryText 原样 + 通用确认行），本回合以此
+              // 终结。为什么必须走这条而不是通用的 terminate 分支：提案这一步可能零网关执行
+              // （拦截发生在 gate 之前，那一条 bash 没被放行），出口校验的零执行门会把它整段
+              // 换成 NO_EXECUTION_CLARIFICATION——确认码随之消失，用户永远拿不到码。
+              // delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
+              // 与 needs/clarification 不互斥但优先：提案登记是既成事实，交还模型只会稀释它。
+              if (delegated.proposalCreated) {
+                turn.delegationFailed = true;
+                console.info(JSON.stringify({
+                  event: 'proposal_created',
+                  requestId: ctx.requestId,
+                  taskId: delegated.taskId,
+                  proposalId: delegated.proposalCreated.proposalId,
+                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+                }));
+                throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
               }
               // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
               // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。

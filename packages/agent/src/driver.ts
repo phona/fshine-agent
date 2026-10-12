@@ -8,6 +8,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { PlatformAuthFailure, SelectionClarification } from './platform-contract';
 import type { PendingPlanConfirmation, PlanCall } from './plan-runtime';
+import type { ProposalCreateCall } from './proposal-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 
 /** 转录消息 = pi 原生 AgentMessage(JSON 可序列化,含工具调用与结果) */
@@ -55,6 +56,16 @@ export interface TurnDriverInput {
    * 宿主在计划评估前就合成写关闭话术终结该轮，不等模型走到提案路径。缺省视为只读。
    */
   capabilities?: readonly string[];
+  /**
+   * 提案创建网关路径（方案 1 · B 波 B3）的宿主出口：驱动在 `beforeToolCall` 认出"创建提案"
+   * 的网关调用后，把 `{operation, payloadPath}` 交给它办调平台，并按返回的三态处理
+   * （completed 终结本回合 / needs_input 交还 / failed 交还错误码 / write_closed 合成写关闭话术）。
+   *
+   * 只有开关开着才注入（见 platform-mock 的 proposalViaGateway）；没注入 = 驱动不拦截，
+   * 走今天的文本路径。宿主经它办调平台，**不经 worker**：payload 路径由 worker 命令给出，
+   * 但读文件、校验、落意图条目、发确认码全在服务端。
+   */
+  onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
 }
 
 /**
@@ -151,7 +162,36 @@ export interface TurnDriverResult {
    * 失败记账与冷却（platform-health.ts）。
    */
   authFailure?: PlatformAuthFailure;
+  /**
+   * 提案已登记（方案 1 · B 波 B3 网关提案路径）：宿主拦下 worker 的提案创建网关调用、
+   * 自己办调平台 create 成功，`text` 是**宿主持有的确定性文本**（平台 `summaryText` 原样
+   * + 通用确认行），不是 worker 文本。宿主据此把这段文本作为本轮回复——与 writeClosed
+   * 同一家族：出口校验的零执行标注不得覆盖或误标其来源（提案这一步可能零网关执行，
+   * 而"提案已登记、等用户确认"是真实状态，不是空转）。
+   *
+   * `proposalId` 是平台提案引用（取物单）：宿主持有的全部，指向执行层自己的提案状态库。
+   */
+  proposalCreated?: { proposalId: string };
 }
+
+/**
+ * 宿主办调平台创建提案的结局（`onCreateProposal` 的返回，方案 1 · B 波 B3）。
+ *
+ * 三态 + 写关闭，全部由宿主从**平台 RESULT 信封**与宿主持有的授权事实判定，没有一个字节
+ * 从 worker 自由文本解析：
+ *   · `completed`   平台 create 成功：`userText` 给用户（平台 summaryText 原样 + 通用确认行，
+ *                    **不含任何宿主拼的业务摘要**），`workerText` 给 worker（确定性事实，
+ *                    **绝不含确认码**——码只出现在给用户的文本里）；
+ *   · `write_closed` 宿主持有的写授权不成立（能力不含 write / 授权名单限制模式）：
+ *                   宿主合成写关闭话术，复用 writeClosed 透传（D-075 同族）；
+ *   · `needs_input` 平台还要更多信息：按确定性线索交还 worker（needs 机制）；
+ *   · `failed`      平台拒绝/失败：交还平台错误码。
+ */
+export type ProposalCreationOutcome =
+  | { status: 'completed'; proposalId: string; userText: string; workerText: string }
+  | { status: 'write_closed'; userText: string; workerText: string }
+  | { status: 'needs_input'; needs: SubagentNeeds; workerText: string }
+  | { status: 'failed'; workerText: string; errorCode?: string };
 
 export interface TurnDriver {
   run(input: TurnDriverInput): Promise<TurnDriverResult>;

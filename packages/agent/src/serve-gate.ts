@@ -147,8 +147,14 @@ export const KEY_ARG_MAX_CHARS = 24;
 /** 审计 detail 的长度上限：与 createServeGate 落账时同一把尺（命令原文也按它截断）。 */
 export const AUDIT_DETAIL_MAX_CHARS = 200;
 
-/** rel 是否落在本轮草稿目录内（`tmp/<id>` 或其子目录；`tmp/<id>x` 不算）。 */
-function isInsideScratch(rel: string, scratchDir: string): boolean {
+/**
+ * rel 是否落在本轮草稿目录内（`tmp/<id>` 或其子目录；`tmp/<id>x` 不算）。
+ *
+ * 导出只为一把尺子量所有"这文件是不是本轮私产"的判定：write/edit 门用它，提案创建拦截的
+ * payload 路径边界检查也用它（B 波 B3）。判据只有一份——在调用方各写一遍就会出现
+ * "write 认子目录、提案只认顶层"这类分叉。
+ */
+export function isInsideScratch(rel: string, scratchDir: string): boolean {
   const prefix = scratchDir.endsWith(path.sep) ? scratchDir : `${scratchDir}${path.sep}`;
   return rel === scratchDir.replace(/\/$/, '') || rel.startsWith(prefix);
 }

@@ -16,14 +16,15 @@
  * process.env 副本，四个文件并行跑不会串味。
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationArgSpecs, loadOperationLabels } from '../../packages/agent/src/operation-labels';
+import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols } from '../../packages/agent/src/operation-labels';
+import { parseProposalCommand } from '../../packages/agent/src/proposal-runtime';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
@@ -40,6 +41,12 @@ let counter = 0;
 // 驱动读同一份平台数据（不镜像、不手抄）。
 const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT);
 const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
+// 协议角色表（方案 1 · B 波 B3 提案创建拦截的机械来源）：与真实驱动**同一份平台数据**
+// （经 CLI 派生，不注入替身）。为什么这一张不替身：它不是判据的输入而是判据本身——
+// 平台必须真的在 `operation list --json` 带出 protocol 列，宿主才认这条命令；这里塞替身
+// 就等于把"A 波交付物在不在"这件事也 mock 掉，e2e 会在一台没有该列的平台上假绿。
+// 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
+const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
 // 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。
 // 为什么这里注入替身而不是经平台 CLI 派生：语义表是**判据**不是普通数据，平台侧正在并行
@@ -68,7 +75,7 @@ const operationSemantics = new Map<string, { plan: boolean; confirm: boolean; mo
 ]);
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
-const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
+const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -79,6 +86,9 @@ beforeEach(() => {
     DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
     DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
     DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    // 提案状态库（A 波新增，B 波网关提案路径的落点）：同样每用例独一份，否则一个用例建的
+    // 提案会漏到下一个用例的读回/提交里。
+    DZ_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
   });
 });
 
@@ -282,6 +292,8 @@ export type WorkerStep =
   | { plan: PlanCall[]; stopAtConfirm?: boolean; stopAfterActivate?: boolean }
   | { execute: PlanCall[] }
   | { need: SubagentNeeds; text?: string }
+  /** 网关提案路径（方案 1 · B 波 B3）：把 payload 写进本轮 scratchDir，再发提案创建网关调用。 */
+  | { proposal: object }
   | { end: true }
   | { text: string };
 
@@ -321,6 +333,14 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       entitySources?: PlanEntitySources;
       /** 宿主注入的能力声明（D-075）：替身按它复刻真实驱动的写关闭计划扫描。 */
       capabilities?: readonly string[];
+      /** 宿主注入的提案创建出口（方案 1 · B 波 B3，开关开着才注入）。 */
+      onCreateProposal?: (call: { operation: string; payloadPath: string }) => Promise<{
+        status: string;
+        userText?: string;
+        workerText?: string;
+        proposalId?: string;
+        needs?: SubagentNeeds;
+      }>;
       messages: unknown[];
     }) => {
       const taskId = input.sessionId ?? 'task_unknown';
@@ -355,6 +375,40 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         if ('end' in current) {
           // worker 收手：本回合到此结束，剩下的步骤留给下一次委派（多轮脚本的分段点）。
           break;
+        }
+        if ('proposal' in current) {
+          // ── 网关提案路径（方案 1 · B 波 B3）────────────────────────────────────
+          // 复刻真实 worker 的两步：把提案 payload 写进本轮 scratchDir（真实 worker 用 write
+          // 工具，落点由门的写边界把着），再发 `bin/17dz prepare <operation> <payload>`。
+          // 命令形态不在这里解析——走**生产**的 parseProposalCommand 拿 operation 与 payload
+          // 路径（与真实驱动同一函数）：平台哪天不再认这个形态，这里立刻响亮失败，而不是
+          // 悄悄走成另一条路。
+          const requestId = input.requestId ?? 'req_unknown';
+          const command = `bin/17dz prepare voucher.proposal tmp/${requestId}/proposal.json`;
+          const call = parseProposalCommand(command, operationProtocols);
+          if (!call) throw new Error(`提案创建命令没有被识别层认出（平台 protocol 列没下发？）：${command}`);
+          const payloadFile = path.join(PLATFORM_ROOT, call.payloadPath);
+          mkdirSync(path.dirname(payloadFile), { recursive: true });
+          writeFileSync(payloadFile, JSON.stringify(current.proposal, null, 2));
+          const create = input.onCreateProposal;
+          if (!create) throw new Error('开关开着但宿主没有注入 onCreateProposal（context.ts 的接线断了？）');
+          const outcome = await create(call);
+          // completed / write_closed：与真实驱动同一形状——宿主持有的文本成为回合终稿，
+          // 提案引用随结果上交（宿主据此把确认码交给用户）。
+          if (outcome.status === 'completed' || outcome.status === 'write_closed') {
+            const text = outcome.userText ?? '';
+            return {
+              text,
+              messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
+              ...(proof ? { execution: proof } : {}),
+              ...(outcome.status === 'completed' && outcome.proposalId ? { proposalCreated: { proposalId: outcome.proposalId } } : { writeClosed: true }),
+            };
+          }
+          // needs_input / failed：按确定性线索交还 worker（与真实驱动的 block reason 同族），
+          // 这一轮不终结——worker 可以补参数重提。
+          if (outcome.status === 'needs_input' && outcome.needs) needs = outcome.needs;
+          parts.push(outcome.workerText ?? `提案未创建（${outcome.status}）`);
+          continue;
         }
         if ('execute' in current) {
           // 用户确认后宿主激活计划并续跑原任务：worker 按平台当前 active 计划执行，
@@ -664,6 +718,19 @@ const SCRIPTS: Record<string, string> = {
   'voucher.query-saved': 'query-saved.js',
 };
 
+/**
+ * 网关提案路径的提案 worker 替身（方案 1 · B 波 B3/B4）：先真跑一笔平台检索（与真实
+ * worker 同形状——提案前核实对象，同时给委派留下执行痕迹），再走网关提案调用。
+ * 定义在共享替身里：写链路与安全两组用例都要用它（两处各写一份就会漂移）。
+ */
+function gatewayProposalWorker(payload: object) {
+  return gatedWorker([
+    { plan: [{ operation: 'finance.search-account-sets', args: ['--query', '幻辰财税'] }] },
+    { proposal: payload },
+    { end: true },
+  ]);
+}
+
 const CURRENT_PERIOD = '202609';
 
 /** 单期查询失败后自行扩大到 1–9 月：必须让用户先知道。 */
@@ -705,6 +772,7 @@ export {
   RecordingSdkClient,
   mainDriver,
   silentDriver,
+  gatewayProposalWorker,
   gatedWorker,
   boot,
   ledger,

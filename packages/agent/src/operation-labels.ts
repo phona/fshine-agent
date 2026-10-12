@@ -1,5 +1,6 @@
 /**
- * 平台操作的人类可读名（label）、参数规格（args spec）与访问语义（access semantics）派生层。
+ * 平台操作的人类可读名（label）、参数规格（args spec）、访问语义（access semantics）与
+ * 协议角色（protocol）派生层。
  *
  * 进度帧里的业务措辞只有一个来源：平台公共 CLI 的 `operation list` 子命令
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
@@ -20,6 +21,10 @@
  * 表声明每个 access 取值的 plan/confirm/mock 三列，宿主据此判"这个调用要不要
  * 用户确认"（= 是不是写）。语义只活在平台的那张表里，宿主一个字节都不猜——
  * 拿不到表就什么都不算写（fail-closed，与 label/规格缺失同族的安全缺省）。
+ *
+ * protocol 角色同理（本模块的第四份只读消费）：`--json` 每行的 `protocol` 列声明
+ * 该 operation 在写流程里的角色（创建提案 / 提交提案），宿主据此识别网关调用的协议
+ * 角色，不认业务 operation 名、不认脚本路径。空表 = 不识别（同族安全缺省）。
  *
  * 纯数据 + 显式传表：无单例、无进程级缓存，调用方持有 Map 并注入，
  * 测试因此可以直接塞替身表，不需要真平台。
@@ -398,6 +403,90 @@ export function loadOperationSemantics(platformRoot?: string): Promise<Operation
     child.once('close', (code) => {
       clearTimeout(timer);
       settle(code === 0 ? parseOperationSemantics(Buffer.concat(stdout).toString('utf8')) : new Map());
+    });
+  });
+}
+
+/**
+ * 平台协议角色列（`operation list --json` 的 `protocol`，A 波新增）：operation 在写流程里
+ * 扮演什么角色（创建提案 / 提交提案）。宿主据此识别网关调用的**协议角色**，不认业务
+ * operation 名、也不认脚本路径（AGENTS.md 跨层协议条款）。
+ *
+ * 与 label / 规格 / 语义三张表同族：只读消费平台数据，缺列 / 空值 / 非字符串一律不进表。
+ * 空表 = 判据不成立（宁缺勿猜）：识别层据此不拦截，由 serve 门与平台继续裁决——绝不用
+ * 宿主硬编码 operation 名单顶替（那正是 L2 禁止的第二份名单）。
+ */
+export type OperationProtocols = ReadonlyMap<string, string>;
+
+/** 角色名的卫生：剥控制字符、折叠空白、截断（角色名是短标识，不是长文）。 */
+function sanitizeProtocol(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const text = value.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return text || undefined;
+}
+
+/**
+ * 解析 `operation list --json` 的 protocol 列：operation → 角色名。
+ *
+ * 顶层形状宽容与 parseOperationArgSpecs 同一判据（裸数组 / `{operations:[…]}` 都收，
+ * 其余返回空表 = 与旧版同一套安全缺省）。键同时收注册名（voucher.proposal）与 command
+ * 裸名（proposal）——命令里两种写法都合法，与规格表、语义表同口径。
+ */
+export function parseOperationProtocols(stdout: string): OperationProtocols {
+  const protocols: Map<string, string> = new Map();
+  const operations = operationsArrayOf(stdout);
+  if (!operations) return protocols;
+  for (const operation of operations) {
+    const name = (operation as { name?: unknown } | null)?.name;
+    const command = (operation as { command?: unknown } | null)?.command;
+    const protocol = sanitizeProtocol((operation as { protocol?: unknown } | null)?.protocol);
+    if (!protocol) continue;
+    for (const key of [name, command]) {
+      if (typeof key === 'string' && key && !protocols.has(key)) protocols.set(key, protocol);
+    }
+  }
+  return protocols;
+}
+
+/**
+ * 经公共 CLI 派生 protocol 角色表（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与 loadOperationLabels / loadOperationArgStyles / loadOperationSemantics 完全
+ * 一致：platformRoot 未配、CLI 不存在/不可执行、3s 超时、非零退出、输出不是 JSON、
+ * 平台还没下发这一列——一律返回空 Map。派生是增强，不是前提；没有角色表就不识别提案
+ * 创建调用（fail-closed 到"不拦截"），门与平台照旧兜底。
+ */
+export function loadOperationProtocols(platformRoot?: string): Promise<OperationProtocols> {
+  if (!platformRoot) return Promise.resolve(new Map());
+  const cli = gatewayExecPath(platformRoot);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (protocols: OperationProtocols): void => {
+      if (settled) return;
+      settled = true;
+      resolve(protocols);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(new Map());
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(new Map());
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseOperationProtocols(Buffer.concat(stdout).toString('utf8')) : new Map());
     });
   });
 }
