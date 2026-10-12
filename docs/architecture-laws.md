@@ -102,7 +102,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **机械守卫**：B 审计清单（每条失败路径归这两类之一）+ 熔断上限测试。
 
-**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`runtime.ts:91`，连续拆解步既无执行痕迹也无 needs 交还即停）、`MAX_NEEDS_ROUNDS = 3`（`runtime.ts:80`）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts:494`，计划被连续拒绝即收敛）。
+**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，计划被连续拒绝即收敛）。
 
 **闭环判据**：任何新失败路径进审计清单；新增无界回路即红。
 

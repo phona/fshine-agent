@@ -183,6 +183,18 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/memory-candidate-extractor.ts: 余额', { tag: '防御排除', reason: 'BALANCE_RE 的"科目余额…"模式（D-005 扩词后现形）：财务事实识别正则的一部分，删=记忆提取器对余额类事实变聋' }],
   ['packages/agent/src/runtime.ts: 财务', { tag: '防御排除', reason: 'hasFinancialFigure 及周边"财务数字"检测（区分编造结论 vs 能力边界说明）+ 历史资料防串（旧财务结论不当本轮实时结果）：删=出口校验/防串防御变聋' }],
   ['packages/agent/src/runtime.ts: 余额', { tag: '防御排除', reason: 'hasFinancialFigure 正则的"余额"分支（D-005 扩词后现形）：检测"回复是否带财务数字"的出口校验尺，删=编造结论识别变聋' }],
+  // 方案 2 分批 1：renderPlanStepOutcomeLines 的"不含财务数字"注释随函数搬进 plan-facts.ts；
+  // 同一条防御理由（出口校验的零执行数字拦截不误伤步骤事实汇总）换文件不换归属。
+  ['packages/agent/src/plan-facts.ts: 财务', { tag: '防御排除', reason: 'renderPlanStepOutcomeLines 注释"不猜业务语义，因此不含财务数字"（随函数自 runtime.ts 逐字搬入）：说明步骤事实汇总为何不被出口校验的零执行数字拦截误伤，删=该防御理由失去着落' }],
+  // 方案 2 分批 1：renderWriteClosureReply 的"不含财务数字"注释随函数搬进 turn-relay.ts；
+  // 判据本体（hasFinancialFigure）仍住 runtime.ts。（同批搬来的 usefulWorkerNote /
+  // composeClarificationReply 后因消循环 import 搬回 runtime.ts，见其上的 runtime.ts 条目。）
+  ['packages/agent/src/turn-relay.ts: 财务', { tag: '防御排除', reason: 'renderWriteClosureReply 注释"不含财务数字"（随函数自 runtime.ts 逐字搬入）：说明写关闭终稿为何要剥掉带数字的文本，删=该防御理由失去着落' }],
+  // 方案 2 分批 3a：出口校验两块（turn-exit.ts）与每回合上下文档装配（turn-context.ts）
+  // 自 runtime.ts 逐字搬入，随函数/常量搬过来的注释与注令文案各带一处"财务"命中。
+  // 归属与 runtime.ts 上的原条目同族（数字结论判据 + 防串注令），换文件不换理由。
+  ['packages/agent/src/turn-exit.ts: 财务', { tag: '防御排除', reason: 'activatedPlan 收尾分支注释"只在不带财务数字…才算有价值"（随函数自 runtime.ts 逐字搬入）：worker 说明附注的准入判据，删=附在状态文案后的可能是编造结论' }],
+  ['packages/agent/src/turn-context.ts: 财务', { tag: '防御排除', reason: 'RECENT_TURN_HISTORY_NOTE 注令及其注释"其中的财务结论不得作为本轮实时结果引用"（随常量自 runtime.ts 逐字搬入）+ renderContextState 的"实时财务数据"措辞：防串轮防御（旧财务结论不当本轮实时结果）的着落，删=防冒充实时的注令失去登记' }],
   // ── 警职执法：守卫/校验器识别业务模式，其存在就是为了识别 ──
   ['packages/agent/src/context-extractor.ts: 期间', { tag: '警职执法', reason: 'hasContradiction 范围意图识别（更多期间/当前期间配对）：识别业务词以判定用户范围意图，是识别器不是泄漏' }],
   ['packages/agent/src/serve-gate.ts: 目录', { tag: '警职执法', reason: 'G1 门知识面/根目录的路径安全判定：门守卫自身引用它约束的知识面' }],
@@ -217,6 +229,10 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
   'packages/agent/src/memory-candidate-extractor.ts: 余额',
   'packages/agent/src/runtime.ts: 财务',
   'packages/agent/src/runtime.ts: 余额',
+  'packages/agent/src/plan-facts.ts: 财务',
+  'packages/agent/src/turn-relay.ts: 财务',
+  'packages/agent/src/turn-exit.ts: 财务',
+  'packages/agent/src/turn-context.ts: 财务',
 ];
 
 /**

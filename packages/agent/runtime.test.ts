@@ -3,12 +3,13 @@ import type { ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, T
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
-import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints, looksLikeProtocolMaterial } from './src/runtime';
-import { clarificationTextFor, toolUserErrorFor } from './src/error-codes';
+import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, composeClarificationReply, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints, looksLikeProtocolMaterial, usefulWorkerNote } from './src/runtime';
+import { clarificationTextFor, messageTextFor, toolUserErrorFor } from './src/error-codes';
 import { DELEGATION_AUTH_FAILURE } from './src/context';
 import { EXECUTION_FACTS_MARKER } from './src/execution-facts';
 import { parseOperationArgSpecs } from './src/operation-labels';
 import type { PlanEntitySources } from './src/turn-contract';
+import type { SelectionClarification } from './src/platform-contract';
 import { FakeSessionRepo } from './test-helpers';
 
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
@@ -35,6 +36,13 @@ function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
     run: run ?? (async (): Promise<SubagentTaskResult> => ({ taskId: 'task_1', text: '子 Agent 完成。' })),
   };
 }
+
+/** 选择类澄清信封替身（结构化歧义：同名/近名多个候选，等用户选一个）。 */
+const AMBIGUOUS: SelectionClarification = {
+  code: 'ACCOUNT_SET_AMBIGUOUS',
+  query: '幻辰',
+  candidates: ['幻辰财税', '幻辰科技'],
+};
 
 /** A turn where the Main Agent declares an ordinary conversation before answering. */
 function declareConversation(steps: ScriptedTurnStep[]): ScriptedTurnStep[] {
@@ -2059,5 +2067,68 @@ describe('createTaxAgentRuntime', () => {
     expect(executionLanguageFingerprints('见 query-receivables.js 说明')).toEqual([]);
     // 防误伤：内部控制的近形结论词不是机制词（"已被拒绝"是结局，"拒绝上限"才是参数）
     expect(executionLanguageFingerprints('该请求已被拒绝')).toEqual([]);
+  });
+
+  // ── usefulWorkerNote / composeClarificationReply（runtime 私有判据及其直接使用者）──
+  //
+  // 方案 2 分批 1 曾把这两个函数搬进 turn-relay.ts，但那会造成 runtime.ts ↔ turn-relay.ts
+  // 循环 import（判据本体 stripFootprint / hasFinancialFigure / executionLanguageFingerprints
+  // 都在 runtime.ts 一侧，而 composeClarificationReply 直接调用 usefulWorkerNote）。它们不是
+  // 与 runtime 无关的纯渲染器，因此搬回本文件；用例随之从 turn-relay.test.ts 迁到这里，
+  // 断言一条不改。turn-relay 仍需要的文本原语（stripFootprint）下沉到 text-hygiene.ts，
+  // 两个使用方认同一份，不成环。
+
+  describe('usefulWorkerNote', () => {
+    it('干净的无数字说明原样通过', () => {
+      expect(usefulWorkerNote('平台没有返回匹配的数据。')).toBe('平台没有返回匹配的数据。');
+    });
+
+    it('空 / 纯空白 → 空', () => {
+      expect(usefulWorkerNote('')).toBe('');
+      expect(usefulWorkerNote('   \n  ')).toBe('');
+    });
+
+    it('剥掉尾部的〔本轮执行面：…〕系统元数据', () => {
+      expect(usefulWorkerNote('平台查完了。\n\n〔本轮执行面：finance.query-receivables〕')).toBe('平台查完了。');
+    });
+
+    it('带财务数字的说明不附后', () => {
+      expect(usefulWorkerNote('本次查到的余额是 1000 元。')).toBe('');
+      expect(usefulWorkerNote('金额合计见明细。')).toBe('');
+    });
+
+    it('执行语言指纹（脚本路径 / 内部控制词）是协议材料，不附后', () => {
+      expect(usefulWorkerNote('详见 src/voucher/scripts/fill.js 的说明。')).toBe('');
+      expect(usefulWorkerNote('本次已用满平台的查询计划额度。')).toBe('');
+    });
+
+    it('宿主自己的兜底文案不附后（恢复路径与 delegate 路径共用同一把尺）', () => {
+      expect(usefulWorkerNote(messageTextFor('NO_EXECUTION_CLARIFICATION'))).toBe('');
+      expect(usefulWorkerNote(messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED'))).toBe('');
+      expect(usefulWorkerNote(messageTextFor('RESUMED_PLAN_NOT_EXECUTED'))).toBe('');
+    });
+  });
+
+  describe('composeClarificationReply', () => {
+    it('表内模板 + 信封数据机械组装；干净说明附后', () => {
+      expect(composeClarificationReply(AMBIGUOUS, '已按目录搜索，只有这两个相近名称。')).toBe([
+        '没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰科技。你要查哪个？告诉我名称或序号即可。',
+        '',
+        '已按目录搜索，只有这两个相近名称。',
+      ].join('\n'));
+    });
+
+    it('worker 文本不干净时只发模板问题', () => {
+      expect(composeClarificationReply(AMBIGUOUS, '')).toBe(
+        '没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰科技。你要查哪个？告诉我名称或序号即可。',
+      );
+      expect(composeClarificationReply(AMBIGUOUS, '详见 src/voucher/scripts/fill.js 的说明。')).toBe(
+        '没有找到唯一匹配“幻辰”的对象。平台上有 2 个名字相近的：1. 幻辰财税 2. 幻辰科技。你要查哪个？告诉我名称或序号即可。',
+      );
+    });
+
+    it('未登记的选择类码 fail-loud（不静默退化成通用问句）', () => {
+      expect(() => composeClarificationReply({ ...AMBIGUOUS, code: 'SOME_NEW_CODE' }, '')).toThrow(/未登记的选择类澄清码/);
+    });
   });
 });

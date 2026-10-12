@@ -13,7 +13,7 @@
  * （落在候选个数内）或与候选逐字相同、且会话里有 issued 未 resolved 的澄清 → 绑定到
  * 对应候选，selected 进本轮实体来源（实体门因此放行"用户亲自选过的"实体）。
  *
- * 与 C31 多任务消歧（runtime.ts 的 matchPlanDisambiguationReply）**并列不合并**：那个
+ * 与 C31 多任务消歧（plan-binding.ts 的 matchPlanDisambiguationReply）**并列不合并**：那个
  * 解"用户要继续哪个任务"，这个解"用户选了哪个候选"；沿用同一条纪律——编号只有紧跟
  * 澄清问题才算数，中间插过任何回合即失效。
  */
