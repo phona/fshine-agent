@@ -223,7 +223,7 @@ Main Agent 申报 delegate
 | 写路径 | 业务字段住编排层：`ChangeIntentRecord`（`packages/contracts/src/store.ts:238` `kind:'voucher.batch'` / `accountSet` / `period` / `summary`）+ `context.ts:360` 由编排层拼写确认摘要（借贷合计） | 保险箱：写提案在编排层是不透明 payload，schema / 域校验 / 确认摘要 / commit 读回全归执行层，编排层只持通用确认状态机；判据 = 走查「新增 payroll 写路径 fshine 改动 = 0」+ 写 e2e 全绿 + §17 七项有守卫（见 [architecture-laws.md](architecture-laws.md) L4） |
 | 申报契约 | 已瘦身：`route_current_turn` 3 字段（kind/request/continueTaskId），零业务知识；申报层只剩结构校验，范围守卫靠计划层包含校验（§2 第 9 条） | 同左（已达成） |
 | 领域判别 | `validatePlanEntities` 已做通用来源校验；但名称重新检索等执行规则仍在 fshine worker 提示词和业务 skill 中，与 17dz serve skill 重复 | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
-| 业务 skill | `docs/business-skill.md` 可配置加载，但现仍写有默认应收、默认期间、名称检索和范围替代等执行口径 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
+| 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁 17dz SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
 | 执行凭证 | 当前 `gateCalls > 0` 主要证明网关调用获准，普通 conversation 的无来源金额主要告警 | 区分调用尝试与成功结果，并让数据回复关联可核对的执行结果 |
 | 通用预算策略 | 17dz 的 `plan evaluate` 当前决定 execute/notify/confirm/stop 并保存累计账本；fshine 执行通知、确认和激活 | fshine 复用通用预算与计划状态策略；执行层声明耗时、副作用及更严格的硬上限，并在实际调用处复核。迁移中保留现有门禁 |
 | 长任务拆解 | 已落地：计划模式协议（delegate request 的「第N/M步：」前缀，宿主机械解析；无前缀 = 单步行为不变）+ 任务计划状态（append-only 步骤事实 + 可重建投影）+ 逐步派单同任务续跑（continueTaskId，累计账本跨步累积）+ 任一步失败不阻塞 + 通知带「第 N/M 步」 | 同左（已达成）；申报契约仍 3 字段，协议写在 request 与工具描述里 |
