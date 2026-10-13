@@ -7,6 +7,10 @@
  * mock 联调:.env 设 DZ_EXECUTOR=mock 后,写链路用例(5.x)走
  * 提案→确认码→dry-run→commit→读回全链(落假状态,零真平台影响),
  * 且每次启动重置 mock 状态文件保证用例可重复。
+ * 出口保真:progress 与 notice 都按生产 adapter 的三个参数交给 handler
+ * (channel-wecom/src/adapter.ts 的 dispatchMessage)。notice 原文收进报告与
+ * records JSON——少了它,plan-runtime 的 fail-closed 守卫会把任何走计划门的
+ * 链路挂死(见 createNoticeRecorder)。
  */
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -16,7 +20,7 @@ import Database from 'better-sqlite3';
 import { loadConfig } from '@fshine/core';
 import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
-import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
+import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
@@ -146,6 +150,8 @@ interface CaseRecord {
   taskId: string | null;
   subagentFinalText: string | null;
   progressSteps: string[];
+  /** 计划通知帧原文（生产 third argument，与 e2e harness 的 Turn.notices 同源）。 */
+  notices: string[];
   reply: string;
   durationMs: number;
   leakFlags: string[];
@@ -193,6 +199,36 @@ function lastAssistantText(workerMessages: unknown): string | null {
     }
   }
   return null;
+}
+
+/**
+ * 计划通知出口（生产保真）。
+ *
+ * 生产 adapter 把 progress/notice 三个参数一起交给 handler
+ * （packages/channel-wecom/src/adapter.ts 的 dispatchMessage），e2e harness 也在
+ * handler 外面包一层记录（tests/e2e/harness.ts 的 recordingHandler）。验收以前只传
+ * progress，于是 handler 里的 onNotice 是 undefined，而 plan-runtime 有刻意的
+ * fail-closed 守卫：计划需要通知/确认时直接抛「trusted.onNotice 未配置；已暂停执行」
+ * ——验收环境里任何走计划门的链路（连只读取数步骤都还没开始）就被挂死。
+ *
+ * 这里只做「记录 + 打印」，生产链路一行不改。送达失败必须留痕：notice 是计划激活
+ * 授权链的一半（plan-runtime 在它 resolve 之前不 activate 计划），与 adapter 的
+ * notice 失败处理同纪律——console.error 记结构化事件后重抛，让调用方看见，不静默吞掉。
+ */
+function createNoticeRecorder(caseId: string, notices: string[]): NoticeFn {
+  return async (text) => {
+    notices.push(text);
+    try {
+      console.log(JSON.stringify({ event: 'acceptance_plan_notice', case: caseId, text }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'acceptance_notice_fail',
+        case: caseId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw error;
+    }
+  };
 }
 
 /** 排干轮询间隔：在飞的写落地通常是毫秒级，250ms 足够，又不至于把时间烧在轮询上。 */
@@ -331,7 +367,7 @@ async function main(): Promise<void> {
       if (!code) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
-          subagentFinalText: null, progressSteps: [],
+          subagentFinalText: null, progressSteps: [], notices: [],
           reply: `(跳过:用例 ${spec.confirmOf} 的回复未含确认码,无法构造确认)`,
           durationMs: 0, leakFlags: [],
         });
@@ -345,7 +381,7 @@ async function main(): Promise<void> {
       if (!choice) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
-          subagentFinalText: null, progressSteps: [],
+          subagentFinalText: null, progressSteps: [], notices: [],
           reply: `(跳过:用例 ${spec.followUpOf} 未产生编号候选,无法构造追问)`,
           durationMs: 0, leakFlags: [],
         });
@@ -362,12 +398,13 @@ async function main(): Promise<void> {
       text,
     };
     const steps: string[] = [];
+    const notices: string[] = [];
     const started = Date.now();
     let replyTextStr: string;
     try {
       const reply = await handler(message, (step) => {
         if (!steps.includes(step)) steps.push(step);
-      });
+      }, createNoticeRecorder(spec.id, notices));
       replyTextStr = replyText(reply);
     } catch (error) {
       replyTextStr = `(handler 抛出异常)${error instanceof Error ? error.message : String(error)}`;
@@ -389,6 +426,7 @@ async function main(): Promise<void> {
       taskId: taskRow?.task_id ?? null,
       subagentFinalText: taskRow ? lastAssistantText(JSON.parse(taskRow.worker_messages)) : null,
       progressSteps: steps,
+      notices: [...notices],
       reply: replyTextStr,
       durationMs,
       leakFlags: leakCheck(replyTextStr),
@@ -397,6 +435,8 @@ async function main(): Promise<void> {
       event: 'acceptance_case_done', case: spec.id, durationMs,
       // 委派判定：宿主代 worker 向平台提交方案那一帧（worker 内部事件名已不外发）
       delegated: steps.includes(PLAN_SUBMIT_STEP) || Boolean(taskRow),
+      // 计划通知帧条数：0 条 + 回复停在计划门 = 保真缺口回来了（onNotice 没接上）
+      noticeCount: notices.length,
     }));
   }
 
@@ -419,6 +459,11 @@ async function main(): Promise<void> {
       `- taskId:${r.taskId ?? '无'}`,
       `- 子 Agent 最终输出:${r.subagentFinalText ? truncate(r.subagentFinalText, 400) : '无'}`,
       `- 进度事件:${r.progressSteps.join(' → ') || '无'}`,
+      // 计划通知原文：plan-runtime 的 confirm/notify 两条分支都先 await onNotice 才继续
+      // （通知送达是计划激活授权的一半）。验收以前不传 notice，这里永远是「无」，
+      // 且 handler 侧会 fail-closed 挂起——所以这一行同时是保真缺口是否复发的信号。
+      ...r.notices.map((notice, index) => `- 计划通知${r.notices.length > 1 ? `#${index + 1}` : ''}:${notice}`),
+      ...(r.notices.length === 0 ? ['- 计划通知:无'] : []),
       `- 耗时:${(r.durationMs / 1000).toFixed(1)}s`,
       `- 泄漏检查:${r.leakFlags.length ? r.leakFlags.join(';') : '通过'}`,
       '',
