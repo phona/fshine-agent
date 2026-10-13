@@ -462,6 +462,6 @@ C 波后两个 B 波灰度开关各只剩一种行为，按侦察图 R10"先删�
 
 **顺序**：方案 3 → 方案 2 → 方案 1。方案 3 半天可完；方案 2 穿插做，越早越便宜；方案 1 每波独立交付、独立回滚。
 
-**回滚**：方案 3 = revert 一个 md；方案 2 = revert 一个 refactor commit（golden 保证行为不变，回滚无风险）；方案 1 = A 波 revert 平台命令、B 波关 `FSHINE_PROPOSAL_VIA_GATEWAY` 开关、C 波随 B 波；D 波起那两个开关已退役（只剩一种行为），回滚 = revert D 波 commit，真平台写仍由 `FSHINE_REAL_COMMIT` 把守。
+**回滚**：方案 3 = revert 一个 md；方案 2 = revert 一个 refactor commit（golden 保证行为不变，回滚无风险）；方案 1 = A 波 revert 平台命令、B/C 波 revert 对应 commit（B 波起那两个灰度开关已在 D 波退役，**不能再靠"关开关"回滚**——回滚目标只能是 revert commit）；D 波 revert 后两个开关恢复存在，真平台写始终由 `FSHINE_REAL_COMMIT` 把守，与这些开关无关。
 
 **归因纪律**：任何一步测试红，先 revert 该 commit（F5），不在红上叠补丁。三波不混 commit（F4），否则回归无法归因到波次。
