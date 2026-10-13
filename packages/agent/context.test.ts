@@ -474,6 +474,97 @@ describe('17dz Pi subagent adapter', () => {
     )).toBeNull();
   });
 
+  // ── worker 自产物路径豁免（2026-10-13 实测假拒修复）────────────────────────────
+  //
+  // 事故形状（真模型 + mock 平台 + 写开放）：worker 把提案 payload 写进自己的草稿位置后，
+  // 按 `tmp/<requestId>/proposal.json` 排进 plan_submit。该路径不在①-④任何来源里——它是
+  // worker 刚落盘的工作区产物，不是用户给过、平台返回过的名称——被 ENTITY_OUT_OF_SCOPE 拒；
+  // 重提再拒，撞 DECLINED_PLAN_LIMIT 后终局 block，worker 只能告诉用户"操作申请已用尽"。
+  // 开关关着时同一条命令走直接 bash 反而能成（绕过实体校验）：新网关路径比旧路径更易被挡。
+  // 修复：路径判据复用 write 门 / 提案 payload 边界检查同一把尺（workspaceRelPath +
+  // isInsideScratch），只有本轮 scratch 内的产物路径免检。
+
+  /** 造一个真实工作区根（路径判据要 realpath，根必须存在）。 */
+  async function artifactWorkspace(requestId: string): Promise<{ workspaceRoot: string; scratchDir: string }> {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-agent-ws-'));
+    roots.push(root);
+    await mkdir(path.join(root, 'tmp', requestId), { recursive: true });
+    return { workspaceRoot: root, scratchDir: `tmp/${requestId}` };
+  }
+
+  it('本轮 scratch 内的产物路径放行（worker 自己写下的 payload 不是领域实体）', async () => {
+    const requestId = 'req_31776cfb-3bdd-4ec7-8389-d5d40ac4b4ea';
+    const boundary = await artifactWorkspace(requestId);
+    const sources = { currentMessage: '把幻辰财税 202606 的应收做成提案' };
+    // 事故原形：草稿位置里的 payload 路径，当前消息里没有它
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/proposal.json`] }],
+      sources,
+      boundary,
+    )).toBeNull();
+    // 子目录里的中间产物同样放行（worker 的草稿不限于顶层）
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/draft/payload.json`] }],
+      sources,
+      boundary,
+    )).toBeNull();
+    // 同一条计划里的领域实体仍逐字校验：豁免只免路径，不免实体
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/proposal.json`, '--period', '202606'] }],
+      sources,
+      boundary,
+    )).toBeNull();
+    // 不给边界判据（requestId 缺失 / 老路径 / 测试替身）→ 豁免整支不出现，判定与从前一字不差
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/proposal.json`] }],
+      sources,
+    )).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
+  });
+
+  it('对抗：伪装成路径的越权实体仍被拒（判据是解析结果，不是字符串长相）', async () => {
+    const requestId = 'req_31776cfb-3bdd-4ec7-8389-d5d40ac4b4ea';
+    const boundary = await artifactWorkspace(requestId);
+    const scope = '未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数';
+    // 别轮次的草稿位置：同在 tmp/ 下但不是本任务私产
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: ['tmp/req_别的任务/proposal.json'] }],
+      { currentMessage: '把幻辰财税 202606 的应收做成提案' },
+      boundary,
+    )).toContain(scope);
+    // 词法穿越：先逃出本轮 scratch 再绕回来，归一化后落点是别处
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/../req_别的任务/proposal.json`] }],
+      { currentMessage: '把幻辰财税 202606 的应收做成提案' },
+      boundary,
+    )).toContain(scope);
+    // 工作区里别的位置（根下的普通文件）：worker 可读不可写成"实体"
+    expect(validatePlanEntities(
+      [{ operation: 'any.operation', args: ['docs/名单.md'] }],
+      { currentMessage: '查一下' },
+      boundary,
+    )).toContain(scope);
+    // 绝对路径越界与 ../ 穿越：workspaceRelPath 直接返回 null，回到逐字校验
+    for (const token of ['/etc/passwd', `../${requestId}/proposal.json`, '../../etc/shadow']) {
+      expect(validatePlanEntities(
+        [{ operation: 'any.operation', args: [token] }],
+        { currentMessage: '查一下' },
+        boundary,
+      )).toContain(scope);
+    }
+    // 豁免按参数逐个判定，不是整支计划免检：同一 call 里的幻觉实体照样被拒
+    expect(validatePlanEntities(
+      [{ operation: 'voucher.proposal', args: [`tmp/${requestId}/proposal.json`, '幻觉出来的对象'] }],
+      { currentMessage: '把幻辰财税 202606 的应收做成提案' },
+      boundary,
+    )).toContain('幻觉出来的对象');
+    // 豁免也不把领域实体的校验放松：消息里没有的名字带边界判据也照样拒
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
+      { currentMessage: '查一下胜利这个帐套' },
+      boundary,
+    )).toContain(scope);
+  });
+
   it.each([
     '找到两个客户，请选择一个。',
     '请确认是否继续执行。',

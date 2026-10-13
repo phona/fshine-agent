@@ -26,7 +26,7 @@ import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePl
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
 import { proposalViaGateway } from './platform-mock';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
-import { validatePlanEntities } from './turn-contract';
+import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 
 /**
  * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
@@ -34,6 +34,17 @@ import { validatePlanEntities } from './turn-contract';
  * 让 worker 收手向用户说明缺什么。5 次宽容正常试错，合法流程不会触碰。
  */
 const MAX_DECLINED_PLANS_PER_TASK = 5;
+
+/**
+ * 本轮 scratch 位置（`tmp/<requestId>`）：worker 唯一可写位置。
+ *
+ * 一处派生两处消费——提案 payload 边界检查（decideProposalCreation）与计划实体校验的
+ * 产物路径豁免（validatePlanEntities 的第三个参数）。判据本身只有一份（serve-gate 的
+ * workspaceRelPath + isInsideScratch），这里只负责"本轮是哪个位置"这一个事实。
+ */
+function scratchDirFor(requestId: string | undefined): string | null {
+  return requestId ? `tmp/${requestId}` : null;
+}
 
 /**
  * 计划提交进度帧：宿主替 worker 调平台评估方案时发一帧。措辞与业务无关
@@ -960,7 +971,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 就等于让 worker 指使平台去读工作区里任意文件、再把错误信息带回来看——那是一道通用
     // 读取面，与提案业务无关。判据与 write 门同一把尺（workspaceRelPath + isInsideScratch），
     // 不存在第二份路径解析。
-    const scratchDir = options.requestId ? `tmp/${options.requestId}` : null;
+    const scratchDir = scratchDirFor(options.requestId);
     const rel = scratchDir ? workspaceRelPath(options.cwd, call.payloadPath) : null;
     if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
       const reason = `PROPOSAL REFUSED：payload 路径越界（只准本轮可写位置 ${scratchDir ?? '（未分配）'} 内），未调用平台。`;
@@ -1060,13 +1071,24 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 里逐字找到。平台响应从当前会话已产生的 tool_result 里收集——执行层调目录
       // 查询拿到的唯一候选名就逐字住在这里面，宿主不需要懂业务就能放行"合法解析出来
       // 的实体"。第四来源（sessionEntities）由宿主在委派时注入，见 runtime.ts。
+      //
+      // 第三个参数（产物路径豁免，2026-10-13 实测假拒修复）：worker 把 payload 写进
+      // 本轮 scratch 后按路径排进计划，该路径不是领域实体、不在任何来源里，逐字包含
+      // 必然假拒，重试还会撞 DECLINED_PLAN_LIMIT 终局。判据与提案 payload 边界检查
+      // 同一把尺（workspaceRelPath + isInsideScratch，见 turn-contract 的
+      // PlanArtifactBoundary），只有本轮 scratch 内的路径免检。requestId 缺失（测试
+      // 替身 / 老路径）时不传 = 豁免整支不出现，判定与从前一字不差。
+      const scratchDir = scratchDirFor(options.requestId);
+      const artifactBoundary: PlanArtifactBoundary | undefined = scratchDir
+        ? { workspaceRoot: options.cwd, scratchDir }
+        : undefined;
       const scopeError = validatePlanEntities(parsed.calls, {
         ...options.entitySources,
         platformResponses: [
           ...(options.entitySources.platformResponses ?? []),
           ...collectPlatformResponses(session.agent.state.messages),
         ],
-      });
+      }, artifactBoundary);
       if (scopeError) {
         activePlan = null;
         needsClues.push({ missing: ['请求中未给出的对象'], reason: scopeError });

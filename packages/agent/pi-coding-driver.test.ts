@@ -547,6 +547,57 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  it('lets a plan through when it carries this task\'s own scratch artifact path (2026-10-13 实测假拒修复)', async () => {
+    // 事故原形：worker 把提案 payload 写进本轮 scratch 后按路径排进 plan_submit，被
+    // ENTITY_OUT_OF_SCOPE 拒；重提再拒，撞 DECLINED_PLAN_LIMIT 后终局 block。这里钉住
+    // 驱动侧接线：requestId 派生出的边界判据必须真的传到 validatePlanEntities。
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-intent-scope-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    const requestId = 'req_31776cfb-3bdd-4ec7-8389-d5d40ac4b4ea';
+    const session = async (sources: { currentMessage: string }) => {
+      const evaluated: string[][] = [];
+      const planCliRunner: PlanCliRunner = async ({ args }) => {
+        evaluated.push(args);
+        if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+      };
+      const worker = await createPiCodingWorkerSession({
+        cwd: root,
+        skillRoots: [],
+        systemPrompt: 'intent scope test',
+        sessionId: 'task_scope',
+        requestId,
+        agentDir: path.join(root, '.fshine-agent'),
+        modelConfig,
+        planCliRunner,
+        entitySources: sources,
+      });
+      return { worker, evaluated };
+    };
+    const submit = async (worker: Awaited<ReturnType<typeof createPiCodingWorkerSession>>, command: string) =>
+      worker.session.agent.beforeToolCall?.({
+        assistantMessage: {} as never,
+        toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
+        args: { command },
+        context: {} as never,
+      });
+
+    // 本轮 scratch 内的产物路径 → 放行（当前消息里没有这个路径，但它不是领域实体）
+    const own = await session({ currentMessage: '把幻辰财税 202606 的应收做成提案' });
+    const verdict = await submit(own.worker, `bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["tmp/${requestId}/proposal.json"]}]}`);
+    expect(verdict?.block).toBe(true);
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    expect(own.evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
+    own.worker.session.dispose();
+
+    // 同一形状但落在别轮次的 scratch → 仍是越权参数（判据是路径解析结果，不是字符串长相）
+    const foreign = await session({ currentMessage: '把幻辰财税 202606 的应收做成提案' });
+    const rejected = await submit(foreign.worker, 'bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["tmp/req_别的任务/proposal.json"]}]}');
+    expect(rejected?.reason).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
+    foreign.worker.session.dispose();
+  });
+
   it('skips entity validation when the host injects no sources', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-no-sources-'));
     roots.push(root);

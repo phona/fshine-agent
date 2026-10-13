@@ -201,6 +201,7 @@ export {
   isSelfContradictoryDeclaration,
   parseTurnDeclaration,
   validatePlanEntities,
+  type PlanArtifactBoundary,
   type PlanEntitySources,
   type TurnDeclaration,
 } from './turn-contract';

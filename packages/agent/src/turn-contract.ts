@@ -1,4 +1,5 @@
 import type { DiscoveredTool } from '@fshine/contracts';
+import { isInsideScratch, workspaceRelPath } from './serve-gate';
 
 /**
  * 申报契约（架构 §4）：**三个字段，零业务知识**。
@@ -135,6 +136,29 @@ export interface PlanEntitySources {
   sessionEntities?: readonly string[];
 }
 
+/**
+ * worker 自产物的路径边界（2026-10-13 实测假拒的修复）：**不是**第五个实体来源，
+ * 而是"哪些字符串参数压根不是领域实体"的判据。
+ *
+ * 事故形状（真模型 + mock 平台 + 写开放）：worker 把提案 payload 写进自己的草稿位置后，
+ * 按 `tmp/<requestId>/proposal.json` 排进计划提交。该路径不在①-④任何来源里——它是
+ * worker 刚落盘的工作区产物，不是用户给过、平台返回过的名称——逐字包含判定必然拒；
+ * 重提再拒，撞上 DECLINED_PLAN_LIMIT 后终局block，worker 只能告诉用户"操作申请已用尽"。
+ * 旧路径（直接 bash 发同一条命令）反而能成，因为绕过了这道校验。
+ *
+ * 判据与 write 门 / 提案 payload 边界检查**同一把尺**（serve-gate 的 workspaceRelPath +
+ * isInsideScratch，不另写一份）：路径经 workspaceRoot 解析后必须落在本轮 scratchDir
+ * （`tmp/<requestId>`）内。豁免面因此只有"本任务私有草稿位置里的路径"一种——`../` 穿越、
+ * 绝对路径越界、符号链接逃逸、工作区里别的位置、别轮次的草稿位置，一律照旧逐字校验。
+ * 不给"任意字符串伪装成路径就免检"开门：判据是路径解析的结果，不是字符串长相。
+ */
+export interface PlanArtifactBoundary {
+  /** 平台工作区根（worker cwd）：与 write 门同一基准。 */
+  workspaceRoot: string;
+  /** 本轮 scratch 位置（`tmp/<requestId>`）：worker 唯一可写位置。 */
+  scratchDir: string;
+}
+
 /** 单条平台响应纳入包含判定的截断长度（与宿主留存 tool_result 的截断一致）。 */
 const PLATFORM_RESPONSE_LIMIT = 20_000;
 /** 纳入判定的平台响应条数上限：覆盖"目录查询拿到唯一候选、再按候选名查"这类跨计划解析。 */
@@ -146,8 +170,9 @@ const SESSION_ENTITY_MAX = 40;
  * 计划实体来源校验（架构 §2 第 9 条，领域无关）。
  *
  * 每个 call 的 args 里所有字符串都要逐一检查：以 `-` 开头的是 flag 不是实体，跳过；
- * 其余字符串必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」的并集里
- * 逐字找到。
+ * 落在本轮 scratch 位置内的路径是 worker 自产物不是实体，跳过（判据见
+ * `PlanArtifactBoundary`，与 write 门同一把尺）；其余字符串必须能在「当前消息 /
+ * 检索证据 / 本轮平台响应 / 本会话已确立实体」的并集里逐字找到。
  *
  * 与旧的领域分支的差别（roadmap 明确接受）：宿主不再强制"某类任务只能调某个操作"，
  * 操作与任务类型是否匹配归执行层 SKILL 与平台门禁。但实体来源校验不弱于原来——
@@ -156,10 +181,14 @@ const SESSION_ENTITY_MAX = 40;
  *
  * 第四来源（sessionEntities）是连续会话的标定补丁而非放松：它只携带用户亲自执行过/
  * 确认过的实体，flash 模型幻觉出的对象名仍然被挡（幻觉名不在任何来源里）。
+ *
+ * 边界判据缺省不传：调用方不给 `PlanArtifactBoundary` 时，产物路径豁免整支不出现，
+ * 判定与今天一字不差（老路径/测试替身不受影响）。
  */
 export function validatePlanEntities(
   calls: readonly { operation: string; args: readonly unknown[] }[],
   sources: PlanEntitySources,
+  artifactBoundary?: PlanArtifactBoundary,
 ): string | null {
   const responses = (sources.platformResponses ?? []).slice(-PLATFORM_RESPONSE_MAX);
   const haystack = [
@@ -174,6 +203,9 @@ export function validatePlanEntities(
       const token = value.trim();
       // flag（--query）不是实体；空串无实体含义
       if (!token || token.startsWith('-')) continue;
+      // worker 刚落盘的自产物路径不是领域实体：只有解析进本轮 scratch 位置的才算，
+      // 判据复用 write 门那把尺（workspaceRelPath + isInsideScratch），不另写一份
+      if (isOwnArtifactPath(token, artifactBoundary)) continue;
       if (!haystack.includes(token)) {
         // 只报第一个越权值并截断：worker 修正后重新提交完整 calls，逐次暴露即可
         return `计划包含未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数：${token.slice(0, 80)}`;
@@ -181,6 +213,19 @@ export function validatePlanEntities(
     }
   }
   return null;
+}
+
+/**
+ * token 是否是 worker 本任务自己的产物路径（落在本轮 scratch 位置内）。
+ *
+ * 复用 serve-gate 的判据而非另写一份：`workspaceRelPath` 做词法 + 符号链接双层边界
+ * （`../` 穿越、绝对路径越界、链接逃逸全返回 null），`isInsideScratch` 判"是不是本轮
+ * 私产"。两者都过不了 = 不是本任务可写位置里的产物，仍按领域实体逐字校验。
+ */
+function isOwnArtifactPath(token: string, boundary: PlanArtifactBoundary | undefined): boolean {
+  if (!boundary) return false;
+  const rel = workspaceRelPath(boundary.workspaceRoot, token);
+  return rel !== null && isInsideScratch(rel, boundary.scratchDir);
 }
 
 /**
