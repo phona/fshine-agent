@@ -409,7 +409,7 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 | W7 | 密钥不变量 | 激活密钥 / commit 密钥不进 worker env（grep 断言 + 现有测试随迁） |
 | W8 | L4 机械守卫 | `ChangeIntentRecord` 字段名白名单断言（出现业务名即红）+ leak-lint 删三条登记（只减不增防回流） |
 
-#### C 波已落地（2026-10-13，fshine commit `cwave-legacy-write-path-removed`）
+#### C 波已落地（2026-10-13，fshine commit `95bdede`）
 
 **删掉的（按文件）**：`apps/server/commit.ts`（legacy 落账执行器：宿主解提案、物化契约、按文件路径 dry-run/commit/读回）与其单测；`context.ts` 的 `ChangeProposal` / `LegacyChangeIntentRecord` / `extractChangeProposal` / `finalizeProposal` / `ProposalOutcome` / `truncate` / legacy 确认分支 / 派发点 / 影子留痕分支，以及选项 `prepareRunner` / `commitRunner` / `maxBatchCount` / `commitEnabled` 与随之死掉的 `PrepareRequest` / `CommitRequest` 四个注入点接口；`platform-contract.ts` 的四个 voucher 操作名与 `parsePrepareOutcome` / `parseVerifyCount` / `PrepareOutcome`（唯一消费者是 commit.ts）+ `index.ts` 对应导出；leak-lint 三条"遗留待清"登记。
 
