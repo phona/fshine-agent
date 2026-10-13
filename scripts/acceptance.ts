@@ -228,14 +228,14 @@ async function main(): Promise<void> {
   }
 
   // 与生产共用同一份装配：避免验收脚本和生产各写一遍、悄悄漂移。
+  const dbPath = path.join(dataDir, `acceptance-${runId}.db`);
   const assembly = await createServerAssembly({
     env: process.env,
-    dbPath: path.join(dataDir, `acceptance-${runId}.db`),
+    dbPath,
   });
   const store = assembly.store;
   const handler = assembly.handler;
-  const platformRoot = assembly.platformRoot;
-  const auditDb = new Database(path.join(dataDir, `acceptance-${runId}.db`));
+  const auditDb = new Database(dbPath);
 
   const records: CaseRecord[] = [];
   const repliesById = new Map<string, string>();
