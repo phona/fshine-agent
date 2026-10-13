@@ -169,6 +169,9 @@ export function createServeGateAuditSink(sink: {
  *
  * 宁缺勿猜：拿不到语义表（平台还没下发 / 派生失败 / operation 未登记）时按②处理——
  * "不要放进计划"对任何调用都是安全的下一步，而"未开放写入权限"是一句可能错误的归因。
+ *
+ * 本条只判"该说哪句话"（confirm 列）；"该点名谁"由 nonPlannableOperations 判（plan 列），
+ * 两列都是平台声明，合起来成 planNotReadOnlyReason。
  */
 export function planNotReadOnlyCode(
   calls: readonly PlanCall[],
@@ -176,6 +179,55 @@ export function planNotReadOnlyCode(
 ): 'WRITE_NOT_ENABLED' | 'PLAN_NOT_PLANNABLE' {
   const needsConfirm = calls.some((call) => isWriteAccess(semantics?.get(call.operation)));
   return needsConfirm ? 'WRITE_NOT_ENABLED' : 'PLAN_NOT_PLANNABLE';
+}
+
+/**
+ * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列**。
+ *
+ * 这一列就是平台自己声明"这个 operation 要不要过计划门"（read → true、本地处理类 → false）。
+ * serve-gate 的计划前置豁免读同一列（planExempt），两侧共用一份数据、一个判据——宿主不
+ * 另立一份 operation 名单（L2），也不按错误码名猜。
+ *
+ * 宁缺勿猜，且方向与 planExempt 一致：语义表缺失 / operation 未登记（plan 列取不到真值）时
+ * **不进名单**——未知不等于免计划。名单为空时调用方退回零名单措辞（PLAN_NOT_PLANNABLE），
+ * 绝不把整份计划的 operation 统统说成"不该进计划"：2026-10-13 事故里 worker 已经试过
+ * "删一个再提"（删错了合法调用，仍然被拒），点错名字比不点名更糟。
+ */
+export function nonPlannableOperations(
+  calls: readonly PlanCall[],
+  semantics: OperationSemantics | undefined,
+): string[] {
+  const named = calls
+    .filter((call) => semantics?.get(call.operation)?.plan === false)
+    .map((call) => call.operation);
+  return [...new Set(named)];
+}
+
+/**
+ * 计划门"含非只读 operation"拒绝 → 交给 worker 的停止原因正文（PLAN STOP 之后那段）。
+ *
+ * 分流判据一字未动（planNotReadOnlyCode：平台语义表的 confirm 列）；② 的理由带上**点名**——
+ * 2026-10-13 真平台实测：worker 的计划里有 4 个调用，其中一个是不该进计划的本地处理类，
+ * 宿主每次只回"该调用不需要计划"而不说是哪个，它无法定位该删哪一个，原样重提 5 次后撞
+ * MAX_DECLINED_PLANS_PER_TASK terminal block，只能向用户承认"登记环节连续被拒后已关闭"。
+ * 点名即自愈通道：删掉它、改为直接调用、重提剩余 calls。
+ *
+ * 措辞唯一出处是 error-codes.ts 的表：点名版 PLAN_NOT_PLANNABLE_OPERATIONS（带 {operations}
+ * 数据），点不出名字时退回零名单版 PLAN_NOT_PLANNABLE——调用点只选码、不拼句。
+ * 混合场景（既有要用户确认的写类、又有不该进计划的）仍归 WRITE_NOT_ENABLED：那句话的
+ * 归属是"找管理员开通写入权限"，不是"改调用形状"，两者混在一句里 worker 又会猜。
+ */
+export function planNotReadOnlyReason(
+  calls: readonly PlanCall[],
+  semantics: OperationSemantics | undefined,
+): string {
+  if (planNotReadOnlyCode(calls, semantics) === 'WRITE_NOT_ENABLED') {
+    return messageTextFor('WRITE_NOT_ENABLED');
+  }
+  const named = nonPlannableOperations(calls, semantics);
+  return named.length > 0
+    ? messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: named.join('、') })
+    : messageTextFor('PLAN_NOT_PLANNABLE');
 }
 
 export interface PiCodingTurnDriverOptions {
@@ -1134,9 +1186,13 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 开通写入权限"，已实证的误导 → PLAN_NOT_PLANNABLE）。按码名猜语义就是按字符串
       // 判权限，那正是本次要拆掉的东西。既有活跃计划照常恢复：被拒的是新提交，
       // 不是已激活的范围。
+      //
+      // ② 的理由带点名（planNotReadOnlyReason → PLAN_NOT_PLANNABLE_OPERATIONS）：不说
+      // "该调用"而说"哪个调用"，worker 才删得动那一个、改为直接调用、重提剩余部分——
+      // 2026-10-13 实测它就是在这一句上无从下手，原样重提 5 次后 terminal block。
       if (error instanceof Error && error.message.includes('PLAN_OPERATION_NOT_READ_ONLY')) {
         activePlan = previousPlan;
-        return { block: true, reason: `PLAN STOP\n${messageTextFor(planNotReadOnlyCode(parsed.calls, operationSemantics))}` };
+        return { block: true, reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics)}` };
       }
       return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
     }

@@ -103,6 +103,14 @@ const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${planDraftExample()}�
  */
 const SHELL_METACHAR_REASON = '命令含 shell 元字符（; & | < > ` $ ( ) 或换行），禁止命令拼接/替换/重定向';
 
+/**
+ * "这个调用不该进计划"的基础句（PLAN_NOT_PLANNABLE 一族共用）：零名单版就是本句加句号，
+ * 点名版逐字包含本句、再接名单数据与下一步。同一事实只说一遍——两侧各写一份，补一条
+ * 自愈动作只补一侧，另一侧静默腐烂（与 SHELL_METACHAR_REASON 同一手法）；逐字包含还
+ * 带来一个可用性质：认基础句的消费者在点名版上照旧认得出。
+ */
+const PLAN_NOT_PLANNABLE_REASON = '该调用不需要计划、也不要放进计划，直接调用即可';
+
 const TABLE: Record<string, CodeEntry> = {
   // ── 门/计划类：worker 提交方案的形状与范围（PLAN DECLINED 的自愈通道）──
   // 措辞是给 worker 的诊断：说清期望什么、实际收到什么、正确形态是什么。正确的
@@ -277,7 +285,27 @@ const TABLE: Record<string, CodeEntry> = {
   // 看到"请联系管理员开通写入权限"，已实证的误导）。判据是平台 access 语义表的 confirm 列
   // （要不要用户确认），不是错误码名——宿主不按码名猜语义。措辞只说该怎么做，不出现平台
   // 实现形状（类名/路径/脚本名一律不进消息）。
-  PLAN_NOT_PLANNABLE: { text: '该调用不需要计划、也不要放进计划，直接调用即可。' },
+  //
+  // 本条是**零名单版**：说不出该删哪个调用时用（平台还没下发 accessSemantics、或计划里的
+  // operation 都没登记 plan 列——那时点名就是猜，见下一条的注释）。
+  PLAN_NOT_PLANNABLE: { text: `${PLAN_NOT_PLANNABLE_REASON}。` },
+  // 同一次拒绝的**点名版**：逐字包含上面的基础句，再把不该进计划的 operation 逐个列出来，
+  // 并说清下一步（从 calls 里移除、改为直接调用、重提剩余部分）。
+  // 为什么必须点名（2026-10-13 真平台实测）：worker 的计划里有 4 个调用，其中一个是不该
+  // 进计划的本地处理类；宿主每次只回一句"该调用不需要计划"而不说是哪个——它无法定位该删
+  // 哪一个，原样重提 5 次后撞 DECLINED_PLAN_LIMIT terminal block，只能向用户承认"登记环节
+  // 连续被拒后已关闭"。拒绝理由里点得出名字，被拒方才改得动（与 ENTITY_OUT_OF_SCOPE 的
+  // correctForm 正路径同一族：拒绝即自愈通道，不是终点）。
+  // {operations} 是**数据**不是措辞：名单由 pi-coding-driver 的 nonPlannableOperations 按
+  // 平台 access 语义表的 plan 列机械得出（serve-gate 的计划前置豁免读同一列、同一个来源），
+  // 宿主不猜；点不出名字时调用方退回上面的零名单版，绝不把整份计划的 operation 统统说成
+  // "不该进计划"——点错了名字，worker 删掉的会是合法调用。
+  // 措辞纪律照旧：零业务词、零平台实现形状；这是给 worker 的协议文本（PLAN STOP 之后那段），
+  // 不上屏给用户。
+  PLAN_NOT_PLANNABLE_OPERATIONS: {
+    text: `${PLAN_NOT_PLANNABLE_REASON}。不该放进计划的是：{operations}。请把上述 operation 从计划的 calls 中移除，改为直接调用，然后重新提交剩余的 calls。`,
+    params: ['operations'],
+  },
 
   // ── 路由类：申报缺失时的重试指令（给模型，不上屏）──
   ROUTE_RETRY_NUDGE: {

@@ -11,7 +11,9 @@ import {
   keyArgsFragment,
   missingLabelFromCode,
   needsFromPlatformResponses,
+  nonPlannableOperations,
   operationStepText,
+  planNotReadOnlyReason,
   PLAN_SUBMIT_STEP,
   serveGateStepText,
 } from './src/pi-coding-driver';
@@ -301,7 +303,8 @@ describe('pi-coding-agent context worker', () => {
     // 前置扫描没拦（scratch 不要用户确认）：平台门真的被咨询了，分流发生在 evaluate 失败分支
     expect(counter.evaluates).toBe(1);
     expect(reason).toContain('PLAN STOP');
-    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
+    // 点名版（2026-10-13）：把 payroll.transform 点出来，worker 才知道该删哪一个
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
     expect(reason).not.toContain('当前未开放写入权限');
     expect(reason).not.toContain('请联系管理员开通');
     worker.session.dispose();
@@ -327,6 +330,102 @@ describe('pi-coding-agent context worker', () => {
     expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
     expect(reason).not.toContain('当前未开放写入权限');
     worker.session.dispose();
+  });
+
+  // ── 点名不该进计划的 operation（2026-10-13 生产缺陷修复）────────────────────
+  // 旧行为：只回一句"该调用不需要计划"而不说是哪个。worker 的计划里有 3-4 个调用，
+  // 它无法定位该删哪一个，原样重提 5 次后撞 MAX_DECLINED_PLANS_PER_TASK terminal block，
+  // 只能向用户承认"登记环节连续被拒后已关闭"。点名 = 自愈通道：删它、改直接调用、重提剩余。
+  it('点名不该进计划的 operation（可多个）并说清下一步', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_named', SEMANTICS_TABLE, counter);
+    // 计划里混着两个本地处理类（plan=false）与一个正常查询（plan=true）：只点名前两个
+    const reason = await submitPlan(worker, [
+      '{"operation":"payroll.transform","args":["A","202609"]}',
+      '{"operation":"voucher.precheck","args":["B"]}',
+      '{"operation":"voucher.query-saved","args":["A","202609"]}',
+    ].join(','));
+    expect(counter.evaluates).toBe(1);
+    expect(reason).toContain('PLAN STOP');
+    // 措辞唯一出处是 error-codes 的表：模板 + 名单数据机械组装（调用点不拼句）
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', {
+      operations: 'payroll.transform、voucher.precheck',
+    }));
+    // 逐个点名，且不牵连计划里的合法调用（删错名字比不点名更糟）
+    expect(reason).toContain('payroll.transform');
+    expect(reason).toContain('voucher.precheck');
+    expect(reason).not.toContain('voucher.query-saved');
+    // 下一步三件套：从 calls 移除、改为直接调用、重提剩余部分
+    expect(reason).toContain('移除');
+    expect(reason).toContain('直接调用');
+    expect(reason).toContain('重新提交剩余的 calls');
+    worker.session.dispose();
+  });
+
+  it('同一个 operation 在计划里出现多次只点名一次（名单是数据不是噪音）', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_dup', SEMANTICS_TABLE, counter);
+    const reason = await submitPlan(worker, [
+      '{"operation":"payroll.transform","args":["A","202609"]}',
+      '{"operation":"payroll.transform","args":["B","202610"]}',
+    ].join(','));
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
+    // 去重后的名单：整条理由里该名字只出现一次（模板里那次）
+    expect(reason?.split('payroll.transform').length).toBe(2);
+    worker.session.dispose();
+  });
+
+  it('混合场景（要确认的写类 + 非可计划）分流仍归 WRITE_NOT_ENABLED，不点名、不混成一句', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_mixed', SEMANTICS_TABLE, counter);
+    const reason = await submitPlan(worker, [
+      '{"operation":"payroll.transform","args":["A","202609"]}',
+      '{"operation":"voucher.commit","args":["A","202609"]}',
+    ].join(','));
+    expect(counter.evaluates).toBe(1);
+    // 分流判据不变（平台语义表的 confirm 列）：写类在场就说"未开放写入权限"
+    expect(reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    // 不把"哪个调用不该进计划"混进那句话——两件事混一句，worker 又会开始猜
+    expect(reason).not.toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
+    expect(reason).not.toContain('payroll.transform');
+    worker.session.dispose();
+  });
+
+  it('未登记的 operation 不进点名名单（宁缺勿猜）：退回零名单措辞，不宣称它不需要计划', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await rejectingWorker('task_unregistered', SEMANTICS_TABLE, counter);
+    // voucher.batch 故意不在语义表里：plan 列取不到真值 → 不点名（与 serve-gate 的计划
+    // 前置豁免同向：未知不等于免计划），但也不升格成"未开放写入权限"
+    const reason = await submitPlan(worker, '{"operation":"voucher.batch","args":["A","202609"]}');
+    expect(counter.evaluates).toBe(1);
+    expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
+    expect(reason).not.toContain('voucher.batch');
+    expect(reason).not.toContain('当前未开放写入权限');
+    worker.session.dispose();
+  });
+
+  it('点名名单按平台 plan 列机械得出：不按错误码名猜、不按 access 词表猜', () => {
+    // 纯函数：名单判据是平台语义表的 plan 列（serve-gate 的 planExempt 读同一列）
+    expect(nonPlannableOperations([
+      { operation: 'payroll.transform', args: [] },
+      { operation: 'voucher.query-saved', args: [] },
+      { operation: 'voucher.batch', args: [] },
+    ], SEMANTICS_TABLE)).toEqual(['payroll.transform']);
+    // 同一份表、写类在场也照实判：confirm 列归分流（planNotReadOnlyCode），plan 列归点名
+    expect(planNotReadOnlyReason([
+      { operation: 'voucher.query-saved', args: [] },
+      { operation: 'payroll.transform', args: [] },
+    ], SEMANTICS_TABLE)).toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
+    expect(planNotReadOnlyReason([
+      { operation: 'payroll.transform', args: [] },
+      { operation: 'voucher.commit', args: [] },
+    ], SEMANTICS_TABLE)).toBe(messageTextFor('WRITE_NOT_ENABLED'));
+    // 拿不到语义表 → 空名单 → 零名单措辞（不把整份计划统统说成不该进计划）
+    expect(nonPlannableOperations([{ operation: 'voucher.commit', args: [] }], undefined)).toEqual([]);
+    expect(planNotReadOnlyReason([{ operation: 'voucher.commit', args: [] }], new Map())).toBe(messageTextFor('PLAN_NOT_PLANNABLE'));
+    // 点名版逐字包含零名单版的基础句：认"该调用不需要计划"的消费者在点名版上照旧认得出
+    expect(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }))
+      .toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
   });
 
   // ── 写关闭前置拦截（D-075：计划扫描）────────────────────────────────────
