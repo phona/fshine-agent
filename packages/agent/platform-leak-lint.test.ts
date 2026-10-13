@@ -205,12 +205,10 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/turn-contract.ts: 目录', { tag: '警职执法', reason: 'validatePlanEntities 实体来源校验：平台响应（含账套检索结果）是受认实体来源，校验器说明其为何天然放行' }],
   ['packages/agent/src/pi-coding-driver.ts: 目录', { tag: '警职执法', reason: '计划实体来源收集：账套检索结果作为执行痕迹/候选名来源的识别' }],
   // ── 遗留待清：已知该走还没走，挂账限期 ──
-  ['packages/agent/src/context.ts: 借贷', { tag: '遗留待清', reason: '写路径确认摘要渲染"借贷合计"（L4 违例）：Wave 3 迁到平台盖章 summary，宿主不再渲染业务字段' }],
-  // D-004 扩范围后 apps/ 生产代码的首批命中（原有 6 处里的 3 处；reply.ts 彩蛋已随 Wave 1
-  // 删除，assembly.ts 两处注释已先行改中性）。commit.ts 是写路径执行器（L4 违例家族）：
-  // 业务词在注释与 ops 面向的错误串里，Wave 3 写路径保险箱重构后整体迁出编排层。
-  ['apps/server/commit.ts: 账套', { tag: '遗留待清', reason: '写路径落账执行器的账套校验/读回注释（L4：业务字段住编排层）：Wave 3 保险箱重构（D-030/D-031）后迁平台，届时本条关闭' }],
-  ['apps/server/commit.ts: 凭证', { tag: '遗留待清', reason: '写路径读回校验的注释与 ops 面向错误串（"期内凭证数变化"）：同 D-030 家族，用户话术不含该串（context.ts 固定文案），随 Wave 3 一并了结' }],
+  // D-004 扩范围后 apps/ 生产代码的首批命中（commit.ts 的账套校验/读回注释与凭证读回错误
+  // 串）已随 C 波关闭：那个 legacy 落账执行器整文件删除，业务词不再进编排层。其两条登记
+  // （`apps/server/commit.ts: 账套` / `: 凭证`）与 `context.ts: 借贷`（旧文本路径的宿主
+  // 摘要渲染）一并撤销——预算只减不增，撤销不等于放行回流：再出现同类命中照旧红。
   // D-005 扩词后 execution-facts.ts 现形的两词：文件头数据源取舍注释正在描述 D-065 欠账
   // 本身（platform_tasks 无账套/期间/calls），同波任务组5 补结构化字段时此段重写。
   ['packages/agent/src/execution-facts.ts: 时间范围', { tag: '遗留待清', reason: '文件头"没有对象、没有时间范围、没有调用次数"描述 D-065 欠账现状：Wave 2 Lane D 任务组5（D-065）补 accountSet/period/calls 结构化字段后此段重写，届时本条关闭' }],

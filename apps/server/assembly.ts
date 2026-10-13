@@ -25,6 +25,7 @@ import {
   isCommitEnabled,
   isPlatformMock,
   loadOperationArgSpecs,
+  newGateSecret,
   proposalCommitWired,
   type CandidateExtractor,
   type ContextTaskRunner,
@@ -33,7 +34,6 @@ import {
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { AuditStore, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
 import { turnBudgetMsFor } from '@fshine/contracts';
-import { createCommitRunner, createPrepareRunner, newGateSecret } from './commit';
 import { createProposalCommitRunner } from './proposal-commit';
 import { createMessageHandler } from './handler';
 import { createPlanConfirmationWiring } from './plan-confirmation-route';
@@ -131,7 +131,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   }
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
-  // dry-run/commit 都受平台网关与 serve-policy 守卫的矩阵裁决。
+  // 提案落账都受平台网关与 serve-policy 守卫的矩阵裁决。
   env.DZ_SERVE = '1';
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效。DZ_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
@@ -220,13 +220,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     profileId: '17dz',
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
-      prepareRunner: createPrepareRunner({ platformRoot, gateSecret }),
-      commitRunner: createCommitRunner({ platformRoot, gateSecret }),
-      commitEnabled: isCommitEnabled(),
-      // 新提案落账后端（B 波 B4）：接线开关（FSHINE_PROPOSAL_COMMIT，默认关）∧ 落账放行
-      // （isCommitEnabled：mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1）。两个条件串成
-      // proposalCommitEnabled——少一个，确认码都只到达"确认收到但不写"，不承诺没接上的事。
-      // 后端本体只在接线时注入：没接线就没有可调用的执行器（fail-closed 到 confirm_held）。
+      // 新提案落账后端（B 波 B4，C 波后唯一的落账路径）：接线开关（FSHINE_PROPOSAL_COMMIT，
+      // 默认关）∧ 落账放行（isCommitEnabled：mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1）。
+      // 两个条件串成 proposalCommitEnabled——少一个，确认码都只到达"确认收到但不写"，
+      // 不承诺没接上的事。后端本体只在接线时注入：没接线就没有可调用的执行器
+      // （fail-closed 到 confirm_held）。
       ...(proposalCommitWired(env) ? { proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }) } : {}),
       proposalCommitEnabled: proposalCommitWired(env) && isCommitEnabled(env),
     } : {}),

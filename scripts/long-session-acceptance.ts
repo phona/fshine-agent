@@ -70,10 +70,9 @@ async function main(): Promise<void> {
     tasks: store.platformTasks!,
     workerDriver: createPiCodingTurnDriver({ env: process.env }),
     profileId: '17dz',
+    // 长会话实测不写任何数据：落账后端不注入（proposalCommitEnabled 缺省 false），
+    // 确认码只会到达"确认收到但不写"。
     changeIntents: store.changeIntents,
-    prepareRunner: async () => ({ ok: false, output: 'long-session test 不落账' }),
-    commitRunner: async () => ({ ok: false, output: 'long-session test 不落账' }),
-    commitEnabled: false,
   });
   const runtime = createTaxAgentRuntime({
     driver: createPiTurnDriver({ env: process.env }),

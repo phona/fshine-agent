@@ -409,6 +409,32 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 | W7 | 密钥不变量 | 激活密钥 / commit 密钥不进 worker env（grep 断言 + 现有测试随迁） |
 | W8 | L4 机械守卫 | `ChangeIntentRecord` 字段名白名单断言（出现业务名即红）+ leak-lint 删三条登记（只减不增防回流） |
 
+#### C 波已落地（2026-10-13，fshine commit `cwave-legacy-write-path-removed`）
+
+**删掉的（按文件）**：`apps/server/commit.ts`（legacy 落账执行器：宿主解提案、物化契约、按文件路径 dry-run/commit/读回）与其单测；`context.ts` 的 `ChangeProposal` / `LegacyChangeIntentRecord` / `extractChangeProposal` / `finalizeProposal` / `ProposalOutcome` / `truncate` / legacy 确认分支 / 派发点 / 影子留痕分支，以及选项 `prepareRunner` / `commitRunner` / `maxBatchCount` / `commitEnabled` 与随之死掉的 `PrepareRequest` / `CommitRequest` 四个注入点接口；`platform-contract.ts` 的四个 voucher 操作名与 `parsePrepareOutcome` / `parseVerifyCount` / `PrepareOutcome`（唯一消费者是 commit.ts）+ `index.ts` 对应导出；leak-lint 三条"遗留待清"登记。
+
+**保留下来的（新路径在用）**：`options.changeIntents` / `intentTtlMs` / `proposalGatewayRunner` / `proposalCommitEnabled` / `proposalCommitRunner`、`COMMIT_FAILED_LINE`、`writeBackTaskOutcome`、`confirmLineFor`、`summaryTextOf`、`proposalNeedsOf`、`createProposalViaGateway`、`confirmProposalViaGateway`、`hostGatewayEnv`、`defaultProposalGatewayRunner`。
+
+**四个坑的处理**：
+
+- **R1（取消码标签）**：`legacyIntentLabel` 的唯一调用点在取消分支，那是新旧路径**共用**的代码。删掉它就要同时改这条共享文案，而现有测试只有 legacy 用例断言过它。选择**保留该函数**（改名 `intentLabel`，因为 C 波后它就是唯一路径的那一个）：业务字段不在宿主库往返，一律降级成中性「本次录入提案」，不把 undefined 渲染给用户、也不为"更具体"去解析 worker 文本。配套补了两条网关路径的取消覆盖（`turn-loop-write-chain` 攻击面组的「取消 pending」「取消已作废码」）。
+- **R2（`newGateSecret` 搬家）**：它原住要删的 `commit.ts`，却被 `assembly.ts` 与 `ask.ts` 用。搬到 `packages/agent/src/context.ts` 并与 `hostGatewayEnv` 同住（两者都是"宿主持有的直调法域"这一族事实），经 `index.ts` 导出；`proposal-commit.ts` 的注释着落同步更新。搬家早于删文件，生产启动编译不错。
+- **R3（过期话术两份）**：898 行那份逐字抄写只删 legacy 分支内那一份，`PROPOSAL_UNAVAILABLE_TEXT.expired`（新路径 `unavailable:'expired'` 分支的唯一来源）保留。
+- **R4（冒烟脚本）**：选**改写指向新路径**（选项 ①），不保留 legacy runner 只为冒烟。理由：保留它等于把 L4 违例的整条文本写路径留在编排层，leak-lint 的 `commit.ts: 账套/凭证` 两条登记也随之关不掉。新脚本三步 = 平台提案创建（protocol 角色列寻址 + `hostGatewayEnv` + 只认 RESULT 信封，与 `createProposalViaGateway` 同一把尺）→ `createProposalCommitRunner` 落账 + 平台读回 → mock 状态凭证数断言；**mock 保险丝原样保留**（检测不到 `DZ_EXECUTOR=mock` 直接拒跑）。W3 的门没有退场。
+
+**测试**：`context-proposal.test.ts` 18 条 legacy 删至 1 条（执行面回账）；`turn-loop-write-chain.test.ts` 删 8 条 legacy 后**把 7 条攻击面/覆盖用例移植到网关路径**（错误码 / TTL 过期 / 跨 session / 跨 principal / 连提两案 superseded / 取消 pending / 取消已作废码）——这些钉的是宿主持有的通用确认状态机，与提案载荷无关，随旧路径一起删就是静默丢安全覆盖；最终 15 条。`turn-loop-security.test.ts` D2 与 D3② 改写为网关路径等价物；`turn-loop-plan-gate-boundaries.test.ts` A5② 改写 + 文件头同步；`proposal-flow.test.ts` 删 legacy 通路用例与 `setupConfirm` 的 `legacy` 选项。
+
+**R1 的落地**：`legacyIntentLabel` 保留并改名 `intentLabel`（C 波后它就是唯一路径的那一个），配套补的取消覆盖是上面那两条「取消 pending」「取消已作废码」。
+
+**W5 的上层钉子**：`proposal-flow.test.ts` 原有一条"不带 proposalId 的旧路径条目仍走 legacy 分支"的用例（B 波分流判据的另一半），随 legacy 分支删除。同文件补回等价物「W5：不带 proposalId 的旧行业 → 一律按过期处理，confirm_stale + 零办调」——旧库 pending 行的 fail-closed 不因此失去单测钉子（存储层那一半在 `packages/core/store.test.ts` 的"旧行读回不带 proposalId"）。
+
+**两处与侦察图不同、需知情**：
+
+1. **影子留痕分支与影子不一致用例互斥**：`extractChangeProposal` 删掉后"检测 worker 终稿里有没有旧形态提案 JSON"这件事本身不存在了（那正是宿主嗅探 worker 文本，L4 要禁的形状），所以 `proposal_shadow_mismatch` 事件无处可发。保留该用例、改断言为"C 波后宿主压根不解析 worker 文本：零条目、零码、零写入、用户看到 worker 原文"。
+2. **`turn-loop-write-chain.test.ts` 的条数**：验收行写的"必须 16/16"是 B 波末的基线（16 条 = 8 legacy + 8 新路径）。删 8 条 legacy 后满配应是 8 条；补 7 条移植后实际 **15 条**。
+
+**`acceptance` 5.x**：写链路 mock 全链仍走网关路径（assembly 的接线未变），本波未改 `scripts/acceptance.ts`（他人所有权）。
+
 ### 上线门（**不属于本次波次验收**，单独清单）
 
 前置条件全满足才允许开真平台写：① D-076 登录页改版修好；② 写 latent 七项（S2/S3/S4/S5③/S7/S9/S10）在 17dz 关闭；③ `FSHINE_REAL_COMMIT` 显式置位并留审批记录；④ 一次真平台手工写留档（dry-run exit1→修→exit0→commit→读回计数 ≥ 提案张数，平台 audit 与宿主 `tool_calls` 两侧对得上）。

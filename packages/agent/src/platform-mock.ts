@@ -34,15 +34,20 @@ export function isCommitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
 }
 
 /**
- * 写路径迁移开关（方案 1 · B 波 W2 一键回滚）：提案创建走不走网关。
+ * 写路径迁移开关（方案 1 · B 波 W2 一键回滚）：宿主要不要拦下 worker 的提案命令。
  *
- * 默认**关**：关 = 宿主在 `beforeToolCall` 完全不拦截提案命令，worker 的网关调用原样落回
- * serve 门与平台，提案预览仍走今天的文本路径（`finalizeProposal`）。开 = 宿主拦下提案命令、
- * 自己办调平台 create，并把旧文本路径的建条目/置 superseded 一并关掉——否则旧路径会把新
- * 路径刚建的 pending 条目 superseded 掉（B 波第 1 批实证的第三点）。
+ * C 波（2026-10-13）删掉了遗留文本写路径（`extractChangeProposal` / `finalizeProposal`），
+ * 从此只有网关这一条路。开关因此不再是"两条路二选一"，而是"这一条路走不走宿主持有的
+ * 确认状态机"：
+ *   关 = 宿主在 `beforeToolCall` 不拦截，worker 的 `prepare voucher.proposal` 原样落回
+ *        serve 门与平台——平台照旧建提案，但宿主持有不透明 proposalId、不发确认码，
+ *        用户拿不到可执行的确认入口（worker 只能转述平台摘要）。
+ *   开 = 宿主拦下提案命令、自己办调平台 create，持有 proposalId 并发确认码。
  *
  * 为什么是宿主开关而不是平台开关：两条路的差别全在宿主持有什么（拦截点、意图条目、确认码），
  * 平台两侧都认。回滚 = 关这一个环境变量，不 revert commit。
+ * 注：开关退役（随 C 波后只剩一种行为而收敛为恒开）是单独一批——删它会连锁
+ * pi-coding-driver 的驱动接线一大片，按 change-safety F4 不与被删路径同批。
  */
 export const PROPOSAL_VIA_GATEWAY_ENV = 'FSHINE_PROPOSAL_VIA_GATEWAY';
 

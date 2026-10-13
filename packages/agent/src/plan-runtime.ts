@@ -297,7 +297,7 @@ export function validateCalls(calls: readonly PlanCall[]): void {
  * 为什么必须是机械判据（而不是等模型走到提案步）：2026-09-29 真实平台 T7 事故——用户
  * 发起录入请求，模型走了完整的"录入准备"流程（行为优秀），然后停在准备阶段，承诺"即可
  * 产出录入提案"却永不抵达提案步。WRITE_NOT_ENABLED 原先只挂在提案路径的 capability
- * 检查（context.ts finalizeProposal）与平台计划门拒绝上，模型不走到那儿，用户就永远
+ * 检查（context.ts 的 createProposalViaGateway）与平台计划门拒绝上，模型不走到那儿，用户就永远
  * 不知道写权限是关闭的。计划成形时（宿主已机械解析出 calls 的 operation 名）就能判：
  * 这份计划注定跑不完，因为部署没开放写。
  *

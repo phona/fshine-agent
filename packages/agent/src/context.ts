@@ -3,12 +3,14 @@
  * platform workspace. The subagent returns natural language; the main Agent
  * decides whether to answer, ask the user, or resume the same session.
  *
- * 写开放（两步确认）：worker 产出变更提案 JSON → 本层做 capability/授权名单
- * 代码级校验 + 服务端 dry-run 预检 → 创建 pending intent（确认码哈希存储）
- * → 主代理转达预览。用户回复「确认 码」由 matchConfirmation 直接匹配执行
- * （绕过模型）；「取消 码」作废；新提案使旧 pending 作废（superseded）。
+ * 写开放（两步确认，方案 1 · C 波后只剩网关路径）：worker 的提案创建网关调用被驱动拦下
+ * → 宿主办调平台 create → 平台回执取物单 proposalId 与渲染好的摘要 → 本层建 pending
+ * intent（确认码哈希存储）→ 主代理转达。用户回复「确认 码」由 matchConfirmation 直接
+ * 匹配执行（绕过模型）；「取消 码」作废；新提案使旧 pending 作废（superseded）。
+ * 宿主持有的只有不透明 proposalId + 确认状态机：不解析 payload、不渲染业务摘要
+ * （L4：宿主不该知道自己在提交什么业务）。
  */
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -129,39 +131,12 @@ export interface SubagentTaskResult {
 
 export type { SubagentNeeds };
 
-/** 服务端预检（dry-run）注入点：默认实现由部署层提供（直调平台网关的 prepare 子命令）。 */
-export interface PrepareRequest {
-  intentId: string;
-  accountSet: string;
-  period: string;
-  contracts: unknown[];
-}
-export interface PrepareResult {
-  ok: boolean;
-  output: string;
-  error?: string;
-}
-
-/** 服务端落账执行注入点：确认码匹配后由服务端直调（不经任何模型）。 */
-export interface CommitRequest {
-  intentId: string;
-  accountSet: string;
-  period: string;
-  contracts: unknown[];
-}
-export interface CommitResult {
-  ok: boolean;
-  output: string;
-  error?: string;
-}
-
 /**
  * 新路径（提案归平台）的落账请求与结局（方案 1 · B 波 B4）。
  *
- * 与旧路径 CommitRequest/CommitResult 的分工：那个必须带业务字段（对象/时间/明细），因为
- * 落账参数是宿主从 worker 提案文本里解出来的；这个**只有一个不透明提案号**——payload 全程
- * 住在执行层自己的状态库里，宿主连"这次提交的是什么业务"都不知道（L4：宿主不该知道）。
- * 用户可见文本因此只有两个来源：平台 `summaryText` 原样 + 宿主通用状态行。
+ * 只有一个不透明提案号——payload 全程住在执行层自己的状态库里，宿主连"这次提交的是什么
+ * 业务"都不知道（L4：宿主不该知道）。用户可见文本因此只有两个来源：平台 `summaryText`
+ * 原样 + 宿主通用状态行。
  */
 export interface ProposalCommitRequest {
   /** 平台提案引用（取物单），创建时由平台 completed 信封给出。 */
@@ -190,21 +165,8 @@ export interface ContextTaskRunnerOptions {
   profileId?: string;
   /** 缺省 = 写流程整体禁用（提案按普通回答透传）。 */
   changeIntents?: ChangeIntentRepo;
-  /** 服务端 dry-run 预检（写流程启用时必填）。 */
-  prepareRunner?: (req: PrepareRequest) => Promise<PrepareResult>;
-  /** 服务端确认后落账（写流程启用时必填）。 */
-  commitRunner?: (req: CommitRequest) => Promise<CommitResult>;
-  /** 单提案条目数上限，默认 50。 */
-  maxBatchCount?: number;
   /** 意图有效期，默认 10 分钟。 */
   intentTtlMs?: number;
-  /**
-   * 落账总闸（派生规则，由部署层经 isCommitEnabled() 计算，默认 false = 拒绝 commit）：
-   * mock 模式下写的是假状态，部署层应传 true 放开全链联调；
-   * 真平台下须显式 FSHINE_REAL_COMMIT=1 才传 true。false 时确认码得到
-   * 确定性拒绝（意图保持 pending 至过期/取消），绝不触发 --save。
-   */
-  commitEnabled?: boolean;
   /** 测试注入点。 */
   generateCode?: () => string;
   hashCode?: (code: string) => string;
@@ -215,9 +177,10 @@ export interface ContextTaskRunnerOptions {
    */
   proposalGatewayRunner?: PlanCliRunner;
   /**
-   * 新路径的落账后端是否已接（B4 接线后由部署层置真）。false 时给用户的确认行明说
-   * "确认不会写入任何数据"——不承诺还没接上的事：承诺了而确认步只会 fail-closed，是把
-   * 用户往一句谎话上引。
+   * 新路径的落账后端是否已接（B4 接线后由部署层置真）。派生规则由部署层经 isCommitEnabled()
+   * 计算：mock 模式下写的是假状态，部署层应传 true 放开全链联调；真平台下须显式
+   * FSHINE_REAL_COMMIT=1 才传 true。false 时给用户的确认行明说"确认不会写入任何数据"
+   * ——不承诺还没接上的事：承诺了而确认步只会 fail-closed，是把用户往一句谎话上引。
    */
   proposalCommitEnabled?: boolean;
   /**
@@ -289,43 +252,13 @@ export const RUN_17DZ_TASK_SCHEMA: Record<string, unknown> = {
   },
 };
 
-/** 变更提案（worker 按 17dz-bookkeeping-prepare 技能产出的冻结载荷）。 */
-export interface ChangeProposal {
-  type: 'change_proposal';
-  domain: 'voucher';
-  accountSet: string;
-  period: string;
-  contracts: unknown[];
-  summary: { count: number; debit: number; credit: number };
-}
-
 /**
- * 旧文本路径的条目形状（方案 1 · B 波后的私有承载）。
- *
- * contracts 的 ChangeIntentRecord 已瘦身成"零业务字段、零 payload"：提案载荷归执行层
- * 自己的提案状态库，宿主持有的只剩取物单 proposalId。影子期两条路并存——旧文本路径仍要
- * 按自己的形状建条目、读条目，所以旧字段只在本文件内以这个私有接口承载，**不回填
- * contracts**（回填就等于把业务字段请回编排层，L4 违例复发）。
- *
- * 字段一律可选：B 波后宿主库不再往返它们（store 的 rowToChangeIntent 只映射新字段），
- * 读回来的条目可能一个都不带这些字段。写路径照旧填全（fake 存储与旧库历史行都还看得到），读
- * 路径据此降级。C 波删旧路径时本接口随之消失。
+ * 意图条目的用户可读标签。业务字段不在宿主库往返（payload 归执行层自己的提案状态库），
+ * 所以这里拿不到任何领域信息——统一降级成中性表述，绝不把 undefined 渲染给用户，
+ * 也不为了"更具体"而去解析 worker 文本或平台信封（L4）。
  */
-interface LegacyChangeIntentRecord extends ChangeIntentRecord {
-  kind?: 'voucher.batch';
-  accountSet?: string;
-  period?: string;
-  payload?: ChangeProposal;
-  summary?: { count: number; debit: number; credit: number };
-}
-
-/**
- * 旧路径意图的用户可读标签。业务字段不在宿主库往返后可能缺失——那时降级成中性表述，
- * 不把 undefined 渲染给用户。
- */
-function legacyIntentLabel(record: LegacyChangeIntentRecord): string {
-  if (!record.summary) return '本次录入提案';
-  return `${record.accountSet} ${record.period} 的录入提案（${record.summary.count} 条）`;
+function intentLabel(): string {
+  return '本次录入提案';
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
@@ -338,7 +271,6 @@ const SUMMARY_TEXT_MAX_CHARS = 500;
 
 /**
  * 落账未完成的用户话术（协议文本，唯一来源）：只说事实与下一步，不猜平台内部状态。
- * 旧文件路径落账与新平台落账共用一句——两条路的失败对用户是同一件事。
  */
 const COMMIT_FAILED_LINE = '执行失败：落账未完成，系统已停止并留痕。请联系管理员核对平台实际状态后，再重新发起录入。';
 
@@ -379,6 +311,18 @@ export function hostGatewayEnv(): NodeJS.ProcessEnv {
 }
 
 /**
+ * 宿主办调平台网关的 HMAC 密钥（进程内生成，C 波起与 hostGatewayEnv 同住一处：两者都是
+ * "宿主持有的直调法域"这一族事实）。
+ *
+ * 为什么不进 env（W7）：进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。它只以参数
+ * 形式交到具体执行器（提案创建 / 提案落账各持一份引用），再由执行层经 env 传给**那一个**
+ * 子进程——子进程 env 是边界，进程 env 不是。重启使未决令牌自然失效，这正是想要的性质。
+ */
+export function newGateSecret(): string {
+  return randomBytes(32).toString('base64url');
+}
+
+/**
  * 宿主直调平台网关的缺省实现（`prepare <operation> <payloadPath>`，cwd = platformRoot）。
  *
  * 与 plan-runtime 的 defaultCliRunner 同一形状（spawn + 收 stdout/stderr + 30s 超时），
@@ -413,31 +357,6 @@ function defaultHashCode(code: string): string {
   return createHash('sha256').update(code.trim().toUpperCase(), 'utf8').digest('hex');
 }
 
-/** 从 worker 文本提取并结构校验提案；不合法一律视为普通回答。 */
-export function extractChangeProposal(text: string, maxBatchCount: number): ChangeProposal | null {
-  const candidates: string[] = [];
-  for (const m of text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)) candidates.push(m[1]!);
-  candidates.push(text.trim());
-  for (const raw of candidates) {
-    if (!raw.startsWith('{')) continue;
-    try {
-      const p = JSON.parse(raw) as ChangeProposal;
-      if (
-        p.type === 'change_proposal'
-        && p.domain === 'voucher'
-        && typeof p.accountSet === 'string' && p.accountSet.trim() !== ''
-        && typeof p.period === 'string' && /^\d{6}$/.test(p.period)
-        && Array.isArray(p.contracts) && p.contracts.length > 0 && p.contracts.length <= maxBatchCount
-        && p.summary && typeof p.summary.count === 'number' && p.summary.count === p.contracts.length
-        && typeof p.summary.debit === 'number' && typeof p.summary.credit === 'number'
-      ) {
-        return p;
-      }
-    } catch { /* 下一个候选 */ }
-  }
-  return null;
-}
-
 /**
  * 把驱动上报的结构化事实（D-065）合并进任务条目：calls/accountSet/period/label 取本次
  * 委派的快照（替换式——任务的最新范围），resultText 追加（同一任务多次委派的结果 trail，
@@ -468,7 +387,6 @@ function withExecutionFacts(
 
 export function createContextTaskRunner(options: ContextTaskRunnerOptions): ContextTaskRunner {
   const profileId = options.profileId ?? '17dz';
-  const maxBatchCount = options.maxBatchCount ?? 50;
   const intentTtlMs = options.intentTtlMs ?? 10 * 60_000;
   const generateCode = options.generateCode ?? defaultGenerateCode;
   const hashCode = options.hashCode ?? defaultHashCode;
@@ -502,15 +420,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     inputSchema: RUN_17DZ_TASK_SCHEMA,
   };
 
-  /**
-   * 提案落账前的宿主持结构化结局（2026-09 第二波）：日志分类从数据里取，
-   * 不再嗅探回复文本（旧实现拿回复 includes 两句中文来分类）。授权名单限制模式与
-   * 未开放写入权限同归 proposal_declined——两者都是确定性拒绝，旧实现把前者算成
-   * proposal_created（文本里两个关键词都不含），日志因此说谎。
-   */
-  type ProposalOutcome = 'proposal_declined' | 'proposal_precheck_failed' | 'proposal_created';
-
-  /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。两条路同一把尺。 */
+  /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
   function confirmLineFor(code: string, commitLive: boolean): string {
     const ttlMinutes = Math.round(intentTtlMs / 60_000);
     return commitLive
@@ -553,12 +463,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   }
 
   /**
-   * 网关提案路径（方案 1 · B 波 B3）：worker 的提案创建网关调用被驱动拦下后，由宿主办调
-   * 平台 create，把结局三态交还驱动。
+   * 网关提案路径（方案 1 · B 波 B3，C 波后唯一的提案路径）：worker 的提案创建网关调用
+   * 被驱动拦下后，由宿主办调平台 create，把结局三态交还驱动。
    *
-   * 与旧文本路径（finalizeProposal）的分工：那条解析 worker 终稿里的提案 JSON、自己渲染
-   * 业务摘要；这条**不解析 payload**——payload 全程不进宿主，宿主持有的只剩平台返回的
-   * 取物单 proposalId + 通用确认状态。用户可见文本因此只有两个来源：平台 `summaryText`
+   * 宿主**不解析 payload**——payload 全程不进宿主，宿主持有的只剩平台返回的取物单
+   * proposalId + 通用确认状态。用户可见文本因此只有两个来源：平台 `summaryText`
    * 原样 + 宿主通用确认行，不写任何业务摘要。
    *
    * 顺序即安全：capability 复核（宿主持有的授权）→ 授权名单复核 → 办调平台 → 落意图条目
@@ -686,13 +595,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   }
 
   /**
-   * 新路径（带 proposalId 的条目）的确认落账（方案 1 · B 波 B4）：确认码命中后由服务端
-   * 直调平台 commit，全程不经任何模型。
+   * 带 proposalId 的条目的确认落账（方案 1 · B 波 B4）：确认码命中后由服务端直调平台
+   * commit，全程不经任何模型。
    *
-   * 与旧路径（finalizeProposal + legacy commitRunner）的分工：那条自己解提案、自己渲染
-   * 业务摘要、自己拿冻结载荷落账；这条**只持有一个取物单**——payload 在平台侧，宿主连
-   * "在提交什么业务"都不知道。用户可见文本因此只有两个来源：平台 `summaryText` 原样 +
-   * 宿主通用状态行。
+   * 宿主**只持有一个取物单**——payload 在平台侧，宿主连"在提交什么业务"都不知道。用户
+   * 可见文本因此只有两个来源：平台 `summaryText` 原样 + 宿主通用状态行。
    *
    * 三笔债的落点：
    *   · D-080 第 ① 步：capability 按**确认时点**复核，不认提案时的快照（"提案成立后
@@ -721,7 +628,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         outcome: 'confirm_held',
       };
     }
-    // ② 落账后端未接（部署开关关着）：确认收到但不写——与 legacy 的 commitEnabled 同语义。
+    // ② 落账后端未接（部署开关关着）：确认收到但不写。
     // 承诺必须与能力对齐：说了"确认即录入"而这一步只会 fail-closed，是把用户往谎话上引。
     if (options.proposalCommitEnabled !== true) {
       return {
@@ -769,67 +676,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     return { text: summaryText ? [summaryText, COMMIT_DONE_LINE].join('\n') : COMMIT_DONE_LINE, outcome: 'confirm_executed' };
   }
 
-  async function finalizeProposal(
-    proposal: ChangeProposal,
-    ctx: ContextTaskExecutionContext,
-    taskId: string,
-  ): Promise<{ result: SubagentTaskResult; outcome: ProposalOutcome }> {
-    const ci = options.changeIntents!;
-    const stop = (text: string, outcome: ProposalOutcome) => ({ result: { taskId, text }, outcome });
-
-    const capabilities = ctx.trusted.capabilities ?? [];
-    if (!capabilities.includes('write')) {
-      // 写关闭话术唯一来源在 error-codes.ts（WRITE_NOT_ENABLED）：与计划门拒绝路径
-      // （pi-coding-driver 的 evaluate 失败分支）共用同一句，不造第二份。
-      return stop(`已收到录入提案，但${messageTextFor('WRITE_NOT_ENABLED')}`, 'proposal_declined');
-    }
-    // allowlist principal 的授权以对象 id 表达，而提案携带平台侧名称——
-    // 名称到 id 的映射不在 fshine 侧，V1 仅对 scope=all 的账号开放写。
-    if (ctx.trusted.allowedAccountSetIds.length > 0) {
-      return stop('已收到录入提案，但当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。', 'proposal_declined');
-    }
-
-    const active = await options.changeIntents!.findPendingBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
-    const intentId = `intent_${randomUUID()}`;
-    const prepareRunner = options.prepareRunner;
-    if (!prepareRunner) throw new ToolUserError('写流程未配置预检执行器。');
-    const prep = await prepareRunner({ intentId, accountSet: proposal.accountSet, period: proposal.period, contracts: proposal.contracts });
-    if (!prep.ok) {
-      console.warn(JSON.stringify({ event: 'change_proposal_precheck_failed', intentId, taskId }));
-      return stop(`变更提案未通过预检（dry-run），未创建待确认任务。原因摘要：${truncate(prep.error || prep.output, 300)}`, 'proposal_precheck_failed');
-    }
-    if (active) await ci.updateStatus(active.intentId, 'superseded');
-
-    const code = generateCode();
-    const now = new Date();
-    const record: LegacyChangeIntentRecord = {
-      intentId,
-      principalId: ctx.trusted.principalId,
-      sessionId: ctx.trusted.sessionId,
-      kind: 'voucher.batch',
-      accountSet: proposal.accountSet,
-      period: proposal.period,
-      payload: proposal,
-      summary: { count: proposal.summary.count, debit: proposal.summary.debit, credit: proposal.summary.credit },
-      confirmCodeHash: hashCode(code),
-      status: 'pending',
-      createdAt: now.toISOString(),
-      expiresAt: new Date(now.getTime() + intentTtlMs).toISOString(),
-    };
-    await ci.create(record);
-    const ttlMinutes = Math.round(intentTtlMs / 60_000);
-    const confirmLine = options.commitEnabled
-      ? `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`
-      : `回复「确认 ${code}」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
-    return stop([
-      '已收到录入提案并通过预检（dry-run）：',
-      `- 对象：${proposal.accountSet}`,
-      `- 时间：${proposal.period}`,
-      `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元`,
-      confirmLine,
-    ].join('\n'), 'proposal_created');
-  }
-
   return {
     tool,
     // D-065：结果原文回写。get→合并→upsert（保留结构化字段，只补 resultText）；
@@ -855,7 +701,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
           await ci.updateStatus(rec.intentId, 'cancelled');
-          return { text: `已作废：${legacyIntentLabel(rec as LegacyChangeIntentRecord)}未执行。`, outcome: 'confirm_cancelled' };
+          return { text: `已作废：${intentLabel()}未执行。`, outcome: 'confirm_cancelled' };
         }
         const stale = await ci.findByCodeHash(ctx.principalId, ctx.sessionId, hash);
         if (!stale) return null;
@@ -875,39 +721,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const hash = hashCode(confirmM[1]!);
         const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hash, now);
         if (rec) {
-          // 按条目形状分流（B 波唯一的判别）：带 proposalId → 新路径（平台 commit 后端，
-          // B4）；不带 → 旧文本路径（legacy runner，C 波删）。确认状态机只有这一套。
-          if (rec.proposalId) return confirmProposalViaGateway(rec, rec.proposalId, ctx);
-          if (!options.commitEnabled) {
-            return { text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。', outcome: 'confirm_held' };
-          }
-          const commitRunner = options.commitRunner;
-          if (!commitRunner) {
-            await ci.updateStatus(rec.intentId, 'failed', { error: 'commit runner 未配置' });
-            await writeBackTaskOutcome(rec.taskId, 'failed');
-            return { text: '执行失败：落账执行器未配置，请联系管理员。', outcome: 'confirm_failed' };
-          }
-          // 本分支只服务"不带 proposalId"的旧路径条目（带引用的新路径由 B4 分流到平台
-          // commit 后端）。旧路径的冻结载荷已不在宿主库往返（B 波：契约零 payload、store
-          // 不再读写旧列），所以**拿不到载荷就不能落账**——没有冻结参数就 commit 等于盲写。
-          // 与 W5 同一条判据：旧行业（有 kind/account_set、无 proposalId）一律按过期处理。
-          const frozen = (rec as LegacyChangeIntentRecord).payload;
-          if (!frozen) {
+          // 判别只有一个：条目带不带 proposalId（取物单）。带 → 平台提案落账后端；
+          // 不带 → 迁移前的旧行业（宿主持有 payload 的时代已随 C 波结束），一律按过期
+          // 处理——拿不到冻结载荷就 commit 等于盲写（W5 同一条判据）。
+          if (!rec.proposalId) {
             console.warn(JSON.stringify({ event: 'change_intent_commit_declined', intentId: rec.intentId, reason: 'no_frozen_payload' }));
             await ci.updateStatus(rec.intentId, 'expired');
-            return { text: '该确认码对应的提案已过期（超过有效期），请重新发起录入。', outcome: 'confirm_stale' };
+            return { text: PROPOSAL_UNAVAILABLE_TEXT.expired, outcome: 'confirm_stale' };
           }
-          const out = await commitRunner({ intentId: rec.intentId, accountSet: frozen.accountSet, period: frozen.period, contracts: frozen.contracts });
-          if (!out.ok) {
-            console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
-            await ci.updateStatus(rec.intentId, 'failed', { output: out.output.slice(0, 2000), error: out.error });
-            // D-082：失败分支同样回写 originating 任务终态（与新路径同一把尺）。
-            await writeBackTaskOutcome(rec.taskId, 'failed');
-            return { text: COMMIT_FAILED_LINE, outcome: 'confirm_failed' };
-          }
-          await ci.updateStatus(rec.intentId, 'committed', { output: out.output.slice(0, 2000) });
-          await writeBackTaskOutcome(rec.taskId, 'done');
-          return { text: `已完成：${frozen.summary.count} 条已录入（${frozen.accountSet} ${frozen.period}），读回校验通过。`, outcome: 'confirm_executed' };
+          return confirmProposalViaGateway(rec, rec.proposalId, ctx);
         }
         // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
         // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
@@ -974,8 +796,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const delegationStart = Date.now();
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       // 网关提案路径开关（W2）：开 = 驱动拦截提案命令并经下方 onCreateProposal 办调平台；
-      // 关 = 不注入回调、驱动不拦截，走今天的文本路径（finalizeProposal）。读一次，本回合
-      // 的审计与影子判定都用这一份，不存在"驱动说开、宿主说关"的两个真相。
+      // 关 = 不注入回调、驱动不拦截，提案这一步不发生（C 波删掉旧文本路径后，关开关不再
+      // 有"回落到另一条写路径"的语义，只表示本部署不开放写创建）。读一次，本回合的审计
+      // 都用这一份，不存在"驱动说开、宿主说关"的两个真相。
       const gatewayProposals = proposalViaGateway();
       // 开关状态每回合留痕（W2 一键回滚的取证）：回滚之后要能回答"这一回合走的是哪条路"。
       // 与 delegation_span 同一族的结构化日志（每委派一次一行）；拦截发生处另有 tool_calls
@@ -1005,9 +828,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而能力不含
             // write 时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读。
             capabilities: ctx.trusted.capabilities,
-            // 提案创建网关路径（B 波 B3）：只在开关开着时注入。没注入 = 驱动不拦截，
-            // 提案走文本路径。宿主持有办调权：读文件、校验、落意图条目、发确认码全在
-            // 服务端，worker 只提供 payload 路径。
+            // 提案创建网关路径（C 波后唯一的提案路径）：只在开关开着时注入。没注入 =
+            // 驱动不拦截，提案这一步不发生。宿主持有办调权：读文件、校验、落意图条目、
+            // 发确认码全在服务端，worker 只提供 payload 路径。
             ...(gatewayProposals && options.changeIntents ? {
               onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
             } : {}),
@@ -1080,35 +903,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             ...(result.execution ? { execution: result.execution } : {}),
           };
         }
-        const proposal = options.changeIntents ? extractChangeProposal(result.text, maxBatchCount) : null;
-        if (proposal && !gatewayProposals) {
-          const handled = await finalizeProposal(proposal, ctx, taskId);
-          await options.tasks.upsert({
-            ...running,
-            workerMessages: result.messages as unknown[],
-            updatedAt: new Date().toISOString(),
-          });
-          // 日志分类从结构化 outcome 取（2026-09 第二波）：不再嗅探回复文本
-          // （旧实现拿回复 includes 两句中文给 outcome 分类，连字面量 if 预算都报了）。
-          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: handled.outcome }));
-          // 提案预览必须带上本轮执行痕迹：finalizeProposal 的 stop() 只回 {taskId,text}，
-          // 丢掉 execution 会让出口校验误判"委派+零执行"，用 NO_EXECUTION_CLARIFICATION
-          // 顶掉含确认码的预览——写链路因此端到端不可达（4dd7490 回归）。
-          return { ...handled.result, ...(result.execution ? { execution: result.execution } : {}) };
-        }
-        if (proposal && gatewayProposals) {
-          // 影子不一致（W1）：开关开着，而 worker 终稿里仍带旧形态的提案 JSON。**只留痕**——
-          // 不生效、不解析、不落库。为什么必须把旧路径整个关掉而不是"两条都建"：旧路径的
-          // `ci.create` + "把旧 pending 置 superseded" 会把新路径刚建的 pending 条目作废掉
-          // （B 波第 1 批实证），用户手里的确认码随之失效。关掉旧路径，这一轮就只是一条
-          // 供比对的事件留痕。
-          console.warn(JSON.stringify({
-            event: 'proposal_shadow_mismatch',
-            requestId: ctx.trusted.requestId,
-            taskId,
-            proposalChars: result.text.length,
-          }));
-        }
         const final: SubagentTaskResult = {
           taskId,
           ...(result.execution ? { execution: result.execution } : {}),
@@ -1124,7 +918,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 组装澄清问题（与 needs 同一族的结构化上交，模型不参与翻译）。
           ...(result.clarification ? { clarification: result.clarification } : {}),
           // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
-          // 必须拼在 extractChangeProposal 之后——尾部注脚会破坏"整段纯 JSON"提案候选。
+          // 拼在提案分支之后：提案回合的文本是平台 summaryText + 通用确认行，注脚只属于
+          // 普通结果（提案那一条路在 proposalCreated 分支就返回了，到不了这里）。
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
         };
         await options.tasks.upsert({
@@ -1195,10 +990,6 @@ export function withStepLabel(text: string, stepLabel: string): string {
   if (!stepLabel) return text;
   if (!text.startsWith(PLAN_NOTICE_PREFIX)) return `${tag}${text}`;
   return `${PLAN_NOTICE_PREFIX}${tag}${text.slice(PLAN_NOTICE_PREFIX.length)}`;
-}
-
-function truncate(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max)}…(截断)` : text;
 }
 
 async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string): Promise<ResolvedContextProfile> {

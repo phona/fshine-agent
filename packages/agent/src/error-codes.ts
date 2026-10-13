@@ -273,7 +273,7 @@ const TABLE: Record<string, CodeEntry> = {
 
   // ── 能力类：写未开放（capability 声明，用户可行动）──────────────────────────
   // 唯一来源纪律：写关闭话术只有这一份。两个消费方共用——提案落账前的 capability 检查
-  // （context.ts finalizeProposal）与计划门对"计划里含非 read operation"的拒绝
+  // （context.ts 的 createProposalViaGateway）与计划门对"计划里含非 read operation"的拒绝
   // （pi-coding-driver 的计划 evaluate 失败分支：平台 canonicalCall 抛
   // PLAN_OPERATION_NOT_READ_ONLY，CLI exit 3）。第三波实测：写尝试被计划门挡下时，
   // 汇报里只有卡点没有"未开放写入权限"，用户不知道该找谁——那句话必须到达用户。

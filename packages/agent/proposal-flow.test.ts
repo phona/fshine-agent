@@ -548,8 +548,8 @@ function setupConfirm(options: {
   result?: Partial<ProposalCommitResult>;
   /** 不注入落账后端（"开关说接了但执行器没配"的配置故障形态）。 */
   withoutRunner?: boolean;
-  /** 不带 proposalId = 旧路径条目（分流判据的另一半）。 */
-  legacy?: boolean;
+  /** 建一条**不带 proposalId** 的条目 = 迁移前的旧行业（W5 fail-closed 的判据来源）。 */
+  legacyRow?: boolean;
 } = {}): ConfirmSetup {
   const intents = fakeIntents();
   const tasks = fakeTasks();
@@ -579,7 +579,7 @@ function setupConfirm(options: {
     principalId: 'wecom:u1',
     sessionId: 'wecom:u1:c1',
     taskId: TASK_ID,
-    ...(options.legacy ? {} : { proposalId: 'prop_abc123' }),
+    ...(options.legacyRow ? {} : { proposalId: 'prop_abc123' }),
     confirmCodeHash: CONFIRM_CODE_HASH,
     status: 'pending',
     createdAt: new Date().toISOString(),
@@ -695,13 +695,23 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(setup.rows.get(INTENT_ID)?.status).toBe('expired');
   });
 
-  it('不带 proposalId 的旧路径条目仍走 legacy 分支（分流判据的另一半）', async () => {
-    const setup = setupConfirm({ legacy: true, proposalCommitEnabled: false });
+  it('W5：不带 proposalId 的旧行业 → 一律按过期处理，confirm_stale + 零办调', async () => {
+    // 迁移前的旧 shape（宿主持有冻结载荷的时代）在库里仍有 pending 行。判别只有一个：
+    // 有没有 proposalId。没有 → 拿不到取物单就无法定位平台提案，commit 等于盲写。
+    const setup = setupConfirm({
+      legacyRow: true,
+      proposalCommitEnabled: true,
+      commitRunner: async () => { throw new Error('旧行业不该被办调'); },
+    });
 
     const reply = await setup.reply();
 
-    expect(reply?.outcome).toBe('confirm_held');
-    expect(reply?.text).toContain('当前落账执行未启用');
+    expect(reply?.outcome).toBe('confirm_stale');
+    // 话术走 PROPOSAL_UNAVAILABLE_TEXT.expired（与新路径"平台说过期"同一句，不造第二份）
+    expect(reply?.text).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
+    expect(setup.rows.get(INTENT_ID)?.status).toBe('expired');
     expect(setup.commitCalls).toHaveLength(0);
+    // 意图归档不回写任务终态：一次写入都没发生，不是执行失败
+    expect(setup.taskUpserts).toHaveLength(0);
   });
 });

@@ -1,11 +1,9 @@
 /**
  * 提案落账后端（方案 1 · B 波 B4，薄执行器：服务端直调平台 commit，不经任何模型）。
  *
- * 与 apps/server 下 `commit.ts`（legacy runner）的分工：那个按文件路径落账——宿主自己解提案、
- * 自己物化契约、自己拿冻结参数；这个**只持有一个不透明提案号**——payload 全程住在执行层
- * 自己的状态库里，宿主连"这次提交的是什么业务"都不知道（L4：宿主不该知道自己在提交什么）。
- * 两条路由由 `change_intents` 的条目形状分流（带 proposalId → 本后端；不带 → legacy），
- * C 波删 legacy 时这个分流自然塌掉，本文件不受影响。
+ * C 波后这是**唯一**的落账路径：原先与它并存的 legacy runner（apps/server/commit.ts，
+ * 按文件路径落账——宿主自己解提案、自己物化契约、自己拿冻结参数）已整文件删除，change_intents
+ * 按"带不带 proposalId"的分流也随之塌成本文件一条路（不带引用的旧行业仍按过期处理）。
  *
  * 四条边界：
  *   ① **operation 名不硬编码**：按平台 `operation list --json` 的 `protocol` 列解析出扮演
@@ -13,12 +11,12 @@
  *      这一列）= 空表 = **拒绝落账**，绝不回落硬编码网关名——回落等于在宿主持第二份业务
  *      名单（L2 禁的那件事）。
  *   ② **令牌只绑提案与有效期**：HMAC-SHA256 over `{proposalId, expiresAt}`，不绑脚本名、
- *      不绑任何业务字段。密钥进程内生成（assembly 的 newGateSecret），仅经 env 传给这
- *      一个子进程，不进 worker env（W7）。
+ *      不绑任何业务字段。密钥进程内生成（`@fshine/agent` 的 newGateSecret，C 波起与
+ *      hostGatewayEnv 同住 context.ts），仅经 env 传给这一个子进程，不进 worker env（W7）。
  *   ③ **env 显式剥 `DZ_REQUIRE_PLAN`**（D-081）：宿主直调是"服务端替 worker 办一件事"，
  *      不该被 worker 的计划门拦——那把尺与提案创建路径同一份（hostGatewayEnv）。
  *   ④ **用户可见文本只有两个来源**：平台 `summaryText` 原样 + 宿主通用状态行。本文件不拼
- *      任何业务摘要，只把平台信封的字段搬进 `CommitResult`。
+ *      任何业务摘要，只把平台信封的字段搬进 `ProposalCommitResult`。
  *
  * 落账前先向平台取问一次提案状态（平台 designated 的"宿主持有 proposalId 后的唯一取问"）：
  * 令牌必须绑提案自己的有效期，而那个值只存在于平台侧；同一问也把"已过期 / 已终结 / 读不到"
@@ -84,9 +82,9 @@ function operationForProtocol(protocols: OperationProtocols, role: string): stri
  * 令牌 = base64url(payload) + '.' + HMAC_SHA256(secret, base64url(payload))，
  * payload = `{proposalId, expiresAt}`。
  *
- * 与 legacy commit 令牌（`commit.ts` 的 signCommitToken）同族同密钥，但**绑不同的东西**：
- * 那个绑"这次调用落在哪个脚本上"，这个绑"这次落账对应哪一份提案、在哪之前有效"。所以不
- * 复用 verifyToken——它硬校验 payload.script，拿提案令牌去过必被拒；两处各验各的那一半。
+ * 绑的东西只有两样：这次落账对应哪一份提案、在哪之前有效。**不绑**脚本名/操作名/任何
+ * 业务字段——旧 legacy 令牌（随 commit.ts 一并删除）绑的是"这次调用落在哪个脚本上"，那是
+ * 宿主替平台记业务账的形状；本令牌让平台侧自己按提案号与有效期验签，宿主无从伪造。
  */
 function signProposalToken(proposalId: string, expiresAt: string, secret: string): string {
   const body = Buffer.from(JSON.stringify({ proposalId, expiresAt })).toString('base64url');

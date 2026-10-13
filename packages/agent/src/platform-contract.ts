@@ -29,13 +29,17 @@ export function gatewayExecPath(platformRoot: string): string {
   return path.join(platformRoot, ...GATEWAY_INVOCATION.split('/'));
 }
 
+/**
+ * 平台操作名（L2 消费不抄写：宿主只引用平台 `operations.json` 的注册名）。
+ *
+ * C 波后只剩 `financeSearchAccountSets` 一个消费者（error-codes.ts 的 correctForm 指引里
+ * 给模型指一条"先做名称检索"的路）。原先这里还挂着旧文本写路径的四个操作名
+ * （voucher.prepare / voucher.commit / voucher.query-saved / voucher.verify-saved）与
+ * voucher.fill——它们的唯一消费者是 apps/server/commit.ts 那个 legacy 落账执行器，随
+ * C 波整体删除，故一并从这里移除：留着就是给"第二份业务名单"留门。
+ */
 export const PLATFORM_OPERATIONS = {
   financeSearchAccountSets: 'finance.search-account-sets',
-  voucherPrepare: 'voucher.prepare',
-  voucherCommit: 'voucher.commit',
-  voucherQuerySaved: 'voucher.query-saved',
-  voucherVerifySaved: 'voucher.verify-saved',
-  voucherFill: 'voucher.fill',
 } as const;
 
 export interface PlatformEnvelope {
@@ -61,27 +65,6 @@ export function parseEnvelope(stdout: string): PlatformEnvelope | null {
   } catch {
     return null;
   }
-}
-
-export interface PrepareOutcome {
-  ok: boolean;
-  dryRun: boolean;
-}
-
-/** prepare（fill.js 别名操作）结果：仅认 RESULT 信封。 */
-export function parsePrepareOutcome(stdout: string): PrepareOutcome {
-  const env = parseEnvelope(stdout);
-  if (!env || env.op !== PLATFORM_OPERATIONS.voucherFill) return { ok: false, dryRun: false };
-  const mode = (env.data as { mode?: unknown } | null)?.mode;
-  return { ok: env.status === 'completed', dryRun: mode === 'dry-run' };
-}
-
-/** verify-saved 读回的期内条数：仅认 RESULT 信封。 */
-export function parseVerifyCount(stdout: string): number | null {
-  const env = parseEnvelope(stdout);
-  if (!env || env.op !== PLATFORM_OPERATIONS.voucherVerifySaved) return null;
-  const count = (env.data as { count?: unknown } | null)?.count;
-  return typeof count === 'number' ? count : null;
 }
 
 /**

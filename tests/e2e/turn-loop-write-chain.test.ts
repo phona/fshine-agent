@@ -1,38 +1,38 @@
 /**
  * 离线全链 e2e：凭证写链路（两步确认完整闭环，B 组）。共享替身见 ./harness.ts。
  *
- * 全链（待迁移的遗留实现）：worker 产出 change_proposal → 宿主 extractChangeProposal
- * 结构校验 → finalizeProposal（capability 检查 → 服务端 prepare dry-run 预检 → 旧
- * pending 置 superseded → 建 ChangeIntentRecord，确认码只存哈希）→ 预览+确认码回复
- * 用户 → 用户「确认 码」由 matchConfirmation 机械匹配（CONFIRM_RE，绕过模型，先于
- * 模型路由）→ 服务端 commit（HMAC 令牌 + --save）→ 读回校验（after-before ≥ 提案
- * 张数）→ 用户拿到成功话术。
+ * **C 波（删旧文本写路径）后只剩网关提案路径**：worker 不把提案 JSON 贴进终稿，而是 write
+ * 进本轮 `tmp/<requestId>/proposal.json` 再发 `bin/17dz prepare <proposal.create 角色的
+ * operation> <文件>`；宿主在 beforeToolCall 拦下这条命令，自己办调平台 create（mock
+ * executor），拿回**平台渲染的摘要** + 一个取物单 proposalId。宿主持有的只剩 proposalId
+ * + 确认码：零业务字段、零 payload（W8 的 L4 机械守卫）。
  *
- * **方案 1 · B 波（B1/B2 批）后的形状变化**：契约瘦身成"零业务字段、零 payload"，宿主库
- * （change_intents）不再往返提案载荷——落账所需的冻结参数因此不在宿主持有范围里，旧文本
- * 路径的确认步**不再可达落账**：拿不到载荷就按过期处理（W5：一律 confirm_stale，不 commit，
- * 不盲写）。预览本身不受影响（对象/时间/条目取自 worker 提案本体，不是库）。
- * 完整落账链（create→确认→commit→读回）随新网关路径在 B3/B5 重建，本文件由 C 波整体重写。
- * 落账执行器自身（prepare dry-run / commit + 令牌 / 读回校验）的覆盖仍在
- * apps/server/commit.test.ts，不因本文件的形状变化而减少。
+ * 于是完整链是：create → 用户文本（平台 summaryText 原样 + 通用确认行）→「确认 码」由
+ * matchConfirmation 机械匹配（绕过模型，先于模型路由）→ 服务端直调平台 commit（HMAC 令牌
+ * + 提案状态取问 + --save 式落账）→ 平台读回校验 → `platform_tasks` 终态回写。
+ *
+ * 影子期（B 波）并存过的旧文本路径——worker 贴提案 JSON、宿主 extractChangeProposal 结构
+ * 校验、服务端 prepare dry-run 预检、按文件路径落账——已整体删除；apps/server/commit.ts
+ * 与 scripts/mock-commit-smoke.ts 的 legacy 冒烟同批退场，提案/落账执行器自身的覆盖改由
+ * tests/e2e/turn-loop-write-chain.test.ts（本文件）+ packages/agent/proposal-flow.test.ts
+ * + apps/server/proposal-commit.test.ts 承担。
  *
  * 只在 mock 执行器下跑（harness beforeAll 固定 DZ_EXECUTOR=mock，落的是假状态文件），
  * 数据瞄准 seed.json：幻辰财税 + 202609（未结账、无存量凭证）。
  *
  * worker 提案前的检索调用是刻意的：与真实 worker 同形状（提案前先经平台核实对象，
- * 留下执行痕迹）；提案本身包在 ```json 围栏里——extractChangeProposal 只认围栏或
- * 整段纯 JSON。
+ * 留下执行痕迹）。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { boot, gatewayProposalWorker, gatedWorker, mainDriver, type WorkerStep } from './harness';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 
-// harness 全局设 DZ_REQUIRE_PLAN=1 是为 worker 侧计划绑定保真；但服务端 commit 执行器
-// （apps/server/commit.ts 的 runGate 继承进程 env）在生产进程里并不带这个 mandate——
-// acceptance.ts 与 mock-commit-smoke.ts 同形态（只设 DZ_SERVE），09-22 全链验收正是在
-// 此形态下 committed 成功。worker 的计划执行 spawn 由 gatedWorker 显式自带
-// DZ_REQUIRE_PLAN=1（harness.ts 两处 execute env），不受这里删除影响。
+// harness 全局设 DZ_REQUIRE_PLAN=1 是为 worker 侧计划绑定保真；服务进程自己并不带这个
+// mandate。宿主持有的两条直调（提案创建、提案落账）都经 hostGatewayEnv() **显式剥**它
+// （D-081），所以这里删掉只为还原"生产进程 env"的形态——真正的保证在 env 纪律本身，
+// 由下面 D-081 那条（显式把它设回来仍全链绿）钉住。worker 的计划执行 spawn 由
+// gatedWorker 显式自带 DZ_REQUIRE_PLAN=1（harness.ts 两处 execute env），不受这里删除影响。
 beforeAll(() => {
   delete process.env['DZ_REQUIRE_PLAN'];
 });
@@ -80,7 +80,7 @@ function validProposal(): object {
   };
 }
 
-/** 单张合法提案（B3/B6 用）：借贷各 800。 */
+/** 单张合法提案：借贷各 800。 */
 function singleValidProposal(): object {
   return {
     type: 'change_proposal', domain: 'voucher', accountSet: ACCOUNT, period: PERIOD,
@@ -98,27 +98,10 @@ function singleValidProposal(): object {
   };
 }
 
-/** 预检必败提案：科目 9999 不在账套科目表里，mock fill 在 dry-run 即 RESOLVE_INVALID。 */
-function invalidSubjectProposal(): object {
-  return {
-    type: 'change_proposal', domain: 'voucher', accountSet: ACCOUNT, period: PERIOD,
-    contracts: [
-      {
-        accountSet: ACCOUNT,
-        date: '2026-09-17',
-        entries: [
-          { summary: '预检必败分录', subjectCode: '9999', debit: 100 },
-          { summary: '预检必败分录', subjectCode: '1002', credit: 100 },
-        ],
-      },
-    ],
-    summary: { count: 1, debit: 100, credit: 100 },
-  };
-}
-
 /**
- * 提案 worker 替身：每次委派先真跑一笔平台检索（与真实 worker 同形状——提案前核实
- * 对象，同时给委派留下执行痕迹），随后把提案包在 ```json 围栏里作为最终文本。
+ * 提案 worker 替身（旧文本路径形状，只为影子不一致用例保留）：每次委派先真跑一笔平台
+ * 检索，随后把提案包在 ```json 围栏里作为最终文本。C 波后这条形状不再被宿主解析——
+ * 这里留着是为了钉住"只记录、不生效、不落库"的字面语义。
  */
 function proposalWorker(...proposals: object[]) {
   const steps: WorkerStep[] = [];
@@ -145,242 +128,21 @@ function writeChainMain(declarations: Array<Record<string, unknown>>) {
   return mainDriver(declarations);
 }
 
-describe('离线全链 e2e：凭证写链路（两步确认闭环）', () => {
-  it('B1 提案→预览→确认：宿主库只持取物单，确认按过期处理、零落账（W5）', async () => {
-    const { send, assembly } = await boot({
-      main: writeChainMain([{ kind: 'delegate', request: '把两笔往来款录入幻辰财税 2026 年 9 月' }]),
-      worker: proposalWorker(validProposal()),
-    });
-    await grantWrite(assembly);
-
-    const before = mockVoucherCount(ACCOUNT, PERIOD);
-    const preview = await send('把两笔往来款录入幻辰财税 2026 年 9 月');
-
-    // 预览 + 确认码（码明文只出现在这条回复里，库里存的是哈希）
-    expect(preview).toContain('已收到录入提案并通过预检（dry-run）');
-    expect(preview).toContain('- 对象：幻辰财税');
-    expect(preview).toContain('- 时间：202609');
-    expect(preview).toContain('- 条目：2 条，借贷合计各 1500 元');
-    expect(preview).toContain('回复「确认');
-    const code = preview.match(CONFIRM_RE)?.[1];
-    expect(code).toBeTruthy();
-
-    const pending = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
-    expect(pending?.status).toBe('pending');
-    expect(pending?.confirmCodeHash).not.toContain(code!);
-    // B 波：宿主库零业务字段、零 payload，也不带平台提案引用（旧文本路径没有引用可持）
-    expect('proposalId' in pending!).toBe(false);
-    for (const field of ['kind', 'accountSet', 'period', 'payload', 'summary']) {
-      expect(field in pending!).toBe(false);
-    }
-
-    // 确认：拿不到冻结载荷 → 一律按过期处理，不 commit、不盲写（W5）
-    const done = await send(`确认 ${code}`);
-    expect(done).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-
-    const decided = await assembly.store.changeIntents!.get(pending!.intentId);
-    expect(decided?.status).toBe('expired');
-    expect(decided?.decidedAt).toBeTruthy();
-    await assembly.close();
-  });
-
-  it('B2 dry-run 预检失败：不建 intent，用户收到 proposal_precheck_failed 话术', async () => {
-    const { send, assembly } = await boot({
-      main: writeChainMain([{ kind: 'delegate', request: '录入一笔 9 月凭证' }]),
-      worker: proposalWorker(invalidSubjectProposal()),
-    });
-    await grantWrite(assembly);
-
-    const before = mockVoucherCount(ACCOUNT, PERIOD);
-    const reply = await send('录入一笔 9 月凭证');
-
-    expect(reply).toContain('变更提案未通过预检（dry-run），未创建待确认任务。');
-    expect(reply).toContain('科目不存在: 9999');
-    // 无 intent 落库（会话里没有任何 pending），mock 状态零变化
-    expect(await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION)).toBeNull();
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-    await assembly.close();
-  });
-
-  describe('B3 确认码攻击面：错误码 / 过期 / 跨 session / 跨 principal 都不放行', () => {
-    /**
-     * 每个用例共用的开局：开写 → 提案回合拿到码与 intentId。
-     * 脚本里多备一条 conversation 申报：码没拦住而走到模型时，替身会"自由回答"——
-     * 这本身就是要观察的行为（未知码按契约走模型，不执行任何写）。
-     */
-    async function bootWithPendingProposal() {
-      const booted = await boot({
-        main: writeChainMain([
-          { kind: 'delegate', request: '录入一笔 9 月凭证' },
-          { kind: 'conversation', text: '模型自由回答：我没有这个确认码的记录，未执行任何操作。' },
-        ]),
-        worker: proposalWorker(singleValidProposal()),
-      });
-      await grantWrite(booted.assembly);
-      const preview = await booted.send('录入一笔 9 月凭证');
-      const code = preview.match(CONFIRM_RE)?.[1];
-      expect(code).toBeTruthy();
-      const pending = await booted.assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
-      expect(pending?.status).toBe('pending');
-      return { ...booted, code: code!, intentId: pending!.intentId };
-    }
-
-    it('错误码（库里无此哈希）：不落账、意图保持 pending，消息按普通对话走模型', async () => {
-      const { send, assembly, intentId } = await bootWithPendingProposal();
-      const before = mockVoucherCount(ACCOUNT, PERIOD);
-
-      const reply = await send('确认 ZZZ999');
-
-      // 未知码命中不了任何 intent → matchConfirmation 返回 null → 模型正常应答
-      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
-      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
-      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      await assembly.close();
-    });
-
-    it('过期（TTL 10 分钟）：confirm_stale 确定性话术，意图就地置 expired，不落账', async () => {
-      const { send, assembly, code, intentId } = await bootWithPendingProposal();
-      const before = mockVoucherCount(ACCOUNT, PERIOD);
-
-      // assembly 不注入 intentTtlMs（生产默认 10 分钟）：只假推进 Date（不动定时器），
-      // 让 matchConfirmation 里的 now 落在 expiresAt 之后。
-      vi.useFakeTimers({ toFake: ['Date'] });
-      try {
-        vi.setSystemTime(new Date(Date.now() + 11 * 60_000));
-        const reply = await send(`确认 ${code}`);
-        expect(reply).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
-      } finally {
-        vi.useRealTimers();
-      }
-      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('expired');
-      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      await assembly.close();
-    });
-
-    it('跨 session 复用（群聊里贴单聊的码）：不放行、意图 pending，走模型', async () => {
-      const { send, assembly, code, intentId } = await bootWithPendingProposal();
-      const before = mockVoucherCount(ACCOUNT, PERIOD);
-
-      // 同一 principal、不同会话（群聊 chatid=grp_e2e）：码哈希按 (principal, session) 绑定
-      const reply = await send(`确认 ${code}`, { group: true });
-
-      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
-      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
-      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      await assembly.close();
-    });
-
-    it('跨 principal 复用（另一个用户贴别人的码）：不放行、意图 pending，走模型', async () => {
-      const { send, assembly, code, intentId } = await bootWithPendingProposal();
-      await assembly.store.principalScopes.upsert({
-        wecomUserId: 'e2e_user_2', accountSetIds: [], accountSetScope: 'all', enabled: true,
-        capabilities: ['read', 'validate', 'write'],
-      });
-      const before = mockVoucherCount(ACCOUNT, PERIOD);
-
-      const reply = await send(`确认 ${code}`, { userid: 'e2e_user_2' });
-
-      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
-      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
-      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      await assembly.close();
-    });
-  });
-
-  it('B4 同会话连提两案：旧码 stale、旧意图 superseded，新码确认同样按过期处理不落账', async () => {
-    const { send, assembly } = await boot({
-      main: writeChainMain([
-        { kind: 'delegate', request: '第一笔：录入 9 月收款凭证' },
-        { kind: 'delegate', request: '第二笔：改为录入 9 月付款凭证' },
-        { kind: 'conversation', text: '模型自由回答。' },
-      ]),
-      worker: proposalWorker(validProposal(), singleValidProposal()),
-    });
-    await grantWrite(assembly);
-
-    const preview1 = await send('第一笔：录入 9 月收款凭证');
-    const code1 = preview1.match(CONFIRM_RE)?.[1]!;
-    const intent1 = (await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION))!.intentId;
-
-    const preview2 = await send('第二笔：改为录入 9 月付款凭证');
-    const code2 = preview2.match(CONFIRM_RE)?.[1]!;
-    expect(code2).not.toBe(code1);
-    // 新提案使旧 pending 作废（superseded），会话里 pending 已是第二张
-    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
-    const pending2 = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
-    expect(pending2?.intentId).not.toBe(intent1);
-    expect(pending2?.status).toBe('pending');
-
-    // 用第一个码确认：确定性 stale 解释，无状态变化、无落账
-    const before = mockVoucherCount(ACCOUNT, PERIOD);
-    const stale = await send(`确认 ${code1}`);
-    expect(stale).toContain('该确认码对应的提案已被更新的提案取代，确认最新的提案即可。');
-    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
-    expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('pending');
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-
-    // 新码确认：B 波后宿主库不持冻结载荷 → 按过期处理，零落账（完整落账链见 B3/B5）
-    const done = await send(`确认 ${code2}`);
-    expect(done).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-    expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('expired');
-    await assembly.close();
-  });
-
-  it('B6 模型试图把「确认 码」当普通 conversation 申报：机械匹配优先，且不落账', async () => {
-    const { send, assembly } = await boot({
-      main: writeChainMain([
-        { kind: 'delegate', request: '录入一笔 9 月凭证' },
-        // 收到「确认 码」后模型试图自答（而非放行给机械匹配）——替身若被叫到就会申报这条
-        { kind: 'conversation', text: '模型自答：我把这句当作普通对话处理，不执行任何写入。' },
-      ]),
-      worker: proposalWorker(singleValidProposal()),
-    });
-    await grantWrite(assembly);
-
-    const preview = await send('录入一笔 9 月凭证');
-    const code = preview.match(CONFIRM_RE)?.[1]!;
-    const intentId = (await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION))!.intentId;
-    const before = mockVoucherCount(ACCOUNT, PERIOD);
-
-    const done = await send(`确认 ${code}`);
-
-    // matchConfirmation 在模型路由之前执行（runtime.ts 的 handleTurn 入口）：
-    // 模型的 conversation 申报根本没被叫到，回复是宿主的确定性话术（B 波后是过期话术）
-    expect(done).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
-    expect(done).not.toContain('模型自答');
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-    expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('expired');
-    await assembly.close();
-  });
-});
-
 /**
- * B 波 B3：网关提案路径（`FSHINE_PROPOSAL_VIA_GATEWAY` 打开）。
- *
- * 与上面旧文本路径的分别：worker 不再把提案 JSON 贴进终稿，而是 write 进本轮
- * `tmp/<requestId>/proposal.json` 再发 `bin/17dz prepare voucher.proposal <文件>`；宿主在
- * beforeToolCall 拦下这条命令，自己办调平台 create（mock executor），拿回**平台渲染的摘要**
- * + 一个取物单 proposalId。宿主持有的只剩 proposalId + 确认码：零业务字段、零 payload。
- *
- * 这一组因此钉三件事：
- *   ① 用户文本 = 平台 summaryText **原样** + 宿主通用确认行（宿主不拼任何业务摘要）；
- *   ② 意图条目带 proposalId、不带任何业务字段（W8 的 L4 机械守卫）；
- *   ③ 确认步在 B4 的落账后端接上之前 fail-closed：不写任何数据，也不借"已过期"说谎。
- *
- * 落账执行器自身（prepare dry-run / commit + 令牌 / 读回）的覆盖仍在 apps/server/commit.test.ts；
- * 完整 create→确认→commit→读回四态随 B4/B5 重建。
+ * 开关（W2）：`FSHINE_PROPOSAL_VIA_GATEWAY` 管提案创建走不走网关，`FSHINE_PROPOSAL_COMMIT`
+ * 管落账后端接不接。两个都只在本文件内生效（vitest 线程池给每个文件独立的 env 副本）。
+ * `commit` 为真 = 完整落账链；为假 = 只到"确认收到但不写"（confirm_held）。
  */
-describe('B3 网关提案路径（开关打开）：平台摘要 + 确认码，宿主持有取物单', () => {
-  /** 开开关：只在本 describe 内生效（vitest 线程池给每个文件独立的 env 副本）。 */
-  function openGateway(): void {
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-  }
-  function closeGateway(): void {
-    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-  }
+function openGateway(commit = false): void {
+  process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
+  if (commit) process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
+}
+function closeGateway(commit = false): void {
+  delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
+  if (commit) delete process.env['FSHINE_PROPOSAL_COMMIT'];
+}
 
+describe('网关提案路径 · 提案创建（开关打开）：平台摘要 + 确认码，宿主持有取物单', () => {
   it('create → 用户文本含平台 summaryText 与确认码；意图条目只持取物单（零业务字段）', async () => {
     openGateway();
     try {
@@ -416,13 +178,15 @@ describe('B3 网关提案路径（开关打开）：平台摘要 + 确认码，�
       for (const field of ['kind', 'accountSet', 'period', 'payload', 'summary']) {
         expect(field in pending!).toBe(false);
       }
+      // create 只跑 dry-run：零写入
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
       await assembly.close();
     } finally {
       closeGateway();
     }
   });
 
-  it('确认码：B4 落账后端未接 → fail-closed 不写数据、提案保持待确认（不借"已过期"说谎）', async () => {
+  it('确认码：落账后端未接 → fail-closed 不写数据、提案保持待确认（不借"已过期"说谎）', async () => {
     openGateway();
     try {
       const { send, assembly } = await boot({
@@ -441,9 +205,9 @@ describe('B3 网关提案路径（开关打开）：平台摘要 + 确认码，�
 
       const reply = await send(`确认 ${code}`);
 
-      // 零写入：mock 状态一张都没多（落账后端 B4 才接）
+      // 零写入：mock 状态一张都没多（落账后端没接）
       expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      // 提案保持待确认（B4 接上后同一个码仍然有效），且不说"已过期"——它一分钟前刚登记
+      // 提案保持待确认（接上后同一个码仍然有效），且不说"已过期"——它一分钟前刚登记
       expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
       expect(reply).toContain('当前落账执行未启用');
       expect(reply).not.toContain('已过期');
@@ -473,16 +237,8 @@ describe('B3 网关提案路径（开关打开）：平台摘要 + 确认码，�
     }
   });
 
-  it('影子不一致（W1）：开关开着而 worker 仍贴旧形态提案 JSON → 只记录，不生效、不落库', async () => {
+  it('worker 仍贴旧形态提案 JSON：宿主不再解析 worker 文本，提案这一步不发生', async () => {
     openGateway();
-    const mismatches: Array<Record<string, unknown>> = [];
-    const original = console.warn;
-    console.warn = (line: string) => {
-      try {
-        const parsed = JSON.parse(line) as Record<string, unknown>;
-        if (parsed['event'] === 'proposal_shadow_mismatch') mismatches.push(parsed);
-      } catch { /* 非 JSON 行忽略 */ }
-    };
     try {
       const { send, assembly } = await boot({
         main: writeChainMain([{ kind: 'delegate', request: '录入一笔 9 月凭证' }]),
@@ -494,47 +250,22 @@ describe('B3 网关提案路径（开关打开）：平台摘要 + 确认码，�
 
       const reply = await send('录入一笔 9 月凭证');
 
-      // 只记录：没有意图条目、没有确认码、零写入
-      expect(mismatches).toHaveLength(1);
-      expect(mismatches[0]?.['proposalChars']).toBeGreaterThan(0);
+      // C 波后宿主压根不解析 worker 终稿（extractChangeProposal 与影子留痕分支一并删除：
+      // 解析 worker 文本正是 L4 要禁的那件事）。于是旧形状不再被识别成提案——没有意图
+      // 条目、没有确认码、零写入，用户看到的就是 worker 原文。
       expect(await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION)).toBeNull();
       expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-      // "只记录"的字面语义：这一轮用户看到的就是 worker 原文（旧形态 JSON），宿主不解析、
-      // 不建条目、不发码——切流后随旧形态一起消失（B3 记录里的已知缺口 ⑤，这里钉住形状）。
       expect(reply).toContain('change_proposal');
       expect(reply).not.toContain('待确认提案');
+      expect(reply).not.toContain('回复「确认');
       await assembly.close();
     } finally {
-      console.warn = original;
       closeGateway();
     }
   });
 });
 
-/**
- * B4：网关提案路径的**完整落账链**（开关打开 + 落账后端接上，全 mock）。
- *
- * 与上一组（B3）的分别只在一个环境变量：`FSHINE_PROPOSAL_COMMIT=1` 把落账后端接上。于是
- * create → 用户文本（平台 summaryText + 通用确认行）→「确认 码」→ 服务端直调平台 commit
- * → 平台读回校验 → `platform_tasks` 终态回写，全链在 mock 执行器下走通——这正是 W3
- * "mock 全链是唯一波次验收"要求的那条链。
- *
- * 钉住的事：
- *   ① 用户可见文本 = 平台 `summaryText` 原样 + 宿主通用状态行（宿主不拼任何业务摘要）；
- *   ② 落账真的发生：mock 状态凭证数按提案张数增长（读回校验的平台侧证据）；
- *   ③ D-082：committed / confirm_failed 两个分支都把 originating 任务推到终态；
- *   ④ D-081：进程带着 `DZ_REQUIRE_PLAN=1` 时全链仍绿（宿主直调显式剥它）。
- */
-describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端接上）', () => {
-  function openGateway(): void {
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
-  }
-  function closeGateway(): void {
-    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    delete process.env['FSHINE_PROPOSAL_COMMIT'];
-  }
-
+describe('网关提案路径 · 完整落账链（开关打开 + 落账后端接上）', () => {
   /** 已结账期提案（seed 的 scenarios.closedPeriods=202606）：dry-run 过、commit 被平台拒。 */
   function closedPeriodProposal(): object {
     return {
@@ -553,8 +284,8 @@ describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端
     };
   }
 
-  it('create → 确认 → commit → 读回：平台摘要上屏、mock 状态 +1、任务终态 done', async () => {
-    openGateway();
+  it('create → 确认 → commit → 读回：平台摘要上屏、mock 状态 +2、任务终态 done', async () => {
+    openGateway(true);
     try {
       const { send, assembly } = await boot({
         main: writeChainMain([
@@ -591,13 +322,13 @@ describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端
       expect(task?.outcome).toBe('done');
       await assembly.close();
     } finally {
-      closeGateway();
+      closeGateway(true);
     }
   });
 
   it('D-081：server 进程带着 DZ_REQUIRE_PLAN=1，commit 全链仍绿（宿主直调显式剥它）', async () => {
-    openGateway();
-    // 复刻"部署里 worker 的计划门 mandate 泄漏进服务进程"的形态：宿主直调平台的两条命令
+    openGateway(true);
+    // 复刻"部署里 worker 的计划门 mandate 泄漏进服务进程"的形态：宿主持有的两条直调
     // （创建、落账）都必须自己剥掉它，否则同一份部署里服务端调不动、worker 调得动。
     process.env['DZ_REQUIRE_PLAN'] = '1';
     try {
@@ -622,12 +353,12 @@ describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端
       await assembly.close();
     } finally {
       delete process.env['DZ_REQUIRE_PLAN'];
-      closeGateway();
+      closeGateway(true);
     }
   });
 
   it('commit 被平台拒绝（已结账期）：confirm_failed + 意图 failed + 任务终态 failed + 零增量', async () => {
-    openGateway();
+    openGateway(true);
     try {
       const { send, assembly } = await boot({
         main: writeChainMain([
@@ -659,12 +390,12 @@ describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端
       expect(task?.outcome).toBe('failed');
       await assembly.close();
     } finally {
-      closeGateway();
+      closeGateway(true);
     }
   });
 
   it('能力在确认时点被收回：确定性拒绝、零写入、提案保持待确认（D-080 端到端）', async () => {
-    openGateway();
+    openGateway(true);
     try {
       const { send, assembly } = await boot({
         main: writeChainMain([
@@ -695,7 +426,212 @@ describe('B4 网关提案路径 · 完整落账链（开关打开 + 落账后端
       expect((await assembly.store.changeIntents!.get(pending!.intentId))?.status).toBe('pending');
       await assembly.close();
     } finally {
-      closeGateway();
+      closeGateway(true);
+    }
+  });
+});
+
+/**
+ * 确认码攻击面（原 B 波旧文本路径的同名一组，C 波改写为网关路径）：判据全部与提案载荷
+ * 无关——确认码哈希按 (principal, session) 绑定、TTL 过期就地置 expired、新提案作废旧码。
+ * 这些是**宿主持有的通用确认状态机**，不随提案归平台而改变，所以覆盖要跟着搬过来而不是
+ * 随旧路径一起删。
+ */
+describe('网关提案路径 · 确认码攻击面：错误码 / 过期 / 跨 session / 跨 principal / 取消 / 被新提案取代', () => {
+  /**
+   * 每个用例共用的开局：开写 + 开落账后端 → 提案回合拿到码与 intentId。
+   * 脚本里多备一条 conversation 申报：码没拦住而走到模型时，替身会"自由回答"——
+   * 这本身就是要观察的行为（未知码按契约走模型，不执行任何写）。
+   */
+  async function bootWithPendingProposal() {
+    const booted = await boot({
+      main: writeChainMain([
+        { kind: 'delegate', request: '录入一笔 9 月凭证' },
+        { kind: 'conversation', text: '模型自由回答：我没有这个确认码的记录，未执行任何操作。' },
+      ]),
+      worker: gatewayProposalWorker(singleValidProposal()),
+    });
+    await grantWrite(booted.assembly);
+    const preview = await booted.send('录入一笔 9 月凭证');
+    const code = preview.match(CONFIRM_RE)?.[1];
+    expect(code).toBeTruthy();
+    const pending = await booted.assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
+    expect(pending?.status).toBe('pending');
+    return { ...booted, code: code!, intentId: pending!.intentId };
+  }
+
+  it('错误码（库里无此哈希）：不落账、意图保持 pending，消息按普通对话走模型', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, intentId } = await bootWithPendingProposal();
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      const reply = await send('确认 ZZZ999');
+
+      // 未知码命中不了任何 intent → matchConfirmation 返回 null → 模型正常应答
+      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('过期（TTL 10 分钟）：confirm_stale 确定性话术，意图就地置 expired，不落账', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, code, intentId } = await bootWithPendingProposal();
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      // assembly 不注入 intentTtlMs（生产默认 10 分钟）：只假推进 Date（不动定时器），
+      // 让 matchConfirmation 里的 now 落在 expiresAt 之后。
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(new Date(Date.now() + 11 * 60_000));
+        const reply = await send(`确认 ${code}`);
+        expect(reply).toContain('该确认码对应的提案已过期（超过有效期），请重新发起录入。');
+      } finally {
+        vi.useRealTimers();
+      }
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('expired');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('跨 session 复用（群聊里贴单聊的码）：不放行、意图 pending，走模型', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, code, intentId } = await bootWithPendingProposal();
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      // 同一 principal、不同会话（群聊 chatid=grp_e2e）：码哈希按 (principal, session) 绑定
+      const reply = await send(`确认 ${code}`, { group: true });
+
+      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('跨 principal 复用（另一个用户贴别人的码）：不放行、意图 pending，走模型', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, code, intentId } = await bootWithPendingProposal();
+      await assembly.store.principalScopes.upsert({
+        wecomUserId: 'e2e_user_2', accountSetIds: [], accountSetScope: 'all', enabled: true,
+        capabilities: ['read', 'validate', 'write'],
+      });
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      const reply = await send(`确认 ${code}`, { userid: 'e2e_user_2' });
+
+      expect(reply).toBe('模型自由回答：我没有这个确认码的记录，未执行任何操作。');
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('pending');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('同会话连提两案：旧码 stale、旧意图 superseded，新码确认走到落账', async () => {
+    openGateway(true);
+    try {
+      // 两轮委派各带一次网关提案调用。注意**不能**照 legacy 夹具那样在提案步后补
+      // `{end:true}`：harness 的 proposal 步一旦 completed 就整段返回，`end` 步会原样
+      // 留给下一轮并把下一轮直接终结（worker 交白卷 → 宿主判"未返回可用结果"）。
+      const twoProposalWorker = gatedWorker([
+        { plan: [{ operation: 'finance.search-account-sets', args: ['--query', ACCOUNT] }] },
+        { proposal: singleValidProposal() },
+        { plan: [{ operation: 'finance.search-account-sets', args: ['--query', ACCOUNT] }] },
+        { proposal: singleValidProposal() },
+      ]);
+      const { send, assembly } = await boot({
+        main: writeChainMain([
+          { kind: 'delegate', request: '第一笔：录入 9 月收款凭证' },
+          { kind: 'delegate', request: '第二笔：改为录入 9 月付款凭证' },
+          { kind: 'conversation', text: '模型自由回答。' },
+        ]),
+        worker: twoProposalWorker,
+      });
+      await grantWrite(assembly);
+
+      const preview1 = await send('第一笔：录入 9 月收款凭证');
+      const code1 = preview1.match(CONFIRM_RE)?.[1]!;
+      const intent1 = (await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION))!.intentId;
+
+      const preview2 = await send('第二笔：改为录入 9 月付款凭证');
+      const code2 = preview2.match(CONFIRM_RE)?.[1]!;
+      expect(code2).not.toBe(code1);
+      // 新提案使旧 pending 作废（superseded），会话里 pending 已是第二张
+      expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
+      const pending2 = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
+      expect(pending2?.intentId).not.toBe(intent1);
+      expect(pending2?.status).toBe('pending');
+
+      // 用第一个码确认：确定性 stale 解释，无状态变化、无落账
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+      const stale = await send(`确认 ${code1}`);
+      expect(stale).toContain('该确认码对应的提案已被更新的提案取代，确认最新的提案即可。');
+      expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
+      expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('pending');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+
+      // 新码确认：走完整落账链（提案载荷在平台侧，宿主持有的取物单仍然有效）
+      const done = await send(`确认 ${code2}`);
+      expect(done).toContain('确认码已核销，落账已完成。');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before + 1);
+      expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('committed');
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('取消码作废 pending：中性标签的确定性答复 + 意图 cancelled + 零写入', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, code, intentId } = await bootWithPendingProposal();
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      const reply = await send(`取消 ${code}`);
+
+      // R1：取消分支是新旧路径**共用**的代码，C 波后它只服务网关路径。业务字段不在宿主库
+      // 往返，标签一律降级成中性表述——不渲染 undefined，也不为"更具体"去解析 worker 文本。
+      expect(reply).toBe('已作废：本次录入提案未执行。');
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('cancelled');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
+    }
+  });
+
+  it('取消一个已作废的码 → confirm_stale（那一轮没有任何状态变化）', async () => {
+    openGateway(true);
+    try {
+      const { send, assembly, code, intentId } = await bootWithPendingProposal();
+      const before = mockVoucherCount(ACCOUNT, PERIOD);
+
+      await send(`取消 ${code}`);
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('cancelled');
+
+      const stale = await send(`取消 ${code}`);
+      expect(stale?.length).toBeGreaterThan(0);
+      expect(stale).toContain('该确认码对应的提案已作废，无需取消。');
+      // 第二发取消码：提案早已终结，这一轮没有任何状态变化、零写入
+      expect((await assembly.store.changeIntents!.get(intentId))?.status).toBe('cancelled');
+      expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
+      await assembly.close();
+    } finally {
+      closeGateway(true);
     }
   });
 });

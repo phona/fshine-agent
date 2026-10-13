@@ -287,16 +287,16 @@ export interface PlatformTaskRepo {
 /**
  * 变更意图（两步确认写开放的持久化状态机）。
  *
- * **方案 1 · B 波后宿主持有的只有一张取物单**：提案 payload 由执行层自己的提案状态库
+ * **方案 1 · C 波后宿主持有的只有一张取物单**：提案 payload 由执行层自己的提案状态库
  * 持有（不透明、宿主不读不解析），本记录因此零业务字段、零 payload——只有确认状态机
  * 必需的四样东西：谁发的（principalId / sessionId）、确认码哈希、有效期与结局，加上
- * 指向平台提案的引用 proposalId（B 波的唯一判别：带 → 新路径；不带 → 旧路径/旧行业，
- * 一律按过期处理）。
+ * 指向平台提案的引用 proposalId（唯一判别：带 → 平台提案落账；不带 → 迁移前的旧行业，
+ * 一律按过期处理，不 commit）。
  *
  * 迁移前的五列历史列（业务字段 + 冻结载荷）已从契约删除；它们仍留在 SQLite 表里做历史，
- * 但不再被读、也不再被写（列名与兼容值见 packages/core/src/store.ts 的前向迁移）。影子期
- * 还在跑的旧文本路径用它自己的私有记录形状（context.ts 内的 LegacyChangeIntentRecord），
- * 不回到本契约。
+ * 但不再被读、也不再被写（列名与兼容值见 packages/core/src/store.ts 的前向迁移）。
+ * 影子期还在跑的旧文本路径（它自己的私有记录形状，曾住在 context.ts 内）已随 C 波整体
+ * 删除，不回到本契约。
  */
 export interface ChangeIntentRecord {
   intentId: string;

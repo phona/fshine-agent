@@ -17,10 +17,9 @@
  *       DECLINED_PLAN_LIMIT，且 evaluate 从未被调用（第 6 次不再产生新计划）。
  *   A5：写关闭三个入口各一条——
  *       ① 计划扫描（gatedWorker enforceWriteClosure 复刻宿主 beforeToolCall 拦截）；
- *       ② 提案路径 capability 拒（worker 直出 change_proposal 文本，走 context.ts
- *          finalizeProposal；终稿是"已收到录入提案，但" + 唯一话术——finalizeProposal
- *          在 WRITE_NOT_ENABLED 前有一句收件确认，故对"内嵌话术一字不差"断言，而不是
- *          对整句相等断言）；
+ *       ② 提案路径 capability 拒（worker 走网关提案调用，驱动拦下后交 context.ts 的
+ *          createProposalViaGateway；终稿就是 error-codes.ts 的 WRITE_NOT_ENABLED 本身，
+ *          C 波删掉旧文本路径后不再有"已收到录入提案，但"那句前缀）；
  *       ③ 平台计划门兜底（真 createPiCodingWorkerSession + 真 CLI：capabilities 声明
  *          含 write 使宿主前置扫描不触发，voucher.commit 被平台 canonicalCall 以
  *          PLAN_OPERATION_NOT_READ_ONLY exit 3 拒绝，驱动 catch 分支按平台语义表的
@@ -40,6 +39,7 @@ import type { PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import {
   LAST_TASK_ID_TOKEN,
   boot,
+  gatewayProposalWorker,
   gatedWorker,
   growingPlan,
   heavyPlan,
@@ -328,39 +328,47 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
   });
 
   it('A5 闸② 提案路径 capability 拒：无 write 能力的 principal 走到提案步也被确定性拒绝', async () => {
-    const proposal = {
-      type: 'change_proposal',
-      domain: 'voucher',
-      accountSet: '幻辰财税',
-      period: '202609',
-      contracts: [{ voucherDate: '2026-09-30', entries: [{ subject: '660203', debit: 100, credit: 0 }] }],
-      summary: { count: 1, debit: 100, credit: 100 },
-    };
-    const proposalText = `已洗好契约。\n\`\`\`json\n${JSON.stringify(proposal, null, 2)}\n\`\`\`\n请确认。`;
     const before = totalActualCalls();
-    const { send, assembly } = await boot({
-      main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
-      // worker 不停在计划步，直接产出提案文本——只有走到 finalizeProposal 的
-      // capability 检查才能拦住它（T7 事故形态里模型永不抵达的那条路径）
-      worker: gatedWorker([{ text: proposalText }]),
-    });
-    await assembly.store.principalScopes.upsert({
-      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
-    });
+    // 网关提案路径开着：worker 的提案创建命令才会被驱动拦下，交到宿主的
+    // createProposalViaGateway 做 capability 复核（C 波后唯一的提案入口）。
+    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
+    try {
+      const { send, assembly } = await boot({
+        main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
+        worker: gatewayProposalWorker({
+          type: 'change_proposal',
+          domain: 'voucher',
+          accountSet: '幻辰财税',
+          period: '202609',
+          contracts: [{ voucherDate: '2026-09-30', entries: [{ subject: '660203', debit: 100, credit: 0 }] }],
+          summary: { count: 1, debit: 100, credit: 100 },
+        }),
+      });
+      try {
+        await assembly.store.principalScopes.upsert({
+          wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
+        });
 
-    const reply = await send('帮我录入一笔办公费凭证');
+        const reply = await send('帮我录入一笔办公费凭证');
 
-    // finalizeProposal（context.ts）在唯一话术前加了一句收件确认——内嵌话术一字不差，
-    // 整句不是裸话术（这是该入口的生产契约，不是泄漏）；该入口不带 writeClosed 标记，
-    // 出口校验按零执行回合追加其标准标注（runtime.ts finishDirectReply）
-    expect(reply).toBe(
-      `已收到录入提案，但${messageTextFor('WRITE_NOT_ENABLED')}\n\n（以上是子 Agent 的说明；本轮没有真正查到平台数据。）`,
-    );
-    // 提案载荷与预检都不发生：提案 JSON 不上屏、零平台调用
-    expect(reply).not.toContain('change_proposal');
-    expect(Object.keys(ledger().plans ?? {})).toEqual([]);
-    expect(totalActualCalls()).toBe(before);
-    await assembly.close();
+        // 终稿 == 码表唯一来源的写关闭话术（一字不差）。C 波前这一入口是
+        // "已收到录入提案，但" + 同一句（finalizeProposal 的收件确认）；删掉旧文本路径后
+        // 宿主不再"收件"，话术本身就是终稿。
+        expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
+        // 提案创建零办调（多出来的一笔是 worker 提案前的只读检索）、零待确认意图。
+        // 注意不再断言"平台侧无计划"：网关夹具那一笔检索自己就是一条**只读**计划，
+        // 平台计划门照常放行它——闸② 判的是提案这一步，不是计划门（那是闸③）。
+        expect(totalActualCalls()).toBe(before + 1);
+        const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
+        const sessionId = events[0]?.sessionId ?? '';
+        expect(sessionId).not.toBe('');
+        expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+      } finally {
+        await assembly.close();
+      }
+    } finally {
+      delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
+    }
   });
 
   it('A5 闸③ 平台计划门兜底：宿主前置扫描放行后，平台以 PLAN_OPERATION_NOT_READ_ONLY 拒绝', async () => {

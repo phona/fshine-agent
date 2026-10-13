@@ -44,9 +44,10 @@ import {
 } from './harness';
 import { invariantSession, type InvariantReport } from './invariant-checker';
 
-// 写链路的服务端 commit 执行器（apps/server/commit.ts runGate 继承进程 env）在生产进程
-// 不带 DZ_REQUIRE_PLAN；harness 全局设它本是为 worker 侧计划绑定保真（gatedWorker 的
-// spawn 自带），这里按 turn-loop-write-chain 同法删除。不影响 gatedWorker 的计划绑定。
+// 写链路的服务端落账执行器在生产进程不带 DZ_REQUIRE_PLAN（C 波后走
+// apps/server/proposal-commit.ts，它经 hostGatewayEnv 显式剥掉 mandate）；harness 全局设它
+// 本是为 worker 侧计划绑定保真（gatedWorker 的 spawn 自带），这里按 turn-loop-write-chain
+// 同法删除。不影响 gatedWorker 的计划绑定。
 beforeAll(() => {
   delete process.env['DZ_REQUIRE_PLAN'];
   // S1 的宿主冷却缩短到 2s：第 7 轮（应被拦截）与第 8 轮（写提案，应放行）之间真实
