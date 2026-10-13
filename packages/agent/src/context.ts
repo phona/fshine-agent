@@ -24,7 +24,6 @@ import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-code
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification } from './platform-contract';
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
 import type { ProposalCreateCall } from './proposal-runtime';
-import { proposalViaGateway } from './platform-mock';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -795,15 +794,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       let result: TurnDriverResult | undefined;
       const delegationStart = Date.now();
       const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
-      // 网关提案路径开关（W2）：开 = 驱动拦截提案命令并经下方 onCreateProposal 办调平台；
-      // 关 = 不注入回调、驱动不拦截，提案这一步不发生（C 波删掉旧文本路径后，关开关不再
-      // 有"回落到另一条写路径"的语义，只表示本部署不开放写创建）。读一次，本回合的审计
-      // 都用这一份，不存在"驱动说开、宿主说关"的两个真相。
-      const gatewayProposals = proposalViaGateway();
-      // 开关状态每回合留痕（W2 一键回滚的取证）：回滚之后要能回答"这一回合走的是哪条路"。
-      // 与 delegation_span 同一族的结构化日志（每委派一次一行）；拦截发生处另有 tool_calls
-      // 一行（驱动侧 reportProposalInterception，tool = proposal_create）。
-      console.info(JSON.stringify({ event: 'delegation_gateway_state', requestId: ctx.trusted.requestId, taskId, proposalGateway: gatewayProposals }));
       try {
         // 并发闸：worker 会话期间独占下游平台（默认全局串行，见文件顶部说明）
         const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
@@ -828,10 +818,17 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而能力不含
             // write 时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读。
             capabilities: ctx.trusted.capabilities,
-            // 提案创建网关路径（C 波后唯一的提案路径）：只在开关开着时注入。没注入 =
-            // 驱动不拦截，提案这一步不发生。宿主持有办调权：读文件、校验、落意图条目、
-            // 发确认码全在服务端，worker 只提供 payload 路径。
-            ...(gatewayProposals && options.changeIntents ? {
+            // 提案创建网关路径（C 波后唯一的提案路径，B 波那个"提案创建走不走网关"的开关
+            // 已退役）：配了 changeIntents 就恒定注入，驱动于是恒定拦下 worker 的提案创建
+            // 命令。宿主持有办调权：读文件、校验、落意图条目、发确认码全在服务端，worker
+            // 只提供 payload 路径。
+            //
+            // （原先这里还有一道开关门与一行 delegation_gateway_state 结构化日志
+            // ——"这一回合走哪条路"的取证，随开关退役一并删除：只有一条路之后，那条布尔
+            // 恒真、不再回答任何问题。仍要问的"这一回合有没有走到提案步"由更强的事实面
+            // 回答：拦截处必有 tool_calls 一行（tool = proposal_create，含拒绝原因），
+            // 建成时有 proposal_created 事件 + delegation_span 的 proposal_created 结局。）
+            ...(options.changeIntents ? {
               onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
             } : {}),
           });

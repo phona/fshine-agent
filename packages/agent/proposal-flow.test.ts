@@ -1,13 +1,17 @@
 /**
- * 网关提案路径（方案 1 · B 波 B3）：拦截点 + 宿主办调 + 三态分流 + 开关。
+ * 网关提案路径（方案 1 · B 波 B3）：拦截点 + 宿主办调 + 三态分流 + 确认落账四态。
  *
  * 分两半，都不起 driver harness：
- *   · **宿主半**（context.ts 的 onCreateProposal 实现）：用一个"捕获回调"的替身 worker 驱动
- *     直接调到那个回调——capability 复核、平台信封三态、意图条目形状、用户可见文本拼法、
- *     env 纪律（剥 DZ_REQUIRE_PLAN）、开关关着时压根不注入；
+ *   · **宿主半**（context.ts 的 onCreateProposal / confirmProposalViaGateway）：用一个
+ *     "捕获回调"的替身 worker 驱动直接调到那个回调——capability 复核、平台信封三态、意图
+ *     条目形状、用户可见文本拼法、env 纪律（剥 DZ_REQUIRE_PLAN）、确认落账四态；
  *   · **驱动半**（pi-coding-driver 的 beforeToolCall 拦截点）：用真 createPiCodingWorkerSession
  *     + 直接调 beforeToolCall（与 plan-audit 同一手法）——认不认这条命令、payload 路径越界
  *     拦不拦、三态各交还什么。
+ *
+ * B 波那两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）已退役：
+ * 宿主恒定注入回调、驱动恒定拦截、落账后端恒接，本文件因此**不再设任何 env 开关**——
+ * "不设开关也走网关路径"本身就是被钉住的行为（原先"开关关着"的两条用例已改为恒真断言）。
  *
  * 为什么值得单独立一个文件：这条路径是"平台有提案、宿主持确认码"的唯一接缝。任一半失效
  * （不拦 / 拦了不办调 / 办调了不落条目 / 落了条目不给用户码）用户侧的表现都是同一个——
@@ -23,17 +27,16 @@ import type { Model } from '@earendil-works/pi-ai/compat';
 import { createContextTaskRunner, type ConfirmationReply, type ProposalCommitRequest, type ProposalCommitResult } from './src/context';
 import { createPiCodingWorkerSession, type PiCodingWorkerSession } from './src/pi-coding-driver';
 import { messageTextFor } from './src/error-codes';
+import { isCommitEnabled } from './src/platform-mock';
 import type { ProposalCreateCall } from './src/proposal-runtime';
 import type { PlanCliRunner } from './src/plan-runtime';
 import type { OperationProtocols } from './src/operation-labels';
 import type { ChangeIntentRecord, ChangeIntentRepo, DiscoveredTool, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import type { DriverMessage, ProposalCreationOutcome, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver';
-import { PROPOSAL_VIA_GATEWAY_ENV } from './src/platform-mock';
 
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-  delete process.env[PROPOSAL_VIA_GATEWAY_ENV];
 });
 
 /** 平台 protocol 列替身：创建提案 / 提交提案两个角色（A 波新增列的形状）。 */
@@ -127,7 +130,7 @@ function fakeIntents() {
 }
 
 interface HostSetup {
-  /** 直接调到宿主注入的 onCreateProposal（开关关着时为 undefined）。 */
+  /** 直接调到宿主注入的 onCreateProposal（未配 changeIntents 时为 undefined）。 */
   invoke: (call?: ProposalCreateCall) => Promise<ProposalCreationOutcome | null>;
   rows: Map<string, ChangeIntentRecord>;
   /** 办调平台时替身收到的请求（含 env）。 */
@@ -186,16 +189,16 @@ function setupHost(options: {
 }
 
 describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal）', () => {
-  it('开关关着：宿主压根不注入回调（驱动无从拦截，走今天的文本路径）', async () => {
+  it('没有任何开关可设：宿主恒定注入回调（B 波开关已退役，拦截不再有条件）', async () => {
     const host = setupHost({});
-    // 不设 FSHINE_PROPOSAL_VIA_GATEWAY = 默认关
-    expect(await host.invoke()).toBeNull();
-    expect(host.calls).toHaveLength(0);
-    expect(host.rows.size).toBe(0);
+    // 不设任何 env：回调照旧注入——"开关关着就不注入"的旧形态已随那个开关一起删除，
+    // 进程 env 里既没有也不该有它的名字（leak-lint 的 FSHINE_* 登记表同理只减不增）。
+    expect(await host.invoke()).not.toBeNull();
+    expect(host.calls).toHaveLength(1);
+    expect(host.rows.size).toBe(1);
   });
 
-  it('开关开着 + capability 不含 write：当场合成写关闭话术，零平台调用', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
+  it('capability 不含 write：当场合成写关闭话术，零平台调用', async () => {
     const host = setupHost({ capabilities: ['read'] });
 
     const outcome = await host.invoke();
@@ -209,7 +212,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('授权名单限制模式：同样不办调（host-held scope，不因 payload 不透明而放宽）', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({ allowedAccountSetIds: ['as_001'] });
 
     const outcome = await host.invoke();
@@ -220,7 +222,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('completed：办调平台 → 落零业务字段的意图条目 → 用户文本 = 平台 summaryText 原样 + 通用确认行', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({});
 
     const outcome = await host.invoke();
@@ -260,7 +261,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('completed 但平台不给 proposalId/summaryText：按失败处理，不建条目', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({ stdout: envelope('voucher.proposal', 'completed', { status: 'pending' }, null) });
 
     const outcome = await host.invoke();
@@ -271,7 +271,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('needs_input：按平台结构化线索交还，不建条目', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({
       stdout: envelope('voucher.proposal', 'needs_input', { needs: [{ type: 'assistant', name: '幻电设备有限公司' }] }, null),
     });
@@ -286,7 +285,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('failed：交还平台错误码，不建条目', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({
       stdout: envelope('voucher.proposal', 'failed', null, { code: 'RESOLVE_INVALID', message: '账套不存在: 某账套' }),
     });
@@ -301,7 +299,6 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
   });
 
   it('新提案使旧 pending 作废（superseded），会话里只留一个待确认提案', async () => {
-    process.env[PROPOSAL_VIA_GATEWAY_ENV] = '1';
     const host = setupHost({});
     await host.invoke();
     const first = [...host.rows.values()][0]!;
@@ -314,11 +311,10 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
 
 // ── 驱动半：beforeToolCall 的拦截点 ─────────────────────────────────────────
 
-/** 造一个挂了协议表/开关/宿主出口替身的 worker 会话（与 plan-audit 同一手法）。 */
+/** 造一个挂了协议表/宿主出口替身的 worker 会话（与 plan-audit 同一手法）。 */
 async function workerWith(options: {
   requestId: string;
   protocols?: OperationProtocols;
-  proposalViaGateway?: boolean;
   onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
 }): Promise<{ worker: PiCodingWorkerSession; cwd: string }> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'fshine-proposal-flow-'));
@@ -337,7 +333,6 @@ async function workerWith(options: {
     operationArgStyles: new Map(),
     operationSemantics: new Map(),
     operationProtocols: options.protocols ?? PROTOCOLS,
-    proposalViaGateway: options.proposalViaGateway ?? true,
     ...(options.onCreateProposal ? { onCreateProposal: options.onCreateProposal } : {}),
   });
   return { worker, cwd };
@@ -355,7 +350,7 @@ function submit(worker: PiCodingWorkerSession, command: string) {
 describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToolCall）', () => {
   const PAYLOAD = 'tmp/req_gate/proposal.json';
 
-  it('开关开着 + 命中 proposal.create：拦下并办调，交还确定性消息（不含确认码）', async () => {
+  it('命中 proposal.create：拦下并办调，交还确定性消息（不含确认码）', async () => {
     const calls: ProposalCreateCall[] = [];
     const { worker, cwd } = await workerWith({
       requestId: 'req_gate',
@@ -393,19 +388,18 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     worker.session.dispose();
   });
 
-  it('开关关着：整支不出现，命令落回 serve 门（无激活计划 → 门自己的拒绝）', async () => {
+  it('不设任何 env 也拦截：提案命令落不到 serve 门（B 波开关退役后没有"不拦"这一态）', async () => {
     const calls: ProposalCreateCall[] = [];
     const { worker } = await workerWith({
       requestId: 'req_gate',
-      proposalViaGateway: false,
       onCreateProposal: async (call) => { calls.push(call); return { status: 'completed', proposalId: 'p', userText: 'u', workerText: 'w' }; },
     });
 
     const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
 
-    expect(calls).toHaveLength(0);
+    expect(calls).toHaveLength(1);
     expect(verdict?.block).toBe(true);
-    expect(verdict?.reason).not.toContain('PROPOSAL');
+    expect(verdict?.reason).toContain('PROPOSAL CREATED');
     worker.session.dispose();
   });
 
@@ -484,7 +478,6 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       operationArgStyles: new Map(),
       operationSemantics: new Map(),
       operationProtocols: PROTOCOLS,
-      proposalViaGateway: true,
       onCreateProposal: async () => ({ status: 'completed', proposalId: 'p', userText: 'u', workerText: 'w' }),
       serveGateAudit: (event) => { events.push({ tool: event.tool, allowed: event.allowed, reason: event.reason ?? '' }); },
     });
@@ -503,7 +496,8 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
 
 /**
  * 确认步的宿主任意半边替身：种子条目直接塞进 fake 意图库（不走创建路径），于是每条判定
- * （capability 时点复核 / 开关 / 后端缺失 / 成败 / 不可用三态）都能不起平台地钉住。
+ * （capability 时点复核 / 落账放行 / 后端缺失 / 成败 / 不可用三态）都能不起平台地钉住。
+ * `proposalCommitEnabled` 由部署层经 isCommitEnabled() 派生，这里直接注入那一位的真假。
  * 任务仓库也是假的，用来断言 D-082 的终态回写。
  */
 const CONFIRM_CODE = 'D3F2K9';
@@ -546,7 +540,7 @@ function setupConfirm(options: {
   proposalCommitEnabled?: boolean;
   commitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
   result?: Partial<ProposalCommitResult>;
-  /** 不注入落账后端（"开关说接了但执行器没配"的配置故障形态）。 */
+  /** 不注入落账后端（"放行说接了但执行器没配"的配置故障形态）。 */
   withoutRunner?: boolean;
   /** 建一条**不带 proposalId** 的条目 = 迁移前的旧行业（W5 fail-closed 的判据来源）。 */
   legacyRow?: boolean;
@@ -618,10 +612,10 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(setup.taskUpserts).toHaveLength(0);
   });
 
-  it('落账后端未接（开关关着）：确认收到但不写，意图保持 pending（不承诺没接上的事）', async () => {
+  it('落账未放行（isCommitEnabled 假 = 真平台未置 FSHINE_REAL_COMMIT）：确认收到但不写，意图保持 pending', async () => {
     const setup = setupConfirm({
       proposalCommitEnabled: false,
-      commitRunner: async () => { throw new Error('开关关着时不该办调平台'); },
+      commitRunner: async () => { throw new Error('未放行时不该办调平台'); },
     });
 
     const reply = await setup.reply();
@@ -713,5 +707,31 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(setup.commitCalls).toHaveLength(0);
     // 意图归档不回写任务终态：一次写入都没发生，不是执行失败
     expect(setup.taskUpserts).toHaveLength(0);
+  });
+});
+
+// ── 落账放行闸：isCommitEnabled（B 波"落账接不接"开关退役后唯一的分真假处）───────────
+
+describe('落账放行闸 isCommitEnabled：mock 放开 / 真平台须 FSHINE_REAL_COMMIT=1', () => {
+  // 这条是安全判据的机械钉子：确认步的 proposalCommitEnabled 现在由本函数**单独**派生
+  // （assembly / ask.ts 直接调它，不再串第二级接线开关）。它恒假 ⇒ 真平台无 REAL_COMMIT 时
+  // 确认码拿到 confirm_held、零写入；它恒真 ⇒ mock 之下那道 fail-closed 消失。所以这四行
+  // 必须独立成用例，而不是只靠 e2e 间接覆盖。
+  it('mock 之下恒真（写的是假状态，全链路联调放开）', () => {
+    expect(isCommitEnabled({ DZ_EXECUTOR: 'mock' })).toBe(true);
+    // 即使 FSHINE_REAL_COMMIT 显式为空也不影响（mock 不需要它）
+    expect(isCommitEnabled({ DZ_EXECUTOR: 'mock', FSHINE_REAL_COMMIT: '' })).toBe(true);
+  });
+
+  it('真平台缺 FSHINE_REAL_COMMIT 恒假（fail-closed：确认码只到 confirm_held，零写入）', () => {
+    expect(isCommitEnabled({})).toBe(false);
+    expect(isCommitEnabled({ DZ_EXECUTOR: '' })).toBe(false);
+    // 'true'/'yes'/'0' 都不算授权——"模糊真值"正是 fail-open 的入口
+    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: 'true' })).toBe(false);
+    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: '0' })).toBe(false);
+  });
+
+  it('真平台显式 FSHINE_REAL_COMMIT=1 才放行真写', () => {
+    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: '1' })).toBe(true);
   });
 });

@@ -22,11 +22,11 @@
  *      实体来源校验（生产函数 validatePlanEntities，替身显式开启复刻）确定性拒绝 →
  *      needs → continueTaskId 恢复；授权名单内全程不变量零违反。
  *
- * S1/S2 的写链路走**网关提案路径**（`FSHINE_PROPOSAL_VIA_GATEWAY` + `FSHINE_PROPOSAL_COMMIT`
- * 都开，见各 describe 的 beforeAll）：create → 用户文本（平台 summaryText + 通用确认行）→
- * 「确认 码」→ 服务端直调平台 commit → 平台读回校验 → originating 任务终态回写。因此
- * invariant-checker 的 L1 是**硬断言**（D-082：曾经的 expectedOpenTasks 例外已撤）——
- * 落账后还留悬挂任务就是回归。
+ * S1/S2 的写链路走**网关提案路径**（默认部署即完整链：B 波的
+ * `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 两个开关已退役，无需设env）：
+ * create → 用户文本（平台 summaryText + 通用确认行）→ 「确认 码」→ 服务端直调平台 commit →
+ * 平台读回校验 → originating 任务终态回写。因此 invariant-checker 的 L1 是**硬断言**
+ * （D-082：曾经的 expectedOpenTasks 例外已撤）——落账后还留悬挂任务就是回归。
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -159,15 +159,8 @@ function expectClean(report: InvariantReport) {
 // ── S1 故障时刻表 ───────────────────────────────────────────────────────────
 
 describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => {
-  // 写链路走网关提案路径（B 波 B3/B4）：创建与落账两个开关都开。只在本 describe 内生效。
-  beforeAll(() => {
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
-  });
-  afterAll(() => {
-    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    delete process.env['FSHINE_PROPOSAL_COMMIT'];
-  });
+  // 写链路走网关提案路径（B 波 B3/B4）：两个写流程开关已退役，默认部署即完整链，
+  // 不再需要 beforeAll/afterAll 设env。
 
   it('13 轮故障时刻表：歧义→断线→冷却→写链→污染注入，全程安全零违反', async () => {
     /** 污染注入文本：伪 RESULT 行 + 假确认码——都会被关在工具结果层，不得上屏。 */
@@ -353,15 +346,7 @@ describe('离线全链 e2e：长会话不变量（S1 故障时刻表）', () => 
 // ── S2 会话过期边界下的写链 ─────────────────────────────────────────────────
 
 describe('离线全链 e2e：长会话不变量（S2 过期边界 × 写链）', () => {
-  // 同 S1：写链路走网关提案路径（创建 + 落账两个开关都开）。
-  beforeAll(() => {
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
-  });
-  afterAll(() => {
-    delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    delete process.env['FSHINE_PROPOSAL_COMMIT'];
-  });
+  // 同 S1：写链路走网关提案路径，默认部署即完整链（两个开关已退役，无需设env）。
 
   it('pending intent 存在期间转录过期：确认码仍机械匹配、落账与读回留痕一致', async () => {
     const inner = gatedWorker([

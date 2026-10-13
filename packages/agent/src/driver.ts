@@ -61,9 +61,9 @@ export interface TurnDriverInput {
    * 的网关调用后，把 `{operation, payloadPath}` 交给它办调平台，并按返回的三态处理
    * （completed 终结本回合 / needs_input 交还 / failed 交还错误码 / write_closed 合成写关闭话术）。
    *
-   * 只有开关开着才注入（见 platform-mock 的 proposalViaGateway）；没注入 = 驱动不拦截，
-   * 走今天的文本路径。宿主经它办调平台，**不经 worker**：payload 路径由 worker 命令给出，
-   * 但读文件、校验、落意图条目、发确认码全在服务端。
+   * 宿主经它办调平台，**不经 worker**：payload 路径由 worker 命令给出，但读文件、校验、
+   * 落意图条目、发确认码全在服务端。（B 波那个"提案创建走不走网关"的开关退役后恒定注入，
+   * 见 context.ts 的接线处。）
    */
   onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
 }

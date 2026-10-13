@@ -435,6 +435,23 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 
 **`acceptance` 5.x**：写链路 mock 全链仍走网关路径（assembly 的接线未变），本波未改 `scripts/acceptance.ts`（他人所有权）。
 
+### D 波（开关退役，收敛）
+
+C 波后两个 B 波灰度开关各只剩一种行为，按侦察图 R10"先删旧路径、留开关恒开，开关退役单独一批"执行退役：`platform-mock.ts` 删 `proposalViaGateway` / `proposalCommitWired` 两个函数与其 ENV 常量，`pi-coding-driver.ts` 删 `proposalViaGateway` 可选字段与两处注入（拦截恒开），`context.ts` 删 `gatewayProposals` 门与 `delegation_gateway_state` 结构化日志，`assembly.ts` / `ask.ts` 改 `proposalCommitEnabled = isCommitEnabled(env)`（后端恒接），`.env.example` 删两条登记，leak-lint 的 FSHINE_* 登记表只减不增（两条删除）。
+
+**防线**：
+
+| # | 措施 | 机械判据 |
+|---|---|---|
+| X1 | 真平台闸门不削弱 | `isCommitEnabled` 仍是唯一出处且**单独**派生 `proposalCommitEnabled`；新增 `proposal-flow.test.ts` 的 `isCommitEnabled` 语义组（mock ⇒ 真 / 真平台缺 `FSHINE_REAL_COMMIT` ⇒ 假 / 显式置位 ⇒ 真），变异验证（把它临时改恒假）→ 该组 2 条 + `turn-loop-write-chain` 落账链 6 条翻红 |
+| X2 | 不造第二份 env 判定 | 退役后无任何新 env 名字；`grep FSHINE_PROPOSAL` 在 packages/apps/scripts 下为 0（含注释——leak-lint 的"未登记即红"顺带把注释里的复活也抓住） |
+| X3 | mock 保险丝不碰 | `smoke:commit:mock` 的 `DZ_EXECUTOR=mock` 拒跑分支未动，`DZ_EXECUTOR=mock npm run smoke:commit:mock` PASS |
+| X4 | 默认部署行为有钉子 | `turn-loop-write-chain.test.ts` 全部用例**不再设任何 env**，"不设开关也走网关路径"由每条用例直接钉住 |
+
+**行为差异（默认部署 `.env`：`DZ_EXECUTOR=mock`、无两个开关、`capabilities:["read"]`）**：提案命令由"不拦（开关默认关）"变为**恒定拦下**；确认码由"只有开了 `FSHINE_PROPOSAL_COMMIT` 才落账"变为**恒定落账**（mock 下 `isCommitEnabled` 恒真）；真平台无 `FSHINE_REAL_COMMIT` 仍是确定性拒绝 + 零写入（唯一闸门未动）；真平台有 `FSHINE_REAL_COMMIT=1` 行为不变。**覆盖面的实质变化**：confirm_held（确认收到但不写）从此是**真平台专属态**，mock 下不可达——原先靠"关掉落账开关"在 mock 里造出这一态的 e2e 用例改写为"mock 之下落账恒放行"，fail-closed 的判据改由 `proposal-flow.test.ts` 的 `proposalCommitEnabled=false` 一支 + X1 的语义组共同钉住。
+
+**`delegation_gateway_state` 的选择（整行删）**：该行唯一的 payload 是 `proposalGateway` 布尔，布尔退役后恒真，不再回答任何问题；它服务的取证问题（"这一回合走哪条路"）随之只有唯一答案，由代码结构承载而非每回合一个常量字段。仍要问的"这一回合有没有走到提案步"有更强的事实面：拦截处必有 `tool_calls` 一行（`tool: 'proposal_create'`，含拒绝原因），建成时有 `proposal_created` 事件与 `delegation_span` 的 `proposal_created` 结局。删除处在 `context.ts` 的接线注释里留了说明，避免后来者误以为漏删。
+
 ### 上线门（**不属于本次波次验收**，单独清单）
 
 前置条件全满足才允许开真平台写：① D-076 登录页改版修好；② 写 latent 七项（S2/S3/S4/S5③/S7/S9/S10）在 17dz 关闭；③ `FSHINE_REAL_COMMIT` 显式置位并留审批记录；④ 一次真平台手工写留档（dry-run exit1→修→exit0→commit→读回计数 ≥ 提案张数，平台 audit 与宿主 `tool_calls` 两侧对得上）。
@@ -445,6 +462,6 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 
 **顺序**：方案 3 → 方案 2 → 方案 1。方案 3 半天可完；方案 2 穿插做，越早越便宜；方案 1 每波独立交付、独立回滚。
 
-**回滚**：方案 3 = revert 一个 md；方案 2 = revert 一个 refactor commit（golden 保证行为不变，回滚无风险）；方案 1 = A 波 revert 平台命令、B 波关 `FSHINE_PROPOSAL_VIA_GATEWAY` 开关、C 波随 B 波。
+**回滚**：方案 3 = revert 一个 md；方案 2 = revert 一个 refactor commit（golden 保证行为不变，回滚无风险）；方案 1 = A 波 revert 平台命令、B 波关 `FSHINE_PROPOSAL_VIA_GATEWAY` 开关、C 波随 B 波；D 波起那两个开关已退役（只剩一种行为），回滚 = revert D 波 commit，真平台写仍由 `FSHINE_REAL_COMMIT` 把守。
 
 **归因纪律**：任何一步测试红，先 revert 该 commit（F5），不在红上叠补丁。三波不混 commit（F4），否则回归无法归因到波次。

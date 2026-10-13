@@ -26,7 +26,6 @@ import {
   isPlatformMock,
   loadOperationArgSpecs,
   newGateSecret,
-  proposalCommitWired,
   type CandidateExtractor,
   type ContextTaskRunner,
   type TurnDriver,
@@ -220,13 +219,12 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     profileId: '17dz',
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
-      // 新提案落账后端（B 波 B4，C 波后唯一的落账路径）：接线开关（FSHINE_PROPOSAL_COMMIT，
-      // 默认关）∧ 落账放行（isCommitEnabled：mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1）。
-      // 两个条件串成 proposalCommitEnabled——少一个，确认码都只到达"确认收到但不写"，
-      // 不承诺没接上的事。后端本体只在接线时注入：没接线就没有可调用的执行器
-      // （fail-closed 到 confirm_held）。
-      ...(proposalCommitWired(env) ? { proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }) } : {}),
-      proposalCommitEnabled: proposalCommitWired(env) && isCommitEnabled(env),
+      // 提案落账后端（B 波 B4，C 波后唯一的落账路径；B 波那个"落账后端接不接"的开关已
+      // 退役，后端恒接）：是否放行由 isCommitEnabled 单独派生——mock ⇒ 全链路放开；真平台 ⇒
+      // 还须显式 FSHINE_REAL_COMMIT=1，否则确认码只到达"确认收到但不写"（confirm_held），
+      // 零写入。没有第二级接线开关可串，真平台的那道闸因此也少一个能被人忘掉的环节。
+      proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
+      proposalCommitEnabled: isCommitEnabled(env),
     } : {}),
   });
 

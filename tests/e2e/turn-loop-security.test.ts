@@ -305,47 +305,39 @@ describe('离线全链 e2e：D2 allowlist 收窄', () => {
   // 授权名单复核，C 波后唯一的提案入口）。
   it('授权名单限制模式：写提案被确定性拒绝，平台零办调、零待确认意图', async () => {
     const before = totalActualCalls();
-    // 网关提案路径开着：worker 的提案创建命令才会被驱动拦下并交给宿主的
-    // createProposalViaGateway（C 波后唯一的提案入口，名单复核在那里）。
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    try {
-      const { send, assembly } = await boot({
-        main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
-        worker: gatewayProposalWorker({
-          type: 'change_proposal',
-          domain: 'voucher',
-          accountSet: '幻辰财税',
-          period: '202609',
-          contracts: [{ summary: '支付办公费', entries: [] }],
-          summary: { count: 1, debit: 530, credit: 530 },
-        }),
-      });
-      try {
-        // 覆盖 boot 的缺省 principal：allowlist + 单个账套 + 显式 write 能力
-        // （capabilities 不含 write 会先撞 WRITE_NOT_ENABLED 分支，测不到名单分支）
-        await assembly.store.principalScopes.upsert({
-          wecomUserId: 'e2e_user', accountSetIds: ['幻辰财税'], accountSetScope: 'allowlist', enabled: true, capabilities: ['read', 'write'],
-        });
+    // 网关提案路径（C 波后唯一的提案入口，开关已退役）：worker 的提案创建命令被驱动
+    // 恒定拦下并交给宿主的 createProposalViaGateway（名单复核在那里）。
+    const { send, assembly } = await boot({
+      main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
+      worker: gatewayProposalWorker({
+        type: 'change_proposal',
+        domain: 'voucher',
+        accountSet: '幻辰财税',
+        period: '202609',
+        contracts: [{ summary: '支付办公费', entries: [] }],
+        summary: { count: 1, debit: 530, credit: 530 },
+      }),
+    });
+    // 覆盖 boot 的缺省 principal：allowlist + 单个账套 + 显式 write 能力
+    // （capabilities 不含 write 会先撞 WRITE_NOT_ENABLED 分支，测不到名单分支）
+    await assembly.store.principalScopes.upsert({
+      wecomUserId: 'e2e_user', accountSetIds: ['幻辰财税'], accountSetScope: 'allowlist', enabled: true, capabilities: ['read', 'write'],
+    });
 
-        const reply = await send('为幻辰财税录入一笔办公费凭证');
+    const reply = await send('为幻辰财税录入一笔办公费凭证');
 
-        // 确定性拒绝话术（context.ts createProposalViaGateway 的名单分支），无第二份手抄本可漂移
-        expect(reply).toContain('当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。');
-        // 提案创建零办调：名单复核排在办调平台之前（capability → 名单 → 办调），平台从未
-        // 被邀请建提案。多出来的那一笔是 worker 提案前的检索（只读，与写路径无关）。
-        expect(totalActualCalls()).toBe(before + 1);
-        // 提案没有落成任何待确认意图
-        const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
-        const sessionId = events[0]?.sessionId ?? '';
-        expect(sessionId).not.toBe('');
-        expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
-        expectCleanReply(reply);
-      } finally {
-        await assembly.close();
-      }
-    } finally {
-      delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    }
+    // 确定性拒绝话术（context.ts createProposalViaGateway 的名单分支），无第二份手抄本可漂移
+    expect(reply).toContain('当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。');
+    // 提案创建零办调：名单复核排在办调平台之前（capability → 名单 → 办调），平台从未
+    // 被邀请建提案。多出来的那一笔是 worker 提案前的检索（只读，与写路径无关）。
+    expect(totalActualCalls()).toBe(before + 1);
+    // 提案没有落成任何待确认意图
+    const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
+    const sessionId = events[0]?.sessionId ?? '';
+    expect(sessionId).not.toBe('');
+    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+    expectCleanReply(reply);
+    await assembly.close();
   });
 });
 
@@ -378,46 +370,39 @@ describe('离线全链 e2e：D3 无 write 能力三入口', () => {
 
   it('入口② 写提案：capability 检查拒，用户可见文案含同一句 WRITE_NOT_ENABLED', async () => {
     const before = totalActualCalls();
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    try {
-      const { send, assembly } = await boot({
-        main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
-        // 网关提案路径：worker 把 payload 写进 scratchDir 再发提案创建命令，驱动拦下后交给
-        // 宿主的 createProposalViaGateway——capability 复核就在那里（C 波后唯一的提案入口）。
-        worker: gatewayProposalWorker({
-          type: 'change_proposal',
-          domain: 'voucher',
-          accountSet: '幻辰财税',
-          period: '202609',
-          contracts: [{ summary: '支付办公费', entries: [] }],
-          summary: { count: 1, debit: 530, credit: 530 },
-        }),
-      });
-      try {
-        await assembly.store.principalScopes.upsert({
-          wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
-        });
+    const { send, assembly } = await boot({
+      main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
+      // 网关提案路径（C 波后唯一的提案入口，开关已退役）：worker 把 payload 写进 scratchDir
+      // 再发提案创建命令，驱动恒定拦下后交给宿主的 createProposalViaGateway——capability
+      // 复核就在那里。
+      worker: gatewayProposalWorker({
+        type: 'change_proposal',
+        domain: 'voucher',
+        accountSet: '幻辰财税',
+        period: '202609',
+        contracts: [{ summary: '支付办公费', entries: [] }],
+        summary: { count: 1, debit: 530, credit: 530 },
+      }),
+    });
+    await assembly.store.principalScopes.upsert({
+      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
+    });
 
-        const reply = await send('为幻辰财税录入一笔办公费凭证');
+    const reply = await send('为幻辰财税录入一笔办公费凭证');
 
-        // 同一句话术（error-codes.ts 唯一来源）：提案路径在能力不成立时当场合成它，且**不带**
-        // 旧文本路径那句"已收到录入提案，但"前缀（那条路已删）——话术本身就是终稿。
-        expect(reply).toContain(messageTextFor('WRITE_NOT_ENABLED'));
-        expect(reply).not.toContain('已收到录入提案');
-        // 提案创建零办调、零待确认意图。多出来的那一笔是 worker 提案前的检索（只读）——
-        // 能力复核就发生在那一笔之后、办调平台之前。
-        expect(totalActualCalls()).toBe(before + 1);
-        const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
-        const sessionId = events[0]?.sessionId ?? '';
-        expect(sessionId).not.toBe('');
-        expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
-        expectCleanReply(reply);
-      } finally {
-        await assembly.close();
-      }
-    } finally {
-      delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    }
+    // 同一句话术（error-codes.ts 唯一来源）：提案路径在能力不成立时当场合成它，且**不带**
+    // 旧文本路径那句"已收到录入提案，但"前缀（那条路已删）——话术本身就是终稿。
+    expect(reply).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    expect(reply).not.toContain('已收到录入提案');
+    // 提案创建零办调、零待确认意图。多出来的那一笔是 worker 提案前的检索（只读）——
+    // 能力复核就发生在那一笔之后、办调平台之前。
+    expect(totalActualCalls()).toBe(before + 1);
+    const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
+    const sessionId = events[0]?.sessionId ?? '';
+    expect(sessionId).not.toBe('');
+    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+    expectCleanReply(reply);
+    await assembly.close();
   });
 
   // 入口③ 覆盖缺口（tripwire）：matchConfirmation 的确认路径（context.ts 的 confirm 分支）
@@ -425,13 +410,10 @@ describe('离线全链 e2e：D3 无 write 能力三入口', () => {
   //
   // **D-080 已修（方案 1 · B 波 B4）**：确认步按**确认时点**复核 capability——"提案成立后
   // 收回写权限"正是这个缺口的形状，现在它拿到确定性拒绝而不是一次落账。本用例即翻转后的
-  // 断言：开网关路径真建一个提案（写能力开着）→ 收回 write → 确认码必被拒、零写入、提案
+  // 断言：走网关路径真建一个提案（写能力开着）→ 收回 write → 确认码必被拒、零写入、提案
   // 在平台侧仍然有效（意图保持 pending，用户修好权限或作废后仍可继续）。
   it('入口③ D-080 翻转：提案成立后收回 write，确认时点复核必被拒、零写入、意图保持 pending', async () => {
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    process.env['FSHINE_PROPOSAL_COMMIT'] = '1';
-    try {
-      const proposal = {
+    const proposal = {
         type: 'change_proposal',
         domain: 'voucher',
         accountSet: '幻辰财税',
@@ -446,49 +428,42 @@ describe('离线全链 e2e：D3 无 write 能力三入口', () => {
         }],
         summary: { count: 1, debit: 800, credit: 800 },
       };
-      const { send, assembly } = await boot({
-        main: mainDriver([
-          { kind: 'delegate', request: '录入一笔 9 月凭证' },
-          { kind: 'conversation', text: '模型自由回答：我没有这个确认码的记录，未执行任何操作。' },
-        ]),
-        worker: gatewayProposalWorker(proposal),
-      });
-      try {
-        // 先开写：提案真的建起来（平台侧 pending），确认码发到用户手里
-        await assembly.store.principalScopes.upsert({
-          wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read', 'write'],
-        });
-        const preview = await send('录入一笔 9 月凭证');
-        const code = preview.match(/确认\s*([A-Z0-9]{6})/)?.[1];
-        expect(code).toBeTruthy();
-        const pending = await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', 'wecom:e2e_user:e2e_user');
-        expect(pending?.status).toBe('pending');
-        expect(pending?.proposalId).toMatch(/^prop_/);
-        const callsAfterPreview = totalActualCalls();
+    const { send, assembly } = await boot({
+      main: mainDriver([
+        { kind: 'delegate', request: '录入一笔 9 月凭证' },
+        { kind: 'conversation', text: '模型自由回答：我没有这个确认码的记录，未执行任何操作。' },
+      ]),
+      worker: gatewayProposalWorker(proposal),
+    });
+    // 先开写：提案真的建起来（平台侧 pending），确认码发到用户手里
+    await assembly.store.principalScopes.upsert({
+      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read', 'write'],
+    });
+    const preview = await send('录入一笔 9 月凭证');
+    const code = preview.match(/确认\s*([A-Z0-9]{6})/)?.[1];
+    expect(code).toBeTruthy();
+    const pending = await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', 'wecom:e2e_user:e2e_user');
+    expect(pending?.status).toBe('pending');
+    expect(pending?.proposalId).toMatch(/^prop_/);
+    const callsAfterPreview = totalActualCalls();
 
-        // 提案成立之后收回写权限（只读 principal）——缺口形状本身
-        await assembly.store.principalScopes.upsert({
-          wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
-        });
+    // 提案成立之后收回写权限（只读 principal）——缺口形状本身
+    await assembly.store.principalScopes.upsert({
+      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
+    });
 
-        const reply = await send(`确认 ${code}`);
+    const reply = await send(`确认 ${code}`);
 
-        // 确定性拒绝：同一句 WRITE_NOT_ENABLED（error-codes.ts 唯一来源），且不是落账结局
-        expect(reply).toContain(messageTextFor('WRITE_NOT_ENABLED'));
-        expect(reply).not.toMatch(/已完成|执行失败|已执行/);
-        // 零写入：确认这一步一次平台调用都没有（办调发生在拒绝之后，走不到）
-        expect(totalActualCalls()).toBe(callsAfterPreview);
-        // 提案在平台侧仍然有效：意图保持 pending（不借"过期"说谎）
-        const record = await assembly.store.changeIntents.get(pending!.intentId);
-        expect(record?.status).toBe('pending');
-        expectCleanReply(reply);
-      } finally {
-        await assembly.close();
-      }
-    } finally {
-      delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-      delete process.env['FSHINE_PROPOSAL_COMMIT'];
-    }
+    // 确定性拒绝：同一句 WRITE_NOT_ENABLED（error-codes.ts 唯一来源），且不是落账结局
+    expect(reply).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    expect(reply).not.toMatch(/已完成|执行失败|已执行/);
+    // 零写入：确认这一步一次平台调用都没有（办调发生在拒绝之后，走不到）
+    expect(totalActualCalls()).toBe(callsAfterPreview);
+    // 提案在平台侧仍然有效：意图保持 pending（不借"过期"说谎）
+    const record = await assembly.store.changeIntents.get(pending!.intentId);
+    expect(record?.status).toBe('pending');
+    expectCleanReply(reply);
+    await assembly.close();
   });
 });
 

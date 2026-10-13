@@ -18,7 +18,6 @@ import {
   isCommitEnabled,
   isPlatformMock,
   newGateSecret,
-  proposalCommitWired,
 } from '@fshine/agent';
 import { createProposalCommitRunner } from '../apps/server/proposal-commit';
 import { createPlanConfirmationWiring } from '../apps/server/plan-confirmation-route';
@@ -89,10 +88,10 @@ async function main(): Promise<void> {
     profileId: '17dz',
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
-      // 与生产装配同一份接线：落账后端只在 FSHINE_PROPOSAL_COMMIT 开着时注入，
-      // proposalCommitEnabled = 接线 ∧ 放行（mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1）。
-      ...(proposalCommitWired(process.env) ? { proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }) } : {}),
-      proposalCommitEnabled: proposalCommitWired(process.env) && isCommitEnabled(process.env),
+      // 与生产装配同一份接线（assembly.ts）：落账后端恒接，放行由 isCommitEnabled 单独
+      // 派生（mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1，否则确认码只到 confirm_held）。
+      proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
+      proposalCommitEnabled: isCommitEnabled(process.env),
     } : {}),
   });
   const runtime = createTaxAgentRuntime({

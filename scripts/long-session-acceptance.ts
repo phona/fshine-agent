@@ -71,7 +71,8 @@ async function main(): Promise<void> {
     workerDriver: createPiCodingTurnDriver({ env: process.env }),
     profileId: '17dz',
     // 长会话实测不写任何数据：落账后端不注入（proposalCommitEnabled 缺省 false），
-    // 确认码只会到达"确认收到但不写"。
+    // 确认码只会到达"确认收到但不写"。（这是本脚本刻意选的只读形态，与开关无关——
+    // B 波那个"落账后端接不接"的开关已退役，落账放行只由 isCommitEnabled 派生。）
     changeIntents: store.changeIntents,
   });
   const runtime = createTaxAgentRuntime({

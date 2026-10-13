@@ -71,14 +71,10 @@ export type { CandidateExtractor } from './memory-consolidator';
 export {
   MOCK_EXECUTOR_ENV,
   MOCK_STATE_ENV,
-  PROPOSAL_COMMIT_ENV,
-  PROPOSAL_VIA_GATEWAY_ENV,
   REAL_COMMIT_ENV,
   ensureMockStatePath,
   isCommitEnabled,
   isPlatformMock,
-  proposalCommitWired,
-  proposalViaGateway,
 } from './platform-mock';
 export {
   activatePendingPlan,

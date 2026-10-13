@@ -24,7 +24,6 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { proposalViaGateway } from './platform-mock';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 
@@ -265,11 +264,6 @@ export interface PiCodingTurnDriverOptions {
   planCliRunner?: PlanCliRunner;
   planActivationSecret?: string;
   /**
-   * 提案创建网关路径开关（W2；测试替身注入点）。缺省经 options.env 读
-   * `FSHINE_PROPOSAL_VIA_GATEWAY`（默认关 = 不拦截，走今天的文本路径）。
-   */
-  proposalViaGateway?: boolean;
-  /**
    * A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
    * 判据见 platformExecutorBypassed；调用方只负责留痕（审计/日志），不得据此改回合结果。
    */
@@ -327,11 +321,6 @@ export interface PiCodingWorkerSessionOptions {
    * 缺省 = 不拦截（fail-closed 到"宿主不认这条路"，门与平台照旧裁决）。
    */
   onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
-  /**
-   * 开关状态（W2，宿主注入）：false = 本会话完全不拦截提案命令（今天的文本路径）。
-   * 缺省读进程 env 的 `FSHINE_PROPOSAL_VIA_GATEWAY`（默认关）。
-   */
-  proposalViaGateway?: boolean;
   /**
    * 提案创建拦截的结局出口（驱动侧 latch 用，与 onPendingPlan 同族）：completed /
    * write_closed 时调用，驱动据此在结果时刻用宿主持有的文本终结本回合。
@@ -535,9 +524,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
-        // 协议角色表（提案创建拦截的机械来源）与开关状态、宿主出口一起进会话。
+        // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
-        proposalViaGateway: options.proposalViaGateway ?? proposalViaGateway(options.env),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
         capabilities: input.capabilities,
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
@@ -867,8 +855,6 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
   // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
   const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd));
-  // 开关状态（W2）：关 = 本会话完全不拦提案命令，走今天的文本路径。缺省读进程 env。
-  const proposalGateway = options.proposalViaGateway ?? proposalViaGateway();
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
@@ -1000,11 +986,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 位置：计划解析之后、gate() 之前。为什么必须在 gate 之前：这条路径**提前 return**，
       // 若落进 gate，worker 的网关调用就真的打到平台——平台会创建提案，而宿主持有的意图
       // 条目、确认码、用户可见摘要全都不存在，用户拿不到确认码（A 波标定的缺口形状）。
-      //
-      // 开关关着时整支不出现（proposalGateway）：影子期两条路都在，关 = 回今天的文本路径。
-      const proposalCall = proposalGateway
-        ? parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols)
-        : null;
+      // B 波那个"提案创建走不走网关"的开关曾让整支可缺席（关 = 走遗留文本路径）；C 波删掉
+      // 那条路后开关退役，拦截恒开。
+      const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols);
       if (proposalCall) return decideProposalCreation(proposalCall);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });

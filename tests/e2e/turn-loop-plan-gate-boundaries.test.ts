@@ -329,46 +329,38 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
 
   it('A5 闸② 提案路径 capability 拒：无 write 能力的 principal 走到提案步也被确定性拒绝', async () => {
     const before = totalActualCalls();
-    // 网关提案路径开着：worker 的提案创建命令才会被驱动拦下，交到宿主的
-    // createProposalViaGateway 做 capability 复核（C 波后唯一的提案入口）。
-    process.env['FSHINE_PROPOSAL_VIA_GATEWAY'] = '1';
-    try {
-      const { send, assembly } = await boot({
-        main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
-        worker: gatewayProposalWorker({
-          type: 'change_proposal',
-          domain: 'voucher',
-          accountSet: '幻辰财税',
-          period: '202609',
-          contracts: [{ voucherDate: '2026-09-30', entries: [{ subject: '660203', debit: 100, credit: 0 }] }],
-          summary: { count: 1, debit: 100, credit: 100 },
-        }),
-      });
-      try {
-        await assembly.store.principalScopes.upsert({
-          wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
-        });
+    // 网关提案路径（C 波后唯一的提案入口，开关已退役）：worker 的提案创建命令被驱动
+    // 恒定拦下，交到宿主的 createProposalViaGateway 做 capability 复核。
+    const { send, assembly } = await boot({
+      main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
+      worker: gatewayProposalWorker({
+        type: 'change_proposal',
+        domain: 'voucher',
+        accountSet: '幻辰财税',
+        period: '202609',
+        contracts: [{ voucherDate: '2026-09-30', entries: [{ subject: '660203', debit: 100, credit: 0 }] }],
+        summary: { count: 1, debit: 100, credit: 100 },
+      }),
+    });
+    await assembly.store.principalScopes.upsert({
+      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
+    });
 
-        const reply = await send('帮我录入一笔办公费凭证');
+    const reply = await send('帮我录入一笔办公费凭证');
 
-        // 终稿 == 码表唯一来源的写关闭话术（一字不差）。C 波前这一入口是
-        // "已收到录入提案，但" + 同一句（finalizeProposal 的收件确认）；删掉旧文本路径后
-        // 宿主不再"收件"，话术本身就是终稿。
-        expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-        // 提案创建零办调（多出来的一笔是 worker 提案前的只读检索）、零待确认意图。
-        // 注意不再断言"平台侧无计划"：网关夹具那一笔检索自己就是一条**只读**计划，
-        // 平台计划门照常放行它——闸② 判的是提案这一步，不是计划门（那是闸③）。
-        expect(totalActualCalls()).toBe(before + 1);
-        const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
-        const sessionId = events[0]?.sessionId ?? '';
-        expect(sessionId).not.toBe('');
-        expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
-      } finally {
-        await assembly.close();
-      }
-    } finally {
-      delete process.env['FSHINE_PROPOSAL_VIA_GATEWAY'];
-    }
+    // 终稿 == 码表唯一来源的写关闭话术（一字不差）。C 波前这一入口是
+    // "已收到录入提案，但" + 同一句（finalizeProposal 的收件确认）；删掉旧文本路径后
+    // 宿主不再"收件"，话术本身就是终稿。
+    expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
+    // 提案创建零办调（多出来的一笔是 worker 提案前的只读检索）、零待确认意图。
+    // 注意不再断言"平台侧无计划"：网关夹具那一笔检索自己就是一条**只读**计划，
+    // 平台计划门照常放行它——闸② 判的是提案这一步，不是计划门（那是闸③）。
+    expect(totalActualCalls()).toBe(before + 1);
+    const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
+    const sessionId = events[0]?.sessionId ?? '';
+    expect(sessionId).not.toBe('');
+    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+    await assembly.close();
   });
 
   it('A5 闸③ 平台计划门兜底：宿主前置扫描放行后，平台以 PLAN_OPERATION_NOT_READ_ONLY 拒绝', async () => {
