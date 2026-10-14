@@ -21,6 +21,8 @@ import { loadConfig } from '@fshine/core';
 import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
+import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
+import type { PlanRejectRow } from './plan-reject-report';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
@@ -152,6 +154,15 @@ interface CaseRecord {
   progressSteps: string[];
   /** 计划通知帧原文（生产 third argument，与 e2e harness 的 Turn.notices 同源）。 */
   notices: string[];
+  /**
+   * 本回合的计划门裁决明细（D-087）：审计库 `tool_calls` 里 `serve_gate:plan_submit` 的每一行。
+   *
+   * 为什么必须有这一节：实体越权 / PLAN_NOT_PLANNABLE / DECLINED_PLAN_LIMIT 三类拒绝在宿主侧
+   * **全静默**——它们只作为 tool_result 回给 worker，唯一的痕迹就是这几行。少了它，报告里只剩
+   * worker 终稿说"操作申请已用尽"，真正的拒绝原因要手工查 sqlite 才看得见（2026-10-13 定位
+   * ENTITY_OUT_OF_SCOPE 假拒时的实测成本）。
+   */
+  planRejects: PlanRejectRow[];
   reply: string;
   durationMs: number;
   leakFlags: string[];
@@ -367,7 +378,7 @@ async function main(): Promise<void> {
       if (!code) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
-          subagentFinalText: null, progressSteps: [], notices: [],
+          subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.confirmOf} 的回复未含确认码,无法构造确认)`,
           durationMs: 0, leakFlags: [],
         });
@@ -381,7 +392,7 @@ async function main(): Promise<void> {
       if (!choice) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
-          subagentFinalText: null, progressSteps: [], notices: [],
+          subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.followUpOf} 未产生编号候选,无法构造追问)`,
           durationMs: 0, leakFlags: [],
         });
@@ -413,6 +424,10 @@ async function main(): Promise<void> {
     repliesById.set(spec.id, replyTextStr);
 
     const request = await store.requests.findByWecomMessageId(message.messageId);
+    // 计划门裁决明细（D-087）：reportPlanSubmission 的 insert 函数体没有 await，行在调用时
+    // 就同步落库，所以回合返回后立刻查得到（不必等 drainBackgroundPersistence）。
+    // requestId 缺席（被拒的回合可能一条事件都不留）时没有任何 tool_calls 行可读。
+    const planRejects = request?.requestId ? planRejectsOf(auditDb, request.requestId) : [];
     const sessionKey = `wecom:${user}:${spec.conv}`;
     const taskRow = auditDb.prepare(
       'SELECT task_id, worker_messages FROM platform_tasks WHERE parent_session_id = ? ORDER BY rowid DESC LIMIT 1',
@@ -427,6 +442,7 @@ async function main(): Promise<void> {
       subagentFinalText: taskRow ? lastAssistantText(JSON.parse(taskRow.worker_messages)) : null,
       progressSteps: steps,
       notices: [...notices],
+      planRejects,
       reply: replyTextStr,
       durationMs,
       leakFlags: leakCheck(replyTextStr),
@@ -437,6 +453,10 @@ async function main(): Promise<void> {
       delegated: steps.includes(PLAN_SUBMIT_STEP) || Boolean(taskRow),
       // 计划通知帧条数：0 条 + 回复停在计划门 = 保真缺口回来了（onNotice 没接上）
       noticeCount: notices.length,
+      // 计划门裁决条数与被挡回来的次数（D-087）。0 条不再是信号——只读回合本来就没有计划门；
+      // declined > 0 而回复里看不出原因，才是"该去读报告的计划门拒绝明细节"的信号。
+      planRejects: planRejects.length,
+      planDeclines: planRejects.filter((row) => classifyPlanReject(row.reason) === 'declined').length,
     }));
   }
 
@@ -464,6 +484,11 @@ async function main(): Promise<void> {
       // 且 handler 侧会 fail-closed 挂起——所以这一行同时是保真缺口是否复发的信号。
       ...r.notices.map((notice, index) => `- 计划通知${r.notices.length > 1 ? `#${index + 1}` : ''}:${notice}`),
       ...(r.notices.length === 0 ? ['- 计划通知:无'] : []),
+      // 计划门裁决：汇总一行 + 明细若干行（D-087）。三类静默拒绝（实体越权 /
+      // PLAN_NOT_PLANNABLE / DECLINED_PLAN_LIMIT）在宿主侧没有任何 console 事件，唯一的
+      // 痕迹就是 tool_calls 里这几行——报告不带它，定位成本就是"手工查 sqlite"。
+      renderPlanRejectSummary(r.planRejects),
+      ...renderPlanRejectLines(r.planRejects),
       `- 耗时:${(r.durationMs / 1000).toFixed(1)}s`,
       `- 泄漏检查:${r.leakFlags.length ? r.leakFlags.join(';') : '通过'}`,
       '',

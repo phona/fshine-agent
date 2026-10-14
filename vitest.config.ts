@@ -90,7 +90,10 @@ export default defineConfig({
         resolve: { alias: ALIAS },
         test: {
           name: 'unit',
-          include: ['packages/**/*.test.ts', 'apps/**/*.test.ts'],
+          // `scripts/**` 是 D-087 补的：验收夹具与运维脚本自此进测试覆盖面。此前这里只有
+          // packages/apps，而 leak-lint 反而扫 scripts/——两边覆盖不对称（D-084 残留 b
+          // 的一半；tsconfig 的 include 仍不含 scripts/，那另一半不混在本波里）。
+          include: ['packages/**/*.test.ts', 'apps/**/*.test.ts', 'scripts/**/*.test.ts'],
           ...SHARED,
         },
       },
