@@ -192,10 +192,18 @@ export function platformAuthFailureFromResponses(
   return undefined;
 }
 
-/** 转录消息的结构判据（不依赖具体驱动类型：只要 role 与 content 两个键）。 */
-interface TranscriptMessageLike {
+/**
+ * 转录消息的结构判据（不依赖具体驱动类型：只要 role / content / toolCallId 三个键）。
+ *
+ * `toolCallId` 在这里是因为有一道判据必须按**身份**而不是按内容或错误标志认领一条
+ * tool_result：宿主自己拦下的那一跳，SDK 会把拒绝理由合成一条 `isError:true` 的
+ * tool_result 落进转录，与平台 CLI exit 3 的真错误信封在这一列上完全同形——只有 id
+ * 能把两者分开（见 platform-entities.ts）。
+ */
+export interface TranscriptMessageLike {
   role?: unknown;
   content?: unknown;
+  toolCallId?: unknown;
 }
 
 /**

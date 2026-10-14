@@ -14,7 +14,7 @@ import {
   SessionManager,
   createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
@@ -25,6 +25,7 @@ import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
+import { transcriptPlatformResponses } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 
 /**
@@ -859,6 +860,18 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
   const needsClues: SubagentNeeds[] = [];
+  /**
+   * 本会话内被宿主拦下的 toolCallId（D-086）。SDK 把 `{block:true,reason}` 变成一条
+   * `isError:true` 的 tool_result 原样落进转录，而那条正文是**宿主写的拒绝理由**、可能逐字
+   * 带着 worker 刚提交的越权 token。把它收进 haystack，"先故意提一个越权实体、拿到拒绝理由、
+   * 再原样提一次"就能过实体门（2026-10-14 实证：改前这一跳确实放行）。
+   *
+   * 按**身份**记，不按 `isError`（平台 CLI exit 3 的真错误信封同样是 isError:true，按它过滤
+   * 会把真证据一起删掉、制造新假拒）、也不按文案前缀（那是从结果原文嗅探语义，且名单要跟着
+   * 每个新裁决增长）。beforeToolCall 抛异常的那一跳同样记：SDK 把异常消息也转成 tool_result，
+   * 正文一样可能带 token。
+   */
+  const blockedToolCallIds = new Set<string>();
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: options.agentDir,
@@ -946,7 +959,15 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     });
   }
 
-  session.agent.beforeToolCall = async (ctx) => {
+  /**
+   * 宿主对每一跳工具调用的裁决（原 beforeToolCall 函数体，一字未动地搬进来）。
+   *
+   * 为什么包一层而不是把"记下被拦身份"逐个 return 前补：这个函数有 8 个 return 点
+   * （计划形状不合法 / 计划六种裁决 / 提案三态 / 落回 gate），漏挂任何一处就是静默的假放行。
+   * 与 reportPlanSubmission 用 try/finally 是同一条理由——把"离开本块必记账"变成结构事实，
+   * 新增裁决出口时不需要记得再补一次。
+   */
+  async function decideToolCall(ctx: BeforeToolCallContext): Promise<ServeGateVerdict | undefined> {
     const args = (typeof ctx.args === 'object' && ctx.args !== null
       ? ctx.args
       : ctx.toolCall.arguments) as Record<string, unknown>;
@@ -992,6 +1013,22 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       if (proposalCall) return decideProposalCreation(proposalCall);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });
+  }
+
+  session.agent.beforeToolCall = async (ctx) => {
+    try {
+      const verdict = await decideToolCall(ctx);
+      // D-086：这一跳被宿主拦下 → SDK 会用我们的 reason 合成一条 isError tool_result 落进
+      // 转录。记下身份，收集平台响应时按 id 整条排除。理由仍逐字到 worker 眼前（它本来就是
+      // worker 的工具输出），这里只收回"把它当实体证据"这一项。
+      if (verdict?.block) blockedToolCallIds.add(ctx.toolCall.id);
+      return verdict;
+    } catch (error) {
+      // 抛异常的那一跳同样被 SDK 转成 tool_result（正文 = 异常消息，agent-loop.js），
+      // 一样按身份排除——否则异常消息里的 token 会留在 haystack 里。
+      blockedToolCallIds.add(ctx.toolCall.id);
+      throw error;
+    }
   };
 
   /**
@@ -1108,6 +1145,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 查询拿到的唯一候选名就逐字住在这里面，宿主不需要懂业务就能放行"合法解析出来
       // 的实体"。第四来源（sessionEntities）由宿主在委派时注入，见 runtime.ts。
       //
+      // **宿主自己拦下的那一跳不算平台响应**（D-086）：它的正文是宿主写的拒绝理由，逐字带
+      // 着 worker 刚提交的越权 token。按 toolCallId 身份排除（见 platform-entities.ts）——
+      // 不按 isError（平台 CLI exit 3 的真错误信封同形），也不按文案前缀（嗅探）。
+      //
       // 第三个参数（产物路径豁免，2026-10-13 实测假拒修复）：worker 把 payload 写进
       // 本轮 scratch 后按路径排进计划，该路径不是领域实体、不在任何来源里，逐字包含
       // 必然假拒，重试还会撞 DECLINED_PLAN_LIMIT 终局。判据与提案 payload 边界检查
@@ -1122,7 +1163,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         ...options.entitySources,
         platformResponses: [
           ...(options.entitySources.platformResponses ?? []),
-          ...collectPlatformResponses(session.agent.state.messages),
+          ...transcriptPlatformResponses(session.agent.state.messages, blockedToolCallIds),
         ],
       }, artifactBoundary);
       if (scopeError) {
@@ -1229,21 +1270,6 @@ async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<Co
   const model = runtime.getModel('llm', modelId);
   if (!model) throw new Error(`pi-coding-agent Worker 模型注册失败:${modelId}`);
   return { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) };
-}
-
-/**
- * 本任务迄今的平台响应：会话转录里的 tool_result 正文。它们既是"上一轮查到了什么"的
- * 载体，也是计划实体来源校验的第三个来源——执行层调目录查询拿到的唯一候选名逐字来自
- * 这里，宿主因此不需要懂业务就能判"这是合法解析出来的"。
- */
-function collectPlatformResponses(messages: readonly AgentMessage[]): string[] {
-  const responses: string[] = [];
-  for (const message of messages) {
-    if ((message as { role?: string }).role !== 'toolResult') continue;
-    const text = textFromContent((message as { content?: unknown }).content);
-    if (text.trim()) responses.push(text);
-  }
-  return responses;
 }
 
 /**
