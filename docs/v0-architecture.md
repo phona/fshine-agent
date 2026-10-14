@@ -59,6 +59,8 @@ fshine-agent 是**编排运行时**，不是财税系统。它把用户的自然
 
 **第 9 条不需要领域知识**：宿主不需要知道"幻辰财税"是不是账套，只校验实体的可信来源。执行层调目录查询拿到的规范名可以来自平台响应；会话实体须有用户先前确立的记录。来源校验不代替执行层的名称解析。
 
+**「平台响应」的边界（2026-10-14 标定复审明确）**：它 = 本任务迄今**全部** tool_result，两个通道——转录里现存的 + 宿主在 `afterToolCall` 上记的账本（SDK 的自动压缩会把早期 tool_result 整条摘出转录，只读转录到不了"迄今全部"）。两条排除：① **宿主自己写的拒绝理由不算平台响应**——它逐字带 offending token，算进去就等于"先故意提一个越权实体、再原样提一次"能过门（按 `toolCallId` 身份排除，不按 `isError`、不按文案前缀：平台 CLI exit 3 的真错误信封与宿主拦截在 `isError` 上完全同形）；② 单条按**保尾**截断（SDK bash 工具保尾弃头、`RESULT` 信封在末行，读头只会得到既不是开头也没有信封的中段）。条数不设上限——上限由任务自己的形状给（平台预算门 + 执行超时）。信封 `data` 的结构化叶值作为**附加**来源，只增覆盖。详见 [architecture-laws.md](architecture-laws.md) 的实体门标定复审。
+
 **写路径的边界（保险箱条款）**：写提案在编排层是**不透明 payload**——提案结构、域校验、确认摘要文案、commit 执行与读回，全归执行层；编排层只持一套**通用确认状态机**（确认码 / 有效期 / principal / 计划版本绑定，均不可由模型填写）。§2 第 9 条的领域无关包含校验可留编排层；一旦要懂「voucher 必须带账套 + 期间」这类口径，就是越界——那归执行层。判据见 [architecture-laws.md](architecture-laws.md) L4。
 
 ---
@@ -222,7 +224,7 @@ Main Agent 申报 delegate
 |---|---|---|
 | 写路径 | 已落地（C 波收口，2026-10-13）：提案载荷全程不住编排层——`ChangeIntentRecord` 只剩取物单 `proposalId` + 通用确认字段；宿主不解析 payload、不渲染业务摘要（用户文本 = 平台 `summaryText` 原样 + 宿主通用状态行）。旧文本路径（worker 贴提案 JSON → `extractChangeProposal` → 服务端 dry-run 预检 → 按文件路径落账）与 `apps/server/commit.ts` 已整文件删除；B 波那两个灰度开关（管提案创建、管落账接线）已随 D 波退役（2026-10-14）——宿主恒定拦截提案命令、落账后端恒接，`proposalCommitEnabled` 由 `isCommitEnabled` 单独派生。残留：① SQLite 里的五列历史列只为旧库 NOT NULL 兼容保留（W5 fail-closed：不带 `proposalId` 的旧行业一律按过期处理） | 同左；下一步 = 结构化调用协议替代现有 env 级接线（判据不变：走查「新增 payroll 写路径 fshine 改动 = 0」+ 写 e2e 全绿 + §17 七项有守卫，见 [architecture-laws.md](architecture-laws.md) L4） |
 | 申报契约 | 已瘦身：`route_current_turn` 3 字段（kind/request/continueTaskId），零业务知识；申报层只剩结构校验，范围守卫靠计划层包含校验（§2 第 9 条） | 同左（已达成） |
-| 领域判别 | `validatePlanEntities` 已做通用来源校验；但名称重新检索等执行规则仍在 fshine worker 提示词和业务 skill 中，与 17dz serve skill 重复 | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
+| 领域判别 | `validatePlanEntities` 已做通用来源校验。**2026-10-14 标定复审后**：覆盖 = 本任务迄今全部平台响应（转录 ∪ 宿主账本双通道，治 SDK 自动压缩）、单条保尾、宿主拒绝理由按身份排除、信封 `data` 叶值作附加来源；包含判据仍是逐字包含，防幻觉功能不变。剩余差距：名称重新检索等执行规则仍在 fshine worker 提示词和业务 skill 中，与 17dz serve skill 重复 | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
 | 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁 17dz SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
 | 执行凭证 | 当前 `gateCalls > 0` 主要证明网关调用获准，普通 conversation 的无来源金额主要告警 | 区分调用尝试与成功结果，并让数据回复关联可核对的执行结果 |
 | 通用预算策略 | 17dz 的 `plan evaluate` 当前决定 execute/notify/confirm/stop 并保存累计账本；fshine 执行通知、确认和激活 | fshine 复用通用预算与计划状态策略；执行层声明耗时、副作用及更严格的硬上限，并在实际调用处复核。迁移中保留现有门禁 |

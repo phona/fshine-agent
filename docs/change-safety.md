@@ -32,7 +32,7 @@
 | # | 措施 | 机械判据 |
 |---|---|---|
 | F1 | **表征测试先行**：动代码前先把当前行为钉成 golden | golden 集在每波第一个 commit 落地且全绿；后续 commit 里 golden 一条不改 |
-| F2 | **基线冻结**：`npm test` 987 例 / 78 文件 + typecheck 0 错误为红线 | 每 commit 一次；用例数不减才进下一步 |
+| F2 | **基线冻结**：`npm test` 全绿 + typecheck 0 错误为红线；用例数**只增不减** | 每 commit 一次；用例数不减才进下一步。**基线是随波次实测刷新的数字，不是常数**（原写死的 987 例 / 78 文件是 2026-09-29 的，C/D 波删了 legacy 落账执行器与其单测、又加了提案/写链路用例，早已漂移）。E 波实测：改造前 1228 例 / 90 文件，E1/E2/E3 后 1267 例 / 92 文件 |
 | F3 | **变异验证**：新守卫必须"改错就红" | 把新判据改反 → 对应断言红；删守卫 → 对应测试红 |
 | F4 | **变更集最小化 + 禁止混波**：一个 commit 一件事，三波不混 commit | `refactor(agent):` 的 diff 只能有 move；回归才能归因 |
 | F5 | **红先 revert 不原地修** | 测试红就 revert 该 commit，不在新 commit 里叠补丁（宪章执行纪律 3） |
@@ -301,7 +301,7 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 
 **A 波明确不做**：不删宿主旧文本路径（B 波影子期还要用）、不跑真平台、不改 `voucher.fill.js` 的域逻辑、不为宿主开 schema CLI。
 
-**A 波的一个标定选择（影响 B 波）**：`voucher.proposal` 声明为 `access: scratch`（它改的是本轮私有草稿，不是平台数据），因此 `confirm` 列为假、宿主 `isWriteAccess` 判它**不是写**。代价是 D-075 那道"计划里出现 write 类 operation 就前置合成写关闭话术"的机械兜底对提案步不触发——所以 **B 波的拦截点必须自己做 capability 复核**（宿主持有的授权，Generic，不依赖 operation 名），不成立时当场合成写关闭话术。这比靠计划扫描猜更准：宿主确切知道"正在创建提案"这一刻。
+**A 波的一个标定选择（影响 B 波；2026-10-14 已被平台侧改动推翻，留档）**：`voucher.proposal` 原声明为 `access: scratch`（理由是它改的是本轮私有草稿，不是平台数据），因此 `confirm` 列为假、宿主 `isWriteAccess` 判它**不是写**。代价是 D-075 那道"计划里出现 write 类 operation 就前置合成写关闭话术"的机械兜底对提案步不触发——所以 **B 波的拦截点必须自己做 capability 复核**（宿主持有的授权，Generic，不依赖 operation 名），不成立时当场合成写关闭话术。这比靠计划扫描猜更准：宿主确切知道"正在创建提案"这一刻。
 
 ### A 波已落地（2026-10-12，17dz 侧，未 commit）
 
@@ -327,7 +327,7 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 |---|---|---|
 | B1 | `packages/agent/src/proposal-runtime.ts`（新，≈150 行，镜像 plan-runtime） | `parseProposalCommand(command)`：网关首词 + `prepare` 模式 + operation 引用，**按 `protocol` 列判是不是提案创建**（A 波实证：按脚本路径寻址会解析成 `voucher.fill` 并报数据错，所以判据认 operation 名 + protocol 列，不认脚本路径）。`operation-labels.ts` 加 `protocol` 列的解析与加载（拿不到表 → 空 → 不拦截，与 label/args 规格同一失败语义）。纯函数 + 单测，不起 harness |
 | B2 | `ChangeIntentRecord` 瘦身 + store 迁移 | 契约形状改为 `{intentId, principalId, sessionId, taskId?, proposalId, status, expiresAt, createdAt, decidedAt?, result?}`——**零业务字段、零 payload**。`change_intents` 加 `proposal_id` 列；旧行业（有 kind/account_set 的无 proposalId）**一律按过期处理**（W5：单测钉"旧行读回 → `confirm_stale`，不 commit"） |
-| B3 | 拦截与提案流 | `pi-coding-driver.ts` `beforeToolCall` 在 plan 解析之后、gate 之前加一支：① **capability 复核**（宿主持有的授权，Generic——A 波标定：`voucher.proposal` 是 `access: scratch`，D-075 那道计划扫描兜底对提案步不触发，所以这一刀必须宿主自己下）；不成立 → 当场合成写关闭话术，`writeClosed` 语义与 D-075 一致。② 成立 → 宿主办调 `bin/17dz prepare voucher.proposal <file>`（serve 法域、剥 `DZ_REQUIRE_PLAN`，修 D-081），解析 RESULT 信封：completed → 落 B2 的记录 + 生成确认码，用户可见文本 = **平台 `summaryText` 原样 + 通用确认行**（宿主的借贷合计渲染在新路径上一行不写）；`needs_input` → 按确定性线索交还 worker；failed → 交还错误码 |
+| B3 | 拦截与提案流 | `pi-coding-driver.ts` `beforeToolCall` 在 plan 解析之后、gate 之前加一支：① **capability 复核**（宿主持有的授权，Generic——A 波当时的标定：`voucher.proposal` 是 `access: scratch`，D-075 的计划扫描兜底对提案步不触发，所以这一刀必须宿主自己下（**2026-10-14 更正**：17dz `a683df2`（D-090）已把 `voucher.proposal` 改成 `access: write`，`confirm` 列为真 ⇒ 计划里出现它时 `planWriteClosed` **会**触发——只读部署下提案步现在先被计划扫描兜住。这是更严的方向，且宿主 B3 的 capability 复核仍在，两层并存不冲突；验收 5.x 要跑写链路必须把主体 `capabilities` 开到含 `write`））；不成立 → 当场合成写关闭话术，`writeClosed` 语义与 D-075 一致。② 成立 → 宿主办调 `bin/17dz prepare voucher.proposal <file>`（serve 法域、剥 `DZ_REQUIRE_PLAN`，修 D-081），解析 RESULT 信封：completed → 落 B2 的记录 + 生成确认码，用户可见文本 = **平台 `summaryText` 原样 + 通用确认行**（宿主的借贷合计渲染在新路径上一行不写）；`needs_input` → 按确定性线索交还 worker；failed → 交还错误码 |
 | B4 | 新 commit 后端 + 三笔债 | `apps/server/proposal-commit.ts`（新，薄）：`bin/17dz commit voucher.commit --proposal-id <id>`，令牌 = HMAC over `{proposalId, expiresAt}`（不绑脚本名/业务字段）。`matchConfirmation` 按 `proposalId` 分流到新后端。**D-080**：confirm 分支按**确认时点**复核 capability（提案到确认之间能力被收回正是该缺口形状）；**D-081**：宿主直调显式剥 `DZ_REQUIRE_PLAN`；**D-082**：committed 与 confirm_failed 两个分支都 upsert originating `platform_tasks` 的 outcome |
 | B5 | 测试 | `proposal-runtime.test.ts`（B1，不起 harness）；`proposal-flow.test.ts`/e2e 写链路改走新路径（mock）：create→确认→commit→读回四态 + needs_input + 写关闭 + 影子不一致事件 + W5 旧行 fail-closed + W4 三态翻转（都是"现在红、修完绿"） |
 
@@ -352,7 +352,7 @@ R1 对模块私有函数的具体落地方式（步 1 起，后续各步同法�
 
 **B3 拦截点**（`pi-coding-driver.ts` 的 `beforeToolCall`，计划解析之后、`gate()` 之前一支）：判据 = B1 的 `parseProposalCommand` + 开关。开关关着时整支不出现（`proposalViaGateway(options.env)`，默认关）；开着才解析命令。protocol 表与 label/argStyles/语义三张表同一手法按 root 缓存一次（`loadOperationProtocols`，拿不到表 = 空 = 不拦截），驱动侧与测试替身注入点同族（`operationProtocols`）。**payload 路径过一道通用文件边界检查**（安全，非业务）：`workspaceRelPath` 解析后必须落在本轮 scratchDir（`tmp/<requestId>`）内，否则 `PROPOSAL REFUSED` 且**不办调**——否则等于让 worker 指使平台读工作区任意文件、再把错误信息带回来看（`isInsideScratch` 从 serve-gate 导出，与 write 门同一把尺）。拦截后走 `options.onCreateProposal`（宿主经 `TurnDriverInput` 注入，与 `onNotice` 同族；驱动侧与 `onPendingPlan` 同族 latch 结局），三态处理：completed → 给 worker 确定性消息（**不含确认码**）+ 本回合以此终结；needs_input → 线索进 `needsClues`（平台信封的 `data.needs[].name`，零 worker 文本解析）；failed → 交还平台错误码；write_closed → 复用 `writeClosed` 透传。拦截与结果都落审计（`tool: 'proposal_create'`，allowed 恒 false → assembly 落 `GATE_BLOCKED`，与 `plan_submit` 同族：这条路径提前 return，不经 gate()）。
 
-**B3 capability 复核**（`context.ts` 的 `createProposalViaGateway`）：`ctx.trusted.capabilities` 不含 `write` → 当场合成 `WRITE_NOT_ENABLED`（error-codes.ts 唯一来源）并返回 `write_closed`，**零平台调用**（A 波标定：`voucher.proposal` 是 `access: scratch`，D-075 的计划扫描兜底对提案步不触发，这一刀必须宿主自己下）。同处保留旧路径的授权名单限制模式判据（host-held scope，payload 不透明不等于可以把允许名单受限主体的写面放大）。含 write → spawn `bin/17dz prepare <operation> <payloadPath>`（cwd = platformRoot，**env 显式剥 `DZ_REQUIRE_PLAN`**，修 D-081；operation 名来自拦截时取到的目标 token，宿主不另持业务名单），`parseEnvelope` 分流：completed → 落新形状 `ChangeIntentRecord`（`proposalId` + `taskId` + 通用字段，零业务字段）+ 现有 `CODE_ALPHABET`/`hashCode` 机制原样 → 用户可见文本 = **平台 `summaryText` 原样**（控制字符/空白卫生 + 500 截断，与 correctFormOf 同族）+ 通用确认行（`confirmLineFor`，两条路同一把尺）；needs_input → 结构化线索；failed → 平台错误码。新 pending 记录经现有 `changeIntents` 仓库落库（改动小的那个选项），旧 pending 照样置 superseded。
+**B3 capability 复核**（`context.ts` 的 `createProposalViaGateway`）：`ctx.trusted.capabilities` 不含 `write` → 当场合成 `WRITE_NOT_ENABLED`（error-codes.ts 唯一来源）并返回 `write_closed`，**零平台调用**（A 波当时的标定：`access: scratch` ⇒ 计划扫描兜底不触发（**2026-10-14 已变**：`a683df2` 改成 `write`，只读部署下计划扫描会先兜住提案步），这一刀仍由宿主自己下）。同处保留旧路径的授权名单限制模式判据（host-held scope，payload 不透明不等于可以把允许名单受限主体的写面放大）。含 write → spawn `bin/17dz prepare <operation> <payloadPath>`（cwd = platformRoot，**env 显式剥 `DZ_REQUIRE_PLAN`**，修 D-081；operation 名来自拦截时取到的目标 token，宿主不另持业务名单），`parseEnvelope` 分流：completed → 落新形状 `ChangeIntentRecord`（`proposalId` + `taskId` + 通用字段，零业务字段）+ 现有 `CODE_ALPHABET`/`hashCode` 机制原样 → 用户可见文本 = **平台 `summaryText` 原样**（控制字符/空白卫生 + 500 截断，与 correctFormOf 同族）+ 通用确认行（`confirmLineFor`，两条路同一把尺）；needs_input → 结构化线索；failed → 平台错误码。新 pending 记录经现有 `changeIntents` 仓库落库（改动小的那个选项），旧 pending 照样置 superseded。
 
 **W1/W2 开关与影子**：`FSHINE_PROPOSAL_VIA_GATEWAY` 默认关（`platform-mock.ts` 的 `proposalViaGateway()`，与 `isCommitEnabled` 同一处读 env；leak-lint 的 FSHINE_* 登记表已登记，C 波删旧路径时随开关退役）。关 = 宿主不注入回调 + 驱动不拦截。开 = 拦截生效，**并且** legacy `finalizeProposal` 的 `ci.create` + "把旧 pending 置 superseded" 一并关掉（B 波第 1 批实证的第三点：否则旧路径会把新路径刚建的 pending 记录 superseded 掉，用户手里的码随之失效）；此时 worker 终稿里仍带旧形态提案 JSON 的，只落 `proposal_shadow_mismatch` 事件，不生效、不解析、不落库。开关状态每回合留痕（`delegation_gateway_state` 日志一行 + 拦截处的 tool_calls 一行）。**与 W2 字面（"每回合进审计"）的一处偏差**：开关关着时本回合没有任何门事件可挂（没有门事件就没有 tool_calls 行），故"每回合"那一份由结构化日志承载（与 delegation_span/turn_span 同一族）；要把关着的状态也写进 tool_calls，得给 TrustedContext 加审计出口——那是契约面改动，超出本批范围，记为 B 波合成 commit 前的待决项。
 
@@ -465,3 +465,61 @@ C 波后两个 B 波灰度开关各只剩一种行为，按侦察图 R10"先删�
 **回滚**：方案 3 = revert 一个 md；方案 2 = revert 一个 refactor commit（golden 保证行为不变，回滚无风险）；方案 1 = A 波 revert 平台命令、B/C 波 revert 对应 commit（B 波起那两个灰度开关已在 D 波退役，**不能再靠"关开关"回滚**——回滚目标只能是 revert commit）；D 波 revert 后两个开关恢复存在，真平台写始终由 `FSHINE_REAL_COMMIT` 把守，与这些开关无关。
 
 **归因纪律**：任何一步测试红，先 revert 该 commit（F5），不在红上叠补丁。三波不混 commit（F4），否则回归无法归因到波次。
+
+---
+
+## 6. E 波 · 实体门标定修复 + 验收仪器 surfaced（2026-10-14）
+
+**目标**：关掉台账 5 条待办债（D-085 / D-086 / D-087 / D-088 / D-091）。四者同源——2026-10-13 写路径真模型三轮实测里 worker 在计划门上反复撞墙、最终只对用户说"操作申请已用尽"，而真正的拒绝原因一直在审计库里记着，却没有出口带到人眼前。
+
+**改动（五个 commit，一个 commit 一件事，不混波）**：
+
+| # | commit | 内容 |
+|---|---|---|
+| E1 | fshine `7281daf` | **D-086**：实体门不再把宿主自己的拒绝理由当实体证据（按 `toolCallId` 身份排除） |
+| E2 | fshine `2e2a699` | **D-085**：实体来源覆盖改为"本任务迄今全部平台证据"（删条数窗口、保头改保尾、双通道、信封叶值作附加来源） |
+| E3 | fshine `3beb3b5` | **D-087**：验收报告 surfaced 计划门拒绝明细 |
+| E4 | 17dz `963e088` | **D-091**：`voucher.validate` 声明与实现对齐（`read` → `scratch`） |
+| E5 | fshine 本 commit | 台账 + 本节 + architecture-laws 三问重答 + v0-architecture 同步 |
+
+**防线**：
+
+| # | 措施 | 机械判据 |
+|---|---|---|
+| E1 | 表征测试先行 | 每条新测试先在基线 commit 上跑出**红**（D-086 的绕过在改前确实放行：第二次提交返回 `PLAN ACTIVE`），再落修复 |
+| E2 | golden 一字不改 | `turn-contract.test.ts` 12 条既有断言、`pi-coding-driver.test.ts` `:572/608/649/700/736/769`、`pi-coding-driver-plan-audit.test.ts`、`context.test.ts` `:495/524`、`runtime.test.ts` `:1191` 与 SE1–SE5、`session-entities.test.ts` 14 条、`error-codes.test.ts`、三个 e2e 文件——全部未改且全绿 |
+| E3 | 用例数只增不减 | 1228 → 1267（+39：E1 六条驱动级 + E2 十五条纯函数/四条 turn-contract/五条驱动级 + E3 九条），90 → 92 文件 |
+| E4 | 变异验证 | 十项"改错必须红"全部实测通过（见下） |
+| E5 | 门禁不削弱 | 实体门的 fail-closed 判据一字未动；新增"防幻觉功能不变"对抗用例（名字不在任何来源里照样被拒）；`isError` 过滤与文案前缀嗅探两条捷径各有单测钉住"不能用" |
+| E6 | 无 import 环 | `turn-contract → platform-entities → platform-contract`、`platform-entities → session-entities`，单向；`architecture-shape.test.ts` 绿 |
+| E7 | 业务词不进宿主 src | leak-lint 4/4（`platform-entities.ts` 注释里"目录"改成"名称检索"——词不承重，改措辞不加白名单） |
+| E8 | 只跑 mock | 全程 `DZ_EXECUTOR=mock` 字面；`FSHINE_REAL_COMMIT` 空、`DZ_ALLOW_REAL` 缺席；D-091 的"非 mock 不误报"改由类级单测承担，**没有**跑任何非 mock 的 `bin/17dz` |
+
+**十项变异验证（本地改错 → 对应断言红 → 已还原）**：
+E1 四项——删 block 分支记账 / 删 catch 分支记账 / 身份判据换 `isError` / 身份判据换 `toolName`。
+E2 六项——覆盖判据改回 `slice(-20)` / 保尾改保头 / haystack 删 `platformEntities` / 删账本 `record` / 删转录通道只留账本（7 条红）/ 保尾常数调大 10 倍。
+E3 一项——删 SQL 的 `tool_name` 过滤。
+E4 三项——17dz 侧把 `access` 改回 `read` → `test-gate.js` 2 条 + `test-real-execution-gate.js` 1 条全红，且 mock 下 `prepare` 复现 `OPERATION_NOT_MOCKED` exit 3。
+
+### E 波的两个判断点（判据被改写的理由，留档）
+
+1. **D-085 的闭环判据字面实现不了**。原字面是「haystack 覆盖从"最后 N 条"改为**本任务迄今全部 toolResult 的结构化实体集合**」。现场证伪：信封 `data` 的每个字符串叶都是它所在响应原文的子串（`RESULT` 在 stdout 末行、SDK bash 工具保尾弃头），所以"只收结构化叶值"是**可证的收窄**——会打破 golden `turn-contract.test.ts:235`（该用例用的就是非信封原文），并新拒「幻电设备」vs 平台返回「幻电设备有限公司」这类缩写/简称形状，方向与修假拒相反。**改为**：覆盖 = 本任务迄今全部 toolResult 原文（双通道）+ 信封 `data` 的结构化叶值作为**附加**第二来源（additive，只增覆盖），包含判据仍是逐字包含。理由与判据改写都记在台账 D-085 主条目里。
+2. **D-091 的「非 mock 无 `DZ_ALLOW_REAL` 也 exit 0」不真跑**。§0 禁止任何不带 `DZ_EXECUTOR=mock` 的 `bin/17dz` 调用，所以该条由 `test-real-execution-gate.js` 的类级断言（从清单读 `voucher.validate` 的声明 → `touchesPlatformOf === false`）承担。另两条（mock 下 exit 0 有输出、`DZ_REQUIRE_PLAN=1` 不索要 `DZ_PLAN_ID`）实跑通过。
+
+### E 波新发现的一条根因（台账原先没有）
+
+SDK 默认开**自动压缩**（`DEFAULT_COMPACTION_SETTINGS`，阈值 = contextWindow − reserveTokens；本部署 128K ⇒ ≈111 616 token）。一到阈值 `agent.state.messages` 被换成 `[压缩摘要] + [保留尾段]`（`keepRecentTokens` ≈ 80KB），早期 tool_result 整条消失。**D-085 自己的证据（单请求 87 次 tool_call）正是会触发压缩的长任务形状**，所以"本任务迄今全部"靠读转录到不了——覆盖判据因此物化成两个通道：转录通道 + 宿主在 `afterToolCall` 上的账本通道（压缩免疫，且 SDK 不给被拦下的调用调它，结构上不含宿主拒绝文本）。
+
+### 首轮真模型基线（D-088 的第一步，2026-10-14）
+
+`npm run acceptance --only=5.1,5.1b,5.2,5.3,5.4`，`DZ_EXECUTOR=mock`，报告 `data/acceptance-report-202610140425.md`。
+
+**仪器本身达标**：报告首次带出「计划门裁决 / 计划门拒绝明细」两节——5.1 的 6 次裁决、5.3 的 4 次全部列明理由与 calls 摘要。换在 E3 之前，这两节的位置只有 worker 终稿那一句。这一条同时是 D-087 的闭环证据。
+
+**首轮未达成 D-088 的字面判据**（无 `prop_*`、5.2 被跳过），原因有三层，按报告可直接归因：
+
+1. **部署姿态**：本地 `config/agent.yaml` 的主体 `capabilities: ["read"]`，写未开放。5.1 的计划里出现 `voucher.proposal` 时被 D-075 的计划扫描兜住（`PLAN STOP 当前未开放写入权限`，detail 逐字列出该调用）→ worker 拿不到提案步 → 回复不含确认码 → 5.2/5.4 按既有逻辑跳过。**这不是本轮引入的缺陷**，但它是 D-090 的一个后果：17dz `a683df2` 把 `voucher.proposal` 从 `scratch` 改成 `write` 之后，计划扫描兜底**首次对提案步生效**（B 波记录的"对提案步不触发"已因此过时，本文上方已更正）。要跑 D-088 的字面判据，必须把该主体 `capabilities` 开到含 `write`。
+2. **模型侧形状问题（两例，均可在报告节里直接读出）**：① worker 发了 `operation list` / `operation.list` 这个**不存在的 operation**，平台回 `PLAN_REFUSE UNKNOWN_OPERATION`，两次都以 `PLAN PAUSED` 收场；② 计划 JSON 形状不合法（`PLAN_JSON_PARSE: No number after minus sign in JSON at position 1`），5.3 里出现两次。
+3. **D-085/D-086 的修复没有可观测的负面效应**：本轮的 10 次 declined 里没有一次是 `ENTITY_OUT_OF_SCOPE`——三类静默拒绝里最相关的那一族本轮零命中，与"窗口已删、假拒来源已除"的方向一致（样本仅一轮，不作为结论）。
+
+**登记口径**：按 architecture-laws 的关账纪律，D-088 **不标已关**（字面判据是连续三轮，且本轮写链路未开放）。第 1 层是部署姿态选择，第 2 层是新观察到的模型侧失效，两条都记进台账待后续处置。
