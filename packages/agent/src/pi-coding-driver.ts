@@ -173,32 +173,58 @@ export function createServeGateAuditSink(sink: {
  * 本条只判"该说哪句话"（confirm 列）；"该点名谁"由 nonPlannableOperations 判（plan 列），
  * 两列都是平台声明，合起来成 planNotReadOnlyReason。
  */
+/**
+ * 计划门"含非只读 operation"拒绝 → 该说哪句话（`confirm` 列 + 部署能力）。
+ *
+ * 分流判据读平台语义表的 `confirm` 列（要不要用户确认）；但**"未开放写入权限"是一句归因，
+ * 只有当这个部署真的没开放写时它才为真**。写已开放时平台照样拒——写类的放行路径是确认码 +
+ * commit token，`planAccessAllows = plan && !confirm` 永远为假，它根本不该进计划。那时它是
+ * **形状问题**：该点名、该让 worker 把那个调用移出计划改为直接调用。
+ *
+ * 2026-10-14 实测的假归因：写开放 + 计划里排了 `voucher.proposal`，宿主回
+ * 「当前未开放写入权限，如有需要请联系管理员开通」，worker 原样转达给用户，用户被指去找
+ * 管理员要一个他已经有的权限，然后这一轮就此放弃。这比不点名更糟——它是一句错话。
+ *
+ * 第三个参数缺省（测试替身 / 老路径）时按只读判，与 `planWriteClosed` 的"空 capabilities
+ * 视为只读"同一约定，既有判定一字不变。
+ */
 export function planNotReadOnlyCode(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
+  capabilities?: readonly string[],
 ): 'WRITE_NOT_ENABLED' | 'PLAN_NOT_PLANNABLE' {
   const needsConfirm = calls.some((call) => isWriteAccess(semantics?.get(call.operation)));
-  return needsConfirm ? 'WRITE_NOT_ENABLED' : 'PLAN_NOT_PLANNABLE';
+  if (needsConfirm && !capabilities?.includes('write')) return 'WRITE_NOT_ENABLED';
+  return 'PLAN_NOT_PLANNABLE';
 }
 
 /**
- * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列**。
+ * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列与
+ * confirm 列合起来的真判据**。
  *
- * 这一列就是平台自己声明"这个 operation 要不要过计划门"（read → true、本地处理类 → false）。
- * serve-gate 的计划前置豁免读同一列（planExempt），两侧共用一份数据、一个判据——宿主不
+ * 平台的真判据是 `planAccessAllows = plan && !confirm`（17dz `src/execution/plan.js`）：两列
+ * 任一为假就进不了计划。只读 `plan` 一列会**漏掉写类**——而写类恰恰是最常被 worker 排进计划
+ * 的那一种。2026-10-14 实测：`voucher.proposal`（`write` ⇒ `plan:true, confirm:true`）被排进
+ * 计划，平台以 `PLAN_OPERATION_NOT_READ_ONLY` 拒，宿主按 `plan` 列点名得到空名单，退回零名单
+ * 措辞「该调用不需要计划」而不说是哪一个——worker 无法定位该删哪一条，正是 D-089 的死因形状。
+ *
+ * serve-gate 的计划前置豁免读同一列（`planExempt`），两侧共用一份数据、一个判据——宿主不
  * 另立一份 operation 名单（L2），也不按错误码名猜。
  *
- * 宁缺勿猜，且方向与 planExempt 一致：语义表缺失 / operation 未登记（plan 列取不到真值）时
- * **不进名单**——未知不等于免计划。名单为空时调用方退回零名单措辞（PLAN_NOT_PLANNABLE），
- * 绝不把整份计划的 operation 统统说成"不该进计划"：2026-10-13 事故里 worker 已经试过
- * "删一个再提"（删错了合法调用，仍然被拒），点错名字比不点名更糟。
+ * 宁缺勿猜，且方向与 planExempt 一致：语义表缺失 / operation 未登记时**不进名单**——未知不
+ * 等于免计划。名单为空时调用方退回零名单措辞（PLAN_NOT_PLANNABLE），绝不把整份计划的
+ * operation 统统说成"不该进计划"：2026-10-13 事故里 worker 已经试过"删一个再提"（删错了
+ * 合法调用，仍然被拒），点错名字比不点名更糟。
  */
 export function nonPlannableOperations(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
 ): string[] {
   const named = calls
-    .filter((call) => semantics?.get(call.operation)?.plan === false)
+    .filter((call) => {
+      const row = semantics?.get(call.operation);
+      return row ? !(row.plan && !row.confirm) : false;
+    })
     .map((call) => call.operation);
   return [...new Set(named)];
 }
@@ -214,14 +240,19 @@ export function nonPlannableOperations(
  *
  * 措辞唯一出处是 error-codes.ts 的表：点名版 PLAN_NOT_PLANNABLE_OPERATIONS（带 {operations}
  * 数据），点不出名字时退回零名单版 PLAN_NOT_PLANNABLE——调用点只选码、不拼句。
- * 混合场景（既有要用户确认的写类、又有不该进计划的）仍归 WRITE_NOT_ENABLED：那句话的
- * 归属是"找管理员开通写入权限"，不是"改调用形状"，两者混在一句里 worker 又会猜。
+ *
+ * 什么时候才说 WRITE_NOT_ENABLED：**这个部署没开放写**（capabilities 不含 write）且计划里有
+ * 要用户确认的写类。那时归属确实是"找管理员开通写入权限"。写已开放时同一形态是形状问题，
+ * 点名、让 worker 把那个调用移出计划改为直接调用——说成权限问题是假归因（见
+ * planNotReadOnlyCode 的注释与 2026-10-14 实测）。`planWriteClosed` 已经在 evaluate 之前
+ * 拦过"没开放写"的那一种，所以走到这里还看见写类，多半是写已开放。
  */
 export function planNotReadOnlyReason(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
+  capabilities?: readonly string[],
 ): string {
-  if (planNotReadOnlyCode(calls, semantics) === 'WRITE_NOT_ENABLED') {
+  if (planNotReadOnlyCode(calls, semantics, capabilities) === 'WRITE_NOT_ENABLED') {
     return messageTextFor('WRITE_NOT_ENABLED');
   }
   const named = nonPlannableOperations(calls, semantics);
@@ -1245,7 +1276,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 只能汇报卡点，"未开放写入权限"到不了用户（2026-09-27 第三波实测）。
       //
       // 匹配这个码**只为定位失败点**（平台暂时还抛它），语义判断读平台语义表：
-      // 同一张拒绝名单里混着两类调用——要用户确认的写类调用（部署没开放写 →
+      // 同一张拒绝名单里混着两类调用——要用户确认的写类调用（**且这个部署没开放写** →
       // WRITE_NOT_ENABLED）与根本不需要计划的本地处理（曾经被用户看到"请联系管理员
       // 开通写入权限"，已实证的误导 → PLAN_NOT_PLANNABLE）。按码名猜语义就是按字符串
       // 判权限，那正是本次要拆掉的东西。既有活跃计划照常恢复：被拒的是新提交，
@@ -1254,9 +1285,18 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // ② 的理由带点名（planNotReadOnlyReason → PLAN_NOT_PLANNABLE_OPERATIONS）：不说
       // "该调用"而说"哪个调用"，worker 才删得动那一个、改为直接调用、重提剩余部分——
       // 2026-10-13 实测它就是在这一句上无从下手，原样重提 5 次后 terminal block。
+      //
+      // 2026-10-14 修一处假归因：分流必须带 capabilities。写已开放时写类在场仍然是形状问题
+      // （写类走确认码 + commit token，`plan && !confirm` 永远为假，它不该进计划），此时回
+      // "未开放写入权限"是错的——实测 worker 原样转达给用户，用户被指去找管理员要一个他已经
+      // 有的权限，这一轮就此放弃。所以 capabilities 含 write 时走②：点名 + 让 worker 改成
+      // 直接调用（B3 的提案拦截就在那条路上等着）。
       if (error instanceof Error && error.message.includes('PLAN_OPERATION_NOT_READ_ONLY')) {
         activePlan = previousPlan;
-        return { block: true, reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics)}` };
+        return {
+          block: true,
+          reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics, options.capabilities)}`,
+        };
       }
       return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
     }

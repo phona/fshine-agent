@@ -385,11 +385,15 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
       const verdict = await bashCall(worker, 'call_platform_gate', command);
 
       expect(verdict?.block).toBe(true);
-      // 驱动的 evaluate 失败分支把平台拒绝码换成用户可行动的写关闭话术（与闸①②同一句）
-      expect(verdict?.reason).toBe(`PLAN STOP\n${messageTextFor('WRITE_NOT_ENABLED')}`);
-      // 平台内部错误码与 operation 名不得透传给 worker
+      // 驱动的 evaluate 失败分支把平台拒绝码换成用户/worker 可行动的话术。
+      // 2026-10-14 修正：capabilities 含 write（闸①刻意放行），所以这不是权限问题而是形状
+      // 问题——点名 voucher.commit、让它移出计划改直接调用。改前这里回 WRITE_NOT_ENABLED，
+      // 是假归因（worker 原样转达给用户"请联系管理员开通写入权限"，而写明明是开的）。
+      expect(verdict?.reason).toBe(
+        `PLAN STOP\n${messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.commit' })}`,
+      );
+      // 平台内部错误码不得透传给 worker
       expect(verdict?.reason).not.toContain('PLAN_OPERATION_NOT_READ_ONLY');
-      expect(verdict?.reason).not.toContain('voucher.commit');
       // 平台门确实被咨询了（与闸①的差别：这是最后一道闸，发生在 evaluate 时）
       expect(counter.evaluates).toBe(1);
       // 拒绝发生在账本写入之前：平台侧无计划残留

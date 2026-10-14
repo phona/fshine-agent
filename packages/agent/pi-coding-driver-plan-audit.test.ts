@@ -210,7 +210,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     worker.session.dispose();
   });
 
-  it('平台按"只读"拒绝计划，语义表说要用户确认 → WRITE_NOT_ENABLED，照旧落一行', async () => {
+  it('平台按"只读"拒绝计划，语义表说要用户确认：写开放时点名该 operation，照旧落一行', async () => {
     const { events } = auditSink();
     const rejectingRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
@@ -227,7 +227,10 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
 
     const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
 
-    expect(verdict?.reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    // 2026-10-14 修正：写已开放时这不是权限问题而是形状问题，点名它（假归因修复）。
+    // 审计一侧的要求不变：每个裁决出口仍落一行，detail 照旧是 calls 摘要。
+    expect(verdict?.reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.commit' }));
+    expect(verdict?.reason).not.toContain('当前未开放写入权限');
     expect(events).toHaveLength(1);
     expect(events[0]?.detail).toBe('voucher.commit 幻骥达 202608');
     worker.session.dispose();
