@@ -523,3 +523,17 @@ SDK 默认开**自动压缩**（`DEFAULT_COMPACTION_SETTINGS`，阈值 = context
 3. **D-085/D-086 的修复没有可观测的负面效应**：本轮的 10 次 declined 里没有一次是 `ENTITY_OUT_OF_SCOPE`——三类静默拒绝里最相关的那一族本轮零命中，与"窗口已删、假拒来源已除"的方向一致（样本仅一轮，不作为结论）。
 
 **登记口径**：按 architecture-laws 的关账纪律，D-088 **不标已关**（字面判据是连续三轮，且本轮写链路未开放）。第 1 层是部署姿态选择，第 2 层是新观察到的模型侧失效，两条都记进台账待后续处置。
+
+### D-088 复跑的第二/第三轮，与暴露的新缺陷 D-096（2026-10-14）
+
+E 波代码落地后为跑 D-088 做了两轮补充复跑（都只跑 mock；`config/agent.yaml` 的本地主体临时开到 `capabilities: ["read","write"]`，`.env` 的 `DZ_EXECUTOR=mock` 与空的 `FSHINE_REAL_COMMIT` 两道闸未动）：
+
+| 轮次 | 报告 | 结果 |
+|---|---|---|
+| 首轮（写关闭） | `acceptance-report-202610140425.md` | 5.1 被 D-075 计划扫描兜住（`voucher.proposal` 因 D-090 改成 `write` 后首次对提案步生效），到不了提案步 |
+| 第二轮（写开放） | `acceptance-report-202610140749.md` | **暴露 D-096**：两次 `PLAN STOP 当前未开放写入权限`，而 `plan_write_not_enabled` 事件零次、库里 capabilities 明明是 `["read","write"]`——假归因。已修（`4aeab16`） |
+| 第三轮（D-096 修后） | `acceptance-report-202610140830.md` | 假归因已除（计划门裁决 8→2、declined 5→1），但 worker 没产出形状合法的计划（`PLAN_JSON_PARSE` + 把 CLI 子命令 `operation list` 塞进计划的 calls），终稿只剩"子任务执行失败" |
+
+**D-096 的修法与边界**：只改"该说哪句话"，不动任何门禁判定。分流增补 `capabilities`（只有 `needsConfirm && !capabilities.includes('write')` 才说 `WRITE_NOT_ENABLED`），点名判据从 `plan === false` 改成平台真判据 `!(plan && !confirm)`（写类因此点得出名字）。缺省不传 `capabilities` 按只读判，与 `planWriteClosed` 的"空 capabilities 视为只读"同约定——**写关闭那条路的行为一字未变**（D-075 前置扫描在 evaluate 之前就拦下，平台门一次都不咨询，给出的仍是同一句话）。两条路在"没开放写"上收敛，在"已开放写"上分开：前者说权限，后者点名 + 让 worker 改成直接调用。
+
+**由此得到的判据**：D-088 剩余的不是宿主/平台侧缺陷，而是模型在计划门交互上的真实方差（D-095：方案 JSON 形状、把 CLI 子命令当 operation）。清掉可修项之后要的是多轮复跑取稳定率，不是继续改代码。**仪器侧已达标**——三轮里每一轮的拒绝原因都能从报告直接读出，换在 E3 之前只有 worker 终稿那一句。
