@@ -284,4 +284,45 @@ describe('计划实体来源校验：三来源逐字包含', () => {
       { currentMessage: '202609', sessionEntities: many },
     )).toBeNull();
   });
+
+  it('platformEntities 里的实体值放行（信封 data 的结构化投影，附加来源）', () => {
+    const calls = [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金有限责任公司'] }];
+    expect(validatePlanEntities(
+      calls,
+      { currentMessage: '查一下', platformResponses: ['RESULT {"op":"x","data":{"candidates":[]}}'], platformEntities: ['胜利五金有限责任公司'] },
+    )).toBeNull();
+  });
+
+  it('platformEntities 未传/为空时判定与从前一字不差（附加来源可缺席）', () => {
+    const calls = [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金有限责任公司'] }];
+    expect(validatePlanEntities(calls, { currentMessage: '查一下', platformResponses: [], platformEntities: [] }))
+      .toContain('未在当前请求');
+    expect(validatePlanEntities(calls, { currentMessage: '查一下', platformResponses: [] }))
+      .toContain('未在当前请求');
+  });
+
+  it('平台响应条数不再设上限：第 21 条仍计入来源', () => {
+    // 覆盖判据 = 本任务迄今全部。42 个历史验收库里单请求 tool_call 数 9…87，
+    // "最后 N 条"会把早期响应里确立的实体静默掉出判定材料。
+    const many = Array.from({ length: 21 }, (_, index) => `第 ${index} 条响应`);
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '最早那条里的名字'] }],
+      { currentMessage: '查一下', platformResponses: ['最早那条里的名字', ...many.slice(1)] },
+    )).toBeNull();
+  });
+
+  it('单条平台响应按保尾截断：末尾的内容不因长度被切掉', () => {
+    const noise = `${'噪声\n'.repeat(30_000)}`;
+    const tail = '末行的规范名：胜利五金有限责任公司';
+    // 保尾：截断后仍在 haystack 里 → 放行
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '胜利五金有限责任公司'] }],
+      { currentMessage: '查一下', platformResponses: [noise + tail] },
+    )).toBeNull();
+    // 保头则会把它切掉 → 这条断言钉住"不是保头"（把常量改成 slice(0, …) 即红）
+    expect(validatePlanEntities(
+      [{ operation: 'finance.query-receivables', args: ['--query', '只活在响应最前面的名字'] }],
+      { currentMessage: '查一下', platformResponses: ['只活在响应最前面的名字' + noise] },
+    )).toContain('未在当前请求');
+  });
 });

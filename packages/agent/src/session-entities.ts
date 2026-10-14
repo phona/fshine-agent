@@ -20,8 +20,14 @@
 import type { PlatformTaskRecord, PlatformTaskRepo } from '@fshine/contracts';
 import type { OperationArgsSpecs } from './operation-labels';
 
-/** 单条提取取值的长度上限：实体名是短字段（与 planCallFacts 的取值卫生同一把尺）。 */
-const ENTITY_VALUE_MAX_CHARS = 40;
+/**
+ * 单条提取取值的长度上限：实体名是短字段（与 planCallFacts 的取值卫生同一把尺）。
+ *
+ * 从本模块导出给 `platform-entities.ts` 用：那边从平台信封的 `data` 里取字符串叶，问的是
+ * 同一个问题——"这个字符串是不是一个实体值的形状"。两处各写一个常数就会漂移，而漂移的方向
+ * 永远是"某一处悄悄变松"。
+ */
+export const ENTITY_VALUE_MAX_CHARS = 40;
 /** 纳入提取的任务条数上限：与平台响应条数上限同族（覆盖跨回合解析，长会话只取最近的）。 */
 const SESSION_TASK_SCAN_LIMIT = 20;
 
@@ -65,8 +71,12 @@ function entityValuesOfCall(
   return values;
 }
 
-/** 取值卫生：剥引号、去空白；空串与超长值（不是实体名的形状）丢弃。 */
-function cleanEntityValue(value: string): string | undefined {
+/**
+ * 取值卫生：剥引号、去空白；空串与超长值（不是实体名的形状）丢弃。
+ *
+ * 导出理由同 `ENTITY_VALUE_MAX_CHARS`：实体值的形状判据只有一份。
+ */
+export function cleanEntityValue(value: string): string | undefined {
   const text = value.trim().replace(/^["']+|["']+$/g, '').trim();
   return text && text.length <= ENTITY_VALUE_MAX_CHARS ? text : undefined;
 }
@@ -98,8 +108,12 @@ export function sessionEntitiesFromRecords(
   return dedupe(values);
 }
 
-/** 去重保序（首次出现序；空白值跳过）。haystack 的条数上限由校验器一侧统一收口。 */
-function dedupe(values: readonly string[]): string[] {
+/**
+ * 去重保序（首次出现序；空白值跳过）。haystack 的条数上限由校验器一侧统一收口。
+ *
+ * 导出理由同上：两个通道（底账 / 信封叶值）产出同一类材料，合并时必须是同一把尺。
+ */
+export function dedupe(values: readonly string[]): string[] {
   const seen = new Set<string>();
   const unique: string[] = [];
   for (const raw of values) {

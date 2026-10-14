@@ -25,7 +25,7 @@ import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
-import { transcriptPlatformResponses } from './platform-entities';
+import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 
 /**
@@ -872,6 +872,18 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    * 正文一样可能带 token。
    */
   const blockedToolCallIds = new Set<string>();
+  /**
+   * 本任务的平台响应账本（D-085）：宿主在 afterToolCall 上记下每一条**执行完**的工具结果。
+   *
+   * 为什么不能只读转录：SDK 默认开自动压缩，阈值 = contextWindow − reserveTokens，一到就把
+   * `agent.state.messages` 换成 `[压缩摘要] + [保留尾段]`，早期 tool_result 整条消失
+   * （keepRecentTokens 只有约 80KB）。单请求 87 次 tool_call 的长任务必然触发，只读转录
+   * 等于把"本任务迄今"偷偷换成"压缩后还剩多少"。
+   *
+   * 顺带第二道保证：SDK 不给被拦下的调用调 afterToolCall，所以这个通道结构上不可能含宿主
+   * 拒绝文本（D-086 的兜底）。
+   */
+  const platformRecorder = createTaskPlatformRecorder();
   const { session } = await createAgentSession({
     cwd: options.cwd,
     agentDir: options.agentDir,
@@ -1032,6 +1044,25 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   };
 
   /**
+   * 平台响应账本的记账点（D-085）：每一条**执行完**的工具结果都记一份。
+   *
+   * **包一层而不赋值**：AgentSession 在自己的构造函数里就装了一个 afterToolCall
+   * （agent-session.js，做扩展 tool_result 钩子 + 图片归一化），直接赋值会踩掉它。
+   * 先 await 原 hook，再记账，最后把原 hook 的返回值原样交还——返回 undefined 就是
+   * "不覆盖"，行为零变化。（beforeToolCall 现在是赋值覆盖，那是 2026-10-07 起就存在的
+   * 既有事实，不在本波范围内改。）
+   *
+   * 只记最终会落进转录的那份 content（扩展/归一化可能换过），所以账本与转录通道记的是
+   * 同一批东西的同一份文本。
+   */
+  const sessionAfterToolCall = session.agent.afterToolCall;
+  session.agent.afterToolCall = async (ctx) => {
+    const overridden = await sessionAfterToolCall?.(ctx);
+    platformRecorder.record((overridden?.content ?? ctx.result.content) as unknown);
+    return overridden;
+  };
+
+  /**
    * 提案创建网关调用的宿主裁决（B 波 B3）：文件边界检查 → 宿主办调平台 → 三态分流 → 审计。
    *
    * 为什么独立成函数（与 decidePlanSubmission 同一理由）：这条路径提前 return，不经 gate()，
@@ -1159,12 +1190,20 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       const artifactBoundary: PlanArtifactBoundary | undefined = scratchDir
         ? { workspaceRoot: options.cwd, scratchDir }
         : undefined;
+      // 两个通道合并（D-085）：转录通道覆盖"现存的 + 上一回合恢复的"，账本通道覆盖"被自动
+      // 压缩摘出转录的"。同一份响应两边都在时只判一次。
+      const taskPlatform = mergeTaskPlatformSources(
+        transcriptPlatformSources(session.agent.state.messages, blockedToolCallIds),
+        platformRecorder.snapshot(),
+      );
       const scopeError = validatePlanEntities(parsed.calls, {
         ...options.entitySources,
         platformResponses: [
           ...(options.entitySources.platformResponses ?? []),
-          ...transcriptPlatformResponses(session.agent.state.messages, blockedToolCallIds),
+          ...taskPlatform.responses,
         ],
+        // ③′ 结构化叶值：与 ③ 同源的附加投影，只在非空时挂（空数组不占地）
+        ...(taskPlatform.entities.length > 0 ? { platformEntities: taskPlatform.entities } : {}),
       }, artifactBoundary);
       if (scopeError) {
         activePlan = null;

@@ -121,6 +121,8 @@ const OVERSCOPE_PLAN = 'bin/17dz plan {"calls":[{"operation":"finance.query-rece
 const OVERSCOPE_TOKEN = '猫一杯';
 /** 当前消息只给账套名，越权实体一个字都不给。 */
 const CURRENT_MESSAGE = '查一下胜利五金有限责任公司账套的应收';
+/** 一条真的带着越权实体的平台信封（末行形态，与 SDK 保尾弃头后的真实转录一致）。 */
+const ENVELOPE_FOR_TOKEN = 'RESULT {"v":1,"op":"finance.search-references","status":"completed","data":{"candidates":[{"id":"c_1","name":"猫一杯"}]}}';
 
 describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）', () => {
   it('越权 token 被拒后原样重提：仍然被拒（"先拒后抄"绕过路径关闭）', async () => {
@@ -160,7 +162,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
     // 真正执行过的一次平台响应（换 id、不带 isError）把越权实体带了回来
     appendToolResult(worker, toolResult(
       'call_search_2',
-      'RESULT {"op":"finance.search-references","status":"completed","data":{"candidates":[{"id":"c_1","name":"猫一杯"}]}}',
+      'RESULT {"v":1,"op":"finance.search-references","status":"completed","data":{"candidates":[{"id":"c_1","name":"猫一杯"}]}}',
       false,
     ));
 
@@ -184,7 +186,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
     // 平台自己回了一段引用了宿主协议前缀的文本：按文案过滤会把这条真证据删掉
     appendToolResult(worker, toolResult(
       'call_echo',
-      'RESULT {"op":"finance.search-references","status":"completed","data":{"note":"worker 上次收到 PLAN DECLINED：ENTITY_OUT_OF_SCOPE","candidates":[{"id":"c_1","name":"猫一杯"}]}}',
+      'RESULT {"v":1,"op":"finance.search-references","status":"completed","data":{"note":"worker 上次收到 PLAN DECLINED：ENTITY_OUT_OF_SCOPE","candidates":[{"id":"c_1","name":"猫一杯"}]}}',
       false,
     ));
 
@@ -209,7 +211,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
     // 拦截在这一列上完全同形，所以判据不能认 isError。
     appendToolResult(worker, toolResult(
       'call_failed',
-      'Command exited with code 3\nRESULT {"op":"finance.query-receivables","status":"failed","error":{"code":"REFERENCE_NOT_FOUND","message":"猫一杯 未登记"}}',
+      'Command exited with code 3\nRESULT {"v":1,"op":"finance.query-receivables","status":"failed","error":{"code":"REFERENCE_NOT_FOUND","message":"猫一杯 未登记"}}',
       true,
     ));
 
@@ -236,7 +238,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
     // 另一次 bash（未被拦）返回了实体名：toolName 与上面那条完全相同
     appendToolResult(worker, toolResult(
       'call_scope_1b',
-      'RESULT {"op":"finance.search-references","status":"completed","data":{"candidates":[{"id":"c_1","name":"猫一杯"}]}}',
+      'RESULT {"v":1,"op":"finance.search-references","status":"completed","data":{"candidates":[{"id":"c_1","name":"猫一杯"}]}}',
       false,
     ));
 
@@ -273,6 +275,113 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
     const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_2');
 
     expect(verdict?.reason).toContain(OUT_OF_SCOPE);
+    worker.session.dispose();
+  });
+});
+
+describe('实体门：本任务全部平台响应都是来源（D-085）', () => {
+  /** 21 条响应：实体确立在最早那一条里。20 条窗口会把它静默掉出判定材料。 */
+  function manyResponses(entityToolCallId: string, entity: string): unknown[] {
+    return Array.from({ length: 21 }, (_unused, index) => toolResult(
+      `call_${index}`,
+      `RESULT {"v":1,"op":"x","status":"completed","data":{"n":${index}}}`,
+      false,
+    )).map((message, index) => (index === 0
+      ? toolResult(entityToolCallId, `RESULT {"v":1,"op":"x","status":"completed","data":{"candidates":[{"name":"${entity}"}]}}`, false)
+      : message));
+  }
+
+  it('第 21 条响应里确立的实体照样放行（条数窗口已删）', async () => {
+    const evaluated: string[][] = [];
+    const worker = await makeWorker({
+      entitySources: { currentMessage: CURRENT_MESSAGE },
+      planCliRunner: planRunner(evaluated),
+    });
+    worker.session.agent.state.messages = manyResponses('call_0', OVERSCOPE_TOKEN) as never;
+
+    const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_1');
+
+    expect(verdict?.reason).not.toContain(OUT_OF_SCOPE);
+    expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
+    worker.session.dispose();
+  });
+
+  it('名字不在任何响应里照样被拒（防幻觉功能不变）', async () => {
+    const evaluated: string[][] = [];
+    const worker = await makeWorker({
+      entitySources: { currentMessage: CURRENT_MESSAGE },
+      planCliRunner: planRunner(evaluated),
+    });
+    worker.session.agent.state.messages = manyResponses('call_0', '完全无关的另一个名字') as never;
+
+    const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_1');
+
+    expect(verdict?.reason).toContain(OUT_OF_SCOPE);
+    expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(false);
+    worker.session.dispose();
+  });
+
+  it('单条响应按保尾截断：末行的信封不被切掉', async () => {
+    const evaluated: string[][] = [];
+    const worker = await makeWorker({
+      entitySources: { currentMessage: CURRENT_MESSAGE },
+      planCliRunner: planRunner(evaluated),
+    });
+    // SDK bash 工具保尾弃头（2000 行 / 50KB）：真实转录里信封在末行。读头会得到一段
+    // "既不是开头、也没有信封"的噪声。
+    const noise = `${'噪声行\n'.repeat(20_000)}`;
+    worker.session.agent.state.messages = [toolResult('call_0', `${noise}${ENVELOPE_FOR_TOKEN}`, false)] as never;
+
+    const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_1');
+
+    expect(verdict?.reason).not.toContain(OUT_OF_SCOPE);
+    worker.session.dispose();
+  });
+
+  it('自动压缩把早期响应摘出转录后，账本通道仍认得早期实体', async () => {
+    const evaluated: string[][] = [];
+    const worker = await makeWorker({
+      entitySources: { currentMessage: CURRENT_MESSAGE },
+      planCliRunner: planRunner(evaluated),
+    });
+    // 宿主账本：早前真正执行过的那一跳把实体带了回来（afterToolCall 记的）
+    // 必须 await：宿主账本的记账点在 hook 内部（原 hook 之后再记），不等待就会在计划提交之后
+    // 才落账——生产里 SDK 自己 await 它，测试里也得一样。
+    await worker.session.agent.afterToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id: 'call_early', type: 'toolCall', name: 'bash', arguments: { command: 'x' } } as never,
+      args: { command: 'x' },
+      result: { content: [{ type: 'text', text: ENVELOPE_FOR_TOKEN }], details: {} } as never,
+      isError: false,
+      context: {} as never,
+    });
+    // 压缩之后的忠实形状：[压缩摘要] + [保留尾段]，早期 toolResult 整条消失
+    worker.session.agent.state.messages = [
+      { role: 'compactionSummary', summary: '（早前对话摘要）', tokensBefore: 120_000, timestamp: 1 },
+      toolResult('call_recent', 'RESULT {"v":1,"op":"x","status":"completed","data":{"n":1}}', false),
+    ] as never;
+
+    const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_1');
+
+    expect(verdict?.reason).not.toContain(OUT_OF_SCOPE);
+    expect(evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
+    worker.session.dispose();
+  });
+
+  it('宿主注入的 platformResponses 与转录通道合并（注入路径不变）', async () => {
+    const evaluated: string[][] = [];
+    const worker = await makeWorker({
+      entitySources: {
+        currentMessage: CURRENT_MESSAGE,
+        platformResponses: ['【宿主主动回溯】tool_result：幻东 202609 余额 51 元'],
+      },
+      planCliRunner: planRunner(evaluated),
+    });
+    worker.session.agent.state.messages = [toolResult('call_0', ENVELOPE_FOR_TOKEN, false)] as never;
+
+    const verdict = await submit(worker, OVERSCOPE_PLAN, 'call_scope_1');
+
+    expect(verdict?.reason).not.toContain(OUT_OF_SCOPE);
     worker.session.dispose();
   });
 });

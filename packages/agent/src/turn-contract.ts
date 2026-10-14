@@ -117,8 +117,24 @@ export interface PlanEntitySources {
   currentMessage: string;
   /** ② 本轮注入的指代消解证据文本（宿主主动回溯产出，可为空）。 */
   referenceEvidence?: string;
-  /** ③ 本任务迄今的平台响应（tool_result 内容，逐条）。 */
+  /**
+   * ③ 本任务迄今的平台响应（tool_result 内容，逐条）。
+   *
+   * 覆盖判据 = **本任务迄今全部**，不再取"最后 N 条"（D-085①：42 个历史验收库里单请求的
+   * tool_call 数 9…87，20 条窗口把早期响应里确立的实体静默掉出判定材料）。单条按**保尾**
+   * 截断（D-085②：SDK bash 工具保尾弃头、RESULT 信封又在末行，读头只会得到既不是开头
+   * 也没有信封的中段）。
+   */
   platformResponses?: readonly string[];
+  /**
+   * ③′ 本任务迄今平台响应里**结构化确立**的实体值：信封 `data` 的字符串叶
+   * （platform-entities.ts 提取，取值卫生与 session-entities 同一把尺）。
+   *
+   * 与 ③ 是同一批响应的两种投影，因此它**只会增加覆盖、不会新增拒绝**：③′ 的每个值都是
+   * 某条 ③ 的子串，唯一能多出来的形状是 JSON 转义叶值（原文里是 `\"`、叶值里是 `"`）。
+   * 它把"实体来源应是结构化的"落到代码里，并在将来收窄 ③ 时不丢失已确立的值。
+   */
+  platformEntities?: readonly string[];
   /**
    * ④ 本会话确立过的实体（用户亲自执行过查询 / 选定过澄清候选）——连续会话的标定补丁。
    *
@@ -159,10 +175,18 @@ export interface PlanArtifactBoundary {
   scratchDir: string;
 }
 
-/** 单条平台响应纳入包含判定的截断长度（与宿主留存 tool_result 的截断一致）。 */
-const PLATFORM_RESPONSE_LIMIT = 20_000;
-/** 纳入判定的平台响应条数上限：覆盖"目录查询拿到唯一候选、再按候选名查"这类跨计划解析。 */
-const PLATFORM_RESPONSE_MAX = 20;
+/**
+ * 单条平台响应纳入包含判定的截断长度。**保尾不保头**（D-085②）。
+ *
+ * 真正作用在会话转录上的是 SDK bash 工具的保尾弃头（truncateTail：2000 行 / 50KB），而
+ * RESULT 信封由平台在 stdout 末行发出——读头只会得到"既不是开头、也没有信封"的中段。
+ * 原注释说本常量"与宿主留存 tool_result 的截断一致"，那个截断在 turn-persistence.ts，
+ * 只作用于落库流，从不经过 haystack 读的转录——那句注释已被 D-085② 证伪。
+ *
+ * 取值 = SDK 自己的单条工具结果上限：真实结果不可能比这更长，所以本常数对真实转录是恒真的
+ * no-op，只约束调用方直接注入的超长字符串（宿主注入 platformResponses 那条路）。
+ */
+const PLATFORM_RESPONSE_TAIL_CHARS = 50_000;
 /** 纳入判定的会话实体条数上限：haystack 是判定材料不是仓库，长会话只保留最近确立的。 */
 const SESSION_ENTITY_MAX = 40;
 
@@ -179,6 +203,10 @@ const SESSION_ENTITY_MAX = 40;
  * 不在四个来源里的字符串参数一律拒绝。执行层调目录查询拿到的唯一候选名逐字来自
  * 本轮平台响应，因此天然放行，宿主不需要懂业务就能判"这是合法解析出来的"。
  *
+ * 第三来源的覆盖判据是"**本任务迄今全部**平台响应"（D-085）：条数不设上限（上限由任务
+ * 自己的形状给——平台预算门 + 执行超时），单条保尾截断。宿主自己写的拒绝理由不算平台
+ * 响应（D-086，按 toolCallId 身份在收集处排除）。
+ *
  * 第四来源（sessionEntities）是连续会话的标定补丁而非放松：它只携带用户亲自执行过/
  * 确认过的实体，flash 模型幻觉出的对象名仍然被挡（幻觉名不在任何来源里）。
  *
@@ -190,11 +218,16 @@ export function validatePlanEntities(
   sources: PlanEntitySources,
   artifactBoundary?: PlanArtifactBoundary,
 ): string | null {
-  const responses = (sources.platformResponses ?? []).slice(-PLATFORM_RESPONSE_MAX);
+  // ③ 没有条数上限：单条 ≤ 50KB（SDK 工具结果上限），条数由平台预算门与执行超时封顶
+  // （实测最大 87 次）。宿主再设一个 20 只会把早期证据静默掉出判定材料。
+  const responses = (sources.platformResponses ?? [])
+    .map((response) => response.slice(-PLATFORM_RESPONSE_TAIL_CHARS));
   const haystack = [
     sources.currentMessage,
     sources.referenceEvidence ?? '',
-    ...responses.map((response) => response.slice(0, PLATFORM_RESPONSE_LIMIT)),
+    ...responses,
+    // ③′：与 ③ 同源的结构化投影（信封 data 的字符串叶），逐条一行
+    ...(sources.platformEntities ?? []),
     ...(sources.sessionEntities ?? []).slice(-SESSION_ENTITY_MAX),
   ].join('\n');
   for (const call of calls) {
