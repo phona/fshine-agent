@@ -126,11 +126,11 @@ describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () =
     // 宿主只拼结构（"没有找到匹配X的对象。{平台措辞}我再查。"），领域提示是平台 correctForm 数据
     expect(reply).toBe(`没有找到匹配“胜利”的对象。${platformCorrectForm('ACCOUNT_SET_NOT_FOUND')}我再查。`);
     expect(reply).toContain('没有找到匹配“胜利”的对象');
-    // 指纹尺现在报得出平台 correctForm 里的**裸 operation 名**（D-098：修前点分形状判据对它
-    // 全无反应，这类泄漏一直静默穿过守卫）。这段执行语言是**平台数据**、由宿主按 L2 原样渲染，
-    // 不是模型说漏嘴——该改的是平台侧重写 correctForm（跨仓），宿主不镜像措辞。尺子看得见它是
-    // "从静默穿过变成被报出"，不是宿主新添一处 bug；跨仓修好前这里钉的是当前真实状态。
-    expect(executionLanguageFingerprints(reply)).toEqual(['operation 名']);
+    // 守卫恢复（D-102 已在平台侧修掉）：这条 correctForm 曾含裸 operation 名
+    // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；17dz
+    // 已把它改成不含 operation 名的可行动措辞，所以这里回到零命中。尺子本身没动
+    // （runtime.ts 的 EXECUTION_LANGUAGE_FINGERPRINTS 报得出这类形态，见 D-098）。
+    expect(executionLanguageFingerprints(reply)).toEqual([]);
     await assembly.close();
   });
 });
