@@ -855,7 +855,21 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   await loader.reload();
   const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
   let activePlan: { planId: string; version: number } | null = null;
-  /** 同任务内计划被拒次数：收敛保护，防 worker 反复重提被拒计划空转整回合。 */
+  /**
+   * **自上次计划成功激活以来**的提交次数（收敛保护，防 worker 反复重提空转整回合）。
+   *
+   * D-099：原注释写"同任务内计划被拒次数"，实现却对**每一跳通过形状解析与写关闭检查的
+   * 提交**自增——`PLAN ACTIVE`（成功激活）与 `PLAN PAUSED`（CLI 失败）同样计数，且成功后
+   * 不归零。于是它数的是提交次数，消息却说"已被连续拒绝 N 次"。2026-10-15 acceptance 8.1
+   * 实证：终局落在第 6 次提交上，而前 5 次里 3 次是 active、1 次 paused、只有 1 次是真拒绝；
+   * 第 6 次本身合法的方案（实体已由平台响应确立）没走到实体校验就被挡掉，worker 只能回头
+   * 向用户要已经给过的信息。
+   *
+   * 现在两件事各自归位：① 只有 `PLAN ACTIVE` 那一支归零——熔断器只放松在确凿成功上，
+   * 不放松到"没报错就算"；越权拒绝 / CLI 失败 / 平台拒绝照旧计数，那一维没有放松。
+   * ② 消息如实陈述这个数的含义（见 error-codes.ts 的 DECLINED_PLAN_LIMIT），不把提交
+   * 次数伪装成拒绝次数。
+   */
   let declinedPlans = 0;
   /** 写关闭拦截标志（D-075）：本回合拦过含写类 operation 的计划即置位，驱动据此替换终稿。 */
   let writeClosed = false;
@@ -1188,16 +1202,22 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       }));
       return { block: true, reason: `PLAN STOP\n${messageTextFor('WRITE_NOT_ENABLED')}` };
     }
-    // 同任务内计划被连续拒绝的收敛保护：计划被拒是确定性信号（实体越权/格式无效），
-    // 反复重提同一请求只会空转模型预算。超过上限就terminal block，让 worker 收手
-    // 向用户说明，而不是把回合拖到 executor 超时（实测 D1 类请求空转 5 分钟后崩溃）。
+    // 计划提交的收敛保护（D-099 起语义修正）：计划被拒是确定性信号（实体越权/平台
+    // 拒绝），CLI 失败同样说明这一跳没成——反复重提同一请求只会空转模型预算。超过上限就
+    // terminal block，让 worker 收手向用户说明，而不是把回合拖到 executor 超时（实测 D1
+    // 类请求空转 5 分钟后崩溃）。计数器是"自上次成功激活以来的提交次数"，不是拒绝次数：
+    // 唯一归零点在下面 ACTIVE 那一支，消息也照这个意思说。
     declinedPlans += 1;
     if (declinedPlans > MAX_DECLINED_PLANS_PER_TASK) {
       return {
         block: true,
         // 收敛原因收口在 error-codes.ts（三要素：码 + 期望/实际/正确形态）；
         // PLAN STOP 是协议前缀（worker 提示词认它），原因本体来自表。
-        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `已被连续拒绝 ${declinedPlans} 次`)}`,
+        // actual 如实陈述这个数是什么：自上次成功激活以来、一次都没激活成的连续提交次数
+        // （D-099）。它**不是**"被拒绝次数"——越权拒绝、CLI 失败暂停、平台拒绝都计数。
+        // 说成"已被连续拒绝 N 次"就是谎报：真实运行里 worker 撞上这条时，前几次常常是成功
+        // 激活（2026-10-15 acceptance 8.1：3 active + 1 paused + 1 declined）。
+        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`,
       };
     }
     if (options.entitySources) {
@@ -1259,6 +1279,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         activationSecret: options.planActivationSecret,
       });
       if (plan.status === 'active') {
+        // D-099：唯一的归零点。计划真的激活了（平台批准 + 本跳执行权已授予）才算一次确凿
+        // 成功——"连续未激活"就此中断，计数从零开始。熔断器只在这里放松：不放松到"没报错
+        // 就算"（PLAN PAUSED / PLAN STOP / 实体越权照旧计数，那一维没有放松）。
+        declinedPlans = 0;
         activePlan = { planId: plan.planId, version: plan.version };
         return { block: true, reason: `PLAN ACTIVE（${plan.planId} v${plan.version}）：按已提交 calls 执行；平台会逐次校验本计划。` };
       }

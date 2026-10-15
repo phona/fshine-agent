@@ -18,7 +18,7 @@ import {
   serveGateStepText,
 } from './src/pi-coding-driver';
 import type { ServeGateEvent } from './src/serve-gate';
-import { messageTextFor } from './src/error-codes';
+import { messageFor, messageTextFor } from './src/error-codes';
 import type { PlanCliRunner } from './src/plan-runtime';
 
 const roots: string[] = [];
@@ -885,6 +885,147 @@ describe('pi-coding-agent context worker', () => {
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('PLAN STOP');
     expect(verdict?.reason).toContain('停止重新提交计划');
+    worker.session.dispose();
+  });
+
+  it('D-099：只有成功激活才归零——3 次 ACTIVE + 1 次 PAUSED + 1 次 DECLINED 之后，合法方案仍能走到实体校验', async () => {
+    // 事故原形（2026-10-15 acceptance 8.1）：declinedPlans 曾对**每一跳通过形状解析与写关闭
+    // 检查的提交**自增，PLAN ACTIVE 与 PLAN PAUSED 同样计数、成功后不归零——于是它数的是提交
+    // 次数，消息却说"已被连续拒绝 N 次"。终局落在第 6 次提交上，而那一次本身合法（期间编码
+    // 已由平台 subject-list 响应确立），没走到实体校验就被挡掉，worker 只能回头向用户要已经
+    // 给过的信息。
+    // 这里钉住归零点：只有 PLAN ACTIVE 那一支归零（熔断器不放松到"没报错就算"——暂停与
+    // 越权照旧计数，见下一条用例）。
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-decline-reset-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    let evaluates = 0;
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') {
+        return { code: 0, stdout: JSON.stringify({ taskId: 'task_reset', planId: null, version: null, status: 'none' }), stderr: '' };
+      }
+      if (args[1] === 'evaluate') {
+        evaluates += 1;
+        // 第 4 跳：CLI 失败（exit 3 且 stdout 解析不出裁决）→ 驱动走 PLAN PAUSED 分支。
+        if (evaluates === 4) return { code: 3, stdout: '', stderr: 'platform offline' };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          taskId: 'task_reset', planId: `plan_${evaluates}`, version: evaluates, decision: 'execute',
+          estimate: { calls: 1, seconds: 1 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
+        }),
+        stderr: '',
+      };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'decline reset test',
+      sessionId: 'task_reset',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      // 当前消息只给对象名：期间编码来自平台响应（与 8.1 同型）
+      entitySources: { currentMessage: '查幻辰财税已保存的凭证' },
+    });
+    // 本任务早前的目录响应：202606 由此逐字确立（平台响应是合法实体来源）
+    worker.session.agent.state.messages = [{
+      role: 'toolResult',
+      toolCallId: 'call_subject_list',
+      content: [{ type: 'text', text: 'RESULT {"op":"voucher.subject-list","data":{"periods":["202606"]}}' }],
+      timestamp: 1,
+    } as never];
+    const submit = (id: string, command: string) => worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id, type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+    const legal = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
+    const rogue = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
+
+    // 3 次成功激活 + 1 次 CLI 失败暂停（旧语义下计数器此刻已经是 4）
+    for (let i = 0; i < 3; i += 1) {
+      expect((await submit(`call_active_${i}`, legal))?.reason).toContain('PLAN ACTIVE');
+    }
+    expect((await submit('call_paused', legal))?.reason).toContain('PLAN PAUSED');
+    // 1 次实体越权拒绝：整段历史里唯一一次真"被拒"
+    expect((await submit('call_rogue', rogue))?.reason).toContain('ENTITY_OUT_OF_SCOPE');
+
+    // 第 6 跳：合法方案。旧语义下计数器 = 6 > 5，会在这里被终局挡掉（evaluate 都不会被调用）；
+    // 新语义下三次激活已归零，它走到实体校验并通过，真的激活。
+    const verdict = await submit('call_legal', legal);
+    expect(verdict?.reason).not.toContain('DECLINED_PLAN_LIMIT');
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
+    // 走到平台了：3 次前期激活 + 1 次暂停的失败调用 + 这一次 = 5 次 evaluate
+    expect(evaluates).toBe(5);
+    worker.session.dispose();
+  });
+
+  it('D-099：终局消息如实陈述计数——混合历史下那个数是"连续未激活的提交次数"，不冒充拒绝次数', async () => {
+    // 计数器数的是提交次数：越权拒绝、CLI 失败、平台拒绝都计数，只有成功激活归零。
+    // 旧措辞「已被连续拒绝 N 次」在这段历史上是谎——真实拒绝只有 3 次，而它会说 8 次。
+    // 新措辞只陈述这个数到底是什么，worker 拿到的数字与它自己的经历一一对得上。
+    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-decline-message-'));
+    roots.push(root);
+    const modelConfig = await fakeModelRuntime();
+    let evaluates = 0;
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') {
+        return { code: 0, stdout: JSON.stringify({ taskId: 'task_msg', planId: null, version: null, status: 'none' }), stderr: '' };
+      }
+      if (args[1] === 'evaluate') {
+        evaluates += 1;
+        // 第 3、5 次 evaluate（暂停跳）CLI 失败：PLAN PAUSED，不是拒绝
+        if (evaluates === 3 || evaluates === 5) return { code: 3, stdout: '', stderr: 'platform offline' };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          taskId: 'task_msg', planId: `plan_${evaluates}`, version: evaluates, decision: 'execute',
+          estimate: { calls: 1, seconds: 1 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
+        }),
+        stderr: '',
+      };
+    };
+    const worker = await createPiCodingWorkerSession({
+      cwd: root,
+      skillRoots: [],
+      systemPrompt: 'decline message test',
+      sessionId: 'task_msg',
+      agentDir: path.join(root, '.fshine-agent'),
+      modelConfig,
+      planCliRunner,
+      entitySources: { currentMessage: '查幻辰财税已保存的凭证' },
+    });
+    worker.session.agent.state.messages = [{
+      role: 'toolResult',
+      toolCallId: 'call_subject_list',
+      content: [{ type: 'text', text: 'RESULT {"op":"voucher.subject-list","data":{"periods":["202606"]}}' }],
+      timestamp: 1,
+    } as never];
+    const submit = (id: string, command: string) => worker.session.agent.beforeToolCall?.({
+      assistantMessage: {} as never,
+      toolCall: { id, type: 'toolCall', name: 'bash', arguments: { command } } as never,
+      args: { command },
+      context: {} as never,
+    });
+    const legal = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
+    const rogue = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
+
+    // 先两次成功激活：计数器归零，后面的计数从这两次之后算起
+    expect((await submit('call_active_0', legal))?.reason).toContain('PLAN ACTIVE');
+    expect((await submit('call_active_1', legal))?.reason).toContain('PLAN ACTIVE');
+    // 之后 6 跳混合 streak（3 次暂停 + 3 次越权拒绝），第 6 跳撞上限
+    const streak = ['call_paused_0', 'call_rogue_0', 'call_paused_1', 'call_rogue_1', 'call_paused_2', 'call_rogue_2'];
+    const reasons = streak.map((id, index) => submit(id, index % 2 === 0 ? legal : rogue));
+    const verdict = (await Promise.all(reasons)).at(-1);
+
+    // 措辞与数字逐字钉死（码表唯一来源 messageFor）：6 = 上次激活以来连续未激活的提交次数
+    expect(verdict?.reason).toBe(`PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', '连续 6 次提交方案均未激活')}`);
+    // 不冒充拒绝次数：这段历史里真拒绝是 3 次、暂停是 3 次，消息一个都不称作"拒绝"
+    expect(verdict?.reason).not.toContain('拒绝');
     worker.session.dispose();
   });
 

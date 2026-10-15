@@ -285,9 +285,11 @@ describe('离线全链 e2e：被拒计划收敛保护（DECLINED_PLAN_LIMIT）',
         expect(verdicts[i]?.reason).not.toContain('DECLINED_PLAN_LIMIT');
       }
       // 第 6 次：超过 MAX_DECLINED_PLANS_PER_TASK=5，收敛为 PLAN STOP——
-      // 话术与计数逐字钉死（码表唯一来源 messageFor）
+      // 话术与计数逐字钉死（码表唯一来源 messageFor）。D-099：计数是"自上次成功激活以来
+      // 的提交次数"（本用例 6 次全是越权拒绝、零激活，所以它同时就是真实拒绝次数），不再
+      // 说成"已被连续拒绝 N 次"——那种措辞在混合历史下是谎。
       expect(verdicts[5]?.block).toBe(true);
-      expect(verdicts[5]?.reason).toBe(`PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', '已被连续拒绝 6 次')}`);
+      expect(verdicts[5]?.reason).toBe(`PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', '连续 6 次提交方案均未激活')}`);
       // 第 6 次不再产生新计划：实体校验在 evaluate 之前，平台计划门全程未被咨询
       expect(counter.evaluates).toBe(0);
       expect(Object.keys(ledger().plans ?? {})).toEqual([]);

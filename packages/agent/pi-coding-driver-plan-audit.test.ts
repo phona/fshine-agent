@@ -31,7 +31,7 @@ import type { Model } from '@earendil-works/pi-ai/compat';
 import { createPiCodingTurnDriver, createPiCodingWorkerSession, type PiCodingWorkerSession } from './src/pi-coding-driver';
 import type { DriverMessage, TurnDriver, TurnDriverInput } from './src/driver';
 import type { ServeGateEvent } from './src/serve-gate';
-import { messageTextFor } from './src/error-codes';
+import { messageFor, messageTextFor } from './src/error-codes';
 import type { PlanCliRunner } from './src/plan-runtime';
 import type { AccessSemantics, OperationSemantics } from './src/operation-labels';
 import type { PlanEntitySources } from './src/turn-contract';
@@ -322,7 +322,10 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
 
     // 前 5 次逐次暴露同一个越权参数，第 6 次收敛
     expect(reasons.slice(0, 5).every((reason) => reason?.includes('ENTITY_OUT_OF_SCOPE'))).toBe(true);
-    expect(reasons[5]).toContain('DECLINED_PLAN_LIMIT');
+    // 措辞与数字逐字钉死（码表唯一来源 messageFor）。这一段历史里 6 次全是越权拒绝、
+    // 零激活，所以"连续 6 次提交方案均未激活"里的 6 同时就是真实拒绝次数——数字与事实
+    // 一致正是 D-099 要的诚实（混合历史下它是提交次数，见 pi-coding-driver.test.ts 那条）。
+    expect(reasons[5]).toBe(`PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', '连续 6 次提交方案均未激活')}`);
     // 每次提交一行：6 次提交 6 行，一行不少
     expect(events).toHaveLength(6);
     expect(events[5]?.reason).toBe(reasons[5]);
