@@ -102,7 +102,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **机械守卫**：B 审计清单（每条失败路径归这两类之一）+ 熔断上限测试。
 
-**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，计划被连续拒绝即收敛）。
+**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，**自上次计划成功激活以来连续未激活的提交次数**达上限即收敛——D-099 语义修正：原注释与消息都写"连续拒绝"，实现却对每一跳通过形状解析与写关闭检查的提交自增、成功后不归零，数的是提交次数；现在唯一归零点在 `PLAN ACTIVE` 那一支，消息也照实说「连续 N 次提交方案均未激活」。残余代价：从不激活但连提 6 次以上的 worker 仍会被挡，那是熔断器的设计行为）。
 
 **闭环判据**：任何新失败路径进审计清单；新增无界回路即红。
 
