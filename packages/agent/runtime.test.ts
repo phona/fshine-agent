@@ -2069,6 +2069,43 @@ describe('createTaxAgentRuntime', () => {
     expect(executionLanguageFingerprints('该请求已被拒绝')).toEqual([]);
   });
 
+  // ── 指纹尺的两个盲区（D-098）────────────────────────────────────────────
+  //
+  // 2026-10-14 真实模型探针实证的两处静默穿过：尺子只认"带命名空间前缀的点分 operation 名"与
+  // "全大写错误码"，另外两类形态从未被守过——
+  //   · A4 第 1 轮回的是**裸名**（宿主把平台 correctForm 数据原样拼进澄清问句，见 error-codes.ts）：
+  //     "先用 search-account-sets 搜出平台规范名再查"——点分形状判据对它全无反应；
+  //   · B1 第 4 轮回的是**小写错误码**："平台返回 not_found：…"——全大写判据对它全无反应。
+  // 修法：operation 名那条兼收 PLATFORM_OPERATIONS 的真名集合（含去掉前缀的裸名，宿主本来就
+  // 持这张表，不新立第二份真相源）；错误码那条放宽到大小写都收。两类实证原文在此钉住。
+
+  it('指纹盲区：裸 operation 名与小写错误码不再静默穿过守卫（D-098 两条实测原文）', () => {
+    // A4 原句：平台 correctForm 数据进用户消息（探针 probe-fshine-probe-V0O1w9.json 第 1 轮）
+    expect(executionLanguageFingerprints('没有找到匹配“胜利”的对象。先用 search-account-sets 搜出平台规范名再查，不猜简称我再查。')).toEqual(['operation 名']);
+    // B1 原句：信封 status 是小写码（同文件第 4 轮）
+    expect(executionLanguageFingerprints('**结果**：该期间无应收账款余额数据（平台返回 not_found：期间 202609 在账套「新兴五金」科目 1122 下无余额数据）')).toEqual(['错误码']);
+    // 同族形态照旧命中：needs_input 是另一个信封 status
+    expect(executionLanguageFingerprints('平台返回 needs_input，还要更多信息')).toEqual(['错误码']);
+    // 裸名不带前缀也命中；前缀写法（点分）同时被形状判据收
+    expect(executionLanguageFingerprints('先用 search-account-sets 搜出平台规范名再查')).toEqual(['operation 名']);
+    expect(executionLanguageFingerprints('接口 finance.search-account-sets 的返回')).toEqual(['operation 名']);
+  });
+
+  it('指纹盲区修后不回归：五类判据照旧命中，id 家族不误红（D-098）', () => {
+    // 五类判据各留一条（点分名 / 全大写码 / 脚本路径 / JSON / 内部控制词）
+    expect(executionLanguageFingerprints('依据 voucher.query-saved 的返回')).toEqual(['operation 名']);
+    expect(executionLanguageFingerprints('平台返回 PERIOD_NO_DATA，说明该期间没有数据。')).toEqual(['错误码']);
+    expect(executionLanguageFingerprints('详见 src/voucher/scripts/fill.js 的说明')).toEqual(['脚本路径']);
+    expect(executionLanguageFingerprints('候选清单 candidates: 为空，原文 {}')).toEqual(['JSON 片段']);
+    expect(executionLanguageFingerprints('后续因熔断停止')).toEqual(['内部控制词']);
+    // 防误伤：小写支只收纯字母段——task_<uuid> 含数字与连字符，是 id 家族，归泄漏基线的
+    // taskId 判据守（e2e 污染塑形 ⑤ 同款断言：指纹尺不碰它）
+    expect(executionLanguageFingerprints('执行编号 task_3f9a1c72-88d5-4b6a-9c2e-2f7a91b3c4d5 已留痕，可凭它续查。')).toEqual([]);
+    expect(executionLanguageFingerprints('会话 session_20260901 已建立')).toEqual([]);
+    // 防误伤：6 位大写字数字确认码没有下划线（e2e 污染塑形 ② 同款断言）
+    expect(executionLanguageFingerprints('录入提案已备好：回复「确认 AB3CDE」即可立即写入平台。')).toEqual([]);
+  });
+
   // ── usefulWorkerNote / composeClarificationReply（runtime 私有判据及其直接使用者）──
   //
   // 方案 2 分批 1 曾把这两个函数搬进 turn-relay.ts，但那会造成 runtime.ts ↔ turn-relay.ts

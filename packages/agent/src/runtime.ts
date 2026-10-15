@@ -34,7 +34,7 @@ import {
   scheduleMemoryConsolidation,
 } from './turn-persistence';
 import { stripFootprint } from './text-hygiene';
-import type { SelectionClarification } from './platform-contract';
+import { PLATFORM_OPERATIONS, type SelectionClarification } from './platform-contract';
 import { clarificationTextFor, messageTextFor } from './error-codes';
 import {
   createPlatformHealthTracker,
@@ -75,55 +75,55 @@ export const RESUMED_PLAN_NOT_EXECUTED = messageTextFor('RESUMED_PLAN_NOT_EXECUT
 const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
 
 /**
- * 执行语言指纹：最终回复里出现任意一条，就说明"模型在翻译执行语言"（2026-09-27 Stage 3
- * 手机实测的形态——一次结构化歧义被翻译成 1201 字符技术报告）。判据都是**形状**，
- * 不是内容嗅探：
+ * 执行语言指纹：最终回复里出现任意一条，就说明"模型在翻译执行语言"（2026-09-27 Stage 3 实测：一次
+ * 结构化歧义被翻译成 1201 字符技术报告）。判据都是**形状**，不是内容嗅探：
  *   · 脚本路径（`src/...js`）：平台实现细节，编排层禁运（泄漏 lint 同款名单）；
- *   · 错误码形态（全大写且含下划线，如 ACCOUNT_SET_AMBIGUOUS）：要求含下划线是防误伤——
- *     正常英文词不会全大写，YYYYMM 这类编码没有下划线；
+ *   · 错误码形态（下划线连接的多段码：全大写 ACCOUNT_SET_AMBIGUOUS / 全小写 not_found）：
+ *     含下划线是防误伤——正常英文词不会全大写，YYYYMM 这类编码没有下划线；小写支只收纯字母段
+ *     （平台状态词），含数字/连字符的串（task_3f9a1c72-…）是 id 家族，归泄漏基线守（D-098）；
  *   · JSON 片段（`candidates:` 或花括号）：信封/方案原文复读；
- *   · operation 名（小写点分，如 finance.query-receivables）：2026-09-27 第三波实测——
- *     回复里"数据来源：平台只读查询接口 finance.query-receivables"，用户不需要知道
- *     接口标识符（语域契约①，见 context.ts worker 提示词）；
+ *   · operation 名（小写点分，如 finance.query-receivables）：第三波实测——回复里"数据来源：
+ *     平台只读查询接口 finance.query-receivables"，用户不需要知道接口标识符（语域契约①）；
  *   · 内部控制词（额度/配额/熔断/计划门/拒绝上限/重试上限）：同波实测——"本次已用满
  *     平台的查询计划额度"被当成说明交给用户，那是宿主计划门的内部控制状态（语域契约②）。
  *
  * operation 名的防误伤（误伤比漏报更糟——探针误红一次，整条断言就没人信了）：
  * 形状要求"小写字母开头 + 至少一个点 + 点后小写连字符段"三条同时成立——
- *   · 正常英文句子没有这个形状："e.g."/"i.e." 没有连字符段；"v1.2"/"no.1" 点后是数字；
- *   · 名称里的点：中文名不以小写字母开头（"幻辰.财税"直接不匹配），点后的中文段
- *     也不是 [a-z]；
- *   · YYYYMM（202609）没有点；日期/时间（2026.09、14.30）以数字开头。
- * 连字符段必须在**点之后**（lookahead 逐段判定）："query-receivables.js" 这类脚本名
- * 连字符在点前，不命中本模式（它由脚本路径模式与泄漏 lint 的 .js 名单各自守）。
- * 白名单是逃生阀：形状命中但经人工判定不是执行语言的 token 才能进，每条附理由；
- * 当前为空——已知误伤家族全部被形状要求挡在门外。
+ *   · "e.g."/"i.e." 没有连字符段；"v1.2"/"no.1" 点后是数字；YYYYMM（202609）没有点，
+ *     日期/时间（2026.09、14.30）以数字开头；
+ *   · 中文名不以小写字母开头（"幻辰.财税"直接不匹配）、点后中文段也不是 [a-z]；
+ *   · 连字符段必须在**点之后**（lookahead 逐段判定）："query-receivables.js" 连字符在点前，
+ *     不命中本模式（归脚本路径模式与泄漏 lint 的 .js 名单各自守）。
+ * 白名单是逃生阀：形状命中但经人工判定不是执行语言的 token 才能进，每条附理由；当前为空——已知误伤家族全部被形状要求挡在门外。
+ * 第二判据（下表）兼收平台注册名本身：形状只认带命名空间前缀的写法，实测回复漏的是**裸名**"先用 search-account-sets 搜出平台规范名再查"（D-098）。
  *
  * 内部控制词为什么是内部控制（不是业务词）：额度/配额是宿主计划门的限额记账，
  * 熔断/计划门是执行流的控制机制，拒绝上限（MAX_DECLINED_PLANS_PER_TASK）/重试上限
  * 是收敛保护参数——它们描述的是"宿主怎么管模型"，没有一个是用户做决策需要的事实。
  * 用户可行动的版本是"本次查询未能继续 + 请重新发起"（语域契约②），机制一词不提。
  *
- * 这把尺有两处使用者：worker 说明的准入（usefulWorkerNote：带指纹的"说明"是协议材料，
- * 不附在状态文案后面）与真实模型探针的断言（probe-real-agent.ts 对歧义/not_found 用例）。
- * 导出一处定义，两边认同一份。
+ * 这把尺有两处使用者：worker 说明的准入（usefulWorkerNote：带指纹的"说明"是协议材料，不附在状态
+ * 文案后面）与真实模型探针的断言（probe-real-agent.ts 对歧义/not_found 用例）。导出一处定义，
+ * 两边认同一份。
  */
 /**
- * operation 名指纹的白名单（逃生阀，不是预设备份）：形状命中但确认真实回复里会出现、
- * 且不是执行语言的 token 才能进，每条注释为什么合法。收词纪律与业务词预算同族——
- * 只收有真实场景证据的项；当前为空（已知误伤家族全被形状要求挡掉，见上方防误伤注释）。
- * 声明须早于指纹表：表里 operation 名那一项挂的是它本身（同一处定义，不复制）。
+ * operation 名指纹的白名单（逃生阀，不是预设备份）：形状命中但确认真实回复里会出现、且不是执行
+ * 语言的 token 才能进，每条注释为什么合法；当前为空（已知误伤家族全被形状挡掉，见上）。声明须
+ * 早于指纹表：表里 operation 名那一项挂的是它本身（同一处定义，不复制）。
  */
 const OPERATION_NAME_WHITELIST: ReadonlySet<string> = new Set<string>();
+/** 平台注册名的判据源（含裸尾段，见上方"第二判据"）：单一来源 PLATFORM_OPERATIONS——宿主本来就持这张表（L2），不另立第二份名单；\b 边界防半个 token 命中。 */
+const REGISTERED_OPERATION_ALTERNATION = Object.values(PLATFORM_OPERATIONS).flatMap((n) => [...new Set([n, n.slice(n.indexOf('.') + 1)])]).map((t) => String.raw`\b${t.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\b`).join('|');
 
 export const EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp; whitelist?: ReadonlySet<string> }> = [
   { label: '脚本路径', pattern: /src\/[^\s）)，,，；;]*\.js/ },
-  { label: '错误码', pattern: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/ },
+  { label: '错误码', pattern: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b|\b[a-z]+(?:_[a-z]+)+\b/ },
   { label: 'JSON 片段', pattern: /candidates\s*:|[{}]/ },
   {
     label: 'operation 名',
-    // lookahead 先验"点后存在小写连字符段"，本体再匹配"小写字母开头的点分 token"。
-    pattern: /\b(?=(?:[a-z0-9-]*\.)+[a-z0-9-]*-)[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+\b/,
+    // lookahead 先验"点后存在小写连字符段"，本体再匹配"小写字母开头的点分 token"；再 ∪ 平台
+    // 注册名（含裸尾段，REGISTERED_OPERATION_ALTERNATION 派生，单一来源见上方第二判据）。
+    pattern: new RegExp([String.raw`\b(?=(?:[a-z0-9-]*\.)+[a-z0-9-]*-)[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+\b`, REGISTERED_OPERATION_ALTERNATION].join('|')),
     whitelist: OPERATION_NAME_WHITELIST,
   },
   { label: '内部控制词', pattern: /额度|配额|熔断|计划门|拒绝上限|重试上限/ },

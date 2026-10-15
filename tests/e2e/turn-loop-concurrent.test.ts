@@ -336,7 +336,9 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       expect(first).not.toContain('这一步没有查到数据');
       expect(first).not.toContain('700 元');
       expect(first).not.toContain('不应外发');
-      expect(executionLanguageFingerprints(first)).toEqual([]);
+      // 指纹尺报得出平台 correctForm 里的**裸 operation 名**（D-098，修前静默穿过守卫）——同 C3：
+      // 平台数据经宿主原样渲染，不是模型说漏嘴；该改的是平台侧 correctForm 措辞（跨仓）。
+      expect(executionLanguageFingerprints(first)).toEqual(['operation 名']);
       // 两步都委派了（第 2 步真调了平台），第 3 步被委派入口的守卫拦住
       expect(worker.taskIds).toHaveLength(2);
 
