@@ -35,13 +35,13 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- **真违例（3 处，扩词后即被守卫抓到，须清）**：
-  - `packages/agent/src/runtime.ts:1539` — `'你是企业财务助手和面向用户的主 Agent。'`（**财务**）。Lane C 本波清。
+- **真违例（3 处，扩词后即被守卫抓到）——均已清（2026-10-16 对账核实，守卫 = `packages/agent/docs-reality.test.ts`）**：
+  - ~~`packages/agent/src/runtime.ts:1539` — `'你是企业财务助手和面向用户的主 Agent。'`（**财务**）~~ **已清**：persona 现为「面向用户的主 Agent」（runtime.ts 的 `SYSTEM_PROMPT`），「财务助手」宿主 src 零命中。行号 1539 是拆分前旧文件的引用（现文件 1221 行）——行号引用禁令见执行纪律 4。D-001 已关。
   - ~~`packages/agent/src/error-codes.ts:158` — `text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。'`（**税号**；直角引号 `“”` 为原文）。Lane C 本波清。~~ **已关**（2026-09-27 Wave 2 Lane D）：模板退化为纯结构 `没有找到匹配“{query}”的对象。{hint}我再查。`，`{hint}` 由平台信封 `error.correctForm` 作为**平台下发**数据填充；宿主只存"信封没带时的兜底"（挂"遗留待清"）。见 debt-ledger D-002。
-  - `packages/agent/src/context.ts:360` — `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**）。同时是 L4 违例，Wave 3 结构性了结。
+  - ~~`packages/agent/src/context.ts:360` — `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**），同时是 L4 违例~~ **已清**（2026-10-14 D 波 `3e5a36c` 写路径收敛为唯一形态）：legacy 摘要渲染与 `ChangeIntentRecord` 业务字段整体删除，全仓非测试零命中。D-003/D-030 已关。
 - **防御排除（不得删、须挂标签）**：
   - `memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE`（第 21 行）、`ACCOUNT_SET_RE`（22）、`BALANCE_RE`（23）、`CURRENCY_AMOUNT_RE`（24）、`FINANCIAL_RESULT_RE`（25）。删任何一条 = 记忆提取器对财务事实变聋。
-  - `hasFinancialFigure`（`runtime.ts:1260` 定义，用于 771/852/888/1277 的出口校验）。
+  - `hasFinancialFigure`（runtime.ts 定义，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。
   - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts:72`，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
 
 **闭环判据**：**非防御命中 = 0；防御项 100% 挂"防御排除"标签**（`hasFinancialFigure`、五条正则逐条在册）。
@@ -74,7 +74,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- **写确认摘要**：`context.ts` 的 `proposal_created` 分支（第 355–362 行）由宿主渲染提案摘要——随 L4 一并迁到执行层产出的不透明 payload。
+- ~~**写确认摘要**：`context.ts` 的 `proposal_created` 分支由宿主渲染提案摘要~~ **已关**（2026-10-14 D 波 `3e5a36c`）：legacy 摘要渲染随写路径收敛整体删除；用户可见摘要 = 平台 `summaryText` 原样 + 宿主通用确认行（守卫 = `docs-reality.test.ts` 的 legacy 痕迹零命中判据）。
 - ~~**F4 残留**：回合真有过执行时，出口校验被跳过，模型复读的协议 JSON 仍可能外发~~ **已关**（2026-09-27 Wave 2 Lane D）：`runtime.ts` 的复读检测（`looksLikeProtocolMaterial`，协议 JSON 首字段 recorded/step/next 的形状判据）**不依赖 execution**——有执行也拦，用宿主步骤事实/needs 线索替换，守夜事件 `execution_language_leak`（D-020；判据修订：未采纳"全量过 executionLanguageFingerprints 硬拦"，理由见台账）。
 
 **闭环判据**：全部状态类回复走**码表 + 信封数据**（模型不发音）；F4 补齐出口校验（已达成：复读检测不依赖 execution，`runtime.test.ts` F4.1–F4.4 钉住）。
@@ -85,12 +85,14 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：写提案的 schema / 域校验 / 确认摘要 / commit 读回**全归 17dz**；fshine 只持**不透明 payload** + 一套**通用确认状态机**（确认码 / 有效期 / principal / 计划版本绑定）。业务字段一旦住进编排层，加新业务域时这一层就要改——正是分层要消灭的东西。
 
-**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」。
+**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」＋ `docs-reality.test.ts` 的 legacy 痕迹零命中判据（借贷合计 / `voucher.batch` / `finalizeProposal` / 退役开关）。
 
-**当前违例**：
+**当前违例**：**编排层侧已清**（2026-10-14 D 波 `3e5a36c`「写路径收敛为唯一形态」：`FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 退役，`finalizeProposal` / `ChangeIntentRecord` 业务字段 / 借贷合计渲染整体删除；2026-10-16 对账核实全仓非测试零命中）：
 
-- **`ChangeIntentRecord`**（`packages/contracts/src/store.ts`）：`kind: 'voucher.batch'`（第 238 行）、`accountSet`（239）、`period`（240）、`summary: { count; debit; credit }`（243）——业务字段住了编排层。
-- **`context.ts` 渲染借贷合计**（第 360 行）：写确认摘要由编排层拼装（同 L1 / L3 违例）。
+- ~~`ChangeIntentRecord`（`packages/contracts/src/store.ts`）持 `voucher.batch` / `accountSet` / `period` / `summary` 业务字段~~ 已删。
+- ~~`context.ts` 渲染借贷合计（第 360 行）~~ 已删（同 L1 / L3）。
+
+**L4 整体保持开放**：闭环判据的 §17 写路径 latent 七项（D-031，17dz 侧执行器的数据正确性债）仍未闭环——编排层侧不再有违例，不等于写路径可以开放。
 
 **闭环判据**：走查通过 + 写 e2e 改写全绿 + **§17 写路径 latent 七项在新结构里有守卫**——`rule-landing.md:326` 列的 S2（fill.js 批量契约只用 `contracts[0].accountSet`→凭证落错账套）、S3（gen-from-journal 账户下拉子串 + `.first()` 多候选不歧义）、S4（`--direction`/`--date-mode` 无枚举白名单，空转报"无符合条件" + exit 0）、S5③（fill `--start-no` NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串 + stripCity 静默采纳简称）、S10（parse-tianren-bills creditRules 未命中静默回落 1122）。
 
@@ -116,8 +118,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- `packages/mcp-fake`、`packages/mcp-host`：`src/` 空、全仓零引用。
-- `apps/server/reply.ts` 假数据彩蛋（第 9–16 行）：命中 `/发图|测试图片|图片/` 即返回硬编码 `renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200])` + "幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)"。
+- ~~`packages/mcp-fake`、`packages/mcp-host`：`src/` 空、全仓零引用。~~ **已清**（目录整体删除；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-050 已关。
+- ~~`apps/server/reply.ts` 假数据彩蛋（第 9–16 行）：命中 `/发图|测试图片|图片/` 即返回硬编码 `renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200])` + "幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)"。~~ **已清**（文件整体删除，`renderBarChartPng`/"模拟数据" 全仓非测试零命中；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-051 已关。
 - `step-text.ts` 6 个退役工具名死分支：`search_account_sets`/`get_current_accounting_period`/`list_vouchers`/`inspect_account_set`/`search_references`/`get_login_status`（现挂在 leak-lint 的字面量 if 白名单，`platform-leak-lint.test.ts:221-226`，属"遗留待清"）。
 - 17dz 仓根 465KB 会话日志：`codex-session-01a0bd75-38f6-79f3-91ed-617ba8fe5ce9.md`（465137 字节，**已被 git 跟踪**）。
 - `.env.real` 残留（fshine 仓根，1635 字节，已被 `.gitignore`——本地沉积、非主干，但有泄露面）。
@@ -180,3 +182,4 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 17dz `dz-env` 过渡期双读。证伪项：初核曾把 17dz `docs/architecture.md:74` 的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
 2. **判据若写得比机制真相更干净，执行者会把防御机制当违例删掉。** 所以标签制度先于清单、验收时逐条核对标签——一条命中该挂"防御排除"还是"警职执法"，删了它会不会让某道防线变聋 / 变瞎，是唯一裁决问题。
 3. **每波只 revert 该波 commit，宪章与台账保留。** 债务状态是快照不是负担；宪章跨波有效，不随单波回退消失。
+4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零，本次对账实证四起（工具面头注释两度未跟、`runtime.ts:1539` 指向拆分前文件、`runtime.ts:1260` 实为 1169、`context.ts:360` 指向已删违例）。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理另登记台账 D-104。

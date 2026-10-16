@@ -3,8 +3,13 @@
  *
  * The main Agent continues to use the small pi-agent-core driver.  This
  * driver is deliberately only for trusted context workers: the SDK owns the
- * cwd-bound read/bash/grep/find/ls tools and its headless AgentSession, while
- * fshine still owns task persistence and the parent session.
+ * cwd-bound native tools (read/ls/bash/write/edit — grep/find are deliberately
+ * not granted so code scanning has no entry; the write face is fenced in
+ * serve-gate's decideFileWrite) and its headless AgentSession, while fshine
+ * still owns task persistence and the parent session.  The tool list is pinned
+ * by WORKER_TOOLS and asserted in docs-reality.test.ts: the prose header had
+ * drifted from the real list twice without being noticed (2026-10-16 文档对账
+ * 实证), which is why the list is now a named constant.
  */
 import {
   type AgentSession,
@@ -34,6 +39,16 @@ import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract
  * 让 worker 收手向用户说明缺什么。5 次宽容正常试错，合法流程不会触碰。
  */
 const MAX_DECLINED_PLANS_PER_TASK = 5;
+
+/**
+ * Worker 的原生工具面（双写断言的锚点，docs-reality.test.ts 钉住本清单）：
+ * grep/find 刻意不授——代码扫描失去工具入口，知识面经 read 白名单可达；
+ * write/edit 只准写本轮 scratchDir（机械边界在 serve-gate 的 decideFileWrite，
+ * 与 edit 共用一份判据）。改工具面必须同时改这里与 docs-reality 的断言——
+ * 本文件的头注释曾与真实清单两度漂移未跟（2026-10-16 文档对账实证），
+ * 自这份常量起清单只有一个来源。
+ */
+export const WORKER_TOOLS = ['read', 'ls', 'bash', 'write', 'edit'] as const;
 
 /**
  * 本轮 scratch 位置（`tmp/<requestId>`）：worker 唯一可写位置。
@@ -954,7 +969,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 每次还可能引入新错。edit 是精确文本替换，一次替换即改完那一处。
     // 边界与 write 完全同一组（serve-gate 的 decideFileWrite 一份判据）：只准
     // tmp/<requestId>/、禁敏感路径、有体积上限——加工具不等于放写入面。
-    tools: ['read', 'ls', 'bash', 'write', 'edit'],
+    tools: [...WORKER_TOOLS],
     customTools: [createBashToolDefinition(options.cwd, {
       spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
     }) as never],

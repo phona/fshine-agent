@@ -37,7 +37,7 @@
 | F4 | **变更集最小化 + 禁止混波**：一个 commit 一件事，三波不混 commit | `refactor(agent):` 的 diff 只能有 move；回归才能归因 |
 | F5 | **红先 revert 不原地修** | 测试红就 revert 该 commit，不在新 commit 里叠补丁（宪章执行纪律 3） |
 | F6 | **真实模型探针基线**：涉及提示词/申报/澄清的改动，改前存 json 基线、改后同参数复跑逐轮 diff | 判定标准预先写死（见各波） |
-| F7 | **文档同步是验收项** | v0-architecture §10 / debt-ledger / rule-landing 同提交更新 |
+| F7 | **文档同步是验收项** | v0-architecture §10 / **architecture-laws「当前违例」节** / debt-ledger / rule-landing 同提交更新；关账与代码同一 commit，`packages/agent/docs-reality.test.ts` 双向对账（已关判据保持 + 防御排除在场，2026-10-16 落地） |
 
 ---
 

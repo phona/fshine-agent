@@ -17,7 +17,7 @@ export interface LoadConfigOptions {
 const DEFAULT_YAML_PATH = fileURLToPath(new URL('../../../config/agent.yaml', import.meta.url));
 const DEFAULT_PORT = 3000;
 const DEFAULT_CALLBACK_PATH = '/wecom/callback';
-// 24h:财务助手"上午查账、下午接着问"是常态,分钟级 TTL 会造成静默失忆。
+// 24h:用户"上午查账、下午接着问"是常态,分钟级 TTL 会造成静默失忆。
 // 过期本身不做清零(agent 层软着陆:压缩成摘要种子续会话),TTL 只决定"多久进入软着陆"。
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 
