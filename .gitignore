@@ -17,3 +17,6 @@ config/agent.yaml
 .runtime/
 .env.real
 .stepcode/
+
+# ZCode 客户端自动生成的工具忽略清单（会自我再生成，内容从 .gitignore 同步）
+.zcodeignore
