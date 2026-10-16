@@ -13,7 +13,7 @@
     "ask": "node --env-file=.env --import tsx scripts/ask.ts",
     "smoke:wecom": "node --env-file=.env --import tsx scripts/smoke-wecom.ts",
     "smoke:commit:mock": "node --env-file=.env --import tsx scripts/mock-commit-smoke.ts",
-    "eval:probe": "node --env-file=.env --import tsx scripts/probe-real-agent.ts --only=A1,A2,A3,A4,A5,B1,Y2",
+    "eval:probe": "node --env-file=.env --import tsx scripts/probe-real-agent.ts --only A1,A2,A3,A4,A5,B1,Y2",
     "eval:acceptance": "node --env-file=.env --import tsx scripts/acceptance.ts --only=5.1,5.1b,5.2,5.3",
     "eval:score": "node --env-file=.env --import tsx scripts/eval/score.ts --judge",
     "eval:baseline": "node --env-file=.env --import tsx scripts/eval/score.ts --judge --write-baseline",

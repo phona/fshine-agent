@@ -29,24 +29,24 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
   const baselineCase = { dims: { ...ZERO_DIMS } };
 
   it('全零 dims + ok → 通过；任一维超上限 → 该维红（变异口径：比较符反转则此断言红）', () => {
-    const pass = evaluateProbeCase(probeRow(), baselineCase);
+    const pass = evaluateProbeCase('probe-X', probeRow(), baselineCase);
     expect(pass.pass).toBe(true);
     expect(pass.checks).toHaveLength(5); // 四维 + 探针ok
-    const worse = evaluateProbeCase(probeRow({ dims: { ...ZERO_DIMS, presentationHygiene: 1 } }), baselineCase);
+    const worse = evaluateProbeCase('probe-X', probeRow({ dims: { ...ZERO_DIMS, presentationHygiene: 1 } }), baselineCase);
     expect(worse.pass).toBe(false);
     expect(worse.checks.find((check) => check.name === '卫生违例')).toMatchObject({ pass: false, expected: '≤0', actual: '1' });
   });
 
   it('「不劣化」档：基线上限 1 时，1 过 2 红（A2 观察项的口径）', () => {
     const lenient = { dims: { ...ZERO_DIMS, entityFidelity: 1 } };
-    expect(evaluateProbeCase(probeRow({ dims: { ...ZERO_DIMS, entityFidelity: 1 } }), lenient).pass).toBe(true);
-    expect(evaluateProbeCase(probeRow({ dims: { ...ZERO_DIMS, entityFidelity: 2 } }), lenient).pass).toBe(false);
+    expect(evaluateProbeCase('probe-X', probeRow({ dims: { ...ZERO_DIMS, entityFidelity: 1 } }), lenient).pass).toBe(true);
+    expect(evaluateProbeCase('probe-X', probeRow({ dims: { ...ZERO_DIMS, entityFidelity: 2 } }), lenient).pass).toBe(false);
   });
 
   it('okExpected：缺省 true，A2 式 false 基线接受 ⚠', () => {
-    expect(evaluateProbeCase(probeRow({ ok: false }), baselineCase).pass).toBe(false);
-    expect(evaluateProbeCase(probeRow({ ok: false }), { ...baselineCase, okExpected: false }).pass).toBe(true);
-    expect(evaluateProbeCase(probeRow({ ok: true }), { ...baselineCase, okExpected: false }).pass).toBe(false);
+    expect(evaluateProbeCase('probe-X', probeRow({ ok: false }), baselineCase).pass).toBe(false);
+    expect(evaluateProbeCase('probe-X', probeRow({ ok: false }), { ...baselineCase, okExpected: false }).pass).toBe(true);
+    expect(evaluateProbeCase('probe-X', probeRow({ ok: true }), { ...baselineCase, okExpected: false }).pass).toBe(false);
   });
 
   it('评委分量：≥ 基线−容差（默认 1）过；null 基线跳过；缺评委结果不检查', () => {
@@ -55,15 +55,15 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
       judge: { groundedness: 2, entityFidelity: 1, failureHonesty: null, presentationHygiene: 2 },
     };
     const judge = { scores: { groundedness: 1, entityFidelity: 1, failureHonesty: 0, presentationHygiene: 2 }, evidence: [], model: 'm' };
-    const verdict = evaluateProbeCase(probeRow(), withJudge, judge as never);
+    const verdict = evaluateProbeCase('probe-X', probeRow(), withJudge, judge as never);
     expect(verdict.pass).toBe(true); // groundedness 1 ≥ 2-1；entity 1 ≥ 1-1；honesty null 跳过
-    const strict = evaluateProbeCase(probeRow(), withJudge, { ...judge, scores: { ...judge.scores, groundedness: 0 } } as never);
+    const strict = evaluateProbeCase('probe-X', probeRow(), withJudge, { ...judge, scores: { ...judge.scores, groundedness: 0 } } as never);
     expect(strict.checks.find((check) => check.name === '评委·有据')).toMatchObject({ pass: false, expected: '≥1', actual: '0' });
   });
 
   it('探针报告缺该用例 / 基线缺该用例都红（不是静默跳过）', () => {
-    expect(evaluateProbeCase(undefined, baselineCase).pass).toBe(false);
-    expect(evaluateProbeCase(probeRow(), undefined).pass).toBe(false);
+    expect(evaluateProbeCase('probe-X', undefined, baselineCase).pass).toBe(false);
+    expect(evaluateProbeCase('probe-X', probeRow(), undefined).pass).toBe(false);
   });
 });
 

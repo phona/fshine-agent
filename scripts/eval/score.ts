@@ -86,6 +86,9 @@ export interface ProbeReport { at: string; results: ProbeResultRow[] }
 
 export interface Check { name: string; pass: boolean; expected: string; actual: string }
 export interface CaseVerdict {
+  /** 语料 id（baseline.cases 的键；acceptance 与 probe 同一命名空间）。 */
+  corpusId: string;
+  /** 展示 id（probe 用例 id 或语料 id）。 */
   id: string;
   kind: string;
   pass: boolean;
@@ -145,16 +148,17 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
 // ── 逐例判定（纯函数，单测面） ──
 
 export function evaluateProbeCase(
+  corpusId: string,
   row: ProbeResultRow | undefined,
   baselineCase: BaselineCase | undefined,
   judge?: JudgeResult,
 ): CaseVerdict {
-  const id = row?.id ?? '(未知用例)';
+  const id = row?.id ?? corpusId;
   if (!row) {
-    return { id, kind: 'probe', pass: false, checks: [{ name: '探针报告含该用例', pass: false, expected: '在', actual: '缺' }] };
+    return { corpusId, id, kind: 'probe', pass: false, checks: [{ name: '探针报告含该用例', pass: false, expected: '在', actual: '缺' }] };
   }
   if (!baselineCase) {
-    return { id, kind: 'probe', pass: false, checks: [{ name: '基线含该用例', pass: false, expected: '在', actual: '缺（进基线的语料必须有基线项）' }] };
+    return { corpusId, id, kind: 'probe', pass: false, checks: [{ name: '基线含该用例', pass: false, expected: '在', actual: '缺（进基线的语料必须有基线项）' }] };
   }
   const checks: Check[] = [];
   for (const dim of NOTE_DIMS) {
@@ -177,7 +181,7 @@ export function evaluateProbeCase(
       checks.push({ name: `评委·${DIM_LABELS_ZH[dim]}`, pass: actual >= expected - tolerance, expected: `≥${expected - tolerance}`, actual: String(actual) });
     }
   }
-  return { id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
+  return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
 }
 
 export function evaluateWriteChainCase(
@@ -192,10 +196,10 @@ export function evaluateWriteChainCase(
     actual: String(actual),
   });
   if (!facts) {
-    return { id: entry.id, kind: 'acceptance', pass: false, checks: [{ name: '验收报告含该会话', pass: false, expected: entry.conversation ?? '', actual: '缺' }] };
+    return { corpusId: entry.id, id: entry.id, kind: 'acceptance', pass: false, checks: [{ name: '验收报告含该会话', pass: false, expected: entry.conversation ?? '', actual: '缺' }] };
   }
   if (!group) {
-    return { id: entry.id, kind: 'acceptance', pass: false, checks: [{ name: '基线含该会话', pass: false, expected: '在', actual: '缺（进基线的语料必须有基线项）' }] };
+    return { corpusId: entry.id, id: entry.id, kind: 'acceptance', pass: false, checks: [{ name: '基线含该会话', pass: false, expected: '在', actual: '缺（进基线的语料必须有基线项）' }] };
   }
   const committed = facts.intents.some((intent) => intent.status === 'committed');
   const checks: Check[] = [
@@ -210,7 +214,7 @@ export function evaluateWriteChainCase(
     expectedTrue('落账 committed', group.committed ?? true, committed),
     expectedTrue('读回校验在', group.readbackVerified ?? true, committed && facts.intents.some((intent) => intent.status === 'committed' && intent.hasResult)),
   ];
-  return { id: entry.id, kind: 'acceptance', pass: checks.every((check) => check.pass), checks };
+  return { corpusId: entry.id, id: entry.id, kind: 'acceptance', pass: checks.every((check) => check.pass), checks };
 }
 
 // ── 主流程 ──
@@ -310,7 +314,7 @@ async function main(): Promise<void> {
           turns: row.turns.map((turn) => ({ user: turn.text, reply: turn.reply, notices: turn.notices })),
         });
       }
-      verdicts.push(evaluateProbeCase(row, baseline.cases[entry.id], judgeResult));
+      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult));
     } else {
       const facts = acceptanceJson.writeChain.find((item) => item.conversationId === entry.conversation);
       verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!]));
@@ -318,7 +322,7 @@ async function main(): Promise<void> {
   }
   const skipped = corpus.filter((entry) => !entry.inBaseline);
   for (const entry of skipped) {
-    verdicts.push({ id: entry.id, kind: entry.kind, pass: true, checks: [], note: '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
+    verdicts.push({ corpusId: entry.id, id: entry.id, kind: entry.kind, pass: true, checks: [], note: '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
   }
 
   for (const verdict of verdicts) {
@@ -372,7 +376,9 @@ function writeBaselineFrom(
     if (verdict.note) continue; // 未进基线的用例不动
     if (verdict.kind === 'probe') {
       const row = verdict.checks.find((check) => check.name === '探针ok');
-      const previous = baseline.cases[verdict.id];
+      // baseline 键 = 语料 id（verdict.corpusId），不是探针用例显示 id——两者差一个
+      // "probe-" 前缀，混用会让重定基线写错命名空间、误判前值（首轮实测踩过）。
+      const previous = baseline.cases[verdict.corpusId];
       const previousOkExpected = previous?.okExpected ?? true;
       const actualOk = row?.actual === 'true';
       if (!actualOk && previousOkExpected && !force) {
@@ -386,7 +392,7 @@ function writeBaselineFrom(
       const judgeScores = verdict.judge
         ? Object.fromEntries(NOTE_DIMS.map((dim) => [dim, verdict.judge!.scores[dim]])) as BaselineCase['judge']
         : previous?.judge ?? null;
-      next.cases[verdict.id] = {
+      next.cases[verdict.corpusId] = {
         dims,
         ...(judgeScores ? { judge: judgeScores } : {}),
         ...(previous?.okExpected !== undefined ? { okExpected: previous.okExpected } : actualOk ? {} : { okExpected: false }),
