@@ -52,8 +52,13 @@ export interface BaselineCase {
   /** 评委分基线；null = 未定（跳过并提示）。 */
   judge?: Partial<Record<NoteDim, number | null>>;
   judgeTolerance?: number;
-  /** 探针自身 ok 的期望（缺省 true；A2 按冻结表 false）。 */
-  okExpected?: boolean;
+  /**
+   * 探针自身 ok 的断言模式（缺省 strict）。
+   * strict = ok 必须为 true（健康用例：出现任何 note 即回归）；
+   * free = 不断言 ok（已知间歇观察项：缺点出现与否是方差，dims 上限承载「不劣化」）。
+   * 不存在 "必须为 false" 的模式——那是要求缺点必须出现，惩罚改进（首轮实测踩过）。
+   */
+  okMode?: 'strict' | 'free';
   note?: string;
 }
 
@@ -166,8 +171,10 @@ export function evaluateProbeCase(
     const actual = row.dims[dim] ?? 0;
     checks.push({ name: `${DIM_LABELS_ZH[dim]}违例`, pass: actual <= limit, expected: `≤${limit}`, actual: String(actual) });
   }
-  const okExpected = baselineCase.okExpected ?? true;
-  checks.push({ name: '探针ok', pass: row.ok === okExpected, expected: String(okExpected), actual: String(row.ok) });
+  const okMode = baselineCase.okMode ?? 'strict';
+  if (okMode === 'strict') {
+    checks.push({ name: '探针ok', pass: row.ok, expected: 'true', actual: String(row.ok) });
+  }
   const tolerance = baselineCase.judgeTolerance ?? 1;
   if (judge) {
     for (const dim of NOTE_DIMS) {
@@ -375,14 +382,14 @@ function writeBaselineFrom(
   for (const verdict of verdicts) {
     if (verdict.note) continue; // 未进基线的用例不动
     if (verdict.kind === 'probe') {
-      const row = verdict.checks.find((check) => check.name === '探针ok');
+      const okCheck = verdict.checks.find((check) => check.name === '探针ok');
       // baseline 键 = 语料 id（verdict.corpusId），不是探针用例显示 id——两者差一个
       // "probe-" 前缀，混用会让重定基线写错命名空间、误判前值（首轮实测踩过）。
       const previous = baseline.cases[verdict.corpusId];
-      const previousOkExpected = previous?.okExpected ?? true;
-      const actualOk = row?.actual === 'true';
-      if (!actualOk && previousOkExpected && !force) {
-        refusals.push(`${verdict.id}（ok 由 ${previousOkExpected} 转 ${actualOk}）`);
+      const previousOkMode = previous?.okMode ?? 'strict';
+      const actualOk = okCheck ? okCheck.actual === 'true' : true; // free 模式无 ok 断言，不触发拒绝
+      if (!actualOk && previousOkMode === 'strict' && !force) {
+        refusals.push(`${verdict.id}（ok 由 true 转 false）`);
       }
       const dims = {} as DimCounts;
       for (const dim of NOTE_DIMS) {
@@ -395,7 +402,7 @@ function writeBaselineFrom(
       next.cases[verdict.corpusId] = {
         dims,
         ...(judgeScores ? { judge: judgeScores } : {}),
-        ...(previous?.okExpected !== undefined ? { okExpected: previous.okExpected } : actualOk ? {} : { okExpected: false }),
+        ...(previousOkMode === 'free' ? { okMode: 'free' as const } : {}),
         ...(previous?.note ? { note: previous.note } : {}),
       };
     } else {

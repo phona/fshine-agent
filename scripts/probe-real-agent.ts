@@ -1093,8 +1093,17 @@ const CASES: Case[] = [
       const notes: string[] = [];
       const calls = ledgerCalls();
       if (calls < 5) notes.push(`5 轮只产生 ${calls} 次平台调用——有轮次没真查`);
-      // 比数据口径，不比措辞：抽取所有数字，5 轮必须一致（开场白本来就会变）
-      const numbers = turns.map((turn) => (turn.reply.match(/[\d,]+\.?\d*/g) ?? []).join('|'));
+      // 每轮真查是直接判据（2026-10-16 标定）：总调用数 ≥5 会被"有的轮查多次、有的轮零查"
+      // 抵消——首跑轮① calls 总数恰为 5，但第 3/5 轮零调用，回复却声称"已经过本轮实时查询
+      // 确认"，复述谎称实查恰好漏网。
+      turns.forEach((turn, i) => {
+        if (turn.calls === 0) notes.push(`第${i + 1}轮零平台调用——同一查询连发须每轮真查`);
+      });
+      // 比数据口径，不比措辞（2026-10-16 二次标定）：只比金额口径（AMOUNT_PATTERN 抽取、
+      // 按数值去重，科目代码/期间/选项序号不算金额）。旧尺抽全部数字串，回复里的选项序号
+      // "1."/"2."、裸 0、期间码让五轮签名必然互异——轮②五轮全部真查且一致答"该期间无数据"
+      // 也被判不一致，噪声轮。
+      const numbers = turns.map((turn) => extractAmounts(turn.reply).map((a) => a.value).join('|'));
       if (new Set(numbers).size > 1) notes.push(`5 轮数据口径不一致：${JSON.stringify(numbers)}`);
       return { turns, notes };
     },

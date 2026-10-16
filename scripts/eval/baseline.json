@@ -1,19 +1,43 @@
 {
-  "version": 1,
-  "generatedAt": "初始预期值（2026-10-16）——首轮 npm run eval -- --write-baseline 后由打分器刷新",
-  "note": "机械分量=四维违例数上限（只增才算劣化，A2 的既有观察项用上限表达「不劣化」）；judge null=未定基线（首轮 --judge --write-baseline 落值）；writeChain 是设计目标形状。A2 是 2026-10-11 冻结表登记的模型侧观察项（范围渗入），okExpected=false。基线重定唯一入口 = score.ts --write-baseline，不手改本文件；重定须在 debt-ledger 记一行理由。",
+  "version": 2,
+  "generatedAt": "2026-10-16 标定批（首轮+复跑两轮实测后刷新；v1→v2 的 delta 见 debt-ledger D-060 关账记录）",
+  "note": "dims=四维违例数上限（只增才算劣化）；judge=两轮实测的评委分下限（gate = 实际 ≥ 基线−容差1，0 分下限只留轨迹不设硬门）；okMode：strict（缺省）=ok 须为 true，free=不断言 ok（已知间歇观察项，缺点出现与否是方差）。judge 为 0 的下限（A4/B1 卫生）实际不设门，这是 ±1 容差在 0-2 量表上的诚实局限，漂移靠 scores.jsonl 轨迹暴露。基线编辑的两条路：(1) 跑分数据驱动的重定走 score.ts --write-baseline（唯一入口，拒绝烤入 ok 翻转）；(2) 标定/校准批（尺子改了、期望含义变了）随代码 commit 手改并在台账留一行理由——本条 v2 即第 (2) 类。",
   "cases": {
-    "probe-A1": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-A1": {
+      "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 2 }
+    },
     "probe-A2": {
       "dims": { "groundedness": 0, "entityFidelity": 1, "failureHonesty": 0, "presentationHygiene": 0 },
-      "okExpected": false,
-      "note": "已知模型侧观察项：新话题带旧账套（rule-landing §6），验收标准=不劣化"
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 2 },
+      "okMode": "free",
+      "note": "已知模型侧观察项：新话题带旧账套（rule-landing §6），两轮实测间歇出现（轮①有、轮②无）——cap 1 承载「不劣化」，ok 不断言"
     },
-    "probe-A3": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
-    "probe-A4": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
-    "probe-A5": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
-    "probe-B1": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
-    "probe-Y2": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } }
+    "probe-A3": {
+      "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 1 }
+    },
+    "probe-A4": {
+      "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 0 },
+      "note": "评委两轮都给卫生 0（「平台返回/无候选」技术报告口吻），机械指纹不报——两个分量在此用例上独立可见"
+    },
+    "probe-A5": {
+      "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 2 }
+    },
+    "probe-B1": {
+      "dims": { "groundedness": 1, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 0 },
+      "okMode": "free",
+      "note": "轮①实证间歇观察项：部分轮零调用却声称「已经过本轮实时查询确认」（复述谎称实查，rule-landing §6 同族）——「每轮真查」判据（B1 二次标定新增）落到有据维，cap 1 不劣化"
+    },
+    "probe-Y2": {
+      "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 1, "presentationHygiene": 0 },
+      "judge": { "groundedness": 2, "entityFidelity": 2, "failureHonesty": 2, "presentationHygiene": 2 },
+      "okMode": "free",
+      "note": "轮②实证间歇观察项：错误态回复引用佐证数字但分句未点名所属科目（500 疑似裸挂）——「金额有所属」判据按既定校准不松，cap 1 不劣化"
+    }
   },
   "writeChain": {
     "acc-write-51": {

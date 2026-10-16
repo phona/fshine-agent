@@ -43,10 +43,13 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
     expect(evaluateProbeCase('probe-X', probeRow({ dims: { ...ZERO_DIMS, entityFidelity: 2 } }), lenient).pass).toBe(false);
   });
 
-  it('okExpected：缺省 true，A2 式 false 基线接受 ⚠', () => {
+  it('okMode：strict（缺省）要求 ok=true；free 不断言 ok（缺点出现与否是方差，上限由 dims 承载）', () => {
     expect(evaluateProbeCase('probe-X', probeRow({ ok: false }), baselineCase).pass).toBe(false);
-    expect(evaluateProbeCase('probe-X', probeRow({ ok: false }), { ...baselineCase, okExpected: false }).pass).toBe(true);
-    expect(evaluateProbeCase('probe-X', probeRow({ ok: true }), { ...baselineCase, okExpected: false }).pass).toBe(false);
+    // free：ok 真假都不断言——不存在"必须为 false"的模式（惩罚改进，首轮实测踩过）
+    const free = evaluateProbeCase('probe-X', probeRow({ ok: false }), { ...baselineCase, okMode: 'free' });
+    expect(free.pass).toBe(true);
+    expect(free.checks.some((check) => check.name === '探针ok')).toBe(false);
+    expect(evaluateProbeCase('probe-X', probeRow({ ok: true }), { ...baselineCase, okMode: 'free' }).pass).toBe(true);
   });
 
   it('评委分量：≥ 基线−容差（默认 1）过；null 基线跳过；缺评委结果不检查', () => {

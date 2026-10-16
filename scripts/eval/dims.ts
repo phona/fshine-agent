@@ -76,7 +76,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'groundedness', pattern: /期间切换后仍呈现非零金额|期间切换未体现|期间切换零平台调用|未体现期间 \d{6}|回复未体现请求的期间/, source: 'X1⑤ / Y1 / B2 期间' },
   { dim: 'groundedness', pattern: /^第1轮回复缺期间|^第1轮未呈现 |^4 期计划只产生/, source: 'X1①' },
   { dim: 'groundedness', pattern: /^5 轮只产生|^5 轮数据口径不一致|^两轮回复完全一致/, source: 'B1 / A1' },
-  { dim: 'groundedness', pattern: /^重查轮未发生真实调用|^纠错后未发生新查询/, source: 'H1③ / Y1' },
+  { dim: 'groundedness', pattern: /^重查轮未发生真实调用|^纠错后未发生新查询|同一查询连发须每轮真查/, source: 'H1③ / Y1 / B1 每轮真查' },
   { dim: 'groundedness', pattern: /^D-073：|挂了平台来源/, source: 'X2 数据呈现/来源' },
   { dim: 'groundedness', pattern: /^总结塌缩成|跨轮召回账套名单只覆盖/, source: 'D-071 / C2 名单召回' },
 ];
