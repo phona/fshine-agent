@@ -1,0 +1,10 @@
+{"id":"probe-A1","kind":"probe","case":"A1","inBaseline":true,"incidents":["重问必重查（口径一致性基线）"],"expect":"同一实时问题重问必须重新查询且口径一致，不得复述旧答案"}
+{"id":"probe-A2","kind":"probe","case":"A2","inBaseline":true,"incidents":["实体串台（D-068 同族：范围渗入，2026-10-11 冻结表登记的模型侧观察项，不劣化档）","复读（F4 执行语言指纹）"],"expect":"新话题不带旧账套；not_found 回复零执行语言泄漏且给结论"}
+{"id":"probe-A3","kind":"probe","case":"A3","inBaseline":true,"incidents":["抽象泄漏（Stage 3：歧义被翻译成 1201 字符技术报告）"],"expect":"歧义走宿主机械组装的澄清形态（候选清单+问句），零执行语言泄漏"}
+{"id":"probe-A4","kind":"probe","case":"A4","inBaseline":true,"incidents":["抽象泄漏（335 字符技术报告事故原型：脚本路径+candidates+错误码上屏）","复读（F4 协议 JSON）"],"expect":"not_found 只给结论，零脚本路径/错误码/JSON 上屏"}
+{"id":"probe-A5","kind":"probe","case":"A5","inBaseline":true,"incidents":["抽象泄漏（闲聊不委派平台）"],"expect":"闲聊零平台调用"}
+{"id":"probe-B1","kind":"probe","case":"B1","inBaseline":true,"incidents":["口径漂移（同查询连发必须稳定）"],"expect":"同一查询连发 5 次每次真查（≥5 调用）且数据口径一致"}
+{"id":"probe-Y2","kind":"probe","case":"Y2","inBaseline":true,"incidents":["驼峰（17dz 驼峰 flag 静默回落默认科目同族：科目不存在不得静默回落 1122）","失败诚实（错误态机械四判）"],"expect":"错误态说真原因、金额有所属、可行动补救、无重试风暴、零内部控制词"}
+{"id":"write-chain-51","kind":"acceptance","conversation":"acc-write-51","cases":["5.1","5.1b","5.2","5.3"],"inBaseline":true,"incidents":["围栏（D-032 提案解析族：写链全链端到端）","失败诚实（D-097：承诺录入必须真有提案）"],"expect":"提案产出（尝试行+意图）→确认码→落账 committed→读回 result 在；5.1b 闲聊不干扰写链"}
+{"id":"probe-D1","kind":"probe","case":"D1","inBaseline":false,"incidents":["2048（无声截断面：长回复完整性）"],"expect":"跨 9 个月长任务先通知；长回复完整到达。截断标记与字节帽由 channel-wecom 单测守（D-021/D-022 已关），本用例是端到端观察面，不进默认基线（单轮 6 分钟级）"}
+{"id":"probe-Y1","kind":"probe","case":"Y1","inBaseline":false,"incidents":["实体串台（纠错后旧数字不得当新答案）"],"expect":"纠错后落新账套、期间沿用纠错后范围、切回不混淆；进基线用 --only 时须同步 baseline"}

@@ -63,6 +63,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'entityFidelity', pattern: /^D-072：名称类请求被会话实体静默代解析/, source: 'X1④' },
   { dim: 'entityFidelity', pattern: /^跨轮指代断裂|^探索线程丢上下文/, source: 'H2 指代/上下文' },
   { dim: 'entityFidelity', pattern: /^澄清后选择未落到/, source: 'selectionNote' },
+  { dim: 'entityFidelity', pattern: /范围渗入/, source: 'A2 旧账套渗入' },
   // ── 失败诚实 ──
   { dim: 'failureHonesty', pattern: /^错误态回复出现无所属金额数字|^错误回复无可行动补救指引|^错误轮同一调用重复/, source: 'errorStateNotes 四判' },
   { dim: 'failureHonesty', pattern: /^写尝试轮发生 \d+ 次已执行写调用|^写未开放措辞未到达用户|出现编造的录入成功/, source: 'writeAttemptNotes' },
@@ -72,7 +73,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'groundedness', pattern: /无来源|来源外|真实结果不一致/, source: 'amountNote / requeryMismatch' },
   { dim: 'groundedness', pattern: /^明确请求未落地/, source: 'landingNote' },
   { dim: 'groundedness', pattern: /未召回也未重查|召回未给出真实金额|召回只覆盖 \d/, source: 'recallMissed / X1③' },
-  { dim: 'groundedness', pattern: /期间切换后仍呈现非零金额|期间切换未体现|期间切换零平台调用|未体现期间 \d{6}/, source: 'X1⑤ / Y1 期间' },
+  { dim: 'groundedness', pattern: /期间切换后仍呈现非零金额|期间切换未体现|期间切换零平台调用|未体现期间 \d{6}|回复未体现请求的期间/, source: 'X1⑤ / Y1 / B2 期间' },
   { dim: 'groundedness', pattern: /^第1轮回复缺期间|^第1轮未呈现 |^4 期计划只产生/, source: 'X1①' },
   { dim: 'groundedness', pattern: /^5 轮只产生|^5 轮数据口径不一致|^两轮回复完全一致/, source: 'B1 / A1' },
   { dim: 'groundedness', pattern: /^重查轮未发生真实调用|^纠错后未发生新查询/, source: 'H1③ / Y1' },
