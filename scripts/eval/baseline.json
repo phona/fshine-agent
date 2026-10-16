@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "generatedAt": "初始预期值（2026-10-16）——首轮 npm run eval -- --write-baseline 后由打分器刷新",
+  "note": "机械分量=四维违例数上限（只增才算劣化，A2 的既有观察项用上限表达「不劣化」）；judge null=未定基线（首轮 --judge --write-baseline 落值）；writeChain 是设计目标形状。A2 是 2026-10-11 冻结表登记的模型侧观察项（范围渗入），okExpected=false。基线重定唯一入口 = score.ts --write-baseline，不手改本文件；重定须在 debt-ledger 记一行理由。",
+  "cases": {
+    "probe-A1": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-A2": {
+      "dims": { "groundedness": 0, "entityFidelity": 1, "failureHonesty": 0, "presentationHygiene": 0 },
+      "okExpected": false,
+      "note": "已知模型侧观察项：新话题带旧账套（rule-landing §6），验收标准=不劣化"
+    },
+    "probe-A3": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-A4": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-A5": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-B1": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } },
+    "probe-Y2": { "dims": { "groundedness": 0, "entityFidelity": 0, "failureHonesty": 0, "presentationHygiene": 0 } }
+  },
+  "writeChain": {
+    "acc-write-51": {
+      "proposalAttemptsAtLeast": 1,
+      "confirmCodeOffered": true,
+      "intentCreated": true,
+      "committed": true,
+      "readbackVerified": true
+    }
+  }
+}
