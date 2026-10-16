@@ -38,13 +38,14 @@
  * operation 名（"数据来源：…finance.query-receivables"）与内部控制词（"查询计划额度"）两类，尺子随 runtime.ts 同扩）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { executionLanguageFingerprints, isPlatformMock } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
+import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
 
 const PRINCIPAL_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
 
@@ -65,6 +66,13 @@ interface CaseResult {
   turns: Turn[];
   ledgerCalls: number;
   notes: string[];
+  /**
+   * 四维可信度机械分量（L7 / D-060）：notes 的归维计数。归维表在 scripts/eval/dims.ts
+   * （单一来源，打分器与 scores.jsonl 记分台消费同一份）；note 原句由 dims.test.ts 表征锁钉住。
+   */
+  dims: DimCounts;
+  /** 归不进四维的 note 数（任务行为类：计划恢复/空转/成本等，继续驱动 ok，不冒充可信度分数）。 */
+  unclassifiedNotes: number;
   ok: boolean;
 }
 
@@ -1869,7 +1877,11 @@ async function main(): Promise<void> {
       const after = ledgerCalls();
       // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
       const ok = notes.every((note) => note.startsWith('（信息性）'));
-      results.push({ id: item.id, group: item.group, intent: item.intent, turns, ledgerCalls: after - before, notes, ok });
+      const counted = countDims(notes);
+      results.push({
+        id: item.id, group: item.group, intent: item.intent, turns, ledgerCalls: after - before, notes,
+        dims: counted.dims, unclassifiedNotes: counted.unclassified, ok,
+      });
       for (const turn of turns) {
         console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
         console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);
@@ -1879,7 +1891,8 @@ async function main(): Promise<void> {
     } catch (error) {
       results.push({
         id: item.id, group: item.group, intent: item.intent, turns: [],
-        ledgerCalls: 0, notes: [error instanceof Error ? error.message : String(error)], ok: false,
+        ledgerCalls: 0, notes: [error instanceof Error ? error.message : String(error)],
+        dims: emptyDimCounts(), unclassifiedNotes: 0, ok: false,
       });
       console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -1901,12 +1914,24 @@ async function main(): Promise<void> {
     console.log(`\n${group}`);
     for (const result of list) {
       const total = result.turns.reduce((sum, turn) => sum + turn.ms, 0);
-      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.ledgerCalls} ${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
+      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.ledgerCalls} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
     }
   }
   const bad = results.filter((result) => !result.ok);
   const scope = only ? `--only ${[...only].join(',')}` : quick ? '--quick' : '全量';
   console.log(`\n[${scope}] ${results.length - bad.length}/${results.length} 无异常；明细 ${report}`);
+
+  // 记分台（L7 / D-060）：每轮探针向 .runtime/scores.jsonl 追加一行机械分量。
+  // 打分器（scripts/eval/score.ts）把这一行与评委分量、写链指标合并对基线比对。
+  const scoresPath = path.join(process.cwd(), '.runtime', 'scores.jsonl');
+  appendFileSync(scoresPath, JSON.stringify({
+    at: new Date().toISOString(),
+    kind: 'probe-mechanical',
+    scope,
+    detail: path.basename(report),
+    results: results.map(({ id, ok, dims, unclassifiedNotes }) => ({ id, ok, dims, unclassifiedNotes })),
+  }) + '\n');
+
   process.env = savedEnv;
   rmSync(stateDir, { recursive: true, force: true });
 }
