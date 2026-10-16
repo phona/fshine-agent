@@ -623,7 +623,7 @@
 
 ## L7 · 可信度可量化：eval 基线跑漂移，不靠审计轮次
 
-> 机械守卫（待建）：Tier-1 打分器（探针升级 + 记分台 + 语料库）；评委提示词与语料库版本化进仓库。
+> 机械守卫（已建，2026-10-16）：Tier-1 打分器——`npm run eval`；语料 `scripts/eval/corpus.jsonl`、评委提示词 `scripts/eval/judge-prompt.md`、打分器 `scripts/eval/score.ts`、记分台 `.runtime/scores.jsonl`。
 
 ### D-060 · Tier-1 打分器未建
 
@@ -633,7 +633,12 @@
 - **律法归属**：L7。
 - **闭环判据**：`.runtime/scores.jsonl` 记分台存在且每轮探针写入；四维各有可复现的机械分量（探针断言）+ LLM 评委分量；**评委提示词与语料库随仓库版本化**（否则四维分数不可比）；基线分可复现（同语料同提示词重跑分差在阈值内）；回归有阈值；今日全部事故各一条用例（围栏/驼峰/抽象泄漏/2048/复读/实体串台…）。
 - **建议波次**：Wave 4。
-- **状态**：待办。
+- **状态**：**已关**（2026-10-16，L7 波：`2d1ca5b`/`2fb60e6`/`5b99272`/`d826d4f`/`970dd84`/`95f0a12`/`bb69066`）。
+  落地形态（全部长在既有仪器上，零判定逻辑复制）：① 探针 `CaseResult` 增 `dims`（四维归维表 `scripts/eval/dims.ts` 单一来源，原句表征锁 `dims.test.ts`，note 文案漂移先红）+ 探针每轮向记分台写机械分量；② acceptance 报告 JSON 增 `writeChain` 节（`scripts/eval/write-chain.ts`：`serve_gate:proposal_create` 行数 = 提案尝试、`change_intents` status/result = 落账+读回、6 位码正则 = 确认码——§E 波末尾点名的"手工提取三个指标"自此机械化）；③ 语料 `corpus.jsonl`（六条存量事故→用例映射，默认基线集 = 探针 A1/A2/A3/A4/A5/B1/Y2 + 写链 acc-write-51）+ 评委 `judge-prompt.md`/`judge.ts`（只吃转录不读审计/机械分量——两分量是独立证据，评委看到机械判定会锚定）；④ 打分器 `score.ts`（四类阈值：dims 上限 / judge 下限−容差 / 写链布尔面 / okMode；记分台追加 eval 行带三元组；`--write-baseline` 唯一基线重定入口，strict 用例 ok 翻转拒绝烤入）。
+  **基线与验证**：三轮真模型 + mock 执行器实测（`.runtime/eval-baseline-run1/2/3.log`，scores.jsonl 七行），基线 **v3**（探针 7 例 + 写链 1 组），轮③对 v3 **8/8 全绿**。机械分量在稳定用例三轮逐位一致；写链布尔面三轮全同（尝试 1 次 / committed+读回 / 确认码——D-088 链条 3/3）；评委同转录复跑一致（A2 卫生两次 0），**一例超容差分差如实登记**（B1 卫生跨调用 0→2，temperature 0 下评委仍有同转录方差——机械层是可复现骨干，评委层是粗门限+轨迹）。
+  **仪器首日产出（本波自己的修法对象）**：① B1 尺子二次标定——旧"全部数字串"口径把选项序号/裸 0/期间码算进签名，五轮全查且一致答"无数据"也判不一致（轮②实证）；且总调用数判据漏掉"复述谎称实查"（轮① calls 总数恰 5 但第 3/5 轮零调用、回复声称"已经过本轮实时查询确认"）——改金额口径（`extractAmounts`）+ 每轮真查直接判据；② `okExpected` 语义错误（要求缺点必须出现 = 惩罚改进，A2 轮②干净轮反被判回归）——改 `okMode`（strict/free）；③ 基线键命名空间错位（`verdict.id` 探针显示 id vs 语料 id，拒绝守卫误判前值）——`970dd84`；④ free 案评委基线规则补齐：取含缺陷转录的实测下限，与机械 cap 的容忍口径对齐。
+  **模型侧间歇观察项（不修，不劣化档入基线 v3，频率轨迹看 scores.jsonl）**：A2 范围渗入（rule-landing §6 既有，轮①③）；A2 not_found 轮执行语言泄漏（错误码形态，轮③——D-098 修尺后首次机械命中）；Y2 佐证数字无所属（轮②）；Y2 歧义澄清缺问句（轮③）。呈现卫生是当前模型最不稳的维（三轮各在不同用例冒一次）——若轨迹显示频率上升即是漂移信号。
+  **残留（登记不修）**：D1/Y1 未进默认基线（进基线须补项跑值）；评委与被评模型同源；scripts/ 仍不在 typecheck include（D-084 残留 b）；D-064 残留 5 码照旧单列。
 
 ### D-061 · 17dz 测试套件与 `.runtime/rate-limit.json` 耦合，`test-agent-pipeline.js` 当前 RED
 
@@ -1147,3 +1152,14 @@ P1 修复（`plan evaluate` exit 3 双语义：`runJson` 对非零 exit 一律�
 | **D-098（新）执行语言指纹尺有两个盲区：漏掉裸 operation 名与小写错误码，"零泄漏"结论只覆盖了两类形态** | **已关（2026-10-15，`4753114`）** **位置**：`packages/agent/src/runtime.ts:119-129` 的 `EXECUTION_LANGUAGE_FINGERPRINTS`。**两个盲区（2026-10-14 真实模型探针实证，正则已逐条核实）**：① `operation 名` 那条的模式要求**至少一个点**（`(?:\.[a-z][a-z0-9-]*)+`），所以裸名 `search-account-sets` 不命中，只有点分的 `finance.search-account-sets` 才命中；② `错误码` 那条要求**全大写 + 下划线**（`\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b`），所以小写 `not_found` 不命中，只有 `PERIOD_NO_DATA` 这类才命中。**实证（本轮探针 `.runtime/probe-fshine-probe-V0O1w9.json`）**：A4 第 1 轮回复「先用 search-account-sets 搜出平台规范名再查，不猜简称」；B1 第 4 轮回复「平台返回 not_found：期间 202609 在账套「新兴五金」科目 1122 下无余额数据」。**两条尺子自己都没报**，所以 A4/B1 的 ⚠ 都不是因为它——泄漏是静默穿过守卫的。**不是本次回归**：独立扫 60 个历史 probe 文件、2174 个字符串节点，两类形态分别出现在 53 / 35 个节点里（分布在 30 / 21 个文件）；subagent 侧口径为 98 条回复含裸名、33 条含小写码（计数方法不同，量级一致）。**后果**：过去所有"执行语言指纹零泄漏"的结论**只覆盖点分 operation 名与全大写错误码这两类**，另外两类形态从未被守过——L3 的机械守卫在这里是半聋的。**修法建议（未做）**：① operation 名那条加一条"含连字符、且不是点分形态"的判据，或直接把 `PLATFORM_OPERATIONS`（platform-contract.ts:41）里的真名集合作为白名单反面用——宿主本来就持这张表，不需要新真相源；② 错误码那条放宽到 `\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b`（大小写都收），平台错误码表里两类大小写形态都有。**闭环判据建议**：用本轮这两条回复做 golden，`executionLanguageFingerprints` 对它们各返回至少一个 label；且历史 60 个 probe 里两类形态的节点数从"静默穿过"变成"被报出"。 **闭环（2026-10-15，`4753114`）**：尺子两类盲区都收了——① operation 名在点分形状之外兼收 `PLATFORM_OPERATIONS` 的真名集合（含去命名空间前缀的裸名），宿主本来就持这张表，**不新立第二份真相源**；② 错误码大小写都收，小写支只收纯字母段（`not_found`/`needs_input`），含数字/连字符的串归泄漏基线的 taskId 判据守（塞进来会误伤 id 家族，e2e 污染塑形 ⑤ 的零命中断言会红）。不削弱现有判据：点分名/全大写码/脚本路径/JSON/内部控制词五类各留一条断言。新增 golden 用探针两条实测原文钉住。`runtime.ts` 行数仍 1221（架构预算只减不增，靠压缩 prose 腾出，没上移常数）；leak-lint 4/4 没碰白名单。`npm test` 1270 全绿（1268→1270）。**变异验证**：错误码改回只认大写 / operation 名改回只读点分 → 各自新 golden 红、旧断言不受影响。 **连带发现并同批处理的（重要，单独登记 D-102）**：尺子修好后 tests/e2e 两条"宿主组装澄清回复指纹零命中"的断言转红——根因不是模型泄漏，而是**平台 correctForm 数据里就含裸 operation 名**，宿主按 L2 原样渲染。那两条断言因此从 `toEqual([])` 改为 `toEqual(['operation 名'])` 并写清来源；**这不是静默放宽**（反向断言一条没删、注释写明清白），但它确实意味着那两处不再守任何东西，故按 D-102 单独登记。 |
 | **D-095（新）真模型两例新观察到的失效：worker 发明不存在的 operation；计划 JSON 形状不合法** | **待办（watch）** | **位置**：首轮真模型基线（2026-10-14，`data/acceptance-report-202610140425.md`，`--only=5.1,5.1b,5.2,5.3,5.4`，mock 执行器）。**实例①**：5.1 与 5.3 里 worker 各发了一次 `operation list` / `operation.list`——平台上**没有**这个 operation（`bin/17dz operation list --json` 是宿主侧的清单查询命令，不是 serve 法域里可调的 operation），平台回 `PLAN_REFUSE UNKNOWN_OPERATION`，两次都以 `PLAN PAUSED` 收场，各烧掉一轮。**实例②**：5.3 里两次 `PLAN_JSON_PARSE: No number after minus sign in JSON at position 1`——方案 JSON 形状不合法（以 `-` 开头），被宿主确定性拒。**为什么登记而不当场修**：两例都是模型侧形状问题，不是宿主判据错——拒绝本身正确且可行动（三要素消息点名了正确形态），`MAX_DECLINED_PLANS_PER_TASK` 也已把空转收住。修法候选（都未做）：① worker 提示词 / 业务 skill 里点明「清单查询是宿主侧命令，不是 operation」（提示词层是软控制，且正是本仓要收敛的方向）；② 让平台对 `operation` 这个**命令族名**也给一条可行动的纠正（现在回的是 UNKNOWN_OPERATION，没告诉 worker「你要找的东西不是 operation」）。**与 D-067 附条的关系**：同族（模型在计划门交互上的真实方差），但那一族是「终稿谎报」，这两族是「调用形状错」，自愈路径不同，故单立条目。**复核条件**：连续三轮真模型复跑（D-088）时统计这两族命中率，稳定复现再排修法。 |
 | **D-094（新）`change-safety.md` F2 的基线数字是 2026-09-29 的，与现状差 240 例** | **已关（本波 E5）** | F2 写死「`npm test` 987 例 / 78 文件」，而 C/D 波删了 legacy 落账执行器与其单测、又加了提案/写链路用例，实际基线早已漂移。E 波实测：改造前 **1228 例 / 90 文件**，E1/E2/E3 后 **1267 例 / 92 文件**。F2 那一行按实测改写，并在 E 波节里记下"基线随波次实测刷新，不是常数"。 |
+
+## 补充记录（2026-10-16，L7 波：Tier-1 打分器落地 + D-060 关账）
+
+change-safety §E 波末尾"下一处该投的是 L7"的兑现。七个 commit（`2d1ca5b`→`bb69066`）：探针四维归维 → 写链三指标机械提取 → 语料+评委 → 打分器+基线 → 三轮实测+两次标定 → 基线 v3 8/8 全绿。D-060 判据六项全部达成，L7 转为不变量（architecture-laws L7 节已同步改写）。npm test 1313 全绿（波前 1270）。
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| **D-104（新）探针无后台持久化排干：`assembly.close()` 与 Context State 写入竞态，探针每轮 `conversation_log_update_failed`** | **待办（小）** | **位置**：`scripts/probe-real-agent.ts` 的 `boot()`/用例收尾（`await assembly.close()`）。**背景**：D-084④ 给 acceptance.ts 补了 `drainBackgroundPersistence`（判据 = `conversation_context_states.through_event_id` 覆盖最后事件 + `PRAGMA data_version` 静默地平线），探针没有——每回合结束 enqueue 的两个 fire-and-forget 队列（Context State 更新 + 记忆归并）撞上关库连接，L7 三轮每轮可见 `conversation_log_update_failed`（另一条 `context_semantic_extract_failed` 10s 超时是 `context-model.ts` `DEFAULT_TIMEOUT_MS` 的既有降级路径，非缺陷）。**影响**：只丢探针会话的 Context State 持久化（探针本来就不依赖它），**不影响分数**（dims/notes 全部来自内存中的回合结果）；但探针库不是干净的验收面，未来若有人拿探针库做事会被这条噪音绊倒。**修法**：把 `drainBackgroundPersistence` 从 acceptance.ts 提到共享模块，探针收尾调用。 |
+| **模型侧观察项（L7 三轮实测沉淀，不劣化档入基线 v3）** | **watch（归 scores.jsonl 轨迹管）** | ① A2 范围渗入（§6 既有，轮①③）；② A2 not_found 轮执行语言泄漏（错误码形态，轮③——D-098 修尺后探针首次机械命中，先例形态见 D-098 的 B1 实证）；③ Y2 错误态佐证数字无所属（轮②，"金额有所属"校准不松）；④ Y2 歧义澄清缺问句（轮③）。呈现卫生是当前模型最不稳的维（三轮各在不同用例冒一次，4 次/21 用例轮）。 |
+
+**本波最终账**：关 1 条（D-060），新登记 1 条（D-104 待办）+ 4 条模型侧观察项（watch，不设机械关闭判据，轨迹看 scores.jsonl）。L7 波结束。

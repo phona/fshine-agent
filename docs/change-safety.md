@@ -10,7 +10,7 @@
 
 当前唯一可用模式是 mock（D-076：真平台登录页改版，真实模式下查询全是诚实失败）。因此：
 
-**允许**：`npm test`、`npm run typecheck`、`npm run acceptance`、`npm run smoke:commit:mock`、`node --env-file=.env --import tsx scripts/probe-real-agent.ts`（真实 LLM + 真实 `bin/17dz` 计划门 + **mock 执行器**）。
+**允许**：`npm test`、`npm run typecheck`、`npm run acceptance`、`npm run smoke:commit:mock`、`node --env-file=.env --import tsx scripts/probe-real-agent.ts`（真实 LLM + 真实 `bin/17dz` 计划门 + **mock 执行器**）、L7 打分链 `npm run eval` / `eval:probe` / `eval:acceptance` / `eval:score` / `eval:baseline`（前者两段与探针同法域；`eval:score`/`eval:baseline` 只读报告 + 调评委模型，不触平台）。
 
 **禁止**：`DZ_EXECUTOR=`（置空切真平台）、`scripts/smoke-real-platform.ts`、任何不带 `DZ_EXECUTOR=mock` 的 `bin/17dz` 调用、`FSHINE_REAL_COMMIT=1`。`.env` 默认 `DZ_EXECUTOR=mock` 且 `FSHINE_REAL_COMMIT` 未置位——双重保险丝都在，**不许摘**。
 
@@ -575,7 +575,7 @@ E 波代码落地后为跑 D-088 做了两轮补充复跑（都只跑 mock；`co
 2. **D-097 按"修正含混文本"修，不按"加控制"修**，且修完不算关闭模型方差问题。
 3. **不为 D-097 建宿主侧守门**：那条不变量 + 重试循环会为抓一个 2/3 概率成功的模型行为新增一套机制，并在"worker 合理地先问用户"的回合误触；宿主不该靠嗅探 worker 文本来补（L4）。
 
-**下一处该投的是 L7（可信度可量化，至今违例"未建"）**：本波的三轮复跑是手工提取 `prop_*`/确认码/落账三个指标的，而这正是 17dz architecture.md 自己写着"让机器报漂移，替代人工复盘"的事。再建一道门是堆机制；建一个可重复跑、能报漂移的打分器是收敛。
+**下一处该投的是 L7（可信度可量化，至今违例"未建"）**：本波的三轮复跑是手工提取 `prop_*`/确认码/落账三个指标的，而这正是 17dz architecture.md 自己写着"让机器报漂移，替代人工复盘"的事。再建一道门是堆机制；建一个可重复跑、能报漂移的打分器是收敛。**（已于 2026-10-16 L7 波兑现，见 §7 与 debt-ledger D-060 关账记录。）**
 
 ### D-097 修后连续三轮：3/3 通过，D-088 与 D-097 双双关账（2026-10-14）
 
@@ -594,3 +594,37 @@ E 波代码落地后为跑 D-088 做了两轮补充复跑（都只跑 mock；`co
 - **仪器侧**：三轮每一轮的拒绝原因都能从报告直接读出，且本轮首次能机械地判定 D-097 的判据（承诺句计数 × `proposal_create` 行计数），不需要人读终稿下判断。
 
 **本波最终账**：关 7 条（D-085/086/087/088/091/094/097），新登记 4 条（D-093/095/096/097 中 D-096/097 已关，净新增 D-093/095/096 三条待办 + D-095 watch）。E 波结束。
+
+## 7. F 波 · L7 打分器落地（2026-10-16）
+
+E 波末尾"下一处该投的是 L7"的兑现：Tier-1 打分器建成（D-060 关账，L7 转为不变量）。**它不是门，是仪器**——不进主流程、不拦任何生产路径；它回答的问题是"漂了没有、漂在哪"。
+
+### 落了什么
+
+| 件 | 位置 | 说明 |
+|---|---|---|
+| 四维归维表 | `scripts/eval/dims.ts` | 探针 note → 有据/实体保真/失败诚实/呈现卫生，单一来源；原句表征锁（`dims.test.ts`）钉住每条规则 |
+| 写链三指标 | `scripts/eval/write-chain.ts` | 提案尝试（`serve_gate:proposal_create` 行）/ 落账+读回（`change_intents`）/ 确认码——§E 波末尾手工提取的三个指标自此机械提取 |
+| 语料库 | `scripts/eval/corpus.jsonl` | 存量事故→用例的版本化映射：围栏→写链全链、驼峰→Y2、抽象泄漏→A3/A4、2048→D1（观察面）、复读→A2/A4、实体串台→A2 |
+| 评委 | `scripts/eval/judge-prompt.md` + `judge.ts` | 四维 0/1/2 + 引文证据；只吃转录（与机械分量互不锚定）；版本 = 内容 sha256 |
+| 打分器 | `scripts/eval/score.ts` + `baseline.json` | 四类阈值（dims 上限 / judge 下限−容差 / 写链布尔面 / okMode）；记分台 `.runtime/scores.jsonl`；回归 exit 1 |
+
+### 怎么用
+
+```bash
+npm run eval            # 全链：探针基线集（真模型+mock）→ 写链 → 评委 → 比基线，回归 exit 1
+npm run eval:score      # 只对现有报告评分（不重跑真模型）
+npm run eval:baseline   # 基线重定（唯一入口；strict 用例 ok 翻转会拒绝烤入）
+```
+
+判定口径：**机械分量只增才算劣化**（A2 等观察项用 cap 表达"不劣化"档）；评委分量 ≥ 基线−容差 1；写链逐项对照布尔面。记分台每行带 corpusVersion / judgePromptVersion / judgeModel 三元组——**三元组一变分数即不可比，必须重定基线**（模型升级、换独立评委、改评委提示词都是"变"）。
+
+### 波次防线与实测记录
+
+- **基线冻结**：npm test 1313 全绿（波前 1270，+43）；typecheck 范围不含 scripts/（D-084 残留 b 照旧，未混波）。
+- **三轮实测**（`.runtime/eval-baseline-run1/2/3.log`，真模型 + mock 执行器）：基线 v3（探针 7 例 + 写链 1 组），轮③ 8/8 全绿。机械分量稳定用例三轮逐位一致；写链布尔面三轮全同（D-088 链条 3/3）；评委同转录复跑一致，一例 ±2 超容差分差如实登记（B1 卫生 0→2）——机械层是可复现骨干，评委层是粗门限 + 轨迹。
+- **标定两次**（F3 变异验证由 dims.test.ts 原句锁 + score.test.ts 判定锁承担）：① B1 尺子失准（全数字串口径把选项序号/期间码算进签名；总调用数漏掉"复述谎称实查"）——改金额口径 + 每轮真查；② `okExpected` 语义错误（要求缺点必须出现 = 惩罚改进）——改 `okMode`（strict/free）；另修基线键命名空间错位与 free 案评委基线规则（取含缺陷转录实测下限）。
+- **模型侧观察项**（登记不修，不劣化档入基线）：A2 范围渗入（§6 既有）、A2 执行语言泄漏一次（D-098 修尺后探针首次机械命中）、Y2 佐证数字无所属、Y2 澄清缺问句。**呈现卫生是当前模型最不稳的维**（三轮 4 次/21 用例轮）——scores.jsonl 轨迹显示频率上升即是漂移信号。
+- **新登记**：D-104（探针无后台持久化排干，不影响分数，探针库不干净）。
+
+F 波结束。
