@@ -23,6 +23,7 @@ import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
 import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
 import type { PlanRejectRow } from './plan-reject-report';
+import { collectWriteChainFacts, hasWriteChainSignal, renderWriteChainLine, type ConversationWriteChainFacts } from './eval/write-chain';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
@@ -149,6 +150,8 @@ interface CaseRecord {
   messageId: string;
   requestId: string | null;
   conversationId: string;
+  /** 主会话键（wecom:<user>:<conv>）：change_intents / platform_tasks 的 session 精确形态。 */
+  sessionKey: string;
   taskId: string | null;
   subagentFinalText: string | null;
   progressSteps: string[];
@@ -377,7 +380,8 @@ async function main(): Promise<void> {
       const code = prev.match(/确认\s*([A-Z0-9]{6})/)?.[1];
       if (!code) {
         records.push({
-          id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
+          id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv,
+          sessionKey: `wecom:${spec.user ?? AUTHORIZED_USER}:${spec.conv}`, taskId: null,
           subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.confirmOf} 的回复未含确认码,无法构造确认)`,
           durationMs: 0, leakFlags: [],
@@ -391,7 +395,8 @@ async function main(): Promise<void> {
       const choice = pickClarification(prev);
       if (!choice) {
         records.push({
-          id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv, taskId: null,
+          id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv,
+          sessionKey: `wecom:${spec.user ?? AUTHORIZED_USER}:${spec.conv}`, taskId: null,
           subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.followUpOf} 未产生编号候选,无法构造追问)`,
           durationMs: 0, leakFlags: [],
@@ -438,6 +443,7 @@ async function main(): Promise<void> {
       messageId: message.messageId,
       requestId: request?.requestId ?? null,
       conversationId: spec.conv,
+      sessionKey,
       taskId: taskRow?.task_id ?? null,
       subagentFinalText: taskRow ? lastAssistantText(JSON.parse(taskRow.worker_messages)) : null,
       progressSteps: steps,
@@ -463,6 +469,22 @@ async function main(): Promise<void> {
   // 关停次序：在飞的后台持久化先排干，再关库（判据与为什么不猜时长见函数注释）——
   // 反序就是那些写在连接关闭后才落地，该会话的 Context State 整段丢失。
   await drainBackgroundPersistence(auditDb);
+
+  // 写链三指标（L7 / D-060）：提案尝试 / 意图（落账+读回）/ 确认码，从宿主契约表机械提取——
+  // 替代三轮复跑时代"人工从报告数 prop_*/确认码/落账"的动作（change-safety §E 波末尾点名的账）。
+  const writeChain = collectWriteChainFacts(
+    auditDb,
+    records.map(({ id, conversationId, sessionKey, requestId, reply }) => ({ id, conversationId, sessionKey, requestId, reply })),
+  );
+  // 写意图会话（有 confirmOf 用例 = 写意图由构造保证）必出报告行：D-097 反例形状
+  // （零尝试/零意图/无确认码）三信号全空，只按信号过滤恰好漏掉最需要看见的那一行。
+  const writeIntentConversations = new Set(CASES.filter((c) => c.confirmOf).map((c) => c.conv));
+  const writeChainReported = writeChain.filter(
+    (facts) => hasWriteChainSignal(facts) || writeIntentConversations.has(facts.conversationId),
+  );
+  for (const facts of writeChainReported) {
+    console.log(JSON.stringify({ event: 'acceptance_write_chain', ...facts }));
+  }
 
   // 报告只依赖内存里的 records：先落盘再拆装配，关库路径再出问题也拿得到本次产物。
   const reportPath = path.join(dataDir, `acceptance-report-${runId}.md`);
@@ -497,8 +519,12 @@ async function main(): Promise<void> {
       ...r.reply.split('\n').map((line) => `> ${line}`),
       '',
     ]),
+    // 写链指标节（L7）：有信号的会话 + 写意图会话（判据见上方 writeChainReported）。
+    ...(writeChainReported.length ? ['## 写链指标', '', ...writeChainReported.map(renderWriteChainLine), ''] : []),
   ].join('\n'));
-  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify(records, null, 2));
+  // JSON 顶层形状（L7 起）：{ records, writeChain }——writeChain 是打分器对 baseline
+  // 比对的取数面（此前顶层是裸数组；无程序化消费方，md 报告形状不变）。
+  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify({ records, writeChain }, null, 2));
   console.log(JSON.stringify({ event: 'acceptance_done', report: reportPath }));
 
   await assembly.close();
