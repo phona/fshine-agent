@@ -27,8 +27,8 @@ export interface HandlerDeps {
   /** 平台工作区根：用于收集本轮回传给用户的产物文件（只认 tmp/ 下的）。 */
   platformRoot?: string;
   /**
-   * 入站防抖窗口（毫秒）：带正文的消息在进入会话队列前先等这么久，让同一burst里
-   * 稍晚到达的附件先落地。缺省取 env `FSHINE_INBOUND_DEBOUNCE_MS`，再缺省 2000。
+   * 入站防抖窗口（毫秒）：**burst 内**带正文的消息在进入会话队列前先等这么久，让同一
+   * burst 里稍晚到达的附件先落地。缺省取 env `FSHINE_INBOUND_DEBOUNCE_MS`，再缺省 2000。
    *
    * 为什么需要：企微的模型里"3 个文件 + 1 条指令"是 4 条独立消息（`MixedMsgItem` 只支持
    * text/image，文件无法与文字同条），而会话队列是串行的——指令那条一启动，晚到的文件
@@ -36,8 +36,20 @@ export interface HandlerDeps {
    * 文件→指令→文件，指令那轮只带了 2 个）。
    * 参照 OpenClaw `messages.inbound.debounceMs`：文本参与防抖，媒体/附件立即 flush。
    * 附件-only 消息因此**不等待**（用户发完文件立刻看到"已收到"）。
+   *
+   * 2026-10-16 首帧提速改成"首条零防抖"：窗口内**首条**消息立即处理、后续到达才合并——
+   * 判据是本条到达前的一个窗口里有没有先行消息（任何消息，含附件）。冷启动的对话不再
+   * 白等 2s；只有 burst 进行中（先行消息打开了窗口）的指令回合才等满窗口，让尾随附件
+   * 赶得上。迟到的文件仍有"指令请再发一次"的明确提示兜底（见 seenTextTurn）。
    */
   inboundDebounceMs?: number;
+  /**
+   * 回合心跳帧间隔（毫秒）：受理帧之后如果整整这么久没有任何帧（模型一轮还没说完话、
+   * 也没有委派帧），补一帧「仍在处理中」，填掉会话轮 10–20s 的盲段。缺省 8000。
+   * 只补一帧（一次性定时器）：重复心跳会挤占渠道的 4 帧进度硬顶，让真实进度帧反被丢掉。
+   * 真实帧已在流动（或披露已上屏）时保持静默——用户不再盲等，就不添噪。0 或负数 = 关闭。
+   */
+  turnHeartbeatMs?: number;
   store: AuditStore;
   runtime: AgentRuntime;
   planConfirmation?: {
@@ -207,6 +219,27 @@ async function loadRecentAttachments(store: HandlerDeps['store'], wecomUserId: s
 /** 入站防抖默认窗口：2 秒。参照 OpenClaw 默认 1500–2000ms；群聊可调更短。 */
 const DEFAULT_INBOUND_DEBOUNCE_MS = 2000;
 
+/**
+ * 受理帧文案（首帧提速，2026-10-16）：回合真正开跑时（防抖后、出队列、进 runtime 之前）
+ * 由宿主经 progress 通道发的确定性回执。
+ *
+ * 为什么是宿主文案而不是等模型：delegate 轮的第一帧「正在…」要等第一轮 LLM（10–20s），
+ * conversation 轮直到终稿零帧——那正是用户亲测的 12–22s 盲等。这帧在进 runtime 之前发，
+ * 毫秒级可见。文案纪律：不泄漏内部机制词（防抖/队列/runtime 一概不提）、不承诺时长
+ * （没有"马上/稍等 X 秒"）、群聊单聊同形（无人称、无 @）。它是宿主回执不是模型文本，
+ * 不经过出口校验，也不进转录。
+ */
+export const TURN_ACCEPTED_TEXT = '已收到，正在处理';
+
+/**
+ * 心跳帧文案：受理帧之后整整一个心跳周期没有任何帧时补的这一帧。同受理帧的文案纪律，
+ * 且只补一帧——真实帧一旦开始流动就静默，不挤占渠道的 4 帧进度硬顶。
+ */
+export const TURN_STILL_WORKING_TEXT = '仍在处理中';
+
+/** 回合心跳帧缺省间隔：8s——低于会话轮第一轮 LLM 的典型下限（10s），只补真盲段。 */
+const DEFAULT_TURN_HEARTBEAT_MS = 8_000;
+
 /** 单会话附件暂存上限（模块级：restoreAttachments 在闭包外也要用）。 */
 const MAX_PENDING_ATTACHMENTS = 8;
 
@@ -368,13 +401,29 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   const rawDebounce = deps.env?.['FSHINE_INBOUND_DEBOUNCE_MS']?.trim();
   const fromEnv = rawDebounce ? Number(rawDebounce) : Number.NaN;
   const debounceMs = deps.inboundDebounceMs ?? (Number.isFinite(fromEnv) ? fromEnv : DEFAULT_INBOUND_DEBOUNCE_MS);
+  const turnHeartbeatMs = deps.turnHeartbeatMs ?? DEFAULT_TURN_HEARTBEAT_MS;
+  /**
+   * 每会话最近一次消息到达时刻（进程内毫秒时钟）——「首条零防抖」的窗口判据。
+   *
+   * 为什么记所有消息（含附件-only）：附件正是 burst 的成员——"文件→指令"形状里，指令
+   * 那条必须因为 0.5s 前的文件而知道自己处于 burst 中、要等窗口让尾随附件落地
+   * （2026-10-08 的事故形状）。会话数即条目数，与 sessionAttachments 同量级，不另设清理。
+   */
+  const lastArrivalAt = new Map<string, number>();
 
   return async (message: IncomingChannelMessage, progress?: ProgressFn, notice?: NoticeFn): Promise<ChannelReply> => {
     const queueKey = `${message.wecomUserId}:${message.conversationId}`;
-    // 防抖只在"带正文"的消息上生效，且在入队**之前**等——这样窗口内到达的附件消息
-    // 会先拿到队列（它们的活只是落盘+暂存，很快），文字回合随后就能带上它们。
-    // 附件-only 消息不等：用户发完文件要立刻看到确认。
-    if (!message.attachmentOnly && debounceMs > 0) {
+    // 首条零防抖（2026-10-16）：到达时刻先记账，再看本条之前的一个窗口内有没有先行消息。
+    //   没有先行消息（冷启动）→ 立即处理，用户最快看到受理帧；
+    //   有先行消息（burst 进行中）→ 等满窗口，让同一 burst 里稍晚到达的附件先落地——
+    //   那些附件走"立即 flush"的路，窗口等的就是它们。
+    // 防抖只在"带正文"的消息上生效；附件-only 消息从不等待（落盘+暂存很快，用户要立刻
+    // 看到确认）。到达时刻在任何等待之前打点，否则窗口判据会被自己的等待污染。
+    const now = Date.now();
+    const prevArrival = lastArrivalAt.get(queueKey);
+    const burstInProgress = prevArrival !== undefined && now - prevArrival < debounceMs;
+    lastArrivalAt.set(queueKey, now);
+    if (!message.attachmentOnly && debounceMs > 0 && burstInProgress) {
       await new Promise((resolve) => setTimeout(resolve, debounceMs));
     }
     const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
@@ -460,6 +509,31 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     }
     await store.requests.insert({ ...base, outcome: 'replied' });
 
+    // ── 首帧提速：受理即帧 + 一次性心跳（2026-10-16）─────────────────────────
+    // 受理帧的发射点在两个 runtime.handleTurn 调用点之前，而不是 processMessage 开头：
+    // 授权拒绝、确认状态机（取代/取消/过期/歧义）这些路都是毫秒级确定性回复，不需要帧；
+    // 只有真的要进 runtime 的回合才发。progress 缺席（单测直调）时整段退化为无操作。
+    // heartbeatTimer 声明在 try 之外——finally 要清它，声明进 try 就成了 try 块局部量。
+    let progressCalls = 0;
+    let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
+    const emitProgress = (text: string): void => {
+      progressCalls += 1;
+      progress?.(text);
+    };
+    let acceptedAnnounced = false;
+    const announceAccepted = (): void => {
+      if (!progress || acceptedAnnounced) return;
+      acceptedAnnounced = true;
+      emitProgress(TURN_ACCEPTED_TEXT);
+      if (turnHeartbeatMs <= 0) return;
+      // 心跳只守"受理帧之后一片静默"的盲段（progressCalls === 1 = 除受理帧外零帧）：
+      // 会话轮的第一轮 LLM 常要 10–20s，这帧填掉它。真实帧已在流动（或披露走了
+      // progress 兜底）时静默——用户不再盲等，多一帧只是噪音，还占渠道的进度硬顶。
+      heartbeatTimer = setTimeout(() => {
+        if (progressCalls === 1) emitProgress(TURN_STILL_WORKING_TEXT);
+      }, turnHeartbeatMs);
+    };
+
     try {
       // 本轮委派开始时刻：产物回传按它划界（collectProducedFiles 的 since）。
       //
@@ -511,9 +585,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           // notice 优先：它被 await、不被渠道节流，且与计划通知走同一条审计轨迹
           // （契约里没有单独的事件种类，可检索历史因此仍是一处）。
           // 没有 notice 时才退到 progress：进度帧有最小间隔与帧数硬顶，可能被丢掉，
-          // 但总比完全不披露好。
+          // 但总比完全不披露好。（经 emitProgress 计数——披露已上屏，心跳就该静默。）
           if (onNotice) await onNotice(text);
-          else progress?.(text);
+          else emitProgress(text);
         } catch (error) {
           // 披露是增强，不是门：送达失败不能让这一轮失败（与计划通知的授权语义不同——
           // 那个必须送达后才激活，这个只是让假设可见）。
@@ -531,7 +605,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         allowedAccountSetIds: scope.accountSetIds,
         capabilities: scope.capabilities,
         sessionId: `wecom:${sessionKey}`,
-        onStep: progress,
+        // 帧计数经 emitProgress：runtime 的「正在…」帧算真实帧流动，心跳据此静默
+        onStep: progress ? emitProgress : undefined,
         ...(onNotice ? { onNotice } : {}),
         ...(deps.planConfirmation?.savePending ? { onPlanPending: deps.planConfirmation.savePending } : {}),
       };
@@ -542,6 +617,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         });
         if (confirmation.status === 'activated') {
           if (!confirmation.taskId) throw new Error('已确认的计划缺少原任务标识。');
+          announceAccepted();
           const resumed = await runtime.handleTurn({ ...trusted, resumeTaskId: confirmation.taskId }, input);
           return withFileReplies(resumed.text, deps.platformRoot, delegatedAt, requestId);
         }
@@ -550,6 +626,10 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         if (confirmation.status === 'ambiguous') return '当前有多个待确认查询，请先说明要继续哪一个。';
         if (confirmation.status === 'expired') return '这项查询确认已过期，请重新发起查询。';
       }
+      // 受理帧：进 runtime 前的最后一刻发——此刻授权已过、交付集已定，回合必然开始
+      // 长时间运行（第一轮 LLM 10–20s 起）。更早的位置会让"很快返回"的确定性回复
+      //（未授权拒绝、确认状态机的取代/取消/过期/歧义）也背上无用的一帧。
+      announceAccepted();
       const reply = await runtime.handleTurn(
         trusted,
         input,
@@ -563,6 +643,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         error: error instanceof Error ? error.message : String(error),
       }));
       return '处理失败,请稍后再试。';
+    } finally {
+      // 心跳定时器随回合终结：不清理会挂在事件循环上，把进程退出/测试收尾拖住
+      if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
     }
   }
 }

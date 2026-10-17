@@ -242,6 +242,35 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(progressTexts).toEqual(['收到,正在处理…', '步骤一:正在定位账套']);
   });
 
+  // 受理帧豁免（首帧提速，2026-10-16）：本流第一帧 progress 是宿主在回合真正开跑时发的
+  // 「已收到，正在处理」——确定性回执、恰好一帧、永不重复（不构成 churn），因此不占
+  // 4 帧进度硬顶；真实进度帧的预算保持 4 帧不缩水。豁免按"第一帧"判定而不是按文案：
+  // 宿主文案不是本层的契约，按内容嗅探会把两层耦死。
+  it('受理帧豁免:本流第一帧 progress 不占 4 帧硬顶,第 6 帧才被丢', async () => {
+    let clock = 1_700_000_000_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const handler: ReplyHandler = async (_message, progress) => {
+      for (let i = 1; i <= 6; i += 1) {
+        progress?.(`进度帧${i}`);
+        clock += 3_100; // 每帧间隔都超过 3 秒最小间隔：只有硬顶在起作用
+      }
+      return '完成';
+    };
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-accept-1', { msgid: 'msg-accept' }));
+    // handler 是同步的，一个真实宏任务之后所有帧都已记录（Date.now 被冻结不影响真定时器）
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    nowSpy.mockRestore();
+
+    expect(fake.replies.filter((reply) => reply.finish)).toHaveLength(1);
+    const progressTexts = fake.replies
+      .filter((reply) => !reply.finish && reply.content !== '收到,正在处理…')
+      .map((reply) => reply.content);
+    // 第 1 帧豁免 + 4 帧预算 = 5 帧；第 6 帧被硬顶丢（老行为：第 1 帧占预算，只送出 4 帧）
+    expect(progressTexts).toEqual(['进度帧1', '进度帧2', '进度帧3', '进度帧4', '进度帧5']);
+  });
+
   it('handler 抛错:记单行日志并回复兜底文案', async () => {
     const handler = vi.fn(async () => {
       throw new Error('boom-secret');

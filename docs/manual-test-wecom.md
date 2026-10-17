@@ -107,7 +107,7 @@ npm test -- tests/e2e/turn-loop
 
 ### 8.2 手工用例 → 自动化用例映射
 
-自动化用例按主题拆在十个文件里（共享替身 `tests/e2e/harness.ts`）：
+自动化用例按主题拆在十一个文件里（共享替身 `tests/e2e/harness.ts`）：
 
 | 文件 | 覆盖 |
 |---|---|
@@ -121,6 +121,7 @@ npm test -- tests/e2e/turn-loop
 | `turn-loop-concurrent.test.ts` | 并发会话里的多步计划：跨回合中断/恢复、计划中插入探索轮不污染投影、用户跳过失败步、计划步骤撞用户确认门后的去留（characterization） |
 | `turn-loop-pingpong.test.ts` | 多任务乒乓路由（三个任务 A→B→C→A→B→C 每回合续回指名的旧任务、worker 转录不串台、账本按子任务累计；续跑编号拿错——别人的任务/失效编号——零执行被拒且会话不卡死）与探索线程延续（只答一半→再澄清→补齐才委派；线程被打断后开头仍在窗口、落地是新任务，问句可经历史工具召回——characterization） |
 | `turn-loop-disambiguation.test.ts` | 多任务回溯歧义的编号消歧（两个未完成计划形状撞车 → 宿主出编号题零委派；紧跟问题的编号回复绑定所选计划、真库投影 planId 归属正确；非编号回复按新请求处理不绑定） |
+| `turn-loop-first-frame.test.ts` | 首帧提速（受理即帧：回合开跑 <1s 发宿主回执「已收到，正在处理」，会话轮不再盲等到终稿；每回合恰一帧、不混进终稿；委派轮受理帧先行于「正在…」进度帧。防抖「首条零防抖、后续到达才合并」由 `apps/server/handler.test.ts` 首帧提速组覆盖） |
 
 | 手工用例 | 自动化用例（文件名 > 用例名） |
 |---|---|

@@ -10,6 +10,8 @@ import {
   createMessageHandler,
   describeDeliveredFiles,
   parseAttachmentEnvelope,
+  TURN_ACCEPTED_TEXT,
+  TURN_STILL_WORKING_TEXT,
   withAttachmentPaths,
 } from './handler';
 
@@ -406,7 +408,8 @@ describe('会话队列的失败留痕', () => {
     const store = fakeStore();
     (store as unknown as { requests: { insert: () => Promise<void> } }).requests.insert = async () => { throw boom; };
     const runtime: AgentRuntime = { handleTurn: async () => ({ text: 'never' } as AgentReply) };
-    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime });
+    // 防抖关掉：两条消息先后落进同一个窗口会让第二条白等一个窗口（本条只验失败留痕）
+    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime, inboundDebounceMs: 0 });
     const logged: string[] = [];
     const orig = console.error;
     console.error = (line: unknown) => { logged.push(String(line)); };
@@ -800,13 +803,19 @@ describe('入站防抖', () => {
     expect(reply).toContain('a.xlsx');
   });
 
-  it('默认窗口 2000ms(未显式配置时)', async () => {
+  // 2026-10-16 首帧提速改写：防抖的新语义是"窗口内首条立即、后续到达才合并"（参照
+  // OpenClaw）。默认窗口的钉子因此改为两段——冷启动首条 <1s（这就是用户感知的等待），
+  // burst 内第二条等满窗口（附件合并的收益保留）。
+  it('默认窗口 2000ms(未显式配置时)：首条立即，burst 内第二条等满窗口', async () => {
     const seen: string[] = [];
     const runtime: AgentRuntime = { handleTurn: async (_c, request: string) => { seen.push(request); return { text: 'ok' }; } };
     const handler = createMessageHandler({ store: fakeStore(), runtime: runtime as unknown as AgentRuntime });
     const t0 = Date.now();
     await handler(msg({ text: '在吗' }));
-    const elapsed = Date.now() - t0;
+    expect(Date.now() - t0).toBeLessThan(1000);
+    const t1 = Date.now();
+    await handler(msg({ text: '第二条' }));
+    const elapsed = Date.now() - t1;
     expect(elapsed).toBeGreaterThanOrEqual(1900);
     expect(elapsed).toBeLessThan(3500);
   });
@@ -820,28 +829,46 @@ describe('入站防抖的配置来源', () => {
     return createMessageHandler({ store: fakeStore(), runtime: runtime as unknown as AgentRuntime, ...(env ? { env } : {}) });
   }
   const msg = (text: string): IncomingChannelMessage => ({ wecomUserId: USER, conversationId: USER, messageId: `m_${Math.random().toString(36).slice(2, 8)}`, text, receivedAt: new Date().toISOString() });
-  const timed = async (handler: ReturnType<typeof build>) => { const t0 = Date.now(); await handler(msg('x')); return Date.now() - t0; };
+  // 2026-10-16 首帧提速改写：时序口径从"单条等满窗口"变成"首条立即 + burst 第二条等窗口"。
+  // 配置的观察点因此移到 burst 第二条上（首条在任何配置下都立即）。
+  const timed = async (handler: ReturnType<typeof build>) => {
+    const t0 = Date.now();
+    await handler(msg('首条'));
+    const first = Date.now() - t0;
+    const t1 = Date.now();
+    await handler(msg('第二条'));
+    return { first, burst: Date.now() - t1 };
+  };
 
-  it('env 未设该键 → 用默认 2000', async () => {
-    expect(await timed(build({}))).toBeGreaterThanOrEqual(1900);
+  it('env 未设该键 → 用默认 2000：首条立即、burst 第二条等窗口', async () => {
+    const { first, burst } = await timed(build({}));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
   });
 
-  it('env 设为 0 → 关闭防抖(不等)', async () => {
-    expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }))).toBeLessThan(1000);
+  it('env 设为 0 → 关闭防抖：burst 第二条也不等', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeLessThan(1000);
   });
 
-  it('env 设为 300 → 按配置等', async () => {
-    const el = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
-    expect(el).toBeGreaterThanOrEqual(250);
-    expect(el).toBeLessThan(1500);
+  it('env 设为 300 → 按配置等（只作用在 burst 第二条上）', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(250);
+    expect(burst).toBeLessThan(1500);
   });
 
   it('env 是空串 → 仍用默认(不是 0)', async () => {
-    expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }))).toBeGreaterThanOrEqual(1900);
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
   });
 
   it('env 是垃圾值 → 回退默认,不崩', async () => {
-    expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }))).toBeGreaterThanOrEqual(1900);
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
   });
 });
 
@@ -851,17 +878,154 @@ describe('入站防抖的配置来源', () => {
     return createMessageHandler({ store: fakeStore(), runtime: runtime as unknown as AgentRuntime, ...(env ? { env } : {}) });
   }
   const msg = (text: string): IncomingChannelMessage => ({ wecomUserId: USER, conversationId: USER, messageId: `m_${Math.random().toString(36).slice(2, 8)}`, text, receivedAt: new Date().toISOString() });
-  const timed = async (handler: ReturnType<typeof build>) => { const t0 = Date.now(); await handler(msg('x')); return Date.now() - t0; };
+  const timed = async (handler: ReturnType<typeof build>) => {
+    const t0 = Date.now();
+    await handler(msg('首条'));
+    const first = Date.now() - t0;
+    const t1 = Date.now();
+    await handler(msg('第二条'));
+    return { first, burst: Date.now() - t1 };
+  };
 
-  it('env 未设该键 → 用默认 2000', async () => { expect(await timed(build({}))).toBeGreaterThanOrEqual(1900); });
-  it('env 设为 0 → 关闭防抖', async () => { expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }))).toBeLessThan(1000); });
-  it('env 设为 300 → 按配置等', async () => {
-    const el = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
-    expect(el).toBeGreaterThanOrEqual(250);
-    expect(el).toBeLessThan(1500);
+  it('env 未设该键 → 用默认 2000：首条立即、burst 第二条等窗口', async () => {
+    const { first, burst } = await timed(build({}));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
   });
-  it('env 空串 → 仍用默认(不是 0)', async () => { expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }))).toBeGreaterThanOrEqual(1900); });
-  it('env 垃圾值 → 回退默认,不崩', async () => { expect(await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }))).toBeGreaterThanOrEqual(1900); });
+  it('env 设为 0 → 关闭防抖', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeLessThan(1000);
+  });
+  it('env 设为 300 → 按配置等', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(250);
+    expect(burst).toBeLessThan(1500);
+  });
+  it('env 空串 → 仍用默认(不是 0)', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
+  });
+  it('env 垃圾值 → 回退默认,不崩', async () => {
+    const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }));
+    expect(first).toBeLessThan(1000);
+    expect(burst).toBeGreaterThanOrEqual(1900);
+  });
+});
+
+// ── 首帧提速：受理即帧 + 首条零防抖（2026-10-16）─────────────────────────────
+// 痛点（用户亲测）：消息到第一个可见反馈之间有 12–22s 盲等——防抖 2s + 串行队列 +
+// Main Agent 第一轮 LLM（10–20s）之后，delegate 轮才产生第一帧「正在…」，conversation
+// 轮直到终稿零帧。修两刀：
+//   ① 受理即帧：回合真正开跑时（防抖后、出队列、进 runtime 之前）由宿主经 progress
+//      通道发一帧确定性文案。它是宿主文案不是模型文本，不经过出口校验；附件-only 不启
+//      回合所以不发帧；未授权拒绝很快也不发帧。
+//   ② 首条零防抖：防抖窗口内首条消息立即处理、后续到达才合并——冷启动的对话不再白等 2s。
+describe('首帧提速：受理即帧与首条零防抖', () => {
+  const scratch = mkdtempSync(path.join(tmpdir(), 'first-frame-'));
+  afterAll(() => rmSync(scratch, { recursive: true, force: true }));
+  const realFile = (name: string) => { const p = path.join(scratch, name); writeFileSync(p, 'x'); return { filename: name, path: p, bytes: 1 }; };
+  function msg(over: Partial<IncomingChannelMessage>, userId = USER): IncomingChannelMessage {
+    return { wecomUserId: userId, conversationId: userId, messageId: `m_${Math.random().toString(36).slice(2, 8)}`, text: '', receivedAt: new Date().toISOString(), ...over };
+  }
+
+  interface Frame { text: string; at: number }
+  /** runtime 替身：进入时记事、可发进度帧、可拖延——受理帧的"先于 runtime"与时序都靠它观察。 */
+  function harness(opts: {
+    debounceMs: number;
+    runtimeDelayMs?: number;
+    runtimeSteps?: string[];
+    heartbeatMs?: number;
+  }) {
+    const frames: Frame[] = [];
+    let framesAtRuntimeStart = -1;
+    const runtime: AgentRuntime = {
+      handleTurn: async (ctx) => {
+        framesAtRuntimeStart = frames.length;
+        for (const step of opts.runtimeSteps ?? []) ctx.onStep?.(step);
+        await new Promise((r) => setTimeout(r, opts.runtimeDelayMs ?? 0));
+        return { text: 'ok' };
+      },
+    };
+    const handler = createMessageHandler({
+      store: fakeStore(),
+      runtime: runtime as unknown as AgentRuntime,
+      inboundDebounceMs: opts.debounceMs,
+      ...(opts.heartbeatMs !== undefined ? { turnHeartbeatMs: opts.heartbeatMs } : {}),
+    });
+    const send = (over: Partial<IncomingChannelMessage>, userId = USER): Promise<{ reply: ChannelReply; elapsed: number }> => {
+      const t0 = Date.now();
+      return handler(msg(over, userId), (text: string) => { frames.push({ text, at: Date.now() }); }).then((reply) => ({ reply, elapsed: Date.now() - t0 }));
+    };
+    return { handler, frames, send, framesAtRuntimeStart: () => framesAtRuntimeStart };
+  }
+
+  it('受理即帧：<1s 发出宿主受理帧，且先于 runtime（不经过出口校验）', async () => {
+    const h = harness({ debounceMs: 2000, runtimeDelayMs: 20 });
+    const { elapsed } = await h.send({ text: '在吗' });
+    expect(h.frames.map((f) => f.text)[0]).toBe(TURN_ACCEPTED_TEXT);
+    // <1s：盲等的第一段（防抖）不许算进首帧延迟；老行为是先等满 2s 防抖且零帧
+    expect(elapsed).toBeLessThan(1000);
+    // 受理帧在进入 runtime 之前发出：runtime 开跑时它已在帧序列里
+    expect(h.framesAtRuntimeStart()).toBeGreaterThanOrEqual(1);
+  });
+
+  it('首条零防抖：窗口内第一条带正文消息立即处理', async () => {
+    const h = harness({ debounceMs: 2000 });
+    const { elapsed } = await h.send({ text: '第一条' });
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('后续到达才合并：先行消息打开窗口，burst 里的指令回合仍等满窗口（晚到附件能赶上）', async () => {
+    const b = realFile('b.xlsx');
+    const h = harness({ debounceMs: 200 });
+    await h.send({ text: '开场白' });                       // 冷启动：立即（新语义）
+    const burst = h.send({ text: '做工资表' });              // 窗口内第二条：等窗口
+    await new Promise((r) => setTimeout(r, 20));
+    const fileTurn = h.send({ attachmentOnly: true, attachments: [b] }); // 附件立即落定
+    const results = await Promise.all([burst, fileTurn]);
+    expect(results[0]!.elapsed).toBeGreaterThanOrEqual(150); // 等了防抖窗口
+    expect(results[1]!.elapsed).toBeLessThan(150);           // 附件不参与防抖
+  });
+
+  it('窗口过期回归零防抖：距上一次到达超过窗口的消息不再等', async () => {
+    const h = harness({ debounceMs: 150 });
+    await h.send({ text: '第一条' });
+    await new Promise((r) => setTimeout(r, 400));            // 窗口（150ms）早已过去
+    const { elapsed } = await h.send({ text: '第二条' });
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('附件-only 不启回合：不发受理帧（回执文案已自带确认）', async () => {
+    const a = realFile('a.xlsx');
+    const h = harness({ debounceMs: 2000 });
+    const { reply } = await h.send({ attachmentOnly: true, attachments: [a] });
+    expect(h.frames).toEqual([]);
+    expect(reply).toBe('已收到 a.xlsx');
+  });
+
+  it('未授权拒绝很快：不发受理帧', async () => {
+    const h = harness({ debounceMs: 0 });
+    const { reply } = await h.send({ text: '在吗' }, 'stranger');
+    expect(h.frames).toEqual([]);
+    expect(reply).toContain('未开通查询权限');
+  });
+
+  it('心跳帧：受理帧之后整整一个周期无任何帧时，补一帧「仍在处理中」', async () => {
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 120, heartbeatMs: 40 });
+    await h.send({ text: '在吗' });
+    // 会话轮零 runtime 帧：受理帧（t≈0）之后的 40ms 盲段由心跳补上，只补一帧
+    expect(h.frames.map((f) => f.text)).toEqual([TURN_ACCEPTED_TEXT, TURN_STILL_WORKING_TEXT]);
+  });
+
+  it('心跳帧不添噪：真实帧已在流动（或已有披露）时保持静默、不挤占帧预算', async () => {
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 120, runtimeSteps: ['正在读取余额…'], heartbeatMs: 40 });
+    await h.send({ text: '查余额' });
+    // runtime 第一帧在受理帧之后立刻发出：用户不再盲等，心跳不再补帧
+    expect(h.frames.map((f) => f.text)).toEqual([TURN_ACCEPTED_TEXT, '正在读取余额…']);
+  });
 });
 
 // ── 文件回传（2026-10-08 重构：宿主扫 tmp/，不靠 worker 声明路径）──────────────────

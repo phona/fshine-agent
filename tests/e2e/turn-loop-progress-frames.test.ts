@@ -10,16 +10,22 @@
  * 发起哪些 bash）与平台计划 CLI 的应答（提交即激活的 execute 档）。帧的文本由生产
  * 渲染层合成（operationStepText + 平台清单第 5 列派生的 label 表），测试不写死措辞。
  *
- * 守三件事：
+ * 守四件事：
+ *   ⓪ 受理帧先行（首帧提速，2026-10-16）：每个启回合的消息，handler 在进 runtime 之前
+ *      经 progress 通道发一帧宿主回执「已收到，正在处理」——它排在一切 runtime 帧之前，
+ *      且每回合恰一帧。文案与发射点在 apps/server/handler.ts（TURN_ACCEPTED_TEXT），
+ *      这里按同一常量断言，不另抄一份措辞。
  *   ① 委派回合真的产出 `正在…` 形态的用户可见帧（不是内部事件名）；
  *   ② 内部事件名（SDK 会话事件的 worker_ 前缀形态）不出厂；
  *   ③ 连续重复帧被压制：worker 连发两次相同调用只外发一帧——生产企微 progress 只有
  *      4 帧硬顶，重复帧会挤占真实进度帧的预算（真实平台战斗测试实测的 churn）。
+ *      受理帧在渠道侧豁免硬顶（adapter 用例钉），真实帧的 4 帧预算不因此缩水。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TURN_ACCEPTED_TEXT } from '../../apps/server/handler';
 import type { PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { createPiCodingTurnDriver, PLAN_SUBMIT_STEP } from '../../packages/agent/src/pi-coding-driver';
 import { boot, mainDriver, type Turn } from './harness';
@@ -137,15 +143,20 @@ async function delegatedTurn(turns: FakeTurn[]): Promise<Turn> {
 }
 
 describe('离线全链 e2e：委派回合的进度帧', () => {
-  it('①② 委派回合产出「正在…」形态的用户可见帧，内部事件名不出厂', async () => {
+  it('⓪①② 受理帧先行，委派回合产出「正在…」形态的用户可见帧，内部事件名不出厂', async () => {
     const turn = await delegatedTurn([
       { bash: [PLAN_COMMAND, QUERY_COMMAND], text: '幻辰财税 202606 应收账款余额为 61000 元。' },
     ]);
 
-    // 帧的形状是生产模板 operationStepText：正在${label}${参数摘要}…
-    expect(turn.steps).toContain(QUERY_STEP);
-    expect(turn.steps.every((step) => /^正在.+…$/.test(step))).toBe(true);
-    // 内部事件名（SDK 会话事件 / 计划协议状态）不出厂：用户只看得到人类可读短语
+    // ⓪ 受理帧是本回合第一帧、恰一帧（宿主回执，先于一切 runtime 帧）
+    expect(turn.steps[0]).toBe(TURN_ACCEPTED_TEXT);
+    expect(turn.steps.filter((step) => step === TURN_ACCEPTED_TEXT)).toHaveLength(1);
+    // ① 帧的形状是生产模板 operationStepText：正在${label}${参数摘要}…
+    // （受理帧之后的其余帧全是 runtime 帧受理这个判据）
+    const runtimeSteps = turn.steps.slice(1);
+    expect(runtimeSteps).toContain(QUERY_STEP);
+    expect(runtimeSteps.every((step) => /^正在.+…$/.test(step))).toBe(true);
+    // ② 内部事件名（SDK 会话事件 / 计划协议状态）不出厂：用户只看得到人类可读短语
     for (const step of turn.steps) {
       expect(step).not.toContain('worker_');
       expect(step).not.toMatch(/tool_execution_start|agent_start|agent_end|PLAN (ACTIVE|DECLINED|STOP)/);
@@ -154,6 +165,7 @@ describe('离线全链 e2e：委派回合的进度帧', () => {
     // 回复本身不带帧文本的重复堆叠：帧走流式通道，finish 帧只给结论
     expect(turn.text).toContain('61000 元');
     expect(turn.text).not.toContain('正在读取余额');
+    expect(turn.text).not.toContain(TURN_ACCEPTED_TEXT);
     // 单次调用的轻量委派不走计划通知门（通知帧由计划门的用例覆盖）
     expect(turn.notices).toEqual([]);
   });
@@ -164,8 +176,9 @@ describe('离线全链 e2e：委派回合的进度帧', () => {
       { bash: [PLAN_COMMAND, PLAN_COMMAND, QUERY_COMMAND, QUERY_COMMAND], text: '幻辰财税 202606 应收账款余额为 61000 元。' },
     ]);
 
-    // 提交帧两次 → 一帧；查询帧两次 → 一帧。真实进度帧的预算（企微 4 帧硬顶）不被 churn 挤占
-    expect(turn.steps).toEqual([PLAN_SUBMIT_STEP, QUERY_STEP]);
+    // 提交帧两次 → 一帧；查询帧两次 → 一帧。受理帧在前、恰一帧；真实进度帧的预算
+    // （企微 4 帧硬顶，渠道侧对受理帧豁免）不被 churn 挤占
+    expect(turn.steps).toEqual([TURN_ACCEPTED_TEXT, PLAN_SUBMIT_STEP, QUERY_STEP]);
   });
 
   it('③ 补：中间插过别的帧后相同文本放行（连续去重不是永久去重）', async () => {
@@ -174,6 +187,6 @@ describe('离线全链 e2e：委派回合的进度帧', () => {
     ]);
 
     // 最后一次查询与第一次文本相同，但中间插过别的帧——那是合法的新动作，必须放行
-    expect(turn.steps).toEqual([PLAN_SUBMIT_STEP, QUERY_STEP, QUERY_STEP_2, PLAN_SUBMIT_STEP, QUERY_STEP]);
+    expect(turn.steps).toEqual([TURN_ACCEPTED_TEXT, PLAN_SUBMIT_STEP, QUERY_STEP, QUERY_STEP_2, PLAN_SUBMIT_STEP, QUERY_STEP]);
   });
 });
