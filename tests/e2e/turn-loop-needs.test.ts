@@ -7,7 +7,7 @@
  *   以及 Main Agent 自己从 Log 证据补齐后直接重派（不问用户）的分支。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
+import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
 
 /** 记录 worker 实际收到的委派请求与 taskId（宿主透传 intent.request，不做二次加工）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -40,9 +40,11 @@ describe('离线全链 e2e：Subagent 报错回路', () => {
     const worker = recordingWorker([
       // ① 执行不了：回报结构化线索，不产生任何平台调用
       { need: NEEDS_PERIOD },
-      // ⑤ 用户补充后续跑原任务：真实执行
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 51 元。' },
+      // ⑤ 用户补充后续跑原任务：真实执行。查 202606（mock 有余额键）——错误态快路径
+      // v2 后，单调用计划查无数据期间会以宿主终局话术终结，不再是"贴成功文本"的形状；
+      // 本用例的意图是纠错环机制，续跑段必须给出数据答案。
+      { plan: balanceCalls('幻辰财税', '202606') },
+      { text: '幻辰财税 202606 应收余额为 51 元。' },
     ]);
     // ② 与 ④ 的申报脚本：第二条在用户补充后才 push 进来（taskId 此时才已知）
     const declarations: Array<Record<string, unknown>> = [
@@ -78,14 +80,16 @@ describe('离线全链 e2e：Subagent 报错回路', () => {
 
   it('5.2 Main Agent 自己从 Log 证据补齐后直接重派，不问用户', async () => {
     const worker = recordingWorker([
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 51 元。' },
-      // worker 收手：第一轮到此结束，后续步骤留给指代轮
-      { end: true },
+      // 首轮查 202609（无余额键）：错误态快路径 v2 后，单调用计划撞 PERIOD_NO_DATA 即以
+      // 宿主终局话术收束本跳——用户首轮看到的不再是贴出来的"51 元"；底账里留下的 calls
+      // 快照（含 202609）正是后面指代轮 Log 证据的来源（对齐后断言不变）。
+      { plan: balanceCalls('幻辰财税', '202609') },
       // 指代轮：宿主注入了 Log 证据，worker 仍然执行不了
       { need: NEEDS_PERIOD },
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 52 元。' },
+      // 重派段查 202606（有余额键）：终稿断言钉"数据答案 + 不含'期间'字样"——若查
+      // 无数据期间，终稿是宿主话术（可改查清单含"平台当前期间"），这条断言即失效。
+      { plan: balanceCalls('幻辰财税', '202606') },
+      { text: '幻辰财税 202606 应收余额为 52 元。' },
     ]);
     const observed: string[] = [];
     const declarations: Array<Record<string, unknown>> = [

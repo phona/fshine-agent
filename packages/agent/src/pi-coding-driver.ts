@@ -29,7 +29,8 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 import { messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, textFromContent, type PlatformAuthFailure, type SelectionClarification } from './platform-contract';
+import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 
@@ -419,6 +420,19 @@ function planFactsOf(
   };
 }
 
+/**
+ * 一批 tool_result 里的**收尾信封**（从后往前第一条带 RESULT 信封的）：与
+ * selectionClarificationFromResponses / platformAuthFailureFromResponses 同一把尺——
+ * 收尾那一条决定本跳的平台交互状态，早先的信封不越权。
+ */
+function closingEnvelopeOfToolResults(toolResults: readonly TranscriptMessageLike[]): PlatformEnvelope | null {
+  for (let i = toolResults.length - 1; i >= 0; i -= 1) {
+    const envelope = parseEnvelope(textFromContent(toolResults[i]?.content));
+    if (envelope) return envelope;
+  }
+  return null;
+}
+
 /** Create a headless pi-coding-agent driver for trusted context workers. */
 export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): TurnDriver {
   let modelPromise: Promise<CodingModelConfig> | undefined;
@@ -524,6 +538,20 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 提案创建拦截的结局（B 波 B3）：宿主办调平台成功后本回合以此终结，所以它必须
       // latch 在 run() 作用域里——beforeToolCall 在会话里跑，结果时刻才读它。
       let proposalOutcome: Extract<ProposalCreationOutcome, { status: 'completed' | 'write_closed' }> | undefined;
+      // 错误态快路径的早停 latch（v2，2026-10-16 重做；第一版 2026-10-17 凌晨因真模型
+      // 探针回归被整波回退）：平台确定性终局码（TERMINAL_FAST_PATH_CODES）以"整份答案"
+      // 收尾时，宿主在此合成话术终结本跳，不再付每轮约 31s 的 worker 重规划循环——
+      // 数据不能凭重试变出来，循环的结局早已确定。shouldStopAfterTurn 在 SDK 的
+      // agent_end 之前裁决（see 下方的 hook 装配），latch 必须在 run() 作用域：hook 在
+      // 会话里跑，结果时刻（含补刀/异常出口）才读它。
+      //
+      // 【第一版死因，写在这里防止后人再踩】第一版只早停、不合成文本：早停发生在工具
+      // 跳之后，转录里没有后续 assistant 文本，result.text 是**空串**；而 context.ts 的
+      // 空文本检查先于 needs/clarification/终局全部分支执行，空 text 直接抛"未返回可用
+      // 结果"、进 catch、被分类 executor_error——真模型探针 4/4 全数触发，用户拿到
+      // "执行失败请稍后再试"。v2 的皮带就是下面这个字段里的非空 text：话术在 latch
+      // 时刻由宿主模板渲染好，无论宿主侧哪个分支失手，用户都不会看到"未返回可用结果"。
+      let terminalStop: { text: string; failure: TerminalFastPathFailure } | null = null;
       // ── 进度帧 / 计划通知的连续重复压制（2026-09-26 真实平台战斗测试实测）──────────
       // worker 在真实调用之后常继续重提执行方案（beforeToolCall 里 activePlan 置空再
       // evaluateAndActivatePlan，后续提交可能 scope 识别失败被拒），每次重提都触发同一帧
@@ -652,6 +680,26 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           ...(outcome.status === 'completed' ? { proposalCreated: { proposalId: outcome.proposalId } } : { writeClosed: true }),
         };
       };
+      // 错误态快路径的结果时刻出口（与 proposalReply 同构）：早停 latch 在场时本回合以
+      // 宿主合成的话术终结。text 是皮带合成的非空话术；terminalFailure 结构化事实随行
+      // （宿主终局分支以它为准终结整轮——"整份答案"判定单一事实源在驱动侧）；execution /
+      // planFacts 照常带上（那一次平台调用真发生过、范围是宿主解析的 calls），它们是
+      // 宿主机械事实，与文本的来源互不相干。
+      const terminalReply = async (): Promise<TurnDriverResult | null> => {
+        if (!terminalStop) return null;
+        // input.cwd 的窄化在闭包里不保留（进回合时已抛过空 cwd），这里取一次局部值。
+        const workerCwd = input.cwd ?? '';
+        const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(workerCwd));
+        const proof = execution();
+        return {
+          text: terminalStop.text,
+          messages: session.agent.state.messages,
+          footprint: footprint(),
+          ...(facts ? { planFacts: facts } : {}),
+          ...(proof ? { execution: proof } : {}),
+          terminalFailure: terminalStop.failure,
+        };
+      };
       // Host-verifiable proof that this delegated turn really executed against the platform.
       // 判据只有一条：至少一次被放行的网关调用（gateCalls > 0）。
       //
@@ -711,6 +759,39 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const failure = platformAuthFailureFromResponses(session.agent.state.messages.slice(initialMessageCount));
         return failure ? { authFailure: failure } : {};
       };
+      // ── 错误态快路径：SDK shouldStopAfterTurn 早停装配（v2 皮带）────────────────
+      // 手法沿用第一版（SDK 公开字段 + latch + agent_end）：hook 返回 true 时 SDK 在
+      // agent_end 之前直接结束循环——worker 不再进入下一轮重规划。三个门全过才停：
+      //   门① 整份答案候选：单调用计划（plannedCalls 是本回合宿主解析的 calls，最后
+      //      一次提交即执行范围）**且**本跳执行过 ≥1 次放行调用。多调用计划（逐期扫描、
+      //      先检索后查）一跳撞终局只是进行中的一步，照旧循环/交还，行为零变化。
+      //   门② 收尾信封：本跳 toolResults 的收尾信封命中终局码（同一把"收尾那一条"的尺，
+      //      与 clarification/authFailure 同边界）。
+      //   门③ 信封完整性（platform-contract 的 terminalFastPathOf）：查询词/取数范围/非空
+      //      可改查清单缺一不挂——话术缺了"下一步改查哪"就不是可行动的诚实答案，宁可
+      //      回到既有重规划循环。码在集合内而信封不完整时 console.warn 留痕（fail-loud：
+      //      契约漂移必须可发现，绝不静默）。
+      // 命中即 latch 话术并返回 true；结果时刻（含补刀/超时/异常各出口）由 terminalReply
+      // 统一取用。等确认门（pendingPlan）与提案拦截（proposalOutcome）在场的回合不快转：
+      // 那两条已有自己的收尾管道。
+      session.agent.shouldStopAfterTurn = (turn) => {
+        if (terminalStop) return true;
+        if (pendingPlan || proposalOutcome || gateCalls === 0 || plannedCalls.length !== 1) return false;
+        const envelope = closingEnvelopeOfToolResults(turn.toolResults);
+        if (!envelope) return false;
+        const failure = terminalFastPathOf(envelope);
+        if (!failure) {
+          const code = envelope.error?.code ?? '';
+          if (TERMINAL_FAST_PATH_CODES.has(code)) {
+            console.warn(JSON.stringify({ event: 'terminal_fast_path_envelope_incomplete', code, status: envelope.status, requestId: input.requestId, taskId: input.sessionId }));
+          }
+          return false;
+        }
+        // 皮带：话术在 latch 时刻合成，text 永不为空（第一版死因见 terminalStop 声明处）。
+        terminalStop = { text: renderTerminalFailureReply(failure), failure };
+        console.info(JSON.stringify({ event: 'deterministic_fast_path_stop', code: failure.code, requestId: input.requestId, taskId: input.sessionId }));
+        return true;
+      };
       const remaining = input.deadline - Date.now();
       // A1 披露：离开本回合时判定一次"整轮只有本地执行却产出了文件"。
       // 为什么放在这里与下方 finally 两处（而不是每个 return 前）：run() 的出口有五六条
@@ -763,6 +844,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // 这一轮是否超时都不改变它；用户要的是确认码，不是后续叙述。
         const settled = await proposalReply();
         if (settled) return settled;
+        // 错误态快路径：早停 latch 在场即以宿主话术终结（先于超时/取消检查——终局信封
+        // 是本跳的真实收尾，文本已在手，不因计时器竞态丢失）。
+        const terminal = await terminalReply();
+        if (terminal) return terminal;
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
           const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
@@ -796,6 +881,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           if (timedOut || cancelled || session.agent.state.errorMessage) {
             const proof = execution();
             const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
+            // 补刀那一跳若撞上终局早停，话术已 latch——先于超时/取消检查交还（同上）。
+            const terminalAfterNudge = await terminalReply();
+            if (terminalAfterNudge) return terminalAfterNudge;
             return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
           }
         }
@@ -805,10 +893,13 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const choice = clarification();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
         const closed = closureText();
-        // 补刀那一轮里拦截成功也要发声（提案可能在补刀轮才抵达）：与上面同一个理由——
+        // 补刀后拦截成功也要发声（提案可能在补刀轮才抵达）：与上面同一个理由——
         // 确认码只在这段文本里。恒为 null 时走原有收尾，行为一字不变。
         const settledAfterNudge = await proposalReply();
-        return settledAfterNudge ?? {
+        // 补刀那一跳撞上终局早停同理：宿主话术先于普通收尾（普通收尾的
+        // lastAssistantText 在早停后必为空串——那正是第一版死因的形状）。
+        const terminalAfterNudge = await terminalReply();
+        return terminalAfterNudge ?? settledAfterNudge ?? {
           text: closed ?? lastAssistantText(session.agent.state.messages),
           ...(closed ? { writeClosed: true } : {}),
           messages: session.agent.state.messages,
@@ -836,8 +927,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const proof = execution();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
         // 异常出口也要让拦截成功的提案发声：提案已登记是既成事实，会话随后抛什么不改变它，
-        // 而确认码只在这段文本里——丢了用户就永远拿不到码。
-        const settledAfterError = await proposalReply();
+        // 而确认码只在这段文本里——丢了用户就永远拿不到码。终局早停同理（防御性：stop
+        // 之后循环正常返回，正常不进 catch，但 latch 一旦在场就是真实收尾）。
+        const settledAfterError = await proposalReply() ?? await terminalReply();
         return settledAfterError ?? { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
       } finally {
         clearTimeout(abortTimer);

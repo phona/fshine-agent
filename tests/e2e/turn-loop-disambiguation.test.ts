@@ -77,14 +77,13 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.1 两个未完成计划形状撞车 → 宿主出题；编号"2"绑定较旧的那个计划续跑', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      // 幻辰财税（第 1 回合，计划 A 的第 1 步；202609 无余额键 → PERIOD_NO_DATA）
+      // 幻辰财税（第 1 回合，计划 A 的第 1 步；202609 无余额键 → PERIOD_NO_DATA）。
+      // 错误态快路径 v2 对齐：单调用计划撞终局信封，替身镜像在本跳以宿主话术收束
+      // （步结果照旧经 stepLabel 交还链）——不再有"贴无数据文本"段，脚本游标经镜像
+      // break 直落下一段（见 harness terminalMirror 注释）。
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
-      { end: true },
       // 新兴五金（第 2 回合，计划 B 的第 1 步；202609 同样无余额键）
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收平台未返回该期间数据。' },
-      { end: true },
       // 新兴建材（第 4 回合，用户选"2"后计划 A 的第 2 步；mock 当前期间应收余额 700）
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },
@@ -154,13 +153,10 @@ describe('离线全链 e2e：多任务回溯歧义的编号消歧', () => {
   it('9.2 消歧问题后的非编号回复按新请求处理：正常单步委派，不产生绑定', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
-      // 202609 两个账套都无余额键 → PERIOD_NO_DATA，不是"余额为 0"
+      // 202609 两个账套都无余额键 → PERIOD_NO_DATA，不是"余额为 0"（快路径 v2 对齐：
+      // 两段单调用撞终局由镜像以宿主话术收束，无贴文本段，游标直落下一段）
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收平台未返回该期间数据。' },
-      { end: true },
       { plan: balanceCalls('新兴五金', '202609') },
-      { text: '新兴五金 202609 应收平台未返回该期间数据。' },
-      { end: true },
       // 非编号回复落地成单步委派（无前缀）：新任务、不绑任何计划
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },

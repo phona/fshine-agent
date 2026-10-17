@@ -6,7 +6,7 @@
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { DiscoveredTool } from '@fshine/contracts';
-import type { PlatformAuthFailure, SelectionClarification } from './platform-contract';
+import type { PlatformAuthFailure, SelectionClarification, TerminalFastPathFailure } from './platform-contract';
 import type { PendingPlanConfirmation, PlanCall } from './plan-runtime';
 import type { ProposalCreateCall } from './proposal-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
@@ -146,6 +146,19 @@ export interface TurnDriverResult {
    * 用户必须选一个"的澄清事实。两者可以同时缺省，也可以同时出现（宿主优先 clarification）。
    */
   clarification?: SelectionClarification;
+  /**
+   * 错误态快路径的终局事实（v2，2026-10-16 重做）：平台确定性终局码（PERIOD_NO_DATA /
+   * ASSISTANT_* 两态，TERMINAL_FAST_PATH_CODES）以"整份答案"收尾时，驱动挂上信封事实。
+   * `text` 是宿主模板渲染的话术（turn-relay 的 renderTerminalFailureReply），**不是
+   * worker 文本**——第一版（2026-10-17 凌晨回退）早停后 text 是空串，宿主空文本检查
+   * 先于一切分支抛"未返回可用结果"，用户拿到 executor 兜底话术；v2 皮带 + 背带：
+   * 驱动合成非空 text + 宿主豁免带结构化收尾的结果，两条防线各自独立成立。
+   * 挂了它 = 这一跳的结果就是整份答案（单调用计划 + 本跳执行过，判据在驱动侧——
+   * 只有驱动看得见本跳全部 toolResults）；宿主侧不再用 planFacts.calls.length 复推
+   * （第一版门与真实驱动的字段装配时序错位正是隐患之一），只保留多步计划的
+   * `!stepLabel` 守卫。
+   */
+  terminalFailure?: TerminalFastPathFailure;
   /**
    * 写关闭终稿标记（D-075）：本回合宿主拦下过含写类 operation 的计划（部署未开放 write），
    * `text` 是宿主合成的写关闭话术而非 worker 文本（T7 形态：模型停在准备阶段永不抵达

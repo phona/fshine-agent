@@ -9,12 +9,14 @@ import { describe, expect, it } from 'vitest';
 import {
   PLATFORM_AUTH_ERROR_CODES,
   SELECTION_CLARIFICATION_CODES,
+  TERMINAL_FAST_PATH_CODES,
   isPlatformAuthError,
   parseEnvelope,
   platformAuthFailureOf,
   platformErrorCodeOf,
   selectionClarificationFromResponses,
   selectionClarificationOf,
+  terminalFastPathOf,
 } from './src/platform-contract';
 
 describe('平台不可用族错误码集合（唯一适配层）', () => {
@@ -148,5 +150,76 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
 
   it('码集合可扩：先登记这两个，新增选择类模式往集合里加码', () => {
     expect([...SELECTION_CLARIFICATION_CODES].sort()).toEqual(['ACCOUNT_SET_AMBIGUOUS', 'ACCOUNT_SET_NOT_FOUND']);
+  });
+});
+
+// ── 终局快路径信封判据（错误态快路径 v2，2026-10-16 重做）────────────────────
+//
+// 平台确定性终局码（PERIOD_NO_DATA / 客户辅助核算两态）以"整份答案"收尾时的机械提取。
+// 判据只认契约数据（码 + status + data 字段），完整性门缺一不挂——话术缺了"下一步改查哪"
+// 就不是可行动的诚实答案，宁可回到既有重规划循环（行为零变化）。
+
+/** 便捷构造：RESULT 信封行 → parseEnvelope。 */
+function terminalEnvelope(status: string, data: unknown, code: string): ReturnType<typeof parseEnvelope> {
+  return parseEnvelope(`RESULT {"v":1,"op":"finance.query-receivables","status":"${status}","data":${JSON.stringify(data)},"error":{"code":"${code}","message":"…","correctForm":"…"}}`);
+}
+
+describe('终局快路径信封判据（terminalFastPathOf）', () => {
+  it('码集合：只转三个终局码——SUBJECT_NOT_FOUND 等 worker 有自愈路径的码明确不转', () => {
+    expect([...TERMINAL_FAST_PATH_CODES].sort()).toEqual([
+      'ASSISTANT_AMBIGUOUS',
+      'ASSISTANT_NOT_FOUND',
+      'PERIOD_NO_DATA',
+    ]);
+    // 第一版结论仍有效：worker 能自愈的输入类码不是终局，快转只会截断它的自愈路径
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: 'x' }, 'SUBJECT_NOT_FOUND'))).toBeUndefined();
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: 'x' }, 'ACCOUNT_SET_NOT_FOUND'))).toBeUndefined();
+  });
+
+  it('PERIOD_NO_DATA：查询词/期间/可改查清单机械提取（与 17dz mock 信封逐字段对齐）', () => {
+    expect(terminalFastPathOf(terminalEnvelope('not_found', {
+      query: '幻辰财税',
+      accountSet: '幻辰财税',
+      subject: { code: '1122', name: '应收账款' },
+      period: '202609',
+      availablePeriods: ['202606', '平台当前期间'],
+    }, 'PERIOD_NO_DATA'))).toEqual({
+      code: 'PERIOD_NO_DATA',
+      query: '幻辰财税',
+      period: '202609',
+      availablePeriods: ['202606', '平台当前期间'],
+    });
+  });
+
+  it('客户两态：customer 取 data.customer（不是 data.query）', () => {
+    // NOT_FOUND（mock/真脚本信封都带 customer）：回显的是"找不到的客户名"，
+    // 回显 data.query（账套搜索词）会让用户去确认一个没问过的对象
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税', customer: '猫一杯' }, 'ASSISTANT_NOT_FOUND')))
+      .toEqual({ code: 'ASSISTANT_NOT_FOUND', query: '猫一杯' });
+    // AMBIGUOUS（真脚本信封带 customer）：同一条提取规则
+    expect(terminalFastPathOf(terminalEnvelope('needs_input', { query: '幻辰财税', customer: '机电', candidates: [{ name: '幻电设备有限公司' }, { name: '机电贸易有限公司' }] }, 'ASSISTANT_AMBIGUOUS')))
+      .toEqual({ code: 'ASSISTANT_AMBIGUOUS', query: '机电' });
+  });
+
+  it('完整性门：查询词/期间/非空清单/客户名缺一不挂（fail-loud 留痕由调用方负责）', () => {
+    // PERIOD_NO_DATA：缺期间 / 缺查询词 / 清单缺失
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税', availablePeriods: ['202606'] }, 'PERIOD_NO_DATA'))).toBeUndefined();
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { period: '202609', availablePeriods: ['202606'] }, 'PERIOD_NO_DATA'))).toBeUndefined();
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税', period: '202609' }, 'PERIOD_NO_DATA'))).toBeUndefined();
+    // 清单为空同样不挂：可改查清单是这句话的行动部分，空清单 = 契约不完整
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税', period: '202609', availablePeriods: [] }, 'PERIOD_NO_DATA'))).toBeUndefined();
+    // 客户两态：缺 customer 不挂（mock 的 AMBIGUOUS 信封只带 candidates——
+    // 契约不完整就不快转，绝不拿账套搜索词冒充客户名）
+    expect(terminalFastPathOf(terminalEnvelope('needs_input', { query: '幻辰财税', candidates: [{ name: '幻电设备有限公司' }] }, 'ASSISTANT_AMBIGUOUS'))).toBeUndefined();
+    expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税' }, 'ASSISTANT_NOT_FOUND'))).toBeUndefined();
+  });
+
+  it('status=completed 的同码信封不挂（码与 status 打架 = 契约违约，不快转数据答案）', () => {
+    expect(terminalFastPathOf(terminalEnvelope('completed', { query: '幻辰财税', period: '202609', availablePeriods: ['202606'] }, 'PERIOD_NO_DATA'))).toBeUndefined();
+  });
+
+  it('没有信封 / 非终局码 → undefined（收尾判据与其余提取器同一把尺）', () => {
+    expect(terminalFastPathOf(null)).toBeUndefined();
+    expect(terminalFastPathOf(parseEnvelope('RESULT {"v":1,"op":"finance.query-receivables","status":"completed","data":{"query":"幻辰财税"},"error":null}'))).toBeUndefined();
   });
 });

@@ -79,9 +79,9 @@ describe('离线全链 e2e：多任务交织与探索型会话', () => {
     expect(worker.requests[2]).toContain('幻辰财税');
     expect(worker.requests[2]).toContain('202609');
     expect(worker.requests[2]).not.toContain('新兴五金');
-    // 最终回复是本轮真实执行的结果，不是把 A 的旧答复重放一遍
-    expect(third).toContain('平台未返回该期间数据');
-    expect(third).toContain('202609');
+    // 最终回复是本轮真实执行的结果，不是把 A 的旧答复重放一遍。错误态快路径 v2 后，
+    // 单调用计划撞无数据终局的收稿是宿主模板话术（不再有替身贴的叙述体），逐字对齐。
+    expect(third).toBe('没有查到“幻辰财税”在 202609 的数据。平台上有数据的是：202606、平台当前期间。要改查的话，告诉我查哪一项即可。');
     expect(third).not.toContain('61000');
     expect(third).not.toContain('不应外发');
     // 账本按子任务累计：A 两次 + B 一次

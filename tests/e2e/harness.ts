@@ -19,16 +19,18 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols } from '../../packages/agent/src/operation-labels';
+import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols, loadOperationSemantics } from '../../packages/agent/src/operation-labels';
 import { parseProposalCommand } from '../../packages/agent/src/proposal-runtime';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
-import { selectionClarificationFromResponses, type SelectionClarification } from '../../packages/agent/src/platform-contract';
+import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure } from '../../packages/agent/src/platform-contract';
+import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
 const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
@@ -49,30 +51,17 @@ const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
 const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
 // 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。
-// 为什么这里注入替身而不是经平台 CLI 派生：语义表是**判据**不是普通数据，平台侧正在并行
-// 改造（顶层 accessSemantics 表尚未下发），此刻派生只会得到空表 = 写关闭扫描静默不生效
-// （假绿）。替身与单测同口径（见 packages/agent/plan-runtime.test.ts 的 SEMANTICS）；
-// 平台下发该表后可换回 loadOperationSemantics(PLATFORM_ROOT)。
-const operationSemantics = new Map<string, { plan: boolean; confirm: boolean; mock: boolean }>([
-  ['query-receivables', { plan: true, confirm: false, mock: true }],
-  ['finance.query-receivables', { plan: true, confirm: false, mock: true }],
-  ['query-saved', { plan: true, confirm: false, mock: true }],
-  ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-  ['search-account-sets', { plan: true, confirm: false, mock: true }],
-  ['finance.search-account-sets', { plan: true, confirm: false, mock: true }],
-  ['validate', { plan: false, confirm: false, mock: false }],
-  ['payroll.validate', { plan: false, confirm: false, mock: false }],
-  ['transform', { plan: false, confirm: false, mock: false }],
-  ['payroll.transform', { plan: false, confirm: false, mock: false }],
-  ['precheck', { plan: false, confirm: false, mock: false }],
-  ['voucher.precheck', { plan: false, confirm: false, mock: false }],
-  ['prepare', { plan: true, confirm: true, mock: true }],
-  ['voucher.prepare', { plan: true, confirm: true, mock: true }],
-  ['fill', { plan: true, confirm: true, mock: true }],
-  ['voucher.fill', { plan: true, confirm: true, mock: true }],
-  ['commit', { plan: true, confirm: true, mock: true }],
-  ['voucher.commit', { plan: true, confirm: true, mock: true }],
-]);
+// 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
+// accessSemantics 表尚未下发时派生只得空表 = 写关闭扫描静默失效，故注入替身防假绿）。
+// 翻回条件已成立：实测派生 53 条、与替身 18 条逐条一致（护栏 HF-1 验证）。替身缺的
+// 5 个 confirm=true operation（voucher.proposal / fix-summary / gen-from-journal /
+// create-assistant / upload-all）在替身政权下写关闭扫描不生效——派生后一并消除。
+// 防回退护栏：harness-fidelity.test.ts 的 HF-1 断言派生表非空 + 锚点条目 + 与本表一致；
+// 有人再把手注表塞回来造成漂移会当场红。
+const operationSemantics = await loadOperationSemantics(PLATFORM_ROOT);
+if (operationSemantics.size === 0) {
+  throw new Error(`平台 accessSemantics 表为空（${PLATFORM_ROOT}）——写关闭扫描会静默失效。`);
+}
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE'] as const;
@@ -188,6 +177,15 @@ class RecordingSdkClient implements SdkClientLike {
   }
   async uploadMedia(): Promise<{ media_id: string }> { return { media_id: 'unused' }; }
   async replyMedia(): Promise<unknown> { return {}; }
+  /**
+   * message.file 帧触发的素材下载（T3 附件全链）。`fileToServe` 决定回什么：
+   * null = 模拟下载失败（验"附件下载失败也要给用户可见降级"），否则回固定文件。
+   */
+  fileToServe: { filename: string; buffer: Buffer } | null = null;
+  async downloadFile(): Promise<{ buffer: Buffer; filename?: string }> {
+    if (!this.fileToServe) throw new Error('模拟素材下载失败（fileToServe 未设置）');
+    return { buffer: this.fileToServe.buffer, filename: this.fileToServe.filename };
+  }
 
   finalText(): string {
     return this.frames.filter((frame) => frame.finish).at(-1)?.content ?? '';
@@ -311,10 +309,18 @@ export type WorkerStep =
  * WRITE_NOT_ENABLED（error-codes.ts 唯一来源），worker 的准备/承诺文本不会成为终稿
  * （T7 形态的机械版），零平台调用发生。与实体门禁同性质：真实驱动的扫描在
  * pi-coding-driver 的 beforeToolCall，单测钉拦截点与理由，这里钉宿主级终稿行为。
+ *
+ * `terminalEmptyText`（显式开启）：错误态快路径替身契约镜像的**翻车点复现档**——真实
+ * 驱动的早停本会经"皮带"合成非空话术，但第一版（2026-10-17 凌晨回退）的早停返回的是
+ * **空 text**，宿主空文本检查先于一切分支抛"未返回可用结果"，真模型探针 4/4 全数触发。
+ * e2e 全绿却漏掉它，正是因为当时的替身早停镜像总返回非空 text——**替身不能只镜像
+ * happy path**。本开关让镜像刻意按第一版的失败形状返回 `text: ''` + 挂 terminalFailure，
+ * 验宿主侧防线（空文本豁免 + 终局分支）独立成立：哪怕皮带失手，用户仍收到话术。
  */
-function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean }) {
+function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean; terminalEmptyText?: boolean }) {
   const enforceEntityScope = options?.enforceEntityScope === true;
   const enforceWriteClosure = options?.enforceWriteClosure === true;
+  const terminalEmptyText = options?.terminalEmptyText === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
     const child = spawnSync(path.join(platformRoot, 'bin', '17dz'), args, {
@@ -361,6 +367,41 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       // （platform-contract 的 selectionClarificationFromResponses）。替身走同一条生产函数
       // ——派生逻辑只有一份，不存在"测试里另写一套提取"。
       const platformOutputs: string[] = [];
+      // 结构化事实的组装（与真实驱动 planFactsOf 同一形状，唯一数据源是平台 CLI 派生的
+      // 规格/label 表）：终局镜像与普通收尾共用这一份，不各写一遍。
+      const factsFor = (calls: PlanCall[]) => {
+        if (calls.length === 0) return undefined;
+        const { accountSet, period, label } = planCallFacts(calls, argSpecs, operationLabels);
+        return {
+          calls: calls.map((call) => ({ operation: call.operation, args: call.args })),
+          ...(accountSet ? { accountSet } : {}),
+          ...(period ? { period } : {}),
+          ...(label ? { label } : {}),
+        };
+      };
+      // 错误态快路径的替身镜像出口（与真实驱动 terminalReply 同构）：挂 terminalFailure、
+      // 带执行痕迹与结构化事实。text 由"皮带"合成（renderTerminalFailureReply，与真实
+      // 驱动同一函数）；terminalEmptyText 档刻意复现第一版的失败形状（text: ''，转录以
+      // tool_result 收尾、没有后续 assistant 文本——这才是"空 text"对宿主的实际含义），
+      // 验宿主侧防线（空文本豁免 + 终局分支）独立成立。
+      const terminalStopMirror = (failure: TerminalFastPathFailure) => {
+        const text = terminalEmptyText ? '' : renderTerminalFailureReply(failure);
+        const facts = factsFor(plannedCalls);
+        return {
+          text,
+          messages: text
+            ? [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }]
+            : [...input.messages],
+          ...(proof ? { execution: proof } : {}),
+          ...(facts ? { planFacts: facts } : {}),
+          terminalFailure: failure,
+        };
+      };
+      // 早停 latch：命中终局信封时在循环里记下镜像结果并 break——**break 而不是 return**
+      // 是结构上的保真点：真实驱动的早停只终结本次 worker run，后续委派（计划模式的
+      // 下一步、纠错环的重派）是新的 run、从脚本的下一段继续；直接 return 会把脚本里
+      // 未消费的后续段整个吞掉，那不是真实驱动的行为。结果在循环外统一取。
+      let terminalMirror: ReturnType<typeof terminalStopMirror> | undefined;
       for (let step = 0; step < script.length; step += 1) {
         const current = script[Math.min(cursor, script.length - 1)]!;
         cursor += 1;
@@ -508,9 +549,31 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           const body = (out.stdout ?? '').trim() || (out.stderr ?? '').trim();
           platformOutputs.push(body);
           if (proof) proof = { ...proof, calls: proof.calls + 1 };
+          // ── 错误态快路径替身契约镜像（v2）────────────────────────────────────
+          // 与真实驱动同一把门：单调用计划 + 本跳执行过（proof.calls ≥ 1）+ 收尾信封
+          // 命中终局码（terminalFastPathOf 与真实驱动同一函数，完整性门同一条）。命中
+          // 即停——真实驱动的 shouldStopAfterTurn 在 agent_end 前结束循环，后续脚本步骤
+          // （重规划/贴成功文本）不再发生，与 happy-path 镜像的根本差别就在这条早退。
+          // 故意**不在** `{ execute: … }`（确认后续跑）分支镜像：真实驱动在该路径不重新
+          // 提交计划（plannedCalls 为空 → 门关闭），替身保持同形。
+          // 与真实驱动同一守卫：本 run 若已有计划停在用户确认门（pendingPlan 在场），
+          // 不快转——那一轮的真实状态是"等宿主验证确认"，确认门的收尾优先于终局话术。
+          if (!pendingPlan && current.plan.length === 1) {
+            const failure = terminalFastPathOf(parseEnvelope(body));
+            if (failure) {
+              terminalMirror = terminalStopMirror(failure);
+              break;
+            }
+          }
           parts.push(`执行 ${call.operation}: ${body}`);
         }
+        // 内层 break 只退出本计划的调用循环——早停的真实语义是**本 run 到此为止**
+        // （后续脚本段留给下一次委派），这里把早退提升到脚本循环。
+        if (terminalMirror) break;
       }
+      // 错误态快路径命中：本 run 以宿主话术（或 terminalEmptyText 档的空串）+ 结构化
+      // 事实收束，后续脚本段留给下一次委派（见上方 terminalMirror 的 break 注释）。
+      if (terminalMirror) return terminalMirror;
       // 有计划停在确认门时，用户看到的是那条确认询问，而不是中间的探索输出
       // （真实 worker 也会在 PLAN NEEDS_USER_CONFIRM 处收手）。
       const text = pendingPlan ? pendingPlan.userText : parts.join('\n');
@@ -520,17 +583,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       const clarification: SelectionClarification | undefined = selectionClarificationFromResponses(
         platformOutputs.map((body) => ({ role: 'toolResult', content: [{ type: 'text', text: body }] })),
       );
-      const facts = plannedCalls.length > 0
-        ? (() => {
-          const { accountSet, period, label } = planCallFacts(plannedCalls, argSpecs, operationLabels);
-          return {
-            calls: plannedCalls.map((call) => ({ operation: call.operation, args: call.args })),
-            ...(accountSet ? { accountSet } : {}),
-            ...(period ? { period } : {}),
-            ...(label ? { label } : {}),
-          };
-        })()
-        : undefined;
+      const facts = factsFor(plannedCalls);
       return {
         text,
         messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
@@ -552,6 +605,11 @@ interface Boot {
   send(text: string, options?: { userid?: string; group?: boolean }): Promise<string>;
   /** 同上，同时带回这一回合产生的进度帧与计划通知帧（帧级断言用）。 */
   turn(text: string, options?: { userid?: string; group?: boolean }): Promise<Turn>;
+  /** 发一条企微 file 消息（T3 附件全链）：走生产的 message.file → 落盘 → 暂存/交付链。 */
+  sendFile(
+    filename: string,
+    options?: { userid?: string; buffer?: Buffer; failDownload?: boolean },
+  ): Promise<string>;
   sdk: RecordingSdkClient;
   assembly: ServerAssembly;
 }
@@ -596,21 +654,58 @@ function wecomText(userid: string, content: string, options: { group?: boolean; 
   };
 }
 
-async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> {
+/**
+ * boot 可选项（全部缺省安全：不给就用既有替身，既有用例零感知）。
+ */
+interface BootOptions {
+  main: unknown;
+  worker: unknown;
+  /**
+   * 覆盖记忆候选提取器（T2 长期记忆全链）：缺省恒空。给确定性 stub 时，
+   * consolidateLongMemory（生产代码）会真跑：候选 → reduceLongMemory → SQLite commit。
+   */
+  memoryCandidateExtractor?: (sourceUserEvents: readonly unknown[], current?: readonly unknown[]) => Promise<unknown[]> | unknown[];
+  /** 覆盖 Context State 语义抽取驱动（T2）：缺省恒回 '{}'（确定性兜底）。 */
+  contextModelDriver?: unknown;
+  /**
+   * 补丁 contextProfiles['17dz']（T1 worker 超时全链）：把 config/agent.yaml 复制一份、
+   * 打上补丁写进 stateDir，经 AGENT_CONFIG_PATH 只对本 boot 生效。不动仓库里的真配置。
+   */
+  patchProfile?: { workerTimeoutMs?: number };
+}
+
+async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
+  const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
+  if (options.patchProfile) {
+    const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+    const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
+    const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
+    if (!profiles?.['17dz']) throw new Error('patchProfile：仓库配置里找不到 contextProfiles.17dz');
+    Object.assign(profiles['17dz']!, options.patchProfile);
+    const patchedPath = path.join(stateDir, `agent-config-${counter}.yaml`);
+    writeFileSync(patchedPath, stringifyYaml(config));
+    bootEnv['AGENT_CONFIG_PATH'] = patchedPath;
+  }
+  // 附件落盘目录（T3）：必须落在平台工作区内（adapter 落点自检），每个 boot 一份、
+  // close 时清走——不与生产默认的 tmp/attachments 串味。
+  const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', `attachments-e2e-${counter}`);
+  bootEnv['FSHINE_ATTACHMENT_DIR'] = attachmentDir;
   const assembly = await createServerAssembly({
     // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（平台冷却、限流窗口）的时序
     // 整体后移。本批用例用 2s 冷却夹具，2s 防抖就足以让冷却过期、该拦截的轮次放行
     // （2026-10-08 实测：invocations 从 6 变 7）。生产上冷却 10 分钟、防抖 2 秒可忽略，
     // 但离线夹具必须把旋钮归零才能验时序本身。防抖自身的行为由 handler 单测覆盖。
-    env: { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' },
+    env: bootEnv,
     dbPath: path.join(stateDir, `agent-${counter}.db`),
     driver: options.main as never,
     workerDriver: options.worker as never,
     channelClientFactory: () => sdk,
-    // 离线环境没有模型可用：Context State 走确定性兜底，记忆整理不产出候选
-    contextModelDriver: { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) },
-    memoryCandidateExtractor: async () => [],
+    // 离线环境没有模型可用：Context State 走确定性兜底，记忆整理不产出候选。
+    // T2 的记忆用例经 boot 选项换上确定性 stub 后，这两段即走生产链路。
+    contextModelDriver: options.contextModelDriver
+      ?? { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) },
+    memoryCandidateExtractor: options.memoryCandidateExtractor ?? (async () => []),
   });
   // 与生产一致：principal 由可信的企微用户 ID 解析，先开通查询权限
   await assembly.store.principalScopes.upsert({
@@ -628,6 +723,9 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
     try {
       await assembly.channel.stop();
     } catch { /* 停止渠道失败不阻塞关库 */ }
+    // 本 boot 的附件落盘目录一并清走（T3）：只在平台 tmp 下、目录名带 boot 序号，
+    // 删目录不影响平台仓库受版本控制的任何内容。
+    try { rmSync(attachmentDir, { recursive: true, force: true }); } catch { /* 清理尽力而为 */ }
     await closeAssembly();
   };
   // 生产保真：adapter 把 progress/notice 传给 handler（channel-wecom adapter.ts 的
@@ -671,12 +769,49 @@ async function boot(options: { main: unknown; worker: unknown }): Promise<Boot> 
     turnFrames.delete(messageId);
     return { text: reply, steps: [...frames.steps], notices: [...frames.notices] };
   };
+  /**
+   * 发一条企微 file 消息（T3）：与生产的 message.file 帧同形状（msgtype=file + file.url/aeskey），
+   * 经生产 adapter 走真实的 saveAttachments 下载/落盘/大小上限链，再进 handler 的暂存/交付。
+   * `failDownload` 时 SDK 侧下载抛错，验"附件失败不吞消息"的降级形态。
+   */
+  const sendFile = async (
+    filename: string,
+    options: { userid?: string; buffer?: Buffer; failDownload?: boolean } = {},
+  ): Promise<string> => {
+    sdk.fileToServe = options.failDownload ? null : { filename, buffer: options.buffer ?? Buffer.from('e2e-attachment-bytes') };
+    const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+    turnFrames.set(messageId, { steps: [], notices: [] });
+    const before = sdk.frames.filter((frame) => frame.finish).length;
+    sdk.emit('message.file', {
+      headers: { req_id: `req_${messageId}` },
+      body: {
+        msgtype: 'file',
+        from: { userid: options.userid ?? 'e2e_user' },
+        msgid: messageId,
+        chattype: 'single',
+        file: { url: `https://wecom-mock/${filename}`, aeskey: 'e2e-aes-key' },
+      },
+    });
+    const done = (async () => {
+      const deadline = Date.now() + 20_000;
+      while (Date.now() < deadline) {
+        const finals = sdk.frames.filter((frame) => frame.finish);
+        if (finals.length > before) return finals.at(-1)!.content;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error(`等待附件消息回复超时；已收帧: ${JSON.stringify(sdk.frames)}`);
+    })();
+    const reply = await done;
+    sdk.fileToServe = null;
+    return reply;
+  };
   return {
     sdk,
     assembly,
     // send 只是 turn 的回复部分：既有断言一行不用改，帧级断言用 turn。
     send: async (text, options) => (await turn(text, options)).text,
     turn,
+    sendFile,
   };
 }
 
@@ -784,4 +919,11 @@ export {
   growingPlan,
   withoutPlatformEnvelope,
 };
-export type { Boot, Turn };
+export type { Boot, BootOptions, Turn };
+/**
+ * T4 假绿护栏用：harness 注入的 access 语义替身表。护栏用例拿它对照
+ * loadOperationSemantics(PLATFORM_ROOT) 的派生结果——平台下发真表的那天，
+ * 两表不一致即红，逼着把替身换回平台派生（见 operationSemantics 处的注释）。
+ */
+export const harnessOperationSemantics = operationSemantics;
+export { PLATFORM_ROOT };

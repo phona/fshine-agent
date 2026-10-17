@@ -247,6 +247,29 @@ const TABLE: Record<string, CodeEntry> = {
     hintFallback: '请确认准确名称后',
   },
 
+  // ── 终局快路径（错误态快路径 v2，2026-10-16 重做）────────────────────────────
+  // 平台确定性终局码（TERMINAL_FAST_PATH_CODES，platform-contract 唯一适配层）不再走
+  // worker 重规划循环：驱动早停 + 宿主用这里的模板合成诚实话术终结。措辞收口在本表，
+  // 与选择类澄清（SELECTION_CLARIFICATION_TEMPLATES）同一条线：平台码 → 模板码一张
+  // 索引（terminalFailureTextFor 下方），动态部分（查询词/取数范围/可改查清单）是信封
+  // **数据**经 {name} 占位符机械填充，模板本身零业务词（泄漏 lint 同款预算）。
+  //
+  // 第一版（2026-10-17 凌晨被整波回退）的措辞经评委验证可用的两条照抄：PERIOD_NO_DATA
+  // 参数化模板带可改查清单、ASSISTANT 两态共用一条结构句。
+  PERIOD_NO_DATA_TERMINAL: {
+    text: '没有查到“{query}”在 {period} 的数据。平台上有数据的是：{list}。要改查的话，告诉我查哪一项即可。',
+    params: ['query', 'period', 'list'],
+  },
+  // 结构句（第一版措辞，沿用）：没有候选列表、没有 correctForm——平台给这两态的
+  // correctForm 是"让调用方先向用户确认规范名再重查"，那是给**解析方**的规则，
+  // 渲染它就是把内部规则念给用户听（D-102 同款语域事故）。ASSISTANT_AMBIGUOUS 共用
+  // 本条：有歧义 = 给出的名字没有唯一匹配，"确认准确名称后我再查"对两态都是真的、
+  // 可行动的；列候选/代选是选择类澄清管道（ACCOUNT_SET_*）的职责，客户辅助核算两态明确不走那条。
+  ASSISTANT_NOT_FOUND_SELECTION: {
+    text: '没有找到匹配“{query}”的对象。请确认准确名称后我再查。',
+    params: ['query'],
+  },
+
   // ── 平台健康类：连续登录/环境异常后的冷却期话术（Lane 2 治标补法）──────────
   // 与 DELEGATION_AUTH_FAILURE 的分工：那句说"这一轮失败了、要重新登录"（一次性、
   // 可行动）；这句说"宿主已暂停自动重试、约 N 分钟后自动恢复"（连续失败后的状态）。
@@ -604,6 +627,57 @@ export function clarificationTextFor(code: string, data: { query: string; candid
     .replace('{n}', () => String(data.candidates.length))
     .replace('{list}', () => names.join(' '))
     .replace('{hint}', () => hint);
+}
+
+/**
+ * 平台终局码 → 本表消息模板码（错误态快路径 v2 的渲染索引，与 SELECTION_CLARIFICATION_TEMPLATES
+ * 同一条纪律：平台码是数据，措辞在本表；新增终局码时 platform-contract 的码集合与本表
+ * 各加一行，单测机械锁两条线覆盖一致——漏登记任何一侧都会红）。
+ */
+const TERMINAL_FAST_PATH_TEMPLATES: Readonly<Record<string, string>> = {
+  PERIOD_NO_DATA: 'PERIOD_NO_DATA_TERMINAL',
+  ASSISTANT_NOT_FOUND: 'ASSISTANT_NOT_FOUND_SELECTION',
+  ASSISTANT_AMBIGUOUS: 'ASSISTANT_NOT_FOUND_SELECTION',
+};
+
+/** terminalFailureTextFor 的数据形状（platform-contract 的 TerminalFastPathFailure 的取值面）。 */
+export interface TerminalFailureTextData {
+  query: string;
+  period?: string;
+  availablePeriods?: readonly string[];
+}
+
+/**
+ * 终局快路径话术：表内模板 + 平台信封数据机械组装（与 clarificationTextFor 同一家族）。
+ *
+ * 动态部分是**数据**（查询词/取数范围标签/可改查清单），不经 messageFor 的 actual 通道
+ * （消息模板传 actual 会 fail-loud，纪律不变）。未登记的码 fail-loud（与未知码同纪律：
+ * 绝不静默 fallback 到通用话术）。PERIOD_NO_DATA 的 period 完整性门保证在场（信封判据
+ * 不挂就到不了这里）——这里再 fail-loud 一次：直接调用方绕过信封判据时响亮失败，绝不
+ * 渲染出"在  的数据"这种空洞句子。
+ */
+export function terminalFailureTextFor(code: string, data: TerminalFailureTextData): string {
+  const templateCode = TERMINAL_FAST_PATH_TEMPLATES[code];
+  if (!templateCode) {
+    throw Object.assign(
+      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的终局快路径码: ${code}——平台侧新增终局模式时，往 packages/agent/src/platform-contract.ts 的 TERMINAL_FAST_PATH_CODES 加码，并往本表加对应消息模板`),
+      { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+    );
+  }
+  if (templateCode === 'PERIOD_NO_DATA_TERMINAL') {
+    if (typeof data.period !== 'string' || !data.period.trim()) {
+      throw Object.assign(
+        new Error(`${UNKNOWN_ERROR_CODE}: PERIOD_NO_DATA 终局话术缺 period（信封完整性门应已拦下，直接调用方必须先过 terminalFastPathOf）: ${code}`),
+        { code: UNKNOWN_ERROR_CODE, unknownCode: code },
+      );
+    }
+    return messageTextFor(templateCode, {
+      query: data.query,
+      period: data.period,
+      list: (data.availablePeriods ?? []).join('、'),
+    });
+  }
+  return messageTextFor(templateCode, { query: data.query });
 }
 
 /**

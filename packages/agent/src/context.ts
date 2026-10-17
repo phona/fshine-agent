@@ -21,8 +21,9 @@ import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult } from './driver';
 import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
-import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification } from './platform-contract';
+import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
+import { renderTerminalFailureReply } from './turn-relay';
 import type { ProposalCreateCall } from './proposal-runtime';
 import type {
   ChangeIntentRecord,
@@ -106,6 +107,13 @@ export interface SubagentTaskResult {
    * 分工：一个是"缺什么"，一个是"选哪个"。
    */
   clarification?: SelectionClarification;
+  /**
+   * 错误态快路径的终局事实（驱动侧 terminalFailure 的透传）：平台确定性终局码以"整份
+   * 答案"收尾，`text` 是宿主模板渲染的话术而非 worker 文本。判定单一事实源在驱动侧
+   * （挂了就是整份答案），宿主只保留 !stepLabel 守卫——多步计划的一步带着本字段照旧
+   * 交还链，不终结整轮。
+   */
+  terminalFailure?: TerminalFastPathFailure;
   /**
    * 写关闭终稿标记（D-075，驱动侧 writeClosed 的透传）：本回合宿主拦下过含写类
    * operation 的计划（部署未开放 write），text 是宿主合成的写关闭话术而非 worker
@@ -835,7 +843,39 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         } finally {
           release();
         }
-        if (!result.text.trim()) throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
+        // 空文本检查（错误态快路径 v2 改豁免判据，2026-10-16）：needs / clarification /
+        // terminalFailure 本来就是空 text 合法的形状——结构化收尾的话术由宿主渲染出口
+        // 组装，不由 worker 文本承担。第一版（2026-10-17 凌晨回退）死因正是这里：驱动
+        // 早停后 result.text 是空串，本检查跑在下面所有分支**之前**，空 text 直接抛出、
+        // 进 catch、被分类 executor_error，用户拿到兜底话术——宿主侧的终局门根本没机会
+        // 执行。豁免只对带结构化收尾的结果生效：纯空 text 照旧失败关闭，基线一字不动。
+        if (!result.text.trim() && !result.terminalFailure && !result.clarification && !result.needs) {
+          throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
+        }
+        // 终局分支（背带，紧跟空文本检查的原位置——第一版的宿主侧门就在这里，但当时
+        // 空文本检查先行抛出，它从未执行过）：平台确定性终局码以"整份答案"收尾时，
+        // 宿主用模板话术终结本轮（ToolUserError 语义 = 这段文本成为本轮回复，出口校验
+        // 由 runtime 的委派 catch 放行）。"整份答案"的判定**单一事实源在驱动侧**（它
+        // 看得见本跳全部 toolResults）：挂了 terminalFailure 就是整份答案，宿主不再用
+        // planFacts.calls.length 复推——第一版那道门与真实驱动的字段装配时序错位正是
+        // 隐患之一。宿主只保留 !stepLabel 守卫：多步计划的一步不终结整轮，照旧交还链
+        // （terminalFailure 原样挂在结果上，话术由皮带保证非空，随交还材料走）。
+        if (result.terminalFailure && !stepLabel) {
+          await options.tasks.upsert({
+            ...withExecutionFacts(running, result, 'done'),
+            workerMessages: result.messages as unknown[],
+            updatedAt: new Date().toISOString(),
+          });
+          console.info(JSON.stringify({
+            event: 'delegation_span',
+            requestId: ctx.trusted.requestId,
+            taskId,
+            durationMs: Date.now() - delegationStart,
+            outcome: 'terminal_fast_path',
+            code: result.terminalFailure.code,
+          }));
+          throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure));
+        }
         if (result.pendingPlan) {
           const pendingPlan: PendingPlanConfirmation = {
             ...result.pendingPlan,
@@ -914,6 +954,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 结构化歧义/未找到：平台请用户"选一个"的澄清事实，原样上交——宿主据此机械
           // 组装澄清问题（与 needs 同一族的结构化上交，模型不参与翻译）。
           ...(result.clarification ? { clarification: result.clarification } : {}),
+          // 错误态快路径的终局事实：只会在 stepLabel 场景走到这里（单步在上方终局分支
+          // 已抛出终结）——多步计划的一步不终结整轮，事实与话术随交还链走。
+          ...(result.terminalFailure ? { terminalFailure: result.terminalFailure } : {}),
           // 执行面回执：主 Agent 的重量反馈（系统元数据，提示词约定不转述给用户）。
           // 拼在提案分支之后：提案回合的文本是平台 summaryText + 通用确认行，注脚只属于
           // 普通结果（提案那一条路在 proposalCreated 分支就返回了，到不了这里）。

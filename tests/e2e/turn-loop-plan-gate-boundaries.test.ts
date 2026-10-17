@@ -232,7 +232,17 @@ describe('离线全链 e2e：计划累计账本', () => {
   it('A3 同一任务第二个计划看到累计 actual：2 调计划触发 notify，delta 只计净新增', async () => {
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '先查幻辰财税 1 月应收，再扩到 1 至 2 月' }]),
-      worker: gatedWorker([{ plan: growingPlan(1) }, { plan: growingPlan(2) }]),
+      worker: gatedWorker([
+        // 错误态快路径 v2 对齐：原首计划是单调用查 202601（无余额键）——快路径会在第二
+        // 个计划提交前就以宿主话术收束本跳，"evaluate 看到累计 actual"的意图就观察不到
+        // 了。本用例的意图是账本累计，首计划改查 202606（有余额键，真实成功），第二计划
+        // 保留 202606（重复项）+ 202601（净新增 1）——累计 1+2=3 > AUTO=2 的档位判据不变。
+        { plan: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202606'] }] },
+        { plan: [
+          { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202606'] },
+          { operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', '202601'] },
+        ] },
+      ]),
     });
     const reply = await send('先查幻辰财税 1 月应收，再扩到 1 至 2 月');
 

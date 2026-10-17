@@ -16,10 +16,11 @@ import {
   messageFor,
   messageTextFor,
   platformUnavailableTextFor,
+  terminalFailureTextFor,
   toolUserErrorFor,
 } from './src/error-codes';
 import { ToolUserError } from './src/driver';
-import { PLATFORM_OPERATIONS, SELECTION_CLARIFICATION_CODES } from './src/platform-contract';
+import { PLATFORM_OPERATIONS, SELECTION_CLARIFICATION_CODES, TERMINAL_FAST_PATH_CODES } from './src/platform-contract';
 import {
   DELEGATION_AUTH_FAILURE,
   DELEGATION_CANCELLED,
@@ -240,5 +241,47 @@ describe('平台健康冷却话术（PLATFORM_UNAVAILABLE，宿主合成）', ()
     expect(text).toContain('已暂停自动重试');
     expect(text).toContain('自动恢复尝试');
     expect(text).toContain('请联系管理员');
+  });
+});
+// ── 终局快路径模板（错误态快路径 v2，2026-10-16 重做）────────────────────────
+//
+// 平台确定性终局码（PERIOD_NO_DATA / 客户辅助核算两态）的话术收口在本表：驱动早停
+// （皮带）与宿主终局分支（背带）共用 terminalFailureTextFor 渲染，话术只有一份来源。
+// 动态部分（查询词/期间/可改查清单）是信封数据不是措辞，模板零业务词（泄漏 lint 同款
+// 预算——领域换了域一个字都不用改）。
+
+describe('终局快路径话术模板（宿主机械组装）', () => {
+  it('两条模板已登记，且与平台终局码集合一一对应（漏登记任何一侧都会红）', () => {
+    expect(has('PERIOD_NO_DATA_TERMINAL')).toBe(true);
+    expect(has('ASSISTANT_NOT_FOUND_SELECTION')).toBe(true);
+    // 平台侧终局码集合 ↔ 本表模板索引：两边必须覆盖同一批码（测试即那条线的锁）
+    for (const code of TERMINAL_FAST_PATH_CODES) {
+      expect(() => terminalFailureTextFor(code, { query: '某词', period: '202609', availablePeriods: ['202606'] }), code).not.toThrow();
+    }
+    // 不在集合内的码 fail-loud：绝不静默 fallback 到通用话术
+    expect(() => terminalFailureTextFor('SUBJECT_NOT_FOUND', { query: 'x' })).toThrow(UNKNOWN_ERROR_CODE);
+    expect(() => terminalFailureTextFor('ACCOUNT_SET_NOT_FOUND', { query: 'x' })).toThrow(UNKNOWN_ERROR_CODE);
+  });
+
+  it('PERIOD_NO_DATA：参数化模板带可改查清单（数据进占位符，措辞零业务词）', () => {
+    expect(terminalFailureTextFor('PERIOD_NO_DATA', {
+      query: '幻辰财税',
+      period: '202609',
+      availablePeriods: ['202606', '平台当前期间'],
+    })).toBe('没有查到“幻辰财税”在 202609 的数据。平台上有数据的是：202606、平台当前期间。要改查的话，告诉我查哪一项即可。');
+    const business = /应收|凭证|科目|账套|期间|目录/u;
+    expect(terminalFailureTextFor('PERIOD_NO_DATA', { query: '某词', period: '202609', availablePeriods: ['202606'] })).not.toMatch(business);
+  });
+
+  it('客户两态共用结构句：查询词原样回显，无候选/无平台 correctForm 措辞（D-102 语域）', () => {
+    // 两态各渲染一次，同一句结构话术（第一版措辞经评委验证，沿用）
+    for (const code of ['ASSISTANT_NOT_FOUND', 'ASSISTANT_AMBIGUOUS']) {
+      expect(terminalFailureTextFor(code, { query: '机电' })).toBe('没有找到匹配“机电”的对象。请确认准确名称后我再查。');
+    }
+  });
+
+  it('PERIOD_NO_DATA 缺 period fail-loud：直接调用方绕过信封完整性门时响亮失败', () => {
+    expect(() => terminalFailureTextFor('PERIOD_NO_DATA', { query: '幻辰财税', availablePeriods: ['202606'] })).toThrow(UNKNOWN_ERROR_CODE);
+    expect(() => terminalFailureTextFor('PERIOD_NO_DATA', { query: '幻辰财税', period: '  ', availablePeriods: ['202606'] })).toThrow(UNKNOWN_ERROR_CODE);
   });
 });

@@ -5,13 +5,16 @@
  * 账套不存在时只走目录搜索。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, ledger, mainDriver, platformCorrectForm, totalActualCalls } from './harness';
+import { balanceCalls, boot, gatedWorker, ledger, mainDriver, platformCorrectForm, totalActualCalls } from './harness';
 
 describe('离线全链 e2e：执行凭证与查询范围', () => {
   it('1.3/5.4 重复提问实时数据必须产生本轮平台执行，不能重放旧答复', async () => {
+    // 查 202606（mock 有余额键）：错误态快路径 v2 后，单调用计划查无数据期间
+    // （如 202609）会以宿主终局话术终结，不再是"贴成功文本"的形状——本用例的意图是
+    // "重复提问必须重新执行并给出数据答案"，因此瞄准有数据的期间。
     const worker = () => gatedWorker([
-      { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收余额为 51 元。' },
+      { plan: balanceCalls('幻辰财税', '202606') },
+      { text: '幻辰财税 202606 应收余额为 51 元。' },
     ]);
     const main = () => mainDriver([
       { kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' },

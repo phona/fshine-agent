@@ -74,10 +74,10 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
       { text: '新兴建材当前期间应收账款余额为 700 元。' },
       { end: true },
       // A 续跑（第 4 回合）：同一子任务换期间——是重新执行，不是重放旧答复
-      // 202609 在 mock 里无余额键（幻辰财税 1122 只有 202606/current）→ PERIOD_NO_DATA
+      // 202609 在 mock 里无余额键（幻辰财税 1122 只有 202606/current）→ PERIOD_NO_DATA。
+      // 错误态快路径 v2 对齐：单调用撞终局由镜像以宿主话术收束本跳（无贴文本段），
+      // 脚本游标 break 后直落 B' 段，由下一次委派继续消费（见 harness terminalMirror 注释）。
       { plan: balanceCalls('幻辰财税', '202609') },
-      { text: '幻辰财税 202609 应收账款平台未返回该期间数据。' },
-      { end: true },
       // B 续跑（第 5 回合）
       { plan: [{ operation: 'voucher.query-saved', args: ['新兴五金', '202606'] }] },
       { text: '新兴五金 202606 也没有已保存的凭证（平台返回 0 条）。' },
@@ -138,13 +138,14 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
     expect(worker.transcripts[5]).not.toContain('幻辰财税');
     expect(worker.transcripts[5]).not.toContain('新兴五金');
 
-    // 回到旧任务是重新执行：A 的 202609 答复是"平台未返回该期间数据"，不是把 61000 重放
-    // 一遍；C 的 202606 同样无数据，也不是重放当前期间的 700（两个期间在 mock 里都没有键）
-    expect(backToA).toContain('平台未返回该期间数据');
-    expect(backToA).toContain('202609');
+    // 回到旧任务是重新执行：A 的 202609 答复不是把 61000 重放一遍。错误态快路径 v2 后，
+    // 单调用计划撞无数据终局的收稿是宿主模板话术（逐字对齐）；C 的 202606 同样无数据，
+    // 也不是重放当前期间的 700（两个期间在 mock 里都没有键）。
+    expect(backToA).toBe('没有查到“幻辰财税”在 202609 的数据。平台上有数据的是：202606、平台当前期间。要改查的话，告诉我查哪一项即可。');
     expect(backToA).not.toContain('61000');
     expect(backToB).toContain('0 条');
-    expect(backToC).toContain('平台未返回该期间数据');
+    // C 续跑（第 6 回合）同样是单调用撞无数据终局：收稿为宿主模板话术（清单只有 current 一项）
+    expect(backToC).toBe('没有查到“新兴建材”在 202606 的数据。平台上有数据的是：平台当前期间。要改查的话，告诉我查哪一项即可。');
     expect(backToC).not.toContain('700');
 
     // 平台账本按子任务累计：每个任务各跑 2 次，六回合共 6 次调用

@@ -141,8 +141,10 @@ describe('离线全链 e2e：手机事故对话回归（连续 + 呈现）', () 
   it('PHONE-2 主模型把平台 RESULT 信封当回复：守卫收尾替换，信封不外发（D-069）', async () => {
     const before = totalActualCalls();
     const worker = gatedWorker([
-      // 计划步骤真跑过一次查询：回合有执行痕迹，worker 文本里夹带着真实平台信封
-      { plan: balanceCalls('幻辰财税', '202609') },
+      // 计划步骤真跑过一次查询：回合有执行痕迹，worker 文本里夹带着真实平台信封。
+      // 查 202606（有余额键）：错误态快路径 v2 后，单调用计划撞无数据终局的本跳文本
+      // 是宿主话术、不再夹带信封——本用例的意图是 D-069 复读守卫，需要信封在场。
+      { plan: balanceCalls('幻辰财税', '202606') },
       { text: '幻辰财税本期应收余额为 86,000 元（借方）。' },
       { end: true },
     ] as WorkerStep[]);

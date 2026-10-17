@@ -6,12 +6,12 @@
  * （worker 干净说明的准入尺、澄清回复组装）住 runtime.ts，两个使用方共用的文本原语
  * （stripFootprint）住 text-hygiene.ts。
  */
-import { messageTextFor } from './error-codes';
+import { messageTextFor, terminalFailureTextFor } from './error-codes';
 import type { SubagentNeeds } from './driver';
 import type { SubagentTaskResult } from './context';
 import { planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
 import { renderPlanStepOutcomeLines } from './plan-facts';
-import type { SelectionClarification } from './platform-contract';
+import type { SelectionClarification, TerminalFastPathFailure } from './platform-contract';
 import { stripFootprint } from './text-hygiene';
 
 /**
@@ -74,6 +74,24 @@ export function renderPlanStepToolResult(step: PlanStepLabel, result: SubagentTa
     ...(result.needs ? { needs: result.needs } : {}),
     next: planStepNextHint(step, result.taskId),
   };
+}
+
+/**
+ * 错误态快路径的终局话术渲染出口（v2，2026-10-16 重做）：平台确定性终局码的信封事实
+ * → 宿主模板话术。渲染只有这一份，两个消费方共用——
+ *   · 驱动侧（皮带）：pi-coding-driver 早停时把渲染好的话术填进 result.text——第一版
+ *     死因正是早停后 result.text 是空串，而宿主的空文本检查先于一切分支执行，用户拿到
+ *     "未返回可用结果"的兜底话术。皮带保证无论宿主侧哪个分支失手，用户都不会看到空结果。
+ *   · 宿主侧（背带）：context.ts 的终局分支用同一函数渲染 ToolUserError——若皮带失手
+ *     （text 意外为空），宿主豁免 + 这条分支仍然把话说全。
+ * 两处调用同一函数 = 话术只有一份来源，不存在"驱动版/宿主版"两个措辞分叉。
+ */
+export function renderTerminalFailureReply(failure: TerminalFastPathFailure): string {
+  return terminalFailureTextFor(failure.code, {
+    query: failure.query,
+    ...(failure.period ? { period: failure.period } : {}),
+    ...(failure.availablePeriods ? { availablePeriods: failure.availablePeriods } : {}),
+  });
 }
 
 /**

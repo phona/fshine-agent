@@ -956,3 +956,85 @@ describe('委派失败分类：登录态按错误码判定（不嗅探文案）'
       .rejects.toThrow(DELEGATION_AUTH_FAILURE);
   });
 });
+
+/**
+ * 错误态快路径 v2（2026-10-16，第一版 2026-10-17 凌晨因真模型探针回归被整波回退后重做）。
+ *
+ * 第一版死因（探针实证，逐行核实）：驱动早停（latch + agent_end）后返回的 result.text
+ * 是**空串**——早停发生时最后一跳是工具调用，转录里没有后续 assistant 文本；而本文件
+ * 上方的空文本检查跑在 needs / clarification 处理**之前**，空 text 直接抛"未返回可用
+ * 结果"、进 catch、被分类 executor_error，用户拿到"执行失败请稍后再试"的兜底话术。
+ * 宿主侧的整份答案门根本没机会执行。v2 契约（皮带 + 背带）：驱动侧合成非空 text（皮带），
+ * 宿主侧空文本检查豁免带结构化收尾的结果（背带）——两条防线各自独立成立，这里钉的是
+ * 背带，以及豁免与既有分支的顺序。
+ */
+describe('错误态快路径 v2：空文本豁免与终局分支的顺序', () => {
+  /** 空文本 + 结构化收尾的 worker 替身（真实驱动早停路径的形状）。 */
+  function earlyStopRunner(root: string, result: Record<string, unknown>) {
+    const profiles: Record<string, ContextProfileConfig> = {
+      '17dz': { root, skillRoots: ['.agents/skills'] },
+    };
+    return createContextTaskRunner({
+      profiles,
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async () => result as never },
+    });
+  }
+
+  it('空 text + terminalFailure：不抛"未返回可用结果"，宿主渲染的终局话术成为本轮回复', async () => {
+    const root = await profileRoot();
+    const task = earlyStopRunner(root, {
+      text: '',
+      messages: [],
+      terminalFailure: {
+        code: 'PERIOD_NO_DATA',
+        query: '幻辰财税',
+        period: '202609',
+        availablePeriods: ['202606', '平台当前期间'],
+      },
+    });
+    // 第一版死因回归钉：这一步此前抛的是"17dz 子 Agent 未返回可用结果。"，
+    // 经 catch 分类成 executor_error，用户拿到兜底话术。
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.not.toThrow('17dz 子 Agent 未返回可用结果。');
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow('没有查到“幻辰财税”在 202609 的数据。平台上有数据的是：202606、平台当前期间。要改查的话，告诉我查哪一项即可。');
+  });
+
+  it('空 text + clarification：空文本不再拦截，澄清事实照常透传（既有顺序隐患补上）', async () => {
+    const root = await profileRoot();
+    const clarification = { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] };
+    const task = earlyStopRunner(root, { text: '', messages: [], clarification });
+    const result = await task.run({ request: '查A' }, { trusted: trusted() });
+    expect(result.clarification).toEqual(clarification);
+  });
+
+  it('空 text + needs：空文本不再拦截，纠错线索照常透传', async () => {
+    const root = await profileRoot();
+    const needs = { missing: ['对象名称'], reason: '请求中未给出对象' };
+    const task = earlyStopRunner(root, { text: '', messages: [], needs });
+    const result = await task.run({ request: '查A' }, { trusted: trusted() });
+    expect(result.needs).toEqual(needs);
+  });
+
+  it('纯空 text（无任何结构化收尾）：照旧失败关闭成 executor 兜底话术——豁免不放松基线', async () => {
+    const root = await profileRoot();
+    const task = earlyStopRunner(root, { text: '', messages: [] });
+    // 空文本抛的是普通 Error，经 catch 分类 executor_error 包装成兜底话术——
+    // 这正是第一版死因的完整链路（空 text → catch → executor_error）；
+    // 豁免只对带结构化收尾的结果生效，纯空 text 的基线一字不动。
+    await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+      .rejects.toThrow(DELEGATION_EXECUTOR_FAILURE);
+  });
+
+  it('terminalFailure + stepLabel：多步计划的一步不终结整轮，照旧交还链', async () => {
+    const root = await profileRoot();
+    const task = earlyStopRunner(root, {
+      text: '没有找到匹配“某客户”的对象。请确认准确名称后我再查。',
+      messages: [],
+      terminalFailure: { code: 'ASSISTANT_NOT_FOUND', query: '某客户' },
+    });
+    const result = await task.run({ request: '查A', stepLabel: '第1/2步：查某客户' }, { trusted: trusted() });
+    expect(result.text).toBe('没有找到匹配“某客户”的对象。请确认准确名称后我再查。');
+  });
+});

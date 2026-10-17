@@ -297,6 +297,86 @@ export function isPlatformAuthError(error: unknown): boolean {
 }
 
 /**
+ * 错误态快路径的**终局码集合**（错误态快路径 v2，2026-10-16；第一版 2026-10-17 凌晨
+ * 因真模型探针回归被整波回退后重做）。
+ *
+ * 语义（已对照 17dz-platform 源码核实，两条都不要再质疑）：
+ *   · `PERIOD_NO_DATA`（mock `respond.js` receivables()）：仅在所查询的取数键**真缺失**时
+ *     发出（"键缺失 ≠ 值为 0"，真零仍是 completed），status=not_found + correctForm
+ *     带有数据的取数范围清单，退出码 0。它确实是终局：数据不能凭重试变出来——重试只会
+ *     付每轮约 31s 的 worker 重规划循环，结局不变。
+ *   · `ASSISTANT_NOT_FOUND` / `ASSISTANT_AMBIGUOUS`：客户辅助核算条目的确定性两态
+ *     （0 条 / 多条）。correctForm 是"让调用方先向用户确认规范名再重查"——那是给
+ *     **解析方**的规则，渲染它就是语域事故（D-102 同款）；宿主只用结构句终结。
+ *
+ * 与 SELECTION_CLARIFICATION_CODES（ACCOUNT_SET_* 两态）的边界：那两个码的澄清
+ * 管道（clarification → 宿主组装澄清问题）已在运转，**不走本快路径**；这里的三个码
+ * 才由驱动早停、宿主合成话术终结。SUBJECT_NOT_FOUND 等 worker 有自愈路径的码明确
+ * **不**转（第一版结论仍有效）：那类码重试/换参有意义，不是终局。
+ *
+ * 与 PLATFORM_AUTH_ERROR_CODES 同纪律——**码是数据，消息文案不是**，平台演进只改
+ * 集合不改编排层。
+ */
+export const TERMINAL_FAST_PATH_CODES: ReadonlySet<string> = new Set([
+  'PERIOD_NO_DATA',
+  'ASSISTANT_NOT_FOUND',
+  'ASSISTANT_AMBIGUOUS',
+]);
+
+/**
+ * 终局快路径的结构化事实（信封 → 宿主话术的机械取值）。字段由信封 data 原样提取：
+ *   · `query`：用户的查询词。PERIOD_NO_DATA 取 `data.query`；ASSISTANT 两态取
+ *     `data.customer`（找不到的/有歧义的是**客户名**，回显 data.query 会让用户确认
+ *     一个没问过的对象）。
+ *   · `period` / `availablePeriods`：仅 PERIOD_NO_DATA。取数范围标签与可改查清单都由
+ *     平台下发（清单里的内部键已由平台映射为用户可读标签），宿主只渲染不解释。
+ */
+export interface TerminalFastPathFailure {
+  code: string;
+  query: string;
+  period?: string;
+  availablePeriods?: readonly string[];
+}
+
+/** 非空字符串卫（完整性门的原子判据：缺/空/非字符串都算缺）。 */
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
+ * 信封 → 终局快路径事实。判据三层，缺一层不挂（行为零变化，宁可回到既有重规划循环，
+ * 也不给用户一句指代不清或没有下一步的话术）：
+ *   ① 码 ∈ TERMINAL_FAST_PATH_CODES（终局族才快转，其余码照旧）；
+ *   ② status 不是 completed（completed 是数据答案；码与 status 打架 = 平台契约违约，
+ *      不快转）；
+ *   ③ **完整性门**：信封必须带齐渲染这句话所需的全部数据——查询词、（PERIOD_NO_DATA）
+ *      取数范围标签与**非空**可改查清单、（ASSISTANT_*）客户名。清单为空同样不挂：可改查
+ *      清单是这句话的行动部分，空清单 = 契约不完整，快转只会把用户推进死胡同。
+ * 不挂时调用方应留痕告警（见 pi-coding-driver 的 incomplete 告警），让契约漂移可发现。
+ */
+export function terminalFastPathOf(envelope: PlatformEnvelope | null): TerminalFastPathFailure | undefined {
+  const code = envelope?.error?.code;
+  if (!envelope || !code || !TERMINAL_FAST_PATH_CODES.has(code)) return undefined;
+  if (envelope.status === 'completed') return undefined;
+  const data = envelope.data as Record<string, unknown> | null;
+  if (code === 'PERIOD_NO_DATA') {
+    const query = typeof data?.['query'] === 'string' ? data['query'].trim() : '';
+    const period = typeof data?.['period'] === 'string' ? data['period'].trim() : '';
+    const availablePeriods = Array.isArray(data?.['availablePeriods'])
+      ? (data['availablePeriods'] as unknown[]).filter(nonEmptyString)
+      : [];
+    // 完整性门：查询词 + 取数范围 + 非空清单三者缺一不挂（fail-loud 的判据在调用方留痕）。
+    if (!query || !period || availablePeriods.length === 0) return undefined;
+    return { code, query, period, availablePeriods };
+  }
+  // ASSISTANT 两态：唯一必需的数据是客户名（correctForm 不渲染——那是给解析方的规则，
+  // 渲染它是语域事故；candidates 也不渲染——宿主的话术请用户确认规范名，不是列候选）。
+  const customer = typeof data?.['customer'] === 'string' ? data['customer'].trim() : '';
+  if (!customer) return undefined;
+  return { code, query: customer };
+}
+
+/**
  * tool_result 正文取文本（原生 content 分段 → 纯文本）。编排层多处要读平台响应
  * （信封解析、选择类提取、实体来源收集），取文本的规则只有这一份。
  */
