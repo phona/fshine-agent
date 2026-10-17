@@ -34,8 +34,18 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
 /**
  * 本批抽取后的真实行数。纪律：**只减不增**——每批抽取把这个常数改小，改大就是回退。
  * 留余量等于没压，所以这里放的是当前真实行数（不含任何 slack）。
+ *
+ * 1221 → 1225（2026-10-17）：SYSTEM_PROMPT 增加委派边界纪律一句（追加/扩范围优先扩当前
+ * 计划；同题重问硬豁免）+ 数据理由注释。上移依据与 B3 条目同先例：探针实测新开委派
+ * ≈ +31s、同委派内追加调用 ≈ +2s（scripts/perf/delegation-boundaries.ts，126 对可合并）。
+ * 第一版因缺"同题重问"豁免被 F6 门打回（B1 零调用召回），带豁免重落；评审复核后按
+ * rule-landing"同一事实只存在一处"收敛为双处分工（全文在 business-skill.md，提示词只留
+ * 原则句），1226 → 1225。登记见 rule-landing §3.1 条目 12。
+ *
+ * 1237 → 1241（同日）：token 消耗遥测（sumUsage + 三采集点 + turn_span/delegation_span
+ * 字段，见 e21570f）使基数升到 1237；P2 边界句恢复后 +4 = 1241。
  */
-const RUNTIME_LINE_BUDGET = 1237;
+const RUNTIME_LINE_BUDGET = 1241;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。
