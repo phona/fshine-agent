@@ -16,6 +16,7 @@ config/agent.yaml
 # 本地运行产物（探针报告、平台 mock 状态等）
 .runtime/
 .env.real
+.env.bak*
 .stepcode/
 
 # ZCode 客户端自动生成的工具忽略清单（会自我再生成，内容从 .gitignore 同步）

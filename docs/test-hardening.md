@@ -42,3 +42,4 @@
 - 真实限流/真实 auth 码：mock 证不到，不写假验证（change-safety §0 表）。
 - 输入形状网不覆盖申报方向听错（模型能力，脚本化 mainDriver 钉死方向）。
 - ASSISTANT_AMBIGUOUS 的终局快路径 e2e 在 mock 下走不到（2026-10-16 评审登记）：平台 mock 信封缺 `data.customer`，`terminalFastPathOf` 的完整性门 fail-safe 不挂（按设计回到既有重规划循环，不出假话术）；真平台信封带该字段。该码的宿主话术渲染只有 unit 链覆盖；补齐 mock 信封属 17dz-platform 仓。
+- 思考档经 pi-ai compat 适配器不可控（2026-10-17 登记）：`LLM_THINKING_LEVEL` 走 compat 适配器（自建 `LLM_API_BASE_URL` + 模型 id）时**不发送任何 thinking/reasoning_effort 参数**（compat.js 零处理；`thinkingLevelMap` 仅对内置注册表模型生效）——服务端默认接管。实测 deepseek-flash 默认即思考开 + effort high，故该变量对此网关是 no-op。两个上游依赖项：① pi-ai compat 适配器如需控思考，需上游支持 `thinking: {type}` / `reasoning_effort` 透传；② DeepSeek 文档要求带 tools 的多轮回传完整 `reasoning_content` 否则 400——当前网关宽容（探针无 400），compat 适配器亦不解析该字段，属对上游行为的隐式依赖，真模型切 deepseek 系时留意。
