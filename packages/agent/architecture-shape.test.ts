@@ -20,6 +20,9 @@ import { describe, expect, it } from 'vitest';
  *      → 1221（方案 1 B 波 B3：新增"提案已登记"分支——宿主持有的确定性文本终结本轮，
  *        与 writeClosed 同族。这是**功能新增**而不是回退：常数随真实行数上移，下一批抽取
  *        时照旧只减不增）。
+ *      → 1237（token 消耗统计，纯加法遥测：Main 侧 turn_span 的 usage 采集——正常回合规口、
+ *        跳过申报重试两段合并、恢复路径整理轮规口、finishDirectReply 透传。同样是功能新增，
+ *        无行为分支变化；下一批抽取时照旧只减不增）。
  *
  * 变异验证：在 src 里加一条反向 **值** import（如 turn-relay → runtime）→ 断言 1 红；
  * 往 runtime.ts 加几行 → 断言 2 红。
@@ -32,7 +35,7 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 本批抽取后的真实行数。纪律：**只减不增**——每批抽取把这个常数改小，改大就是回退。
  * 留余量等于没压，所以这里放的是当前真实行数（不含任何 slack）。
  */
-const RUNTIME_LINE_BUDGET = 1221;
+const RUNTIME_LINE_BUDGET = 1237;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

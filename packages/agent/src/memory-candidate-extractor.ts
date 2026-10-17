@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { ConversationEventRecord } from '@fshine/contracts';
 import type { MemoryRecordType } from '@fshine/core';
+import { usageSpanFields, type UsageTotals } from './driver';
 import type { CandidateExtractor } from './memory-consolidator';
 import type { LongMemoryCandidate } from './long-memory';
 
@@ -12,6 +13,12 @@ export interface MemoryCandidateModelRequest {
 /** Adapter around the configured model provider. The return value may be structured JSON or JSON text. */
 export interface MemoryCandidateModel {
   generateStructured(request: MemoryCandidateModelRequest): Promise<unknown> | unknown;
+  /**
+   * 可选：最近一次 generateStructured 的真实 usage 分项（口径见 driver.ts 的 sumUsage）。
+   * 适配器不实现 / 网关没回传时返回 undefined → aux_model_usage 的 token 字段缺席，
+   * 不是全零（缺席=没证据，全零=provider 如实报 0，账目上必须可区分）。测试替身可以不实现。
+   */
+  lastUsage?(): UsageTotals | undefined;
 }
 
 const SYSTEM_PROMPT = `你负责从用户原始消息中提取适合长期保存的稳定信息。只返回 JSON 对象 {"candidates":[...]}，每条包含 key、type(preference|fact)、content、sourceEventIds、action(assert|correct|delete)，纠正或删除还要提供 supersedesMemoryIds。
@@ -31,6 +38,7 @@ export function createLongMemoryCandidateExtractor(model: MemoryCandidateModel):
     if (!userEvents.length) return [];
     const principalId = userEvents[0]!.principalId;
     const eventText = userEvents.map(({ eventId, content, createdAt }) => ({ eventId, createdAt, content }));
+    const extractionStartedAt = Date.now();
     const response = await model.generateStructured({
       systemPrompt: SYSTEM_PROMPT,
       userPrompt: JSON.stringify({
@@ -40,6 +48,16 @@ export function createLongMemoryCandidateExtractor(model: MemoryCandidateModel):
         memoryRecordRule: 'currentMemoryRecords 只能用于识别用户明确更正或删除的 target memoryId，不是事实证据；sourceEventIds 仍必须引用本批 user_message。',
       }),
     });
+    // 辅助模型消耗（纯加法遥测）：长期记忆抽取是宿主自己的模型调用（kind: memory），与
+    // worker / Main / context 抽取的账目分开——宿主开销与 worker 开销混在一起就没法分析
+    // 成本构成。适配器不回传 usage（lastUsage 缺席）时 token 字段缺席，不报错。
+    const auxUsage = model.lastUsage?.();
+    console.info(JSON.stringify({
+      event: 'aux_model_usage',
+      kind: 'memory',
+      durationMs: Date.now() - extractionStartedAt,
+      ...(auxUsage ? usageSpanFields(auxUsage) : {}),
+    }));
     const rawCandidates = parseCandidates(response);
     const allowedEvents = new Map(userEvents.map((event) => [event.eventId, event]));
     const candidates: LongMemoryCandidate[] = [];

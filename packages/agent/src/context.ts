@@ -19,7 +19,7 @@ import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanCliRunner } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
-import { ToolUserError, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult } from './driver';
+import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
@@ -134,6 +134,12 @@ export interface SubagentTaskResult {
    * 可能零网关执行，而"提案已登记、等用户确认"是真实状态）。
    */
   proposalCreated?: { proposalId: string };
+  /**
+   * worker 本回合的真实 token 消耗分项（纯加法遥测，口径见 driver.ts 的 sumUsage）：
+   * 对 worker 转录里 assistant 消息的 provider Usage 求和，供 stepLabel 场景与测试断言。
+   * 网关不回传 usage 时缺席——缺席（没证据）与全零（provider 如实报 0）必须可区分。
+   */
+  usage?: UsageTotals;
 }
 
 export type { SubagentNeeds };
@@ -843,6 +849,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         } finally {
           release();
         }
+        // worker 侧真实 token 消耗（纯加法遥测）：对 worker 转录里 assistant 消息的
+        // provider Usage 分项求和（口径见 driver.ts 的 sumUsage），挂到下方每个
+        // delegation_span 结局与 SubagentTaskResult 透传。网关不回传 usage 时埋点字段
+        // 缺席（不是全零）——两类事实必须可区分，且缺失绝不报错。
+        const workerTokens = sumUsage(result.messages);
+        const workerUsage = workerTokens ? usageSpanFields(workerTokens) : {};
         // 空文本检查（错误态快路径 v2 改豁免判据，2026-10-16）：needs / clarification /
         // terminalFailure 本来就是空 text 合法的形状——结构化收尾的话术由宿主渲染出口
         // 组装，不由 worker 文本承担。第一版（2026-10-17 凌晨回退）死因正是这里：驱动
@@ -873,6 +885,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             durationMs: Date.now() - delegationStart,
             outcome: 'terminal_fast_path',
             code: result.terminalFailure.code,
+            ...workerUsage,
           }));
           throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure));
         }
@@ -899,8 +912,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             requestId: ctx.trusted.requestId,
             userText: result.pendingPlan.userText,
           });
-          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending' }));
-          return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}) };
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending', ...workerUsage }));
+          return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}), ...(workerTokens ? { usage: workerTokens } : {}) };
         }
         // 纠错环（架构 §3）：worker 执行不了，回报"缺什么/为什么/建议用户提供什么"。
         // 任务保持可续（taskId 已知会宿主侧，用户补充后经 continueTaskId 重派），
@@ -912,8 +925,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
-          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input' }));
-          return { taskId, text: result.text, needs: result.needs };
+          console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input', ...workerUsage }));
+          return { taskId, text: result.text, needs: result.needs, ...(workerTokens ? { usage: workerTokens } : {}) };
         }
         // 提案已登记（网关路径，B 波 B3）：宿主持有的确定性文本（平台 summaryText + 确认行）
         // 原样上交，任务条目照常落（这一轮的转录与执行事实要能续跑）。必须**先于**下面的
@@ -932,12 +945,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             durationMs: Date.now() - delegationStart,
             outcome: 'proposal_created',
             proposalGateway: true,
+            ...workerUsage,
           }));
           return {
             taskId,
             text: result.text,
             proposalCreated: result.proposalCreated,
             ...(result.execution ? { execution: result.execution } : {}),
+            ...(workerTokens ? { usage: workerTokens } : {}),
           };
         }
         const final: SubagentTaskResult = {
@@ -961,13 +976,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 拼在提案分支之后：提案回合的文本是平台 summaryText + 通用确认行，注脚只属于
           // 普通结果（提案那一条路在 proposalCreated 分支就返回了，到不了这里）。
           text: result.footprint ? `${result.text}\n\n〔本轮执行面：${result.footprint}〕` : result.text,
+          // worker token 分项透传（纯加法遥测，供 stepLabel 场景与测试断言；口径见上）。
+          ...(workerTokens ? { usage: workerTokens } : {}),
         };
         await options.tasks.upsert({
           ...withExecutionFacts(running, result, result.execution ? 'done' : 'failed'),
           workerMessages: result.messages as unknown[],
           updatedAt: new Date().toISOString(),
         });
-        console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok' }));
+        console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok', ...workerUsage }));
         return final;
       } catch (error) {
         // 已经是面向用户的安全话术（ToolUserError 语义 = 这段文本成为本轮回复）时
@@ -995,6 +1012,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           durationMs: Date.now() - delegationStart,
           outcome: 'failed',
           failureClass,
+          // 失败前已产生的部分转录同样计入（超时/取消前 worker 真实消耗过的 token）；
+          // result 缺席（驱动没返回过）时字段缺席。
+          ...(result ? usageFieldsOf(result.messages) : {}),
         }));
         console.error(JSON.stringify({
           event: 'subagent_task_failed',

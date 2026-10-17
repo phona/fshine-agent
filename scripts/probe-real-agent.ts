@@ -49,6 +49,21 @@ import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/d
 
 const PRINCIPAL_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
 
+/**
+ * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
+ * 来源是宿主进程埋点行（turn_span / delegation_span / aux_model_usage）里的 provider
+ * 真实 Usage 分项，不是字符估算。total = input+output+cacheRead+cacheWrite（与宿主侧
+ * driver.ts 的 usageSpanFields 同一口径）；reasoning ⊆ output，不重复相加。
+ */
+interface UsageBreakdown {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  reasoning?: number;
+  total: number;
+}
+
 interface Turn {
   text: string;
   reply: string;
@@ -57,6 +72,17 @@ interface Turn {
   /** 本轮实际产生的平台调用数（17dz plan state 的 actual.calls 增量；隔离状态按用例累计，可逐轮相减）。 */
   calls: number;
   group?: boolean;
+  /**
+   * 本回合真实 token 消耗（纯加法遥测）：main = Main 编排模型（turn_span），worker =
+   * 17dz 子 Agent（delegation_span，多步计划的多次委派已求和）。埋点行没带 token 字段
+   * （旧路径/网关不回传 usage）时对应分项缺席——缺席与全零必须可区分，不得拿零冒充。
+   * aux（context/memory 抽取）不进逐轮结构：它们是回合后的异步落账，可能晚于回复帧，
+   * 逐轮归属不可靠，只在 CaseResult.tokens 按用例全局汇总。
+   */
+  tokens?: {
+    main?: UsageBreakdown;
+    worker?: UsageBreakdown;
+  };
 }
 
 interface CaseResult {
@@ -73,6 +99,16 @@ interface CaseResult {
   dims: DimCounts;
   /** 归不进四维的 note 数（任务行为类：计划恢复/空转/成本等，继续驱动 ok，不冒充可信度分数）。 */
   unclassifiedNotes: number;
+  /**
+   * 用例级 token 汇总（纯加法遥测）：main/worker 由逐轮 tokens 求和；aux 按 kind 全局捕获
+   * （异步落账晚于回复帧，逐轮归属不可靠）。没有任何 usage 证据时整个字段缺席。
+   */
+  tokens?: {
+    main?: UsageBreakdown;
+    worker?: UsageBreakdown;
+    auxContext?: UsageBreakdown;
+    auxMemory?: UsageBreakdown;
+  };
   ok: boolean;
 }
 
@@ -119,6 +155,71 @@ const PROBE_REPLY_WAIT_MS = 600_000;
 
 const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
+
+// ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
+// 拦截 console.info 里 event 为 turn_span / delegation_span / aux_model_usage 的 JSON 行，
+// 其余原样透传（探针进程的日志行为不变）。归属判据：探针的 send 严格串行（等最终回复帧
+// 才发下一条），而 turn_span/delegation_span 在 handleTurn 返回前同步落账、先于回复帧，
+// 所以"本条 send 起点之后的埋点行"就是本回合的——按缓冲区下标切片即可，不需要 requestId
+// 关联（handler 自造 requestId，与企微 req_id 不同源，关联不上）。
+type TelemetryEvent = Record<string, unknown>;
+const telemetryEvents: TelemetryEvent[] = [];
+const TELEMETRY_EVENT_NAMES = new Set(['turn_span', 'delegation_span', 'aux_model_usage']);
+const originalConsoleInfo = console.info.bind(console);
+console.info = (...args: unknown[]): void => {
+  const line = args[0];
+  if (typeof line === 'string' && line.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(line) as TelemetryEvent;
+      if (typeof parsed['event'] === 'string' && TELEMETRY_EVENT_NAMES.has(parsed['event'])) {
+        telemetryEvents.push(parsed);
+      }
+    } catch { /* 非 JSON 行原样透传 */ }
+  }
+  originalConsoleInfo(...args);
+};
+
+/** 埋点行 → token 分项；行里没带 token 字段（网关不回传 usage）时返回 null（缺席，不编零）。 */
+function usageBreakdownOf(event: TelemetryEvent): UsageBreakdown | null {
+  if (typeof event['tokensIn'] !== 'number' || typeof event['tokensOut'] !== 'number') return null;
+  const input = event['tokensIn'];
+  const output = event['tokensOut'];
+  const cacheRead = typeof event['cacheRead'] === 'number' ? event['cacheRead'] : 0;
+  const cacheWrite = typeof event['cacheWrite'] === 'number' ? event['cacheWrite'] : 0;
+  const reasoning = typeof event['reasoning'] === 'number' ? event['reasoning'] : undefined;
+  return {
+    input, output, cacheRead, cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    total: input + output + cacheRead + cacheWrite,
+  };
+}
+
+/** 分项相加（null = 无证据，加法单位元）；口径与宿主 driver.ts 的 addUsageTotals 同族。 */
+function addBreakdown(a: UsageBreakdown | null, b: UsageBreakdown | null): UsageBreakdown | null {
+  if (!a) return b;
+  if (!b) return a;
+  const reasoning = a.reasoning === undefined && b.reasoning === undefined
+    ? undefined
+    : (a.reasoning ?? 0) + (b.reasoning ?? 0);
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+    total: a.total + b.total,
+  };
+}
+
+/** 自 mark 起的埋点行里，按事件名求和出的 token 分项（无证据返回 null）。 */
+function breakdownSince(mark: number, eventName: string): UsageBreakdown | null {
+  let total: UsageBreakdown | null = null;
+  for (const event of telemetryEvents.slice(mark)) {
+    if (event['event'] !== eventName) continue;
+    total = addBreakdown(total, usageBreakdownOf(event));
+  }
+  return total;
+}
 
 function isolatePlatformState(): void {
   platformStateBackup = Object.fromEntries(PLATFORM_STATE_KEYS.map((key) => [key, process.env[key]]));
@@ -168,18 +269,24 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
     send: async (text: string): Promise<Turn> => {
       const before = sdk.frames.filter((frame) => frame.finish).length;
       const callsBefore = ledgerCalls();
+      // 埋点切片起点：send 起点之后的 turn_span/delegation_span 都归属本回合（串行保证）。
+      const telemetryMark = telemetryEvents.length;
       const startedAt = Date.now();
       sdk.emit('message.text', wecomText(PRINCIPAL_USER, text));
       const deadline = Date.now() + PROBE_REPLY_WAIT_MS;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
         if (finals.length > before) {
+          // token 分项（纯加法遥测）：无 usage 证据时分项缺席，不编零。
+          const main = breakdownSince(telemetryMark, 'turn_span');
+          const worker = breakdownSince(telemetryMark, 'delegation_span');
           return {
             text,
             reply: finals.at(-1)!.content,
             ms: Date.now() - startedAt,
             notices: sdk.frames.filter((frame) => !frame.finish && frame.content.startsWith('计划通知：')).map((frame) => frame.content),
             calls: ledgerCalls() - callsBefore,
+            ...((main || worker) ? { tokens: { ...(main ? { main } : {}), ...(worker ? { worker } : {}) } } : {}),
           };
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1865,6 +1972,32 @@ const CASES: Case[] = [
 /** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
 const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
+/** 用例级 token 汇总：main/worker 逐轮求和；aux 按 kind 用全局捕获求和（异步落账逐轮归属不可靠）。 */
+function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | undefined {
+  let main: UsageBreakdown | null = null;
+  let worker: UsageBreakdown | null = null;
+  for (const turn of turns) {
+    main = addBreakdown(main, turn.tokens?.main ?? null);
+    worker = addBreakdown(worker, turn.tokens?.worker ?? null);
+  }
+  let auxContext: UsageBreakdown | null = null;
+  let auxMemory: UsageBreakdown | null = null;
+  for (const event of telemetryEvents.slice(caseMark)) {
+    if (event['event'] !== 'aux_model_usage') continue;
+    const breakdown = usageBreakdownOf(event);
+    if (!breakdown) continue;
+    if (event['kind'] === 'context') auxContext = addBreakdown(auxContext, breakdown);
+    if (event['kind'] === 'memory') auxMemory = addBreakdown(auxMemory, breakdown);
+  }
+  if (!main && !worker && !auxContext && !auxMemory) return undefined;
+  return {
+    ...(main ? { main } : {}),
+    ...(worker ? { worker } : {}),
+    ...(auxContext ? { auxContext } : {}),
+    ...(auxMemory ? { auxMemory } : {}),
+  };
+}
+
 async function main(): Promise<void> {
   const only = process.argv.includes('--only')
     ? new Set(process.argv[process.argv.indexOf('--only') + 1]!.split(','))
@@ -1881,15 +2014,20 @@ async function main(): Promise<void> {
   for (const item of selected) {
     console.log(`\n=== ${item.id} ${item.intent} ===`);
     const before = ledgerCalls();
+    // 用例级 aux 捕获窗口（caseTokensOf）：从用例开始前的缓冲区下标切到用例结束。
+    const caseMark = telemetryEvents.length;
     try {
       const { turns, notes = [] } = await item.run();
       const after = ledgerCalls();
       // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
       const ok = notes.every((note) => note.startsWith('（信息性）'));
       const counted = countDims(notes);
+      const tokens = caseTokensOf(turns, caseMark);
       results.push({
         id: item.id, group: item.group, intent: item.intent, turns, ledgerCalls: after - before, notes,
-        dims: counted.dims, unclassifiedNotes: counted.unclassified, ok,
+        dims: counted.dims, unclassifiedNotes: counted.unclassified,
+        ...(tokens ? { tokens } : {}),
+        ok,
       });
       for (const turn of turns) {
         console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
@@ -1923,7 +2061,10 @@ async function main(): Promise<void> {
     console.log(`\n${group}`);
     for (const result of list) {
       const total = result.turns.reduce((sum, turn) => sum + turn.ms, 0);
-      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.ledgerCalls} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
+      // token 概览（纯加法遥测）：只报 main+worker 的合计；aux 明细看 json。没证据不打印。
+      const tokenTotal = (result.tokens?.main?.total ?? 0) + (result.tokens?.worker?.total ?? 0);
+      const tokenNote = tokenTotal > 0 ? ` tokens ${tokenTotal}` : '';
+      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.ledgerCalls}${tokenNote} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
     }
   }
   const bad = results.filter((result) => !result.ok);

@@ -1,4 +1,5 @@
 import type { TurnDriver, TurnDriverInput } from './driver';
+import { usageFieldsOf } from './driver';
 import { extractSemanticContext, type ContextExtractionResult, type ContextSemanticModelInput } from './context-extractor';
 
 export interface ContextModelClock {
@@ -83,6 +84,16 @@ async function runIsolatedModelTurn(
   try {
     const result = await Promise.race([run, timeout]);
     if (timedOut || clock.now() > startedAt + timeoutMs) throw new Error(`Context model call exceeded ${timeoutMs} ms.`);
+    // 辅助模型消耗（纯加法遥测）：context 抽取走独立的 contextModelDriver，宿主开销与
+    // worker/Main 的账目分开（kind: context），故在这里单独成账。挂在 JSON 校验之前：
+    // 模型真实消耗发生在解析成败之前，解析失败不该丢账。网关不回传 usage 时 token 字段
+    // 缺席（不是全零，口径见 driver.ts 的 sumUsage），绝不报错。
+    console.info(JSON.stringify({
+      event: 'aux_model_usage',
+      kind: 'context',
+      durationMs: clock.now() - startedAt,
+      ...usageFieldsOf(result.messages),
+    }));
     if (!result.text.trim()) throw new Error('Context model returned an empty response.');
     if (utf8Bytes(result.text) > maxOutputBytes) throw new Error(`Context model output exceeds ${maxOutputBytes} bytes.`);
     try {

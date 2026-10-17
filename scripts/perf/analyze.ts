@@ -93,19 +93,36 @@ function analyzeSuite(): void {
 }
 
 // ── B 段：真实链路延迟 ────────────────────────────────────────────────
-interface Turn { date: string; id: string; idx: number; ms: number; calls: number; replyLen: number }
+interface Turn {
+  date: string; id: string; idx: number; ms: number; calls: number; replyLen: number;
+  /**
+   * 本轮真实 token 总量（main+worker 的 total 合计；纯加法遥测，来自探针捕获的宿主埋点行，
+   * provider 真实 Usage 分项，非字符估算）。旧探针 json 没有 tokens 字段 → undefined，
+   * 这批轮次不进 token 统计——数据不足就直说，不拿零冒充。
+   */
+  tokensTotal?: number;
+}
 
 function analyzeProbes(): void {
   const turns: Turn[] = [];
   const runs: Array<{ date: string; id: string; n: number }> = [];
   for (const f of fs.readdirSync(path.join(repoRoot, '.runtime')).filter(f => /^probe-fshine-probe-.+\.json$/.test(f))) {
-    let j: { at?: string; results?: Array<{ id: string; turns?: Array<{ ms?: number; calls?: number; reply?: string }> }> };
+    let j: { at?: string; results?: Array<{ id: string; turns?: Array<{ ms?: number; calls?: number; reply?: string; tokens?: { main?: { total?: number }; worker?: { total?: number } } }> }> };
     try { j = JSON.parse(fs.readFileSync(path.join(repoRoot, '.runtime', f), 'utf8')); } catch { continue; }
     const date = (j.at || '').slice(0, 10);
     for (const r of j.results ?? []) {
-      (r.turns ?? []).forEach((t, idx) => turns.push({
-        date, id: r.id, idx: idx + 1, ms: t.ms ?? 0, calls: t.calls ?? 0, replyLen: (t.reply ?? '').length,
-      }));
+      (r.turns ?? []).forEach((t, idx) => {
+        // turn.tokens.{main,worker}.total 至少一个在場才算有 token 证据（与探针写入条件一致）。
+        const mainTotal = t.tokens?.main?.total;
+        const workerTotal = t.tokens?.worker?.total;
+        const tokensTotal = mainTotal === undefined && workerTotal === undefined
+          ? undefined
+          : (mainTotal ?? 0) + (workerTotal ?? 0);
+        turns.push({
+          date, id: r.id, idx: idx + 1, ms: t.ms ?? 0, calls: t.calls ?? 0, replyLen: (t.reply ?? '').length,
+          ...(tokensTotal !== undefined ? { tokensTotal } : {}),
+        });
+      });
       if ((r.turns ?? []).length) runs.push({ date, id: r.id, n: (r.turns ?? []).length });
     }
   }
@@ -127,6 +144,31 @@ function analyzeProbes(): void {
   }
   const zc = byCalls[0] ?? [], oc = byCalls[1] ?? [];
   if (zc.length && oc.length) console.log(`  → 委派边界边际（1调用−0调用）：${((median(oc) - median(zc)) / 1000).toFixed(1)}s；贵在 worker 会话的模型轮次，不在平台调用本身`);
+
+  // Token 维（纯加法遥测）：只有带 tokens 字段的新探针 json 才有证据（探针从宿主的
+  // turn_span/delegation_span 埋点行捕获 provider 真实 Usage）。旧 json / 网关不回传
+  // usage 的轮次进不来——输出"数据不足"，不拿零冒充、不编数。
+  const tokenTurns = turns.filter(t => t.tokensTotal !== undefined);
+  console.log('\nToken 消耗（provider 真实 Usage，main+worker 合计；仅统计带 tokens 的新探针 json）：');
+  if (!tokenTurns.length) {
+    console.log('  数据不足：现有探针 json 都没有 tokens 字段（旧版探针产物或网关未回传 usage），token 维跳过。');
+  } else {
+    const tokById: Record<string, number[]> = {};
+    for (const t of tokenTurns.filter(t => t.date === latest)) (tokById[t.id] = tokById[t.id] || []).push(t.tokensTotal!);
+    console.log('  最新批分场景（每轮 tokens 中位 / 场景累计）：');
+    for (const [id, xs] of Object.entries(tokById).sort()) {
+      console.log(`    ${id.padEnd(4)} n=${String(xs.length).padStart(2)}  中位 ${median(xs)} tok  累计 ${xs.reduce((a, b) => a + b, 0)} tok`);
+    }
+    // 零调用轮 vs 委派轮的 token 边际对照：两个桶都有样本才对照（委派轮贵在 worker 的
+    // 模型轮次，token 边际是它的直接计量；缺桶直说数据不足）。
+    const zeroTok = tokenTurns.filter(t => t.date === latest && t.calls === 0).map(t => t.tokensTotal!);
+    const delegTok = tokenTurns.filter(t => t.date === latest && t.calls > 0).map(t => t.tokensTotal!);
+    if (zeroTok.length && delegTok.length) {
+      console.log(`  → token 边际（委派轮中位 − 零调用轮中位）：${median(delegTok) - median(zeroTok)} tok（零调用 n=${zeroTok.length}，委派 n=${delegTok.length}）`);
+    } else {
+      console.log(`  → 数据不足：零调用轮（n=${zeroTok.length}）或委派轮（n=${delegTok.length}）缺 token 样本，边际对照跳过。`);
+    }
+  }
 
   // 长会话组内对照（≥12 轮实例：前 5 轮 vs 末 5 轮中位，消除场景混合偏差）
   const longRuns: Record<string, Record<number, number>> = {};

@@ -2,7 +2,7 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
-import { ToolUserError, type TurnDriver, type TurnDriverResult } from './driver';
+import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
@@ -400,6 +400,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           exec: async () => { throw new ToolUserError('本轮只负责整理已完成的计划结果。'); },
           deadline,
         });
+        // Main 编排模型本回合的真实 token 消耗（纯加法遥测）：对 Main 驱动本回合新增的
+        // assistant 消息求和（口径 Main=编排模型本体；context/memory 辅助调用走独立的
+        // contextModelDriver，其消耗由 aux_model_usage 单独成账，不混进 Main 的数字）。
+        const resumeMainUsage = usageFieldsOf(answer.messages.slice(messages.length));
         // 选择类澄清（任务 1）：确认后重跑撞上结构化歧义/未找到时，回复同样由宿主机械组装
         // ——整理模型的文本是对协议材料的翻译，不上屏也不进转录（与 delegate 路径同一修法）。
         const clarificationReply = resumed.clarification
@@ -463,7 +467,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             ...(note ? { withWorkerNote: true } : {}),
           }));
         }
-        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : clarificationReply ? 'confirmed_plan_clarification' : 'confirmed_plan_resumed' }));
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : clarificationReply ? 'confirmed_plan_clarification' : 'confirmed_plan_resumed', ...resumeMainUsage }));
         return { text };
       }
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
@@ -1009,16 +1013,26 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
 
       const initialMessageCount = context.length;
       let result = await runMainAgent(context);
+      // Main 编排模型本回合的真实 token 消耗（纯加法遥测）：对 Main 驱动本回合新增的
+      // assistant 消息分项求和（口径 Main=编排模型本体；context/memory 辅助调用走独立的
+      // contextModelDriver，由 aux_model_usage 单独成账，不混进这里）。网关不回传 usage
+      // 时保持 undefined → turn_span 字段缺席（不是全零，两类事实必须可区分）。
+      // 跳过申报的重试段也是本回合的 Main 消耗：第二段输入 = 第一段转录 + 重试指令，
+      // 从 firstRunLen+1 起切只拿第二段新增的 assistant 消息（切片判据与下方
+      // extract17dzToolResultEvents 的 initialMessageCount 同法）。
+      let mainUsage = sumUsage(result.messages.slice(initialMessageCount));
       if (!turn.declared) {
         // 跳过申报：丢弃自由文本，追一条明确指令重试一次。
+        const firstRunLen = result.messages.length;
         const retried = await runMainAgent([
           ...result.messages,
           { role: 'user', content: ROUTE_RETRY_NUDGE, timestamp: Date.now() } as unknown as AgentMessage,
         ]);
+        mainUsage = addUsageTotals(mainUsage, sumUsage(retried.messages.slice(firstRunLen + 1)));
         if (!turn.declared) {
           // 仍跳过：失败关闭，绝不外发未申报的文本。
           console.warn(JSON.stringify({ event: 'route_declaration_missing', requestId: ctx.requestId }));
-          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing');
+          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage);
         }
         result = retried;
       }
@@ -1038,6 +1052,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           turn.clarificationReply,
           'selection_clarification',
           `平台澄清 ${turn.clarification.code}：候选 ${turn.clarification.candidates.length} 个`,
+          mainUsage,
         );
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
@@ -1085,7 +1100,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       let needsRelay = '';
       if (exitDecision.kind === 'direct') {
         logExitEvents(exitDecision.events);
-        return await finishDirectReply(exitDecision.text, exitDecision.outcome);
+        return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage);
       }
       if (exitDecision.kind === 'relay') {
         logExitEvents(exitDecision.events);
@@ -1129,7 +1144,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         await persistAssistantAndContext(deps, ctx, fallback, contextUpdateQueues);
         scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
         console.info(JSON.stringify({ event: 'fallback_reply', requestId: ctx.requestId, reason }));
-        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason }));
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason, ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
         return { text: fallback };
       }
       const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx);
@@ -1140,9 +1155,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         void deps.platformTask.recordTaskResult?.(taskId, { resultText })?.catch(() => undefined);
       }
       scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok' }));
+      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok', ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
       return { text: replyText };
-      async function finishDirectReply(text: string, outcome: string, toolResult?: string): Promise<AgentReply> {
+      async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals): Promise<AgentReply> {
         const now = Date.now();
         const messages = [
           ...loaded,
@@ -1158,7 +1173,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }] : [];
         await persistAssistantAndContext(deps, ctx, text, contextUpdateQueues, toolEvents);
         scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome }));
+        // usage 缺席（模型没被调用 / 网关没回传）时字段缺席，不是全零（口径见 driver.ts）。
+        console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome, ...(usage ? usageSpanFields(usage) : {}) }));
         return { text };
       }
     },

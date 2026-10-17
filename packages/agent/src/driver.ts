@@ -220,6 +220,102 @@ export interface TurnDriver {
   synthesizeAssistant?(text: string): DriverMessage;
 }
 
+// ── 真实 token 消耗的求和（纯加法遥测：性能测试与成本分析用，不算钱不计费）────────
+//
+// 数据源是 pi-ai 盖在每条 assistant 消息上的真实 provider Usage（message.usage，分项：
+// input/output/cacheRead/cacheWrite/reasoning）。pi-agent-core 不做会话级聚合，聚合是
+// 本文件的事。**禁止用 estimateTokens/estimateContextTokens 做账目**——那是压缩时机的
+// 字符近似判断，不是 provider 计量。
+
+/**
+ * 分项合计的形状（cost 不进账：遥测不算钱不计费）。
+ * 口径要点：`reasoning` 是 `output` 的**子集**（pi-ai 契约：output 已含 reasoning），
+ * 任何合计都不得把 reasoning 再加一遍。
+ */
+export interface UsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** provider 回报了推理分项才有（⊆ output）；从未回报时缺席。 */
+  reasoning?: number;
+}
+
+/**
+ * 对转录里 assistant 消息的 usage 求和；一条 usage 证据都没有时返回 undefined。
+ *
+ * 缺失策略（全采集点统一，选了"缺席"而不是"全零"）：单条消息缺 usage 按 0 计入；
+ * 整段转录没有任何 usage 证据时返回 undefined，调用方据此让埋点字段**缺席**——
+ * 全零会把"网关没回传"洗成"真的消耗了 0 token"，账目上两者必须可区分。
+ * 失败消息的 usage 是 pi-ai 的全零占位（EMPTY_USAGE，形状恒定），求和自然为 0：
+ * 那是"provider 如实报 0"的事实，与"没回传"（undefined）正是靠这里区分的。
+ */
+export function sumUsage(messages: readonly DriverMessage[]): UsageTotals | undefined {
+  let seen = false;
+  const totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let reasoning: number | undefined;
+  let reasoningSeen = false;
+  for (const message of messages) {
+    if ((message as { role?: string }).role !== 'assistant') continue;
+    const usage = (message as { usage?: Partial<Record<keyof UsageTotals, unknown>> }).usage;
+    if (!usage || typeof usage !== 'object') continue;
+    seen = true;
+    totals.input += typeof usage.input === 'number' ? usage.input : 0;
+    totals.output += typeof usage.output === 'number' ? usage.output : 0;
+    totals.cacheRead += typeof usage.cacheRead === 'number' ? usage.cacheRead : 0;
+    totals.cacheWrite += typeof usage.cacheWrite === 'number' ? usage.cacheWrite : 0;
+    if (typeof usage.reasoning === 'number') {
+      reasoning = (reasoning ?? 0) + usage.reasoning;
+      reasoningSeen = true;
+    }
+  }
+  if (!seen) return undefined;
+  return reasoningSeen ? { ...totals, reasoning } : totals;
+}
+
+/** 两个分项合计相加（undefined = 没有证据，加法单位元）。 */
+export function addUsageTotals(a: UsageTotals | undefined, b: UsageTotals | undefined): UsageTotals | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  const reasoning = a.reasoning === undefined && b.reasoning === undefined
+    ? undefined
+    : (a.reasoning ?? 0) + (b.reasoning ?? 0);
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    ...(reasoning !== undefined ? { reasoning } : {}),
+  };
+}
+
+/**
+ * 埋点字段投影（turn_span / delegation_span / aux_model_usage 共用同一份口径，注释即定义）：
+ *   · tokensIn = input（本轮新付的上下文 token，不含缓存读写——缓存另列，成本分析各有其价）；
+ *   · tokensOut = output（模型生成量，**已含 reasoning**，不再重复相加）；
+ *   · cacheRead / cacheWrite = provider 缓存命中/写入分项；
+ *   · reasoning = 推理分项（provider 未回报时字段缺席）；
+ *   · tokens = input+output+cacheRead+cacheWrite（全口径总量。不取 provider 自报的
+ *     totalTokens：各家口径不一，按分项自算账目才自洽）。
+ */
+export function usageSpanFields(totals: UsageTotals): Record<string, number> {
+  const fields: Record<string, number> = {
+    tokensIn: totals.input,
+    tokensOut: totals.output,
+    cacheRead: totals.cacheRead,
+    cacheWrite: totals.cacheWrite,
+    tokens: totals.input + totals.output + totals.cacheRead + totals.cacheWrite,
+  };
+  if (totals.reasoning !== undefined) fields['reasoning'] = totals.reasoning;
+  return fields;
+}
+
+/** 求和 + 投影一步到位：转录里没有任何 usage 证据时返回空对象（埋点字段缺席，不报全零）。 */
+export function usageFieldsOf(messages: readonly DriverMessage[]): Record<string, number> {
+  const totals = sumUsage(messages);
+  return totals ? usageSpanFields(totals) : {};
+}
+
 /** 工具失败的确定性终结错误:message 是面向用户的安全话术,直接作为最终回复(driver 不得再喂给模型) */
 export class ToolUserError extends Error {
   constructor(message: string) {
