@@ -14,6 +14,11 @@
  *      中文 correctForm 与错误码就会漏进"叙述体"断言——剥不动不等于断言红，是静默的。
  *      这里真 spawn 一次平台 CLI（mock 执行器），钉住真实输出仍长成该正则认得的形状：
  *      漂移当天这里先红，不用等某条叙述体断言碰巧失败。
+ *   ③ args 规格表（D-065 结构化事实的取值来源）。planCallFacts 按平台 `operation list
+ *      --json` 的 args 声明名机械取值（harness 的 factsFor 与真实驱动同一份），而整个
+ *      e2e **没有任何一处断言 planFacts 的取值**——平台哪天改了 args 规格形状，解析
+ *      整份退化为空表/空声明，事实链静默退化，所有 e2e 照样绿。这里钉住派生非空 +
+ *      锚点 flag（--query/--period）在声明里，形状漂移当天就响。
  *
  * mock 铁律：本文件只经 import harness 拿环境（DZ_EXECUTOR=mock 已在其 beforeAll 钉死，
  * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 DZ_/FSHINE_ 开关，绝不
@@ -23,7 +28,7 @@ import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationSemantics, type AccessSemantics } from '../../packages/agent/src/operation-labels';
+import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
 import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope } from './harness';
 
 describe('harness 保真度绊线', () => {
@@ -121,5 +126,36 @@ describe('harness 保真度绊线', () => {
 
     // 剥离函数自身的最低行为锚（合成样例，与平台无关）：信封整行剥掉，叙述体一字不动。
     expect(withoutPlatformEnvelope('执行 x: RESULT {y}\n正文行')).toBe('正文行');
+  });
+
+  // ── 护栏③：args 规格派生 vs D-065 结构化事实链 ────────────────────────────
+
+  it('HF-3 args 规格必须平台派生、非空、锚点 flag 在声明里（形状漂移=结构化事实链静默退化）', async () => {
+    // loadOperationArgSpecs 的失败语义与 loadOperationSemantics 同一族：CLI 不存在/非零
+    // 退出/输出不是 JSON/顶层形状不认识——一律 resolve 空表、从不 reject。catch 与 HF-1
+    // 同因：照 load* 家族的防御姿态写，不改变行为。
+    const specs = await loadOperationArgSpecs(PLATFORM_ROOT).catch(
+      () => new Map<string, OperationArgsSpec>(),
+    );
+
+    // 第一重：规格必须非空。harness 的 factsFor 与真实驱动的 planCallFacts 都吃这份表，
+    // 空表 = accountSet/period/label 全部取不到——D-065 结构化事实链静默退化（e2e 零处
+    // 断言 planFacts，退化不会让任何用例红，这正是本护栏存在的理由）。
+    expect(specs.size, '平台 args 规格为空或派生失败——D-065 结构化事实链（planCallFacts）会静默退化，先和平台对齐').toBeGreaterThan(0);
+
+    // 第二重：锚点两头钉在 e2e 假设最多的那条 operation 上。balanceCalls 全族提交的都是
+    // finance.query-receivables + --query/--period；结构化事实的 accountSet/period、
+    // PERIOD_NO_DATA 终局话术里"查的是谁、哪一期"，全靠这两个 flag 在规格里有声明名。
+    // 键同时收注册名与 command 裸名（parseOperationArgSpecs 的登记规则，两种都合法）。
+    const spec = specs.get('finance.query-receivables') ?? specs.get('query-receivables');
+    expect(spec, 'args 规格里找不到 finance.query-receivables（注册名与 command 裸名都不在）——e2e 的 balanceCalls 全族失去声明依据').toBeDefined();
+    expect(
+      spec!.flagStyles.get('--query'),
+      '锚点 flag 缺声明：--query 不在 finance.query-receivables 的规格里——事实提取与参数摘要会漏掉查询词',
+    ).toBeDefined();
+    expect(
+      spec!.flagStyles.get('--period'),
+      '锚点 flag 缺声明：--period 不在 finance.query-receivables 的规格里——PERIOD_NO_DATA 终局话术与事实里的期间会静默消失',
+    ).toBeDefined();
   });
 });

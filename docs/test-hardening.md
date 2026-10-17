@@ -41,3 +41,4 @@
 - 长对话（20/30 轮）离线化不做——探针层（C1/C2/H1）+ 冻结基线承接，分工是设计。
 - 真实限流/真实 auth 码：mock 证不到，不写假验证（change-safety §0 表）。
 - 输入形状网不覆盖申报方向听错（模型能力，脚本化 mainDriver 钉死方向）。
+- ASSISTANT_AMBIGUOUS 的终局快路径 e2e 在 mock 下走不到（2026-10-16 评审登记）：平台 mock 信封缺 `data.customer`，`terminalFastPathOf` 的完整性门 fail-safe 不挂（按设计回到既有重规划循环，不出假话术）；真平台信封带该字段。该码的宿主话术渲染只有 unit 链覆盖；补齐 mock 信封属 17dz-platform 仓。

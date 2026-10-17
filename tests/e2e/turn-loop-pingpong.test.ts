@@ -83,9 +83,10 @@ describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => 
       { text: '新兴五金 202606 也没有已保存的凭证（平台返回 0 条）。' },
       { end: true },
       // C 续跑（第 6 回合）
-      // 新兴建材 1122 只有 current 键，202606 无数据 → PERIOD_NO_DATA（不是零余额）
+      // 新兴建材 1122 只有 current 键，202606 无数据 → 单调用计划撞 PERIOD_NO_DATA：
+      // 错误态快路径 v2 对齐——镜像以宿主话术收束本跳（无贴文本段，逐字断言见下方
+      // backToC），收稿不是"余额为 0"的重放。
       { plan: balanceCalls('新兴建材', '202606') },
-      { text: '新兴建材 202606 应收账款平台未返回该期间数据。' },
     ]);
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额' },

@@ -43,10 +43,10 @@ describe('离线全链 e2e：多任务交织与探索型会话', () => {
       { text: '新兴五金 202609 没有已保存的凭证（平台返回 0 条）。' },
       { end: true },
       // 任务 A 续跑（第 3 轮）：宿主按 continueTaskId 找回 A 的会话再执行
-      // 202609 在 mock 里没有余额键（幻辰财税 1122 只有 202606/current）→ 平台回
-      // not_found + PERIOD_NO_DATA，不是"余额为 0"。夹具叙述体按平台口径说无数据。
+      // 202609 在 mock 里没有余额键（幻辰财税 1122 只有 202606/current）→ 单调用计划撞
+      // not_found + PERIOD_NO_DATA，不是"余额为 0"。错误态快路径 v2 后镜像以宿主话术
+      // 收束本跳（无贴文本段，逐字断言见下方 third）。
       { plan: balanceCalls('幻辰财税', CURRENT_PERIOD) },
-      { text: '幻辰财税 202609 应收账款平台未返回该期间数据。' },
     ]);
     // 前两条申报先入脚本；第三条（带 continueTaskId）要等 A 的 taskId 真跑出来才知道
     const declarations: Array<Record<string, unknown>> = [

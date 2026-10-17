@@ -12,9 +12,9 @@
  *
  * 守四件事：
  *   ⓪ 受理帧先行（首帧提速，2026-10-16）：每个启回合的消息，handler 在进 runtime 之前
- *      经 progress 通道发一帧宿主回执「已收到，正在处理」——它排在一切 runtime 帧之前，
- *      且每回合恰一帧。文案与发射点在 apps/server/handler.ts（TURN_ACCEPTED_TEXT），
- *      这里按同一常量断言，不另抄一份措辞。
+ *      经 progress 通道发一帧宿主回执（TURN_ACCEPTED_TEXT，文案纪律：ack=已收达、
+ *      受理帧=已开跑，两帧语义递进）——它排在一切 runtime 帧之前，且每回合恰一帧。
+ *      文案与发射点在 apps/server/handler.ts，这里按同一常量断言，不另抄一份措辞。
  *   ① 委派回合真的产出 `正在…` 形态的用户可见帧（不是内部事件名）；
  *   ② 内部事件名（SDK 会话事件的 worker_ 前缀形态）不出厂；
  *   ③ 连续重复帧被压制：worker 连发两次相同调用只外发一帧——生产企微 progress 只有

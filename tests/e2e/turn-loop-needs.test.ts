@@ -61,19 +61,21 @@ describe('离线全链 e2e：Subagent 报错回路', () => {
     expect(totalActualCalls()).toBe(before);
 
     // ③④：用户补充后，Main Agent 申报 delegate + continueTaskId + 补齐后的完整 request
+    // 期间因果对齐（2026-10-16 评审）：用户补哪个期间，申报/执行/答案就是哪个期间——
+    // 此前用户说"9月"、申报写 202609，脚本却查 202606 答 51 元，三处不同期。
     declarations.push({
       kind: 'delegate',
-      request: '查询幻辰财税账套 202609 的应收账款余额',
+      request: '查询幻辰财税账套 202606 的应收账款余额',
       continueTaskId: worker.taskIds[0],
     });
-    const done = await send('9月');
+    const done = await send('202606 那期');
 
     // ⑤：续跑的是同一个子任务，最终回复含真实执行结果
     expect(done).toContain('51 元');
     expect(done).not.toContain('不应外发');
     expect(worker.taskIds).toHaveLength(2);
     expect(worker.taskIds[1]).toBe(worker.taskIds[0]);
-    expect(worker.requests[1]).toContain('202609');
+    expect(worker.requests[1]).toContain('202606');
     expect(totalActualCalls()).toBeGreaterThan(before);
     await assembly.close();
   });
@@ -107,14 +109,17 @@ describe('离线全链 e2e：Subagent 报错回路', () => {
     await send('好的');
     // 两轮对话之后，上一轮查询已被挤出最近轮次窗口：实体与期间只存在于 Conversation Log
     declarations.push({ kind: 'delegate', request: '查询幻辰财税账套的应收账款余额', continueTaskId: worker.taskIds[0]! });
-    declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202609 的应收账款余额', continueTaskId: worker.taskIds[0]! });
+    // 期间因果对齐（2026-10-16 评审）：重派申报的期间与用户补的期间、脚本查的期间、
+    // 答案同期（202606）——此前申报写 202609、答案却是 202606 的 52 元，三处不同期。
+    // 首轮的 202609（无数据）原样保留：它是 Log 证据与"宿主主动回溯"断言的来源。
+    declarations.push({ kind: 'delegate', request: '查询幻辰财税账套 202606 的应收账款余额', continueTaskId: worker.taskIds[0]! });
 
-    const done = await send('那个账套这个月呢');
+    const done = await send('那个账套 202606 那期呢');
 
     // 宿主注入了 Log 证据（含期间），Main Agent 自己补齐后重派——用户没有被问任何问题
     expect(observed[3]).toContain('宿主主动回溯');
     expect(observed[3]).toContain('202609');
-    expect(worker.requests[2]).toContain('202609');
+    expect(worker.requests[2]).toContain('202606');
     expect(worker.taskIds[2]).toBe(worker.taskIds[0]);
     expect(withoutPlatformEnvelope(done)).toContain('52 元');
     // 同剥信封：平台 correctForm「该期间平台无数据，请确认期间编码…」自带"期间"二字，

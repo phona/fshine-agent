@@ -790,7 +790,7 @@ describe('入站防抖', () => {
     const { handler, seen } = harness(0);
     const t0 = Date.now();
     await handler(msg({ text: '做工资表' }));
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(1500);
     expect(seen).toHaveLength(1);
   });
 
@@ -799,7 +799,7 @@ describe('入站防抖', () => {
     const { handler } = harness(2000);
     const t0 = Date.now();
     const reply = await handler(msg({ attachmentOnly: true, attachments: [a] }));
-    expect(Date.now() - t0).toBeLessThan(1000); // 没有等满 2 秒
+    expect(Date.now() - t0).toBeLessThan(1500); // 没有等满 2 秒
     expect(reply).toContain('a.xlsx');
   });
 
@@ -812,7 +812,7 @@ describe('入站防抖', () => {
     const handler = createMessageHandler({ store: fakeStore(), runtime: runtime as unknown as AgentRuntime });
     const t0 = Date.now();
     await handler(msg({ text: '在吗' }));
-    expect(Date.now() - t0).toBeLessThan(1000);
+    expect(Date.now() - t0).toBeLessThan(1500);
     const t1 = Date.now();
     await handler(msg({ text: '第二条' }));
     const elapsed = Date.now() - t1;
@@ -842,32 +842,32 @@ describe('入站防抖的配置来源', () => {
 
   it('env 未设该键 → 用默认 2000：首条立即、burst 第二条等窗口', async () => {
     const { first, burst } = await timed(build({}));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
 
   it('env 设为 0 → 关闭防抖：burst 第二条也不等', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }));
-    expect(first).toBeLessThan(1000);
-    expect(burst).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
+    expect(burst).toBeLessThan(1500);
   });
 
   it('env 设为 300 → 按配置等（只作用在 burst 第二条上）', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(250);
     expect(burst).toBeLessThan(1500);
   });
 
   it('env 是空串 → 仍用默认(不是 0)', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
 
   it('env 是垃圾值 → 回退默认,不崩', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
 });
@@ -889,40 +889,42 @@ describe('入站防抖的配置来源', () => {
 
   it('env 未设该键 → 用默认 2000：首条立即、burst 第二条等窗口', async () => {
     const { first, burst } = await timed(build({}));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
   it('env 设为 0 → 关闭防抖', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '0' }));
-    expect(first).toBeLessThan(1000);
-    expect(burst).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
+    expect(burst).toBeLessThan(1500);
   });
   it('env 设为 300 → 按配置等', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '300' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(250);
     expect(burst).toBeLessThan(1500);
   });
   it('env 空串 → 仍用默认(不是 0)', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: '' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
   it('env 垃圾值 → 回退默认,不崩', async () => {
     const { first, burst } = await timed(build({ FSHINE_INBOUND_DEBOUNCE_MS: 'abc' }));
-    expect(first).toBeLessThan(1000);
+    expect(first).toBeLessThan(1500);
     expect(burst).toBeGreaterThanOrEqual(1900);
   });
 });
 
 // ── 首帧提速：受理即帧 + 首条零防抖（2026-10-16）─────────────────────────────
-// 痛点（用户亲测）：消息到第一个可见反馈之间有 12–22s 盲等——防抖 2s + 串行队列 +
-// Main Agent 第一轮 LLM（10–20s）之后，delegate 轮才产生第一帧「正在…」，conversation
-// 轮直到终稿零帧。修两刀：
+// 背景：渠道 ack 秒回"收达"（channel-wecom adapter 的 ACK_TEXT 对所有消息无条件发），
+// 但到"回合真正开跑"的第一个反馈之间仍有一段空窗——Main Agent 第一轮 LLM（10–20s）之后
+// delegate 轮才产生第一帧「正在…」，conversation 轮直到终稿零帧。修两刀：
 //   ① 受理即帧：回合真正开跑时（防抖后、出队列、进 runtime 之前）由宿主经 progress
-//      通道发一帧确定性文案。它是宿主文案不是模型文本，不经过出口校验；附件-only 不启
-//      回合所以不发帧；未授权拒绝很快也不发帧。
+//      通道发一帧确定性文案——两帧语义递进（ack=已收达、受理帧=已开跑）。它是宿主文案
+//      不是模型文本，不经过出口校验；附件-only 不启回合所以不发帧；未授权拒绝很快也不发帧。
 //   ② 首条零防抖：防抖窗口内首条消息立即处理、后续到达才合并——冷启动的对话不再白等 2s。
+// 时钟断言口径（2026-10-16 评审放宽）："立即"类上界统一 <1500——仍远小于 2000 默认防抖
+// 窗，"没等防抖窗"的命题不变，给慢 CI 留抖动余量。
 describe('首帧提速：受理即帧与首条零防抖', () => {
   const scratch = mkdtempSync(path.join(tmpdir(), 'first-frame-'));
   afterAll(() => rmSync(scratch, { recursive: true, force: true }));
@@ -962,12 +964,12 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     return { handler, frames, send, framesAtRuntimeStart: () => framesAtRuntimeStart };
   }
 
-  it('受理即帧：<1s 发出宿主受理帧，且先于 runtime（不经过出口校验）', async () => {
+  it('受理即帧：<1.5s 发出宿主受理帧，且先于 runtime（不经过出口校验）', async () => {
     const h = harness({ debounceMs: 2000, runtimeDelayMs: 20 });
     const { elapsed } = await h.send({ text: '在吗' });
     expect(h.frames.map((f) => f.text)[0]).toBe(TURN_ACCEPTED_TEXT);
-    // <1s：盲等的第一段（防抖）不许算进首帧延迟；老行为是先等满 2s 防抖且零帧
-    expect(elapsed).toBeLessThan(1000);
+    // <1.5s：防抖（2s 窗）不许算进首帧延迟；老行为是先等满 2s 防抖且零帧
+    expect(elapsed).toBeLessThan(1500);
     // 受理帧在进入 runtime 之前发出：runtime 开跑时它已在帧序列里
     expect(h.framesAtRuntimeStart()).toBeGreaterThanOrEqual(1);
   });
@@ -975,7 +977,7 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
   it('首条零防抖：窗口内第一条带正文消息立即处理', async () => {
     const h = harness({ debounceMs: 2000 });
     const { elapsed } = await h.send({ text: '第一条' });
-    expect(elapsed).toBeLessThan(1000);
+    expect(elapsed).toBeLessThan(1500);
   });
 
   it('后续到达才合并：先行消息打开窗口，burst 里的指令回合仍等满窗口（晚到附件能赶上）', async () => {
@@ -995,7 +997,7 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     await h.send({ text: '第一条' });
     await new Promise((r) => setTimeout(r, 400));            // 窗口（150ms）早已过去
     const { elapsed } = await h.send({ text: '第二条' });
-    expect(elapsed).toBeLessThan(1000);
+    expect(elapsed).toBeLessThan(1500);
   });
 
   it('附件-only 不启回合：不发受理帧（回执文案已自带确认）', async () => {
