@@ -1181,7 +1181,6 @@ function workerSystemPrompt(
     ].join('\n'),
     '## 硬边界',
     [
-      ...(scratchNotice ? [scratchNotice] : []),
       // 平台调用形状以清单为准（律法 L2）：这里刻意不手抄网关形状与 flag 纪律——手抄那份
       // 随平台演进过期，而模型会照着手抄那份去撞门。也不限定某一种模式：产出该走哪条
       // 路由由清单说明，worker 自己读。
@@ -1189,9 +1188,18 @@ function workerSystemPrompt(
       planNotice,
       capabilityEnvelope,
       knowledgeNotice,
-      ...(absorbNotice ? [absorbNotice] : []),
       scope,
     ].join('\n'),
+    // 可写位置与自写解析（2026-10-17 从硬边界段首移到此处）：scratchNotice 内嵌
+    // `tmp/${requestId}`，每请求都变——原先排在提示词 ~40% 处，跨回合续跑（requestId
+    // 更新）时缓存从这一点炸断，其后全部提示词 + 复用的 workerMessages 历史按全价重付。
+    // 移到稳定段（身份/原则/硬边界）之后、输出纪律（含每步变化的 declarationNotice）
+    // 之前：变化频率排序 = 静态 → 每请求（本块）→ 每步（declaration 尾注），缓存断点
+    // 尽量靠后。无标题块：语义上仍是硬边界的延伸（"机械边界"的怎么写细则），且落点
+    // 恰在两个标题之间，C 系列的分区断言不受影响。
+    ...(scratchNotice
+      ? [[scratchNotice, ...(absorbNotice ? [absorbNotice] : [])].join('\n')]
+      : []),
     '## 输出纪律',
     [
       // 回复面向用户 + 内部语言不上屏（Stage 3 事故根治包）：worker 的工作上下文全泡在
