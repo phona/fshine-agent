@@ -558,6 +558,11 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           // 提交计划（plannedCalls 为空 → 门关闭），替身保持同形。
           // 与真实驱动同一守卫：本 run 若已有计划停在用户确认门（pendingPlan 在场），
           // 不快转——那一轮的真实状态是"等宿主验证确认"，确认门的收尾优先于终局话术。
+          // 保真边界（在案）：生产守卫在 latch 前还数**跳内平台信封数**（>1 不快转——SDK
+          // 并行执行同一跳的全部 toolCall，可先取到 completed 数据再撞终局，收尾信封不得
+          // 冒充整份答案）；而镜像的内层循环一轮只跑一个调用、每次只产生一条信封，结构上
+          // 造不出多信封跳，该守卫在镜像侧恒 vacuous——多信封行为由
+          // pi-coding-driver-fast-path.test.ts 的单测钉住，e2e 抓不到它的回归。
           if (!pendingPlan && current.plan.length === 1) {
             const failure = terminalFastPathOf(parseEnvelope(body));
             if (failure) {

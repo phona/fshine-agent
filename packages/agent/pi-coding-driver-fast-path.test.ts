@@ -6,7 +6,12 @@
  * 早停后 text 为空串，宿主空文本检查先于一切分支抛"未返回可用结果"，真模型探针 4/4
  * 全数触发——这条皮带就是为此而设）；② 挂 terminalFailure 结构化事实（"整份答案"判定
  * 单一事实源在驱动侧）；③ 只对单调用计划 + 本跳执行过生效——多调用计划一跳撞终局
- * 只是进行中的一步，照旧循环，行为零变化；④ 信封完整性门不挂时不快转（fail-loud 留痕）。
+ * 只是进行中的一步，照旧循环，行为零变化；④ 信封完整性门不挂时不快转（fail-loud 留痕）；
+ * ⑤ 跳内多信封不快转——SDK 并行执行同一跳的全部 toolCall，worker 可以先拿到一条
+ * completed 数据信封、收尾再撞一条终局信封，只数计划调用数会让收尾信封冒充整份答案、
+ * 同跳已取得的 completed 数据被静默丢弃（e2e 镜像一轮一调用，结构上造不出这个形状）；
+ * ⑥ 补刀两条出口（超时/异常腿与正常腿）的 terminalReply 话术必须到达——删掉出口全套
+ * 测试仍绿的死形（空 text → executor_error 上屏）不得静默复活。
  *
  * 只替身 SDK 的 AgentSession（与 pi-coding-driver-execution.test.ts 同一手法）：假 agent
  * 的 continue() 在推完本跳 tool_result 后调用生产装配的 shouldStopAfterTurn（与 SDK
@@ -24,8 +29,8 @@ import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo } from 
 import { ToolUserError, type DriverMessage, type TurnDriver, type TurnDriverInput } from './src/driver';
 import type { PlanCliRunner } from './src/plan-runtime';
 
-/** 假 agent 的单个模型回合：要发起哪些 bash（可带各自的信封应答）、收尾文本。 */
-type FakeTurn = { bash?: Array<{ command: string; envelope: string }>; text?: string };
+/** 假 agent 的单个模型回合：要发起哪些 bash（可带各自的信封应答）、收尾文本、模型轮失败。 */
+type FakeTurn = { bash?: Array<{ command: string; envelope: string }>; text?: string; errorMessage?: string };
 
 const OK_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"completed","data":{"ok":true},"error":null}';
 /** PERIOD_NO_DATA 信封（与 17dz mock respond.js receivables() 逐字段同形）。 */
@@ -34,9 +39,9 @@ const PERIOD_NO_DATA_ENVELOPE = 'RESULT {"v":1,"op":"finance.query-receivables",
 const AMBIGUOUS_MOCK_ENVELOPE = 'RESULT {"v":1,"op":"finance.query-receivables","status":"needs_input","data":{"query":"对象甲","candidates":[{"name":"幻电设备有限公司"},{"name":"机电贸易有限公司"}]},"error":{"code":"ASSISTANT_AMBIGUOUS","message":"ASSISTANT_AMBIGUOUS: 客户匹配到多个候选","correctForm":"把候选呈现给用户选择——绝不代选"}}';
 
 const fake = vi.hoisted(() => {
-  type SessionRecord = { turns: Array<{ bash?: Array<{ command: string; envelope: string }>; text?: string }>; rounds: number; messages: unknown[]; stopped: boolean };
+  type SessionRecord = { turns: Array<{ bash?: Array<{ command: string; envelope: string }>; text?: string; errorMessage?: string }>; rounds: number; messages: unknown[]; stopped: boolean };
   const records: SessionRecord[] = [];
-  let script: Array<{ bash?: Array<{ command: string; envelope: string }>; text?: string }> = [];
+  let script: Array<{ bash?: Array<{ command: string; envelope: string }>; text?: string; errorMessage?: string }> = [];
   return {
     records,
     setScript: (turns: typeof script) => { script = turns; },
@@ -83,10 +88,12 @@ const fake = vi.hoisted(() => {
           // 与 SDK agent-loop 同一语义：每跳收尾时调用宿主装配的 shouldStopAfterTurn，
           // 命中即在 agent_end 之前结束循环（后续模型轮与收尾文本都不再发生）。
           const stop = await (agent.shouldStopAfterTurn as ((c: { toolResults: unknown[] }) => Promise<boolean> | boolean) | undefined)?.({ toolResults: roundToolResults });
-          if (stop) {
-            record.stopped = true;
-            return;
-          }
+          if (stop) record.stopped = true;
+          // errorMessage 注入（与 pi-coding-driver-activation.test.ts:79 同一手法）放在早停
+          // 判定**之后**：模型轮自身的失败落在 shouldStopAfterTurn 裁决之后，latch 与失败态
+          // 可以同跳并存——那正是补刀异常出口（terminalReply 先于错误收尾）要走的形状。
+          if (turn.errorMessage) state.errorMessage = turn.errorMessage;
+          if (stop) return;
           if (turn.text) {
             record.messages.push({ role: 'assistant', content: [{ type: 'text', text: turn.text }], stopReason: 'stop', timestamp: Date.now() });
           }
@@ -196,6 +203,36 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
     expect(fake.records.at(-1)?.stopped).toBe(false);
   });
 
+  it('单调用计划同跳双信封（先 completed 数据、收尾撞终局）：不快转，数据不被收尾信封冒充', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const { driver, cwd } = await makeDriver();
+      fake.setScript([
+        // SDK 并行执行同一跳的全部 toolCall（agent-loop.js：一条 assistant 消息的所有
+        // toolCall 都执行、toolResults 一起交给 hook）：计划放行后两条 bash 同跳返回——
+        // 先一条 completed 数据信封，收尾一条 PERIOD_NO_DATA 终局信封。收尾信封不是整份答案。
+        { bash: [
+          { command: PLAN_COMMAND, envelope: OK_ENVELOPE },
+          { command: QUERY_COMMAND, envelope: OK_ENVELOPE },
+          { command: QUERY_COMMAND, envelope: PERIOD_NO_DATA_ENVELOPE },
+        ], text: '对象甲 202606 的余额已查到；202609 期间无数据，可改查 202606。' },
+      ]);
+
+      const result = await driver.run(runInput(cwd));
+
+      // 跳内多信封 → "收尾信封 = 整份答案"前提不成立：宿主不合成话术、不早停（诊断留痕），
+      // 回落既有循环由模型汇总——同跳已取得的 completed 数据不被静默丢弃。
+      expect(infoSpy).toHaveBeenCalledWith(expect.stringContaining('terminal_fast_path_skip_multi_envelope'));
+      expect(result.terminalFailure).toBeUndefined();
+      expect(result.text).toBe('对象甲 202606 的余额已查到；202609 期间无数据，可改查 202606。');
+      // 两次放行调用都真实发生并留痕：数据与终局状态都在执行足迹里，不由宿主拼装文本。
+      expect(result.execution).toEqual({ planId: 'plan_activated', version: 7, calls: 2 });
+      expect(fake.records.at(-1)?.stopped).toBe(false);
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
   it('信封完整性门：mock 形状的 AMBIGUOUS（缺 data.customer）不快转，fail-loud 留痕', async () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     try {
@@ -233,5 +270,53 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
     // 宿主终局分支（背带的常规位）：ToolUserError 语义 = 这段文本成为本轮回复。
     await expect(task.run({ request: '核对对象甲 202609 的应收余额' }, { trusted: { requestId: 'req_fastpath', principalId: 'wecom:u', allowedAccountSetIds: [], sessionId: 's1' } }))
       .rejects.toThrow('没有查到“对象甲”在 202609 的数据。平台上有数据的是：202606。要改查的话，告诉我查哪一项即可。');
+  });
+});
+
+describe('补刀出口的 terminalReply 话术（v1 空 text 死形防护）', () => {
+  // 与上组第一条用例同一句宿主合成话术（renderTerminalFailureReply 的唯一来源）。
+  const NUDGE_TERMINAL_TEXT = '没有查到“对象甲”在 202609 的数据。平台上有数据的是：202606。要改查的话，告诉我查哪一项即可。';
+  const NUDGE_TERMINAL_FAILURE = {
+    code: 'PERIOD_NO_DATA',
+    query: '对象甲',
+    period: '202609',
+    availablePeriods: ['202606'],
+  };
+
+  it('正常腿：补刀那一跳撞终局早停，terminalReply 先于普通收尾交还话术', async () => {
+    const { driver, cwd } = await makeDriver();
+    fake.setScript([
+      // 第一跳只提交计划（gateCalls=0，早停门关闭）→ 落到"计划已激活却零执行"的补刀；
+      { bash: [{ command: PLAN_COMMAND, envelope: OK_ENVELOPE }] },
+      // 第二跳（补刀轮）真实查询撞终局 → latch 在场，正常腿出口以宿主话术收尾。
+      { bash: [{ command: QUERY_COMMAND, envelope: PERIOD_NO_DATA_ENVELOPE }] },
+    ]);
+
+    const result = await driver.run(runInput(cwd));
+
+    const record = fake.records.at(-1)!;
+    // 补刀真的发生了：rounds === 2（主回合 + 补刀那一轮）。
+    expect(record.rounds).toBe(2);
+    // 终局话术到达：非空、非"未返回可用结果"——早停后普通收尾的 lastAssistantText 是
+    // 空串（v1 死形），这条出口必须用 latch 里的宿主话术替换它。
+    expect(result.text).toBe(NUDGE_TERMINAL_TEXT);
+    expect(result.terminalFailure).toEqual(NUDGE_TERMINAL_FAILURE);
+    expect(record.stopped).toBe(true);
+  });
+
+  it('超时/异常腿：补刀那一跳模型失败，latch 已在场的终局话术仍先于错误收尾交还', async () => {
+    const { driver, cwd } = await makeDriver();
+    fake.setScript([
+      { bash: [{ command: PLAN_COMMAND, envelope: OK_ENVELOPE }] },
+      // 补刀轮的模型回合自身失败（errorMessage 注入，activation.test.ts:79 同一手法）：
+      // 走超时/异常出口——terminalReply 必须先于该出口的兜底（closureText() ?? ''）。
+      { bash: [{ command: QUERY_COMMAND, envelope: PERIOD_NO_DATA_ENVELOPE }], errorMessage: 'upstream model error' },
+    ]);
+
+    const result = await driver.run(runInput(cwd));
+
+    expect(result.text).toBe(NUDGE_TERMINAL_TEXT);
+    expect(result.terminalFailure).toEqual(NUDGE_TERMINAL_FAILURE);
+    expect(fake.records.at(-1)?.stopped).toBe(true);
   });
 });

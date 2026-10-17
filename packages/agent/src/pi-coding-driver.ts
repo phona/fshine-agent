@@ -433,6 +433,19 @@ function closingEnvelopeOfToolResults(toolResults: readonly TranscriptMessageLik
   return null;
 }
 
+/**
+ * 一批 tool_result 里的平台信封**条数**（逐条解析，与 closingEnvelopeOfToolResults 同一把
+ * 尺）：错误态快路径"跳内多信封"守卫的计数器——条数 >1 即"收尾信封 = 整份答案"的前提
+ * 不成立（见 shouldStopAfterTurn 的门④）。
+ */
+function countEnvelopesOfToolResults(toolResults: readonly TranscriptMessageLike[]): number {
+  let count = 0;
+  for (const result of toolResults) {
+    if (parseEnvelope(textFromContent(result.content))) count += 1;
+  }
+  return count;
+}
+
 /** Create a headless pi-coding-agent driver for trusted context workers. */
 export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): TurnDriver {
   let modelPromise: Promise<CodingModelConfig> | undefined;
@@ -761,7 +774,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       };
       // ── 错误态快路径：SDK shouldStopAfterTurn 早停装配（v2 皮带）────────────────
       // 手法沿用第一版（SDK 公开字段 + latch + agent_end）：hook 返回 true 时 SDK 在
-      // agent_end 之前直接结束循环——worker 不再进入下一轮重规划。三个门全过才停：
+      // agent_end 之前直接结束循环——worker 不再进入下一轮重规划。四个门全过才停：
       //   门① 整份答案候选：单调用计划（plannedCalls 是本回合宿主解析的 calls，最后
       //      一次提交即执行范围）**且**本跳执行过 ≥1 次放行调用。多调用计划（逐期扫描、
       //      先检索后查）一跳撞终局只是进行中的一步，照旧循环/交还，行为零变化。
@@ -771,6 +784,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       //      可改查清单缺一不挂——话术缺了"下一步改查哪"就不是可行动的诚实答案，宁可
       //      回到既有重规划循环。码在集合内而信封不完整时 console.warn 留痕（fail-loud：
       //      契约漂移必须可发现，绝不静默）。
+      //   门④ 跳内单信封：SDK 并行执行同一跳的全部 toolCall（agent-loop.js 一条 assistant
+      //      消息的所有 toolCall 都执行、toolResults 一起交给本 hook），"整份答案"要求
+      //      本跳**只有一条**平台信封——见守卫处的注释。
       // 命中即 latch 话术并返回 true；结果时刻（含补刀/超时/异常各出口）由 terminalReply
       // 统一取用。等确认门（pendingPlan）与提案拦截（proposalOutcome）在场的回合不快转：
       // 那两条已有自己的收尾管道。
@@ -785,6 +801,17 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           if (TERMINAL_FAST_PATH_CODES.has(code)) {
             console.warn(JSON.stringify({ event: 'terminal_fast_path_envelope_incomplete', code, status: envelope.status, requestId: input.requestId, taskId: input.sessionId }));
           }
+          return false;
+        }
+        // 门④ 跳内多信封守卫（latch 前的最后一道）：本跳出现不止一条平台信封时，"收尾
+        // 信封 = 整份答案"的前提不成立——worker 完全可以同一跳先拿到一条 completed 数据
+        // 信封、收尾再撞一条终局信封（只数计划调用数抓不到这个形状），宿主若仍用收尾信封
+        // 合成话术终结，同跳已取得的 completed 数据就被静默丢弃，任务记 done——那正是
+        // 快路径要消灭的"单一信封冒充整份答案"事故类别。宿主也绝不自己把 completed 数据
+        // 与终局话术拼成回答（那是数据结论，越 L3 线）：回落既有循环，由模型汇总后发声。
+        const envelopeCount = countEnvelopesOfToolResults(turn.toolResults);
+        if (envelopeCount > 1) {
+          console.info(JSON.stringify({ event: 'terminal_fast_path_skip_multi_envelope', envelopes: envelopeCount, requestId: input.requestId, taskId: input.sessionId }));
           return false;
         }
         // 皮带：话术在 latch 时刻合成，text 永不为空（第一版死因见 terminalStop 声明处）。
