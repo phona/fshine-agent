@@ -17,7 +17,9 @@
     "eval:acceptance": "node --env-file=.env --import tsx scripts/acceptance.ts --only=5.1,5.1b,5.2,5.3",
     "eval:score": "node --env-file=.env --import tsx scripts/eval/score.ts --judge",
     "eval:baseline": "node --env-file=.env --import tsx scripts/eval/score.ts --judge --write-baseline",
-    "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score"
+    "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score",
+    "perf:suite": "node --import tsx scripts/perf/run-suite.ts 3",
+    "perf:report": "node --import tsx scripts/perf/analyze.ts"
   },
   "engines": {
     "node": ">=24"
