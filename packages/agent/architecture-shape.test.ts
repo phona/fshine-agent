@@ -44,8 +44,14 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  *
  * 1237 → 1241（同日）：token 消耗遥测（sumUsage + 三采集点 + turn_span/delegation_span
  * 字段，见 e21570f）使基数升到 1237；P2 边界句恢复后 +4 = 1241。
+ *
+ * 1241 → 1251（2026-10-16）：SYSTEM_PROMPT 首条的日期行移出为 DATE_SUFFIX 常量，改拼在
+ * 组装后系统提示词的最尾部（business skill 之后；恢复路径整理提示词同样拼尾）。动机：
+ * prompt cache 按前缀逐字节命中，动态日期排在稳定内容之前会把整个前缀炸断——跨天每次
+ * 调用对 SYSTEM_PROMPT + skill 全额付价；移到尾部后跨天只有尾注一行未命中。文案一字不差，
+ * 行为等价（非抽取回退）：+10 = 注释块 6 + 常量 1 + 拼装处 3。下一批抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1241;
+const RUNTIME_LINE_BUDGET = 1251;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

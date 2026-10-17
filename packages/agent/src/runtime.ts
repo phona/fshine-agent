@@ -247,7 +247,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   // 业务 skill（架构 §5）：静态程序性知识，每回合进系统提示词；与日期行同性质，
   // 缺文件/缺配置时为空，其余能力不受影响。
   const businessSkill = typeof deps.businessSkill === 'string' ? deps.businessSkill.trim() : '';
-  const systemPrompt = businessSkill ? `${SYSTEM_PROMPT}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : SYSTEM_PROMPT;
+  // 日期尾注放组装后提示词的最尾部（理由见 DATE_SUFFIX 注释）：前缀 = 稳定 SYSTEM_PROMPT
+  // + 稳定 skill 文本，跨天只有尾注一行未命中。
+  const systemPrompt = `${businessSkill ? `${SYSTEM_PROMPT}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : SYSTEM_PROMPT}\n\n${DATE_SUFFIX}`;
   // 平台健康信号（Lane 2 治标补法）：会话级连续 AUTH 类平台失败记账 + 冷却。判据与
   // 边界见 platform-health.ts——治"平台根本不可用时的逐轮重试式重查"，与回合内的
   // MAX_* 熔断、平台侧限流、并发闸正交。时钟可注入（测试可推），阈值/时长可配置。
@@ -393,7 +395,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         const answer = await deps.driver.run({
           systemPrompt: `${SYSTEM_PROMPT}\n\n${resumedBlocked
             ? '本轮 17dz 子任务按用户确认重跑后没有产生任何平台执行。'
-            : '本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。`,
+            : '本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。\n\n${DATE_SUFFIX}`,
           tools: [],
           messages,
           onStep: ctx.onStep ?? (() => {}),
@@ -1222,8 +1224,16 @@ export function composeClarificationReply(clarification: SelectionClarification,
  * 同模块：判定与文案一处，两边不复制）。
  */
 
+/**
+ * 日期尾注：拼在组装后系统提示词的**最尾部**（business skill 之后；恢复路径的整理提示词
+ * 同样拼尾）。LLM 的 prompt cache 按前缀逐字节匹配命中：日期排在提示词前部时，跨天即
+ * 炸断全部稳定前缀——SYSTEM_PROMPT 与 skill 文本每次调用都按未命中付全价。放尾部后，
+ * 跨天只有这一行动态，前面的稳定内容继续命中缓存。文案与原日期行一字不差（模型仍能
+ * 看到完整日期信息），只挪位置。模块加载时求值一次，与原实现同频。
+ */
+const DATE_SUFFIX = `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`;
+
 const SYSTEM_PROMPT = [
-  `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`,
   '你是面向用户的主 Agent，职责只有三个：选 conversation 还是 delegate；把指代解析成具体实体；汇总子 Agent 的结果。',
   '**你没有平台能力**：不能发现域能力、不能读域文档、不能执行、不能摸索传参——这些全是子 Agent 的活。**因此不要拆解执行步骤**：步骤是子 Agent 上下文里的域 SOP 定义的，你复述一遍只是制造第二份真相。只有"同一个动作要对 N 个独立对象各做一次"才值得拆多步；单一对象的任务再长也不拆。',
   '每回合必须先调用一次 route_current_turn 申报本轮动作（conversation / delegate），不得跳过申报；字段口径以工具说明为准，填错会被退回重填。',
