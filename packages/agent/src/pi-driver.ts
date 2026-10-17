@@ -27,15 +27,44 @@ export const KIMI_THINKING_LEVEL_MAP = {
   max: null,
 } as const;
 
+/** pi 统一思考深度词表:off/minimal/low/medium/high/xhigh/max(是否生效取决于模型/端点支持)。 */
+export const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type PiThinkingLevel = (typeof PI_THINKING_LEVELS)[number];
+
+/**
+ * 校验思考深度原始值:合法原样返回,空串归一为 undefined(= 不带思考参数),非法抛中文错误。
+ * `envVarName` 只进错误信息:同一份词表被 LLM_THINKING_LEVEL 与 LLM_MAIN_THINKING_LEVEL
+ * 两个入口共用(词表只有这一个权威位置),报错必须指向真正配错的那一个变量。
+ */
+export function parsePiThinkingLevel(rawValue: string | undefined, envVarName: string): PiThinkingLevel | undefined {
+  const value = rawValue ?? '';
+  if (value === '') return undefined;
+  if (!(PI_THINKING_LEVELS as readonly string[]).includes(value)) {
+    throw new Error(`环境变量 ${envVarName} 无效:${value}(可选 ${PI_THINKING_LEVELS.join('/')})`);
+  }
+  return value as PiThinkingLevel;
+}
+
 export interface PiTurnDriverOptions {
   env: Record<string, string | undefined>;
+  /**
+   * 显式模型 id(分层模型接缝):装配层持有配置,按 LLM_MAIN_MODEL(缺省回落 LLM_MODEL)
+   * 解析后传入,驱动不自行读取 Main 专用 env。缺省(不传)回落 env.LLM_MODEL——
+   * 直连调用方(scripts/ask.ts 等手工入口)与历史行为逐字段一致。
+   */
+  modelId?: string;
+  /**
+   * 显式思考深度:装配层按 LLM_MAIN_THINKING_LEVEL(缺省回落 LLM_THINKING_LEVEL)校验后
+   * 传入。缺省(不传)回落 env.LLM_THINKING_LEVEL(此处校验,报错指向该变量)。
+   */
+  thinkingLevel?: PiThinkingLevel;
 }
 
 /** 从 env 构建 kimi 兼容的 pi 模型集合;env 缺失在创建时即抛中文错误。 */
 export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   const baseUrl = (options.env.LLM_API_BASE_URL ?? '').replace(/\/+$/, '');
   const apiKey = options.env.LLM_API_KEY;
-  const modelId = options.env.LLM_MODEL ?? '';
+  const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
   if (!baseUrl || !apiKey || !modelId) {
     const missing = [
       ['LLM_API_BASE_URL', baseUrl],
@@ -49,14 +78,10 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
 
   // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
   // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
-  const THINKING_LEVELS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-  const thinkingLevelRaw = options.env.LLM_THINKING_LEVEL ?? '';
-  if (thinkingLevelRaw !== '' && !THINKING_LEVELS.has(thinkingLevelRaw)) {
-    throw new Error(`环境变量 LLM_THINKING_LEVEL 无效:${thinkingLevelRaw}(可选 off/minimal/low/medium/high/xhigh/max)`);
-  }
-  const thinkingLevel = (thinkingLevelRaw || undefined) as
-    | 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
-    | undefined;
+  // 词表与校验在 parsePiThinkingLevel(模块级唯一定义);装配层显式传入时已校验过,
+  // 走到 env 回落才在这里报错,错误信息仍指向 LLM_THINKING_LEVEL。
+  const thinkingLevel = options.thinkingLevel
+    ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
 
   // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
   // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响

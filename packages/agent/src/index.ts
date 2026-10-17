@@ -8,7 +8,13 @@ export type {
   SubagentNeeds,
   ProposalCreationOutcome,
 } from './driver';
-export { createPiTurnDriver, type PiTurnDriverOptions } from './pi-driver';
+export {
+  createPiTurnDriver,
+  parsePiThinkingLevel,
+  PI_THINKING_LEVELS,
+  type PiThinkingLevel,
+  type PiTurnDriverOptions,
+} from './pi-driver';
 export {
   createPiCodingTurnDriver,
   createPiCodingWorkerSession,

@@ -16,6 +16,10 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   'LLM_API_KEY',
   'LLM_MODEL',
   'LLM_THINKING_LEVEL',
+  // 分层模型接缝(Main Agent 专用覆盖,装配层解析):同样按"运行者 shell 泄漏会改变装配
+  // 产物"的理由纳入密封——测试要钉的"缺省回落 LLM_MODEL"不该依赖运行者没 export 它。
+  'LLM_MAIN_MODEL',
+  'LLM_MAIN_THINKING_LEVEL',
   'DZ_EXECUTOR',
   'FSHINE_REAL_COMMIT',
 ];

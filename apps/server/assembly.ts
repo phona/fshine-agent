@@ -26,6 +26,7 @@ import {
   isPlatformMock,
   loadOperationArgSpecs,
   newGateSecret,
+  parsePiThinkingLevel,
   type CandidateExtractor,
   type ContextTaskRunner,
   type TurnDriver,
@@ -155,7 +156,27 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
     : { event: 'business_skill_skipped', path: businessSkill.path }));
 
-  const driver = overrides.driver ?? createPiTurnDriver({ env });
+  // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），17dz worker 仍走
+  // LLM_MODEL——worker 驱动的输入原样不动（pi-coding-driver 只认 env.LLM_MODEL）。
+  // 装配层持有配置、驱动只收参数：Main 专用变量在这里解析成显式 modelId/thinkingLevel，
+  // pi-driver 不再自行读取。两个变量都缺省时 createPiTurnDriver 收到的 options 与旧装配
+  // 逐字段一致（恒等断言钉在 model-seam-wiring.test.ts），行为零变化。
+  // 空白值视为未配置：注释掉值留空不该挡启动（模型选择器不是安全门，宽进）；真正要
+  // fail-fast 的是思考深度词表——非法值在此即抛，报错点名 LLM_MAIN_THINKING_LEVEL。
+  const mainModelOverride = (env['LLM_MAIN_MODEL'] ?? '').trim();
+  const mainThinkingRaw = (env['LLM_MAIN_THINKING_LEVEL'] ?? '').trim();
+  const mainThinkingLevel = mainThinkingRaw
+    ? parsePiThinkingLevel(mainThinkingRaw, 'LLM_MAIN_THINKING_LEVEL')
+    : undefined;
+  const driver = overrides.driver ?? createPiTurnDriver({
+    env,
+    ...(mainModelOverride ? { modelId: mainModelOverride } : {}),
+    ...(mainThinkingLevel ? { thinkingLevel: mainThinkingLevel } : {}),
+  });
+  // Context 抽取缺省跟随 Main（`?? driver` 排在 Main 覆盖解析之后，结构上保证跟随）：
+  // 抽取与主回合同量级（无工具、单轮、短输出），Main 换小模型时抽取跟着换——同一供应商
+  // 配额下的同量级任务，没有理由让它单独留在强模型上；也不逼部署为它再配一套变量。
+  // 确要隔离（如抽取质量劣化）时仍可显式注入 overrides.contextModelDriver，语义不变。
   const contextModelDriver = overrides.contextModelDriver ?? driver;
   const memoryCandidateExtractor = overrides.memoryCandidateExtractor
     ?? createLongMemoryCandidateExtractor(createMemoryCandidateModel(contextModelDriver, { timeoutMs: 15_000 }));
