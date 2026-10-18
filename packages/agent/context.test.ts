@@ -252,11 +252,13 @@ describe('17dz Pi subagent adapter', () => {
     expect(prompt).toContain('不主动交代表能力边界');
   });
 
-  it('输出纪律：名称类请求先经平台检索 + 已取结果必须呈现', async () => {
+  it('输出纪律：名称类请求先经平台检索（新名称不豁免 + 同名续查豁免）+ 已取结果必须呈现', async () => {
     const prompt = await capturePrompt();
-    // D-072：会话已确立实体只回答"只给参数的续问"，新名称一律重新检索（防张冠李戴）
+    // D-072：会话已确立实体只回答"只给参数的续问"，新名称一律重新检索（防张冠李戴）；
+    // 2026-10-17 补同名续查豁免（性能）：已确认过的同一名称不重复检索，D-072 保护不变
     expect(prompt).toContain('名称类请求仍须先经平台检索确认规范名称');
-    expect(prompt).toContain('即使用户本会话已经用过某个对象');
+    expect(prompt).toContain('即使用户本会话已用过某个对象也不例外');
+    expect(prompt).toContain('同一会话内已检索确认过的同一名称，同口径续查可直接复用已确认的规范名，不再重复检索');
     // D-073：数据在手时把用户推回重新发起 = 球踢回给用户
     expect(prompt).toContain('本轮已经取到的执行结果必须呈现在终稿里');
     expect(prompt).toContain('明示缺席原因');
