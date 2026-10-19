@@ -123,7 +123,7 @@
 - **律法归属**：L1。
 - **闭环判据**：模板文案零领域词；「或编号/税号」改由平台信封 correctForm 携带，宿主渲染层零业务词（测试：`clarificationTextFor` 两条模板不匹配 `/应收|凭证|科目|账套|期间|目录|税号|财务/`）。
 - **建议波次**：Wave 1 先降级为中性；Wave 2 由平台 correctForm 作为数据加回。
-- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
+- **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。2026-10-19 对账：worker 系统提示词位置的散文已随注入重写退役——planCommandForm 经参数由 planDraftExample 单源注入，本条关闭状态不受影响。
   关闭方式：`error-codes.ts` 的 NOT_FOUND_SELECTION 退化为纯结构模板
   `没有找到匹配“{query}”的对象。{hint}我再查。`——`{hint}` 槽位优先取平台信封
   `error.correctForm`（platform-contract 的 `selectionClarificationOf` 解析，带控制字符
