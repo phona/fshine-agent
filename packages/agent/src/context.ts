@@ -20,7 +20,7 @@ import type { PlanCliRunner } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
-import { messageTextFor, planDraftExample, toolUserErrorFor } from './error-codes';
+import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
@@ -34,7 +34,7 @@ import type {
   PlatformTaskRepo,
   TrustedContext,
 } from '@fshine/contracts';
-import { DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
+import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
 
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
 
@@ -202,6 +202,18 @@ export interface ContextTaskRunnerOptions {
    * 为假（接线与开关同进同退），确认步只到达"确认收到但不写"。
    */
   proposalCommitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
+  /**
+   * 平台侧的写开放声明（部署层从平台状态派生，如 isCommitEnabled()；缺省视为只读）。
+   * 写关闭执法路径（worker 驱动的计划扫描 + 本文件的提案路径）统一以它为判据——
+   * 不再读委托主体自持的能力布尔（TrustedContext.capabilities 保留但执法不读，变更项 ⑧）。
+   */
+  writeEnabled?: boolean;
+  /**
+   * 平台 plan 申请的命令形态（调用方从平台适配层取值注入，如 planDraftExample()）：
+   * worker 系统提示词的许可段据此渲染，通用编排层不硬编码网关名（变更项 ②）。
+   * 缺省 = 无平台能力，许可段整段不渲染。
+   */
+  planCommandForm?: string;
 }
 
 export interface ContextTaskExecutionContext {
@@ -483,8 +495,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * proposalId + 通用确认状态。用户可见文本因此只有两个来源：平台 `summaryText`
    * 原样 + 宿主通用确认行，不写任何业务摘要。
    *
-   * 顺序即安全：capability 复核（宿主持有的授权）→ 授权名单复核 → 办调平台 → 落意图条目
-   * → 生成确认码。能力不成立时**零平台调用**（不办调），当场合成写关闭话术。
+   * 顺序即安全：写开放声明复核（平台侧声明，⑧）→ 办调平台 → 落意图条目
+   * → 生成确认码。声明不成立时**零平台调用**（不办调），当场合成写关闭话术。
+   * 实体授权不在此复核：宿主不解释业务实体（payload 不透明），读写语义归执行层。
    */
   async function createProposalViaGateway(
     call: ProposalCreateCall,
@@ -492,24 +505,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     taskId: string,
     platformRoot: string,
   ): Promise<ProposalCreationOutcome> {
-    const capabilities = ctx.trusted.capabilities ?? [];
-    // ① capability 复核（Generic，不依赖任何 operation 名）：A 波标定——创建提案的
-    // operation 声明为 access: scratch，平台 `confirm` 列为假，所以 D-075 那道"计划里出现
-    // 写类 operation 就前置合成"的机械兜底对提案步不触发；这一刀必须宿主自己下，而宿主
-    // 确切知道"正在创建提案"这一刻。话术唯一来源在 error-codes.ts（WRITE_NOT_ENABLED），
-    // 与计划门拒绝、旧提案路径同一句。
-    if (!capabilities.includes('write')) {
+    // ① 写开放复核（平台侧声明，Generic，不依赖任何 operation 名）：判据与 worker 驱动的
+    // 计划扫描（D-075）同源——部署层经 isCommitEnabled() 从平台状态派生。话术唯一来源在
+    // error-codes.ts（WRITE_NOT_ENABLED），与计划门拒绝同一句。声明不成立时零平台调用。
+    if (options.writeEnabled !== true) {
       const text = messageTextFor('WRITE_NOT_ENABLED');
       return { status: 'write_closed', userText: text, workerText: text };
     }
-    // ② 授权名单限制模式（host-held scope，与旧路径同判据）：名称到 id 的映射不在 fshine 侧，
-    // V1 仅对 scope=all 的账号开放写。payload 不透明不等于这条可以丢——丢了就是把允许名单
-    // 受限主体的写面放大。
-    if (ctx.trusted.allowedAccountSetIds.length > 0) {
-      const text = '当前账号为授权名单限制模式，写开放暂不支持该模式，已停止。';
-      return { status: 'write_closed', userText: text, workerText: text };
-    }
-    // ③ 办调平台（serve 法域；env 显式剥 DZ_REQUIRE_PLAN——修 D-081：宿主直调不该被
+    // ② 办调平台（serve 法域；env 显式剥 DZ_REQUIRE_PLAN——修 D-081：宿主直调不该被
     // worker 的计划门拦，那个 mandate 是给 worker 子进程的）。operation 名来自驱动拦截时
     // 从命令里取到的目标 token（平台 protocol 列已声明它扮演创建提案角色），宿主不另持
     // 一份业务 operation 名单。
@@ -614,38 +617,29 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * 宿主**只持有一个取物单**——payload 在平台侧，宿主连"在提交什么业务"都不知道。用户
    * 可见文本因此只有两个来源：平台 `summaryText` 原样 + 宿主通用状态行。
    *
-   * 三笔债的落点：
-   *   · D-080 第 ① 步：capability 按**确认时点**复核，不认提案时的快照（"提案成立后
-   *     收回写权限"正是这个缺口的形状）；
+   * 写开放的复核在确认时点照旧发生（D-080 的时点纪律），但判据已切到平台侧声明
+   * （⑧）：读的是**此刻**的部署声明（isCommitEnabled 派生位），不是提案成立时的任何
+   * 主体快照——主体授权归执行层后，"提案之后被收回"的形状只可能是部署声明翻转。
+   * 两笔旧债的落点：
    *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 DZ_REQUIRE_PLAN）；
    *   · D-082 由 writeBackTaskOutcome 承担（committed / confirm_failed 都回写终态）。
    */
   async function confirmProposalViaGateway(
     rec: ChangeIntentRecord,
     proposalId: string,
-    ctx: TrustedContext,
   ): Promise<ConfirmationReply> {
     const ci = options.changeIntents!;
-    // ① D-080：确认时点复核 capability。判据与提案时那一刀完全相同（宿主持有的授权，
-    // Generic，不依赖任何 operation 名）——差别只在**时点**：授权可能在提案与确认之间被
-    // 收回（运维关了写、principal 权限变更），那时这个码必须被拒。不通过 → 意图保持
-    // pending：提案还在平台侧有效，用户修好权限或作废后仍可继续，不借"过期"说谎。
-    if (!(ctx.capabilities ?? []).includes('write')) {
+    // ① 确认时点复核平台写开放声明（D-080 的时点纪律 + ⑧ 的判据切换合流为一支）：
+    // 声明不成立 → 确定性拒绝，意图保持 pending：提案还在平台侧有效，部署恢复写开放或
+    // 作废后仍可继续，不借"过期"说谎，也零办调。
+    if (options.proposalCommitEnabled !== true) {
       console.warn(JSON.stringify({
         event: 'change_intent_confirm_declined',
         intentId: rec.intentId,
-        reason: 'capability_revoked_at_confirm',
+        reason: 'platform_write_not_enabled_at_confirm',
       }));
       return {
         text: `确认已收到，但${messageTextFor('WRITE_NOT_ENABLED')}本次未写入任何数据，提案保持待确认。`,
-        outcome: 'confirm_held',
-      };
-    }
-    // ② 落账后端未接（部署开关关着）：确认收到但不写。
-    // 承诺必须与能力对齐：说了"确认即录入"而这一步只会 fail-closed，是把用户往谎话上引。
-    if (options.proposalCommitEnabled !== true) {
-      return {
-        text: '确认已收到。当前落账执行未启用（对真实平台的写入需显式开启），本次未写入任何数据；提案保持待确认，如需作废请回复「取消 <确认码>」或等待其过期。',
         outcome: 'confirm_held',
       };
     }
@@ -742,7 +736,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             await ci.updateStatus(rec.intentId, 'expired');
             return { text: PROPOSAL_UNAVAILABLE_TEXT.expired, outcome: 'confirm_stale' };
           }
-          return confirmProposalViaGateway(rec, rec.proposalId, ctx);
+          return confirmProposalViaGateway(rec, rec.proposalId);
         }
         // 码存在但已终结 → 确定性答复（散漫用法高频：拿到预览后被别的事打断）；
         // 码完全未知 → 走模型（普通对话里出现"确认 XX"字样不算数）。
@@ -791,6 +785,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           : trustedNotice
         : undefined;
       const taskId = existing?.taskId ?? `task_${randomUUID()}`;
+      // worker 工作区按任务切（⑨）：`tmp/${taskId}`（taskId 本身是 `task_<uuid>` 形态，
+      // 即 tmp/task_<uuid>）。续跑同一任务共享同一个工作区，上一轮落下的产物下一步还能用；
+      // 每请求换目录的旧形态会让多步计划的各步互相看不到中间产物。
+      const scratchDir = `tmp/${taskId}`;
       const running: PlatformTaskRecord = {
         taskId,
         parentSessionId: ctx.trusted.sessionId,
@@ -801,9 +799,23 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       };
       await options.tasks.upsert(running);
 
+      // 委派块走 user message（A2A 协议生命周期第①阶段，变更项 ②）：逐任务的边界
+      //（范围/工作区/协议版本）只随载荷下行，系统提示词保持纯静态。宿主已核验的申报范围
+      // （turnDeclaration.request）是边界声明的来源；无申报（测试替身 / 老路径）时退化为
+      // 原样 request，worker 看到的消息形状与从前一字不差。
+      const workerRequest = args.turnDeclaration
+        ? [
+          '【委派】',
+          `范围：${args.turnDeclaration.request}`,
+          `工作区：${scratchDir}`,
+          `协议版本：${A2A_PROTOCOL_VERSION}`,
+          '',
+          args.request,
+        ].join('\n')
+        : args.request;
       const messages = [
         ...((existing?.workerMessages ?? []) as DriverMessage[]),
-        { role: 'user', content: args.request, timestamp: Date.now() } as unknown as DriverMessage,
+        { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
       ];
       let result: TurnDriverResult | undefined;
       const delegationStart = Date.now();
@@ -813,7 +825,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
         try {
           result = await options.workerDriver.run({
-            systemPrompt: workerSystemPrompt(profile.root, ctx.trusted.allowedAccountSetIds, args.turnDeclaration, ctx.trusted.capabilities, `tmp/${ctx.trusted.requestId}`),
+            // 纯静态系统提示词（变更项 ②）：只含协议义务与机械边界，逐任务的范围随委派块
+            // 走 user message，网关命令形态经 planCommandForm 注入（无平台能力时不渲染许可段）。
+            systemPrompt: workerSystemPrompt(profile.root, scratchDir, options.planCommandForm),
             tools: [],
             messages,
             cwd: profile.root,
@@ -829,9 +843,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
             ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
             ...(onNotice ? { onNotice } : {}),
-            // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而能力不含
-            // write 时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读。
-            capabilities: ctx.trusted.capabilities,
+            // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而平台侧声明
+            // 写未开放时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读（⑧：
+            // 判据依据是平台声明，不再是 TrustedContext.capabilities——字段保留但执法不读）。
+            writeEnabled: options.writeEnabled === true,
+            // worker 工作区（⑨）：write/edit 门、提案 payload 边界与计划产物路径豁免共用。
+            scratchDir,
             // 提案创建网关路径（C 波后唯一的提案路径，B 波那个"提案创建走不走网关"的开关
             // 已退役）：配了 changeIntents 就恒定注入，驱动于是恒定拦下 worker 的提案创建
             // 命令。宿主持有办调权：读文件、校验、落意图条目、发确认码全在服务端，worker
@@ -1086,75 +1103,70 @@ function isInside(root: string, candidate: string): boolean {
 }
 
 /**
- * worker 系统提示词（四类：身份 / 原则 / 硬边界 / 输出纪律）。
+ * worker 系统提示词——**纯静态**（A2A 协议生命周期第①阶段的设计约束，变更项 ②）：
+ * 只含身份、判断类原则、机械边界与输出纪律，以及不随任务变化的静态协议义务。
+ * 逐任务的范围不进提示词——它随委派块走 user message（见 run() 的 workerRequest）；
+ * 网关命令形态不硬编码——经 planCommandForm 参数由调用方（assembly，从平台适配层取值）
+ * 注入，无平台能力时许可段整段不渲染。
  *
  * 组织律法：**判断类**规则（怎么想）与**机械类**规则（边界在哪）分开放，输出类规则
  * （说什么形状的话）单独收口。每条防一类已发生的事故，注释只记事故不记叙事：
- *   · 优先复用     —— 治"自己写渲染器/自己洗数据"：平台有确定性子过程而 worker 重造，
+ *   · 优先复用     —— 治”自己写渲染器/自己洗数据”：平台有确定性子过程而 worker 重造，
  *                    重造那份与平台口径漂移，产出于是不可复核。
- *   · 交付前自检   —— 治"不过校验直接交付"：域提供的校验入口被跳过，错数据直达用户。
- *   · 范围         —— 治"自作主张扩大产出"：用户只要一件事，worker 顺手多做一件没人要的。
- *   · 拿不到就说缺 —— 治"换口径试探/猜参数/拿缓存值当真值"：一次查不到就换个写法蒙。
- *   · 经济性       —— 治"越挫越试"与"为次要产出阻塞主产出"（四轮实测：同一拒绝理由
+ *   · 交付前自检   —— 治”不过校验直接交付”：域提供的校验入口被跳过，错数据直达用户。
+ *   · 范围         —— 治”自作主张扩大产出”：用户只要一件事，worker 顺手多做一件没人要的。
+ *   · 拿不到就说缺 —— 治”换口径试探/猜参数/拿缓存值当真值”：一次查不到就换个写法蒙。
+ *   · 经济性       —— 治”越挫越试”与”为次要产出阻塞主产出”（四轮实测：同一拒绝理由
  *                    连撞五次，预算烧光超时，主产出没回到用户手上）。
  *   · 内部语言不上屏 —— 治 Stage 3 事故：结构化歧义被写成技术报告，脚本路径/错误码/
  *                    门的规则引述全上屏。宿主已改为替 worker 组装结构化状态，这里只
- *                    钉"数据答案"的语域。
+ *                    钉”数据答案”的语域。
+ *   · 委派块范围   —— 治”从会话历史补范围”：逐任务边界只随载荷走（A2A 协议 §①），
+ *                    静态规则钉住”只认委派块”，防漂移不靠每回合往提示词里塞申报原文
+ *                    （原 declarationNotice 已由这条静态规则承担）。
  * 律法 L2：协议事实平台拥有，宿主读数据（operation list --json）不抄写——所以这里
- * **不手抄**网关调用形状与 flag 纪律，只给"以平台清单为准"这一指针。
+ * **不手抄**网关调用形状与 flag 纪律，只给”以平台清单为准”这一指针；命令形态经参数
+ * 注入，是迁移期适配边界向通用层的唯一渗入点。
  */
 function workerSystemPrompt(
   root: string,
-  allowedAccountSetIds: readonly string[],
-  turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>,
-  capabilities?: readonly string[],
   scratchDir?: string,
+  planCommandForm?: string,
 ): string {
-  const scope = allowedAccountSetIds.length > 0
-    ? `授权名单：${allowedAccountSetIds.join(', ')}。不得查询或操作名单外对象。`
-    : '授权名单：未提供；范围以平台领域脚本的权限校验为准。';
-  // 能力信封（D-075 软层）：把本部署的能力声明作为框架事实告诉 worker——"写入/只读"
-  // 是通用能力词，不是业务词（不触泄漏 lint 的业务词预算）。为什么需要这一层：第 1 层
-  // （计划扫描）是机械兜底，但 T7 事故形态里模型的计划可能全程只含只读的"录入准备"
-  // 调用——机械扫描无事可做，能否披露全靠 worker 自己知道写权限是关闭的。具备领域知识
-  // 的 worker 在这一句的提示下能在准备阶段自行披露。**诚实报告：这层没有机械锁**，
-  // 与 D-072 的技能条同性质——软提示，不保证模型一定说；保证用户一定知道的是第 1 层
-  // （计划含写类 operation 时宿主直接合成 WRITE_NOT_ENABLED 终稿）。
-  // 未开放时给 worker 的确切措辞插值自 error-codes.ts 的 WRITE_NOT_ENABLED（唯一来源），
-  // 不在这里造第二份手抄本；开放时只陈述"写入由服务端在用户确认后执行"这一既有事实。
-  const capabilityEnvelope = capabilities?.includes('write')
-    ? '能力信封：本部署已开放写入能力；写入由服务端在用户确认后执行，你不得自行落库。'
-    : `能力信封：本部署未开放写入能力（只读）。用户提出写入类请求时，必须在准备或执行前如实告知——${messageTextFor('WRITE_NOT_ENABLED')}不得承诺可以完成写入。`;
-  // 可写位置（机械边界，不是约定）：write 工具只有这一个目录写得进去；不说，worker
-  // 只能猜，猜错就被门拒并白跑一轮。按 requestId 派生子目录是因为 tmp/ 是共享草稿区，
-  // 多个会话同时写同名产物会互相覆盖，而覆盖后的产物看不出被谁污染。
+  // 可写位置（机械边界，不是约定）＝委派块声明的工作区（⑨：按任务切，路径只随委派块
+  // 下行，提示词保持纯静态——逐任务的路径进提示词会让跨任务缓存前缀在这里炸断）。
   // 同一条里带上 edit（2026-10-08 实测）：worker 写了 11KB 脚本崩在 KeyError，只想改
   // 一行却没有 edit 工具，bash 门又只准网关调用（用不了 sed），只能整份重写——33 秒
   // 模型生成，而写 11KB 不可能一次对，这类迭代必然反复。放在同一段而不新起一条：
-  // 它是"怎么写"的细则，不是另一条边界（边界仍然只有 tmp/ 这一处）。
+  // 它是”怎么写”的细则，不是另一条边界（边界仍然只有工作区这一处）。
   const scratchNotice = scratchDir
-    ? `可写位置：${scratchDir}，其他路径不可写（机械边界）。**改自己写的脚本用 edit（精确文本替换，不要整份重写）**——重写一份 11KB 脚本要 30+ 秒生成，改一行只要一次替换。`
+    ? `写边界：文件只能写进委派块声明的工作区，其他路径不可写（机械边界）。**改自己写的脚本用 edit（精确文本替换，不要整份重写）**——重写一份 11KB 脚本要 30+ 秒生成，改一行只要一次替换。`
     : '';
   // 读不到上游内容时自写解析代码（D-083，用户明确批准）：read 只放行文本知识面，二进制
-  // 附件读不进来；这一条把"自己写脚本"限定在上游吸收，并钉住路径必须落在本轮可写位置内
+  // 附件读不进来；这一条把”自己写脚本”限定在上游吸收，并钉住路径必须落在本任务工作区内
   // （平台只放行 tmp/ 下的脚本），且子进程 env 被剥掉凭据类变量（不是沙箱：脚本仍能读盘，
   // 故不要读写与任务无关的文件）。刻意不提具体文件格式名——格式域不该进通用提示词。
   const absorbNotice = scratchDir
-    ? `读不到上游内容时（如附件是二进制），可自写解析脚本放进可写位置，经统一入口本地执行；脚本只落在这里，不读写无关文件。`
+    ? `读不到上游内容时（如附件是二进制），可自写解析脚本放进委派块声明的工作区，经统一入口本地执行；脚本只落在这里，不读写无关文件。`
     : '';
-  // 计划门协议（宿主协议，保留状态字）：执行前先提交方案，按平台裁决状态行事。草案形状
-  // 由 planDraftExample() 单一来源派生（L2：平台 schema 拥有形状，宿主不抄第二份），
-  // 这里不另写一种形状；状态字是宿主协议的一部分，压到一行。
-  const planNotice = `执行前先提交方案：第一条 bash 命令是单行 JSON——${planDraftExample()}，calls 逐项列出 operation 与参数。PLAN ACTIVE 后才能执行；PLAN DECLINED 按原因修正后重提；PLAN NEEDS_USER_CONFIRM / PLAN PAUSED 结束回合等宿主；PLAN STOP 说明停止原因。范围变化时重提完整 calls。`;
-  // 知识面（门禁）：只经 read 读固定知识面，"技能指向的程序文档"让 SOP 类文档合法可读
+  // 静态协议义务·许可与裁决（取代原 planNotice，变更项 ②）：是否需要许可以能力清单声明
+  // 为准；命令形态经 planCommandForm 注入（通用层不出现网关名），无平台能力时整段不渲染。
+  // 状态字是宿主协议的一部分（与驱动侧 PLAN ACTIVE / DECLINED / NEEDS_USER_CONFIRM /
+  // PAUSED / STOP 前缀一一对应），逐条钉住回合义务。
+  const permitNotice = planCommandForm
+    ? [
+      `许可：平台操作是否需要许可，以能力清单声明为准。标了需许可的 operation，执行前先提交申请——申请是单行原始命令：${planCommandForm}，calls 逐项列出 operation 与参数——获准后才能执行该操作；清单未标注的 operation 直接调用。`,
+      '裁决义务：申请收到 NEEDS_USER_CONFIRM 或 PAUSED → 立即结束回合等宿主；DECLINED → 按原因修正后重提；STOP → 停止并说明原因；ACTIVE → 按单执行；范围变化时重提完整 calls。',
+    ].join('\n')
+    : '';
+  // 静态协议义务·范围与能力（变更项 ②）：原 declarationNotice 的防漂移语义收进这两条
+  // 静态规则——逐任务的范围声明随委派块走 user message，提示词只钉”只认委派块”。
+  const scopeNotice = '范围义务：只执行用户消息中【委派】块声明的范围，不得扩大或从会话历史补范围。';
+  const capabilityDuty = '能力义务：只承诺清单声明可用的操作；清单标记不可用的，如实向用户说明。';
+  // 知识面（门禁）：只经 read 读固定知识面，”技能指向的程序文档”让 SOP 类文档合法可读
   // （此前被排除在知识面外，worker 于是从不读 SOP）。实现源码不可读——读源码会把它
   // 的中间状态当成协议事实，而那正是平台拥有、宿主与 worker 都不该镜像的那一半真相。
   const knowledgeNotice = '知识只经 read 工具读固定知识面（挂载技能、域文档、*.schema.json 及技能指向的程序文档）；实现源码不可读；先读知识面再调用平台能力，数据必须来自平台返回，不得编造。';
-  // turnDeclaration：宿主已核验本轮请求（含实体来源），worker 严格按此执行——宿主不做
-  // 领域判别，这一句是它唯一能给出的范围承诺；缺了它，worker 会自行从历史内容补范围。
-  const declarationNotice = turnDeclaration
-    ? `宿主已核验本轮请求；严格按此执行，不得扩大范围或补历史范围：${turnDeclaration.request}`
-    : '';
 
   return [
     '## 身份与职责',
@@ -1164,19 +1176,19 @@ function workerSystemPrompt(
     ].join('\n'),
     '## 工作原则',
     [
-      // ① 优先复用：平台已提供的确定性子过程（校验、渲染、格式转换）必须调用——治"自己
-      //    写渲染器/自己洗数据"，重造那份与平台口径漂移，产出不可复核。自写代码只用于
+      // ① 优先复用：平台已提供的确定性子过程（校验、渲染、格式转换）必须调用——治”自己
+      //    写渲染器/自己洗数据”，重造那份与平台口径漂移，产出不可复核。自写代码只用于
       //    上游吸收：格式不稳定、需要判断的那一步（D-083 的解析脚本即此形态）。
       '1. 优先复用：平台已提供的确定性子过程（校验、渲染、格式转换）必须调用，不要自己实现；自写代码只用于上游吸收——格式不稳定、要判断的那一步。',
-      // ② 交付前自检：该域提供校验入口就必须过一遍——治"不过校验直接交付"，错数据直达用户。
+      // ② 交付前自检：该域提供校验入口就必须过一遍——治”不过校验直接交付”，错数据直达用户。
       '2. 交付前自检：该域提供校验入口的必须过一遍再交付；不过就停下报告，不改不跳过。',
-      // ③ 范围：只做被要求的事——治"自作主张扩大产出"（用户只要一件事，顺手多做一件）。
+      // ③ 范围：只做被要求的事——治”自作主张扩大产出”（用户只要一件事，顺手多做一件）。
       '3. 范围：只做被要求的事；发现范围外的产出或前置动作，报告，不要自作主张。',
-      // ④ 拿不到就说缺什么：只做平台文档声明的操作——治"换口径试探、猜参数、拿缓存值
-      //    当真值"（一次查不到就换个写法蒙，蒙出来的数无法复核）。
+      // ④ 拿不到就说缺什么：只做平台文档声明的操作——治”换口径试探、猜参数、拿缓存值
+      //    当真值”（一次查不到就换个写法蒙，蒙出来的数无法复核）。
       '4. 拿不到就说缺什么：只做平台文档声明的操作；不换口径试探，不猜参数，不用缓存值代替真实查询。',
-      // ⑤ 经济性：治四轮实测的两种失效形态——"越挫越试"（同一拒绝理由连撞五次，换姿势
-      //    不算新尝试，预算烧光超时且主产出没回到用户手上）与"为次要产出阻塞主产出"。
+      // ⑤ 经济性：治四轮实测的两种失效形态——“越挫越试”（同一拒绝理由连撞五次，换姿势
+      //    不算新尝试，预算烧光超时且主产出没回到用户手上）与”为次要产出阻塞主产出”。
       '5. 经济性：一次调用能拿到的不要写脚本绕；同一障碍最多撞两次——同类错误第二次出现时就停止重试（换写法、换路径、换参数形态再试不算新尝试），先交付已经确定的部分，不要为次要产出阻塞主产出。',
     ].join('\n'),
     '## 硬边界',
@@ -1185,18 +1197,14 @@ function workerSystemPrompt(
       // 随平台演进过期，而模型会照着手抄那份去撞门。也不限定某一种模式：产出该走哪条
       // 路由由清单说明，worker 自己读。
       '平台调用走统一入口；形状与可用模式以平台清单（operation list --json）为准，不手抄。',
-      planNotice,
-      capabilityEnvelope,
       knowledgeNotice,
-      scope,
+      ...(permitNotice ? [permitNotice] : []),
+      scopeNotice,
+      capabilityDuty,
     ].join('\n'),
-    // 可写位置与自写解析（2026-10-17 从硬边界段首移到此处）：scratchNotice 内嵌
-    // `tmp/${requestId}`，每请求都变——原先排在提示词 ~40% 处，跨回合续跑（requestId
-    // 更新）时缓存从这一点炸断，其后全部提示词 + 复用的 workerMessages 历史按全价重付。
-    // 移到稳定段（身份/原则/硬边界）之后、输出纪律（含每步变化的 declarationNotice）
-    // 之前：变化频率排序 = 静态 → 每请求（本块）→ 每步（declaration 尾注），缓存断点
-    // 尽量靠后。无标题块：语义上仍是硬边界的延伸（"机械边界"的怎么写细则），且落点
-    // 恰在两个标题之间，C 系列的分区断言不受影响。
+    // 任务工作区与自写解析（⑨：语义从”可写位置”改为”任务工作区/文件交互区”；仍是无标题
+    // 块——语义上是硬边界的延伸，且落点在稳定段之后、输出纪律之前，缓存断点尽量靠后。
+    // scratchDir 按任务派生，跨回合续跑同任务时不再变化，此处不再是每请求缓存断点）。
     ...(scratchNotice
       ? [[scratchNotice, ...(absorbNotice ? [absorbNotice] : [])].join('\n')]
       : []),
@@ -1205,14 +1213,14 @@ function workerSystemPrompt(
       // 回复面向用户 + 内部语言不上屏（Stage 3 事故根治包）：worker 的工作上下文全泡在
       // 执行语言里（协议命令 / 技能文档 / 信封错误码），它是执行语言与用户语言之间唯一
       // 的翻译器——压力下翻译退化，执行语言就越界进最终回复。宿主已改为替它组装结构化
-      // 平台状态，这里只钉"数据答案"的发声形状。
+      // 平台状态，这里只钉”数据答案”的发声形状。
       '回复面向用户：只说结论、数据和需要用户给什么。',
       '内部语言不上屏：脚本路径、错误码、JSON、协议状态、接口名、门的规则不进回复。',
-      // 来源标注纪律（2026-09-27 第三波）：用户不需要知道接口标识符，"平台实时查询"已足够
+      // 来源标注纪律（2026-09-27 第三波）：用户不需要知道接口标识符，”平台实时查询”已足够
       // 证明数据不是编的；写出 operation 名/接口名/脚本名只会把内部语言带上屏。
       '来源标注只说“平台实时查询”这类中性表述，不出现 operation 名、接口名或脚本名。',
       // 内部控制不上屏（同波）：计划额度、拒绝次数、熔断、计划门、重试上限是宿主/平台的
-      // 内部控制状态，对用户"下一步做什么"没有任何帮助——实测里它被当成"说明"交出去，
+      // 内部控制状态，对用户”下一步做什么”没有任何帮助——实测里它被当成”说明”交出去，
       // 反而像在推卸。因内部限制停顿时只说事实与出路，不说机制。
       '内部控制不上屏：计划额度、拒绝次数、熔断、计划门、重试上限等内部控制状态；因内部限制停顿时只说事实与出路，不说机制。',
       // 不主动交代表能力边界（同波）：诚实不等于全说。用户没问到的口径，接口不支持就不是
@@ -1220,18 +1228,22 @@ function workerSystemPrompt(
       '不主动交代表能力边界：只回答用户问到的；边界仅在该口径被问到时才说明。',
       // 名称类请求仍须先经平台检索确认（D-072）：真实平台实测里用户给出需要解析的名称，
       // 模型未搜索也未澄清，直接用会话里已确立的实体出数——连续性修复让模型宁可信任
-      // 上下文也不重新解析。会话实体只回答"用户只给参数的续问"，新名称一律重新检索。
+      // 上下文也不重新解析。会话实体只回答”用户只给参数的续问”，新名称一律重新检索。
       // 2026-10-17 补豁免边界（性能）：同一会话内**已检索确认过的同一名称**、同口径续查
       // （B1 形状）可直接复用规范名提交单调用计划——重复检索是纯冗余（实体门第四来源
       // 仍放行已确立实体），且 2 调用计划会错过终局快路径、坠入模型翻译慢路。新名称或
       // 名称有变不豁免，D-072 的保护原样保留。
       '名称类请求仍须先经平台检索确认规范名称——新名称即使用户本会话已用过某个对象也不例外；但同一会话内已检索确认过的同一名称，同口径续查可直接复用已确认的规范名，不再重复检索。',
-      // 已取数据必须呈现（D-073）：实测"我们的客户有哪些"——模型花 295s/8 调用，本轮已查到
+      // 已取数据必须呈现（D-073）：实测”我们的客户有哪些”——模型花 295s/8 调用，本轮已查到
       // 的维度数据不出现在终稿里，反请用户补充范围重查：数据在手，球踢回给用户。
       '本轮已经取到的执行结果必须呈现在终稿里；确未取到的，明示缺席原因。',
-      // 纠错环：执行不了时报"缺什么/为什么/建议提供什么"，与总结原则同一份表述。
+      // 纠错环：执行不了时报”缺什么/为什么/建议用户提供什么”，与总结原则同一份表述。
       '缺信息或执行不了时，用自然语言说明缺什么、为什么、建议提供什么。',
-      ...(declarationNotice ? [declarationNotice] : []),
+      // 被阻塞时的报告形状（A2A §⑥ 报告义务；run5 实测：终稿曾以”流程验证通过 ✅”开头，
+      // 把样本冒烟当成交付叙事）。未完成先声明，验证性成功不作报告开头。
+      '被阻塞或未完成时，回复第一句陈述”未完成”与原因；管线自检、样本运行等验证性成功不得作为报告开头。',
+      // 样本产物命名隔离（run5 实测：样本数据曾以真实交付物命名留在工作区，构成污染面）。
+      '样本或冒烟数据落盘时，文件名加「样本-」前缀或统一收纳在 smoke/ 之下，不得使用真实交付物命名。',
     ].join('\n'),
   ].join('\n\n');
 }

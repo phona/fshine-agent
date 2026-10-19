@@ -3,7 +3,9 @@
  *
  * 这条链此前零测试：worker 跑过 deadline → 宿主分类（context.ts 的 catch，取消先于
  * 超时先于 auth 先于 executor_error）→ 超时/失败也持久化中间转录（taskId 断点续跑的
- * 资本）→ 用户拿到 DELEGATION_TIMEOUT_FAILURE 话术。真实驱动对 deadline 的契约是
+ * 资本）→ 用户拿到超时话术（2026-10-18"失败必达"改造后 = runtime 从执行事实合成的
+ * 资源耗尽终稿，resource-exhausted.ts；WT-1 ① 的判据随之从超时话术换成合成终稿）。
+ * 真实驱动对 deadline 的契约是
  * "到点即收、**返回**不抛"（pi-coding-driver.ts :714 起的 remaining/abortTimer，
  * :766-770 的超时返回形状：text 可能为空、转录照常带回），替身按同一契约复刻。
  *
@@ -32,6 +34,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
+import { renderResourceExhaustedReply } from '../../packages/agent/src/resource-exhausted';
 import { LAST_TASK_ID_TOKEN, boot, mainDriver, type Boot } from './harness';
 
 /** 企微单聊：principal 由 userid 解析，conversationId = chatid ?? userid（与 write-chain 同口径）。 */
@@ -237,27 +240,42 @@ describe('离线全链 e2e：worker 执行超时（功能规格验收第 7 条�
 
       const reply = await booted.send(USER_ASK);
 
-      // ① 终稿一字不差 = error-codes 表的超时话术（唯一来源，不手抄第二份）
-      expect(reply).toBe(messageTextFor('DELEGATION_TIMEOUT_FAILURE'));
-
-      // ② 审计留痕：delegation_span 记 failed + timeout（失败的分类可行动：超时是
-      // "稍后再试"，与执行器错误/登录态话术必须是不同的句子）
+      // ① 终稿 = 资源耗尽合成（"失败必达"路径 1，2026-10-18 起的行为契约）：超时失败
+      //   不再是干巴巴的"请稍后重试"，而是宿主从执行事实合成的可行动终稿（已完成部分/
+      //   未完成部分/续跑入口）。期望文本用渲染器从**同一条底账记录**现算（唯一来源，
+      //   不手抄第二份）——本用例的替身 worker 没提交过计划，条目无结构化事实，落在
+      //   "无事实版本"（如实说没有可确认的已完成产出，不编造）。
       const span = audit.events.find((event) => event['event'] === 'delegation_span');
       expect(span).toBeDefined();
       expect(span!['outcome']).toBe('failed');
       expect(span!['failureClass']).toBe('timeout');
       const taskId = span!['taskId'];
       expect(taskId).toMatch(/^task_/);
+      const failedRecord = (await platformTasksOf(booted)).find((entry) => entry.taskId === taskId);
+      expect(failedRecord).toBeDefined();
+      expect(reply).toBe(renderResourceExhaustedReply({ record: failedRecord ?? null, doneSteps: [] }));
+      expect(reply).toContain('已完成部分');
+      expect(reply).toContain('未完成部分');
+      expect(reply).toContain('继续');
+      expect(reply).not.toBe(messageTextFor('DELEGATION_TIMEOUT_FAILURE'));
+
+      // ①b 审计带协议失败分类：resource_exhausted_reply 事件记 RESOURCE_EXHAUSTED，
+      //   turn_span 的 outcome 记 resource_exhausted（delegation_span 的 failed/timeout
+      //   由 context.ts 独立落账，两侧不互斥）。
+      const exhausted = audit.events.find((event) => event['event'] === 'resource_exhausted_reply');
+      expect(exhausted).toBeDefined();
+      expect(exhausted!['failureClass']).toBe('RESOURCE_EXHAUSTED');
+      expect(exhausted!['taskId']).toBe(taskId);
+      const turnSpan = audit.events.filter((event) => event['event'] === 'turn_span').at(-1);
+      expect(turnSpan?.['outcome']).toBe('resource_exhausted');
 
       // ③ 底账留痕：任务条目 outcome=failed，workerMessages 非空——超时也要持久化中间
       // 转录，taskId 断点续跑才有的续（长任务业务稳定性的关键，context.ts catch 里的
       // upsert 分支此前零覆盖）。
-      const record = (await platformTasksOf(booted)).find((entry) => entry.taskId === taskId);
-      expect(record).toBeDefined();
-      expect(record!.outcome).toBe('failed');
-      expect(record!.workerMessages.length).toBeGreaterThanOrEqual(2);
-      expect(JSON.stringify(record!.workerMessages)).toContain(PARTIAL_TRANSCRIPT);
-      expect(JSON.stringify(record!.workerMessages)).toContain(DELEGATE_ASK);
+      expect(failedRecord!.outcome).toBe('failed');
+      expect(failedRecord!.workerMessages.length).toBeGreaterThanOrEqual(2);
+      expect(JSON.stringify(failedRecord!.workerMessages)).toContain(PARTIAL_TRANSCRIPT);
+      expect(JSON.stringify(failedRecord!.workerMessages)).toContain(DELEGATE_ASK);
 
       // ④ 驱动契约证据：deadline 确实传给了 worker 驱动（真实链路里驱动靠它自断）
       expect(worker.runs[0]?.deadline).toBeDefined();
@@ -282,9 +300,10 @@ describe('离线全链 e2e：worker 执行超时（功能规格验收第 7 条�
         patchProfile: { workerTimeoutMs: WORKER_TIMEOUT_MS },
       });
 
-      // 第一回合：撞超时（同 WT-1），拿到失败话术后从宿主底账取回任务编号
+      // 第一回合：撞超时（同 WT-1，终稿为资源耗尽合成），从宿主底账取回任务编号
       const first = await booted.send(USER_ASK);
-      expect(first).toBe(messageTextFor('DELEGATION_TIMEOUT_FAILURE'));
+      expect(first).toContain('资源超时');
+      expect(first).not.toBe(messageTextFor('DELEGATION_TIMEOUT_FAILURE'));
       const failedRecords = await platformTasksOf(booted);
       expect(failedRecords).toHaveLength(1);
       expect(failedRecords[0]!.outcome).toBe('failed');
@@ -301,10 +320,11 @@ describe('离线全链 e2e：worker 执行超时（功能规格验收第 7 条�
       expect(resumed).toBeDefined();
       expect(JSON.stringify(resumed!.messages)).toContain(DELEGATE_ASK);
       expect(JSON.stringify(resumed!.messages)).toContain(PARTIAL_TRANSCRIPT);
-      // 末条是宿主为本回合新拼的用户请求（续跑请求原文，不是超时回合的旧请求）
+      // 末条是宿主为本回合新拼的用户请求（续跑请求随【委派】块下行，不是超时回合的旧请求）
       const last = resumed!.messages.at(-1);
       expect(last?.role).toBe('user');
-      expect(last?.content).toBe(RESUME_DELEGATE_ASK);
+      expect(String(last?.content)).toContain('【委派】');
+      expect(String(last?.content)).toContain(`范围：${RESUME_DELEGATE_ASK}`);
 
       // ② 续跑是同一任务的继续：底账里仍只有一条记录（continueTaskId 复用了 taskId），
       // 且这次真跑完了，终态从 failed 推到 done

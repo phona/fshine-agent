@@ -292,7 +292,7 @@ export function validateCalls(calls: readonly PlanCall[]): void {
 }
 
 /**
- * 写关闭判据（D-075）：计划里出现写类 operation，而本部署的能力声明不含 write。
+ * 写关闭判据（D-075）：计划里出现写类 operation，而平台侧声明本部署写未开放。
  *
  * 为什么必须是机械判据（而不是等模型走到提案步）：2026-09-29 真实平台 T7 事故——用户
  * 发起录入请求，模型走了完整的"录入准备"流程（行为优秀），然后停在准备阶段，承诺"即可
@@ -305,18 +305,18 @@ export function validateCalls(calls: readonly PlanCall[]): void {
  *   · calls：宿主自己从计划命令解析出来的（parsePlanCallsCommand）；
  *   · semantics：平台 `operation list --json` 的 access 语义表（operation-labels 派生，
  *     判据是平台声明的 confirm 列——要不要用户确认）；
- *   · capabilities：宿主持有的部署能力声明（TrustedContext.capabilities，缺省只读）。
+ *   · writeEnabled：平台侧的写开放声明（部署层经 isCommitEnabled() 从平台状态派生，
+ *     变更项 ⑧——不再是委托主体自持的能力布尔）。缺省（false）视为只读。
  *
  * 宁缺勿猜：语义表缺失（CLI 派生失败 / 平台还没下发 accessSemantics）或 operation 查不到
  * 语义时，该 operation 不算写类——不触发布防，平台计划门与提案路径的既有拒绝照旧兜底。
- * 空 capabilities 视为只读（与契约层同语义：缺省视为只读）。
  */
 export function planWriteClosed(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
-  capabilities: readonly string[] | undefined,
+  writeEnabled: boolean,
 ): boolean {
-  if (capabilities?.includes('write')) return false;
+  if (writeEnabled) return false;
   if (!semantics || semantics.size === 0) return false;
   return calls.some((call) => isWriteAccess(semantics.get(call.operation)));
 }

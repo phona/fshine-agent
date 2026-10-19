@@ -1,24 +1,25 @@
 /**
- * 草稿位置清理（`tmp/<requestId>/`）。
+ * 工作区清理（`tmp/task_<taskId>/`）。
  *
- * 为什么需要：worker 的 write 被机械边界限制在 `tmp/<requestId>/`，每轮请求一个。不清理
- * 就会无限堆积——而它里面的东西（契约、mapping、临时脚本）都是可再生产物，没有长期价值。
+ * 为什么需要：worker 的 write 被机械边界限制在 `tmp/task_<taskId>/`，每个子任务一个
+ * （同任务的续跑共享同一个工作区）。不清理就会无限堆积——而它里面的东西（提案 payload、
+ * mapping、临时脚本）都是可再生产物，没有长期价值。
  *
  * 三条纪律，缺一不可：
- *   ① **只删 `tmp/req_<uuid>` 形态的位置**。tmp/ 同时是平台自己的产物区（探针输出、
+ *   ① **只删 `tmp/task_<uuid>` 形态的位置**。tmp/ 同时是平台自己的产物区（探针输出、
  *      交互式跑出来的 contract.json、`tmp/excels/` …），绝不能碰。命名不匹配的一律不删。
  *      宁可漏删，不可误删。
  *   ② **只删位置，不删文件**。同 ①：tmp/ 下的散文件是平台的。
- *   ③ **按年龄删，不按生命周期删**。worker 会话可以跨轮续跑（continueTaskId），上一轮的
- *      产物下一步还要用；在"回合结束"时删会切断续跑。默认 TTL 24h——只有闲置超过一天的
- *      才会被清，那时分隔已久的续跑本就该重新产出。
+ *   ③ **按年龄删，不按生命周期删**。worker 会话可以跨轮续跑（taskId 续用同一个工作区），
+ *      上一轮的产物下一步还要用；在"回合结束"时删会切断续跑。默认 TTL 24h——只有闲置
+ *      超过一天的才会被清，那时分隔已久的续跑本就该重新产出。
  */
 import { randomUUID } from 'node:crypto';
 import { readdirSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 
-/** 我们的草稿位置名形态：`req_<uuid>`（宿主 requestId = newId('req')）。 */
-const SCRATCH_DIR_RE = /^req_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** 我们的工作区名形态：`task_<uuid>`（宿主 taskId = `task_${randomUUID()}`）。 */
+const SCRATCH_DIR_RE = /^task_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export interface ScratchSweepResult {
   /** 已删除的位置名 */
@@ -74,7 +75,7 @@ export function sweepScratchDirs(root: string, nowMs: number, ttlMs: number): Sc
   return result;
 }
 
-/** 生成一个草稿位置名（与宿主 requestId 同形；测试与工具用）。 */
+/** 生成一个工作区名（与宿主 taskId 同形；测试与工具用）。 */
 export function newScratchDirName(): string {
-  return `req_${randomUUID()}`;
+  return `task_${randomUUID()}`;
 }

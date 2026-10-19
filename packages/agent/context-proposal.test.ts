@@ -9,7 +9,6 @@ const ctx = {
   trusted: {
     requestId: 'req_1',
     principalId: 'wecom:u1',
-    allowedAccountSetIds: [] as string[],
     sessionId: 'wecom:u1:c1',
     capabilities: ['read', 'write'] as string[],
   },

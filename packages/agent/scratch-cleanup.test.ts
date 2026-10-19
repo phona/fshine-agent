@@ -18,9 +18,11 @@ const mk = (name: string, ageMs: number) => {
 };
 
 describe('isScratchDirName', () => {
-  it('只认 req_<uuid>', () => {
+  it('只认 task_<uuid>（⑨：工作区按任务切，续跑共享）', () => {
     expect(isScratchDirName(newScratchDirName())).toBe(true);
-    expect(isScratchDirName('req_018f0d2a-1111-2222-3333-444455556666')).toBe(true);
+    expect(isScratchDirName('task_018f0d2a-1111-2222-3333-444455556666')).toBe(true);
+    // 旧命名 req_ 不再认领（迁移期遗留目录需手动清理，不可误删平台产物）
+    expect(isScratchDirName('req_018f0d2a-1111-2222-3333-444455556666')).toBe(false);
   });
   it('平台自己的产物一律不算(宁可漏删不可误删)', () => {
     for (const n of ['excels', 'contract-2026-07.json', '整理好的2026年07月工资表.xlsx',

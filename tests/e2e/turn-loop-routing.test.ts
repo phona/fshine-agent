@@ -51,8 +51,10 @@ describe('离线全链 e2e：申报路由与安全边界', () => {
     });
     const reply = await send('帮我查一下猫一杯的应收账款还有多少');
 
-    // 宿主据申报直接委派，且 request 逐字透传：worker 收到的是加工后的请求
-    expect(worker.requests).toEqual(['查询猫一杯的应收账款余额']);
+    // 宿主据申报直接委派，request 逐字透传进【委派】块（②：载荷走消息通道）
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0]).toContain('【委派】');
+    expect(worker.requests[0]).toContain('范围：查询猫一杯的应收账款余额');
     expect(reply).toContain('猫一杯');
     expect(reply).not.toContain('不应外发');
     await assembly.close();

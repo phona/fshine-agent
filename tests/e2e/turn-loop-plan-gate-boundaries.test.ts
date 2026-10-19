@@ -98,6 +98,8 @@ interface SessionExtra {
   sessionId: string;
   entitySources?: PlanEntitySources;
   capabilities?: readonly string[];
+  /** 平台写开放声明（⑧）：写开时宿主前置扫描放行，裁决落到平台计划门。 */
+  writeEnabled?: boolean;
   /** 平台 access 语义表替身（判据是平台数据：不在测试里跑 CLI 派生它）。 */
   operationSemantics?: ReadonlyMap<string, { plan: boolean; confirm: boolean; mock: boolean }>;
 }
@@ -113,6 +115,7 @@ async function makeWorkerSession(counter: { evaluates: number }, extra: SessionE
     agentDir: path.join(root, '.fshine-agent'),
     modelConfig,
     planCliRunner: countingCliRunner(counter),
+    ...(extra.writeEnabled !== undefined ? { writeEnabled: extra.writeEnabled } : {}),
     ...extra,
     ...(extra.operationSemantics ? { operationSemantics: extra.operationSemantics } : {}),
   });
@@ -315,6 +318,9 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
   it('A5 闸① 计划扫描拒：含 voucher.commit 的计划在 evaluate 前被拦，终稿一字不差', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
+      // ⑧ 权威源归一：写关闭判据 = 平台侧写开放声明（writeEnabled），不再是 principal
+      // capabilities——部署关写时计划扫描在 evaluate 前拦截并合成终稿。
+      writeEnabled: false,
       main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
       worker: gatedWorker([
         { text: '我先核实一下范围、日期与借贷平衡。' },
@@ -339,11 +345,12 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
     await assembly.close();
   });
 
-  it('A5 闸② 提案路径 capability 拒：无 write 能力的 principal 走到提案步也被确定性拒绝', async () => {
+  it('A5 闸② 提案路径部署关写拒：写声明关闭时走到提案步也被确定性拒绝', async () => {
     const before = totalActualCalls();
     // 网关提案路径（C 波后唯一的提案入口，开关已退役）：worker 的提案创建命令被驱动
-    // 恒定拦下，交到宿主的 createProposalViaGateway 做 capability 复核。
+    // 恒定拦下，交到宿主的 createProposalViaGateway 做写开放复核（⑧：判据=平台声明）。
     const { send, assembly } = await boot({
+      writeEnabled: false,
       main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
       worker: gatewayProposalWorker({
         type: 'change_proposal',
@@ -383,6 +390,10 @@ describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）
     const worker = await makeWorkerSession(counter, {
       sessionId: 'task_platform_write_gate',
       capabilities: ['read', 'write'],
+      // ⑧ 写开放声明（部署写开着）：闸①前置扫描不触发，裁决完全落到平台计划门——
+      // serve 法域的 plan 只接受 read operation，voucher.commit（write-flag）被平台
+      // canonicalCall 确定性拒绝（CLI exit 3）。
+      writeEnabled: true,
       // 平台语义表替身：voucher.commit 要用户确认（confirm=true）。为什么不经平台 CLI 派生：
       // 语义表是**判据**不是普通数据，平台侧顶层 accessSemantics 正在并行改造、尚未下发，
       // 此刻派生只会得到空表——宿主 fail-closed 到"不该进计划"（PLAN_NOT_PLANNABLE），

@@ -38,7 +38,7 @@ class MemorySessions {
 }
 
 function trusted(sessionId = 'session-1', principalId = 'wecom:user-1'): TrustedContext {
-  return { requestId: 'req-1', principalId, allowedAccountSetIds: [], sessionId };
+  return { requestId: 'req-1', principalId, sessionId };
 }
 
 async function profileRoot(): Promise<string> {
@@ -49,11 +49,11 @@ async function profileRoot(): Promise<string> {
   return root;
 }
 
-function runner(root: string, tasks: MemoryTasks, driver: TurnDriver) {
+function runner(root: string, tasks: MemoryTasks, driver: TurnDriver, options: { planCommandForm?: string } = {}) {
   const profiles: Record<string, ContextProfileConfig> = {
     '17dz': { root, skillRoots: ['.agents/skills'] },
   };
-  return createContextTaskRunner({ profiles, tasks, workerDriver: driver });
+  return createContextTaskRunner({ profiles, tasks, workerDriver: driver, ...(options.planCommandForm ? { planCommandForm: options.planCommandForm } : {}) });
 }
 
 describe('17dz Pi subagent adapter', () => {
@@ -115,9 +115,11 @@ describe('17dz Pi subagent adapter', () => {
       entitySources: { currentMessage: '查幻辰财税账套里猫一杯的应收账款', referenceEvidence: '【宿主主动回溯】幻东 202609 余额 51 元' },
     }, { trusted: trusted() });
 
-    expect(prompt).toContain('宿主已核验本轮请求');
-    // 加工后的 request 随申报一起进 worker 提示词（宿主不再做领域判别，只透传请求本身）
-    expect(prompt).toContain('查幻辰财税账套里猫一杯的应收账款');
+    // 委派块走 user message（A2A ①：载荷走消息通道，不进身份通道）——提示词不再含申报原文
+    expect(prompt).not.toContain('宿主已核验本轮请求');
+    const firstUser = observed?.messages?.[0];
+    expect(String((firstUser as unknown as { content?: string })?.content)).toContain('【委派】');
+    expect(String((firstUser as unknown as { content?: string })?.content)).toContain('查幻辰财税账套里猫一杯的应收账款');
     // 领域无关的实体来源原样透传到 worker 驱动（宿主不懂业务，只做字符串包含）
     expect(observed?.entitySources).toEqual({
       currentMessage: '查幻辰财税账套里猫一杯的应收账款',
@@ -197,8 +199,8 @@ describe('17dz Pi subagent adapter', () => {
     for (const index of at) expect(index).toBeGreaterThanOrEqual(0);
     expect([...at].sort((a, b) => a - b)).toEqual(at);
     // 判断类规则（原则）与机械类规则（硬边界）分开：混在一处时模型分不清哪条能通融
-    expect(prompt.slice(at[1]!, at[2]!)).not.toContain('可写位置');
-    expect(prompt.slice(at[2]!, at[3]!)).toContain('可写位置');
+    expect(prompt.slice(at[1]!, at[2]!)).not.toContain('写边界');
+    expect(prompt.slice(at[2]!, at[3]!)).toContain('写边界');
   });
 
   it('工作原则：优先复用平台确定性子过程，不要自己实现', async () => {
@@ -276,21 +278,64 @@ describe('17dz Pi subagent adapter', () => {
     expect(prompt).toContain('不得编造');
   });
 
-  it('硬边界：计划门协议保留状态字，草案形状由单一来源派生', async () => {
-    const prompt = await capturePrompt();
-    // 执行前先提交方案（宿主协议）：状态字是宿主协议的一部分，压缩措辞但五个状态都在
-    expect(prompt).toContain('执行前先提交方案');
-    for (const state of ['PLAN ACTIVE', 'PLAN DECLINED', 'PLAN NEEDS_USER_CONFIRM', 'PLAN PAUSED', 'PLAN STOP']) {
-      expect(prompt, `计划门状态字 ${state} 必须留在提示词里`).toContain(state);
+  it('硬边界：许可段按清单声明 + 五个裁决状态 + 命令形态参数注入（不硬编码网关名）', async () => {
+    // 无 planCommandForm（无平台能力）→ 许可段整段不渲染
+    const bare = await capturePrompt();
+    expect(bare).not.toContain('执行前先提交方案');
+    expect(bare).not.toContain('bin/17dz');
+    // 有命令形态 → 许可段渲染：是否需要许可以清单声明为准（逐 operation 属性，不分类任务）
+    const root = await profileRoot();
+    let prompt = '';
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        prompt = input.systemPrompt;
+        return { text: '完成。', messages: input.messages };
+      },
+    }, { planCommandForm: 'bin/17dz plan {"goal":"…","calls":[]}' });
+    await subagent.run({ request: '查一下余额' }, { trusted: trusted() });
+    expect(prompt).toContain('以能力清单声明为准');
+    expect(prompt).toContain('标了需许可的 operation');
+    expect(prompt).toContain('bin/17dz plan');
+    // 裁决状态机：worker 回合义务逐状态钉住
+    for (const state of ['NEEDS_USER_CONFIRM', 'PAUSED', 'DECLINED', 'STOP', 'ACTIVE']) {
+      expect(prompt, `裁决状态 ${state} 必须留在提示词里`).toContain(state);
     }
-    // 范围扩大时重新提交完整 calls（防止"计划外执行"）
     expect(prompt).toContain('范围变化时重提完整 calls');
   });
 
-  it('硬边界：可写位置与读不到上游内容时的自写脚本边界', async () => {
+  it('系统提示词跨任务逐字节稳定且零执行层词汇（A2A 验收 ③④）', async () => {
+    // 两个不同任务（同一部署根、各自随机工作区）的提示词逐字节一致：逐任务数据
+    // （范围/工作区/路径）全部走委派块，提示词只含静态协议义务——生产环境前缀缓存 100% 命中
+    const root = await profileRoot();
+    let a = '';
+    let b = '';
+    const driver: TurnDriver = { run: async (input) => { return { text: '完成。', messages: input.messages }; } };
+    {
+      let prompt = '';
+      const subagent = runner(root, new MemoryTasks(), { run: async (input) => { prompt = input.systemPrompt; return driver.run(input); } });
+      await subagent.run({ request: '查一下余额' }, { trusted: trusted() });
+      a = prompt;
+    }
+    {
+      let prompt = '';
+      const subagent = runner(root, new MemoryTasks(), { run: async (input) => { prompt = input.systemPrompt; return driver.run(input); } });
+      await subagent.run({ request: '查幻辰财税账套里猫一杯的应收账款', turnDeclaration: { kind: 'delegate', request: '查幻辰财税账套里猫一杯的应收账款' } }, { trusted: trusted() });
+      b = prompt;
+    }
+    expect(a).toBe(b);
+    // 执行层词汇与已退役散文不在提示词里（迁移期适配仅经参数注入，通用层零硬编码）。
+    // 【委派】不进禁词表：静态范围规则合法引用"委派块"一词，禁的是逐任务载荷本身。
+    for (const banned of ['bin/17dz', '授权名单', '能力信封', '执行前先提交方案', '宿主已核验本轮请求']) {
+      expect(a, `提示词不得包含已退役内容：${banned}`).not.toContain(banned);
+    }
+    // 逐任务载荷不进提示词：申报原文只出现在 user message 委派块
+    expect(a).not.toContain('查幻辰财税账套里猫一杯的应收账款');
+  });
+
+  it('硬边界：任务工作区与读不到上游内容时的自写脚本边界', async () => {
     const prompt = await capturePrompt();
-    // 机械边界：只有 scratchDir 写得进去，不说 worker 只能猜，猜错就白跑一轮
-    expect(prompt).toContain('可写位置：tmp/req-1');
+    // 机械边界：只有委派块声明的工作区写得进去（⑨：路径随委派块走，提示词不带具体路径）
+    expect(prompt).toContain('文件只能写进委派块声明的工作区');
     expect(prompt).toContain('其他路径不可写');
     // D-083（用户明确批准）：读不到上游内容时可自写解析脚本，但必须落在可写目录内
     expect(prompt).toContain('读不到上游内容时');
@@ -349,12 +394,12 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.turnDeclaration).toBeUndefined();
   });
 
-  // ── 能力信封（D-075 软层）：worker 系统提示词里的当前能力声明 ─────────────────
-  // 第 1 层（计划扫描）是机械兜底，但 T7 形态里模型的计划可能全程只含只读的"录入准备"
-  // 调用——机械扫描无事可做，能否披露全靠 worker 自己知道写权限是关闭的。这一层把能力
-  // 声明作为框架事实注入提示词。**诚实报告：没有机械锁**，与 D-072 的技能条同性质。
+  // ── 能力信封退役（变更项 ⑦）：提示词不再承载能力声明散文 ─────────────────────
+  // 机械保证层（计划扫描合成 WRITE_NOT_ENABLED、gate 按清单拒调用）一字未动，判据已切
+  // 平台声明（isCommitEnabled，变更项 ⑧）。提前披露由"能力义务"静态规则 + 清单预载承担，
+  // 不再是提示词里的软提示。这里钉住：信封句与 capabilities 透传双双退场。
 
-  it('写关闭（capabilities 不含 write）时 worker 提示词含能力信封句与必须告知的义务', async () => {
+  it('写关闭时 worker 提示词不含能力信封句（机械层在别处保证，散文退役）', async () => {
     const root = await profileRoot();
     let prompt = '';
     const subagent = runner(root, new MemoryTasks(), {
@@ -364,23 +409,17 @@ describe('17dz Pi subagent adapter', () => {
       },
     });
 
-    // capabilities 缺省同样视为只读（与契约层同语义）：信封句照常注入
     await subagent.run({ request: '查一下余额' }, { trusted: trusted() });
-    expect(prompt).toContain('能力信封：本部署未开放写入能力（只读）');
-    expect(prompt).toContain('当前未开放写入权限，如有需要请联系管理员开通。');
-    expect(prompt).toContain('不得承诺可以完成写入');
-
-    await subagent.run({ request: '查一下余额' }, { trusted: { ...trusted(), capabilities: ['read'] } });
-    expect(prompt).toContain('能力信封：本部署未开放写入能力（只读）');
+    expect(prompt).not.toContain('能力信封');
+    // 静态能力义务取代信封：承诺面以清单为准
+    expect(prompt).toContain('只承诺清单声明可用的操作');
   });
 
-  it('写开放时 worker 提示词含已开放能力信封句，且不出现未开放措辞', async () => {
+  it('capabilities 不再透传到 worker 驱动（执法不读，变更项 ⑧）', async () => {
     const root = await profileRoot();
-    let prompt = '';
     let observed: TurnDriverInput | undefined;
     const subagent = runner(root, new MemoryTasks(), {
       run: async (input) => {
-        prompt = input.systemPrompt;
         observed = input;
         return { text: '完成。', messages: input.messages };
       },
@@ -388,10 +427,8 @@ describe('17dz Pi subagent adapter', () => {
 
     await subagent.run({ request: '查一下余额' }, { trusted: { ...trusted(), capabilities: ['read', 'write'] } });
 
-    expect(prompt).toContain('能力信封：本部署已开放写入能力');
-    expect(prompt).not.toContain('本部署未开放写入能力');
-    // 能力声明同时透传到 worker 驱动（写关闭判据 D-075 的宿主持有输入）
-    expect(observed?.capabilities).toEqual(['read', 'write']);
+    // TrustedContext.capabilities 仍在（契约层保留），但驱动输入不再携带——执法不读它
+    expect('capabilities' in (observed ?? {})).toBe(false);
   });
 
   it('计划模式的步骤标签透传给子 Agent 驱动，用户通知带「第 N/M 步」前缀', async () => {

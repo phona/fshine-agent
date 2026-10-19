@@ -37,7 +37,6 @@ function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
   return {
     requestId: 'req_health',
     principalId: 'wecom:user_a',
-    allowedAccountSetIds: ['as_001'],
     sessionId: 'sess_health',
     ...overrides,
   };

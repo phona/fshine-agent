@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
-import { RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './context';
+import { RUN_17DZ_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import type { CandidateExtractor } from './memory-consolidator';
@@ -34,6 +34,7 @@ import {
   scheduleMemoryConsolidation,
 } from './turn-persistence';
 import { stripFootprint } from './text-hygiene';
+import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { PLATFORM_OPERATIONS, type SelectionClarification } from './platform-contract';
 import { clarificationTextFor, messageTextFor } from './error-codes';
 import {
@@ -355,6 +356,19 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
                 cooldownEntered: snapshot.coolingDown,
               }));
+            }
+            // 资源耗尽终稿（"失败必达"路径 1，恢复路径同一义务）：确认后重跑撞超时，
+            // 同样以执行事实合成的终稿替代"请稍后重试"（taskId 精确在手上，断点更真）。
+            if (error.message === DELEGATION_TIMEOUT_FAILURE) {
+              const timedOut = await loadTimedOutRecord(deps.platformTasks, ctx.principalId, ctx.sessionId, ctx.resumeTaskId, ctx.requestId);
+              console.info(JSON.stringify({
+                event: 'resource_exhausted_reply',
+                requestId: ctx.requestId,
+                stage: 'resume',
+                failureClass: RESOURCE_EXHAUSTED_CLASS,
+                ...(timedOut ? { taskId: timedOut.taskId } : {}),
+              }));
+              return await finishDirectReply(renderResourceExhaustedReply({ record: timedOut }), 'resource_exhausted');
             }
             return await finishDirectReply(error.message, 'confirmed_plan_resume_failed');
           }
@@ -808,7 +822,32 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                     cooldownEntered: snapshot.coolingDown,
                   }));
                 }
-                if (error instanceof ToolUserError) throw error;
+                if (error instanceof ToolUserError) {
+                  // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
+                  // 'timeout'）以 DELEGATION_TIMEOUT_FAILURE 话术上抛（error-codes 表唯一
+                  // 来源，恒等比对、不模糊匹配）。宿主按协议把该失败分类为
+                  // RESOURCE_EXHAUSTED，并从执行事实合成终稿（已完成部分/未完成部分/续跑
+                  // 入口，判据与渲染住 resource-exhausted.ts）——替代干巴巴的"请稍后重试"。
+                  // 只 enrich 用户话术：delegation_span 的 failed/timeout 与 platform_tasks
+                  // 的 failed 终态由 context.ts 原样落，不被这里改写；分类经审计事件与
+                  // turn_span 的 resource_exhausted 留痕。
+                  if (error.message === DELEGATION_TIMEOUT_FAILURE) {
+                    turn.resourceExhausted = true;
+                    const timedOut = await loadTimedOutRecord(deps.platformTasks, ctx.principalId, ctx.sessionId, intent.continueTaskId, ctx.requestId);
+                    console.info(JSON.stringify({
+                      event: 'resource_exhausted_reply',
+                      requestId: ctx.requestId,
+                      failureClass: RESOURCE_EXHAUSTED_CLASS,
+                      ...(timedOut ? { taskId: timedOut.taskId } : {}),
+                      ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+                    }));
+                    throw new ToolUserError(renderResourceExhaustedReply({
+                      record: timedOut,
+                      doneSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label),
+                    }));
+                  }
+                  throw error;
+                }
                 console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
                 throw new ToolUserError(FALLBACK_FAILURE);
               }
@@ -1157,7 +1196,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         void deps.platformTask.recordTaskResult?.(taskId, { resultText })?.catch(() => undefined);
       }
       scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
-      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok', ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
+      // turn_span 的 outcome 带上资源耗尽分类（路径 1"失败必达"）：委派超时的回合以
+      // 合成终稿收尾，outcome 记 resource_exhausted 供审计与续跑识别；delegation_span
+      // 的 failed/timeout 分类由 context.ts 独立落账，两侧不互斥。
+      console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: turn.resourceExhausted ? 'resource_exhausted' : needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok', ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
       return { text: replyText };
       async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals): Promise<AgentReply> {
         const now = Date.now();

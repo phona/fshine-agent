@@ -123,6 +123,8 @@ function proposalWorker(...proposals: object[]) {
 
 /**
  * 放开写能力：harness boot 默认只读（与 config/agent.yaml 的 capabilities: ["read"] 同形态）。
+ * ⑧ 后执法判据 = 平台写开放声明（writeEnabled，mock 默认放开），principal capabilities 不再
+ * 参与执法——本函数保留是为了维持"合法 principal"的夹具形状，不再承载授权语义。
  */
 async function grantWrite(assembly: Awaited<ReturnType<typeof boot>>['assembly']) {
   await assembly.store.principalScopes.upsert({
@@ -209,10 +211,12 @@ describe('网关提案路径 · 提案创建（无开关，默认部署）：平
 
   it('能力不含 write：宿主当场合成写关闭话术，平台一次都没被办调（无提案落库）', async () => {
     const { send, assembly } = await boot({
+      // ⑧ 部署关写（writeEnabled: false）：提案路径的写开放复核据此拒绝
+      writeEnabled: false,
       main: writeChainMain([{ kind: 'delegate', request: '录入一笔 9 月凭证' }]),
       worker: gatewayProposalWorker(singleValidProposal()),
     });
-    // 不开写能力：harness boot 默认只读
+    // 部署写声明关闭
 
     const reply = await send('录入一笔 9 月凭证');
 
@@ -362,8 +366,14 @@ describe('网关提案路径 · 完整落账链（默认部署，无开关）', 
     await assembly.close();
   });
 
-  it('能力在确认时点被收回：确定性拒绝、零写入、提案保持待确认（D-080 端到端）', async () => {
+  it('落账声明关闭时确认被确定性拒绝：零写入、提案保持待确认（D-080 端到端）', async () => {
+    // ⑧ 后 D-080 的时点纪律由双声明分离表达：提案时点看 writeEnabled（开，提案成立并
+    // 发码），确认时点看 proposalCommitEnabled（关，确认被拒）——两个判点、两份声明，
+    // 证明确认步确实重新复核而不是沿用提案时点的放行。部署中途收写是运维面动作，
+    // e2e 以静态双声明覆盖同一执法分支。
     const { send, assembly } = await boot({
+      writeEnabled: true,
+      proposalCommitEnabled: false,
       main: writeChainMain([
         { kind: 'delegate', request: '录入一笔 9 月凭证' },
         { kind: 'conversation', text: '模型自由回答。' },
@@ -377,11 +387,6 @@ describe('网关提案路径 · 完整落账链（默认部署，无开关）', 
     const code = preview.match(CONFIRM_RE)?.[1];
     expect(code).toBeTruthy();
     const pending = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
-
-    // 提案成立之后收回写权限——正是 D-080 缺口的形状
-    await assembly.store.principalScopes.upsert({
-      wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
-    });
 
     const done = await send(`确认 ${code}`);
 

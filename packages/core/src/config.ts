@@ -91,9 +91,9 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
   const principals: Record<string, PrincipalConfig> = {};
   for (const [key, value] of Object.entries(entries)) {
     const item = asRecord(value, `principals.${key}`);
-    const accountSetIds = item['accountSetIds'];
     principals[key] = {
-      accountSetIds: Array.isArray(accountSetIds) ? accountSetIds.map(String) : [],
+      // accountSetIds 不再进契约：实体授权归执行层，宿主不读 YAML 里的这个键
+      // （config/agent.yaml 里的旧键原样保留，加载层直接忽略）。
       accountSetScope: parseAccountSetScope(item['accountSetScope'], `principals.${key}.accountSetScope`),
       enabled: item['enabled'] === true,
       capabilities: parseCapabilities(item['capabilities'], `principals.${key}.capabilities`),
@@ -151,12 +151,6 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const principals = parsePrincipals(root['principals']);
   const contextProfiles = parseContextProfiles(root['contextProfiles']);
 
-  for (const [key, principal] of Object.entries(principals)) {
-    if (principal.enabled && principal.accountSetScope !== 'all' && principal.accountSetIds.length < 1) {
-      throw new Error(`principal ${key} 已启用但未配置任何 accountSetIds,至少需要 1 个账套`);
-    }
-  }
-
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
 
   const portRaw = env['APP_PORT'] ?? channelRaw['port'];
@@ -189,7 +183,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[] {
   return Object.entries(config.principals).map(([key, principal]) => ({
     wecomUserId: key.startsWith('wecom:') ? key.slice('wecom:'.length) : key,
-    accountSetIds: [...principal.accountSetIds],
+    // 实体授权归执行层：宿主不再持账套名单，列保留不读（写空串形式的历史兼容值）。
+    accountSetIds: [],
     ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
     enabled: principal.enabled,
     capabilities: [...(principal.capabilities ?? ['read'])],

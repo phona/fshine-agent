@@ -3,8 +3,8 @@
  *
  * 分两半，都不起 driver harness：
  *   · **宿主半**（context.ts 的 onCreateProposal / confirmProposalViaGateway）：用一个
- *     "捕获回调"的替身 worker 驱动直接调到那个回调——capability 复核、平台信封三态、意图
- *     条目形状、用户可见文本拼法、env 纪律（剥 DZ_REQUIRE_PLAN）、确认落账四态；
+ *     "捕获回调"的替身 worker 驱动直接调到那个回调——写开放声明复核（⑧，平台侧声明）、
+ *     平台信封三态、意图条目形状、用户可见文本拼法、env 纪律（剥 DZ_REQUIRE_PLAN）、确认落账四态；
  *   · **驱动半**（pi-coding-driver 的 beforeToolCall 拦截点）：用真 createPiCodingWorkerSession
  *     + 直接调 beforeToolCall（与 plan-audit 同一手法）——认不认这条命令、payload 路径越界
  *     拦不拦、三态各交还什么。
@@ -142,8 +142,8 @@ interface HostSetup {
  * onCreateProposal 交出来给用例直接调——于是宿主半的每条判定都能不起 harness 地钉住。
  */
 function setupHost(options: {
-  capabilities?: readonly string[];
-  allowedAccountSetIds?: readonly string[];
+  /** 平台写开放声明（⑧）：缺省 true（mock 部署恒放行的形态）；false = 真平台未置 REAL_COMMIT。 */
+  writeEnabled?: boolean;
   stdout?: string;
   gatewayRunner?: PlanCliRunner;
 }): HostSetup {
@@ -166,6 +166,7 @@ function setupHost(options: {
     workerDriver,
     changeIntents: intents.repo,
     proposalGatewayRunner: runner,
+    writeEnabled: options.writeEnabled ?? true,
     generateCode: () => 'D3F2K9',
     intentTtlMs: 10 * 60_000,
   });
@@ -178,8 +179,6 @@ function setupHost(options: {
           requestId: 'req_1',
           principalId: 'wecom:u1',
           sessionId: 'wecom:u1:c1',
-          allowedAccountSetIds: [...(options.allowedAccountSetIds ?? [])],
-          capabilities: [...(options.capabilities ?? ['read', 'write'])],
         },
       });
       if (!captured) return null;
@@ -198,25 +197,15 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
     expect(host.rows.size).toBe(1);
   });
 
-  it('capability 不含 write：当场合成写关闭话术，零平台调用', async () => {
-    const host = setupHost({ capabilities: ['read'] });
+  it('平台声明写未开放（writeEnabled=false）：当场合成写关闭话术，零平台调用', async () => {
+    const host = setupHost({ writeEnabled: false });
 
     const outcome = await host.invoke();
 
     expect(outcome?.status).toBe('write_closed');
     // 话术唯一来源在 error-codes.ts（与计划门拒绝、旧提案路径同一句）
     expect(outcome && 'userText' in outcome ? outcome.userText : '').toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    // 不办调平台：能力不成立时一次网关调用都不发生
-    expect(host.calls).toHaveLength(0);
-    expect(host.rows.size).toBe(0);
-  });
-
-  it('授权名单限制模式：同样不办调（host-held scope，不因 payload 不透明而放宽）', async () => {
-    const host = setupHost({ allowedAccountSetIds: ['as_001'] });
-
-    const outcome = await host.invoke();
-
-    expect(outcome?.status).toBe('write_closed');
+    // 不办调平台：声明不成立时一次网关调用都不发生
     expect(host.calls).toHaveLength(0);
     expect(host.rows.size).toBe(0);
   });
@@ -333,6 +322,8 @@ async function workerWith(options: {
     operationArgStyles: new Map(),
     operationSemantics: new Map(),
     operationProtocols: options.protocols ?? PROTOCOLS,
+    // 工作区按任务注入（⑨）：payload 边界检查的判据输入（与 write 门同一把尺）
+    scratchDir: `tmp/${options.requestId}`,
     ...(options.onCreateProposal ? { onCreateProposal: options.onCreateProposal } : {}),
   });
   return { worker, cwd };
@@ -478,6 +469,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       operationArgStyles: new Map(),
       operationSemantics: new Map(),
       operationProtocols: PROTOCOLS,
+      scratchDir: 'tmp/req_gate',
       onCreateProposal: async () => ({ status: 'completed', proposalId: 'p', userText: 'u', workerText: 'w' }),
       serveGateAudit: (event) => { events.push({ tool: event.tool, allowed: event.allowed, reason: event.reason ?? '' }); },
     });
@@ -536,7 +528,6 @@ interface ConfirmSetup {
 }
 
 function setupConfirm(options: {
-  capabilities?: readonly string[];
   proposalCommitEnabled?: boolean;
   commitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
   result?: Partial<ProposalCommitResult>;
@@ -583,8 +574,6 @@ function setupConfirm(options: {
     requestId: 'req_confirm',
     principalId: 'wecom:u1',
     sessionId: 'wecom:u1:c1',
-    allowedAccountSetIds: [],
-    capabilities: [...(options.capabilities ?? ['read', 'write'])],
   };
   return {
     reply: () => taskRunner.matchConfirmation!(ctx, `确认 ${CONFIRM_CODE}`),
@@ -595,10 +584,13 @@ function setupConfirm(options: {
 }
 
 describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 分流）', () => {
-  it('D-080 翻转：提案成立后收回 write，确认时点复核必被拒、意图保持 pending、零办调', async () => {
+  it('D-080 时点纪律 + ⑧ 判据切换：确认时点平台声明写未开放 → confirm_held、意图保持 pending、零办调', async () => {
+    // 主体授权归执行层（⑥）后，"提案之后被收回"的形状只剩部署声明翻转——确认时点读
+    // 此刻的声明位（isCommitEnabled 派生），不认任何主体快照。声明不成立：不落账、
+    // 不借"过期"说谎，提案保持 pending，一次平台调用都不发生。
     const setup = setupConfirm({
-      capabilities: ['read'],
-      commitRunner: async () => { throw new Error('能力不成立时不该办调平台'); },
+      proposalCommitEnabled: false,
+      commitRunner: async () => { throw new Error('声明不成立时不该办调平台'); },
     });
 
     const reply = await setup.reply();
@@ -610,20 +602,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(setup.rows.get(INTENT_ID)?.status).toBe('pending');
     expect(setup.commitCalls).toHaveLength(0);
     expect(setup.taskUpserts).toHaveLength(0);
-  });
-
-  it('落账未放行（isCommitEnabled 假 = 真平台未置 FSHINE_REAL_COMMIT）：确认收到但不写，意图保持 pending', async () => {
-    const setup = setupConfirm({
-      proposalCommitEnabled: false,
-      commitRunner: async () => { throw new Error('未放行时不该办调平台'); },
-    });
-
-    const reply = await setup.reply();
-
-    expect(reply?.text).toContain('当前落账执行未启用');
-    expect(reply?.outcome).toBe('confirm_held');
-    expect(setup.rows.get(INTENT_ID)?.status).toBe('pending');
-    expect(setup.commitCalls).toHaveLength(0);
   });
 
   it('开关说接了但后端没注入（配置故障）：fail-closed → confirm_failed + 意图 failed + 任务终态 failed', async () => {

@@ -30,8 +30,12 @@ describe('离线全链 e2e：写关闭 disclosure（D-075）', () => {
         { plan: [{ operation: 'voucher.prepare', args: ['幻辰财税', '202609'] }] },
         { text: '已准备好录入提案，即可产出。' },
       ], { enforceWriteClosure: true }),
+      // ⑧：写关闭判据读平台侧声明（isCommitEnabled 派生）。mock 之下该声明恒真（写链路
+      // 全放开），本用例经 assembly 覆盖显式钉"真平台未置 FSHINE_REAL_COMMIT"的部署——
+      // mock 不可达的那一态，执法接线仍要可验（派生规则在 proposal-flow 单测钉住）。
+      writeEnabled: false,
     });
-    // 生产保真：principal 的能力声明显式为只读（与 config/agent.yaml 的 capabilities: ["read"] 同形态）
+    // 生产保真：principal 的能力声明显式为只读（遗留数据位，写关闭执法已不读它——⑧）
     await assembly.store.principalScopes.upsert({
       wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
     });
@@ -64,12 +68,14 @@ describe('离线全链 e2e：写关闭 disclosure（D-075）', () => {
         { text: '幻辰财税当前期间应收账款余额为 86000 元。' },
         { end: true },
         // 第 2 步：写类计划（voucher.prepare，access=write-flag）——宿主在 evaluate 前
-        // 拦下（与真实驱动 beforeToolCall 同一把机械尺：calls × access 表 × capabilities）
+        // 拦下（与真实驱动 beforeToolCall 同一把机械尺：calls × access 表 × 平台写开放声明）
         { plan: [{ operation: 'voucher.prepare', args: ['幻辰财税', '202609'] }] },
         { text: '已准备好录入提案，即可产出。' },
       ], { enforceWriteClosure: true }),
+      // ⑧：同上——经 assembly 覆盖显式钉"平台声明写未开放"的部署形态。
+      writeEnabled: false,
     });
-    // 生产保真：principal 的能力声明显式为只读（与 config/agent.yaml 的 capabilities: ["read"] 同形态）
+    // 生产保真：principal 的能力声明显式为只读（遗留数据位，写关闭执法已不读它——⑧）
     await assembly.store.principalScopes.upsert({
       wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
     });

@@ -50,7 +50,7 @@ const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
 // 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
 const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
-// 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。
+// 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明注入）。
 // 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
 // accessSemantics 表尚未下发时派生只得空表 = 写关闭扫描静默失效，故注入替身防假绿）。
 // 翻回条件已成立：实测派生 53 条、与替身 18 条逐条一致（护栏 HF-1 验证）。替身缺的
@@ -337,8 +337,8 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       onNotice?: (text: string) => Promise<void>;
       /** 宿主注入的实体来源（架构 §2 第 9 条）：替身按它复刻真实驱动的计划门禁。 */
       entitySources?: PlanEntitySources;
-      /** 宿主注入的能力声明（D-075）：替身按它复刻真实驱动的写关闭计划扫描。 */
-      capabilities?: readonly string[];
+      /** 宿主注入的平台写开放声明（D-075 + ⑧）：替身按它复刻真实驱动的写关闭计划扫描。 */
+      writeEnabled?: boolean;
       /** 宿主注入的提案创建出口（方案 1 · B 波 B3，开关开着才注入）。 */
       onCreateProposal?: (call: { operation: string; payloadPath: string }) => Promise<{
         status: string;
@@ -492,10 +492,11 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           }
         }
         // 写关闭计划扫描（D-075）：与真实驱动 beforeToolCall 同一把机械尺——calls（宿主
-        // 解析）× 语义表（平台 access 声明，confirm 列）× capabilities（宿主注入）。命中即在
-        // evaluate 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型停在"录入准备"阶段
-        // 永不抵达提案步，这句话必须由宿主说，且 worker 的准备/承诺文本不得外发。
-        if (enforceWriteClosure && planWriteClosed(current.plan, operationSemantics, input.capabilities)) {
+        // 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明，
+        // ⑧）。命中即在 evaluate 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型
+        // 停在"录入准备"阶段永不抵达提案步，这句话必须由宿主说，且 worker 的准备/承诺
+        // 文本不得外发。
+        if (enforceWriteClosure && planWriteClosed(current.plan, operationSemantics, input.writeEnabled === true)) {
           const text = messageTextFor('WRITE_NOT_ENABLED');
           return {
             text,
@@ -676,18 +677,33 @@ interface BootOptions {
    * 补丁 contextProfiles['17dz']（T1 worker 超时全链）：把 config/agent.yaml 复制一份、
    * 打上补丁写进 stateDir，经 AGENT_CONFIG_PATH 只对本 boot 生效。不动仓库里的真配置。
    */
-  patchProfile?: { workerTimeoutMs?: number };
+  patchProfile?: { workerTimeoutMs?: number; root?: string };
+  /**
+   * 平台写开放声明的覆盖（⑧，写关闭 disclosure e2e 用）：缺省按生产规则由
+   * isCommitEnabled(bootEnv) 派生（mock ⇒ true）。给 false 时模拟"真平台未置
+   * FSHINE_REAL_COMMIT"的部署——mock 之下该形态不可达，但 D-075 执法流程的接线
+   * （计划扫描 → 终稿替换 → 零调用）仍要可验；派生规则本身由 proposal-flow 单测钉住。
+   */
+  writeEnabled?: boolean;
+  /** 落账声明覆盖（D-080）：确认时点复核的是这一位——提案成立 ≠ 落账放行。 */
+  proposalCommitEnabled?: boolean;
 }
 
 async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
-  if (options.patchProfile) {
+  // 隔离运行（DZ_PLATFORM_ROOT）：开发仓的 17dz-platform 常被并行任务动到半途（未登记
+  // 的孤儿脚本会让 operations lint 红掉、boot 拒起）。指向干净快照时把 config 的
+  // profiles['17dz'].root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
+  // e2e 与开发仓的进行中改动互不拖累。缺省（未设该变量）行为一字不变。
+  const isolatedRoot = (bootEnv['DZ_PLATFORM_ROOT'] ?? '').trim();
+  if (options.patchProfile || isolatedRoot !== '') {
     const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
     const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
     const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
     if (!profiles?.['17dz']) throw new Error('patchProfile：仓库配置里找不到 contextProfiles.17dz');
-    Object.assign(profiles['17dz']!, options.patchProfile);
+    if (options.patchProfile) Object.assign(profiles['17dz']!, options.patchProfile);
+    if (isolatedRoot !== '') profiles['17dz']!['root'] = isolatedRoot;
     const patchedPath = path.join(stateDir, `agent-config-${counter}.yaml`);
     writeFileSync(patchedPath, stringifyYaml(config));
     bootEnv['AGENT_CONFIG_PATH'] = patchedPath;
@@ -711,6 +727,8 @@ async function boot(options: BootOptions): Promise<Boot> {
     contextModelDriver: options.contextModelDriver
       ?? { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) },
     memoryCandidateExtractor: options.memoryCandidateExtractor ?? (async () => []),
+    ...(options.writeEnabled !== undefined ? { writeEnabled: options.writeEnabled } : {}),
+    ...(options.proposalCommitEnabled !== undefined ? { proposalCommitEnabled: options.proposalCommitEnabled } : {}),
   });
   // 与生产一致：principal 由可信的企微用户 ID 解析，先开通查询权限
   await assembly.store.principalScopes.upsert({

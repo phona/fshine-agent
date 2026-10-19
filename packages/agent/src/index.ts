@@ -186,6 +186,7 @@ export {
   has,
   messageFor,
   messageTextFor,
+  planDraftExample,
   platformUnavailableTextFor,
   toolUserErrorFor,
 } from './error-codes';

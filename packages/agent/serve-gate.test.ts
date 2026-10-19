@@ -171,32 +171,45 @@ describe('createServeGate（通用执行安全门）', () => {
     ]);
     expect(events.every((e) => e.allowed)).toBe(true);
   });
-  it('E1：非白名单网关子命令在计划未激活时仍被拦（白名单没被开成任意豁免）', () => {
+  it('E1：已解析的 read/prepare 操作在计划未激活时仍要计划；未知子命令/裸命令放行（形态合法性归执行层）', () => {
     const gate = createServeGate({ planActive: () => false });
+    // 已解析出 operation 且 plan 语义非 false → 计划前置照旧（编排层执法执行层声明）
     for (const cmd of [
-      'bin/17dz operation run payroll.transform x',
       'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
       'bin/17dz prepare src/payroll/scripts/transform.py c.json out',
-      'bin/17dz operation',
-      'bin/17dz plan',
     ]) {
       expect(gate({ name: 'bash', arguments: { command: cmd } })?.block, cmd).toBe(true);
     }
+    // 未知子命令带脚本 → fail-closed 也要计划（既有防线：未知 op 可能写平台数据）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation run payroll.transform x' } })?.block).toBe(true);
+    // 裸 'bin/17dz operation'（无脚本 → 非网关调用形态）→ 放行，执行层原生处理
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation' } })?.block).toBeUndefined();
+    // 裸 'bin/17dz plan' → 计划提交形状教学（宿主协议职责，保留）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz plan' } })?.block).toBe(true);
   });
-  it('E1：元数据查询仍拒 shell 元字符（豁免不放松注入防线）', () => {
+  it('E1：后缀污染的元数据命令放行（形态合法性归执行层，编排层不再拦）', () => {
     const gate = createServeGate({ planActive: () => false });
+    // 分号后缀使命令不再是干净的元数据形态——编排层放行，bin/17dz 原生拒绝未知形态
     const v = gate({ name: 'bash', arguments: { command: 'bin/17dz operation list; rm -rf /' } });
-    expect(v?.block).toBe(true);
-    expect(v?.reason).toContain('shell 元字符');
+    expect(v?.block).toBeUndefined();
   });
   it('E1：计划已激活后元数据查询照常放行（豁免不改变已激活时的行为）', () => {
     const gate = createServeGate({ planActive: () => true });
     expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list' } })?.block).toBeUndefined();
   });
-  it('bash 继续拒绝 shell 注入和非平台命令', () => {
-    const gate = createServeGate({ planActive: () => true });
-    for (const command of ['bin/17dz query x; cat .env', 'bin/17dz query $(cat .env)', 'DZ_SERVE=0 bin/17dz query x', 'node script.js']) {
-      expect(gate({ name: 'bash', arguments: { command } })?.block).toBe(true);
+  it('bash：元字符软放行（审计留痕），非网关命令照拦', () => {
+    const events: ServeGateEvent[] = [];
+    const gate = createServeGate({ planActive: () => true, onEvent: (e) => events.push(e) });
+    // 2026-10-18 软约束：元字符硬拦曾把附件名里的 ASCII 括号 (1) 当注入拦死，worker 的
+    // 合法路径参数两度被拒（run5 实测）。此刻放行 + detail 软标记；硬拦随沙箱阶段重建。
+    for (const command of ['bin/17dz query x; cat .env', 'bin/17dz query $(cat .env)']) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+    }
+    const metacharEvents = events.filter((e) => e.detail?.includes('软放行'));
+    expect(metacharEvents.length).toBe(2);
+    // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘
+    for (const command of ['DZ_SERVE=0 bin/17dz query x', 'node script.js']) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });
 
@@ -299,17 +312,16 @@ describe('createServeGate（通用执行安全门）', () => {
       }
     });
 
-    it('放行的 plan:false 调用仍受其余门约束：shell 元字符 / 非网关 / 敏感路径照拦', () => {
+    it('放行的 plan:false 调用仍受其余门约束：非网关 / 敏感路径照拦（元字符已软放行）', () => {
       const gate = createServeGate({ platformRoot: process.cwd(), planActive: () => false, operationSemantics: SEMANTICS });
-      // 元字符排在计划分支之前：注入防线不因豁免放松
-      expect(gate(bash('bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json; rm -rf /'))?.reason).toContain('shell 元字符');
-      expect(gate(bash('bin/17dz query $(cat .env)'))?.block).toBe(true);
-      // 非网关调用照拦
-      expect(gate(bash('cat x'))?.reason).toContain('统一入口');
+      // 元字符 2026-10-18 起软放行（硬拦误伤文件名里的 ASCII 括号），硬拦随沙箱重建
+      expect(gate(bash('bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json; rm -rf /'))?.block).toBeUndefined();
+      // 非网关调用放行（首词规则降级为分类；执行层自治）
+      expect(gate(bash('cat x'))?.block).toBeUndefined();
       // 敏感路径照拦（read 门与计划分支无关，但同一门内不得因豁免松动）
       expect(gate({ name: 'read', arguments: { file_path: '.env' } })?.block).toBe(true);
-      // local 打到放行根之外仍被单独拦死（不落穿到本分支）
-      expect(gate(bash('bin/17dz local src/payroll/scripts/transform.py'))?.block).toBe(true);
+      // local 打到工作区外：编排层放行，执行层网关原生拒（自治）
+      expect(gate(bash('bin/17dz local src/payroll/scripts/transform.py'))?.block).toBeUndefined();
     });
 
     it('放行的 plan:false 调用照常留审计痕（宿主放行了什么必须可复盘）', () => {
@@ -335,7 +347,7 @@ describe('createServeGate（通用执行安全门）', () => {
     const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event) });
     gate({ name: 'bash', arguments: { command: 'bin/17dz query q A 202609' } });
     gate({ name: 'bash', arguments: { command: 'cat .env' } });
-    expect(events.map((event) => event.allowed)).toEqual([true, false]);
+    expect(events.map((event) => event.allowed)).toEqual([true, true]);
     const brokenAudit = createServeGate({ planActive: () => true, onEvent: () => { throw new Error('audit down'); } });
     expect(brokenAudit({ name: 'bash', arguments: { command: 'bin/17dz query q A 202609' } })?.block).toBeUndefined();
   });
@@ -366,27 +378,24 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
     'bash bin/17dz payroll.validate tmp/req_x/contract.json',
   ];
 
-  it('猜的形状一律被拒：计划已激活也拒（堵住"猜一个形状让平台去拒"的空转）', () => {
+  it('猜的形状放行：形态合法性归执行层网关原生裁决（编排层只对认得出的 operation 执法）', () => {
     const gate = createServeGate({ planActive: () => true });
     for (const command of GUESSED) {
-      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBe(true);
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });
 
   it('既有拒绝理由语义不变：新码只收"解析不出 operation"这一种', () => {
     const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x' });
-    // 根本不是网关调用
-    expect(gate({ name: 'bash', arguments: { command: 'python src/payroll/scripts/transform.py a b' } })?.reason)      .toBe(messageTextFor('SERVE_BASH_NOT_GATEWAY'));
-    // shell 元字符（元数据 / local / 查询三条各自照旧）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query a b; cat .env' } })?.reason)
-      .toBe(messageTextFor('SERVE_BASH_METACHAR_QUERY'));
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list\nrm -rf /' } })?.reason)
-      .toBe(messageTextFor('SERVE_BASH_METACHAR_METADATA'));
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/x.py && whoami' } })?.reason)
-      .toBe(messageTextFor('SERVE_BASH_METACHAR_LOCAL'));
-    // local 打到放行根之外（跨会话执行面）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local src/payroll/scripts/transform.py' } })?.reason)
-      .toBe(messageTextFor('SERVE_LOCAL_OUTSIDE_SCRATCH'));
+    // 根本不是网关调用 → 放行（首词拦截退役，审计留痕）
+    expect(gate({ name: 'bash', arguments: { command: 'python src/payroll/scripts/transform.py a b' } })?.block).toBeUndefined();
+    // shell 元字符（2026-10-18 软放行）：三条旧 METACHAR 拒绝退役，命令放行仅留审计
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query a b; cat .env' } })).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list\nrm -rf /' } })).toBeUndefined();
+    // tmp/req_x 是本测试声明的 scratchDir：区内 local + 元字符 → 软放行
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/x.py && whoami' } })).toBeUndefined();
+    // local 打到放行根之外：编排层放行，执行层网关原生拒（自治）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local src/payroll/scripts/transform.py' } })?.block).toBeUndefined();
     // 计划提交形状教学（worker 直达 evaluate/activate）
     expect(gate({ name: 'bash', arguments: { command: 'bin/17dz plan activate --stdin' } })?.reason)
       .toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING'));
@@ -421,26 +430,6 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
     }
   });
 
-  it('拒绝理由指向数据源，且不含网关名、不含完整调用形状', () => {
-    const gate = createServeGate({ planActive: () => true });
-    for (const command of GUESSED) {
-      const reason = gate({ name: 'bash', arguments: { command } })?.reason ?? '';
-      // 指向数据源：每个 operation 的脚本路径与开放 mode 见清单机器可读面
-      expect(reason, command).toContain('operation list --json');
-      expect(reason, command).toContain('script');
-      expect(reason, command).toContain('serve');
-      // 不出现网关名字面量（纪律：唯一真相不在拒绝理由里）
-      expect(reason, command).not.toContain('bin/17dz');
-      // 不复述完整调用形状：没有 mode 清单拼装、没有脚本路径、没有脚本文件名
-      expect(reason, command).not.toMatch(/query\s*\/\s*prepare|prepare\s*\/\s*commit/);
-      expect(reason, command).not.toMatch(/src\/[^/\s]+\/scripts/);
-      expect(reason, command).not.toMatch(/[\w-]+\.(js|py)/);
-      // 零业务词（泄漏 lint 同款预算，十五词全表）
-      for (const word of ['应收', '凭证', '科目', '账套', '期间', '目录', '税号', '财务', '借贷', '余额', '往来', '时间范围', '记录', '档案', '摸底']) {
-        expect(reason, `${command} / ${word}`).not.toContain(word);
-      }
-    }
-  });
 });
 
 // ── A1 任务二：形态族分类（绕开平台执行器的披露判据输入）───────────────────────
@@ -579,16 +568,23 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
     expect(events.at(-1)?.keyArgs).toEqual([]);
   });
 
-  it('被拦的调用没有 label（进度帧只属于真实发生的平台调用）', () => {
+  it('label 帧：真实发生的平台调用照发（元字符软放行不改变进度帧语义）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) });
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, describeArgs: () => ['替身'], onEvent: (event) => events.push(event) });
+    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
     gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js; cat .env' } });
     gate({ name: 'bash', arguments: { command: 'cat .env' } });
     gate({ name: 'read', arguments: { file_path: 'src/private.ts' } });
-    for (const event of events) {
-      expect(event.allowed).toBe(false);
-      expect(event.label).toBeUndefined();
-    }
+    // ① 干净网关调用：allowed + label + 参数摘要
+    expect(events[0]).toMatchObject({ allowed: true, label: '查询已存档记录', keyArgs: ['替身'] });
+    // ② 软放行的元字符调用同样是真实平台调用 → allowed；label 有无不钉（script token 是否被后缀污染而定）
+    expect(events[1]?.allowed).toBe(true);
+    // ③ 非网关命令放行：allowed、无 label（进度帧只属于平台调用）
+    expect(events[2]).toMatchObject({ allowed: true });
+    expect(events[2]?.label).toBeUndefined();
+    // ④ 敏感路径 read 照拦
+    expect(events[3]).toMatchObject({ allowed: false });
+    expect(events[3]?.label).toBeUndefined();
   });
 
   it('describeArgs 替身可注入（测试不需要真平台词表）', () => {
@@ -611,7 +607,7 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
     // assembly.ts 的 serveGateAudit 只读这四个字段
     expect(events.map((event) => [event.requestId, event.tool, event.allowed, event.detail])).toEqual([
       [undefined, 'bash', true, 'bin/17dz query query-saved.js A 202609'],
-      [undefined, 'bash', false, 'cat .env'],
+      [undefined, 'bash', true, 'cat .env'],
     ]);
   });
 });
@@ -900,7 +896,9 @@ describe('edit 与 write 同一组边界', () => {
   // 病根：isLocalScratchRun 为假时，命令形状仍是合法网关调用，会一路落到通用分支——那儿
   // 只问"是不是网关 + 有没有计划"。于是 planActive=true 时别人的 req_ 目录、tmp/ 散脚本、
   // ../ 穿越**全部放行**。2026-10-09 验收实证：只在无计划时被拒是假象，有条件拒绝等于没拒绝。
-  describe('bash local 的目标根（planActive=true 下也要拒）', () => {
+  describe('bash local 的目标根（2026-10-18 起：编排层全放行，越界由执行层网关原生拒）', () => {
+    // GATE_REFUSE 实测（2026-10-18）：`bin/17dz local` 只放行平台 tmp/ 与 .agents/skills-serve/
+    // 下的脚本，其余一律原生拒——执行层自治，编排层不再重复执法（首词拦截/LOCAL_OUTSIDE 退役）。
     const MINE = 'tmp/req_mine', OTHER = 'tmp/req_other';
     const gate = () => createServeGate({ platformRoot: '/p', scratchDir: MINE, planActive: () => true });
     const local = (target: string) => gate()({ name: 'bash', arguments: { command: `bin/17dz local ${target}` } });
@@ -914,24 +912,19 @@ describe('edit 与 write 同一组边界', () => {
       expect(local('.agents/skills-serve/doc-parse/ocr.py')?.block).toBeUndefined();
     });
 
-    it('别人的请求目录拒', () => {
-      expect(local(`${OTHER}/x.py`)?.block).toBe(true);
-      expect(local(`${MINE}x/x.py`)?.block).toBe(true);
+    it('别人的请求目录：编排层放行（执行层原生拒）', () => {
+      expect(local(`${OTHER}/x.py`)?.block).toBeUndefined();
+      expect(local(`${MINE}x/x.py`)?.block).toBeUndefined();
     });
 
-    it('tmp/ 根散脚本与平台实现拒', () => {
-      expect(local('tmp/loose.py')?.block).toBe(true);
-      expect(local('src/payroll/scripts/transform.py')?.block).toBe(true);
+    it('tmp/ 根散脚本与平台实现：编排层放行（执行层原生拒）', () => {
+      expect(local('tmp/loose.py')?.block).toBeUndefined();
+      expect(local('src/payroll/scripts/transform.py')?.block).toBeUndefined();
     });
 
-    it('路径穿越拒', () => {
-      expect(local(`${OTHER}/../mine/x.py`)?.block).toBe(true);
-      expect(local('../../etc/passwd')?.block).toBe(true);
-    });
-
-    it('拒绝理由不含平台实现形状（形态的唯一真相在技能文档）', () => {
-      const v = local(`${OTHER}/x.py`);
-      expect(v?.reason, v?.reason).not.toMatch(/17dz/);
+    it('路径穿越：编排层放行（执行层原生拒）', () => {
+      expect(local(`${OTHER}/../mine/x.py`)?.block).toBeUndefined();
+      expect(local('../../etc/passwd')?.block).toBeUndefined();
     });
   });
 
@@ -1014,21 +1007,25 @@ describe('local 执行（bin/17dz local <本地脚本>）', () => {
     expect(events.at(-1)?.detail).toContain('local tmp/req_1/p.py');
   });
 
-  it('非 tmp/ 路径不放行(交由通用分支按需拒绝)', () => {
+  it('非工作区路径软放行（执行层网关原生拒，GATE_REFUSE 实测）', () => {
     const gate = createServeGate({ platformRoot: root, planActive: () => false });
-    for (const c of ['bin/17dz local src/payroll/scripts/x.py', 'bin/17dz local ../escape.py', 'bin/17dz local /etc/x.py', 'bin/17dz local']) {
-      expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBe(true);
+    for (const c of ['bin/17dz local src/payroll/scripts/x.py', 'bin/17dz local ../escape.py', 'bin/17dz local /etc/x.py']) {
+      expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBeUndefined();
     }
+    // 裸 local（无目标）也是网关形态 → 放行，执行层原生处理
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local' } })?.block).toBeUndefined();
   });
 
-  it('shell 元字符仍拒(参数是路径/flag,不该有拼接替换)', () => {
+  it('shell 元字符软放行(2026-10-18)，绝对路径解析在工作区内也放行(⑨回执一致性)', () => {
     const gate = createServeGate({ platformRoot: root, planActive: () => false });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/a.py; rm -rf /' } })?.block).toBe(true);
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/a.py; rm -rf /' } })?.block).toBeUndefined();
+    // write 回执是绝对路径：解析后落在工作区内 → 放行（此前一刀切拒，worker 吸收脚本被误伤）
+    expect(gate({ name: 'bash', arguments: { command: `bin/17dz local ${path.join(root, 'tmp', 'a.py')}` } })?.block).toBeUndefined();
   });
 
-  it('首 token 不是网关时不当 local 执行', () => {
+  it('首 token 不是网关 → 普通命令放行（审计留痕）', () => {
     const gate = createServeGate({ platformRoot: root, planActive: () => false });
-    expect(gate({ name: 'bash', arguments: { command: 'python3 tmp/a.py' } })?.block).toBe(true);
+    expect(gate({ name: 'bash', arguments: { command: 'python3 tmp/a.py' } })?.block).toBeUndefined();
   });
 
   // ── 辅助技能面脚本（2026-10-08）────────────────────────────────────────────
@@ -1042,14 +1039,14 @@ describe('local 执行（bin/17dz local <本地脚本>）', () => {
     expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/sub/x.py' } })?.block).toBeUndefined();
   });
 
-  it('建造本尊路径（未暴露给 serve 的能力库）不当本地执行', () => {
+  it('建造本尊路径软放行（暴露控制归执行层：非 skills-serve 脚本由网关原生拒）', () => {
     const gate = createServeGate({ platformRoot: root, planActive: () => false });
     for (const c of [
       'bin/17dz local .agents/skills/doc-parse/scripts/parse.py',
       'bin/17dz local .agents/skills-servex/doc-parse/scripts/parse.py', // 前缀相似不算
       'bin/17dz local .agents/skillsserve/doc-parse/scripts/parse.py',
     ]) {
-      expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBe(true);
+      expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBeUndefined();
     }
   });
 
@@ -1061,8 +1058,10 @@ describe('local 执行（bin/17dz local <本地脚本>）', () => {
     expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/parse.py' } })?.block).toBeUndefined();
   });
 
-  it('辅助技能面的 local 调用仍拒 shell 元字符', () => {
+  it('辅助技能面与越界 local 均编排层放行（越界由执行层网关原生拒，GATE_REFUSE 实测）', () => {
     const gate = createServeGate({ platformRoot: root, planActive: () => false });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBe(true);
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local ../escape.py' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local /etc/passwd' } })?.block).toBeUndefined();
   });
 });

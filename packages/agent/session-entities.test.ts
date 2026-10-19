@@ -181,7 +181,7 @@ describe('合并去重：来源 A（执行实体）∪ 来源 B（澄清选定�
 // ── 来源 B：clarification_event 事件族 ────────────────────────────────────
 
 function ctx(requestId = 'req_clarify') {
-  return { requestId, principalId: 'wecom:user_a', sessionId: 'sess_1', allowedAccountSetIds: [], capabilities: ['read'] };
+  return { requestId, principalId: 'wecom:user_a', sessionId: 'sess_1', capabilities: ['read'] };
 }
 
 function event(overrides: Partial<ConversationEventRecord> & { eventId: string; kind: ConversationEventRecord['kind'] }): ConversationEventRecord {

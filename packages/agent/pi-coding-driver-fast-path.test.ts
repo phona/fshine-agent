@@ -268,7 +268,7 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
     const task = createContextTaskRunner({ profiles, tasks, workerDriver: driver });
 
     // 宿主终局分支（背带的常规位）：ToolUserError 语义 = 这段文本成为本轮回复。
-    await expect(task.run({ request: '核对对象甲 202609 的应收余额' }, { trusted: { requestId: 'req_fastpath', principalId: 'wecom:u', allowedAccountSetIds: [], sessionId: 's1' } }))
+    await expect(task.run({ request: '核对对象甲 202609 的应收余额' }, { trusted: { requestId: 'req_fastpath', principalId: 'wecom:u', sessionId: 's1' } }))
       .rejects.toThrow('没有查到“对象甲”在 202609 的数据。平台上有数据的是：202606。要改查的话，告诉我查哪一项即可。');
   });
 });

@@ -32,6 +32,12 @@ export interface TurnState {
   activatedPlan: { planId: string; version: number } | null;
   /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
   delegationFailed: boolean;
+  /**
+   * 本回合以资源耗尽（RESOURCE_EXHAUSTED，协议失败分类）收尾：委派层超时分类的失败。
+   * 终稿由宿主从执行事实合成（resource-exhausted.ts），turn_span 按它记 resource_exhausted
+   * 供审计与续跑识别——delegation_span 的 failed/timeout 分类由 context.ts 原样落，不互斥。
+   */
+  resourceExhausted: boolean;
   /** 纠错环（架构 §3）：本回合已发生几轮"子 Agent 回报缺信息"。0 = 没有回路。 */
   needsRounds: number;
   /** 最近一条结构化线索（回路兜底转达用户时用）。 */
@@ -66,6 +72,7 @@ export function createTurnState(planChoice?: { planId: string } | null): TurnSta
     pendingPlan: null,
     activatedPlan: null,
     delegationFailed: false,
+    resourceExhausted: false,
     needsRounds: 0,
     lastNeeds: null,
     planSteps: 0,

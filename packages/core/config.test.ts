@@ -17,6 +17,9 @@ principals:
     accountSetIds: []
     enabled: false
 `;
+// YAML 里的 accountSetIds 键在契约删除后（⑥）由加载层忽略：宿主不再持实体授权，
+// config/agent.yaml 的旧键原样保留、不再进 PrincipalConfig。上面夹具刻意保留旧键，
+// 正是为钉住"旧 YAML 照常加载"这一兼容行为。
 
 describe('loadConfig', () => {
   let dir: string;
@@ -46,7 +49,8 @@ describe('loadConfig', () => {
     expect(config.sessionTtlMs).toBe(86_400_000); // 默认 24h:TTL 过期走软着陆,不再分钟级清零失忆
 
     const userA = config.principals['wecom:user_a'];
-    expect(userA?.accountSetIds).toEqual(['as_001', 'as_002']);
+    // accountSetIds 不再进契约（⑥）：YAML 里的旧键被加载层忽略
+    expect('accountSetIds' in (userA ?? {})).toBe(false);
     expect(userA?.enabled).toBe(true);
     expect(userA?.capabilities).toEqual(['read']);
   });
@@ -96,20 +100,19 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).toThrowError(/workerTimeoutMs/);
   });
 
-  it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录', () => {
+  it('principalScopeRecords:去掉 wecom: 前缀映射为授权记录（账套列保留不读，写空）', () => {
     const config = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV });
     const records = principalScopeRecords(config);
 
     expect(records).toHaveLength(2);
     expect(records[0]).toEqual({
       wecomUserId: 'user_a',
-      accountSetIds: ['as_001', 'as_002'],
+      accountSetIds: [],
       enabled: true,
       capabilities: ['read'],
     });
     const disabled = records.find((record) => record.wecomUserId === 'user_b');
     expect(disabled?.enabled).toBe(false);
-    expect(disabled?.accountSetIds).toEqual([]);
     expect(disabled?.capabilities).toEqual(['read']);
   });
 
@@ -128,13 +131,12 @@ contextProfiles:
     }
   });
 
-  it('enabled 的 principal 无账套:报错并指出 principal key', () => {
+  it('enabled 的 principal 无账套不再报错（⑥：宿主不持实体授权，账套校验随之退役）', () => {
     const yaml = VALID_YAML.replace(
       `accountSetIds: ["as_001", "as_002"]\n    enabled: true`,
-      `accountSetIds: []\n    enabled: true`,
+      `enabled: true`,
     );
-    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
-      .toThrowError(/wecom:user_a/);
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV })).not.toThrow();
   });
 
   it('APP_PUBLIC_URL 未设:得到空字符串且不抛(WebSocket 长连接无需公网 URL)', () => {

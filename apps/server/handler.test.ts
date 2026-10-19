@@ -1052,10 +1052,10 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
   };
   afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 
-  // 宿主 requestId = newId('req') = req_<uuid>；草稿位置名必须是这个形态才会被
+  // 任务工作区名与宿主 taskId 同形（task_<uuid>，⑨）；目录名必须是这个形态才会被
   // isScratchDirName 认出来（与生产同一条判据，不另造一个假名字）。
-  const REQUEST_ID = `req_${randomUUID()}`;
-  const OTHER_SESSION_ID = `req_${randomUUID()}`;
+  const TASK_DIR = `task_${randomUUID()}`;
+  const OTHER_TASK_DIR = `task_${randomUUID()}`;
 
   /** 在假平台根的 tmp/ 下写一个文件（rel 可带子路径）；返回绝对路径。 */
   const put = (root: string, rel: string, content: string | Buffer = 'x'): string => {
@@ -1076,7 +1076,7 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
   it('本轮委派开始后落盘的产物被收', () => {
     const root = freshRoot();
     put(root, '工资表.xlsx', 'DATA');
-    const files = collectProducedFiles(root, sinceTurnStart(), REQUEST_ID);
+    const files = collectProducedFiles(root, sinceTurnStart());
     expect(files.map((f) => f.filename)).toEqual(['工资表.xlsx']);
     expect(files[0]!.data.toString()).toBe('DATA');
   });
@@ -1086,37 +1086,29 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
     const stale = put(root, '上一轮落下的产物.xlsx');
     const longAgo = new Date(Date.now() - 60 * 60 * 1000);
     utimesSync(stale, longAgo, longAgo);                          // 把 mtime 推到一小时前
-    expect(collectProducedFiles(root, new Date().toISOString(), REQUEST_ID)).toEqual([]);
+    expect(collectProducedFiles(root, new Date().toISOString())).toEqual([]);
   });
 
   it('tmp/attachments/ 里的不收(那是本轮输入,不是产物)', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
     put(root, 'attachments/用户上传的原料.xlsx');
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toEqual([]);
+    expect(collectProducedFiles(root, since)).toEqual([]);
   });
 
-  it('别的会话的 tmp/req_<别的id>/ 不收', () => {
+  it('任务工作区 tmp/task_<taskId>/ 不收（⑨：工作区是文件交互区，不是交付通道）', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
-    put(root, `${OTHER_SESSION_ID}/别人的草稿.xlsx`);
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toEqual([]);
-  });
-
-  it('本请求的 tmp/req_<本id>/ 收', () => {
-    const root = freshRoot();
-    const since = sinceTurnStart();
-    put(root, `${REQUEST_ID}/整理好的表.xlsx`, 'MINE');
-    const files = collectProducedFiles(root, since, REQUEST_ID);
-    expect(files.map((f) => f.filename)).toEqual(['整理好的表.xlsx']);
-    expect(files[0]!.data.toString()).toBe('MINE');
+    put(root, `${OTHER_TASK_DIR}/别人的中间产物.xlsx`);
+    put(root, `${TASK_DIR}/本任务的草稿.xlsx`);
+    expect(collectProducedFiles(root, since)).toEqual([]);
   });
 
   it('非办公扩展名不收(.py 是中间产物,不是交付物)', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
     put(root, 'transform.py', 'print(1)');
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toEqual([]);
+    expect(collectProducedFiles(root, since)).toEqual([]);
   });
 
   it('超过 20MB 不收', () => {
@@ -1124,24 +1116,23 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
     const since = sinceTurnStart();
     const big = put(root, '超大.xlsx', Buffer.alloc(20 * 1024 * 1024 + 1, 1));
     expect(statSync(big).size).toBeGreaterThan(20 * 1024 * 1024);
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toEqual([]);
+    expect(collectProducedFiles(root, since)).toEqual([]);
   });
 
   it('最多 3 个', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
     for (let i = 0; i < 6; i++) put(root, `f${i}.xlsx`);
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toHaveLength(3);
+    expect(collectProducedFiles(root, since)).toHaveLength(3);
   });
 
   it('同一文件不重复收取(按解析后的真实路径去重)', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
     const real = put(root, '工资表.xlsx', 'DATA');
-    const link = path.join(root, 'tmp', REQUEST_ID, '工资表.xlsx');
-    mkdirSync(path.dirname(link), { recursive: true });
+    const link = path.join(root, 'tmp', `链接名-${TASK_DIR}.xlsx`);
     symlinkSync(real, link);                                      // 同一个文件,两个名字
-    const files = collectProducedFiles(root, since, REQUEST_ID);
+    const files = collectProducedFiles(root, since);
     expect(files).toHaveLength(1);
     expect(files[0]!.data.toString()).toBe('DATA');
   });
@@ -1152,6 +1143,6 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
     const outside = path.join(root, 'secret.docx');
     writeFileSync(outside, 'SECRET');
     symlinkSync(outside, path.join(root, 'tmp', '外泄.xlsx'));
-    expect(collectProducedFiles(root, since, REQUEST_ID)).toEqual([]);
+    expect(collectProducedFiles(root, since)).toEqual([]);
   });
 });

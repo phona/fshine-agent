@@ -27,6 +27,7 @@ import {
   loadOperationArgSpecs,
   newGateSecret,
   parsePiThinkingLevel,
+  planDraftExample,
   type CandidateExtractor,
   type ContextTaskRunner,
   type TurnDriver,
@@ -99,6 +100,15 @@ export interface ServerAssemblyOverrides {
   /** Isolated tool-free driver for Context State extraction. Defaults to `driver`. */
   contextModelDriver?: TurnDriver;
   memoryCandidateExtractor?: CandidateExtractor;
+  /**
+   * 平台写开放声明的显式覆盖（变更项 ⑧）。缺省按生产规则由 isCommitEnabled(env) 派生；
+   * 离线 e2e 用它钉"真平台未置 FSHINE_REAL_COMMIT"形态（mock 之下该形态不可达，
+   * 执法流程的接线仍要可验）。派生规则本身由 proposal-flow 的 isCommitEnabled 语义组钉住。
+   */
+  writeEnabled?: boolean;
+  /** 落账声明覆盖（D-080 e2e 用）：确认时点复核的是这一位而非 writeEnabled——提案成立
+   * ≠落账放行。缺省按生产规则 isCommitEnabled(env) 派生，与 writeEnabled 同源但判点不同。 */
+  proposalCommitEnabled?: boolean;
   /** Inject the WeCom SDK client (offline harness); defaults to the real WSClient. */
   channelClientFactory?: () => SdkClientLike;
 }
@@ -238,6 +248,12 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     },
     workerDriver,
     profileId: '17dz',
+    // 写开放的执法判据（变更项 ⑧）：平台侧声明，isCommitEnabled 单独派生（mock ⇒ 写链路
+    // 全放开；真平台 ⇒ 还须显式 FSHINE_REAL_COMMIT=1）。worker 驱动的计划扫描与本层的
+    // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
+    // e2e 覆盖（overrides.writeEnabled）只换取值来源，不换派生规则。
+    writeEnabled: overrides.writeEnabled ?? isCommitEnabled(env),
+
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
       // 提案落账后端（B 波 B4，C 波后唯一的落账路径；B 波那个"落账后端接不接"的开关已
@@ -245,7 +261,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       // 还须显式 FSHINE_REAL_COMMIT=1，否则确认码只到达"确认收到但不写"（confirm_held），
       // 零写入。没有第二级接线开关可串，真平台的那道闸因此也少一个能被人忘掉的环节。
       proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
-      proposalCommitEnabled: isCommitEnabled(env),
+      proposalCommitEnabled: overrides.proposalCommitEnabled ?? isCommitEnabled(env),
+      // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
+      // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
+      // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
+      planCommandForm: planDraftExample(),
     } : {}),
   });
 

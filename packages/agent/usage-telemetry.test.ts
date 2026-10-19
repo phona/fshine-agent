@@ -111,7 +111,7 @@ class MemoryTasks implements PlatformTaskRepo {
 }
 
 function trusted(): TrustedContext {
-  return { requestId: 'req-1', principalId: 'wecom:user-1', allowedAccountSetIds: [], sessionId: 'session-1' };
+  return { requestId: 'req-1', principalId: 'wecom:user-1', sessionId: 'session-1' };
 }
 
 async function profileRoot(): Promise<string> {
@@ -180,7 +180,7 @@ describe('worker 侧 token 采集（delegation_span + SubagentTaskResult）', ()
 // ── Main 侧采集：turn_span ─────────────────────────────────────────────────
 
 function makeCtx(): TrustedContext {
-  return { requestId: 'req_usage', principalId: 'wecom:user_a', allowedAccountSetIds: ['as_001'], sessionId: 'sess_1' };
+  return { requestId: 'req_usage', principalId: 'wecom:user_a', sessionId: 'sess_1' };
 }
 
 /**

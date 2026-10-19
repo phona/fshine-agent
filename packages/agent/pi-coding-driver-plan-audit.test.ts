@@ -82,7 +82,7 @@ async function workerWith(options: {
   sessionId: string;
   events: ServeGateEvent[];
   planCliRunner?: PlanCliRunner;
-  capabilities?: readonly string[];
+  writeEnabled?: boolean;
   entitySources?: PlanEntitySources;
   semantics?: OperationSemantics;
   onNotice?: (text: string) => Promise<void>;
@@ -99,7 +99,7 @@ async function workerWith(options: {
     agentDir: path.join(root, '.fshine-agent'),
     modelConfig,
     ...(options.planCliRunner ? { planCliRunner: options.planCliRunner } : {}),
-    ...(options.capabilities ? { capabilities: options.capabilities } : {}),
+    ...(options.writeEnabled !== undefined ? { writeEnabled: options.writeEnabled } : {}),
     ...(options.entitySources ? { entitySources: options.entitySources } : {}),
     ...(options.semantics ? { operationSemantics: options.semantics } : {}),
     ...(options.onNotice ? { onNotice: options.onNotice } : {}),
@@ -199,8 +199,8 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY\n' };
       throw new Error('unexpected CLI call');
     };
-    // 写开放：不走前置扫描，这句话必须来自 evaluate 失败分支的分流
-    const worker = await workerWith({ sessionId: 'notplannable', events, planCliRunner: rejectingRunner, semantics: SEMANTICS, capabilities: ['read', 'write'] });
+    // 写开放（平台声明 writeEnabled）：不走前置扫描，这句话必须来自 evaluate 失败分支的分流
+    const worker = await workerWith({ sessionId: 'notplannable', events, planCliRunner: rejectingRunner, semantics: SEMANTICS, writeEnabled: true });
 
     const verdict = await submit(worker, PLAN_COMMAND);
 
@@ -222,7 +222,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       events,
       planCliRunner: rejectingRunner,
       semantics: SEMANTICS,
-      capabilities: ['read', 'write'],
+      writeEnabled: true,
     });
 
     const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
@@ -270,15 +270,14 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     worker.session.dispose();
   });
 
-  it('写关闭前置拦截（部署未开放 write）→ WRITE_NOT_ENABLED，落一行', async () => {
+  it('写关闭前置拦截（平台声明写未开放）→ WRITE_NOT_ENABLED，落一行', async () => {
     const { events } = auditSink();
-    // 能力面不含 write + 语义表说 voucher.commit 要用户确认：宿主在 evaluate 之前就拦
+    // 平台声明写未开放 + 语义表说 voucher.commit 要用户确认：宿主在 evaluate 之前就拦
     const worker = await workerWith({
       sessionId: 'prewrite',
       events,
       planCliRunner: activatingRunner,
       semantics: SEMANTICS,
-      capabilities: ['read'],
     });
 
     const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');

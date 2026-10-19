@@ -24,7 +24,6 @@ function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
   return {
     requestId: 'req_test',
     principalId: 'wecom:user_a',
-    allowedAccountSetIds: ['as_001'],
     sessionId: 'sess_1',
     ...overrides,
   };

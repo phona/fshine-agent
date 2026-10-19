@@ -7,12 +7,12 @@
  * 模型不走到那儿，用户就永远不知道写权限是关闭的。
  *
  * 这里守四件事：
- *   1. 计划里出现要用户确认的 operation（平台语义表 confirm=true）而部署未开放 write：宿主在
+ *   1. 计划里出现要用户确认的 operation（平台语义表 confirm=true）而平台声明写未开放：宿主在
  *      **计划评估前**拦截（平台计划门 CLI 一次都没被调用），拦截理由复用 error-codes.ts
  *      的 WRITE_NOT_ENABLED 唯一来源；
  *   2. 终稿由宿主合成的话术整体替换——worker 的准备/承诺文本没有成为用户回复
  *      （T7 形态的机械版：不依赖模型自觉披露）；
- *   3. 写开放部署（capabilities 含 write）：同一份计划照常提交平台评估，行为零变化；
+ *   3. 写开放部署（平台声明 writeEnabled=true）：同一份计划照常提交平台评估，行为零变化；
  *   4. worker 转录原样保留（审计轨迹完整），替换只发生在结果文本上。
  *
  * 只替身 SDK 的 AgentSession：模型回合由脚本化的假 agent 回放（每轮发起哪些 bash），
@@ -133,7 +133,7 @@ async function makeDriver(options: { planCliRunner: PlanCliRunner }): Promise<{ 
   };
 }
 
-function runInput(cwd: string, capabilities: readonly string[]): TurnDriverInput {
+function runInput(cwd: string, writeEnabled: boolean): TurnDriverInput {
   return {
     systemPrompt: 'worker system prompt',
     tools: [],
@@ -146,7 +146,7 @@ function runInput(cwd: string, capabilities: readonly string[]): TurnDriverInput
     exec: async () => { throw new Error('worker 只能使用其工作目录内配置的原生工具'); },
     deadline: Date.now() + 10_000,
     onNotice: async () => {},
-    capabilities,
+    writeEnabled,
   };
 }
 
@@ -165,7 +165,7 @@ describe('D-075 写关闭：计划扫描 + 终稿合成', () => {
       { text: T7_PROMISE },
     ]);
 
-    const result = await driver.run(runInput(cwd, ['read']));
+    const result = await driver.run(runInput(cwd, false));
 
     // 终稿 = error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源（一字不差，不新写措辞）
     expect(result.text).toBe(messageTextFor('WRITE_NOT_ENABLED'));
@@ -180,7 +180,7 @@ describe('D-075 写关闭：计划扫描 + 终稿合成', () => {
     expect(JSON.stringify(result.messages)).toContain(T7_PROMISE);
   });
 
-  it('写开放部署：同一份计划照常提交平台评估并激活，行为零变化', async () => {
+  it('写开放部署（平台声明 writeEnabled=true）：同一份计划照常提交平台评估并激活，行为零变化', async () => {
     const cliCalls: string[][] = [];
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       cliCalls.push(args);
@@ -196,7 +196,7 @@ describe('D-075 写关闭：计划扫描 + 终稿合成', () => {
       { text: '已按方案执行。' },
     ]);
 
-    const result = await driver.run(runInput(cwd, ['read', 'write']));
+    const result = await driver.run(runInput(cwd, true));
 
     expect(cliCalls.filter((args) => args[1] === 'evaluate')).toHaveLength(1);
     expect(result.text).toBe('已按方案执行。');

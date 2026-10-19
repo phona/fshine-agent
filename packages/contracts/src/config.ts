@@ -4,8 +4,7 @@
  */
 
 export interface PrincipalConfig {
-  accountSetIds: string[];
-  /** 账套发现/授权范围；旧配置缺省为 allowlist。 */
+  /** 账套发现/授权范围（遗留数据位：实体授权归执行层，宿主不再读它裁决任何路径）。 */
   accountSetScope?: AccountSetScope;
   enabled: boolean;
   /** V1 authority capabilities. Omitted values default to read for backwards compatibility. */

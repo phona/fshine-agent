@@ -47,7 +47,6 @@ function ctx(overrides: Partial<TrustedContext> = {}): TrustedContext {
   return {
     requestId: 'req_pb',
     principalId: 'wecom:user_a',
-    allowedAccountSetIds: ['as_001'],
     sessionId: 'sess_pb',
     ...overrides,
   };

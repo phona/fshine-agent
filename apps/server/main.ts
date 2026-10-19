@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { sweepScratchDirs } from '@fshine/agent';
 import { createServerAssembly, repoRoot } from './assembly';
 
-/** 草稿保留时长：默认 24h。跨轮续跑的任务仍要用上一轮的产物，所以不能按回合删。 */
+/** 工作区保留时长：默认 24h。同任务的续跑仍要用上一轮的产物，所以不能按回合删。 */
 const SCRATCH_TTL_MS = 24 * 60 * 60 * 1000;
 /** 清理周期：启动时跑一次，之后每 6h 一次（不依赖重启）。 */
 const SCRATCH_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -20,7 +20,8 @@ async function main(): Promise<void> {
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
   const assembly = await createServerAssembly({ env: process.env });
 
-  // 清理：只扫 tmp/req_<uuid>（我们自己的命名），平台自己的 tmp/ 产物一律不碰。
+  // 清理：只扫 tmp/task_<uuid>（我们自己的命名，同任务续跑共享工作区），平台自己的
+  // tmp/ 产物一律不碰。
   if (assembly.platformRoot) {
     const sweep = () => {
       const r = sweepScratchDirs(assembly.platformRoot!, Date.now(), SCRATCH_TTL_MS);

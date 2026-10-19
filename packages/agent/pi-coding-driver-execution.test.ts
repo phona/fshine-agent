@@ -282,7 +282,7 @@ function planDriver(declarations: Array<Record<string, unknown> & { text?: strin
 }
 
 function makeCtx(requestId: string): TrustedContext {
-  return { requestId, principalId: 'wecom:user_a', allowedAccountSetIds: ['as_001'], sessionId: 'sess_execution' };
+  return { requestId, principalId: 'wecom:user_a', sessionId: 'sess_execution' };
 }
 
 describe('C26 投影：真实执行过的步骤记 done，不被足迹误判污染成 failed', () => {

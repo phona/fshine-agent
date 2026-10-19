@@ -50,6 +50,12 @@ export interface SdkClientLike {
   replyStream(frame: SdkFrame, streamId: string, content: string, finish: boolean): Promise<unknown>;
   uploadMedia(data: Buffer, options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }>;
   replyMedia(frame: SdkFrame, mediaType: 'image' | 'file', mediaId: string): Promise<unknown>;
+  /**
+   * 主动发送一条全新消息（SDK 的 aibot_send_msg 通道，不经流式更新）。降级通道：
+   * 流式终帧被企微拒收（如 errcode 846608"stream message update expired"）时，
+   * 用它把终稿作为新消息送达——见 reply() 的降级分支。
+   */
+  sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown>;
   /** 下载企微素材（file/image）：url 五分钟内有效且已加密，需配 aeskey 解密 */
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }>;
 }
@@ -70,6 +76,12 @@ export interface WecomBotChannelOptions {
   attachmentDir?: string;
   /** 平台工作区根；用来把附件目录兜在场内。缺省用 cwd。 */
   platformRoot?: string;
+}
+
+/** 终帧拒收降级的上下文：会话地址 + 本次回复的防重 latch（一次派发最多降级一条）。 */
+interface ReplyDegrade {
+  chatId: string;
+  once: { used: boolean };
 }
 
 export class WecomBotChannel implements ChannelAdapter {
@@ -264,10 +276,13 @@ export class WecomBotChannel implements ChannelAdapter {
     for (const failed of attachments.failed) parts.push(`[附件下载失败:${failed}]`);
     for (const ok of attachments.saved) parts.push(`[附件:${ok.filename}]`);
     if (parts.length === 0) return;
+    // 降级通道的会话地址（sendMessage 语义：单聊填 userid，群聊填 chatid——与
+    // conversationId 同一取法）。提出来一处计算，消息对象与降级分支共认。
+    const conversationId = chatid ?? userid;
 
     const message: IncomingChannelMessage = {
       wecomUserId: userid,
-      conversationId: chatid ?? userid,
+      conversationId,
       messageId: msgid,
       chatType,
       text: chatType === 'group' ? stripMentionPrefix(parts.join('\n')) : parts.join('\n'),
@@ -281,6 +296,10 @@ export class WecomBotChannel implements ChannelAdapter {
 
     const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
     const streamId = randomUUID();
+    // 降级防重（"失败必达"路径 2）：同一次回复最多降级一次——终帧被拒后改走
+    // sendMessage 全新消息通道。latch 按消息派发（每条用户消息一次），同一终稿不会
+    // 因多次失败被重复轰炸。
+    const degradeOnce = { used: false };
     let lastProgressAt = 0;
     let progressCount = 0;
     // 受理帧豁免（首帧提速，2026-10-16）：本流的**第一帧** progress 是宿主在回合真正
@@ -358,7 +377,11 @@ export class WecomBotChannel implements ChannelAdapter {
           limit: MAX_REPLY_BYTES,
         }));
       }
-      void this.reply(frame, reqId, streamId, bounded.text, true);
+      // 终帧失败可降级（degrade 参数）：流式更新被企微拒收（历史事故 errcode 846608——
+      // 流式回复超过 10 分钟更新窗口，终帧被拒后用户端永远停在旧进度帧，整轮静默）时，
+      // 改用 sendMessage 全新消息通道把终稿送达。中间进度帧不降级（降级是给"答案"的，
+      // 不是给中间帧的，否则每次拒收都是一条新消息）。
+      void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce });
     }
     // 文件回传（2026-10-08）：worker 在平台 tmp/ 下产出的 xlsx 等，经临时素材上传回传。
     // 失败只记事件不外抛——文本已经发出去了，不该因为附件上传失败把整轮回复搞成失败。
@@ -389,7 +412,7 @@ export class WecomBotChannel implements ChannelAdapter {
           error: error instanceof Error ? error.message : String(error),
         }));
         if (!textSent) {
-          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true);
+          void this.reply(frame, reqId, streamId, IMAGE_FAIL_REPLY, true, { chatId: conversationId, once: degradeOnce });
         }
       }
     }
@@ -401,19 +424,46 @@ export class WecomBotChannel implements ChannelAdapter {
     streamId: string,
     content: string,
     finish: boolean,
+    degrade?: ReplyDegrade,
   ): Promise<void> {
     const client = this.client;
     if (!client) return Promise.resolve();
     return client
       .replyStream(frame, streamId, content, finish)
       .then(async () => undefined)
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
         console.error(JSON.stringify({
           event: 'wecom_reply_fail',
           req_id: reqId,
           finish,
           error: error instanceof Error ? error.message : String(error),
         }));
+        // "失败必达"路径 2：终帧（finish=true）被企微拒收时，流式更新通道对这条回复已经
+        // 死了（历史事故 errcode 846608：流式回复超 10 分钟更新窗口，终帧被拒，用户端
+        // 永远停在旧进度帧）。降级为 sendMessage 发一条**全新消息**（aibot_send_msg 主动
+        // 推送通道，不走流式更新），把终稿送达。防重：同一次回复只降级一次——中间帧
+        // 失败不降级（调用点不传 degrade）、终帧重复失败也不重复发（once latch）。
+        // 降级再失败只记事件：两条通道都不可达时已无第三条路，日志是唯一的守夜人。
+        if (finish && degrade && !degrade.once.used) {
+          degrade.once.used = true;
+          try {
+            await client.sendMessage(degrade.chatId, { msgtype: 'markdown', markdown: { content } });
+            console.info(JSON.stringify({
+              event: 'wecom_reply_degraded',
+              req_id: reqId,
+              channel: 'send_message',
+              bytes: Buffer.byteLength(content, 'utf8'),
+              originError: error instanceof Error ? error.message.slice(0, 200) : String(error),
+            }));
+          } catch (degradeError: unknown) {
+            console.error(JSON.stringify({
+              event: 'wecom_reply_degrade_fail',
+              req_id: reqId,
+              error: degradeError instanceof Error ? degradeError.message : String(degradeError),
+              content,
+            }));
+          }
+        }
       });
   }
 

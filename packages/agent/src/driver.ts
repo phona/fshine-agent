@@ -51,11 +51,17 @@ export interface TurnDriverInput {
   /** Trusted host notice callback, awaited before any notify-required plan activates. */
   onNotice?: (text: string) => Promise<void>;
   /**
-   * 当前委托主体的有效能力（宿主持有的部署能力声明，TrustedContext.capabilities）。
-   * 写关闭判据（D-075）的输入之一：计划里出现写类 operation 而能力不含 write 时，
-   * 宿主在计划评估前就合成写关闭话术终结该轮，不等模型走到提案路径。缺省视为只读。
+   * 平台侧的写开放声明（宿主从平台状态派生，如 isCommitEnabled()；缺省视为只读）。
+   * 写关闭判据（D-075 计划扫描）的输入：计划里出现写类 operation 而平台声明写未开放时，
+   * 宿主在计划评估前就合成写关闭话术终结该轮，不等模型走到提案路径。
+   * 判据依据是平台/部署侧声明，不是委托主体自持的能力布尔（变更项 ⑧）。
    */
-  capabilities?: readonly string[];
+  writeEnabled?: boolean;
+  /**
+   * 本回合 worker 的工作区（相对 cwd，如 `tmp/task_<taskId>`）：write/edit 的机械边界与
+   * 提案 payload / 计划产物路径豁免的判据输入。续跑同一任务共享同一工作区（变更项 ⑨）。
+   */
+  scratchDir?: string;
   /**
    * 提案创建网关路径（方案 1 · B 波 B3）的宿主出口：驱动在 `beforeToolCall` 认出"创建提案"
    * 的网关调用后，把 `{operation, payloadPath}` 交给它办调平台，并按返回的三态处理

@@ -262,7 +262,8 @@ const ATTACHMENT_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
  *   ② `mtime >= since`——本轮委派开始之后才落盘的，才是本轮产物；
  *   ③ 扩展名是办公文档（OFFICE_EXT）；
  *   ④ 不在 `tmp/attachments/`——那是本轮**输入**；
- *   ⑤ 不在别的 `tmp/req_<uuid>/`——那是别的会话的草稿位置；
+ *   ⑤ 不在 `tmp/task_<taskId>/` 任务工作区——那是 worker 的文件交互区（⑨：按任务切，
+ *      续跑共享），不是交付物位置；交付通道只有 tmp/ 顶层的平台执行器产物；
  *   ⑥ 普通文件且 ≤ 20MB。
  *
  * **为什么不再让 worker 声明路径**：旧约定是"worker 在回复末行写 `[发送文件] <绝对路径>`，
@@ -284,7 +285,7 @@ const MAX_OUT_FILES = 3;
 /** 入站附件的暂存位置名（`tmp/attachments/`）：那是输入，永远不是要回传的产物。 */
 const ATTACHMENTS_DIR_NAME = 'attachments';
 
-export function collectProducedFiles(platformRoot: string, since: string, requestId: string): OutgoingFileReply[] {
+export function collectProducedFiles(platformRoot: string, since: string): OutgoingFileReply[] {
   const sinceMs = Date.parse(since);
   let tmpRoot: string;
   try {
@@ -304,10 +305,11 @@ export function collectProducedFiles(platformRoot: string, since: string, reques
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        // 顶层就绕开两类非本产物位置：附件输入区、以及**别的**会话的草稿位置。省得白走，
-        // 也避免把别人的中间产物读进来。真正的判据仍在下面按真实路径复核一遍——符号链接
-        // 可能从别处指回这两类位置，只在这一层拦不住。
-        if (depth === 0 && (entry.name === ATTACHMENTS_DIR_NAME || (isScratchDirName(entry.name) && entry.name !== requestId))) continue;
+        // 顶层就绕开两类非产物位置：附件输入区、任务工作区（⑨：tmp/task_<taskId>/ 是
+        // worker 的文件交互区，不是交付通道）。省得白走，也避免把工作区中间产物读进来。
+        // 真正的判据仍在下面按真实路径复核一遍——符号链接可能从别处指回这两类位置，
+        // 只在这一层拦不住。
+        if (depth === 0 && (entry.name === ATTACHMENTS_DIR_NAME || isScratchDirName(entry.name))) continue;
         visit(full, depth + 1);
         continue;
       }
@@ -323,7 +325,7 @@ export function collectProducedFiles(platformRoot: string, since: string, reques
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;   // 逃出受信边界
       const top = rel.split(path.sep)[0]!;
       if (top === ATTACHMENTS_DIR_NAME) continue;                  // 输入，不是产物
-      if (isScratchDirName(top) && top !== requestId) continue;    // 别人会话的草稿
+      if (isScratchDirName(top)) continue;                         // 任务工作区，不是交付通道
       if (!OFFICE_EXT.has(path.extname(real).toLowerCase())) continue;
       try {
         const stat = statSync(real);
@@ -353,9 +355,9 @@ export function collectProducedFiles(platformRoot: string, since: string, reques
   return out;
 }
 
-function withFileReplies(text: string, platformRoot: string | undefined, since: string, requestId: string): ChannelReply {
+function withFileReplies(text: string, platformRoot: string | undefined, since: string): ChannelReply {
   if (!platformRoot) return text;
-  const [file] = collectProducedFiles(platformRoot, since, requestId);
+  const [file] = collectProducedFiles(platformRoot, since);
   return file ? { text, file } : text;
 }
 
@@ -609,7 +611,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       const trusted = {
         requestId,
         principalId,
-        allowedAccountSetIds: scope.accountSetIds,
+        // 实体授权归执行层（⑥）：宿主不再向运行时传业务实体名单——TrustedContext 已无该
+        // 字段，principal_scopes 的实体列保留不读。
         capabilities: scope.capabilities,
         sessionId: `wecom:${sessionKey}`,
         // 帧计数经 emitProgress：runtime 的「正在…」帧算真实帧流动，心跳据此静默
@@ -626,7 +629,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           if (!confirmation.taskId) throw new Error('已确认的计划缺少原任务标识。');
           announceAccepted();
           const resumed = await runtime.handleTurn({ ...trusted, resumeTaskId: confirmation.taskId }, input);
-          return withFileReplies(resumed.text, deps.platformRoot, delegatedAt, requestId);
+          return withFileReplies(resumed.text, deps.platformRoot, delegatedAt);
         }
         if (confirmation.status === 'superseded') return '这项扩大查询已经被更新的计划取代，之前的确认不再有效。请重新发起查询，我会按新的范围再问你一次。';
         if (confirmation.status === 'cancelled') return '已取消本次扩大查询。';
@@ -641,7 +644,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         trusted,
         input,
       );
-      return withFileReplies(reply.text, deps.platformRoot, delegatedAt, requestId);
+      return withFileReplies(reply.text, deps.platformRoot, delegatedAt);
     } catch (error) {
       await store.requests.setOutcome(requestId, 'failed');
       console.error(JSON.stringify({

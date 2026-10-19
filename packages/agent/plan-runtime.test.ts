@@ -353,7 +353,7 @@ describe('planCallFacts（平台 args 规格声明名机械提取）', () => {
   });
 });
 
-// ── 写关闭判据（D-075：calls × 平台语义表 × capabilities，三个输入都非 worker 文本）──
+// ── 写关闭判据（D-075：calls × 平台语义表 × 平台写开放声明，三个输入都非 worker 文本）──
 
 /** 与平台 `operation list --json` 同形的预置语义表（三列由平台声明，宿主只读消费）。 */
 const SEMANTICS = parseOperationSemantics(JSON.stringify({
@@ -372,40 +372,39 @@ const SEMANTICS = parseOperationSemantics(JSON.stringify({
 }));
 
 describe('planWriteClosed（写关闭的机械判据）', () => {
-  it('计划含要用户确认的 operation（confirm=true）且能力不含 write →  true', () => {
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A', '202609'] }], SEMANTICS, ['read'])).toBe(true);
-    expect(planWriteClosed([{ operation: 'voucher.commit', args: ['A', '202609'] }], SEMANTICS, ['read'])).toBe(true);
+  it('计划含要用户确认的 operation（confirm=true）且平台声明写未开放 →  true', () => {
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A', '202609'] }], SEMANTICS, false)).toBe(true);
+    expect(planWriteClosed([{ operation: 'voucher.commit', args: ['A', '202609'] }], SEMANTICS, false)).toBe(true);
     // 混在只读调用里同样命中：准备流程中的写步骤让整份计划注定跑不完
     expect(planWriteClosed([
       { operation: 'voucher.query-saved', args: ['A', '202609'] },
       { operation: 'voucher.prepare', args: ['A', '202609'] },
-    ], SEMANTICS, ['read'])).toBe(true);
+    ], SEMANTICS, false)).toBe(true);
   });
 
-  it('能力含 write → 不触发布防（写开放部署照常走平台计划门）', () => {
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], SEMANTICS, ['read', 'write'])).toBe(false);
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], SEMANTICS, ['write'])).toBe(false);
+  it('平台声明写开放 → 不触发布防（写开放部署照常走平台计划门）', () => {
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], SEMANTICS, true)).toBe(false);
   });
 
   it('纯只读 / scratch（本地处理）计划 → 不触发（两者都不要用户确认）', () => {
     expect(planWriteClosed([
       { operation: 'voucher.query-saved', args: ['A', '202609'] },
       { operation: 'voucher.precheck', args: [] },
-    ], SEMANTICS, ['read'])).toBe(false);
+    ], SEMANTICS, false)).toBe(false);
   });
 
-  it('缺语义表 / operation 查不到语义 / capabilities 缺省 → 不触发（宁缺勿猜）', () => {
+  it('缺语义表 / operation 查不到语义 → 不触发（宁缺勿猜）', () => {
     // CLI 派生失败或平台还没下发 accessSemantics（空表）：前置判定整体不生效，
     // 平台计划门与提案路径照旧兜底——fail-closed 到什么都不算写
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], undefined, ['read'])).toBe(false);
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], new Map(), ['read'])).toBe(false);
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], undefined, false)).toBe(false);
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], new Map(), false)).toBe(false);
     // 未登记的 operation：平台会以 UNKNOWN_OPERATION 拒绝，不猜它的访问语义
-    expect(planWriteClosed([{ operation: 'voucher.batch', args: ['A'] }], SEMANTICS, ['read'])).toBe(false);
-    // capabilities 缺省视为只读（与契约层同语义）：要用户确认的 operation 仍然触发
-    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], SEMANTICS, undefined)).toBe(true);
+    expect(planWriteClosed([{ operation: 'voucher.batch', args: ['A'] }], SEMANTICS, false)).toBe(false);
+    // writeEnabled 缺省（false）视为只读（与契约层同语义）：要用户确认的 operation 仍然触发
+    expect(planWriteClosed([{ operation: 'voucher.prepare', args: ['A'] }], SEMANTICS, false)).toBe(true);
   });
 
   it('command 裸名写法同样命中（命令里两种写法都合法，键双收）', () => {
-    expect(planWriteClosed([{ operation: 'prepare', args: ['A'] }], SEMANTICS, ['read'])).toBe(true);
+    expect(planWriteClosed([{ operation: 'prepare', args: ['A'] }], SEMANTICS, false)).toBe(true);
   });
 });

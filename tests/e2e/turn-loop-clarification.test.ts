@@ -105,7 +105,9 @@ describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () =
     expect(executionLanguageFingerprints(reply)).toEqual([]);
     // 用户要先回答"查哪个"：第二步没有派发（worker 只被调用一次）
     expect(worker.requests).toHaveLength(1);
-    expect(worker.requests[0]).toBe('查询幻辰的应收账款');
+    // ② 委派块随载荷走 user message：范围原文在【委派】块里
+    expect(worker.requests[0]).toContain('【委派】');
+    expect(worker.requests[0]).toContain('范围：查询幻辰的应收账款');
     await assembly.close();
   });
 

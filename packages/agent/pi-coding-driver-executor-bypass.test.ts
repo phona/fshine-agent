@@ -191,7 +191,9 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
       auxiliaryCalls: 0,
       producedFiles: ['tmp/req_bypass/run_transform.py'],
     });
-    // 告警只是披露：回合结果一字不变（local 调用照旧构成执行痕迹）
+    // 告警只是披露：回合结果一字不变（local 调用照旧构成执行痕迹）。
+    // 2026-10-18 起 execution.calls = 全部被放行执行的 bash 数（2026-10-18 run6：纯本地
+    // 任务的诚实报告曾被"零网关调用 = 零执行"的旧判据顶掉，本地执行也是执行痕迹）
     expect(result.execution).toEqual({ planId: '', version: 0, calls: 2 });
     expect(result.footprint).toBe('2 次 bin/17dz 调用');
     expect(result.text).toBe('表已经算好了。');

@@ -79,6 +79,19 @@ class FakeSdkClient {
     return Promise.resolve({});
   }
 
+  /** 主动消息通道（终帧拒收降级用）：默认成功并记录；测试可用 failNextSend 注入失败。 */
+  readonly sentMessages: Array<{ chatid: string; content: string }> = [];
+  private sendFailNext = false;
+  sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
+    this.sentMessages.push({ chatid, content: body.markdown.content });
+    if (this.sendFailNext) return Promise.reject(new Error('send boom'));
+    return Promise.resolve({});
+  }
+
+  failNextSend(): void {
+    this.sendFailNext = true;
+  }
+
   /** 附件下载替身：默认把调用记下来并按注入内容返回 */
   downloadCalls: Array<{ url: string; aesKey?: string }> = [];
   downloadResult: { buffer: Buffer; filename?: string } | Error = { buffer: Buffer.from('x'), filename: 'f.bin' };

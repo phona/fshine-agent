@@ -107,12 +107,13 @@ export interface ServeGateOptions {
   /** 参数摘要提取器（测试替身注入点）；缺省用内置 describeKeyArgs（查平台 args 规格）。 */
   describeArgs?: (command: string) => string[];
   /**
-   * 本轮请求的草稿目录（相对 platformRoot，如 `tmp/req_abc123`）。给了它，write 就**只**
-   * 放行这一个目录——不是约定，是机械边界。
+   * 本回合的工作区（相对 platformRoot，如 `tmp/task_<taskId>`，宿主按任务注入）。给了它，
+   * write 就**只**放行这一个目录——不是约定，是机械边界。
    *
-   * 为什么必须是每请求一个：tmp/ 是共享草稿区，多个会话同时写 `tmp/contract.json` 会互相
-   * 覆盖，而覆盖后的产物看不出是被谁污染的。宿主已有现成的随机源（requestId），用它派生
-   * 一个子目录即可，不需要 worker 自己随机（它也没有随机手段）。
+   * 为什么必须是每任务一个：tmp/ 是共享区，多个会话同时写 `tmp/contract.json` 会互相
+   * 覆盖，而覆盖后的产物看不出是被谁污染的。宿主已有现成的随机源（taskId），用它派生
+   * 一个子目录即可，不需要 worker 自己随机（它也没有随机手段）；同任务续跑共享同一
+   * 工作区（变更项 ⑨）。
    * 缺省不设：只约束"必须在 tmp/ 下"（向后兼容与单测隔离）。
    */
   scratchDir?: string;
@@ -293,10 +294,10 @@ const SERVE_NON_EXECUTOR_GROUPS: ReadonlySet<string> = new Set(['memory']);
  * local 执行的根：**本轮 scratchDir**（宿主自己的概念），以及辅助技能面暴露的技能脚本。
  *
  * 为什么从平台目录名换成宿主的 scratchDir：原先凭平台目录名 `tmp/` 放行，于是
- * `bin/17dz local tmp/req_别人的/x.py` 能跑——跨会话执行面（别人的请求目录里躺着别人
- * 的脚本，跑它读到的是别人的产物）。而 `scratchDir`（`tmp/req_<requestId>`）是宿主按
- * requestId 派生的，凭它判既堵洞又不新增平台知识：宿主本来就知道自己给 worker 开了哪个
- * 草稿目录（write 门用的就是同一个值）。
+ * `bin/17dz local tmp/别人的/x.py` 能跑——跨会话执行面（别人的工作区里躺着别人
+ * 的脚本，跑它读到的是别人的产物）。而 `scratchDir`（`tmp/task_<taskId>`）是宿主按
+ * 任务派生的，凭它判既堵洞又不新增平台知识：宿主本来就知道自己给 worker 开了哪个
+ * 工作区（write 门用的就是同一个值）。
  *
  * 不变量：**local 的放行面不宽于 write 的放行面**——worker 只能跑自己写得进去的脚本。
  * 因此 scratchDir 缺省时退回 write 的根（`WRITE_ROOT_SEGMENT`），与 write 分支同一句
@@ -329,7 +330,7 @@ function localRoots(scratchDir?: string): readonly string[] {
  * 每跑一次都走一遍计划门会把回合拖垮。
  *
  * 边界不在本文件——在平台侧：网关只放行本地根目录下的脚本（宿主 write 门已把 worker 的
- * 可写位置钉死在 `tmp/<requestId>/`），且子进程 env 被剥掉凭据类变量。本文件只负责
+ * 可写位置钉死在 `tmp/task_<taskId>/`），且子进程 env 被剥掉凭据类变量。本文件只负责
  * "这条命令属于本地执行、不需要计划"，不判断脚本内容、也不判断它在平台上是否真放行。
  *
  * `scratchDir` 必须从调用方透进来：判据是"这个脚本落点是不是本轮草稿目录"，而草稿目录
@@ -342,7 +343,7 @@ function localRoots(scratchDir?: string): readonly string[] {
  *
  * 与 isLocalScratchRun 的分工：后者答"放不放行"，前者只答"这是不是一次 local 调用"。
  * 必须有后者之外的这一问，否则 local 打到放行根之外时会落穿到通用网关分支被放行
- * （判据见 createServeGate 里 SERVE_LOCAL_OUTSIDE_SCRATCH 那支的注释）。
+ * （本地根语义见 isLocalScratchRun；越界的执行面拦截归执行层网关原生执法）。
  */
 function localModeTarget(command: string): string | null {
   const tokens = splitCommandTokens(command);
@@ -351,14 +352,22 @@ function localModeTarget(command: string): string | null {
   return tokens[2] ?? null;
 }
 
-function isLocalScratchRun(command: string, scratchDir?: string): boolean {
+function isLocalScratchRun(command: string, scratchDir?: string, platformRoot?: string): boolean {
   const tokens = splitCommandTokens(command);
   if (!tokens[0] || !SERVE_CLI_INVOCATION_RE.test(tokens[0])) return false;
   if (tokens[1] !== 'local') return false;
   const target = tokens[2];
   if (!target) return false;
-  // 只认本地根下的相对路径；带 ../ 或绝对路径的一律不当本地执行（交给后面的通用分支拒）
-  return localRoots(scratchDir).some((root) => target === root || target.startsWith(`${root}/`));
+  // 相对路径按前缀判；绝对路径解析后判包含——write 回执给 worker 的是绝对路径，
+  // 一刀切拒绝对路径等于门否认自己的回执（2026-10-18 实测：worker 的吸收脚本
+  // 两度被拒后按经济性纪律放弃，吸收循环就此断线）。../ 与工作区外目录解析后
+  // 仍然拒，边界语义不变。
+  const inRoot = (target: string, root: string): boolean => {
+    const t = platformRoot ? path.resolve(platformRoot, target) : path.normalize(target);
+    const r = platformRoot ? path.resolve(platformRoot, root) : path.normalize(root);
+    return t === r || t.startsWith(`${r}${path.sep}`);
+  };
+  return localRoots(scratchDir).some((root) => inRoot(target, root));
 }
 
 /**
@@ -653,30 +662,12 @@ export function createServeGate(options: ServeGateOptions = {}) {
       // 元数据分支不判 planActive（理由见 SERVE_METADATA_COMMANDS 注释），但仍校验
       // shell 元字符，且照常落 onEvent 审计——"宿主放行了什么"必须可复盘。
       const metadata = serveMetadataCommand(command);
+      const isGateway = isServeCliInvocation(command);
       if (metadata) {
-        if (hasShellMetachars(command)) {
-          verdict = { block: true, reason: messageTextFor('SERVE_BASH_METACHAR_METADATA') };
-        }
-        // 否则放行：verdict 保持 undefined。detail 已记命令原文，审计由此留痕。
-      } else if (isLocalScratchRun(command, options.scratchDir)) {
-        // 本地执行：不需要计划（纯本地计算，见 isLocalScratchRun 注释）。shell 元字符仍要
-        // 拦——local 的参数是路径/flag，不该有拼接替换。留痕照旧（detail = 命令原文）。
-        if (hasShellMetachars(command)) {
-          verdict = { block: true, reason: messageTextFor('SERVE_BASH_METACHAR_LOCAL') };
-        }
-      } else if (localModeTarget(command) !== null) {
-        // local 模式但目标不在本轮 scratchDir / 辅助技能面：**必须在这里拦死，不能落穿**。
-        //
-        // 为什么单独一支：isLocalScratchRun 为假时，命令形状仍是合法的网关调用
-        // （`bin/17dz local <路径>`），于是会一路落到文件末尾的通用分支——那儿只问
-        // "是不是网关调用 + 有没有活动计划"，两个都真就放行。实证（2026-10-09 验收）：
-        // planActive=true 时 `bin/17dz local tmp/req_别人的/x.py`、`local tmp/散脚本.py`、
-        // `local src/…/transform.py`、带 ../ 的穿越路径**全部放行**——而它们恰恰是
-        // "local 根收紧"要堵的跨会话执行面。只在无计划时被拒（ SERVE_PLAN_NOT_ACTIVE ）
-        // 是假象：有条件拒绝等于没拒绝。
-        //
-        // 判据与 isLocalScratchRun 同源（同一个 localRoots），不立第二份名单。
-        verdict = { block: true, reason: messageTextFor('SERVE_LOCAL_OUTSIDE_SCRATCH') };
+        // 元数据查询放行（detail 已记命令原文，审计由此留痕）。
+      } else if (isLocalScratchRun(command, options.scratchDir, platformRoot)) {
+        // 本地执行：不需要计划（纯本地计算，见 isLocalScratchRun 注释）。留痕照旧
+        // （detail = 命令原文）。
       } else if (SERVE_CLI_PLAN_RE.test(command)) {
         // 教学而非 merely 拒绝：真实平台实测里旧消息（"只能提交 JSON calls 方案"）
         // 没说怎么提交，worker 被拒后理解成"把 JSON 打印出来"，步步空转。因此这里直接
@@ -687,28 +678,26 @@ export function createServeGate(options: ServeGateOptions = {}) {
           block: true,
           reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING'),
         };
-      } else if (!isServeCliInvocation(command)) {
-        verdict = { block: true, reason: messageTextFor('SERVE_BASH_NOT_GATEWAY') };
-      } else if (hasShellMetachars(command)) {
-        verdict = { block: true, reason: messageTextFor('SERVE_BASH_METACHAR_QUERY') };
-      } else if (invocation === null) {
-        // 形态解析不出 operation：缺 mode、缺脚本路径、或用了未注册的形式（A1 实测形态
-        // 是 worker 猜出来的调用——平台清单的 command 与真实脚本名不一致，它无从机械构造
-        // 命令，只能猜一个形状）。走到这里说明首词确是网关、没有元字符、也不是 local 与
-        // 元数据出口，于是门答不出"这是哪个 operation"：该不该计划、挂哪条 label 都无从
-        // 判断。旧行为是放行后让平台网关去拒、或在本门吃一条"尚无激活计划"——两条都没告诉
-        // 它正确形状从哪来，于是它猜第二次、第三次，最后绕开平台自己包 wrapper。
-        // 这里只指路（措辞见 error-codes 的 SERVE_INVOCATION_FORM_UNKNOWN）：不复述形状、
-        // 不出现网关名，把推导留给它做。
-        verdict = { block: true, reason: messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN') };
-      } else if (!options.planActive?.() && !planExempt(command, options.operationSemantics)) {
-        // 计划前置：先问"这个调用要不要计划"（平台语义表 plan 列），再问"有没有计划"。
-        // plan=false 的调用走到这里即放行（不设 verdict），继续受平台侧裁决；plan=true
-        // 或判据不成立（查不到）才照旧要求宿主激活的计划——理由见 planExempt 注释。
-        verdict = { block: true, reason: messageTextFor('SERVE_PLAN_NOT_ACTIVE') };
+      } else if (isGateway && invocation !== null && localModeTarget(command) === null) {
+        // 计划前置（宿主保留的执法）：非 local 的网关调用 fail-closed——已登记 operation
+        // 按语义表（scratch plan=false 直调、read/write 需激活计划）；未登记/未知形态也
+        // 要求先有激活计划（2026-10-09 起的既有防线：未知 op 可能写平台数据，宁拦勿猜；
+        // 正确形态由指路文案引导）。首词非网关的 bash 自 2026-10-18 起放行（首词拦截退役，
+        // 非网关命令审计留痕；硬约束随沙箱阶段在共享空间边界重建）。
+        if (!options.planActive?.() && !planExempt(command, options.operationSemantics)) {
+          verdict = { block: true, reason: messageTextFor('SERVE_PLAN_NOT_ACTIVE') };
+        } else {
+          const label = operationLabel(options.operationLabels, extractGateScript(command));
+          if (label) progress = { label, keyArgs: describeArgs(command) };
+        }
       } else {
-        const label = operationLabel(options.operationLabels, extractGateScript(command));
-        if (label) progress = { label, keyArgs: describeArgs(command) };
+        // local（区内直调；区外由执行层网关自校验根）与非网关命令 → 放行，审计照记
+      }
+      // 元字符软放行（2026-10-18）：硬拦曾把附件名里的 ASCII 括号当注入拦死（(1) 是
+      // 常见文件名后缀），worker 的合法路径参数两度被拒。安全机制随沙箱阶段重建；
+      // 此刻放行 + 审计 detail 带软标记，可复盘可计量。
+      if (!verdict && hasShellMetachars(command)) {
+        detail = `${detail}（含元字符，软放行）`;
       }
     } else if (name === 'write') {
       // ── write：只准写 tmp/ ────────────────────────────────────────────────

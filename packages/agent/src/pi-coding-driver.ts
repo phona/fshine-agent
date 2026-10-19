@@ -20,6 +20,8 @@ import {
   createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
+import { copyFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import path from 'node:path';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
@@ -52,15 +54,14 @@ const MAX_DECLINED_PLANS_PER_TASK = 5;
 export const WORKER_TOOLS = ['read', 'ls', 'bash', 'write', 'edit'] as const;
 
 /**
- * 本轮 scratch 位置（`tmp/<requestId>`）：worker 唯一可写位置。
+ * 本回合 worker 的工作区（`tmp/task_<taskId>`，宿主注入）：worker 唯一可写位置。
  *
- * 一处派生两处消费——提案 payload 边界检查（decideProposalCreation）与计划实体校验的
- * 产物路径豁免（validatePlanEntities 的第三个参数）。判据本身只有一份（serve-gate 的
- * workspaceRelPath + isInsideScratch），这里只负责"本轮是哪个位置"这一个事实。
+ * 一处注入三处消费——write/edit 门的边界（serve-gate 的 scratchDir）、提案 payload 边界
+ * 检查（decideProposalCreation）与计划实体校验的产物路径豁免（validatePlanEntities 的
+ * 第三个参数）。判据本身只有一份（serve-gate 的 workspaceRelPath + isInsideScratch），
+ * 注入方只负责"本回合是哪个位置"这一个事实：按任务派生（续跑同任务共享工作区），
+ * 不再按请求派生（变更项 ⑨）。
  */
-function scratchDirFor(requestId: string | undefined): string | null {
-  return requestId ? `tmp/${requestId}` : null;
-}
 
 /**
  * 计划提交进度帧：宿主替 worker 调平台评估方案时发一帧。措辞与业务无关
@@ -76,6 +77,27 @@ export const PLAN_SUBMIT_STEP = '正在向平台提交执行方案…';
  * 措辞与业务无关（不出现任何领域词）：只陈述确定性事实与明确指令，不代平台说话。
  */
 export const PLAN_ACTIVATED_NUDGE = '宿主已批准你的执行方案（计划已激活）。请立即按方案中的 calls 执行查询，不要再次提交方案。如确实无法执行，说明具体阻碍。';
+
+/**
+ * 墙钟收尾信号（"失败必达"路径 1 的前半段）：回合预算用到 90% 时经 SDK 的 steer 通道
+ * 注入一条 user 消息，给 worker 剩余 10% 自行收尾——停止开新工作、交付已完成部分
+ * （产物引用 + 下一步一句话）。worker 在窗口内收尾的，回合照常完成（文本就是它的交付）；
+ * 无视信号的，到点照旧被 abort 截停，由宿主从执行事实合成终稿（resource-exhausted.ts）。
+ *
+ * 边界如实记：steer 在 SDK 的跳间投递（当前这跳的工具调用结束后、下一次模型调用前）。
+ * worker 卡在单个超长工具调用里时，信号要等该调用返回才能被看到——那种形状由 abort +
+ * 宿主合成终稿兜底，本信号覆盖的是"多跳推进、越干越远"的常态。
+ * 措辞与业务无关，不碰 workerSystemPrompt（这是回合内的 user 消息，不是系统提示词）。
+ */
+export const WORKER_WIND_DOWN_NUDGE = '【宿主收尾指令】处理时间预算即将用尽。立即停止开始任何新工作：不要再发起新的查询、处理或探索。用一段话交付已完成的部分——已产出文件的引用（路径）+ 一句话说明剩余未完成的部分。现在就收尾。';
+
+/** 收尾窗口占预算的比例：最后 10% 留给 worker 自行收尾（90% 处发信号）。 */
+export const WIND_DOWN_FRACTION = 0.9;
+
+/** 距截止还剩 remainingMs 时，收尾信号应当发出的时刻（毫秒延迟）。纯函数，测试直测。 */
+export function windDownDelayMs(remainingMs: number): number {
+  return Math.max(1, Math.floor(remainingMs * WIND_DOWN_FRACTION));
+}
 
 /**
  * A1：绕开平台执行器的披露判据（**告警，不是门**）。
@@ -190,10 +212,10 @@ export function createServeGateAuditSink(sink: {
  * 两列都是平台声明，合起来成 planNotReadOnlyReason。
  */
 /**
- * 计划门"含非只读 operation"拒绝 → 该说哪句话（`confirm` 列 + 部署能力）。
+ * 计划门"含非只读 operation"拒绝 → 该说哪句话（`confirm` 列 + 平台写开放声明）。
  *
  * 分流判据读平台语义表的 `confirm` 列（要不要用户确认）；但**"未开放写入权限"是一句归因，
- * 只有当这个部署真的没开放写时它才为真**。写已开放时平台照样拒——写类的放行路径是确认码 +
+ * 只有当平台侧真的声明写未开放时它才为真**。写已开放时平台照样拒——写类的放行路径是确认码 +
  * commit token，`planAccessAllows = plan && !confirm` 永远为假，它根本不该进计划。那时它是
  * **形状问题**：该点名、该让 worker 把那个调用移出计划改为直接调用。
  *
@@ -201,16 +223,16 @@ export function createServeGateAuditSink(sink: {
  * 「当前未开放写入权限，如有需要请联系管理员开通」，worker 原样转达给用户，用户被指去找
  * 管理员要一个他已经有的权限，然后这一轮就此放弃。这比不点名更糟——它是一句错话。
  *
- * 第三个参数缺省（测试替身 / 老路径）时按只读判，与 `planWriteClosed` 的"空 capabilities
- * 视为只读"同一约定，既有判定一字不变。
+ * 第三个参数缺省（测试替身 / 老路径）时按只读判，与 `planWriteClosed` 的"writeEnabled
+ * 缺省视为只读"同一约定，既有判定一字不变。
  */
 export function planNotReadOnlyCode(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
-  capabilities?: readonly string[],
+  writeEnabled?: boolean,
 ): 'WRITE_NOT_ENABLED' | 'PLAN_NOT_PLANNABLE' {
   const needsConfirm = calls.some((call) => isWriteAccess(semantics?.get(call.operation)));
-  if (needsConfirm && !capabilities?.includes('write')) return 'WRITE_NOT_ENABLED';
+  if (needsConfirm && writeEnabled !== true) return 'WRITE_NOT_ENABLED';
   return 'PLAN_NOT_PLANNABLE';
 }
 
@@ -257,7 +279,7 @@ export function nonPlannableOperations(
  * 措辞唯一出处是 error-codes.ts 的表：点名版 PLAN_NOT_PLANNABLE_OPERATIONS（带 {operations}
  * 数据），点不出名字时退回零名单版 PLAN_NOT_PLANNABLE——调用点只选码、不拼句。
  *
- * 什么时候才说 WRITE_NOT_ENABLED：**这个部署没开放写**（capabilities 不含 write）且计划里有
+ * 什么时候才说 WRITE_NOT_ENABLED：**平台侧声明写未开放**（writeEnabled 非真）且计划里有
  * 要用户确认的写类。那时归属确实是"找管理员开通写入权限"。写已开放时同一形态是形状问题，
  * 点名、让 worker 把那个调用移出计划改为直接调用——说成权限问题是假归因（见
  * planNotReadOnlyCode 的注释与 2026-10-14 实测）。`planWriteClosed` 已经在 evaluate 之前
@@ -266,9 +288,9 @@ export function nonPlannableOperations(
 export function planNotReadOnlyReason(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
-  capabilities?: readonly string[],
+  writeEnabled?: boolean,
 ): string {
-  if (planNotReadOnlyCode(calls, semantics, capabilities) === 'WRITE_NOT_ENABLED') {
+  if (planNotReadOnlyCode(calls, semantics, writeEnabled) === 'WRITE_NOT_ENABLED') {
     return messageTextFor('WRITE_NOT_ENABLED');
   }
   const named = nonPlannableOperations(calls, semantics);
@@ -349,11 +371,18 @@ export interface PiCodingWorkerSessionOptions {
    */
   onPlanSubmitted?: (calls: readonly PlanCall[]) => void;
   /**
-   * 当前委托主体的有效能力（宿主注入，TurnDriverInput.capabilities 的透传）。
-   * 写关闭判据（D-075）的输入：计划含写类 operation 且能力不含 write 时，宿主在
-   * 计划评估前拦截并合成写关闭话术。缺省视为只读。
+   * 平台侧的写开放声明（宿主注入，TurnDriverInput.writeEnabled 的透传；缺省视为只读）。
+   * 写关闭判据（D-075）的输入：计划含写类 operation 且平台声明写未开放时，宿主在
+   * 计划评估前拦截并合成写关闭话术。判据依据是平台/部署侧声明（部署层经 isCommitEnabled()
+   * 派生），不是委托主体自持的能力布尔（变更项 ⑧）。
    */
-  capabilities?: readonly string[];
+  writeEnabled?: boolean;
+  /**
+   * 本回合 worker 的工作区（宿主注入，TurnDriverInput.scratchDir 的透传，如
+   * `tmp/task_<taskId>`）：write/edit 门、提案 payload 边界与计划产物路径豁免共用的
+   * 判据输入。缺省（未注入，测试替身 / 老路径）= 三支边界整支不出现，判定与从前一字不差。
+   */
+  scratchDir?: string;
   /**
    * operation → 平台 access 语义表（平台 `operation list --json` 派生，测试替身注入点）；
    * 缺省本会话自派生一次（失败 = 空表 = 写类判定不生效，平台门禁照旧兜底）。
@@ -517,6 +546,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
       // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
       // 因此不变）；这里只把它拆成三个族并记下本轮落盘的文件——拆分只服务于告警披露，
@@ -615,7 +645,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
-        capabilities: input.capabilities,
+        writeEnabled: input.writeEnabled === true,
+        scratchDir: input.scratchDir,
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
           onStep: stepOnce,
@@ -626,6 +657,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             if (event.allowed && (event.tool === 'write' || event.tool === 'edit') && event.detail) {
               producedFiles.push(event.detail);
             }
+            // 任何被放行执行的 bash 都构成执行痕迹（2026-10-18）：首词拦截退役后 worker
+            // 会像交互式 Claude 一样直跑 python/cat——纯本地任务的执行全是非网关命令，
+            // 不计数的话，回合出口的防伪造检查会把诚实的完成报告当成伪造顶掉（run6 实测）。
+            if (event.allowed && event.tool === 'bash') bashRuns += 1;
             options.serveGateAudit?.(event);
           },
           onAllowedBash: (kind) => {
@@ -729,9 +764,14 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 不可达）时退回 currentPlan()，再为空则 planId 记 ''、version 记 0——calls 仍如实
       // 报 gateCalls，"执行发生过"这个事实绝不被计划身份的空缺抹掉。
       const execution = (): { planId: string; version: number; calls: number } | undefined => {
-        if (gateCalls <= 0) return undefined;
+        // 任何被放行执行的 bash 都构成执行痕迹（2026-10-18）：首词拦截退役后 worker 会像
+        // 交互式 Claude 一样直跑 python/cat——纯本地任务的执行全是非网关命令，只数网关
+        // 调用的话，回合出口的防伪造检查会把诚实的完成报告当成伪造顶掉（run6 实测：
+        // 106 人契约勾稽全对、真 Excel 已落盘，终稿却被换成"请告诉我要查询的对象"）。
+        // 执行发生过就是执行过，与调用的形态无关。
+        if (bashRuns <= 0) return undefined;
         const plan = executedPlan ?? currentPlan();
-        return { planId: plan?.planId ?? '', version: plan?.version ?? 0, calls: gateCalls };
+        return { planId: plan?.planId ?? '', version: plan?.version ?? 0, calls: bashRuns };
       };
       // 纠错环（架构 §3）：执行不了就回报"缺什么"。只在**没有执行痕迹**时派生——
       // execution() 为真（≥1 次被放行的调用）即认为执行面跑过，那类回合不缺信息，把已经
@@ -859,6 +899,29 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         timedOut = true;
         session.agent.abort();
       }, Math.max(1, remaining));
+      // 墙钟收尾信号（"失败必达"路径 1 前半段）：预算 90% 处经 SDK steer 通道注入一条
+      // user 消息（WORKER_WIND_DOWN_NUDGE），给 worker 剩余 10% 自行收尾。latch 一次；
+      // 信号已发过就不再补发（绝不在同一回合反复推同一个模型，与补一刀同纪律）。
+      let windDownSent = false;
+      const windDownTimer = setTimeout(() => {
+        windDownSent = true;
+        try {
+          session.agent.steer({
+            role: 'user',
+            content: WORKER_WIND_DOWN_NUDGE,
+            timestamp: Date.now(),
+          } as unknown as DriverMessage);
+          console.info(JSON.stringify({ event: 'worker_wind_down_signaled', requestId: input.requestId, taskId: input.sessionId }));
+        } catch (error) {
+          // 信号失败不外溢：到点 abort 照旧兜底，宿主合成终稿的路径不受影响。
+          console.warn(JSON.stringify({
+            event: 'worker_wind_down_failed',
+            requestId: input.requestId,
+            taskId: input.sessionId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+        }
+      }, windDownDelayMs(remaining));
       // SDK 会话事件（tool_execution_start / agent_start / agent_end）是内部协议名，
       // 一律不当进度帧外发：用户可见的进度只由 G1 放行事件经 label 驱动产生。
       try {
@@ -960,6 +1023,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         return settledAfterError ?? { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
       } finally {
         clearTimeout(abortTimer);
+        // 收尾信号计时器与 abort 计时器同命运：回合已收尾（含正常完成）就不再注入——
+        // steer 队列残留会让下一回合凭空多出一条收尾指令。
+        clearTimeout(windDownTimer);
         input.signal?.removeEventListener('abort', cancel);
         session.dispose();
         // A1 披露（只告警、不改回合结果）：上面每个 return 之前都不必记得调它——finally
@@ -974,6 +1040,52 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
  * Public only for integration tests and future worker composition.  This is
  * the one place where pi-coding-agent is configured for a context worker.
  */
+/**
+ * bash 溢出快照归位（A2A 文件通道，P9）：SDK 把超限全量输出写到 /tmp/pi-bash-<id>.log
+ * （工作区外，read 不可及——截断的"逃生通道"由此形同虚设，2026-10-18 run5 实测 worker
+ * 的吸收脚本两度被拒后放弃）。这里在结果交还模型之前把它搬进本轮工作区的 .outputs/，
+ * 并把 content/details 里的旧路径改写为新路径——模型与后续轮次看到的都是工作区内路径。
+ *
+ * 失败语义：搬移失败（权限/跨盘复制失败等）不阻断、不改写——快照留在原位，行为与
+ * 改造前一致。工具名非 bash、无 scratchDir、结果无溢出路径时零操作。
+ */
+export function relocateBashSnapshotIntoWorkspace(
+  toolName: string | undefined,
+  result: { content?: unknown; details?: unknown } | undefined,
+  scratchDir: string | undefined,
+  cwd: string,
+): { content?: unknown; details?: unknown } | null {
+  if (toolName !== 'bash' || !scratchDir || !result) return null;
+  const details = (result.details ?? null) as { fullOutputPath?: unknown } | null;
+  const src = typeof details?.fullOutputPath === 'string' && path.isAbsolute(details.fullOutputPath)
+    ? details.fullOutputPath
+    : undefined;
+  if (!src) return null;
+  try {
+    const outDir = path.join(cwd, scratchDir, '.outputs');
+    mkdirSync(outDir, { recursive: true });
+    const dest = path.join(outDir, path.basename(src));
+    try {
+      renameSync(src, dest);
+    } catch {
+      // 跨文件系统 rename 会 EXDEV：退化为复制 + 删源
+      copyFileSync(src, dest);
+      rmSync(src, { force: true });
+    }
+    const rewriteText = (text: string): string => text.split(src).join(dest);
+    const content = Array.isArray(result.content)
+      ? result.content.map((block) => {
+          const b = block as { type?: string; text?: string };
+          return b?.type === 'text' && typeof b.text === 'string' ? { ...b, text: rewriteText(b.text) } : block;
+        })
+      : result.content;
+    const detailsOut = details && typeof details === 'object' ? { ...details, fullOutputPath: dest } : details;
+    return { content, details: detailsOut };
+  } catch {
+    return null;
+  }
+}
+
 export async function createPiCodingWorkerSession(options: PiCodingWorkerSessionOptions): Promise<PiCodingWorkerSession> {
   const loader = new DefaultResourceLoader({
     cwd: options.cwd,
@@ -1111,10 +1223,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
-    // 本轮草稿目录：tmp/<requestId>。宿主已有随机源（requestId），不必让 worker 自己随机
-    // （它也没有随机手段）。给了它，write 只放行这一个目录——共享 tmp/ 下多个会话同时写
-    // tmp/contract.json 会互相覆盖，而覆盖后的产物看不出被谁污染过。
-    ...(options.requestId ? { scratchDir: `tmp/${options.requestId}` } : {}),
+    // 本回合工作区：宿主按任务注入（`tmp/task_<taskId>`，续跑同任务共享）。宿主有随机源
+    // （taskId），不必让 worker 自己随机（它也没有随机手段）。给了它，write 只放行这一个
+    // 目录——共享 tmp/ 下多个会话同时写同名产物会互相覆盖，而覆盖后的产物看不出被谁污染过。
+    ...(options.scratchDir ? { scratchDir: options.scratchDir } : {}),
   });
   /**
    * 计划提交审计上报：一次提交一行 tool_calls（与 G1 门同一口径、同一个出口）。
@@ -1237,8 +1349,13 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   const sessionAfterToolCall = session.agent.afterToolCall;
   session.agent.afterToolCall = async (ctx) => {
     const overridden = await sessionAfterToolCall?.(ctx);
-    platformRecorder.record((overridden?.content ?? ctx.result.content) as unknown);
-    return overridden;
+    // bash 溢出快照归位（A2A 文件通道）：/tmp 快照搬进本轮工作区，路径改写后交还模型
+    const relocated = relocateBashSnapshotIntoWorkspace(ctx.toolCall?.name, overridden ?? ctx.result, options.scratchDir, options.cwd);
+    const merged = relocated
+      ? ({ ...(overridden ?? {}), ...relocated } as typeof overridden)
+      : overridden;
+    platformRecorder.record((merged?.content ?? ctx.result.content) as unknown);
+    return merged;
   };
 
   /**
@@ -1250,11 +1367,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    */
   async function decideProposalCreation(call: ProposalCreateCall): Promise<ServeGateVerdict> {
     // payload 路径的通用文件边界检查（安全，非业务）：路径经 workspaceRelPath 解析后必须
-    // 落在本轮 scratchDir（tmp/<requestId>）内。理由：payload 路径来自 worker 命令，不检查
-    // 就等于让 worker 指使平台去读工作区里任意文件、再把错误信息带回来看——那是一道通用
-    // 读取面，与提案业务无关。判据与 write 门同一把尺（workspaceRelPath + isInsideScratch），
-    // 不存在第二份路径解析。
-    const scratchDir = scratchDirFor(options.requestId);
+    // 落在本回合工作区（tmp/task_<taskId>，宿主注入）内。理由：payload 路径来自 worker 命令，
+    // 不检查就等于让 worker 指使平台去读工作区里任意文件、再把错误信息带回来看——那是一道
+    // 通用读取面，与提案业务无关。判据与 write 门同一把尺（workspaceRelPath +
+    // isInsideScratch），不存在第二份路径解析。
+    const scratchDir = options.scratchDir ?? null;
     const rel = scratchDir ? workspaceRelPath(options.cwd, call.payloadPath) : null;
     if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
       const reason = `PROPOSAL REFUSED：payload 路径越界（只准本轮可写位置 ${scratchDir ?? '（未分配）'} 内），未调用平台。`;
@@ -1321,13 +1438,14 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 模型不走到那儿，用户就永远不知道写权限是关闭的。计划里出现写类 operation 而
     // 本部署能力不含 write 时，这份计划注定跑不完——宿主当场合成写关闭话术终结该轮，
     // 不依赖模型自觉披露。
-    // 判据是机械的：calls（宿主解析）× 语义表（平台 access 声明，confirm 列）× capabilities
-    // （宿主持有），三个输入没有一个字节从 worker 文本解析。拦截理由复用
-    // error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源（与平台门拒绝/提案路径同一句），
-    // 不新写措辞；PLAN STOP 是协议前缀（worker 提示词认它 = 直接说明停止原因）。
+    // 判据是机械的：calls（宿主解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled
+    // （平台侧写开放声明，部署层经 isCommitEnabled() 派生——变更项 ⑧），三个输入没有一个
+    // 字节从 worker 文本解析。拦截理由复用 error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源
+    // （与平台门拒绝/提案路径同一句），不新写措辞；PLAN STOP 是协议前缀（worker 提示词认
+    // 它 = 直接说明停止原因）。
     // 与实体门禁并列不合并：那个管"参数越权"（可自愈的诊断），这个管"部署没开放写"
     // （终局事实，无可自愈动作）。拦在 evaluate 之前：零平台调用、零写尝试。
-    if (planWriteClosed(parsed.calls, operationSemantics, options.capabilities)) {
+    if (planWriteClosed(parsed.calls, operationSemantics, options.writeEnabled === true)) {
       writeClosed = true;
       console.info(JSON.stringify({
         event: 'plan_write_not_enabled',
@@ -1366,12 +1484,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 不按 isError（平台 CLI exit 3 的真错误信封同形），也不按文案前缀（嗅探）。
       //
       // 第三个参数（产物路径豁免，2026-10-13 实测假拒修复）：worker 把 payload 写进
-      // 本轮 scratch 后按路径排进计划，该路径不是领域实体、不在任何来源里，逐字包含
+      // 本回合工作区后按路径排进计划，该路径不是领域实体、不在任何来源里，逐字包含
       // 必然假拒，重试还会撞 DECLINED_PLAN_LIMIT 终局。判据与提案 payload 边界检查
       // 同一把尺（workspaceRelPath + isInsideScratch，见 turn-contract 的
-      // PlanArtifactBoundary），只有本轮 scratch 内的路径免检。requestId 缺失（测试
+      // PlanArtifactBoundary），只有本回合工作区内的路径免检。scratchDir 缺失（测试
       // 替身 / 老路径）时不传 = 豁免整支不出现，判定与从前一字不差。
-      const scratchDir = scratchDirFor(options.requestId);
+      const scratchDir = options.scratchDir ?? null;
       const artifactBoundary: PlanArtifactBoundary | undefined = scratchDir
         ? { workspaceRoot: options.cwd, scratchDir }
         : undefined;
@@ -1444,16 +1562,16 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // "该调用"而说"哪个调用"，worker 才删得动那一个、改为直接调用、重提剩余部分——
       // 2026-10-13 实测它就是在这一句上无从下手，原样重提 5 次后 terminal block。
       //
-      // 2026-10-14 修一处假归因：分流必须带 capabilities。写已开放时写类在场仍然是形状问题
-      // （写类走确认码 + commit token，`plan && !confirm` 永远为假，它不该进计划），此时回
+      // 2026-10-14 修一处假归因：分流必须带平台写开放声明。写已开放时写类在场仍然是形状
+      // 问题（写类走确认码 + commit token，`plan && !confirm` 永远为假，它不该进计划），此时回
       // "未开放写入权限"是错的——实测 worker 原样转达给用户，用户被指去找管理员要一个他已经
-      // 有的权限，这一轮就此放弃。所以 capabilities 含 write 时走②：点名 + 让 worker 改成
+      // 有的权限，这一轮就此放弃。所以平台声明写开放时走②：点名 + 让 worker 改成
       // 直接调用（B3 的提案拦截就在那条路上等着）。
       if (error instanceof Error && error.message.includes('PLAN_OPERATION_NOT_READ_ONLY')) {
         activePlan = previousPlan;
         return {
           block: true,
-          reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics, options.capabilities)}`,
+          reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics, options.writeEnabled === true)}`,
         };
       }
       return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };

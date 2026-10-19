@@ -50,8 +50,14 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * prompt cache 按前缀逐字节命中，动态日期排在稳定内容之前会把整个前缀炸断——跨天每次
  * 调用对 SYSTEM_PROMPT + skill 全额付价；移到尾部后跨天只有尾注一行未命中。文案一字不差，
  * 行为等价（非抽取回退）：+10 = 注释块 6 + 常量 1 + 拼装处 3。下一批抽取时照旧只减不增。
+ *
+ * 1251 → 1293（2026-10-18，功能新增非抽取）：资源耗尽终稿（"失败必达"路径 1）。委派
+ * catch 与恢复路径各接一段 RESOURCE_EXHAUSTED 合成接线（判定与渲染住新模块
+ * resource-exhausted.ts：这里只做"检测 DELEGATION_TIMEOUT_FAILURE 话术 → 取底账 →
+ * 渲染 → 抛出/返回"），turn_span 增 resource_exhausted 结局。+42 = import 2 + 委派
+ * catch 接线 26 + 恢复路径接线 12 + turn_span 2。判据本体不在 runtime，后续抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1251;
+const RUNTIME_LINE_BUDGET = 1293;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

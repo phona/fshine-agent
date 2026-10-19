@@ -219,8 +219,8 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      // 写开放：前置扫描不触发，这句话必须来自 evaluate 失败分支（平台门真的被咨询了）
-      capabilities: ['read', 'write'],
+      // 写开放（平台声明 writeEnabled）：前置扫描不触发，这句话必须来自 evaluate 失败分支（平台门真的被咨询了）
+      writeEnabled: true,
     });
     // 平台语义表说 voucher.fill 要用户确认（confirm=true）→ 部署没开放写的事实
     const command = 'bin/17dz plan {"calls":[{"operation":"voucher.fill","args":["幻辰财税","202609"]}]}';
@@ -234,7 +234,7 @@ describe('pi-coding-agent context worker', () => {
     expect(verdict?.block).toBe(true);
     // 拒绝原因是用户/worker 可行动的话术，且**不是 CLI 失败串**：平台内部错误码、operation 名
     // 都不以"透传"形式上屏，宿主只给结构化的下一步。
-    // 2026-10-14 修正：这里 capabilities 是 ['read','write']（写开放），所以这句话不再是
+    // 2026-10-14 修正：这里平台声明写开放（writeEnabled: true），所以这句话不再是
     // "未开放写入权限"——那是假归因（实测 worker 原样转达给用户，用户被指去找管理员要一个
     // 他已经有的权限，这一轮就此放弃）。写开放时它是形状问题：点名 + 移出计划改直接调用。
     expect(verdict?.reason).toContain('PLAN STOP');
@@ -284,9 +284,9 @@ describe('pi-coding-agent context worker', () => {
       modelConfig: await fakeModelRuntime(),
       planCliRunner,
       operationSemantics: semantics,
-      // 写开放：前置扫描（D-075）不触发，裁决完全落到平台计划门——否则写类计划在
+      // 写开放（平台声明 writeEnabled）：前置扫描（D-075）不触发，裁决完全落到平台计划门——否则写类计划在
       // evaluate 之前就被拦下，测不到 evaluate 失败分支的分流。
-      capabilities: ['read', 'write'],
+      writeEnabled: true,
     });
   }
 
@@ -331,7 +331,7 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
 
     // 同一形态、部署没开放写 ⇒ 仍是写关闭话术（那句话的归属没变）。
-    // 注意这条走的是**前置扫描**（D-075）：capabilities 缺省只读 ⇒ planWriteClosed 在
+    // 注意这条走的是**前置扫描**（D-075）：writeEnabled 缺省只读 ⇒ planWriteClosed 在
     // evaluate 之前就拦下，平台门一次都不咨询（evaluates 保持 0）。两条路——前置扫描与
     // 平台门拒绝的映射——在"没开放写"上给出同一句话，这正是想要的效果。
     const closed = { evaluates: 0 };
@@ -349,7 +349,7 @@ describe('pi-coding-agent context worker', () => {
         return NOT_READ_ONLY_REJECTION(request);
       },
       operationSemantics: SEMANTICS_TABLE,
-      // 不传 capabilities = 只读（与 planWriteClosed 的"空 capabilities 视为只读"同约定）
+      // 不传 writeEnabled = 只读（与 planWriteClosed 的"缺省视为只读"同约定）
     });
     const closedReason = await submitPlan(closedWorker, '{"operation":"voucher.commit","args":["A","202609"]}');
     expect(closed.evaluates).toBe(0);
@@ -419,7 +419,7 @@ describe('pi-coding-agent context worker', () => {
       '{"operation":"voucher.commit","args":["A","202609"]}',
     ].join(','));
     expect(counter.evaluates).toBe(1);
-    // 写已开放（rejectingWorker 的 capabilities）⇒ 不是权限问题，是"这两个都不该进计划"。
+    // 写已开放（rejectingWorker 声明 writeEnabled）⇒ 不是权限问题，是"这两个都不该进计划"。
     // 2026-10-14 实测：改前这里回 WRITE_NOT_ENABLED，worker 原样转达给用户"请联系管理员
     // 开通写入权限"——用户要一个他已经有的权限，这一轮就此放弃。
     expect(reason).not.toContain(messageTextFor('WRITE_NOT_ENABLED'));
@@ -444,7 +444,7 @@ describe('pi-coding-agent context worker', () => {
       modelConfig: await fakeModelRuntime(),
       planCliRunner: async () => NOT_READ_ONLY_REJECTION({ args: ['plan', 'evaluate'], platformRoot: root }),
       operationSemantics: SEMANTICS_TABLE,
-      // 缺省（不传 capabilities）= 只读：语义表说有写类 ⇒ 权限问题，与 planWriteClosed 同约定
+      // 缺省（不传 writeEnabled）= 只读：语义表说有写类 ⇒ 权限问题，与 planWriteClosed 同约定
     });
     const reason = await submitPlan(worker, [
       '{"operation":"payroll.transform","args":["A","202609"]}',
@@ -486,7 +486,7 @@ describe('pi-coding-agent context worker', () => {
       { operation: 'voucher.query-saved', args: [] },
       { operation: 'payroll.transform', args: [] },
     ], SEMANTICS_TABLE)).toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
-    // 不传 capabilities（缺省只读）⇒ 写类在场仍是权限问题，判定一字不变
+    // 不传 writeEnabled（缺省只读）⇒ 写类在场仍是权限问题，判定一字不变
     expect(planNotReadOnlyReason([
       { operation: 'payroll.transform', args: [] },
       { operation: 'voucher.commit', args: [] },
@@ -495,11 +495,11 @@ describe('pi-coding-agent context worker', () => {
     expect(planNotReadOnlyReason([
       { operation: 'payroll.transform', args: [] },
       { operation: 'voucher.commit', args: [] },
-    ], SEMANTICS_TABLE, ['read', 'write']))
+    ], SEMANTICS_TABLE, true))
       .toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform、voucher.commit' }));
     expect(planNotReadOnlyReason([
       { operation: 'voucher.proposal', args: [] },
-    ], SEMANTICS_TABLE, ['read', 'write']))
+    ], SEMANTICS_TABLE, true))
       .toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.proposal' }));
     // 拿不到语义表 → 空名单 → 零名单措辞（不把整份计划统统说成不该进计划）
     expect(nonPlannableOperations([{ operation: 'voucher.commit', args: [] }], undefined)).toEqual([]);
@@ -560,7 +560,6 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      capabilities: ['read'],
     });
     const command = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
@@ -601,8 +600,8 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      // 写开放：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
-      capabilities: ['read', 'write'],
+      // 写开放（平台声明 writeEnabled）：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
+      writeEnabled: true,
     });
     const command = 'bin/17dz plan {"calls":[{"operation":"voucher.prepare","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
@@ -637,7 +636,6 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      capabilities: ['read'],
     });
     // 未登记的 operation：查不到 access 就不猜它是写类——平台计划门按既有路径裁决
     const command = 'bin/17dz plan {"calls":[{"operation":"voucher.batch","args":["A","202609"]}]}';
@@ -739,6 +737,7 @@ describe('pi-coding-agent context worker', () => {
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
     const requestId = 'req_31776cfb-3bdd-4ec7-8389-d5d40ac4b4ea';
+    const scratchDir = 'tmp/task_018f0d2a-1111-2222-3333-444455556666';
     const session = async (sources: { currentMessage: string }) => {
       const evaluated: string[][] = [];
       const planCliRunner: PlanCliRunner = async ({ args }) => {
@@ -752,6 +751,7 @@ describe('pi-coding-agent context worker', () => {
         systemPrompt: 'intent scope test',
         sessionId: 'task_scope',
         requestId,
+        scratchDir,
         agentDir: path.join(root, '.fshine-agent'),
         modelConfig,
         planCliRunner,
@@ -767,9 +767,9 @@ describe('pi-coding-agent context worker', () => {
         context: {} as never,
       });
 
-    // 本轮 scratch 内的产物路径 → 放行（当前消息里没有这个路径，但它不是领域实体）
+    // 本轮任务工作区内的产物路径 → 放行（当前消息里没有这个路径，但它不是领域实体）
     const own = await session({ currentMessage: '把幻辰财税 202606 的应收做成提案' });
-    const verdict = await submit(own.worker, `bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["tmp/${requestId}/proposal.json"]}]}`);
+    const verdict = await submit(own.worker, `bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["${scratchDir}/proposal.json"]}]}`);
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(own.evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
@@ -1266,13 +1266,15 @@ describe('降级：没有 label 就零进度帧，审计字段一字不少', () 
     expect(events.at(-1)?.label).toBeUndefined();
   });
 
-  it('被拦的调用既不留 label 也不发帧', async () => {
+  it('被拦改软放行后：元字符调用真实执行，label 帧照发、审计带软标记', async () => {
     const { steps, events } = await driveBash({
       command: 'bin/17dz query query-receivables.js --query 甲; cat .env',
       operationLabels: new Map([['query-receivables', '读取余额']]),
     });
-    expect(steps).toEqual([]);
-    expect(events.at(-1)?.allowed).toBe(false);
-    expect(events.at(-1)?.label).toBeUndefined();
+    // 2026-10-18 元字符软放行：调用真实放行 → label 帧照发（真实调用就该有进度帧）
+    expect(steps).toEqual(['正在读取余额…']);
+    expect(events.at(-1)?.allowed).toBe(true);
+    expect(events.at(-1)?.label).toBe('读取余额');
+    expect(events.at(-1)?.detail).toContain('软放行');
   });
 });
