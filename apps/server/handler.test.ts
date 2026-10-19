@@ -1096,12 +1096,54 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
     expect(collectProducedFiles(root, since)).toEqual([]);
   });
 
-  it('任务工作区 tmp/task_<taskId>/ 不收（⑨：工作区是文件交互区，不是交付通道）', () => {
+  it('未登记的任务工作区 tmp/task_<taskId>/ 不收(别的会话/未在册:防把 A 的文件发给 B)', () => {
     const root = freshRoot();
     const since = sinceTurnStart();
     put(root, `${OTHER_TASK_DIR}/别人的中间产物.xlsx`);
-    put(root, `${TASK_DIR}/本任务的草稿.xlsx`);
+    put(root, `${TASK_DIR}/没登记就不算本轮产物.xlsx`);
+    // 白名单只列了 OTHER_TASK_DIR：它的文件收，未在册的 TASK_DIR 不收
+    const files = collectProducedFiles(root, since, [`tmp/${OTHER_TASK_DIR}`]);
+    expect(files.map((f) => f.filename)).toEqual(['别人的中间产物.xlsx']);
+    // 一个都不列（旧替身/缺 platformTasks 的退化形态）= 只扫 tmp/ 顶层，两个都不收
     expect(collectProducedFiles(root, since)).toEqual([]);
+  });
+
+  it('本会话任务工作区里的本轮产物被收(worker 唯一可写位置,2026-10-19 事故形状)', () => {
+    const root = freshRoot();
+    const since = sinceTurnStart();
+    put(root, `${TASK_DIR}/整理好的2026年08月工资表.xlsx`, 'XLSX');
+    put(root, `${TASK_DIR}/幻骥达2026年08月个税申报.xlsx`, 'TAX');
+    const expected = ['幻骥达2026年08月个税申报.xlsx', '整理好的2026年08月工资表.xlsx'];
+    const files = collectProducedFiles(root, since, [`tmp/${TASK_DIR}`]);
+    expect(files.map((f) => f.filename).sort()).toEqual(expected.sort());
+  });
+
+  it('工作区里 since 之前的老文件不收(续跑共享工作区,旧产物不是本轮交付)', () => {
+    const root = freshRoot();
+    const since = sinceTurnStart();
+    const stale = put(root, `${TASK_DIR}/上个月落下的工资表.xlsx`);
+    const longAgo = new Date(Date.now() - 60 * 60 * 1000);
+    utimesSync(stale, longAgo, longAgo);
+    put(root, `${TASK_DIR}/本轮的新表.xlsx`);
+    const files = collectProducedFiles(root, since, [`tmp/${TASK_DIR}`]);
+    expect(files.map((f) => f.filename)).toEqual(['本轮的新表.xlsx']);
+  });
+
+  it('工作区里非办公扩展名不收(契约/脚本是中间产物,不是交付物)', () => {
+    const root = freshRoot();
+    const since = sinceTurnStart();
+    put(root, `${TASK_DIR}/final_contract.json`);
+    put(root, `${TASK_DIR}/build_contract.py`);
+    expect(collectProducedFiles(root, since, [`tmp/${TASK_DIR}`])).toEqual([]);
+  });
+
+  it('工作区白名单形态外的入参被忽略(非 tmp/task_<uuid> 一律不当收集范围)', () => {
+    const root = freshRoot();
+    const since = sinceTurnStart();
+    put(root, `${TASK_DIR}/工资表.xlsx`);
+    put(root, 'attachments/用户上传的原料.xlsx');                       // 输入区:永不是产物
+    // 'tmp'（缺一段）、穿越形态、 attachments 都不是合法工作区名 → 白名单为空 → 只扫顶层
+    expect(collectProducedFiles(root, since, ['tmp', `tmp/${TASK_DIR}/../${TASK_DIR}x`, 'tmp/attachments'])).toEqual([]);
   });
 
   it('非办公扩展名不收(.py 是中间产物,不是交付物)', () => {
@@ -1144,5 +1186,107 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
     writeFileSync(outside, 'SECRET');
     symlinkSync(outside, path.join(root, 'tmp', '外泄.xlsx'));
     expect(collectProducedFiles(root, since)).toEqual([]);
+  });
+
+  // ── 端到端：工作区产物随最终回复一起回传（2026-10-19 幻骥达事故形状）───────────
+  // 事故：worker 把两个 xlsx 写进 tmp/task_d42fffce-…/，宿主按"工作区不是交付通道"
+  // 整轮只回文字，用户在企微里什么都拿不到。下面两条钉修好后与退化后的两种形态。
+  describe('端到端:本会话任务工作区的产物随回复回传', () => {
+    const e2eRoots: string[] = [];
+    afterAll(() => { for (const root of e2eRoots) rmSync(root, { recursive: true, force: true }); });
+    const freshE2eRoot = (): string => {
+      const root = mkdtempSync(path.join(tmpdir(), 'produced-e2e-'));
+      e2eRoots.push(root);
+      mkdirSync(path.join(root, 'tmp'), { recursive: true });
+      return root;
+    };
+
+    /** 本会话在册的平台任务替身（taskId 即工作区名）。 */
+    const storeWithTasks = (taskIds: string[]): AuditStore => ({
+      ...fakeStore(),
+      platformTasks: {
+        get: async () => null,
+        upsert: async () => {},
+        listBySession: async () => taskIds.map((taskId) => ({
+          taskId,
+          parentSessionId: `wecom:${USER}:${USER}`,
+          principalId: `wecom:${USER}`,
+          workerMessages: [],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        })),
+      },
+    }) as unknown as AuditStore;
+
+    const textTurn = (): IncomingChannelMessage => ({
+      wecomUserId: USER,
+      conversationId: USER,
+      messageId: `m_${randomUUID()}`,
+      text: '帮我做幻骥达的工资表',
+      receivedAt: new Date().toISOString(),
+    });
+
+    it('platformTasks 在册:工作区里的交付物挂到回复上回传', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '整理好的2026年08月工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      // 交付物在回合执行期间落盘（生产形态：worker 跑域执行器产出），mtime 才会晚于
+      // 本轮委派开始时刻——提前写好会被 since 界判成"上一轮的旧产物"而不收。
+      // utimesSync 显式把 mtime 拨到"此刻"：内核粗粒度时钟打点可能比 Date.now() 落后
+      // 1ms 量级（见 sinceTurnStart 的注释），贴着 delegatedAt 写会让产物偶发被判旧。
+      const handler = createMessageHandler({
+        store: storeWithTasks([taskDir]),
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            writeFileSync(deliverable, 'XLSX');
+            utimesSync(deliverable, new Date(), new Date());
+            return { text: '做完了' };
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(typeof reply).not.toBe('string');
+      if (typeof reply === 'string') return;
+      expect(reply.text).toBe('做完了');
+      expect(reply.file?.filename).toBe('整理好的2026年08月工资表.xlsx');
+      expect(reply.file?.data.toString()).toBe('XLSX');
+    });
+
+    it('platformTasks 缺库(旧替身):退化为只回文字,不因收集失败炸掉回合', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const p = path.join(root, 'tmp', taskDir, '整理好的2026年08月工资表.xlsx');
+      mkdirSync(path.dirname(p), { recursive: true });
+      writeFileSync(p, 'XLSX');
+      const handler = createMessageHandler({
+        store: fakeStore(),
+        runtime: { handleTurn: async (): Promise<AgentReply> => ({ text: '做完了' }) } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(reply).toBe('做完了');
+    });
+
+    it('在册的是别的会话的工作区:本会话工作区里的文件不外发', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const otherTaskDir = `task_${randomUUID()}`;
+      const mine = path.join(root, 'tmp', taskDir, '我的工资表.xlsx');
+      mkdirSync(path.dirname(mine), { recursive: true });
+      writeFileSync(mine, 'MINE');
+      const handler = createMessageHandler({
+        // 在册的只有别人的工作区；我的不在册 → 不收
+        store: storeWithTasks([otherTaskDir]),
+        runtime: { handleTurn: async (): Promise<AgentReply> => ({ text: '做完了' }) } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(reply).toBe('做完了');
+    });
   });
 });

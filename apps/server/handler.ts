@@ -262,8 +262,12 @@ const ATTACHMENT_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
  *   ② `mtime >= since`——本轮委派开始之后才落盘的，才是本轮产物；
  *   ③ 扩展名是办公文档（OFFICE_EXT）；
  *   ④ 不在 `tmp/attachments/`——那是本轮**输入**；
- *   ⑤ 不在 `tmp/task_<taskId>/` 任务工作区——那是 worker 的文件交互区（⑨：按任务切，
- *      续跑共享），不是交付物位置；交付通道只有 tmp/ 顶层的平台执行器产物；
+ *   ⑤ `tmp/task_<taskId>/` 任务工作区**按白名单收**：只收 `workspaceDirs` 列明的那几个
+ *      （调用方按 principal/会话从 platform_tasks 取，见 sessionWorkspaceDirs）。工作区是
+ *      worker 的**唯一可写位置**（serve-gate 的 write 门），域执行器的输出位置又由 worker
+ *      传参决定——2026-10-19 实测：薪酬域把两个 xlsx 写进 `tmp/task_d42fffce-…/`，按旧规则
+ *      （工作区一律跳过）整轮回传只有文字，用户在企微里什么都拿不到。不收**未登记的**工作区：
+ *      并发会话各有各的任务工作区，认全会话的会把 A 的文件发给 B（数据泄漏，比漏传更严重）；
  *   ⑥ 普通文件且 ≤ 20MB。
  *
  * **为什么不再让 worker 声明路径**：旧约定是"worker 在回复末行写 `[发送文件] <绝对路径>`，
@@ -285,8 +289,32 @@ const MAX_OUT_FILES = 3;
 /** 入站附件的暂存位置名（`tmp/attachments/`）：那是输入，永远不是要回传的产物。 */
 const ATTACHMENTS_DIR_NAME = 'attachments';
 
-export function collectProducedFiles(platformRoot: string, since: string): OutgoingFileReply[] {
+/** 归一化工作区白名单：只认 `tmp/task_<uuid>` 形态，别的名字（含 `../` 穿越）一律忽略。 */
+function normalizeWorkspaceDirs(workspaceDirs: readonly string[] | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const raw of workspaceDirs ?? []) {
+    const rel = raw.replace(/^\.\//, '').replace(/\/+$/, '');
+    const segments = rel.split('/');
+    if (segments.length !== 2 || segments[0] !== 'tmp') continue;
+    if (!isScratchDirName(segments[1]!)) continue;
+    out.add(`tmp/${segments[1]}`);
+  }
+  return out;
+}
+
+/**
+ * 收集本轮产生的、用户能直接消费的终态产物。
+ *
+ * @param workspaceDirs 本会话的任务工作区（相对 platformRoot，形如 `tmp/task_<uuid>`）——
+ *   只有列在这里的工作区才纳入扫描；未登记的 `tmp/task_*` 一律跳过（防并发会话串味）。
+ */
+export function collectProducedFiles(
+  platformRoot: string,
+  since: string,
+  workspaceDirs?: readonly string[],
+): OutgoingFileReply[] {
   const sinceMs = Date.parse(since);
+  const allowedWorkspaces = normalizeWorkspaceDirs(workspaceDirs);
   let tmpRoot: string;
   try {
     tmpRoot = realpathSync(path.join(platformRoot, 'tmp'));
@@ -305,11 +333,13 @@ export function collectProducedFiles(platformRoot: string, since: string): Outgo
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        // 顶层就绕开两类非产物位置：附件输入区、任务工作区（⑨：tmp/task_<taskId>/ 是
-        // worker 的文件交互区，不是交付通道）。省得白走，也避免把工作区中间产物读进来。
-        // 真正的判据仍在下面按真实路径复核一遍——符号链接可能从别处指回这两类位置，
-        // 只在这一层拦不住。
-        if (depth === 0 && (entry.name === ATTACHMENTS_DIR_NAME || isScratchDirName(entry.name))) continue;
+        // 顶层就绕开两类非产物位置：附件输入区、以及**未登记的**任务工作区（白名单外的）。
+        // 省得白走，也避免把别处工作区的中间产物读进来。真正的判据仍在下面按真实路径复核
+        // 一遍——符号链接可能从别处指回这两类位置，只在这一层拦不住。
+        if (depth === 0) {
+          if (entry.name === ATTACHMENTS_DIR_NAME) continue;
+          if (isScratchDirName(entry.name) && !allowedWorkspaces.has(`tmp/${entry.name}`)) continue;
+        }
         visit(full, depth + 1);
         continue;
       }
@@ -325,7 +355,8 @@ export function collectProducedFiles(platformRoot: string, since: string): Outgo
       if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;   // 逃出受信边界
       const top = rel.split(path.sep)[0]!;
       if (top === ATTACHMENTS_DIR_NAME) continue;                  // 输入，不是产物
-      if (isScratchDirName(top)) continue;                         // 任务工作区，不是交付通道
+      // 任务工作区按白名单放行：解引用后落在别处工作区（含链接指回别人工作区）的一律拒。
+      if (isScratchDirName(top) && !allowedWorkspaces.has(`tmp/${top}`)) continue;
       if (!OFFICE_EXT.has(path.extname(real).toLowerCase())) continue;
       try {
         const stat = statSync(real);
@@ -355,9 +386,49 @@ export function collectProducedFiles(platformRoot: string, since: string): Outgo
   return out;
 }
 
-function withFileReplies(text: string, platformRoot: string | undefined, since: string): ChannelReply {
+/**
+ * 本会话的任务工作区清单（相对 platformRoot，形如 `tmp/task_<uuid>`）——产物回传的
+ * 额外收集范围（collectProducedFiles 的 workspaceDirs）。
+ *
+ * 为什么按会话取：worker 的 write 门把可写位置钉在本轮工作区（serve-gate 的 scratchDir），
+ * 域执行器的输出位置又由 worker 传参决定，交付物因此落在 `tmp/task_<taskId>/` 里——那是
+ * 它唯一能写的地方。只认本会话（principal × session）在册的任务：并发会话各有各的任务
+ * 工作区，认全会话的等于把 A 的文件回传给 B。任务由委派时落库（context.ts 的 upsert），
+ * 回合结束来查时本轮任务必已在册。
+ *
+ * 失败语义：platformTasks 缺库（旧替身/精简部署）或查询抛错 → 空数组 = 退化为只扫 tmp/
+ * 顶层，回传收集失败不能让整个回合失败。
+ */
+async function sessionWorkspaceDirs(
+  store: AuditStore,
+  principalId: string,
+  sessionId: string,
+): Promise<string[]> {
+  const repo = store.platformTasks;
+  if (!repo) return [];
+  try {
+    const tasks = await repo.listBySession(principalId, sessionId);
+    return tasks.map((task) => `tmp/${task.taskId}`);
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: 'platform_tasks_list_failed',
+      principalId,
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    return [];
+  }
+}
+
+function withFileReplies(
+  text: string,
+  platformRoot: string | undefined,
+  since: string,
+  workspaceDirs?: readonly string[],
+): ChannelReply {
   if (!platformRoot) return text;
-  const [file] = collectProducedFiles(platformRoot, since);
+  const files = collectProducedFiles(platformRoot, since, workspaceDirs);
+  const [file] = files;
   return file ? { text, file } : text;
 }
 
@@ -551,6 +622,24 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 反复回传。而反过来，委派前一刻记的界又能覆盖整个 worker 执行期（含平台执行器在占用
       // 时改走 fallback 分支、晚一步才落盘的那份）——worker 无法预知分支，宿主也不必预知。
       const delegatedAt = new Date().toISOString();
+      // 回合出口：把本轮产物挂到回复上回传用户。收集范围 = tmp/ 顶层 + **本会话**任务
+      // 工作区里本轮新落盘的办公文档（worker 的 write 门只放行工作区，域执行器的输出
+      // 输出位置由 worker 传参决定，交付物因此落在那里——2026-10-19 事故形状）。收到时落
+      // 一条事件：回传成败必须可观测，那场事故最贵的成本就是全程零日志、零错误事件，
+      // 只能靠人肉翻 tmp/ 才定位到"文件写了、没人收"。
+      const finishWithFiles = async (text: string): Promise<ChannelReply> => {
+        const workspaceDirs = await sessionWorkspaceDirs(store, principalId, `wecom:${sessionKey}`);
+        const reply = withFileReplies(text, deps.platformRoot, delegatedAt, workspaceDirs);
+        if (typeof reply !== 'string' && reply.file) {
+          console.info(JSON.stringify({
+            event: 'produced_files_collected',
+            requestId,
+            filename: reply.file.filename,
+            bytes: reply.file.data.length,
+          }));
+        }
+        return reply;
+      };
       let noticeSequence = 0;
       const onNotice: NoticeFn | undefined = notice ? async (text) => {
         await notice(text);
@@ -629,7 +718,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           if (!confirmation.taskId) throw new Error('已确认的计划缺少原任务标识。');
           announceAccepted();
           const resumed = await runtime.handleTurn({ ...trusted, resumeTaskId: confirmation.taskId }, input);
-          return withFileReplies(resumed.text, deps.platformRoot, delegatedAt);
+          return finishWithFiles(resumed.text);
         }
         if (confirmation.status === 'superseded') return '这项扩大查询已经被更新的计划取代，之前的确认不再有效。请重新发起查询，我会按新的范围再问你一次。';
         if (confirmation.status === 'cancelled') return '已取消本次扩大查询。';
@@ -644,7 +733,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         trusted,
         input,
       );
-      return withFileReplies(reply.text, deps.platformRoot, delegatedAt);
+      return finishWithFiles(reply.text);
     } catch (error) {
       await store.requests.setOutcome(requestId, 'failed');
       console.error(JSON.stringify({
