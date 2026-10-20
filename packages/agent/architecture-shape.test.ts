@@ -56,8 +56,15 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * resource-exhausted.ts：这里只做"检测 DELEGATION_TIMEOUT_FAILURE 话术 → 取底账 →
  * 渲染 → 抛出/返回"），turn_span 增 resource_exhausted 结局。+42 = import 2 + 委派
  * catch 接线 26 + 恢复路径接线 12 + turn_span 2。判据本体不在 runtime，后续抽取时照旧只减不增。
+ *
+ * 2026-10-20 波：重复请求复核 + 服务器路径不外发。判据住 repeat-request.ts /
+ * reply-exit.ts（后者一并收走原本散在出口处的数值溯源探查），runtime 只留两处调用与
+ * 打点。这一批同时把两块既有的 I/O 包装抽出去付账：会话实体安全读（→ session-entities.ts，
+ * 判据本体保持"抛错向上传播"，降级是调用策略）与平台冷却拦截（→ platform-health.ts，
+ * 一次读取同时拿回复文本与日志载荷，分三次读会在到期边界上各说各话）。
+ * 1293 → 1290。
  */
-const RUNTIME_LINE_BUDGET = 1293;
+const RUNTIME_LINE_BUDGET = 1290;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

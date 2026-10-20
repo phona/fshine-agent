@@ -145,3 +145,33 @@ export async function collectSessionEntities(options: {
   const records = await options.platformTasks.listBySession(options.principalId, options.sessionId);
   return sessionEntitiesFromRecords(records, options.operationArgSpecs);
 }
+
+/**
+ * 上面那个的安全包装（runtime 每回合调一次）。存储未注入 / 抛错 → 空数组 + 一条 error
+ * 日志：实体门退回另外三个来源，不失败回合——与执行台账、主动回溯不可用时同一族降级。
+ *
+ * 为什么降级住在这一层而不是 `collectSessionEntities` 里：判据本体保持"抛错向上传播"
+ * （session-entities.test.ts 钉住了这一点），要不要吞掉是**调用策略**——runtime 每回合都
+ * 问一次，一次存储抖动不该炸掉一个用户回合。
+ */
+export async function collectSessionEntitiesSafely(options: {
+  /** 存储未注入（缺省部署）即返回空数组——不是错误。 */
+  platformTasks: Pick<PlatformTaskRepo, 'listBySession'> | undefined;
+  operationArgSpecs: OperationArgsSpecs | undefined;
+  principalId: string;
+  sessionId: string;
+  requestId: string;
+}): Promise<string[]> {
+  if (!options.platformTasks) return [];
+  try {
+    return await collectSessionEntities({
+      platformTasks: options.platformTasks,
+      ...(options.operationArgSpecs ? { operationArgSpecs: options.operationArgSpecs } : {}),
+      principalId: options.principalId,
+      sessionId: options.sessionId,
+    });
+  } catch (error) {
+    console.error(JSON.stringify({ event: 'session_entities_failed', requestId: options.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+    return [];
+  }
+}

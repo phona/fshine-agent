@@ -35,6 +35,7 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
   description: [
     '在最终回答前先调用一次，申报本轮是普通对话（conversation）还是委派子 Agent 执行（delegate）。',
     '只看当前用户消息作为当前请求。之前的回答、工具结果、确认计划只是历史资料，不是当前授权；用户重复实时数据问题仍是新查询。',
+    '当前消息与本会话早前的某条请求同文时，照样按新请求判 kind：历史答复不是当前授权，重复的任务请求必须申报 delegate（宿主持有重复请求复核，申报 conversation 会被退回重填）。',
     '只申报结构化意图，不直接回答数据问题。',
     '',
     '【选 kind】',
@@ -72,6 +73,20 @@ export const ROUTE_CURRENT_TURN_TOOL: DiscoveredTool = {
     additionalProperties: false,
   },
 };
+
+/**
+ * 重复请求被退回时的重填指引（2026-10-19 真机实测，见 repeat-request.ts 的事故形状）。
+ *
+ * 与 `reviewRouteDeclaration` 的退回同一族：都是"申报填错了，重填"，**不消耗用户的
+ * 澄清轮次**。区别在判据来源——那句查的是申报自身的结构矛盾（说要委派却不给 request），
+ * 这句查的是宿主持有的确定性事实（这条消息本会话已经委派执行过）。措辞因此必须把
+ * 事实说全：同文、已执行过几次、该改成什么。taskId 不写进去——宿主此刻只从转录拿到
+ * "委派过"，编号在 platform_tasks 台账里，模型填 continueTaskId 时自己会去检索。
+ */
+export const REPEATED_REQUEST_RETRY =
+  '这条消息与本会话早前的一条请求完全相同，而那一次已经委派子 Agent 执行过。'
+  + '历史答复不是当前授权：重复的请求是新请求，必须申报 delegate 才能真正执行。'
+  + '要在同一个子任务里续跑就填 continueTaskId；不要用历史答复组织本轮回复。';
 
 /**
  * A declaration that contradicts itself is a form-filling mistake, not missing user input:

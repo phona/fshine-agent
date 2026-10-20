@@ -20,7 +20,7 @@ import type {
 } from '@fshine/contracts';
 import { formatFileReceipt } from '@fshine/contracts';
 import { newId } from '@fshine/core';
-import { isScratchDirName } from '@fshine/agent';
+import { ATTACHMENT_PATHS_MARKER, isScratchDirName } from '@fshine/agent';
 
 export interface HandlerDeps {
   /** 环境变量源（读 FSHINE_INBOUND_DEBOUNCE_MS）；缺省 process.env。 */
@@ -898,7 +898,7 @@ export function withAttachmentPaths(text: string, attachments?: readonly Incomin
     sessionKey: sessionKey ?? null,
     files: Object.fromEntries(attachments.map((f) => [f.filename, f.path])),
   })}-->`;
-  return `${text}\n\n[本次消息附带的文件路径，可按路径直接使用]\n${lines.join('\n')}\n${envelope}`;
+  return `${text}\n\n${ATTACHMENT_PATHS_MARKER}，可按路径直接使用]\n${lines.join('\n')}\n${envelope}`;
 }
 
 /**

@@ -170,6 +170,22 @@ export {
   type TaxAgentRuntimeDeps,
 } from './runtime';
 export {
+  ATTACHMENT_PATHS_MARKER,
+  findRepeatedDelegatedRequest,
+  normalizeUserRequest,
+  type RepeatedRequest,
+} from './repeat-request';
+export {
+  SERVER_PATH_PATTERN,
+  stripServerPaths,
+  type ServerPathStripResult,
+} from './server-paths';
+export {
+  sanitizeUserVisibleReply,
+  type ReplyExitInput,
+  type ReplyExitResult,
+} from './reply-exit';
+export {
   DEFAULT_PLATFORM_AUTH_FAILURE_THRESHOLD,
   DEFAULT_PLATFORM_COOLDOWN_MS,
   createPlatformHealthTracker,
@@ -203,6 +219,7 @@ export {
 } from './turn-contract';
 export {
   collectSessionEntities,
+  collectSessionEntitiesSafely,
   mergeSessionEntities,
   sessionEntitiesFromRecords,
 } from './session-entities';

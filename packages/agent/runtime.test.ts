@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
@@ -2166,5 +2166,173 @@ describe('createTaxAgentRuntime', () => {
     it('未登记的选择类码 fail-loud（不静默退化成通用问句）', () => {
       expect(() => composeClarificationReply({ ...AMBIGUOUS, code: 'SOME_NEW_CODE' }, '')).toThrow(/未登记的选择类澄清码/);
     });
+  });
+
+  // ── 2026-10-20 波：重复请求复核 + 服务器路径不外发 ──────────────────────
+  // 两条来自同一次真机实测：用户把同一句话连发三次（16:06 / 16:10 / 23:30），中间那次
+  // 真委派了、文件也真落盘了；第三次模型申报 conversation，拿 7 小时前的结论重新排版——
+  // 零执行、零产物，终稿里还带着 `tmp/task_<id>/` 路径，用户拿到路径等于什么都没拿到。
+  // 转录里模型的 thinking 原话是 "The user has re-asked the same question. The Sub Agent
+  // previously returned…"：它明确认出是重复请求，还是选了对话枝。
+
+  /** 侦测 console 上的 JSON 事件行（写法同 plan-mode.test.ts 的 capturePlanLog）。 */
+  function captureEvents(event: string, channel: 'info' | 'warn' = 'info') {
+    const seen: Array<Record<string, unknown>> = [];
+    const spy = vi.spyOn(console, channel).mockImplementation((...args: unknown[]) => {
+      const line = args[0];
+      if (typeof line !== 'string') return;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (parsed['event'] === event) seen.push(parsed);
+      } catch { /* 非 JSON 行忽略 */ }
+    });
+    return { seen, restore: () => spy.mockRestore() };
+  }
+
+  /** 一段"这条请求已经委派执行过"的历史转录（形状与生产落库一致）。 */
+  async function seedDelegatedTurn(request: string, resultText: string): Promise<FakeSessionRepo> {
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1',
+      updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: request, timestamp: 1 },
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'delegate' } }], timestamp: 2 } as never,
+        { role: 'toolResult', content: [{ type: 'text', text: resultText }], timestamp: 3 } as never,
+      ] as never,
+    });
+    return sessions;
+  }
+
+  it('RR1 同文请求本会话已委派过：申报 conversation 被退回重填，最终真的委派', async () => {
+    const request = '帮我做一下幻骥达的工资表给我';
+    const delegated: Array<{ request: string }> = [];
+    const events = captureEvents('repeat_request_declaration_bounced');
+    const { driver } = recordingDriver([
+      // 第一次申报 conversation——正是实测里模型选的那一枝
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      // 拿到宿主持有的那个事实后改申报 delegate
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '重新生成幻骥达 2026 年 8 月工资表与个税申报表' } }] },
+      { text: '本轮重新执行：两个文件已重新生成。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: await seedDelegatedTurn(request, '上一轮：12 人汇总完毕，文件已落盘。'),
+      platformTask: subagent(async (args) => {
+        delegated.push({ request: args.request });
+        return { taskId: 'task_live', text: '本轮实时执行：两个文件已重新生成。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_repeat_bounce' }), request);
+
+    expect(events.seen).toHaveLength(1);
+    expect(events.seen[0]?.['priorDelegations']).toBe(1);
+    expect(delegated).toHaveLength(1);
+    expect(reply.text).toBe('本轮实时执行：两个文件已重新生成。');
+    // 关键：用户看到的不是历史结论的重新排版
+    expect(reply.text).not.toContain('上一轮');
+    events.restore();
+  });
+
+  it('RR2 重复请求只退一次：第二次仍申报 conversation 就放行（这道尺是增强不是门）', async () => {
+    // 拦住不放，用户连历史结论都看不到——比给一段可能过期的答复更糟。模型已经拿到
+    // 事实仍坚持对话枝时，宿主没有领域语义可以替它判断，只能放行 + 留痕。
+    const request = '帮我做一下幻骥达的工资表给我';
+    const events = captureEvents('repeat_request_declaration_bounced');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '工资表已整理完成，12 人零差异。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: await seedDelegatedTurn(request, '上一轮：12 人汇总完毕。'),
+      platformTask: subagent(),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_repeat_once' }), request);
+
+    expect(events.seen).toHaveLength(1);
+    expect(reply.text).toBe('工资表已整理完成，12 人零差异。');
+    events.restore();
+  });
+
+  it('RR3 早前那一轮停在对话枝时不退：闲聊重复不会被逼去执行', async () => {
+    const request = '在吗';
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1',
+      updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: request, timestamp: 1 },
+        { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'conversation' } }], timestamp: 2 } as never,
+        { role: 'toolResult', content: [{ type: 'text', text: '{"recorded":"conversation"}' }], timestamp: 3 } as never,
+      ] as never,
+    });
+    const events = captureEvents('repeat_request_declaration_bounced');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '在的，说吧。' },
+    ]);
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_chitchat' }), request);
+
+    expect(events.seen).toHaveLength(0);
+    expect(reply.text).toBe('在的，说吧。');
+    events.restore();
+  });
+
+  it('SP1 终稿里的服务器路径不外发：删掉路径、保留内容、留一条告警', async () => {
+    const leaked = [
+      '**已产出文件**（均在 `tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/`）：',
+      '· 整理好的2026年08月工资表.xlsx — 12 人完整工资表，实发合计 120,000.00。',
+      '原始表在 /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/attachments/5b58ba31-19ce-428d-99a9-ef501836b04e-工资表2026-8月(1).xlsx。',
+    ].join('\n');
+    const events = captureEvents('server_path_leak', 'warn');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: leaked },
+    ]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_path_strip' }), '幻骥达 2026 年 8 月工资表');
+
+    expect(events.seen).toHaveLength(1);
+    expect(events.seen[0]?.['removed']).toBe(2);
+    // 路径没了
+    expect(reply.text).not.toContain('tmp/');
+    expect(reply.text).not.toContain('/home/');
+    // 内容还在：文件名、人数、金额一条不少
+    expect(reply.text).toContain('整理好的2026年08月工资表.xlsx');
+    expect(reply.text).toContain('12 人');
+    expect(reply.text).toContain('120,000.00');
+    expect(reply.text).toContain('工资表2026-8月(1).xlsx');
+    events.restore();
+  });
+
+  it('SP2 委派回合的终稿同样过这道尺（执行痕迹不外泄路径）', async () => {
+    const events = captureEvents('server_path_leak', 'warn');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '整理幻骥达 2026 年 8 月工资表' } }] },
+      { text: '本轮实时执行：两个文件已重新生成。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => ({
+        taskId: 'task_live',
+        text: '已产出文件（均在 tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/）：整理好的2026年08月工资表.xlsx',
+        execution: { planId: 'plan_live', version: 1, calls: 1 },
+      })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_path_strip_delegate' }), '把幻骥达 2026 年 8 月工资表整理好');
+
+    expect(events.seen).toHaveLength(1);
+    expect(reply.text).not.toContain('tmp/');
+    expect(reply.text).toContain('整理好的2026年08月工资表.xlsx');
+    events.restore();
   });
 });

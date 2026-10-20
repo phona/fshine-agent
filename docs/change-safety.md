@@ -738,3 +738,78 @@ F 波结束。
 乱序到达波结束。
 
 ---
+
+## 11. 重复请求波 · 同文重发不再被判成对话 + 编排层不外泄服务器路径（2026-10-20）
+
+**目标**：修「用户把同一条指令重发一遍，bot 回一段完整报告却不带文件」——**零执行、零产物**，还把几小时前的结论重新排版给他。单波单主题：申报层的重复请求复核 + 出口层的路径不外泄（两个缺陷同一次实测暴露，共用同一段转录）。
+
+**触发（用户观察，2026-10-19 23:30）**：「怎么还是没有发文件出来给我」。同一指令在本会话发了三遍（16:06 带 1 个文件 / 16:10 带 3 个文件 / 23:30），16:10 那一遍真委派、两个交付物真落盘（16:20:30、16:21:13），23:30 那一遍回的是一段完整报告（12 人、应发合计 123,456.78、实发合计 120,000.00）+ 服务器路径，**没有任何附件**。
+
+**根因（两个，都不在 D-106 的回传机制里——那一次它行为完全正确）**：
+
+1. **申报层**。23:30 那一轮模型申报 `kind: conversation`：无 `delegation_span`、无平台执行，`collectProducedFiles` 按 `mtime ≥ 本轮委派开始` 正确地什么都没收到（23:30 之后 `17dz-platform/tmp` 下零办公文件被改动；两个交付物 7 小时前的 mtime 正是被这条判据挡住的）。转录里模型的 thinking 原话是「The user has re-asked the same question. The Sub Agent previously returned…」——**它明确认出是重复请求，还是选了对话枝**：历史答复在它眼里成了本轮授权的替代品。
+2. **出口层**。终稿里的 `tmp/task_d42fffce-…/` 出自**编排模型**（它读转录里的历史结论，把上一轮的路径一起排版出来），而「用户可见回复不写服务器路径」只写在执行层 skill 里（D-106 配套），管不到这一侧。
+
+**修法**：
+
+- **R1 重复请求复核**（`packages/agent/src/repeat-request.ts`，新增）：从转录机械判定「这条同文请求本会话已经委派执行过」——逐轮配对 user 消息 ↔ `route_current_turn` 调用 ↔ 回执；先剥掉宿主追加的附件路径后缀、折叠空白（后缀是宿主注入的，不属于「用户说了什么」，不剥就永远判不出同文——本次三遍里两遍带附件且文件数不同）；回执是 `{"recorded":"conversation"}` 或该轮根本没申报 → 不算执行过。命中则**退回重填**（与 `reviewRouteDeclaration` 同一族：不消耗用户轮次），并只在 `route_current_turn` 的工具说明里补一句「同文照样按新请求判 kind，申报 conversation 会被退回重填」。
+  **只退一次后放行**：这道尺是增强不是门——拦住不放，用户连历史结论都看不到，比给一段可能过期的答复更糟；模型已经拿到事实仍坚持对话枝时，宿主没有领域语义可以替它判断，只能放行 + 留痕（`repeat_request_declaration_bounced`）。
+- **R2 服务器路径不外发**（`packages/agent/src/reply-exit.ts` + `server-paths.ts`，新增）：终稿出口删掉路径 token、保留其余内容。判据只有**形状**（`/` + POSIX 顶层路径名；`tmp/` 开头——后者是**宿主自己的**暂存命名，`sweepScratchDirs` 只扫这一种，不是执行层的业务字段），两条都锚在宿主持有的名字上，不把任何执行层目录约定搬进通用 runtime。**删路径而不是整段拦掉**：金额与结论来自 7 小时前那次真跑，整段替换会把有用内容一起扔掉；该丢的只是用户没法用的那一截。位置在 turn-exit 之后、落库与上屏之前——转录、Conversation Log、turn_span 三处看到的都是用户真正收到的那一版。
+
+**归属判据（AGENTS.md）**：通知送达、用户可见状态反馈是 fshine 通用机制，两道尺都判「形状」不判内容，零业务 `if` 分支——`repeat-request.ts` 全文不知道任何业务词汇，`server-paths.ts` 只认 POSIX 顶层路径名与宿主自己的 `tmp/` 命名。执行层那条「回复不写服务器路径」的约定原地不动（它管 worker 自己的回复），宿主这道尺盖编排模型——两层各有提示与确定性复核，不构成两份相互冲突的要求。
+
+### 落了什么
+
+| 位置 | 改动 |
+|---|---|
+| `packages/agent/src/repeat-request.ts` | **新文件**。`normalizeUserRequest`（剥附件后缀 + 折叠空白）、`findRepeatedDelegatedRequest`（逐轮配对，返回 `{request, priorDelegations}` 或 null）、`ATTACHMENT_PATHS_MARKER`（宿主追加后缀的标记，单一来源） |
+| `packages/agent/src/server-paths.ts` | **新文件**。`SERVER_PATH_PATTERN`（两条形状判据，全局）、`stripServerPaths`（删路径 + 清空括号对 + 收空白；零命中原文原样返回） |
+| `packages/agent/src/reply-exit.ts` | **新文件**。`sanitizeUserVisibleReply`（纯函数：删路径 + 零执行金额只留痕，带回 `TurnExitEvent[]`）。**一并收走原本散在 runtime.ts 出口处的数值溯源探查**——两支作用点相同（都是本回合出口、落库与上屏之前），合成一个纯函数后 runtime 只提供事实与打日志（与 `turn-exit.ts` 同一分工） |
+| `packages/agent/src/turn-contract.ts` | `ROUTE_CURRENT_TURN_TOOL.description` 补一句同文判 kind；新增导出的 `REPEATED_REQUEST_RETRY`（退回时的重填指引，把事实说全：同文、已执行过、该改成什么） |
+| `packages/agent/src/runtime.ts` | 申报分支加重复请求复核（含"只退一次"计数）；出口处改调 `sanitizeUserVisibleReply`。**净 −3 行**（1293 → 1290）：判据全部住新模块，同时把两块既有 I/O 包装抽出去付账（见下） |
+| `packages/agent/src/session-entities.ts` | `collectSessionEntitiesSafely`（原 runtime.ts 内的安全包装）：判据本体保持「抛错向上传播」，降级与留痕是**调用策略**，住到判据旁边 |
+| `packages/agent/src/platform-health.ts` | 新增 `cooldownBlock`：一次读取同时拿用户可见文本与日志载荷。分三次读（isCoolingDown / 两个 getter）会在「刚好到期」的边界上各说各话——日志说还在冷却、回复说还剩 0 分钟 |
+| `packages/agent/src/index.ts` | 三个新模块的公开出口 |
+| `apps/server/handler.ts` | `withAttachmentPaths` 改用 `ATTACHMENT_PATHS_MARKER` 常量（后缀标记不再有第二份字面量） |
+| `packages/agent/architecture-shape.test.ts` | `RUNTIME_LINE_BUDGET` 1293 → 1290（每批抽取后把常数改小） |
+| 测试 | 新文件 3 个（`repeat-request.test.ts` 12 条 / `server-paths.test.ts` 8 条 / `reply-exit.test.ts` 8 条）+ `runtime.test.ts` 5 条集成 |
+
+### 波次防线与实测记录
+
+- **F1 表征先行**：附件后缀标记、`collectProducedFiles` 的 mtime 判据、`conversation_unsourced_amounts` 的字段集（`count` + `needsRounds` 一条没少）、平台冷却两个调用点的日志字段一字未改；既有 90 条 runtime 用例零改写。
+- **F2 基线冻结**：改造前 `npm test` **1433 全绿 / 111 文件** + typecheck 0 错误（2026-10-19 17:16 冻结，即 §10 收口数字）；改造后 **1466 全绿 / 114 文件**（+33），typecheck 0 错误，`npm run test:e2e` **143 全绿**无回归。
+- **F3 变异验证**（六条，逐条确认对应用例转红后回滚复绿）：① 删掉重复请求复核的退回 → RR1/RR2 红；② 对话枝回执识别不出来（`isConversationReceipt` 恒真）→ 5 条红；③ 不剥宿主追加的附件后缀 → 2 条红；④ 出口不删路径 → 3 条红；⑤ 相对路径支失效（`tmp/` 那条判据坏掉）→ 4 条红；⑥ 去掉「只退一次」的有界性 → RR2 红。
+- **F4 最小化**：一个主题，改动全在 `packages/agent` + `apps/server` 的一个常量引用；未碰渠道适配器、契约、执行层任何一行。R1 与 R2 同波是因为它们修同一段转录的两个面（重复请求让历史结论外发，外发时又把路径带出来），拆开会让中间态同时带着两个已知缺陷。两块既有 I/O 包装的抽取是 `architecture-shape.test.ts` 的行数棘轮要求（判据本体不在 runtime，接线 +3 行就得从别处抽回来），不是顺手重构。
+- **F5 红先 revert**：无（全程绿）。
+- **F6 真实模型探针基线**：`route_current_turn` 的工具说明变了（提示词级），改前改后同参数复跑 `--only A1,B1,A5`（A1 = 同一实时问题重问、B1 = 同一查询连发 5 次、A5 = 闲聊不委派——正是本波判据的三个面）。见下。
+- **F7 文档同步**：debt-ledger D-109 + 本 §11 + F2 基线行（1433/111 → 本波后 1466/114）+ manual-test-wecom §8.6 同批落地。
+
+### F6 探针结果（真实 LLM + mock 执行器，`--only A1,B1,A5`）
+
+**判定标准预先写死**：A1 必须重新查询（平台调用 > 0 且每轮都真调）、B1 连发 5 次每次都真查（口径一致）、A5 闲聊零调用；且**不新增** `repeat_request_declaration_bounced`（模型本就走 delegate，退回机制不该被触发）。
+
+| 用例 | 改前（说明里没有那句同文判据） | 改后（带那句） | 判定 |
+|---|---|---|---|
+| A1 同一实时问题重问 | 343.3s / 3 次调用 / 全 delegate | 396.1s / 5 次调用 / 全 delegate | 不劣化 |
+| A5 闲聊不委派 | 9.4s / 0 次调用 / conversation | 15.6s / 0 次调用 / conversation | 不劣化 |
+| B1 同一查询连发 5 次 | 446.0s / 7 次调用 / 5 轮全 delegate | 549.5s / 10 次调用 / 5 轮全 delegate | 不劣化 |
+
+**三段日志实证**（明细 `.runtime/probe-fshine-probe-tILSIE.json` = 改前，`fQCtXA.json` + `inKAS5.json` = 改后）：
+
+- **零退回**：改前改后都没有 `repeat_request_declaration_bounced`。模型在重问上本来就选 delegate，宿主这道尺是**兜底**不是主路径——这正是「只退一次后放行」的理由：它不该是常态，真被触发说明模型那一轮看走了眼。
+- **闲聊仍然走对话枝**：A5「现在几月份了？」改后照旧申报 `conversation`（0 次调用），且因为早前没有同文的委派痕迹，判据不成立、没有退回——R1 不会把闲聊逼去执行。
+- **改后第一次 B1 撞了探针的 10 分钟回复等待上限**（其中一轮 >600s，探针记 `⚠ 等待回复超时`），单独重跑 B1 得 549.5s / 10 次调用全绿。这是**延迟抖动不是行为变化**：超时那一轮的 `turn_declaration` 仍是 delegate、口径与前四轮一致；探针的 `PROBE_REPLY_WAIT_MS` 是探针自己的等待上限，与宿主无关（同一次运行里 A1 的 396.1s 也已接近该量级）。如实登记，不当成通过项也不当成回归项。
+
+**结论**：提示词级改动在三个面上都没有行为漂移——重问照旧真查、闲聊照旧不委派、退回机制零触发。
+
+### 残余五项（登记，不阻塞关闭）
+
+1. **模型被退回后仍坚持对话枝时放行**，用户拿到的仍是历史结论。行为已在 RR2 钉住，日志留痕（`repeat_request_declaration_bounced` + `turn_declaration kind=conversation`）；要更进一步就得让宿主替模型判断「这轮该不该执行」，那是领域语义，归执行层。
+2. **路径判据是形状匹配，未登记形态漏网**：`~/…`、相对 `./…`、Windows 盘符、以及不以上表顶层路径名开头的绝对路径。漏报的路径仍在原地，用户至少看到内容——比误删结论字符好（误伤面见 `server-paths.test.ts` 的五类反例）。
+3. **平台冷却有两个调用点、两种读法**：委派路径这一批换成了 `cooldownBlock`（一次读取），恢复路径（`ctx.resumeTaskId` 分支）仍是三次读。行为不变、未 touched（F4），但同一件事两种 idiom；下回碰恢复路径时一并换。
+4. **真机复跑待用户确认**：重复请求现在真的重新委派并回传文件、终稿不出现路径——已写入 `docs/manual-test-wecom.md` §8.6（mock 的 Main Agent 是脚本化驱动，证不了「真实模型选哪一枝」）。
+5. **探针的回复等待上限（600s）低于真实慢轮**：B1 改后首跑有一轮超过它被记 `⚠ 等待回复超时`（重跑即绿）。上限是探针自己的参数（`PROBE_REPLY_WAIT_MS`），与宿主无关，但**长任务轮的探针断言现在会被它截断**——D-105 一类"探针环境自身缺陷"又多一条，登记在此，不阻塞本波关闭。
+
+重复请求波结束。
+
+---

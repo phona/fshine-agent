@@ -88,6 +88,15 @@ export interface PlatformHealthTracker {
   consecutiveAuthFailures(key: string): number;
   /** 冷却期用户可见文本：码表措辞 + 剩余分钟数（宿主时钟数据，见 error-codes.ts）。 */
   cooldownReply(key: string): string;
+  /**
+   * 冷却期拦截（宿主在 platformTask.run 之前调一次）：不在冷却返回 null；在冷却返回
+   * **一次读取**同时取到的用户可见文本与日志载荷。
+   *
+   * 为什么要一个调用拿两样：日志里的 `consecutiveAuthFailures` 与 `cooldownRemainingMs`
+   * 和回复里的剩余分钟数必须是同一时刻的事实。分三次读（isCoolingDown / 各自 getter）会
+   * 在"刚好到期"的边界上各说各话——日志说还在冷却、回复说还剩 0 分钟。
+   */
+  cooldownBlock(key: string): { reply: string; event: Record<string, unknown> } | null;
   /** 一次 AUTH 类平台失败：计数 +1；达阈值即（重）进入冷却。返回记账后状态（日志用）。 */
   recordAuthFailure(key: string): PlatformHealthSnapshot;
   /** 平台健康已恢复（有执行痕迹的非 AUTH 回合）：计数清零、冷却解除。 */
@@ -134,6 +143,18 @@ export function createPlatformHealthTracker(options: PlatformHealthTrackerOption
     cooldownReply: (key) => platformUnavailableTextFor(
       Math.ceil(Math.max(0, (peek(key)?.cooldownUntil ?? 0) - clock.now()) / MS_PER_MINUTE),
     ),
+    cooldownBlock: (key) => {
+      const state = peek(key);
+      const remainingMs = Math.max(0, (state?.cooldownUntil ?? 0) - clock.now());
+      if (remainingMs <= 0) return null;
+      return {
+        reply: platformUnavailableTextFor(Math.ceil(remainingMs / MS_PER_MINUTE)),
+        event: {
+          consecutiveAuthFailures: state?.consecutiveAuthFailures ?? 0,
+          cooldownRemainingMs: remainingMs,
+        },
+      };
+    },
     recordAuthFailure: (key) => {
       const state = stateOf(key);
       state.consecutiveAuthFailures += 1;

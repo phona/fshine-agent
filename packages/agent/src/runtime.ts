@@ -7,10 +7,10 @@ import { RUN_17DZ_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner,
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import type { CandidateExtractor } from './memory-consolidator';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, REPEATED_REQUEST_RETRY, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
 import { collectExecutionFacts, type ExecutionFacts } from './execution-facts';
-import { collectSessionEntities, mergeSessionEntities } from './session-entities';
+import { collectSessionEntitiesSafely, mergeSessionEntities } from './session-entities';
 import { matchClarificationBinding } from './clarification-events';
 import type { OperationArgsSpecs } from './operation-labels';
 import { parsePlanStep, type PlanStepLabel } from './plan-steps';
@@ -18,6 +18,8 @@ import { createPlanFactWriter, planStepSummary, renderPlanCircuitBreak, renderPl
 import { matchPlanDisambiguationReply, renderDisambiguationQuestion, resolvePlanBinding } from './plan-binding';
 import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult, renderWriteClosureReply } from './turn-relay';
 import { decideTurnExit, type TurnExitEvent } from './turn-exit';
+import { findRepeatedDelegatedRequest } from './repeat-request';
+import { sanitizeUserVisibleReply } from './reply-exit';
 import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
 import {
@@ -619,6 +621,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 状态形状与记账规则住 turn-state.ts（计数器在那里可用纯数据直接验证）；
       // 这里只按消歧回合的选定计划建状态，控制流仍在本函数。
       const turn = createTurnState(planChoice);
+      // 重复请求复核的重试计数：同一个回合只退一次（判据见 route_current_turn 调用处）。
+      let repeatRequestNudged = false;
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -690,23 +694,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       /**
        * 会话实体（任务 1 来源 A）：读 platform_tasks 底账按平台 args 规格提取。存储未注入
        * / 抛错 / 规格缺失 → 空数组（安全缺省：判定回退到三个来源，不失败回合——与执行台账
-       * 不可用时的降级同族）。
+       * 不可用时的降级同族）。降级与留痕住 session-entities.ts，这里只调用。
        */
-      async function collectSessionEntitiesSafely(): Promise<string[]> {
-        if (!deps.platformTasks) return [];
-        try {
-          return await collectSessionEntities({
-            platformTasks: deps.platformTasks,
-            ...(deps.operationArgSpecs ? { operationArgSpecs: deps.operationArgSpecs } : {}),
-            principalId: ctx.principalId,
-            sessionId: ctx.sessionId,
-          });
-        } catch (error) {
-          console.error(JSON.stringify({ event: 'session_entities_failed', requestId: ctx.requestId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
-          return [];
-        }
-      }
-
       const turnDeadline = Date.now() + turnBudgetMs;
       const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
         systemPrompt,
@@ -720,6 +709,22 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             if ('error' in reviewed) {
               console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys: Object.keys(args).sort(), kind: typeof args['kind'] === 'string' ? args['kind'] : undefined }));
               return { error: `申报无效：${reviewed.error}` };
+            }
+            // 重复请求复核（2026-10-19 实测）：同文请求本会话已经委派执行过，模型却申报
+            // conversation——那是拿历史答复收尾，本回合零执行、零产物。判据与"只退一次"
+            // 的取舍见 repeat-request.ts；这里递一个宿主持有的确定性事实让它重填，与上面
+            // 那句退回同一族（不消耗用户轮次）。
+            if (reviewed.intent.kind === 'conversation' && !repeatRequestNudged) {
+              const repeated = findRepeatedDelegatedRequest(loaded, userMessage);
+              if (repeated) {
+                repeatRequestNudged = true;
+                console.info(JSON.stringify({
+                  event: 'repeat_request_declaration_bounced',
+                  requestId: ctx.requestId,
+                  priorDelegations: repeated.priorDelegations,
+                }));
+                return { error: REPEATED_REQUEST_RETRY };
+              }
             }
             turn.declared = true;
             turn.intent = reviewed.intent;
@@ -745,16 +750,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // token，也省用户 10-60s 的等待。终稿由宿主合成（PLATFORM_UNAVAILABLE，
               // error-codes.ts 唯一措辞来源）：只说平台侧异常与恢复动作，不说内部控制
               // 机制，也不编造原因。抛出点在 platformTask.run 之前：零委派、零足迹。
-              if (platformHealth.isCoolingDown(platformHealthKey)) {
+              const cooldown = platformHealth.cooldownBlock(platformHealthKey);
+              if (cooldown) {
                 turn.delegationFailed = true;
-                console.info(JSON.stringify({
-                  event: 'platform_cooldown_blocked',
-                  requestId: ctx.requestId,
-                  sessionId: ctx.sessionId,
-                  consecutiveAuthFailures: platformHealth.consecutiveAuthFailures(platformHealthKey),
-                  cooldownRemainingMs: platformHealth.cooldownRemainingMs(platformHealthKey),
-                }));
-                throw new ToolUserError(platformHealth.cooldownReply(platformHealthKey));
+                console.info(JSON.stringify({ event: 'platform_cooldown_blocked', requestId: ctx.requestId, sessionId: ctx.sessionId, ...cooldown.event }));
+                throw new ToolUserError(cooldown.reply);
               }
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
@@ -768,7 +768,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 两个来源都为空时不挂字段——老路径的判定一字不变。
               const sessionEntities = mergeSessionEntities(
                 clarificationSelected ? [clarificationSelected] : [],
-                await collectSessionEntitiesSafely(),
+                await collectSessionEntitiesSafely({
+                  platformTasks: deps.platformTasks,
+                  operationArgSpecs: deps.operationArgSpecs,
+                  principalId: ctx.principalId,
+                  sessionId: ctx.sessionId,
+                  requestId: ctx.requestId,
+                }),
               );
               const entitySources: PlanEntitySources = {
                 currentMessage: userMessage,
@@ -1150,27 +1156,18 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
 
       // 纠错环转达：宿主自己把"缺什么"说给用户（模型没产出可用文本时）。它优先于空回复兜底——
       // 用户至少知道在等自己补什么，而不是一句"查询失败"。
-      const replyText = needsRelay || result.text;
+      let replyText = needsRelay || result.text;
 
-      // 数值溯源探查（只留痕，不拦截）：零执行轮次的回复若含"千分位小数"格式的金额，
-      // 而该数值在历史转录/检索证据/当前消息里都逐字找不到，记一条告警。
-      // 为什么不拦截：模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在
-      // "算术"与"编造"之间做确定性区分——那道线由探针（E1/F1 的金额判定）和人工守。
-      // E1 实测：模型会在零执行轮次编造业务明细（rule-landing.md §9），此日志让运维看得见。
-      if (!turn.execution && !turn.pendingPlan) {
-        const amounts = new Set<number>();
-        for (const match of replyText.matchAll(/\d{1,3}(?:,\d{3})+(?:\.\d+)?/g)) {
-          amounts.add(Number(match[0].replace(/,/g, '')));
-        }
-        if (amounts.size > 0) {
-          const history = JSON.stringify(result.messages.slice(0, -1));
-          const haystack = `${history}\n${referenceEvidence?.text ?? ''}\n${userMessage}`;
-          const unsourced = [...amounts].filter((value) => !haystack.includes(String(value)) && !haystack.includes(value.toLocaleString('en-US')));
-          if (unsourced.length > 0) {
-            console.warn(JSON.stringify({ event: 'conversation_unsourced_amounts', requestId: ctx.requestId, count: unsourced.length, needsRounds: turn.needsRounds }));
-          }
-        }
-      }
+      // 出口整理（两道尺的判据与取舍见 reply-exit.ts）：删服务器路径 + 零执行金额只留痕。
+      // 位置在 turn-exit 之后、落库与上屏之前——三处看到的都是用户真正收到的那一版。
+      const replyExit = sanitizeUserVisibleReply({
+        text: replyText,
+        executed: Boolean(turn.execution || turn.pendingPlan),
+        needsRounds: turn.needsRounds,
+        evidence: () => `${JSON.stringify(result.messages.slice(0, -1))}\n${referenceEvidence?.text ?? ''}\n${userMessage}`,
+      });
+      logExitEvents(replyExit.events);
+      replyText = replyExit.text;
 
       await saveTranscript(deps.sessions, {
         sessionId: ctx.sessionId,
