@@ -163,6 +163,14 @@ npm test -- tests/e2e/turn-loop
 - 写操作两步确认的真实落账（§4.1/4.2，需 `FSHINE_REAL_COMMIT=1`）
 - 真实模型下的申报合规率：日志关注 `turn_declaration`、`route_declaration_missing` 与 `reference_evidence_injected`（宿主主动回溯的注入条数/截断）
 
+### 8.4 文件消息的气泡归属（2026-10-19 文件收据波，mock 证不了）
+
+mock 的 `replyStream` 是个数组，既不会转圈也不会拒收，所以下面三条只能真机验：
+
+1. **发 2 个文件、不发指令** → 约 2 秒后出现**一条**合并收据（「已收到 2 个文件：a、b，等待你的指令」），且两个文件消息底下**都没有**转圈的 spinner、没有「收到,正在处理…」。
+2. **紧接着发一条指令** → 只有指令那一个气泡里带收据（「已收到 2 个文件：a、b」，无「等待你的指令」），收据在全链上只出现一次。
+3. **只发 1 个文件就发指令** → 收据由指令回合带，文件消息底下无残留 spinner；并窗（2s）短于渠道被动回复时限——若收据迟迟不出现或出现时报 `846608`，说明这个上界判错了，先核 `RECEIPT_COALESCE_MS`。
+
 同一场景的追问复用 `conversationId`，每条消息使用新的 `messageId`。验收记录至少包含
 `requestId`、主会话、`taskId`（如有）、子 Agent 执行结果和最终回复。不要要求或记录 MCP
 trace、原始 JSON 或平台密码。

@@ -7,7 +7,7 @@
  * 委派"这条真实渠道路径在全链上不存在：此前 e2e 只发 text 帧，adapter 的 message.file
  * 分发、saveAttachments 落盘、attachmentOnly 短路从未在生产装配里跑过。
  *
- * 本文件经 boot 的 sendFile（与生产同形状的 message.file 帧）走完整链路，钉三件事：
+ * 本文件经 boot 的 sendFile（与生产同形状的 message.file 帧）走完整链路，钉四件事：
  *   ① 附件-only：暂存确认 + attachment_received 落库 + 字节真实落盘（平台工作区内）；
  *   ② 先文件后指令：附件路径由 handler 注入请求文本（withAttachmentPaths），worker 提交的
  *      计划参数带该路径能过实体门（镜像 handler.test.ts :182「附件路径 + 期间一起注入后过门」；
@@ -15,13 +15,15 @@
  *      实体门对位置/flag 取值是同一把尺：非 flag 值逐字包含判定）；
  *   ③ 下载失败：失败说明降级成文字不吞消息，且照常启 Agent 回合（表征——handler 的
  *      attachment-only 短路要求"有已保存附件"，下载失败一个都没有，于是走普通回合；
- *      与 handler 单测语义不冲突但全链形状在此钉实）。
+ *      与 handler 单测语义不冲突但全链形状在此钉实）；
+ *   ④ 突发形态（2026-10-19）：几个文件 + 一条指令连发时，文件消息一个气泡都不开，收据
+ *      只由指令回合带一次（实测 3 文件 + 1 指令曾出现 4 条气泡且互相穿插）。
  *
  * 纪律：DZ_EXECUTOR=mock 由 harness 钉死；本文件只新增用例，不改 harness 与既有文件。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { ServerAssembly } from '../../apps/server/assembly';
 import { parseAttachmentEnvelope } from '../../apps/server/handler';
 import {
@@ -56,7 +58,7 @@ function recordRequestOutcomes(assembly: ServerAssembly): string[] {
 }
 
 describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
-  it('AT-1 附件-only 消息：只暂存不启回合，确认文案、attachment_received 落库与真实落盘齐全', async () => {
+  it('AT-1 附件-only 消息：只暂存不启回合，孤儿收据、attachment_received 落库与真实落盘齐全', async () => {
     // 若这条消息意外启了 Agent 回合，主 Agent 的申报文本会顶替确认回复，精确断言当场响
     const { sendFile, assembly } = await boot({
       main: mainDriver([{ kind: 'conversation', text: '不应有回合：附件-only 消息不得启 Agent' }]),
@@ -66,8 +68,9 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
 
     const reply = await sendFile('对账单-202606.csv');
 
-    // 暂存确认（表征钉真实文案）：短、只说事实，没有"请告诉我需要做什么"式噪音
-    expect(reply).toBe('已收到 对账单-202606.csv');
+    // 没有指令跟来：渠道并窗到点补一条收据（2026-10-19 起文件消息自己不再回气泡）。
+    // 后缀"等待你的指令"是它与回合披露的唯一区别——没有这句，用户只会干等
+    expect(reply).toBe('已收到 1 个文件：对账单-202606.csv，等待你的指令');
     // 没启 Agent 回合：唯一的审计就是附件接收登记，没有 replied
     expect(outcomes).toEqual(['attachment_received']);
     // 登记行带着机器可解析的信封（生产重启恢复的同一数据源），路径可取回
@@ -103,7 +106,8 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     const { sendFile, turn, assembly } = await boot({ main: mainDriver(declarations), worker });
     const outcomes = recordRequestOutcomes(assembly);
 
-    expect(await sendFile('对账单-202606.csv')).toBe('已收到 对账单-202606.csv');
+    // 文件消息等不及指令：并窗先补一条孤儿收据（sendFile 等的就是这条终帧）
+    expect(await sendFile('对账单-202606.csv')).toBe('已收到 1 个文件：对账单-202606.csv，等待你的指令');
     const rows = await recentAttachmentRows(assembly);
     const att = rows.flatMap((row) => parseAttachmentEnvelope(row.input, SESSION_KEY))[0];
     if (!att) throw new Error('附件信封解析失败：attachment_received 行里没有可恢复的路径');
@@ -157,9 +161,9 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     expect(clean).not.toContain('RESULT {');
     expect(clean).not.toContain(att.path);
     expect(reply).not.toContain('fshine-turn-loop-');
-    // 交付披露（规则二）：说文件名，不刷路径
-    const disclosure = notices.find((t) => t.startsWith('本轮使用文件'));
-    expect(disclosure).toBe('本轮使用文件：对账单-202606.csv');
+    // 交付披露（规则二）：说文件名，不刷路径；与渠道孤儿收据同一句措辞，只少"等待指令"
+    const disclosure = notices.find((t) => t.startsWith('已收到'));
+    expect(disclosure).toBe('已收到 1 个文件：对账单-202606.csv');
     await assembly.close();
   });
 
@@ -192,6 +196,67 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
       ? readdirSync(path.join(PLATFORM_ROOT, 'tmp')).filter((name) => name.startsWith('attachments-e2e-'))
       : [];
     expect(tmpEntries).toEqual([]);
+    await assembly.close();
+  });
+
+  // 2026-10-19 实测形态的守卫：用户发 3 个 Excel + 1 条指令，会话里出现 4 条机器人气泡
+  // （3 条"已收到 X" + 一串回合帧），且文件回执与回合帧互相穿插。根因在渠道：企微流式
+  // 回复按入站消息的 req_id 走，一条用户消息就是一个气泡，SDK 没有跨消息合并的接口
+  // （reply() 只转发 frame.headers.req_id）。修法是"不为文件起气泡"——这里在全链上钉死。
+  it('AT-4 突发形态（2 个文件 + 1 条指令连发）：文件消息零帧，收据只由指令回合带一次', async () => {
+    const { sdk, assembly, turn } = await boot({
+      main: mainDriver([{ kind: 'conversation', text: '两个文件都读到了，202606 核对完成。' }]),
+      worker: gatedWorker([]),
+    });
+    const outcomes = recordRequestOutcomes(assembly);
+
+    // 直接派发 file 帧：与 sendFile 同形状，但不等它的终帧——这一条断言的前提恰恰是
+    // "文件消息不产生终帧"，等一个不来的终帧会把用例挂死。
+    const emitFile = async (filename: string): Promise<void> => {
+      sdk.fileToServe = { filename, buffer: Buffer.from('e2e-attachment-bytes') };
+      const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+      sdk.emit('message.file', {
+        headers: { req_id: `req_${messageId}` },
+        body: {
+          msgtype: 'file',
+          from: { userid: 'e2e_user' },
+          msgid: messageId,
+          chattype: 'single',
+          file: { url: `https://wecom-mock/${filename}`, aeskey: 'e2e-aes-key' },
+        },
+      });
+      // 等暂存登记落库：确认 handler 真的处理过这条消息，指令才不会早于它到达
+      await vi.waitFor(async () => {
+        expect((await recentAttachmentRows(assembly)).length).toBeGreaterThanOrEqual(emitted);
+      });
+      emitted += 1;
+    };
+
+    let emitted = 0;
+    await emitFile('对账单-202606.csv');
+    await emitFile('工资表-202608.xlsx');
+    const framesAfterFiles = sdk.frames.length;
+    // 两个文件消息一个气泡都没开：没有 ack、没有收据、没有转圈的 spinner。
+    // （并窗已在跑，但指令随后就到——见下面的取消断言。）
+    expect(sdk.frames).toEqual([]);
+
+    const { text, notices } = await turn('核对一下我刚发的两个文件 202606');
+
+    // 收据在全链上只出现一次，且不带"等待你的指令"（那个后缀只属于没人跟指令的孤儿收据）
+    const receipts = sdk.frames.filter((frame) => frame.content.startsWith('已收到'));
+    expect(receipts).toHaveLength(1);
+    // 两个文件名都在同一帧里（顺序不钉：交付集按路径排序，而 e2e 的落盘名带 uuid 前缀，
+    // 顺序由前缀决定——"并成一条"才是这条用例要守的东西）
+    expect(receipts[0]!.content).toMatch(/^已收到 2 个文件：.+、.+$/);
+    expect(receipts[0]!.content).toContain('对账单-202606.csv');
+    expect(receipts[0]!.content).toContain('工资表-202608.xlsx');
+    expect(receipts[0]!.finish).toBe(false);            // 披露帧，不是终帧
+    expect(notices.some((t) => t.startsWith('已收到 2 个文件：'))).toBe(true);
+    // 并窗被指令取消：否则这里会有第二条（带后缀的）收据
+    expect(sdk.frames.slice(framesAfterFiles).filter((f) => f.content.includes('等待你的指令'))).toEqual([]);
+    // 附件回合的终稿照常送达，两个文件都进了暂存池（登记两条）
+    expect(text).toContain('两个文件都读到了');
+    expect(outcomes).toEqual(['attachment_received', 'attachment_received', 'replied']);
     await assembly.close();
   });
 });

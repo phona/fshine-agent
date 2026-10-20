@@ -19,6 +19,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
 import type { SdkClientLike } from '@fshine/channel-wecom';
@@ -710,7 +711,13 @@ async function boot(options: BootOptions): Promise<Boot> {
   }
   // 附件落盘目录（T3）：必须落在平台工作区内（adapter 落点自检），每个 boot 一份、
   // close 时清走——不与生产默认的 tmp/attachments 串味。
-  const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', `attachments-e2e-${counter}`);
+  //
+  // 名字必须**全局唯一**，不能只用 counter：counter 是每个测试文件一份的模块级计数，
+  // 于是两个并行文件各自的第一号 boot 会落到同一个目录名上，先 close 的那个把后者的
+  // 附件一并删掉。这个竞态在 2026-10-19 之前不可见——那时 sendFile 几毫秒就返回，
+  // 断言紧跟着落盘跑；文件收据并窗让 sendFile 等满 2 秒，窗口足以让别的文件 boot+close
+  // 一轮，症状是"落盘成功的附件 existsSync 为假"这种指代不清的失败。
+  const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', `attachments-e2e-${counter}-${randomUUID().slice(0, 8)}`);
   bootEnv['FSHINE_ATTACHMENT_DIR'] = attachmentDir;
   const assembly = await createServerAssembly({
     // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（平台冷却、限流窗口）的时序

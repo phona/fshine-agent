@@ -19,6 +19,33 @@ export interface IncomingAttachment {
   bytes: number;
 }
 
+/**
+ * 文件收据里最多列几个文件名（再多用"等"收尾）。
+ *
+ * 为什么截断：一条企微 file 消息带 8 个文件是常见形状（暂存上限就是 8），全列会把
+ * 收据撑成一屏；而收据的作用是"我知道你发了什么、发对了没有"，前 3 个名 + 总数
+ * 足以让用户判断，真要全量可以回会话里翻。
+ */
+export const FILE_RECEIPT_NAME_LIMIT = 3;
+
+/**
+ * 文件收据文案：**宿主回合首帧与渠道孤儿收据共用同一句**，所以住在这里而不是各写一份。
+ *
+ * 为什么必须一个权威位置：同一句"你发了哪些文件"会在两个地方出现——① 带指令的回合
+ * 首帧（handler 的规则二披露，告诉用户"这轮我用这些文件"，假设错时用户几秒内能纠正）；
+ * ② 只发文件、迟迟没有指令时渠道补的那条（告诉用户"文件我收下了，在等你的指令"）。
+ * 两处各写一份措辞，迟早漂移成一桩"同一个事实两种说法"的交互债。
+ *
+ * 去重按文件名：同名文件（不同路径）在清单里出现两行没有信息量。计数按去重后的个数，
+ * 与暂存池的"保留最新 N 个"无关——这里只说用户看见了什么。
+ */
+export function formatFileReceipt(filenames: readonly string[]): string {
+  const unique = [...new Set(filenames)];
+  const listed = unique.slice(0, FILE_RECEIPT_NAME_LIMIT);
+  const rest = unique.length - listed.length;
+  return `已收到 ${unique.length} 个文件：${listed.join('、')}${rest > 0 ? ' 等' : ''}`;
+}
+
 export interface IncomingChannelMessage {
   /** 不可变的企微成员 UserID */
   wecomUserId: string;

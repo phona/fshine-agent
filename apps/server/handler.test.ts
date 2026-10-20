@@ -252,13 +252,15 @@ describe('附件-only 消息的暂存与交付', () => {
     return { handler: createMessageHandler({ store, runtime }), inserted, seen };
   }
 
-  it('附件-only：不调 Agent，落审计为 attachment_received，回复要能收尾流', async () => {
+  it('附件-only：不调 Agent，落审计为 attachment_received，正常路径安静', async () => {
     const { handler, inserted, seen } = probe();
     const reply = await handler(msg({ attachmentOnly: true, attachments: [file('a.xlsx')] }));
     expect(seen).toHaveLength(0);
-    expect(reply).toBe('已收到 a.xlsx');
-    // 必须非空：适配器只在 rich.text 非空时才发 finish=true，空回复会让客户端 spinner 永转
-    expect(reply).not.toBe('');
+    // 2026-10-19：正常路径返回空串。企微的流式回复按入站消息的 req_id 走，一条用户消息
+    // 就是一个气泡——每个文件各回一条"已收到 X"必然是 N 个气泡，再和指令回合那一串帧
+    // 在会话里互相穿插。收据并到回合上（describeDeliveredFiles）；渠道侧对附件-only 不起
+    // 流，所以空回复不会留下转圈的 spinner（起不起流由 adapter 决定，不靠"必须非空"）。
+    expect(reply).toBe('');
     // 文案纪律：不出现"请告诉我需要做什么"这类噪音（一发 N 个文件就刷 N 遍）
     expect(reply).not.toContain('请告诉我');
     expect(inserted.map((r) => r.outcome)).toEqual(['attachment_received']);
@@ -328,14 +330,13 @@ describe('附件-only 消息的暂存与交付', () => {
     const reply = await handler(msg({ attachmentOnly: true, attachments: [file('late.xlsx')] }));
     expect(seen).toHaveLength(1); // 迟到文件没有启第二个回合
     expect(seen[0]!.request).not.toContain('late.xlsx');
-    expect(reply).toContain('late.xlsx');
-    expect(reply).toContain('指令再发一次'); // 可行动,不是干等
+    expect(reply).toBe('上一条指令已经处理完了，请把指令再发一次，这些文件会一起用上');
   });
 
-  it('会话里第一个文件不算迟到:不出现补发提示', async () => {
+  it('会话里第一个文件不算迟到:安静（不出现补发提示）', async () => {
     const { handler } = probe();
     const reply = await handler(msg({ attachmentOnly: true, attachments: [file('a.xlsx')] }));
-    expect(reply).toBe('已收到 a.xlsx');
+    expect(reply).toBe('');
   });
 
   it('会话隔离：A 会话暂存的附件不会进 B 会话的回合', async () => {
@@ -702,16 +703,18 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
     expect(reply).toBe('做完了');
   });
 
-  it('describeDeliveredFiles:措辞纪律(空集不发、只列文件名、多了给总数)', () => {
+  it('describeDeliveredFiles:收据措辞(空集不发、只列文件名、多了给总数)', () => {
     const f = (filename: string) => ({ filename, path: `/tmp/x/${filename}`, bytes: 1 });
     expect(describeDeliveredFiles([])).toBe('');                       // 调用方据此不发帧
-    expect(describeDeliveredFiles([f('工资.xlsx')])).toBe('本轮使用文件：工资.xlsx');
-    expect(describeDeliveredFiles([f('a.xlsx'), f('b.xls')])).toBe('本轮使用文件：a.xlsx、b.xls');
+    // 2026-10-19 起这句同时是附件回合的收据（附件-only 不再各自回气泡，否则一发 N 个文件
+    // 就是 N 个气泡），所以措辞与渠道的孤儿收据共用 contracts 的 formatFileReceipt
+    expect(describeDeliveredFiles([f('工资.xlsx')])).toBe('已收到 1 个文件：工资.xlsx');
+    expect(describeDeliveredFiles([f('a.xlsx'), f('b.xls')])).toBe('已收到 2 个文件：a.xlsx、b.xls');
     // 4 个起不逐名列，只给前 3 + 总数：帧是短消息，不是清单
-    expect(describeDeliveredFiles([f('a'), f('b'), f('c'), f('d')])).toBe('本轮使用文件：a、b、c 等 4 个');
-    // 同一文件名重复只列一次（去重按 path，重名文件在文本里仍会出现两次）
+    expect(describeDeliveredFiles([f('a'), f('b'), f('c'), f('d')])).toBe('已收到 4 个文件：a、b、c 等');
+    // 同一文件名重复只列一次（去重按 filename，重名文件在文本里仍会出现两次）
     expect(describeDeliveredFiles([f('a.xlsx'), { ...f('a.xlsx'), path: '/tmp/y/a.xlsx' }]))
-      .toBe('本轮使用文件：a.xlsx');
+      .toBe('已收到 1 个文件：a.xlsx');
   });
 
   // ── 重启降级：账本失记 → 全部未消费（宁可多给,不可漏）─────────────────────
@@ -794,13 +797,14 @@ describe('入站防抖', () => {
     expect(seen).toHaveLength(1);
   });
 
-  it('附件-only 消息不参与防抖:立刻返回确认', async () => {
+  it('附件-only 消息不参与防抖:立刻返回（但正常路径无话可说）', async () => {
     const a = realFile('a.xlsx');
     const { handler } = harness(2000);
     const t0 = Date.now();
     const reply = await handler(msg({ attachmentOnly: true, attachments: [a] }));
     expect(Date.now() - t0).toBeLessThan(1500); // 没有等满 2 秒
-    expect(reply).toContain('a.xlsx');
+    // 2026-10-19：不等待遇不变，但不再回一条气泡（收据由指令回合或渠道并窗承担）
+    expect(reply).toBe('');
   });
 
   // 2026-10-16 首帧提速改写：防抖的新语义是"窗口内首条立即、后续到达才合并"（参照
@@ -939,14 +943,20 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     debounceMs: number;
     runtimeDelayMs?: number;
     runtimeSteps?: string[];
+    /** runtime 里走 notice 通道发的帧（进度帧走 onStep）。 */
+    runtimeNotices?: string[];
     heartbeatMs?: number;
+    /** 给 send 也挂上 notice 通道（进度帧走 progress，notice 帧单独记账）。 */
+    notice?: boolean;
   }) {
     const frames: Frame[] = [];
+    const noticeTexts: string[] = [];
     let framesAtRuntimeStart = -1;
     const runtime: AgentRuntime = {
       handleTurn: async (ctx) => {
         framesAtRuntimeStart = frames.length;
         for (const step of opts.runtimeSteps ?? []) ctx.onStep?.(step);
+        for (const text of opts.runtimeNotices ?? []) await ctx.onNotice?.(text);
         await new Promise((r) => setTimeout(r, opts.runtimeDelayMs ?? 0));
         return { text: 'ok' };
       },
@@ -959,9 +969,14 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     });
     const send = (over: Partial<IncomingChannelMessage>, userId = USER): Promise<{ reply: ChannelReply; elapsed: number }> => {
       const t0 = Date.now();
-      return handler(msg(over, userId), (text: string) => { frames.push({ text, at: Date.now() }); }).then((reply) => ({ reply, elapsed: Date.now() - t0 }));
+      // notice 帧与进度帧进同一个序列：帧预算不按通道分别算（一个气泡就是一屏）
+      const notice = opts.notice
+        ? async (text: string) => { frames.push({ text, at: Date.now() }); noticeTexts.push(text); }
+        : undefined;
+      return handler(msg(over, userId), (text: string) => { frames.push({ text, at: Date.now() }); }, notice)
+        .then((reply) => ({ reply, elapsed: Date.now() - t0 }));
     };
-    return { handler, frames, send, framesAtRuntimeStart: () => framesAtRuntimeStart };
+    return { handler, frames, noticeTexts, send, framesAtRuntimeStart: () => framesAtRuntimeStart };
   }
 
   it('受理即帧：<1.5s 发出宿主受理帧，且先于 runtime（不经过出口校验）', async () => {
@@ -1000,12 +1015,12 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     expect(elapsed).toBeLessThan(1500);
   });
 
-  it('附件-only 不启回合：不发受理帧（回执文案已自带确认）', async () => {
+  it('附件-only 不启回合：零帧、零回复（气泡由指令回合或渠道并窗承担）', async () => {
     const a = realFile('a.xlsx');
     const h = harness({ debounceMs: 2000 });
     const { reply } = await h.send({ attachmentOnly: true, attachments: [a] });
     expect(h.frames).toEqual([]);
-    expect(reply).toBe('已收到 a.xlsx');
+    expect(reply).toBe('');
   });
 
   it('未授权拒绝很快：不发受理帧', async () => {
@@ -1027,6 +1042,59 @@ describe('首帧提速：受理即帧与首条零防抖', () => {
     await h.send({ text: '查余额' });
     // runtime 第一帧在受理帧之后立刻发出：用户不再盲等，心跳不再补帧
     expect(h.frames.map((f) => f.text)).toEqual([TURN_ACCEPTED_TEXT, '正在读取余额…']);
+  });
+
+  // ── 2026-10-19 附件回合：收据并到回合气泡上，受理帧让位 ──────────────────
+  //
+  // 背景：3 个文件 + 1 条指令，用户看到 4 条气泡（3 个"已收到 X" + 1 串回合帧），而且
+  // 文件回执和回合帧在会话里互相穿插。根因是企微流式回复按入站消息的 req_id 走，一条
+  // 用户消息就是一个气泡——附件-only 各回一句必然是 N 个气泡。所以：附件-only 不再回
+  // 气泡，收据改挂到指令回合的首帧（就是披露帧，见 announceDeliveredFiles）。
+  it('附件回合首帧就是收据：披露帧顶掉受理帧（不两句近义挨着冒）', async () => {
+    const a = realFile('a.xlsx');
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 60 });
+    await h.send({ attachmentOnly: true, attachments: [a] });   // 只发文件：零帧（气泡省下来了）
+    expect(h.frames).toEqual([]);
+    await h.send({ text: '做工资表' });                         // 指令回合：收据由它带
+    expect(h.frames.map((f) => f.text)).toEqual(['已收到 1 个文件：a.xlsx']);
+    // 受理帧被跳过：用户刚看完"已收到哪些文件"，紧跟一句"已受理"只是抖动
+    expect(h.frames.some((f) => f.text === TURN_ACCEPTED_TEXT)).toBe(false);
+  });
+
+  it('附件回合心跳不丢：披露帧之后又是整周期无帧，仍补一帧（盲段没被"跳过受理帧"吃掉）', async () => {
+    const a = realFile('a.xlsx');
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 120, heartbeatMs: 40 });
+    await h.send({ attachmentOnly: true, attachments: [a] });
+    await h.send({ text: '做工资表' });
+    // 心跳锚在"受理点"而不是"受理帧"：附件回合没有受理帧，锚点仍落在披露帧之后
+    expect(h.frames.map((f) => f.text)).toEqual(['已收到 1 个文件：a.xlsx', TURN_STILL_WORKING_TEXT]);
+  });
+
+  it('附件回合心跳不添噪：披露帧之后真实帧开始流动就静默', async () => {
+    const a = realFile('a.xlsx');
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 120, runtimeSteps: ['正在读取余额…'], heartbeatMs: 40 });
+    await h.send({ attachmentOnly: true, attachments: [a] });
+    await h.send({ text: '查余额' });
+    expect(h.frames.map((f) => f.text)).toEqual(['已收到 1 个文件：a.xlsx', '正在读取余额…']);
+  });
+
+  it('披露走 notice 通道：算一帧流量（通道归属也要钉住）', async () => {
+    const a = realFile('a.xlsx');
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 60, notice: true });
+    await h.send({ attachmentOnly: true, attachments: [a] });
+    await h.send({ text: '做工资表' });
+    // 通道归属：有 notice 时披露走 notice（被 await、不被渠道节流、与计划通知同一审计轨迹），
+    // 不是 progress。两条路都改计数，但走哪条决定了它会不会被帧节流挤掉。
+    expect(h.noticeTexts).toEqual(['已收到 1 个文件：a.xlsx']);
+    expect(h.frames.map((f) => f.text)).toEqual(['已收到 1 个文件：a.xlsx']);
+  });
+
+  it('notice 帧也算帧流量：受理帧之后来了计划通知，心跳不再补', async () => {
+    const h = harness({ debounceMs: 0, runtimeDelayMs: 120, runtimeNotices: ['计划已确认，开始执行'], heartbeatMs: 40, notice: true });
+    await h.send({ text: '做工资表' });
+    // notice 上屏 = 用户不再盲等。若只数 progress 帧，这一帧会被漏计，8 秒后心跳再补一句
+    // 近义文案——帧预算只有 4，浪费在重复上。
+    expect(h.frames.map((f) => f.text)).toEqual([TURN_ACCEPTED_TEXT, '计划已确认，开始执行']);
   });
 });
 

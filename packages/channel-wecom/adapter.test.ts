@@ -1,9 +1,9 @@
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
-import { WecomBotChannel, type WecomBotChannelOptions } from './src/index';
+import { WecomBotChannel, type WecomBotChannelOptions, RECEIPT_COALESCE_MS } from './src/index';
 import { MAX_REPLY_BYTES, REPLY_TRUNCATED_MARK } from './src/index';
 
 const ENV = { WECOM_BOT_ID: 'bot-001', WECOM_BOT_SECRET: 'secret-abc' };
@@ -61,7 +61,17 @@ class FakeSdkClient {
     finish: boolean,
   ): Promise<unknown> {
     this.replies.push({ reqId: frame.headers?.req_id, streamId, content, finish });
+    if (this.replyFailNext) {
+      this.replyFailNext = false;
+      return Promise.reject(new Error('stream boom'));
+    }
     return Promise.resolve({});
+  }
+
+  /** 下一条 replyStream 拒收（验"流式帧发不出去时降级成新消息"）。 */
+  private replyFailNext = false;
+  failNextReply(): void {
+    this.replyFailNext = true;
   }
 
   uploadMedia(data: Buffer, options: { type: 'image'; filename: string }): Promise<{ media_id: string }> {
@@ -511,5 +521,130 @@ describe('WecomBotChannel 附件(file 消息)', () => {
     await expect(channel.start(handler)).rejects.toThrow(/必须在平台工作区内/);
     rmSync(root, { recursive: true, force: true });
     rmSync(outside, { recursive: true, force: true });
+  });
+});
+
+// ── 文件收据：附件-only 不再各回一个气泡（2026-10-19）────────────────────────
+//
+// 实测形态：用户发 3 个 Excel + 1 条指令，会话里出现 4 条机器人气泡——3 条"已收到 X"
+// 加一串回合帧，还互相穿插。根因是企微流式回复按入站消息的 req_id 走：一条用户消息
+// 就是一个气泡，N 个文件必然是 N 条收据，SDK 侧没有跨消息合并的接口（reply() 只转发
+// frame.headers.req_id）。所以这里锁住"不为文件起气泡"：附件-only 消息零帧，收据要么
+// 搭指令回合的首帧（宿主披露，见 handler.test.ts），要么在并窗到点时合成一条。
+describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)', () => {
+  const roots: string[] = [];
+  const freshRoot = (): string => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    roots.push(root);
+    return root;
+  };
+  afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+
+  // 并窗只有 2 秒，真等会把这一组用例拖成 10 秒量级；用假时钟精确推进到点。
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  /** 宿主正常路径对附件-only 无话可说（收据由回合/并窗承担）。 */
+  const quiet = (): ReplyHandler => async () => '';
+
+  /** 派发一条 file 消息（下载内容可注入）。 */
+  const sendFile = async (fake: FakeSdkClient, reqId: string, filename: string): Promise<void> => {
+    fake.downloadResult = { buffer: Buffer.from('x'), filename };
+    fake.emit('message.file', fileFrame(reqId));
+    await vi.advanceTimersByTimeAsync(0);   // 冲掉 dispatch 尾部的微任务
+  };
+
+  it('附件-only 消息零帧：连秒回 ack 都不发', async () => {
+    const root = freshRoot();
+    const handler = vi.fn(quiet());
+    const { fake } = await startChannel(handler, root);
+    await sendFile(fake, 'req-quiet', 'a.xlsx');
+    expect(handler).toHaveBeenCalled();
+    // "收到,正在处理…"对一条只暂存、不处理的消息是假承诺，且正常路径下没有终帧来改写
+    // 它——用户会看到一条永远转圈的"正在处理"。零帧 = 没有 spinner。
+    expect(fake.replies).toEqual([]);
+  });
+
+  it('孤儿文件：并窗到点补一条收据，首帧即终帧', async () => {
+    const root = freshRoot();
+    const { fake } = await startChannel(quiet(), root);
+    await sendFile(fake, 'req-orphan', 'a.xlsx');
+    expect(fake.replies).toEqual([]);                       // 窗口内不起流
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fake.replies).toHaveLength(1);
+    expect(fake.replies[0]!.content).toBe('已收到 1 个文件：a.xlsx，等待你的指令');
+    expect(fake.replies[0]!.finish).toBe(true);
+    expect(fake.replies[0]!.reqId).toBe('req-orphan');
+  });
+
+  it('并窗：窗内两条文件消息合成一条收据，不是两条气泡', async () => {
+    const root = freshRoot();
+    const { fake } = await startChannel(quiet(), root);
+    await sendFile(fake, 'req-f1', 'a.xlsx');
+    await sendFile(fake, 'req-f2', 'b.xls');
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fake.replies).toHaveLength(1);
+    // 措辞与宿主回合披露同一句（contracts.formatFileReceipt），只多一个"在等指令"后缀
+    expect(fake.replies[0]!.content).toBe('已收到 2 个文件：a.xlsx、b.xls，等待你的指令');
+    // 通道挂在最后到达的那条上：时间上最接近用户所见
+    expect(fake.replies[0]!.reqId).toBe('req-f2');
+  });
+
+  it('带正文的消息到达即取消挂起的收据（那一回合的首帧会带同样的收据）', async () => {
+    const root = freshRoot();
+    // 宿主正常路径对附件-only 无话可说；带正文的回合照常出终帧
+    const handler = vi.fn(async (msg: IncomingChannelMessage): Promise<string> => (msg.attachmentOnly ? '' : '做完了'));
+    const { fake } = await startChannel(handler, root);
+    await sendFile(fake, 'req-f1', 'a.xlsx');
+    expect(fake.replies).toEqual([]);                       // 附件-only：零帧
+    fake.emit('message.text', textFrame('req-t1'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(5_000);               // 窗口早过了
+    // 只有那一回合的两帧；没有第三条收据——同一句话说两遍才是冗余
+    expect(fake.replies.map((r) => r.content)).toEqual(['收到,正在处理…', '做完了']);
+  });
+
+  it('例外路径（暂存超限等）宿主自己回文本：当即终帧，不进并窗', async () => {
+    const root = freshRoot();
+    // 宿主返回非空 = 用户必须立刻知道的事（超出暂存上限），不能等窗口
+    const handler = vi.fn(async (): Promise<string> => '另有 2 个超出暂存上限未收');
+    const { fake } = await startChannel(handler, root);
+    fake.downloadResult = { buffer: Buffer.from('x'), filename: 'a.xlsx' };
+    fake.emit('message.file', fileFrame('req-over'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fake.replies.map((r) => r.content)).toEqual(['另有 2 个超出暂存上限未收']);
+    await vi.advanceTimersByTimeAsync(5_000);               // 并窗已被这条终帧占住，不再补
+    expect(fake.replies).toHaveLength(1);
+  });
+
+  // 这一帧是它所在流的**首帧**：流式更新被企微拒收时若不降级，那条流会永远开着——客户端
+  // 表现是文件消息底下一个转不停的 spinner（历史事故 errcode 846608 的同一形态）。
+  it('孤儿收据的首帧被拒收：降级成新消息送达，不留转圈的流', async () => {
+    const root = freshRoot();
+    const { fake } = await startChannel(quiet(), root);
+    await sendFile(fake, 'req-degrade', 'a.xlsx');
+    fake.failNextReply();                                    // 并窗到点那一帧发不出去
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fake.replies).toHaveLength(1);                    // 流的尝试确实发生了
+    // 降级通道把同一条收据作为全新消息送达：用户看得到，且没有开着的流
+    expect(fake.sentMessages).toEqual([{ chatid: 'zhangsan', content: '已收到 1 个文件：a.xlsx，等待你的指令' }]);
+  });
+
+  // 并窗长度是个有上下界的调参，值得一根钉子：下界要盖住"最后一个文件 → 指令"的间隔
+  // （人是打字，秒级），上界必须短于企微对被动回复的接受时限（SDK 只对欢迎语/模板卡片
+  // 明确写了 5s，846608 是流式更新超时）。2s 两边都留了余量；改它先核这两条。
+  it('并窗长度：2 秒（下界盖住文件→指令的间隔，上界短于渠道被动回复时限）', () => {
+    expect(RECEIPT_COALESCE_MS).toBe(2_000);
+  });
+
+  it('stop() 撤掉挂起的收据：定时器与待发帧都不留', async () => {
+    const root = freshRoot();
+    const { channel, fake } = await startChannel(quiet(), root);
+    await sendFile(fake, 'req-stop', 'a.xlsx');
+    expect(vi.getTimerCount()).toBe(1);                    // 只有并窗那一个定时器
+    await channel.stop();
+    expect(vi.getTimerCount()).toBe(0);                    // 停机即撤：不把进程/收尾拖住
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(fake.replies).toEqual([]);                      // 也不会往已断开的连接发东西
   });
 });

@@ -24,6 +24,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
+import { formatFileReceipt } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
 
 const ACK_TEXT = '收到,正在处理…';
@@ -32,6 +33,23 @@ const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
 const START_TIMEOUT_MS = 30_000;
 const PROGRESS_MIN_INTERVAL_MS = 3_000;
 const MAX_PROGRESS_FRAMES = 4;
+/**
+ * 文件收据的并窗（毫秒）：附件-only 消息的文件名在这个窗口里累积，到点合成**一条**收据。
+ *
+ * 为什么是 2s：用户的自然形态是"几个文件 + 一条指令"在同一秒里发出（企微的模型里文件
+ * 无法与文字同条，只能是 N+1 条独立消息）。窗口要盖住"最后一个文件 → 指令"的间隔；
+ * 带正文的消息一到达就取消并窗（那时收据由回合首帧承载），所以这个窗口**不是**防抖窗
+ * 的复制品——它只回答"还要不要替这批文件补一句"，与宿主的入站防抖各管一件事。
+ *
+ * 上界顾虑：窗口内不起流，到点才发这一条的**首帧**，所以窗口必须短于企微对被动回复的
+ * 接受时限（SDK 只对欢迎语/模板卡片明确写了 5s；流式首帧同样有窗口，846608 是更新超时）。
+ * 2s 留了一倍余量。改大先核这条。
+ */
+/** 文件收据的并窗（毫秒）。导出是为了让这个调参值有测试守着——改大先核上面的上界理由。 */
+export const RECEIPT_COALESCE_MS = 2_000;
+
+/** 孤儿收据的后缀：告诉用户文件收下了、在等他发指令（没有这个后缀，用户只会干等）。 */
+const RECEIPT_WAITING_SUFFIX = '，等待你的指令';
 /** 附件大小上限：企微 file 消息的合理体量。超限直接拒收，不落盘、不进上下文 */
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 /** 单个附件名长度上限：防超长名把落盘路径撑爆（也防日志刷屏） */
@@ -84,6 +102,28 @@ interface ReplyDegrade {
   once: { used: boolean };
 }
 
+/**
+ * 挂起的文件收据：一个会话在一个并窗里到达的所有附件-only 消息，共用一条收据。
+ *
+ * 为什么需要并窗（2026-10-19）：企微的流式回复按入站消息的 `req_id` 走——一条用户
+ * 消息就是一个气泡，N 个文件必然是 N 条"已收到 X"，和随后指令回合的帧在会话里互相
+ * 穿插。修法是**不为文件起气泡**：附件-only 消息连秒回 ack 都不发（"收到,正在处理…"
+ * 对一条只暂存不处理的消息是假承诺，而且没有终帧来改写它），收据改由两处承载——
+ * ① 带指令的回合首帧（宿主的规则二披露，与这里同一句措辞 formatFileReceipt）；
+ * ② 只发文件、迟迟没有指令时，本类在窗口到点后补一条，否则用户对着静默的会话
+ *    不知道文件到底收没收到。
+ *
+ * 通道挂在**最后到达**的那条附件消息上：时间上最接近用户所见，且窗内每条早到的消息
+ * 都没有起过流——没有流就不会有转圈的 spinner。
+ */
+interface PendingReceipt {
+  filenames: string[];
+  frame: SdkFrame;
+  streamId: string;
+  chatId: string;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class WecomBotChannel implements ChannelAdapter {
   private readonly env: Record<string, string | undefined>;
   private readonly clientFactory: () => SdkClientLike;
@@ -92,6 +132,8 @@ export class WecomBotChannel implements ChannelAdapter {
   private started = false;
   private handler: ReplyHandler | null = null;
   private client: SdkClientLike | null = null;
+  /** 按会话（conversationId）记挂起的文件收据；stop() 时整体清掉。 */
+  private readonly pendingReceipts = new Map<string, PendingReceipt>();
 
   constructor(options: WecomBotChannelOptions = {}) {
     this.env = options.env ?? process.env;
@@ -173,6 +215,10 @@ export class WecomBotChannel implements ChannelAdapter {
     this.handler = null;
     this.client?.disconnect();
     this.client = null;
+    // 挂起的收据一并撤：窗口到点时要往企微发帧，停机后不该还有定时器挂着（会把测试
+    // 收尾/进程退出拖住），也不该再往一个已断开的连接发东西。没收过的文件仍在暂存池里，
+    // 下一条指令进来时由宿主的披露帧告知用户，信息不会丢。
+    for (const key of [...this.pendingReceipts.keys()]) this.dropPendingReceipt(key);
   }
 
   /**
@@ -347,8 +393,18 @@ export class WecomBotChannel implements ChannelAdapter {
       }
     };
 
-    // 秒回 ack:用户即时可见;最终答案以同 streamId 的 finish=true 帧整体替换
-    void this.reply(frame, reqId, streamId, ACK_TEXT, false);
+    // 秒回 ack:用户即时可见;最终答案以同 streamId 的 finish=true 帧整体替换。
+    //
+    // 附件-only 消息**不发 ack**（2026-10-19）：它不启回合，"正在处理"是假承诺，且正常
+    // 路径下没有终帧来改写这句话——用户会看到一条永远转圈、永不收尾的"正在处理"。
+    // 文件收据改由并窗承担（见 PendingReceipt / queuePendingReceipt）。起不起流由本层
+    // 决定，与宿主返回什么无关：不起流就没有 spinner，也就不需要"必须非空才收尾"。
+    if (!message.attachmentOnly) {
+      // 带正文的消息到达即取消本会话挂起的收据：那条回合的首帧会带上同样的收据
+      // （宿主的规则二披露），两条都说同一件事才是冗余。
+      this.dropPendingReceipt(conversationId);
+      void this.reply(frame, reqId, streamId, ACK_TEXT, false);
+    }
 
     let reply: ChannelReply;
     try {
@@ -382,6 +438,11 @@ export class WecomBotChannel implements ChannelAdapter {
       // 改用 sendMessage 全新消息通道把终稿送达。中间进度帧不降级（降级是给"答案"的，
       // 不是给中间帧的，否则每次拒收都是一条新消息）。
       void this.reply(frame, reqId, streamId, bounded.text, true, { chatId: conversationId, once: degradeOnce });
+    } else if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
+      // 宿主对这条附件-only 消息无话可说（正常路径）：文件名并进本会话的收据窗，到点合成
+      // 一条。例外路径（暂存超限、指令跑完后才到的文件）宿主会返回文本，走上面的终帧分支，
+      // 当即告知——那两条是用户必须知道的事，不能等窗口。
+      this.queuePendingReceipt(conversationId, frame, streamId, message.attachments);
     }
     // 文件回传（2026-10-08）：worker 在平台 tmp/ 下产出的 xlsx 等，经临时素材上传回传。
     // 失败只记事件不外抛——文本已经发出去了，不该因为附件上传失败把整轮回复搞成失败。
@@ -416,6 +477,65 @@ export class WecomBotChannel implements ChannelAdapter {
         }
       }
     }
+  }
+
+  /**
+   * 把一条附件-only 消息的文件名并进本会话的收据窗（窗已在跑则只追加 + 换通道）。
+   *
+   * 通道为什么换成最新那条：收据要挂在"最后到达的文件"之后，用户读起来才连贯；窗内早到
+   * 的消息都没有起过流，不存在"旧消息被改写"的问题。只换 frame/streamId，req_id 从
+   * frame 上取（reply() 内部就是这么用的），不另存一份——同一事实两个落点迟早漂移。
+   */
+  private queuePendingReceipt(
+    conversationId: string,
+    frame: SdkFrame,
+    streamId: string,
+    attachments: readonly IncomingAttachment[],
+  ): void {
+    const filenames = attachments.map((file) => file.filename);
+    const existing = this.pendingReceipts.get(conversationId);
+    if (existing) {
+      existing.filenames.push(...filenames);
+      existing.frame = frame;
+      existing.streamId = streamId;
+      return;
+    }
+    this.pendingReceipts.set(conversationId, {
+      filenames,
+      frame,
+      streamId,
+      chatId: conversationId,
+      timer: setTimeout(() => { void this.flushPendingReceipt(conversationId); }, RECEIPT_COALESCE_MS),
+    });
+  }
+
+  /** 撤掉挂起的收据（带正文的消息到达 / 停机）：不发送，只清状态与定时器。 */
+  private dropPendingReceipt(conversationId: string): void {
+    const pending = this.pendingReceipts.get(conversationId);
+    if (!pending) return;
+    this.pendingReceipts.delete(conversationId);
+    clearTimeout(pending.timer);
+  }
+
+  /**
+   * 并窗到点：把累积的文件名合成一条收据，以 finish=true 收尾。
+   *
+   * 走 degrade：这一帧是它所在流的首帧，发不出去的话那条流会永远开着——客户端表现是
+   * 文件消息底下一个转不停的 spinner（与"没有流"是两回事，这里流是我们自己开的）。
+   */
+  private async flushPendingReceipt(conversationId: string): Promise<void> {
+    const pending = this.pendingReceipts.get(conversationId);
+    if (!pending) return;
+    this.pendingReceipts.delete(conversationId);
+    clearTimeout(pending.timer);
+    await this.reply(
+      pending.frame,
+      pending.frame.headers?.req_id ?? '',
+      pending.streamId,
+      formatFileReceipt(pending.filenames) + RECEIPT_WAITING_SUFFIX,
+      true,
+      { chatId: pending.chatId, once: { used: false } },
+    );
   }
 
   private reply(

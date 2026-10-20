@@ -653,3 +653,49 @@ F 波结束。
 - **F7 文档同步**：debt-ledger D-106 + 本 §8 + F2 基线行（1409/111 → 本波后 1416/111）同批落地。
 
 产物回传波结束。
+
+---
+
+## 9. 文件收据波 · 附件消息不再各占一个气泡（2026-10-19）
+
+**目标**：修「N 个文件 + 1 条指令 → N+1 个机器人气泡且互相穿插」。单波单主题：气泡的归属与收据措辞的唯一权威位置。
+
+**根因（不是文案问题，是接口问题）**：企微流式回复按**入站消息的 `req_id`** 走——SDK 的 `reply()` 只转发 `frame.headers.req_id`，`streamId` 是每次入站派发新生成的 UUID。于是**一条用户消息就是一个气泡**，跨消息合并在接口层不存在（已核 `node_modules/@wecom/aibot-node-sdk/dist/index.cjs.js:1006` 的 `reply()` 与 README：只有欢迎语/模板卡片有明确的 5s 回复窗，`846608` 是流式更新超时）。用户发 3 个 Excel + 1 条指令，会话里就是 3 条「已收到 X」加指令回合那一串帧，且文件回执与回合帧按各自流的状态交错上屏。
+
+**修法**：不为文件起气泡，把气泡花在回合上。
+- 附件-only 消息**零帧**——连秒回 ack 都不发。「收到,正在处理…」对一条只暂存、不处理的消息是假承诺，且正常路径下没有终帧来改写它，用户会看到一条永远转圈的「正在处理」。不起流就没有 spinner，所以空回复不再依赖「必须非空才收尾」这条隐式契约。
+- 收据改由两处承载，**共用同一句措辞**：① 带指令的回合首帧（宿主规则二的披露帧，`已收到 N 个文件：…`）；② 只发文件、迟迟没有指令时，渠道在 2s 并窗到点补一条（同句 + 「，等待你的指令」）。带正文的消息一到达就取消并窗——那一回合的首帧会带同样的收据，两条说同一件事才是冗余。
+- 附件回合**不再发受理帧**（披露帧本身就是「回合开跑了」的证据，且信息量更大）；心跳的锚点从「受理帧」改为「受理点」（帧流量计数），盲段照样被盖上。
+
+**归属判据（AGENTS.md）**：通知送达与进度反馈是 fshine 通用机制，不属于执行层，故改动落在 `apps/server` + `packages/channel-wecom` + `packages/contracts`，无业务 `if` 分支。措辞的唯一权威位置放 `packages/contracts/src/channel.ts` 的 `formatFileReceipt`（宿主与渠道共用，`@fshine/contracts` 本就是两边的依赖）——同一句「你发了哪些文件」在两个地方各写一份，迟早漂移成一桩「同一个事实两种说法」的交互债。
+
+### 落了什么
+
+| 位置 | 改动 |
+|---|---|
+| `packages/contracts/src/channel.ts` | 新增 `FILE_RECEIPT_NAME_LIMIT`（3）与 `formatFileReceipt(filenames)`：去重后「已收到 N 个文件：a、b、c 等」。权威措辞，宿主回合首帧与渠道孤儿收据共用 |
+| `apps/server/handler.ts` | `describeDeliveredFiles` 改为委托 `formatFileReceipt`（删 `DELIVERY_NOTICE_NAME_LIMIT`）；附件-only 正常路径返回空串（仍要张嘴的只有暂存超限、指令跑完后才到文件两种）；披露帧上屏后置 `receiptAnnounced`，受理帧据此跳过；`framesEmitted` 计数覆盖 progress/notice/披露三条来路，心跳锚点改为帧流量 |
+| `packages/channel-wecom/src/adapter.ts` | 附件-only 消息不发 ack（不起流）；`PendingReceipt` 按会话累积文件名、通道挂到最后到达的那条、2s 并窗；带正文的消息到达即撤；`stop()` 一并撤（不把定时器留给进程收尾）；孤儿收据走 degrade（首帧被拒收时降级成新消息，否则流永远开着）；导出 `RECEIPT_COALESCE_MS` 让这个调参值有测试守着 |
+| `packages/channel-wecom/src/index.ts` | 导出 `RECEIPT_COALESCE_MS` |
+| `apps/server/handler.test.ts` | 5 条既有断言按新语义改写（附件-only 正常路径零回复）+ 5 条新增（附件回合首帧即收据 / 心跳不丢 / 心跳不添噪 / 披露走 notice 的通道归属 / notice 帧计流量）+ harness 增 notice 通道与 runtime 注帧 |
+| `packages/channel-wecom/adapter.test.ts` | 新增 8 条（附件-only 零帧 / 孤儿收据 / 并窗合成一条 / 带正文取消 / 例外路径不等窗 / 收据首帧拒收降级 / stop 撤定时器 / 并窗长度）；`FakeSdkClient` 增 `failNextReply` |
+| `tests/e2e/turn-loop-attachments.test.ts` | AT-1/AT-2 期望改为孤儿收据文案；披露断言随措辞更新；新增 AT-4 突发形态（2 文件 + 1 指令连发：文件消息零帧、收据只出现一次、不带等待后缀） |
+| `tests/e2e/harness.ts` | 附件落盘目录加随机后缀（见下「顺带修的竞态」） |
+| `docs/debt-ledger.md` | D-107（已关） |
+
+### 波次防线与实测记录
+
+- **F1 表征先行**：附件链路的既有判据（暂存/FIFO/迟到文件/会话隔离/超限告知/下载失败降级/落点自检/防穿越）一条未改，只把 5 条钉旧文案的断言按新语义改写；每一条改写的理由都写在原处（为什么不再回气泡）。
+- **F2 基线冻结**：改造前 `npm test` **1416 全绿 / 111 文件** + typecheck 0 错误（2026-10-19 17:16 实测冻结，即 §8 产物回传波的收口数字）；改造后 **1430 全绿 / 111 文件**（+14：handler 5、adapter 8、e2e 1），typecheck 0 错误，`npm run test:e2e` **143 全绿**无回归。
+- **F3 变异验证**（九条 adapter 侧 + 五条 handler 侧，逐条确认对应用例转红后回滚复绿）：① 附件-only 也发秒回 ack → 4 条收据用例红；② 带正文的消息不撤并窗 → 「取消挂起收据」红；③ 不并窗（每条文件各起一窗）→ 「并窗合成一条」红；④ `stop()` 不清定时器 → 「stop 撤收据」红（用 `vi.getTimerCount()` 才看得见，第一版断言只验「停机后不发帧」，而那半条被 `this.client = null` 挡住，变异**不红**——补了定时器计数才真守住）；⑤ 并窗改为覆盖而非累积 → 「合成一条」红；⑥ 通道不换成最新那条 → 「挂在最后到达的那条」红（顺带删掉 `PendingReceipt.reqId`：它与 `frame.headers.req_id` 是同一事实两个落点，删掉后少一条守不住的线）；⑦ 去掉「，等待你的指令」后缀 → 2 条红；⑧ 收据不走 degrade → 「首帧拒收降级」红（补了 `failNextReply` 才可观察）；⑨ 并窗改 20ms → 「并窗长度」红。handler 侧：① 附件回合仍发受理帧 → 4 条红；② 心跳锚点不随帧推进 → 2 条红；③ notice 帧不计流量 → 「notice 帧算流量」红；④ 不记披露已上屏 → 4 条红；⑤ 附件-only 又回气泡 → 6 条红。
+- **F4 最小化**：一个主题，`packages/contracts` 加一个纯函数、宿主改收据与帧计数、渠道改气泡归属，无夹带；未碰任何执行层文件。
+- **顺带修的竞态（e2e harness，非本波主题但被本波放大）**：附件落盘目录名只用每文件份的 `counter`，两个并行文件各自的第一号 boot 会落进同一目录，先 `close()` 的把后者的附件删掉。此前不可见——`sendFile` 几毫秒就返回，断言紧跟着落盘跑；并窗让 `sendFile` 等满 2s，窗口足以让别的文件 boot+close 一轮，症状是「落盘成功的附件 `existsSync` 为假」这种指代不清的失败（全量跑时 AT-1 偶发红）。修法是目录名加随机后缀，`close()` 的清理语义不变。
+- **F7 文档同步**：debt-ledger D-107 + 本 §9 + F2 基线行（1416/111 → 本波后 1430/111）同批落地。
+
+### 未验的一项（mock 证不了，登记不闭环）
+
+「文件消息一条回复都不回」在真企微里的客户端表现（无气泡、无 spinner）**只能真机验**：mock 的 `replyStream` 是个数组，既不会转圈也不会拒收。已写入 `docs/manual-test-wecom.md` 的待验清单（发 2 个文件不发指令 → 2s 后一条合并收据；再发指令 → 只有回合气泡带收据，文件消息下无残留 spinner）。并窗长度 2s 的上界依据（短于渠道被动回复时限）同样只有真机能验。
+
+文件收据波结束。
+
+---

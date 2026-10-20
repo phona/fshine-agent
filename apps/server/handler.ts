@@ -18,6 +18,7 @@ import type {
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
+import { formatFileReceipt } from '@fshine/contracts';
 import { newId } from '@fshine/core';
 import { isScratchDirName } from '@fshine/agent';
 
@@ -135,19 +136,19 @@ function selectDeliveredAttachments(
 /**
  * 规则二的措辞：本轮用了哪些文件，只说事实。
  *
- * 纪律：短；只列**文件名**不列路径（路径刷屏对用户没有任何信息量，且属于实现细节）；
- * 文件多时截断到前几个 + 总数，进度/通知帧是短消息，不是清单。
+ * 纪律：短；只列**文件名**不列路径（路径刷屏对用户没有任何信息量，且属于实现细节）。
+ * 句子本身由契约层的 `formatFileReceipt` 出——同一句"你发了哪些文件"在宿主回合首帧
+ * 与渠道的孤儿收据（只发文件、迟迟没有指令时补的那条）两地出现，措辞必须只有一个
+ * 权威位置，否则同一事实两种说法，迟早成一桩交互债。
+ *
+ * 2026-10-19 起它同时是**附件回合的收据**：附件-only 消息不再各自回一条"已收到 X"
+ * （企微的流式回复按入站消息的 req_id 走，N 个文件必然是 N 个气泡，见
+ * channel-wecom adapter），收据因此并到这一帧上——用户先看到"已收到 3 个文件：…"，
+ * 再看到同一气泡里的进度与终稿。
  */
-/** 披露里最多列几个文件名（再多只给总数）。 */
-const DELIVERY_NOTICE_NAME_LIMIT = 3;
-
 export function describeDeliveredFiles(files: readonly IncomingAttachment[]): string {
   if (files.length === 0) return '';
-  const listed = files.slice(0, DELIVERY_NOTICE_NAME_LIMIT);
-  // 同名文件（不同路径）只列一次：清单是给人看的，重复一行没有信息量
-  const names = [...new Set(listed.map((file) => file.filename))];
-  const rest = files.length - listed.length;
-  return `本轮使用文件：${names.join('、')}${rest > 0 ? ` 等 ${files.length} 个` : ''}`;
+  return formatFileReceipt(files.map((file) => file.filename));
 }
 
 /**
@@ -223,23 +224,25 @@ const DEFAULT_INBOUND_DEBOUNCE_MS = 2000;
  * 受理帧文案（首帧提速，2026-10-16）：回合真正开跑时（防抖后、出队列、进 runtime 之前）
  * 由宿主经 progress 通道发的确定性回执。
  *
- * 与渠道 ack 的分工（2026-10-16 评审修正，如实叙事）：渠道层对所有消息无条件秒回
+ * 与渠道 ack 的分工（2026-10-16 评审修正，如实叙事）：渠道层对**带正文**的消息无条件秒回
  * 「收到,正在处理…」（channel-wecom adapter 的 ACK_TEXT），"收达"那一层早已即时回执——
  * 用户从发消息起就不是盲等。本帧标记的是**回合真正开跑**：防抖结算完、出了会话队列、
- * 即将进 runtime。两帧语义递进（ack=已收达、受理帧=已开跑），不是近义重复。它同时是
- * 心跳锚点：一次性心跳定时器从这一帧起算（见 announceAccepted），只守受理帧之后没有
- * 真实帧流动的静默段。
+ * 即将进 runtime。两帧语义递进（ack=已收达、受理帧=已开跑），不是近义重复。
  *
  * 为什么由宿主发而不是等模型：delegate 轮的第一帧「正在…」要等第一轮 LLM（10–20s），
  * conversation 轮直到终稿零帧——ack 之后到第一帧之间仍有一段只有"收达"没有"开跑"的
  * 空窗，这帧把它填上。文案纪律：不泄漏内部机制词（防抖/队列/runtime 一概不提）、不承诺
  * 时长（没有"马上/稍等 X 秒"）、群聊单聊同形（无人称、无 @）。它是宿主回执不是模型文本，
  * 不经过出口校验，也不进转录。
+ *
+ * 2026-10-19：**附件回合不发这一帧**——那类回合的第一帧是规则二的文件收据
+ * （"已收到 N 个文件：…"，见 describeDeliveredFiles），它已经证明回合开跑且信息量更大，
+ * 两帧挨着冒只是抖动。心跳因此改锚帧流量（announceAccepted），不再假设受理帧一定存在。
  */
 export const TURN_ACCEPTED_TEXT = '开始处理你的请求';
 
 /**
- * 心跳帧文案：受理帧之后整整一个心跳周期没有任何帧时补的这一帧。同受理帧的文案纪律，
+ * 心跳帧文案：布防之后整整一个心跳周期没有任何帧流过时补的这一帧。同受理帧的文案纪律，
  * 且只补一帧——真实帧一旦开始流动就静默，不挤占渠道的 4 帧进度硬顶。
  */
 export const TURN_STILL_WORKING_TEXT = '仍在处理中';
@@ -542,8 +545,19 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
 
     // ── 附件-only 消息：只暂存，不启回合 ──────────────────────────────────────
     // 仍要落一条审计（"这一轮用户给了什么"是排查时最缺的证据），但 outcome 区别于 replied，
-    // 且不调 LLM。返回的文本会以 finish=true 收尾——否则客户端 spinner 永远转
-    // （适配器只在 rich.text 非空时才发收尾帧）。
+    // 且不调 LLM。
+    //
+    // 2026-10-19：正常路径**不再回文本**（返回空串）。企微的流式回复按入站消息的 req_id
+    // 走（SDK 的 reply() 只透传 frame.headers.req_id），一条用户消息就是一个气泡，没法
+    // 把三个文件的回执并进同一个气泡——于是"3 个文件 + 1 条指令"在会话里是 3 条
+    // "已收到 X"加上指令回合那一串帧互相穿插，用户读到的是顺序混乱的刷屏。
+    // 收据因此并到**回合**上：带指令的那条进来时，规则二的披露帧（describeDeliveredFiles）
+    // 就是合并收据，和进度、终稿同在同一个气泡里。只发文件、迟迟没有指令时，由渠道层
+    // 的并窗补一条合并收据（channel-wecom adapter 的 RECEIPT_COALESCE_MS）。
+    //
+    // 空回复不会让客户端 spinner 永转：适配器对附件-only 消息**不起流**（连秒回 ack 都不发，
+    // 见 adapter 的 dispatchMessage），没有流就没有 spinner；本条要么由并窗补一条收据
+    // （finish=true 收尾），要么一句话都不说。起没起流是渠道层的决定，与这里返回什么无关。
     if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
       // 统一按"保留最新 N 个"：既覆盖会话日积月累挤掉最旧，也覆盖一次就发超过 N 个。
       // 最初分两条路写（先看出能不能装下本轮），结果一批超限时保留了**最先**的 N 个、
@@ -560,13 +574,14 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         requestId, wecomMessageId: message.messageId, principalId,
         input: withAttachmentPaths(message.text, accepted, sessionKey), createdAt, outcome: 'attachment_received',
       });
-      // 文案纪律：短、只说事实。曾有"请告诉我需要做什么。"——那是噪音：用户当然知道
-      // 要说话，而且一发 N 个文件就刷 N 条同样的话。超限时才多说一句（那是用户不知道的）。
-      const names = accepted.map((file) => file.filename).join('、');
+      // 仍要张嘴的只剩一种："用户不知道的事"——暂存超限丢了文件。
+      // 曾有"请告诉我需要做什么。"——那是噪音：用户当然知道要说话，而且一发 N 个文件就刷
+      // N 条同样的话。
       const notes: string[] = [];
       if (dropped.length > 0) notes.push(`另有 ${dropped.length} 个超出暂存上限（${MAX_PENDING_ATTACHMENTS} 个）未收：${dropped.map((f) => f.filename).join('、')}`);
       if (seenTextTurn.has(sessionKey)) notes.push('上一条指令已经处理完了，请把指令再发一次，这些文件会一起用上');
-      return `已收到 ${names}${notes.length > 0 ? `；${notes.join('；')}` : ''}`;
+      if (notes.length === 0) return '';
+      return notes.join('；');
     }
 
     seenTextTurn.add(sessionKey);
@@ -594,23 +609,31 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // 授权拒绝、确认状态机（取代/取消/过期/歧义）这些路都是毫秒级确定性回复，不需要帧；
     // 只有真的要进 runtime 的回合才发。progress 缺席（单测直调）时整段退化为无操作。
     // heartbeatTimer 声明在 try 之外——finally 要清它，声明进 try 就成了 try 块局部量。
-    let progressCalls = 0;
+    //
+    // 2026-10-19：附件回合不再另发受理帧——规则二的披露帧（"已收到 N 个文件：…"）本身就是
+    // "回合开跑了"的证据，且它先说。两帧挨着冒出近义文案，用户看到的是抖动不是信息。
+    // 心跳因此不能再锚"受理帧之后"（那一条在附件回合根本不存在），改锚**帧流量**：
+    // 布防之后一帧都没再流过，才补心跳。
+    let framesEmitted = 0;
     let heartbeatTimer: ReturnType<typeof setTimeout> | undefined;
     const emitProgress = (text: string): void => {
-      progressCalls += 1;
+      framesEmitted += 1;
       progress?.(text);
     };
     let acceptedAnnounced = false;
+    /** 披露帧是否已经代替受理帧上屏（附件回合）。见 announceDeliveredFiles。 */
+    let receiptAnnounced = false;
     const announceAccepted = (): void => {
       if (!progress || acceptedAnnounced) return;
       acceptedAnnounced = true;
-      emitProgress(TURN_ACCEPTED_TEXT);
+      if (!receiptAnnounced) emitProgress(TURN_ACCEPTED_TEXT);
       if (turnHeartbeatMs <= 0) return;
-      // 心跳只守"受理帧之后一片静默"的盲段（progressCalls === 1 = 除受理帧外零帧）：
-      // 会话轮的第一轮 LLM 常要 10–20s，这帧填掉它。真实帧已在流动（或披露走了
-      // progress 兜底）时静默——用户不再盲等，多一帧只是噪音，还占渠道的进度硬顶。
+      // 心跳只守"布防之后一片静默"的盲段：会话轮的第一轮 LLM 常要 10–20s，这帧填掉它。
+      // 真实帧已在流动（或披露走了 notice 通道）时静默——用户不再盲等，多一帧只是噪音，
+      // 还占渠道的进度硬顶。
+      const armedAt = framesEmitted;
       heartbeatTimer = setTimeout(() => {
-        if (progressCalls === 1) emitProgress(TURN_STILL_WORKING_TEXT);
+        if (framesEmitted === armedAt) emitProgress(TURN_STILL_WORKING_TEXT);
       }, turnHeartbeatMs);
     };
 
@@ -643,6 +666,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       let noticeSequence = 0;
       const onNotice: NoticeFn | undefined = notice ? async (text) => {
         await notice(text);
+        // 送达成功才算一帧流过：心跳守的是"用户不再盲等"，通知没送到时用户仍在盲等，
+        // 那一帧不能算数（宁可多补一帧，不可让用户对着静默的会话）。
+        framesEmitted += 1;
         try {
           await store.conversationLog?.append({
             eventId: `${requestId}:plan_notice:${++noticeSequence}`,
@@ -676,6 +702,10 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 等 10 分钟后拿到一份安静算错的结果——那时连"它读的是哪个文件"都难以复盘。
       //
       // 措辞纪律：短、只说事实、只列文件名不列路径（见 describeDeliveredFiles）。
+      //
+      // 2026-10-19 起它同时是**附件回合的收据**（附件-only 消息自己不再回气泡，见上方
+      // attachmentOnly 分支），因此"这一帧上过屏"要记下来：announceAccepted 据此跳过
+      // 受理帧——披露帧本身就是"回合开跑了"的证据，且它先说。
       const announceDeliveredFiles = async (): Promise<void> => {
         const text = describeDeliveredFiles(attachments);
         if (!text) return;                                   // 本轮没有附件：无可披露
@@ -683,9 +713,11 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           // notice 优先：它被 await、不被渠道节流，且与计划通知走同一条审计轨迹
           // （契约里没有单独的事件种类，可检索历史因此仍是一处）。
           // 没有 notice 时才退到 progress：进度帧有最小间隔与帧数硬顶，可能被丢掉，
-          // 但总比完全不披露好。（经 emitProgress 计数——披露已上屏，心跳就该静默。）
+          // 但总比完全不披露好。（两条路都经计数——披露已上屏，心跳就该静默。）
           if (onNotice) await onNotice(text);
-          else emitProgress(text);
+          else if (progress) emitProgress(text);
+          else return;                                       // 两个通道都没有：无从告知
+          receiptAnnounced = true;
         } catch (error) {
           // 披露是增强，不是门：送达失败不能让这一轮失败（与计划通知的授权语义不同——
           // 那个必须送达后才激活，这个只是让假设可见）。
