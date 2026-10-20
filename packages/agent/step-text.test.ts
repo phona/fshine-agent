@@ -56,6 +56,25 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
     }
   });
 
+  it('带服务器路径的短语整条丢弃：路径对用户零可行动性（判据与终稿出口同一把尺）', () => {
+    // 带 task_ 的形状早被协议特征拦下（所以那条标记不能删）；这里补的是**不带 task_**
+    // 的路径形状——附件暂存路径 tmp/attachments/<uuid>-文件名.xlsx 就不带，而它正是
+    // 编排模型会从转录里原样抄出来的那种（2026-10-19 终稿泄漏同源）。
+    // 与协议材料同一族处理：整条丢、回落默认帧，不"删掉路径留着话"——那只会给用户
+    // 剩一句主语残缺的话。
+    const paths = [
+      '正在读 /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/attachments/5b58ba31-19ce-428d-99a9-ef501836b04e-工资表2026-8月(1).xlsx',
+      '契约写在 /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/contract.json 里',
+      '已读取 `tmp/attachments/5b58ba31-19ce-428d-99a9-ef501836b04e-工资表.xlsx`',
+      '正在盘点薪酬数据源 + 契约草稿 tmp/task_f695557e-f9b1-4',
+    ];
+    for (const phrase of paths) {
+      expect(clampProgressPhrase(phrase), phrase).toBe('');
+    }
+    // 丢短语之后照旧回落默认帧，不会因此不出帧
+    expect(renderToolStepText('run_17dz_task', paths[0]!)).toBe('正在调用 run_17dz_task…');
+  });
+
   it('正常短语原样通过（不被误判成泄漏）', () => {
     for (const phrase of ['正在核对往来记录', '读取余额中', '正在做摸底']) {
       expect(clampProgressPhrase(phrase)).toBe(phrase);

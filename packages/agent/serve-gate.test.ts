@@ -513,6 +513,28 @@ describe('describeKeyArgs（平台 args 规格消费，无宿主 flag 名单）'
     expect(describeKeyArgs(`bin/17dz query x.js --query ${'名'.repeat(40)}`, styles)).toEqual([`「${'名'.repeat(24)}」`]);
   });
 
+  it('服务器路径不进摘要：参数摘要的唯一去处是用户可见进度帧', () => {
+    // 2026-10-20 真机实测：payroll.detect 的 --out-dir 取的是宿主自己的任务工作区
+    // （tmp/task_<uuid>），被渲染成「正在盘点薪酬数据源 + 契约草稿 「tmp/task_f695557e-…」…」。
+    // 路径对企微里的用户零可行动性，同族 flag 还有 --contract / --cache / --out / --decisions。
+    const pathStyles: KeyArgStyles = new Map([
+      ['--query', 'name'],
+      ['--out-dir', 'name'],
+      ['--contract', 'name'],
+      ['--cache', 'name'],
+      ['--period', 'code'],
+    ]);
+    expect(describeKeyArgs('bin/17dz operation run payroll.detect 工资表.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f', pathStyles)).toEqual([]);
+    expect(describeKeyArgs('bin/17dz operation run payroll.validate --contract /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
+    // 等号写法同样拦
+    expect(describeKeyArgs('bin/17dz operation run payroll.validate --contract=/home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
+    // 截断到 24 字符的半截路径也拦（前缀没被截掉）
+    expect(describeKeyArgs('bin/17dz query x.js --cache tmp/task_f695557e-f9b1-4c7-9d2e', pathStyles)).toEqual([]);
+    // 拦的是路径，不是这个 flag：同一条命令里的非路径取值照旧进摘要
+    expect(describeKeyArgs('bin/17dz operation run payroll.detect --out-dir tmp/task_f695557e-f9b1-4c7 --query 幻骥达 --period 202609', pathStyles))
+      .toEqual(['「幻骥达」', '202609']);
+  });
+
   it('bash 前缀与空命令同样走同一套词法', () => {
     expect(describeKeyArgs('bash bin/17dz query x.js --query 甲', styles)).toEqual(['「甲」']);
     expect(describeKeyArgs('')).toEqual([]);

@@ -46,6 +46,21 @@ export const SERVER_PATH_PATTERN = new RegExp(
  */
 const EMPTY_PAREN_PATTERN = /[（(][\s均在位于]*[）)]/gu;
 
+/**
+ * 只判"有没有"的探针：与 SERVER_PATH_PATTERN 同一形状（同源派生，不可能分叉），
+ * 去掉 `g` 免得 `.test()` 带着 lastIndex 状态——同一个正则对象反复 test 会漏判。
+ *
+ * 为什么需要探针而不是复用 SERVER_PATH_PATTERN：有些出口不该"删"，该"整条作废"
+ * （进度帧带上路径 → 这一帧不发）。删是把文本改干净，探针是让调用方自己决定
+ * 丢整条还是丢一段。两个出口共用一把尺，见 server-paths.test.ts 的一致性用例。
+ */
+const SERVER_PATH_PROBE = new RegExp(SERVER_PATH_PATTERN.source, 'u');
+
+/** 文本里是否带服务器路径（不修改文本）。纯函数，无状态，可反复调用。 */
+export function hasServerPath(text: string): boolean {
+  return SERVER_PATH_PROBE.test(text);
+}
+
 export interface ServerPathStripResult {
   /** 处理后的文本。 */
   text: string;

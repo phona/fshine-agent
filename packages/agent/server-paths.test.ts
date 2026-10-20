@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SERVER_PATH_PATTERN, stripServerPaths } from './src/server-paths';
-
+import { SERVER_PATH_PATTERN, hasServerPath, stripServerPaths } from './src/server-paths';
 
 /** 本次实测漏进终稿的两个路径（2026-10-19，幻骥达工资表任务）。 */
 const WORKSPACE_PATH = 'tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/';
@@ -71,3 +70,50 @@ describe('stripServerPaths', () => {
   });
 });
 
+describe('hasServerPath（只判有没有，不删）', () => {
+  it('命中两条判据的形状', () => {
+    expect(hasServerPath(WORKSPACE_PATH)).toBe(true);
+    expect(hasServerPath(ABSOLUTE_PATH)).toBe(true);
+    expect(hasServerPath('/tmp/scratch/x.xlsx')).toBe(true);
+    // 摘要截断到 24 字符的那种半截路径同样命中（前缀没被截掉）
+    expect(hasServerPath('tmp/task_f695557e-f9b1-4')).toBe(true);
+    expect(hasServerPath('`tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/`')).toBe(true);
+  });
+
+  it('干净文本、URL、日期、普通点分名都不算路径', () => {
+    for (const text of [
+      '应发合计 123,456.78；实发合计 120,000.00。',
+      '详见 https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=ABC',
+      '2026/8 与 2026/9 两个月',
+      '和/或 两种口径都列一下',
+      'A/B 测试不做',
+    ]) {
+      expect(hasServerPath(text), text).toBe(false);
+    }
+  });
+
+  it('与 stripServerPaths 是同一把尺：判定永远一致，不存在"删得掉却探不到"', () => {
+    // 两个出口（删 / 探）共用 SERVER_PATH_PATTERN 的形状。这条用例钉住它们不分叉：
+    // 哪天有人改了形状却只改了一侧，这里立刻红。
+    const corpus = [
+      WORKSPACE_PATH,
+      ABSOLUTE_PATH,
+      '/tmp/scratch/x.xlsx',
+      'tmp/task_f695557e-f9b1-4',
+      '**产出文件**（均在 `tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/`）：',
+      '文件在 /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/attachments/工资表2026-8月(1).xlsx 里。',
+      '应发合计 123,456.78；实发合计 120,000.00。12 人逐人零差异。',
+      '详见 https://qyapi.weixin.qq.com/cgi-bin/aibot/response?response_code=ABC',
+      '2026/8 与 2026/9 两个月',
+      'v1.2 版本；幻辰.财税 账套',
+    ];
+    for (const text of corpus) {
+      expect(hasServerPath(text), text).toBe(stripServerPaths(text).removed > 0);
+    }
+    // 反复调用不串状态：探针不是有状态的全局匹配（/g 的 lastIndex 陷阱）
+    for (let i = 0; i < 3; i += 1) {
+      expect(hasServerPath('干净文本')).toBe(false);
+      expect(hasServerPath(WORKSPACE_PATH)).toBe(true);
+    }
+  });
+});

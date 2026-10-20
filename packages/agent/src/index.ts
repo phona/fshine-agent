@@ -177,6 +177,7 @@ export {
 } from './repeat-request';
 export {
   SERVER_PATH_PATTERN,
+  hasServerPath,
   stripServerPaths,
   type ServerPathStripResult,
 } from './server-paths';

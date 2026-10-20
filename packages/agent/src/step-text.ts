@@ -1,4 +1,5 @@
 /** 工具调用阶段的进度模板:埋点事实渲染,开发者为每个工具维护一条。 */
+import { hasServerPath } from './server-paths';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
 
 /**
@@ -36,11 +37,17 @@ const PROGRESS_LEAK_MARKERS: readonly RegExp[] = [
 /**
  * 钳制模型自填的进度短语：命中内部协议特征 → 空串（整条丢弃，调用方回落默认帧或
  * 静默）；超长 → 截断到 PROGRESS_PHRASE_LIMIT。返回空串表示"这条短语不可用"。
+ *
+ * 服务器路径与协议材料同族（判据用宿主那把 `hasServerPath`，与终稿出口同一把尺）：
+ * 短语是模型自己写的一句话，带上路径时整条丢而不是"删掉路径留着话"——后者只会给
+ * 用户剩一句主语残缺的话。带 `task_` 的形状早被下面的协议特征拦下，补这条堵的是
+ * 不带 `task_` 的路径（附件暂存 `tmp/attachments/<uuid>-文件名.xlsx`）。
  */
 export function clampProgressPhrase(phrase: string): string {
   const text = phrase.trim();
   if (!text) return '';
   if (PROGRESS_LEAK_MARKERS.some((marker) => marker.test(text))) return '';
+  if (hasServerPath(text)) return '';
   return text.length > PROGRESS_PHRASE_LIMIT ? `${text.slice(0, PROGRESS_PHRASE_LIMIT)}…` : text;
 }
 

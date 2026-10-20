@@ -852,3 +852,76 @@ F 波结束。
 收据复读波结束。
 
 ---
+
+## 13. 进度帧路径波 · 「正在…」帧不再带服务器路径（2026-10-20）
+
+**目标**：修「重启之后还是看到 `tmp/task_<uuid>`」——§11 的出口尺只盖终稿，这一波盖**进度帧**。
+
+**触发（用户观察，2026-10-20，重启后第一条真实委派）**：企微里弹出
+`正在盘点薪酬数据源 + 契约草稿 「tmp/task_f695557e-f9b1-4」…`。用户原话：「怎么还有这种东西」。
+
+**根因（不是 §11 的尺失效，是另一条出口）**：`sanitizeUserVisibleReply` 挂在**终稿**出口上，而这条文本出自
+**进度帧**通道——worker 每放行一次平台调用，宿主按平台声明的 label + 参数摘要合成一帧
+（`serveGateStepText` → `operationStepText`，`createServeGateAuditSink` 推给渠道）。参数摘要
+（`describeKeyArgs`）按平台 args 规格摘 flag 取值，而平台把一堆**路径型** flag 声明成了 `name` 样式
+（`--out-dir` / `--contract` / `--cache` / `--out` / `--decisions`，payroll 与 voucher 两个域都有）；
+这一次的取值正是宿主自己的任务工作区 `tmp/task_<uuid>`，于是被渲染成帧。终稿那道尺从头到尾没被调用
+——它是另一个出口，两个出口都要过尺，这正是 §11 残留项里"只盖了一个出口"的兑现。
+
+**修法（一个判据，三个出口）**：判据仍只有 `server-paths.ts` 那一份形状，新增**探针** `hasServerPath`
+（与 `stripServerPaths` 同源派生、去掉 `g` 免得 `.test()` 带 lastIndex 状态），在三个出口各自引用它：
+
+| 出口 | 处理 | 为什么是这种处理 |
+|---|---|---|
+| 参数摘要（`describeKeyArgs`） | 路径型取值**不进摘要** | 摘要是帧的原料，源头不放，帧就干净；被拦的只是这一个取值，同一命令里的其他取值照旧进摘要——帧照发，用户仍知道在干什么 |
+| 平台操作帧（`serveGateStepText`） | 帧里探到路径 → **整帧不发**（返回 null） | 与"没有 label 就不发帧"同一族安全缺省；label 是平台数据，这一侧守住平台侧与未来摘要来源 |
+| 模型自填短语（`clampProgressPhrase`） | 探到路径 → **整条短语丢弃**，回落默认帧 | 与协议材料同一族：短语是模型写的一句话，"删掉路径留着话"只会给用户剩一句主语残缺的话 |
+
+**归属判据（AGENTS.md）**：用户可见状态反馈是 fshine 通用机制；`tmp/task_<uuid>` 是**宿主自己的**暂存命名
+（`sweepScratchDirs` 只扫这一种），判据因此住在 fshine 且不碰任何执行层字段——平台那边只是被消费的
+args 规格数据（样式表），不是新协议面。
+
+**为什么不放渠道适配器**：适配器是传输，把内容判据塞进去会让"发什么"取决于"走哪个渠道"；放在三个
+合成点则任何渠道、任何未来出口都过同一把尺（与终稿出口同一思路）。
+
+### 落了什么
+
+| 位置 | 改动 |
+|---|---|
+| `packages/agent/src/server-paths.ts` | 新增 `hasServerPath`（探针，非全局正则）+ 注释说明"删 / 探"两个出口为什么共用一份形状 |
+| `packages/agent/src/serve-gate.ts` | `describeKeyArgs` 跳过路径型取值（+ 函数注释写清取舍） |
+| `packages/agent/src/pi-coding-driver.ts` | `serveGateStepText` 探到路径返回 null（+ 注释） |
+| `packages/agent/src/step-text.ts` | `clampProgressPhrase` 加路径判据（+ 注释） |
+| `packages/agent/src/index.ts` | 导出 `hasServerPath` |
+| `packages/agent/server-paths.test.ts` | 3 条新增：探针命中/不误伤 + **与 `stripServerPaths` 的一致性**（两个出口同一把尺，任一侧改形状即红）+ 无状态（反复调用不串） |
+| `packages/agent/serve-gate.test.ts` | 1 条新增：路径型 flag（三种写法 + 截断后的半截路径）不进摘要，同命令其他取值照旧 |
+| `packages/agent/step-text.test.ts` | 1 条新增：带路径的短语整条丢弃并回落默认帧；其中三条是**不带 `task_`** 的路径形状（既有协议特征只拦 `task_`，补的是这个缺口） |
+| `packages/agent/pi-coding-driver.test.ts` | 2 条新增：帧里探到路径不发帧；**真实事故复现**（`--out-dir tmp/task_<uuid>` → 帧只剩 label，审计 detail 仍带完整命令） |
+
+### 波次防线与实测记录
+
+- **F1 表征先行**：先写 7 条红测试（`hasServerPath` 不存在 → server-paths 3 条当场红；其余 4 条按修法逐条红），再动代码。既有用例零改写。
+- **F2 基线冻结**：改造前 `npm test` 全绿 / 114 文件（本机会话首测 1466，同树连跑复测 1476/1477——计数在本机有 ±10 抖动，见下"已知抖动"）；改造后 **1477 全绿 / 114 文件**，typecheck 0 错误，`npm run test:e2e` **35 文件 / 144 全绿**。
+- **F3 变异验证**（四条，逐条确认转红后回滚复绿）：① 删掉 `describeKeyArgs` 的路径跳过 → 2 条红（serve-gate 单测 + 真实事故复现）；② 删掉 `serveGateStepText` 的帧守卫 → 1 条红；③ 删掉 `clampProgressPhrase` 的路径判据 → 1 条红；④ 把 `hasServerPath` 改成恒假 → 6 条红（四个文件全红）。
+- **F4 最小化**：只动 `packages/agent` 的 4 个生产文件 + 1 个导出 + 4 个测试文件 + 3 份文档；未碰 runtime、渠道适配器、契约、handler、e2e harness。
+- **F5 红先 revert**：不适用（新增判据，无既有行为被推翻；唯一行为变化是"路径不再出现在帧里"）。
+- **F6 探针**：**不需要**——本波不改任何提示词/工具说明/申报契约（`turn-contract.ts` 一字未动），帧文本由宿主确定性合成，不是模型生成。
+- **F7 文档同步**：debt-ledger D-111 + 本 §13 + manual-test-wecom §8.7 同批落地。
+
+### 已知抖动（登记，不阻塞关闭）
+
+同一棵树连跑 `npm test`，本机测得 1466 / 1476 / 1477 三个数（§12 记账为 1477）。差异不出现在任何
+文件的失败上（三次都全绿），也不随本波改动出现或消失——本波新增用例数是构造上确定的 7 条。因此
+F2 的"只增不减"按**新增用例逐条可数**核，不按单次总计数核；要稳定总计数得先查本机 vitest 并行计数的
+抖动源（疑点在满负荷下的收集阶段，§12 已记录过同机型的一次并行抖动）。
+
+### 未验的一项（mock 证不了，登记不闭环）
+
+真企微客户端上"这一帧不再出现、且后面没有出现空帧或掉帧"只能真机确认——e2e 与单测钉的是帧的**文本**
+与**有无**，不是用户在客户端看到的气泡流。已写入 `docs/manual-test-wecom.md` §8.7。
+
+另有一个出口本波**有意**没上尺：计划通知（`formatPlanMessage` → `sanitizeSummary`）。已核平台
+`buildNotice`（17dz `src/execution/plan.js`）只拼账套名/期间/客户/科目编号，现无路径；判据与方法都已
+就位，留作下一个出口真出现时同批补，不预支防御（登记在 debt-ledger D-111 未验项 ③）。
+
+进度帧路径波结束。

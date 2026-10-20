@@ -42,6 +42,7 @@ import path from 'node:path';
 import { messageTextFor } from './error-codes';
 import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { GATEWAY_INVOCATION } from './platform-contract';
+import { hasServerPath } from './server-paths';
 import type { PlanCall } from './plan-runtime';
 
 export interface ServeGateEvent {
@@ -435,6 +436,13 @@ export function gateInvocationKind(command: string): GateInvocationKind | null {
  * 安全缺省与 label 同族：没有规格 / 规格里查不到这个 flag → 不进摘要，绝不回退
  * 到硬编码名单或"把所有 --flag 都摘上"。flag 不带值（布尔开关，样式 none 本来
  * 就不入表）或后随另一个 flag 时跳过；`--flag 值` 与 `--flag=值` 两种写法都认。
+ *
+ * 服务器路径同样不进摘要（2026-10-20 真机实测）：摘要的**唯一去处是用户可见进度帧**，
+ * 而平台把一堆路径型 flag 声明成了 name 样式（--out-dir / --contract / --cache /
+ * --out / --decisions、payroll 与 voucher 各域的位置参数），取值又常是宿主自己的任务
+ * 工作区 `tmp/task_<uuid>`。路径对渠道那头的用户零可行动性——拿到路径等于什么都没拿到。
+ * 判据用宿主那把 `hasServerPath`（server-paths.ts），不在这里另立一份形状；被拦的只是
+ * 这个取值，同一命令里的其他取值照旧进摘要（帧仍在，只是不再带路径）。
  */
 export function describeKeyArgs(command: string, styles?: KeyArgStyles): string[] {
   const tokens = splitCommandTokens(command);
@@ -459,6 +467,9 @@ export function describeKeyArgs(command: string, styles?: KeyArgStyles): string[
     // 值可能自带引号（worker 传参把引号嵌进了值里）：剥掉再套书名号，避免 「"X"」。
     const text = value.replace(/^["']+|["']+$/g, '').slice(0, KEY_ARG_MAX_CHARS);
     if (!text) continue;
+    // 路径型取值不上用户的屏幕（判据见函数注释）：宁缺勿滥——摘要少一项只是帧里
+    // 少个参数，路径上屏是让用户拿到一个他根本用不了的东西。
+    if (hasServerPath(text)) continue;
     args.push(style === 'name' ? `「${text}」` : text);
   }
   return args;

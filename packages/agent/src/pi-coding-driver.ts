@@ -26,6 +26,7 @@ import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
+import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { messageFor, messageTextFor } from './error-codes';
@@ -162,9 +163,16 @@ export function operationStepText(label: string, keyArgs?: readonly string[]): s
 /**
  * G1 放行事件 → 进度帧。没有 label（平台清单没给这一列 / 查不到这个操作）→ null：
  * 安全缺省是静默不发帧，绝不回退显示脚本名或操作名——内部事件名同理永不出厂。
+ *
+ * 帧里带上服务器路径 → 同样 null（与"没有 label"同一族安全缺省，2026-10-20 实测）：
+ * 参数摘要那一侧已经不放路径（describeKeyArgs），这里守住剩下的来源——label 是平台
+ * 数据，未来的摘要来源也可能变。判据用宿主那把 `hasServerPath`，不另立形状；宁可少
+ * 一帧，也不把 `tmp/task_<uuid>` 送到企微用户眼前。
  */
 export function serveGateStepText(event: Pick<ServeGateEvent, 'label' | 'keyArgs'>): string | null {
-  return event.label ? operationStepText(event.label, event.keyArgs) : null;
+  if (!event.label) return null;
+  const frame = operationStepText(event.label, event.keyArgs);
+  return hasServerPath(frame) ? null : frame;
 }
 
 /**

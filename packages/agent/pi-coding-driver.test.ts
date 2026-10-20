@@ -1173,6 +1173,34 @@ describe('进度帧渲染器（唯一模板，零 per-operation 分支）', () =
     expect(serveGateStepText({ keyArgs: ['202609'] })).toBeNull();
     expect(serveGateStepText({})).toBeNull();
   });
+
+  it('帧里出现服务器路径 → 整帧不发（与空 label 同一族安全缺省）', () => {
+    // 2026-10-20 真机实测的泄漏形状：label 是平台声明的"盘点薪酬数据源 + 契约草稿"，
+    // keyArgs 里躺着宿主任务工作区 tmp/task_<uuid>。参数摘要那一侧已经不放路径
+    // （describeKeyArgs），这里守住另一侧——label 或未来的摘要来源真带上路径时，
+    // 宁可不出这一帧，也不把服务器路径送上用户的屏幕。
+    expect(serveGateStepText({ label: '盘点薪酬数据源 + 契约草稿', keyArgs: ['「tmp/task_f695557e-f9b1-4」'] })).toBeNull();
+    expect(serveGateStepText({ label: '读取 /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/x.xlsx' })).toBeNull();
+    // 干净帧不受影响
+    expect(serveGateStepText({ label: '读取应收余额', keyArgs: ['「猫一杯」', '202609'] })).toBe('正在读取应收余额「猫一杯」·202609…');
+  });
+
+  it('真实事故复现：--out-dir 带宿主工作区时，帧只剩 label，路径不上屏', async () => {
+    // 真机原帧：`正在盘点薪酬数据源 + 契约草稿 「tmp/task_f695557e-f9b1-4」…`
+    // 修后：路径值不进参数摘要，帧照旧发（用户仍知道在干什么），只是不再有路径。
+    const { steps, events } = await driveBash({
+      command: 'bin/17dz operation run payroll.detect 工资表2026-8月.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f',
+      operationLabels: new Map([['detect', '盘点薪酬数据源 + 契约草稿']]),
+      operationArgStyles: new Map([['--out-dir', 'name']]),
+    });
+    expect(steps).toEqual(['正在盘点薪酬数据源 + 契约草稿…']);
+    for (const step of steps) {
+      expect(step).not.toMatch(/tmp\/|home\//);
+    }
+    // 审计侧仍看得到完整命令原文（截断到 AUDIT_DETAIL_MAX_CHARS）：用户屏上少的是
+    // 路径，排查时不该少。
+    expect(events.at(-1)?.detail).toContain('--out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f');
+  });
 });
 
 describe('防泄漏：内部事件名不出现在用户可见进度帧里', () => {
