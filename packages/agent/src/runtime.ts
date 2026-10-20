@@ -19,7 +19,7 @@ import { matchPlanDisambiguationReply, renderDisambiguationQuestion, resolvePlan
 import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult, renderWriteClosureReply } from './turn-relay';
 import { decideTurnExit, type TurnExitEvent } from './turn-exit';
 import { findRepeatedDelegatedRequest } from './repeat-request';
-import { sanitizeUserVisibleReply } from './reply-exit';
+import { sanitizeServerPathReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
 import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
 import {
@@ -271,6 +271,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
       // 而不是被模型理解」。未命中则按正常回合进入模型。
       const turnStart = Date.now();
+      const logExitEvents = (entries: readonly TurnExitEvent[]): void => entries.forEach(({ level, event, detail }) => (level === 'warn' ? console.warn : console.info)(JSON.stringify({ event, requestId: ctx.requestId, ...detail })));
       // 平台健康信号的会话键（Lane 2）：与 Context State 同一把复合键——同一用户在同一
       // 会话里的连续失败才累计；换会话（新对话）从零开始，不把别的会话的健康状态带过来。
       const platformHealthKey = `${ctx.principalId}\0${ctx.sessionId}`;
@@ -319,7 +320,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             stage: 'resume',
             cooldownRemainingMs: platformHealth.cooldownRemainingMs(platformHealthKey),
           }));
-          return await finishDirectReply(platformHealth.cooldownReply(platformHealthKey), 'platform_cooldown_blocked');
+          return await finishDirectReply(platformHealth.cooldownReply(platformHealthKey), 'platform_cooldown_blocked', undefined, undefined, false);
         }
         // ③-1：恢复路径与 delegate 路径同样收尾。此前 platformTask.run 抛出的
         // ToolUserError（如 DELEGATION_AUTH_FAILURE"平台登录态过期，需要重新登录后
@@ -829,6 +830,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   }));
                 }
                 if (error instanceof ToolUserError) {
+                  error.delegationCompleted = true;
                   // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
                   // 'timeout'）以 DELEGATION_TIMEOUT_FAILURE 话术上抛（error-codes 表唯一
                   // 来源，恒等比对、不模糊匹配）。宿主按协议把该失败分类为
@@ -850,12 +852,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                     throw new ToolUserError(renderResourceExhaustedReply({
                       record: timedOut,
                       doneSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label),
-                    }));
+                    }), { delegationCompleted: true });
                   }
                   throw error;
                 }
                 console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
-                throw new ToolUserError(FALLBACK_FAILURE);
+                throw new ToolUserError(FALLBACK_FAILURE, { delegationCompleted: true });
               }
               // 平台健康信号（Lane 2）：本回合平台交互的结局进会话级记账。判据两条
               // （都是码级）：① 驱动从平台错误信封派生的 authFailure（exit 非零 + 错误
@@ -920,7 +922,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                     totalSteps: step.totalSteps,
                     stoppedAt: `${step.stepIndex}/${step.totalSteps}`,
                   }));
-                  throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps));
+                  throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps), { delegationCompleted: true });
                 }
               }
               // 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"。**不 terminate**——
@@ -991,7 +993,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   // suggestion 是宿主与平台信封的结构化事实，照常转达（先例：
                   // renderNeedsUserText(needs, '')）。
                   const needsOnly = renderNeedsUserText(delegated.needs, '');
-                  throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly);
+                  throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly, { delegationCompleted: true });
                 }
                 if (step) return renderPlanStepToolResult(step, delegated);
                 const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
@@ -1012,7 +1014,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               if (delegated.writeClosed) {
                 turn.delegationFailed = true;
                 console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId, ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}) }));
-                throw new ToolUserError(renderWriteClosureReply(step, delegated, turn.planStepOutcomes));
+                throw new ToolUserError(renderWriteClosureReply(step, delegated, turn.planStepOutcomes), { delegationCompleted: true });
               }
               // 提案已登记（B 波 B3 网关提案路径）：与写关闭同一家族——delegated.text 是
               // **宿主持有的确定性文本**（平台 summaryText 原样 + 通用确认行），本回合以此
@@ -1030,7 +1032,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   proposalId: delegated.proposalCreated.proposalId,
                   ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
                 }));
-                throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
+                throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
               }
               // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
               // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。
@@ -1039,7 +1041,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
               // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
               // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
-              throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
+              throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
             }
             // conversation：不触发任何执行，模型紧接着给出的文本即本轮回复
             // （需要澄清、说明能力边界时同样走这条路径）。
@@ -1079,7 +1081,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         if (!turn.declared) {
           // 仍跳过：失败关闭，绝不外发未申报的文本。
           console.warn(JSON.stringify({ event: 'route_declaration_missing', requestId: ctx.requestId }));
-          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage);
+          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage, false);
         }
         result = retried;
       }
@@ -1100,6 +1102,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           'selection_clarification',
           `平台澄清 ${turn.clarification.code}：候选 ${turn.clarification.candidates.length} 个`,
           mainUsage,
+          Boolean(turn.execution),
         );
       }
       // 出口校验：申报了实时查询，就必须有本轮执行痕迹（激活计划 + 至少一次平台调用），
@@ -1119,13 +1122,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 出口校验的两段门（执行痕迹门 + 协议复读门）判定住 turn-exit.ts：纯函数，只回答
       // "这一回合外发什么、记什么事件"。副作用留在调用点——日志按决策带回的级别打，
       // needsRelay 只拿决策选中的文本，确定性话术经 finishDirectReply 提前返回。
-      const logExitEvents = (entries: readonly TurnExitEvent[]): void => {
-        for (const { level, event, detail } of entries) {
-          const payload = JSON.stringify({ event, requestId: ctx.requestId, ...detail });
-          if (level === 'warn') console.warn(payload);
-          else console.info(payload);
-        }
-      };
       const exitDecision = decideTurnExit({
         delegationFailed: turn.delegationFailed,
         execution: Boolean(turn.execution),
@@ -1147,7 +1143,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       let needsRelay = '';
       if (exitDecision.kind === 'direct') {
         logExitEvents(exitDecision.events);
-        return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage);
+        return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage, Boolean(turn.execution));
       }
       if (exitDecision.kind === 'relay') {
         logExitEvents(exitDecision.events);
@@ -1172,7 +1168,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       await saveTranscript(deps.sessions, {
         sessionId: ctx.sessionId,
         principalId: ctx.principalId,
-        messages: stripHistoryNotes(result.messages),
+        messages: sanitizeTranscriptMessages(stripHistoryNotes(result.messages)),
       });
 
       if (!replyText.trim()) {
@@ -1185,7 +1181,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason, ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
         return { text: fallback };
       }
-      const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(result.messages.slice(initialMessageCount), ctx);
+      const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
       await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, toolResultEvents);
       // D-065：结果文本回写任务条目（结构化字段缺失时召回台账的兜底渲染源）。与 Log 同文、
       // 同样脱敏；失败不影响回合（recordTaskResult 内部已兜底）。
@@ -1198,25 +1194,29 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 的 failed/timeout 分类由 context.ts 独立落账，两侧不互斥。
       console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: turn.resourceExhausted ? 'resource_exhausted' : needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok', ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
       return { text: replyText };
-      async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals): Promise<AgentReply> {
+      async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals, executed?: boolean): Promise<AgentReply> {
         const now = Date.now();
+        // Direct exits bypass normal reply hygiene, so strip paths before display, storage, and logs.
+        const replyExit = sanitizeServerPathReply({ text, ...(executed === undefined ? {} : { executed }) });
+        logExitEvents(replyExit.events);
+        const safeText = replyExit.text;
         const messages = [
           ...loaded,
           { role: 'user', content: userMessage, timestamp: now } as unknown as AgentMessage,
           deps.driver.synthesizeAssistant
-            ? deps.driver.synthesizeAssistant(text)
-            : ({ role: 'assistant', content: text, timestamp: now + 1 } as unknown as AgentMessage),
+            ? deps.driver.synthesizeAssistant(safeText)
+            : ({ role: 'assistant', content: safeText, timestamp: now + 1 } as unknown as AgentMessage),
         ];
-        await saveTranscript(deps.sessions, { sessionId: ctx.sessionId, principalId: ctx.principalId, messages });
+        await saveTranscript(deps.sessions, { sessionId: ctx.sessionId, principalId: ctx.principalId, messages: sanitizeTranscriptMessages(messages) });
         const toolEvents = toolResult ? [{
           eventId: `${ctx.requestId}:routed_tool_result`, principalId: ctx.principalId, sessionId: ctx.sessionId,
           kind: 'tool_result' as const, content: redactInternalIds(redactSensitiveText(toolResult)), createdAt: new Date().toISOString(), requestId: ctx.requestId,
         }] : [];
-        await persistAssistantAndContext(deps, ctx, text, contextUpdateQueues, toolEvents);
+        await persistAssistantAndContext(deps, ctx, safeText, contextUpdateQueues, toolEvents);
         scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
         // usage 缺席（模型没被调用 / 网关没回传）时字段缺席，不是全零（口径见 driver.ts）。
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome, ...(usage ? usageSpanFields(usage) : {}) }));
-        return { text };
+        return { text: safeText };
       }
     },
   };

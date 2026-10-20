@@ -994,3 +994,32 @@ vitest 的用例总数是**被收集文件内容的纯函数**——已核本仓
 真企微客户端上三件事只能真机确认：① 收据去掉后缀后用户是否反而不知要发指令（文案判断，已写入 manual-test §8.8）；② 终稿点名那一行与文件消息的邻接读感；③ 无关回合不复读没有以别的形态回来。e2e 钉住的是帧序列，不是用户的眼睛。
 
 交互缝波结束。
+
+## 15. D-108/D-109 跨层回归补强（2026-10-20）
+
+**目标**：补上上一波单层测试没有覆盖的三个接缝：企微附件下载与 handler 排队、Main Agent direct 出口与转录持久化、重复请求判据与 route toolResult 的宿主元数据。第二渠道身份隔离仍按 D-112 作为第二渠道接入前阻断门，本波不迁移授权主键或外置会话态。
+
+### 覆盖与修复
+
+| 接缝 | 回归判据 | 修复 |
+|---|---|---|
+| file 事件已到、`downloadFile()` 尚未完成时正文随后到达 | adapter 集成替身先发 file、延迟 resolve 下载，再发正文；ACK 即时出现，handler 不得在附件暂存前运行；final 与 ACK 共用 req_id/streamId | adapter 按会话跟踪附件处理至 handler 暂存和收据入队；正文在总上界 8s 内等齐，不足时不进 worker，回“附件尚未准备好，请稍后重试” |
+| 附件收据与正文收据竞态 | 附件已暂存、正文同时到达时只出现一条收据；持续分批到达不能续长 8s 总上界；停机唤醒等待 | handler 暂存完成后再撤附件收据；使用绝对 deadline 与 stop interrupt |
+| 服务器路径经过 direct、转录和可检索 tool result | SP1/SP3 检查普通/direct 回复和 assistant transcript；toolResult 夹路径时 Conversation Log 不保存该路径 | direct 与普通出口统一用 `server-paths.ts`；保存 transcript 和提取可检索 toolResult 前整理 assistant/toolResult 内容，保留原始 user 消息 |
+| route 回执误把拦截当 delegate | `{"error":...}` 与 details 标记 `precondition` 不计数；`recorded: delegate` 与 details 标记 `delegate` 计数；用户可见 ToolUserError 文案不变 | ToolUserError 的 `delegationCompleted` 写入 `toolResult.details.routeReceipt`；新转录优先按标记判定。旧转录缺标记时保留既有文本兼容路径（边界见 D-113） |
+
+附件 E2E 夹具的每 boot 输入目录改为 `tmp/attachments/e2e-<boot>-<uuid>`，仍保持独立清理，同时落在 `collectProducedFiles` 的保留输入区内，避免把测试输入误当作本轮产物回传。
+
+### 波次防线与实测记录
+
+- **F1 表征先行**：adapter 延迟下载、重复收据、8s 总上界与停机用例，SP3 direct 路径、transcript/toolResult 路径断言，以及 precondition/委派回执区分用例先复红，再修实现。
+- **F2 基线冻结**：§14 收口基线为 **1484 / 115 文件**；改后 `npm test` **1494 全绿 / 115 文件**（+10），`npm run typecheck` 0 错误。全量 mock E2E 需 spawn sibling 17dz CLI；默认沙箱下该只读子进程报 EPERM，本次在显式 `DZ_EXECUTOR=mock` 且无真实提交开关的受审执行中完成全量测试。
+- **F3 变异验证**（均已还原）：① adapter 不等待附件处理 → 延迟下载回归红；② 把收据撤销移回等待之前 → 重复收据回归红；③ 按批重置等待 deadline → 8s 总上界回归红；④ direct 路径清理失效 → SP3 红；⑤ 将 `precondition` marker 当作 delegate → 重复请求回归红；⑥ transcript/toolResult 清理恒等返回 → SP1 transcript 与可检索 tool_result 两条断言红。
+- **F4 最小化**：改动限于 agent 出口/转录与 route 收据、WeCom adapter 的在途附件处理、现有测试夹具与对应文档；没有增加业务判断分支或接入第二渠道。
+- **F5 红先 revert**：无既有行为回退；正常 ACK、附件池语义与用户原始消息保持不变。
+- **F6 探针**：不改提示词或申报工具说明，无需真实模型探针。
+- **F7 文档同步**：D-113 + 本 §15 + architecture-laws L3 + D-112 渠道隔离接入门同批更新。
+
+**仍登记的边界**：D-112 渠道身份未在授权存储和 handler 内存态隔离；旧转录没有 `routeReceipt` details 时，为兼容既有成功委派继续使用旧文本判据，无法机械区分旧版前置拦截文本。第二渠道接入前必须完成身份主键迁移与隔离表征；旧转录歧义作为部署过渡边界，不写成已修复。
+
+D-108/D-109 回归补强结束。

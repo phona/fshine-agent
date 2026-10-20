@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { sanitizeUserVisibleReply } from './src/reply-exit';
+import { sanitizeServerPathReply, sanitizeUserVisibleReply } from './src/reply-exit';
 
 /** 一次实测漏进终稿的路径（2026-10-19，幻骥达工资表任务）。 */
 const WORKSPACE_PATH = 'tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/';
@@ -75,5 +75,12 @@ describe('sanitizeUserVisibleReply', () => {
     });
     expect(out.events.map((entry) => entry.event)).toEqual(['server_path_leak', 'conversation_unsourced_amounts']);
     expect(out.text).toBe('已产出文件：实发合计 120,000.00。');
+  });
+});
+
+describe('sanitizeServerPathReply', () => {
+  it('direct exit execution is unknown unless the caller supplies a fact', () => {
+    const out = sanitizeServerPathReply({ text: `见 ${WORKSPACE_PATH}。` });
+    expect(out.events).toEqual([{ level: 'warn', event: 'server_path_leak', detail: { removed: 1 } }]);
   });
 });

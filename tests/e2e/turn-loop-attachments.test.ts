@@ -82,7 +82,7 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     if (!att) throw new Error('附件信封解析失败：attachment_received 行里没有可恢复的路径');
     expect(att.filename).toBe('对账单-202606.csv');
     // 真实落盘：目录在平台 tmp 下的 boot 专属附件区（adapter 落点自检的受信边界），字节一致
-    expect(att.path.startsWith(path.join(PLATFORM_ROOT, 'tmp', 'attachments-e2e-'))).toBe(true);
+    expect(att.path.startsWith(path.join(PLATFORM_ROOT, 'tmp', 'attachments', 'e2e-'))).toBe(true);
     expect(existsSync(att.path)).toBe(true);
     expect(readFileSync(att.path, 'utf8')).toBe('e2e-attachment-bytes');
     // basename 化：落盘名 = uuid 前缀 + 安全化文件名，用户可写的目录结构不保留
@@ -180,7 +180,7 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
 
   it('AT-3 附件下载失败：失败说明降级成文字不吞消息，且照常启 Agent 回合（表征）', async () => {
     const observed: string[] = [];
-    const { sendFile, assembly } = await boot({
+    const { sendFile, assembly, attachmentDir } = await boot({
       // 生产形状：模型读到 adapter 的失败说明并转达，给用户可行动的建议。e2e 钉的是管道
       // （失败文本到达模型、用户拿到收尾帧），不是模型的措辞——所以转达文本由替身给出。
       main: mainDriver([
@@ -203,10 +203,7 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     expect(outcomes).toEqual(['replied']);
     expect(await recentAttachmentRows(assembly)).toEqual([]);
     // 下载失败不落盘：boot 的附件目录根本不会被创建（mkdir 发生在下载成功之后）
-    const tmpEntries = existsSync(path.join(PLATFORM_ROOT, 'tmp'))
-      ? readdirSync(path.join(PLATFORM_ROOT, 'tmp')).filter((name) => name.startsWith('attachments-e2e-'))
-      : [];
-    expect(tmpEntries).toEqual([]);
+    expect(existsSync(attachmentDir)).toBe(false);
     await assembly.close();
   });
 

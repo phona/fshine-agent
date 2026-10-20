@@ -13,6 +13,7 @@
  * 来自真实执行，整段扔掉比留着更糟。与 `conversation_unsourced_amounts` 一贯的判断——
  * 那道尺也只留痕。
  */
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { stripServerPaths } from './server-paths';
 import type { TurnExitEvent } from './turn-exit';
 
@@ -40,6 +41,12 @@ export interface ReplyExitResult {
   events: readonly TurnExitEvent[];
 }
 
+export interface ServerPathExitInput {
+  text: string;
+  /** Omit when the direct exit cannot establish whether platform execution happened. */
+  executed?: boolean;
+}
+
 /**
  * 千分位小数格式的金额（`123,456.78` / `1,000`）。
  *
@@ -55,16 +62,9 @@ const THOUSANDS_AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g;
  */
 export function sanitizeUserVisibleReply(input: ReplyExitInput): ReplyExitResult {
   const events: TurnExitEvent[] = [];
-  const paths = stripServerPaths(input.text);
-  let text = input.text;
-  if (paths.removed > 0) {
-    text = paths.text;
-    events.push({
-      level: 'warn',
-      event: 'server_path_leak',
-      detail: { removed: paths.removed, executed: input.executed },
-    });
-  }
+  const pathExit = sanitizeServerPathReply({ text: input.text, executed: input.executed });
+  let text = pathExit.text;
+  events.push(...pathExit.events);
 
   // 数值溯源探查：零执行轮次的回复若含千分位金额，而该数值在证据里逐字找不到，记一条
   // 告警。为什么不拦：模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在"算术"
@@ -86,4 +86,46 @@ export function sanitizeUserVisibleReply(input: ReplyExitInput): ReplyExitResult
     detail: { count: unsourced.length, needsRounds: input.needsRounds },
   });
   return { text, events };
+}
+
+/** Path-only variant for direct exits, which do not run amount provenance checks. */
+export function sanitizeServerPathReply(input: ServerPathExitInput): ReplyExitResult {
+  const paths = stripServerPaths(input.text);
+  if (paths.removed === 0) return { text: input.text, events: [] };
+  return {
+    text: paths.text,
+    events: [{
+      level: 'warn',
+      event: 'server_path_leak',
+      detail: { removed: paths.removed, ...(input.executed === undefined ? {} : { executed: input.executed }) },
+    }],
+  };
+}
+
+/**
+ * Remove server paths from model and tool messages before saving the Pi transcript.
+ * User messages stay byte-for-byte intact: a path supplied by the user is input, not
+ * an assistant generated leak.  The returned array keeps message identity when no
+ * path was found so the normal save path remains cheap.
+ */
+export function sanitizeTranscriptMessages(messages: readonly AgentMessage[]): AgentMessage[] {
+  return messages.map((message) => {
+    const role = (message as { role?: unknown }).role;
+    if (role !== 'assistant' && role !== 'toolResult') return message;
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === 'string') {
+      const stripped = stripServerPaths(content);
+      return stripped.removed > 0 ? ({ ...message, content: stripped.text } as AgentMessage) : message;
+    }
+    if (!Array.isArray(content)) return message;
+    let changed = false;
+    const sanitized = content.map((part) => {
+      if (!part || typeof part !== 'object' || typeof (part as { text?: unknown }).text !== 'string') return part;
+      const stripped = stripServerPaths((part as { text: string }).text);
+      if (stripped.removed === 0) return part;
+      changed = true;
+      return { ...(part as Record<string, unknown>), text: stripped.text };
+    });
+    return changed ? ({ ...message, content: sanitized } as AgentMessage) : message;
+  });
 }

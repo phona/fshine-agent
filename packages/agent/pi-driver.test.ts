@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool } from './src/pi-driver';
 import type { DiscoveredTool } from '@fshine/contracts';
-import type { TurnDriverInput } from './src/driver';
+import { ToolUserError, type TurnDriverInput } from './src/driver';
 
 describe('Pi driver safety helpers', () => {
   it('does not opt into unsupported Kimi extended thinking levels', () => {
@@ -59,6 +59,23 @@ describe('Pi driver safety helpers', () => {
     await agentTool.execute('call_1', { accountSetId: 'as_003', progress: '启动工作流' });
 
     expect(calls).toEqual([{ tool: 'workflow.start', args: { accountSetId: 'as_003' } }]);
+  });
+
+  it('ToolUserError 的委派标记只进 details，用户可见文本保持原样', async () => {
+    const input = {
+      exec: async () => {
+        throw new ToolUserError('平台返回的用户可见话术', { delegationCompleted: true });
+      },
+      onStep: () => undefined,
+    } as unknown as TurnDriverInput;
+    const result = await toAgentTool({
+      name: 'route_current_turn',
+      description: 'route',
+      inputSchema: { type: 'object', properties: {} },
+    }, input, 'route_current_turn').execute('call_1', {});
+
+    expect(result.content).toEqual([{ type: 'text', text: '平台返回的用户可见话术' }]);
+    expect(result.details).toEqual({ routeReceipt: 'delegate' });
   });
 
   it('keeps long and non-ASCII domain tool names within provider limits', () => {

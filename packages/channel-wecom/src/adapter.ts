@@ -31,6 +31,12 @@ const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
 const IMAGE_FAIL_REPLY = '图片发送失败,请稍后再试';
 const START_TIMEOUT_MS = 30_000;
+/**
+ * 正文最多等待同会话已在途的附件下载；超时则拒绝本轮，避免缺附件进入 worker。
+ * 与 handler 的 D-108 burst 稳定器一致：4 × 2s = 8s。
+ */
+export const ATTACHMENT_WAIT_TIMEOUT_MS = 8_000;
+const ATTACHMENT_WAIT_TIMEOUT_REPLY = '附件尚未准备好,请稍后重试';
 const PROGRESS_MIN_INTERVAL_MS = 3_000;
 const MAX_PROGRESS_FRAMES = 4;
 /**
@@ -132,6 +138,14 @@ export class WecomBotChannel implements ChannelAdapter {
   private client: SdkClientLike | null = null;
   /** 按会话（conversationId）记挂起的文件收据；stop() 时整体清掉。 */
   private readonly pendingReceipts = new Map<string, PendingReceipt>();
+  /**
+   * 按会话记仍在处理的附件。企微把文件与正文拆成两条事件，正文必须等文件完成下载并
+   * 交给 handler 暂存后再继续，否则会话回合会拿不到本应属于同一批输入的附件。
+   */
+  private readonly pendingAttachmentProcessing = new Map<string, Set<Promise<void>>>();
+  /** stop() 用它唤醒等待中的正文 dispatch，避免停机后留下悬挂 Promise。 */
+  private attachmentWaitInterrupt!: Promise<void>;
+  private resolveAttachmentWaitInterrupt!: () => void;
 
   constructor(options: WecomBotChannelOptions = {}) {
     this.env = options.env ?? process.env;
@@ -141,6 +155,7 @@ export class WecomBotChannel implements ChannelAdapter {
     const configured = (options.attachmentDir ?? (this.env['FSHINE_ATTACHMENT_DIR'] ?? '').trim()).trim();
     this.attachmentDir = path.resolve(configured || fallback);
     this.platformRoot = platformRoot;
+    this.resetAttachmentWaitInterrupt();
   }
 
   async start(handler: ReplyHandler): Promise<void> {
@@ -217,6 +232,9 @@ export class WecomBotChannel implements ChannelAdapter {
     // 收尾/进程退出拖住），也不该再往一个已断开的连接发东西。没收过的文件仍在暂存池里，
     // 下一条指令进来时由宿主的披露帧告知用户，信息不会丢。
     for (const key of [...this.pendingReceipts.keys()]) this.dropPendingReceipt(key);
+    this.pendingAttachmentProcessing.clear();
+    this.resolveAttachmentWaitInterrupt();
+    this.resetAttachmentWaitInterrupt();
   }
 
   /**
@@ -312,18 +330,71 @@ export class WecomBotChannel implements ChannelAdapter {
     const content = this.textOf(body);
     if (msgtype !== 'file' && typeof content !== 'string') return;
 
-    const attachments = await this.saveAttachments(body, client);
+    // 单聊 conversationId 就是 userid，群聊则是 chatid；它也是宿主附件池使用的会话键。
+    const conversationId = chatid ?? userid;
+    const attachmentOnly = typeof content !== 'string' || content.trim() === '';
+    const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
+    const streamId = randomUUID();
+    // 正文先发受理帧，再等待同会话在途附件；这样等待期间用户有即时反馈，且终帧复用
+    // 同一 req_id/streamId。附件-only 仍不起流，收据由并窗承载。
+    if (!attachmentOnly) void this.reply(frame, reqId, streamId, ACK_TEXT, false);
+    let attachments: { saved: IncomingAttachment[]; failed: string[] };
+    let finishAttachmentProcessing: (() => void) | undefined;
+    if (msgtype === 'file') {
+      // 先登记再 await：正文事件可能在本次 downloadFile 尚未完成时同步到达。pending 要
+      // 持续到下面的 handler 已经暂存附件并排好收据，不能只覆盖 bytes 下载阶段。
+      const download = this.saveAttachments(body, client);
+      let resolveProcessing!: () => void;
+      const pending = new Promise<void>((resolve) => { resolveProcessing = resolve; });
+      let finished = false;
+      finishAttachmentProcessing = () => {
+        if (finished) return;
+        finished = true;
+        this.untrackAttachmentProcessing(conversationId, pending);
+        resolveProcessing();
+      };
+      this.trackAttachmentProcessing(conversationId, pending);
+      try {
+        attachments = await download;
+      } catch (error) {
+        finishAttachmentProcessing();
+        throw error;
+      }
+    } else {
+      const waitResult = await this.waitForAttachmentProcessing(conversationId);
+      if (waitResult !== 'ready') {
+        // 停机期间不再向旧客户端发送任何帧；下载超时也不能把缺附件的正文交给 worker。
+        if (waitResult === 'stopped' || !this.started || this.handler !== handler || this.client !== client) return;
+        const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
+        await this.reply(
+          frame,
+          reqId,
+          streamId,
+          ATTACHMENT_WAIT_TIMEOUT_REPLY,
+          true,
+          { chatId: conversationId, once: { used: false } },
+        );
+        return;
+      }
+      attachments = await this.saveAttachments(body, client);
+    }
+    // stop() 或重启期间完成的旧事件不能再交给旧 handler。
+    if (!this.started || this.handler !== handler || this.client !== client) {
+      finishAttachmentProcessing?.();
+      return;
+    }
+    // 等待在途附件完成后再撤收据；否则文件 dispatch 可能随后才把收据排进并窗，造成重复。
+    if (!attachmentOnly) this.dropPendingReceipt(conversationId);
     // 附件下载失败不能让整条消息消失：降级成"附件没拿到"的文字说明，用户至少知道
     // 该补什么，而不是等一个永远不来的回复。
     const parts: string[] = [];
     if (typeof content === 'string' && content.trim() !== '') parts.push(content);
     for (const failed of attachments.failed) parts.push(`[附件下载失败:${failed}]`);
     for (const ok of attachments.saved) parts.push(`[附件:${ok.filename}]`);
-    if (parts.length === 0) return;
-    // 降级通道的会话地址（sendMessage 语义：单聊填 userid，群聊填 chatid——与
-    // conversationId 同一取法）。提出来一处计算，消息对象与降级分支共认。
-    const conversationId = chatid ?? userid;
-
+    if (parts.length === 0) {
+      finishAttachmentProcessing?.();
+      return;
+    }
     const message: IncomingChannelMessage = {
       wecomUserId: userid,
       // 渠道身份在源头显式给出：宿主据此拼 principalId/sessionId 的前缀（见契约的 channel
@@ -338,12 +409,10 @@ export class WecomBotChannel implements ChannelAdapter {
       // 附件-only：本条没有用户正文（file 消息，或 mixed 里取不到任何文字项）。
       // 宿主据此只暂存附件、不启 Agent 回合——否则"先发文件再发指令"会变成 N 次 LLM 调用，
       // 并且串行堵住会话队列，把真正带指令的那条挡在后面。
-      ...(typeof content !== 'string' || content.trim() === '' ? { attachmentOnly: true } : {}),
+      ...(attachmentOnly ? { attachmentOnly: true } : {}),
       receivedAt: new Date().toISOString(),
     };
 
-    const reqId = typeof frame.headers?.req_id === 'string' ? frame.headers.req_id : randomUUID();
-    const streamId = randomUUID();
     // 降级防重（"失败必达"路径 2）：同一次回复最多降级一次——终帧被拒后改走
     // sendMessage 全新消息通道。latch 按消息派发（每条用户消息一次），同一终稿不会
     // 因多次失败被重复轰炸。
@@ -395,19 +464,6 @@ export class WecomBotChannel implements ChannelAdapter {
       }
     };
 
-    // 秒回 ack:用户即时可见;最终答案以同 streamId 的 finish=true 帧整体替换。
-    //
-    // 附件-only 消息**不发 ack**（2026-10-19）：它不启回合，"正在处理"是假承诺，且正常
-    // 路径下没有终帧来改写这句话——用户会看到一条永远转圈、永不收尾的"正在处理"。
-    // 文件收据改由并窗承担（见 PendingReceipt / queuePendingReceipt）。起不起流由本层
-    // 决定，与宿主返回什么无关：不起流就没有 spinner，也就不需要"必须非空才收尾"。
-    if (!message.attachmentOnly) {
-      // 带正文的消息到达即取消本会话挂起的收据：那条回合的首帧会带上同样的收据
-      // （宿主的规则二披露），两条都说同一件事才是冗余。
-      this.dropPendingReceipt(conversationId);
-      void this.reply(frame, reqId, streamId, ACK_TEXT, false);
-    }
-
     let reply: ChannelReply;
     try {
       reply = await handler(message, progress, notice);
@@ -446,6 +502,8 @@ export class WecomBotChannel implements ChannelAdapter {
       // 当即告知——那两条是用户必须知道的事，不能等窗口。
       this.queuePendingReceipt(conversationId, frame, streamId, message.attachments);
     }
+    // 让正文等待到附件已经进入宿主暂存池/收据队列，再撤掉挂起收据并进入自己的 handler。
+    finishAttachmentProcessing?.();
     // 文件回传（2026-10-08）：worker 在平台 tmp/ 下产出的 xlsx 等，经临时素材上传回传。
     // 失败只记事件不外抛——文本已经发出去了，不该因为附件上传失败把整轮回复搞成失败。
     if (rich.file) {
@@ -479,6 +537,48 @@ export class WecomBotChannel implements ChannelAdapter {
         }
       }
     }
+  }
+
+  private trackAttachmentProcessing(conversationId: string, pending: Promise<void>): void {
+    const downloads = this.pendingAttachmentProcessing.get(conversationId) ?? new Set<Promise<void>>();
+    downloads.add(pending);
+    this.pendingAttachmentProcessing.set(conversationId, downloads);
+  }
+
+  private untrackAttachmentProcessing(conversationId: string, pending: Promise<void>): void {
+    const downloads = this.pendingAttachmentProcessing.get(conversationId);
+    if (!downloads) return;
+    downloads.delete(pending);
+    if (downloads.size === 0) this.pendingAttachmentProcessing.delete(conversationId);
+  }
+
+  private async waitForAttachmentProcessing(conversationId: string): Promise<'ready' | 'timeout' | 'stopped'> {
+    // 总上界从正文首次等待开始计算；新文件在上一批将结束时登记，也不能续钟。
+    const deadline = Date.now() + ATTACHMENT_WAIT_TIMEOUT_MS;
+    while (true) {
+      const downloads = this.pendingAttachmentProcessing.get(conversationId);
+      if (!downloads || downloads.size === 0) return 'ready';
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return 'timeout';
+      const interrupt = this.attachmentWaitInterrupt;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), remaining);
+      });
+      const result = await Promise.race([
+        Promise.all([...downloads]).then(() => 'ready' as const),
+        timeout,
+        interrupt.then(() => 'stopped' as const),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      if (result !== 'ready') return result;
+    }
+  }
+
+  private resetAttachmentWaitInterrupt(): void {
+    this.attachmentWaitInterrupt = new Promise<void>((resolve) => {
+      this.resolveAttachmentWaitInterrupt = resolve;
+    });
   }
 
   /**

@@ -351,7 +351,9 @@ export function toAgentTool(
           return {
             content: [{ type: 'text' as const, text: error.message }],
             terminate: true,
-            details: {},
+            details: {
+              routeReceipt: error.delegationCompleted ? 'delegate' : 'precondition',
+            },
           };
         }
         throw error;

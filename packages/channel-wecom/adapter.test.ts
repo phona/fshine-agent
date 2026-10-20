@@ -3,7 +3,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
-import { WecomBotChannel, type WecomBotChannelOptions, RECEIPT_COALESCE_MS } from './src/index';
+import {
+  ATTACHMENT_WAIT_TIMEOUT_MS,
+  WecomBotChannel,
+  type WecomBotChannelOptions,
+  RECEIPT_COALESCE_MS,
+} from './src/index';
 import { MAX_REPLY_BYTES, REPLY_TRUNCATED_MARK } from './src/index';
 
 const ENV = { WECOM_BOT_ID: 'bot-001', WECOM_BOT_SECRET: 'secret-abc' };
@@ -105,8 +110,10 @@ class FakeSdkClient {
   /** 附件下载替身：默认把调用记下来并按注入内容返回 */
   downloadCalls: Array<{ url: string; aesKey?: string }> = [];
   downloadResult: { buffer: Buffer; filename?: string } | Error = { buffer: Buffer.from('x'), filename: 'f.bin' };
+  downloadGate: Promise<{ buffer: Buffer; filename?: string }> | undefined;
   async downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }> {
     this.downloadCalls.push({ url, ...(aesKey === undefined ? {} : { aesKey }) });
+    if (this.downloadGate) return this.downloadGate;
     if (this.downloadResult instanceof Error) throw this.downloadResult;
     return this.downloadResult;
   }
@@ -393,6 +400,189 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
 // Excel 连下载都没有。而 17dz 薪酬域要求先吸收多份 Excel 才能产出 PayrollContract，
 // "帮我做工资表"因此永远无输入。这里锁住 file/mixed 三条路径 + 三条纪律。
 describe('WecomBotChannel 附件(file 消息)', () => {
+  it('文件下载未完成时,后到正文要等附件落盘后再交给 handler', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    const handler = vi.fn(async (_message: IncomingChannelMessage) => 'ok');
+    const { fake } = await startChannel(handler, root);
+    let resolveDownload!: (value: { buffer: Buffer; filename: string }) => void;
+    fake.downloadGate = new Promise((resolve) => { resolveDownload = resolve; });
+
+    fake.emit('message.file', fileFrame('req-file-slow', { msgid: 'msg-file-slow' }));
+    fake.emit('message.text', textFrame('req-text-after-file', {
+      msgid: 'msg-text-after-file',
+      text: { content: '帮我做工资表' },
+    }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // 文件事件先到，但 downloadFile 还没完成；正文不能冷启动进入 handler，
+    // 否则下游会在附件进入暂存池前开始执行。
+    expect(handler).not.toHaveBeenCalled();
+    const ack = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && !reply.finish);
+    expect(ack).toMatchObject({ content: '收到,正在处理…', finish: false });
+
+    resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(2));
+    expect(handler.mock.calls.map(([message]) => (message as IncomingChannelMessage).messageId))
+      .toEqual(['msg-file-slow', 'msg-text-after-file']);
+    expect((handler.mock.calls[1]![0] as IncomingChannelMessage).text).toBe('帮我做工资表');
+    const final = fake.replies.find((reply) => reply.reqId === 'req-text-after-file' && reply.finish);
+    expect(final?.streamId).toBe(ack?.streamId);
+
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('文件已暂存后正文收据只发送一次', async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    try {
+      const receipt = '已收到 1 个文件：工资.xlsx';
+      const handler = vi.fn(async (
+        message: IncomingChannelMessage,
+        _progress: unknown,
+        notice?: (text: string) => Promise<void>,
+      ) => {
+        if (message.attachmentOnly) return '';
+        await notice?.(receipt);
+        return '完成';
+      });
+      const { fake } = await startChannel(handler, root);
+      fake.downloadResult = { buffer: Buffer.from('xlsx'), filename: '工资.xlsx' };
+
+      fake.emit('message.file', fileFrame('req-file-receipt', { msgid: 'msg-file-receipt' }));
+      fake.emit('message.text', textFrame('req-text-receipt', {
+        msgid: 'msg-text-receipt',
+        text: { content: '继续处理' },
+      }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(RECEIPT_COALESCE_MS);
+
+      expect(handler).toHaveBeenCalledTimes(2);
+      expect(fake.replies.filter((reply) => reply.content === receipt)).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('附件下载超过上界时,拒绝缺附件正文并提示稍后重试', async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    try {
+      const handler = vi.fn(async (_message: IncomingChannelMessage) => 'ok');
+      const { fake } = await startChannel(handler, root);
+      let resolveDownload!: (value: { buffer: Buffer; filename: string }) => void;
+      fake.downloadGate = new Promise((resolve) => { resolveDownload = resolve; });
+
+      fake.emit('message.file', fileFrame('req-file-timeout', { msgid: 'msg-file-timeout' }));
+      fake.emit('message.text', textFrame('req-text-timeout', {
+        msgid: 'msg-text-timeout',
+        text: { content: '帮我做工资表' },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(handler).not.toHaveBeenCalled();
+      expect(fake.replies).toContainEqual(expect.objectContaining({
+        reqId: 'req-text-timeout',
+        content: '收到,正在处理…',
+        finish: false,
+      }));
+
+      await vi.advanceTimersByTimeAsync(ATTACHMENT_WAIT_TIMEOUT_MS);
+      expect(handler).not.toHaveBeenCalled();
+      expect(fake.replies).toContainEqual(expect.objectContaining({
+        reqId: 'req-text-timeout',
+        content: '附件尚未准备好,请稍后重试',
+        finish: true,
+      }));
+
+      // 释放替身 Promise，避免测试结束时留下未完成的 dispatch；文件自身仍按原路径落盘。
+      resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('附件持续分批处理时,正文等待不超过一次 8 秒总上界', async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    try {
+      const fileResolvers: Array<() => void> = [];
+      const handler = vi.fn(async (message: IncomingChannelMessage) => {
+        if (message.attachmentOnly) {
+          return await new Promise<string>((resolve) => {
+            fileResolvers.push(() => resolve(''));
+          });
+        }
+        return '完成';
+      });
+      const { fake } = await startChannel(handler, root);
+      fake.downloadResult = { buffer: Buffer.from('xlsx'), filename: '工资.xlsx' };
+
+      fake.emit('message.file', fileFrame('req-file-trickle-1', { msgid: 'msg-file-trickle-1' }));
+      fake.emit('message.text', textFrame('req-text-trickle', {
+        msgid: 'msg-text-trickle',
+        text: { content: '继续处理' },
+      }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fileResolvers).toHaveLength(1);
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      // 第一批在总等待接近结束时完成，紧接着登记第二批；第二批不能再获得新的 8 秒。
+      await vi.advanceTimersByTimeAsync(7_000);
+      fileResolvers[0]!();
+      fake.emit('message.file', fileFrame('req-file-trickle-2', { msgid: 'msg-file-trickle-2' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fileResolvers).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(handler).toHaveBeenCalledTimes(2); // 两个附件 handler，正文仍未进入
+      expect(fake.replies).toContainEqual(expect.objectContaining({
+        reqId: 'req-text-trickle',
+        content: '附件尚未准备好,请稍后重试',
+        finish: true,
+      }));
+
+      fileResolvers[1]!();
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stop() 会唤醒等待中的正文并丢弃旧事件', async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
+    try {
+      const handler = vi.fn(async (_message: IncomingChannelMessage) => 'ok');
+      const { channel, fake } = await startChannel(handler, root);
+      let resolveDownload!: (value: { buffer: Buffer; filename: string }) => void;
+      fake.downloadGate = new Promise((resolve) => { resolveDownload = resolve; });
+
+      fake.emit('message.file', fileFrame('req-file-stop', { msgid: 'msg-file-stop' }));
+      fake.emit('message.text', textFrame('req-text-stop', { msgid: 'msg-text-stop' }));
+      await Promise.resolve();
+      await channel.stop();
+      await Promise.resolve();
+      expect(handler).not.toHaveBeenCalled();
+      expect(fake.replies).toContainEqual(expect.objectContaining({
+        reqId: 'req-text-stop',
+        content: '收到,正在处理…',
+        finish: false,
+      }));
+      expect(fake.replies.some((reply) => reply.finish)).toBe(false);
+
+      resolveDownload({ buffer: Buffer.from('xlsx'), filename: '工资.xlsx' });
+      await vi.advanceTimersByTimeAsync(0);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('file 消息:下载落盘,路径与文件名进上下文,正文给占位说明', async () => {
     const root = mkdtempSync(path.join(tmpdir(), 'wecom-root-'));
     const dir = path.join(root, 'tmp', 'attachments');

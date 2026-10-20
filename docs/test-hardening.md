@@ -18,7 +18,7 @@
 
 - `boot()` 新增可选项：`memoryCandidateExtractor` / `contextModelDriver` 透传（T2）；`patchProfile`（复制 config/agent.yaml 打补丁 + `AGENT_CONFIG_PATH`，T1 的 workerTimeoutMs）。
 - `RecordingSdkClient` 补 `downloadFile`（`fileToServe` 可编程，含失败模拟）；`boot().sendFile()` 发生产同形状 message.file 帧（T3）。
-- 每 boot 独立 `FSHINE_ATTACHMENT_DIR`（平台 tmp 内、close 清走）。
+- 每 boot 独立 `FSHINE_ATTACHMENT_DIR`（位于平台 `tmp/attachments/e2e-<boot>-<uuid>`，被产物扫描的输入区排除规则覆盖，close 清走）。
 - **语义表翻回平台派生**（见"真发现"①）：18 条手注替身退役，换 `loadOperationSemantics(PLATFORM_ROOT)`，空表即抛。
 
 ## 落地中的真发现

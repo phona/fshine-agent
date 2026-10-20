@@ -77,9 +77,9 @@ describe('createMessageHandler', () => {
   });
 
   // 2026-10-20 留缝：principalId/sessionId 的前缀段从消息的 channel 取（缺省 wecom）。
-  // 前缀会进审计表、conversation log 与 principal_scopes 的键——等第二个客户端接入再统一，
-  // 就是数据迁移或永久双读。这条钉子守"同一个渠道原生 id 在不同渠道下不撞"。
-  it('渠道前缀参数化：channel: web 的消息拼出 web: 前缀，与 wecom 的同名用户不相撞', async () => {
+  // 这条只钉两个身份标识带上渠道前缀；scope 存储和 handler 内存态仍按原始 ID 取键，
+  // 尚未实现跨渠道授权/附件隔离，第二渠道接入前的阻断项见 D-112。
+  it('渠道前缀参数化：web 与 wecom 的 principalId/sessionId 带各自前缀', async () => {
     const seen: TrustedContext[] = [];
     const runtime: AgentRuntime = {
       handleTurn: async (ctx) => { seen.push(ctx); return { text: '做完了' }; },

@@ -21,6 +21,14 @@ function routeCall(): AgentMessage {
 function receipt(text: string): AgentMessage {
   return { role: 'toolResult', content: [{ type: 'text', text }], timestamp: 1 } as never;
 }
+function markedReceipt(text: string, routeReceipt: 'delegate' | 'precondition'): AgentMessage {
+  return {
+    role: 'toolResult',
+    content: [{ type: 'text', text }],
+    details: { routeReceipt },
+    timestamp: 1,
+  } as never;
+}
 
 /** 宿主追加在用户消息尾部的附件路径后缀（生产形状，见 handler 的 withAttachmentPaths）。 */
 function withAttachments(text: string, names: readonly string[]): string {
@@ -59,6 +67,44 @@ describe('findRepeatedDelegatedRequest', () => {
     ];
     const hit = findRepeatedDelegatedRequest(transcript, withAttachments(REQUEST, ['工资表2026-8月(1).xlsx']));
     expect(hit).toEqual({ request: REQUEST, priorDelegations: 1 });
+  });
+
+  it('只把合法 recorded=delegate 回执计为委派，申报错误回执不计数', () => {
+    const invalidTranscript = [
+      user(REQUEST),
+      routeCall(),
+      receipt('{"error":"申报无效：申报不是合法的结构化意图。请按 schema 重新调用 route_current_turn。"}'),
+    ];
+    expect(findRepeatedDelegatedRequest(invalidTranscript, REQUEST)).toBeNull();
+
+    const validTranscript = [
+      user(REQUEST),
+      routeCall(),
+      receipt('{"recorded":"delegate","text":"子 Agent 已完成。","taskId":"task_1"}'),
+    ];
+    expect(findRepeatedDelegatedRequest(validTranscript, REQUEST)).toEqual({
+      request: REQUEST,
+      priorDelegations: 1,
+    });
+  });
+
+  it('前置拦截的纯文本 ToolUserError 不计数，委派终结的纯文本保留计数', () => {
+    const blockedTranscript = [
+      user(REQUEST),
+      routeCall(),
+      markedReceipt('当前计划存在多个候选，请先选择。', 'precondition'),
+    ];
+    expect(findRepeatedDelegatedRequest(blockedTranscript, REQUEST)).toBeNull();
+
+    const completedTranscript = [
+      user(REQUEST),
+      routeCall(),
+      markedReceipt('子 Agent 已完成。', 'delegate'),
+    ];
+    expect(findRepeatedDelegatedRequest(completedTranscript, REQUEST)).toEqual({
+      request: REQUEST,
+      priorDelegations: 1,
+    });
   });
 
   it('不命中：同文请求早前那一轮停在对话枝（没有委派痕迹）', () => {

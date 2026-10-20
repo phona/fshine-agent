@@ -65,10 +65,9 @@ export interface IncomingChannelMessage {
   /**
    * 渠道身份（缺省 `wecom`）：principalId / sessionId 的前缀段。
    *
-   * 为什么参数化：`wecom:` 前缀会进审计表、conversation log 与 principal_scopes 的键——
-   * 等 web/小程序客户端接入再统一，就是数据迁移或永久双读。所以前缀从消息上取，宿主不认
-   * 渠道名只认这个字段；适配器报"我是哪个渠道 + 这个渠道里的谁"，身份归属仍是宿主的事
-   * （AGENTS.md：身份与授权归 fshine）。
+   * 为什么参数化：前缀会进入审计与会话身份。当前授权存储仍以原始用户 ID 为键；这个字段
+   * 尚未实现渠道间独立授权。接入第二渠道前必须补齐存储键、会话态隔离与迁移（D-112）。
+   * 适配器只报"我是哪个渠道 + 这个渠道里的谁"，可信身份与授权归宿主（AGENTS.md）。
    */
   channel?: string;
   /** 渠道会话标识;单聊可用 userid 推导 */

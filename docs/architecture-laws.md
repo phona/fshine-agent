@@ -70,12 +70,13 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：用户可见的状态消息 = 宿主持**结构化事实**机械渲染；模型只答数据。模型对"状态转换"的发音权压到接近零——它泡在执行语言里，是执行语言与用户语言之间唯一的翻译器，压力下翻译退化，协议 JSON 就原样漏进最终回复。
 
-**机械守卫**：探针的"执行语言指纹"断言（回复里出现脚本路径 / 原始错误码 / 门的规则引述即红）+ 回复模板零业务词。
+**机械守卫**：探针的"执行语言指纹"断言（回复里出现脚本路径 / 原始错误码 / 门的规则引述即红）+ 回复模板零业务词；`server_path_leak` 测试覆盖普通回复、direct 收尾、转录与可检索 tool result。
 
 **当前违例**：
 
 - ~~**写确认摘要**：`context.ts` 的 `proposal_created` 分支由宿主渲染提案摘要~~ **已关**（2026-10-14 D 波 `3e5a36c`）：legacy 摘要渲染随写路径收敛整体删除；用户可见摘要 = 平台 `summaryText` 原样 + 宿主通用确认行（守卫 = `docs-reality.test.ts` 的 legacy 痕迹零命中判据）。
 - ~~**F4 残留**：回合真有过执行时，出口校验被跳过，模型复读的协议 JSON 仍可能外发~~ **已关**（2026-09-27 Wave 2 Lane D）：`runtime.ts` 的复读检测（`looksLikeProtocolMaterial`，协议 JSON 首字段 recorded/step/next 的形状判据）**不依赖 execution**——有执行也拦，用宿主步骤事实/needs 线索替换，守夜事件 `execution_language_leak`（D-020；判据修订：未采纳"全量过 executionLanguageFingerprints 硬拦"，理由见台账）。
+- ~~**D-109 终稿路径整理未覆盖 direct / 持久化出口**~~ **已关（D-113 补强）**：普通/direct 回复、保存的 assistant/toolResult 转录与可检索 tool result 共用 `server-paths.ts` 判据；SP1/SP3 与 tool-result 断言守住出口。
 
 **闭环判据**：全部状态类回复走**码表 + 信封数据**（模型不发音）；F4 补齐出口校验（已达成：复读检测不依赖 execution，`runtime.test.ts` F4.1–F4.4 钉住）。
 

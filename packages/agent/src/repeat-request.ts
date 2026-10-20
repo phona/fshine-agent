@@ -17,7 +17,11 @@
  *   ① 会话转录（runtime 的 `loaded`）：同文的早前用户消息，且那一轮申报并执行过委派；
  *   ② 当前消息原文。
  * 「那一轮委派过」按转录形状判——route_current_turn 的 toolCall 之后紧接的那条
- * toolResult 不是 `{"recorded":"conversation"}` 回执（单步委派的执行结果就是它）。
+ * toolResult 是单步委派的纯文本终结结果，或结构化的 `{"recorded":"delegate",…}` 回执。
+ * `{"error":…}` 是申报被退回，不代表委派执行过；`{"recorded":"conversation"}` 则是对话枝。
+ * 纯文本终结结果带有宿主写入 `toolResult.details.routeReceipt` 的标记：
+ * `delegate` 表示委派已经开始，`precondition` 表示前置拦截。没有该标记的旧转录保留
+ * 兼容判定；新转录不再靠用户可见文案猜测。
  * 不做语义判断：不猜"这句话像不像任务"，所以不会把闲聊误判成重复任务请求
  * （"在吗"发两遍而本会话另有委派时，早前那个"在吗"没有委派痕迹，判据不成立）。
  *
@@ -61,9 +65,43 @@ export function normalizeUserRequest(text: string): string {
   return head.replace(/\s+/g, ' ').trim();
 }
 
-/** 这一轮是否停在对话枝：按 route_current_turn 的回执形状判，只认 `{"recorded":"conversation"}`。 */
-function isConversationReceipt(text: string): boolean {
-  return /^\s*\{\s*"recorded"\s*:\s*"conversation"/.test(text);
+/** 取宿主持有的 route_current_turn 终结标记；未知 details 形状一律交给兼容判定。 */
+function routeReceiptMarker(message: AgentMessage): 'delegate' | 'precondition' | undefined {
+  const details = (message as { details?: unknown }).details;
+  if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined;
+  const marker = (details as { routeReceipt?: unknown }).routeReceipt;
+  return marker === 'delegate' || marker === 'precondition' ? marker : undefined;
+}
+
+/** 结构化回执只认 `recorded=delegate`。 */
+function isStructuredDelegationReceipt(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (!trimmed.startsWith('{')) return false;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+    return (parsed as { recorded?: unknown }).recorded === 'delegate';
+  } catch {
+    // A malformed object-shaped result cannot be proved to be a delegate receipt.
+    return false;
+  }
+}
+
+/**
+ * 这一轮是否真的走过 delegate：优先使用宿主持有的转录标记，旧转录才回退到文本形状。
+ *
+ * 正常单步委派以 ToolUserError 纯文本终结；新转录上的纯文本必须有 delegate 标记，避免
+ * 把计划消歧、冷却、熔断等前置拦截的用户话术误当成历史委派。没有 details 的旧转录保留
+ * 纯文本兼容路径，结构化 JSON 仍只认 recorded=delegate。
+ */
+function isDelegationReceipt(message: AgentMessage): boolean {
+  const marker = routeReceiptMarker(message);
+  if (marker) return marker === 'delegate';
+  const text = messageText(message);
+  const hasDetails = Object.prototype.hasOwnProperty.call(message, 'details');
+  if (hasDetails) return isStructuredDelegationReceipt(text);
+  return text.trim().startsWith('{') ? isStructuredDelegationReceipt(text) : Boolean(text.trim());
 }
 
 /** assistant 消息里是否含一次 route_current_turn 调用。 */
@@ -105,13 +143,13 @@ export function findRepeatedDelegatedRequest(
 
   const delegatedRequests: string[] = [];
   let turnRequest = '';
-  let turnReceipt: string | null = null;
+  let turnReceipt: AgentMessage | null = null;
   let awaitingRouteResult = false;
 
   const closeTurn = (): void => {
-    // 申报过（有回执）且没停在对话枝 = 这一轮真的委派执行了。没有申报的回合整轮被
+    // 申报过（有合法委派回执）= 这一轮真的委派执行了。没有申报的回合整轮被
     // 丢弃（route_declaration_missing），同样不算执行。
-    if (turnRequest && turnReceipt !== null && !isConversationReceipt(turnReceipt)) {
+    if (turnRequest && turnReceipt !== null && isDelegationReceipt(turnReceipt)) {
       delegatedRequests.push(turnRequest);
     }
     turnRequest = '';
@@ -130,7 +168,7 @@ export function findRepeatedDelegatedRequest(
       continue;
     }
     if (awaitingRouteResult && message.role === 'toolResult') {
-      turnReceipt = messageText(message);
+      turnReceipt = message;
       awaitingRouteResult = false;
     }
   }

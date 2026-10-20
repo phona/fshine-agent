@@ -85,10 +85,7 @@ describe('企微计划通知交付屏障', () => {
     const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => now);
     sdk.emit('message.text', messageFrame());
     await vi.waitFor(() => {
-      const noticeFrame = sdk.frames.find((frame) => frame.content.startsWith('计划通知：'));
-      if (noticeFrame) return;
-      // Current adapter falls back after the handler discovers there is no notice callback.
-      expect(sdk.frames.some((frame) => frame.finish)).toBe(false);
+      expect(sdk.frames.some((frame) => frame.content.startsWith('计划通知：') && !frame.finish)).toBe(true);
     });
     expect(sdk.frames.filter((frame) => !frame.finish && frame.content.startsWith('普通进度'))).toHaveLength(4);
     expect(sdk.frames.some((frame) => frame.content.startsWith('计划通知：') && !frame.finish)).toBe(true);

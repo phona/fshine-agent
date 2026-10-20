@@ -619,6 +619,8 @@ interface Boot {
   ): Promise<string>;
   sdk: RecordingSdkClient;
   assembly: ServerAssembly;
+  /** 本 boot 的独立附件目录，用于验证失败下载没有落盘。 */
+  attachmentDir: string;
 }
 
 /**
@@ -709,15 +711,15 @@ async function boot(options: BootOptions): Promise<Boot> {
     writeFileSync(patchedPath, stringifyYaml(config));
     bootEnv['AGENT_CONFIG_PATH'] = patchedPath;
   }
-  // 附件落盘目录（T3）：必须落在平台工作区内（adapter 落点自检），每个 boot 一份、
-  // close 时清走——不与生产默认的 tmp/attachments 串味。
+  // 附件落盘目录（T3）：放在平台的保留输入区下，让 collectProducedFiles 不会把输入
+  // 附件误认成产物；每个 boot 用独立子目录，close 时单独清走，不与其他用例串味。
   //
   // 名字必须**全局唯一**，不能只用 counter：counter 是每个测试文件一份的模块级计数，
   // 于是两个并行文件各自的第一号 boot 会落到同一个目录名上，先 close 的那个把后者的
   // 附件一并删掉。这个竞态在 2026-10-19 之前不可见——那时 sendFile 几毫秒就返回，
   // 断言紧跟着落盘跑；文件收据并窗让 sendFile 等满 2 秒，窗口足以让别的文件 boot+close
   // 一轮，症状是"落盘成功的附件 existsSync 为假"这种指代不清的失败。
-  const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', `attachments-e2e-${counter}-${randomUUID().slice(0, 8)}`);
+  const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', 'attachments', `e2e-${counter}-${randomUUID().slice(0, 8)}`);
   bootEnv['FSHINE_ATTACHMENT_DIR'] = attachmentDir;
   const assembly = await createServerAssembly({
     // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（平台冷却、限流窗口）的时序
@@ -838,6 +840,7 @@ async function boot(options: BootOptions): Promise<Boot> {
   return {
     sdk,
     assembly,
+    attachmentDir,
     // send 只是 turn 的回复部分：既有断言一行不用改，帧级断言用 turn。
     send: async (text, options) => (await turn(text, options)).text,
     turn,

@@ -531,7 +531,7 @@ describe('createTaxAgentRuntime', () => {
           messages: [
               ...input.messages,
               { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'route_current_turn', arguments: { kind: 'delegate' } }], timestamp: 9 } as never,
-              { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元"}' }], timestamp: 10 } as never,
+              { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元，文件在 tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/"}' }], timestamp: 10 } as never,
               { role: 'assistant', content: '幻辰本期应收为 42 元。', timestamp: 11 } as never,
             ],
           };
@@ -548,6 +548,7 @@ describe('createTaxAgentRuntime', () => {
 
     expect(events.map((event) => event.kind)).toEqual(['user_message', 'tool_result', 'assistant_message']);
     expect(events[1]?.content).toContain('42 元');
+    expect(events[1]?.content).not.toContain('tmp/');
     expect(events[1]?.content).not.toContain('task_01234567');
     expect(events[1]?.eventId).toContain('req_tool_history:tool:call_1');
   });
@@ -2295,7 +2296,8 @@ describe('createTaxAgentRuntime', () => {
       { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
       { text: leaked },
     ]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
+    const sessions = new FakeSessionRepo();
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
 
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_path_strip' }), '幻骥达 2026 年 8 月工资表');
 
@@ -2309,6 +2311,42 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('12 人');
     expect(reply.text).toContain('120,000.00');
     expect(reply.text).toContain('工资表2026-8月(1).xlsx');
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+    const assistantText = transcript
+      .filter((message) => message.role === 'assistant')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    expect(assistantText).not.toContain('tmp/');
+    expect(assistantText).not.toContain('/home/');
+    events.restore();
+  });
+
+  it('SP3 direct 收尾也整理服务器路径：零执行 worker 文本不上屏也不进转录', async () => {
+    const leaked = '文件已整理好，位置：tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/。';
+    const events = captureEvents('server_path_leak', 'warn');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '整理幻骥达工资表' } }] },
+    ]);
+    const sessions = new FakeSessionRepo();
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      platformTask: subagent(async () => ({ taskId: 'task_zero', text: leaked })),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_path_strip_direct' }), '整理幻骥达工资表');
+
+    expect(reply.text).not.toContain('tmp/');
+    expect(reply.text).toContain('文件已整理好');
+    expect(events.seen).toHaveLength(1);
+    expect(events.seen[0]?.['executed']).toBe(false);
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+    const assistantText = transcript
+      .filter((message) => message.role === 'assistant')
+      .map((message) => String(message.content ?? ''))
+      .join('\n');
+    expect(assistantText).not.toContain('tmp/');
+    expect(assistantText).toContain('文件已整理好');
     events.restore();
   });
 

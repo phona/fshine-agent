@@ -180,12 +180,11 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 }
 
 /**
- * principals(`<channel>:<userid>` 键)→ 渠道无关的授权记录。
+ * principals(`<channel>:<userid>` 键)→ 旧版 `wecomUserId` 授权记录。
  *
- * 键的前缀段是渠道身份（宿主拼 principalId 用的那个，见 handler 的 DEFAULT_CHANNEL）。
- * 2026-10-20 前这里写死 `wecom:`——第二个客户端接入时，它的授权键会被这个判据拒绝，
- * 而前缀本来就从消息上来（适配器报"哪个渠道 + 渠道里的谁"）。改成取首段之后：
- * 没有冒号的键整体当 userid（存量配置不破），`web:abc` 与 `wecom:abc` 各归各的。
+ * 取第一个冒号之后的部分写入 legacy `wecom_user_id` 列；无冒号的旧键整体当 userid。
+ * 这只让配置解析接受其他前缀，**不会**形成渠道隔离：`web:abc` 与 `wecom:abc` 仍落到
+ * 同一存储键。第二渠道接入前须迁移授权主键并补 handler 会话/附件态隔离（D-112）。
  */
 export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[] {
   return Object.entries(config.principals).map(([key, principal]) => {

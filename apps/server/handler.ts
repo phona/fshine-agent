@@ -341,10 +341,9 @@ const ATTACHMENT_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
 /**
  * 渠道前缀缺省值：消息没带 `channel` 时按企微算（存量调用方与测试替身都不用改）。
  *
- * 前缀会进审计表、conversation log 与 principal_scopes 的键，所以它从**消息**上取而不是
- * 宿主猜（AGENTS.md：身份与授权归 fshine；适配器报"哪个渠道 + 渠道里的谁"）。等第二个
- * 客户端接入，各自报自己的名字，前缀从此不挤在同一套审计行里——那时要改的只是新适配器
- * 一行，不是这里的一排 `wecom:`。
+ * 前缀会进请求审计、Conversation Log 与 sessionId，所以它从消息上取而不是宿主猜。授权
+ * 存储和 handler 内存态目前仍按原始用户/会话 ID 取键，尚未跨渠道隔离；第二渠道接入前须
+ * 先完成 D-112 的身份存储迁移与同 ID 隔离验收。
  */
 const DEFAULT_CHANNEL = 'wecom';
 
