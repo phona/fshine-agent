@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
- * handler.ts 行数棘轮（2026-10-20 落地，见 docs/change-safety.md §13）。
+ * handler.ts 行数棘轮（2026-10-20 落地，见 docs/change-safety.md §14）。
  *
  * **为什么单给它一根棘轮**：`packages/agent/architecture-shape.test.ts` 守着 runtime.ts
  * （1969 → 1290，拆了七个模块），而 handler.ts 从来没被拆过、也没有任何机械护栏——
