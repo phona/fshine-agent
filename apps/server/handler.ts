@@ -55,6 +55,13 @@ export interface HandlerDeps {
    * 真实帧已在流动（或披露已上屏）时保持静默——用户不再盲等，就不添噪。0 或负数 = 关闭。
    */
   turnHeartbeatMs?: number;
+  /**
+   * 到达时刻的来源（缺省进程内严格递增钟，见 createArrivalClock）。
+   *
+   * 注入点留缝用：判据本体只认识 `next()`，多实例部署时换一个共享单调源即可，
+   * 不必改规则一。生产默认值就是进程内那把钟——现在没有第二个实例。
+   */
+  arrivalClock?: ArrivalClock;
   store: AuditStore;
   runtime: AgentRuntime;
   planConfirmation?: {
@@ -75,7 +82,7 @@ export interface HandlerDeps {
  */
 interface PooledAttachment extends IncomingAttachment {
   /**
-   * 到达时刻（进程内同一把严格递增的钟，毫秒见 nextArrivalStamp）。
+   * 到达时刻（进程内同一把严格递增的钟，见 ArrivalClock）。
    *
    * `undefined` = 来自审计库恢复、到达时刻未知（服务重启后内存池失记时的兜底来源）。
    * 未知一律按"未消费"算——宁可多给，不可漏：漏一个文件会让 worker 回"没有数据"，
@@ -96,7 +103,7 @@ interface DelegationLedger {
 }
 
 /**
- * 严格递增的到达时刻。
+ * 到达时刻的来源：进程内同一把严格递增的钟。
  *
  * 为什么不能直接存 `Date.now()`：① 时钟粒度是毫秒，而"附件到达"与"委派开始"完全可能
  * 落在同一毫秒里（测试里必然如此；生产上防抖 + 排队也只把差距拉到毫秒量级）。同毫秒时
@@ -104,11 +111,26 @@ interface DelegationLedger {
  * 旧文件在后续每一轮都被当成新到达。② `Date.now()` 本身也不严格单调（NTP 步进会回退）。
  * 所以每取一次都钳成"至少比上一次大 1"：值仍是毫秒墙钟（日志里看得懂、能与
  * lastDelegationStartedAt 对齐），序关系严格可靠。
+ *
+ * **为什么包成接口而不是模块级变量**（2026-10-20 留缝）：规则一的判据本体是"到达时刻 >
+ * 上次委派开始时刻"，而这把钟目前活在进程内存里。第二个客户端（web/小程序）意味着多实例——
+ * 那时"同一毫秒分不出先后"会原样回来，且要的是一个跨实例共享的单调源。提前焊死一个模块级
+ * `let`，等于把那天的改造从"换一个实现"升级成"动判据本体"。所以：宿主持有一把钟
+ * （`deps.arrivalClock` 可注入），判据只认识 `next()`。
  */
-let arrivalClock = 0;
-function nextArrivalStamp(): number {
-  arrivalClock = Math.max(Date.now(), arrivalClock + 1);
-  return arrivalClock;
+export interface ArrivalClock {
+  next(): number;
+}
+
+/** 进程内严格递增钟的缺省实现（上面两条理由的落点）。 */
+export function createArrivalClock(): ArrivalClock {
+  let last = 0;
+  return {
+    next(): number {
+      last = Math.max(Date.now(), last + 1);
+      return last;
+    },
+  };
 }
 
 /**
@@ -208,15 +230,16 @@ async function restoreAttachments(
   store: HandlerDeps['store'],
   sessionAttachments: Map<string, PooledAttachment[]>,
   ledger: DelegationLedger | undefined,
+  clock: ArrivalClock,
 ): Promise<RestoredAttachments> {
   const fromMemory = sessionAttachments.get(sessionKey) ?? [];
-  const fromDb = await loadRecentAttachments(store, message.wecomUserId, sessionKey);
+  const fromDb = await loadRecentAttachments(store, principalIdOf(message), sessionKey);
   const merged = new Map<string, PooledAttachment>();
   // DB 在前、内存在后：同 path 时内存覆盖 DB（内存是更新的那份，且带着到达时刻）
   for (const file of fromDb) merged.set(file.path, { ...file, arrivedAt: undefined });
   for (const file of fromMemory) merged.set(file.path, file);
   // 与正文同一条消息到达的附件当然是本轮的
-  for (const file of message.attachments ?? []) merged.set(file.path, { ...file, arrivedAt: nextArrivalStamp() });
+  for (const file of message.attachments ?? []) merged.set(file.path, { ...file, arrivedAt: clock.next() });
   const candidates = [...merged.values()];
   // 池子：这个会话迄今有过的文件（含已交付过的），上限与暂存上限同一个数。
   // DB 恢复来的文件没有到达时刻，落池时补一个"现在"——它自此被记作"这次委派已见过"，
@@ -225,7 +248,7 @@ async function restoreAttachments(
     .sort((a, b) => a.path.localeCompare(b.path))
     .slice(-MAX_PENDING_ATTACHMENTS)
     .filter((file) => existsSync(file.path))
-    .map((file) => ({ ...file, arrivedAt: file.arrivedAt ?? nextArrivalStamp() }));
+    .map((file) => ({ ...file, arrivedAt: file.arrivedAt ?? clock.next() }));
   if (pooled.length > 0) sessionAttachments.set(sessionKey, pooled);
   const selection = selectDeliveredAttachments(candidates, ledger);
   return {
@@ -244,12 +267,12 @@ async function restoreAttachments(
  * 普通回合其附件已在自身 input 里，不需要在这里重复取。
  * 任何失败（旧库没有这个方法 / 查询抛错）都返回空数组：恢复是增强，不是前提。
  */
-async function loadRecentAttachments(store: HandlerDeps['store'], wecomUserId: string, sessionKey: string): Promise<IncomingAttachment[]> {
+async function loadRecentAttachments(store: HandlerDeps['store'], principalId: string, sessionKey: string): Promise<IncomingAttachment[]> {
   const repo = store.requests as Partial<AgentRequestRepo>;
   if (typeof repo.listRecentAttachments !== 'function') return [];
   try {
     const rows = await repo.listRecentAttachments(
-      `wecom:${wecomUserId}`,
+      principalId,
       new Date(Date.now() - ATTACHMENT_RESTORE_WINDOW_MS).toISOString(),
     );
     const seen = new Map<string, IncomingAttachment>();
@@ -314,6 +337,21 @@ const MAX_PENDING_ATTACHMENTS = 8;
 
 /** 恢复窗口：只认最近 24h 内登记的附件。更早的要么已用完，要么已被 tmp 清理回收。 */
 const ATTACHMENT_RESTORE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 渠道前缀缺省值：消息没带 `channel` 时按企微算（存量调用方与测试替身都不用改）。
+ *
+ * 前缀会进审计表、conversation log 与 principal_scopes 的键，所以它从**消息**上取而不是
+ * 宿主猜（AGENTS.md：身份与授权归 fshine；适配器报"哪个渠道 + 渠道里的谁"）。等第二个
+ * 客户端接入，各自报自己的名字，前缀从此不挤在同一套审计行里——那时要改的只是新适配器
+ * 一行，不是这里的一排 `wecom:`。
+ */
+const DEFAULT_CHANNEL = 'wecom';
+
+/** principalId = 渠道前缀 + 渠道原生用户 id。见 DEFAULT_CHANNEL 的说明。 */
+function principalIdOf(message: IncomingChannelMessage): string {
+  return `${message.channel ?? DEFAULT_CHANNEL}:${message.wecomUserId}`;
+}
 
 
 /**
@@ -516,11 +554,23 @@ function withFileReplies(
   if (!platformRoot) return text;
   const files = collectProducedFiles(platformRoot, since, workspaceDirs);
   const [file] = files;
-  return file ? { text, file } : text;
+  if (!file) return text;
+  // 终稿点名回传的文件（2026-10-20）：企微里 file 是独立消息、可能先于终稿到达，用户看到
+  // 一个不知道是什么的 xlsx。这一行是宿主补的确定性文字——与收据同族（传输事实，不过模型的
+  // 手），所以不走出口校验、也不进模型上下文。挂载式客户端不需要它（文件就贴在答复旁边），
+  // 所以它住在宿主而不是 contracts 的措辞表里。
+  //
+  // 只点名**真的挂上去的那一个**：契约的 file 是单数，collectProducedFiles 最多收 3 个而
+  // 这里只回第 1 个——说 3 个发 1 个就是假陈述。要发多个先扩契约，别先把文案写宽。
+  const note = `本轮回传：${file.filename}`;
+  return { text: text === '' ? note : `${text}\n${note}`, file };
 }
 
 export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   const { store, runtime } = deps;
+  // 本实例持有的到达钟（缺省进程内严格递增钟）。判据本体只认识 next()，注入点留给
+  // 多实例部署时换共享单调源——见 ArrivalClock 的注释。
+  const arrivalClock = deps.arrivalClock ?? createArrivalClock();
   // 同一会话的消息串行处理(pi 的 steering/followUp 队列哲学):
   // 并发回合会竞态会话状态(候选/游标/历史互相覆盖),必须排队
   const sessionQueues = new Map<string, Promise<unknown>>();
@@ -599,7 +649,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       console.error(JSON.stringify({
         event: 'wecom_turn_failed',
         messageId: message.messageId,
-        principalId: `wecom:${message.wecomUserId}`,
+        principalId: principalIdOf(message),
         error: error instanceof Error ? error.message : String(error),
       }));
       return undefined;
@@ -616,8 +666,12 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     progress?: ProgressFn,
     notice?: NoticeFn,
   ): Promise<ChannelReply> {
-    const principalId = `wecom:${message.wecomUserId}`;
+    // 身份前缀从消息的 channel 取（缺省 wecom，见 DEFAULT_CHANNEL）：principalId 与
+    // sessionId 都要带它，否则两个渠道的审计行会挤在同一套前缀里，接入时就得迁移历史数据。
+    const channel = message.channel ?? DEFAULT_CHANNEL;
+    const principalId = `${channel}:${message.wecomUserId}`;
     const sessionKey = `${message.wecomUserId}:${message.conversationId}`;
+    const sessionId = `${channel}:${sessionKey}`;
     const requestId = newId('req');
     const createdAt = new Date().toISOString();
 
@@ -641,7 +695,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // 顺序投递，"指令之后才到"是常态而不是异常；而旧那句"上一条指令已经处理完了"在回合还在
     // 飞时就是假的（当时还没有任何判据能区分这两种时序，`seenTextTurn` 又在 runtime 之前
     // 置位）。改成： burst 稳定器先把回合按住等文件落定（见 waitForBurstSettle），真的等到了
-    // 触顶还没稳的那些，进暂存池、由渠道并窗补一句中性的"等待你的指令"，并由下一条指令的
+    // 触顶还没稳的那些，进暂存池、由渠道并窗补一句中性的"已收到 N 个文件"（2026-10-20 起
+    // 不再带"等待你的指令"——气泡本身就是回应，那句把"存个档"误设成待办），并由下一条指令的
     // 回合首帧带上。收据因此永远只有一句措辞（contracts.formatFileReceipt），没有第二份。
     if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
       // 统一按"保留最新 N 个"：既覆盖会话日积月累挤掉最旧，也覆盖一次就发超过 N 个。
@@ -649,7 +704,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 丢掉最后发的——与"逐出最旧"自相矛盾，且丢的是最新那份。
       const before = sessionAttachments.get(sessionKey) ?? [];
       // 到达时刻在这里打：规则一靠它分辨"这轮新到的"与"上次委派已交付过的"。
-      const arriving: PooledAttachment[] = message.attachments.map((file) => ({ ...file, arrivedAt: nextArrivalStamp() }));
+      const arriving: PooledAttachment[] = message.attachments.map((file) => ({ ...file, arrivedAt: arrivalClock.next() }));
       const combined = [...before, ...arriving];
       const kept = combined.slice(-MAX_PENDING_ATTACHMENTS);
       const dropped = combined.slice(0, combined.length - kept.length);
@@ -661,7 +716,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       });
       // 仍要张嘴的只剩一种："用户不知道的事"——暂存超限丢了文件。迟到文件不再由这里回话：
       // 乱序之下那不是异常，且那一句在回合还在飞时就是假的。收据与下一步由渠道并窗
-      // （"已收到 N 个文件：…，等待你的指令"）与下一条指令的回合首帧承担。
+      // （"已收到 N 个文件：…"，与回合披露同一句）与下一条指令的回合首帧承担。
       // 曾有"请告诉我需要做什么。"——那是噪音：用户当然知道要说话，而且一发 N 个文件就刷
       // N 条同样的话。
       const notes: string[] = [];
@@ -677,7 +732,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // "没有数据"）。落库数据因此不只是审计，也是重启后的恢复源。
     // `attachmentsAreNew` 与交付集同源：它决定收据帧播不播（见 announceDeliveredFiles）。
     const { delivered: attachments, fresh: attachmentsAreNew } = await restoreAttachments(
-      sessionKey, message, store, sessionAttachments, sessionDelegations.get(sessionKey),
+      sessionKey, message, store, sessionAttachments, sessionDelegations.get(sessionKey), arrivalClock,
     );
 
     const input = withAttachmentPaths(message.text, attachments);
@@ -737,7 +792,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 一条事件：回传成败必须可观测，那场事故最贵的成本就是全程零日志、零错误事件，
       // 只能靠人肉翻 tmp/ 才定位到"文件写了、没人收"。
       const finishWithFiles = async (text: string): Promise<ChannelReply> => {
-        const workspaceDirs = await sessionWorkspaceDirs(store, principalId, `wecom:${sessionKey}`);
+        const workspaceDirs = await sessionWorkspaceDirs(store, principalId, sessionId);
         const reply = withFileReplies(text, deps.platformRoot, delegatedAt, workspaceDirs);
         if (typeof reply !== 'string' && reply.file) {
           console.info(JSON.stringify({
@@ -759,7 +814,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
           await store.conversationLog?.append({
             eventId: `${requestId}:plan_notice:${++noticeSequence}`,
             principalId,
-            sessionId: `wecom:${sessionKey}`,
+            sessionId,
             kind: 'plan_event',
             content: redactNotice(text),
             createdAt: new Date().toISOString(),
@@ -772,13 +827,13 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 规则一的账本在这里落：本次委派从这一刻开始。晚于它到达的附件属于下一轮，
       // 早于它的一律视为"已经交付过"——同日多任务因此不会把上一个任务的文件带进来。
       //
-      // 界也从 nextArrivalStamp() 取而不是 Date.now()：它必须严格大于本回合之前打上的
+      // 界也从到达钟取而不是 Date.now()：它必须严格大于本回合之前打上的
       // 所有到达时刻，否则同一毫秒里到达的文件会被误判成"上次已交付"而静默丢掉
       // （2026-10-09 实测：附件到达与委派开始同在 982ms，`>` 比分不出先后）。
       // 与 delegatedAt（产物回传的 since）标的是同一时刻，只是各用各的尺子——那边比
       // tmp/ 里文件的 mtime，这边比附件到达时刻；两把尺子不能互换，也不必互换。
       sessionDelegations.set(sessionKey, {
-        lastDelegationStartedAt: nextArrivalStamp(),
+        lastDelegationStartedAt: arrivalClock.next(),
         lastDelegationDelivered: attachments,
       });
       // 规则二：把"本轮用了哪些文件"说给用户听。
@@ -826,7 +881,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         // 实体授权归执行层（⑥）：宿主不再向运行时传业务实体名单——TrustedContext 已无该
         // 字段，principal_scopes 的实体列保留不读。
         capabilities: scope.capabilities,
-        sessionId: `wecom:${sessionKey}`,
+        sessionId,
         // 帧计数经 emitProgress：runtime 的「正在…」帧算真实帧流动，心跳据此静默
         onStep: progress ? emitProgress : undefined,
         ...(onNotice ? { onNotice } : {}),
@@ -834,7 +889,7 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       };
       if (deps.planConfirmation) {
         const confirmation = await deps.planConfirmation.handle({
-          origin: 'wecom_user', messageId: message.messageId, principalId, sessionId: `wecom:${sessionKey}`,
+          origin: 'wecom_user', messageId: message.messageId, principalId, sessionId,
           text: message.text, receivedAt: message.receivedAt,
         });
         if (confirmation.status === 'activated') {

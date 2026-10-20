@@ -9,6 +9,13 @@
  * 为什么契约里只放**路径**不放 Buffer：宿主与 worker 跨进程，附件要进 worker 的决策
  * 上下文只能以路径形式出现在请求文本里（worker 再把它作为 operation 的位置参数传给
  * 执行层）。Buffer 进不了上下文，也没有第二个消费者。
+ *
+ * **adapter 的义务（2026-10-20 显式化）**：把渠道上的文件**落到宿主可见的本地位置**，
+ * 契约里只出现本地绝对路径——不是 URL、不是对象存储 key、不是临时素材 id。企微的素材
+ * 要用 aeskey 解密下载，web/小程序客户端大概会把文件放在对象存储里：那时也是 adapter
+ * 先下载到同一个附件目录，契约一个字不用改。反过来，谁若让 worker 直接读签名 URL，
+ * 裂开的是这条契约（宿主的实体门按"路径在本轮请求文本里"执法，URL 不在那个面上），
+ * 而且文件会在签名过期后静默失效。locality 由 e2e AT-1 钉住。
  */
 export interface IncomingAttachment {
   /** 落盘后的文件名（已 basename 化，不含路径分隔符） */
@@ -47,8 +54,23 @@ export function formatFileReceipt(filenames: readonly string[]): string {
 }
 
 export interface IncomingChannelMessage {
-  /** 不可变的企微成员 UserID */
+  /**
+   * 渠道原生用户标识（当前唯一接入的渠道是企微，故字段名带 wecom）。
+   *
+   * 字段名**故意不改**（2026-10-20）：改它要动 65 处零行为变化的调用点，而 PoC 阶段只有
+   * 一个渠道，那是纯 churn。真正进持久化的是下面的 `channel` + 这个 id 拼出的 principalId，
+   * 那条缝已经留好——接入第二个客户端时同批改字段名，别提前付这笔钱。
+   */
   wecomUserId: string;
+  /**
+   * 渠道身份（缺省 `wecom`）：principalId / sessionId 的前缀段。
+   *
+   * 为什么参数化：`wecom:` 前缀会进审计表、conversation log 与 principal_scopes 的键——
+   * 等 web/小程序客户端接入再统一，就是数据迁移或永久双读。所以前缀从消息上取，宿主不认
+   * 渠道名只认这个字段；适配器报"我是哪个渠道 + 这个渠道里的谁"，身份归属仍是宿主的事
+   * （AGENTS.md：身份与授权归 fshine）。
+   */
+  channel?: string;
   /** 渠道会话标识;单聊可用 userid 推导 */
   conversationId: string;
   /** 渠道消息 id,用于幂等与审计关联 */

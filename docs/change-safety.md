@@ -925,3 +925,53 @@ F2 的"只增不减"按**新增用例逐条可数**核，不按单次总计数�
 就位，留作下一个出口真出现时同批补，不预支防御（登记在 debt-ledger D-111 未验项 ③）。
 
 进度帧路径波结束。
+
+---
+
+## 13. 交互缝波 · 收据文案 + 终稿点名 + 三条演进缝 + handler 行数棘轮（2026-10-20）
+
+**目标**：把前几轮讨论定下的「留缝，不搭桥」清单落地——PoC/MVP 阶段允许先写简单的，不允许做把演进选项焊死的选择。单波单主题：用户可见交互的两处修正（D1/D2）+ 三条缝（契约去渠道化 / 到达钟可注入 / 附件 locality 成断言）+ 一根机械护栏。
+
+**为什么是这一波**（讨论结论的落地，不是新发现）：第二个客户端（web/小程序）已明确在路线上。它的输入模型是 composer 式（文件与文字同一条请求），企微消息模型特有的机器——`attachmentOnly`、burst 稳定器、孤儿收据并窗、ack/4 帧硬顶/心跳——在它上面根本不该存在。所以本波不动那些机器（它们留在企微 adapter），只做三件让接入变成「加一个 renderer」而不是「从宿主挖假设」的准备，外加两处今天就能让用户读得更舒服的改动。
+
+**归属判据（AGENTS.md）**：通知送达与用户可见状态反馈是 fshine 通用机制 → D1/D2 落在宿主与 adapter，措辞仍只有 contracts 一个权威位置；身份与授权归 fshine → principal 前缀从消息的 `channel` 取，适配器报「哪个渠道 + 渠道里的谁」，宿主不认渠道名。判据全部是形状与来源，零业务 `if` 分支。
+
+### 落了什么
+
+| 位置 | 改动 |
+|---|---|
+| `packages/channel-wecom/src/adapter.ts` | **D1**：孤儿收据不再带「，等待你的指令」后缀（删 `RECEIPT_WAITING_SUFFIX`）。气泡本身就是回应，那句把「存个档」误设成待办 |
+| `apps/server/handler.ts` | **D2**：`withFileReplies` 挂了回传文件时，在终稿尾部追加一行确定性文字「本轮回传：\<文件名\>」。企微里 file 是独立消息、可能先于终稿到达，用户看到一个不知道是什么的 xlsx；这一行与收据同族（传输事实，不过模型的手），不走出口校验、不进模型上下文。**只点名真的挂上去的那一个**（契约的 `file` 是单数，说 3 个发 1 个就是假陈述） |
+| `packages/contracts/src/channel.ts` | **缝 a**：`IncomingChannelMessage` 加 `channel?: string`（缺省 `wecom`）；`IncomingAttachment` 注释显式化 adapter 的义务——把渠道文件落到宿主可见的本地位置，契约只出现本地绝对路径，不是 URL/存储 key/素材 id。**字段名 `wecomUserId` 故意不改**（65 处零行为 churn，PoC 单渠道；接入时同批改） |
+| `packages/channel-wecom/src/adapter.ts` | 消息构造处显式 `channel: 'wecom'`——前缀在源头给出，比让宿主猜诚实 |
+| `apps/server/handler.ts` | **缝 a 落地**：`DEFAULT_CHANNEL` + `principalIdOf()`；`processMessage` 的 principalId/sessionId 由 channel 拼；`loadRecentAttachments` 改收 principalId（不再自己拼前缀）；队列失败日志同源 |
+| `packages/core/src/config.ts` | **缝 a 落地**：`principalScopeRecords` 的 `wecom:` 写死解析改成取键的首段（无冒号的键整体当 userid，存量配置不破） |
+| `apps/server/handler.ts` | **缝 b**：模块级 `let arrivalClock` → `ArrivalClock` 接口 + `createArrivalClock()`；宿主持有一把（`deps.arrivalClock` 可注入），判据只认识 `next()`。多实例部署时换共享单调源即可，不必动规则一。**不上 Redis** |
+| `apps/server/handler-shape.test.ts` | **护栏（新文件）**：`HANDLER_LINE_BUDGET = 1013` 只减不增。handler.ts 是唯一没拆过也没有机械护栏的大文件，附件机器是它长到 1013 行的主要原因；棘轮把「再往里加一段」从零成本决定变成显式决定 |
+| `tests/e2e/turn-loop-attachments.test.ts` | **缝 c**：AT-1 显式钉住 locality 契约（本地绝对路径、非 URL、无签名参数）；D1 的断言与注释同步改写 |
+| `docs/test-hardening.md` | T3 行 4 → 5 例（AT-5 自 D-110 波就在，上波计数漏登，本波顺手修正） |
+| `docs/manual-test-wecom.md` | §8.8 三条真机验项（收据无后缀读起来是否反而不知要发指令 / 终稿点名与文件消息的邻接感 / 无关回合不复读没有换形态回来） |
+
+### 波次防线与实测记录
+
+- **F1 表征先行**：D1 是断言改写（三条 adapter + 两条 e2e），每条改写理由写在原处；D2 先加红测试（终稿为空时只留点名那一行）再改 `withFileReplies`；三条缝各自先有钉子后有实现。
+- **F2 基线冻结**：改造前 `npm test` **1477 全绿 / 114 文件** + typecheck 0 错误（2026-10-20 冻结，即 §12 收口数字）；改造后 **1484 全绿 / 115 文件**（+7：D2 一条、钟三条、渠道前缀两条、shape 一条），typecheck 0 错误，`npm run test:e2e` **35 文件 / 144 全绿**无回归。
+- **F3 变异验证**（六条，逐条确认转红后回滚复绿）：① 往 handler.ts 加 5 行 → 行数棘轮红；② 去掉终稿点名 → 2 条 D2 用例红；③ 钟退回 `Date.now()`（不严格递增）→ 2 条钟用例红；④ `createMessageHandler` 不认注入的钟 → 注入用例红；⑤ principalId 前缀写死 `wecom:` → 渠道前缀用例红；⑥ config 的键解析写死 `wecom:` → config 用例红。
+- **F4 最小化**：一个主题。改动落在 contracts / channel-wecom / core(config) / apps/server，未碰 `packages/agent` 任何一行，未碰执行层。D1/D2 与三条缝同波，是因为它们同属「为第二个客户端留缝」这一件事的两面（交互修正 + 结构缝），拆开会让中间态同时带着已知缺陷又没有护栏。
+- **F5 红先 revert**：无（全程绿）。
+- **F6 探针**：不涉及提示词/申报/澄清，无需探针。
+- **F7 文档同步**：debt-ledger D-112 + 本 §13 + test-hardening T3 行 + manual-test-wecom §8.8 同批落地。
+
+### 明确不做（防过度设计，登记在案）
+
+1. **不外置附件状态**：`sessionAttachments` / `sessionDelegations` / `sessionQueues` / `lastArrivalAt` 四个 Map 保持进程内。多实例时是换实现不是改语义——但降级行为（重启后按全部未消费）已有测试钉住，接入前先补多实例语义的表征。
+2. **不做渠道能力声明协议**（`canAnchorReply` / `frameBudget` / `passiveReplyWindowMs`）：等第二个客户端真来了再做，现在做就是猜测性抽象。
+3. **不把企微帧策略泛化成宿主配置**：`RECEIPT_COALESCE_MS` 留在 adapter，不挪进通用 env 当旋钮。
+4. **不动实体门**：清单化（引用形态）等出现「模型回显路径真出问题」的实证再动；它现在是纯函数 + 5 个 source，形状健康。
+5. **不改 `wecomUserId` 字段名**：65 处零行为 churn，与第二个客户端同批做。
+
+### 未验项（mock 证不了，登记不闭环）
+
+真企微客户端上三件事只能真机确认：① 收据去掉后缀后用户是否反而不知要发指令（文案判断，已写入 manual-test §8.8）；② 终稿点名那一行与文件消息的邻接读感；③ 无关回合不复读没有以别的形态回来。e2e 钉住的是帧序列，不是用户的眼睛。
+
+交互缝波结束。

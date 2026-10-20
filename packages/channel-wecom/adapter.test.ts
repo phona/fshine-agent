@@ -572,7 +572,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     expect(fake.replies).toEqual([]);                       // 窗口内不起流
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);
-    expect(fake.replies[0]!.content).toBe('已收到 1 个文件：a.xlsx，等待你的指令');
+    expect(fake.replies[0]!.content).toBe('已收到 1 个文件：a.xlsx');
     expect(fake.replies[0]!.finish).toBe(true);
     expect(fake.replies[0]!.reqId).toBe('req-orphan');
   });
@@ -584,8 +584,9 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     await sendFile(fake, 'req-f2', 'b.xls');
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);
-    // 措辞与宿主回合披露同一句（contracts.formatFileReceipt），只多一个"在等指令"后缀
-    expect(fake.replies[0]!.content).toBe('已收到 2 个文件：a.xlsx、b.xls，等待你的指令');
+    // 措辞与宿主回合披露同一句（contracts.formatFileReceipt）——2026-10-20 起不再带
+    // "等待你的指令"后缀：气泡本身就是回应，那句把"存个档"误设成待办
+    expect(fake.replies[0]!.content).toBe('已收到 2 个文件：a.xlsx、b.xls');
     // 通道挂在最后到达的那条上：时间上最接近用户所见
     expect(fake.replies[0]!.reqId).toBe('req-f2');
   });
@@ -627,7 +628,7 @@ describe('WecomBotChannel 文件收据(附件-only 零帧 + 孤儿收据并窗)'
     await vi.advanceTimersByTimeAsync(2_000);
     expect(fake.replies).toHaveLength(1);                    // 流的尝试确实发生了
     // 降级通道把同一条收据作为全新消息送达：用户看得到，且没有开着的流
-    expect(fake.sentMessages).toEqual([{ chatid: 'zhangsan', content: '已收到 1 个文件：a.xlsx，等待你的指令' }]);
+    expect(fake.sentMessages).toEqual([{ chatid: 'zhangsan', content: '已收到 1 个文件：a.xlsx' }]);
   });
 
   // 并窗长度是个有上下界的调参，值得一根钉子：下界要盖住"最后一个文件 → 指令"的间隔

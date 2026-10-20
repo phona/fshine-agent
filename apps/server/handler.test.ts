@@ -7,6 +7,7 @@ import { validatePlanEntities } from '@fshine/agent';
 import type { AgentReply, AgentRuntime, AuditStore, ChannelReply, IncomingAttachment, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
 import {
   collectProducedFiles,
+  createArrivalClock,
   createMessageHandler,
   describeDeliveredFiles,
   parseAttachmentEnvelope,
@@ -73,6 +74,26 @@ describe('createMessageHandler', () => {
     expect(reply).toBe('计划执行完成。');
     expect(seen).toHaveLength(1);
     expect(seen[0]?.resumeTaskId).toBe('task_1');
+  });
+
+  // 2026-10-20 留缝：principalId/sessionId 的前缀段从消息的 channel 取（缺省 wecom）。
+  // 前缀会进审计表、conversation log 与 principal_scopes 的键——等第二个客户端接入再统一，
+  // 就是数据迁移或永久双读。这条钉子守"同一个渠道原生 id 在不同渠道下不撞"。
+  it('渠道前缀参数化：channel: web 的消息拼出 web: 前缀，与 wecom 的同名用户不相撞', async () => {
+    const seen: TrustedContext[] = [];
+    const runtime: AgentRuntime = {
+      handleTurn: async (ctx) => { seen.push(ctx); return { text: '做完了' }; },
+    };
+    const handler = createMessageHandler({ store: fakeStore(), runtime, inboundDebounceMs: 0 });
+    const base = { wecomUserId: USER, conversationId: 'c', receivedAt: '2026-09-24T00:00:00.000Z' };
+
+    await handler({ ...base, channel: 'web', messageId: 'm-web', text: '在吗' });
+    expect(seen[0]?.principalId).toBe('web:user_a');
+    expect(seen[0]?.sessionId).toBe('web:user_a:c');
+
+    await handler({ ...base, messageId: 'm-wecom', text: '在吗' });       // 没带 channel → 缺省
+    expect(seen[1]?.principalId).toBe('wecom:user_a');
+    expect(seen[1]?.sessionId).toBe('wecom:user_a:c');
   });
 
   it('R9 待确认计划已被新计划取代时给出确定性解释，不再落到通用失败', async () => {
@@ -327,7 +348,7 @@ describe('附件-only 消息的暂存与交付', () => {
   // 2026-10-19 改写：迟到文件不再回一条气泡。企微不保证同批消息按发送顺序投递，"指令之后
   // 才到"是常态而非异常；而旧那句"上一条指令已经处理完了"在回合还在飞时就是假的（当时没有
   // 任何判据能区分这两种时序）。现在：burst 稳定器先把回合按住等文件落定，等不到的那些进暂存
-  // 池，由渠道并窗补一句中性的"等待你的指令"、由下一条指令的回合首帧带上。
+  // 池，由渠道并窗补一句"已收到 N 个文件"、由下一条指令的回合首帧带上。
   it('迟到的文件:不再回气泡(乱序之下那不是异常),但要留在池子里给下一条指令', async () => {
     const { handler, seen } = probe();
     await handler(msg({ text: '先来的指令' }));
@@ -568,7 +589,7 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
    * 最小装配：可注入 DB 存量行（模拟重启前的审计库），并捕获请求文本、通知帧与
    * "通知 vs 委派"的先后。防抖置 0——本组只验交付边界，不想把 2s 防抖算进每条用例。
    */
-  function probe(dbRows: Array<{ input: string }> = []) {
+  function probe(dbRows: Array<{ input: string }> = [], extra: { arrivalClock?: { next(): number } } = {}) {
     const base = fakeStore();
     const store = {
       ...base,
@@ -586,7 +607,7 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
         return { text: 'ok' };
       },
     };
-    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime, inboundDebounceMs: 0 });
+    const handler = createMessageHandler({ store, runtime: runtime as unknown as AgentRuntime, inboundDebounceMs: 0, ...extra });
     const send = (over: Partial<IncomingChannelMessage>, userId = USER): Promise<ChannelReply> =>
       handler(msg(over, userId), undefined, async (text: string) => { order.push('notice'); notices.push(text); });
     return { send, seen, notices, order };
@@ -800,6 +821,37 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
     expect(deliveredNames(seen[1]!)).toEqual(['a.xlsx']);
     await send({ text: '第三句' });
     expect(deliveredNames(seen[2]!)).toEqual(['a.xlsx']);
+  });
+
+  // 钟的来源可注入（2026-10-20 留缝）：判据本体只认识 next()，多实例部署时换一个共享
+  // 单调源即可，不必改规则一。这条钉子守的是"缝是通的"——宿主持有的是注入的那把钟。
+  it('可注入：宿主用的是 deps.arrivalClock 那一把，且换钟不改交付语义', async () => {
+    const stamps: number[] = [];
+    const clock = { next: (): number => { stamps.push(stamps.length + 1); return stamps.length; } };
+    const { send, seen } = probe([], { arrivalClock: clock });
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx')] });   // 打一个到达时刻
+    await send({ text: '做工资表' });                                      // 委派开始再打一个
+    expect(stamps.length).toBeGreaterThanOrEqual(2);                       // 缝是通的
+    expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx']);                  // 换钟不改语义
+  });
+});
+
+// ── 到达钟（规则一的时间尺，2026-10-20 留缝）─────────────────────────────────
+// 规则一的判据本体是"到达时刻 > 上次委派开始时刻"。这把钟住在进程内存里，第二个客户端
+// （web/小程序）意味着多实例——那时"同一毫秒分不出先后"会原样回来，且要的是跨实例共享的
+// 单调源。所以判据只认识 next()，钟的来源可注入（deps.arrivalClock）。
+describe('到达钟（规则一的时间尺）', () => {
+  it('严格递增：同一毫秒里连取也分得出先后（否则附件会被误判成"上次已交付"）', () => {
+    const clock = createArrivalClock();
+    const values = Array.from({ length: 50 }, () => clock.next());
+    for (let i = 1; i < values.length; i += 1) {
+      expect(values[i]!).toBeGreaterThan(values[i - 1]!);
+    }
+  });
+
+  it('值仍是毫秒墙钟：日志里读得懂，能与 lastDelegationStartedAt 对齐', () => {
+    const before = Date.now();
+    expect(createArrivalClock().next()).toBeGreaterThanOrEqual(before);
   });
 });
 
@@ -1428,9 +1480,35 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
       const reply = await handler(textTurn());
       expect(typeof reply).not.toBe('string');
       if (typeof reply === 'string') return;
-      expect(reply.text).toBe('做完了');
+      // 终稿点名回传的文件（2026-10-20 D2）：file 是独立消息、可能先于终稿到达，
+      // 这一行让用户知道那个 xlsx 是什么。宿主补的确定性文字，不过模型的手
+      expect(reply.text).toBe('做完了\n本轮回传：整理好的2026年08月工资表.xlsx');
       expect(reply.file?.filename).toBe('整理好的2026年08月工资表.xlsx');
       expect(reply.file?.data.toString()).toBe('XLSX');
+    });
+
+    it('终稿为空时只留点名那一行(不让用户面对一个没有说明的文件消息)', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      const handler = createMessageHandler({
+        store: storeWithTasks([taskDir]),
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            writeFileSync(deliverable, 'XLSX');
+            utimesSync(deliverable, new Date(), new Date());
+            return { text: '' };                       // 委派终稿空串（出口校验放过的那支）
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(typeof reply).not.toBe('string');
+      if (typeof reply === 'string') return;
+      expect(reply.text).toBe('本轮回传：工资表.xlsx');
+      expect(reply.file?.filename).toBe('工资表.xlsx');
     });
 
     it('platformTasks 缺库(旧替身):退化为只回文字,不因收集失败炸掉回合', async () => {

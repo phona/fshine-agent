@@ -179,16 +179,26 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   };
 }
 
-/** principals(wecom:<userid> 键)→ 渠道无关的授权记录。 */
+/**
+ * principals(`<channel>:<userid>` 键)→ 渠道无关的授权记录。
+ *
+ * 键的前缀段是渠道身份（宿主拼 principalId 用的那个，见 handler 的 DEFAULT_CHANNEL）。
+ * 2026-10-20 前这里写死 `wecom:`——第二个客户端接入时，它的授权键会被这个判据拒绝，
+ * 而前缀本来就从消息上来（适配器报"哪个渠道 + 渠道里的谁"）。改成取首段之后：
+ * 没有冒号的键整体当 userid（存量配置不破），`web:abc` 与 `wecom:abc` 各归各的。
+ */
 export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[] {
-  return Object.entries(config.principals).map(([key, principal]) => ({
-    wecomUserId: key.startsWith('wecom:') ? key.slice('wecom:'.length) : key,
-    // 实体授权归执行层：宿主不再持账套名单，列保留不读（写空串形式的历史兼容值）。
-    accountSetIds: [],
-    ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
-    enabled: principal.enabled,
-    capabilities: [...(principal.capabilities ?? ['read'])],
-  }));
+  return Object.entries(config.principals).map(([key, principal]) => {
+    const colon = key.indexOf(':');
+    return {
+      wecomUserId: colon === -1 ? key : key.slice(colon + 1),
+      // 实体授权归执行层：宿主不再持账套名单，列保留不读（写空串形式的历史兼容值）。
+      accountSetIds: [],
+      ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
+      enabled: principal.enabled,
+      capabilities: [...(principal.capabilities ?? ['read'])],
+    };
+  });
 }
 
 function parseStringArray(value: unknown): string[] | undefined {

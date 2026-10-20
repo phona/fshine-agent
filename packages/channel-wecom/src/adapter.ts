@@ -48,8 +48,6 @@ const MAX_PROGRESS_FRAMES = 4;
 /** 文件收据的并窗（毫秒）。导出是为了让这个调参值有测试守着——改大先核上面的上界理由。 */
 export const RECEIPT_COALESCE_MS = 2_000;
 
-/** 孤儿收据的后缀：告诉用户文件收下了、在等他发指令（没有这个后缀，用户只会干等）。 */
-const RECEIPT_WAITING_SUFFIX = '，等待你的指令';
 /** 附件大小上限：企微 file 消息的合理体量。超限直接拒收，不落盘、不进上下文 */
 const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 /** 单个附件名长度上限：防超长名把落盘路径撑爆（也防日志刷屏） */
@@ -328,6 +326,10 @@ export class WecomBotChannel implements ChannelAdapter {
 
     const message: IncomingChannelMessage = {
       wecomUserId: userid,
+      // 渠道身份在源头显式给出：宿主据此拼 principalId/sessionId 的前缀（见契约的 channel
+      // 字段）。缺省也是 'wecom'，但写在来源处比让宿主猜更诚实——接入第二个客户端时，
+      // 每个适配器各自报自己的名字，前缀从此不挤在同一套审计行里。
+      channel: 'wecom',
       conversationId,
       messageId: msgid,
       chatType,
@@ -532,7 +534,7 @@ export class WecomBotChannel implements ChannelAdapter {
       pending.frame,
       pending.frame.headers?.req_id ?? '',
       pending.streamId,
-      formatFileReceipt(pending.filenames) + RECEIPT_WAITING_SUFFIX,
+      formatFileReceipt(pending.filenames),
       true,
       { chatId: pending.chatId, once: { used: false } },
     );

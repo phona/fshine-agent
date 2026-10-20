@@ -116,6 +116,22 @@ contextProfiles:
     expect(disabled?.capabilities).toEqual(['read']);
   });
 
+  it('principalScopeRecords:键的前缀段是渠道身份，不写死 wecom（第二个客户端接入不改判据）', () => {
+    // 2026-10-20 前这里写死 startsWith('wecom:')：web/小程序客户端接入时，它的授权键会被
+    // 这个判据拒掉，而前缀本来就从消息上来（适配器报"哪个渠道 + 渠道里的谁"）。
+    const yaml = VALID_YAML + `  "web:user_c":\n    accountSetIds: []\n    enabled: true\n`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    const records = principalScopeRecords(config);
+
+    expect(records.find((r) => r.wecomUserId === 'user_c')?.enabled).toBe(true);
+    // 没有冒号的键整体当 userid（存量配置不破）
+    const bare = loadConfig({
+      yamlPath: writeFixture(`principals:\n  "user_d":\n    enabled: true\n`),
+      env: PUBLIC_URL_ENV,
+    });
+    expect(principalScopeRecords(bare)[0]?.wecomUserId).toBe('user_d');
+  });
+
   it('V1 capabilities:解析 read/validate/write 并默认旧 principal 为 read', () => {
     const yaml = VALID_YAML.replace('enabled: true', 'enabled: true\n    capabilities: [read, validate, write]');
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });

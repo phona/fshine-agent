@@ -69,8 +69,9 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     const reply = await sendFile('对账单-202606.csv');
 
     // 没有指令跟来：渠道并窗到点补一条收据（2026-10-19 起文件消息自己不再回气泡）。
-    // 后缀"等待你的指令"是它与回合披露的唯一区别——没有这句，用户只会干等
-    expect(reply).toBe('已收到 1 个文件：对账单-202606.csv，等待你的指令');
+    // 2026-10-20 起收据不再带"等待你的指令"后缀——气泡本身就是回应，那句把"存个档"
+    // 误设成待办；措辞与回合披露逐字相同（contracts.formatFileReceipt）
+    expect(reply).toBe('已收到 1 个文件：对账单-202606.csv');
     // 没启 Agent 回合：唯一的审计就是附件接收登记，没有 replied
     expect(outcomes).toEqual(['attachment_received']);
     // 登记行带着机器可解析的信封（生产重启恢复的同一数据源），路径可取回
@@ -87,6 +88,15 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     // basename 化：落盘名 = uuid 前缀 + 安全化文件名，用户可写的目录结构不保留
     expect(path.basename(att.path).endsWith('对账单-202606.csv')).toBe(true);
     expect(readdirSync(path.dirname(att.path))).toHaveLength(1);
+    // ── locality 契约（2026-10-20 钉死）──────────────────────────────────────
+    // 契约只认"宿主可见的本地绝对路径"：宿主与 worker 按同一个路径引用同一份文件，实体门
+    // 也按"路径在本轮请求文本里"执法。adapter 负责把渠道上的文件落到这个位置——企微要
+    // aeskey 解密下载，web/小程序客户端大概会放在对象存储里，那时也是 adapter 先下载到
+    // 同一个附件目录，契约一个字不用改。所以这里显式钉住"不是 URL、不是存储 key"：
+    // 谁若让 worker 直接读签名 URL，裂开的是这条契约（且文件会在签名过期后静默失效）。
+    expect(path.isAbsolute(att.path)).toBe(true);
+    expect(att.path).not.toMatch(/^[a-z][a-z0-9+.-]*:\/\//i);
+    expect(att.path).not.toContain('?');                         // 签名参数不进契约
     await assembly.close();
   });
 
@@ -106,8 +116,9 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     const { sendFile, turn, assembly } = await boot({ main: mainDriver(declarations), worker });
     const outcomes = recordRequestOutcomes(assembly);
 
-    // 文件消息等不及指令：并窗先补一条孤儿收据（sendFile 等的就是这条终帧）
-    expect(await sendFile('对账单-202606.csv')).toBe('已收到 1 个文件：对账单-202606.csv，等待你的指令');
+    // 文件消息等不及指令：并窗先补一条孤儿收据（sendFile 等的就是这条终帧）。
+    // 2026-10-20 起不带"等待你的指令"后缀（气泡本身就是回应）
+    expect(await sendFile('对账单-202606.csv')).toBe('已收到 1 个文件：对账单-202606.csv');
     const rows = await recentAttachmentRows(assembly);
     const att = rows.flatMap((row) => parseAttachmentEnvelope(row.input, SESSION_KEY))[0];
     if (!att) throw new Error('附件信封解析失败：attachment_received 行里没有可恢复的路径');
@@ -242,7 +253,7 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
 
     const { text, notices } = await turn('核对一下我刚发的两个文件 202606');
 
-    // 收据在全链上只出现一次，且不带"等待你的指令"（那个后缀只属于没人跟指令的孤儿收据）
+    // 收据在全链上只出现一次，且与孤儿收据逐字同句（2026-10-20 起后缀也去掉了）
     const receipts = sdk.frames.filter((frame) => frame.content.startsWith('已收到'));
     expect(receipts).toHaveLength(1);
     // 两个文件名都在同一帧里（顺序不钉：交付集按路径排序，而 e2e 的落盘名带 uuid 前缀，
@@ -252,8 +263,8 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     expect(receipts[0]!.content).toContain('工资表-202608.xlsx');
     expect(receipts[0]!.finish).toBe(false);            // 披露帧，不是终帧
     expect(notices.some((t) => t.startsWith('已收到 2 个文件：'))).toBe(true);
-    // 并窗被指令取消：否则这里会有第二条（带后缀的）收据
-    expect(sdk.frames.slice(framesAfterFiles).filter((f) => f.content.includes('等待你的指令'))).toEqual([]);
+    // 并窗被指令取消：否则这里会有第二条收据。2026-10-20 前靠"等待你的指令"后缀区分两条，
+    // 后缀去掉后判别并到上面的 length===1（同一措辞，多一条就是冗余）
     // 附件回合的终稿照常送达，两个文件都进了暂存池（登记两条）
     expect(text).toContain('两个文件都读到了');
     expect(outcomes).toEqual(['attachment_received', 'attachment_received', 'replied']);
