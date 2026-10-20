@@ -324,13 +324,20 @@ describe('附件-only 消息的暂存与交付', () => {
     expect(inserted[0]!.input.match(/f\d\.xlsx：/g)).toHaveLength(8);
   });
 
-  it('迟到的文件:回复必须明确要求补发指令(不静默干等)', async () => {
+  // 2026-10-19 改写：迟到文件不再回一条气泡。企微不保证同批消息按发送顺序投递，"指令之后
+  // 才到"是常态而非异常；而旧那句"上一条指令已经处理完了"在回合还在飞时就是假的（当时没有
+  // 任何判据能区分这两种时序）。现在：burst 稳定器先把回合按住等文件落定，等不到的那些进暂存
+  // 池，由渠道并窗补一句中性的"等待你的指令"、由下一条指令的回合首帧带上。
+  it('迟到的文件:不再回气泡(乱序之下那不是异常),但要留在池子里给下一条指令', async () => {
     const { handler, seen } = probe();
     await handler(msg({ text: '先来的指令' }));
     const reply = await handler(msg({ attachmentOnly: true, attachments: [file('late.xlsx')] }));
-    expect(seen).toHaveLength(1); // 迟到文件没有启第二个回合
+    expect(seen).toHaveLength(1);          // 迟到文件没有启第二个回合
     expect(seen[0]!.request).not.toContain('late.xlsx');
-    expect(reply).toBe('上一条指令已经处理完了，请把指令再发一次，这些文件会一起用上');
+    expect(reply).toBe('');                // 不刷气泡，也不说一句可能为假的话
+    await handler(msg({ text: '把工资表补上' }));
+    expect(seen).toHaveLength(2);
+    expect(seen[1]!.request).toContain(file('late.xlsx').path); // 兜底：下一条指令带上
   });
 
   it('会话里第一个文件不算迟到:安静（不出现补发提示）', async () => {
@@ -788,6 +795,59 @@ describe('入站防抖', () => {
     expect(seen[0]!.request).toContain(b.path);
   });
 
+  // ── burst 稳定器（2026-10-19，乱序到达）──────────────────────────────────────
+  // 判据从"睡满一个固定窗"换成"静默"：一个窗口内没有新到达才算 burst 结束。固定窗治不了
+  // "第三个文件落在指令回合开跑之后"——企微不保证同批消息按发送顺序投递，实测跨度 3s 就超过
+  // 了 2s 窗，那一轮会拿着不完整的文件集算完（2026-10-08 的事故形状在乱序下是常态）。
+  it('稳定器：文件持续 trickle 时就一直等，跨过固定窗到达的也赶得上', async () => {
+    const a = realFile('a.xlsx'); const b = realFile('b.xlsx'); const c = realFile('c.xlsx');
+    const { handler, seen } = harness(200);
+    await handler(msg({ attachmentOnly: true, attachments: [a] }));   // 先把 burst 打开
+    const t = handler(msg({ text: '做工资表' }));                     // 窗口内第二条 → 等稳
+    await new Promise((r) => setTimeout(r, 120));
+    await handler(msg({ attachmentOnly: true, attachments: [b] }));   // 第一个窗口内到达
+    await new Promise((r) => setTimeout(r, 120));
+    const f2 = handler(msg({ attachmentOnly: true, attachments: [c] })); // 旧固定窗（200ms）已发车
+    await Promise.all([t, f2]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.request).toContain(a.path);
+    expect(seen[0]!.request).toContain(b.path);
+    expect(seen[0]!.request).toContain(c.path);   // 固定窗在这里会漏掉 c
+  });
+
+  it('稳定器上界：文件永远 trickle 时最多等 4 个窗口，不把回合无限期挂住', async () => {
+    const a = realFile('a.xlsx');
+    const { handler } = harness(100);             // 窗口 100ms → 上界 400ms
+    await handler(msg({ attachmentOnly: true, attachments: [a] }));
+    const t0 = Date.now();
+    let done = -1;
+    // 在回合自己的完成点取时刻：trickle 循环要跑 1.2s，不能让它进这个计时
+    const turn = handler(msg({ text: '做工资表' })).then((reply) => { done = Date.now() - t0; return reply; });
+    // 每 60ms 一个文件，持续 1.2s：静默永远不满一个窗口，只有上界能拦住它
+    const trickle: Array<Promise<ChannelReply>> = [];
+    for (let i = 0; i < 20; i += 1) {
+      await new Promise((r) => setTimeout(r, 60));
+      trickle.push(handler(msg({ attachmentOnly: true, attachments: [realFile(`t${i}.xlsx`)] })));
+    }
+    await turn;
+    expect(done).toBeGreaterThanOrEqual(380);     // 等满了 4 个窗口
+    expect(done).toBeLessThan(900);               // 没有跟着 trickle 等到 1.2s+
+    await Promise.all(trickle);
+  });
+
+  it('稳定器：静默满一个窗口就收工，不因为附件回合的存在无限加钟', async () => {
+    const a = realFile('a.xlsx');
+    const { handler, seen } = harness(300);
+    await handler(msg({ attachmentOnly: true, attachments: [a] }));
+    const t0 = Date.now();
+    await handler(msg({ text: '做工资表' }));     // 之后再没有任何消息
+    const elapsed = Date.now() - t0;
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.request).toContain(a.path);
+    expect(elapsed).toBeGreaterThanOrEqual(250);  // 等了一个窗口（尾随附件要能落地）
+    expect(elapsed).toBeLessThan(900);            // 但只等一个，不加钟
+  });
+
   it('防抖窗口为 0 时不等待(行为退化为立即处理)', async () => {
     const a = realFile('a.xlsx');
     const { handler, seen } = harness(0);
@@ -805,6 +865,13 @@ describe('入站防抖', () => {
     expect(Date.now() - t0).toBeLessThan(1500); // 没有等满 2 秒
     // 2026-10-19：不等待遇不变，但不再回一条气泡（收据由指令回合或渠道并窗承担）
     expect(reply).toBe('');
+    // burst 已经打开时也一样不等（上一条就是它自己）。这一条才真的守着"附件立即 flush"：
+    // 只发冷启动那条的话，burstInProgress 为假，等不等都立刻返回，判据是空的。
+    // "先发 N 个文件再发指令"的形状里，文件之间若互相等待，用户发完第三个要等半天。
+    const b = realFile('b.xlsx');
+    const t1 = Date.now();
+    await handler(msg({ attachmentOnly: true, attachments: [b] }));
+    expect(Date.now() - t1).toBeLessThan(1500);
   });
 
   // 2026-10-16 首帧提速改写：防抖的新语义是"窗口内首条立即、后续到达才合并"（参照

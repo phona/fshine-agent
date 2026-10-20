@@ -40,8 +40,12 @@ export interface HandlerDeps {
    *
    * 2026-10-16 首帧提速改成"首条零防抖"：窗口内**首条**消息立即处理、后续到达才合并——
    * 判据是本条到达前的一个窗口里有没有先行消息（任何消息，含附件）。冷启动的对话不再
-   * 白等 2s；只有 burst 进行中（先行消息打开了窗口）的指令回合才等满窗口，让尾随附件
-   * 赶得上。迟到的文件仍有"指令请再发一次"的明确提示兜底（见 seenTextTurn）。
+   * 白等 2s；只有 burst 进行中（先行消息打开了窗口）的指令回合才等。
+   *
+   * 2026-10-19 乱序到达：等的判据从"睡满一个窗口"改成**静默**（一个窗口内没有新到达才算
+   * burst 结束，见 waitForBurstSettle），最多 4 个窗口。企微不保证同批消息按发送顺序投递，
+   * 固定窗治不了"第三个文件落在指令回合开跑之后"——实测跨度 3s 就超过了 2s 窗，那一轮会
+   * 拿着不完整的文件集算完。真的等到了触顶还没稳的文件不丢：进暂存池，由下一条指令带上。
    */
   inboundDebounceMs?: number;
   /**
@@ -219,6 +223,22 @@ async function loadRecentAttachments(store: HandlerDeps['store'], wecomUserId: s
 
 /** 入站防抖默认窗口：2 秒。参照 OpenClaw 默认 1500–2000ms；群聊可调更短。 */
 const DEFAULT_INBOUND_DEBOUNCE_MS = 2000;
+
+/**
+ * 附件 burst 稳定器的窗口倍数上限：等"一个窗口内没有新到达"才收工，最多等这么多轮。
+ *
+ * 为什么不是睡满一个固定窗（2026-10-19，乱序到达）：企微不保证同一批消息按发送顺序投递，
+ * 实测跨度就有 3 秒——3 个文件 + 1 条指令，第三个文件落在指令回合开跑之后。固定窗只覆盖
+ * "指令之后 2 秒内到达"那一段，而且它治不了"文件落在指令之后"：那时防抖早就睡完了，
+ * `restoreAttachments` 已经拍完快照，那一轮是拿着不完整的文件集算完的。
+ *
+ * 稳定器把判据从"睡了多久"换成**静默**：一个窗口内没有新到达，才算 burst 结束。
+ *
+ * 为什么是 4 轮而不是无限等：等待必须有上界，否则一条永远 trickle 的文件流能把回合无限期
+ * 按住。4 × 2s = 8s，盖住实测的 3s 跨度并留一倍余量。触顶时仍未落定的文件不丢——进暂存池，
+ * 由渠道并窗补一条收据、由下一条指令的回合首帧带上（见 attachmentOnly 分支）。
+ */
+const MAX_BURST_SETTLE_WINDOWS = 4;
 
 /**
  * 受理帧文案（首帧提速，2026-10-16）：回合真正开跑时（防抖后、出队列、进 runtime 之前）
@@ -423,6 +443,31 @@ async function sessionWorkspaceDirs(
   }
 }
 
+/**
+ * 等附件 burst 稳了：一个窗口内没有新到达就收工，触顶兜底。
+ *
+ * 判据是**静默**而不是"睡满 N 秒"——文件持续 trickle 时就一直等，这正是乱序投递要的；
+ * 每一轮都对照 `lastArrivalAt`，所以安静的 burst 仍然只等一个窗口（与旧行为同延迟，
+ * 冷启动的首条零防抖也不受影响：调用方的 `burstInProgress` 门挡着它）。
+ *
+ * 为什么等的是"没有新到达"而不是"附件到齐"：后者要求预先知道一共有几个文件，而那正是
+ * 乱序投递下不知道的事。
+ */
+async function waitForBurstSettle(
+  lastArrivalAt: Map<string, number>,
+  queueKey: string,
+  windowMs: number,
+  capMs: number,
+): Promise<void> {
+  let waited = 0;
+  while (waited < capMs) {
+    const before = lastArrivalAt.get(queueKey);
+    await new Promise((resolve) => setTimeout(resolve, windowMs));
+    waited += windowMs;
+    if (lastArrivalAt.get(queueKey) === before) return;
+  }
+}
+
 function withFileReplies(
   text: string,
   platformRoot: string | undefined,
@@ -469,15 +514,6 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
    * 24h 窗口内的附件仍由审计库恢复（restoreAttachments 的 DB 那条路）。
    */
   const sessionDelegations = new Map<string, DelegationLedger>();
-  /**
-   * 会话是否已经跑过带正文的回合。
-   *
-   * 用来识别"文件迟到了"：附件缓冲只在文字回合被消费，所以指令之后才到的文件进的是新缓冲，
-   * 而上一轮指令已经跑完、看不到它。若不告知，用户会以为机器人收了文件就该办事，实际它在
-   * 等一句永远不会来的指令——2026-10-07 实测正是这个形态（第三个文件迟到，干等到超时）。
-   * 所以迟到的文件要明确说"指令请再发一次"。
-   */
-  const seenTextTurn = new Set<string>();
 
   // 空串必须归一成 NaN 而不是 0：Number('') === 0，会被当成「显式配置了 0」，
   // 于是默认值永远不生效（2026-10-08 测试抓到的静默失效）。
@@ -507,7 +543,10 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     const burstInProgress = prevArrival !== undefined && now - prevArrival < debounceMs;
     lastArrivalAt.set(queueKey, now);
     if (!message.attachmentOnly && debounceMs > 0 && burstInProgress) {
-      await new Promise((resolve) => setTimeout(resolve, debounceMs));
+      // 等的是 burst 稳了，不是睡满一个窗。乱序投递下第三个文件可能落在指令之后
+      // （2026-10-19 实测跨度 3s > 2s 窗），固定窗治不了那种形状：文件到达时防抖
+      // 早已睡完，restoreAttachments 也拍完了快照，那一轮拿着不完整的文件集跑完。
+      await waitForBurstSettle(lastArrivalAt, queueKey, debounceMs, debounceMs * MAX_BURST_SETTLE_WINDOWS);
     }
     const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
     const task = prev.then(() => processMessage(message, progress, notice));
@@ -558,6 +597,13 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // 空回复不会让客户端 spinner 永转：适配器对附件-only 消息**不起流**（连秒回 ack 都不发，
     // 见 adapter 的 dispatchMessage），没有流就没有 spinner；本条要么由并窗补一条收据
     // （finish=true 收尾），要么一句话都不说。起没起流是渠道层的决定，与这里返回什么无关。
+    //
+    // 2026-10-19 晚些时候（乱序到达）：迟到文件**也不再回文本**。企微不保证同批消息按发送
+    // 顺序投递，"指令之后才到"是常态而不是异常；而旧那句"上一条指令已经处理完了"在回合还在
+    // 飞时就是假的（当时还没有任何判据能区分这两种时序，`seenTextTurn` 又在 runtime 之前
+    // 置位）。改成： burst 稳定器先把回合按住等文件落定（见 waitForBurstSettle），真的等到了
+    // 触顶还没稳的那些，进暂存池、由渠道并窗补一句中性的"等待你的指令"，并由下一条指令的
+    // 回合首帧带上。收据因此永远只有一句措辞（contracts.formatFileReceipt），没有第二份。
     if (message.attachmentOnly && message.attachments && message.attachments.length > 0) {
       // 统一按"保留最新 N 个"：既覆盖会话日积月累挤掉最旧，也覆盖一次就发超过 N 个。
       // 最初分两条路写（先看出能不能装下本轮），结果一批超限时保留了**最先**的 N 个、
@@ -574,17 +620,17 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         requestId, wecomMessageId: message.messageId, principalId,
         input: withAttachmentPaths(message.text, accepted, sessionKey), createdAt, outcome: 'attachment_received',
       });
-      // 仍要张嘴的只剩一种："用户不知道的事"——暂存超限丢了文件。
+      // 仍要张嘴的只剩一种："用户不知道的事"——暂存超限丢了文件。迟到文件不再由这里回话：
+      // 乱序之下那不是异常，且那一句在回合还在飞时就是假的。收据与下一步由渠道并窗
+      // （"已收到 N 个文件：…，等待你的指令"）与下一条指令的回合首帧承担。
       // 曾有"请告诉我需要做什么。"——那是噪音：用户当然知道要说话，而且一发 N 个文件就刷
       // N 条同样的话。
       const notes: string[] = [];
       if (dropped.length > 0) notes.push(`另有 ${dropped.length} 个超出暂存上限（${MAX_PENDING_ATTACHMENTS} 个）未收：${dropped.map((f) => f.filename).join('、')}`);
-      if (seenTextTurn.has(sessionKey)) notes.push('上一条指令已经处理完了，请把指令再发一次，这些文件会一起用上');
       if (notes.length === 0) return '';
       return notes.join('；');
     }
 
-    seenTextTurn.add(sessionKey);
     // 本轮交付集（规则一）：自上次委派开始以来新到达的附件；没有新到来的才沿用上次交付的
     // 那批（纠正/重试流）。池子本身不清空，见 sessionAttachments / sessionDelegations 注释。
     // 另外并入 DB 里 Recent 的附件接收行——内存关联会随服务重启失记（2026-10-07 实测：
