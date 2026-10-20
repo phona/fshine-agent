@@ -10,7 +10,7 @@
 |---|---|---|---|
 | T1 worker 超时全链 | `tests/e2e/turn-loop-worker-timeout.test.ts` | 3 | 超时话术一字不差（`DELEGATION_TIMEOUT_FAILURE`）；`delegation_span` 记 `failureClass=timeout`；workerMessages 断点留痕；同 taskId 续跑从断点续；取消优先于超时（signal 中止 + 超时同刻，收取消话术） |
 | T2 长期记忆全链 | `tests/e2e/turn-loop-long-memory.test.ts` | 3 | cue 命中即整理；候选溯源到真实 user_message 事件（reduceLongMemory 全链）；投影头注入模型输入（含"不代表授权"框架）；principal 级跨会话延续；记忆数字上屏现状（见"真发现"②） |
-| T3 附件全链 | `tests/e2e/turn-loop-attachments.test.ts` | 3 | 附件-only 暂存（`已收到 <文件名>` + `attachment_received` 留痕 + 真实落盘）；先文件后指令 → 路径注入过实体门 → 计划激活真实执行；下载失败降级不吞消息 |
+| T3 附件全链 | `tests/e2e/turn-loop-attachments.test.ts` | 4 | 附件-only 暂存（`已收到 <文件名>` + `attachment_received` 留痕 + 真实落盘）；先文件后指令 → 路径注入过实体门 → 计划激活真实执行；下载失败降级不吞消息；文件到过之后与附件无关的后续回合不再复读收据（D-110） |
 | T4 替身保真护栏 | `tests/e2e/harness-fidelity.test.ts` | 2 | 语义表必须平台派生、非空、锚点在场（HF-1）；平台 RESULT 信封真实形状仍被 `withoutPlatformEnvelope` 剥净（HF-2，真 spawn 一次 CLI） |
 | T5 输入形状多样化 | `tests/e2e/input-shape-variants.test.ts` | 11 | 口语/全角标点/首尾空白/超长铺垫/语气词 emoji/非实体词错字六类变体过追问、重查、澄清三个锚：零翻车——确定性机器（实体门逐字 includes、澄清机械组装、编号绑定）对输入形状免疫 |
 

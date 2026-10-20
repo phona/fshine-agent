@@ -692,6 +692,49 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
     expect(notices).toEqual([]);
   });
 
+  // 2026-10-20 用户观察（企微会话实录）：用户先发 3 个 Excel + 一条指令，之后又问了一句
+  // 与附件无关的话（"发一下 幻骥达2026年08月个税申报.xlsx 给我"），气泡里又冒出
+  // "已收到 3 个文件：工资表2026-8月(1).xlsx、幻骥达26年8月社保实际缴费金额模版…"——
+  // 用户原话："怎么不管怎么样都会显示说收到附件？"
+  // 根因：收据帧挂在"本轮交付集非空"上，而规则一在"没有新附件"时**沿用上次委派的交付集**
+  // （纠正/重试流），于是每一句后续指令都复读一遍旧清单。修法：收据只认"本轮真有新到达"。
+  it('沿用旧交付集的回合不再复读收据(交付不变,只是不二次披露)', async () => {
+    const { send, seen, notices } = probe();
+    await send({ attachmentOnly: true, attachments: [
+      file('工资表2026-8月(1).xlsx'),
+      file('幻骥达26年8月社保实际缴费金额模版（幻企赢导入.xls'),
+      file('2026年8月工资（幻骥达）(1).xlsx'),
+    ] });
+    await send({ text: '帮我做工资表' });
+    expect(notices).toHaveLength(1);                      // 收据只属于"文件刚到"那一轮
+    notices.length = 0;
+    await send({ text: '发一下 幻骥达2026年08月个税申报.xlsx 给我' });   // 一个字附件都没有
+    expect(notices).toEqual([]);                          // 这句与附件无关,不播旧清单
+    // 文件本身仍交付给 worker：纠正/重试流（"社保填错了,重做"）要靠它,只是不再出声
+    // （附件-only 消息不启回合,所以两个指令回合 = seen[0]、seen[1]）
+    expect(deliveredNames(seen[1]!)).toHaveLength(3);
+  });
+
+  it('纠正/重试流:文件照样沿用,收据不二次上屏', async () => {
+    const { send, seen, notices } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xls')] });
+    await send({ text: '帮我做工资表' });
+    notices.length = 0;
+    await send({ text: '社保填错了,重做' });
+    expect(deliveredNames(seen[1]!)).toEqual(['a.xlsx', 'b.xls']);
+    expect(notices).toEqual([]);
+  });
+
+  it('新文件到达的回合照常披露,且只列本轮新到的那几个', async () => {
+    const { send, notices } = probe();
+    await send({ attachmentOnly: true, attachments: [file('a.xlsx'), file('b.xls')] });
+    await send({ text: '帮我做工资表' });
+    notices.length = 0;
+    await send({ attachmentOnly: true, attachments: [file('d.xlsx')] });
+    await send({ text: '把凭证也做了' });
+    expect(notices).toEqual(['已收到 1 个文件：d.xlsx']);   // 不把 A/B 也列进来
+  });
+
   it('披露送达失败不影响本轮结果(披露是增强,不是门)', async () => {
     const base = fakeStore();
     const store = {

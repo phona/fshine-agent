@@ -25,7 +25,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { ServerAssembly } from '../../apps/server/assembly';
-import { parseAttachmentEnvelope } from '../../apps/server/handler';
+import { parseAttachmentEnvelope, TURN_ACCEPTED_TEXT } from '../../apps/server/handler';
 import {
   boot,
   gatedWorker,
@@ -257,6 +257,69 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     // 附件回合的终稿照常送达，两个文件都进了暂存池（登记两条）
     expect(text).toContain('两个文件都读到了');
     expect(outcomes).toEqual(['attachment_received', 'attachment_received', 'replied']);
+    await assembly.close();
+  });
+
+  // 2026-10-20 用户观察（企微会话实录）：用户先发几个 Excel + 一条指令，之后又问了一句
+  // 与附件无关的话（"发一下 幻骥达2026年08月个税申报.xlsx 给我"），那一回合的气泡里又
+  // 冒出"已收到 3 个文件：…"——用户原话："怎么不管怎么样都会显示说收到附件？"
+  // 根因：收据帧挂在"本轮交付集非空"上，而规则一在"没有新附件"时沿用上次委派的交付集
+  // （纠正/重试流），于是每一句后续指令都复读旧清单。handler 单测钉死语义，这里在全链上
+  // 钉死形状：收据只属于"文件刚到"那一轮，与附件无关的后续回合安静交付（文件照旧进请求）。
+  it('AT-5 文件到过之后：与附件无关的后续回合不再复读收据（交付不变）', async () => {
+    const observed: string[] = [];
+    const { sdk, turn, assembly } = await boot({
+      main: mainDriver([
+        { kind: 'conversation', text: '两个文件都读到了，202606 核对完成。' },
+        { kind: 'conversation', text: '个税申报表在平台导出目录里，我发你。' },
+      ], (input) => { observed.push(JSON.stringify(input.messages)); }),
+      worker: gatedWorker([]),
+    });
+    const outcomes = recordRequestOutcomes(assembly);
+
+    // 直接派发 file 帧（与 AT-4 同法：文件消息没有终帧可等，并窗到点才补孤儿收据，
+    // 而指令随后就到——这条用例守的正是"指令回合的收据只播一次"）
+    const emitFile = async (filename: string): Promise<void> => {
+      sdk.fileToServe = { filename, buffer: Buffer.from('e2e-attachment-bytes') };
+      const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+      sdk.emit('message.file', {
+        headers: { req_id: `req_${messageId}` },
+        body: {
+          msgtype: 'file',
+          from: { userid: 'e2e_user' },
+          msgid: messageId,
+          chattype: 'single',
+          file: { url: `https://wecom-mock/${filename}`, aeskey: 'e2e-aes-key' },
+        },
+      });
+      await vi.waitFor(async () => {
+        expect((await recentAttachmentRows(assembly)).length).toBeGreaterThanOrEqual(emitted);
+      });
+      emitted += 1;
+    };
+
+    let emitted = 0;
+    await emitFile('工资表2026-8月(1).xlsx');
+    await emitFile('幻骥达26年8月社保实际缴费金额模版（幻企赢导入.xls');
+    const first = await turn('核对一下我刚发的两个文件 202606');
+    const second = await turn('发一下 幻骥达2026年08月个税申报.xlsx 给我');   // 一个字附件都没有
+
+    // 整个会话里收据只出现一次，且只属于第一个（文件刚到那一个）回合
+    const receipts = sdk.frames.filter((frame) => frame.content.startsWith('已收到'));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]!.content).toContain('工资表2026-8月(1).xlsx');
+    expect(receipts[0]!.content).toContain('幻骥达26年8月社保实际缴费金额模版（幻企赢导入.xls');
+    // 第二个回合零收据：不播旧清单，受理帧照旧（没有收据顶替它时它就是"开跑了"的证据）
+    expect(second.notices.filter((t) => t.startsWith('已收到'))).toEqual([]);
+    expect(second.steps).toContain(TURN_ACCEPTED_TEXT);
+    expect(second.text).toBe('个税申报表在平台导出目录里，我发你。');
+    // 但文件仍交付给 worker（规则一的纠正/重试沿用）：请求文本里两个文件名都在
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toContain('工资表2026-8月(1).xlsx');
+    expect(observed[1]).toContain('幻骥达26年8月社保实际缴费金额模版（幻企赢导入.xls');
+    // 第二个回合是真正的 replied 回合，不是被附件短路掉的那种
+    expect(outcomes).toEqual(['attachment_received', 'attachment_received', 'replied', 'replied']);
+    expect(first.text).toContain('两个文件都读到了');
     await assembly.close();
   });
 });

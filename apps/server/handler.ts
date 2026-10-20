@@ -112,6 +112,21 @@ function nextArrivalStamp(): number {
 }
 
 /**
+ * 规则一的选择结果：本轮交付集，以及**这批文件是不是本轮新到的**。
+ *
+ * 为什么必须把 `fresh` 带出来：收据帧（规则二）只该在"用户本轮真的发了文件"时上屏。
+ * 分支 ② 沿用上次委派交付集的那批文件，它们的收据早在到达那一轮就播过——2026-10-20
+ * 用户观察（企微会话实录）：3 个文件 + 一条指令之后，用户又问了一句与附件无关的话，
+ * 气泡里又冒出"已收到 3 个文件：…"，用户原话"怎么不管怎么样都会显示说收到附件？"。
+ * 交付行为一个字节不改（worker 照旧拿到那批文件），只是不再复读旧清单。
+ */
+interface DeliveredSelection {
+  files: IncomingAttachment[];
+  /** true = 本轮有新到达（或账本失记、全量按未消费）；false = 沿用上次委派的交付集。 */
+  fresh: boolean;
+}
+
+/**
  * 规则一：本轮交付集 = 自「上次委派开始」以来新到达的附件。
  *
  * 三种收尾，缺一不可：
@@ -126,15 +141,15 @@ function nextArrivalStamp(): number {
 function selectDeliveredAttachments(
   candidates: readonly PooledAttachment[],
   ledger: DelegationLedger | undefined,
-): IncomingAttachment[] {
+): DeliveredSelection {
   // 从未委派过（全新会话，或重启后账本失记）：全部按未消费交付。
-  if (!ledger) return [...candidates];
+  if (!ledger) return { files: [...candidates], fresh: true };
   const fresh = candidates.filter(
     (file) => file.arrivedAt === undefined || file.arrivedAt > ledger.lastDelegationStartedAt,
   );
-  if (fresh.length > 0) return fresh;
+  if (fresh.length > 0) return { files: fresh, fresh: true };
   // ② 纠正/重试流：直接沿用上次交付的那一批（仍要过存在性检查——tmp/ 可能已被清理）。
-  return ledger.lastDelegationDelivered.filter((file) => existsSync(file.path));
+  return { files: ledger.lastDelegationDelivered.filter((file) => existsSync(file.path)), fresh: false };
 }
 
 /**
@@ -149,10 +164,30 @@ function selectDeliveredAttachments(
  * （企微的流式回复按入站消息的 req_id 走，N 个文件必然是 N 个气泡，见
  * channel-wecom adapter），收据因此并到这一帧上——用户先看到"已收到 3 个文件：…"，
  * 再看到同一气泡里的进度与终稿。
+ *
+ * 2026-10-20 补一刀边界：这一帧**只在本轮真有新到达的附件时才播**（判据见
+ * DeliveredSelection.fresh）。沿用上次交付集的回合（纠正/重试流）安静交付——
+ * 那批文件的收据早在到达那一轮播过，每句后续指令都复读一遍就是刷屏。
  */
 export function describeDeliveredFiles(files: readonly IncomingAttachment[]): string {
   if (files.length === 0) return '';
   return formatFileReceipt(files.map((file) => file.filename));
+}
+
+/**
+ * 本轮交付集 + 它是不是"本轮新到的"。
+ *
+ * 为什么必须把 `fresh` 带出来：收据帧（规则二）只该在"用户本轮真的发了文件"时上屏。
+ * 规则一在"没有新附件"时沿用上次委派的交付集（纠正/重试流），那批文件的首帧收据早在
+ * 它们到达那一轮就播过——2026-10-20 用户观察（企微会话实录）：3 个文件 + 一条指令之后，
+ * 用户又问了一句与附件无关的话（"发一下 幻骥达2026年08月个税申报.xlsx 给我"），气泡里
+ * 又冒出"已收到 3 个文件：…"，用户原话"怎么不管怎么样都会显示说收到附件？"。
+ * 交付行为不变（worker 仍拿到那批文件），只是不再复读。
+ */
+interface RestoredAttachments {
+  delivered: IncomingAttachment[];
+  /** 本轮是否真的有新到达的附件（含与正文同条到达的；账本失记时算新，见选择结果）。 */
+  fresh: boolean;
 }
 
 /**
@@ -173,7 +208,7 @@ async function restoreAttachments(
   store: HandlerDeps['store'],
   sessionAttachments: Map<string, PooledAttachment[]>,
   ledger: DelegationLedger | undefined,
-): Promise<IncomingAttachment[]> {
+): Promise<RestoredAttachments> {
   const fromMemory = sessionAttachments.get(sessionKey) ?? [];
   const fromDb = await loadRecentAttachments(store, message.wecomUserId, sessionKey);
   const merged = new Map<string, PooledAttachment>();
@@ -192,10 +227,14 @@ async function restoreAttachments(
     .filter((file) => existsSync(file.path))
     .map((file) => ({ ...file, arrivedAt: file.arrivedAt ?? nextArrivalStamp() }));
   if (pooled.length > 0) sessionAttachments.set(sessionKey, pooled);
-  return selectDeliveredAttachments(candidates, ledger)
-    .sort((a, b) => a.path.localeCompare(b.path))
-    .slice(-MAX_PENDING_ATTACHMENTS)
-    .filter((file) => existsSync(file.path));
+  const selection = selectDeliveredAttachments(candidates, ledger);
+  return {
+    delivered: selection.files
+      .sort((a, b) => a.path.localeCompare(b.path))
+      .slice(-MAX_PENDING_ATTACHMENTS)
+      .filter((file) => existsSync(file.path)),
+    fresh: selection.fresh,
+  };
 }
 
 /**
@@ -636,7 +675,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // 另外并入 DB 里 Recent 的附件接收行——内存关联会随服务重启失记（2026-10-07 实测：
     // 连重启三次后，用户早先上传的文件还在盘上，但请求里一个路径都没有，worker 只能回
     // "没有数据"）。落库数据因此不只是审计，也是重启后的恢复源。
-    const attachments = await restoreAttachments(
+    // `attachmentsAreNew` 与交付集同源：它决定收据帧播不播（见 announceDeliveredFiles）。
+    const { delivered: attachments, fresh: attachmentsAreNew } = await restoreAttachments(
       sessionKey, message, store, sessionAttachments, sessionDelegations.get(sessionKey),
     );
 
@@ -752,7 +792,12 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 2026-10-19 起它同时是**附件回合的收据**（附件-only 消息自己不再回气泡，见上方
       // attachmentOnly 分支），因此"这一帧上过屏"要记下来：announceAccepted 据此跳过
       // 受理帧——披露帧本身就是"回合开跑了"的证据，且它先说。
+      //
+      // 2026-10-20：只在本轮**真有新到达**的附件时才播（attachmentsAreNew）。沿用上次
+      // 交付集的回合（纠正/重试流）安静交付：那批文件的收据早在到达那一轮播过，每句后续
+      // 指令都复读一遍旧清单，用户看到的就是"不管发什么都在说收到附件"。
       const announceDeliveredFiles = async (): Promise<void> => {
+        if (!attachmentsAreNew) return;                        // 沿用旧集：无可披露
         const text = describeDeliveredFiles(attachments);
         if (!text) return;                                   // 本轮没有附件：无可披露
         try {
