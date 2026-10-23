@@ -11,6 +11,23 @@ export interface PlanCall {
   args: unknown[];
 }
 
+/**
+ * worker 一次计划提交的两种形态：
+ *   · `inline`——现状：`<gateway> plan {…}` 单行裸 JSON；
+ *   · `file`——`<gateway> plan --file <工作区路径>`，宿主读文件后走同一份校验。
+ *
+ * 为什么需要 file 通道（2026-10-23 实测）：worker 无法稳定一次写对裸 JSON——
+ * 本能给 JSON 加 shell 引号、命令尾部跟 `2>&1` / `; echo`，而宿主解析的是原始
+ * 命令字符串，引号与尾巴原样进 JSON.parse。req_368b68b3 因此 11 连撞空转
+ * 4 分 11 秒 / 657k tokens，最后靠黑盒探针才摸到规则。而"宿主 absorbing 格式
+ * 波动"是被事故否决的路（见 locatePlanSubmission 注释：absorbing 曾把模型误导
+ * 成把方案 JSON 打印成助手文本，12 步全空转）。给一条不经过命令行的精确通道，
+ * 模型才能用本地 lint 廉价迭代，而不是拿门当校验器黑盒试探。
+ */
+export type PlanSubmission =
+  | { kind: 'inline'; calls: PlanCall[]; userConfirmed?: boolean }
+  | { kind: 'file'; path: string };
+
 export interface PlanEvaluation {
   planId: string;
   version: number;
@@ -333,6 +350,14 @@ export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePl
 
 /** 计划管理子命令：worker 不得直达，只由宿主调用。 */
 const PLAN_SUBCOMMANDS = ['evaluate', 'activate', 'current', 'status'];
+/**
+ * `--file` 取值形态：等号或空白分隔，路径是单个 token 且必须到行尾。
+ * 行尾硬边界是这条通道的价值本身——裸 JSON 通道的病根之一就是命令尾巴
+ * （`2>&1` / `; echo`），不带进新通道。
+ */
+const PLAN_FILE_FLAG_RE = /^--file(?:=|\s+)(\S+)$/;
+/** `--file` 旗标出现的前缀形态：= 或任意空白（tab 也是模型的常见发射形态）取值都算；裸旗标（无值）也归本分支，由取值正则给出 PLAN_FILE_FLAG_INVALID。 */
+const PLAN_FILE_PREFIX_RE = /^--file(?=[=\s]|$)/;
 /** 网关 plan 之前允许出现的内容：空 / bash|sh / 路径前缀，以及 bash|sh + 路径前缀。 */
 const ALLOWED_PLAN_PREFIX_RE = /^(?:(?:bash|sh)\s+)?(?:[^\s]+\/)?$/;
 /** 报错里回显"多出来的内容"时的截断长度：够模型认出自己加了什么，又不把消息撑爆。 */
@@ -369,8 +394,8 @@ function collapseExtra(text: string): string {
   return text.trim().replace(/\s+/g, ' ').slice(0, EXTRA_PREFIX_MAX_CHARS);
 }
 
-/** Parse the worker's intercepted gateway `plan { ... }` JSON command. */
-export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; userConfirmed?: boolean } | null {
+/** Parse the worker's intercepted gateway plan submission: inline JSON or `--file <path>`. */
+export function parsePlanCallsCommand(command: string): PlanSubmission | null {
   const trimmed = command.trim();
   // 三态分辨，不能一律返回 null：
   //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
@@ -396,6 +421,38 @@ export function parsePlanCallsCommand(command: string): { calls: PlanCall[]; use
   if (PLAN_SUBCOMMANDS.includes(subcommand)) {
     throw errorFor('PLAN_SUBCOMMAND_RESERVED', subcommand);
   }
+  // ── --file 通道（先于 JSON 分支）──────────────────────────────────────────
+  // payload 以 --file 开头时它不是 JSON，落进 JSON.parse 只会得到一句答非所问的
+  // PLAN_JSON_PARSE——那正是 2026-10-23 实测里 worker 无路可走时的形态。路径取值
+  // 必须到行尾：尾巴（2>&1 / ; echo）是裸 JSON 通道的病根，不带进新通道。
+  if (PLAN_FILE_PREFIX_RE.test(payload)) {
+    const file = PLAN_FILE_FLAG_RE.exec(payload);
+    if (!file) throw errorFor('PLAN_FILE_FLAG_INVALID', payload);
+    return { kind: 'file', path: file[1]! };
+  }
+  // ── 旗标形态 payload（C4）────────────────────────────────────────────────
+  // `--` 开头的旗标（--file 已在上面分流）与元数据别名 `schema`：宿主不当成计划
+  // 提交，返回 null 交 serve-gate 裁决——元数据出口（plan --schema / plan schema）
+  // 在门里有白名单（SERVE_METADATA_COMMANDS），放行到平台 CLI 逐字打印
+  // plan-schema.json；其余旗标落在门的计划教学分支（PLAN_SHAPE_GATE_TEACHING，
+  // C2 起已教两种提交形态）。判据不在此处写第二份名单。
+  //
+  // 2026-10-23 实证：这套白名单一直存在，但 driver 的计划解析把 `plan ` 之后任何
+  // 东西当 JSON 草案，--schema 直接 PLAN_JSON_PARSE——门里的元数据分支因 driver
+  // 先行拦截而不可达，执行层 SKILL 教的是个死命令。返回 null 让两条路都活：
+  // 元数据放行到平台；未知旗标拿到教学话术（而不是"JSON 位置 1 处有个 -"）。
+  if (payload === 'schema' || payload.startsWith('--')) return null;
+  return { kind: 'inline', ...parsePlanCallsPayload(payload) };
+}
+
+/**
+ * 计划草案 payload 的纯校验：inline 与 --file 两条通道共用的唯一一份判据。
+ *
+ * 宿主读文件后原样交给它——文件内容与命令行 payload 过同一套校验，不存在
+ * "文件通道宽松一点"的第二标准（宽容面 = 攻击面，与 ALLOWED_PLAN_PREFIX_RE
+ * 不 absorbing 格式波动是同一条纪律）。
+ */
+export function parsePlanCallsPayload(payload: string): { calls: PlanCall[]; userConfirmed?: boolean } {
   let parsed: unknown;
   try { parsed = JSON.parse(payload); }
   catch (error) {

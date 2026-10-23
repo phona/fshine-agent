@@ -137,7 +137,7 @@ const WRITE_CONTENT_ARG = 'content';
  */
 const WRITE_ROOT_SEGMENT = 'tmp';
 /** 单次写入体积上限：草稿产物够用，同时防止有人拿它当磁盘占满工具。 */
-const MAX_WRITE_BYTES = 256 * 1024;
+export const MAX_WRITE_BYTES = 256 * 1024;
 
 /**
  * 单个取值截断：参数摘要不许把进度帧撑成长文。

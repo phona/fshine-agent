@@ -310,6 +310,91 @@ describe('离线全链 e2e：被拒计划收敛保护（DECLINED_PLAN_LIMIT）',
       worker.session.dispose();
     }
   });
+
+  it('A4b 同一任务连续 6 次提交形状非法的计划：前 5 次 PLAN DECLINED（PLAN_JSON_PARSE），第 6 次收敛', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await makeWorkerSession(counter, { sessionId: 'task_shape_limit' });
+    try {
+      // 2026-10-23 实测形状（req_368b68b3）：worker 把计划 JSON 用单引号包起来。
+      // C3 前这类失败在 parsePlanCallsCommand 抛出点提前返回、从不计入 declinedPlans，
+      // 11 连撞空转 4 分 11 秒 / 657k tokens；C3 起形状失败计入同一收敛计数器。
+      const command = `bin/17dz plan '{"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202609"]}]}'`;
+      const verdicts: Array<{ block?: boolean; reason?: string } | undefined> = [];
+      for (let i = 1; i <= 6; i += 1) {
+        verdicts.push(await bashCall(worker, `call_shape_${i}`, command));
+      }
+
+      // 前 5 次：逐次 PLAN DECLINED（形状诊断），且不预告收敛
+      for (let i = 0; i < 5; i += 1) {
+        expect(verdicts[i]?.block).toBe(true);
+        expect(verdicts[i]?.reason).toContain('PLAN DECLINED');
+        expect(verdicts[i]?.reason).toContain('PLAN_JSON_PARSE');
+        expect(verdicts[i]?.reason).not.toContain('DECLINED_PLAN_LIMIT');
+      }
+      // 第 6 次：同一熔断器收敛（措辞与计数逐字钉死，D-099：提交次数不是拒绝次数）
+      expect(verdicts[5]?.block).toBe(true);
+      expect(verdicts[5]?.reason).toBe(`PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', '连续 6 次提交方案均未激活')}`);
+      // 形状失败在解析期就被拦下：evaluate 从未被调用，平台计划门全程未被咨询
+      expect(counter.evaluates).toBe(0);
+      expect(Object.keys(ledger().plans ?? {})).toEqual([]);
+    } finally {
+      worker.session.dispose();
+    }
+  });
+});
+
+// ── A6：plan --schema 元数据自救通道（C4）──────────────────────────────────
+
+describe('离线全链 e2e：plan --schema 元数据自救通道（C4）', () => {
+  it('A6 --schema 不被 driver 当计划提交拦下，门的元数据白名单放行，CLI 逐字打印计划 schema', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_schema' });
+    try {
+      // 2026-10-23 实证的死命令：driver 的计划解析曾把 `plan ` 之后任何东西当 JSON
+      // 草案，--schema 吃 PLAN_JSON_PARSE——门里为元数据写的白名单因 driver 先行
+      // 拦截而不可达。C4 起分发器认出旗标形态返回 null，这一跳落门的元数据分支。
+      const verdict = await bashCall(worker, 'call_schema', 'bin/17dz plan --schema');
+      // 放行 = 不拦（verdict 无 block）；若被拦 reason 会带 PLAN DECLINED 或教学话术
+      expect(verdict?.block).toBeUndefined();
+      // 不是提交：不计数、不碰平台计划门
+      expect(counter.evaluates).toBe(0);
+
+      // 平台 CLI 确实认这个出口（本地打印 plan-schema.json，不触平台会话）
+      const printed = spawnSync(CLI, ['plan', '--schema'], {
+        encoding: 'utf8', timeout: 30_000, env: { ...process.env, DZ_EXECUTOR: 'mock' },
+      });
+      expect(printed.status).toBe(0);
+      expect(printed.stdout).toContain('"calls"');
+    } finally {
+      worker.session.dispose();
+    }
+  });
+
+  it('A6b schema 无横线写法同样放行（门白名单对两种写法归一同键）', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_schema_alias' });
+    try {
+      const verdict = await bashCall(worker, 'call_schema_alias', 'bin/17dz plan schema');
+      expect(verdict?.block).toBeUndefined();
+      expect(counter.evaluates).toBe(0);
+    } finally {
+      worker.session.dispose();
+    }
+  });
+
+  it('A6c 未知旗标（--stdin）落门的计划教学分支：教两种提交形态，而不是坏 JSON 诊断', async () => {
+    const counter = { evaluates: 0 };
+    const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_unknown_flag' });
+    try {
+      const verdict = await bashCall(worker, 'call_unknown_flag', 'bin/17dz plan --stdin');
+      expect(verdict?.block).toBe(true);
+      // 话术唯一来源 error-codes.ts（C2 起教两种形态：inline 裸 JSON + --file）
+      expect(verdict?.reason).toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING'));
+      expect(verdict?.reason).toContain('--file');
+    } finally {
+      worker.session.dispose();
+    }
+  });
 });
 
 // ── A5：写关闭三闸 ────────────────────────────────────────────────────────

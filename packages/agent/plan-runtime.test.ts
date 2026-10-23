@@ -23,9 +23,10 @@ describe('platform-backed execution plan runtime', () => {
     // 措辞收口在 error-codes.ts 表（三要素：码 + 期望/实际/正确形态）
     expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
     expect(() => parsePlanCallsCommand('bin/17dz plan activate --plan-id forged --evidence notification-delivered --token forged')).toThrow('PLAN_SUBCOMMAND_RESERVED');
-    expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}')?.calls).toEqual([
-      { operation: 'voucher.query-saved', args: ['A', '202609'] },
-    ]);
+    expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}')).toEqual({
+      kind: 'inline',
+      calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
+    });
     expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":{"account":"A"}}]}')).toThrow('PLAN_CALL_ARGS_NOT_ARRAY');
     expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
   });
@@ -34,7 +35,7 @@ describe('platform-backed execution plan runtime', () => {
     const bare = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]}';
     const expected = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
     // 对照：同样的内容去掉包装就是合法命令（围栏/引号是唯一差别）
-    expect(parsePlanCallsCommand(bare)?.calls).toEqual(expected);
+    expect(parsePlanCallsCommand(bare)).toEqual({ kind: 'inline', calls: expected });
     // markdown 围栏（带语言标签、单行）
     expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)).toThrow('PLAN_SHAPE_PREFIX');
     // 围栏无标签 + 多行美化（JSON 本体跨行）
@@ -59,9 +60,10 @@ describe('platform-backed execution plan runtime', () => {
     const calls = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
     const json = JSON.stringify({ calls });
     for (const prefix of ['', 'bash ', 'sh ', 'bash /abs/path/', 'sh /abs/path/', '/abs/path/']) {
-      expect(parsePlanCallsCommand(`${prefix}bin/17dz plan ${json}`)?.calls).toEqual(calls);
+      expect(parsePlanCallsCommand(`${prefix}bin/17dz plan ${json}`)).toEqual({ kind: 'inline', calls });
     }
     expect(parsePlanCallsCommand('bin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}')).toEqual({
+      kind: 'inline',
       calls: [{ operation: 'voucher.query-saved', args: [] }],
       userConfirmed: true,
     });

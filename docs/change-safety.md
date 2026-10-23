@@ -1023,3 +1023,32 @@ vitest 的用例总数是**被收集文件内容的纯函数**——已核本仓
 **仍登记的边界**：D-112 渠道身份未在授权存储和 handler 内存态隔离；旧转录没有 `routeReceipt` details 时，为兼容既有成功委派继续使用旧文本判据，无法机械区分旧版前置拦截文本。第二渠道接入前必须完成身份主键迁移与隔离表征；旧转录歧义作为部署过渡边界，不写成已修复。
 
 D-108/D-109 回归补强结束。
+
+---
+
+## 17. 计划提交空转治理波 · `--file` 通道 + 形状失败收敛 + 元数据自救（2026-10-23，C1–C4）
+
+**目标**：治 2026-10-23 实测的计划提交空转。`req_368b68b3`（「列一下清单看一下先」）367s / 656,960 tokens，其中 4 分 11 秒是 11 次 `plan_submit` 连续 `PLAN_JSON_PARSE`；`req_17790072`（查李华欠款）同形态 188.8s / 241k tokens。平台侧行为干净（当日 6 次平台调用、零循环），问题全在"模型写不对裸 JSON 而机制不兜底"。三个改动：C2 `--file` 提交通道（主修，治结构）、C3 形状失败计入收敛计数（兜底，治无界）、C4 `plan --schema` 元数据自救复活（小的通道修复）。设计论证与归档取证见 `debt-ledger.md` 对应补充记录。
+
+**根因（三重，全部有审计出处）**：① 宿主解析的是**原始命令字符串**（`plan-runtime.ts` payload = `plan` 令牌之后的命令原文），模型本能的 shell 引号（`'{…}'` / `"{\…}"`）与命令尾巴（`2>&1` / `; echo`）原样进 `JSON.parse`；② 熔断器 `MAX_DECLINED_PLANS_PER_TASK=5` 只在 `decidePlanSubmission`（解析成功之后）自增，形状失败在 `parsePlanCallsCommand` 抛出点提前返回、**从不计数**——11 连撞因此完全绕过熔断；③ `bin/17dz plan --schema`（执行层 SKILL 教的自救出口）被 driver 的计划解析当坏 JSON 拒掉，serve-gate 里为它写的元数据白名单（`SERVE_METADATA_COMMANDS`）因 driver 先行拦截而不可达——文档教的是个死命令。
+
+**基线（C1 冻结，2026-10-23 11:00）**：`npm test` 1545 全绿 / 118 文件 + typecheck 0 错误。
+
+| 波 | 改动（位置） | 用例数 | 变异验证（F3） |
+|---|---|---|---|
+| C1 | 4 条表征 golden 先行（`plan-shape-fuzz.test.ts` 3 条：`--file`/`--schema`/`schema` 当前按坏 JSON 拒；`pi-coding-driver-plan-audit.test.ts` 1 条：20 连形状失败不触发收敛） | 端点未单独实测（与 C2 合并见下；"1549"是枚举推算，不当实测引用） | —（golden 由后续波翻转） |
+| C2 | `--file` 通道：`plan-runtime.ts` 分发器（`PlanSubmission` 联合类型 + `PLAN_FILE_FLAG_RE` 行尾硬边界 + `parsePlanCallsPayload` 纯校验抽出，inline/file 两条通道共用一份判据）；`pi-coding-driver.ts` `resolvePlanSubmission`（边界 = 提案 payload 同一把尺 `workspaceRelPath`+`isInsideScratch`、缺 scratchDir fail-closed；体积 = 导出复用 `MAX_WRITE_BYTES` 256KB；内容 = 同一份 payload 校验）；`error-codes.ts` 双形态教学（`planFileExample()` + `CORRECT_PLAN_SHAPE` 两形态并列 + 反模式"不要加引号/不要跟 2>&1"）+ 3 个新码（`PLAN_FILE_FLAG_INVALID`/`PLAN_FILE_OUT_OF_WORKSPACE`/`PLAN_FILE_TOO_LARGE`）；`index.ts` 导出。审计 detail 带工作区相对路径 | 1545 → **1563**（+18，含 C1 的 4 条与 C1 golden 改写，C1/C2 之间未单独测） | 边界尺改永不拒 → **4 红**（越界 / 缺 scratchDir / `..` 穿越 / 符号链接） |
+| C3 | 形状失败计入收敛：`decideToolCall` catch 处自增同一 `declinedPlans`，超限返回既有 `PLAN STOP`+`DECLINED_PLAN_LIMIT` 终局（措辞纪律不变：提交次数不伪装成拒绝次数，D-099）；归零点仍只有 ACTIVE | 1563 → **1564** | 注掉 catch 自增 → **5 红**（单测 4：纯形状/文件通道/混合/终局后递增 + e2e A4b） |
+| C4 | 元数据自救：分发器对旗标形态 payload（`--` 开头 + `schema` 别名）返回 null——不当计划提交、不计收敛，落 serve-gate 既有裁决（元数据白名单放行到平台 CLI 逐字打印 plan-schema.json；未知旗标落门的计划教学分支，C2 起已教双形态） | 1564 → **1566** | 停掉旗标放行 → **8 红**（fuzz 3 条 null + 单测 2：schema 不计收敛/带尾巴元数据 + e2e A6/A6b/A6c） |
+
+**验收**：F1 表征先行且四条 golden 随 C2/C3/C4 各自翻转（fuzz 3 条 + audit 1 条；翻转点在各波测试注释注明）；F2 用例数只增不减（1545 → **1582**，+37 全可逐条数：本波 C1–C4 共 21 条 + review 补强 16 条（R1/R2 的 14 条 + Round 2 的 2 条判别用例），118 文件不变）+ typecheck 0 错误 + `tests/e2e` 全绿（含新增 A4b 形状连击收敛、A6/A6b/A6c 元数据通道三条）；F3 四个变异全红后回滚复绿——C2 边界尺 4 红 / C3 计数 5 红 / C4 旗标放行 8 红 / R1 isFile 守卫 1 红，均为**单测 + e2e 全量范围**重跑取数（波次表原记的 2/1/3 红是单测范围的旧覆盖面，Round 1 对账时修正），回滚后全量 1582 复绿、无 MUTATION 残迹（grep 实证）；F4 每波一个主题（C2 的解析/驱动/教学必须同 commit——`plan-teaching.test.ts` 的 D-011 锁要求教学与解析不互相打架）；F5 无红 state 叠补丁——两处测试失败都以改设计而非改断言收场：① `error-codes.ts` 注释里为描述 D-011 锁把锁的字面量本身写进注释，锁计数 1→2 红，改注释措辞（不在注释复述被锁的模式）；② 泄漏 lint 字面量 if 预算抓住第一版 C2 的 `!== '--schema'` carve-out（针对具体输入值的字面量比较 = 症状嗅探），未申请白名单而是把未知旗标分支整体移出 C2——C4 的"旗标返回 null 交门裁决"结构让它从数据判据自然长出来，专用码也不再需要；F6 见下；F7 文档同提交（本节 + debt-ledger 补充记录 + `plan-teaching.test.ts` 头注释修正）。
+
+**与设计文档的三处偏差（都有据，非静默发散）**：① `PLAN_SHAPE_UNKNOWN_FLAG` 专用码**未建**——未知旗标落门的 `PLAN_SHAPE_GATE_TEACHING`（已教双形态），driver 侧设码只会把同一判决复制第二份；② 文件读上限**复用** serve-gate 导出的 `MAX_WRITE_BYTES`（256KB）而非新常数——bash（python3 落盘）绕得过 write 工具那侧上限，宿主读需要自己的界，但数字只有一份；③ 新增第三个码 `PLAN_FILE_TOO_LARGE`（方案原列两码）——体积越界与路径越权是不同的失败模式，合并即谎报。
+
+**F6 探针（未跑，待用户确认）**：本波**未改静态提示词**——worker 提示词经 `planCommandForm` 注入的取值 = `planDraftExample()`，逐字节未动（`planDraftExample` 本身不变，新增的是并列的 `planFileExample`）；改的是运行时诊断（PLAN DECLINED 理由 / 门教学话术）。冻结基线可用 §16 W4 的 A1/A2/A4/A5（A1 7 调用/93.2s、A2 ⚠ 4 调用/214.5s、A4 1 调用、A5 0 调用）。真实 LLM 复跑需用户确认（花费真实 token）；建议判据 = A1/A4/A5 不劣化 + **新增观测量**：每轮 plan 形状拒绝数（今天形态 11 → 预期 ≤2，最坏 6 熔断）。
+
+**Round 1 review 补强（2026-10-23 下午，R1–R2；五个独立审查员并行）**：五视角审查（文件通道安全 / 计数器语义 / 回归保真 / 测试充分性 / 文档对账）后落地两批修复。**R1 三处代码修复**：① `--file` 分发守卫补 tab 形态——守卫/取值正则/码表措辞三处曾各说各话（守卫只认空格、正则 `\s+`、码表写"空格"），tab 发射会静默落 null 变成"非计划命令"（文件通道对一种常见模型形态静默失效），统一为 `[=\s]` 归一；② `reportPlanSubmission` detail 补 `AUDIT_DETAIL_MAX_CHARS` 截断（提案路径早就有，计划上报是唯一没挂尺子的出口）；③ 读文件前 `isFile()` 守卫——FIFO 的 size 为 0 但 `readFileSync` 会无限期阻塞，而 `beforeToolCall` 没有超时（对照 `defaultCliRunner` 的 30s SIGTERM），挂住的是宿主这一跳；读后 `Buffer.byteLength` 复核收 stat→read 的 TOCTOU 实际窗口。**R2 补 13 条判别性用例**（1566 → 1579；连同 R1 的 tab 分发用例共 +14，合计 1566 → 1580；Round 2 复审又补 2 条判别用例（`parsePlanCallsPayload` 的 user_confirmed 提取点、审计 detail 截断尺子——各自由 Round 2 变异实证判别力）至 1582）：`PLAN_FILE_TOO_LARGE` 零覆盖、`..` 穿越归一与符号链接逃逸（原有越界用例被任何朴素 `startsWith` 实现同样拒掉、不判别——这两条才判"真尺子"在不在）、工作区内绝对路径（worker 从 write 回执拿到的自然发射形态；一次"拒绝对路径"的加固就会把主通道变成死路）、文件坏内容 6 连撞收敛（文件通道版 C3）、混合 3 形状+3 越权计数且终局串逐字一致、终局后第 7/8/9 次 N 递增稳定、`--schema` 连提不计收敛、跨通道归零（4 败→文件激活→再 5 败）、子目录/目录当文件/`user_confirmed` 走确认门/带尾巴元数据放行。**三处既有行为经审查确认但登记不随波改**（各有权威注释）：写关闭路径不计入计数（与"熔断对该类失效"同形，但被 `writeClosed` latch 部分兜底且属既有语义，改它需要自己的波次）；计数器作用域是每次委派而非每任务（常量名与码表文案说 PER_TASK，任务级上界实为乘法——声明处补注释说明）；保留子命令（`plan current`/`status` 只读查询）计入提交数（措辞在该历史上虚增、概率低；排除它 lint 并不拦——错误码是标识符形判据、lint 明确背书数据判据，但排除会把这类拒绝重新变成无界空转，正是 C3 抗的向量，故登记不排除）。审查员环境无 `run_command`，全部定量结论由本会话实测复核；其中一处**测试设计算术错**（"5 败后接合法提交"——那次提交自己就是第 6 跳、撞 cap 到不了激活）以改测试收场，产品行为经复核无误。**Round 2 复审（三视角：测试判别性对抗验证 / 登记不修理由复核 / 完备性批判）**：结论无必须处理项；其指出的 5 条弱判别测试已加固（各补能杀死对应存活变异的断言）、2 条新判别用例已补（`parsePlanCallsPayload` 的 user_confirmed 提取点、审计 detail 截断尺子——原先均无主）、计数器作用域注释已落代码；对 R2 新测试补做三个变异实证判别力（原始串前缀替边界 → 3 红 / 终局后重置计数器 → 1 红 / 停体积双闸 → 1 红，回滚后复绿）；一处登记理由经复核更正（保留子命令计数的原"字面量 if 预算"理由不成立——错误码是标识符形判据、lint 明确背书数据判据——改为"概率低 + 排除会重开 C3 抗空转向量"）。
+
+**未关/留缝（登记，不阻塞）**：① **17dz-platform SKILL.md 跨仓更新未落**（方案 gate：单独确认后落）——`17dz-query/SKILL.md` 的"计划草案形状"节应改教"write 计划 JSON 到本轮工作区 → 本地 lint → `bin/17dz plan --file` 提交"工作流；`plan --schema` 自救指令 C4 后已真实可用，保留；② **`voucher.assistant-map` 能力与 SKILL.md 矛盾未修**——2026-10-23 09:31 那轮据此给过用户错误结论（"平台没有列举客户档案的能力"，实测 assistant-map 一次拉回 99 客户 + 759 供应商），修法同属跨仓 SKILL.md，与①同批；③ F6 探针待确认；④ 长期：结构化调用协议（`docs/a2a-protocol.md`）取代裸命令行 JSON 后，本类失败整体消失，`--file` 通道是它的踏脚石。
+
+计划提交空转治理波结束。

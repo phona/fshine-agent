@@ -16,8 +16,10 @@
  *
  * 跨仓读平台文件是可接受的（L2 单一来源就在平台侧）：这里读 17dz 的 plan-schema.json
  * 与 plan.js 的字段读取面，**不在 fshine 仓里抄一份平台事实**——抄了就又是第二份真相。
- * `bin/17dz plan --schema` 这个 CLI 形态平台尚未提供（plan 只有 evaluate/current/
- * status/activate 四个子命令），所以按方案许可走读文件核验。
+ * （2026-10-23 C4 起 `bin/17dz plan --schema` 已是真实可用的元数据出口——driver 的
+ * 计划解析认出旗标形态返回 null，门的 SERVE_METADATA_COMMANDS 白名单放行它到平台
+ * CLI 逐字打印 plan-schema.json，e2e A6 spawn 实证 exit 0。本测试仍走读文件核验：
+ * 教学形态与平台声明的逐字一致是 L2 判据，与 CLI 出口是否可用是两个事实。）
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -68,8 +70,10 @@ describe('计划草案教学：单一来源与平台 schema 一致（D-011）', 
 
   it('宿主解析器认这个形状：教学 → 解析 → 同一批 calls（教学与解析不打架）', () => {
     const parsed = parsePlanCallsCommand(concreteDraftCommand());
-    expect(parsed).not.toBeNull();
-    expect(parsed?.calls).toEqual([{ operation: 'finance.query-receivables', args: ['--query', '某公司', '--period', '202609'] }]);
+    expect(parsed).toEqual({
+      kind: 'inline',
+      calls: [{ operation: 'finance.query-receivables', args: ['--query', '某公司', '--period', '202609'] }],
+    });
     // 形状类错误的 correctForm 就是从同一份教学派生（消息文本不得另写一种形状）
     expect(messageFor('PLAN_SHAPE_PREFIX', '```json')).toContain(planDraftExample());
     expect(messageFor('PLAN_CALLS_NOT_ARRAY', 0)).toContain(planDraftExample());

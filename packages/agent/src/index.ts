@@ -91,6 +91,7 @@ export {
   loadPlanStatus,
   loadCurrentActivePlan,
   parsePlanCallsCommand,
+  parsePlanCallsPayload,
   planWriteClosed,
   validateCalls,
   type EvaluateAndActivatePlanOptions,
@@ -98,6 +99,7 @@ export {
   type PlanCall,
   type PlanCliRequest,
   type PlanCliRunner,
+  type PlanSubmission,
   type PlanEvaluation,
   type PlanRuntimeResult,
 } from './plan-runtime';

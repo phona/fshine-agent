@@ -20,17 +20,17 @@ import {
   createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
-import { copyFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
-import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
-import { messageFor, messageTextFor } from './error-codes';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation } from './plan-runtime';
+import { errorFor, messageFor, messageTextFor } from './error-codes';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
 import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
@@ -1123,6 +1123,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    * 不放松到"没报错就算"；越权拒绝 / CLI 失败 / 平台拒绝照旧计数，那一维没有放松。
    * ② 消息如实陈述这个数的含义（见 error-codes.ts 的 DECLINED_PLAN_LIMIT），不把提交
    * 次数伪装成拒绝次数。
+   *
+   * 作用域（2026-10-23 Round 1 review 登记，行为不改只登记）：计数器声明在本工厂内，
+   * 每个 worker 会话（每次委派）新建即重置——不是"每任务"。任务级上界 = 上限 × 委派
+   * 轮次，轮次另由 turn-state 的 MAX_NEEDS_ROUNDS / MAX_PLAN_ZERO_EXEC_STEPS 兜底；
+   * 常量名 MAX_DECLINED_PLANS_PER_TASK 的 PER_TASK 是历史口径，语义以本注释与调用点
+   * 为准（同 error-codes.ts 对该码名"名字是历史"的声明）。
    */
   let declinedPlans = 0;
   /** 写关闭拦截标志（D-075）：本回合拦过含写类 operation 的计划即置位，驱动据此替换终稿。 */
@@ -1266,7 +1272,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 都是"这一跳不许真调平台"），所以 allowed 恒 false：记的是判定结果，不是放行。
       allowed: false,
       reason: event.reason,
-      detail: event.detail ?? '',
+      detail: (event.detail ?? '').slice(0, AUDIT_DETAIL_MAX_CHARS),
     });
   }
 
@@ -1283,17 +1289,33 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       ? ctx.args
       : ctx.toolCall.arguments) as Record<string, unknown>;
     if (ctx.toolCall.name === 'bash') {
-      let parsed: ReturnType<typeof parsePlanCallsCommand>;
-      try { parsed = parsePlanCallsCommand(String(args?.['command'] ?? '')); }
-      catch (error) {
+      // 解析与（--file 时）读文件在同一个 try 里：形状、旗标、边界、读取、内容五类
+      // 失败共用一条 PLAN DECLINED 交付与一次上报。分开放就会重演另一类缺口——文件
+      // 通道的失败若绕过上报，"worker 指了个越界文件"在 tool_calls 里查不到。
+      let submission: ResolvedPlanSubmission | null = null;
+      try {
+        const parsed = parsePlanCallsCommand(String(args?.['command'] ?? ''));
+        if (parsed) submission = await resolvePlanSubmission(parsed);
+      } catch (error) {
         // 形状不合法的提交也要留痕：这一跳同样是"worker 提交了方案"的事实，只是宿主
         // 解析不出来（2026-10-10 实证：真实运行里 worker 先拿带引号的 JSON 试了一次，
         // 那一次在 tool_calls 里没有任何痕迹）。detail 为空，见 reportPlanSubmission。
-        const reason = `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}`;
+        //
+        // C3：形状失败计入收敛计数。2026-10-23 实证的缺口——req_368b68b3 连撞
+        // 11 次 PLAN_JSON_PARSE、空转 4 分 11 秒 / 657k tokens：解析抛出点在这条
+        // catch 里提前返回，declinedPlans（只在 decidePlanSubmission 内自增）从不
+        // 被碰，熔断器对形状失败整类失效。计数器语义不变（自上次成功激活以来未激活
+        // 的提交数——形状失败是其中一类），归零点仍只有 ACTIVE 那一支；措辞照旧说
+        // "提交未激活"而不是"被拒 N 次"（D-099 的诚实纪律：混合历史下它就是提交数）。
+        declinedPlans += 1;
+        const reason = declinedPlans > MAX_DECLINED_PLANS_PER_TASK
+          ? `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`
+          : `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}`;
         reportPlanSubmission({ reason });
         return { block: true, reason };
       }
-      if (parsed) {
+      if (submission) {
+        const resolved = submission;
         // ── 计划提交审计（补 tool_calls 缺口）────────────────────────────────────
         // 为什么必须在这里上报：整条计划分支**提前 return，不经 gate()**，serve-gate 的
         // onEvent 一次都不触发——于是"worker 提交了什么方案"在 tool_calls 里查不到，
@@ -1305,13 +1327,13 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // 变成结构事实——新增一条裁决出口时不需要记得再补一次上报，漏不掉。
         let reason = '';
         try {
-          const planVerdict = await decidePlanSubmission(parsed);
+          const planVerdict = await decidePlanSubmission(resolved);
           reason = planVerdict.reason ?? '';
           return planVerdict;
         } finally {
           // reason 为空只可能是 decidePlanSubmission 自己抛了（此时异常继续往外抛，
           // SDK 把它转成工具错误结果）：记一条占位判定，提交事实不因异常被抹掉。
-          reportPlanSubmission({ reason: reason || '计划评估未返回判定', detail: describePlanCalls(parsed.calls) });
+          reportPlanSubmission({ reason: reason || '计划评估未返回判定', detail: resolved.detail });
         }
       }
       // ── 提案创建拦截（方案 1 · B 波 B3）────────────────────────────────────────
@@ -1424,6 +1446,70 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       reason: event.reason,
       detail: event.detail.slice(0, AUDIT_DETAIL_MAX_CHARS),
     });
+  }
+
+  /** 解析后的计划提交：calls + 审计 detail（--file 通道带工作区相对路径）。 */
+  interface ResolvedPlanSubmission {
+    calls: PlanCall[];
+    userConfirmed?: boolean;
+    detail: string;
+  }
+
+  /**
+   * 把一次计划提交解析成可交付裁决的 calls：inline 原样透传；--file 走文件通道。
+   *
+   * 文件通道三道闸，判据全部沿用现成的那一份（不建第二套路径解析）：
+   *   ① 边界——workspaceRelPath + isInsideScratch，与提案 payload 边界检查、
+   *      write 门同一把尺；缺 scratchDir = fail-closed。放行面就是 write 门的放行
+   *      面：worker 只能指自己写得进去的文件（tmp/task_<taskId> 内）；
+   *   ② 体积——write 门同口径 MAX_WRITE_BYTES。write 工具写的文件天然不超，但
+   *      bash（python3 落盘）绕得过那侧上限，指个大文件会把宿主读爆；
+   *   ③ 内容——parsePlanCallsPayload，与 inline 同一份校验（文件通道不宽松：
+   *      宽容面 = 攻击面，与 ALLOWED_PLAN_PREFIX_RE 不 absorbing 同一条纪律）。
+   *
+   * detail 在成功路径带工作区相对路径（审计要能看出方案来自哪个文件）；失败路径
+   * detail 留空——拒绝理由里已带 worker 指的路径（actual），不往审计倒第二次。
+   */
+  async function resolvePlanSubmission(parsed: PlanSubmission): Promise<ResolvedPlanSubmission> {
+    if (parsed.kind === 'inline') {
+      return {
+        calls: parsed.calls,
+        ...(parsed.userConfirmed !== undefined ? { userConfirmed: parsed.userConfirmed } : {}),
+        detail: describePlanCalls(parsed.calls),
+      };
+    }
+    const scratchDir = options.scratchDir ?? null;
+    const rel = scratchDir ? workspaceRelPath(options.cwd, parsed.path) : null;
+    if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
+      throw errorFor('PLAN_FILE_OUT_OF_WORKSPACE', parsed.path);
+    }
+    const abs = path.resolve(options.cwd, rel);
+    let content: string;
+    try {
+      const stats = statSync(abs);
+      // 只收普通文件：目录/FIFO/设备文件过不了 size 这一关的语义——FIFO 的 size 为 0
+      // 但 readFileSync 会无限期阻塞，而 beforeToolCall 没有超时（对照 defaultCliRunner
+      // 的 30s SIGTERM），挂住的是宿主这一跳。worker 经 bash（mkfifo）可自造，虽非新
+      // 提权面（非网关 bash 本就能自挂），但宿主自己的读路径要有界。
+      if (!stats.isFile()) throw new Error('不是普通文件（目录/FIFO/设备），拒绝读取');
+      if (stats.size > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（${stats.size} 字节，上限 ${MAX_WRITE_BYTES}）`);
+      content = readFileSync(abs, 'utf8');
+      // 读后复核：stat 与 read 之间文件可能被撑大（TOCTOU，微秒级窗口且属自伤）——
+      // 读后按字节数再校一次。上限只认 write 门那一个数字，不设第二本账。
+      const bytes = Buffer.byteLength(content, 'utf8');
+      if (bytes > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（读取后 ${bytes} 字节，上限 ${MAX_WRITE_BYTES}）`);
+    } catch (error) {
+      // 表内码（体积越界）原样抛；文件系统错误包一层上下文——与 plan CLI 失败同一
+      // 手法：真实原因逐字带出，worker 看得见是哪个文件怎么了（ENOENT = 忘了先写）。
+      if (error instanceof Error && (error as { code?: string }).code?.startsWith('PLAN_')) throw error;
+      throw new Error(`计划文件读取失败（${rel}）：${error instanceof Error ? error.message : String(error)}`);
+    }
+    const payload = parsePlanCallsPayload(content);
+    return {
+      calls: payload.calls,
+      ...(payload.userConfirmed !== undefined ? { userConfirmed: payload.userConfirmed } : {}),
+      detail: `${rel} ${describePlanCalls(payload.calls)}`,
+    };
   }
 
   /**

@@ -10,7 +10,7 @@
  * 表里自由演化，码不变。
  */
 import { describe, expect, it } from 'vitest';
-import { evaluateAndActivatePlan, parsePlanCallsCommand, type PlanCliRunner } from './plan-runtime';
+import { evaluateAndActivatePlan, parsePlanCallsCommand, parsePlanCallsPayload, type PlanCliRunner } from './plan-runtime';
 
 const VALID = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202609"]}]}';
 
@@ -68,16 +68,26 @@ describe('plan-shape-fuzz：合法形状原样通过', () => {
 
   for (const { name, command, calls } of okCases) {
     it(name, () => {
-      const parsed = parsePlanCallsCommand(command);
-      expect(parsed).not.toBeNull();
-      expect(parsed!['userConfirmed']).toBeUndefined();
-      expect(parsed!['calls']).toEqual(calls);
+      // inline 形态（C2 起提交分 inline / file 两种，合法 JSON 一律 inline）
+      expect(parsePlanCallsCommand(command)).toEqual({ kind: 'inline', calls });
     });
   }
 
   it('user_confirmed:true 原样记录为审计字段（不是授权输入）', () => {
     const parsed = parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":true}');
     expect(parsed).toEqual({
+      kind: 'inline',
+      calls: [{ operation: 'finance.query-receivables', args: [] }],
+      userConfirmed: true,
+    });
+  });
+
+  it('parsePlanCallsPayload 从文件内容形态提取 user_confirmed（inline 与 --file 共用的提取点）', () => {
+    // 2026-10-23 Round 2：driver 文件支的 userConfirmed 透传行本身没有运行时消费点
+    // （runtime 按设计忽略模型自报确认，见下面"只审计不授权"一组），提取点在这个
+    // 共用函数——删了它两条通道的 user_confirmed 一起哑，上面两条 inline 断言也
+    // 只守住半边。文件通道的坏内容/好内容都过这个函数，故钉这里而不是驱动层。
+    expect(parsePlanCallsPayload('{"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":true}')).toEqual({
       calls: [{ operation: 'finance.query-receivables', args: [] }],
       userConfirmed: true,
     });
@@ -87,7 +97,7 @@ describe('plan-shape-fuzz：合法形状原样通过', () => {
     const payload = '{"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":%s}';
     for (const raw of ['false', '"yes"', '1', 'null']) {
       const parsed = parsePlanCallsCommand(`bin/17dz plan ${payload.replace('%s', raw)}`);
-      expect(parsed).toEqual({ calls: [{ operation: 'finance.query-receivables', args: [] }] });
+      expect(parsed).toEqual({ kind: 'inline', calls: [{ operation: 'finance.query-receivables', args: [] }] });
     }
   });
 });
@@ -212,4 +222,85 @@ describe('plan-shape-fuzz：user_confirmed 只审计不授权', () => {
     expect(without.sent).toEqual(withClaim.sent);
     expect(without.notices).toEqual(withClaim.notices);
   });
+});
+
+/**
+ * --file 提交通道（C2）：dispatch、取值形态与旗标拒绝。
+ *
+ * 背景同表征 golden：2026-10-23 实测 worker 无法稳定一次写对裸 JSON（加 shell
+ * 引号、跟 2>&1 尾巴），11 连撞空转 4 分 11 秒 / 657k tokens。文件通道给一条
+ * 不经过命令行的精确路径；两条通道过同一份 payload 校验（parsePlanCallsPayload），
+ * 文件通道不宽松——宽容面 = 攻击面。
+ */
+describe('plan-shape-fuzz：--file 提交通道（C2）', () => {
+  it('--file <路径>（空格取值）→ 文件描述，路径原样带回', () => {
+    expect(parsePlanCallsCommand('bin/17dz plan --file tmp/task_x/plan.json')).toEqual({
+      kind: 'file',
+      path: 'tmp/task_x/plan.json',
+    });
+  });
+
+  it('--file=<路径>（等号取值）等价', () => {
+    expect(parsePlanCallsCommand('bin/17dz plan --file=tmp/task_x/plan.json')).toEqual({
+      kind: 'file',
+      path: 'tmp/task_x/plan.json',
+    });
+  });
+
+  it('bash/路径前缀下的 --file 照常识别（前缀规则不因通道变化）', () => {
+    expect(parsePlanCallsCommand('bash /abs/bin/17dz plan --file tmp/task_x/plan.json')).toEqual({
+      kind: 'file',
+      path: 'tmp/task_x/plan.json',
+    });
+  });
+
+  it('--file<TAB>路径（tab 分隔）也认：守卫与取值正则同按空白归一，不静默落 null', () => {
+    // 2026-10-23 Round 1 review 抓到：守卫曾只认空格形态，tab 发射会静默变成
+    // "非计划命令"落门教学——文件通道对一种常见模型形态静默失效。前缀正则 + 取值
+    // 正则现在同按 [=\s] 归一，这条钉住三处口径不再分叉。
+    expect(parsePlanCallsCommand('bin/17dz plan --file\ttmp/task_x/plan.json')).toEqual({
+      kind: 'file',
+      path: 'tmp/task_x/plan.json',
+    });
+  });
+
+  const throwCases: Array<{ name: string; command: string; code: string }> = [
+    // 行尾硬边界：尾巴正是裸 JSON 通道的病根，不带进新通道
+    { name: '--file 后跟 2>&1 尾巴', command: 'bin/17dz plan --file tmp/task_x/plan.json 2>&1', code: 'PLAN_FILE_FLAG_INVALID' },
+    { name: '--file 后跟 ; echo 链', command: 'bin/17dz plan --file tmp/task_x/plan.json; echo hi', code: 'PLAN_FILE_FLAG_INVALID' },
+    { name: '--file 缺路径', command: 'bin/17dz plan --file', code: 'PLAN_FILE_FLAG_INVALID' },
+    { name: '--file= 空路径', command: 'bin/17dz plan --file=', code: 'PLAN_FILE_FLAG_INVALID' },
+    { name: '--file 给两个 token', command: 'bin/17dz plan --file a.json b.json', code: 'PLAN_FILE_FLAG_INVALID' },
+  ];
+
+  for (const { name, command, code } of throwCases) {
+    it(`${name} → ${code}`, () => {
+      expectCode(() => parsePlanCallsCommand(command), code);
+    });
+  }
+});
+
+/**
+ * 元数据自救通道（C1 表征 golden 随 C4 翻转；2026-10-23 空转治理波次）。
+ *
+ * C1 冻结时钉的是"现状"：--schema / schema 两种元数据写法都被当成坏 JSON 拒绝
+ * （PLAN_JSON_PARSE）——执行层 SKILL 教 worker 跑 `bin/17dz plan --schema` 自救，
+ * 但 driver 的计划解析把 `plan ` 之后任何东西当 JSON 草案，门里为元数据写的
+ * 白名单（SERVE_METADATA_COMMANDS）因 driver 先行拦截而不可达，文档教的是个死命令。
+ * C4 翻转为：分发器认出旗标形态返回 null（不当计划提交、不计收敛计数），交
+ * serve-gate 裁决——元数据出口放行到平台 CLI 逐字打印 plan-schema.json，未知
+ * 旗标落门的计划教学分支（PLAN_SHAPE_GATE_TEACHING，C2 起已教两种提交形态）。
+ */
+describe('plan-shape-fuzz：--schema / schema / 未知旗标返回 null（C1 表征 golden 随 C4 翻转）', () => {
+  const nullCases: Array<{ name: string; command: string }> = [
+    { name: '--schema payload', command: 'bin/17dz plan --schema' },
+    { name: 'schema 子命令（无横线写法）', command: 'bin/17dz plan schema' },
+    { name: '未知旗标 --stdin：同样不当提交（落门教学分支，不再当坏 JSON）', command: 'bin/17dz plan --stdin' },
+  ];
+
+  for (const { name, command } of nullCases) {
+    it(`${name} → null`, () => {
+      expect(parsePlanCallsCommand(command)).toBeNull();
+    });
+  }
 });

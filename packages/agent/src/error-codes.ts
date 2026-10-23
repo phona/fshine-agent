@@ -93,8 +93,28 @@ export function planDraftExample(): string {
   return `${GATEWAY_INVOCATION} plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}`;
 }
 
-/** 计划提交的正确形状：形状类错误共用的 correctForm（静态词进表）。 */
-const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${planDraftExample()}，JSON 原样放在这一行命令里。`;
+/**
+ * `--file` 提交通径的示例（C2 起与 planDraftExample 并列的第二种提交形态）。
+ *
+ * 不含草案 JSON 形状——D-011 锁只数草案 JSON 形状的教学字面量（网关名后紧跟
+ * 左花括号那一处），文件形态天然不在锁内；文件里的 JSON 仍以 planDraftExample
+ * 为唯一形状源，两种形态过同一份 payload 校验（parsePlanCallsPayload），不存在
+ * 第二标准。
+ */
+export function planFileExample(): string {
+  return `${GATEWAY_INVOCATION} plan --file <本轮工作区内的计划文件路径>`;
+}
+
+/**
+ * 计划提交的正确形状：形状类错误共用的 correctForm（静态词进表）。
+ *
+ * C2 起教两种形态并列（inline 裸 JSON + --file 工作区文件），并把反模式写进来。
+ * 为什么必须两种都教：shape 错误的 correctForm 是 worker 在失败循环里**唯一**看到
+ * 的自愈依据——driver 的计划解析先于 serve-gate，门教学（PLAN_SHAPE_GATE_TEACHING）
+ * 对畸形提交不可达（2026-10-23 实证：11 连 PLAN_JSON_PARSE 里 worker 从没收到过
+ * 门教学）。而"不要加外层引号、不要跟 2>&1 等后缀"正是那 11 连撞里它反复犯的错。
+ */
+const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${planDraftExample()}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 ${planFileExample()} 提交`;
 
 /**
  * shell 元字符拒绝理由的公共前缀：同一事实（放行这些字符 = 放行任意命令）只说一遍，
@@ -164,6 +184,25 @@ const TABLE: Record<string, CodeEntry> = {
   PLAN_CALL_ARGS_NOT_JSON: {
     expected: 'args 是 JSON 值',
     correctForm: '字符串 / 数字 / 布尔 / null；不含函数、循环引用等不可序列化值',
+  },
+  // ── --file 提交通道（C2）：文件通道的旗标与边界拒绝 ──
+  // 判据与提案 payload 边界检查同一把尺（serve-gate 的 workspaceRelPath +
+  // isInsideScratch，不另写一份路径解析）；自愈动作统一是"把计划 JSON 写进本轮
+  // 工作区再提交"，不是"换个路径再试"——后者会把模型引向到处找可写位置。
+  // （未知 -- 旗标不设 driver 侧专用码：C4 起它们返回 null 落门的计划教学分支，
+  // PLAN_SHAPE_GATE_TEACHING 已教两种提交形态——在 driver 侧设码只会把同一判决
+  // 复制成第二份。）
+  PLAN_FILE_FLAG_INVALID: {
+    expected: '--file 之后只跟一个工作区内路径（= 或空白取值，行尾结束，无其它内容）',
+    correctForm: `${planFileExample()}（单行一个路径，不带 2>&1 等后缀）`,
+  },
+  PLAN_FILE_OUT_OF_WORKSPACE: {
+    expected: '计划文件在本轮工作区内（宿主按任务派生的唯一可写位置）',
+    correctForm: `用 write 把计划 JSON 写进本轮工作区后以 ${planFileExample()} 提交；路径解析后必须落在本轮工作区内`,
+  },
+  PLAN_FILE_TOO_LARGE: {
+    expected: '计划文件不超过 256KB（与 write 门同口径的体积上限）',
+    correctForm: '计划 JSON 只有几 KB；文件过大说明指错了文件，重新用 write 写计划 JSON 再提交',
   },
   // 计划实体来源校验（宿主侧 C20）的拒绝原因：实际 = 校验器点名的越权参数，
   // 由 pi-coding-driver 以 PLAN DECLINED 协议前缀交付 worker。
@@ -349,7 +388,7 @@ const TABLE: Record<string, CodeEntry> = {
 
   // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──
   PLAN_SHAPE_GATE_TEACHING: {
-    text: `计划必须经 bash 工具作为单行原始命令提交：${planDraftExample()}，JSON 原样放在这一行命令里。不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行。evaluate/activate 由宿主调用，worker 不得直接调用。`,
+    text: `计划必须经 bash 工具提交，两种形态等价：① 单行原始命令 ${planDraftExample()}，JSON 原样放在这一行命令里——不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行，不要跟 2>&1 等后缀；② 把同一份 JSON 用 write 写进本轮工作区文件后 ${planFileExample()}（文件路径必须在本轮工作区内）。evaluate/activate 由宿主调用，worker 不得直接调用。`,
   },
 
   // ── serve 门类：G1 原生工具门的拒绝理由（唯一来源，原 serve-gate.ts 各出事点 inline）──
