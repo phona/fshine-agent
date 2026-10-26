@@ -60,6 +60,12 @@ describe('createTurnState', () => {
       clarification: null,
       clarificationReply: null,
       preferredPlanId: 'plan_chosen',
+      backgroundStarted: false,
+      backgroundTaskId: null,
+      backgroundRunId: null,
+      backgroundTaskState: null,
+      backgroundReceiptText: null,
+      resendRefs: [],
     });
   });
 

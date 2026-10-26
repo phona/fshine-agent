@@ -36,7 +36,7 @@ import {
 } from './harness';
 
 /** 附件信封的会话键：单聊 conversationId=userid，与 handler 的 sessionKey 拼法一致。 */
-const SESSION_KEY = 'e2e_user:e2e_user';
+const SESSION_KEY = 'e2e_user';
 
 /** 生产恢复路径的同一入口：读本 principal 最近的 attachment_received 行。 */
 async function recentAttachmentRows(assembly: ServerAssembly) {

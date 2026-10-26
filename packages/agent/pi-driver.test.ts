@@ -1,9 +1,49 @@
 import { describe, expect, it } from 'vitest';
-import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool } from './src/pi-driver';
+import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool, plannerMessagesToLlm } from './src/pi-driver';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriverInput } from './src/driver';
+import { createCompactionContextMessage } from './src/compaction-context';
 
 describe('Pi driver safety helpers', () => {
+  it('把宿主任務事件和任务清单转换给真实模型，同时保留原生转录中的 custom 来源', () => {
+    const event = { role: 'custom', customType: 'background_task_event', content: '宿主事件：原始请求A与执行结果', timestamp: 1 };
+    const roster = { role: 'custom', customType: 'background_task_roster', content: '正在运行的任务A', timestamp: 2 };
+    const user = { role: 'user', content: '现在做到哪了？', timestamp: 3 };
+    const converted = plannerMessagesToLlm([event, roster, user] as never);
+    expect(converted.map((message) => message.role)).toEqual(['user', 'user', 'user']);
+    expect(JSON.stringify(converted)).toContain('原始请求A与执行结果');
+    expect(JSON.stringify(converted)).toContain('正在运行的任务A');
+    expect(event.role).toBe('custom');
+    expect(converted[2]).toBe(user);
+  });
+
+  it('把历史引用 sidecar 作为明确的非直接陈述上下文投给模型，计数-only sidecar 不增用户内容', () => {
+    const quoteSidecar = createCompactionContextMessage({
+      version: 1,
+      delegatedRequests: [{ requestKey: `request-v1:${'a'.repeat(64)}`, count: 2 }],
+      quotedTurns: [{
+        requestKey: `request-v1:${'a'.repeat(64)}`,
+        bodyPreview: '这段是什么意思？',
+        messageReference: { kind: 'text', text: '历史引用片段' },
+      }],
+      omittedQuotedTurns: 0,
+    });
+    const requestCountsOnly = createCompactionContextMessage({
+      version: 1,
+      delegatedRequests: [{ requestKey: `request-v1:${'b'.repeat(64)}`, count: 1 }],
+      quotedTurns: [],
+      omittedQuotedTurns: 0,
+    });
+    const converted = plannerMessagesToLlm([quoteSidecar, requestCountsOnly]);
+
+    expect(converted).toHaveLength(1);
+    expect(converted[0]?.role).toBe('user');
+    expect(JSON.stringify(converted[0])).toContain('宿主压缩引用索引');
+    expect(JSON.stringify(converted[0])).toContain('历史引用片段');
+    expect(JSON.stringify(converted[0])).toContain('不是用户直接陈述');
+    expect(JSON.stringify(converted[0])).not.toContain('request-v1:');
+  });
+
   it('does not opt into unsupported Kimi extended thinking levels', () => {
     expect(KIMI_THINKING_LEVEL_MAP.low).toBe('low');
     expect(KIMI_THINKING_LEVEL_MAP.medium).toBe('medium');
@@ -76,6 +116,24 @@ describe('Pi driver safety helpers', () => {
 
     expect(result.content).toEqual([{ type: 'text', text: '平台返回的用户可见话术' }]);
     expect(result.details).toEqual({ routeReceipt: 'delegate' });
+  });
+
+  it('后台任务受理独立记账，不伪装成执行结果或前置失败', async () => {
+    const input = {
+      exec: async () => {
+        throw Object.assign(new ToolUserError('任务已排队'), { routeReceipt: 'background' });
+      },
+      onStep: () => undefined,
+    } as unknown as TurnDriverInput;
+    const result = await toAgentTool({
+      name: 'route_current_turn',
+      description: 'route',
+      inputSchema: { type: 'object' },
+    }, input).execute('background_1', {});
+
+    expect(result.terminate).toBe(true);
+    expect(result.content).toEqual([{ type: 'text', text: '任务已排队' }]);
+    expect(result.details).toEqual({ routeReceipt: 'background' });
   });
 
   it('keeps long and non-ASCII domain tool names within provider limits', () => {

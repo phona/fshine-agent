@@ -2,14 +2,16 @@ import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import {
   ATTACHMENT_PATHS_MARKER,
+  buildRequestKey,
   findRepeatedDelegatedRequest,
   normalizeUserRequest,
 } from './src/repeat-request';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
+import { createCompactionContextMessage } from './src/compaction-context';
 
 /** 转录形状替身：与生产落库一致（user 是字符串，assistant/toolResult 是块数组）。 */
-function user(text: string): AgentMessage {
-  return { role: 'user', content: text, timestamp: 1 } as never;
+function user(text: string, hostContext?: unknown): AgentMessage {
+  return { role: 'user', content: text, timestamp: 1, ...(hostContext ? { hostContext } : {}) } as never;
 }
 function routeCall(): AgentMessage {
   return {
@@ -21,7 +23,7 @@ function routeCall(): AgentMessage {
 function receipt(text: string): AgentMessage {
   return { role: 'toolResult', content: [{ type: 'text', text }], timestamp: 1 } as never;
 }
-function markedReceipt(text: string, routeReceipt: 'delegate' | 'precondition'): AgentMessage {
+function markedReceipt(text: string, routeReceipt: 'delegate' | 'precondition' | 'background'): AgentMessage {
   return {
     role: 'toolResult',
     content: [{ type: 'text', text }],
@@ -105,6 +107,74 @@ describe('findRepeatedDelegatedRequest', () => {
       request: REQUEST,
       priorDelegations: 1,
     });
+  });
+
+  it('把宿主后台受理回执记为已派发请求，不把它当执行结果', () => {
+    const transcript = [user(REQUEST), routeCall(), markedReceipt('后台任务已受理。', 'background')];
+    expect(findRepeatedDelegatedRequest(transcript, REQUEST)?.priorDelegations).toBe(1);
+  });
+
+  it('同正文、不同引用不会互相命中；完整相同引用再次发送仍命中', () => {
+    const quoteA = { kind: 'text', text: '幻东账套 202609' } as const;
+    const quoteB = { kind: 'text', text: '新兴五金账套 202609' } as const;
+    const transcript = [
+      user(REQUEST, { messageReference: quoteA, requestKey: buildRequestKey(REQUEST, { messageReference: quoteA }) }),
+      routeCall(),
+      receipt('委派完成。'),
+    ];
+
+    expect(findRepeatedDelegatedRequest(transcript, REQUEST, { messageReference: quoteB })).toBeNull();
+    expect(findRepeatedDelegatedRequest(transcript, REQUEST, { messageReference: quoteA })?.priorDelegations).toBe(1);
+  });
+
+  it('引用 fingerprint 使用规范化 kind/text/truncated/sourceMessageId 字段', () => {
+    const base = { kind: 'text', text: '  幻东   202609 ', truncated: false, sourceMessageId: 'old-1' } as const;
+    const equivalent = { kind: 'text', text: '幻东 202609', truncated: false, sourceMessageId: 'old-1' } as const;
+    expect(buildRequestKey(REQUEST, { messageReference: base })).toBe(buildRequestKey(REQUEST, { messageReference: equivalent }));
+    expect(buildRequestKey(REQUEST, { messageReference: base })).not.toBe(
+      buildRequestKey(REQUEST, { messageReference: { ...equivalent, sourceMessageId: 'old-2' } }),
+    );
+    expect(buildRequestKey(REQUEST, { messageReference: base })).not.toBe(
+      buildRequestKey(REQUEST, { messageReference: { ...equivalent, truncated: true } }),
+    );
+    expect(buildRequestKey(REQUEST, { messageReference: base })).not.toBe(
+      buildRequestKey(REQUEST, { messageReference: { ...equivalent, kind: 'mixed' } }),
+    );
+  });
+
+  it('压缩 sidecar 保留已压缩派发计数并按完整请求键匹配', () => {
+    const quoteA = { kind: 'text', text: '引用 A' } as const;
+    const quoteB = { kind: 'text', text: '引用 B' } as const;
+    const key = buildRequestKey(REQUEST, { messageReference: quoteA });
+    const sidecar = createCompactionContextMessage({
+      version: 1,
+      delegatedRequests: [{ requestKey: key, count: 2 }],
+      quotedTurns: [{ requestKey: key, bodyPreview: REQUEST, messageReference: quoteA }],
+      omittedQuotedTurns: 0,
+    });
+
+    expect(findRepeatedDelegatedRequest([sidecar], REQUEST, { messageReference: quoteA }))
+      .toEqual({ request: REQUEST, priorDelegations: 2 });
+    expect(findRepeatedDelegatedRequest([sidecar], REQUEST, { messageReference: quoteB })).toBeNull();
+  });
+
+  it('sidecar 计数与保留尾部的具体委派相加一次，不重复计入摘要覆盖部分', () => {
+    const quote = { kind: 'text', text: '引用 A' } as const;
+    const key = buildRequestKey(REQUEST, { messageReference: quote });
+    const compressed = createCompactionContextMessage({
+      version: 1,
+      delegatedRequests: [{ requestKey: key, count: 2 }],
+      quotedTurns: [{ requestKey: key, bodyPreview: REQUEST, messageReference: quote }],
+      omittedQuotedTurns: 0,
+    });
+    const retainedTurn = [
+      user(REQUEST, { messageReference: quote, requestKey: key }),
+      routeCall(),
+      receipt('本轮结果'),
+    ];
+
+    expect(findRepeatedDelegatedRequest([compressed, ...retainedTurn], REQUEST, { messageReference: quote }))
+      .toEqual({ request: REQUEST, priorDelegations: 3 });
   });
 
   it('不命中：同文请求早前那一轮停在对话枝（没有委派痕迹）', () => {

@@ -44,7 +44,7 @@ afterAll(() => { delete process.env['DZ_PLAN_MAX_NOTIFY']; });
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
-const SESSION_ID = 'wecom:e2e_user:e2e_user';
+const SESSION_ID = 'wecom:e2e_user';
 
 /** 三个期间的查询计划：3 次调用，越过 harness 的 DZ_PLAN_AUTO_CALLS=2 触发通知。 */
 function threePeriodPlan(account: string) {

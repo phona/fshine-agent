@@ -4,6 +4,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import Database from 'better-sqlite3';
+import { SessionArtifactRefConflictError, TaskRunActiveConflictError } from '@fshine/contracts';
 import type {
   AgentRequestRecord,
   AgentRequestRepo,
@@ -17,6 +18,8 @@ import type {
   PrincipalScopeRecord,
   PrincipalScopeRepo,
   RequestOutcome,
+  SessionArtifactRecord,
+  SessionArtifactRepo,
   ToolCallRecord,
   ToolCallRepo,
   PlatformTaskRecord,
@@ -29,6 +32,9 @@ import type {
   TaskPlanRepo,
   TaskPlanStepFact,
   TaskPlanSummary,
+  TaskRunRecord,
+  TaskRunRepo,
+  TaskRunState,
 } from '@fshine/contracts';
 
 export function newId(prefix: string): string {
@@ -91,14 +97,34 @@ CREATE TABLE IF NOT EXISTS conversation_events (
   session_id TEXT NOT NULL,
   kind TEXT NOT NULL,
   content TEXT,
+  message_reference TEXT,
   artifact_ref TEXT,
   created_at TEXT NOT NULL,
-  request_id TEXT
+  request_id TEXT,
+  task_id TEXT,
+  run_id TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_events_scope_time
   ON conversation_events (principal_id, session_id, created_at, event_id);
 CREATE INDEX IF NOT EXISTS idx_conversation_events_principal_time
   ON conversation_events (principal_id, created_at, event_id);
+
+CREATE TABLE IF NOT EXISTS session_artifacts (
+  ref TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  sha256 TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  source_task_id TEXT,
+  source_run_id TEXT,
+  request_id TEXT,
+  created_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  path TEXT NOT NULL,
+  PRIMARY KEY (session_id, ref)
+);
+CREATE INDEX IF NOT EXISTS idx_session_artifacts_session_time
+  ON session_artifacts (session_id, created_at);
 
 CREATE TABLE IF NOT EXISTS conversation_context_states (
   principal_id TEXT NOT NULL,
@@ -174,6 +200,43 @@ CREATE TABLE IF NOT EXISTS platform_tasks (
 CREATE INDEX IF NOT EXISTS idx_platform_tasks_parent_session_id
   ON platform_tasks (parent_session_id);
 
+CREATE TABLE IF NOT EXISTS task_runs (
+  run_id TEXT PRIMARY KEY,
+  task_id TEXT NOT NULL,
+  dispatch_key TEXT NOT NULL UNIQUE,
+  principal_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  origin_request_id TEXT NOT NULL,
+  origin_user_event_id TEXT NOT NULL,
+  request TEXT NOT NULL,
+  origin_message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  state TEXT NOT NULL,
+  started_at TEXT,
+  ended_at TEXT,
+  deadline TEXT,
+  plan_id TEXT,
+  step_index INTEGER,
+  total_steps INTEGER,
+  last_progress TEXT,
+  result_text TEXT,
+  result_json TEXT,
+  error TEXT,
+  result_event_id TEXT,
+  input_context_json TEXT,
+  delivery_route_json TEXT,
+  metadata_json TEXT,
+  result_handling_state TEXT,
+  delivery_state TEXT,
+  delivery_json TEXT,
+  revision INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_task_runs_scope_created
+  ON task_runs (principal_id, session_id, created_at, run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_runs_one_active_per_task
+  ON task_runs (task_id) WHERE state IN ('queued', 'running', 'cancelling');
+
 CREATE TABLE IF NOT EXISTS change_intents (
   intent_id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
@@ -245,15 +308,65 @@ interface SessionRow {
   state: string | null;
 }
 
+interface SessionArtifactRow {
+  ref: string;
+  session_id: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  source_task_id: string | null;
+  source_run_id: string | null;
+  request_id: string | null;
+  created_at: string;
+  status: string;
+  path: string;
+}
+
 interface ConversationEventRow {
   event_id: string;
   principal_id: string;
   session_id: string;
   kind: ConversationEventRecord['kind'];
   content: string | null;
+  message_reference: string | null;
   artifact_ref: string | null;
   created_at: string;
   request_id: string | null;
+  task_id: string | null;
+  run_id: string | null;
+}
+
+interface TaskRunRow {
+  run_id: string;
+  task_id: string;
+  dispatch_key: string;
+  principal_id: string;
+  session_id: string;
+  origin_request_id: string;
+  origin_user_event_id: string;
+  request: string;
+  origin_message: string;
+  created_at: string;
+  updated_at: string;
+  state: TaskRunState;
+  started_at: string | null;
+  ended_at: string | null;
+  deadline: string | null;
+  plan_id: string | null;
+  step_index: number | null;
+  total_steps: number | null;
+  last_progress: string | null;
+  result_text: string | null;
+  result_json: string | null;
+  error: string | null;
+  result_event_id: string | null;
+  input_context_json: string | null;
+  delivery_route_json: string | null;
+  metadata_json: string | null;
+  result_handling_state: TaskRunRecord['resultHandlingState'] | null;
+  delivery_state: TaskRunRecord['deliveryState'] | null;
+  delivery_json: string | null;
+  revision: number;
 }
 
 interface ContextStateRow {
@@ -397,6 +510,22 @@ function rowToSession(row: SessionRow): ConversationSessionRecord {
   };
 }
 
+function rowToSessionArtifact(row: SessionArtifactRow): SessionArtifactRecord {
+  return {
+    ref: row.ref,
+    sessionId: row.session_id,
+    filename: row.filename,
+    sha256: row.sha256,
+    size: row.size,
+    ...(row.source_task_id === null ? {} : { sourceTaskId: row.source_task_id }),
+    ...(row.source_run_id === null ? {} : { sourceRunId: row.source_run_id }),
+    ...(row.request_id === null ? {} : { requestId: row.request_id }),
+    createdAt: row.created_at,
+    status: row.status === 'evicted' ? 'evicted' : 'available',
+    path: row.path,
+  };
+}
+
 function rowToConversationEvent(row: ConversationEventRow): ConversationEventRecord {
   return {
     eventId: row.event_id,
@@ -404,9 +533,47 @@ function rowToConversationEvent(row: ConversationEventRow): ConversationEventRec
     sessionId: row.session_id,
     kind: row.kind,
     ...(row.content === null ? {} : { content: row.content }),
+    ...(row.message_reference === null ? {} : { messageReference: JSON.parse(row.message_reference) as ConversationEventRecord['messageReference'] }),
     ...(row.artifact_ref === null ? {} : { artifactRef: row.artifact_ref }),
     createdAt: row.created_at,
     ...(row.request_id === null ? {} : { requestId: row.request_id }),
+    ...(row.task_id === null ? {} : { taskId: row.task_id }),
+    ...(row.run_id === null ? {} : { runId: row.run_id }),
+  };
+}
+
+function rowToTaskRun(row: TaskRunRow): TaskRunRecord {
+  return {
+    runId: row.run_id,
+    taskId: row.task_id,
+    dispatchKey: row.dispatch_key,
+    principalId: row.principal_id,
+    sessionId: row.session_id,
+    originRequestId: row.origin_request_id,
+    originUserEventId: row.origin_user_event_id,
+    request: row.request,
+    originMessage: row.origin_message,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    state: row.state,
+    ...(row.started_at === null ? {} : { startedAt: row.started_at }),
+    ...(row.ended_at === null ? {} : { endedAt: row.ended_at }),
+    ...(row.deadline === null ? {} : { deadline: row.deadline }),
+    ...(row.plan_id === null ? {} : { planId: row.plan_id }),
+    ...(row.step_index === null ? {} : { stepIndex: row.step_index }),
+    ...(row.total_steps === null ? {} : { totalSteps: row.total_steps }),
+    ...(row.last_progress === null ? {} : { lastProgress: row.last_progress }),
+    ...(row.result_text === null ? {} : { resultText: row.result_text }),
+    ...(row.result_json === null ? {} : { result: JSON.parse(row.result_json) as unknown }),
+    ...(row.error === null ? {} : { error: row.error }),
+    ...(row.result_event_id === null ? {} : { resultEventId: row.result_event_id }),
+    ...(row.input_context_json === null ? {} : { inputContext: JSON.parse(row.input_context_json) as TaskRunRecord['inputContext'] }),
+    ...(row.delivery_route_json === null ? {} : { deliveryRoute: JSON.parse(row.delivery_route_json) as TaskRunRecord['deliveryRoute'] }),
+    ...(row.metadata_json === null ? {} : { metadata: JSON.parse(row.metadata_json) as Record<string, unknown> }),
+    ...(row.result_handling_state === null ? {} : { resultHandlingState: row.result_handling_state }),
+    ...(row.delivery_state === null ? {} : { deliveryState: row.delivery_state }),
+    ...(row.delivery_json === null ? {} : { delivery: JSON.parse(row.delivery_json) as unknown }),
+    revision: row.revision,
   };
 }
 
@@ -473,15 +640,40 @@ function sameMemoryRecord(a: MemoryRecordRecord, b: MemoryRecordRecord): boolean
     && a.version === b.version && a.createdAt === b.createdAt && a.updatedAt === b.updatedAt;
 }
 
+function normalizedMessageReference(reference: ConversationEventRecord['messageReference']): string | null {
+  if (reference == null) return null;
+  // Fixed field order makes idempotency independent of the caller's object property order.
+  return JSON.stringify([
+    reference.kind,
+    reference.text ?? null,
+    reference.truncated ?? false,
+    reference.sourceMessageId ?? null,
+  ]);
+}
+
+function serializeMessageReference(reference: ConversationEventRecord['messageReference']): string | null {
+  if (reference == null) return null;
+  // Persist only the public normalized contract; never carry through adapter callback extras.
+  return JSON.stringify({
+    kind: reference.kind,
+    ...(reference.text === undefined ? {} : { text: reference.text }),
+    ...(reference.truncated === undefined ? {} : { truncated: reference.truncated }),
+    ...(reference.sourceMessageId === undefined ? {} : { sourceMessageId: reference.sourceMessageId }),
+  });
+}
+
 function sameConversationEvent(a: ConversationEventRecord, b: ConversationEventRecord): boolean {
   return a.eventId === b.eventId
     && a.principalId === b.principalId
     && a.sessionId === b.sessionId
     && a.kind === b.kind
     && a.content === b.content
+    && normalizedMessageReference(a.messageReference) === normalizedMessageReference(b.messageReference)
     && a.artifactRef === b.artifactRef
     && a.createdAt === b.createdAt
-    && a.requestId === b.requestId;
+    && a.requestId === b.requestId
+    && a.taskId === b.taskId
+    && a.runId === b.runId;
 }
 
 function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
@@ -568,6 +760,40 @@ export function createSqliteStore(dbPath: string): AuditStore {
     if (!intentColumns.some((existing) => existing.name === column)) {
       db.exec(`ALTER TABLE change_intents ADD COLUMN ${column} TEXT`);
     }
+  }
+
+  // Conversation quote metadata and background task linkage are additive nullable
+  // fields. Existing event content remains the current message body; NULL means no quote.
+  const conversationEventColumns = db.prepare('PRAGMA table_info(conversation_events)').all() as Array<{ name: string }>;
+  for (const column of ['message_reference', 'task_id', 'run_id']) {
+    if (!conversationEventColumns.some((existing) => existing.name === column)) {
+      db.exec(`ALTER TABLE conversation_events ADD COLUMN ${column} TEXT`);
+    }
+  }
+
+  const taskRunColumns = db.prepare('PRAGMA table_info(task_runs)').all() as Array<{ name: string }>;
+  if (!taskRunColumns.some((column) => column.name === 'revision')) {
+    db.exec('ALTER TABLE task_runs ADD COLUMN revision INTEGER NOT NULL DEFAULT 0');
+  }
+
+  // Forward-compatible migration for the result-handling state machine column: the state
+  // used to live only inside metadata_json (sniffed via json_extract), which silently broke
+  // GC pinning whenever the writer renamed fields. Old rows are backfilled once from valid
+  // metadata JSON; rows without a resultHandling (or with invalid JSON) stay NULL, and the
+  // guarded WHERE keeps a second reopen a no-op (idempotent backfill).
+  if (!taskRunColumns.some((column) => column.name === 'result_handling_state')) {
+    db.exec('ALTER TABLE task_runs ADD COLUMN result_handling_state TEXT');
+    db.prepare(
+      'UPDATE task_runs SET result_handling_state = json_extract(metadata_json, \'$.resultHandling.state\') '
+      + 'WHERE result_handling_state IS NULL AND json_valid(metadata_json) '
+      + 'AND json_extract(metadata_json, \'$.resultHandling.state\') IN (\'processing\', \'handled\', \'failed\')',
+    ).run();
+  }
+
+  // Preserve task and per-run provenance for artifacts created before background execution.
+  const artifactColumns = db.prepare('PRAGMA table_info(session_artifacts)').all() as Array<{ name: string }>;
+  if (!artifactColumns.some((column) => column.name === 'source_run_id')) {
+    db.exec('ALTER TABLE session_artifacts ADD COLUMN source_run_id TEXT');
   }
 
   const principalScopes: PrincipalScopeRepo = {
@@ -692,6 +918,61 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
+  const sessionArtifacts: SessionArtifactRepo = {
+    async insert(record) {
+      // D-123 fail-loud：覆盖 upsert 会让并发重叠 ref 的后写吃掉前写（字节留孤儿）。
+      // 唯一键冲突转可识别错误；其余约束错误（NOT NULL 等）原样上抛。
+      try {
+        db.prepare(
+          'INSERT INTO session_artifacts (ref, session_id, filename, sha256, size, source_task_id, source_run_id, request_id, created_at, status, path) '
+          + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run(
+          record.ref,
+          record.sessionId,
+          record.filename,
+          record.sha256,
+          record.size,
+          record.sourceTaskId ?? null,
+          record.sourceRunId ?? null,
+          record.requestId ?? null,
+          record.createdAt,
+          record.status,
+          record.path,
+        );
+      } catch (error) {
+        // 该表 (session_id, ref) 是 PRIMARY KEY（code 为 PRIMARYKEY；唯一索引形态才是
+        // UNIQUE），两种都按 ref 冲突处理；NOT NULL 等其他约束原样上抛。
+        const code = (error as { code?: string }).code;
+        if (code === 'SQLITE_CONSTRAINT_UNIQUE' || code === 'SQLITE_CONSTRAINT_PRIMARYKEY') {
+          throw new SessionArtifactRefConflictError(
+            `会话 '${record.sessionId}' 的产物 ref '${record.ref}' 已存在：insert 不做覆盖（fail-loud），ref 分配须在会话串行段内完成。`,
+          );
+        }
+        throw error;
+      }
+    },
+    async listBySession(sessionId) {
+      // ref 是 TEXT 列，纯 TEXT 序在跨 10 位数（'10' < '2'）时不稳定（D-123）；
+      // ref 由 nextArtifactRef 生成（数字字符串），CAST 后数值序与单调性同源，
+      // 末位再按 TEXT 兜底非数字形态的并列。
+      const rows = db.prepare(
+        'SELECT ref, session_id, filename, sha256, size, source_task_id, source_run_id, request_id, created_at, status, path '
+        + 'FROM session_artifacts WHERE session_id = ? ORDER BY created_at, CAST(ref AS INTEGER), ref',
+      ).all(sessionId) as SessionArtifactRow[];
+      return rows.map(rowToSessionArtifact);
+    },
+    async get(sessionId, ref) {
+      const row = db.prepare(
+        'SELECT ref, session_id, filename, sha256, size, source_task_id, source_run_id, request_id, created_at, status, path '
+        + 'FROM session_artifacts WHERE session_id = ? AND ref = ?',
+      ).get(sessionId, ref) as SessionArtifactRow | undefined;
+      return row ? rowToSessionArtifact(row) : null;
+    },
+    async setStatus(sessionId, ref, status) {
+      db.prepare('UPDATE session_artifacts SET status = ? WHERE session_id = ? AND ref = ?').run(status, sessionId, ref);
+    },
+  };
+
   const conversationLog: ConversationLogRepo = {
     async append(record) {
       const existing = db.prepare('SELECT * FROM conversation_events WHERE event_id = ?')
@@ -702,8 +983,20 @@ export function createSqliteStore(dbPath: string): AuditStore {
         return;
       }
       db.prepare(
-        'INSERT INTO conversation_events (event_id, principal_id, session_id, kind, content, artifact_ref, created_at, request_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      ).run(record.eventId, record.principalId, record.sessionId, record.kind, record.content ?? null, record.artifactRef ?? null, record.createdAt, record.requestId ?? null);
+        'INSERT INTO conversation_events (event_id, principal_id, session_id, kind, content, message_reference, artifact_ref, created_at, request_id, task_id, run_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        record.eventId,
+        record.principalId,
+        record.sessionId,
+        record.kind,
+        record.content ?? null,
+        serializeMessageReference(record.messageReference),
+        record.artifactRef ?? null,
+        record.createdAt,
+        record.requestId ?? null,
+        record.taskId ?? null,
+        record.runId ?? null,
+      );
     },
     async list(query) {
       const where = ['principal_id = ?'];
@@ -726,8 +1019,12 @@ export function createSqliteStore(dbPath: string): AuditStore {
       return (query.afterEventId === undefined ? rows.reverse() : rows).map(rowToConversationEvent);
     },
     async search(query) {
-      const where = ['principal_id = ?', 'instr(lower(coalesce(content, artifact_ref, \u0027\u0027)), lower(?)) > 0'];
-      const values: Array<string | number> = [query.principalId, query.query];
+      const where = [
+        'principal_id = ?',
+        '(instr(lower(coalesce(content, artifact_ref, \'\')), lower(?)) > 0 '
+          + 'OR instr(lower(coalesce(json_extract(message_reference, \'$.text\'), \'\')), lower(?)) > 0)',
+      ];
+      const values: Array<string | number> = [query.principalId, query.query, query.query];
       if (query.sessionId !== undefined) { where.push('session_id = ?'); values.push(query.sessionId); }
       if (query.before !== undefined) { where.push('created_at < ?'); values.push(query.before); }
       values.push(Math.max(1, Math.min(100, Math.floor(query.limit))));
@@ -988,6 +1285,158 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
+  const taskRuns: TaskRunRepo = {
+    async createOrGetByDispatchKey(record) {
+      const transaction = db.transaction(() => {
+        try {
+          db.prepare(
+            'INSERT INTO task_runs ('
+            + 'run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+            + 'created_at, updated_at, state, started_at, ended_at, deadline, plan_id, step_index, total_steps, last_progress, result_text, '
+            + 'result_json, error, result_event_id, input_context_json, delivery_route_json, metadata_json, result_handling_state, delivery_state, delivery_json) '
+            + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+            + 'ON CONFLICT (dispatch_key) DO NOTHING',
+          ).run(
+            record.runId,
+            record.taskId,
+            record.dispatchKey,
+            record.principalId,
+            record.sessionId,
+            record.originRequestId,
+            record.originUserEventId,
+            record.request,
+            record.originMessage,
+            record.createdAt,
+            record.updatedAt,
+            record.state,
+            record.startedAt ?? null,
+            record.endedAt ?? null,
+            record.deadline ?? null,
+            record.planId ?? null,
+            record.stepIndex ?? null,
+            record.totalSteps ?? null,
+            record.lastProgress ?? null,
+            record.resultText ?? null,
+            record.result === undefined ? null : JSON.stringify(record.result),
+            record.error ?? null,
+            record.resultEventId ?? null,
+            record.inputContext === undefined ? null : JSON.stringify(record.inputContext),
+            record.deliveryRoute === undefined ? null : JSON.stringify(record.deliveryRoute),
+            record.metadata === undefined ? null : JSON.stringify(record.metadata),
+            record.resultHandlingState ?? null,
+            record.deliveryState ?? null,
+            record.delivery === undefined ? null : JSON.stringify(record.delivery),
+          );
+        } catch (error) {
+          // dispatch_key 冲突已被 DO NOTHING 吞掉；能抛到这里的唯一键冲突只剩
+          // run_id 主键（新 id 撞车，原样上抛）与每任务单活跃部分索引（D-125：
+          // 跨进程/重启竞态下调用方拿到的是未分类 SqliteError）——后者转可识别
+          // 错误，判定依据 message 里的列名而不是索引名（SQLite 不报索引名）。
+          if (
+            (error as { code?: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+            && String((error as Error).message).includes('task_runs.task_id')
+          ) {
+            throw new TaskRunActiveConflictError(
+              `任务 ${record.taskId} 已有活跃 run（每任务单活跃）：dispatchKey=${record.dispatchKey} 的建单被拒。`,
+            );
+          }
+          throw error;
+        }
+        const row = db.prepare('SELECT * FROM task_runs WHERE dispatch_key = ?').get(record.dispatchKey) as TaskRunRow | undefined;
+        if (!row) throw new Error(`task run dispatch was not recorded: ${record.dispatchKey}`);
+        return rowToTaskRun(row);
+      });
+      return transaction();
+    },
+    async get(runId) {
+      const row = db.prepare('SELECT * FROM task_runs WHERE run_id = ?').get(runId) as TaskRunRow | undefined;
+      return row ? rowToTaskRun(row) : null;
+    },
+    async getByDispatchKey(dispatchKey) {
+      const row = db.prepare('SELECT * FROM task_runs WHERE dispatch_key = ?').get(dispatchKey) as TaskRunRow | undefined;
+      return row ? rowToTaskRun(row) : null;
+    },
+    async listBySession(principalId, sessionId) {
+      const rows = db.prepare(
+        'SELECT * FROM task_runs WHERE principal_id = ? AND session_id = ? ORDER BY rowid ASC',
+      ).all(principalId, sessionId) as TaskRunRow[];
+      return rows.map(rowToTaskRun);
+    },
+    async listPinnedTaskIds() {
+      const rows = db.prepare(
+        "SELECT DISTINCT run.task_id FROM task_runs AS run "
+        + "WHERE run.state IN ('queued', 'running', 'cancelling') "
+        + "OR (run.state IN ('waiting_input', 'waiting_confirmation') AND NOT EXISTS ("
+        + 'SELECT 1 FROM task_runs AS newer WHERE newer.task_id = run.task_id AND newer.rowid > run.rowid)) '
+        + "OR (run.state IN ('completed', 'failed', 'cancelled', 'interrupted') AND ("
+        + "run.delivery_state IS NULL OR run.delivery_state IN ('pending', 'failed', 'unknown') "
+        // Pin judgment reads the explicit result_handling_state column, never a JSON path:
+        // a writer renaming metadata fields must fail loudly at the contract, not silently
+        // pin every terminal run forever.
+        + "OR COALESCE(run.result_handling_state, '') <> 'handled')) "
+        + 'ORDER BY run.task_id',
+      ).all() as Array<{ task_id: string }>;
+      return rows.map((row) => row.task_id);
+    },
+    async listTerminalUnsettledDeliveries() {
+      // Crash-recovery leftovers: the run reached a terminal state but delivery never
+      // settled (prepared-but-never-sent, or the handling claim 'processing' was never
+      // resolved because the in-memory event chain died with the process).
+      const rows = db.prepare(
+        "SELECT * FROM task_runs "
+        + "WHERE state IN ('completed', 'failed', 'cancelled', 'interrupted') "
+        + "AND (delivery_state = 'pending' OR result_handling_state = 'processing') "
+        + 'ORDER BY rowid',
+      ).all() as TaskRunRow[];
+      return rows.map(rowToTaskRun);
+    },
+    async transition(runId, expectedStates, patch, expectedRevision) {
+      const immutableFields = new Set([
+        'runId', 'taskId', 'dispatchKey', 'principalId', 'sessionId', 'originRequestId', 'originUserEventId',
+        'request', 'originMessage', 'createdAt', 'revision', 'planId', 'stepIndex', 'totalSteps',
+        'inputContext', 'deliveryRoute',
+      ]);
+      for (const field of Object.keys(patch)) {
+        if (immutableFields.has(field)) throw new Error(`task run field is immutable: ${field}`);
+      }
+      // patchColumns deliberately omits planId/stepIndex/totalSteps/inputContext/deliveryRoute:
+      // they sit in immutableFields above, so listing them here was dead guidance — any patch
+      // carrying them throws before the column lookup.
+      const patchColumns: Record<string, string> = {
+        updatedAt: 'updated_at', state: 'state', startedAt: 'started_at', endedAt: 'ended_at', deadline: 'deadline',
+        lastProgress: 'last_progress', resultText: 'result_text', result: 'result_json', error: 'error',
+        resultEventId: 'result_event_id', metadata: 'metadata_json', resultHandlingState: 'result_handling_state',
+        deliveryState: 'delivery_state', delivery: 'delivery_json',
+      };
+      const jsonFields = new Set(['result', 'inputContext', 'deliveryRoute', 'metadata', 'delivery']);
+      const assignments: string[] = [];
+      const values: Array<string | number | null> = [];
+      for (const [field, value] of Object.entries(patch)) {
+        const column = patchColumns[field];
+        if (!column) throw new Error(`unsupported task run patch field: ${field}`);
+        assignments.push(`${column} = ?`);
+        values.push(value === undefined ? null : jsonFields.has(field) ? JSON.stringify(value) : value as string | number);
+      }
+      if (assignments.length === 0) assignments.push('state = state');
+      if (expectedStates.length === 0) return false;
+      assignments.push('revision = revision + 1');
+      values.push(runId, ...expectedStates);
+      const placeholders = expectedStates.map(() => '?').join(', ');
+      const revisionPredicate = expectedRevision === undefined ? '' : ' AND revision = ?';
+      if (expectedRevision !== undefined) values.push(expectedRevision);
+      const result = db.prepare(
+        `UPDATE task_runs SET ${assignments.join(', ')} WHERE run_id = ? AND state IN (${placeholders})${revisionPredicate}`,
+      ).run(...values);
+      return result.changes === 1;
+    },
+    async interruptActive(now) {
+      const transaction = db.transaction(() => db.prepare(
+        "UPDATE task_runs SET state = 'interrupted', updated_at = ?, ended_at = COALESCE(ended_at, ?), revision = revision + 1 WHERE state IN ('queued', 'running', 'cancelling')",
+      ).run(now, now).changes);
+      return transaction();
+    },
+  };
+
   const changeIntents: ChangeIntentRepo = {
     async create(record) {
       const columns = ['intent_id', 'principal_id', 'session_id', 'proposal_id', 'task_id', 'confirm_code_hash', 'status', 'created_at', 'expires_at'];
@@ -1027,10 +1476,10 @@ export function createSqliteStore(dbPath: string): AuditStore {
       }
       return record;
     },
-    async findPendingBySession(principalId, sessionId) {
+    async findPendingBySession(principalId, sessionId, taskId) {
       const row = db.prepare(
-        'SELECT * FROM change_intents WHERE principal_id = ? AND session_id = ? AND status = ? ORDER BY created_at DESC LIMIT 1',
-      ).get(principalId, sessionId, 'pending') as ChangeIntentRow | undefined;
+        `SELECT * FROM change_intents WHERE principal_id = ? AND session_id = ? AND status = ?${taskId === undefined ? '' : ' AND task_id = ?'} ORDER BY created_at DESC LIMIT 1`,
+      ).get(principalId, sessionId, 'pending', ...(taskId === undefined ? [] : [taskId])) as ChangeIntentRow | undefined;
       return row ? rowToChangeIntent(row) : null;
     },
     async findByCodeHash(principalId, sessionId, codeHash) {
@@ -1045,7 +1494,7 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, contextStates, taskPlans, memoryRecords, platformTasks, changeIntents };
+  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, contextStates, taskPlans, memoryRecords, platformTasks, changeIntents, sessionArtifacts, taskRuns };
   handles.set(store, db);
   return store;
 }

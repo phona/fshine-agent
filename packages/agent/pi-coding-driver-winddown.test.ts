@@ -116,10 +116,13 @@ describe('Agent.steer（收尾信号的投递契约）', () => {
     expect(last.stopReason).toBe('stop');
   });
 
-  it('收尾指令文案三要素：停止新工作 / 交付已完成部分（产物引用）/ 说明剩余未完成', () => {
+  it('收尾指令文案三要素：停止新工作 / 交付已完成部分（不写路径）/ 说明剩余未完成', () => {
     expect(WORKER_WIND_DOWN_NUDGE).toContain('停止');
-    expect(WORKER_WIND_DOWN_NUDGE).toContain('已产出文件的引用');
+    expect(WORKER_WIND_DOWN_NUDGE).toContain('交付已完成的部分');
     expect(WORKER_WIND_DOWN_NUDGE).toContain('未完成');
     expect(WORKER_WIND_DOWN_NUDGE).toContain('收尾');
+    // W4：不再要求 worker 交还文件路径——产物由宿主按工作区扫描回收，路径对用户
+    // 没有可行动性（2026-10-20 事故里"委派路径不存在"的叙述就是这么上屏的）。
+    expect(WORKER_WIND_DOWN_NUDGE).toContain('不要在回复里写文件路径');
   });
 });

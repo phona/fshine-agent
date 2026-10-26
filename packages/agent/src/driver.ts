@@ -331,11 +331,18 @@ export class ToolUserError extends Error {
    * 未标记的 ToolUserError 表示前置拦截或其他宿主错误。
    */
   delegationCompleted = false;
+  /** Host receipt kind persisted into the tool result; background acceptance is not execution proof. */
+  readonly routeReceipt?: 'delegate' | 'precondition' | 'background';
 
-  constructor(message: string, options?: { delegationCompleted?: boolean }) {
+  constructor(message: string, options?: {
+    delegationCompleted?: boolean;
+    routeReceipt?: 'delegate' | 'precondition' | 'background';
+  }) {
     super(message);
     this.name = 'ToolUserError';
-    this.delegationCompleted = options?.delegationCompleted === true;
+    this.routeReceipt = options?.routeReceipt
+      ?? (options?.delegationCompleted === true ? 'delegate' : undefined);
+    this.delegationCompleted = this.routeReceipt === 'delegate' || options?.delegationCompleted === true;
   }
 }
 

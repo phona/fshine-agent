@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ContextStateRecord, ConversationEventRecord, MemoryRecordRecord, TrustedContext } from '@fshine/contracts';
+import type { TurnInputContext } from '@fshine/contracts';
+import type { TurnDriver } from './src/driver';
 import { RUN_17DZ_TASK_TOOL } from './src/context';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
+import { createCurrentUserMessage } from './src/message-reference';
+import { buildRequestKey } from './src/repeat-request';
 import {
   appendClarificationIssued,
   appendClarificationResolved,
@@ -326,6 +330,27 @@ describe('ensureHistoryBackfill', () => {
     expect(states.upserted[0]?.throughEventId).toBe(log.appended[1]?.eventId);
   });
 
+  it('backfill unwraps a host quote envelope and stores quote metadata separately', async () => {
+    const log = new FakeLog();
+    const states = new FakeContextStates();
+    const reference = { kind: 'text' as const, text: '引用里说以后都这样做' };
+    const currentUser = createCurrentUserMessage(
+      '这是什么意思？',
+      { messageReference: reference },
+      buildRequestKey('这是什么意思？', { messageReference: reference }),
+    );
+
+    await ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [currentUser]);
+
+    expect(log.appended[0]).toMatchObject({
+      kind: 'user_message',
+      content: '这是什么意思？',
+      messageReference: reference,
+    });
+    expect(states.upserted[0]?.state).toMatchObject({ recentTopic: { text: '这是什么意思？' } });
+    expect(JSON.stringify(states.upserted[0]?.state)).not.toContain('引用里说以后都这样做');
+  });
+
   it('已有合法 Context State：直接放行，不重复导入', async () => {
     const log = new FakeLog();
     const states = new FakeContextStates();
@@ -444,6 +469,33 @@ describe('persistAssistantAndContext', () => {
     expect(queues.size).toBe(0);
   });
 
+  it('Context State 的语义抽取只收到正文，不收到引用 metadata', async () => {
+    const log = new FakeLog();
+    log.events.push({
+      ...event('req_tp:user', 'user_message', '这个呢？'),
+      messageReference: { kind: 'text', text: '以后默认采用这个规则' },
+    });
+    const states = new FakeContextStates();
+    let observedPrompt = '';
+    const contextModelDriver: TurnDriver = {
+      run: async (input) => {
+        observedPrompt = String((input.messages[0] as { content?: unknown } | undefined)?.content ?? '');
+        return { text: '{}', messages: input.messages };
+      },
+    };
+    const queues = new Map<string, Promise<void>>();
+
+    await persistAssistantAndContext({
+      conversationLog: log.repo,
+      contextStates: states.repo,
+      contextModelDriver,
+    }, ctx(), '已看到。', queues);
+    await queues.get('wecom:user_a\0sess_tp');
+
+    expect(observedPrompt).toContain('这个呢？');
+    expect(observedPrompt).not.toContain('以后默认采用这个规则');
+  });
+
   it('Context State 更新自身失败也不影响已落库的事件', async () => {
     const log = new FakeLog();
     const states = new FakeContextStates();
@@ -475,6 +527,22 @@ describe('appendUserEvent', () => {
     expect(record?.content).toBe('api_key: "[REDACTED]"');
     expect(record?.requestId).toBe('req_tp');
     expect(Number.isFinite(Date.parse(record?.createdAt ?? ''))).toBe(true);
+  });
+
+  it('stores quote metadata separately and keeps ConversationEventRecord.content as the raw body', async () => {
+    const log = new FakeLog();
+    const inputContext: TurnInputContext = {
+      messageReference: { kind: 'mixed', text: '被引用的幻东账套', truncated: false },
+    };
+
+    await appendUserEvent({ conversationLog: log.repo }, ctx(), '这个呢？', inputContext);
+
+    expect(log.events[0]).toMatchObject({
+      kind: 'user_message',
+      content: '这个呢？',
+      messageReference: { kind: 'mixed', text: '被引用的幻东账套' },
+    });
+    expect(log.events[0]?.content).not.toContain('被引用的幻东账套');
   });
 
   it('没有 conversationLog：空操作', async () => {
@@ -641,6 +709,27 @@ describe('scheduleMemoryConsolidation', () => {
 
     expect(committed).toEqual([{ expected: null, next: 'e_u1' }]);
     expect(queues.size).toBe(0);
+  });
+
+  it('长期记忆提取器只收到用户正文，不收到引用 metadata', async () => {
+    const queues = new Map<string, Promise<void>>();
+    const log = new FakeLog();
+    log.events.push({
+      ...event('e_quoted', 'user_message', '这个选项是什么意思？'),
+      messageReference: { kind: 'text', text: '以后都默认接受' },
+    });
+    let observedEvents: readonly ConversationEventRecord[] = [];
+
+    scheduleMemoryConsolidation({
+      conversationLog: log.repo,
+      memoryRecords: memoryRepo([]),
+      memoryCandidateExtractor: async (events) => { observedEvents = events; return []; },
+      memoryBatchSize: 1,
+    }, ctx(), '这个选项是什么意思？', queues);
+    await queues.get('wecom:user_a');
+
+    expect(observedEvents[0]?.content).toBe('这个选项是什么意思？');
+    expect(observedEvents[0]).not.toHaveProperty('messageReference');
   });
 
   it('cursor 冲突（commit 返回 false）只记警告，不抛', async () => {

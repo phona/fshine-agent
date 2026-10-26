@@ -1,7 +1,9 @@
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { truncateSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import type { TurnDeclaration } from './src/turn-contract';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
@@ -11,9 +13,13 @@ import {
   DELEGATION_EXECUTOR_FAILURE,
   DELEGATION_TIMEOUT_FAILURE,
   createContextTaskRunner,
+  snapshotWorkspaceFiles,
   type ContextTaskRunner,
+  type RunWorkspaceFile,
 } from './src/context';import { createTaxAgentRuntime } from './src/runtime';
+import { outputDiff } from './src/task-manager';
 import { validatePlanEntities } from './src/turn-contract';
+import { createPlatformExecutionGate } from './src/platform-execution-gate';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -77,6 +83,77 @@ describe('17dz Pi subagent adapter', () => {
     expect(observed?.skillRoots).toEqual([path.join(root, '.agents', 'skills')]);
     expect(observed?.sessionId).toBe(result.taskId);
     expect((await tasks.get(result.taskId))?.workerMessages).toHaveLength(2);
+  });
+
+  it('prepare 不先写任务，manager 入队前仅冻结 host-selected 附件并改写对应原路径', async () => {
+    const root = await profileRoot();
+    const sourcePath = path.join(root, 'incoming.xlsx');
+    await writeFile(sourcePath, Buffer.from('fixed attachment bytes'));
+    const tasks = new MemoryTasks();
+    let observed: TurnDriverInput | undefined;
+    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 });
+    const subagent = createContextTaskRunner({
+      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      tasks,
+      executionGate: gate,
+      workerDriver: { run: async (input) => { observed = input; return { text: '已处理。', messages: input.messages }; } },
+    });
+    const hostContext = trusted();
+    hostContext.inputFiles = [{ filename: 'incoming.xlsx', path: sourcePath, bytes: Buffer.byteLength('fixed attachment bytes') }];
+    const prepared = await subagent.prepare!({ request: `读取文件 ${sourcePath}` }, { trusted: hostContext });
+    expect(tasks.records.size).toBe(0);
+    expect(prepared.request).toContain(sourcePath);
+
+    const frozen = await prepared.materializeInputs!('run_123');
+    expect(frozen).toHaveLength(1);
+    expect(frozen[0]?.path).not.toBe(sourcePath);
+    expect(frozen[0]?.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(prepared.request).not.toContain(sourcePath);
+    expect(prepared.request).toContain(frozen[0]!.path);
+
+    const ticket = gate.enqueue({ requestId: hostContext.requestId });
+    const lease = await ticket.acquired;
+    lease.start();
+    try {
+      await prepared.execute({ lease, startedAt: Date.now(), deadline: Date.now() + 1_000, background: true, backgroundRunId: 'run_123' });
+    } finally {
+      lease.release();
+    }
+    const content = String((observed?.messages.at(-1) as unknown as { content?: unknown })?.content ?? '');
+    expect(content).toContain(frozen[0]!.path);
+    expect(content).not.toContain(sourcePath);
+    expect(tasks.records.get(prepared.taskId)?.workerMessages).toHaveLength(1);
+  });
+
+  it('外来工作区路径剥离覆盖完整委派请求：「范围：」行与任务正文（args.request 主拷贝）同一把尺', async () => {
+    // D-114 事故形状（tmp/task_<uuid>）：workerRequest 里同一文本有两份拷贝——「范围：」行
+    // （turnDeclaration.request）与任务正文（args.request）。只剥范围行时，主拷贝原样下发，
+    // worker 仍能拿到外来工作区路径去 hunt。端到端断言：worker 可见的完整委派请求（首条
+    // user message）两处都不含外来路径；本任务自己的工作区路径不在剥离模式内，安全。
+    const root = await profileRoot();
+    const foreignInBody = 'tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/工资表.xlsx';
+    const foreignAbsolute = '/home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_11111111-2222-3333-4444-555555555555/旧结果.xlsx';
+    let observed: TurnDriverInput | undefined;
+    const subagent = runner(root, new MemoryTasks(), {
+      run: async (input) => {
+        observed = input;
+        return { text: '完成。', messages: input.messages };
+      },
+    });
+
+    await subagent.run({
+      request: `把 ${foreignInBody} 重发给用户`,
+      turnDeclaration: { kind: 'delegate', request: `把 ${foreignInBody} 重发，并参考 ${foreignAbsolute}` },
+    }, { trusted: trusted() });
+
+    const firstUser = String((observed?.messages[0] as unknown as { content?: string })?.content ?? '');
+    expect(firstUser).toContain('【委派】');
+    expect(firstUser).toContain('（非本任务工作区路径，已由宿主剥离）');
+    // 两份拷贝都不再含外来任务工作区路径（含其绝对前缀形态）
+    expect(firstUser).not.toContain('task_d42fffce');
+    expect(firstUser).not.toContain('task_11111111');
+    // 正向对照：本任务自己的工作区行原样保留（worker 写得动的位置）
+    expect(firstUser).toMatch(/工作区：tmp\/task_[0-9a-f-]+/u);
   });
 
   it('账套存在性任务要求只用专用目录搜索 operation', async () => {
@@ -1075,5 +1152,130 @@ describe('错误态快路径 v2：空文本豁免与终局分支的顺序', () =
     });
     const result = await task.run({ request: '查A', stepLabel: '第1/2步：查某客户' }, { trusted: trusted() });
     expect(result.text).toBe('没有找到匹配“某客户”的对象。请确认准确名称后我再查。');
+  });
+});
+
+describe('snapshotWorkspaceFiles 体积上限（D-116）', () => {
+  function limitedEvents(warn: ReturnType<typeof vi.spyOn>): Array<Record<string, unknown>> {
+    return warn.mock.calls.map(([line]) => {
+      const parsed = JSON.parse(String(line)) as Record<string, unknown>;
+      return parsed.event === 'workspace_snapshot_limited' ? parsed : null;
+    }).filter((entry): entry is Record<string, unknown> => entry !== null);
+  }
+
+  it('常规工作区逐文件哈希行为不变：真实 sha256、无降级标记、无日志事件', async () => {
+    const root = await profileRoot();
+    const workspaceDir = 'tmp/task_snap_normal';
+    const workspace = path.join(root, workspaceDir);
+    await mkdir(path.join(workspace, 'nested'), { recursive: true });
+    await writeFile(path.join(workspace, 'a.txt'), 'alpha');
+    await writeFile(path.join(workspace, 'nested', 'b.txt'), 'beta');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const files = await snapshotWorkspaceFiles(root, workspaceDir);
+      const digest = (content: string) => createHash('sha256').update(content).digest('hex');
+      expect(files.map(({ relativePath, size, sha256, hashSkipped }) => ({ relativePath, size, sha256, hashSkipped }))).toEqual([
+        { relativePath: 'a.txt', size: 5, sha256: digest('alpha'), hashSkipped: undefined },
+        { relativePath: 'nested/b.txt', size: 4, sha256: digest('beta'), hashSkipped: undefined },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('单文件超限降级：不读全文不哈希（fake hash 计数为证），条目只登记大小并带 hashSkipped，skipped 计数留日志事件', async () => {
+    const root = await profileRoot();
+    const workspaceDir = 'tmp/task_snap_oversize';
+    const workspace = path.join(root, workspaceDir);
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(workspace, 'small.txt'), 'small');
+    const bigPath = path.join(workspace, 'big.bin');
+    writeFileSync(bigPath, '');
+    truncateSync(bigPath, 33 * 1024 * 1024);
+    let hashCalls = 0;
+    const fakeHash = async (): Promise<string> => {
+      hashCalls += 1;
+      return '00'.repeat(32);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const files = await snapshotWorkspaceFiles(root, workspaceDir, fakeHash);
+      expect(hashCalls).toBe(1);
+      const big = files.find((file) => file.relativePath === 'big.bin');
+      expect(big).toMatchObject({ size: 33 * 1024 * 1024, hashSkipped: true });
+      expect(big?.sha256).toBeUndefined();
+      expect(limitedEvents(warn)).toEqual([
+        expect.objectContaining({ hashSkippedOversize: 1, hashedFiles: 1, stoppedEarly: false }),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('超总量停止遍历：12 个 30MB 文件只入快照 9 个（270MB>256MB），余下不再读不再入', async () => {
+    const root = await profileRoot();
+    const workspaceDir = 'tmp/task_snap_total';
+    const workspace = path.join(root, workspaceDir);
+    await mkdir(workspace, { recursive: true });
+    for (let index = 1; index <= 12; index += 1) {
+      const filePath = path.join(workspace, `chunk_${String(index).padStart(2, '0')}.bin`);
+      writeFileSync(filePath, '');
+      truncateSync(filePath, 30 * 1024 * 1024);
+    }
+    let hashCalls = 0;
+    const fakeHash = async (): Promise<string> => {
+      hashCalls += 1;
+      return '00'.repeat(32);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const files = await snapshotWorkspaceFiles(root, workspaceDir, fakeHash);
+      expect(files).toHaveLength(9);
+      expect(hashCalls).toBe(9);
+      expect(limitedEvents(warn)).toEqual([
+        expect.objectContaining({ hashedFiles: 9, hashSkippedOversize: 0, totalBytes: 9 * 30 * 1024 * 1024, stoppedEarly: true }),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('超条目数停止遍历：20001 个空文件封顶 2 万条（数量上限与总量上限同一停止机制）', async () => {
+    const root = await profileRoot();
+    const workspaceDir = 'tmp/task_snap_count';
+    const workspace = path.join(root, workspaceDir);
+    await mkdir(workspace, { recursive: true });
+    for (let index = 0; index <= 20_000; index += 1) {
+      writeFileSync(path.join(workspace, `f_${String(index).padStart(5, '0')}.txt`), '');
+    }
+    let hashCalls = 0;
+    const fakeHash = async (): Promise<string> => {
+      hashCalls += 1;
+      return '00'.repeat(32);
+    };
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const files = await snapshotWorkspaceFiles(root, workspaceDir, fakeHash);
+      expect(files).toHaveLength(20_000);
+      expect(hashCalls).toBe(20_000);
+      expect(limitedEvents(warn)).toEqual([
+        expect.objectContaining({ hashedFiles: 20_000, hashSkippedOversize: 0, totalBytes: 0, stoppedEarly: true }),
+      ]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('降级条目不参与 diff 的内容比较：before/after 同为降级且同大小时不误报新增输出', () => {
+    // 钉 task-manager outputDiff 对可选 sha256 的语义（D-116 降级条目）：
+    // 无哈希可比 → 不按内容判定差异；大小变化仍会被看见；一侧降级一侧有哈希 → 保守归因为变化。
+    const degraded: RunWorkspaceFile = { path: '/w/big.bin', relativePath: 'big.bin', size: 40 * 1024 * 1024, hashSkipped: true };
+    const sameAgain: RunWorkspaceFile = { path: '/w/big.bin', relativePath: 'big.bin', size: 40 * 1024 * 1024, hashSkipped: true };
+    const grew: RunWorkspaceFile = { path: '/w/big.bin', relativePath: 'big.bin', size: 41 * 1024 * 1024, hashSkipped: true };
+    const hashedNow: RunWorkspaceFile = { path: '/w/big.bin', relativePath: 'big.bin', size: 1024, sha256: 'ab'.repeat(32) };
+    expect(outputDiff([degraded], [sameAgain])).toEqual([]);
+    expect(outputDiff([degraded], [grew])).toEqual([grew]);
+    expect(outputDiff([degraded], [hashedNow])).toEqual([hashedNow]);
   });
 });

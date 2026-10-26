@@ -20,7 +20,7 @@ import { balanceCalls, boot, gatedWorker, ledger, mainDriver, totalActualCalls, 
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
-const SESSION_ID = 'wecom:e2e_user:e2e_user';
+const SESSION_ID = 'wecom:e2e_user';
 
 /**
  * Context State 的落库是回合内 fire-and-forget（runtime.ts 的 enqueueContextStateUpdate）：

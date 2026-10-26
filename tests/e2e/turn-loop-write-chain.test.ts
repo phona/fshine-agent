@@ -49,7 +49,7 @@ const ACCOUNT = '幻辰财税';
 const PERIOD = '202609';
 const PRINCIPAL = 'wecom:e2e_user';
 /** 单聊会话：adapter 的 conversationId = chatid ?? userid。 */
-const SESSION = 'wecom:e2e_user:e2e_user';
+const SESSION = 'wecom:e2e_user';
 const CONFIRM_RE = /确认\s*([A-Z0-9]{6})/;
 
 /** mock 状态文件（DZ_MOCK_STATE）里账套期内的凭证张数；文件未播种时视为 0。 */

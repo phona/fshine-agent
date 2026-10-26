@@ -3,7 +3,8 @@ import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { AgentRequestRecord, AuditStore, ConversationSessionRecord, MemoryRecordRecord, PlatformTaskRecord, PrincipalScopeRecord, ToolCallRecord } from '@fshine/contracts';
+import type { AgentRequestRecord, AuditStore, ConversationEventRecord, ConversationSessionRecord, MemoryRecordRecord, PlatformTaskRecord, PrincipalScopeRecord, SessionArtifactRecord, TaskRunRecord, ToolCallRecord } from '@fshine/contracts';
+import { TaskRunActiveConflictError } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from './src/index';
 
 const DB_MODES = [':memory:', 'file'] as const;
@@ -72,6 +73,26 @@ function makeMemoryRecord(overrides: Partial<MemoryRecordRecord> = {}): MemoryRe
     memoryId: 'mem_style', principalId: 'wecom:user_a', key: 'response_style', type: 'preference',
     content: '用中文简洁回答', status: 'active', sourceEventIds: ['evt_1'], version: 1,
     createdAt: '2026-09-15T08:00:00.000Z', updatedAt: '2026-09-15T08:00:00.000Z',
+    ...overrides,
+  };
+}
+
+function makeTaskRun(overrides: Partial<TaskRunRecord> = {}): TaskRunRecord {
+  const runId = newId('run');
+  return {
+    runId,
+    taskId: `task_${runId}`,
+    dispatchKey: `dispatch_${runId}`,
+    principalId: 'wecom:user_a',
+    sessionId: 'wecom:user_a:conv_1',
+    originRequestId: 'req_origin',
+    originUserEventId: 'evt_origin',
+    request: '查账',
+    originMessage: '帮我查账',
+    createdAt: '2026-10-23T01:00:00.000Z',
+    updatedAt: '2026-10-23T01:00:00.000Z',
+    state: 'queued',
+    revision: 0,
     ...overrides,
   };
 }
@@ -293,6 +314,57 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
     });
   });
 
+  describe('sessionArtifacts', () => {
+    it('stores the originating run alongside task provenance', async () => {
+      const artifact: SessionArtifactRecord = {
+        ref: '7', sessionId: 'sess_a', filename: 'result.xlsx', sha256: 'abc123', size: 2048,
+        sourceTaskId: 'task_1', sourceRunId: 'run_2', requestId: 'req_1',
+        createdAt: '2026-10-23T02:00:00.000Z', status: 'available', path: '/tmp/artifact.xlsx',
+      };
+      await store.sessionArtifacts!.insert(artifact);
+      expect(await store.sessionArtifacts!.get(artifact.sessionId, artifact.ref)).toEqual(artifact);
+      expect(await store.sessionArtifacts!.listBySession(artifact.sessionId)).toEqual([artifact]);
+    });
+
+    // ── D-123（2026-10-25 登债）：insert 是静默覆盖 upsert，并发 ingest 分到重叠 ref 时
+    // 后写覆盖前写（字节留孤儿、ref 指向新文件），正确性只靠"handler 会话队列内串行"的
+    // 注释纪律。fail-loud 优于数据丢失：冲突必须抛可识别错误且首行数据不变。
+    it('同会话同 ref 二次 insert fail-loud 抛可识别错误，首行数据不变（D-123）', async () => {
+      const first: SessionArtifactRecord = {
+        ref: '3', sessionId: 'sess_dup', filename: 'first.xlsx', sha256: 'sha_first', size: 10,
+        createdAt: '2026-10-25T00:00:00.000Z', status: 'available', path: '/tmp/first.xlsx',
+      };
+      await store.sessionArtifacts!.insert(first);
+
+      const error = await store.sessionArtifacts!.insert({
+        ...first, filename: 'second.xlsx', sha256: 'sha_second', size: 20, path: '/tmp/second.xlsx',
+      }).then(() => null, (caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).name).toBe('SessionArtifactRefConflictError');
+      expect((error as Error).message).toContain('sess_dup');
+      expect((error as Error).message).toContain("'3'");
+      // 首行未被覆盖：ref 仍指向原文件（覆盖 upsert 会让 get 读回 second 的形状）。
+      expect(await store.sessionArtifacts!.get('sess_dup', '3')).toEqual(first);
+      expect((await store.sessionArtifacts!.listBySession('sess_dup'))).toHaveLength(1);
+    });
+
+    // ── D-123：ref 是 TEXT 列，同毫秒批内跨 10 位数（'10' < '2'）时 TEXT 序不稳定，
+    // 影响清单顺序与最旧优先淘汰的确定性。ref 由 nextArtifactRef 生成（数字字符串），
+    // CAST 后数值序稳定。
+    it('同毫秒批内 ref 跨 10 位数仍按数值序排列（D-123：改前 TEXT 序是 1,10,2）', async () => {
+      const createdAt = '2026-10-25T00:00:00.000Z';
+      for (const ref of ['1', '2', '10']) {
+        await store.sessionArtifacts!.insert({
+          ref, sessionId: 'sess_order', filename: `f${ref}.xlsx`, sha256: 'sha', size: 1,
+          createdAt, status: 'available', path: `/tmp/${ref}.xlsx`,
+        });
+      }
+      expect((await store.sessionArtifacts!.listBySession('sess_order')).map((row) => row.ref))
+        .toEqual(['1', '2', '10']);
+    });
+  });
+
   describe('platformTasks', () => {
     it('只持久化可恢复 Pi transcript 的最小字段', async () => {
       const record = makePlatformTask();
@@ -437,6 +509,16 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       expect(done?.result).toEqual({ saved: 1 });
       expect(done?.decidedAt).toBeTruthy();
     });
+
+    it('后台提案可按任务查找，不会把另一独立任务的待确认提案取代', async () => {
+      const first = { ...base, intentId: newId('intent'), taskId: 'task_a', confirmCodeHash: 'code_a' };
+      const second = { ...base, intentId: newId('intent'), taskId: 'task_b', confirmCodeHash: 'code_b', createdAt: '2026-09-19T08:01:00.000Z' };
+      await store.changeIntents!.create(first);
+      await store.changeIntents!.create(second);
+      expect((await store.changeIntents!.findPendingBySession(base.principalId, base.sessionId))?.intentId).toBe(second.intentId);
+      expect((await store.changeIntents!.findPendingBySession(base.principalId, base.sessionId, 'task_a'))?.intentId).toBe(first.intentId);
+      expect(await store.changeIntents!.findPendingBySession(base.principalId, base.sessionId, 'task_c')).toBeNull();
+    });
   });
 
   describe('conversationLog', () => {
@@ -467,6 +549,208 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       await store.conversationLog.append(event);
       await expect(store.conversationLog.append({ ...event, content: '被篡改' })).rejects.toThrow(/eventId/);
       expect(await store.conversationLog.list({ principalId: 'wecom:user_a', sessionId: 'sess_a', limit: 10 })).toEqual([event]);
+    });
+
+    it('引用 metadata 独立往返、可搜索，且相同 eventId 的不同引用触发冲突', async () => {
+      const event: ConversationEventRecord = {
+        eventId: 'evt_quoted', principalId: 'wecom:user_a', sessionId: 'sess_a',
+        kind: 'user_message', content: '解释一下这个',
+        messageReference: { kind: 'text', text: '上月的汇总表', truncated: false, sourceMessageId: 'quoted_msg_1' },
+        createdAt: '2026-10-23T01:00:00.000Z', requestId: 'req_quoted',
+      };
+      const unsafeEvent = {
+        ...event,
+        messageReference: { ...event.messageReference!, tempUrl: 'https://temporary.invalid/x', aeskey: 'secret' } as NonNullable<ConversationEventRecord['messageReference']>,
+      };
+      await store.conversationLog.append(unsafeEvent);
+
+      expect(await store.conversationLog.list({ principalId: event.principalId, sessionId: event.sessionId, limit: 10 }))
+        .toEqual([event]);
+      expect(await store.conversationLog.search({ principalId: event.principalId, sessionId: event.sessionId, query: '汇总表', limit: 10 }))
+        .toEqual([event]);
+      expect(await store.conversationLog.search({ principalId: event.principalId, sessionId: event.sessionId, query: '解释一下', limit: 10 }))
+        .toEqual([event]);
+
+      await expect(store.conversationLog.append({
+        ...unsafeEvent,
+        messageReference: { ...event.messageReference!, text: '另一段引用' },
+      })).rejects.toThrow(/eventId/);
+    });
+
+    it('task_event 的 taskId/runId 持久化并可检索', async () => {
+      const event: ConversationEventRecord = {
+        eventId: 'evt_task_run', principalId: 'wecom:user_a', sessionId: 'sess_a',
+        kind: 'task_event', content: '{"state":"completed"}', taskId: 'task_1', runId: 'run_1',
+        createdAt: '2026-10-23T01:01:00.000Z', requestId: 'req_1',
+      };
+      await store.conversationLog.append(event);
+      expect(await store.conversationLog.list({ principalId: event.principalId, sessionId: event.sessionId, limit: 10 }))
+        .toEqual([event]);
+      expect(await store.conversationLog.search({ principalId: event.principalId, query: 'completed', limit: 10 }))
+        .toEqual([event]);
+    });
+  });
+
+  describe('taskRuns', () => {
+    it('按唯一 dispatchKey 原子创建或返回同一 run，并无损读回事件与交付 metadata', async () => {
+      const first = makeTaskRun({
+        dispatchKey: 'dispatch_origin_tool_call',
+        planId: 'plan_1', stepIndex: 2, totalSteps: 3,
+        inputContext: { messageReference: { kind: 'text', text: '本轮引用' } },
+        deliveryRoute: { channel: 'wecom', conversationId: 'conv_1' },
+        result: { outcome: 'ok', count: 4 }, resultEventId: 'evt_result_1',
+        deliveryState: 'pending', delivery: [{ itemId: 'text:0', status: 'pending' }],
+        metadata: { inputFiles: [{ path: '/tmp/input.xlsx', size: 9, sha256: 'abc' }] },
+      });
+      const duplicate = { ...first, runId: 'run_duplicate', taskId: 'task_duplicate', createdAt: '2026-10-24T00:00:00.000Z' };
+
+      const [created, repeated] = await Promise.all([
+        store.taskRuns!.createOrGetByDispatchKey(first),
+        store.taskRuns!.createOrGetByDispatchKey(duplicate),
+      ]);
+
+      expect(created).toEqual(first);
+      expect(repeated).toEqual(first);
+      expect(await store.taskRuns!.get(first.runId)).toEqual(first);
+      expect(await store.taskRuns!.getByDispatchKey(first.dispatchKey)).toEqual(first);
+      expect(await store.taskRuns!.get(duplicate.runId)).toBeNull();
+      expect(await store.taskRuns!.listBySession(first.principalId, first.sessionId)).toEqual([first]);
+    });
+
+    it('同毫秒和旧运行交付更新不改变 run 注册顺序', async () => {
+      const first = makeTaskRun({ runId: 'run_z_first', dispatchKey: 'first', state: 'completed' });
+      const second = makeTaskRun({ runId: 'run_a_second', dispatchKey: 'second', state: 'running' });
+      await store.taskRuns!.createOrGetByDispatchKey(first);
+      await store.taskRuns!.createOrGetByDispatchKey(second);
+      await store.taskRuns!.transition(first.runId, ['completed'], { updatedAt: '2099-01-01T00:00:00.000Z', deliveryState: 'sent' });
+      const rows = await store.taskRuns!.listBySession(first.principalId, first.sessionId);
+      expect(rows.map((row) => row.runId)).toEqual([first.runId, second.runId]);
+    });
+
+    it('expected-state transition 是原子的，并拒绝改写身份与派单键', async () => {
+      const run = makeTaskRun();
+      await store.taskRuns!.createOrGetByDispatchKey(run);
+
+      expect(await store.taskRuns!.transition(run.runId, ['running'], { state: 'completed' })).toBe(false);
+      expect(await store.taskRuns!.transition(run.runId, ['queued'], {
+        state: 'running', startedAt: '2026-10-23T01:01:00.000Z', updatedAt: '2026-10-23T01:01:00.000Z',
+      })).toBe(true);
+      expect(await store.taskRuns!.transition(run.runId, ['queued'], { state: 'failed' })).toBe(false);
+      expect(await store.taskRuns!.transition(run.runId, ['running'], {
+        state: 'completed', resultEventId: 'evt_done', endedAt: '2026-10-23T01:02:00.000Z',
+      })).toBe(true);
+      await expect(store.taskRuns!.transition(run.runId, ['completed'], { taskId: 'other_task' }))
+        .rejects.toThrow(/immutable|identity|dispatch/i);
+      await expect(store.taskRuns!.transition(run.runId, ['completed'], { principalId: 'wecom:other' }))
+        .rejects.toThrow(/immutable|identity|dispatch/i);
+      await expect(store.taskRuns!.transition(run.runId, ['completed'], {
+        deliveryRoute: { channel: 'wecom', conversationId: 'other-conversation' },
+      })).rejects.toThrow(/immutable|identity|dispatch/i);
+      expect((await store.taskRuns!.get(run.runId))?.state).toBe('completed');
+    });
+
+    it('revision CAS 会拒绝同状态的过期 delivery/metadata 写入', async () => {
+      const run = makeTaskRun();
+      await store.taskRuns!.createOrGetByDispatchKey(run);
+      const initial = await store.taskRuns!.get(run.runId);
+      expect(initial?.revision).toBe(0);
+      expect(await store.taskRuns!.transition(run.runId, ['queued'], { state: 'running' }, initial?.revision)).toBe(true);
+
+      const current = await store.taskRuns!.get(run.runId);
+      expect(current?.revision).toBe(1);
+      expect(await store.taskRuns!.transition(
+        run.runId,
+        ['running'],
+        { lastProgress: 'stale snapshot' },
+        initial?.revision,
+      )).toBe(false);
+      expect(await store.taskRuns!.transition(
+        run.runId,
+        ['running'],
+        { lastProgress: 'current snapshot' },
+        current?.revision,
+      )).toBe(true);
+      expect(await store.taskRuns!.get(run.runId)).toMatchObject({ revision: 2, lastProgress: 'current snapshot' });
+    });
+
+    it('启动恢复只中断 queued/running/cancelling，不自动恢复或重放', async () => {
+      const queued = makeTaskRun({ runId: 'run_queued', dispatchKey: 'd_queued', state: 'queued' });
+      const running = makeTaskRun({ runId: 'run_running', dispatchKey: 'd_running', state: 'running', startedAt: '2026-10-23T01:00:30.000Z' });
+      const cancelling = makeTaskRun({ runId: 'run_cancelling', dispatchKey: 'd_cancelling', state: 'cancelling' });
+      const waiting = makeTaskRun({ runId: 'run_waiting', dispatchKey: 'd_waiting', state: 'waiting_confirmation' });
+      const completed = makeTaskRun({ runId: 'run_completed', dispatchKey: 'd_completed', state: 'completed' });
+      for (const run of [queued, running, cancelling, waiting, completed]) await store.taskRuns!.createOrGetByDispatchKey(run);
+
+      expect(await store.taskRuns!.interruptActive('2026-10-23T02:00:00.000Z')).toBe(3);
+      expect(await store.taskRuns!.interruptActive('2026-10-23T02:01:00.000Z')).toBe(0);
+      expect(await store.taskRuns!.get(queued.runId)).toMatchObject({ state: 'interrupted', updatedAt: '2026-10-23T02:00:00.000Z', endedAt: '2026-10-23T02:00:00.000Z' });
+      expect(await store.taskRuns!.get(running.runId)).toMatchObject({ state: 'interrupted', startedAt: running.startedAt });
+      expect(await store.taskRuns!.get(cancelling.runId)).toMatchObject({ state: 'interrupted' });
+      expect(await store.taskRuns!.get(waiting.runId)).toMatchObject({ state: 'waiting_confirmation' });
+      expect(await store.taskRuns!.get(completed.runId)).toMatchObject({ state: 'completed' });
+    });
+
+    it('同一 taskId 不允许存在两个活动 run，结束/等待后才允许显式新 run', async () => {
+      const first = makeTaskRun({ taskId: 'task_single_active', dispatchKey: 'dispatch_active_1' });
+      await store.taskRuns!.createOrGetByDispatchKey(first);
+      // D-125：跨进程/重启竞态下调用方拿到的是未分类 SqliteError——转可识别错误，
+      // 调用方才能回复"已有 Worker 在跑"而不是接住底层约束异常。
+      const conflict = await store.taskRuns!.createOrGetByDispatchKey(makeTaskRun({
+        taskId: first.taskId, dispatchKey: 'dispatch_active_2',
+      })).then(() => null, (caught: unknown) => caught);
+      expect(conflict).toBeInstanceOf(TaskRunActiveConflictError);
+      expect((conflict as Error).message).toContain('task_single_active');
+      // dispatchKey 幂等（DO NOTHING 回读）不受分类改造影响：同 key 二次提交仍返回原 run。
+      await expect(store.taskRuns!.createOrGetByDispatchKey(makeTaskRun({
+        taskId: 'task_other', dispatchKey: 'dispatch_active_1', runId: 'run_idempotent_1',
+      }))).resolves.toMatchObject({ runId: first.runId, taskId: first.taskId });
+
+      expect(await store.taskRuns!.transition(first.runId, ['queued'], { state: 'waiting_input' })).toBe(true);
+      const resumed = makeTaskRun({ taskId: first.taskId, dispatchKey: 'dispatch_active_3' });
+      await expect(store.taskRuns!.createOrGetByDispatchKey(resumed)).resolves.toEqual(resumed);
+    });
+
+    it('枚举全局未完成任务与待处理结果的 GC 引用，不钉已交付终态（result_handling_state 列驱动）', async () => {
+      const pinned = [
+        makeTaskRun({ runId: 'run_pin_queued', taskId: 'task_pin_queued', dispatchKey: 'pin_queued', state: 'queued' }),
+        makeTaskRun({ runId: 'run_pin_running', taskId: 'task_pin_running', dispatchKey: 'pin_running', state: 'running' }),
+        makeTaskRun({ runId: 'run_pin_cancelling', taskId: 'task_pin_cancelling', dispatchKey: 'pin_cancelling', state: 'cancelling' }),
+        makeTaskRun({ runId: 'run_pin_input', taskId: 'task_pin_input', dispatchKey: 'pin_input', state: 'waiting_input' }),
+        makeTaskRun({ runId: 'run_pin_confirmation', taskId: 'task_pin_confirmation', dispatchKey: 'pin_confirmation', state: 'waiting_confirmation' }),
+        makeTaskRun({ runId: 'run_pin_delivery_pending', taskId: 'task_pin_delivery_pending', dispatchKey: 'pin_delivery_pending', state: 'completed', deliveryState: 'pending' }),
+        makeTaskRun({ runId: 'run_pin_delivery_failed', taskId: 'task_pin_delivery_failed', dispatchKey: 'pin_delivery_failed', state: 'failed', deliveryState: 'failed' }),
+        makeTaskRun({ runId: 'run_pin_delivery_unknown', taskId: 'task_pin_delivery_unknown', dispatchKey: 'pin_delivery_unknown', state: 'interrupted', deliveryState: 'unknown' }),
+        makeTaskRun({ runId: 'run_pin_unhandled', taskId: 'task_pin_unhandled', dispatchKey: 'pin_unhandled', state: 'completed', resultHandlingState: 'failed' }),
+        makeTaskRun({ runId: 'run_pin_processing', taskId: 'task_pin_processing', dispatchKey: 'pin_processing', state: 'completed', deliveryState: 'sent', resultHandlingState: 'processing' }),
+        makeTaskRun({ runId: 'run_pin_missing_handling', taskId: 'task_pin_missing_handling', dispatchKey: 'pin_missing_handling', state: 'completed', deliveryState: 'sent' }),
+      ];
+      const delivered = makeTaskRun({
+        runId: 'run_delivered', taskId: 'task_delivered', dispatchKey: 'delivered',
+        state: 'completed', deliveryState: 'sent', resultHandlingState: 'handled',
+      });
+      const noDeliveryState = makeTaskRun({
+        runId: 'run_terminal', taskId: 'task_terminal', dispatchKey: 'terminal', state: 'failed',
+      });
+      const oldWaiting = makeTaskRun({
+        runId: 'run_old_waiting', taskId: 'task_resumed', dispatchKey: 'old_waiting', state: 'waiting_confirmation',
+      });
+      const intermediate = makeTaskRun({
+        runId: 'run_intermediate', taskId: 'task_intermediate', dispatchKey: 'intermediate',
+        state: 'completed', deliveryState: 'not_required', resultHandlingState: 'handled',
+      });
+      const finalAfterIntermediate = makeTaskRun({
+        runId: 'run_final_after_intermediate', taskId: 'task_intermediate', dispatchKey: 'final_after_intermediate',
+        state: 'completed', deliveryState: 'sent', resultHandlingState: 'handled',
+      });
+      const newDelivered = makeTaskRun({
+        runId: 'run_new_delivered', taskId: 'task_resumed', dispatchKey: 'new_delivered',
+        state: 'completed', deliveryState: 'sent', resultHandlingState: 'handled',
+      });
+      for (const run of [...pinned, delivered, noDeliveryState, oldWaiting, newDelivered, intermediate, finalAfterIntermediate]) {
+        await store.taskRuns!.createOrGetByDispatchKey(run);
+      }
+
+      expect(await store.taskRuns!.listPinnedTaskIds()).toEqual([...pinned, noDeliveryState].map((run) => run.taskId).sort());
     });
   });
 
@@ -697,6 +981,246 @@ describe('change_intents 前向迁移（旧库历史行）', () => {
         closeStore(legacyStore);
       }
     } finally {
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('conversation_events 前向迁移（引用与后台关联）', () => {
+  it('为已有事件表补可空列；旧事件读作无引用，后续 quote 与 task_event 可正常写入', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-events-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    const timestamp = '2026-10-22T10:00:00.000Z';
+    let legacyStore: AuditStore | undefined;
+    try {
+      const legacy = new Database(legacyPath);
+      try {
+        legacy.exec(
+          'CREATE TABLE conversation_events ('
+          + 'event_seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, principal_id TEXT NOT NULL, '
+          + 'session_id TEXT NOT NULL, kind TEXT NOT NULL, content TEXT, artifact_ref TEXT, created_at TEXT NOT NULL, request_id TEXT)',
+        );
+        legacy.prepare(
+          'INSERT INTO conversation_events (event_id, principal_id, session_id, kind, content, created_at, request_id) '
+          + 'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        ).run('evt_old', 'wecom:user_a', 'sess_a', 'user_message', '旧正文', timestamp, 'req_old');
+      } finally {
+        legacy.close();
+      }
+
+      legacyStore = createSqliteStore(legacyPath);
+      const columns = new Set((new Database(legacyPath).prepare('PRAGMA table_info(conversation_events)').all() as Array<{ name: string }>).map(({ name }) => name));
+      expect(columns.has('message_reference')).toBe(true);
+      expect(columns.has('task_id')).toBe(true);
+      expect(columns.has('run_id')).toBe(true);
+      expect(await legacyStore.conversationLog.list({ principalId: 'wecom:user_a', sessionId: 'sess_a', limit: 10 }))
+        .toEqual([{ eventId: 'evt_old', principalId: 'wecom:user_a', sessionId: 'sess_a', kind: 'user_message', content: '旧正文', createdAt: timestamp, requestId: 'req_old' }]);
+
+      await legacyStore.conversationLog.append({
+        eventId: 'evt_new', principalId: 'wecom:user_a', sessionId: 'sess_a', kind: 'task_event',
+        content: 'run completed', messageReference: { kind: 'text', text: '引用正文' },
+        taskId: 'task_new', runId: 'run_new', createdAt: timestamp, requestId: 'req_new',
+      });
+      expect(await legacyStore.conversationLog.search({ principalId: 'wecom:user_a', sessionId: 'sess_a', query: '引用正文', limit: 10 }))
+        .toMatchObject([{ eventId: 'evt_new', content: 'run completed', messageReference: { text: '引用正文' }, taskId: 'task_new', runId: 'run_new' }]);
+    } finally {
+      if (legacyStore) closeStore(legacyStore);
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('session_artifacts 前向迁移（run provenance）', () => {
+  it('为旧产物库补 source_run_id 且旧行保持无 run 关联', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-artifacts-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    let legacyStore: AuditStore | undefined;
+    try {
+      const legacy = new Database(legacyPath);
+      try {
+        legacy.exec(
+          'CREATE TABLE session_artifacts ('
+          + 'ref TEXT NOT NULL, session_id TEXT NOT NULL, filename TEXT NOT NULL, sha256 TEXT NOT NULL, size INTEGER NOT NULL, '
+          + 'source_task_id TEXT, request_id TEXT, created_at TEXT NOT NULL, status TEXT NOT NULL, path TEXT NOT NULL, '
+          + 'PRIMARY KEY (session_id, ref))',
+        );
+        legacy.prepare(
+          'INSERT INTO session_artifacts (ref, session_id, filename, sha256, size, source_task_id, request_id, created_at, status, path) '
+          + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run('1', 'sess_a', 'old.xlsx', 'oldhash', 10, 'task_old', 'req_old', '2026-10-22T10:00:00.000Z', 'available', '/tmp/old.xlsx');
+      } finally {
+        legacy.close();
+      }
+
+      legacyStore = createSqliteStore(legacyPath);
+      const columns = new Set((new Database(legacyPath).prepare('PRAGMA table_info(session_artifacts)').all() as Array<{ name: string }>).map(({ name }) => name));
+      expect(columns.has('source_run_id')).toBe(true);
+      const old = await legacyStore.sessionArtifacts!.get('sess_a', '1');
+      expect(old).toMatchObject({ ref: '1', sourceTaskId: 'task_old', filename: 'old.xlsx' });
+      expect('sourceRunId' in old!).toBe(false);
+
+      const current: SessionArtifactRecord = {
+        ref: '2', sessionId: 'sess_a', filename: 'new.xlsx', sha256: 'newhash', size: 20,
+        sourceTaskId: 'task_new', sourceRunId: 'run_new', requestId: 'req_new',
+        createdAt: '2026-10-23T10:00:00.000Z', status: 'available', path: '/tmp/new.xlsx',
+      };
+      await legacyStore.sessionArtifacts!.insert(current);
+      expect(await legacyStore.sessionArtifacts!.get('sess_a', '2')).toEqual(current);
+    } finally {
+      if (legacyStore) closeStore(legacyStore);
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('task_runs 前向迁移（revision CAS）', () => {
+  it('为已有后台运行表补 revision 默认值并支持 CAS 更新', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-runs-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    let legacyStore: AuditStore | undefined;
+    try {
+      const legacy = new Database(legacyPath);
+      try {
+        legacy.exec(
+          'CREATE TABLE task_runs ('
+          + 'run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, dispatch_key TEXT NOT NULL UNIQUE, principal_id TEXT NOT NULL, session_id TEXT NOT NULL, '
+          + 'origin_request_id TEXT NOT NULL, origin_user_event_id TEXT NOT NULL, request TEXT NOT NULL, origin_message TEXT NOT NULL, '
+          + 'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT, ended_at TEXT, deadline TEXT, '
+          + 'plan_id TEXT, step_index INTEGER, total_steps INTEGER, last_progress TEXT, result_text TEXT, result_json TEXT, error TEXT, '
+          + 'result_event_id TEXT, input_context_json TEXT, delivery_route_json TEXT, metadata_json TEXT, delivery_state TEXT, delivery_json TEXT)',
+        );
+        legacy.prepare(
+          'INSERT INTO task_runs (run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+          + 'created_at, updated_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        ).run('run_legacy', 'task_legacy', 'dispatch_legacy', 'wecom:user_a', 'sess_a', 'req_a', 'evt_a', '查账', '帮我查账',
+          '2026-10-22T10:00:00.000Z', '2026-10-22T10:00:00.000Z', 'queued');
+      } finally {
+        legacy.close();
+      }
+
+      legacyStore = createSqliteStore(legacyPath);
+      const revisionColumn = (new Database(legacyPath).prepare('PRAGMA table_info(task_runs)').all() as Array<{ name: string; dflt_value: string | null }>)
+        .find((column) => column.name === 'revision');
+      expect(revisionColumn).toMatchObject({ name: 'revision', dflt_value: '0' });
+      const loaded = await legacyStore.taskRuns!.get('run_legacy');
+      expect(loaded).toMatchObject({ runId: 'run_legacy', revision: 0, state: 'queued' });
+      expect(await legacyStore.taskRuns!.transition('run_legacy', ['queued'], { state: 'running' }, 0)).toBe(true);
+      expect(await legacyStore.taskRuns!.get('run_legacy')).toMatchObject({ revision: 1, state: 'running' });
+    } finally {
+      if (legacyStore) closeStore(legacyStore);
+      rmSync(legacyDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── task_runs 的 result_handling_state 前向迁移（P1：pin 判据去 JSON 嗅探）────────
+// 迁移前的形状：resultHandling 状态机只活在 metadata_json 里，listPinnedTaskIds 用
+// json_extract 嗅探。写入方改名时 typecheck 与测试都不红，生产静默退化成"所有终态
+// run 永久 pin"。迁移后该状态是显式列，旧库从 metadata 一次性回填（json_valid 才回填，
+// NULL 容忍），二次重开不重复回填出错。
+describe('task_runs 前向迁移（result_handling_state 列）', () => {
+  /** 迁移前的库：task_runs 已有 revision（上一波形状），没有 result_handling_state。 */
+  function seedLegacyTaskRuns(file: string): void {
+    const legacy = new Database(file);
+    try {
+      legacy.exec(
+        'CREATE TABLE task_runs ('
+        + 'run_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, dispatch_key TEXT NOT NULL UNIQUE, principal_id TEXT NOT NULL, session_id TEXT NOT NULL, '
+        + 'origin_request_id TEXT NOT NULL, origin_user_event_id TEXT NOT NULL, request TEXT NOT NULL, origin_message TEXT NOT NULL, '
+        + 'created_at TEXT NOT NULL, updated_at TEXT NOT NULL, state TEXT NOT NULL, started_at TEXT, ended_at TEXT, deadline TEXT, '
+        + 'plan_id TEXT, step_index INTEGER, total_steps INTEGER, last_progress TEXT, result_text TEXT, result_json TEXT, error TEXT, '
+        + 'result_event_id TEXT, input_context_json TEXT, delivery_route_json TEXT, metadata_json TEXT, delivery_state TEXT, delivery_json TEXT, '
+        + 'revision INTEGER NOT NULL DEFAULT 0)',
+      );
+      legacy.prepare(
+        'INSERT INTO task_runs (run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+        + 'created_at, updated_at, state, delivery_state, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'run_legacy_handled', 'task_legacy_handled', 'dispatch_handled', 'wecom:user_a', 'sess_a', 'req_a', 'evt_a', '查账', '帮我查账',
+        '2026-10-22T10:00:00.000Z', '2026-10-22T10:05:00.000Z', 'completed', 'sent',
+        '{"resultHandling":{"eventId":"evt_handled","requestId":"req_handled","state":"handled"}}',
+      );
+      legacy.prepare(
+        'INSERT INTO task_runs (run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+        + 'created_at, updated_at, state, delivery_state, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'run_legacy_processing', 'task_legacy_processing', 'dispatch_processing', 'wecom:user_a', 'sess_a', 'req_a', 'evt_a', '查账', '帮我查账',
+        '2026-10-22T10:00:00.000Z', '2026-10-22T10:05:00.000Z', 'completed', 'sent',
+        '{"resultHandling":{"eventId":"evt_processing","requestId":"req_processing","state":"processing"}}',
+      );
+      // 没有 resultHandling 的行：回填保持 NULL（不是空串、不猜）。
+      legacy.prepare(
+        'INSERT INTO task_runs (run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+        + 'created_at, updated_at, state, delivery_state, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'run_legacy_plain', 'task_legacy_plain', 'dispatch_plain', 'wecom:user_a', 'sess_a', 'req_a', 'evt_a', '查账', '帮我查账',
+        '2026-10-22T10:00:00.000Z', '2026-10-22T10:05:00.000Z', 'completed', 'sent', '{"inputFiles":[]}',
+      );
+      // 坏 JSON 的 metadata：json_valid 守卫跳过，重开不炸、列保持 NULL。
+      legacy.prepare(
+        'INSERT INTO task_runs (run_id, task_id, dispatch_key, principal_id, session_id, origin_request_id, origin_user_event_id, request, origin_message, '
+        + 'created_at, updated_at, state, delivery_state, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      ).run(
+        'run_legacy_badjson', 'task_legacy_badjson', 'dispatch_badjson', 'wecom:user_a', 'sess_a', 'req_a', 'evt_a', '查账', '帮我查账',
+        '2026-10-22T10:00:00.000Z', '2026-10-22T10:05:00.000Z', 'completed', 'sent', 'not-json{',
+      );
+    } finally {
+      legacy.close();
+    }
+  }
+
+  it('缺列即补 + 从 metadata_json 回填一次（json_valid 才回填），新写入走列，二次重开幂等', async () => {
+    const legacyDir = mkdtempSync(join(tmpdir(), 'fshine-core-rhs-legacy-'));
+    const legacyPath = join(legacyDir, 'audit.db');
+    let reopened: AuditStore | undefined;
+    try {
+      seedLegacyTaskRuns(legacyPath);
+
+      reopened = createSqliteStore(legacyPath);
+      // ① 列存在
+      const columns = new Set((new Database(legacyPath).prepare('PRAGMA table_info(task_runs)').all() as Array<{ name: string }>).map(({ name }) => name));
+      expect(columns.has('result_handling_state')).toBe(true);
+      // ② 回填正确：handled/processing 回填；无 resultHandling 与坏 JSON 保持 NULL。
+      // 坏 JSON 行经 raw SQL 断言——repo.get 会对该行 metadata_json 的 JSON.parse 抛错
+      // （既有行为，与本次迁移无关），而"重开不炸"指的是开库这一步本身。
+      expect(await reopened.taskRuns!.get('run_legacy_handled')).toMatchObject({ resultHandlingState: 'handled' });
+      expect(await reopened.taskRuns!.get('run_legacy_processing')).toMatchObject({ resultHandlingState: 'processing' });
+      expect('resultHandlingState' in (await reopened.taskRuns!.get('run_legacy_plain'))!).toBe(false);
+      const badJsonColumn = (new Database(legacyPath)
+        .prepare('SELECT result_handling_state AS state FROM task_runs WHERE run_id = ?')
+        .get('run_legacy_badjson')) as { state: string | null };
+      expect(badJsonColumn.state).toBeNull();
+      // ③ pin 判据走列：handled+sent 不钉；processing/无状态钉
+      expect(await reopened.taskRuns!.listPinnedTaskIds()).toEqual(['task_legacy_badjson', 'task_legacy_plain', 'task_legacy_processing']);
+      // ④ 新写入走列（不经 metadata）
+      const fresh = makeTaskRun({
+        runId: 'run_fresh', taskId: 'task_fresh', dispatchKey: 'dispatch_fresh',
+        state: 'completed', deliveryState: 'sent', resultHandlingState: 'handled',
+      });
+      await reopened.taskRuns!.createOrGetByDispatchKey(fresh);
+      expect(await reopened.taskRuns!.get('run_fresh')).toMatchObject({ resultHandlingState: 'handled' });
+      // ⑤ transition 可 patch 该列（状态机每次转移同步写列）
+      expect(await reopened.taskRuns!.transition('run_fresh', ['completed'], { resultHandlingState: 'failed' })).toBe(true);
+      expect(await reopened.taskRuns!.get('run_fresh')).toMatchObject({ resultHandlingState: 'failed' });
+      expect(await reopened.taskRuns!.listPinnedTaskIds()).toContain('task_fresh');
+    } finally {
+      if (reopened) closeStore(reopened);
+    }
+
+    // ⑥ 二次重开：回填幂等（已回填的不动，NULL 的不误填），数据仍可读
+    let second: AuditStore | undefined;
+    try {
+      second = createSqliteStore(legacyPath);
+      expect(await second.taskRuns!.get('run_legacy_handled')).toMatchObject({ resultHandlingState: 'handled' });
+      expect(await second.taskRuns!.get('run_legacy_processing')).toMatchObject({ resultHandlingState: 'processing' });
+      expect('resultHandlingState' in (await second.taskRuns!.get('run_legacy_plain'))!).toBe(false);
+      const badJsonSecond = (new Database(legacyPath)
+        .prepare('SELECT result_handling_state AS state FROM task_runs WHERE run_id = ?')
+        .get('run_legacy_badjson')) as { state: string | null };
+      expect(badJsonSecond.state).toBeNull();
+      expect(await second.taskRuns!.get('run_fresh')).toMatchObject({ resultHandlingState: 'failed' });
+    } finally {
+      if (second) closeStore(second);
       rmSync(legacyDir, { recursive: true, force: true });
     }
   });

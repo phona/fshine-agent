@@ -84,3 +84,64 @@ describe('sweepScratchDirs', () => {
     rmSync(empty, { recursive: true, force: true });
   });
 });
+
+// ── W5 终态判据策略（双年龄：终态短 grace + 抛弃长 TTL）────────────────────────
+describe('sweepScratchDirs 策略形态（W5）', () => {
+  const GRACE = 60 * 60 * 1000;           // 终态 grace：1h
+  const ABANDONED = 24 * 60 * 60 * 1000;  // 抛弃兜底：24h
+
+  const policy = (isTerminal: (taskId: string) => boolean) => ({
+    terminalGraceMs: GRACE,
+    abandonedTtlMs: ABANDONED,
+    isTerminal,
+  });
+
+  it('终态且过了 grace：删（交付物已在会话库，scratch 只是中间产物）', () => {
+    const name = newScratchDirName();
+    mk(name, 2 * 60 * 60 * 1000);         // 2h > grace
+    const r = sweepScratchDirs(root, Date.now(), policy((taskId) => taskId === name));
+    expect(r.removed).toContain(name);
+  });
+
+  it('终态但在 grace 内：留（排障与重试窗口）', () => {
+    const name = newScratchDirName();
+    mk(name, 30 * 60 * 1000);             // 30min < grace
+    const r = sweepScratchDirs(root, Date.now(), policy(() => true));
+    expect(r.removed).not.toContain(name);
+    expect(r.kept).toContain(name);
+  });
+
+  it('非终态但闲置超 abandoned TTL：删（抛弃兜底，防无限堆积）', () => {
+    const name = newScratchDirName();
+    mk(name, 25 * 60 * 60 * 1000);        // 25h > abandoned
+    const r = sweepScratchDirs(root, Date.now(), policy(() => false));
+    expect(r.removed).toContain(name);
+  });
+
+  it('非终态且闲置不久：留（在飞任务，续跑还要用）', () => {
+    const name = newScratchDirName();
+    mk(name, 2 * 60 * 60 * 1000);         // 2h：终态会删，非终态不删
+    const r = sweepScratchDirs(root, Date.now(), policy(() => false));
+    expect(r.removed).not.toContain(name);
+    expect(r.kept).toContain(name);
+  });
+
+  it('持久运行记录 pin 的工作区即使超 abandoned TTL 也保留', () => {
+    const name = newScratchDirName();
+    mk(name, 48 * 60 * 60 * 1000);
+    const r = sweepScratchDirs(root, Date.now(), {
+      ...policy(() => false),
+      isPinned: (taskId) => taskId === name,
+    });
+    expect(r.removed).not.toContain(name);
+    expect(r.kept).toContain(name);
+  });
+
+  it('判据抛错 = 不确定 = 非终态：留（宁可漏删，不可误删）', () => {
+    const name = newScratchDirName();
+    mk(name, 2 * 60 * 60 * 1000);         // 终态会被删的年龄，但判据炸了
+    const r = sweepScratchDirs(root, Date.now(), policy(() => { throw new Error('台账读不到'); }));
+    expect(r.removed).not.toContain(name);
+    expect(r.kept).toContain(name);
+  });
+});

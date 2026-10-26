@@ -181,13 +181,13 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/memory-candidate-extractor.ts: 科目', { tag: '防御排除', reason: 'BALANCE_RE（科目余额…）：同上财务识别防御正则' }],
   ['packages/agent/src/memory-candidate-extractor.ts: 账套', { tag: '防御排除', reason: 'ACCOUNT_SET_RE：同上财务识别防御正则（PERIOD_RE/CURRENCY_AMOUNT_RE 两条不含九词，故不命中）' }],
   ['packages/agent/src/memory-candidate-extractor.ts: 余额', { tag: '防御排除', reason: 'BALANCE_RE 的"科目余额…"模式（D-005 扩词后现形）：财务事实识别正则的一部分，删=记忆提取器对余额类事实变聋' }],
-  ['packages/agent/src/runtime.ts: 财务', { tag: '防御排除', reason: 'hasFinancialFigure 及周边"财务数字"检测（区分编造结论 vs 能力边界说明）+ 历史资料防串（旧财务结论不当本轮实时结果）：删=出口校验/防串防御变聋' }],
-  ['packages/agent/src/runtime.ts: 余额', { tag: '防御排除', reason: 'hasFinancialFigure 正则的"余额"分支（D-005 扩词后现形）：检测"回复是否带财务数字"的出口校验尺，删=编造结论识别变聋' }],
+  ['packages/agent/src/runtime.ts: 财务', { tag: '防御排除', reason: 'needs/计划收尾注释解释零执行出口如何阻断财务数字、避免把带金额的 worker 文本当结果；出口判据在 runtime-quality.ts 的 hasFinancialFigure，删=该数字出口防御的维护理由失去着落' }],
+  ['packages/agent/src/runtime-quality.ts: 余额', { tag: '防御排除', reason: 'hasFinancialFigure 正则的"余额"分支（随 runtime-quality.ts 文本防御模块搬迁）：检测"回复是否带财务数字"的出口校验尺，删=编造结论识别变聋' }],
   // 方案 2 分批 1：renderPlanStepOutcomeLines 的"不含财务数字"注释随函数搬进 plan-facts.ts；
   // 同一条防御理由（出口校验的零执行数字拦截不误伤步骤事实汇总）换文件不换归属。
   ['packages/agent/src/plan-facts.ts: 财务', { tag: '防御排除', reason: 'renderPlanStepOutcomeLines 注释"不猜业务语义，因此不含财务数字"（随函数自 runtime.ts 逐字搬入）：说明步骤事实汇总为何不被出口校验的零执行数字拦截误伤，删=该防御理由失去着落' }],
   // 方案 2 分批 1：renderWriteClosureReply 的"不含财务数字"注释随函数搬进 turn-relay.ts；
-  // 判据本体（hasFinancialFigure）仍住 runtime.ts。（同批搬来的 usefulWorkerNote /
+  // 判据本体（hasFinancialFigure）已抽到 runtime-quality.ts。（同批搬来的 usefulWorkerNote /
   // composeClarificationReply 后因消循环 import 搬回 runtime.ts，见其上的 runtime.ts 条目。）
   ['packages/agent/src/turn-relay.ts: 财务', { tag: '防御排除', reason: 'renderWriteClosureReply 注释"不含财务数字"（随函数自 runtime.ts 逐字搬入）：说明写关闭终稿为何要剥掉带数字的文本，删=该防御理由失去着落' }],
   // 方案 2 分批 3a：出口校验两块（turn-exit.ts）与每回合上下文档装配（turn-context.ts）
@@ -195,6 +195,7 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   // 归属与 runtime.ts 上的原条目同族（数字结论判据 + 防串注令），换文件不换理由。
   ['packages/agent/src/turn-exit.ts: 财务', { tag: '防御排除', reason: 'activatedPlan 收尾分支注释"只在不带财务数字…才算有价值"（随函数自 runtime.ts 逐字搬入）：worker 说明附注的准入判据，删=附在状态文案后的可能是编造结论' }],
   ['packages/agent/src/turn-context.ts: 财务', { tag: '防御排除', reason: 'RECENT_TURN_HISTORY_NOTE 注令及其注释"其中的财务结论不得作为本轮实时结果引用"（随常量自 runtime.ts 逐字搬入）+ renderContextState 的"实时财务数据"措辞：防串轮防御（旧财务结论不当本轮实时结果）的着落，删=防冒充实时的注令失去登记' }],
+  ['packages/agent/src/turn-state.ts: 凭证', { tag: '防御排除', reason: '后台受理状态注释明示“不是平台执行凭证”：防止 queued/running 回执被提升为实际执行证明，删=受理与执行边界的防御说明失去着落' }],
   // ── 警职执法：守卫/校验器识别业务模式，其存在就是为了识别 ──
   ['packages/agent/src/context-extractor.ts: 期间', { tag: '警职执法', reason: 'hasContradiction 范围意图识别（更多期间/当前期间配对）：识别业务词以判定用户范围意图，是识别器不是泄漏' }],
   ['packages/agent/src/serve-gate.ts: 目录', { tag: '警职执法', reason: 'G1 门知识面/根目录的路径安全判定：门守卫自身引用它约束的知识面' }],
@@ -204,6 +205,9 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/error-codes.ts: 目录', { tag: '警职执法', reason: 'SERVE_WRITE_NO_PLATFORM_ROOT「未配置平台工作目录」（随 serve 门拒绝理由收口自 serve-gate.ts 迁入）：平台工作目录是 write/edit 落点裁决的前提，门守卫自身引用它' }],
   ['packages/agent/src/turn-contract.ts: 目录', { tag: '警职执法', reason: 'validatePlanEntities 实体来源校验：平台响应（含账套检索结果）是受认实体来源，校验器说明其为何天然放行' }],
   ['packages/agent/src/pi-coding-driver.ts: 目录', { tag: '警职执法', reason: '计划实体来源收集：账套检索结果作为执行痕迹/候选名来源的识别' }],
+  ['packages/agent/src/freeze-task-inputs.ts: 目录', { tag: '警职执法', reason: '后台输入冻结代码校验任务输入目录并复制/校验文件摘要；这里是文件系统路径边界，不是领域目录检索' }],
+  ['packages/agent/src/background-runtime.ts: 记录', { tag: '警职执法', reason: '宿主 task_event 结构化记录用于追加会话历史和幂等续步，属于跨业务任务协议状态，不是平台业务记录' }],
+  ['apps/server/background-delivery.ts: 记录', { tag: '防御排除', reason: '后台交付回执要持久化每部分 ACK 状态；删掉记录会把未确认或失败的发送误报为已送达' }],
   // ── 遗留待清：已知该走还没走，挂账限期 ──
   // D-004 扩范围后 apps/ 生产代码的首批命中（commit.ts 的账套校验/读回注释与凭证读回错误
   // 串）已随 C 波关闭：那个 legacy 落账执行器整文件删除，业务词不再进编排层。其两条登记
@@ -226,7 +230,9 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
   'packages/agent/src/memory-candidate-extractor.ts: 账套',
   'packages/agent/src/memory-candidate-extractor.ts: 余额',
   'packages/agent/src/runtime.ts: 财务',
-  'packages/agent/src/runtime.ts: 余额',
+  'packages/agent/src/runtime-quality.ts: 余额',
+  'packages/agent/src/turn-state.ts: 凭证',
+  'apps/server/background-delivery.ts: 记录',
   'packages/agent/src/plan-facts.ts: 财务',
   'packages/agent/src/turn-relay.ts: 财务',
   'packages/agent/src/turn-exit.ts: 财务',
@@ -234,7 +240,7 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
 ];
 
 /**
- * FSHINE_* 名字登记表（D-017：E4 治理六名已禁绝，剩下三个"有意保留"的必须显式登记）。
+ * FSHINE_* 名字登记表（D-017：E4 治理六名已禁绝，剩余宿主运行参数显式登记）。
  *
  * 为什么不是统统禁绝：这三个不是治理接口（那六名已收敛到 DZ_*），而是宿主自己的安全
  * 开关/运行参数——改名要联动 17dz 侧读取端与部署文档，且 FSHINE_REAL_COMMIT 是真写
@@ -248,13 +254,15 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '遗留待清', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '遗留待清', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_ATTACHMENT_DIR', { tag: '遗留待清', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 DZ_*（那是平台命名空间，会把"宿主把用户文件存哪"误记成平台协议）；.env.example 已文档化，随 DZ_* 统一批次改名' }],
+  ['FSHINE_WORKER_DISPATCH_MODE', { tag: '警职执法', reason: 'fshine 部署选择新委派 inline/background 的宿主交互模式开关（默认 inline）：这是通用 runtime 调度策略，不是 17dz 执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
+  ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主排队容量上限：这是通用平台资源保护参数，不是 17dz 业务规则或执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
   // 方案 1 · B 波曾登记的两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）
   // 已随 C 波后只剩一种行为而退役，登记项一并删除——本表只减不增；那两个名字若在
   // packages/apps/scripts 里复活（含注释），下面"未登记即红"会当场抓住。
 ]);
 
 // 防御排除登记（属防御性业务逻辑，但当前正则/名单不含九词中文、故不命中，仍登记防误删）：
-//   · runtime.ts hasFinancialFigure：正则用 余额/金额/发生额（不在九词表）检测"财务数字"。
+//   · runtime-quality.ts hasFinancialFigure：正则用 余额/金额/发生额（不在九词表）检测"财务数字"。
 //   · serve-gate.ts 的参数摘要：Wave 2 Lane D 已把 KEY_ARG_FLAGS 硬编码名单删掉，改为从
 //     平台 `operation list --json` 的 args 规格消费（flag→style 是平台数据，见
 //     operation-labels.ts）——镜像表不复存在，这里留档防"再立第二份名单"复发。
@@ -347,6 +355,8 @@ const LITERAL_IF_PROTOCOL_TOKENS: ReadonlySet<string> = new Set([
   // CLI 子命令 / 原生工具名 / 开关值（bin/17dz 网关与 serve-gate 协议）
   'operation', 'plan', 'query', 'prepare', 'commit', 'evaluate', 'activate', 'current', 'status', 'run',
   'bash', 'sh', 'read', 'ls', 'write', 'mock',
+  // Background TaskRunState enum values from @fshine/contracts; status protocol constants, not model intent sniffing.
+  'queued', 'running', 'cancelling', 'waiting_input', 'waiting_confirmation', 'interrupted',
   // 宿主内部工具名（step-text.ts 静默帧名单）
   'search_history', 'get_messages', 'route_current_turn',
   // 渠道来源判别符（可信渠道适配器添加，从不复制模型输出）

@@ -31,7 +31,11 @@
  * 比给一段可能过期的答复更糟；模型已经拿到这个确定性事实仍坚持对话枝时，宿主没有领域
  * 语义可以替它判断，只能放行并留痕。因此调用方自己记"退过没有"，同一个回合不重复退。
  */
+import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { TurnInputContext } from '@fshine/contracts';
+import { readCompactionContext, type CompactedRequestCount } from './compaction-context';
+import { extractCurrentMessageBody, hostContextMetadataOf, normalizeMessageReference } from './message-reference';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
 
 /**
@@ -66,14 +70,14 @@ export function normalizeUserRequest(text: string): string {
 }
 
 /** 取宿主持有的 route_current_turn 终结标记；未知 details 形状一律交给兼容判定。 */
-function routeReceiptMarker(message: AgentMessage): 'delegate' | 'precondition' | undefined {
+function routeReceiptMarker(message: AgentMessage): 'delegate' | 'precondition' | 'background' | undefined {
   const details = (message as { details?: unknown }).details;
   if (!details || typeof details !== 'object' || Array.isArray(details)) return undefined;
   const marker = (details as { routeReceipt?: unknown }).routeReceipt;
-  return marker === 'delegate' || marker === 'precondition' ? marker : undefined;
+  return marker === 'delegate' || marker === 'precondition' || marker === 'background' ? marker : undefined;
 }
 
-/** 结构化回执只认 `recorded=delegate`。 */
+/** 结构化回执只认已派发的 `delegate` / `background`；后台受理不是执行成功证明。 */
 function isStructuredDelegationReceipt(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
@@ -81,7 +85,8 @@ function isStructuredDelegationReceipt(text: string): boolean {
   try {
     const parsed: unknown = JSON.parse(trimmed);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
-    return (parsed as { recorded?: unknown }).recorded === 'delegate';
+    const recorded = (parsed as { recorded?: unknown }).recorded;
+    return recorded === 'delegate' || recorded === 'background';
   } catch {
     // A malformed object-shaped result cannot be proved to be a delegate receipt.
     return false;
@@ -97,11 +102,52 @@ function isStructuredDelegationReceipt(text: string): boolean {
  */
 function isDelegationReceipt(message: AgentMessage): boolean {
   const marker = routeReceiptMarker(message);
-  if (marker) return marker === 'delegate';
+  if (marker) return marker === 'delegate' || marker === 'background';
   const text = messageText(message);
   const hasDetails = Object.prototype.hasOwnProperty.call(message, 'details');
   if (hasDetails) return isStructuredDelegationReceipt(text);
   return text.trim().startsWith('{') ? isStructuredDelegationReceipt(text) : Boolean(text.trim());
+}
+
+/** Stable body + quote key; with no quote the request still matches legacy body-only behavior. */
+export function buildRequestKey(currentMessage: string, inputContext?: TurnInputContext): string {
+  const request = normalizeUserRequest(currentMessage);
+  const reference = normalizeMessageReference(inputContext?.messageReference);
+  const payload = JSON.stringify({
+    version: 1,
+    request,
+    messageReference: reference ? {
+      kind: reference.kind,
+      text: normalizeReferenceText(reference.text ?? ''),
+      truncated: reference.truncated === true,
+      ...(reference.sourceMessageId ? { sourceMessageId: reference.sourceMessageId } : {}),
+    } : null,
+  });
+  return `request-v1:${createHash('sha256').update(payload, 'utf8').digest('hex')}`;
+}
+
+function normalizeReferenceText(text: string): string {
+  return text.replace(/\s+/gu, ' ').trim();
+}
+
+interface HistoricalUserRequest {
+  request: string;
+  requestKey: string;
+}
+
+function historicalUserRequest(message: AgentMessage): HistoricalUserRequest {
+  const hostContext = hostContextMetadataOf(message);
+  const content = messageText(message);
+  const messageReference = hostContext?.messageReference;
+  const body = extractCurrentMessageBody(content, messageReference !== undefined);
+  const request = normalizeUserRequest(body);
+  const storedKey = hostContext?.requestKey;
+  return {
+    request,
+    requestKey: typeof storedKey === 'string' && storedKey
+      ? storedKey
+      : buildRequestKey(body, { ...(messageReference ? { messageReference } : {}) }),
+  };
 }
 
 /** assistant 消息里是否含一次 route_current_turn 调用。 */
@@ -137,12 +183,29 @@ export interface RepeatedRequest {
 export function findRepeatedDelegatedRequest(
   transcript: readonly AgentMessage[],
   currentMessage: string,
+  inputContext?: TurnInputContext,
 ): RepeatedRequest | null {
   const request = normalizeUserRequest(currentMessage);
   if (!request) return null;
 
-  const delegatedRequests: string[] = [];
+  const priorCounts = new Map<string, number>();
+  for (const message of transcript) {
+    const sidecar = readCompactionContext(message);
+    if (!sidecar) continue;
+    addRequestCounts(priorCounts, sidecar.delegatedRequests);
+  }
+  addRequestCounts(priorCounts, collectDelegatedRequestCounts(transcript));
+
+  const currentRequestKey = buildRequestKey(currentMessage, inputContext);
+  const priorDelegations = priorCounts.get(currentRequestKey) ?? 0;
+  return priorDelegations > 0 ? { request, priorDelegations } : null;
+}
+
+/** Collect completed/accepted dispatches represented by concrete, still-present Pi turns only. */
+export function collectDelegatedRequestCounts(transcript: readonly AgentMessage[]): CompactedRequestCount[] {
+  const delegatedRequestCounts = new Map<string, number>();
   let turnRequest = '';
+  let turnRequestKey = '';
   let turnReceipt: AgentMessage | null = null;
   let awaitingRouteResult = false;
 
@@ -150,9 +213,10 @@ export function findRepeatedDelegatedRequest(
     // 申报过（有合法委派回执）= 这一轮真的委派执行了。没有申报的回合整轮被
     // 丢弃（route_declaration_missing），同样不算执行。
     if (turnRequest && turnReceipt !== null && isDelegationReceipt(turnReceipt)) {
-      delegatedRequests.push(turnRequest);
+      delegatedRequestCounts.set(turnRequestKey, (delegatedRequestCounts.get(turnRequestKey) ?? 0) + 1);
     }
     turnRequest = '';
+    turnRequestKey = '';
     turnReceipt = null;
     awaitingRouteResult = false;
   };
@@ -160,7 +224,9 @@ export function findRepeatedDelegatedRequest(
   for (const message of transcript) {
     if (message.role === 'user') {
       closeTurn();
-      turnRequest = normalizeUserRequest(messageText(message));
+      const historical = historicalUserRequest(message);
+      turnRequest = historical.request;
+      turnRequestKey = historical.requestKey;
       continue;
     }
     if (isRouteCall(message)) {
@@ -173,7 +239,12 @@ export function findRepeatedDelegatedRequest(
     }
   }
   closeTurn();
+  return [...delegatedRequestCounts.entries()].map(([requestKey, count]) => ({ requestKey, count }));
+}
 
-  const priorDelegations = delegatedRequests.filter((text) => text === request).length;
-  return priorDelegations > 0 ? { request, priorDelegations } : null;
+function addRequestCounts(target: Map<string, number>, counts: readonly CompactedRequestCount[]): void {
+  for (const item of counts) {
+    if (!item.requestKey || !Number.isSafeInteger(item.count) || item.count <= 0) continue;
+    target.set(item.requestKey, (target.get(item.requestKey) ?? 0) + item.count);
+  }
 }

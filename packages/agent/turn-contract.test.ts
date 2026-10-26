@@ -33,6 +33,28 @@ describe('申报契约：route_current_turn 三字段', () => {
     expect(parseTurnDeclaration(JSON.stringify({ kind: 'delegate', request: 42 }))).toBeNull();
   });
 
+  it('解析 resend 申报（W4 重发路由）：只认 {kind, artifactRef} 两字段', () => {
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: '3' })))
+      .toEqual({ kind: 'resend', artifactRef: '3' });
+    // ref 首尾空白去掉（与 delegate 的 request/continueTaskId 同规矩）
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: ' 3 ' })))
+      .toEqual({ kind: 'resend', artifactRef: '3' });
+  });
+
+  it('resend 缺 artifactRef、多带字段、ref 为空或非字符串时解析失败', () => {
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: '' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: '   ' }))).toBeNull();
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: 3 }))).toBeNull();
+    // 多一个字段就是另一份契约（与 schema additionalProperties:false 同语义）
+    expect(parseTurnDeclaration(JSON.stringify({ kind: 'resend', artifactRef: '3', request: '顺带' }))).toBeNull();
+  });
+
+  it('resend 经 reviewRouteDeclaration 原样通过：有效性由宿主答，申报层只校验形状', () => {
+    expect(reviewRouteDeclaration({ kind: 'resend', artifactRef: '3' }))
+      .toEqual({ intent: { kind: 'resend', artifactRef: '3' } });
+  });
+
   it('kind 缺失或不在枚举内时解析失败（clarify 种类已取消）', () => {
     expect(parseTurnDeclaration(JSON.stringify({}))).toBeNull();
     expect(parseTurnDeclaration(JSON.stringify({ kind: 'typo', request: '查询' }))).toBeNull();
@@ -93,12 +115,12 @@ describe('申报契约：route_current_turn 三字段', () => {
     }
   });
 
-  it('工具 schema 恰好三个属性：kind / request / continueTaskId', () => {
+  it('工具 schema 恰好四个属性：kind / request / continueTaskId / artifactRef', () => {
     const schema = ROUTE_CURRENT_TURN_TOOL.inputSchema;
     const properties = schema.properties as Record<string, { enum?: string[] }>;
-    expect(Object.keys(properties).sort()).toEqual(['continueTaskId', 'kind', 'request']);
-    expect(Object.keys(properties)).toHaveLength(3);
-    expect(properties['kind']?.enum).toEqual(['conversation', 'delegate']);
+    expect(Object.keys(properties).sort()).toEqual(['artifactRef', 'continueTaskId', 'kind', 'request']);
+    expect(Object.keys(properties)).toHaveLength(4);
+    expect(properties['kind']?.enum).toEqual(['conversation', 'delegate', 'resend']);
     // 入口就挡掉多余字段；parse 那一侧的归一只是兜底
     expect(schema.additionalProperties).toBe(false);
     expect(ROUTE_CURRENT_TURN_TOOL.name).toBe('route_current_turn');
@@ -117,10 +139,10 @@ describe('申报契约：route_current_turn 三字段', () => {
     expect(description).toContain('continueTaskId');
     expect(description).toContain('不阻塞');
     expect(description).toContain('如实报告');
-    // 字段数没变：多步协议全部写在 request 与描述里
+    // 多步协议全部写在 request 与描述里；artifactRef 是 W4 resend 枝的唯一新增字段
     const properties = ROUTE_CURRENT_TURN_TOOL.inputSchema.properties as Record<string, unknown>;
-    expect(Object.keys(properties)).toHaveLength(3);
-    expect(Object.keys(properties).sort()).toEqual(['continueTaskId', 'kind', 'request']);
+    expect(Object.keys(properties)).toHaveLength(4);
+    expect(Object.keys(properties).sort()).toEqual(['artifactRef', 'continueTaskId', 'kind', 'request']);
   });
 
   it('工具描述与契约源码全文无业务词（编排层零业务知识）', () => {
@@ -240,6 +262,18 @@ describe('计划实体来源校验：三来源逐字包含', () => {
         platformResponses: ['更早的响应：提到了新兴五金', '更近的响应：幻东 202609 余额 51 元'],
       },
     )).toBeNull();
+  });
+
+  it('quotedEvidence 是独立来源，只放行本轮实际收到的引用文字', () => {
+    const calls = [{ operation: 'finance.query-receivables', args: ['--query', '幻东账套'] }];
+    expect(validatePlanEntities(calls, {
+      currentMessage: '查这个',
+      quotedEvidence: '我想问幻东账套 202609 的结果',
+    })).toBeNull();
+    expect(validatePlanEntities(calls, {
+      currentMessage: '查这个',
+      quotedEvidence: '我想问另一个对象',
+    })).toContain('幻东账套');
   });
 
   // ── 第四来源：本会话确立过的实体（任务 1 标定修复，2026-09-27 连续会话事故）────────

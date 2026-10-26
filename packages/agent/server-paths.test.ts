@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SERVER_PATH_PATTERN, hasServerPath, stripServerPaths } from './src/server-paths';
+import { SERVER_PATH_PATTERN, hasServerPath, stripForeignScratchPaths, stripServerPaths } from './src/server-paths';
 
 /** 本次实测漏进终稿的两个路径（2026-10-19，幻骥达工资表任务）。 */
 const WORKSPACE_PATH = 'tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/';
@@ -115,5 +115,52 @@ describe('hasServerPath（只判有没有，不删）', () => {
       expect(hasServerPath('干净文本')).toBe(false);
       expect(hasServerPath(WORKSPACE_PATH)).toBe(true);
     }
+  });
+});
+
+describe('stripForeignScratchPaths（W4 委派范围守卫）', () => {
+  const OWN = 'tmp/task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+  const FOREIGN = 'tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/';
+
+  it('剥掉指向别的任务工作区的相对路径，并计数', () => {
+    const out = stripForeignScratchPaths(`文件位于 ${FOREIGN}整理好的2026年08月工资表.xlsx`, OWN);
+    expect(out.stripped).toBe(1);
+    expect(out.text).toBe('文件位于 （非本任务工作区路径，已由宿主剥离）整理好的2026年08月工资表.xlsx');
+  });
+
+  it('三种错误形态全剥：相对、/tmp/ 绝对、完整绝对（2026-10-20 事故的三种写法）', () => {
+    const rel = stripForeignScratchPaths('tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/x.xlsx', OWN);
+    const tmpAbs = stripForeignScratchPaths('/tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/x.xlsx', OWN);
+    const fullAbs = stripForeignScratchPaths('/home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/x.xlsx', OWN);
+    expect(rel.stripped).toBe(1);
+    expect(tmpAbs.stripped).toBe(1);
+    expect(fullAbs.stripped).toBe(1);
+    expect(tmpAbs.text).not.toContain('task_d42fffce');
+    expect(fullAbs.text).not.toContain('task_d42fffce');
+  });
+
+  it('本任务自己的工作区（含其下文件）原样放过', () => {
+    const text = '输出到 tmp/task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/工资表.xlsx';
+    expect(stripForeignScratchPaths(text, OWN)).toEqual({ text, stripped: 0 });
+  });
+
+  it('附件输入路径（tmp/attachments/）不碰：那不是任务工作区', () => {
+    const text = '读取 tmp/attachments/5b58ba31-19ce-428d-99a9-ef501836b04e-工资表.xlsx';
+    expect(stripForeignScratchPaths(text, OWN)).toEqual({ text, stripped: 0 });
+  });
+
+  it('没有工作区路径时原样返回、计数为 0', () => {
+    const text = '把工资表按 2026 年 8 月口径整理';
+    expect(stripForeignScratchPaths(text, OWN)).toEqual({ text, stripped: 0 });
+  });
+
+  it('自己的与外来的混在一句里：只剥外来的', () => {
+    const out = stripForeignScratchPaths(
+      '参考 tmp/task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/a.xlsx，别动 tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/b.xlsx',
+      OWN,
+    );
+    expect(out.stripped).toBe(1);
+    expect(out.text).toContain('tmp/task_aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/a.xlsx');
+    expect(out.text).not.toContain('task_d42fffce');
   });
 });

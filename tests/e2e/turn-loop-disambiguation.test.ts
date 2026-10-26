@@ -28,7 +28,7 @@ import {
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
-const SESSION_ID = 'wecom:e2e_user:e2e_user';
+const SESSION_ID = 'wecom:e2e_user';
 
 /** 记录 worker 实际收到的委派请求与 taskId（宿主透传剥掉协议前缀的 request）。 */
 function recordingWorker(script: WorkerStep[]) {

@@ -39,7 +39,7 @@ import { LAST_TASK_ID_TOKEN, boot, mainDriver, type Boot } from './harness';
 
 /** 企微单聊：principal 由 userid 解析，conversationId = chatid ?? userid（与 write-chain 同口径）。 */
 const PRINCIPAL = 'wecom:e2e_user';
-const SESSION = 'wecom:e2e_user:e2e_user';
+const SESSION = 'wecom:e2e_user';
 
 /** 第一回合（超时回合）的用户消息与 Main Agent 加工后的委派请求。 */
 const USER_ASK = '查一下幻辰财税 202609 的应收账款余额';

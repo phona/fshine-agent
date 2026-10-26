@@ -22,9 +22,9 @@ import { boot, gatedWorker, mainDriver, totalActualCalls } from './harness';
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
-const SINGLE_SESSION_ID = 'wecom:e2e_user:e2e_user';
+const SINGLE_SESSION_ID = 'wecom:e2e_user';
 /** 群聊：conversationId 取 chatid（harness 的 wecomText 固定 grp_e2e）——与单聊是两个会话。 */
-const GROUP_SESSION_ID = 'wecom:e2e_user:grp_e2e';
+const GROUP_SESSION_ID = 'wecom:grp_e2e';
 /** loadMemoryProjection 注入头的前缀（turn-persistence.ts）：有 active 记录才注入。 */
 const MEMORY_HEAD = '【长期记忆资料';
 

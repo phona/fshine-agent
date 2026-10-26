@@ -21,6 +21,7 @@
  * "有执行但协议复读"这种第二段门的形状——都能用纯数据直接钉住。
  */
 import type { SubagentNeeds } from './driver';
+import type { TaskRunState } from '@fshine/contracts';
 import { messageTextFor } from './error-codes';
 import { renderPlanStepsRelayFallback } from './plan-facts';
 import { renderNeedsUserText } from './turn-relay';
@@ -49,7 +50,13 @@ export interface TurnExitInput {
   /** 模型这一轮的结果是否停在用户确认门（result.pendingPlan 的真值）。 */
   resultPendingPlan: boolean;
   /** 本回合申报的动作（null = 没有申报）。 */
-  intentKind: 'conversation' | 'delegate' | null;
+  intentKind: 'conversation' | 'delegate' | 'resend' | null;
+  /** Host-registered background dispatch. Acceptance must not be mistaken for execution. */
+  backgroundStarted: boolean;
+  backgroundTaskId: string | null;
+  backgroundRunId: string | null;
+  backgroundTaskState: TaskRunState | null;
+  backgroundReceiptText: string | null;
   /** needs 回路进行中（turn.needsRounds > 0）：Main Agent 的回复是"转达用户缺什么"。 */
   needsLoop: boolean;
   /** 计划模式回合（turn.planSteps > 0）：汇总可因"任一步真跑过"而放行。 */
@@ -106,9 +113,27 @@ export type TurnExitDecision =
  * 出口校验决策。**纯函数**：不抛异常、不打日志、不写 turn、不碰存储——只回答"这一回合
  * 外发什么、记什么事件"。
  *
- * 分支顺序（一字未改）：① 执行痕迹门（转达支 / 确定性话术支）→ ② 协议复读门。
+ * 分支顺序：后台受理短路（backgroundStarted，先于两段门——受理回执是宿主持有的确定性
+ * 文本，不受出口校验改写）→ ① 执行痕迹门（转达支 / 确定性话术支）→ ② 协议复读门。
  */
 export function decideTurnExit(input: TurnExitInput): TurnExitDecision {
+  if (input.backgroundStarted) {
+    const accepted = input.backgroundTaskState === 'queued' || input.backgroundTaskState === 'running';
+    return {
+      kind: 'direct',
+      text: input.backgroundReceiptText?.trim() || '后台任务已受理。',
+      outcome: accepted ? 'background_task_accepted' : 'background_task_receipt_returned',
+      events: [{
+        level: 'info',
+        event: accepted ? 'background_task_accepted' : 'background_task_receipt_returned',
+        detail: {
+          ...(input.backgroundTaskId ? { taskId: input.backgroundTaskId } : {}),
+          ...(input.backgroundRunId ? { runId: input.backgroundRunId } : {}),
+          ...(input.backgroundTaskState ? { state: input.backgroundTaskState } : {}),
+        },
+      }],
+    };
+  }
   const explained = input.resultText.trim();
   // 模型可能把工具结果原样当回复（停在工具结果上没再说话）：那是内部协议材料
   // （任务编号、continueTaskId 字样），由宿主 composing 的转达文本顶上。

@@ -61,7 +61,7 @@ afterAll(() => {
 
 const PRINCIPAL = 'wecom:e2e_user';
 /** 单聊会话：adapter 的 conversationId = chatid ?? userid。 */
-const SESSION = 'wecom:e2e_user:e2e_user';
+const SESSION = 'wecom:e2e_user';
 const CONFIRM_RE = /确认\s*([A-Z0-9]{6})/;
 /** 污染注入里的假确认码：不属于任何 intent，拿来证明它触发不了任何提交。 */
 const FAKE_CODE = 'ZZZ999';

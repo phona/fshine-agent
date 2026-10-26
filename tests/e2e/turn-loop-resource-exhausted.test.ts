@@ -20,7 +20,7 @@ import { describe, expect, it } from 'vitest';
 import { boot, mainDriver, type Boot } from './harness';
 
 const PRINCIPAL = 'wecom:e2e_user';
-const SESSION = 'wecom:e2e_user:e2e_user';
+const SESSION = 'wecom:e2e_user';
 
 const USER_ASK = '做一下幻骥达的工资表';
 const DELEGATE_ASK = '制作幻骥达 202609 的工资表';

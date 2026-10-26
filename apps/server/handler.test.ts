@@ -1,12 +1,11 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { validatePlanEntities } from '@fshine/agent';
-import type { AgentReply, AgentRuntime, AuditStore, ChannelReply, IncomingAttachment, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, AgentRuntime, AuditStore, ChannelReply, IncomingAttachment, IncomingChannelMessage, SessionArtifactRecord, TrustedContext } from '@fshine/contracts';
 import {
-  collectProducedFiles,
   createArrivalClock,
   createMessageHandler,
   describeDeliveredFiles,
@@ -15,6 +14,7 @@ import {
   TURN_STILL_WORKING_TEXT,
   withAttachmentPaths,
 } from './handler';
+import { collectProducedFiles } from './artifact-store';
 
 const USER = 'user_a';
 
@@ -79,6 +79,8 @@ describe('createMessageHandler', () => {
   // 2026-10-20 留缝：principalId/sessionId 的前缀段从消息的 channel 取（缺省 wecom）。
   // 这条只钉两个身份标识带上渠道前缀；scope 存储和 handler 内存态仍按原始 ID 取键，
   // 尚未实现跨渠道授权/附件隔离，第二渠道接入前的阻断项见 D-112。
+  // W1 起 sessionId 只由 conversationId 决定（session = 聊天窗口，群不按用户切）；
+  // principalId 仍是逐消息的 channel:wecomUserId。
   it('渠道前缀参数化：web 与 wecom 的 principalId/sessionId 带各自前缀', async () => {
     const seen: TrustedContext[] = [];
     const runtime: AgentRuntime = {
@@ -89,11 +91,38 @@ describe('createMessageHandler', () => {
 
     await handler({ ...base, channel: 'web', messageId: 'm-web', text: '在吗' });
     expect(seen[0]?.principalId).toBe('web:user_a');
-    expect(seen[0]?.sessionId).toBe('web:user_a:c');
+    expect(seen[0]?.sessionId).toBe('web:c');
 
     await handler({ ...base, messageId: 'm-wecom', text: '在吗' });       // 没带 channel → 缺省
     expect(seen[1]?.principalId).toBe('wecom:user_a');
-    expect(seen[1]?.sessionId).toBe('wecom:user_a:c');
+    expect(seen[1]?.sessionId).toBe('wecom:c');
+  });
+
+  // W1：session = 聊天窗口（conversationId）。同一群里两个用户共享一个 sessionId——转录、
+  // 附件池、委派账本、（后续）产物库都按窗口走；principalId 仍逐消息区分，授权/确认门/
+  // 审计钉在它上面。群里 A 交付的产物，B 能指代（共享窗口）；B 的写操作仍过 B 的授权。
+  it('W1:群聊里两个用户共享一个 session,principal 逐消息', async () => {
+    const seen: TrustedContext[] = [];
+    const runtime: AgentRuntime = {
+      handleTurn: async (ctx) => { seen.push(ctx); return { text: '做完了' }; },
+    };
+    // 两个用户都要发 scope：fakeStore 只给 user_a 发，user_b 会被当未授权用户拒在
+    // runtime 之外（那是另一条既有行为，这里不测它）。
+    const store = {
+      ...fakeStore(),
+      principalScopes: {
+        get: async (userId: string) => ({ wecomUserId: userId, accountSetIds: ['as_001'], enabled: true }),
+        list: async () => [],
+        upsert: async () => {},
+      },
+    } as unknown as AuditStore;
+    const handler = createMessageHandler({ store, runtime, inboundDebounceMs: 0 });
+
+    await handler({ wecomUserId: USER, conversationId: 'group_chat_1', messageId: 'm-a', text: '在吗', receivedAt: '2026-09-24T00:00:00.000Z' });
+    await handler({ wecomUserId: 'user_b', conversationId: 'group_chat_1', messageId: 'm-b', text: '在吗', receivedAt: '2026-09-24T00:00:00.000Z' });
+    expect(seen.map((c) => c.sessionId)).toEqual(['wecom:group_chat_1', 'wecom:group_chat_1']);
+    expect(seen[0]?.principalId).toBe('wecom:user_a');
+    expect(seen[1]?.principalId).toBe('wecom:user_b');
   });
 
   it('R9 待确认计划已被新计划取代时给出确定性解释，不再落到通用失败', async () => {
@@ -163,8 +192,39 @@ describe('createMessageHandler', () => {
 
     const starts = order.filter((entry) => entry.startsWith('start:')).length;
     expect(starts).toBe(2);
-    expect(order.indexOf('start:wecom:user_a:c')).toBeLessThan(order.indexOf('end:wecom:user_a:c'));
-    expect(order.indexOf('end:wecom:user_a:c')).toBeLessThan(order.lastIndexOf('start:wecom:user_a:c'));
+    expect(order.indexOf('start:wecom:c')).toBeLessThan(order.indexOf('end:wecom:c'));
+    expect(order.indexOf('end:wecom:c')).toBeLessThan(order.lastIndexOf('start:wecom:c'));
+  });
+
+  it('W6 群聊:不同用户在同一群的回合串行(共享会话状态,禁并发写)', async () => {
+    const order: string[] = [];
+    // 两个用户都要发 scope：fakeStore 只给 user_a 发，另一个会被当未授权拒掉。
+    const store = {
+      ...fakeStore(),
+      principalScopes: {
+        get: async (userId: string) => ({ wecomUserId: userId, accountSetIds: ['as_001'], enabled: true }),
+        list: async () => [],
+        upsert: async () => {},
+      },
+    } as unknown as AuditStore;
+    const handler = createMessageHandler({
+      store,
+      runtime: fakeRuntime(order, 30),
+      inboundDebounceMs: 0,
+    });
+
+    const first = handler({ wecomUserId: 'user_a', conversationId: 'group_1', messageId: 'm1', text: '第一条', receivedAt: '' });
+    const second = handler({ wecomUserId: 'user_b', conversationId: 'group_1', messageId: 'm2', text: '第二条', receivedAt: '' });
+    await Promise.all([first, second]);
+
+    // W1 起会话按聊天窗口共享（两人的 sessionId 都是 wecom:group_1），W6 起回合队列也按
+    // 会话串行：A 的回合完整结束 B 才开始。队列键若退回旧的 (用户 × 会话) 复合，两条
+    // 回合并发跑同一份共享状态（转录/附件池/委派账本/产物库），order 会变成
+    // start,start,end,end——本断言红。
+    expect(order).toEqual([
+      'start:wecom:group_1', 'end:wecom:group_1',
+      'start:wecom:group_1', 'end:wecom:group_1',
+    ]);
   });
 });
 
@@ -502,7 +562,7 @@ describe('附件关联：跨重启恢复与会话隔离', () => {
 
   it('跨会话不串:单聊上传的文件不进群聊回合', async () => {
     const a = realFile('a.xlsx');
-    const rows = [{ input: withAttachmentPaths('', [a], `${USER}:${USER}`) }]; // 单聊会话键
+    const rows = [{ input: withAttachmentPaths('', [a], `${USER}`) }]; // 单聊会话键
     const { handler, seen } = capture(storeWith(rows));
     await handler(msg({ text: '在群里问一句' }, 'group_chat_1')); // 群聊会话键不同
     expect(seen[0]!.request).not.toContain(a.path);
@@ -510,7 +570,7 @@ describe('附件关联：跨重启恢复与会话隔离', () => {
 
   it('同会话恢复:DB 有记录 + 内存空 → 文字回合带上路径', async () => {
     const a = realFile('a.xlsx');
-    const rows = [{ input: withAttachmentPaths('', [a], `${USER}:${USER}`) }];
+    const rows = [{ input: withAttachmentPaths('', [a], `${USER}`) }];
     const { handler, seen } = capture(storeWith(rows));
     await handler(msg({ text: '帮我做工资表' }));
     expect(seen[0]!.request).toContain(a.path);
@@ -521,8 +581,8 @@ describe('附件关联：跨重启恢复与会话隔离', () => {
     const a = realFile('a.xlsx');
     const b = realFile('b.xls');
     const rows = [
-      { input: withAttachmentPaths('', [a], `${USER}:${USER}`) },
-      { input: withAttachmentPaths('', [b], `${USER}:${USER}`) },
+      { input: withAttachmentPaths('', [a], `${USER}`) },
+      { input: withAttachmentPaths('', [b], `${USER}`) },
     ];
     // 第一个实例：收附件（写 DB）
     const first = capture(storeWith(rows));
@@ -535,7 +595,7 @@ describe('附件关联：跨重启恢复与会话隔离', () => {
   });
 
   it('路径已被 tmp 清理 → 安静不带上,不把死路径交给 worker', async () => {
-    const rows = [{ input: withAttachmentPaths('', [{ filename: 'gone.xlsx', path: '/tmp/definitely-not-here-xyz.xlsx', bytes: 1 }], `${USER}:${USER}`) }];
+    const rows = [{ input: withAttachmentPaths('', [{ filename: 'gone.xlsx', path: '/tmp/definitely-not-here-xyz.xlsx', bytes: 1 }], `${USER}`) }];
     const { handler, seen } = capture(storeWith(rows));
     await handler(msg({ text: '做工资表' }));
     expect(seen[0]!.request).toBe('做工资表');
@@ -791,7 +851,7 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
   // ── 重启降级：账本失记 → 全部未消费（宁可多给,不可漏）─────────────────────
   it('重启降级:新实例没有账本 → DB 里的存量全部交付,一个不漏', async () => {
     const a = file('a.xlsx'); const b = file('b.xls'); const c = file('c.xls');
-    const rows = [a, b, c].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}:${USER}`) }));
+    const rows = [a, b, c].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}`) }));
     const { send, seen, notices } = probe(rows);
     await send({ text: '帮我做工资表' });
     expect(deliveredNames(seen[0]!)).toEqual(['a.xlsx', 'b.xls', 'c.xls']);
@@ -802,7 +862,7 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
 
   it('重启降级只一次性:重启后第一次委派重新立账,此后的新任务只拿新文件', async () => {
     const a = file('a.xlsx'); const b = file('b.xls');
-    const rows = [a, b].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}:${USER}`) }));
+    const rows = [a, b].map((f) => ({ input: withAttachmentPaths('', [f], `${USER}`) }));
     const { send, seen } = probe(rows);
     await send({ text: '帮我做工资表' });                    // 重启后第一轮:全部未消费
     await send({ attachmentOnly: true, attachments: [file('d.xlsx')] });
@@ -813,7 +873,7 @@ describe('附件交付边界：按委派算，不按会话累积', () => {
 
   it('重启降级不会把 DB 存量永久当成新到达(否则规则一被绕过)', async () => {
     const a = file('a.xlsx');
-    const rows = [{ input: withAttachmentPaths('', [a], `${USER}:${USER}`) }];
+    const rows = [{ input: withAttachmentPaths('', [a], `${USER}`) }];
     const { send, seen } = probe(rows);
     await send({ text: '第一句' });                          // 交付 {a},并立账
     await send({ text: '第二句' });                          // 无新到达 → 沿用 {a},不是"又新到达一次"
@@ -1439,7 +1499,7 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
         upsert: async () => {},
         listBySession: async () => taskIds.map((taskId) => ({
           taskId,
-          parentSessionId: `wecom:${USER}:${USER}`,
+          parentSessionId: `wecom:${USER}`,
           principalId: `wecom:${USER}`,
           workerMessages: [],
           createdAt: new Date().toISOString(),
@@ -1483,8 +1543,8 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
       // 终稿点名回传的文件（2026-10-20 D2）：file 是独立消息、可能先于终稿到达，
       // 这一行让用户知道那个 xlsx 是什么。宿主补的确定性文字，不过模型的手
       expect(reply.text).toBe('做完了\n本轮回传：整理好的2026年08月工资表.xlsx');
-      expect(reply.file?.filename).toBe('整理好的2026年08月工资表.xlsx');
-      expect(reply.file?.data.toString()).toBe('XLSX');
+      expect(reply.files?.map((f) => f.filename)).toEqual(['整理好的2026年08月工资表.xlsx']);
+      expect(reply.files?.[0]?.data.toString()).toBe('XLSX');
     });
 
     it('终稿为空时只留点名那一行(不让用户面对一个没有说明的文件消息)', async () => {
@@ -1508,7 +1568,297 @@ describe('文件回传:宿主扫 tmp/ 收集本轮产物', () => {
       expect(typeof reply).not.toBe('string');
       if (typeof reply === 'string') return;
       expect(reply.text).toBe('本轮回传：工资表.xlsx');
-      expect(reply.file?.filename).toBe('工资表.xlsx');
+      expect(reply.files?.map((f) => f.filename)).toEqual(['工资表.xlsx']);
+    });
+
+    // W3（golden 翻转）：本轮真产生了两份交付物，两份全部回传。改造前是单数契约——
+    // 2026-10-20 真机形态：终稿列"交付物（2 份）"却只发出 1 个文件，用户被迫二次索要，
+    // 而二次索要正掉进"产物无库"的坑（W2 的由来）。files[] 之后收集到几个挂几个。
+    it('W3 两份交付物全部回传(mtime 新的在前,点名列全)', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const older = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      const newer = path.join(root, 'tmp', taskDir, '个税申报.xlsx');
+      mkdirSync(path.dirname(older), { recursive: true });
+      const handler = createMessageHandler({
+        store: storeWithTasks([taskDir]),
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            writeFileSync(older, 'OLD');
+            writeFileSync(newer, 'NEW');
+            // 显式拨开 mtime：collectProducedFiles 按"新的在前"排序，同毫秒会退到路径序
+            utimesSync(older, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+            utimesSync(newer, new Date(2_000_000_001_000), new Date(2_000_000_001_000));
+            return { text: '做完了' };
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(typeof reply).not.toBe('string');
+      if (typeof reply === 'string') return;
+      expect(reply.files?.map((f) => f.filename)).toEqual(['个税申报.xlsx', '工资表.xlsx']);
+      expect(reply.files?.[0]?.data.toString()).toBe('NEW');
+      expect(reply.files?.[1]?.data.toString()).toBe('OLD');
+      expect(reply.text).toBe('做完了\n本轮回传：个税申报.xlsx、工资表.xlsx');
+    });
+
+    // 表征（golden，W4 改造对象）："把上一轮发过的文件再发一次"当前没有宿主动路——
+    // 只能再走一次模型回合（真机上就是那次委派：模型凭记忆写路径、写错、worker 满目录
+    // hunt）。重发宿主化波会把本断言改为"零模型回合 + 宿主直接回传"。
+    it('表征:重发已交付产物没有宿主动路,仍要过模型回合', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      let calls = 0;
+      const handler = createMessageHandler({
+        store: storeWithTasks([taskDir]),
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            calls += 1;
+            if (calls === 1) {
+              writeFileSync(deliverable, 'XLSX');
+              utimesSync(deliverable, new Date(), new Date());
+              return { text: '做完了' };
+            }
+            return { text: '好的' };                                   // 第二轮不产出任何文件
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        inboundDebounceMs: 0,
+      });
+
+      const first = await handler(textTurn());
+      expect(typeof first).not.toBe('string');
+      if (typeof first === 'string') return;
+      expect(first.files?.map((f) => f.filename)).toEqual(['工资表.xlsx']);
+
+      // 拨回确定性的过去：turn 2 的收集界是"本轮委派开始之后落盘"，不拨的话两回合
+      // 落在同一毫秒时，turn 1 的文件会被当成本轮产物再发一次（full-suite 实测竞态）。
+      utimesSync(deliverable, new Date(1_000_000_000_000), new Date(1_000_000_000_000));
+      const second = await handler({ ...textTurn(), text: '发一下 工资表.xlsx' });
+      // 第二轮照样进了模型（真机上即重新委派），且没有新产物可挂
+      expect(calls).toBe(2);
+      expect(typeof second).toBe('string');
+    });
+
+    // ── W2 产物库：交付即入库 + 每回合清单注入 ────────────────────────────────
+    // 内存版 sessionArtifacts repo（行为对齐 core store：ref 单调、按会话列）。
+    const artifactStore = (): { rows: SessionArtifactRecord[]; repo: NonNullable<AuditStore['sessionArtifacts']> } => {
+      const rows: SessionArtifactRecord[] = [];
+      return {
+        rows,
+        repo: {
+          insert: async (record) => { rows.push(record); },
+          listBySession: async () => [...rows].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || Number(a.ref) - Number(b.ref)),
+          get: async (_sessionId, ref) => rows.find((r) => r.ref === ref) ?? null,
+          setStatus: async () => {},
+        },
+      };
+    };
+
+    it('W2 交付即入库:两份产物都入库(字节复制+ref),回复仍只挂第 1 个(W3 才挂全)', async () => {
+      const root = freshE2eRoot();
+      const dataRoot = mkdtempSync(path.join(tmpdir(), 'artifact-data-'));
+      e2eRoots.push(dataRoot);
+      const taskDir = `task_${randomUUID()}`;
+      const older = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      const newer = path.join(root, 'tmp', taskDir, '个税申报.xlsx');
+      mkdirSync(path.dirname(older), { recursive: true });
+      const { rows, repo } = artifactStore();
+      const handler = createMessageHandler({
+        store: { ...storeWithTasks([taskDir]), sessionArtifacts: repo } as unknown as AuditStore,
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            writeFileSync(older, 'OLD');
+            writeFileSync(newer, 'TAX');
+            utimesSync(older, new Date(2_000_000_000_000), new Date(2_000_000_000_000));
+            utimesSync(newer, new Date(2_000_000_001_000), new Date(2_000_000_001_000));
+            return { text: '做完了' };
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        dataRoot,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(typeof reply).not.toBe('string');
+      if (typeof reply === 'string') return;
+      // 收集序是 mtime 新的在前：个税申报=#1、工资表=#2；W3 起两份都挂（files[]）
+      expect(reply.files?.map((f) => f.filename)).toEqual(['个税申报.xlsx', '工资表.xlsx']);
+      expect(rows.map((r) => r.ref)).toEqual(['1', '2']);
+      expect(rows.map((r) => r.filename)).toEqual(['个税申报.xlsx', '工资表.xlsx']);
+      expect(rows[0]?.sourceTaskId).toBe(taskDir);
+      // 字节复制进了库（不是 scratch 同一份）：库里读出来内容一致
+      const payroll = rows.find((r) => r.filename === '工资表.xlsx');
+      expect(payroll).toBeDefined();
+      expect(readFileSync(payroll!.path).toString()).toBe('OLD');
+    });
+
+    it('W2 下一轮输入带产物清单(重发有确定答案;第一轮还没有)', async () => {
+      const root = freshE2eRoot();
+      const dataRoot = mkdtempSync(path.join(tmpdir(), 'artifact-data-'));
+      e2eRoots.push(dataRoot);
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      const { repo } = artifactStore();
+      const inputs: string[] = [];
+      let calls = 0;
+      const handler = createMessageHandler({
+        store: { ...storeWithTasks([taskDir]), sessionArtifacts: repo } as unknown as AuditStore,
+        runtime: {
+          handleTurn: async (_ctx: TrustedContext, input: string): Promise<AgentReply> => {
+            inputs.push(input);
+            calls += 1;
+            if (calls === 1) {
+              writeFileSync(deliverable, 'XLSX');
+              utimesSync(deliverable, new Date(), new Date());
+              return { text: '做完了' };
+            }
+            return { text: '好的' };
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        dataRoot,
+        inboundDebounceMs: 0,
+      });
+
+      await handler(textTurn());
+      expect(inputs[0]).not.toContain('本会话已保存的产物');           // 第一轮库还空着
+
+      // 拨回确定性的过去：防 turn 2 把 turn 1 的文件当成本轮产物（同毫秒竞态）
+      utimesSync(deliverable, new Date(1_000_000_000_000), new Date(1_000_000_000_000));
+      const second = await handler({ ...textTurn(), text: '发一下 工资表.xlsx' });
+      expect(typeof second).toBe('string');                          // 无新产物，纯文字
+      expect(inputs[1]).toContain('【本会话已保存的产物】');
+      expect(inputs[1]).toContain('#1 工资表.xlsx');
+      expect(inputs[1]).toContain('UTC+8');                          // 时间显式带时区
+    });
+
+    it('W2 缺 dataRoot 或 repo 时静默退化:不入库、不注入清单,交付照旧', async () => {
+      const root = freshE2eRoot();
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      const inputs: string[] = [];
+      const handler = createMessageHandler({
+        store: storeWithTasks([taskDir]),                              // 无 sessionArtifacts
+        runtime: {
+          handleTurn: async (_ctx: TrustedContext, input: string): Promise<AgentReply> => {
+            inputs.push(input);
+            writeFileSync(deliverable, 'XLSX');
+            utimesSync(deliverable, new Date(), new Date());
+            return { text: '做完了' };
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,                                            // 没传 dataRoot
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      expect(typeof reply).not.toBe('string');
+      if (typeof reply === 'string') return;
+      expect(reply.files?.map((f) => f.filename)).toEqual(['工资表.xlsx']);  // 流式交付不受影响
+      expect(inputs[0]).not.toContain('本会话已保存的产物');
+    });
+
+    // ── W4 重发路由：runtime 零委派交回 artifactRefs，宿主从库里取文件 ──────────
+    // 2026-10-20 事故形状：用户说"发一下 个税申报.xlsx"，模型申报委派、凭记忆写错
+    // 路径（/tmp + 编造 UUID），worker 满目录 hunt，内部叙述上屏。重发枝之后这条
+    // 路是：申报 resend → runtime 记账不委派 → 宿主依产物库确定性回答。
+    it('W4 重发:runtime 交回 artifactRefs,宿主从库里取文件回挂并合成文本', async () => {
+      const root = freshE2eRoot();
+      const dataRoot = mkdtempSync(path.join(tmpdir(), 'artifact-data-'));
+      e2eRoots.push(dataRoot);
+      const taskDir = `task_${randomUUID()}`;
+      const deliverable = path.join(root, 'tmp', taskDir, '工资表.xlsx');
+      mkdirSync(path.dirname(deliverable), { recursive: true });
+      const { rows, repo } = artifactStore();
+      let calls = 0;
+      const handler = createMessageHandler({
+        store: { ...storeWithTasks([taskDir]), sessionArtifacts: repo } as unknown as AuditStore,
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => {
+            calls += 1;
+            if (calls === 1) {
+              writeFileSync(deliverable, 'XLSX');
+              utimesSync(deliverable, new Date(), new Date());
+              return { text: '做完了' };
+            }
+            return { text: '重发产物 #1。', artifactRefs: ['1'] };        // W4 resend 路由交回
+          },
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        dataRoot,
+        inboundDebounceMs: 0,
+      });
+
+      await handler(textTurn());                                        // 第一轮：产出并入库（#1）
+      expect(rows.map((r) => r.ref)).toEqual(['1']);
+      // 拨回确定性的过去：防 turn 2 把 turn 1 的文件当成本轮产物（同毫秒竞态，
+      // 与上一用例同一手法——收集界是 mtime >= delegatedAt，同毫秒即误收）。
+      utimesSync(deliverable, new Date(1_000_000_000_000), new Date(1_000_000_000_000));
+
+      const second = await handler({ ...textTurn(), text: '发一下 工资表.xlsx' });
+      expect(calls).toBe(2);
+      expect(typeof second).not.toBe('string');
+      if (typeof second === 'string') return;
+      // 文本由宿主依产物记录合成（带生成时间与显式时区），文件从库里取字节回挂
+      expect(second.text).toContain('重发：#1 工资表.xlsx');
+      expect(second.text).toContain('UTC+8');
+      expect(second.text).toContain('本轮回传：工资表.xlsx');
+      expect(second.files?.map((f) => f.filename)).toEqual(['工资表.xlsx']);
+      expect(second.files?.[0]?.data.toString()).toBe('XLSX');
+      // 重发不重新入库：库里仍只有一条（重复入库会产生重复 ref）
+      expect(rows).toHaveLength(1);
+    });
+
+    it('W4 重发不存在的 ref:确定性回答,零文件不编造', async () => {
+      const root = freshE2eRoot();
+      const dataRoot = mkdtempSync(path.join(tmpdir(), 'artifact-data-'));
+      e2eRoots.push(dataRoot);
+      const { repo } = artifactStore();
+      const handler = createMessageHandler({
+        store: { ...storeWithTasks([]), sessionArtifacts: repo } as unknown as AuditStore,
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => ({ text: '重发产物 #9。', artifactRefs: ['9'] }),
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        dataRoot,
+        inboundDebounceMs: 0,
+      });
+      const reply = await handler(textTurn());
+      // 失败路径是纯文本（零文件可挂），ChannelReply 退化成 string
+      expect(typeof reply).toBe('string');
+      if (typeof reply !== 'string') return;
+      expect(reply).toContain('本会话没有交付过产物 #9');
+    });
+
+    it('W4 重发已淘汰产物:确定说过期并指重算,不尝试读字节', async () => {
+      const root = freshE2eRoot();
+      const dataRoot = mkdtempSync(path.join(tmpdir(), 'artifact-data-'));
+      e2eRoots.push(dataRoot);
+      const { rows, repo } = artifactStore();
+      const handler = createMessageHandler({
+        store: { ...storeWithTasks([]), sessionArtifacts: repo } as unknown as AuditStore,
+        runtime: {
+          handleTurn: async (): Promise<AgentReply> => ({ text: '重发产物 #1。', artifactRefs: ['1'] }),
+        } as unknown as AgentRuntime,
+        platformRoot: root,
+        dataRoot,
+        inboundDebounceMs: 0,
+      });
+      rows.push({
+        ref: '1', sessionId: 'wecom:user_a', filename: '旧表.xlsx', sha256: 'a', size: 1,
+        createdAt: '2026-10-19T08:24:50.000Z', status: 'evicted', path: '/definitely-not-here.xlsx',
+      });
+      const reply = await handler(textTurn());
+      // 淘汰路径同样是纯文本：不尝试读字节，指重算
+      expect(typeof reply).toBe('string');
+      if (typeof reply !== 'string') return;
+      expect(reply).toContain('产物 #1 已淘汰');
     });
 
     it('platformTasks 缺库(旧替身):退化为只回文字,不因收集失败炸掉回合', async () => {

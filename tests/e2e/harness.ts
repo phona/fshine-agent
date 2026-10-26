@@ -154,6 +154,8 @@ afterEach(async () => {
 
 class RecordingSdkClient implements SdkClientLike {
   readonly frames: Array<{ content: string; finish: boolean }> = [];
+  readonly sentMessages: Array<{ chatid: string; content: string }> = [];
+  readonly sentFiles: Array<{ chatid: string; mediaId: string }> = [];
   /** 命中该子串的计划通知投递失败，用来验证"通知不到就不放行"。 */
   failNotice: string | null = null;
   private readonly listeners = new Map<string, Array<(...args: unknown[]) => void>>();
@@ -178,6 +180,15 @@ class RecordingSdkClient implements SdkClientLike {
   }
   async uploadMedia(): Promise<{ media_id: string }> { return { media_id: 'unused' }; }
   async replyMedia(): Promise<unknown> { return {}; }
+  async sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
+    if (this.failNotice !== null && body.markdown.content.includes(this.failNotice)) throw new Error('notice delivery failed');
+    this.sentMessages.push({ chatid, content: body.markdown.content });
+    return {};
+  }
+  async sendMediaMessage(chatid: string, _mediaType: 'file', mediaId: string): Promise<unknown> {
+    this.sentFiles.push({ chatid, mediaId });
+    return {};
+  }
   /**
    * message.file 帧触发的素材下载（T3 附件全链）。`fileToServe` 决定回什么：
    * null = 模拟下载失败（验"附件下载失败也要给用户可见降级"），否则回固定文件。
@@ -607,11 +618,13 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
 
 // ── 装配辅助 ────────────────────────────────────────────────────────────
 
+interface SendOptions { userid?: string; group?: boolean; quote?: unknown }
+
 interface Boot {
   /** 以指定企微用户身份发一句话，返回用户最终看到的文本。 */
-  send(text: string, options?: { userid?: string; group?: boolean }): Promise<string>;
+  send(text: string, options?: SendOptions): Promise<string>;
   /** 同上，同时带回这一回合产生的进度帧与计划通知帧（帧级断言用）。 */
-  turn(text: string, options?: { userid?: string; group?: boolean }): Promise<Turn>;
+  turn(text: string, options?: SendOptions): Promise<Turn>;
   /** 发一条企微 file 消息（T3 附件全链）：走生产的 message.file → 落盘 → 暂存/交付链。 */
   sendFile(
     filename: string,
@@ -644,7 +657,7 @@ export interface Turn {
 const turnFrames = new Map<string, { steps: string[]; notices: string[] }>();
 
 /** 构造一条企微文本消息帧（与官方 SDK 投给适配器的形状一致）。 */
-function wecomText(userid: string, content: string, options: { group?: boolean; messageId?: string } = {}): {
+function wecomText(userid: string, content: string, options: SendOptions & { messageId?: string } = {}): {
   headers: { req_id: string };
   body: Record<string, unknown>;
 } {
@@ -659,6 +672,7 @@ function wecomText(userid: string, content: string, options: { group?: boolean; 
       chattype: options.group ? 'group' : 'single',
       ...(options.group ? { chatid: 'grp_e2e' } : {}),
       text: { content: mentioned },
+      ...(options.quote === undefined ? {} : { quote: options.quote }),
     },
   };
 }
@@ -669,6 +683,7 @@ function wecomText(userid: string, content: string, options: { group?: boolean; 
 interface BootOptions {
   main: unknown;
   worker: unknown;
+  workerDispatchMode?: 'inline' | 'background';
   /**
    * 覆盖记忆候选提取器（T2 长期记忆全链）：缺省恒空。给确定性 stub 时，
    * consolidateLongMemory（生产代码）会真跑：候选 → reduceLongMemory → SQLite commit。
@@ -695,6 +710,7 @@ interface BootOptions {
 async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
+  if (options.workerDispatchMode) bootEnv['FSHINE_WORKER_DISPATCH_MODE'] = options.workerDispatchMode;
   // 隔离运行（DZ_PLATFORM_ROOT）：开发仓的 17dz-platform 常被并行任务动到半途（未登记
   // 的孤儿脚本会让 operations lint 红掉、boot 拒起）。指向干净快照时把 config 的
   // profiles['17dz'].root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
@@ -752,6 +768,8 @@ async function boot(options: BootOptions): Promise<Boot> {
   const closeAssembly = assembly.close.bind(assembly);
   assembly.close = async () => {
     liveAssemblies.delete(assembly);
+    // Drain background results while the recording channel and attachment inputs still exist.
+    await assembly.backgroundTasks.shutdown();
     try {
       await assembly.channel.stop();
     } catch { /* 停止渠道失败不阻塞关库 */ }
@@ -778,12 +796,12 @@ async function boot(options: BootOptions): Promise<Boot> {
   sdk.emit('authenticated');
   await starting;
   /** 发一句话并等到这一回合的 finish 帧；帧采集按 messageId 预先登记同一份对象。 */
-  const deliver = (text: string, options: { userid?: string; group?: boolean } = {}): { done: Promise<string>; frames: { steps: string[]; notices: string[] }; messageId: string } => {
+  const deliver = (text: string, options: SendOptions = {}): { done: Promise<string>; frames: { steps: string[]; notices: string[] }; messageId: string } => {
     const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
     const frames = { steps: [] as string[], notices: [] as string[] };
     turnFrames.set(messageId, frames);
     const before = sdk.frames.filter((frame) => frame.finish).length;
-    sdk.emit('message.text', wecomText(options.userid ?? 'e2e_user', text, { group: options.group, messageId }));
+    sdk.emit('message.text', wecomText(options.userid ?? 'e2e_user', text, { group: options.group, messageId, quote: options.quote }));
     const done = (async () => {
       const deadline = Date.now() + 20_000;
       while (Date.now() < deadline) {
@@ -795,7 +813,7 @@ async function boot(options: BootOptions): Promise<Boot> {
     })();
     return { done, frames, messageId };
   };
-  const turn = async (text: string, options: { userid?: string; group?: boolean } = {}): Promise<Turn> => {
+  const turn = async (text: string, options: SendOptions = {}): Promise<Turn> => {
     const { done, frames, messageId } = deliver(text, options);
     const reply = await done;
     turnFrames.delete(messageId);

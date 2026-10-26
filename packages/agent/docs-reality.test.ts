@@ -100,7 +100,7 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     for (const name of ['PERIOD_RE', 'ACCOUNT_SET_RE', 'BALANCE_RE', 'CURRENCY_AMOUNT_RE', 'FINANCIAL_RESULT_RE']) {
       expect(extractor.includes(name), `防御排除失踪：memory-candidate-extractor 的 ${name} 被删——防线变聋`).toBe(true);
     }
-    expect(read('packages/agent/src/runtime.ts').includes('function hasFinancialFigure'), '防御排除失踪：hasFinancialFigure 被删——出口校验变聋').toBe(true);
+    expect(read('packages/agent/src/runtime-quality.ts').includes('function hasFinancialFigure'), '防御排除失踪：hasFinancialFigure 被删——出口校验变聋').toBe(true);
   });
 
   it('worker 工具面双写断言：WORKER_TOOLS 是唯一来源', () => {
@@ -110,5 +110,15 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(src.includes('tools: [...WORKER_TOOLS]'), 'pi-coding-driver 的 tools 未消费 WORKER_TOOLS——双写断言被绕过').toBe(true);
     // 漂移过的旧注释形态不得复发（2026-10-16 实证：头注释与真实工具面脱节两次）
     expect(src.includes('read/bash/grep/find/ls'), '头注释重新出现已漂移的工具面描述——改注释前先核对 WORKER_TOOLS').toBe(false);
+  });
+
+  it('D-121：准入闸与授信门的术语边界注释不得失踪', () => {
+    // PlatformExecutionGate 只是并发准入闸（FIFO 槽位），不做授权裁决——授权裁决住
+    // serve-gate.ts（G1/授信期门）。"拿到 lease=已获准执行"的误读曾在 review 现形，
+    // 注释即防线（同 WORKER_TOOLS 双写断言 / L1 防御排除不得失踪的存在性守卫先例）：
+    // 头注释被删或漂移，此处翻红。零行为主张。
+    const src = read('packages/agent/src/platform-execution-gate.ts');
+    expect(src.includes('不构成执行授权'), 'platform-execution-gate 的授权边界声明被删——准入闸/授信门术语混淆防线失效').toBe(true);
+    expect(src.includes('serve-gate.ts'), '头注释与授权裁决模块的指向脱钩——读者找不到授信门的权威位置').toBe(true);
   });
 });

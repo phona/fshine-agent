@@ -57,6 +57,26 @@ export {
 } from './operation-labels';
 export * from './scratch-cleanup';
 export {
+  createPlatformExecutionGate,
+  PlatformExecutionAbortedError,
+  PlatformExecutionQueueFullError,
+  type PlatformExecutionGate,
+  type PlatformExecutionGateOptions,
+  type PlatformExecutionLease,
+  type PlatformExecutionTicket,
+  type PlatformExecutionTicketState,
+} from './platform-execution-gate';
+export {
+  createBackgroundTaskManager,
+  type BackgroundTaskManager,
+  type BackgroundTaskManagerOptions,
+  type BackgroundTaskSubmitInput,
+  type PreparedBackgroundTaskSubmitInput,
+  type TaskControlReceipt,
+  type TaskManagerScope,
+  type TaskReceipt,
+} from './task-manager';
+export {
   FileSkillRegistry,
   createSkillRegistry,
   discoverSkills,
@@ -159,6 +179,9 @@ export {
   type ProposalCommitRequest,
   type ProposalCommitResult,
   type ProposalUnavailableKind,
+  type PreparedContextTaskRun,
+  type PreparedContextTaskRunExecution,
+  type RunWorkspaceFile,
 } from './context';
 export {
   createTaxAgentRuntime,

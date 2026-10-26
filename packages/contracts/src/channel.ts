@@ -26,6 +26,18 @@ export interface IncomingAttachment {
   bytes: number;
 }
 
+/** A quote attached to the current inbound message; it is context, not an identity or authorization fact. */
+export interface IncomingMessageReference {
+  kind: 'text' | 'mixed' | 'image' | 'voice' | 'file';
+  text?: string;
+  truncated?: boolean;
+  /** Only set when the channel actually identifies the quoted source message. */
+  sourceMessageId?: string;
+}
+
+/** UTF-8 byte cap for quote text; shared by channel extraction and runtime normalization. */
+export const MAX_QUOTED_TEXT_BYTES = 16_384;
+
 /**
  * 文件收据里最多列几个文件名（再多用"等"收尾）。
  *
@@ -77,6 +89,8 @@ export interface IncomingChannelMessage {
   /** 单聊 / 群聊(群聊时 text 已剥离 @机器人 前缀) */
   chatType?: 'single' | 'group';
   text: string;
+  /** Native reference content associated with this message, separate from its body. */
+  messageReference?: IncomingMessageReference;
   /**
    * 本条消息携带的附件（企微 file 消息）。
    *
@@ -110,22 +124,64 @@ export interface OutgoingImageReply {
 export interface OutgoingFileReply {
   data: Buffer;
   filename: string;
+  /**
+   * 收集时的磁盘来源（平台 tmp/ 里的真实路径）。W2 起宿主用它做入库与 ref 改写——
+   * 交付即把字节复制进会话产物库，scratch 被 GC 后产物仍可寻址。渠道侧不消费它。
+   */
+  sourcePath?: string;
 }
 
 /**
  * 渠道回复:纯文本,或文本 + 图片/文件组合。
  *
- * `file` 是 2026-10-08 补的最后一环：worker 在平台 tmp/ 下产出 xlsx（如工资表），
- * 此前渠道只会把它说成一段 markdown——12 人的工资表被塞进 20KB 文本上限里截断，
- * 用户既拿不到文件也看不完。SDK 的 uploadMedia/replyMedia 本就支持 file 类型。
+ * `files` 是 2026-10-08 补的最后一环（当时还是单数 `file`）：worker 在平台 tmp/ 下产出
+ * xlsx（如工资表），此前渠道只会把它说成一段 markdown——12 人的工资表被塞进 20KB
+ * 文本上限里截断，用户既拿不到文件也看不完。SDK 的 uploadMedia/replyMedia 本就支持
+ * file 类型。
+ *
+ * W3（2026-10-20）单数改数组：单数是"说 3 个发 1 个"的根源——真机实测终稿列"交付物
+ * （2 份）"却只挂 1 个文件，用户被迫二次索要，而二次索要又掉进"产物无库"的坑（W2 的
+ * 由来）。一次任务产出多个交付物是常态，数组才是这个场景的诚实形状。
  */
 export interface RichChannelReply {
   text?: string;
   image?: OutgoingImageReply;
-  file?: OutgoingFileReply;
+  /** 按收集序（mtime 新的在前）排列；渠道逐条发送，每条是独立消息。 */
+  files?: readonly OutgoingFileReply[];
 }
 
 export type ChannelReply = string | RichChannelReply;
+
+export interface ChannelRoute {
+  channel: string;
+  conversationId: string;
+}
+
+export interface DeliveryPartReceipt {
+  kind: 'text' | 'file';
+  /** Zero-based index within its kind. */
+  index: number;
+  status: 'sent';
+}
+
+export interface DeliveryReceipt {
+  route: ChannelRoute;
+  /** Parts with an ACK from the channel. */
+  parts: readonly DeliveryPartReceipt[];
+}
+
+/** Shape used when an active-channel delivery fails after possibly sending earlier parts. */
+export interface ChannelDeliveryError extends Error {
+  readonly code: 'CHANNEL_TRANSPORT_FAILED';
+  readonly route: ChannelRoute;
+  readonly failedPart: {
+    kind: 'text' | 'file';
+    index: number;
+    stage: 'send' | 'upload';
+  };
+  /** Successful ACKs from earlier parts in the same reply. */
+  readonly receipt: DeliveryReceipt;
+}
 
 /** 进度回调:adapter 提供(节流 + finish=false 流帧),handler/runtime 在阶段节点调用 */
 export type ProgressFn = (text: string) => void;
@@ -143,4 +199,6 @@ export type ReplyHandler = (
 export interface ChannelAdapter {
   start(handler: ReplyHandler): Promise<void>;
   stop(): Promise<void>;
+  /** Actively deliver a new reply to a host-validated route, independent of an inbound frame. */
+  sendToConversation?(route: ChannelRoute, reply: ChannelReply): Promise<DeliveryReceipt>;
 }

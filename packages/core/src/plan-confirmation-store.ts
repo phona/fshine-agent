@@ -42,6 +42,8 @@ export interface SqlitePendingPlanConfirmationRepo {
   /** Explicit claim primitive supports crash/lease diagnostics and deterministic recovery tests. */
   claimPending(pending: StoredPendingPlanConfirmation, evidence: StoredPlanConfirmationEvidence): Promise<boolean>;
   getResolution(messageId: string): Promise<PlanConfirmationResolution | null>;
+  /** Host task cancellation; invalidates pending authority without recording positive consent. */
+  cancelTask(principalId: string, sessionId: string, taskId: string): Promise<number>;
   close(): void;
 }
 
@@ -197,6 +199,22 @@ export function createSqlitePendingPlanConfirmationRepo(
         sessionId: row.session_id, text: row.text, receivedAt: row.received_at,
         resolution: row.resolution as PlanConfirmationResolution['resolution'], resolvedAt: row.resolved_at,
       } : null;
+    },
+    async cancelTask(principalId, sessionId, taskId) {
+      // busy 前置判定保留（同任务多行场景：processing 在途时不动该任务任何行，与既有
+      // 语义一致）。UPDATE 自带租约条件——busy 检查与 UPDATE 之间被其他实例 claim 的行
+      // （D-124 的 TOCTOU 窗口）在 UPDATE 求值时刻有效租约已生效，不再被翻 cancelled
+      // （在途确认被静默丢弃、finalize 失败的形态关闭）。租约过期或缺省的 processing 行
+      // 仍可取消，与改前 UPDATE 的 status IN ('pending','processing') 等价。
+      const busy = db.prepare(`SELECT 1 FROM pending_plan_confirmations
+        WHERE principal_id = ? AND session_id = ? AND task_id = ? AND status = 'processing' AND lease_until > ? LIMIT 1`)
+        .get(principalId, sessionId, taskId, now().getTime());
+      if (busy) throw new Error('该任务的确认操作正在执行，请稍后查询实际结果。');
+      return db.prepare(`UPDATE pending_plan_confirmations SET status = 'cancelled', updated_at = ?,
+        lease_token = NULL, lease_until = NULL, lease_message_id = NULL
+        WHERE principal_id = ? AND session_id = ? AND task_id = ?
+          AND (status = 'pending' OR (status = 'processing' AND (lease_until IS NULL OR lease_until <= ?)))`)
+        .run(now().toISOString(), principalId, sessionId, taskId, now().getTime()).changes;
     },
     close() { db.close(); },
   };

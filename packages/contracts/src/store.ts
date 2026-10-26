@@ -14,6 +14,8 @@
 export type RequestOutcome = 'replied' | 'denied' | 'failed' | 'attachment_received';
 
 import type { AccountSetScope, PrincipalCapability } from './config';
+import type { ChannelRoute, IncomingMessageReference } from './channel';
+import type { TurnInputContext } from './runtime';
 
 export interface PrincipalScopeRecord {
   wecomUserId: string;
@@ -97,7 +99,7 @@ export interface ConversationSessionRepo {
   upsert(record: ConversationSessionRecord): Promise<void>;
 }
 
-export type ConversationEventKind = 'user_message' | 'assistant_message' | 'tool_result' | 'plan_event' | 'clarification_event';
+export type ConversationEventKind = 'user_message' | 'assistant_message' | 'tool_result' | 'plan_event' | 'clarification_event' | 'task_event';
 
 /**
  * Append-only message/tool/plan event. Keep only safe, searchable text or an artifact reference.
@@ -113,9 +115,111 @@ export interface ConversationEventRecord {
   sessionId: string;
   kind: ConversationEventKind;
   content?: string;
+  /** Structured inbound quote; content continues to contain only the current message body. */
+  messageReference?: IncomingMessageReference;
   artifactRef?: string;
   createdAt: string;
   requestId?: string;
+  taskId?: string;
+  runId?: string;
+}
+
+/** State of one Worker invocation; a task can have several runs over its lifetime. */
+export type TaskRunState =
+  | 'queued'
+  | 'running'
+  | 'cancelling'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'waiting_input'
+  | 'waiting_confirmation'
+  | 'interrupted';
+
+/** Durable background Worker invocation metadata. Runtime-only callbacks and credentials stay out of storage. */
+export interface TaskRunRecord {
+  runId: string;
+  taskId: string;
+  /** Host-generated idempotency key for the source dispatch event/tool call. */
+  dispatchKey: string;
+  principalId: string;
+  sessionId: string;
+  originRequestId: string;
+  originUserEventId: string;
+  /** Prepared request passed to the execution layer. */
+  request: string;
+  /** Original message/request snapshot used to anchor future continuation. */
+  originMessage: string;
+  createdAt: string;
+  updatedAt: string;
+  state: TaskRunState;
+  startedAt?: string;
+  endedAt?: string;
+  deadline?: string;
+  planId?: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  lastProgress?: string;
+  resultText?: string;
+  result?: unknown;
+  error?: string;
+  resultEventId?: string;
+  inputContext?: TurnInputContext;
+  deliveryRoute?: ChannelRoute;
+  /**
+   * Host-owned result-handling state machine state ('processing' | 'handled' | 'failed').
+   * Persisted as an explicit column so storage-level queries (GC pins, crash-recovery
+   * sweeps) never sniff it out of `metadata`. Absent = the result was never claimed.
+   * `metadata.resultHandling` keeps the machine's other details (eventId/requestId/
+   * replyText/artifactRefs/error) and its `state` field is mirrored, not authoritative.
+   */
+  resultHandlingState?: 'processing' | 'handled' | 'failed';
+  /**
+   * Host-owned input/output snapshot details; opaque to generic storage. The
+   * resultHandling.state written here by apps/server is a mirror only — storage
+   * queries read the `resultHandlingState` field above instead.
+   */
+  metadata?: Record<string, unknown>;
+  deliveryState?: 'pending' | 'sent' | 'failed' | 'unknown' | 'not_required';
+  /** Opaque delivery item states / receipts. */
+  delivery?: unknown;
+  /** Repository-owned CAS token. Older/non-SQLite repositories may omit it. */
+  revision?: number;
+}
+
+/** Stable completion event emitted from a persisted run. */
+export interface BackgroundTaskEvent {
+  eventId: string;
+  run: TaskRunRecord;
+  result?: unknown;
+  error?: string;
+}
+
+export interface TaskRunRepo {
+  /**
+   * Unique dispatchKey: repeated submissions return the original run without replacing it.
+   * 失败形态（D-125）：同 taskId 已存在活跃 run（每任务单活跃部分唯一索引）时抛
+   * TaskRunActiveConflictError——调用方可据此回复"已有 Worker 在跑"，而不是接住
+   * 未分类的底层约束错误。
+   */
+  createOrGetByDispatchKey(record: TaskRunRecord): Promise<TaskRunRecord>;
+  get(runId: string): Promise<TaskRunRecord | null>;
+  getByDispatchKey(dispatchKey: string): Promise<TaskRunRecord | null>;
+  /** Oldest registration first; timestamps and delivery updates do not determine run order. */
+  listBySession(principalId: string, sessionId: string): Promise<TaskRunRecord[]>;
+  /** Compare-and-set state update; false means the current state did not match. */
+  transition(runId: string, expectedStates: readonly TaskRunState[], patch: Partial<TaskRunRecord>, expectedRevision?: number): Promise<boolean>;
+  /** Global task workspaces protected from GC by active/waiting work or unhandled delivery results. */
+  listPinnedTaskIds(): Promise<string[]>;
+  /**
+   * Terminal runs whose delivery never settled (deliveryState 'pending', or the result
+   * handling state machine still 'processing'). These are crash-recovery leftovers: the
+   * completion event lived only on an in-memory promise chain that died with the process.
+   * Optional: older test stores/deployments without it simply find nothing to sweep.
+   */
+  listTerminalUnsettledDeliveries?(): Promise<TaskRunRecord[]>;
+  /** Mark only runs left queued/running/cancelling by a previous process as interrupted. */
+  interruptActive(now: string): Promise<number>;
 }
 
 export interface ConversationLogQuery {
@@ -326,13 +430,74 @@ export interface ChangeIntentRepo {
   /** 命中确认码的未过期意图；过期意图就地标记 expired 后返回 null */
   findPendingByConfirm(principalId: string, sessionId: string, codeHash: string, now: Date): Promise<ChangeIntentRecord | null>;
   /** 该会话当前的 pending 意图（新提案创建前将其置 superseded） */
-  findPendingBySession(principalId: string, sessionId: string): Promise<ChangeIntentRecord | null>;
+  findPendingBySession(principalId: string, sessionId: string, taskId?: string): Promise<ChangeIntentRecord | null>;
   /** 按确认码哈希查最新意图（任意状态）——过期/已完成/作废的确定性答复用 */
   findByCodeHash(principalId: string, sessionId: string, codeHash: string): Promise<ChangeIntentRecord | null>;
   updateStatus(intentId: string, status: ChangeIntentRecord['status'], result?: unknown): Promise<void>;
 }
 
 /** Repository aggregate used by the application and Agent adapters. */
+/**
+ * 会话级产物记录（W2 产物库，2026-10-20）。
+ *
+ * 为什么需要：交付曾经是"回合末把字节流进渠道消息"的一次性副作用——不停留、不登记，
+ * 系统里再没有任何结构知道"这个会话交付过什么"。用户说"把那个表再发一次"时，Main
+ * Agent 只能凭对话散文里提到的路径复述，而复述会损坏（2026-10-20 实证：委派文本里
+ * 出现编造的 `/tmp/task_<uuid>` 路径，worker 拿着它 ls 失败后满目录 hunt）。
+ *
+ * 库只存"ref ↔ 交付回合 ↔ 产生任务"的映射；溯源细节（读了哪些输入、何时委派、
+ * worker 摘要）从 platform_tasks.worker_messages 投影，不建平行登记表。
+ */
+export interface SessionArtifactRecord {
+  /** 会话内单调 ref（'1'、'2'…）：用户可见清单与宿主解析的内部句柄。 */
+  ref: string;
+  sessionId: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  /** 产生该产物的平台任务（溯源投影键，可缺失：非委派回合的交付）。 */
+  sourceTaskId?: string;
+  /** 具体运行的溯源键；一个续跑 taskId 可对应多个 Worker run。 */
+  sourceRunId?: string;
+  /** 交付回合的请求 ID。 */
+  requestId?: string;
+  /** ISO 8601（UTC），入库（=交付）时刻。 */
+  createdAt: string;
+  /** available = 可重发；evicted = 已淘汰（清单仍展示，重发答"已过期需重算"）。 */
+  status: 'available' | 'evicted';
+  /** 库内字节的绝对路径：scratch 被 GC 后产物仍可寻址。 */
+  path: string;
+}
+
+/** Session artifact ref conflict（D-123）：同会话同 ref 重复 insert，fail-loud 不覆盖。 */
+export class SessionArtifactRefConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionArtifactRefConflictError';
+  }
+}
+
+/** 同 taskId 已有活跃 run（每任务单活跃不变量，D-125）：建单被拒的可识别失败形态。 */
+export class TaskRunActiveConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'TaskRunActiveConflictError';
+  }
+}
+
+export interface SessionArtifactRepo {
+  /**
+   * Fail-loud（D-123）：同会话同 ref 已存在时抛 SessionArtifactRefConflictError，
+   * 不做覆盖 upsert——覆盖会让并发分到重叠 ref 的后写吃掉前写的登记（字节留孤儿、
+   * ref 指向新文件）。ref 分配与 insert 须在调用方的会话串行段内完成。
+   */
+  insert(record: SessionArtifactRecord): Promise<void>;
+  /** 按入库时间正序（清单与 ref 单调性同源）。 */
+  listBySession(sessionId: string): Promise<SessionArtifactRecord[]>;
+  get(sessionId: string, ref: string): Promise<SessionArtifactRecord | null>;
+  setStatus(sessionId: string, ref: string, status: SessionArtifactRecord['status']): Promise<void>;
+}
+
 export interface AuditStore {
   principalScopes: PrincipalScopeRepo;
   requests: AgentRequestRepo;
@@ -348,4 +513,8 @@ export interface AuditStore {
   platformTasks?: PlatformTaskRepo;
   /** Optional：缺省时写流程整体禁用（提案按普通回答处理）。 */
   changeIntents?: ChangeIntentRepo;
+  /** Optional：会话级产物库（W2）。缺省时交付不入库、不注入清单（旧替身/旧部署退化）。 */
+  sessionArtifacts?: SessionArtifactRepo;
+  /** Optional on legacy test stores; the SQLite implementation always provides background run storage. */
+  taskRuns?: TaskRunRepo;
 }

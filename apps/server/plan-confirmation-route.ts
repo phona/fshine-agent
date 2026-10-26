@@ -103,6 +103,9 @@ export function createPlanConfirmationWiring(options: {
   return {
     /** 挂到 createMessageHandler 的 planConfirmation.handle。 */
     handle: confirmationRoute.handle,
+    /** Host task-control cancellation is separate from user confirmation evidence. */
+    cancelTask: (principalId: string, sessionId: string, taskId: string) =>
+      pendingPlanRepo.cancelTask(principalId, sessionId, taskId),
     /** 挂到 createMessageHandler 的 planConfirmation.savePending（决策固定 confirm）。 */
     savePending: async (pending: { planId: string; version: number; taskId: string; principalId: string; sessionId: string; requestId: string; userText: string }) => {
       await pendingPlanRepo.savePending({ ...pending, decision: 'confirm', expiresAt: new Date(Date.now() + PLAN_CONFIRMATION_TTL_MS).toISOString(), evaluation: {} });

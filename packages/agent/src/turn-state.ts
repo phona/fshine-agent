@@ -16,6 +16,7 @@ import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanStepLabel } from './plan-steps';
 import type { SelectionClarification } from './platform-contract';
 import type { TurnDeclaration } from './turn-contract';
+import type { TaskRunState } from '@fshine/contracts';
 
 type TurnExecution = NonNullable<TurnDriverResult['execution']>;
 
@@ -58,6 +59,18 @@ export interface TurnState {
   clarificationReply: string | null;
   /** 消歧回合：用户从多个未完成任务中选定的计划。绑定由宿主强制，模型不可改绑。 */
   preferredPlanId: string | null;
+  /** 后台提交已由宿主登记：这是受理事实，绝不是平台执行凭证。 */
+  backgroundStarted: boolean;
+  backgroundTaskId: string | null;
+  backgroundRunId: string | null;
+  backgroundTaskState: TaskRunState | null;
+  backgroundReceiptText: string | null;
+  /**
+   * 重发路由（W4）：本回合申报的 resend 产物 ref。runtime 只记账不办事——委派被
+   * 完全跳过，ref 随 AgentReply.artifactRefs 交handler 依会话产物库解析成文件。
+   * 有效性（存在/淘汰/字节在否）由 handler 确定性回答，runtime 不碰产物库。
+   */
+  resendRefs: string[];
 }
 
 /**
@@ -83,6 +96,12 @@ export function createTurnState(planChoice?: { planId: string } | null): TurnSta
     clarification: null,
     clarificationReply: null,
     preferredPlanId: planChoice?.planId ?? null,
+    backgroundStarted: false,
+    backgroundTaskId: null,
+    backgroundRunId: null,
+    backgroundTaskState: null,
+    backgroundReceiptText: null,
+    resendRefs: [],
   };
 }
 

@@ -42,6 +42,11 @@ function input(overrides: Partial<TurnExitInput> = {}): TurnExitInput {
     pendingPlan: false,
     resultPendingPlan: false,
     intentKind: 'delegate',
+    backgroundStarted: false,
+    backgroundTaskId: null,
+    backgroundRunId: null,
+    backgroundTaskState: null,
+    backgroundReceiptText: null,
     needsLoop: false,
     planModeTurn: false,
     needsRounds: 0,
@@ -56,6 +61,29 @@ function input(overrides: Partial<TurnExitInput> = {}): TurnExitInput {
     ...overrides,
   };
 }
+
+it('background acceptance ends the turn without requiring or fabricating execution evidence', () => {
+  const decision = decideTurnExit(input({
+    backgroundStarted: true,
+    backgroundTaskId: 'task_accepted',
+    backgroundRunId: 'run_accepted',
+    backgroundTaskState: 'queued',
+    backgroundReceiptText: '任务已排队。',
+    protocolReplay: true,
+    resultText: '{"recorded":"delegate","taskId":"task_accepted"}',
+  }));
+  expect(decision).toEqual({
+    kind: 'direct',
+    text: '任务已排队。',
+    outcome: 'background_task_accepted',
+    events: [{
+      level: 'info',
+      event: 'background_task_accepted',
+      detail: { taskId: 'task_accepted', runId: 'run_accepted', state: 'queued' },
+    }],
+  });
+  expect(input({ backgroundStarted: true }).execution).toBe(false);
+});
 
 /** 事件断言的小工具：名字 + 级别 + 字段一起比。 */
 function expectEvent(decision: TurnExitDecision, index: number, level: 'info' | 'warn', event: string, detail: Record<string, unknown>): void {

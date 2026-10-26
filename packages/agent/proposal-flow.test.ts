@@ -32,6 +32,7 @@ import type { ProposalCreateCall } from './src/proposal-runtime';
 import type { PlanCliRunner } from './src/plan-runtime';
 import type { OperationProtocols } from './src/operation-labels';
 import type { ChangeIntentRecord, ChangeIntentRepo, DiscoveredTool, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
+import { createPlatformExecutionGate } from './src/platform-execution-gate';
 import type { DriverMessage, ProposalCreationOutcome, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver';
 
 const roots: string[] = [];
@@ -686,6 +687,65 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     // 意图归档不回写任务终态：一次写入都没发生，不是执行失败
     expect(setup.taskUpserts).toHaveLength(0);
   });
+
+  it('共享闸被长任务占槽：确认等待有上界 → confirm_held 且提案保持 pending；槽释放后重发确认成功', async () => {
+    // 修复 2（本波引入的回归）：inline 确认在共享 executionGate 上无界等待——gate 并发 1，
+    // 别会话的 inline worker 最长占槽 DEFAULT_WORKER_TIMEOUT_MS（600s），确认回执被堵在
+    // handler 会话队列队头，渠道流式窗口（企微约 10 分钟）外终帧被拒：用户看不到回执但
+    // gate 放行后 commit 照样执行。等待上界到期走 confirm_held（提案不被作废），可重试。
+    const intents = fakeIntents();
+    const tasks = fakeTasks();
+    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const commitCalls: ProposalCommitRequest[] = [];
+    const taskRunner = createContextTaskRunner({
+      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      tasks: tasks.repo,
+      workerDriver: { run: async (): Promise<TurnDriverResult> => ({ text: '（本组不委派 worker）', messages: [] }) },
+      changeIntents: intents.repo,
+      proposalCommitEnabled: true,
+      proposalCommitRunner: async (req) => {
+        commitCalls.push(req);
+        return { ok: true, verified: true, summaryText: '平台渲染的落账摘要（原样转述）', output: 'VERIFY delta=1' };
+      },
+      generateCode: () => CONFIRM_CODE,
+      executionGate: gate,
+      confirmGateWaitMs: 20,
+    });
+    await intents.repo.create({
+      intentId: INTENT_ID,
+      principalId: 'wecom:u1',
+      sessionId: 'wecom:u1:c1',
+      taskId: TASK_ID,
+      proposalId: 'prop_abc123',
+      confirmCodeHash: CONFIRM_CODE_HASH,
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+    });
+    const ctx: TrustedContext = { requestId: 'req_confirm_gate', principalId: 'wecom:u1', sessionId: 'wecom:u1:c1' };
+
+    // 占槽：模拟另一会话的长 worker（不放回槽）
+    const holder = gate.enqueue({ requestId: 'other-session-worker' });
+    const holderLease = await holder.acquired;
+    holderLease.start();
+
+    const held = await taskRunner.matchConfirmation!(ctx, `确认 ${CONFIRM_CODE}`);
+
+    expect(held?.outcome).toBe('confirm_held');
+    expect(held?.text).toContain('仍待确认');
+    // 提案保持 pending（confirm_held 语义：无状态变化），零办调、零任务终态回写
+    expect(intents.rows.get(INTENT_ID)?.status).toBe('pending');
+    expect(commitCalls).toHaveLength(0);
+    expect(tasks.upserts).toHaveLength(0);
+
+    // 槽释放后重发同一确认码：照常落账（上界只放弃"这一次等待"，不作废提案）
+    holderLease.release();
+    const executed = await taskRunner.matchConfirmation!(ctx, `确认 ${CONFIRM_CODE}`);
+
+    expect(executed?.outcome).toBe('confirm_executed');
+    expect(commitCalls).toEqual([{ proposalId: 'prop_abc123' }]);
+    expect(intents.rows.get(INTENT_ID)?.status).toBe('committed');
+  }, 3_000);
 });
 
 // ── 落账放行闸：isCommitEnabled（B 波"落账接不接"开关退役后唯一的分真假处）───────────

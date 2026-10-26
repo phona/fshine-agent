@@ -22,7 +22,7 @@
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createHash } from 'node:crypto';
-import type { ContextStateRepo, ConversationEventRecord, ConversationLogRepo, MemoryRecordRepo, TrustedContext } from '@fshine/contracts';
+import type { ContextStateRepo, ConversationEventRecord, ConversationLogRepo, MemoryRecordRepo, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import type { TurnDriver } from './driver';
 import { RUN_17DZ_TASK_TOOL } from './context';
@@ -31,6 +31,7 @@ import { extractContextWithTurnDriver } from './context-model';
 import { clarificationIssuedRecord, clarificationResolvedRecord, type ClarificationBinding } from './clarification-events';
 import { consolidateLongMemory, type CandidateExtractor } from './memory-consolidator';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
+import { extractCurrentMessageBody, hostContextMetadataOf, normalizeMessageReference } from './message-reference';
 
 /**
  * 本模块需要的依赖（TaxAgentRuntimeDeps 的真子集）。不引 runtime 的类型——引回来就成环。
@@ -84,9 +85,12 @@ export function scheduleMemoryConsolidation(
     const threshold = Math.max(1, deps.memoryBatchSize ?? 8);
     if (!EXPLICIT_MEMORY_CUE.test(userMessage) && pendingUsers.length < threshold) return;
     const current = await deps.memoryRecords!.listByPrincipal(principalId);
+    // A quote is context attached to a user event, not a direct user statement. Long-memory
+    // extractors receive the body-only projection so quoted instructions cannot become facts.
+    const memorySourceEvents = events.map(withoutQuotedMetadata);
     const result = await consolidateLongMemory({
       principalId,
-      sourceEvents: events,
+      sourceEvents: memorySourceEvents,
       current,
       ...(cursor ? { cursor } : {}),
       extractor: deps.memoryCandidateExtractor!,
@@ -137,12 +141,23 @@ export async function appendClarificationResolved(
   }
 }
 
-export async function appendUserEvent(deps: TurnPersistenceDeps, ctx: TrustedContext, userMessage: string): Promise<void> {
+export async function appendUserEvent(
+  deps: TurnPersistenceDeps,
+  ctx: TrustedContext,
+  userMessage: string,
+  inputContext?: TurnInputContext,
+): Promise<void> {
   if (!deps.conversationLog) return;
   try {
+    const reference = normalizeMessageReference(inputContext?.messageReference);
+    const messageReference = reference ? {
+      ...reference,
+      ...(reference.text !== undefined ? { text: redactSensitiveText(reference.text) } : {}),
+    } : undefined;
     await deps.conversationLog.append({
       eventId: `${ctx.requestId}:user`, principalId: ctx.principalId, sessionId: ctx.sessionId,
       kind: 'user_message', content: redactSensitiveText(userMessage), createdAt: new Date().toISOString(), requestId: ctx.requestId,
+      ...(messageReference ? { messageReference } : {}),
     });
   } catch (error) {
     console.error(JSON.stringify({ event: 'conversation_user_append_failed', sessionId: ctx.sessionId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
@@ -247,12 +262,15 @@ async function updateContextState(deps: TurnPersistenceDeps, ctx: TrustedContext
 
     let next: ContextState;
     if (deps.contextModelDriver) {
+      // Semantic extraction may reason over user statements and decisions only. Quote metadata
+      // remains searchable in the log but is deliberately absent from both model and evidence.
+      const semanticIncoming = incoming.map(withoutQuotedMetadata);
       const extracted = await extractContextWithTurnDriver({
         driver: deps.contextModelDriver,
         principalId: ctx.principalId,
         sessionId: ctx.sessionId,
         ...(prior ? { previous: prior } : {}),
-        incoming,
+        incoming: semanticIncoming,
       });
       if (extracted.ok) {
         next = extracted.state;
@@ -316,21 +334,26 @@ export async function ensureHistoryBackfill(
 }
 
 function transcriptEvents(messages: AgentMessage[], ctx: TrustedContext) {
-  const events: Array<{
-    eventId: string; principalId: string; sessionId: string;
-    kind: 'user_message' | 'assistant_message' | 'tool_result';
-    content: string; createdAt: string;
-  }> = [];
+  const events: ConversationEventRecord[] = [];
   for (const message of messages) {
     const item = message as { role?: string; content?: unknown; timestamp?: unknown; toolCallId?: unknown };
     const kind = item.role === 'user' ? 'user_message'
       : item.role === 'assistant' ? 'assistant_message'
         : item.role === 'toolResult' ? 'tool_result' : undefined;
     if (!kind) continue;
-    const content = messageText(item.content);
+    const hostContext = hostContextMetadataOf(message);
+    const renderedContent = messageText(item.content);
+    const content = kind === 'user_message'
+      ? extractCurrentMessageBody(renderedContent, hostContext?.messageReference !== undefined)
+      : renderedContent;
     if (!content.trim()) continue;
     const timestamp = typeof item.timestamp === 'number' ? item.timestamp : Date.parse(String(item.timestamp ?? ''));
-    const eventSource = `${item.role}\0${String(item.timestamp ?? '')}\0${content}`;
+    const reference = kind === 'user_message' ? hostContext?.messageReference : undefined;
+    const safeReference = reference ? {
+      ...reference,
+      ...(reference.text !== undefined ? { text: redactSensitiveText(reference.text) } : {}),
+    } : undefined;
+    const eventSource = JSON.stringify([item.role, String(item.timestamp ?? ''), content, safeReference ?? null]);
     const digest = createHash('sha256').update(eventSource).digest('hex').slice(0, 24);
     events.push({
       eventId: `migrate:${ctx.sessionId}:${digest}`,
@@ -339,9 +362,16 @@ function transcriptEvents(messages: AgentMessage[], ctx: TrustedContext) {
       kind,
       content: redactSensitiveText(content),
       createdAt: Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date(0).toISOString(),
+      ...(safeReference ? { messageReference: safeReference } : {}),
     });
   }
   return events;
+}
+
+function withoutQuotedMetadata(event: ConversationEventRecord): ConversationEventRecord {
+  if (!event.messageReference) return event;
+  const { messageReference: _reference, ...bodyOnly } = event;
+  return bodyOnly;
 }
 
 function messageText(content: unknown): string {

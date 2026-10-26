@@ -22,6 +22,9 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   'LLM_MAIN_THINKING_LEVEL',
   'DZ_EXECUTOR',
   'FSHINE_REAL_COMMIT',
+  // New deployment switches must not change the default inline/queue baseline of mock tests.
+  'FSHINE_WORKER_DISPATCH_MODE',
+  'FSHINE_PLATFORM_QUEUE_CAPACITY',
 ];
 
 for (const key of LEAKED_ENV_KEYS) {

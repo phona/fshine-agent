@@ -134,4 +134,40 @@ describe('SQLite pending plan confirmation repository', () => {
     await expect(repo.resolvePending(pending(), evidence({ text: '取消' }), 'cancelled', async () => {})).resolves.toBe(true);
     await expect(repo.getResolution('msg_1')).resolves.toMatchObject({ resolution: 'cancelled', text: '取消', version: 2 });
   });
+
+  it('task control invalidates only the selected task pending confirmation without forging consent', async () => {
+    const repo = open();
+    await repo.savePending(pending());
+    await repo.savePending(pending({ planId: 'plan_other', taskId: 'task_other', version: 1 }));
+    expect(await repo.cancelTask('wecom:wrong', 'chat_a', 'task_1')).toBe(0);
+    expect(await repo.cancelTask('wecom:user_a', 'chat_a', 'task_1')).toBe(1);
+    expect(await repo.cancelTask('wecom:user_a', 'chat_a', 'task_1')).toBe(0);
+    expect(await repo.listPending('wecom:user_a', 'chat_a')).toMatchObject([{ taskId: 'task_other' }]);
+    expect(await repo.resolvePending(pending(), evidence(), 'confirmed', async () => { throw new Error('must not activate cancelled task'); })).toBe(false);
+    expect(await repo.getResolution('msg_1')).toBeNull();
+  });
+
+  // ── D-124（2026-10-25 登债）：busy 检查与 UPDATE 两步窗口里，另一实例 claim 后可被
+  // 翻 cancelled——在途确认被静默丢弃而平台动作可能已执行。修法=UPDATE 自带租约条件
+  // （有效租约的行不可被取消路径触及）；跨进程交错无法单进程确定性表征，此测试钉住
+  // 对外可观察的租约语义两态。
+  it('cancelTask 租约语义：有效租约抛 busy 不动行；租约过期后可取消（D-124）', async () => {
+    directory ??= mkdtempSync(path.join(tmpdir(), 'fshine-plan-confirm-'));
+    let clockMs = nowMs;
+    const repo = createSqlitePendingPlanConfirmationRepo(path.join(directory, 'agent.db'), {
+      now: () => new Date(clockMs), leaseMs: 1_000,
+    });
+    repos.push(repo);
+    await repo.savePending(pending());
+    await expect(repo.claimPending(pending(), evidence())).resolves.toBe(true);
+
+    // 有效租约（nowMs+1000 > nowMs）：busy 抛错，行保持 processing——确认动作不被打断。
+    await expect(repo.cancelTask('wecom:user_a', 'chat_a', 'task_1')).rejects.toThrow('正在执行');
+
+    // 租约过期（时钟推进 2s）：取消成功——过期租约不构成在途保护（与改前
+    // "processing 一律可取消"的 UPDATE 语义等价，只是不再有裸窗口）。
+    clockMs = nowMs + 2_000;
+    await expect(repo.cancelTask('wecom:user_a', 'chat_a', 'task_1')).resolves.toBe(1);
+    await expect(repo.listPending('wecom:user_a', 'chat_a')).resolves.toHaveLength(0);
+  });
 });

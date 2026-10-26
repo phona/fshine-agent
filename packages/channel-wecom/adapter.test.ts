@@ -2,7 +2,13 @@ import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { IncomingChannelMessage, ReplyHandler } from '@fshine/contracts';
+import type {
+  ChannelReply,
+  ChannelRoute,
+  DeliveryReceipt,
+  IncomingChannelMessage,
+  ReplyHandler,
+} from '@fshine/contracts';
 import {
   ATTACHMENT_WAIT_TIMEOUT_MS,
   WecomBotChannel,
@@ -27,6 +33,13 @@ interface UploadCall {
 
 interface MediaCall {
   mediaId: string;
+  mediaType: 'image' | 'file';
+}
+
+interface ActiveMediaCall {
+  chatid: string;
+  mediaType: 'file';
+  mediaId: string;
 }
 
 /** 官方 SDK WSClient 的测试替身:记录调用、允许测试手动派发事件 */
@@ -34,10 +47,12 @@ class FakeSdkClient {
   readonly replies: ReplyCall[] = [];
   readonly uploads: UploadCall[] = [];
   readonly mediaCalls: MediaCall[] = [];
+  readonly activeMediaCalls: ActiveMediaCall[] = [];
   connected = 0;
   disconnected = 0;
   private readonly listeners = new Map<string, Array<(...args: any[]) => void>>();
   private uploadFailNext = false;
+  private activeMediaFailNext = false;
 
   on(event: string, listener: (...args: any[]) => void): unknown {
     const list = this.listeners.get(event) ?? [];
@@ -79,9 +94,13 @@ class FakeSdkClient {
     this.replyFailNext = true;
   }
 
-  uploadMedia(data: Buffer, options: { type: 'image'; filename: string }): Promise<{ media_id: string }> {
+  uploadMedia(data: Buffer, options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }> {
     this.uploads.push({ data, filename: options.filename });
-    if (this.uploadFailNext) return Promise.reject(new Error('upload boom'));
+    // D-129 用例的失败注入点：指定序号（1 基，按 push 后的 uploads.length）的上传抛错，
+    // 用来造"多文件里中间一条失败"的形态——failNextUpload 只能失败第一条，造不出中位失败。
+    const fail = this.uploadFailNext || this.failUploadIndexes.has(this.uploads.length);
+    this.uploadFailNext = false;
+    if (fail) return Promise.reject(new Error('upload boom'));
     return Promise.resolve({ media_id: `media-${this.uploads.length}` });
   }
 
@@ -89,8 +108,10 @@ class FakeSdkClient {
     this.uploadFailNext = true;
   }
 
-  replyMedia(_frame: unknown, _mediaType: 'image', mediaId: string): Promise<unknown> {
-    this.mediaCalls.push({ mediaId });
+  readonly failUploadIndexes = new Set<number>();
+
+  replyMedia(_frame: unknown, mediaType: 'image', mediaId: string): Promise<unknown> {
+    this.mediaCalls.push({ mediaId, mediaType });
     return Promise.resolve({});
   }
 
@@ -105,6 +126,19 @@ class FakeSdkClient {
 
   failNextSend(): void {
     this.sendFailNext = true;
+  }
+
+  sendMediaMessage(chatid: string, mediaType: 'file', mediaId: string): Promise<unknown> {
+    this.activeMediaCalls.push({ chatid, mediaType, mediaId });
+    if (this.activeMediaFailNext) {
+      this.activeMediaFailNext = false;
+      return Promise.reject(new Error('active media send boom'));
+    }
+    return Promise.resolve({});
+  }
+
+  failNextSendMedia(): void {
+    this.activeMediaFailNext = true;
   }
 
   /** 附件下载替身：默认把调用记下来并按注入内容返回 */
@@ -172,6 +206,17 @@ function fileFrame(reqId: string, overrides: Record<string, unknown> = {}): Reco
 
 function firstCall(handler: ReturnType<typeof vi.fn>): IncomingChannelMessage {
   return handler.mock.calls[0]![0] as IncomingChannelMessage;
+}
+
+function sendToConversation(
+  channel: WecomBotChannel,
+  route: ChannelRoute,
+  reply: ChannelReply,
+): Promise<DeliveryReceipt> {
+  const activeChannel = channel as unknown as {
+    sendToConversation(route: ChannelRoute, reply: ChannelReply): Promise<DeliveryReceipt>;
+  };
+  return activeChannel.sendToConversation(route, reply);
 }
 
 describe('WecomBotChannel(官方 SDK 封装)', () => {
@@ -250,6 +295,92 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(message.chatType).toBe('group');
     expect(message.conversationId).toBe('wr_group_9');
     expect(message.text).toBe('帮我查7月流水');
+  });
+
+  it('文本引用单独提取:保留本次正文原样,不伪造引用消息 ID', async () => {
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-quote-text', {
+      msgid: 'current-message-1',
+      text: { content: '确认 1234' },
+      quote: { msgtype: 'text', text: { content: '引用里的旧说明' } },
+    }));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+
+    const message = firstCall(handler);
+    expect(message.text).toBe('确认 1234');
+    expect(message.messageReference).toEqual({ kind: 'text', text: '引用里的旧说明' });
+    expect(message.messageReference?.sourceMessageId).toBeUndefined();
+  });
+
+  it('图文混排引用:按原顺序拼接文字,不把媒体 URL 或 aeskey 放入引用', async () => {
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-quote-mixed', {
+      msgid: 'current-message-2',
+      text: { content: '解释一下这段' },
+      quote: {
+        msgtype: 'mixed',
+        mixed: { msg_item: [
+          { msgtype: 'text', text: { content: '第一段' } },
+          { msgtype: 'image', image: { url: 'https://secret.invalid/image', aeskey: 'secret-key' } },
+          { msgtype: 'text', text: { content: '第二段' } },
+        ] },
+      },
+    }));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+
+    const message = firstCall(handler);
+    expect(message.text).toBe('解释一下这段');
+    expect(message.messageReference).toEqual({ kind: 'mixed', text: '第一段\n第二段' });
+    expect(JSON.stringify(message)).not.toContain('secret.invalid');
+    expect(JSON.stringify(message)).not.toContain('secret-key');
+  });
+
+  it.each([
+    ['image', { image: { url: 'https://secret.invalid/image', aeskey: 'image-key' } }],
+    ['voice', { voice: { content: 'private voice transcription' } }],
+    ['file', { file: { url: 'https://secret.invalid/file', aeskey: 'file-key' } }],
+  ] as const)('媒体引用只标类型(%s):不下载、不转成当前附件,不暴露媒体内容', async (kind, media) => {
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-quote-file', {
+      msgid: 'current-message-3',
+      text: { content: '这个文件是什么' },
+      quote: { msgtype: kind, ...media },
+    }));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+
+    const message = firstCall(handler);
+    expect(message.text).toBe('这个文件是什么');
+    expect(message.messageReference).toEqual({ kind });
+    expect(message.attachments).toBeUndefined();
+    expect(fake.downloadCalls).toEqual([]);
+    expect(JSON.stringify(message)).not.toContain('secret.invalid');
+    expect(JSON.stringify(message)).not.toContain('image-key');
+    expect(JSON.stringify(message)).not.toContain('file-key');
+    expect(JSON.stringify(message)).not.toContain('private voice transcription');
+  });
+
+  it('长引用按 16 KiB UTF-8 边界截断并明确标记', async () => {
+    const handler = vi.fn(async () => 'ok');
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-quote-long', {
+      msgid: 'current-message-4',
+      text: { content: '看这段' },
+      quote: { msgtype: 'text', text: { content: '中'.repeat(6_000) } },
+    }));
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+
+    const reference = firstCall(handler).messageReference;
+    expect(reference?.kind).toBe('text');
+    expect(reference?.truncated).toBe(true);
+    expect(Buffer.byteLength(reference?.text ?? '', 'utf8')).toBeLessThanOrEqual(16_384);
+    expect(reference?.text).not.toContain('\uFFFD');
   });
 
   it('进度回调:finish=false 帧,节流(3 秒内第二帧被跳过)', async () => {
@@ -352,6 +483,63 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
     expect(fake.replies.find((reply) => reply.finish)!.content).toBe('图片发送失败,请稍后再试');
   });
 
+  // D-129：被动回复的多文件回传循环（adapter.ts `for (const file of rich.files)`）此前零直接
+  // 覆盖——W3 变异守卫在 handler.test 断言的是 reply.files 对象（不经 adapter），e2e 的
+  // RecordingSdkClient.replyMedia 是 no-op，回归成"只发首个文件"全套仍绿。这里补被动路径的
+  // 直接判据：两条都发 + 单条失败只跳过并留痕、不挡后续。
+  it('被动回复多文件:handler 返回几个 files 就逐条上传回传几条,顺序与文件名一一对应', async () => {
+    const handler = vi.fn(async () => ({
+      text: '工资表与个税表已生成',
+      files: [
+        { data: Buffer.from('wage-bytes'), filename: '工资表.xlsx' },
+        { data: Buffer.from('tax-bytes'), filename: '个税申报表.xlsx' },
+      ],
+    }));
+    const { fake } = await startChannel(handler);
+
+    fake.emit('message.text', textFrame('cb-files-1', { msgid: 'msg-files-1', text: { content: '把表发我' } }));
+    await vi.waitFor(() => expect(fake.mediaCalls).toHaveLength(2));
+
+    expect(fake.uploads.map((call) => call.filename)).toEqual(['工资表.xlsx', '个税申报表.xlsx']);
+    expect(fake.uploads.map((call) => call.data.toString())).toEqual(['wage-bytes', 'tax-bytes']);
+    // 每条文件走自己的 upload→replyMedia('file') 配对，media_id 与上传序号一一对应。
+    expect(fake.mediaCalls).toEqual([
+      { mediaId: 'media-1', mediaType: 'file' },
+      { mediaId: 'media-2', mediaType: 'file' },
+    ]);
+    // 文字终帧先于文件回传（与图片回复同纪律）。
+    expect(fake.replies.find((reply) => reply.finish)!.content).toBe('工资表与个税表已生成');
+  });
+
+  it('被动回复多文件:单个上传失败只跳过该文件并留痕,不挡同轮其余文件', async () => {
+    const handler = vi.fn(async () => ({
+      files: [
+        { data: Buffer.from('a'), filename: '工资表.xlsx' },
+        { data: Buffer.from('b'), filename: '个税申报表.xlsx' },
+        { data: Buffer.from('c'), filename: '备注.txt' },
+      ],
+    }));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { fake } = await startChannel(handler);
+    fake.failUploadIndexes.add(2); // 第二个文件的上传抛错
+
+    fake.emit('message.text', textFrame('cb-files-2', { msgid: 'msg-files-2', text: { content: '把三份都发我' } }));
+    await vi.waitFor(() => expect(fake.mediaCalls).toHaveLength(2));
+
+    // 三条都尝试过：循环没有在失败处提前退出。
+    expect(fake.uploads.map((call) => call.filename)).toEqual(['工资表.xlsx', '个税申报表.xlsx', '备注.txt']);
+    // 失败的那条没有回传；它前后的文件照发，media_id 对应各自的 upload。
+    expect(fake.mediaCalls).toEqual([
+      { mediaId: 'media-1', mediaType: 'file' },
+      { mediaId: 'media-3', mediaType: 'file' },
+    ]);
+    // 留痕：失败文件名单独记 wecom_file_fail 事件（filename 进日志，可关联到具体文件）。
+    const logged = errorSpy.mock.calls.map((args: unknown[]) => args.join(' ')).join('\n');
+    expect(logged).toContain('wecom_file_fail');
+    expect(logged).toContain('个税申报表.xlsx');
+    errorSpy.mockRestore();
+  });
+
   it('超长回复截到上限内、不截半、且带截断标记', async () => {
     const handler = vi.fn(async () => '查'.repeat(30000));
     const { fake } = await startChannel(handler);
@@ -392,6 +580,129 @@ describe('WecomBotChannel(官方 SDK 封装)', () => {
 
     expect(fake.disconnected).toBeGreaterThanOrEqual(1);
     expect(handler).not.toHaveBeenCalled();
+  });
+});
+
+describe('WecomBotChannel 独立主动交付', () => {
+  it('新路由发文字和多个文件;按 ACK 返回结构化回执,不借用原入站流', async () => {
+    const handler = vi.fn(async () => '当前回合已结束');
+    const { channel, fake } = await startChannel(handler);
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'wr_group_9' };
+    const reply: ChannelReply = {
+      text: '后台任务完成',
+      files: [
+        { data: Buffer.from('file-a'), filename: 'a.xlsx' },
+        { data: Buffer.from('file-b'), filename: 'b.csv' },
+      ],
+    };
+
+    fake.emit('message.text', textFrame('cb-original', {
+      msgid: 'msg-original',
+      chattype: 'group',
+      chatid: 'wr_group_9',
+      from: { userid: 'lisi' },
+      text: { content: '开始后台任务' },
+    }));
+    await vi.waitFor(() => expect(fake.replies.some((call) => call.finish)).toBe(true));
+    const originalReplies = [...fake.replies];
+
+    const receipt = await sendToConversation(channel, route, reply);
+
+    expect(fake.sentMessages).toEqual([{ chatid: 'wr_group_9', content: '后台任务完成' }]);
+    expect(fake.uploads.map((call) => call.filename)).toEqual(['a.xlsx', 'b.csv']);
+    expect(fake.activeMediaCalls).toEqual([
+      { chatid: 'wr_group_9', mediaType: 'file', mediaId: 'media-1' },
+      { chatid: 'wr_group_9', mediaType: 'file', mediaId: 'media-2' },
+    ]);
+    expect(receipt).toEqual({
+      route,
+      parts: [
+        { kind: 'text', index: 0, status: 'sent' },
+        { kind: 'file', index: 0, status: 'sent' },
+        { kind: 'file', index: 1, status: 'sent' },
+      ],
+    });
+    expect(fake.replies).toEqual(originalReplies);
+  });
+
+  it('路由 channel 不匹配时拒绝,不把消息发给别的会话', async () => {
+    const { channel, fake } = await startChannel(async () => 'ok');
+    await expect(sendToConversation(
+      channel,
+      { channel: 'other', conversationId: 'target' },
+      { text: 'do not send' },
+    )).rejects.toThrow(/channel|渠道/i);
+    expect(fake.sentMessages).toEqual([]);
+    expect(fake.activeMediaCalls).toEqual([]);
+  });
+
+  it('主动文件发送失败时抛出 transport error 并保留此前已 ACK 部分', async () => {
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'zhangsan' };
+    fake.failNextSendMedia();
+
+    await expect(sendToConversation(channel, route, {
+      text: '结果已登记',
+      files: [{ data: Buffer.from('file'), filename: 'result.xlsx' }],
+    })).rejects.toMatchObject({
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'file', index: 0, stage: 'send' },
+      receipt: { route, parts: [{ kind: 'text', index: 0, status: 'sent' }] },
+    });
+    expect(fake.sentMessages).toHaveLength(1);
+    expect(fake.activeMediaCalls).toHaveLength(1);
+  });
+
+  it('主动文字发送失败时抛出 transport error 且不伪造 ACK', async () => {
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'zhangsan' };
+    fake.failNextSend();
+
+    await expect(sendToConversation(channel, route, { text: '任务完成' })).rejects.toMatchObject({
+      name: 'WecomChannelDeliveryError',
+      message: expect.stringContaining('send boom'),
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'text', index: 0, stage: 'send' },
+      receipt: { route, parts: [] },
+    });
+    expect(fake.sentMessages).toHaveLength(1);
+  });
+
+  it('主动素材上传失败时报告 upload 阶段及之前已 ACK 部分', async () => {
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'zhangsan' };
+    fake.failNextUpload();
+
+    await expect(sendToConversation(channel, route, {
+      text: '结果已登记',
+      files: [{ data: Buffer.from('file'), filename: 'result.xlsx' }],
+    })).rejects.toMatchObject({
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'file', index: 0, stage: 'upload' },
+      receipt: { route, parts: [{ kind: 'text', index: 0, status: 'sent' }] },
+    });
+    expect(fake.activeMediaCalls).toEqual([]);
+  });
+
+  it('旧 SDK 替身缺少 sendMediaMessage 时显式失败,不谎报文件或先发出部分文字', async () => {
+    const { channel, fake } = await startChannel(async () => 'ok');
+    const route: ChannelRoute = { channel: 'wecom', conversationId: 'zhangsan' };
+    Object.defineProperty(fake, 'sendMediaMessage', { value: undefined });
+
+    await expect(sendToConversation(channel, route, {
+      text: '结果已登记',
+      files: [{ data: Buffer.from('file'), filename: 'result.xlsx' }],
+    })).rejects.toMatchObject({
+      code: 'CHANNEL_TRANSPORT_FAILED',
+      route,
+      failedPart: { kind: 'file', index: 0, stage: 'send' },
+      receipt: { route, parts: [] },
+    });
+    expect(fake.sentMessages).toEqual([]);
+    expect(fake.uploads).toEqual([]);
   });
 });
 

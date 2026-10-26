@@ -2,31 +2,41 @@
  * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ Context Worker → 回复。
  * 被 apps/server/main.ts 与 tests/e2e 共用,保证测的就是跑的。
  */
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from 'node:fs';
-import type { Dirent } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type {
   AgentReply,
   AgentRequestRepo,
   AgentRuntime,
   AuditStore,
+  BackgroundTaskEvent,
   ChannelReply,
+  ChannelRoute,
+  DeliveryReceipt,
   IncomingAttachment,
   IncomingChannelMessage,
   NoticeFn,
-  OutgoingFileReply,
   ProgressFn,
   ReplyHandler,
 } from '@fshine/contracts';
 import { formatFileReceipt } from '@fshine/contracts';
 import { newId } from '@fshine/core';
-import { ATTACHMENT_PATHS_MARKER, isScratchDirName } from '@fshine/agent';
+import { ATTACHMENT_PATHS_MARKER } from '@fshine/agent';
+import { appendArtifactManifest, finalizeWithArtifacts, loadArtifactManifest } from './artifact-store';
+import { createBackgroundNoticeSender, createBackgroundTaskEventProcessor, redactNotice } from './background-delivery';
+import type { WorkerDispatchMode } from './dispatch-mode';
 
 export interface HandlerDeps {
   /** 环境变量源（读 FSHINE_INBOUND_DEBOUNCE_MS）；缺省 process.env。 */
   env?: Record<string, string | undefined>;
   /** 平台工作区根：用于收集本轮回传给用户的产物文件（只认 tmp/ 下的）。 */
   platformRoot?: string;
+  /**
+   * 会话产物库的字节根（W2）：交付即入库的落盘位置，形如 `<repo>/data`（库内布局
+   * `sessions/<sessionId>/artifacts/`）。缺省 = 不入库、不注入清单（旧部署/测试替身
+   * 退化：交付仍按流式附件走，与 W2 之前一致）。
+   */
+  dataRoot?: string;
   /**
    * 入站防抖窗口（毫秒）：**burst 内**带正文的消息在进入会话队列前先等这么久，让同一
    * burst 里稍晚到达的附件先落地。缺省取 env `FSHINE_INBOUND_DEBOUNCE_MS`，再缺省 2000。
@@ -68,7 +78,16 @@ export interface HandlerDeps {
     handle(message: { origin: 'wecom_user'; messageId: string; principalId: string; sessionId: string; text: string; receivedAt: string }): Promise<{ status: string; planId?: string; version?: number; taskId?: string }>;
     savePending?: (pending: { planId: string; version: number; taskId: string; principalId: string; sessionId: string; requestId: string; userText: string }) => Promise<void>;
   };
+  /** Host proactive delivery seam. It does not capture or reuse an inbound message frame. */
+  pushToConversation?: (route: ChannelRoute, reply: ChannelReply) => Promise<DeliveryReceipt>;
+  /** Background acceptance replies must not scan a Worker's output before its task event. */
+  workerDispatchMode?: WorkerDispatchMode;
 }
+
+/** The WeCom adapter receives the callable reply handler; assembly also uses its event ingress. */
+export type ServerReplyHandler = ReplyHandler & {
+  enqueueTaskEvent(event: BackgroundTaskEvent): Promise<void>;
+};
 
 
 /**
@@ -352,176 +371,8 @@ function principalIdOf(message: IncomingChannelMessage): string {
   return `${message.channel ?? DEFAULT_CHANNEL}:${message.wecomUserId}`;
 }
 
-
-/**
- * 收集本轮产生的、用户能直接消费的终态产物。
- *
- * 判据（"可交付结果 = 本轮产生的、用户能直接消费的终态产物"）：
- *   ① 在平台 `tmp/` 之下——受信边界内，不让人借机器人外发别处的文件；
- *   ② `mtime >= since`——本轮委派开始之后才落盘的，才是本轮产物；
- *   ③ 扩展名是办公文档（OFFICE_EXT）；
- *   ④ 不在 `tmp/attachments/`——那是本轮**输入**；
- *   ⑤ `tmp/task_<taskId>/` 任务工作区**按白名单收**：只收 `workspaceDirs` 列明的那几个
- *      （调用方按 principal/会话从 platform_tasks 取，见 sessionWorkspaceDirs）。工作区是
- *      worker 的**唯一可写位置**（serve-gate 的 write 门），域执行器的输出位置又由 worker
- *      传参决定——2026-10-19 实测：薪酬域把两个 xlsx 写进 `tmp/task_d42fffce-…/`，按旧规则
- *      （工作区一律跳过）整轮回传只有文字，用户在企微里什么都拿不到。不收**未登记的**工作区：
- *      并发会话各有各的任务工作区，认全会话的会把 A 的文件发给 B（数据泄漏，比漏传更严重）；
- *   ⑥ 普通文件且 ≤ 20MB。
- *
- * **为什么不再让 worker 声明路径**：旧约定是"worker 在回复末行写 `[发送文件] <绝对路径>`，
- * 宿主解析这句话"。它必然失败——产物落在哪不由 worker 决定。实证：平台薪酬域的
- * transform.py 输出 xlsx 时，若目标文件正被 Excel 打开占用，会自动 fallback 到 `tmp/` 下
- * 一个名字带"（自动）"的路径；worker 无法预先知道这一次会走哪条分支，只能跑完后列位置。
- * 而"跑完后看落了什么"是纯 plumbing，本该由宿主代码直连，不过 AI 的手——worker 只说
- * "做完了"，文件由宿主按上面的判据自己扫出来。于是"它忘了写 / 写错路径 / 压根不知道路径"
- * 这三种静默失败形态一并消失：回传不再依赖回复文本里出现任何标记。
- *
- * 去重按**解析后的真实路径**：扫描会解引用符号链接（否则 worker 用链接指向的产物会漏收），
- * 而解引用一来会让同一文件有两个名字（去重必须按真实路径算），二来会让一个指向受信边界外
- * 的链接借机器人外发文件——旧实现靠"路径文本以 tmp/ 开头"守住的边界，解引用后必须用真实
- * 路径再守一次，所以解析后仍要求在 `tmp/` 内。
- */
-const OFFICE_EXT = new Set(['.xlsx', '.xls', '.csv', '.pdf', '.docx']);
-const MAX_OUT_FILE_BYTES = 20 * 1024 * 1024;
-const MAX_OUT_FILES = 3;
-/** 入站附件的暂存位置名（`tmp/attachments/`）：那是输入，永远不是要回传的产物。 */
-const ATTACHMENTS_DIR_NAME = 'attachments';
-
-/** 归一化工作区白名单：只认 `tmp/task_<uuid>` 形态，别的名字（含 `../` 穿越）一律忽略。 */
-function normalizeWorkspaceDirs(workspaceDirs: readonly string[] | undefined): Set<string> {
-  const out = new Set<string>();
-  for (const raw of workspaceDirs ?? []) {
-    const rel = raw.replace(/^\.\//, '').replace(/\/+$/, '');
-    const segments = rel.split('/');
-    if (segments.length !== 2 || segments[0] !== 'tmp') continue;
-    if (!isScratchDirName(segments[1]!)) continue;
-    out.add(`tmp/${segments[1]}`);
-  }
-  return out;
-}
-
-/**
- * 收集本轮产生的、用户能直接消费的终态产物。
- *
- * @param workspaceDirs 本会话的任务工作区（相对 platformRoot，形如 `tmp/task_<uuid>`）——
- *   只有列在这里的工作区才纳入扫描；未登记的 `tmp/task_*` 一律跳过（防并发会话串味）。
- */
-export function collectProducedFiles(
-  platformRoot: string,
-  since: string,
-  workspaceDirs?: readonly string[],
-): OutgoingFileReply[] {
-  const sinceMs = Date.parse(since);
-  const allowedWorkspaces = normalizeWorkspaceDirs(workspaceDirs);
-  let tmpRoot: string;
-  try {
-    tmpRoot = realpathSync(path.join(platformRoot, 'tmp'));
-  } catch {
-    return [];                                                     // tmp/ 不在 = 没有产物
-  }
-  // 真实路径 → mtime。用 Map 而非数组：同一文件被链接指过来时天然只记一份。
-  const found = new Map<string, number>();
-  const visit = (dir: string, depth: number): void => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;                                                      // 读不了的位置当作没有产物
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        // 顶层就绕开两类非产物位置：附件输入区、以及**未登记的**任务工作区（白名单外的）。
-        // 省得白走，也避免把别处工作区的中间产物读进来。真正的判据仍在下面按真实路径复核
-        // 一遍——符号链接可能从别处指回这两类位置，只在这一层拦不住。
-        if (depth === 0) {
-          if (entry.name === ATTACHMENTS_DIR_NAME) continue;
-          if (isScratchDirName(entry.name) && !allowedWorkspaces.has(`tmp/${entry.name}`)) continue;
-        }
-        visit(full, depth + 1);
-        continue;
-      }
-      // 普通文件与符号链接都当候选；别的类型（socket/fifo）不可能是什么产物。
-      if (!entry.isFile() && !entry.isSymbolicLink()) continue;
-      let real: string;
-      try {
-        real = realpathSync(full);
-      } catch {
-        continue;                                                  // 悬空链接：当作没发生过
-      }
-      const rel = path.relative(tmpRoot, real);
-      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) continue;   // 逃出受信边界
-      const top = rel.split(path.sep)[0]!;
-      if (top === ATTACHMENTS_DIR_NAME) continue;                  // 输入，不是产物
-      // 任务工作区按白名单放行：解引用后落在别处工作区（含链接指回别人工作区）的一律拒。
-      if (isScratchDirName(top) && !allowedWorkspaces.has(`tmp/${top}`)) continue;
-      if (!OFFICE_EXT.has(path.extname(real).toLowerCase())) continue;
-      try {
-        const stat = statSync(real);
-        if (!stat.isFile() || stat.size > MAX_OUT_FILE_BYTES) continue;
-        if (stat.mtimeMs < sinceMs) continue;                      // 不是本轮产生的
-        if (!found.has(real)) found.set(real, stat.mtimeMs);
-      } catch {
-        continue;                                                  // 扫描过程中被清掉
-      }
-    }
-  };
-  visit(tmpRoot, 0);
-  // 最新的在前：本轮最后落盘的那份最可能是终态产物（fallback 分支会另起一个名字，时间上
-  // 晚于主产物）。同毫秒按路径排序，保证同一份盘上状态下结果确定。
-  const ordered = [...found.entries()]
-    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
-    .map(([filePath]) => filePath);
-  const out: OutgoingFileReply[] = [];
-  for (const filePath of ordered) {
-    try {
-      out.push({ data: readFileSync(filePath), filename: path.basename(filePath) });
-    } catch {
-      continue;                                                    // 刚要发就被删了：安静跳过
-    }
-    if (out.length >= MAX_OUT_FILES) break;
-  }
-  return out;
-}
-
-/**
- * 本会话的任务工作区清单（相对 platformRoot，形如 `tmp/task_<uuid>`）——产物回传的
- * 额外收集范围（collectProducedFiles 的 workspaceDirs）。
- *
- * 为什么按会话取：worker 的 write 门把可写位置钉在本轮工作区（serve-gate 的 scratchDir），
- * 域执行器的输出位置又由 worker 传参决定，交付物因此落在 `tmp/task_<taskId>/` 里——那是
- * 它唯一能写的地方。只认本会话（principal × session）在册的任务：并发会话各有各的任务
- * 工作区，认全会话的等于把 A 的文件回传给 B。任务由委派时落库（context.ts 的 upsert），
- * 回合结束来查时本轮任务必已在册。
- *
- * 失败语义：platformTasks 缺库（旧替身/精简部署）或查询抛错 → 空数组 = 退化为只扫 tmp/
- * 顶层，回传收集失败不能让整个回合失败。
- */
-async function sessionWorkspaceDirs(
-  store: AuditStore,
-  principalId: string,
-  sessionId: string,
-): Promise<string[]> {
-  const repo = store.platformTasks;
-  if (!repo) return [];
-  try {
-    const tasks = await repo.listBySession(principalId, sessionId);
-    return tasks.map((task) => `tmp/${task.taskId}`);
-  } catch (error) {
-    console.warn(JSON.stringify({
-      event: 'platform_tasks_list_failed',
-      principalId,
-      sessionId,
-      error: error instanceof Error ? error.message : String(error),
-    }));
-    return [];
-  }
-}
-
 /**
  * 等附件 burst 稳了：一个窗口内没有新到达就收工，触顶兜底。
- *
  * 判据是**静默**而不是"睡满 N 秒"——文件持续 trickle 时就一直等，这正是乱序投递要的；
  * 每一轮都对照 `lastArrivalAt`，所以安静的 burst 仍然只等一个窗口（与旧行为同延迟，
  * 冷启动的首条零防抖也不受影响：调用方的 `burstInProgress` 门挡着它）。
@@ -544,28 +395,7 @@ async function waitForBurstSettle(
   }
 }
 
-function withFileReplies(
-  text: string,
-  platformRoot: string | undefined,
-  since: string,
-  workspaceDirs?: readonly string[],
-): ChannelReply {
-  if (!platformRoot) return text;
-  const files = collectProducedFiles(platformRoot, since, workspaceDirs);
-  const [file] = files;
-  if (!file) return text;
-  // 终稿点名回传的文件（2026-10-20）：企微里 file 是独立消息、可能先于终稿到达，用户看到
-  // 一个不知道是什么的 xlsx。这一行是宿主补的确定性文字——与收据同族（传输事实，不过模型的
-  // 手），所以不走出口校验、也不进模型上下文。挂载式客户端不需要它（文件就贴在答复旁边），
-  // 所以它住在宿主而不是 contracts 的措辞表里。
-  //
-  // 只点名**真的挂上去的那一个**：契约的 file 是单数，collectProducedFiles 最多收 3 个而
-  // 这里只回第 1 个——说 3 个发 1 个就是假陈述。要发多个先扩契约，别先把文案写宽。
-  const note = `本轮回传：${file.filename}`;
-  return { text: text === '' ? note : `${text}\n${note}`, file };
-}
-
-export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
+export function createMessageHandler(deps: HandlerDeps): ServerReplyHandler {
   const { store, runtime } = deps;
   // 本实例持有的到达钟（缺省进程内严格递增钟）。判据本体只认识 next()，注入点留给
   // 多实例部署时换共享单调源——见 ArrivalClock 的注释。
@@ -618,8 +448,47 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
    */
   const lastArrivalAt = new Map<string, number>();
 
-  return async (message: IncomingChannelMessage, progress?: ProgressFn, notice?: NoticeFn): Promise<ChannelReply> => {
-    const queueKey = `${message.wecomUserId}:${message.conversationId}`;
+  const processBackgroundTaskEvent = createBackgroundTaskEventProcessor({
+    store,
+    runtime,
+    ...(deps.platformRoot ? { platformRoot: deps.platformRoot } : {}),
+    ...(deps.dataRoot ? { dataRoot: deps.dataRoot } : {}),
+    ...(deps.pushToConversation ? { pushToConversation: deps.pushToConversation } : {}),
+    ...(deps.planConfirmation?.savePending ? { onPlanPending: deps.planConfirmation.savePending } : {}),
+  });
+  const enqueueTaskEvent = async (event: BackgroundTaskEvent): Promise<void> => {
+    // 现行会话键 = 裸 conversationId（同下方主路径 queueKey）；旧 run（W1 之前）的 sessionId
+    // 是三段 channel:principal:conversation——取末段才与该会话用户回合同队列；其余形态沿用
+    // 剥首段的旧行为（W6 串行不变量不给过渡期数据开口）。
+    const seg = event.run.sessionId.split(':');
+    const queueKey = event.run.deliveryRoute?.conversationId ?? (seg.length === 3 ? seg[2]! : seg.length === 2 ? seg[1]! : event.run.sessionId.slice(event.run.sessionId.indexOf(':') + 1));
+    const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
+    const task = prev.then(() => processBackgroundTaskEvent(event));
+    const queued = task.catch((error: unknown) => {
+      console.error(JSON.stringify({
+        event: 'background_task_event_failed',
+        resultEventId: event.eventId,
+        taskId: event.run.taskId,
+        runId: event.run.runId,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    });
+    sessionQueues.set(queueKey, queued);
+    void queued.finally(() => {
+      if (sessionQueues.get(queueKey) === queued) sessionQueues.delete(queueKey);
+    });
+    return queued;
+  };
+
+  const handler = async (message: IncomingChannelMessage, progress?: ProgressFn, notice?: NoticeFn): Promise<ChannelReply> => {
+    // 两个键，两种职责（W6 群语义过堂）：
+    //   · arrivalKey（发送者 × 会话）：burst 防抖的窗口判据——等的是"同一个人的一批
+    //     消息"稳了；群里别人的闲聊不该重置这个窗口，否则忙群的回合被无限拖长。
+    //   · queueKey（会话）：回合串行的队列键——W1 起会话状态（转录/附件池/委派账本/
+    //     产物库）按聊天窗口共享，群里所有人的回合必须串行；用旧的复合键会让 A、B 的
+    //     回合并发写同一份共享状态（竞态：交付集账本、附件池、产物 ref）。
+    const arrivalKey = `${message.wecomUserId}:${message.conversationId}`;
+    const queueKey = message.conversationId;
     // 首条零防抖（2026-10-16）：到达时刻先记账，再看本条之前的一个窗口内有没有先行消息。
     //   没有先行消息（冷启动）→ 立即处理，用户最快看到受理帧；
     //   有先行消息（burst 进行中）→ 等满窗口，让同一 burst 里稍晚到达的附件先落地——
@@ -627,19 +496,18 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     // 防抖只在"带正文"的消息上生效；附件-only 消息从不等待（落盘+暂存很快，用户要立刻
     // 看到确认）。到达时刻在任何等待之前打点，否则窗口判据会被自己的等待污染。
     const now = Date.now();
-    const prevArrival = lastArrivalAt.get(queueKey);
+    const prevArrival = lastArrivalAt.get(arrivalKey);
     const burstInProgress = prevArrival !== undefined && now - prevArrival < debounceMs;
-    lastArrivalAt.set(queueKey, now);
+    lastArrivalAt.set(arrivalKey, now);
     if (!message.attachmentOnly && debounceMs > 0 && burstInProgress) {
       // 等的是 burst 稳了，不是睡满一个窗。乱序投递下第三个文件可能落在指令之后
       // （2026-10-19 实测跨度 3s > 2s 窗），固定窗治不了那种形状：文件到达时防抖
       // 早已睡完，restoreAttachments 也拍完了快照，那一轮拿着不完整的文件集跑完。
-      await waitForBurstSettle(lastArrivalAt, queueKey, debounceMs, debounceMs * MAX_BURST_SETTLE_WINDOWS);
+      await waitForBurstSettle(lastArrivalAt, arrivalKey, debounceMs, debounceMs * MAX_BURST_SETTLE_WINDOWS);
     }
     const prev = sessionQueues.get(queueKey) ?? Promise.resolve();
     const task = prev.then(() => processMessage(message, progress, notice));
-    // Keep a rejection-safe promise in the map so the next turn can always
-    // start, while retaining the exact identity for cleanup below.
+    // Keep a rejection-safe promise in the map (next turn can always start); exact identity kept for cleanup below.
     // 错误必须留痕：`task.catch(() => undefined)` 的语义是"别让一个失败回合毒化队列"，
     // 但它同时会把失败吞得无声无息——2026-10-07 实测有一个附件回合在队列里消失，
     // 没有任何痕迹，而会话队列又串行，后续请求全被它挡住。当时日志已被重启覆盖，
@@ -660,6 +528,8 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
     return task;
   };
 
+  return Object.assign(handler, { enqueueTaskEvent });
+
   async function processMessage(
     message: IncomingChannelMessage,
     progress?: ProgressFn,
@@ -667,9 +537,14 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
   ): Promise<ChannelReply> {
     // 身份前缀从消息的 channel 取（缺省 wecom，见 DEFAULT_CHANNEL）：principalId 与
     // sessionId 都要带它，否则两个渠道的审计行会挤在同一套前缀里，接入时就得迁移历史数据。
+    //
+    // session = 聊天窗口（conversationId），principal = 发这条消息的人。两个身份分开：
+    // 群里所有人共享一个 session（转录/附件池/委派账本/产物库都按窗口走），授权、确认门
+    // 与审计仍逐消息钉在 principalId 上。单聊时 conversationId 就是 userid，sessionId 与
+    // principalId 同形不同义（不同表不同列，不互相推导）。
     const channel = message.channel ?? DEFAULT_CHANNEL;
     const principalId = `${channel}:${message.wecomUserId}`;
-    const sessionKey = `${message.wecomUserId}:${message.conversationId}`;
+    const sessionKey = message.conversationId;
     const sessionId = `${channel}:${sessionKey}`;
     const requestId = newId('req');
     const createdAt = new Date().toISOString();
@@ -734,7 +609,12 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       sessionKey, message, store, sessionAttachments, sessionDelegations.get(sessionKey), arrivalClock,
     );
 
-    const input = withAttachmentPaths(message.text, attachments);
+    // 产物清单（W2）与附件路径同族：都是宿主把确定性事实注入模型输入。清单让模型
+    // 每回合都看得见"本会话交付过什么"——重发请求因此有确定答案，不需要凭散文记忆。
+    const input = appendArtifactManifest(
+      withAttachmentPaths(message.text, attachments),
+      await loadArtifactManifest(store, sessionId),
+    );
     const base = { requestId, wecomMessageId: message.messageId, principalId, input, createdAt };
 
     const scope = await store.principalScopes.get(message.wecomUserId);
@@ -790,19 +670,23 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       // 输出位置由 worker 传参决定，交付物因此落在那里——2026-10-19 事故形状）。收到时落
       // 一条事件：回传成败必须可观测，那场事故最贵的成本就是全程零日志、零错误事件，
       // 只能靠人肉翻 tmp/ 才定位到"文件写了、没人收"。
-      const finishWithFiles = async (text: string): Promise<ChannelReply> => {
-        const workspaceDirs = await sessionWorkspaceDirs(store, principalId, sessionId);
-        const reply = withFileReplies(text, deps.platformRoot, delegatedAt, workspaceDirs);
-        if (typeof reply !== 'string' && reply.file) {
-          console.info(JSON.stringify({
-            event: 'produced_files_collected',
-            requestId,
-            filename: reply.file.filename,
-            bytes: reply.file.data.length,
-          }));
-        }
-        return reply;
-      };
+      // 产物机器的完整收口在 artifact-store.ts（W2 抽取）：列任务 → 收集 → 入库 →
+      // ref 改写 → 回挂。handler 只提供回合上下文，产物逻辑不再堆在主链路上。
+      // W4：artifactRefs 是重发路由的产物 ref（runtime 零委派回合交回）——宿主依
+      // 会话产物库解析成文件回挂，并合成确定性文本。
+      const finishWithFiles = async (text: string, artifactRefs?: readonly string[]): Promise<ChannelReply> =>
+        finalizeWithArtifacts({
+          text,
+          store,
+          principalId,
+          sessionId,
+          requestId,
+          ...(deps.platformRoot ? { platformRoot: deps.platformRoot } : {}),
+          ...(deps.dataRoot ? { dataRoot: deps.dataRoot } : {}),
+          delegatedAt,
+          ...(deps.workerDispatchMode === 'background' ? { collectProduced: false } : {}),
+          ...(artifactRefs && artifactRefs.length > 0 ? { artifactRefs } : {}),
+        });
       let noticeSequence = 0;
       const onNotice: NoticeFn | undefined = notice ? async (text) => {
         await notice(text);
@@ -881,6 +765,18 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         // 字段，principal_scopes 的实体列保留不读。
         capabilities: scope.capabilities,
         sessionId,
+        inputFiles: attachments.map(({ filename, path: filePath, bytes }) => ({ filename, path: filePath, bytes })),
+        deliveryRoute: { channel, conversationId: message.conversationId },
+        ...(deps.pushToConversation ? {
+          onBackgroundNotice: createBackgroundNoticeSender({
+            store,
+            route: { channel, conversationId: message.conversationId },
+            requestId,
+            principalId,
+            sessionId,
+            pushToConversation: deps.pushToConversation,
+          }),
+        } : {}),
         // 帧计数经 emitProgress：runtime 的「正在…」帧算真实帧流动，心跳据此静默
         onStep: progress ? emitProgress : undefined,
         ...(onNotice ? { onNotice } : {}),
@@ -894,7 +790,11 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
         if (confirmation.status === 'activated') {
           if (!confirmation.taskId) throw new Error('已确认的计划缺少原任务标识。');
           announceAccepted();
-          const resumed = await runtime.handleTurn({ ...trusted, resumeTaskId: confirmation.taskId }, input);
+          const resumed = await runtime.handleTurn(
+            { ...trusted, resumeTaskId: confirmation.taskId },
+            input,
+            message.messageReference ? { messageReference: message.messageReference } : undefined,
+          );
           return finishWithFiles(resumed.text);
         }
         if (confirmation.status === 'superseded') return '这项扩大查询已经被更新的计划取代，之前的确认不再有效。请重新发起查询，我会按新的范围再问你一次。';
@@ -909,8 +809,9 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       const reply = await runtime.handleTurn(
         trusted,
         input,
+        message.messageReference ? { messageReference: message.messageReference } : undefined,
       );
-      return finishWithFiles(reply.text);
+      return finishWithFiles(reply.text, reply.artifactRefs);
     } catch (error) {
       await store.requests.setOutcome(requestId, 'failed');
       console.error(JSON.stringify({
@@ -924,12 +825,6 @@ export function createMessageHandler(deps: HandlerDeps): ReplyHandler {
       if (heartbeatTimer !== undefined) clearTimeout(heartbeatTimer);
     }
   }
-}
-
-function redactNotice(value: string): string {
-  return value
-    .replace(/\bBearer\s+[^\s,;]+/gi, 'Bearer [REDACTED]')
-    .replace(/((?:api[_-]?key|access[_-]?token|secret|password)\s*[:=]\s*)[^\s,;]+/gi, '$1[REDACTED]');
 }
 
 /**

@@ -11,6 +11,7 @@
  * （L4：宿主不该知道自己在提交什么业务）。
  */
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -18,6 +19,7 @@ import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanCliRunner } from './plan-runtime';
 import { PLAN_NOTICE_PREFIX } from './plan-runtime';
+import { stripForeignScratchPaths } from './server-paths';
 import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
@@ -25,6 +27,7 @@ import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, t
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import type { ProposalCreateCall } from './proposal-runtime';
+import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -35,6 +38,14 @@ import type {
   TrustedContext,
 } from '@fshine/contracts';
 import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
+import {
+  createPlatformExecutionGate,
+  PlatformExecutionAbortedError,
+  PlatformExecutionQueueFullError,
+  PlatformExecutionWaitTimeoutError,
+  type PlatformExecutionGate,
+  type PlatformExecutionLease,
+} from './platform-execution-gate';
 
 export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
 
@@ -86,6 +97,8 @@ export interface Run17dzTaskArgs {
 export interface SubagentTaskResult {
   taskId: string;
   text: string;
+  /** Host confirmation result for an asynchronous host-owned operation; never an execution proof. */
+  hostConfirmationOutcome?: ConfirmationOutcome;
   pendingPlan?: PendingPlanConfirmation;
   /** Host-verified proof that this delegated turn executed at least one platform call. */
   execution?: { planId: string; version: number; calls: number };
@@ -142,6 +155,60 @@ export interface SubagentTaskResult {
   usage?: UsageTotals;
 }
 
+/**
+ * Host-only file identity used to attribute workspace outputs to one Worker run.
+ *
+ * `sha256` 可选（D-116）：单文件超过快照上限时降级为只登记大小、不读内容不哈希
+ * （条目标 `hashSkipped`）。降级条目因此不参与后续 diff 的内容比较（无哈希可比），
+ * 大小变化仍然可见；skipped 计数经 `workspace_snapshot_limited` 日志事件留痕。
+ */
+export interface RunWorkspaceFile {
+  path: string;
+  relativePath: string;
+  size: number;
+  sha256?: string;
+  hashSkipped?: true;
+}
+
+export interface PreparedContextTaskRunExecution {
+  /** Independent manager-owned cancellation signal for background runs. */
+  signal?: AbortSignal;
+  /** Caller-owned shared platform lease; it is released only after execute settles. */
+  lease: PlatformExecutionLease;
+  startedAt: number;
+  /** Absolute deadline computed after the shared platform gate grants a slot. */
+  deadline: number;
+  /** Background callbacks are independent of the original request frame. */
+  background?: boolean;
+  backgroundRunId?: string;
+  onStep?: (text: string) => void;
+  onNotice?: (text: string) => Promise<void>;
+}
+
+/** Validated, task-scoped execution snapshot. Preparation does not write worker task state. */
+export interface PreparedContextTaskRun {
+  readonly taskId: string;
+  readonly request: string;
+  readonly timeoutMs: number;
+  readonly workspaceDir: string;
+  /** Copies only the trusted input files after dispatch-key dedupe and before receipt. */
+  materializeInputs?(runId: string): Promise<FrozenTaskInput[]>;
+  snapshotWorkspace(): Promise<RunWorkspaceFile[]>;
+  execute(options: PreparedContextTaskRunExecution): Promise<SubagentTaskResult>;
+}
+
+interface ContextTaskPreparationState {
+  args: Run17dzTaskArgs;
+  ctx: ContextTaskExecutionContext;
+  profile: ResolvedContextProfile;
+  existing: PlatformTaskRecord | null;
+  taskId: string;
+  scratchDir: string;
+  workerRequest: string;
+  messages: DriverMessage[];
+  stepLabel: string;
+}
+
 export type { SubagentNeeds };
 
 /**
@@ -175,6 +242,8 @@ export interface ContextTaskRunnerOptions {
   profiles: Record<string, ContextProfileConfig>;
   tasks: PlatformTaskRepo;
   workerDriver: TurnDriver;
+  /** Shared with TaskManager and host-side platform commits; omitted test/legacy callers get a local gate. */
+  executionGate?: PlatformExecutionGate;
   profileId?: string;
   /** 缺省 = 写流程整体禁用（提案按普通回答透传）。 */
   changeIntents?: ChangeIntentRepo;
@@ -214,6 +283,10 @@ export interface ContextTaskRunnerOptions {
    * 缺省 = 无平台能力，许可段整段不渲染。
    */
   planCommandForm?: string;
+  /**
+   * 确认码命中后等待共享执行闸的上界（修复 2）。缺省 DEFAULT_CONFIRM_GATE_WAIT_MS。
+   */
+  confirmGateWaitMs?: number;
 }
 
 export interface ContextTaskExecutionContext {
@@ -222,6 +295,11 @@ export interface ContextTaskExecutionContext {
 
 export interface ContextTaskRunner {
   readonly tool: DiscoveredTool;
+  prepare?(
+    args: Run17dzTaskArgs,
+    ctx: ContextTaskExecutionContext,
+  ): Promise<PreparedContextTaskRun>;
+  prepareConfirmation?(ctx: TrustedContext, message: string): Promise<PreparedContextTaskRun | null>;
   run(
     args: Run17dzTaskArgs,
     ctx: ContextTaskExecutionContext,
@@ -245,6 +323,16 @@ export interface ContextTaskRunner {
    * 增强，不回写不该让回合失败。
    */
   recordTaskResult?(taskId: string, facts: { resultText: string }): Promise<void>;
+}
+
+interface InternalContextTaskRunner extends ContextTaskRunner {
+  run(
+    args: Run17dzTaskArgs,
+    ctx: ContextTaskExecutionContext,
+    signal?: AbortSignal,
+    preparedState?: ContextTaskPreparationState,
+    execution?: PreparedContextTaskRunExecution,
+  ): Promise<SubagentTaskResult>;
 }
 
 /**
@@ -316,6 +404,18 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
   not_pending: '该确认码对应的提案已终结，无需重复确认；本次未写入任何数据。',
   unreadable: '该确认码对应的提案当前不可用（平台侧读不到有效状态），本次未写入任何数据；请重新发起录入。',
 };
+
+/**
+ * 确认码直执行等待共享执行闸的缺省上界（修复 2，自选值与理由）：
+ *
+ * 共享闸默认并发 1，别会话的 inline worker 最长占槽 DEFAULT_WORKER_TIMEOUT_MS
+ * （600s，contracts/src/config.ts）。确认回执必须在渠道流式回复窗口（企微约 10 分钟，
+ * errcode 846608）内回到用户，且确认回合阻塞在 handler 会话队列**队头**会卡住整个
+ * 会话——等待上界必须远小于 worker 超时。取 10s：兄弟落账（宿主直调网关 30s 硬超时、
+ * 常态秒级）大多能在上界内排空，而 10s 的卡顿仍在"可感知但可解释"的范围；超时走
+ * confirm_held（提案保持 pending、不作废），用户稍后重发同一确认码即可续办。
+ */
+const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
 
 /**
  * 宿主直调平台网关的环境（serve 法域）：**显式剥 `DZ_REQUIRE_PLAN`**、显式声明 `DZ_SERVE`。
@@ -410,35 +510,98 @@ function withExecutionFacts(
   };
 }
 
+async function hashWorkspaceFile(filePath: string): Promise<string> {
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(filePath)) hash.update(chunk);
+  return hash.digest('hex');
+}
+
+/**
+ * 快照体积上限（D-116）：before/after 快照在共享平台槽位被持有的窗口内执行
+ * （task-manager 在 lease 取得后、worker 启动前取 before 快照），无界 walk + 逐文件
+ * 整读会把平台槽位耗在纯宿主开销上。量级对照 write 门（MAX_WRITE_BYTES=256KB，
+ * 单次写即封顶）：worker 产物单个通常远低于 32MB；单文件 32MB / 总量 256MB / 条目
+ * 2 万之后再多的内容对"输出归属判定"（before/after diff）已无增益，只剩成本。
+ * 超限不是失败：超单文件上限 → 条目只登记大小并标 hashSkipped（不读不哈希）；
+ * 超总量或总条数 → 停止遍历；两者都发 `workspace_snapshot_limited` 日志事件留痕。
+ */
+const SNAPSHOT_MAX_FILE_BYTES = 32 * 1024 * 1024;
+const SNAPSHOT_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
+const SNAPSHOT_MAX_FILE_COUNT = 20_000;
+
+/**
+ * Captures a safe, exact run workspace manifest; symlinks and paths escaping the task root are ignored.
+ * `hashFile` is the hashing injection point (tests count reads without touching file contents).
+ */
+export async function snapshotWorkspaceFiles(
+  platformRoot: string,
+  workspaceDir: string,
+  hashFile: (filePath: string) => Promise<string> = hashWorkspaceFile,
+): Promise<RunWorkspaceFile[]> {
+  const platformReal = await fs.realpath(platformRoot).catch(() => null);
+  if (!platformReal) return [];
+  const workspacePath = path.resolve(platformReal, workspaceDir);
+  const workspaceReal = await fs.realpath(workspacePath).catch(() => null);
+  if (!workspaceReal || !isInside(platformReal, workspaceReal)) return [];
+
+  const files: RunWorkspaceFile[] = [];
+  let totalBytes = 0;
+  let oversizeSkipped = 0;
+  let stoppedEarly = false;
+  const walk = async (directory: string): Promise<void> => {
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries) {
+      if (stoppedEarly) return;
+      const fullPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      const realPath = await fs.realpath(fullPath).catch(() => null);
+      if (!realPath || !isInside(workspaceReal, realPath)) continue;
+      const stat = await fs.stat(realPath).catch(() => null);
+      if (!stat?.isFile()) continue;
+      const relativePath = path.relative(workspaceReal, realPath).split(path.sep).join('/');
+      if (stat.size > SNAPSHOT_MAX_FILE_BYTES) {
+        // D-116 降级：只登记大小，不读内容、不哈希——diff 的内容比较对它失效（无哈希
+        // 可比），大小变化仍可见；skipped 计数进下方日志事件。
+        oversizeSkipped += 1;
+        files.push({ path: realPath, relativePath, size: stat.size, hashSkipped: true });
+      } else {
+        try {
+          files.push({ path: realPath, relativePath, size: stat.size, sha256: await hashFile(realPath) });
+        } catch {
+          // A transiently changing or unreadable file is not a stable artifact candidate.
+        }
+      }
+      totalBytes += stat.size;
+      if (totalBytes > SNAPSHOT_MAX_TOTAL_BYTES || files.length >= SNAPSHOT_MAX_FILE_COUNT) stoppedEarly = true;
+    }
+  };
+  await walk(workspaceReal);
+  if (oversizeSkipped > 0 || stoppedEarly) {
+    console.warn(JSON.stringify({
+      event: 'workspace_snapshot_limited',
+      workspaceDir,
+      hashedFiles: files.length - oversizeSkipped,
+      hashSkippedOversize: oversizeSkipped,
+      totalBytes,
+      stoppedEarly,
+    }));
+  }
+  return files.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+}
+
 export function createContextTaskRunner(options: ContextTaskRunnerOptions): ContextTaskRunner {
   const profileId = options.profileId ?? '17dz';
   const intentTtlMs = options.intentTtlMs ?? 10 * 60_000;
   const generateCode = options.generateCode ?? defaultGenerateCode;
   const hashCode = options.hashCode ?? defaultHashCode;
-  // ── 下游平台保护（并发闸）────────────────────────────────────────────
-  // 真实平台的浏览器是共享登录态的持久 profile（launchPersistentContext）：
-  // 并发委派会多开 Chrome 抢同一 profile——那正是"被平台感知"的典型方式
-  // （会话互踢、登录态竞争、行为像自动化）。默认全局串行，可用
-  // FSHINE_PLATFORM_CONCURRENCY 放宽。排队只增加等待，不影响正确性；
-  // 速率另由平台侧 DZ_RATE_LIMIT 令牌桶控制（read/global/api 分类）。
-  const platformLimit = Math.max(1, Number.parseInt(process.env.FSHINE_PLATFORM_CONCURRENCY ?? '', 10) || 1);
-  let platformActive = 0;
-  const platformWaiters: Array<() => void> = [];
-  function releasePlatformSlot(): void {
-    platformActive -= 1;
-    const next = platformWaiters.shift();
-    if (next) next();
-  }
-  async function acquirePlatformSlot(requestId: string, queuedSince: number): Promise<() => void> {
-    if (platformActive < platformLimit) {
-      platformActive += 1;
-      return releasePlatformSlot;
-    }
-    await new Promise<void>((resolve) => platformWaiters.push(resolve));
-    platformActive += 1; // 取走 releaser 刚释放的份额
-    console.info(JSON.stringify({ event: 'platform_delegation_queued', requestId, waitedMs: Date.now() - queuedSince }));
-    return releasePlatformSlot;
-  }
+  const platformQueueCapacity = Number.parseInt(process.env.FSHINE_PLATFORM_QUEUE_CAPACITY ?? '', 10);
+  const executionGate = options.executionGate ?? createPlatformExecutionGate({
+    maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
+  });
   const tool: DiscoveredTool = {
     name: RUN_17DZ_TASK_TOOL,
     description: RUN_17DZ_TASK_DESCRIPTION,
@@ -537,7 +700,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const ci = options.changeIntents;
       if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
       // 新提案使旧 pending 作废（与旧路径同一语义）：会话里同时只留一个待确认提案。
-      const active = await ci.findPendingBySession(ctx.trusted.principalId, ctx.trusted.sessionId);
+      const active = await ci.findPendingBySession(
+        ctx.trusted.principalId,
+        ctx.trusted.sessionId,
+        ctx.trusted.backgroundRunId ? taskId : undefined,
+      );
       if (active) await ci.updateStatus(active.intentId, 'superseded');
       const code = generateCode();
       const now = new Date();
@@ -627,8 +794,52 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   async function confirmProposalViaGateway(
     rec: ChangeIntentRecord,
     proposalId: string,
+    execution: { leaseHeld?: boolean; signal?: AbortSignal } = {},
   ): Promise<ConfirmationReply> {
     const ci = options.changeIntents!;
+    if (!execution.leaseHeld) {
+      // 等待上界（修复 2）：闸被长 worker 占槽时，确认回执不能无界挂在闸上——渠道流式
+      // 窗口外终帧会被拒，用户看不到回执而 gate 放行后 commit 照样执行。上界由闸原生
+      // 支持（waitTimeoutMs），不在外面裸轮询；超时与队满同为 confirm_held 语义。
+      const waitMs = options.confirmGateWaitMs ?? DEFAULT_CONFIRM_GATE_WAIT_MS;
+      try {
+        return await executionGate.run(
+          {
+            requestId: rec.taskId ?? rec.intentId,
+            ...(Number.isFinite(waitMs) && waitMs > 0 ? { waitTimeoutMs: waitMs } : {}),
+            ...(execution.signal ? { signal: execution.signal } : {}),
+          },
+          () => confirmProposalViaGateway(rec, proposalId, { leaseHeld: true, ...(execution.signal ? { signal: execution.signal } : {}) }),
+        );
+      } catch (error) {
+        if (error instanceof PlatformExecutionQueueFullError) {
+          return { text: '平台执行队列已满，请稍后重试；提案仍待确认。', outcome: 'confirm_held' };
+        }
+        if (error instanceof PlatformExecutionWaitTimeoutError) {
+          return { text: '平台当前繁忙，确认暂未执行；提案仍待确认，请稍后重新回复确认。', outcome: 'confirm_held' };
+        }
+        if (execution.signal?.aborted || error instanceof PlatformExecutionAbortedError) {
+          return { text: '确认已收到，但平台提交已取消；提案仍待确认。', outcome: 'confirm_held' };
+        }
+        throw error;
+      }
+    }
+    // Recheck the exact host confirmation after any queue wait. A stale/superseded/expired
+    // confirmation must never reach the platform commit runner.
+    const stillPending = await ci.findPendingByConfirm(rec.principalId, rec.sessionId, rec.confirmCodeHash, new Date());
+    if (!stillPending || stillPending.intentId !== rec.intentId || stillPending.proposalId !== proposalId) {
+      const latest = await ci.get(rec.intentId);
+      const why: Record<ChangeIntentRecord['status'], string> = {
+        pending: '仍在等待确认',
+        committed: '已完成录入',
+        expired: '已过期',
+        cancelled: '已作废',
+        superseded: '已被更新的提案取代',
+        failed: '执行失败',
+      };
+      return { text: `该确认码对应的提案${latest ? why[latest.status] : '已不可用'}。`, outcome: 'confirm_stale' };
+    }
+    rec = stillPending;
     // ① 确认时点复核平台写开放声明（D-080 的时点纪律 + ⑧ 的判据切换合流为一支）：
     // 声明不成立 → 确定性拒绝，意图保持 pending：提案还在平台侧有效，部署恢复写开放或
     // 作废后仍可继续，不借"过期"说谎，也零办调。
@@ -683,7 +894,88 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     return { text: summaryText ? [summaryText, COMMIT_DONE_LINE].join('\n') : COMMIT_DONE_LINE, outcome: 'confirm_executed' };
   }
 
-  return {
+  async function prepareConfirmation(ctx: TrustedContext, message: string): Promise<PreparedContextTaskRun | null> {
+    const match = message.match(CONFIRM_RE);
+    const ci = options.changeIntents;
+    if (!match || !ci || options.proposalCommitEnabled !== true || !options.proposalCommitRunner) return null;
+    const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hashCode(match[1]!), new Date());
+    if (!rec?.proposalId) return null;
+    const taskId = rec.taskId ?? `task_${randomUUID()}`;
+    return {
+      taskId,
+      request: '用户确认了待处理操作。',
+      timeoutMs: DEFAULT_WORKER_TIMEOUT_MS,
+      workspaceDir: `tmp/${taskId}`,
+      snapshotWorkspace: async () => [],
+      execute: async (execution) => {
+        if (execution.signal?.aborted) throw new PlatformExecutionAbortedError();
+        const reply = await confirmProposalViaGateway(rec, rec.proposalId!, {
+          leaseHeld: true,
+          ...(execution.signal ? { signal: execution.signal } : {}),
+        });
+        return { taskId, text: reply.text, hostConfirmationOutcome: reply.outcome };
+      },
+    };
+  }
+
+  async function prepareContextTask(
+    args: Run17dzTaskArgs,
+    ctx: ContextTaskExecutionContext,
+  ): Promise<ContextTaskPreparationState> {
+    if (!args || typeof args.request !== 'string' || args.request.trim() === '') {
+      throw toolUserErrorFor('TASK_REQUEST_EMPTY');
+    }
+    if (args.taskId !== undefined && (typeof args.taskId !== 'string' || args.taskId.trim() === '')) {
+      throw toolUserErrorFor('TASK_ID_INVALID');
+    }
+
+    const profile = await resolveContextProfile(options.profiles, profileId);
+    // continueTaskId 查不到就抛 ToolUserError——不猜、不兜底；准备阶段只读，不提前改 worker transcript。
+    const existing = args.taskId ? await options.tasks.get(args.taskId) : null;
+    if (args.taskId && !existing) throw toolUserErrorFor('TASK_NOT_FOUND');
+    if (existing && (existing.principalId !== ctx.trusted.principalId || existing.parentSessionId !== ctx.trusted.sessionId)) {
+      throw toolUserErrorFor('TASK_FORBIDDEN');
+    }
+
+    const stepLabel = typeof args.stepLabel === 'string' ? args.stepLabel.trim() : '';
+    const taskId = existing?.taskId ?? `task_${randomUUID()}`;
+    const scratchDir = `tmp/${taskId}`;
+    // 委派块走 user message：申报范围在宿主验证后冻结；worker 工作区路径守卫仍按自身 taskId 执行。
+    const guardedScope = args.turnDeclaration
+      ? stripForeignScratchPaths(args.turnDeclaration.request, scratchDir)
+      : null;
+    // 主拷贝同一把尺（D-114）：args.request 是这段文本的第二份拷贝（任务正文），只剥
+    // 「范围：」行时 tmp/task_<uuid> 事故形状对主拷贝依然成立。本任务自己的工作区路径
+    // 与 tmp/attachments/ 不匹配剥离模式，安全。
+    const guardedRequest = stripForeignScratchPaths(args.request, scratchDir);
+    const strippedCount = (guardedScope?.stripped ?? 0) + guardedRequest.stripped;
+    if (strippedCount > 0) {
+      console.warn(JSON.stringify({
+        event: 'delegation_scope_foreign_path_stripped',
+        requestId: ctx.trusted.requestId,
+        taskId,
+        strippedCount,
+      }));
+    }
+    const workerRequest = args.turnDeclaration && guardedScope
+      ? [
+        '【委派】',
+        `范围：${guardedScope.text}`,
+        `工作区：${scratchDir}`,
+        `协议版本：${A2A_PROTOCOL_VERSION}`,
+        '',
+        guardedRequest.text,
+      ].join('\n')
+      : guardedRequest.text;
+    const previousMessages = structuredClone((existing?.workerMessages ?? []) as DriverMessage[]);
+    const messages = [
+      ...previousMessages,
+      { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
+    ];
+    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel };
+  }
+
+  const runner: InternalContextTaskRunner = {
     tool,
     // D-065：结果原文回写。get→合并→upsert（保留结构化字段，只补 resultText）；
     // 失败只记日志——事实回写是增强，不该让回合失败。
@@ -754,41 +1046,75 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       }
       return null;
     },
-    async run(args, ctx, signal) {
-      if (!args || typeof args.request !== 'string' || args.request.trim() === '') {
-        throw toolUserErrorFor('TASK_REQUEST_EMPTY');
-      }
-      if (args.taskId !== undefined && (typeof args.taskId !== 'string' || args.taskId.trim() === '')) {
-        throw toolUserErrorFor('TASK_ID_INVALID');
+    prepareConfirmation: (ctx, message) => prepareConfirmation(ctx, message),
+    prepare: async (args, ctx): Promise<PreparedContextTaskRun> => {
+      const state = await prepareContextTask(args, ctx);
+      return {
+        taskId: state.taskId,
+        get request() { return state.workerRequest; },
+        timeoutMs: state.profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS,
+        workspaceDir: state.scratchDir,
+        materializeInputs: async (runId) => {
+          const files = await materializeTaskInputs({
+            platformRoot: state.profile.root,
+            workspaceDir: state.scratchDir,
+            runId,
+            files: state.ctx.trusted.inputFiles ?? [],
+          });
+          if (files.length > 0) {
+            state.workerRequest = requestWithFrozenInputs(state.workerRequest, files);
+            const last = state.messages.at(-1);
+            if (last) state.messages[state.messages.length - 1] = { ...last, content: state.workerRequest } as DriverMessage;
+          }
+          return files;
+        },
+        snapshotWorkspace: () => snapshotWorkspaceFiles(state.profile.root, state.scratchDir),
+        execute: (execution) => runner.run(args, ctx, execution.signal, state, execution),
+      };
+    },
+    run: async (args, ctx, signal, preparedState, execution): Promise<SubagentTaskResult> => {
+      if (!preparedState) {
+        const prepared = await runner.prepare!(args, ctx);
+        let ticket;
+        try {
+          ticket = executionGate.enqueue({ requestId: ctx.trusted.requestId, ...(signal ? { signal } : {}) });
+        } catch (error) {
+          if (error instanceof PlatformExecutionQueueFullError) throw new ToolUserError('平台执行队列已满，请稍后重试。');
+          throw error;
+        }
+        let lease: PlatformExecutionLease;
+        try {
+          lease = await ticket.acquired;
+        } catch (error) {
+          if (signal?.aborted || error instanceof PlatformExecutionAbortedError) throw new ToolUserError(DELEGATION_CANCELLED);
+          throw error;
+        }
+        if (signal?.aborted) {
+          ticket.cancel();
+          throw new ToolUserError(DELEGATION_CANCELLED);
+        }
+        lease.start();
+        const startedAt = Date.now();
+        if (lease.waitedMs > 0) {
+          console.info(JSON.stringify({ event: 'platform_delegation_queued', requestId: ctx.trusted.requestId, waitedMs: lease.waitedMs }));
+        }
+        try {
+          return await prepared.execute({ lease, startedAt, deadline: startedAt + prepared.timeoutMs, ...(signal ? { signal } : {}) });
+        } finally {
+          lease.release();
+        }
       }
 
-      const profile = await resolveContextProfile(options.profiles, profileId);
-      // continueTaskId 查不到就抛 ToolUserError——不猜、不兜底。宿主只保证两件事：
-      // 错误永远诚实可行动、爆炸永远有界。"这个会话里有几个开放任务"宿主确实知道，
-      // 但"模型想续的是哪一个"只有模型知道；替它猜（哪怕恰一个时猜对）就是把重试的
-      // 职责从模型手里拿回来，猜错时用户的问题会被静默送进别的子任务。编号无效时说清
-      // 编号无效、并给出下一步动作（措辞在 error-codes.ts 表里），模型下一轮自己改。
-      const existing = args.taskId ? await options.tasks.get(args.taskId) : null;
-      if (args.taskId && !existing) throw toolUserErrorFor('TASK_NOT_FOUND');
-      if (existing && (existing.principalId !== ctx.trusted.principalId || existing.parentSessionId !== ctx.trusted.sessionId)) {
-        throw toolUserErrorFor('TASK_FORBIDDEN');
+      args = preparedState.args;
+      ctx = preparedState.ctx;
+      if (execution?.backgroundRunId) {
+        ctx = { trusted: { ...ctx.trusted, backgroundRunId: execution.backgroundRunId } };
       }
-
-      // 计划模式（Phase 6）：这一步的计划门通知带上「第 N/M 步」前缀交付用户——
-      // 用户因此看到"现在在拆解的第几步"，而不是一条没有上下文的孤立通知。
-      // 前缀插在固定标记之后，渠道与 e2e 替身仍按「计划通知：」识别这是通知帧。
-      const stepLabel = typeof args.stepLabel === 'string' ? args.stepLabel.trim() : '';
-      const trustedNotice = ctx.trusted.onNotice;
-      const onNotice = trustedNotice
-        ? stepLabel
-          ? async (text: string) => { await trustedNotice(withStepLabel(text, stepLabel)); }
-          : trustedNotice
-        : undefined;
-      const taskId = existing?.taskId ?? `task_${randomUUID()}`;
-      // worker 工作区按任务切（⑨）：`tmp/${taskId}`（taskId 本身是 `task_<uuid>` 形态，
-      // 即 tmp/task_<uuid>）。续跑同一任务共享同一个工作区，上一轮落下的产物下一步还能用；
-      // 每请求换目录的旧形态会让多步计划的各步互相看不到中间产物。
-      const scratchDir = `tmp/${taskId}`;
+      const { profile, existing, taskId, scratchDir, messages, stepLabel } = preparedState;
+      const runSignal = execution?.signal ?? signal;
+      const delegationStart = execution?.startedAt ?? Date.now();
+      const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
+      if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED);
       const running: PlatformTaskRecord = {
         taskId,
         parentSessionId: ctx.trusted.sessionId,
@@ -798,33 +1124,20 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         updatedAt: new Date().toISOString(),
       };
       await options.tasks.upsert(running);
-
-      // 委派块走 user message（A2A 协议生命周期第①阶段，变更项 ②）：逐任务的边界
-      //（范围/工作区/协议版本）只随载荷下行，系统提示词保持纯静态。宿主已核验的申报范围
-      // （turnDeclaration.request）是边界声明的来源；无申报（测试替身 / 老路径）时退化为
-      // 原样 request，worker 看到的消息形状与从前一字不差。
-      const workerRequest = args.turnDeclaration
-        ? [
-          '【委派】',
-          `范围：${args.turnDeclaration.request}`,
-          `工作区：${scratchDir}`,
-          `协议版本：${A2A_PROTOCOL_VERSION}`,
-          '',
-          args.request,
-        ].join('\n')
-        : args.request;
-      const messages = [
-        ...((existing?.workerMessages ?? []) as DriverMessage[]),
-        { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
-      ];
+      const onStep = execution?.background
+        ? execution.onStep ?? (() => {})
+        : execution?.onStep ?? ctx.trusted.onStep ?? (() => {});
+      const trustedNotice = execution?.background
+        ? execution.onNotice
+        : execution?.onNotice ?? ctx.trusted.onNotice;
+      const onNotice = trustedNotice
+        ? stepLabel
+          ? async (text: string) => { await trustedNotice(withStepLabel(text, stepLabel)); }
+          : trustedNotice
+        : undefined;
       let result: TurnDriverResult | undefined;
-      const delegationStart = Date.now();
-      const deadline = delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       try {
-        // 并发闸：worker 会话期间独占下游平台（默认全局串行，见文件顶部说明）
-        const release = await acquirePlatformSlot(ctx.trusted.requestId, delegationStart);
-        try {
-          result = await options.workerDriver.run({
+        result = await options.workerDriver.run({
             // 纯静态系统提示词（变更项 ②）：只含协议义务与机械边界，逐任务的范围随委派块
             // 走 user message，网关命令形态经 planCommandForm 注入（无平台能力时不渲染许可段）。
             systemPrompt: workerSystemPrompt(profile.root, scratchDir, options.planCommandForm),
@@ -834,10 +1147,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             skillRoots: profile.skillRoots,
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
-            onStep: ctx.trusted.onStep ?? (() => {}),
+            onStep,
             exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
             deadline,
-            signal,
+            signal: runSignal,
             ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
             ...(args.entitySources ? { entitySources: args.entitySources } : {}),
             ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
@@ -863,9 +1176,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
               onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
             } : {}),
           });
-        } finally {
-          release();
-        }
         // worker 侧真实 token 消耗（纯加法遥测）：对 worker 转录里 assistant 消息的
         // provider Usage 分项求和（口径见 driver.ts 的 sumUsage），挂到下方每个
         // delegation_span 结局与 SubagentTaskResult 透传。网关不回传 usage 时埋点字段
@@ -1017,7 +1327,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 唯一不带码前缀的形态，17dz 侧尚未给它挂码；在平台收口之前先留正则兜底，
         // 否则那一条会退化成 executor_error——而"请稍后再试"对 auth 是错指令。
         // 平台侧该消息一带码（走 messageFor），这行即可删除。
-        const failureClass = signal?.aborted ? 'cancelled'
+        // 取消判据读 runSignal（本次执行实际持有的信号；形参 signal 在 prepared 路径下
+        // 与之同值，但两者一旦分叉，分类与最终话术必须跟实际执行的那一个走）。
+        const failureClass = runSignal?.aborted ? 'cancelled'
           : Date.now() >= deadline ? 'timeout'
           : isPlatformAuthError(error) ? 'auth'
           : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
@@ -1050,12 +1362,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // （platform-health.ts 的连续失败记账）认这个码——码级判据，不嗅探回复文本。
         // 其余三类维持原样（没有第二类失败需要宿主跨回合记账）。
         if (failureClass === 'auth') throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');
-        throw new ToolUserError(signal?.aborted ? DELEGATION_CANCELLED
+        // 取消话术与 failureClass 同一判据（runSignal）：日志分类与用户话术不许分叉。
+        throw new ToolUserError(runSignal?.aborted ? DELEGATION_CANCELLED
           : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
           : DELEGATION_EXECUTOR_FAILURE);
       }
     },
   };
+  return runner;
 }
 
 /**

@@ -1,6 +1,6 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { AgentReply, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
+import type { AgentReply, BackgroundTaskEvent, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { RUN_17DZ_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
@@ -18,7 +18,19 @@ import { createPlanFactWriter, planStepSummary, renderPlanCircuitBreak, renderPl
 import { matchPlanDisambiguationReply, renderDisambiguationQuestion, resolvePlanBinding } from './plan-binding';
 import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult, renderWriteClosureReply } from './turn-relay';
 import { decideTurnExit, type TurnExitEvent } from './turn-exit';
-import { findRepeatedDelegatedRequest } from './repeat-request';
+import { buildRequestKey, findRepeatedDelegatedRequest } from './repeat-request';
+import { createCurrentUserMessage, getQuotedEvidence } from './message-reference';
+import { executeTaskControl, renderTaskRoster, TASK_CONTROL_TOOL, TASK_CONTROL_TOOL_NAME } from './task-control';
+import {
+  renderBackgroundTaskReceipt,
+  dispatchBackgroundTask,
+  processBackgroundTaskEvent,
+  maybeSubmitBackgroundConfirmation,
+  maybeSubmitBackgroundResume,
+  type RuntimeTaskEventContext,
+  taskResultFromEvent,
+} from './background-runtime';
+import type { BackgroundTaskManager } from './task-manager';
 import { sanitizeServerPathReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
 import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
@@ -37,163 +49,42 @@ import {
 } from './turn-persistence';
 import { stripFootprint } from './text-hygiene';
 import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
-import { PLATFORM_OPERATIONS, type SelectionClarification } from './platform-contract';
-import { clarificationTextFor, messageTextFor } from './error-codes';
+import { messageTextFor } from './error-codes';
 import {
   createPlatformHealthTracker,
   isAuthDelegationFailure,
   type PlatformHealthClock,
   type PlatformHealthTracker,
 } from './platform-health';
+import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, SYSTEM_PROMPT } from './system-prompt';
+import { executionLanguageFingerprints } from './execution-language';
+import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
+import { looksLikeProtocolMaterial } from './protocol-material';
+import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+export { EXECUTION_LANGUAGE_FINGERPRINTS, executionLanguageFingerprints } from './execution-language';
+export { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
+export { looksLikeProtocolMaterial } from './protocol-material';
+export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
 
-// 收尾/兜底话术全部收口在 error-codes.ts（消息模板类：码 → 文本一一对应）；
-// 这里的常量是同一份表值的再导出，测试与调用方继续认常量。
-export const FALLBACK_TIMEOUT = messageTextFor('FALLBACK_TIMEOUT');
-export const FALLBACK_FAILURE = messageTextFor('FALLBACK_FAILURE');
-
-/** Fail-closed reply whenever a turn claims real-time data but produced no platform execution. */
-export const NO_EXECUTION_CLARIFICATION = messageTextFor('NO_EXECUTION_CLARIFICATION');
-
-/**
- * 方案已获批准但查询没有执行时的确定性收尾文案（P1 收尾事实兜底）。
- * 与 NO_EXECUTION_CLARIFICATION 的区别是事实本身：用户早就给过查询对象和范围，缺的是
- * 执行不是 specification——再让用户"补充范围"就是误导。因此这里只说真实状态
- * （批准了、通知送到了、查询没跑），并给出明确的下一步（回复"继续"按已批准计划重跑）。
- * 措辞与业务无关（不出现任何领域词），重启执行的动作由用户一句话触发。
- */
-export const ACTIVATED_PLAN_NOT_EXECUTED = messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED');
-
-/**
- * 恢复路径（resumeTaskId）重跑后零执行的收尾文案（③-5b）。
- * 与 ACTIVATED_PLAN_NOT_EXECUTED 的分工：后者有"方案已获批准、通知已送达"这个事实
- * （activatedPlan 为真）；前者覆盖其余零执行形状——用户刚确认过操作，缺的是执行，
- * 不能再问"要查询的对象和范围"（那是 NO_EXECUTION_CLARIFICATION 的问句，早就答过）。
- */
-export const RESUMED_PLAN_NOT_EXECUTED = messageTextFor('RESUMED_PLAN_NOT_EXECUTED');
-
 /** Appended when the Main Agent answers without declaring the turn's intent. */
 const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
-
-/**
- * 执行语言指纹：最终回复里出现任意一条，就说明"模型在翻译执行语言"（2026-09-27 Stage 3 实测：一次
- * 结构化歧义被翻译成 1201 字符技术报告）。判据都是**形状**，不是内容嗅探：
- *   · 脚本路径（`src/...js`）：平台实现细节，编排层禁运（泄漏 lint 同款名单）；
- *   · 错误码形态（下划线连接的多段码：全大写 ACCOUNT_SET_AMBIGUOUS / 全小写 not_found）：
- *     含下划线是防误伤——正常英文词不会全大写，YYYYMM 这类编码没有下划线；小写支只收纯字母段
- *     （平台状态词），含数字/连字符的串（task_3f9a1c72-…）是 id 家族，归泄漏基线守（D-098）；
- *   · JSON 片段（`candidates:` 或花括号）：信封/方案原文复读；
- *   · operation 名（小写点分，如 finance.query-receivables）：第三波实测——回复里"数据来源：
- *     平台只读查询接口 finance.query-receivables"，用户不需要知道接口标识符（语域契约①）；
- *   · 内部控制词（额度/配额/熔断/计划门/拒绝上限/重试上限）：同波实测——"本次已用满
- *     平台的查询计划额度"被当成说明交给用户，那是宿主计划门的内部控制状态（语域契约②）。
- *
- * operation 名的防误伤（误伤比漏报更糟——探针误红一次，整条断言就没人信了）：
- * 形状要求"小写字母开头 + 至少一个点 + 点后小写连字符段"三条同时成立——
- *   · "e.g."/"i.e." 没有连字符段；"v1.2"/"no.1" 点后是数字；YYYYMM（202609）没有点，
- *     日期/时间（2026.09、14.30）以数字开头；
- *   · 中文名不以小写字母开头（"幻辰.财税"直接不匹配）、点后中文段也不是 [a-z]；
- *   · 连字符段必须在**点之后**（lookahead 逐段判定）："query-receivables.js" 连字符在点前，
- *     不命中本模式（归脚本路径模式与泄漏 lint 的 .js 名单各自守）。
- * 白名单是逃生阀：形状命中但经人工判定不是执行语言的 token 才能进，每条附理由；当前为空——已知误伤家族全部被形状要求挡在门外。
- * 第二判据（下表）兼收平台注册名本身：形状只认带命名空间前缀的写法，实测回复漏的是**裸名**"先用 search-account-sets 搜出平台规范名再查"（D-098）。
- *
- * 内部控制词为什么是内部控制（不是业务词）：额度/配额是宿主计划门的限额记账，
- * 熔断/计划门是执行流的控制机制，拒绝上限（MAX_DECLINED_PLANS_PER_TASK）/重试上限
- * 是收敛保护参数——它们描述的是"宿主怎么管模型"，没有一个是用户做决策需要的事实。
- * 用户可行动的版本是"本次查询未能继续 + 请重新发起"（语域契约②），机制一词不提。
- *
- * 这把尺有两处使用者：worker 说明的准入（usefulWorkerNote：带指纹的"说明"是协议材料，不附在状态
- * 文案后面）与真实模型探针的断言（probe-real-agent.ts 对歧义/not_found 用例）。导出一处定义，
- * 两边认同一份。
- */
-/**
- * operation 名指纹的白名单（逃生阀，不是预设备份）：形状命中但确认真实回复里会出现、且不是执行
- * 语言的 token 才能进，每条注释为什么合法；当前为空（已知误伤家族全被形状挡掉，见上）。声明须
- * 早于指纹表：表里 operation 名那一项挂的是它本身（同一处定义，不复制）。
- */
-const OPERATION_NAME_WHITELIST: ReadonlySet<string> = new Set<string>();
-/** 平台注册名的判据源（含裸尾段，见上方"第二判据"）：单一来源 PLATFORM_OPERATIONS——宿主本来就持这张表（L2），不另立第二份名单；\b 边界防半个 token 命中。 */
-const REGISTERED_OPERATION_ALTERNATION = Object.values(PLATFORM_OPERATIONS).flatMap((n) => [...new Set([n, n.slice(n.indexOf('.') + 1)])]).map((t) => String.raw`\b${t.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\b`).join('|');
-
-export const EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp; whitelist?: ReadonlySet<string> }> = [
-  { label: '脚本路径', pattern: /src\/[^\s）)，,，；;]*\.js/ },
-  { label: '错误码', pattern: /\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b|\b[a-z]+(?:_[a-z]+)+\b/ },
-  { label: 'JSON 片段', pattern: /candidates\s*:|[{}]/ },
-  {
-    label: 'operation 名',
-    // lookahead 先验"点后存在小写连字符段"，本体再匹配"小写字母开头的点分 token"；再 ∪ 平台
-    // 注册名（含裸尾段，REGISTERED_OPERATION_ALTERNATION 派生，单一来源见上方第二判据）。
-    pattern: new RegExp([String.raw`\b(?=(?:[a-z0-9-]*\.)+[a-z0-9-]*-)[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+\b`, REGISTERED_OPERATION_ALTERNATION].join('|')),
-    whitelist: OPERATION_NAME_WHITELIST,
-  },
-  { label: '内部控制词', pattern: /额度|配额|熔断|计划门|拒绝上限|重试上限/ },
-];
-
-/**
- * 文本命中的执行语言指纹标签（空数组 = 干净）。
- *
- * 白名单只作用于挂了它的那类形状（当前=operation 名），且是 **token 级**排除：一段话
- * 同时混着白名单 token 和真 operation 名时，后者照旧命中——逃生阀掩掉的是单个 token，
- * 不是整段文本。用可选字段而不是标签名比较做分流：标签是给用户读的文案，不该承担
- * 结构化判据的职责（也不该为它立一条中文字面量 if）。
- */
-export function executionLanguageFingerprints(text: string): string[] {
-  const hits: string[] = [];
-  for (const { label, pattern, whitelist } of EXECUTION_LANGUAGE_FINGERPRINTS) {
-    if (!whitelist) {
-      if (pattern.test(text)) hits.push(label);
-      continue;
-    }
-    const tokens = text.match(new RegExp(pattern.source, 'g')) ?? [];
-    if (tokens.some((token) => !whitelist.has(token))) hits.push(label);
-  }
-  return hits;
-}
 
 /**
  * 纠错环单回合上限（架构 §3）与计划模式熔断阈值随 TurnState 的记账规则一起住在
  * turn-state.ts（MAX_NEEDS_ROUNDS / MAX_PLAN_ZERO_EXEC_STEPS）。
  */
 
-/** 纠错环工具结果的序列化前缀：模型把它原样当回复时，宿主用自己的转达文本顶上。 */
-const NEEDS_TOOL_RESULT_PREFIX = '{"recorded":"delegate"';
-
-/**
- * 内部协议材料的复读判据（D-020 / F4 残留；D-069 补平台 RESULT 信封形态）：模型把工具
- * 结果原样当回复时，那段文本是宿主与模型之间的内部协议材料——纠错环交还
- * （`{"recorded":"delegate",…}`）、计划步骤交还（同族，recorded/step/next 是协议字段）、
- * 回合申报回执（`{"recorded":"conversation"}`）、平台 RESULT 信封（`{"v":1,"op":…}`）。
- *
- * 为什么信封复读与协议 JSON 复读同族：信封是宿主与**平台**之间的输出契约
- * （platform-contract.ts 的 PlatformEnvelope，字段形状以那里的信封解析为准），和宿主与
- * 模型之间的协议 JSON 一样都是机器传递的结构化材料，不是给用户读的话；原样外发等于把
- * operation 名、status、错误码等执行层语言怼到用户眼前——与执行语言指纹尺防的是同一族
- * 泄漏，只是那道尺不在终稿硬闸上（见债务台账 D-069）。前缀按信封的固定形状写死
- * （v:1 + op 首字段），形状之外的内容不嗅探。
- *
- * 判据只有**形状**（开头是协议 JSON 且首字段是协议字段名），不嗅探内容：正常回复不可
- * 能以这几个字段开头，误判面为零。导出供测试直接钉形状。
- */
-export function looksLikeProtocolMaterial(text: string): boolean {
-  const trimmed = text.trimStart();
-  return trimmed.startsWith(NEEDS_TOOL_RESULT_PREFIX)
-    || /^\{\s*"(?:recorded|step|next)"\s*:/.test(trimmed)
-    || /^\{\s*"v"\s*:\s*1\s*,\s*"op"\s*:/.test(trimmed);
-}
-
-/**
- * 业务 skill 注入系统提示词时的小标题（架构 §5）。只说明这份材料的性质与边界，
- * 不含任何规则本身——规则在部署方提供的文件里。
- */
-const BUSINESS_SKILL_HEADING = '【业务编排知识：程序性知识，只用于长任务拆解与信息补齐；"怎么做才对"归执行层，不由这里规定】';
-
 export interface TaxAgentRuntimeDeps {
   driver: TurnDriver;
   sessions: Pick<ConversationSessionRepo, 'get' | 'upsert'>;
   platformTask: ContextTaskRunner;
+  /** Optional process-local Worker manager; existing tasks remain controllable when dispatch mode is inline. */
+  backgroundTasks?: BackgroundTaskManager;
+  /** Host deployment choice for new delegate submissions. Defaults to the existing inline behavior. */
+  workerDispatchMode?: 'inline' | 'background';
   /** 平台任务条目的结构化执行事实源（D-065：召回事实台账的列举入口，消费者=execution-facts）。 */
   platformTasks?: Pick<PlatformTaskRepo, 'listBySession'>;
   /**
@@ -247,6 +138,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   const contextUpdateQueues = new Map<string, Promise<void>>();
   const memoryUpdateQueues = new Map<string, Promise<void>>();
   const initializedContextSessions = new Set<string>();
+  const taskEventInFlight = new Map<string, Promise<AgentReply | null>>();
+  const taskEventContexts = new WeakMap<TrustedContext, RuntimeTaskEventContext>();
+  const taskEventContinuationAccepted = new WeakSet<TrustedContext>();
   // 业务 skill（架构 §5）：静态程序性知识，每回合进系统提示词；与日期行同性质，
   // 缺文件/缺配置时为空，其余能力不受影响。
   const businessSkill = typeof deps.businessSkill === 'string' ? deps.businessSkill.trim() : '';
@@ -267,7 +161,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   // 会静默丢失）。principalId / sessionId / requestId 每回合都不同，由调用点从 ctx 现取。
   const appendPlanFact = createPlanFactWriter({ taskPlans: deps.taskPlans });
   return {
-    async handleTurn(ctx: TrustedContext, userMessage: string): Promise<AgentReply> {
+    async handleTurn(ctx: TrustedContext, userMessage: string, inputContext?: TurnInputContext): Promise<AgentReply> {
+      const currentUserMessage = createCurrentUserMessage(userMessage, inputContext, buildRequestKey(userMessage, inputContext));
+      const taskEventContext = taskEventContexts.get(ctx);
       // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
       // 而不是被模型理解」。未命中则按正常回合进入模型。
       const turnStart = Date.now();
@@ -275,15 +171,37 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 平台健康信号的会话键（Lane 2）：与 Context State 同一把复合键——同一用户在同一
       // 会话里的连续失败才累计；换会话（新对话）从零开始，不把别的会话的健康状态带过来。
       const platformHealthKey = `${ctx.principalId}\0${ctx.sessionId}`;
-      const { messages: loaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
+      const { messages: persistedLoaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
+      const loaded = taskEventContext ? taskEventContext.promptMessages : persistedLoaded;
+      let backgroundTaskRoster = '';
+      if (deps.backgroundTasks && !taskEventContexts.has(ctx)) {
+        try {
+          backgroundTaskRoster = renderTaskRoster(await deps.backgroundTasks.list({ principalId: ctx.principalId, sessionId: ctx.sessionId }));
+        } catch (error) {
+          console.error(JSON.stringify({ event: 'background_task_roster_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
+        }
+      }
       let effectiveContextMode = contextMode;
       const contextSessionKey = `${ctx.principalId}\0${ctx.sessionId}`;
-      if (deps.conversationLog && !initializedContextSessions.has(contextSessionKey)) {
+      if (!taskEventContext && deps.conversationLog && !initializedContextSessions.has(contextSessionKey)) {
         if (!(await ensureHistoryBackfill(deps, ctx, loaded))) effectiveContextMode = 'transcript';
         else initializedContextSessions.add(contextSessionKey);
       }
-      await appendUserEvent(deps, ctx, userMessage);
-      if (typeof deps.platformTask.matchConfirmation === 'function') {
+      if (!taskEventContext) await appendUserEvent(deps, ctx, userMessage, inputContext);
+      if (!taskEventContext) {
+        const confirmationDispatch = await maybeSubmitBackgroundConfirmation({
+          runner: deps.platformTask,
+          ...(deps.backgroundTasks ? { manager: deps.backgroundTasks } : {}),
+          dispatchMode: deps.workerDispatchMode ?? 'inline',
+          trusted: ctx,
+          message: userMessage,
+          ...(inputContext ? { inputContext } : {}),
+          log: (event, error) => console.warn(JSON.stringify({ event, requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' })),
+        });
+        if (confirmationDispatch.kind === 'accepted') return await finishDirectReply(confirmationDispatch.text, 'background_task_accepted');
+        if (confirmationDispatch.kind === 'unavailable') return await finishDirectReply(confirmationDispatch.text, 'background_confirmation_unavailable');
+      }
+      if (!taskEventContext && typeof deps.platformTask.matchConfirmation === 'function') {
         const direct = await deps.platformTask.matchConfirmation(ctx, userMessage);
         if (direct) {
           const now = Date.now();
@@ -292,7 +210,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             principalId: ctx.principalId,
             messages: [
               ...loaded,
-              { role: 'user', content: userMessage, timestamp: now } as unknown as AgentMessage,
+              currentUserMessage,
               // 必须是原生形状(含 api/usage/stopReason):裸字符串消息会让下一模型回合内部报错
               deps.driver.synthesizeAssistant
                 ? deps.driver.synthesizeAssistant(direct.text)
@@ -308,7 +226,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return direct;
         }
       }
-      if (ctx.resumeTaskId) {
+      if (!taskEventContext && ctx.resumeTaskId) {
         // 平台健康冷却（Lane 2）：冷却期内不发起平台调用——恢复路径同样是真实委派
         // （一次浏览器自动化 + 限流 token），结论早已确定，重试只是浪费。终稿由宿主
         // 合成（PLATFORM_UNAVAILABLE，error-codes.ts 唯一措辞来源），用户等待为零。
@@ -322,6 +240,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           }));
           return await finishDirectReply(platformHealth.cooldownReply(platformHealthKey), 'platform_cooldown_blocked', undefined, undefined, false);
         }
+        const backgroundResume = await maybeSubmitBackgroundResume({
+          runner: deps.platformTask, manager: deps.backgroundTasks, trusted: ctx, taskId: ctx.resumeTaskId,
+          log: (event, error) => console.warn(JSON.stringify({ event, requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' })),
+        });
+        if (backgroundResume.kind !== 'not_background') return await finishDirectReply(backgroundResume.text, backgroundResume.kind === 'accepted' ? 'background_task_accepted' : 'background_confirmation_unavailable');
         // ③-1：恢复路径与 delegate 路径同样收尾。此前 platformTask.run 抛出的
         // ToolUserError（如 DELEGATION_AUTH_FAILURE"平台登录态过期，需要重新登录后
         // 才能继续查询"）会一路穿透到 handler.ts 顶层 catch，被换成"处理失败，请稍后
@@ -405,7 +328,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         const base = effectiveContextMode === 'transcript' ? loaded : selectRecentTurns(loaded, recentTurns);
         const messages = [
           ...base,
-          { role: 'user', content: userMessage, timestamp: Date.now() } as unknown as AgentMessage,
+          currentUserMessage,
           { role: 'user', content: `${hostFact}【宿主已执行计划的结果；仅作为本轮答复依据】\n${resumed.text}`, timestamp: Date.now() + 1 } as unknown as AgentMessage,
         ];
         const deadline = Date.now() + Math.min(turnBudgetMs, 60_000);
@@ -492,7 +415,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
       // 本条是纯编号，才算用户选定了任务。宿主只解决"哪个任务"（机械），继续做什么
       // 仍由模型在本回合申报；计划绑定在本回合由宿主强制（preferredPlanId）。
-      const planChoice = await matchPlanDisambiguationReply(deps, ctx, userMessage);
+      const planChoice = taskEventContext ? null : await matchPlanDisambiguationReply(deps, ctx, userMessage);
       if (planChoice) {
         console.info(JSON.stringify({ event: 'plan_disambiguation_matched', requestId: ctx.requestId, planId: planChoice.planId }));
       }
@@ -501,7 +424,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // **并列不合并**——那个解"继续哪个任务"，这个解"用户选了哪个候选"；绑定成功后
       // selected 进本轮实体来源（实体门放行"用户亲自选过的"实体）。
       let clarificationSelected: string | null = null;
-      if (deps.conversationLog) {
+      if (!taskEventContext && deps.conversationLog) {
         try {
           const events = await deps.conversationLog.list({ principalId: ctx.principalId, sessionId: ctx.sessionId, limit: 20 });
           const binding = matchClarificationBinding(events, userMessage);
@@ -521,7 +444,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }
       }
       let previousContextState: ContextState | undefined;
-      if (deps.contextStates) {
+      if (!taskEventContexts.has(ctx) && deps.contextStates) {
         try {
           const stored = await deps.contextStates.get(ctx.principalId, ctx.sessionId);
           if (stored?.principalId === ctx.principalId && stored.sessionId === ctx.sessionId && isContextState(stored.state)) {
@@ -535,7 +458,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 注入上下文头部（与 Context State 并列）。铁律在 reference-evidence.ts：证据只支撑
       // 指代消解，不扩大实体范围——本轮范围仍由 validatePlanEntities 逐字校验。
       let referenceEvidence: ReferenceEvidence | null = null;
-      if (deps.conversationLog && looksLikeReferenceCue(userMessage)) {
+      if (!taskEventContexts.has(ctx) && deps.conversationLog && looksLikeReferenceCue(userMessage)) {
         try {
           referenceEvidence = await collectReferenceEvidence({
             conversationLog: deps.conversationLog,
@@ -559,7 +482,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 两个不同对象/范围的查询混成"刚才两次查询"（归因串轮），转录里"提过"不等于"真的执行过"；
       // 台账只机械陈述，比较与解释仍归模型。取舍与边界见 execution-facts.ts 文件头（D-065）。
       let executionFacts: ExecutionFacts | null = null;
-      if (deps.platformTasks && looksLikeReferenceCue(userMessage)) {
+      if (!taskEventContext && deps.platformTasks && looksLikeReferenceCue(userMessage)) {
         try {
           executionFacts = await collectExecutionFacts({
             platformTasks: deps.platformTasks,
@@ -578,11 +501,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }
       }
       // 长期记忆投影：取数与降级住 runtime.ts（I/O），装配只拿文本。
-      const memoryText = await loadMemoryProjection(deps, ctx.principalId);
+      const memoryText = taskEventContext ? '' : await loadMemoryProjection(deps, ctx.principalId);
       // 每回合上下文档装配：头部材料的顺序与文案住 turn-context.ts（纯函数）。I/O 不在这里——
       // 指代证据 / 执行台账 / Context State / 长期记忆投影的取数都在上面各自的分支里做完了，
       // 这里只把结果作为参数传进去。
-      let context = assembleTurnContext({
+      let context = taskEventContext ? [...taskEventContext.promptMessages] : assembleTurnContext({
         base: effectiveContextMode === 'transcript' ? loaded : selectRecentTurns(loaded, recentTurns),
         // state_recent 模式在底座前部加历史资料注令（保存前由 stripHistoryNotes 剥掉）；
         // transcript 模式用全量转录，不加。
@@ -604,24 +527,34 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return msgs;
         }
       };
-      if (effectiveContextMode === 'transcript' && expired && loaded.length > 0) {
+      if (!taskEventContext && effectiveContextMode === 'transcript' && expired && loaded.length > 0) {
         console.info(JSON.stringify({ event: 'session_resume_seeding', sessionId: ctx.sessionId, staleMessages: loaded.length }));
         context = await compactSafe(loaded, true);
       }
-      if (effectiveContextMode === 'transcript') context = await compactSafe(context);
-      context.push({ role: 'user', content: userMessage, timestamp: Date.now() } as unknown as AgentMessage);
+      if (!taskEventContext && effectiveContextMode === 'transcript') context = await compactSafe(context);
+      if (!taskEventContext && backgroundTaskRoster) {
+        context.push({ role: 'custom', customType: 'background_task_roster', content: backgroundTaskRoster, display: false, timestamp: Date.now() } as unknown as AgentMessage);
+      }
+      if (!taskEventContext) context.push(currentUserMessage);
 
-      const historyTools = deps.conversationLog
+      const historyTools = !taskEventContext && deps.conversationLog
         ? createHistoryTools(deps.conversationLog, { principalId: ctx.principalId, sessionId: ctx.sessionId })
         : [];
       const tools = [
         ROUTE_CURRENT_TURN_TOOL,
+        ...(!taskEventContext && deps.backgroundTasks ? [TASK_CONTROL_TOOL] : []),
         ...historyTools.map((tool) => tool.definition),
       ];
       // 回合契约：Main Agent 必须显式申报本轮动作，宿主留存并校验证据。
       // 状态形状与记账规则住 turn-state.ts（计数器在那里可用纯数据直接验证）；
       // 这里只按消歧回合的选定计划建状态，控制流仍在本函数。
-      const turn = createTurnState(planChoice);
+      const turn = createTurnState(taskEventContext?.event.run.planId ? { planId: taskEventContext.event.run.planId } : planChoice);
+      if (taskEventContext) {
+        turn.planId = taskEventContext.event.run.planId ?? null;
+        turn.planSteps = taskEventContext.planStepOutcomes.length;
+        turn.planStepOutcomes = [...taskEventContext.planStepOutcomes];
+        turn.execution = taskResultFromEvent(taskEventContext.event)?.execution ?? null;
+      }
       // 重复请求复核的重试计数：同一个回合只退一次（判据见 route_current_turn 调用处）。
       let repeatRequestNudged = false;
 
@@ -702,8 +635,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         systemPrompt,
         tools,
         messages,
-        onStep: ctx.onStep ?? (() => {}),
+        onStep: taskEventContext ? (() => {}) : ctx.onStep ?? (() => {}),
         exec: async (tool, args, signal) => {
+          if (tool === TASK_CONTROL_TOOL_NAME) {
+            if (!deps.backgroundTasks) return { error: '后台任务控制当前不可用。' };
+            return executeTaskControl(deps.backgroundTasks, ctx, args);
+          }
           if (tool === ROUTE_CURRENT_TURN_TOOL_NAME) {
             const reviewed = reviewRouteDeclaration(args);
             // 自相矛盾的申报退回给模型重填，不消耗用户的澄清轮次
@@ -711,12 +648,21 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys: Object.keys(args).sort(), kind: typeof args['kind'] === 'string' ? args['kind'] : undefined }));
               return { error: `申报无效：${reviewed.error}` };
             }
+            if (taskEventContext && reviewed.intent.kind === 'delegate') {
+              const completedStep = taskEventContext.event.run.stepIndex;
+              const totalSteps = taskEventContext.event.run.totalSteps;
+              const nextStep = parsePlanStep(reviewed.intent.request);
+              if (completedStep === undefined || totalSteps === undefined || completedStep >= totalSteps
+                || !nextStep || nextStep.stepIndex !== completedStep + 1 || nextStep.totalSteps !== totalSteps) {
+                return { error: '后台计划事件只能继续原计划的下一步；若没有下一步，请汇总原计划结果。' };
+              }
+            }
             // 重复请求复核（2026-10-19 实测）：同文请求本会话已经委派执行过，模型却申报
             // conversation——那是拿历史答复收尾，本回合零执行、零产物。判据与"只退一次"
             // 的取舍见 repeat-request.ts；这里递一个宿主持有的确定性事实让它重填，与上面
             // 那句退回同一族（不消耗用户轮次）。
             if (reviewed.intent.kind === 'conversation' && !repeatRequestNudged) {
-              const repeated = findRepeatedDelegatedRequest(loaded, userMessage);
+              const repeated = findRepeatedDelegatedRequest(loaded, userMessage, inputContext);
               if (repeated) {
                 repeatRequestNudged = true;
                 console.info(JSON.stringify({
@@ -740,6 +686,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 requestLength: intent.request.length,
               } : {}),
             }));
+            if (intent.kind === 'resend') {
+              // W4 重发路由：申报 resend → 零委派、零平台调用。ref 的有效性由 handler
+              // 依会话产物库确定性回答（存在/淘汰/字节在否），runtime 只记账把 ref 带去
+              // 出口。文本非空：空文本会触发下方的空回复兜底。
+              turn.resendRefs.push(intent.artifactRef);
+              console.info(JSON.stringify({ event: 'turn_resend_declared', requestId: ctx.requestId, sessionId: ctx.sessionId, artifactRef: intent.artifactRef }));
+              throw new ToolUserError(`重发产物 #${intent.artifactRef}。`);
+            }
             if (intent.kind === 'delegate') {
               // 澄清收口（任务 1）：本回合已经进入"平台请用户选一个"的收口，任何再次委派都在
               // 此拦住——计划模式的后续步骤、单步模式的重新派单都不该发生（用户要先回答）。
@@ -767,7 +721,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 的实体。来源 A = 本会话执行过的任务的 calls 快照（平台 args 规格机械
               // 提取，只取执行过的不取搜索结果候选）；来源 B = 本轮澄清绑定选定的候选。
               // 两个来源都为空时不挂字段——老路径的判定一字不变。
-              const sessionEntities = mergeSessionEntities(
+              const sessionEntities = taskEventContext ? [] : mergeSessionEntities(
                 clarificationSelected ? [clarificationSelected] : [],
                 await collectSessionEntitiesSafely({
                   platformTasks: deps.platformTasks,
@@ -777,10 +731,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   requestId: ctx.requestId,
                 }),
               );
-              const entitySources: PlanEntitySources = {
-                currentMessage: userMessage,
-                ...(referenceEvidence ? { referenceEvidence: referenceEvidence.text } : {}),
-                ...(sessionEntities.length > 0 ? { sessionEntities } : {}),
+              const quotedEvidence = getQuotedEvidence(inputContext?.messageReference);
+              const entitySources: PlanEntitySources = taskEventContext?.entitySources ?? {
+                currentMessage: taskEventContext?.event.run.originMessage ?? userMessage,
+                ...(quotedEvidence ? { quotedEvidence } : {}),
+                ...(!taskEventContext && referenceEvidence ? { referenceEvidence: referenceEvidence.text } : {}),
+                ...(!taskEventContext && sessionEntities.length > 0 ? { sessionEntities } : {}),
               };
               // 计划模式（Phase 6，架构 §3 规划者/执行者）：request 带「第N/M步：」前缀
               // 就是多步拆解的一步。无前缀 = 单步，行为与从前完全一样（结果 terminate
@@ -799,6 +755,47 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 }));
               }
               const request = step ? step.request : intent.request;
+              const backgroundDispatch = deps.workerDispatchMode === 'background' || Boolean(taskEventContext);
+              if (backgroundDispatch) {
+                if (!deps.backgroundTasks) {
+                  turn.delegationFailed = true;
+                  if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '后台任务服务不可用' });
+                  throw new ToolUserError('后台任务服务当前不可用，任务没有提交。');
+                }
+                const workerArgs = {
+                  request,
+                  turnDeclaration: step
+                    ? { ...intent, request }
+                    : intent,
+                  entitySources,
+                  ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
+                  ...(step ? { stepLabel: step.label } : {}),
+                };
+                await dispatchBackgroundTask({
+                  manager: deps.backgroundTasks,
+                  trusted: ctx,
+                  args: workerArgs,
+                  originMessage: userMessage,
+                  ...(inputContext ? { inputContext } : {}),
+                  ...(planId ? { planId } : {}),
+                  ...(step ? { step: { stepIndex: step.stepIndex, totalSteps: step.totalSteps } } : {}),
+                  ...(taskEventContext ? { taskEvent: taskEventContext.event } : {}),
+                  fallbackFailure: FALLBACK_FAILURE,
+                  renderReceipt: renderBackgroundTaskReceipt,
+                  onAccepted: (receipt, text) => {
+                    turn.backgroundStarted = true;
+                    turn.backgroundTaskId = receipt.taskId;
+                    turn.backgroundRunId = receipt.runId;
+                    turn.backgroundTaskState = receipt.state;
+                    turn.backgroundReceiptText = text;
+                  },
+                  onFailure: async (error) => {
+                  turn.delegationFailed = true;
+                  if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '后台任务登记未完成' });
+                  if (!(error instanceof ToolUserError)) console.error(JSON.stringify({ event: 'background_task_submit_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
+                  },
+                });
+              }
               try {
                 // request 是宿主委托执行的加工后请求（指代已解析成实体），
                 // 与 entitySources.currentMessage 里的原始用户消息刻意分开。
@@ -1128,6 +1125,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         pendingPlan: Boolean(turn.pendingPlan),
         resultPendingPlan: Boolean(result.pendingPlan),
         intentKind: turn.intent?.kind ?? null,
+        backgroundStarted: turn.backgroundStarted,
+        backgroundTaskId: turn.backgroundTaskId,
+        backgroundRunId: turn.backgroundRunId,
+        backgroundTaskState: turn.backgroundTaskState,
+        backgroundReceiptText: turn.backgroundReceiptText,
         needsLoop,
         planModeTurn,
         needsRounds: turn.needsRounds,
@@ -1143,6 +1145,29 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       let needsRelay = '';
       if (exitDecision.kind === 'direct') {
         logExitEvents(exitDecision.events);
+        if (taskEventContext && turn.backgroundStarted) {
+          const continuationMessages = sanitizeTranscriptMessages(stripHistoryNotes(result.messages.slice(initialMessageCount)));
+          await saveTranscript(deps.sessions, {
+            sessionId: ctx.sessionId,
+            principalId: ctx.principalId,
+            messages: sanitizeTranscriptMessages([...persistedLoaded, ...taskEventContext.promptMessages, ...continuationMessages]),
+          });
+          const { events } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
+          for (const event of events) await deps.conversationLog?.append(event);
+          taskEventContinuationAccepted.add(ctx);
+          console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'background_task_continuation_accepted' }));
+          return { text: '' };
+        }
+        if (turn.backgroundStarted) {
+          // 后台受理回执必须连同 route toolCall/toolResult（details.routeReceipt='background'，
+          // 由驱动的 terminate 语义写入 result.messages）一起落转录（修复 5）：direct 出口只落
+          // [loaded, user, 合成回执] 时这对消息整体被丢弃，repeat-request 的
+          // findRepeatedDelegatedRequest 认不出"同文请求已后台派发"——用户重发同文会再起
+          // 一个后台任务（2026-10-19 防线要防的 B1/F6 形态）。受理只是登记与排队状态，
+          // 不是执行成功的证明：routeReceipt='background' 本就不算执行，matcher 语义不变。
+          const continuationMessages = sanitizeTranscriptMessages(stripHistoryNotes(result.messages.slice(initialMessageCount)));
+          return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage, Boolean(turn.execution), continuationMessages);
+        }
         return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage, Boolean(turn.execution));
       }
       if (exitDecision.kind === 'relay') {
@@ -1165,10 +1190,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       logExitEvents(replyExit.events);
       replyText = replyExit.text;
 
+      const persistedTurnMessages = taskEventContext
+        ? [...persistedLoaded, ...taskEventContext.promptMessages, ...sanitizeTranscriptMessages(stripHistoryNotes(result.messages.slice(initialMessageCount)))]
+        : sanitizeTranscriptMessages(stripHistoryNotes(result.messages));
       await saveTranscript(deps.sessions, {
         sessionId: ctx.sessionId,
         principalId: ctx.principalId,
-        messages: sanitizeTranscriptMessages(stripHistoryNotes(result.messages)),
+        messages: persistedTurnMessages,
       });
 
       if (!replyText.trim()) {
@@ -1176,7 +1204,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         const reason = timedOut ? 'turn_timeout' : 'empty_reply';
         const fallback = timedOut ? FALLBACK_TIMEOUT : FALLBACK_FAILURE;
         await persistAssistantAndContext(deps, ctx, fallback, contextUpdateQueues);
-        scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
+        if (!taskEventContext) scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
         console.info(JSON.stringify({ event: 'fallback_reply', requestId: ctx.requestId, reason }));
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason, ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
         return { text: fallback };
@@ -1188,21 +1216,23 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       for (const { taskId, resultText } of taskResults) {
         void deps.platformTask.recordTaskResult?.(taskId, { resultText })?.catch(() => undefined);
       }
-      scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
+      if (!taskEventContext) scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
       // turn_span 的 outcome 带上资源耗尽分类（路径 1"失败必达"）：委派超时的回合以
       // 合成终稿收尾，outcome 记 resource_exhausted 供审计与续跑识别；delegation_span
       // 的 failed/timeout 分类由 context.ts 独立落账，两侧不互斥。
       console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: turn.resourceExhausted ? 'resource_exhausted' : needsRelay ? (needsLoop ? 'needs_loop_relayed' : 'plan_steps_relayed') : 'ok', ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
-      return { text: replyText };
-      async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals, executed?: boolean): Promise<AgentReply> {
+      return { text: replyText, ...(turn.resendRefs.length > 0 ? { artifactRefs: turn.resendRefs } : {}) };
+      async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals, executed?: boolean, middleMessages?: AgentMessage[]): Promise<AgentReply> {
         const now = Date.now();
         // Direct exits bypass normal reply hygiene, so strip paths before display, storage, and logs.
         const replyExit = sanitizeServerPathReply({ text, ...(executed === undefined ? {} : { executed }) });
         logExitEvents(replyExit.events);
         const safeText = replyExit.text;
         const messages = [
-          ...loaded,
-          { role: 'user', content: userMessage, timestamp: now } as unknown as AgentMessage,
+          ...(taskEventContext ? [...persistedLoaded, ...taskEventContext.promptMessages] : [...loaded, currentUserMessage]),
+          // 后台受理等 direct 出口的转录中段（route toolCall/toolResult 等宿主标记）：插在
+          // 用户消息与合成回执之间，与正常出口落 result.messages 的形状一致（修复 5）。
+          ...(middleMessages ?? []),
           deps.driver.synthesizeAssistant
             ? deps.driver.synthesizeAssistant(safeText)
             : ({ role: 'assistant', content: safeText, timestamp: now + 1 } as unknown as AgentMessage),
@@ -1213,78 +1243,69 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           kind: 'tool_result' as const, content: redactInternalIds(redactSensitiveText(toolResult)), createdAt: new Date().toISOString(), requestId: ctx.requestId,
         }] : [];
         await persistAssistantAndContext(deps, ctx, safeText, contextUpdateQueues, toolEvents);
-        scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
+        if (!taskEventContext) scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
         // usage 缺席（模型没被调用 / 网关没回传）时字段缺席，不是全零（口径见 driver.ts）。
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome, ...(usage ? usageSpanFields(usage) : {}) }));
         return { text: safeText };
       }
     },
+    async handleTaskEvent(ctx: TrustedContext, event: BackgroundTaskEvent): Promise<AgentReply | null> {
+      const existing = taskEventInFlight.get(event.eventId);
+      if (existing) return existing;
+      if (!deps.conversationLog) throw new Error('后台任务事件无法写入会话历史。');
+      const processing = processBackgroundTaskEvent(ctx, event, {
+        conversationLog: deps.conversationLog,
+        ...(deps.taskPlans ? { taskPlans: deps.taskPlans } : {}),
+        appendPlanFact,
+        entitySourcesOf: (taskEvent) => {
+          const metadata = taskEvent.run.metadata;
+          const sources = metadata && typeof metadata === 'object' ? (metadata as Record<string, unknown>)['entitySources'] : undefined;
+          if (sources && typeof sources === 'object' && !Array.isArray(sources)
+            && typeof (sources as Record<string, unknown>)['currentMessage'] === 'string') return sources as PlanEntitySources;
+          const quotedEvidence = getQuotedEvidence(taskEvent.run.inputContext?.messageReference);
+          return { currentMessage: taskEvent.run.originMessage, ...(quotedEvidence ? { quotedEvidence } : {}) };
+        },
+        renderNeeds: (needs) => renderNeedsUserText(needs, ''),
+        renderClarification: (result) => result.clarification ? composeClarificationReply(result.clarification, result.text) : FALLBACK_FAILURE,
+        continuePlan: async (eventCtx, taskEvent, eventContext) => {
+          taskEventContexts.set(eventCtx, eventContext);
+          const continuation = await this.handleTurn(eventCtx, taskEvent.run.originMessage, taskEvent.run.inputContext);
+          if (taskEventContinuationAccepted.has(eventCtx)) return null;
+          return continuation.text.trim() ? continuation : { text: FALLBACK_FAILURE };
+        },
+        persistReply: async (eventCtx, taskEvent, promptMessage, replyText) => {
+          const { messages: sessionMessages } = await loadTranscript(deps.sessions, eventCtx.sessionId, sessionTtlMs);
+          const assistant = replyText
+            ? deps.driver.synthesizeAssistant
+              ? deps.driver.synthesizeAssistant(replyText)
+              : ({ role: 'assistant', content: replyText, timestamp: Date.now() } as unknown as AgentMessage)
+            : null;
+          await saveTranscript(deps.sessions, {
+            sessionId: eventCtx.sessionId,
+            principalId: eventCtx.principalId,
+            messages: sanitizeTranscriptMessages([...sessionMessages, promptMessage, ...(assistant ? [assistant] : [])]),
+          });
+          if (!replyText) return null;
+          await persistAssistantAndContext(deps, eventCtx, replyText, contextUpdateQueues);
+          console.info(JSON.stringify({ event: 'task_event_replied', requestId: eventCtx.requestId, taskId: taskEvent.run.taskId, runId: taskEvent.run.runId, state: taskEvent.run.state }));
+          return { text: replyText };
+        },
+        fallbackFailure: FALLBACK_FAILURE,
+        log: (name, fields) => console.error(JSON.stringify({ event: name, ...fields })),
+      });
+      taskEventInFlight.set(event.eventId, processing);
+      try {
+        return await processing;
+      } finally {
+        if (taskEventInFlight.get(event.eventId) === processing) taskEventInFlight.delete(event.eventId);
+        taskEventContexts.delete(ctx);
+        taskEventContinuationAccepted.delete(ctx);
+      }
+    },
   };
-}
-
-/** 回复里是否带财务数字——用来区分"编造的结论"和"能力边界说明"。 */
-export function hasFinancialFigure(text: string): boolean {
-  return /[\d,]+\.?\d*\s*(元|块|万|亿)|余额|金额|发生额/.test(text);
-}
-
-/**
- * worker 文本里"有价值的无数字说明"：剥掉执行面注脚后非空、不含财务数字、不含执行语言
- * 指纹（脚本路径/错误码/JSON 片段——那是模型在翻译协议材料，不是给用户的说明），也不是
- * 宿主的通用兜底——这种说明才配附在状态文案后面，否则只会稀释它。
- * 恢复路径（确认后零执行）与 delegate 路径的收尾兜底共用同一把尺。
- *
- * 这把尺是 runtime 自己的私有判据（判据本体 stripFootprint / hasFinancialFigure /
- * executionLanguageFingerprints 都不在 turn-relay 那一侧），调用点全在本文件内；导出仅为
- * golden 测试直接钉形状，包的公开出口（index.ts）不认它——不因测试需要把它抬成跨模块
- * 公共协议。
- */
-export function usefulWorkerNote(text: string): string {
-  const note = stripFootprint(text).trim();
-  if (!note || hasFinancialFigure(note) || note === NO_EXECUTION_CLARIFICATION || note === ACTIVATED_PLAN_NOT_EXECUTED || note === RESUMED_PLAN_NOT_EXECUTED) return '';
-  if (executionLanguageFingerprints(note).length > 0) return '';
-  return note;
-}
-
-/**
- * 选择类澄清的本轮回复：表内模板 + 平台信封数据机械组装（宿主发音，模型不参与）；
- * worker 留下的干净说明（无财务数字、非协议材料——判据复用 usefulWorkerNote）才附后。
- *
- * 与 usefulWorkerNote 同住 runtime.ts：这把尺是 runtime 私有判据，澄清回复是它的直接
- * 使用者（turn-relay 不能 import runtime，否则循环）——组装逻辑跟着判据走，不复制第二份。
- */
-export function composeClarificationReply(clarification: SelectionClarification, workerText: string): string {
-  const question = clarificationTextFor(clarification.code, clarification);
-  const note = usefulWorkerNote(workerText);
-  return note ? `${question}\n\n${note}` : question;
 }
 
 /**
  * 多任务消歧的编号回复匹配与消歧问题渲染住在 plan-binding.ts（与 resolvePlanBinding
  * 同模块：判定与文案一处，两边不复制）。
  */
-
-/**
- * 日期尾注：拼在组装后系统提示词的**最尾部**（business skill 之后；恢复路径的整理提示词
- * 同样拼尾）。LLM 的 prompt cache 按前缀逐字节匹配命中：日期排在提示词前部时，跨天即
- * 炸断全部稳定前缀——SYSTEM_PROMPT 与 skill 文本每次调用都按未命中付全价。放尾部后，
- * 跨天只有这一行动态，前面的稳定内容继续命中缓存。文案与原日期行一字不差（模型仍能
- * 看到完整日期信息），只挪位置。模块加载时求值一次，与原实现同频。
- */
-const DATE_SUFFIX = `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`;
-
-const SYSTEM_PROMPT = [
-  '你是面向用户的主 Agent，职责只有三个：选 conversation 还是 delegate；把指代解析成具体实体；汇总子 Agent 的结果。',
-  '**你没有平台能力**：不能发现域能力、不能读域文档、不能执行、不能摸索传参——这些全是子 Agent 的活。**因此不要拆解执行步骤**：步骤是子 Agent 上下文里的域 SOP 定义的，你复述一遍只是制造第二份真相。只有"同一个动作要对 N 个独立对象各做一次"才值得拆多步；单一对象的任务再长也不拆。',
-  '每回合必须先调用一次 route_current_turn 申报本轮动作（conversation / delegate），不得跳过申报；字段口径以工具说明为准，填错会被退回重填。',
-  '申报 delegate 后由宿主把加工后的请求委派 17dz 子 Agent 执行。子 Agent 执行不了时会退回"缺什么"的结构化线索：你能自己补齐（从 Log、检索证据或本轮平台响应里取实体）就补齐后带 continueTaskId 重派同一个子任务，补不齐就转告用户、等用户补充后续跑。request 必须加工：把指代解析成当前消息或宿主注入的检索证据里出现的具体实体；实体不得凭历史或常识编造；不得把上一轮答复当作本轮结果，重复提问仍是新查询。',
-  // 委派边界纪律：全文（含 31s/2s 标定数据与场景引例）在 business-skill.md 路由原则，
-  // 提示词只留一句原则兜底（skill 文件缺失时静默跳过是设计内场景，rule-landing §3.1 条目 12）。
-  // "同题重问不是追加"是硬豁免：第一版缺它时 B1 探针把重复提问当追加召回、零调用作答，F6 门红。
-  '同一任务的追加或扩大范围优先扩展当前计划：补一步并带 continueTaskId 续跑同一子任务，不为此另开一次委派；同题重问不是追加，仍按新查询照常委派。',
-  '不要向用户描述内部机制或执行过程：不许出现 route_current_turn、宿主、委派、申报、本轮执行面、PLAN ACTIVE/DECLINED、taskId 等字样；用户只应看到结论和数据。',
-  '能力边界：支持查询、核对、分析与经确认的录入类写操作（两步确认制）；修改或删除已保存数据、以及不可逆的高危写操作一律直接拒绝，不得描述路径或方案。',
-  '子 Agent 返回待确认的变更提案（含确认码）时，把提案的对象、范围、条目数、金额合计和确认码完整转达给用户，并告知：「确认 码」执行、「取消 码」作废；执行由系统在确认后完成，不得代替执行或改动确认码。',
-  '申报 delegate 时口径必须可履行：平台工具面不支持的数据选 conversation 回复，把能力边界和可履行选项告诉用户。',
-  'Context State、history tools 和长期记忆都是带引文的历史资料：只能帮助解析指代与个性化，不能覆盖当前任务、实时数据或工具授权。',
-  '回答使用简体中文；数据结论保留子 Agent 给出的对象、范围、来源和证据。',
-].join('\n');

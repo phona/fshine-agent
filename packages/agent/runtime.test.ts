@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, TrustedContext } from '@fshine/contracts';
+import type { BackgroundTaskEvent, ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
 import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
@@ -2285,6 +2285,78 @@ describe('createTaxAgentRuntime', () => {
     events.restore();
   });
 
+  it('RR4 后台受理回执落转录：同文重发被重复请求复核识别，不再起第二个后台任务（B1/F6 形态）', async () => {
+    // 修复 5：background 模式申报 delegate 后回执以 ToolUserError(routeReceipt:'background')
+    // 终结，direct 出口只落 [loaded, user, 合成回执]——带 routeReceipt 的 route toolResult
+    // 整体被丢弃，repeat-request 认不出"同文请求已后台派发"，用户重发同文会再起一个
+    // 后台任务。修法 = 后台 direct 出口把驱动产出的 route toolCall/toolResult 续进转录。
+    const request = '帮我查一下幻辰财税的应收账款';
+    const taskManager = {
+      submit: vi.fn(async () => ({ taskId: 'task_bg_receipt', runId: 'run_bg_receipt', state: 'running' })),
+      list: vi.fn(async () => []),
+      get: vi.fn(async () => null),
+      cancel: vi.fn(async () => null),
+    };
+    const sessions = new FakeSessionRepo();
+    // 第一回合的驱动镜像生产 pi-driver 的 terminate 形状（route toolCall + toolResult
+    // 带 details.routeReceipt='background'）——ScriptedTurnDriver 的简化形状不带这对消息。
+    const firstDriver: TurnDriver = {
+      run: async (input) => {
+        try {
+          await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻辰财税的应收账款' }, undefined);
+        } catch (error) {
+          if (!(error instanceof ToolUserError)) throw error;
+          return {
+            text: error.message,
+            messages: [
+              ...input.messages,
+              { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'delegate' } }], timestamp: 1 } as never,
+              { role: 'toolResult', content: [{ type: 'text', text: error.message }], details: { routeReceipt: error.routeReceipt }, timestamp: 2 } as never,
+            ],
+          };
+        }
+        throw new Error('后台受理应终结第一回合');
+      },
+    };
+    const firstRuntime = createTaxAgentRuntime({
+      driver: firstDriver,
+      sessions,
+      platformTask: subagent(),
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+    } as never);
+    const firstReply = await firstRuntime.handleTurn(makeCtx({ requestId: 'req_bg_receipt_1' }), request);
+    expect(firstReply.text).toMatch(/受理|排队/);
+    expect(taskManager.submit).toHaveBeenCalledTimes(1);
+    // 转录里确实有带 routeReceipt='background' 的 route toolResult（受理事实，非执行凭证）
+    const saved = sessions.peek('sess_1')?.state as Array<{ role?: string; details?: { routeReceipt?: string } }>;
+    expect(saved.some((message) => message.role === 'toolResult' && message.details?.routeReceipt === 'background')).toBe(true);
+
+    // 同文重发：模型申报 conversation（实测错枝）→ 宿主把"已后台派发"事实递给申报处退回
+    // 重填一次（与 RR1/RR2 同一形状：第二次申报被放行）
+    const events = captureEvents('repeat_request_declaration_bounced');
+    const secondDriver = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+      { text: '任务仍在后台执行中，完成后会单独反馈。' },
+    ]);
+    const secondRuntime = createTaxAgentRuntime({
+      driver: secondDriver.driver,
+      sessions,
+      platformTask: subagent(),
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+    } as never);
+    const reply = await secondRuntime.handleTurn(makeCtx({ requestId: 'req_bg_receipt_2' }), request);
+
+    expect(events.seen).toHaveLength(1);
+    expect(events.seen[0]?.['priorDelegations']).toBe(1);
+    // 退回重填一次后放行（增强不是门）；本回合没有第二次后台提交
+    expect(taskManager.submit).toHaveBeenCalledTimes(1);
+    expect(reply.text).toBe('任务仍在后台执行中，完成后会单独反馈。');
+    events.restore();
+  });
+
   it('SP1 终稿里的服务器路径不外发：删掉路径、保留内容、留一条告警', async () => {
     const leaked = [
       '**已产出文件**（均在 `tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/`）：',
@@ -2372,5 +2444,499 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).not.toContain('tmp/');
     expect(reply.text).toContain('整理好的2026年08月工资表.xlsx');
     events.restore();
+  });
+
+  it('后台模式在多步计划第一步受理后立刻结束 Planner 回合，受理回执不冒充执行结果', async () => {
+    const submitted: unknown[] = [];
+    const taskManager = {
+      submit: vi.fn(async (input: unknown) => {
+        submitted.push(input);
+        return { taskId: 'task_background_a', runId: 'run_background_a', state: 'running' };
+      }),
+      list: vi.fn(async () => []),
+      get: vi.fn(async () => null),
+      cancel: vi.fn(async () => null),
+    };
+    const inlineRun = vi.fn(async (): Promise<SubagentTaskResult> => ({
+      taskId: 'task_inline_should_not_run',
+      text: '幻辰的应收余额为 51 元。',
+      execution: { planId: 'plan_a', version: 1, calls: 1 },
+    }));
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      // 此步骤不能在同一 Planner 回合里被派发：第 1 步只是受理，不是执行完成。
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+      { text: '两步都查完了。' },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(inlineRun),
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+    } as never);
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_background_first_step' }), '查幻辰和新兴五金的应收账款');
+
+    expect(taskManager.submit).toHaveBeenCalledTimes(1);
+    expect(submitted[0]).toMatchObject({
+      originMessage: '查幻辰和新兴五金的应收账款',
+      planId: expect.any(String),
+      step: { stepIndex: 1, totalSteps: 2 },
+      args: { request: '查询幻辰的应收账款' },
+    });
+    expect(inlineRun).not.toHaveBeenCalled();
+    expect(inputs).toHaveLength(1);
+    expect(reply.text).toMatch(/受理|排队/);
+    expect(reply.text).not.toContain('51 元');
+    expect(reply.text).not.toContain('两步都查完了');
+    expect(reply.text).not.toBe(NO_EXECUTION_CLARIFICATION);
+  });
+
+  it('task_control 的 list/status/cancel 只使用 TrustedContext 的宿主范围', async () => {
+    const taskManager = {
+      submit: vi.fn(),
+      list: vi.fn(async () => [{ taskId: 'task_a', runId: 'run_a', state: 'running' }]),
+      get: vi.fn(async () => ({ taskId: 'task_a', runId: 'run_a', state: 'running' })),
+      cancel: vi.fn(async () => ({ taskId: 'task_a', runId: 'run_a', state: 'cancelling' })),
+    };
+    const { driver, inputs } = recordingDriver([
+      {
+        toolCalls: [
+          { tool: 'route_current_turn', args: { kind: 'conversation' } },
+          { tool: 'task_control', args: { action: 'list', principalId: 'wecom:other', sessionId: 'other' } },
+        ],
+        text: '当前任务已列出。',
+      },
+      {
+        toolCalls: [
+          { tool: 'route_current_turn', args: { kind: 'conversation' } },
+          { tool: 'task_control', args: { action: 'status', taskId: 'task_a', principalId: 'wecom:other', sessionId: 'other' } },
+        ],
+        text: '任务仍在执行。',
+      },
+      {
+        toolCalls: [
+          { tool: 'route_current_turn', args: { kind: 'conversation' } },
+          { tool: 'task_control', args: { action: 'cancel', taskId: 'task_a', principalId: 'wecom:other', sessionId: 'other' } },
+        ],
+        text: '已请求取消。',
+      },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+    } as never);
+    const ctx = makeCtx({ requestId: 'req_task_control' });
+
+    for (const [index, message] of ['查看后台任务', '任务状态', '取消这个任务'].entries()) {
+      await runtime.handleTurn({ ...ctx, requestId: `${ctx.requestId}_${index}` }, message);
+    }
+
+    expect(taskManager.list).toHaveBeenCalledWith({ principalId: ctx.principalId, sessionId: ctx.sessionId });
+    expect(taskManager.get).toHaveBeenCalledWith({ principalId: ctx.principalId, sessionId: ctx.sessionId }, 'task_a');
+    expect(taskManager.cancel).toHaveBeenCalledWith({ principalId: ctx.principalId, sessionId: ctx.sessionId }, 'task_a');
+    expect(inputs.every((input) => input.tools.some((tool) => tool.name === 'task_control'))).toBe(true);
+  });
+
+  it('引用上下文随第三参数进入 Planner 与每条 transcript user message，但正文和确认匹配仍保持独立', async () => {
+    const appended: ConversationEventRecord[] = [];
+    const conversationLog = {
+      append: async (event: ConversationEventRecord) => { appended.push(event); },
+      search: async () => [],
+      list: async () => [],
+    };
+    const sessions = new FakeSessionRepo();
+    const reference = { kind: 'text' as const, text: '确认 A1B2C3' };
+    const matched: string[] = [];
+    const platformTask = {
+      ...subagent(),
+      matchConfirmation: async (_ctx: TrustedContext, message: string) => {
+        matched.push(message);
+        return message === '确认 A1B2C3' ? { text: '确认已处理。', outcome: 'confirmed' } as never : null;
+      },
+    };
+    const { driver, inputs } = recordingDriver(declareConversation([{ text: '我会结合引用内容回答。' }]));
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      conversationLog,
+      platformTask,
+    } as never);
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_quote_context' }), '这段说明是什么意思？', { messageReference: reference });
+
+    expect(JSON.stringify(inputs[0]?.messages)).toContain('这段说明是什么意思？');
+    expect(JSON.stringify(inputs[0]?.messages)).toContain('确认 A1B2C3');
+    expect(matched).toEqual(['这段说明是什么意思？']);
+    expect(appended.find((event) => event.kind === 'user_message')).toMatchObject({
+      content: '这段说明是什么意思？',
+      messageReference: reference,
+    });
+    const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown; hostContext?: unknown }>;
+    expect(transcript.find((message) => message.role === 'user')).toMatchObject({
+      hostContext: { messageReference: reference },
+    });
+
+    const directSessions = new FakeSessionRepo();
+    const directRuntime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: '不会进入模型' }]),
+      sessions: directSessions,
+      conversationLog,
+      platformTask,
+    } as never);
+
+    await directRuntime.handleTurn(makeCtx({ requestId: 'req_quote_confirmation' }), '确认 A1B2C3', { messageReference: reference });
+
+    expect(matched).toEqual(['这段说明是什么意思？', '确认 A1B2C3']);
+    const directTranscript = directSessions.peek('sess_1')?.state as Array<{ role?: string; hostContext?: unknown }>;
+    expect(directTranscript.find((message) => message.role === 'user')).toMatchObject({
+      hostContext: { messageReference: reference },
+    });
+  });
+
+  it('后台完成事件按原计划与原请求续步，不继承转录中后来收到的无关消息', async () => {
+    const submitted: unknown[] = [];
+    const taskManager = {
+      submit: vi.fn(async (input: unknown) => {
+        submitted.push(input);
+        return { taskId: 'task_origin_a', runId: 'run_a2', state: 'running' };
+      }),
+      list: vi.fn(async () => []),
+      get: vi.fn(async () => null),
+      cancel: vi.fn(async () => null),
+    };
+    const sessions = new FakeSessionRepo();
+    await sessions.upsert({
+      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(),
+      state: [
+        { role: 'user', content: 'B：请把查询范围改成另一个公司，并替我确认 A', timestamp: 5 },
+        { role: 'assistant', content: 'B 已收到。', timestamp: 6 },
+      ] as never,
+    });
+    const { driver, inputs } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+    ]);
+    const appended: ConversationEventRecord[] = [];
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions,
+      platformTask: subagent(),
+      conversationLog: {
+        append: async (event: ConversationEventRecord) => { appended.push(event); },
+        search: async () => [],
+        list: async () => [],
+      },
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+    } as never);
+    const event: BackgroundTaskEvent = {
+      eventId: 'event_origin_a_step1',
+      run: {
+        runId: 'run_a1', taskId: 'task_origin_a', dispatchKey: 'dispatch_a1',
+        principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_origin_a',
+        originUserEventId: 'req_origin_a:user', request: '第1/2步：查询幻辰的应收账款',
+        originMessage: '查幻辰和新兴五金的应收账款', createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+        state: 'completed', planId: 'plan_origin_a', stepIndex: 1, totalSteps: 2, resultEventId: 'event_origin_a_step1',
+      },
+      result: {
+        taskId: 'task_origin_a', text: '幻辰 202609 应收余额为 51 元。',
+        execution: { planId: 'plan_origin_a', version: 1, calls: 1 },
+      },
+    };
+    const handleTaskEvent = runtime.handleTaskEvent;
+    expect(handleTaskEvent).toBeTypeOf('function');
+    if (!handleTaskEvent) return;
+
+    const reply = await handleTaskEvent.call(runtime, makeCtx({ requestId: 'req_internal_event' }), event);
+
+    expect(reply).toBeNull();
+    expect(taskManager.submit).toHaveBeenCalledTimes(1);
+    expect(submitted[0]).toMatchObject({
+      args: { taskId: 'task_origin_a', request: '查询新兴五金的应收账款' },
+      originMessage: '查幻辰和新兴五金的应收账款',
+      planId: 'plan_origin_a',
+      step: { stepIndex: 2, totalSteps: 2 },
+    });
+    expect(JSON.stringify(inputs[0]?.messages)).toContain('幻辰 202609 应收余额为 51 元。');
+    expect(JSON.stringify(inputs[0]?.messages)).not.toContain('B：请把查询范围改成另一个公司');
+    expect(appended).toContainEqual(expect.objectContaining({
+      eventId: event.eventId,
+      kind: 'task_event',
+      taskId: 'task_origin_a',
+      runId: 'run_a1',
+    }));
+  });
+
+  // ── 后台多步计划的连续零执行熔断（修复 4）──────────────────────────────────
+  // inline 的熔断计数住在每回合新建的 turn state；后台每步一个事件一个回合，计数必清零
+  // ——零执行 "completed" 步可链完整份计划，每步烧一整个 worker 会话。且零执行步落的
+  // 计划事实是 'failed' 而续跑判定不看 execution 照样续：同一事件"事实写 failed、行动
+  // 却继续"。修法 = 计数持久化到计划事实（projection 尾部连续 failed 步），事实与续跑
+  // 判定同源。
+
+  /** 计划事实仓库替身：append 落内存，project 按步号排序、每步取最后一条事实。 */
+  function planFactsRepo(seed: Array<{ stepIndex: number; status: 'done' | 'failed' | 'needs' }>, totalSteps: number, planId: string) {
+    const facts: TaskPlanStepFact[] = seed.map((step, index) => ({
+      factId: `seed:${planId}:${step.stepIndex}:${index}`,
+      principalId: 'wecom:user_a', sessionId: 'sess_1', planId,
+      stepIndex: step.stepIndex, totalSteps,
+      request: `第${step.stepIndex}/${totalSteps}步：查询`,
+      status: step.status,
+      createdAt: new Date(1_000 + index).toISOString(),
+    }));
+    return {
+      facts,
+      repo: {
+        append: async (fact: TaskPlanStepFact) => { facts.push(fact); },
+        project: async () => {
+          if (facts.length === 0) return null;
+          const lastByStep = new Map<number, TaskPlanStepFact>();
+          for (const fact of facts) lastByStep.set(fact.stepIndex, fact);
+          const steps = [...lastByStep.values()]
+            .sort((a, b) => a.stepIndex - b.stepIndex)
+            .map((fact) => ({ stepIndex: fact.stepIndex, status: fact.status }));
+          return {
+            planId, sessionId: 'sess_1', totalSteps,
+            started: steps.filter((step) => step.status === 'started').length,
+            done: steps.filter((step) => step.status === 'done').length,
+            failed: steps.filter((step) => step.status === 'failed').length,
+            needs: steps.filter((step) => step.status === 'needs').length,
+            steps,
+            updatedAt: new Date().toISOString(),
+          };
+        },
+        openPlans: async () => [],
+        latestOpenPlan: async () => null,
+        planIdForTask: async () => null,
+      },
+    };
+  }
+
+  it('后台连续零执行达阈值：停止派发后续步骤，熔断汇总直达用户（事实与续跑判定同源）', async () => {
+    const taskManager = {
+      submit: vi.fn(async () => ({ taskId: 'task_zero_exec', runId: 'run_next', state: 'running' })),
+      list: vi.fn(async () => []),
+      get: vi.fn(async () => null),
+      cancel: vi.fn(async () => null),
+    };
+    // 步 1、2 已是零执行 failed；本次事件是步 3 又一个零执行 completed（无 execution、
+    // 无 needs 交还）——尾部连续 3 步 failed 达 MAX_PLAN_ZERO_EXEC_STEPS。
+    const plans = planFactsRepo([
+      { stepIndex: 1, status: 'failed' },
+      { stepIndex: 2, status: 'failed' },
+    ], 4, 'plan_zero_exec');
+    const { driver } = recordingDriver([
+      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第4/4步：查询最后一项' } }] },
+    ]);
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      conversationLog: { append: async () => {}, search: async () => [], list: async () => [] },
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'background',
+      taskPlans: plans.repo as never,
+    } as never);
+    const event: BackgroundTaskEvent = {
+      eventId: 'event_zero_exec_3',
+      run: {
+        runId: 'run_zero_exec_3', taskId: 'task_zero_exec', dispatchKey: 'dispatch_zero_exec_3',
+        principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_zero_exec',
+        originUserEventId: 'req_zero_exec:user', request: '第3/4步：查询第三项',
+        originMessage: '查四项数据', createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+        state: 'completed', planId: 'plan_zero_exec', stepIndex: 3, totalSteps: 4, resultEventId: 'event_zero_exec_3',
+      },
+      result: { taskId: 'task_zero_exec', text: '方案如下：先查询再汇总。' },
+    };
+    const handleTaskEvent = runtime.handleTaskEvent;
+    expect(handleTaskEvent).toBeTypeOf('function');
+    if (!handleTaskEvent) return;
+
+    const reply = await handleTaskEvent.call(runtime, makeCtx({ requestId: 'req_zero_exec_event' }), event);
+
+    // 不再派发第 4 步：熔断先于 continuePlan
+    expect(taskManager.submit).not.toHaveBeenCalled();
+    // 用户拿到可行动的机械汇总（与 inline 熔断同一份话术）
+    expect(reply?.text).toContain('计划执行已停止');
+    expect(reply?.text).toContain('连续 3 步');
+    expect(reply?.text).toContain('可以回复');
+    // 判据同源：本步事实确实落了 failed（零执行），但行动不再与它矛盾
+    expect(plans.facts.filter((fact) => fact.stepIndex === 3).at(-1)?.status).toBe('failed');
+  });
+
+  it('task_event 交付完成、待确认、缺信息、失败与取消事实，不伪装成用户消息', async () => {
+    const timestamp = new Date(1000).toISOString();
+    const makeEvent = (eventId: string, state: string, result?: unknown, error?: string, notice?: string): BackgroundTaskEvent => ({
+      eventId,
+      run: {
+        runId: `run_${eventId}`, taskId: 'task_event_outcomes', dispatchKey: `dispatch_${eventId}`,
+        principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_origin_event',
+        originUserEventId: 'req_origin_event:user', request: '查询幻辰 202609 应收',
+        originMessage: '查询幻辰 202609 应收', createdAt: timestamp, updatedAt: timestamp,
+        state: state as BackgroundTaskEvent['run']['state'], resultEventId: eventId,
+        ...(notice ? { metadata: { noticeDeliveries: [{ noticeId: `notice_${eventId}`, text: notice, status: 'sent' }] } } : {}),
+      },
+      ...(result !== undefined ? { result } : {}),
+      ...(error ? { error } : {}),
+    });
+    const cases: Array<{ event: BackgroundTaskEvent; includes?: string; expectedNull?: boolean }> = [
+      {
+        event: makeEvent('event_done', 'completed', {
+          taskId: 'task_event_outcomes', text: '幻辰 202609 应收余额为 51 元。',
+          execution: { planId: 'plan_event', version: 1, calls: 1 },
+        }),
+        includes: '幻辰 202609 应收余额为 51 元。',
+      },
+      {
+        event: makeEvent('event_pending', 'waiting_confirmation', {
+          taskId: 'task_event_outcomes', text: '请确认 A1B2C3。',
+          pendingPlan: { planId: 'plan_event', version: 1, userText: '请确认 A1B2C3。' },
+        }),
+        includes: '请确认 A1B2C3。',
+      },
+      {
+        event: makeEvent('event_needs', 'waiting_input', {
+          taskId: 'task_event_outcomes', text: 'worker internal',
+          needs: { missing: ['期间'], reason: '请求中没有期间', suggestion: '请提供期间' },
+        }),
+        includes: '请提供期间',
+      },
+      {
+        event: makeEvent('event_failed', 'failed', undefined, '后台任务无法完成，请重新发起。'),
+        includes: '后台任务无法完成',
+      },
+      {
+        event: makeEvent('event_cancelled', 'cancelled', {
+          taskId: 'task_event_outcomes', text: 'stale needs text',
+          needs: { missing: ['期间'], reason: 'old result' },
+        }),
+        includes: '后台任务已取消',
+      },
+      {
+        event: makeEvent('event_notice', 'waiting_confirmation', {
+          taskId: 'task_event_outcomes', text: '确认摘要已送达。',
+          pendingPlan: { planId: 'plan_event', version: 2, userText: '确认摘要已送达。' },
+        }, undefined, '确认摘要已送达。'),
+        expectedNull: true,
+      },
+    ];
+
+    for (const [index, item] of cases.entries()) {
+      const appended: ConversationEventRecord[] = [];
+      const sessions = new FakeSessionRepo();
+      const runtime = createTaxAgentRuntime({
+        driver: { run: vi.fn(async () => ({ text: 'Planner must not run for a terminal task event.', messages: [] })) },
+        sessions,
+        platformTask: subagent(),
+        conversationLog: {
+          append: async (event: ConversationEventRecord) => { appended.push(event); },
+          search: async () => [],
+          list: async () => [],
+        },
+      } as never);
+      const handle = runtime.handleTaskEvent;
+      expect(handle).toBeTypeOf('function');
+      if (!handle) return;
+      const reply = await handle.call(runtime, makeCtx({ requestId: `req_event_outcome_${index}` }), item.event);
+      if (item.expectedNull) expect(reply).toBeNull();
+      else expect(reply?.text).toContain(item.includes);
+      expect(appended).toContainEqual(expect.objectContaining({ eventId: item.event.eventId, kind: 'task_event' }));
+      expect(appended.some((event) => event.kind === 'user_message')).toBe(false);
+      const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; customType?: string }>;
+      expect(transcript.some((message) => message.customType === 'background_task_event')).toBe(true);
+    }
+  });
+
+  it('resumeTaskId 属于后台任务时，切回 inline 后确认仍异步派发并继承原来源快照', async () => {
+    const originalReference = { kind: 'text' as const, text: '查幻辰和新兴五金' };
+    const originalEntitySources = { currentMessage: '查幻辰和新兴五金', quotedEvidence: '新兴五金' };
+    const originalRun = {
+      runId: 'run_resume_before', taskId: 'task_resume_a', dispatchKey: 'dispatch_before',
+      principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_plan_a',
+      originUserEventId: 'req_plan_a:user', request: '查询新兴五金的应收账款',
+      originMessage: '查幻辰和新兴五金', createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+      state: 'waiting_confirmation' as const, planId: 'plan_a', stepIndex: 2, totalSteps: 3,
+      inputContext: { messageReference: originalReference },
+      metadata: { entitySources: originalEntitySources, label: '任务 1 · 查幻辰和新兴五金' },
+    };
+    const prepared = {
+      taskId: 'task_resume_a', request: '宿主已收到真实确认，继续原计划。', timeoutMs: 1000,
+      workspaceDir: 'tmp/task_resume_a', snapshotWorkspace: async () => [],
+      execute: vi.fn(async () => ({ taskId: 'task_resume_a', text: 'worker should stay in the manager' })),
+    };
+    const submitted: unknown[] = [];
+    const taskManager = {
+      submit: vi.fn(),
+      submitPrepared: vi.fn(async (input: unknown) => {
+        submitted.push(input);
+        return { taskId: 'task_resume_a', runId: 'run_resume_after', dispatchKey: 'req_resume_confirmation:resume:task_resume_a', state: 'queued' };
+      }),
+      list: vi.fn(async () => [originalRun]),
+      get: vi.fn(async (scope: unknown, taskId: string) => taskId === 'task_resume_a' ? originalRun : null),
+      cancel: vi.fn(),
+    };
+    const inlineRun = vi.fn(async (): Promise<SubagentTaskResult> => ({
+      taskId: 'task_resume_a', text: 'inline worker must not run after confirmation',
+      execution: { planId: 'plan_a', version: 1, calls: 1 },
+    }));
+    const platformTask = {
+      ...subagent(inlineRun),
+      prepare: vi.fn(async () => prepared),
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: 'confirmation should not reach planner' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask,
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'inline',
+    } as never);
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_confirmation', resumeTaskId: 'task_resume_a' }),
+      '确认 A1B2C3',
+      { messageReference: { kind: 'text', text: '确认 B9Z8Y7' } },
+    );
+
+    expect(reply.text).toContain('排队');
+    expect(taskManager.get).toHaveBeenCalledWith({ principalId: 'wecom:user_a', sessionId: 'sess_1' }, 'task_resume_a');
+    expect(platformTask.prepare).toHaveBeenCalledWith(expect.objectContaining({ taskId: 'task_resume_a' }), expect.objectContaining({ trusted: expect.objectContaining({ requestId: 'req_resume_confirmation' }) }));
+    expect(taskManager.submitPrepared).toHaveBeenCalledTimes(1);
+    expect(submitted[0]).toMatchObject({
+      dispatchKey: 'req_resume_confirmation:resume:task_resume_a',
+      prepared: { taskId: 'task_resume_a' },
+      originMessage: '查幻辰和新兴五金',
+      originUserEventId: 'req_plan_a:user',
+      inputContext: { messageReference: originalReference },
+      planId: 'plan_a',
+      step: { stepIndex: 2, totalSteps: 3 },
+      metadata: { kind: 'plan_resume', entitySources: originalEntitySources },
+    });
+    expect(inlineRun).not.toHaveBeenCalled();
+  });
+
+  it('当前切到后台模式也保留没有后台 run 的旧任务 inline 恢复路径', async () => {
+    const inlineRun = vi.fn(async (): Promise<SubagentTaskResult> => ({
+      taskId: 'task_legacy_inline', text: 'legacy run completed',
+      execution: { planId: 'plan_legacy', version: 1, calls: 1 },
+    }));
+    const taskManager = {
+      submit: vi.fn(), submitPrepared: vi.fn(),
+      list: vi.fn(async () => []), get: vi.fn(async () => null), cancel: vi.fn(),
+    };
+    const platformTask = subagent(inlineRun);
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: 'legacy result' }]),
+      sessions: new FakeSessionRepo(), platformTask, backgroundTasks: taskManager, workerDispatchMode: 'background',
+    } as never);
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_legacy_resume', resumeTaskId: 'task_legacy_inline' }), '确认继续');
+
+    expect(taskManager.get).toHaveBeenCalledWith({ principalId: 'wecom:user_a', sessionId: 'sess_1' }, 'task_legacy_inline');
+    expect(inlineRun).toHaveBeenCalledTimes(1);
+    expect(taskManager.submitPrepared).not.toHaveBeenCalled();
   });
 });

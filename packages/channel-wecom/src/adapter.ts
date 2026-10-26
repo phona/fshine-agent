@@ -16,8 +16,12 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { WSClient } from '@wecom/aibot-node-sdk';
 import type {
+  ChannelDeliveryError as ChannelDeliveryErrorShape,
   ChannelAdapter,
   ChannelReply,
+  ChannelRoute,
+  DeliveryPartReceipt,
+  DeliveryReceipt,
   IncomingAttachment,
   IncomingChannelMessage,
   NoticeFn,
@@ -26,6 +30,7 @@ import type {
 } from '@fshine/contracts';
 import { formatFileReceipt } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
+import { extractMessageReference } from './quote';
 
 const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
@@ -78,8 +83,34 @@ export interface SdkClientLike {
    * 用它把终稿作为新消息送达——见 reply() 的降级分支。
    */
   sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown>;
+  /** 主动发送媒体消息，不依赖入站回调 frame。 */
+  sendMediaMessage?(chatid: string, mediaType: 'file', mediaId: string): Promise<unknown>;
   /** 下载企微素材（file/image）：url 五分钟内有效且已加密，需配 aeskey 解密 */
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }>;
+}
+
+/** Transport failure with the ACKs that were received before the failed part. */
+export class WecomChannelDeliveryError extends Error implements ChannelDeliveryErrorShape {
+  readonly code = 'CHANNEL_TRANSPORT_FAILED' as const;
+  readonly route: ChannelRoute;
+  readonly failedPart: ChannelDeliveryErrorShape['failedPart'];
+  readonly receipt: DeliveryReceipt;
+  readonly cause: unknown;
+
+  constructor(
+    route: ChannelRoute,
+    failedPart: ChannelDeliveryErrorShape['failedPart'],
+    receipt: DeliveryReceipt,
+    cause: unknown,
+  ) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(`企微主动交付失败（${failedPart.kind}[${failedPart.index}] ${failedPart.stage}）: ${detail}`);
+    this.name = 'WecomChannelDeliveryError';
+    this.route = { ...route };
+    this.failedPart = { ...failedPart };
+    this.receipt = { route: { ...receipt.route }, parts: [...receipt.parts] };
+    this.cause = cause;
+  }
 }
 
 export interface WecomBotChannelOptions {
@@ -235,6 +266,92 @@ export class WecomBotChannel implements ChannelAdapter {
     this.pendingAttachmentProcessing.clear();
     this.resolveAttachmentWaitInterrupt();
     this.resetAttachmentWaitInterrupt();
+  }
+
+  /**
+   * Send new messages to a host-validated WeCom route, independent of any inbound
+   * frame. Text is sent first, then each file is uploaded and sent as its own item.
+   */
+  async sendToConversation(route: ChannelRoute, reply: ChannelReply): Promise<DeliveryReceipt> {
+    if (route.channel !== 'wecom') {
+      throw new Error(`WecomBotChannel 不支持渠道 ${route.channel}`);
+    }
+    if (typeof route.conversationId !== 'string' || route.conversationId.trim() === '') {
+      throw new Error('企微主动交付缺少 conversationId');
+    }
+    const client = this.client;
+    if (!client) throw new Error('WecomBotChannel 尚未启动,无法主动交付');
+
+    const rich = typeof reply === 'string' ? { text: reply } : reply;
+    if (rich.image) {
+      throw new Error('企微独立主动交付当前只支持文字与文件');
+    }
+
+    const parts: DeliveryPartReceipt[] = [];
+    const receipt = (): DeliveryReceipt => ({ route: { ...route }, parts: [...parts] });
+    if ((rich.files?.length ?? 0) > 0 && typeof client.sendMediaMessage !== 'function') {
+      throw new WecomChannelDeliveryError(
+        route,
+        { kind: 'file', index: 0, stage: 'send' },
+        receipt(),
+        new Error('SDK 客户端未提供 sendMediaMessage'),
+      );
+    }
+    const text = rich.text;
+    if (typeof text === 'string' && text !== '') {
+      const bounded = truncateReply(text);
+      if (bounded.truncated) {
+        console.warn(JSON.stringify({
+          event: 'wecom_reply_truncated',
+          frame: 'proactive',
+          bytes: Buffer.byteLength(text, 'utf8'),
+          limit: MAX_REPLY_BYTES,
+        }));
+      }
+      try {
+        await client.sendMessage(route.conversationId, {
+          msgtype: 'markdown',
+          markdown: { content: bounded.text },
+        });
+      } catch (error) {
+        throw new WecomChannelDeliveryError(
+          route,
+          { kind: 'text', index: 0, stage: 'send' },
+          receipt(),
+          error,
+        );
+      }
+      parts.push({ kind: 'text', index: 0, status: 'sent' });
+    }
+
+    for (const [index, file] of (rich.files ?? []).entries()) {
+      let mediaId: string;
+      try {
+        const uploaded = await client.uploadMedia(file.data, { type: 'file', filename: file.filename });
+        mediaId = uploaded.media_id;
+      } catch (error) {
+        throw new WecomChannelDeliveryError(
+          route,
+          { kind: 'file', index, stage: 'upload' },
+          receipt(),
+          error,
+        );
+      }
+      try {
+        if (!client.sendMediaMessage) throw new Error('SDK 客户端未提供 sendMediaMessage');
+        await client.sendMediaMessage(route.conversationId, 'file', mediaId);
+      } catch (error) {
+        throw new WecomChannelDeliveryError(
+          route,
+          { kind: 'file', index, stage: 'send' },
+          receipt(),
+          error,
+        );
+      }
+      parts.push({ kind: 'file', index, status: 'sent' });
+    }
+
+    return receipt();
   }
 
   /**
@@ -395,6 +512,7 @@ export class WecomBotChannel implements ChannelAdapter {
       finishAttachmentProcessing?.();
       return;
     }
+    const messageReference = extractMessageReference(body['quote']);
     const message: IncomingChannelMessage = {
       wecomUserId: userid,
       // 渠道身份在源头显式给出：宿主据此拼 principalId/sessionId 的前缀（见契约的 channel
@@ -405,6 +523,7 @@ export class WecomBotChannel implements ChannelAdapter {
       messageId: msgid,
       chatType,
       text: chatType === 'group' ? stripMentionPrefix(parts.join('\n')) : parts.join('\n'),
+      ...(messageReference ? { messageReference } : {}),
       ...(attachments.saved.length > 0 ? { attachments: attachments.saved } : {}),
       // 附件-only：本条没有用户正文（file 消息，或 mixed 里取不到任何文字项）。
       // 宿主据此只暂存附件、不启 Agent 回合——否则"先发文件再发指令"会变成 N 次 LLM 调用，
@@ -504,17 +623,19 @@ export class WecomBotChannel implements ChannelAdapter {
     }
     // 让正文等待到附件已经进入宿主暂存池/收据队列，再撤掉挂起收据并进入自己的 handler。
     finishAttachmentProcessing?.();
-    // 文件回传（2026-10-08）：worker 在平台 tmp/ 下产出的 xlsx 等，经临时素材上传回传。
-    // 失败只记事件不外抛——文本已经发出去了，不该因为附件上传失败把整轮回复搞成失败。
-    if (rich.file) {
+    // 文件回传（2026-10-08 单数 → 2026-10-20 W3 数组）：worker 在平台 tmp/ 下产出的
+    // xlsx 等，经临时素材上传回传。一次任务多个交付物是常态（如工资表 + 个税申报表），
+    // 逐条发送、每条独立消息。单个文件失败只记事件不外抛——文本已经发出去了，不该因为
+    // 一个附件上传失败把整轮回复搞成失败，也不该挡住同轮其余文件。
+    for (const file of rich.files ?? []) {
       try {
-        const uploaded = await client.uploadMedia(rich.file.data, { type: 'file', filename: rich.file.filename });
+        const uploaded = await client.uploadMedia(file.data, { type: 'file', filename: file.filename });
         await client.replyMedia(frame, 'file', uploaded.media_id);
       } catch (error) {
         console.error(JSON.stringify({
           event: 'wecom_file_fail',
           req_id: reqId,
-          filename: rich.file.filename,
+          filename: file.filename,
           error: error instanceof Error ? error.message : String(error),
         }));
       }

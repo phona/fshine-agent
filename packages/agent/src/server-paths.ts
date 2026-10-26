@@ -87,3 +87,43 @@ export function stripServerPaths(text: string): ServerPathStripResult {
     .replace(/[ \t]+\n/g, '\n');
   return { text: tidied, removed };
 }
+
+/**
+ * 任务工作区路径的形状（全局）：`tmp/task_<uuid>`，前缀可选（`/` 或
+ * `/home/fictional-user/fictional-projects/fictional-execution-layer/` 这类绝对前缀都要拦——2026-10-20 事故里
+ * 模型把路径写错过三种形态：相对、`/tmp/` 绝对、完整绝对）。后缀沿用 PATH_CHARS，
+ * 中日韩文件名在字符类边界处自然收住（剥掉路径前缀即断绝可用性，残留的文件名
+ * 片段不成路径）。
+ */
+const SCRATCH_PATH_PATTERN = new RegExp(
+  String.raw`(?:[\w.~-]*\/)*tmp/task_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}[${PATH_CHARS}]*`,
+  'gu',
+);
+
+/**
+ * 剥掉委派范围里指向**别的**任务工作区的路径（W4，2026-10-20 事故的直接修法）。
+ *
+ * 事故形状：用户说"把上轮那个表再发一次"，模型凭记忆把路径写进委派范围——位置错
+ * （`/tmp` 而非平台 tmp/）、UUID 错（编造的变体，真实 id 在历史里明明白白出现过
+ * 两次）。worker 拿着假路径 ls 失败后把 tmp/ 下逐个任务工作区翻了一遍，交还文本
+ * "委派中给出的原文件路径已不存在……"原样上了用户的屏。重发路由（resend 申报枝）
+ * 消灭了这个需求的大半，
+ * 但非重发的续跑请求仍可能引用旧工作区路径——这里做外科手术式剥离。
+ *
+ * 放过两类：**本任务自己的工作区**（`scratchDir` 形如 `tmp/task_<uuid>`，含其下
+ * 文件——worker 写得动的位置）与 **附件输入路径**（`tmp/attachments/`，worker 的
+ * 合法读取对象，本模式根本不匹配它）。剥掉的路径对 worker 本就不可能有用（不是
+ * 它写得动的位置），留着只会诱发 hunt。
+ *
+ * 判据全在宿主持有的名字上（task id 形态、本任务 scratchDir），零业务知识。
+ */
+export function stripForeignScratchPaths(text: string, scratchDir: string): { text: string; stripped: number } {
+  const ownTaskId = scratchDir.replace(/^\.?\//u, '').split('/')[1] ?? '';
+  let stripped = 0;
+  const out = text.replace(SCRATCH_PATH_PATTERN, (match) => {
+    if (ownTaskId !== '' && match.includes(ownTaskId)) return match;   // 本任务自己的工作区（含其下文件）
+    stripped += 1;
+    return '（非本任务工作区路径，已由宿主剥离）';
+  });
+  return { text: out, stripped };
+}

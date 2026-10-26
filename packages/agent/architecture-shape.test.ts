@@ -63,8 +63,21 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 判据本体保持"抛错向上传播"，降级是调用策略）与平台冷却拦截（→ platform-health.ts，
  * 一次读取同时拿回复文本与日志载荷，分三次读会在到期边界上各说各话）。
  * 1293 → 1290。
+ *
+ * 1290 → 1298（2026-10-20，功能新增非抽取）：W4 重发路由。申报契约增 resend 枝
+ * （turn-contract.ts），runtime 只做路由接线两处：exec 里的 resend 分支（记账 +
+ * 一行打点 + ToolUserError 终止，零委派）与主路径返回挂 artifactRefs。判据本体
+ * （ref 解析、文本合成、文件回挂）在 apps/server/artifact-store.ts；后续抽取时照
+ * 旧只减不增。+8。
+ *
+ * 1298 → 1311（2026-10-25，review 修复波，功能新增非抽取）：后台受理回执落转录。
+ * background 出口此前走 direct reply，route toolCall/toolResult（routeReceipt=
+ * 'background'）整对被丢弃，repeat-request 复核在后台模式失明（同文重发会再起一个
+ * 后台任务）。修复把这对消息经 sanitize 续进转录（turn.backgroundStarted 标记 +
+ * finishDirectReply 的 middleMessages 参数）；判据本体在 repeat-request.ts，
+ * runtime 只做转录续写接线。+13，后续抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1290;
+const RUNTIME_LINE_BUDGET = 1311;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。
