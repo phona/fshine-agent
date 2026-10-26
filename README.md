@@ -36,6 +36,13 @@ npm run smoke:wecom              # 企微长连接冒烟测试
 npm run smoke:commit:mock        # mock 保护下两步写链路冒烟（非 mock 拒跑）
 ```
 
+## 引用消息与后台任务
+
+企微原生引用会与本次正文一起交给 Planner，正文确认与引用内容分别处理。
+`FSHINE_WORKER_DISPATCH_MODE` 默认 `inline`；设为 `background` 后，Worker 执行期间用户可以继续提问、查询或取消任务，结果和文件独立主动推送。同一会话的 Planner 回合仍串行，平台并发默认仍为 1。
+
+首版尚未生产验收；不支持运行中 steer、暂停恢复或重启后自动重跑。配置和回滚见 [会话交互方案](docs/interactive-session-plan.md#9-首版实现对账2026-10-24)。
+
 ## mock 联调（平台侧 fake 保护）
 
 `.env` 设 `DZ_EXECUTOR=mock`（默认已设）后，幻账平台执行器被替换为 mock

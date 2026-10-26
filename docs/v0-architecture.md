@@ -216,6 +216,8 @@ Main Agent 申报 delegate
 
 已落地并稳定：Conversation Log / Context State / history tools / 带来源长期记忆 / 计划门与累计账本 / 通知送达屏障 / 跨轮确认与 superseded / 离线全链 e2e / 跨仓真实 CLI e2e / 网关写路径（提案归平台，宿主持不透明引用 + 通用确认状态机）。
 
+2026-10-24 新增首版实现（尚未生产验收）：企微原生引用与正文分离、引用历史检索及去重；可选后台 Worker、同会话串行 Planner/完成事件、任务查询和取消、独立结果与文件推送。`FSHINE_WORKER_DISPATCH_MODE` 缺省 `inline`，显式设为 `background` 才启用后台委派。它是单进程任务管理器，不提供崩溃自动重跑、运行中 steer、暂停恢复或分布式调度。实现边界、验证及回滚见 [interactive-session-plan.md](interactive-session-plan.md) §9 和 [change-safety.md](change-safety.md) §18。
+
 尚未按本文档实现的部分：
 
 > 写路径违规此前不可见，即因本表缺一行——业务字段住进编排层这类越界，若不在此显式列项就会一直藏在已落地的叙事里。

@@ -1226,6 +1226,14 @@ change-safety §E 波末尾"下一处该投的是 L7"的兑现。七个 commit�
 |---|---|---|
 | **D-113（新）附件下载、路径出口与重复请求回执的跨层漏测** | **部分关（当前新路径已封；旧转录兼容边界保留）** | **触发**：review 发现 D-108 的静默窗口只看到附件下载完成后进入 handler 的消息；file 事件已到但下载较慢时，正文可能被当作冷启动。D-109 的路径整理只覆盖普通终稿出口，direct 收尾、转录与可检索 toolResult 仍可能留路径；route 回执判据把非 conversation 结果一概当作 delegate。**修法**：① WeCom adapter 在正文到达时立刻 ACK，跟踪附件消息直到 handler 暂存/收据入队；正文等待总上界 8s，超时用“附件尚未准备好”收尾且不进 worker；② `server-paths.ts` 判据覆盖 direct 回复、assistant/toolResult transcript 与可检索 toolResult；审计只在能确认执行事实时写 `executed`；③ 新 toolResult 用 `details.routeReceipt` 区分 `delegate` 与 `precondition`，结构化回执只认 `recorded: delegate`，用户文案不变。**机械锁**：adapter 5 条（延迟下载、收据只一次、超时失败关闭、持续分批总上界、stop 唤醒）；agent 4 个新增回归（SP3 direct、transcript/toolResult 路径、结构化错误/前置拦截回执）；`pi-driver` 1 条 details 不进入用户文本的契约。**变异验证**：去掉等待、提前撤收据、按批续 8s、绕过 direct 路径整理、transcript/toolResult 清理恒等返回、把 precondition 当 delegate，各自对应测试红。**兼容边界**：没有 `routeReceipt` 的旧转录仍走既有纯文本兼容判据；缺少可靠元数据时可能把旧版前置拦截当作 delegate，保留此行为是为了不静默丢失旧版成功委派的重复请求保护。跨渠道授权和附件态隔离不在本条内，接入门见 D-112。 |
 
+## 补充记录（2026-10-20，会话级产物库与引用迁移波：R1–R4 根治，W0–W7）
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| **D-114（新）产物无会话级生命线：交付即蒸发、指针住散文（R1 主根，附 R2/R3/R4）** | **已关（2026-10-20，W0–W7 七波；D5 物化留缝）** | **触发（用户观察 + 库取证）**：2026-10-20 企微会话（`data/agent.db` 只读取证；同一指令在本会话发了 24 次，会话自 09-20 起 153 条事件）。15:05:58 用户说「发一下 幻骥达2026年08月个税申报.xlsx」，委派原文（`platform_tasks.worker_messages` 逐字）写着「文件位于 `/tmp/task_d42fffce-e4b2-4d35-82b6-969f97b12b0a/…`」——**前缀错**（`/tmp` 而非平台 tmp/）、**UUID 是编造变体**（真身 `…ce9a-4ff7…`，该字符串全历史零出现；而正确路径在历史里明明白白出现过两次）。worker 拿假路径 ls 失败后 `find -iname "*个税*"`、翻 `/tmp/`、依次 ls 四个 task 目录（其中两个现已被 scratch 清理）、md5sum、python 逐格比对，最后把 10/19 的副本 cp 进本轮工作区；交还文本「委派中给出的原文件路径已不存在……已放入本轮工作区」被原样转给用户。同族形状：终稿列「交付物（2 份）」却只附 1 个文件（契约 `file` 单数）；DB 存 UTC，模型把 15:05:58（北京）引述成「07:06」；附件 10/19 16:10 上传、10/20 五个回合 5/5 都播「已收到 3 个文件」。**取证结论**：交付文件与 12 分钟前刚重算的那份**逐格一致**（116 行 0 差异，md5 差只是 zip 元数据）——**无数据正确性事故**，问题全部发生在"系统怎么指认、怎么叙述、怎么使用共同历史"。**根因 R1（主根）**：交付曾是"回合末把字节流进渠道消息"的一次性副作用——不停留、不复制、不登记；`conversation_events.artifact_ref` 槽位全代码库只有读方没有写方。"重发一个已交付产物"这个产品上完全自然的请求，系统没有任何机制：Main Agent 只能凭对话散文里提到的路径复述，而复述会损坏。**信息不是不存在，是以"散文中路径"的形态存在：不可校验、不可引用。** **附条 R2**：交付集当会话级持久状态（附件池 + 规则一窗口），"系统手里有什么文件"与"用户这一轮给了什么"混为一谈（收据复读已由 D-110 修；池与窗口模型本身在 D-112 跟踪外置）。**附条 R3**：用户可见层只做形态过滤（`stripServerPaths` 形状匹配）不做语域过滤，"委派/批次/工作区/逐格比对"类流程叙述与 UTC 时间戳复述管不住——注意因果方向：R1 决定了 worker 只能靠 hunt 和自我叙述交差（没有身份可引用），R3 决定这些叙述到达用户。**附条 R4**：长会话无摘要与复用纪律（30 天 153 条事件、greeting 触发状态倾倒、同指令 24 次重发却没有"产物已存在"的产品语义）。**修法（七波，设计全文 `docs/artifacts.md`）**：W1 session = 聊天窗口（`channel:conversationId`，principal 降为消息级）；W2 产物库 per-session（`session_artifacts` 表 + `apps/server/artifact-store.ts`：ingest/manifest/ref 改写/回合收口；溯源从 `platform_tasks.worker_messages` 投影，不建平行登记）；W3 契约 `files[]`（多文件诚实回传）；W4 重发宿主动化（申报 `resend` → runtime 记账零委派 → handler 依库三态确定性回答）+ 委派外来 scratch 路径外科手术式剥离 + 收尾指令去路径；W5 scratch 双年龄清理（终态 1h grace + 抛弃 24h）+ 库显式淘汰（50 个 / 512MB 双闸压可重发集合，最旧优先、新批保护、status=evicted 清单可见）；W6 群语义（队列键 = 会话，arrivalKey/queueKey 分职）。**机械锁**：+44 用例（1494 → 1538，115 → 117 文件），每波新守卫均过变异验证（汇总表 `docs/artifacts.md` §7）：W1 改回复合键 9 红 / W2 ref 恒 '1' 1 红、insert 跳过 4 红、清单恒空 1 红 / W3 只挂首个 2 红 / W4 路由不记账 2 红、解析恒无 2 红、守卫空操作 3 红 / W5 grace 失效 1 红、fresh 守卫删 1 红 / W6 队列键改回 1 红。**结构护栏**：handler.ts 1104 → 839 行（产物机器抽取进 artifact-store.ts，行数棘轮 1017 内）；runtime.ts 棘轮 1290 → 1298 按"功能新增留理由"规矩上移（resend 路由接线，判据本体在 server 侧）。**未关/留缝（登记，不阻塞）**：① **D5 物化未做**——续跑引用产物 ref 时宿主把字节复制进新任务 scratch 需要 driver↔库接缝（跨层），当前替代是委派信封剥离外来路径 + 留痕（worker 不再 hunt，但指代旧产物的续跑请求会确定性找不到文件而非 silent hunt）；② `worker_messages` 保留策略未验证（D3 投影源的寿命未知，现 45 条任务俱在）；③ R4 长会话摘要纪律未收敛（resend 语义已给，转录增长与 greeting 倾销另立账）；④ `artifact_ref` 槽位仍未启用（本轮登记走独立表——该槽位没有 ref 语义（单调/状态/溯源），不复用而非留双写，理由写在该列声明处）。 |
+
+**本波最终账**：关 1 条（D-114）。基线实测：改造前 `npm test` 1494 全绿 / 115 文件 + typecheck 0 错误（2026-10-20 W0 冻结）；改造后 **1538 全绿 / 117 文件**（+44，全为新增用例）+ typecheck 0 错误 + `tests/e2e` 全绿。七波各自的 F1–F7 执行记录见 change-safety.md §16。
+
 ## 补充记录（2026-10-23，计划提交空转治理波：--file 通道 + 形状失败收敛 + 元数据自救，C1–C4 + Round 1 review 补强）
 
 | 条目 | 状态 | 说明 |
@@ -1233,3 +1241,71 @@ change-safety §E 波末尾"下一处该投的是 L7"的兑现。七个 commit�
 | **计划提交空转（新登记即关：worker 写不对裸 plan JSON，机制不兜底）** | **已关（2026-10-23，C1–C4 + R1/R2 review 补强；跨仓 SKILL 更新与 F6 探针留缝）** | **触发（用户提问 + 库取证）**：2026-10-23 企微会话（`data/agent.db` 只读取证）。`req_368b68b3`「列一下清单看一下先」→ 委派 `task_c7e41c75` 367s / 656,960 tokens，其中 **4 分 11 秒是 11 次 `plan_submit` 连续 `PLAN_JSON_PARSE`**；`req_17790072`「查李华欠款明细」同形态 188.8s / 241k tokens（6 次提交被拒）。**取证结论**：平台侧行为干净——当日 6 次真实平台调用全部单发、一一对应用户意图，零循环零枚举；问题 100% 在宿主侧"提交形态解析 + 无界重试"。**根因（三重）**：① 宿主解析的是**原始命令字符串**（`plan-runtime.ts` 的 payload = `bin/17dz plan` 之后的命令原文），模型本能的 shell 引号（`'{"goal"…}'` / 转义双引号）与命令尾巴（`2>&1` / `; echo "rc=$?"` / `|| true`）原样进 `JSON.parse`——worker 最后靠发 `{"a":1}`、`ZZ{"a":1}` 黑盒探针才逆推出"JSON 必须是整行剩余内容、无引号无后缀"的规则（探针本身证明：没有便宜确定性校验器时，试错是模型唯一路径）；② 熔断器 `MAX_DECLINED_PLANS_PER_TASK=5` 只在解析成功后的 `decidePlanSubmission` 内自增，**形状失败在 `parsePlanCallsCommand` 抛出点提前返回、从不计数**——11 连撞完全绕过熔断；③ `bin/17dz plan --schema`（17dz-query SKILL 教的自救出口）被 driver 的计划解析当坏 JSON 拒掉，serve-gate 里为它写的元数据白名单（`SERVE_METADATA_COMMANDS`）因 driver 先行拦截而不可达——**文档教的是个死命令**（平台 CLI 确实支持该出口，`src/cli/index.js` 逐字打印 plan-schema.json）。**修法（四波）**：C1 表征 golden 先行（4 条：fuzz 3 条 + audit 1 条）；C2 `--file` 提交通道（worker 用 write 把计划 JSON 落本轮工作区 `tmp/task_<taskId>/plan.json` 后以 `bin/17dz plan --file <路径>` 提交；宿主只读不代写，边界尺 = 提案 payload 同一把尺 `workspaceRelPath`+`isInsideScratch`，体积 = write 门同口径 256KB，内容 = inline 同一份 `parsePlanCallsPayload` 校验——文件通道不宽松；lint 是 worker 侧本地命令，属待落的跨仓 SKILL 工作流，宿主体只有读通道）；C3 形状失败计入同一 `declinedPlans`（第 6 次即 `PLAN STOP`+`DECLINED_PLAN_LIMIT`，措辞纪律不变：提交次数不伪装成拒绝次数）；C4 旗标形态 payload 返回 null 交 serve-gate 裁决（元数据放行复活、未知旗标落门的计划教学分支）。**设计红线（遵守未破）**：不做引号/尾巴解包容忍层（`plan-runtime.ts` 注释里钉着事故判据——absorbing 曾把模型误导成把方案 JSON 打印成助手文本、12 步全空转）；宿主不吸收格式波动，只给精确通道。**Round 1 review 补强（五个独立审查员并行后落地 R1/R2）**：R1 三处代码修复——`--file` 守卫补 tab 形态（守卫/取值正则/码表措辞三处归一为 `[=\s]`，修复前 tab 发射静默落 null）、`reportPlanSubmission` detail 补 `AUDIT_DETAIL_MAX_CHARS` 截断（提案路径早有、计划上报是唯一没挂尺子的出口）、读文件前 `isFile()` 守卫（挡 FIFO 无限期阻塞挂住无超时的 `beforeToolCall`）+ 读后 `Buffer.byteLength` 复核（收 TOCTOU 实际窗口）；R2 补 13 条判别性用例（`PLAN_FILE_TOO_LARGE` 零覆盖、`..` 穿越与符号链接逃逸——原有越界用例被任何朴素 startsWith 同样拒掉不判别、工作区内绝对路径自然形态、文件坏内容 6 连撞收敛、混合 3+3 计数、终局后 N 递增、`--schema` 不计收敛、跨通道归零、子目录/目录/user_confirmed/带尾巴元数据）。**三处既有行为审查确认但登记不随波改**（各有权威注释）：写关闭路径不计入计数（与"熔断对该类失效"同形但被 writeClosed latch 部分兜底且属既有语义）；计数器作用域是每次委派而非每任务（常量名与码表文案说 PER_TASK，任务级上界实为乘法）；保留子命令计入提交数（措辞在该历史上虚增、概率低；排除它 lint 并不拦——错误码是标识符形判据，但排除会把这类拒绝重新变成无界空转、正是 C3 抗的向量，故登记不排除）。**机械锁**：+21 用例（1545 → 1566）+ R1/R2 补强 +14（→ **1580**，118 文件不变）；Round 2 复审补 2 条判别用例（→ **1582**）；四个变异全红后回滚复绿（全量范围单测+e2e：C2 边界尺 4 红 / C3 计数 5 红 / C4 旗标放行 8 红 / R1 isFile 守卫 1 红；Round 2 补三个：原始串前缀替边界 3 红 / 终局后重置计数器 1 红 / 停体积双闸 1 红）；泄漏 lint 的字面量 if 预算当场抓住第一版 C2 的 `!== '--schema'` carve-out（症状嗅探），以改设计收场（未知旗标分支移入 C4 的数据判据结构）而非申请白名单——守卫起作用的实证。**未关/留缝（登记，不阻塞）**：① 17dz-platform `17dz-query/SKILL.md` 跨仓更新未落（方案 gate：单独确认后落）——"计划草案形状"节应改教 file+lint 工作流；② `voucher.assistant-map` 能力与 SKILL.md"没有列举客户档案能力"的矛盾未修——09:31 那轮据此给过用户错误结论（实测一次拉回 99 客户 + 759 供应商），修法同属跨仓；③ F6 真实 LLM 探针未跑（静态提示词逐字节未动——`planDraftExample()` 不变，改的是运行时诊断；冻结基线 §16 W4 可用，复跑待用户确认）；④ 长期：结构化调用协议（`docs/a2a-protocol.md`）取代裸命令行 JSON 后本类失败整体消失。 |
 
 **本波最终账**：关 1 条（计划提交空转，新登记即关）。基线实测：改造前 `npm test` 1545 全绿 / 118 文件 + typecheck 0 错误（2026-10-23 C1 冻结）；改造后 **1582 全绿 / 118 文件**（+37：本波 C1–C4 共 21 条 + review 补强 16 条，全为新增/翻转用例）+ typecheck 0 错误 + `tests/e2e` 全绿（新增 A4b 形状连击收敛、A6/A6b/A6c 元数据通道）。四波 + review 补强各自的 F1–F7 执行记录见 change-safety.md §17。
+
+
+## 补充记录（2026-10-24，原生引用与后台会话首版）
+
+新增通用会话能力：原生企微引用、后台 run 管理、查询/取消、独立文字与文件交付、原任务范围续跑。后台模式默认关闭，未生产验收。实施与回归账见 [change-safety.md](change-safety.md) §18，实际边界见 [interactive-session-plan.md](interactive-session-plan.md) §9。
+
+本波不关闭既有执行凭证充分性、领域规则迁移、分布式可靠调度等债务。新增留缝：真实模型改前/改后探针因自动审批拒绝而未跑，真实企微引用及主动文件验收待授权；运行中 steer、暂停恢复与队列重排未实现；通知去重仅同 run 的已 ACK notice 精确匹配，尚无通用版本化通知身份；失败交付保存可核对状态，暂无任意部分的一键恢复。不承诺进程崩溃后的自动续跑或网络 exactly-once。
+
+本波本地最终验证：完整 mock **1706/1706、129 文件通过**，typecheck 0 错误，diff-check 通过；冻结基线 1582 项 / 118 文件。六条交叉会话 e2e 全绿；没有以本地通过代替真实模型或渠道验收。
+
+## 补充记录（2026-10-25，review 修复波：8 项 P1 修复 + 21 条 P2 登债）
+
+六切片并行深度 review（账目见 [change-safety.md](change-safety.md) §19）后修复 8 项 P1：① 委派外来 scratch 路径剥离覆盖任务正文主拷贝（D-114 留缝①的加固，端到端断言"worker 可见全文无外来路径"）；② 确认码在共享执行闸的等待上界 10s（`platform-execution-gate` 新增 `waitTimeoutMs`，只限排队等待不撤销已授予槽；超时走 confirm_held，提案保持 pending 可重试）；③ task-manager 同 taskId 并发提交同步预留（检查与预留之间不再隔 await）；④ 后台多步计划零执行熔断（计数持久化在计划投影尾部连续 failed 步，与 inline 同阈值，事实与续跑判定同源）；⑤ 后台受理回执落转录（repeat-request 复核在后台模式复明，runtime 棘轮 1298→1311 登记在案）；⑥ `task_runs.result_handling_state` 显式列（弃 `$.resultHandling.state` 魔法 JSON 嗅探，迁移幂等回填，契约声明）；⑦ 启动期清扫终态未决投递（可校验则重投，否则标 failed + 可行动通知）+ 传输失败有界重试（3 次 × 750ms，耗尽发失败通知）+ 认领抢锁失败留痕；⑧ 重发读回 sha256+size 复验。顺手项：signal→runSignal、patchColumns 死条目、serializeMessageReference null 防御、W4 用例同毫秒竞态稳定化、handler 棘轮 1017→907 压余量。
+
+review 遗留 P2 逐条核实仍成立后登记如下（已修的不登）：
+
+| 条目 | 状态 | 说明 |
+|---|---|---|
+| **D-115 inline/background 输入语义分叉** | 登记不阻塞 | inline 委派不走 `materializeInputs`（冻结只在 background 生效），附件靠消息文本活路径；附件池按最新 N=8 滚动（handler `MAX_PENDING_ATTACHMENTS`），inline worker 晚读时活路径可能已被挤出；模式切换输入行为静默变化。收敛方向：inline 也走 materialize 或部署文档写明分叉 |
+| **D-116 工作区快照无界** | 登记不阻塞 | `snapshotWorkspaceFiles`（context.ts）无单文件/总量上限，逐文件整读 sha256；before 快照在 `lease.start()` 之后 worker 启动之前执行——续跑任务已有大工作区时拉长平台槽位占用。建议加阈值，超限降级为只记大小不哈希 |
+| **D-117 待确认提案不变量两模式不对称** | 登记不阻塞 | background 建提案只 supersede 同 taskId（`findPendingBySession` 第三参，store 按 task_id 过滤），inline 仍 supersede 全会话 pending——用户可同时持多个有效确认码；紧邻注释仍写"会话里同时只留一个待确认提案"（context.ts:657-660）。不变量需明确定义并写准注释 |
+| **D-118 history-tools 引用渲染无截断** | 登记不阻塞 | `reference.text` 上限 16,384 字节（contracts `MAX_QUOTED_TEXT_BYTES`）× limit 20 原样 stringify，单次工具输出可膨胀数百 KB 进模型上下文，与该模块紧凑纪律不匹配 |
+| **D-119 dispatchKey 只锚 requestId，渠道重投递不去重** | 登记不阻塞 | 企微对同一消息的重投递会生成新 requestId，可二次建后台任务跑同样工作（repeat-request 拦不住 delegate 形态重投递）。消息级去重需 messageId 进身份 |
+| **D-120 task-manager 公共接口内嵌执行层类型** | 登记不阻塞 | 公共接口暴露 `Run17dzTaskArgs` / `ContextTaskRunner`（17dz 执行层类型进通用命名表面积，未登记迁移债）；同族：`TaskRunRecord` 无 `dispatchMode` 字段，方案 §4.3 要求的"创建时派发模式"未落账，取消原因只能挤 `error` |
+| **D-121 PlatformExecutionGate 命名与授信门术语相撞** | 登记不阻塞 | 本仓语境"平台执行门/G1"指 serve-gate 的授权裁决；新模块只是并发准入闸（不做授权裁决）。易被误读为"拿到 lease=已获准执行"。建议更名（如 PlatformAdmissionGate）或文件头写明与授信门的关系 |
+| **D-122 system-prompt 固化执行层名** | 登记不阻塞 | system-prompt.ts:14 固化"17dz 子 Agent"字样，与文件头 business-neutral 声明矛盾；应像 `planCommandForm` 一样参数化执行层名 |
+| **D-123 session_artifacts insert 静默覆盖 upsert + ref TEXT 排序** | 登记不阻塞 | `ON CONFLICT (session_id, ref) DO UPDATE` 整行覆盖无守卫（store.ts:925），正确性依赖"只在 handler 会话队列内调用"的注释纪律，跨进程无防护；`ORDER BY created_at, ref` 的 ref 是 TEXT，同毫秒批内跨 10 位数排序不稳定。建议 INSERT 冲突即错或契约注明前提 |
+| **D-124 cancelTask 跨进程 TOCTOU** | 登记不阻塞 | busy 检查（SELECT processing+lease）与 UPDATE 非原子（plan-confirmation-store.ts:203-212）；跨进程另一实例可在两语句间 claim 后被翻成 cancelled——失败方向安全（不伪造同意）但用户确认被静默丢弃。收敛：判定并进单条 UPDATE |
+| **D-125 单活跃 run 冲突裸抛 SqliteError** | 登记不阻塞 | `createOrGetByDispatchKey` 撞 `idx_task_runs_one_active_per_task` 时调用方拿到未分类错误；契约只承诺 dispatchKey 幂等，未声明该失败形态。应在 repo 层转可识别错误或契约写明 |
+| **D-126 background × 无主动发送渠道未装配期 fail-fast** | 登记不阻塞 | 渠道缺 `sendToConversation`/`sendMediaMessage` 时 background 模式两条交付路（inline 收集已关、后台投递必败）都发不出文件，只在运行中逐次留 failed 记录；该组合应在装配期报错 |
+| **D-127 产物清单把"已入库"当"已交付"** | 登记不阻塞 | `artifactManifestText`（artifact-store.ts:212）无投递状态门：产物 staged 即 status=available，交付失败或崩溃后清单仍宣告"本会话已交付产物 #N"，模型可据此声称"已发过"。清单措辞应与 resultHandling/deliveryState 对账 |
+| **D-128 「本回合交付」收据措辞两个权威位置** | 登记不阻塞 | artifact-store.ts 与 background-delivery.ts 各有一份（一带 ref 一不带），违反 `formatFileReceipt` 立过的"同一事实一个权威位置" |
+| **D-129 adapter 被动回复多文件回传无直接测试** | 登记不阻塞 | adapter.ts 的 `for (const file of rich.files)` 循环零直接覆盖：W3 变异守卫在 handler.test 断言 reply.files 对象（不经 adapter），e2e 的 RecordingSdkClient.replyMedia 是 no-op——回归成只发首个文件全套仍绿。补一条：handler 返回两个 files → 断言 uploads/mediaCalls 各两条、单文件失败不挡后续 |
+| **D-130 requestWithFrozenInputs 纯字符串匹配 + 读无上限** | 登记不阻塞 | freeze-task-inputs 的路径替换只认精确拼法（相对路径、`./` 前缀、别名不替换）；`readFileSync(originalPath)` 无体积上限（write 门有 `MAX_WRITE_BYTES`，输入侧无对偶）；两者零测试 |
+| **D-131 任务事件通知投递失败即整任务 failed** | 登记不阻塞 | task-manager 的 `onNotice` 直接 await（task-manager.ts:439-441），渠道瞬断 → executionError → run 标 failed，而 Worker 可能已产生平台副作用；通知送达的有界重试是 fshine 通用机制义务（AGENTS.md），background-delivery 侧已补（3×750ms），任务事件侧未补 |
+| **D-132 shutdown 窗口竞态** | 登记不阻塞 | `stopping` 只在 submitIdempotently 入口检查，已过检查的提交可在遍历 activeRuns 之后 schedule；main.ts 连续两次 SIGINT 并发跑两遍 shutdown；drain 上限 5s 排不完长队。`recoverInterrupted` 兜底（重启标 interrupted 不自动重跑），危害有界 |
+| **D-133 enqueueTaskEvent 旧会话键过渡期错配** | 登记不阻塞 | 对旧 sessionId（`wecom:user:conv` 形态）剥前缀得 `user:conv`，与现行会话队列键（单取 conversationId）不匹配——过渡期数据绕过 W6 串行不变量 |
+| **D-134 handleTaskEvent 无 conversationLog 硬 throw** | 登记不阻塞 | 配置错误时所有后台事件交付静默丢失（仅 listener 日志），应启动期校验或降级可观察 |
+| **D-135 e2e 断言质量两条** | 登记不阻塞 | turn-loop-interactive.test.ts:69 的 finish 帧断言近恒真（`send()` 本就等到那条 finish 帧才返回）；"引用携带真实确认码不触发"无 e2e（结构性保证在 background-event.test.ts:382 单测钉住），登记为缝 |
+
+**本波最终账**：修 8 条 P1（含 D-114 留缝①加固），新登记 21 条 P2（D-115–D-135），无既有债关账。终态实测：`npx vitest run` **1725/1725、129 文件全绿** + typecheck 0 错误。F1–F7 执行记录见 change-safety.md §19。注：§16 过程数字（handler 1104→839）为波内中间态，当前树 907（棘轮已于本波压到 907），对账以波内日志为准。
+
+## 补充记录（2026-10-26，P2 清偿波：D-115–D-135 中 16 条收口）
+
+对 2026-10-25 登记的 21 条 P2 按"可机械收口"分批清偿（两波 subagent + 限额后协调方亲落地；部分表征测试由并行会话先行写红）。**关账 16 条，留账 5 条**（D-115/D-117/D-119/D-120/D-132，均需设计决策，见下）。终态与证据见 change-safety.md §20。
+
+| 条目 | 状态 | 收口摘要 |
+|---|---|---|
+| D-116 工作区快照无界 | **已关（缝：快照仍在租约窗口内）** | 三道上限（单文件 32MB/总量 256MB/2 万条），超限降级为记大小不哈希（`hashSkipped` 随快照持久化）+ `workspace_snapshot_limited` 留痕；红→绿含"上限置 MAX_SAFE_INTEGER 复现旧行为"反证。快照移出租约窗口属行为重排，未做（登记缝） |
+| D-118 引用渲染无截断 | **已关** | `formatHistory` 每条引用 512 字节 UTF-8 安全截断 + 「（引用已截断，全文走持久历史检索）」注记，对齐压缩 sidecar 预览惯例；16KB 引用红→绿 |
+| D-121 门命名术语相撞 | **已关** | platform-execution-gate 文件头 + 接口 doc 澄清块：并发准入闸不做授权裁决、lease 不构成执行授权、授权裁决在 serve-gate.ts；存在性守卫测试（docs-reality 新钉） |
+| D-122 提示词固化执行层名 | **已关（缝：常量待装配注入退役）** | `buildSystemPrompt(executorLabel)` 参数化 + `DEFAULT_EXECUTOR_LABEL` 全文件唯一执行层字样（注释标注迁移期待清）；golden 逐字节相等（2650B 冻结）+ 变异验证。runtime deps 全参数化降级原因：无既有配置可取、需新增装配参数且本波 apps 侧无人可传（死配置违仓规）——装配接入路径已留 |
+| D-123 insert 静默覆盖 + ref TEXT 排序 | **已关** | insert 改 fail-loud（`SessionArtifactRefConflictError`，PRIMARYKEY/UNIQUE 两种 code 都收口，契约声明）；`ORDER BY created_at, CAST(ref AS INTEGER), ref`；先行红 4 条转绿 |
+| D-124 cancelTask 跨进程 TOCTOU | **已关（TOCTOU 结构性闭合）** | UPDATE 自带租约条件（有效租约行不可被取消路径触及；过期/缺省租约仍可取消，与改前等价）；busy 前置保留（同任务多行语义不变）。机械锁=租约语义两态钉（有效→busy 抛、过期→可取消，注入时钟）；跨进程交错无单进程确定性表征，如实记录 |
+| D-125 单活跃冲突裸抛 | **已关** | 撞 `idx_task_runs_one_active_per_task` 转可识别错误 `TaskRunActiveConflictError`（contracts 导出，判定=message 列名——SQLite 不报索引名；dispatch_key DO NOTHING 幂等不受影响，测试钉住）；变异验证（去分类→2 红→恢复绿） |
+| D-126 background×无主动渠道未 fail-fast | **已关（缝：client 内层能力运行期兜底）** | `assertBackgroundAssemblyReady` 装配期卡渠道契约面（`sendToConversation`）+ conversationLog 缺失（与 D-134 同点）；仅 background 触发（inline 全放行，两态钉住）。SDK client 的 `sendMediaMessage` 在 channel.start 才构造、装配层不可见——留运行期有界重试+失败通知兜底 |
+| D-127 清单冒称"已交付" | **已关（缝：条目级投递对账不做）** | 清单标题改登记语义「已保存的产物（可随时要求重发）」；消费该标题的模型指令（turn-contract 三处）同步；e2e 确认路由不受措辞迁移影响 |
+| D-128 收据两个权威位置 | **已关** | `fileReturnReceipt(entries)` 单一权威（带/不带 #ref 是参数），两消费点改吃它；扫描锁：`本轮回传` 构造点全 apps/server 只允许出现在 artifact-store.ts |
+| D-129 adapter 被动多文件零直测 | **已关** | 被动路径两条直测：逐条 upload→replyMedia 配对（顺序/文件名/media_id 一一对应）+ 中位失败只跳过并留 `wecom_file_fail`（失败注入点 `failUploadIndexes` 落进 FakeSdkClient） |
+| D-130 冻结读无上限 + 替换零测试 | **已关（缝：幂等复验路径重读未加上界）** | 输入读前 `lstat().size` 判体积，超 `MAX_WRITE_BYTES`（import serve-gate 同一常量，同一把尺）fail-closed；替换行为 4 条表征钉现状（精确拼法成立；相对/`./` 不替换=已知缝，不擅自扩面） |
+| D-131 任务事件通知无重试 | **已关** | 归属判据：渠道语义住 server 层——`createBackgroundNoticeSender`（onBackgroundNotice 唯一生产点）内层走既有 `pushWithBoundedRetry`（3×750ms，仅传输错重试）；task-manager 零改动；三用例：瞬断吸收/持续失败仍 failed（语义不回归）/确定性错误零重试 |
+| D-133 旧会话键过渡错配 | **已关** | enqueueTaskEvent 对三段 legacy 形态取末段（=现行裸 conversationId 键，与用户回合同队列）；不可识别形态保守回退旧行为；互斥串行红→绿；handler.ts 907 精确不变（注释压缩抵扣） |
+| D-134 handleTaskEvent 无库硬 throw | **已关** | 与 D-126 同点：装配期校验 background 模式下 conversationLog 必须存在，缺失启动即拒；守卫本体+wiring 两级用例 |
+| D-135 e2e 断言质量 | **已关（缝：引用×真实确认码 e2e 留缝）** | a：受理 finish 帧=入站流**最后**一帧 + 委派输出不进原流（send 返回瞬间快照，序列形状断言替换恒真断言）；b：反方向单测钉——真实待确认文本在**引用**、正文无关 → 匹配器只见正文（变异：喂引用文本→2 红→恢复绿） |
+
+**留账 5 条（需设计决策，未机械收口）**：D-115（inline/background 输入语义分叉——收敛方向 inline 也走 materialize 或部署文档写明，涉及行为决策）；D-117（待确认提案不变量两模式不对称——不变量需先定义再实现）；D-119（企微消息级重投递去重——需 messageId 进身份，跨层）；D-120（task-manager 公共接口内嵌执行层类型——随 a2a 结构化协议迁移批次）；D-132（shutdown 窗口竞态——drain 语义重排）。
+
+**本波最终账**：关 16 条（其中 4 条留缝已注明）、留 5 条。终态实测见 change-safety §20。

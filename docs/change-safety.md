@@ -1024,6 +1024,31 @@ vitest 的用例总数是**被收集文件内容的纯函数**——已核本仓
 
 D-108/D-109 回归补强结束。
 
+## 16. 会话级产物库与引用迁移波 · R1–R4 根治（2026-10-20，W0–W7）
+
+**目标**：修 D-114（产物无会话级生命线：交付即蒸发、指针住散文）。设计全文 `docs/artifacts.md`，根因登记 `debt-ledger.md` D-114。单波单主题的七连波：W0 表征 → W1 会话身份 → W2 产物库 → W3 多文件契约 → W4 重发路由 → W5 GC/淘汰 → W6 群语义 → W7 文档。
+
+**基线（W0 冻结，2026-10-20）**：`npm test` 1494 全绿 / 115 文件 + typecheck 0 错误。
+
+| 波 | 改动（位置） | 用例数 | 变异验证（F3） |
+|---|---|---|---|
+| W0 | 3 条表征先行（`handler.test.ts`：群 per-user session 现状 / 两份交付物只回传第 1 个 / 重发无宿主动路） | 1494 → **1497** | —（golden 由后续波翻转） |
+| W1 | session = 聊天窗口：`handler.ts` sessionKey 改单取 conversationId；principal 降为消息级；测试 9 处更新（渠道前缀 / 群共享 / 附件信封键 / e2e 父会话 id） | 1497 | 改回复合键 → **9 红** |
+| W2 | 产物库核心：contracts `SessionArtifactRecord/Repo` + `AuditStore.sessionArtifacts`；`core/store.ts` `session_artifacts` 表；新模块 `apps/server/artifact-store.ts`（ingest/manifest/ref 改写/收口）；handler 接入（manifest 注入输入、finishWithFiles 透传 artifactRefs）；assembly 注入 dataRoot。产物机器自 handler 抽取（1104 → 839 行，棘轮 1017 内） | 1497 → **1511**（+11 单测 +3 e2e） | ref 恒 '1' → 1 红；insert 跳过 → 4 红；清单恒空 → 1 红 |
+| W3 | 契约 `files[]`：`RichChannelReply.file` → `files`；adapter 逐条发送（每文件独立 try/catch）；withFileReplies 全量挂载 + 点名列全；G2 表征翻转为“两份都发” | 1511 | 只挂第 1 个 → **2 红** |
+| W4 | 重发路由：turn-contract `resend` 申报枝（schema/review/描述）；runtime 记账零委派 + `AgentReply.artifactRefs`；handler 三态确定回答（不存在/已淘汰/字节不在）；`server-paths.ts` `stripForeignScratchPaths` + 委派信封接入；收尾指令去路径。runtime 棘轮 1290 → 1298（功能新增留理由） | 1511 → **1525**（+3 申报 +6 路径 +3 handler +2 e2e） | 路由不记账 → 2 红；解析恒无 → 2 红；守卫空操作 → 3 红 |
+| W5 | GC/淘汰：`scratch-cleanup.ts` 双年龄策略（终态 grace 1h + 抛弃 TTL 24h + 判据注入）；`main.ts` 终态快照 sweep；`evictOverCapArtifacts`（50 个/512MB 双闸、最旧优先、新批保护、显式 evicted） | 1525 → **1536**（+5 清理 +6 淘汰） | grace 失效 → 1 红；fresh 守卫删 → 1 红（结构性场景） |
+| W6 | 群语义：队列键修正——arrivalKey（发送者×会话）管 burst 防抖、queueKey（会话）管回合串行（W1 改了会话键没改队列键，群里两人回合曾并发写共享状态）；e2e 补 A 交付/B 同群指代重发 | 1536 → **1538**（+1 串行 +1 群重发） | 队列键改回复合 → **1 红** |
+| W7 | 文档：`docs/artifacts.md` 设计账、debt-ledger D-114、本节 | 1538 | docs-reality 对账 |
+
+**验收**：F1 表征先行且每波 golden 随该波翻转更新；F2 用例数只增不减（1494 → 1538，+44 全可逐条数，115 → 117 文件）+ typecheck 0 错误 + `tests/e2e` 全绿；F3 七波变异全红后回滚复绿（汇总表 `docs/artifacts.md` §7）；F4 每波一个主题（W2 的 handler 抽取是行数棘轮逼出的同波动作，改动集限于产物机器搬迁）；F5 无红 state 叠补丁——两处 flaky（mtime 同毫秒竞态）以拨到确定过去修复而非放宽断言，两次变异迭代暴露的测试缺口（淘汰 fresh 守卫不可达、resend 路由无覆盖）以加强测试解决而非删断言；F6 见下；F7 文档同提交（artifacts.md / D-114 / 本节），`docs-reality.test.ts` 对账通过。
+
+**F6 探针（W4 改了 `route_current_turn` 工具描述——提示词级）**：改后同参数复跑 `--only A1,A2,A4,A5`（real LLM + mock 执行器）：A1 ✓ 93.2s/7 调用（重问真的重查）、A2 ⚠ 214.5s/4 调用（第二轮带旧账套"幻辰"——与 2026-10-11 冻结基线同形状的既有模型侧观察项，未劣化）、A4 ✓ 35.9s/1、A5 ✓ 3.3s/0。**登记观察**：A1 平台调用 7 vs 冻结基线 4——明细显示两轮各 4+3 次，多出的调用是 worker 两轮都重新提交计划（“期间范围无法可靠识别”的重报形态），属 worker 侧不确定性；A1 的 ✓ 判据（重查而非复述旧答案）成立。隔夜基线 + 其间 D-109/D-113 波 + 模型不确定性使归因不可立，记为观察不记为回归；真机上"重发请求走 resend 枝、零委派、文件从库里回传"已由 e2e（turn-loop-resend R1/R2/R3）钉住，待用户复跑确认。
+
+**未关/留缝（详见 `docs/artifacts.md` §6）**：D5 委派 setup 按 ref 物化未做（driver↔库接缝跨层；当前以外来路径剥离 + 留痕替代）；`worker_messages` 保留策略未验证（溯源投影源寿命）；R4 长会话摘要纪律未收敛；`artifact_ref` 事件槽位仍未启用（独立表的理由写在列声明处）。
+
+会话级产物库与引用迁移波结束。
+
 ---
 
 ## 17. 计划提交空转治理波 · `--file` 通道 + 形状失败收敛 + 元数据自救（2026-10-23，C1–C4）
@@ -1052,3 +1077,54 @@ D-108/D-109 回归补强结束。
 **未关/留缝（登记，不阻塞）**：① **17dz-platform SKILL.md 跨仓更新未落**（方案 gate：单独确认后落）——`17dz-query/SKILL.md` 的"计划草案形状"节应改教"write 计划 JSON 到本轮工作区 → 本地 lint → `bin/17dz plan --file` 提交"工作流；`plan --schema` 自救指令 C4 后已真实可用，保留；② **`voucher.assistant-map` 能力与 SKILL.md 矛盾未修**——2026-10-23 09:31 那轮据此给过用户错误结论（"平台没有列举客户档案的能力"，实测 assistant-map 一次拉回 99 客户 + 759 供应商），修法同属跨仓 SKILL.md，与①同批；③ F6 探针待确认；④ 长期：结构化调用协议（`docs/a2a-protocol.md`）取代裸命令行 JSON 后，本类失败整体消失，`--file` 通道是它的踏脚石。
 
 计划提交空转治理波结束。
+
+
+## 18. 原生引用与后台会话首版（2026-10-24）
+
+范围与设计见 [interactive-session-plan.md](interactive-session-plan.md)，实际范围以该文 §9 为准。按用户要求并行 Luna/max 实施；保留实施前的脏工作树，不以 `HEAD` 代替本轮基线。未部署、未重启、未调用真实业务平台或真实企微。
+
+| 防线 | 本轮记录 |
+|---|---|
+| F1 基线 | 实施前工作树归档 `/tmp/fshine-interactive-worktree-start.tar.gz`；冻结解包在 `/tmp/fshine-interactive-baseline-tree`。真实 CLI 仅 mock：`DZ_EXECUTOR=mock DZ_PLATFORM_ROOT=/home/fictional-user/fictional-projects/fictional-execution-layer npx vitest run --maxWorkers 2`，**1582/1582，118 文件**；typecheck 通过。日志 `/tmp/fshine-interactive-baseline-frozen-valid.log`。沙箱内 Node spawn 的 EPERM 试跑不算产品失败或有效基线 |
+| F2 先红后绿 | 分波冻结 quote 契约/历史/正文确认、后台受理出口、任务 run 持久化与 CAS、共享 gate 排队取消、输入物化、宿主确认、主动交付及多步原范围续跑。根补 `pi-driver` 后台回执与自定义消息 LLM 投影、输入快照、提案 task 范围、待确认取消、真实 assembly 交叉提问 e2e。复审要求补压缩 sidecar 与预算确认后台续跑 |
+| F3 变异 | 独立目录 `/tmp/fshine-interactive-mutation`，不改共享源码：移除引用 fingerprint → **2 红**；移除 grant 后启动前 abort 复核 → **1 红**；移除完成事件重复消费守卫 → **1 红**。恢复后三组 **32/32 通过**。日志分别为 `/tmp/fshine-interactive-mutation-{quote,gate,event}.log` 和 `-restored.log`；变异源码不带回工作树 |
+| F4 改动边界 | 仅通用渠道/上下文/任务/确认/产物交付机制；执行层业务规则不迁入主流程。新 schema 是兼容添加。`runtime.ts` 沿用 **1298 行**预算，不上调；大型函数抽入专用模块并保持依赖无环 |
+| F5 回归 | 第一次完整 mock：**1682 通过、4 失败 / 127 文件**，失败为新增通用状态/环境变量/词归属登记及防御函数迁移的静态守卫；不得靠缩小扫描放行。修复登记与防御函数迁移守卫后，最终完整 mock **1706/1706、129 文件全部通过**（相对冻结基线 +124 项、+11 文件）。日志 `/tmp/fshine-interactive-final-full.log`；`npm run typecheck` exit 0（`/tmp/fshine-interactive-final-typecheck.log`）；`git diff --check` 通过 |
+| F6 真实模型 | 自动审批拒绝：探针读取真实 `.env` 并向模型服务发送提示词、有调用费用，未得到明确外发授权。没有换命令绕过。改前/改后真实模型对照与真实企微验收仍待授权，不宣称已完成 |
+| F7 回滚 | 默认 `FSHINE_WORKER_DISPATCH_MODE=inline`；显式 `background` 开启。关闭只影响新委派；既有后台任务仍要完成/取消并 drain 后才能回退代码。保留 task_runs/引用/产物关联列，不删历史。重启只标 interrupted，不自动重跑 |
+
+验证命令不读取 `.env`：`DZ_EXECUTOR=mock npx vitest run --maxWorkers 2`、`npm run typecheck`、`git diff --check`。真实 CLI 测试允许创建本地 mock 子进程与 localhost 服务，不启用真实执行器。
+
+最终交叉会话 e2e 六条全部通过，包含原生引用、Worker 阻塞期间下一问、文字与多个文件主动交付、排队取消、A/B 交错时 A 原范围续步、真实预算确认路径后台续跑。取消门补齐授权失效屏障与最后一次状态读取期间的竞态；任务最新 run 按注册顺序判定，不按随机 ID 或旧交付更新时间。压缩 sidecar 有界保留引用出处和去重计数（边界见方案 §9）。源码已冻结；未提交、未部署或重启服务。
+
+## 19. Review 修复波（2026-10-25）
+
+对未提交工作树（§16 产物库波与 §18 原生引用/后台会话波叠合）做六切片并行深度 review（runtime/turn 生命周期、context 周边、agent 新模块、apps/server、contracts/core/wecom、e2e/文档），按发现分片修复、逐项验收。部分修复（7 个红灯防线的对账、文档状态翻转、server 侧 result_handling_state 与投递清扫/重试的主体实现）由并行工作先落地，本波补齐缺口并验收终态；账目按终态事实记，不按作者。未部署、未重启、未调用真实业务平台或真实企微。
+
+| 防线 | 本轮记录 |
+|---|---|
+| F1 基线 | review 时点实测：`npx vitest run` 1684 用例 / 127 文件 **7 红**（architecture-shape 棘轮 1342>1298、runtime.test 两条新断言、docs-reality 锚点、platform-leak-lint 三条登记缺口），typecheck 0——红项全部为防线测试未随两波对账，非生产代码正确性缺陷 |
+| F2 先红后绿 | 8 项 P1 修复全部新表征先行，红形态即缺陷本身：外来路径剥离主拷贝（红=worker 委派块任务正文仍含 `tmp/task_…`）/ 确认闸等待上界 10s（红=确认挂闸至测试超时）/ 同 taskId 并发提交同步预留（红=双提交双 run 双 Worker）/ 后台零执行熔断（红=连续零执行照旧派发第 4 步）/ 后台受理回执落转录（红=同文重发的退回重填不发生）/ `result_handling_state` 列迁移（含旧库回填用例）/ 投递清扫 + 有界重试（红=崩溃残留永久 pending 且被永久 pin）/ 重发读回 sha256+size 复验（红=坏哈希照发） |
+| F3 变异 | 未另设变异目录：先红后绿的红形态即等价变异证据（各修复报告附红绿命令记录）。防线侧：platform-leak-lint 词条登记（含理由）、docs-reality 锚点随迁、两处行数棘轮全部回绿且理由在档 |
+| F4 改动边界 | 全部为通用机制（路径剥离、并发闸等待上界、任务预留原子性、熔断持久化、转录续写、投递状态列、清扫与重试），无执行层分支引入；`result_handling_state` 是通用投递语义列，契约声明后 metadata 注释同步降为 mirror。serve-gate 授信期门零改动零绕过（六切片逐条核对政策四条：放行仅审计 / 元字符软放行 / 非 local 网关计划前置 fail-closed / 放行 bash 留执行痕迹） |
+| F5 回归 | 终态实测：`npx vitest run` **1725/1725、129 文件全绿**（review 起点 1684/7红 → 对账与修复后 +41 用例）；`npm run typecheck` exit 0。棘轮：runtime.ts 1298 → 1311（后台受理回执落转录 +13，理由在 architecture-shape.test.ts 文件头登记）；handler.ts 1017 → 907（压掉 110 行余量——"留余量等于没压"） |
+| F6 真实模型 | 未跑（与 §18 F6 同因，待授权）。本波不改系统提示词与工具说明文本；转录续写与委派剥离是宿主机械行为，模型侧观感待真实渠道验收 |
+| F7 回滚 | 修复为行为修正，无新增开关；后台模式开关与回退口径沿用 §18 F7。新列 `result_handling_state` 保留（向后兼容迁移，旧库重开不炸、回填幂等） |
+
+review 遗留 P2 共 21 条逐条核实后登记为 D-115–D-135（见 debt-ledger.md 2026-10-25 补充记录）；§16 的过程数字（handler 1104→839）为波内中间态、当前树 907，已在账内标注。
+
+## 20. P2 清偿波（2026-10-26）
+
+对 §19 登记的 21 条 P2（D-115–D-135）按"可机械收口 vs 需设计决策"分批清偿：两波 subagent（apps/server 生产 6 项、packages/agent 5 项）+ subagent 用量受限后协调方亲落地 core/contracts 3 项与测试质量 2 项；部分表征测试由并行会话先行写红（D-123 四条、D-129/D-135a 两处）。**关账 16 条、留账 5 条**（D-115/D-117/D-119/D-120/D-132，需设计决策）。未部署、未重启、未调用真实业务平台或真实企微。
+
+| 防线 | 本轮记录 |
+|---|---|
+| F1 基线 | §19 终态 1725/1725、129 文件 + typecheck 0（本轮起点；除先行红 4 条 D-123 表征） |
+| F2 先红后绿 | D-123（先行红 4：fail-loud×2 + 排序×2 → 绿）；D-125（强化断言 + 变异：去分类→2 红→恢复绿）；D-135b（新反向钉 + 变异：喂引用文本→2 红→恢复绿）；D-116（上限置 MAX_SAFE_INTEGER 复现旧行为→3 红）；D-131（瞬断/持续失败/确定性错误三态）；D-133（互斥串行，改前事件插队红）；D-126/D-134（background×缺能力装配红→绿，inline 两态放行钉住）；其余各项均有新表征（详见 debt-ledger 各条收口摘要） |
+| F3 变异 | 本波三处显式变异记录（D-125/D-135b/D-116，见 F2）；D-124 跨进程 TOCTOU 无单进程确定性表征——UPDATE 租约条件为结构性闭合，机械锁=租约语义两态钉（注入时钟：有效租约 busy 抛/过期可取消），如实记录不冒充 |
+| F4 改动边界 | 全部为通用机制（fail-loud 契约错误、CAS 语义、装配校验、上限与截断、收据单一权威）；渠道语义留在 server 层（D-131 经 onBackgroundNotice 回调内包重试，task-manager 零改动）；无执行层分支引入；serve-gate 零触碰 |
+| F5 回归 | 终态实测：`npx vitest run` **1759/1759、130 文件全绿**（较 §19 +34，全为新增/强化用例）；`npm run typecheck` exit 0。棘轮零动：runtime.ts 1311、handler.ts 907（D-133 增 4 行靠注释压缩抵扣） |
+| F6 真实模型 | 未跑（待授权，与 §18/§19 同因）。D-122 为结构参数化且 golden 钉逐字节不变（2650B），提示词文本零变更 |
+| F7 回滚 | 行为修正无新开关；新增错误类（SessionArtifactRefConflictError/TaskRunActiveConflictError）为兼容添加，旧调用方接住 Error 的行为不变；insert 由覆盖转 fail-loud 是语义收紧——调用方（artifact-store）经核实不存在自然冲突路径，串行队列纪律不变 |
+
+留账 5 条的收敛方向已写入 debt-ledger（D-115 inline 物化、D-117 不变量先定义、D-119 messageId 身份、D-120 随 a2a 协议批次、D-132 drain 重排）。
