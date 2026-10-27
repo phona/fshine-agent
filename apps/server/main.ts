@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sweepScratchDirs, listScratchDirNames } from '@fshine/agent';
 import { createServerAssembly, repoRoot } from './assembly';
+import { createShutdownGuard, shutdownDrainMsOf } from './main-shutdown';
 import { runtimeModeOf } from './runtime-mode';
 
 /**
@@ -83,16 +84,21 @@ async function main(): Promise<void> {
   // 一屏可查，不用再做法医式核查。只含三个模式键——绝不全量打 env（.env 有 LLM 密钥）。
   console.log(JSON.stringify({ event: 'runtime_mode', ...runtimeModeOf(process.env) }));
 
-  const shutdown = async (signal: string): Promise<void> => {
+  // 停机在飞闸（D-132a）：连按两次信号只在飞跑一遍停机体，第二次只打一行
+  // shutdown_already_in_progress——并发第二遍会在第一遍排干中途就停渠道关库。
+  const shutdownGuard = createShutdownGuard();
+  const shutdown = (signal: string): Promise<void> => shutdownGuard.run(signal, async () => {
     console.log(JSON.stringify({ event: 'shutting_down', signal }));
     if (sweepTimer !== undefined) clearInterval(sweepTimer);
     // Stop admissions, cancel/wind down Worker runs, and let terminal event delivery finish while
-    // the channel and durable stores are still available.
-    await assembly.backgroundTasks.shutdown();
+    // the channel and durable stores are still available. 排干上限（D-132c）读
+    // FSHINE_SHUTDOWN_DRAIN_MS（缺省/非法回退 30s）：排干到期仍未落定的终态投递不在
+    // 停机期强收，由下次启动的 sweepUndeliveredTaskRuns 清扫兜底（assembly 接线）。
+    await assembly.backgroundTasks.shutdown({ drainMs: shutdownDrainMsOf(process.env) });
     await assembly.channel.stop();
     await assembly.close();
     process.exit(0);
-  };
+  });
   process.on('SIGINT', () => void shutdown('SIGINT'));
   process.on('SIGTERM', () => void shutdown('SIGTERM'));
 }

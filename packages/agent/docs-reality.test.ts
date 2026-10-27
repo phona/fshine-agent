@@ -121,4 +121,13 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(src.includes('不构成执行授权'), 'platform-execution-gate 的授权边界声明被删——准入闸/授信门术语混淆防线失效').toBe(true);
     expect(src.includes('serve-gate.ts'), '头注释与授权裁决模块的指向脱钩——读者找不到授信门的权威位置').toBe(true);
   });
+
+  it('D-120（命名债已关）：通用任务基础设施不再引用执行层命名的参数类型', () => {
+    // task-manager / background-runtime 是通用任务管理基础设施；其公共表面积引用
+    // Run17dzTaskArgs 是"新执行层照抄违例样板"的入口。主名 ContextTaskRunArgs 已
+    // 中性化，旧名只允许存在于 context.ts 的 deprecated 别名与 index.ts 的再导出
+    // （过渡一个版本周期，随 a2a 结构化调用协议批次退役）。此处复发 = 债回潮。
+    expect(read('packages/agent/src/task-manager.ts').includes('Run17dzTaskArgs'), 'task-manager 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
+    expect(read('packages/agent/src/background-runtime.ts').includes('Run17dzTaskArgs'), 'background-runtime 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
+  });
 });

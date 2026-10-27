@@ -274,4 +274,29 @@ describe('interactive session production wiring', () => {
       expect(new Set(runs.map((run) => run.planId)).size).toBe(1);
     } finally { release.resolve(); }
   });
+
+  // D-119：企微重投同一 msgid 不二次起后台任务。受理层按 messageId 幂等命中后，
+  // 重投拿到的重放回执引用原终稿（assistant 事件按 requestId 关联取回）。
+  it('redelivering the same msgid starts the Worker once and replays the recorded final reply', async () => {
+    let workerCalls = 0;
+    const b = await boot({
+      workerDispatchMode: 'background',
+      main: mainDriver([{ kind: 'delegate', request: '跑一遍报表' }]),
+      worker: { run: async (input: { messages: unknown[] }) => {
+        workerCalls += 1;
+        return { messages: input.messages, text: '本次报表已生成（重投幂等）', execution: { planId: 'mock-plan', version: 1, calls: 1 } };
+      } },
+    });
+    const first = await b.send('跑一遍报表', { messageId: 'msg_redeliver_e2e' });
+    expect(first).toMatch(/受理|排队/);
+    await until(() => b.sdk.sentMessages.some((message) => message.content.includes('本次报表已生成（重投幂等）')));
+
+    const second = await b.send('跑一遍报表', { messageId: 'msg_redeliver_e2e' });
+
+    expect(workerCalls).toBe(1);
+    expect(second).toContain('之前已处理过');
+    expect(second).toContain('本次报表已生成（重投幂等）');
+    const runs = await b.assembly.store.taskRuns!.listBySession('wecom:e2e_user', 'wecom:e2e_user');
+    expect(runs).toHaveLength(1);
+  });
 });

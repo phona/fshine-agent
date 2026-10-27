@@ -24,6 +24,11 @@ import { describe, expect, it } from 'vitest';
  * 1017 → 907（2026-10-25 收口）：W0–W7 产物机器（收集/工作区清单/收据脱敏）与 §18
  * 后台接线后的实际行数——产物与投递判据都住 artifact-store.ts / background-delivery.ts，
  * 压掉 110 行余量（留余量等于没压）。
+ * 907 → 956（2026-10-26，功能新增非抽取）：D-119 消息级幂等。受理入口加 msgid 查重
+ * 块（四层回执：后台 run 终稿优先重放 / assistant 事件重放 / 同文案拒绝 / 静默 /
+ * 诚实不可取）与 latestAssistantReply 取稿 helper（task_runs 按 originRequestId 关联
+ * 优先，assistant_message 事件兜底）；判据本体在 turn-persistence 与 task_runs，
+ * 这里只做查重与回执合成。后续抽取时照旧只减不增。
  *
  * 变异验证（F3）：往 handler.ts 加几行 → 断言红。
  */
@@ -31,7 +36,7 @@ import { describe, expect, it } from 'vitest';
 const HANDLER_PATH = join(__dirname, 'handler.ts');
 
 /** 当前真实行数（不含任何 slack）。改大 = 回退或未登记的功能新增，都要在这上面留一行理由。 */
-const HANDLER_LINE_BUDGET = 907;
+const HANDLER_LINE_BUDGET = 956;
 
 function countLines(path: string): number {
   const lines = readFileSync(path, 'utf8').split('\n');

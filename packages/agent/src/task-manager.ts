@@ -11,7 +11,7 @@ import { ToolUserError } from './driver';
 import type {
   ContextTaskRunner,
   PreparedContextTaskRun,
-  Run17dzTaskArgs,
+  ContextTaskRunArgs,
   RunWorkspaceFile,
   SubagentTaskResult,
 } from './context';
@@ -48,7 +48,7 @@ export interface TaskManagerScope {
 export interface BackgroundTaskSubmitInput {
   /** Host-generated identity for this source tool call or task event. */
   dispatchKey: string;
-  args: Run17dzTaskArgs;
+  args: ContextTaskRunArgs;
   trusted: TrustedContext;
   originMessage: string;
   originUserEventId?: string;
@@ -112,6 +112,11 @@ const TERMINAL_STATES = new Set<TaskRunState>([
 const TRANSITION_RETRIES = 4;
 const RESULT_PERSIST_RETRIES = 3;
 const RESULT_EVENT_PREFIX = 'task-run:';
+/**
+ * 停止受理后台任务的统一用户话术（D-132b）：submit 入口检查与停机窗口内的落库前
+ * 复查共用同一句——同一事实一个权威位置，两道闸对用户的发音必须一致。
+ */
+const STOPPING_REJECT_MESSAGE = '服务正在停止接收后台任务，请稍后重试。';
 
 function iso(ms: number): string {
   return new Date(ms).toISOString();
@@ -144,7 +149,7 @@ function resultState(result: SubagentTaskResult): Extract<TaskRunState, 'complet
 }
 
 function requestSummary(
-  input: Pick<PreparedBackgroundTaskSubmitInput, 'originMessage'> & { args?: Run17dzTaskArgs },
+  input: Pick<PreparedBackgroundTaskSubmitInput, 'originMessage'> & { args?: ContextTaskRunArgs },
   metadata?: Record<string, unknown>,
 ): string {
   if (metadata?.kind === 'host_confirmation') return '确认待处理操作';
@@ -269,6 +274,43 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
     return false;
   };
 
+  /**
+   * 停机收卷单个 run（shutdown 循环与 execute 末道闸共用，D-132b）：分类与话术只有
+   * 这一份——未启动的待确认类标 interrupted（宿主授权不撤，恢复后可再确认），排队中
+   * 标 cancelled，运行中转 cancelling 交由执行续篇收尾。终态/缺失的 run 不动（continue
+   * 语义）。票据只在排队/待确认两枝回收；运行中那枝的票据随执行续篇自然释放。
+   */
+  const windDownForStop = async (active: ActiveRun): Promise<void> => {
+    const current = await options.repo.get(active.record.runId);
+    if (!current || isTerminal(current.state)) return;
+    const unstartedHostConfirmation = current.metadata?.kind === 'host_confirmation'
+      && !active.executionStarted
+      && ['queued', 'running'].includes(current.state);
+    if (unstartedHostConfirmation) {
+      // Shutdown interrupts this receipt but does not revoke its still-valid host approval.
+      // The user may confirm it again after service recovery.
+      await transition(current.runId, ['queued', 'running'], {
+        state: 'interrupted',
+        endedAt: iso(now()),
+        resultEventId: current.resultEventId ?? `${RESULT_EVENT_PREFIX}${current.runId}`,
+        deliveryState: current.deliveryRoute ? 'pending' : 'not_required',
+      });
+      active.ticket.cancel();
+      settleCancelBarrier(active, true);
+    } else if (current.state === 'queued') {
+      await transition(current.runId, ['queued'], {
+        state: 'cancelled',
+        endedAt: iso(now()),
+        resultEventId: current.resultEventId ?? `${RESULT_EVENT_PREFIX}${current.runId}`,
+        deliveryState: current.deliveryRoute ? 'pending' : 'not_required',
+      });
+      active.ticket.cancel();
+    } else if (current.state === 'running') {
+      await transition(current.runId, ['running'], { state: 'cancelling' });
+    }
+    active.controller.abort();
+  };
+
   const stopBeforeExecution = async (active: ActiveRun, lease?: PlatformExecutionLease): Promise<void> => {
     active.ticket.cancel();
     lease?.release();
@@ -333,6 +375,19 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
     let result: SubagentTaskResult | undefined;
     let executionError: unknown;
     try {
+      // 停机末道闸（D-132b）：落库前复查之后仍隔着落库 await 的残余窗口里，run 会在
+      // shutdown 遍历 activeRuns 之后才排上队，没有谁会来取消它。起 Worker 前复查
+      // stopping：命中则按 shutdown 同一套收卷分类落终态（不新起 Worker、票据随收卷
+      // 回收），并照常派发终态事件——被 shutdown 遍历收卷的 run 也是经各自 execute
+      // 续篇派发终态的，两路口径一致；排干期外的残留投递由宿主启动期清扫兜底。
+      if (stopping) {
+        await windDownForStop(active);
+        const stopped = await options.repo.get(active.record.runId);
+        if (stopped && isTerminal(stopped.state)) {
+          scheduleDispatch(active, stopped, stopped.result as SubagentTaskResult | undefined, stopped.error);
+        }
+        return;
+      }
       let current = await options.repo.get(active.record.runId);
       if (!current || current.state !== 'queued') {
         if (current && isTerminal(current.state)) scheduleDispatch(active, current, current.result as SubagentTaskResult | undefined, current.error);
@@ -630,6 +685,12 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
       },
     };
     try {
+      // 停机窗口收口·前半（D-132b）：submitIdempotently 的入口检查之后隔着 prepare、
+      // materializeInputs 等多个 await——停机在这些 await 里置位时，提交会带着"已排队"
+      // 回执照常落库并调度。落库前再查一次 stopping，命中即以与入口同句的用户错误拒绝
+      // （用户拿到的是诚实的重试提示，不是假回执）；ticket 由本 try 的 catch 回收，
+      // reserved 由 submitPreparedNew 的 catch 释放。
+      if (stopping) throw new ToolUserError(STOPPING_REJECT_MESSAGE);
       const saved = await options.repo.createOrGetByDispatchKey(record);
       if (saved.runId !== runId) {
         ticket.cancel();
@@ -658,7 +719,7 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
   }
 
   async function submitIdempotently(dispatchKey: string, create: () => Promise<TaskReceipt>): Promise<TaskReceipt> {
-    if (stopping) throw new ToolUserError('服务正在停止接收后台任务，请稍后重试。');
+    if (stopping) throw new ToolUserError(STOPPING_REJECT_MESSAGE);
     const existing = await options.repo.getByDispatchKey(dispatchKey);
     if (existing) return receiptFor(existing);
     const pending = inFlightDispatches.get(dispatchKey);

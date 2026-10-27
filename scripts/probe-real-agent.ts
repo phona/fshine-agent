@@ -1195,7 +1195,13 @@ const CASES: Case[] = [
     run: async () => {
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
-      for (let i = 0; i < 5; i += 1) turns.push(await send('查一下新兴五金账套 202609 的应收账款'));
+      // 2026-10-26 修正（F6 首批实测 ⚠）：原查询"新兴五金 202609"在 mock 平台无数据
+      // （not_found），模型五轮诚实答"该期间无数据"（零金额→空签名），第五轮还主动改查
+      // 当前期间给了数——金额签名判"口径不一致"是断言不适配 not_found 形态，不是模型
+      // 回归（先例：Y2 的"关闭期间"错误态在 mock 读路径不可达时换可达形态）。换成 mock
+      // 有数据的组合（幻辰财税 1122 202606=61,000，见 mock 状态注释），口径一致才真正
+      // 可判：五轮都该给出同一笔数。
+      for (let i = 0; i < 5; i += 1) turns.push(await send('查一下幻辰财税账套 202606 的应收账款'));
       await assembly.close();
       const notes: string[] = [];
       const calls = ledgerCalls();

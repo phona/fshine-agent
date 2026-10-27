@@ -256,6 +256,7 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_ATTACHMENT_DIR', { tag: '遗留待清', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 DZ_*（那是平台命名空间，会把"宿主把用户文件存哪"误记成平台协议）；.env.example 已文档化，随 DZ_* 统一批次改名' }],
   ['FSHINE_WORKER_DISPATCH_MODE', { tag: '警职执法', reason: 'fshine 部署选择新委派 inline/background 的宿主交互模式开关（默认 inline）：这是通用 runtime 调度策略，不是 17dz 执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
   ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主排队容量上限：这是通用平台资源保护参数，不是 17dz 业务规则或执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
+  ['FSHINE_SHUTDOWN_DRAIN_MS', { tag: '警职执法', reason: '宿主停机排干上限（apps/server：main.ts 经 shutdownDrainMsOf 读入并传给 backgroundTasks.shutdown({drainMs})，缺省/非法回退 30000ms）：宿主停机参数，非执行层协议——排干的是 fshine 自己的后台任务与终态事件投递，与 17dz 无关，保留 fshine 命名空间，不改 DZ_*' }],
   // 方案 1 · B 波曾登记的两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）
   // 已随 C 波后只剩一种行为而退役，登记项一并删除——本表只减不增；那两个名字若在
   // packages/apps/scripts 里复活（含注释），下面"未登记即红"会当场抓住。

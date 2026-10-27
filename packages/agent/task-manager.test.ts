@@ -654,4 +654,81 @@ describe('BackgroundTaskManager', () => {
     expect(stopped).toBe(true);
     expect((await repo.get(receipt.runId))?.state).toBe('completed');
   });
+
+  it('停机窗口内迟到的提交在落库前被拒：与入口同文案、无新 run、无 Worker（D-132b）', async () => {
+    // 事故形状：submitIdempotently 的入口 stopping 检查之后隔着 prepare/materializeInputs
+    // 多个 await——停机在 await 里置位时，提交带着"已排队"回执照常落库并调度，重启后
+    // 变成 interrupted 死任务。复现：prepare 内卡住，入口检查已过、shutdown 置位后再放行。
+    const repo = new MemoryTaskRuns();
+    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const prepareEntered = deferred<void>();
+    const releasePrepare = deferred<void>();
+    const executions: string[] = [];
+    let preparedCount = 0;
+    const runner: ContextTaskRunner = {
+      tool: { name: 'run_17dz_task', description: 'test', inputSchema: {} },
+      run: async () => { throw new Error('manager must execute the prepared handle'); },
+      prepare: async (requestArgs: Run17dzTaskArgs) => {
+        preparedCount += 1;
+        prepareEntered.resolve();
+        await releasePrepare.promise;
+        const prepared: PreparedContextTaskRun = {
+          taskId: requestArgs.taskId ?? 'task-stop-window',
+          request: requestArgs.request,
+          timeoutMs: 1_000,
+          workspaceDir: 'tmp/task-stop-window',
+          snapshotWorkspace: async () => [],
+          execute: async () => { executions.push('task-stop-window'); return { taskId: 'task-stop-window', text: 'done' }; },
+        };
+        return prepared;
+      },
+    };
+    const manager = createBackgroundTaskManager({ runner, repo, executionGate: gate });
+
+    const submitPromise = manager.submit(input('stop-window'));
+    await prepareEntered.promise; // 已过 submitIdempotently 入口检查
+    await manager.shutdown({ drainMs: 0 }); // stopping 置位；此刻无在飞 run
+    releasePrepare.resolve();
+
+    const settled = await Promise.allSettled([submitPromise]);
+    expect(settled[0]?.status).toBe('rejected');
+    const reason = (settled[0] as PromiseRejectedResult).reason;
+    expect(reason).toBeInstanceOf(ToolUserError);
+    expect(reason.message).toBe('服务正在停止接收后台任务，请稍后重试。');
+    expect(preparedCount).toBe(1);
+    // 仓储无新 run、无 Worker 启动、排队票据无残留。
+    expect(await repo.listBySession('wecom:user-1', 'session-1')).toHaveLength(0);
+    expect(executions).toHaveLength(0);
+    expect(gate.snapshot().queued).toBe(0);
+  });
+
+  it('遍历 activeRuns 之后才排上队的迟到 run 在 execute 入口被末道闸收卷为 cancelled，不起 Worker（D-132b）', async () => {
+    // 残余窗口：落库前复查之后仍隔着 createOrGetByDispatchKey 一个 await——停机恰落在
+    // 这个 await 上时，run 在 shutdown 的 activeRuns 遍历之后才登记并调度，没有谁会来
+    // 取消它。复现：落库 await 上卡住、shutdown（遍历时 activeRuns 为空）后再放行。
+    const repo = new MemoryTaskRuns();
+    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const harness = mockRunner();
+    const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: gate });
+    const createEntered = deferred<void>();
+    const releaseCreate = deferred<void>();
+    const originalCreate = repo.createOrGetByDispatchKey.bind(repo);
+    repo.createOrGetByDispatchKey = async (record: TaskRunRecord) => {
+      createEntered.resolve();
+      await releaseCreate.promise;
+      return originalCreate(record);
+    };
+
+    const submitPromise = manager.submit(input('late-schedule'));
+    await createEntered.promise; // 已过入口检查与预留，卡在落库 await 上
+    await manager.shutdown({ drainMs: 0 }); // stopping 置位且 activeRuns 遍历已过
+    releaseCreate.resolve();
+    const receipt = await submitPromise; // 回执仍是 queued——这正是要收卷的窗口
+
+    await waitFor(async () => (await repo.get(receipt.runId))?.state !== 'queued');
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    expect(harness.executions).toHaveLength(0); // 无 Worker 启动
+    expect(gate.snapshot().queued).toBe(0); // 排队票据已回收
+    await manager.shutdown({ drainMs: 100 });
+  });
 });

@@ -173,6 +173,7 @@ export {
   type ContextTaskRunnerOptions,
   type ContextTaskExecutionContext,
   type SubagentTaskResult,
+  type ContextTaskRunArgs,
   type Run17dzTaskArgs,
   type ConfirmationOutcome,
   type ConfirmationReply,

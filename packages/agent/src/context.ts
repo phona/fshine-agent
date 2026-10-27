@@ -76,7 +76,12 @@ export const RUN_17DZ_TASK_DESCRIPTION = [
   '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
 ].join('\n');
 
-export interface Run17dzTaskArgs {
+/**
+ * 委派任务的宿主侧参数（D-120 第一步：中性主名）。字段全部是宿主持有的通用形态
+ * （请求文本、任务续跑句柄、计划步骤标签、申报块、实体来源）——原名 Run17dzTaskArgs
+ * 只有名字带执行层色彩，保留为过渡别名随 a2a 结构化调用协议批次退役。
+ */
+export interface ContextTaskRunArgs {
   request: string;
   taskId?: string;
   /**
@@ -93,6 +98,9 @@ export interface Run17dzTaskArgs {
    */
   entitySources?: PlanEntitySources;
 }
+
+/** @deprecated 中性名 ContextTaskRunArgs 的过渡别名：随 a2a 结构化调用协议批次退役。 */
+export type Run17dzTaskArgs = ContextTaskRunArgs;
 
 export interface SubagentTaskResult {
   taskId: string;
@@ -198,7 +206,7 @@ export interface PreparedContextTaskRun {
 }
 
 interface ContextTaskPreparationState {
-  args: Run17dzTaskArgs;
+  args: ContextTaskRunArgs;
   ctx: ContextTaskExecutionContext;
   profile: ResolvedContextProfile;
   existing: PlatformTaskRecord | null;
@@ -296,12 +304,12 @@ export interface ContextTaskExecutionContext {
 export interface ContextTaskRunner {
   readonly tool: DiscoveredTool;
   prepare?(
-    args: Run17dzTaskArgs,
+    args: ContextTaskRunArgs,
     ctx: ContextTaskExecutionContext,
   ): Promise<PreparedContextTaskRun>;
   prepareConfirmation?(ctx: TrustedContext, message: string): Promise<PreparedContextTaskRun | null>;
   run(
-    args: Run17dzTaskArgs,
+    args: ContextTaskRunArgs,
     ctx: ContextTaskExecutionContext,
     signal?: AbortSignal,
   ): Promise<SubagentTaskResult>;
@@ -327,7 +335,7 @@ export interface ContextTaskRunner {
 
 interface InternalContextTaskRunner extends ContextTaskRunner {
   run(
-    args: Run17dzTaskArgs,
+    args: ContextTaskRunArgs,
     ctx: ContextTaskExecutionContext,
     signal?: AbortSignal,
     preparedState?: ContextTaskPreparationState,
@@ -699,11 +707,16 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       }
       const ci = options.changeIntents;
       if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
-      // 新提案使旧 pending 作废（与旧路径同一语义）：会话里同时只留一个待确认提案。
+      // 新提案作废**同任务**的旧 pending（D-117，2026-10-26 拍板 I2：一任务一码）。
+      // 跨任务的 pending 并存——后台长任务跑到中途出的提案，不得作废用户前台正要
+      // 确认的另一个任务的提案（I1 全会话单窗会让后台提案打断前台确认，与后台
+      // "不打扰前台"的设计初衷冲突）。已接受的代价：同一用户可同时持多个任务的
+      // 有效确认码，回错码=确认错任务，由确认码三元绑定（principal/session/task）
+      // + TTL 兜底。
       const active = await ci.findPendingBySession(
         ctx.trusted.principalId,
         ctx.trusted.sessionId,
-        ctx.trusted.backgroundRunId ? taskId : undefined,
+        taskId,
       );
       if (active) await ci.updateStatus(active.intentId, 'superseded');
       const code = generateCode();
@@ -919,7 +932,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   }
 
   async function prepareContextTask(
-    args: Run17dzTaskArgs,
+    args: ContextTaskRunArgs,
     ctx: ContextTaskExecutionContext,
   ): Promise<ContextTaskPreparationState> {
     if (!args || typeof args.request !== 'string' || args.request.trim() === '') {

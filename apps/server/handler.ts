@@ -372,6 +372,35 @@ function principalIdOf(message: IncomingChannelMessage): string {
 }
 
 /**
+ * 取某回合的最终回复（D-119 重放回执）。优先级：① 后台 run 的终稿（task_runs 按
+ * originRequestId 关联，background 回合的受理回执只是"已排队"，真正有信息量的
+ * 交付文本在 run.resultText）；② assistant_message 事件（inline/direct 回合由
+ * runtime 侧统一收口落库并带 requestId）。两者都取不到（极长会话挤出 500 条窗口
+ * 或崩溃中断）→ null，调用方走"回复未能取回"的诚实回执，不伪造结果。
+ */
+async function latestAssistantReply(
+  store: Pick<HandlerDeps['store'], 'conversationLog' | 'taskRuns'>,
+  principalId: string,
+  sessionId: string,
+  requestId: string,
+): Promise<string | null> {
+  const runs = await store.taskRuns?.listBySession(principalId, sessionId) ?? [];
+  const settled = runs
+    .filter((run) => run.originRequestId === requestId && run.resultText)
+    .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1));
+  if (settled.length > 0) return settled[0]!.resultText ?? null;
+  if (!store.conversationLog) return null;
+  const events = await store.conversationLog.list({ principalId, sessionId, limit: 500 });
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i]!;
+    if (event.kind === 'assistant_message' && event.requestId === requestId && event.content) {
+      return event.content;
+    }
+  }
+  return null;
+}
+
+/**
  * 等附件 burst 稳了：一个窗口内没有新到达就收工，触顶兜底。
  * 判据是**静默**而不是"睡满 N 秒"——文件持续 trickle 时就一直等，这正是乱序投递要的；
  * 每一轮都对照 `lastArrivalAt`，所以安静的 burst 仍然只等一个窗口（与旧行为同延迟，
@@ -546,8 +575,28 @@ export function createMessageHandler(deps: HandlerDeps): ServerReplyHandler {
     const principalId = `${channel}:${message.wecomUserId}`;
     const sessionKey = message.conversationId;
     const sessionId = `${channel}:${sessionKey}`;
-    const requestId = newId('req');
     const createdAt = new Date().toISOString();
+
+    // ── 消息级幂等（D-119）：企微重投同一 msgid 不二次起回合 ────────────────────
+    // 事故形状：回调未及时 ACK/网络重试时企微会重投同一消息；每条入站本这里新造
+    // requestId，repeat-request 只拦"申报 conversation"形态拦不住 delegate——重投
+    // 会再起一个后台任务跑同样工作。幂等键 = 渠道层解析并已验签回调的 messageId
+    //（信任边界：msgid 身份来自受信适配器，宿主不复核渠道投递语义）；查重先于
+    // 新 requestId 的任何副作用（含附件-only 的入池——重投的附件不能把池翻倍）。
+    // 同会话消息经 sessionQueues 串行，重投被处理时原回合已终态；跨进程重启后
+    // 中断的回合（outcome 已写、终稿未达）走"诚实回执"而不是伪造结果。
+    const replayed = await store.requests.findByWecomMessageId(message.messageId);
+    if (replayed) {
+      if (replayed.outcome === 'denied') {
+        return `该账号(${replayed.principalId})未开通查询权限,请联系管理员开通。`;
+      }
+      if (replayed.outcome === 'attachment_received') return '';
+      const finalReply = await latestAssistantReply(store, principalId, sessionId, replayed.requestId);
+      if (finalReply) return `这条消息之前已处理过，原回复如下：\n\n${finalReply}`;
+      return '这条消息此前已受理，但回复内容未能取回（可能因服务中断）。若涉及产物文件，可直接回复「重发」重新获取。';
+    }
+
+    const requestId = newId('req');
 
     // ── 附件-only 消息：只暂存，不启回合 ──────────────────────────────────────
     // 仍要落一条审计（"这一轮用户给了什么"是排查时最缺的证据），但 outcome 区别于 replied，

@@ -108,6 +108,106 @@ function message(overrides: Partial<IncomingChannelMessage> = {}): IncomingChann
   };
 }
 
+// ── D-119：消息级幂等。企微回调未及时 ACK 会重投同一 msgid——每条入站新造
+// requestId 的旧形态会再起一个回合（含二次建后台任务、附件池翻倍）。这里用
+// 状态化 requests/conversationLog 替身驱动受理层的查重路径（storeWithRun 的
+// requests 是恒空替身，驱动不了）。
+function statefulIntakeStore() {
+  const { store } = storeWithRun();
+  const requestRows = new Map<string, { requestId: string; wecomMessageId: string; principalId: string; input: string; createdAt: string; outcome: string }>();
+  const insertCount = new Map<string, number>();
+  const events: Array<{ principalId: string; sessionId: string; kind: string; content?: string; requestId?: string; createdAt: string }> = [];
+  const stateful = store as unknown as {
+    requests: { insert: (record: never) => Promise<void>; findByWecomMessageId: (id: string) => Promise<unknown> };
+    conversationLog: { list: (query: { principalId: string; sessionId: string; limit: number }) => Promise<unknown[]> };
+  };
+  stateful.requests = {
+    insert: async (record: never) => {
+      const r = record as unknown as { requestId: string; wecomMessageId: string; principalId: string; input: string; createdAt: string; outcome: string };
+      requestRows.set(r.wecomMessageId, r);
+      insertCount.set(r.wecomMessageId, (insertCount.get(r.wecomMessageId) ?? 0) + 1);
+    },
+    findByWecomMessageId: async (id: string) => requestRows.get(id) ?? null,
+  };
+  stateful.conversationLog = {
+    list: async (query: { principalId: string; sessionId: string; limit: number }) =>
+      events.filter((event) => event.principalId === query.principalId && event.sessionId === query.sessionId).slice(0, query.limit),
+  };
+  return {
+    store,
+    recordOf: (msgid: string) => requestRows.get(msgid) ?? null,
+    insertsOf: (msgid: string) => insertCount.get(msgid) ?? 0,
+    seedAssistantReply: (requestId: string, content: string) => {
+      events.push({ principalId: `wecom:${USER}`, sessionId: 'wecom:chat_a', kind: 'assistant_message', content, requestId, createdAt: NOW });
+    },
+  };
+}
+
+describe('消息级幂等（D-119）：同 msgid 重投不二次起回合', () => {
+  it('文本消息重投：handleTurn 恰一次、恰一条 request，二次回复重放原终稿', async () => {
+    const intake = statefulIntakeStore();
+    const turns: string[] = [];
+    const runtime: AgentRuntime = { handleTurn: async (_ctx, text) => { turns.push(text); return { text: '工资表已生成。' }; } };
+    const handler = createMessageHandler({ store: intake.store, runtime, inboundDebounceMs: 0 });
+    const msg = message({ messageId: 'msgid_replay_1', text: '做工资表' });
+
+    const first = await handler(msg);
+    expect(String(first)).toContain('工资表已生成');
+    // 原终稿落库（生产由 runtime 侧统一收口写入，这里按同形态预置）。
+    intake.seedAssistantReply(intake.recordOf('msgid_replay_1')!.requestId, '工资表已生成。');
+
+    const second = await handler(message({ messageId: 'msgid_replay_1', text: '做工资表' }));
+
+    expect(turns).toEqual(['做工资表']);
+    expect(intake.recordOf('msgid_replay_1')).toMatchObject({ outcome: 'replied' });
+    expect(intake.insertsOf('msgid_replay_1')).toBe(1);
+    expect(String(second)).toContain('之前已处理过');
+    expect(String(second)).toContain('工资表已生成。');
+  });
+
+  it('崩溃形状：outcome 已写但终稿未达（无 assistant 事件）→ 诚实回执不伪造结果', async () => {
+    const intake = statefulIntakeStore();
+    const runtime: AgentRuntime = { handleTurn: async () => ({ text: 'done' }) };
+    const handler = createMessageHandler({ store: intake.store, runtime, inboundDebounceMs: 0 });
+    await handler(message({ messageId: 'msgid_crash_1', text: '查一下' }));
+    // 不 seed assistant 事件：模拟回合中途进程中断（requests.insert 先于终稿落库）。
+
+    const second = await handler(message({ messageId: 'msgid_crash_1', text: '查一下' }));
+
+    expect(String(second)).toContain('未能取回');
+    expect(String(second)).toContain('重发');
+  });
+
+  it('附件-only 消息重投：二次静默（不二次入池、不二次落审计）', async () => {
+    const intake = statefulIntakeStore();
+    const runtime: AgentRuntime = { handleTurn: async () => ({ text: 'ok' }) };
+    const handler = createMessageHandler({ store: intake.store, runtime, inboundDebounceMs: 0 });
+    const attach = { filename: '工资表.xlsx', path: '/tmp/wage.xlsx', bytes: 6 };
+    const first = await handler(message({ messageId: 'msgid_attach_1', text: '', attachmentOnly: true, attachments: [attach] }));
+
+    expect(first).toBe('');
+    expect(intake.recordOf('msgid_attach_1')).toMatchObject({ outcome: 'attachment_received' });
+
+    const second = await handler(message({ messageId: 'msgid_attach_1', text: '', attachmentOnly: true, attachments: [attach] }));
+    expect(second).toBe('');
+    expect(intake.insertsOf('msgid_attach_1')).toBe(1);
+  });
+
+  it('未授权消息重投：同文案拒绝，不二次查 scope', async () => {
+    const intake = statefulIntakeStore();
+    const runtime: AgentRuntime = { handleTurn: async () => ({ text: 'ok' }) };
+    const handler = createMessageHandler({ store: intake.store, runtime, inboundDebounceMs: 0 });
+    const denied = message({ messageId: 'msgid_denied_1', wecomUserId: 'user_denied', text: '在吗' });
+
+    const first = await handler(denied);
+    const second = await handler(message({ messageId: 'msgid_denied_1', wecomUserId: 'user_denied', text: '在吗' }));
+
+    expect(first).toContain('未开通查询权限');
+    expect(second).toBe(first);
+    expect(intake.insertsOf('msgid_denied_1')).toBe(1);
+  });
+});
+
 describe('background task server delivery', () => {
   const tempRoots: string[] = [];
   afterAll(() => { for (const root of tempRoots) rmSync(root, { recursive: true, force: true }); });

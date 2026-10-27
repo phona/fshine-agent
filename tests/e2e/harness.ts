@@ -618,7 +618,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
 
 // ── 装配辅助 ────────────────────────────────────────────────────────────
 
-interface SendOptions { userid?: string; group?: boolean; quote?: unknown }
+interface SendOptions { userid?: string; group?: boolean; quote?: unknown; /** 覆盖 msgid（D-119 重投 e2e 用）；缺省每次随机。 */ messageId?: string }
 
 interface Boot {
   /** 以指定企微用户身份发一句话，返回用户最终看到的文本。 */
@@ -797,7 +797,7 @@ async function boot(options: BootOptions): Promise<Boot> {
   await starting;
   /** 发一句话并等到这一回合的 finish 帧；帧采集按 messageId 预先登记同一份对象。 */
   const deliver = (text: string, options: SendOptions = {}): { done: Promise<string>; frames: { steps: string[]; notices: string[] }; messageId: string } => {
-    const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+    const messageId = options.messageId ?? `msg_${Math.random().toString(36).slice(2, 10)}`;
     const frames = { steps: [] as string[], notices: [] as string[] };
     turnFrames.set(messageId, frames);
     const before = sdk.frames.filter((frame) => frame.finish).length;
@@ -829,7 +829,7 @@ async function boot(options: BootOptions): Promise<Boot> {
     options: { userid?: string; buffer?: Buffer; failDownload?: boolean } = {},
   ): Promise<string> => {
     sdk.fileToServe = options.failDownload ? null : { filename, buffer: options.buffer ?? Buffer.from('e2e-attachment-bytes') };
-    const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+    const messageId = options.messageId ?? `msg_${Math.random().toString(36).slice(2, 10)}`;
     turnFrames.set(messageId, { steps: [], notices: [] });
     const before = sdk.frames.filter((frame) => frame.finish).length;
     sdk.emit('message.file', {

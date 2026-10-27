@@ -3,7 +3,7 @@ import type { AgentReply, BackgroundTaskEvent, ConversationEventRecord, Conversa
 import type { ContextTaskRunner, PreparedContextTaskRun, SubagentTaskResult } from './context';
 import type { PlanEntitySources } from './turn-contract';
 import type { PlanStepLabel } from './plan-steps';
-import type { Run17dzTaskArgs } from './context';
+import type { ContextTaskRunArgs } from './context';
 import type { BackgroundTaskManager, TaskReceipt } from './task-manager';
 import type { TaskRunRecord, TurnInputContext } from '@fshine/contracts';
 import { ToolUserError } from './driver';
@@ -43,7 +43,7 @@ export function taskEventDispatchKey(event: BackgroundTaskEvent, stepIndex: numb
 export async function submitBackgroundWorkerTask(input: {
   manager: BackgroundTaskManager;
   trusted: TrustedContext;
-  args: Run17dzTaskArgs;
+  args: ContextTaskRunArgs;
   originMessage: string;
   inputContext?: TurnInputContext;
   planId?: string;
@@ -54,7 +54,7 @@ export async function submitBackgroundWorkerTask(input: {
   const turnDeclaration = input.args.turnDeclaration && input.taskEvent
     ? { ...input.args.turnDeclaration, continueTaskId: input.taskEvent.run.taskId }
     : input.args.turnDeclaration;
-  const args: Run17dzTaskArgs = {
+  const args: ContextTaskRunArgs = {
     ...input.args,
     ...(turnDeclaration ? { turnDeclaration } : {}),
     ...(taskId ? { taskId } : {}),
@@ -77,7 +77,7 @@ export async function submitBackgroundWorkerTask(input: {
 export async function dispatchBackgroundTask(input: {
   manager: BackgroundTaskManager;
   trusted: TrustedContext;
-  args: Run17dzTaskArgs;
+  args: ContextTaskRunArgs;
   originMessage: string;
   inputContext?: TurnInputContext;
   planId?: string;
@@ -211,7 +211,7 @@ export async function maybeSubmitBackgroundResume(input: {
   const source = metadata && typeof metadata === 'object' ? metadata['entitySources'] : undefined;
   const entitySources = source && typeof source === 'object' && !Array.isArray(source)
     && typeof (source as Record<string, unknown>)['currentMessage'] === 'string'
-    ? source as Run17dzTaskArgs['entitySources']
+    ? source as ContextTaskRunArgs['entitySources']
     : undefined;
   const stepLabel = metadata && typeof metadata === 'object' && typeof metadata['stepLabel'] === 'string'
     ? metadata['stepLabel'] as string

@@ -107,9 +107,11 @@ function fakeIntents() {
       }
       return null;
     },
-    async findPendingBySession(principalId, sessionId) {
+    async findPendingBySession(principalId, sessionId, taskId) {
       for (const r of rows.values()) {
-        if (r.principalId === principalId && r.sessionId === sessionId && r.status === 'pending') return r;
+        if (r.principalId !== principalId || r.sessionId !== sessionId || r.status !== 'pending') continue;
+        if (taskId !== undefined && r.taskId !== taskId) continue;
+        return r;
       }
       return null;
     },
@@ -133,6 +135,10 @@ function fakeIntents() {
 interface HostSetup {
   /** 直接调到宿主注入的 onCreateProposal（未配 changeIntents 时为 undefined）。 */
   invoke: (call?: ProposalCreateCall) => Promise<ProposalCreationOutcome | null>;
+  /** 同任务续跑（continueTaskId）后再回调 onCreateProposal：D-117 同任务二次提案用。 */
+  invokeSameTask: (taskId: string, call?: ProposalCreateCall) => Promise<ProposalCreationOutcome | null>;
+  /** 往任务仓库替身里放一条本会话任务：continueTaskId 续跑前置。 */
+  seedTask: (taskId: string) => void;
   rows: Map<string, ChangeIntentRecord>;
   /** 办调平台时替身收到的请求（含 env）。 */
   calls: Array<{ platformRoot: string; args: string[]; env: NodeJS.ProcessEnv }>;
@@ -149,6 +155,7 @@ function setupHost(options: {
   gatewayRunner?: PlanCliRunner;
 }): HostSetup {
   const intents = fakeIntents();
+  const tasks = fakeTasks();
   const calls: HostSetup['calls'] = [];
   const runner = options.gatewayRunner ?? (async ({ platformRoot, args, env }) => {
     calls.push({ platformRoot, args, env: env ?? {} });
@@ -163,7 +170,7 @@ function setupHost(options: {
   };
   const taskRunner = createContextTaskRunner({
     profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
-    tasks: noopTasks,
+    tasks: tasks.repo,
     workerDriver,
     changeIntents: intents.repo,
     proposalGatewayRunner: runner,
@@ -174,8 +181,26 @@ function setupHost(options: {
   return {
     rows: intents.rows,
     calls,
+    seedTask: (taskId: string) => {
+      tasks.rows.set(taskId, {
+        taskId, parentSessionId: 'wecom:u1:c1', principalId: 'wecom:u1', workerMessages: [],
+        createdAt: '2026-10-26T00:00:00.000Z', updatedAt: '2026-10-26T00:00:00.000Z', outcome: 'done',
+      });
+    },
     invoke: async (call = { operation: 'voucher.proposal', payloadPath: 'tmp/req_1/proposal.json' }) => {
       await taskRunner.run({ request: '录入两笔往来款' }, {
+        trusted: {
+          requestId: 'req_1',
+          principalId: 'wecom:u1',
+          sessionId: 'wecom:u1:c1',
+        },
+      });
+      if (!captured) return null;
+      return captured(call);
+    },
+    /** 同任务续跑（continueTaskId）：D-117 用例需要"同一 taskId 再出一张提案"。 */
+    invokeSameTask: async (taskId: string, call = { operation: 'voucher.proposal', payloadPath: 'tmp/req_1/proposal3.json' }) => {
+      await taskRunner.run({ request: '按补充信息再录', taskId }, {
         trusted: {
           requestId: 'req_1',
           principalId: 'wecom:u1',
@@ -288,14 +313,34 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
     expect(host.rows.size).toBe(0);
   });
 
-  it('新提案使旧 pending 作废（superseded），会话里只留一个待确认提案', async () => {
+  // ── D-117（2026-10-26 拍板 I2：一任务一码）：同任务只留一个待确认提案，跨任务
+  // 并存——后台长任务出提案不应作废用户前台正要确认的另一个任务（I1 的代价形态）。
+  // 代价（已接受）：同一用户可同时持多个任务的有效确认码，回错码=确认错任务；
+  // 由确认码三元绑定（principal/session/task）+ TTL 兜底。改前 inline 枝 supersede
+  // 全会话 pending——该期望随政策决定翻转。
+  it('同任务二次提案作废旧 pending；跨任务提案并存（D-117 I2：一任务一码）', async () => {
     const host = setupHost({});
     await host.invoke();
     const first = [...host.rows.values()][0]!;
+    // 不同任务的新提案：first 存活（跨任务并存）。
     await host.invoke({ operation: 'voucher.proposal', payloadPath: 'tmp/req_1/proposal2.json' });
+    expect(first.status).toBe('pending');
+    const pendings = [...host.rows.values()].filter((row) => row.status === 'pending');
+    expect(pendings).toHaveLength(2);
+    expect(new Set(pendings.map((row) => row.taskId)).size).toBe(2);
 
-    expect(first.status).toBe('superseded');
-    expect([...host.rows.values()].filter((row) => row.status === 'pending')).toHaveLength(1);
+    // 同任务再建提案：旧 pending 被作废（一任务一码）。
+    const second = pendings[1]!;
+    const secondTaskId = second.taskId!;
+    host.seedTask(secondTaskId);
+    const intents = host.rows;
+    const before = new Set(intents.keys());
+    await host.invokeSameTask(secondTaskId);
+    expect(second.status).toBe('superseded');
+    // I2 语义：first（其他任务）不受影响仍 pending；同任务的在窗提案恰一张（新那张）。
+    expect(first.status).toBe('pending');
+    expect([...intents.values()].filter((row) => row.status === 'pending' && row.taskId === secondTaskId)).toHaveLength(1);
+    expect(intents.size).toBe(before.size + 1);
   });
 });
 

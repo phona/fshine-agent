@@ -490,10 +490,15 @@ describe('网关提案路径 · 确认码攻击面：错误码 / 过期 / 跨 se
     await assembly.close();
   });
 
-  it('同会话连提两案：旧码 stale、旧意图 superseded，新码确认走到落账', async () => {
+  it('同会话连提两案（D-117 I2：一任务一码）：两意图并存，各码各落账', async () => {
     // 两轮委派各带一次网关提案调用。注意**不能**照 legacy 夹具那样在提案步后补
     // `{end:true}`：harness 的 proposal 步一旦 completed 就整段返回，`end` 步会原样
     // 留给下一轮并把下一轮直接终结（worker 交白卷 → 宿主判"未返回可用结果"）。
+    //
+    // D-117（2026-10-26 拍板 I2）：supersede 只作用于**同任务**。本用例两案是两次
+    // 独立委派（不同 taskId）——旧意图不再被新提案机械作废，用户两个码各自有效，
+    // 确认哪个落账哪个（改前 inline 枝 supersede 全会话，旧码 stale——期望随政策
+    // 决定翻转）。"改为"类替换语义由模型在提案文本里向用户说明，宿主不越权作废。
     const twoProposalWorker = gatedWorker([
       { plan: [{ operation: 'finance.search-account-sets', args: ['--query', ACCOUNT] }] },
       { proposal: singleValidProposal() },
@@ -517,25 +522,20 @@ describe('网关提案路径 · 确认码攻击面：错误码 / 过期 / 跨 se
     const preview2 = await send('第二笔：改为录入 9 月付款凭证');
     const code2 = preview2.match(CONFIRM_RE)?.[1]!;
     expect(code2).not.toBe(code1);
-    // 新提案使旧 pending 作废（superseded），会话里 pending 已是第二张
-    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
-    const pending2 = await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION);
-    expect(pending2?.intentId).not.toBe(intent1);
-    expect(pending2?.status).toBe('pending');
+    // I2：跨任务 pending 并存——第一张意图存活，会话里有两张待确认。
+    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('pending');
 
-    // 用第一个码确认：确定性 stale 解释，无状态变化、无落账
+    // 用第一个码确认：第一案照常落账（不再是 stale——旧码绑定的是仍存活的意图）。
     const before = mockVoucherCount(ACCOUNT, PERIOD);
-    const stale = await send(`确认 ${code1}`);
-    expect(stale).toContain('该确认码对应的提案已被更新的提案取代，确认最新的提案即可。');
-    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('superseded');
-    expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('pending');
-    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-
-    // 新码确认：走完整落账链（提案载荷在平台侧，宿主持有的取物单仍然有效）
-    const done = await send(`确认 ${code2}`);
-    expect(done).toContain('确认码已核销，落账已完成。');
+    const done1 = await send(`确认 ${code1}`);
+    expect(done1).toContain('确认码已核销，落账已完成。');
     expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before + 1);
-    expect((await assembly.store.changeIntents!.get(pending2!.intentId))?.status).toBe('committed');
+    expect((await assembly.store.changeIntents!.get(intent1))?.status).toBe('committed');
+
+    // 新码确认第二案：同样走完整落账链，两案各落各的账。
+    const done2 = await send(`确认 ${code2}`);
+    expect(done2).toContain('确认码已核销，落账已完成。');
+    expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before + 2);
     await assembly.close();
   });
 
