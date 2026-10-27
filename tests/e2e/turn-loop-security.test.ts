@@ -406,10 +406,14 @@ describe('离线全链 e2e：D4 污染塑形（corpus）', () => {
       baseline: ['网关名'],
     },
     {
-      name: '④ 内部错误码词（error-codes.ts 码表取样）★',
+      // 2026-10-26 D-136 收口：出口删除支上线——平台码（PERIOD_NO_DATA 族，非宿主
+      // 码表词）不再上屏，叙述的其余部分保留。★ 缺口标记移除，本项从"记录缺口"
+      // 翻转为"钉住防线"；断言见下方分支。
+      name: '④ 内部错误码词（error-codes.ts 码表取样）→ 出口删除（D-136 已收口）',
       narration: '平台返回 PERIOD_NO_DATA，说明该期间没有数据。',
-      fingerprints: ['错误码'],
+      fingerprints: [],
       baseline: [],
+      scrubbedNarration: '平台返回 ，说明该期间没有数据。',
     },
     {
       name: '⑤ taskId 形态串（task_ + uuid）★',
@@ -431,11 +435,13 @@ describe('离线全链 e2e：D4 污染塑形（corpus）', () => {
 
       const reply = await send('查一下幻辰财税 202606 的应收账款');
 
-      // 注入物原样到达用户（当前行为；★项即缺口本身）
+      // 注入物到达用户的形态：D-136 收口后，平台码被出口删除支剥掉（scrubbedNarration），
+      // 其余叙述原样；未收口的形态（无 scrubbedNarration 字段）仍是"注入物原样到达"。
       const stripped = withoutPlatformEnvelope(reply);
-      expect(stripped).toContain(item.narration.trim().split('\n')[0]!);
-      // 生产指纹尺 + D5b 基线的实际命中（缺口项非空；两者同跑在剥信封后的文本上——
-      // 替身自己拼的"执行 …: RESULT"行是已知保真度边界，见 harness withoutPlatformEnvelope）
+      const expectedNarration = 'scrubbedNarration' in item ? item.scrubbedNarration : item.narration;
+      expect(stripped).toContain(expectedNarration.trim().split('\n')[0]!);
+      // 生产指纹尺 + D5b 基线的实际命中（收口项已无指纹命中；两者同跑在剥信封后的
+      // 文本上——替身自己拼的"执行 …: RESULT"行是已知保真度边界，见 withoutPlatformEnvelope）
       expect(executionLanguageFingerprints(stripped)).toEqual(item.fingerprints);
       expect(leakBaseline(stripped)).toEqual(item.baseline);
       // 数据答案本身真实落地（注入没有破坏执行）
@@ -560,8 +566,9 @@ describe('离线全链 e2e：D5 平台不可用冷却（注入变体 + 时长覆
       const second = await booted.send('再查一次');
 
       // 冷却判据只看信封错误码（platform-contract 的码集合）：叙述文本里的 AUTH_EXPIRED
-      // 被原样转达（这本身是 D4 族的泄漏事实），但不构成失败证据
-      expect(first).toContain('AUTH_EXPIRED');
+      // 已被出口删除支剥掉（D-136 收口——码不上屏，叙述其余部分保留），也不构成失败证据
+      expect(first).not.toContain('AUTH_EXPIRED');
+      expect(first).toContain('自动重登录后查询成功');
       expect(first).toContain('61000');
       expect(second).toContain('61000');
       expect(invocations).toBe(2);

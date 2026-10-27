@@ -14,6 +14,7 @@
  * 那道尺也只留痕。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { EXECUTION_LANGUAGE_SCRUB_PATTERNS } from './execution-language';
 import { stripServerPaths } from './server-paths';
 import type { TurnExitEvent } from './turn-exit';
 
@@ -58,13 +59,17 @@ const THOUSANDS_AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g;
 /**
  * 出口整理。**纯函数**：不抛异常、不打日志、不碰存储——只回答"文本改成什么、记什么事件"。
  *
- * 顺序固定：先删路径，再扫金额（删完之后正文里剩的数字才是用户真正看到的数字）。
+ * 顺序固定：先删路径，再删执行语言（协议标记/错误码——删完之后正文里剩的才是用户
+ * 真正看到的），最后扫金额（判据因此不受被删内容干扰）。
  */
 export function sanitizeUserVisibleReply(input: ReplyExitInput): ReplyExitResult {
   const events: TurnExitEvent[] = [];
   const pathExit = sanitizeServerPathReply({ text: input.text, executed: input.executed });
   let text = pathExit.text;
   events.push(...pathExit.events);
+  const scrubExit = scrubExecutionLanguageReply(text);
+  text = scrubExit.text;
+  events.push(...scrubExit.events);
 
   // 数值溯源探查：零执行轮次的回复若含千分位金额，而该数值在证据里逐字找不到，记一条
   // 告警。为什么不拦：模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在"算术"
@@ -99,6 +104,43 @@ export function sanitizeServerPathReply(input: ServerPathExitInput): ReplyExitRe
       event: 'server_path_leak',
       detail: { removed: paths.removed, ...(input.executed === undefined ? {} : { executed: input.executed }) },
     }],
+  };
+}
+
+/** 整段都是协议原文时（删完剩不下可读内容）的兜底——格式异常的可行动话术。 */
+const FORMAT_ANOMALY_FALLBACK = '这条回复的格式出现了异常，请重发你的问题或换个说法。';
+
+/**
+ * 执行语言删除（D-136/D-138）：判据在 execution-language.ts 的 SCRUB_PATTERNS（只收
+ * 零争议形态）。删标记留其余——与删路径同纪律，该丢的只是用户没法用的那一截；删完
+ * 剩不下可读内容时（整段都是协议）替换为兜底话术，不给用户一个空气泡。
+ */
+function scrubExecutionLanguageReply(text: string): ReplyExitResult {
+  let tokens = 0;
+  const labels: string[] = [];
+  let scrubbed = text;
+  for (const { label, pattern, whitelist } of EXECUTION_LANGUAGE_SCRUB_PATTERNS) {
+    scrubbed = scrubbed.replace(pattern, (matched) => {
+      if (whitelist?.has(matched)) return matched;
+      tokens += 1;
+      if (!labels.includes(label)) labels.push(label);
+      return '';
+    });
+  }
+  if (tokens === 0) return { text, events: [] };
+  // 整段协议的判定：标签删完后还有参数值残渣（"delegate" 之类 ASCII 标识符），
+  // 但那不是给用户读的——以剩余的**非 ASCII 字符数**（中文等自然语言内容）< 4
+  // 判"没有可读内容"，替换为兜底话术，不给用户一个只有残渣的气泡。
+  const readableChars = [...scrubbed].filter((ch) => ch.codePointAt(0)! > 0x7f).length;
+  if (readableChars < 4) {
+    return {
+      text: FORMAT_ANOMALY_FALLBACK,
+      events: [{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels, tokens } }],
+    };
+  }
+  return {
+    text: scrubbed,
+    events: [{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels, tokens } }],
   };
 }
 

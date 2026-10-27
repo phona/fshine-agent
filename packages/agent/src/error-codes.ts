@@ -749,3 +749,11 @@ export function errorFor(code: string, actual?: unknown, correctForm?: string): 
 export function toolUserErrorFor(code: string, actual?: unknown, correctForm?: string): ToolUserError {
   return Object.assign(new ToolUserError(messageFor(code, actual, correctForm)), { code });
 }
+
+/**
+ * 宿主码表键的全集（D-136 出口删除的保留名单）：这些码可能出现在宿主自己的
+ * 确定性话术里（如 TASK_FORBIDDEN 的拒绝文案）——码上屏是既有产品行为（用户可
+ * 引用码报告问题），出口删除支只针对**平台/worker 侧**的错误码泄漏，不动宿主
+ * 话术。封闭集、机械生成（Object.keys(TABLE)），不存在第二份手抄。
+ */
+export const HOST_ERROR_CODE_NAMES: ReadonlySet<string> = new Set(Object.keys(TABLE));

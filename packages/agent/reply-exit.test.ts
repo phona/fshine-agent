@@ -12,6 +12,62 @@ describe('sanitizeUserVisibleReply', () => {
     expect(out.events).toEqual([]);
   });
 
+  // ── D-138（Z1 实测 2026-10-26）：确认续跑轮模型曾把工具调用写成正文，宿主终稿
+  // 出口原样上屏 318 字符 <tool_call> XML。协议原文是"用户没法用的那一截"，与删
+  // 路径同族——删标签留其余；整段都是协议时替换为可行动兜底话术。
+  it('工具调用协议原文：删标记留其余文本，事件带 execution_language_scrubbed（D-138）', () => {
+    const out = sanitizeUserVisibleReply({
+      text: '查询进行中。\n<tool_call>\n<function=route_current_turn>\n<parameter=kind>\ndelegate\n</parameter>\n</function>\n</tool_call>\n稍后汇总。',
+      executed: true,
+      needsRounds: 0,
+      evidence: () => '',
+    });
+    expect(out.text).not.toMatch(/tool_call|function=|parameter=/);
+    expect(out.text).toContain('查询进行中');
+    expect(out.text).toContain('稍后汇总');
+    expect(out.events).toEqual([{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels: ['工具调用协议'], tokens: 6 } }]);
+  });
+
+  it('整段回复都是协议原文：替换为格式异常兜底话术（D-138）', () => {
+    const out = sanitizeUserVisibleReply({
+      text: '<tool_call><function=route_current_turn><parameter=kind>delegate</parameter></function></tool_call>',
+      executed: true,
+      needsRounds: 0,
+      evidence: () => '',
+    });
+    expect(out.text).not.toMatch(/tool_call|function=|parameter=/);
+    expect(out.text.length).toBeGreaterThan(0);
+    expect(out.text).toMatch(/格式|异常|重发|换个/);
+    expect(out.events[0]?.event).toBe('execution_language_scrubbed');
+  });
+
+  // ── D-136（F6 双向实测）：模型偶发把平台错误码（PERIOD_NO_DATA 族）说给用户。
+  // 码对用户无用，删码留解释文本——只删全大写 snake 形态，避免误伤普通小写词。
+  it('全大写错误码：删码留其余文本（D-136）', () => {
+    const out = sanitizeUserVisibleReply({
+      text: '该期间查不到数据（PERIOD_NO_DATA），建议确认期间后重查。',
+      executed: true,
+      needsRounds: 0,
+      evidence: () => '',
+    });
+    expect(out.text).toBe('该期间查不到数据（），建议确认期间后重查。');
+    expect(out.events).toEqual([{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels: ['错误码'], tokens: 1 } }]);
+  });
+
+  it('普通小写 snake 词与中文数字零误伤', () => {
+    const clean = '按 account_set 口径，202606 余额 61,000 元与上月一致。';
+    const out = sanitizeUserVisibleReply({ text: clean, executed: true, needsRounds: 0, evidence: () => '' });
+    expect(out.text).toBe(clean);
+    expect(out.events).toEqual([]);
+  });
+
+  it('宿主码表词保留（TASK_FORBIDDEN 族是宿主话术的产品行为，非泄漏）', () => {
+    const hostAuthored = 'TASK_FORBIDDEN: 期望 taskId 是本会话里未完成的编号；实际 无权继续别人的任务。';
+    const out = sanitizeUserVisibleReply({ text: hostAuthored, executed: true, needsRounds: 0, evidence: () => '' });
+    expect(out.text).toBe(hostAuthored);
+    expect(out.events).toEqual([]);
+  });
+
   it('路径命中：删路径、留内容，事件带 removed 与 executed', () => {
     const out = sanitizeUserVisibleReply({
       text: `已产出文件（${WORKSPACE_PATH}）：整理好的2026年08月工资表.xlsx`,
