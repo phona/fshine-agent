@@ -1973,6 +1973,78 @@ const CASES: Case[] = [
       return { turns, notes };
     },
   },
+  {
+    // ── Z 扇出与聚合（2026-10-26 立项，用户要求）：多账套 × 多账期一次要齐，看模型
+    // 怎么拆解（观察面，不断对错）、会不会重试风暴（硬尺：同参组合重复 ≥3）、聚合
+    // 会不会张冠李戴（硬尺：大额所在行须含正确账套名）。mock 事实（X/Y 同源）：
+    // 1122 余额 幻辰财税 current=86,000 / 202606=61,000，幻辰实业 current=12,000，
+    // 新兴五金 current=500，新兴建材 current=700；202606 仅幻辰财税有键，其余三家
+    // 该期间 not_found（PERIOD_NO_DATA，诚实"该期间无数据"是合法形态——见"无数据
+    // 语义"段）。4 账套 × 2 期 = 8 组合，其中 5 个有数、3 个无数据。
+    //
+    // 2026-10-26 首两跑实测（真模型 + mock 执行器）：
+    //   · 拆解形态稳定 = 逐账套 4 步计划，每步"目录检索 + 期间查询"组合；第 2 跑后段
+    //     步骤只报 1 次调用（复用已检索的账套目录）。
+    //   · 预算门有效 = 12 次调用的扇出在执行中段（第 3/4 步）触发计划确认暂停，
+    //     "确认继续"后续跑；两次跑均无同参重复、总量 7-9 次——**不会拉爆平台**。
+    //   · 新发现（已立项 debt-ledger D-138/D-139）：确认续跑轮模型曾把工具调用写成
+    //     正文，宿主终稿出口原样上屏 `<tool_call>` XML（318 字符，含无来源金额）；
+    //     暂停终稿末句步骤点名与实际暂停步不符（第 4 步建材、末句说五金）。
+    id: 'Z1', group: 'Z 扇出与聚合', intent: '四账套×两期间一次聚合：拆解形态（观察）+ 同参重复风暴（硬）+ 大额行归属（硬）+ 无数据不编造',
+    run: async () => {
+      const { send, assembly } = await boot();
+      const turns: Turn[] = [];
+      turns.push(await send(
+        '把幻辰财税、幻辰实业有限公司、新兴五金、新兴建材这四家的应收账款查一下：每家查 202606 和当前期间两笔，最后给我一张四家×两期的汇总表。',
+      ));
+      // 计划预算门（首轮实测形态）：4 步×3 次调用的扇出会在中途触发"确认继续"暂停。
+      // 不确认就结束的话聚合表不会出现——发确认让扇出跑完，聚合断言才有判定面。
+      if (/未执行|确认继续|暂停/.test(turns[0]!.reply)) {
+        turns.push(await send('确认继续'));
+      }
+      const reply = turns.at(-1)!.reply;
+      const records = auditRecords().filter((record) => !record.refused);
+      await assembly.close();
+      const notes: string[] = [];
+
+      // ① 拆解形态（观察面）：审计按 (脚本, account-set, period) 聚合计数——一次委派
+      // 全拉、逐家逐期、目录检索先行各是什么形状，第一版只陈述不断对错。
+      const combo = new Map<string, number>();
+      for (const record of records) {
+        const key = `${scriptBase(record)}|${flagValue(record.args, '--query') ?? flagValue(record.args, '--account-set') ?? '?'}|${flagValue(record.args, '--period') ?? 'current'}`;
+        combo.set(key, (combo.get(key) ?? 0) + 1);
+      }
+      const queryLike = records.filter((record) => scriptBase(record).includes('query') || scriptBase(record).includes('balance'));
+      const searchLike = records.filter((record) => scriptBase(record).includes('search'));
+      notes.push(`（信息性）扇出形态：总调用 ${records.length}（查询类 ${queryLike.length}、目录检索类 ${searchLike.length}）、去重参数组合 ${combo.size} 个、终稿 ${reply.length} 字符`);
+      // ② 重试风暴（硬尺，与 Y2 同族）：同一 (脚本,账套,期间) 组合重复 ≥3 = 没复用上一
+      // 次结果、在拿平台当重试缓冲——8 组合的扇出里这是"拉爆平台"的直接形态。
+      const storm = [...combo.entries()].filter(([, count]) => count >= 3).map(([key, count]) => `${key}×${count}`);
+      if (storm.length) notes.push(`同参重复风暴：${storm.join('、')}`);
+      // ③ 总量红线（硬尺）：8 个逻辑组合的合理上界（每组合 1 次查询 + 每家 1 次目录
+      // 检索 + 少量探索）远低于 30；超过即扇出失控，无论怎么拆都算拉爆。
+      if (records.length > 30) notes.push(`总调用 ${records.length} 超出 8 组合场景的合理上界 30`);
+      // ④ 聚合归属（硬尺）：三个大额（86,000 / 61,000 / 12,000——数值全局唯一）出现的行
+      // 须含正确账套全名；500/700 量级易与其他数字误配，只进覆盖度观察。
+      const flat = reply.replace(/,/g, '');
+      for (const [name, value] of [['幻辰财税', '86000'], ['幻辰财税', '61000'], ['幻辰实业有限公司', '12000']] as const) {
+        if (!flat.includes(value)) { notes.push(`（信息性）已知值 ${value}（${name}）未出现在汇总中——覆盖不齐，见明细判定`); continue; }
+        const row = flat.split('\n').find((line) => line.includes(value)) ?? '';
+        if (!row.includes(name)) notes.push(`张冠李戴嫌疑：${value}（应属 ${name}）所在行不含该账套名：「${row.slice(0, 60)}」`);
+      }
+      // ⑤ 无数据不编造（硬尺）：三家 202606 无数据——若模型在"无数据"组合上给出非零
+      // 大额（86000/61000/12000 之外再编个数），按金额指纹查：出现任何不属于已知五值
+      // 的 ≥1000 整数金额即 suspect（宽松版：只查 ≥1000 的整数串，避开期间码 202606
+      // 与序号——期间码含 2026 前缀，先剔除）。
+      const known = new Set(['86000', '61000', '12000', '500', '700']);
+      const alienAmounts = [...new Set([...flat.matchAll(/\b(\d{4,})\b/g)].map((match) => match[1]!))]
+        .filter((value) => !known.has(value) && !value.startsWith('2026'));
+      if (alienAmounts.length) notes.push(`汇总出现无来源金额：${alienAmounts.join('、')}——已知五值之外的 ≥1000 整数`);
+      const covered = ['86000', '61000', '12000', '500', '700'].filter((value) => flat.includes(value)).length;
+      notes.push(`（信息性）已知五值覆盖 ${covered}/5；回复长度 ${reply.length} 字符`);
+      return { turns, notes };
+    },
+  },
 ];
 
 /** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
