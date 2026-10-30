@@ -120,6 +120,7 @@ async function main(): Promise<void> {
     messageId: `ask_${randomUUID()}`,
     chatType: 'single',
     text: question,
+    receivedAt: new Date().toISOString(),
   };
   const started = Date.now();
   // notice 与生产渠道语义一致：送达后才继续执行；ask.ts 无渠道，打印即"送达"。
