@@ -90,6 +90,31 @@ afterEach(() => {
   }
 });
 
+/**
+ * D-145 fixture：把计划门的两条非次数线——权重线（17dz b424b26 预算容量模型）与估时秒线
+ * （query-receivables est_seconds 自 cda6ba9 换芯起 15→60，两次调用即 120s > autoSeconds 60）
+ * ——的全部阈值设为极大值，使档位判定对本用例退回**纯次数线**。测试意图本来就是次数线
+ * 语义的用例（AUTO=2/NOTIFY=10/CONFIRM=20 档位边界、轻量计划直执行、续跑零通知）需要它：
+ * mock 场景的查询操作每条 weight 6 / est 60 秒，两三次调用就把这两条线推过档，抢走次数线
+ * 的档位判定。返回恢复函数——调用方用 onTestFinished 挂上，防止泄漏到同文件其它用例
+ * （上方 PLATFORM_STATE_KEYS 的备份/恢复不覆盖这些键）。
+ */
+export function neutralizePlanGateNonCallLines(): () => void {
+  const keys = [
+    'DZ_PLAN_AUTO_WEIGHT', 'DZ_PLAN_NOTIFY_WEIGHT', 'DZ_PLAN_BUDGET_WEIGHT', 'DZ_PLAN_HARD_WEIGHT',
+    'DZ_PLAN_AUTO_SECONDS', 'DZ_PLAN_NOTIFY_SECONDS', 'DZ_PLAN_CONFIRM_SECONDS', 'DZ_PLAN_HARD_SECONDS',
+  ] as const;
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+  Object.assign(process.env, Object.fromEntries(keys.map((key) => [key, '1000000'])));
+  return () => {
+    for (const key of keys) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+}
+
 beforeAll(() => {
   if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 DZ_PLATFORM_ROOT 指向 17dz-platform）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));

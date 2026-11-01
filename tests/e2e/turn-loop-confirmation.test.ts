@@ -4,11 +4,16 @@
  * 覆盖：待确认计划被新计划取代后旧确认得到确定性解释、
  * 同一任务反复 notify 后升级为必须等用户确认。
  */
-import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, growingPlan, heavyPlan, mainDriver } from './harness';
+import { describe, expect, it, onTestFinished } from 'vitest';
+import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, growingPlan, heavyPlan, mainDriver, neutralizePlanGateNonCallLines } from './harness';
 
 describe('离线全链 e2e：跨轮确认语义', () => {
   it('2.7 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
+    // D-145：隔离权重线（与估时秒线），本用例专测次数线语义下的取代路径——同一任务先
+    // 21 调确认档、再 1 调轻量计划，次数线上轻量计划落 AUTO 档直执行并取代旧计划；不隔
+    // 离的话权重线按任务累计重量判（126+6=132 ≥ budgetWeight 60），轻量计划也停在确认
+    // 档，旧确认激活的是在世新计划，"旧确认被取代"的场景就构造不出来了。
+    onTestFinished(neutralizePlanGateNonCallLines());
     const { send, assembly } = await boot({
       main: mainDriver([
         { kind: 'delegate', request: '查幻辰财税账套全年的应收账款' },

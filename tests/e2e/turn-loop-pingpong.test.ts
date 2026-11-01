@@ -14,9 +14,9 @@
  *      线程开头仍在最近轮次窗口里、落地的是新子任务而不是续跑旧任务（问句原文被窗口
  *      挤出后仍在 Conversation Log，可经宿主提供的历史工具召回——characterization）。
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 import type { ServerAssembly } from '../../apps/server/assembly';
-import { balanceCalls, boot, gatedWorker, ledger, mainDriver, totalActualCalls, type WorkerStep } from './harness';
+import { balanceCalls, boot, gatedWorker, ledger, mainDriver, neutralizePlanGateNonCallLines, totalActualCalls, type WorkerStep } from './harness';
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
@@ -59,6 +59,11 @@ function recordingWorker(script: WorkerStep[]) {
 
 describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => {
   it('8.1 三个任务来回乒乓：每回合按 continueTaskId 续回指名的旧任务，worker 转录不串台', async () => {
+    // D-145：隔离权重线与估时秒线，本用例的夹具语义在次数线上——每任务两回合各一张单
+    // 调用轻量计划（累计 2 调 ≤ AUTO=2 直执行、零通知）。不隔离的话两条非次数线按任务
+    // 累计判（weight 6+6=12 > autoWeight 6；est 60+60=120 > autoSeconds 60，后者来自
+    // 换芯 cda6ba9 的 est 15→60），A/C 的续跑计划被推到 notify 档凭空出通知帧（实测 +2 帧）。
+    onTestFinished(neutralizePlanGateNonCallLines());
     const before = totalActualCalls();
     const worker = recordingWorker([
       // 任务 A（第 1 回合）：幻辰财税 202606 应收

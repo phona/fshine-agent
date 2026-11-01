@@ -29,7 +29,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import { createPiCodingWorkerSession, type PiCodingWorkerSession } from '../../packages/agent/src/pi-coding-driver';
@@ -45,6 +45,7 @@ import {
   heavyPlan,
   ledger,
   mainDriver,
+  neutralizePlanGateNonCallLines,
   totalActualCalls,
 } from './harness';
 
@@ -153,6 +154,10 @@ describe('离线全链 e2e：计划门档位边界（AUTO=2 / NOTIFY=10 / CONFIR
   });
 
   it('A2 AUTO 档上沿：2 次调用（=AUTO 档）仍直执行，零通知帧零确认帧', async () => {
+    // D-145：隔离权重线与估时秒线（阈值设极大），本用例专测次数线边界——mock 查询每条
+    // weight 6 / est 60 秒：权重线 2×6=12 越过 autoWeight 6，秒线 2×60=120 越过
+    // autoSeconds 60（est 15→60 来自换芯 cda6ba9），不隔离都会把 execute 档抢推到 notify。
+    onTestFinished(neutralizePlanGateNonCallLines());
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '查幻辰财税账套近 2 个月的应收账款' }]),
       worker: gatedWorker([{ plan: growingPlan(2) }]),
@@ -187,6 +192,10 @@ describe('离线全链 e2e：计划门档位边界（AUTO=2 / NOTIFY=10 / CONFIR
   });
 
   it('A2 NOTIFY 档上沿：10 次调用（=NOTIFY 档，开区间上界）仍是通知档不是确认档', async () => {
+    // D-145：隔离权重线与估时秒线，本用例专测次数线边界——10×6=60 已达 budgetWeight 60，
+    // 不隔离的话权重线会把 notify 档抢推到 confirm（BUDGET_WEIGHT），"上界仍是通知档"
+    // 就测不到了。
+    onTestFinished(neutralizePlanGateNonCallLines());
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '查幻辰财税账套近 10 个月的应收账款' }]),
       worker: gatedWorker([{ plan: growingPlan(10) }]),
