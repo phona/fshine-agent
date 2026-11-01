@@ -1074,6 +1074,105 @@ describe('委派失败分类：登录态按错误码判定（不嗅探文案）'
 });
 
 /**
+ * 模型瞬时失败的分类分离（波次C，2026-11-01）。
+ *
+ * 事故链（2026-10-31 实测）：worker 模型请求 ~260ms 瞬时传输失败 → 驱动返回空文本且
+ * errorMessage 被吞 → 空文本检查抛普通 Error → catch 分类 executor_error → 用户见
+ * 「17dz 子任务执行失败，请稍后再试。」。C1/C2 之后驱动把失败事实透传为
+ * `TurnDriverResult.modelError`（重试用尽或不可重试时在场）；这里钉分类与话术：
+ *   · modelError 在场 → failureClass=model_transient，文案如实说"已自动重试仍未成功"
+ *     （与 executor 故障的"执行面坏了"分开——后者重试大概率没用，前者稍后再试通常就好，
+ *     且宿主确实已自动补救过一次，用户该知道）；
+ *   · 取消/超时仍优先于 model_transient（宿主自己的收尾事实先于模型侧表征）；
+ *   · subagent_task_failed 补 error.message 截断 160 字符（先例：
+ *     platform_task_outcome_writeback_failed 带 message）——失败要能关联原因。
+ */
+describe('委派失败分类：模型瞬时失败（model_transient，波次C）', () => {
+  /** 与驱动侧实测同形的瞬时错误文案（openai SDK APIConnectionTimeoutError）。 */
+  const TRANSIENT_MODEL_ERROR = 'Request timed out.';
+
+  function modelErrorRunner(root: string, result: Record<string, unknown>) {
+    const profiles: Record<string, ContextProfileConfig> = {
+      '17dz': { root, skillRoots: ['.agents/skills'] },
+    };
+    return createContextTaskRunner({
+      profiles,
+      tasks: new MemoryTasks(),
+      workerDriver: { run: async () => result as never },
+    });
+  }
+
+  it('modelError + 空文本 → failureClass=model_transient，用户文案如实说已自动重试', async () => {
+    const root = await profileRoot();
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const task = modelErrorRunner(root, { text: '', messages: [], modelError: 'Request timed out.' });
+      await expect(task.run({ request: '查A' }, { trusted: trusted() }))
+        .rejects.toThrow('模型服务瞬时中断，已自动重试仍未成功，请稍后再试。');
+      // 分类进 delegation_span（与 auth/timeout/executor_error 同一张日志面）。
+      const spans = infoSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'delegation_span');
+      expect(spans.at(-1)).toMatchObject({ outcome: 'failed', failureClass: 'model_transient' });
+      // 失败事件带原因（不再只有 errorType='Error'）。
+      const failures = errorSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'subagent_task_failed');
+      expect(failures.at(-1)).toMatchObject({ failureClass: 'model_transient', error: '17dz 子 Agent 未返回可用结果。' });
+    } finally {
+      infoSpy.mockRestore();
+      errorSpy.mockRestore();
+    }
+  });
+
+  it('取消优先于 model_transient：执行途中中止时即使 modelError 在场也归 cancelled（先后关系不破坏）', async () => {
+    const root = await profileRoot();
+    const controller = new AbortController();
+    // 在 driver 执行途中中止（越过 run() 入口的预检 ：1136，让失败真正走进 catch 的
+    // 分类链——预检前置的中止不经过分类，钉不住先后关系）。
+    const profiles: Record<string, ContextProfileConfig> = { '17dz': { root, skillRoots: ['.agents/skills'] } };
+    const task = createContextTaskRunner({
+      profiles,
+      tasks: new MemoryTasks(),
+      workerDriver: {
+        run: async () => {
+          controller.abort();
+          return { text: '', messages: [], modelError: TRANSIENT_MODEL_ERROR } as never;
+        },
+      },
+    });
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      await expect(task.run({ request: '查A' }, { trusted: trusted() }, controller.signal))
+        .rejects.toThrow(DELEGATION_CANCELLED);
+      // 分类面（delegation_span 的 failureClass）与话术同一判据：用户文案那道 throw
+      // 自带独立的 runSignal 条件，钉不住分类顺序——分类必须单独断言。
+      const spans = infoSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'delegation_span');
+      expect(spans.at(-1)).toMatchObject({ outcome: 'failed', failureClass: 'cancelled' });
+    } finally {
+      infoSpy.mockRestore();
+    }
+  });
+
+  it('subagent_task_failed 的 error 字段截断 160 字符（长消息不整段进日志）', async () => {
+    const root = await profileRoot();
+    const longMessage = `worker 端异常：${'细节'.repeat(200)}`;
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const profiles: Record<string, ContextProfileConfig> = { '17dz': { root, skillRoots: ['.agents/skills'] } };
+      const failing = createContextTaskRunner({
+        profiles,
+        tasks: new MemoryTasks(),
+        workerDriver: { run: async () => { throw new Error(longMessage); } },
+      });
+      await expect(failing.run({ request: '查A' }, { trusted: trusted() })).rejects.toThrow(DELEGATION_EXECUTOR_FAILURE);
+      const failures = errorSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'subagent_task_failed');
+      expect(failures.at(-1).error).toBe(longMessage.slice(0, 160));
+      expect(failures.at(-1).error.length).toBe(160);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+});
+
+/**
  * 错误态快路径 v2（2026-10-16，第一版 2026-10-17 凌晨因真模型探针回归被整波回退后重做）。
  *
  * 第一版死因（探针实证，逐行核实）：驱动早停（latch + agent_end）后返回的 result.text

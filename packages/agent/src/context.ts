@@ -67,6 +67,12 @@ export const DELEGATION_AUTH_FAILURE = messageTextFor('DELEGATION_AUTH_FAILURE')
 export const DELEGATION_TIMEOUT_FAILURE = messageTextFor('DELEGATION_TIMEOUT_FAILURE');
 export const DELEGATION_EXECUTOR_FAILURE = messageTextFor('DELEGATION_EXECUTOR_FAILURE');
 export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
+/**
+ * 模型瞬时失败档（波次C，2026-11-01）：worker 模型调用瞬时中断、驱动侧有界重试用尽。
+ * 与 executor 故障分开（见码表条目注释）；判据是 TurnDriverResult.modelError 在场
+ * （驱动透传的模型侧失败事实，见 driver.ts 的字段注释）。
+ */
+export const DELEGATION_MODEL_TRANSIENT_FAILURE = messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE');
 
 export const RUN_17DZ_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
@@ -1342,8 +1348,13 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 平台侧该消息一带码（走 messageFor），这行即可删除。
         // 取消判据读 runSignal（本次执行实际持有的信号；形参 signal 在 prepared 路径下
         // 与之同值，但两者一旦分叉，分类与最终话术必须跟实际执行的那一个走）。
+        // model_transient（波次C，2026-11-01）排在取消/超时之后、auth 之前：判据是驱动
+        // 透传的 result.modelError（模型侧瞬时失败，重试用尽或不可重试）——它只在驱动
+        // 正常返回时在场，届时 catch 里的 error 只能是下方空文本检查抛的那句普通 Error，
+        // 与 auth 码族无交集；而取消/超时是宿主自己的收尾事实，永远先于模型侧表征。
         const failureClass = runSignal?.aborted ? 'cancelled'
           : Date.now() >= deadline ? 'timeout'
+          : result?.modelError ? 'model_transient'
           : isPlatformAuthError(error) ? 'auth'
           : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
           : 'executor_error';
@@ -1363,6 +1374,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           taskId,
           failureClass,
           errorType: error instanceof Error ? error.name : 'UnknownError',
+          // 失败原因原文截断 160 字符（波次C；先例：platform_task_outcome_writeback_failed
+          // 带 message）——errorType 只有 Error 这类名字时，原因一个字都不该再丢。
+          error: (error instanceof Error ? error.message : String(error)).slice(0, 160),
         }));
         // 超时/失败也持久化本轮已产生的中间转录：taskId 续跑从断点继续，
         // 而不是从零重付全部时间与浏览器占用（长任务业务稳定性的关键）。
@@ -1371,6 +1385,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
           updatedAt: new Date().toISOString(),
         });
+        // 【C4 登记，刻意不实现（波次C，2026-11-01）】model_transient 失败后任务条目落
+        // outcome='failed'，确认 lease 已消费——用户裸回「确认继续」会撞 TASK_NOT_FOUND
+        // （其 correctForm 已指路重发，不误导）。后续可选项：给这类"宿主已自动重试用尽"
+        // 的失败保留一个「待重试」终态（或确认条目侧的续用通道），让「继续」能原地重派
+        // 而不必重发全文；本波不扩确认状态机，先把失败分类与观测修准。
         // auth 类经 toolUserErrorFor 挂码抛出（消息一字不改）：宿主侧的平台健康信号
         // （platform-health.ts 的连续失败记账）认这个码——码级判据，不嗅探回复文本。
         // 其余三类维持原样（没有第二类失败需要宿主跨回合记账）。
@@ -1378,6 +1397,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 取消话术与 failureClass 同一判据（runSignal）：日志分类与用户话术不许分叉。
         throw new ToolUserError(runSignal?.aborted ? DELEGATION_CANCELLED
           : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
+          : failureClass === 'model_transient' ? DELEGATION_MODEL_TRANSIENT_FAILURE
           : DELEGATION_EXECUTOR_FAILURE);
       }
     },

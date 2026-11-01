@@ -350,6 +350,13 @@ const TABLE: Record<string, CodeEntry> = {
   DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
   DELEGATION_EXECUTOR_FAILURE: { text: '17dz 子任务执行失败，请稍后再试。' },
   DELEGATION_CANCELLED: { text: '17dz 子任务已取消。' },
+  // 模型瞬时失败档（波次C，2026-11-01，循 RESUMED_PLAN_NOT_EXECUTED 的消息模板族）：
+  // worker 的模型调用撞上瞬时传输/服务中断，驱动侧有界重试（默认 2 次）用尽仍未恢复。
+  // 与 executor 故障的分工：那是"执行面坏了"（重试大概率没用，需要排查）；这是"模型
+  // 服务抖了一下"（稍后再试通常就好）。文案如实说"已自动重试"——用户该知道宿主已经
+  // 补救过一次，手动重试的预期才是校准的。措辞零业务词、不出现内部机制名（重试次数、
+  // 驱动、SDK 一律不进）。
+  DELEGATION_MODEL_TRANSIENT_FAILURE: { text: '模型服务瞬时中断，已自动重试仍未成功，请稍后再试。' },
 
   // ── 能力类：写未开放（capability 声明，用户可行动）──────────────────────────
   // 唯一来源纪律：写关闭话术只有这一份。两个消费方共用——提案落账前的 capability 检查

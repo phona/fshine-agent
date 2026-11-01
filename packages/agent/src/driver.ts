@@ -191,6 +191,14 @@ export interface TurnDriverResult {
    * `proposalId` 是平台提案引用（取物单）：宿主持有的全部，指向执行层自己的提案状态库。
    */
   proposalCreated?: { proposalId: string };
+  /**
+   * 模型侧瞬时失败的透传事实（波次C，2026-11-01）：worker 的模型调用撞上传输/服务
+   * 中断，驱动侧有界重试用尽（或判为不可重试）后仍失败——此时 `text` 为空串，本字段
+   * 是那次失败的 errorMessage 原文。宿主据此把失败分类为 model_transient（与真实
+   * executor 故障分开），而不是只看得到"空文本"再退化成 executor_error。超时/取消
+   * 的回合**不**带它（那两条是宿主自己的收尾事实，先于模型侧表征判定）。
+   */
+  modelError?: string;
 }
 
 /**

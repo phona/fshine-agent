@@ -20,6 +20,7 @@ import {
   createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
+import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
 import path from 'node:path';
 import type { Model } from '@earendil-works/pi-ai/compat';
@@ -94,6 +95,21 @@ export const WORKER_WIND_DOWN_NUDGE = '【宿主收尾指令】处理时间预�
 
 /** 收尾窗口占预算的比例：最后 10% 留给 worker 自行收尾（90% 处发信号）。 */
 export const WIND_DOWN_FRACTION = 0.9;
+
+/**
+ * 模型瞬时失败的有界重试档位（波次C，2026-11-01）：数组长度 = 重试次数上限，
+ * 逐项 = 每次重试前的等待毫秒。默认最多 2 次、间隔 1-2 秒（指数退避的最小档——
+ * 实测事故形态是 ~260ms 的网抖，秒级间隔足以跨过它，又远小于回合预算的噪声级）。
+ *
+ * 为什么在驱动层重试而不是靠 SDK 会话级自动重试：fshine 为避免重复 user 消息
+ * 直调 `session.agent.continue()`（见 run() 内注释），整条绕开了
+ * AgentSession.prompt() 的 _handlePostAgentRun 重试链；请求级 maxRetries:0 又是
+ * pi-ai openai-completions 的既有配置。三层全缺席的后果（2026-10-31 实测
+ * task_144c9690）：260ms 网抖报废 90 秒工作 + 烧掉一次用户确认。这里补的是宿主
+ * 自己那条腿；判据不自造——可重试性认定用 pi-ai 现成的 isRetryableAssistantError
+ * （与 SDK 自动重试同一份判据，见下方 retryableModelError）。
+ */
+export const DEFAULT_MODEL_RETRY_DELAYS_MS: readonly number[] = [1000, 2000];
 
 /** 距截止还剩 remainingMs 时，收尾信号应当发出的时刻（毫秒延迟）。纯函数，测试直测。 */
 export function windDownDelayMs(remainingMs: number): number {
@@ -346,6 +362,12 @@ export interface PiCodingTurnDriverOptions {
    * 判据见 platformExecutorBypassed；调用方只负责留痕（审计/日志），不得据此改回合结果。
    */
   onExecutorBypassed?: (event: PlatformExecutorBypassedEvent) => void;
+  /**
+   * 模型瞬时失败的有界重试间隔表（波次C）：逐项为每次重试前的等待毫秒，长度即重试
+   * 次数上限。缺省 DEFAULT_MODEL_RETRY_DELAYS_MS（2 次 / 1-2 秒）。测试替身注入点
+   * （与 operationLabels 同族）；生产语义由常量测试钉住。
+   */
+  modelRetryDelaysMs?: readonly number[];
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -932,11 +954,68 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       }, windDownDelayMs(remaining));
       // SDK 会话事件（tool_execution_start / agent_start / agent_end）是内部协议名，
       // 一律不当进度帧外发：用户可见的进度只由 G1 放行事件经 label 驱动产生。
+      // ── 模型瞬时失败：观测（C1）+ 有界重试（C2，波次C 2026-11-01）────────────────
+      // 事故链：pi-agent-core 的 agent-loop 遇 stopReason=error 正常 return 不抛异常，
+      // 只把 errorMessage 留在 agent.state——原先它在这里被 `timedOut || cancelled ||
+      // state.errorMessage` 分支的空文本返回整段吞掉（零日志），宿主只见"空文本"。现在：
+      //   · 每次命中发 worker_model_stream_error 结构化日志（真实错误全文进日志——
+      //     DB 的 worker_messages 里它一直活着，宿主侧日志却一个字没有）；
+      //   · 可重试（pi-ai 判据，见 retryableModelError）则原地重试：剥掉结尾的 error
+      //     assistant 消息（SDK _prepareRetry 同款——不剥的话 continue() 会拒绝从
+      //     assistant 消息续跑）→ 等待 → 再 continue()。模型调用无副作用，幂等安全；
+      //   · 超时/取消**不重试**：那两条是宿主自己的收尾事实（abortTimer/用户 signal），
+      //     此刻的模型错误只是 abort 的表征，重试等于跟自己的计时器作对。先后关系
+      //     与既有分支一致（timedOut/cancelled 判定先于一切模型侧收尾）。
+      // 重试的回合里 worker 可能执行新的工具调用（提案/终局 latch 照常由下方的
+      // proposalReply/terminalReply 出口取用——它们在 continue() 返回后统一裁决）。
+      const retryableModelError = (errorMessage: string): boolean =>
+        isRetryableAssistantError({ stopReason: 'error', errorMessage } as Parameters<typeof isRetryableAssistantError>[0]);
+      const runAgentTurn = async (): Promise<void> => {
+        const delays = options.modelRetryDelaysMs ?? DEFAULT_MODEL_RETRY_DELAYS_MS;
+        let retryStartedAt = 0;
+        for (let attempt = 0; ; attempt += 1) {
+          await session.agent.continue();
+          if (timedOut || cancelled) return;
+          const errorMessage = session.agent.state.errorMessage;
+          if (!errorMessage) {
+            if (attempt > 0) {
+              console.info(JSON.stringify({
+                event: 'worker_model_retry_recovered',
+                requestId: input.requestId,
+                taskId: input.sessionId,
+                attempt,
+                durationMs: Date.now() - retryStartedAt,
+              }));
+            }
+            return;
+          }
+          if (attempt === 0) retryStartedAt = Date.now();
+          console.error(JSON.stringify({
+            event: 'worker_model_stream_error',
+            requestId: input.requestId,
+            taskId: input.sessionId,
+            stopReason: 'error',
+            errorMessage,
+            attempt: attempt + 1,
+          }));
+          if (attempt >= delays.length || !retryableModelError(errorMessage)) return;
+          // SDK _prepareRetry 同款剥除：结尾的 error assistant 消息出转录再续跑
+          // （continue() 只认 user/toolResult 结尾）。
+          const messages = session.agent.state.messages;
+          const last = messages[messages.length - 1];
+          if (messages.length > 0 && (last as { role?: string } | undefined)?.role === 'assistant') {
+            session.agent.state.messages = messages.slice(0, -1);
+          }
+          await new Promise((resolve) => { setTimeout(resolve, delays[attempt]); });
+          // 等待途中撞上超时/取消（abortTimer 仍在计时）：不再推模型，按收尾事实返回。
+          if (timedOut || cancelled) return;
+        }
+      };
       try {
         // The current ContextTaskRunner already appends the current user
         // message to input.messages. Calling the underlying Agent avoids
         // duplicating it through AgentSession.prompt().
-        await session.agent.continue();
+        await runAgentTurn();
         // 提案创建拦截成功（B 波 B3）：本回合以此终结——先于超时/取消/补刀等一切收尾检查。
         // 提案登记是既成事实（平台侧已有提案、宿主已建意图条目），worker 之后说了什么、
         // 这一轮是否超时都不改变它；用户要的是确认码，不是后续叙述。
@@ -949,7 +1028,11 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         if (timedOut || cancelled || session.agent.state.errorMessage) {
           const proof = execution();
           const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
+          // C1 透传：模型侧失败事实（非超时/取消——那两条是宿主自己的收尾事实，取消时
+          // agent.state 里残留的 errorMessage 是中止的伴生物不是模型故障）随结果上交，
+          // 宿主据此分类 model_transient，不再只看得到空文本。
+          const modelError = timedOut || cancelled ? undefined : session.agent.state.errorMessage; // MUTATION-F
+          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
         }
         // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
         // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
@@ -966,7 +1049,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           } as unknown as DriverMessage);
           // 沿用现有 abortTimer/deadline：这一轮若超时/取消，按上面的 timedOut/cancelled 路径返回
           try {
-            await session.agent.continue();
+            await runAgentTurn();
           } catch (error) {
             // 追问这一轮自己失败（网络/模型抖动）不吞掉事实：仍然走下面的结果计算，
             // 由 activatedPlan 把"批准了没执行"交还宿主——用户看到的不是笼统的失败话术。
@@ -982,7 +1065,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             // 补刀那一跳若撞上终局早停，话术已 latch——先于超时/取消检查交还（同上）。
             const terminalAfterNudge = await terminalReply();
             if (terminalAfterNudge) return terminalAfterNudge;
-            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
+            // C1 透传（与上方非补刀出口同一把尺）：模型侧失败事实上交宿主分类；
+            // 超时/取消同样不透传（取消伴生的 errorMessage 不是模型故障）。
+            const modelError = timedOut || cancelled ? undefined : session.agent.state.errorMessage; // MUTATION-F
+            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
           }
         }
         const proof = execution();

@@ -25,6 +25,7 @@ import {
   DELEGATION_AUTH_FAILURE,
   DELEGATION_CANCELLED,
   DELEGATION_EXECUTOR_FAILURE,
+  DELEGATION_MODEL_TRANSIENT_FAILURE,
   DELEGATION_TIMEOUT_FAILURE,
 } from './src/context';
 import {
@@ -54,6 +55,8 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(messageTextFor('DELEGATION_TIMEOUT_FAILURE')).toBe('平台响应超时，请稍后重试。');
     expect(messageTextFor('DELEGATION_EXECUTOR_FAILURE')).toBe('17dz 子任务执行失败，请稍后再试。');
     expect(messageTextFor('DELEGATION_CANCELLED')).toBe('17dz 子任务已取消。');
+    // 模型瞬时失败档（波次C，2026-11-01）：与 executor 故障分开，如实说已自动重试。
+    expect(messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE')).toBe('模型服务瞬时中断，已自动重试仍未成功，请稍后再试。');
     expect(messageTextFor('ROUTE_RETRY_NUDGE')).toContain('route_current_turn');
     expect(messageTextFor('PLAN_PENDING_PERSIST_MISSING')).toBe('平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。');
     // 写关闭话术（唯一来源：提案路径 capability 检查与计划门写拒绝共用同一句）
@@ -70,6 +73,7 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(DELEGATION_TIMEOUT_FAILURE).toBe(messageTextFor('DELEGATION_TIMEOUT_FAILURE'));
     expect(DELEGATION_EXECUTOR_FAILURE).toBe(messageTextFor('DELEGATION_EXECUTOR_FAILURE'));
     expect(DELEGATION_CANCELLED).toBe(messageTextFor('DELEGATION_CANCELLED'));
+    expect(DELEGATION_MODEL_TRANSIENT_FAILURE).toBe(messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE'));
   });
 
   it('未知码 fail-loud：抛 UNKNOWN_ERROR_CODE 并挂上未登记的码，不静默 fallback', () => {
