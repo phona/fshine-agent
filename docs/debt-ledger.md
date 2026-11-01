@@ -1358,6 +1358,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| **D-144 续跑回合终稿出口泄漏 route_current_turn 工具协议原文** | 登记不阻塞（D-138 同族新形态） | 2026-10-31 实测：`confirmed_plan_resumed` 回合（多步扇出第 3/10 步申报时）终稿把 `<tool_call><function=route_current_turn>…` 协议原文整段上屏给用户——出口第三支（2accb20，D-136/D-138）未覆盖"续跑回合的下一申报成为终稿"路径。同轮另见 `route_declaration_invalid`（申报 schema 不合法被拒）先兆。多步扇出被此卡住（预算门已放行、内容已完成，出口把申报文本当终稿）。修法方向：出口第三支补 confirmed_plan_resumed 终稿形态；申报失败时终稿应落"本步完成、请说继续"类确定性文案 |
+| **D-144 续跑回合终稿出口泄漏 route_current_turn 工具协议原文** | **已修（2026-11-01 出口收敛波，change-safety §23）** | 2026-10-31 实测：`confirmed_plan_resumed` 回合（多步扇出第 3/10 步申报时）终稿把 `<tool_call><function=route_current_turn>…` 协议原文整段上屏给用户——出口第三支（2accb20，D-136/D-138）未覆盖"续跑回合的下一申报成为终稿"路径。同轮另见 `route_declaration_invalid`（申报 schema 不合法被拒）先兆。**修法落地**：protocol-material 新增整段申报窄判据（XML 标签外一无所有 / JSON 首键 kind 且解析成申报键）；reply-exit 整段替换支（先于删除支，fallback=worker 整理文本）；resume 与确认直达出口全部接终稿一把尺，转录只留用户收到的那一版，`route_declaration_reply_replaced` 留痕 |
+| **D-145 b424b26 预算容量模型的 fshine e2e 期望未同步（4 用例）** | 登记不阻塞（main 既有失败） | 2026-11-01 真·main 基线实测（§23 F1）：全量 1783 通过 / 4 失败——`turn-loop-plan-gate-boundaries` A2×2（档位边界断言仍按旧 AUTO=2/NOTIFY=10/CONFIRM=10 计数语义，未随 17dz 预算容量模型双线判定更新）、`turn-loop-confirmation` 2.7（取代路径确定性回复）、`turn-loop-pingpong` 8.1（乒乓续跑）。根因：b424b26 落地时只跑 17dz 测试未跑 fshine 全量。修法方向：A2×2 按预算容量语义改写断言；2.7/8.1 先归因（可能同波）再定修断言还是修实现。波次C 开工前应先清此债，避免新波在 4 红基线上无法察觉回归 |
 
 **本波最终账**：D-143 已修验收通过；D-144 立项。复跑另两项观察（未立项）：①确认续跑后 worker 偶发 executor_error（task_144c9690，重发即通，原因未定位——频次高再立项）；②逐户反查路线受 maxVariants=3/调用 限制（Q2 9/63 户后登记额度用尽，差额 96,805 如实披露）——逐户扇出天然超变体额度，正解仍是导出文件本地解析路线。

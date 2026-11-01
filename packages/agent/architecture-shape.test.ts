@@ -72,12 +72,20 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  *
  * 1298 → 1311（2026-10-25，review 修复波，功能新增非抽取）：后台受理回执落转录。
  * background 出口此前走 direct reply，route toolCall/toolResult（routeReceipt=
- * 'background'）整对被丢弃，repeat-request 复核在后台模式失明（同文重发会再起一个
- * 后台任务）。修复把这对消息经 sanitize 续进转录（turn.backgroundStarted 标记 +
+ * 'background'）整对被丢弃，repeat-request 复核在后台模式失明（同文重发会再起
+ * 一个后台任务）。修复把这对消息经 sanitize 续进转录（turn.backgroundStarted 标记 +
  * finishDirectReply 的 middleMessages 参数）；判据本体在 repeat-request.ts，
  * runtime 只做转录续写接线。+13，后续抽取时照旧只减不增。
+ *
+ * 1311 → 1334（2026-10-31，D-144 出口收敛，功能新增非抽取）：恢复分支与 direct
+ * 出口接终稿一把尺。resume 分支此前在 return { text } 处提前收尾，出口两把尺
+ * （decideTurnExit / sanitizeUserVisibleReply）全被绕过（eval14 实测：整理模型把
+ * route 申报原文写成正文直发并落转录）；修法 = resume 出口接 sanitizeUserVisibleReply
+ * （+ RESUMED_DECLARATION_FALLBACK 回退）、finishDirectReply 与 matchConfirmation
+ * 直达文本改过 sanitizeDirectExitReply。判据本体在 reply-exit.ts / protocol-material.ts，
+ * runtime 只做接线与打点。+23，后续抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1311;
+const RUNTIME_LINE_BUDGET = 1334;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

@@ -208,6 +208,7 @@ export {
   type ServerPathStripResult,
 } from './server-paths';
 export {
+  sanitizeDirectExitReply,
   sanitizeUserVisibleReply,
   type ReplyExitInput,
   type ReplyExitResult,

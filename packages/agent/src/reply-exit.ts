@@ -1,20 +1,24 @@
 /**
- * 用户可见终稿的出口整理：两道都改"用户最终看到的那一版文本"的尺。
+ * 用户可见终稿的出口整理：几道都改"用户最终看到的那一版文本"的尺。
  *
- * 为什么单独一个模块：这两支原本散在 runtime.ts 的出口处，各自的判据住在别处
- * （`server-paths.ts` 的路径形状；本文件的数值溯源），凑在一起只是因为**作用点相同**——
- * 都是本回合出口、落库与上屏之前。合成一个纯函数后，runtime 只负责提供事实与打日志
- * （与 `turn-exit.ts` 同一分工：那边判"外发什么、记什么"，这边判"文本改成什么、记什么"）。
+ * 为什么单独一个模块：这些支原本散在 runtime.ts 的出口处，各自的判据住在别处
+ * （`server-paths.ts` 的路径形状；本文件的数值溯源；`protocol-material.ts` 的申报形状），
+ * 凑在一起只是因为**作用点相同**——都是本回合出口、落库与上屏之前。合成一个纯函数后，
+ * runtime 只负责提供事实与打日志（与 `turn-exit.ts` 同一分工：那边判"外发什么、记什么"，
+ * 这边判"文本改成什么、记什么"）。
  *
  * 位置由调用点保证，不在这里：turn-exit 之后、`saveTranscript` 与上屏之前。转录、
  * Conversation Log、turn_span 看到的都是用户真正收到的那一版，三处不会各说各话。
  *
- * 两支都**不拦**（拦 = 整段替换成兜底话术）：该丢的只是用户没法用的那一截，数字与结论
+ * 默认**不拦**（拦 = 整段替换成兜底话术）：该丢的只是用户没法用的那一截，数字与结论
  * 来自真实执行，整段扔掉比留着更糟。与 `conversation_unsourced_amounts` 一贯的判断——
- * 那道尺也只留痕。
+ * 那道尺也只留痕。唯一例外是"整段=申报"（D-144）：整段都是申报结构时正文里没有任何
+ * 用户可用的内容（标签是协议、参数值是申报字段），替换才有信息量——fallback 由调用方
+ * 给（手里有真实执行产物时用它），整段协议删完无内容时沿用格式异常兜底。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { EXECUTION_LANGUAGE_SCRUB_PATTERNS } from './execution-language';
+import { isWholeReplyRouteDeclaration } from './protocol-material';
 import { stripServerPaths } from './server-paths';
 import type { TurnExitEvent } from './turn-exit';
 
@@ -33,6 +37,11 @@ export interface ReplyExitInput {
   evidence: () => string;
   /** 纠错环已进行的轮数（只进日志：同一条告警要能看出是不是回路里的轮次）。 */
   needsRounds: number;
+  /**
+   * 整段=申报被替换时优先使用的文本（D-144）：调用方手里真实的执行产物（如 worker
+   * 整理文本）。缺省/为空 = 格式异常兜底话术（与整段协议删完无内容同一兜底）。
+   */
+  declarationFallback?: string;
 }
 
 export interface ReplyExitResult {
@@ -59,14 +68,18 @@ const THOUSANDS_AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?/g;
 /**
  * 出口整理。**纯函数**：不抛异常、不打日志、不碰存储——只回答"文本改成什么、记什么事件"。
  *
- * 顺序固定：先删路径，再删执行语言（协议标记/错误码——删完之后正文里剩的才是用户
- * 真正看到的），最后扫金额（判据因此不受被删内容干扰）。
+ * 顺序固定：先删路径，再拦整段=申报（D-144 第三形态——申报参数本身是自然语言，删除式
+ * 救不了，只能整段替换，且要先于删除支判定：删了标签整段形状就认不出了），再删执行语言
+ * （协议标记/错误码——删完之后正文里剩的才是用户真正看到的），最后扫金额（判据因此不受
+ * 被删内容干扰）。
  */
 export function sanitizeUserVisibleReply(input: ReplyExitInput): ReplyExitResult {
   const events: TurnExitEvent[] = [];
   const pathExit = sanitizeServerPathReply({ text: input.text, executed: input.executed });
   let text = pathExit.text;
   events.push(...pathExit.events);
+  const declarationExit = replaceDeclarationReply(text, input.declarationFallback);
+  if (declarationExit) return { text: declarationExit.text, events: [...events, ...declarationExit.events] };
   const scrubExit = scrubExecutionLanguageReply(text);
   text = scrubExit.text;
   events.push(...scrubExit.events);
@@ -109,6 +122,45 @@ export function sanitizeServerPathReply(input: ServerPathExitInput): ReplyExitRe
 
 /** 整段都是协议原文时（删完剩不下可读内容）的兜底——格式异常的可行动话术。 */
 const FORMAT_ANOMALY_FALLBACK = '这条回复的格式出现了异常，请重发你的问题或换个说法。';
+
+/**
+ * 整段=申报（D-144 第三形态，判据在 protocol-material.ts 的 isWholeReplyRouteDeclaration）
+ * 的整段替换：**不是删标签**——申报参数（continueTaskId/request/progress）携带自然语言，
+ * 删完标签正文里剩的就是申报字段的值，删除式救不了。替换优先调用方给的真实执行产物，
+ * 缺省用格式异常兜底。未命中返回 null（调用方继续走删除支）。
+ */
+function replaceDeclarationReply(text: string, fallback?: string): ReplyExitResult | null {
+  const form = isWholeReplyRouteDeclaration(text);
+  if (!form) return null;
+  return {
+    text: fallback?.trim() || FORMAT_ANOMALY_FALLBACK,
+    events: [{
+      level: 'warn',
+      event: 'route_declaration_reply_replaced',
+      detail: { form, replacedLength: text.length },
+    }],
+  };
+}
+
+/**
+ * direct 出口的终稿一把尺（D-144 出口收敛）：与 sanitizeUserVisibleReply 同一判据链的前
+ * 三步——删路径、整段=申报替换、删执行语言——只缺数值溯源。direct 出口（finishDirectReply
+ * 等）的文本是宿主/适配器合成或平台确定性给出的，不是本轮模型自由产出，"模型编造金额"
+ * 的探查不适用（§22 的 direct 分工保留；删除支与申报替换按 D-144 收敛并入——direct 出口
+ * 此前只删路径，经它直达终稿的模型/平台文本零检测）。
+ */
+export function sanitizeDirectExitReply(input: ServerPathExitInput): ReplyExitResult {
+  const events: TurnExitEvent[] = [];
+  const pathExit = sanitizeServerPathReply(input);
+  let text = pathExit.text;
+  events.push(...pathExit.events);
+  const declarationExit = replaceDeclarationReply(text);
+  if (declarationExit) return { text: declarationExit.text, events: [...events, ...declarationExit.events] };
+  const scrubExit = scrubExecutionLanguageReply(text);
+  text = scrubExit.text;
+  events.push(...scrubExit.events);
+  return { text, events };
+}
 
 /**
  * 执行语言删除（D-136/D-138）：判据在 execution-language.ts 的 SCRUB_PATTERNS（只收

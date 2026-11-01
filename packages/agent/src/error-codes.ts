@@ -336,6 +336,12 @@ const TABLE: Record<string, CodeEntry> = {
   RESUMED_PLAN_NOT_EXECUTED: {
     text: '按您刚才确认的操作没有产生任何平台执行。请回复“继续”重跑，或直接告诉我要调整的范围。',
   },
+  // 终稿=申报被整段替换时的 resume 兜底（D-144）：确认续跑轮整理模型把 route 申报原文
+  // 写成正文、且 worker 整理文本也为空时的确定性话术。能走到该出口说明重跑有执行痕迹
+  // （零执行另有专用话术），如实说"本步已完成"，下一步由用户推进——不编造具体进度。
+  RESUMED_DECLARATION_FALLBACK: {
+    text: '本步已完成。回复『继续』推进下一步，或告诉我下一步要做什么。',
+  },
   FALLBACK_TIMEOUT: { text: '查询超时,请稍后再试' },
   FALLBACK_FAILURE: { text: '查询失败,请稍后再试或联系管理员' },
   // 委派失败四档（按 failureClass 分流，2026-09 审计 F7）：auth 是唯一需要用户

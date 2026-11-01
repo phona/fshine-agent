@@ -731,6 +731,100 @@ describe('createTaxAgentRuntime', () => {
     expect(fallback.text).toBe('worker 原文：幻辰 202609 应收余额为 42 元。');
   });
 
+  // ── D-144（eval14-misc 实测 2026-10-31）：续跑轮整理模型把申报原文当终稿 ──────
+  // 事故链：resume 分支 tools:[] 的整理轮里模型把 <function=route_current_turn> 申报写成
+  // 正文，answer.text 直接成为终稿——该分支在 return { text } 处提前收尾，出口两把尺
+  // （decideTurnExit / sanitizeUserVisibleReply）全被绕过。第三形态判据=整段申报且参数
+  // 携带自然语言（中文参数让「剩余非 ASCII<4」判据失明）→ 整段替换为 stripFootprint
+  // (worker 文本)，为空则确定性话术；替换留 route_declaration_reply_replaced 痕。
+
+  /** eval14 实测泄漏原文（conversation_sessions.state msg7 整段）。 */
+  const LEAKED_ROUTE_DECLARATION = [
+    '<tool_call>',
+    '<function=route_current_turn>',
+    '<parameter=continueTaskId>',
+    'task_812c1535-2a5f-4b18-9995-9e3a883f84fc',
+    '</parameter>',
+    '<parameter=kind>',
+    'delegate',
+    '</parameter>',
+    '<parameter=progress>',
+    '幻州幻仁汽车技术有限公司的做账进度',
+    '</parameter>',
+    '<parameter=request>',
+    '第3/10步：查询幻州幻仁汽车技术有限公司的做账进度，当前处理到哪个月、凭证是否已录完',
+    '</parameter>',
+    '</function>',
+    '</tool_call>',
+  ].join('\n');
+
+  it('D-144 整理模型输出=申报原文：整段替换为 worker 文本，不上屏不进转录，留 warn 事件', async () => {
+    const warnings: Array<Record<string, unknown>> = [];
+    const original = console.warn;
+    console.warn = (line: string) => { try { warnings.push(JSON.parse(line)); } catch { /* 非 JSON 告警忽略 */ } };
+    try {
+      const workerText = '幻州幻仁：做账已处理到 2026 年 8 月，凭证已录完。';
+      const platformTask = subagent(async (args) => ({
+        taskId: args.taskId ?? 'task_812c1535-2a5f-4b18-9995-9e3a883f84fc',
+        text: workerText,
+        execution: { planId: 'plan_812c', version: 2, calls: 3 },
+      }));
+      const { driver } = recordingDriver([{ text: LEAKED_ROUTE_DECLARATION }]);
+      const sessions = new FakeSessionRepo();
+      const log = resumeLog();
+      const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, conversationLog: log.repo });
+
+      const reply = await runtime.handleTurn(
+        makeCtx({ requestId: 'req_resume_decl', resumeTaskId: 'task_812c1535-2a5f-4b18-9995-9e3a883f84fc' }),
+        '确认继续',
+      );
+
+      // 终稿=worker 整理文本（fallback 优先真实执行产物），申报原文零残留
+      expect(reply.text).toBe(workerText);
+      expect(reply.text).not.toContain('route_current_turn');
+      expect(reply.text).not.toContain('tool_call');
+      expect(reply.text).not.toContain('task_812c');
+      // 替换不静默：结构化 warn 带 requestId 与被替换文本长度
+      expect(warnings.some((w) => w['event'] === 'route_declaration_reply_replaced'
+        && w['requestId'] === 'req_resume_decl'
+        && w['replacedLength'] === LEAKED_ROUTE_DECLARATION.length)).toBe(true);
+      // 转录干净：申报原文不落库（被替换的整理轮整体丢弃，synthesized 只落用户收到的那版）
+      const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
+      const assistantText = transcript
+        .filter((message) => message.role === 'assistant')
+        .map((message) => String(message.content ?? ''))
+        .join('\n');
+      expect(assistantText).not.toContain('route_current_turn');
+      expect(assistantText).not.toContain('tool_call');
+      expect(assistantText).not.toContain('task_812c');
+      expect(assistantText).toContain(workerText);
+      // durable log 的 tool_result 本就是 worker 文本，不带申报
+      const toolResult = log.events.find((event) => event.kind === 'tool_result');
+      expect(toolResult?.content).toBe(workerText);
+    } finally {
+      console.warn = original;
+    }
+  });
+
+  it('D-144 worker 文本也为空：整段替换为确定性话术（不编造进度）', async () => {
+    const platformTask = subagent(async (args) => ({
+      taskId: args.taskId ?? 'task_blank',
+      text: '',
+      execution: { planId: 'plan_blank', version: 1, calls: 1 },
+    }));
+    const { driver } = recordingDriver([{ text: '{"kind":"delegate","continueTaskId":"task_blank","request":"第3/10步：继续查询"}' }]);
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_blank', resumeTaskId: 'task_blank' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toBe(messageTextFor('RESUMED_DECLARATION_FALLBACK'));
+    expect(reply.text).not.toContain('kind');
+    expect(reply.text).not.toContain('task_blank');
+  });
+
   // ── ③-1：恢复路径的 ToolUserError 穿透修复 ───────────────────────────────
   // resumeTaskId 路径绕过 route_current_turn：确认码 → 计划激活 → worker 重跑全部
   // 在宿主内完成。此前 platformTask.run 抛出的 ToolUserError（如 DELEGATION_AUTH_FAILURE）
@@ -1980,6 +2074,13 @@ describe('createTaxAgentRuntime', () => {
     expect(looksLikeProtocolMaterial('结果：{"balance":51000} 元。')).toBe(false);
     expect(looksLikeProtocolMaterial('平台返回 ACCOUNT_SET_AMBIGUOUS，请用户选择。')).toBe(false);
     expect(looksLikeProtocolMaterial('')).toBe(false);
+    // D-144（eval14 实测）：route 申报的 XML/JSON 整段形态——正常路径的协议复读门
+    // 此前只认 JSON 信封，整段 XML 申报（中文参数）直发。补形态后整段=申报即命中；
+    // 标签混在自然语言里的不命中（那由 reply-exit 的删除支管，不整段拦）。
+    expect(looksLikeProtocolMaterial('<tool_call>\n<function=route_current_turn>\n<parameter=kind>delegate</parameter>\n</function>\n</tool_call>')).toBe(true);
+    expect(looksLikeProtocolMaterial('{"kind":"delegate","continueTaskId":"task_1","request":"第3/10步：继续查询"}')).toBe(true);
+    expect(looksLikeProtocolMaterial('查询进行中。<tool_call><function=route_current_turn><parameter=kind>delegate</parameter></function></tool_call>稍后汇总。')).toBe(false);
+    expect(looksLikeProtocolMaterial('接口偶发返回 {"kind":"delegate"} 标记，已忽略。')).toBe(false);
   });
 
   it('F4.2 计划模式有执行 + 模型复读步骤工具结果：不外发，宿主步骤事实汇总顶上', async () => {

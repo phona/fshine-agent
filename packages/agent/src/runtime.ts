@@ -31,7 +31,7 @@ import {
   taskResultFromEvent,
 } from './background-runtime';
 import type { BackgroundTaskManager } from './task-manager';
-import { sanitizeServerPathReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
+import { sanitizeDirectExitReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
 import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
 import {
@@ -60,11 +60,11 @@ import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, SYSTEM_PROMPT } from './system-pro
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
-import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
 export { EXECUTION_LANGUAGE_FINGERPRINTS, executionLanguageFingerprints } from './execution-language';
 export { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 export { looksLikeProtocolMaterial } from './protocol-material';
-export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
@@ -204,6 +204,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       if (!taskEventContext && typeof deps.platformTask.matchConfirmation === 'function') {
         const direct = await deps.platformTask.matchConfirmation(ctx, userMessage);
         if (direct) {
+          // D-144 出口收敛：确认直达文本同样过终稿一把尺（适配器合成文本零命中是常态，
+          // 接尺只为"所有门都过"——正常路径能拦的形态这条路径不再豁免）。
+          const confirmationExit = sanitizeDirectExitReply({ text: direct.text });
+          logExitEvents(confirmationExit.events);
+          const directText = confirmationExit.text;
           const now = Date.now();
           await saveTranscript(deps.sessions, {
             sessionId: ctx.sessionId,
@@ -213,17 +218,17 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               currentUserMessage,
               // 必须是原生形状(含 api/usage/stopReason):裸字符串消息会让下一模型回合内部报错
               deps.driver.synthesizeAssistant
-                ? deps.driver.synthesizeAssistant(direct.text)
-                : ({ role: 'assistant', content: direct.text, timestamp: now + 1 } as unknown as AgentMessage),
+                ? deps.driver.synthesizeAssistant(directText)
+                : ({ role: 'assistant', content: directText, timestamp: now + 1 } as unknown as AgentMessage),
             ],
           });
-          await persistAssistantAndContext(deps, ctx, direct.text, contextUpdateQueues);
+          await persistAssistantAndContext(deps, ctx, directText, contextUpdateQueues);
           scheduleMemoryConsolidation(deps, ctx, userMessage, memoryUpdateQueues);
           // turn_span 的 outcome 从 matchConfirmation 的结构化结局取（2026-09 第二波）：
           // 不再嗅探自己刚生成的回复文本（includes('已作废') 会把"取消已作废的码"
           // 误记成 confirm_cancelled——那一轮什么都没发生）。
           console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: direct.outcome }));
-          return direct;
+          return { ...direct, text: directText };
         }
       }
       if (!taskEventContext && ctx.resumeTaskId) {
@@ -367,17 +372,33 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           // 正常路径：整理模型的文本优先；它没说话时回落 worker 文本——执行面注脚
           // 是给模型的系统元数据，回落不过滤就会直接上屏并进转录（F5）。
           : (answer.text.trim() || stripFootprint(resumed.text)));
+        // D-144 出口收敛：恢复分支此前在下方 return { text } 处提前收尾，出口两把尺
+        // （decideTurnExit / sanitizeUserVisibleReply）全被绕过——eval14 实测里整理模型
+        // 把 route 申报原文写成正文，直接成为终稿并落转录。这里接正常路径同一把尺；
+        // 整段=申报被替换时 fallback 优先 worker 整理文本（真实执行产物），为空则
+        // 确定性话术（不编造进度）。数值溯源的证据集 = worker 报告本身。
+        const resumeExit = sanitizeUserVisibleReply({
+          text,
+          executed: Boolean(resumed.execution),
+          needsRounds: 0,
+          evidence: () => resumed.text,
+          declarationFallback: stripFootprint(resumed.text) || RESUMED_DECLARATION_FALLBACK,
+        });
+        logExitEvents(resumeExit.events);
+        const safeText = resumeExit.text;
         const latestAssistant = [...answer.messages].reverse().find((message) => (message as { role?: string }).role === 'assistant') as { content?: unknown } | undefined;
         const latestText = assistantContentText(latestAssistant?.content).trim();
         const synthesized = deps.driver.synthesizeAssistant
-          ? deps.driver.synthesizeAssistant(text)
-          : ({ role: 'assistant', content: text, timestamp: Date.now() } as unknown as AgentMessage);
+          ? deps.driver.synthesizeAssistant(safeText)
+          : ({ role: 'assistant', content: safeText, timestamp: Date.now() } as unknown as AgentMessage);
         // 零执行时整理模型的文本既不上屏也不进转录：它最常见的形状正是把零执行
         // 总结成"已完成"，留在转录里会污染后续回合。用宿主收尾文案整体替换。
         // 澄清回合同理：整理模型那一轮是对协议材料的翻译，整体替换掉。
-        const savedMessages = clarificationReply || resumedBlocked
+        // 终稿被出口整理改写时（D-144，含整段申报替换）同理——转录只留用户真正
+        // 收到的那一版，申报原文不落库。
+        const savedMessages = clarificationReply || resumedBlocked || safeText !== text
           ? [...messages, synthesized]
-          : latestText === text
+          : latestText === safeText
             ? answer.messages
             : [...answer.messages, synthesized];
         await saveTranscript(deps.sessions, {
@@ -385,7 +406,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           principalId: ctx.principalId,
           messages: savedMessages,
         });
-        await persistAssistantAndContext(deps, ctx, text, contextUpdateQueues, [{
+        await persistAssistantAndContext(deps, ctx, safeText, contextUpdateQueues, [{
           eventId: `${ctx.requestId}:confirmed_tool_result`, principalId: ctx.principalId, sessionId: ctx.sessionId,
           kind: 'tool_result', content: redactInternalIds(redactSensitiveText(stripFootprint(resumed.text))), createdAt: new Date().toISOString(), requestId: ctx.requestId,
         }]);
@@ -410,7 +431,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           }));
         }
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: resumedBlocked ? 'confirmed_plan_not_executed' : clarificationReply ? 'confirmed_plan_clarification' : 'confirmed_plan_resumed', ...resumeMainUsage }));
-        return { text };
+        return { text: safeText };
       }
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
       // 本条是纯编号，才算用户选定了任务。宿主只解决"哪个任务"（机械），继续做什么
@@ -1224,8 +1245,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       return { text: replyText, ...(turn.resendRefs.length > 0 ? { artifactRefs: turn.resendRefs } : {}) };
       async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals, executed?: boolean, middleMessages?: AgentMessage[]): Promise<AgentReply> {
         const now = Date.now();
-        // Direct exits bypass normal reply hygiene, so strip paths before display, storage, and logs.
-        const replyExit = sanitizeServerPathReply({ text, ...(executed === undefined ? {} : { executed }) });
+        // Direct exits run the same final-text ruler (D-144 出口收敛): paths + whole-reply
+        // declaration replacement + execution-language scrub. 数值溯源仍只在正常路径做——
+        // direct 文本是宿主/适配器/平台确定性给出的，不是本轮模型自由产出。
+        const replyExit = sanitizeDirectExitReply({ text, ...(executed === undefined ? {} : { executed }) });
         logExitEvents(replyExit.events);
         const safeText = replyExit.text;
         const messages = [
