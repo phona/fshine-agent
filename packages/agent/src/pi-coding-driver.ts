@@ -150,6 +150,38 @@ export function platformExecutorBypassed(signal: {
   return signal.localCalls > 0 && signal.executorCalls === 0 && signal.producedFiles.length > 0;
 }
 
+/**
+ * Partition of allowed bash calls by gate kind. The three kinds are
+ * mutually exclusive (see gateInvocationKind), so exactly one sub-count
+ * grows per call and the partition sum always equals gateCalls.
+ *
+ * This is the production counting function the driver calls in
+ * onAllowedBash. It is deliberately separate from the step-cap wind-down
+ * tracker: counting is unconditional, wind-down is a side effect only.
+ * An earlier version gated the sub-count on the wind-down return value,
+ * which dropped a wind-down local call from localCalls (suppressing the
+ * platformExecutorBypassed disclosure when that call was the round's only
+ * local call) and double-counted executor calls into auxiliaryCalls.
+ */
+export interface GateCallCounts {
+  gateCalls: number;
+  executorCalls: number;
+  localCalls: number;
+  auxiliaryCalls: number;
+}
+
+export function recordAllowedBashCall(
+  counts: GateCallCounts,
+  kind: GateInvocationKind,
+): GateCallCounts {
+  return {
+    gateCalls: counts.gateCalls + 1,
+    executorCalls: counts.executorCalls + (kind === 'executor' ? 1 : 0),
+    localCalls: counts.localCalls + (kind === 'local' ? 1 : 0),
+    auxiliaryCalls: counts.auxiliaryCalls + (kind === 'auxiliary' ? 1 : 0),
+  };
+}
+
 /** 绕开平台执行器的告警事件（宿主侧结构化留痕，只披露、不改回合结果）。 */
 export interface PlatformExecutorBypassedEvent {
   requestId: string;
@@ -719,16 +751,21 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             options.serveGateAudit?.(event);
           },
           onAllowedBash: (kind) => {
-            gateCalls += 1;
-            if (kind === 'executor') executorCalls += 1;
-            // 步数帽：第 cap+1 次放行时送一次 90% 预算点同款 wind-down，
-            // 且只送一次——后续放行不再重复打断，模型仍可收尾交已做 + 未做。
-            // wind-down 那一次本身不计入 local/auxiliary 分项（与 Phase 2 原逻辑一致）；
-            // 只有非 wind-down 的放行才按 kind 分项。
-            if (!fireStepCapWindDown(gateCalls)) {
-              if (kind === 'local') localCalls += 1;
-              else auxiliaryCalls += 1;
-            }
+            // 分项计数无条件先行：每一次放行恰好计入一个族，分项和恒等于
+            // gateCalls。步数帽 wind-down 只当副作用触发一次（第 cap+1 次
+            // 送一次 90% 预算点同款 wind-down，后续放行不再重复打断，模型
+            // 仍可收尾交已做 + 未做），它的返回值不再 gating 计数——否则
+            // wind-down 那一次的 local 调用会从 localCalls 丢失，而
+            // executor 调用又会被双计进 auxiliaryCalls。
+            const next = recordAllowedBashCall(
+              { gateCalls, executorCalls, localCalls, auxiliaryCalls },
+              kind,
+            );
+            gateCalls = next.gateCalls;
+            executorCalls = next.executorCalls;
+            localCalls = next.localCalls;
+            auxiliaryCalls = next.auxiliaryCalls;
+            fireStepCapWindDown(gateCalls);
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
             // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
