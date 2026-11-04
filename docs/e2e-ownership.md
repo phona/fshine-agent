@@ -58,6 +58,24 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 - 真写：`FSHINE_REAL_COMMIT` 不设、`EXECUTION_ALLOW_REAL` 不设；
   写链路用例跑的是 mock 下的提案创建/确认/读回，不是真落账。
 
+### 已知限制：`plan-teaching.test.ts` 的跨仓读与 dummy 回落（#31/#32 定判，2026-11-04）
+
+- **定判 1——main 侧红是环境伪影，不是代码回归。** main 版该测试无回落，
+  直接 `readFileSync(<PLATFORM_ROOT>/src/execution/plan-schema.json)`；
+  单仓检出或 `/tmp` 工作树下兄弟仓不在 `../17dz-platform` 时，第 1 用例必以
+  `ENOENT: no such file or directory, open '…/17dz-platform/src/execution/plan-schema.json'`
+  失败，其余 2 用例仍过（实测：1 failed | 2 passed）。兄弟仓在场时 main 版 3/3 过。
+  另注意变量名已改：main 只认旧名 `DZ_PLATFORM_ROOT`，单设新名
+  `FSHINE_PLATFORM_ROOT` 救不了 main（实测仍 ENOENT）。
+- **定判 2——p1 版 dummy 回落成立，但口径只到协议顶层形状。** p1 版兄弟仓不在场时
+  回落到仓内 `scripts/eval/fixtures/dummy-platform/bin/dummy plan --schema`，无兄弟仓布局下
+  实测 3/3 过；dummy 与真实 schema 在本测试断言的顶层字段上一致
+  （`required: ["calls"]`、`additionalProperties: false`、
+  `properties: calls / goal / requestId`）。因此 dummy 绿只证明“教学形态符合协议顶层形状”，
+  不证明教学与财税 schema 的描述、逐调用校验一致；真 schema 核验仍需兄弟仓在场的那一跑
+  （p1 版指 `FSHINE_PLATFORM_ROOT` 向真实兄弟仓时实测亦 3/3 过）。
+- **本定判不改生产逻辑、不放松门禁。** 不得把 dummy 绿读成“已对真实财税 schema 验过”。
+
 例外：`plan-awareness.test.ts` 用 `describe.skipIf(!existsSync(cliPath))`，
 兄弟仓 CLI 不存在时**跳过而不是失败**——跳过不是绿证据，跑它必须先确认
 CLI 在场。
