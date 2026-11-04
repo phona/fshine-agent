@@ -1426,6 +1426,13 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **闭环判据**：schema 缺失分支的文案不再是无条件重发指令，且同 proposalId 重试或运营升级二选一落地；或平台 emission 被证明在所有部署下必带 schema（则本分支退化为不可达的防御，文案可保留）。
 - **状态**：待办（已知限制，登记不修——本分支的硬约束是不碰生产逻辑，故不以代码修复冒充已修）。
 
+### D-150 · 跨仓预算校验的 CI 边界（已知限制，登记不修接线）
+
+- **位置**：fshine `scripts/cross-repo/check-budget-thresholds.mjs`（`check:cross-repo-budget`）与 `packages/agent/src/budget-policy-cross-repo.test.ts`；`scripts/ci.sh` 三步 gate 与 `.github/workflows/ci.yml`（只调 `ci.sh`）均不跑该校验。
+- **已知限制（按 `docs/e2e-ownership.md` 的“已知限制”格式登记，不冒充已接线）**：默认 `npm test` 的绿灯**不含真跨仓比对**——`budget-policy-cross-repo.test.ts` 的真实两仓用例在未设 `CROSS_REPO_17DZ_ROOT` 时 skip，用例名写明 skip 原因；真比对需显式设 `CROSS_REPO_17DZ_ROOT=<17dz 检出根目录>` 后跑（脚本对真实检出实跑 12/12 一致是手动证据，不是 CI 证据）。CI（`ci.sh` + `ci.yml`）目前只跑 typecheck + unit + generic-mock，不跑 `check:cross-repo-budget`，这一点在本条登记前在 debt-ledger/change-safety 里零登记。
+- **不改的说法（登记不等于改接线）**：`budget-policy.ts:14-22` 与 17dz `docs/architecture.md:402` 里“漂移由机械校验兜底”的表述**不改**——改表述而不改接线是换一种纸面，改接线（把校验接进 CI）是另开一题；本条只登记边界，不以登记冒充接线已落地。闭环判据二选一：(a) 校验接进 `ci.sh`/CI 并有一次 CI 绿灯证据；(b) 本条登记被后续评审接受为长期已知限制并写进 CI 文档的 scope 说明。任一成立即关。
+- **状态**：待办（已知限制，登记不修接线）。
+
 ### F3 未留档项（本补档未做变异，登记）
 
 - gatedWorker 光标不重跑最后一段（`tests/e2e/harness-cursor.test.ts`，`c1b5967`）：测试存在，本补档未做变异（e2e harness 接缝，单进程变异成本与 flaky 风险另计）。补变异或登记为"测试存在、变异未做"，二选一留给后续主题。
