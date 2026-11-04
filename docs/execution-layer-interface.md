@@ -288,6 +288,22 @@
   已发布的工具协议名，改名即断协议；新执行层接入时用其中性
   工具名，不复用该名（§0、§10）。
 
+## 14. 执行层准入清单与第二执行层证明（第 4 包，2026-11-04）
+
+- 准入清单见 [execution-layer-admission.md](execution-layer-admission.md)：
+  一个执行层接进 fshine 必须交齐 A1–A14（profile/网关、operation list、
+  plan schema、plan evaluate 含 weight、proposal schema 下发、提案创建/
+  提交/读回、RESULT 信封、退出码与错误码家族、serve 令牌与实执行门、
+  自己的 mock、自己的记忆、自己的熔断/缓存、自己的 skill 路由示例、
+  状态隔离），缺一项就不算接通。
+- 第二证明域是库存（stock），夹具位置
+  `scripts/eval/fixtures/stock-platform/`，网关 `bin/stock`，操作名
+  `stock.*`，不是生产域，不进 `packages/` / `apps/`；证明判据是
+  fshine 生产代码改动为 0（`git diff --name-only <基线> -- packages apps`
+  为空），只改夹具域、测试/评价脚本、配置与文档。
+- 本节与准入清单有冲突时，以准入清单的 A1–A14 为准，本文 §§1–13
+  的形状定义不变。
+
 ## 13. 交接损坏的 Main 分级恢复（第 2 包后续裁定，2026-11-04）
 
 > e2e 归属（通用 vs L4 集成）不在本文件展开，见 [e2e-ownership.md](e2e-ownership.md)：
