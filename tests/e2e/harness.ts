@@ -439,8 +439,14 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       // 下一步、纠错环的重派）是新的 run、从脚本的下一段继续；直接 return 会把脚本里
       // 未消费的后续段整个吞掉，那不是真实驱动的行为。结果在循环外统一取。
       let terminalMirror: ReturnType<typeof terminalStopMirror> | undefined;
-      for (let step = 0; step < script.length; step += 1) {
-        const current = script[Math.min(cursor, script.length - 1)]!;
+      // 光标保真（2026-11-04 诊断）：一轮只消费本轮开始时光标后剩余的段，
+      // 最后一项不夹回重跑——原 for 循环按脚本总长度跑，第二轮会把 execute
+      // 那一段跑两次（heavyPlan 21 次变 42 次，interactive 续跑因此超时）。
+      // 单段脚本例外：复用是既有单轮替身的约定，每轮仍跑一次。
+      const runStartCursor = cursor;
+      const remaining = script.length === 1 ? 1 : Math.max(0, script.length - runStartCursor);
+      for (let step = 0; step < remaining; step += 1) {
+        const current = script.length === 1 ? script[0]! : script[cursor]!;
         cursor += 1;
         if ('text' in current) { parts.push(current.text); continue; }
         if ('need' in current) {

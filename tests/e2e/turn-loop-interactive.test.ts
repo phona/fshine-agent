@@ -11,8 +11,8 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function until(predicate: () => boolean | Promise<boolean>): Promise<void> {
-  const deadline = Date.now() + 5_000;
+async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -190,7 +190,10 @@ describe('interactive session production wiring', () => {
 
       const priorNotices = b.sdk.sentMessages.length;
       releaseResume.resolve();
-      await until(() => resumeWorkerFinished);
+      // 续跑要真跑 21 次查询：单跑约 4.3 秒，全量并行下常超 5 秒。
+      // 5 秒不是生产门限（后台任务 deadline 是 10 分钟），这里只放宽测试等待，
+      // 不放宽任何生产门禁；光标修后调用数已回到 21 次，见 harness-cursor.test.ts。
+      await until(() => resumeWorkerFinished, 15_000);
       await until(() => b.sdk.sentMessages.length > priorNotices);
       expect(b.sdk.sentMessages.slice(priorNotices).some((message) => message.content.includes('用户确认后已按原计划完成查询'))).toBe(true);
     } finally {
