@@ -27,6 +27,8 @@ import {
   isCommitEnabled,
   isPlatformMock,
   loadOperationArgSpecs,
+  loadProposalSchema,
+  reviewProposalWithDriver,
   newGateSecret,
   parsePiThinkingLevel,
   planDraftExample,
@@ -310,6 +312,14 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
     // e2e 覆盖（overrides.writeEnabled）只换取值来源，不换派生规则。
     writeEnabled: overrides.writeEnabled ?? isCommitEnabled(env),
+    // 写路径隔离复核（第 2 包生产接线）：装配必须注入真实复核驱动，
+    // 未注入时提案创建路径直接失败（不再记 skipped 就继续）。
+    // 驱动 = contextModelDriver（隔离回合、无工具，与上下文抽取同一驱动面），
+    // 不是 Main 驱动，也不是一个独立评委模型（那是仍待定的另一步）。
+    proposalReviewTurn: (input) => reviewProposalWithDriver(contextModelDriver, input),
+    // 提案 schema 取问（接口文档 §5）：按 profile 的 root 与 gateway spawn
+    // operation list --json，取 proposal.create 行的 proposalSchema。
+    proposalSchemaLoader: (args) => loadProposalSchema(args.platformRoot, args.gateway),
 
     ...(platformRoot ? {
       changeIntents: store.changeIntents,

@@ -492,6 +492,74 @@ export function loadOperationProtocols(platformRoot?: string, gateway?: string):
 }
 
 /**
+ * 提案创建角色的协议列取值：平台声明的角色名，属协议常量（非模型输入嗅探），
+ * 故以具名常量出现一次，比较处不再写字面量。parseProposalSchema 只认这个
+ * 常量命名的行，不另持业务 operation 名单。
+ */
+export const PROPOSAL_CREATE_PROTOCOL = 'proposal.create';
+
+/**
+ * 提案 schema 下发（接口文档 §5，第 2 包）：operation list 里携带提案创建
+ * 协议角色的那一行的 proposalSchema 列。宿主只做“是不是非空普通对象”
+ * 这一形状卫生检查，然后原样透传给隔离复核，不读、不校验、不缓存任何
+ * 业务字段。缺列 / 非对象 / 数组一律返回 null = schema 未下发，调用方按
+ * fail-closed 处理（提案创建直接失败，不降级）。
+ */
+export function parseProposalSchema(stdout: string): unknown | null {
+  const operations = operationsArrayOf(stdout);
+  if (!operations) return null;
+  for (const operation of operations) {
+    const protocol = (operation as { protocol?: unknown } | null)?.protocol;
+    if (protocol !== PROPOSAL_CREATE_PROTOCOL) continue;
+    const schema = (operation as { proposalSchema?: unknown } | null)?.proposalSchema;
+    if (schema && typeof schema === 'object' && !Array.isArray(schema)) return schema;
+    return null;
+  }
+  return null;
+}
+
+/**
+ * 经公共 CLI 取问提案 schema（cwd=platformRoot，`operation list --json`）。
+ * 失败语义与 loadOperationProtocols 完全一致，只是返回值不同：
+ * 平台未配、CLI 失败、超时、非 JSON、行里无 schema——一律返回 null，
+ * 调用方（提案创建路径）按 fail-closed 处理，绝不以 null schema 继续复核。
+ */
+export function loadProposalSchema(platformRoot?: string, gateway?: string): Promise<unknown | null> {
+  if (!platformRoot) return Promise.resolve(null);
+  const cli = gatewayExecPath(platformRoot, gateway);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (schema: unknown | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(schema);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(null);
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(null); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseProposalSchema(Buffer.concat(stdout).toString('utf8')) : null);
+    });
+  });
+}
+
+/**
  * 该 operation 是否属写类——判据只有一列：平台声明的 `confirm`（要不要用户确认）。
  *
  * 为什么"要不要用户确认"就是"是不是写"：平台对每个 access 取值声明三列语义，其中

@@ -16,9 +16,12 @@
  *     disagree (field names only, no values, no business summary).
  *
  * Fail-closed: an unparsable reviewer reply, a reply with an unknown
- * verdict, a dry-run that is not 'completed', or an empty summaryText all
- * count as 'inconsistent'. A reviewer turn that throws also blocks. The
- * caller must then not issue a confirmation code.
+ * verdict, a dry-run that is not 'completed', an empty summaryText, or a
+ * missing/illegal proposal schema (interface §5, package 2: the schema slot
+ * is no longer nullable in production — a null schema is not "review
+ * without a schema", it is a failed review) all count as 'inconsistent'.
+ * A reviewer turn that throws also blocks. The caller must then not issue
+ * a confirmation code.
  *
  * Note on independence: this is an isolated turn, not an independent
  * model. In production assembly the driver is the context-model driver
@@ -70,8 +73,11 @@ export function parseReviewReply(text: string): ProposalReviewVerdict | null {
   return { verdict: row.verdict, fields: [...(row.fields as string[])] };
 }
 
-/** Mechanical pre-checks that need no model: a failed dry-run or an empty summary cannot be consistent. */
+/** Mechanical pre-checks that need no model: a failed dry-run, an empty summary, or a missing/illegal schema cannot be consistent. The schema check is shape-only (non-empty plain object): the host never parses business fields. */
 export function mechanicalReview(input: ProposalReviewInput): ProposalReviewVerdict | null {
+  if (!input.proposalSchema || typeof input.proposalSchema !== 'object' || Array.isArray(input.proposalSchema)) {
+    return { verdict: 'inconsistent', fields: [], blockedReason: 'proposal schema missing or invalid' };
+  }
   if (!input.dryRunEnvelope || input.dryRunEnvelope.status !== 'completed') {
     return { verdict: 'inconsistent', fields: [], blockedReason: 'dry-run did not complete' };
   }

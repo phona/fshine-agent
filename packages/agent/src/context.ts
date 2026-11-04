@@ -11,7 +11,7 @@
  * （L4：宿主不该知道自己在提交什么业务）。
  */
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
-import { createReadStream } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -26,8 +26,9 @@ import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
-import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFile, writeHandoverFile, type HandoverExecutedCall, type TaskHandover } from './task-handover';
-import { reviewProposalWithDriver, type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
+import { HANDOVER_VERSION, handoverFilePath, mergeExecutedCalls, readHandoverFile, writeHandoverFile, type HandoverExecutedCall, type TaskHandover } from './task-handover';
+import { loadProposalSchema } from './operation-labels';
+import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
@@ -315,13 +316,22 @@ export interface ContextTaskRunnerOptions {
    */
   confirmGateWaitMs?: number;
   /**
-   * 写路径隔离复核回合（Phase 2）：在提案创建成功、宿主发确认码之前运行。
-   * 输入只给提案 schema（宿主目前未从平台取问 schema 时为 null，见下）+
-   * 域 dry-run 信封 + 平台渲染的 summaryText；输出只给一致/不一致 + 字段。
-   * 不一致时不发确认码。未注入时打一条 proposal_review_skipped 日志并继续——
-   * 生产装配的复核驱动接线仍待定（见 GENERIC_MOCK_NOTES），不得谎称已接线。
+   * 写路径隔离复核回合（第 2 包已接线）：在提案创建成功、宿主发确认码
+   * 之前运行。输入给平台下发的提案 schema（接口文档 §5，真实下发值，
+   * 不再是 null）+ 域 dry-run 信封 + 平台渲染的 summaryText；输出只给
+   * 一致/不一致 + 字段。不一致时不发确认码。生产装配必须注入
+   * （`reviewProposalWithDriver(contextModelDriver)`）；未注入时
+   * fail-closed，直接失败并记 `proposal_review_required`，绝不记
+   * skipped 日志就继续——`proposal_review_skipped` 事件已删除。
    */
   proposalReviewTurn?: ProposalReviewTurn;
+  /**
+   * 提案 schema 取问器（接口文档 §5）：按 profile 的 root 与 gateway
+   * spawn `operation list --json`，取 proposal.create 行的
+   * `proposalSchema`。缺省用 `loadProposalSchema`；测试可塞替身。
+   * 返回 null / 非对象时提案创建直接失败（见下），不存在无 schema 路径。
+   */
+  proposalSchemaLoader?: (args: { platformRoot: string; gateway?: string }) => Promise<unknown | null>;
 }
 
 export interface ContextTaskExecutionContext {
@@ -788,35 +798,40 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (!proposalId || !summaryText) {
         return { status: 'failed', workerText: `平台的 completed 信封缺少 proposalId/summaryText（proposalId=${proposalId || '空'}），未创建待确认任务。` };
       }
-      // 写路径隔离复核（Phase 2）：在发确认码之前，独立回合只比对
-      // summaryText 与域 dry-run 信封。宿主目前没有一条已声明的接口可从平台
-      // 取问提案 schema，故 schema 位传 null、复核只做摘要与信封比对；
-      // schema 一致性检查是仍待平台声明取问接口的开放项，不得谎称已覆盖。
-      // 不一致 = 不发确认码（fail-closed），且不作废、不重试、不兜底放行。
-      if (options.proposalReviewTurn) {
-        const verdict = await options.proposalReviewTurn({
-          proposalSchema: null,
-          dryRunEnvelope: envelope,
-          summaryText,
-        });
-        console.info(JSON.stringify({
-          event: 'proposal_review',
-          requestId: ctx.trusted.requestId,
-          taskId,
-          proposalId,
-          verdict: verdict.verdict,
-          fields: verdict.fields,
-          ...(verdict.blockedReason ? { blockedReason: verdict.blockedReason } : {}),
-        }));
-        if (verdict.verdict !== 'consistent') {
-          const fields = verdict.fields.length ? `（不一致字段：${verdict.fields.join('、')}）` : '';
-          return {
-            status: 'failed',
-            workerText: `提案隔离复核未通过${fields}，未发确认码，请重新发起录入。`,
-          };
-        }
-      } else {
-        console.info(JSON.stringify({ event: 'proposal_review_skipped', requestId: ctx.trusted.requestId, taskId, proposalId }));
+      // 写路径隔离复核（第 2 包）：在发确认码之前，独立回合比对
+      // 平台下发的提案 schema + 域 dry-run 信封 + summaryText。
+      // 缺复核驱动、缺 schema、schema 非法、不一致——一律不发确认码
+      // （fail-closed），且不作废、不重试、不兜底放行、不降级为只比摘要。
+      if (!options.proposalReviewTurn) {
+        console.info(JSON.stringify({ event: 'proposal_review_required', requestId: ctx.trusted.requestId, taskId, proposalId }));
+        return { status: 'failed', workerText: '提案隔离复核未接线，未发确认码，请重新发起录入。' };
+      }
+      const proposalSchemaLoader = options.proposalSchemaLoader ?? (async (args: { platformRoot: string; gateway?: string }) => loadProposalSchema(args.platformRoot, args.gateway));
+      const proposalSchema = await proposalSchemaLoader({ platformRoot, gateway });
+      if (!proposalSchema || typeof proposalSchema !== 'object' || Array.isArray(proposalSchema)) {
+        console.info(JSON.stringify({ event: 'proposal_review_schema_missing', requestId: ctx.trusted.requestId, taskId, proposalId }));
+        return { status: 'failed', workerText: '平台未下发提案 schema，未发确认码，请重新发起录入。' };
+      }
+      const verdict = await options.proposalReviewTurn({
+        proposalSchema,
+        dryRunEnvelope: envelope,
+        summaryText,
+      });
+      console.info(JSON.stringify({
+        event: 'proposal_review',
+        requestId: ctx.trusted.requestId,
+        taskId,
+        proposalId,
+        verdict: verdict.verdict,
+        fields: verdict.fields,
+        ...(verdict.blockedReason ? { blockedReason: verdict.blockedReason } : {}),
+      }));
+      if (verdict.verdict !== 'consistent') {
+        const fields = verdict.fields.length ? `（不一致字段：${verdict.fields.join('、')}）` : '';
+        return {
+          status: 'failed',
+          workerText: `提案隔离复核未通过${fields}，未发确认码，请重新发起录入。`,
+        };
       }
       const ci = options.changeIntents;
       if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
@@ -1112,10 +1127,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       ...previousMessages,
       { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
     ];
-    // 续跑时宿主先读交接文件再环境核对（Phase 2）：交接是任务层事实，不是
-    // 会话层触发式召回。文件缺失/损坏不阻塞续跑——旧任务仍可凭转录继续，
-    // 但留痕说明交接不可用，绝不凭空编一个。
+    // 续跑时宿主先读交接文件再环境核对（第 2 包端到端）：交接是任务层事实，
+    // 不是会话层触发式召回。文件缺失 = 交接不可用（仍可凭转录续跑，不凭空
+    // 编一个）；文件存在但解析失败 / 版本不符 = 交接损坏，对交接数据
+    // fail-closed：按缺失处理、其调用一律不合并，事件记
+    // `task_handover_corrupt`（整轮续跑本身不因此硬阻塞，见接口文档 §11；
+    // 若要升级为硬阻塞须另行裁定）。
     const handover = existing ? readHandoverFile(profile.root, taskId) : null;
+    const handoverCorrupt = existing && !handover && existsSync(handoverFilePath(profile.root, taskId));
     if (existing && handover) {
       console.info(JSON.stringify({
         event: 'task_handover_resumed',
@@ -1125,6 +1144,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         executedCalls: handover.executedCalls.length,
         unfinishedSteps: handover.unfinishedSteps.length,
       }));
+    } else if (handoverCorrupt) {
+      console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId }));
     } else if (existing) {
       console.info(JSON.stringify({ event: 'task_handover_missing', taskId }));
     }

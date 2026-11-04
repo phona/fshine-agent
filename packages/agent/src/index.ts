@@ -17,6 +17,7 @@ export {
 } from './pi-driver';
 export {
   DEFAULT_WORKER_STEP_CAP,
+  createStepCapWindDown,
   parseStepCap,
   stepCapDecision,
   type StepCapDecision,
@@ -78,10 +79,12 @@ export {
   loadOperationArgSpecs,
   loadOperationProtocols,
   loadOperationSemantics,
+  loadProposalSchema,
   operationLabel,
   parseOperationLabels,
   parseOperationArgSpecs,
   parseOperationProtocols,
+  parseProposalSchema,
   parseAccessSemantics,
   parseOperationSemantics,
   isWriteAccess,
