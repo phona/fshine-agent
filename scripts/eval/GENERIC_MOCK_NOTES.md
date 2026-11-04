@@ -190,7 +190,10 @@ number from here.
   wind-down, configurable, invalid falls back). It does NOT prove the
   live worker driver fires the steer at the 51st allowed bash in a real
   worker session — that wiring is code-reviewed, not live-run. A
-  scripted worker-session test for the steer is still open.
+  scripted worker-session test for the steer has since landed
+  (29b78f0: real driver + fake session, stepCap=2; this branch adds
+  the steer-failure redelivery cases). What remains open is the live
+  real-model session firing the steer, not the scripted version.
 - g-handover-file proves the file round-trip, the resume merge
   (no double count), and fail-closed parsing. It does NOT prove a
   resumed real task reads the handover before re-delegation in
@@ -280,8 +283,9 @@ number from here.
   schema-conformance checking by the host is still not claimed: the
   host only shape-checks and passes the schema through, and the
   reviewer prompt compares summaryText against the dry-run envelope.
-- Scripted worker-session test for the step-cap steer firing at the
-  51st allowed bash (decision boundary is proven, live steer is not).
+- Live real-model worker-session test for the step-cap steer firing at the
+  51st allowed bash (the scripted version landed in 29b78f0: real driver
+  + fake session, stepCap=2; live steer is not proven).
 - Moving session/sensitive state out of the worker-readable workspace
   (dummy has no browser profile or platform session, so this gap is
   execution-layer-instance side, not dummy-side).
