@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { BackgroundTaskEvent, ContextStateRecord, ConversationEventRecord, PlatformTaskRecord, TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, SubagentTaskResult } from './src/context';
-import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL } from './src/context';
+import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { createTaxAgentRuntime, ACTIVATED_PLAN_NOT_EXECUTED, composeClarificationReply, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED, executionLanguageFingerprints, looksLikeProtocolMaterial, usefulWorkerNote } from './src/runtime';
 import { clarificationTextFor, messageTextFor, toolUserErrorFor } from './src/error-codes';
@@ -31,7 +31,7 @@ function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
 
 function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
   return {
-    tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+    tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
     run: run ?? (async (): Promise<SubagentTaskResult> => ({ taskId: 'task_1', text: '子 Agent 完成。' })),
   };
 }
@@ -885,7 +885,7 @@ describe('createTaxAgentRuntime', () => {
     console.info = (line: string) => { try { const parsed = JSON.parse(line); if (parsed['event'] === 'turn_span') spans.push(parsed); } catch { /* 非 JSON 行 */ } };
     try {
       const platformTask: ContextTaskRunner = {
-        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
         matchConfirmation: async () => ({ text: '已作废：甲账套 202608 的录入提案（1 条）未执行。', outcome: 'confirm_cancelled' }),
         run: async () => ({ taskId: 'task_1', text: '不该被叫到' }),
       };
@@ -902,7 +902,7 @@ describe('createTaxAgentRuntime', () => {
     console.info = (line: string) => { try { const parsed = JSON.parse(line); if (parsed['event'] === 'turn_span') spans.push(parsed); } catch { /* 非 JSON 行 */ } };
     try {
       const platformTask: ContextTaskRunner = {
-        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
         // 回复里确实带"已作废"三个字（提案早就作废了）——但这一轮没有任何状态变化
         matchConfirmation: async () => ({ text: '该确认码对应的提案已作废，无需取消。', outcome: 'confirm_stale' }),
         run: async () => ({ taskId: 'task_1', text: '不该被叫到' }),

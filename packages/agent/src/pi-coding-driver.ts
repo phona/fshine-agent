@@ -741,7 +741,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         sensitivePaths: input.sensitivePaths,
         onNotice: noticeOnce,
         planCliRunner: options.planCliRunner,
-        planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
+        planActivationSecret: options.planActivationSecret ?? options.env.EXECUTION_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
         onProposalOutcome: (outcome) => { proposalOutcome = outcome; },
         turnDeclaration: input.turnDeclaration,

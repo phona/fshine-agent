@@ -124,7 +124,7 @@ describe('parseProposalCommand', () => {
 
   it('非网关命令 / 没有 payload 位置参数 → 不拦截', () => {
     expect(parseProposalCommand('echo bin/17dz prepare voucher.proposal p.json', protocols)).toBeNull();
-    expect(parseProposalCommand('env DZ_EXECUTOR=mock bin/17dz prepare voucher.proposal p.json', protocols)).toBeNull();
+    expect(parseProposalCommand('env EXECUTION_EXECUTOR=mock bin/17dz prepare voucher.proposal p.json', protocols)).toBeNull();
     expect(parseProposalCommand('bin/17dz prepare voucher.proposal', protocols)).toBeNull();
     expect(parseProposalCommand('bin/17dz prepare voucher.proposal --batch', protocols)).toBeNull();
   });

@@ -4,7 +4,7 @@
  * 使用独立的验收数据库,不触碰生产数据/生产连接。
  * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault]
  * --fault:使用指向不存在目录的临时配置,验收 2.5 的失败降级。
- * mock 联调:.env 设 DZ_EXECUTOR=mock 后,写链路用例(5.x)走
+ * mock 联调:.env 设 EXECUTION_EXECUTOR=mock 后,写链路用例(5.x)走
  * 提案→确认码→dry-run→commit→读回全链(落假状态,零真平台影响),
  * 且每次启动重置 mock 状态文件保证用例可重复。
  * 出口保真:progress 与 notice 都按生产 adapter 的三个参数交给 handler
@@ -330,7 +330,7 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/17dz 网关与守卫真实生效）。
-  process.env.DZ_SERVE = '1'; // 平台 serve 法域
+  process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
   if (faultMode) {
     configPath = path.join(dataDir, `acceptance-fault-${runId}.yaml`);

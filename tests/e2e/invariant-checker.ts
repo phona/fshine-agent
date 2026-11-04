@@ -4,10 +4,10 @@
  * 评的不是对话质量，而是**审计事件流上的机械不变量**——与 LLM 输出无关。检查器只从制品
  * 判读，不嗅探自然语言：
  *
- *   - 平台计划账本（DZ_PLAN_STATE，跨进程真账本：plans[].calls/used/actual/activatedAt）
- *   - 平台调用审计（DZ_AUDIT_PATH，网关逐调用 jsonl：mode/script/args/exitCode/refused）
+ *   - 平台计划账本（EXECUTION_PLAN_STATE，跨进程真账本：plans[].calls/used/actual/activatedAt）
+ *   - 平台调用审计（EXECUTION_AUDIT_PATH，网关逐调用 jsonl：mode/script/args/exitCode/refused）
  *   - 宿主审计库（assembly.store：platform_tasks/change_intents/task_plan_steps）
- *   - mock 平台状态（DZ_MOCK_STATE，落账读回的证据面）
+ *   - mock 平台状态（EXECUTION_MOCK_STATE，落账读回的证据面）
  *   - 用户可见面（每轮最终回复 + 进度帧 + 计划通知帧，剥信封后过生产指纹尺）
  *
  * 不变量目录（按类，编号与报告一致）：
@@ -70,7 +70,7 @@ export interface InvariantSessionOptions {
    * 注意：名称↔id 映射在平台侧（L2），这里按**名称**判是跨层测试数据面的机械核对。
    */
   allowedAccountSets?: readonly string[];
-  /** 硬预算档（平台 DZ_PLAN_HARD_CALLS，harness = 50）。 */
+  /** 硬预算档（平台 EXECUTION_PLAN_HARD_CALLS，harness = 50）。 */
   hardCallBudget?: number;
   /** 每任务委派轮数上限（默认随硬预算档）。 */
   maxDelegationsPerTask?: number;
@@ -104,7 +104,7 @@ const CONFIRM_CODE_RE = /确认\s*([A-Z0-9]{6})/g;
 /** 64-hex 哈希形态串（确认码哈希/密钥形态泄漏判据）。 */
 const HASH_SHAPE_RE = /[0-9a-f]{64}/i;
 
-// ── 平台侧制品读取（DZ_PLAN_STATE / DZ_AUDIT_PATH / DZ_MOCK_STATE）─────────
+// ── 平台侧制品读取（EXECUTION_PLAN_STATE / EXECUTION_AUDIT_PATH / EXECUTION_MOCK_STATE）─────────
 
 interface LedgerCall { operation: string; args: string[]; key: string }
 interface LedgerPlan {
@@ -116,7 +116,7 @@ interface LedgerTask { actual: { calls: number; seconds: number }; evaluateCount
 interface LedgerState { version: number; tasks: Record<string, LedgerTask>; plans: Record<string, LedgerPlan> }
 
 function readLedger(): LedgerState | null {
-  const file = process.env['DZ_PLAN_STATE'];
+  const file = process.env['EXECUTION_PLAN_STATE'];
   if (!file || !existsSync(file)) return null;
   try { return JSON.parse(readFileSync(file, 'utf8')) as LedgerState; } catch { return null; }
 }
@@ -124,7 +124,7 @@ function readLedger(): LedgerState | null {
 interface AuditRecord { ts?: string; mode?: string; script?: string; args?: unknown; exitCode?: number; refused?: string }
 
 function readAudit(): AuditRecord[] | null {
-  const file = process.env['DZ_AUDIT_PATH'];
+  const file = process.env['EXECUTION_AUDIT_PATH'];
   if (!file || !existsSync(file)) return null;
   const out: AuditRecord[] = [];
   for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -137,7 +137,7 @@ function readAudit(): AuditRecord[] | null {
 interface MockState { accountSets?: Record<string, { vouchers?: Record<string, unknown[]> }> }
 
 function readMockState(): MockState | null {
-  const file = process.env['DZ_MOCK_STATE'];
+  const file = process.env['EXECUTION_MOCK_STATE'];
   if (!file || !existsSync(file)) return null;
   try { return JSON.parse(readFileSync(file, 'utf8')) as MockState; } catch { return null; }
 }
@@ -231,9 +231,9 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
       const ledger = readLedger();
       const audit = readAudit();
       const mock = readMockState();
-      if (!ledger) notes.push('S1/E1/E2：读不到计划账本（DZ_PLAN_STATE），平台调用面不变量跳过');
-      if (!audit) notes.push('S1/S2：读不到平台调用审计（DZ_AUDIT_PATH），审计守恒跳过');
-      if (!mock) notes.push('S2：读不到 mock 状态（DZ_MOCK_STATE），落账增长核对跳过');
+      if (!ledger) notes.push('S1/E1/E2：读不到计划账本（EXECUTION_PLAN_STATE），平台调用面不变量跳过');
+      if (!audit) notes.push('S1/S2：读不到平台调用审计（EXECUTION_AUDIT_PATH），审计守恒跳过');
+      if (!mock) notes.push('S2：读不到 mock 状态（EXECUTION_MOCK_STATE），落账增长核对跳过');
 
       // ── 实际执行清单（账本 used 索引展开）：S1/S4/E1 共用 ──────────────
       const executed: Array<{ taskId: string; planId: string; call: LedgerCall }> = [];

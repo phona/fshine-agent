@@ -49,7 +49,7 @@ import {
   totalActualCalls,
 } from './harness';
 
-const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
 const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
 
 // ── 真实 pi-coding-worker 会话辅助（A4 / A5③ 用：替身不复刻这两段生产逻辑）────────
@@ -370,7 +370,7 @@ describe('离线全链 e2e：plan --schema 元数据自救通道（C4）', () =>
 
       // 平台 CLI 确实认这个出口（本地打印 plan-schema.json，不触平台会话）
       const printed = spawnSync(CLI, ['plan', '--schema'], {
-        encoding: 'utf8', timeout: 30_000, env: { ...process.env, DZ_EXECUTOR: 'mock' },
+        encoding: 'utf8', timeout: 30_000, env: { ...process.env, EXECUTION_EXECUTOR: 'mock' },
       });
       expect(printed.status).toBe(0);
       expect(printed.stdout).toContain('"calls"');

@@ -20,8 +20,8 @@
  *      整份退化为空表/空声明，事实链静默退化，所有 e2e 照样绿。这里钉住派生非空 +
  *      锚点 flag（--query/--period）在声明里，形状漂移当天就响。
  *
- * mock 铁律：本文件只经 import harness 拿环境（DZ_EXECUTOR=mock 已在其 beforeAll 钉死，
- * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 DZ_/FSHINE_ 开关，绝不
+ * mock 铁律：本文件只经 import harness 拿环境（EXECUTION_EXECUTOR=mock 已在其 beforeAll 钉死，
+ * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 EXECUTION_/FSHINE_ 开关，绝不
  * FSHINE_REAL_COMMIT=1；护栏②的一次 CLI spawn 走 mock 执行器，不开浏览器不触网。
  */
 import { spawnSync } from 'node:child_process';
@@ -79,7 +79,7 @@ describe('harness 保真度绊线', () => {
 
   it('HF-2 平台 CLI 真实输出必须仍长成 withoutPlatformEnvelope 认得的信封（信封格式漂移=剥信封静默失效）', async () => {
     // 与 gatedWorker 同一条激活链：先 evaluateAndActivatePlan 一个最小计划（1 个查询调用
-    // < DZ_PLAN_AUTO_CALLS=2 → execute 档，真 CLI、真账本）拿 planId，再按 execute 分支的
+    // < EXECUTION_PLAN_AUTO_CALLS=2 → execute 档，真 CLI、真账本）拿 planId，再按 execute 分支的
     // 原样 env 真跑一次网关 query。信封形状全平台只有一个出口（src/lib/envelope.js 的
     // emit），钉住一个 operation 的真实输出即钉住整类。
     const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
@@ -95,17 +95,17 @@ describe('harness 保真度绊线', () => {
       calls: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税', '--period', CURRENT_PERIOD] }],
       onNotice: async () => { /* execute 档用不到；notify 档也不为它红，激活链由门禁用例守 */ },
       runCli,
-      activationSecret: process.env['DZ_PLAN_ACTIVATION_SECRET'],
+      activationSecret: process.env['EXECUTION_PLAN_ACTIVATION_SECRET'],
     });
     if (activated.status !== 'active') {
       throw new Error(`最小计划没走到 active（status=${activated.status}）：${activated.message}`);
     }
 
-    // gatedWorker execute 分支的原样 spawn：网关形式 + DZ_PLAN_ID/DZ_REQUIRE_PLAN 绑定。
+    // gatedWorker execute 分支的原样 spawn：网关形式 + EXECUTION_PLAN_ID/EXECUTION_REQUIRE_PLAN 绑定。
     const out = spawnSync(path.join(PLATFORM_ROOT, 'bin', '17dz'),
       ['query', QUERY_RECEIVABLES_SCRIPT, '--query', '幻辰财税', '--period', CURRENT_PERIOD], {
         encoding: 'utf8', timeout: 30_000,
-        env: { ...process.env, DZ_PLAN_ID: activated.planId, DZ_REQUIRE_PLAN: '1' },
+        env: { ...process.env, EXECUTION_PLAN_ID: activated.planId, EXECUTION_REQUIRE_PLAN: '1' },
       });
     // 先把"执行没起来"和"信封变形"分开：GATE_REFUSE/限流/脚本未声明走的是 stderr 文本，
     // 不出 RESULT 行——那不是本护栏要抓的漂移，混在一起会把人引去改正则。

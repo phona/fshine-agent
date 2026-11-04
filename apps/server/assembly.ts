@@ -198,11 +198,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
   // 提案落账都受平台网关与 serve-policy 守卫的矩阵裁决。
-  env.DZ_SERVE = '1';
-  // HMAC 密钥进程内生成：重启使未决 commit 自然失效。DZ_GATE_SECRET 故意不进 env——
+  env.EXECUTION_SERVE = '1';
+  // HMAC 密钥进程内生成：重启使未决 commit 自然失效。EXECUTION_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
   const gateSecret = newGateSecret();
-  const planActivationSecret = env['DZ_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
+  const planActivationSecret = env['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
 
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
   if (isPlatformMock()) {

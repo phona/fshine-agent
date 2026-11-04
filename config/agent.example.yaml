@@ -50,4 +50,4 @@ contextProfiles:
 # businessSkillPath: docs/business-skill.md
 
 # ---- 秘密(WECOM_BOT_ID/WECOM_BOT_SECRET/LLM_*)见 .env.example,放 .env ----
-# ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 DZ_PHONE + ~/.config/17dz/password ----
+# ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 EXECUTION_PHONE + ~/.config/17dz/password ----

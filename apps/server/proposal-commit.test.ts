@@ -5,7 +5,7 @@
  * 不起平台：`runCli` 与协议角色表都是注入点，于是能机械钉住四件事——
  *   · operation 名按 protocol 角色列解析，**表拿不到就拒绝落账**（不回落硬编码网关名）；
  *   · 令牌只绑 {proposalId, expiresAt}（不绑脚本名/业务字段），且只经 env 传给子进程；
- *   · env 纪律：serve 法域 + 剥 DZ_REQUIRE_PLAN（D-081）；
+ *   · env 纪律：serve 法域 + 剥 EXECUTION_REQUIRE_PLAN（D-081）；
  *   · 落账前先取问平台状态，把"已过期/已终结/读不到"在办调之前现形。
  *
  * 真网关 + mock 执行器的全链覆盖在 tests/e2e/turn-loop-write-chain.test.ts。
@@ -93,7 +93,7 @@ function makeRunner(
 const OK_SCRIPT = { status: { stdout: statusJson() }, commit: { stdout: COMMIT_OK } };
 
 afterEach(() => {
-  delete process.env['DZ_REQUIRE_PLAN'];
+  delete process.env['EXECUTION_REQUIRE_PLAN'];
 });
 
 describe('createProposalCommitRunner：operation 寻址（protocol 角色列，不硬编码）', () => {
@@ -135,7 +135,7 @@ describe('createProposalCommitRunner：令牌与 env 纪律', () => {
     await cli.run();
 
     const commit = cli.calls.find((call) => call.args[0] === 'commit')!;
-    const token = commit.env['DZ_COMMIT_TOKEN'];
+    const token = commit.env['EXECUTION_COMMIT_TOKEN'];
     expect(typeof token).toBe('string');
     const [body, signature, extra] = token!.split('.');
     expect(extra).toBeUndefined();
@@ -143,18 +143,18 @@ describe('createProposalCommitRunner：令牌与 env 纪律', () => {
     expect(JSON.parse(Buffer.from(body!, 'base64url').toString('utf8'))).toEqual({ proposalId: PROPOSAL_ID, expiresAt: EXPIRES_AT });
     expect(signature).toBe(createHmac('sha256', SECRET).update(body!).digest('base64url'));
     // 密钥与令牌都只出现在这一个子进程的 env 里
-    expect(commit.env['DZ_GATE_SECRET']).toBe(SECRET);
+    expect(commit.env['EXECUTION_GATE_SECRET']).toBe(SECRET);
   });
 
-  it('D-081：进程带着 DZ_REQUIRE_PLAN=1，宿主直调仍然把它剥掉并显式声明 serve 法域', async () => {
-    process.env['DZ_REQUIRE_PLAN'] = '1';
+  it('D-081：进程带着 EXECUTION_REQUIRE_PLAN=1，宿主直调仍然把它剥掉并显式声明 serve 法域', async () => {
+    process.env['EXECUTION_REQUIRE_PLAN'] = '1';
     const cli = makeRunner(OK_SCRIPT);
 
     await cli.run();
 
     for (const call of cli.calls) {
-      expect(call.env['DZ_REQUIRE_PLAN']).toBeUndefined();
-      expect(call.env['DZ_SERVE']).toBe('1');
+      expect(call.env['EXECUTION_REQUIRE_PLAN']).toBeUndefined();
+      expect(call.env['EXECUTION_SERVE']).toBe('1');
     }
   });
 });

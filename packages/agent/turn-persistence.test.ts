@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ContextStateRecord, ConversationEventRecord, MemoryRecordRecord, TrustedContext } from '@fshine/contracts';
 import type { TurnInputContext } from '@fshine/contracts';
 import type { TurnDriver } from './src/driver';
-import { RUN_17DZ_TASK_TOOL } from './src/context';
+import { RUN_EXECUTION_TASK_TOOL } from './src/context';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
 import { createCurrentUserMessage } from './src/message-reference';
 import { buildRequestKey } from './src/repeat-request';
@@ -130,7 +130,7 @@ function event(eventId: string, kind: ConversationEventRecord['kind'], content: 
 describe('extract17dzToolResultEvents：三种工具结果路径', () => {
   it('terminate 路径（run_17dz_task 的信封）：取 text 字段并收回 taskId', () => {
     const { events, taskResults } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_1', JSON.stringify({ taskId: 'task_a1', text: '余额 42 元' })),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_1', JSON.stringify({ taskId: 'task_a1', text: '余额 42 元' })),
     ], ctx());
 
     expect(events).toHaveLength(1);
@@ -188,7 +188,7 @@ describe('extract17dzToolResultEvents：三种工具结果路径', () => {
 
   it('非 JSON 的自然语言结果照常落库（不需要信封）', () => {
     const { events, taskResults } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_5', '一句普通文本结果'),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_5', '一句普通文本结果'),
     ], ctx());
 
     expect(events[0]?.content).toBe('一句普通文本结果');
@@ -197,7 +197,7 @@ describe('extract17dzToolResultEvents：三种工具结果路径', () => {
 
   it('content 段数组只取 type=text 的正文，其余段忽略', () => {
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_6', [
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_6', [
         { type: 'text', text: '第一段' },
         { type: 'image', url: 'x' },
         { type: 'text', text: '第二段' },
@@ -211,7 +211,7 @@ describe('extract17dzToolResultEvents：三种工具结果路径', () => {
 describe('extract17dzToolResultEvents：脱敏、截断与 id 组成', () => {
   it('内部 task_/plan_ id 换成占位符（内容里一个不留）', () => {
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_7', JSON.stringify({
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_7', JSON.stringify({
         taskId: 'task_9f8e7d6c',
         text: '计划 plan_abc123 的第一步 task_9f8e7d6c 已开始',
       })),
@@ -226,7 +226,7 @@ describe('extract17dzToolResultEvents：脱敏、截断与 id 组成', () => {
 
   it('Bearer 令牌与 api_key 之类的键值被脱敏', () => {
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_8', 'Authorization: Bearer sk-live-abcdef\napi_key: "topsecret"'),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_8', 'Authorization: Bearer sk-live-abcdef\napi_key: "topsecret"'),
     ], ctx());
 
     expect(events[0]?.content).toContain('Bearer [REDACTED]');
@@ -238,7 +238,7 @@ describe('extract17dzToolResultEvents：脱敏、截断与 id 组成', () => {
   it('内容截断到 20000 字符（截断在脱敏之后）', () => {
     const long = 'x'.repeat(20_050);
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_9', JSON.stringify({ taskId: 'task_t', text: long })),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_9', JSON.stringify({ taskId: 'task_t', text: long })),
     ], ctx());
 
     expect(events[0]?.content).toHaveLength(20_000);
@@ -246,8 +246,8 @@ describe('extract17dzToolResultEvents：脱敏、截断与 id 组成', () => {
 
   it('toolCallId 缺失时 eventId 退回消息下标', () => {
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, undefined, '第一条'),
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_named', '第二条'),
+      toolResult(RUN_EXECUTION_TASK_TOOL, undefined, '第一条'),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_named', '第二条'),
     ], ctx());
 
     expect(events.map((entry) => entry.eventId)).toEqual(['req_tp:tool:0', 'req_tp:tool:call_named']);
@@ -255,20 +255,20 @@ describe('extract17dzToolResultEvents：脱敏、截断与 id 组成', () => {
 
   it('createdAt 取消息自带的时间戳（数字），缺失时用当前时间', () => {
     const stamped = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_ts', '带时间戳', 1_700_000_000_000),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_ts', '带时间戳', 1_700_000_000_000),
     ], ctx());
     expect(stamped.events[0]?.createdAt).toBe(new Date(1_700_000_000_000).toISOString());
 
     const before = Date.now();
     const unstamped = extract17dzToolResultEvents([
-      { role: 'toolResult', toolName: RUN_17DZ_TASK_TOOL, content: [{ type: 'text', text: '无时间戳' }] } as unknown as AgentMessage,
+      { role: 'toolResult', toolName: RUN_EXECUTION_TASK_TOOL, content: [{ type: 'text', text: '无时间戳' }] } as unknown as AgentMessage,
     ], ctx());
     expect(Date.parse(unstamped.events[0]?.createdAt ?? '')).toBeGreaterThanOrEqual(before);
   });
 
   it('脱敏后为空的工具结果不落事件', () => {
     const { events } = extract17dzToolResultEvents([
-      toolResult(RUN_17DZ_TASK_TOOL, 'call_empty', '   \n  '),
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_empty', '   \n  '),
     ], ctx());
 
     expect(events).toEqual([]);

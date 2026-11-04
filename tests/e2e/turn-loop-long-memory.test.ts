@@ -74,9 +74,9 @@ function scriptedMemoryExtractor(
     });
 }
 
-/** 平台调用审计（DZ_AUDIT_PATH，逐行 JSON）：用例内读本用例自己的审计文件。 */
+/** 平台调用审计（EXECUTION_AUDIT_PATH，逐行 JSON）：用例内读本用例自己的审计文件。 */
 function auditLines(): string[] {
-  const file = process.env['DZ_AUDIT_PATH'];
+  const file = process.env['EXECUTION_AUDIT_PATH'];
   if (!file || !existsSync(file)) return [];
   return readFileSync(file, 'utf8').split('\n').filter((line) => line.trim().length > 0);
 }

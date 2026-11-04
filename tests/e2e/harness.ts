@@ -3,13 +3,13 @@
  *
  * 与手工企微测试的差别只有两处是假的：
  *   - 模型（Main Agent 与 17dz 子 Agent 都用脚本化驱动回放）
- *   - 平台执行器（DZ_EXECUTOR=mock 的应答器，不开浏览器不触网）
+ *   - 平台执行器（EXECUTION_EXECUTOR=mock 的应答器，不开浏览器不触网）
  * 其余全是生产代码：企微适配器的 stream/节流/notice 语义、createMessageHandler、
  * createTaxAgentRuntime 的回合契约与出口校验、ContextTaskRunner、计划门禁，
  * 以及真 spawn 的 bin/17dz（plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定）。
  *
  * 子 Agent 替身不复刻模型行为，但复刻它的门禁行为：提交计划走真实的
- * evaluateAndActivatePlan，执行走真实的 operation run + DZ_PLAN_ID 绑定。
+ * evaluateAndActivatePlan，执行走真实的 operation run + EXECUTION_PLAN_ID 绑定。
  *
  * 并行安全：每个导入本模块的测试文件各得一份模块实例（独立 stateDir 与 counter），
  * 文件内每个用例再按编号分到独立的平台状态文件；vitest 线程池给每个文件独立的
@@ -34,7 +34,7 @@ import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf,
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
-const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
 const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
 
 let stateDir: string;
@@ -65,20 +65,20 @@ if (operationSemantics.size === 0) {
 }
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
-const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE'] as const;
+const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 beforeEach(() => {
   platformStateBackup = Object.fromEntries(PLATFORM_STATE_KEYS.map((key) => [key, process.env[key]]));
   counter += 1;
   Object.assign(process.env, {
-    DZ_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
-    DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
-    DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
-    DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    EXECUTION_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
+    EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
+    EXECUTION_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
+    EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
     // 提案状态库（A 波新增，B 波网关提案路径的落点）：同样每用例独一份，否则一个用例建的
     // 提案会漏到下一个用例的读回/提交里。
-    DZ_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
+    EXECUTION_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
   });
 });
 
@@ -101,8 +101,8 @@ afterEach(() => {
  */
 export function neutralizePlanGateNonCallLines(): () => void {
   const keys = [
-    'DZ_PLAN_AUTO_WEIGHT', 'DZ_PLAN_NOTIFY_WEIGHT', 'DZ_PLAN_BUDGET_WEIGHT', 'DZ_PLAN_HARD_WEIGHT',
-    'DZ_PLAN_AUTO_SECONDS', 'DZ_PLAN_NOTIFY_SECONDS', 'DZ_PLAN_CONFIRM_SECONDS', 'DZ_PLAN_HARD_SECONDS',
+    'EXECUTION_PLAN_AUTO_WEIGHT', 'EXECUTION_PLAN_NOTIFY_WEIGHT', 'EXECUTION_PLAN_BUDGET_WEIGHT', 'EXECUTION_PLAN_HARD_WEIGHT',
+    'EXECUTION_PLAN_AUTO_SECONDS', 'EXECUTION_PLAN_NOTIFY_SECONDS', 'EXECUTION_PLAN_CONFIRM_SECONDS', 'EXECUTION_PLAN_HARD_SECONDS',
   ] as const;
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
   Object.assign(process.env, Object.fromEntries(keys.map((key) => [key, '1000000'])));
@@ -116,27 +116,27 @@ export function neutralizePlanGateNonCallLines(): () => void {
 }
 
 beforeAll(() => {
-  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 DZ_PLATFORM_ROOT 指向 17dz-platform）`);
+  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向 17dz-platform）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {
-    DZ_SERVE: '1',
-    DZ_EXECUTOR: 'mock',
-    DZ_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
-    DZ_PLAN_STATE: path.join(stateDir, 'plans.json'),
-    DZ_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
-    DZ_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
-    DZ_REQUIRE_PLAN: '1',
-    DZ_PLAN_ACTIVATION_SECRET: 'turn-loop-test-secret',
-    DZ_PLAN_AUTO_CALLS: '2',
-    DZ_PLAN_NOTIFY_CALLS: '10',
-    DZ_PLAN_CONFIRM_CALLS: '20',
-    DZ_PLAN_HARD_CALLS: '50',
-    DZ_PLAN_MAX_NOTIFY: '2',
-    DZ_PLAN_MAX_REPLANS: '6',
+    EXECUTION_SERVE: '1',
+    EXECUTION_EXECUTOR: 'mock',
+    EXECUTION_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
+    EXECUTION_PLAN_STATE: path.join(stateDir, 'plans.json'),
+    EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
+    EXECUTION_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
+    EXECUTION_REQUIRE_PLAN: '1',
+    EXECUTION_PLAN_ACTIVATION_SECRET: 'turn-loop-test-secret',
+    EXECUTION_PLAN_AUTO_CALLS: '2',
+    EXECUTION_PLAN_NOTIFY_CALLS: '10',
+    EXECUTION_PLAN_CONFIRM_CALLS: '20',
+    EXECUTION_PLAN_HARD_CALLS: '50',
+    EXECUTION_PLAN_MAX_NOTIFY: '2',
+    EXECUTION_PLAN_MAX_REPLANS: '6',
     // 网关限流有 17dz 自己的专项测试；这里放宽 burst，避免 9 期查询被限流挡住，
     // 从而测不到"通知先于执行"这条主线。
-    DZ_RATE_LIMIT: JSON.stringify({ read: { burst: 60, perMs: 0 }, global: { burst: 120, perMs: 0 } }),
+    EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 60, perMs: 0 }, global: { burst: 120, perMs: 0 } }),
     // 离线环境不发真实模型请求；脚本化驱动覆盖了 Main Agent 与子 Agent。
     LLM_API_BASE_URL: 'http://127.0.0.1:9',
     LLM_API_KEY: 'unused-in-offline-harness',
@@ -334,7 +334,7 @@ export type WorkerStep =
 
 /**
  * 17dz 子 Agent 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
- * 计划激活后按 calls 真跑 operation run（mock executor、真 DZ_PLAN_ID 绑定）。
+ * 计划激活后按 calls 真跑 operation run（mock executor、真 EXECUTION_PLAN_ID 绑定）。
  *
  * `enforceEntityScope`（显式开启）：复刻真实驱动的实体门禁——计划参数必须逐字来自宿主
  * 注入的实体来源 + 本任务平台响应，越权即确定性拒绝（PLAN DECLINED → needs）。默认关闭：
@@ -505,7 +505,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
             if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
             const out = spawnSync(CLI, ['query', script, ...call.args.map(String)], {
               encoding: 'utf8', timeout: 30_000,
-              env: { ...process.env, DZ_PLAN_ID: active.planId, DZ_REQUIRE_PLAN: '1' },
+              env: { ...process.env, EXECUTION_PLAN_ID: active.planId, EXECUTION_REQUIRE_PLAN: '1' },
             });
             if (proof) proof = { ...proof, calls: proof.calls + 1 };
             const body = (out.stdout ?? '').trim() || (out.stderr ?? '').trim();
@@ -556,7 +556,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           calls: current.plan,
           onNotice: input.onNotice,
           runCli,
-          activationSecret: process.env['DZ_PLAN_ACTIVATION_SECRET'],
+          activationSecret: process.env['EXECUTION_PLAN_ACTIVATION_SECRET'],
         });
         if (plan.status === 'confirm') {
           // 计划停在用户确认门：把 pending 上报宿主，由宿主持久化并等真实回复。
@@ -583,12 +583,12 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         proof = { planId: plan.planId, version: plan.version, calls: 0 };
         for (const call of current.plan) {
           // 与真实 worker 一致：bash 只允许 bin/17dz，且必须走网关形式——
-          // serve 法域的 DZ_INVOCATION 由网关铸造，直调 operation run 会被拒。
+          // serve 法域的 EXECUTION_INVOCATION 由网关铸造，直调 operation run 会被拒。
           const script = SCRIPTS[call.operation];
           if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
           const out = spawnSync(CLI, ['query', script, ...call.args.map(String)], {
             encoding: 'utf8', timeout: 30_000,
-            env: { ...process.env, DZ_PLAN_ID: plan.planId, DZ_REQUIRE_PLAN: '1' },
+            env: { ...process.env, EXECUTION_PLAN_ID: plan.planId, EXECUTION_REQUIRE_PLAN: '1' },
           });
           const body = (out.stdout ?? '').trim() || (out.stderr ?? '').trim();
           platformOutputs.push(body);
@@ -742,11 +742,11 @@ async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
   if (options.workerDispatchMode) bootEnv['FSHINE_WORKER_DISPATCH_MODE'] = options.workerDispatchMode;
-  // 隔离运行（DZ_PLATFORM_ROOT）：开发仓的 17dz-platform 常被并行任务动到半途（未登记
+  // 隔离运行（FSHINE_PLATFORM_ROOT）：开发仓的 17dz-platform 常被并行任务动到半途（未登记
   // 的孤儿脚本会让 operations lint 红掉、boot 拒起）。指向干净快照时把 config 的
   // profiles['17dz'].root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
   // e2e 与开发仓的进行中改动互不拖累。缺省（未设该变量）行为一字不变。
-  const isolatedRoot = (bootEnv['DZ_PLATFORM_ROOT'] ?? '').trim();
+  const isolatedRoot = (bootEnv['FSHINE_PLATFORM_ROOT'] ?? '').trim();
   if (options.patchProfile || isolatedRoot !== '') {
     const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
     const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
@@ -898,7 +898,7 @@ async function boot(options: BootOptions): Promise<Boot> {
 }
 
 function ledger(): { tasks?: Record<string, { actual?: { calls?: number } }> } {
-  const file = process.env['DZ_PLAN_STATE'];
+  const file = process.env['EXECUTION_PLAN_STATE'];
   if (!file || !existsSync(file)) return {};
   try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return {}; }
 }

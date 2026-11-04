@@ -23,7 +23,7 @@ const ALIAS = [
 ] as const;
 
 const SHARED = {
-  // 出向密封：每个测试文件前 unset 运行者环境泄漏的 LLM_*/DZ_EXECUTOR/FSHINE_REAL_COMMIT，
+  // 出向密封：每个测试文件前 unset 运行者环境泄漏的 LLM_*/EXECUTION_EXECUTOR/FSHINE_REAL_COMMIT，
   // 使 `npm test` 在任意 shell 环境下确定性一致（治本，不依赖手工 env -u）。
   setupFiles: ['tests/vitest.setup.ts'],
   environment: 'node' as const,

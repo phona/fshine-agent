@@ -51,9 +51,9 @@ import {
 /** 越权账套：mock 种子（fixtures/seed.json）里没有这个名字，也不出现在任何合法来源里。 */
 const OUT_OF_SCOPE = '宏盛财税';
 
-/** 平台调用审计（DZ_AUDIT_PATH jsonl，网关逐次落账含 args）。 */
+/** 平台调用审计（EXECUTION_AUDIT_PATH jsonl，网关逐次落账含 args）。 */
 function auditText(): string {
-  const file = process.env['DZ_AUDIT_PATH'];
+  const file = process.env['EXECUTION_AUDIT_PATH'];
   return file && existsSync(file) ? readFileSync(file, 'utf8') : '';
 }
 

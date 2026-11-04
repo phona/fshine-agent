@@ -22,8 +22,8 @@
  * （新增即红，收敛直接通过）。模式定义、三轮收窄过程与白名单理由见文件底部
  * LITERAL_IF_* 常量块。
  *
- * 第四条预算（D-017）：FSHINE_* 命名空间登记锁——治理六名已由第一条预算禁绝，
- * 剩下三个"有意保留"的 FSHINE_* 名字必须显式登记（挂标签 + 理由），未登记的新名字
+ * 第四条预算（D-017）：FSHINE_* 命名空间登记锁——执行层治理接口已收敛到
+ * EXECUTION_*，剩下宿主自用的 FSHINE_* 名字必须显式登记（挂标签 + 理由），未登记的新名字
  * 即红。命名空间从此只有两种状态：禁绝或已登记，没有"没决定"。
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -47,7 +47,7 @@ const FORBIDDEN: Array<{ label: string; pattern: RegExp }> = [
   { label: '平台脚本目录路径', pattern: /src\/(voucher|finance|payroll)\/scripts/ },
   { label: '平台内部清单文件', pattern: /operations\.json/ },
   { label: '已废弃入口 serve.sh', pattern: /serve\.sh/ },
-  { label: '旧消费者命名（E4 后应全量 DZ_*）', pattern: /FSHINE_(MODE|INVOCATION|COMMIT_TOKEN|GATE_SECRET|EXECUTOR|MOCK_STATE)/ },
+  { label: '旧消费者命名（E4 后应全量 EXECUTION_*）', pattern: /FSHINE_(MODE|INVOCATION|COMMIT_TOKEN|GATE_SECRET|EXECUTOR|MOCK_STATE)/ },
 ];
 function* walk(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
@@ -114,9 +114,9 @@ describe('平台泄漏预算 lint', () => {
     }
     const unregistered = [...found].filter((name) => !FSHINE_NAME_REGISTRY.has(name)).sort();
     expect(unregistered, [
-      '出现了未登记的 FSHINE_* 名字（E4 命名统一后只允许两种状态：禁绝或已登记）：',
+      '出现了未登记的 FSHINE_* 名字（只允许两种状态：禁绝或已登记）：',
       ...unregistered,
-      '新名字 → 统一改 DZ_*；确有必要保留 → 在 FSHINE_NAME_REGISTRY 登记并挂四标签之一 + 理由。',
+      '新名字 → 按归属定前缀：执行层接口用 EXECUTION_*，宿主自用用 FSHINE_* 并在 FSHINE_NAME_REGISTRY 登记并挂四标签之一 + 理由。',
     ].join('\n')).toEqual([]);
     // 登记项必须挂标签（与业务词预算同纪律：没有标签的命中既不许默默保留也不许当违例删）
     for (const [name, entry] of FSHINE_NAME_REGISTRY) {
@@ -240,24 +240,24 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
 ];
 
 /**
- * FSHINE_* 名字登记表（D-017：E4 治理六名已禁绝，剩余宿主运行参数显式登记）。
+ * FSHINE_* 名字登记表（D-017：执行层治理接口已收敛到 EXECUTION_*，剩余宿主运行参数显式登记）。
  *
- * 为什么不是统统禁绝：这三个不是治理接口（那六名已收敛到 DZ_*），而是宿主自己的安全
- * 开关/运行参数——改名要联动 17dz 侧读取端与部署文档，且 FSHINE_REAL_COMMIT 是真写
- * 放行总闸（比治理接口更危险），在双仓协同改名落地前"已登记"优于"没决定"。
- * 每条挂且仅挂一类标签 + 限期；17dz 侧 dz-env 退役（D-016）后复审判定是跟进 DZ_* 还是续期。
+ * 为什么不是统统禁绝：这些不是执行层治理接口，而是宿主自己的安全
+ * 开关/运行参数——按新命名规则，宿主自用参数保留 FSHINE_* 前缀，不跟进 EXECUTION_*；
+ * 其中 FSHINE_REAL_COMMIT 是真写放行总闸（比治理接口更危险），须显式登记。
+ * 每条挂且仅挂一类标签；宿主自用参数一律保留 FSHINE_*，不改 EXECUTION_*。
  */
 const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }> = new Map([
-  ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：17dz 侧 LEAKY_EXACT 已预留 DZ_REAL_COMMIT，双仓协同改名属 D-016 退役批次；此前面向生产的"显式声明"语义不变' }],
-  ['FSHINE_PI_AGENT_DIR', { tag: '遗留待清', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；随 DZ_* 统一批次改名' }],
-  ['FSHINE_PLATFORM_CONCURRENCY', { tag: '遗留待清', reason: '委派并发闸（context.ts，默认 1）：.env.example 已文档化，改 DZ_* 需同步部署文档；随 DZ_* 统一批次改名' }],
-  ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '遗留待清', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
-  ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '遗留待清', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化，随 DZ_* 统一批次改名' }],
-  ['FSHINE_ATTACHMENT_DIR', { tag: '遗留待清', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 DZ_*（那是平台命名空间，会把"宿主把用户文件存哪"误记成平台协议）；.env.example 已文档化，随 DZ_* 统一批次改名' }],
-  ['FSHINE_WORKER_DISPATCH_MODE', { tag: '警职执法', reason: 'fshine 部署选择新委派 inline/background 的宿主交互模式开关（默认 inline）：这是通用 runtime 调度策略，不是 17dz 执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
-  ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主排队容量上限：这是通用平台资源保护参数，不是 17dz 业务规则或执行层协议，保留 fshine 命名空间，不改 DZ_*' }],
-  ['FSHINE_WORKER_STEP_CAP', { tag: '警职执法', reason: '自由 worker 每回合放行调用步数上限（Phase 2，pi-coding-driver.ts，缺省 50）：这是通用 worker 生命周期调度参数，不是执行层协议也不是业务规则，保留 fshine 命名空间，不改 DZ_*' }],
-  ['FSHINE_SHUTDOWN_DRAIN_MS', { tag: '警职执法', reason: '宿主停机排干上限（apps/server：main.ts 经 shutdownDrainMsOf 读入并传给 backgroundTasks.shutdown({drainMs})，缺省/非法回退 30000ms）：宿主停机参数，非执行层协议——排干的是 fshine 自己的后台任务与终态事件投递，与 17dz 无关，保留 fshine 命名空间，不改 DZ_*' }],
+  ['FSHINE_REAL_COMMIT', { tag: '警职执法', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：宿主自用，不改 EXECUTION_*；17dz 侧 LEAKY_EXACT 仅作泄漏剥离（EXECUTION_REAL_COMMIT），不读取；此前面向生产的"显式声明"语义不变' }],
+  ['FSHINE_PI_AGENT_DIR', { tag: '警职执法', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
+  ['FSHINE_PLATFORM_CONCURRENCY', { tag: '警职执法', reason: '委派并发闸（context.ts，默认 1）：宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
+  ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '警职执法', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
+  ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '警职执法', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
+  ['FSHINE_ATTACHMENT_DIR', { tag: '警职执法', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——17dz 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 EXECUTION_*（那是执行层命名空间，会把"宿主把用户文件存哪"误记成执行层协议）；.env.example 已文档化；按新命名规则保留 FSHINE_*' }],
+  ['FSHINE_WORKER_DISPATCH_MODE', { tag: '警职执法', reason: 'fshine 部署选择新委派 inline/background 的宿主交互模式开关（默认 inline）：这是通用 runtime 调度策略，不是 17dz 执行层协议，保留 fshine 命名空间，不改 EXECUTION_*' }],
+  ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主排队容量上限：这是通用平台资源保护参数，不是 17dz 业务规则或执行层协议，保留 fshine 命名空间，不改 EXECUTION_*' }],
+  ['FSHINE_WORKER_STEP_CAP', { tag: '警职执法', reason: '自由 worker 每回合放行调用步数上限（Phase 2，pi-coding-driver.ts，缺省 50）：这是通用 worker 生命周期调度参数，不是执行层协议也不是业务规则，保留 fshine 命名空间，不改 EXECUTION_*' }],
+  ['FSHINE_SHUTDOWN_DRAIN_MS', { tag: '警职执法', reason: '宿主停机排干上限（apps/server：main.ts 经 shutdownDrainMsOf 读入并传给 backgroundTasks.shutdown({drainMs})，缺省/非法回退 30000ms）：宿主停机参数，非执行层协议——排干的是 fshine 自己的后台任务与终态事件投递，与 17dz 无关，保留 fshine 命名空间，不改 EXECUTION_*' }],
   // 方案 1 · B 波曾登记的两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）
   // 已随 C 波后只剩一种行为而退役，登记项一并删除——本表只减不增；那两个名字若在
   // packages/apps/scripts 里复活（含注释），下面"未登记即红"会当场抓住。
@@ -333,7 +333,7 @@ function isSpecificInputLiteral(literal: string, isCaseClause: boolean): boolean
  * 协议常量白名单（全局豁免，分组注释理由）。
  *
  * 用户点名的 `=== 'mock'`（platform-mock.ts 执行器开关值）、serve-gate.ts 的
- * `=== 'bash'` / `=== 'operation'` / `=== 'run'`（CLI 子命令与工具名）、dz-env 类
+ * `=== 'bash'` / `=== 'operation'` / `=== 'run'`（CLI 子命令与工具名）、execution-env 类
  * env 值比较（'1'）都在本表内。收窄后的模式下它们本就不命中（短/标识符形 token
  * 预设为协议常量）——仍显式登记：既是双保险（模式若再放宽不会一夜爆红），
  * 也是"为什么合法"的文档：这些值不是模型可能吐出的内容，而是 fshine 自己契约 /

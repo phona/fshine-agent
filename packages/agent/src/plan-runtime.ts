@@ -218,14 +218,14 @@ export async function activatePendingPlan(options: {
   gateway?: string;
 }): Promise<unknown> {
   const secret = options.activationSecret;
-  if (!secret) throw new Error('缺少宿主计划激活密钥 DZ_PLAN_ACTIVATION_SECRET。');
+  if (!secret) throw new Error('缺少宿主计划激活密钥 EXECUTION_PLAN_ACTIVATION_SECRET。');
   const expires = (options.now ?? Date.now()) + 60_000;
   const token = createActivationToken(options.planId, options.evidence, expires, secret);
   return runJson((options.runCli ?? defaultCliRunner), {
     platformRoot: options.platformRoot,
     args: ['plan', 'activate', '--stdin'],
     input: JSON.stringify({ planId: options.planId, evidence: options.evidence, token }),
-    env: { ...options.env, DZ_PLAN_ACTIVATION_SECRET: secret },
+    env: { ...options.env, EXECUTION_PLAN_ACTIVATION_SECRET: secret },
     ...(options.gateway ? { gateway: options.gateway } : {}),
   });
 }
@@ -373,10 +373,10 @@ export function planWriteClosed(
 /** Build the per-command environment for a worker bash subprocess. */
 export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePlanId: string | null): NodeJS.ProcessEnv {
   const env = { ...inherited };
-  delete env.DZ_PLAN_ACTIVATION_SECRET;
-  delete env.DZ_PLAN_ID;
-  env.DZ_REQUIRE_PLAN = '1';
-  if (activePlanId) env.DZ_PLAN_ID = activePlanId;
+  delete env.EXECUTION_PLAN_ACTIVATION_SECRET;
+  delete env.EXECUTION_PLAN_ID;
+  env.EXECUTION_REQUIRE_PLAN = '1';
+  if (activePlanId) env.EXECUTION_PLAN_ID = activePlanId;
   return env;
 }
 

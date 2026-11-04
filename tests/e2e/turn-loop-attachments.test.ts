@@ -19,7 +19,7 @@
  *   ④ 突发形态（2026-10-19）：几个文件 + 一条指令连发时，文件消息一个气泡都不开，收据
  *      只由指令回合带一次（实测 3 文件 + 1 指令曾出现 4 条气泡且互相穿插）。
  *
- * 纪律：DZ_EXECUTOR=mock 由 harness 钉死；本文件只新增用例，不改 harness 与既有文件。
+ * 纪律：EXECUTION_EXECUTOR=mock 由 harness 钉死；本文件只新增用例，不改 harness 与既有文件。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -126,9 +126,9 @@ describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
     // mock 账套按"名字包含查询词"命中：查询词是整条附件路径，得种一份名字含它的账套，
     // 否则 ACCOUNT_SET_NOT_FOUND（选择类澄清码）会让宿主组装澄清问题接管终稿，交付链的
     // "执行结果上屏"就验不到。种 mock 状态文件是它的正常用法（重置/预置 = 写这个文件），
-    // 执行器仍是 mock，DZ_EXECUTOR 没动。
-    const statePath = process.env['DZ_MOCK_STATE'];
-    if (!statePath) throw new Error('harness 未设置 DZ_MOCK_STATE');
+    // 执行器仍是 mock，EXECUTION_EXECUTOR 没动。
+    const statePath = process.env['EXECUTION_MOCK_STATE'];
+    if (!statePath) throw new Error('harness 未设置 EXECUTION_MOCK_STATE');
     const seed = JSON.parse(
       readFileSync(path.join(PLATFORM_ROOT, 'src', 'execution', 'mocks', 'fixtures', 'seed.json'), 'utf8'),
     ) as { accountSets: Record<string, unknown> };

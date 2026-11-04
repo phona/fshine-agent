@@ -13,7 +13,7 @@
  *   ② **令牌只绑提案与有效期**：HMAC-SHA256 over `{proposalId, expiresAt}`，不绑脚本名、
  *      不绑任何业务字段。密钥进程内生成（`@fshine/agent` 的 newGateSecret，C 波起与
  *      hostGatewayEnv 同住 context.ts），仅经 env 传给这一个子进程，不进 worker env（W7）。
- *   ③ **env 显式剥 `DZ_REQUIRE_PLAN`**（D-081）：宿主直调是"服务端替 worker 办一件事"，
+ *   ③ **env 显式剥 `EXECUTION_REQUIRE_PLAN`**（D-081）：宿主直调是"服务端替 worker 办一件事"，
  *      不该被 worker 的计划门拦——那把尺与提案创建路径同一份（hostGatewayEnv）。
  *   ④ **用户可见文本只有两个来源**：平台 `summaryText` 原样 + 宿主通用状态行。本文件不拼
  *      任何业务摘要，只把平台信封的字段搬进 `ProposalCommitResult`。
@@ -199,12 +199,12 @@ export function createProposalCommitRunner(
       };
     }
 
-    // ③ 令牌 + serve 法域直调（env 只多带密钥与令牌，且剥 DZ_REQUIRE_PLAN——D-081）。
+    // ③ 令牌 + serve 法域直调（env 只多带密钥与令牌，且剥 EXECUTION_REQUIRE_PLAN——D-081）。
     const token = signProposalToken(proposalId, status.expiresAt, options.gateSecret);
     const result = await runCli({
       platformRoot: options.platformRoot,
       args: ['commit', operation, '--proposal-id', proposalId],
-      env: { ...hostGatewayEnv(), DZ_GATE_SECRET: options.gateSecret, DZ_COMMIT_TOKEN: token },
+      env: { ...hostGatewayEnv(), EXECUTION_GATE_SECRET: options.gateSecret, EXECUTION_COMMIT_TOKEN: token },
     });
 
     // ④ 只认 RESULT 信封：成败由平台说（ok / verified / summaryText 全是信封字段）。

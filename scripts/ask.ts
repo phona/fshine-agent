@@ -50,7 +50,7 @@ async function main(): Promise<void> {
     console.error('用法：npm run ask -- "要问的问题"');
     process.exit(2);
   }
-  process.env.DZ_SERVE = '1'; // 平台 serve 法域
+  process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   const gateSecret = newGateSecret();
   const config = loadConfig({ env: process.env, yamlPath: process.env['AGENT_CONFIG_PATH'] || undefined });
   const platformRoot = config.contextProfiles['17dz']?.root;

@@ -29,7 +29,7 @@ import { messageFor, planDraftExample } from './src/error-codes';
 import { parsePlanCallsCommand } from './src/plan-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', '17dz-platform');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', '17dz-platform');
 
 /**
  * 平台计划草案 schema。

@@ -94,10 +94,10 @@ describe('platform-backed execution plan runtime', () => {
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
-    expect(createPlanScopedWorkerEnv({ DZ_PLAN_ACTIVATION_SECRET: 'secret', DZ_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
-      .toEqual({ DZ_REQUIRE_PLAN: '1', DZ_PLAN_ID: 'plan_host', OTHER: 'ok' });
-    expect(createPlanScopedWorkerEnv({ DZ_PLAN_ACTIVATION_SECRET: 'secret' }, null))
-      .toEqual({ DZ_REQUIRE_PLAN: '1' });
+    expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret', EXECUTION_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
+      .toEqual({ EXECUTION_REQUIRE_PLAN: '1', EXECUTION_PLAN_ID: 'plan_host', OTHER: 'ok' });
+    expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret' }, null))
+      .toEqual({ EXECUTION_REQUIRE_PLAN: '1' });
   });
 
   it('restores only the host-selected active plan when resuming a task', async () => {
@@ -152,7 +152,7 @@ describe('platform-backed execution plan runtime', () => {
     expect(JSON.parse(requests[0]!.input!)).toEqual({ requestId: 'request_9', calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }] });
     expect(requests[1]!.args).toEqual(['plan', 'activate', '--stdin']);
     expect(requests[1]!.input).toMatch(/"evidence":"notification-delivered"/);
-    expect(requests[1]!.env?.DZ_PLAN_ACTIVATION_SECRET).toBe('test-host-secret');
+    expect(requests[1]!.env?.EXECUTION_PLAN_ACTIVATION_SECRET).toBe('test-host-secret');
     expect(requests[1]!.args.join(' ')).not.toContain('test-host-secret');
   });
 

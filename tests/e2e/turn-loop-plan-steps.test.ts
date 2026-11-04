@@ -29,10 +29,10 @@ import {
  * 这里把同一任务的 notify 上限放宽（平台侧默认 2），否则第 3 步会被升级成"必须等用户
  * 确认"——那是单步试探收口的规则，不是长任务拆解该有的形状。
  */
-beforeAll(() => { process.env['DZ_PLAN_MAX_NOTIFY'] = '6'; });
-afterAll(() => { delete process.env['DZ_PLAN_MAX_NOTIFY']; });
+beforeAll(() => { process.env['EXECUTION_PLAN_MAX_NOTIFY'] = '6'; });
+afterAll(() => { delete process.env['EXECUTION_PLAN_MAX_NOTIFY']; });
 
-/** 三个期间的查询计划：3 次调用，越过 harness 的 DZ_PLAN_AUTO_CALLS=2 触发通知。 */
+/** 三个期间的查询计划：3 次调用，越过 harness 的 EXECUTION_PLAN_AUTO_CALLS=2 触发通知。 */
 function threePeriodPlan(account: string): PlanCall[] {
   return [1, 2, 3].map((month) => ({ operation: 'finance.query-receivables', args: ['--query', account, '--period', `20260${month}`] }));
 }

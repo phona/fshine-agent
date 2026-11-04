@@ -50,7 +50,7 @@ import {
   type PlatformExecutionLease,
 } from './platform-execution-gate';
 
-export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
+export const RUN_EXECUTION_TASK_TOOL = 'run_17dz_task';
 
 /**
  * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
@@ -77,7 +77,7 @@ export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
  */
 export const DELEGATION_MODEL_TRANSIENT_FAILURE = messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE');
 
-export const RUN_17DZ_TASK_DESCRIPTION = [
+export const RUN_EXECUTION_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
   '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
   '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
@@ -393,7 +393,7 @@ export interface ConfirmationReply {
   outcome: ConfirmationOutcome;
 }
 
-export const RUN_17DZ_TASK_SCHEMA: Record<string, unknown> = {
+export const RUN_EXECUTION_TASK_SCHEMA: Record<string, unknown> = {
   type: 'object',
   required: ['request'],
   additionalProperties: false,
@@ -456,7 +456,7 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
 const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
 
 /**
- * 宿主直调平台网关的环境（serve 法域）：**显式剥 `DZ_REQUIRE_PLAN`**、显式声明 `DZ_SERVE`。
+ * 宿主直调平台网关的环境（serve 法域）：**显式剥 `EXECUTION_REQUIRE_PLAN`**、显式声明 `EXECUTION_SERVE`。
  *
  * 修 D-081：那个 mandate 是给 worker 的 bash 子进程的（每个 worker 命令都带它，见
  * createPlanScopedWorkerEnv），服务进程自己并不带。宿主直调是"服务端替 worker 办一件事"，
@@ -468,8 +468,8 @@ const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
  */
 export function hostGatewayEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.DZ_REQUIRE_PLAN;
-  env.DZ_SERVE = '1';
+  delete env.EXECUTION_REQUIRE_PLAN;
+  env.EXECUTION_SERVE = '1';
   return env;
 }
 
@@ -692,9 +692,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
   const tool: DiscoveredTool = {
-    name: RUN_17DZ_TASK_TOOL,
-    description: RUN_17DZ_TASK_DESCRIPTION,
-    inputSchema: RUN_17DZ_TASK_SCHEMA,
+    name: RUN_EXECUTION_TASK_TOOL,
+    description: RUN_EXECUTION_TASK_DESCRIPTION,
+    inputSchema: RUN_EXECUTION_TASK_SCHEMA,
   };
 
   /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
@@ -765,7 +765,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const text = messageTextFor('WRITE_NOT_ENABLED');
       return { status: 'write_closed', userText: text, workerText: text };
     }
-    // ② 办调平台（serve 法域；env 显式剥 DZ_REQUIRE_PLAN——修 D-081：宿主直调不该被
+    // ② 办调平台（serve 法域；env 显式剥 EXECUTION_REQUIRE_PLAN——修 D-081：宿主直调不该被
     // worker 的计划门拦，那个 mandate 是给 worker 子进程的）。operation 名来自驱动拦截时
     // 从命令里取到的目标 token（平台 protocol 列已声明它扮演创建提案角色），宿主不另持
     // 一份业务 operation 名单。
@@ -914,7 +914,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * （⑧）：读的是**此刻**的部署声明（isCommitEnabled 派生位），不是提案成立时的任何
    * 主体快照——主体授权归执行层后，"提案之后被收回"的形状只可能是部署声明翻转。
    * 两笔旧债的落点：
-   *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 DZ_REQUIRE_PLAN）；
+   *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 EXECUTION_REQUIRE_PLAN）；
    *   · D-082 由 writeBackTaskOutcome 承担（committed / confirm_failed 都回写终态）。
    */
   async function confirmProposalViaGateway(

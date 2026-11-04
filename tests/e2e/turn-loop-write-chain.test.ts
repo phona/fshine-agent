@@ -19,13 +19,13 @@
  *
  * **D 波（两个写流程开关退役）后本文件不设任何 env 开关**：B 波的
  * `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 已删，宿主恒定拦截提案命令、
- * 落账后端恒接，默认部署（.env 只有 DZ_EXECUTOR=mock）就走完整链——"不设开关也走网关
+ * 落账后端恒接，默认部署（.env 只有 EXECUTION_EXECUTOR=mock）就走完整链——"不设开关也走网关
  * 路径"由本文件每条用例直接钉住。原先靠"关掉落账开关"才可达的 confirm_held（确认收到但不写）
  * 随之成为**真平台专属态**：mock 之下 isCommitEnabled 恒真，那个 fail-closed 在本文件里
  * 已不可达，改由 packages/agent/proposal-flow.test.ts（proposalCommitEnabled=false 一支）
  * + 同文件的 isCommitEnabled 语义组（真平台缺 FSHINE_REAL_COMMIT ⇒ 假）共同钉住。
  *
- * 只在 mock 执行器下跑（harness beforeAll 固定 DZ_EXECUTOR=mock，落的是假状态文件），
+ * 只在 mock 执行器下跑（harness beforeAll 固定 EXECUTION_EXECUTOR=mock，落的是假状态文件），
  * 数据瞄准 seed.json：幻辰财税 + 202609（未结账、无存量凭证）。
  *
  * worker 提案前的检索调用是刻意的：与真实 worker 同形状（提案前先经平台核实对象，
@@ -36,13 +36,13 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { boot, gatewayProposalWorker, gatedWorker, mainDriver, type WorkerStep } from './harness';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 
-// harness 全局设 DZ_REQUIRE_PLAN=1 是为 worker 侧计划绑定保真；服务进程自己并不带这个
+// harness 全局设 EXECUTION_REQUIRE_PLAN=1 是为 worker 侧计划绑定保真；服务进程自己并不带这个
 // mandate。宿主持有的两条直调（提案创建、提案落账）都经 hostGatewayEnv() **显式剥**它
 // （D-081），所以这里删掉只为还原"生产进程 env"的形态——真正的保证在 env 纪律本身，
 // 由下面 D-081 那条（显式把它设回来仍全链绿）钉住。worker 的计划执行 spawn 由
-// gatedWorker 显式自带 DZ_REQUIRE_PLAN=1（harness.ts 两处 execute env），不受这里删除影响。
+// gatedWorker 显式自带 EXECUTION_REQUIRE_PLAN=1（harness.ts 两处 execute env），不受这里删除影响。
 beforeAll(() => {
-  delete process.env['DZ_REQUIRE_PLAN'];
+  delete process.env['EXECUTION_REQUIRE_PLAN'];
 });
 
 const ACCOUNT = '幻辰财税';
@@ -52,9 +52,9 @@ const PRINCIPAL = 'wecom:e2e_user';
 const SESSION = 'wecom:e2e_user';
 const CONFIRM_RE = /确认\s*([A-Z0-9]{6})/;
 
-/** mock 状态文件（DZ_MOCK_STATE）里账套期内的凭证张数；文件未播种时视为 0。 */
+/** mock 状态文件（EXECUTION_MOCK_STATE）里账套期内的凭证张数；文件未播种时视为 0。 */
 function mockVoucherCount(accountSet: string, period: string): number {
-  const statePath = process.env['DZ_MOCK_STATE'];
+  const statePath = process.env['EXECUTION_MOCK_STATE'];
   if (!statePath || !existsSync(statePath)) return 0;
   const state = JSON.parse(readFileSync(statePath, 'utf8')) as {
     accountSets: Record<string, { vouchers?: Record<string, unknown[]> }>;
@@ -305,10 +305,10 @@ describe('网关提案路径 · 完整落账链（默认部署，无开关）', 
     await assembly.close();
   });
 
-  it('D-081：server 进程带着 DZ_REQUIRE_PLAN=1，commit 全链仍绿（宿主直调显式剥它）', async () => {
+  it('D-081：server 进程带着 EXECUTION_REQUIRE_PLAN=1，commit 全链仍绿（宿主直调显式剥它）', async () => {
     // 复刻"部署里 worker 的计划门 mandate 泄漏进服务进程"的形态：宿主持有的两条直调
     // （创建、落账）都必须自己剥掉它，否则同一份部署里服务端调不动、worker 调得动。
-    process.env['DZ_REQUIRE_PLAN'] = '1';
+    process.env['EXECUTION_REQUIRE_PLAN'] = '1';
     try {
       const { send, assembly } = await boot({
         main: writeChainMain([
@@ -330,7 +330,7 @@ describe('网关提案路径 · 完整落账链（默认部署，无开关）', 
       expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before + 1);
       await assembly.close();
     } finally {
-      delete process.env['DZ_REQUIRE_PLAN'];
+      delete process.env['EXECUTION_REQUIRE_PLAN'];
     }
   });
 

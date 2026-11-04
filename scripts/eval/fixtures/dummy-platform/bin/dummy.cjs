@@ -20,10 +20,10 @@
  *   DUMMY_STATE           (collections + records; default <fixture>/.runtime/dummy-state.json)
  *   DUMMY_PLAN_STATE      (plans; default <state-dir>/plans.json)
  *   DUMMY_PROPOSAL_STATE  (proposals; default <state-dir>/proposals.json)
- *   DUMMY_AUDIT_PATH / DZ_AUDIT_PATH (JSONL audit, refusals included)
+ *   DUMMY_AUDIT_PATH / EXECUTION_AUDIT_PATH (JSONL audit, refusals included)
  * Serve compatibility: when used as bin/generic inside this fixture, fshine sets
- * DZ_SERVE=1 / DZ_INVOCATION / DZ_PLAN_ID / DZ_COMMIT_TOKEN / DZ_GATE_SECRET /
- * DZ_PLAN_ACTIVATION_SECRET. This fixture accepts those names as aliases for
+ * EXECUTION_SERVE=1 / EXECUTION_INVOCATION / EXECUTION_PLAN_ID / EXECUTION_COMMIT_TOKEN / EXECUTION_GATE_SECRET /
+ * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture accepts those names as aliases for
  * its own DUMMY_* names, so fshine code needs no change. It does NOT read
  * LLM keys, WeCom secrets or any other host secret.
  *
@@ -137,9 +137,9 @@ function statePaths() {
   const dir = path.dirname(stateFile);
   return {
     stateFile,
-    planFile: env2('DUMMY_PLAN_STATE', 'DZ_PLAN_STATE', path.join(dir, 'plans.json')),
+    planFile: env2('DUMMY_PLAN_STATE', 'EXECUTION_PLAN_STATE', path.join(dir, 'plans.json')),
     proposalFile: env('DUMMY_PROPOSAL_STATE', path.join(dir, 'proposals.json')),
-    auditFile: env2('DUMMY_AUDIT_PATH', 'DZ_AUDIT_PATH', null),
+    auditFile: env2('DUMMY_AUDIT_PATH', 'EXECUTION_AUDIT_PATH', null),
   };
 }
 function seedState() {
@@ -323,8 +323,8 @@ function doProposalCommit(opName, args) {
   }
   if (rec.status !== 'pending') { process.stderr.write(`PROPOSAL_REFUSE proposal not pending: status=${rec.status}\n`); emit(opName, 'failed', null, errObj('PROPOSAL_NOT_PENDING', `status=${rec.status}`)); return 3; }
   if (new Date(rec.expiresAt).getTime() < Date.now()) { process.stderr.write('PROPOSAL_REFUSE proposal expired\n'); emit(opName, 'failed', null, errObj('PROPOSAL_EXPIRED', rec.expiresAt)); return 3; }
-  const secret = env2('DUMMY_GATE_SECRET', 'DZ_GATE_SECRET', '');
-  const token = env2('DUMMY_COMMIT_TOKEN', 'DZ_COMMIT_TOKEN', '');
+  const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
+  const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
   if (secret && !verifyProposalToken(token, proposalId, rec.expiresAt, secret)) { process.stderr.write('PROPOSAL_REFUSE proposal token untrusted\n'); emit(opName, 'failed', null, errObj('PROPOSAL_TOKEN_UNTRUSTED', 'Token does not match this proposal or has expired')); return 3; }
   // Pre-commit readback baseline, then apply, then post-commit readback.
   const state = loadState();
@@ -452,7 +452,7 @@ async function planActivate(argv) {
   let input;
   try { input = JSON.parse(inputText); } catch { process.stderr.write('PLAN_REFUSE activation input is not JSON\n'); return 2; }
   const { planId, evidence, token } = input;
-  const secret = env2('DUMMY_PLAN_ACTIVATION_SECRET', 'DZ_PLAN_ACTIVATION_SECRET', '');
+  const secret = env2('DUMMY_PLAN_ACTIVATION_SECRET', 'EXECUTION_PLAN_ACTIVATION_SECRET', '');
   let ok = false;
   try {
     if (secret && token) {
@@ -547,9 +547,9 @@ async function main() {
     }
     const verdict = decide(cmd, op, rest);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }
-    // Plan binding (only when the caller opts in, mirroring DZ_REQUIRE_PLAN).
-    const planId = env2('DUMMY_PLAN_ID', 'DZ_PLAN_ID', '');
-    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'DZ_REQUIRE_PLAN', '') === '1';
+    // Plan binding (only when the caller opts in, mirroring EXECUTION_REQUIRE_PLAN).
+    const planId = env2('DUMMY_PLAN_ID', 'EXECUTION_PLAN_ID', '');
+    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     if (op.name === 'dummy.query') code = doQuery(op.name, rest);
@@ -558,8 +558,8 @@ async function main() {
     else if (op.name === 'dummy.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
       // mirroring gateway commit-token binding (operation name preferred).
-      const secret = env2('DUMMY_GATE_SECRET', 'DZ_GATE_SECRET', '');
-      const token = env2('DUMMY_COMMIT_TOKEN', 'DZ_COMMIT_TOKEN', '');
+      const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
+      const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
       if (secret) {
         let ok = false;
         try {
