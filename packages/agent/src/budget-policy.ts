@@ -11,12 +11,11 @@
  *   目的是让宿主裁档与执行层裁档在缺省配置下同口径——不是复制业务规则，
  *   而是让两层对同一组通用数字达成一致。执行层若调高/调低自己的阈值，
  *   宿主侧仍以更严一档为准（见 `stricterTier`），且执行端门保留不动。
- * · 本模块目前**未接入**计划评估主路径：平台 plan evaluate 的响应
- *   （PlanEvaluation）只带 estimate.calls/seconds，不带 weight，宿主在
- *   不改 17dz 代码的前提下算不出 weight 档。接入需要平台在评估响应里
- *   下发 weight（接口层面，非业务语义改动）——那一步不在 Package 1 内，
- *   17dz 代码本包一律不动。未接入前，执行端门是唯一生效的档位门，
- *   本模块只作为已测试的通用策略备用件，不可宣称“预算策略已搬回”。
+ * · 本模块已接入计划评估主路径（第 1 包收尾）：plan-runtime 的
+ *   evaluateAndActivatePlan 在平台 decision 之上叠加本模块的宿主档，
+ *   更严为准；平台 decision 仍保留作防线。weight 由平台 evaluate 响应
+ *   的 estimate.weight 下发（财税实例早已带该字段，本接口只是立约，
+ *   不改档位语义、不改执行端门）；weight 缺失时宿主 fail-closed。
  */
 export type BudgetTier = 'execute' | 'notify' | 'confirm' | 'stop';
 

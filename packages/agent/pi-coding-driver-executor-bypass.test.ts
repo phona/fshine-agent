@@ -98,7 +98,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_bypass', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_bypassed', version: 3, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    planId: 'plan_bypassed', version: 3, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 },
     delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);

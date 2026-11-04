@@ -128,7 +128,7 @@ describe('pi-coding-agent context worker', () => {
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_saved', planId: 'plan_previous', version: 1, status: 'active' }), stderr: '' };
       if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-        planId: 'plan_stopped', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600 },
+        planId: 'plan_stopped', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600, weight: 2 },
         delta: { addedCalls: 60, addedSeconds: 3600 }, cumulative: { calls: 0, seconds: 0 }, reasonCode: 'hard_limit', status: 'stopped',
       }), stderr: '' };
       throw new Error('unexpected CLI call');
@@ -165,7 +165,7 @@ describe('pi-coding-agent context worker', () => {
       if (args[1] === 'evaluate') return {
         code: 3,
         stdout: `${JSON.stringify({
-          planId: 'plan_stop', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600 },
+          planId: 'plan_stop', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600, weight: 2 },
           delta: { addedCalls: 60, addedSeconds: 3600 }, cumulative: { calls: 120, seconds: 7200 },
           reasonCode: 'HARD_LIMIT', status: 'stopped', noticeText: '累计查询已达本任务硬上限。',
         })}\n`,
@@ -589,7 +589,7 @@ describe('pi-coding-agent context worker', () => {
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: null, version: null, status: 'none' }), stderr: '' };
       evaluated.push(args);
-      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 2, seconds: 20 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 2, seconds: 20, weight: 2 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
       cwd: root,
@@ -625,7 +625,7 @@ describe('pi-coding-agent context worker', () => {
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: null, version: null, status: 'none' }), stderr: '' };
       evaluated.push(args);
-      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
       cwd: root,
@@ -913,7 +913,7 @@ describe('pi-coding-agent context worker', () => {
         code: 0,
         stdout: JSON.stringify({
           taskId: 'task_reset', planId: `plan_${evaluates}`, version: evaluates, decision: 'execute',
-          estimate: { calls: 1, seconds: 1 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
+          estimate: { calls: 1, seconds: 1, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
         }),
         stderr: '',
       };
@@ -984,7 +984,7 @@ describe('pi-coding-agent context worker', () => {
         code: 0,
         stdout: JSON.stringify({
           taskId: 'task_msg', planId: `plan_${evaluates}`, version: evaluates, decision: 'execute',
-          estimate: { calls: 1, seconds: 1 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
+          estimate: { calls: 1, seconds: 1, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'OK', status: 'active',
         }),
         stderr: '',
       };
@@ -1082,7 +1082,7 @@ const activePlanRunner: PlanCliRunner = async ({ args }) => {
 const evaluatingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_progress', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 },
     delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);

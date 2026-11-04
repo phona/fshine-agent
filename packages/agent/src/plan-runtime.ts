@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
@@ -32,7 +33,8 @@ export interface PlanEvaluation {
   planId: string;
   version: number;
   decision: 'execute' | 'notify' | 'confirm' | 'stop';
-  estimate: { calls: number; seconds: number };
+  /** 本张计划的声明总权重（接口文档 §4 必填；缺失/非法时宿主 fail-closed，不激活）。 */
+  estimate: { calls: number; seconds: number; weight?: number };
   delta: { calls?: unknown[]; [key: string]: unknown };
   cumulative: Record<string, unknown>;
   reasonCode: string;
@@ -140,13 +142,27 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gatew
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
   const runCli = options.runCli ?? defaultCliRunner;
   validateCalls(options.calls);
-  const evaluation = await runPlanEvaluation(runCli, {
+  const rawEvaluation = await runPlanEvaluation(runCli, {
     platformRoot: options.platformRoot,
     args: ['plan', 'evaluate', '--task-id', options.taskId, '--stdin'],
     input: JSON.stringify({ calls: options.calls, ...(options.requestId ? { requestId: options.requestId } : {}) }),
     env: options.env,
     ...(options.gateway ? { gateway: options.gateway } : {}),
   });
+  // 预算接入（接口文档 §4）：平台已下发 estimate.weight 时，宿主用通用策略
+  // 算出宿主档，与平台 decision 取更严一档；平台档始终保留作防线，宿主档
+  // 只做叠加，绝不放宽。注意不对称性：宿主这里只看本张计划的 weight，
+  // 平台 decision 已计入任务累计 weight——更严为准保证宿主叠加只收紧不放松。
+  // weight 缺失/非有限数/为负 → fail-closed：不激活、不降级为仅 calls/seconds 裁档。
+  const weight = rawEvaluation.estimate.weight;
+  if (typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0) {
+    throw new Error('plan evaluate 未下发合法 weight：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
+  }
+  const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
+  const RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
+  const evaluation = RANK[host.tier] > RANK[rawEvaluation.decision]
+    ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
+    : rawEvaluation;
 
   if (evaluation.decision === 'stop') {
     return { status: 'stop', evaluation, message: formatPlanMessage(evaluation) };

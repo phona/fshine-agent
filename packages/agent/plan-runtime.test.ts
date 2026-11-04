@@ -4,7 +4,7 @@ import { parseOperationArgSpecs, parseOperationSemantics, type OperationArgsSpec
 
 const approved = {
   planId: 'plan_123', version: 2, decision: 'notify',
-  estimate: { calls: 9, seconds: 540 },
+  estimate: { calls: 9, seconds: 540, weight: 2 },
   delta: { addedCalls: 9, addedSeconds: 540, calls: [] },
   cumulative: { calls: 9, seconds: 540 }, reasonCode: 'scope_expanded', status: 'pending_notice',
   noticeText: '账套「A」；期间2026年09月；新增9次查询，预计耗时约9分钟。',
@@ -204,7 +204,7 @@ describe('platform-backed execution plan runtime', () => {
 
   const stopped = {
     planId: 'plan_stop', version: 3, decision: 'stop',
-    estimate: { calls: 60, seconds: 3600 }, delta: { addedCalls: 60, addedSeconds: 3600 },
+    estimate: { calls: 60, seconds: 3600, weight: 2 }, delta: { addedCalls: 60, addedSeconds: 3600 },
     cumulative: { calls: 120, seconds: 7200 }, reasonCode: 'HARD_LIMIT', status: 'stopped',
     noticeText: '累计查询已达本任务硬上限。',
   } as const;

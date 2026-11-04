@@ -103,7 +103,7 @@ const USER_REQUEST = '把本期要查的对象查一遍';
 const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_activation', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_activated', version: 7, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    planId: 'plan_activated', version: 7, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 },
     delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);
@@ -113,7 +113,7 @@ const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
 const confirmingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_activation', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600 },
+    planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600, weight: 2 },
     delta: { addedCalls: 30 }, cumulative: {}, reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);
