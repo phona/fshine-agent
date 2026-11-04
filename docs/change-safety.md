@@ -1218,3 +1218,4 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 |---|---|---|---|
 | G15 | decision fail-closed 两道防线（`plan-runtime.ts`：exit 0 预验 + `planDecisionRank`） | ① `planDecisionRank` 改回 `?? 0` | `plan-budget-overlay.test.ts` 直测 1 红 → 还原复绿 |
 | G15 | 同上 | ② 删 exit 0 预验（rankOf 仍在） | 公开路径测试凭“exit 0 预验”文案标记 1 红 → 还原复绿（单拆任一道时另一道仍抛错，故两道各凭直测/文案分别钉住，不能凭“公开路径仍抛错”证明单道无用；两道同时拆掉时未知档位会落进 active 返回，见测试文件内的书面说明） |
+| G16 | 步数帽 steer 失败补发（`pi-coding-driver.ts` pending 补发块） | 删整个 pending 补发块 | `pi-coding-driver-executor-bypass.test.ts` 补发成功用例 1 红（首次 steer 抛错、第 4 次放行补发）→ 还原复绿；补发时仍抛错的用例不红（pending 保持、无更多放行时送达 0 次是预期行为，不以它证明补发） |
