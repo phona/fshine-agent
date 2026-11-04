@@ -35,13 +35,25 @@ number from here.
    is created; inconsistent blocks the code. Input is schema + dry-run
    envelope + platform summaryText only; output is consistent/
    inconsistent + field names only. Injection point is the
-   `proposalReviewTurn` option. LIMIT: the host currently has no declared
-   interface to fetch the platform proposal schema, so the schema slot
-   is passed as null and the review compares summaryText against the
-   dry-run envelope only; schema-conformance checking is open until the
-   platform declares a schema endpoint. When no reviewer is injected,
-   the code logs `proposal_review_skipped` and proceeds — production
-   assembly wiring of the reviewer driver is still open (see below).
+   `proposalReviewTurn` option. UPDATE (Package 2, supersedes the LIMIT
+   below as written in Phase 2): the schema slot is no longer null in
+   production. The declared interface is `operation list --json`'s
+   `proposalSchema` column on the `proposal.create` row
+   (`loadProposalSchema` in `operation-labels.ts`, interface doc §5);
+   the host shape-checks it (non-empty plain object) and passes the
+   real declared value through to the review; a missing/illegal schema
+   fails proposal creation (`proposal_review_schema_missing`, no code,
+   no downgrade to summary-only comparison). The reviewer prompt still
+   compares summaryText against the dry-run envelope — the schema is
+   passed through, not field-by-field validated by the host — so
+   schema-conformance as a field check is still not claimed. When no
+   reviewer is injected, creation now fails closed
+   (`proposal_review_required`); the `proposal_review_skipped` event
+   has been deleted. Production assembly now injects the driver
+   (`apps/server/assembly.ts`: `reviewProposalWithDriver(contextModelDriver)`
+   + `proposalSchemaLoader`). Still open, unchanged: a truly
+   independent judge model (assembly uses the context-model driver,
+   not a separate judge) and real-model tamper detection.
 4. committed_unverified terminal state — `packages/agent/src/committed-unverified.ts`
    (mechanical classifier on envelope fields only: error code
    PROPOSAL_VERIFY_SHORT, or readback delta < required; report text
@@ -192,8 +204,12 @@ number from here.
   scripted reviewer (inconsistent => no code, consistent => code) and
   the mechanical pre-checks. It does NOT prove a real model reviewer
   would catch a tampered summary. Real-model tamper detection is
-  still open, and the production reviewer driver is not yet wired
-  (proposalReviewTurn un-injected logs proposal_review_skipped).
+  still open, and a truly independent judge model is still open —
+  but the production reviewer driver IS now wired (Package 2:
+  `apps/server/assembly.ts` injects
+  `reviewProposalWithDriver(contextModelDriver)`; un-injected runs
+  no longer log `proposal_review_skipped` and proceed, they fail
+  closed with `proposal_review_required`).
 - g-committed-unverified-report proves the classifier and the report
   text. The platform side (proposal becomes committed, partial count)
   is already proven by g-readback-short on the dummy.
@@ -249,13 +265,21 @@ number from here.
   dummy — simplified decision only (weight + calls/seconds, stricter wins).
 - Rate-limit token bucket in dummy.
 - Production wiring of the proposal reviewer driver into assembly
-  (`proposalReviewTurn`): the option and the gate exist, the driver is
-  not yet injected, so un-injected runs log `proposal_review_skipped`.
-  Do not present the review as live in production until that wiring
-  lands and is tested.
-- Platform proposal-schema endpoint: the host has no declared interface
-  to fetch the proposal schema, so the review's schema slot is null.
-  Schema-conformance checking waits on that endpoint.
+  (`proposalReviewTurn`): LANDED in Package 2
+  (`apps/server/assembly.ts`: `reviewProposalWithDriver(contextModelDriver)`
+  + `proposalSchemaLoader: loadProposalSchema`); un-injected runs fail
+  closed (`proposal_review_required`), `proposal_review_skipped` is
+  deleted. What is still open is a truly independent judge model
+  (assembly reuses the context-model driver) and real-model tamper
+  detection — do not present either as done.
+- Platform proposal-schema endpoint: LANDED in Package 2 as the
+  `proposalSchema` column on the `proposal.create` row of
+  `operation list --json` (interface doc §5, `loadProposalSchema`);
+  the review's schema slot now carries the real declared value and a
+  missing/illegal schema fails creation. Field-by-field
+  schema-conformance checking by the host is still not claimed: the
+  host only shape-checks and passes the schema through, and the
+  reviewer prompt compares summaryText against the dry-run envelope.
 - Scripted worker-session test for the step-cap steer firing at the
   51st allowed bash (decision boundary is proven, live steer is not).
 - Moving session/sensitive state out of the worker-readable workspace
