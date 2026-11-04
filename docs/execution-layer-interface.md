@@ -290,6 +290,10 @@
 
 ## 13. 交接损坏的 Main 分级恢复（第 2 包后续裁定，2026-11-04）
 
+> e2e 归属（通用 vs L4 集成）不在本文件展开，见 [e2e-ownership.md](e2e-ownership.md)：
+> CI 只认 typecheck + unit + generic-mock，`tests/e2e` 全部按 L4 集成与通用
+> 分开标，L4 集成证据不得冒充通用证据。
+
 原则：交接损坏由 Main 兜底，不要什么都让人介入；只有确实恢复不了、
 推进不了的东西才进入人工介入。异常码就是决策依据（`task-handover.ts`
 的 `HandoverReadCode`，`context.ts` 的 `resolveHandoverRecovery`）。

@@ -5,6 +5,8 @@
 # - real-model eval needs LLM credentials and has judge variance;
 # - e2e needs a gitignored local config/agent.yaml (deployment config).
 # Those are Tier B (manual before merge + nightly), not every-push CI.
+# e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
+# CI scope is unchanged by that inventory: no finance e2e is added back here.
 set -eu
 cd "$(dirname "$0")/.."
 echo "== node =="
