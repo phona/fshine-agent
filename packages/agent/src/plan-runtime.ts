@@ -154,6 +154,9 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
   // 只做叠加，绝不放宽。注意不对称性：宿主这里只看本张计划的 weight，
   // 平台 decision 已计入任务累计 weight——更严为准保证宿主叠加只收紧不放松。
   // weight 缺失/非有限数/为负 → fail-closed：不激活、不降级为仅 calls/seconds 裁档。
+  if (!rawEvaluation.estimate || typeof rawEvaluation.estimate !== 'object') {
+    throw new Error('plan evaluate 未返回合法 estimate：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
+  }
   const weight = rawEvaluation.estimate.weight;
   if (typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0) {
     throw new Error('plan evaluate 未下发合法 weight：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');

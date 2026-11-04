@@ -104,7 +104,9 @@ describe('计划草案教学：单一来源与平台 schema 一致（D-011）', 
     expect(errorCodes.split('plan {"').length - 1, 'error-codes.ts 只许有一处草案形状字面量（planDraftExample 函数体）').toBe(1);
     expect(workerPrompt.split('plan {"').length - 1, 'context.ts 的 worker 提示词不许再手写草案形状').toBe(0);
     // 那一处必须真的是函数体，且 worker 提示词确实引用了同一个函数
-    expect(errorCodes).toContain('export function planDraftExample()');
+    // 签名现带可选 gateway 参数（接口文档 §2：文本识别从 profile.gateway 派生），
+    // 单一来源不变：形状字面量仍只在该函数体内一处。
+    expect(errorCodes).toContain('export function planDraftExample(');
     expect(workerPrompt).toContain('planDraftExample()');
   });
 });

@@ -696,7 +696,7 @@ describe('pi-coding-agent context worker', () => {
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       evaluated.push(args);
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
-      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
       cwd: root,
@@ -743,7 +743,7 @@ describe('pi-coding-agent context worker', () => {
       const planCliRunner: PlanCliRunner = async ({ args }) => {
         evaluated.push(args);
         if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
-        return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+        return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
       };
       const worker = await createPiCodingWorkerSession({
         cwd: root,
@@ -790,7 +790,7 @@ describe('pi-coding-agent context worker', () => {
     const planCliRunner: PlanCliRunner = async ({ args }) => {
       evaluated.push(args);
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_active', version: 1, status: 'active' }), stderr: '' };
-      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, status: 'active' }), stderr: '' };
+      return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
       cwd: root,

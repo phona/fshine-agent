@@ -52,13 +52,13 @@ describe('generic mock execution layer', () => {
   });
 
   it('fshine operation-list consumers derive labels/specs/semantics/protocols from dummy', async () => {
-    const labels = await loadOperationLabels(fixtureRoot);
+    const labels = await loadOperationLabels(fixtureRoot, 'bin/generic');
     expect(labels.get('dummy.query')).toBeTruthy();
-    const specs = await loadOperationArgSpecs(fixtureRoot);
+    const specs = await loadOperationArgSpecs(fixtureRoot, 'bin/generic');
     expect(specs.get('dummy.query')).toBeTruthy();
-    const semantics = await loadOperationSemantics(fixtureRoot);
+    const semantics = await loadOperationSemantics(fixtureRoot, 'bin/generic');
     expect(semantics.get('dummy.query')).toBeTruthy();
-    const protocols = await loadOperationProtocols(fixtureRoot);
+    const protocols = await loadOperationProtocols(fixtureRoot, 'bin/generic');
     expect(protocols.get('dummy.proposal')).toBe('proposal.create');
     expect(protocols.get('dummy.proposal-commit')).toBe('proposal.commit');
   });
