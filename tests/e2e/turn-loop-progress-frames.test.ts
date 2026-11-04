@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：一次委派回合产生的进度帧（D1）。共享替身见 ./harness.ts。
  *
@@ -142,7 +145,7 @@ async function delegatedTurn(turns: FakeTurn[]): Promise<Turn> {
   return turn;
 }
 
-describe('离线全链 e2e：委派回合的进度帧', () => {
+describe('[L4 集成] 离线全链 e2e：委派回合的进度帧', () => {
   it('⓪①② 受理帧先行，委派回合产出「正在…」形态的用户可见帧，内部事件名不出厂', async () => {
     const turn = await delegatedTurn([
       { bash: [PLAN_COMMAND, QUERY_COMMAND], text: '幻辰财税 202606 应收账款余额为 61000 元。' },

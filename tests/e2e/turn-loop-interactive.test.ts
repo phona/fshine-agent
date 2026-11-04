@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /** Native WeCom quotes and background work through production assembly, SQLite and channel. */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -20,7 +23,7 @@ async function until(predicate: () => boolean | Promise<boolean>, timeoutMs = 5_
   throw new Error('Expected interactive state did not settle');
 }
 
-describe('interactive session production wiring', () => {
+describe('[L4 集成] interactive session production wiring', () => {
   it('native quote reaches Planner while canonical body and searchable history stay separate', async () => {
     let plannerMessages = '';
     const b = await boot({

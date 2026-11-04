@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：计划与预算门禁边界（A 组：A2 档位边界 / A3 累计账本 / A4 收敛保护 /
  * A5 写关闭三闸）。共享替身见 ./harness.ts。
@@ -138,7 +141,7 @@ function bashCall(
 
 // ── A2：档位边界 ─────────────────────────────────────────────────────────
 
-describe('离线全链 e2e：计划门档位边界（AUTO=2 / NOTIFY=10 / CONFIRM=20）', () => {
+describe('[L4 集成] 离线全链 e2e：计划门档位边界（AUTO=2 / NOTIFY=10 / CONFIRM=20）', () => {
   it('A2 AUTO 档内：1 次调用直执行，零通知帧零确认帧', async () => {
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '查幻辰财税账套近 1 个月的应收账款' }]),
@@ -240,7 +243,7 @@ describe('离线全链 e2e：计划门档位边界（AUTO=2 / NOTIFY=10 / CONFIR
 
 // ── A3：账本累计 ─────────────────────────────────────────────────────────
 
-describe('离线全链 e2e：计划累计账本', () => {
+describe('[L4 集成] 离线全链 e2e：计划累计账本', () => {
   it('A3 同一任务第二个计划看到累计 actual：2 调计划触发 notify，delta 只计净新增', async () => {
     const { send, sdk, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '先查幻辰财税 1 月应收，再扩到 1 至 2 月' }]),
@@ -284,7 +287,7 @@ describe('离线全链 e2e：计划累计账本', () => {
 
 // ── A4：收敛保护（真驱动 + 真 CLI）────────────────────────────────────────
 
-describe('离线全链 e2e：被拒计划收敛保护（DECLINED_PLAN_LIMIT）', () => {
+describe('[L4 集成] 离线全链 e2e：被拒计划收敛保护（DECLINED_PLAN_LIMIT）', () => {
   it('A4 同一任务连续 6 次提交越权计划：前 5 次 PLAN DECLINED，第 6 次收敛且不再产生新计划', async () => {
     const counter = { evaluates: 0 };
     const worker = await makeWorkerSession(counter, {
@@ -354,7 +357,7 @@ describe('离线全链 e2e：被拒计划收敛保护（DECLINED_PLAN_LIMIT）',
 
 // ── A6：plan --schema 元数据自救通道（C4）──────────────────────────────────
 
-describe('离线全链 e2e：plan --schema 元数据自救通道（C4）', () => {
+describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C4）', () => {
   it('A6 --schema 不被 driver 当计划提交拦下，门的元数据白名单放行，CLI 逐字打印计划 schema', async () => {
     const counter = { evaluates: 0 };
     const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_schema' });
@@ -408,7 +411,7 @@ describe('离线全链 e2e：plan --schema 元数据自救通道（C4）', () =>
 
 // ── A5：写关闭三闸 ────────────────────────────────────────────────────────
 
-describe('离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）', () => {
+describe('[L4 集成] 离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）', () => {
   it('A5 闸① 计划扫描拒：含 voucher.commit 的计划在 evaluate 前被拦，终稿一字不差', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({

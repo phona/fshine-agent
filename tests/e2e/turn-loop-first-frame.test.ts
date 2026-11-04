@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：首帧提速——受理即帧（2026-10-16）。共享替身见 ./harness.ts。
  *
@@ -57,7 +60,7 @@ function conversationBoot() {
   });
 }
 
-describe('离线全链 e2e：受理即帧', () => {
+describe('[L4 集成] 离线全链 e2e：受理即帧', () => {
   it('① 会话轮：受理帧 <1.5s 出现在投递流里，终稿照常整体替换', async () => {
     const booted = await conversationBoot();
     const turnPromise: Promise<Turn> = booted.turn('在吗');

@@ -1,3 +1,5 @@
+// [通用] 单仓就能跑的 e2e：不依赖兄弟仓、config/agent.yaml、财税语义与财税 mock。
+// 见 docs/e2e-ownership.md。文件内 profile 键名 17dz 是遗留键名，不是兄弟仓依赖。
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from '@fshine/core';

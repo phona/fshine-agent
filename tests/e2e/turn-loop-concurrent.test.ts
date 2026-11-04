@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：并发多线程会话里的多步计划中断/恢复/跳过/确认门（覆盖增强）。共享替身见 ./harness.ts。
  *
@@ -103,7 +106,7 @@ function capturePlanLog() {
   };
 }
 
-describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/确认门', () => {
+describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/确认门', () => {
   it('7.1 多步计划被打断后跨回合恢复：同任务续跑、步号接得上、账本跨回合累计', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

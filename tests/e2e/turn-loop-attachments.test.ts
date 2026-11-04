@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：附件/文件消息的真实渠道路径。
  * 共享替身见 ./harness.ts（真企微 adapter、真 handler、真 SQLite、真 bin/17dz 计划门、mock 执行器）。
@@ -57,7 +60,7 @@ function recordRequestOutcomes(assembly: ServerAssembly): string[] {
   return outcomes;
 }
 
-describe('离线全链 e2e：附件/文件消息的真实渠道路径', () => {
+describe('[L4 集成] 离线全链 e2e：附件/文件消息的真实渠道路径', () => {
   it('AT-1 附件-only 消息：只暂存不启回合，孤儿收据、attachment_received 落库与真实落盘齐全', async () => {
     // 若这条消息意外启了 Agent 回合，主 Agent 的申报文本会顶替确认回复，精确断言当场响
     const { sendFile, assembly } = await boot({

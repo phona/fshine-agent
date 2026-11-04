@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：委派失败的用户话术分流（F7）。共享替身见 ./harness.ts。
  *
@@ -15,7 +18,7 @@ function failingWorker(message: string) {
   return { run: async () => { throw new Error(message); } };
 }
 
-describe('离线全链 e2e：委派失败的用户话术', () => {
+describe('[L4 集成] 离线全链 e2e：委派失败的用户话术', () => {
   it('F7 平台登录态过期：用户收到需要重新登录的可行动话术，而不是"稍后再试"', async () => {
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' }]),

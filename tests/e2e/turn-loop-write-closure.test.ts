@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：写关闭 disclosure（D-075 第 1 层机械兜底）。共享替身见 ./harness.ts。
  *
@@ -20,7 +23,7 @@
 import { describe, expect, it } from 'vitest';
 import { LAST_TASK_ID_TOKEN, boot, gatedWorker, ledger, mainDriver, totalActualCalls } from './harness';
 
-describe('离线全链 e2e：写关闭 disclosure（D-075）', () => {
+describe('[L4 集成] 离线全链 e2e：写关闭 disclosure（D-075）', () => {
   it('写关闭部署：含写类 operation 的计划在评估前被宿主拦下，终稿是写关闭话术', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({

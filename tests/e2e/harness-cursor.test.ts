@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 夹具光标保真（2026-11-04 诊断的正式化）：
  * gatedWorker 一轮只消费光标后剩余的段，最后一项不夹回重跑。
@@ -9,7 +12,7 @@
 import { describe, expect, it } from 'vitest';
 import { boot, gatedWorker, mainDriver } from './harness';
 
-describe('harness 光标保真', () => {
+describe('[L4 集成] harness 光标保真', () => {
   it('第二轮只消费剩余段一次，最后一项不重复', async () => {
     const b = await boot({
       main: mainDriver([

@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：worker 执行超时路径（功能规格验收第 7 条）。
  *
@@ -226,7 +229,7 @@ async function platformTasksOf(booted: Boot) {
   return booted.assembly.store.platformTasks!.listBySession(PRINCIPAL, SESSION);
 }
 
-describe('离线全链 e2e：worker 执行超时（功能规格验收第 7 条）', () => {
+describe('[L4 集成] 离线全链 e2e：worker 执行超时（功能规格验收第 7 条）', () => {
   it('WT-1 worker 跑过截止后返回空稿：用户收到超时话术，span 记 failed/timeout，任务留痕带部分转录', async () => {
     const worker = scriptedWorker(['timeout'], PARTIAL_TRANSCRIPT);
     const audit = captureEvents();

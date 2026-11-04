@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * harness 保真度绊线（HF = Harness Fidelity）：把 harness.ts 两处"靠人记得换回来"的
  * 假绿风险改成"不一致就红"。只 import harness、不改 harness——两处风险都在共享替身
@@ -31,7 +34,7 @@ import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agen
 import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
 import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope } from './harness';
 
-describe('harness 保真度绊线', () => {
+describe('[L4 集成] harness 保真度绊线', () => {
   // ── 护栏①：access 语义表替身 vs 平台派生 ────────────────────────────────
 
   it('HF-1 语义表必须平台派生、非空、含确认类锚点（空表/手注漂移=写关闭判据失效）', async () => {

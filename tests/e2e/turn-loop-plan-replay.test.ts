@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：计划模式的"复读"外发缺口（F4）。共享替身见 ./harness.ts。
  *
@@ -76,7 +79,7 @@ function replayMainDriver(requests: readonly string[]) {
   };
 }
 
-describe('离线全链 e2e：计划模式复读的外发兜底', () => {
+describe('[L4 集成] 离线全链 e2e：计划模式复读的外发兜底', () => {
   it('F4 两步零执行后模型复读工具结果：协议 JSON 不外发，用户收到步骤事实汇总', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

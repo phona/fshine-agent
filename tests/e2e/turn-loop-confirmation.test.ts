@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：跨轮确认语义。共享替身见 ./harness.ts。
  *
@@ -7,7 +10,7 @@
 import { describe, expect, it, onTestFinished } from 'vitest';
 import { balanceCalls, boot, CURRENT_PERIOD, gatedWorker, growingPlan, heavyPlan, mainDriver, neutralizePlanGateNonCallLines } from './harness';
 
-describe('离线全链 e2e：跨轮确认语义', () => {
+describe('[L4 集成] 离线全链 e2e：跨轮确认语义', () => {
   it('2.7 待确认计划被新计划取代后，旧确认得到确定性解释', async () => {
     // D-145：隔离权重线（与估时秒线），本用例专测次数线语义下的取代路径——同一任务先
     // 21 调确认档、再 1 调轻量计划，次数线上轻量计划落 AUTO 档直执行并取代旧计划；不隔

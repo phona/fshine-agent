@@ -1,3 +1,4 @@
+// [L4 集成基础设施] tests/e2e 的共享替身：加载即派生兄弟仓 operation 表，beforeAll 要求 bin/17dz 在场。
 /**
  * 离线全链 e2e 共享替身：tests/e2e/turn-loop-*.test.ts 四个文件共用。
  *

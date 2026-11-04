@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：召回事实注入（支柱 C 第一刀）。共享替身见 ./harness.ts。
  *
@@ -113,7 +116,7 @@ function recallFromFacts(facts: string): string {
   return lines.length > 0 ? `刚才的执行记录如下：\n${lines.join('\n')}` : '没有可依据的执行记录，我不能凭印象编。';
 }
 
-describe('离线全链 e2e：召回事实注入（执行台账）', () => {
+describe('[L4 集成] 离线全链 e2e：召回事实注入（执行台账）', () => {
   it('10.1 一次真实委派后召回：答案来自宿主台账，不串轮不混列', async () => {
     const before = totalActualCalls();
     const worker = gatedWorker([
@@ -211,7 +214,7 @@ describe('离线全链 e2e：召回事实注入（执行台账）', () => {
   });
 });
 
-describe('离线全链 e2e：结构化召回条目（D-065 P2）', () => {
+describe('[L4 集成] 离线全链 e2e：结构化召回条目（D-065 P2）', () => {
   it('10.4 有计划的委派 → 召回条目带结构化事实（期间/平台label/结局）且原文数值仍在', async () => {
     // 期间取 202606（mock 有余额键）而非 CURRENT_PERIOD：本条断言的是"结构化头 + 原文数值
     // 仍在"，而 resultText 在 execution-facts 里按 300 字截断。无数据期间的平台信封是

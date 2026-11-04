@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：多任务乒乓路由与探索线程延续（覆盖增强）。共享替身见 ./harness.ts。
  *
@@ -57,7 +60,7 @@ function recordingWorker(script: WorkerStep[]) {
   };
 }
 
-describe('离线全链 e2e：多任务乒乓路由与探索线程延续', () => {
+describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延续', () => {
   it('8.1 三个任务来回乒乓：每回合按 continueTaskId 续回指名的旧任务，worker 转录不串台', async () => {
     // D-145：隔离权重线与估时秒线，本用例的夹具语义在次数线上——每任务两回合各一张单
     // 调用轻量计划（累计 2 调 ≤ AUTO=2 直执行、零通知）。不隔离的话两条非次数线按任务

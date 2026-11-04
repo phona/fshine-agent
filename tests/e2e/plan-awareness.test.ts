@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 bin/17dz（缺失时跳过，不读 config/agent.yaml）+ 自有计划状态文件，mock 执行器，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * Cross-repository acceptance against the real 17dz CLI in mock mode.
  * Run explicitly with:
@@ -18,7 +21,7 @@ import { evaluateAndActivatePlan, type PlanCliRequest, type PlanCliRunner, type 
 const platformRoot = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
 const cliPath = path.join(platformRoot, 'bin', '17dz');
 // Never silently skip: a missing CLI is an explicit failure, not a green run.
-const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
+const integration = describe.skipIf(!existsSync(cliPath))('[L4 集成] fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
   let stateDir: string;
   let env: NodeJS.ProcessEnv;
   let subprocessSequence = 0;

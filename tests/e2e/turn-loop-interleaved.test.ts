@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：多任务交织与探索型会话（覆盖增强）。共享替身见 ./harness.ts。
  *
@@ -30,7 +33,7 @@ function recordingWorker(script: WorkerStep[]) {
   };
 }
 
-describe('离线全链 e2e：多任务交织与探索型会话', () => {
+describe('[L4 集成] 离线全链 e2e：多任务交织与探索型会话', () => {
   it('2.3 两个委派任务交织后，按 continueTaskId 回到第一个任务', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

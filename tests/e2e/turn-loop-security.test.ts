@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：D 组 越权与安全。共享替身见 ./harness.ts（真 SQLite、真 bin/17dz
  * 计划门、mock 执行器；模型与平台应答是脚本化的）。
@@ -163,7 +166,7 @@ function recordingWorker(script: WorkerStep[], enforce: { enforceEntityScope?: b
   };
 }
 
-describe('离线全链 e2e：D1 实体越权 × 注入（表驱动）', () => {
+describe('[L4 集成] 离线全链 e2e：D1 实体越权 × 注入（表驱动）', () => {
   // 三个单回合注入渠道：request 文本 / plan args / worker 叙述。每个用例两步：
   // ①越权计划被判 ENTITY_OUT_OF_SCOPE（生产校验器同一把尺 + 码表诊断到达用户），
   // 零平台调用、审计参数里没有越权 id；②用户改报合法范围 → 查询正常落地。
@@ -298,7 +301,7 @@ describe('离线全链 e2e：D1 实体越权 × 注入（表驱动）', () => {
   });
 });
 
-describe('离线全链 e2e：D3 平台写开放声明不成立的入口', () => {
+describe('[L4 集成] 离线全链 e2e：D3 平台写开放声明不成立的入口', () => {
   it('入口① 含写 operation 的计划：宿主在 evaluate 前终结，终稿全等 WRITE_NOT_ENABLED', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
@@ -374,7 +377,7 @@ describe('离线全链 e2e：D3 平台写开放声明不成立的入口', () => 
   // proposal-flow.test.ts 的「D-080 时点纪律 + ⑧ 判据切换」单测钉住。
 });
 
-describe('离线全链 e2e：D4 污染塑形（corpus）', () => {
+describe('[L4 集成] 离线全链 e2e：D4 污染塑形（corpus）', () => {
   // 每个注入物一条用例：worker 叙述文本混入注入物，回合有真实执行（单步委派，
   // worker 文本即终稿的形状）。剥掉替身拼的执行行后跑生产指纹尺 + D5b 基线。
   // 缺口项（★）钉的是当前事实：终稿没有执行语言指纹硬闸（债务台账 D-069），
@@ -485,7 +488,7 @@ describe('离线全链 e2e：D4 污染塑形（corpus）', () => {
   });
 });
 
-describe('离线全链 e2e：D5 平台不可用冷却（注入变体 + 时长覆盖）', () => {
+describe('[L4 集成] 离线全链 e2e：D5 平台不可用冷却（注入变体 + 时长覆盖）', () => {
   /** 平台登录/凭据类失败信封（与 turn-loop-platform-health 的 authFailingWorker 同形）。 */
   function authEnvelope(code: string): string {
     return `RESULT ${JSON.stringify({

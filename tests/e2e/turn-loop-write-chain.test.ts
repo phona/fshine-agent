@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：凭证写链路（两步确认完整闭环，B 组）。共享替身见 ./harness.ts。
  *
@@ -138,7 +141,7 @@ function writeChainMain(declarations: Array<Record<string, unknown>>) {
   return mainDriver(declarations);
 }
 
-describe('网关提案路径 · 提案创建（无开关，默认部署）：平台摘要 + 确认码，宿主持有取物单', () => {
+describe('[L4 集成] 网关提案路径 · 提案创建（无开关，默认部署）：平台摘要 + 确认码，宿主持有取物单', () => {
   it('create → 用户文本含平台 summaryText 与确认码；意图条目只持取物单（零业务字段）', async () => {
     const { send, assembly } = await boot({
       main: writeChainMain([
@@ -249,7 +252,7 @@ describe('网关提案路径 · 提案创建（无开关，默认部署）：平
   });
 });
 
-describe('网关提案路径 · 完整落账链（默认部署，无开关）', () => {
+describe('[L4 集成] 网关提案路径 · 完整落账链（默认部署，无开关）', () => {
   /** 已结账期提案（seed 的 scenarios.closedPeriods=202606）：dry-run 过、commit 被平台拒。 */
   function closedPeriodProposal(): object {
     return {
@@ -405,7 +408,7 @@ describe('网关提案路径 · 完整落账链（默认部署，无开关）', 
  * 这些是**宿主持有的通用确认状态机**，不随提案归平台而改变，所以覆盖要跟着搬过来而不是
  * 随旧路径一起删。
  */
-describe('网关提案路径 · 确认码攻击面：错误码 / 过期 / 跨 session / 跨 principal / 取消 / 被新提案取代', () => {
+describe('[L4 集成] 网关提案路径 · 确认码攻击面：错误码 / 过期 / 跨 session / 跨 principal / 取消 / 被新提案取代', () => {
   /**
    * 每个用例共用的开局：开写 → 提案回合拿到码与 intentId（落账后端默认就接着，
    * 无需再开任何开关）。
