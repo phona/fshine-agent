@@ -385,6 +385,22 @@ describe('步数帽 steer 失败补发路径（真 driver）：首次 steer 抛�
     expect(result.text).toBe('表已经算好了。');
   });
 
+  it('清 pending 钉子：第 5 次放行不再补发（删清位行时本条变红）', async () => {
+    // M2（第四轮）：前一个用例只有 4 次放行，删掉
+    // stepCapWindDownPending = false 后第 4 次补发成功、pending 仍 true，
+    // 但因没有第 5 次放行，steer 断言依旧通过——清位行无钉子。
+    // 本条加第 5 次放行：清位后第 5 次不再补发，steer 仍恰 1 次；
+    // 不清位时第 5 次会补发第二次，steer 变 2 次而变红。
+    const { alerts, steers, result } = await runWithThrow([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ], 1);
+
+    expect(steers).toEqual([WORKER_WIND_DOWN_NUDGE]);
+    expect(alerts).toHaveLength(1);
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 5 });
+    expect(result.text).toBe('表已经算好了。');
+  });
+
   it('补发时 steer 仍抛错：pending 保持待补发，不立即重发、不中断回合', async () => {
     const { alerts, steers, result } = await runWithThrow([
       { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
