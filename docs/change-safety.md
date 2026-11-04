@@ -1170,3 +1170,42 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | F5 回归 | 终态实测：typecheck 0；全量 `npx vitest run` **1772/1772、131 文件全绿**（较 §20 +13，全为新增用例）。棘轮：handler 907 → 956（D-119 功能新增，理由登记于 handler-shape 文件头）；runtime 1311 未动 |
 | F6 真实模型 | **两批已跑（2026-10-26，用户授权，mock 执行器全程平台零外发）**。①quick 批：A1/A2/A4/A5 绿；B1 ⚠ 判为断言不适配 not_found 形态（mock 对 202609 无数据，模型五轮诚实不编造），断言已按 Y2 先例适配（换幻辰财税 202606=61,000 有数据组合）并以真模型复验 1/1 无异常。②重场景批（G1,G2,X1,X2,Y1,Y2）：**3/6 无异常（G2/X2/Y2 绿）**；G1/X1/Y1 ⚠ 经**改前基线对照判定全部为既有行为、非四波回归**——基线 = 3b97f51 worktree（config/agent.yaml 为 gitignore 文件需补入），同版脚本（diff 仅 B1 适配，对照批不含 B1）跑同场景：G1 基线出现逐字相同的"计划未恢复"警告（且基线 26 次平台调用/285 万 token vs 改后 18 次/180 万——改后反而收敛）；X1 基线同族警告清单逐项对应（步骤通知/澄清候选/D-072 静默代解析，历史高频波动区）；Y1 基线同样泄漏错误码形态（Stage 3 事故家族老缝，轮次不同）+ 另多一条期间未体现。两批日志 /tmp/f6-probe-quick.log、/tmp/f6-probe-heavy.log、/tmp/f6-probe-baseline.log，明细 .runtime/probe-fshine-probe-{4YFCub,7GM9Oy}.json。次生事件登记不阻塞：context 语义抽取辅助模型偶发空响应/超时（有降级路径）、收尾关库后迟到日志写入（良性时序）。Y1 的错误码泄漏老缝与 G1 计划恢复波动建议另行立项（模型行为调优，非编排层缺陷）。真实企微渠道验收仍待渠道侧授权 |
 | F7 回滚 | D-119 查重先于副作用、未命中路径零变化（既有 130 handler 用例全绿作证）；D-132 闸默认生效、drainMs 缺省值即旧行为上限放宽；D-120 旧名别名保兼容 |
+
+## 24. 纯编排波（2026-11-04，pure-orchestration-p1：P1 + P2 + 收尾修复）
+
+**范围**：`origin/main`（`33c1a31`，2026-11-01）→ `91bf841`（2026-11-04）的 35 个提交。本节是事后补档（F4 主题债，debt/process-debt 分支），不是波次当时的逐 commit 验收记录——当时的逐项证据以各提交信息与 `scripts/eval/GENERIC_MOCK_NOTES.md` 为准，本节只补当时缺失的三样：每子项的验收与回滚开关、F3 变异留档、新硬控制的标定登记入口（详见 debt-ledger 2026-11-04 补充记录 D-146–D-149）。未部署、未重启、未调用真实业务平台或真实企微（本补档只改文档/台账）。
+
+| 子项 | 改动（提交） | 验收（波次内已有证据） | 回滚开关 / 回滚代价 |
+|---|---|---|---|
+| P1 网关 profile 化 | 网关调用形式由 `profile.gateway` 派生（`321e528`、`0bad668` 接口文档 v1、`17d5670` mock 网关改名、`27cc43` 文本识别随 profile、`807d359`/`3662826` e2e 归属） | 通用 dummy 网关 + stock 第二执行层 e2e（`1d371e4`，9 例）+ 通用模型基线 v1（`3acfb05`，3 轮机械 21/21） | **开关**：profile 不声明 `gateway` 时走遗留缺省（`resolveGatewayText` 回退 `bin/17dz`，接口文档 §10 过渡）。**代码回滚** = revert P1 提交；代价是回到"网关名散写"状态，不影响已落盘数据 |
+| P1 预算叠加 | 计划评估接预算 overlay，weight fail-closed、宿主档只收紧不放宽（`0f4bc22`，`plan-budget-overlay.test.ts` 6 例） | 新 6 例 + `plan-runtime` 29 例（提交信息内实测） | **无运行时开关**；回滚 = revert `0f4bc22`。代价：weight 缺失/非法时不再 fail-closed，回到"丢弃 weight 字段"状态 |
+| P2 步数帽 | 自由 worker 步数帽默认 50，第 51 次放行送一次收尾 steer（`4332660`、`703ebf6` 生产跟踪器、`91bf841` 计数分区修复） | 通用 mock 21/21（`4332660`）+ `gate-call-counts.test.ts` 4 例（`91bf841` 提交信息：unit 104 文件 / 1706 例 + `eval:generic-mock` 21/21） | **旋钮**：`stepCap` 选项 / `FSHINE_WORKER_STEP_CAP` 环境变量可调大（非法值回退 50，不崩溃）。**代码回滚** = revert `703ebf6` + `91bf841`；代价是回到旧计数缺陷（executor 调用双计、收尾 local 调用丢计数，可能静默压住 `platformExecutorBypassed` 披露） |
+| P2 提案复核 fail-closed | 未注入复核驱动 / schema 未下发 / 复核不一致 → 一律不发确认码、不落意图（`92f7ed8`、`de9a462`、`5b30525`） | 生产接线测试（`production-wiring.test.ts` §5/§11）+ 通用 mock 21/21 | **无运行时开关**；回滚 = revert `92f7ed8`。代价是**重开旧洞**：复核可被 `proposal_review_skipped` 跳过继续（见 D-148）。生产回滚前须先接受该代价，不得以"先回滚再说"处理 |
+| P2 交接分级恢复 | 交接读回按码分级（ok / missing / corrupt 族 / version / schema），损坏族丢弃重建、仅"损坏 + 转录也缺失"才 blocked（`dff16ee`，接口文档 §13） | `phase2.test.ts` 交接组 + `production-wiring.test.ts` 续跑组（损坏/版本/形状/双缺失四态） | **无运行时开关**；回滚 = revert `dff16ee`。代价：读失败一律塌成 null，损坏 + 无转录时不再 blocked（可能在无确定依据下继续） |
+| P2 其余新守卫 | 工具定义移除守卫、committed_unverified 终态、预算 overlay（见 F3 表） | 各守卫单测（`phase2.test.ts` / `plan-budget-overlay.test.ts`） | 各守卫均为纯函数/确定性判据，无开关；回滚 = revert 对应提交，代价见各守卫行 |
+| canary | **本仓无 canary 改动**：`33c1a31..91bf841` 的提交信息与 diff 中 `canary` 命中为 0（仅 `docs/roadmap.md` 与 debt-ledger 里 17dz skills-serve canary 的历史记述）。17dz 仓 PR #3 的 canary 修复不在 fshine 树内 | —（无 fshine 侧验收可写） | **fshine 回滚不覆盖 17dz canary**：revert fshine 纯编排分支不改变 17dz 侧 canary 状态；17dz canary 的回滚须在 17dz 仓另行处理。本节不把 17dz canary 写成 fshine 已修项 |
+
+**F1/F2 基线**：波次起点为 §23 后的 main（D-145 清偿后全量 1795 例 / 132 文件，见 debt-ledger D-145）；波次内 `91bf841` 提交信息实测 unit 104 文件 / 1706 例——与 1795 的差额是统计口径（提交信息只计 unit 文件，不含 e2e）与波次内 e2e 归属调整所致，**本补档不把两个口径拼成一条曲线**。本补档分支的终态 gate 见 PR 描述（`npm run typecheck`、`npm run test` unit 全量、`npm run eval:generic-mock`）。
+
+**F3 变异留档（2026-11-04 补档批次，变异均已还原，工作树复核干净）**：变异方法 = 临时改源码、跑对应单测文件、确认红、立即 `git checkout` 还原，不留变异代码。
+
+| # | 新守卫 | 变异 | 结果 | 留档位置 |
+|---|---|---|---|---|
+| G1 | 步数帽阈值：50 不触发、51 触发（`worker-step-cap.ts` `stepCapDecision`） | `>` 改 `>=` | `phase2.test.ts` **2 红**（50 默认值 / 51 触发两条）→ 还原复绿 | 本节 + D-147 |
+| G2 | 收尾 steer 只送一次（`createStepCapWindDown`） | 删 `sent = true` | `production-wiring.test.ts` **1 红**（50→0 / 51→1 / 52→仍 1）→ 还原复绿 | 本节 + D-147 |
+| G3 | 门调用分区计数：每放行恰计一类，分区和 = gateCalls（`recordAllowedBashCall`，`91bf841`） | local 计 1 改 0 | `gate-call-counts.test.ts` **4 红**（全文件）→ 还原复绿 | 本节 |
+| G4 | 工具定义移除守卫（`decideToolDefinitionGuard`） | `!tools && !exec` 改 `!tools && exec` | `phase2.test.ts` **2 红** → 还原复绿 | 本节 |
+| G5 | 提案机械复核：schema 缺失/非法即不一致（`mechanicalReview`） | schema 检查改 `if (false)` | `production-wiring.test.ts` **1 红** → 还原复绿 | 本节 + D-148/D-149 |
+| G6 | 提案 schema 取问：仅认 `proposal.create` 行的非空普通对象（`parseProposalSchema`） | 去掉 `!Array.isArray` | `production-wiring.test.ts` **1 红** → 还原复绿 | 本节 + D-148 |
+| G7 | 交接版本校验（`parseHandover`） | 版本不等改 `if (false)` | `phase2.test.ts` **1 红** → 还原复绿 | 本节 |
+| G8 | 交接分级恢复：损坏 + 转录在场 → 重建不 blocked（`resolveHandoverRecovery`） | `transcriptAvailable` 改 `if (false)` | `phase2.test.ts` **1 红** → 还原复绿 | 本节 |
+| G9 | 预算 weight fail-closed（`plan-runtime.ts`） | weight 合法性检查改 `if (false)` | `plan-budget-overlay.test.ts` **2 红**（缺失 / 非法两条）→ 还原复绿 | 本节 |
+| G10 | 网关文本识别随 profile（`gatewayTextPatterns`） | 注入网关名改硬编码旧名 | `gateway-text-recognition.test.ts` **2 红** → 还原复绿 | 本节 |
+| G11 | 交接去重：同一调用不重复计数（`mergeExecutedCalls`） | 去重条件改 `if (true)` | `phase2.test.ts` **1 红** → 还原复绿 | 本节 |
+| G12 | committed_unverified：`PROPOSAL_VERIFY_SHORT` 即未核实终态（`isCommittedUnverified`） | 该码分支改 `if (false)` | `phase2.test.ts` **1 红** → 还原复绿 | 本节 |
+| G13 | 提案复核驱动必注入（`context.ts` 创建路径） | `!proposalReviewTurn` 改 `if (false)` | `production-wiring.test.ts` **1 红**（未注入驱动仍失败那条）→ 还原复绿 | 本节 + D-148 |
+| G14 | 预算叠加只收紧不放宽（`plan-runtime.ts` 更严为准） | 更严判断改恒真（恒取宿主档） | `plan-budget-overlay.test.ts` **1 红**（平台 confirm + 宿主 execute 仍 confirm 那条）→ 还原复绿 | 本节 |
+
+**未留档（登记，不冒充已验证）**：① gatedWorker 光标不重跑最后一段（`tests/e2e/harness-cursor.test.ts`）：测试存在，但本补档未对其做单进程变异（e2e harness 接缝，变异成本与 flaky 风险另计），F3 留档缺口登记在 debt-ledger 2026-11-04 补充记录。② profile.gateway 的 spawn 路径 fail-closed（`gateway-profile.test.ts`「未声明 gateway 不回退旧值」）：测试存在，本补档未做变异，同上登记。③ F6 真实模型探针：本波的通用模型评估（`3acfb05` 机械 21/21、`2eaf927` stock 域真模型）是波次内证据，不是 §1 F6 意义上的"改前/改后同参数探针复跑"，不得写成 F6 已过。
+
+**F7 文档同步**：本节 + debt-ledger 2026-11-04 补充记录（D-146–D-149）+ architecture-laws L5 不变量与标定表补行（步数帽、提案复核）同分支提交；`docs-reality.test.ts` 未因本补档改动而新增断言——本补档只补文档，不改代码主张，故不触发双向对账新增项。
