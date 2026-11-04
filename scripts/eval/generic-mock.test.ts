@@ -1,11 +1,11 @@
 /**
- * Generic-mock integration tests (no model, no 17dz, no real platform).
+ * Generic-mock integration tests (no model, no finance execution layer, no real platform).
  *
  * Proves fshine's own operation-list consumers work against the dummy
  * execution layer: labels, arg specs, semantics and protocol roles are all
- * derived from `bin/dummy operation list --json` (via the bin/17dz
- * compatibility symlink inside the fixture, which is how fshine's
- * gatewayExecPath addresses any platform root), never from a second copy
+ * derived from `bin/dummy operation list --json` (via the bin/generic
+ * symlink inside the fixture, which is how fshine's gatewayExecPath
+ * addresses any platform root), never from a second copy
  * in this repo. The dummy CLI itself is covered deterministically by
  * scripts/eval/generic-mock.ts; this file covers the fshine side of the
  * same interface.

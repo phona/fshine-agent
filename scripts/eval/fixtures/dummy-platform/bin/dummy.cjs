@@ -7,7 +7,7 @@
  * here are deliberately neutral: record / collection / window. No finance,
  * voucher, account-set or period vocabulary lives in this fixture.
  *
- * Transport: binary CLI only, same surface as bin/17dz (see parent design):
+ * Transport: binary CLI only, same surface as any execution-layer gateway (see docs/execution-layer-interface.md):
  *   operation list --json | plan --schema | plan evaluate/current/status/activate
  *   proposal status | query|prepare|commit|local <target> [args]
  * Protocol: RESULT envelope v1 on the last stdout line, exit codes 0/1/2/3.
@@ -21,7 +21,7 @@
  *   DUMMY_PLAN_STATE      (plans; default <state-dir>/plans.json)
  *   DUMMY_PROPOSAL_STATE  (proposals; default <state-dir>/proposals.json)
  *   DUMMY_AUDIT_PATH / DZ_AUDIT_PATH (JSONL audit, refusals included)
- * Serve compatibility: when used as bin/17dz inside this fixture, fshine sets
+ * Serve compatibility: when used as bin/generic inside this fixture, fshine sets
  * DZ_SERVE=1 / DZ_INVOCATION / DZ_PLAN_ID / DZ_COMMIT_TOKEN / DZ_GATE_SECRET /
  * DZ_PLAN_ACTIVATION_SECRET. This fixture accepts those names as aliases for
  * its own DUMMY_* names, so fshine code needs no change. It does NOT read
@@ -29,8 +29,8 @@
  *
  * Deliberately NOT implemented in v1 (see GENERIC_MOCK_NOTES.md):
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
- * rate-limit token bucket, browser/platform execution. Those are 17dz
- * specifics, not protocol. The eval script tests what is implemented and
+ * rate-limit token bucket, browser/platform execution. Those are
+ * execution-layer-instance specifics, not protocol. The eval script tests what is implemented and
  * lists the rest as TODO, it does not fake them.
  */
 'use strict';
@@ -521,7 +521,7 @@ async function main() {
   if (['query', 'prepare', 'commit', 'local'].includes(cmd)) {
     const target = argv[1];
     const rest = argv.slice(2);
-    // local: scratch scripts under <fixture>/tmp/ only (mirrors 17dz local rule, simplified).
+    // local: scratch scripts under <fixture>/tmp/ only (mirrors the local rule of an execution layer, simplified).
     if (cmd === 'local') {
       if (!target) { process.stderr.write('usage: dummy local <script> [args...]\n'); return 2; }
       const abs = path.resolve(target);
@@ -534,7 +534,7 @@ async function main() {
     if (!target) { process.stderr.write(`usage: dummy ${cmd} <operation-or-script> [args...]\n`); return 2; }
     const op = resolveOperation(target);
     if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
-    // Proposal protocol routing (by operation name, not script path -- same rule as 17dz).
+    // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
       audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
       return doProposalCreate(op.name, rest);
@@ -557,7 +557,7 @@ async function main() {
     else if (op.name === 'dummy.prepare') code = doPrepare(op.name, rest);
     else if (op.name === 'dummy.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
-      // mirroring 17dz gateway commit-token binding (operation name preferred).
+      // mirroring gateway commit-token binding (operation name preferred).
       const secret = env2('DUMMY_GATE_SECRET', 'DZ_GATE_SECRET', '');
       const token = env2('DUMMY_COMMIT_TOKEN', 'DZ_COMMIT_TOKEN', '');
       if (secret) {

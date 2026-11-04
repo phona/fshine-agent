@@ -2,7 +2,7 @@
  * Generic-mock deterministic eval for fshine-agent (Phase 1 protocol + Phase 2 host).
  *
  * This is NOT the real-model Tier-1 probe. It needs no LLM, no WeCom, no
- * 17dz checkout and no real platform. It spawns the dummy execution layer
+ * execution-layer checkout and no real platform. It spawns the dummy execution layer
  * (scripts/eval/fixtures/dummy-platform/bin/dummy) directly and checks the
  * protocol the orchestration layer consumes: operation list, plan, proposal,
  * RESULT envelope v1, exit codes, and per-case state isolation. Phase 2 adds
@@ -48,7 +48,10 @@ import { decideToolDefinitionGuard } from '../../packages/agent/src/tool-definit
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(evalDir, '..', '..');
 const fixtureRoot = path.join(evalDir, 'fixtures', 'dummy-platform');
-const dummyBin = path.join(fixtureRoot, 'bin', 'dummy');
+// Generic gateway entry point (bin/generic -> dummy); the eval proves the
+// orchestration layer works through the generic gateway name, not the dummy's
+// own file name and not any execution-layer instance's gateway name.
+const dummyBin = path.join(fixtureRoot, 'bin', 'generic');
 const BASELINE_PATH = path.join(evalDir, 'generic-mock-baseline.json');
 
 interface Check { name: string; pass: boolean; expected: string; actual: string }

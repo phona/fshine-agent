@@ -99,15 +99,17 @@ number from here.
   `bin/dummy.cjs` (Node implementation, CommonJS — the repo is
   `"type": "module"`, so an extensionless Node file loads as ESM and fails;
   the shim is the workaround, documented here so nobody "simplifies" it away).
-- `bin/17dz` inside the fixture is a symlink to `dummy`. That is the
-  compatibility point that lets fshine code stay unchanged: fshine's
-  `gatewayExecPath(platformRoot)` always resolves to `<root>/bin/17dz`.
+- `bin/generic` inside the fixture is a symlink to `dummy`. That is the
+  generic gateway name (see docs/execution-layer-interface.md §0):
+  fshine's `gatewayExecPath(platformRoot, 'bin/generic')` resolves to
+  `<root>/bin/generic`. The finance instance's own gateway name
+  (`bin/17dz`) lives only in that instance's profile, not here.
   The dummy's primary entry is still `bin/dummy`; the symlink is not a
   second implementation.
 - `scripts/lint-operations.js` in the fixture, for fshine's assembly health
   gate (`<platformRoot>/scripts/lint-operations.js` must exit 0).
 - `scripts/eval/generic-mock.ts` — deterministic eval, no model, no network,
-  no 17dz checkout. Command: `npm run eval:generic-mock` (full) or
+  no finance execution-layer checkout. Command: `npm run eval:generic-mock` (full) or
   `node --import tsx scripts/eval/generic-mock.ts --only=<id>` (single case;
   note: `npm run … -- --only=…` is swallowed by npm, use the direct node
   form for --only).
@@ -258,7 +260,7 @@ number from here.
   51st allowed bash (decision boundary is proven, live steer is not).
 - Moving session/sensitive state out of the worker-readable workspace
   (dummy has no browser profile or platform session, so this gap is
-  17dz-side, not dummy-side).
+  execution-layer-instance side, not dummy-side).
 - Real-model L1 migration: run the 7 L1 cases against the dummy domain
   with a real model, 3 rounds, then set a separate Main-agent baseline.
   That run needs LLM credentials and must be done by the parent agent,
