@@ -28,10 +28,14 @@ export {
   handoverFilePath,
   mergeExecutedCalls,
   parseHandover,
+  parseHandoverWithCode,
   readHandoverFile,
+  readHandoverFileWithCode,
   serializeHandover,
   writeHandoverFile,
   type HandoverExecutedCall,
+  type HandoverReadCode,
+  type HandoverReadResult,
   type TaskHandover,
 } from './task-handover';
 export {
@@ -218,6 +222,7 @@ export {
   RUN_EXECUTION_TASK_DESCRIPTION,
   RUN_EXECUTION_TASK_SCHEMA,
   withStepLabel,
+  resolveHandoverRecovery,
   DELEGATION_AUTH_FAILURE,
   DELEGATION_TIMEOUT_FAILURE,
   DELEGATION_EXECUTOR_FAILURE,
@@ -236,6 +241,7 @@ export {
   type PreparedContextTaskRun,
   type PreparedContextTaskRunExecution,
   type RunWorkspaceFile,
+  type HandoverRecovery,
 } from './context';
 export {
   createTaxAgentRuntime,

@@ -12,11 +12,14 @@ import {
   HANDOVER_VERSION,
   mergeExecutedCalls,
   parseHandover,
+  parseHandoverWithCode,
   readHandoverFile,
+  readHandoverFileWithCode,
   serializeHandover,
   writeHandoverFile,
   type TaskHandover,
 } from './task-handover';
+import { resolveHandoverRecovery } from './context';
 import { mechanicalReview, parseReviewReply, reviewProposalWithDriver } from './proposal-review';
 import { isCommittedUnverified, renderCommittedUnverifiedReply } from './committed-unverified';
 import { decideToolDefinitionGuard } from './tool-definition-guard';
@@ -78,6 +81,38 @@ describe('task handover', () => {
       { operation: 'dummy.query', args: ['--record', 'beta'] },
     ];
     expect(mergeExecutedCalls(already, from)).toHaveLength(2);
+  });
+  it('distinguishes handover read codes instead of collapsing them to null', () => {
+    expect(parseHandoverWithCode(serializeHandover(handover())).code).toBe('handover_ok');
+    expect(parseHandoverWithCode('{broken json').code).toBe('handover_corrupt_json');
+    expect(parseHandoverWithCode(JSON.stringify({ ...handover(), version: 99 })).code).toBe('handover_version_mismatch');
+    expect(parseHandoverWithCode(JSON.stringify({ ...handover(), executedCalls: 'not-an-array' })).code).toBe('handover_schema_invalid');
+    const root = mkdtempSync(path.join(tmpdir(), 'fshine-handover-code-'));
+    expect(readHandoverFileWithCode(root, 'task-missing').code).toBe('handover_missing');
+  });
+  it('recovers from corrupt handover on transcript, blocks only when transcript is also gone', () => {
+    const withTranscript = {
+      taskId: 'task-1', parentSessionId: 's', principalId: 'p',
+      workerMessages: [{ role: 'assistant', content: '第一轮' }], createdAt: '', updatedAt: '',
+      resultText: '第一轮结果',
+    } as never;
+    const rebuilt = resolveHandoverRecovery({ existing: withTranscript, read: { code: 'handover_corrupt_json', handover: null } });
+    expect(rebuilt.level).toBe('transcript_rebuilt');
+    expect(rebuilt.canProceed).toBe(true);
+    expect(rebuilt.blocked).toBe(false);
+    expect(rebuilt.discarded).toBe(true);
+    const empty = {
+      taskId: 'task-1', parentSessionId: 's', principalId: 'p',
+      workerMessages: [], createdAt: '', updatedAt: '',
+    } as never;
+    const blocked = resolveHandoverRecovery({ existing: empty, read: { code: 'handover_version_mismatch', handover: null, rawVersion: 99 } });
+    expect(blocked.level).toBe('blocked');
+    expect(blocked.canProceed).toBe(false);
+    expect(blocked.blocked).toBe(true);
+    expect(blocked.missing).toContain('转录消息');
+    const missing = resolveHandoverRecovery({ existing: withTranscript, read: { code: 'handover_missing', handover: null } });
+    expect(missing.level).toBe('transcript_only');
+    expect(missing.canProceed).toBe(true);
   });
 });
 

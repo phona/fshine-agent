@@ -11,7 +11,7 @@
  * （L4：宿主不该知道自己在提交什么业务）。
  */
 import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
-import { createReadStream, existsSync } from 'node:fs';
+import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
@@ -26,7 +26,7 @@ import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
-import { HANDOVER_VERSION, handoverFilePath, mergeExecutedCalls, readHandoverFile, writeHandoverFile, type HandoverExecutedCall, type TaskHandover } from './task-handover';
+import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHandoverFile, type HandoverExecutedCall, type HandoverReadCode, type HandoverReadResult, type TaskHandover } from './task-handover';
 import { loadProposalSchema } from './operation-labels';
 import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
@@ -215,6 +215,61 @@ export interface PreparedContextTaskRun {
   execute(options: PreparedContextTaskRunExecution): Promise<SubagentTaskResult>;
 }
 
+/**
+ * Main 对交接读取的分级恢复结论（接口文档 §11，异常码即判据）：
+ * - handover：交接可用，按交接续跑。
+ * - transcript_only：交接从未写成（handover_missing），只凭转录续跑；新请求本身就是下一步。
+ * - transcript_rebuilt：交接损坏族（解析失败 / 版本不符 / 形状非法），文件内容一律丢弃，
+ *   只凭转录（workerMessages / 结果原文 / 已执行调用清单）重建；已确认意图与结果不依赖
+ *   交接文件——意图住在 changeIntents 库、结果住在任务条目，转录在场时它们不受交接丢失影响。
+ * - blocked：交接损坏且转录也无法重建（转录消息、结果原文、已执行调用清单全空），
+ *   确实恢复不了、推进不了，才进入人工介入；这是人工介入的唯一条件，可恢复的损坏绝不推给人工。
+ * - fresh：新任务，无续跑可言。
+ */
+export interface HandoverRecovery {
+  code: HandoverReadCode | 'handover_fresh';
+  level: 'handover' | 'transcript_only' | 'transcript_rebuilt' | 'blocked' | 'fresh';
+  /** 损坏族文件内容是否已被丢弃（ok / missing / fresh 时为 false）。 */
+  discarded: boolean;
+  /** 续跑时已有的转录消息条数（重建依据的量，不是质量保证）。 */
+  transcriptMessages: number;
+  canProceed: boolean;
+  blocked: boolean;
+  /** blocked 时缺的东西（needs 的 missing 原样来源）；非 blocked 时为空。 */
+  missing: string[];
+}
+
+export function resolveHandoverRecovery(input: {
+  existing: PlatformTaskRecord | null;
+  read: HandoverReadResult;
+}): HandoverRecovery {
+  const { existing, read } = input;
+  if (!existing) {
+    return { code: 'handover_fresh', level: 'fresh', discarded: false, transcriptMessages: 0, canProceed: true, blocked: false, missing: [] };
+  }
+  const transcriptMessages = existing.workerMessages.length;
+  const transcriptAvailable = transcriptMessages > 0
+    || Boolean(existing.resultText?.trim())
+    || (existing.calls?.length ?? 0) > 0;
+  if (read.code === 'handover_ok') {
+    return { code: read.code, level: 'handover', discarded: false, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  if (read.code === 'handover_missing') {
+    return { code: read.code, level: 'transcript_only', discarded: false, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  // 损坏族：文件内容一律丢弃；转录在场就重建，不在场才 blocked。
+  if (transcriptAvailable) {
+    return { code: read.code, level: 'transcript_rebuilt', discarded: true, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  const missing: string[] = [];
+  if (transcriptMessages === 0) missing.push('转录消息');
+  if (!existing.resultText?.trim()) missing.push('任务结果原文');
+  if ((existing.calls?.length ?? 0) === 0) missing.push('已执行调用清单');
+  missing.push('下一步的确定依据（交接文件已损坏且无转录可重建）');
+  missing.push('待确认提案状态（交接丢失后无法确认本任务是否已有待确认提案）');
+  return { code: read.code, level: 'blocked', discarded: true, transcriptMessages, canProceed: false, blocked: true, missing };
+}
+
 interface ContextTaskPreparationState {
   args: ContextTaskRunArgs;
   ctx: ContextTaskExecutionContext;
@@ -227,6 +282,7 @@ interface ContextTaskPreparationState {
   stepLabel: string;
   /** Host-written handover read on continue (null on a fresh task or a missing/corrupt file). */
   handover: TaskHandover | null;
+  handoverRecovery: HandoverRecovery;
 }
 
 export type { SubagentNeeds };
@@ -1127,14 +1183,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       ...previousMessages,
       { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
     ];
-    // 续跑时宿主先读交接文件再环境核对（第 2 包端到端）：交接是任务层事实，
-    // 不是会话层触发式召回。文件缺失 = 交接不可用（仍可凭转录续跑，不凭空
-    // 编一个）；文件存在但解析失败 / 版本不符 = 交接损坏，对交接数据
-    // fail-closed：按缺失处理、其调用一律不合并，事件记
-    // `task_handover_corrupt`（整轮续跑本身不因此硬阻塞，见接口文档 §11；
-    // 若要升级为硬阻塞须另行裁定）。
-    const handover = existing ? readHandoverFile(profile.root, taskId) : null;
-    const handoverCorrupt = existing && !handover && existsSync(handoverFilePath(profile.root, taskId));
+    // 续跑时宿主先读交接文件再环境核对：交接是任务层事实，不是会话层
+    // 触发式召回。Main 按异常码分级恢复（接口文档 §11，码即判据）：
+    // ok → 按交接续跑；missing → 只凭转录续跑；损坏族 → 丢弃文件内容、
+    // 只凭转录重建（转录在场就继续，不推给人工）；损坏且转录也无 →
+    // blocked（人工介入的唯一条件）。损坏的调用一律不合并、不做部分解析。
+    const read = existing ? readHandoverFileWithCode(profile.root, taskId) : { code: 'handover_missing' as const, handover: null };
+    const handover = read.handover;
+    const handoverRecovery = resolveHandoverRecovery({ existing, read });
     if (existing && handover) {
       console.info(JSON.stringify({
         event: 'task_handover_resumed',
@@ -1144,12 +1200,25 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         executedCalls: handover.executedCalls.length,
         unfinishedSteps: handover.unfinishedSteps.length,
       }));
-    } else if (handoverCorrupt) {
-      console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId }));
-    } else if (existing) {
-      console.info(JSON.stringify({ event: 'task_handover_missing', taskId }));
+    } else if (existing && handoverRecovery.level === 'blocked') {
+      console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId, code: handoverRecovery.code }));
+      console.info(JSON.stringify({ event: 'task_handover_blocked', taskId, code: handoverRecovery.code, missing: handoverRecovery.missing }));
+    } else if (existing && handoverRecovery.code !== 'handover_ok') {
+      if (handoverRecovery.code === 'handover_missing') {
+        console.info(JSON.stringify({ event: 'task_handover_missing', taskId }));
+      } else {
+        console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId, code: handoverRecovery.code }));
+      }
+      console.info(JSON.stringify({
+        event: 'task_handover_recovered',
+        taskId,
+        code: handoverRecovery.code,
+        level: handoverRecovery.level,
+        discarded: handoverRecovery.discarded,
+        transcriptMessages: handoverRecovery.transcriptMessages,
+      }));
     }
-    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel, handover };
+    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel, handover, handoverRecovery };
   }
 
   const runner: InternalContextTaskRunner = {
@@ -1287,11 +1356,27 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (execution?.backgroundRunId) {
         ctx = { trusted: { ...ctx.trusted, backgroundRunId: execution.backgroundRunId } };
       }
-      const { profile, existing, taskId, scratchDir, messages, stepLabel, handover } = preparedState;
+      const { profile, existing, taskId, scratchDir, messages, stepLabel, handover, handoverRecovery } = preparedState;
       const runSignal = execution?.signal ?? signal;
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED);
+      // 人工介入的唯一入口：交接损坏且转录也无法重建。此时不调 worker、
+      // 不写新交接、不发确认码、不重复提交，只把缺什么交还 Main（needs），
+      // 由 Main 决定是人工核对后重发、还是放弃本任务。任务条目原样不动，
+      // 以便人工核对时仍能看到旧转录与旧状态。
+      if (handoverRecovery.blocked) {
+        const needs: SubagentNeeds = {
+          missing: handoverRecovery.missing,
+          reason: `交接文件损坏（${handoverRecovery.code}）且转录无法重建，Main 无法确定本任务的已做部分与下一步。`,
+          suggestion: '请人工核对本任务是否已有待确认提案、以及希望的下一步，再决定是重新发请求还是放弃本任务；核对前不要重复提交。',
+        };
+        return {
+          taskId,
+          text: `本轮已停止委派：交接文件损坏（${handoverRecovery.code}），转录也无法重建，无法确定已做部分与下一步。缺：${handoverRecovery.missing.join('、')}。未调用 worker、未发确认码、未重复提交，需人工核对后再决定。`,
+          needs,
+        };
+      }
       const running: PlatformTaskRecord = {
         taskId,
         parentSessionId: ctx.trusted.sessionId,

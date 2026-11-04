@@ -14,9 +14,10 @@
  *     驱动里实际调用的那段生产代码（跟踪器），不是它的复写；活会话里
  *     51 次放行才送 steer 的完整链路仍待一次真模型长任务复核。
  *   · 交接文件：真实 context runner 的续跑先读交接文件再委派；
- *     第二轮的调用与首轮去重合并、不重复计数；文件损坏时对交接数据
- *     fail-closed（记 `task_handover_corrupt`、损坏的调用一律不合并），
- *     但整轮续跑不因此硬阻塞（转录续跑仍是既有设计；升级为硬阻塞须另行裁定）。
+ *     第二轮的调用与首轮去重合并、不重复计数；文件损坏时 Main 按异常码
+ *     分级恢复（接口文档 §11）：损坏内容一律丢弃、只凭转录重建，转录在场
+ *     就继续，不推给人工；损坏且转录也无时才进入人工介入（needs），不调
+ *     worker、不发确认码、不重复提交。
  *
  * 全部用脚本化驱动 + 通用 dummy 平台，不碰真模型、不碰真平台。
  */
@@ -299,7 +300,7 @@ describe('生产接线 · 交接文件真实续跑', () => {
     }
   });
 
-  it('交接文件损坏：记 task_handover_corrupt、损坏的调用一律不合并，续跑本身不硬阻塞', async () => {
+  it('交接文件损坏：记 task_handover_corrupt、损坏的调用一律不合并，转录在场时自动恢复继续', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
     const first = runner(root, tasks, queueDriver([turnResult('第一轮', [{ operation: 'dummy.query', args: ['a'] }])]));
@@ -315,9 +316,63 @@ describe('生产接线 · 交接文件真实续跑', () => {
       ]));
       const done = await resumed.run({ taskId: pending.taskId, request: '继续查询' }, { trusted: trusted() });
       expect(done.text).toContain('第二轮');
-      expect(logs.some((line) => line.includes('task_handover_corrupt'))).toBe(true);
+      expect(done.needs).toBeUndefined();
+      expect(logs.some((line) => line.includes('task_handover_corrupt') && line.includes('handover_corrupt_json'))).toBe(true);
+      expect(logs.some((line) => line.includes('task_handover_recovered') && line.includes('transcript_rebuilt'))).toBe(true);
+      expect(logs.some((line) => line.includes('task_handover_blocked'))).toBe(false);
       const after = readHandoverFile(root, pending.taskId);
       expect(after?.executedCalls.map((c) => c.args.join(','))).toEqual(['b']);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('交接版本不符与形状非法：同样按损坏码丢弃重建，不推给人工', async () => {
+    for (const broken of [
+      JSON.stringify({ version: 99, taskId: 'x', completedSteps: [], executedCalls: [], unfinishedSteps: [], nextAction: '', lastResultSummary: '' }),
+      JSON.stringify({ version: 1, taskId: 'x', completedSteps: [], executedCalls: 'not-an-array', unfinishedSteps: [], nextAction: '', lastResultSummary: '' }),
+    ]) {
+      const root = await profileRoot();
+      const tasks = new MemoryTasks();
+      const first = runner(root, tasks, queueDriver([turnResult('第一轮', [{ operation: 'dummy.query', args: ['a'] }])]));
+      const pending = await first.run({ request: '查询 a' }, { trusted: trusted() });
+      writeFileSync(handoverFilePath(root, pending.taskId), broken);
+      const resumed = runner(root, tasks, queueDriver([
+        turnResult('第二轮', [{ operation: 'dummy.query', args: ['b'] }]),
+      ]));
+      const done = await resumed.run({ taskId: pending.taskId, request: '继续查询' }, { trusted: trusted() });
+      expect(done.text).toContain('第二轮');
+      expect(done.needs).toBeUndefined();
+    }
+  });
+
+  it('交接损坏且转录也缺失：进入人工介入，不调 worker、不发确认码、不重复提交', async () => {
+    const root = await profileRoot();
+    const tasks = new MemoryTasks();
+    const taskId = 'task_blocked';
+    await tasks.upsert({
+      taskId, parentSessionId: 'wecom:u1:c1', principalId: 'wecom:u1',
+      workerMessages: [], createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    } as PlatformTaskRecord);
+    await mkdir(path.dirname(handoverFilePath(root, taskId)), { recursive: true });
+    writeFileSync(handoverFilePath(root, taskId), '{broken json');
+    let workerCalls = 0;
+    const driver: TurnDriver = { run: async () => { workerCalls += 1; return { text: '不应执行', messages: [] }; } };
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, 'info').mockImplementation((...args: unknown[]) => { logs.push(String(args[0])); });
+    try {
+      const resumed = runner(root, tasks, driver);
+      const done = await resumed.run({ taskId, request: '继续查询' }, { trusted: trusted() });
+      expect(workerCalls).toBe(0);
+      expect(done.needs).toBeDefined();
+      expect(done.needs?.missing).toContain('转录消息');
+      expect(done.text).toContain('人工');
+      expect(done.proposalCreated).toBeUndefined();
+      expect(done.execution).toBeUndefined();
+      expect(logs.some((line) => line.includes('task_handover_blocked'))).toBe(true);
+      // 任务条目原样不动，供人工核对。
+      const kept = await tasks.get(taskId);
+      expect(kept?.workerMessages).toEqual([]);
     } finally {
       spy.mockRestore();
     }

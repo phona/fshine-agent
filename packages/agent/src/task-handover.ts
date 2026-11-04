@@ -18,7 +18,7 @@
  * executed calls with any already-recorded calls by that key, never by
  * appending blindly.
  */
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 export const HANDOVER_FILE_NAME = 'handover.json';
@@ -118,4 +118,59 @@ export function readHandoverFile(platformRoot: string, taskId: string): TaskHand
   } catch {
     return null;
   }
+}
+
+/**
+ * 交接读取的异常码（Main 分级恢复的唯一判据，见接口文档 §11）：
+ * - handover_ok：文件可用。
+ * - handover_missing：文件不存在（从未写成；不是损坏的证据）。
+ * - handover_corrupt_json：文件存在但 JSON 解析失败。
+ * - handover_version_mismatch：JSON 合法但 version 不是当前版本（不做版本迁移，不猜字段）。
+ * - handover_schema_invalid：JSON 合法、版本对，但必填字段/调用形状不对；文件不可读
+ *   （exists 后读失败）也归入此类——内容无法验证，一律按不可信处理。
+ * 损坏族（后三码）一律丢弃文件内容，绝不做部分解析后合并。
+ */
+export type HandoverReadCode =
+  | 'handover_ok'
+  | 'handover_missing'
+  | 'handover_corrupt_json'
+  | 'handover_version_mismatch'
+  | 'handover_schema_invalid';
+
+export interface HandoverReadResult {
+  code: HandoverReadCode;
+  handover: TaskHandover | null;
+  /** version 字段的原值（仅 version_mismatch 时有意义，供日志与人工核对）。 */
+  rawVersion?: unknown;
+}
+
+export function parseHandoverWithCode(raw: string): HandoverReadResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { code: 'handover_corrupt_json', handover: null };
+  }
+  if (!parsed || typeof parsed !== 'object') return { code: 'handover_schema_invalid', handover: null };
+  const row = parsed as Record<string, unknown>;
+  if (row.version !== HANDOVER_VERSION) {
+    return { code: 'handover_version_mismatch', handover: null, rawVersion: row.version };
+  }
+  const handover = parseHandover(raw);
+  return handover
+    ? { code: 'handover_ok', handover }
+    : { code: 'handover_schema_invalid', handover: null };
+}
+
+export function readHandoverFileWithCode(platformRoot: string, taskId: string): HandoverReadResult {
+  const file = handoverFilePath(platformRoot, taskId);
+  if (!existsSync(file)) return { code: 'handover_missing', handover: null };
+  let raw: string;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch {
+    // 文件存在但读失败：内容无法验证，按不可信处理。
+    return { code: 'handover_schema_invalid', handover: null };
+  }
+  return parseHandoverWithCode(raw);
 }

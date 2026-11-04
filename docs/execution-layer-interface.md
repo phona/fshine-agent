@@ -265,11 +265,9 @@
   `<platformRoot>/tmp/<taskId>/handover.json`（`context.ts` 的
   prepare 阶段），去重合并按精确键（operation + args），已记的调用
   不二次计数；文件缺失 = 交接不可用（事件 `task_handover_missing`，
-  仍可凭转录续跑，不凭空编一个）；文件存在但解析失败 / 版本不符 =
-  交接损坏（事件 `task_handover_corrupt`），交接按缺失处理、其调用
-  一律不合并——对交接数据 fail-closed，**不是**对整轮续跑硬阻塞
-  （转录续跑仍是既有设计；若要把损坏升级为整轮阻塞，须另行裁定，
-  见第 2 包收尾报告的遗留项）。证据见同一测试文件的续跑证明。
+  仍可凭转录续跑，不凭空编一个）。损坏的分级恢复见 §13（2026-11-04
+  裁定后，取代本条旧的“不硬阻塞、须另行裁定”表述）。证据见同一测试
+  文件的续跑证明。
 
 ## 12. B4 审计结论（第 1 包收尾核查，2026-11-04）
 
@@ -289,3 +287,35 @@
 - `run_17dz_task` 与 `17dz 子 Agent` 标签保留：那是财税集成
   已发布的工具协议名，改名即断协议；新执行层接入时用其中性
   工具名，不复用该名（§0、§10）。
+
+## 13. 交接损坏的 Main 分级恢复（第 2 包后续裁定，2026-11-04）
+
+原则：交接损坏由 Main 兜底，不要什么都让人介入；只有确实恢复不了、
+推进不了的东西才进入人工介入。异常码就是决策依据（`task-handover.ts`
+的 `HandoverReadCode`，`context.ts` 的 `resolveHandoverRecovery`）。
+
+| 异常码 | 含义 | Main 恢复分支 | 事件 |
+| --- | --- | --- | --- |
+| `handover_ok` | 文件可用 | 按交接续跑（原有去重合并） | `task_handover_resumed` |
+| `handover_missing` | 文件不存在（从未写成，不是损坏的证据） | 只凭转录续跑；新请求本身就是下一步 | `task_handover_missing` + `task_handover_recovered`（level `transcript_only`） |
+| `handover_corrupt_json` | 存在但 JSON 解析失败 | 丢弃文件内容（不做部分解析）、只凭转录重建；转录在场就继续 | `task_handover_corrupt` + `task_handover_recovered`（level `transcript_rebuilt`） |
+| `handover_version_mismatch` | JSON 合法但 version 不是当前版本 | 同上；不做版本迁移、不猜字段 | 同上 |
+| `handover_schema_invalid` | JSON 合法、版本对，但必填字段/调用形状不对（文件存在但读失败也归入此类） | 同上 | 同上 |
+
+重建的依据与边界（必须如实说清，不夸大）：
+
+- 转录在场 = 任务条目的 workerMessages、结果原文、已执行调用清单
+  任一非空。转录消息本身已随续跑进入 worker 上下文，旧的已执行调用
+  因此仍可见；交接文件丢弃后，去重合并的范围重置为本轮起——旧调用
+  不再由交接文件保证不二次计数，这是丢弃的真实代价，文档不掩盖它。
+- 已确认意图与结果不依赖交接文件：意图住在 changeIntents 库、结果
+  住在任务条目，交接丢失不影响确认码路径；损坏恢复绝不因此重发
+  确认码、绝不重复提交。
+- 人工介入的唯一条件：交接损坏族 + 转录也无法重建（转录消息、结果
+  原文、已执行调用记录全空）。此时 Main 不调 worker、不写新交接、
+  不发确认码、不重复提交，只返回结构化 needs（缺：转录消息、任务
+  结果原文、已执行调用清单、下一步的确定依据、待确认提案状态），
+  任务条目原样不动供人工核对。事件 `task_handover_blocked`。
+- 缺失（missing）不适用 blocked：从未写成的交接没有“丢失的状态”
+  可言，新请求即下一步；只有“写过又坏了”且转录也无时才 blocked。
+  这是 missing 与损坏族在恢复链里的实质区别，不是口头区分。
