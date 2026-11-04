@@ -160,7 +160,8 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
   }
   const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
   const RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
-  const evaluation = RANK[host.tier] > RANK[rawEvaluation.decision]
+  const rankOf = (tier: string): number => RANK[tier] ?? 0;
+  const evaluation = rankOf(host.tier) > rankOf(rawEvaluation.decision)
     ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
     : rawEvaluation;
 
