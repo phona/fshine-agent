@@ -1209,3 +1209,12 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 **未留档（登记，不冒充已验证）**：① gatedWorker 光标不重跑最后一段（`tests/e2e/harness-cursor.test.ts`）：测试存在，但本补档未对其做单进程变异（e2e harness 接缝，变异成本与 flaky 风险另计），F3 留档缺口登记在 debt-ledger 2026-11-04 补充记录。② profile.gateway 的 spawn 路径 fail-closed（`gateway-profile.test.ts`「未声明 gateway 不回退旧值」）：测试存在，本补档未做变异，同上登记。③ F6 真实模型探针：本波的通用模型评估（`3acfb05` 机械 21/21、`2eaf927` stock 域真模型）是波次内证据，不是 §1 F6 意义上的"改前/改后同参数探针复跑"，不得写成 F6 已过。
 
 **F7 文档同步**：本节 + debt-ledger 2026-11-04 补充记录（D-146–D-149）+ architecture-laws L5 不变量与标定表补行（步数帽、提案复核）同分支提交；`docs-reality.test.ts` 未因本补档改动而新增断言——本补档只补文档，不改代码主张，故不触发双向对账新增项。
+
+## 补充（第三轮评审合入前钉子，超出 §24 声明范围——不是 §24 内）
+
+§24 的声明范围是 `origin/main`（`33c1a31`）→ `91bf841` 的 35 个提交。本补充节的守卫落地在 `91bf841` 之后（`5426a85` decision fail-closed、`29b78f0` driver stepCap 用例、本分支），故**不属于 §24 的 G1–G14 表**，不得把本节写成“§24 已覆盖”。变异方法与 §24 同款：临时改源码、跑对应单测文件、确认红、立即还原，不留变异代码。
+
+| # | 新守卫 | 变异 | 结果 |
+|---|---|---|---|
+| G15 | decision fail-closed 两道防线（`plan-runtime.ts`：exit 0 预验 + `planDecisionRank`） | ① `planDecisionRank` 改回 `?? 0` | `plan-budget-overlay.test.ts` 直测 1 红 → 还原复绿 |
+| G15 | 同上 | ② 删 exit 0 预验（rankOf 仍在） | 公开路径测试凭“exit 0 预验”文案标记 1 红 → 还原复绿（单拆任一道时另一道仍抛错，故两道各凭直测/文案分别钉住，不能凭“公开路径仍抛错”证明单道无用；两道同时拆掉时未知档位会落进 active 返回，见测试文件内的书面说明） |

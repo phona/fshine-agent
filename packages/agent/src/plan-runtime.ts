@@ -140,6 +140,15 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gatew
   child.stdin.end(input);
 });
 
+const DECISION_RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
+
+/** decision 四档的严度序。未知档位抛错，绝不回退到 execute（rank 0）。 */
+export function planDecisionRank(tier: string): number {
+  const rank = DECISION_RANK[tier];
+  if (rank === undefined) throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  return rank;
+}
+
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
   const runCli = options.runCli ?? defaultCliRunner;
   validateCalls(options.calls);
@@ -163,17 +172,14 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
     throw new Error('plan evaluate 未下发合法 weight：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
   }
   const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
-  const RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
   // fail-closed（接口文档 §4）：未知档位绝不按最宽档（execute，rank 0）静默
   // 激活。旧代码 `RANK[tier] ?? 0` 把任何非法 decision 映射成 execute，又因
   // 后续 stop/confirm/notify 分支都不命中而落进 active 返回——即“未知档位按
   // 最宽档静默激活”，与文档“decision 非四档之一 → 抛错”矛盾。本处抛错；
   // runPlanEvaluation 的 exit 0 分支亦在解析后先验 decision，两道同判据。
-  const rankOf = (tier: string): number => {
-    const rank = RANK[tier];
-    if (rank === undefined) throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
-    return rank;
-  };
+  // planDecisionRank 导出供测试直测：它是第二道防线，公开路径上通常先被
+  // exit 0 预验拦住，故只测公开路径无法单独证明它——直测才能钉住它。
+  const rankOf = planDecisionRank;
   const evaluation = rankOf(host.tier) > rankOf(rawEvaluation.decision)
     ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
     : rawEvaluation;
@@ -547,8 +553,11 @@ async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest)
   try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
   // exit 0 也验 decision：非四档即抛错，不交给 rankOf 的缺省映射（见上）。
   // exit 非零分支的 tryParseEvaluation 本就只认四档，两路判据一致。
+  // 报错文案带“exit 0 预验”标记：它是第一道防线，与 planDecisionRank 的
+  // 报错区分开，这样删掉预验时公开路径测试能凭文案变红（否则 rankOf 仍
+  // 抛同文案，删预验在公开路径上不可观测——两道防线各有各的钉子）。
   if (evaluation.decision !== 'execute' && evaluation.decision !== 'notify' && evaluation.decision !== 'confirm' && evaluation.decision !== 'stop') {
-    throw new Error(`plan evaluate 返回了非法 decision（${String(evaluation.decision)}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+    throw new Error(`plan evaluate 返回了非法 decision（${String(evaluation.decision)}）（exit 0 预验）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
   }
   return evaluation;
 }
