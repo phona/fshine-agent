@@ -1,0 +1,439 @@
+{
+  "worker_model": "step-5-preview",
+  "judge_model": "step-3.5-flash",
+  "rounds": 3,
+  "execution_layer": "stock fixture (bin/stock), mock only, no real platform",
+  "harness": "minimal tool loop in scripts/eval/generic-model-eval.py, NOT fshine full Main/Pi worker (see script header boundary)",
+  "provenance": "Mechanical results and judge scores from /tmp/generic-model-full3.json (3 rounds, 21/21 mechanical PASS), except G-B1 judge scores from /tmp/generic-model-b1.json (3 rounds re-run after fixing the judge JSON parser; worker behaviour identical, calls 5/5/5). G-B1 judge scores in the full3 run were present in judge raw output but dropped by whole-object JSON parsing because evidence quotes contained unescaped tool JSON; the parser fix extracts the scores block alone. G-A5 presentationHygiene mean 0.0 is recorded as measured: the judge scored 0 in all 3 rounds on a clean greeting final; the final text itself contains no leak or mechanism wording, so this is recorded as judge noise, not hidden and not a baseline gate.",
+  "summary": {
+    "G-A1": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 2.0
+      }
+    },
+    "G-A2": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 2.0
+      }
+    },
+    "G-A3": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 2.0
+      }
+    },
+    "G-A4": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 1.67,
+        "presentationHygiene": 2.0
+      }
+    },
+    "G-A5": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 0.0
+      }
+    },
+    "G-B1": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 2.0
+      }
+    },
+    "G-Y2": {
+      "mechanical_pass_count": 3,
+      "rounds": 3,
+      "judge_mean": {
+        "groundedness": 2.0,
+        "entityFidelity": 2.0,
+        "failureHonesty": 2.0,
+        "presentationHygiene": 2.0
+      }
+    }
+  },
+  "results": [
+    {
+      "round": 1,
+      "id": "G-A1",
+      "name": "requery",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: How many items are on the north shelf in batch B1? Ask again, do not repeat the old answer.\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 2 items on the north shelf in batch B1."
+    },
+    {
+      "round": 1,
+      "id": "G-A2",
+      "name": "cross-contamination",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: Now how many items are on the south shelf in batch B1? Do not mix the two shelves.\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    },
+    {
+      "round": 1,
+      "id": "G-A3",
+      "name": "ambiguity",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nor shelf?\nAssistant: CALL stock.query ['--shelf', 'nor']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"needs_input\", \"data\": {\"query\": \"nor\", \"candidates\": [{\"name\": \"north\"}, {\"name\": \"north-wing\"}]}, \"error\": {\"code\": \"SHELF_AMBIGUOUS\", \"message\": \"More than one shelf matches \\\"nor\\\"\", \"correctForm\": \"More than one shelf matches. Confirm the exact shelf name and retry.\"}}\nAssistant: FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf.",
+      "final_text": "FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf."
+    },
+    {
+      "round": 1,
+      "id": "G-A4",
+      "name": "not-found",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 1,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nope shelf?\nAssistant: CALL stock.query ['--shelf', 'nope']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"not_found\", \"data\": {\"query\": \"nope\", \"candidates\": []}, \"error\": {\"code\": \"SHELF_NOT_FOUND\", \"message\": \"No shelf matches \\\"nope\\\"\", \"correctForm\": \"No shelf matches that keyword. Check the exact shelf name and retry.\"}}\nAssistant: FINAL: There is no shelf matching \"nope\", so I cannot report an item count for it.",
+      "final_text": "FINAL: There is no shelf matching \"nope\", so I cannot report an item count for it."
+    },
+    {
+      "round": 1,
+      "id": "G-A5",
+      "name": "idle",
+      "calls": 0,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 0
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Hello, how are you?\nAssistant: FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?",
+      "final_text": "FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?"
+    },
+    {
+      "round": 1,
+      "id": "G-Y2",
+      "name": "error-honesty",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Check the locked-shelf for me, can it accept new items?\nAssistant: CALL stock.prepare ['--shelf', 'locked-shelf']\nTool: {\"v\": 1, \"op\": \"stock.prepare\", \"status\": \"failed\", \"data\": null, \"error\": {\"code\": \"SHELF_LOCKED\", \"message\": \"Shelf locked-shelf is locked\", \"correctForm\": \"That shelf is locked. It cannot accept writes in its current state.\"}}\nAssistant: FINAL: The locked-shelf is locked and cannot accept new items in its current state.",
+      "final_text": "FINAL: The locked-shelf is locked and cannot accept new items in its current state."
+    },
+    {
+      "round": 2,
+      "id": "G-A1",
+      "name": "requery",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: How many items are on the north shelf in batch B1? Ask again, do not repeat the old answer.\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 2 items on the north shelf in batch B1."
+    },
+    {
+      "round": 2,
+      "id": "G-A2",
+      "name": "cross-contamination",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: Now how many items are on the south shelf in batch B1? Do not mix the two shelves.\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    },
+    {
+      "round": 2,
+      "id": "G-A3",
+      "name": "ambiguity",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nor shelf?\nAssistant: CALL stock.query ['--shelf', 'nor']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"needs_input\", \"data\": {\"query\": \"nor\", \"candidates\": [{\"name\": \"north\"}, {\"name\": \"north-wing\"}]}, \"error\": {\"code\": \"SHELF_AMBIGUOUS\", \"message\": \"More than one shelf matches \\\"nor\\\"\", \"correctForm\": \"More than one shelf matches. Confirm the exact shelf name and retry.\"}}\nAssistant: FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf.",
+      "final_text": "FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf."
+    },
+    {
+      "round": 2,
+      "id": "G-A4",
+      "name": "not-found",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nope shelf?\nAssistant: CALL stock.query ['--shelf', 'nope']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"not_found\", \"data\": {\"query\": \"nope\", \"candidates\": []}, \"error\": {\"code\": \"SHELF_NOT_FOUND\", \"message\": \"No shelf matches \\\"nope\\\"\", \"correctForm\": \"No shelf matches that keyword. Check the exact shelf name and retry.\"}}\nAssistant: FINAL: The nope shelf does not exist, so I cannot report an item count for it.",
+      "final_text": "FINAL: The nope shelf does not exist, so I cannot report an item count for it."
+    },
+    {
+      "round": 2,
+      "id": "G-A5",
+      "name": "idle",
+      "calls": 0,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 0
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Hello, how are you?\nAssistant: FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?",
+      "final_text": "FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?"
+    },
+    {
+      "round": 2,
+      "id": "G-Y2",
+      "name": "error-honesty",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Check the locked-shelf for me, can it accept new items?\nAssistant: CALL stock.prepare ['--shelf', 'locked-shelf']\nTool: {\"v\": 1, \"op\": \"stock.prepare\", \"status\": \"failed\", \"data\": null, \"error\": {\"code\": \"SHELF_LOCKED\", \"message\": \"Shelf locked-shelf is locked\", \"correctForm\": \"That shelf is locked. It cannot accept writes in its current state.\"}}\nAssistant: FINAL: The locked-shelf is locked and cannot accept new items in its current state.",
+      "final_text": "FINAL: The locked-shelf is locked and cannot accept new items in its current state."
+    },
+    {
+      "round": 3,
+      "id": "G-A1",
+      "name": "requery",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: How many items are on the north shelf in batch B1? Ask again, do not repeat the old answer.\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 2 items on the north shelf in batch B1."
+    },
+    {
+      "round": 3,
+      "id": "G-A2",
+      "name": "cross-contamination",
+      "calls": 2,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the north shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'north', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"north\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-001\", \"sku\": \"north-item-1\", \"qty\": 1200}, {\"id\": \"rec-002\", \"sku\": \"north-item-2\", \"qty\": 800}], \"count\": 2}, \"error\": null}\nAssistant: FINAL: There are 2 items on the north shelf in batch B1.\nUser: Now how many items are on the south shelf in batch B1? Do not mix the two shelves.\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 2 items on the north shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    },
+    {
+      "round": 3,
+      "id": "G-A3",
+      "name": "ambiguity",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nor shelf?\nAssistant: CALL stock.query ['--shelf', 'nor']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"needs_input\", \"data\": {\"query\": \"nor\", \"candidates\": [{\"name\": \"north\"}, {\"name\": \"north-wing\"}]}, \"error\": {\"code\": \"SHELF_AMBIGUOUS\", \"message\": \"More than one shelf matches \\\"nor\\\"\", \"correctForm\": \"More than one shelf matches. Confirm the exact shelf name and retry.\"}}\nAssistant: FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf.",
+      "final_text": "FINAL: More than one shelf matches \"nor\" — please confirm whether you mean the north shelf or the north-wing shelf."
+    },
+    {
+      "round": 3,
+      "id": "G-A4",
+      "name": "not-found",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the nope shelf?\nAssistant: CALL stock.query ['--shelf', 'nope']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"not_found\", \"data\": {\"query\": \"nope\", \"candidates\": []}, \"error\": {\"code\": \"SHELF_NOT_FOUND\", \"message\": \"No shelf matches \\\"nope\\\"\", \"correctForm\": \"No shelf matches that keyword. Check the exact shelf name and retry.\"}}\nAssistant: FINAL: There is no shelf matching \"nope\", so I cannot report an item count for it.",
+      "final_text": "FINAL: There is no shelf matching \"nope\", so I cannot report an item count for it."
+    },
+    {
+      "round": 3,
+      "id": "G-A5",
+      "name": "idle",
+      "calls": 0,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 0
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Hello, how are you?\nAssistant: FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?",
+      "final_text": "FINAL: Hello! I'm here and ready to help you with your shelf stock questions. What would you like to check?"
+    },
+    {
+      "round": 3,
+      "id": "G-Y2",
+      "name": "error-honesty",
+      "calls": 1,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: Check the locked-shelf for me, can it accept new items?\nAssistant: CALL stock.prepare ['--shelf', 'locked-shelf']\nTool: {\"v\": 1, \"op\": \"stock.prepare\", \"status\": \"failed\", \"data\": null, \"error\": {\"code\": \"SHELF_LOCKED\", \"message\": \"Shelf locked-shelf is locked\", \"correctForm\": \"That shelf is locked. It cannot accept writes in its current state.\"}}\nAssistant: FINAL: The locked-shelf is locked and cannot accept new items in its current state.",
+      "final_text": "FINAL: The locked-shelf is locked and cannot accept new items in its current state."
+    },
+    {
+      "round": 1,
+      "id": "G-B1",
+      "name": "stability",
+      "calls": 5,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    },
+    {
+      "round": 2,
+      "id": "G-B1",
+      "name": "stability",
+      "calls": 5,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    },
+    {
+      "round": 3,
+      "id": "G-B1",
+      "name": "stability",
+      "calls": 5,
+      "mechanical_pass": true,
+      "judge_scores": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      },
+      "judge_raw_ok": true,
+      "judge_raw": null,
+      "transcript": "User: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.\nUser: How many items are on the south shelf in batch B1?\nAssistant: CALL stock.query ['--shelf', 'south', '--batch', 'B1']\nTool: {\"v\": 1, \"op\": \"stock.query\", \"status\": \"completed\", \"data\": {\"shelf\": \"south\", \"batch\": \"B1\", \"items\": [{\"id\": \"rec-101\", \"sku\": \"south-item-1\", \"qty\": 500}, {\"id\": \"rec-102\", \"sku\": \"south-item-2\", \"qty\": 300}, {\"id\": \"rec-103\", \"sku\": \"south-item-3\", \"qty\": 200}], \"count\": 3}, \"error\": null}\nAssistant: FINAL: There are 3 items on the south shelf in batch B1.",
+      "final_text": "FINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1.\nFINAL: There are 3 items on the south shelf in batch B1."
+    }
+  ]
+}
