@@ -203,14 +203,14 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 **状态：已完成**。17dz 持久化自己的领域记忆，跨任务生效；编排层零改动。
 **改动（实际落地，17dz 仓）**：
-- 新增 `bin/17dz memory <get|put|list|delete>`（与 plan 组同风格：单行 JSON、MEMORY_REFUSE 走 stderr exit 3），存储为平台状态目录 JSON（`DZ_MEMORY_STATE` 可覆盖，默认 `.runtime/memory.json`），scope 白名单 global/customer/accountSet（后两者必须带平台规范名 id），key kebab-case、value ≤2000 字符，机器强制
+- 新增 `bin/17dz memory <get|put|list|delete>`（与 plan 组同风格：单行 JSON、MEMORY_REFUSE 走 stderr exit 3），存储为平台状态目录 JSON（`EXECUTION_MEMORY_STATE` 可覆盖，默认 `.runtime/memory.json`），scope 白名单 global/customer/accountSet（后两者必须带平台规范名 id），key kebab-case、value ≤2000 字符，机器强制
 - 跨进程安全复刻 plan.js 失败模型：'wx' 独占锁 + 原子 rename；状态损坏 **fail-closed**（MEMORY_STATE_CORRUPT，不静默重置）
 - SKILL（serve 两个）新增「领域记忆」节：何时读（计划激活后涉及该客户/账套时、用户说"跟上次一样"时）、何时写（用户当场确认后）、键约定、铁边界（只存领域口径，不存用户偏好/稳定事实；不得要求主 Agent 转述或代存）
 - 边界保证：fshine 零改动；`bin/17dz memory` 天然过 fshine bash 门（首词规则）；memory 不进 operations 清单/矩阵/限流/计划绑定——取数路径上没有任何编排层组件参与
 
 **验收（按实际达成记录）**：
 - 17dz 全量 **21/21 套件全绿**（新增 test-memory.js：往返/覆盖写/scope 三维隔离/17 条坏输入/状态隔离/损坏 fail-closed/serve 法域读取/4 进程跨进程全链路）+ `lint:operations` 通过 ✓
-- 跨任务说"跟上次一样"时执行层自取：3 独立进程共享 DZ_MEMORY_STATE 的 put→get→list 复现实测通过 ✓
+- 跨任务说"跟上次一样"时执行层自取：3 独立进程共享 EXECUTION_MEMORY_STATE 的 put→get→list 复现实测通过 ✓
 - 已知限制（已记录）：worker 在计划激活前读不了记忆（fshine 门禁要求先有激活计划）——SKILL 将读记忆定在计划激活后；记忆无审计/无版本迁移（对齐 roadmap「明确不做」）
 
 ---
@@ -238,4 +238,4 @@ Phase 0 测试并行化        （不动架构，纯提速）
 - 通用多 Agent registry、跨域结果聚合（等真有第二个域再做）
 - 业务 skill 从 operation 清单自动派生（先手写，等第二个域出现再看）
 - 长期记忆定时生产调度、`MEMORY.md` 落盘、store schema 版本管理
-- `DZ_PLAN_*` 阈值精调（等真实执行数据积累）
+- `EXECUTION_PLAN_*` 阈值精调（等真实执行数据积累）

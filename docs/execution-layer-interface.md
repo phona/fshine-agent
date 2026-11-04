@@ -178,22 +178,34 @@
 
 - **生产者**：部署环境与宿主（不是模型）。
 - **字段**：
-  - `DZ_SERVE=1` + `DZ_INVOCATION`：serve 法域声明，服务器签发
+  - `EXECUTION_SERVE=1` + `EXECUTION_INVOCATION`：serve 法域声明，服务器签发
     HMAC 提案 / 提交令牌；
-  - `DZ_ALLOW_REAL=1`：执行层实执行授权（缺它 = 触平台执行被拒，
+  - `EXECUTION_ALLOW_REAL=1`：执行层实执行授权（缺它 = 触平台执行被拒，
     `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响）；
   - `FSHINE_REAL_COMMIT=1`：宿主真写落账授权（缺它 = 确认码只到
     `confirm_held`，不写）。
 - **正交性**：三道门互相独立，缺一不可叠加；mock 之下实执行门
   不可达，真平台之下缺任一门即拒绝，不降级。
-- **缺失时**：一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。
+- **缺失时（各门拒绝形态，语义不变）**：
+  - `EXECUTION_SERVE` 未设为 `1`：不进入 serve 法域，serve 调用
+    走建造法域规则，缺合法 `EXECUTION_INVOCATION` 即被 serve 门拒绝；
+  - `EXECUTION_INVOCATION` 缺失或非法：serve 法域调用一律拒绝
+    （统一 CLI 之外直调 operation run 会被拒），不以模型自报确认放行；
+  - `EXECUTION_ALLOW_REAL` 未设为字面量 `1`：触平台执行被拒
+    `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算（scratch / mock）不受影响；
+  - `FSHINE_REAL_COMMIT` 未设为 `1`：确认码只到 `confirm_held`，不写，
+    真写落账不发生。
+  - 一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。
+- **命名**：执行层治理接口统一用 `EXECUTION_*` 前缀，宿主自用参数用
+  `FSHINE_*` 前缀（如 `FSHINE_REAL_COMMIT`、`FSHINE_PLATFORM_ROOT`），
+  通用夹具只认执行层接口名作别名；旧前缀已全量清零，不留别名 shim。
 
 ## 9. Mock 契约（归属与隔离）
 
 | Mock | 归属 | 测什么 | 不测什么 |
 | --- | --- | --- | --- |
 | 通用 mock（本仓 `scripts/eval/fixtures/dummy-platform/`） | fshine 的测试夹具 | 编排协议：operation list、plan、proposal、信封、退出码、每案状态隔离 | 任何执行层实例的业务语义与真实平台兼容性 |
-| 执行层自有 mock（如 17dz 的 `DZ_EXECUTOR=mock`） | 执行层自己的测试替身 | 该执行层的集成：网关门、令牌、审计仍走，平台脚本被替身替换 | 编排层的通用性（它只证明这一个实例） |
+| 执行层自有 mock（如 17dz 的 `EXECUTION_EXECUTOR=mock`） | 执行层自己的测试替身 | 该执行层的集成：网关门、令牌、审计仍走，平台脚本被替身替换 | 编排层的通用性（它只证明这一个实例） |
 
 - **隔离**：通用 mock 的状态文件（state / plans / proposals / audit）
   按案隔离，删除即重置；执行层 mock 的状态文件与种子只属于该执行层，
