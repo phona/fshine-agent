@@ -1,0 +1,216 @@
+# 执行层接口定义（fshine-agent 侧，v1）
+
+> 地位：本文是 fshine-agent 与任何一个执行层之间的**唯一接口定义**。
+> 业务实体、口径、校验、读回判定永远属于执行层，本文只定义两层之间
+> 交换的形状、顺序与失败语义，不复制任何业务字段。
+> 读法：每一节都写清**生产者 / 消费者 / 缺失时 / 版本变化**四项。
+> 缺失时只允许两种处置：`fail-closed`（拒绝并留痕，绝不降级猜测）
+> 或节内明文写出的降级；未写明的，一律按 fail-closed 处理。
+
+## 0. 分层与命名归属
+
+| 层 | 归属 | 例子 |
+| --- | --- | --- |
+| 编排层 fshine-agent | 通用机制：身份、上下文、任务、计划门、确认、续跑、审计、呈现 | 本仓 `packages/`、`apps/` |
+| 执行层 | 业务实体与口径、能力声明、命令语法、提案结构、领域记忆、执行步骤、业务校验、保存与读回判定 | 财税实例：17dz-platform；通用夹具：本仓 `scripts/eval/fixtures/dummy-platform/` |
+| 通用夹具 | **不是**执行层实例，只是证明编排层可换执行层的测试替身 | 网关名 `bin/generic`、操作名 `dummy.*`，**不得**以任何执行层实例的名字命名 |
+
+命名纪律：
+
+- 通用层（夹具、文档、测试名、网关入口）出现执行层实例名即为越界。
+  通用夹具的网关是 `bin/generic`（指向 `bin/dummy`），不是任何实例的网关名。
+- 执行层实例自己的网关名只属于该实例：财税实例是 `bin/17dz`，
+  只出现在该实例的 profile（`contextProfiles.<id>.gateway`）与该实例
+  的文档里，不进入通用层代码、通用夹具与通用文档。
+- 工具名同理：`run_17dz_task` 是财税集成的工具名（见 §9 遗留），
+  通用层的新工具不得再以实例名命名。
+
+## 1. Profile / 网关声明（受信配置）
+
+- **生产者**：部署管理员（配置文件 `config/agent.yaml` 的
+  `contextProfiles.<id>`，见 `config/agent.example.yaml`）。
+- **消费者**：宿主 spawn 路径与文本识别路径（§2）。
+- **字段**（三件套随 profile 走，缺一不可）：
+  - `root`：执行层仓根绝对路径；worker 的 cwd 即 root。
+  - `gateway`：相对 root 的网关调用形式，如财税实例 `bin/17dz`、
+    通用夹具 `bin/generic`。模型绝不传入、绝不由模型文本派生。
+  - `skillRoots`：相对 root 的运行态技能面（如 `.agents/skills-serve`）。
+- **校验**（加载时，`validateGatewayInvocation`）：相对路径、无父级
+  `..`、无绝对路径、无 shell 元字符；任一不满足即加载失败。
+- **缺失时**：spawn 路径 `gatewayExecPathForProfile` fail-closed 抛错，
+  不回退任何缺省网关名；文本识别路径见 §2 的遗留过渡。
+- **版本变化**：新增 profile 字段必须向后兼容（旧 profile 缺新字段时
+  按节内缺失语义处理，不得静默取实例名作缺省）。
+
+## 2. 文本识别：网关名从 profile 来（不再从常量来）
+
+- **生产者**：profile 的 `gateway`（§1）。
+- **消费者**：
+  - serve-gate 首词规则：bash 首 token 是否为网关可执行文件
+    （可带路径前缀），`ServeGateOptions.gateway` 注入；
+  - plan 令牌定位：`parsePlanCallsCommand(command, gateway?)`，
+    网关名后紧跟完整 `plan` 令牌才算计划提交；
+  - 错误文案 correctForm：`planDraftExample(gateway)` /
+    `planFileExample(gateway)`，网关名由调用方传入。
+- **构造**：`gatewayTextPatterns(gateway)`（`platform-contract.ts`）
+  对网关名做正则转义后派生首词与 plan 正则；网关名本身不允许含
+  正则或 shell 元字符（§1 校验已挡），转义只是纵深。
+- **缺失时（遗留过渡，见 §9）**：未注入 gateway 的老调用方（单元测试
+  与未穿透的驱动路径）仍走 `GATEWAY_INVOCATION` 缺省（财税实例名）。
+  这是**唯一**允许的过渡缺省，断点是：驱动层把 profile.gateway
+  穿透到 serve-gate 与 plan 解析后，该缺省即删；新代码不得新增
+  对 `GATEWAY_INVOCATION` 的引用。
+
+## 3. Operation list（能力清单，唯一权威）
+
+- **生产者**：执行层网关 `<gateway> operation list --json`。
+- **消费者**：宿主的 label / args 规格 / access 语义 / protocol 角色
+  四张派生表（`operation-labels.ts`），以及计划门与 serve 门。
+- **形状**（每条 operation）：`name`（注册名，调用唯一依据）、
+  `domain`、`command`、`access`（read / scratch / write 等）、
+  `script`（执行层内部路径，宿主不直接执行，只作审计引用）、
+  `effects`、`executor`、`est_seconds`、`weight`、`args`（位置参数与
+  flag 的声明名与样式）、`serve`（mode×access 矩阵）、`protocol`
+  （如 `proposal.create` / `proposal.commit`，无则 null）、`label`。
+- **缺失时**：清单拿不到 / 某 operation 不在表里 / `plan` 列取不到 →
+  fail-closed：一律要求计划、不挂 label、不做参数摘要、不拦截提案，
+  执行层门禁照旧兜底。宿主绝不另立 operation 名单。
+- **版本变化**：新增 operation 只加行；改名即新 operation，旧名调用
+  应得 `not_found` 族错误，不得静默别名。
+
+## 4. Plan schema 与 plan evaluate（计划门）
+
+- **生产者**：执行层 `plan --schema`（PlanDraft 唯一来源）与
+  `<gateway> plan evaluate --task-id <id> --stdin`。
+- **消费者**：宿主 `evaluateAndActivatePlan`（`plan-runtime.ts`）。
+- **输入**：`{ calls: [{ operation, args }] }`，`operation` 必须是
+  §3 注册名，`args` 为 JSON 可序列化值数组；顶层未声明字段
+  执行层以确定性错误响亮拒绝，绝不静默忽略。
+- **输出（PlanEvaluation）**：
+  - `planId`、`version`、`decision`（`execute` / `notify` / `confirm` /
+    `stop`）、`reasonCode`、`status`；
+  - `estimate: { calls, seconds, weight }` —— **weight 必填**：
+    本张计划声明的总权重（各 call 权重之和），执行层在评估时
+    已算出即下发（财税实例 `src/execution/plan.js` 的 `evaluate`
+    早已在 `estimate` 里带 `weight`；本接口只是把它立为契约，
+    不改档位语义、不改执行端门）；
+  - `delta`（新增 calls 摘要）、`cumulative`（任务累计）、
+    `budget`（可选回执：已用 / 容量 / 剩余，仅作呈现）、
+    `summary` / `noticeText` / `scopeSummary`（执行层提供的安全
+    用户可见范围摘要，宿主只做长度与控制字符卫生，不改写业务措辞）。
+- **宿主档位叠加（更严为准）**：
+  宿主用通用策略 `decideBudgetTier({ calls, seconds, weight })`
+  （`budget-policy.ts`，缺省阈值 calls 2/10/20/50、seconds
+  60/180/600/1800、weight 6/18/60/180，`grantLevel` 作乘数扩容）
+  算出宿主档，与平台 `decision` 取更严一档；同档时宿主档优先
+  保留原 reasonCode 措辞。平台档始终保留作防线，宿主档只做叠加，
+  绝不绕过平台档。
+- **缺失时**：`estimate.weight` 缺失、非有限数、为负 → fail-closed：
+  `evaluateAndActivatePlan` 抛错，不激活、不降级为仅 calls/seconds
+  裁档。`decision` 非四档之一、stdout 非合法 JSON → 同样抛错；
+  仅 exit 3 且 stdout 能解析出合法 `decision` 时视为结构化 stop 裁决。
+- **版本变化**：`estimate` 新增字段向后兼容；`weight` 一旦立约即
+  不得再去掉，去掉即视为契约违约（宿主 fail-closed 可发现）。
+
+## 5. Proposal schema 下发接口（平台下发、宿主消费）
+
+- **生产者**：执行层。提案 payload 的 schema 由执行层在其
+  `operation list` 的 proposal.create 操作或其 schema 端点声明
+  （财税实例：提案 payload schema；通用夹具：`dummy.cjs` 内嵌的
+  proposal schema 声明，`additionalProperties: false`，上限 50 条）。
+- **消费者**：宿主提案创建拦截与复核（`proposal-runtime.ts`、
+  `proposal-review.ts`）。宿主只消费三样东西，**不复制业务字段**：
+  ① 哪个 operation 扮演 `proposal.create` / `proposal.commit`
+  （§3 `protocol` 列）；② payload 是不透明文件（宿主持有
+  proposalId + 通用确认元数据，不解析、不校验、不重渲染业务内容）；
+  ③ 提案状态查询的返回形状（`proposalId`、`status`、
+  `createdAt`、`expiresAt`、`expired`）。
+- **缺失时**：`protocol` 列缺失 → 不拦截（fail-closed 到“这不是提案
+  调用”，门与平台继续裁决）；schema 未下发 → 宿主不猜 payload
+  形状，创建请求原样透传执行层校验。
+- **版本变化**：schema 演进由执行层版本号或 schema 内容本身驱动；
+  宿主不缓存业务字段，执行层改 schema 不需要宿主改代码。
+
+## 6. Proposal 创建 / 提交 / 读回
+
+- **生产者**：执行层网关（serve 法域）与宿主确认链（host 法域）。
+- **顺序**（缺一不可）：
+  1. 干跑创建（dry-run create）：执行层生成 proposal，TTL 30 分钟
+     （执行层可配，缺省 30 分钟），返回 `proposalId` + 通用摘要；
+     宿主只存不透明 proposalId 与通用确认状态。
+  2. 用户确认：宿主持有确认状态，确认码与提案绑定（HMAC 提案 /
+     提交令牌，服务器签发，见 §7）。
+  3. 提交：执行层按令牌提交，提交前读回、提交后读回；读回不足
+     （`PROPOSAL_VERIFY_SHORT` 或读回差额）→ 宿主记
+     `committed_unverified`（“已落账、读回不足、需人工核对”，
+     任务结果记 failed、意图记 committed 以防二次提交），
+     绝不把读回不足说成成功。
+- **缺失时**：令牌缺失 / 变形 / 过期 / 与提案不匹配 →
+  `PROPOSAL_TOKEN_UNTRUSTED`，提交拒绝；提案过期 →
+  `PROPOSAL_EXPIRED`，须重建；提案状态损坏 →
+  `PROPOSAL_STATE_CORRUPT`，拒绝并留痕。任一情形宿主都不代为重建。
+- **版本变化**：令牌算法与 TTL 由执行层声明；宿主只校验“令牌由
+  执行层签发且未过期”，不解析令牌业务内容。
+
+## 7. RESULT 信封、退出码、错误码家族
+
+- **生产者**：执行层网关（stdout 末行）。
+- **形状**：`RESULT {v:1, op, status, data, error}`，`status` ∈
+  `completed` / `failed` / `needs_input` / `not_found`。
+  `not_found` 是确定性无数据，**绝不洗成零值**。
+- **退出码**：0 = 结构化成功（含 stop 裁决以外的完成态）；
+  1 = 失败；2 = 用法错误；3 = 网关 / 提案拒绝（未注册、serve 矩阵、
+  令牌、过期、状态损坏等）。宿主判据是码与信封，不嗅探消息文本。
+- **错误码家族**（宿主只判族，不判文案）：
+  - 平台不可用族：`AUTH_*`、登录态、`NEEDS_LOGIN`、
+    `PLATFORM_TIMEOUT` 等 → 冷却，不重试；
+  - 选择类：`ACCOUNT_SET_AMBIGUOUS` / `ACCOUNT_SET_NOT_FOUND`
+    等 → 宿主机械组装澄清问题，模型不为状态转换发音；
+  - 终局快路径：`PERIOD_NO_DATA`、`ASSISTANT_NOT_FOUND` /
+    `ASSISTANT_AMBIGUOUS` → 早停终结，须带齐渲染数据否则不挂；
+  - 输入类、数据三态、兜底码各有其族，互不混用。
+  平台新增码时只在唯一适配层（`platform-contract.ts`）加码，
+  不在编排层各处分身。
+- **缺失时**：无信封 / 信封非法 → 宿主视为网关失败，fail-closed，
+  不把自由文本当数据答案。
+
+## 8. Serve 令牌与实执行门（两道正交门）
+
+- **生产者**：部署环境与宿主（不是模型）。
+- **字段**：
+  - `DZ_SERVE=1` + `DZ_INVOCATION`：serve 法域声明，服务器签发
+    HMAC 提案 / 提交令牌；
+  - `DZ_ALLOW_REAL=1`：执行层实执行授权（缺它 = 触平台执行被拒，
+    `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响）；
+  - `FSHINE_REAL_COMMIT=1`：宿主真写落账授权（缺它 = 确认码只到
+    `confirm_held`，不写）。
+- **正交性**：三道门互相独立，缺一不可叠加；mock 之下实执行门
+  不可达，真平台之下缺任一门即拒绝，不降级。
+- **缺失时**：一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。
+
+## 9. Mock 契约（归属与隔离）
+
+| Mock | 归属 | 测什么 | 不测什么 |
+| --- | --- | --- | --- |
+| 通用 mock（本仓 `scripts/eval/fixtures/dummy-platform/`） | fshine 的测试夹具 | 编排协议：operation list、plan、proposal、信封、退出码、每案状态隔离 | 任何执行层实例的业务语义与真实平台兼容性 |
+| 执行层自有 mock（如 17dz 的 `DZ_EXECUTOR=mock`） | 执行层自己的测试替身 | 该执行层的集成：网关门、令牌、审计仍走，平台脚本被替身替换 | 编排层的通用性（它只证明这一个实例） |
+
+- **隔离**：通用 mock 的状态文件（state / plans / proposals / audit）
+  按案隔离，删除即重置；执行层 mock 的状态文件与种子只属于该执行层，
+  不得被通用层引用。两者不得互相冒充对方的证据。
+- **缺失时**：通用 mock 缺失 → generic-mock 评价直接失败，不回退
+  到执行层实例；执行层 mock 缺失 → 该执行层集成测试响亮失败
+  （`MOCK_STATE_MISSING` / `OPERATION_NOT_MOCKED`，exit 3），不静默走真平台。
+
+## 10. 遗留过渡与断点（本轮收尾后仍剩下的）
+
+| 遗留项 | 位置 | 断点（何时删） |
+| --- | --- | --- |
+| `GATEWAY_INVOCATION` 缺省（财税实例名） | `platform-contract.ts` 定义处；未注入 gateway 的老调用方（单元测试、未穿透驱动路径）仍以它为文本识别缺省 | 驱动层把 profile.gateway 穿透到 serve-gate 与 plan 解析的全部生产路径后删除；新代码不得新增引用 |
+| spawn 路径的旧回退 | `plan-runtime.ts` 默认 runner、`context.ts` 默认提案 runner：未声明 gateway 时回退旧值 | profile 必填 gateway 的配置校验落地后删除回退，改为 fail-closed |
+| `run_17dz_task` 工具名与 `17dz 子 Agent` 标签 | `context.ts`（财税集成的工具定义与描述） | 改名会断已发布工具协议时不动；新执行层接入时用其中性工具名，不复用该名 |
+| 协议形状解析中的实例痕迹 | `plan-runtime.ts` 的 PlanDraft `{calls}` 形状解析（协议形状，非业务逻辑）、`error-codes.ts` 中个别实例操作名示例 | 仅当实例协议本身演进时随协议改，不为改名而改名 |
+| 宿主侧的业务词兜底 | `error-codes.ts` 的 `{hint}` 兜底字符串（平台全域携带 correctForm 后即删，见该文件注释） | 平台全域携带 correctForm 后删除 |
+
+> 本文档是接口定义，不是实现报告。实现是否符合本文，以
+> `docs/execution-layer-interface.md` 为准绳逐项核对，见收尾报告。
