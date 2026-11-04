@@ -150,6 +150,14 @@ export function platformExecutorBypassed(signal: {
   return signal.localCalls > 0 && signal.executorCalls === 0 && signal.producedFiles.length > 0;
 }
 
+/** Allowed-bash partition counts by gate kind (see gateInvocationKind). */
+export interface GateCallCounts {
+  gateCalls: number;
+  executorCalls: number;
+  localCalls: number;
+  auxiliaryCalls: number;
+}
+
 /**
  * Partition of allowed bash calls by gate kind. The three kinds are
  * mutually exclusive (see gateInvocationKind), so exactly one sub-count
@@ -158,18 +166,18 @@ export function platformExecutorBypassed(signal: {
  * This is the production counting function the driver calls in
  * onAllowedBash. It is deliberately separate from the step-cap wind-down
  * tracker: counting is unconditional, wind-down is a side effect only.
- * An earlier version gated the sub-count on the wind-down return value,
- * which dropped a wind-down local call from localCalls (suppressing the
- * platformExecutorBypassed disclosure when that call was the round's only
- * local call) and double-counted executor calls into auxiliaryCalls.
+ * Two earlier defects had distinct causes (see gate-call-counts.test.ts
+ * header — do not merge them into one cause):
+ *  - else binding: the old code counted executor calls separately, then
+ *    counted every non-local call into auxiliaryCalls, so an executor
+ *    call was counted in executorCalls and again in auxiliaryCalls;
+ *  - wind-down gating: the old code skipped the sub-count when the
+ *    wind-down tracker fired, so a wind-down local call was dropped
+ *    from localCalls (suppressing the platformExecutorBypassed
+ *    disclosure when that call was the round's only local call), while
+ *    a wind-down executor call was kept because executorCalls was
+ *    incremented before the gate.
  */
-export interface GateCallCounts {
-  gateCalls: number;
-  executorCalls: number;
-  localCalls: number;
-  auxiliaryCalls: number;
-}
-
 export function recordAllowedBashCall(
   counts: GateCallCounts,
   kind: GateInvocationKind,
@@ -631,6 +639,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 再赋值——onAllowedBash 在会话建成后的工具执行时才被调用，届时
       // 持有者已指向 session.agent.steer，与 currentPlan 的 latch 哲学同一手法。
       let stepCapSteer: ((content: string) => void) | null = null;
+      // 步数帽收尾未成功送达的待补发标志（见下方 stepCapSteer 赋值处）：
+      // 跟踪器先置 latch 再调 steer，steer 一抛错跟踪器此后不再重调，
+      // 所以驱动自己记 pending，在下一次放行时补发——成功送达一次即清，
+      // 失败则保持 pending 待再下一次放行。墙钟 wind-down 失败有 abort +
+      // 宿主合成终稿兜底，步数帽没有同款兜底，故不能只记 warn 就丢信号。
+      let stepCapWindDownPending = false;
       const fireStepCapWindDown = createStepCapWindDown(stepCap, () => stepCapSteer?.(WORKER_WIND_DOWN_NUDGE));
       let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
@@ -754,9 +768,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             // 分项计数无条件先行：每一次放行恰好计入一个族，分项和恒等于
             // gateCalls。步数帽 wind-down 只当副作用触发一次（第 cap+1 次
             // 送一次 90% 预算点同款 wind-down，后续放行不再重复打断，模型
-            // 仍可收尾交已做 + 未做），它的返回值不再 gating 计数——否则
-            // wind-down 那一次的 local 调用会从 localCalls 丢失，而
-            // executor 调用又会被双计进 auxiliaryCalls。
+            // 仍可收尾交已做 + 未做），它的返回值不再 gating 计数。旧逻辑
+            // 是两处各错、根因不同：wind-down 门控使 wind-down 那次 local
+            // 从 localCalls 丢失；else 分支把非 local 一律计 auxiliary，
+            // 使 executor 在非 wind-down 时也被双计。现三分支互斥，两者皆消。
             const next = recordAllowedBashCall(
               { gateCalls, executorCalls, localCalls, auxiliaryCalls },
               kind,
@@ -765,6 +780,16 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             executorCalls = next.executorCalls;
             localCalls = next.localCalls;
             auxiliaryCalls = next.auxiliaryCalls;
+            // 步数帽失败补发：上一轮 steer 失败留下的 pending 在本次放行时
+            // 先补发（不在同一轮内立即重发，避免一次放行连发两次信号/日志）。
+            // 补发前先清 pending：成功则保持清除，失败时 stepCapSteer 的
+            // catch 会重新置位，待下一次放行再补。跟踪器 latch 已置位，
+            // 故补发直接调 steer，不再经跟踪器。
+            const pendingSteer = stepCapSteer;
+            if (stepCapWindDownPending && pendingSteer) {
+              stepCapWindDownPending = false;
+              pendingSteer(WORKER_WIND_DOWN_NUDGE);
+            }
             fireStepCapWindDown(gateCalls);
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
@@ -790,8 +815,25 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         entitySources: input.entitySources,
       });
       // 步数帽 steer 持有者在此指向会话：onAllowedBash 在此之后才被调用。
+      // 纪律与墙钟 wind-down 同款（try/catch + 结构化日志，失败不外溢，
+      // 不让一次 steer 抛错打断 onAllowedBash / 回合），但失败语义不同：
+      // 墙钟失败靠到点 abort + 宿主合成终稿兜底，步数帽失败置 pending，
+      // 由 onAllowedBash 在下一次放行时补发（见上）。“只送一次”指成功
+      // 送达一次：成功路径上跟踪器 + 本标志均不再重发；失败重试不计入
+      // “已送”，直到某次 steer 成功才算送达。
       stepCapSteer = (content: string) => {
-        session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
+        try {
+          session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
+          console.info(JSON.stringify({ event: 'worker_step_cap_wind_down_signaled', requestId: input.requestId, taskId: input.sessionId }));
+        } catch (error) {
+          stepCapWindDownPending = true;
+          console.warn(JSON.stringify({
+            event: 'worker_step_cap_wind_down_failed',
+            requestId: input.requestId,
+            taskId: input.sessionId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+        }
       };
       const footprint = (): string => `${gateCalls} 次 ${resolveGatewayText(options.gateway)} 调用`;
       // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
