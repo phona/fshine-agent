@@ -103,6 +103,45 @@ describe('跨仓预算阈值校验脚本', () => {
   );
 });
 
+describe('跨仓预算阈值校验脚本：旧值注释不得劫持解析（M3，第四轮）', () => {
+  it('fshine 块内与 17dz 行上的旧值注释行都被剥离，真值胜出、不假绿', () => {
+    directory = mkdtempSync(path.join(tmpdir(), 'fshine-budget-cross-comment-'));
+    const fshineRoot = path.join(directory, 'fshine');
+    const dzRoot = path.join(directory, 'dz');
+    mkdirSync(path.join(fshineRoot, 'packages/agent/src'), { recursive: true });
+    mkdirSync(path.join(dzRoot, 'src/execution'), { recursive: true });
+    // fshine 块内先写旧值行注释与块注释，再写真值；不剥离时首匹配会命中 7。
+    writeFileSync(path.join(fshineRoot, 'packages/agent/src/budget-policy.ts'),
+      'export const DEFAULT_BUDGET_THRESHOLDS: BudgetThresholds = {\n'
+      + '  // autoCalls: 7,\n  /* notifyCalls: 99, */\n'
+      + '  autoCalls: 2,\n  notifyCalls: 10,\n  confirmCalls: 20,\n  hardCalls: 50,\n'
+      + '  autoSeconds: 60,\n  notifySeconds: 180,\n  confirmSeconds: 600,\n  hardSeconds: 1800,\n'
+      + '  autoWeight: 6,\n  notifyWeight: 18,\n  budgetWeight: 60,\n  hardWeight: 180,\n};\n');
+    // 17dz 真值 autoCalls=2，但其上有旧值注释行（复核员假绿复现的形态）。
+    writeFileSync(path.join(dzRoot, 'src/execution/plan.js'),
+      '// autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 7),\n'
+      + '/* notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 99), */\n'
+      + 'function policy(env) {\n  return {\n'
+      + '    autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 2),\n'
+      + '    notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 10),\n'
+      + '    confirmCalls: configured(env, \'EXECUTION_PLAN_CONFIRM_CALLS\', 20),\n'
+      + '    hardCalls: configured(env, \'EXECUTION_PLAN_HARD_CALLS\', 50),\n'
+      + '    autoSeconds: configured(env, \'EXECUTION_PLAN_AUTO_SECONDS\', 60),\n'
+      + '    notifySeconds: configured(env, \'EXECUTION_PLAN_NOTIFY_SECONDS\', 180),\n'
+      + '    confirmSeconds: configured(env, \'EXECUTION_PLAN_CONFIRM_SECONDS\', 600),\n'
+      + '    hardSeconds: configured(env, \'EXECUTION_PLAN_HARD_SECONDS\', 1800),\n'
+      + '    autoWeight: configured(env, \'EXECUTION_PLAN_AUTO_WEIGHT\', 6),\n'
+      + '    notifyWeight: configured(env, \'EXECUTION_PLAN_NOTIFY_WEIGHT\', 18),\n'
+      + '    budgetWeight: configured(env, \'EXECUTION_PLAN_BUDGET_WEIGHT\', 60),\n'
+      + '    hardWeight: configured(env, \'EXECUTION_PLAN_HARD_WEIGHT\', 180),\n'
+      + '  };\n}\n');
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('12/12 一致');
+    expect(r.stdout).toContain('autoCalls: fshine=2 17dz=2');
+  });
+});
+
 describe('跨仓预算阈值校验脚本：真实路径与 exit 2 守门（非仅合成夹具）', () => {
   it('真实 fshine 文件解析路径：以本仓真实 budget-policy.ts 为 fshine 根，dz 夹具一致时 exit 0', () => {
     const { dzRoot } = fixtureRoots();

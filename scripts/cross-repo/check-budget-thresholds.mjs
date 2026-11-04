@@ -46,7 +46,44 @@ const DZ_ENV = {
   hardWeight: 'EXECUTION_PLAN_HARD_WEIGHT',
 };
 
+/**
+ * 剥离 JS/TS 注释（// 行注释与 /* *\/ 块注释），再做首匹配解析。
+ * 不剥离时，同名旧值注释行会抢先命中：复核员已端到端复现假绿——
+ * 17dz 真值 autoCalls=7、其上有旧值注释行，脚本仍报 12/12 一致。
+ * 剥离时跟踪字符串状态，不误伤字符串内的 //（阈值行本身不在字符串
+ * 里，但其他源码行可能有 URL 字符串，误剥会改写待解析文本）。
+ */
+function stripComments(text) {
+  let out = '';
+  let i = 0;
+  let quote = null;
+  while (i < text.length) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (quote) {
+      out += ch;
+      if (ch === '\\') { out += next ?? ''; i += 2; continue; }
+      if (ch === quote) quote = null;
+      i += 1;
+      continue;
+    }
+    if (ch === "'" || ch === '"' || ch === '`') { quote = ch; out += ch; i += 1; continue; }
+    if (ch === '/' && next === '/') { while (i < text.length && text[i] !== '\n') i += 1; continue; }
+    if (ch === '/' && next === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i += 1;
+      i += 2;
+      out += ' ';
+      continue;
+    }
+    out += ch;
+    i += 1;
+  }
+  return out;
+}
+
 function parseFshine(text, file) {
+  text = stripComments(text);
   const block = text.match(/DEFAULT_BUDGET_THRESHOLDS[^=]*=\s*\{([^}]+)\}/);
   if (!block) throw new Error(`fshine 阈值块未找到：${file}`);
   const out = {};
@@ -59,6 +96,7 @@ function parseFshine(text, file) {
 }
 
 function parseDz(text, file) {
+  text = stripComments(text);
   const out = {};
   for (const key of BUDGET_KEYS) {
     const m = text.match(new RegExp(`\\b${key}\\s*:\\s*configured\\(env,\\s*'${DZ_ENV[key]}',\\s*(\\d+)\\)`));
