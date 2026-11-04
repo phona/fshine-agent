@@ -112,22 +112,35 @@
 - **版本变化**：`estimate` 新增字段向后兼容；`weight` 一旦立约即
   不得再去掉，去掉即视为契约违约（宿主 fail-closed 可发现）。
 
-## 5. Proposal schema 下发接口（平台下发、宿主消费）
+## 5. Proposal schema 下发接口（平台下发、宿主消费，第 2 包已落地）
 
-- **生产者**：执行层。提案 payload 的 schema 由执行层在其
-  `operation list` 的 proposal.create 操作或其 schema 端点声明
-  （财税实例：提案 payload schema；通用夹具：`dummy.cjs` 内嵌的
-  proposal schema 声明，`additionalProperties: false`，上限 50 条）。
+- **生产者**：执行层，经 `operation list --json` 的 `proposalSchema` 列
+  下发，且只在 `protocol === 'proposal.create'` 的那一行带出：
+  财税实例带 `src/voucher/proposal.schema.json` 的内容（`proposal.js`
+  导出的 `proposalSchema`，单一来源仍是该 schema 文件）；
+  通用夹具带 `dummy.cjs` 内嵌的 proposal schema
+  （`additionalProperties: false`，上限 50 条）。
+  其他 operation 的本列一律为 null，宿主不读。
 - **消费者**：宿主提案创建拦截与复核（`proposal-runtime.ts`、
-  `proposal-review.ts`）。宿主只消费三样东西，**不复制业务字段**：
+  `proposal-review.ts`、`operation-labels.ts` 的
+  `loadProposalSchema` / `parseProposalSchema`）。
+  宿主只消费四样东西，**不复制、不解析业务字段**：
   ① 哪个 operation 扮演 `proposal.create` / `proposal.commit`
   （§3 `protocol` 列）；② payload 是不透明文件（宿主持有
   proposalId + 通用确认元数据，不解析、不校验、不重渲染业务内容）；
   ③ 提案状态查询的返回形状（`proposalId`、`status`、
-  `createdAt`、`expiresAt`、`expired`）。
-- **缺失时**：`protocol` 列缺失 → 不拦截（fail-closed 到“这不是提案
-  调用”，门与平台继续裁决）；schema 未下发 → 宿主不猜 payload
-  形状，创建请求原样透传执行层校验。
+  `createdAt`、`expiresAt`、`expired`）；
+  ④ proposal.create 行的 `proposalSchema` 原值：宿主只做“是不是
+  非空普通对象”这一形状卫生检查（非对象 / 数组 / null 即非法），
+  然后原样透传给隔离复核回合，**不读、不校验、不缓存任何业务字段**。
+  复核的 schema 槽因此不再是 null——第 2 包起，schema 位传真实下发值。
+- **缺失时（fail-closed，不降级）**：`protocol` 列缺失 → 不拦截
+  （fail-closed 到“这不是提案调用”，门与平台继续裁决）；
+  但一旦进入提案创建路径，schema 缺失 / 非法（清单拿不到、行里
+  没有 `proposalSchema`、值不是非空普通对象）→ 提案创建直接失败，
+  不发确认码，事件记 `proposal_review_schema_missing`，**绝不降级
+  为“只比摘要与信封”**。机械复核（`mechanicalReview`）同样把
+  schema 缺失 / 非法判为不一致，与摘要为空、dry-run 未完成同族。
 - **版本变化**：schema 演进由执行层版本号或 schema 内容本身驱动；
   宿主不缓存业务字段，执行层改 schema 不需要宿主改代码。
 
@@ -229,7 +242,36 @@
 > 环境变量的完整清单（生产者 / 消费者 / 默认值 / 缺失行为、删除清单）见
 > 附录 `docs/environment-variables.md`。
 
-## 11. B4 审计结论（第 1 包收尾核查，2026-11-04）
+## 11. 生产装配接线（第 2 包，2026-11-04）
+
+- **复核驱动注入**：生产装配（`apps/server/assembly.ts`）必须向
+  `createContextTaskRunner` 注入 `proposalReviewTurn`，实现为
+  `reviewProposalWithDriver(contextModelDriver, input)`——隔离回合、
+  无工具、超时与字节上限见 `proposal-review.ts`。
+  未注入不再是“记一条 `proposal_review_skipped` 日志就继续”：
+  `createProposalViaGateway` 在复核位缺失时直接失败，事件记
+  `proposal_review_required`，不发确认码。`proposal_review_skipped`
+  事件自此删除，任何代码不得再发它。
+- **schema 取问**：装配同时注入 `proposalSchemaLoader`
+  （即 `loadProposalSchema`，按 profile 的 root 与 gateway spawn
+  `operation list --json`）；`createProposalViaGateway` 未注入时
+  用同一默认加载器，不存在“无加载器即跳过 schema”的路径。
+- **步数帽端到端**：步数帽不在决策函数里才成立，它在真实 worker
+  驱动会话（`pi-coding-driver.ts` 的 `onAllowedBash`）里计数：
+  第 51 次放行时送一次 wind-down steer，且只送一次；证据见
+  `packages/agent/src/production-wiring.test.ts` 的脚本化 worker
+  会话证明（51 次放行 → steer 恰好 1 次，50 次 → 0 次）。
+- **交接文件端到端**：续跑时宿主在委派前先读
+  `<platformRoot>/tmp/<taskId>/handover.json`（`context.ts` 的
+  prepare 阶段），去重合并按精确键（operation + args），已记的调用
+  不二次计数；文件缺失 = 交接不可用（事件 `task_handover_missing`，
+  仍可凭转录续跑，不凭空编一个）；文件存在但解析失败 / 版本不符 =
+  交接损坏（事件 `task_handover_corrupt`），交接按缺失处理、其调用
+  一律不合并——对交接数据 fail-closed，**不是**对整轮续跑硬阻塞
+  （转录续跑仍是既有设计；若要把损坏升级为整轮阻塞，须另行裁定，
+  见第 2 包收尾报告的遗留项）。证据见同一测试文件的续跑证明。
+
+## 12. B4 审计结论（第 1 包收尾核查，2026-11-04）
 
 - 计划解析是协议形状，不是业务逻辑：`plan-runtime.ts` 的
   `PlanCall { operation, args }` 只校验 JSON 形状（calls 为数组、
