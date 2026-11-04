@@ -20,7 +20,8 @@
     "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score",
     "perf:suite": "node --import tsx scripts/perf/run-suite.ts 3",
     "perf:report": "node --import tsx scripts/perf/analyze.ts",
-    "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts"
+    "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
+    "ci": "sh scripts/ci.sh"
   },
   "engines": {
     "node": ">=24"

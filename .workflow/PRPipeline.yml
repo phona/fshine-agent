@@ -1,0 +1,46 @@
+# Gitee Go pipeline: deterministic CI for fshine-agent.
+#
+# IMPORTANT - read before enabling:
+# - This pipeline runs ONLY the deterministic gates (scripts/ci.sh):
+#   typecheck + unit tests + generic-mock eval. No real-model eval,
+#   no e2e (e2e needs a gitignored local config/agent.yaml), no deploy,
+#   no secrets. A failure here is a real regression and blocks the PR.
+# - The real-model eval (npm run eval) is Tier B: manual before merge
+#   + nightly, with LLM_* secrets set in Gitee Go settings. It is
+#   deliberately NOT in this auto pipeline: it is costly, slow, and
+#   the judge layer has variance (see scripts/eval/GENERIC_MOCK_NOTES.md).
+# - To enable: open Gitee Go in this repo's settings, then push a branch
+#   or open a PR. If Gitee Go is not enabled, this file is inert and
+#   CI must be run locally with: sh scripts/ci.sh
+# - This file follows the Gitee Go template shape (version / name /
+#   displayName / triggers / stages / steps, npmbuild step). If your
+#   Gitee Go version rejects a field, keep the commands identical and
+#   adjust only the step wrapper in the Gitee Go UI - do not change
+#   what scripts/ci.sh runs.
+version: '1.0'
+name: fshine-ci
+displayName: 'fshine-agent CI（确定性门）'
+triggers:
+  trigger: auto
+  push:
+    branches:
+      - main
+      - eval/*
+  pull_request:
+    branches:
+      - main
+stages:
+  - name: ci-stage
+    displayName: '确定性 CI'
+    strategy: naturally
+    trigger: auto
+    executor: []
+    steps:
+      - step: npmbuild@1
+        name: deterministic-ci
+        displayName: 'typecheck + unit + generic-mock'
+        inputs:
+          nodeVersion: 24
+          commands:
+            - npm ci
+            - sh scripts/ci.sh
