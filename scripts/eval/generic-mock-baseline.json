@@ -1,0 +1,116 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-04T02:33:32.433Z",
+  "note": "Generic-mock deterministic baseline v1: protocol checks only, no model, no judge. A check recorded as pass must stay pass; a fail recorded here is a known failure, not a baseline to bake in -- this writer refuses to write a baseline containing a failing non-skipped case.",
+  "cases": {
+    "smoke-query": {
+      "checks": {
+        "exit": "pass",
+        "status": "pass",
+        "count": "pass"
+      }
+    },
+    "smoke-prepare-commit": {
+      "checks": {
+        "prepare dry-run, no write": "pass",
+        "prepare did not change count": "pass",
+        "proposal created pending": "pass",
+        "proposal status pending": "pass",
+        "commit verified": "pass",
+        "readback delta = required": "pass",
+        "second commit refused, no double count": "pass",
+        "no double count after refused second commit": "pass"
+      }
+    },
+    "smoke-not-found": {
+      "checks": {
+        "unknown collection not_found exit 0": "pass",
+        "missing window not_found with availableWindows": "pass",
+        "zero is completed, never not_found": "pass"
+      }
+    },
+    "g-a1-requery": {
+      "checks": {
+        "requery returns identical data": "pass"
+      }
+    },
+    "g-a2-cross-contamination": {
+      "checks": {
+        "alpha/beta items do not overlap": "pass",
+        "ambiguous returns needs_input with exact candidates": "pass"
+      }
+    },
+    "g-a3-ambiguity-mechanical": {
+      "checks": {
+        "needs_input only, no script path in data": "pass",
+        "correctForm present": "pass"
+      }
+    },
+    "g-a4-not-found-zero-leak": {
+      "checks": {
+        "not_found only, no script path in data": "pass"
+      }
+    },
+    "g-a5-idle-zero-calls": {
+      "checks": {
+        "idle produces no audit line": "pass"
+      }
+    },
+    "g-b1-stability": {
+      "checks": {
+        "5 repeated queries identical count": "pass"
+      }
+    },
+    "g-y2-error-honesty": {
+      "checks": {
+        "locked collection refused exit 2": "pass",
+        "missing required flag failed exit 1": "pass",
+        "refused calls changed nothing": "pass"
+      }
+    },
+    "g-plan-gate": {
+      "checks": {
+        "plan execute decision": "pass",
+        "plan rejects non-read-only call": "pass",
+        "plan rejects unknown field": "pass",
+        "budget-weight plan stops at confirm": "pass",
+        "plan activate with host token": "pass",
+        "plan activate with bad token refused": "pass"
+      }
+    },
+    "g-serve-matrix": {
+      "checks": {
+        "query refuses always-write": "pass",
+        "prepare refuses write-flagged call": "pass",
+        "unregistered script refused": "pass",
+        "accessSemantics read/scratch/write": "pass",
+        "protocol roles present": "pass"
+      }
+    },
+    "g-readback-short": {
+      "checks": {
+        "short proposal created": "pass",
+        "readback short is failed, verified=false, delta < required": "pass",
+        "host classification must be committed_unverified, never completed": "pass",
+        "short proposal is committed, not pending (no second commit)": "pass",
+        "partial count applied, not full": "pass"
+      }
+    },
+    "g-proposal-expired": {
+      "checks": {
+        "expired proposal refused exit 3": "pass",
+        "expired commit wrote nothing (count unchanged from seed)": "pass"
+      }
+    },
+    "g-proposal-token-untrusted": {
+      "checks": {
+        "bad token refused exit 3": "pass"
+      }
+    },
+    "g-state-isolation": {
+      "checks": {
+        "case A count moved, case B still seed": "pass"
+      }
+    }
+  }
+}
