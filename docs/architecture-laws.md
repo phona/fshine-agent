@@ -56,13 +56,13 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- **网关名 `bin/17dz`：已收敛至 1（配置缺省值）**——非测试 src 里只剩 `packages/agent/src/platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，其余全部由它派生（消息文本与提示词不再各抄一份）。历史窗口内曾 20→35 增长（+15，+75%，违反只减不增），增长源=错误码表与提示词的消息文本（`error-codes.ts` 0→7、`plan-runtime.ts` 1→7、`operation-labels.ts` 0→1、`context.ts` 2→3）——已由配置派生修复。
+- **网关名 `bin/17dz`：代码字面量已收敛至 1（配置缺省值）**——非测试 src 里只剩 `packages/agent/src/platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，其余全部由它派生（消息文本与提示词不再各抄一份）。口径：此处“只剩一处”仅指代码字面量，注释/示例字面量除外；按守卫命令字面 grep 的总量是 10 行（代码 1 处 + 注释/示例 9 处），main 为 8 行、PR 为 10 行，**总量“只减不增”不成立**，不要写成已成立。历史窗口内曾 20→35 增长（+15，+75%，违反只减不增），增长源=错误码表与提示词的消息文本（`error-codes.ts` 0→7、`plan-runtime.ts` 1→7、`operation-labels.ts` 0→1、`context.ts` 2→3）——已由配置派生修复。
 - **plan 草案形状的教学副本 6 处且自相矛盾（D-011）**——**已关**（2026-09-27 Wave 2 Lane D）。6 处收敛为 1 处：`error-codes.ts` 的 `planDraftExample()` 是唯一教学源（内容与平台 plan-schema.json 声明一致），表内 5 处与 `context.ts` worker 提示词 1 处全部由它派生；机械锁 = `plan-teaching.test.ts`（跨仓读平台 schema 断言形态合法 + 宿主解析器认同一形状 + 源文件零第二种形状字面量）。原闭环判据 `grep 'plan {"goal"'` → 0 已作废：Lane B 把 goal 收编为 schema 声明过的可选元数据，教学示例合法地含 goal。历史形状（D0 审计快照，保留备查）：fshine `error-codes.ts` 计划门错误表 5 处（`CORRECT_PLAN_SHAPE`/`PLAN_SUBCOMMAND_RESERVED`/`PLAN_JSON_NOT_OBJECT`/`PLAN_CALLS_NOT_ARRAY`/`PLAN_SHAPE_GATE_TEACHING`，其中 4 处教带 goal 形、1 处教无 goal 形）+ `context.ts` worker 系统提示词 1 处；17dz SKILL 那 1 处已由 Lane B④ 删除。矛盾要害即"同一张表两种形状 = 模型静默选一份信"。
 - **错误码表镜像**：~~`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。~~ **已退化为渲染层**（2026-09-27 Wave 2 Lane D）：`NOT_FOUND_SELECTION` 只拼结构，措辞槽位优先取信封 `error.correctForm`；宿主表仅存"信封没带时的兜底"并挂"遗留待清"（D-002）。`AMBIGUOUS_SELECTION` 的用户可见事实已全部来自信封数据，平台给它的 correctForm 是解析方规则、不上屏。
 - **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts:72`。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
 - **ask.ts 复刻装配层**：~~`scripts/ask.ts`（第 104–137 行）把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。~~ **已消除**（2026-09-27 Wave 2 Lane D）：`apps/server/plan-confirmation-route.ts` 导出工厂 `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`，assembly 与 ask.ts 共用；TTL 收敛为 `PLAN_CONFIRMATION_TTL_MS`（D-013）。
 
-**闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；网关名 ≤1（配置派生）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
+**闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；代码网关名 ≤1（配置派生；注释/示例字面量除外，grep 总量另记，不计入本判据）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
 
 ---
 
