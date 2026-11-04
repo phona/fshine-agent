@@ -1,7 +1,7 @@
 {
-  "version": 1,
-  "generatedAt": "2026-11-04T02:33:32.433Z",
-  "note": "Generic-mock deterministic baseline v1: protocol checks only, no model, no judge. A check recorded as pass must stay pass; a fail recorded here is a known failure, not a baseline to bake in -- this writer refuses to write a baseline containing a failing non-skipped case.",
+  "version": 2,
+  "generatedAt": "2026-11-04T03:05:33.954Z",
+  "note": "Generic-mock deterministic baseline v2 (Phase 2): protocol checks + host pure-module / scripted checks for the four former SKIP cases + committed_unverified host report. No model, no judge. A check recorded as pass must stay pass; this writer refuses to write a baseline containing a failing case.",
   "cases": {
     "smoke-query": {
       "checks": {
@@ -110,6 +110,51 @@
     "g-state-isolation": {
       "checks": {
         "case A count moved, case B still seed": "pass"
+      }
+    },
+    "g-step-cap-50-51": {
+      "checks": {
+        "default cap is 50": "pass",
+        "50 calls: no wind-down": "pass",
+        "51 calls: wind-down": "pass",
+        "51 calls: remaining 0": "pass",
+        "custom cap 2 fires at 3": "pass",
+        "invalid cap falls back to 50": "pass"
+      }
+    },
+    "g-handover-file": {
+      "checks": {
+        "handover path is tmp/<taskId>/handover.json": "pass",
+        "round-trip identical": "pass",
+        "resume merge does not double-count": "pass",
+        "wrong version parses to null": "pass",
+        "missing file reads to null": "pass"
+      }
+    },
+    "g-tool-definition-removed": {
+      "checks": {
+        "tools removed + zero execution blocks": "pass",
+        "tools present does not block": "pass",
+        "execution present does not block": "pass"
+      }
+    },
+    "g-tampered-summary-review": {
+      "checks": {
+        "tampered summary blocks the code": "pass",
+        "consistent summary issues the code": "pass",
+        "failed dry-run is inconsistent without a model": "pass",
+        "empty summary is inconsistent without a model": "pass",
+        "strict-JSON consistent reply parses": "pass",
+        "non-JSON reply parses to null (fail-closed)": "pass"
+      }
+    },
+    "g-committed-unverified-report": {
+      "checks": {
+        "readback-short classifies committed_unverified": "pass",
+        "delta < required classifies committed_unverified": "pass",
+        "success does not classify committed_unverified": "pass",
+        "report states posted + readback short + reconciliation": "pass",
+        "report never says completed": "pass"
       }
     }
   }

@@ -1,8 +1,97 @@
-# Generic-mock eval, Phase 1 — working notes (branch eval/generic-mock-v1)
+# Generic-mock eval, Phase 1 + Phase 2 — working notes (branch eval/generic-mock-v1)
 
-Status: Phase 1 deterministic protocol eval is green. This is NOT a Main-agent
-trustworthiness baseline. Read the "What this does NOT prove" section before
-quoting any number from here.
+Status: Phase 1 deterministic protocol eval is green, and Phase 2 (host
+changes for the four former SKIP cases) is green at the level honestly
+testable without a model. This is NOT a Main-agent trustworthiness
+baseline. Read the "What this does NOT prove" section before quoting any
+number from here.
+
+## Phase 2 — what was built (host changes, all on branch eval/generic-mock-v1)
+
+1. Free-worker step cap — `packages/agent/src/worker-step-cap.ts` (pure
+   decision: default 50, configurable via `stepCap` option or
+   `FSHINE_WORKER_STEP_CAP` env, invalid values fall back to 50) +
+   wiring in `pi-coding-driver.ts`: counting reuses the serve-gate
+   audit's `gateCalls`; the (cap+1)th allowed bash sends the same
+   `WORKER_WIND_DOWN_NUDGE` as the 90% wall-clock point (deliver done +
+   not-done, no new work), latched once. The env name is registered in
+   `platform-leak-lint.test.ts` as a host runtime parameter (tag
+   警职执法), same precedent as FSHINE_PLATFORM_QUEUE_CAPACITY.
+2. Host handover file — `packages/agent/src/task-handover.ts` (fixed
+   fields: plan id/version, completed steps + executed calls, unfinished
+   steps, next action, last RESULT summary; file
+   `<platformRoot>/tmp/<taskId>/handover.json`; resume merge deduplicates
+   executed calls by exact key, so a resumed turn never double-counts) +
+   wiring in `context.ts`: written at every turn end (ok, pending_plan,
+   needs_input, proposal_created, terminal), read on continue
+   (`task_handover_resumed` / `task_handover_missing` log events),
+   write failure only logs, never fails the turn.
+3. Isolated write-path review — `packages/agent/src/proposal-review.ts`
+   (same isolated-turn pattern as `context-model.ts`: own message list,
+   no tools, 10s timeout, 32KB in / 12KB out, strict-JSON parse,
+   fail-closed on unparsable reply / failed dry-run / empty summary /
+   turn throw) + wiring in `context.ts`: runs in `createProposalViaGateway`
+   after the platform dry-run succeeds and before any confirmation code
+   is created; inconsistent blocks the code. Input is schema + dry-run
+   envelope + platform summaryText only; output is consistent/
+   inconsistent + field names only. Injection point is the
+   `proposalReviewTurn` option. LIMIT: the host currently has no declared
+   interface to fetch the platform proposal schema, so the schema slot
+   is passed as null and the review compares summaryText against the
+   dry-run envelope only; schema-conformance checking is open until the
+   platform declares a schema endpoint. When no reviewer is injected,
+   the code logs `proposal_review_skipped` and proceeds — production
+   assembly wiring of the reviewer driver is still open (see below).
+4. committed_unverified terminal state — `packages/agent/src/committed-unverified.ts`
+   (mechanical classifier on envelope fields only: error code
+   PROPOSAL_VERIFY_SHORT, or readback delta < required; report text
+   "已落账、读回不足、需人工核对" + a reconciliation entry, never
+   "已完成") + classification in `apps/server/proposal-commit.ts` +
+   host terminal in `context.ts`: new `ConfirmationOutcome`
+   `confirm_committed_unverified`; intent goes to `committed` (platform
+   side is terminal, no second commit), task outcome goes to `failed`
+   (human reconciliation still open, task is not done) via
+   `task-manager.ts`.
+5. Tool-definition-removed scripted turn — `packages/agent/src/tool-definition-guard.ts`
+   (pure: tools removed + zero execution blocks, regardless of how
+   formatted the model text looks) + a scripted turn-exit proof in
+   `packages/agent/src/phase2.test.ts`: a fixed formatted fake answer
+   with zero execution is not passed through by `decideTurnExit`.
+   Scripted, not a real model — stated as such in the test and here.
+6. Eval cases — the four former SKIP cases are now real cases in
+   `scripts/eval/generic-mock.ts` (21 cases, 0 skipped), plus a new
+   `g-committed-unverified-report` case for the host report. Baseline is
+   now v2 (`generic-mock-baseline.json`, version 2).
+   `scripts/eval/generic-mock.ts` imports the host pure modules by
+   relative path (tsx does not resolve the `@fshine/agent` alias);
+   the script typechecks under the repo tsconfig settings via a
+   temporary tsconfig (repo tsconfig excludes `scripts/`).
+
+## Phase 2 — commands and actual results (this session, same branch)
+
+- `npm run eval:generic-mock -- --write-baseline` → exit 0.
+  21 cases PASS, 0 SKIP (16 Phase 1 + 4 converted + 1 new report case).
+- `npm run eval:generic-mock` (compare against v2 baseline) → exit 0.
+  21 cases pass, 0 skipped.
+- `npm run typecheck` → exit 0 (repo tsconfig, excludes `scripts/`).
+- Script typecheck: `npx tsc --noEmit` on generic-mock.ts under the repo
+  tsconfig settings (temporary tsconfig in /tmp, not committed) → exit 0.
+  One pre-existing null-narrowing spot in g-readback-short was fixed
+  (`commitEnv.data` → `commitEnv?.data`); it was not a Phase 2 behaviour
+  change.
+- `npm run test -- --project unit` → 97 files, 1655 tests, ALL PASS
+  (including the 14 new phase2 tests and the 4 generic-mock tests).
+  Two lint failures appeared on the first full run and were fixed by
+  the repo's own mechanisms, not by weakening the lint: the word 记录
+  in a new context.ts comment was reworded to 打一条日志, and
+  FSHINE_WORKER_STEP_CAP was registered in the FSHINE_NAME_REGISTRY
+  (see item 1 above).
+- `npm run test` (full, unit + e2e) was NOT re-run in Phase 2; the
+  Phase 1 e2e caveat stands (missing gitignored `config/agent.yaml`
+  in this clone). Re-run the full suite on a machine with a real
+  deployment config before merging.
+- No LLM was available in this environment, so `npm run eval`
+  (real-model probe) was NOT run and must NOT be reported as run.
 
 ## What was built
 
@@ -81,7 +170,43 @@ quoting any number from here.
    giving each dummy operation a neutral label (query records, etc.).
 4. ESM/CJS: see "What was built" above.
 
-## Baseline v1 (generic-mock-baseline.json, 16 cases)
+## Phase 2 — what the converted cases do NOT prove (read before quoting)
+
+- g-step-cap-50-51 proves the decision boundary (50 no wind-down, 51
+  wind-down, configurable, invalid falls back). It does NOT prove the
+  live worker driver fires the steer at the 51st allowed bash in a real
+  worker session — that wiring is code-reviewed, not live-run. A
+  scripted worker-session test for the steer is still open.
+- g-handover-file proves the file round-trip, the resume merge
+  (no double count), and fail-closed parsing. It does NOT prove a
+  resumed real task reads the handover before re-delegation in
+  production — the wiring exists in context.ts, but no end-to-end
+  resumed-task run was done here (no model, no deployment config).
+- g-tool-definition-removed proves the guard and the turn-exit block
+  for a fixed fake answer. It does NOT prove a real model, with tools
+  removed, would be blocked in a live turn — that needs a real-model
+  (or scripted-driver) worker run, not a dummy CLI call.
+- g-tampered-summary-review proves the host gate contract with a
+  scripted reviewer (inconsistent => no code, consistent => code) and
+  the mechanical pre-checks. It does NOT prove a real model reviewer
+  would catch a tampered summary. Real-model tamper detection is
+  still open, and the production reviewer driver is not yet wired
+  (proposalReviewTurn un-injected logs proposal_review_skipped).
+- g-committed-unverified-report proves the classifier and the report
+  text. The platform side (proposal becomes committed, partial count)
+  is already proven by g-readback-short on the dummy.
+
+## Baseline v2 (generic-mock-baseline.json, 21 cases)
+
+- Phase 1 cases (16, unchanged):
+  smoke-query, smoke-prepare-commit, smoke-not-found,
+  g-a1-requery, g-a2-cross-contamination, g-a3-ambiguity-mechanical,
+  g-a4-not-found-zero-leak, g-a5-idle-zero-calls, g-b1-stability,
+  g-y2-error-honesty, g-plan-gate, g-serve-matrix, g-readback-short,
+  g-proposal-expired, g-proposal-token-untrusted, g-state-isolation
+- Phase 2 cases (5):
+  g-step-cap-50-51, g-handover-file, g-tool-definition-removed,
+  g-tampered-summary-review, g-committed-unverified-report
 
 - smoke-query, smoke-prepare-commit, smoke-not-found
 - g-a1-requery, g-a2-cross-contamination, g-a3-ambiguity-mechanical,
@@ -102,34 +227,35 @@ quoting any number from here.
   replies. Do not present them as the L1 baseline.
 - It does not prove real-platform compatibility, domain correctness, or
   browser behaviour. Dummy payloads are simplified and neutral.
-- It does not prove the host-side changes that do not exist yet (see
-  skipped cases). Skipped ≠ passed.
+- It does not prove the live behaviours listed under "what the
+  converted cases do NOT prove" (live worker steer, resumed-task
+  end-to-end, real-model tamper detection, production reviewer wiring).
+  Those are unproven, not skipped — and not passed either.
 
-## Skipped cases (TODO, not done)
+## Skipped cases (none in Phase 2)
 
-- g-step-cap-50-51: free-worker step cap does not exist in fshine yet
-  (only 600s time + plan weight 180). Needs a host code change + a test
-  at call 50 and call 51, with the same wind-down as the 90% budget point.
-- g-handover-file: host-written mandatory handover file on task resume
-  does not exist yet. Needs the host change + a scripted turn.
-- g-tool-definition-removed: needs a real or scripted model turn with
-  tool definitions removed.
-- g-tampered-summary-review: isolated write-path review turn does not
-  exist yet in production. Needs the host review turn + a tampered
-  summary case (must block the confirmation code) and a consistent case
-  (must pass).
+- No skipped cases remain in generic-mock eval: 21 cases, 0 skipped.
+  The residual open items are listed under "what the converted cases
+  do NOT prove" above — they are unproven live behaviours, not hidden
+  skips, and must be quoted that way.
 
-## Other TODO (not in Phase 1)
+## Other TODO (not in Phase 1, not in Phase 2)
 
 - memory / breaker / cache auxiliary groups in dummy (not implemented;
   dummy returns usage exit 2 for them).
 - Plan grind / variant guards (maxNotify, maxReplans, maxVariants) in
   dummy — simplified decision only (weight + calls/seconds, stricter wins).
 - Rate-limit token bucket in dummy.
-- `committed_unverified` as a distinct host terminal state: dummy already
-  returns failed + verified=false + committed status for readback-short,
-  and the eval script classifies it as committed_unverified. The host
-  reporting change (never say "completed" for it) is still a host change.
+- Production wiring of the proposal reviewer driver into assembly
+  (`proposalReviewTurn`): the option and the gate exist, the driver is
+  not yet injected, so un-injected runs log `proposal_review_skipped`.
+  Do not present the review as live in production until that wiring
+  lands and is tested.
+- Platform proposal-schema endpoint: the host has no declared interface
+  to fetch the proposal schema, so the review's schema slot is null.
+  Schema-conformance checking waits on that endpoint.
+- Scripted worker-session test for the step-cap steer firing at the
+  51st allowed bash (decision boundary is proven, live steer is not).
 - Moving session/sensitive state out of the worker-readable workspace
   (dummy has no browser profile or platform session, so this gap is
   17dz-side, not dummy-side).

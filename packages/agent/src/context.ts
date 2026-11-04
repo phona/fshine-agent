@@ -26,6 +26,9 @@ import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
 import { gatewayExecPath, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
+import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFile, writeHandoverFile, type HandoverExecutedCall, type TaskHandover } from './task-handover';
+import { reviewProposalWithDriver, type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
+import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
 import type {
@@ -221,6 +224,8 @@ interface ContextTaskPreparationState {
   workerRequest: string;
   messages: DriverMessage[];
   stepLabel: string;
+  /** Host-written handover read on continue (null on a fresh task or a missing/corrupt file). */
+  handover: TaskHandover | null;
 }
 
 export type { SubagentNeeds };
@@ -250,6 +255,14 @@ export interface ProposalCommitResult {
   error?: string;
   /** 提案在平台侧已不可用：给用户确定性解释，不落账、不谎称执行失败。 */
   unavailable?: ProposalUnavailableKind;
+  /**
+   * 已落账但读回不足（Phase 2）：平台已把提案标为 committed（不可二次提交），
+   * 但落账后读回未达提案要求。宿主必须报独立终态，绝不报已完成，也绝不
+   * 按普通失败处理（普通失败意味着一次写入都没发生，那是假话）。
+   */
+  committedUnverified?: boolean;
+  /** 读回计数字段（平台信封原样搬运，仅用于终态报告的计数行）。 */
+  readBack?: ReadBackCounts;
 }
 
 export interface ContextTaskRunnerOptions {
@@ -301,6 +314,14 @@ export interface ContextTaskRunnerOptions {
    * 确认码命中后等待共享执行闸的上界（修复 2）。缺省 DEFAULT_CONFIRM_GATE_WAIT_MS。
    */
   confirmGateWaitMs?: number;
+  /**
+   * 写路径隔离复核回合（Phase 2）：在提案创建成功、宿主发确认码之前运行。
+   * 输入只给提案 schema（宿主目前未从平台取问 schema 时为 null，见下）+
+   * 域 dry-run 信封 + 平台渲染的 summaryText；输出只给一致/不一致 + 字段。
+   * 不一致时不发确认码。未注入时打一条 proposal_review_skipped 日志并继续——
+   * 生产装配的复核驱动接线仍待定（见 GENERIC_MOCK_NOTES），不得谎称已接线。
+   */
+  proposalReviewTurn?: ProposalReviewTurn;
 }
 
 export interface ContextTaskExecutionContext {
@@ -354,6 +375,8 @@ interface InternalContextTaskRunner extends ContextTaskRunner {
  *   · confirm_executed：确认码命中待确认提案且落账完成；
  *   · confirm_cancelled：取消码命中待确认提案且作废完成；
  *   · confirm_failed：确认/落账链路失败（执行器未配置或落账未完成，意图置 failed）；
+ *   · confirm_committed_unverified：已落账但读回不足（Phase 2 独立终态，意图置
+ *     committed 以防二次提交，任务结局置 failed 以留人工核对口，绝不报已完成）；
  *   · confirm_held：确认收到但落账执行未启用，提案保持待确认（无状态变化）；
  *   · confirm_stale：码已终结，给出确定性解释（无状态变化）。
  */
@@ -361,6 +384,7 @@ export type ConfirmationOutcome =
   | 'confirm_executed'
   | 'confirm_cancelled'
   | 'confirm_failed'
+  | 'confirm_committed_unverified'
   | 'confirm_held'
   | 'confirm_stale';
 
@@ -503,6 +527,55 @@ function defaultHashCode(code: string): string {
  * 消费方据此降级，不猜不补。
  */
 const RESULT_TEXT_MAX_CHARS = 2_000;
+
+/**
+ * Host-written turn-end handover (Phase 2). Fields come only from host
+ * facts: execution proof (plan id/version), host-parsed plan calls, and
+ * the result text already shown. Worker prose is never a handover source.
+ * Merges with the previous handover's executed calls by exact key, so a
+ * resumed turn never double-counts a call it already made. Best-effort:
+ * a write failure only logs, it must not fail the turn (same discipline
+ * as the D-065 result-text writeback).
+ */
+function writeTurnHandover(
+  platformRoot: string,
+  taskId: string,
+  result: TurnDriverResult,
+  previous: TaskHandover | null,
+  kind: 'ok' | 'pending_plan' | 'needs_input' | 'proposal_created' | 'terminal',
+): void {
+  try {
+    const calls: HandoverExecutedCall[] = (result.planFacts?.calls ?? []).map((call) => ({
+      operation: call.operation,
+      args: call.args.filter((a): a is string => typeof a === 'string'),
+    }));
+    const merged = mergeExecutedCalls(previous?.executedCalls ?? [], calls);
+    const unfinished =
+      kind === 'pending_plan' ? ['等待用户确认计划']
+      : kind === 'needs_input' ? ['等待用户补充信息']
+      : kind === 'proposal_created' ? ['等待用户确认提案']
+      : [];
+    const nextAction =
+      kind === 'pending_plan' ? '用户确认计划后继续执行'
+      : kind === 'needs_input' ? '用户补充信息后继续'
+      : kind === 'proposal_created' ? '用户确认提案后继续'
+      : '任务已完成，无后续动作';
+    writeHandoverFile(platformRoot, taskId, {
+      version: HANDOVER_VERSION,
+      taskId,
+      planId: result.execution?.planId ?? previous?.planId ?? null,
+      planVersion: result.execution?.version ?? previous?.planVersion ?? null,
+      completedSteps: merged.map((call) => `${call.operation} ${call.args.join(' ')}`.trim()),
+      executedCalls: merged,
+      unfinishedSteps: unfinished,
+      nextAction,
+      lastResultSummary: result.text.trim().slice(0, 500),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'task_handover_write_failed', taskId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+  }
+}
 
 function withExecutionFacts(
   running: PlatformTaskRecord,
@@ -711,6 +784,36 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (!proposalId || !summaryText) {
         return { status: 'failed', workerText: `平台的 completed 信封缺少 proposalId/summaryText（proposalId=${proposalId || '空'}），未创建待确认任务。` };
       }
+      // 写路径隔离复核（Phase 2）：在发确认码之前，独立回合只比对
+      // summaryText 与域 dry-run 信封。宿主目前没有一条已声明的接口可从平台
+      // 取问提案 schema，故 schema 位传 null、复核只做摘要与信封比对；
+      // schema 一致性检查是仍待平台声明取问接口的开放项，不得谎称已覆盖。
+      // 不一致 = 不发确认码（fail-closed），且不作废、不重试、不兜底放行。
+      if (options.proposalReviewTurn) {
+        const verdict = await options.proposalReviewTurn({
+          proposalSchema: null,
+          dryRunEnvelope: envelope,
+          summaryText,
+        });
+        console.info(JSON.stringify({
+          event: 'proposal_review',
+          requestId: ctx.trusted.requestId,
+          taskId,
+          proposalId,
+          verdict: verdict.verdict,
+          fields: verdict.fields,
+          ...(verdict.blockedReason ? { blockedReason: verdict.blockedReason } : {}),
+        }));
+        if (verdict.verdict !== 'consistent') {
+          const fields = verdict.fields.length ? `（不一致字段：${verdict.fields.join('、')}）` : '';
+          return {
+            status: 'failed',
+            workerText: `提案隔离复核未通过${fields}，未发确认码，请重新发起录入。`,
+          };
+        }
+      } else {
+        console.info(JSON.stringify({ event: 'proposal_review_skipped', requestId: ctx.trusted.requestId, taskId, proposalId }));
+      }
       const ci = options.changeIntents;
       if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
       // 新提案作废**同任务**的旧 pending（D-117，2026-10-26 拍板 I2：一任务一码）。
@@ -896,6 +999,20 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       await ci.updateStatus(rec.intentId, 'expired', { output: out.output.slice(0, 2000), ...(out.error ? { error: out.error } : {}) });
       return { text: PROPOSAL_UNAVAILABLE_TEXT[out.unavailable], outcome: 'confirm_stale' };
     }
+    // 已落账但读回不足（Phase 2 独立终态）：必须在普通失败分支之前分流——
+    // 普通失败意味着一次写入都没发生，在这里是假话；报已完成更是假话。
+    // 意图置 committed（平台侧已终结，防二次提交），任务结局置 failed
+    // （人工核对未完成，任务不能算 done），用户文本是独立终态报告 + 核对入口。
+    if (out.committedUnverified) {
+      console.warn(JSON.stringify({ event: 'change_intent_commit_unverified', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
+      await ci.updateStatus(rec.intentId, 'committed', {
+        output: out.output.slice(0, 2000),
+        verified: false,
+        ...(out.error ? { error: out.error } : {}),
+      });
+      await writeBackTaskOutcome(rec.taskId, 'failed');
+      return { text: renderCommittedUnverifiedReply(out.readBack), outcome: 'confirm_committed_unverified' };
+    }
     if (!out.ok) {
       console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
       await ci.updateStatus(rec.intentId, 'failed', {
@@ -991,7 +1108,23 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       ...previousMessages,
       { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
     ];
-    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel };
+    // 续跑时宿主先读交接文件再环境核对（Phase 2）：交接是任务层事实，不是
+    // 会话层触发式召回。文件缺失/损坏不阻塞续跑——旧任务仍可凭转录继续，
+    // 但留痕说明交接不可用，绝不凭空编一个。
+    const handover = existing ? readHandoverFile(profile.root, taskId) : null;
+    if (existing && handover) {
+      console.info(JSON.stringify({
+        event: 'task_handover_resumed',
+        taskId,
+        planId: handover.planId,
+        planVersion: handover.planVersion,
+        executedCalls: handover.executedCalls.length,
+        unfinishedSteps: handover.unfinishedSteps.length,
+      }));
+    } else if (existing) {
+      console.info(JSON.stringify({ event: 'task_handover_missing', taskId }));
+    }
+    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel, handover };
   }
 
   const runner: InternalContextTaskRunner = {
@@ -1129,7 +1262,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (execution?.backgroundRunId) {
         ctx = { trusted: { ...ctx.trusted, backgroundRunId: execution.backgroundRunId } };
       }
-      const { profile, existing, taskId, scratchDir, messages, stepLabel } = preparedState;
+      const { profile, existing, taskId, scratchDir, messages, stepLabel, handover } = preparedState;
       const runSignal = execution?.signal ?? signal;
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
@@ -1224,6 +1357,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'terminal');
           console.info(JSON.stringify({
             event: 'delegation_span',
             requestId: ctx.trusted.requestId,
@@ -1258,6 +1392,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             requestId: ctx.trusted.requestId,
             userText: result.pendingPlan.userText,
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'pending_plan');
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending', ...workerUsage }));
           return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}), ...(workerTokens ? { usage: workerTokens } : {}) };
         }
@@ -1271,6 +1406,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'needs_input');
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input', ...workerUsage }));
           return { taskId, text: result.text, needs: result.needs, ...(workerTokens ? { usage: workerTokens } : {}) };
         }
@@ -1284,6 +1420,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'proposal_created');
           console.info(JSON.stringify({
             event: 'delegation_span',
             requestId: ctx.trusted.requestId,
@@ -1330,6 +1467,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           workerMessages: result.messages as unknown[],
           updatedAt: new Date().toISOString(),
         });
+        writeTurnHandover(profile.root, taskId, result, handover, 'ok');
         console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok', ...workerUsage }));
         return final;
       } catch (error) {

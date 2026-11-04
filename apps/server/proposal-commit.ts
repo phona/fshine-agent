@@ -26,6 +26,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   hostGatewayEnv,
+  isCommittedUnverified,
   loadOperationProtocols,
   parseEnvelope,
   gatewayExecPath,
@@ -35,6 +36,7 @@ import {
   type ProposalCommitRequest,
   type ProposalCommitResult,
   type ProposalUnavailableKind,
+  type ReadBackCounts,
 } from '@fshine/agent';
 
 /** CLI 超时：与 plan-runtime / 提案创建的缺省 runner 同一量级（平台起不来不能吊住回合）。 */
@@ -112,7 +114,7 @@ interface ProposalCommitEnvelopeData {
   ok?: unknown;
   verified?: unknown;
   summaryText?: unknown;
-  readBack?: unknown;
+  readBack?: ReadBackCounts;
 }
 
 type ProposalStatusOutcome =
@@ -219,7 +221,24 @@ export function createProposalCommitRunner(
       const detail = envelope
         ? [envelope.error?.code, envelope.error?.message].filter((part) => typeof part === 'string' && part).join('：')
         : (result.stderr || result.stdout).trim().slice(0, 300);
-      return { ok: false, verified, summaryText, output, error: detail || `落账命令失败（exit ${result.code}）` };
+      // 已落账但读回不足的机械分类（Phase 2）：只认信封字段——错误码
+      // PROPOSAL_VERIFY_SHORT，或读回 delta < required。分类结果由宿主
+      // context.ts 转成独立终态报告，本文件不拼用户话术。
+      const committedUnverified = isCommittedUnverified({
+        ok,
+        verified,
+        errorCode: typeof envelope?.error?.code === 'string' ? envelope.error.code : undefined,
+        readBack: data?.readBack,
+      });
+      return {
+        ok: false,
+        verified,
+        summaryText,
+        output,
+        error: detail || `落账命令失败（exit ${result.code}）`,
+        ...(committedUnverified ? { committedUnverified: true as const } : {}),
+        ...(data?.readBack ? { readBack: data.readBack } : {}),
+      };
     }
     return { ok: true, verified, summaryText, output };
   };

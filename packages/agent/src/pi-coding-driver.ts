@@ -37,6 +37,7 @@ import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, se
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
+import { parseStepCap, stepCapDecision } from './worker-step-cap';
 
 /**
  * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
@@ -368,6 +369,13 @@ export interface PiCodingTurnDriverOptions {
    * （与 operationLabels 同族）；生产语义由常量测试钉住。
    */
   modelRetryDelaysMs?: readonly number[];
+  /**
+   * Free-worker step cap (Phase 2): allowed gate calls per turn, default 50.
+   * The (cap+1)th allowed bash triggers the same wind-down nudge as the
+   * 90% wall-clock point (done + not-done, no new work). Counting reuses
+   * gateCalls; this option only changes the threshold, never the counter.
+   */
+  stepCap?: number;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -576,6 +584,13 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      // 自由 worker 步数帽（Phase 2）：计数复用 gateCalls，阈值可配，缺省 50。
+      // steer 持有者先占位、会话建成后再赋值——onAllowedBash 在会话建成后的
+      // 工具执行时才被调用，届时持有者已指向 session.agent.steer，与
+      // currentPlan 的 latch 哲学同一手法。
+      const stepCap = parseStepCap(options.stepCap ?? options.env.FSHINE_WORKER_STEP_CAP);
+      let stepCapWindDownSent = false;
+      let stepCapSteer: ((content: string) => void) | null = null;
       let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
       // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
@@ -696,6 +711,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           onAllowedBash: (kind) => {
             gateCalls += 1;
             if (kind === 'executor') executorCalls += 1;
+            // 步数帽：第 cap+1 次放行时送一次 90% 预算点同款 wind-down，
+            // 且只送一次——后续放行不再重复打断，模型仍可收尾交已做 + 未做。
+            if (!stepCapWindDownSent && stepCapDecision(gateCalls, stepCap).windDown) {
+              stepCapWindDownSent = true;
+              stepCapSteer?.(WORKER_WIND_DOWN_NUDGE);
+            }
             else if (kind === 'local') localCalls += 1;
             else auxiliaryCalls += 1;
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
@@ -721,6 +742,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         turnDeclaration: input.turnDeclaration,
         entitySources: input.entitySources,
       });
+      // 步数帽 steer 持有者在此指向会话：onAllowedBash 在此之后才被调用。
+      stepCapSteer = (content: string) => {
+        session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
+      };
       const footprint = (): string => `${gateCalls} 次 ${GATEWAY_INVOCATION} 调用`;
       // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
       // 时，委派结果的文本由宿主合成的话术整体替换。为什么必须在结果时刻合成而不是只给

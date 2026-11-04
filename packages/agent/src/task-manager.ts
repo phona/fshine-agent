@@ -143,6 +143,9 @@ export function outputDiff(before: readonly RunWorkspaceFile[], after: readonly 
 function resultState(result: SubagentTaskResult): Extract<TaskRunState, 'completed' | 'failed' | 'waiting_input' | 'waiting_confirmation'> {
   if (result.pendingPlan || result.proposalCreated) return 'waiting_confirmation';
   if (result.hostConfirmationOutcome === 'confirm_failed') return 'failed';
+  // 已落账但读回不足：人工核对未完成，任务不能算 completed；置 failed
+  // 是“仍需人工处理”的开放态，不是“一次写入都没发生”的失败。
+  if (result.hostConfirmationOutcome === 'confirm_committed_unverified') return 'failed';
   if (result.hostConfirmationOutcome === 'confirm_held') return 'waiting_confirmation';
   if (result.needs || result.clarification) return 'waiting_input';
   return 'completed';

@@ -16,6 +16,44 @@ export {
   type PiTurnDriverOptions,
 } from './pi-driver';
 export {
+  DEFAULT_WORKER_STEP_CAP,
+  parseStepCap,
+  stepCapDecision,
+  type StepCapDecision,
+} from './worker-step-cap';
+export {
+  HANDOVER_FILE_NAME,
+  HANDOVER_VERSION,
+  handoverFilePath,
+  mergeExecutedCalls,
+  parseHandover,
+  readHandoverFile,
+  serializeHandover,
+  writeHandoverFile,
+  type HandoverExecutedCall,
+  type TaskHandover,
+} from './task-handover';
+export {
+  mechanicalReview,
+  parseReviewReply,
+  reviewProposalWithDriver,
+  type ProposalReviewInput,
+  type ProposalReviewTurn,
+  type ProposalReviewVerdict,
+} from './proposal-review';
+export {
+  COMMITTED_UNVERIFIED_LINE,
+  COMMITTED_UNVERIFIED_RECONCILIATION_LINE,
+  isCommittedUnverified,
+  renderCommittedUnverifiedReply,
+  type ReadBackCounts,
+} from './committed-unverified';
+export {
+  decideToolDefinitionGuard,
+  type ToolDefinitionGuardDecision,
+  type ToolDefinitionGuardInput,
+} from './tool-definition-guard';
+export {
   createPiCodingTurnDriver,
   createPiCodingWorkerSession,
   createServeGateAuditSink,
