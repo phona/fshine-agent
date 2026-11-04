@@ -1,10 +1,9 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import path from 'node:path';
 import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
+import { gatewayExecPath, gatewayTextPatterns, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -117,11 +116,13 @@ export async function loadPlanStatus(options: {
 }
 
 const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gateway }) => new Promise((resolve, reject) => {
-  // 第二处硬编码网关 spawn：与 context 提案网关同理，profile.gateway 优先，
-  // 未声明时回退旧值。调用方在 plan-runtime 外注入 runner 时应把 profile.gateway
-  // 带进 PlanCliRequest.gateway；直接调 evaluateAndActivatePlan 的调用方见
-  // EvaluateAndActivatePlanOptions.gateway。
-  const child = spawn(gateway ? path.join(platformRoot, ...gateway.split('/')) : path.join(platformRoot, 'bin', '17dz'), args, {
+  // 第二处网关 spawn：与 context 提案网关（context.ts 的
+  // defaultProposalGatewayRunner）同法——profile.gateway 优先，未声明或非法时
+  // 经 gatewayExecPath 回退遗留常量，不再以 'bin' / '17dz' 分段拼写（分段拼写
+  // 逃过 L2 字面量守卫 grep "bin/17dz"）。调用方在 plan-runtime
+  // 外注入 runner 时应把 profile.gateway 带进 PlanCliRequest.gateway；直接调
+  // evaluateAndActivatePlan 的调用方见 EvaluateAndActivatePlanOptions.gateway。
+  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -163,7 +164,16 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
   }
   const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
   const RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
-  const rankOf = (tier: string): number => RANK[tier] ?? 0;
+  // fail-closed（接口文档 §4）：未知档位绝不按最宽档（execute，rank 0）静默
+  // 激活。旧代码 `RANK[tier] ?? 0` 把任何非法 decision 映射成 execute，又因
+  // 后续 stop/confirm/notify 分支都不命中而落进 active 返回——即“未知档位按
+  // 最宽档静默激活”，与文档“decision 非四档之一 → 抛错”矛盾。本处抛错；
+  // runPlanEvaluation 的 exit 0 分支亦在解析后先验 decision，两道同判据。
+  const rankOf = (tier: string): number => {
+    const rank = RANK[tier];
+    if (rank === undefined) throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+    return rank;
+  };
   const evaluation = rankOf(host.tier) > rankOf(rawEvaluation.decision)
     ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
     : rawEvaluation;
@@ -533,7 +543,14 @@ async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest)
     if (evaluation) return evaluation;
     throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
   }
-  try { return JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  let evaluation: PlanEvaluation;
+  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  // exit 0 也验 decision：非四档即抛错，不交给 rankOf 的缺省映射（见上）。
+  // exit 非零分支的 tryParseEvaluation 本就只认四档，两路判据一致。
+  if (evaluation.decision !== 'execute' && evaluation.decision !== 'notify' && evaluation.decision !== 'confirm' && evaluation.decision !== 'stop') {
+    throw new Error(`plan evaluate 返回了非法 decision（${String(evaluation.decision)}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  return evaluation;
 }
 
 /** exit 非零时区分"stop 裁决"与"拒绝/失败"的唯一判据：stdout 能解析出带合法 decision 的 JSON。 */

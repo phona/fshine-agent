@@ -82,6 +82,39 @@
 | `DUMMY_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`、`_WEIGHT`、`_BUDGET_WEIGHT` | 夹具计划档位阈值，与 §3 执行层阈值同缺省 |
 | `DUMMY_PLAN_ID` / `DUMMY_REQUIRE_PLAN` / `DUMMY_GATE_SECRET` / `DUMMY_COMMIT_TOKEN` / `DUMMY_PLAN_ACTIVATION_SECRET` | 夹具计划绑定与令牌面；`EXECUTION_*` 同名作回退 |
 
+### 4b. stock 夹具（第二执行层证明夹具，`scripts/eval/fixtures/stock-platform/bin/stock.cjs`，隔离语义）
+
+stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证明
+（`second-layer.ts` / `second-layer.test.ts` / `generic-model-eval.py`）
+读取，`packages/` 与 `apps/` 生产代码对 `STOCK_*` 零读取。空串按缺失
+处理（夹具 `env()` 把 `''` 当作未设）。计数说明：按 `env()` / `env2()`
+实际读取点逐个核实为 **26 个**；若按字面 token 扫夹具目录会多出
+`STOCK_*` 前缀提法（`stock.cjs` 头注释“its own STOCK_* names”）与
+`generic-model-eval.py` 的 `STOCK_BIN`（Python 本地路径变量，不是环境
+变量），两者均不计入。另注意夹具 README 称“各状态文件均接受
+`EXECUTION_*` 别名”并不准确：下表逐个标明，只有 7 个有 `EXECUTION_*`
+回退，其余为 stock 专名。
+
+| 变量 | 作用 / 回退 / 缺省 |
+| --- | --- |
+| `STOCK_STATE` | 货架与物品状态文件；无 `EXECUTION_*` 回退；缺省 `<夹具>/.runtime/stock-state.json`；其所在目录即其余状态文件的缺省目录 |
+| `STOCK_PLAN_STATE` | 计划账本；回退 `EXECUTION_PLAN_STATE`；缺省 `<STOCK_STATE 所在目录>/plans.json` |
+| `STOCK_PROPOSAL_STATE` | 提案状态库；无回退；缺省 `<STOCK_STATE 所在目录>/proposals.json` |
+| `STOCK_AUDIT_PATH` | 审计 JSONL（含拒绝）；回退 `EXECUTION_AUDIT_PATH`；缺省 null（不写审计文件） |
+| `STOCK_MEMORY_STATE` | 记忆辅助组状态；无回退；缺省 `<STOCK_STATE 所在目录>/memory.json` |
+| `STOCK_BREAKER_STATE` | 熔断辅助组状态；无回退；缺省 `<STOCK_STATE 所在目录>/breaker.json` |
+| `STOCK_CACHE_STATE` | 缓存辅助组状态；无回退；缺省 `<STOCK_STATE 所在目录>/cache.json` |
+| `STOCK_PROPOSAL_TTL_SECONDS` | 提案 TTL（秒）；无回退；仅正整数有效，否则缺省 30 分钟 |
+| `STOCK_READBACK_SHORT` | 仅字面量 `1` 时提交只落部分记录，模拟读回不足；无回退 |
+| `STOCK_GATE_SECRET` | 提案提交令牌验签密钥；回退 `EXECUTION_GATE_SECRET`；缺省空串（空则不验令牌） |
+| `STOCK_COMMIT_TOKEN` | 提案提交令牌；回退 `EXECUTION_COMMIT_TOKEN`；缺省空串 |
+| `STOCK_PLAN_ACTIVATION_SECRET` | 计划激活令牌密钥；回退 `EXECUTION_PLAN_ACTIVATION_SECRET`；缺省空串 |
+| `STOCK_PLAN_ID` | 宿主注入的计划 id；回退 `EXECUTION_PLAN_ID`；缺省空串 |
+| `STOCK_REQUIRE_PLAN` | 仅字面量 `1` 时 serve 执行须有计划 id；回退 `EXECUTION_REQUIRE_PLAN`；缺省关闭 |
+| `STOCK_PLAN_AUTO_CALLS` / `STOCK_PLAN_NOTIFY_CALLS` / `STOCK_PLAN_CONFIRM_CALLS` / `STOCK_PLAN_HARD_CALLS` | 计划档位调用数阈值；无回退；仅有限正数有效，否则缺省 2 / 10 / 20 / 50 |
+| `STOCK_PLAN_AUTO_SECONDS` / `STOCK_PLAN_NOTIFY_SECONDS` / `STOCK_PLAN_CONFIRM_SECONDS` / `STOCK_PLAN_HARD_SECONDS` | 计划档位估时秒阈值；无回退；仅有限正数有效，否则缺省 60 / 180 / 600 / 1800 |
+| `STOCK_PLAN_AUTO_WEIGHT` / `STOCK_PLAN_NOTIFY_WEIGHT` / `STOCK_PLAN_BUDGET_WEIGHT` / `STOCK_PLAN_HARD_WEIGHT` | 计划档位权重阈值（注意权重线用 `BUDGET` 而非 `CONFIRM` 命名）；无回退；仅有限正数有效，否则缺省 6 / 18 / 60 / 180 |
+
 ## 5. 外部服务商凭据（只盘点，不删、不改）
 
 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_MAIN_MODEL` /
