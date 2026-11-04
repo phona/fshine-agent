@@ -214,3 +214,22 @@
 
 > 本文档是接口定义，不是实现报告。实现是否符合本文，以
 > `docs/execution-layer-interface.md` 为准绳逐项核对，见收尾报告。
+
+## 11. B4 审计结论（第 1 包收尾核查，2026-11-04）
+
+- 计划解析是协议形状，不是业务逻辑：`plan-runtime.ts` 的
+  `PlanCall { operation, args }` 只校验 JSON 形状（calls 为数组、
+  每项为对象、args 为数组、可序列化），不持 operation 允许名单、
+  不解释任何业务字段。操作名合法性由执行层 `plan evaluate`
+  与 §3 清单裁决，宿主不复核业务。
+- 凭证专用写路径已不存在：C 波删除的 legacy 落账执行器
+  （`apps/server/commit.ts`）无残留代码路径；现写路径只有
+  §6 的提案创建 / 提交 / 读回通用协议。
+- 残留的业务词 token 均为注释、示例或历史说明，不是逻辑：
+  `operation-labels.ts` 的归一示例（域前缀剥离的举例）、
+  `plan-runtime.ts` / `serve-gate.ts` 注释里的实测记录、
+  `platform-contract.ts` 关于已删 legacy 执行器的历史注。
+  为改名而改名会破坏历史记录的可读性，故保留，见 §10 表。
+- `run_17dz_task` 与 `17dz 子 Agent` 标签保留：那是财税集成
+  已发布的工具协议名，改名即断协议；新执行层接入时用其中性
+  工具名，不复用该名（§0、§10）。
