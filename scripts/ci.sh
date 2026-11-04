@@ -1,5 +1,5 @@
 #!/bin/sh
-# Deterministic CI entry point, used by Gitee Go and locally.
+# Deterministic CI entry point, run locally.
 # Runs only the deterministic gates: typecheck, unit tests, generic-mock eval.
 # It deliberately does NOT run the real-model eval (npm run eval) or e2e:
 # - real-model eval needs LLM credentials and has judge variance;
