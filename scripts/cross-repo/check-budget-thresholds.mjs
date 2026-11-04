@@ -84,7 +84,12 @@ function main(argv) {
   let dzRoot = process.env.CROSS_REPO_17DZ_ROOT || null;
   let positionalSeen = false;
   for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === '--fshine-root') fshineRoot = path.resolve(args[++i]);
+    if (args[i] === '--fshine-root') {
+      // 尾随无值时不得 path.resolve(undefined) 抛未捕获 TypeError（exit 1）：
+      // 本脚本承诺解析/用法类失败一律 exit 2，缺值即按用法失败处理。
+      if (i + 1 >= args.length) { console.error('--fshine-root 缺少取值。'); return 2; }
+      fshineRoot = path.resolve(args[++i]);
+    }
     else if (!args[i].startsWith('--') && !positionalSeen) { dzRoot = path.resolve(args[i]); positionalSeen = true; }
     else { console.error(`未知参数：${args[i]}`); return 2; }
   }

@@ -94,6 +94,67 @@ describe('跨仓预算阈值校验脚本', () => {
       const dzRoot = process.env.CROSS_REPO_17DZ_ROOT as string;
       const r = run(repoRoot, dzRoot);
       expect(r.code, r.stdout + r.stderr).toBe(0);
+      // 真实路径不只验 exit 0：12 个键的逐行输出都在场，才算真实解析走过。
+      expect(r.stdout).toContain('12/12 一致');
+      for (const key of ['autoCalls', 'notifyCalls', 'confirmCalls', 'hardCalls', 'autoWeight', 'notifyWeight', 'budgetWeight', 'hardWeight']) {
+        expect(r.stdout).toContain(`${key}: fshine=`);
+      }
     },
   );
+});
+
+describe('跨仓预算阈值校验脚本：真实路径与 exit 2 守门（非仅合成夹具）', () => {
+  it('真实 fshine 文件解析路径：以本仓真实 budget-policy.ts 为 fshine 根，dz 夹具一致时 exit 0', () => {
+    const { dzRoot } = fixtureRoots();
+    const r = run(repoRoot, dzRoot);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('12/12 一致');
+  });
+
+  it('真实 fshine 文件解析路径：dz 夹具改一个阈值时 exit 1 且点名该键', () => {
+    const { dzRoot } = fixtureRoots(61);
+    const r = run(repoRoot, dzRoot);
+    expect(r.code).toBe(1);
+    expect(r.stdout + r.stderr).toContain('budgetWeight');
+  });
+
+  it('parseFshine 失败路径：fshine 文件里没有 DEFAULT_BUDGET_THRESHOLDS 块时 exit 2', () => {
+    directory = mkdtempSync(path.join(tmpdir(), 'fshine-budget-cross-'));
+    const fshineRoot = path.join(directory, 'fshine');
+    const dzRoot = path.join(directory, 'dz');
+    mkdirSync(path.join(fshineRoot, 'packages/agent/src'), { recursive: true });
+    mkdirSync(path.join(dzRoot, 'src/execution'), { recursive: true });
+    writeFileSync(path.join(fshineRoot, 'packages/agent/src/budget-policy.ts'), '// no thresholds here\n');
+    writeFileSync(path.join(dzRoot, 'src/execution/plan.js'), 'function policy(env) { return {}; }\n');
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code).toBe(2);
+    expect(r.stdout + r.stderr).toContain('fshine 阈值块未找到');
+  });
+
+  it('未给 17dz 根 → exit 2（拒绝静默通过），且不依赖环境变量', () => {
+    try {
+      execFileSync(process.execPath, [script], {
+        encoding: 'utf8',
+        env: { ...process.env, CROSS_REPO_17DZ_ROOT: '' },
+      });
+      throw new Error('expected exit 2');
+    } catch (e) {
+      const err = e as { status?: number; stdout?: unknown; stderr?: unknown; message?: string };
+      if (err.message === 'expected exit 2') throw err;
+      expect(err.status).toBe(2);
+      expect(String(err.stdout ?? '') + String(err.stderr ?? '')).toContain('未给 17dz 根');
+    }
+  });
+
+  it('--fshine-root 尾随无值 → exit 2 而非未捕获 TypeError', () => {
+    const { dzRoot } = fixtureRoots();
+    try {
+      execFileSync(process.execPath, [script, dzRoot, '--fshine-root'], { encoding: 'utf8' });
+      throw new Error('expected exit 2');
+    } catch (e) {
+      const err = e as { status?: number; stdout?: unknown; stderr?: unknown; message?: string };
+      if (err.message === 'expected exit 2') throw err;
+      expect(err.status).toBe(2);
+    }
+  });
 });
