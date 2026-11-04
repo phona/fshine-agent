@@ -21,6 +21,7 @@
     "perf:suite": "node --import tsx scripts/perf/run-suite.ts 3",
     "perf:report": "node --import tsx scripts/perf/analyze.ts",
     "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
+    "check:cross-repo-budget": "node scripts/cross-repo/check-budget-thresholds.mjs",
     "ci": "sh scripts/ci.sh"
   },
   "engines": {
