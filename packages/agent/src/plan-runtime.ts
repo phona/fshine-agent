@@ -152,7 +152,13 @@ export function planDecisionRank(tier: string): number {
   if (!Object.prototype.hasOwnProperty.call(DECISION_RANK, tier)) {
     throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
   }
-  return DECISION_RANK[tier];
+  // 第二道守卫只为 TS 收窄索引类型：自有属性检查已排除原型链键，
+  // 这里再排除理论上的 undefined 值，行为上不改变任何已抛错的路径。
+  const rank = DECISION_RANK[tier];
+  if (rank === undefined) {
+    throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  return rank;
 }
 
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
