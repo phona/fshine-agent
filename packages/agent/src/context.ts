@@ -1301,6 +1301,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             messages,
             cwd: profile.root,
             skillRoots: profile.skillRoots,
+            ...(profile.gateway ? { gateway: profile.gateway } : {}),
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,

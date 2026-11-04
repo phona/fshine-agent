@@ -33,7 +33,7 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
@@ -334,6 +334,8 @@ export interface PiCodingTurnDriverOptions {
   platformRoot?: string;
   /** Keep SDK auth/session files outside the mounted platform workspace. */
   agentDir?: string;
+  /** Profile-declared gateway invocation (interface §1/§2). */
+  gateway?: string;
   /** G1 工具门事件留痕（放行与拦截都上报，落 tool_calls 审计）。 */
   serveGateAudit?: (event: ServeGateEvent) => void;
   /** script → label 查找表（测试替身注入点）；缺省经平台 CLI 派生。 */
@@ -383,6 +385,8 @@ export interface PiCodingWorkerSessionOptions {
   sensitivePaths?: readonly string[];
 
   cwd: string;
+  /** Profile-declared gateway invocation (interface §1/§2). */
+  gateway?: string;
   skillRoots: readonly string[];
   systemPrompt: string;
   sessionId?: string;
@@ -687,6 +691,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
+        ...(input.gateway ? { gateway: input.gateway } : {}),
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
@@ -746,7 +751,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       stepCapSteer = (content: string) => {
         session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
       };
-      const footprint = (): string => `${gateCalls} 次 ${GATEWAY_INVOCATION} 调用`;
+      const footprint = (): string => `${gateCalls} 次 ${resolveGatewayText(options.gateway)} 调用`;
       // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
       // 时，委派结果的文本由宿主合成的话术整体替换。为什么必须在结果时刻合成而不是只给
       // worker 一条 PLAN STOP：T7 事故形态——模型走了完整的"录入准备"流程（行为优秀），
@@ -1348,6 +1353,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
     // 本回合工作区：宿主按任务注入（`tmp/task_<taskId>`，续跑同任务共享）。宿主有随机源
     // （taskId），不必让 worker 自己随机（它也没有随机手段）。给了它，write 只放行这一个
     // 目录——共享 tmp/ 下多个会话同时写同名产物会互相覆盖，而覆盖后的产物看不出被谁污染过。
@@ -1405,7 +1411,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 通道的失败若绕过上报，"worker 指了个越界文件"在 tool_calls 里查不到。
       let submission: ResolvedPlanSubmission | null = null;
       try {
-        const parsed = parsePlanCallsCommand(String(args?.['command'] ?? ''));
+        const parsed = parsePlanCallsCommand(String(args?.['command'] ?? ''), options.gateway);
         if (parsed) submission = await resolvePlanSubmission(parsed);
       } catch (error) {
         // 形状不合法的提交也要留痕：这一跳同样是"worker 提交了方案"的事实，只是宿主
@@ -1453,7 +1459,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 条目、确认码、用户可见摘要全都不存在，用户拿不到确认码（A 波标定的缺口形状）。
       // B 波那个"提案创建走不走网关"的开关曾让整支可缺席（关 = 走遗留文本路径）；C 波删掉
       // 那条路后开关退役，拦截恒开。
-      const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols);
+      const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols, options.gateway);
       if (proposalCall) return decideProposalCreation(proposalCall);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });

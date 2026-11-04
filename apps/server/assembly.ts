@@ -322,7 +322,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
       // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
-      planCommandForm: planDraftExample(),
+      planCommandForm: planDraftExample(config.contextProfiles['17dz']?.gateway),
     } : {}),
   });
   // The task manager may cancel a waiting confirmation using the original principal/session/task

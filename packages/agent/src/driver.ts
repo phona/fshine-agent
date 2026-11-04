@@ -30,6 +30,8 @@ export interface TurnDriverInput {
   cwd?: string;
   /** Optional skill roots mounted by the trusted context profile. */
   skillRoots?: readonly string[];
+  /** Profile-declared gateway invocation (interface §1/§2); text recognition derives from it. */
+  gateway?: string;
   /** Stable worker/session id used by a resumable driver. */
   sessionId?: string;
   /** 请求级关联 id（审计串查 fshine ↔ 平台门控日志用）。 */

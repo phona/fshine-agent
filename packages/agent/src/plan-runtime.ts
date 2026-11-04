@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { GATEWAY_INVOCATION } from './platform-contract';
+import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -387,12 +387,18 @@ const EXTRA_PREFIX_MAX_CHARS = 120;
  * 一律算形状不符，抛一条说清"期望什么、实际什么"的结构错误，让模型下一轮自己改。
  * 重试是模型的职责，宿主不替它 absorbing。
  */
-function locatePlanSubmission(command: string): { prefix: string; payload: string } | null {
+/**
+ * plan 令牌定位：网关名由调用方注入（profile.gateway），未注入时走
+ * 遗留缺省（接口文档 §2/§10）。与 serve-gate 共用 gatewayTextPatterns
+ * 的网关名来源，不存在第二份抄写。
+ */
+function locatePlanSubmission(command: string, gateway?: string): { prefix: string; payload: string } | null {
+  const resolved = resolveGatewayText(gateway);
   let from = 0;
   for (;;) {
-    const at = command.indexOf(GATEWAY_INVOCATION, from);
+    const at = command.indexOf(resolved, from);
     if (at < 0) return null;
-    from = at + GATEWAY_INVOCATION.length;
+    from = at + resolved.length;
     // 该网关名必须紧跟 plan 子命令（空白分隔，且 plan 自身是一个完整令牌）才算计划提交；
     // 否则只是别处提到了网关（如网关 query），继续找下一个位置。
     const plan = /^\s+plan(?=\s|$)/.exec(command.slice(from));
@@ -407,7 +413,7 @@ function collapseExtra(text: string): string {
 }
 
 /** Parse the worker's intercepted gateway plan submission: inline JSON or `--file <path>`. */
-export function parsePlanCallsCommand(command: string): PlanSubmission | null {
+export function parsePlanCallsCommand(command: string, gateway?: string): PlanSubmission | null {
   const trimmed = command.trim();
   // 三态分辨，不能一律返回 null：
   //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
@@ -417,7 +423,7 @@ export function parsePlanCallsCommand(command: string): PlanSubmission | null {
   // 无从自愈（真实平台实测：被误导到把方案 JSON 打印成助手文本，12 步全空转）。
   // throw 在 beforeToolCall 里变成 PLAN DECLINED：<可行动消息>——正确的诊断
   // 本身就是自愈通道：说清形状哪里不对、正确形状长什么样，worker 下一轮就能改。
-  const located = locatePlanSubmission(trimmed);
+  const located = locatePlanSubmission(trimmed, gateway);
   if (!located) return null;
   const { prefix, payload } = located;
 

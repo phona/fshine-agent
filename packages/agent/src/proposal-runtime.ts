@@ -72,9 +72,10 @@ export interface ProposalCreateCall {
 export function parseProposalCommand(
   command: string,
   protocols: OperationProtocols | undefined,
+  gateway?: string,
 ): ProposalCreateCall | null {
   if (!protocols || protocols.size === 0) return null;
-  if (!isServeCliInvocation(command)) return null;
+  if (!isServeCliInvocation(command, gateway)) return null;
   const tokens = splitCommandTokens(command);
   const form = proposalCreateForm(tokens);
   if (!form) return null;
