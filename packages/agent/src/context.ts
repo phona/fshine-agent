@@ -24,7 +24,7 @@ import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
-import { gatewayExecPath, parseEnvelope } from './platform-contract';
+import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFile, writeHandoverFile, type HandoverExecutedCall, type TaskHandover } from './task-handover';
 import { reviewProposalWithDriver, type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
@@ -492,8 +492,10 @@ export function newGateSecret(): string {
  * 因此测试可以塞同一个 PlanCliRunner 替身。超时/ spawn 失败按非零退出 + stderr 交还，
  * 由调用方走"平台拒绝"分支——宿主不猜平台内部状态。
  */
-const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env }) => new Promise((resolve, reject) => {
-  const child = spawn(gatewayExecPath(platformRoot), args, {
+const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
+  // Profile 声明优先：调用方（createProposalViaGateway）把 resolve 出的
+  // profile.gateway 传进来；未声明时回退遗留常量（过渡期，见 platform-contract）。
+  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -754,6 +756,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     ctx: ContextTaskExecutionContext,
     taskId: string,
     platformRoot: string,
+    gateway?: string,
   ): Promise<ProposalCreationOutcome> {
     // ① 写开放复核（平台侧声明，Generic，不依赖任何 operation 名）：判据与 worker 驱动的
     // 计划扫描（D-075）同源——部署层经 isCommitEnabled() 从平台状态派生。话术唯一来源在
@@ -770,6 +773,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       platformRoot,
       args: ['prepare', call.operation, call.payloadPath],
       env: hostGatewayEnv(),
+      ...(gateway ? { gateway } : {}),
     });
     const envelope = parseEnvelope(result.stdout);
     if (!envelope) {
@@ -1325,7 +1329,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             // 回答：拦截处必有 tool_calls 一行（tool = proposal_create，含拒绝原因），
             // 建成时有 proposal_created 事件 + delegation_span 的 proposal_created 结局。）
             ...(options.changeIntents ? {
-              onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
+              onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root, profile.gateway),
             } : {}),
           });
         // worker 侧真实 token 消耗（纯加法遥测）：对 worker 转录里 assistant 消息的
@@ -1571,6 +1575,7 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
     workerTimeoutMs: configured.workerTimeoutMs,
     ...(configured.knowledgePaths ? { knowledgePaths: configured.knowledgePaths } : {}),
     ...(configured.sensitivePaths ? { sensitivePaths: configured.sensitivePaths } : {}),
+    ...(configured.gateway ? { gateway: configured.gateway } : {}),
   };
 }
 
@@ -1580,6 +1585,7 @@ interface ResolvedContextProfile {
   workerTimeoutMs?: number;
   knowledgePaths?: string[];
   sensitivePaths?: string[];
+  gateway?: string;
 }
 
 function isInside(root: string, candidate: string): boolean {

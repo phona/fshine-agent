@@ -80,9 +80,9 @@ export function parseOperationLabels(stdout: string): OperationLabels {
  * 任何失败——platformRoot 未配、CLI 不存在/不可执行、超时、非零退出、
  * spawn 抛错——都返回空 Map：派生是增强，不是前提。
  */
-export function loadOperationLabels(platformRoot?: string): Promise<OperationLabels> {
+export function loadOperationLabels(platformRoot?: string, gateway?: string): Promise<OperationLabels> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = gatewayExecPath(platformRoot);
+  const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (labels: OperationLabels): void => {
@@ -212,9 +212,9 @@ export function parseOperationArgStyles(stdout: string): KeyArgStyles {
  * 不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
  * 不是前提；没有规格就不发参数摘要，绝不用宿主硬编码名单顶替。
  */
-export function loadOperationArgStyles(platformRoot?: string): Promise<KeyArgStyles> {
+export function loadOperationArgStyles(platformRoot?: string, gateway?: string): Promise<KeyArgStyles> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = gatewayExecPath(platformRoot);
+  const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (styles: KeyArgStyles): void => {
@@ -254,9 +254,9 @@ export function loadOperationArgStyles(platformRoot?: string): Promise<KeyArgSty
  * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON——一律返回空 Map。派生是增强，
  * 不是前提；没有规格就不提取结构化事实（宁缺勿猜），绝不用宿主硬编码位置猜。
  */
-export function loadOperationArgSpecs(platformRoot?: string): Promise<OperationArgsSpecs> {
+export function loadOperationArgSpecs(platformRoot?: string, gateway?: string): Promise<OperationArgsSpecs> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = gatewayExecPath(platformRoot);
+  const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (specs: OperationArgsSpecs): void => {
@@ -372,9 +372,9 @@ export function parseOperationSemantics(stdout: string): OperationSemantics {
  * 兜底），绝不用宿主硬编码 operation 名单或 access 词表顶替（那违反 L2：宿主另立
  * 一份名单/词表即分叉）。
  */
-export function loadOperationSemantics(platformRoot?: string): Promise<OperationSemantics> {
+export function loadOperationSemantics(platformRoot?: string, gateway?: string): Promise<OperationSemantics> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = gatewayExecPath(platformRoot);
+  const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (semantics: OperationSemantics): void => {
@@ -456,9 +456,9 @@ export function parseOperationProtocols(stdout: string): OperationProtocols {
  * 平台还没下发这一列——一律返回空 Map。派生是增强，不是前提；没有角色表就不识别提案
  * 创建调用（fail-closed 到"不拦截"），门与平台照旧兜底。
  */
-export function loadOperationProtocols(platformRoot?: string): Promise<OperationProtocols> {
+export function loadOperationProtocols(platformRoot?: string, gateway?: string): Promise<OperationProtocols> {
   if (!platformRoot) return Promise.resolve(new Map());
-  const cli = gatewayExecPath(platformRoot);
+  const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
     const settle = (protocols: OperationProtocols): void => {

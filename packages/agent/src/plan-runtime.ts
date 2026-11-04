@@ -48,6 +48,8 @@ export interface PlanCliRequest {
   args: string[];
   input?: string;
   env?: NodeJS.ProcessEnv;
+  /** Profile 声明的网关调用形式；未声明时默认 runner 回退遗留常量（过渡期）。 */
+  gateway?: string;
 }
 
 export type PlanCliRunner = (request: PlanCliRequest) => Promise<{ code: number | null; stdout: string; stderr: string }>;
@@ -80,6 +82,8 @@ export interface EvaluateAndActivatePlanOptions {
   runCli?: PlanCliRunner;
   env?: NodeJS.ProcessEnv;
   activationSecret?: string;
+  /** Profile 声明的网关调用形式，透传给默认 runner（注入 runner 时由 runner 自行决定）。 */
+  gateway?: string;
 }
 
 export async function loadCurrentActivePlan(options: {
@@ -110,8 +114,12 @@ export async function loadPlanStatus(options: {
   return result && typeof result.status === 'string' ? result : null;
 }
 
-const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
-  const child = spawn(path.join(platformRoot, 'bin', '17dz'), args, {
+const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gateway }) => new Promise((resolve, reject) => {
+  // 第二处硬编码网关 spawn：与 context 提案网关同理，profile.gateway 优先，
+  // 未声明时回退旧值。调用方在 plan-runtime 外注入 runner 时应把 profile.gateway
+  // 带进 PlanCliRequest.gateway；直接调 evaluateAndActivatePlan 的调用方见
+  // EvaluateAndActivatePlanOptions.gateway。
+  const child = spawn(gateway ? path.join(platformRoot, ...gateway.split('/')) : path.join(platformRoot, 'bin', '17dz'), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -137,6 +145,7 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
     args: ['plan', 'evaluate', '--task-id', options.taskId, '--stdin'],
     input: JSON.stringify({ calls: options.calls, ...(options.requestId ? { requestId: options.requestId } : {}) }),
     env: options.env,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
   });
 
   if (evaluation.decision === 'stop') {
@@ -171,6 +180,7 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
       runCli,
       env: options.env,
       activationSecret: options.activationSecret,
+      ...(options.gateway ? { gateway: options.gateway } : {}),
     });
   }
   return { status: 'active', planId: evaluation.planId, version: evaluation.version, evaluation };
@@ -185,6 +195,7 @@ export async function activatePendingPlan(options: {
   env?: NodeJS.ProcessEnv;
   activationSecret?: string;
   now?: number;
+  gateway?: string;
 }): Promise<unknown> {
   const secret = options.activationSecret;
   if (!secret) throw new Error('缺少宿主计划激活密钥 DZ_PLAN_ACTIVATION_SECRET。');
@@ -195,6 +206,7 @@ export async function activatePendingPlan(options: {
     args: ['plan', 'activate', '--stdin'],
     input: JSON.stringify({ planId: options.planId, evidence: options.evidence, token }),
     env: { ...options.env, DZ_PLAN_ACTIVATION_SECRET: secret },
+    ...(options.gateway ? { gateway: options.gateway } : {}),
   });
 }
 

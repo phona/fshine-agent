@@ -89,6 +89,26 @@ contextProfiles:
     });
   });
 
+  it('context profile 声明 gateway 且拒绝父级逃逸 gateway', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    gateway: bin/17dz
+    skillRoots: [".agents/skills"]
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['17dz']).toMatchObject({ gateway: 'bin/17dz' });
+    const bad = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    gateway: ../escape
+    skillRoots: [".agents/skills"]
+`;
+    expect(() => loadConfig({ yamlPath: writeFixture(bad), env: PUBLIC_URL_ENV })).toThrowError(/gateway/);
+  });
+
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:

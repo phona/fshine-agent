@@ -179,6 +179,8 @@ export {
 export {
   GATEWAY_INVOCATION,
   gatewayExecPath,
+  gatewayExecPathForProfile,
+  validateGatewayInvocation,
   PLATFORM_OPERATIONS,
   PLATFORM_AUTH_ERROR_CODES,
   parseEnvelope,
@@ -194,6 +196,16 @@ export {
   type PlatformEnvelope,
   type SelectionClarification,
 } from './platform-contract';
+export {
+  DEFAULT_BUDGET_THRESHOLDS,
+  decideBudgetTier,
+  stricterTier,
+  weightOfOperation,
+  type BudgetDecision,
+  type BudgetInput,
+  type BudgetThresholds,
+  type BudgetTier,
+} from './budget-policy';
 export * from './session';
 export {
   createContextTaskRunner,

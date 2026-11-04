@@ -25,6 +25,9 @@ principals:
 contextProfiles:
   17dz:
     root: /path/to/17dz-platform
+    # 每个 profile 声明自己的网关调用形式（相对 root，宿主 spawn 用它，不硬编码）。
+    # 换执行层时只改这里：root + gateway + skillRoots 三件套随 profile 走。
+    gateway: bin/17dz
     # 运行态技能面:只认 .agents/skills-serve(平台仓 skills-lock 同步过来的 SKILL.md)。
     # 与建造期技能面 .agents/skills 互斥——worker 驱动 noSkills:true 只加载显式
     # skillRoots,指向建造面会让"技能注入静默失效"(D-055:模板曾写着旧路径)。
