@@ -142,11 +142,17 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gatew
 
 const DECISION_RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
 
-/** decision 四档的严度序。未知档位抛错，绝不回退到 execute（rank 0）。 */
+/** decision 四档的严度序。未知档位抛错，绝不回退到 execute（rank 0）。
+ * 查表必须先过自有属性检查：DECISION_RANK 是普通对象，toString /
+ * constructor / __proto__ 等键不经检查会命中 Object.prototype，返回函数或
+ * 对象而非 undefined，`rank === undefined` 守卫就失效，比较为 false 后
+ * 正好落回“按平台档静默激活”的旧缺陷形态。生产路径目前有 exit 0 预验
+ * 与 tryParse 两道预校验，本口子是公开 API 层面的，不是已可达的生产绕过。 */
 export function planDecisionRank(tier: string): number {
-  const rank = DECISION_RANK[tier];
-  if (rank === undefined) throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
-  return rank;
+  if (!Object.prototype.hasOwnProperty.call(DECISION_RANK, tier)) {
+    throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  return DECISION_RANK[tier];
 }
 
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {

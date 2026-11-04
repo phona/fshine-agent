@@ -89,6 +89,13 @@ describe('decision fail-closed：未知档位两道防线各有钉子', () => {
     expect(planDecisionRank('stop')).toBe(3);
     expect(() => planDecisionRank('bogus')).toThrow(/非法 decision/);
     expect(() => planDecisionRank('')).toThrow(/非法 decision/);
+    // M1（第四轮）：原型链键名必须抛错，不能命中 Object.prototype。
+    // 旧查表（不做自有属性检查）下 toString 返回函数、constructor 返回
+    // 函数、__proto__ 返回对象，`rank === undefined` 守卫失效，比较为
+    // false 后落回静默激活形态——改回旧查表时本条变红。
+    for (const protoKey of ['toString', 'constructor', '__proto__', 'hasOwnProperty', 'valueOf']) {
+      expect(() => planDecisionRank(protoKey)).toThrow(/非法 decision/);
+    }
   });
 
   it('exit 0 返回未知 decision → 抛错且文案带 exit 0 预验标记，不激活（删预验时本条凭文案变红）', async () => {
