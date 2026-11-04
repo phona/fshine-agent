@@ -177,6 +177,11 @@ function setupHost(options: {
     writeEnabled: options.writeEnabled ?? true,
     generateCode: () => 'D3F2K9',
     intentTtlMs: 10 * 60_000,
+    // 第 2 包生产契约：提案创建必须经过隔离复核 + 真实下发的 schema，
+    // 旧测试“无复核也完成”的前提已不存在，故宿主半默认注入一致复核与
+    // dummy schema；fail-closed 的反向情形由 production-wiring.test.ts 钉住。
+    proposalReviewTurn: async () => ({ verdict: 'consistent', fields: [] }),
+    proposalSchemaLoader: async () => ({ $id: 'ChangeProposalPayload', type: 'object' }),
   });
   return {
     rows: intents.rows,
