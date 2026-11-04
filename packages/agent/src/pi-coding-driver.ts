@@ -37,7 +37,7 @@ import { parseEnvelope, resolveGatewayText, platformAuthFailureFromResponses, se
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
-import { parseStepCap, stepCapDecision } from './worker-step-cap';
+import { createStepCapWindDown, parseStepCap } from './worker-step-cap';
 
 /**
  * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
@@ -593,8 +593,13 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 工具执行时才被调用，届时持有者已指向 session.agent.steer，与
       // currentPlan 的 latch 哲学同一手法。
       const stepCap = parseStepCap(options.stepCap ?? options.env.FSHINE_WORKER_STEP_CAP);
-      let stepCapWindDownSent = false;
+      // 步数帽收尾（第 2 包）：跟踪器是 worker-step-cap.ts 的生产代码，
+      // 驱动在每次放行后把自己的 gateCalls 计数喂给它；第 cap+1 次恰好
+      // 送一次 wind-down，之后不再重复。steer 持有者先占位、会话建成后
+      // 再赋值——onAllowedBash 在会话建成后的工具执行时才被调用，届时
+      // 持有者已指向 session.agent.steer，与 currentPlan 的 latch 哲学同一手法。
       let stepCapSteer: ((content: string) => void) | null = null;
+      const fireStepCapWindDown = createStepCapWindDown(stepCap, () => stepCapSteer?.(WORKER_WIND_DOWN_NUDGE));
       let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
       // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
@@ -718,12 +723,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             if (kind === 'executor') executorCalls += 1;
             // 步数帽：第 cap+1 次放行时送一次 90% 预算点同款 wind-down，
             // 且只送一次——后续放行不再重复打断，模型仍可收尾交已做 + 未做。
-            if (!stepCapWindDownSent && stepCapDecision(gateCalls, stepCap).windDown) {
-              stepCapWindDownSent = true;
-              stepCapSteer?.(WORKER_WIND_DOWN_NUDGE);
+            // wind-down 那一次本身不计入 local/auxiliary 分项（与 Phase 2 原逻辑一致）；
+            // 只有非 wind-down 的放行才按 kind 分项。
+            if (!fireStepCapWindDown(gateCalls)) {
+              if (kind === 'local') localCalls += 1;
+              else auxiliaryCalls += 1;
             }
-            else if (kind === 'local') localCalls += 1;
-            else auxiliaryCalls += 1;
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
             // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
