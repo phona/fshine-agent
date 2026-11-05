@@ -1480,3 +1480,23 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L2（跨仓面：mock seed 住兄弟仓、fshine Tier B 链消费它，两仓夹具改名未同批——与 D-015「17dz mock 夹具手抄、无机械锁」同族）。
 - **归属波次 / 限期**：W5 前（结构化调用协议波次要以 Tier B 全绿作证据）。
 - **状态**：待办。
+
+### D-155 · config/agent.example.yaml 的 5 处 17dz 名词无任何守卫覆盖（含 contextProfiles 结构键）
+
+- **位置**：`config/agent.example.yaml`（部署模板，5 处 17dz：注释里的授权账套 id 说明、`17dz:` profile 段、`root: /path/to/17dz-platform`、`gateway: bin/17dz`、自动登录凭据说明行）；`config/` 目录整体在 `packages/agent/platform-leak-lint.test.ts`（SCAN_DIRS = packages/apps/scripts）与 `packages/agent/docs-reality.test.ts`（只扫 `packages/*/src` + `apps/server`）两把尺的扫描范围之外。
+- **根因**：两把尺的扫描范围都按"编排层源码"划定，`config/` 是部署模板、不在其内；于是模板里的执行层实例名词既没有词预算约束，也没有对账判据。exposure-lint 扫 `git ls-files` 全量，该模板的暴露三类（UserID 占位符 / 内部路径 / 客户名）实际已被覆盖——**缺口仅在 17dz 名词这一类**。
+- **影响面核实（不扩大）**：模板是示例文件、不进运行态（真实 `config/agent.yaml` gitignored）；本波不为它单开守卫，收进 gate① 对账一次清。
+- **闭环判据**：gate①（产品面 `git grep -i 17dz` = 0，例外 = debt-ledger/change-safety/AGENTS.md）对账时该文件零 17dz，且 `contextProfiles` 的结构键随 W1 完成参数化（profile id 是结构键而非注释，不能靠文本替换糊过去）。
+- **律法归属**：L1（词汇边界：业务/实例词汇只住执行层 + 夹具 + 文档，模板不在词预算扫描范围内）。
+- **归属波次 / 限期**：W1 / 波次 4；限期 = 波次 4（门面按终局写时一并处理）。
+- **状态**：待办。
+
+### D-156 · 两支真实读数（61,000 / 86,000）未替换也未收词——守卫 D 类缺口
+
+- **位置**：`docs/debt-ledger.md`、`docs/rule-landing.md`、`docs/change-safety.md` 的叙述（把 86,000 / 61,000 当真实验收结果引用，如 rule-landing.md「真实数据（86,000）旁边编造了…61,000」）+ 约 28 个文件的夹具与断言（`tests/e2e` 各 turn-loop、`packages/agent` 多个测试、`scripts/probe-real-agent.ts` 等，含无千分位形 61000/86000）。
+- **根因**：这两支是真实平台查询读数，先作为 e2e 夹具"真值"落进 mock 数据，再被 docs 叙述引用；脱敏波映射表 E 组未收它们，`exposure-lint` D 类因此也没有防复发判据。同族的另一处差额读数（守卫条目 F15）已按"登记与替换必须同一批"的纪律在 `fbab7d7` 补掉（收词 + 替换同批），本条是剩下的两支。
+- **影响面核实（不扩大）**：现行树客户名已虚构化，夹具里这两个数与虚构主体配对，单独看不构成"真实主体 + 真实读数"的完整暴露；但 docs 叙述把它们当真实验收结果引用，属真实读数引用。**不得**因为"夹具里是 mock 数据"就整条不登记——那样 docs 侧的引用永远没有判据。
+- **闭环判据**：两支读数在全树（docs 叙述 + 夹具 + 成对断言）机械替换为虚构值（同一 commit 内成对输入/期望同步换，判别力保留），且 `exposure-lint` D 类收词后零命中；替换后 `npm run test -- --project unit` 与 Tier B 的失败集合不得相对替换前扩大（Tier B 按 D-154 已知红者除外）。
+- **律法归属**：L6（零沉积：陈旧/沉积数据进主干且无守卫，与"17dz 仓根 465KB 会话日志被跟踪"同族）。
+- **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环；执行波次随脱敏补批或并入波次 4 门面对账，届时两仓夹具同批）。
+- **状态**：待办。

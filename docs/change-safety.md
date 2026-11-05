@@ -1219,3 +1219,78 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | G15 | decision fail-closed 两道防线（`plan-runtime.ts`：exit 0 预验 + `planDecisionRank`） | ① `planDecisionRank` 改回 `?? 0` | `plan-budget-overlay.test.ts` 直测 1 红 → 还原复绿 |
 | G15 | 同上 | ② 删 exit 0 预验（rankOf 仍在） | 公开路径测试凭“exit 0 预验”文案标记 1 红 → 还原复绿（单拆任一道时另一道仍抛错，故两道各凭直测/文案分别钉住，不能凭“公开路径仍抛错”证明单道无用；两道同时拆掉时未知档位会落进 active 返回，见测试文件内的书面说明） |
 | G16 | 步数帽 steer 失败补发（`pi-coding-driver.ts` pending 补发块） | 删整个 pending 补发块 | `pi-coding-driver-executor-bypass.test.ts` 补发成功用例 1 红（首次 steer 抛错、第 4 次放行补发）→ 还原复绿；补发时仍抛错的用例不红（pending 保持、无更多放行时送达 0 次是预期行为，不以它证明补发） |
+
+---
+
+## 25. 公开迁移 · 脱敏波（2026-11-05，wave1-exposure-scrub：现行树全量脱敏）
+
+**范围**：迁移起点 `44a84a6` → 本波 9 个提交（下表）。本波是**纯文本级脱敏 + 一道常驻守卫**：不部署、不重启、不调用真实业务平台或真实企微（D-076——本波的实际"执行面"只有 `git grep` / vitest / tsc，没有任何一次真实平台外发）。目标是"现行树四类敏感串零命中，且此后有机械判据防复发"，不是改任何运行期行为。
+
+| # | 提交 | 主题 | 文件 / 规模 |
+|---|---|---|---|
+| 1 | `12d4148` | test(agent)：暴露面守卫先进场——四类零命中断言，**此刻红着交回** | 1 文件 +306（新增 `packages/agent/exposure-lint.test.ts`） |
+| 2 | `bfa3a31` | chore(security)：机械替换四类敏感串为虚构值（代码+夹具+docs 同一 commit） | 105 文件 / 1301 处（+1301 −1301，纯替换零净增行） |
+| 3 | `21e3dc2` | refactor(scripts)：6 个脚本授权用户去硬编码——改从 `config/agent.yaml` 派生 | 9 文件（含 `packages/core` 派生助手 + `config.test.ts` 5 条表征用例） |
+| 4 | `821a3f7` | chore(security)：脱敏收口——.env.example 三处 + debt-ledger 剩余真实客户名 | 2 文件 |
+| 5 | `ecc1e65` | docs(debt)：脱敏波新立两债（D-153 / D-154） | 1 文件 +24 |
+| 6 | `f7e88f4` | chore(security)：映射表遗漏的两支真实账套名脱敏 + 守卫 B 类同批收词 | 3 文件 |
+| 7 | `4dc372b` | test(agent)：暴露面守卫 F3 五项变异留档 | 1 文件 +17（纯注释，行为零变化） |
+| 8 | `fbab7d7` | chore(security)：收词漏网的一处真实差额读数脱敏 + 守卫 D 类同批收词 | 2 文件 |
+| 9 | 本提交 | docs：脱敏波关账（本节 + D-155/D-156 + 违例同步 + v0-architecture §10 现状） | 4 文件 |
+
+**与方案的偏离（如实记，不修饰）**：方案把替换拆成 路径→名称→数字 三个 commit（C4/C6/C7，附"提交序固定、任一 commit 变红即整条 revert"的归因规则），实际由 2 号提交把三类合成一个 commit 落地；派生助手（方案 C2）也未单独成 commit，而与 6 脚本接线（方案 C3）同在 `21e3dc2`。后果两条：① **F5 回滚粒度比方案粗**——revert `bfa3a31` 会一次性回退三类替换（纯文本代入，revert 仍精确移除且只移除该 commit 的代入、不叠补丁，但不能再按类分别回退）；② 归因抽查（方案验收 11"每 commit 文件集与声明一致"）只能按本表实际文件集核对。**不重写历史**：回头改已落盘 commit 属波次 2 的历史重写范畴，本波只在新 commit 里补——两处补漏（`f7e88f4` / `fbab7d7`）都是新 commit 追加，没有改旧 commit、没有在红树上叠补丁。
+
+**F1（表征先行）**：`12d4148` 把暴露面守卫写在一切替换之前——落地时四类都有命中，提交信息明写"红着交回"，转绿由紧随的 `bfa3a31` 完成（前序留档的改前红实证 = stash 实验 1 failed / 1736 passed）。`21e3dc2` 的派生助手 `firstEnabledPrincipalId` 先有 `packages/core/config.test.ts` 5 条表征用例（单/多 principal、`enabled=false` 跳过、空表→null、无前缀形态）才接线（偏离：方案要求助手单独 commit，见上段）。本棒两处补漏都按"先收词见红 → 再替换复绿"取证：`f7e88f4` 加词后 B 类红（4 处 / 2 文件 / 2 条禁词）、`fbab7d7` 加词后 D 类红（1 处 / 1 文件 / 1 条禁词），替换后均复绿 7 passed——"加词抓得到、替换后归零"两侧都实测，不是只跑绿。
+
+**F2（unit 基线冻结）**：波次前实测 105 文件 / 1725 passed | 1 skipped；本波终态（本棒实跑 `npm run test -- --project unit`）**Test Files 106 passed (106) / Tests 1737 passed | 1 skipped (1738)**——文件 +1（守卫自身）、用例 +12（守卫 7 + core 助手表征 5），只增不减。`npm run typecheck` exit 0（0 错误）；`npm run ci` exit 0，末行 `CI deterministic gates: PASS`（三门 = typecheck + unit 106/1737|1 + generic-mock 21 cases pass, 0 skipped）。
+
+**F3（变异验证）**：五项变异在本棒逐一实跑，留档在守卫文件头（表格 + 每项实测输出摘句）：① 任意跟踪文件加回一条真实客户名 → B 类零命中红；② 改坏某条禁词的拆段（拼回值随之改变）→ 禁词表完整性红（sha256 自校验报出条目编号，证明禁词不能被悄悄换成另一个串）；③ 扫描范围砍成只走 `packages/` → 范围自校验红（166 个 < 下限 200 + 缺 7 个锚点 + 缺 `apps`/`scripts`/`docs` 三个顶层目录）；④a stub `git ls-files` 返回空数组 → 范围自校验红（0 个；范围一空四类零命中会全部恒绿）；④b `git rm --cached` 真删一个锚点文件 → 范围自校验红，且此时四类零命中**仍全绿**——抓住假绿的是自校验，不是类别断言。每次还原后 `git status --short` 干净并复绿 7 passed。
+
+**F4（一 commit 一件事）**：逐 commit 文件集见上表；偏离记录见上段。两处补漏各自是"替换 + 守卫同批收词"一件事——收词与替换必须同 commit 是守卫自身的纪律（只收词不替换 = 终态永远转不了绿），不是两件事混装。
+
+**F5（红先 revert 不叠补丁）**：本波没有"中间 commit 红着、靠后续 commit 补救"的实例——`12d4148` 的红是防线先于改动的设计状态（提交信息即声明），紧随的 `bfa3a31` 一刀转绿；两处补漏都是新 commit 追加。五项变异全部"临时改 → 红 → 立即还原"，不留变异代码。
+
+**F6（探针基线 diff）**：本波**未跑**真实模型探针（需 LLM 凭据、属用户授权项），因此不存在"改前/改后同参数探针复跑"意义上的 F6 证据——不得把本波任何通过说成 F6 已过。语料内容确实变了（`bfa3a31` 换掉 `scripts/eval/corpus.jsonl` 里 incidents/expect 引用的真实读数，判别结构一字未动），`corpusVersion` 随之改变 → D-153 登记，闭环前不得引用脱敏前分数。CI 不受影响已实测：generic-mock 门不读 corpus.jsonl（`grep -n corpus scripts/eval/generic-mock.ts` 仅命中注释行）、`scripts/eval/baseline.json` 无 corpusVersion 字段（grep 计数 0）。
+
+**F7（文档同提交同步）**：`ecc1e65`（D-153/D-154）、本提交（本节 + D-155/D-156 + architecture-laws L1/L2/L6「当前违例」+ v0-architecture §10 暴露面现状）、守卫文件头（B 类短名计数、D 类收词、F3 留档、文件数 307）均与代码同帧。`docs-reality.test.ts` 全程绿（每 commit 后实跑），替换未造成文档主张与代码现实脱节。
+
+**关账文档自己撞了一次守卫（留档，不是插曲）**：本节与 D-156 的第一版把 4 条敏感字面写进了 docs——一条真实短名（审读意见 4 行）、一条内部路径前缀（历史计数表）、两处差额读数（两篇新债条目）——`exposure-lint` 当场转红（B/C/D 三类各 1–2 处命中，位置精确到 `docs/change-safety.md` / `docs/architecture-laws.md` / `docs/debt-ledger.md` 的行）。改法不是给守卫开豁免，而是**按守卫条目编号指认**（字面只住禁词表，叙述里只写编号），改完复绿 19 passed。这条实证两用：① 文档也是扫描面，"写文档"不是法外地带——脱敏波的最后一击来自自己的关账写作；② 历史计数表因此按条目编号列计数而非列字面。
+
+### 审读意见逐条处置
+
+| 审读意见 | 处置 | 证据 / 落点 |
+|---|---|---|
+| 1 · 读数文件清单不全（早前只列 3 个，机械上不可能通过） | 按 acceptance 原命令实测命中的全部文件替换（9 文件） | `bfa3a31`；守卫 D 类 15 条禁词、验收读数类 grep 全零 |
+| 2 · corpus 规则的矛盾（expect 被 score.ts 当 judge rubric） | corpus 只换 expect 引用的读数，id/kind/case/inBaseline/cases/conversation 与 incidents 判别结构一字不动 | `bfa3a31` + D-153 |
+| 3 · gate① 交叠范围（.env.example 其余 17dz、config 模板、全树约百处） | 切分：本波只处理已登记暴露发现；其余归 W1/波次 4 | D-155；**拍板未闭环**，本节"未做/已知项"如实列明 |
+| 4 · 判定标准统一为"完整真实主体名一律虚构化" | 裸州名与第二个短族入表；本棒再补两支映射表遗漏的账套名 | `bfa3a31` + `f7e88f4`（B 类 16 条） |
+| 5 · 行数口径纠正 | 按 `git grep -ohE` 实测并集（100 文件 / 1446 处）记，不沿用早前口径 | `bfa3a31` |
+| 6 · 第四类读数进常驻守卫（消灭"只跑一次"的不对称） | D 类进 exposure-lint + "只增不减"收词纪律写进守卫文件头 | `12d4148` + `fbab7d7` |
+| 7 · scripts/ 在 typecheck 与 unit 双重覆盖之外，F1 缺位 | 派生与 fail-closed 判据迁进 `packages/core/src` 获双覆盖，脚本只剩三行接线 | `21e3dc2`（`config.ts` 助手 + `config.test.ts` 5 例）；残余"scripts 不进 typecheck"另题（实测扩含 scripts 有 47 个既有错误，未在本波处理） |
+| 8 · .env.example:98 改示范值 = 发明运行期数字且三桶实质变宽 | 整行注释化 + 指明"缺省 = 执行层默认桶"并指向 environment-variables.md:56 | `821a3f7`；验收 grep `EXECUTION_RATE_LIMIT=` = 0 |
+| 9 · 历史敏感串清单产出 | 首轮清单由前序 run 实测并本地留档；本棒按守卫条目编号复跑计数（见下），作波次 2 literals.txt 输入与核对基准 | 本节历史计数表；清单本身不进库（进库即重新引入敏感串） |
+| 10 · 假绿模式（ls-files 空返回 → 守卫恒绿） | 锚点 + 非空 + 顶层目录 + 文件数下限四重自校验 | 变异 ④a/④b 实证 |
+| 11 · 常量引用点写成"随改"会诱导无意义 diff | `ask.ts` 与 `smoke-real-platform.ts` 的常量引用一字未动 | `21e3dc2` 文件集 |
+| 12 · change-safety.md:1088 一行两职（敏感路径 + 历史基数「1582/1582，118 文件」） | 路径成分随 C 类虚构化；17dz-platform 成分属 AGENTS.md 档案例外（免名词叙述、不免敏感串）；历史基数作事实结构保留 | `bfa3a31`；门①对账以"例外文件中的 17dz 名词未被本波新增/扩散"为准 |
+| missing · config/agent.example.yaml 的 5 处 17dz 无任何守卫覆盖 | 登记 D-155（`config/` 不在 platform-leak-lint 与 docs-reality 扫描范围内；exposure-lint 扫 ls-files 全量，该模板的暴露三类已被覆盖，缺口仅 17dz 名词类） | D-155 + architecture-laws L1 |
+| missing · 多文件多 commit 归因规则 | 本波实际未按"路径→名称→数字"拆 commit，偏离与后果见上段 | 本节偏离记录 |
+
+### 历史命中计数（本棒实跑，作波次 2 literals.txt 核对基准）
+
+口径：`git log --all -p | grep -Fc <串>`，**含提交信息与 diff 的增删两行**，HEAD = `0b83317`。按守卫条目编号列（字面不进库，回 `exposure-lint.test.ts` 禁词表核对）。**计数随 HEAD 增长**——本波每个删除 diff 都把该串写进历史，所以这组数只能当"不少于"的下界读，不能当历史存量的精确值。
+
+| 类 | 条目 → 计数 |
+|---|---|
+| A UserID | U1 → 22 |
+| C 路径 | P1（开发者主目录下的项目路径前缀）→ 129 |
+| B 名称 | C1 → 2822、C2 → 213、C3 → 416、C4 → 53、C5 → 32、C6（带市缀形）→ 40、C7（裸形，含 C6）→ 129、C8 → 22、C9 → 36、C10 → 3、C11 → 498、C12 → 2291、C13 → 26、C14 → 11、C15 → 11、C16 → 5 |
+| D 读数 | F1 → 9、F2 → 23、F3 → 46、F4（无千分位形）→ 4、F5 → 3、F6 → 4、F7 → 3、F8 → 3、F9 → 3、F10 → 3、F11 → 3、F12 → 60、F13 → 11、F14 → 5、F15 → 4 |
+
+### 未做 / 已知项（不冒充已完成）
+
+- **Tier B e2e 未跑**：`FSHINE_PLATFORM_ROOT=<17dz 检出> npx vitest run tests/e2e` 需兄弟仓检出 + gitignored `config/agent.yaml`；本机 17dz 检出落后 origin/main 且环境有既存红基线。按 D-154，seed 同步改名前 Tier B 红是已知状态。**本波一切"绿"仅指 CI 三门 + 三把守卫（exposure-lint / docs-reality / platform-leak-lint）+ 验收 grep，不含 Tier B。**
+- **eval 基线未重定**（D-153，需 LLM 凭据，限期波次 5 前）。
+- **产品面 17dz 名词仍在**（属 gate① 交叠面，归 W1/波次 4）：`.env.example` 三处（节头与限流说明）、`config/agent.example.yaml` 5 处（含 `contextProfiles: 17dz` 结构键）、全树约百处 → D-155。另 `docs/rule-landing.md` 仍有一句描述生产 `.env` 的 `EXECUTION_RATE_LIMIT` 实践（gitignored 文件，不受模板变更影响），是否随 W2+W3 的 rule-landing 清洗一并改写，留后续判断。
+- **通用测试人名未处理**：猫一杯（公众人物名，16 文件）、胜利（15 文件）、宏大贸易、新兴五金/新兴建材（兄弟仓 seed 自造歧义样本）——方案 openDecisions 4 对猫一杯的拍板未闭环，本波不自行决定。
+- **61,000 / 86,000 两支真实读数未替换未收词**（在 docs 叙述与约 28 个文件的夹具里成片出现，收词需连带替换整批夹具与断言）→ D-156。
+- **`bfa3a31` 的提交信息含映射表真实串**（真实→虚构对照 15 对）——波次 2 的 filter-repo literals.txt 必须覆盖 **commit message 字面量**，不能只换 blob。
