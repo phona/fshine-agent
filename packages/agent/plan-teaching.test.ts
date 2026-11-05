@@ -55,7 +55,7 @@ function planSchema(): { required?: unknown; additionalProperties?: unknown; pro
 
 /** 教学示例里的占位符（…）→ 具体合法值，得到一条可解析的真草案命令。 */
 function concreteDraftCommand(): string {
-  return planDraftExample()
+  return planDraftExample('bin/17dz')
     .replace('"goal":"…"', '"goal":"查询某公司本期的应收余额"')
     .replace('"operation":"…"', '"operation":"finance.query-receivables"')
     .replace('"args":[…]', '"args":["--query","某公司","--period","202609"]');
@@ -87,14 +87,14 @@ describe('计划草案教学：单一来源与平台 schema 一致（D-011）', 
   });
 
   it('宿主解析器认这个形状：教学 → 解析 → 同一批 calls（教学与解析不打架）', () => {
-    const parsed = parsePlanCallsCommand(concreteDraftCommand());
+    const parsed = parsePlanCallsCommand(concreteDraftCommand(), 'bin/17dz');
     expect(parsed).toEqual({
       kind: 'inline',
       calls: [{ operation: 'finance.query-receivables', args: ['--query', '某公司', '--period', '202609'] }],
     });
     // 形状类错误的 correctForm 就是从同一份教学派生（消息文本不得另写一种形状）
-    expect(messageFor('PLAN_SHAPE_PREFIX', '```json')).toContain(planDraftExample());
-    expect(messageFor('PLAN_CALLS_NOT_ARRAY', 0)).toContain(planDraftExample());
+    expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/17dz')).toContain(planDraftExample('bin/17dz'));
+    expect(messageFor('PLAN_CALLS_NOT_ARRAY', 0, undefined, 'bin/17dz')).toContain(planDraftExample('bin/17dz'));
   });
 
   it('6 处副本收敛为 1 处：源文件里除 planDraftExample 外零第二种形状字面量', () => {

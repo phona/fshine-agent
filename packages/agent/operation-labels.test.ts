@@ -60,7 +60,7 @@ describe('loadOperationLabels（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出 label 表', async () => {
     const root = await fakePlatformRoot(LIST_TSV);
-    expect(await loadOperationLabels(root)).toEqual(parseOperationLabels(LIST_TSV));
+    expect(await loadOperationLabels(root, 'bin/17dz')).toEqual(parseOperationLabels(LIST_TSV));
   });
 
   it('CLI 非零退出 → 空表', async () => {
@@ -173,7 +173,7 @@ describe('loadOperationArgStyles（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出样式表', async () => {
     const root = await fakePlatformRootWithJson(LIST_JSON);
-    expect(await loadOperationArgStyles(root)).toEqual(parseOperationArgStyles(LIST_JSON));
+    expect(await loadOperationArgStyles(root, 'bin/17dz')).toEqual(parseOperationArgStyles(LIST_JSON));
   });
 
   it('CLI 非零退出 / 不存在 / 挂住 → 空表（与 label 派生同一套失败语义）', async () => {
@@ -229,7 +229,7 @@ describe('parseOperationArgSpecs（整份规格：位置参数声明名 + flag �
 describe('loadOperationArgSpecs（经公共 CLI 派生整份规格）', () => {
   it('CLI 正常 → 解析出规格表；非零退出 → 空表', async () => {
     const root = await fakePlatformRootWithJson(LIST_JSON);
-    expect(await loadOperationArgSpecs(root)).toEqual(parseOperationArgSpecs(LIST_JSON));
+    expect(await loadOperationArgSpecs(root, 'bin/17dz')).toEqual(parseOperationArgSpecs(LIST_JSON));
     expect((await loadOperationArgSpecs(await fakePlatformRootWithJson(LIST_JSON, { exitCode: 3 }))).size).toBe(0);
   });
 
@@ -349,7 +349,7 @@ describe('loadOperationSemantics（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出语义表；非零退出 → 空表', async () => {
     const root = await fakePlatformRootWithJson(SEMANTICS_LIST_JSON);
-    expect(await loadOperationSemantics(root)).toEqual(parseOperationSemantics(SEMANTICS_LIST_JSON));
+    expect(await loadOperationSemantics(root, 'bin/17dz')).toEqual(parseOperationSemantics(SEMANTICS_LIST_JSON));
     expect((await loadOperationSemantics(await fakePlatformRootWithJson(SEMANTICS_LIST_JSON, { exitCode: 3 }))).size).toBe(0);
   });
 

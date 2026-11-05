@@ -63,11 +63,11 @@
 - **构造**：`gatewayTextPatterns(gateway)`（`platform-contract.ts`）
   对网关名做正则转义后派生首词与 plan 正则；网关名本身不允许含
   正则或 shell 元字符（§1 校验已挡），转义只是纵深。
-- **缺失时（遗留过渡，见 §9）**：未注入 gateway 的老调用方（单元测试
-  与未穿透的驱动路径）仍走 `GATEWAY_INVOCATION` 缺省（财税实例名）。
-  这是**唯一**允许的过渡缺省，断点是：驱动层把 profile.gateway
-  穿透到 serve-gate 与 plan 解析后，该缺省即删；新代码不得新增
-  对 `GATEWAY_INVOCATION` 的引用。
+- **缺失时（C7b 起 fail-closed）**：未注入 gateway 即抛错（`resolveGatewayText`
+  / `gatewayExecPath` 统一拒绝，理由中性、指引部署补声明），宿主不再持有任何
+  实例网关名缺省——`GATEWAY_INVOCATION` 常量已退役。§2 的穿线（驱动层把
+  profile.gateway 透传 serve-gate、plan 解析、诊断渲染与全部 spawn 路径）
+  是它的前置，已于 C7a 落地。
 
 ## 3. Operation list（能力清单，唯一权威）
 
@@ -239,7 +239,7 @@
 
 | 遗留项 | 位置 | 断点（何时删） |
 | --- | --- | --- |
-| `GATEWAY_INVOCATION` 缺省（财税实例名） | `platform-contract.ts` 定义处；未注入 gateway 的老调用方（单元测试、未穿透驱动路径）仍以它为文本识别缺省 | 驱动层把 profile.gateway 穿透到 serve-gate 与 plan 解析的全部生产路径后删除；新代码不得新增引用 |
+| ~~`GATEWAY_INVOCATION` 缺省~~（**已退役**，C7b） | 无——常量已删；`resolveGatewayText`/`gatewayExecPath` fail-closed（未声明有效 gateway 即抛中性错），渲染面（C7a 穿线）与 spawn 面（`gatewayExecPathForProfile`）全部经显式注入 | 无断点：实例网关名唯一来源 = 部署的 `contextProfiles.<id>.gateway` 声明 |
 | spawn 路径的旧回退 | `plan-runtime.ts` 默认 runner、`context.ts` 默认提案 runner：未声明 gateway 时回退旧值 | profile 必填 gateway 的配置校验落地后删除回退，改为 fail-closed |
 | `run_17dz_task` 工具名实例值 | 财税部署的 `contextProfiles.<id>.toolName` 声明（C3 起）；宿主侧 `RUN_EXECUTION_TASK_TOOL` 已为中性缺省 `run_task`，`extractDelegationToolResultEvents` 经 `runner.tool.name` 注入认名 | 无断点：工具名经 profile 声明注入，宿主不持实例缺省；`Run17dzTaskArgs` 过渡别名已随 C3 退役（docs-reality tripwire 盯绝迹） |
 | `17dz 子 Agent` 称谓实例值 | 财税部署的 `contextProfiles.<id>.executorLabel` 声明（C2 起）；宿主侧 `DEFAULT_EXECUTOR_LABEL` 已为中性缺省，不含实例名 | 无断点：称谓经 profile 声明注入（`buildSystemPrompt`），宿主不持实例缺省；注入实例称谓时提示词与参数化前逐字节相同（D-122 golden） |

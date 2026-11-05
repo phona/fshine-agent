@@ -44,7 +44,7 @@ import {
 } from './src/context';
 import { messageFor, planDraftExample, planFileExample } from './src/error-codes';
 import { resolveActiveProfileId } from '@fshine/contracts';
-import { GATEWAY_INVOCATION, resolveGatewayText } from './src/platform-contract';
+import { resolveGatewayText } from './src/platform-contract';
 import { DEFAULT_EXECUTOR_LABEL, SYSTEM_PROMPT, buildSystemPrompt } from './src/system-prompt';
 import { evaluateAndActivatePlan, type PlanCliRunner } from './src/plan-runtime';
 import { ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
@@ -381,26 +381,31 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
 
   // ── C7 归属块：网关名穿线 + GATEWAY_INVOCATION 退役（resolveGatewayText fail-closed）──
   describe('C7 块：网关名（platform-contract.ts / error-codes.ts）', () => {
-    it('GATEWAY_INVOCATION 与 resolveGatewayText 回退当前值', () => {
-      expect(GATEWAY_INVOCATION).toBe('bin/17dz');
-      expect(resolveGatewayText()).toBe('bin/17dz');
-      expect(resolveGatewayText('/abs/gateway')).toBe('bin/17dz');
+    it('GATEWAY_INVOCATION 已退役：resolveGatewayText fail-closed（缺失/非法即抛，合法值原样）', () => {
+      expect(() => resolveGatewayText()).toThrow('未声明有效的 profile.gateway');
+      expect(() => resolveGatewayText('/abs/gateway')).toThrow('未声明有效的 profile.gateway');
       expect(resolveGatewayText('bin/other')).toBe('bin/other');
+      expect(resolveGatewayText('bin/generic')).toBe('bin/generic');
     });
 
-    it('planDraftExample/planFileExample 无参输出（含 CORRECT_PLAN_SHAPE 内的两条示例）', () => {
-      expect(planDraftExample()).toBe('bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
-      expect(planFileExample()).toBe('bin/17dz plan --file <本轮工作区内的计划文件路径>');
+    it('planDraftExample/planFileExample：无参抛错（fail-closed）；显式注入即用注入值', () => {
+      expect(() => planDraftExample()).toThrow('未声明有效的 profile.gateway');
+      expect(() => planFileExample()).toThrow('未声明有效的 profile.gateway');
+      expect(planDraftExample('bin/17dz')).toBe('bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
+      expect(planFileExample('bin/17dz')).toBe('bin/17dz plan --file <本轮工作区内的计划文件路径>');
+      expect(planDraftExample('bin/generic')).toBe('bin/generic plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
     });
 
-    it('PLAN_SHAPE_PREFIX 整条渲染（expected 的网关名 + correctForm 的 CORRECT_PLAN_SHAPE）', () => {
-      expect(messageFor('PLAN_SHAPE_PREFIX', '（围栏）')).toBe(
+    it('PLAN_SHAPE_PREFIX 整条渲染（expected 网关名 + correctForm；显式 gateway 注入）', () => {
+      expect(messageFor('PLAN_SHAPE_PREFIX', '（围栏）', undefined, 'bin/17dz')).toBe(
         'PLAN_SHAPE_PREFIX: 期望 bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 （围栏）；正确形态 方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/17dz plan --file <本轮工作区内的计划文件路径> 提交',
       );
+      // 渲染 PLAN_* 诊断而不注入 gateway = 部署未声明网关 → 响亮失败（fail-closed 语义）。
+      expect(() => messageFor('PLAN_SHAPE_PREFIX', '（围栏）')).toThrow('未声明有效的 profile.gateway');
     });
 
-    it('PLAN_SUBCOMMAND_RESERVED 整条渲染（correctForm 的 planDraftExample）', () => {
-      expect(messageFor('PLAN_SUBCOMMAND_RESERVED', 'evaluate')).toBe(
+    it('PLAN_SUBCOMMAND_RESERVED 整条渲染（correctForm 的 planDraftExample；显式注入）', () => {
+      expect(messageFor('PLAN_SUBCOMMAND_RESERVED', 'evaluate', undefined, 'bin/17dz')).toBe(
         'PLAN_SUBCOMMAND_RESERVED: 期望 worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用；实际 evaluate；正确形态 bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}（单行原始命令）',
       );
     });

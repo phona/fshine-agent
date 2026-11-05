@@ -31,14 +31,13 @@ describe('文本识别接线到 profile.gateway', () => {
     expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"dummy.query","args":[]}]}', 'bin/generic')).toBeNull();
   });
 
-  it('错误文案 correctForm 跟随注入网关，未注入时保持旧文案', () => {
+  it('错误文案 correctForm 跟随注入网关；未注入时 fail-closed（C7b 退役回退）', () => {
     expect(planDraftExample('bin/generic')).toBe('bin/generic plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
     expect(planFileExample('bin/generic')).toBe('bin/generic plan --file <本轮工作区内的计划文件路径>');
-    expect(planDraftExample()).toContain('bin/17dz plan');
+    expect(() => planDraftExample()).toThrow('未声明有效的 profile.gateway');
     const generic = messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/generic');
     expect(generic).toContain('bin/generic plan');
     expect(generic).not.toContain('bin/17dz');
-    const legacy = messageFor('PLAN_SHAPE_PREFIX', '```json');
-    expect(legacy).toContain('bin/17dz plan');
+    expect(() => messageFor('PLAN_SHAPE_PREFIX', '```json')).toThrow('未声明有效的 profile.gateway');
   });
 });

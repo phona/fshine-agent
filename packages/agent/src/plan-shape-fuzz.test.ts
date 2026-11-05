@@ -69,12 +69,12 @@ describe('plan-shape-fuzz：合法形状原样通过', () => {
   for (const { name, command, calls } of okCases) {
     it(name, () => {
       // inline 形态（C2 起提交分 inline / file 两种，合法 JSON 一律 inline）
-      expect(parsePlanCallsCommand(command)).toEqual({ kind: 'inline', calls });
+      expect(parsePlanCallsCommand(command, 'bin/17dz')).toEqual({ kind: 'inline', calls });
     });
   }
 
   it('user_confirmed:true 原样记录为审计字段（不是授权输入）', () => {
-    const parsed = parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":true}');
+    const parsed = parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":true}', 'bin/17dz');
     expect(parsed).toEqual({
       kind: 'inline',
       calls: [{ operation: 'finance.query-receivables', args: [] }],
@@ -96,7 +96,7 @@ describe('plan-shape-fuzz：合法形状原样通过', () => {
   it('user_confirmed 缺省 / false / 非布尔：都不产出 userConfirmed 键', () => {
     const payload = '{"calls":[{"operation":"finance.query-receivables","args":[]}],"user_confirmed":%s}';
     for (const raw of ['false', '"yes"', '1', 'null']) {
-      const parsed = parsePlanCallsCommand(`bin/17dz plan ${payload.replace('%s', raw)}`);
+      const parsed = parsePlanCallsCommand(`bin/17dz plan ${payload.replace('%s', raw)}`, 'bin/17dz');
       expect(parsed).toEqual({ kind: 'inline', calls: [{ operation: 'finance.query-receivables', args: [] }] });
     }
   });
@@ -114,7 +114,7 @@ describe('plan-shape-fuzz：非计划命令返回 null（不响亮报错）', ()
 
   for (const { name, command } of nullCases) {
     it(name, () => {
-      expect(parsePlanCallsCommand(command)).toBeNull();
+      expect(parsePlanCallsCommand(command, 'bin/17dz')).toBeNull();
     });
   }
 });
@@ -160,7 +160,7 @@ describe('plan-shape-fuzz：形状错误抛结构化错误码', () => {
 
   for (const { name, command, code } of throwCases) {
     it(`${name} → ${code}`, () => {
-      expectCode(() => parsePlanCallsCommand(command), code);
+      expectCode(() => parsePlanCallsCommand(command, 'bin/17dz'), code);
     });
   }
 });
@@ -188,6 +188,7 @@ describe('plan-shape-fuzz：user_confirmed 只审计不授权', () => {
     const captured = { stdin: [] as string[] };
     const notices: string[] = [];
     const result = await evaluateAndActivatePlan({
+      gateway: 'bin/17dz',
       platformRoot: '/unused', taskId: 'task_fuzz', calls: [{ operation: 'x', args: [] }],
       userConfirmed: true,
       onNotice: async (text) => { notices.push(text); },
@@ -209,6 +210,7 @@ describe('plan-shape-fuzz：user_confirmed 只审计不授权', () => {
       const captured = { stdin: [] as string[] };
       const notices: string[] = [];
       return evaluateAndActivatePlan({
+        gateway: 'bin/17dz',
         platformRoot: '/unused', taskId: 'task_fuzz', calls: [{ operation: 'x', args: [] }],
         ...(userConfirmed === undefined ? {} : { userConfirmed }),
         onNotice: async (text) => { notices.push(text); },
@@ -234,21 +236,21 @@ describe('plan-shape-fuzz：user_confirmed 只审计不授权', () => {
  */
 describe('plan-shape-fuzz：--file 提交通道（C2）', () => {
   it('--file <路径>（空格取值）→ 文件描述，路径原样带回', () => {
-    expect(parsePlanCallsCommand('bin/17dz plan --file tmp/task_x/plan.json')).toEqual({
+    expect(parsePlanCallsCommand('bin/17dz plan --file tmp/task_x/plan.json', 'bin/17dz')).toEqual({
       kind: 'file',
       path: 'tmp/task_x/plan.json',
     });
   });
 
   it('--file=<路径>（等号取值）等价', () => {
-    expect(parsePlanCallsCommand('bin/17dz plan --file=tmp/task_x/plan.json')).toEqual({
+    expect(parsePlanCallsCommand('bin/17dz plan --file=tmp/task_x/plan.json', 'bin/17dz')).toEqual({
       kind: 'file',
       path: 'tmp/task_x/plan.json',
     });
   });
 
   it('bash/路径前缀下的 --file 照常识别（前缀规则不因通道变化）', () => {
-    expect(parsePlanCallsCommand('bash /abs/bin/17dz plan --file tmp/task_x/plan.json')).toEqual({
+    expect(parsePlanCallsCommand('bash /abs/bin/17dz plan --file tmp/task_x/plan.json', 'bin/17dz')).toEqual({
       kind: 'file',
       path: 'tmp/task_x/plan.json',
     });
@@ -258,7 +260,7 @@ describe('plan-shape-fuzz：--file 提交通道（C2）', () => {
     // 2026-10-23 Round 1 review 抓到：守卫曾只认空格形态，tab 发射会静默变成
     // "非计划命令"落门教学——文件通道对一种常见模型形态静默失效。前缀正则 + 取值
     // 正则现在同按 [=\s] 归一，这条钉住三处口径不再分叉。
-    expect(parsePlanCallsCommand('bin/17dz plan --file\ttmp/task_x/plan.json')).toEqual({
+    expect(parsePlanCallsCommand('bin/17dz plan --file\ttmp/task_x/plan.json', 'bin/17dz')).toEqual({
       kind: 'file',
       path: 'tmp/task_x/plan.json',
     });
@@ -275,7 +277,7 @@ describe('plan-shape-fuzz：--file 提交通道（C2）', () => {
 
   for (const { name, command, code } of throwCases) {
     it(`${name} → ${code}`, () => {
-      expectCode(() => parsePlanCallsCommand(command), code);
+      expectCode(() => parsePlanCallsCommand(command, 'bin/17dz'), code);
     });
   }
 });
@@ -300,7 +302,7 @@ describe('plan-shape-fuzz：--schema / schema / 未知旗标返回 null（C1 表
 
   for (const { name, command } of nullCases) {
     it(`${name} → null`, () => {
-      expect(parsePlanCallsCommand(command)).toBeNull();
+      expect(parsePlanCallsCommand(command, 'bin/17dz')).toBeNull();
     });
   }
 });

@@ -742,7 +742,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
-        ...(input.gateway ? { gateway: input.gateway } : {}),
+        // gateway（C7b fail-closed）：run 输入显式指定优先，工厂声明兜底——两处都来自
+        // profile.gateway（runtime 按任务注入 / 装配按工厂注入）；都未声明时 session 内
+        // servePatterns 即抛，宿主不回退任何遗留网关名。
+        gateway: input.gateway ?? options.gateway,
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),

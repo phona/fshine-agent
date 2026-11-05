@@ -337,14 +337,15 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
       proposalCommitEnabled: overrides.proposalCommitEnabled ?? isCommitEnabled(env),
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
-      // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
-      // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
+      // 不出现网关名。取值单一来源 = planDraftExample(activeProfile?.gateway)（C7b 起
+      // gateway 未声明即抛，宿主不持任何实例网关名缺省；形状与平台 plan schema 的一致性
+      // 由 plan-teaching.test 钉住）。
       planCommandForm: planDraftExample(activeProfile?.gateway),
     } : {}),
   });
   // The task manager may cancel a waiting confirmation using the original principal/session/task
   // identity. This route is host-owned and does not synthesize positive user confirmation evidence.
-  const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret });
+  const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret, gateway: activeProfile?.gateway });
   const backgroundTasks = createBackgroundTaskManager({
     runner: platformTask,
     repo: store.taskRuns,

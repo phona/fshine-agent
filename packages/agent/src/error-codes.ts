@@ -43,7 +43,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { GATEWAY_INVOCATION, PLATFORM_OPERATIONS, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
+import { PLATFORM_OPERATIONS, resolveGatewayText } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -553,17 +553,6 @@ function show(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
-/**
- * 静态表的网关名机械替换：表内文本只含遗留缺省网关名一处来源
- * （GATEWAY_INVOCATION），注入 gateway 与它不同时，把整条渲染结果里的
- * 该字符串替换为注入值。替换的是网关名这一个 token，不是业务措辞；
- * 未注入或注入值不合法时保持原样（遗留缺省）。
- */
-function applyGatewayText(text: string, gateway?: string): string {
-  if (!validateGatewayInvocation(gateway) || gateway === GATEWAY_INVOCATION) return text;
-  return text.split(GATEWAY_INVOCATION).join(gateway);
-}
-
 function render(code: string, actual?: unknown, correctForm?: string, params?: Readonly<Record<string, string | number>>, gateway?: string): string {
   const entry = entryOf(code);
   if ('text' in entry) {
@@ -577,21 +566,20 @@ function render(code: string, actual?: unknown, correctForm?: string, params?: R
     }
     // 声明了 params 的条目必须经参数出口渲染（漏传/多传/少传都 fail-loud，见 fillParams）；
     // 没声明的条目传参数同样是误用——它没有占位符，参数只会被静默丢掉。
-    if (entry.params) return applyGatewayText(fillParams(code, entry as MessageCodeEntry & { text: string }, params), gateway);
+    if (entry.params) return fillParams(code, entry as MessageCodeEntry & { text: string }, params);
     if (params !== undefined) {
       throw Object.assign(
         new Error(`${UNKNOWN_ERROR_CODE}: 该消息模板未声明占位符，不接受参数: ${code}（要加动态部分先在本表条目里声明 params）`),
         { code: UNKNOWN_ERROR_CODE, unknownCode: code },
       );
     }
-    const text = typeof entry.text === 'function' ? entry.text(gateway) : entry.text;
-    return applyGatewayText(text, gateway);
+    return typeof entry.text === 'function' ? entry.text(gateway) : entry.text;
   }
   const actualText = actual === undefined ? show(entry.actual) : show(actual);
   const entryForm = typeof entry.correctForm === 'function' ? entry.correctForm(gateway) : entry.correctForm;
   const form = correctForm === undefined ? entryForm : correctForm;
   const expectedText = typeof entry.expected === 'function' ? entry.expected(gateway) : entry.expected;
-  return applyGatewayText(`${code}: 期望 ${expectedText}；实际 ${actualText}；正确形态 ${form}`, gateway);
+  return `${code}: 期望 ${expectedText}；实际 ${actualText}；正确形态 ${form}`;
 }
 
 /** `{name}` 占位符：声明过的名字一个不能少，没声明的名字给了也是误用。 */

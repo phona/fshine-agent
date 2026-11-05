@@ -27,25 +27,10 @@ import path from 'node:path';
  *
  * Package 1 收窄口径：17dz 执行代码不动、执行端门先留。宿主 spawn 路径
  * 不再以本常量为准——以 profile 声明的 `gateway` 为准
- * （见 `gatewayExecPathForProfile`）。本常量目前仅留在两处过渡位置：
- * ① 文本识别（serve-gate 首词正则、plan 令牌定位、错误文案 correctForm）
- *    ——第 1 包收尾已接线到 profile.gateway（gatewayTextPatterns /
- *    ServeGateOptions.gateway / parsePlanCallsCommand 的 gateway 参数 /
- *    planDraftExample 的 gateway 参数）；未注入 gateway 的老调用方
- *    仍以本常量为缺省，见 docs/execution-layer-interface.md §2/§10，
- *    断点是驱动层把 profile.gateway 穿透全部生产路径后删除本缺省；
- * ② 未声明 gateway 的旧 profile 的 spawn 回退（宁可走旧值也不静默失败，
- *    但新 profile 必须声明 gateway，见 config 解析）。
- * 新代码不得新增对本常量的引用；新执行层接入时 profile 必须声明 gateway。
+ * （见 `gatewayExecPathForProfile`）。C7b 起本文件不再持有任何实例网关名：
+ * 文本识别与诊断渲染一律 fail-closed（resolveGatewayText / gatewayExecPath
+ * 未声明有效 gateway 即抛），profile.gateway 是网关名的唯一来源。
  */
-/**
- * @deprecated 遗留缺省网关名，仅供未注入 profile.gateway 的老调用方
- * 作文本识别缺省（见 docs/execution-layer-interface.md §2/§10）。
- * 新代码不得新增对本常量的引用；spawn 路径一律用
- * gatewayExecPathForProfile（未声明即 fail-closed）。
- */
-export const GATEWAY_INVOCATION = 'bin/17dz';
-
 /** 正则转义：网关名经 §1 校验已无 shell 元字符，转义只是纵深。 */
 function escapeRegExpSegment(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -64,14 +49,19 @@ export function gatewayTextPatterns(gateway: string): { invocation: RegExp; plan
   };
 }
 
+/** 未声明有效 gateway 的统一拒绝理由（fail-closed，C7b）：中性、可行动，不点名任何实例。 */
+export function gatewayNotDeclaredError(): Error {
+  return new Error('未声明有效的 profile.gateway：宿主不再回退任何遗留网关名（C7b 起删除实例名缺省）。部署需在 contextProfiles.<id>.gateway 声明相对网关调用形式（如 bin/<name>）。');
+}
+
 /**
- * 文本识别用的网关名解析：注入且合法的 profile.gateway 优先；
- * 未注入/不合法时回退遗留缺省（老调用方过渡，见 §10 断点）。
- * 本函数是常量之外的唯一回退点——新调用方应直接传 profile.gateway，
- * 而不是依赖本回退。
+ * 文本识别用的网关名解析：fail-closed（C7b 退役）——注入且合法的 profile.gateway
+ * 原样返回；未注入/不合法即抛错，绝不回退任何实例网关名。调用方（文本识别、
+ * 诊断渲染模板）因此要求部署显式声明 gateway。
  */
 export function resolveGatewayText(gateway?: string): string {
-  return validateGatewayInvocation(gateway) ? gateway : GATEWAY_INVOCATION;
+  if (!validateGatewayInvocation(gateway)) throw gatewayNotDeclaredError();
+  return gateway;
 }
 
 /** 校验 profile 声明的网关调用形式：相对路径、无父级逃逸、无 shell 元字符。 */
@@ -85,8 +75,9 @@ export function validateGatewayInvocation(gateway: unknown): gateway is string {
   );
 }
 
-/** 网关可执行文件的绝对路径 = platformRoot + GATEWAY_INVOCATION（供 spawn 用，配置派生）。 */
-export function gatewayExecPath(platformRoot: string, gateway: string = GATEWAY_INVOCATION): string {
+/** 网关可执行文件的绝对路径 = platformRoot + 注入的 gateway（供 spawn 用，配置派生；非法即抛）。 */
+export function gatewayExecPath(platformRoot: string, gateway: string): string {
+  if (!validateGatewayInvocation(gateway)) throw gatewayNotDeclaredError();
   return path.join(platformRoot, ...gateway.split('/'));
 }
 

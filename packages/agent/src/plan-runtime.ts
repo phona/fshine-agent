@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { gatewayExecPath, gatewayTextPatterns, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
+import { gatewayExecPathForProfile, gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -107,22 +107,23 @@ export async function loadPlanStatus(options: {
   planId: string;
   runCli?: PlanCliRunner;
   env?: NodeJS.ProcessEnv;
+  /** Profile 声明的网关调用形式（C7b）：缺省 runner spawn 前 fail-closed 校验。 */
+  gateway?: string;
 }): Promise<{ planId: string; version: number | null; status: string } | null> {
   const result = await runJson<{ planId: string; version: number | null; status: string }>(
     options.runCli ?? defaultCliRunner,
-    { platformRoot: options.platformRoot, args: ['plan', 'status', '--plan-id', options.planId], env: options.env },
+    { platformRoot: options.platformRoot, args: ['plan', 'status', '--plan-id', options.planId], env: options.env, ...(options.gateway ? { gateway: options.gateway } : {}) },
   );
   return result && typeof result.status === 'string' ? result : null;
 }
 
 const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gateway }) => new Promise((resolve, reject) => {
   // 第二处网关 spawn：与 context 提案网关（context.ts 的
-  // defaultProposalGatewayRunner）同法——profile.gateway 优先，未声明或非法时
-  // 经 gatewayExecPath 回退遗留常量，不再以 'bin' / '17dz' 分段拼写（分段拼写
-  // 逃过 L2 字面量守卫 grep "bin/17dz"）。调用方在 plan-runtime
-  // 外注入 runner 时应把 profile.gateway 带进 PlanCliRequest.gateway；直接调
+  // defaultProposalGatewayRunner）同法——C7b 起 fail-closed：调用方必须把
+  // profile.gateway 带进 PlanCliRequest.gateway，未声明/非法即抛（gatewayExecPath
+  // 内部校验），宿主不再回退任何遗留网关名。直接调
   // evaluateAndActivatePlan 的调用方见 EvaluateAndActivatePlanOptions.gateway。
-  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
+  const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],

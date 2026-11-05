@@ -36,8 +36,10 @@ function fakePlatformRoot(): { root: string; calls: () => string[]; setStatus: (
     'if [ "$1" = "plan" ] && [ "$2" = "activate" ]; then cat > /dev/null; echo \'{"ok":true}\'; exit 0; fi',
     'echo "unexpected: $@" >&2; exit 2',
   ].join('\n');
-  writeFileSync(path.join(root, 'bin', '17dz'), script);
-  chmodSync(path.join(root, 'bin', '17dz'), 0o755);
+  // C7b：fixture 网关名改中性（bin/generic）——spawn 名由显式注入的 profile.gateway
+  // 决定，宿主不再回退实例名缺省（原 bin/17dz 形态退役）。
+  writeFileSync(path.join(root, 'bin', 'generic'), script);
+  chmodSync(path.join(root, 'bin', 'generic'), 0o755);
   return {
     root,
     calls: () => {
@@ -58,7 +60,7 @@ describe('计划确认门装配接线（D-063：verifyActivatable 真的接上�
   it('平台说计划已被取代（status 非 pending）→ superseded 解释分支，且不激活', async () => {
     const platform = fakePlatformRoot();
     const dbPath = path.join(platform.root, 'agent.db');
-    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret' });
+    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret', gateway: 'bin/generic' });
 
     await wiring.savePending({
       planId: 'plan_1', version: 3, taskId: 'task_1', principalId: PRINCIPAL, sessionId: SESSION,
@@ -80,7 +82,7 @@ describe('计划确认门装配接线（D-063：verifyActivatable 真的接上�
   it('平台说计划还活着（pending）→ 校验放行，确认后真激活', async () => {
     const platform = fakePlatformRoot();
     const dbPath = path.join(platform.root, 'agent.db');
-    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret' });
+    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret', gateway: 'bin/generic' });
 
     await wiring.savePending({
       planId: 'plan_1', version: 3, taskId: 'task_1', principalId: PRINCIPAL, sessionId: SESSION,
@@ -98,7 +100,7 @@ describe('计划确认门装配接线（D-063：verifyActivatable 真的接上�
   it('savePending 的落库形状：决策固定 confirm + TTL 单一来源（D-013）', async () => {
     const platform = fakePlatformRoot();
     const dbPath = path.join(platform.root, 'agent.db');
-    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret' });
+    const wiring = createPlanConfirmationWiring({ dbPath, platformRoot: platform.root, planActivationSecret: 'test-secret', gateway: 'bin/generic' });
 
     const before = Date.now();
     await wiring.savePending({

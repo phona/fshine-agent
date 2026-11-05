@@ -142,6 +142,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       // label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单

@@ -126,6 +126,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -186,6 +187,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -219,6 +221,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -238,6 +241,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -255,6 +259,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -292,6 +297,7 @@ describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -359,6 +365,7 @@ describe('步数帽 steer 失败补发路径（真 driver）：首次 steer 抛�
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),

@@ -24,7 +24,7 @@ import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
-import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
+import { gatewayExecPathForProfile, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHandoverFile, type HandoverExecutedCall, type HandoverReadCode, type HandoverReadResult, type TaskHandover } from './task-handover';
 import { loadProposalSchema } from './operation-labels';
@@ -577,8 +577,9 @@ export function newGateSecret(): string {
  */
 const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
   // Profile 声明优先：调用方（createProposalViaGateway）把 resolve 出的
-  // profile.gateway 传进来；未声明时回退遗留常量（过渡期，见 platform-contract）。
-  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
+  // profile.gateway 传进来；C7b 起 fail-closed——未声明/非法即抛，宿主不回退
+  // 任何遗留网关名（与 plan-runtime 的 defaultCliRunner 同法）。
+  const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],

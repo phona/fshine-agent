@@ -184,7 +184,6 @@ export {
   type ProposalCreateCall,
 } from './proposal-runtime';
 export {
-  GATEWAY_INVOCATION,
   gatewayExecPath,
   gatewayExecPathForProfile,
   validateGatewayInvocation,

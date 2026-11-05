@@ -29,7 +29,7 @@ import {
   isCommittedUnverified,
   loadOperationProtocols,
   parseEnvelope,
-  gatewayExecPath,
+  gatewayExecPathForProfile,
   PROPOSAL_COMMIT_PROTOCOL,
   type OperationProtocols,
   type PlanCliRunner,
@@ -51,11 +51,13 @@ export interface ProposalCommitRunnerOptions {
   operationProtocols?: OperationProtocols;
   /** CLI 运行器（测试替身注入点）；缺省 spawn 真网关。 */
   runCli?: PlanCliRunner;
+  /** Profile 声明的网关调用形式（C7b 穿线）：缺省 runner spawn 前 fail-closed 校验。 */
+  gateway?: string;
 }
 
-/** 缺省 CLI runner：spawn 网关 + 收 stdio + 超时kill（与 plan-runtime 的 defaultCliRunner 同形状）。 */
-const defaultRunCli: PlanCliRunner = ({ platformRoot, args, env }) => new Promise((resolve, reject) => {
-  const child = spawn(gatewayExecPath(platformRoot), args, {
+/** 缺省 CLI runner：spawn 网关 + 收 stdio + 超时kill（与 plan-runtime 的 defaultCliRunner 同形状；C7b 起 gateway 未声明即 fail-closed）。 */
+const defaultRunCli: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
+  const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -129,11 +131,12 @@ type ProposalStatusOutcome =
  *   · expired / 有效期不在未来 → 已过期（令牌绑的就是它，签了也过不了验签）；
  *   · 取问本身失败或输出不是约定形状 → 读不到（fail-closed，不猜平台内部状态）。
  */
-async function proposalStatusOf(runCli: PlanCliRunner, platformRoot: string, proposalId: string): Promise<ProposalStatusOutcome> {
+async function proposalStatusOf(runCli: PlanCliRunner, platformRoot: string, proposalId: string, gateway?: string): Promise<ProposalStatusOutcome> {
   const result = await runCli({
     platformRoot,
     args: ['proposal', 'status', '--proposal-id', proposalId],
     env: hostGatewayEnv(),
+    ...(gateway ? { gateway } : {}),
   });
   const unreadable = (detail: string): ProposalStatusOutcome => ({ usable: false, kind: 'unreadable', detail });
   if (result.code !== 0) {
@@ -172,7 +175,7 @@ export function createProposalCommitRunner(
     if (options.operationProtocols) return Promise.resolve(options.operationProtocols);
     // 按进程缓存一次（与 label/规格/语义/角色四张表同一手法）：协议列是启动期事实，
     // 绝不每次确认都 spawn 一遍 CLI。派生失败 = 空表 = 拒绝落账。
-    table ??= loadOperationProtocols(options.platformRoot).catch(() => new Map<string, string>());
+    table ??= loadOperationProtocols(options.platformRoot, options.gateway).catch(() => new Map<string, string>());
     return table;
   };
 
@@ -187,7 +190,7 @@ export function createProposalCommitRunner(
     }
 
     // ② 落账前取问：令牌要绑提案自己的有效期（只存在于平台侧），并把不可用形态前置现形。
-    const status = await proposalStatusOf(runCli, options.platformRoot, proposalId);
+    const status = await proposalStatusOf(runCli, options.platformRoot, proposalId, options.gateway);
     if (!status.usable) {
       return {
         ok: false,
@@ -205,6 +208,7 @@ export function createProposalCommitRunner(
       platformRoot: options.platformRoot,
       args: ['commit', operation, '--proposal-id', proposalId],
       env: { ...hostGatewayEnv(), EXECUTION_GATE_SECRET: options.gateSecret, EXECUTION_COMMIT_TOKEN: token },
+      ...(options.gateway ? { gateway: options.gateway } : {}),
     });
 
     // ④ 只认 RESULT 信封：成败由平台说（ok / verified / summaryText 全是信封字段）。
