@@ -25,6 +25,9 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // New deployment switches must not change the default inline/queue baseline of mock tests.
   'FSHINE_WORKER_DISPATCH_MODE',
   'FSHINE_PLATFORM_QUEUE_CAPACITY',
+  // 步数帽（自由 worker 的放行次数帽，缺省 50）同理：运行者 shell 里 export 了它，
+  // 没显式传 stepCap 的 driver 测试基线就被悄悄改小（第 N 次放行就 wind-down）。
+  'FSHINE_WORKER_STEP_CAP',
 ];
 
 for (const key of LEAKED_ENV_KEYS) {
