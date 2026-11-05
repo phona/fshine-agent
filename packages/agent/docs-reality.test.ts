@@ -158,4 +158,15 @@ describe('docs-reality：worker 提示词静态文本零执行层名（渲染级
     const injected = workerSystemPrompt('/platform-root', 'tmp/req-1', 'bin/17dz plan {"calls":[]}');
     expect(injected).toContain('bin/17dz');
   });
+
+  it('W3-B 文档级 tripwire：v0-architecture §10 已修正的过期句不得复发', () => {
+    // 弱锁（§10 文案可被后续合法重写绕过）：主锁是渲染级代码断言（workerSystemPrompt
+    // 零执行层名）+ plan-teaching 计数锁，本条只防「改回过期句/矛盾句」。两条过期句
+    // 的修正事实：① worker 提示词静态文本零执行层名已实测并挂渲染级锁（W3-A）；
+    // ② 申报契约已瘦身为三枝四字段（resend 枝 2026-10-20 产物库波，turn-contract.test.ts
+    // 钉 schema 恰 4 属性）——「仍 3 字段」与 §10 申报契约行直接矛盾。
+    const doc = read('docs/v0-architecture.md');
+    expect(doc.includes('worker 提示词仍包含 17dz 网关用法'), '§10 提示词面积行改回过期句——该句已被 W3-A 渲染级锁伪证').toBe(false);
+    expect(doc.includes('申报契约仍 3 字段'), '§10 出现「申报契约仍 3 字段」矛盾句——resend 枝 2026-10-20 已新增，契约是三枝四字段').toBe(false);
+  });
 });
