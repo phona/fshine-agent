@@ -7,11 +7,10 @@
 # Those are Tier B (manual before merge + nightly), not every-push CI.
 # e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
 # CI scope is unchanged by that inventory: no finance e2e is added back here.
-# The cross-repo budget-threshold check (npm run check:cross-repo-budget) is also
-# NOT in this CI: it needs a sibling platform checkout, which single-repo CI does not
-# have. Its real comparison runs only when CROSS_REPO_17DZ_ROOT is set explicitly // identity-defer: W4（变量名改名决策 openDecisions #7）
-# (dev/review time); the default green suite covers it with fixtures only.
-# Boundary registered as a known limit: docs/debt-ledger.md D-150.
+# CI runs only the deterministic gates; consistency between this repo's generic
+# budget-protocol defaults and any execution layer's own policy is owned by the
+# execution layer's repository, not by this single-repo CI (the check moved there
+# in wave W4). Boundary registered as a known limit: docs/debt-ledger.md D-150.
 set -eu
 cd "$(dirname "$0")/.."
 echo "== node =="

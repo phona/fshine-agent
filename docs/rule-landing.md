@@ -368,8 +368,8 @@
 - profileId：`resolveActiveProfileId(profiles, explicit?)` 纯函数（contracts/config.ts）——显式优先、单 profile 派生其键、零/多 fail-closed；assembly 与 runner 共用同一份判定。
 - 网关名：`GATEWAY_INVOCATION` 常量退役（platform-contract.ts），`resolveGatewayText`/`gatewayExecPathForProfile` fail-closed；渲染面（error-codes 惰性模板 + plan-runtime 14 处 + pi-coding-driver 6 处）与 spawn 面全部显式穿线（C7a→C7b 两步，先行为不变后删常量）。
 - 文案：错误码表/确认路由/上下文 profile 拒绝/plan CLI 运维文案全部去实例名（error-codes.ts、plan-confirmation-route.ts、context.ts、plan-runtime.ts）。
-- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"，两级排除（两预算测试文件整文件挂 W4 签、`CROSS_REPO_17DZ_ROOT` 行挂 `identity-defer: W4` 签），排除机制非空转自反内建；F3 六项变异红→还原→复绿留档 change-safety §27。
+- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"；两级待办排除机制（预算测试文件整文件签、跨仓变量行内签）已随 W4 清账整体退役（2026-11-06：C2 清预算注释并移出一个整文件排除，C4 删跨仓校验脚本后守卫语义收敛为无条件零，自反断言随机制一并移除）；F3 六项变异红→还原→复绿留档 change-safety §27。
 
 **测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（Run17dzTaskArgs 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
 
-**已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与 `CROSS_REPO_17DZ_ROOT` 变量名挂 W4 签（D-165）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。
+**已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与跨仓变量名挂的 W4 签已随 D-165 关账清空退役（2026-11-06）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。

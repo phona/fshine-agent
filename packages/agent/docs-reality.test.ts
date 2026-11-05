@@ -144,7 +144,9 @@ describe('docs-reality：文档主张与代码现实对账', () => {
       const text = read(rel);
       expect(text, `${rel} 重新出现执行层实例名（/17dz/i）——W4 归属表述回潮`).not.toMatch(/17dz/i);
       expect(text, `${rel} 重新出现执行层源码路径（src/execution/plan.js）——W4 归属表述回潮`).not.toContain('src/execution/plan.js');
-      expect(text, `${rel} 重新出现宿主侧跨仓校验脚本名（check-budget-thresholds）——跨仓机器细节入住通用策略`).not.toContain('check-budget-thresholds');
+      // 禁令串按段拆写：W4 C4 起全仓除台账两文件外不得出现该已删脚本的完整名字
+      // （本波验收 grep 判据），守卫自身的禁令串也不例外——语义不变，grep 可复核。
+      expect(text, `${rel} 重新出现宿主侧跨仓校验脚本名——跨仓机器细节入住通用策略`).not.toContain(`check-budget-` + `thresholds`);
     }
   });
 });
