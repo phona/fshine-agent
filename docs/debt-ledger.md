@@ -1456,3 +1456,27 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - gatedWorker 光标不重跑最后一段（`tests/e2e/harness-cursor.test.ts`，`c1b5967`）：测试存在，本补档未做变异（e2e harness 接缝，单进程变异成本与 flaky 风险另计）。补变异或登记为"测试存在、变异未做"，二选一留给后续主题。
 - profile.gateway 的 spawn 路径 fail-closed（`gateway-profile.test.ts`「未声明 gateway 不回退旧值」）：测试存在，本补档未做变异，同上。
 - 以上两项不计入 change-safety §24 的 G1–G14 已留档表，不得合并宣称"新守卫全部已变异"。
+
+---
+
+## 公开迁移 · 脱敏波（波次 1）新账
+
+### D-153 · 脱敏波改写 eval 语料：corpusVersion 变，脱敏前的 eval 分数全部不可比
+
+- **位置**：`scripts/eval/corpus.jsonl`（脱敏波 `bfa3a31` 把 incidents/expect 里的真实客户名与财务读数换成虚构值，id/kind/case/inBaseline 等判别结构一字未动）；`scripts/eval/score.ts:138` `corpusVersion()`（= sha256(语料内容) 前 8 位）、`:16` 三元组注释（corpusVersion / judgePromptVersion / judgeModel 任一变了分数即不可比，须重定基线）、报告落点 `score.ts:349`。
+- **根因**：脱敏是内容级替换——语料字节变即哈希变。三元组里的 corpusVersion 已随本波改变，脱敏前跑分与脱敏后跑分不同基；重定基线前引用旧分数即造假。
+- **影响面核实（不扩大）**：CI 三门不受影响——`scripts/ci.sh` 的 generic-mock 门用自持 fixtures（`scripts/eval/fixtures/dummy-platform`）与自带 baseline（`scripts/eval/generic-mock-baseline.json`），全文不读 corpus.jsonl（2026-11-05 实测 `grep -n corpus scripts/eval/generic-mock.ts` 仅命中注释行）；`scripts/eval/baseline.json` 实测无 corpusVersion 字段、无客户名与金额。
+- **闭环判据**：重跑 `npm run eval:baseline`，且新报告携带的 corpusVersion 与脱敏后语料的 sha256 前 8 位一致；闭环前不得引用脱敏前的 eval 分数作任何结论。
+- **律法归属**：L7（可信度可量化：eval 基线跑漂移，不靠审计轮次）。
+- **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环，否则公开渠道无可比分数）。
+- **状态**：待办。
+
+### D-154 · e2e/探针/验收/smoke:commit:mock 耦合兄弟仓 mock seed 目录——脱敏改名后 Tier B 转红
+
+- **位置**：`tests/e2e/harness.ts:38-39`（`PLATFORM_ROOT` 缺省指向 `../../../17dz-platform`，`CLI = <root>/bin/17dz`，真 spawn 兄弟仓 CLI）；兄弟仓 `src/execution/mocks/respond.js:50`（把 `fixtures/seed.json` 拷为 mock 状态文件）；该 seed 的账套键现行仍是脱敏前的真实名（fshine 侧夹具已按映射表改为 幻辰财税 / 幻辰实业有限公司 两支，seed 未动；真实→虚构对照只住映射表 `.sensitive-strings.replace.txt`，不在本文件重述），另两支 新兴五金 / 新兴建材 不在映射表内、两仓天然一致。
+- **根因**：脱敏波只改了 fshine 一侧夹具名，兄弟仓 seed 未同批改名——两套名字对不上，经 mock 目录的 Tier B 链（tests/e2e、probe-real-agent、acceptance、smoke-real-platform、mock-commit-smoke）预期与实测失配。实例：`tests/e2e/turn-loop-disambiguation.test.ts:107` 期望「幻辰财税 202609 平台未返回该期间数据」，而 mock 应答仍按 seed 里的脱敏前键名组织返回。失配面只在被改名的两支。
+- **处置边界（不冒充绿）**：本波不把 Tier B 写成绿，也不在本波重定任何基线；CI 三门（ci.sh：typecheck + unit + generic-mock）不 spawn 兄弟仓、自洽不受影响（实测）。seed 同步改名是 mock-only 机械替换，合 D-076 纪律。
+- **闭环判据**：兄弟仓 seed 与 respond 夹具按同一张映射表同步机械改名后，`FSHINE_PLATFORM_ROOT=<17dz 检出> npx vitest run tests/e2e` 全绿；同步前 Tier B 红是已知状态，任何报告不得写成绿。
+- **律法归属**：L2（跨仓面：mock seed 住兄弟仓、fshine Tier B 链消费它，两仓夹具改名未同批——与 D-015「17dz mock 夹具手抄、无机械锁」同族）。
+- **归属波次 / 限期**：W5 前（结构化调用协议波次要以 Tier B 全绿作证据）。
+- **状态**：待办。
