@@ -51,6 +51,7 @@
  * | ③ | 扫描范围砍窄为只走 packages/ | 扫描范围自校验 | 1 failed，"实际扫到 166 个被跟踪文件（下限 200）" + 缺 7 个锚点 + 缺 apps/scripts/docs 三个顶层目录 |
  * | ④a | stub `git ls-files` 返回空数组 | 扫描范围自校验 | 1 failed，"实际扫到 0 个被跟踪文件"（假绿模式：范围一空，四类零命中会全部恒绿） |
  * | ④b | `git rm --cached README.md` 真删一个锚点文件 | 扫描范围自校验 | 1 failed，缺锚点 README.md；四类零命中**仍全绿**——抓住它的是自校验，不是类别断言 |
+ * | ⑤ | 修复轮补收 C17 后复核①：向 `docs/artifacts.md` 追加该支本体一行 | B 类零命中 | 1 failed / 6 passed，报 `C17` 位置（`docs/artifacts.md:149`），失败消息为终态措辞（任何命中即回归） |
  *
  * 留档的意义：③④ 证明"砍窄范围"与"扫空集合"这两种最便宜的假绿各有独立判据；② 证明禁词不能被
  * 悄悄换成另一个串（换了就自校验红）；① 证明类别断言对真实串敏感。改本文件的人请连同这张表一起
@@ -243,7 +244,7 @@ function failureMessage(category: CategoryId, hits: Hit[]): string {
     sha256Of(materialize(SENSITIVE_ENTRIES.find((entry) => entry.id === id)!.parts)).slice(0, 12);
   return [
     `${CATEGORY_LABELS[category]}：${hits.length} 处命中 / ${perFile.size} 个文件 / ${perEntry.size} 条禁词。`,
-    '当前态 = 脱敏波次 1 落地前，命中是预期状态（F1：防线先于改动，红着交回）。',
+    '当前态 = 终态：脱敏波已收口，四类应零命中——出现任何命中即回归（新引入 / 回潮 / 收词遗漏）。',
     '按禁词编号汇总（编号 → sha256 前 12 位；字面不落盘，按编号回表核对）：',
     ...[...perEntry.entries()]
       .sort((left, right) => right[1] - left[1])
@@ -253,7 +254,8 @@ function failureMessage(category: CategoryId, hits: Hit[]): string {
       : '位置（相对路径:行号）：',
     ...shown.map((hit) => `  ${hit.rel}:${hit.line}  [${hit.entryId}]`),
     '命中文本刻意不打印——那会把敏感串再抄一份进 CI 日志。',
-    '出路：按波次 1 映射表把真实串机械替换为虚构串（代码 + 夹具 + docs 同一 commit）。',
+    '出路：查该串为何再现（哪个 commit / 文件带回来的），并按收词纪律把该条补进禁词表',
+    '      （只增不减；需要替换的连替换同批落地——只收词不替换 = 终态永远转不了绿）。',
     '      不要改本文件的断言——为绿灯改断言等于拆防线。',
   ].join('\n');
 }
