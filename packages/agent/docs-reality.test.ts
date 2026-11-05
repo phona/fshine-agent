@@ -134,6 +134,22 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(read('packages/agent/src/context.ts').includes('Run17dzTaskArgs'), 'context.ts 的过渡别名复活——C3 退役决策被回退').toBe(false);
     expect(read('packages/agent/src/index.ts').includes('Run17dzTaskArgs'), 'index.ts 重新导出 Run17dzTaskArgs——C3 退役决策被回退').toBe(false);
   });
+
+  it('W4：budget-policy 归属表述——通用协议缺省单一源在宿主，执行层引用零回流', () => {
+    // W4 上收：budget-policy 的 12 个缺省值改述为通用预算协议缺省档位线
+    // （单一真相源在本文件），不再是「逐字对齐执行层 policy()」的第二份叙事。
+    // 执行层实例名、执行层源码路径与宿主侧跨仓校验脚本名从本模块清零；
+    // 任何一处回流 = 「第二份真相」叙事复辟或跨仓机器细节再次入住通用策略
+    // （一致性校验的归属与关账口径住在 debt-ledger D-150/D-151，不在本模块注释里）。
+    for (const rel of ['packages/agent/src/budget-policy.ts', 'packages/agent/src/budget-policy.test.ts']) {
+      const text = read(rel);
+      expect(text, `${rel} 重新出现执行层实例名（/17dz/i）——W4 归属表述回潮`).not.toMatch(/17dz/i);
+      expect(text, `${rel} 重新出现执行层源码路径（src/execution/plan.js）——W4 归属表述回潮`).not.toContain('src/execution/plan.js');
+      // 禁令串按段拆写：W4 C4 起全仓除台账两文件外不得出现该已删脚本的完整名字
+      // （本波验收 grep 判据），守卫自身的禁令串也不例外——语义不变，grep 可复核。
+      expect(text, `${rel} 重新出现宿主侧跨仓校验脚本名——跨仓机器细节入住通用策略`).not.toContain(`check-budget-` + `thresholds`);
+    }
+  });
 });
 
 // ── W3-A 渲染级机械锁（2026-11-05）：worker 提示词静态文本零执行层名 ──────────

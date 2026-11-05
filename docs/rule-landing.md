@@ -25,7 +25,7 @@
 | C9 | ~~凭证计划只能调 voucher 域；期间不得超出申报范围~~ → 同上（域与期间匹配归执行层） | 同 C6 |
 | C10 | 计划只能含只读 operation | 17dz `src/execution/plan.js` `PLAN_OPERATION_NOT_READ_ONLY` |
 | C11 | 实际调用必须逐次匹配激活计划 | 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` |
-| C12 | 超重 → notify / confirm / stop 分级；notify 需送达证据、confirm 需真实用户确认；反复试探按计数器升级 | 17dz `src/execution/plan.js` `decision()` + `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` |
+| C12 | 超重 → notify / confirm / stop 分级；notify 需送达证据、confirm 需真实用户确认；反复试探按计数器升级 | 通用档位策略单一源在宿主 `budget-policy.ts`（`decideBudgetTier`，协议缺省档位线）；执行层门（`plan.js` `decision()` + 磨大计数器，符号名引用）并行保留至迁移完成，双门取更严一档 |
 | C13 | 写操作必须服务端确认后执行（确认码 + commit token，默认关闭） | `packages/agent/src/context.ts` commit 流程 + 17dz serve-policy |
 | C14 | worker bash 只能 `bin/17dz`（首词规则）、禁 shell 元字符、无计划拒绝 | `packages/agent/src/serve-gate.ts` |
 | C15 | worker 不读 `.runtime/` / `.env` / auth；只读知识面（*.md / *.schema.json） | `serve-gate.ts` `sensitivePaths` + 知识面判定 |
@@ -231,7 +231,7 @@
 
 **修复**：`latestOpenPlan` 改为 count 语义——**已记录步号 < totalSteps 即未完成**。悬挂步（确认门）是其子集；步号接满即关闭，确认门步骤不写终态也不会让计划永开（maxStep 接满即关，投影里恒为 started 只是显示问题）。`plan-mode.test.ts` 的 FakeRepo 同步同语义；`task-plan.test.ts` 的 4 处旧断言按新语义重钉并补"中断后续跑接回同一 planId"专例；e2e 7.1/7.2/7.3/7.4 的裂开断言全部翻正（7.1 现在断言 `task_plan_resumed` + 单一投影三步全 done + 接满后 latestOpenPlan 归 null）。
 
-**连带发现（characterization，未改）**：确认门的恢复路径（`resumeTaskId`）不经 `route_current_turn`，因此确认门步骤在投影里恒为 `started`；且高重量步确认后累计重量越过 confirm 门槛，后续每一步都要单独再确认一次——全局预算闸口的既有语义，在长任务链上是逐步重复打扰用户，记录待观察。
+**连带发现（characterization，未改）**：确认门的恢复路径（`resumeTaskId`）不经 `route_current_turn`，因此确认门步骤在投影里恒为 `started`；且高重量步确认后累计重量越过 confirm 门槛，后续每一步都要单独再确认一次——全局预算闸口的既有语义，在长任务链上是逐步重复打扰用户，记录待观察。宿主叠加档不认 grantLevel/生效容量的同形观察已随 W4 标定登记 D-169（architecture-laws「预算门标定」表 stricterTier 行）；计数器类判据本身归执行层门（D-143 修复后为磨大辅助判据）。
 
 ## 11. 并发多线程探针（G1/G2）实测记录
 
@@ -374,8 +374,8 @@
 - profileId：`resolveActiveProfileId(profiles, explicit?)` 纯函数（contracts/config.ts）——显式优先、单 profile 派生其键、零/多 fail-closed；assembly 与 runner 共用同一份判定。
 - 网关名：`GATEWAY_INVOCATION` 常量退役（platform-contract.ts），`resolveGatewayText`/`gatewayExecPathForProfile` fail-closed；渲染面（error-codes 惰性模板 + plan-runtime 14 处 + pi-coding-driver 6 处）与 spawn 面全部显式穿线（C7a→C7b 两步，先行为不变后删常量）。
 - 文案：错误码表/确认路由/上下文 profile 拒绝/plan CLI 运维文案全部去实例名（error-codes.ts、plan-confirmation-route.ts、context.ts、plan-runtime.ts）。
-- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"，两级排除（两预算测试文件整文件挂 W4 签、`CROSS_REPO_17DZ_ROOT` 行挂 `identity-defer: W4` 签），排除机制非空转自反内建；F3 六项变异红→还原→复绿留档 change-safety §27。
+- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"；两级待办排除机制（预算测试文件整文件签、跨仓变量行内签）已随 W4 清账整体退役（2026-11-06：C2 清预算注释并移出一个整文件排除，C4 删跨仓校验脚本后守卫语义收敛为无条件零，自反断言随机制一并移除）；F3 六项变异红→还原→复绿留档 change-safety §27。
 
 **测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（Run17dzTaskArgs 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
 
-**已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与 `CROSS_REPO_17DZ_ROOT` 变量名挂 W4 签（D-165）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。
+**已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与跨仓变量名挂的 W4 签已随 D-165 关账清空退役（2026-11-06）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。
