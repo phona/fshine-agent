@@ -23,7 +23,7 @@ const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 
 /** 一轮真实感问答（含账套 id、期间、翻页游标、结论——压缩摘要的保留目标） */
 function round(i: number): { user: string; assistant: string } {
-  const sets = ['幻晟', '腾海升', '幻辰', '幻骥达', '鑫跃'];
+  const sets = ['幻晟', '幻海升', '幻辰', '幻骥达', '幻跃'];
   const name = sets[i % sets.length]!;
   const id = `as_${(i + 1001).toString().padStart(6, '0')}`;
   const period = `2026${String((i % 12) + 1).padStart(2, '0')}`;

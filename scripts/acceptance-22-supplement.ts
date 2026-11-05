@@ -1,5 +1,5 @@
 /**
- * 补充验收 2.2:2.1 主流程中子代理自选了「腾海升」,未产生编号候选。
+ * 补充验收 2.2:2.1 主流程中子代理自选了「幻海升」,未产生编号候选。
  * 本脚本在同一会话(acc-multi)中追问切换账套,验证多轮继续与重新委派。
  */
 import { randomUUID } from 'node:crypto';
@@ -64,7 +64,7 @@ async function main(): Promise<void> {
     conversationId: CONV,
     messageId: `accmsg_${randomUUID()}`,
     chatType: 'single',
-    text: '那不查腾海升了，换成幻晟，帮我查幻晟本期的凭证',
+    text: '那不查幻海升了，换成幻晟，帮我查幻晟本期的凭证',
   };
   const steps: string[] = [];
   const started = Date.now();
