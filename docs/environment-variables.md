@@ -115,6 +115,12 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
 | `STOCK_PLAN_AUTO_SECONDS` / `STOCK_PLAN_NOTIFY_SECONDS` / `STOCK_PLAN_CONFIRM_SECONDS` / `STOCK_PLAN_HARD_SECONDS` | 计划档位估时秒阈值；无回退；仅有限正数有效，否则缺省 60 / 180 / 600 / 1800 |
 | `STOCK_PLAN_AUTO_WEIGHT` / `STOCK_PLAN_NOTIFY_WEIGHT` / `STOCK_PLAN_BUDGET_WEIGHT` / `STOCK_PLAN_HARD_WEIGHT` | 计划档位权重阈值（注意权重线用 `BUDGET` 而非 `CONFIRM` 命名）；无回退；仅有限正数有效，否则缺省 6 / 18 / 60 / 180 |
 
+### 4c. 跨仓校验开关（`scripts/cross-repo/check-budget-thresholds.mjs` 读，dev/评审面，不是部署开关）
+
+| 变量 | 作用 / 消费者 / 缺失行为 |
+| --- | --- |
+| `CROSS_REPO_17DZ_ROOT` | 跨仓预算阈值漂移校验的 17dz 检出根目录；消费者 = `scripts/cross-repo/check-budget-thresholds.mjs`（也接受位置参数，env 与位置参数都缺时 exit 2，拒绝静默通过）。只在开发/评审时显式设置；CI（`scripts/ci.sh`）不设——默认绿灯以夹具覆盖，边界登记见 `docs/debt-ledger.md` D-150。注意：名字里的 `17DZ` 是历史命名沿用，与 §8 旧前缀复核口径的关系见该节注记 |
+
 ## 5. 外部服务商凭据（只盘点，不删、不改）
 
 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_MAIN_MODEL` /
@@ -152,6 +158,11 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
   字面量以免复核说明本身成为命中，含 tracked、untracked、ignored
   的 `.runtime/`、`data/`、`tmp/`，排除 `.git/`、`node_modules/`、`.pi/`），
   结果为 0 处，无需再改任何文件；本节是复核记录，不是又一次改名。
+- **口径范围（2026-11-05 补注）**：上述"0 处"指**旧 env 名**（部署开关面）。
+  纯编排波内新引入的两处含旧前缀子串的名字不在该口径内，特此注明免后人
+  按字面复核时误判：`scripts/cross-repo/check-budget-thresholds.mjs` 里的
+  `DZ_ENV`（JS 标识符，映射表键名）与 §4c 的 `CROSS_REPO_17DZ_ROOT`
+  （新 env 名，`17DZ` 是历史命名沿用）。17dz 工作树本身实测仍为 0 处。
 - 唯一例外是 git 历史：改名前的提交里自然还有旧名，重写历史会破坏
   现有分支与 PR 基线，故不重写；“工作树污染”的度量是工作树 grep，
   不是历史 grep。
