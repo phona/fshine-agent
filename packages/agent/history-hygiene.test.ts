@@ -3,8 +3,8 @@
  *
  * 与波次 1 的 `exposure-lint.test.ts`（扫**现行树**的被跟踪文件）分工：本文件扫
  * **全部 ref 的历史**（`git log --all -p`，含提交信息与 diff 的增删两行）。波次 1 清完
- * 现行树之后，敏感串仍整条活在历史里——没有这道守卫，「重写已生效」与「守卫根本没在看」
- * 在测试输出上完全一样。
+ * 现行树之后，敏感串仍整条活在历史里（重写前的状态）——没有这道守卫，「重写已生效」
+ * 与「守卫根本没在看」在测试输出上完全一样。
  *
  * 四类靶子（形态一律拆段拼回、字面零落盘，理由同 exposure-lint：本文件自己也在扫描范围里）：
  *   ① 企微 UserID 的**带前缀**形态；
@@ -12,17 +12,28 @@
  *   ③ 数字 QQ 邮箱形态；
  *   ④ `config/agent.yaml` 与 `.runtime/` 两个路径涉史的 commit。
  *
- * **本文件落地即红（2026-11-05 实跑，HEAD = `598e4c6`、全 ref）**：四类分别
- * **4 / 129 / 377 / 12**（净命中，口径见各类失败消息）。红着交回是正确状态——重写
- * （波次 2 C2）落地前它就该红；谁为了绿灯改断言，谁就是把防线拆了。
+ * **重写后实测（2026-11-05 实跑，HEAD = `24f3b08`、全 ref）**：四类净命中
+ * **0 / 0 / 0 / 0**，两条正向锚点 **19 / 91**，`Author:` 元数据行 379 / `Commit:` 行 0。
+ * 历史已由本程序带外重写洗净（mirror filter-repo + mailmap + 采用回本地 + force-push
+ * gitee，经过见 `docs/change-safety.md` §26）——本守卫现行职责因此是**防回归**：
+ * 四类计数此后再出现净命中 = 新提交把敏感串带回来，或某条 ref 又被指回重写前的历史。
+ * 谁为了绿灯改断言，谁就是把防线拆了。计数随提交增长（每个新提交带一行 `Author:`；
+ * 本守卫自身提交的 diff 删除行含 X1 旧拆法的连续串，会让 Y1 +1）——引用这组数前按当时
+ * HEAD 复跑，别把某个数当历史存量的精确值。
  *
  * 覆盖边界（已知不管的，写在这里而不是留给读者猜）：
- *   · ① 只覆盖带前缀形态。UserID 字面在历史里共 22 行，其中 4 行带前缀、18 行是裸常量
- *     （PRINCIPAL_USER / AUTHORIZED_USER / REAL_USER 的赋值形态）。字面级清零由 owner 侧
- *     逐串扫描 `scripts/history-sensitive-scan.sh` 兜底（G1b），**两者缺一不可**——只跑本
- *     守卫会把「还有 18 行」读成「已干净」。
- *   · ③ 的 377 行**全部**落在 `Author:` / `Commit:` 元数据行，diff 里 0 行——字面替换
- *     （--replace-text）抓不到元数据，只能靠 mailmap（波次 2 C2 配方的一项）。
+ *   · ① 只覆盖带前缀形态。重写前实测 UserID 字面共 22 行，其中 4 行带前缀、18 行是裸常量
+ *     （PRINCIPAL_USER / AUTHORIZED_USER / REAL_USER 的赋值形态）；重写后带前缀形态 0 行。
+ *     字面级清零由 owner 侧逐串扫描 `scripts/history-sensitive-scan.sh` 兜底（G1b），
+ *     **两者缺一不可**——只跑本守卫会把「还有 18 行」读成「已干净」。
+ *   · ③ 重写前实测 377 行**全部**落在 `Author:` 元数据行，diff 里 0 行——字面替换
+ *     （--replace-text）抓不到元数据，只能靠 mailmap（重写配方的一项）。`git log -p`
+ *     默认格式不输出 `Commit:` 行（实测 Author 379 / Commit 0），失败消息因此只提
+ *     `Author:` 行。
+ *   · 通用测试人名 / mock seed 自造样本名（新兴五金 / 猫一杯 / 恒信钢铁 / 工资表2026-8月）
+ *     按波次 1 修复轮既定处置**不 scrub**：兄弟仓 `seed.json` 自造样本、非真实客户、
+ *     无泄漏。本守卫四类不覆盖它们，`exposure-lint` 的 34 条也不为此扩——与 §25
+ *     已知项清单（`docs/change-safety.md`）一致。
  *   · 客户名 / 真实读数 / 执行层平台名词不在四类内：前者走 G1b 逐串扫描（表由波次 1 映射表
  *     v2 生成），后者是波次 2 openDecisions 3 的未拍板项。
  *   · 本守卫**不读**替换表文件——表缺失不会成为红的原因，C1→C2 之间的红必须且只能由四类
@@ -46,8 +57,9 @@
  * vitest 对该文件仍报 passed、退出码仍是 0——实测过，那正是要堵的真空绿）。真判据是全量
  * clone（波次 2 G4）。
  *
- * F3 变异留档（2026-11-05 实跑，五项均已还原，还原后 `git diff` 为空并复跑 5 failed / 3 passed）：
- * 方法 = 临时改一处 → 跑本文件 → 确认**对应**断言翻红或翻绿 → 立即从备份还原 → 复核 diff 干净。
+ * F3 变异留档（2026-11-05 实跑于 C1 期、重写之前；五项均已还原，还原后 `git diff` 为空
+ * 并复跑 5 failed / 3 passed——彼时守卫红着交回是设计状态，下表输出属重写前世界的口径，
+ * 不是当前态）：方法 = 临时改一处 → 跑本文件 → 确认**对应**断言翻红或翻绿 → 立即从备份还原 → 复核 diff 干净。
  * 五项各盯一条不同失败路径，合起来证明这里的"红"不是恒红的副产品，"绿"也不是扫了个空的假绿：
  *
  * | # | 变异（临时） | 翻红 / 翻绿的断言 | 实测输出 |
@@ -73,19 +85,19 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const GUARD_FILE = path.resolve(__dirname, 'history-hygiene.test.ts');
 
 /**
- * git 子进程出口缓冲区。实测 `git log --all -p`（2026-11-05，`598e4c6`，全 ref）
- * = **13,041,595 字节**；Node `spawnSync` 默认 maxBuffer 1MB 会 ENOBUFS——守卫一上工
- * 就红，且红因与"历史有敏感串"混在一起。取 64MB 留足重写后仍不触顶的余量。
+ * git 子进程出口缓冲区。实测 `git log --all -p`（2026-11-05，`24f3b08`，全 ref）
+ * = **12,064,335 字节**；Node `spawnSync` 默认 maxBuffer 1MB 会 ENOBUFS——守卫一上工
+ * 就红，且红因与"历史有敏感串"混在一起。取 64MB 留足后续提交增长仍不触顶的余量。
  */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 
-/** 扫描面下限（2026-11-05 实测：13.0MB / 377 commit / 364 文件；重写后仍远高于此）。 */
+/** 扫描面下限（2026-11-05 重写后实测：12.06MB / 379 commit / 363 文件，仍远高于下限）。 */
 const MIN_PATCH_BYTES = 2 * 1024 * 1024;
 const MIN_ALL_COMMITS = 300;
 const MIN_PATCH_COMMITS = 100;
 const MIN_PATCH_FILES = 100;
 
-/** 历史路径类的两个靶子（本地部署配置与本地运行产物，随 C2 的 --invert-paths 整体移出历史）。 */
+/** 历史路径类的两个靶子（本地部署配置与本地运行产物，已随重写配方的 --invert-paths 整体移出历史）。 */
 const RETIRED_PATHS: readonly string[] = ['config/agent.yaml', '.runtime'];
 
 /** 失败消息里最多列几处归因（全量计数照报，位置只抽样，避免把日志刷成敏感串清单）。 */
@@ -121,19 +133,22 @@ interface SplitEntry {
 /**
  * 已登记替换值（重写的**替换侧**，来自波次 1 映射表 v2 与波次 2 替换表）。
  * 它们按设计就长得像敏感形态，故在各类计数里被扣减；理由见文件头「替换值扣减」。
+ * X1 的第二/三段拆法是为避开锚点 Y1 的连续串（自匹配把守，见 ANCHORS 注释）。
  */
 const REGISTERED_REPLACEMENTS: readonly SplitEntry[] = [
-  { id: 'X1', parts: ['wecom:', 'REPLACE_WITH_YOUR_WECOM_USERID'], sha256: '03c6be330253344375b63c7cece387ad1a8d127c775a0d52e93ee689c38e5cc7' },
+  { id: 'X1', parts: ['wecom:', 'REPLACE_WITH_YOUR_WECOM_', 'USERID'], sha256: '03c6be330253344375b63c7cece387ad1a8d127c775a0d52e93ee689c38e5cc7' },
   { id: 'X2', parts: ['/home/fictional-', 'user/'], sha256: '0097b0fdb7264c8f8f21ccf540096a480d5ee2fcae578cc35a05ab42bb30dd1e' },
 ];
 
 /**
- * 正向锚点（重写产物）：历史里各 ≥1 次才算"重写真发生过"。
- * Y1 = 映射表 B 组给执行层根目录的占位符；Y2 = 映射表 C 组给账套族的替换值。
+ * 正向锚点（重写产物）：历史里各 ≥1 次才算"重写发生过"。
+ * Y1 = 波次 2 替换表给企微 UserID 的占位符（重写后史 19 行：9 个 scripts + 守卫旧版
+ *       自身一行）；Y2 = 映射表 v2 B 组给内部绝对路径的虚构主目录前缀（史 91 行）。
+ * 两个字面都不以连续串形态写进本文件（自匹配把守）——包括 X1 的拆法也为此让路。
  */
 const ANCHORS: readonly SplitEntry[] = [
-  { id: 'Y1', parts: ['<platform-', 'root>'], sha256: '05c3d3742e170a61f9f6fc9486f644aa8cd48f66ac2ef63e65ec90207f2d4c17' },
-  { id: 'Y2', parts: ['账', '套甲'], sha256: 'f687f7e6bd3bcbc2442990eccb23464bb75bcfc06517a3319e4ef17f4d10fcfe' },
+  { id: 'Y1', parts: ['REPLACE_WITH_', 'YOUR_WECOM_USERID'], sha256: 'aae0aa4535180a66e0191ed0fdbc93b07f9dfc0fb25fd7960d63871d3a19cd01' },
+  { id: 'Y2', parts: ['/home/fictional-', 'user'], sha256: '9d5eeff354172f7507948fb1e08a9fcec35ebbedf5a6a57606313822027ce0f3' },
 ];
 
 function materialize(parts: readonly string[]): string {
@@ -159,7 +174,7 @@ function runGit(args: readonly string[]): string {
   if (result.error) {
     throw new Error(
       `历史守卫执行 git ${args.join(' ')} 失败：${String(result.error)}。` +
-        '实测 git log --all -p 约 13MB，maxBuffer 小于它就会 ENOBUFS——' +
+        '实测 git log --all -p 约 12MB，maxBuffer 小于它就会 ENOBUFS——' +
         '这是实现缺陷，不是历史干净；修缓冲区，不要把扫描范围写窄。',
     );
   }
@@ -229,7 +244,7 @@ function countOccurrences(haystack: string, needle: string): number {
 
 let cachedScan: HistoryScan | undefined;
 
-/** 一次运行只扫一遍历史（13MB，三类形态共用）；失败即抛，不做降级。 */
+/** 一次运行只扫一遍历史（12MB，三类形态共用）；失败即抛，不做降级。 */
 function scanHistory(): HistoryScan {
   if (cachedScan) return cachedScan;
   const patch = runGit(['log', '--all', '-p']);
@@ -314,10 +329,10 @@ function shapeFailureMessage(id: ShapeId, tally: ShapeTally): string {
   return [
     `${SHAPE_LABELS[id]}：净命中 ${tally.net} 行（形态原始命中 ${tally.raw} 行，` +
       `其中 ${tally.excluded} 行是已登记替换值，扣减后 ${tally.net}）。`,
-    '当前态 = 终态：波次 2 C2 重写落地后四类应零命中。出现净命中 = 历史里仍有敏感串',
-    '（重写未覆盖该形态 / 新 commit 又带回来）。',
+    '当前态 = 重写已落地（经过见 docs/change-safety.md §26）：四类应零命中。出现净命中 = 回归',
+    '（新 commit 把敏感串带回来 / 某条 ref 被指回重写前的历史）。',
     metadataOnly
-      ? '命中全部落在提交元数据行（Author/Commit）——字面替换抓不到，只能靠 mailmap 清。'
+      ? '命中全部落在提交元数据行（Author: 行；git log -p 默认格式不输出 Commit: 行）——字面替换抓不到元数据，只能靠 mailmap 清。'
       : '',
     '归因（commit + 文件；命中文本刻意不打印——那会把敏感串再抄一份进 CI 日志）：',
     ...tally.hits.map((hit) => `  ${hit.commit}  ${hit.file}`),
@@ -371,10 +386,11 @@ describe('历史敏感面守卫（HG1）：四类敏感物在全部 ref 历史�
       [
         `两个本地部署/运行路径在历史里还有 ${scan.retiredPathCommits.length} 个 commit 触碰。`,
         '它们是本地配置（含企微 UserID）与本地运行产物（探针报告、平台 mock 状态），',
-        '随波次 2 C2 的 --invert-paths 整体移出历史。当前态 = 移出前，红是预期。',
+        '已随重写配方的 --invert-paths 整体移出历史（见 docs/change-safety.md §26）。',
+        '当前态 = 移出后：非空即回归，不是"预期红"。',
         '曾以新增形态进入历史的文件：',
         ...scan.retiredAddedFiles.map((rel) => `  ${rel}`),
-        '出路：跑 C2 配方（--invert-paths --path config/agent.yaml --path .runtime/），',
+        '出路：查哪个 ref / commit 又把它们带回来（如某条 ref 被指回重写前历史），',
         '      不要改本文件的断言。',
       ].join('\n'),
     ).toEqual([]);
@@ -390,7 +406,7 @@ describe('历史敏感面守卫（HG1）：四类敏感物在全部 ref 历史�
         `正向锚点缺席：${missing.map((anchor) => anchor.id).join(', ') || '无'}。`,
         '四类清零只证明"敏感串没了"，不证明"重写真发生过"——把扫描范围砍空同样四类全绿。',
         '这两条锚点是重写产物（替换值）在历史里的落点，各 ≥1 次才说明重写真的执行过。',
-        '重写未落地时它们本来就是 0——这正是 C1 状态下的预期红，归因写在这里而不是猜。',
+        '重写已落地后它们必须 ≥1；跌到 0 = 历史再次被改写 / ref 丢失 / 扫描范围被砍空。',
         '当前锚点计数：',
         ...ANCHORS.map((anchor) => `  ${anchor.id} → ${scan.anchors[anchor.id] ?? 0}`),
       ].join('\n'),
