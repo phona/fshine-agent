@@ -254,12 +254,14 @@ function ledgerCalls(): number {
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
   isolatePlatformState();
   const sdk = new RecordingSdk();
-  // 授权用户 = config/agent.yaml 首个 enabled principal。null = 没人可用：明确报错
-  // 退出，不回落写死值（真实 UserID 曾是这里的硬编码）。每次 boot 现取现派生，
-  // 与下面 createServerAssembly 自带的 loadConfig 同一来源，不存第二份。
+  // 授权用户 = config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）首个
+  // enabled principal。null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是
+  // 这里的硬编码）。每次 boot 现取现派生；注意与下面 createServerAssembly 自带的
+  // loadConfig 只在未设 AGENT_CONFIG_PATH 时同源——assembly 读该变量、缺省同为
+  // config/agent.yaml，设了就分行，派生处按缺省路径报错点名。
   const principalUser = firstEnabledPrincipalId(loadConfig({ env: process.env }));
   if (!principalUser) {
-    console.error('config/agent.yaml 里没有 enabled 的 principal——探针脚本无法派生授权用户（fail-closed，不回落写死值）');
+    console.error('config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）里没有 enabled 的 principal——探针脚本无法派生授权用户（fail-closed，不回落写死值）');
     process.exit(1);
   }
   const assembly = await createServerAssembly({
