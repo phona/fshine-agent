@@ -1359,3 +1359,4 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **守卫不进 CI 的 exhaustive 面**：HG1 形态类只覆盖带前缀 UserID（4/22 行，另 18 行是裸常量），G1b 逐串扫描**刻意不接 npm test**（表是 gitignored 本地文件，接进去要么泄密、要么表缺失时整条跳过 = 真空绿）。CI 因此不是 exhaustive；本地 fresh clone（G4）才是真判据。`fetch-depth: 0` 归波次 4 的 ci.yml 门面重写。
 - **浅克隆下 CI 会怎么走已实测并堵住**：见 F3 变异 ④ 与环境门用例。
 - **`git filter-repo --version` 非空已实测**（`31ebad4c8fb3`，`~/.local/bin/git-filter-repo`，D3 硬门在 C2 前仍会复跑）；本棒不需要它，未调用。
+- **gitee `refs/pull/*` 残留已登记 debt-ledger D-158**（2026-11-05 收口补登）：26 个 ref（`refs/pull/{1..13}/{head,MERGE}`）全部指向重写前提交；force-push 重写 main/分支不移除 pull ref，删 ref = 删 gitee 上 13 个 PR 记录（不可逆），用户决定不删、登记残留。gitee 是私有仓（残留仅对有仓访问权者可见），公开 GitHub 库永远只收干净历史；闭环判据 = gitee 仓库删除/归档，或用户改主意删 PR。

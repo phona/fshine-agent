@@ -1513,3 +1513,13 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L6（零沉积）+ L2（同一事实只存在一处：替换表不得有第二份）。
 - **归属波次 / 限期**：波次 2 C2 实做前（重写落地即把缺口固化成"公开库已知残留"，越晚拍板越贵）。
 - **状态**：待办。
+
+## 公开迁移 · 历史重写波（波次 2）新账
+
+### D-158 · gitee 上 26 个 refs/pull/* 残留（指向重写前提交，用户决定不删 PR）
+
+- **位置**：gitee 私有仓 `git@gitee.com:phona/fshine-agent.git`（本仓 origin）的 26 个 `refs/pull/{1..13}/{head,MERGE}`，完整清单（全部指向重写前提交）：`refs/pull/1/head=2accb20a`、`refs/pull/1/MERGE=bf602a44`、`refs/pull/2/MERGE=8d8542f1`、`refs/pull/2/head=c1b5967f`、`refs/pull/3/head=10874385`、`refs/pull/3/MERGE=307da988`、`refs/pull/4/MERGE=61bb7dea`、`refs/pull/4/head=7db31cbe`、`refs/pull/5/head=5426a85a`、`refs/pull/5/MERGE=631375c5`、`refs/pull/6/head=085a26fd`、`refs/pull/6/MERGE=bb9e15f9`、`refs/pull/7/head=1734dd5e`、`refs/pull/7/MERGE=8d14afce`、`refs/pull/8/head=29b78f0d`、`refs/pull/8/MERGE=823209ce`、`refs/pull/9/MERGE=3835735b`、`refs/pull/9/head=d7c6ed65`、`refs/pull/10/MERGE=70b45f3f`、`refs/pull/10/head=87ca65f4`、`refs/pull/11/MERGE=1aad24d2`、`refs/pull/11/head=646c8d93`、`refs/pull/12/head=10874385`、`refs/pull/12/MERGE=9955c354`、`refs/pull/13/MERGE=098c8b8a`、`refs/pull/13/head=89e605ec`。2026-11-05 实测 `git ls-remote origin 'refs/pull/*'` 返回 26 条、与清单逐条一致（其中 `refs/pull/3/head` 与 `refs/pull/12/head` 同为 `10874385`）；本仓本地无 `refs/pull/*` ref，残留只在 gitee 侧。
+- **已知限制（登记不修，不冒充已清）**：force-push 重写 main/分支不会移除 `refs/pull/*`——PR 记录与其 ref 在 gitee 侧独立存活，C2 重写后这 26 个 ref 仍指向重写前（含敏感串）的提交对象，旧历史在 gitee 侧继续可达。删这些 ref = 删 gitee 上对应的 13 个 PR 记录（不可逆）。用户 2026-11-05 决定不删、登记残留。
+- **风险边界**：gitee 是私有仓，残留仅对有仓访问权者可见；公开 GitHub 库永远只收干净历史。normal clone 的干净判据 = fresh clone 逐串零命中 + `npm run ci` 全绿：change-safety §26 定本地 fresh clone（G4）为真判据，`npm run ci` 三门全绿已实测留档于 §25；fresh clone 两级逐串零命中属波次 2 C2 的 S7/G4 验收门（迁移基线 `out/parts/07-wave2-b.md`），重写未做故该门尚未跑。
+- **闭环判据**：gitee 仓库删除/归档，或用户改主意删 PR——任一发生即关。
+- **状态**：登记不修（用户 2026-11-05 决定不删 PR，残留登记在案）。
