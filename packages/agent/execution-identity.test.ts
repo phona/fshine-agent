@@ -43,6 +43,7 @@ import {
   RUN_EXECUTION_TASK_TOOL,
 } from './src/context';
 import { messageFor, planDraftExample, planFileExample } from './src/error-codes';
+import { resolveActiveProfileId } from '@fshine/contracts';
 import { GATEWAY_INVOCATION, resolveGatewayText } from './src/platform-contract';
 import { DEFAULT_EXECUTOR_LABEL, SYSTEM_PROMPT, buildSystemPrompt } from './src/system-prompt';
 import { evaluateAndActivatePlan, type PlanCliRunner } from './src/plan-runtime';
@@ -191,12 +192,22 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
   });
 
   // ── C5 归属块：profileId 缺省去实例名（resolveActiveProfileId 派生）──
-  describe('C5 块：profileId 缺省（context.ts）', () => {
-    it('不显式传 profileId 时缺省取 17dz（profiles 里有该键 → 任务照常跑）', async () => {
+  describe('C5 块：profileId 缺省（context.ts + contracts）', () => {
+    it('resolveActiveProfileId：显式优先；单 profile → 其键；零/多 → undefined', () => {
+      const p = { root: '/tmp/x', skillRoots: [] };
+      expect(resolveActiveProfileId({ generic: p }, 'explicit')).toBe('explicit');
+      expect(resolveActiveProfileId({ generic: p })).toBe('generic');
+      expect(resolveActiveProfileId({})).toBeUndefined();
+      expect(resolveActiveProfileId({ a: p, b: p })).toBeUndefined();
+      // 多 profile 时显式指定仍然生效（显式优先于 fail-closed）。
+      expect(resolveActiveProfileId({ a: p, b: p }, 'b')).toBe('b');
+    });
+
+    it('单 profile 部署：不显式传 profileId → 派生其键，任务照常跑（键名无关）', async () => {
       const root = await profileRoot();
       let observedCwd: string | undefined;
       const subagent = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        profiles: { generic: { root, skillRoots: ['.agents/skills'] } },
         tasks: new MemoryTasks(),
         workerDriver: { run: async (input) => { observedCwd = input.cwd; return { text: '完成。', messages: input.messages }; } },
       });
@@ -205,15 +216,56 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       expect(observedCwd).toBe(root);
     });
 
-    it('不显式传 profileId 且 profiles 无 17dz 键 → 报错点名缺省 id', async () => {
+    it('零 profile → 消费方 fail-closed（新中性拒绝文案，不点名任何实例）', async () => {
       const root = await profileRoot();
       const subagent = createContextTaskRunner({
-        profiles: { generic: { root, skillRoots: ['.agents/skills'] } },
+        profiles: {},
         tasks: new MemoryTasks(),
         workerDriver: scriptedDriver('完成。'),
       });
       await expect(subagent.run({ request: '查询余额' }, { trusted: trusted() }))
-        .rejects.toThrow('未配置 17dz 上下文 profile:17dz');
+        .rejects.toThrow('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
+    });
+
+    it('多 profile 且未显式指定 → 同样 fail-closed（不静默挑一个）', async () => {
+      const root = await profileRoot();
+      const subagent = createContextTaskRunner({
+        profiles: {
+          generic: { root, skillRoots: ['.agents/skills'] },
+          other: { root, skillRoots: ['.agents/skills'] },
+        },
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      await expect(subagent.run({ request: '查询余额' }, { trusted: trusted() }))
+        .rejects.toThrow('未指定执行层 profile');
+    });
+
+    it('多 profile 且显式指定 → 显式值生效', async () => {
+      const root = await profileRoot();
+      const subagent = createContextTaskRunner({
+        profiles: {
+          generic: { root, skillRoots: ['.agents/skills'] },
+          other: { root, skillRoots: ['.agents/skills'] },
+        },
+        profileId: 'other',
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      const result = await subagent.run({ request: '查询余额' }, { trusted: trusted() });
+      expect(result.text).toBe('完成。');
+    });
+
+    it('单 profile 但显式传了未配置的 profileId → 未命中拒绝（显式不换校验；文案逐字归 C6 块）', async () => {
+      const root = await profileRoot();
+      const subagent = createContextTaskRunner({
+        profiles: { generic: { root, skillRoots: ['.agents/skills'] } },
+        profileId: 'missing',
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      await expect(subagent.run({ request: '查询余额' }, { trusted: trusted() }))
+        .rejects.toThrow();
     });
   });
 

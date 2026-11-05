@@ -78,7 +78,8 @@ async function main(): Promise<void> {
   console.log(JSON.stringify({
     event: 'server_started',
     db: process.env['DB_PATH'] ?? path.join(repoRoot, 'data/agent.db'),
-    contextProfiles: assembly.platformRoot ? ['17dz'] : [],
+    // C5：打 active profile 的实际键（派生自 contextProfiles），不再硬编码实例名。
+    contextProfiles: assembly.activeProfileId !== undefined ? [assembly.activeProfileId] : [],
   }));
   // 生效模式一行可观测（2026-10-21 真平台切换事故补丁）：executor / 运维授权 / 写授权
   // 一屏可查，不用再做法医式核查。只含三个模式键——绝不全量打 env（.env 有 LLM 密钥）。

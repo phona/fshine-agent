@@ -74,6 +74,23 @@ export function turnBudgetMsFor(profile?: Pick<ContextProfileConfig, 'workerTime
   return (profile?.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS) + TURN_BUDGET_MARGIN_MS;
 }
 
+/**
+ * Active profile ID 的解析（C5）：宿主不把任何执行层实例名当缺省。
+ *
+ * 判定规则：显式指定优先；未指定且恰有一个 profile → 该键（单执行层部署零配置可用）；
+ * 未指定且 0 个或多个 profile → undefined——由消费方 fail-closed（如
+ * resolveContextProfile 拒绝启动回合），绝不静默挑一个或回退实例名。
+ * 纯函数：装配派生（assembly）与 runner 缺省（context.ts）共用同一份判定，不新增 env。
+ */
+export function resolveActiveProfileId(
+  profiles: Record<string, ContextProfileConfig>,
+  explicit?: string,
+): string | undefined {
+  if (explicit !== undefined && explicit.trim() !== '') return explicit;
+  const keys = Object.keys(profiles);
+  return keys.length === 1 ? keys[0] : undefined;
+}
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   /** Trusted platform subagent context profiles. */

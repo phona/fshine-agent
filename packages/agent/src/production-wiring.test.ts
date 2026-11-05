@@ -122,7 +122,7 @@ function setupProposal(options: {
     },
   };
   const taskRunner = createContextTaskRunner({
-    profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+    profiles: { generic: { root: '/tmp', skillRoots: [] } },
     tasks,
     workerDriver,
     changeIntents: intents.repo,
@@ -258,7 +258,7 @@ describe('生产接线 · 交接文件真实续跑', () => {
 
   function runner(root: string, tasks: MemoryTasks, driver: TurnDriver) {
     return createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      profiles: { generic: { root, skillRoots: ['.agents/skills'] } },
       tasks,
       workerDriver: driver,
     });

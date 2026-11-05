@@ -41,7 +41,7 @@ import type {
   PlatformTaskRepo,
   TrustedContext,
 } from '@fshine/contracts';
-import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
+import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS, resolveActiveProfileId } from '@fshine/contracts';
 import {
   createPlatformExecutionGate,
   PlatformExecutionAbortedError,
@@ -766,7 +766,10 @@ export async function snapshotWorkspaceFiles(
 }
 
 export function createContextTaskRunner(options: ContextTaskRunnerOptions): ContextTaskRunner {
-  const profileId = options.profileId ?? '17dz';
+  // Active profile 派生（C5）：显式指定优先；未指定且恰有一个 profile → 该键；
+  // 0 个或多个 → undefined，消费方（resolveContextProfile）fail-closed。宿主不把
+  // 任何执行层实例名当缺省。
+  const profileId = options.profileId ?? resolveActiveProfileId(options.profiles);
   const intentTtlMs = options.intentTtlMs ?? 10 * 60_000;
   const generateCode = options.generateCode ?? defaultGenerateCode;
   const hashCode = options.hashCode ?? defaultHashCode;
@@ -774,12 +777,15 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   const executionGate = options.executionGate ?? createPlatformExecutionGate({
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
+  // Active profile 的声明面（C3/C4/C5）：profileId 派生失败（0/多个 profile 未显式指定）
+  // 时为 undefined，工具面全部落到中性缺省；真实委派在 resolveContextProfile 处 fail-closed。
+  const activeProfile = profileId === undefined ? undefined : options.profiles[profileId];
   // 工具描述的称谓与系统提示词同源（C4）：profile.executorLabel 声明，缺省中性。
-  const effectiveExecutorLabel = options.profiles[profileId]?.executorLabel ?? DEFAULT_EXECUTOR_LABEL;
+  const effectiveExecutorLabel = activeProfile?.executorLabel ?? DEFAULT_EXECUTOR_LABEL;
   const tool: DiscoveredTool = {
     // 工具名 = profile.toolName 声明（C3），缺省中性（RUN_EXECUTION_TASK_TOOL）：
     // 实例已发布的工具协议名由该实例自己的 profile 声明保持连续，宿主不取实例名缺省。
-    name: options.profiles[profileId]?.toolName ?? RUN_EXECUTION_TASK_TOOL,
+    name: activeProfile?.toolName ?? RUN_EXECUTION_TASK_TOOL,
     description: buildRunExecutionTaskDescription(effectiveExecutorLabel),
     inputSchema: buildRunExecutionTaskSchema(effectiveExecutorLabel),
   };
@@ -1686,7 +1692,10 @@ export function withStepLabel(text: string, stepLabel: string): string {
   return `${PLAN_NOTICE_PREFIX}${tag}${text.slice(PLAN_NOTICE_PREFIX.length)}`;
 }
 
-async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string): Promise<ResolvedContextProfile> {
+async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string | undefined): Promise<ResolvedContextProfile> {
+  // 消费方 fail-closed（C5）：0 个或多个 profile 且未显式指定 profileId → 拒绝执行，
+  // 不静默挑 profile、不回退任何实例名（文案中性，指引部署补配置或显式指定）。
+  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
   const configured = profiles[id];
   if (!configured) throw new ToolUserError(`未配置 17dz 上下文 profile:${id}`);
   const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`17dz 上下文目录不可用:${id}`); });

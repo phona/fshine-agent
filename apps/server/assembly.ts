@@ -40,7 +40,7 @@ import {
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { AuditStore, ChannelReply, ChannelRoute, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
-import { turnBudgetMsFor } from '@fshine/contracts';
+import { resolveActiveProfileId, turnBudgetMsFor } from '@fshine/contracts';
 import { createProposalCommitRunner } from './proposal-commit';
 import { createMessageHandler } from './handler';
 import { sweepUndeliveredTaskRuns } from './background-delivery';
@@ -168,6 +168,8 @@ export interface ServerAssembly {
   replyHandler: ReplyHandler;
   channel: WecomBotChannel;
   platformRoot?: string;
+  /** Active profile 的键（C5）：单 profile 派生，多/零 profile 未显式指定时 undefined。 */
+  activeProfileId?: string;
   planActivationSecret: string;
   workerDispatchMode: WorkerDispatchMode;
   close(): Promise<void>;
@@ -177,7 +179,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const env = overrides.env ?? process.env;
   const workerDispatchMode = overrides.workerDispatchMode ?? workerDispatchModeOf(env);
   const config = loadConfig({ env, yamlPath: env['AGENT_CONFIG_PATH'] || undefined });
-  const platformRoot = config.contextProfiles['17dz']?.root;
+  // Active profile 派生（C5）：单 profile → 其键；零/多 profile → undefined（各消费点
+  // 按无平台能力降级，runner 侧 resolveContextProfile fail-closed）。宿主不取实例名缺省。
+  const activeProfileId = resolveActiveProfileId(config.contextProfiles);
+  const activeProfile = activeProfileId === undefined ? undefined : config.contextProfiles[activeProfileId];
+  const platformRoot = activeProfile?.root;
   // 接口完整性硬门：lint 红就抛错、拒绝启动（不建存储、不接渠道），判据与输出见上方函数注释。
   if (platformRoot) assertPlatformOperationsHealthy(platformRoot);
   const dbPath = overrides.dbPath ?? path.join(repoRoot, 'data/agent.db');
@@ -306,7 +312,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     },
     workerDriver,
     executionGate: platformExecutionGate,
-    profileId: '17dz',
+    // C5：active profile 派生（单 profile → 其键；零/多 → undefined，消费方 fail-closed）。
+    profileId: activeProfileId,
     // 写开放的执法判据（变更项 ⑧）：平台侧声明，isCommitEnabled 单独派生（mock ⇒ 写链路
     // 全放开；真平台 ⇒ 还须显式 FSHINE_REAL_COMMIT=1）。worker 驱动的计划扫描与本层的
     // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
@@ -332,7 +339,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
       // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
-      planCommandForm: planDraftExample(config.contextProfiles['17dz']?.gateway),
+      planCommandForm: planDraftExample(activeProfile?.gateway),
     } : {}),
   });
   // The task manager may cancel a waiting confirmation using the original principal/session/task
@@ -388,7 +395,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     sessionTtlMs: config.sessionTtlMs,
     // Leave time for the Main Agent to interpret the subagent's final text
     // after the delegated turn reaches its own deadline.
-    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
+    turnBudgetMs: turnBudgetMsFor(activeProfile),
     platformTask,
     backgroundTasks,
     workerDispatchMode,
@@ -402,7 +409,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
     // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 系统
     // 提示词；未声明 = 宿主中性缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
-    ...(config.contextProfiles['17dz']?.executorLabel ? { executorLabel: config.contextProfiles['17dz']!.executorLabel } : {}),
+    ...(activeProfile?.executorLabel ? { executorLabel: activeProfile.executorLabel } : {}),
     // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后会话进入冷却，冷却期内不再
     // 发起平台调用。时长经 env 覆盖（见上），阈值固定 2（platform-health.ts 缺省）。
     ...(platformCooldownMs ? { platformCooldownMs } : {}),
@@ -461,6 +468,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     replyHandler: handler,
     channel,
     ...(platformRoot ? { platformRoot } : {}),
+    ...(activeProfileId !== undefined ? { activeProfileId } : {}),
     planActivationSecret,
     workerDispatchMode,
     close: async () => {
