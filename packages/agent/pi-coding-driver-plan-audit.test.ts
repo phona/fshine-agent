@@ -170,7 +170,7 @@ async function fileWorkerWith(options: {
 /** 提交即激活（execute 档）：不等通知、不等确认。 */
 const activatingRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
-  if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_audit', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 1 }, delta: {}, cumulative: {}, status: 'active' }), stderr: '' };
+  if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_audit', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 1, weight: 2 }, delta: {}, cumulative: {}, status: 'active' }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);
 };
 
@@ -200,7 +200,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     const { events } = auditSink();
     const confirmingRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
-      if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600 }, delta: {}, cumulative: {}, reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming', noticeText: '第 1 批查询' }), stderr: '' };
+      if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming', noticeText: '第 1 批查询' }), stderr: '' };
       throw new Error('unexpected CLI call');
     };
     // 确认门要求宿主持有通知出口（fail-closed：没配就暂停执行），否则 evaluate 直接抛
@@ -226,7 +226,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
       if (args[1] === 'evaluate') return {
         code: 3,
-        stdout: `${JSON.stringify({ planId: 'plan_stop', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600 }, delta: { addedCalls: 60 }, cumulative: { calls: 120, seconds: 7200 }, reasonCode: 'HARD_LIMIT', status: 'stopped', noticeText: '累计查询已达本任务硬上限。' })}\n`,
+        stdout: `${JSON.stringify({ planId: 'plan_stop', version: 2, decision: 'stop', estimate: { calls: 60, seconds: 3600, weight: 2 }, delta: { addedCalls: 60 }, cumulative: { calls: 120, seconds: 7200 }, reasonCode: 'HARD_LIMIT', status: 'stopped', noticeText: '累计查询已达本任务硬上限。' })}\n`,
         stderr: '',
       };
       throw new Error('unexpected CLI call');
@@ -732,7 +732,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     // 模型自报确认对文件通道与 inline 同权：evaluate 给 confirm 档裁决时照样停在确认门
     const confirmingRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
-      if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600 }, delta: {}, reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming', noticeText: '第 1 批查询' }), stderr: '' };
+      if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({ planId: 'plan_confirm', version: 3, decision: 'confirm', estimate: { calls: 30, seconds: 600, weight: 2 }, delta: {}, reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming', noticeText: '第 1 批查询' }), stderr: '' };
       throw new Error('unexpected CLI call');
     };
     const notices: string[] = [];

@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：平台健康信号（Lane 2「治标补法」）——连续 AUTH 类平台失败的冷却。
  *
@@ -81,7 +84,7 @@ function captureEvents(): { events: Array<Record<string, unknown>>; restore: () 
   return { events, restore: () => { console.info = original; } };
 }
 
-describe('离线全链 e2e：平台健康信号（Lane 2 冷却）', () => {
+describe('[L4 集成] 离线全链 e2e：平台健康信号（Lane 2 冷却）', () => {
   it('连续两回合 AUTH 失败信封 → 第三回合终稿是宿主合成消息且零平台调用', async () => {
     const worker = authFailingWorker(['NEEDS_LOGIN', 'AUTH_EXPIRED']);
     const audit = captureEvents();

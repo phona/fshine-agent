@@ -173,7 +173,7 @@ describe('plan-shape-fuzz：形状错误抛结构化错误码', () => {
 describe('plan-shape-fuzz：user_confirmed 只审计不授权', () => {
   const confirmEvaluation = {
     planId: 'plan_c1', version: 1, decision: 'confirm',
-    estimate: { calls: 3, seconds: 45 }, delta: { addedCalls: 3 },
+    estimate: { calls: 3, seconds: 45, weight: 2 }, delta: { addedCalls: 3 },
     cumulative: { calls: 0, seconds: 0 }, reasonCode: 'CONFIRM_THRESHOLD', status: 'pending',
   };
 

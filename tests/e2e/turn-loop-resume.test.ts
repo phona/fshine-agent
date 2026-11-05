@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：计划恢复路径（resumeTaskId）的两个缺口。共享替身见 ./harness.ts。
  *
@@ -65,7 +68,7 @@ function authFailingOnResume(script: WorkerStep[]) {
   };
 }
 
-describe('离线全链 e2e：计划恢复路径（注脚剥离 + 执行痕迹判据）', () => {
+describe('[L4 集成] 离线全链 e2e：计划恢复路径（注脚剥离 + 执行痕迹判据）', () => {
   it('F5 整理模型停嘴：回落 worker 文本，执行面注脚不上屏', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({

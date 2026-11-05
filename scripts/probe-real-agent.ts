@@ -153,7 +153,7 @@ let counter = 0;
  */
 const PROBE_REPLY_WAIT_MS = 600_000;
 
-const PLATFORM_STATE_KEYS = ['DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH'] as const;
+const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
@@ -225,13 +225,13 @@ function isolatePlatformState(): void {
   platformStateBackup = Object.fromEntries(PLATFORM_STATE_KEYS.map((key) => [key, process.env[key]]));
   counter += 1;
   Object.assign(process.env, {
-    DZ_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
-    DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
-    DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
-    DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    EXECUTION_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
+    EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
+    EXECUTION_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
+    EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
     // 网关限流有 17dz 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
     // 真实平台保持生产限流（"别让下游平台有感知"）：探针节奏天然低于限额，被限就是信号。
-    ...(isPlatformMock() ? { DZ_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
+    ...(isPlatformMock() ? { EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
   });
 }
 
@@ -244,7 +244,7 @@ function restorePlatformState(): void {
 }
 
 function ledgerCalls(): number {
-  const file = process.env['DZ_PLAN_STATE'];
+  const file = process.env['EXECUTION_PLAN_STATE'];
   if (!file || !existsSync(file)) return 0;
   try {
     const state = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: Record<string, { actual?: { calls?: number } }> };
@@ -826,7 +826,7 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 // ─── X/Y 用例（复杂任务会话 / 纠错与错误态）的 mock 事实源与判定 helper ───
 //
 // mock 事实（2026-09-29 从 /home/fictional-user/fictional-projects/fictional-execution-layer/.runtime/mock-state.json 读出；
-// 探针每用例的 DZ_MOCK_STATE 指向临时空文件，mock 应答器自动从同仓 fixtures 的种子状态播种，
+// 探针每用例的 EXECUTION_MOCK_STATE 指向临时空文件，mock 应答器自动从同仓 fixtures 的种子状态播种，
 // 两份余额事实一致——此处以种子为准，改动任何数字前先重读状态文件）：
 //   · 账套目录 4 个：幻辰财税 / 幻辰实业有限公司 / 新兴五金 / 新兴建材。匹配语义是
 //     「平台名 includes 查询词」子串——"幻辰"命中前两个 → ACCOUNT_SET_AMBIGUOUS；
@@ -910,9 +910,9 @@ interface AuditRecord {
   exitCode?: number;
 }
 
-/** 读审计日志（DZ_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
+/** 读审计日志（EXECUTION_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
 function auditRecords(): AuditRecord[] {
-  const file = process.env['DZ_AUDIT_PATH'];
+  const file = process.env['EXECUTION_AUDIT_PATH'];
   if (!file || !existsSync(file)) return [];
   try {
     return readFileSync(file, 'utf8').split('\n').filter(Boolean)

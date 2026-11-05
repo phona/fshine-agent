@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：长任务拆解（roadmap Phase 6，架构 §3 规划者/执行者分工）。共享替身见 ./harness.ts。
  *
@@ -29,10 +32,10 @@ import {
  * 这里把同一任务的 notify 上限放宽（平台侧默认 2），否则第 3 步会被升级成"必须等用户
  * 确认"——那是单步试探收口的规则，不是长任务拆解该有的形状。
  */
-beforeAll(() => { process.env['DZ_PLAN_MAX_NOTIFY'] = '6'; });
-afterAll(() => { delete process.env['DZ_PLAN_MAX_NOTIFY']; });
+beforeAll(() => { process.env['EXECUTION_PLAN_MAX_NOTIFY'] = '6'; });
+afterAll(() => { delete process.env['EXECUTION_PLAN_MAX_NOTIFY']; });
 
-/** 三个期间的查询计划：3 次调用，越过 harness 的 DZ_PLAN_AUTO_CALLS=2 触发通知。 */
+/** 三个期间的查询计划：3 次调用，越过 harness 的 EXECUTION_PLAN_AUTO_CALLS=2 触发通知。 */
 function threePeriodPlan(account: string): PlanCall[] {
   return [1, 2, 3].map((month) => ({ operation: 'finance.query-receivables', args: ['--query', account, '--period', `20260${month}`] }));
 }
@@ -62,7 +65,7 @@ const NEEDS_PERIOD = {
   suggestion: '请告诉我要查的具体期间',
 };
 
-describe('离线全链 e2e：长任务拆解（计划模式）', () => {
+describe('[L4 集成] 离线全链 e2e：长任务拆解（计划模式）', () => {
   it('6.1 「核对 3 个账套」全链：逐步派单、同任务续跑、每步结果如实进汇总', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

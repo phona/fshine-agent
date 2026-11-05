@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskPlanProjection, TaskPlanRepo, TaskPlanStepFact, TaskPlanSummary, TrustedContext } from '@fshine/contracts';
-import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
+import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { ScriptedTurnDriver } from './src/driver';
 import { createTaxAgentRuntime } from './src/runtime';
@@ -142,7 +142,7 @@ function planDriver(declarations: Array<Record<string, unknown> & { text?: strin
 function subagent(script: Array<(args: { request: string; taskId?: string; stepLabel?: string }) => SubagentTaskResult>): ContextTaskRunner & { calls: Array<{ request: string; taskId?: string; stepLabel?: string }> } {
   const calls: Array<{ request: string; taskId?: string; stepLabel?: string }> = [];
   return {
-    tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+    tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
     calls,
     run: async (args) => {
       calls.push({ request: args.request, ...(args.taskId ? { taskId: args.taskId } : {}), ...(args.stepLabel ? { stepLabel: args.stepLabel } : {}) });

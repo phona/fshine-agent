@@ -16,6 +16,49 @@ export {
   type PiTurnDriverOptions,
 } from './pi-driver';
 export {
+  DEFAULT_WORKER_STEP_CAP,
+  createStepCapWindDown,
+  parseStepCap,
+  stepCapDecision,
+  type StepCapDecision,
+} from './worker-step-cap';
+export {
+  HANDOVER_FILE_NAME,
+  HANDOVER_VERSION,
+  handoverFilePath,
+  mergeExecutedCalls,
+  parseHandover,
+  parseHandoverWithCode,
+  readHandoverFile,
+  readHandoverFileWithCode,
+  serializeHandover,
+  writeHandoverFile,
+  type HandoverExecutedCall,
+  type HandoverReadCode,
+  type HandoverReadResult,
+  type TaskHandover,
+} from './task-handover';
+export {
+  mechanicalReview,
+  parseReviewReply,
+  reviewProposalWithDriver,
+  type ProposalReviewInput,
+  type ProposalReviewTurn,
+  type ProposalReviewVerdict,
+} from './proposal-review';
+export {
+  COMMITTED_UNVERIFIED_LINE,
+  COMMITTED_UNVERIFIED_RECONCILIATION_LINE,
+  isCommittedUnverified,
+  renderCommittedUnverifiedReply,
+  type ReadBackCounts,
+} from './committed-unverified';
+export {
+  decideToolDefinitionGuard,
+  type ToolDefinitionGuardDecision,
+  type ToolDefinitionGuardInput,
+} from './tool-definition-guard';
+export {
   createPiCodingTurnDriver,
   createPiCodingWorkerSession,
   createServeGateAuditSink,
@@ -40,10 +83,12 @@ export {
   loadOperationArgSpecs,
   loadOperationProtocols,
   loadOperationSemantics,
+  loadProposalSchema,
   operationLabel,
   parseOperationLabels,
   parseOperationArgSpecs,
   parseOperationProtocols,
+  parseProposalSchema,
   parseAccessSemantics,
   parseOperationSemantics,
   isWriteAccess,
@@ -141,6 +186,8 @@ export {
 export {
   GATEWAY_INVOCATION,
   gatewayExecPath,
+  gatewayExecPathForProfile,
+  validateGatewayInvocation,
   PLATFORM_OPERATIONS,
   PLATFORM_AUTH_ERROR_CODES,
   parseEnvelope,
@@ -156,15 +203,26 @@ export {
   type PlatformEnvelope,
   type SelectionClarification,
 } from './platform-contract';
+export {
+  DEFAULT_BUDGET_THRESHOLDS,
+  decideBudgetTier,
+  stricterTier,
+  weightOfOperation,
+  type BudgetDecision,
+  type BudgetInput,
+  type BudgetThresholds,
+  type BudgetTier,
+} from './budget-policy';
 export * from './session';
 export {
   createContextTaskRunner,
   hostGatewayEnv,
   newGateSecret,
-  RUN_17DZ_TASK_TOOL,
-  RUN_17DZ_TASK_DESCRIPTION,
-  RUN_17DZ_TASK_SCHEMA,
+  RUN_EXECUTION_TASK_TOOL,
+  RUN_EXECUTION_TASK_DESCRIPTION,
+  RUN_EXECUTION_TASK_SCHEMA,
   withStepLabel,
+  resolveHandoverRecovery,
   DELEGATION_AUTH_FAILURE,
   DELEGATION_TIMEOUT_FAILURE,
   DELEGATION_EXECUTOR_FAILURE,
@@ -183,6 +241,7 @@ export {
   type PreparedContextTaskRun,
   type PreparedContextTaskRunExecution,
   type RunWorkspaceFile,
+  type HandoverRecovery,
 } from './context';
 export {
   createTaxAgentRuntime,

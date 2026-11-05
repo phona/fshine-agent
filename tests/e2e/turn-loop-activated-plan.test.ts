@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：方案已批准但查询没有执行（P1 收尾事实兜底）。共享替身见 ./harness.ts。
  *
@@ -9,7 +12,7 @@ import { describe, expect, it } from 'vitest';
 import { ACTIVATED_PLAN_NOT_EXECUTED } from '../../packages/agent/src/runtime';
 import { boot, gatedWorker, growingPlan, mainDriver, totalActualCalls } from './harness';
 
-describe('离线全链 e2e：批准了但没执行的收尾', () => {
+describe('[L4 集成] 离线全链 e2e：批准了但没执行的收尾', () => {
   it('P1.1 计划通知已送达、查询零执行时，说清真实状态并给出下一步', async () => {
     const before = totalActualCalls();
     const { send, sdk, assembly } = await boot({

@@ -4,7 +4,7 @@
  * 分两半，都不起 driver harness：
  *   · **宿主半**（context.ts 的 onCreateProposal / confirmProposalViaGateway）：用一个
  *     "捕获回调"的替身 worker 驱动直接调到那个回调——写开放声明复核（⑧，平台侧声明）、
- *     平台信封三态、意图条目形状、用户可见文本拼法、env 纪律（剥 DZ_REQUIRE_PLAN）、确认落账四态；
+ *     平台信封三态、意图条目形状、用户可见文本拼法、env 纪律（剥 EXECUTION_REQUIRE_PLAN）、确认落账四态；
  *   · **驱动半**（pi-coding-driver 的 beforeToolCall 拦截点）：用真 createPiCodingWorkerSession
  *     + 直接调 beforeToolCall（与 plan-audit 同一手法）——认不认这条命令、payload 路径越界
  *     拦不拦、三态各交还什么。
@@ -177,6 +177,11 @@ function setupHost(options: {
     writeEnabled: options.writeEnabled ?? true,
     generateCode: () => 'D3F2K9',
     intentTtlMs: 10 * 60_000,
+    // 第 2 包生产契约：提案创建必须经过隔离复核 + 真实下发的 schema，
+    // 旧测试“无复核也完成”的前提已不存在，故宿主半默认注入一致复核与
+    // dummy schema；fail-closed 的反向情形由 production-wiring.test.ts 钉住。
+    proposalReviewTurn: async () => ({ verdict: 'consistent', fields: [] }),
+    proposalSchemaLoader: async () => ({ $id: 'ChangeProposalPayload', type: 'object' }),
   });
   return {
     rows: intents.rows,
@@ -245,12 +250,12 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
     // 办调形态：prepare <operation> <payloadPath>，operation 名来自拦截到的目标 token
     expect(host.calls).toHaveLength(1);
     expect(host.calls[0]?.args).toEqual(['prepare', 'voucher.proposal', 'tmp/req_1/proposal.json']);
-    // env 纪律（修 D-081）：宿主直调显式剥 DZ_REQUIRE_PLAN——那个 mandate 是 worker 子进程的
-    process.env.DZ_REQUIRE_PLAN = '1';
+    // env 纪律（修 D-081）：宿主直调显式剥 EXECUTION_REQUIRE_PLAN——那个 mandate 是 worker 子进程的
+    process.env.EXECUTION_REQUIRE_PLAN = '1';
     const withMandate = setupHost({});
     await withMandate.invoke();
-    expect(withMandate.calls[0]?.env.DZ_REQUIRE_PLAN).toBeUndefined();
-    delete process.env.DZ_REQUIRE_PLAN;
+    expect(withMandate.calls[0]?.env.EXECUTION_REQUIRE_PLAN).toBeUndefined();
+    delete process.env.EXECUTION_REQUIRE_PLAN;
 
     if (!outcome || outcome.status !== 'completed') throw new Error('expected completed');
     expect(outcome.proposalId).toBe('prop_abc123');
@@ -801,14 +806,14 @@ describe('落账放行闸 isCommitEnabled：mock 放开 / 真平台须 FSHINE_RE
   // 确认码拿到 confirm_held、零写入；它恒真 ⇒ mock 之下那道 fail-closed 消失。所以这四行
   // 必须独立成用例，而不是只靠 e2e 间接覆盖。
   it('mock 之下恒真（写的是假状态，全链路联调放开）', () => {
-    expect(isCommitEnabled({ DZ_EXECUTOR: 'mock' })).toBe(true);
+    expect(isCommitEnabled({ EXECUTION_EXECUTOR: 'mock' })).toBe(true);
     // 即使 FSHINE_REAL_COMMIT 显式为空也不影响（mock 不需要它）
-    expect(isCommitEnabled({ DZ_EXECUTOR: 'mock', FSHINE_REAL_COMMIT: '' })).toBe(true);
+    expect(isCommitEnabled({ EXECUTION_EXECUTOR: 'mock', FSHINE_REAL_COMMIT: '' })).toBe(true);
   });
 
   it('真平台缺 FSHINE_REAL_COMMIT 恒假（fail-closed：确认码只到 confirm_held，零写入）', () => {
     expect(isCommitEnabled({})).toBe(false);
-    expect(isCommitEnabled({ DZ_EXECUTOR: '' })).toBe(false);
+    expect(isCommitEnabled({ EXECUTION_EXECUTOR: '' })).toBe(false);
     // 'true'/'yes'/'0' 都不算授权——"模糊真值"正是 fail-open 的入口
     expect(isCommitEnabled({ FSHINE_REAL_COMMIT: 'true' })).toBe(false);
     expect(isCommitEnabled({ FSHINE_REAL_COMMIT: '0' })).toBe(false);

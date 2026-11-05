@@ -21,18 +21,36 @@
  * CLI 逐字打印 plan-schema.json，e2e A6 spawn 实证 exit 0。本测试仍走读文件核验：
  * 教学形态与平台声明的逐字一致是 L2 判据，与 CLI 出口是否可用是两个事实。）
  */
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { messageFor, planDraftExample } from './src/error-codes';
 import { parsePlanCallsCommand } from './src/plan-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const PLATFORM_ROOT = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', '17dz-platform');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', '17dz-platform');
 
-/** 平台计划草案 schema（跨仓读文件：唯一事实源在平台，fshine 不镜像）。 */
+/**
+ * 平台计划草案 schema。
+ * 同仓在场时读 17dz 的 plan-schema.json（L2 跨仓单一来源，fshine 不镜像）。
+ * 同仓不在场时（单仓 GitHub CI：只检出 fshine-agent），回落到仓内通用
+ * mock 执行层的 plan --schema 输出——那是 dummy 平台自己的 schema，
+ * 不是财税 schema 的副本，校验的只是协议顶层形状（calls 必填、
+ * goal/requestId 为声明过的可选元数据、additionalProperties:false）。
+ * 回落不是静默放水：dummy 输出缺失或解析失败时测试直接失败。
+ */
 function planSchema(): { required?: unknown; additionalProperties?: unknown; properties?: Record<string, unknown> } {
-  return JSON.parse(readFileSync(path.join(PLATFORM_ROOT, 'src', 'execution', 'plan-schema.json'), 'utf8'));
+  const siblingSchema = path.join(PLATFORM_ROOT, 'src', 'execution', 'plan-schema.json');
+  if (existsSync(siblingSchema)) {
+    return JSON.parse(readFileSync(siblingSchema, 'utf8'));
+  }
+  const dummyBin = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform', 'bin', 'dummy');
+  const r = spawnSync(dummyBin, ['plan', '--schema'], { encoding: 'utf8' });
+  if (r.status !== 0 || !r.stdout) {
+    throw new Error(`同仓 plan-schema.json 不在场，且 dummy plan --schema 失败（status=${r.status}）：单仓 CI 无法校验教学形状`);
+  }
+  return JSON.parse(r.stdout);
 }
 
 /** 教学示例里的占位符（…）→ 具体合法值，得到一条可解析的真草案命令。 */
@@ -86,7 +104,9 @@ describe('计划草案教学：单一来源与平台 schema 一致（D-011）', 
     expect(errorCodes.split('plan {"').length - 1, 'error-codes.ts 只许有一处草案形状字面量（planDraftExample 函数体）').toBe(1);
     expect(workerPrompt.split('plan {"').length - 1, 'context.ts 的 worker 提示词不许再手写草案形状').toBe(0);
     // 那一处必须真的是函数体，且 worker 提示词确实引用了同一个函数
-    expect(errorCodes).toContain('export function planDraftExample()');
+    // 签名现带可选 gateway 参数（接口文档 §2：文本识别从 profile.gateway 派生），
+    // 单一来源不变：形状字面量仍只在该函数体内一处。
+    expect(errorCodes).toContain('export function planDraftExample(');
     expect(workerPrompt).toContain('planDraftExample()');
   });
 });

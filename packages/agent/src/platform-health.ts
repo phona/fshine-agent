@@ -14,7 +14,7 @@
  * 绝不对 worker 自由文本做模糊匹配——那是猜，不是事实（与 needs/澄清的派生同纪律）。
  *
  * 与既有机制的分工（正交，不重复不替代）：
- *   · 平台网关限流（DZ_RATE_LIMIT 令牌桶）治"调用太频"——本模块治"平台根本不可用"；
+ *   · 平台网关限流（EXECUTION_RATE_LIMIT 令牌桶）治"调用太频"——本模块治"平台根本不可用"；
  *   · 计划门/纠错环的 MAX_* 收敛（MAX_PLAN_ZERO_EXEC_STEPS / MAX_DECLINED_PLANS_PER_TASK /
  *     MAX_NEEDS_ROUNDS）治"模型在同一回合/同一任务里空转"——本模块治"跨回合的逐轮重试
  *     式重查"：一个在回合内，一个跨回合；

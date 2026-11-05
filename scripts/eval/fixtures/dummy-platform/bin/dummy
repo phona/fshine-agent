@@ -1,0 +1,5 @@
+#!/bin/sh
+# Generic mock execution layer entry point: delegates to the Node implementation.
+# Kept as a shell shim because the fshine repo uses "type": "module", which makes
+# an extensionless Node file load as ESM; the implementation is CommonJS.
+exec node "$(dirname "$0")/dummy.cjs" "$@"

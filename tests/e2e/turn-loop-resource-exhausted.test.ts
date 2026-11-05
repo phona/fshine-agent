@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：资源耗尽终稿的事实变体（"失败必达"路径 1，2026-10 事故修复）。
  *
@@ -50,7 +53,7 @@ function captureEvents(): { events: Array<Record<string, unknown>>; restore: () 
   return { events, restore: () => { console.info = original; } };
 }
 
-describe('离线全链 e2e：资源耗尽终稿（事实变体）', () => {
+describe('[L4 集成] 离线全链 e2e：资源耗尽终稿（事实变体）', () => {
   it('worker 提交过计划后撞墙钟：终稿点出已执行操作（底账结构化事实），分类三处留痕', async () => {
     const worker = {
       // 复刻真实驱动的 deadline 契约：睡到 deadline+ε 再**返回**（不是抛）——

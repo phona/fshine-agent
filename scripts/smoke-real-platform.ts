@@ -8,9 +8,9 @@
  * "有没有真查/是不是平台来的/像不像人话"。
  *
  * 用法（纪律同探针：StepCode 衍生的 shell 会带 harness 的 LLM_*，Node --env-file
- * 不覆盖已存在变量，必须先剥；真实平台还须剥 DZ_EXECUTOR/FSHINE_REAL_COMMIT）：
+ * 不覆盖已存在变量，必须先剥；真实平台还须剥 EXECUTION_EXECUTOR/FSHINE_REAL_COMMIT）：
  *   env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL \
- *       -u DZ_EXECUTOR -u FSHINE_REAL_COMMIT \
+ *       -u EXECUTION_EXECUTOR -u FSHINE_REAL_COMMIT \
  *       node --env-file=/tmp/env-real --import tsx scripts/smoke-real-platform.ts
  * 自检（不碰平台：只验环境三闸 + 断言尺子在好坏两种Fixture上各自该响的响、该静的音）：
  *   同上命令追加 --check
@@ -23,10 +23,10 @@
  *     端点抖动数据并停（模型端点不稳是已登记的 watch，D-074 同篇）。
  *
  * 与探针的状态隔离差异（刻意为之）：
- *   · DZ_PLAN_STATE 隔离到临时文件——不与常驻生产服务器（mock 模式）互写 plans.json；
- *   · DZ_AUDIT_PATH 保持生产共享——"审计共享"是今日真实平台实测确认的事实，
+ *   · EXECUTION_PLAN_STATE 隔离到临时文件——不与常驻生产服务器（mock 模式）互写 plans.json；
+ *   · EXECUTION_AUDIT_PATH 保持生产共享——"审计共享"是今日真实平台实测确认的事实，
  *     跑完核对 .runtime/invocations.jsonl 新增条目；
- *   · DZ_RATE_LIMIT_STATE 保持生产共享——"限流生产桶"同今日实测事实，冒烟节奏
+ *   · EXECUTION_RATE_LIMIT_STATE 保持生产共享——"限流生产桶"同今日实测事实，冒烟节奏
  *     天然低于限额，被限就是信号（RATE_LIMITED 落审计，≥2 次记异常）；
  *   · dbPath 用临时目录——绝不碰生产 data/agent.db。
  *
@@ -77,7 +77,7 @@ interface Turn {
   reply: string;
   ms: number;
   notices: string[];
-  /** 本轮实际产生的平台调用数（DZ_PLAN_STATE 的 actual.calls 增量）。 */
+  /** 本轮实际产生的平台调用数（EXECUTION_PLAN_STATE 的 actual.calls 增量）。 */
   calls: number;
 }
 
@@ -130,18 +130,18 @@ function wecomText(userid: string, content: string): { headers: { req_id: string
 let planStateBackup: string | undefined;
 
 function isolatePlanState(stateDir: string): void {
-  planStateBackup = process.env['DZ_PLAN_STATE'];
-  process.env['DZ_PLAN_STATE'] = path.join(stateDir, 'plans.json');
+  planStateBackup = process.env['EXECUTION_PLAN_STATE'];
+  process.env['EXECUTION_PLAN_STATE'] = path.join(stateDir, 'plans.json');
 }
 
 function restorePlanState(): void {
-  if (planStateBackup === undefined) delete process.env['DZ_PLAN_STATE'];
-  else process.env['DZ_PLAN_STATE'] = planStateBackup;
+  if (planStateBackup === undefined) delete process.env['EXECUTION_PLAN_STATE'];
+  else process.env['EXECUTION_PLAN_STATE'] = planStateBackup;
 }
 
 /** 计划底账里的累计平台调用数（隔离状态按会话累计，逐轮相减得本轮 calls）。 */
 function ledgerCalls(): number {
-  const file = process.env['DZ_PLAN_STATE'];
+  const file = process.env['EXECUTION_PLAN_STATE'];
   if (!file || !existsSync(file)) return 0;
   try {
     const state = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: Record<string, { actual?: { calls?: number } }> };
@@ -150,12 +150,12 @@ function ledgerCalls(): number {
 }
 
 /**
- * 平台审计文件：DZ_AUDIT_PATH 未设（冒烟集刻意不隔离）时即平台默认路径
+ * 平台审计文件：EXECUTION_AUDIT_PATH 未设（冒烟集刻意不隔离）时即平台默认路径
  * （17dz-platform/.runtime/invocations.jsonl，src/execution/audit.js 同源）。
  */
 function platformAuditFile(platformRoot: string): string {
-  return process.env['DZ_AUDIT_PATH']
-    ? path.resolve(process.env['DZ_AUDIT_PATH'])
+  return process.env['EXECUTION_AUDIT_PATH']
+    ? path.resolve(process.env['EXECUTION_AUDIT_PATH'])
     : path.join(platformRoot, '.runtime', 'invocations.jsonl');
 }
 
@@ -419,7 +419,7 @@ async function main(): Promise<void> {
 
   // ── 写安全三闸（boot 前）──
   const guards: string[] = [];
-  if (isPlatformMock()) guards.push('当前 DZ_EXECUTOR=mock——冒烟集只跑真实平台；mock 行为层全集请用探针 scripts/probe-real-agent.ts');
+  if (isPlatformMock()) guards.push('当前 EXECUTION_EXECUTOR=mock——冒烟集只跑真实平台；mock 行为层全集请用探针 scripts/probe-real-agent.ts');
   if (process.env['FSHINE_REAL_COMMIT'] === '1') guards.push('FSHINE_REAL_COMMIT=1 已置位——真平台 commit 双闸之一被打开，只读冒烟集拒跑');
   const capabilities = config.principals[AUTHORIZED_KEY]?.capabilities ?? ['read'];
   if (capabilities.some((c) => c !== 'read')) guards.push(`principal capabilities 含非只读项（${capabilities.join('/')}）——冒烟集拒跑`);
@@ -473,14 +473,14 @@ async function main(): Promise<void> {
     at: new Date().toISOString(),
     mode: 'real-platform-smoke',
     env: {
-      executor: process.env['DZ_EXECUTOR'] ?? '(unset=real)',
+      executor: process.env['EXECUTION_EXECUTOR'] ?? '(unset=real)',
       mock: isPlatformMock(),
       commitEnabled: isCommitEnabled(),
       capabilities,
       llm: { base: process.env['LLM_API_BASE_URL'] ?? '', model: process.env['LLM_MODEL'] ?? '' },
       planStateIsolated: true,
-      auditShared: !process.env['DZ_AUDIT_PATH'],
-      rateLimitShared: !process.env['DZ_RATE_LIMIT_STATE'],
+      auditShared: !process.env['EXECUTION_AUDIT_PATH'],
+      rateLimitShared: !process.env['EXECUTION_RATE_LIMIT_STATE'],
     },
     platformRoot,
     script: [...SCRIPT],

@@ -43,7 +43,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { GATEWAY_INVOCATION, PLATFORM_OPERATIONS } from './platform-contract';
+import { GATEWAY_INVOCATION, PLATFORM_OPERATIONS, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -89,8 +89,9 @@ type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
  * 静默选一份信」的机制（D-011 根因）。机械锁：plan-teaching.test.ts 跨仓读平台 schema
  * 断言本示例合法，并断言两个源文件里除本函数外零第二种草案形状字面量。
  */
-export function planDraftExample(): string {
-  return `${GATEWAY_INVOCATION} plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}`;
+/** 计划草案示例：网关名由调用方注入（profile.gateway），未注入时走遗留缺省（接口文档 §2/§10）。旧无参调用保持与从前一字不差。 */
+export function planDraftExample(gateway?: string): string {
+  return `${resolveGatewayText(gateway)} plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}`;
 }
 
 /**
@@ -101,8 +102,8 @@ export function planDraftExample(): string {
  * 为唯一形状源，两种形态过同一份 payload 校验（parsePlanCallsPayload），不存在
  * 第二标准。
  */
-export function planFileExample(): string {
-  return `${GATEWAY_INVOCATION} plan --file <本轮工作区内的计划文件路径>`;
+export function planFileExample(gateway?: string): string {
+  return `${resolveGatewayText(gateway)} plan --file <本轮工作区内的计划文件路径>`;
 }
 
 /**
@@ -544,7 +545,18 @@ function show(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
-function render(code: string, actual?: unknown, correctForm?: string, params?: Readonly<Record<string, string | number>>): string {
+/**
+ * 静态表的网关名机械替换：表内文本只含遗留缺省网关名一处来源
+ * （GATEWAY_INVOCATION），注入 gateway 与它不同时，把整条渲染结果里的
+ * 该字符串替换为注入值。替换的是网关名这一个 token，不是业务措辞；
+ * 未注入或注入值不合法时保持原样（遗留缺省）。
+ */
+function applyGatewayText(text: string, gateway?: string): string {
+  if (!validateGatewayInvocation(gateway) || gateway === GATEWAY_INVOCATION) return text;
+  return text.split(GATEWAY_INVOCATION).join(gateway);
+}
+
+function render(code: string, actual?: unknown, correctForm?: string, params?: Readonly<Record<string, string | number>>, gateway?: string): string {
   const entry = entryOf(code);
   if ('text' in entry) {
     // 消息模板不是错误：给它传 actual/correctForm 是调用方误用，fail-loud——
@@ -557,18 +569,18 @@ function render(code: string, actual?: unknown, correctForm?: string, params?: R
     }
     // 声明了 params 的条目必须经参数出口渲染（漏传/多传/少传都 fail-loud，见 fillParams）；
     // 没声明的条目传参数同样是误用——它没有占位符，参数只会被静默丢掉。
-    if (entry.params) return fillParams(code, entry, params);
+    if (entry.params) return applyGatewayText(fillParams(code, entry, params), gateway);
     if (params !== undefined) {
       throw Object.assign(
         new Error(`${UNKNOWN_ERROR_CODE}: 该消息模板未声明占位符，不接受参数: ${code}（要加动态部分先在本表条目里声明 params）`),
         { code: UNKNOWN_ERROR_CODE, unknownCode: code },
       );
     }
-    return entry.text;
+    return applyGatewayText(entry.text, gateway);
   }
   const actualText = actual === undefined ? show(entry.actual) : show(actual);
   const form = correctForm === undefined ? entry.correctForm : correctForm;
-  return `${code}: 期望 ${entry.expected}；实际 ${actualText}；正确形态 ${form}`;
+  return applyGatewayText(`${code}: 期望 ${entry.expected}；实际 ${actualText}；正确形态 ${form}`, gateway);
 }
 
 /** `{name}` 占位符：声明过的名字一个不能少，没声明的名字给了也是误用。 */
@@ -612,16 +624,16 @@ function fillParams(code: string, entry: MessageCodeEntry, params?: Readonly<Rec
 }
 
 /** 统一入口（镜像 17dz 的 messageFor）：错误类走三要素，模板类走文本。 */
-export function messageFor(code: string, actual?: unknown, correctForm?: string): string {
-  return render(code, actual, correctForm);
+export function messageFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): string {
+  return render(code, actual, correctForm, undefined, gateway);
 }
 
 /**
  * 消息模板类码的文本（错误类码误用此处同样 fail-loud，由 render 分流）。
  * 条目声明了 params 时才接受第二个参数：动态值（动词/路径/字节数）是数据，机械填充。
  */
-export function messageTextFor(code: string, params?: Readonly<Record<string, string | number>>): string {
-  return render(code, undefined, undefined, params);
+export function messageTextFor(code: string, params?: Readonly<Record<string, string | number>>, gateway?: string): string {
+  return render(code, undefined, undefined, params, gateway);
 }
 
 /** 选择类澄清候选清单的渲染上限：平台一次可能返回很多相近名，全列会把澄清问题变成一张长清单。 */
@@ -754,13 +766,13 @@ export function platformUnavailableTextFor(minutes: number): string {
 }
 
 /** throw 站点专用：三要素消息 + 原码挂回 error.code（调用方继续认码）。 */
-export function errorFor(code: string, actual?: unknown, correctForm?: string): Error {
-  return Object.assign(new Error(messageFor(code, actual, correctForm)), { code });
+export function errorFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): Error {
+  return Object.assign(new Error(messageFor(code, actual, correctForm, gateway)), { code });
 }
 
 /** ToolUserError 站点专用：消息来自表，原码挂回 error.code（语义 = 该文本成本轮回复）。 */
-export function toolUserErrorFor(code: string, actual?: unknown, correctForm?: string): ToolUserError {
-  return Object.assign(new ToolUserError(messageFor(code, actual, correctForm)), { code });
+export function toolUserErrorFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): ToolUserError {
+  return Object.assign(new ToolUserError(messageFor(code, actual, correctForm, gateway)), { code });
 }
 
 /**

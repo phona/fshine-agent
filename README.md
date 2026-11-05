@@ -45,7 +45,7 @@ npm run smoke:commit:mock        # mock 保护下两步写链路冒烟（非 moc
 
 ## mock 联调（平台侧 fake 保护）
 
-`.env` 设 `DZ_EXECUTOR=mock`（默认已设）后，幻账平台执行器被替换为 mock
+`.env` 设 `EXECUTION_EXECUTOR=mock`（默认已设）后，幻账平台执行器被替换为 mock
 应答器：不开浏览器、不触网，gate 矩阵/commit 令牌/审计照真生效，落账写进
 mock 状态文件（默认 `<17dz-platform>/.runtime/mock-state.json`，删文件即重置）。
 此模式下落账全链路默认放开（写的是假状态）；切回真平台后落账默认拒绝，
@@ -53,7 +53,7 @@ mock 状态文件（默认 `<17dz-platform>/.runtime/mock-state.json`，删文�
 
 ```bash
 npm run acceptance                 # mock 保护下全量验收（含 5.x 写链路、6.x 污染用例）
-DZ_EXECUTOR= npm run acceptance  # 临时切真平台只读回归（真环境变量优先于 .env）
+EXECUTION_EXECUTOR= npm run acceptance  # 临时切真平台只读回归（真环境变量优先于 .env）
 ```
 
 本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。

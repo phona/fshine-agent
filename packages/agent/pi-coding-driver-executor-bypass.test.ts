@@ -22,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TrustedContext } from '@fshine/contracts';
-import { createPiCodingTurnDriver, platformExecutorBypassed, type PlatformExecutorBypassedEvent } from './src/pi-coding-driver';
+import { createPiCodingTurnDriver, platformExecutorBypassed, WORKER_WIND_DOWN_NUDGE, type PlatformExecutorBypassedEvent } from './src/pi-coding-driver';
 import type { DriverMessage, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver';
 import type { PlanCliRunner } from './src/plan-runtime';
 
@@ -33,14 +33,18 @@ type FakeTurn = { bash?: string[]; write?: Array<{ path: string; content?: strin
 const OK_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"completed","data":{"ok":true},"error":null}';
 
 const fake = vi.hoisted(() => {
-  type SessionRecord = { turns: FakeTurn[]; rounds: number; messages: unknown[] };
+  type SessionRecord = { turns: FakeTurn[]; rounds: number; messages: unknown[]; steers: string[] };
   const records: SessionRecord[] = [];
   let script: FakeTurn[] = [];
+  // 假 steer 抛错计数：前 N 次 steer 抛错，之后正常记录。setScript 时归零，
+  // 故不影响本文件其他不设抛错的用例。
+  let steerThrowRemaining = 0;
   return {
     records,
-    setScript: (turns: FakeTurn[]) => { script = turns; },
+    setScript: (turns: FakeTurn[]) => { script = turns; steerThrowRemaining = 0; },
+    setSteerThrowCount: (n: number) => { steerThrowRemaining = n; },
     makeSession: () => {
-      const record: SessionRecord = { turns: script, rounds: 0, messages: [] };
+      const record: SessionRecord = { turns: script, rounds: 0, messages: [], steers: [] };
       records.push(record);
       const state: { errorMessage?: string; messages: unknown[] } = {
         errorMessage: undefined,
@@ -51,6 +55,18 @@ const fake = vi.hoisted(() => {
         state,
         beforeToolCall: undefined as unknown,
         abort: () => {},
+        // 步数帽 wind-down 经 session.agent.steer 投递：假会话只记录收到的
+        // 内容，不驱动新的模型轮次——断言只认"送过一次、内容是生产那条 nudge"。
+        // 抛错路径用例（见文末）通过 setSteerThrowCount 让前 N 次 steer 抛错，
+        // 以走生产代码的 pending 补发分支。
+        steer: (message: unknown) => {
+          if (steerThrowRemaining > 0) {
+            steerThrowRemaining -= 1;
+            throw new Error('fake steer boom');
+          }
+          const content = (message as { content?: unknown } | null)?.content;
+          record.steers.push(typeof content === 'string' ? content : String(message));
+        },
         continue: async () => {
           const turn = record.turns[Math.min(record.rounds, record.turns.length - 1)];
           record.rounds += 1;
@@ -98,7 +114,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_bypass', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_bypassed', version: 3, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    planId: 'plan_bypassed', version: 3, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 },
     delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);
@@ -253,5 +269,147 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ localCalls: 1, planGateCalls: 0, auxiliaryCalls: 1 });
+  });
+});
+
+describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind-down', () => {
+  /**
+   * 钉住 91bf841 修的那条接线，不是它的复写：gate-call-counts.test.ts 只把
+   * recordAllowedBashCall + createStepCapWindDown 两个生产函数按顺序调一遍，
+   * 组合行是测试自己写的——把 driver 的 onAllowedBash 改回缺陷形状（wind-down
+   * 那一次不计分项 / executor 双计进 auxiliary），那套用例照样全绿。本块用真
+   * driver + 脚本化假会话走生产接线：stepCap=2，第 3 次放行恰好是 wind-down
+   * 点；断言同时认三件事——steer 只送一次且是生产那条 nudge、wind-down 那次
+   * local 照旧计入披露、回合结果（execution / footprint / text）一字不变。
+   */
+  const METADATA_BASH = 'bin/17dz operation list --json';
+
+  async function runWithStepCap(script: FakeTurn[], steerThrowCount = 0): Promise<{
+    alerts: PlatformExecutorBypassedEvent[];
+    steers: string[];
+    result: TurnDriverResult;
+  }> {
+    const { cwd } = await makeDriver();
+    const alerts: PlatformExecutorBypassedEvent[] = [];
+    const driver = createPiCodingTurnDriver({
+      env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
+      agentDir: path.join(cwd, '.fshine-agent'),
+      operationLabels: new Map(),
+      planCliRunner: activatingPlanRunner,
+      onExecutorBypassed: (event) => alerts.push(event),
+      stepCap: 2,
+    });
+    fake.setScript(script);
+    fake.setSteerThrowCount(steerThrowCount);
+    const before = fake.records.length;
+    const result = await driver.run(runInput(cwd));
+    return { alerts, steers: fake.records[before]?.steers ?? [], result };
+  }
+
+  it('第 3 次放行是本轮唯一 local：wind-down 只送一次，且该 local 照旧披露', async () => {
+    const { alerts, steers, result } = await runWithStepCap([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ]);
+
+    expect(steers).toEqual([WORKER_WIND_DOWN_NUDGE]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toEqual({
+      requestId: 'req_bypass',
+      taskId: 'task_bypass',
+      localCalls: 1,
+      planGateCalls: 0,
+      auxiliaryCalls: 2,
+      producedFiles: ['tmp/req_bypass/run_transform.py'],
+    });
+    // 披露只是披露：回合结果一字不变。
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 3 });
+    expect(result.footprint).toBe('3 次 bin/17dz 调用');
+    expect(result.text).toBe('表已经算好了。');
+  });
+
+  it('wind-down 之后计数继续、steer 不重复：第 4 次 local 照旧计入', async () => {
+    const { alerts, steers, result } = await runWithStepCap([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ]);
+
+    expect(steers).toEqual([WORKER_WIND_DOWN_NUDGE]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ localCalls: 2, planGateCalls: 0, auxiliaryCalls: 2 });
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 4 });
+    expect(result.text).toBe('表已经算好了。');
+  });
+});
+
+describe('步数帽 steer 失败补发路径（真 driver）：首次 steer 抛错时 pending 在下一次放行补发', () => {
+  /**
+   * 钉住 pi-coding-driver.ts 的 pending 补发块（不是成功路径的复写）：
+   * 29b78f0 的假会话 steer 只记录不抛错，只走成功路径；删掉整个 pending
+   * 补发块时那套用例照样全绿。本块让第 3 次放行（wind-down 点）的 steer
+   * 抛错一次：生产代码应置 pending、不中断回合，第 4 次放行时直接补发
+   * （不再经已 latch 的跟踪器、不在同一轮内立即重发），最终 steer 恰好
+   * 送达一次、内容是生产那条 nudge，回合结果一字不变。
+   */
+  const METADATA_BASH = 'bin/17dz operation list --json';
+
+  async function runWithThrow(script: FakeTurn[], throwCount: number): Promise<{
+    alerts: PlatformExecutorBypassedEvent[];
+    steers: string[];
+    result: TurnDriverResult;
+  }> {
+    const { cwd } = await makeDriver();
+    const alerts: PlatformExecutorBypassedEvent[] = [];
+    const driver = createPiCodingTurnDriver({
+      env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
+      agentDir: path.join(cwd, '.fshine-agent'),
+      operationLabels: new Map(),
+      planCliRunner: activatingPlanRunner,
+      onExecutorBypassed: (event) => alerts.push(event),
+      stepCap: 2,
+    });
+    fake.setScript(script);
+    fake.setSteerThrowCount(throwCount);
+    const before = fake.records.length;
+    const result = await driver.run(runInput(cwd));
+    return { alerts, steers: fake.records[before]?.steers ?? [], result };
+  }
+
+  it('首次 steer 抛错：第 4 次放行补发成功，steer 恰 1 次，回合结果不变', async () => {
+    const { alerts, steers, result } = await runWithThrow([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ], 1);
+
+    expect(steers).toEqual([WORKER_WIND_DOWN_NUDGE]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({ localCalls: 2, planGateCalls: 0, auxiliaryCalls: 2 });
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 4 });
+    expect(result.text).toBe('表已经算好了。');
+  });
+
+  it('清 pending 钉子：第 5 次放行不再补发（删清位行时本条变红）', async () => {
+    // M2（第四轮）：前一个用例只有 4 次放行，删掉
+    // stepCapWindDownPending = false 后第 4 次补发成功、pending 仍 true，
+    // 但因没有第 5 次放行，steer 断言依旧通过——清位行无钉子。
+    // 本条加第 5 次放行：清位后第 5 次不再补发，steer 仍恰 1 次；
+    // 不清位时第 5 次会补发第二次，steer 变 2 次而变红。
+    const { alerts, steers, result } = await runWithThrow([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ], 1);
+
+    expect(steers).toEqual([WORKER_WIND_DOWN_NUDGE]);
+    expect(alerts).toHaveLength(1);
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 5 });
+    expect(result.text).toBe('表已经算好了。');
+  });
+
+  it('补发时 steer 仍抛错：pending 保持待补发，不立即重发、不中断回合', async () => {
+    const { alerts, steers, result } = await runWithThrow([
+      { bash: [METADATA_BASH, METADATA_BASH, WRAPPER_BASH, WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+    ], 2);
+
+    // 两次 steer 都抛错（wind-down 一次 + 第 4 次补发一次），本轮已无
+    // 更多放行可触发再补发，故 steer 送达 0 次；回合本身不受影响。
+    expect(steers).toEqual([]);
+    expect(alerts).toHaveLength(1);
+    expect(result.text).toBe('表已经算好了。');
   });
 });

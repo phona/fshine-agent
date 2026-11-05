@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：并发多线程会话里的多步计划中断/恢复/跳过/确认门（覆盖增强）。共享替身见 ./harness.ts。
  *
@@ -36,17 +39,17 @@ import {
  * 三步续跑会让同一子任务的累计调用数一直越过高 weight 自动档：每一步重提计划都是 notify。
  * 这里把同一任务的 notify 上限放宽（平台侧默认 2），否则最后一步会被升级成"必须等用户
  * 确认"——那是单步试探收口的规则，不是长任务拆解该有的形状（与 turn-loop-plan-steps 同因）。
- * confirm 门槛本身由累计重量触发（DZ_PLAN_CONFIRM_CALLS=20），不受此上限影响，
+ * confirm 门槛本身由累计重量触发（EXECUTION_PLAN_CONFIRM_CALLS=20），不受此上限影响，
  * 用例 4 的确认门因此照旧能观察到。
  */
-beforeAll(() => { process.env['DZ_PLAN_MAX_NOTIFY'] = '6'; });
-afterAll(() => { delete process.env['DZ_PLAN_MAX_NOTIFY']; });
+beforeAll(() => { process.env['EXECUTION_PLAN_MAX_NOTIFY'] = '6'; });
+afterAll(() => { delete process.env['EXECUTION_PLAN_MAX_NOTIFY']; });
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
 const SESSION_ID = 'wecom:e2e_user';
 
-/** 三个期间的查询计划：3 次调用，越过 harness 的 DZ_PLAN_AUTO_CALLS=2 触发通知。 */
+/** 三个期间的查询计划：3 次调用，越过 harness 的 EXECUTION_PLAN_AUTO_CALLS=2 触发通知。 */
 function threePeriodPlan(account: string) {
   return [1, 2, 3].map((month) => ({ operation: 'finance.query-receivables', args: ['--query', account, '--period', `20260${month}`] }));
 }
@@ -103,7 +106,7 @@ function capturePlanLog() {
   };
 }
 
-describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/确认门', () => {
+describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/确认门', () => {
   it('7.1 多步计划被打断后跨回合恢复：同任务续跑、步号接得上、账本跨回合累计', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([
@@ -392,7 +395,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       { end: true },
       // 第 3 步：用户再说"继续"后，Main Agent 才续派最后一步。
       // 它自己也会撞上 confirm 门槛——第 2 步确认后真跑了 21 次，累计重量早已越过
-      // DZ_PLAN_CONFIRM_CALLS=20，"闸口做全局预算"在这条链上的形状就是每一步都要再问一次。
+      // EXECUTION_PLAN_CONFIRM_CALLS=20，"闸口做全局预算"在这条链上的形状就是每一步都要再问一次。
       { plan: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }], stopAtConfirm: true },
       { execute: [{ operation: 'finance.query-receivables', args: ['--query', '新兴建材'] }] },
       { text: '新兴建材当前期间应收余额为 700 元。' },
@@ -440,7 +443,7 @@ describe('离线全链 e2e：并发会话里的多步计划中断/恢复/跳过/
       // 实测（2026-09）：确认轮的回复只整理那一个已执行步骤（宿主拼装 + 模型转述），
       // 第 3 步不会自己跑；用户再说一句"继续"后 Main Agent 申报第 3 步才派出去。
       // 派得出去但立刻又停在同一道门前：第 2 步确认后真跑了 21 次，累计重量早已越过
-      // DZ_PLAN_CONFIRM_CALLS=20，"闸口做全局预算"在这条链上的形状就是每一步都要再问一次。
+      // EXECUTION_PLAN_CONFIRM_CALLS=20，"闸口做全局预算"在这条链上的形状就是每一步都要再问一次。
       const askedAgain = await send('继续核对最后一步');
       expect(askedAgain).toContain('确认继续');
       expect(askedAgain).not.toContain('700 元');

@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：结构化歧义/未找到 → 宿主机械组装澄清（2026-09-27 Stage 3 事故根治包）。
  * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
@@ -37,7 +40,7 @@ function recordingWorker(script: WorkerStep[]) {
 const QIANLONG_CLARIFICATION = { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] };
 const EXPECTED_QUESTION = clarificationTextFor(QIANLONG_CLARIFICATION.code, QIANLONG_CLARIFICATION);
 
-describe('离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () => {
+describe('[L4 集成] 离线全链 e2e：结构化歧义 → 宿主机械组装澄清', () => {
   it('C1 单步委派撞歧义：澄清问题由宿主组装，技术报告不上屏；用户回答后真实查询落地', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：会话实体——实体门禁的第四来源（任务 1 标定修复）。
  * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
@@ -36,7 +39,7 @@ function recordingWorker(script: WorkerStep[]) {
   };
 }
 
-describe('离线全链 e2e：会话实体（实体门禁第四来源）', () => {
+describe('[L4 集成] 离线全链 e2e：会话实体（实体门禁第四来源）', () => {
   it('SE-e2e-1 事故形状：执行过的账套 + 本轮只发期间编码 → 门禁放行、查询落地', async () => {
     const before = totalActualCalls();
     const worker = recordingWorker([

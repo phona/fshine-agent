@@ -13,9 +13,9 @@
  * ——W3 把"smoke:commit:mock + acceptance 5.x 写链路 mock 下全绿"定为波次唯一验收，
  * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。旧脚本自带的 mock 保险丝原样保留。
  *
- * 保险丝：检测不到 DZ_EXECUTOR=mock 直接拒跑——本脚本会真实走落账，
+ * 保险丝：检测不到 EXECUTION_EXECUTOR=mock 直接拒跑——本脚本会真实走落账，
  * 绝不允许误打真平台。
- * 用法：npm run smoke:commit:mock（=.env 需含 DZ_EXECUTOR=mock）
+ * 用法：npm run smoke:commit:mock（=.env 需含 EXECUTION_EXECUTOR=mock）
  */
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -91,7 +91,7 @@ async function proposalCreateOperation(platformRoot: string): Promise<string> {
 
 async function main(): Promise<void> {
   if (!isPlatformMock()) {
-    console.error('拒跑：DZ_EXECUTOR=mock 未设置——本冒烟走真实落账流程，只允许在 mock 保护下执行。');
+    console.error('拒跑：EXECUTION_EXECUTOR=mock 未设置——本冒烟走真实落账流程，只允许在 mock 保护下执行。');
     process.exit(1);
   }
   const config = loadConfig({ env: process.env });

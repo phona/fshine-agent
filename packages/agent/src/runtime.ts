@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
-import { RUN_17DZ_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
+import { RUN_EXECUTION_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import type { CandidateExtractor } from './memory-consolidator';
@@ -1065,7 +1065,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             // （需要澄清、说明能力边界时同样走这条路径）。
             return { recorded: 'conversation' };
           }
-          if (tool === RUN_17DZ_TASK_TOOL) {
+          if (tool === RUN_EXECUTION_TASK_TOOL) {
             return deps.platformTask.run({
               request: String(args['request'] ?? ''),
               ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),

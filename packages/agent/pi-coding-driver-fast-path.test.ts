@@ -124,7 +124,7 @@ const ENTITY_SOURCES = { currentMessage: '核对对象甲 202609 的应收余额
 const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
   if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_fastpath', planId: null, version: null, status: 'none' }), stderr: '' };
   if (args[1] === 'evaluate') return { code: 0, stdout: JSON.stringify({
-    planId: 'plan_activated', version: 7, decision: 'execute', estimate: { calls: 1, seconds: 10 },
+    planId: 'plan_activated', version: 7, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 },
     delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active',
   }), stderr: '' };
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);

@@ -4,7 +4,7 @@ import { parseOperationArgSpecs, parseOperationSemantics, type OperationArgsSpec
 
 const approved = {
   planId: 'plan_123', version: 2, decision: 'notify',
-  estimate: { calls: 9, seconds: 540 },
+  estimate: { calls: 9, seconds: 540, weight: 2 },
   delta: { addedCalls: 9, addedSeconds: 540, calls: [] },
   cumulative: { calls: 9, seconds: 540 }, reasonCode: 'scope_expanded', status: 'pending_notice',
   noticeText: '账套「A」；期间2026年09月；新增9次查询，预计耗时约9分钟。',
@@ -94,10 +94,10 @@ describe('platform-backed execution plan runtime', () => {
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
-    expect(createPlanScopedWorkerEnv({ DZ_PLAN_ACTIVATION_SECRET: 'secret', DZ_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
-      .toEqual({ DZ_REQUIRE_PLAN: '1', DZ_PLAN_ID: 'plan_host', OTHER: 'ok' });
-    expect(createPlanScopedWorkerEnv({ DZ_PLAN_ACTIVATION_SECRET: 'secret' }, null))
-      .toEqual({ DZ_REQUIRE_PLAN: '1' });
+    expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret', EXECUTION_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
+      .toEqual({ EXECUTION_REQUIRE_PLAN: '1', EXECUTION_PLAN_ID: 'plan_host', OTHER: 'ok' });
+    expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret' }, null))
+      .toEqual({ EXECUTION_REQUIRE_PLAN: '1' });
   });
 
   it('restores only the host-selected active plan when resuming a task', async () => {
@@ -152,7 +152,7 @@ describe('platform-backed execution plan runtime', () => {
     expect(JSON.parse(requests[0]!.input!)).toEqual({ requestId: 'request_9', calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }] });
     expect(requests[1]!.args).toEqual(['plan', 'activate', '--stdin']);
     expect(requests[1]!.input).toMatch(/"evidence":"notification-delivered"/);
-    expect(requests[1]!.env?.DZ_PLAN_ACTIVATION_SECRET).toBe('test-host-secret');
+    expect(requests[1]!.env?.EXECUTION_PLAN_ACTIVATION_SECRET).toBe('test-host-secret');
     expect(requests[1]!.args.join(' ')).not.toContain('test-host-secret');
   });
 
@@ -204,7 +204,7 @@ describe('platform-backed execution plan runtime', () => {
 
   const stopped = {
     planId: 'plan_stop', version: 3, decision: 'stop',
-    estimate: { calls: 60, seconds: 3600 }, delta: { addedCalls: 60, addedSeconds: 3600 },
+    estimate: { calls: 60, seconds: 3600, weight: 2 }, delta: { addedCalls: 60, addedSeconds: 3600 },
     cumulative: { calls: 120, seconds: 7200 }, reasonCode: 'HARD_LIMIT', status: 'stopped',
     noticeText: '累计查询已达本任务硬上限。',
   } as const;

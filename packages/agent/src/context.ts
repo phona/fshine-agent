@@ -24,8 +24,12 @@ import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
-import { gatewayExecPath, parseEnvelope } from './platform-contract';
+import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
+import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHandoverFile, type HandoverExecutedCall, type HandoverReadCode, type HandoverReadResult, type TaskHandover } from './task-handover';
+import { loadProposalSchema } from './operation-labels';
+import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
+import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
 import type {
@@ -47,7 +51,7 @@ import {
   type PlatformExecutionLease,
 } from './platform-execution-gate';
 
-export const RUN_17DZ_TASK_TOOL = 'run_17dz_task';
+export const RUN_EXECUTION_TASK_TOOL = 'run_17dz_task';
 
 /**
  * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
@@ -74,7 +78,7 @@ export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
  */
 export const DELEGATION_MODEL_TRANSIENT_FAILURE = messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE');
 
-export const RUN_17DZ_TASK_DESCRIPTION = [
+export const RUN_EXECUTION_TASK_DESCRIPTION = [
   '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
   '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
   '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
@@ -211,6 +215,61 @@ export interface PreparedContextTaskRun {
   execute(options: PreparedContextTaskRunExecution): Promise<SubagentTaskResult>;
 }
 
+/**
+ * Main 对交接读取的分级恢复结论（接口文档 §11，异常码即判据）：
+ * - handover：交接可用，按交接续跑。
+ * - transcript_only：交接从未写成（handover_missing），只凭转录续跑；新请求本身就是下一步。
+ * - transcript_rebuilt：交接损坏族（解析失败 / 版本不符 / 形状非法），文件内容一律丢弃，
+ *   只凭转录（workerMessages / 结果原文 / 已执行调用清单）重建；已确认意图与结果不依赖
+ *   交接文件——意图住在 changeIntents 库、结果住在任务条目，转录在场时它们不受交接丢失影响。
+ * - blocked：交接损坏且转录也无法重建（转录消息、结果原文、已执行调用清单全空），
+ *   确实恢复不了、推进不了，才进入人工介入；这是人工介入的唯一条件，可恢复的损坏绝不推给人工。
+ * - fresh：新任务，无续跑可言。
+ */
+export interface HandoverRecovery {
+  code: HandoverReadCode | 'handover_fresh';
+  level: 'handover' | 'transcript_only' | 'transcript_rebuilt' | 'blocked' | 'fresh';
+  /** 损坏族文件内容是否已被丢弃（ok / missing / fresh 时为 false）。 */
+  discarded: boolean;
+  /** 续跑时已有的转录消息条数（重建依据的量，不是质量保证）。 */
+  transcriptMessages: number;
+  canProceed: boolean;
+  blocked: boolean;
+  /** blocked 时缺的东西（needs 的 missing 原样来源）；非 blocked 时为空。 */
+  missing: string[];
+}
+
+export function resolveHandoverRecovery(input: {
+  existing: PlatformTaskRecord | null;
+  read: HandoverReadResult;
+}): HandoverRecovery {
+  const { existing, read } = input;
+  if (!existing) {
+    return { code: 'handover_fresh', level: 'fresh', discarded: false, transcriptMessages: 0, canProceed: true, blocked: false, missing: [] };
+  }
+  const transcriptMessages = existing.workerMessages.length;
+  const transcriptAvailable = transcriptMessages > 0
+    || Boolean(existing.resultText?.trim())
+    || (existing.calls?.length ?? 0) > 0;
+  if (read.code === 'handover_ok') {
+    return { code: read.code, level: 'handover', discarded: false, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  if (read.code === 'handover_missing') {
+    return { code: read.code, level: 'transcript_only', discarded: false, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  // 损坏族：文件内容一律丢弃；转录在场就重建，不在场才 blocked。
+  if (transcriptAvailable) {
+    return { code: read.code, level: 'transcript_rebuilt', discarded: true, transcriptMessages, canProceed: true, blocked: false, missing: [] };
+  }
+  const missing: string[] = [];
+  if (transcriptMessages === 0) missing.push('转录消息');
+  if (!existing.resultText?.trim()) missing.push('任务结果原文');
+  if ((existing.calls?.length ?? 0) === 0) missing.push('已执行调用清单');
+  missing.push('下一步的确定依据（交接文件已损坏且无转录可重建）');
+  missing.push('待确认提案状态（交接丢失后无法确认本任务是否已有待确认提案）');
+  return { code: read.code, level: 'blocked', discarded: true, transcriptMessages, canProceed: false, blocked: true, missing };
+}
+
 interface ContextTaskPreparationState {
   args: ContextTaskRunArgs;
   ctx: ContextTaskExecutionContext;
@@ -221,6 +280,9 @@ interface ContextTaskPreparationState {
   workerRequest: string;
   messages: DriverMessage[];
   stepLabel: string;
+  /** Host-written handover read on continue (null on a fresh task or a missing/corrupt file). */
+  handover: TaskHandover | null;
+  handoverRecovery: HandoverRecovery;
 }
 
 export type { SubagentNeeds };
@@ -250,6 +312,14 @@ export interface ProposalCommitResult {
   error?: string;
   /** 提案在平台侧已不可用：给用户确定性解释，不落账、不谎称执行失败。 */
   unavailable?: ProposalUnavailableKind;
+  /**
+   * 已落账但读回不足（Phase 2）：平台已把提案标为 committed（不可二次提交），
+   * 但落账后读回未达提案要求。宿主必须报独立终态，绝不报已完成，也绝不
+   * 按普通失败处理（普通失败意味着一次写入都没发生，那是假话）。
+   */
+  committedUnverified?: boolean;
+  /** 读回计数字段（平台信封原样搬运，仅用于终态报告的计数行）。 */
+  readBack?: ReadBackCounts;
 }
 
 export interface ContextTaskRunnerOptions {
@@ -301,6 +371,23 @@ export interface ContextTaskRunnerOptions {
    * 确认码命中后等待共享执行闸的上界（修复 2）。缺省 DEFAULT_CONFIRM_GATE_WAIT_MS。
    */
   confirmGateWaitMs?: number;
+  /**
+   * 写路径隔离复核回合（第 2 包已接线）：在提案创建成功、宿主发确认码
+   * 之前运行。输入给平台下发的提案 schema（接口文档 §5，真实下发值，
+   * 不再是 null）+ 域 dry-run 信封 + 平台渲染的 summaryText；输出只给
+   * 一致/不一致 + 字段。不一致时不发确认码。生产装配必须注入
+   * （`reviewProposalWithDriver(contextModelDriver)`）；未注入时
+   * fail-closed，直接失败并记 `proposal_review_required`，绝不记
+   * skipped 日志就继续——`proposal_review_skipped` 事件已删除。
+   */
+  proposalReviewTurn?: ProposalReviewTurn;
+  /**
+   * 提案 schema 取问器（接口文档 §5）：按 profile 的 root 与 gateway
+   * spawn `operation list --json`，取 proposal.create 行的
+   * `proposalSchema`。缺省用 `loadProposalSchema`；测试可塞替身。
+   * 返回 null / 非对象时提案创建直接失败（见下），不存在无 schema 路径。
+   */
+  proposalSchemaLoader?: (args: { platformRoot: string; gateway?: string }) => Promise<unknown | null>;
 }
 
 export interface ContextTaskExecutionContext {
@@ -354,6 +441,8 @@ interface InternalContextTaskRunner extends ContextTaskRunner {
  *   · confirm_executed：确认码命中待确认提案且落账完成；
  *   · confirm_cancelled：取消码命中待确认提案且作废完成；
  *   · confirm_failed：确认/落账链路失败（执行器未配置或落账未完成，意图置 failed）；
+ *   · confirm_committed_unverified：已落账但读回不足（Phase 2 独立终态，意图置
+ *     committed 以防二次提交，任务结局置 failed 以留人工核对口，绝不报已完成）；
  *   · confirm_held：确认收到但落账执行未启用，提案保持待确认（无状态变化）；
  *   · confirm_stale：码已终结，给出确定性解释（无状态变化）。
  */
@@ -361,6 +450,7 @@ export type ConfirmationOutcome =
   | 'confirm_executed'
   | 'confirm_cancelled'
   | 'confirm_failed'
+  | 'confirm_committed_unverified'
   | 'confirm_held'
   | 'confirm_stale';
 
@@ -369,7 +459,7 @@ export interface ConfirmationReply {
   outcome: ConfirmationOutcome;
 }
 
-export const RUN_17DZ_TASK_SCHEMA: Record<string, unknown> = {
+export const RUN_EXECUTION_TASK_SCHEMA: Record<string, unknown> = {
   type: 'object',
   required: ['request'],
   additionalProperties: false,
@@ -432,7 +522,7 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
 const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
 
 /**
- * 宿主直调平台网关的环境（serve 法域）：**显式剥 `DZ_REQUIRE_PLAN`**、显式声明 `DZ_SERVE`。
+ * 宿主直调平台网关的环境（serve 法域）：**显式剥 `EXECUTION_REQUIRE_PLAN`**、显式声明 `EXECUTION_SERVE`。
  *
  * 修 D-081：那个 mandate 是给 worker 的 bash 子进程的（每个 worker 命令都带它，见
  * createPlanScopedWorkerEnv），服务进程自己并不带。宿主直调是"服务端替 worker 办一件事"，
@@ -444,8 +534,8 @@ const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
  */
 export function hostGatewayEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.DZ_REQUIRE_PLAN;
-  env.DZ_SERVE = '1';
+  delete env.EXECUTION_REQUIRE_PLAN;
+  env.EXECUTION_SERVE = '1';
   return env;
 }
 
@@ -468,8 +558,10 @@ export function newGateSecret(): string {
  * 因此测试可以塞同一个 PlanCliRunner 替身。超时/ spawn 失败按非零退出 + stderr 交还，
  * 由调用方走"平台拒绝"分支——宿主不猜平台内部状态。
  */
-const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env }) => new Promise((resolve, reject) => {
-  const child = spawn(gatewayExecPath(platformRoot), args, {
+const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
+  // Profile 声明优先：调用方（createProposalViaGateway）把 resolve 出的
+  // profile.gateway 传进来；未声明时回退遗留常量（过渡期，见 platform-contract）。
+  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -503,6 +595,55 @@ function defaultHashCode(code: string): string {
  * 消费方据此降级，不猜不补。
  */
 const RESULT_TEXT_MAX_CHARS = 2_000;
+
+/**
+ * Host-written turn-end handover (Phase 2). Fields come only from host
+ * facts: execution proof (plan id/version), host-parsed plan calls, and
+ * the result text already shown. Worker prose is never a handover source.
+ * Merges with the previous handover's executed calls by exact key, so a
+ * resumed turn never double-counts a call it already made. Best-effort:
+ * a write failure only logs, it must not fail the turn (same discipline
+ * as the D-065 result-text writeback).
+ */
+function writeTurnHandover(
+  platformRoot: string,
+  taskId: string,
+  result: TurnDriverResult,
+  previous: TaskHandover | null,
+  kind: 'ok' | 'pending_plan' | 'needs_input' | 'proposal_created' | 'terminal',
+): void {
+  try {
+    const calls: HandoverExecutedCall[] = (result.planFacts?.calls ?? []).map((call) => ({
+      operation: call.operation,
+      args: call.args.filter((a): a is string => typeof a === 'string'),
+    }));
+    const merged = mergeExecutedCalls(previous?.executedCalls ?? [], calls);
+    const unfinished =
+      kind === 'pending_plan' ? ['等待用户确认计划']
+      : kind === 'needs_input' ? ['等待用户补充信息']
+      : kind === 'proposal_created' ? ['等待用户确认提案']
+      : [];
+    const nextAction =
+      kind === 'pending_plan' ? '用户确认计划后继续执行'
+      : kind === 'needs_input' ? '用户补充信息后继续'
+      : kind === 'proposal_created' ? '用户确认提案后继续'
+      : '任务已完成，无后续动作';
+    writeHandoverFile(platformRoot, taskId, {
+      version: HANDOVER_VERSION,
+      taskId,
+      planId: result.execution?.planId ?? previous?.planId ?? null,
+      planVersion: result.execution?.version ?? previous?.planVersion ?? null,
+      completedSteps: merged.map((call) => `${call.operation} ${call.args.join(' ')}`.trim()),
+      executedCalls: merged,
+      unfinishedSteps: unfinished,
+      nextAction,
+      lastResultSummary: result.text.trim().slice(0, 500),
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.warn(JSON.stringify({ event: 'task_handover_write_failed', taskId, error: error instanceof Error ? error.message.slice(0, 160) : String(error) }));
+  }
+}
 
 function withExecutionFacts(
   running: PlatformTaskRecord,
@@ -617,9 +758,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
   const tool: DiscoveredTool = {
-    name: RUN_17DZ_TASK_TOOL,
-    description: RUN_17DZ_TASK_DESCRIPTION,
-    inputSchema: RUN_17DZ_TASK_SCHEMA,
+    name: RUN_EXECUTION_TASK_TOOL,
+    description: RUN_EXECUTION_TASK_DESCRIPTION,
+    inputSchema: RUN_EXECUTION_TASK_SCHEMA,
   };
 
   /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
@@ -681,6 +822,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     ctx: ContextTaskExecutionContext,
     taskId: string,
     platformRoot: string,
+    gateway?: string,
   ): Promise<ProposalCreationOutcome> {
     // ① 写开放复核（平台侧声明，Generic，不依赖任何 operation 名）：判据与 worker 驱动的
     // 计划扫描（D-075）同源——部署层经 isCommitEnabled() 从平台状态派生。话术唯一来源在
@@ -689,7 +831,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const text = messageTextFor('WRITE_NOT_ENABLED');
       return { status: 'write_closed', userText: text, workerText: text };
     }
-    // ② 办调平台（serve 法域；env 显式剥 DZ_REQUIRE_PLAN——修 D-081：宿主直调不该被
+    // ② 办调平台（serve 法域；env 显式剥 EXECUTION_REQUIRE_PLAN——修 D-081：宿主直调不该被
     // worker 的计划门拦，那个 mandate 是给 worker 子进程的）。operation 名来自驱动拦截时
     // 从命令里取到的目标 token（平台 protocol 列已声明它扮演创建提案角色），宿主不另持
     // 一份业务 operation 名单。
@@ -697,6 +839,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       platformRoot,
       args: ['prepare', call.operation, call.payloadPath],
       env: hostGatewayEnv(),
+      ...(gateway ? { gateway } : {}),
     });
     const envelope = parseEnvelope(result.stdout);
     if (!envelope) {
@@ -710,6 +853,41 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       // 定位提案），也不能把一句空摘要发给用户。按失败处理，原因说清缺什么。
       if (!proposalId || !summaryText) {
         return { status: 'failed', workerText: `平台的 completed 信封缺少 proposalId/summaryText（proposalId=${proposalId || '空'}），未创建待确认任务。` };
+      }
+      // 写路径隔离复核（第 2 包）：在发确认码之前，独立回合比对
+      // 平台下发的提案 schema + 域 dry-run 信封 + summaryText。
+      // 缺复核驱动、缺 schema、schema 非法、不一致——一律不发确认码
+      // （fail-closed），且不作废、不重试、不兜底放行、不降级为只比摘要。
+      if (!options.proposalReviewTurn) {
+        console.info(JSON.stringify({ event: 'proposal_review_required', requestId: ctx.trusted.requestId, taskId, proposalId }));
+        return { status: 'failed', workerText: '提案隔离复核未接线，未发确认码，请重新发起录入。' };
+      }
+      const proposalSchemaLoader = options.proposalSchemaLoader ?? (async (args: { platformRoot: string; gateway?: string }) => loadProposalSchema(args.platformRoot, args.gateway));
+      const proposalSchema = await proposalSchemaLoader({ platformRoot, gateway });
+      if (!proposalSchema || typeof proposalSchema !== 'object' || Array.isArray(proposalSchema)) {
+        console.info(JSON.stringify({ event: 'proposal_review_schema_missing', requestId: ctx.trusted.requestId, taskId, proposalId }));
+        return { status: 'failed', workerText: '平台未下发提案 schema，未发确认码，请重新发起录入。' };
+      }
+      const verdict = await options.proposalReviewTurn({
+        proposalSchema,
+        dryRunEnvelope: envelope,
+        summaryText,
+      });
+      console.info(JSON.stringify({
+        event: 'proposal_review',
+        requestId: ctx.trusted.requestId,
+        taskId,
+        proposalId,
+        verdict: verdict.verdict,
+        fields: verdict.fields,
+        ...(verdict.blockedReason ? { blockedReason: verdict.blockedReason } : {}),
+      }));
+      if (verdict.verdict !== 'consistent') {
+        const fields = verdict.fields.length ? `（不一致字段：${verdict.fields.join('、')}）` : '';
+        return {
+          status: 'failed',
+          workerText: `提案隔离复核未通过${fields}，未发确认码，请重新发起录入。`,
+        };
       }
       const ci = options.changeIntents;
       if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
@@ -807,7 +985,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * （⑧）：读的是**此刻**的部署声明（isCommitEnabled 派生位），不是提案成立时的任何
    * 主体快照——主体授权归执行层后，"提案之后被收回"的形状只可能是部署声明翻转。
    * 两笔旧债的落点：
-   *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 DZ_REQUIRE_PLAN）；
+   *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 EXECUTION_REQUIRE_PLAN）；
    *   · D-082 由 writeBackTaskOutcome 承担（committed / confirm_failed 都回写终态）。
    */
   async function confirmProposalViaGateway(
@@ -895,6 +1073,20 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       }));
       await ci.updateStatus(rec.intentId, 'expired', { output: out.output.slice(0, 2000), ...(out.error ? { error: out.error } : {}) });
       return { text: PROPOSAL_UNAVAILABLE_TEXT[out.unavailable], outcome: 'confirm_stale' };
+    }
+    // 已落账但读回不足（Phase 2 独立终态）：必须在普通失败分支之前分流——
+    // 普通失败意味着一次写入都没发生，在这里是假话；报已完成更是假话。
+    // 意图置 committed（平台侧已终结，防二次提交），任务结局置 failed
+    // （人工核对未完成，任务不能算 done），用户文本是独立终态报告 + 核对入口。
+    if (out.committedUnverified) {
+      console.warn(JSON.stringify({ event: 'change_intent_commit_unverified', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
+      await ci.updateStatus(rec.intentId, 'committed', {
+        output: out.output.slice(0, 2000),
+        verified: false,
+        ...(out.error ? { error: out.error } : {}),
+      });
+      await writeBackTaskOutcome(rec.taskId, 'failed');
+      return { text: renderCommittedUnverifiedReply(out.readBack), outcome: 'confirm_committed_unverified' };
     }
     if (!out.ok) {
       console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, taskIdCorrelate: rec.sessionId }));
@@ -991,7 +1183,42 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       ...previousMessages,
       { role: 'user', content: workerRequest, timestamp: Date.now() } as unknown as DriverMessage,
     ];
-    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel };
+    // 续跑时宿主先读交接文件再环境核对：交接是任务层事实，不是会话层
+    // 触发式召回。Main 按异常码分级恢复（接口文档 §11，码即判据）：
+    // ok → 按交接续跑；missing → 只凭转录续跑；损坏族 → 丢弃文件内容、
+    // 只凭转录重建（转录在场就继续，不推给人工）；损坏且转录也无 →
+    // blocked（人工介入的唯一条件）。损坏的调用一律不合并、不做部分解析。
+    const read = existing ? readHandoverFileWithCode(profile.root, taskId) : { code: 'handover_missing' as const, handover: null };
+    const handover = read.handover;
+    const handoverRecovery = resolveHandoverRecovery({ existing, read });
+    if (existing && handover) {
+      console.info(JSON.stringify({
+        event: 'task_handover_resumed',
+        taskId,
+        planId: handover.planId,
+        planVersion: handover.planVersion,
+        executedCalls: handover.executedCalls.length,
+        unfinishedSteps: handover.unfinishedSteps.length,
+      }));
+    } else if (existing && handoverRecovery.level === 'blocked') {
+      console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId, code: handoverRecovery.code }));
+      console.info(JSON.stringify({ event: 'task_handover_blocked', taskId, code: handoverRecovery.code, missing: handoverRecovery.missing }));
+    } else if (existing && handoverRecovery.code !== 'handover_ok') {
+      if (handoverRecovery.code === 'handover_missing') {
+        console.info(JSON.stringify({ event: 'task_handover_missing', taskId }));
+      } else {
+        console.info(JSON.stringify({ event: 'task_handover_corrupt', taskId, code: handoverRecovery.code }));
+      }
+      console.info(JSON.stringify({
+        event: 'task_handover_recovered',
+        taskId,
+        code: handoverRecovery.code,
+        level: handoverRecovery.level,
+        discarded: handoverRecovery.discarded,
+        transcriptMessages: handoverRecovery.transcriptMessages,
+      }));
+    }
+    return { args, ctx, profile, existing, taskId, scratchDir, workerRequest, messages, stepLabel, handover, handoverRecovery };
   }
 
   const runner: InternalContextTaskRunner = {
@@ -1129,11 +1356,27 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       if (execution?.backgroundRunId) {
         ctx = { trusted: { ...ctx.trusted, backgroundRunId: execution.backgroundRunId } };
       }
-      const { profile, existing, taskId, scratchDir, messages, stepLabel } = preparedState;
+      const { profile, existing, taskId, scratchDir, messages, stepLabel, handover, handoverRecovery } = preparedState;
       const runSignal = execution?.signal ?? signal;
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED);
+      // 人工介入的唯一入口：交接损坏且转录也无法重建。此时不调 worker、
+      // 不写新交接、不发确认码、不重复提交，只把缺什么交还 Main（needs），
+      // 由 Main 决定是人工核对后重发、还是放弃本任务。任务条目原样不动，
+      // 以便人工核对时仍能看到旧转录与旧状态。
+      if (handoverRecovery.blocked) {
+        const needs: SubagentNeeds = {
+          missing: handoverRecovery.missing,
+          reason: `交接文件损坏（${handoverRecovery.code}）且转录无法重建，Main 无法确定本任务的已做部分与下一步。`,
+          suggestion: '请人工核对本任务是否已有待确认提案、以及希望的下一步，再决定是重新发请求还是放弃本任务；核对前不要重复提交。',
+        };
+        return {
+          taskId,
+          text: `本轮已停止委派：交接文件损坏（${handoverRecovery.code}），转录也无法重建，无法确定已做部分与下一步。缺：${handoverRecovery.missing.join('、')}。未调用 worker、未发确认码、未重复提交，需人工核对后再决定。`,
+          needs,
+        };
+      }
       const running: PlatformTaskRecord = {
         taskId,
         parentSessionId: ctx.trusted.sessionId,
@@ -1164,6 +1407,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             messages,
             cwd: profile.root,
             skillRoots: profile.skillRoots,
+            ...(profile.gateway ? { gateway: profile.gateway } : {}),
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,
@@ -1192,7 +1436,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             // 回答：拦截处必有 tool_calls 一行（tool = proposal_create，含拒绝原因），
             // 建成时有 proposal_created 事件 + delegation_span 的 proposal_created 结局。）
             ...(options.changeIntents ? {
-              onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root),
+              onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root, profile.gateway),
             } : {}),
           });
         // worker 侧真实 token 消耗（纯加法遥测）：对 worker 转录里 assistant 消息的
@@ -1224,6 +1468,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'terminal');
           console.info(JSON.stringify({
             event: 'delegation_span',
             requestId: ctx.trusted.requestId,
@@ -1258,6 +1503,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             requestId: ctx.trusted.requestId,
             userText: result.pendingPlan.userText,
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'pending_plan');
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'plan_confirmation_pending', ...workerUsage }));
           return { taskId, text: result.text, pendingPlan, ...(result.execution ? { execution: result.execution } : {}), ...(workerTokens ? { usage: workerTokens } : {}) };
         }
@@ -1271,6 +1517,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'needs_input');
           console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'needs_input', ...workerUsage }));
           return { taskId, text: result.text, needs: result.needs, ...(workerTokens ? { usage: workerTokens } : {}) };
         }
@@ -1284,6 +1531,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             workerMessages: result.messages as unknown[],
             updatedAt: new Date().toISOString(),
           });
+          writeTurnHandover(profile.root, taskId, result, handover, 'proposal_created');
           console.info(JSON.stringify({
             event: 'delegation_span',
             requestId: ctx.trusted.requestId,
@@ -1330,6 +1578,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           workerMessages: result.messages as unknown[],
           updatedAt: new Date().toISOString(),
         });
+        writeTurnHandover(profile.root, taskId, result, handover, 'ok');
         console.info(JSON.stringify({ event: 'delegation_span', requestId: ctx.trusted.requestId, taskId, durationMs: Date.now() - delegationStart, outcome: 'ok', ...workerUsage }));
         return final;
       } catch (error) {
@@ -1433,6 +1682,7 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
     workerTimeoutMs: configured.workerTimeoutMs,
     ...(configured.knowledgePaths ? { knowledgePaths: configured.knowledgePaths } : {}),
     ...(configured.sensitivePaths ? { sensitivePaths: configured.sensitivePaths } : {}),
+    ...(configured.gateway ? { gateway: configured.gateway } : {}),
   };
 }
 
@@ -1442,6 +1692,7 @@ interface ResolvedContextProfile {
   workerTimeoutMs?: number;
   knowledgePaths?: string[];
   sensitivePaths?: string[];
+  gateway?: string;
 }
 
 function isInside(root: string, candidate: string): boolean {

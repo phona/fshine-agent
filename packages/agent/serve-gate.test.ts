@@ -17,8 +17,8 @@ describe('isServeCliInvocation（首词规则）', () => {
   });
 
   it('拒绝 env 前缀注入（法域声明不可剥离）', () => {
-    expect(isServeCliInvocation('DZ_SERVE=0 bin/17dz commit src/voucher/scripts/fill.js --save')).toBe(false);
-    expect(isServeCliInvocation('env -u DZ_SERVE bin/17dz query x')).toBe(false);
+    expect(isServeCliInvocation('EXECUTION_SERVE=0 bin/17dz commit src/voucher/scripts/fill.js --save')).toBe(false);
+    expect(isServeCliInvocation('env -u EXECUTION_SERVE bin/17dz query x')).toBe(false);
   });
 
   it('拒绝非 bin/17dz 命令（含历史 serve.sh——平台已删除该入口）', () => {
@@ -208,7 +208,7 @@ describe('createServeGate（通用执行安全门）', () => {
     const metacharEvents = events.filter((e) => e.detail?.includes('软放行'));
     expect(metacharEvents.length).toBe(2);
     // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘
-    for (const command of ['DZ_SERVE=0 bin/17dz query x', 'node script.js']) {
+    for (const command of ['EXECUTION_SERVE=0 bin/17dz query x', 'node script.js']) {
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });

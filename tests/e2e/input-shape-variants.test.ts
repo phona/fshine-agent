@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：输入形状多样性——口语/标点/空白/长度/语气/错字变体不得改变确定性机器的判定。
  * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
@@ -105,8 +108,8 @@ function recordingWorker(script: WorkerStep[]) {
   };
 }
 
-describe('离线全链 e2e：输入形状变体不改变确定性机器的判定', () => {
-  describe('追问锚（照抄 turn-loop-routing 1.6）：不带账套的实时余额问题先追问', () => {
+describe('[L4 集成] 离线全链 e2e：输入形状变体不改变确定性机器的判定', () => {
+  describe('[L4 集成] 追问锚（照抄 turn-loop-routing 1.6）：不带账套的实时余额问题先追问', () => {
     for (const variant of FOLLOWUP_VARIANTS) {
       it(`1.6 变体[${variant.shape}]「${variant.message}」→ 仍追问账套，零平台调用`, async () => {
         const before = totalActualCalls();
@@ -124,7 +127,7 @@ describe('离线全链 e2e：输入形状变体不改变确定性机器的判定
     }
   });
 
-  describe('重查锚（照抄 turn-loop-execution 1.3/5.4）：变体句重问仍必须重查（实体门禁开启）', () => {
+  describe('[L4 集成] 重查锚（照抄 turn-loop-execution 1.3/5.4）：变体句重问仍必须重查（实体门禁开启）', () => {
     // 每个变体一个用例：第一回合规整句（对照组，兼作表征基线），第二回合变体句重问。
     // 变体表 6 种形态全量过锚——重查锚是三锚里唯一"消息携带全部计划参数"的，
     // 逐字包含判定的形状敏感性只有在这里能被真门禁压到。
@@ -168,7 +171,7 @@ describe('离线全链 e2e：输入形状变体不改变确定性机器的判定
     }
   });
 
-  describe('澄清锚（照抄 turn-loop-clarification C1）：变体初始问句 → 澄清 → 编号"1"绑定 → 落地', () => {
+  describe('[L4 集成] 澄清锚（照抄 turn-loop-clarification C1）：变体初始问句 → 澄清 → 编号"1"绑定 → 落地', () => {
     for (const variant of CLARIFY_VARIANTS) {
       it(`C1 变体[${variant.shape}]「${variant.message}」→ 宿主组装澄清 → "1"绑定后真实查询落地`, async () => {
         const before = totalActualCalls();

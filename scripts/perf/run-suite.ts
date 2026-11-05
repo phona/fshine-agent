@@ -5,7 +5,7 @@
  *   2. 耗时基线——三轮均值做分母，改测试基建（如 handler.test 的真实 sleep 换 fake timers）
  *      前后各跑一次，收益有数字。
  *
- * 为什么不带 --env-file=.env：性能跑的是离线套件，vitest.setup 会抹掉泄漏的 LLM_/DZ_ 变量，
+ * 为什么不带 --env-file=.env：性能跑的是离线套件，vitest.setup 会抹掉泄漏的 LLM_/EXECUTION_ 变量，
  * 显式加载 .env 反而把秘密送进测试环境——这里刻意不加载（与 eval:* 脚本相反，那组要真模型）。
  *
  * 用法：node --import tsx scripts/perf/run-suite.ts [轮数=3]

@@ -1,9 +1,9 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import path from 'node:path';
+import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { GATEWAY_INVOCATION } from './platform-contract';
+import { gatewayExecPath, gatewayTextPatterns, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -32,7 +32,8 @@ export interface PlanEvaluation {
   planId: string;
   version: number;
   decision: 'execute' | 'notify' | 'confirm' | 'stop';
-  estimate: { calls: number; seconds: number };
+  /** 本张计划的声明总权重（接口文档 §4 必填；缺失/非法时宿主 fail-closed，不激活）。 */
+  estimate: { calls: number; seconds: number; weight?: number };
   delta: { calls?: unknown[]; [key: string]: unknown };
   cumulative: Record<string, unknown>;
   reasonCode: string;
@@ -48,6 +49,8 @@ export interface PlanCliRequest {
   args: string[];
   input?: string;
   env?: NodeJS.ProcessEnv;
+  /** Profile 声明的网关调用形式；未声明时默认 runner 回退遗留常量（过渡期）。 */
+  gateway?: string;
 }
 
 export type PlanCliRunner = (request: PlanCliRequest) => Promise<{ code: number | null; stdout: string; stderr: string }>;
@@ -80,6 +83,8 @@ export interface EvaluateAndActivatePlanOptions {
   runCli?: PlanCliRunner;
   env?: NodeJS.ProcessEnv;
   activationSecret?: string;
+  /** Profile 声明的网关调用形式，透传给默认 runner（注入 runner 时由 runner 自行决定）。 */
+  gateway?: string;
 }
 
 export async function loadCurrentActivePlan(options: {
@@ -110,8 +115,14 @@ export async function loadPlanStatus(options: {
   return result && typeof result.status === 'string' ? result : null;
 }
 
-const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
-  const child = spawn(path.join(platformRoot, 'bin', '17dz'), args, {
+const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gateway }) => new Promise((resolve, reject) => {
+  // 第二处网关 spawn：与 context 提案网关（context.ts 的
+  // defaultProposalGatewayRunner）同法——profile.gateway 优先，未声明或非法时
+  // 经 gatewayExecPath 回退遗留常量，不再以 'bin' / '17dz' 分段拼写（分段拼写
+  // 逃过 L2 字面量守卫 grep "bin/17dz"）。调用方在 plan-runtime
+  // 外注入 runner 时应把 profile.gateway 带进 PlanCliRequest.gateway；直接调
+  // evaluateAndActivatePlan 的调用方见 EvaluateAndActivatePlanOptions.gateway。
+  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -129,15 +140,61 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env }) => 
   child.stdin.end(input);
 });
 
+const DECISION_RANK: Record<string, number> = { execute: 0, notify: 1, confirm: 2, stop: 3 };
+
+/** decision 四档的严度序。未知档位抛错，绝不回退到 execute（rank 0）。
+ * 查表必须先过自有属性检查：DECISION_RANK 是普通对象，toString /
+ * constructor / __proto__ 等键不经检查会命中 Object.prototype，返回函数或
+ * 对象而非 undefined，`rank === undefined` 守卫就失效，比较为 false 后
+ * 正好落回“按平台档静默激活”的旧缺陷形态。生产路径目前有 exit 0 预验
+ * 与 tryParse 两道预校验，本口子是公开 API 层面的，不是已可达的生产绕过。 */
+export function planDecisionRank(tier: string): number {
+  if (!Object.prototype.hasOwnProperty.call(DECISION_RANK, tier)) {
+    throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  // 第二道守卫只为 TS 收窄索引类型：自有属性检查已排除原型链键，
+  // 这里再排除理论上的 undefined 值，行为上不改变任何已抛错的路径。
+  const rank = DECISION_RANK[tier];
+  if (rank === undefined) {
+    throw new Error(`plan evaluate 返回了非法 decision（${tier}）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  return rank;
+}
+
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
   const runCli = options.runCli ?? defaultCliRunner;
   validateCalls(options.calls);
-  const evaluation = await runPlanEvaluation(runCli, {
+  const rawEvaluation = await runPlanEvaluation(runCli, {
     platformRoot: options.platformRoot,
     args: ['plan', 'evaluate', '--task-id', options.taskId, '--stdin'],
     input: JSON.stringify({ calls: options.calls, ...(options.requestId ? { requestId: options.requestId } : {}) }),
     env: options.env,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
   });
+  // 预算接入（接口文档 §4）：平台已下发 estimate.weight 时，宿主用通用策略
+  // 算出宿主档，与平台 decision 取更严一档；平台档始终保留作防线，宿主档
+  // 只做叠加，绝不放宽。注意不对称性：宿主这里只看本张计划的 weight，
+  // 平台 decision 已计入任务累计 weight——更严为准保证宿主叠加只收紧不放松。
+  // weight 缺失/非有限数/为负 → fail-closed：不激活、不降级为仅 calls/seconds 裁档。
+  if (!rawEvaluation.estimate || typeof rawEvaluation.estimate !== 'object') {
+    throw new Error('plan evaluate 未返回合法 estimate：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
+  }
+  const weight = rawEvaluation.estimate.weight;
+  if (typeof weight !== 'number' || !Number.isFinite(weight) || weight < 0) {
+    throw new Error('plan evaluate 未下发合法 weight：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
+  }
+  const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
+  // fail-closed（接口文档 §4）：未知档位绝不按最宽档（execute，rank 0）静默
+  // 激活。旧代码 `RANK[tier] ?? 0` 把任何非法 decision 映射成 execute，又因
+  // 后续 stop/confirm/notify 分支都不命中而落进 active 返回——即“未知档位按
+  // 最宽档静默激活”，与文档“decision 非四档之一 → 抛错”矛盾。本处抛错；
+  // runPlanEvaluation 的 exit 0 分支亦在解析后先验 decision，两道同判据。
+  // planDecisionRank 导出供测试直测：它是第二道防线，公开路径上通常先被
+  // exit 0 预验拦住，故只测公开路径无法单独证明它——直测才能钉住它。
+  const rankOf = planDecisionRank;
+  const evaluation = rankOf(host.tier) > rankOf(rawEvaluation.decision)
+    ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
+    : rawEvaluation;
 
   if (evaluation.decision === 'stop') {
     return { status: 'stop', evaluation, message: formatPlanMessage(evaluation) };
@@ -171,6 +228,7 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
       runCli,
       env: options.env,
       activationSecret: options.activationSecret,
+      ...(options.gateway ? { gateway: options.gateway } : {}),
     });
   }
   return { status: 'active', planId: evaluation.planId, version: evaluation.version, evaluation };
@@ -185,16 +243,18 @@ export async function activatePendingPlan(options: {
   env?: NodeJS.ProcessEnv;
   activationSecret?: string;
   now?: number;
+  gateway?: string;
 }): Promise<unknown> {
   const secret = options.activationSecret;
-  if (!secret) throw new Error('缺少宿主计划激活密钥 DZ_PLAN_ACTIVATION_SECRET。');
+  if (!secret) throw new Error('缺少宿主计划激活密钥 EXECUTION_PLAN_ACTIVATION_SECRET。');
   const expires = (options.now ?? Date.now()) + 60_000;
   const token = createActivationToken(options.planId, options.evidence, expires, secret);
   return runJson((options.runCli ?? defaultCliRunner), {
     platformRoot: options.platformRoot,
     args: ['plan', 'activate', '--stdin'],
     input: JSON.stringify({ planId: options.planId, evidence: options.evidence, token }),
-    env: { ...options.env, DZ_PLAN_ACTIVATION_SECRET: secret },
+    env: { ...options.env, EXECUTION_PLAN_ACTIVATION_SECRET: secret },
+    ...(options.gateway ? { gateway: options.gateway } : {}),
   });
 }
 
@@ -341,10 +401,10 @@ export function planWriteClosed(
 /** Build the per-command environment for a worker bash subprocess. */
 export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePlanId: string | null): NodeJS.ProcessEnv {
   const env = { ...inherited };
-  delete env.DZ_PLAN_ACTIVATION_SECRET;
-  delete env.DZ_PLAN_ID;
-  env.DZ_REQUIRE_PLAN = '1';
-  if (activePlanId) env.DZ_PLAN_ID = activePlanId;
+  delete env.EXECUTION_PLAN_ACTIVATION_SECRET;
+  delete env.EXECUTION_PLAN_ID;
+  env.EXECUTION_REQUIRE_PLAN = '1';
+  if (activePlanId) env.EXECUTION_PLAN_ID = activePlanId;
   return env;
 }
 
@@ -375,12 +435,18 @@ const EXTRA_PREFIX_MAX_CHARS = 120;
  * 一律算形状不符，抛一条说清"期望什么、实际什么"的结构错误，让模型下一轮自己改。
  * 重试是模型的职责，宿主不替它 absorbing。
  */
-function locatePlanSubmission(command: string): { prefix: string; payload: string } | null {
+/**
+ * plan 令牌定位：网关名由调用方注入（profile.gateway），未注入时走
+ * 遗留缺省（接口文档 §2/§10）。与 serve-gate 共用 gatewayTextPatterns
+ * 的网关名来源，不存在第二份抄写。
+ */
+function locatePlanSubmission(command: string, gateway?: string): { prefix: string; payload: string } | null {
+  const resolved = resolveGatewayText(gateway);
   let from = 0;
   for (;;) {
-    const at = command.indexOf(GATEWAY_INVOCATION, from);
+    const at = command.indexOf(resolved, from);
     if (at < 0) return null;
-    from = at + GATEWAY_INVOCATION.length;
+    from = at + resolved.length;
     // 该网关名必须紧跟 plan 子命令（空白分隔，且 plan 自身是一个完整令牌）才算计划提交；
     // 否则只是别处提到了网关（如网关 query），继续找下一个位置。
     const plan = /^\s+plan(?=\s|$)/.exec(command.slice(from));
@@ -395,7 +461,7 @@ function collapseExtra(text: string): string {
 }
 
 /** Parse the worker's intercepted gateway plan submission: inline JSON or `--file <path>`. */
-export function parsePlanCallsCommand(command: string): PlanSubmission | null {
+export function parsePlanCallsCommand(command: string, gateway?: string): PlanSubmission | null {
   const trimmed = command.trim();
   // 三态分辨，不能一律返回 null：
   //   ① 没有 plan 令牌 → 真不是计划命令（null，交 serve-gate 的常规 CLI 检查）；
@@ -405,7 +471,7 @@ export function parsePlanCallsCommand(command: string): PlanSubmission | null {
   // 无从自愈（真实平台实测：被误导到把方案 JSON 打印成助手文本，12 步全空转）。
   // throw 在 beforeToolCall 里变成 PLAN DECLINED：<可行动消息>——正确的诊断
   // 本身就是自愈通道：说清形状哪里不对、正确形状长什么样，worker 下一轮就能改。
-  const located = locatePlanSubmission(trimmed);
+  const located = locatePlanSubmission(trimmed, gateway);
   if (!located) return null;
   const { prefix, payload } = located;
 
@@ -495,7 +561,17 @@ async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest)
     if (evaluation) return evaluation;
     throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
   }
-  try { return JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  let evaluation: PlanEvaluation;
+  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  // exit 0 也验 decision：非四档即抛错，不交给 rankOf 的缺省映射（见上）。
+  // exit 非零分支的 tryParseEvaluation 本就只认四档，两路判据一致。
+  // 报错文案带“exit 0 预验”标记：它是第一道防线，与 planDecisionRank 的
+  // 报错区分开，这样删掉预验时公开路径测试能凭文案变红（否则 rankOf 仍
+  // 抛同文案，删预验在公开路径上不可观测——两道防线各有各的钉子）。
+  if (evaluation.decision !== 'execute' && evaluation.decision !== 'notify' && evaluation.decision !== 'confirm' && evaluation.decision !== 'stop') {
+    throw new Error(`plan evaluate 返回了非法 decision（${String(evaluation.decision)}）（exit 0 预验）：非 execute/notify/confirm/stop 四档之一，已拒绝激活（接口文档 §4）。`);
+  }
+  return evaluation;
 }
 
 /** exit 非零时区分"stop 裁决"与"拒绝/失败"的唯一判据：stdout 能解析出带合法 decision 的 JSON。 */

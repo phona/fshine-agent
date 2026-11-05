@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：W4 重发路由（2026-10-20 事故的直接修法）。
  * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
@@ -23,7 +26,7 @@ import { boot, gatedWorker, mainDriver, totalActualCalls } from './harness';
 /** 单聊会话：conversationId 回落为 userid（W1 后 sessionId = channel:conversationId）。 */
 const SESSION_ID = 'wecom:e2e_user';
 
-describe('离线全链 e2e：W4 重发路由（申报 resend → 零委派 → 宿主确定性回答）', () => {
+describe('[L4 集成] 离线全链 e2e：W4 重发路由（申报 resend → 零委派 → 宿主确定性回答）', () => {
   const roots: string[] = [];
   afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
 

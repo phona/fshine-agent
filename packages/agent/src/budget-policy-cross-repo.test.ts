@@ -1,0 +1,203 @@
+/**
+ * 跨仓预算阈值校验脚本的测试（debt/second-truth，主题 3a）。
+ *
+ * 测三件事，缺一不可——只测“脚本存在”等于没测：
+ * ① 夹具一致时脚本 exit 0；② 17dz 侧改一个阈值时脚本 exit 1 且点名该键；
+ * ③ 17dz 侧缺一个阈值时脚本非 0（解析不到即 fail，不静默通过）。
+ * 真实两仓比对是环境相关的（需要一个 17dz 检出）：CROSS_REPO_17DZ_ROOT
+ * 指向检出时跑真比对、必须 exit 0；未指向时该用例 skip，并在用例名里写明
+ * skip 原因——默认 `npm test` 的绿灯不包含真跨仓比对，这一点不许含糊。
+ */
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+const repoRoot = path.resolve(__dirname, '../../..');
+const script = path.join(repoRoot, 'scripts/cross-repo/check-budget-thresholds.mjs');
+
+let directory: string | undefined;
+afterEach(() => {
+  if (directory) rmSync(directory, { recursive: true, force: true });
+  directory = undefined;
+});
+
+function fixtureRoots(dzBudgetWeight = 60, dzOmitHardWeight = false) {
+  directory = mkdtempSync(path.join(tmpdir(), 'fshine-budget-cross-'));
+  const fshineRoot = path.join(directory, 'fshine');
+  const dzRoot = path.join(directory, 'dz');
+  mkdirSync(path.join(fshineRoot, 'packages/agent/src'), { recursive: true });
+  mkdirSync(path.join(dzRoot, 'src/execution'), { recursive: true });
+  writeFileSync(path.join(fshineRoot, 'packages/agent/src/budget-policy.ts'),
+    'export const DEFAULT_BUDGET_THRESHOLDS: BudgetThresholds = {\n'
+    + '  autoCalls: 2,\n  notifyCalls: 10,\n  confirmCalls: 20,\n  hardCalls: 50,\n'
+    + '  autoSeconds: 60,\n  notifySeconds: 180,\n  confirmSeconds: 600,\n  hardSeconds: 1800,\n'
+    + '  autoWeight: 6,\n  notifyWeight: 18,\n  budgetWeight: 60,\n  hardWeight: 180,\n};\n');
+  const dzLines = [
+    'autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 2),',
+    'notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 10),',
+    'confirmCalls: configured(env, \'EXECUTION_PLAN_CONFIRM_CALLS\', 20),',
+    'hardCalls: configured(env, \'EXECUTION_PLAN_HARD_CALLS\', 50),',
+    'autoSeconds: configured(env, \'EXECUTION_PLAN_AUTO_SECONDS\', 60),',
+    'notifySeconds: configured(env, \'EXECUTION_PLAN_NOTIFY_SECONDS\', 180),',
+    'confirmSeconds: configured(env, \'EXECUTION_PLAN_CONFIRM_SECONDS\', 600),',
+    'hardSeconds: configured(env, \'EXECUTION_PLAN_HARD_SECONDS\', 1800),',
+    'autoWeight: configured(env, \'EXECUTION_PLAN_AUTO_WEIGHT\', 6),',
+    'notifyWeight: configured(env, \'EXECUTION_PLAN_NOTIFY_WEIGHT\', 18),',
+    `budgetWeight: configured(env, 'EXECUTION_PLAN_BUDGET_WEIGHT', ${dzBudgetWeight}),`,
+  ];
+  if (!dzOmitHardWeight) dzLines.push('hardWeight: configured(env, \'EXECUTION_PLAN_HARD_WEIGHT\', 180),');
+  writeFileSync(path.join(dzRoot, 'src/execution/plan.js'), `function policy(env) {\n  return {\n    ${dzLines.join('\n    ')}\n  };\n}\n`);
+  return { fshineRoot, dzRoot };
+}
+
+function run(fshineRoot: string, dzRoot: string) {
+  try {
+    const stdout = execFileSync(process.execPath, [script, dzRoot, '--fshine-root', fshineRoot], { encoding: 'utf8' });
+    return { code: 0, stdout, stderr: '' };
+  } catch (e) {
+    const err = e as { status?: number; stdout?: unknown; stderr?: unknown };
+    return {
+      code: err.status ?? -1,
+      stdout: typeof err.stdout === 'string' ? err.stdout : '',
+      stderr: typeof err.stderr === 'string' ? err.stderr : '',
+    };
+  }
+}
+
+describe('跨仓预算阈值校验脚本', () => {
+  it('夹具一致：exit 0 且报 12/12 一致', () => {
+    const { fshineRoot, dzRoot } = fixtureRoots();
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('12/12 一致');
+  });
+
+  it('17dz 侧改一个阈值：exit 1 且点名该键（变异验证：校验不是恒绿）', () => {
+    const { fshineRoot, dzRoot } = fixtureRoots(61);
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code).toBe(1);
+    expect(r.stdout + r.stderr).toContain('budgetWeight');
+  });
+
+  it('17dz 侧缺一个阈值：非 0（解析不到即 fail，不静默通过）', () => {
+    const { fshineRoot, dzRoot } = fixtureRoots(60, true);
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code).not.toBe(0);
+    expect(r.stdout + r.stderr).toContain('hardWeight');
+  });
+
+  it.skipIf(!process.env.CROSS_REPO_17DZ_ROOT || !existsSync(process.env.CROSS_REPO_17DZ_ROOT))(
+    '真实两仓比对（仅 CROSS_REPO_17DZ_ROOT 指向 17dz 检出时跑；未指向时 skip，不计入默认绿灯）',
+    () => {
+      const dzRoot = process.env.CROSS_REPO_17DZ_ROOT as string;
+      const r = run(repoRoot, dzRoot);
+      expect(r.code, r.stdout + r.stderr).toBe(0);
+      // 真实路径不只验 exit 0：12 个键的逐行输出都在场，才算真实解析走过。
+      expect(r.stdout).toContain('12/12 一致');
+      for (const key of ['autoCalls', 'notifyCalls', 'confirmCalls', 'hardCalls', 'autoWeight', 'notifyWeight', 'budgetWeight', 'hardWeight']) {
+        expect(r.stdout).toContain(`${key}: fshine=`);
+      }
+    },
+  );
+});
+
+describe('跨仓预算阈值校验脚本：旧值注释不得劫持解析（M3，第四轮）', () => {
+  it('fshine 块内与 17dz 行上的旧值注释行都被剥离，真值胜出、不假绿', () => {
+    directory = mkdtempSync(path.join(tmpdir(), 'fshine-budget-cross-comment-'));
+    const fshineRoot = path.join(directory, 'fshine');
+    const dzRoot = path.join(directory, 'dz');
+    mkdirSync(path.join(fshineRoot, 'packages/agent/src'), { recursive: true });
+    mkdirSync(path.join(dzRoot, 'src/execution'), { recursive: true });
+    // fshine 块内先写旧值行注释与块注释，再写真值；不剥离时首匹配会命中 7。
+    writeFileSync(path.join(fshineRoot, 'packages/agent/src/budget-policy.ts'),
+      'export const DEFAULT_BUDGET_THRESHOLDS: BudgetThresholds = {\n'
+      + '  // autoCalls: 7,\n  /* notifyCalls: 99, */\n'
+      + '  autoCalls: 2,\n  notifyCalls: 10,\n  confirmCalls: 20,\n  hardCalls: 50,\n'
+      + '  autoSeconds: 60,\n  notifySeconds: 180,\n  confirmSeconds: 600,\n  hardSeconds: 1800,\n'
+      + '  autoWeight: 6,\n  notifyWeight: 18,\n  budgetWeight: 60,\n  hardWeight: 180,\n};\n');
+    // 17dz 真值 autoCalls=2，但其上有旧值注释行（复核员假绿复现的形态）。
+    // 注意：17dz 侧块注释旧值故意写成 98，与 fshine 侧的 99 不对称——
+    // 块注释分支必须有独立钉子：只剥 // 行注释、不剥 /* */ 时，
+    // 两侧块注释旧值 99 vs 98 失配、脚本 exit 1，本用例变红；
+    // 两侧都写 99 时只剥行注释也能全过，块注释分支无判别力（第五轮）。
+    writeFileSync(path.join(dzRoot, 'src/execution/plan.js'),
+      '// autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 7),\n'
+      + '/* notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 98), */\n'
+      + 'function policy(env) {\n  return {\n'
+      + '    autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 2),\n'
+      + '    notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 10),\n'
+      + '    confirmCalls: configured(env, \'EXECUTION_PLAN_CONFIRM_CALLS\', 20),\n'
+      + '    hardCalls: configured(env, \'EXECUTION_PLAN_HARD_CALLS\', 50),\n'
+      + '    autoSeconds: configured(env, \'EXECUTION_PLAN_AUTO_SECONDS\', 60),\n'
+      + '    notifySeconds: configured(env, \'EXECUTION_PLAN_NOTIFY_SECONDS\', 180),\n'
+      + '    confirmSeconds: configured(env, \'EXECUTION_PLAN_CONFIRM_SECONDS\', 600),\n'
+      + '    hardSeconds: configured(env, \'EXECUTION_PLAN_HARD_SECONDS\', 1800),\n'
+      + '    autoWeight: configured(env, \'EXECUTION_PLAN_AUTO_WEIGHT\', 6),\n'
+      + '    notifyWeight: configured(env, \'EXECUTION_PLAN_NOTIFY_WEIGHT\', 18),\n'
+      + '    budgetWeight: configured(env, \'EXECUTION_PLAN_BUDGET_WEIGHT\', 60),\n'
+      + '    hardWeight: configured(env, \'EXECUTION_PLAN_HARD_WEIGHT\', 180),\n'
+      + '  };\n}\n');
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain('12/12 一致');
+    expect(r.stdout).toContain('autoCalls: fshine=2 17dz=2');
+  });
+});
+
+describe('跨仓预算阈值校验脚本：真实路径与 exit 2 守门（非仅合成夹具）', () => {
+  it('真实 fshine 文件解析路径：以本仓真实 budget-policy.ts 为 fshine 根，dz 夹具一致时 exit 0', () => {
+    const { dzRoot } = fixtureRoots();
+    const r = run(repoRoot, dzRoot);
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('12/12 一致');
+  });
+
+  it('真实 fshine 文件解析路径：dz 夹具改一个阈值时 exit 1 且点名该键', () => {
+    const { dzRoot } = fixtureRoots(61);
+    const r = run(repoRoot, dzRoot);
+    expect(r.code).toBe(1);
+    expect(r.stdout + r.stderr).toContain('budgetWeight');
+  });
+
+  it('parseFshine 失败路径：fshine 文件里没有 DEFAULT_BUDGET_THRESHOLDS 块时 exit 2', () => {
+    directory = mkdtempSync(path.join(tmpdir(), 'fshine-budget-cross-'));
+    const fshineRoot = path.join(directory, 'fshine');
+    const dzRoot = path.join(directory, 'dz');
+    mkdirSync(path.join(fshineRoot, 'packages/agent/src'), { recursive: true });
+    mkdirSync(path.join(dzRoot, 'src/execution'), { recursive: true });
+    writeFileSync(path.join(fshineRoot, 'packages/agent/src/budget-policy.ts'), '// no thresholds here\n');
+    writeFileSync(path.join(dzRoot, 'src/execution/plan.js'), 'function policy(env) { return {}; }\n');
+    const r = run(fshineRoot, dzRoot);
+    expect(r.code).toBe(2);
+    expect(r.stdout + r.stderr).toContain('fshine 阈值块未找到');
+  });
+
+  it('未给 17dz 根 → exit 2（拒绝静默通过），且不依赖环境变量', () => {
+    try {
+      execFileSync(process.execPath, [script], {
+        encoding: 'utf8',
+        env: { ...process.env, CROSS_REPO_17DZ_ROOT: '' },
+      });
+      throw new Error('expected exit 2');
+    } catch (e) {
+      const err = e as { status?: number; stdout?: unknown; stderr?: unknown; message?: string };
+      if (err.message === 'expected exit 2') throw err;
+      expect(err.status).toBe(2);
+      expect(String(err.stdout ?? '') + String(err.stderr ?? '')).toContain('未给 17dz 根');
+    }
+  });
+
+  it('--fshine-root 尾随无值 → exit 2 而非未捕获 TypeError', () => {
+    const { dzRoot } = fixtureRoots();
+    try {
+      execFileSync(process.execPath, [script, dzRoot, '--fshine-root'], { encoding: 'utf8' });
+      throw new Error('expected exit 2');
+    } catch (e) {
+      const err = e as { status?: number; stdout?: unknown; stderr?: unknown; message?: string };
+      if (err.message === 'expected exit 2') throw err;
+      expect(err.status).toBe(2);
+    }
+  });
+});

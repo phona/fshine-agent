@@ -22,11 +22,85 @@ import path from 'node:path';
  * （plan 令牌定位、serve CLI 首词/拦截正则）全部从这里取值构造，不各自硬编码——平台若
  * 改名/迁移网关，只改这一处。泄漏 lint 把网关名字面量的预算压到只剩本常量这一处。
  */
+/**
+ * 遗留缺省网关名（过渡期）。
+ *
+ * Package 1 收窄口径：17dz 执行代码不动、执行端门先留。宿主 spawn 路径
+ * 不再以本常量为准——以 profile 声明的 `gateway` 为准
+ * （见 `gatewayExecPathForProfile`）。本常量目前仅留在两处过渡位置：
+ * ① 文本识别（serve-gate 首词正则、plan 令牌定位、错误文案 correctForm）
+ *    ——第 1 包收尾已接线到 profile.gateway（gatewayTextPatterns /
+ *    ServeGateOptions.gateway / parsePlanCallsCommand 的 gateway 参数 /
+ *    planDraftExample 的 gateway 参数）；未注入 gateway 的老调用方
+ *    仍以本常量为缺省，见 docs/execution-layer-interface.md §2/§10，
+ *    断点是驱动层把 profile.gateway 穿透全部生产路径后删除本缺省；
+ * ② 未声明 gateway 的旧 profile 的 spawn 回退（宁可走旧值也不静默失败，
+ *    但新 profile 必须声明 gateway，见 config 解析）。
+ * 新代码不得新增对本常量的引用；新执行层接入时 profile 必须声明 gateway。
+ */
+/**
+ * @deprecated 遗留缺省网关名，仅供未注入 profile.gateway 的老调用方
+ * 作文本识别缺省（见 docs/execution-layer-interface.md §2/§10）。
+ * 新代码不得新增对本常量的引用；spawn 路径一律用
+ * gatewayExecPathForProfile（未声明即 fail-closed）。
+ */
 export const GATEWAY_INVOCATION = 'bin/17dz';
 
+/** 正则转义：网关名经 §1 校验已无 shell 元字符，转义只是纵深。 */
+function escapeRegExpSegment(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * 从 profile.gateway 派生文本识别正则（接口文档 §2）：
+ * 首词 = 行首或斜杠后的完整网关名；plan = 网关名后紧跟完整 plan 令牌。
+ * 供 serve-gate 与 plan-runtime 共用，不存在第二份抄写。
+ */
+export function gatewayTextPatterns(gateway: string): { invocation: RegExp; plan: RegExp } {
+  const escaped = escapeRegExpSegment(gateway);
+  return {
+    invocation: new RegExp(`(^|/)${escaped}$`),
+    plan: new RegExp(`(?:^|\\s)(?:[^\\s]+/)?${escaped}\\s+plan(?:\\s|$)`),
+  };
+}
+
+/**
+ * 文本识别用的网关名解析：注入且合法的 profile.gateway 优先；
+ * 未注入/不合法时回退遗留缺省（老调用方过渡，见 §10 断点）。
+ * 本函数是常量之外的唯一回退点——新调用方应直接传 profile.gateway，
+ * 而不是依赖本回退。
+ */
+export function resolveGatewayText(gateway?: string): string {
+  return validateGatewayInvocation(gateway) ? gateway : GATEWAY_INVOCATION;
+}
+
+/** 校验 profile 声明的网关调用形式：相对路径、无父级逃逸、无 shell 元字符。 */
+export function validateGatewayInvocation(gateway: unknown): gateway is string {
+  return (
+    typeof gateway === 'string' &&
+    gateway.trim().length > 0 &&
+    !path.isAbsolute(gateway) &&
+    !gateway.split('/').includes('..') &&
+    !/[\\'"`$;|&<>*?(){}[\]!#~]/.test(gateway)
+  );
+}
+
 /** 网关可执行文件的绝对路径 = platformRoot + GATEWAY_INVOCATION（供 spawn 用，配置派生）。 */
-export function gatewayExecPath(platformRoot: string): string {
-  return path.join(platformRoot, ...GATEWAY_INVOCATION.split('/'));
+export function gatewayExecPath(platformRoot: string, gateway: string = GATEWAY_INVOCATION): string {
+  return path.join(platformRoot, ...gateway.split('/'));
+}
+
+/**
+ * Profile 驱动的网关路径：profile 未声明 gateway 时 fail-closed 抛错，
+ * 不回退到遗留常量——回退会让“未声明”静默等同于“17dz”，新执行层接入时
+ * 这正是要消除的默认。调用方是宿主 spawn 路径（context 提案网关、
+ * assembly 提案落账），不是文本识别路径。
+ */
+export function gatewayExecPathForProfile(platformRoot: string, profile: { gateway?: string }): string {
+  if (!validateGatewayInvocation(profile.gateway)) {
+    throw new Error('contextProfile 未声明 gateway：宿主 spawn 网关前必须在配置里声明相对网关名');
+  }
+  return gatewayExecPath(platformRoot, profile.gateway);
 }
 
 /**

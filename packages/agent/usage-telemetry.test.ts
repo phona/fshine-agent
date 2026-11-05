@@ -10,7 +10,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import { addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, DriverMessage, ScriptedTurnDriver, type TurnDriver, type TurnDriverInput } from './src/driver';
-import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL, createContextTaskRunner } from './src/context';
+import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, createContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
 import { extractContextWithTurnDriver } from './src/context-model';
 import { createLongMemoryCandidateExtractor, type MemoryCandidateModel } from './src/memory-candidate-extractor';
@@ -211,7 +211,7 @@ describe('Main 侧 token 采集（turn_span）', () => {
       driver: scriptedMainDriver(usage, '你好，我可以帮你查询平台数据。'),
       sessions: new FakeSessionRepo(),
       platformTask: {
-        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
         run: async () => { throw new Error('闲聊轮不应委派'); },
       },
     });
@@ -238,7 +238,7 @@ describe('Main 侧 token 采集（turn_span）', () => {
       driver: scriptedMainDriver(undefined, '你好，我可以帮你查询平台数据。'),
       sessions: new FakeSessionRepo(),
       platformTask: {
-        tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+        tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
         run: async () => { throw new Error('闲聊轮不应委派'); },
       },
     });

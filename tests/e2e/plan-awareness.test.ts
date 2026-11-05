@@ -1,9 +1,12 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 bin/17dz（缺失时跳过，不读 config/agent.yaml）+ 自有计划状态文件，mock 执行器，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * Cross-repository acceptance against the real 17dz CLI in mock mode.
  * Run explicitly with:
- * DZ_PLATFORM_ROOT=/home/fictional-user/fictional-projects/fictional-execution-layer npx vitest run packages/agent/plan-cross-repo.acceptance.test.ts
+ * FSHINE_PLATFORM_ROOT=/home/fictional-user/fictional-projects/fictional-execution-layer npx vitest run packages/agent/plan-cross-repo.acceptance.test.ts
  *
- * The suite owns a private DZ_PLAN_STATE file and never touches live platform data.
+ * The suite owns a private EXECUTION_PLAN_STATE file and never touches live platform data.
  */
 import { existsSync } from 'node:fs';
 import assert from 'node:assert/strict';
@@ -15,10 +18,10 @@ import { afterAll, beforeAll, describe, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRequest, type PlanCliRunner, type PlanEvaluation } from '../../packages/agent/src/plan-runtime';
 
 /** Sibling platform repo by default so this suite runs in a normal `npm test`. */
-const platformRoot = process.env['DZ_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
+const platformRoot = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
 const cliPath = path.join(platformRoot, 'bin', '17dz');
 // Never silently skip: a missing CLI is an explicit failure, not a green run.
-const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
+const integration = describe.skipIf(!existsSync(cliPath))('[L4 集成] fshine ↔ 17dz 计划边界（真实 CLI / mock executor）', () => {
   let stateDir: string;
   let env: NodeJS.ProcessEnv;
   let subprocessSequence = 0;
@@ -27,21 +30,21 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
     stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-plan-acceptance-'));
     env = {
       ...process.env,
-      DZ_PLAN_STATE: path.join(stateDir, 'plans.json'),
-      DZ_EXECUTOR: 'mock',
-      DZ_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
-      DZ_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
-      DZ_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
-      DZ_REQUIRE_PLAN: '1',
-      DZ_PLAN_ACTIVATION_SECRET: 'acceptance-only-secret',
-      DZ_PLAN_AUTO_CALLS: '2',
-      DZ_PLAN_NOTIFY_CALLS: '10',
-      DZ_PLAN_CONFIRM_CALLS: '20',
-      DZ_PLAN_HARD_CALLS: '50',
-      DZ_PLAN_AUTO_SECONDS: '60',
-      DZ_PLAN_NOTIFY_SECONDS: '180',
-      DZ_PLAN_CONFIRM_SECONDS: '600',
-      DZ_PLAN_HARD_SECONDS: '1800',
+      EXECUTION_PLAN_STATE: path.join(stateDir, 'plans.json'),
+      EXECUTION_EXECUTOR: 'mock',
+      EXECUTION_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
+      EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
+      EXECUTION_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
+      EXECUTION_REQUIRE_PLAN: '1',
+      EXECUTION_PLAN_ACTIVATION_SECRET: 'acceptance-only-secret',
+      EXECUTION_PLAN_AUTO_CALLS: '2',
+      EXECUTION_PLAN_NOTIFY_CALLS: '10',
+      EXECUTION_PLAN_CONFIRM_CALLS: '20',
+      EXECUTION_PLAN_HARD_CALLS: '50',
+      EXECUTION_PLAN_AUTO_SECONDS: '60',
+      EXECUTION_PLAN_NOTIFY_SECONDS: '180',
+      EXECUTION_PLAN_CONFIRM_SECONDS: '600',
+      EXECUTION_PLAN_HARD_SECONDS: '1800',
     };
   });
   afterAll(() => rmSync(stateDir, { recursive: true, force: true }));
@@ -85,7 +88,7 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
     return runCliSync({
       platformRoot: platformRoot!,
       args: ['operation', 'run', 'voucher.query-saved', '威德盛', period],
-      env: { DZ_PLAN_ID: planId },
+      env: { EXECUTION_PLAN_ID: planId },
     });
   }
 
@@ -142,7 +145,7 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
       calls: callsFor(['202601', '202602', '202603', '202604', '202605', '202606', '202607', '202608', '202609']),
       runCli: interceptCli,
       env,
-      activationSecret: env.DZ_PLAN_ACTIVATION_SECRET,
+      activationSecret: env.EXECUTION_PLAN_ACTIVATION_SECRET,
       onNotice: async (text) => {
         order.push('notice:start');
         assert.ok(expandedEvaluation, '通知前没有得到平台评估结果。');
@@ -219,7 +222,7 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
       userConfirmed: true,
       runCli: annualCli,
       env,
-      activationSecret: env.DZ_PLAN_ACTIVATION_SECRET,
+      activationSecret: env.EXECUTION_PLAN_ACTIVATION_SECRET,
       onNotice: async () => {},
     });
     assert.equal(annual.status, 'active', '12 次全年计划应按重量策略在通知后继续。');
@@ -260,7 +263,7 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
     const result = runCliSync({
       platformRoot: platformRoot!,
       args: ['operation', 'run', 'finance.search-account-sets', '--query', '胜利'],
-      env: { DZ_PLAN_ID: searchPlan.planId },
+      env: { EXECUTION_PLAN_ID: searchPlan.planId },
     });
     assert.equal(result.code, 0, result.stderr);
     const envelope = JSON.parse(result.stdout.match(/^RESULT (.*)$/m)?.[1] ?? 'null');
@@ -272,7 +275,7 @@ const integration = describe.skipIf(!existsSync(cliPath))('fshine ↔ 17dz 计�
     const sideQuery = runCliSync({
       platformRoot: platformRoot!,
       args: ['operation', 'run', 'finance.query-receivables', '--query', '胜利'],
-      env: { DZ_PLAN_ID: searchPlan.planId },
+      env: { EXECUTION_PLAN_ID: searchPlan.planId },
     });
     assert.notEqual(sideQuery.code, 0, '账套搜索计划不得旁路调用应收查询。');
     const ledger = JSON.parse(readFileSync(path.join(stateDir, 'plans.json'), 'utf8'));

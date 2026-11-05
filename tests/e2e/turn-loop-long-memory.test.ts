@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：长期记忆全链（架构冻结清单第 7 条的替身边界内职责）。
  *
@@ -74,9 +77,9 @@ function scriptedMemoryExtractor(
     });
 }
 
-/** 平台调用审计（DZ_AUDIT_PATH，逐行 JSON）：用例内读本用例自己的审计文件。 */
+/** 平台调用审计（EXECUTION_AUDIT_PATH，逐行 JSON）：用例内读本用例自己的审计文件。 */
 function auditLines(): string[] {
-  const file = process.env['DZ_AUDIT_PATH'];
+  const file = process.env['EXECUTION_AUDIT_PATH'];
   if (!file || !existsSync(file)) return [];
   return readFileSync(file, 'utf8').split('\n').filter((line) => line.trim().length > 0);
 }
@@ -90,7 +93,7 @@ function unescapeProjection(text: string): string {
   return text.replace(/\\([\\`*_{}[\]()#+.!|>~-])/g, '$1').replace(/\\([\\`*_{}[\]()#+.!|>~-])/g, '$1');
 }
 
-describe('离线全链 e2e：长期记忆确立、注入与 principal 级延续', () => {
+describe('[L4 集成] 离线全链 e2e：长期记忆确立、注入与 principal 级延续', () => {
   it('LM-1 记忆确立与注入：cue 命中即整理落库（带真实事件溯源），下一回合模型输入带投影头且回复正常', async () => {
     const observed: string[] = [];
     const declarations: Array<Record<string, unknown>> = [

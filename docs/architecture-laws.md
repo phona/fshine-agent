@@ -56,13 +56,13 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **当前违例**：
 
-- **网关名 `bin/17dz`：已收敛至 1（配置缺省值）**——非测试 src 里只剩 `packages/agent/src/platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，其余全部由它派生（消息文本与提示词不再各抄一份）。历史窗口内曾 20→35 增长（+15，+75%，违反只减不增），增长源=错误码表与提示词的消息文本（`error-codes.ts` 0→7、`plan-runtime.ts` 1→7、`operation-labels.ts` 0→1、`context.ts` 2→3）——已由配置派生修复。
+- **网关名 `bin/17dz`：代码字面量已收敛至 1（配置缺省值）**——非测试 src 里只剩 `packages/agent/src/platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，其余全部由它派生（消息文本与提示词不再各抄一份）。口径：此处“只剩一处”仅指代码字面量，注释/示例字面量除外；按守卫命令字面 grep 的总量是 10 行（代码 1 处 + 注释/示例 9 处），main 为 8 行、PR 为 10 行，**总量“只减不增”不成立**，不要写成已成立。历史窗口内曾 20→35 增长（+15，+75%，违反只减不增），增长源=错误码表与提示词的消息文本（`error-codes.ts` 0→7、`plan-runtime.ts` 1→7、`operation-labels.ts` 0→1、`context.ts` 2→3）——已由配置派生修复。
 - **plan 草案形状的教学副本 6 处且自相矛盾（D-011）**——**已关**（2026-09-27 Wave 2 Lane D）。6 处收敛为 1 处：`error-codes.ts` 的 `planDraftExample()` 是唯一教学源（内容与平台 plan-schema.json 声明一致），表内 5 处与 `context.ts` worker 提示词 1 处全部由它派生；机械锁 = `plan-teaching.test.ts`（跨仓读平台 schema 断言形态合法 + 宿主解析器认同一形状 + 源文件零第二种形状字面量）。原闭环判据 `grep 'plan {"goal"'` → 0 已作废：Lane B 把 goal 收编为 schema 声明过的可选元数据，教学示例合法地含 goal。历史形状（D0 审计快照，保留备查）：fshine `error-codes.ts` 计划门错误表 5 处（`CORRECT_PLAN_SHAPE`/`PLAN_SUBCOMMAND_RESERVED`/`PLAN_JSON_NOT_OBJECT`/`PLAN_CALLS_NOT_ARRAY`/`PLAN_SHAPE_GATE_TEACHING`，其中 4 处教带 goal 形、1 处教无 goal 形）+ `context.ts` worker 系统提示词 1 处；17dz SKILL 那 1 处已由 Lane B④ 删除。矛盾要害即"同一张表两种形状 = 模型静默选一份信"。
 - **错误码表镜像**：~~`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。~~ **已退化为渲染层**（2026-09-27 Wave 2 Lane D）：`NOT_FOUND_SELECTION` 只拼结构，措辞槽位优先取信封 `error.correctForm`；宿主表仅存"信封没带时的兜底"并挂"遗留待清"（D-002）。`AMBIGUOUS_SELECTION` 的用户可见事实已全部来自信封数据，平台给它的 correctForm 是解析方规则、不上屏。
 - **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts:72`。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
 - **ask.ts 复刻装配层**：~~`scripts/ask.ts`（第 104–137 行）把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。~~ **已消除**（2026-09-27 Wave 2 Lane D）：`apps/server/plan-confirmation-route.ts` 导出工厂 `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`，assembly 与 ask.ts 共用；TTL 收敛为 `PLAN_CONFIRMATION_TTL_MS`（D-013）。
 
-**闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；网关名 ≤1（配置派生）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
+**闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 17dz `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，`plan-runtime.ts:272` 起）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；代码网关名 ≤1（配置派生；注释/示例字面量除外，grep 总量另记，不计入本判据）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
 
 ---
 
@@ -105,7 +105,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **机械守卫**：B 审计清单（每条失败路径归这两类之一）+ 熔断上限测试。
 
-**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，**自上次计划成功激活以来连续未激活的提交次数**达上限即收敛——D-099 语义修正：原注释与消息都写"连续拒绝"，实现却对每一跳通过形状解析与写关闭检查的提交自增、成功后不归零，数的是提交次数；现在唯一归零点在 `PLAN ACTIVE` 那一支，消息也照实说「连续 N 次提交方案均未激活」。残余代价：从不激活但连提 6 次以上的 worker 仍会被挡，那是熔断器的设计行为）。
+**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，**自上次计划成功激活以来连续未激活的提交次数**达上限即收敛——D-099 语义修正：原注释与消息都写"连续拒绝"，实现却对每一跳通过形状解析与写关闭检查的提交自增、成功后不归零，数的是提交次数；现在唯一归零点在 `PLAN ACTIVE` 那一支，消息也照实说「连续 N 次提交方案均未激活」。残余代价：从不激活但连提 6 次以上的 worker 仍会被挡，那是熔断器的设计行为）。另有**非熔断的收尾提示**：步数帽 `DEFAULT_WORKER_STEP_CAP = 50`（`worker-step-cap.ts`，第 51 次放行送一次收尾 steer，之后不再重复；超帽不拒单，真正的硬上限仍是 wall-clock 预算与计划权重帽——标定见本节标定表新增行与 debt-ledger D-147）。
 
 **闭环判据**：任何新失败路径进审计清单；新增无界回路即红。
 
@@ -123,7 +123,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 - ~~`apps/server/reply.ts` 假数据彩蛋（第 9–16 行）：命中 `/发图|测试图片|图片/` 即返回硬编码 `renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200])` + "幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)"。~~ **已清**（文件整体删除，`renderBarChartPng`/"模拟数据" 全仓非测试零命中；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-051 已关。
 - `step-text.ts` 6 个退役工具名死分支：`search_account_sets`/`get_current_accounting_period`/`list_vouchers`/`inspect_account_set`/`search_references`/`get_login_status`（现挂在 leak-lint 的字面量 if 白名单，`platform-leak-lint.test.ts:221-226`，属"遗留待清"）。
 - 17dz 仓根 465KB 会话日志：`codex-session-01a0bd75-38f6-79f3-91ed-617ba8fe5ce9.md`（465137 字节，**已被 git 跟踪**）。
-- `.env.real` 残留（fshine 仓根，1635 字节，已被 `.gitignore`——本地沉积、非主干，但有泄露面）。
+- `.env.real` 残留（fshine 仓根，1635 字节，已被 `.gitignore`——本地沉积、非主干，但有泄露面；**D-054：接受不修，仓库侧已关**——与台账同步，见 debt-ledger 2026-11-04 补充记录）。
 - ~~fshine `.agents/skills/finance` 死技能（`name: finance`；运行态 `skillRoots` 指向 `.agents/skills-serve`、`businessSkillPath` 指向 `docs/business-skill.md`，零引用）。~~ 技能本体已删（Wave 1 `4362cef`）；**会复活它的配置模板引用已清**（2026-09-27 Wave 2 Lane D：`config/agent.example.yaml` 的 skillRoots 改指 `.agents/skills-serve` + `config.test.ts` 机械锁，D-055）。
 
 **闭环判据**：清单清空（每一项要么删、要么有守卫 + 标签 + 限期）。
@@ -166,6 +166,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 | **2048 帽**（`MAX_REPLY_BYTES`，channel-wecom `text.ts`） | 硬（无声截断） | **无从考据**——常数是抄来的，平台 SDK README 写明 20480，从未有人核过 | 误拦：超过约 600 汉字的正常回复被**无声**截断，用户拿不到完整答案；自愈路径：无（没有截断标记、没有日志）——这正是它烂掉的原因。已修：20480 + 截断标记 + 守夜事件（D-021/D-022 已关） |
 | **实体门标定**（`validatePlanEntities`，turn-contract.ts） | 硬（fail-closed） | 真事故：flash 模型幻觉过账套名——门禁的逐字溯源正是那次事故的修法，功能必须保留 | 误拦：连续会话里"用户上一轮亲自查过的对象，本轮只补一个范围编码"（消息里没有对象名 → 三个来源全空 → 判死，用户被要求重新报名字）；自愈路径：修复前**没有**（死局）。已修：第四来源 `sessionEntities`（执行过的 calls 快照 + 澄清选定的候选，只收用户亲自操作/确认过的）+ correctForm 正路径（先名称检索让平台响应携带规范名再提交）。**这是标定修复不是放宽**：进 haystack 的每条都有用户来源与确立轮次可审计（D-068 已关） |
 | **账套读授权软限制**（accountSetScope 名单模式，context.ts `workerSystemPrompt`） | **软**（仅提示词一句"不得查询或操作名单外对象"；写路径同场景是硬门——capability + 名单非空即拒） | Stage 1–3 单用户全量授权下"够用"——从未按多用户标定过 | 当前不误拦（软控制的危险方向是**漏拦**）：多用户激活后名单外读操作没有任何代码级拦截。激活条件 = Stage 4 多用户；闭环 = 读路径硬门（D-066 待办） |
+| **步数帽 50**（`worker-step-cap.ts`，第 51 次放行送收尾 steer） | **硬触发、软后果**（触发是代码级确定性；后果只是提示，不拒单、不停轮） | **无事故/数据标定**——50 是可配置的默认值（`stepCap` 选项 / `FSHINE_WORKER_STEP_CAP`，非法值回退 50），复用 90% 预算收尾同款提示；按本节纪律，答不出数据依据的控制应登记为待标定（见 D-147），不得写成经实测标定 | 误拦：合法长任务（>50 次廉价调用）会被提前催收尾，可能交付未完成；自愈路径：提示不拒单，worker 可继续，续跑靠交接文件；操作方可调大 cap。反向缺口：忽略提示的 worker 不会被拦，帽不是硬上限 |
+| **提案复核 fail-closed**（`context.ts` 创建路径，`92f7ed8`） | **硬**（无驱动 / 无 schema / 不一致 → 不发确认码、不落意图，fail-closed） | P2 前状态的洞：`proposal_review_skipped` 分支允许无复核继续（生产装配当时未接线、schema 取问接口缺失）；`92f7ed8` 以装配注入 + schema 取问关掉该洞 | 误拦：平台未下发 schema 或驱动未注入时，合法提案也被拦，且文案只说请重新发起录入（确定性死循环，见 D-149）；自愈路径：**目前缺失**——无同提案重试、无可行动信息；workaround 是运营先核查 `operation list --json` 的 `proposal.create` 行是否带 `proposalSchema`，确认平台已修复后再重发，否则每次重发都会新建一个被遗弃的平台提案 |
 
 **纪律**：新控制进主干前把三问的答案写进它的注释；老控制每次被事故触及时重答三问——重答发现标定与现状不符的，按"标定修复"处理（收窄或修正出处范围），不拆控制本身（用户已明确否决"拆安全机制"式修法）。
 
@@ -185,7 +187,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 ## 执行纪律
 
-1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 17dz `dz-env` 过渡期双读。证伪项：初核曾把 17dz `docs/architecture.md:74` 的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
+1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 17dz `execution-env` 过渡期双读。证伪项：初核曾把 17dz `docs/architecture.md:74` 的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
 2. **判据若写得比机制真相更干净，执行者会把防御机制当违例删掉。** 所以标签制度先于清单、验收时逐条核对标签——一条命中该挂"防御排除"还是"警职执法"，删了它会不会让某道防线变聋 / 变瞎，是唯一裁决问题。
 3. **每波只 revert 该波 commit，宪章与台账保留。** 债务状态是快照不是负担；宪章跨波有效，不随单波回退消失。
 4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零，本次对账实证四起（工具面头注释两度未跟、`runtime.ts:1539` 指向拆分前文件、`runtime.ts:1260` 实为 1169、`context.ts:360` 指向已删违例）。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理另登记台账 D-104。

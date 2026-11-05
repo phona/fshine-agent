@@ -12,24 +12,24 @@
  * 空），不含敏感信息。
  *
  * 判据复用不重抄：执行器判定用 `@fshine/agent` 的 `isPlatformMock`（与业务代码同一把尺）；
- * `DZ_ALLOW_REAL` 的权威在 17dz-platform `src/lib/real-execution.js`（fail-closed 门，
+ * `EXECUTION_ALLOW_REAL` 的权威在 17dz-platform `src/lib/real-execution.js`（fail-closed 门，
  * 2026-10-12 加），这里只为日志读它。
  */
 import { isPlatformMock, MOCK_EXECUTOR_ENV, REAL_COMMIT_ENV } from '@fshine/agent';
 
 /**
  * 真平台运维授权（17dz-platform `src/lib/real-execution.js` 的 fail-closed 门）：
- * 非 mock 且触平台的执行必须显式 `DZ_ALLOW_REAL=1`，否则 REAL_EXECUTION_NOT_ALLOWED。
+ * 非 mock 且触平台的执行必须显式 `EXECUTION_ALLOW_REAL=1`，否则 REAL_EXECUTION_NOT_ALLOWED。
  * 只认字面量 '1'（'true'/'yes'/'0' 都不算——模糊真值是 fail-open 的入口）。
  */
-export const ALLOW_REAL_ENV = 'DZ_ALLOW_REAL';
+export const ALLOW_REAL_ENV = 'EXECUTION_ALLOW_REAL';
 
 export interface RuntimeModeSummary {
-  /** mock = 应答器替身（不触平台）；real = 真平台执行器（DZ_EXECUTOR 空/未设/怪值） */
+  /** mock = 应答器替身（不触平台）；real = 真平台执行器（EXECUTION_EXECUTOR 空/未设/怪值） */
   executor: 'mock' | 'real';
-  /** DZ_EXECUTOR 原值：空串 = 置空/未设；怪值（如 'Mock'）原样露出便于诊断 */
+  /** EXECUTION_EXECUTOR 原值：空串 = 置空/未设；怪值（如 'Mock'）原样露出便于诊断 */
   executorRaw: string;
-  /** DZ_ALLOW_REAL === '1'：触平台执行的运维授权（real 之下缺它 = 执行被门拒绝） */
+  /** EXECUTION_ALLOW_REAL === '1'：触平台执行的运维授权（real 之下缺它 = 执行被门拒绝） */
   realExecutionAllowed: boolean;
   /** FSHINE_REAL_COMMIT === '1'：真平台写落账授权（缺它 = 确认码到 confirm_held，不写） */
   realCommitAuthorized: boolean;
@@ -55,9 +55,9 @@ function noteOf(
     return 'executor=mock：平台查询由 mock 应答器应答，不触真平台（授权/写闸在 mock 下无意义）';
   }
   if (!realExecutionAllowed) {
-    return 'executor=real 但 DZ_ALLOW_REAL≠1：触平台执行将被拒绝（REAL_EXECUTION_NOT_ALLOWED），纯本地计算不受影响';
+    return 'executor=real 但 EXECUTION_ALLOW_REAL≠1：触平台执行将被拒绝（REAL_EXECUTION_NOT_ALLOWED），纯本地计算不受影响';
   }
   return realCommitAuthorized
-    ? 'executor=real 且 DZ_ALLOW_REAL=1：触平台执行已授权；FSHINE_REAL_COMMIT=1：真平台写落账已授权'
-    : 'executor=real 且 DZ_ALLOW_REAL=1：触平台执行已授权；真平台写落账未授权（FSHINE_REAL_COMMIT≠1，确认码将到达 confirm_held）';
+    ? 'executor=real 且 EXECUTION_ALLOW_REAL=1：触平台执行已授权；FSHINE_REAL_COMMIT=1：真平台写落账已授权'
+    : 'executor=real 且 EXECUTION_ALLOW_REAL=1：触平台执行已授权；真平台写落账未授权（FSHINE_REAL_COMMIT≠1，确认码将到达 confirm_held）';
 }

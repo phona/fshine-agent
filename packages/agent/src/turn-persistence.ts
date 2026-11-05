@@ -25,7 +25,7 @@ import { createHash } from 'node:crypto';
 import type { ContextStateRepo, ConversationEventRecord, ConversationLogRepo, MemoryRecordRepo, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import type { TurnDriver } from './driver';
-import { RUN_17DZ_TASK_TOOL } from './context';
+import { RUN_EXECUTION_TASK_TOOL } from './context';
 import { reduceContextState, type ContextState } from './context-state';
 import { extractContextWithTurnDriver } from './context-model';
 import { clarificationIssuedRecord, clarificationResolvedRecord, type ClarificationBinding } from './clarification-events';
@@ -198,7 +198,7 @@ export function extract17dzToolResultEvents(
   for (const [index, message] of messages.entries()) {
     const item = message as { role?: string; toolName?: string; toolCallId?: unknown; content?: unknown; timestamp?: unknown };
     if (item.role !== 'toolResult') continue;
-    if (item.toolName !== RUN_17DZ_TASK_TOOL && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
+    if (item.toolName !== RUN_EXECUTION_TASK_TOOL && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
     let content = messageText(item.content);
     // The tool result is usually a JSON envelope. Keep only its user-facing text field.
     let taskId: string | undefined;

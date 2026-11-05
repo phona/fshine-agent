@@ -33,10 +33,11 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { GATEWAY_INVOCATION, parseEnvelope, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
+import { createStepCapWindDown, parseStepCap } from './worker-step-cap';
 
 /**
  * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
@@ -147,6 +148,46 @@ export function platformExecutorBypassed(signal: {
   producedFiles: readonly string[];
 }): boolean {
   return signal.localCalls > 0 && signal.executorCalls === 0 && signal.producedFiles.length > 0;
+}
+
+/** Allowed-bash partition counts by gate kind (see gateInvocationKind). */
+export interface GateCallCounts {
+  gateCalls: number;
+  executorCalls: number;
+  localCalls: number;
+  auxiliaryCalls: number;
+}
+
+/**
+ * Partition of allowed bash calls by gate kind. The three kinds are
+ * mutually exclusive (see gateInvocationKind), so exactly one sub-count
+ * grows per call and the partition sum always equals gateCalls.
+ *
+ * This is the production counting function the driver calls in
+ * onAllowedBash. It is deliberately separate from the step-cap wind-down
+ * tracker: counting is unconditional, wind-down is a side effect only.
+ * Two earlier defects had distinct causes (see gate-call-counts.test.ts
+ * header — do not merge them into one cause):
+ *  - else binding: the old code counted executor calls separately, then
+ *    counted every non-local call into auxiliaryCalls, so an executor
+ *    call was counted in executorCalls and again in auxiliaryCalls;
+ *  - wind-down gating: the old code skipped the sub-count when the
+ *    wind-down tracker fired, so a wind-down local call was dropped
+ *    from localCalls (suppressing the platformExecutorBypassed
+ *    disclosure when that call was the round's only local call), while
+ *    a wind-down executor call was kept because executorCalls was
+ *    incremented before the gate.
+ */
+export function recordAllowedBashCall(
+  counts: GateCallCounts,
+  kind: GateInvocationKind,
+): GateCallCounts {
+  return {
+    gateCalls: counts.gateCalls + 1,
+    executorCalls: counts.executorCalls + (kind === 'executor' ? 1 : 0),
+    localCalls: counts.localCalls + (kind === 'local' ? 1 : 0),
+    auxiliaryCalls: counts.auxiliaryCalls + (kind === 'auxiliary' ? 1 : 0),
+  };
 }
 
 /** 绕开平台执行器的告警事件（宿主侧结构化留痕，只披露、不改回合结果）。 */
@@ -333,6 +374,8 @@ export interface PiCodingTurnDriverOptions {
   platformRoot?: string;
   /** Keep SDK auth/session files outside the mounted platform workspace. */
   agentDir?: string;
+  /** Profile-declared gateway invocation (interface §1/§2). */
+  gateway?: string;
   /** G1 工具门事件留痕（放行与拦截都上报，落 tool_calls 审计）。 */
   serveGateAudit?: (event: ServeGateEvent) => void;
   /** script → label 查找表（测试替身注入点）；缺省经平台 CLI 派生。 */
@@ -368,6 +411,13 @@ export interface PiCodingTurnDriverOptions {
    * （与 operationLabels 同族）；生产语义由常量测试钉住。
    */
   modelRetryDelaysMs?: readonly number[];
+  /**
+   * Free-worker step cap (Phase 2): allowed gate calls per turn, default 50.
+   * The (cap+1)th allowed bash triggers the same wind-down nudge as the
+   * 90% wall-clock point (done + not-done, no new work). Counting reuses
+   * gateCalls; this option only changes the threshold, never the counter.
+   */
+  stepCap?: number;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -375,6 +425,8 @@ export interface PiCodingWorkerSessionOptions {
   sensitivePaths?: readonly string[];
 
   cwd: string;
+  /** Profile-declared gateway invocation (interface §1/§2). */
+  gateway?: string;
   skillRoots: readonly string[];
   systemPrompt: string;
   sessionId?: string;
@@ -576,6 +628,24 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const agentDir = options.agentDir ?? process.env.FSHINE_PI_AGENT_DIR ?? `${process.cwd()}/data/pi-agent`;
       // 执行面回执：G1 事件计数（放行的 bash 才构成对平台的真实触达）
       let gateCalls = 0;
+      // 自由 worker 步数帽（Phase 2）：计数复用 gateCalls，阈值可配，缺省 50。
+      // steer 持有者先占位、会话建成后再赋值——onAllowedBash 在会话建成后的
+      // 工具执行时才被调用，届时持有者已指向 session.agent.steer，与
+      // currentPlan 的 latch 哲学同一手法。
+      const stepCap = parseStepCap(options.stepCap ?? options.env.FSHINE_WORKER_STEP_CAP);
+      // 步数帽收尾（第 2 包）：跟踪器是 worker-step-cap.ts 的生产代码，
+      // 驱动在每次放行后把自己的 gateCalls 计数喂给它；第 cap+1 次恰好
+      // 送一次 wind-down，之后不再重复。steer 持有者先占位、会话建成后
+      // 再赋值——onAllowedBash 在会话建成后的工具执行时才被调用，届时
+      // 持有者已指向 session.agent.steer，与 currentPlan 的 latch 哲学同一手法。
+      let stepCapSteer: ((content: string) => void) | null = null;
+      // 步数帽收尾未成功送达的待补发标志（见下方 stepCapSteer 赋值处）：
+      // 跟踪器先置 latch 再调 steer，steer 一抛错跟踪器此后不再重调，
+      // 所以驱动自己记 pending，在下一次放行时补发——成功送达一次即清，
+      // 失败则保持 pending 待再下一次放行。墙钟 wind-down 失败有 abort +
+      // 宿主合成终稿兜底，步数帽没有同款兜底，故不能只记 warn 就丢信号。
+      let stepCapWindDownPending = false;
+      const fireStepCapWindDown = createStepCapWindDown(stepCap, () => stepCapSteer?.(WORKER_WIND_DOWN_NUDGE));
       let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
       // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
@@ -672,6 +742,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
+        ...(input.gateway ? { gateway: input.gateway } : {}),
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
@@ -694,10 +765,32 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             options.serveGateAudit?.(event);
           },
           onAllowedBash: (kind) => {
-            gateCalls += 1;
-            if (kind === 'executor') executorCalls += 1;
-            else if (kind === 'local') localCalls += 1;
-            else auxiliaryCalls += 1;
+            // 分项计数无条件先行：每一次放行恰好计入一个族，分项和恒等于
+            // gateCalls。步数帽 wind-down 只当副作用触发一次（第 cap+1 次
+            // 送一次 90% 预算点同款 wind-down，后续放行不再重复打断，模型
+            // 仍可收尾交已做 + 未做），它的返回值不再 gating 计数。旧逻辑
+            // 是两处各错、根因不同：wind-down 门控使 wind-down 那次 local
+            // 从 localCalls 丢失；else 分支把非 local 一律计 auxiliary，
+            // 使 executor 在非 wind-down 时也被双计。现三分支互斥，两者皆消。
+            const next = recordAllowedBashCall(
+              { gateCalls, executorCalls, localCalls, auxiliaryCalls },
+              kind,
+            );
+            gateCalls = next.gateCalls;
+            executorCalls = next.executorCalls;
+            localCalls = next.localCalls;
+            auxiliaryCalls = next.auxiliaryCalls;
+            // 步数帽失败补发：上一轮 steer 失败留下的 pending 在本次放行时
+            // 先补发（不在同一轮内立即重发，避免一次放行连发两次信号/日志）。
+            // 补发前先清 pending：成功则保持清除，失败时 stepCapSteer 的
+            // catch 会重新置位，待下一次放行再补。跟踪器 latch 已置位，
+            // 故补发直接调 steer，不再经跟踪器。
+            const pendingSteer = stepCapSteer;
+            if (stepCapWindDownPending && pendingSteer) {
+              stepCapWindDownPending = false;
+              pendingSteer(WORKER_WIND_DOWN_NUDGE);
+            }
+            fireStepCapWindDown(gateCalls);
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
             // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
@@ -715,13 +808,34 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         sensitivePaths: input.sensitivePaths,
         onNotice: noticeOnce,
         planCliRunner: options.planCliRunner,
-        planActivationSecret: options.planActivationSecret ?? options.env.DZ_PLAN_ACTIVATION_SECRET,
+        planActivationSecret: options.planActivationSecret ?? options.env.EXECUTION_PLAN_ACTIVATION_SECRET,
         onPendingPlan: (plan) => { pendingPlan = plan; },
         onProposalOutcome: (outcome) => { proposalOutcome = outcome; },
         turnDeclaration: input.turnDeclaration,
         entitySources: input.entitySources,
       });
-      const footprint = (): string => `${gateCalls} 次 ${GATEWAY_INVOCATION} 调用`;
+      // 步数帽 steer 持有者在此指向会话：onAllowedBash 在此之后才被调用。
+      // 纪律与墙钟 wind-down 同款（try/catch + 结构化日志，失败不外溢，
+      // 不让一次 steer 抛错打断 onAllowedBash / 回合），但失败语义不同：
+      // 墙钟失败靠到点 abort + 宿主合成终稿兜底，步数帽失败置 pending，
+      // 由 onAllowedBash 在下一次放行时补发（见上）。“只送一次”指成功
+      // 送达一次：成功路径上跟踪器 + 本标志均不再重发；失败重试不计入
+      // “已送”，直到某次 steer 成功才算送达。
+      stepCapSteer = (content: string) => {
+        try {
+          session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
+          console.info(JSON.stringify({ event: 'worker_step_cap_wind_down_signaled', requestId: input.requestId, taskId: input.sessionId }));
+        } catch (error) {
+          stepCapWindDownPending = true;
+          console.warn(JSON.stringify({
+            event: 'worker_step_cap_wind_down_failed',
+            requestId: input.requestId,
+            taskId: input.sessionId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+        }
+      };
+      const footprint = (): string => `${gateCalls} 次 ${resolveGatewayText(options.gateway)} 调用`;
       // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
       // 时，委派结果的文本由宿主合成的话术整体替换。为什么必须在结果时刻合成而不是只给
       // worker 一条 PLAN STOP：T7 事故形态——模型走了完整的"录入准备"流程（行为优秀），
@@ -1323,6 +1437,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
+    ...(options.gateway ? { gateway: options.gateway } : {}),
     // 本回合工作区：宿主按任务注入（`tmp/task_<taskId>`，续跑同任务共享）。宿主有随机源
     // （taskId），不必让 worker 自己随机（它也没有随机手段）。给了它，write 只放行这一个
     // 目录——共享 tmp/ 下多个会话同时写同名产物会互相覆盖，而覆盖后的产物看不出被谁污染过。
@@ -1380,7 +1495,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 通道的失败若绕过上报，"worker 指了个越界文件"在 tool_calls 里查不到。
       let submission: ResolvedPlanSubmission | null = null;
       try {
-        const parsed = parsePlanCallsCommand(String(args?.['command'] ?? ''));
+        const parsed = parsePlanCallsCommand(String(args?.['command'] ?? ''), options.gateway);
         if (parsed) submission = await resolvePlanSubmission(parsed);
       } catch (error) {
         // 形状不合法的提交也要留痕：这一跳同样是"worker 提交了方案"的事实，只是宿主
@@ -1428,7 +1543,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 条目、确认码、用户可见摘要全都不存在，用户拿不到确认码（A 波标定的缺口形状）。
       // B 波那个"提案创建走不走网关"的开关曾让整支可缺席（关 = 走遗留文本路径）；C 波删掉
       // 那条路后开关退役，拦截恒开。
-      const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols);
+      const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols, options.gateway);
       if (proposalCall) return decideProposalCreation(proposalCall);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });

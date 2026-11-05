@@ -41,7 +41,7 @@ import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
 import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { GATEWAY_INVOCATION } from './platform-contract';
+import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 import { hasServerPath } from './server-paths';
 import type { PlanCall } from './plan-runtime';
 
@@ -84,6 +84,12 @@ export interface ServeGateOptions {
   onEvent?: (event: ServeGateEvent) => void;
   /** 平台根目录：用于经公共 CLI 派生能力清单（定价与脚本存在性校验）。缺省降级。 */
   platformRoot?: string;
+  /**
+   * profile 声明的网关调用形式（接口文档 §2）：首词规则与 plan 提交
+   * 识别据此派生。未注入时走遗留缺省（见 resolveGatewayText 与
+   * 接口文档 §10），生产路径应由驱动层注入 profile.gateway。
+   */
+  gateway?: string;
   /** 知识面规则（read/ls 白名单），缺省内置。 */
   knowledgePaths?: readonly string[];
   /** 敏感路径规则，缺省内置。 */
@@ -214,21 +220,23 @@ export function workspaceRelPath(root: string, value: string): string | null {
 }
 
 /**
- * 首词规则（警职执法）：识别"这条 bash 是不是一次平台网关调用"——首 token 须为网关
- * 可执行文件（可带路径前缀）。模式从配置值 GATEWAY_INVOCATION 构造，不硬编码网关名
- * （平台改网关名只改 platform-contract.ts 那一处）。env 前缀（FOO=bar …）天然不匹配。
+ * 文本识别正则的来源：createServeGate 按注入的 gateway 派生
+ * （gatewayTextPatterns），未注入时走遗留缺省；与 plan-runtime 的
+ * locatePlanSubmission 共用同一网关名来源，不存在第二份抄写。
+ * 模块级常量不再持有网关名——正则随 gate 实例走 profile。
  */
-const SERVE_CLI_INVOCATION_RE = new RegExp(`(^|/)${GATEWAY_INVOCATION}$`);
+function servePatterns(gateway?: string): { invocation: RegExp; plan: RegExp } {
+  return gatewayTextPatterns(resolveGatewayText(gateway));
+}
 /**
- * 网关 plan 提交识别（警职执法）：命中即走"教学式拒绝"分支（真形状见 error-codes 的
- * PLAN_SHAPE_GATE_TEACHING），而非 merely block。模式同样从配置值 GATEWAY_INVOCATION
- * 构造——与 plan-runtime 的 locatePlanSubmission 共用同一网关名来源，不存在第二份抄写。
+ * 首词规则（警职执法）：识别"这条 bash 是不是一次平台网关调用"——首 token 须为网关
+ * 可执行文件（可带路径前缀）。模式从注入的 gateway 派生（gatewayTextPatterns），
+ * 未注入时走遗留缺省（接口文档 §2/§10）。env 前缀天然不匹配。
  */
-const SERVE_CLI_PLAN_RE = new RegExp(`(?:^|\\s)(?:[^\\s]+/)?${GATEWAY_INVOCATION}\\s+plan(?:\\s|$)`);
-export function isServeCliInvocation(command: string): boolean {
+export function isServeCliInvocation(command: string, gateway?: string): boolean {
   const head = splitCommandTokens(command)[0];
   if (!head) return false;
-  return SERVE_CLI_INVOCATION_RE.test(head);
+  return servePatterns(gateway).invocation.test(head);
 }
 
 // 命令拼接/替换/重定向/管道：worker bash 经 shell 执行，放行这些字符等于放行任意命令
@@ -346,16 +354,16 @@ function localRoots(scratchDir?: string): readonly string[] {
  * 必须有后者之外的这一问，否则 local 打到放行根之外时会落穿到通用网关分支被放行
  * （本地根语义见 isLocalScratchRun；越界的执行面拦截归执行层网关原生执法）。
  */
-function localModeTarget(command: string): string | null {
+function localModeTarget(command: string, gateway?: string): string | null {
   const tokens = splitCommandTokens(command);
-  if (!tokens[0] || !SERVE_CLI_INVOCATION_RE.test(tokens[0])) return null;
+  if (!tokens[0] || !servePatterns(gateway).invocation.test(tokens[0])) return null;
   if (tokens[1] !== 'local') return null;
   return tokens[2] ?? null;
 }
 
-function isLocalScratchRun(command: string, scratchDir?: string, platformRoot?: string): boolean {
+function isLocalScratchRun(command: string, scratchDir?: string, platformRoot?: string, gateway?: string): boolean {
   const tokens = splitCommandTokens(command);
-  if (!tokens[0] || !SERVE_CLI_INVOCATION_RE.test(tokens[0])) return false;
+  if (!tokens[0] || !servePatterns(gateway).invocation.test(tokens[0])) return false;
   if (tokens[1] !== 'local') return false;
   const target = tokens[2];
   if (!target) return false;
@@ -374,13 +382,12 @@ function isLocalScratchRun(command: string, scratchDir?: string, platformRoot?: 
 /**
  * 命令 → 命中的元数据子命令名；不是元数据返回 null。
  *
- * 先校验首 token 确是网关（复用 SERVE_CLI_INVOCATION_RE，网关名单仍只有
- * platform-contract 那一处），再认子命令——否则一条普通命令里拼上 `operation list`
+ * 先校验首 token 确是网关（servePatterns 按注入 gateway 派生），再认子命令——否则一条普通命令里拼上 `operation list`
  * 字样就能绕过计划前置。
  */
-export function serveMetadataCommand(command: string): string | null {
+export function serveMetadataCommand(command: string, gateway?: string): string | null {
   const tokens = splitCommandTokens(command);
-  if (!tokens[0] || !SERVE_CLI_INVOCATION_RE.test(tokens[0])) return null;
+  if (!tokens[0] || !servePatterns(gateway).invocation.test(tokens[0])) return null;
   const head = tokens[1];
   const sub = tokens[2];
   if (!head || !sub) return null;
@@ -418,9 +425,9 @@ export function extractGateScript(command: string): string | null {
  */
 export type GateInvocationKind = 'executor' | 'local' | 'auxiliary';
 
-export function gateInvocationKind(command: string): GateInvocationKind | null {
-  if (serveMetadataCommand(command)) return 'auxiliary';
-  if (localModeTarget(command) !== null) return 'local';
+export function gateInvocationKind(command: string, gateway?: string): GateInvocationKind | null {
+  if (serveMetadataCommand(command, gateway)) return 'auxiliary';
+  if (localModeTarget(command, gateway) !== null) return 'local';
   if (extractGateScript(command) !== null) return 'executor';
   const tokens = splitCommandTokens(command);
   if (tokens[1] && SERVE_NON_EXECUTOR_GROUPS.has(tokens[1])) return 'auxiliary';
@@ -640,6 +647,8 @@ function planExempt(command: string, semantics: OperationSemantics | undefined):
 
 export function createServeGate(options: ServeGateOptions = {}) {
   const { onEvent, platformRoot } = options;
+  const gateway = options.gateway;
+  const patterns = servePatterns(gateway);
   const sensitivePaths = options.sensitivePaths ?? DEFAULT_SENSITIVE_PATHS;
   const knowledgePaths = options.knowledgePaths ?? DEFAULT_KNOWLEDGE_PATHS;
   const describeArgs = options.describeArgs ?? ((command) => describeKeyArgs(command, options.operationArgStyles));
@@ -666,20 +675,20 @@ export function createServeGate(options: ServeGateOptions = {}) {
     if (name === 'bash') {
       const command = String(args['command'] ?? '').trim();
       detail = command;
-      invocation = gateInvocationKind(command);
-      // 元数据查询先行（且必须排在 SERVE_CLI_PLAN_RE 教学分支之前）：
+      invocation = gateInvocationKind(command, gateway);
+      // 元数据查询先行（且必须排在 plan 教学分支之前）：
       // `plan --schema` 字面上含 `plan`，会被那条正则判成"worker 在提交方案"而吃到
       // PLAN_SHAPE_GATE_TEACHING——可它恰恰是平台给宿主的机器可读出口，不是方案提交。
       // 元数据分支不判 planActive（理由见 SERVE_METADATA_COMMANDS 注释），但仍校验
       // shell 元字符，且照常落 onEvent 审计——"宿主放行了什么"必须可复盘。
-      const metadata = serveMetadataCommand(command);
-      const isGateway = isServeCliInvocation(command);
+      const metadata = serveMetadataCommand(command, gateway);
+      const isGateway = isServeCliInvocation(command, gateway);
       if (metadata) {
         // 元数据查询放行（detail 已记命令原文，审计由此留痕）。
-      } else if (isLocalScratchRun(command, options.scratchDir, platformRoot)) {
+      } else if (isLocalScratchRun(command, options.scratchDir, platformRoot, gateway)) {
         // 本地执行：不需要计划（纯本地计算，见 isLocalScratchRun 注释）。留痕照旧
         // （detail = 命令原文）。
-      } else if (SERVE_CLI_PLAN_RE.test(command)) {
+      } else if (patterns.plan.test(command)) {
         // 教学而非 merely 拒绝：真实平台实测里旧消息（"只能提交 JSON calls 方案"）
         // 没说怎么提交，worker 被拒后理解成"把 JSON 打印出来"，步步空转。因此这里直接
         // 给出唯一合法形式——bash 工具里的单行原始命令，并点名三种常见错误包装。
@@ -687,9 +696,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
         // platform-leak-lint），也不出现平台脚本文件名。
         verdict = {
           block: true,
-          reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING'),
+          reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING', undefined, gateway),
         };
-      } else if (isGateway && invocation !== null && localModeTarget(command) === null) {
+      } else if (isGateway && invocation !== null && localModeTarget(command, gateway) === null) {
         // 计划前置（宿主保留的执法）：非 local 的网关调用 fail-closed——已登记 operation
         // 按语义表（scratch plan=false 直调、read/write 需激活计划）；未登记/未知形态也
         // 要求先有激活计划（2026-10-09 起的既有防线：未知 op 可能写平台数据，宁拦勿猜；

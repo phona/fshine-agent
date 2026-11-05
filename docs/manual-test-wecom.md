@@ -99,7 +99,7 @@
 共享替身在 `tests/e2e/harness.ts`，七个文件按主题拆分、并行执行。
 
 只有两样是假的：**模型**（Main Agent 与子 Agent 用脚本化驱动回放）和**平台执行器**
-（`DZ_EXECUTOR=mock`）。企微投递语义、计划门禁、跨进程账本全是生产代码。
+（`EXECUTION_EXECUTOR=mock`）。企微投递语义、计划门禁、跨进程账本全是生产代码。
 
 ```bash
 npm test -- tests/e2e/turn-loop

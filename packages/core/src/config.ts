@@ -123,12 +123,23 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const knowledgePaths = parseStringArray(item['knowledgePaths']);
     const sensitivePaths = parseStringArray(item['sensitivePaths']);
+    const gatewayRaw = item['gateway'];
+    const gateway = gatewayRaw === undefined ? undefined : String(gatewayRaw).trim();
+    if (gateway !== undefined) {
+      // Relative invocation only: no absolute path, no parent escape, no
+      // shell metacharacters. A bad gateway here is a config error at
+      // load time, not a spawn-time surprise.
+      if (!gateway || path.isAbsolute(gateway) || gateway.split('/').includes('..') || /[\\'"`$;|&<>*?(){}[\]!#~]/.test(gateway)) {
+        throw new Error(`配置项 contextProfiles.${name}.gateway 必须是相对 root 的网关调用形式`);
+      }
+    }
     profiles[name] = {
       root,
       skillRoots,
       ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
       ...(knowledgePaths ? { knowledgePaths } : {}),
       ...(sensitivePaths ? { sensitivePaths } : {}),
+      ...(gateway === undefined ? {} : { gateway }),
     };
   }
   return profiles;

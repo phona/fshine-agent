@@ -27,6 +27,8 @@ import {
   isCommitEnabled,
   isPlatformMock,
   loadOperationArgSpecs,
+  loadProposalSchema,
+  reviewProposalWithDriver,
   newGateSecret,
   parsePiThinkingLevel,
   planDraftExample,
@@ -198,11 +200,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
   // 提案落账都受平台网关与 serve-policy 守卫的矩阵裁决。
-  env.DZ_SERVE = '1';
-  // HMAC 密钥进程内生成：重启使未决 commit 自然失效。DZ_GATE_SECRET 故意不进 env——
+  env.EXECUTION_SERVE = '1';
+  // HMAC 密钥进程内生成：重启使未决 commit 自然失效。EXECUTION_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
   const gateSecret = newGateSecret();
-  const planActivationSecret = env['DZ_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
+  const planActivationSecret = env['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
 
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
   if (isPlatformMock()) {
@@ -310,6 +312,14 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
     // e2e 覆盖（overrides.writeEnabled）只换取值来源，不换派生规则。
     writeEnabled: overrides.writeEnabled ?? isCommitEnabled(env),
+    // 写路径隔离复核（第 2 包生产接线）：装配必须注入真实复核驱动，
+    // 未注入时提案创建路径直接失败（不再记 skipped 就继续）。
+    // 驱动 = contextModelDriver（隔离回合、无工具，与上下文抽取同一驱动面），
+    // 不是 Main 驱动，也不是一个独立评委模型（那是仍待定的另一步）。
+    proposalReviewTurn: (input) => reviewProposalWithDriver(contextModelDriver, input),
+    // 提案 schema 取问（接口文档 §5）：按 profile 的 root 与 gateway spawn
+    // operation list --json，取 proposal.create 行的 proposalSchema。
+    proposalSchemaLoader: (args) => loadProposalSchema(args.platformRoot, args.gateway),
 
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
@@ -322,7 +332,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
       // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
-      planCommandForm: planDraftExample(),
+      planCommandForm: planDraftExample(config.contextProfiles['17dz']?.gateway),
     } : {}),
   });
   // The task manager may cancel a waiting confirmation using the original principal/session/task

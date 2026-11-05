@@ -28,7 +28,7 @@ import {
 } from './src/platform-contract';
 import { platformUnavailableTextFor } from './src/error-codes';
 import { toolUserErrorFor } from './src/error-codes';
-import { RUN_17DZ_TASK_DESCRIPTION, RUN_17DZ_TASK_SCHEMA, RUN_17DZ_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
+import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ScriptedTurnDriver, type ScriptedTurnStep, type TurnDriver } from './src/driver';
 import { createTaxAgentRuntime, executionLanguageFingerprints } from './src/runtime';
 import { FakeSessionRepo } from './test-helpers';
@@ -213,7 +213,7 @@ function platformStub(initial: 'auth' | 'timeout' | 'ok' = 'auth') {
   let calls = 0;
   let mode: 'auth' | 'timeout' | 'ok' = initial;
   const runner: ContextTaskRunner = {
-    tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+    tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
     run: async (): Promise<SubagentTaskResult> => {
       calls += 1;
       if (mode === 'auth') {
@@ -250,7 +250,7 @@ function platformStub(initial: 'auth' | 'timeout' | 'ok' = 'auth') {
 function throwingAuthStub() {
   let calls = 0;
   const runner: ContextTaskRunner = {
-    tool: { name: RUN_17DZ_TASK_TOOL, description: RUN_17DZ_TASK_DESCRIPTION, inputSchema: RUN_17DZ_TASK_SCHEMA },
+    tool: { name: RUN_EXECUTION_TASK_TOOL, description: RUN_EXECUTION_TASK_DESCRIPTION, inputSchema: RUN_EXECUTION_TASK_SCHEMA },
     run: async (): Promise<SubagentTaskResult> => {
       calls += 1;
       throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');

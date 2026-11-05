@@ -13,7 +13,7 @@
  *   ② **令牌只绑提案与有效期**：HMAC-SHA256 over `{proposalId, expiresAt}`，不绑脚本名、
  *      不绑任何业务字段。密钥进程内生成（`@fshine/agent` 的 newGateSecret，C 波起与
  *      hostGatewayEnv 同住 context.ts），仅经 env 传给这一个子进程，不进 worker env（W7）。
- *   ③ **env 显式剥 `DZ_REQUIRE_PLAN`**（D-081）：宿主直调是"服务端替 worker 办一件事"，
+ *   ③ **env 显式剥 `EXECUTION_REQUIRE_PLAN`**（D-081）：宿主直调是"服务端替 worker 办一件事"，
  *      不该被 worker 的计划门拦——那把尺与提案创建路径同一份（hostGatewayEnv）。
  *   ④ **用户可见文本只有两个来源**：平台 `summaryText` 原样 + 宿主通用状态行。本文件不拼
  *      任何业务摘要，只把平台信封的字段搬进 `ProposalCommitResult`。
@@ -26,6 +26,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
   hostGatewayEnv,
+  isCommittedUnverified,
   loadOperationProtocols,
   parseEnvelope,
   gatewayExecPath,
@@ -35,6 +36,7 @@ import {
   type ProposalCommitRequest,
   type ProposalCommitResult,
   type ProposalUnavailableKind,
+  type ReadBackCounts,
 } from '@fshine/agent';
 
 /** CLI 超时：与 plan-runtime / 提案创建的缺省 runner 同一量级（平台起不来不能吊住回合）。 */
@@ -112,7 +114,7 @@ interface ProposalCommitEnvelopeData {
   ok?: unknown;
   verified?: unknown;
   summaryText?: unknown;
-  readBack?: unknown;
+  readBack?: ReadBackCounts;
 }
 
 type ProposalStatusOutcome =
@@ -197,12 +199,12 @@ export function createProposalCommitRunner(
       };
     }
 
-    // ③ 令牌 + serve 法域直调（env 只多带密钥与令牌，且剥 DZ_REQUIRE_PLAN——D-081）。
+    // ③ 令牌 + serve 法域直调（env 只多带密钥与令牌，且剥 EXECUTION_REQUIRE_PLAN——D-081）。
     const token = signProposalToken(proposalId, status.expiresAt, options.gateSecret);
     const result = await runCli({
       platformRoot: options.platformRoot,
       args: ['commit', operation, '--proposal-id', proposalId],
-      env: { ...hostGatewayEnv(), DZ_GATE_SECRET: options.gateSecret, DZ_COMMIT_TOKEN: token },
+      env: { ...hostGatewayEnv(), EXECUTION_GATE_SECRET: options.gateSecret, EXECUTION_COMMIT_TOKEN: token },
     });
 
     // ④ 只认 RESULT 信封：成败由平台说（ok / verified / summaryText 全是信封字段）。
@@ -219,7 +221,24 @@ export function createProposalCommitRunner(
       const detail = envelope
         ? [envelope.error?.code, envelope.error?.message].filter((part) => typeof part === 'string' && part).join('：')
         : (result.stderr || result.stdout).trim().slice(0, 300);
-      return { ok: false, verified, summaryText, output, error: detail || `落账命令失败（exit ${result.code}）` };
+      // 已落账但读回不足的机械分类（Phase 2）：只认信封字段——错误码
+      // PROPOSAL_VERIFY_SHORT，或读回 delta < required。分类结果由宿主
+      // context.ts 转成独立终态报告，本文件不拼用户话术。
+      const committedUnverified = isCommittedUnverified({
+        ok,
+        verified,
+        errorCode: typeof envelope?.error?.code === 'string' ? envelope.error.code : undefined,
+        readBack: data?.readBack,
+      });
+      return {
+        ok: false,
+        verified,
+        summaryText,
+        output,
+        error: detail || `落账命令失败（exit ${result.code}）`,
+        ...(committedUnverified ? { committedUnverified: true as const } : {}),
+        ...(data?.readBack ? { readBack: data.readBack } : {}),
+      };
     }
     return { ok: true, verified, summaryText, output };
   };

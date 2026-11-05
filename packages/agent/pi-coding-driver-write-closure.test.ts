@@ -187,7 +187,7 @@ describe('D-075 写关闭：计划扫描 + 终稿合成', () => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_closure', planId: null, version: null, status: 'none' }), stderr: '' };
       return { code: 0, stdout: JSON.stringify({
         taskId: 'task_write_closure', planId: 'plan_open', version: 1, decision: 'execute',
-        estimate: { calls: 2, seconds: 20 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active',
+        estimate: { calls: 2, seconds: 20, weight: 2 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active',
       }), stderr: '' };
     };
     const { driver, cwd } = await makeDriver({ planCliRunner });

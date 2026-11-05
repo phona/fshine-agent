@@ -1,3 +1,6 @@
+// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
+// 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：申报路由与安全边界。共享替身见 ./harness.ts。
  *
@@ -23,7 +26,7 @@ function recordingWorker(script: Parameters<typeof gatedWorker>[0]) {
   };
 }
 
-describe('离线全链 e2e：申报路由与安全边界', () => {
+describe('[L4 集成] 离线全链 e2e：申报路由与安全边界', () => {
   it('1.6 不问账套的实时余额问题先追问，不调用平台', async () => {
     const before = totalActualCalls();
     const { send, sdk, assembly } = await boot({
