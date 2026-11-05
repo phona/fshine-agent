@@ -305,7 +305,7 @@ export function planNotReadOnlyCode(
  * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列与
  * confirm 列合起来的真判据**。
  *
- * 平台的真判据是 `planAccessAllows = plan && !confirm`（17dz `src/execution/plan.js`）：两列
+ * 平台的真判据是 `planAccessAllows = plan && !confirm`（平台仓 `src/execution/plan.js`）：两列
  * 任一为假就进不了计划。只读 `plan` 一列会**漏掉写类**——而写类恰恰是最常被 worker 排进计划
  * 的那一种。2026-10-14 实测：`voucher.proposal`（`write` ⇒ `plan:true, confirm:true`）被排进
  * 计划，平台以 `PLAN_OPERATION_NOT_READ_ONLY` 拒，宿主按 `plan` 列点名得到空名单，退回零名单
@@ -742,7 +742,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
         // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
         operationSemantics: await operationSemanticsFor(input.cwd),
-        ...(input.gateway ? { gateway: input.gateway } : {}),
+        // gateway（C7b fail-closed）：run 输入显式指定优先，工厂声明兜底——两处都来自
+        // profile.gateway（runtime 按任务注入 / 装配按工厂注入）；都未声明时 session 内
+        // servePatterns 即抛，宿主不回退任何遗留网关名。
+        gateway: input.gateway ?? options.gateway,
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
@@ -928,7 +931,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         return needsClue() ?? needsFromPlatformResponses(session.agent.state.messages) ?? undefined;
       };
       // TaskStore remains the source of truth.  Restore its transcript into
-      // the SDK Agent rather than persisting a second session file in 17dz.
+      // the SDK Agent rather than persisting a second session file platform-side.
       session.agent.state.messages = input.messages;
       // 本回合新增消息的起点（之后只增不减）：选择类状态只在本回合的平台交互里找——
       // 上一回合遗留的信封不能越权替这一回合提问（早先歧义、用户补全后重查成功的回合
@@ -1409,7 +1412,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // （transform.py 的 `tmp/整理好的…（自动）.xlsx`），所以这不是新开的先例。
     // 2026-10-08 加 'edit'：实测 worker 写了一个 11KB 的解析脚本，崩在 KeyError（上游
     // 缺某个键），它只想改一行——但没有 edit 工具（原话 "No edit tool"），而 bash 门只准
-    // bin/17dz 网关调用，用不了 sed。于是只能整份重写那 11KB：33 秒模型生成。
+    // 网关 CLI 调用（bin/<gateway>），用不了 sed。于是只能整份重写那 11KB：33 秒模型生成。
     // 而"写 11KB 脚本一次就对"不现实，这类"改一行"的迭代必然反复发生，每次都付 33 秒、
     // 每次还可能引入新错。edit 是精确文本替换，一次替换即改完那一处。
     // 边界与 write 完全同一组（serve-gate 的 decideFileWrite 一份判据）：只准
@@ -1510,7 +1513,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // "提交未激活"而不是"被拒 N 次"（D-099 的诚实纪律：混合历史下它就是提交数）。
         declinedPlans += 1;
         const reason = declinedPlans > MAX_DECLINED_PLANS_PER_TASK
-          ? `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`
+          ? `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`, undefined, options.gateway)}`
           : `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}`;
         reportPlanSubmission({ reason });
         return { block: true, reason };
@@ -1682,7 +1685,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     const scratchDir = options.scratchDir ?? null;
     const rel = scratchDir ? workspaceRelPath(options.cwd, parsed.path) : null;
     if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
-      throw errorFor('PLAN_FILE_OUT_OF_WORKSPACE', parsed.path);
+      throw errorFor('PLAN_FILE_OUT_OF_WORKSPACE', parsed.path, undefined, options.gateway);
     }
     const abs = path.resolve(options.cwd, rel);
     let content: string;
@@ -1693,19 +1696,19 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 的 30s SIGTERM），挂住的是宿主这一跳。worker 经 bash（mkfifo）可自造，虽非新
       // 提权面（非网关 bash 本就能自挂），但宿主自己的读路径要有界。
       if (!stats.isFile()) throw new Error('不是普通文件（目录/FIFO/设备），拒绝读取');
-      if (stats.size > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（${stats.size} 字节，上限 ${MAX_WRITE_BYTES}）`);
+      if (stats.size > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（${stats.size} 字节，上限 ${MAX_WRITE_BYTES}）`, undefined, options.gateway);
       content = readFileSync(abs, 'utf8');
       // 读后复核：stat 与 read 之间文件可能被撑大（TOCTOU，微秒级窗口且属自伤）——
       // 读后按字节数再校一次。上限只认 write 门那一个数字，不设第二本账。
       const bytes = Buffer.byteLength(content, 'utf8');
-      if (bytes > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（读取后 ${bytes} 字节，上限 ${MAX_WRITE_BYTES}）`);
+      if (bytes > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（读取后 ${bytes} 字节，上限 ${MAX_WRITE_BYTES}）`, undefined, options.gateway);
     } catch (error) {
       // 表内码（体积越界）原样抛；文件系统错误包一层上下文——与 plan CLI 失败同一
       // 手法：真实原因逐字带出，worker 看得见是哪个文件怎么了（ENOENT = 忘了先写）。
       if (error instanceof Error && (error as { code?: string }).code?.startsWith('PLAN_')) throw error;
       throw new Error(`计划文件读取失败（${rel}）：${error instanceof Error ? error.message : String(error)}`);
     }
-    const payload = parsePlanCallsPayload(content);
+    const payload = parsePlanCallsPayload(content, options.gateway);
     return {
       calls: payload.calls,
       ...(payload.userConfirmed !== undefined ? { userConfirmed: payload.userConfirmed } : {}),
@@ -1764,7 +1767,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // （D-099）。它**不是**"被拒绝次数"——越权拒绝、CLI 失败暂停、平台拒绝都计数。
         // 说成"已被连续拒绝 N 次"就是谎报：真实运行里 worker 撞上这条时，前几次常常是成功
         // 激活（2026-10-15 acceptance 8.1：3 active + 1 paused + 1 declined）。
-        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`,
+        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`, undefined, options.gateway)}`,
       };
     }
     if (options.entitySources) {
@@ -1807,7 +1810,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         activePlan = null;
         needsClues.push({ missing: ['请求中未给出的对象'], reason: scopeError });
         // 实体越权原因收口在 error-codes.ts（三要素）；PLAN DECLINED 是协议前缀。
-        return { block: true, reason: `PLAN DECLINED：${messageFor('ENTITY_OUT_OF_SCOPE', scopeError)}` };
+        return { block: true, reason: `PLAN DECLINED：${messageFor('ENTITY_OUT_OF_SCOPE', scopeError, undefined, options.gateway)}` };
       }
     }
     const previousPlan = activePlan;

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { gatewayExecPath, gatewayTextPatterns, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
+import { gatewayExecPathForProfile, gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -107,22 +107,23 @@ export async function loadPlanStatus(options: {
   planId: string;
   runCli?: PlanCliRunner;
   env?: NodeJS.ProcessEnv;
+  /** Profile 声明的网关调用形式（C7b）：缺省 runner spawn 前 fail-closed 校验。 */
+  gateway?: string;
 }): Promise<{ planId: string; version: number | null; status: string } | null> {
   const result = await runJson<{ planId: string; version: number | null; status: string }>(
     options.runCli ?? defaultCliRunner,
-    { platformRoot: options.platformRoot, args: ['plan', 'status', '--plan-id', options.planId], env: options.env },
+    { platformRoot: options.platformRoot, args: ['plan', 'status', '--plan-id', options.planId], env: options.env, ...(options.gateway ? { gateway: options.gateway } : {}) },
   );
   return result && typeof result.status === 'string' ? result : null;
 }
 
 const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gateway }) => new Promise((resolve, reject) => {
   // 第二处网关 spawn：与 context 提案网关（context.ts 的
-  // defaultProposalGatewayRunner）同法——profile.gateway 优先，未声明或非法时
-  // 经 gatewayExecPath 回退遗留常量，不再以 'bin' / '17dz' 分段拼写（分段拼写
-  // 逃过 L2 字面量守卫 grep "bin/17dz"）。调用方在 plan-runtime
-  // 外注入 runner 时应把 profile.gateway 带进 PlanCliRequest.gateway；直接调
+  // defaultProposalGatewayRunner）同法——C7b 起 fail-closed：调用方必须把
+  // profile.gateway 带进 PlanCliRequest.gateway，未声明/非法即抛（gatewayExecPath
+  // 内部校验），宿主不再回退任何遗留网关名。直接调
   // evaluateAndActivatePlan 的调用方见 EvaluateAndActivatePlanOptions.gateway。
-  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
+  const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -163,7 +164,7 @@ export function planDecisionRank(tier: string): number {
 
 export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOptions): Promise<PlanRuntimeResult> {
   const runCli = options.runCli ?? defaultCliRunner;
-  validateCalls(options.calls);
+  validateCalls(options.calls, options.gateway);
   const rawEvaluation = await runPlanEvaluation(runCli, {
     platformRoot: options.platformRoot,
     args: ['plan', 'evaluate', '--task-id', options.taskId, '--stdin'],
@@ -357,14 +358,16 @@ export function planCallFacts(
   return facts;
 }
 
-export function validateCalls(calls: readonly PlanCall[]): void {
-  if (!Array.isArray(calls) || calls.length === 0) throw errorFor('PLAN_CALLS_EMPTY');
+export function validateCalls(calls: readonly PlanCall[], gateway?: string): void {
+  // gateway 形参（C7a 穿线）：诊断文案里的网关名示例按注入值渲染；缺省时
+  // errorFor 内部走遗留缺省（applyGatewayText 出口替换仍在，行为零变化）。
+  if (!Array.isArray(calls) || calls.length === 0) throw errorFor('PLAN_CALLS_EMPTY', undefined, undefined, gateway);
   for (const [index, call] of calls.entries()) {
     if (!call || typeof call.operation !== 'string' || !call.operation.trim()) {
-      throw errorFor('PLAN_CALL_OPERATION_EMPTY', index);
+      throw errorFor('PLAN_CALL_OPERATION_EMPTY', index, undefined, gateway);
     }
-    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index);
-    try { JSON.stringify(call.args); } catch { throw errorFor('PLAN_CALL_ARGS_NOT_JSON', index); }
+    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index, undefined, gateway);
+    try { JSON.stringify(call.args); } catch { throw errorFor('PLAN_CALL_ARGS_NOT_JSON', index, undefined, gateway); }
   }
 }
 
@@ -478,14 +481,14 @@ export function parsePlanCallsCommand(command: string, gateway?: string): PlanSu
   // 前缀只允许 bash/sh 与路径前缀。围栏、外层引号、"请提交这个计划：…谢谢"这类包装
   // 一律不算合法前缀——宿主不 absorbing 格式波动，直接说清前面多了什么。
   if (!ALLOWED_PLAN_PREFIX_RE.test(prefix)) {
-    throw errorFor('PLAN_SHAPE_PREFIX', collapseExtra(prefix));
+    throw errorFor('PLAN_SHAPE_PREFIX', collapseExtra(prefix), undefined, gateway);
   }
   if (!payload) {
-    throw errorFor('PLAN_SHAPE_PAYLOAD');
+    throw errorFor('PLAN_SHAPE_PAYLOAD', undefined, undefined, gateway);
   }
   const subcommand = payload.split(/\s+/)[0] ?? '';
   if (PLAN_SUBCOMMANDS.includes(subcommand)) {
-    throw errorFor('PLAN_SUBCOMMAND_RESERVED', subcommand);
+    throw errorFor('PLAN_SUBCOMMAND_RESERVED', subcommand, undefined, gateway);
   }
   // ── --file 通道（先于 JSON 分支）──────────────────────────────────────────
   // payload 以 --file 开头时它不是 JSON，落进 JSON.parse 只会得到一句答非所问的
@@ -493,7 +496,7 @@ export function parsePlanCallsCommand(command: string, gateway?: string): PlanSu
   // 必须到行尾：尾巴（2>&1 / ; echo）是裸 JSON 通道的病根，不带进新通道。
   if (PLAN_FILE_PREFIX_RE.test(payload)) {
     const file = PLAN_FILE_FLAG_RE.exec(payload);
-    if (!file) throw errorFor('PLAN_FILE_FLAG_INVALID', payload);
+    if (!file) throw errorFor('PLAN_FILE_FLAG_INVALID', payload, undefined, gateway);
     return { kind: 'file', path: file[1]! };
   }
   // ── 旗标形态 payload（C4）────────────────────────────────────────────────
@@ -508,7 +511,7 @@ export function parsePlanCallsCommand(command: string, gateway?: string): PlanSu
   // 先行拦截而不可达，执行层 SKILL 教的是个死命令。返回 null 让两条路都活：
   // 元数据放行到平台；未知旗标拿到教学话术（而不是"JSON 位置 1 处有个 -"）。
   if (payload === 'schema' || payload.startsWith('--')) return null;
-  return { kind: 'inline', ...parsePlanCallsPayload(payload) };
+  return { kind: 'inline', ...parsePlanCallsPayload(payload, gateway) };
 }
 
 /**
@@ -518,25 +521,26 @@ export function parsePlanCallsCommand(command: string, gateway?: string): PlanSu
  * "文件通道宽松一点"的第二标准（宽容面 = 攻击面，与 ALLOWED_PLAN_PREFIX_RE
  * 不 absorbing 格式波动是同一条纪律）。
  */
-export function parsePlanCallsPayload(payload: string): { calls: PlanCall[]; userConfirmed?: boolean } {
+export function parsePlanCallsPayload(payload: string, gateway?: string): { calls: PlanCall[]; userConfirmed?: boolean } {
+  // gateway 形参（C7a 穿线）：与 parsePlanCallsCommand 的 gateway 同源透传。
   let parsed: unknown;
   try { parsed = JSON.parse(payload); }
   catch (error) {
     // JSON 坏了要说 JSON 哪坏了：带解析器原文（截断）+ 正确形状。
     const reason = (error instanceof Error ? error.message : String(error)).slice(0, 120);
-    throw errorFor('PLAN_JSON_PARSE', reason);
+    throw errorFor('PLAN_JSON_PARSE', reason, undefined, gateway);
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw errorFor('PLAN_JSON_NOT_OBJECT');
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw errorFor('PLAN_JSON_NOT_OBJECT', undefined, undefined, gateway);
   const value = parsed as Record<string, unknown>;
-  if (!Array.isArray(value.calls)) throw errorFor('PLAN_CALLS_NOT_ARRAY');
+  if (!Array.isArray(value.calls)) throw errorFor('PLAN_CALLS_NOT_ARRAY', undefined, undefined, gateway);
   const calls = value.calls.map((raw, index) => {
-    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw errorFor('PLAN_CALL_NOT_OBJECT', index);
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw errorFor('PLAN_CALL_NOT_OBJECT', index, undefined, gateway);
     const call = raw as Record<string, unknown>;
-    if (typeof call.operation !== 'string' || !('args' in call)) throw errorFor('PLAN_CALL_FIELDS', index);
-    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index);
+    if (typeof call.operation !== 'string' || !('args' in call)) throw errorFor('PLAN_CALL_FIELDS', index, undefined, gateway);
+    if (!Array.isArray(call.args)) throw errorFor('PLAN_CALL_ARGS_NOT_ARRAY', index, undefined, gateway);
     return { operation: call.operation, args: call.args };
   });
-  validateCalls(calls);
+  validateCalls(calls, gateway);
   // Preserve the field for audit only. The runtime never treats this model claim as authorization.
   return { calls, ...(value.user_confirmed === true ? { userConfirmed: true } : {}) };
 }
@@ -559,10 +563,10 @@ async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest)
   if (result.code !== 0) {
     const evaluation = tryParseEvaluation(result.stdout);
     if (evaluation) return evaluation;
-    throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
+    throw new Error(`plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
   }
   let evaluation: PlanEvaluation;
-  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('plan CLI 返回了无效 JSON。'); }
   // exit 0 也验 decision：非四档即抛错，不交给 rankOf 的缺省映射（见上）。
   // exit 非零分支的 tryParseEvaluation 本就只认四档，两路判据一致。
   // 报错文案带“exit 0 预验”标记：它是第一道防线，与 planDecisionRank 的
@@ -587,6 +591,6 @@ function tryParseEvaluation(stdout: string): PlanEvaluation | null {
 
 async function runJson<T = unknown>(runCli: PlanCliRunner, request: PlanCliRequest): Promise<T> {
   const result = await runCli(request);
-  if (result.code !== 0) throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
-  try { return JSON.parse(result.stdout) as T; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  if (result.code !== 0) throw new Error(`plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
+  try { return JSON.parse(result.stdout) as T; } catch { throw new Error('plan CLI 返回了无效 JSON。'); }
 }

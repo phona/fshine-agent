@@ -53,7 +53,7 @@ export function clampProgressPhrase(phrase: string): string {
 
 /**
  * 默认进度帧（L6 沉积清理后）：主 Agent 工具面早已只剩宿主内部工具
- * （route_current_turn / search_history / get_messages）与 run_17dz_task 委派——
+ * （route_current_turn / search_history / get_messages）与委派工具（缺省 run_task，实例名经 profile.toolName 声明）——
  * 直接平台工具（search_account_sets 等）已退役，其具名帧与 accountSetId→名称
  * 查找（rememberAccountSets）随之删除。剩余工具一律回退到通用工具名模板；
  * 宿主内部工具仍静默（null）。帧文本仍由 renderToolStepText 一处合成。

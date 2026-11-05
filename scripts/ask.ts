@@ -109,6 +109,9 @@ async function main(): Promise<void> {
     ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
     // 与生产装配同一条加载链：业务 skill（架构 §5）存在才注入
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
+    // 执行层称谓（C2）：与 assembly 同一来源（active profile 的 executorLabel 声明）；
+    // 未声明 = 宿主中性缺省，CLI 与生产装配因此不会漂移。
+    ...(config.contextProfiles['17dz']?.executorLabel ? { executorLabel: config.contextProfiles['17dz']!.executorLabel } : {}),
     ...(store.taskPlans ? { taskPlans: store.taskPlans } : {}),
   });
   // 计划确认门（与生产装配同一个工厂：D-013 后不再逐字复刻接线）：待确认计划落 SQLite，

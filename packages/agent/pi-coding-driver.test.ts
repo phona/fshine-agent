@@ -63,6 +63,7 @@ describe('pi-coding-agent context worker', () => {
     ].join('\n'));
     const modelConfig = await fakeModelRuntime();
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [skillRoot],
       systemPrompt: 'worker-system-prompt',
@@ -101,6 +102,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'resume plan test',
@@ -134,6 +136,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'stop plan test',
@@ -174,6 +177,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'stop exit3 test',
@@ -211,6 +215,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write closed test',
@@ -276,6 +281,7 @@ describe('pi-coding-agent context worker', () => {
       return NOT_READ_ONLY_REJECTION(request);
     };
     return createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -338,6 +344,7 @@ describe('pi-coding-agent context worker', () => {
     const closedRoot = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_closed-'));
     roots.push(closedRoot);
     const closedWorker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: closedRoot,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -436,6 +443,7 @@ describe('pi-coding-agent context worker', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_nowrite-'));
     roots.push(root);
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -552,6 +560,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('写关闭拦截后不得再调平台计划门');
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write scan test',
@@ -592,6 +601,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 2, seconds: 20, weight: 2 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write open test',
@@ -628,6 +638,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write unknown test',
@@ -662,6 +673,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'intent scope test',
@@ -699,6 +711,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'intent scope test',
@@ -746,6 +759,7 @@ describe('pi-coding-agent context worker', () => {
         return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
       };
       const worker = await createPiCodingWorkerSession({
+        gateway: 'bin/17dz',
         cwd: root,
         skillRoots: [],
         systemPrompt: 'intent scope test',
@@ -793,6 +807,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'no sources test',
@@ -826,6 +841,7 @@ describe('pi-coding-agent context worker', () => {
       code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
     });
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'needs clue test',
@@ -859,6 +875,7 @@ describe('pi-coding-agent context worker', () => {
       code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
     });
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline cap test',
@@ -919,6 +936,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline reset test',
@@ -990,6 +1008,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline message test',
@@ -1105,6 +1124,7 @@ async function driveBash(options: {
   const steps: string[] = [];
   const events: ServeGateEvent[] = [];
   const worker = await createPiCodingWorkerSession({
+    gateway: 'bin/17dz',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'progress frame test',

@@ -1,5 +1,5 @@
 /**
- * 17dz-platform 公共契约适配层。
+ * 执行层平台公共契约适配层（原文件头的历史出处与 Package 1 收窄说明已移 debt-ledger）。
  *
  * 本文件是 fshine 仓库中【唯一】允许出现平台实现细节的模块（泄漏 lint 白名单）。
  * 平台输出契约 = RESULT 单行 JSON 信封（schema v1，E2；行协议已随 E2 退役，解析仅认信封）；
@@ -14,7 +14,7 @@ import path from 'node:path';
  * L2（跨仓协议单一来源）：平台网关的调用形式（相对平台根路径）。
  *
  * 这是宿主侧**唯一**允许出现网关名字面量的地方——即"配置缺省值"：网关可执行文件
- * 固定在平台仓 bin/ 下，名字与 config/agent.yaml 的 contextProfiles['17dz'] profile id
+ * 固定在平台仓 bin/ 下，名字与部署 config/agent.yaml 里对应 profile 的 gateway 声明
  * 一致；其绝对路径 = platformRoot（来自该 profile 的 root）+ 本常量（见 gatewayExecPath）。
  * worker 的 cwd 即 platformRoot，故命令与消息里出现的都是本相对形式。
  *
@@ -25,27 +25,12 @@ import path from 'node:path';
 /**
  * 遗留缺省网关名（过渡期）。
  *
- * Package 1 收窄口径：17dz 执行代码不动、执行端门先留。宿主 spawn 路径
+ * Package 1 收窄口径：平台执行代码不动、执行端门先留。宿主 spawn 路径
  * 不再以本常量为准——以 profile 声明的 `gateway` 为准
- * （见 `gatewayExecPathForProfile`）。本常量目前仅留在两处过渡位置：
- * ① 文本识别（serve-gate 首词正则、plan 令牌定位、错误文案 correctForm）
- *    ——第 1 包收尾已接线到 profile.gateway（gatewayTextPatterns /
- *    ServeGateOptions.gateway / parsePlanCallsCommand 的 gateway 参数 /
- *    planDraftExample 的 gateway 参数）；未注入 gateway 的老调用方
- *    仍以本常量为缺省，见 docs/execution-layer-interface.md §2/§10，
- *    断点是驱动层把 profile.gateway 穿透全部生产路径后删除本缺省；
- * ② 未声明 gateway 的旧 profile 的 spawn 回退（宁可走旧值也不静默失败，
- *    但新 profile 必须声明 gateway，见 config 解析）。
- * 新代码不得新增对本常量的引用；新执行层接入时 profile 必须声明 gateway。
+ * （见 `gatewayExecPathForProfile`）。C7b 起本文件不再持有任何实例网关名：
+ * 文本识别与诊断渲染一律 fail-closed（resolveGatewayText / gatewayExecPath
+ * 未声明有效 gateway 即抛），profile.gateway 是网关名的唯一来源。
  */
-/**
- * @deprecated 遗留缺省网关名，仅供未注入 profile.gateway 的老调用方
- * 作文本识别缺省（见 docs/execution-layer-interface.md §2/§10）。
- * 新代码不得新增对本常量的引用；spawn 路径一律用
- * gatewayExecPathForProfile（未声明即 fail-closed）。
- */
-export const GATEWAY_INVOCATION = 'bin/17dz';
-
 /** 正则转义：网关名经 §1 校验已无 shell 元字符，转义只是纵深。 */
 function escapeRegExpSegment(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -64,14 +49,19 @@ export function gatewayTextPatterns(gateway: string): { invocation: RegExp; plan
   };
 }
 
+/** 未声明有效 gateway 的统一拒绝理由（fail-closed，C7b）：中性、可行动，不点名任何实例。 */
+export function gatewayNotDeclaredError(): Error {
+  return new Error('未声明有效的 profile.gateway：宿主不再回退任何遗留网关名（C7b 起删除实例名缺省）。部署需在 contextProfiles.<id>.gateway 声明相对网关调用形式（如 bin/<name>）。');
+}
+
 /**
- * 文本识别用的网关名解析：注入且合法的 profile.gateway 优先；
- * 未注入/不合法时回退遗留缺省（老调用方过渡，见 §10 断点）。
- * 本函数是常量之外的唯一回退点——新调用方应直接传 profile.gateway，
- * 而不是依赖本回退。
+ * 文本识别用的网关名解析：fail-closed（C7b 退役）——注入且合法的 profile.gateway
+ * 原样返回；未注入/不合法即抛错，绝不回退任何实例网关名。调用方（文本识别、
+ * 诊断渲染模板）因此要求部署显式声明 gateway。
  */
 export function resolveGatewayText(gateway?: string): string {
-  return validateGatewayInvocation(gateway) ? gateway : GATEWAY_INVOCATION;
+  if (!validateGatewayInvocation(gateway)) throw gatewayNotDeclaredError();
+  return gateway;
 }
 
 /** 校验 profile 声明的网关调用形式：相对路径、无父级逃逸、无 shell 元字符。 */
@@ -85,14 +75,15 @@ export function validateGatewayInvocation(gateway: unknown): gateway is string {
   );
 }
 
-/** 网关可执行文件的绝对路径 = platformRoot + GATEWAY_INVOCATION（供 spawn 用，配置派生）。 */
-export function gatewayExecPath(platformRoot: string, gateway: string = GATEWAY_INVOCATION): string {
+/** 网关可执行文件的绝对路径 = platformRoot + 注入的 gateway（供 spawn 用，配置派生；非法即抛）。 */
+export function gatewayExecPath(platformRoot: string, gateway: string): string {
+  if (!validateGatewayInvocation(gateway)) throw gatewayNotDeclaredError();
   return path.join(platformRoot, ...gateway.split('/'));
 }
 
 /**
  * Profile 驱动的网关路径：profile 未声明 gateway 时 fail-closed 抛错，
- * 不回退到遗留常量——回退会让“未声明”静默等同于“17dz”，新执行层接入时
+ * 不回退到遗留常量——回退会让“未声明”静默等同于某个实例的网关名，新执行层接入时
  * 这正是要消除的默认。调用方是宿主 spawn 路径（context 提案网关、
  * assembly 提案落账），不是文本识别路径。
  */
@@ -123,7 +114,7 @@ export interface PlatformEnvelope {
   data: Record<string, unknown> | null;
   /**
    * 平台错误（L2）：码 + 消息 + **平台拥有的正确形态指引**。correctForm 由平台
-   * 错误码表静态列随信封出得去（17dz `lib/envelope.js` 的 emit 出口统一收口），
+   * 错误码表静态列随信封出得去（平台 `lib/envelope.js` 的 emit 出口统一收口），
    * 宿主按字段原样渲染"该怎么改"，不在自己仓里镜像一份词表（镜像即分叉）。
    */
   error: { code: string; message: string; correctForm?: string } | null;
@@ -223,9 +214,9 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
  *
  * 机械判据（不猜、不嗅探文案）：平台错误信封的 `error.code ∈ PLATFORM_AUTH_ERROR_CODES`。
  * 这一个判据同时覆盖两句话——
- *   ① "平台返回 AUTH_* 类错误码"：17dz 错误码表「登录态」一组的四档（AUTH_EXPIRED /
+ *   ① "平台返回 AUTH_* 类错误码"：平台错误码表「登录态」一组的四档（AUTH_EXPIRED /
  *      AUTH_REDIRECTED_TO_LOGIN / AUTH_WORKBENCH_NOT_READY / AUTH_UNKNOWN，表源：
- *      17dz `src/lib/error-codes.js` 的登录态段）；
+ *      平台 `src/lib/error-codes.js` 的登录态段）；
  *   ② "exit 非零且错误信封属平台不可用族"：领域脚本把 AuthExpiredError 归一为
  *      NEEDS_LOGIN（`query-receivables.js` 的 errorCodeOf），该信封随网关 exit 1 出得去
  *      （runner.js：信封非 ok 即 code 1）——码在信封里，"exit 非零"是同一事实的另一面，
@@ -305,7 +296,7 @@ export function selectionClarificationFromResponses(
 }
 
 /**
- * 平台**不可用族**错误码集合（17dz `src/lib/error-codes.js` 的 AUTH_* 四档 + 脚本层
+ * 平台**不可用族**错误码集合（平台 `src/lib/error-codes.js` 的 AUTH_* 四档 + 脚本层
  * 归一码 NEEDS_LOGIN + D-076 登录流程两码 + 平台页面响应超时 PLATFORM_TIMEOUT）。
  * **码是数据，消息文案不是**——平台改文案不影响判定，新增平台侧不可用模式时往这里
  * 加码（收口在唯一适配层）。
@@ -318,7 +309,7 @@ export function selectionClarificationFromResponses(
  *   · LOGIN_PAGE_CHANGED / AUTH_REJECTED：登录流程自身的两类失败（D-076：平台登录页
  *     改版后元素等不到 vs 元素在但凭据被拒）——都是"登录态拿不到"的收尾形态，计入平台
  *     健康；分因信息在消息里由平台错误码自带，宿主只判族。
- *   · PLATFORM_TIMEOUT：平台页面在 N 秒内没渲染出结果/空态（17dz 对 playwright
+ *   · PLATFORM_TIMEOUT：平台页面在 N 秒内没渲染出结果/空态（平台对 playwright
  *     Timeout Error 的码级映射，见 query-receivables 的 errorCodeOf）。
  *
  * 为什么超时与登录失效同族（进同一个集合、触发同一套冷却）：两者都是**平台侧不可用**
@@ -350,8 +341,8 @@ export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
 
 /**
  * 从错误对象提取平台错误码。两个来源都是**码级**判据（不是自然语言嗅探）：
- *   ① error.code 挂码（17dz errorFor / 信封 error.code 的宿主侧载体）；
- *   ② 消息开头的 `CODE:` 前缀——17dz 错误码表的渲染格式就是 `<CODE>: 期望 …`，
+ *   ① error.code 挂码（平台 errorFor / 信封 error.code 的宿主侧载体）；
+ *   ② 消息开头的 `CODE:` 前缀——平台错误码表的渲染格式就是 `<CODE>: 期望 …`，
  *      前缀由 messageFor 保证，是契约的一部分。
  */
 export function platformErrorCodeOf(error: unknown): string | null {
@@ -374,7 +365,7 @@ export function isPlatformAuthError(error: unknown): boolean {
  * 错误态快路径的**终局码集合**（错误态快路径 v2，2026-10-16；第一版 2026-10-17 凌晨
  * 因真模型探针回归被整波回退后重做）。
  *
- * 语义（已对照 17dz-platform 源码核实，两条都不要再质疑）：
+ * 语义（已对照平台仓源码核实，两条都不要再质疑）：
  *   · `PERIOD_NO_DATA`（mock `respond.js` receivables()）：仅在所查询的取数键**真缺失**时
  *     发出（"键缺失 ≠ 值为 0"，真零仍是 completed），status=not_found + correctForm
  *     带有数据的取数范围清单，退出码 0。它确实是终局：数据不能凭重试变出来——重试只会

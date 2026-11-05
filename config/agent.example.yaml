@@ -32,6 +32,13 @@ contextProfiles:
     # 与建造期技能面 .agents/skills 互斥——worker 驱动 noSkills:true 只加载显式
     # skillRoots,指向建造面会让"技能注入静默失效"(D-055:模板曾写着旧路径)。
     skillRoots: [".agents/skills-serve"]
+    # 执行层称谓(可选,≤32 字符无控制字符):进 Main Agent 系统提示词的委派句。
+    # 缺省 = 宿主中性缺省「执行层子 Agent」,不静默取任何实例名;财税实例按自己的
+    # 已发布协议声明实例称谓(如 executorLabel: 17dz 子 Agent)。
+    # executorLabel: 17dz 子 Agent
+    # 委派工具名(可选,≤48 字符,小写字母开头仅小写字母/数字/下划线):模型可见协议面。
+    # 缺省 = 宿主中性缺省 run_task;已发布过实例工具名的部署在此声明保持协议连续。
+    # toolName: run_17dz_task
     # Worker 单次任务预算(可选，默认 10 分钟)
     workerTimeoutMs: 600000
 

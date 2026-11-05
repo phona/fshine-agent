@@ -109,6 +109,79 @@ contextProfiles:
     expect(() => loadConfig({ yamlPath: writeFixture(bad), env: PUBLIC_URL_ENV })).toThrowError(/gateway/);
   });
 
+  it('context profile 声明 executorLabel 且拒绝空值/超长/控制字符（C2）', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    executorLabel: 17dz 子 Agent
+    skillRoots: [".agents/skills"]
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['17dz']).toMatchObject({ executorLabel: '17dz 子 Agent' });
+
+    // 空串（trim 后为空）
+    const empty = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    executorLabel: "   "
+    skillRoots: [".agents/skills"]
+`;
+    expect(() => loadConfig({ yamlPath: writeFixture(empty), env: PUBLIC_URL_ENV })).toThrowError(/executorLabel/);
+    // 超过 32 字符（它是模型可见文本，加载期挡住畸形值）
+    const tooLong = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    executorLabel: ${'x'.repeat(33)}
+    skillRoots: [".agents/skills"]
+`;
+    expect(() => loadConfig({ yamlPath: writeFixture(tooLong), env: PUBLIC_URL_ENV })).toThrowError(/executorLabel/);
+    // 控制字符（换行会污染提示词渲染）
+    const control = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    executorLabel: "label\\nline2"
+    skillRoots: [".agents/skills"]
+`;
+    expect(() => loadConfig({ yamlPath: writeFixture(control), env: PUBLIC_URL_ENV })).toThrowError(/executorLabel/);
+  });
+
+  it('context profile 声明 toolName 且拒绝非法形状（C3）', () => {
+    const yaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    toolName: run_17dz_task
+    skillRoots: [".agents/skills"]
+`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(config.contextProfiles['17dz']).toMatchObject({ toolName: 'run_17dz_task' });
+
+    // 大写/连字符/数字开头都不是合法工具名（模型可见协议面，形状必须像标识符）
+    for (const bad of ['Run_Task', 'run-task', '1run_task', 'run task']) {
+      const badYaml = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    toolName: "${bad}"
+    skillRoots: [".agents/skills"]
+`;
+      expect(() => loadConfig({ yamlPath: writeFixture(badYaml), env: PUBLIC_URL_ENV }), bad).toThrowError(/toolName/);
+    }
+    // 超过 48 字符
+    const tooLong = `${VALID_YAML}
+contextProfiles:
+  17dz:
+    root: /opt/17dz-platform
+    toolName: ${'a'.repeat(49)}
+    skillRoots: [".agents/skills"]
+`;
+    expect(() => loadConfig({ yamlPath: writeFixture(tooLong), env: PUBLIC_URL_ENV })).toThrowError(/toolName/);
+  });
+
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:

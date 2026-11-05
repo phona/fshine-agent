@@ -136,6 +136,7 @@ async function makeDriver(): Promise<{ driver: TurnDriver; cwd: string }> {
   return {
     cwd,
     driver: createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),

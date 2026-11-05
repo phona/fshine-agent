@@ -361,6 +361,7 @@ async function workerWith(options: {
   roots.push(cwd);
   const modelConfig = await fakeModelRuntime();
   const worker = await createPiCodingWorkerSession({
+    gateway: 'bin/17dz',
     cwd,
     skillRoots: [],
     systemPrompt: 'proposal flow test',
@@ -509,6 +510,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     roots.push(cwd);
     const modelConfig = await fakeModelRuntime();
     const worker = await createPiCodingWorkerSession({
+      gateway: 'bin/17dz',
       cwd,
       skillRoots: [],
       systemPrompt: 'proposal flow test',

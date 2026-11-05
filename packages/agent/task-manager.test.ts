@@ -6,7 +6,7 @@ import type {
   TaskRunState,
   TrustedContext,
 } from '@fshine/contracts';
-import type { ContextTaskRunner, PreparedContextTaskRun, Run17dzTaskArgs, SubagentTaskResult } from './src/context';
+import type { ContextTaskRunner, ContextTaskRunArgs, PreparedContextTaskRun, SubagentTaskResult } from './src/context';
 import { ToolUserError } from './src/driver';
 import { createPlatformExecutionGate } from './src/platform-execution-gate';
 import { createBackgroundTaskManager } from './src/task-manager';
@@ -86,9 +86,9 @@ function mockRunner(args: {
   const executions: RunnerHarness['executions'] = [];
   let preparedCount = 0;
   const runner: ContextTaskRunner = {
-    tool: { name: 'run_17dz_task', description: 'test', inputSchema: {} },
+    tool: { name: 'run_task', description: 'test', inputSchema: {} },
     run: async () => { throw new Error('manager must execute the prepared handle'); },
-    prepare: async (requestArgs: Run17dzTaskArgs) => {
+    prepare: async (requestArgs: ContextTaskRunArgs) => {
       preparedCount += 1;
       const taskId = requestArgs.taskId ?? `task-${++taskSeq}`;
       let snapshotIndex = 0;
@@ -525,9 +525,9 @@ describe('BackgroundTaskManager', () => {
     };
     const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
     const runner: ContextTaskRunner = {
-      tool: { name: 'run_17dz_task', description: 'test', inputSchema: {} },
+      tool: { name: 'run_task', description: 'test', inputSchema: {} },
       run: async () => { throw new Error('manager must execute the prepared handle'); },
-      prepare: async (requestArgs: Run17dzTaskArgs) => {
+      prepare: async (requestArgs: ContextTaskRunArgs) => {
         const prepared: PreparedContextTaskRun = {
           taskId: requestArgs.taskId ?? 'task-race',
           request: requestArgs.request,
@@ -666,9 +666,9 @@ describe('BackgroundTaskManager', () => {
     const executions: string[] = [];
     let preparedCount = 0;
     const runner: ContextTaskRunner = {
-      tool: { name: 'run_17dz_task', description: 'test', inputSchema: {} },
+      tool: { name: 'run_task', description: 'test', inputSchema: {} },
       run: async () => { throw new Error('manager must execute the prepared handle'); },
-      prepare: async (requestArgs: Run17dzTaskArgs) => {
+      prepare: async (requestArgs: ContextTaskRunArgs) => {
         preparedCount += 1;
         prepareEntered.resolve();
         await releasePrepare.promise;

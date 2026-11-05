@@ -357,3 +357,19 @@
 - **变异验证**：把注入关掉 → R6 + 10.1 + 10.2 红（3 例）；渲染函数里混入一条从未执行的对象 → 单测条目数断言 + 10.1 的"不含本轮之外对象"断言红（3 例）。
 
 **已知边界（如实记录）**：台账条目内容是 Log 里的记录原文（生产=worker 最终答复；harness 的替身 worker 会把原始平台输出并进最终文本，所以 e2e 断言落在截断后仍在的事实上）。零执行且走宿主兜底文案的委派（`delegate_without_execution` / `activated_plan_not_executed`）不写 tool_result 事件，因此不在台账里——那类轮次没有平台执行可归因，转录里的兜底文案仍可见。台账回答"执行过哪些/结果是什么"，不回答"哪个余额最高"——比较让模型基于条目自己做。
+
+## 19. 执行层身份参数化：宿主身份面改 profile 声明 + 中性缺省（W1，2026-11-05/06）
+
+**规则**：宿主通用层不持有任何执行层实例身份——委派工具名、称谓、profileId 缺省、网关名、用户可见文案五类，一律「部署 profile 声明 + 宿主中性缺省」，缺省语义 = 中性（`run_task` / 「执行层子 Agent」/ 单 profile 派生 / 无网关名缺省即 fail-closed），绝不静默取实例名。实例部署经 `contextProfiles.<id>` 的 `gateway` / `toolName` / `executorLabel` 三项声明保持已发布协议逐字节连续（声明面见 execution-layer-interface §1）。
+
+**落地点**：
+- 称谓：`buildSystemPrompt(executorLabel)`（system-prompt.ts；D-122 golden 钉注入实例称谓与改前逐字节相同）。
+- 工具名：`createContextTaskRunner` 解析 profile 后建 tool（context.ts）；`extractDelegationToolResultEvents` 经 runner.tool.name 注入认名，通用层不认死名字（turn-persistence.ts）。
+- profileId：`resolveActiveProfileId(profiles, explicit?)` 纯函数（contracts/config.ts）——显式优先、单 profile 派生其键、零/多 fail-closed；assembly 与 runner 共用同一份判定。
+- 网关名：`GATEWAY_INVOCATION` 常量退役（platform-contract.ts），`resolveGatewayText`/`gatewayExecPathForProfile` fail-closed；渲染面（error-codes 惰性模板 + plan-runtime 14 处 + pi-coding-driver 6 处）与 spawn 面全部显式穿线（C7a→C7b 两步，先行为不变后删常量）。
+- 文案：错误码表/确认路由/上下文 profile 拒绝/plan CLI 运维文案全部去实例名（error-codes.ts、plan-confirmation-route.ts、context.ts、plan-runtime.ts）。
+- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"，两级排除（两预算测试文件整文件挂 W4 签、`CROSS_REPO_17DZ_ROOT` 行挂 `identity-defer: W4` 签），排除机制非空转自反内建；F3 六项变异红→还原→复绿留档 change-safety §27。
+
+**测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（Run17dzTaskArgs 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
+
+**已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与 `CROSS_REPO_17DZ_ROOT` 变量名挂 W4 签（D-165）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。

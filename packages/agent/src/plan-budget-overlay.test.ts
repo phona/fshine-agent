@@ -121,7 +121,7 @@ describe('decision fail-closed：未知档位两道防线各有钉子', () => {
     };
     await expect(evaluateAndActivatePlan({
       platformRoot: '/platform', taskId: 't1', calls: CALLS, runCli,
-    })).rejects.toThrow(/17dz plan CLI 失败/);
+    })).rejects.toThrow(/plan CLI 失败/);
   });
 
   it('两道防线同时拆掉时未知档位不再被拦——本条是变异对照的书面说明，非可跑用例', () => {

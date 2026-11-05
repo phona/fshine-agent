@@ -75,6 +75,7 @@ async function makeWorker(options: {
   roots.push(root);
   const modelConfig = await fakeModelRuntime();
   return createPiCodingWorkerSession({
+    gateway: 'bin/17dz',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'entity scope test',

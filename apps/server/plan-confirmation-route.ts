@@ -79,24 +79,27 @@ export function createPlanConfirmationWiring(options: {
   platformRoot?: string;
   /** 宿主计划激活密钥（进程级机密，不进 worker env）。 */
   planActivationSecret: string;
+  /** Profile 声明的网关调用形式（C7b 穿线）：计划状态取问与激活的 spawn fail-closed 依赖它。 */
+  gateway?: string;
 }) {
   const pendingPlanRepo = createSqlitePendingPlanConfirmationRepo(options.dbPath);
   const confirmationRoute = createPlanConfirmationRoute({
     repo: asAgentPendingRepo(pendingPlanRepo),
     verifyActivatable: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
-      const status = await loadPlanStatus({ platformRoot: options.platformRoot, planId: pending.planId });
+      if (!options.platformRoot) throw new Error('平台根路径未配置');
+      const status = await loadPlanStatus({ platformRoot: options.platformRoot, planId: pending.planId, ...(options.gateway ? { gateway: options.gateway } : {}) });
       if (status && status.status !== 'pending') {
         throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
       }
     },
     activate: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
+      if (!options.platformRoot) throw new Error('平台根路径未配置');
       await activatePendingPlan({
         platformRoot: options.platformRoot,
         planId: pending.planId,
         evidence: 'user-confirmed',
         activationSecret: options.planActivationSecret,
+        ...(options.gateway ? { gateway: options.gateway } : {}),
       });
     },
   });

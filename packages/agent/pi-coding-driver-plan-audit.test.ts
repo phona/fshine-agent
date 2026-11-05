@@ -91,6 +91,7 @@ async function workerWith(options: {
   roots.push(root);
   const modelConfig = await fakeModelRuntime();
   return createPiCodingWorkerSession({
+    gateway: 'bin/17dz',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'plan audit test',
@@ -149,6 +150,7 @@ async function fileWorkerWith(options: {
   }
   const modelConfig = await fakeModelRuntime();
   const worker = await createPiCodingWorkerSession({
+    gateway: 'bin/17dz',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'plan audit test',
@@ -468,6 +470,7 @@ describe('计划提交审计：真 SDK AgentSession 链路', () => {
     const events: ServeGateEvent[] = [];
     const steps: string[] = [];
     const driver: TurnDriver = createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: `http://127.0.0.1:${port}`, LLM_API_KEY: 'test-key', LLM_MODEL: 'audit-model' },
       agentDir: path.join(cwd, '.fshine-agent'),
       planCliRunner: activatingRunner,

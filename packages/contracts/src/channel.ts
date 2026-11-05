@@ -95,7 +95,7 @@ export interface IncomingChannelMessage {
    * 本条消息携带的附件（企微 file 消息）。
    *
    * 2026-10-07 之前没有这个字段，渠道层只放行 `msgtype === 'text'`，用户发的 Excel
-   * 连下载都没有——"帮我做工资表"这类请求永远拿不到上游数据，而下游执行层（17dz
+   * 连下载都没有——"帮我做工资表"这类请求永远拿不到上游数据，而下游执行层（平台侧
    * 薪酬域）恰恰要求先吸收多份 Excel 才能产出 PayrollContract。
    */
   attachments?: readonly IncomingAttachment[];

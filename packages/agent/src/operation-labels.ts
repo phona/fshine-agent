@@ -6,7 +6,7 @@
  * TSV 输出第 5 列。fshine 不维护业务词表，也不认识任何具体操作——label 是
  * 平台数据，经本模块读进来后只做查表。
  *
- * 输出契约（17dz 侧新增的第 5 列，已实测在线）：
+ * 输出契约（平台侧新增的第 5 列，已实测在线）：
  *   name <TAB> script <TAB> access <TAB> executor <TAB> label
  * 第 5 列缺失或为空（旧版平台 / 平台没给这个操作起名）→ 该操作不进表 → 没有帧。
  * 这正是安全缺省：没有人类可读名就不发帧，绝不回退显示脚本名或操作名。
@@ -30,7 +30,7 @@
  * 测试因此可以直接塞替身表，不需要真平台。
  */
 import { spawn } from 'node:child_process';
-import { gatewayExecPath } from './platform-contract';
+import { gatewayExecPath, validateGatewayInvocation } from './platform-contract';
 
 /** script → label 查找表。script 与操作名两种写法都收录（命令里两种都合法）。 */
 export type OperationLabels = Map<string, string>;
@@ -82,6 +82,9 @@ export function parseOperationLabels(stdout: string): OperationLabels {
  */
 export function loadOperationLabels(platformRoot?: string, gateway?: string): Promise<OperationLabels> {
   if (!platformRoot) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -214,6 +217,9 @@ export function parseOperationArgStyles(stdout: string): KeyArgStyles {
  */
 export function loadOperationArgStyles(platformRoot?: string, gateway?: string): Promise<KeyArgStyles> {
   if (!platformRoot) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -256,6 +262,9 @@ export function loadOperationArgStyles(platformRoot?: string, gateway?: string):
  */
 export function loadOperationArgSpecs(platformRoot?: string, gateway?: string): Promise<OperationArgsSpecs> {
   if (!platformRoot) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -374,6 +383,9 @@ export function parseOperationSemantics(stdout: string): OperationSemantics {
  */
 export function loadOperationSemantics(platformRoot?: string, gateway?: string): Promise<OperationSemantics> {
   if (!platformRoot) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -458,6 +470,9 @@ export function parseOperationProtocols(stdout: string): OperationProtocols {
  */
 export function loadOperationProtocols(platformRoot?: string, gateway?: string): Promise<OperationProtocols> {
   if (!platformRoot) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -526,6 +541,9 @@ export function parseProposalSchema(stdout: string): unknown | null {
  */
 export function loadProposalSchema(platformRoot?: string, gateway?: string): Promise<unknown | null> {
   if (!platformRoot) return Promise.resolve(null);
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
+  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;

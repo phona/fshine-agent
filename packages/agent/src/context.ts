@@ -24,7 +24,7 @@ import type { PlanEntitySources, TurnDeclaration } from './turn-contract';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriverResult, type UsageTotals } from './driver';
 import { messageTextFor, toolUserErrorFor } from './error-codes';
 import { isPlatformAuthError, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure } from './platform-contract';
-import { gatewayExecPath, parseEnvelope, validateGatewayInvocation } from './platform-contract';
+import { gatewayExecPathForProfile, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHandoverFile, type HandoverExecutedCall, type HandoverReadCode, type HandoverReadResult, type TaskHandover } from './task-handover';
 import { loadProposalSchema } from './operation-labels';
@@ -41,7 +41,7 @@ import type {
   PlatformTaskRepo,
   TrustedContext,
 } from '@fshine/contracts';
-import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS } from '@fshine/contracts';
+import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS, resolveActiveProfileId } from '@fshine/contracts';
 import {
   createPlatformExecutionGate,
   PlatformExecutionAbortedError,
@@ -50,8 +50,15 @@ import {
   type PlatformExecutionGate,
   type PlatformExecutionLease,
 } from './platform-execution-gate';
+import { DEFAULT_EXECUTOR_LABEL } from './system-prompt';
 
-export const RUN_EXECUTION_TASK_TOOL = 'run_17dz_task';
+/**
+ * 委派工具名的中性缺省（C3）。工具名是模型可见协议面：实例已发布的协议名由该实例的
+ * profile 经 `toolName` 声明注入（createContextTaskRunner 解析 profile 后建 tool），
+ * 宿主不把某个执行层的名字当作通用协议缺省。形状约束见 config 加载校验
+ * （^[a-z][a-z0-9_]*$/，≤48）。
+ */
+export const RUN_EXECUTION_TASK_TOOL = 'run_task';
 
 /**
  * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
@@ -78,18 +85,41 @@ export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
  */
 export const DELEGATION_MODEL_TRANSIENT_FAILURE = messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE');
 
-export const RUN_EXECUTION_TASK_DESCRIPTION = [
-  '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
-  '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
-  '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
-  '涉及 17dz 实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
-  '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
-].join('\n');
+/**
+ * 委派工具描述（C4 称谓槽注入）：描述文本不携带实例名——「幻账平台/财税数据」等业务
+ * 语义出宿主，只剩「执行层平台的实时数据」「受信的工作目录」两处通用表述；唯一可变槽
+ * 是称谓（executorLabel，与系统提示词同一来源：profile 声明、缺省中性，不静默取实例名）。
+ */
+export function buildRunExecutionTaskDescription(executorLabel: string): string {
+  return [
+    `当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 ${executorLabel}。`,
+    `${executorLabel} 在受信的工作目录中加载平台 Skill，并返回自然语言结果。`,
+    '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
+    '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
+    '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
+  ].join('\n');
+}
+
+/** 委派工具参数 schema（C4 同槽：request 的 description 带称谓槽，taskId 中性）。 */
+export function buildRunExecutionTaskSchema(executorLabel: string): Record<string, unknown> {
+  return {
+    type: 'object',
+    required: ['request'],
+    additionalProperties: false,
+    properties: {
+      request: { type: 'string', minLength: 1, description: `交给 ${executorLabel} 的完整任务或用户最新补充` },
+      taskId: { type: 'string', description: '仅在继续此前子任务时使用返回的 taskId' },
+    },
+  };
+}
+
+/** 中性缺省形态（未声明称谓的部署与测试夹具拿到的文本）；实例称谓经 build* 注入。 */
+export const RUN_EXECUTION_TASK_DESCRIPTION = buildRunExecutionTaskDescription(DEFAULT_EXECUTOR_LABEL);
+export const RUN_EXECUTION_TASK_SCHEMA = buildRunExecutionTaskSchema(DEFAULT_EXECUTOR_LABEL);
 
 /**
- * 委派任务的宿主侧参数（D-120 第一步：中性主名）。字段全部是宿主持有的通用形态
- * （请求文本、任务续跑句柄、计划步骤标签、申报块、实体来源）——原名 Run17dzTaskArgs
- * 只有名字带执行层色彩，保留为过渡别名随 a2a 结构化调用协议批次退役。
+ * 委派任务的宿主侧参数（D-120：中性主名，别名已随 C3 退役）。字段全部是宿主持有的
+ * 通用形态（请求文本、任务续跑句柄、计划步骤标签、申报块、实体来源）。
  */
 export interface ContextTaskRunArgs {
   request: string;
@@ -108,9 +138,6 @@ export interface ContextTaskRunArgs {
    */
   entitySources?: PlanEntitySources;
 }
-
-/** @deprecated 中性名 ContextTaskRunArgs 的过渡别名：随 a2a 结构化调用协议批次退役。 */
-export type Run17dzTaskArgs = ContextTaskRunArgs;
 
 export interface SubagentTaskResult {
   taskId: string;
@@ -459,16 +486,6 @@ export interface ConfirmationReply {
   outcome: ConfirmationOutcome;
 }
 
-export const RUN_EXECUTION_TASK_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  required: ['request'],
-  additionalProperties: false,
-  properties: {
-    request: { type: 'string', minLength: 1, description: '交给 17dz 子 Agent 的完整任务或用户最新补充' },
-    taskId: { type: 'string', description: '仅在继续此前 17dz 子任务时使用返回的 taskId' },
-  },
-};
-
 /**
  * 意图条目的用户可读标签。业务字段不在宿主库往返（payload 归执行层自己的提案状态库），
  * 所以这里拿不到任何领域信息——统一降级成中性表述，绝不把 undefined 渲染给用户，
@@ -560,8 +577,9 @@ export function newGateSecret(): string {
  */
 const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
   // Profile 声明优先：调用方（createProposalViaGateway）把 resolve 出的
-  // profile.gateway 传进来；未声明时回退遗留常量（过渡期，见 platform-contract）。
-  const child = spawn(gatewayExecPath(platformRoot, validateGatewayInvocation(gateway) ? gateway : undefined), args, {
+  // profile.gateway 传进来；C7b 起 fail-closed——未声明/非法即抛，宿主不回退
+  // 任何遗留网关名（与 plan-runtime 的 defaultCliRunner 同法）。
+  const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -749,7 +767,10 @@ export async function snapshotWorkspaceFiles(
 }
 
 export function createContextTaskRunner(options: ContextTaskRunnerOptions): ContextTaskRunner {
-  const profileId = options.profileId ?? '17dz';
+  // Active profile 派生（C5）：显式指定优先；未指定且恰有一个 profile → 该键；
+  // 0 个或多个 → undefined，消费方（resolveContextProfile）fail-closed。宿主不把
+  // 任何执行层实例名当缺省。
+  const profileId = options.profileId ?? resolveActiveProfileId(options.profiles);
   const intentTtlMs = options.intentTtlMs ?? 10 * 60_000;
   const generateCode = options.generateCode ?? defaultGenerateCode;
   const hashCode = options.hashCode ?? defaultHashCode;
@@ -757,10 +778,17 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   const executionGate = options.executionGate ?? createPlatformExecutionGate({
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
+  // Active profile 的声明面（C3/C4/C5）：profileId 派生失败（0/多个 profile 未显式指定）
+  // 时为 undefined，工具面全部落到中性缺省；真实委派在 resolveContextProfile 处 fail-closed。
+  const activeProfile = profileId === undefined ? undefined : options.profiles[profileId];
+  // 工具描述的称谓与系统提示词同源（C4）：profile.executorLabel 声明，缺省中性。
+  const effectiveExecutorLabel = activeProfile?.executorLabel ?? DEFAULT_EXECUTOR_LABEL;
   const tool: DiscoveredTool = {
-    name: RUN_EXECUTION_TASK_TOOL,
-    description: RUN_EXECUTION_TASK_DESCRIPTION,
-    inputSchema: RUN_EXECUTION_TASK_SCHEMA,
+    // 工具名 = profile.toolName 声明（C3），缺省中性（RUN_EXECUTION_TASK_TOOL）：
+    // 实例已发布的工具协议名由该实例自己的 profile 声明保持连续，宿主不取实例名缺省。
+    name: activeProfile?.toolName ?? RUN_EXECUTION_TASK_TOOL,
+    description: buildRunExecutionTaskDescription(effectiveExecutorLabel),
+    inputSchema: buildRunExecutionTaskSchema(effectiveExecutorLabel),
   };
 
   /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
@@ -1411,7 +1439,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,
-            exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
+            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。'); },
             deadline,
             signal: runSignal,
             ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
@@ -1452,7 +1480,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 进 catch、被分类 executor_error，用户拿到兜底话术——宿主侧的终局门根本没机会
         // 执行。豁免只对带结构化收尾的结果生效：纯空 text 照旧失败关闭，基线一字不动。
         if (!result.text.trim() && !result.terminalFailure && !result.clarification && !result.needs) {
-          throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
+          throw new Error(signal?.aborted ? '子任务已取消。' : '子 Agent 未返回可用结果。');
         }
         // 终局分支（背带，紧跟空文本检查的原位置——第一版的宿主侧门就在这里，但当时
         // 空文本检查先行抛出，它从未执行过）：平台确定性终局码以"整份答案"收尾时，
@@ -1592,7 +1620,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 登录态判定以**码**为准（isPlatformAuthError：信封/挂码/码前缀，见
         // platform-contract.ts 的 auth 码集合）。下面那条中文正则是**过渡**：平台
         // auth.js 的自动重登录失败消息（"平台登录已过期，自动登录失败——…"）是既有
-        // 唯一不带码前缀的形态，17dz 侧尚未给它挂码；在平台收口之前先留正则兜底，
+        // 唯一不带码前缀的形态，平台侧尚未给它挂码；在平台收口之前先留正则兜底，
         // 否则那一条会退化成 executor_error——而"请稍后再试"对 auth 是错指令。
         // 平台侧该消息一带码（走 messageFor），这行即可删除。
         // 取消判据读 runSignal（本次执行实际持有的信号；形参 signal 在 prepared 路径下
@@ -1665,15 +1693,18 @@ export function withStepLabel(text: string, stepLabel: string): string {
   return `${PLAN_NOTICE_PREFIX}${tag}${text.slice(PLAN_NOTICE_PREFIX.length)}`;
 }
 
-async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string): Promise<ResolvedContextProfile> {
+async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string | undefined): Promise<ResolvedContextProfile> {
+  // 消费方 fail-closed（C5）：0 个或多个 profile 且未显式指定 profileId → 拒绝执行，
+  // 不静默挑 profile、不回退任何实例名（文案中性，指引部署补配置或显式指定）。
+  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
   const configured = profiles[id];
-  if (!configured) throw new ToolUserError(`未配置 17dz 上下文 profile:${id}`);
-  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`17dz 上下文目录不可用:${id}`); });
+  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`);
+  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`); });
   const skillRoots: string[] = [];
   for (const relative of configured.skillRoots) {
-    if (path.isAbsolute(relative)) throw new ToolUserError('17dz skillRoots 必须是相对 root 的路径。');
+    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。');
     const resolved = await fs.realpath(path.join(root, relative)).catch(() => undefined);
-    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('17dz skillRoots 未通过路径安全校验。');
+    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。');
     skillRoots.push(resolved);
   }
   return {

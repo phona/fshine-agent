@@ -1,7 +1,7 @@
 /**
  * 分层模型接缝的装配接线测试（LLM_MAIN_MODEL / LLM_MAIN_THINKING_LEVEL）。
  *
- * 旋钮语义：Main Agent 可单独配更快的模型，17dz worker 保持强模型（LLM_MODEL）；
+ * 旋钮语义：Main Agent 可单独配更快的模型，执行层 worker 保持强模型（LLM_MODEL）；
  * 只做接缝、默认行为零变化——真要换哪个模型是选型决策，不属于这里。
  *
  * 写法沿用 plan-confirmation-wiring.test.ts：真工厂 + 最小真装配（临时 SQLite + 只含

@@ -122,12 +122,15 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(src.includes('serve-gate.ts'), '头注释与授权裁决模块的指向脱钩——读者找不到授信门的权威位置').toBe(true);
   });
 
-  it('D-120（命名债已关）：通用任务基础设施不再引用执行层命名的参数类型', () => {
+  it('D-120（命名债已关，别名已随 C3 退役）：Run17dzTaskArgs 全仓绝迹', () => {
     // task-manager / background-runtime 是通用任务管理基础设施；其公共表面积引用
     // Run17dzTaskArgs 是"新执行层照抄违例样板"的入口。主名 ContextTaskRunArgs 已
-    // 中性化，旧名只允许存在于 context.ts 的 deprecated 别名与 index.ts 的再导出
-    // （过渡一个版本周期，随 a2a 结构化调用协议批次退役）。此处复发 = 债回潮。
+    // 中性化；C3 起过渡别名（context.ts 类型 + index.ts 再导出）整体退役——它是
+    // `git grep -i 17dz` 门①路径集内的执行层名残留，W1 身份面守卫不容它挂签续命。
+    // 此处任何一处复发 = 债回潮。
     expect(read('packages/agent/src/task-manager.ts').includes('Run17dzTaskArgs'), 'task-manager 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
     expect(read('packages/agent/src/background-runtime.ts').includes('Run17dzTaskArgs'), 'background-runtime 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
+    expect(read('packages/agent/src/context.ts').includes('Run17dzTaskArgs'), 'context.ts 的过渡别名复活——C3 退役决策被回退').toBe(false);
+    expect(read('packages/agent/src/index.ts').includes('Run17dzTaskArgs'), 'index.ts 重新导出 Run17dzTaskArgs——C3 退役决策被回退').toBe(false);
   });
 });

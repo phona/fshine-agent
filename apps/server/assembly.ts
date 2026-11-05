@@ -40,7 +40,7 @@ import {
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import type { AuditStore, ChannelReply, ChannelRoute, ReplyHandler, TaskPlanRepo } from '@fshine/contracts';
-import { turnBudgetMsFor } from '@fshine/contracts';
+import { resolveActiveProfileId, turnBudgetMsFor } from '@fshine/contracts';
 import { createProposalCommitRunner } from './proposal-commit';
 import { createMessageHandler } from './handler';
 import { sweepUndeliveredTaskRuns } from './background-delivery';
@@ -103,7 +103,7 @@ export interface ServerAssemblyOverrides {
   dbPath?: string;
   /** Main Agent driver. Defaults to the configured model driver. */
   driver?: TurnDriver;
-  /** 17dz subagent driver. Defaults to the pi coding agent driver. */
+  /** Execution-layer subagent driver. Defaults to the pi coding agent driver. */
   workerDriver?: TurnDriver;
   /** Isolated tool-free driver for Context State extraction. Defaults to `driver`. */
   contextModelDriver?: TurnDriver;
@@ -168,6 +168,8 @@ export interface ServerAssembly {
   replyHandler: ReplyHandler;
   channel: WecomBotChannel;
   platformRoot?: string;
+  /** Active profile 的键（C5）：单 profile 派生，多/零 profile 未显式指定时 undefined。 */
+  activeProfileId?: string;
   planActivationSecret: string;
   workerDispatchMode: WorkerDispatchMode;
   close(): Promise<void>;
@@ -177,7 +179,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const env = overrides.env ?? process.env;
   const workerDispatchMode = overrides.workerDispatchMode ?? workerDispatchModeOf(env);
   const config = loadConfig({ env, yamlPath: env['AGENT_CONFIG_PATH'] || undefined });
-  const platformRoot = config.contextProfiles['17dz']?.root;
+  // Active profile 派生（C5）：单 profile → 其键；零/多 profile → undefined（各消费点
+  // 按无平台能力降级，runner 侧 resolveContextProfile fail-closed）。宿主不取实例名缺省。
+  const activeProfileId = resolveActiveProfileId(config.contextProfiles);
+  const activeProfile = activeProfileId === undefined ? undefined : config.contextProfiles[activeProfileId];
+  const platformRoot = activeProfile?.root;
   // 接口完整性硬门：lint 红就抛错、拒绝启动（不建存储、不接渠道），判据与输出见上方函数注释。
   if (platformRoot) assertPlatformOperationsHealthy(platformRoot);
   const dbPath = overrides.dbPath ?? path.join(repoRoot, 'data/agent.db');
@@ -224,7 +230,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
     : { event: 'business_skill_skipped', path: businessSkill.path }));
 
-  // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），17dz worker 仍走
+  // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），执行层 worker 仍走
   // LLM_MODEL——worker 驱动的输入原样不动（pi-coding-driver 只认 env.LLM_MODEL）。
   // 装配层持有配置、驱动只收参数：Main 专用变量在这里解析成显式 modelId/thinkingLevel，
   // pi-driver 不再自行读取。两个变量都缺省时 createPiTurnDriver 收到的 options 与旧装配
@@ -306,7 +312,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     },
     workerDriver,
     executionGate: platformExecutionGate,
-    profileId: '17dz',
+    // C5：active profile 派生（单 profile → 其键；零/多 → undefined，消费方 fail-closed）。
+    profileId: activeProfileId,
     // 写开放的执法判据（变更项 ⑧）：平台侧声明，isCommitEnabled 单独派生（mock ⇒ 写链路
     // 全放开；真平台 ⇒ 还须显式 FSHINE_REAL_COMMIT=1）。worker 驱动的计划扫描与本层的
     // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
@@ -330,14 +337,15 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
       proposalCommitEnabled: overrides.proposalCommitEnabled ?? isCommitEnabled(env),
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
-      // 不出现网关名。取值单一来源 = planDraftExample()（它派生自平台适配层的
-      // GATEWAY_INVOCATION 常量；形状与平台 plan schema 的一致性由 plan-teaching.test 钉住）。
-      planCommandForm: planDraftExample(config.contextProfiles['17dz']?.gateway),
+      // 不出现网关名。取值单一来源 = planDraftExample(activeProfile?.gateway)（C7b 起
+      // gateway 未声明即抛，宿主不持任何实例网关名缺省；形状与平台 plan schema 的一致性
+      // 由 plan-teaching.test 钉住）。
+      planCommandForm: planDraftExample(activeProfile?.gateway),
     } : {}),
   });
   // The task manager may cancel a waiting confirmation using the original principal/session/task
   // identity. This route is host-owned and does not synthesize positive user confirmation evidence.
-  const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret });
+  const planConfirmation = createPlanConfirmationWiring({ dbPath, platformRoot, planActivationSecret, gateway: activeProfile?.gateway });
   const backgroundTasks = createBackgroundTaskManager({
     runner: platformTask,
     repo: store.taskRuns,
@@ -388,7 +396,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     sessionTtlMs: config.sessionTtlMs,
     // Leave time for the Main Agent to interpret the subagent's final text
     // after the delegated turn reaches its own deadline.
-    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
+    turnBudgetMs: turnBudgetMsFor(activeProfile),
     platformTask,
     backgroundTasks,
     workerDispatchMode,
@@ -400,6 +408,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(taskPlans ? { taskPlans } : {}),
     // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
+    // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 系统
+    // 提示词；未声明 = 宿主中性缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
+    ...(activeProfile?.executorLabel ? { executorLabel: activeProfile.executorLabel } : {}),
     // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后会话进入冷却，冷却期内不再
     // 发起平台调用。时长经 env 覆盖（见上），阈值固定 2（platform-health.ts 缺省）。
     ...(platformCooldownMs ? { platformCooldownMs } : {}),
@@ -458,6 +469,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     replyHandler: handler,
     channel,
     ...(platformRoot ? { platformRoot } : {}),
+    ...(activeProfileId !== undefined ? { activeProfileId } : {}),
     planActivationSecret,
     workerDispatchMode,
     close: async () => {

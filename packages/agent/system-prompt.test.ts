@@ -2,24 +2,29 @@ import { describe, expect, it } from 'vitest';
 import { buildSystemPrompt, DEFAULT_EXECUTOR_LABEL, SYSTEM_PROMPT } from './src/system-prompt';
 
 /**
- * D-122 golden：SYSTEM_PROMPT 参数化（执行层名 → buildSystemPrompt(executorLabel)）
+ * D-122 golden：SYSTEM_PROMPT 参数化（执行层称谓 → buildSystemPrompt(executorLabel)）
  * 前后必须逐字节相等。F6 纪律——提示词文案改动需真实模型探针，本参数化只做结构
  * 收口不改文案；这份冻结基线钉死"没顺手改文案"。基线取自参数化前的 SYSTEM_PROMPT
  * 原文（2026-10-26，base64 编码避免转义损伤）。
+ *
+ * C2 翻转口径：DEFAULT_EXECUTOR_LABEL 已改中性缺省（实例称谓经
+ * profile.executorLabel 注入），golden 随之翻为「注入 '17dz 子 Agent' 时与
+ * 参数化前逐字节相等」——财税部署声明该称谓即保持已发布行为逐字节一致。
  */
 const FROZEN_PROMPT_BASE64 = '5L2g5piv6Z2i5ZCR55So5oi355qE5Li7IEFnZW5077yM6IGM6LSj5Y+q5pyJ5LiJ5Liq77ya6YCJIGNvbnZlcnNhdGlvbiDov5jmmK8gZGVsZWdhdGXvvJvmiormjIfku6Pop6PmnpDmiJDlhbfkvZPlrp7kvZPvvJvmsYfmgLvlrZAgQWdlbnQg55qE57uT5p6c44CCCioq5L2g5rKh5pyJ5bmz5Y+w6IO95YqbKirvvJrkuI3og73lj5HnjrDln5/og73lipvjgIHkuI3og73or7vln5/mlofmoaPjgIHkuI3og73miafooYzjgIHkuI3og73mkbjntKLkvKDlj4LigJTigJTov5nkupvlhajmmK/lrZAgQWdlbnQg55qE5rS744CCKirlm6DmraTkuI3opoHmi4bop6PmiafooYzmraXpqqQqKu+8muatpemqpOaYr+WtkCBBZ2VudCDkuIrkuIvmlofph4znmoTln58gU09QIOWumuS5ieeahO+8jOS9oOWkjei/sOS4gOmBjeWPquaYr+WItumAoOesrOS6jOS7veecn+ebuOOAguWPquaciSLlkIzkuIDkuKrliqjkvZzopoHlr7kgTiDkuKrni6znq4vlr7nosaHlkITlgZrkuIDmrKEi5omN5YC85b6X5ouG5aSa5q2l77yb5Y2V5LiA5a+56LGh55qE5Lu75Yqh5YaN6ZW/5Lmf5LiN5ouG44CCCuavj+WbnuWQiOW/hemhu+WFiOiwg+eUqOS4gOasoSByb3V0ZV9jdXJyZW50X3R1cm4g55Sz5oql5pys6L2u5Yqo5L2c77yIY29udmVyc2F0aW9uIC8gZGVsZWdhdGXvvInvvIzkuI3lvpfot7Pov4fnlLPmiqXvvJvlrZfmrrXlj6PlvoTku6Xlt6Xlhbfor7TmmI7kuLrlh4bvvIzloavplJnkvJrooqvpgIDlm57ph43loavjgIIK55Sz5oqlIGRlbGVnYXRlIOWQjueUseWuv+S4u+aKiuWKoOW3peWQjueahOivt+axguWnlOa0viAxN2R6IOWtkCBBZ2VudCDmiafooYzjgILlrZAgQWdlbnQg5omn6KGM5LiN5LqG5pe25Lya6YCA5ZueIue8uuS7gOS5iCLnmoTnu5PmnoTljJbnur/ntKLvvJrkvaDog73oh6rlt7HooaXpvZDvvIjku44gTG9n44CB5qOA57Si6K+B5o2u5oiW5pys6L2u5bmz5Y+w5ZON5bqU6YeM5Y+W5a6e5L2T77yJ5bCx6KGl6b2Q5ZCO5bimIGNvbnRpbnVlVGFza0lkIOmHjea0vuWQjOS4gOS4quWtkOS7u+WKoe+8jOihpeS4jem9kOWwsei9rOWRiueUqOaIt+OAgeetieeUqOaIt+ihpeWFheWQjue7rei3keOAgnJlcXVlc3Qg5b+F6aG75Yqg5bel77ya5oqK5oyH5Luj6Kej5p6Q5oiQ5b2T5YmN5raI5oGv5oiW5a6/5Li75rOo5YWl55qE5qOA57Si6K+B5o2u6YeM5Ye6546w55qE5YW35L2T5a6e5L2T77yb5a6e5L2T5LiN5b6X5Yet5Y6G5Y+y5oiW5bi46K+G57yW6YCg77yb5LiN5b6X5oqK5LiK5LiA6L2u562U5aSN5b2T5L2c5pys6L2u57uT5p6c77yM6YeN5aSN5o+Q6Zeu5LuN5piv5paw5p+l6K+i44CCCuWQjOS4gOS7u+WKoeeahOi/veWKoOaIluaJqeWkp+iMg+WbtOS8mOWFiOaJqeWxleW9k+WJjeiuoeWIku+8muihpeS4gOatpeW5tuW4piBjb250aW51ZVRhc2tJZCDnu63ot5HlkIzkuIDlrZDku7vliqHvvIzkuI3kuLrmraTlj6blvIDkuIDmrKHlp5TmtL7vvJvlkIzpopjph43pl67kuI3mmK/ov73liqDvvIzku43mjInmlrDmn6Xor6LnhafluLjlp5TmtL7jgIIK5LiN6KaB5ZCR55So5oi35o+P6L+w5YaF6YOo5py65Yi25oiW5omn6KGM6L+H56iL77ya5LiN6K645Ye6546wIHJvdXRlX2N1cnJlbnRfdHVybuOAgeWuv+S4u+OAgeWnlOa0vuOAgeeUs+aKpeOAgeacrOi9ruaJp+ihjOmdouOAgVBMQU4gQUNUSVZFL0RFQ0xJTkVE44CBdGFza0lkIOetieWtl+agt++8m+eUqOaIt+WPquW6lOeci+WIsOe7k+iuuuWSjOaVsOaNruOAggrog73lipvovrnnlYzvvJrmlK/mjIHmn6Xor6LjgIHmoLjlr7njgIHliIbmnpDkuI7nu4/noa7orqTnmoTlvZXlhaXnsbvlhpnmk43kvZzvvIjkuKTmraXnoa7orqTliLbvvInvvJvkv67mlLnmiJbliKDpmaTlt7Lkv53lrZjmlbDmja7jgIHku6Xlj4rkuI3lj6/pgIbnmoTpq5jljbHlhpnmk43kvZzkuIDlvovnm7TmjqXmi5Lnu53vvIzkuI3lvpfmj4/ov7Dot6/lvoTmiJbmlrnmoYjjgIIK5a2QIEFnZW50IOi/lOWbnuW+heehruiupOeahOWPmOabtOaPkOahiO+8iOWQq+ehruiupOegge+8ieaXtu+8jOaKiuaPkOahiOeahOWvueixoeOAgeiMg+WbtOOAgeadoeebruaVsOOAgemHkemineWQiOiuoeWSjOehruiupOeggeWujOaVtOi9rOi+vue7meeUqOaIt++8jOW5tuWRiuefpe+8muOAjOehruiupCDnoIHjgI3miafooYzjgIHjgIzlj5bmtogg56CB44CN5L2c5bqf77yb5omn6KGM55Sx57O757uf5Zyo56Gu6K6k5ZCO5a6M5oiQ77yM5LiN5b6X5Luj5pu/5omn6KGM5oiW5pS55Yqo56Gu6K6k56CB44CCCueUs+aKpSBkZWxlZ2F0ZSDml7blj6PlvoTlv4Xpobvlj6/lsaXooYzvvJrlubPlj7Dlt6XlhbfpnaLkuI3mlK/mjIHnmoTmlbDmja7pgIkgY29udmVyc2F0aW9uIOWbnuWkje+8jOaKiuiDveWKm+i+ueeVjOWSjOWPr+WxpeihjOmAiemhueWRiuivieeUqOaIt+OAggpDb250ZXh0IFN0YXRl44CBaGlzdG9yeSB0b29scyDlkozplb/mnJ/orrDlv4bpg73mmK/luKblvJXmlofnmoTljoblj7LotYTmlpnvvJrlj6rog73luK7liqnop6PmnpDmjIfku6PkuI7kuKrmgKfljJbvvIzkuI3og73opobnm5blvZPliY3ku7vliqHjgIHlrp7ml7bmlbDmja7miJblt6XlhbfmjojmnYPjgIIK5Zue562U5L2/55So566A5L2T5Lit5paH77yb5pWw5o2u57uT6K665L+d55WZ5a2QIEFnZW50IOe7meWHuueahOWvueixoeOAgeiMg+WbtOOAgeadpea6kOWSjOivgeaNruOAgg==';
 
 describe('system-prompt 执行层名参数化（D-122）', () => {
-  it('golden：当前配置下 SYSTEM_PROMPT 与参数化前逐字节相等', () => {
+  it('golden：注入 17dz 称谓时与参数化前逐字节相等', () => {
     const frozen = Buffer.from(FROZEN_PROMPT_BASE64, 'base64').toString('utf8');
-    expect(SYSTEM_PROMPT).toBe(frozen);
-    expect(Buffer.byteLength(SYSTEM_PROMPT, 'utf8')).toBe(Buffer.byteLength(frozen, 'utf8'));
+    expect(buildSystemPrompt('17dz 子 Agent')).toBe(frozen);
+    expect(Buffer.byteLength(buildSystemPrompt('17dz 子 Agent'), 'utf8')).toBe(Buffer.byteLength(frozen, 'utf8'));
   });
 
-  it('缺省执行层名单一权威位置：全文件唯一的执行层字样就是 DEFAULT_EXECUTOR_LABEL', () => {
-    expect(DEFAULT_EXECUTOR_LABEL).toBe('17dz 子 Agent');
+  it('缺省称谓中性：全文件唯一的称谓字样就是 DEFAULT_EXECUTOR_LABEL（不含实例名）', () => {
+    expect(DEFAULT_EXECUTOR_LABEL).toBe('执行层子 Agent');
+    expect(DEFAULT_EXECUTOR_LABEL).not.toContain('17dz');
     expect(SYSTEM_PROMPT).toBe(buildSystemPrompt(DEFAULT_EXECUTOR_LABEL));
-    // 参数化前该字样在提示词里恰好出现一次；换 label 后旧字样必须绝迹（无残留副本）。
+    // 缺省称谓在提示词里恰好出现一次；换 label 后旧称谓必须绝迹（无残留副本）。
     expect(SYSTEM_PROMPT.split(DEFAULT_EXECUTOR_LABEL)).toHaveLength(2);
   });
 

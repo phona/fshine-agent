@@ -1,9 +1,9 @@
-/** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
+/** Main Pi Agent runtime with one narrow delegation tool for the execution-layer subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
-import { RUN_EXECUTION_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
+import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import type { CandidateExtractor } from './memory-consolidator';
@@ -39,7 +39,7 @@ import {
   appendClarificationResolved,
   appendUserEvent,
   ensureHistoryBackfill,
-  extract17dzToolResultEvents,
+  extractDelegationToolResultEvents,
   isContextState,
   loadMemoryProjection,
   persistAssistantAndContext,
@@ -56,7 +56,7 @@ import {
   type PlatformHealthClock,
   type PlatformHealthTracker,
 } from './platform-health';
-import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, SYSTEM_PROMPT } from './system-prompt';
+import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, DEFAULT_EXECUTOR_LABEL, buildSystemPrompt } from './system-prompt';
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
@@ -118,6 +118,8 @@ export interface TaxAgentRuntimeDeps {
    * 每回合追加进系统提示词（与日期行同性质）。缺省 = 不注入，不影响其他能力。
    */
   businessSkill?: string;
+  /** 执行层称谓（C2）：部署层按 profile 声明注入进系统提示词；缺省 = 宿主中性值。 */
+  executorLabel?: string;
   /**
    * 平台健康信号的时钟注入（Lane 2）：冷却判定只认 now()，测试推时钟即可验证
    * "冷却中 / 已到期"，不需要真等 10 分钟。缺省 Date.now()（与 context-model 的
@@ -144,9 +146,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   // 业务 skill（架构 §5）：静态程序性知识，每回合进系统提示词；与日期行同性质，
   // 缺文件/缺配置时为空，其余能力不受影响。
   const businessSkill = typeof deps.businessSkill === 'string' ? deps.businessSkill.trim() : '';
-  // 日期尾注放组装后提示词的最尾部（理由见 DATE_SUFFIX 注释）：前缀 = 稳定 SYSTEM_PROMPT
-  // + 稳定 skill 文本，跨天只有尾注一行未命中。
-  const systemPrompt = `${businessSkill ? `${SYSTEM_PROMPT}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : SYSTEM_PROMPT}\n\n${DATE_SUFFIX}`;
+  // 日期尾注拼最尾部（跨天只有尾注一行未命中）。baseSystemPrompt 的称谓经
+  // deps.executorLabel 注入（C2，缺省中性），工厂内只构造一次，恢复路径复用。
+  const baseSystemPrompt = buildSystemPrompt(deps.executorLabel ?? DEFAULT_EXECUTOR_LABEL);
+  const systemPrompt = `${businessSkill ? `${baseSystemPrompt}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : baseSystemPrompt}\n\n${DATE_SUFFIX}`;
   // 平台健康信号（Lane 2 治标补法）：会话级连续 AUTH 类平台失败记账 + 冷却。判据与
   // 边界见 platform-health.ts——治"平台根本不可用时的逐轮重试式重查"，与回合内的
   // MAX_* 熔断、平台侧限流、并发闸正交。时钟可注入（测试可推），阈值/时长可配置。
@@ -338,9 +341,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         ];
         const deadline = Date.now() + Math.min(turnBudgetMs, 60_000);
         const answer = await deps.driver.run({
-          systemPrompt: `${SYSTEM_PROMPT}\n\n${resumedBlocked
-            ? '本轮 17dz 子任务按用户确认重跑后没有产生任何平台执行。'
-            : '本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。\n\n${DATE_SUFFIX}`,
+          systemPrompt: `${baseSystemPrompt}\n\n${resumedBlocked
+            ? '本轮子任务按用户确认重跑后没有产生任何平台执行。'
+            : '本轮子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。\n\n${DATE_SUFFIX}`,
           tools: [],
           messages,
           onStep: ctx.onStep ?? (() => {}),
@@ -1065,7 +1068,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             // （需要澄清、说明能力边界时同样走这条路径）。
             return { recorded: 'conversation' };
           }
-          if (tool === RUN_EXECUTION_TASK_TOOL) {
+          if (tool === deps.platformTask.tool.name) {
             return deps.platformTask.run({
               request: String(args['request'] ?? ''),
               ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
@@ -1086,7 +1089,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 时保持 undefined → turn_span 字段缺席（不是全零，两类事实必须可区分）。
       // 跳过申报的重试段也是本回合的 Main 消耗：第二段输入 = 第一段转录 + 重试指令，
       // 从 firstRunLen+1 起切只拿第二段新增的 assistant 消息（切片判据与下方
-      // extract17dzToolResultEvents 的 initialMessageCount 同法）。
+      // extractDelegationToolResultEvents 的 initialMessageCount 同法）。
       let mainUsage = sumUsage(result.messages.slice(initialMessageCount));
       if (!turn.declared) {
         // 跳过申报：丢弃自由文本，追一条明确指令重试一次。
@@ -1173,7 +1176,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             principalId: ctx.principalId,
             messages: sanitizeTranscriptMessages([...persistedLoaded, ...taskEventContext.promptMessages, ...continuationMessages]),
           });
-          const { events } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
+          const { events } = extractDelegationToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx, deps.platformTask.tool.name);
           for (const event of events) await deps.conversationLog?.append(event);
           taskEventContinuationAccepted.add(ctx);
           console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'background_task_continuation_accepted' }));
@@ -1230,7 +1233,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason, ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
         return { text: fallback };
       }
-      const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
+      const { events: toolResultEvents, taskResults } = extractDelegationToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx, deps.platformTask.tool.name);
       await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, toolResultEvents);
       // D-065：结果文本回写任务条目（结构化字段缺失时召回台账的兜底渲染源）。与 Log 同文、
       // 同样脱敏；失败不影响回合（recordTaskResult 内部已兜底）。

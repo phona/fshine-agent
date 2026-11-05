@@ -184,7 +184,6 @@ export {
   type ProposalCreateCall,
 } from './proposal-runtime';
 export {
-  GATEWAY_INVOCATION,
   gatewayExecPath,
   gatewayExecPathForProfile,
   validateGatewayInvocation,
@@ -232,7 +231,6 @@ export {
   type ContextTaskExecutionContext,
   type SubagentTaskResult,
   type ContextTaskRunArgs,
-  type Run17dzTaskArgs,
   type ConfirmationOutcome,
   type ConfirmationReply,
   type ProposalCommitRequest,

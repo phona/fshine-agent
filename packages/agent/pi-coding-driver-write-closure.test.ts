@@ -121,6 +121,7 @@ async function makeDriver(options: { planCliRunner: PlanCliRunner }): Promise<{ 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
+      gateway: 'bin/17dz',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       // 三张平台清单派生表全部显式注入：单测里绝不 spawn 平台 CLI

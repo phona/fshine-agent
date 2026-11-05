@@ -21,48 +21,48 @@ function fakeCli(outputs: unknown[], calls: Array<{ args: string[]; input?: stri
 describe('platform-backed execution plan runtime', () => {
   it('only accepts the virtual JSON plan submission and rejects direct evaluate/activate CLI calls', () => {
     // 措辞收口在 error-codes.ts 表（三要素：码 + 期望/实际/正确形态）
-    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
-    expect(() => parsePlanCallsCommand('bin/17dz plan activate --plan-id forged --evidence notification-delivered --token forged')).toThrow('PLAN_SUBCOMMAND_RESERVED');
-    expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}')).toEqual({
+    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin', 'bin/17dz')).toThrow('PLAN_SUBCOMMAND_RESERVED');
+    expect(() => parsePlanCallsCommand('bin/17dz plan activate --plan-id forged --evidence notification-delivered --token forged', 'bin/17dz')).toThrow('PLAN_SUBCOMMAND_RESERVED');
+    expect(parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}', 'bin/17dz')).toEqual({
       kind: 'inline',
       calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
     });
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":{"account":"A"}}]}')).toThrow('PLAN_CALL_ARGS_NOT_ARRAY');
-    expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":{"account":"A"}}]}', 'bin/17dz')).toThrow('PLAN_CALL_ARGS_NOT_ARRAY');
+    expect(() => parsePlanCallsCommand('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin', 'bin/17dz')).toThrow('PLAN_SUBCOMMAND_RESERVED');
   });
 
   it('围栏/外层引号包装不再被容忍：抛结构错误，宿主不 absorbing 格式波动', () => {
     const bare = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]}';
     const expected = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
     // 对照：同样的内容去掉包装就是合法命令（围栏/引号是唯一差别）
-    expect(parsePlanCallsCommand(bare)).toEqual({ kind: 'inline', calls: expected });
+    expect(parsePlanCallsCommand(bare, 'bin/17dz')).toEqual({ kind: 'inline', calls: expected });
     // markdown 围栏（带语言标签、单行）
-    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``)).toThrow('PLAN_SHAPE_PREFIX');
+    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``, 'bin/17dz')).toThrow('PLAN_SHAPE_PREFIX');
     // 围栏无标签 + 多行美化（JSON 本体跨行）
-    expect(() => parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202606"] }\n  ]\n}\n```')).toThrow('PLAN_SHAPE_PREFIX');
+    expect(() => parsePlanCallsCommand('```\nbin/17dz plan {\n  "calls": [\n    { "operation": "voucher.query-saved", "args": ["A", "202606"] }\n  ]\n}\n```', 'bin/17dz')).toThrow('PLAN_SHAPE_PREFIX');
     // 外层成对引号（双引号/单引号）
-    expect(() => parsePlanCallsCommand(`"${bare}"`)).toThrow('PLAN_SHAPE_PREFIX');
-    expect(() => parsePlanCallsCommand(`'${bare}'`)).toThrow('PLAN_SHAPE_PREFIX');
+    expect(() => parsePlanCallsCommand(`"${bare}"`, 'bin/17dz')).toThrow('PLAN_SHAPE_PREFIX');
+    expect(() => parsePlanCallsCommand(`'${bare}'`, 'bin/17dz')).toThrow('PLAN_SHAPE_PREFIX');
     // 报错必须说清"前面多了什么"并给出正确形状——这是模型下一轮自愈的唯一依据
     // （三要素：期望/实际/正确形态；实际即多出来的内容，逐字点出）
-    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``))
+    expect(() => parsePlanCallsCommand(`\`\`\`json\n${bare}\n\`\`\``, 'bin/17dz'))
       .toThrow('实际 ```json；正确形态');
     // 围栏里不是计划命令（没有 bin/17dz plan 头）：仍返回 null，与裸命令语义一致
-    expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```')).toBeNull();
+    expect(parsePlanCallsCommand('```json\n{"calls":[{"operation":"x","args":[]}]}\n```', 'bin/17dz')).toBeNull();
   });
 
   it('plan 之后没有 JSON 方案：抛形状错误', () => {
-    expect(() => parsePlanCallsCommand('bin/17dz plan')).toThrow('PLAN_SHAPE_PAYLOAD');
-    expect(() => parsePlanCallsCommand('bash /abs/path/bin/17dz plan   ')).toThrow('PLAN_SHAPE_PAYLOAD');
+    expect(() => parsePlanCallsCommand('bin/17dz plan', 'bin/17dz')).toThrow('PLAN_SHAPE_PAYLOAD');
+    expect(() => parsePlanCallsCommand('bash /abs/path/bin/17dz plan   ', 'bin/17dz')).toThrow('PLAN_SHAPE_PAYLOAD');
   });
 
   it('bash/sh 与任意路径前缀照常放行，user_confirmed 只作审计', () => {
     const calls = [{ operation: 'voucher.query-saved', args: ['A', '202606'] }];
     const json = JSON.stringify({ calls });
     for (const prefix of ['', 'bash ', 'sh ', 'bash /abs/path/', 'sh /abs/path/', '/abs/path/']) {
-      expect(parsePlanCallsCommand(`${prefix}bin/17dz plan ${json}`)).toEqual({ kind: 'inline', calls });
+      expect(parsePlanCallsCommand(`${prefix}bin/17dz plan ${json}`, 'bin/17dz')).toEqual({ kind: 'inline', calls });
     }
-    expect(parsePlanCallsCommand('bin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}')).toEqual({
+    expect(parsePlanCallsCommand('bin/17dz plan {"user_confirmed":true,"calls":[{"operation":"voucher.query-saved","args":[]}]}', 'bin/17dz')).toEqual({
       kind: 'inline',
       calls: [{ operation: 'voucher.query-saved', args: [] }],
       userConfirmed: true,
@@ -70,27 +70,27 @@ describe('platform-backed execution plan runtime', () => {
   });
 
   it('没有 plan 令牌：返回 null（真不是计划命令，交 serve-gate 常规检查）', () => {
-    expect(parsePlanCallsCommand('bin/17dz query --saved-vouchers --account-set A --period 202606')).toBeNull();
-    expect(parsePlanCallsCommand('ls -la')).toBeNull();
-    expect(parsePlanCallsCommand('')).toBeNull();
+    expect(parsePlanCallsCommand('bin/17dz query --saved-vouchers --account-set A --period 202606', 'bin/17dz')).toBeNull();
+    expect(parsePlanCallsCommand('ls -la', 'bin/17dz')).toBeNull();
+    expect(parsePlanCallsCommand('', 'bin/17dz')).toBeNull();
   });
 
   it('JSON 残缺：抛带 JSON.parse 真实原因的错误', () => {
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow('PLAN_JSON_PARSE');
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[')).toThrow(/实际 Unexpected end of JSON input/);
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[', 'bin/17dz')).toThrow('PLAN_JSON_PARSE');
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[', 'bin/17dz')).toThrow(/实际 Unexpected end of JSON input/);
   });
 
   it('前后有多余内容：抛结构错误并点出前面多出的 token', () => {
     // 前后加了别的内容（"请提交这个计划：…谢谢"）——不是合法前缀，报期望/实际
-    expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]} 谢谢'))
+    expect(() => parsePlanCallsCommand('请提交这个计划：bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202606"]}]} 谢谢', 'bin/17dz'))
       .toThrow('实际 请提交这个计划：；正确形态');
     // 多 token 的前缀同样逐字点出
-    expect(() => parsePlanCallsCommand('echo hi && bin/17dz plan {"calls":[]}'))
+    expect(() => parsePlanCallsCommand('echo hi && bin/17dz plan {"calls":[]}', 'bin/17dz'))
       .toThrow('实际 echo hi &&；正确形态');
     // 对照：形状正确不抛
-    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}')).not.toThrow();
+    expect(() => parsePlanCallsCommand('bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","x"]}]}', 'bin/17dz')).not.toThrow();
     // 直接调子命令：宿主专属语义（保留关键词），码与正确形状都在表里
-    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin')).toThrow('PLAN_SUBCOMMAND_RESERVED');
+    expect(() => parsePlanCallsCommand('bin/17dz plan evaluate --task-id forged --stdin', 'bin/17dz')).toThrow('PLAN_SUBCOMMAND_RESERVED');
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
@@ -242,7 +242,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
       runCli,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
     await expect(evaluateAndActivatePlan({
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
@@ -259,7 +259,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
       runCli,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
   });
 
   it('exit 非零且 stdout 残缺 JSON / 崩溃（exit 1）：维持既有抛错形态', async () => {
@@ -268,7 +268,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
       runCli: partial,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
     const crashed: PlanCliRunner = async () => ({ code: 1, stdout: '', stderr: '' });
     await expect(evaluateAndActivatePlan({
       platformRoot: '/platform', taskId: 'task_1',

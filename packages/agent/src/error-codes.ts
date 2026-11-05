@@ -1,5 +1,5 @@
 /**
- * fshine 侧错误码表（镜像 17dz `src/lib/error-codes.js` 的结构与纪律：错误即数据）。
+ * fshine 侧错误码表（镜像执行层平台错误码表的结构与纪律：错误即数据；出处见 debt-ledger）。
  *
  * 为什么收口：fshine 的拒绝/兜底消息曾是各出事点现场手拼——同一个"计划形状不符"
  * 在 plan-runtime 六个 throw 站点六种写法；"零执行"兜底在 runtime 三处各写一遍；
@@ -11,7 +11,7 @@
  * 两类条目（一张表，两种形态）：
  *   · 错误类 `{expected, actual?, correctForm}`：参数问题 / 形状问题 / 配置故障。
  *     渲染 `<CODE>: 期望 <expected>；实际 <actual>；正确形态 <correctForm>`——
- *     必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）。
+ *     必须说清差在哪，绝不让参数问题长得像权限问题（平台同款事故形态）。
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
  *     语义照旧，只是不再有第二份手抄本。个别条目带占位符（选择类澄清的
@@ -29,7 +29,7 @@
  * （fail-loud），多给/少给参数同样 fail-loud（静默忽略会把"话术被悄悄加了动态部分"
  * 藏起来，与消息模板传 actual 同纪律）。
  *
- * 纪律（与 17dz 表相同）：
+ * 纪律（与平台表相同）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
  *   - 未知码 fail-loud（UNKNOWN_ERROR_CODE）：绝不静默 fallback 到通用消息——那会把
  *     "忘了登记新码"伪装成"已知的普通失败"，正是本表要消灭的事故形态。误用
@@ -43,21 +43,28 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { GATEWAY_INVOCATION, PLATFORM_OPERATIONS, resolveGatewayText, validateGatewayInvocation } from './platform-contract';
+import { PLATFORM_OPERATIONS, resolveGatewayText } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
 /** 错误类条目：三要素（期望 / 实际 / 正确形态）。 */
+/**
+ * 网关名惰性模板（C7a 穿线）：含网关名的 expected/correctForm/text 不再在模块加载时
+ * 以遗留缺省求值，改为渲染时经调用链注入的 gateway 解析（resolveGatewayText）。
+ * applyGatewayText 出口替换保留（C7b 退役），注入值与遗留缺省相同时输出逐字节不变。
+ */
+type GatewayText = (gateway?: string) => string;
+
 interface ErrorCodeEntry {
-  expected: string;
+  expected: string | GatewayText;
   /** 稳定的实际形态缺省；动态实际值由拒绝点传参覆盖。 */
   actual?: string;
-  correctForm: string;
+  correctForm: string | GatewayText;
 }
 
 /** 消息模板类条目：用户可见的状态话术（不是错误，码 → 文本一一对应）。 */
 interface MessageCodeEntry {
-  text: string;
+  text: string | GatewayText;
   /**
    * 参数化模板的占位符名单（`{name}` 形）：声明了它，`messageTextFor(code, params)` 才
    * 接受参数并机械填充；没声明而传参数 = 调用方误用（fail-loud）。名单即契约——少一个
@@ -77,7 +84,7 @@ type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
 /**
  * 计划草案形状的**唯一教学源**（L2 / D-011：宿主侧 6 处散文副本收敛为这 1 处）。
  *
- * 内容与平台 `17dz-platform/src/execution/plan-schema.json` 的声明一致：`calls` 必填
+ * 内容与平台仓 `plan-schema.json` 的声明一致：`calls` 必填
  * （PlanCall 数组），`goal` / `requestId` 是**声明过的**可选元数据
  * （`additionalProperties:false`——未声明顶层字段平台以 PLAN_UNKNOWN_FIELD 响亮拒绝，
  * 绝不静默忽略后跑）。goal 收编为可选元数据而非否决：宿主历史上一直在教它，平台选择
@@ -115,7 +122,8 @@ export function planFileExample(gateway?: string): string {
  * 对畸形提交不可达（2026-10-23 实证：11 连 PLAN_JSON_PARSE 里 worker 从没收到过
  * 门教学）。而"不要加外层引号、不要跟 2>&1 等后缀"正是那 11 连撞里它反复犯的错。
  */
-const CORRECT_PLAN_SHAPE = `方案是单行原始命令：${planDraftExample()}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 ${planFileExample()} 提交`;
+/** 渲染时按注入 gateway 求值（C7a 穿线；原为模块级常量 CORRECT_PLAN_SHAPE，加载期即落遗留缺省）。 */
+const correctPlanShape: GatewayText = (gateway) => `方案是单行原始命令：${planDraftExample(gateway)}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 ${planFileExample(gateway)} 提交`;
 
 /**
  * shell 元字符拒绝理由的公共前缀：同一事实（放行这些字符 = 放行任意命令）只说一遍，
@@ -138,29 +146,29 @@ const TABLE: Record<string, CodeEntry> = {
   // 诊断本身就是自愈通道——真实平台实测里用权限话术答复格式问题，worker 被误导到
   // 把方案 JSON 打印成助手文本，12 步全空转；此后形状错误一律响亮抛出。
   PLAN_SHAPE_PREFIX: {
-    expected: `${GATEWAY_INVOCATION} plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）`,
-    correctForm: CORRECT_PLAN_SHAPE,
+    expected: (gateway) => `${resolveGatewayText(gateway)} plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）`,
+    correctForm: correctPlanShape,
   },
   PLAN_SHAPE_PAYLOAD: {
-    expected: `${GATEWAY_INVOCATION} plan 之后紧跟单行 JSON 方案`,
+    expected: (gateway) => `${resolveGatewayText(gateway)} plan 之后紧跟单行 JSON 方案`,
     actual: 'plan 之后没有任何内容',
-    correctForm: CORRECT_PLAN_SHAPE,
+    correctForm: correctPlanShape,
   },
   PLAN_SUBCOMMAND_RESERVED: {
     expected: 'worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用',
-    correctForm: `${planDraftExample()}（单行原始命令）`,
+    correctForm: (gateway) => `${planDraftExample(gateway)}（单行原始命令）`,
   },
   PLAN_JSON_PARSE: {
     expected: '方案是合法 JSON',
-    correctForm: CORRECT_PLAN_SHAPE,
+    correctForm: correctPlanShape,
   },
   PLAN_JSON_NOT_OBJECT: {
     expected: '方案 JSON 顶层是对象',
-    correctForm: `${planDraftExample()}（顶层为对象，calls 是数组）`,
+    correctForm: (gateway) => `${planDraftExample(gateway)}（顶层为对象，calls 是数组）`,
   },
   PLAN_CALLS_NOT_ARRAY: {
     expected: '方案声明 calls 数组',
-    correctForm: planDraftExample(),
+    correctForm: (gateway) => planDraftExample(gateway),
   },
   PLAN_CALLS_EMPTY: {
     expected: 'calls 至少包含一个操作',
@@ -195,11 +203,11 @@ const TABLE: Record<string, CodeEntry> = {
   // 复制成第二份。）
   PLAN_FILE_FLAG_INVALID: {
     expected: '--file 之后只跟一个工作区内路径（= 或空白取值，行尾结束，无其它内容）',
-    correctForm: `${planFileExample()}（单行一个路径，不带 2>&1 等后缀）`,
+    correctForm: (gateway) => `${planFileExample(gateway)}（单行一个路径，不带 2>&1 等后缀）`,
   },
   PLAN_FILE_OUT_OF_WORKSPACE: {
     expected: '计划文件在本轮工作区内（宿主按任务派生的唯一可写位置）',
-    correctForm: `用 write 把计划 JSON 写进本轮工作区后以 ${planFileExample()} 提交；路径解析后必须落在本轮工作区内`,
+    correctForm: (gateway) => `用 write 把计划 JSON 写进本轮工作区后以 ${planFileExample(gateway)} 提交；路径解析后必须落在本轮工作区内`,
   },
   PLAN_FILE_TOO_LARGE: {
     expected: '计划文件不超过 256KB（与 write 门同口径的体积上限）',
@@ -349,8 +357,8 @@ const TABLE: Record<string, CodeEntry> = {
   // 动手的一类，不说"稍后再试"（那是错指令，重试多少次都没用）。
   DELEGATION_AUTH_FAILURE: { text: '平台登录态过期，需要重新登录后才能继续查询。' },
   DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
-  DELEGATION_EXECUTOR_FAILURE: { text: '17dz 子任务执行失败，请稍后再试。' },
-  DELEGATION_CANCELLED: { text: '17dz 子任务已取消。' },
+  DELEGATION_EXECUTOR_FAILURE: { text: '子任务执行失败，请稍后再试。' },
+  DELEGATION_CANCELLED: { text: '子任务已取消。' },
   // 模型瞬时失败档（波次C，2026-11-01，循 RESUMED_PLAN_NOT_EXECUTED 的消息模板族）：
   // worker 的模型调用撞上瞬时传输/服务中断，驱动侧有界重试（默认 2 次）用尽仍未恢复。
   // 与 executor 故障的分工：那是"执行面坏了"（重试大概率没用，需要排查）；这是"模型
@@ -402,7 +410,7 @@ const TABLE: Record<string, CodeEntry> = {
 
   // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──
   PLAN_SHAPE_GATE_TEACHING: {
-    text: `计划必须经 bash 工具提交，两种形态等价：① 单行原始命令 ${planDraftExample()}，JSON 原样放在这一行命令里——不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行，不要跟 2>&1 等后缀；② 把同一份 JSON 用 write 写进本轮工作区文件后 ${planFileExample()}（文件路径必须在本轮工作区内）。evaluate/activate 由宿主调用，worker 不得直接调用。`,
+    text: (gateway) => `计划必须经 bash 工具提交，两种形态等价：① 单行原始命令 ${planDraftExample(gateway)}，JSON 原样放在这一行命令里——不要用 markdown 代码块包裹，不要加外层引号，不要拆成多行，不要跟 2>&1 等后缀；② 把同一份 JSON 用 write 写进本轮工作区文件后 ${planFileExample(gateway)}（文件路径必须在本轮工作区内）。evaluate/activate 由宿主调用，worker 不得直接调用。`,
   },
 
   // ── serve 门类：G1 原生工具门的拒绝理由（唯一来源，原 serve-gate.ts 各出事点 inline）──
@@ -545,17 +553,6 @@ function show(value: unknown): string {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
-/**
- * 静态表的网关名机械替换：表内文本只含遗留缺省网关名一处来源
- * （GATEWAY_INVOCATION），注入 gateway 与它不同时，把整条渲染结果里的
- * 该字符串替换为注入值。替换的是网关名这一个 token，不是业务措辞；
- * 未注入或注入值不合法时保持原样（遗留缺省）。
- */
-function applyGatewayText(text: string, gateway?: string): string {
-  if (!validateGatewayInvocation(gateway) || gateway === GATEWAY_INVOCATION) return text;
-  return text.split(GATEWAY_INVOCATION).join(gateway);
-}
-
 function render(code: string, actual?: unknown, correctForm?: string, params?: Readonly<Record<string, string | number>>, gateway?: string): string {
   const entry = entryOf(code);
   if ('text' in entry) {
@@ -569,18 +566,20 @@ function render(code: string, actual?: unknown, correctForm?: string, params?: R
     }
     // 声明了 params 的条目必须经参数出口渲染（漏传/多传/少传都 fail-loud，见 fillParams）；
     // 没声明的条目传参数同样是误用——它没有占位符，参数只会被静默丢掉。
-    if (entry.params) return applyGatewayText(fillParams(code, entry, params), gateway);
+    if (entry.params) return fillParams(code, entry as MessageCodeEntry & { text: string }, params);
     if (params !== undefined) {
       throw Object.assign(
         new Error(`${UNKNOWN_ERROR_CODE}: 该消息模板未声明占位符，不接受参数: ${code}（要加动态部分先在本表条目里声明 params）`),
         { code: UNKNOWN_ERROR_CODE, unknownCode: code },
       );
     }
-    return applyGatewayText(entry.text, gateway);
+    return typeof entry.text === 'function' ? entry.text(gateway) : entry.text;
   }
   const actualText = actual === undefined ? show(entry.actual) : show(actual);
-  const form = correctForm === undefined ? entry.correctForm : correctForm;
-  return applyGatewayText(`${code}: 期望 ${entry.expected}；实际 ${actualText}；正确形态 ${form}`, gateway);
+  const entryForm = typeof entry.correctForm === 'function' ? entry.correctForm(gateway) : entry.correctForm;
+  const form = correctForm === undefined ? entryForm : correctForm;
+  const expectedText = typeof entry.expected === 'function' ? entry.expected(gateway) : entry.expected;
+  return `${code}: 期望 ${expectedText}；实际 ${actualText}；正确形态 ${form}`;
 }
 
 /** `{name}` 占位符：声明过的名字一个不能少，没声明的名字给了也是误用。 */
@@ -597,7 +596,10 @@ const PLACEHOLDER_RE = /\{(\w+)\}/g;
  * fail-loud 三条（静默忽略会把"话术缺了动态部分"藏起来，而那正是拒不出理由的事故形态）：
  * 漏传参数对象、少给某个占位符、多给未声明的占位符。
  */
-function fillParams(code: string, entry: MessageCodeEntry, params?: Readonly<Record<string, string | number>>): string {
+function fillParams(code: string, entry: MessageCodeEntry & { text: string }, params?: Readonly<Record<string, string | number>>): string {
+  // 签名收窄（C7a）：含网关名的惰性模板不声明 params（PLAN_SHAPE_GATE_TEACHING 无占位符），
+  // 参数化模板（SERVE_* 一族）全部是静态 text——类型上排除 GatewayText，调用点（render 的
+  // entry.params 分支）以该谓词为前提。
   const declared = entry.params ?? [];
   if (!params) {
     throw Object.assign(
@@ -623,7 +625,7 @@ function fillParams(code: string, entry: MessageCodeEntry, params?: Readonly<Rec
   return entry.text.replace(PLACEHOLDER_RE, (_match, name: string) => String(params[name]));
 }
 
-/** 统一入口（镜像 17dz 的 messageFor）：错误类走三要素，模板类走文本。 */
+/** 统一入口（镜像平台的 messageFor）：错误类走三要素，模板类走文本。 */
 export function messageFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): string {
   return render(code, actual, correctForm, undefined, gateway);
 }
@@ -680,6 +682,7 @@ export function clarificationTextFor(code: string, data: { query: string; candid
       { code: UNKNOWN_ERROR_CODE, unknownCode: templateCode },
     );
   }
+  if (typeof entry.text === 'function') throw new Error('选择类澄清模板不支持惰性网关名');
   const names = data.candidates.slice(0, SELECTION_CANDIDATE_LIMIT).map((name, index) => {
     const shown = name.length > SELECTION_CANDIDATE_NAME_LIMIT ? `${name.slice(0, SELECTION_CANDIDATE_NAME_LIMIT)}…` : name;
     return `${index + 1}. ${shown}`;
@@ -760,6 +763,7 @@ export function platformUnavailableTextFor(minutes: number): string {
       { code: UNKNOWN_ERROR_CODE, unknownCode: 'PLATFORM_UNAVAILABLE' },
     );
   }
+  if (typeof entry.text === 'function') throw new Error('平台健康话术不支持惰性网关名');
   const shown = Number.isFinite(minutes) ? Math.max(1, Math.ceil(minutes)) : 1;
   // 函数式 replacement：分钟数是数字，没有 $& 之类的替换pattern 歧义（与澄清模板同一写法）
   return entry.text.replace('{minutes}', () => String(shown));

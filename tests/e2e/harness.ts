@@ -37,20 +37,23 @@ import { createServerAssembly, type ServerAssembly } from '../../apps/server/ass
 
 const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
 const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
+// C7b 起 profile.gateway 是网关名唯一来源、load* 派生对未声明 gateway 一律降级空表——
+// harness 作为（测试）部署方，按自己 spawn 的 CLI 相对名显式声明，与 PLATFORM_ROOT 同源。
+const GATEWAY = 'bin/17dz';
 
 let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
 let counter = 0;
 // 平台 args 规格与 label 表（D-065 结构化事实的取值来源）：一次性派生，测试替身与真实
 // 驱动读同一份平台数据（不镜像、不手抄）。
-const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT);
-const operationLabels = await loadOperationLabels(PLATFORM_ROOT);
+const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT, GATEWAY);
+const operationLabels = await loadOperationLabels(PLATFORM_ROOT, GATEWAY);
 // 协议角色表（方案 1 · B 波 B3 提案创建拦截的机械来源）：与真实驱动**同一份平台数据**
 // （经 CLI 派生，不注入替身）。为什么这一张不替身：它不是判据的输入而是判据本身——
 // 平台必须真的在 `operation list --json` 带出 protocol 列，宿主才认这条命令；这里塞替身
 // 就等于把"A 波交付物在不在"这件事也 mock 掉，e2e 会在一台没有该列的平台上假绿。
 // 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
-const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT);
+const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT, GATEWAY);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
 // 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明注入）。
 // 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
@@ -60,7 +63,7 @@ const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT);
 // create-assistant / upload-all）在替身政权下写关闭扫描不生效——派生后一并消除。
 // 防回退护栏：harness-fidelity.test.ts 的 HF-1 断言派生表非空 + 锚点条目 + 与本表一致；
 // 有人再把手注表塞回来造成漂移会当场红。
-const operationSemantics = await loadOperationSemantics(PLATFORM_ROOT);
+const operationSemantics = await loadOperationSemantics(PLATFORM_ROOT, GATEWAY);
 if (operationSemantics.size === 0) {
   throw new Error(`平台 accessSemantics 表为空（${PLATFORM_ROOT}）——写关闭扫描会静默失效。`);
 }
@@ -117,7 +120,7 @@ export function neutralizePlanGateNonCallLines(): () => void {
 }
 
 beforeAll(() => {
-  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向 17dz-platform）`);
+  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向执行层平台仓检出）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {

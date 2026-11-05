@@ -181,20 +181,20 @@ describe('Pi driver 进度帧接线', () => {
 
   it('平台工具调用仍出帧：模型短语优先，泄漏/超长短语被钳制后回落默认帧', async () => {
     const clean = stepRecorder();
-    await toAgentTool(toolFor('run_17dz_task'), clean.input, 'run_17dz_task')
+    await toAgentTool(toolFor('run_task'), clean.input, 'run_task')
       .execute('call_1', { progress: '查询往来记录' });
     expect(clean.steps).toEqual(['查询往来记录']);
 
     // 复读了协议材料 → 整条丢弃，回落到通用工具名帧
     const leaky = stepRecorder();
-    await toAgentTool(toolFor('run_17dz_task'), leaky.input, 'run_17dz_task')
+    await toAgentTool(toolFor('run_task'), leaky.input, 'run_task')
       .execute('call_1', { progress: '{"recorded":"delegate","step":"第 1/2 步"}' });
-    expect(leaky.steps).toEqual(['正在调用 run_17dz_task…']);
+    expect(leaky.steps).toEqual(['正在调用 run_task…']);
 
     // 超长 → 截断到 50 字符
     const long = stepRecorder();
     const phrase = `正在核对${'x'.repeat(60)}`;
-    await toAgentTool(toolFor('run_17dz_task'), long.input, 'run_17dz_task')
+    await toAgentTool(toolFor('run_task'), long.input, 'run_task')
       .execute('call_1', { progress: phrase });
     expect(long.steps).toHaveLength(1);
     expect(long.steps[0]).toHaveLength(51);

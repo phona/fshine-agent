@@ -1542,3 +1542,84 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L7（可信度可量化——登记项也必须有可判据的关闭条件）+ 执行纪律 4（文档主张与代码现实对账）。
 - **归属波次 / 限期**：波次 4（门面对账波）前。
 - **状态**：登记（2 中危已修；9 低危待波次 4 文档关账或 owner 接受）。
+
+## 公开迁移 · 身份参数化波（W1）新账（2026-11-06 关账）
+
+### D-160 · W1 provenance 移入（源码注释的史料原文，C8 移出后唯一留存处）
+
+W1 C8 把源码注释里有史料价值的出处注记改为中性指向（「出处见 debt-ledger」），原文唯一留存处 = 本条。改写前逐字原文按文件归档：
+
+- **packages/agent/src/budget-policy.ts（5 处）**：
+  ①「阈值缺省值逐字对齐 17dz `src/execution/plan.js` 的 policy() 缺省（calls 2/10/20/50，seconds 60/180/600/1800，weight 6/18/60/180），目的是让宿主裁档与执行层裁档在缺省配置下同口径」；
+  ②「漂移由跨仓机械校验兜底：`scripts/cross-repo/check-budget-thresholds.mjs <17dz 检出路径>`（或环境变量 `CROSS_REPO_17DZ_ROOT`）逐键比对，不一致即 exit 1、解析不到即 exit 2；改任一仓阈值必须同批改另一仓」（该行现挂 `// identity-defer: W4` 签，变量名未改）；
+  ③「17dz policy() 另有 4 个平台门专属项（grindGap 30、maxNotify 3、maxReplans 8、maxVariants 3），宿主叠加档不实现磨大守卫与变体预算，故有意不镜像」；
+  ④「与 17dz decision() 的 tie-break 一致，旧调用方认的词汇不因权重线改口」；
+  ⑤「operation 权重缺省换算（与 17dz weightOf 同口径，业务无关）」。
+- **packages/agent/src/error-codes.ts（5 处）**：
+  ①「fshine 侧错误码表（镜像 17dz `src/lib/error-codes.js` 的结构与纪律：错误即数据）」；
+  ②「必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）」；
+  ③「纪律（与 17dz 表相同）」；
+  ④「内容与平台 `17dz-platform/src/execution/plan-schema.json` 的声明一致」；
+  ⑤「统一入口（镜像 17dz 的 messageFor）」。
+- **packages/agent/src/platform-contract.ts（12 处）**：文件头「17dz-platform 公共契约适配层」、网关名与 `contextProfiles['17dz']` profile id 的对应、Package 1 收窄口径（17dz 执行代码不动、执行端门先留）、信封静态列（17dz `lib/envelope.js` emit 出口）、AUTH 四档出处（17dz 错误码表登录态组 + `src/lib/error-codes.js`）、不可用族集合出处、playwright 超时语义（17dz 对 playwright 的行为约定）、errorFor 挂码载体、`CODE:` 前缀渲染格式（17dz 错误码表格式）、语义已对照 17dz-platform 源码核实的声明、「未声明静默等同于 17dz」的回退风险描述（C7b 后风险已消除，措辞改「某个实例的网关名」）。
+- **packages/agent/src/platform-mock.ts（1 处）**：「对接 17dz-platform 的 executor 开关，commit 376ea0d」（commit 引用指向 17dz-platform 仓历史）。
+
+- **闭环判据**：无关闭条件——本条是长期史料归档（上述机制仍然在线，出处名不再住源码）。
+- **律法归属**：L2（协议单一来源的注释面收尾）。
+- **归属波次 / 状态**：W1 C8/C9；已归档。
+
+### D-161 · 中性缺省值拍板项：run_task / 「执行层子 Agent」按方案推荐值落地，待 run owner 确认
+
+W1 draftsForApproval #1/#2（中性委派工具名与称谓缺省）属模型可见协议面选择，未经 run owner 拍板。本波按方案推荐值落地：`RUN_EXECUTION_TASK_TOOL = 'run_task'`（备选 delegate_task / run_execution_task）、`DEFAULT_EXECUTOR_LABEL = '执行层子 Agent'`（备选「子 Agent」）。改值面已收敛为单常量 + 少量 golden 断言：工具名 = `packages/agent/src/context.ts` 一常量 + golden C3 两断言；称谓 = `packages/agent/src/system-prompt.ts` 一常量 + golden C2/D-122 块。实例部署经 `contextProfiles.<id>.toolName / executorLabel` 声明（`bin/17dz` / `run_17dz_task` / `17dz 子 Agent`）保持已发布协议连续，改缺省值不影响部署行为。
+
+- **闭环判据**：run owner 在任一 W1 关账物上确认推荐值，或改值（改值时同步 golden 两个 describe 块与 example.yaml 注释）。
+- **律法归属**：跨层协议（模型可见面选择须有人负责）。
+- **归属波次 / 状态**：W1 落地、确认开放；不阻塞后续波次（改值面已收敛）。
+
+### D-162 · W1 验收 grep 与守卫签机制的判定张力：挂 `identity-defer: W4` 签的 2 行
+
+W1 验收条要求 `git grep -il 17dz -- <W1 scope>` 输出为空，但方案 C8 同时要求 `CROSS_REPO_17DZ_ROOT` 变量名保留并挂 `identity-defer: W4` 签（openDecisions #7 改名归 W4）。变量名含 "17DZ"，裸 grep（大小写不敏感、无签感知）必然命中：终态实测恰 2 行——`packages/agent/src/budget-policy.ts:18` 与 `scripts/ci.sh:12`（另有两预算测试文件被验收命令自身的 `:!` 排除）。守卫 `execution-identity-surface.test.ts` 按签机制判绿。两套判据的张力是方案内部遗留，按守卫判据执行（签即待办，W4 清空）并在此登记差异。
+
+- **闭环判据**：W4 改名落地（D-165）→ 2 行签清空 → 验收 grep 与守卫判定一致（输出为空 = 守卫绿）。
+- **律法归属**：L7（判定口径必须唯一且可机械复现）。
+- **归属波次 / 状态**：W4；登记。
+
+### D-163 · e2e 失败集合稳定但根因未完全归因（方案 risk #3 的正式登记）
+
+W1 波前基线（C1 期实测）：`npx vitest run --project e2e` = 26 文件失败 / 93 用例失败，签名分布 AssertionError 78 / RATE_LIMITED 10 / REAL_EXECUTION_NOT_ALLOWED 6 / GATE_REFUSE 1，失败集合运行间稳定。环境漂移（sibling 17dz-platform 已迁 DZ_EXECUTOR/DZ_ALLOW_REAL 而 `tests/e2e/harness.ts` 仍传 `EXECUTION_EXECUTOR: 'mock'`）最多解释个位数失败，主因未定位。W1 终态复跑数字见 change-safety §27 e2e 实测行（判据 = 失败文件集合与波前 26/26 逐一相同且用例数 ≤93；e2e 不作 W1 绿灯门槛）。
+
+- **闭环判据**：根因归因报告（AssertionError 78 的具体断言分布）+ harness env 对齐单独立项落地后 e2e 全绿，或 owner 接受为长期已知红并写明理由。
+- **律法归属**：L4（可观察性——预存红必须有主人，不能变成「反正红着就没人看」）。
+- **归属波次 / 状态**：独立立项（不混入 W1；harness env 对齐超出 W1 列范围）；登记。
+
+### D-164 · 迁移门④三道守卫之一 exposure-lint 在本仓不存在
+
+方案 openDecisions #8：迁移门④（exposure 面）应有三道守卫，其中 exposure-lint 在全仓无命中（不存在）。W1 新建的 `execution-identity-surface.test.ts` 只是其身份面子集（17dz 字样零容忍），不等于 exposure-lint 整体。exposure-lint 的完整职责（哪些字段/信封/日志允许出宿主边界）与归属波次未定。
+
+- **闭环判据**：run owner 指定 exposure-lint 的职责边界与归属波次；或明确由 execution-identity-surface 演进承担并在守卫头注释写明。
+- **律法归属**：L2 + 迁移门④。
+- **归属波次 / 状态**：待拍板（不阻塞后续波次——身份面子集已在线）。
+
+### D-165 · CROSS_REPO_17DZ_ROOT 改名/例外决策（openDecisions #7）
+
+环境变量名含 "17DZ"，横跨 `scripts/ci.sh:12`、`packages/agent/src/budget-policy.ts:18`（两处均挂 `// identity-defer: W4` 签）、`budget-policy-cross-repo.test.ts`（4 处，整文件挂 W4 排除签）、`scripts/cross-repo/check-budget-thresholds.mjs`、`docs/environment-variables.md §4c`。推荐 W4 改名（如 `CROSS_REPO_PLATFORM_ROOT`）并同步 D-150 关账文本；备选设永久例外（则 W1 守卫的两级排除机制转为永久豁免，须在守卫头注释改写理由）。不决策则 W3/波次 4 清 scripts 时注释与代码必脱钩一个。
+
+- **闭环判据**：改名落地并同步 D-150/D-162/守卫签清空；或 owner 拍板永久例外并更新守卫语义。
+- **律法归属**：L2 + L7。
+- **归属波次 / 状态**：W4；登记。
+
+### D-166 · ask 范围实况与实测差异（openDecisions #1）：两套数字并记
+
+ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本会话实测：门①路径集 362 行（命令 `git grep -i 17dz -- packages apps scripts config README.md .github docs .env.example package.json`，排除档案例外；审读员同范围 356，差异为 docs 128 vs 129 等口径）；src+apps 非测试 23 文件/88 行。W1 边界按实测划定（翻转 160 行 lint scope + harness 1 行），剩余约 202 行（docs 129、scripts 38、README 8、config/agent.example.yaml 5、.env.example 4、package.json 1、两 W4 预算测试文件 17）按 openDecisions #6 归 W3 与波次 4。波次记录如实写两套数字，规划以实测为准。
+
+- **闭环判据**：W3/波次 4 清完剩余 202 行后，本条与 openDecisions #6 一并关闭。
+- **律法归属**：执行纪律 4（文档主张与代码现实对账）。
+- **归属波次 / 状态**：W3/波次 4；登记。
+
+### D-167 · F6 探针待跑（真实 LLM 授权后补）+ 波前树红输出未留档
+
+两项如实登记：① F6 探针（`node --env-file=.env --import tsx scripts/probe-real-agent.ts --only A1,A2,A4,A5,B1`，mock 执行器）需真实 LLM 授权，本波未获授权未跑；字节同一性 golden 已落地（D-122 base64、工具描述/schema 注入逐字节、工具名注入还原），授权后复跑逐轮 diff 即闭环（判定标准预写在 change-safety §27 F6 行）。② 方案守卫 w1-identity-surface-lint 要求「守卫在波前树实测红并留档红输出」，实际守卫与清理同 commit 落地（C8），波前 160 行数字沿方案口径登记未重放；守卫有效性以变异⑥两半（漏 apps 注入不红 / 完整路径注入即红）+ 排除非空转断言实证。两条都不影响 W1 判定成立性，但与方案守卫判据的字面要求有偏差，如实入账。
+
+- **闭环判据**：① 授权后探针跑毕留档 json；② 无需补跑（波前树已不存在可检出的红状态，本条即为留档）。
+- **律法归属**：F6 一致性 + L7。
+- **归属波次 / 状态**：①条件项待授权；②已留档。

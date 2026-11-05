@@ -25,7 +25,6 @@ import { createHash } from 'node:crypto';
 import type { ContextStateRepo, ConversationEventRecord, ConversationLogRepo, MemoryRecordRepo, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { renderMemoryProjection } from '@fshine/core';
 import type { TurnDriver } from './driver';
-import { RUN_EXECUTION_TASK_TOOL } from './context';
 import { reduceContextState, type ContextState } from './context-state';
 import { extractContextWithTurnDriver } from './context-model';
 import { clarificationIssuedRecord, clarificationResolvedRecord, type ClarificationBinding } from './clarification-events';
@@ -186,9 +185,16 @@ export async function persistAssistantAndContext(
   }
 }
 
-export function extract17dzToolResultEvents(
+/**
+ * 委派工具结果的事件提取（C3 改名：原名带执行层实例名的函数已退役，实例名出通用层）。
+ *
+ * taskToolName 由调用方注入（= runner 的 tool.name，随 profile.toolName 声明走）：
+ * 提取器不认死任何工具名——通用层认"runner 自己发布的名字"，实例名不进本文件。
+ */
+export function extractDelegationToolResultEvents(
   messages: readonly AgentMessage[],
   ctx: TrustedContext,
+  taskToolName: string,
 ): { events: ConversationEventRecord[]; taskResults: Array<{ taskId: string; resultText: string }> } {
   const events: ConversationEventRecord[] = [];
   // D-065：同一次委派在 Conversation Log 里的 tool_result 文本，回写任务条目做召回
@@ -198,7 +204,7 @@ export function extract17dzToolResultEvents(
   for (const [index, message] of messages.entries()) {
     const item = message as { role?: string; toolName?: string; toolCallId?: unknown; content?: unknown; timestamp?: unknown };
     if (item.role !== 'toolResult') continue;
-    if (item.toolName !== RUN_EXECUTION_TASK_TOOL && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
+    if (item.toolName !== taskToolName && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
     let content = messageText(item.content);
     // The tool result is usually a JSON envelope. Keep only its user-facing text field.
     let taskId: string | undefined;

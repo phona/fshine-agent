@@ -22,7 +22,7 @@ export interface ContextProfileConfig {
   /** Paths relative to root containing Pi-compatible SKILL.md files. */
   skillRoots: string[];
   /**
-   * Gateway invocation relative to root (e.g. `bin/17dz`), declared by the
+   * Gateway invocation relative to root (e.g. `bin/<name>`), declared by the
    * operator per profile, never supplied by the model. This is the only
    * place a gateway name is configured: spawn paths must be derived from
    * it (see `gatewayExecPathForProfile`), not from a hardcoded constant.
@@ -31,6 +31,22 @@ export interface ContextProfileConfig {
    * gateway calls (those call sites fail closed instead of guessing).
    */
   gateway?: string;
+  /**
+   * Operator-declared display name for this execution layer's subagent,
+   * injected into the host Main Agent system prompt via `buildSystemPrompt`.
+   * Never supplied by the model. Omitted profiles fall back to the neutral
+   * host default (`DEFAULT_EXECUTOR_LABEL`) — the host never silently adopts
+   * an instance name as its default.
+   */
+  executorLabel?: string;
+  /**
+   * Operator-declared delegation tool name for this profile — the
+   * model-visible protocol name published for this deployment. Never
+   * supplied by the model. Omitted profiles fall back to the neutral host
+   * default (`RUN_EXECUTION_TASK_TOOL` = `run_task`); an instance's
+   * already-published tool protocol name keeps working by declaring it here.
+   */
+  toolName?: string;
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */
@@ -56,6 +72,23 @@ export const TURN_BUDGET_MARGIN_MS = 120_000;
 /** 主 Agent 回合预算 = worker 超时（缺省见 DEFAULT_WORKER_TIMEOUT_MS）+ 收尾余量。 */
 export function turnBudgetMsFor(profile?: Pick<ContextProfileConfig, 'workerTimeoutMs'>): number {
   return (profile?.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS) + TURN_BUDGET_MARGIN_MS;
+}
+
+/**
+ * Active profile ID 的解析（C5）：宿主不把任何执行层实例名当缺省。
+ *
+ * 判定规则：显式指定优先；未指定且恰有一个 profile → 该键（单执行层部署零配置可用）；
+ * 未指定且 0 个或多个 profile → undefined——由消费方 fail-closed（如
+ * resolveContextProfile 拒绝启动回合），绝不静默挑一个或回退实例名。
+ * 纯函数：装配派生（assembly）与 runner 缺省（context.ts）共用同一份判定，不新增 env。
+ */
+export function resolveActiveProfileId(
+  profiles: Record<string, ContextProfileConfig>,
+  explicit?: string,
+): string | undefined {
+  if (explicit !== undefined && explicit.trim() !== '') return explicit;
+  const keys = Object.keys(profiles);
+  return keys.length === 1 ? keys[0] : undefined;
 }
 
 export interface AppConfig {

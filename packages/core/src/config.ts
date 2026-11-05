@@ -133,6 +133,26 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
         throw new Error(`配置项 contextProfiles.${name}.gateway 必须是相对 root 的网关调用形式`);
       }
     }
+    // 执行层称谓（C2）：非空、≤32 字符、无控制字符——它进 Main Agent 系统提示词，
+    // 是模型可见文本，加载时挡住畸形值好过运行时渲染出脏提示词。缺省 = 宿主中性
+    // 缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
+    const executorLabelRaw = item['executorLabel'];
+    const executorLabel = executorLabelRaw === undefined ? undefined : String(executorLabelRaw).trim();
+    if (executorLabel !== undefined) {
+      if (!executorLabel || executorLabel.length > 32 || /[\u0000-\u001f\u007f]/.test(executorLabel)) {
+        throw new Error(`配置项 contextProfiles.${name}.executorLabel 必须是非空且不超过 32 字符的可见文本`);
+      }
+    }
+    // 委派工具名（C3）：工具名是模型可见协议面（进工具 schema 与调用分发），形状必须
+    // 是合法标识符（小写字母开头，仅小写字母/数字/下划线）且 ≤48 字符。缺省 = 宿主
+    // 中性缺省（run_task），实例已发布协议名由该实例 profile 声明保持连续。
+    const toolNameRaw = item['toolName'];
+    const toolName = toolNameRaw === undefined ? undefined : String(toolNameRaw).trim();
+    if (toolName !== undefined) {
+      if (!/^[a-z][a-z0-9_]*$/.test(toolName) || toolName.length > 48) {
+        throw new Error(`配置项 contextProfiles.${name}.toolName 必须是 ≤48 字符的工具名（小写字母开头，仅小写字母/数字/下划线）`);
+      }
+    }
     profiles[name] = {
       root,
       skillRoots,
@@ -140,6 +160,8 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
       ...(knowledgePaths ? { knowledgePaths } : {}),
       ...(sensitivePaths ? { sensitivePaths } : {}),
       ...(gateway === undefined ? {} : { gateway }),
+      ...(executorLabel === undefined ? {} : { executorLabel }),
+      ...(toolName === undefined ? {} : { toolName }),
     };
   }
   return profiles;
