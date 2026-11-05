@@ -42,10 +42,25 @@
  * **假绿自校验（比漏扫更危险的是扫了个空）**：patch 字节数、`--all` 的 commit 数、patch 里
  * 实际出现的 commit 头数、diff 覆盖的去重文件数，四道下限。浅克隆（CI 默认 depth=1）下
  * `git log --all -p` 只看得到 1 个 commit，四类会全部恒绿——那种环境下本文件**显式 skip**
- * 并写明原因，不装绿；真判据是全量 clone（波次 2 G4）。
+ * 并写明原因，不装绿；且有一条常驻「环境门」用例在浅克隆下**失败**（只 skip 不失败的话
+ * vitest 对该文件仍报 passed、退出码仍是 0——实测过，那正是要堵的真空绿）。真判据是全量
+ * clone（波次 2 G4）。
  *
- * F3 变异留档（四项：扫描目标改错 → 计数掉零 → 守卫转绿）见文件头表格，随 C1 之后的
- * 留档 commit 落地——改动本文件的人请连同那张表一起复核。
+ * F3 变异留档（2026-11-05 实跑，五项均已还原，还原后 `git diff` 为空并复跑 5 failed / 3 passed）：
+ * 方法 = 临时改一处 → 跑本文件 → 确认**对应**断言翻红或翻绿 → 立即从备份还原 → 复核 diff 干净。
+ * 五项各盯一条不同失败路径，合起来证明这里的"红"不是恒红的副产品，"绿"也不是扫了个空的假绿：
+ *
+ * | # | 变异（临时） | 翻红 / 翻绿的断言 | 实测输出 |
+ * |---|---|---|---|
+ * | ① | `git log --all -p` 改成 `git log --all -p -- packages/agent/history-hygiene.test.ts`（扫描目标收窄到守卫自己一个文件） | **①② 类别断言转绿**（净命中 4→0、129→0）——同一次运行里 ③ 仍红（1 行 = 守卫自己那个 commit 的 Author 行）、④ 仍红（12 commit）、锚点仍红；抓住收窄的是范围自校验 | 4 failed / 3 passed（原 5 failed / 3 passed）；范围自校验报 `patch 字节 23366（下限 2097152）`、`diff 覆盖去重文件 1（下限 100）` |
+ * | ② | `RETIRED_PATHS` 两个路径改成不存在的路径 | ④ 转绿（12→0），①②③ 与锚点仍红、范围自校验**仍绿** | 4 failed / 3 passed——证明 ④ 的判别力只由本类断言提供，范围自校验抓不到这一类，两者不能互相替代 |
+ * | ③ | `GIT_MAX_BUFFER` 从 64MB 改回 Node 默认 1MB | 六个依赖历史的用例全部红（fail-closed，不是绿） | 6 failed，全部报 `spawnSync git ENOBUFS` + "这是实现缺陷，不是历史干净；修缓冲区，不要把扫描范围写窄" |
+ * | ④ | 强制 `SHALLOW = true`（模拟浅克隆） | 环境门红 + 六个用例 skip（**不是绿**） | 1 failed / 1 passed / 6 skipped，vitest exit=1。同一次改动在"环境门"加上之前的早期版本实测 **6 skipped / 1 passed / exit 0**——vitest 对全 skip 的文件仍报 passed，那正是要堵的真空绿，环境门这条用例因此补上 |
+ * | ⑤ | 把锚点 Y1 的连续串写进守卫源码（注释形式，parts 仍拆段、sha256 不变） | 自匹配断言红 | 1 failed，报 `Y1 的连续串出现在守卫自身源码里——守卫自己的提交会把锚点计数顶起来，判别力归零`。机制已验证：守卫源码确已进入 `git log --all -p`（`grep -cF` 本文件 describe 标题 = 3） |
+ *
+ * 留档的意义：① 证明类别断言对扫描目标敏感（不是恒绿）；② 证明 ④ 与范围自校验各管一段、互不替代；
+ * ③ 证明 64MB 缓冲区是承重的；④ 证明浅克隆下既 skip 又失败、CI 退出码不说谎；⑤ 证明锚点字面
+ * 不能被写进源码（写了判别力归零）。改本文件的人请连同这张表一起复核——表与实现脱节就是防线在退化的信号。
  */
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -315,6 +330,21 @@ function shapeFailureMessage(id: ShapeId, tally: ShapeTally): string {
 }
 
 describe('历史敏感面守卫（HG1）：四类敏感物在全部 ref 历史里零命中', () => {
+  it('环境门：非浅克隆（浅克隆下本文件判不了，显式失败而不是装绿）', () => {
+    expect(
+      SHALLOW,
+      [
+        '浅克隆环境：git rev-parse --is-shallow-repository = true。',
+        '这种环境下 git log --all -p 只能看到截断深度内的少量 commit，四类零命中是**假绿**。',
+        '本文件因此判不了：其余用例在这种环境下跳过（不拿"扫不到"当"干净"），这一条显式失败，',
+        '让 CI 退出码说实话——只 skip 不失败的话，vitest 对该文件仍报 passed、退出码仍是 0',
+        '（实测：强制 SHALLOW=true 时 6 skipped / 1 passed / exit 0，正是要堵的真空绿）。',
+        '真判据是全量 clone 后重跑（波次 2 G4：普通 clone + mirror clone 两级），',
+        '或 CI 改 fetch-depth: 0（归波次 4 的 ci.yml 门面重写）。',
+      ].join('\n'),
+    ).toBe(false);
+  });
+
   it('① 企微 UserID（带前缀形态）零命中', (ctx) => {
     if (SHALLOW) return ctx.skip(SKIP_REASON);
     const tally = scanHistory().tallies.userid;
