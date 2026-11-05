@@ -349,8 +349,8 @@ const TABLE: Record<string, CodeEntry> = {
   // 动手的一类，不说"稍后再试"（那是错指令，重试多少次都没用）。
   DELEGATION_AUTH_FAILURE: { text: '平台登录态过期，需要重新登录后才能继续查询。' },
   DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
-  DELEGATION_EXECUTOR_FAILURE: { text: '17dz 子任务执行失败，请稍后再试。' },
-  DELEGATION_CANCELLED: { text: '17dz 子任务已取消。' },
+  DELEGATION_EXECUTOR_FAILURE: { text: '子任务执行失败，请稍后再试。' },
+  DELEGATION_CANCELLED: { text: '子任务已取消。' },
   // 模型瞬时失败档（波次C，2026-11-01，循 RESUMED_PLAN_NOT_EXECUTED 的消息模板族）：
   // worker 的模型调用撞上瞬时传输/服务中断，驱动侧有界重试（默认 2 次）用尽仍未恢复。
   // 与 executor 故障的分工：那是"执行面坏了"（重试大概率没用，需要排查）；这是"模型

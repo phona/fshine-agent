@@ -271,37 +271,39 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
 
   // ── C6 归属块：用户可见与运维文案去实例名（错误码/确认路由/CLI 失败/上下文 profile）──
   describe('C6 块：用户可见与运维文案', () => {
-    it('委派失败两条用户话术（error-codes.ts:352-353）', () => {
-      expect(DELEGATION_EXECUTOR_FAILURE).toBe('17dz 子任务执行失败，请稍后再试。');
-      expect(DELEGATION_CANCELLED).toBe('17dz 子任务已取消。');
+    it('委派失败两条用户话术（C6 起中性，error-codes.ts）', () => {
+      expect(DELEGATION_EXECUTOR_FAILURE).toBe('子任务执行失败，请稍后再试。');
+      expect(DELEGATION_CANCELLED).toBe('子任务已取消。');
+      expect(DELEGATION_EXECUTOR_FAILURE).not.toContain('17dz');
+      expect(DELEGATION_CANCELLED).not.toContain('17dz');
     });
 
-    it('resolveContextProfile 四条拒绝文案逐字（显式 profileId 路径）', async () => {
+    it('resolveContextProfile 四条拒绝文案逐字（C6 起中性，显式 profileId 路径）', async () => {
       const root = await profileRoot();
       const cases: Array<{ name: string; profileId: string; profiles: Record<string, ContextProfileConfig>; expected: string }> = [
         {
           name: 'profile 未配置',
           profileId: 'missing',
           profiles: {},
-          expected: '未配置 17dz 上下文 profile:missing',
+          expected: '未配置执行层上下文 profile:missing',
         },
         {
           name: '上下文目录不可用',
           profileId: '17dz',
           profiles: { '17dz': { root: path.join(os.tmpdir(), 'fshine-identity-missing-dir-xyz'), skillRoots: [] } },
-          expected: '17dz 上下文目录不可用:17dz',
+          expected: '执行层上下文目录不可用:17dz',
         },
         {
           name: 'skillRoots 绝对路径',
           profileId: '17dz',
           profiles: { '17dz': { root, skillRoots: [path.join(os.tmpdir(), 'abs-skill-root')] } },
-          expected: '17dz skillRoots 必须是相对 root 的路径。',
+          expected: 'skillRoots 必须是相对 root 的路径。',
         },
         {
           name: 'skillRoots 逃逸 root',
           profileId: '17dz',
           profiles: { '17dz': { root, skillRoots: ['../escape-skill-root'] } },
-          expected: '17dz skillRoots 未通过路径安全校验。',
+          expected: 'skillRoots 未通过路径安全校验。',
         },
       ];
       for (const { name, profileId, profiles, expected } of cases) {
@@ -330,7 +332,7 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       });
       await subagent.run({ request: '查询余额' }, { trusted: trusted() });
       expect(execError).toBeInstanceOf(ToolUserError);
-      expect((execError as Error).message).toBe('17dz 子 Agent 只能使用其工作目录内配置的原生工具。');
+      expect((execError as Error).message).toBe('子 Agent 只能使用其工作目录内配置的原生工具。');
 
       // 空文本检查抛的内部话术不进用户回复（用户拿到 DELEGATION_EXECUTOR_FAILURE），
       // 可观测面是 subagent_task_failed 事件的 error 字段（context.test.ts:1118 同形）。
@@ -343,9 +345,9 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
           workerDriver: scriptedDriver('   '),
         });
         await expect(emptyText.run({ request: '查询余额' }, { trusted: trusted() }))
-          .rejects.toThrow('17dz 子任务执行失败，请稍后再试。');
+          .rejects.toThrow('子任务执行失败，请稍后再试。');
         const failures = errorSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'subagent_task_failed');
-        expect(failures.at(-1)).toMatchObject({ error: '17dz 子 Agent 未返回可用结果。' });
+        expect(failures.at(-1)).toMatchObject({ error: '子 Agent 未返回可用结果。' });
       } finally {
         infoSpy.mockRestore();
         errorSpy.mockRestore();
@@ -360,19 +362,20 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
         platformRoot: '/platform', taskId: 'task_1',
         calls: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
         runCli: failing,
-      })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）：boom');
+      })).rejects.toThrow('plan CLI 失败（plan evaluate）：boom');
       const invalidJson: PlanCliRunner = async () => ({ code: 0, stdout: 'not-json', stderr: '' });
       await expect(evaluateAndActivatePlan({
         platformRoot: '/platform', taskId: 'task_1',
         calls: [{ operation: 'finance.query-receivables', args: ['--query', '幻辰财税'] }],
         runCli: invalidJson,
-      })).rejects.toThrow('17dz plan CLI 返回了无效 JSON。');
+      })).rejects.toThrow('plan CLI 返回了无效 JSON。');
     });
 
     it('计划确认路由两条 fail-loud 文案（plan-confirmation-route.ts:87/94，源码逐字）', () => {
       const src = readSrc('apps/server/plan-confirmation-route.ts');
-      expect(src).toContain("if (!options.platformRoot) throw new Error('幻账平台根路径未配置');");
-      expect(src.split("throw new Error('幻账平台根路径未配置')")).toHaveLength(3);
+      expect(src).toContain("if (!options.platformRoot) throw new Error('平台根路径未配置');");
+      expect(src.split("throw new Error('平台根路径未配置')")).toHaveLength(3);
+      expect(src).not.toContain('幻账平台');
     });
   });
 

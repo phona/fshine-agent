@@ -1438,7 +1438,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,
-            exec: async () => { throw new ToolUserError('17dz 子 Agent 只能使用其工作目录内配置的原生工具。'); },
+            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。'); },
             deadline,
             signal: runSignal,
             ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
@@ -1479,7 +1479,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 进 catch、被分类 executor_error，用户拿到兜底话术——宿主侧的终局门根本没机会
         // 执行。豁免只对带结构化收尾的结果生效：纯空 text 照旧失败关闭，基线一字不动。
         if (!result.text.trim() && !result.terminalFailure && !result.clarification && !result.needs) {
-          throw new Error(signal?.aborted ? '17dz 子任务已取消。' : '17dz 子 Agent 未返回可用结果。');
+          throw new Error(signal?.aborted ? '子任务已取消。' : '子 Agent 未返回可用结果。');
         }
         // 终局分支（背带，紧跟空文本检查的原位置——第一版的宿主侧门就在这里，但当时
         // 空文本检查先行抛出，它从未执行过）：平台确定性终局码以"整份答案"收尾时，
@@ -1697,13 +1697,13 @@ async function resolveContextProfile(profiles: Record<string, ContextProfileConf
   // 不静默挑 profile、不回退任何实例名（文案中性，指引部署补配置或显式指定）。
   if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
   const configured = profiles[id];
-  if (!configured) throw new ToolUserError(`未配置 17dz 上下文 profile:${id}`);
-  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`17dz 上下文目录不可用:${id}`); });
+  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`);
+  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`); });
   const skillRoots: string[] = [];
   for (const relative of configured.skillRoots) {
-    if (path.isAbsolute(relative)) throw new ToolUserError('17dz skillRoots 必须是相对 root 的路径。');
+    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。');
     const resolved = await fs.realpath(path.join(root, relative)).catch(() => undefined);
-    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('17dz skillRoots 未通过路径安全校验。');
+    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。');
     skillRoots.push(resolved);
   }
   return {

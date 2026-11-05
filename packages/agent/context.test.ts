@@ -835,7 +835,7 @@ describe('17dz Pi subagent adapter', () => {
     });
     const ctx = trusted();
     ctx.onPlanPending = async () => { throw new Error('pending store down'); };
-    await expect(subagent.run({ request: '执行较大查询' }, { trusted: ctx })).rejects.toThrow('17dz 子任务执行失败');
+    await expect(subagent.run({ request: '执行较大查询' }, { trusted: ctx })).rejects.toThrow('子任务执行失败');
   });
 
   it('③-3 宿主未配置 onPlanPending：用户话术指向管理员，不说"执行失败请稍后再试"', async () => {
@@ -864,7 +864,7 @@ describe('17dz Pi subagent adapter', () => {
       run: async () => { throw new Error('secret=/private/credentials'); },
     });
     await expect(subagent.run({ request: '执行任务' }, { trusted: trusted() }))
-      .rejects.toThrow('17dz 子任务执行失败，请稍后再试。');
+      .rejects.toThrow('子任务执行失败，请稍后再试。');
   });
 
   it('Main Agent 只申报本轮动作，宿主据申报委派并采用子 Agent 自然语言结果', async () => {
@@ -963,7 +963,7 @@ describe('下游平台保护：委派并发闸', () => {
     };
     const task = runner(root, new MemoryTasks(), flaky);
     // worker 原始错误被 runner 转成面向用户的安全话术（既有行为）；关键是它reject了
-    await expect(task.run({ request: '查A' }, { trusted: trusted() })).rejects.toThrow('17dz 子任务执行失败');
+    await expect(task.run({ request: '查A' }, { trusted: trusted() })).rejects.toThrow('子任务执行失败');
     // 闸门已释放：第二次委派照常进行，没有被第一次的异常卡死
     const second = await task.run({ request: '查B' }, { trusted: trusted() });
     expect(second.text).toBe('恢复后查完了');
@@ -1115,7 +1115,7 @@ describe('委派失败分类：模型瞬时失败（model_transient，波次C）
       expect(spans.at(-1)).toMatchObject({ outcome: 'failed', failureClass: 'model_transient' });
       // 失败事件带原因（不再只有 errorType='Error'）。
       const failures = errorSpy.mock.calls.map((args) => JSON.parse(String(args[0]))).filter((e) => e.event === 'subagent_task_failed');
-      expect(failures.at(-1)).toMatchObject({ failureClass: 'model_transient', error: '17dz 子 Agent 未返回可用结果。' });
+      expect(failures.at(-1)).toMatchObject({ failureClass: 'model_transient', error: '子 Agent 未返回可用结果。' });
     } finally {
       infoSpy.mockRestore();
       errorSpy.mockRestore();
@@ -1211,7 +1211,7 @@ describe('错误态快路径 v2：空文本豁免与终局分支的顺序', () =
     // 第一版死因回归钉：这一步此前抛的是"17dz 子 Agent 未返回可用结果。"，
     // 经 catch 分类成 executor_error，用户拿到兜底话术。
     await expect(task.run({ request: '查A' }, { trusted: trusted() }))
-      .rejects.not.toThrow('17dz 子 Agent 未返回可用结果。');
+      .rejects.not.toThrow('子 Agent 未返回可用结果。');
     await expect(task.run({ request: '查A' }, { trusted: trusted() }))
       .rejects.toThrow('没有查到“幻辰财税”在 202609 的数据。平台上有数据的是：202606、平台当前期间。要改查的话，告诉我查哪一项即可。');
   });

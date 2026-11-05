@@ -84,14 +84,14 @@ export function createPlanConfirmationWiring(options: {
   const confirmationRoute = createPlanConfirmationRoute({
     repo: asAgentPendingRepo(pendingPlanRepo),
     verifyActivatable: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
+      if (!options.platformRoot) throw new Error('平台根路径未配置');
       const status = await loadPlanStatus({ platformRoot: options.platformRoot, planId: pending.planId });
       if (status && status.status !== 'pending') {
         throw new PlanSupersededError(pending.planId, pending.version, pending.taskId);
       }
     },
     activate: async (pending) => {
-      if (!options.platformRoot) throw new Error('幻账平台根路径未配置');
+      if (!options.platformRoot) throw new Error('平台根路径未配置');
       await activatePendingPlan({
         platformRoot: options.platformRoot,
         planId: pending.planId,

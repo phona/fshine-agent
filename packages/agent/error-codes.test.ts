@@ -53,8 +53,8 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(messageTextFor('FALLBACK_FAILURE')).toBe('查询失败,请稍后再试或联系管理员');
     expect(messageTextFor('DELEGATION_AUTH_FAILURE')).toBe('平台登录态过期，需要重新登录后才能继续查询。');
     expect(messageTextFor('DELEGATION_TIMEOUT_FAILURE')).toBe('平台响应超时，请稍后重试。');
-    expect(messageTextFor('DELEGATION_EXECUTOR_FAILURE')).toBe('17dz 子任务执行失败，请稍后再试。');
-    expect(messageTextFor('DELEGATION_CANCELLED')).toBe('17dz 子任务已取消。');
+    expect(messageTextFor('DELEGATION_EXECUTOR_FAILURE')).toBe('子任务执行失败，请稍后再试。');
+    expect(messageTextFor('DELEGATION_CANCELLED')).toBe('子任务已取消。');
     // 模型瞬时失败档（波次C，2026-11-01）：与 executor 故障分开，如实说已自动重试。
     expect(messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE')).toBe('模型服务瞬时中断，已自动重试仍未成功，请稍后再试。');
     expect(messageTextFor('ROUTE_RETRY_NUDGE')).toContain('route_current_turn');

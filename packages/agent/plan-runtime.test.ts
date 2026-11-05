@@ -242,7 +242,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
       runCli,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
     await expect(evaluateAndActivatePlan({
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
@@ -259,7 +259,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.commit', args: ['A', '202609'] }],
       runCli,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
   });
 
   it('exit 非零且 stdout 残缺 JSON / 崩溃（exit 1）：维持既有抛错形态', async () => {
@@ -268,7 +268,7 @@ describe('platform-backed execution plan runtime', () => {
       platformRoot: '/platform', taskId: 'task_1',
       calls: [{ operation: 'voucher.query-saved', args: ['A', '202609'] }],
       runCli: partial,
-    })).rejects.toThrow('17dz plan CLI 失败（plan evaluate）');
+    })).rejects.toThrow('plan CLI 失败（plan evaluate）');
     const crashed: PlanCliRunner = async () => ({ code: 1, stdout: '', stderr: '' });
     await expect(evaluateAndActivatePlan({
       platformRoot: '/platform', taskId: 'task_1',

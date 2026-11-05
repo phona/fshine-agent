@@ -559,10 +559,10 @@ async function runPlanEvaluation(runCli: PlanCliRunner, request: PlanCliRequest)
   if (result.code !== 0) {
     const evaluation = tryParseEvaluation(result.stdout);
     if (evaluation) return evaluation;
-    throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
+    throw new Error(`plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
   }
   let evaluation: PlanEvaluation;
-  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  try { evaluation = JSON.parse(result.stdout) as PlanEvaluation; } catch { throw new Error('plan CLI 返回了无效 JSON。'); }
   // exit 0 也验 decision：非四档即抛错，不交给 rankOf 的缺省映射（见上）。
   // exit 非零分支的 tryParseEvaluation 本就只认四档，两路判据一致。
   // 报错文案带“exit 0 预验”标记：它是第一道防线，与 planDecisionRank 的
@@ -587,6 +587,6 @@ function tryParseEvaluation(stdout: string): PlanEvaluation | null {
 
 async function runJson<T = unknown>(runCli: PlanCliRunner, request: PlanCliRequest): Promise<T> {
   const result = await runCli(request);
-  if (result.code !== 0) throw new Error(`17dz plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
-  try { return JSON.parse(result.stdout) as T; } catch { throw new Error('17dz plan CLI 返回了无效 JSON。'); }
+  if (result.code !== 0) throw new Error(`plan CLI 失败（${request.args.slice(0, 2).join(' ')}）：${result.stderr.trim() || `exit ${result.code}`}`);
+  try { return JSON.parse(result.stdout) as T; } catch { throw new Error('plan CLI 返回了无效 JSON。'); }
 }
