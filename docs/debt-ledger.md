@@ -1578,11 +1578,13 @@ W1 draftsForApproval #1/#2（中性委派工具名与称谓缺省）属模型可
 
 ### D-162 · W1 验收 grep 与守卫签机制的判定张力：挂 `identity-defer: W4` 签的 2 行
 
-W1 验收条要求 `git grep -il 17dz -- <W1 scope>` 输出为空，但方案 C8 同时要求 `CROSS_REPO_17DZ_ROOT` 变量名保留并挂 `identity-defer: W4` 签（openDecisions #7 改名归 W4）。变量名含 "17DZ"，裸 grep（大小写不敏感、无签感知）必然命中：终态实测恰 2 行——`packages/agent/src/budget-policy.ts:18` 与 `scripts/ci.sh:12`（另有两预算测试文件被验收命令自身的 `:!` 排除）。守卫 `execution-identity-surface.test.ts` 按签机制判绿。两套判据的张力是方案内部遗留，按守卫判据执行（签即待办，W4 清空）并在此登记差异。
+W1 验收条要求 `git grep -il 17dz -- <W1 scope>` 输出为空，但方案 C8 同时要求 `CROSS_REPO_17DZ_ROOT` 变量名保留并挂 `identity-defer: W4` 签（openDecisions #7 改名归 W4）。变量名含 "17DZ"，裸 grep（大小写不敏感、无签感知）必然命中：终态实测恰 2 行——`packages/agent/src/budget-policy.ts:19` 与 `scripts/ci.sh:12`（行号订正 2026-11-06 修复轮：C8 同 commit 改注释致 +1，`:18` 为旧引用；另有两预算测试文件被验收命令自身的 `:!` 排除）。守卫 `execution-identity-surface.test.ts` 按签机制判绿。两套判据的张力是方案内部遗留，按守卫判据执行（签即待办，W4 清空）并在此登记差异。
+
+**裁决（run owner，2026-11-06）**：两条挂 `identity-defer: W4` 签的行**正确保留，门禁按签排除，不是放水**——签是显式待办标记（W4 清空），不是对 17dz 字样的豁免。复核口径 = ①验收 grep 的签排除后零命中（修复轮实测：`budget-policy.ts`/`ci.sh` 命中行全部带签，排除挂签行后零残留）+ ②身份守卫 3/3 绿（execution-identity-surface 修复轮实跑通过）。口径已写实进 change-safety §27 验收对账，防后人误读。
 
 - **闭环判据**：W4 改名落地（D-165）→ 2 行签清空 → 验收 grep 与守卫判定一致（输出为空 = 守卫绿）。
 - **律法归属**：L7（判定口径必须唯一且可机械复现）。
-- **归属波次 / 状态**：W4；登记。
+- **归属波次 / 状态**：W4；已裁决（签保留），余 W4 清签。
 
 ### D-163 · e2e 失败集合稳定但根因未完全归因（方案 risk #3 的正式登记）
 
@@ -1602,7 +1604,7 @@ W1 波前基线（C1 期实测）：`npx vitest run --project e2e` = 26 文件�
 
 ### D-165 · CROSS_REPO_17DZ_ROOT 改名/例外决策（openDecisions #7）
 
-环境变量名含 "17DZ"，横跨 `scripts/ci.sh:12`、`packages/agent/src/budget-policy.ts:18`（两处均挂 `// identity-defer: W4` 签）、`budget-policy-cross-repo.test.ts`（4 处，整文件挂 W4 排除签）、`scripts/cross-repo/check-budget-thresholds.mjs`、`docs/environment-variables.md §4c`。推荐 W4 改名（如 `CROSS_REPO_PLATFORM_ROOT`）并同步 D-150 关账文本；备选设永久例外（则 W1 守卫的两级排除机制转为永久豁免，须在守卫头注释改写理由）。不决策则 W3/波次 4 清 scripts 时注释与代码必脱钩一个。
+环境变量名含 "17DZ"，横跨 `scripts/ci.sh:12`、`packages/agent/src/budget-policy.ts:19`（行号订正 2026-11-06 修复轮：C8 同 commit 改注释致 +1，`:18` 为旧引用；两处均挂 `// identity-defer: W4` 签）、`budget-policy-cross-repo.test.ts`（4 处，整文件挂 W4 排除签）、`scripts/cross-repo/check-budget-thresholds.mjs`、`docs/environment-variables.md §4c`。推荐 W4 改名（如 `CROSS_REPO_PLATFORM_ROOT`）并同步 D-150 关账文本；备选设永久例外（则 W1 守卫的两级排除机制转为永久豁免，须在守卫头注释改写理由）。不决策则 W3/波次 4 清 scripts 时注释与代码必脱钩一个。
 
 - **闭环判据**：改名落地并同步 D-150/D-162/守卫签清空；或 owner 拍板永久例外并更新守卫语义。
 - **律法归属**：L2 + L7。
@@ -1618,8 +1620,8 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 
 ### D-167 · F6 探针待跑（真实 LLM 授权后补）+ 波前树红输出未留档
 
-两项如实登记：① F6 探针（`node --env-file=.env --import tsx scripts/probe-real-agent.ts --only A1,A2,A4,A5,B1`，mock 执行器）需真实 LLM 授权，本波未获授权未跑；字节同一性 golden 已落地（D-122 base64、工具描述/schema 注入逐字节、工具名注入还原），授权后复跑逐轮 diff 即闭环（判定标准预写在 change-safety §27 F6 行）。② 方案守卫 w1-identity-surface-lint 要求「守卫在波前树实测红并留档红输出」，实际守卫与清理同 commit 落地（C8），波前 160 行数字沿方案口径登记未重放；守卫有效性以变异⑥两半（漏 apps 注入不红 / 完整路径注入即红）+ 排除非空转断言实证。两条都不影响 W1 判定成立性，但与方案守卫判据的字面要求有偏差，如实入账。
+两项如实登记：① F6 探针（`node --env-file=.env --import tsx scripts/probe-real-agent.ts --only A1,A2,A4,A5,B1`，mock 执行器）需真实 LLM 授权，本波未获授权未跑；字节同一性 golden 已落地（D-122 base64、工具描述/schema 注入逐字节、工具名注入还原），授权后复跑逐轮 diff 即闭环（判定标准预写在 change-safety §27 F6 行）。② 方案守卫 w1-identity-surface-lint 要求「守卫在波前树实测红并留档红输出」，实际守卫与清理同 commit 落地（C8），C8 期波前 160 行数字沿方案口径登记未重放；守卫有效性以变异⑥两半（漏 apps 注入不红 / 完整路径注入即红）+ 排除非空转断言实证。**波前红已于 2026-11-06 修复轮实跑复现（订正 C8 期口径）**：对 7ba775d 按守卫 scope 重放，零排除（无文件排除、波前树无签行）计红 **173 处**，守卫执行形态（FILE_EXCLUSIONS_W4 整文件排除两预算测试文件，恰 17 处）计红 **156 处**——方案口径 160 与两实测均不符，波前红数字以本次重放为准（此前「波前树已不存在可检出的红状态」的说法不实，7ba775d 一直可检出）。两条都不影响 W1 判定成立性，但与方案守卫判据的字面要求有偏差，如实入账。
 
-- **闭环判据**：① 授权后探针跑毕留档 json；② 无需补跑（波前树已不存在可检出的红状态，本条即为留档）。
+- **闭环判据**：① 授权后探针跑毕留档 json；② 已补齐——波前红实测复现（零排除 173 / 守卫排除形态 156，命令与口径见上），不再以「树不存在」为由免留档。
 - **律法归属**：F6 一致性 + L7。
-- **归属波次 / 状态**：①条件项待授权；②已留档。
+- **归属波次 / 状态**：①条件项待授权；②已实测留档（160 系方案口径误计，以 173/156 为准）。

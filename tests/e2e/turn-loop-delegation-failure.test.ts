@@ -5,7 +5,7 @@
  * 离线全链 e2e：委派失败的用户话术分流（F7）。共享替身见 ./harness.ts。
  *
  * failureClass 原来只进日志：auth / timeout / executor_error / cancelled 四类失败，
- * 用户统一收到"17dz 子任务执行失败，请稍后再试"。于是唯一需要用户动手的一类
+ * 用户统一收到"子任务执行失败，请稍后再试"（W1 C6 起去实例名）。于是唯一需要用户动手的一类
  * （平台登录态过期）被埋掉——用户只能盲目重试，重试多少次都不会好。
  *
  * 这里走真 assembly + 真 ContextTaskRunner 的 catch 分支，钉住 auth 类给出可行动话术。
@@ -42,7 +42,8 @@ describe('[L4 集成] 离线全链 e2e：委派失败的用户话术', () => {
 
     const reply = await send('查一下幻辰财税的应收账款');
 
-    expect(reply).toBe('17dz 子任务执行失败，请稍后再试。');
+    // C6 去实例名：用户可见话术不含执行层称谓，断言与生产模板 error-codes.ts 同文案
+    expect(reply).toBe('子任务执行失败，请稍后再试。');
     expect(reply).not.toContain('secret');
     await assembly.close();
   });
