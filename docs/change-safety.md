@@ -1377,3 +1377,50 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **`git filter-repo` 已由带外重写实际调用**（mirror 仓 `.git/filter-repo/` 证据组在案，2026-11-05 20:14）；C1 期"版本非空已实测、未调用"的记录随之作废。
 - **gitee `refs/pull/*` 残留已登记 debt-ledger D-158**（2026-11-05 收口补登）：26 个 ref（`refs/pull/{1..13}/{head,MERGE}`）全部指向重写前提交；force-push 重写 main/分支不移除 pull ref，删 ref = 删 gitee 上 13 个 PR 记录（不可逆），用户决定不删、登记残留。gitee 是私有仓（残留仅对有仓访问权者可见），公开 GitHub 库永远只收干净历史；闭环判据 = gitee 仓库删除/归档，或用户改主意删 PR。
 - **两处波次内文档残留（修复轮发现，登记未改）**：debt-ledger D-158「重写未做故该门尚未跑」一句已过时（fresh clone 判据本棒已跑，数字见上）；rule-landing §1 HG1 行的「实测 4/22 行」「C1→C2 之间的红」属重写前口径。两处都不影响判定，留待随波次 4 门面重写或 owner 指示再动。
+
+## 27. 公开迁移 · 身份参数化波（2026-11-05/06，w1-identity-params：宿主身份面 profile 声明 + 中性缺省）
+
+**目标**：把宿主侧全部执行层实例身份（委派工具名、称谓、profileId 缺省、网关名缺省、用户可见文案与 provenance 注释）改为「profile 声明 + 中性缺省」，公开仓身份面子集（packages/*/src + apps + CI 配置）17dz 归零；部署侧经 profile 声明保持实例行为连续。方案 = /tmp/pp-waves-b.json W1；分支 w1-identity-params（自集成分支 migration/public-release = 波次 2 后 HEAD 7ba775d 起）。
+
+**commit 表（10 项全落地）**：
+
+| # | commit | 内容 | 验证 |
+| --- | --- | --- | --- |
+| C1 | `0ae2833` | 表征先行：execution-identity.test.ts golden 冻结（F1） | C1 前 7ba775d 重测 unit = 107 文件/1745+1（方案引用的 105/1725 是 44a84a6 值）；C1 后 108/1762+1 |
+| C2 | `f980e14` | 称谓参数化：DEFAULT_EXECUTOR_LABEL '执行层子 Agent' 中性缺省 + profile.executorLabel | 108/1764+1；D-122 golden 转为「注入 '17dz 子 Agent' 逐字节相同」 |
+| C3 | `fcfc006` | 工具名参数化：RUN_EXECUTION_TASK_TOOL 'run_task' + profile.toolName；Run17dzTaskArgs 别名退役（openDecisions #5 采推荐：W1 内清干净） | 108/1766+1；docs-reality tripwire 反向翻「全仓绝迹」 |
+| C4 | `8b35a2d` | 工具描述与 schema 中性化：buildRunExecutionTaskDescription/Schema(executorLabel)（W1 唯一模型可见文案变更，F6 挂靠点） | 108/1768+1；golden 注入实例称谓逐字节断言落地 |
+| C5 | `4e9e8bd` | profileId 缺省去实例名：resolveActiveProfileId 纯函数（单 profile 派生/多 profile fail-closed）；assembly/main 走 activeProfileId | 108/1772+1；assembly 剩 2 处 17dz 注释归 C8 |
+| C6 | `a8be999` | 用户可见与运维文案去实例名（错误码 2 + 确认路由 2 + context 6 + plan CLI 4） | 108/1772+1（文案翻转不增用例） |
+| C7a | `5bf014b` | 网关名穿线（行为零变化）：error-codes 惰性模板（GatewayText）+ plan-runtime 14 处 errorFor + pi-coding-driver 6 处，全链路 gateway 参数覆盖 | 108/1772+1；plan-teaching D-011 逐字节原样过 |
+| C7b | `adfd16d` | GATEWAY_INVOCATION 退役：删常量，resolveGatewayText/gatewayExecPath fail-closed；spawn 全部 gatewayExecPathForProfile；wiring 链补 gateway（C5 推迟项落地）；测试夹具消红 20 文件 | 108/1772+1；architecture-laws L2 断点达成 |
+| C8 | `e415b19` | provenance 注释移出源码（→debt-ledger）+ 示例中性化 + surface lint 守卫落地（变异自反内建） | 109/1775+1（守卫 3 用例） |
+| C9 | （本提交） | change-safety §27 + debt-ledger W1 节 + 文档关账 | 见下 F7 |
+
+**F1（golden 先行）**：C1 全绿落在 7ba775d；C2-C7b 每 commit 只翻转本 commit 拥有的 describe 块（各 commit message 带翻转清单），C1 冻结的其余断言至终态未动（execution-identity.test.ts 终态 25 例全绿）。
+
+**F2（unit 基线冻结）**：基线 = C1 前重测 107 文件/1745+1（波次 2 后 HEAD 实测；44a84a6 的 105/1725 仅作参考）。逐 commit 单调：1762→1764→1766→1768→1772→1772→1772→1772→1775（+1 skipped 恒定），只增不减。终态 `npm run test -- --project unit` = 109 文件 / 1775 passed + 1 skipped（C9 前实测）；typecheck 每 commit exit 0。
+
+**F3（六项变异，2026-11-06 实跑，临时改→红→还原→复绿）**：
+① DEFAULT_EXECUTOR_LABEL 改回 '17dz 子 Agent' → system-prompt D-122 中性断言红 + surface lint 红（2 failed）；还原后 6/6 绿。
+② core/config.ts toolName 校验删（`if (false)`）→ config.test.ts '拒绝非法形状（C3）' 红；还原 21/21 绿。
+③ resolveActiveProfileId 多 profile 改返回首键（`>= 1`）→ golden C5 纯函数断言 + runner 多 profile fail-closed 断言红（2 failed）；还原 25/25 绿。
+④ resolveGatewayText 恢复 'bin/17dz' 回退 → surface lint 红（回退字面量进 src 即被抓；serve-gate/plan-runtime 测试因 C7b 后全部显式注入不再依赖回退而不红——捕获面已转移到身份守卫，属预期防御层级，如实记录）；还原 32/32 绿。
+⑤ plan-runtime PLAN_SHAPE_PREFIX 的 errorFor 抽掉 gateway 实参 → plan-shape-fuzz 4 例 + plan-runtime 围栏断言红（渲染回落 fail-closed 抛错，断言拿不到文本）；还原 89/89 绿。
+⑥ surface lint 路径集删 apps + 注入 apps/server/main.ts 一处 17dz → 不红（3 passed，漏洞实证）；还原路径集后同注入 → 红（1 failed）；还原注入 → 3/3 绿。两半自反闭环。
+
+**F6（探针一致性——条件项，未授权未跑）**：C2/C3/C4 触及模型可见面（系统提示词称谓、工具名、工具描述）。按 §18 先例未获真实 LLM 授权不跑探针，以字节同一性断言替代并留档：① 系统提示词注入 '17dz 子 Agent' 与参数化前逐字节相同（D-122 frozen base64，C2）；② 工具描述/schema 注入 '17dz 子 Agent' 逐字节（golden C4 注入断言）；③ 工具名注入 run_17dz_task = 改前发布名（golden C3）。**待办**：授权后 `node --env-file=.env --import tsx scripts/probe-real-agent.ts --only A1,A2,A4,A5,B1`（mock 执行器）复跑逐轮 diff，判定标准按方案 f6-probe-parity 预写值。
+
+**F7（文档同提交）**：C2 §1/§10/§12（executorLabel 字段）、C3 §0/§10/§12（toolName + 别名退役）、C7b architecture-laws L2 终态 + execution-layer-interface §2/§10/§12（退役终态）、C9 本节 + debt-ledger W1 节 + v0-architecture §10 身份两行 + rule-landing 现状行。docs-reality 双向对账无机械强制的风险照方案 risk#7 如实成立（本波文档同步为纯人工纪律，surface 守卫的窄断言补强未做，登记 debt-ledger）。
+
+**验收对账（W1 验收清单逐项）**：
+- 每 commit unit 全绿 + 只增不减 + typecheck 0：见 F2 表 ✓
+- surface lint 绿 + 波前树红形态：守卫 3/3 绿（e415b19）；波前树红形态 = 零排除时对 7ba775d 同 scope 计红——方案口径 160 行（src 非测试 77 + src 测试 66 + apps 非测试 11 + apps 测试 3 + ci.yml 1 + ci.sh 2）未在本棒重放（守卫是在清理同 commit 落地，波前红输出未留档），**以变异⑥（删 apps 路径注入不红 / 完整路径注入即红）+ 排除非空转断言实证守卫有效性**，波前 160 行数字沿方案口径登记——此偏差如实声明。
+- 验收 grep（迁移门① W1 子集）：`git grep -il 17dz -- packages/agent/src packages/core/src packages/contracts/src packages/channel-wecom/src apps .github scripts/ci.sh ':!packages/agent/src/budget-policy.test.ts' ':!packages/agent/src/budget-policy-cross-repo.test.ts'` 终态输出 = `packages/agent/src/budget-policy.ts` + `scripts/ci.sh` 两行——**均为挂 `identity-defer: W4` 签的 CROSS_REPO_17DZ_ROOT 行（budget-policy.ts:18、scripts/ci.sh:12）**。与验收「输出为空」的差异：守卫判据（w1-identity-surface-lint）认行内签排除、验收 grep 是无签感知的裸命令，两者对挂签行的判定不一致是方案内部张力（C8 changes 要求挂签、验收要求为空），按守卫判据执行并如实上报 run owner 裁决（debt-ledger D-162）。Run17dzTaskArgs 未走「W5 退化分支」——C3 已退役，3 行残留不存在。
+- platform-leak-lint + docs-reality 绿 ✓（常驻守卫不退场；platform-leak-lint 的业务词表在本波捕获了 C8 一次措辞失误（「记录」），守卫有效）。
+- e2e 失败集合对比：见本节末实测行。
+- 全程 mock（D-076）：本波零真实平台调用；探针未跑（见 F6）。
+
+**e2e 实测（C9 期复跑 `npx vitest run --project e2e`，非绿门槛、集合对比判据）**：终态 = **28 文件失败 / 106 用例失败**（vitest exit 1）。与波前基线（C1 期 26 文件/93 用例）的偏差如实归因三层：① 本 worktree 初跑 37 文件/148+ 系 fresh 环境缺 gitignored `config/agent.yaml`（C1 期已知坑，从主仓复制后消失）；② C7b fail-closed 波及 e2e harness——`config/agent.yaml` 的 profile 缺 `gateway` 声明 + `tests/e2e/harness.ts` 的 4 处 `load*` 派生未传 gateway，合计推到 37 文件/156 用例；两者已随 C9 修复（agent.yaml 补三项声明——方案 draftsForApproval #5 推荐项，gitignored 不进提交；harness 加 `GATEWAY = 'bin/17dz'` 常量注入 4 处 load*，本 commit）降到 28/106；③ 剩余 28/106 的主因是 **sibling 侧外生变更** `584b580`（2026-10-28「FSHINE_* 旧名退役执行：删六个读取回退、serve() 收窄为 DZ_SERVE=1」）——harness env 仍传 `EXECUTION_MOCK_STATE`/`EXECUTION_PLAN_ACTIVATION_SECRET` 等旧名，平台侧 fail-closed 拒绝（实测签名：`MOCK_STATE_MISSING: 需 DZ_MOCK_STATE…`、`PLAN_ACTIVATION_UNTRUSTED` ×33、`未声明有效的 profile.gateway` ×38[含非 suite 级残余]）。该对齐方案明裁「单独立项不混入 W1」（risk #3/#8、openDecisions #9、debt-ledger D-163）。**结论**：失败集合 28 ≠ 波前 26、用例 106 > 93，集合对比判据不满足；偏差主体归 sibling 外生 env 退役 + 本地部署配置初补，非 W1 代码改动的行为回归（C7b 波及部分已在本波消红），本波不据此宣称 e2e 判据通过，也不宣称「非 fshine 代码缺陷」的强断言——归因证据链如上，W1 期间 sibling 未再变更（584b580 时间戳 2026-10-28 早于 C1 基线 2026-11-05 22:55），C1 期 26/93 与当前 28/106 的环境差异在于本 worktree 初建（agent.yaml 补齐路径）与 shell env（`DZ_EXECUTOR` 在主仓 .env 为空值注释态，e2e 不自动加载 .env；第四轮带 `DZ_EXECUTOR=mock` 验证过 REAL_EXECUTION_NOT_ALLOWED 签名消失、被 MOCK_STATE_MISSING 取代）。归入 D-163 的根因归因报告。
+
+**风险条目兑现**：C7b churn 按清单拆解成立（C7a/C7b 分离提交；C7b 红面 20 文件/210 用例一轮机械消红未叠补丁未 revert——红出现在工作区而非已提交 commit，F5 的「红先 revert」对象不存在的场景，如实记录）；中性缺省值拍板项（draftsForApproval #1/#2）采推荐值 run_task/「执行层子 Agent」落地，改值面 = 单常量 + 两断言，待 run owner 确认（debt-ledger D-161）。
