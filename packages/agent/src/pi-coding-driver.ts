@@ -1510,7 +1510,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // "提交未激活"而不是"被拒 N 次"（D-099 的诚实纪律：混合历史下它就是提交数）。
         declinedPlans += 1;
         const reason = declinedPlans > MAX_DECLINED_PLANS_PER_TASK
-          ? `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`
+          ? `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`, undefined, options.gateway)}`
           : `PLAN DECLINED：${error instanceof Error ? error.message : '计划格式无效'}`;
         reportPlanSubmission({ reason });
         return { block: true, reason };
@@ -1682,7 +1682,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     const scratchDir = options.scratchDir ?? null;
     const rel = scratchDir ? workspaceRelPath(options.cwd, parsed.path) : null;
     if (!scratchDir || rel === null || !isInsideScratch(rel, scratchDir)) {
-      throw errorFor('PLAN_FILE_OUT_OF_WORKSPACE', parsed.path);
+      throw errorFor('PLAN_FILE_OUT_OF_WORKSPACE', parsed.path, undefined, options.gateway);
     }
     const abs = path.resolve(options.cwd, rel);
     let content: string;
@@ -1693,19 +1693,19 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 的 30s SIGTERM），挂住的是宿主这一跳。worker 经 bash（mkfifo）可自造，虽非新
       // 提权面（非网关 bash 本就能自挂），但宿主自己的读路径要有界。
       if (!stats.isFile()) throw new Error('不是普通文件（目录/FIFO/设备），拒绝读取');
-      if (stats.size > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（${stats.size} 字节，上限 ${MAX_WRITE_BYTES}）`);
+      if (stats.size > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（${stats.size} 字节，上限 ${MAX_WRITE_BYTES}）`, undefined, options.gateway);
       content = readFileSync(abs, 'utf8');
       // 读后复核：stat 与 read 之间文件可能被撑大（TOCTOU，微秒级窗口且属自伤）——
       // 读后按字节数再校一次。上限只认 write 门那一个数字，不设第二本账。
       const bytes = Buffer.byteLength(content, 'utf8');
-      if (bytes > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（读取后 ${bytes} 字节，上限 ${MAX_WRITE_BYTES}）`);
+      if (bytes > MAX_WRITE_BYTES) throw errorFor('PLAN_FILE_TOO_LARGE', `${rel}（读取后 ${bytes} 字节，上限 ${MAX_WRITE_BYTES}）`, undefined, options.gateway);
     } catch (error) {
       // 表内码（体积越界）原样抛；文件系统错误包一层上下文——与 plan CLI 失败同一
       // 手法：真实原因逐字带出，worker 看得见是哪个文件怎么了（ENOENT = 忘了先写）。
       if (error instanceof Error && (error as { code?: string }).code?.startsWith('PLAN_')) throw error;
       throw new Error(`计划文件读取失败（${rel}）：${error instanceof Error ? error.message : String(error)}`);
     }
-    const payload = parsePlanCallsPayload(content);
+    const payload = parsePlanCallsPayload(content, options.gateway);
     return {
       calls: payload.calls,
       ...(payload.userConfirmed !== undefined ? { userConfirmed: payload.userConfirmed } : {}),
@@ -1764,7 +1764,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // （D-099）。它**不是**"被拒绝次数"——越权拒绝、CLI 失败暂停、平台拒绝都计数。
         // 说成"已被连续拒绝 N 次"就是谎报：真实运行里 worker 撞上这条时，前几次常常是成功
         // 激活（2026-10-15 acceptance 8.1：3 active + 1 paused + 1 declined）。
-        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`)}`,
+        reason: `PLAN STOP：${messageFor('DECLINED_PLAN_LIMIT', `连续 ${declinedPlans} 次提交方案均未激活`, undefined, options.gateway)}`,
       };
     }
     if (options.entitySources) {
@@ -1807,7 +1807,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         activePlan = null;
         needsClues.push({ missing: ['请求中未给出的对象'], reason: scopeError });
         // 实体越权原因收口在 error-codes.ts（三要素）；PLAN DECLINED 是协议前缀。
-        return { block: true, reason: `PLAN DECLINED：${messageFor('ENTITY_OUT_OF_SCOPE', scopeError)}` };
+        return { block: true, reason: `PLAN DECLINED：${messageFor('ENTITY_OUT_OF_SCOPE', scopeError, undefined, options.gateway)}` };
       }
     }
     const previousPlan = activePlan;
