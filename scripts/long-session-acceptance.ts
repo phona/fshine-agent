@@ -20,7 +20,7 @@ import { estimateContextTokens, type AgentMessage } from '@earendil-works/pi-age
 
 const mode = process.argv.includes('--mode=auto') ? 'auto' : 'ttl';
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-const USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const USER = 'fictional-wecom-user-id';
 const SESSION = `wecom:${USER}:ls-${mode}`;
 
 /** 一轮真实感问答（含账套 id、期间、翻页游标、结论——压缩摘要的保留目标） */

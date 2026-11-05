@@ -21,7 +21,7 @@ import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-const AUTHORIZED_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const AUTHORIZED_USER = 'fictional-wecom-user-id';
 const CONV = 'acc-multi';
 
 function replyText(reply: ChannelReply): string {

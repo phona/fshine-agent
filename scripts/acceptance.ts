@@ -31,7 +31,7 @@ const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 const dataDir = path.join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
 
-const AUTHORIZED_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const AUTHORIZED_USER = 'fictional-wecom-user-id';
 
 // --only=1.1,4.1：只跑指定用例（P2 门控验收等子集场景）
 const onlyArg = process.argv.find((a) => a.startsWith('--only='));

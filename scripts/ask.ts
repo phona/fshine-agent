@@ -28,7 +28,7 @@ import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // 与 acceptance.ts 相同的验收主用户（config/agent.yaml 里 capabilities=read+write 的 principal）
-const AUTHORIZED_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const AUTHORIZED_USER = 'fictional-wecom-user-id';
 
 function replyText(reply: ChannelReply): string {
   return typeof reply === 'string' ? reply : (reply.text ?? '(图片回复)');

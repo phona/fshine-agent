@@ -47,7 +47,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
 
-const PRINCIPAL_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const PRINCIPAL_USER = 'fictional-wecom-user-id';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。

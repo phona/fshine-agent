@@ -44,7 +44,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import { loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 
-const PRINCIPAL_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
+const PRINCIPAL_USER = 'fictional-wecom-user-id';
 const AUTHORIZED_KEY = `wecom:${PRINCIPAL_USER}`;
 
 /**
