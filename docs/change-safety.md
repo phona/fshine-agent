@@ -1431,3 +1431,44 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - 【中危·裁决写实】D-162 验收对账段落 owner 裁决：两条 `identity-defer: W4` 挂签行正确保留、门禁按签排除不是放水；复核口径 = 签排除后零命中 + 身份守卫 3/3 绿（修复轮双口径实跑通过），见上文验收 grep 行与 D-162。
 - 【低危·订正】D-162/D-165 引用的 `budget-policy.ts:18` 订正为 `:19`（C8 同 commit 改注释致 +1）；D-167②「波前树已不存在可检出的红状态」不实——修复轮对 7ba775d 实跑重放：零排除 173 处 / 守卫排除形态 156 处（173 − 两个预算测试文件 17 处），方案口径 160 与两实测均不符，详见 D-167 订正。
 - 【低危·登记不改】e2e 用例文件的 size 估计 27 vs 实际 37（方案材料口径，本波文档已有 37 实测，不改）；真实 LLM 探针未跑（F6 条件项，字节同一性断言已绿，D-167① 维持待授权）。
+
+---
+
+## 28. 公开迁移 · 预算策略上收波（2026-11-06，w4-budget-strategy：通用预算协议单一源 + 跨仓校验移交执行层）
+
+**目标形状**：通用预算策略上收为宿主持有的协议级单一真相源——12 个阈值缺省（calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180）不再是「逐字对齐执行层」的第二份，其归属表述为通用预算协议缺省档位线、单一真相源在宿主 `budget-policy.ts`；执行层经声明面（operation 清单 est_seconds/weight/effects）给估时、可声明更严硬上限并由执行端门在实际调用处复核；双门并行期宿主档只收紧不放宽（`stricterTier`）；跨仓预算一致性校验从 fshine 搬到执行层仓（方向修正：执行层核对自己对通用协议的一致，宿主不知道执行层）。平台计划门原样保留至迁移完成，本波零门禁删除、零运行时行为变化。
+
+**commit 表**：
+
+| commit | 主题 | F2 记账（unit） |
+|---|---|---|
+| 8a18d0b | C1 表征先行：双门叠加语义 23 例 + 两个现状不对称性钉子 + dummy 第三副本守卫（预热落地，本棒变基到集成头 5624075 后复验全绿；未改任何生产代码） | 110 文件 / 1798+1 skip |
+| 769ce54 | C2 协议缺省单一源（零行为变化）+ G2 守卫 + W1 守卫自设指令的覆盖收紧 | 110 文件 / 1799+1 skip（+1=G2） |
+| （17dz 仓）4f0e2ec | C3 一致性校验落执行层：rename-immune 解析 + 七态夹具 + 真实解析路径 + architecture.md 方向声明 | （跨仓，不在 unit 口径） |
+| aef5814 | C4 跨仓校验退出宿主：脚本/测试/npm 入口/CI scope 改写/env 文档 + D-150 落定、D-151/D-162/D-165 关账、D-168 新登 | 109 文件 / 1788+0 skip（-9-1skip-1 文件，被删测试） |
+| （本 commit） | C5 标定三问逐道重答 + D-169 新登 + rule-landing/v0-architecture 同步 + 本节 | 见 F2 表 |
+
+**双门判据一致性的证据形态**：机械侧 = ① 17dz 仓七态夹具（含不对称块注释钉子，G7-⑥ 变异实测红→还原→复绿）+ 真实两仓比对（fshine W4 检出 ↔ 17dz origin/main de41ae3：新校验脚本 exit 0「12/12 一致」；被删旧脚本从 aef5814^ 取原文对同检出补跑同证 exit 0——G4 删除前留档本应在 C4 前实跑，此处如实记为删除后从父提交补跑的等效证据）；② fshine 仓 G1 dummy 守卫（dummy.cjs planPolicy 12 值逐键 + planDecision 算子骨架锁，受测参考实例与协议缺省分叉必须红）；③ G2 守卫（budget-policy 两文件零 17dz/plan.js/跨仓脚本字样，变异自证）。书面侧 = G1 每条用例注释的「执行层 decision() 同形实现」逐支对应（>= vs >、scale 三线同乘、rank 取严、previous 只改措辞）。**对真执行层的逐支逻辑 conformance 无机械校验**——登记 D-169 附带项，共享判别向量或执行层侧形状断言留 W5。
+
+**切换条件（平台门退役条件，本波不执行）**：双门判据一致（上三机械侧全绿）+ e2e 失败集合不增 + 探针 parity（需 LLM 授权）+ 执行层 CI 真实 12 键 parity 接线绿灯（D-168，限期波次 5）。capacityScale/grantLevel 协议字段设计留 W5（D-169；W4 不拿 budget 回执的呈现字段当控制输入）。
+
+**门① 剩余产品面交接清单（锁定口径实测，2026-11-06 本波终态；命令 `git grep -c -i 17dz` 逐文件，排除 debt-ledger/change-safety 两档案例外）**：
+- **在册面已清零**：packages/agent/src、packages/core/src、packages/contracts/src、packages/channel-wecom/src、apps、.github（W1 清 identity 面；W2 清 error-codes 面——以 W2+W3 终态为准；W4 清预算面）。本波终态实测：以上路径非测试 .ts 零命中。
+- **docs 规格与说明（归 W3/W2+W3 与波次 4）**：rule-landing 33、environment-variables 16、roadmap 13、v0-functional-spec 11、e2e-ownership 11、execution-layer-interface 11（本波 §4 已清其预算段）、architecture-laws 10、manual-test-wecom 9、v0-architecture 6（本波 §10 预算行改写后 9→6）、v0-implementation-decisions 6、business-skill 2、execution-layer-admission 1、test-hardening 1。
+- **scripts 验收/探针夹具（归波次 4，口径待拍板）**：acceptance.ts 4、ask.ts 4、probe-real-agent.ts 5、smoke-real-platform.ts 4、acceptance-22-supplement.ts 2、long-session-acceptance.ts 2、mock-commit-smoke.ts 2、plan-reject-report.test.ts 1、eval/corpus.jsonl 1、eval/GENERIC_MOCK_NOTES.md 1。
+- **模板与元数据（归 W1/W3/波次 4）**：config/agent.example.yaml 8、README.md 7、.env.example 3。
+- **包根测试夹具（册外待拍板——锁定 glob 是 packages/*/src，包根 *.test.ts 不在册；若扩口径则量大增，见 W4 方案 risk#2/openDecisions#6）**：serve-gate.test.ts 248、pi-coding-driver.test.ts 56、execution-identity.test.ts 37（W1 golden，故意钉实例值）、core/config.test.ts 32、context.test.ts 29、plan-runtime.test.ts 27、proposal-runtime.test.ts 26、pi-coding-driver-plan-audit.test.ts 31、proposal-flow.test.ts 13、operation-labels.test.ts 9、plan-teaching.test.ts 8、pi-coding-driver-executor-bypass.test.ts 15、其余零星。
+- **守卫自引字面量（结构性，不算命中）**：execution-identity-surface.test.ts 5、docs-reality.test.ts 8（G2 守卫的禁令断言本身）、platform-leak-lint.test.ts 6（allowlist 标签制度）。
+- 合计 785 行（含册外与守卫自引）；在册面（src+apps+scripts+config 模板+README+.github+docs）待清约 145 行。
+
+**e2e 红基线冻结（G6；本波实测口径，取代方案冻结的 26/93）**：环境前置已满足——`FSHINE_PLATFORM_ROOT=<17dz origin/main 检出>`（本波在 17dz-platform 仓建的 origin/main 检出 worktree，含 C3 增量；未动用户主检出；具体路径属部署环境细节不入文档——exposure-lint 内部绝对路径禁词对全部被跟踪文件生效，本行首稿即被它抓出改写）+ `EXECUTION_EXECUTOR=mock` + 本 worktree gitignored config/agent.yaml 补 W1 三项声明（gateway/executorLabel/toolName，root 指向同一检出）。命令 `FSHINE_PLATFORM_ROOT=<…> EXECUTION_EXECUTOR=mock npx vitest run --project e2e`：**22 文件失败 / 86 用例失败**（38 文件/159 用例）。与方案冻结基线 26/93、W1 终态 28/106 的差异归因：① 后两者测于陈旧平台检出（DZ_* 旧名 vs harness 的 EXECUTION_* 新名）——origin/main 平台下 MOCK_STATE_MISSING/PLAN_ACTIVATION_UNTRUSTED 签名消失；② W1 修复轮后 harness 需 profile.gateway 声明（本波 agent.yaml 已补）。**A/B 同环境对照（新增侧必须为空的判据形态）**：在波起点 commit 8a18d0b（pre-C2）建临时基线 worktree、同一 node_modules、同一 config、同一 env 复跑同命令 → 22 文件/86 用例，FAIL 文件集合与本波终态逐一相同（diff 空）——C1-C4 零 e2e 新增失败，22/86 为继承环境债。逐文件计数：turn-loop-write-chain 15、turn-loop-security 11、turn-loop-plan-gate-boundaries 10、input-shape-variants 8、turn-loop-error-fast-path 5、turn-loop-long-session-invariants 4、turn-loop-concurrent 4、turn-loop-pingpong 4、turn-loop-plan-gate 2、turn-loop-clarification 2、turn-loop-interleaved 3、turn-loop-needs 2、turn-loop-phone-incident 2、turn-loop-disambiguation 2、turn-loop-plan-steps 2、turn-loop-recall-facts 2、turn-loop-session-entities 2、turn-loop-activated-plan 1、turn-loop-execution 1、turn-loop-resume 1、turn-loop-write-closure 1、harness-fidelity 2。签名分布：AssertionError 71（mock 实体门应答/夹具期望，主体）、「未声明有效的 profile.gateway」35（e2e 假 worker 路径的 C7b fail-closed 形态，harness 侧 env 对齐遗留）、PLAN_REFUSE 1。e2e 不作本波绿灯门槛；失败集合不增判据由 A/B 对照满足，根因归因与 harness env 对齐仍归 D-163。
+
+**dummy 第三副本定位声明**：`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs` 是 generic-mock（npm run ci 一道门）的受测通用执行层参考实例，不是真执行层仓；其与协议缺省的一致性由仓内断言钉住（G1 dummy 守卫：planPolicy 12 缺省逐键 + planDecision 算子骨架），不进 C3 跨仓 parity（跨仓只覆盖真执行层仓）。绕过守卫把它当「可漂移的夹具细节」或反向把它扩进跨仓比对都不合法。
+
+**F1/F3 实测记录**：G1 表征 23 例在变基后集成头复验全绿；G2 变异（budget-policy.ts 注入 17dz → docs-reality 守卫红 1 failed → 还原复绿 9 passed）；G7-⑥ 变异（17dz 仓剥离器删块注释分支 → 七态 ④ 红 2 fail → 还原复绿 27 pass）；G7-①（budgetWeight `>=` 改 `>` → G1 恰等边界例红 1 failed：confirm 漏成 notify，两方向都是事故面 → 还原复绿 23 passed）；G7-②（scale 从 weight 四线删掉 → grantLevel 扩容例红 1 failed → 还原复绿）；G7-③（叠加判据「宿主 rank 严格更高才覆盖」改成「平台档优先」（`>` 反转为 `<=`）→ plan-budget-dual-gate + plan-budget-overlay 双红 6 failed（不放宽防线失效实证）→ 还原复绿 34 passed）；G7-⑤（budget-policy.ts notifyWeight 18→19 → G1 边界例 + G3 dummy 第三副本守卫双红 2 failed → 还原复绿 23 passed）。六项均「本地改错→对应断言红→还原→复绿」，变异后 `git status` 干净。
+
+**F7（文档同提交）**：C2 execution-layer-interface §4 + docs-reality 守卫同提交；C3 architecture.md 方向声明同提交（17dz 仓）；C4 ci.sh scope 注/env 文档/rule-landing 守卫描述/D-150/D-151/D-162/D-165/D-168 同提交；C5 architecture-laws「预算门标定」表 + rule-landing C12/§10 + v0-architecture §10 + D-169 + 本节同提交。
+
+**F2 表（逐 commit 实测，冻结基线 105 文件/1725+1 skip）**：变基后起点 110/1798+1（W1 增量+23）→ C2 后 110/1799+1 → C4 后 109/1788+0（-9-1skip-1 文件，被删 budget-policy-cross-repo.test.ts；仍 ≥1725）→ C5 后见本 commit 实测行。每 commit `npm run test -- --project unit` 全绿 + `npm run typecheck` exit 0。
+
+**F6**：本波零提示词/零门语义行为变化（C2 数字与比较符一字不动；C4 删的是从未进 CI 的开发面脚本）→ 不取新探针基线；判据=冻结基线 §16 W4（A1/A4/A5）不劣化，需真实 LLM 授权后补跑（未授权不跑，D-076 全程 mock）。

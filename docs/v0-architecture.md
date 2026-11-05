@@ -229,7 +229,7 @@ Main Agent 申报 delegate
 | 领域判别 | `validatePlanEntities` 已做通用来源校验。**2026-10-14 标定复审后**：覆盖 = 本任务迄今全部平台响应（转录 ∪ 宿主账本双通道，治 SDK 自动压缩）、单条保尾、宿主拒绝理由按身份排除、信封 `data` 叶值作附加来源；包含判据仍是逐字包含，防幻觉功能不变。剩余差距：名称重新检索等执行规则仍在 fshine worker 提示词和业务 skill 中，与 17dz serve skill 重复 | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
 | 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁 17dz SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
 | 执行凭证 | 当前 `gateCalls > 0` 主要证明网关调用获准，普通 conversation 的无来源金额主要告警 | 区分调用尝试与成功结果，并让数据回复关联可核对的执行结果 |
-| 通用预算策略 | 17dz 的 `plan evaluate` 当前决定 execute/notify/confirm/stop 并保存累计账本；fshine 执行通知、确认和激活 | fshine 复用通用预算与计划状态策略；执行层声明耗时、副作用及更严格的硬上限，并在实际调用处复核。迁移中保留现有门禁 |
+| 通用预算策略 | 通用预算协议缺省档位线的单一真相源已由宿主持有（`budget-policy.ts`，W4 上收；12 个缺省不再是「逐字对齐执行层」的第二份）；双门并行期执行层 `plan evaluate` 仍决定 execute/notify/confirm/stop 并保存累计账本，宿主叠加档只收紧不放宽 | fshine 复用通用预算与计划状态策略；执行层经声明面给 est_seconds/weight/effects、可声明更严硬上限并在实际调用处复核；一致性校验归执行层仓（D-150/D-168）。迁移中保留现有门禁 |
 | 长任务拆解 | 已落地：计划模式协议（delegate request 的「第N/M步：」前缀，宿主机械解析；无前缀 = 单步行为不变）+ 任务计划状态（append-only 步骤事实 + 可重建投影）+ 逐步派单同任务续跑（continueTaskId，累计账本跨步累积）+ 任一步失败不阻塞 + 通知带「第 N/M 步」 | 同左（已达成）；申报契约仍 3 字段，协议写在 request 与工具描述里 |
 | Subagent 报错回路 | 已落地：needs 结构化线索（确定性派生）+ 宿主不 terminate + continueTaskId 重派，3 轮上限 | 同左（已达成） |
 | 主动回溯 | 已落地：宿主申报前注入检索证据（`reference-evidence.ts`，≤5+3 条带 eventId，超限截断记日志）；`route_reference_hint` 已删除。根因修复：查询轮次曾被 `selectRecentTurns` 踢出最近窗口 | 同左（已达成） |

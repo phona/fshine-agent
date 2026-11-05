@@ -1637,3 +1637,13 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **限期**：波次 5 迁移完成前。
 - **律法归属**：L2（单一真相源）+ 迁移门④。
 - **归属波次 / 状态**：波次 5；登记（W4 C4 落账，不冒充已接线）。
+
+### D-169 · 宿主叠加档不认 grantLevel/生效容量（W4 方案草案 D-153，程序级编号按执行序递补；误拦方向，D-143 同形）
+
+- **位置**：`plan-runtime.ts` 叠加段（evaluateAndActivatePlan 调 `decideBudgetTier({ calls, seconds, weight })`，不传 grantLevel、不传 previous）。现状由 `plan-budget-dual-gate.test.ts`「宿主叠加档现状不对称性」两条钉子按现状钉住（修它时该文件先红、随修同 commit 翻转）。
+- **触发 / 后果（误拦方向）**：用户确认一张容量边缘计划（grantLevel+1，执行层按扩容后容量放行）后，宿主叠加档仍按缺省阈值裁档——例如扩容后 weight=181 在执行层门裁 confirm（181 ≥ 120），宿主仍裁 stop。D-143「confirm 粘住」的宿主侧复辟形状：执行层已扩容、宿主不认。`rule-landing.md` §10 连带发现（高重量步确认后每步再确认）与之交叉。不传 previous 是低危措辞漂移（重计划场景 reasonCode 恒为 INITIAL_SCOPE_THRESHOLD）。
+- **修法**：evaluate 响应声明 capacityScale（生效容量倍数），宿主叠加档认它——字段设计随 W5 结构化调用协议重塑 evaluate 通道一起落，避免同一字段落两次（W4 方案 openDecisions #3）；若评审要求提前落，需执行层同批在 evaluate 响应声明该字段。另一备选：以 evaluate 回执 cumulative 派生并留判定记录。
+- **闭环判据**：扩容后的合法重计划不再被宿主按缺省阈值裁 stop（dual-gate 钉子①随修翻转 + 一条端到端用例）；reasonCode 措辞漂移同批或另修。
+- **附带登记**：12 个阈值缺省的数字级标定缺失（calls/seconds 线）——与 D-147 步数帽同款闭环二选一（数据标定 or 明确登记为未标定默认值），已在 architecture-laws「预算门标定（2026-11-06，W4）」表逐道登记。
+- **律法归属**：L5（误拦方向的自愈通道）+ 控制的标定审查第三问。
+- **归属波次 / 状态**：W5（推荐）；登记。W4 不先行硬修——硬修需要执行层先在协议里声明该字段，而现协议仅经 budget 回执的 weightBudget 间接暴露（接口文档 §4 定性「仅作呈现」，拿呈现字段当控制输入是第二份真相）。
