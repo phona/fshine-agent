@@ -2,6 +2,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { WORKER_TOOLS } from './src/pi-coding-driver';
+import { workerSystemPrompt } from './src/context';
 
 /**
  * 文档-代码对账守卫（docs-reality）——律法/台账的可判主张必须与代码现实一致。
@@ -132,5 +133,40 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(read('packages/agent/src/background-runtime.ts').includes('Run17dzTaskArgs'), 'background-runtime 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
     expect(read('packages/agent/src/context.ts').includes('Run17dzTaskArgs'), 'context.ts 的过渡别名复活——C3 退役决策被回退').toBe(false);
     expect(read('packages/agent/src/index.ts').includes('Run17dzTaskArgs'), 'index.ts 重新导出 Run17dzTaskArgs——C3 退役决策被回退').toBe(false);
+  });
+});
+
+// ── W3-A 渲染级机械锁（2026-11-05）：worker 提示词静态文本零执行层名 ──────────
+//
+// F1/F7——先锁后改：锁的是已为真的事实（W3-A 时点 workerSystemPrompt 函数体
+// `sed -n '1729,1847p' context.ts | grep -i 17dz` 零命中），防 W3-B 文档修正后回潮。
+// 唯一实现 = 直接调用 workerSystemPrompt 本体（context.ts 纯测试缝导出，零行为变化），
+// 不用 planCommandForm=undefined 的弱实现——那样许可段整段不渲染，会漏掉唯一渗入点
+// （planCommandForm 参数注入，permitNotice 段）。正反双向：
+//   正向：中性值渲染（许可段/工作区段全部渲染、注入值不含 17dz）→ 提示词零 /17dz/i；
+//   反向：注入 'bin/17dz plan …' 时原文出现——证明「唯一网关名渗入点 = 参数注入、
+//         静态文本零贡献」，锁的是结构不是碰巧。root 与注入值刻意取不含 17dz 的
+//         中性值，防假红。
+describe('docs-reality：worker 提示词静态文本零执行层名（渲染级机械锁）', () => {
+  it('中性值渲染 → 零 /17dz/i；网关名只能经 planCommandForm 参数注入（静态文本零贡献）', () => {
+    const prompt = workerSystemPrompt('/platform-root', 'tmp/req-1', 'gateway plan {"calls":[]}');
+    // 前置自证：许可段与工作区段确实渲染了（非 permitNotice 整段缺席的弱实现）
+    expect(prompt).toContain('许可：');
+    expect(prompt).toContain('写边界：');
+    expect(prompt).not.toMatch(/17dz/i);
+    // 反向：唯一渗入点 = 参数注入
+    const injected = workerSystemPrompt('/platform-root', 'tmp/req-1', 'bin/17dz plan {"calls":[]}');
+    expect(injected).toContain('bin/17dz');
+  });
+
+  it('W3-B 文档级 tripwire：v0-architecture §10 已修正的过期句不得复发', () => {
+    // 弱锁（§10 文案可被后续合法重写绕过）：主锁是渲染级代码断言（workerSystemPrompt
+    // 零执行层名）+ plan-teaching 计数锁，本条只防「改回过期句/矛盾句」。两条过期句
+    // 的修正事实：① worker 提示词静态文本零执行层名已实测并挂渲染级锁（W3-A）；
+    // ② 申报契约已瘦身为三枝四字段（resend 枝 2026-10-20 产物库波，turn-contract.test.ts
+    // 钉 schema 恰 4 属性）——「仍 3 字段」与 §10 申报契约行直接矛盾。
+    const doc = read('docs/v0-architecture.md');
+    expect(doc.includes('worker 提示词仍包含 17dz 网关用法'), '§10 提示词面积行改回过期句——该句已被 W3-A 渲染级锁伪证').toBe(false);
+    expect(doc.includes('申报契约仍 3 字段'), '§10 出现「申报契约仍 3 字段」矛盾句——resend 枝 2026-10-20 已新增，契约是三枝四字段').toBe(false);
   });
 });

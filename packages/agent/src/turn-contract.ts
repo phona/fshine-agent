@@ -131,8 +131,9 @@ export function reviewRouteDeclaration(
  * 领域无关的实体来源集合（架构 §2 第 9 条）。宿主不懂业务，只做字符串包含：
  * 计划里每个实体都必须能在五个来源的并集里逐字找到。
  *
- * 五个来源全部由调用方注入——**不从申报契约的字段推导**。申报契约已经瘦身成
- * kind/request/continueTaskId，这个校验正是为独立于它而写的，原样存活。
+ * 五个来源全部由调用方注入——**不从申报契约的字段推导**。申报契约已经瘦身为三枝
+ * 四字段（kind；delegate 的 request + continueTaskId；resend 的 artifactRef，
+ * 2026-10-20 产物库波新增），这个校验正是为独立于它而写的，原样存活。
  */
 export interface PlanEntitySources {
   /** ① 本轮用户正文，不包含引用内容。 */

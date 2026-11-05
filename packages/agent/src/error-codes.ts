@@ -1,5 +1,8 @@
 /**
- * fshine 侧错误码表（镜像执行层平台错误码表的结构与纪律：错误即数据；出处见 debt-ledger）。
+ * 宿主侧渲染层：持「错误即数据」的纪律（三要素 + 消息模板），领域措辞由执行层信封
+ * 作为**数据**携带，宿主只拼结构；平台错误码表与 schema 是权威，宿主消费不抄写
+ * （2026-11-05 W2 镜像层退役：correctForm 教学只留结构，零业务命令语法、零平台
+ * operation 名——机械锁见 error-codes.test.ts 三把全表锁）。
  *
  * 为什么收口：fshine 的拒绝/兜底消息曾是各出事点现场手拼——同一个"计划形状不符"
  * 在 plan-runtime 六个 throw 站点六种写法；"零执行"兜底在 runtime 三处各写一遍；
@@ -11,7 +14,7 @@
  * 两类条目（一张表，两种形态）：
  *   · 错误类 `{expected, actual?, correctForm}`：参数问题 / 形状问题 / 配置故障。
  *     渲染 `<CODE>: 期望 <expected>；实际 <actual>；正确形态 <correctForm>`——
- *     必须说清差在哪，绝不让参数问题长得像权限问题（平台同款事故形态）。
+ *     必须说清差在哪，绝不让参数问题长得像权限问题（平台侧同款事故形态）。
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
  *     语义照旧，只是不再有第二份手抄本。个别条目带占位符（选择类澄清的
@@ -29,7 +32,7 @@
  * （fail-loud），多给/少给参数同样 fail-loud（静默忽略会把"话术被悄悄加了动态部分"
  * 藏起来，与消息模板传 actual 同纪律）。
  *
- * 纪律（与平台表相同）：
+ * 纪律（与平台表同族）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
  *   - 未知码 fail-loud（UNKNOWN_ERROR_CODE）：绝不静默 fallback 到通用消息——那会把
  *     "忘了登记新码"伪装成"已知的普通失败"，正是本表要消灭的事故形态。误用
@@ -43,7 +46,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { PLATFORM_OPERATIONS, resolveGatewayText } from './platform-contract';
+import { resolveGatewayText } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -84,7 +87,8 @@ type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
 /**
  * 计划草案形状的**唯一教学源**（L2 / D-011：宿主侧 6 处散文副本收敛为这 1 处）。
  *
- * 内容与平台仓 `plan-schema.json` 的声明一致：`calls` 必填
+ * 内容与执行层仓 `src/execution/plan-schema.json` 的声明一致（跨仓机械锁
+ * plan-teaching.test.ts 持指针并断言本示例合法）：`calls` 必填
  * （PlanCall 数组），`goal` / `requestId` 是**声明过的**可选元数据
  * （`additionalProperties:false`——未声明顶层字段平台以 PLAN_UNKNOWN_FIELD 响亮拒绝，
  * 绝不静默忽略后跑）。goal 收编为可选元数据而非否决：宿主历史上一直在教它，平台选择
@@ -188,7 +192,9 @@ const TABLE: Record<string, CodeEntry> = {
   },
   PLAN_CALL_ARGS_NOT_ARRAY: {
     expected: 'args 是数组',
-    correctForm: 'args 为字符串数组，即命令行原样参数（如 ["--query","某名称","--period","202609"]）',
+    // W2 镜像层退役（2026-11-05）：只教结构——args 的业务命令语法（旗标示例等）归
+    // 平台命令文档，宿主不抄写（机械锁 = error-codes.test.ts 锁②）。
+    correctForm: 'args 为字符串数组，即命令行原样参数',
   },
   PLAN_CALL_ARGS_NOT_JSON: {
     expected: 'args 是 JSON 值',
@@ -221,10 +227,11 @@ const TABLE: Record<string, CodeEntry> = {
   // 同一请求直到收敛上限。正路径两条：① 先执行一次名称检索让平台响应携带规范名，再按
   // 响应里的名字提交（"名称检索拿唯一候选 → 按候选名查"天然放行正是这条）；② 本会话
   // 早前用户亲自提供/确认过的实体同样是合法来源（第四来源 sessionEntities，见
-  // turn-contract.ts）。检索操作名取平台契约常量（PLATFORM_OPERATIONS，L2 消费不抄写）。
+  // turn-contract.ts）。W2 镜像层退役（2026-11-05）：不再指名检索操作——「用哪个
+  // operation 检索」的权威在平台 operation 清单，宿主只教结构（机械锁 = 锁①）。
   ENTITY_OUT_OF_SCOPE: {
     expected: '计划的每个参数都能在当前请求、检索证据、平台响应或本会话已确立实体里逐字找到',
-    correctForm: `严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索（如 ${PLATFORM_OPERATIONS.financeSearchAccountSets}）使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效`,
+    correctForm: '严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效',
   },
   // 计划提交的收敛保护（PLAN STOP）。D-099 语义修正：计数器是**自上次计划成功激活以来
   // 的提交次数**，不是"被拒次数"——原实现与这条注释都写"连续拒绝"，实际对每一跳通过形状
@@ -625,7 +632,7 @@ function fillParams(code: string, entry: MessageCodeEntry & { text: string }, pa
   return entry.text.replace(PLACEHOLDER_RE, (_match, name: string) => String(params[name]));
 }
 
-/** 统一入口（镜像平台的 messageFor）：错误类走三要素，模板类走文本。 */
+/** 统一入口（与平台表同族的 messageFor）：错误类走三要素，模板类走文本。 */
 export function messageFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): string {
   return render(code, actual, correctForm, undefined, gateway);
 }

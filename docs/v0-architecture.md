@@ -89,13 +89,14 @@ Main Agent 每回合先申报一次：
 
 ```ts
 route_current_turn({
-  kind: 'conversation' | 'delegate',
-  request: string,              // 加工后的用户请求
-  continueTaskId?: string,      // 仅在补充子 Agent 索要的信息时使用
+  kind: 'conversation' | 'delegate' | 'resend',
+  request?: string,             // delegate：加工后的用户请求
+  continueTaskId?: string,      // delegate：仅在补充子 Agent 索要的信息时使用
+  artifactRef?: string,         // resend：指向宿主注入的会话产物清单 #编号
 })
 ```
 
-**三个字段，零业务知识。** 没有 `taskType`、没有 `accountQueries`、没有 `periods`、没有 `accountResolution`——那些都要求编排者做领域判别（区分账套名/科目名/客户名、知道凭证必须带期间），正是知识污染的来源。
+**四个字段，零业务知识。** 没有 `taskType`、没有 `accountQueries`、没有 `periods`、没有 `accountResolution`——那些都要求编排者做领域判别（区分账套名/科目名/客户名、知道凭证必须带期间），正是知识污染的来源。
 
 `request` 需要加工，这是编排层的核心价值，而且加工全是机制：
 
@@ -225,16 +226,16 @@ Main Agent 申报 delegate
 | 项 | 现状 | 目标 |
 |---|---|---|
 | 写路径 | 已落地（C 波收口，2026-10-13）：提案载荷全程不住编排层——`ChangeIntentRecord` 只剩取物单 `proposalId` + 通用确认字段；宿主不解析 payload、不渲染业务摘要（用户文本 = 平台 `summaryText` 原样 + 宿主通用状态行）。旧文本路径（worker 贴提案 JSON → `extractChangeProposal` → 服务端 dry-run 预检 → 按文件路径落账）与 `apps/server/commit.ts` 已整文件删除；B 波那两个灰度开关（管提案创建、管落账接线）已随 D 波退役（2026-10-14）——宿主恒定拦截提案命令、落账后端恒接，`proposalCommitEnabled` 由 `isCommitEnabled` 单独派生。残留：① SQLite 里的五列历史列只为旧库 NOT NULL 兼容保留（W5 fail-closed：不带 `proposalId` 的旧行业一律按过期处理） | 同左；下一步 = 结构化调用协议替代现有 env 级接线（判据不变：走查「新增 payroll 写路径 fshine 改动 = 0」+ 写 e2e 全绿 + §17 七项有守卫，见 [architecture-laws.md](architecture-laws.md) L4） |
-| 申报契约 | 已瘦身：`route_current_turn` 3 字段（kind/request/continueTaskId），零业务知识；申报层只剩结构校验，范围守卫靠计划层包含校验（§2 第 9 条） | 同左（已达成） |
-| 领域判别 | `validatePlanEntities` 已做通用来源校验。**2026-10-14 标定复审后**：覆盖 = 本任务迄今全部平台响应（转录 ∪ 宿主账本双通道，治 SDK 自动压缩）、单条保尾、宿主拒绝理由按身份排除、信封 `data` 叶值作附加来源；包含判据仍是逐字包含，防幻觉功能不变。剩余差距：名称重新检索等执行规则仍在 fshine worker 提示词和业务 skill 中，与 17dz serve skill 重复 | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
-| 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁 17dz SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
+| 申报契约 | 已瘦身为四字段（kind/request/continueTaskId/artifactRef——resend 枝 2026-10-20 产物库波新增，指向宿主注入的会话产物清单 #编号），零业务知识；申报层只剩结构校验（turn-contract.test.ts 钉 schema 恰 4 属性），范围守卫靠计划层包含校验（§2 第 9 条） | 同左（已达成） |
+| 领域判别 | `validatePlanEntities` 已做通用来源校验。**2026-10-14 标定复审后**：覆盖 = 本任务迄今全部平台响应（转录 ∪ 宿主账本双通道，治 SDK 自动压缩）、单条保尾、宿主拒绝理由按身份排除、信封 `data` 叶值作附加来源；包含判据仍是逐字包含，防幻觉功能不变。剩余差距：名称重新检索规则仍在 fshine worker 提示词（context.ts 输出纪律条），与执行层 serve skill 重复——业务 skill 已明写名称解析归执行层（2026-10-11/2026-11-04 两波收口） | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
+| 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁执行层 SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。2026-11-04 纯编排波再收口：执行默认值与业务路由例子中性化移出（业务示例归执行层 `.agents/skills-serve/`，执行默认词表守卫实测零命中）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
 | 执行凭证 | 当前 `gateCalls > 0` 主要证明网关调用获准，普通 conversation 的无来源金额主要告警 | 区分调用尝试与成功结果，并让数据回复关联可核对的执行结果 |
-| 通用预算策略 | 17dz 的 `plan evaluate` 当前决定 execute/notify/confirm/stop 并保存累计账本；fshine 执行通知、确认和激活 | fshine 复用通用预算与计划状态策略；执行层声明耗时、副作用及更严格的硬上限，并在实际调用处复核。迁移中保留现有门禁 |
-| 长任务拆解 | 已落地：计划模式协议（delegate request 的「第N/M步：」前缀，宿主机械解析；无前缀 = 单步行为不变）+ 任务计划状态（append-only 步骤事实 + 可重建投影）+ 逐步派单同任务续跑（continueTaskId，累计账本跨步累积）+ 任一步失败不阻塞 + 通知带「第 N/M 步」 | 同左（已达成）；申报契约仍 3 字段，协议写在 request 与工具描述里 |
+| 通用预算策略 | 执行层 `plan evaluate` 当前决定 execute/notify/confirm/stop 并保存累计账本；fshine 执行通知、确认和激活；2026-11-04 起宿主叠加通用预算档（budget-policy.ts 裁档已接入 plan-runtime 评估主路径、与执行层档更严为准——目标态重写属 W4） | fshine 复用通用预算与计划状态策略；执行层声明耗时、副作用及更严格的硬上限，并在实际调用处复核。迁移中保留现有门禁 |
+| 长任务拆解 | 已落地：计划模式协议（delegate request 的「第N/M步：」前缀，宿主机械解析；无前缀 = 单步行为不变）+ 任务计划状态（append-only 步骤事实 + 可重建投影）+ 逐步派单同任务续跑（continueTaskId，累计账本跨步累积）+ 任一步失败不阻塞 + 通知带「第 N/M 步」 | 同左（已达成）；协议写在 request 与工具描述里 |
 | Subagent 报错回路 | 已落地：needs 结构化线索（确定性派生）+ 宿主不 terminate + continueTaskId 重派，3 轮上限 | 同左（已达成） |
 | 主动回溯 | 已落地：宿主申报前注入检索证据（`reference-evidence.ts`，≤5+3 条带 eventId，超限截断记日志）；`route_reference_hint` 已删除。根因修复：查询轮次曾被 `selectRecentTurns` 踢出最近窗口 | 同左（已达成） |
 | 执行层记忆 | 已落地：平台 memory 命令（scope 隔离 + 锁 + fail-closed；W1 起网关名由部署 profile 声明，宿主不再持实例名缺省），SKILL 读写规程；编排层不存不转发不理解 | 同左（已达成） |
-| 提示词面积 | 主提示词以协议与通用原则为主；worker 提示词已纯静态清场（迁移期对账 2026-10-19：只含协议义务、机械边界与输出纪律，零网关名零执行层规则，逐任务范围随委派块走 user message）。W1 身份参数化收尾：委派工具名/称谓/网关名/profileId 缺省全部改为 profile 声明 + 中性缺省（`docs/change-safety.md` §27），宿主提示词面不再持有任何实例身份。业务 skill 的执行默认值中性化见 §3 现状行 | 通用宿主只保留委派和安全控制指令；业务语义归执行层，机器可校验的规则归清单、schema 和执行代码 |
+| 提示词面积 | 主提示词以协议与通用原则为主；worker 提示词已纯静态清场（迁移期对账 2026-10-19：只含协议义务、机械边界与输出纪律，零网关名零执行层规则，逐任务范围随委派块走 user message），静态部分零执行层名有渲染级机械锁（docs-reality.test.ts，2026-11-05 W3-A 落地）；W1 身份参数化收尾：委派工具名/称谓/网关名/profileId 缺省全部改为 profile 声明 + 中性缺省（change-safety §27），宿主提示词面不再持有任何实例身份；网关命令形态经 planCommandForm 参数注入（唯一渗入点，取值来自部署配置）；名称检索等执行层指令仍在 worker 提示词（见「领域判别」行）；业务 skill 的执行默认值中性化见 §3 现状行 | 通用宿主只保留委派和安全控制指令；业务语义归执行层，机器可校验的规则归清单、schema 和执行代码 |
 | 多任务回溯绑定 | 已落地（rule-landing C31）：续跑计划绑定按优先级机械判定——`continueTaskId` 按 taskId 反查 > 用户编号消歧 > 形状唯一自动续跑；多候选且无依据时宿主发编号消歧问题（`【任务消歧】`，选项由计划事实机械生成），**紧跟问题**的纯编号回复才绑定（中间插过回合即失效）。宿主持有绑定权，模型只申报"做什么"；不解任务语义、不引入判别模型 | 同左（已达成） |
 
 **公开迁移暴露面现状（2026-11-05 脱敏波，change-safety §25）**：现行树的四类敏感物——真实企微 UserID、内部绝对路径、真实客户名/主体名、真实财务读数——已机械替换为虚构值，并由 `packages/agent/exposure-lint.test.ts`（扫 `git ls-files` 全量、四类零命中断言 + 假绿自校验）常驻看守；CI 三门 + 三把守卫全绿，Tier B 未跑。**尚未处理的三面**：① git 历史里的同批串（归波次 2 历史重写，替换表由波次 1 产出）；② 产品面执行层实例名词（归 W1 / 波次 4，含 `config/agent.example.yaml` 的 `contextProfiles` 结构键，D-155）；③ Tier B 对兄弟仓 mock seed 目录的耦合（D-154）。各债的归属、闭环判据与限期见 debt-ledger 脱敏波新账（D-153–D-156）。

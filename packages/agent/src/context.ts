@@ -1756,8 +1756,11 @@ function isInside(root: string, candidate: string): boolean {
  * 律法 L2：协议事实平台拥有，宿主读数据（operation list --json）不抄写——所以这里
  * **不手抄**网关调用形状与 flag 纪律，只给”以平台清单为准”这一指针；命令形态经参数
  * 注入，是迁移期适配边界向通用层的唯一渗入点。
+ *
+ * 导出 = 纯测试缝（docs-reality.test.ts 渲染级机械锁直接调用本函数，锁「静态文本零
+ * 执行层名」），零行为变化；内部调用点不变（context.ts 委派 runner 装配处）。
  */
-function workerSystemPrompt(
+export function workerSystemPrompt(
   root: string,
   scratchDir?: string,
   planCommandForm?: string,
