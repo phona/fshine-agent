@@ -289,3 +289,26 @@ describe('终局快路径话术模板（宿主机械组装）', () => {
     expect(() => terminalFailureTextFor('PERIOD_NO_DATA', { query: '幻辰财税', period: '  ', availablePeriods: ['202606'] })).toThrow(UNKNOWN_ERROR_CODE);
   });
 });
+
+// ── W2 表征 golden：两条目现行渲染文本（镜像层退役前的钉子，2026-11-05）──────
+//
+// F1 表征先行：W2-B 镜像层退役将改这两条的 correctForm（PLAN_CALL_ARGS_NOT_ARRAY
+// 去业务命令示例、ENTITY_OUT_OF_SCOPE 去平台 operation 名），先把现行渲染文本逐字
+// 钉住——W2-B 时只翻转本 describe 的断言并在注释注明翻转点与理由，红了能归因到
+// 对应条目（F4/F5）。逐字串以首跑实际输出粘贴（node --import tsx 渲染 messageFor），
+// 不手抄。两条 correctForm 均不含网关名，与 W1 网关参数化正交；既有「错误类码渲染
+// 三要素」golden（含网关名遗留缺省，error-codes.test.ts:41）归 W1 负责，本 describe
+// 不涉及。
+describe('W2 表征 golden：两条目现行渲染文本（W2-B 退役前的钉子）', () => {
+  it('PLAN_CALL_ARGS_NOT_ARRAY 现行渲染逐字（W2-B 翻转点：correctForm 将去业务命令示例，只留结构教学）', () => {
+    expect(messageFor('PLAN_CALL_ARGS_NOT_ARRAY', 0)).toBe(
+      'PLAN_CALL_ARGS_NOT_ARRAY: 期望 args 是数组；实际 0；正确形态 args 为字符串数组，即命令行原样参数（如 ["--query","某名称","--period","202609"]）',
+    );
+  });
+
+  it('ENTITY_OUT_OF_SCOPE 现行渲染逐字（W2-B 翻转点：correctForm 将去平台 operation 名，正路径保留）', () => {
+    expect(messageFor('ENTITY_OUT_OF_SCOPE', '某个越权参数')).toBe(
+      'ENTITY_OUT_OF_SCOPE: 期望 计划的每个参数都能在当前请求、检索证据、平台响应或本会话已确立实体里逐字找到；实际 某个越权参数；正确形态 严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索（如 finance.search-account-sets）使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效',
+    );
+  });
+});
