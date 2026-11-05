@@ -1620,7 +1620,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 登录态判定以**码**为准（isPlatformAuthError：信封/挂码/码前缀，见
         // platform-contract.ts 的 auth 码集合）。下面那条中文正则是**过渡**：平台
         // auth.js 的自动重登录失败消息（"平台登录已过期，自动登录失败——…"）是既有
-        // 唯一不带码前缀的形态，17dz 侧尚未给它挂码；在平台收口之前先留正则兜底，
+        // 唯一不带码前缀的形态，平台侧尚未给它挂码；在平台收口之前先留正则兜底，
         // 否则那一条会退化成 executor_error——而"请稍后再试"对 auth 是错指令。
         // 平台侧该消息一带码（走 messageFor），这行即可删除。
         // 取消判据读 runSignal（本次执行实际持有的信号；形参 signal 在 prepared 路径下

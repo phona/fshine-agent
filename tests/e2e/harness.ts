@@ -117,7 +117,7 @@ export function neutralizePlanGateNonCallLines(): () => void {
 }
 
 beforeAll(() => {
-  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向 17dz-platform）`);
+  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向执行层平台仓检出）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {

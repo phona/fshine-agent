@@ -263,7 +263,7 @@ export function splitCommandTokens(command: string): string[] {
  * 为什么需要豁免：本门的 `planActive` 前置要求"先有计划才准调网关"，而平台自己定义里
  * 能力面与计划形状都是元数据命令（`operation list` / `plan --schema`）——它们在平台 CLI
  * 里 return 在 plan 评估、限流、mode×access 矩阵之前，不触平台会话、不耗令牌、不执行
- * 任何东西（与 `bin/17dz memory` 同族）。豁免它们解的是一个死锁：**写计划要先知道
+ * 任何东西（与 `bin/<gateway> memory` 同族）。豁免它们解的是一个死锁：**写计划要先知道
  * operation 名，知道 operation 名要先有计划。**
  *
  * 不豁免的后果已实测：worker 的能力视野只剩 serve skill 里手写的"可用脚本"表
@@ -303,7 +303,7 @@ const SERVE_NON_EXECUTOR_GROUPS: ReadonlySet<string> = new Set(['memory']);
  * local 执行的根：**本轮 scratchDir**（宿主自己的概念），以及辅助技能面暴露的技能脚本。
  *
  * 为什么从平台目录名换成宿主的 scratchDir：原先凭平台目录名 `tmp/` 放行，于是
- * `bin/17dz local tmp/别人的/x.py` 能跑——跨会话执行面（别人的工作区里躺着别人
+ * `bin/<gateway> local tmp/别人的/x.py` 能跑——跨会话执行面（别人的工作区里躺着别人
  * 的脚本，跑它读到的是别人的产物）。而 `scratchDir`（`tmp/task_<taskId>`）是宿主按
  * 任务派生的，凭它判既堵洞又不新增平台知识：宿主本来就知道自己给 worker 开了哪个
  * 工作区（write 门用的就是同一个值）。
@@ -331,7 +331,7 @@ function localRoots(scratchDir?: string): readonly string[] {
 }
 
 /**
- * local 执行：`bin/17dz local <本地脚本>` —— 跑 worker 自己写的解析代码，或平台辅助技能面
+ * local 执行：`bin/<gateway> local <本地脚本>` —— 跑 worker 自己写的解析代码，或平台辅助技能面
  * 暴露的技能脚本。
  *
  * 为什么也要免计划前置：它是纯本地计算（不触平台会话、不耗令牌、不写平台数据），
@@ -347,7 +347,7 @@ function localRoots(scratchDir?: string): readonly string[] {
  * "只有本轮那一个目录行"，堵的就是跨会话执行面）。
  */
 /**
- * local 模式的调用目标（不论是否在放行根内）：`bin/17dz local <路径>` → 该路径;
+ * local 模式的调用目标（不论是否在放行根内）：`bin/<gateway> local <路径>` → 该路径;
  * 不是 local 模式 / 没有目标 → null。
  *
  * 与 isLocalScratchRun 的分工：后者答"放不放行"，前者只答"这是不是一次 local 调用"。
@@ -628,8 +628,8 @@ function planSemanticsOf(command: string, semantics: OperationSemantics | undefi
  * 硬闸（调用数/秒数/通知与重划上限）、范围摘要给人签字、写操作确认门——而对平台自己
  * 声明 `plan:false` 的 operation（纯本地计算：不触平台会话、不耗令牌、不写平台数据）
  * **三样全部不成立**：几秒的本地处理没有预算可言、不碰任何平台实体没有范围可摘要、
- * 不写平台数据无须人认账。宿主此前给 `bin/17dz local <脚本>` 免了计划，却给同样是纯
- * 本地计算的 `bin/17dz query <平台脚本>` 不免——判据看的是调用形态，不是调用性质。
+ * 不写平台数据无须人认账。宿主此前给 `bin/<gateway> local <脚本>` 免了计划，却给同样是纯
+ * 本地计算的 `bin/<gateway> query <平台脚本>` 不免——判据看的是调用形态，不是调用性质。
  *
  * 更关键的是平台侧本来就不要求：对 `plan:false` 的 operation，平台 `planEligible` 为假、
  * `reserveInvocation` 根本不调。这道要求是宿主单方面加的，于是出现自相矛盾——宿主在

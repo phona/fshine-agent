@@ -12,13 +12,13 @@
  * 空），不含敏感信息。
  *
  * 判据复用不重抄：执行器判定用 `@fshine/agent` 的 `isPlatformMock`（与业务代码同一把尺）；
- * `EXECUTION_ALLOW_REAL` 的权威在 17dz-platform `src/lib/real-execution.js`（fail-closed 门，
+ * `EXECUTION_ALLOW_REAL` 的权威在执行层平台仓 `src/lib/real-execution.js`（fail-closed 门，
  * 2026-10-12 加），这里只为日志读它。
  */
 import { isPlatformMock, MOCK_EXECUTOR_ENV, REAL_COMMIT_ENV } from '@fshine/agent';
 
 /**
- * 真平台运维授权（17dz-platform `src/lib/real-execution.js` 的 fail-closed 门）：
+ * 真平台运维授权（平台仓 `src/lib/real-execution.js` 的 fail-closed 门）：
  * 非 mock 且触平台的执行必须显式 `EXECUTION_ALLOW_REAL=1`，否则 REAL_EXECUTION_NOT_ALLOWED。
  * 只认字面量 '1'（'true'/'yes'/'0' 都不算——模糊真值是 fail-open 的入口）。
  */

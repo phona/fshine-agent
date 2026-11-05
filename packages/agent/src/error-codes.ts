@@ -1,5 +1,5 @@
 /**
- * fshine 侧错误码表（镜像 17dz `src/lib/error-codes.js` 的结构与纪律：错误即数据）。
+ * fshine 侧错误码表（镜像执行层平台错误码表的结构与纪律：错误即数据；出处见 debt-ledger）。
  *
  * 为什么收口：fshine 的拒绝/兜底消息曾是各出事点现场手拼——同一个"计划形状不符"
  * 在 plan-runtime 六个 throw 站点六种写法；"零执行"兜底在 runtime 三处各写一遍；
@@ -11,7 +11,7 @@
  * 两类条目（一张表，两种形态）：
  *   · 错误类 `{expected, actual?, correctForm}`：参数问题 / 形状问题 / 配置故障。
  *     渲染 `<CODE>: 期望 <expected>；实际 <actual>；正确形态 <correctForm>`——
- *     必须说清差在哪，绝不让参数问题长得像权限问题（17dz 同款事故形态）。
+ *     必须说清差在哪，绝不让参数问题长得像权限问题（平台同款事故形态）。
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
  *     语义照旧，只是不再有第二份手抄本。个别条目带占位符（选择类澄清的
@@ -29,7 +29,7 @@
  * （fail-loud），多给/少给参数同样 fail-loud（静默忽略会把"话术被悄悄加了动态部分"
  * 藏起来，与消息模板传 actual 同纪律）。
  *
- * 纪律（与 17dz 表相同）：
+ * 纪律（与平台表相同）：
  *   - 错误码本身不变（测试与调用方认码）；本表只收口消息构造，不动任何裁决逻辑。
  *   - 未知码 fail-loud（UNKNOWN_ERROR_CODE）：绝不静默 fallback 到通用消息——那会把
  *     "忘了登记新码"伪装成"已知的普通失败"，正是本表要消灭的事故形态。误用
@@ -84,7 +84,7 @@ type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
 /**
  * 计划草案形状的**唯一教学源**（L2 / D-011：宿主侧 6 处散文副本收敛为这 1 处）。
  *
- * 内容与平台 `17dz-platform/src/execution/plan-schema.json` 的声明一致：`calls` 必填
+ * 内容与平台仓 `plan-schema.json` 的声明一致：`calls` 必填
  * （PlanCall 数组），`goal` / `requestId` 是**声明过的**可选元数据
  * （`additionalProperties:false`——未声明顶层字段平台以 PLAN_UNKNOWN_FIELD 响亮拒绝，
  * 绝不静默忽略后跑）。goal 收编为可选元数据而非否决：宿主历史上一直在教它，平台选择
@@ -625,7 +625,7 @@ function fillParams(code: string, entry: MessageCodeEntry & { text: string }, pa
   return entry.text.replace(PLACEHOLDER_RE, (_match, name: string) => String(params[name]));
 }
 
-/** 统一入口（镜像 17dz 的 messageFor）：错误类走三要素，模板类走文本。 */
+/** 统一入口（镜像平台的 messageFor）：错误类走三要素，模板类走文本。 */
 export function messageFor(code: string, actual?: unknown, correctForm?: string, gateway?: string): string {
   return render(code, actual, correctForm, undefined, gateway);
 }

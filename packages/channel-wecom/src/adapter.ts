@@ -7,7 +7,7 @@
  *
  * 附件链路（2026-10-07 补）：此前只监听 `message.text`，`adapter.ts` 里
  * `body['msgtype'] !== 'text'` 直接 return——用户发的 Excel 连下载都没有，而下游执行层
- * （17dz 薪酬域）要求先吸收多份 Excel 才能产出契约，"帮我做工资表"因此永远无输入。
+ * （平台薪酬域）要求先吸收多份 Excel 才能产出契约，"帮我做工资表"因此永远无输入。
  * 现在监听 `message.file` / `message.mixed`，经 SDK 的 `downloadFile(url, aeskey)` 解密
  * 取 Buffer 后落到受信目录，只把**路径**交给上层。
  */
@@ -559,7 +559,7 @@ export class WecomBotChannel implements ChannelAdapter {
     const notice: NoticeFn = async (text) => {
       try {
         // 计划通知是三个出口里最可能超长的一个：平台 noticeText 由账套/期间/客户/科目
-        // 多个集合 join 而成、无条数上限（17dz plan.js 的 scope 摘要）。与最终回复同一
+        // 多个集合 join 而成、无条数上限（平台 plan.js 的 scope 摘要）。与最终回复同一
         // 纪律——超限时**看得见地**截断（带标记）+ 记守夜事件（D-021：cef97c9 只改了
         // final 一条路，notice 还在用无声硬切，用户拿到半句话而不自知）。
         const bounded = truncateReply(text);

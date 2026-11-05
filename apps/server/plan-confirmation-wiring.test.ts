@@ -37,7 +37,7 @@ function fakePlatformRoot(): { root: string; calls: () => string[]; setStatus: (
     'echo "unexpected: $@" >&2; exit 2',
   ].join('\n');
   // C7b：fixture 网关名改中性（bin/generic）——spawn 名由显式注入的 profile.gateway
-  // 决定，宿主不再回退实例名缺省（原 bin/17dz 形态退役）。
+  // 决定，宿主不再回退实例名缺省（原实例名 fixture 形态退役）。
   writeFileSync(path.join(root, 'bin', 'generic'), script);
   chmodSync(path.join(root, 'bin', 'generic'), 0o755);
   return {

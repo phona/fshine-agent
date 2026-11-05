@@ -186,7 +186,7 @@ export async function persistAssistantAndContext(
 }
 
 /**
- * 委派工具结果的事件提取（C3 改名：原 extract17dzToolResultEvents 的实例名出通用层）。
+ * 委派工具结果的事件提取（C3 改名：原名带执行层实例名的函数已退役，实例名出通用层）。
  *
  * taskToolName 由调用方注入（= runner 的 tool.name，随 profile.toolName 声明走）：
  * 提取器不认死任何工具名——通用层认"runner 自己发布的名字"，实例名不进本文件。

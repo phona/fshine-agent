@@ -22,7 +22,7 @@ export interface ContextProfileConfig {
   /** Paths relative to root containing Pi-compatible SKILL.md files. */
   skillRoots: string[];
   /**
-   * Gateway invocation relative to root (e.g. `bin/17dz`), declared by the
+   * Gateway invocation relative to root (e.g. `bin/<name>`), declared by the
    * operator per profile, never supplied by the model. This is the only
    * place a gateway name is configured: spawn paths must be derived from
    * it (see `gatewayExecPathForProfile`), not from a hardcoded constant.

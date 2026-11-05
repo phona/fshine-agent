@@ -1,4 +1,4 @@
-/** Main Pi Agent runtime with one narrow delegation tool for the 17dz subagent. */
+/** Main Pi Agent runtime with one narrow delegation tool for the execution-layer subagent. */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';

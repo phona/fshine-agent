@@ -4,7 +4,7 @@
 # a single checkout of this repo is enough. It runs ONLY the deterministic
 # gates (scripts/ci.sh): typecheck + unit tests + generic-mock eval.
 # It deliberately does NOT run:
-# - e2e (tests/e2e needs a sibling 17dz-platform checkout + a gitignored
+# - e2e (tests/e2e needs a sibling execution-layer checkout + a gitignored
 #   config/agent.yaml deployment config, see tests/e2e/harness.ts);
 # - real-model eval (npm run eval needs LLM_API_* secrets and has judge
 #   variance; run it manually before merge, not on every push).

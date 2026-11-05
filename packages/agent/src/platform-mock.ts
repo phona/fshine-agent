@@ -1,5 +1,5 @@
 /**
- * 平台 mock 控制面 + 宿主持有的落账总闸（对接 17dz-platform 的 executor 开关，commit 376ea0d）。
+ * 平台 mock 控制面 + 宿主持有的落账总闸（对接执行层平台的 executor 开关；对接出处见 debt-ledger）。
  *
  * EXECUTION_EXECUTOR=mock：平台网关把执行器替换为 mock 应答器（不开浏览器、不触网），
  * gate 矩阵/commit 令牌/审计照真生效。本模块只集中读开关与兜底状态路径，

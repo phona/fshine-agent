@@ -6,7 +6,7 @@
  * 声明（`contextProfiles.<id>.executorLabel` → createTaxAgentRuntime 的 executorLabel
  * 参数 → buildSystemPrompt(executorLabel)）。未声明 profile 的部署（测试、CLI 脚本）
  * 拿到中性缺省，文本与注入实例称谓时仅差称谓一个 token（system-prompt.test.ts 的
- * D-122 golden 钉死"注入 '17dz 子 Agent' 时与参数化前逐字节相同"；改文案需真实模型
+ * D-122 golden 钉死"注入实例称谓（如财税部署声明的称谓）时与参数化前逐字节相同"；改文案需真实模型
  * 探针，F6）。
  */
 export const BUSINESS_SKILL_HEADING = '【业务编排知识：程序性知识，只用于长任务拆解与信息补齐；"怎么做才对"归执行层，不由这里规定】';
@@ -24,7 +24,7 @@ export const DATE_SUFFIX = `今天是 ${new Date().toISOString().slice(0, 10)}�
  * `createTaxAgentRuntime({ executorLabel })` → 本文件的 buildSystemPrompt；
  * 先例：planCommandForm 经 ContextTaskRunnerOptions 注入）。缺省取中性值
  * 而不取任何实例名——实例称谓由该实例自己的 profile 声明（如财税部署声明
- * `17dz 子 Agent`），宿主不把某个执行层的名字当作通用协议缺省。
+ * 执行层实例称谓），宿主不把某个执行层的名字当作通用协议缺省。
  */
 export const DEFAULT_EXECUTOR_LABEL = '执行层子 Agent';
 

@@ -103,7 +103,7 @@ export interface ServerAssemblyOverrides {
   dbPath?: string;
   /** Main Agent driver. Defaults to the configured model driver. */
   driver?: TurnDriver;
-  /** 17dz subagent driver. Defaults to the pi coding agent driver. */
+  /** Execution-layer subagent driver. Defaults to the pi coding agent driver. */
   workerDriver?: TurnDriver;
   /** Isolated tool-free driver for Context State extraction. Defaults to `driver`. */
   contextModelDriver?: TurnDriver;
@@ -230,7 +230,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
     : { event: 'business_skill_skipped', path: businessSkill.path }));
 
-  // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），17dz worker 仍走
+  // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），执行层 worker 仍走
   // LLM_MODEL——worker 驱动的输入原样不动（pi-coding-driver 只认 env.LLM_MODEL）。
   // 装配层持有配置、驱动只收参数：Main 专用变量在这里解析成显式 modelId/thinkingLevel，
   // pi-driver 不再自行读取。两个变量都缺省时 createPiTurnDriver 收到的 options 与旧装配

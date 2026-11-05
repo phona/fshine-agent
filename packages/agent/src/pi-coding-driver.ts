@@ -305,7 +305,7 @@ export function planNotReadOnlyCode(
  * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列与
  * confirm 列合起来的真判据**。
  *
- * 平台的真判据是 `planAccessAllows = plan && !confirm`（17dz `src/execution/plan.js`）：两列
+ * 平台的真判据是 `planAccessAllows = plan && !confirm`（平台仓 `src/execution/plan.js`）：两列
  * 任一为假就进不了计划。只读 `plan` 一列会**漏掉写类**——而写类恰恰是最常被 worker 排进计划
  * 的那一种。2026-10-14 实测：`voucher.proposal`（`write` ⇒ `plan:true, confirm:true`）被排进
  * 计划，平台以 `PLAN_OPERATION_NOT_READ_ONLY` 拒，宿主按 `plan` 列点名得到空名单，退回零名单
@@ -931,7 +931,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         return needsClue() ?? needsFromPlatformResponses(session.agent.state.messages) ?? undefined;
       };
       // TaskStore remains the source of truth.  Restore its transcript into
-      // the SDK Agent rather than persisting a second session file in 17dz.
+      // the SDK Agent rather than persisting a second session file platform-side.
       session.agent.state.messages = input.messages;
       // 本回合新增消息的起点（之后只增不减）：选择类状态只在本回合的平台交互里找——
       // 上一回合遗留的信封不能越权替这一回合提问（早先歧义、用户补全后重查成功的回合
@@ -1412,7 +1412,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // （transform.py 的 `tmp/整理好的…（自动）.xlsx`），所以这不是新开的先例。
     // 2026-10-08 加 'edit'：实测 worker 写了一个 11KB 的解析脚本，崩在 KeyError（上游
     // 缺某个键），它只想改一行——但没有 edit 工具（原话 "No edit tool"），而 bash 门只准
-    // bin/17dz 网关调用，用不了 sed。于是只能整份重写那 11KB：33 秒模型生成。
+    // 网关 CLI 调用（bin/<gateway>），用不了 sed。于是只能整份重写那 11KB：33 秒模型生成。
     // 而"写 11KB 脚本一次就对"不现实，这类"改一行"的迭代必然反复发生，每次都付 33 秒、
     // 每次还可能引入新错。edit 是精确文本替换，一次替换即改完那一处。
     // 边界与 write 完全同一组（serve-gate 的 decideFileWrite 一份判据）：只准

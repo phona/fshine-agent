@@ -261,7 +261,7 @@ export interface TaskPlanStepFact {
   planId: string;              // 一次拆解的标识（宿主持有；跨回合续跑同一拆解时不变）
   stepIndex: number;           // 1-based
   totalSteps: number;          // N；来自 request 的「第N/M步」标记，未知为 0
-  taskId?: string;             // 该步委派的 17dz 子任务（宿主回填）
+  taskId?: string;             // 该步委派的执行层子任务（宿主回填）
   request: string;             // 该步加工后的请求原文
   status: 'started' | 'done' | 'failed' | 'needs';
   summary?: string;            // 结果摘要（宿主截断，≤500 字）
@@ -307,7 +307,7 @@ export interface TaskPlanRepo {
   openPlans(principalId: string, sessionId: string): Promise<TaskPlanSummary[]>;
   /** 最近一个未完成计划的 planId；openPlans()[0] 的便捷形式，没有返回 null。 */
   latestOpenPlan(principalId: string, sessionId: string): Promise<string | null>;
-  /** 某 17dz 子任务所属的计划（taskId 记录在步骤终态事实上）；没有返回 null。 */
+  /** 某执行层子任务所属的计划（taskId 记录在步骤终态事实上）；没有返回 null。 */
   planIdForTask(principalId: string, sessionId: string, taskId: string): Promise<string | null>;
 }
 

@@ -12,8 +12,8 @@ describe('profile 声明的网关名', () => {
     expect(() => gatewayExecPathForProfile('/opt/platform', { gateway: '/abs/bin' })).toThrowError(/gateway/);
   });
   it('validateGatewayInvocation 拒绝 shell 元字符', () => {
-    expect(validateGatewayInvocation('bin/17dz')).toBe(true);
-    expect(validateGatewayInvocation('bin/17dz; rm')).toBe(false);
+    expect(validateGatewayInvocation('bin/generic')).toBe(true);
+    expect(validateGatewayInvocation('bin/generic; rm')).toBe(false);
     expect(validateGatewayInvocation('')).toBe(false);
   });
 });
