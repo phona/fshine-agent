@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { loadConfig, principalScopeRecords } from './src/index';
+import { loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
 
 const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
 
@@ -186,6 +186,52 @@ contextProfiles:
     const yaml = VALID_YAML.replace('wecom:user_a', 'wecom:REPLACE_WITH_USERID');
     expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV }))
       .toThrowError(/REPLACE_WITH/);
+  });
+
+  // ── firstEnabledPrincipalId：验收/探针脚本的授权用户派生（UserID 不落代码） ──
+  //
+  // 6 个 scripts/ 验收与探针脚本曾把真实企微 UserID 写死在常量里。principal 的既定家在
+  // config/agent.yaml（gitignore），脚本改为消费本助手；scripts/ 不在 typecheck 与 unit
+  // 覆盖内，所以派生判据（含 fail-closed 的 null 分支）必须在这里先有表征。
+  it('firstEnabledPrincipalId:取首个 enabled principal 的裸 userid（剥渠道前缀）', () => {
+    const config = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: PUBLIC_URL_ENV });
+    expect(firstEnabledPrincipalId(config)).toBe('user_a');
+  });
+
+  it('firstEnabledPrincipalId:enabled=false 的 principal 被跳过', () => {
+    const yaml = `principals:\n  "wecom:user_off":\n    enabled: false\n  "wecom:user_on":\n    enabled: true\n`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    expect(firstEnabledPrincipalId(config)).toBe('user_on');
+  });
+
+  it('firstEnabledPrincipalId: principals 全 disabled / 空表 → null（调用方 fail-closed）', () => {
+    const allOff = loadConfig({
+      yamlPath: writeFixture(`principals:\n  "wecom:user_a":\n    enabled: false\n`),
+      env: PUBLIC_URL_ENV,
+    });
+    expect(firstEnabledPrincipalId(allOff)).toBeNull();
+    const empty = loadConfig({ yamlPath: writeFixture(`principals: {}\n`), env: PUBLIC_URL_ENV });
+    expect(firstEnabledPrincipalId(empty)).toBeNull();
+  });
+
+  it('firstEnabledPrincipalId:无冒号的旧键整体当 userid（与 principalScopeRecords 同取舍）', () => {
+    const config = loadConfig({
+      yamlPath: writeFixture(`principals:\n  "user_d":\n    enabled: true\n`),
+      env: PUBLIC_URL_ENV,
+    });
+    expect(firstEnabledPrincipalId(config)).toBe('user_d');
+  });
+
+  it('firstEnabledPrincipalId:第二个客户端前缀同样只剥第一段（不写死 wecom）', () => {
+    const yaml = VALID_YAML + `  "web:user_c":\n    accountSetIds: []\n    enabled: true\n`;
+    const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
+    // VALID_YAML 里 user_a 已 enabled——首个即它；web: 前缀的判据由下一行单独钉。
+    expect(firstEnabledPrincipalId(config)).toBe('user_a');
+    const webOnly = loadConfig({
+      yamlPath: writeFixture(`principals:\n  "web:user_c":\n    enabled: true\n`),
+      env: PUBLIC_URL_ENV,
+    });
+    expect(firstEnabledPrincipalId(webOnly)).toBe('user_c');
   });
 
   // ── D-055：配置模板不许指向会"静默失效"的技能面 ──────────────────────────

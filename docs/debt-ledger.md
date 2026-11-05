@@ -1045,7 +1045,7 @@
 | **current token 泄漏** | ✅ 已关。17dz `64e8bf3`：信封三个用户可见期间字段统一走 `periodLabel()`，`current` 映射为“平台当前期间”；completed 信封的 `data.period` 一并收口（宿主零消费方）。实证：无数据信封 current 原文 0 次，`availablePeriods:["202606","平台当前期间"]`；机读判据（status/code/correctForm）一字未动 |
 | **台账截断偏紧** | ✅ 已关。fshine `9930e79`：`EXECUTION_FACT_CONTENT_LIMIT` 300→1000（一个无数据信封 ≈760 + 叙述体 + 余量）+ 留头也留结论尾（头 880 + 尾句 120）。有界性未破：最坏 5×(60+1002)≈5.3KB 常数。诊断比预想重：旧 300 窗连一个信封都装不下，10.1/10.2 的 `toContain('61000')` 当时靠信封 JSON 凑巧过 |
 | **e2e 夹具叙述体漂移** | ✅ 已关。8 文件 20 处：“…应收余额为 0 元”→“…平台未返回该期间数据”（判定依据=种子键集）。**刻意不改**：合法零余额（1121/2201 current）、真值（61000/86000）、query-saved 的“0 条”（真空列表）、非零负面样本、runtime.test.ts:404 逐字钉的串（留文件 owner） |
-| **多账套真实批量** | ✅ 已跑（L3 升“高”信度）。2 步计划：幻亨纸业真数 1,234,567.89 + 创驰贸易诚实失败（“科目 1122 不存在，**这不代表余额为零**”+补救路径），汇总两者都覆盖、失败步不阻塞、4 次全 read 调用零写零拒 |
+| **多账套真实批量** | ✅ 已跑（L3 升“高”信度）。2 步计划：幻亨纸业真数 1,234,567.89 + 幻驰贸易诚实失败（“科目 1122 不存在，**这不代表余额为零**”+补救路径），汇总两者都覆盖、失败步不阻塞、4 次全 read 调用零写零拒 |
 | **C2 三十轮用例** | ✅ 已建未跑（`78192fb`）。30 轮/4 账套/4 次话题切换/2 次澄清-选择/5+1 次召回（带框定断言）/跨轮总结/1 次 not_found；静态自检+运行时两层形态断言 |
 | **观察1：首步无计划通知** | 确认无异常。2 步计划首步累计 2 次调用= AUTO_CALLS 阈值内直接执行，第 2 步累计 4 次超阈才通知——配置行为非缺陷 |
 | **观察2（新）：tsconfig 不含 scripts/** | **待办（小）** | 项目 `tsconfig.json` 的 include 只有 `packages/**`+`apps/**`，探针文件（800+ 行）**不进项目类型检查**——Lane F 靠临时 config 单独检才抓到 4 个真实错误（常量先于声明使用）。修法：tsconfig include 加 scripts/ 或建 scripts/tsconfig（需评估既有 21 个存量 error 的处置，不是加一行就好） |
@@ -1362,7 +1362,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 | **D-144 续跑回合终稿出口泄漏 route_current_turn 工具协议原文** | **已修（2026-11-01 出口收敛波，change-safety §23）** | 2026-10-31 实测：`confirmed_plan_resumed` 回合（多步扇出第 3/10 步申报时）终稿把 `<tool_call><function=route_current_turn>…` 协议原文整段上屏给用户——出口第三支（2accb20，D-136/D-138）未覆盖"续跑回合的下一申报成为终稿"路径。同轮另见 `route_declaration_invalid`（申报 schema 不合法被拒）先兆。**修法落地**：protocol-material 新增整段申报窄判据（XML 标签外一无所有 / JSON 首键 kind 且解析成申报键）；reply-exit 整段替换支（先于删除支，fallback=worker 整理文本）；resume 与确认直达出口全部接终稿一把尺，转录只留用户收到的那一版，`route_declaration_reply_replaced` 留痕 |
 | **D-145 b424b26 预算容量模型的 fshine e2e 期望未同步（4 用例）** | **已修（2026-11-01，期望滞后部分——4/4 全部为 fixture 串场，无真回归）** | 2026-11-01 真·main 基线实测（§23 F1）：全量 1783 通过 / 4 失败——`turn-loop-plan-gate-boundaries` A2×2、`turn-loop-confirmation` 2.7、`turn-loop-pingpong` 8.1。**归因实测修正**（旧平台 worktree 对照：pre-b424b26 平台上 2.7/A2·NOTIFY 上沿回绿、A2·AUTO 上沿/8.1 仍红）：只有 2 例是 b424b26 权重线（A2·NOTIFY 上沿 10×6=60 ≥ budgetWeight 60 升 confirm；2.7 见下），另 2 例是**估时秒线**——query-receivables est_seconds 15→60 出自查账换芯 cda6ba9（2026-10-28，PR !2），先于 b424b26：A2·AUTO 上沿 2×60=120 > autoSeconds 60 出通知帧；8.1 续跑计划累计 60+60=120 > 60 出 +2 通知帧。**修法落地**：不重写断言——harness 新增 `neutralizePlanGateNonCallLines()`（权重线 4 键 + 秒线 4 阈值全设 1e6，onTestFinished 恢复防泄漏），4 用例各注入一行，档位判定回到纯次数线，断言原语义继续成立；mock 查询每条 weight 6/est 60s 是串场源。**2.7 判定=期望滞后非真回归**：turn-1 worker run 内同任务先 21 调确认档再 1 调轻量计划，权重线下累计 taskWeight 126+6=132 ≥ budgetWeight 60 把轻量计划也推到 confirm 档（旧语义 1 调 ≤ AUTO=2 直执行并取代旧计划），待确认记录变成在世轻量计划，"确认继续"正常激活它（confirmed_plan_resumed，收到整理台词）——取代/确认语义未被改坏；登记时怀疑的「stop 跳过 supersede 标记」路径被证伪：该计划 decision=confirm 非 stop（132 < hardWeight 180），supersede 循环有执行（旧计划已标 superseded），且该守卫 b424b26 前后逐字相同。**8.1 判定=期望滞后非真回归**：路由/转录断言全过，唯一失败是通知帧数（秒线所致）。17dz 零改动；清偿后全量实测 132 文件 / 1795 通过 0 失败（基线 1783+4 之后 main 又入了 8 个新测试），typecheck 干净 |
 
-**本波最终账**：D-143 已修验收通过；D-144 立项。复跑另两项观察（未立项）：①确认续跑后 worker 偶发 executor_error（task_144c9690，重发即通，原因未定位——频次高再立项）；②逐户反查路线受 maxVariants=3/调用 限制（Q2 9/63 户后登记额度用尽，差额 96,805 如实披露）——逐户扇出天然超变体额度，正解仍是导出文件本地解析路线。
+**本波最终账**：D-143 已修验收通过；D-144 立项。复跑另两项观察（未立项）：①确认续跑后 worker 偶发 executor_error（task_144c9690，重发即通，原因未定位——频次高再立项）；②逐户反查路线受 maxVariants=3/调用 限制（Q2 9/63 户后登记额度用尽，差额 87,654 如实披露）——逐户扇出天然超变体额度，正解仍是导出文件本地解析路线。
 
 ## 补充记录（2026-11-04，纯编排波流程债对账：F4）
 
@@ -1456,3 +1456,47 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - gatedWorker 光标不重跑最后一段（`tests/e2e/harness-cursor.test.ts`，`c1b5967`）：测试存在，本补档未做变异（e2e harness 接缝，单进程变异成本与 flaky 风险另计）。补变异或登记为"测试存在、变异未做"，二选一留给后续主题。
 - profile.gateway 的 spawn 路径 fail-closed（`gateway-profile.test.ts`「未声明 gateway 不回退旧值」）：测试存在，本补档未做变异，同上。
 - 以上两项不计入 change-safety §24 的 G1–G14 已留档表，不得合并宣称"新守卫全部已变异"。
+
+---
+
+## 公开迁移 · 脱敏波（波次 1）新账
+
+### D-153 · 脱敏波改写 eval 语料：corpusVersion 变，脱敏前的 eval 分数全部不可比
+
+- **位置**：`scripts/eval/corpus.jsonl`（脱敏波 `bfa3a31` 把 incidents/expect 里的真实客户名与财务读数换成虚构值，id/kind/case/inBaseline 等判别结构一字未动）；`scripts/eval/score.ts:138` `corpusVersion()`（= sha256(语料内容) 前 8 位）、`:16` 三元组注释（corpusVersion / judgePromptVersion / judgeModel 任一变了分数即不可比，须重定基线）、报告落点 `score.ts:349`。
+- **根因**：脱敏是内容级替换——语料字节变即哈希变。三元组里的 corpusVersion 已随本波改变，脱敏前跑分与脱敏后跑分不同基；重定基线前引用旧分数即造假。
+- **影响面核实（不扩大）**：CI 三门不受影响——`scripts/ci.sh` 的 generic-mock 门用自持 fixtures（`scripts/eval/fixtures/dummy-platform`）与自带 baseline（`scripts/eval/generic-mock-baseline.json`），全文不读 corpus.jsonl（2026-11-05 实测 `grep -n corpus scripts/eval/generic-mock.ts` 仅命中注释行）；`scripts/eval/baseline.json` 实测无 corpusVersion 字段、无客户名与金额。
+- **闭环判据**：重跑 `npm run eval:baseline`，且新报告携带的 corpusVersion 与脱敏后语料的 sha256 前 8 位一致；闭环前不得引用脱敏前的 eval 分数作任何结论。
+- **律法归属**：L7（可信度可量化：eval 基线跑漂移，不靠审计轮次）。
+- **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环，否则公开渠道无可比分数）。
+- **状态**：待办。
+
+### D-154 · e2e/探针/验收/smoke:commit:mock 耦合兄弟仓 mock seed 目录——脱敏改名后 Tier B 转红
+
+- **位置**：`tests/e2e/harness.ts:38-39`（`PLATFORM_ROOT` 缺省指向 `../../../17dz-platform`，`CLI = <root>/bin/17dz`，真 spawn 兄弟仓 CLI）；兄弟仓 `src/execution/mocks/respond.js:50`（把 `fixtures/seed.json` 拷为 mock 状态文件）；该 seed 的账套键现行仍是脱敏前的真实名（fshine 侧夹具已按映射表改为 幻辰财税 / 幻辰实业有限公司 两支，seed 未动；真实→虚构对照只住映射表 `.sensitive-strings.replace.txt`，不在本文件重述），另两支 新兴五金 / 新兴建材 不在映射表内、两仓天然一致。
+- **根因**：脱敏波只改了 fshine 一侧夹具名，兄弟仓 seed 未同批改名——两套名字对不上，经 mock 目录的 Tier B 链（tests/e2e、probe-real-agent、acceptance、smoke-real-platform、mock-commit-smoke）预期与实测失配。实例：`tests/e2e/turn-loop-disambiguation.test.ts:107` 期望「幻辰财税 202609 平台未返回该期间数据」，而 mock 应答仍按 seed 里的脱敏前键名组织返回。失配面只在被改名的两支。
+- **处置边界（不冒充绿）**：本波不把 Tier B 写成绿，也不在本波重定任何基线；CI 三门（ci.sh：typecheck + unit + generic-mock）不 spawn 兄弟仓、自洽不受影响（实测）。seed 同步改名是 mock-only 机械替换，合 D-076 纪律。
+- **闭环判据**：兄弟仓 seed 与 respond 夹具按同一张映射表同步机械改名后，`FSHINE_PLATFORM_ROOT=<17dz 检出> npx vitest run tests/e2e` 全绿；同步前 Tier B 红是已知状态，任何报告不得写成绿。
+- **律法归属**：L2（跨仓面：mock seed 住兄弟仓、fshine Tier B 链消费它，两仓夹具改名未同批——与 D-015「17dz mock 夹具手抄、无机械锁」同族）。
+- **归属波次 / 限期**：W5 前（结构化调用协议波次要以 Tier B 全绿作证据）。
+- **状态**：待办。
+
+### D-155 · config/agent.example.yaml 的 5 处 17dz 名词无任何守卫覆盖（含 contextProfiles 结构键）
+
+- **位置**：`config/agent.example.yaml`（部署模板，5 处 17dz：注释里的授权账套 id 说明、`17dz:` profile 段、`root: /path/to/17dz-platform`、`gateway: bin/17dz`、自动登录凭据说明行）；`config/` 目录整体在 `packages/agent/platform-leak-lint.test.ts`（SCAN_DIRS = packages/apps/scripts）与 `packages/agent/docs-reality.test.ts`（只扫 `packages/*/src` + `apps/server`）两把尺的扫描范围之外。
+- **根因**：两把尺的扫描范围都按"编排层源码"划定，`config/` 是部署模板、不在其内；于是模板里的执行层实例名词既没有词预算约束，也没有对账判据。exposure-lint 扫 `git ls-files` 全量，该模板的暴露三类（UserID 占位符 / 内部路径 / 客户名）实际已被覆盖——**缺口仅在 17dz 名词这一类**。
+- **影响面核实（不扩大）**：模板是示例文件、不进运行态（真实 `config/agent.yaml` gitignored）；本波不为它单开守卫，收进 gate① 对账一次清。
+- **闭环判据**：gate①（产品面 `git grep -i 17dz` = 0，例外 = debt-ledger/change-safety/AGENTS.md）对账时该文件零 17dz，且 `contextProfiles` 的结构键随 W1 完成参数化（profile id 是结构键而非注释，不能靠文本替换糊过去）。
+- **律法归属**：L1（词汇边界：业务/实例词汇只住执行层 + 夹具 + 文档，模板不在词预算扫描范围内）。
+- **归属波次 / 限期**：W1 / 波次 4；限期 = 波次 4（门面按终局写时一并处理）。
+- **状态**：待办。
+
+### D-156 · 两支真实读数（61,000 / 86,000）未替换也未收词——守卫 D 类缺口
+
+- **位置**：`docs/debt-ledger.md`、`docs/rule-landing.md`、`docs/change-safety.md` 的叙述（把 86,000 / 61,000 当真实验收结果引用，如 rule-landing.md「真实数据（86,000）旁边编造了…61,000」）+ 约 28 个文件的夹具与断言（`tests/e2e` 各 turn-loop、`packages/agent` 多个测试、`scripts/probe-real-agent.ts` 等，含无千分位形 61000/86000）。
+- **根因**：这两支是真实平台查询读数，先作为 e2e 夹具"真值"落进 mock 数据，再被 docs 叙述引用；脱敏波映射表 E 组未收它们，`exposure-lint` D 类因此也没有防复发判据。同族的另一处差额读数（守卫条目 F15）已按"登记与替换必须同一批"的纪律在 `fbab7d7` 补掉（收词 + 替换同批），本条是剩下的两支。
+- **影响面核实（不扩大）**：现行树客户名已虚构化，夹具里这两个数与虚构主体配对，单独看不构成"真实主体 + 真实读数"的完整暴露；但 docs 叙述把它们当真实验收结果引用，属真实读数引用。**不得**因为"夹具里是 mock 数据"就整条不登记——那样 docs 侧的引用永远没有判据。
+- **闭环判据**：两支读数在全树（docs 叙述 + 夹具 + 成对断言）机械替换为虚构值（同一 commit 内成对输入/期望同步换，判别力保留），且 `exposure-lint` D 类收词后零命中；替换后 `npm run test -- --project unit` 与 Tier B 的失败集合不得相对替换前扩大（Tier B 按 D-154 已知红者除外）。
+- **律法归属**：L6（零沉积：陈旧/沉积数据进主干且无守卫，与"17dz 仓根 465KB 会话日志被跟踪"同族）。
+- **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环；执行波次随脱敏补批或并入波次 4 门面对账，届时两仓夹具同批）。
+- **状态**：待办。

@@ -211,6 +211,26 @@ export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[]
   });
 }
 
+/**
+ * 首个 enabled principal 的**裸 userid**（`<channel>:<userid>` 键剥掉渠道前缀；
+ * 无冒号的旧键整体当 userid，与 principalScopeRecords 同一取舍）。
+ *
+ * 用途：验收/探针脚本派生"授权用户"。UserID 是身份暴露，不落代码——principal 的
+ * 既定家在 config/agent.yaml（gitignore），脚本从这里取。无 enabled principal →
+ * 返回 null，调用方必须 fail-closed 报错退出，**不回落任何写死的值**。
+ *
+ * 只取首个：这些脚本本就只用一个授权用户跑单会话，多 principal 的选取是部署决策，
+ * 不是脚本该发明的第二套判据。
+ */
+export function firstEnabledPrincipalId(config: AppConfig): string | null {
+  for (const [key, principal] of Object.entries(config.principals)) {
+    if (principal.enabled !== true) continue;
+    const colon = key.indexOf(':');
+    return colon === -1 ? key : key.slice(colon + 1);
+  }
+  return null;
+}
+
 function parseStringArray(value: unknown): string[] | undefined {
   if (value === undefined) return undefined;
   if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {

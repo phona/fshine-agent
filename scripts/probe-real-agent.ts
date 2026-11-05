@@ -44,10 +44,9 @@ import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
 import { executionLanguageFingerprints, isPlatformMock } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
+import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
-
-const PRINCIPAL_USER = 'REPLACE_WITH_YOUR_WECOM_USERID';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -255,6 +254,14 @@ function ledgerCalls(): number {
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
   isolatePlatformState();
   const sdk = new RecordingSdk();
+  // 授权用户 = config/agent.yaml 首个 enabled principal。null = 没人可用：明确报错
+  // 退出，不回落写死值（真实 UserID 曾是这里的硬编码）。每次 boot 现取现派生，
+  // 与下面 createServerAssembly 自带的 loadConfig 同一来源，不存第二份。
+  const principalUser = firstEnabledPrincipalId(loadConfig({ env: process.env }));
+  if (!principalUser) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——探针脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
   const assembly = await createServerAssembly({
     env: process.env,
     dbPath: path.join(stateDir, `agent-${counter}.db`),
@@ -272,7 +279,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
       // 埋点切片起点：send 起点之后的 turn_span/delegation_span 都归属本回合（串行保证）。
       const telemetryMark = telemetryEvents.length;
       const startedAt = Date.now();
-      sdk.emit('message.text', wecomText(PRINCIPAL_USER, text));
+      sdk.emit('message.text', wecomText(principalUser, text));
       const deadline = Date.now() + PROBE_REPLY_WAIT_MS;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
