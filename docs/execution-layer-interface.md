@@ -29,16 +29,23 @@
 
 - **生产者**：部署管理员（配置文件 `config/agent.yaml` 的
   `contextProfiles.<id>`，见 `config/agent.example.yaml`）。
-- **消费者**：宿主 spawn 路径与文本识别路径（§2）。
-- **字段**（三件套随 profile 走，缺一不可）：
+- **消费者**：宿主 spawn 路径与文本识别路径（§2）；称谓字段的消费者是
+  Main Agent 系统提示词（`buildSystemPrompt`，经 `createTaxAgentRuntime`
+  的 `executorLabel` 注入）。
+- **字段**（三件套随 profile 走，缺一不可；称谓一件可选，缺省中性）：
   - `root`：执行层仓根绝对路径；worker 的 cwd 即 root。
   - `gateway`：相对 root 的网关调用形式，如财税实例 `bin/17dz`、
     通用夹具 `bin/generic`。模型绝不传入、绝不由模型文本派生。
   - `skillRoots`：相对 root 的运行态技能面（如 `.agents/skills-serve`）。
-- **校验**（加载时，`validateGatewayInvocation`）：相对路径、无父级
-  `..`、无绝对路径、无 shell 元字符；任一不满足即加载失败。
+  - `executorLabel`（C2 新增，可选）：该执行层子 Agent 的称谓，进 Main
+    Agent 系统提示词的委派句；如财税实例 `17dz 子 Agent`。模型绝不传入。
+- **校验**（加载时）：`gateway` 经 `validateGatewayInvocation`——相对
+  路径、无父级 `..`、无绝对路径、无 shell 元字符，任一不满足即加载失败；
+  `executorLabel` 非空、≤32 字符、无控制字符（模型可见文本，畸形值加载期挡下）。
 - **缺失时**：spawn 路径 `gatewayExecPathForProfile` fail-closed 抛错，
-  不回退任何缺省网关名；文本识别路径见 §2 的遗留过渡。
+  不回退任何缺省网关名；文本识别路径见 §2 的遗留过渡；`executorLabel`
+  缺失 = 宿主中性缺省（`DEFAULT_EXECUTOR_LABEL`，不含任何实例名），
+  实例称谓由该实例自己的 profile 声明，宿主不静默取实例名。
 - **版本变化**：新增 profile 字段必须向后兼容（旧 profile 缺新字段时
   按节内缺失语义处理，不得静默取实例名作缺省）。
 
@@ -233,7 +240,8 @@
 | --- | --- | --- |
 | `GATEWAY_INVOCATION` 缺省（财税实例名） | `platform-contract.ts` 定义处；未注入 gateway 的老调用方（单元测试、未穿透驱动路径）仍以它为文本识别缺省 | 驱动层把 profile.gateway 穿透到 serve-gate 与 plan 解析的全部生产路径后删除；新代码不得新增引用 |
 | spawn 路径的旧回退 | `plan-runtime.ts` 默认 runner、`context.ts` 默认提案 runner：未声明 gateway 时回退旧值 | profile 必填 gateway 的配置校验落地后删除回退，改为 fail-closed |
-| `run_17dz_task` 工具名与 `17dz 子 Agent` 标签 | `context.ts`（财税集成的工具定义与描述） | 改名会断已发布工具协议时不动；新执行层接入时用其中性工具名，不复用该名 |
+| `run_17dz_task` 工具名 | `context.ts`（财税集成的工具定义与描述） | 改名会断已发布工具协议时不动；新执行层接入时用其中性工具名，不复用该名 |
+| `17dz 子 Agent` 称谓实例值 | 财税部署的 `contextProfiles.<id>.executorLabel` 声明（C2 起）；宿主侧 `DEFAULT_EXECUTOR_LABEL` 已为中性缺省，不含实例名 | 无断点：称谓经 profile 声明注入（`buildSystemPrompt`），宿主不持实例缺省；注入实例称谓时提示词与参数化前逐字节相同（D-122 golden） |
 | 协议形状解析中的实例痕迹 | `plan-runtime.ts` 的 PlanDraft `{calls}` 形状解析（协议形状，非业务逻辑）、`error-codes.ts` 中个别实例操作名示例 | 仅当实例协议本身演进时随协议改，不为改名而改名 |
 | 宿主侧的业务词兜底 | `error-codes.ts` 的 `{hint}` 兜底字符串（平台全域携带 correctForm 后即删，见该文件注释） | 平台全域携带 correctForm 后删除 |
 
@@ -284,9 +292,11 @@
   `plan-runtime.ts` / `serve-gate.ts` 注释里的实测记录、
   `platform-contract.ts` 关于已删 legacy 执行器的历史注。
   为改名而改名会破坏历史记录的可读性，故保留，见 §10 表。
-- `run_17dz_task` 与 `17dz 子 Agent` 标签保留：那是财税集成
-  已发布的工具协议名，改名即断协议；新执行层接入时用其中性
-  工具名，不复用该名（§0、§10）。
+- `run_17dz_task` 工具名保留：那是财税集成已发布的工具协议名，改名即断
+  协议；新执行层接入时用其中性工具名，不复用该名（§0、§10）。
+- `17dz 子 Agent` 称谓不再是宿主常量（C2）：宿主缺省中性
+  （`DEFAULT_EXECUTOR_LABEL`），财税部署经 profile 的 `executorLabel`
+  声明保持已发布行为逐字节一致（D-122 golden 钉死注入值与改前相等）。
 
 ## 14. 执行层准入清单与第二执行层证明（第 4 包，2026-11-04）
 

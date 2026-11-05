@@ -400,6 +400,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(taskPlans ? { taskPlans } : {}),
     // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
+    // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 系统
+    // 提示词；未声明 = 宿主中性缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
+    ...(config.contextProfiles['17dz']?.executorLabel ? { executorLabel: config.contextProfiles['17dz']!.executorLabel } : {}),
     // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后会话进入冷却，冷却期内不再
     // 发起平台调用。时长经 env 覆盖（见上），阈值固定 2（platform-health.ts 缺省）。
     ...(platformCooldownMs ? { platformCooldownMs } : {}),

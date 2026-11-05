@@ -31,6 +31,14 @@ export interface ContextProfileConfig {
    * gateway calls (those call sites fail closed instead of guessing).
    */
   gateway?: string;
+  /**
+   * Operator-declared display name for this execution layer's subagent
+   * (e.g. `17dz 子 Agent`), injected into the host Main Agent system prompt
+   * via `buildSystemPrompt`. Never supplied by the model. Omitted profiles
+   * fall back to the neutral host default (`DEFAULT_EXECUTOR_LABEL`) — the
+   * host never silently adopts an instance name as its default.
+   */
+  executorLabel?: string;
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */

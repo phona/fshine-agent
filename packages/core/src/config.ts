@@ -133,6 +133,16 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
         throw new Error(`配置项 contextProfiles.${name}.gateway 必须是相对 root 的网关调用形式`);
       }
     }
+    // 执行层称谓（C2）：非空、≤32 字符、无控制字符——它进 Main Agent 系统提示词，
+    // 是模型可见文本，加载时挡住畸形值好过运行时渲染出脏提示词。缺省 = 宿主中性
+    // 缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
+    const executorLabelRaw = item['executorLabel'];
+    const executorLabel = executorLabelRaw === undefined ? undefined : String(executorLabelRaw).trim();
+    if (executorLabel !== undefined) {
+      if (!executorLabel || executorLabel.length > 32 || /[\u0000-\u001f\u007f]/.test(executorLabel)) {
+        throw new Error(`配置项 contextProfiles.${name}.executorLabel 必须是非空且不超过 32 字符的可见文本`);
+      }
+    }
     profiles[name] = {
       root,
       skillRoots,
@@ -140,6 +150,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
       ...(knowledgePaths ? { knowledgePaths } : {}),
       ...(sensitivePaths ? { sensitivePaths } : {}),
       ...(gateway === undefined ? {} : { gateway }),
+      ...(executorLabel === undefined ? {} : { executorLabel }),
     };
   }
   return profiles;

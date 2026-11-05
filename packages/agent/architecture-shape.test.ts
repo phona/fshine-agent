@@ -84,8 +84,13 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * （+ RESUMED_DECLARATION_FALLBACK 回退）、finishDirectReply 与 matchConfirmation
  * 直达文本改过 sanitizeDirectExitReply。判据本体在 reply-exit.ts / protocol-material.ts，
  * runtime 只做接线与打点。+23，后续抽取时照旧只减不增。
+ *
+ * 1334 → 1337（2026-11-05，W1 C2 称谓参数化，功能新增非抽取）：profile.executorLabel
+ * 声明经 createTaxAgentRuntime deps 注入 buildSystemPrompt（D-122 收口——宿主缺省改
+ * 中性，实例称谓由部署层按 profile 声明）。deps 一字段 + 工厂内一次构造（恢复路径复用
+ * 同一份，无第二构造点）。+3，后续抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1334;
+const RUNTIME_LINE_BUDGET = 1337;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

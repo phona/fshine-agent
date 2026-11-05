@@ -81,14 +81,28 @@ function readSrc(rel: string): string {
 describe('W1 执行层身份面 golden（C1 冻结）', () => {
   // ── C2 归属块：称谓参数化（DEFAULT_EXECUTOR_LABEL 中性缺省 + profile.executorLabel）──
   describe('C2 块：执行层称谓（system-prompt.ts）', () => {
-    it('DEFAULT_EXECUTOR_LABEL 当前值', () => {
-      expect(DEFAULT_EXECUTOR_LABEL).toBe('17dz 子 Agent');
+    it('DEFAULT_EXECUTOR_LABEL 当前值（C2 起中性缺省）', () => {
+      expect(DEFAULT_EXECUTOR_LABEL).toBe('执行层子 Agent');
+      expect(DEFAULT_EXECUTOR_LABEL).not.toContain('17dz');
     });
 
     it('SYSTEM_PROMPT = buildSystemPrompt(缺省称谓)，且称谓恰好出现一次', () => {
       expect(SYSTEM_PROMPT).toBe(buildSystemPrompt(DEFAULT_EXECUTOR_LABEL));
       expect(SYSTEM_PROMPT.split(DEFAULT_EXECUTOR_LABEL)).toHaveLength(2);
       expect(SYSTEM_PROMPT).toContain(`申报 delegate 后由宿主把加工后的请求委派 ${DEFAULT_EXECUTOR_LABEL} 执行。`);
+    });
+
+    it('注入实例称谓时委派句随参数替换（财税部署经 profile.executorLabel 声明）', () => {
+      expect(buildSystemPrompt('17dz 子 Agent')).toContain('委派 17dz 子 Agent 执行');
+    });
+
+    // 恢复回合整理提示词与 :149 同一模板块（runtime.ts）：C2 同commit翻转，避免 F4
+    // 归因撕裂——两条 17dz 字面量随该块一起去实例名。
+    it('恢复回合整理提示词两条话术已去实例名（runtime.ts，源码逐字）', () => {
+      const src = readSrc('packages/agent/src/runtime.ts');
+      expect(src).toContain('本轮子任务按用户确认重跑后没有产生任何平台执行。');
+      expect(src).toContain('本轮子任务已由宿主根据用户确认的计划执行完毕。');
+      expect(src).not.toContain('本轮 17dz 子任务');
     });
   });
 
@@ -249,12 +263,6 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       const src = readSrc('apps/server/plan-confirmation-route.ts');
       expect(src).toContain("if (!options.platformRoot) throw new Error('幻账平台根路径未配置');");
       expect(src.split("throw new Error('幻账平台根路径未配置')")).toHaveLength(3);
-    });
-
-    it('恢复回合整理提示词两条 17dz 字面量（runtime.ts:342-343，源码逐字）', () => {
-      const src = readSrc('packages/agent/src/runtime.ts');
-      expect(src).toContain('本轮 17dz 子任务按用户确认重跑后没有产生任何平台执行。');
-      expect(src).toContain('本轮 17dz 子任务已由宿主根据用户确认的计划执行完毕。');
     });
   });
 

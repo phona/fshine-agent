@@ -2,10 +2,12 @@
  * Stable, business-neutral Planner instructions and the dynamic date suffix.
  *
  * business-neutral 的准确边界（D-122）：提示词文案本身不携带执行层知识；唯一的执行层
- * 字样是下方 DEFAULT_EXECUTOR_LABEL——迁移期待清项，单一权威位置，未来由部署层经
- * buildSystemPrompt(executorLabel) 注入（先例：planCommandForm 经 ContextTaskRunnerOptions
- * 注入）。在装配层接入前 SYSTEM_PROMPT 取缺省值，文本与参数化前逐字节一致
- * （system-prompt.test.ts 的 golden 钉死这一点；改文案需真实模型探针，F6）。
+ * 称谓是下方 DEFAULT_EXECUTOR_LABEL——C2 起为中性缺省，实例称谓由部署层按 profile
+ * 声明（`contextProfiles.<id>.executorLabel` → createTaxAgentRuntime 的 executorLabel
+ * 参数 → buildSystemPrompt(executorLabel)）。未声明 profile 的部署（测试、CLI 脚本）
+ * 拿到中性缺省，文本与注入实例称谓时仅差称谓一个 token（system-prompt.test.ts 的
+ * D-122 golden 钉死"注入 '17dz 子 Agent' 时与参数化前逐字节相同"；改文案需真实模型
+ * 探针，F6）。
  */
 export const BUSINESS_SKILL_HEADING = '【业务编排知识：程序性知识，只用于长任务拆解与信息补齐；"怎么做才对"归执行层，不由这里规定】';
 
@@ -16,10 +18,15 @@ export const BUSINESS_SKILL_HEADING = '【业务编排知识：程序性知识�
 export const DATE_SUFFIX = `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`;
 
 /**
- * 迁移期缺省的执行层称谓（D-122）：全文件唯一的执行层字样。多执行层接入后应由
- * 部署层按 profile 注入（buildSystemPrompt 参数），此常量届时退役。
+ * 中性缺省的执行层称谓（C2，D-122 收口）：全文件唯一的执行层称谓字样。
+ *
+ * 部署层按 profile 声明注入（`contextProfiles.<id>.executorLabel` →
+ * `createTaxAgentRuntime({ executorLabel })` → 本文件的 buildSystemPrompt；
+ * 先例：planCommandForm 经 ContextTaskRunnerOptions 注入）。缺省取中性值
+ * 而不取任何实例名——实例称谓由该实例自己的 profile 声明（如财税部署声明
+ * `17dz 子 Agent`），宿主不把某个执行层的名字当作通用协议缺省。
  */
-export const DEFAULT_EXECUTOR_LABEL = '17dz 子 Agent';
+export const DEFAULT_EXECUTOR_LABEL = '执行层子 Agent';
 
 export function buildSystemPrompt(executorLabel: string): string {
   return [
@@ -40,5 +47,5 @@ export function buildSystemPrompt(executorLabel: string): string {
   ].join('\n');
 }
 
-/** 迁移期稳定值：当前配置下与参数化前的提示词逐字节一致（golden 见 system-prompt.test.ts）。 */
+/** 中性缺省的组装结果（C2 后无生产消费者——生产路径经 createTaxAgentRuntime deps 注入称谓；保留给测试与 API 兼容）。 */
 export const SYSTEM_PROMPT = buildSystemPrompt(DEFAULT_EXECUTOR_LABEL);
