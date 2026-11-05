@@ -331,11 +331,12 @@ async function main(): Promise<void> {
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
   if (faultMode) {
-    // fault 配置的授权用户同样派生自 config/agent.yaml 首个 enabled principal：
-    // UserID 不落代码，principal 的既定家只有那一份（缺配置时下面第一次派生即报错退出）。
+    // fault 配置的授权用户同样派生自当次加载的配置（AGENT_CONFIG_PATH 指向的文件，
+    // 缺省 config/agent.yaml）首个 enabled principal：UserID 不落代码，principal 的既定家
+    // 只有那一份（缺配置时下面第一次派生即报错退出）。
     const basePrincipal = firstEnabledPrincipalId(loadConfig({ env: process.env, yamlPath: configPath }));
     if (!basePrincipal) {
-      console.error('config/agent.yaml 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）');
+      console.error(`配置 ${configPath ?? 'config/agent.yaml（缺省）'} 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）`);
       process.exit(1);
     }
     configPath = path.join(dataDir, `acceptance-fault-${runId}.yaml`);
@@ -354,10 +355,12 @@ async function main(): Promise<void> {
   }
   const config = loadConfig({ env: process.env, yamlPath: configPath });
   // 授权用户 = 首个 enabled principal 的裸 userid。null = 部署里没人可用：明确报错
-  // 退出，不静默回落任何写死/虚构值（真实 UserID 曾是这里的硬编码）。
+  // 退出，不静默回落任何写死/虚构值（真实 UserID 曾是这里的硬编码）。报错点名当次
+  // 实际加载的配置——fault 模式下是上面生成的 fault yaml，否则 AGENT_CONFIG_PATH
+  // 或缺省 config/agent.yaml。
   const AUTHORIZED_USER = firstEnabledPrincipalId(config);
   if (!AUTHORIZED_USER) {
-    console.error('config/agent.yaml 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）');
+    console.error(`配置 ${configPath ?? 'config/agent.yaml（缺省）'} 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）`);
     process.exit(1);
   }
   const platformRoot = config.contextProfiles['17dz']?.root;
