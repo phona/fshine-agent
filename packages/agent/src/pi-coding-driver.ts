@@ -567,7 +567,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     const root = options.platformRoot ?? workerCwd;
     const cached = labelCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationLabels(root).catch(() => new Map<string, string>());
+    const loading = loadOperationLabels(root, options.gateway).catch(() => new Map<string, string>());
     labelCache.set(root, loading);
     return loading;
   };
@@ -579,7 +579,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     const root = options.platformRoot ?? workerCwd;
     const cached = argStyleCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationArgStyles(root).catch(() => new Map<string, KeyArgStyle>());
+    const loading = loadOperationArgStyles(root, options.gateway).catch(() => new Map<string, KeyArgStyle>());
     argStyleCache.set(root, loading);
     return loading;
   };
@@ -590,7 +590,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     const root = options.platformRoot ?? workerCwd;
     const cached = argSpecCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationArgSpecs(root).catch(() => new Map<string, never>());
+    const loading = loadOperationArgSpecs(root, options.gateway).catch(() => new Map<string, never>());
     argSpecCache.set(root, loading);
     return loading;
   };
@@ -603,7 +603,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     const root = options.platformRoot ?? workerCwd;
     const cached = semanticsCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationSemantics(root).catch(() => new Map<string, AccessSemantics>());
+    const loading = loadOperationSemantics(root, options.gateway).catch(() => new Map<string, AccessSemantics>());
     semanticsCache.set(root, loading);
     return loading;
   };
@@ -616,7 +616,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     const root = options.platformRoot ?? workerCwd;
     const cached = protocolCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationProtocols(root).catch(() => new Map<string, string>());
+    const loading = loadOperationProtocols(root, options.gateway).catch(() => new Map<string, string>());
     protocolCache.set(root, loading);
     return loading;
   };
@@ -1351,19 +1351,21 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   const activePlanId = (): string | null => activePlan?.planId ?? null;
   // label 表（平台清单第 5 列）：驱动侧已缓存则直接传入，否则本会话派生一次。
   // 派生失败/平台还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
-  const operationLabels = options.operationLabels ?? (await loadOperationLabels(options.cwd));
+  // gateway 穿线（C7b 收口补漏）：loader 对未声明 gateway 一律降级空表，声明来自
+  // profile.gateway 注入，本层不持实例名缺省。
+  const operationLabels = options.operationLabels ?? (await loadOperationLabels(options.cwd, options.gateway));
   // args 规格（flag → 样式）：放行的平台调用才有人类可读参数摘要，规格同样只在
   // 放行分支消费。派生失败/旧版平台 → 空表 → 零参数摘要（安全缺省，不外泄、不猜）。
-  const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd));
+  const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd, options.gateway));
   // access 语义表（平台 `operation list --json` 的 access 列 × 顶层 accessSemantics 表）：
   // 写关闭前置判定（D-075）与计划门拒绝分流的机械来源。派生失败/平台还没下发这张表 →
   // 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案路径的既有拒绝照旧兜底），
   // 绝不回退到宿主硬编码 operation 名单或 access 词表。
-  const operationSemantics = options.operationSemantics ?? (await loadOperationSemantics(options.cwd));
+  const operationSemantics = options.operationSemantics ?? (await loadOperationSemantics(options.cwd, options.gateway));
   // 协议角色表（平台 `operation list --json` 的 protocol 列）：提案创建拦截的机械来源
   // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
   // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
-  const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd));
+  const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd, options.gateway));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。

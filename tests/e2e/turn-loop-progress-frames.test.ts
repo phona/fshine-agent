@@ -129,6 +129,10 @@ function workerDriver() {
     agentDir,
     operationLabels: OPERATION_LABELS,
     planCliRunner: activatingPlanRunner,
+    // C7b 起派生 loader 对未声明 gateway 降级空表（不回退实例名缺省）：本文件是点名
+    // 17dz 的 L4 集成测试（见文件头），按自己驱动的命令前缀显式声明——args 样式表
+    // 仍从兄弟仓 CLI 真派生（不替身），与 harness.ts 的 GATEWAY 同一口径。
+    gateway: 'bin/17dz',
   });
 }
 

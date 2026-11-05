@@ -258,6 +258,11 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     env,
     // label 表派生根：平台操作的人类可读名来自平台公共 CLI 的第 5 列
     ...(platformRoot ? { platformRoot } : {}),
+    // 网关调用形式（C7b 收口补漏）：label/规格/语义/协议四张派生表与 serve 门共用同一
+    // profile.gateway 声明——C7b 起 loader 对未声明 gateway 一律降级空表（不回退实例名），
+    // 装配不穿线 = 生产静默零进度帧、零参数摘要、写关闭前置判定失效。未声明 = 不传，
+    // loader 按同一安全缺省降级，与"未配平台根"同判据。
+    ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
     planActivationSecret,
     // A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
     // 判据在 platformExecutorBypassed：整轮只有本地执行、零计划门放行的平台执行调用、
@@ -383,7 +388,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   // 平台 args 规格（任务 1 会话实体的查表依据）：与 worker 驱动同一份平台数据源，一次性
   // 派生后显式传表（operation-labels 的"纯数据 + 显式传表"纪律——调用方持有 Map 并注入）。
   // 派生失败/未配平台根 → 空表 → runtime 不提取得会话实体（安全缺省，判定回退三个来源）。
-  const operationArgSpecs = platformRoot ? await loadOperationArgSpecs(platformRoot) : undefined;
+  const operationArgSpecs = platformRoot ? await loadOperationArgSpecs(platformRoot, activeProfile?.gateway) : undefined;
   const runtime = createTaxAgentRuntime({
     driver,
     // Context State extraction is a separate tool-free background turn using the same provider/model.
