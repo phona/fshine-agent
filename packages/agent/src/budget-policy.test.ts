@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { decideBudgetTier, stricterTier, weightOfOperation } from './budget-policy';
 
-describe('通用预算档位策略（与 17dz plan.js policy 缺省同口径）', () => {
+describe('通用预算档位策略（通用预算协议缺省档位线，单一真相源在宿主）', () => {
   it('小计划放行', () => {
     expect(decideBudgetTier({ calls: 1, seconds: 30, weight: 2 })).toEqual({ tier: 'execute', reasonCode: 'WITHIN_AUTO_THRESHOLD' });
   });
@@ -20,7 +20,7 @@ describe('通用预算档位策略（与 17dz plan.js policy 缺省同口径）'
   it('calls 超 hard 线 → stop（HARD_LIMIT）', () => {
     expect(decideBudgetTier({ calls: 51, seconds: 30, weight: 2 })).toEqual({ tier: 'stop', reasonCode: 'HARD_LIMIT' });
   });
-  it('同档时 calls 线优先（tie-break 与 17dz 一致）', () => {
+  it('同档时 calls 线优先（tie-break 取 calls/seconds 线理由，与执行层门同形）', () => {
     expect(decideBudgetTier({ calls: 11, seconds: 100, weight: 19 })).toEqual({ tier: 'notify', reasonCode: 'NOTIFY_THRESHOLD' });
   });
   it('grantLevel 扩容：同一容量边缘只停一次', () => {

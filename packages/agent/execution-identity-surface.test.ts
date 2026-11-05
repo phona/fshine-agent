@@ -7,11 +7,13 @@
  * 不在本守卫范围——范围收窄是有意的，不要"顺手"扩大。
  *
  * 两级排除机制（均为待办签，不是永久豁免；W4 落地时两类签同时清空）：
- *  · 整文件排除：budget-policy.test.ts / budget-policy-cross-repo.test.ts
- *    ——两个预算测试文件的夹具与断言锚在 CROSS_REPO_17DZ_ROOT 变量名上，
- *    W4 改名（openDecisions #7）时同批处理，现挂 W4 签整文件排除；
- *  · 行内排除：`identity-defer: W4` 签——budget-policy.ts / scripts/ci.sh 里
- *    引用 CROSS_REPO_17DZ_ROOT 变量名的行（变量名改名归 W4，见 openDecisions #7）。
+ *  · 整文件排除：budget-policy-cross-repo.test.ts——夹具与断言锚在
+ *    CROSS_REPO_17DZ_ROOT 变量名上，随 W4 跨仓校验退出宿主时整文件删除
+ *    （W4 C4 同批移出本清单）；budget-policy.test.ts 已由 W4 C2 清零并
+ *    移出本清单（守卫覆盖收紧）；
+ *  · 行内排除：`identity-defer: W4` 签——scripts/ci.sh 里引用
+ *    CROSS_REPO_17DZ_ROOT 变量名的行（budget-policy.ts 的签已随 W4 C2
+ *    清零；ci.sh 的签随 C4 scope 注改写清空，届时本机制整体退役）。
  *
  * 变异自反（F3）内建于测试：①排除清单里列出的文件被断言确实含 17dz（排除非空转）；
  * ②挂签行被断言确实含签（签机制被删行不虚计）。往 scope 内任一文件注入一处 17dz
@@ -25,7 +27,6 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 /** 整文件排除：W4 预算改名批次（openDecisions #7），W4 落地时清空本清单。 */
 const FILE_EXCLUSIONS_W4: ReadonlyArray<string> = [
-  'packages/agent/src/budget-policy.test.ts',
   'packages/agent/src/budget-policy-cross-repo.test.ts',
 ];
 
@@ -91,7 +92,7 @@ describe('W1 身份面守卫：scope 内零 17dz 字样（大小写不敏感）'
     expect(hits, `W1 身份面守卫红：scope 内出现 ${hits.length} 处 17dz 字样（大小写不敏感）。\n${report}\n处置判据见本文件头注释与 docs/change-safety.md §25`).toEqual([]);
   });
 
-  it('排除机制非空转（变异自反①）：被整文件排除的两个预算文件确实含 17dz', () => {
+  it('排除机制非空转（变异自反①）：被整文件排除的预算文件确实含 17dz', () => {
     for (const relative of FILE_EXCLUSIONS_W4) {
       const content = readFileSync(path.join(REPO_ROOT, relative), 'utf8');
       expect(/17dz/i.test(content), `${relative} 已不含 17dz——W4 改名已落地，请把该文件移出 FILE_EXCLUSIONS_W4（守卫覆盖收紧）`).toBe(true);

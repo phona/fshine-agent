@@ -1,31 +1,31 @@
 /**
- * 通用预算档位策略（fshine 侧，业务无关）。
+ * 通用预算档位策略（宿主侧，业务无关）。
  *
- * Package 1 收窄口径后的状态：
- * · 本模块是宿主侧的通用策略：输入只有调用数、估时秒、权重、档位阈值、
- *   扩容档（grantLevel）、是否有历史计划——不含任何业务实体、业务 operation
- *   名、业务默认参数。换一个执行层后仍成立：执行层只需声明每条 operation
- *   的 est_seconds / 权重 / 副作用，宿主按本模块裁档。
- * · 阈值缺省值逐字对齐执行层平台 `plan.js` 的 policy() 缺省（出处与对齐说明已移
- *   debt-ledger「W1 provenance 移入」条目；下同）
- *   （calls 2/10/20/50，seconds 60/180/600/1800，weight 6/18/60/180），
- *   目的是让宿主裁档与执行层裁档在缺省配置下同口径——不是复制业务规则，
- *   而是让两层对同一组通用数字达成一致。执行层若调高/调低自己的阈值，
- *   宿主侧仍以更严一档为准（见 `stricterTier`），且执行端门保留不动。
- * · 第二份真相的处置（debt/second-truth，主题 3a）：这 12 个阈值有意两处
- *   并存、不删任何一处——删宿主这处，`stricterTier` 叠加档无档可叠；
- *   删平台那处，执行端门（evaluate 裁档与调用处硬上限复核）消失。
- *   漂移由跨仓机械校验兜底：`scripts/cross-repo/check-budget-thresholds.mjs
- *   <17dz 检出路径>`（或环境变量 `CROSS_REPO_17DZ_ROOT`）逐键比对， // identity-defer: W4（改名决策 openDecisions #7）
- *   不一致即 exit 1、解析不到即 exit 2；改任一仓阈值必须同批改另一仓。
- *   平台 policy() 另有 4 个平台门专属项（grindGap 30、maxNotify 3、
+ * 归属口径（协议缺省单一源在宿主）：
+ * · 本模块是通用预算协议的缺省档位策略：输入只有调用数、估时秒、权重、
+ *   档位阈值、扩容档（grantLevel）、是否有历史计划——不含任何业务实体、
+ *   业务 operation 名、业务默认参数。换一个执行层后仍成立：执行层只需经
+ *   声明面（operation 清单）声明每条 operation 的 est_seconds / 权重 /
+ *   副作用，宿主按本模块裁档。
+ * · 12 个阈值缺省（calls 2/10/20/50，seconds 60/180/600/1800，weight
+ *   6/18/60/180）是通用预算协议的缺省档位线，单一真相源在本文件；数字级
+ *   出处与对齐史见 debt-ledger「W1 provenance 移入」条目。执行层可声明
+ *   更严的硬上限，并由执行端门在实际调用处复核。
+ * · 双门并行期（平台计划门原样保留至迁移完成）：执行端门（evaluate 裁档
+ *   与调用处硬上限复核）与宿主叠加档并存、不删任何一处——删宿主这处，
+ *   `stricterTier` 叠加档无档可叠；删执行端门，执行端复核消失。宿主档只
+ *   收紧不放宽：执行层调高/调低自己的阈值线时，宿主侧仍以更严一档为准
+ *   （见 `stricterTier`）。两侧判据必须一致——改任一侧的这 12 个数字必须
+ *   同批对齐另一侧，漂移由机械校验兜底（校验脚本、CI 边界与归属迁移的
+ *   关账口径见 debt-ledger D-150/D-151；迁移期该校验不进宿主 CI）。
+ *   执行层 policy 另有 4 个平台门专属项（grindGap 30、maxNotify 3、
  *   maxReplans 8、maxVariants 3），宿主叠加档不实现磨大守卫与变体预算，
  *   故有意不镜像——它们不是漂移项。
  * · 本模块已接入计划评估主路径（第 1 包收尾）：plan-runtime 的
- *   evaluateAndActivatePlan 在平台 decision 之上叠加本模块的宿主档，
- *   更严为准；平台 decision 仍保留作防线。weight 由平台 evaluate 响应
- *   的 estimate.weight 下发（财税实例早已带该字段，本接口只是立约，
- *   不改档位语义、不改执行端门）；weight 缺失时宿主 fail-closed。
+ *   evaluateAndActivatePlan 在执行层 decision 之上叠加本模块的宿主档，
+ *   更严为准；执行层 decision 仍保留作防线。weight 由执行层 evaluate
+ *   响应的 estimate.weight 下发（本接口只是立约，不改档位语义、不改执行
+ *   端门）；weight 缺失时宿主 fail-closed。
  */
 export type BudgetTier = 'execute' | 'notify' | 'confirm' | 'stop';
 
@@ -107,7 +107,7 @@ export function decideBudgetTier(input: BudgetInput, thresholds: BudgetThreshold
 }
 
 /**
- * operation 权重缺省换算（与平台 weightOf 同口径，业务无关）：
+ * operation 权重缺省换算（通用协议缺省换算语义，业务无关）：
  * 有正权重用权重；否则按 est_seconds/10 四舍五入、下限 1；都没有则 1。
  * 执行层已声明权重时宿主不做换算——本函数只用于缺省补位。
  */

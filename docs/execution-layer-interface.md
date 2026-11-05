@@ -99,20 +99,20 @@
     `stop`）、`reasonCode`、`status`；
   - `estimate: { calls, seconds, weight }` —— **weight 必填**：
     本张计划声明的总权重（各 call 权重之和），执行层在评估时
-    已算出即下发（财税实例 `src/execution/plan.js` 的 `evaluate`
-    早已在 `estimate` 里带 `weight`；本接口只是把它立为契约，
-    不改档位语义、不改执行端门）；
+    已算出即下发；本接口把它立为契约，不改档位语义、不改执行端门
+    （执行层可另行声明更严硬上限并在调用处复核）；
   - `delta`（新增 calls 摘要）、`cumulative`（任务累计）、
     `budget`（可选回执：已用 / 容量 / 剩余，仅作呈现）、
     `summary` / `noticeText` / `scopeSummary`（执行层提供的安全
     用户可见范围摘要，宿主只做长度与控制字符卫生，不改写业务措辞）。
 - **宿主档位叠加（更严为准）**：
   宿主用通用策略 `decideBudgetTier({ calls, seconds, weight })`
-  （`budget-policy.ts`，缺省阈值 calls 2/10/20/50、seconds
-  60/180/600/1800、weight 6/18/60/180，`grantLevel` 作乘数扩容）
-  算出宿主档，与平台 `decision` 取更严一档；同档时宿主档优先
-  保留原 reasonCode 措辞。平台档始终保留作防线，宿主档只做叠加，
-  绝不绕过平台档。
+  （`budget-policy.ts`——通用预算协议缺省档位线的单一真相源，
+  缺省阈值 calls 2/10/20/50、seconds 60/180/600/1800、weight
+  6/18/60/180，`grantLevel` 作乘数扩容）算出宿主档，与执行层
+  `decision` 取更严一档；同档时宿主档优先保留原 reasonCode 措辞。
+  执行层档始终保留作防线，宿主档只做叠加，绝不绕过执行层档；
+  双门并行期宿主档只收紧不放宽。
 - **缺失时**：`estimate.weight` 缺失、非有限数、为负 → fail-closed：
   `evaluateAndActivatePlan` 抛错，不激活、不降级为仅 calls/seconds
   裁档。`decision` 非四档之一、stdout 非合法 JSON → 同样抛错；
