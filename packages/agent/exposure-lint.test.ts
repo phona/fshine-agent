@@ -84,8 +84,9 @@ const SCOPE_ANCHORS: readonly string[] = [
 const SCOPE_TOP_DIRS: readonly string[] = ['packages', 'apps', 'scripts', 'docs'];
 
 /**
- * 被跟踪文件数下限（2026-11-05 实测 306）。只作"扫描面被 stub 成一小撮"的绊线：
- * 仓库正常只增不减，真要在下降沿调整就显式改这个数并写理由，不让它静默失效。
+ * 被跟踪文件数下限（2026-11-05 实测 307：迁移起点 44a84a6 为 306，加本守卫自身 1）。
+ * 只作"扫描面被 stub 成一小撮"的绊线：仓库正常只增不减，真要在下降沿调整就显式改这个数并写
+ * 理由，不让它静默失效。
  */
 const MIN_TRACKED_FILES = 200;
 
