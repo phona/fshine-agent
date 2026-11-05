@@ -27,7 +27,7 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
   });
 
   it('非内部工具回退到通用工具名模板（直接平台工具已退役，不再有具名帧）', () => {
-    expect(defaultStepText('run_17dz_task')).toBe('正在调用 run_17dz_task…');
+    expect(defaultStepText('run_task')).toBe('正在调用 run_task…');
     expect(defaultStepText('some_future_tool')).toBe('正在调用 some_future_tool…');
   });
 
@@ -72,7 +72,7 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
       expect(clampProgressPhrase(phrase), phrase).toBe('');
     }
     // 丢短语之后照旧回落默认帧，不会因此不出帧
-    expect(renderToolStepText('run_17dz_task', paths[0]!)).toBe('正在调用 run_17dz_task…');
+    expect(renderToolStepText('run_task', paths[0]!)).toBe('正在调用 run_task…');
   });
 
   it('正常短语原样通过（不被误判成泄漏）', () => {
@@ -83,11 +83,11 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
 
   it('短语被丢弃时回落默认帧；默认帧也没有（内部工具）时返回 null', () => {
     // 非内部工具 + 泄漏短语 → 回落到通用工具名帧
-    expect(renderToolStepText('run_17dz_task', '{"recorded":"delegate"}')).toBe('正在调用 run_17dz_task…');
+    expect(renderToolStepText('run_task', '{"recorded":"delegate"}')).toBe('正在调用 run_task…');
     // 非内部工具 + 空短语 → 通用帧
-    expect(renderToolStepText('run_17dz_task', '   ')).toBe('正在调用 run_17dz_task…');
+    expect(renderToolStepText('run_task', '   ')).toBe('正在调用 run_task…');
     // 非内部工具 + 可用短语 → 短语优先
-    expect(renderToolStepText('run_17dz_task', '查询往来记录')).toBe('查询往来记录');
+    expect(renderToolStepText('run_task', '查询往来记录')).toBe('查询往来记录');
     // 内部工具 + 泄漏短语 → null（driver 侧必须因此跳过 onStep）
     expect(renderToolStepText('search_history', 'task_1 续跑')).toBeNull();
   });

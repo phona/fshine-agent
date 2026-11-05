@@ -32,13 +32,21 @@ export interface ContextProfileConfig {
    */
   gateway?: string;
   /**
-   * Operator-declared display name for this execution layer's subagent
-   * (e.g. `17dz 子 Agent`), injected into the host Main Agent system prompt
-   * via `buildSystemPrompt`. Never supplied by the model. Omitted profiles
-   * fall back to the neutral host default (`DEFAULT_EXECUTOR_LABEL`) — the
-   * host never silently adopts an instance name as its default.
+   * Operator-declared display name for this execution layer's subagent,
+   * injected into the host Main Agent system prompt via `buildSystemPrompt`.
+   * Never supplied by the model. Omitted profiles fall back to the neutral
+   * host default (`DEFAULT_EXECUTOR_LABEL`) — the host never silently adopts
+   * an instance name as its default.
    */
   executorLabel?: string;
+  /**
+   * Operator-declared delegation tool name for this profile — the
+   * model-visible protocol name published for this deployment. Never
+   * supplied by the model. Omitted profiles fall back to the neutral host
+   * default (`RUN_EXECUTION_TASK_TOOL` = `run_task`); an instance's
+   * already-published tool protocol name keeps working by declaring it here.
+   */
+  toolName?: string;
   /** Maximum wall-clock budget for one Worker turn. Defaults to 10 minutes. */
   workerTimeoutMs?: number;
   /** 平台仓知识面（worker read/ls 白名单）；缺省 = .md/.schema.json/.agents//docs/ */

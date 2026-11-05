@@ -143,6 +143,16 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
         throw new Error(`配置项 contextProfiles.${name}.executorLabel 必须是非空且不超过 32 字符的可见文本`);
       }
     }
+    // 委派工具名（C3）：工具名是模型可见协议面（进工具 schema 与调用分发），形状必须
+    // 是合法标识符（小写字母开头，仅小写字母/数字/下划线）且 ≤48 字符。缺省 = 宿主
+    // 中性缺省（run_task），实例已发布协议名由该实例 profile 声明保持连续。
+    const toolNameRaw = item['toolName'];
+    const toolName = toolNameRaw === undefined ? undefined : String(toolNameRaw).trim();
+    if (toolName !== undefined) {
+      if (!/^[a-z][a-z0-9_]*$/.test(toolName) || toolName.length > 48) {
+        throw new Error(`配置项 contextProfiles.${name}.toolName 必须是 ≤48 字符的工具名（小写字母开头，仅小写字母/数字/下划线）`);
+      }
+    }
     profiles[name] = {
       root,
       skillRoots,
@@ -151,6 +161,7 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
       ...(sensitivePaths ? { sensitivePaths } : {}),
       ...(gateway === undefined ? {} : { gateway }),
       ...(executorLabel === undefined ? {} : { executorLabel }),
+      ...(toolName === undefined ? {} : { toolName }),
     };
   }
   return profiles;

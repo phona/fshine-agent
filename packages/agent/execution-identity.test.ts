@@ -108,8 +108,25 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
 
   // ── C3 归属块：委派工具名参数化（RUN_EXECUTION_TASK_TOOL 中性缺省 + profile.toolName）──
   describe('C3 块：委派工具名（context.ts）', () => {
-    it('RUN_EXECUTION_TASK_TOOL 当前值', () => {
-      expect(RUN_EXECUTION_TASK_TOOL).toBe('run_17dz_task');
+    it('RUN_EXECUTION_TASK_TOOL 当前值（C3 起中性缺省）', () => {
+      expect(RUN_EXECUTION_TASK_TOOL).toBe('run_task');
+      expect(RUN_EXECUTION_TASK_TOOL).not.toContain('17dz');
+    });
+
+    it('runner.tool.name 随 profile.toolName 声明；未声明走中性缺省', async () => {
+      const root = await profileRoot();
+      const declared = createContextTaskRunner({
+        profiles: { '17dz': { root, skillRoots: ['.agents/skills'], toolName: 'run_17dz_task' } },
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      expect(declared.tool.name).toBe('run_17dz_task');
+      const neutral = createContextTaskRunner({
+        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      expect(neutral.tool.name).toBe('run_task');
     });
   });
 

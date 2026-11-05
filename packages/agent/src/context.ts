@@ -51,7 +51,13 @@ import {
   type PlatformExecutionLease,
 } from './platform-execution-gate';
 
-export const RUN_EXECUTION_TASK_TOOL = 'run_17dz_task';
+/**
+ * 委派工具名的中性缺省（C3）。工具名是模型可见协议面：实例已发布的协议名由该实例的
+ * profile 经 `toolName` 声明注入（createContextTaskRunner 解析 profile 后建 tool），
+ * 宿主不把某个执行层的名字当作通用协议缺省。形状约束见 config 加载校验
+ * （^[a-z][a-z0-9_]*$/，≤48）。
+ */
+export const RUN_EXECUTION_TASK_TOOL = 'run_task';
 
 /**
  * 委派失败的用户话术（按 failureClass 分流，2026-09 审计 F7）。
@@ -87,9 +93,8 @@ export const RUN_EXECUTION_TASK_DESCRIPTION = [
 ].join('\n');
 
 /**
- * 委派任务的宿主侧参数（D-120 第一步：中性主名）。字段全部是宿主持有的通用形态
- * （请求文本、任务续跑句柄、计划步骤标签、申报块、实体来源）——原名 Run17dzTaskArgs
- * 只有名字带执行层色彩，保留为过渡别名随 a2a 结构化调用协议批次退役。
+ * 委派任务的宿主侧参数（D-120：中性主名，别名已随 C3 退役）。字段全部是宿主持有的
+ * 通用形态（请求文本、任务续跑句柄、计划步骤标签、申报块、实体来源）。
  */
 export interface ContextTaskRunArgs {
   request: string;
@@ -108,9 +113,6 @@ export interface ContextTaskRunArgs {
    */
   entitySources?: PlanEntitySources;
 }
-
-/** @deprecated 中性名 ContextTaskRunArgs 的过渡别名：随 a2a 结构化调用协议批次退役。 */
-export type Run17dzTaskArgs = ContextTaskRunArgs;
 
 export interface SubagentTaskResult {
   taskId: string;
@@ -758,7 +760,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
   const tool: DiscoveredTool = {
-    name: RUN_EXECUTION_TASK_TOOL,
+    // 工具名 = profile.toolName 声明（C3），缺省中性（RUN_EXECUTION_TASK_TOOL）：
+    // 实例已发布的工具协议名由该实例自己的 profile 声明保持连续，宿主不取实例名缺省。
+    name: options.profiles[profileId]?.toolName ?? RUN_EXECUTION_TASK_TOOL,
     description: RUN_EXECUTION_TASK_DESCRIPTION,
     inputSchema: RUN_EXECUTION_TASK_SCHEMA,
   };

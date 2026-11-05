@@ -22,8 +22,9 @@
 - 执行层实例自己的网关名只属于该实例：财税实例是 `bin/17dz`，
   只出现在该实例的 profile（`contextProfiles.<id>.gateway`）与该实例
   的文档里，不进入通用层代码、通用夹具与通用文档。
-- 工具名同理：`run_17dz_task` 是财税集成的工具名（见 §9 遗留），
-  通用层的新工具不得再以实例名命名。
+- 工具名同理（C3）：委派工具名是模型可见协议面，宿主缺省中性（`run_task`）；
+  实例已发布的协议名（如财税集成 `run_17dz_task`）由该实例 profile 的
+  `toolName` 声明保持连续，不进入通用层代码、通用夹具与通用文档。
 
 ## 1. Profile / 网关声明（受信配置）
 
@@ -240,7 +241,7 @@
 | --- | --- | --- |
 | `GATEWAY_INVOCATION` 缺省（财税实例名） | `platform-contract.ts` 定义处；未注入 gateway 的老调用方（单元测试、未穿透驱动路径）仍以它为文本识别缺省 | 驱动层把 profile.gateway 穿透到 serve-gate 与 plan 解析的全部生产路径后删除；新代码不得新增引用 |
 | spawn 路径的旧回退 | `plan-runtime.ts` 默认 runner、`context.ts` 默认提案 runner：未声明 gateway 时回退旧值 | profile 必填 gateway 的配置校验落地后删除回退，改为 fail-closed |
-| `run_17dz_task` 工具名 | `context.ts`（财税集成的工具定义与描述） | 改名会断已发布工具协议时不动；新执行层接入时用其中性工具名，不复用该名 |
+| `run_17dz_task` 工具名实例值 | 财税部署的 `contextProfiles.<id>.toolName` 声明（C3 起）；宿主侧 `RUN_EXECUTION_TASK_TOOL` 已为中性缺省 `run_task`，`extractDelegationToolResultEvents` 经 `runner.tool.name` 注入认名 | 无断点：工具名经 profile 声明注入，宿主不持实例缺省；`Run17dzTaskArgs` 过渡别名已随 C3 退役（docs-reality tripwire 盯绝迹） |
 | `17dz 子 Agent` 称谓实例值 | 财税部署的 `contextProfiles.<id>.executorLabel` 声明（C2 起）；宿主侧 `DEFAULT_EXECUTOR_LABEL` 已为中性缺省，不含实例名 | 无断点：称谓经 profile 声明注入（`buildSystemPrompt`），宿主不持实例缺省；注入实例称谓时提示词与参数化前逐字节相同（D-122 golden） |
 | 协议形状解析中的实例痕迹 | `plan-runtime.ts` 的 PlanDraft `{calls}` 形状解析（协议形状，非业务逻辑）、`error-codes.ts` 中个别实例操作名示例 | 仅当实例协议本身演进时随协议改，不为改名而改名 |
 | 宿主侧的业务词兜底 | `error-codes.ts` 的 `{hint}` 兜底字符串（平台全域携带 correctForm 后即删，见该文件注释） | 平台全域携带 correctForm 后删除 |
@@ -292,8 +293,10 @@
   `plan-runtime.ts` / `serve-gate.ts` 注释里的实测记录、
   `platform-contract.ts` 关于已删 legacy 执行器的历史注。
   为改名而改名会破坏历史记录的可读性，故保留，见 §10 表。
-- `run_17dz_task` 工具名保留：那是财税集成已发布的工具协议名，改名即断
-  协议；新执行层接入时用其中性工具名，不复用该名（§0、§10）。
+- `run_17dz_task` 工具名实例值不再是宿主常量（C3）：宿主缺省中性
+  （`RUN_EXECUTION_TASK_TOOL` = `run_task`），财税部署经 profile 的
+  `toolName` 声明保持已发布工具协议连续；`Run17dzTaskArgs` 过渡别名
+  同批退役（tripwire 盯绝迹，§0、§10）。
 - `17dz 子 Agent` 称谓不再是宿主常量（C2）：宿主缺省中性
   （`DEFAULT_EXECUTOR_LABEL`），财税部署经 profile 的 `executorLabel`
   声明保持已发布行为逐字节一致（D-122 golden 钉死注入值与改前相等）。

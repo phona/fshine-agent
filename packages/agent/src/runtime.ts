@@ -3,7 +3,7 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ContextStateRepo, ConversationLogRepo, ConversationSessionRepo, MemoryRecordRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
-import { RUN_EXECUTION_TASK_TOOL, DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
+import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
 import type { CandidateExtractor } from './memory-consolidator';
@@ -39,7 +39,7 @@ import {
   appendClarificationResolved,
   appendUserEvent,
   ensureHistoryBackfill,
-  extract17dzToolResultEvents,
+  extractDelegationToolResultEvents,
   isContextState,
   loadMemoryProjection,
   persistAssistantAndContext,
@@ -1068,7 +1068,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             // （需要澄清、说明能力边界时同样走这条路径）。
             return { recorded: 'conversation' };
           }
-          if (tool === RUN_EXECUTION_TASK_TOOL) {
+          if (tool === deps.platformTask.tool.name) {
             return deps.platformTask.run({
               request: String(args['request'] ?? ''),
               ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
@@ -1089,7 +1089,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 时保持 undefined → turn_span 字段缺席（不是全零，两类事实必须可区分）。
       // 跳过申报的重试段也是本回合的 Main 消耗：第二段输入 = 第一段转录 + 重试指令，
       // 从 firstRunLen+1 起切只拿第二段新增的 assistant 消息（切片判据与下方
-      // extract17dzToolResultEvents 的 initialMessageCount 同法）。
+      // extractDelegationToolResultEvents 的 initialMessageCount 同法）。
       let mainUsage = sumUsage(result.messages.slice(initialMessageCount));
       if (!turn.declared) {
         // 跳过申报：丢弃自由文本，追一条明确指令重试一次。
@@ -1176,7 +1176,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             principalId: ctx.principalId,
             messages: sanitizeTranscriptMessages([...persistedLoaded, ...taskEventContext.promptMessages, ...continuationMessages]),
           });
-          const { events } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
+          const { events } = extractDelegationToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx, deps.platformTask.tool.name);
           for (const event of events) await deps.conversationLog?.append(event);
           taskEventContinuationAccepted.add(ctx);
           console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: 'background_task_continuation_accepted' }));
@@ -1233,7 +1233,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         console.info(JSON.stringify({ event: 'turn_span', requestId: ctx.requestId, durationMs: Date.now() - turnStart, outcome: reason, ...(mainUsage ? usageSpanFields(mainUsage) : {}) }));
         return { text: fallback };
       }
-      const { events: toolResultEvents, taskResults } = extract17dzToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx);
+      const { events: toolResultEvents, taskResults } = extractDelegationToolResultEvents(sanitizeTranscriptMessages(result.messages).slice(initialMessageCount), ctx, deps.platformTask.tool.name);
       await persistAssistantAndContext(deps, ctx, replyText, contextUpdateQueues, toolResultEvents);
       // D-065：结果文本回写任务条目（结构化字段缺失时召回台账的兜底渲染源）。与 Log 同文、
       // 同样脱敏；失败不影响回合（recordTaskResult 内部已兜底）。

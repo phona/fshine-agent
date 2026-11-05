@@ -232,7 +232,6 @@ export {
   type ContextTaskExecutionContext,
   type SubagentTaskResult,
   type ContextTaskRunArgs,
-  type Run17dzTaskArgs,
   type ConfirmationOutcome,
   type ConfirmationReply,
   type ProposalCommitRequest,

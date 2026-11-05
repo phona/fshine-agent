@@ -25,7 +25,7 @@ function assistantText(content: string): AgentMessage {
   return { role: 'assistant', content, timestamp: 2 } as unknown as AgentMessage;
 }
 function assistantToolCall(id = 'call_1'): AgentMessage {
-  return { role: 'assistant', content: [{ type: 'toolCall', id, name: 'run_17dz_task', arguments: {} }], timestamp: 2 } as unknown as AgentMessage;
+  return { role: 'assistant', content: [{ type: 'toolCall', id, name: 'run_task', arguments: {} }], timestamp: 2 } as unknown as AgentMessage;
 }
 function toolResult(id = 'call_1'): AgentMessage {
   return { role: 'toolResult', toolCallId: id, content: '结果', timestamp: 3 } as unknown as AgentMessage;
@@ -184,7 +184,7 @@ describe('selectRecentTurns：完整轮次或被 toolResult 终结的判定（C1
 
   it('孤儿 toolResult（toolCallId 不在本轮的 assistant toolCall 里）被过滤掉', () => {
     const messages = [user('查一下'), assistantToolCall('call_1'), toolResult('call_orphan')];
-    expect(contents(selectRecentTurns(messages, 2))).toEqual(['查一下', [{ type: 'toolCall', id: 'call_1', name: 'run_17dz_task', arguments: {} }]]);
+    expect(contents(selectRecentTurns(messages, 2))).toEqual(['查一下', [{ type: 'toolCall', id: 'call_1', name: 'run_task', arguments: {} }]]);
     // 配得上的 toolResult 保留
     const matched = [user('查一下'), assistantToolCall('call_1'), toolResult('call_1')];
     expect(selectRecentTurns(matched, 2)).toEqual(matched);

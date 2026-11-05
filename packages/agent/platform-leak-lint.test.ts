@@ -379,7 +379,7 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
   ["packages/agent/src/skills.ts:'", 'frontmatter 标量去引号（结构形状检查）'],
   // L6：step-text.ts 的 6 个已退役直接平台工具名 case（search_account_sets 等）已随
   // 沉积清理删除，对应白名单条目一并移除——主 Agent 工具面早已只剩宿主内部工具与
-  // run_17dz_task 委派，任何新的具名 case 不在表内，照样红。
+  // run_task 委派（实例名经 profile.toolName 声明，C3），任何新的具名 case 不在表内，照样红。
 ]);
 
 /**
