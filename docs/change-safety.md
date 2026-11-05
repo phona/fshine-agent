@@ -1295,6 +1295,6 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **Tier B e2e 未跑**：`FSHINE_PLATFORM_ROOT=<17dz 检出> npx vitest run tests/e2e` 需兄弟仓检出 + gitignored `config/agent.yaml`；本机 17dz 检出落后 origin/main 且环境有既存红基线。按 D-154，seed 同步改名前 Tier B 红是已知状态。**本波一切"绿"仅指 CI 三门 + 三把守卫（exposure-lint / docs-reality / platform-leak-lint）+ 验收 grep，不含 Tier B。**
 - **eval 基线未重定**（D-153，需 LLM 凭据，限期波次 5 前）。
 - **产品面 17dz 名词仍在**（属 gate① 交叠面，归 W1/波次 4）：`.env.example` 三处（节头与限流说明）、`config/agent.example.yaml` 5 处（含 `contextProfiles: 17dz` 结构键）、全树约百处 → D-155。另 `docs/rule-landing.md` 仍有一句描述生产 `.env` 的 `EXECUTION_RATE_LIMIT` 实践（gitignored 文件，不受模板变更影响），是否随 W2+W3 的 rule-landing 清洗一并改写，留后续判断。
-- **通用测试人名未处理**：猫一杯（公众人物名，16 文件）、胜利（15 文件）、宏大贸易、新兴五金/新兴建材（兄弟仓 seed 自造歧义样本）——方案 openDecisions 4 对猫一杯的拍板未闭环，本波不自行决定。
+- **通用测试人名 / mock seed 自造样本名未处理**：猫一杯（公众人物名，现行树 17 文件，含本节）、胜利（现行树 16 文件，含本节）、宏大贸易、恒信钢铁（现行树 5 文件，含本节本行；代码/测试/夹具侧 4 文件）、机电贸易有限公司（现行树 5 文件，含本节本行；代码/测试/夹具侧 4 文件）、新兴五金/新兴建材（兄弟仓 seed 自造歧义样本）。**分类**：恒信钢铁与机电贸易有限公司与已登记的新兴五金同类——兄弟仓 17dz-platform `src/execution/mocks/fixtures/seed.json` 的自造样本、非真实客户、无泄漏（该文件里恒信钢铁 3 处、机电贸易有限公司 1 处；新兴五金 2 处、新兴建材 1 处），fshine 侧命中全在测试夹具、验收用例与探针期望值（辅助档案名 / 候选名 / 往来户名，如 `scripts/probe-real-agent.ts:874` 的期望辅助档案表）。**计数口径**：`git grep -l` 实测，文档点名即计入——猫一杯/胜利 的登记值本轮由 16/15 刷新为 17/16，差额正是 change-safety.md 自己；恒信钢铁/机电贸易有限公司 登记前的代码/夹具侧各 4 文件，经本节本行点名后现行计数各为 5。方案 openDecisions 4 对猫一杯的拍板未闭环，本波不自行决定。
 - **61,000 / 86,000 两支真实读数未替换未收词**（在 docs 叙述与约 28 个文件的夹具里成片出现，收词需连带替换整批夹具与断言）→ D-156。
 - **`bfa3a31` 的提交信息含映射表真实串**（真实→虚构对照 15 对）——波次 2 的 filter-repo literals.txt 必须覆盖 **commit message 字面量**，不能只换 blob。
