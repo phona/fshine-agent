@@ -1431,3 +1431,44 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - 【中危·裁决写实】D-162 验收对账段落 owner 裁决：两条 `identity-defer: W4` 挂签行正确保留、门禁按签排除不是放水；复核口径 = 签排除后零命中 + 身份守卫 3/3 绿（修复轮双口径实跑通过），见上文验收 grep 行与 D-162。
 - 【低危·订正】D-162/D-165 引用的 `budget-policy.ts:18` 订正为 `:19`（C8 同 commit 改注释致 +1）；D-167②「波前树已不存在可检出的红状态」不实——修复轮对 7ba775d 实跑重放：零排除 173 处 / 守卫排除形态 156 处（173 − 两个预算测试文件 17 处），方案口径 160 与两实测均不符，详见 D-167 订正。
 - 【低危·登记不改】e2e 用例文件的 size 估计 27 vs 实际 37（方案材料口径，本波文档已有 37 实测，不改）；真实 LLM 探针未跑（F6 条件项，字节同一性断言已绿，D-167① 维持待授权）。
+
+## 28. 公开迁移 · W2+W3 波（2026-11-05，w2w3-error-doc：错误码镜像层退役 + 提示词与文档对账）
+
+**范围**：起点 = 波次 2 后 HEAD `7ba775d`（`migration/public-release`），W2-A 表征 golden 已落在起点（`f234457`）。**W1 并行未合入本分支**：`error-codes.ts:352/353` 两行用户可见文案（`DELEGATION_EXECUTOR_FAILURE`/`DELEGATION_CANCELLED`）与 error-codes.test.ts:41 golden 的网关名遗留缺省属 W1 身份参数化，本波不碰——W2-B 后该文件 17dz 计数 7→2，剩余恰为 W1 的两行。六个 commit 一件一事：
+
+| # | 提交 | 主题 | 门内实测 |
+|---|---|---|---|
+| 1 | `f234457` | W2-A 表征 golden 两条逐字钉住退役前文本（零生产代码改动） | unit 107 文件 / 1745→1747 passed + 1 skipped |
+| 2 | `049b2eb` | W2-B 镜像层退役：correctForm 只教结构、信封数据优先、兜底只留结构 + 三把全表锁 + D-002 追记 + L2 更新 | unit 1750；plan-teaching 3 例对锁绿（`plan {"` 计数 = 1） |
+| 3 | `d7b8a28` | W3-A worker 提示词静态文本零执行层名渲染级机械锁（`workerSystemPrompt` 纯测试缝导出） | unit 1751；docs-reality 9 例 |
+| 4 | `7e77798` | W3-B §10 逐行对账修正（5 行）+ rule-landing §3.1/§3.2 刷新 + AGENTS.md 事实修正 + turn-contract 注释 + 2 条文档级 tripwire | unit 1752；docs-reality 10 例 |
+| 5 | `a366a2b` | W3-C business-skill 两处执行层指称中性化（提示词注入面收尾） | business-skill 守卫 10 例绿 |
+| 6 | 本提交 | C6 波次记录（本节）+ debt-ledger 迁移清册五条（D-168–D-172） | docs-only，零代码改动 |
+
+**F1（表征先行）**：W2-A 把 `PLAN_CALL_ARGS_NOT_ARRAY`（correctForm 含业务命令示例）与 `ENTITY_OUT_OF_SCOPE`（correctForm 含平台 operation 名）的现行渲染文本逐字钉住（逐字串以首跑实际输出粘贴）；W2-B 有意翻转两条并在测试注释注明翻转点与理由（F1「golden 一条不改」的合法例外 = 波次内有意行为变更），退役前钉子原文 `git show f234457` 可取。
+
+**F2（基线冻结）**：unit 用例数曲线（实测，只增不减）：1745（波前）→ 1747（W2-A，+2）→ 1750（W2-B，+3 三把锁）→ 1751（W3-A，+1）→ 1752（W3-B，+1 tripwire）→ 1752（W3-C，无新测试）；文件数恒 107；skipped 恒 1（budget-policy-cross-repo.test.ts 的 CROSS_REPO_17DZ_ROOT skipIf）。终态 `npm run ci` exit 0（typecheck + unit 107/1752+1 + generic-mock 21 cases pass, 0 skipped）。
+
+**F3（变异留档，五项本地实测「改错→红→还原→复绿」）**：
+① `ENTITY_OUT_OF_SCOPE.correctForm` 加回 operation 名 → 锁①红（`AssertionError: ENTITY_OUT_OF_SCOPE 含平台 operation 名 finance.search-account-sets`）→ `git checkout` 还原 → 复绿 27 passed；
+② `PLAN_CALL_ARGS_NOT_ARRAY.correctForm` 加回 `--query` 示例 → 锁②红（`not to contain '--'`）→ 还原 → 复绿；
+③ `clarificationTextFor` 删信封优先分支（`data.correctForm?.trim() || entry.hintFallback || ''` → `entry.hintFallback || ''`）→ 既有「信封带平台 correctForm 时优先渲染它」用例红（渲染出宿主兜底句而非平台措辞）→ 还原 → 复绿 27 passed；
+④ `error-codes.ts` 尾增第二处 `plan {"` 草案形状字面量 → `plan-teaching.test.ts` 计数断言红（1 failed | 2 passed）→ 还原 → 复绿 30 passed；
+⑤ workerSystemPrompt 静态文本注入一处 17dz（身份句）→ docs-reality 渲染级锁红（`not to match /17dz/i`）→ 逆文本替换还原（W3-A 未提交态，git checkout 会连带丢测试缝）→ 复绿 9 passed。
+收尾 `git status` 干净。
+
+**F4**：六个 commit 逐件一件事（见上表）。**F5**：本波无 revert 事件——每 commit 落地前红先证据均在当次会话内转绿，无叠补丁。
+
+**F6（诚实登记：未跑）**：真实模型探针未跑（需用户授权 + token 花费；§18/§19/§24 同款先例），不写成已跑。预设判据：① W2-B 后 `ENTITY_OUT_OF_SCOPE` 正路径仍引导「先名称检索」（既有单测「名称检索/平台响应/同样有效」断言钉住）+ 探针复跑实体门拒绝场景时 worker 仍走「先名称检索再重提」路径、不新增空转轮次（验收 = 不劣化，观察项登记）；② W3-C 后 business-skill 守卫组绿 + 路由表唯一权威声明语义不变（静态部分已满足：权威声明句逐字保留，只去实例名）。
+
+**F7（文档同提交）**：W2-B 伴随 debt-ledger D-002 追记 + architecture-laws L2「错误码表镜像」终态；W3-B 伴随 v0-architecture §10/§4、rule-landing §3.1/§3.2、AGENTS.md 事实修正、turn-contract.ts 注释、docs-reality 2 条 tripwire；本提交伴随 debt-ledger D-168–D-172。
+
+**§10 十二行逐行核对结论**：7 行属实（写路径 / 执行凭证 / Subagent 报错回路 / 主动回溯 / 执行层记忆 / 多任务回溯绑定 / 业务 skill 主体——末行补 2026-11-04 中性化注记）+ 5 行修正（申报契约三枝四字段〔resend 枝 2026-10-20〕、领域判别收窄至 worker 提示词、长任务拆解目标列去「仍 3 字段」、通用预算策略补 2026-11-04 宿主叠加档、提示词面积按实测重写）。
+
+**门① 存量基线（本波终态实测 2026-11-05，`git grep -c -i 17dz` 逐文件；波前读数同会话实测）**：README.md 7→7、config/agent.example.yaml 5→5、docs/v0-architecture.md 9→5（本波 −4，≤6 达标）、docs/architecture-laws.md 10→10（本波零增减；方案基线 9 为旧时点读数）、docs/rule-landing.md 32→30（本波 −2，历史叙述段保留）、docs/environment-variables.md 18→18、scripts/ci.sh 2→2、.github/workflows/ci.yml 1→1、package.json 1→1、packages/agent/src/error-codes.ts 7→2（本波 −5，剩余归 W1）、packages/agent/src/context.ts 16→16、docs/business-skill.md 2→0（本波清零）。src 测试夹具与 scripts/ 验收夹具口径未定，归 D-168。
+
+**L3 出口校验（用户可见文本零劣化）**：error-codes.test.ts 既有用户可见话术逐字断言（NO_EXECUTION_CLARIFICATION / ACTIVATED_PLAN_NOT_EXECUTED / RESUMED_* / FALLBACK_* / DELEGATION_* / 选择类澄清两模板 / 终局快路径 / PLATFORM_UNAVAILABLE / WRITE_NOT_ENABLED / PLAN_NOT_PLANNABLE 共 20+ 条 toBe）一条未改；W2-B 只改 worker 面向的 correctForm 诊断。`reply-exit`（22）/`runtime`（102）/`platform-health`（20）逐文件实测全绿 144 例。**低频偶发登记（如实）**：三文件**并行组合**跑 12 次中 1 次偶发 1 failed（失败详情未被捕获，非 AssertionError 抓取形态），逐文件与同组合复跑 11/12 全绿；波前树（`f234457`）同组合对照 6/6 全绿。判为低频环境 flaky（并发资源竞争形态）而非本波确定性回归——本波生产代码改动（两条 correctForm + 注释 + 一个 export 缝）与该组用例涉及的 resume/auth/cooldown 链路无交集；后续若复现，先抓失败用例名再归因，登记为观察项不冒充已归因。
+
+**e2e 侧文本耦合静态核对（本波不修 e2e 环境红）**：`tests/e2e/turn-loop-security.test.ts:236` 为 `startsWith('ENTITY_OUT_OF_SCOPE: 期望')` 前缀断言——前缀不受 correctForm 改动影响；`scripts/plan-reject-report.test.ts:65` 夹具止于「或向用户澄清」（新 correctForm 开头逐字包含）且实测 9 passed。e2e 项目整体在本机为环境预存红（基线归 W1/W4 波冻结），本波不拿 e2e 全绿自证、也不在本波修。
+
+**全程 mock（D-076）**：本波无任何非 mock 的执行路径、无 `EXECUTION_EXECUTOR` 置空、无 `FSHINE_REAL_COMMIT`；npm run ci 三段（typecheck + unit + generic-mock）均为 mock 面。
