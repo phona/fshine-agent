@@ -85,9 +85,10 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const GUARD_FILE = path.resolve(__dirname, 'history-hygiene.test.ts');
 
 /**
- * git 子进程出口缓冲区。实测 `git log --all -p`（2026-11-05，`24f3b08`，全 ref）
- * = **12,064,335 字节**；Node `spawnSync` 默认 maxBuffer 1MB 会 ENOBUFS——守卫一上工
- * 就红，且红因与"历史有敏感串"混在一起。取 64MB 留足后续提交增长仍不触顶的余量。
+ * git 子进程出口缓冲区。实测 `git log --all -p`（全 ref）输出在 12MB 量级——2026-11-05 各时点
+ * 实测 12.06–12.11MB（精确值与测量时点见 change-safety §26 四类实测计数节；该数随提交增长）；
+ * Node `spawnSync` 默认 maxBuffer 1MB 会 ENOBUFS——守卫一上工就红，且红因与"历史有敏感串"混在
+ * 一起。取 64MB 留足后续提交增长仍不触顶的余量。
  */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 

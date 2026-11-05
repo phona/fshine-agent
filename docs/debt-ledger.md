@@ -1504,11 +1504,11 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 ### D-157 · 历史敏感面守卫（HG1）的覆盖边界 + 替换表 v2 的收词缺口（波次 2 C1 实跑发现）
 
 - **位置**：`packages/agent/history-hygiene.test.ts`（HG1，形态守卫）+ `scripts/history-sensitive-scan.sh`（G1b，逐串扫描）+ gitignored `.sensitive-strings.replace.txt`（`git filter-repo --replace-text` 输入，由波次 1 映射表 v2 生成）。
-- **根因**：两侧都是"按形态 / 按表"判定的机械守卫，判定面由形态定义与收词范围决定，天然有边界。C1 实跑（2026-11-05，HEAD = `598e4c6`，全 ref）把边界量了出来：
+- **根因**：两侧都是"按形态 / 按表"判定的机械守卫，判定面由形态定义与收词范围决定，天然有边界。C1 实跑（2026-11-05，HEAD = `598e4c6`——重写前 SHA、切割后不可解析，以位置与 subject 为准——全 ref）把边界量了出来：
   1. **HG1 只认形态**：UserID 字面共 22 行，带前缀形态只覆盖 4 行，另 18 行是裸常量（赋值形态）；客户名 / 真实读数 / 事故附件名没有任何共同形态。缺口由 G1b 逐串扫描兜底，两者缺一不可。
   2. **替换表 v2 未收、但别处已登记为敏感的串**（重写后逐串扫描仍会红，需 owner 拍板后按"只增不减"补收）：守卫条目 F15 的那支差额读数（现行树已替换，历史 6 行）；D-156 的两支读数（历史 79 / 129 行）；change-safety §25「未做/已知项」点名的通用测试人名与兄弟仓 mock seed 自造样本名三支（历史 617 / 261 / 161 行）；真实事故附件名（历史 66 行）。对应波次 2 openDecisions 4 / 5 / 7。
   3. **执行层平台名词**：历史 3550 行（其中带仓根形 396 行、提交信息 144 行），既不在 HG1 四类内也不在表内——对应 openDecisions 3，未拍板前不得自行补进表。
-- **影响面核实（不扩大）**：以上都是"判定面没覆盖"，不是"守卫失效"。HG1 的四类与 G1b 的表内 34 条在各自判定面内都实测有效——红态计数与 change-safety §25 留档的历史计数表逐条对上（同口径 `git log --all -p | grep -Fc`，HEAD = `598e4c6`：U1 = 22 行、C1 = 2822 行、C11 = 498 行、C3 = 416 行、F12 = 60 行，与 §25 表同值；该表测于 `2c41d48`，其后每个 commit 只让计数增、不让它减）。**不得**因为"还有没覆盖的"就把四类断言放宽——那会连已覆盖的部分一起废掉。
+- **影响面核实（不扩大）**：以上都是"判定面没覆盖"，不是"守卫失效"。HG1 的四类与 G1b 的表内 34 条在各自判定面内都实测有效——红态计数与 change-safety §25 留档的历史计数表逐条对上（同口径 `git log --all -p | grep -Fc`，HEAD = `598e4c6`（重写前 SHA、不可解析）：U1 = 22 行、C1 = 2822 行、C11 = 498 行、C3 = 416 行、F12 = 60 行，与 §25 表同值；该表测于 `2c41d48`（同为重写前 SHA），其后每个 commit 只让计数增、不让它减）。**不得**因为"还有没覆盖的"就把四类断言放宽——那会连已覆盖的部分一起废掉。
 - **闭环判据**：owner 对 openDecisions 4 / 5 / 7 / 3 拍板 → 替换表按"只增不减"补收（每条配 sha256 前缀，与 `exposure-lint` 禁词表交叉核对）→ 重跑 filter-repo → `scripts/history-sensitive-scan.sh .sensitive-strings.replace.txt` 退出码 0 且 `npx vitest run packages/agent/history-hygiene.test.ts` 绿（含两条正向锚点）。
 - **律法归属**：L6（零沉积）+ L2（同一事实只存在一处：替换表不得有第二份）。
 - **归属波次 / 限期**：波次 2 C2 实做前（重写落地即把缺口固化成"公开库已知残留"，越晚拍板越贵）。
@@ -1520,6 +1520,25 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 
 - **位置**：gitee 私有仓 `git@gitee.com:phona/fshine-agent.git`（本仓 origin）的 26 个 `refs/pull/{1..13}/{head,MERGE}`，完整清单（全部指向重写前提交）：`refs/pull/1/head=2accb20a`、`refs/pull/1/MERGE=bf602a44`、`refs/pull/2/MERGE=8d8542f1`、`refs/pull/2/head=c1b5967f`、`refs/pull/3/head=10874385`、`refs/pull/3/MERGE=307da988`、`refs/pull/4/MERGE=61bb7dea`、`refs/pull/4/head=7db31cbe`、`refs/pull/5/head=5426a85a`、`refs/pull/5/MERGE=631375c5`、`refs/pull/6/head=085a26fd`、`refs/pull/6/MERGE=bb9e15f9`、`refs/pull/7/head=1734dd5e`、`refs/pull/7/MERGE=8d14afce`、`refs/pull/8/head=29b78f0d`、`refs/pull/8/MERGE=823209ce`、`refs/pull/9/MERGE=3835735b`、`refs/pull/9/head=d7c6ed65`、`refs/pull/10/MERGE=70b45f3f`、`refs/pull/10/head=87ca65f4`、`refs/pull/11/MERGE=1aad24d2`、`refs/pull/11/head=646c8d93`、`refs/pull/12/head=10874385`、`refs/pull/12/MERGE=9955c354`、`refs/pull/13/MERGE=098c8b8a`、`refs/pull/13/head=89e605ec`。2026-11-05 实测 `git ls-remote origin 'refs/pull/*'` 返回 26 条、与清单逐条一致（其中 `refs/pull/3/head` 与 `refs/pull/12/head` 同为 `10874385`）；本仓本地无 `refs/pull/*` ref，残留只在 gitee 侧。
 - **已知限制（登记不修，不冒充已清）**：force-push 重写 main/分支不会移除 `refs/pull/*`——PR 记录与其 ref 在 gitee 侧独立存活，C2 重写后这 26 个 ref 仍指向重写前（含敏感串）的提交对象，旧历史在 gitee 侧继续可达。删这些 ref = 删 gitee 上对应的 13 个 PR 记录（不可逆）。用户 2026-11-05 决定不删、登记残留。
-- **风险边界**：gitee 是私有仓，残留仅对有仓访问权者可见；公开 GitHub 库永远只收干净历史。normal clone 的干净判据 = fresh clone 逐串零命中 + `npm run ci` 全绿：change-safety §26 定本地 fresh clone（G4）为真判据，`npm run ci` 三门全绿已实测留档于 §25；fresh clone 两级逐串零命中属波次 2 C2 的 S7/G4 验收门（迁移基线 `out/parts/07-wave2-b.md`），重写未做故该门尚未跑。
+- **风险边界**：gitee 是私有仓，残留仅对有仓访问权者可见；公开 GitHub 库永远只收干净历史。normal clone 的干净判据 = fresh clone 逐串零命中 + `npm run ci` 全绿：change-safety §26 定本地 fresh clone（G4）为真判据，`npm run ci` 三门全绿已实测留档于 §25；fresh clone 两级逐串零命中属波次 2 C2 的 S7/G4 验收门（迁移基线 `out/parts/07-wave2-b.md`）——**重写已于 2026-11-05 20:14 落地，S7/G4 已在切割段实跑通过**（34 串逐串 TOTAL=0 + fresh clone `npm run ci` 全绿，留档于 §26「fresh clone 判据」段），本条初版「重写未做故该门尚未跑」的表述作废。
 - **闭环判据**：gitee 仓库删除/归档，或用户改主意删 PR——任一发生即关。
 - **状态**：登记不修（用户 2026-11-05 决定不删 PR，残留登记在案）。
+
+### D-159 · 波次 2 第二轮验收的文档精确性残留（2 中危已修 + 9 低危登记）
+
+- **位置**：`docs/change-safety.md` §25/§26、`docs/debt-ledger.md` D-157/D-158、`packages/agent/history-hygiene.test.ts`、`scripts/history-sensitive-scan.sh`、`~/fshine-agent-pre-rewrite-2.bundle`、mirror `.rewrite-rehearsal/`。
+- **本 entry 落盘前已直接修掉的（2026-11-05， dwfrun-5d0c895d 收口轮之后的补充处置）**：① `fshine-agent-wave1` worktree 的 7 个 staged 陈旧文件（与 wave2 同族、方向相反地把虚构平台名改回真名）已 `reset --hard` 丢弃——两个 worktree 现均干净；② 提交数分解已补写进 §26（380→379、main 352→351、merge 7→7、现行 --all=382），计划书验收 [8] 原口径（358/352/352−N）作废；③ 守卫头字节数Claim 改口径（12MB 量级 + 指向 §26 实测节），不再钉某个会过时的精确值；④ §25 与 D-157 的重写前 SHA（`44a84a6`/`2c41d48`/`598e4c6`）全部加「不可解析」标注，`b4f4668` 提交信息里「删掉全部悬空 SHA 引用」的Claim 自此为真；⑤ D-158 初版「重写未做故该门尚未跑」已订正（S7/G4 已实测通过）。
+- **登记不修（9 项低危，逐条评估如下，不冒充已清）**：
+  - **a) 验收 [5] 字面主义**：守卫红输出除四类计数外还含两条正向锚点计数，条目字面要求「只能包含四类命中计数」未满足。评估：意图（无基础设施故障混入）已实证——守卫不读表文件、cwd 从 `__dirname` 解析、maxBuffer 64MB 不触 ENOBUFS、变异①失败输出只有类别计数与归因。锚点计数是「证明重写发生过」的判据，删它等于删一个正向证据。§26 已自行登记该偏离。
+  - **b) 验收 [0]/[1] 交付态不可执行**：替换表按设计已从磁盘清除（它本身就是泄密面），实跑 `history-sensitive-scan.sh` 得 exit 2 是契约正确行为（缺表=扫不了，不当通过）。表内 34 串的 exhaustive 实证留在演练门（34/34 TOTAL=0）与切割段 S7；交付态只剩字面抽查代验。
+  - **c) 验收 [11]/G4 前提未写在条目里**：普通 clone 检出的是 main，HG1 只在 `wave2-history-prep` 分支——plain clone 跑守卫必 exit 1（No test files found），须先 `git checkout wave2-history-prep`。条目文字缺这个前提，不是仓库缺陷。
+  - **d) `~/fshine-agent-pre-rewrite-2.bundle` 存着弃用的 `5395b798`**（QQ 邮箱署名的 D-158 初版，mailmap 之后、身份切换之前留下）：现行历史已全部 noreply、该对象不在本地 ODB，仅本地 bundle 内有，无门禁影响；§26 未记这次弃用重提的动线。
+  - **e) `.rewrite-rehearsal/tree-before.txt` 未产出**（S1 配方声称有）：`old-main.txt` 与 `refs-before.txt` 在案，tree 快照缺失不影响任何判据（判据用的是 ref 快照与逐串扫描）。
+  - **f) 「工资表2026-8月」分类表述不一致**：守卫头把它列入「通用测试名/seed 自造」，但 §25 已知项名单里没有它——它是 D-111 真实事故的用户附件名，走 openDecisions 7 / D-157 另一条决策路径。机械断言不受影响（HG1 四类本就不覆盖它），不一致只在散文。
+  - **g) §25 名单里的胜利/宏大贸易/机电贸易有限公司未进守卫头那四条通用名**：同 (f)——不覆盖即不误伤，清单与守卫头的列举范围本就有不同职责。
+  - **h) 波次 1 遗留三条**（见本轮 findings）：§25「全树约百处」实为 1233 处/136 文件；D-154「位置」字段指向的 `.replace.txt` 已按设计删除（权威来源实为 exposure-lint 的 SENSITIVE_ENTRIES + 生成口径）；D 类 15 条读数只登记千分位形（无千分位形历史零出现，潜在不对称非现存漏网）。
+  - **i) §26 与 D-157 的个别计数为时点值**（12.06–12.11MB / 380–382 commit 随提交增长）：各节已写明「引用前按当时 HEAD 复跑」，本条再统一提醒——这些数只能当量级与「不少于」读。
+- **闭环判据**：波次 4 门面文档统一关账时连同 (a)–(i) 逐条关闭，或 owner 接受为长期已知限制并在此条写明接受理由。
+- **律法归属**：L7（可信度可量化——登记项也必须有可判据的关闭条件）+ 执行纪律 4（文档主张与代码现实对账）。
+- **归属波次 / 限期**：波次 4（门面对账波）前。
+- **状态**：登记（2 中危已修；9 低危待波次 4 文档关账或 owner 接受）。
