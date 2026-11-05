@@ -118,9 +118,13 @@ describe('跨仓预算阈值校验脚本：旧值注释不得劫持解析（M3�
       + '  autoSeconds: 60,\n  notifySeconds: 180,\n  confirmSeconds: 600,\n  hardSeconds: 1800,\n'
       + '  autoWeight: 6,\n  notifyWeight: 18,\n  budgetWeight: 60,\n  hardWeight: 180,\n};\n');
     // 17dz 真值 autoCalls=2，但其上有旧值注释行（复核员假绿复现的形态）。
+    // 注意：17dz 侧块注释旧值故意写成 98，与 fshine 侧的 99 不对称——
+    // 块注释分支必须有独立钉子：只剥 // 行注释、不剥 /* */ 时，
+    // 两侧块注释旧值 99 vs 98 失配、脚本 exit 1，本用例变红；
+    // 两侧都写 99 时只剥行注释也能全过，块注释分支无判别力（第五轮）。
     writeFileSync(path.join(dzRoot, 'src/execution/plan.js'),
       '// autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 7),\n'
-      + '/* notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 99), */\n'
+      + '/* notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 98), */\n'
       + 'function policy(env) {\n  return {\n'
       + '    autoCalls: configured(env, \'EXECUTION_PLAN_AUTO_CALLS\', 2),\n'
       + '    notifyCalls: configured(env, \'EXECUTION_PLAN_NOTIFY_CALLS\', 10),\n'
