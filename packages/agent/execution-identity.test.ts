@@ -33,6 +33,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 import {
+  buildRunExecutionTaskDescription,
+  buildRunExecutionTaskSchema,
   createContextTaskRunner,
   DELEGATION_CANCELLED,
   DELEGATION_EXECUTOR_FAILURE,
@@ -132,20 +134,59 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
 
   // ── C4 归属块：委派工具描述与 schema 中性化（业务语义出宿主，称谓槽注入）──
   describe('C4 块：委派工具描述与 schema（context.ts）', () => {
-    it('RUN_EXECUTION_TASK_DESCRIPTION 全文逐字', () => {
+    it('RUN_EXECUTION_TASK_DESCRIPTION 缺省全文逐字（C4 起中性，称谓=中性缺省）', () => {
       expect(RUN_EXECUTION_TASK_DESCRIPTION).toBe([
-        '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
-        '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
+        '当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 执行层子 Agent。',
+        '执行层子 Agent 在受信的工作目录中加载平台 Skill，并返回自然语言结果。',
         '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
-        '涉及 17dz 实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
+        '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
         '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
       ].join('\n'));
+      expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('17dz');
+      expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('幻账');
+      expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('财税');
     });
 
-    it('RUN_EXECUTION_TASK_SCHEMA 两条 description 逐字', () => {
+    it('RUN_EXECUTION_TASK_SCHEMA 两条 description 缺省逐字（C4 起中性）', () => {
       const properties = RUN_EXECUTION_TASK_SCHEMA.properties as Record<string, { description?: string }>;
+      expect(properties.request?.description).toBe('交给 执行层子 Agent 的完整任务或用户最新补充');
+      expect(properties.taskId?.description).toBe('仅在继续此前子任务时使用返回的 taskId');
+      expect(JSON.stringify(RUN_EXECUTION_TASK_SCHEMA)).not.toContain('17dz');
+    });
+
+    it('注入实例称谓时描述与 schema 逐字节（称谓槽唯一可变点，F6 豁免论证的锚点）', () => {
+      const label = '17dz 子 Agent';
+      const description = buildRunExecutionTaskDescription(label);
+      expect(description).toBe([
+        '当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 17dz 子 Agent。',
+        '17dz 子 Agent 在受信的工作目录中加载平台 Skill，并返回自然语言结果。',
+        '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
+        '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
+        '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
+      ].join('\n'));
+      const schema = buildRunExecutionTaskSchema(label);
+      const properties = schema.properties as Record<string, { description?: string }>;
       expect(properties.request?.description).toBe('交给 17dz 子 Agent 的完整任务或用户最新补充');
-      expect(properties.taskId?.description).toBe('仅在继续此前 17dz 子任务时使用返回的 taskId');
+      expect(properties.taskId?.description).toBe('仅在继续此前子任务时使用返回的 taskId');
+    });
+
+    it('runner.tool.description/inputSchema 随 profile.executorLabel 声明；未声明走中性缺省', async () => {
+      const root = await profileRoot();
+      const declared = createContextTaskRunner({
+        profiles: { '17dz': { root, skillRoots: ['.agents/skills'], executorLabel: '17dz 子 Agent' } },
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      expect(declared.tool.description).toContain('17dz 子 Agent');
+      expect(declared.tool.description).not.toContain('幻账');
+      expect((declared.tool.inputSchema as { properties: Record<string, { description?: string }> }).properties['request']?.description).toBe('交给 17dz 子 Agent 的完整任务或用户最新补充');
+      const neutral = createContextTaskRunner({
+        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        tasks: new MemoryTasks(),
+        workerDriver: scriptedDriver('完成。'),
+      });
+      expect(neutral.tool.description).toBe(RUN_EXECUTION_TASK_DESCRIPTION);
+      expect(neutral.tool.inputSchema).toEqual(RUN_EXECUTION_TASK_SCHEMA);
     });
   });
 

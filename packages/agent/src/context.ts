@@ -50,6 +50,7 @@ import {
   type PlatformExecutionGate,
   type PlatformExecutionLease,
 } from './platform-execution-gate';
+import { DEFAULT_EXECUTOR_LABEL } from './system-prompt';
 
 /**
  * 委派工具名的中性缺省（C3）。工具名是模型可见协议面：实例已发布的协议名由该实例的
@@ -84,13 +85,37 @@ export const DELEGATION_CANCELLED = messageTextFor('DELEGATION_CANCELLED');
  */
 export const DELEGATION_MODEL_TRANSIENT_FAILURE = messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE');
 
-export const RUN_EXECUTION_TASK_DESCRIPTION = [
-  '当用户的问题需要访问或处理 幻账平台中的真实财税数据时，将任务委托给 17dz 子 Agent。',
-  '子 Agent 在受信的 17dz-platform 工作目录中加载平台 Skill，并返回自然语言结果。',
-  '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
-  '涉及 17dz 实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
-  '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
-].join('\n');
+/**
+ * 委派工具描述（C4 称谓槽注入）：描述文本不携带实例名——「幻账平台/财税数据」等业务
+ * 语义出宿主，只剩「执行层平台的实时数据」「受信的工作目录」两处通用表述；唯一可变槽
+ * 是称谓（executorLabel，与系统提示词同一来源：profile 声明、缺省中性，不静默取实例名）。
+ */
+export function buildRunExecutionTaskDescription(executorLabel: string): string {
+  return [
+    `当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 ${executorLabel}。`,
+    `${executorLabel} 在受信的工作目录中加载平台 Skill，并返回自然语言结果。`,
+    '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
+    '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
+    '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
+  ].join('\n');
+}
+
+/** 委派工具参数 schema（C4 同槽：request 的 description 带称谓槽，taskId 中性）。 */
+export function buildRunExecutionTaskSchema(executorLabel: string): Record<string, unknown> {
+  return {
+    type: 'object',
+    required: ['request'],
+    additionalProperties: false,
+    properties: {
+      request: { type: 'string', minLength: 1, description: `交给 ${executorLabel} 的完整任务或用户最新补充` },
+      taskId: { type: 'string', description: '仅在继续此前子任务时使用返回的 taskId' },
+    },
+  };
+}
+
+/** 中性缺省形态（未声明称谓的部署与测试夹具拿到的文本）；实例称谓经 build* 注入。 */
+export const RUN_EXECUTION_TASK_DESCRIPTION = buildRunExecutionTaskDescription(DEFAULT_EXECUTOR_LABEL);
+export const RUN_EXECUTION_TASK_SCHEMA = buildRunExecutionTaskSchema(DEFAULT_EXECUTOR_LABEL);
 
 /**
  * 委派任务的宿主侧参数（D-120：中性主名，别名已随 C3 退役）。字段全部是宿主持有的
@@ -461,16 +486,6 @@ export interface ConfirmationReply {
   outcome: ConfirmationOutcome;
 }
 
-export const RUN_EXECUTION_TASK_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  required: ['request'],
-  additionalProperties: false,
-  properties: {
-    request: { type: 'string', minLength: 1, description: '交给 17dz 子 Agent 的完整任务或用户最新补充' },
-    taskId: { type: 'string', description: '仅在继续此前 17dz 子任务时使用返回的 taskId' },
-  },
-};
-
 /**
  * 意图条目的用户可读标签。业务字段不在宿主库往返（payload 归执行层自己的提案状态库），
  * 所以这里拿不到任何领域信息——统一降级成中性表述，绝不把 undefined 渲染给用户，
@@ -759,12 +774,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   const executionGate = options.executionGate ?? createPlatformExecutionGate({
     maxQueue: Number.isFinite(platformQueueCapacity) && platformQueueCapacity >= 0 ? platformQueueCapacity : 100,
   });
+  // 工具描述的称谓与系统提示词同源（C4）：profile.executorLabel 声明，缺省中性。
+  const effectiveExecutorLabel = options.profiles[profileId]?.executorLabel ?? DEFAULT_EXECUTOR_LABEL;
   const tool: DiscoveredTool = {
     // 工具名 = profile.toolName 声明（C3），缺省中性（RUN_EXECUTION_TASK_TOOL）：
     // 实例已发布的工具协议名由该实例自己的 profile 声明保持连续，宿主不取实例名缺省。
     name: options.profiles[profileId]?.toolName ?? RUN_EXECUTION_TASK_TOOL,
-    description: RUN_EXECUTION_TASK_DESCRIPTION,
-    inputSchema: RUN_EXECUTION_TASK_SCHEMA,
+    description: buildRunExecutionTaskDescription(effectiveExecutorLabel),
+    inputSchema: buildRunExecutionTaskSchema(effectiveExecutorLabel),
   };
 
   /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
