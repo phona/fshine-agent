@@ -97,8 +97,9 @@ export function gatewayExecPathForProfile(platformRoot: string, profile: { gatew
 /**
  * 平台操作名（L2 消费不抄写：宿主只引用平台 `operations.json` 的注册名）。
  *
- * C 波后只剩 `financeSearchAccountSets` 一个消费者（error-codes.ts 的 correctForm 指引里
- * 给模型指一条"先做名称检索"的路）。原先这里还挂着旧文本写路径的四个操作名
+ * W2 镜像层退役（2026-11-05）后生产代码零消费：error-codes.ts 的 correctForm 不再
+ * 指名 operation（宿主只教"先名称检索再提交"的结构，机械锁 = error-codes.test.ts
+ * 锁①，判据即本常量）；本常量的宿主侧消费者只剩该测试锁。原先这里还挂着旧文本写路径的四个操作名
  * （voucher.prepare / voucher.commit / voucher.query-saved / voucher.verify-saved）与
  * voucher.fill——它们的唯一消费者是 apps/server/commit.ts 那个 legacy 落账执行器，随
  * C 波整体删除，故一并从这里移除：留着就是给"第二份业务名单"留门。

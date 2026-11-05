@@ -1,14 +1,17 @@
 /**
- * 错误码表（error-codes.ts）的纪律测试（2026-09 第二波，镜像 17dz 侧同款测试位）。
+ * 错误码表（error-codes.ts）的纪律测试（2026-09 第二波；2026-11-05 W2 镜像层退役后
+ * 头注释同步为渲染层框架——宿主只持渲染纪律与结构教学，领域措辞由执行层信封携带）。
  *
  * 钉住三件事：
  *   ① 错误类码渲染三要素（码 + 期望/实际/正确形态），actual 缺省给稳定形态；
  *   ② 消息模板类码逐字返回表内文本（收尾/兜底话术的既有文本一个字不动）；
  *   ③ 未知码与误用 fail-loud——绝不静默 fallback 到通用消息。
- * 另钉两条表级纪律：措辞零业务词（泄漏 lint 同款预算）、17dz 镜像的 auth 码集合。
+ * 另钉表级纪律：措辞零业务词（泄漏 lint 同款预算）；W2 起三把全表锁守「宿主教学
+ * 零业务命令语法 / 零平台 operation 名」的结构-only 边界（见文末 describe）。
  */
 import { describe, expect, it } from 'vitest';
 import {
+  HOST_ERROR_CODE_NAMES,
   UNKNOWN_ERROR_CODE,
   clarificationTextFor,
   errorFor,
@@ -122,9 +125,13 @@ describe('fshine 错误码表（错误即数据）', () => {
   it('ENTITY_OUT_OF_SCOPE 的 correctForm 带正路径：名称检索指引 + 会话既有实体有效（任务 1/2）', () => {
     // 标定修复（2026-09-27 实体门事故）：负指令之外必须给被拦方（worker）可执行的自愈
     // 动作——先名称检索让平台响应携带规范名再提交；本会话早前用户亲自提供/确认过的实体
-    // 同样是合法来源（第四来源 sessionEntities）。检索操作名取平台契约常量，不硬编码。
-    const rendered = messageFor('ENTITY_OUT_OF_SCOPE', '某个越权参数', undefined, 'bin/17dz');
-    expect(rendered).toContain(PLATFORM_OPERATIONS.financeSearchAccountSets);
+    // 同样是合法来源（第四来源 sessionEntities）。
+    // W2-B 翻转点（2026-11-05 镜像层退役）：correctForm 不再指名平台 operation——
+    // 「用哪个操作做名称检索」的权威在平台 operation 清单（operation list），宿主只教
+    // 结构（先检索、名称进平台响应后再提交）；指名即镜像（退役前这里经
+    // PLATFORM_OPERATIONS 写死 finance.search-account-sets）。反向断言 = 零指名。
+    const rendered = messageFor('ENTITY_OUT_OF_SCOPE', '某个越权参数');
+    expect(rendered).not.toContain(PLATFORM_OPERATIONS.financeSearchAccountSets);
     expect(rendered).toContain('名称检索');
     expect(rendered).toContain('平台响应');
     expect(rendered).toContain('同样有效');
@@ -290,25 +297,76 @@ describe('终局快路径话术模板（宿主机械组装）', () => {
   });
 });
 
-// ── W2 表征 golden：两条目现行渲染文本（镜像层退役前的钉子，2026-11-05）──────
+// ── W2 表征 golden：两条目镜像层退役后的渲染文本（W2-B 翻转留痕，2026-11-05）──
 //
-// F1 表征先行：W2-B 镜像层退役将改这两条的 correctForm（PLAN_CALL_ARGS_NOT_ARRAY
-// 去业务命令示例、ENTITY_OUT_OF_SCOPE 去平台 operation 名），先把现行渲染文本逐字
-// 钉住——W2-B 时只翻转本 describe 的断言并在注释注明翻转点与理由，红了能归因到
-// 对应条目（F4/F5）。逐字串以首跑实际输出粘贴（node --import tsx 渲染 messageFor），
-// 不手抄。两条 correctForm 均不含网关名，与 W1 网关参数化正交；既有「错误类码渲染
-// 三要素」golden（含网关名遗留缺省，error-codes.test.ts:41）归 W1 负责，本 describe
-// 不涉及。
-describe('W2 表征 golden：两条目现行渲染文本（W2-B 退役前的钉子）', () => {
-  it('PLAN_CALL_ARGS_NOT_ARRAY 现行渲染逐字（W2-B 翻转点：correctForm 将去业务命令示例，只留结构教学）', () => {
+// F1 表征先行（W2-A，commit f234457）：退役前把现行渲染文本逐字钉住（当时 correctForm
+// 含业务命令示例 ["--query","某名称","--period","202609"] 与平台 operation 名
+// finance.search-account-sets；退役前钉子原文可 git show f234457 取回）。W2-B 镜像层
+// 退役在本 describe 内有意翻转——F1「golden 一条不改」的合法例外 = 波次内有意行为
+// 变更，翻转点与理由逐条留痕（F4 归因、F5 revert 有基可退）：
+//   · PLAN_CALL_ARGS_NOT_ARRAY：correctForm 去业务命令示例（--query/--period 等命令
+//     语法归平台，宿主只教结构：args 为字符串数组、命令行原样参数）；
+//   · ENTITY_OUT_OF_SCOPE：correctForm 去平台 operation 名（「用哪个操作检索」的权威
+//     在平台 operation 清单，宿主不指名），正路径文字逐字保留。
+// 两条均不含网关名，与 W1 网关参数化正交；既有「错误类码渲染三要素」golden（含网关名
+// 遗留缺省，error-codes.test.ts:41）归 W1 负责，本 describe 不涉及。
+describe('W2 表征 golden：两条目镜像层退役后的渲染文本（W2-B 翻转留痕）', () => {
+  it('PLAN_CALL_ARGS_NOT_ARRAY 退役后渲染逐字（correctForm 只教结构，零业务命令示例）', () => {
     expect(messageFor('PLAN_CALL_ARGS_NOT_ARRAY', 0)).toBe(
-      'PLAN_CALL_ARGS_NOT_ARRAY: 期望 args 是数组；实际 0；正确形态 args 为字符串数组，即命令行原样参数（如 ["--query","某名称","--period","202609"]）',
+      'PLAN_CALL_ARGS_NOT_ARRAY: 期望 args 是数组；实际 0；正确形态 args 为字符串数组，即命令行原样参数',
     );
   });
 
-  it('ENTITY_OUT_OF_SCOPE 现行渲染逐字（W2-B 翻转点：correctForm 将去平台 operation 名，正路径保留）', () => {
+  it('ENTITY_OUT_OF_SCOPE 退役后渲染逐字（correctForm 零平台 operation 名，正路径逐字保留）', () => {
     expect(messageFor('ENTITY_OUT_OF_SCOPE', '某个越权参数')).toBe(
-      'ENTITY_OUT_OF_SCOPE: 期望 计划的每个参数都能在当前请求、检索证据、平台响应或本会话已确立实体里逐字找到；实际 某个越权参数；正确形态 严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索（如 finance.search-account-sets）使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效',
+      'ENTITY_OUT_OF_SCOPE: 期望 计划的每个参数都能在当前请求、检索证据、平台响应或本会话已确立实体里逐字找到；实际 某个越权参数；正确形态 严格按本轮请求的范围执行，或向用户澄清——不把计划外实体塞进 calls；可先执行一次名称检索使名称进入平台响应后再提交查询；用户在本会话早前提供或确认过的实体同样有效',
     );
+  });
+});
+
+// ── 宿主教学三把全表锁（W2 镜像层退役的结构-only 机械守卫，2026-11-05）────────
+//
+// 统一口径（三把锁同）：中性哑值（'占位'）按 fail-loud 报文里的占位符名单机械填充、
+// 只扫宿主静态模板、不扫平台下发数据——D-102：{operations}/{hint}/correctForm 是
+// 平台数据，合法含 operation 名；哑值填充后这些槽位不再是噪声源。
+//   锁① 全表渲染文本零平台 operation 名（判据机械取自 PLATFORM_OPERATIONS 注册名+裸名，
+//        无第二份手抄名单）；
+//   锁② PLAN_CALL_ARGS_NOT_ARRAY 渲染文本零命令旗标示例（'--'；--file/--json 是协议
+//        旗标不在本锁范围，本锁只盯 args 教学槽）；
+//   锁③ 全表渲染文本零业务词（『目录』按 leak-lint 警职执法登记排除——与 leak-lint
+//        双保险不互相替代，leak-lint 仍是 src 业务词的权威，两者红都按 F5 归因）。
+describe('宿主教学三把全表锁（结构-only，哑值填充）', () => {
+  const DUMMY = '占位';
+  /** 中性哑网关：W1 C7b 起 resolveGatewayText 对未注入 fail-closed（不再回退遗留缺省），全表渲染必须显式注入。 */
+  const DUMMY_GATEWAY = 'bin/example';
+  /** 全表渲染文本：错误类走三要素缺省渲染；参数化模板按 fail-loud 报文的占位符名单哑值填充。 */
+  function renderedTextOf(code: string): string {
+    try {
+      return messageFor(code, undefined, undefined, DUMMY_GATEWAY);
+    } catch (error) {
+      const names = /（占位符：([^）]+)）/.exec((error as Error).message);
+      if (!names) throw error;
+      return messageTextFor(code, Object.fromEntries(names[1]!.split(' / ').map((n) => [n, DUMMY])));
+    }
+  }
+
+  it('锁①：全表渲染文本零平台 operation 名（注册名+裸名，判据机械取自 PLATFORM_OPERATIONS）', () => {
+    const names = Object.values(PLATFORM_OPERATIONS).flatMap((n) => [n, n.slice(n.indexOf('.') + 1)]);
+    for (const code of HOST_ERROR_CODE_NAMES) {
+      for (const name of names) {
+        expect(renderedTextOf(code), `${code} 含平台 operation 名 ${name}`).not.toContain(name);
+      }
+    }
+  });
+
+  it('锁②：PLAN_CALL_ARGS_NOT_ARRAY 渲染文本零命令旗标示例（业务命令语法出宿主）', () => {
+    expect(messageFor('PLAN_CALL_ARGS_NOT_ARRAY', 0)).not.toContain('--');
+  });
+
+  it('锁③：全表渲染文本零业务词（『目录』按 leak-lint 警职执法登记排除，双保险不互相替代）', () => {
+    const BUSINESS_WORDS = /应收|凭证|科目|账套|期间|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/;
+    for (const code of HOST_ERROR_CODE_NAMES) {
+      expect(renderedTextOf(code), code).not.toMatch(BUSINESS_WORDS);
+    }
   });
 });

@@ -133,6 +133,14 @@
   （期望值经 harness 的 `platformCorrectForm` 跨仓读平台错误码表，不抄第二份台词）。
   复核条件：平台若给 ACCOUNT_SET_NOT_FOUND 的 correctForm 带上领域词，那是**平台下发**
   数据（宪章四标签之"平台下发"），不算宿主违例；宿主兜底字符串在平台全域携带后删除。
+  2026-11-05 W2 镜像层退役追记（关账留痕，非重开口径）：correctForm 教学已零业务命令语法
+  （`PLAN_CALL_ARGS_NOT_ARRAY` 只教结构）、信封数据优先（`{hint}` 槽位）、宿主兜底只留结构，
+  三把机械锁在场（`error-codes.test.ts` 全表锁：零平台 operation 名 / args 教学零旗标示例 /
+  全表零业务词，哑值填充、不扫平台下发数据）。本条仅在既有「hintFallback 挂遗留待清 + 复核
+  条件」口径上补两件事：① 补限期 = 波次 5；② 补登记第二处宿主兜底——
+  `ASSISTANT_NOT_FOUND_SELECTION` 结构句尾『请确认准确名称后我再查』（终局快路径共用条目）。
+  闭环判据不变 = 平台对 ACCOUNT_SET_NOT_FOUND/ASSISTANT_* 全域携带用户向 correctForm 后
+  删除宿主兜底。
 
 ### D-003 · 写路径确认摘要在编排层渲染"借贷合计"
 
