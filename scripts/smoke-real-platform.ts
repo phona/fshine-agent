@@ -41,11 +41,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { executionLanguageFingerprints, isCommitEnabled, isPlatformMock } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
-import { loadConfig } from '@fshine/core';
+import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
-
-const PRINCIPAL_USER = 'fictional-wecom-user-id';
-const AUTHORIZED_KEY = `wecom:${PRINCIPAL_USER}`;
 
 /**
  * 等一条最终回复的轮询上限（10 分钟，与探针同值）。真实平台单轮 60-180s、
@@ -359,7 +356,7 @@ function selftest(guards: string[]): string[] {
 
 // ─── 装配（探针同款：生产同一装配 + 假企微 SDK；dbPath 临时目录，不碰生产库）──
 
-async function boot(stateDir: string): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly }> {
+async function boot(stateDir: string, principalUser: string): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly }> {
   isolatePlanState(stateDir);
   const sdk = new RecordingSdk();
   const assembly = await createServerAssembly({
@@ -377,7 +374,7 @@ async function boot(stateDir: string): Promise<{ send: (text: string) => Promise
       const callsBefore = ledgerCalls();
       const startedAt = Date.now();
       console.log(JSON.stringify({ event: 'turn_start', text, at: new Date().toISOString() }));
-      sdk.emit('message.text', wecomText(PRINCIPAL_USER, text));
+      sdk.emit('message.text', wecomText(principalUser, text));
       const deadline = Date.now() + SMOKE_REPLY_WAIT_MS;
       let logged = sdk.frames.length;
       while (Date.now() < deadline) {
@@ -414,6 +411,14 @@ async function boot(stateDir: string): Promise<{ send: (text: string) => Promise
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 授权用户 = config/agent.yaml 首个 enabled principal。null = 没人可用：明确报错
+  // 退出，不回落写死值（真实 UserID 曾是这里的硬编码）。
+  const PRINCIPAL_USER = firstEnabledPrincipalId(config);
+  if (!PRINCIPAL_USER) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——冒烟脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
+  const AUTHORIZED_KEY = `wecom:${PRINCIPAL_USER}`;
   const platformRoot = config.contextProfiles['17dz']?.root;
   if (!platformRoot) throw new Error('config/agent.yaml 未配置 17dz contextProfiles.root——无法定位平台仓');
 
@@ -448,7 +453,7 @@ async function main(): Promise<void> {
 
   const turns: Turn[] = [];
   const errors: string[] = [];
-  const { send, assembly } = await boot(stateDir);
+  const { send, assembly } = await boot(stateDir, PRINCIPAL_USER);
   try {
     for (const text of SCRIPT) turns.push(await send(text));
   } catch (error) {

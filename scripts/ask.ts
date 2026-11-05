@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
+import { closeStore, createSqliteStore, firstEnabledPrincipalId, loadConfig, principalScopeRecords } from '@fshine/core';
 import {
   createContextTaskRunner,
   createPiCodingTurnDriver,
@@ -27,8 +27,6 @@ import { turnBudgetMsFor } from '@fshine/contracts';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// 与 acceptance.ts 相同的验收主用户（config/agent.yaml 里 capabilities=read+write 的 principal）
-const AUTHORIZED_USER = 'fictional-wecom-user-id';
 
 function replyText(reply: ChannelReply): string {
   return typeof reply === 'string' ? reply : (reply.text ?? '(图片回复)');
@@ -53,6 +51,13 @@ async function main(): Promise<void> {
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   const gateSecret = newGateSecret();
   const config = loadConfig({ env: process.env, yamlPath: process.env['AGENT_CONFIG_PATH'] || undefined });
+  // 授权用户 = config/agent.yaml 首个 enabled principal（与 acceptance.ts 同一来源）。
+  // null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是这里的硬编码）。
+  const AUTHORIZED_USER = firstEnabledPrincipalId(config);
+  if (!AUTHORIZED_USER) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——ask 脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
   const platformRoot = config.contextProfiles['17dz']?.root;
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
   if (isPlatformMock()) {

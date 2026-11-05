@@ -13,15 +13,13 @@
  * 平台说话）。若要把其中任何数字当断言用，先换成平台真实规范名与真实返回值。
  */
 import { randomUUID } from 'node:crypto';
-import { closeStore, createSqliteStore, loadConfig, principalScopeRecords, newId } from '@fshine/core';
+import { closeStore, createSqliteStore, firstEnabledPrincipalId, loadConfig, principalScopeRecords, newId } from '@fshine/core';
 import { turnBudgetMsFor } from '@fshine/contracts';
 import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { estimateContextTokens, type AgentMessage } from '@earendil-works/pi-agent-core';
 
 const mode = process.argv.includes('--mode=auto') ? 'auto' : 'ttl';
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-const USER = 'fictional-wecom-user-id';
-const SESSION = `wecom:${USER}:ls-${mode}`;
 
 /** 一轮真实感问答（含账套 id、期间、翻页游标、结论——压缩摘要的保留目标） */
 function round(i: number): { user: string; assistant: string } {
@@ -62,6 +60,14 @@ function buildTranscript(rounds: number, opts?: { lastUsageInput?: number }): Ag
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 授权用户 = config/agent.yaml 首个 enabled principal。null = 没人可用：明确报错
+  // 退出，不回落写死值（真实 UserID 曾是这里的硬编码）。
+  const USER = firstEnabledPrincipalId(config);
+  if (!USER) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——长会话实测脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
+  const SESSION = `wecom:${USER}:ls-${mode}`;
   const store = createSqliteStore(`data/acceptance-ls-${mode}-${runId}.db`);
   for (const record of principalScopeRecords(config)) await store.principalScopes.upsert(record);
 

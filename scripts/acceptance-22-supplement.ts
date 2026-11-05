@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { closeStore, createSqliteStore, loadConfig, principalScopeRecords } from '@fshine/core';
+import { closeStore, createSqliteStore, firstEnabledPrincipalId, loadConfig, principalScopeRecords } from '@fshine/core';
 import {
   createContextTaskRunner,
   createPiCodingTurnDriver,
@@ -21,7 +21,6 @@ import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
-const AUTHORIZED_USER = 'fictional-wecom-user-id';
 const CONV = 'acc-multi';
 
 function replyText(reply: ChannelReply): string {
@@ -30,6 +29,13 @@ function replyText(reply: ChannelReply): string {
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 授权用户 = config/agent.yaml 首个 enabled principal（与 acceptance.ts 同一来源）。
+  // null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是这里的硬编码）。
+  const AUTHORIZED_USER = firstEnabledPrincipalId(config);
+  if (!AUTHORIZED_USER) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——补充验收脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
   const dataDir = path.join(repoRoot, 'data');
   mkdirSync(dataDir, { recursive: true });
   // 复用主流程验收库,保证 acc-multi 会话里 2.1/2.3 的历史在场,才是真正的多轮继续。

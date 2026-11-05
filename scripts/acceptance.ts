@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
-import { loadConfig } from '@fshine/core';
+import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
@@ -30,8 +30,6 @@ const faultMode = process.argv.includes('--fault');
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 const dataDir = path.join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
-
-const AUTHORIZED_USER = 'fictional-wecom-user-id';
 
 // --only=1.1,4.1：只跑指定用例（P2 门控验收等子集场景）
 const onlyArg = process.argv.find((a) => a.startsWith('--only='));
@@ -333,10 +331,17 @@ async function main(): Promise<void> {
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
   if (faultMode) {
+    // fault 配置的授权用户同样派生自 config/agent.yaml 首个 enabled principal：
+    // UserID 不落代码，principal 的既定家只有那一份（缺配置时下面第一次派生即报错退出）。
+    const basePrincipal = firstEnabledPrincipalId(loadConfig({ env: process.env, yamlPath: configPath }));
+    if (!basePrincipal) {
+      console.error('config/agent.yaml 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）');
+      process.exit(1);
+    }
     configPath = path.join(dataDir, `acceptance-fault-${runId}.yaml`);
     writeFileSync(configPath, [
       'principals:',
-      `  "wecom:${AUTHORIZED_USER}":`,
+      `  "wecom:${basePrincipal}":`,
       '    accountSetScope: all',
       '    enabled: true',
       'contextProfiles:',
@@ -348,6 +353,13 @@ async function main(): Promise<void> {
     ].join('\n'));
   }
   const config = loadConfig({ env: process.env, yamlPath: configPath });
+  // 授权用户 = 首个 enabled principal 的裸 userid。null = 部署里没人可用：明确报错
+  // 退出，不静默回落任何写死/虚构值（真实 UserID 曾是这里的硬编码）。
+  const AUTHORIZED_USER = firstEnabledPrincipalId(config);
+  if (!AUTHORIZED_USER) {
+    console.error('config/agent.yaml 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）');
+    process.exit(1);
+  }
   const platformRoot = config.contextProfiles['17dz']?.root;
 
   // mock 联调：兜底状态路径 + 每次启动重置 mock 状态（用例的"第 N 张"预期才可重复）。
