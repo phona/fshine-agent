@@ -21,3 +21,16 @@ config/agent.yaml
 
 # ZCode 客户端自动生成的工具忽略清单（会自我再生成，内容从 .gitignore 同步）
 .zcodeignore
+
+# ── 波次 2（全历史重写）的本地工件 ──────────────────────────────────────────
+# 敏感串替换表：按定义含全部敏感串原文（真实 UserID / 内部绝对路径 / 客户名 / 真实读数），
+# 是 git filter-repo --replace-text 的输入，也是新的泄密面——只住本地，进库即把刚清完的
+# 历史又带回来。生成口径见 docs/change-safety.md §26（单一来源 = 波次 1 映射表 v2）。
+.sensitive-strings.replace.txt
+# 身份归一 mailmap：含真实作者邮箱，同理只住本地。
+.sensitive-strings.mailmap
+# 重写演练与快照（refs-before / tree-before / bundle 清单）：含旧 SHA 与路径，不留库。
+.rewrite-rehearsal/
+# 跑完 unit / npm run ci 后偶发的临时产物：不忽略会让「git status --porcelain 为空」这条
+# 判据时红时绿（防御性修复，见 docs/change-safety.md §26 的登记）。
+tmp/

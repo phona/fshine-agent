@@ -1500,3 +1500,26 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L6（零沉积：陈旧/沉积数据进主干且无守卫，与"17dz 仓根 465KB 会话日志被跟踪"同族）。
 - **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环；执行波次随脱敏补批或并入波次 4 门面对账，届时两仓夹具同批）。
 - **状态**：待办。
+
+### D-157 · 历史敏感面守卫（HG1）的覆盖边界 + 替换表 v2 的收词缺口（波次 2 C1 实跑发现）
+
+- **位置**：`packages/agent/history-hygiene.test.ts`（HG1，形态守卫）+ `scripts/history-sensitive-scan.sh`（G1b，逐串扫描）+ gitignored `.sensitive-strings.replace.txt`（`git filter-repo --replace-text` 输入，由波次 1 映射表 v2 生成）。
+- **根因**：两侧都是"按形态 / 按表"判定的机械守卫，判定面由形态定义与收词范围决定，天然有边界。C1 实跑（2026-11-05，HEAD = `598e4c6`，全 ref）把边界量了出来：
+  1. **HG1 只认形态**：UserID 字面共 22 行，带前缀形态只覆盖 4 行，另 18 行是裸常量（赋值形态）；客户名 / 真实读数 / 事故附件名没有任何共同形态。缺口由 G1b 逐串扫描兜底，两者缺一不可。
+  2. **替换表 v2 未收、但别处已登记为敏感的串**（重写后逐串扫描仍会红，需 owner 拍板后按"只增不减"补收）：守卫条目 F15 的那支差额读数（现行树已替换，历史 6 行）；D-156 的两支读数（历史 79 / 129 行）；change-safety §25「未做/已知项」点名的通用测试人名与兄弟仓 mock seed 自造样本名三支（历史 617 / 261 / 161 行）；真实事故附件名（历史 66 行）。对应波次 2 openDecisions 4 / 5 / 7。
+  3. **执行层平台名词**：历史 3550 行（其中带仓根形 396 行、提交信息 144 行），既不在 HG1 四类内也不在表内——对应 openDecisions 3，未拍板前不得自行补进表。
+- **影响面核实（不扩大）**：以上都是"判定面没覆盖"，不是"守卫失效"。HG1 的四类与 G1b 的表内 34 条在各自判定面内都实测有效——红态计数与 change-safety §25 留档的历史计数表逐条对上（同口径 `git log --all -p | grep -Fc`，HEAD = `598e4c6`：U1 = 22 行、C1 = 2822 行、C11 = 498 行、C3 = 416 行、F12 = 60 行，与 §25 表同值；该表测于 `2c41d48`，其后每个 commit 只让计数增、不让它减）。**不得**因为"还有没覆盖的"就把四类断言放宽——那会连已覆盖的部分一起废掉。
+- **闭环判据**：owner 对 openDecisions 4 / 5 / 7 / 3 拍板 → 替换表按"只增不减"补收（每条配 sha256 前缀，与 `exposure-lint` 禁词表交叉核对）→ 重跑 filter-repo → `scripts/history-sensitive-scan.sh .sensitive-strings.replace.txt` 退出码 0 且 `npx vitest run packages/agent/history-hygiene.test.ts` 绿（含两条正向锚点）。
+- **律法归属**：L6（零沉积）+ L2（同一事实只存在一处：替换表不得有第二份）。
+- **归属波次 / 限期**：波次 2 C2 实做前（重写落地即把缺口固化成"公开库已知残留"，越晚拍板越贵）。
+- **状态**：待办。
+
+## 公开迁移 · 历史重写波（波次 2）新账
+
+### D-158 · gitee 上 26 个 refs/pull/* 残留（指向重写前提交，用户决定不删 PR）
+
+- **位置**：gitee 私有仓 `git@gitee.com:phona/fshine-agent.git`（本仓 origin）的 26 个 `refs/pull/{1..13}/{head,MERGE}`，完整清单（全部指向重写前提交）：`refs/pull/1/head=2accb20a`、`refs/pull/1/MERGE=bf602a44`、`refs/pull/2/MERGE=8d8542f1`、`refs/pull/2/head=c1b5967f`、`refs/pull/3/head=10874385`、`refs/pull/3/MERGE=307da988`、`refs/pull/4/MERGE=61bb7dea`、`refs/pull/4/head=7db31cbe`、`refs/pull/5/head=5426a85a`、`refs/pull/5/MERGE=631375c5`、`refs/pull/6/head=085a26fd`、`refs/pull/6/MERGE=bb9e15f9`、`refs/pull/7/head=1734dd5e`、`refs/pull/7/MERGE=8d14afce`、`refs/pull/8/head=29b78f0d`、`refs/pull/8/MERGE=823209ce`、`refs/pull/9/MERGE=3835735b`、`refs/pull/9/head=d7c6ed65`、`refs/pull/10/MERGE=70b45f3f`、`refs/pull/10/head=87ca65f4`、`refs/pull/11/MERGE=1aad24d2`、`refs/pull/11/head=646c8d93`、`refs/pull/12/head=10874385`、`refs/pull/12/MERGE=9955c354`、`refs/pull/13/MERGE=098c8b8a`、`refs/pull/13/head=89e605ec`。2026-11-05 实测 `git ls-remote origin 'refs/pull/*'` 返回 26 条、与清单逐条一致（其中 `refs/pull/3/head` 与 `refs/pull/12/head` 同为 `10874385`）；本仓本地无 `refs/pull/*` ref，残留只在 gitee 侧。
+- **已知限制（登记不修，不冒充已清）**：force-push 重写 main/分支不会移除 `refs/pull/*`——PR 记录与其 ref 在 gitee 侧独立存活，C2 重写后这 26 个 ref 仍指向重写前（含敏感串）的提交对象，旧历史在 gitee 侧继续可达。删这些 ref = 删 gitee 上对应的 13 个 PR 记录（不可逆）。用户 2026-11-05 决定不删、登记残留。
+- **风险边界**：gitee 是私有仓，残留仅对有仓访问权者可见；公开 GitHub 库永远只收干净历史。normal clone 的干净判据 = fresh clone 逐串零命中 + `npm run ci` 全绿：change-safety §26 定本地 fresh clone（G4）为真判据，`npm run ci` 三门全绿已实测留档于 §25；fresh clone 两级逐串零命中属波次 2 C2 的 S7/G4 验收门（迁移基线 `out/parts/07-wave2-b.md`），重写未做故该门尚未跑。
+- **闭环判据**：gitee 仓库删除/归档，或用户改主意删 PR——任一发生即关。
+- **状态**：登记不修（用户 2026-11-05 决定不删 PR，残留登记在案）。
