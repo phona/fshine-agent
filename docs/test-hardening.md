@@ -41,5 +41,5 @@
 - 长对话（20/30 轮）离线化不做——探针层（C1/C2/H1）+ 冻结基线承接，分工是设计。
 - 真实限流/真实 auth 码：mock 证不到，不写假验证（change-safety §0 表）。
 - 输入形状网不覆盖申报方向听错（模型能力，脚本化 mainDriver 钉死方向）。
-- ASSISTANT_AMBIGUOUS 的终局快路径 e2e 在 mock 下走不到（2026-10-16 评审登记）：平台 mock 信封缺 `data.customer`，`terminalFastPathOf` 的完整性门 fail-safe 不挂（按设计回到既有重规划循环，不出假话术）；真平台信封带该字段。该码的宿主话术渲染只有 unit 链覆盖；补齐 mock 信封属 17dz-platform 仓。
+- ASSISTANT_AMBIGUOUS 的终局快路径 e2e 在 mock 下走不到（2026-10-16 评审登记）：平台 mock 信封缺 `data.customer`，`terminalFastPathOf` 的完整性门 fail-safe 不挂（按设计回到既有重规划循环，不出假话术）；真平台信封带该字段。该码的宿主话术渲染只有 unit 链覆盖；补齐 mock 信封属执行层仓。
 - 思考档与 DeepSeek 契约的落地情况（2026-10-17 研究修正早前"适配器不可控"的误判）：pi-ai 的 openai-completions 适配器**已实现** DeepSeek 思考模式契约——响应侧解析 `reasoning_content` 进 thinking 块（`thinkingSignature` 记字段名），重放侧按签名回发（DeepSeek 带 tools 的多轮要求完整回传 reasoning_content 否则 400，官方 harness 的解法是整条 message 对象回填，"让模型继续之前的思考"）；`reasoning_effort` 亦随 `LLM_THINKING_LEVEL` 透传（medium/high/xhigh→high 服务端映射）。已知边界：① deepseek-flash 服务端默认即思考开 + effort high，故 `=high` 与缺省无行为差异（low/max 可真降/真升，未测）；② 重放的 reasoning 前缀滚入输入是 token 膨胀的机制根源，靠 DeepSeek 上下文缓存折价对冲（实测 cacheRead 为大头）；③ 依赖 pi-ai 持续正确实现该契约——其回归（如重放漏 reasoning_content）会以 DeepSeek 400 的形式炸穿 worker，离线 mock 闸不拦，属对上游的隐式依赖。
