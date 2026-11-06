@@ -392,6 +392,6 @@
 - 失败分类：`failure-delivery.ts` 覆盖五类协议分类；context.ts 失败 catch 块统一走 `deliverFailure`（auth / cancelled / timeout / model_transient / executor_error 全覆盖）；platform-leak-lint 协议失败分类常量（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED / cancelled / model_transient / executor_error）登记进 `LITERAL_IF_PROTOCOL_TOKENS`。
 - 三道门：platform-mock / assembly / 5 脚本显式携带 env；serve 令牌门与真写门执法点未动（D-175 登记待 owner 决策）。
 
-**测试与波次记录**：typecheck 0 错误 + unit 113 文件 / 1848 例全绿 + golden ④翻转 + failure-delivery.test.ts 全矩阵 + turn-loop e2e 断言随翻。materializeTaskInputs 提前到准备阶段导致 existing 续跑红（D-174），已修复为仅在 `args.turnDeclaration && guardedScope` 时调用。
+**测试与波次记录**：typecheck 0 错误 + unit 113 文件 / 1848 例全绿 + golden ④翻转 + failure-delivery.test.ts 全矩阵 + turn-loop e2e 断言随翻。materializeTaskInputs 提前到准备阶段导致 existing 续跑红（D-177），已修复为仅在 `args.turnDeclaration && guardedScope` 时调用。
 
-**已知边界**：C8 serve 令牌门与真写门执法点未动（D-175）；e2e 全量面因 sibling 侧 env 退役（D-163）与本地部署配置初补（config/agent.yaml）仍红，失败集合不增判据由 A/B 对照满足（22 文件 / 86 用例）；ballot 第二写域证据仍为 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本），未升 vitest e2e（D-176 登记）。
+**已知边界**：C8 serve 令牌门与真写门执法点未动（D-175）；e2e 全量面因 sibling 侧 env 退役（D-163）与本地部署配置初补（config/agent.yaml）仍红，失败集合不增判据由 A/B 对照满足（22 文件 / 86 用例）；ballot 第二写域证据仍为 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本），未升 vitest e2e（D-178 登记）。

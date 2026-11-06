@@ -1688,7 +1688,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：波次 4 执行盘点、波次 5 门⑦检查前完成。
 - **状态**：待办。
 
-### D-173 · C4 宿主送达义务收口未接线（W5 尾程修复）
+### D-176 · C4 宿主送达义务收口未接线（W5 尾程修复）
 
 - **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/context.ts`。
 - **根因**：C4 交付了 `deliverFailure` / `policyOf` 纯函数，但 context.ts 仍以内联五路话术 throw ToolUserError，deliverFailure 在非测试代码零调用方；CAPABILITY_UNAVAILABLE / HARD_REJECTED 在 error-codes.ts 无独立条目，failure-delivery.ts 用硬编码占位话术 + `gap: 'no_error_code_entry'` 审计字段，构成第二份用户回复要求。
@@ -1697,7 +1697,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：W5 尾程。
 - **状态**：已修复（context.ts 接线 deliverFailure + error-codes.ts 补 DELEGATION_CAPABILITY_UNAVAILABLE / DELEGATION_HARD_REJECTED + failure-delivery.ts 改取 error-codes 单一来源）。
 
-### D-174 · C5 委派块结构化落地回归（materializeTaskInputs 提前到准备阶段）
+### D-177 · C5 委派块结构化落地回归（materializeTaskInputs 提前到准备阶段）
 
 - **位置**：`packages/agent/src/context.ts:1208`（prepareContextTask 中 materializeTaskInputs 调用）。
 - **根因**：C5 把 `materializeTaskInputs` 从执行阶段移到 prepareContextTask，导致 existing 续跑场景下非 UUID taskId（如测试用 'task_blocked'）触发 scratchDir 格式验证失败，production-wiring.test.ts「交接损坏且转录也缺失」用例红。
@@ -1734,3 +1734,33 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **附带登记**：12 个阈值缺省的数字级标定缺失（calls/seconds 线）——与 D-147 步数帽同款闭环二选一（数据标定 or 明确登记为未标定默认值），已在 architecture-laws「预算门标定（2026-11-06，W4）」表逐道登记。
 - **律法归属**：L5（误拦方向的自愈通道）+ 控制的标定审查第三问。
 - **归属波次 / 状态**：W5（推荐）；登记。W4 不先行硬修——硬修需要执行层先在协议里声明该字段，而现协议仅经 budget 回执的 weightBudget 间接暴露（接口文档 §4 定性「仅作呈现」，拿呈现字段当控制输入是第二份真相）。
+
+### D-178 · ballot 第二写域证据未升 vitest e2e（C10 第二写域闭环缺口）
+
+- **位置**：`tests/e2e/`、`scripts/eval/generic-mock.ts`。
+- **根因**：C10 第二写域（ballot）的端到端证据目前仅靠 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本直驱 dummy CLI），未升 vitest e2e；L4「换一个域 fshine 不用改代码」的证明力仅到夹具层。
+- **律法归属**：L4（换域不改代码）。
+- **闭环判据**：tests/e2e 内新增 ballot 第二写域 vitest e2e，或 execution-layer-admission.md 明确登记为「非 vitest e2e，由 generic-mock 一道门覆盖」并获 owner 认可。
+- **归属波次 / 限期**：W5 尾程登记；待 owner 确认是否升 vitest e2e 或维持 generic-mock 一道门。
+- **状态**：登记（C10 已完成 generic-mock 覆盖；vitest e2e 升级待决策）。
+
+### D-179 · C5 翻转点过程违规：golden/context.test 未同批翻转（W5 尾程留证）
+
+- **位置**：`packages/agent/a2a-cutover-golden.test.ts`、`packages/agent/context.test.ts`、`docs/debt-ledger.md`。
+- **根因**：C5 落地时违反 F5 与「两个显式翻转点」纪律：golden 第④项自 d5e645d 起红（1 例）、5971868 起 2 例红、至 15be41a 仍 2 例红，直到收尾 commit 750190e 才显式翻转——比方案规定的「C5 同 commit 翻转」晚 9 个 commit；context.test.ts 同样未在 C5 同批更新（该点 56 例红）。三处 e2e 确系 d5e645d 同批更新（符合⑩前半），但 golden/context.test 没有。
+- **律法归属**：F5（翻转点纪律）。
+- **闭环判据**：golden 第④项与 context.test.ts 已在 C5 收尾 commit 750190e 翻转，过程违规已留证（本条目 + git log 可追溯）。
+- **归属波次 / 限期**：W5 尾程留证；已修复。
+- **状态**：已修复，过程违规留证。
+
+### D-180 · C4 五类全覆盖的函数级限制 + guard-latent-declaration 未实现 + policyOf 无消费方
+
+- **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/pi-coding-driver.ts`、`packages/contracts/src/a2a-protocol.ts`。
+- **根因**：
+  1. `failureClassFor` 的生产入参只覆盖 runtime 五档（cancelled/timeout/model_transient/auth/executor_error），协议五类中的 CAPABILITY_UNAVAILABLE 与 HARD_REJECTED 无任何生产者（worker 侧结构化失败上报通道尚不存在），deliverFailure 的 needs / needsEnrichment 分支同样不可达。
+  2. `OperationDeclaration` 无 args schema 字段，`validateStructuredCall` 只查 operation 声明与 args 是对象，未声明参数名/类型/枚举值不 reject；generic-mock g-structured-undeclared-arg 用例缺失。
+  3. `policyOf` 导出无消费方。
+- **律法归属**：L2（措辞单一来源）+ L4（声明可守）。
+- **闭环判据**：worker 侧结构化失败上报通道落地后，CAPABILITY_UNAVAILABLE / HARD_REJECTED 有生产者；OperationDeclaration 补 args schema 后，validateStructuredCall 实现参数级 fail-closed；policyOf 有消费方。
+- **归属波次 / 限期**：W5 尾程登记；args schema 与结构化失败上报待后续波次。
+- **状态**：登记（函数级覆盖已达成，生产级覆盖待执行层配合）。

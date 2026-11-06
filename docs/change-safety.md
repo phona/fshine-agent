@@ -1563,16 +1563,16 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### fallback 退役判据（C9 的机械条件）
 
-`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。
+`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。**机械计数器**：`scripts/eval/count-a2a-fallback.ts` 读取 `.runtime/a2a-cutover.jsonl` 并输出 fallback 行数；CI 或本地跑满 20 次后该脚本输出 0 即满足计数条件。**三域新路径全绿**判据需要 17dz 兄弟仓前置（兄弟仓提供 stock 网关 + 全操作族覆盖），本仓确定性门内单独不可达，需与 17dz w5-tail 配对验证。
 
 ### 四个小裁示（owner 待确认，已带推荐；不堵 C0–C2，C9/C11 开工前需定）
 
 1. **Q9 第二写域名**：推荐 `ballot-platform`（非财税域、与 payroll.*/stock.*/dummy.* 零重叠，避免撞 leak-lint 的 FORBIDDEN 指纹与 L4 判据原文的 payroll 举例）；备选 booking-platform。
-   - **执行状态**：已采纳 ballot 命名，落点 = dummy-platform/bin/dummy.cjs 内 6 个 ballot 操作（与 dummy 共享状态机，未建独立 fixtures/ballot-platform/ 目录）；命名理由段已补 execution-layer-admission.md「ballot 第二写域证据」节 + D-175 登记。待 owner 确认共享状态机方案是否可接受。
+   - **执行状态**：已采纳 ballot 命名，落点 = dummy-platform/bin/dummy.cjs 内 6 个 ballot 操作（与 dummy 共享状态机，未建独立 fixtures/ballot-platform/ 目录）；命名理由段已补 execution-layer-admission.md「ballot 第二写域证据」节 + D-178 登记。待 owner 确认共享状态机方案是否可接受。
 2. **Q10 entities 投影规则**：推荐 DelegationBlock.entities 取四来源（当前消息 / Log / 平台响应 / 会话已确立实体）**全量并集**——执行层复核从宽，宿主不替它做步骤级裁剪；inputs 只带 FrozenTaskInput 的引用清单不带内容。
    - **执行状态**：偏离采纳——实现只取 platformEntities + sessionEntities（结构化字段），文本来源（currentMessage / quotedEvidence / referenceEvidence / platformResponses）全部排除；context.ts:1204-1207 已补偏离登记注释，理由 = 文本来源体积大且含噪声，结构化实体值已足够 worker 做范围判定。待 owner 确认。
 3. **Q11 网关文本识别回退退役时机**：`resolveGatewayText`/`gatewayTextPatterns` 的文本识别侧穿透验证随 C7 同批退役（推荐）；不留给 W1 补。
-   - **执行状态**：已达成（W1 C7b）。gatewayTextPatterns 全仓绝迹；resolveGatewayText 退为 fail-closed 校验器（platform-contract.ts）；C7 翻转点二已落地。
+   - **执行状态**：已达成（W1 C7b）。`gatewayTextPatterns` 函数仍导出并由 serve-gate.ts / plan-runtime.ts 消费（文本识别正则派生用），但 `GATEWAY_INVOCATION` 常量与文本识别回退语义已退役；`resolveGatewayText` 退为 fail-closed 校验器（platform-contract.ts），serve-gate.ts:224 注释「未注入时走遗留缺省」与 fail-closed 现实不符，需修正。C7 翻转点二已落地。
 4. **C11 范围**：只做关账核对（docs-reality 承诺指向 + 本节之外不新增改动），**不硬改名**——W1 已完成工具名参数化（RUN_EXECUTION_TASK_TOOL='run_task' + profile.toolName）与 Run17dzTaskArgs 别名退役，迁移门①（产品面 17dz=0）已达成，硬改名只剩断对外协议的成本。
    - **执行状态**：已达成（C11）。docs-reality.test.ts:125-131 Run17dzTaskArgs 绝迹断言绿；DelegationBlock 协议中性确认；本节未新增改动。
 
@@ -1582,3 +1582,28 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **W1 C7b 已达成 spawn 面 fail-closed 主体**：platform-contract.ts 不再持有 `GATEWAY_INVOCATION` 常量（注释区 :25-33）；`gatewayExecPathForProfile` 生产调用方 = 3（context.ts:582、plan-runtime.ts:126、apps/server/proposal-commit.ts:60）；`gatewayExecPath` 调用方 = 7（operation-labels.ts:88/223/268/389/476/547 + scripts/mock-commit-smoke.ts:57）——合计 10 个 spawn 消费点，与方案计数一致，但全部已是「未声明/非法即抛」，方案原文「静默落到 bin/17dz」的现状表述作废。golden 第⑥项按现行真实行为钉（fail-closed 已达成），C7 的翻转点相应改为「注释修正 + mock-commit-smoke 缺陷修复」。
 - **mock-commit-smoke.ts:57 既存缺陷**（登记，属 C7 收尾范围）：`gatewayExecPath(platformRoot)` 单参数调用缺 gateway，运行时报 `gatewayNotDeclaredError`（本会话 `node --import tsx` 实测）；根 tsconfig include 不含 scripts/ 故 typecheck 不拦。修法随 C7（补 gateway 入参或改 profile 驱动）。
 - **F2 基线记账**：本波起点实测 `npm run test -- --project unit` → **109 文件 / 1795 passed / 0 skipped**（W4 冻结点 105/1725+1 skip；只增不减满足——skipped 归零为前序波次修复所致，如实记录不追认为缺口）。
+
+### W5 新守卫变异留档（F3/R5， mutation-f3 要求）
+
+| 守卫 | 变异操作 | 预期结果 | 状态 |
+|---|---|---|---|
+| `a2a-cutover-golden.test.ts` 第④项（DelegationBlock 五字段） | 删除 `entities` 字段 | 对应断言红 | 已实测 |
+| `a2a-cutover-golden.test.ts` 第⑤项（failureClassFor 五档映射） | 把 auth 映射改成 NEEDS_INPUT | 对应断言红 | 已实测 |
+| `failure-delivery.test.ts` 五类话术 | 把 auth 话术改成 executor_error 话术 | 对应断言红 | 已实测 |
+| `context.ts` deliverFailure 接线 | 恢复旧路径 `throw new ToolUserError(delivery.userMessage)`（不挂码） | `isAuthDelegationFailure` 相关断言红 | 已实测（#1 回归） |
+| `pi-coding-driver.ts` structured_call 新路径 | 回滚 dummy.cjs call 子命令 | `g-structured-parity` 红 | 已实测（#2 回归） |
+| `gateway-text-recognition.test.ts` | 删掉 gatewayTextPatterns 断言 | 对应断言红 | 已实测 |
+
+### 验收⑫ commit 集合与方案对应关系说明
+
+方案 C1–C12 共 12 项，实际 commit 14 个：
+- `0ae18fe`（merge）内含 C1+C2+方案落档；
+- C3–C10 各一个独立 commit；
+- C11 无独立 commit，关账核对并入 `ccec18a` / `923928c`；
+- 另有 4 个方案外收尾 commit：`cabadae` / `15be41a` / `750190e` / `fbc9fba`。
+
+无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
+
+### 验收⑬口径校正
+
+基线 `migration/public-release` 的 `packages/agent/src` + `apps/server` 非测试 17dz 命中实测已为 0（W1 清场），本波维持 0，「82→下降」叙事属 W1 而非本波（不构成回归）。
