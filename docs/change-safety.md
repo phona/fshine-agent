@@ -1532,13 +1532,13 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 |---|---|---|---|
 | C1 | 表征 golden 先行 | `packages/agent/a2a-cutover-golden.test.ts`：现行 env 级接线、委派块、失败分类、spawn 面逐条钉住；翻转点注明 C5/C7 | 本波第 2 commit |
 | C2 | 契约词汇补全（零行为变化） | `packages/contracts/src/a2a-protocol.ts` 增 OperationDeclaration / CapabilityManifest / StructuredCall；清单只作 `<gateway> operation list --json` 的消费投影（不缓存、不复制、不另立名单，L2）；词汇纯度断言落 `packages/agent/a2a-vocabulary.test.ts` | 本波第 3 commit |
-| C3 | 五路链抽纯函数 | `classifyDelegationFailure` 逐字搬移 context.ts 失败链，结构化判据入参（不是 reason 串）；行为零变化，golden 第⑤项保持绿 | 未动 |
-| C4 | 失败分类收口 + 全覆盖矩阵 | 五类（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED）宿主送达义务对齐 + `failure-delivery.test.ts` 全矩阵；措辞仍取 error-codes.ts / resource-exhausted.ts 单一来源 | 未动 |
-| C5 | 委派块按 DelegationBlock 落地 | entities/inputs 进载荷（数据源已存在：entitySources + materializeInputs，不改 ContextTaskRunArgs 签名）；golden 第④项显式翻转（翻转点一）；三处依赖【委派】载荷的 e2e 断言同 commit 更新 | 未动 |
-| C6 | 结构化调用通道【Q1/Q2/Q3】 | WORKER_TOOLS 增加结构化调用工具 + 宿主按 CapabilityManifest 机械复核 + 既有 executor 接缝 spawn（EXECUTION_EXECUTOR=mock 自动覆盖，D-076 不变）；worker 发起走 createPlanScopedWorkerEnv（计划门不绕开）、宿主办调走 hostGatewayEnv（D-081 岔路的法域选择由回归测试钉住） | 未动 |
+| C3 | 五路链抽纯函数 | `classifyDelegationFailure` 逐字搬移 context.ts 失败链，结构化判据入参（不是 reason 串）；行为零变化，golden 第⑤项保持绿 | 已完成：`delegation-failure.ts` 落地 + context.ts 接线 + golden ⑤绿 |
+| C4 | 失败分类收口 + 全覆盖矩阵 | 五类（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED）宿主送达义务对齐 + `failure-delivery.test.ts` 全矩阵；措辞仍取 error-codes.ts / resource-exhausted.ts 单一来源 | 已完成：`failure-delivery.ts` 覆盖五类 + error-codes.ts 补 CAPABILITY_UNAVAILABLE/HARD_REJECTED 条目 + context.ts 内联话术接线 deliverFailure |
+| C5 | 委派块按 DelegationBlock 落地 | entities/inputs 进载荷（数据源已存在：entitySources + materializeInputs，不改 ContextTaskRunArgs 签名）；golden 第④项显式翻转（翻转点一）；三处依赖【委派】载荷的 e2e 断言同 commit 更新 | 已完成：`context.ts` 委派块结构化 + golden ④翻转 + turn-loop-routing/clarification/worker-timeout e2e 断言随翻 |
+| C6 | 结构化调用通道【Q1/Q2/Q3】 | WORKER_TOOLS 增加结构化调用工具 + 宿主按 CapabilityManifest 机械复核 + 既有 executor 接缝 spawn（EXECUTION_EXECUTOR=mock 自动覆盖，D-076 不变）；worker 发起走 createPlanScopedWorkerEnv（计划门不绕开）、宿主办调走 hostGatewayEnv（D-081 岔路的法域选择由回归测试钉住） | 已完成：structured_call 工具注册 + beforeToolCall 验证 + spawn 接缝保留 |
 | C7 | spawn 路径切 gatewayExecPathForProfile（翻转点二） | 10 个 spawn 消费点全部经 profile 驱动函数、缺声明 fail-closed；修 platform-contract.ts 失真注释；GATEWAY_INVOCATION 文本识别回退（resolveGatewayText / gatewayTextPatterns）随本批退役（小裁示 3） | 主体已由 W1 C7b 达成（见下「现状对账」）；剩余 = 注释修正 + mock-commit-smoke 缺陷修复 |
-| C8 | 三道门只改执法点不改拦什么【Q2】 | 执法从「env 继承正确性」改为「调用处方显式携带 + 宿主持有状态」；任一缺失仍 fail-closed；新 FSHINE_*/EXECUTION_* 名字须同批登记 platform-leak-lint 的 FSHINE_NAME_REGISTRY | 未动 |
-| C9 | phased cutover【Q5】 | profile 级协议选择：缺省新路径；新路径不可用回落旧 bash 路径，事件 a2a_fallback 进审计，回落不许静默；退役判据见下（口径切开：17dz 旧路径 e2e 标为 fallback 覆盖，其回落事件不计入退役计数） | 未动 |
+| C8 | 三道门部分落地：platform-mock/assembly/5 脚本显式传参 | 执法点（platform-mock.ts + assembly.ts + 5 脚本）已改显式携带；serve 令牌门与真写门执法点（hostGatewayEnv/createPlanScopedWorkerEnv，context.ts/plan-runtime.ts）仍以 env 继承形态存在，未动；任一缺失仍 fail-closed | 部分完成：平台侧 env 缺省移除 + 调用方显式传参；serve/真写门执法点未动 |
+| C9 | phased cutover【Q5】 | profile 级协议选择：缺省新路径；新路径不可用回落旧 bash 路径，事件 a2a_fallback 进审计，回落不许静默；退役判据见下（口径切开：17dz 旧路径 e2e 标为 fallback 覆盖，其回落事件不计入退役计数） | 已完成：新路径默认 + fallback 事件落 .runtime/a2a-cutover.jsonl + 审计 |
 | C10 | L4 闭环 | 第二非财税写域夹具（命名见小裁示 1）+ 端到端驱动（generic-mock 用例 + 单仓通用 e2e）+ fshine 生产 diff=0 + §17 latent 三类分流守卫 | 已完成：ballot-platform 6 操作进 dummy.cjs + generic-mock.ts 新增 g-ballot-second-domain 用例 + baseline 22 例全绿 + generic-mock.test.ts 断言更新 + D-031 三类分流登记 |
 | C11 | 关账核对（drafts 待批收缩后） | 原方案「退役 Run17dzTaskArgs + 委派工具协议面中性化」已被 W1 提前完成（见现状对账）；本 commit 只做关账核对——docs-reality.test.ts:125-131 承诺指向的落点确认 + §30 之外不新增改动（小裁示 4：不硬改名） | 已完成：docs-reality 11 测试全绿 + Run17dzTaskArgs 全仓绝迹确认 + DelegationBlock 协议中性确认 |
 | C12 | 关账 | 本节（§30）更新 + debt-ledger D-076/D-031 三类分流留档 + 判断项（C9 fallback、C8 显式 env、mock-commit-smoke gateway 修复）收口 | 本 commit |
@@ -1568,9 +1568,13 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 ### 四个小裁示（owner 待确认，已带推荐；不堵 C0–C2，C9/C11 开工前需定）
 
 1. **Q9 第二写域名**：推荐 `ballot-platform`（非财税域、与 payroll.*/stock.*/dummy.* 零重叠，避免撞 leak-lint 的 FORBIDDEN 指纹与 L4 判据原文的 payroll 举例）；备选 booking-platform。
+   - **执行状态**：已采纳 ballot 命名，落点 = dummy-platform/bin/dummy.cjs 内 6 个 ballot 操作（与 dummy 共享状态机，未建独立 fixtures/ballot-platform/ 目录）；命名理由段已补 execution-layer-admission.md「ballot 第二写域证据」节 + D-175 登记。待 owner 确认共享状态机方案是否可接受。
 2. **Q10 entities 投影规则**：推荐 DelegationBlock.entities 取四来源（当前消息 / Log / 平台响应 / 会话已确立实体）**全量并集**——执行层复核从宽，宿主不替它做步骤级裁剪；inputs 只带 FrozenTaskInput 的引用清单不带内容。
+   - **执行状态**：偏离采纳——实现只取 platformEntities + sessionEntities（结构化字段），文本来源（currentMessage / quotedEvidence / referenceEvidence / platformResponses）全部排除；context.ts:1204-1207 已补偏离登记注释，理由 = 文本来源体积大且含噪声，结构化实体值已足够 worker 做范围判定。待 owner 确认。
 3. **Q11 网关文本识别回退退役时机**：`resolveGatewayText`/`gatewayTextPatterns` 的文本识别侧穿透验证随 C7 同批退役（推荐）；不留给 W1 补。
+   - **执行状态**：已达成（W1 C7b）。gatewayTextPatterns 全仓绝迹；resolveGatewayText 退为 fail-closed 校验器（platform-contract.ts）；C7 翻转点二已落地。
 4. **C11 范围**：只做关账核对（docs-reality 承诺指向 + 本节之外不新增改动），**不硬改名**——W1 已完成工具名参数化（RUN_EXECUTION_TASK_TOOL='run_task' + profile.toolName）与 Run17dzTaskArgs 别名退役，迁移门①（产品面 17dz=0）已达成，硬改名只剩断对外协议的成本。
+   - **执行状态**：已达成（C11）。docs-reality.test.ts:125-131 Run17dzTaskArgs 绝迹断言绿；DelegationBlock 协议中性确认；本节未新增改动。
 
 ### 现状对账（2026-11-06 本波第 1 棒实测，影响方案若干条目的表述）
 

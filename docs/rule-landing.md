@@ -379,3 +379,19 @@
 **测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（Run17dzTaskArgs 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
 
 **已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与跨仓变量名挂的 W4 签已随 D-165 关账清空退役（2026-11-06）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。
+
+## 20. 委派块结构化 + 失败分类收口 + 三道门部分落地（W5 尾程，2026-11-06）
+
+**规则**：
+- C5 委派块从四行文本模板升级为 `DelegationBlock` 结构化 JSON（request / entities / workspace / inputs / protocolVersion 五字段），worker 请求走 `JSON.stringify(delegationBlock) + '\n\n' + guardedRequest.text` 合并形态；旧四行文本（【委派】/范围/工作区/协议版本）退役。
+- C4 失败分类收口：runtime 五档（cancelled / timeout / model_transient / auth / executor_error）通过 `failureClassFor` 映射到协议五类（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED），`deliverFailure` 按协议类选择用户话术——措辞单一来源（error-codes.ts / resource-exhausted.ts），error-codes.ts 补全 CAPABILITY_UNAVAILABLE / HARD_REJECTED 条目。
+- C8 三道门部分落地：platform-mock.ts + assembly.ts + 5 脚本移除 process.env 缺省，调用方显式传参；serve 令牌门（hostGatewayEnv）与真写门（createPlanScopedWorkerEnv）的 env 继承执法点仍在 context.ts / plan-runtime.ts，未动。
+
+**落地点**：
+- 委派块：`context.ts` 构造 `DelegationBlock`（entities 取 platformEntities + sessionEntities；inputs 经 materializeTaskInputs 物化）；golden ④五字段断言翻转 + 三处 e2e 断言随 commit 更新（turn-loop-routing / clarification / worker-timeout）。
+- 失败分类：`failure-delivery.ts` 覆盖五类协议分类；context.ts 失败 catch 块统一走 `deliverFailure`（auth / cancelled / timeout / model_transient / executor_error 全覆盖）；platform-leak-lint 协议失败分类常量（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED / cancelled / model_transient / executor_error）登记进 `LITERAL_IF_PROTOCOL_TOKENS`。
+- 三道门：platform-mock / assembly / 5 脚本显式携带 env；serve 令牌门与真写门执法点未动（D-175 登记待 owner 决策）。
+
+**测试与波次记录**：typecheck 0 错误 + unit 113 文件 / 1848 例全绿 + golden ④翻转 + failure-delivery.test.ts 全矩阵 + turn-loop e2e 断言随翻。materializeTaskInputs 提前到准备阶段导致 existing 续跑红（D-174），已修复为仅在 `args.turnDeclaration && guardedScope` 时调用。
+
+**已知边界**：C8 serve 令牌门与真写门执法点未动（D-175）；e2e 全量面因 sibling 侧 env 退役（D-163）与本地部署配置初补（config/agent.yaml）仍红，失败集合不增判据由 A/B 对照满足（22 文件 / 86 用例）；ballot 第二写域证据仍为 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本），未升 vitest e2e（D-176 登记）。

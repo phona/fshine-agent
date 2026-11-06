@@ -1688,6 +1688,33 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：波次 4 执行盘点、波次 5 门⑦检查前完成。
 - **状态**：待办。
 
+### D-173 · C4 宿主送达义务收口未接线（W5 尾程修复）
+
+- **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/context.ts`。
+- **根因**：C4 交付了 `deliverFailure` / `policyOf` 纯函数，但 context.ts 仍以内联五路话术 throw ToolUserError，deliverFailure 在非测试代码零调用方；CAPABILITY_UNAVAILABLE / HARD_REJECTED 在 error-codes.ts 无独立条目，failure-delivery.ts 用硬编码占位话术 + `gap: 'no_error_code_entry'` 审计字段，构成第二份用户回复要求。
+- **律法归属**：L2（措辞单一来源）。
+- **闭环判据**：context.ts 失败 catch 块统一走 deliverFailure；error-codes.ts 五档话术全齐；failure-delivery.ts 审计字段无 `gap` 占位。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：已修复（context.ts 接线 deliverFailure + error-codes.ts 补 DELEGATION_CAPABILITY_UNAVAILABLE / DELEGATION_HARD_REJECTED + failure-delivery.ts 改取 error-codes 单一来源）。
+
+### D-174 · C5 委派块结构化落地回归（materializeTaskInputs 提前到准备阶段）
+
+- **位置**：`packages/agent/src/context.ts:1208`（prepareContextTask 中 materializeTaskInputs 调用）。
+- **根因**：C5 把 `materializeTaskInputs` 从执行阶段移到 prepareContextTask，导致 existing 续跑场景下非 UUID taskId（如测试用 'task_blocked'）触发 scratchDir 格式验证失败，production-wiring.test.ts「交接损坏且转录也缺失」用例红。
+- **律法归属**：L3（回归测试钉住）。
+- **闭环判据**：existing 续跑时 materializeTaskInputs 不因非 UUID taskId 失败；新任务仍验证 scratchDir 格式。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：已修复（materializeTaskInputs 仅在 `args.turnDeclaration && guardedScope` 时调用）。
+
+### D-175 · C8 三道门部分落地：serve 令牌门与真写门执法点未动
+
+- **位置**：`packages/agent/src/context.ts`、`packages/agent/src/plan-runtime.ts`、`packages/agent/src/platform-mock.ts`、`packages/agent/src/assembly.ts`。
+- **根因**：C8（8302f5f）只移除 isPlatformMock/isCommitEnabled/ensureMockStatePath 的 process.env 缺省并改调用方显式传参（platform-mock.ts + assembly.ts + 5 脚本），serve 令牌门（hostGatewayEnv）与真写门（createPlanScopedWorkerEnv）的 env 继承执法点仍在 context.ts/plan-runtime.ts 未动，与方案「三道门执法点改显式携带+宿主持有状态」不符。
+- **律法归属**：L2 / 门②。
+- **闭环判据**：hostGatewayEnv / createPlanScopedWorkerEnv 的 env 读取点改为显式携带或宿主持有状态。
+- **归属波次 / 限期**：待定（owner 确认是否纳入本波或后续波次）。
+- **状态**：登记（部分完成，待 owner 决策）。
+
 ### D-173 · 执行层仓 CI 的真实 12 键 parity 未接线（W4 方案草案 D-154，程序级编号按执行序递补）
 
 - **位置**：17dz-platform 仓（执行层）。W4 C3 已落地一致性校验脚本与七态夹具（`scripts/check-generic-budget-protocol.mjs` + `test/test-budget-protocol.js`，分支 `w4-budget-protocol` 提交 `4f0e2ec`，基于其 origin/main `de41ae3`），但该仓 CI 尚未接线跑真实比对——本地 `npm test` 的 ⑦ 态在未设其检出根目录变量时大声说明「真实比对未跑」（非无声 skip，拒绝语义由 ⑤ 态钉住），真实 parity 目前仍是手动 pinned-ref 证据（2026-11-06 实测：fshine W4 检出 ↔ 17dz origin/main `de41ae3`，exit 0、12/12 一致）。
