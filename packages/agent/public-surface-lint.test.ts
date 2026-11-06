@@ -359,7 +359,7 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
   // b) change-safety 尾部为 §27–§30、W1–W5 在册
   const changeSafety = readFile('docs/change-safety.md');
   const hasW1ToW5 = ['W1', 'W2', 'W3', 'W4', 'W5'].every(w => changeSafety.includes(w));
-  const hasS27ToS30 = ['§27', '§28', '§29', '§30'].every(s => changeSafety.includes(s));
+  const hasS27ToS30 = ['## 27.', '## 28.', '## 29.', '## 30.'].every(s => changeSafety.includes(s));
   if (!hasW1ToW5 || !hasS27ToS30) {
     failures.push('b) docs/change-safety.md 尾部缺少 §27–§30 或 W1–W5 在册');
   }
