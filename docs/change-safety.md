@@ -1656,6 +1656,10 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | ⑤ | Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline） | Tier B 在册条目让它红 | **改错即红：成立**（将 TIER_A 并入 TIER_B 字段/stale 判据循环，Tier B 字段检查立刻红：六条 Tier A 条目缺 tag/closure/deadline） | 本节记录 |
 | ⑥ | README 目录表注入不存在的顶层目录 `nonexistent-dir-xyz` | 目录表缺失不红 | **改错即红：成立**（注入 `| \`nonexistent-dir-xyz\` |` 进目录表 → golden 测试红，missingDirs = ['nonexistent-dir-xyz']；目录表真空已堵实） | 本节记录 |
 
+| ⑦ | README 注入 17dz 字面量 | 断言①产品面零引用红 | **改错即红：成立**（README.md 末尾加 `17dz` → migration-gate 断言① FAIL，gate ① 命中 README.md:73；还原后复绿） | 本节记录 |
+| ⑧ | README 注入本地绝对路径（形如 `/home/<user>/projects/<repo>`） | 断言②本地秘密路径零入库红 | **改错即红：成立**（README.md 末尾加本地路径 → migration-gate 断言② FAIL，gate ② 命中 README.md；还原后复绿） | 本节记录 |
+| ⑨ | debt-ledger D-001 删 `归属波次 / 限期` 行 | 断言③台账三件套红 | **改错即红：成立**（删 D-001 的 `归属波次 / 限期` → migration-gate 断言③ FAIL，gate ③ 报 D-001 缺限期；还原后复绿） | 本节记录 |
+
 ### 未验项
 
 1. **e2e 集成验证**：波次起点基线（migration/public-release）实测 `npx vitest run tests/e2e/` = 37 文件 / 156 用例失败（根因：config/agent.yaml ENOENT 导致 36 文件 126 处根因同一错误 + 3 文件 30 处其他根因）；本波同环境 HEAD 实测同样 37 文件 / 157 失败（4 passed 为 harness-cursor 等不依赖平台的用例）。文件级失败集合完全相同、既有 156 条失败无一转绿/无一新增回归；用例级失败集合严格大于基线一条：波次新增的 HF-4（无平台环境因空派生表红，与既有 HF-1/HF-3 同因同错型）。**本波不跑，记录基线集合，不冒充已验。** 波次末 harness 已修复 import 期强读 config/agent.yaml 崩溃（config 缺失时 PLATFORM_ROOT/GATEWAY 走 null 回退，load* 函数返回空表不阻断 import），36 个 e2e 文件从「收集期即失败」退化为「收集成功 / 执行期因平台未配而响亮失败」——符合方案「未设环境变量的本地 e2e 还能不能跑」的实答（不能，但失败形态正确）。
