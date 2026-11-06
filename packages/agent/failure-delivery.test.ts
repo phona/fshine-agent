@@ -55,13 +55,13 @@ describe('failure-delivery：五类协议分类映射 + 宿主送达义务', () 
       expect(result.needsEnrichment).toBe(false);
     });
 
-    it('CAPABILITY_UNAVAILABLE：能力边界消息（当前路径缺口，error-codes.ts 尚无独立条目）', () => {
+    it('CAPABILITY_UNAVAILABLE：能力边界消息（error-codes.ts 单一来源）', () => {
       const result = deliverFailure(baseInput({
         classification: { protocolClass: 'CAPABILITY_UNAVAILABLE', subReason: 'executor_error' },
       }));
-      expect(result.userMessage).toBe('当前能力不足以完成该请求。');
+      expect(result.userMessage).toBe(toolUserErrorFor('DELEGATION_CAPABILITY_UNAVAILABLE').message);
       expect(result.auditFields.protocolClass).toBe('CAPABILITY_UNAVAILABLE');
-      expect(result.auditFields.gap).toBe('no_error_code_entry');
+      expect(result.auditFields.code).toBe('DELEGATION_CAPABILITY_UNAVAILABLE');
       expect(result.needsEnrichment).toBe(false);
     });
 
@@ -90,26 +90,25 @@ describe('failure-delivery：五类协议分类映射 + 宿主送达义务', () 
       expect(result.auditFields.code).toBe('DELEGATION_EXECUTOR_FAILURE');
     });
 
-    it('RESOURCE_EXHAUSTED：复用 renderResourceExhaustedReply（缺底账时降级）', () => {
+    it('RESOURCE_EXHAUSTED / timeout：保持 runtime.ts DELEGATION_TIMEOUT_FAILURE 兼容', () => {
       const result = deliverFailure(baseInput({
         classification: { protocolClass: 'RESOURCE_EXHAUSTED', subReason: 'timeout' },
         doneSteps: ['step1'],
       }));
-      expect(result.userMessage).toContain('已完成');
+      expect(result.userMessage).toBe(toolUserErrorFor('DELEGATION_TIMEOUT_FAILURE').message);
       expect(result.auditFields.protocolClass).toBe('RESOURCE_EXHAUSTED');
       expect(result.auditFields.subReason).toBe('timeout');
-      // 缺底账时 needsEnrichment = false，降级为无事实版本。
+      expect(result.auditFields.code).toBe('DELEGATION_TIMEOUT_FAILURE');
       expect(result.needsEnrichment).toBe(false);
-      expect(result.auditFields.degraded).toBe(true);
     });
 
-    it('HARD_REJECTED：拒绝结果消息（当前路径缺口，error-codes.ts 尚无独立条目）', () => {
+    it('HARD_REJECTED：拒绝结果消息（error-codes.ts 单一来源）', () => {
       const result = deliverFailure(baseInput({
         classification: { protocolClass: 'HARD_REJECTED', subReason: 'executor_error' },
       }));
-      expect(result.userMessage).toBe('请求被执行层拒绝。');
+      expect(result.userMessage).toBe(toolUserErrorFor('DELEGATION_HARD_REJECTED').message);
       expect(result.auditFields.protocolClass).toBe('HARD_REJECTED');
-      expect(result.auditFields.gap).toBe('no_error_code_entry');
+      expect(result.auditFields.code).toBe('DELEGATION_HARD_REJECTED');
       expect(result.needsEnrichment).toBe(false);
     });
 

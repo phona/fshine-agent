@@ -360,7 +360,7 @@ const TABLE: Record<string, CodeEntry> = {
   },
   FALLBACK_TIMEOUT: { text: '查询超时,请稍后再试' },
   FALLBACK_FAILURE: { text: '查询失败,请稍后再试或联系管理员' },
-  // 委派失败四档（按 failureClass 分流，2026-09 审计 F7）：auth 是唯一需要用户
+  // 委派失败六档（按 failureClass 分流，2026-09 审计 F7 扩 C4）：auth 是唯一需要用户
   // 动手的一类，不说"稍后再试"（那是错指令，重试多少次都没用）。
   DELEGATION_AUTH_FAILURE: { text: '平台登录态过期，需要重新登录后才能继续查询。' },
   DELEGATION_TIMEOUT_FAILURE: { text: '平台响应超时，请稍后重试。' },
@@ -373,6 +373,9 @@ const TABLE: Record<string, CodeEntry> = {
   // 补救过一次，手动重试的预期才是校准的。措辞零业务词、不出现内部机制名（重试次数、
   // 驱动、SDK 一律不进）。
   DELEGATION_MODEL_TRANSIENT_FAILURE: { text: '模型服务瞬时中断，已自动重试仍未成功，请稍后再试。' },
+  // C4 扩两档：能力边界与硬拒绝——error-codes.ts 单一来源，failure-delivery.ts 不复写措辞。
+  DELEGATION_CAPABILITY_UNAVAILABLE: { text: '当前能力不足以完成该请求。' },
+  DELEGATION_HARD_REJECTED: { text: '请求被执行层拒绝。' },
 
   // ── 能力类：写未开放（capability 声明，用户可行动）──────────────────────────
   // 唯一来源纪律：写关闭话术只有这一份。两个消费方共用——提案落账前的 capability 检查

@@ -13,7 +13,8 @@
  */
 
 import type { FailureClass, FailureClassPolicy } from '@fshine/contracts';
-import { FAILURE_CLASS_POLICIES, RESOURCE_EXHAUSTED_CLASS } from '@fshine/contracts';
+import { FAILURE_CLASS_POLICIES } from '@fshine/contracts';
+import { RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { toolUserErrorFor } from './error-codes';
 import { renderResourceExhaustedReply } from './resource-exhausted';
 import type { DelegationFailureClass } from './delegation-failure';
@@ -104,6 +105,15 @@ export function deliverFailure(input: DeliverFailureInput): DeliverFailureResult
 
   switch (protocolClass) {
     case 'NEEDS_INPUT': {
+      // cancelled 映射到 NEEDS_INPUT，但用户话术应是"已取消"而非"请补充信息"。
+      if (subReason === 'cancelled' && !needs) {
+        const userMessage = toolUserErrorFor('DELEGATION_CANCELLED').message;
+        return {
+          userMessage,
+          auditFields: { protocolClass, subReason, code: 'DELEGATION_CANCELLED' },
+          needsEnrichment: false,
+        };
+      }
       // 原样转达缺口，不改写、不折损。
       const userMessage = needs
         ? `缺少必要输入：${needs.reason}。建议：${needs.suggestion}。缺：${needs.missing.join('、')}。`
@@ -115,12 +125,10 @@ export function deliverFailure(input: DeliverFailureInput): DeliverFailureResult
       };
     }
     case 'CAPABILITY_UNAVAILABLE': {
-      // 当前路径缺口：error-codes.ts 尚无独立条目。
-      // 临时用通用话术，待执行层补充能力边界消息后替换。
-      const userMessage = '当前能力不足以完成该请求。';
+      const userMessage = toolUserErrorFor('DELEGATION_CAPABILITY_UNAVAILABLE').message;
       return {
         userMessage,
-        auditFields: { protocolClass, subReason, gap: 'no_error_code_entry' },
+        auditFields: { protocolClass, subReason, code: 'DELEGATION_CAPABILITY_UNAVAILABLE' },
         needsEnrichment: false,
       };
     }
@@ -152,6 +160,16 @@ export function deliverFailure(input: DeliverFailureInput): DeliverFailureResult
       };
     }
     case 'RESOURCE_EXHAUSTED': {
+      // timeout 子原因保持与 runtime.ts 的 DELEGATION_TIMEOUT_FAILURE 兼容：
+      // runtime.ts 按该话术识别并 enrich 为 RESOURCE_EXHAUSTED 终稿（底账 + 续跑入口）。
+      if (subReason === 'timeout') {
+        const userMessage = toolUserErrorFor('DELEGATION_TIMEOUT_FAILURE').message;
+        return {
+          userMessage,
+          auditFields: { protocolClass, subReason, code: 'DELEGATION_TIMEOUT_FAILURE' },
+          needsEnrichment: false,
+        };
+      }
       // 复用 renderResourceExhaustedReply；若缺少底账，降级为无事实版本。
       if (!platformTasks || !principalId || !sessionId) {
         return {
@@ -168,11 +186,10 @@ export function deliverFailure(input: DeliverFailureInput): DeliverFailureResult
       };
     }
     case 'HARD_REJECTED': {
-      // 当前路径缺口：error-codes.ts 尚无独立条目。
-      const userMessage = '请求被执行层拒绝。';
+      const userMessage = toolUserErrorFor('DELEGATION_HARD_REJECTED').message;
       return {
         userMessage,
-        auditFields: { protocolClass, subReason, gap: 'no_error_code_entry' },
+        auditFields: { protocolClass, subReason, code: 'DELEGATION_HARD_REJECTED' },
         needsEnrichment: false,
       };
     }
