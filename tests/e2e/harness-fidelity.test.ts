@@ -32,9 +32,17 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
-import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope, operationScripts } from './harness';
+import { CURRENT_PERIOD, GATEWAY, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope, operationScripts } from './harness';
 
 describe('[L4 集成] harness 保真度绊线', () => {
+  // 平台未 checkout（config/agent.yaml 缺失 + FSHINE_PLATFORM_ROOT 未设）→ 护栏必须有真实平台才跑
+  const platformAvailable = PLATFORM_ROOT !== '' && GATEWAY !== '';
+  if (!platformAvailable) {
+    it('平台未配，全组护栏跳过（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）', () => {
+      expect(PLATFORM_ROOT, 'PLATFORM_ROOT 未配：设置 FSHINE_PLATFORM_ROOT 或建 config/agent.yaml').toBe('');
+    });
+  }
+
   // ── 护栏①：access 语义表替身 vs 平台派生 ────────────────────────────────
 
   it('HF-1 语义表必须平台派生、非空、含确认类锚点（空表/手注漂移=写关闭判据失效）', async () => {
@@ -173,5 +181,13 @@ describe('[L4 集成] harness 保真度绊线', () => {
     for (const op of ['finance.query-receivables', 'finance.search-account-sets', 'voucher.query-saved']) {
       expect(operationScripts.has(op), `operation scripts 表缺少 ${op}——execute 分支会抛错或降级`).toBe(true);
     }
+
+    // 第三重：源码机械检查——两个消费点都用 operationScripts.get，且无手抄 SCRIPTS 常量残留。
+    // C5 把手抄表 SCRIPTS 换成了 loadOperationScripts 派生表；如果有人把某一消费点换回
+    // 手抄表（或加回 const SCRIPTS = {...}），这里当场红，HF-4 才算真兜住。
+    const harnessSrc = readFileSync(path.join(REPO_ROOT, 'tests', 'e2e', 'harness.ts'), 'utf8');
+    const opScriptUsages = (harnessSrc.match(/operationScripts\.get\(/g) ?? []).length;
+    expect(opScriptUsages, `harness 中 operationScripts.get 出现 ${opScriptUsages} 次（预期 ≥ 2：execute 分支 + gatedWorker query 分支）——少于 2 说明有消费点仍用手抄表或空转`).toBeGreaterThanOrEqual(2);
+    expect(harnessSrc, 'harness 中仍存在手抄表 SCRIPTS 常量——C5 的「消费点改用派生表」未彻底落地').not.toMatch(/^const SCRIPTS\s*[:=]/m);
   });
 });

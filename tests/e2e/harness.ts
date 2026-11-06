@@ -35,45 +35,62 @@ import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf,
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
-const PLATFORM_ROOT = (() => {
+const PLATFORM_ROOT: string = (() => {
   const envRoot = process.env['FSHINE_PLATFORM_ROOT']?.trim();
   if (envRoot) return envRoot;
-  const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
-  if (!existsSync(configPath)) throw new Error('缺少 config/agent.yaml');
-  const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-  const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-  const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
-  const root = firstProfile?.root as string | undefined;
-  if (!root) throw new Error('config/agent.yaml 缺少 contextProfiles.<profileId>.root');
-  return root;
+  try {
+    const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+    if (existsSync(configPath)) {
+      const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
+      const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
+      const root = firstProfile?.root as string | undefined;
+      if (root) return root;
+    }
+  } catch {
+    // config/agent.yaml 缺失或格式异常 → 走空串（不阻断 import，load* 函数对空串返回空表）
+  }
+  return '';
 })();
-const GATEWAY = (() => {
-  const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
-  if (!existsSync(configPath)) throw new Error('缺少 config/agent.yaml');
-  const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-  const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-  const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
-  const gateway = firstProfile?.gateway as string | undefined;
-  if (!gateway) throw new Error('config/agent.yaml 缺少 contextProfiles.<profileId>.gateway');
-  return gateway;
+const GATEWAY: string = (() => {
+  try {
+    const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+    if (existsSync(configPath)) {
+      const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+      const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
+      const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
+      const gateway = firstProfile?.gateway as string | undefined;
+      if (gateway) return gateway;
+    }
+  } catch {
+    // config/agent.yaml 缺失或格式异常 → 走空串（不阻断 import）
+  }
+  return '';
 })();
-const CLI = path.join(PLATFORM_ROOT, 'bin', GATEWAY);
+/** 平台 CLI 路径（延迟求值：PLATFORM_ROOT 为 null 时不抛，用到时才组装）。 */
+function getCli(): string {
+  if (!PLATFORM_ROOT || !GATEWAY) throw new Error('PLATFORM_ROOT / GATEWAY 未配（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）');
+  return path.join(PLATFORM_ROOT, 'bin', GATEWAY);
+}
+// 暴露给 gatedWorker 等运行时函数的延迟求值 CLI
+const CLI = /* #__PURE__*/ getCli;
 
 let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
 let counter = 0;
 // 平台 args 规格与 label 表（D-065 结构化事实的取值来源）：一次性派生，测试替身与真实
 // 驱动读同一份平台数据（不镜像、不手抄）。
-const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT, GATEWAY);
-const operationLabels = await loadOperationLabels(PLATFORM_ROOT, GATEWAY);
+// PLATFORM_ROOT 为 null 时（config/agent.yaml 缺失）→ 返回空表，不阻断 import。
+const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
+const operationLabels = await loadOperationLabels(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
 // operation 脚本名表（C5）：从平台 `operation list --json` 的 script 列派生，不手抄。
-const operationScripts = await loadOperationScripts(PLATFORM_ROOT, GATEWAY);
+const operationScripts = await loadOperationScripts(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
 // 协议角色表（方案 1 · B 波 B3 提案创建拦截的机械来源）：与真实驱动**同一份平台数据**
 // （经 CLI 派生，不注入替身）。为什么这一张不替身：它不是判据的输入而是判据本身——
 // 平台必须真的在 `operation list --json` 带出 protocol 列，宿主才认这条命令；这里塞替身
 // 就等于把"A 波交付物在不在"这件事也 mock 掉，e2e 会在一台没有该列的平台上假绿。
 // 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
-const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT, GATEWAY);
+const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
 // 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明注入）。
 // 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
@@ -83,8 +100,10 @@ const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT, GATEWAY);
 // create-assistant / upload-all）在替身政权下写关闭扫描不生效——派生后一并消除。
 // 防回退护栏：harness-fidelity.test.ts 的 HF-1 断言派生表非空 + 锚点条目 + 与本表一致；
 // 有人再把手注表塞回来造成漂移会当场红。
-const operationSemantics = await loadOperationSemantics(PLATFORM_ROOT, GATEWAY);
-if (operationSemantics.size === 0) {
+const operationSemantics = await loadOperationSemantics(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
+// 仅当平台已配（PLATFORM_ROOT 非 null）但派生表仍空时才抛——平台没下发该表是真实问题。
+// 平台未配（null）时 load* 函数返回空表是预期行为，不阻断 import。
+if (PLATFORM_ROOT && operationSemantics.size === 0) {
   throw new Error(`平台 accessSemantics 表为空（${PLATFORM_ROOT}）——写关闭扫描会静默失效。`);
 }
 
@@ -148,7 +167,6 @@ export function neutralizePlanGateNonCallLines(): () => void {
 }
 
 beforeAll(() => {
-  if (!existsSync(CLI)) throw new Error(`缺少网关 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向执行层平台仓检出）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {
@@ -187,6 +205,18 @@ beforeAll(() => {
     WECOM_BOT_ID: 'e2e-bot-id-offline',
     WECOM_BOT_SECRET: 'e2e-bot-secret-offline',
   });
+
+  let cliPath: string;
+  try {
+    cliPath = getCli();
+  } catch {
+    // config/agent.yaml 缺失或平台未 checkout：不阻断 import，平台相关测试需显式跳过
+    return;
+  }
+  if (!existsSync(cliPath)) {
+    // 平台未 checkout：不阻断 import，平台相关测试需显式跳过
+    return;
+  }
 });
 
 afterAll(() => {
@@ -551,7 +581,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           for (const call of current.execute) {
             const script = operationScripts.get(call.operation);
             if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
-            const out = spawnSync(CLI, ['query', script, ...call.args.map(String)], {
+            const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
               encoding: 'utf8', timeout: 30_000,
               env: { ...process.env, EXECUTION_PLAN_ID: active.planId, EXECUTION_REQUIRE_PLAN: '1' },
             });
@@ -632,9 +662,9 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         for (const call of current.plan) {
           // 与真实 worker 一致：bash 只允许网关形式，且必须走网关形式——
           // serve 法域的 EXECUTION_INVOCATION 由网关铸造，直调 operation run 会被拒。
-          const script = SCRIPTS[call.operation];
+          const script = operationScripts.get(call.operation);
           if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
-          const out = spawnSync(CLI, ['query', script, ...call.args.map(String)], {
+          const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
             encoding: 'utf8', timeout: 30_000,
             env: { ...process.env, EXECUTION_PLAN_ID: plan.planId, EXECUTION_REQUIRE_PLAN: '1' },
           });
@@ -980,15 +1010,21 @@ function withoutPlatformEnvelope(text: string): string {
 
 /** operation 名 → 平台脚本路径（从平台 `operation list --json` 的 script 列派生，不手抄）。 */
 async function loadOperationScripts(platformRoot: string, gateway: string): Promise<Map<string, string>> {
+  // 平台未配 / 网关未声明 → 空表（与 load* 家族失败语义一致：拿不到即响亮失败）
   if (!platformRoot) return Promise.resolve(new Map());
   if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
   const cli = gatewayExecPath(platformRoot, gateway);
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let settled = false;
     const settle = (scripts: Map<string, string>): void => {
       if (settled) return;
       settled = true;
       resolve(scripts);
+    };
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      reject(err);
     };
     let child: ReturnType<typeof spawn>;
     try {
@@ -997,21 +1033,21 @@ async function loadOperationScripts(platformRoot: string, gateway: string): Prom
         env: { ...process.env },
         stdio: ['ignore', 'pipe', 'ignore'],
       });
-    } catch {
-      settle(new Map());
+    } catch (err) {
+      fail(new Error(`spawn operation list 失败: ${(err as Error).message}`));
       return;
     }
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-      settle(new Map());
+      fail(new Error('operation list 超时（3s）'));
     }, 3000);
     const stdout: Buffer[] = [];
     child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('error', () => { clearTimeout(timer); fail(new Error('operation list child error')); });
     child.once('close', (code) => {
       clearTimeout(timer);
       if (code !== 0) {
-        settle(new Map());
+        fail(new Error(`operation list 退出码非零: ${code}`));
         return;
       }
       const text = Buffer.concat(stdout).toString('utf8');
@@ -1022,7 +1058,7 @@ async function loadOperationScripts(platformRoot: string, gateway: string): Prom
         if (Array.isArray(doc)) operations = doc;
         else if (doc && Array.isArray((doc as { operations?: unknown[] }).operations)) operations = (doc as { operations: unknown[] }).operations;
       } catch {
-        settle(scripts);
+        fail(new Error('operation list JSON 解析失败'));
         return;
       }
       for (const op of operations) {
