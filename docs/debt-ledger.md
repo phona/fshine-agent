@@ -1742,7 +1742,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：L4（换域不改代码）。
 - **闭环判据**：tests/e2e 内新增 ballot 第二写域 vitest e2e，或 execution-layer-admission.md 明确登记为「非 vitest e2e，由 generic-mock 一道门覆盖」并获 owner 认可。
 - **归属波次 / 限期**：W5 尾程。
-- **状态**：已修复（closure via 选项 2：execution-layer-admission.md 已登记「非 vitest e2e，由 generic-mock 一道门覆盖」；tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；generic-mock g-ballot-second-domain 为有效证据）。
+- **状态**：登记，待 owner 认可（closure via 选项 2：execution-layer-admission.md 已登记「非 vitest e2e，由 generic-mock 一道门覆盖」；tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；generic-mock g-ballot-second-domain 为有效证据；但 D-178 自身闭环判据要求「并获 owner 认可」，目前无 owner 认可留痕，故状态为登记待认可）。
 
 ### D-181 · 17dz 集成 e2e 跨仓配对红（C6↔P1、C8↔P4 环境变量重命名不兼容）
 
