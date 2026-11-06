@@ -115,7 +115,7 @@ npm test -- tests/e2e/turn-loop
 
 - 真实企微收发、长连接稳定性、Markdown 渲染（5.2）
 - 真实执行层返回结果的查询一致性与金额一致性
-- 写操作两步确认的真实落账（§4.1/4.2，需 `FSHINE_REAL_COMMIT=1`）
+- 写操作两步确认的真实落账（归执行层仓库持有，需 `FSHINE_REAL_COMMIT=1`；见文末「已移出事项」）
 - 真实模型下的委派合规率：日志关注 `turn_declaration`、`route_declaration_missing` 与 `reference_evidence_injected`（宿主主动回溯的注入条数/截断）
 
 ### 8.4 文件消息的气泡归属（文件收据波，mock 证不了）

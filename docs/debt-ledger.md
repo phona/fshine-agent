@@ -1773,3 +1773,48 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：worker 侧结构化失败上报通道落地后，CAPABILITY_UNAVAILABLE / HARD_REJECTED 有生产者；OperationDeclaration 补 args schema 后，validateStructuredCall 实现参数级 fail-closed；policyOf 有消费方。
 - **归属波次 / 限期**：W5 尾程登记；根因第 1、3 条待后续波次。
 - **状态**：根因第 2 条已修复（da36f44）；根因第 1、3 条仍登记待后续波次。
+
+### D-181 · HF-4 第三重源码检查的 import 期死代码与平台未配噪音
+
+- **位置**：`tests/e2e/harness-fidelity.test.ts:188`（HF-4 第三重源码检查）。
+- **根因**：C5 落地 HF-4 第三重时遗漏了 `readFileSync` 与 `REPO_ROOT` 的 import/定义，导致平台可用环境下实跑即抛 `readFileSync is not defined`；平台未配时被第一重空表断言掩盖。此外，HF-1..4 未按 `platformAvailable` 条件化，平台未配时整组照跑照红（HF-1/2/3 在基线同因已红，HF-4 为新增噪音）。
+- **律法归属**：守卫弱点（门① 机械化）。
+- **闭环判据**：① `readFileSync`/`REPO_ROOT` 导入与定义在场，平台可用环境下第三重可机械判定；② HF-1..4 按 `platformAvailable` 条件化，平台未配时整组跳过不产生噪音。
+- **归属波次 / 限期**：波次 4。
+- **状态**：登记（① 未成立：readFileSync 错模块导入 + describe 未闭合两条新伤导致 import 崩；② 待本波或后续波次落地）。
+
+### D-182 · e2e 扫描面外文件 plan-awareness.test.ts 的实例路径硬编码
+
+- **位置**：`tests/e2e/plan-awareness.test.ts:21-22`（`path.resolve(__dirname,'..','..','..','17dz-platform')` 与 `bin/17dz`）。
+- **根因**：产品面守卫扫描面只含 `tests/e2e/harness.ts`，`tests/e2e` 其余文件按 openDecisions #5 口径排除（该口径自述「需确认」，无任何台账登记）。plan-awareness.test.ts 仍硬编码兄弟仓实例路径与 CLI 名，e2e 会真实 spawn 兄弟仓 CLI。
+- **律法归属**：扫描面缺口（门① 机械化）+ 范围决策未登记。
+- **闭环判据**：① 将 plan-awareness.test.ts 纳入扫描面并清零实例路径；或 ② 在 openDecisions / debt-ledger 中正式登记「tests/e2e 其余文件排除在扫描面外」的决策与限期。
+- **归属波次 / 限期**：波次 4 登记；待收口波或 W5 闭环。
+- **状态**：登记（本波确认缺口存在，不硬修——属范围决策，非 acceptance 违背）。
+
+### D-183 · public-surface-lint F3 变异①：scripts/** 扫描面非 .ts 文件覆盖依赖 TIER_B 手动登记
+
+- **位置**：`packages/agent/public-surface-lint.test.ts` scanSurface（scripts/** 用 walkAll，其余目录用 walk 只扫 .ts）。
+- **根因**：F3 变异① 把 scripts/** 从 walkAll 改成 walk 后，表外命中不红——因为 scripts 下非 .ts 文件的 17dz 命中已在 TIER_B 在册，fileMatchesNeedle 直接读文件内容，扫描面变更不影响 stale 判定。扫描面自身对 scripts/ 下 .md/.jsonl/.sh 的覆盖依赖 TIER_B 手动登记，而非扫描面自身完整性机械保证。
+- **律法归属**：守卫弱点（门① 机械化）。
+- **闭环判据**：scripts/** 下新增未登记文件含 17dz 命中时，守卫能独立捕获；或将扫描面逻辑改为对 scripts/ 也全文件类型扫描。
+- **归属波次 / 限期**：迁移完成前。
+- **状态**：登记（F3 变异已留档，弱点已确认）。
+
+### D-184 · public-surface-lint F3 变异④：BUSINESS_WORD_RE 词表删词不产生可观测失败
+
+- **位置**：`packages/agent/platform-leak-lint.test.ts`（BUSINESS_WORD_RE）+ `packages/agent/public-surface-lint.test.ts` 业务词守卫。
+- **根因**：F3 变异④ 删掉 BUSINESS_WORD_RE 的「期间」后，含该词的文档不再红——因为当前 2 处命中均在 BUSINESS_WORD_ALLOWLIST 内，删正则后无未归属命中可触发。守卫对词表收缩无感知。
+- **律法归属**：守卫弱点（门① 机械化）。
+- **闭环判据**：词表删词后应有至少一处命中不再被 allowlist 覆盖，从而产生可观测失败；或守卫改为逐词命中计数而非全正则匹配。
+- **归属波次 / 限期**：迁移完成前。
+- **状态**：登记（F3 变异已留档，弱点已确认）。
+
+### D-185 · public-surface-lint F3 变异⑤：Tier A 清零判据与 Tier B 合并后无 stale 条目可触发失败
+
+- **位置**：`packages/agent/public-surface-lint.test.ts` Tier A/Tier B 分层判据。
+- **根因**：F3 变异⑤ 把 Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline）后，Tier B 在册条目让它红——但 Tier A 当前无命中，合并判据后无 stale 条目可触发失败。判据正确性依赖 Tier A 当前零命中的事实，无独立机械验证。
+- **律法归属**：守卫弱点（门① 机械化）。
+- **闭环判据**：Tier A 新增至少一条 stale 条目后，合并判据能正确红；或 Tier A 判据保持独立且与 Tier B 分层验证。
+- **归属波次 / 限期**：迁移完成前。
+- **状态**：登记（F3 变异已留档，弱点已确认）。
