@@ -658,7 +658,7 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
 
     const requiresPlan = typeof access === 'string' && accessTable.has(access)
       ? (accessTable.get(access)!.plan)
-      : false;
+      : true;
 
     const effectList = Array.isArray(effects)
       ? effects.filter((e): e is string => typeof e === 'string')
