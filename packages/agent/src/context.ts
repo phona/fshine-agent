@@ -33,6 +33,7 @@ import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
 import { classifyDelegationFailure } from './delegation-failure';
+import { failureClassFor, deliverFailure } from './failure-delivery';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -1637,6 +1638,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           isPlatformAuthError,
           error,
         });
+        const classified = failureClassFor(failureClass);
         console.info(JSON.stringify({
           event: 'delegation_span',
           requestId: ctx.trusted.requestId,
@@ -1644,6 +1646,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           durationMs: Date.now() - delegationStart,
           outcome: 'failed',
           failureClass,
+          protocolClass: classified.protocolClass,
           // 失败前已产生的部分转录同样计入（超时/取消前 worker 真实消耗过的 token）；
           // result 缺席（驱动没返回过）时字段缺席。
           ...(result ? usageFieldsOf(result.messages) : {}),
@@ -1652,6 +1655,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           event: 'subagent_task_failed',
           taskId,
           failureClass,
+          protocolClass: classified.protocolClass,
           errorType: error instanceof Error ? error.name : 'UnknownError',
           // 失败原因原文截断 160 字符（波次C；先例：platform_task_outcome_writeback_failed
           // 带 message）——errorType 只有 Error 这类名字时，原因一个字都不该再丢。
