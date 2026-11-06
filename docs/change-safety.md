@@ -1593,7 +1593,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 **本节性质**：波次 4 的执行关账记录。波次方案在 `/tmp/pp-waves-c.json`（waveId=波次 4）；本节的防线表、每 commit 实测记录、F3 变异留档表与未验项格式对齐 §24。
 
-**就绪检查四项符合情况**（验收项 1）：a) roadmap 对 W1–W5 零记载 → 不满足；b) change-safety 尾部为 §27–§30、W1–W5 在册 → 满足；c) AGENTS.md:25 仍自述预算档位在 17dz → 不满足；d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件全 0 命中 → 不满足。四项仅 b 满足，漂移已登记 D-179，未硬开跑前阻塞。
+**就绪检查四项符合情况**（验收项 1，已落地为门禁 `public-surface-lint.test.ts` → `acceptance ①`）：a) roadmap 对 W1–W5 零记载 → 不满足；b) change-safety 尾部为 §27–§30、W1–W5 在册 → 满足；c) AGENTS.md:25 仍自述预算档位在 17dz → 不满足；d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件全 0 命中 → 不满足。四项仅 b 满足，漂移已登记 D-179，门禁当前 fail（3 项缺口）。波次已硬开跑属历史事实，门禁已补堵后续波次。
 
 ### 防线表
 
@@ -1630,16 +1630,17 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 |---|---|---|---|---|
 | ① | scanSurface scripts/** 改用 walk（只扫 .ts，漏 .md/.jsonl/.sh） | 表外命中不再红 | **改错即红：未成立**（scripts 下非 .ts 文件的 17dz 命中已在 TIER_B 在册，fileMatchesNeedle 直接读文件内容，扫描面变更不影响 stale 判定；守卫弱点已登记为潜在洞） | 本节记录 |
 | ② | golden 双向守卫移除 + README 删 typecheck | README 命令缺失不红 | **改错即红：成立**（双向守卫缺失时删 typecheck → 测试 PASS；守卫在位时删 typecheck → golden 测试 FAIL；守卫有效） | 本节记录 |
-| ③ | HF-4 第三重源码检查移除 + 加回 const SCRIPTS 手抄表 | 加回手抄表不红 | **改错即红：成立**（HF-4 源码检查已落地：`operationScripts.get(` 出现次数 ≥ 2 + 无 `const SCRIPTS` 常量；因 harness-fidelity 在本环境因 import 期 config/agent.yaml 缺失而无法完整收集，全量验证需兄弟仓环境，已在 D-181 登记） | 本节记录 |
+| ③ | HF-4 第三重源码检查移除 + 加回 const SCRIPTS 手抄表 | 加回手抄表不红 | **改错即红：未成立**（HF-4 第三重源码检查在工作区因 readFileSync 错模块导入而 esbuild Transform failed，HEAD 态平台未配时被第一重空表断言掩盖，两种环境都不能机械判定消费点形态；D-181 已登记该守卫弱点） | 本节记录 |
 | ④ | BUSINESS_WORD_RE 删「期间」 | 含该词的文档不再红 | **改错即红：未成立**（当前扫描范围内「期间」的 2 处命中均在 BUSINESS_WORD_ALLOWLIST 内，删正则后无未归属命中可触发；守卫弱点已登记） | 本节记录 |
 | ⑤ | Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline） | Tier B 在册条目让它红 | **改错即红：未成立**（Tier A 当前无命中，合并判据后无 stale 条目；守卫弱点已登记） | 本节记录 |
+| ⑥ | README 目录表注入不存在的顶层目录 `nonexistent-dir-xyz` | 目录表缺失不红 | **改错即红：成立**（注入 `| \`nonexistent-dir-xyz\` |` 进目录表 → golden 测试红，missingDirs = ['nonexistent-dir-xyz']；目录表真空已堵实） | 本节记录 |
 
 ### 未验项
 
-1. **e2e 集成验证**：波次起点基线（migration/public-release）实测 `npx vitest run tests/e2e/` = 38 文件 / 156 用例失败（根因：config/agent.yaml ENOENT 导致 37 文件 126 处根因同一错误 + 3 文件 30 处其他根因）；本波同环境 HEAD 实测同样 38 文件 / 156 失败（3 passed 为 harness-cursor 等不依赖平台的用例）。**本波不跑，记录基线集合，不冒充已验。** 波次末 harness 已修复 import 期强读 config/agent.yaml 崩溃（config 缺失时 PLATFORM_ROOT/GATEWAY 走 null 回退，load* 函数返回空表不阻断 import），36 个 e2e 文件从「收集期即失败」退化为「收集成功 / 执行期因平台未配而响亮失败」——符合方案「未设环境变量的本地 e2e 还能不能跑」的实答（不能，但失败形态正确）。
+1. **e2e 集成验证**：波次起点基线（migration/public-release）实测 `npx vitest run tests/e2e/` = 37 文件 / 156 用例失败（根因：config/agent.yaml ENOENT 导致 36 文件 126 处根因同一错误 + 3 文件 30 处其他根因）；本波同环境 HEAD 实测同样 37 文件 / 157 失败（4 passed 为 harness-cursor 等不依赖平台的用例）。文件级失败集合完全相同、既有 156 条失败无一转绿/无一新增回归；用例级失败集合严格大于基线一条：波次新增的 HF-4（无平台环境因空派生表红，与既有 HF-1/HF-3 同因同错型）。**本波不跑，记录基线集合，不冒充已验。** 波次末 harness 已修复 import 期强读 config/agent.yaml 崩溃（config 缺失时 PLATFORM_ROOT/GATEWAY 走 null 回退，load* 函数返回空表不阻断 import），36 个 e2e 文件从「收集期即失败」退化为「收集成功 / 执行期因平台未配而响亮失败」——符合方案「未设环境变量的本地 e2e 还能不能跑」的实答（不能，但失败形态正确）。
 2. **F6 探针基线 diff**：需要真实 LLM 授权，本波未获授权未跑。
 3. **exposure-lint 扩展**：凭据/token/主机名三类新增守卫断言，属 C9 登记项 D-180，实际扩展待波次 4 后续或波次 5 落地。
 4. **rule-landing 全量中性化**：C9 只同步「波次 4 主张变更」涉及的行，rule-landing 剩余 30 处（D-169）按 Tier B 在册，待收口波清零。
 5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 仍自述 W4 未完成——属于前置波次责任，本波登记漂移（D-179）但不硬修文档。
 
-6. **unit 基线**：波次起点 `npx vitest run packages/ apps/` = 105 unit 文件（含 e2e 标签的 fixtures 在内）；本波 unit 文件计数同 105。波次末波次专属的 public-surface-lint 全绿（9/9），platform-leak-lint 全绿（4/4），harness-fidelity 因 import 期 config/agent.yaml 缺失而跳过（见未验项 1）。
+6. **unit 基线**：波次起点 `npx vitest run packages/ apps/` = 105 unit 文件（含 e2e 标签的 fixtures 在内）；本波 unit 文件计数同 105。`npx vitest run --project unit` 基线 111 文件 / 1825 passed / 0 skipped；HEAD 112 文件 / 1834 passed / 0 skipped。F2「只增不减」方向成立（HEAD 112 文件/1834 passed/0 skipped ≥ 记录值 105/1825/0）。波次末波次专属的 public-surface-lint 全绿（9/9），platform-leak-lint 全绿（4/4），harness-fidelity 因平台未配而响亮失败（HF-1/2/3 空派生表红、HF-4 平台未配跳过执行期断言，见未验项 1）。
