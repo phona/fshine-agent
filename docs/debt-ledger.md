@@ -35,6 +35,7 @@
 | 律法归属 | L1–L7 之一；`元` = 先于七律法的核实纪律 |
 | 闭环判据 | 机械可验的关账条件（ grep 计数 / 测试红绿 / 走查结果 ） |
 | 建议波次 | Wave 1–4；Wave 1 内注明建议 Lane |
+| 限期 | 关账的时间/波次约束；无期限约束显式写「无」 |
 | 状态 | `待办` / `已关` / `接受不修`（必须带理由） |
 
 **四标签归属制度**（先于一切违例清单存在）：台账里每条痕迹必须挂且仅挂一类——`警职执法`（守卫/解析器本身）、`防御排除`（删它=防御变聋）、`平台下发`（文本由执行层数据携带）、`遗留待清`（已知该走还没走）。漏挂标签比违例本身更危险。
@@ -71,7 +72,7 @@
 
 **闭环判据**：本台账每条债的「位置」字段都附可复现核实方式；本台账之后新增任何条目，若不含核实方式，视为未完成条目。
 
-**建议波次**：Wave 1（本条即落地）。
+**归属波次 / 限期**：Wave 1（本条即落地）。
 
 **状态**：待办（纪律已立，待 Wave 4 关账复核时验证"本台账是否真的没有未核实断言"）。
 
@@ -110,7 +111,7 @@
 - **根因**：persona 把宿主定位成"财务助手"——领域定语住进了编排层。亲和力本应由每回合注入的 business skill 提供，不靠 persona 声明身份。
 - **律法归属**：L1。
 - **闭环判据**：该行不含任何领域定语（改为"面向用户的主 Agent"）；`grep -rn "财务" packages/*/src apps scripts` 在非测试 src 零命中（需先把 `财务` 加进 `BUSINESS_WORD_RE`，见 D-005）。
-- **建议波次**：Wave 1 · Lane C④。
+- **归属波次 / 限期**：Wave 1 · Lane C④。
 - **状态**：待办。
 - **已关（2026-10-16，docs-reality 对账守卫落地时核实）**：persona 已改「面向用户的主 Agent」，「财务助手」在宿主 src 零命中（守卫 = `packages/agent/docs-reality.test.ts`）。判据原文的 `grep "财务" packages/*/src apps scripts 零命中` 按字面不可达——history-tools.ts 两处"实时财务查询/历史财务结果"是边界框架文案，leak-lint 已挂"遗留待清"（待改中性措辞），归 L1 词表制度管，不属 persona 违例；本条按精确靶子（persona 领域定语）关账。
 
@@ -122,7 +123,7 @@
 - **根因**：选择类澄清模板由宿主持有，宿主不该知道"税号"这个领域概念。中性措辞应由平台 correctForm 作为**数据**加回（Wave 2 依赖 Lane B③ 的错误信封 correctForm）。
 - **律法归属**：L1。
 - **闭环判据**：模板文案零领域词；「或编号/税号」改由平台信封 correctForm 携带，宿主渲染层零业务词（测试：`clarificationTextFor` 两条模板不匹配 `/应收|凭证|科目|账套|期间|目录|税号|财务/`）。
-- **建议波次**：Wave 1 先降级为中性；Wave 2 由平台 correctForm 作为数据加回。
+- **归属波次 / 限期**：Wave 1 先降级为中性；Wave 2 由平台 correctForm 作为数据加回。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。2026-10-19 对账：worker 系统提示词位置的散文已随注入重写退役——planCommandForm 经参数由 planDraftExample 单源注入，本条关闭状态不受影响。
   关闭方式：`error-codes.ts` 的 NOT_FOUND_SELECTION 退化为纯结构模板
   `没有找到匹配“{query}”的对象。{hint}我再查。`——`{hint}` 槽位优先取平台信封
@@ -151,7 +152,7 @@
 - **根因**：写路径的业务字段住在编排层（架构 §2 判据要求"编排层不懂口径"，§9 却把写操作人机确认派给编排层——文档内部矛盾的必然形状）。
 - **律法归属**：L1（业务词泄漏）+ L4（写路径保险箱，主归属）。
 - **闭环判据**：`ChangeIntentRecord` 只剩不透明 payload；"条目数/借贷合计"由 17dz 盖章 summary 并经平台渲染；`grep -rn "借贷" packages/*/src` 零命中。**与 D-030 同一条债，不重复关账。**
-- **建议波次**：Wave 3。
+- **归属波次 / 限期**：Wave 3。
 - **状态**：待办。
 - **已关（2026-10-16 对账核实；代码层 2026-10-14 D 波 `3e5a36c`）**：写路径收敛为唯一形态——借贷合计渲染、`ChangeIntentRecord` 业务字段、legacy `finalizeProposal` 整体删除；闭环判据机械满足（`grep -rn "借贷" packages/*/src` 非测试零命中）。守卫 = `packages/agent/docs-reality.test.ts`（legacy 痕迹零命中断言）。与 D-030 同批关账。
 
@@ -170,7 +171,7 @@
 - **根因**：守卫写的时候只想到"编排层 = packages/agent/src"，忘了 `apps/server`（生产装配、落账执行器）与 `scripts` 也属编排层。且 `commit.ts` 正是写路径代码，`reply.ts:11` 正是彩蛋文案——盲区恰好压在风险最高的两个文件上。
 - **律法归属**：L1。
 - **闭环判据**：`businessWordHits` 的扫描目录与 `LITERAL_IF_SCAN_DIRS` 对齐为 `['packages/agent/src', 'apps']`（scripts 的排除须显式声明并注释理由，见 D-005 附条）；`apps/` 现有 6 处命中逐条归类进基线（带四标签）或清除；新增任意一行即红。
-- **建议波次**：Wave 1 · Lane C③（加词与归属制度落地时一并扩范围；顺序仍须"先清违例再加词"）。
+- **归属波次 / 限期**：Wave 1 · Lane C③（加词与归属制度落地时一并扩范围；顺序仍须"先清违例再加词"）。
 - **状态**：待办。
 
 ### D-005 · 业务词表收词不全：正在用的伪装形一个都抓不到
@@ -183,14 +184,14 @@
 - **根因**：词表按"最显而易见的六个领域词"定，而泄漏的真实形状是**同义改写**。进度帧尤其危险——它是唯一直接上用户屏的宿主生成文本，却靠一串近义词绕过守卫。
 - **律法归属**：L1。
 - **闭环判据**：词表扩充为 `应收|凭证|科目|账套|期间|目录|税号|财务|余额|往来` 加一张**同义改写对照表**（`时间范围→期间`、`记录/档案→凭证`、`摸底→域操作`）；进度帧模板（`step-text.ts` + `operationStepText`）逐条过对照表后命中数为 0，或全部挂 `平台下发` 标签（label 来自 operations.json 第 5 列）。
-- **建议波次**：Wave 2（需先有 D-004 的范围修正，否则扩词只在 packages/agent/src 内生效）。
+- **归属波次 / 限期**：Wave 2（需先有 D-004 的范围修正，否则扩词只在 packages/agent/src 内生效）。
 - **状态**：待办。
 
 ### D-005 附条 · `scripts/` 144 处命中：接受不修，但必须把"不修"写成显式决策
 
 - **位置**：`fshine-agent/scripts/**`（144 处业务词命中，集中在 `acceptance.ts` 45 处、`long-session-acceptance.ts` 9 处、`ask.ts` 3 处、`acceptance-22-supplement.ts` 2 处、`mock-commit-smoke.ts` 1 处）。
 - **律法归属**：L1。
-- **建议波次**：Wave 1 · Lane C③（与 D-004 同一处改动）。
+- **归属波次 / 限期**：Wave 1 · Lane C③（与 D-004 同一处改动）。
 - **状态**：**接受不修**。
 - **理由**：`scripts/` 是验收夹具与探针替身，领域词在这里是**测试数据**不是**宿主替平台说话**——`L1 律法原文即"业务词汇只住执行层 + 夹具 + 文档"`，夹具本就在白名单内。把它们纳入"只减不增"预算会直接冻结 144 行，反而挡住后续收敛。
 - **复核条件**：若 `scripts/` 下新增**非夹具**用途文件（如把某段验收逻辑提升为生产代码），本条即失效，该文件须并入 D-004 的扫描范围。**排除必须写成 lint 里一行显式常量 + 注释，不允许继续以"忘了传这个目录"的形式存在。**
@@ -203,7 +204,7 @@
 - **根因**：长会话验收脚本用算术公式现场生成"借贷合计各 N 元"的假财务结论，作为模型替身回复。这与 rule-landing §9/§14 记录的事故（在真实数据旁编造补充数字）是同一形状，只是发生在夹具里。
 - **律法归属**：L1（领域词进编排层）+ L7（编造数字的形态进了语料）。
 - **闭环判据**：替身回复改为逐字引用脚本预置的真实数字（`ScriptLine` 里的 expected 值），不再用公式生成；或显式挂 `防御排除`/`夹具` 标签并在文件头注明"本文件的数字全部是编造的，不得作为期望值引用"。
-- **建议波次**：Wave 1（与 Lane C⑤ 的测试密封性同批）。
+- **归属波次 / 限期**：Wave 1（与 Lane C⑤ 的测试密封性同批）。
 - **状态**：**接受不修（显式决策）**（2026-09-27 Wave 2 Lane D 登记）。
   **决策**：走闭环判据的第二条路——**显式挂夹具标签**，不改代码逻辑。
   理由：① 该脚本是长会话压缩/记忆探针的验收夹具，`round()` 的数字用途是给 compact
@@ -240,7 +241,7 @@
 - **根因**：窗口内两个新文件（`error-codes.ts` 建表、`operation-labels.ts` 接 CLI）与 `plan-runtime.ts` 的错误消息扩写，都在往宿主里抄网关名。没有任何机械守卫在拦"只减不增"——这条律法目前**只有判据没有锁**。
 - **律法归属**：L2。
 - **闭环判据**：`bin/17dz` 字面量在 fshine 非测试 src 的出现次数 ≤ 20（回到窗口起点），且全部挂在 `警职执法` 标签下（解析器/spawn 路径构造）；消息文本与提示词里的网关名改由 `GATEWAY_INVOCATION` 常量或 context profile 配置派生。**锁的形式**：把该计数写成 leak-lint 第四条预算（新增即红，收敛直接通过）。
-- **建议波次**：Wave 1 · Lane C①（进行中：工作区已有把字面量替换为 `GATEWAY_INVOCATION` 的未提交改动，替换后需补计数锁）。
+- **归属波次 / 限期**：Wave 1 · Lane C①（进行中：工作区已有把字面量替换为 `GATEWAY_INVOCATION` 的未提交改动，替换后需补计数锁）。
 - **状态**：待办。
 - **2026-11-04 对账注记（F4，见文末补充记录 D-146）**：本条主状态仍为待办，但须拆面——未来面已收敛：非测试 src 的 `bin/17dz` 代码字面量只剩 `platform-contract.ts` 的 `GATEWAY_INVOCATION` 常量一处，grep 总量 10 含非代码字面量（第四轮实测，含 plan-runtime.ts:122 新加 1 处），仍 ≤20 的闭环判据；剩余面是 9 处非代码字面量（注释 8 处 + 配置示例注释 1 处）未派生，另立 D-146 跟踪，不再由本条笼统背账。
 
@@ -263,7 +264,7 @@
 - **根因**：`goal` 是宿主自己发明的幻影字段。平台静默丢弃它（不校验、不存储、不报错），所以模型带不带都能跑——直到某天平台开始严校验，或模型因为"这个字段明明在错误消息里"而坚持填写而与 `calls` 位置打架。更直接的伤害是**同一张错误码表给出两种互相矛盾的形状**：模型撞到 `PLAN_JSON_NOT_OBJECT` 时被告知 `{"calls":[…]}`，撞到其他四个码时被告知 `{"goal":"…","calls":[…]}`——这正是"模型静默选一份信"的机制。
 - **律法归属**：L2。
 - **闭环判据**：6 处散文收敛为 1 处（正确形状从 17dz SKILL 或平台 JSON schema 派生，宿主只持指针/常量）；`grep -rn 'plan {"goal"' packages/*/src apps scripts` → 0 命中；`error-codes.ts` 全部 `correctForm` 与平台 `plan.js` 的 `canonicalCall` 实际接受形状逐字一致（测试断言，不是人眼比对）。
-- **建议波次**：Wave 2（与 Lane B④「SKILL 两节删改」同批——本条的权威源正是那一节）。
+- **归属波次 / 限期**：Wave 2（与 Lane B④「SKILL 两节删改」同批——本条的权威源正是那一节）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`error-codes.ts` 新增唯一教学源 `planDraftExample()`——内容与平台
   `src/execution/plan-schema.json` 声明一致（`{"goal":"…","calls":[{"operation":"…","args":[…]}]}`，
@@ -288,7 +289,7 @@
 - **根因**：宿主为渲染进度帧自己维护"哪些 flag 是用户认得出的"名单。平台注册表才是这个事实的权威处，但还没把它机器可读地下发。
 - **律法归属**：L2。
 - **闭环判据**：17dz `operations.json` 每 operation 有 `args` 规格（Lane B① 交付）→ 宿主 `KEY_ARG_FLAGS` 删除，改为读平台清单；删除后 `serve-gate.test.ts:153` 的名单断言改为"从 operations.json 派生"。
-- **建议波次**：Wave 2（**依赖 Lane B①**，B 不落地则本条顺延）。
+- **归属波次 / 限期**：Wave 2（**依赖 Lane B①**，B 不落地则本条顺延）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；Lane B① 已交付 args 规格）。
   关闭方式：`operation-labels.ts` 新增 `parseOperationArgStyles` / `loadOperationArgStyles`——
   经同一公共 CLI 的 `operation list --json`（平台把 args 规格只放机器消费面，TSV 维持 5 列
@@ -308,7 +309,7 @@
 - **根因**：`cc4ea40`（ask.ts 接计划确认门）为了让单进程 CLI 覆盖 confirm 档，把装配层的接线整段抄了一份。抄的时候没有共用的装配函数可调。
 - **律法归属**：L2。
 - **闭环判据**：`planConfirmation` 对象从装配层导出（如 `createPlanConfirmationWiring(deps)`），`ask.ts` 与 `assembly.ts` 都调它；两文件中不再出现 `savePending` 的字面量实现；`10 * 60_000` 的 TTL 只有一处定义（可命名 `PLAN_CONFIRMATION_TTL_MS`）。
-- **建议波次**：Wave 2（方案已列为夹带小刀）。
+- **归属波次 / 限期**：Wave 2（方案已列为夹带小刀）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`apps/server/plan-confirmation-route.ts` 新增导出工厂
   `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`——仓库创建、
@@ -324,7 +325,7 @@
 - **根因**：`turnBudgetMs` 的派生公式（worker 超时 + 2 分钟余量）没有共用函数，四个入口各写一遍。改一次 worker 超时语义要改五个地方。
 - **律法归属**：L2。
 - **闭环判据**：公式收敛为一个导出函数（如 `turnBudgetMsFor(profile)`），`grep -rn "600_000" packages apps scripts | grep -v test` → ≤1 处（常量定义）。
-- **建议波次**：Wave 2。
+- **归属波次 / 限期**：Wave 2。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`packages/contracts/src/config.ts` 导出 `DEFAULT_WORKER_TIMEOUT_MS` +
   `TURN_BUDGET_MARGIN_MS` + `turnBudgetMsFor(profile)`（公式 = worker 超时 + 2 分钟余量，
@@ -349,7 +350,7 @@
 - **根因**：`a44e128`（"补 Tier-1 打分暗区"）把 flag 卫生同步做成了机械锁，但只锁了能导出 `LEGAL_FLAGS` 的两个 finance 脚本。fill.js 走 commander，锁够不着它，于是留了一处手抄。
 - **律法归属**：L2。
 - **闭环判据**：`fill.js` 的合法 flag 集合要么从 commander 声明机械派生（导出 `LEGAL_FLAGS` 或提供等价派生函数）并进 `test-mock-responder.js` 的同一把锁，要么 mock 侧改为从 `operations.json`/脚本声明读取；锁的覆盖集合 = `respond.js` 的 `LEGAL_FLAGS` 全部键，一个不漏。
-- **建议波次**：Wave 1（17dz 侧小刀，与 Lane B 同批不冲突——B 动的是 operations.json 的 args 规格与本文件的 fill 条目，需协调）。
+- **归属波次 / 限期**：Wave 1（17dz 侧小刀，与 Lane B 同批不冲突——B 动的是 operations.json 的 args 规格与本文件的 fill 条目，需协调）。
 - **状态**：待办。
 
 ### D-016 · FSHINE_\* 环境变量退役：移除条件不可执行，且阻塞在 17dz 自身
@@ -359,7 +360,7 @@
 - **根因**：execution-env.js 注释写的移除条件是「写入端全部切换到 EXECUTION_\* **并稳定一个周期**后」——"一个周期"没有定义（多少天？多少次发布？谁签字？），所以这条双读会一直"过渡"下去。且写入端已经切换了，真正在双写的是 17dz 自己，条件里却没提。
 - **律法归属**：L2（协议名双真相）。
 - **闭环判据**：`execution-env.js` 中 `FSHINE_*` 回退分支全部删除（六处 `??` 链变单读）；`runner.js` 的 `setServe` 只写 `EXECUTION_SERVE`；`gateway.js:90` 双写行删除；`test-auth.js`/`test-serve-e2e.js` 的 `FSHINE_MODE` 用例改为 `EXECUTION_SERVE`；`grep -rn "FSHINE_" src/ test/` → 0 命中（`test-all.js` 的 LEAKY_EXACT 同步收缩）。
-- **建议波次**：Wave 2（方案已列）。
+- **归属波次 / 限期**：Wave 2（方案已列）。
 - **状态**：待办。
 
 ### D-017 · 三个 FSHINE_\* 名字不在 lint 禁绝集内，"FSHINE_\* 已禁绝"是半真
@@ -370,7 +371,7 @@
 - **根因**：E4 命名统一只覆盖"治理接口"六名；`FSHINE_REAL_COMMIT` 是写放行安全开关（比治理接口更危险——它是真写的总闸），却因为"不是 E4 那一批"而没被纳入禁绝集，也没被改名。命名空间从此分裂：治理接口叫 EXECUTION_\*，安全开关叫 FSHINE_\*。
 - **律法归属**：L2。
 - **闭环判据**：三者要么统一改名（`EXECUTION_REAL_COMMIT` / `EXECUTION_PI_AGENT_DIR` / `EXECUTION_PLATFORM_CONCURRENCY`，17dz `test-all.js` 的 LEAKY_EXACT 已预留 `EXECUTION_REAL_COMMIT`）并把 `FSHINE_` 整体加入 lint 禁绝集，要么在 lint 里显式登记"这三个是有意保留的 FSHINE_\*"并注明理由。二选一，不许继续处于"没决定"状态。
-- **建议波次**：Wave 2。
+- **归属波次 / 限期**：Wave 2。
 - **状态**：待办。
 
 ### D-018 · 双仓错误码表零漂移（对账通过，登记为"已关"的守卫）
@@ -379,7 +380,7 @@
   核实（本次机械比对）：两侧码集合**完全不相交**——fshine 持宿主码（PLAN_SHAPE_\* / PLAN_CALL_\* / DELEGATION_\* / FALLBACK_\* / 状态话术），17dz 持平台码（INVALID_\* / \*_NOT_FOUND / \*_AMBIGUOUS / AUTH_\* / GATE_\* / PLAN_CALL_MISMATCH / NO_SAMPLES）。唯一双侧共名的 `ACCOUNT_SET_AMBIGUOUS`/`ACCOUNT_SET_NOT_FOUND` 是有意分层（平台持错误码+消息，宿主持澄清模板），非漂移。
 - **律法归属**：L2。
 - **闭环判据**：已达成（本次比对即判据）。
-- **建议波次**：—（本条是"查了没漂移"的阴性记录，供 Wave 4 关账复核时确认无需动作）。
+- **归属波次 / 限期**：—（本条是"查了没漂移"的阴性记录，供 Wave 4 关账复核时确认无需动作）。
 - **状态**：**已关**（2026-09-27 D0 审计关闭；若后续任一侧新增与对侧同名的码，本条重开）。
 
 ---
@@ -398,7 +399,7 @@
 - **根因**：F4-F8 批修（`1e8f2ec`）补的是"零执行"侧的出口校验；"有执行"侧的假设是"真调过平台所以模型说的是数据答案"。但 Stage 3 实测事故的形状恰恰是**execution 为真**（目录搜索真的发生过、`gateCalls>0`）而模型把信封翻译成 1201 字符技术报告——794eab2 用 `clarification` 字段绕过了这一刀，但没有执行语言指纹的通用出口仍在。
 - **律法归属**：L3。
 - **闭环判据**：`execution === true` 的最终回复也过 `executionLanguageFingerprints`（命中即记守夜事件 `execution_language_leak` 并回落宿主兜底文案，不放行）；测试：构造"execution 为真 + 模型复读协议 JSON"的用例，断言不外发（现有 S1-S5 全部是 `clarification` 挂载路径，需补一条无 clarification 的）。
-- **建议波次**：Wave 2（方案已列为夹带小刀）。
+- **归属波次 / 限期**：Wave 2（方案已列为夹带小刀）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`runtime.ts` 新增 `looksLikeProtocolMaterial(text)`——内部协议材料的**形状**判据
   （开头是协议 JSON 且首字段是 recorded/step/next，含 NEEDS_TOOL_RESULT_PREFIX），不嗅探
@@ -424,7 +425,7 @@
 - **根因**：`cef97c9` 的修法是"用户可见的最终回复要看得见地被截断"，但渠道有三个出口（progress / notice / final），只改了 final。notice 是计划门通知——平台生成的 `noticeText` 由 `账套「…、…、…」；期间…；客户「…」；科目「…」` 拼接（`17dz-platform/src/execution/plan.js:193-219`，accounts/customers/subjectCodes 三个集合用 `、`  join，**无条数上限**），是最可能超长的一个出口，却用的是无声硬切。
 - **律法归属**：L3（状态消息呈现卫生）+ L6（改了一半）。
 - **闭环判据**：`truncateUtf8` 在 `adapter.ts` 中不再被直接调用（三个出口统一走 `truncateReply` 或等价"看得见的截断"）；补测试：notice 超长 → 带标记 + 守夜事件（现有 `notice.acceptance.test.ts` 只测送达语义，无长度用例）。
-- **建议波次**：Wave 1（与 675bd15 同属渠道层，改动小）。
+- **归属波次 / 限期**：Wave 1（与 675bd15 同属渠道层，改动小）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`adapter.ts` 的 notice 路径从 `truncateUtf8(text, MAX_REPLY_BYTES)`（无声硬切）
   换成 `truncateReply(text)`（超限带 REPLY_TRUNCATED_MARK）+ 守夜事件
@@ -442,7 +443,7 @@
 - **根因**：`cef97c9` 在 `text.ts` 里特意加了"改这个值之前先核对 SDK README，不要再凭感觉抄"的长注释防再抄错，却在同一批改动的 `adapter.ts` 文件头留了一个 2048 的旧数——**防抄错的注释旁边就有一个抄错的注释**。下一个人读文件头会以为上限是 2048。
 - **律法归属**：L3（呈现层的注释与代码不符归此；亦可归 L6 化石）。
 - **闭环判据**：`grep -rn "2048" packages apps scripts tests | grep -v "历史事故\|W1 曾"` → 0 命中（`text.ts:4` 的事故记述除外，它是故意的历史记录）。
-- **建议波次**：Wave 1。
+- **归属波次 / 限期**：Wave 1。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：`adapter.ts` 文件头注释"2048 字节截断"改为实情（MAX_REPLY_BYTES = 20480）
   并指向 `text.ts` 常量与"改值前先核 SDK README"的事故记述。grep 判据实测：
@@ -462,7 +463,7 @@
 - **根因**：架构文档 §2 判据要求"编排层不懂口径"，§9 却把写操作的人机确认派给编排层——确认凭证批就必须懂"金额"。§10 差距表里没有"写路径"这一行，所以违规长期不可见。
 - **律法归属**：L4（主）+ L1（D-003，同一处的业务词面）。
 - **闭环判据**：`ChangeIntentRecord` 改不透明 `payload` + 平台盖章 `summary`；"条目数/借贷合计"由 17dz 渲染；fshine 只留通用确认状态机（确认码/有效期/principal/计划版本绑定）；§10 差距表补"写路径"行。**与 D-003 同一条债，关账判据合并。**
-- **建议波次**：Wave 3（大项目，可再拆并行）。
+- **归属波次 / 限期**：Wave 3（大项目，可再拆并行）。
 - **状态**：待办。
 - **已关（2026-10-16 对账核实；代码层 2026-10-14 D 波 `3e5a36c`）**：编排层侧（本条靶子）已清——业务字段/确认摘要渲染删除，fshine 只剩不透明 payload + 通用确认状态机；§10 差距表"写路径"行随 D 波更新。**L4 闭环判据的 §17 七项（D-031，17dz 侧）仍开放，L4 本身保持开放**——本条关的是编排层侧形状。守卫 = `docs-reality.test.ts`。
 
@@ -490,7 +491,7 @@
 - **根因**：读路径 live 批（3707bac / 1e8f2ec）已把"静默回落/答非所问"扫清，写路径因为是 latent（生产写关闭）没扫。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套）。
 - **律法归属**：L4。
 - **闭环判据**：七项各自有守卫（枚举白名单 / fail-loud 三态 / 非零退出）；§17 的"遗留"段可整段删除。**判据必须在新结构（保险箱）里成立——不许在旧结构上先修，那会被 Wave 3 重构掉。**
-- **建议波次**：Wave 3（与 D-030 同批；若 Wave 3 顺延，本条不得单独提前修）。
+- **归属波次 / 限期**：Wave 3（与 D-030 同批；若 Wave 3 顺延，本条不得单独提前修）。
 - **状态**：待办。
 
 ### D-032 · fshine F1：`extractChangeProposal` 剥 ```json 围栏（与被删的 stripCommandWrapping 同族）
@@ -500,7 +501,7 @@
 - **根因**：同一族"宿主替模型猜格式"的容忍层，读路径按"不建容忍层"架构删干净了，写路径因为 latent 没删。留着一个同族反例，会让后人怀疑那条架构决定是否只适用于读路径。
 - **律法归属**：L4。
 - **闭环判据**：`extractChangeProposal` 不再做围栏剥离；模型提交非法形状时按 `PLAN_*` 错误码 fail-loud（三要素消息）；有测试钉住"带围栏的提案被拒"而不是"被正确解析"。
-- **建议波次**：Wave 3（与 D-031 同批；写提案 schema 迁移时一并了结）。
+- **归属波次 / 限期**：Wave 3（与 D-031 同批；写提案 schema 迁移时一并了结）。
 - **状态**：待办。
 
 ---
@@ -519,7 +520,7 @@
 - **根因**：平台有唯一一条失败消息不带码前缀，宿主只能嗅探中文。这是 L5 二分流里唯一一处"靠文本不靠码"的判定。
 - **律法归属**：L5。
 - **闭环判据**：17dz `auth.js` 的自动重登录失败改走 `errorFor('AUTH_*', …)` 挂码 → 宿主删除该正则行，auth 分类 100% 走 `isPlatformAuthError`（码级判据）；测试：一条不带码的 auth 失败不再需要中文正则也能分到 `DELEGATION_AUTH_FAILURE`。
-- **建议波次**：Wave 2（与 17dz 六个错误码登域文档同批，D-064）。
+- **归属波次 / 限期**：Wave 2（与 17dz 六个错误码登域文档同批，D-064）。
 - **状态**：**接受不修（限期）**。
 - **理由**：删了它，那一条 auth 失败会退化成 `executor_error` → 用户收到"请稍后再试"——对登录态过期是**错指令**（重试多少次都没用）。在平台挂码之前，留正则比删正则正确。这是本条唯一合理的"接受"形态：附带明确移除条件与对侧动作。
 - **复核条件**：17dz `auth.js` 一带码即删；Wave 4 关账复核时若平台仍未挂码，须重写理由或升级为待办。
@@ -537,7 +538,7 @@
 - **根因**：MCP 层已被 `15cfe1b`（drop mcp layer）删除，目录树没删干净。"无 src 目录"的 lint 措辞抓不到它们——src 存在但是空的。
 - **律法归属**：L6。
 - **闭环判据**：两个目录删除；新增 lint：`packages/*/src` 下无任何 `.ts` 文件即红（把"空 src"纳入判据，不只是"缺 src"）。
-- **建议波次**：Wave 1 · Lane C②。
+- **归属波次 / 限期**：Wave 1 · Lane C②。
 - **状态**：待办。
 - **已关（2026-10-16 对账核实）**：两个目录已整体删除（packages 下仅剩 agent/channel-wecom/contracts/core）。守卫 = `packages/agent/docs-reality.test.ts`（目录不存在断言）。
 
@@ -553,7 +554,7 @@
 - **根因**：图片通道演示短路写在生产入口包装里。用户只要打出"图片"两个字，就会收到一张带 8 个编造金额的柱状图——文本虽标了"模拟数据"，图上的数字没有任何标注。这与 rule-landing §9/§14 记录的事故（真实数据旁编造补充数字）同族，且**可从生产入口触发**。
 - **律法归属**：L6（彩蛋/假数据）+ L1（:11 的 `凭证`）。
 - **闭环判据**：彩蛋从生产入口移除（演示逻辑移入手动脚本或测试替身，并显式挂标签）；`grep -rn "模拟数据\|DEMO_" apps packages --include=*.ts | grep -v test` → 0 命中。
-- **建议波次**：Wave 1 · Lane C②。
+- **归属波次 / 限期**：Wave 1 · Lane C②。
 - **状态**：待办。
 - **已关（2026-10-16 对账核实）**：`apps/server/reply.ts` 已整体删除；`renderBarChartPng`/"模拟数据"/`DEMO_` 全仓非测试零命中（判据机械满足）。守卫 = `packages/agent/docs-reality.test.ts`（文件不存在 + 零命中断言）。
 
@@ -565,7 +566,7 @@
 - **根因**：直接平台工具面已退役（Phase 3 领域判别下沉），渲染层的分支没跟着删。`platform-leak-lint.test.ts` 的白名单注释已经点明这六条是"已退役工具名（死代码）……只有'该删'的债务"，但一直没删。
 - **律法归属**：L6。
 - **闭环判据**：`step-text.ts` 的 `switch` 删除（或收敛为 `INTERNAL_TOOLS.has(toolName) ? null : null`——既然工具面只剩内部工具，`defaultStepText` 整体可退化为常量 null）；`step-text.test.ts` 的"平台工具仍照常出默认帧"用例改为断言"主 Agent 工具面上不存在平台工具，故一律不出帧"；`LITERAL_IF_WHITELIST` 中 6 条对应条目同步移除。
-- **建议波次**：Wave 1 · Lane C②。
+- **归属波次 / 限期**：Wave 1 · Lane C②。
 - **状态**：待办。
 
 ### D-053 · 17dz 仓根 465KB 会话日志被 git 跟踪
@@ -576,7 +577,7 @@
 - **根因**：codex 会话导出物落在了仓库根，且被 `git add` 进主干。它同时是 L2 的风险面——本次审计中多处"平台侧事实"的旧文本就存在这个文件里（如 `codex-session-*.md:76,79,80` 引述的旧 `serve-gate.js` / `auth.js` 源码），后人容易把会话记录当成现行文档引用。
 - **律法归属**：L6。
 - **闭环判据**：`git rm --cached` 该文件并在 `.gitignore` 登记 `codex-session-*.md` / `*-session-*.md`；`git ls-files | grep -c "session.*\.md"` → 0；仓库根不再有任何会话导出物。
-- **建议波次**：Wave 1 · Lane B⑤（方案已归本 lane）。
+- **归属波次 / 限期**：Wave 1 · Lane B⑤（方案已归本 lane）。
 - **状态**：待办。
 
 ### D-054 · `.env.real` 本地残留（已 gitignore，本地卫生）
@@ -586,7 +587,7 @@
 - **根因**：真实平台联调副本（`95fbd6b` 提交信息自述"含同 etc 凭据"）。gitignore 之后它只是本机文件。
 - **律法归属**：L6。
 - **闭环判据**：仓库侧已达成（未跟踪 + 已 ignore）。
-- **建议波次**：—（无仓库动作）。
+- **归属波次 / 限期**：—（无仓库动作）。
 - **状态**：**接受不修（仓库侧已关）**。
 - **理由**：它是真实平台联调的活副本（含企微 UserID 与本机路径），联调还要用；gitignore 已经切断它进主干的路。保留本机文件不构成仓库债。
 - **复核条件**：若该文件内容被复制进任何会被跟踪的路径（如 `config/agent.yaml` 或 `.env.example`），本条重开并升级为待办。
@@ -599,7 +600,7 @@
 - **根因**：建造期技能面（`.agents/skills`）已被运行态技能面（`.agents/skills-serve`）取代，`.agents/skills/finance` 无运行时加载链。但**版本库里的模板 `agent.example.yaml` 还写着旧路径**——新部署者照模板复制一份 `config/agent.yaml`，配的是一个驱动明确拒绝加载的 skillRoots，于是"技能注入静默失效"。这是"改了一半的新旧并存"：生产配置改了，模板没改。
 - **律法归属**：L6（死技能）+ L2（配置默认值双真相）。
 - **闭环判据**：`.agents/skills/finance` 删除；`config/agent.example.yaml` 的 `skillRoots` 改为 `.agents/skills-serve` 并加注释说明与建造技能面互斥；新增测试或 lint 断言模板与生产示例一致（或模板值必须在合法集合内）。
-- **建议波次**：Wave 1 · Lane C②（模板那一行建议同批改，属于一行修复）。
+- **归属波次 / 限期**：Wave 1 · Lane C②（模板那一行建议同批改，属于一行修复）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；死技能本体已由 Wave 1 `4362cef` 删除）。
   关闭方式：`config/agent.example.yaml:28` 的 `skillRoots: [".agents/skills"]` 改为
   `[".agents/skills-serve"]` 并加注释（与建造技能面互斥、noSkills 只认显式 skillRoots、
@@ -621,7 +622,7 @@
 - **根因**：契约校验的测试夹具直接放在生产脚本目录里。脚本目录是 `operations.json` 的声明面，夹具混在里面会让"这个目录里全是可执行脚本"的直觉失效，也让按目录扫描的工具（lint、打包、审计）多一类要排除的噪音。两个孤儿夹具连"双用途"的理由都不成立。
 - **律法归属**：L6。
 - **闭环判据**：`test-contract-bad-subject.json` 与 `test-contract-need-assistant.json` 删除（0 引用，删除零风险）或被某个测试引用；其余 3 个移入 `test/fixtures/`（或显式登记"这是文档 worked example，有意留在 scripts/"并写进 `TEMPLATES.md` 的同一条注释）；`git ls-files src/voucher/scripts/ | grep -c "test-contract"` → 0（或 = 登记数）。
-- **建议波次**：Wave 2。
+- **归属波次 / 限期**：Wave 2。
 - **状态**：待办。
 
 ### D-057 · 17dz `docs/superpowers/` 7 个 2026-08 旧计划/设计文档，零引用
@@ -632,7 +633,7 @@
 - **根因**：2026-08 的旧轮次计划/设计文档从未清理。它们描述的是当时的代码形状（如 `2026-08-11-voucher-cleanup.md:426` 关于夹具留在 scripts/ 的决定），与现状已有实质差异——却仍然在 `docs/` 下，与现行 `docs/architecture.md`、`AGENTS.md` 并列。后人无法从路径判断哪份是权威。
 - **律法归属**：L6。
 - **闭环判据**：二选一，都要落成显式决策——(a) 整目录删除（若结论已被 rule-landing / architecture.md 吸收）；(b) 目录改名为 `docs/archive/2026-08-*/` 并在每份文件头加「历史存档，非现行权威；现行定义见 AGENTS.md / docs/architecture.md」横幅。判据：`docs/` 下不存在"无法从路径判断是否现行"的文档。
-- **建议波次**：Wave 1 · Lane B（与 B⑤ 的"删仓根 465KB 会话日志"同属文档卫生，一次做完）。
+- **归属波次 / 限期**：Wave 1 · Lane B（与 B⑤ 的"删仓根 465KB 会话日志"同属文档卫生，一次做完）。
 - **状态**：待办。
 
 ---
@@ -648,7 +649,7 @@
 - **根因**：探针是"跑一轮、人读报告、人判过不过"的形态——判定逻辑散在 helper 函数里，没有基线分、没有阈值、没有回归对比。四维分数（groundedness/实体保真/失败诚实/呈现卫生）目前只能靠审计轮次人肉挑，正是今日 30 小时里最贵的成本。
 - **律法归属**：L7。
 - **闭环判据**：`.runtime/scores.jsonl` 记分台存在且每轮探针写入；四维各有可复现的机械分量（探针断言）+ LLM 评委分量；**评委提示词与语料库随仓库版本化**（否则四维分数不可比）；基线分可复现（同语料同提示词重跑分差在阈值内）；回归有阈值；今日全部事故各一条用例（围栏/驼峰/抽象泄漏/2048/复读/实体串台…）。
-- **建议波次**：Wave 4。
+- **归属波次 / 限期**：Wave 4。
 - **状态**：**已关**（2026-10-16，L7 波：`2d1ca5b`/`2fb60e6`/`5b99272`/`d826d4f`/`970dd84`/`95f0a12`/`bb69066`）。
   落地形态（全部长在既有仪器上，零判定逻辑复制）：① 探针 `CaseResult` 增 `dims`（四维归维表 `scripts/eval/dims.ts` 单一来源，原句表征锁 `dims.test.ts`，note 文案漂移先红）+ 探针每轮向记分台写机械分量；② acceptance 报告 JSON 增 `writeChain` 节（`scripts/eval/write-chain.ts`：`serve_gate:proposal_create` 行数 = 提案尝试、`change_intents` status/result = 落账+读回、6 位码正则 = 确认码——§E 波末尾点名的"手工提取三个指标"自此机械化）；③ 语料 `corpus.jsonl`（六条存量事故→用例映射，默认基线集 = 探针 A1/A2/A3/A4/A5/B1/Y2 + 写链 acc-write-51）+ 评委 `judge-prompt.md`/`judge.ts`（只吃转录不读审计/机械分量——两分量是独立证据，评委看到机械判定会锚定）；④ 打分器 `score.ts`（四类阈值：dims 上限 / judge 下限−容差 / 写链布尔面 / okMode；记分台追加 eval 行带三元组；`--write-baseline` 唯一基线重定入口，strict 用例 ok 翻转拒绝烤入）。
   **基线与验证**：三轮真模型 + mock 执行器实测（`.runtime/eval-baseline-run1/2/3.log`，scores.jsonl 七行），基线 **v3**（探针 7 例 + 写链 1 组），轮③对 v3 **8/8 全绿**。机械分量在稳定用例三轮逐位一致；写链布尔面三轮全同（尝试 1 次 / committed+读回 / 确认码——D-088 链条 3/3）；评委同转录复跑一致（A2 卫生两次 0），**一例超容差分差如实登记**（B1 卫生跨调用 0→2，temperature 0 下评委仍有同转录方差——机械层是可复现骨干，评委层是粗门限+轨迹）。
@@ -669,7 +670,7 @@
 - **根因**：`test-all.js` 的测试环境自封（出向）只删了 `LEAKY_EXACT` 名单里的 8 个变量（`EXECUTION_EXECUTOR/FSHINE_EXECUTOR/FSHINE_REAL_COMMIT/EXECUTION_REAL_COMMIT/proxy*/LLM_*`），**没有覆盖"不设就会落到共享真实状态文件"这一类泄漏**。限流是有意做成持久化的（跨进程累计），于是测试就继承了真实运行的桶。
 - **律法归属**：L7（验收标准不可复现）+ L5（全回路有界——限流本身没问题，是测试前提被污染）。
 - **闭环判据**：`test-all.js` 的自封名单扩展为"所有会落到 `.runtime/` 共享状态的 env（`EXECUTION_RATE_LIMIT_STATE` / `EXECUTION_PLAN_STATE` / `EXECUTION_MEMORY_STATE` / `EXECUTION_AUDIT_PATH`）在未显式设置时指向临时目录"；或每个 spawn CLI 的测试文件自行隔离（推荐前者——一处修，六个文件受益）；修后 `node test/test-all.js` 在**连续两次运行**下全绿（第二次不复现第一次的失败）。
-- **建议波次**：Wave 1（这是当前唯一的红灯，阻塞"验收总标准：全量测试"）。
+- **归属波次 / 限期**：Wave 1（这是当前唯一的红灯，阻塞"验收总标准：全量测试"）。
 - **状态**：待办。
 
 ### D-062 · fshine `npm test` 在无凭据环境 17 文件 52 例全红
@@ -688,7 +689,7 @@
 - **根因**：e2e  harness 启动**真实** `WecomBotChannel`（只有 SDK client 是替身），而渠道启动硬性要求企微凭证；`npm test` 是裸 vitest 不加载 `.env`。于是"验收总标准：全量测试"只在开发机上成立，在干净机器/CI 上不可复现。附带伤害：狼来了——52 例环境性红灯会掩护真回归。
 - **律法归属**：L7。
 - **闭环判据**：`vitest.config.ts` 配 `loadEnv`（或 harness 在无凭据环境装假通道/跳过 start），使 `env -u WECOM_BOT_ID -u WECOM_BOT_SECRET npx vitest run` → 0 failed；同时保留"有凭据环境跑真实渠道"的能力（不为了绿而把真实路径测掉）。基线数字：574 例 / 61 文件全绿。
-- **建议波次**：Wave 1 · Lane C⑤。
+- **归属波次 / 限期**：Wave 1 · Lane C⑤。
 - **状态**：待办。
 
 ### D-063 · `loadPlanStatus` 与 `verifyActivatable` 的装配接线无测试
@@ -698,7 +699,7 @@
 - **根因**：`cc4ea40`（ask.ts 接计划确认门）与 `436aea4`（17dz 新增 `plan status --plan-id`）都是窗口内新代码。安全语义是"用户说'确认继续'时，先问平台这个待确认计划是否还活着，被取代了就解释而不是 generic-fail"——这条链现在只有底层单测 + 人工联调，**没有任何测试断言 assembly/ask.ts 真的把 `loadPlanStatus` 接进了 `verifyActivatable`**。删掉那三行接线，全库依旧全绿。
 - **律法归属**：L7。
 - **闭环判据**：至少一个测试（单测或 e2e）断言"装配层确实注入了 `verifyActivatable`，且平台返回 `superseded` 时用户收到 `superseded` 解释而非激活/通用失败"；变异验证：删掉 `assembly.ts:150-153` 的注入 → 该测试红。
-- **建议波次**：Wave 2。
+- **归属波次 / 限期**：Wave 2。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭）。
   关闭方式：新增 `apps/server/plan-confirmation-wiring.test.ts`——走**真工厂**
   （D-013 收敛后的 `createPlanConfirmationWiring`，assembly 与 ask.ts 共用同一份接线，
@@ -721,7 +722,7 @@
 - **根因**：`b25550b` 把 27 个码收口进一张表，域文档（MECHANISMS/README）只补了当时想到的几个；`PLAN_CALL_MISMATCH` 是 `9fcbf4c` 之后才有的码，两边都没回头对齐。
 - **律法归属**：L7（可信度：调用方拿不到码的域级含义）+ L2（协议事实的文档面）。
 - **闭环判据**：新增机械锁——测试断言 `TABLE` 每个码至少在 `src/**/*.md` 或 `.agents/skills-serve/**/SKILL.md` 里出现一次（死条目锁已有：`test-error-codes.js` 锁"表里每个码在 src/ 有消费点"；本条锁反向："每个码在域文档有解释"）；5 个码补登后该断言通过。
-- **建议波次**：Wave 2（方案已列）。
+- **归属波次 / 限期**：Wave 2（方案已列）。
 - **状态**：待办。
 
 ### D-065 · P2 结构化事实欠账：`platform_tasks` 无账套/期间/calls 字段，召回只能读记录原文
@@ -740,7 +741,7 @@
 - **根因**：任务记录只存 worker 原始转录。要回答"本会话迄今执行过哪些/结果是什么"，只能渲染转录原文（截断到 300 字）——这正是 execution-facts 明确不做的"对业务文本做模糊匹配"。缺的是 `accountSet` / `period` / `calls` 三个结构化字段 + 一个"按会话列举"的入口。
 - **律法归属**：L2（宿主在抄写平台执行事实，而非机器可读地持有）。
 - **闭环判据**：`PlatformTaskRecord` 增加 `accountSet?` / `period?` / `calls?`（由 worker 出口的结构化数据回填，不是从转录解析）；`PlatformTaskRepo` 增加 `listBySession(principalId, sessionId)`；执行台账改为读结构化字段（原文仅作兜底并标注）；测试钉住"结构化字段缺失时不猜、不解析原文"。
-- **建议波次**：Wave 2 或 Wave 3（视 Lane B① 的 operations.json args 规格进度定—— args 规格落地后回填成本最低）。
+- **归属波次 / 限期**：Wave 2 或 Wave 3（视 Lane B① 的 operations.json args 规格进度定—— args 规格落地后回填成本最低）。
 - **状态**：**已关**（2026-09-27 Wave 2 Lane D 关闭；Lane B① 的 args 规格已交付，回填走规格查表）。
   关闭方式（字段与填充点比方案描述的略窄，宁缺勿猜）：
   - `PlatformTaskRecord` 增 `accountSet?` / `period?` / `calls?` / `label?` / `outcome?` /
@@ -777,7 +778,7 @@
 - **根因**：读路径授权从第一天就是提示词约束——Stage 1–3 单用户全量授权（`accountSetScope: 'all'`，e2e 亦如此）下"够用"，从未按多用户标定。提示词是**软控制**：模型压力下可绕过、可遗忘，名单外读操作当前没有任何代码级拦截。软控制与硬控制的差别不是强度是**性质**（见 architecture-laws.md「控制的标定审查」）。
 - **律法归属**：L4（授权边界硬门化家族；写路径已硬门化，读路径欠账）。
 - **闭环判据**：读路径硬门——宿主或平台对**读操作**的实体按 `allowedAccountSetIds` 做确定性校验，名单外即拒；测试钉"名单外主体的读计划被确定性拒绝（不是提示词劝阻）"。
-- **建议波次**：Stage 4 多用户上线前（激活条件 = principal 配 `accountSetScope` 名单模式且 `accountSetIds` 非空）。
+- **归属波次 / 限期**：Stage 4 多用户上线前（激活条件 = principal 配 `accountSetScope` 名单模式且 `accountSetIds` 非空）。
 - **状态**：待办（watch：当前单用户全量授权，未激活；上线多用户前必须闭环）。
 
 ### D-067 · 模型机制 confabulation：内部控制状态被编成"说明"交给用户
@@ -787,7 +788,7 @@
 - **根因**：真实通话里模型把宿主/平台的内部控制状态编成给用户的"说明"（"本次已用满平台的查询计划额度"）。禁词汇已修（2026-09-27 第三波：内部控制词进指纹表 + 提示词明令），但 confabulation 是**模型机制**不是词表问题——换个说法（"今天的查询次数到顶了"）机械防不住。当前防线 = 指纹形状 + 探针断言 + 人工守夜，没有确定性拦截（也不该有：合法数据答案与编造说明无法用形状完全区分）。
 - **律法归属**：L3（模型发音权：内部控制不上屏）+ L7（证据靠探针基线累积，不靠审计轮次）。
 - **闭环判据**：watch 项，**不设机械关闭判据**——新形态现形即登记（进指纹表或词表，附真实用例）；靠探针指纹 + 真实使用攒案，每条新说法都要有一次真实出处。
-- **建议波次**：持续（每波探针跑分时复核；Stage 4 前结合真实使用记录复审一次）。
+- **归属波次 / 限期**：持续（每波探针跑分时复核；Stage 4 前结合真实使用记录复审一次）。
 - **状态**：待办（watch）。
 
 ### D-068 · 实体门按每轮无状态标定：连续会话里"用户亲自查过的对象"被误拦（已关）
@@ -801,7 +802,7 @@
   2. 单测：来源 A 提取（按规格 / 只取执行过的 / 规格缺失降级）、澄清 issued→resolved 绑定（纯数字 / 逐字名称 / 非编号不误绑 / 插回合失效）、haystack 合并去重；
   3. 变异三项全红：sessionEntities 注入短路 → e2e 红；correctForm 删"检索"指引 → 钉措辞的测试红；裸编号绑定关掉 → 绑定测试红；
   4. `npm test` 全量只增不减；platform-leak-lint 通过。
-- **建议波次**：本波（Wave 3 任务 1/2）。
+- **归属波次 / 限期**：本波（Wave 3 任务 1/2）。
 - **状态**：**已关**（证据 = 本波任务 1/2 的测试；边界随 D-065 已知边界：`--query` 检索词与位置参数一并进 haystack——门禁要回答"用户本会话亲自确立过吗"，检索词同样算数；计划模式跨步只保留末次 calls 快照）。
 
 ---
@@ -1117,7 +1118,7 @@ P1 修复（`plan evaluate` exit 3 双语义：`runJson` 对非零 exit 一律�
 
 | 条目 | 状态 | 说明 |
 |---|---|---|
-| **D-083（新）serve worker 无法消费二进制附件：缺"任意格式 → 文本"能力，通用解是沙箱执行，本次显式不引入** | **待办（用户明确推迟）** | **背景**：用户经企微上传的附件已能落到平台工作区内（`17dz-platform/tmp/attachments/`，落点 bug 见下方「同批修掉的三笔」第 1 条），路径也已注入 worker 请求文本。但 worker 仍读不到内容——`read` 工具只放行文本知识面（`.md/.schema.json/.agents//docs//mappings/`）且本身是文本读取，二进制 xlsx 读出来是乱码；而 serve 模式唯一执行通道是网关，网关只解析 `operations.json` 注册的脚本。三条路组合起来，二进制内容没有任何一条能进到模型面前。**平台审计实证**：`17dz-platform/.runtime/invocations.jsonl` 里 `prepare dump.py → 脚本未在 operations.json 声明`（skill 级脚本在 serve 下不可执行）。**已验证的事实**：① 平台上已有"吃 xlsx"的同族能力——`voucher.parse-yijieda-bills`（xlsx → VoucherContract，access=local，serve.prepare=true），说明机制现成，工资域只是缺对应物；② worker 已有 `write` 且被机械边界限制在 `tmp/<requestId>/`，即"写脚本"已可行，"跑脚本"不可行（bash 只允许网关调用）。**通用解**：给 worker 一个隔离沙箱执行面（剥环境变量/断网/cwd 限定为仅含输入文件的空临时目录/仅准跑 `tmp/<requestId>/`），让它针对现场格式自己写解析逻辑。这不是"怕它写错代码"——模型看错单元格只是算出错数；问题是**附件内容由任一企微用户提供（攻击者可控）**，而代码执行是唯一能把"模型被引导"升级成"系统沦陷"的权限（进程可读 `.env`/`auth.json`）。压掉该风险的关键不是审代码质量，是让执行体碰不到凭据与平台会话——纯本地解析本来就不需要它们。**用户裁决（2026-10-07）**：暂时不引入沙箱，本条记债后置；当前用「用户粘贴文本」或「平台预注册 operation」两种替代走通业务。**闭环判据**：沙箱执行面落地，且满足 ① 执行子进程 env 已剥 `.env`/auth/token 类变量（grep 断言）；② 无网络出口（机械断言或沙箱配置）；③ cwd 为仅含输入文件的临时目录；④ 仅接受 `tmp/<requestId>/` 下的脚本（复用 serve-gate 的 `scratchDir` 判据）；⑤ 每次执行落审计（脚本路径 + 哈希 + 退出码）；⑥ e2e 覆盖"附件内含诱导指令时不构成代码执行"。**建议波次**：Wave 4（安全设施批）。**备选修法**（不必等沙箱）：按 `TEMPLATES.md` 既有流程沉淀——AI 分析新格式 → 生成 mapping → 人工确认 → 存 `mappings/`，把解析固化为 mapping 驱动、由人 review 的 operation。 |
+| **D-083（新）serve worker 无法消费二进制附件：缺"任意格式 → 文本"能力，通用解是沙箱执行，本次显式不引入** | **待办（用户明确推迟）** | **背景**：用户经企微上传的附件已能落到平台工作区内（`17dz-platform/tmp/attachments/`，落点 bug 见下方「同批修掉的三笔」第 1 条），路径也已注入 worker 请求文本。但 worker 仍读不到内容——`read` 工具只放行文本知识面（`.md/.schema.json/.agents//docs//mappings/`）且本身是文本读取，二进制 xlsx 读出来是乱码；而 serve 模式唯一执行通道是网关，网关只解析 `operations.json` 注册的脚本。三条路组合起来，二进制内容没有任何一条能进到模型面前。**平台审计实证**：`17dz-platform/.runtime/invocations.jsonl` 里 `prepare dump.py → 脚本未在 operations.json 声明`（skill 级脚本在 serve 下不可执行）。**已验证的事实**：① 平台上已有"吃 xlsx"的同族能力——`voucher.parse-yijieda-bills`（xlsx → VoucherContract，access=local，serve.prepare=true），说明机制现成，工资域只是缺对应物；② worker 已有 `write` 且被机械边界限制在 `tmp/<requestId>/`，即"写脚本"已可行，"跑脚本"不可行（bash 只允许网关调用）。**通用解**：给 worker 一个隔离沙箱执行面（剥环境变量/断网/cwd 限定为仅含输入文件的空临时目录/仅准跑 `tmp/<requestId>/`），让它针对现场格式自己写解析逻辑。这不是"怕它写错代码"——模型看错单元格只是算出错数；问题是**附件内容由任一企微用户提供（攻击者可控）**，而代码执行是唯一能把"模型被引导"升级成"系统沦陷"的权限（进程可读 `.env`/`auth.json`）。压掉该风险的关键不是审代码质量，是让执行体碰不到凭据与平台会话——纯本地解析本来就不需要它们。**用户裁决（2026-10-07）**：暂时不引入沙箱，本条记债后置；当前用「用户粘贴文本」或「平台预注册 operation」两种替代走通业务。**闭环判据**：沙箱执行面落地，且满足 ① 执行子进程 env 已剥 `.env`/auth/token 类变量（grep 断言）；② 无网络出口（机械断言或沙箱配置）；③ cwd 为仅含输入文件的临时目录；④ 仅接受 `tmp/<requestId>/` 下的脚本（复用 serve-gate 的 `scratchDir` 判据）；⑤ 每次执行落审计（脚本路径 + 哈希 + 退出码）；⑥ e2e 覆盖"附件内含诱导指令时不构成代码执行"。**归属波次 / 限期**：Wave 4（安全设施批）。**备选修法**（不必等沙箱）：按 `TEMPLATES.md` 既有流程沉淀——AI 分析新格式 → 生成 mapping → 人工确认 → 存 `mappings/`，把解析固化为 mapping 驱动、由人 review 的 operation。 |
 | **D-083 附条 · 附件-only 消息曾各自启回合，串行堵死会话队列** | **已关（2026-10-07）** | 用户"先发文件、再发指令"时，每个 file 消息都触发一整个 Agent 回合：N 个文件 = N 次 LLM 调用，且串行占住会话队列，真正带指令的那条排在后面出不来。实测形态：3 文件 + 1 指令 → 4 个 ack、0 个最终回复，第一条文件回合卡在 LLM 上（10 分钟预算内不返回）。修法：契约加 `IncomingChannelMessage.attachmentOnly`，宿主据此只暂存附件不启回合（落审计 `attachment_received`），带正文的回合一次性取走并清空缓冲；迟到的文件明确回复"指令请再发一次"而不是静默干等。机械锁：`apps/server/handler.test.ts`「附件-only 消息的暂存与交付」+「附件迟到 + 文字回合在飞(真并发)」+「会话队列的失败留痕」。 |
 | **同批修掉的三笔（登记备查，均已关）** | **已关（2026-10-07）** | ① **附件落点在平台工作区外**：最初落在宿主 `fshine-agent/data/attachments/`，而 worker 的 cwd 是 `17dz-platform/`，`workspaceRelPath` 判"工作区外"直接拒——症状是指代不清的"读不到附件"。改为 `<platformRoot>/tmp/attachments/` 并在渠道启动时断言落点必须场內（不等用户发文件才暴露）。锁：`packages/channel-wecom/adapter.test.ts`「附件目录在平台工作区外:启动即拒」+「不配 attachmentDir 时,默认落在平台工作区的 tmp/attachments」。② **`tmp/` 无回收**：`packages/agent/src/scratch-cleanup.ts` 新增，只删 `tmp/req_<uuid>` 形态的位置（平台自己的 tmp/ 产物一律不碰，宁可漏删不可误删），按 24h TTL、启动 + 每 6h 扫；按年龄而非生命周期删，因为任务可跨轮续跑。③ **队列失败被静默吞掉**：`task.catch(() => undefined)` 的语义是"别让失败回合毒化队列"，但也把失败吞得无声无息，导致一个附件回合消失时连"它失败了还是没跑"都无法判断。现打 `wecom_turn_failed`（带 messageId/principal/error）。 |
 
@@ -1137,15 +1138,15 @@ P1 修复（`plan evaluate` exit 3 双语义：`runJson` 对非零 exit 一律�
 |---|---|---|
 | **D-084（新）acceptance 仪器四缺陷：W3 的 mock 全链验收入口自 2026-09-25 起跑不了** | **已关（2026-10-13）** | **背景**：`docs/change-safety.md` W3 把「`smoke:commit:mock` + `acceptance` 5.x 写链路 mock 下全绿」定为波次唯一验收。而 `scripts/acceptance.ts` 自引入 commit `f0f0fe8`（2026-09-25）起有四个各自独立致命的缺陷，从未完整跑成过一次——`data/` 下最后的报告 `202609220353.md` 正处在 f0f0fe8 之前。① `:237` `const platformRoot = assembly.platformRoot` 与 `:218` 活着的那条同一作用域重复声明 → esbuild 编译错，**脚本连入口都没进**（该声明之后全文再无读取，是死代码）。② `:326` 报告里用全文未声明的 `dbPath` → 跑到最后一步 ReferenceError。③ 报告写在 `assembly.close()`/`auditDb.close()` **之后**，而每回合结束都 enqueue 两个 fire-and-forget 队列（`turn-persistence.ts` 的 `enqueueContextStateUpdate`/`scheduleMemoryConsolidation`），写的那下不在回合 await 链上 → `conversation_log_update_failed`（该会话 Context State 整段丢失）+ `long_memory_consolidation_failed`，而报告已落盘、exit 0，丢失无声无息。④ `:350` 调 `handler(message, progress)` **只传两个参数**，生产（`channel-wecom/src/adapter.ts:326`）与 e2e harness（`tests/e2e/harness.ts:636-643`，注释明写"生产保真"）都传三个 → `onNotice` undefined → `plan-runtime.ts:130/147` 的 fail-closed 守卫生效（抛"已暂停执行"），**任何走计划门的写链路都被挂死**。修法：①② `2f29f4e`（删死声明 + 提出 `const dbPath` 单一出处）；③ `4c7d28e`（`drainBackgroundPersistence`，判据取存储自身的可观察终态 `conversation_context_states.through_event_id` 覆盖该会话最后一条事件，再等 `PRAGMA data_version` 静默地平线，超时报 `acceptance_drain_timeout` 不吞；报告改到关库之前落盘）；④ `64f8ea7`（补第三参 `createNoticeRecorder`，照 e2e harness 只外包记录不碰生产链路，notice 原文进报告与 records JSON，送达失败记 `acceptance_notice_fail` 后 rethrow）。**机械锁**：`--only=5.3` 与 5.x 子集实跑，两条丢失写 0 次、`acceptance_drain_timeout` 0 次、3 条计划通知逐字进报告、worker 首次在真模型下产出 `prop_7a458052-…`；`npm test` 1244→1247 全绿。**残留（两条，记在案未修）**：a) `scripts/acceptance-22-supplement.ts:65` 同样只传两个参数（同形状缺口；`scripts/ask.ts:125` 核实后**已有** notice，不在缺口内）；b) `tsconfig.json:23` 的 include 只含 `packages/**` 与 `apps/**`，`scripts/` **不在 `npm run typecheck` 覆盖内**（`--listFilesOnly` 实测 0 个 scripts 文件），该文件有 14 条既有类型错误无人看见——而 leak-lint 反而扫 `scripts/`，两边覆盖不对称。 |
 | **D-068 附条 · 实体来源校验把 worker 自产 scratch 路径当越权实体（假拒致写链路建不出提案）** | **已关（2026-10-13，`72f5e09`）** | **背景**：与 D-068 同一个校验器（`packages/agent/src/turn-contract.ts` 的 `validatePlanEntities`），但根因不同——D-068 是"跨轮次实体丢失"，本条是"把不是领域实体的东西当成领域实体"。2026-10-13 真模型 + mock 平台 + 写开放 + 网关路径开，审计库 `tool_calls` 记录：worker 把提案 payload 写进自己的 scratch 目录后，把 `voucher.proposal tmp/<requestId>/proposal.json` 排进计划提交 → `PLAN DECLINED：ENTITY_OUT_OF_SCOPE: 实际 计划包含未在…中出现的参数：tmp/req_31776cfb-…/proposal.json` → 重试 → 6 次后撞 `MAX_DECLINED_PLANS_PER_TASK`（`pi-coding-driver.ts:36`，=5）→ terminal block，worker 放弃。**根因**：`validatePlanEntities` 对每个不以 `-` 开头的字符串参数都要求在 haystack（当前消息/检索证据/平台响应/会话实体）里逐字找到，而 worker 刚落盘的工作区产物路径当然不在里面。**这是意外后果而非设计决定**：现有测试（`context.test.ts:88-96`、`461-470`）钉的全是领域实体语义，没有任何路径类用例。**为什么新网关路径更容易中**：开关关着时 worker 用直接 `bash` 发同一条命令，绕过实体校验所以成功；开关开着时走 `plan_submit` 必须过实体校验。**修法**：新增 `PlanArtifactBoundary({workspaceRoot, scratchDir})` 与 `isOwnArtifactPath()`，`validatePlanEntities` 加第三个**可选**参；不传边界判据时豁免整支不出现（判定与从前一字不差，有测试钉）。豁免复用 `serve-gate.ts` 的 `workspaceRelPath` + `isInsideScratch` 这一把尺（提案 payload 边界检查已在用），没有第二份路径解析；解析后必须落在本轮 `tmp/<requestId>/` 内，`../` 穿越/绝对路径越界/符号链接逃逸/别轮次 scratch 全都过不了。**机械锁**：`context.test.ts` 两条（本轮 scratch 产物放行 + 对抗：别轮次 scratch/词法穿越/`docs/名单.md`/`/etc/passwd`/`../…` 全仍拒，外加"豁免按参数逐个判定，同一 call 里的幻觉实体照样报它"）；`pi-coding-driver.test.ts` 驱动级接线一条。**变异验证（主 agent 本人做的，非转述）**：把 `isOwnArtifactPath` 改成恒 false → 正好这 3 条红、其余 78 条不受影响，还原后 52 绿。`npm test` 1247 全绿、typecheck 0 错误、leak-lint 4/4。 |
-| **D-085（新）haystack 的条数窗口与单条截断构成另一种假拒（与 D-068 同族，未修）** | **已关（2026-10-14，`2e2a699`）** | **位置**：`packages/agent/src/turn-contract.ts` 的 `validatePlanEntities` haystack 构造——对平台响应只取 `slice(-PLATFORM_RESPONSE_MAX=20)` 且每条只取 `slice(0, PLATFORM_RESPONSE_LIMIT=20_000)`。**根因**：两条都真实有效。① **条数窗口**：`collectPlatformResponses`（`pi-coding-driver.ts:1177-1185`）把会话里**每一条** toolResult 都收进来，包括被门拦下的（SDK 把 `{block:true,reason}` 转成 error tool result）。扫全部 42 个历史验收库，单 request 的 tool_call 数有 9/11/13/21/26/26/32/34/37/39/40/47/**87**——大量超过窗口 20，"早期平台响应里确立的实体"在后续计划提交时已滑出窗口，而 `turn-contract.ts:179-180` 的注释点名要支持的正是"目录查询拿到唯一候选、再按候选名查"这个场景。② **单条截断比注释说的更狠**：注释说 20_000「与宿主留存 tool_result 的截断一致」，但那个截断在 `turn-persistence.ts:197`，只作用于 `run_17dz_task`/`route_current_turn` 的**落库**流，完全不经过 haystack 读的 `session.agent.state.messages`；真正作用在会话转录上的是 SDK bash 工具的保尾弃头（约 2000 行/50KB），宿主再 `slice(0,20_000)` 只看到其中段。**终局形状与 D-068 附条相同**：假拒 → 重试 → `DECLINED_PLAN_LIMIT` → worker 放弃；且写路径（scratch 产物场景）正是长任务形状，最容易滑窗口。**建议波次**：与 D-068 附条同批（同一函数、同一终局）。**闭环判据建议**：haystack 覆盖判据从"最后 N 条"改为"本任务迄今全部 toolResult 的结构化实体集合"（复用 D-068 的 `sessionEntities` 来源 A 机制，而不是把窗口调大——调大只是把阈值推远，不解决"实体来源应是结构化的"这个根因）。 **闭环（2026-10-14，`2e2a699`）**：条数窗口 `slice(-20)` 与保头 `slice(0,20_000)` 一并删除，改为「本任务迄今**全部**平台响应、单条**保尾**」（新常数 `PLATFORM_RESPONSE_TAIL_CHARS = 50_000` = SDK 自己的单条工具结果上限，对真实转录是恒真 no-op）。**判据据现场核实改写**：原字面「改为结构化实体集合」实现不了——信封 `data` 的每个字符串叶都是它所在响应原文的子串（`RESULT` 在 stdout 末行、SDK 保尾弃头），所以只收叶值是可证的**收窄**，会打破 golden `turn-contract.test.ts:235`（该用例用的就是非信封原文）并新拒「幻电设备」vs 平台返回「幻电设备有限公司」这类缩写/简称形状，方向与修假拒相反。改为「全部原文 + 结构化叶值作为**附加**第二来源（additive，只增覆盖）」，包含判据仍是逐字包含。**新发现的根因（台账原先没有）**：SDK 默认开自动压缩（阈值 = contextWindow − 16384 ≈ 111 616 token），一到阈值 `agent.state.messages` 被换成 `[压缩摘要] + [保留尾段]`（`keepRecentTokens` ≈ 80KB），早期 tool_result 整条消失——单请求 87 次 tool_call 的长任务必然触发，所以覆盖判据物化成两个通道：转录通道 + 宿主在 `afterToolCall` 上的账本通道（压缩免疫）。**机械锁**：`platform-entities.test.ts` 15 条 + `turn-contract.test.ts` +4 + 驱动级 +5（21 条响应实体在第 1 条 / 防幻觉不变 / 60KB 噪声 + 末行信封 / 压缩后账本仍认得早期实体 / 注入路径不变）。**变异验证**：改回 `slice(-20)`、保尾改保头、删 `platformEntities`、删账本记账、删转录通道、调大保尾常数 —— 六项各自对应断言红。 |
-| **D-086（新）被拒计划的原因文本回灌 haystack，形成"假放行"方向（安全相邻，未修）** | **已关（2026-10-14，`7281daf`）** | **位置**：`packages/agent/src/turn-contract.ts` 的 `ENTITY_OUT_OF_SCOPE` 消息（截到 80 字符）逐字带 offending token，该消息作为 tool_result 回到会话，而 haystack 的 `platformResponses` 正从会话 toolResult 收集。**根因**：于是**同一 token 原样重提一次就能过**——第一次被拒反而把该 token 送进了 haystack。方向与 D-085 相反（那条是假拒，这条是假放行），但同源：haystack 把"宿主的拒绝理由"当成了"平台返回的实体证据"。**影响**：实体来源校验的防线可被"先故意提一个越权实体、拿到拒绝理由、再原样提一次"绕过；对恶意/失控 worker 是真实的边界弱化。**建议波次**：与 D-085 同批。**闭环判据建议**：haystack 只收平台**成功**响应的结构化产物，不收门拒绝理由（拒绝理由进独立的"上次为什么被拒"通道，供 worker 自纠但不作为实体来源）。 **闭环（2026-10-14，`7281daf`）**：按 `toolCallId` **身份**排除宿主自己拦下的那一跳（`beforeToolCall` 改成 wrapper，`verdict?.block` 与抛异常两处都记），收集处按 id 整条排除。**两处被否决的替代方案及理由**：① 按 `isError` 过滤 —— 不行，SDK bash 工具退出码非零时 throw，平台 CLI exit 3 的真错误信封同样 `isError:true`，按它过滤会把真平台证据一起删掉、制造新假拒（单测钉住）；② 按协议前缀嗅探文案 —— 不行，那是从结果原文猜语义，且名单要跟着每个新裁决增长，平台响应只要引用宿主一句话就能绕过（单测钉住）。**「上次为什么被拒」通道不新建**：被拦的 tool_result 原文本来就是 worker 自己的工具输出（自纠通道）+ `needsClues` 已把理由交给主 Agent + `correctForm` 已带正路径，三件套都在；这里只收回「把它当实体证据」这一项。**机械锁**：`pi-coding-driver-entity-scope.test.ts` 6 条（核心 = 越权 token 被拒后原样重提仍被拒，改前第二次提交确实放行）。**变异验证**：删 block 分支记账、删 catch 分支记账、身份判据换 `isError`、身份判据换 `toolName` —— 四项各自对应断言红。 |
-| **D-087（新）acceptance 报告不 surfaced `tool_calls` 表，根因诊断被延迟数小时** | **已关（2026-10-14，`3beb3b5`）** | **位置**：`scripts/acceptance.ts` 的报告只写 `subagentFinalText` 与 `progressSteps`（+ notice），不读审计库的 `tool_calls`。**根因**：计划门的三类拒绝里只有 `plan_write_not_enabled` 有 `console.info` 事件；实体越权、`PLAN_NOT_PLANNABLE`、`DECLINED_PLAN_LIMIT` **在宿主侧全静默**——它们只作为 tool_result 回给 worker 并落进 `tool_calls` 表。2026-10-13 定位 `ENTITY_OUT_OF_SCOPE` 假拒时，报告里只有 worker 终稿说"操作申请已用尽"，真正的拒绝原因一直在库里记着（`safe_arguments` 带完整三要素），但没有任何出口把它带到人眼前。**影响**：每一次这类缺陷的定位成本都从"读报告"变成"手工查 sqlite"。**建议波次**：随 acceptance 仪器批（D-084 同批）。**闭环判据建议**：报告增加一节「计划门拒绝明细」——按 request 列出 `serve_gate:plan_submit` 的 status/error_code/reason；或至少在 `acceptance_case_done` 事件里带 `planRejects` 计数（与已有的 `noticeCount` 同族，0 条通知已是保真缺口复发的信号）。 **闭环（2026-10-14，`3beb3b5`）**：新模块 `scripts/plan-reject-report.ts`（按 request 取该回合全部 `serve_gate:plan_submit` 行，理由/摘要用 `json_extract` 从 `safe_arguments` 取——该表没有独立 reason 列）；`acceptance.ts` 的 `CaseRecord` 加 `planRejects`，报告每节多一行汇总 + 若干行明细（declined 前置，理由截断到 200 字不铺全文），`acceptance_case_done` 事件加 `planRejects` / `planDeclines` 两个计数。查询点在回合返回后立刻：`reportPlanSubmission` 的 insert 函数体没有 await，行在调用时就同步落库，不必等 `drainBackgroundPersistence`。**出口选审计库而不是再加 console.info**：日志解决"这次看得见"，不解决"每次定位都要手工查 sqlite"。分类只认宿主自己的协议前缀且**只做报告、没有任何门读它**（不按错误码名猜语义，D-089 纪律）。`vitest.config.ts` 的 unit include 加 `scripts/**/*.test.ts`，补上 D-084 残留 (b) 的一半不对称（tsconfig 的 include 仍不含 scripts/，那一半不混进本波）。**机械锁**：`scripts/plan-reject-report.test.ts` 9 条，行形状按现有 `data/acceptance-202610131453.db` 与 `…202610131112.db` 里真实的两行钉。**变异验证**：删 SQL 的 `tool_name` 过滤 → 隔离用例红。 |
-| **D-088（新）真模型不稳定抵达提案步：写路径端到端未经真模型验证** | **已关（2026-10-14）** | **位置**：实证 = 2026-10-13 三轮真模型 + mock 平台 + 写开放 + 网关路径开（`FSHINE_PROPOSAL_VIA_GATEWAY=1` + `FSHINE_PROPOSAL_COMMIT=1`）：轮① worker 自己跑了 `bin/17dz prepare voucher.proposal tmp/<req>/payload.json`（该轮开关关着）并在平台侧建出提案；轮② 把 7 次查询配额用尽后说"操作申请已用尽"放弃（该配额在 host/平台/SKILL 三处都不存在，见 D-067 附条）；轮③ 反复把 `voucher.proposal` 排进计划，每次被 `PLAN_NOT_PLANNABLE` 拒（消息不点名操作，见 D-089），6 次后撞上限放弃。**根因**：三个可修的宿主/平台侧缺陷叠加（notice 缺失、实体假拒、拒绝不点名）+ 模型在计划门交互上的真实方差。**已排除的误解（重要，勿再犯）**：**mock 全链本身是通的**——`smoke:commit:mock` PASS（提案→确认→落账→读回，mock 状态 0→2）；`tests/e2e/turn-loop-write-chain.test.ts` 16/16（含 create→确认→commit→读回、`EXECUTION_REQUIRE_PLAN=1` 全链、平台拒绝、确认时点能力收回）。W3 指定的 mock 验收门是绿的，未通的只是真模型这一条腿。**建议波次**：D-084/D-085/D-086/D-089/D-090 修完后复跑三轮取稳定率。**闭环判据建议**：连续三轮真模型 + mock 平台，5.1 均能产出 `prop_*` 且 5.2 能取到 6 位确认码完成落账；三轮报告写进 `data/acceptance-report-*` 留档。 **进展（2026-10-14）**：台账原文列的三个可修上游缺陷已全部关闭——notice 缺失（D-084，`64f8ea7`）、实体假拒（D-085，`2e2a699`）、拒绝不点名（D-089，`71757d3`）；`voucher.proposal` 的声明矛盾（D-090，17dz `a683df2`）亦已关。D-086（`7281daf`）额外堵上了"先故意提越权实体、再原样重提"这条绕过路径。**本条因此只剩"连续三轮真模型 + mock 平台"这一件事**，按 architecture-laws 的关账纪律不因"上游都修完了"而标关——字面判据是连续三轮，差一轮都不算达成。  **第二轮（2026-10-14，`data/acceptance-report-202610140749.md`）——为跑写链路把本地主体 `capabilities` 开到 `["read","write"]`（`config/agent.yaml`，gitignored；mock 执行器 + `FSHINE_REAL_COMMIT` 空两道闸未动）。仍未达成，且暴露一个新缺陷：报告里两次 `PLAN STOP 当前未开放写入权限`，而 `plan_write_not_enabled` 事件零次、库里 `principal_scopes.capabilities` 明明是 `["read","write"]`——这句话不来自 D-075 前置扫描，而是 evaluate 失败分支的假归因（已修，登记为 **D-096**，`4aeab16`）。worker 把假归因原样转达给用户，用户被指去找管理员要一个他已经有的权限，这一轮放弃。**第三轮（`data/acceptance-report-202610140830.md`，D-096 修后复跑）**：假归因已除（本轮 `declined` 从 5 降到 1、计划门裁决从 8 降到 2），但 worker **没能产出形状合法的计划**——两次裁决分别是 `PLAN_JSON_PARSE`（方案 JSON 以 `-` 开头）与 `PLAN REFUSE UNKNOWN_OPERATION:operation list`（worker 把 CLI 子命令 `operation list --json` 塞进了计划的 calls 数组；已实测该命令在 serve 法域下直接跑是 exit 0 的，所以这是" CLI 子命令 ≠ operation"的模型侧混淆，属 D-095 实例①），终稿只剩"17dz 子任务执行失败，请稍后再试"。 **连续三轮复跑（2026-10-14，`acceptance-report-202610140902/…0911/…0920.md`，mock 执行器，本地主体临时 `["read","write"]`）——2/3 通过，未达成"连续三轮"**：① 轮① **PASS**：5.1 出 `prop_8ef3fd97-…` + 6 位码 `4R2V98`，5.2 落账且读回校验通过（凭证数 +1）；② 轮② **FAIL**：宿主给出正确的点名指令（`不该放进计划的是：voucher.proposal。请…改为直接调用`——D-096 修复生效），worker 也照办把 `voucher.proposal` 移出计划并跑完了全部只读核实，**然后停在下一次交互**，终稿写"确认后由系统执行录入"；审计库里 `proposal_create` 行 **0 条**——它从未尝试过提案步。这正是 **D-075 记录的 T7 事故形状**（"走完录入准备、承诺即可产出提案却永不抵达提案步"），只是发生在写开放的配置下；③ 轮③ **PASS**：5.1 出 `prop_38603366-…` + 码 `RZE78N`，5.2 落账、读回 +1。**判据未达成的原因不是宿主/平台侧缺陷**：三轮里计划门的拒绝全部可行动、无一次 `ENTITY_OUT_OF_SCOPE`、无一次假归因；唯一失败轮次是模型侧 workflow 缺口（登记 D-097）。按关账纪律仍不标已关。 **结论**：宿主/平台侧可修的障碍已全部清掉（D-084/D-085/D-086/D-089/D-090/D-096），剩下的是模型在计划门交互上的真实方差（D-095），要的是多轮复跑取稳定率，不是再改代码。 **首轮真模型基线（2026-10-14，`data/acceptance-report-202610140425.md`，mock 执行器）——未达成字面判据，原因三层、均可从报告直接归因**：① **部署姿态**：本地 `config/agent.yaml` 的主体 `capabilities: ["read"]`，写未开放。5.1 的计划里出现 `voucher.proposal` 时被 D-075 的计划扫描兜住（`PLAN STOP 当前未开放写入权限`，detail 逐字列出该调用）→ worker 到不了提案步 → 回复不含确认码 → 5.2/5.4 按既有逻辑跳过。这不是本轮引入的缺陷，但它是 **D-090 的一个后果**：17dz `a683df2` 把 `voucher.proposal` 从 `scratch` 改成 `write` 之后，`planWriteClosed` 读的 `confirm` 列为真，计划扫描兜底**首次对提案步生效**（change-safety B 波记的「对提案步不触发」已因此更正）。要跑字面判据必须把该主体 `capabilities` 开到含 `write`。② **模型侧形状问题两例**（新登记 D-095）：worker 发明了不存在的 `operation list` / `operation.list`（平台回 `PLAN_REFUSE UNKNOWN_OPERATION`，两次 `PLAN PAUSED`）；5.3 里两次 `PLAN_JSON_PARSE`（方案 JSON 以 `-` 开头）。③ **D-085/D-086 的修复无可观测负面效应**：本轮 10 次 declined 里 `ENTITY_OUT_OF_SCOPE` 零命中——三类静默拒绝里最相关的那一族本轮没出现（样本仅一轮，不作为结论）。**仪器侧结论**：D-087 落地后报告首次带出「计划门裁决 / 计划门拒绝明细」两节，5.1 的 6 次、5.3 的 4 次裁决全部列明理由与 calls 摘要——换在 E3 之前，这些位置只有 worker 终稿那一句。 **已排除的误解不许再犯**：mock 全链本身是通的（`smoke:commit:mock` PASS、`turn-loop-write-chain` 16/16），要验的只是真模型这一条腿；且三轮稳定率是**统计判据不是证明**，模型在计划门交互上有真实方差，任一轮失败要按报告节里的拒绝码归类（宿主/平台可修 → 登记新债或补进既有条目；模型方差 → 记观察项，与 rule-landing §6/§9 对 A2/F1 同口径）。 **闭环（2026-10-14，D-097 修后连续三轮）**：三轮全部达成字面判据——5.1 均产出 `prop_*` 且 5.2 均取到 6 位确认码完成落账、读回校验凭证数 +1。① `acceptance-report-202610141202.md`：`prop_68c39c11-…` + 码 `GK74HC`，计划门裁决 5（declined 2）；② `…1209.md`：`prop_70535385-…` + 码 `UF6HCA`，裁决 5（declined 1）；③ `…1217.md`：`prop_131f91fd-…` + 码 `WFVSKC`，裁决 4（declined 1）。**前置与边界**：三轮均在 mock 执行器 + 写开放（本地 `config/agent.yaml` 主体临时 `["read","write"]`，`.env` 的 `EXECUTION_EXECUTOR=mock` 与空的 `FSHINE_REAL_COMMIT` 两道闸未动）下取得；真平台仍受上线门把守（`docs/change-safety.md` §4 上线门四条），本条只证明"真模型 + mock 执行器"这一条腿通了。**对比基线**：改造前同一条用例三轮全失败（D-067 附条的"操作申请已用尽"、轮③ 反复 `PLAN_NOT_PLANNABLE` 后撞上限放弃）；本波修掉 D-084/085/086/089/090/096 六项后 3/3。 |
+| **D-085（新）haystack 的条数窗口与单条截断构成另一种假拒（与 D-068 同族，未修）** | **已关（2026-10-14，`2e2a699`）** | **位置**：`packages/agent/src/turn-contract.ts` 的 `validatePlanEntities` haystack 构造——对平台响应只取 `slice(-PLATFORM_RESPONSE_MAX=20)` 且每条只取 `slice(0, PLATFORM_RESPONSE_LIMIT=20_000)`。**根因**：两条都真实有效。① **条数窗口**：`collectPlatformResponses`（`pi-coding-driver.ts:1177-1185`）把会话里**每一条** toolResult 都收进来，包括被门拦下的（SDK 把 `{block:true,reason}` 转成 error tool result）。扫全部 42 个历史验收库，单 request 的 tool_call 数有 9/11/13/21/26/26/32/34/37/39/40/47/**87**——大量超过窗口 20，"早期平台响应里确立的实体"在后续计划提交时已滑出窗口，而 `turn-contract.ts:179-180` 的注释点名要支持的正是"目录查询拿到唯一候选、再按候选名查"这个场景。② **单条截断比注释说的更狠**：注释说 20_000「与宿主留存 tool_result 的截断一致」，但那个截断在 `turn-persistence.ts:197`，只作用于 `run_17dz_task`/`route_current_turn` 的**落库**流，完全不经过 haystack 读的 `session.agent.state.messages`；真正作用在会话转录上的是 SDK bash 工具的保尾弃头（约 2000 行/50KB），宿主再 `slice(0,20_000)` 只看到其中段。**终局形状与 D-068 附条相同**：假拒 → 重试 → `DECLINED_PLAN_LIMIT` → worker 放弃；且写路径（scratch 产物场景）正是长任务形状，最容易滑窗口。**归属波次 / 限期**：与 D-068 附条同批（同一函数、同一终局）。**闭环判据建议**：haystack 覆盖判据从"最后 N 条"改为"本任务迄今全部 toolResult 的结构化实体集合"（复用 D-068 的 `sessionEntities` 来源 A 机制，而不是把窗口调大——调大只是把阈值推远，不解决"实体来源应是结构化的"这个根因）。 **闭环（2026-10-14，`2e2a699`）**：条数窗口 `slice(-20)` 与保头 `slice(0,20_000)` 一并删除，改为「本任务迄今**全部**平台响应、单条**保尾**」（新常数 `PLATFORM_RESPONSE_TAIL_CHARS = 50_000` = SDK 自己的单条工具结果上限，对真实转录是恒真 no-op）。**判据据现场核实改写**：原字面「改为结构化实体集合」实现不了——信封 `data` 的每个字符串叶都是它所在响应原文的子串（`RESULT` 在 stdout 末行、SDK 保尾弃头），所以只收叶值是可证的**收窄**，会打破 golden `turn-contract.test.ts:235`（该用例用的就是非信封原文）并新拒「幻电设备」vs 平台返回「幻电设备有限公司」这类缩写/简称形状，方向与修假拒相反。改为「全部原文 + 结构化叶值作为**附加**第二来源（additive，只增覆盖）」，包含判据仍是逐字包含。**新发现的根因（台账原先没有）**：SDK 默认开自动压缩（阈值 = contextWindow − 16384 ≈ 111 616 token），一到阈值 `agent.state.messages` 被换成 `[压缩摘要] + [保留尾段]`（`keepRecentTokens` ≈ 80KB），早期 tool_result 整条消失——单请求 87 次 tool_call 的长任务必然触发，所以覆盖判据物化成两个通道：转录通道 + 宿主在 `afterToolCall` 上的账本通道（压缩免疫）。**机械锁**：`platform-entities.test.ts` 15 条 + `turn-contract.test.ts` +4 + 驱动级 +5（21 条响应实体在第 1 条 / 防幻觉不变 / 60KB 噪声 + 末行信封 / 压缩后账本仍认得早期实体 / 注入路径不变）。**变异验证**：改回 `slice(-20)`、保尾改保头、删 `platformEntities`、删账本记账、删转录通道、调大保尾常数 —— 六项各自对应断言红。 |
+| **D-086（新）被拒计划的原因文本回灌 haystack，形成"假放行"方向（安全相邻，未修）** | **已关（2026-10-14，`7281daf`）** | **位置**：`packages/agent/src/turn-contract.ts` 的 `ENTITY_OUT_OF_SCOPE` 消息（截到 80 字符）逐字带 offending token，该消息作为 tool_result 回到会话，而 haystack 的 `platformResponses` 正从会话 toolResult 收集。**根因**：于是**同一 token 原样重提一次就能过**——第一次被拒反而把该 token 送进了 haystack。方向与 D-085 相反（那条是假拒，这条是假放行），但同源：haystack 把"宿主的拒绝理由"当成了"平台返回的实体证据"。**影响**：实体来源校验的防线可被"先故意提一个越权实体、拿到拒绝理由、再原样提一次"绕过；对恶意/失控 worker 是真实的边界弱化。**归属波次 / 限期**：与 D-085 同批。**闭环判据建议**：haystack 只收平台**成功**响应的结构化产物，不收门拒绝理由（拒绝理由进独立的"上次为什么被拒"通道，供 worker 自纠但不作为实体来源）。 **闭环（2026-10-14，`7281daf`）**：按 `toolCallId` **身份**排除宿主自己拦下的那一跳（`beforeToolCall` 改成 wrapper，`verdict?.block` 与抛异常两处都记），收集处按 id 整条排除。**两处被否决的替代方案及理由**：① 按 `isError` 过滤 —— 不行，SDK bash 工具退出码非零时 throw，平台 CLI exit 3 的真错误信封同样 `isError:true`，按它过滤会把真平台证据一起删掉、制造新假拒（单测钉住）；② 按协议前缀嗅探文案 —— 不行，那是从结果原文猜语义，且名单要跟着每个新裁决增长，平台响应只要引用宿主一句话就能绕过（单测钉住）。**「上次为什么被拒」通道不新建**：被拦的 tool_result 原文本来就是 worker 自己的工具输出（自纠通道）+ `needsClues` 已把理由交给主 Agent + `correctForm` 已带正路径，三件套都在；这里只收回「把它当实体证据」这一项。**机械锁**：`pi-coding-driver-entity-scope.test.ts` 6 条（核心 = 越权 token 被拒后原样重提仍被拒，改前第二次提交确实放行）。**变异验证**：删 block 分支记账、删 catch 分支记账、身份判据换 `isError`、身份判据换 `toolName` —— 四项各自对应断言红。 |
+| **D-087（新）acceptance 报告不 surfaced `tool_calls` 表，根因诊断被延迟数小时** | **已关（2026-10-14，`3beb3b5`）** | **位置**：`scripts/acceptance.ts` 的报告只写 `subagentFinalText` 与 `progressSteps`（+ notice），不读审计库的 `tool_calls`。**根因**：计划门的三类拒绝里只有 `plan_write_not_enabled` 有 `console.info` 事件；实体越权、`PLAN_NOT_PLANNABLE`、`DECLINED_PLAN_LIMIT` **在宿主侧全静默**——它们只作为 tool_result 回给 worker 并落进 `tool_calls` 表。2026-10-13 定位 `ENTITY_OUT_OF_SCOPE` 假拒时，报告里只有 worker 终稿说"操作申请已用尽"，真正的拒绝原因一直在库里记着（`safe_arguments` 带完整三要素），但没有任何出口把它带到人眼前。**影响**：每一次这类缺陷的定位成本都从"读报告"变成"手工查 sqlite"。**归属波次 / 限期**：随 acceptance 仪器批（D-084 同批）。**闭环判据建议**：报告增加一节「计划门拒绝明细」——按 request 列出 `serve_gate:plan_submit` 的 status/error_code/reason；或至少在 `acceptance_case_done` 事件里带 `planRejects` 计数（与已有的 `noticeCount` 同族，0 条通知已是保真缺口复发的信号）。 **闭环（2026-10-14，`3beb3b5`）**：新模块 `scripts/plan-reject-report.ts`（按 request 取该回合全部 `serve_gate:plan_submit` 行，理由/摘要用 `json_extract` 从 `safe_arguments` 取——该表没有独立 reason 列）；`acceptance.ts` 的 `CaseRecord` 加 `planRejects`，报告每节多一行汇总 + 若干行明细（declined 前置，理由截断到 200 字不铺全文），`acceptance_case_done` 事件加 `planRejects` / `planDeclines` 两个计数。查询点在回合返回后立刻：`reportPlanSubmission` 的 insert 函数体没有 await，行在调用时就同步落库，不必等 `drainBackgroundPersistence`。**出口选审计库而不是再加 console.info**：日志解决"这次看得见"，不解决"每次定位都要手工查 sqlite"。分类只认宿主自己的协议前缀且**只做报告、没有任何门读它**（不按错误码名猜语义，D-089 纪律）。`vitest.config.ts` 的 unit include 加 `scripts/**/*.test.ts`，补上 D-084 残留 (b) 的一半不对称（tsconfig 的 include 仍不含 scripts/，那一半不混进本波）。**机械锁**：`scripts/plan-reject-report.test.ts` 9 条，行形状按现有 `data/acceptance-202610131453.db` 与 `…202610131112.db` 里真实的两行钉。**变异验证**：删 SQL 的 `tool_name` 过滤 → 隔离用例红。 |
+| **D-088（新）真模型不稳定抵达提案步：写路径端到端未经真模型验证** | **已关（2026-10-14）** | **位置**：实证 = 2026-10-13 三轮真模型 + mock 平台 + 写开放 + 网关路径开（`FSHINE_PROPOSAL_VIA_GATEWAY=1` + `FSHINE_PROPOSAL_COMMIT=1`）：轮① worker 自己跑了 `bin/17dz prepare voucher.proposal tmp/<req>/payload.json`（该轮开关关着）并在平台侧建出提案；轮② 把 7 次查询配额用尽后说"操作申请已用尽"放弃（该配额在 host/平台/SKILL 三处都不存在，见 D-067 附条）；轮③ 反复把 `voucher.proposal` 排进计划，每次被 `PLAN_NOT_PLANNABLE` 拒（消息不点名操作，见 D-089），6 次后撞上限放弃。**根因**：三个可修的宿主/平台侧缺陷叠加（notice 缺失、实体假拒、拒绝不点名）+ 模型在计划门交互上的真实方差。**已排除的误解（重要，勿再犯）**：**mock 全链本身是通的**——`smoke:commit:mock` PASS（提案→确认→落账→读回，mock 状态 0→2）；`tests/e2e/turn-loop-write-chain.test.ts` 16/16（含 create→确认→commit→读回、`EXECUTION_REQUIRE_PLAN=1` 全链、平台拒绝、确认时点能力收回）。W3 指定的 mock 验收门是绿的，未通的只是真模型这一条腿。**归属波次 / 限期**：D-084/D-085/D-086/D-089/D-090 修完后复跑三轮取稳定率。**闭环判据建议**：连续三轮真模型 + mock 平台，5.1 均能产出 `prop_*` 且 5.2 能取到 6 位确认码完成落账；三轮报告写进 `data/acceptance-report-*` 留档。 **进展（2026-10-14）**：台账原文列的三个可修上游缺陷已全部关闭——notice 缺失（D-084，`64f8ea7`）、实体假拒（D-085，`2e2a699`）、拒绝不点名（D-089，`71757d3`）；`voucher.proposal` 的声明矛盾（D-090，17dz `a683df2`）亦已关。D-086（`7281daf`）额外堵上了"先故意提越权实体、再原样重提"这条绕过路径。**本条因此只剩"连续三轮真模型 + mock 平台"这一件事**，按 architecture-laws 的关账纪律不因"上游都修完了"而标关——字面判据是连续三轮，差一轮都不算达成。  **第二轮（2026-10-14，`data/acceptance-report-202610140749.md`）——为跑写链路把本地主体 `capabilities` 开到 `["read","write"]`（`config/agent.yaml`，gitignored；mock 执行器 + `FSHINE_REAL_COMMIT` 空两道闸未动）。仍未达成，且暴露一个新缺陷：报告里两次 `PLAN STOP 当前未开放写入权限`，而 `plan_write_not_enabled` 事件零次、库里 `principal_scopes.capabilities` 明明是 `["read","write"]`——这句话不来自 D-075 前置扫描，而是 evaluate 失败分支的假归因（已修，登记为 **D-096**，`4aeab16`）。worker 把假归因原样转达给用户，用户被指去找管理员要一个他已经有的权限，这一轮放弃。**第三轮（`data/acceptance-report-202610140830.md`，D-096 修后复跑）**：假归因已除（本轮 `declined` 从 5 降到 1、计划门裁决从 8 降到 2），但 worker **没能产出形状合法的计划**——两次裁决分别是 `PLAN_JSON_PARSE`（方案 JSON 以 `-` 开头）与 `PLAN REFUSE UNKNOWN_OPERATION:operation list`（worker 把 CLI 子命令 `operation list --json` 塞进了计划的 calls 数组；已实测该命令在 serve 法域下直接跑是 exit 0 的，所以这是" CLI 子命令 ≠ operation"的模型侧混淆，属 D-095 实例①），终稿只剩"17dz 子任务执行失败，请稍后再试"。 **连续三轮复跑（2026-10-14，`acceptance-report-202610140902/…0911/…0920.md`，mock 执行器，本地主体临时 `["read","write"]`）——2/3 通过，未达成"连续三轮"**：① 轮① **PASS**：5.1 出 `prop_8ef3fd97-…` + 6 位码 `4R2V98`，5.2 落账且读回校验通过（凭证数 +1）；② 轮② **FAIL**：宿主给出正确的点名指令（`不该放进计划的是：voucher.proposal。请…改为直接调用`——D-096 修复生效），worker 也照办把 `voucher.proposal` 移出计划并跑完了全部只读核实，**然后停在下一次交互**，终稿写"确认后由系统执行录入"；审计库里 `proposal_create` 行 **0 条**——它从未尝试过提案步。这正是 **D-075 记录的 T7 事故形状**（"走完录入准备、承诺即可产出提案却永不抵达提案步"），只是发生在写开放的配置下；③ 轮③ **PASS**：5.1 出 `prop_38603366-…` + 码 `RZE78N`，5.2 落账、读回 +1。**判据未达成的原因不是宿主/平台侧缺陷**：三轮里计划门的拒绝全部可行动、无一次 `ENTITY_OUT_OF_SCOPE`、无一次假归因；唯一失败轮次是模型侧 workflow 缺口（登记 D-097）。按关账纪律仍不标已关。 **结论**：宿主/平台侧可修的障碍已全部清掉（D-084/D-085/D-086/D-089/D-090/D-096），剩下的是模型在计划门交互上的真实方差（D-095），要的是多轮复跑取稳定率，不是再改代码。 **首轮真模型基线（2026-10-14，`data/acceptance-report-202610140425.md`，mock 执行器）——未达成字面判据，原因三层、均可从报告直接归因**：① **部署姿态**：本地 `config/agent.yaml` 的主体 `capabilities: ["read"]`，写未开放。5.1 的计划里出现 `voucher.proposal` 时被 D-075 的计划扫描兜住（`PLAN STOP 当前未开放写入权限`，detail 逐字列出该调用）→ worker 到不了提案步 → 回复不含确认码 → 5.2/5.4 按既有逻辑跳过。这不是本轮引入的缺陷，但它是 **D-090 的一个后果**：17dz `a683df2` 把 `voucher.proposal` 从 `scratch` 改成 `write` 之后，`planWriteClosed` 读的 `confirm` 列为真，计划扫描兜底**首次对提案步生效**（change-safety B 波记的「对提案步不触发」已因此更正）。要跑字面判据必须把该主体 `capabilities` 开到含 `write`。② **模型侧形状问题两例**（新登记 D-095）：worker 发明了不存在的 `operation list` / `operation.list`（平台回 `PLAN_REFUSE UNKNOWN_OPERATION`，两次 `PLAN PAUSED`）；5.3 里两次 `PLAN_JSON_PARSE`（方案 JSON 以 `-` 开头）。③ **D-085/D-086 的修复无可观测负面效应**：本轮 10 次 declined 里 `ENTITY_OUT_OF_SCOPE` 零命中——三类静默拒绝里最相关的那一族本轮没出现（样本仅一轮，不作为结论）。**仪器侧结论**：D-087 落地后报告首次带出「计划门裁决 / 计划门拒绝明细」两节，5.1 的 6 次、5.3 的 4 次裁决全部列明理由与 calls 摘要——换在 E3 之前，这些位置只有 worker 终稿那一句。 **已排除的误解不许再犯**：mock 全链本身是通的（`smoke:commit:mock` PASS、`turn-loop-write-chain` 16/16），要验的只是真模型这一条腿；且三轮稳定率是**统计判据不是证明**，模型在计划门交互上有真实方差，任一轮失败要按报告节里的拒绝码归类（宿主/平台可修 → 登记新债或补进既有条目；模型方差 → 记观察项，与 rule-landing §6/§9 对 A2/F1 同口径）。 **闭环（2026-10-14，D-097 修后连续三轮）**：三轮全部达成字面判据——5.1 均产出 `prop_*` 且 5.2 均取到 6 位确认码完成落账、读回校验凭证数 +1。① `acceptance-report-202610141202.md`：`prop_68c39c11-…` + 码 `GK74HC`，计划门裁决 5（declined 2）；② `…1209.md`：`prop_70535385-…` + 码 `UF6HCA`，裁决 5（declined 1）；③ `…1217.md`：`prop_131f91fd-…` + 码 `WFVSKC`，裁决 4（declined 1）。**前置与边界**：三轮均在 mock 执行器 + 写开放（本地 `config/agent.yaml` 主体临时 `["read","write"]`，`.env` 的 `EXECUTION_EXECUTOR=mock` 与空的 `FSHINE_REAL_COMMIT` 两道闸未动）下取得；真平台仍受上线门把守（`docs/change-safety.md` §4 上线门四条），本条只证明"真模型 + mock 执行器"这一条腿通了。**对比基线**：改造前同一条用例三轮全失败（D-067 附条的"操作申请已用尽"、轮③ 反复 `PLAN_NOT_PLANNABLE` 后撞上限放弃）；本波修掉 D-084/085/086/089/090/096 六项后 3/3。 |
 | **D-089（新）`PLAN_NOT_PLANNABLE` 不点名是哪个调用，worker 无法 self-correct** | **已关（2026-10-13，`71757d3`）** | **位置**：`packages/agent/src/pi-coding-driver.ts:176-178` 的 `planNotReadOnlyCode(calls, semantics)` **手里就拿着 `calls`**，却只返回一个错误码；`messageTextFor(code)` 渲染 `error-codes.ts:280` 的固定文案「该调用不需要计划、也不要放进计划，直接调用即可。」。**根因**：worker 的计划里有 3-4 个调用，这句不含操作名的文案让它无法定位该删哪一个 → 原样重提 → 6 次后撞 `MAX_DECLINED_PLANS_PER_TASK` → 放弃（D-088 轮③ 的直接死因）。**修法要求**（已派 subagent）：消息列出具体 operation 名并说清下一步；三要素消息的唯一出处仍是 `error-codes.ts` 的表，用表里既有的参数化机制（`messageFor(code, actual)`），不新造一套；保持两枝分流判据（平台 access 语义表的 confirm 列）不变，**不按错误码名猜语义**；消息是给 worker 的协议文本不上屏。**顺带核查要求**：语义表缺失 / operation 未登记时 `isWriteAccess(semantics?.get(...))` 的降级路径是否真的按注释"宁缺勿猜"成立，有没有可能把要用户确认的写类误判成②。 |
 | **D-090（新）17dz `voucher.proposal` 的声明与实现互相矛盾** | **已关（2026-10-13，17dz `a683df2`）** | **位置**：`17dz-platform/src/voucher/operations.json` 的 `voucher.proposal` 声明 `"access": "scratch"` + `"effects": ["local"]`；而 `src/execution/proposal.js:218` 的注释自己写着「mock 只换"触平台"的操作，**dry-run/save/读回三者都触**」，`runDomain` 在非 mock 下确实 `spawnSync(process.execPath, [SCRIPTS.fill, ...])` 起真 `fill.js`。**根因**：`access: scratch` 在语义表里意味着 `mock:false`（联调不能替换）+ `plan:false`（不进计划、网关不 bind）——即"纯本地、不触平台、不需要计划"；而实现起了真域脚本触平台，同一个 `runDomain` 还带着 `touchesPlatform:true` 的真平台执行门（fail-closed），等于实现侧在补偿这个错误声明。这是 A 波 commit `38585d4` 引入的缺陷。**后果**：宿主按表叫 worker"别把 voucher.proposal 放进计划"，而它恰恰是写路径里最该让人签字范围的那一步（D-089 的直接上游）。**修法要求**（已派 subagent）：先读计划门判据与语义表派生处搞清 `access` 四个字面量各自意味着什么再决定改成哪个值，不凭猜；三个维度自洽（dry-run 触平台 → mock 列可替换；写路径提案创建步产物要人签字 → plan 列为真；`effects` 反映真实副作用）；改完 `node test/test-all.js` 必须 ALL PASS。**顺带核查要求**：`operations.json` 里还有没有别的 operation 同类"声明与实现矛盾"。 |
 | **D-092（新）D 波开关退役的已知代价：委派中途崩溃失去一行 start 痕迹；`confirm_held` 成真平台专属态** | **接受（已记录代价）** | **位置**：`packages/agent/src/context.ts`（原 `delegation_gateway_state` 结构化日志，D 波 `3e5a36c` 整行删除）与 `proposal-flow.test.ts` / `turn-loop-write-chain.test.ts` 的 confirm_held 覆盖。**背景**：D 波退役 `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 后，写路径只剩一种形态。删除 `delegation_gateway_state` 的理由是该行唯一 payload `proposalGateway` 布尔退役后恒真、不再回答任何问题。**代价①（可观测性）**：委派**中途崩溃/挂死**的窗口原本有一行 start 痕迹（证明"这一回合确实进了委派、走到哪儿停的"），现在只剩 SQLite 里的 task 记录与回合级 `turn_span`。建成与拒绝两侧的事实面反而更强（拦截处必有 `tool_calls` 一行 `tool:'proposal_create'` 含拒绝原因；建成时有 `proposal_created` 事件 + `delegation_span` 的 `proposal_created` 结局），缺的只是"起了头但什么都没发生"那一窗口。**代价②（测试覆盖形态）**：`confirm_held`（确认收到但不写）从此是**真平台专属态**，mock 下不可达——原先靠"关掉落账开关"在 mock e2e 里造出这一态的用例改写为"mock 之下落账恒放行"；fail-closed 的判据改由 `proposal-flow.test.ts` 的 `proposalCommitEnabled=false` 一支 + `isCommitEnabled` 语义组共同钉住（组成链条：真平台无 `FSHINE_REAL_COMMIT` ⇒ `isCommitEnabled` 假 ⇒ `proposalCommitEnabled` 假 ⇒ `confirm_held` + 零写入）。**为什么接受而不是留开关**：留两个恒开开关的两种"关"形态都是静默半成品——不拦截 = 平台建了提案而用户拿不到确认入口；不接线 = 用户以为确认即录入而实际不写。半成品比没有开关更危险，它让"看起来配好了"和"真的能跑"无法区分。**安全判据未削弱**：`isCommitEnabled` 一字未动且是唯一闸门，真平台无 `FSHINE_REAL_COMMIT` 仍是确定性拒绝 + 零写入；变异验证（恒 false）→ 7 条红。**若将来要补代价①**：给委派入口补一行不带布尔的事实痕迹（如 `delegation_started` + taskId），或从既有 `turn_span`/task 记录派生"起了头无结局"的查询。 |
 | **D-067 附条 · 新 confabulation 实例（2026-10-13）：「本轮可向平台发起的操作申请已用尽」** | **待办（watch，归 D-067）** | **实例**：真模型 + mock 平台 + 写开放，worker 终稿说「本轮可向平台发起的**操作申请已用尽**，无法再提交这一步」。核实：host（`pi-coding-driver.ts` 只有 `MAX_DECLINED_PLANS_PER_TASK` 计划拒绝计数）、平台（`operations.json` 无调用配额列）、SKILL（`.agents/skills-serve/17dz-bookkeeping-prepare/SKILL.md` 无次数/上限语）**三处都不存在这种配额**。真实原因是它撞了 `DECLINED_PLAN_LIMIT`，而 `context.ts:1358` 的提示词明令"内部控制不上屏……因内部限制停顿时只说事实与出路，不说机制"——于是它把内部限制译成了一句虚构的资源配额。**意义**：这是 D-067 预言的新形态（换个说法机械防不住），且它与 D-089 是同一事故的两面——D-089 修好（消息点名操作、可 self-correct）后，worker 更可能根本走不到"需要解释为什么停"这一步。**机械锁**：无新增（D-067 本就是 watch 项，不设机械关闭判据）；本条登记真实出处供指纹表/词表复核。 |
-| **D-091（新）17dz `voucher.validate` 声明错在反方向：纯离线脚本声明 `read`，mock 换不掉、fail-closed 门误报** | **已关（2026-10-14，17dz `963e088`）** | **位置**：`17dz-platform/src/voucher/operations.json` 的 `voucher.validate` 声明 `access: "read"` + `effects: ["read"]`；而实现 `src/voucher/scripts/validate-contract.js` 头部自述「凭证契约校验（**纯离线，无浏览器**）」，只 `require('node:fs')` + `../contract`（→ `contract.schema.json` + ajv + 算术）。`read` 在 `ACCESS_SEMANTICS`（`src/lib/operations.js:45-49`）里是 `{plan:true, confirm:false, mock:true}`。**根因**：与 D-090 同族但方向相反——D-090 是"宣称纯本地实则触平台"（危险方向），本条是"宣称触平台实则纯本地"。`mock:true` 让联调把它换成应答器，而应答器没有它的罐头回答。**三个后果**（D-090 修覆时顺带核查实证）：① `EXECUTION_EXECUTOR=mock` 下 `prepare src/voucher/scripts/validate-contract.js` → `OPERATION_NOT_MOCKED` exit 3，**`voucher.validate` 在 mock 联调里根本跑不了**（同形状的 `payroll.validate` 声明 scratch，同一环境 exit 0 正常输出）；② 非 mock 且无 `EXECUTION_ALLOW_REAL=1` → `REAL_EXECUTION_NOT_ALLOWED` exit 3，**为一个物理上碰不到平台的脚本要运维授权**（fail-closed 门误报）；③ `plan:true` 使 `EXECUTION_REQUIRE_PLAN=1` 时网关为一个离线校验索要 `EXECUTION_PLAN_ID`。**为什么是已知 bug 类的活实例**：`gateway.js:313-320` 的注释记过同一形态——2026-10-09 实证 worker 发 `prepare transform.py` 拿 exit 3、out/ 为空，根因是 mock 按"是否触平台"判，纯本地脚本也被换成应答器落到 fail-loud。当时修的是判据读语义表 `mock` 列，但**声明本身错了的那一行没被扫出来**。**为什么没顺手修**：这个假声明还被两处钉住——`test/test-gate.js:291-293`（"一个 scratch 纯本地、一个 read 触平台会话，语义正相反"）与 `docs/architecture.md` 同款措辞；改它 = 改计划门范围（scratch 的 plan=false），是**有意决策而非顺手改**。**建议波次**：与 D-090 同批的下一轮（17dz 声明审计批）。**闭环判据建议**：`access` 改 `scratch` + `effects` 改 `["local"]`，同步 `test-gate.js:291-293` 与 `docs/architecture.md` 那两处措辞；改后 mock 下 `prepare voucher.validate` exit 0 有输出、非 mock 无 `EXECUTION_ALLOW_REAL` 也 exit 0（不触平台不该要运维授权）、`EXECUTION_REQUIRE_PLAN=1` 不索要 `EXECUTION_PLAN_ID`。**顺带登记（D-090 核查 B/C 的阴性/轻微项）**：`voucher.fix-summary`/`gen-from-journal`/`create-assistant` 都是 `access:write` 且无 `writeFlag`（读作"总是写"）但各自有 dry-run 缺省 flag——因三者 `serve.prepare` 均为 false，读 `writeFlag` 的分支不可达，今天无行为后果；其余 10 个 read 类 voucher + 2 个 finance operation 的脚本都 require `lib/browser`/`lib/platform`（grep 实证触平台，声明准确）。**全仓扫下来，`voucher.proposal`（D-090，危险方向）与 `voucher.validate`（本条，反方向）是仅有的两处声明/实现矛盾。** **闭环（2026-10-14，17dz `963e088`）**：`access` 改 `scratch` + `effects` 改 `["local"]`（同仓同形状对照就是 `payroll.validate`），`serve` 三列 / `label` / `script` 不动；`test/test-gate.js:291-292` 与 `docs/architecture.md:245` 两处会变成假事实源的 prose 同批重写。三条判据：① `EXECUTION_EXECUTOR=mock` 下 `prepare src/voucher/scripts/validate-contract.js <契约>` exit 0 且信封 `{ok:true,…}`（改前 `OPERATION_NOT_MOCKED` exit 3）；② `EXECUTION_EXECUTOR=mock EXECUTION_SERVE=1 EXECUTION_REQUIRE_PLAN=1` 下同一条命令 exit 0，不再索要 `EXECUTION_PLAN_ID`；③ 「非 mock 无 `EXECUTION_ALLOW_REAL` 也 exit 0」**按类级单测钉住而非真跑**——`change-safety.md` §0 禁止任何不带 `EXECUTION_EXECUTOR=mock` 的 `bin/17dz` 调用，故该条由 `test-real-execution-gate.js` 新增的「从清单读 `voucher.validate` 的声明 → `touchesPlatformOf === false`」断言承担。17dz `npm test` ALL PASS + `lint:operations` passed。**变异验证**：access 改回 `read` → 3 条新断言全红 + mock 下 prepare 复现 `OPERATION_NOT_MOCKED` exit 3。**残留（登记不修）**：`src/execution/executor.js` 与 `proposal.js` 读 mock 时不看 `touchesPlatform` 列，`operation run voucher.validate` 在 mock 下仍会被换掉——非本条引入（`payroll.transform` 同状），属"mock 判据在 compat/proposal 两条路上与 gateway 不一致"的独立条目；`SCOPE_FORMS['voucher.validate']`（`plan.js`）随之不可达，与 `payroll.validate` 同状，无害。 |
+| **D-091（新）17dz `voucher.validate` 声明错在反方向：纯离线脚本声明 `read`，mock 换不掉、fail-closed 门误报** | **已关（2026-10-14，17dz `963e088`）** | **位置**：`17dz-platform/src/voucher/operations.json` 的 `voucher.validate` 声明 `access: "read"` + `effects: ["read"]`；而实现 `src/voucher/scripts/validate-contract.js` 头部自述「凭证契约校验（**纯离线，无浏览器**）」，只 `require('node:fs')` + `../contract`（→ `contract.schema.json` + ajv + 算术）。`read` 在 `ACCESS_SEMANTICS`（`src/lib/operations.js:45-49`）里是 `{plan:true, confirm:false, mock:true}`。**根因**：与 D-090 同族但方向相反——D-090 是"宣称纯本地实则触平台"（危险方向），本条是"宣称触平台实则纯本地"。`mock:true` 让联调把它换成应答器，而应答器没有它的罐头回答。**三个后果**（D-090 修覆时顺带核查实证）：① `EXECUTION_EXECUTOR=mock` 下 `prepare src/voucher/scripts/validate-contract.js` → `OPERATION_NOT_MOCKED` exit 3，**`voucher.validate` 在 mock 联调里根本跑不了**（同形状的 `payroll.validate` 声明 scratch，同一环境 exit 0 正常输出）；② 非 mock 且无 `EXECUTION_ALLOW_REAL=1` → `REAL_EXECUTION_NOT_ALLOWED` exit 3，**为一个物理上碰不到平台的脚本要运维授权**（fail-closed 门误报）；③ `plan:true` 使 `EXECUTION_REQUIRE_PLAN=1` 时网关为一个离线校验索要 `EXECUTION_PLAN_ID`。**为什么是已知 bug 类的活实例**：`gateway.js:313-320` 的注释记过同一形态——2026-10-09 实证 worker 发 `prepare transform.py` 拿 exit 3、out/ 为空，根因是 mock 按"是否触平台"判，纯本地脚本也被换成应答器落到 fail-loud。当时修的是判据读语义表 `mock` 列，但**声明本身错了的那一行没被扫出来**。**为什么没顺手修**：这个假声明还被两处钉住——`test/test-gate.js:291-293`（"一个 scratch 纯本地、一个 read 触平台会话，语义正相反"）与 `docs/architecture.md` 同款措辞；改它 = 改计划门范围（scratch 的 plan=false），是**有意决策而非顺手改**。**归属波次 / 限期**：与 D-090 同批的下一轮（17dz 声明审计批）。**闭环判据建议**：`access` 改 `scratch` + `effects` 改 `["local"]`，同步 `test-gate.js:291-293` 与 `docs/architecture.md` 那两处措辞；改后 mock 下 `prepare voucher.validate` exit 0 有输出、非 mock 无 `EXECUTION_ALLOW_REAL` 也 exit 0（不触平台不该要运维授权）、`EXECUTION_REQUIRE_PLAN=1` 不索要 `EXECUTION_PLAN_ID`。**顺带登记（D-090 核查 B/C 的阴性/轻微项）**：`voucher.fix-summary`/`gen-from-journal`/`create-assistant` 都是 `access:write` 且无 `writeFlag`（读作"总是写"）但各自有 dry-run 缺省 flag——因三者 `serve.prepare` 均为 false，读 `writeFlag` 的分支不可达，今天无行为后果；其余 10 个 read 类 voucher + 2 个 finance operation 的脚本都 require `lib/browser`/`lib/platform`（grep 实证触平台，声明准确）。**全仓扫下来，`voucher.proposal`（D-090，危险方向）与 `voucher.validate`（本条，反方向）是仅有的两处声明/实现矛盾。** **闭环（2026-10-14，17dz `963e088`）**：`access` 改 `scratch` + `effects` 改 `["local"]`（同仓同形状对照就是 `payroll.validate`），`serve` 三列 / `label` / `script` 不动；`test/test-gate.js:291-292` 与 `docs/architecture.md:245` 两处会变成假事实源的 prose 同批重写。三条判据：① `EXECUTION_EXECUTOR=mock` 下 `prepare src/voucher/scripts/validate-contract.js <契约>` exit 0 且信封 `{ok:true,…}`（改前 `OPERATION_NOT_MOCKED` exit 3）；② `EXECUTION_EXECUTOR=mock EXECUTION_SERVE=1 EXECUTION_REQUIRE_PLAN=1` 下同一条命令 exit 0，不再索要 `EXECUTION_PLAN_ID`；③ 「非 mock 无 `EXECUTION_ALLOW_REAL` 也 exit 0」**按类级单测钉住而非真跑**——`change-safety.md` §0 禁止任何不带 `EXECUTION_EXECUTOR=mock` 的 `bin/17dz` 调用，故该条由 `test-real-execution-gate.js` 新增的「从清单读 `voucher.validate` 的声明 → `touchesPlatformOf === false`」断言承担。17dz `npm test` ALL PASS + `lint:operations` passed。**变异验证**：access 改回 `read` → 3 条新断言全红 + mock 下 prepare 复现 `OPERATION_NOT_MOCKED` exit 3。**残留（登记不修）**：`src/execution/executor.js` 与 `proposal.js` 读 mock 时不看 `touchesPlatform` 列，`operation run voucher.validate` 在 mock 下仍会被换掉——非本条引入（`payroll.transform` 同状），属"mock 判据在 compat/proposal 两条路上与 gateway 不一致"的独立条目；`SCOPE_FORMS['voucher.validate']`（`plan.js`）随之不可达，与 `payroll.validate` 同状，无害。 |
 
 ## 补充记录（2026-10-14，实体门标定修复 D-085 / D-086 + 验收仪器 D-087 + 17dz 声明 D-091）
 
@@ -1400,7 +1401,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **根因**：D-010 的收敛只做了代码派生，注释与示例未跟进。注释字面量不进执行路径，故不是 L2 的执行面违例，但"网关名只剩一处"的律法表述按字面 grep 是不成立的（10 ≠ 1），后人按字面复核会误判律法已破。
 - **律法归属**：L2。
 - **闭环判据**：二选一——(a) 律法 L2 的表述收窄为"代码字面量只剩一处"（注释/示例除外，并写清 grep 口径）；(b) 9 处注释/示例改由常量名或"网关名见配置"措辞替代，grep 总量回到 1。**本轮选 (a)**：`docs/architecture-laws.md` L2 条目与闭环判据已收窄为代码字面量 ≤1，口径写清注释/示例除外、grep 总量 10 另记；不选 (b)，改 9 处注释凑 1 会扩大 diff 且与"注释不进执行路径"的定性冲突。
-- **建议波次**：文档小刀，随下一波顺手做。
+- **归属波次 / 限期**：文档小刀，随下一波顺手做。
 - **状态**：已关（闭环判据 (a) 成立；总量 10 与 main 8 的差额是注释面，不再由本条背账为执行面违例）。
 
 ### D-147 · 新硬控制标定：步数帽 50（未证实标定依据，登记为待标定）
@@ -1414,6 +1415,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L5（有界回路的收尾提示，非熔断）。
 - **闭环判据**：给出 50 的数据依据（历史任务步数分布，或至少一轮"50 误拦率 vs 51+ 空转拦截率"实测），或把 50 明确降格为"未标定默认值"并写进接口文档；二选一。
 - **变异留档**：change-safety §24 G1/G2/G3（阈值 `>`→`>=` 2 红；只送一次删 `sent` 1 红；分区 local 计零 4 红，均已还原）。
+- **归属波次 / 限期**：W5 尾程（标定数据或降格声明随 W5 结构化调用协议一并落地）。
 - **状态**：待办（待标定）。
 
 ### D-148 · 新硬控制标定：提案复核 fail-closed（标定已答，死循环面另立 D-149）
@@ -1427,6 +1429,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **律法归属**：L4（写路径保险箱的确认门）+ L5（失败有界：不发码即不进入确认态）。
 - **闭环判据**：(b) 的自愈路径落地（D-149 的方案之一）或 (b) 的文案改为可行动信息；(a) 保持现状（重发即自愈）。
 - **变异留档**：change-safety §24 G5/G6/G13（机械复核 schema 检查失效 1 红；schema 数组放行 1 红；驱动必注入失效 1 红，均已还原）。
+- **归属波次 / 限期**：W5 尾程（(b) 面自愈路径或文案改可行动信息随 W5 落地）。
 - **状态**：待办（仅 (b) 面开放；fail-closed 本身不拆——用户已明确否决"拆安全机制"式修法）。
 
 ### D-149 · 提案 schema 缺失分支给用户"请重新发起录入"是死循环（已知限制，登记不修）
@@ -1439,6 +1442,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **Workaround（今日可用）**：运营先在平台侧跑 `operation list --json`，确认 `proposal.create` 行带合法 `proposalSchema`；确认前不要让用户重发。已产生的孤儿 pending 提案须在平台提案状态库里人工核对（宿主侧无意图记录，无法代为作废）。
 - **律法归属**：L5（失败二分流：本应是"平台/部署对齐"类失败，却被包装成"用户重发"类）+ L4（确认门文案）。
 - **闭环判据**：schema 缺失分支的文案不再是无条件重发指令，且同 proposalId 重试或运营升级二选一落地；或平台 emission 被证明在所有部署下必带 schema（则本分支退化为不可达的防御，文案可保留）。
+- **归属波次 / 限期**：W5 尾程（文案或重试路径落地即关）。
 - **状态**：待办（已知限制，登记不修——本分支的硬约束是不碰生产逻辑，故不以代码修复冒充已修）。
 
 ### D-150 · 跨仓预算校验的 CI 边界（已知限制，登记不修接线）
@@ -1466,6 +1470,9 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **代码文案**：第二道防线抛错文案把档位归因给"plan evaluate 返回了"，但唯一可能的触发输入是宿主自己的 `decideBudgetTier`；`--fshine-root` 后跟旗标名会被吞成路径；decision 四档枚举全仓仍有 8 处副本，两张排序表逐字相同却无测试断言一致。
 - **文档笔误**：change-safety 补充节只有 G15/G16 两行变异表，缺 F2 要求的逐 commit 用例数行、也没留守卫落地时的"现在红"证据；§24 两处既有笔误（`27cc43a` 解析不到、真名 `e27cc43`；波次规模写 35 实为 34）；`285fed1` 的五个跨仓钉子没有对应 F3 留档行；NOTES:253 与 :296 两条陈旧；`interface.md:241` "见收尾报告"悬空。
 - **流程形态（2026-11-05 第六轮补记）**：`62d579a`（planDecisionRank 原型链修复）单独落地时 typecheck 红（`noUncheckedIndexedAccess` 下索引访问不收窄，`git archive` 抽树实跑 `tsc --noEmit` exit 2），由同 PR 的 fixup `646c8d9` 就地补齐而非 F5「红先 revert」——终态绿、未叠行为补丁，按 F2/F5 字面记一笔。教训：推 PR 前发现中间 commit 红，优先 rebase 消掉而不是留 fixup 让评审再抓一次。
+- **律法归属**：L7（可信度可量化：低危项登记也必须有可判据的关闭条件）。
+- **闭环判据**：每条低危项按技术债三件套补齐（归属标签 + 闭环判据 + 限期）并分流至对应波次；或 owner 接受为长期已知限制并逐条写明理由。
+- **归属波次 / 限期**：波次 5 前（公开库定稿前必须闭环，否则低危项沦为无主债务）。
 - **状态**：待办（登记）。
 
 ### F3 未留档项（本补档未做变异，登记）
@@ -1506,7 +1513,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **闭环判据**：gate①（产品面 `git grep -i 17dz` = 0，例外 = debt-ledger/change-safety/AGENTS.md）对账时该文件零 17dz，且 `contextProfiles` 的结构键随 W1 完成参数化（profile id 是结构键而非注释，不能靠文本替换糊过去）。
 - **律法归属**：L1（词汇边界：业务/实例词汇只住执行层 + 夹具 + 文档，模板不在词预算扫描范围内）。
 - **归属波次 / 限期**：W1 / 波次 4；限期 = 波次 4（门面按终局写时一并处理）。
-- **状态**：待办。
+- **状态**：已关（2026-11-06 波次 5 对账核实：`config/agent.example.yaml` 现行树零 17dz，`contextProfiles` 结构键已参数化为中性占位 `<profileId>`；闭环判据机械满足）。
 
 ### D-156 · 两支真实读数（61,000 / 86,000）未替换也未收词——守卫 D 类缺口
 
@@ -1819,7 +1826,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：迁移完成前。
 - **状态**：登记（F3 变异已留档，弱点已确认）。
 
-### D-176 · 门①口径分歧：测试夹具豁免惯例与"产品面零 17dz"字面判据冲突
+### D-190 · 门①口径分歧：测试夹具豁免惯例与"产品面零 17dz"字面判据冲突
 
 - **位置**：`docs/architecture-laws.md`（Tier B 闭环判据与守卫命令）、`packages/agent/platform-leak-lint.test.ts`（豁免惯例）。
 - **触发 / 根因**：门①字面口径（`git grep -il 17dz` 排除 3 档案例外后 = 0）与 platform-leak-lint 的 *.test.ts 豁免惯例存在冲突。本波方案明确"platform-leak-lint 的 *.test.ts 豁免惯例不适用于门①"，但这一口径未在 debt-ledger 或 change-safety 中登记为正式裁定，导致不同执行者对"门①是否应豁免测试夹具"有不同解读。
@@ -1827,3 +1834,40 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：口径分歧经 owner 拍板后，在 `change-safety.md` 或 `architecture-laws.md` 中以正式条目形式落地（"豁免"或"不豁免"），且 `platform-leak-lint.test.ts` 的豁免范围与该条目一致。
 - **归属波次 / 限期**：W6 前拍板；W6 落地。
 - **状态**：待办（登记，待 owner 拍板）。
+
+### D-186 · 公开库维护边界与回滚开关
+
+- **位置**：`docs/change-safety.md` §32、`docs/debt-ledger.md`。
+- **根因**：公开库需明确维护边界（什么能改、什么不能改）与回滚开关（紧急转私有/删除仓库命令），避免公开后因误操作或争议无法收回。
+- **律法归属**：L6（公开库治理）。
+- **闭环判据**：runbook 中回滚命令存在且可执行；公开库维护边界文档化并获 owner 认可。
+- **归属波次 / 限期**：波次 5；迁移完成前。
+- **状态**：登记。
+
+### D-187 · gitee/github 历史分叉
+
+- **位置**：`docs/change-safety.md` §32。
+- **根因**：gitee 保留未重写历史、GitHub 为 clean history，两台 remote 历史分叉；force-push 跟随重写或挂账需明确决策。
+- **律法归属**：L2（单一真相源）。
+- **闭环判据**：D1 决策落地（force-push 跟随或挂账 D-173）；历史分叉状态文档化。
+- **归属波次 / 限期**：波次 5；迁移完成前。
+- **状态**：登记（挂账）。
+
+### D-188 · 扫描工作流裁决输入定义与复跑归属
+
+- **位置**：`docs/change-safety.md` §32。
+- **根因**：扫描工作流（dwfrun-0637e7fe）的 25 条明细取回前，gate ⑥ 不可验收；verdict JSON 形状与 tag 三件套判定需明确定义。
+- **律法归属**：门⑥ / L7。
+- **闭环判据**：dwfrun-0637e7fe 明细取回并录入 verdict.json；扫描工作流按机械判据复跑且 verdict 可证伪翻转。
+- **归属波次 / 限期**：波次 5；扫描工作流明细取回后。
+- **状态**：登记（阻塞，O6）。
+
+### D-189 · fresh clone 云侧复证环境边界
+
+- **位置**：`docs/change-safety.md` §32。
+- **根因**：沙箱 /tmp 写入配额 EDQUOT/-122 致 fresh clone 后 npm ci 失败，本会话无法复证 gate ③。
+- **律法归属**：D-076（只跑 mock 不碰真实平台）+ 环境限制。
+- **闭环判据**：在无 /tmp 配额限制的环境执行 fresh clone + npm ci + npm run ci 全绿。
+- **归属波次 / 限期**：波次 5；公开推送前。
+- **状态**：登记（环境限制）。
+

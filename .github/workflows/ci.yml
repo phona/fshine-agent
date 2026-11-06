@@ -1,16 +1,13 @@
 # GitHub Actions CI for fshine-agent, self-contained.
 #
-# This is the workflow that makes the repo painless to maintain on GitHub:
-# a single checkout of this repo is enough. It runs ONLY the deterministic
-# gates (scripts/ci.sh): typecheck + unit tests + generic-mock eval.
+# This workflow runs the deterministic gates (scripts/ci.sh):
+# typecheck + unit tests + generic-mock eval.
 # It deliberately does NOT run:
 # - e2e (tests/e2e needs a sibling execution-layer checkout + a gitignored
 #   config/agent.yaml deployment config, see tests/e2e/harness.ts);
 # - real-model eval (npm run eval needs LLM_API_* secrets and has judge
 #   variance; run it manually before merge, not on every push).
 # No secrets, no deploy, no sibling repo, no .env.
-# Public repos get unlimited Actions minutes; private repos get the free
-# account quota (2000 min/month at last check) - one run here is ~2-3 min.
 name: CI
 
 on:
@@ -19,8 +16,14 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
