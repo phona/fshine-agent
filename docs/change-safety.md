@@ -1593,6 +1593,8 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 **本节性质**：波次 4 的执行关账记录。波次方案在 `/tmp/pp-waves-c.json`（waveId=波次 4）；本节的防线表、每 commit 实测记录、F3 变异留档表与未验项格式对齐 §24。
 
+**就绪检查四项符合情况**（验收项 1）：a) roadmap 对 W1–W5 零记载 → 不满足；b) change-safety 尾部为 §27–§30、W1–W5 在册 → 满足；c) AGENTS.md:25 仍自述预算档位在 17dz → 不满足；d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件全 0 命中 → 不满足。四项仅 b 满足，漂移已登记 D-179，未硬开跑前阻塞。
+
 ### 防线表
 
 | 守卫 | 判据 | 本波状态 |
@@ -1611,31 +1613,33 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | Commit | 主题 | 守卫状态 | 备注 |
 |---|---|---|---|
 | C1 | 产品面执行层实例痕迹守卫与门面表征 golden | public-surface-lint 全绿 | 防线先于改写 |
-| C2 | README 重写 | public-surface-lint Tier A 销账 8 行 | README 零 17dz |
+| C2 | README 重写 | public-surface-lint Tier A 销账 7 行（实测：README.md 17dz 命中 7 行） | README 零 17dz |
 | C3 | 功能规格能力表换通用要求 | public-surface-lint Tier A 销账 11 行 | spec 零 17dz |
 | C4 | 企微手工测试整篇重写 | public-surface-lint 业务词守卫移除 `.skip()` 后全绿；manual-test-wecom.md 17dz=0 / 业务词=0 | 销账 9 行 |
 | C5 | e2e 替身改由平台 operation 清单寻址 | harness-fidelity HF-4 落地；public-surface-lint harness.ts 17dz=0 | 20 行逐行销账 |
-| C6 | 部署模板改协议形状 | public-surface-lint config/agent.example.yaml 17dz=0 / 业务词=0 | 销账 5 行 |
-| C7 | .env.example 改协议契约自描述 | public-surface-lint .env.example 17dz=0 / 业务词=0 | 销账 4 行（实测 3+1 幻账） |
+| C6 | 部署模板改协议形状 | public-surface-lint config/agent.example.yaml 17dz=0 / 业务词=0 | 销账 8 行（实测） |
+| C7 | .env.example 改协议契约自描述 | public-surface-lint .env.example 17dz=0 / 业务词=0 | 销账 3 行（实测 3，无幻账） |
 | C8 | docs 索引页 | public-surface-lint docs/index.md 17dz=0 | README docs 行改链索引页 |
 | C9 | F7 五篇同步 | architecture-laws L2 补「守卫定义不是泄漏」；v0-architecture 补日期戳；debt-ledger 追加 D-175–D-180；rule-landing 同步；本节新增 | 两处按实测保守形式 |
-| C10 | CI 注释中性化 | public-surface-lint .github/workflows/ci.yml 17dz=0 | 销账 1 行 |
+| C10 | CI 注释中性化 | public-surface-lint .github/workflows/ci.yml 17dz=0 | 基线即 0 命中，无需销账；TIER_A 注册表注释「当前 0 命中，不登记」 |
 | C11 | package.json 元数据中性化 | public-surface-lint package.json description 17dz=0 | description 去实例名；private 不动 |
 
 ### F3 变异留档表
 
 | # | 变异操作 | 预期 | 实际 | 留档 |
 |---|---|---|---|---|
-| ① | 守卫覆盖匹配改恒真（scanSurface includes→false） | 表外命中不再红 | 待执行 | 本节记录 |
-| ② | golden「README 命令必须存在」反向改成不校验 | README 命令缺失不红 | 待执行 | 本节记录 |
-| ③ | HF-4 消费点断言改为只查派生表非空 | 加回手抄表不红 | 待执行 | 本节记录 |
-| ④ | 业务词守卫词表删一个词（BUSINESS_WORD_RE 删「账套」） | 含该词的文档不再红 | 待执行 | 本节记录 |
-| ⑤ | Tier A/Tier B 分层判据合并成一律要求为空 | Tier B 在册条目让它红 | 待执行 | 本节记录 |
+| ① | scanSurface scripts/** 改用 walk（只扫 .ts，漏 .md/.jsonl/.sh） | 表外命中不再红 | **改错即红：未成立**（scripts 下非 .ts 文件的 17dz 命中已在 TIER_B 在册，fileMatchesNeedle 直接读文件内容，扫描面变更不影响 stale 判定；守卫弱点已登记为潜在洞） | 本节记录 |
+| ② | golden 双向守卫移除 + README 删 typecheck | README 命令缺失不红 | **改错即红：成立**（双向守卫缺失时删 typecheck → 测试 PASS；守卫在位时删 typecheck → golden 测试 FAIL；守卫有效） | 本节记录 |
+| ③ | HF-4 第三重源码检查移除 + 加回 const SCRIPTS 手抄表 | 加回手抄表不红 | **改错即红：成立**（HF-4 源码检查已落地：`operationScripts.get(` 出现次数 ≥ 2 + 无 `const SCRIPTS` 常量；因 harness-fidelity 在本环境因 import 期 config/agent.yaml 缺失而无法完整收集，全量验证需兄弟仓环境，已在 D-181 登记） | 本节记录 |
+| ④ | BUSINESS_WORD_RE 删「期间」 | 含该词的文档不再红 | **改错即红：未成立**（当前扫描范围内「期间」的 2 处命中均在 BUSINESS_WORD_ALLOWLIST 内，删正则后无未归属命中可触发；守卫弱点已登记） | 本节记录 |
+| ⑤ | Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline） | Tier B 在册条目让它红 | **改错即红：未成立**（Tier A 当前无命中，合并判据后无 stale 条目；守卫弱点已登记） | 本节记录 |
 
 ### 未验项
 
-1. **e2e 集成验证**：波次起点实测 `npx vitest run --project e2e` = 26 文件 / 93 用例失败（38 文件 / 159 用例），根因是缺兄弟仓 17dz checkout 与 gitignored config/agent.yaml（docs/e2e-ownership.md:43-59）。本波 C5 改了 harness 的 PLATFORM_ROOT/CLI 派生逻辑，C6 改了 config/agent.example.yaml 的 profile id 中性占位——两者耦合，需要兄弟仓环境才能验证 e2e 不劣化。**本波不跑，记录基线集合，不冒充已验。**
+1. **e2e 集成验证**：波次起点基线（migration/public-release）实测 `npx vitest run tests/e2e/` = 38 文件 / 156 用例失败（根因：config/agent.yaml ENOENT 导致 37 文件 126 处根因同一错误 + 3 文件 30 处其他根因）；本波同环境 HEAD 实测同样 38 文件 / 156 失败（3 passed 为 harness-cursor 等不依赖平台的用例）。**本波不跑，记录基线集合，不冒充已验。** 波次末 harness 已修复 import 期强读 config/agent.yaml 崩溃（config 缺失时 PLATFORM_ROOT/GATEWAY 走 null 回退，load* 函数返回空表不阻断 import），36 个 e2e 文件从「收集期即失败」退化为「收集成功 / 执行期因平台未配而响亮失败」——符合方案「未设环境变量的本地 e2e 还能不能跑」的实答（不能，但失败形态正确）。
 2. **F6 探针基线 diff**：需要真实 LLM 授权，本波未获授权未跑。
 3. **exposure-lint 扩展**：凭据/token/主机名三类新增守卫断言，属 C9 登记项 D-180，实际扩展待波次 4 后续或波次 5 落地。
 4. **rule-landing 全量中性化**：C9 只同步「波次 4 主张变更」涉及的行，rule-landing 剩余 30 处（D-169）按 Tier B 在册，待收口波清零。
 5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 仍自述 W4 未完成——属于前置波次责任，本波登记漂移（D-179）但不硬修文档。
+
+6. **unit 基线**：波次起点 `npx vitest run packages/ apps/` = 105 unit 文件（含 e2e 标签的 fixtures 在内）；本波 unit 文件计数同 105。波次末波次专属的 public-surface-lint 全绿（9/9），platform-leak-lint 全绿（4/4），harness-fidelity 因 import 期 config/agent.yaml 缺失而跳过（见未验项 1）。
