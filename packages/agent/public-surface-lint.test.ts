@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { BUSINESS_WORD_RE } from './platform-leak-lint.test.ts';
+import { BUSINESS_WORD_RE } from './platform-leak-lint.test';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
@@ -111,6 +111,38 @@ function fileMatchesNeedle(rel: string, needle: string): boolean {
   return content.includes(needle);
 }
 
+function* walkTs(dir: string): Generator<string> {
+  for (const entry of readdirSync(dir)) {
+    const full = path.join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) {
+      if (entry === 'node_modules' || entry === 'data') continue;
+      yield* walkTs(full);
+    } else if (full.endsWith('.ts') && !full.endsWith('.test.ts')) yield full;
+  }
+}
+
+function* walkAll(dir: string): Generator<string> {
+  for (const entry of readdirSync(dir)) {
+    const full = path.join(dir, entry);
+    const st = statSync(full);
+    if (st.isDirectory()) {
+      if (entry === 'node_modules' || entry === 'data') continue;
+      yield* walkAll(full);
+    } else yield full;
+  }
+}
+
+function scanLines(content: string, file: string, needle: string, hits: { file: string; needle: string; line: number }[]): void {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line.includes(needle)) {
+      hits.push({ file, needle, line: i + 1 });
+    }
+  }
+}
+
 function scanSurface(): { file: string; needle: string; line: number }[] {
   const hits: { file: string; needle: string; line: number }[] = [];
   const scanned = new Set<string>();
@@ -122,26 +154,14 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
     for (const file of walk(absDir)) {
       const rel = path.relative(REPO_ROOT, file);
       scanned.add(rel);
-      const content = readFile(rel);
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('17dz')) {
-          hits.push({ file: rel, needle: '17dz', line: i + 1 });
-        }
-      }
+      scanLines(readFile(rel), rel, '17dz', hits);
     }
   }
 
   // 2. 固定文件
   for (const rel of SCAN_FILES) {
     scanned.add(rel);
-    const content = readFile(rel);
-    const lines = content.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].includes('17dz')) {
-        hits.push({ file: rel, needle: '17dz', line: i + 1 });
-      }
-    }
+    scanLines(readFile(rel), rel, '17dz', hits);
   }
 
   // 3. docs/**（排除 debt-ledger / change-safety）
@@ -153,29 +173,17 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
       const abs = path.join(REPO_ROOT, rel);
       if (!statSync(abs).isFile()) continue;
       scanned.add(rel);
-      const content = readFile(rel);
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('17dz')) {
-          hits.push({ file: rel, needle: '17dz', line: i + 1 });
-        }
-      }
+      scanLines(readFile(rel), rel, '17dz', hits);
     }
   }
 
-  // 4. .github/**
+  // 4. .github/**（全部文件）
   const githubDir = path.join(REPO_ROOT, '.github');
   if (existsSync(githubDir)) {
-    for (const file of walk(githubDir)) {
+    for (const file of walkAll(githubDir)) {
       const rel = path.relative(REPO_ROOT, file);
       scanned.add(rel);
-      const content = readFile(rel);
-      const lines = content.split('\n');
-      for (let i = 0; i < lines.length; i++) {
-        if (lines[i].includes('17dz')) {
-          hits.push({ file: rel, needle: '17dz', line: i + 1 });
-        }
-      }
+      scanLines(readFile(rel), rel, '17dz', hits);
     }
   }
 
@@ -183,13 +191,7 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
   const harness = 'tests/e2e/harness.ts';
   if (existsSync(path.join(REPO_ROOT, harness))) {
     scanned.add(harness);
-    const content = readFile(harness);
-    const lines = content.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].includes('17dz')) {
-        hits.push({ file: harness, needle: '17dz', line: i + 1 });
-      }
-    }
+    scanLines(readFile(harness), harness, '17dz', hits);
   }
 
   // 6. package.json name/description
