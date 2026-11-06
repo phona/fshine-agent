@@ -381,8 +381,8 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
     const content = readFile(f);
     return (content.match(/DZ_EXECUTOR|DZ_ALLOW_REAL/g) ?? []).map(() => f);
   });
-  if (dzHits.length === 0) {
-    failures.push('d) DZ_EXECUTOR / DZ_ALLOW_REAL 在四文件（platform-mock.ts / runtime-mode.ts / harness.ts / .env.example）中全 0 命中');
+  if (dzHits.length > 0) {
+    failures.push(`d) DZ_EXECUTOR / DZ_ALLOW_REAL 在四文件（platform-mock.ts / runtime-mode.ts / harness.ts / .env.example）中仍有 ${dzHits.length} 命中，未修复漂移`);
   }
 
   it('四项全部满足才开跑（当前不满足时列出缺口，阻塞硬开跑）', () => {
