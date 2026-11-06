@@ -221,7 +221,7 @@ export function workspaceRelPath(root: string, value: string): string | null {
 
 /**
  * 文本识别正则的来源：createServeGate 按注入的 gateway 派生
- * （gatewayTextPatterns），未注入时走遗留缺省；与 plan-runtime 的
+ * （gatewayTextPatterns），未注入时 fail-closed 抛错；与 plan-runtime 的
  * locatePlanSubmission 共用同一网关名来源，不存在第二份抄写。
  * 模块级常量不再持有网关名——正则随 gate 实例走 profile。
  */
@@ -231,7 +231,7 @@ function servePatterns(gateway?: string): { invocation: RegExp; plan: RegExp } {
 /**
  * 首词规则（警职执法）：识别"这条 bash 是不是一次平台网关调用"——首 token 须为网关
  * 可执行文件（可带路径前缀）。模式从注入的 gateway 派生（gatewayTextPatterns），
- * 未注入时走遗留缺省（接口文档 §2/§10）。env 前缀天然不匹配。
+ * 未注入时 fail-closed 抛错（接口文档 §2/§10）。env 前缀天然不匹配。
  */
 export function isServeCliInvocation(command: string, gateway?: string): boolean {
   const head = splitCommandTokens(command)[0];

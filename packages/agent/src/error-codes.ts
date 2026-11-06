@@ -100,7 +100,7 @@ type CodeEntry = ErrorCodeEntry | MessageCodeEntry;
  * 静默选一份信」的机制（D-011 根因）。机械锁：plan-teaching.test.ts 跨仓读平台 schema
  * 断言本示例合法，并断言两个源文件里除本函数外零第二种草案形状字面量。
  */
-/** 计划草案示例：网关名由调用方注入（profile.gateway），未注入时走遗留缺省（接口文档 §2/§10）。旧无参调用保持与从前一字不差。 */
+/** 计划草案示例：网关名由调用方注入（profile.gateway），未注入时 fail-closed 抛错。旧无参调用保持与从前一字不差。 */
 export function planDraftExample(gateway?: string): string {
   return `${resolveGatewayText(gateway)} plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}`;
 }

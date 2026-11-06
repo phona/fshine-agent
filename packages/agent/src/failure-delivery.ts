@@ -12,8 +12,9 @@
  * 未分类（unclassified）不离网：记 unclassified 并走既有兜底话术。
  *
  * 当前生产者缺口（W5 尾程登记，待 worker 侧结构化失败上报通道落地后补齐）：
- *   · CAPABILITY_UNAVAILABLE / HARD_REJECTED：runtime 五档无对应生产者，这两类
- *     协议失败目前仅由 failure-delivery.ts 函数级覆盖，生产路径不可达。
+ *   · CAPABILITY_UNAVAILABLE / HARD_REJECTED：runtime 五档无对应生产者，error-codes.ts
+ *     已补 DELEGATION_CAPABILITY_UNAVAILABLE / DELEGATION_HARD_REJECTED（cabadae），
+ *     但生产路径仍不可达（worker 侧结构化失败上报通道尚不存在）。
  *   · NEEDS_INPUT 的 needs 分支：需调用方传入 needs 缺口，当前 context.ts 未传。
  *   · RESOURCE_EXHAUSTED 的 needsEnrichment 分支：需 platformTasks + principalId +
  *     sessionId 且 subReason 非 timeout，当前 failureClassFor 只把 timeout 映射到
