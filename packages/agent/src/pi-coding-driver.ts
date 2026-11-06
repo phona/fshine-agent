@@ -1456,7 +1456,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           mkdirSync(scratchDir, { recursive: true });
           const tempFile = path.join(scratchDir, `structured_call_${toolCallId}.json`);
           writeFileSync(tempFile, JSON.stringify(call));
-          const env = createPlanScopedWorkerEnv(process.env, activePlanId());
+          const env = createPlanScopedWorkerEnv(ctx.env, activePlanId());
           const fallbackLogPath = path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl');
 
           const spawnGateway = (args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> => {
