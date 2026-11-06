@@ -113,7 +113,7 @@
       {
         "name": "guard-latent-declaration",
         "kind": "guard-test",
-        "criterion": "声明可守子集（S4 无枚举白名单、S5③ 起始号 NaN）：packages/agent/a2a-structured-call.test.ts + generic-mock g-structured-undeclared-arg 用例，对未声明的参数名/类型/枚举值 fail-closed；变异（去掉声明复核分支）→ 对应测试红。"
+        "criterion": "声明可守子集（S4 无枚举白名单、S5③ 起始号 NaN）：packages/agent/pi-coding-driver-structured-call.test.ts + generic-mock g-structured-undeclared-arg 用例，对未声明的参数名/类型/枚举值 fail-closed；变异（去掉声明复核分支）→ 对应测试红。"
       },
       {
         "name": "guard-latent-readback-count",
