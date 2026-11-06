@@ -150,7 +150,7 @@
       "L4 走查：git diff --name-only 96d9c5f^..96d9c5f -- packages apps → 空（C10 commit 上，且同 commit 的 generic-mock 新域端到端用例全绿，排除「空目录恒真」）。",
       "新域夹具零命名重叠：git grep -ic \"payroll\\.\\|17dz\" scripts/eval/fixtures/<新域名> → 0（execution-layer-admission.md 第二证明域判据第 4 条）。",
       "写 e2e（17dz 集成，前置=兄弟仓 checkout + gitignored config/agent.yaml + mock）：npx vitest run tests/e2e/turn-loop-write-chain.test.ts --project e2e → 全绿。**本会话实测未跑通前置**：四个受影响文件（turn-loop-clarification / turn-loop-routing / turn-loop-worker-timeout / turn-loop-write-chain）合跑结果 Test Files 2 failed | 2 passed (4)、Tests 16 failed | 10 passed (26)，根因是缺兄弟仓与部署配置（docs/e2e-ownership.md:43-59 记载的前置），不是代码回归；按未跑报告，不作为放行或打回依据。",
-      "写 e2e（单仓通用，无前置）：新增的第二写域通用 e2e 在 tests/e2e 内、local-fake.test.ts 同款归属，npx vitest run tests/e2e/<新域用例> --project e2e 全绿（这是本波内不依赖兄弟仓的写链闭环证据，弥补 g-structured-parity 只做信封 parity 的缺口）。",
+      "写 e2e（单仓通用，无前置）：tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；第二写域写链闭环证据 = generic-mock g-ballot-second-domain 全绿（24/24）+ execution-layer-admission.md 登记（这是本波内不依赖兄弟仓的写链闭环证据，弥补 g-structured-parity 只做信封 parity 的缺口）。",
       "F6 探针：C5 与 C6 两个挂点各留一份改前/改后 --only A1,A2,A4,A5 的 json 与逐轮 diff（需 LLM 凭据；本会话未跑）。",
       "grep -c \"^### D-1[5-9][0-9]\" docs/debt-ledger.md → 相对基线增加；每条新条目含归属标签 + 闭环判据 + 限期（迁移门⑦），其中 S3/S9/S10 三条按 guard-latent-unguarded-registered 逐条在册。",
       "git log --oneline <W5 基线>..HEAD → commit 集合与本方案 commits 一一对应，无混波（F4 归因）。",
