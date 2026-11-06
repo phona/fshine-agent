@@ -1747,7 +1747,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 ### D-181 · 17dz 集成 e2e 跨仓配对红（C6↔P1、C8↔P4 环境变量重命名不兼容）
 
 - **位置**：`tests/e2e/turn-loop-clarification.test.ts`、`tests/e2e/turn-loop-write-chain.test.ts`。
-- **根因**：17dz 平台 main 分支将执行器环境变量由 `EXECUTION_EXECUTOR` / `EXECUTION_ALLOW_REAL` 重命名为 `DZ_EXECUTOR` / `DZ_ALLOW_REAL`，但 17dz 侧 W5 分支 `a2a-structured-call` 未合入 main；fshine harness 仍设旧名，跨仓配对在当前环境下无绿色集成证据。clarification 3 例全红、write-chain 14/15 红，routing 5/5 与 worker-timeout 3/3 绿。
+- **根因**：17dz 平台 main 分支将执行器环境变量由 `EXECUTION_EXECUTOR` / `EXECUTION_ALLOW_REAL` 重命名为 `DZ_EXECUTOR` / `DZ_ALLOW_REAL`，但 17dz 侧 W5 分支 `a2a-structured-call` 未合入 main；fshine harness 仍设旧名，跨仓配对在当前环境下无绿色集成证据。clarification 3 例全红、write-chain 14/15 红，routing 5/5 与 worker-timeout 3/3 绿。**实质阻塞点在治理 env 族未对齐**：17dz main 的 governance 环境变量（`DZ_SERVE` / `DZ_MOCK_STATE` / `DZ_PLAN_STATE` / `DZ_PROPOSAL_STATE` / `DZ_AUDIT_PATH` / `DZ_REQUIRE_PLAN` / `DZ_INVOCATION` / `DZ_COMMIT_TOKEN` / `DZ_GATE_SECRET`）与 fshine harness 的 `EXECUTION_*` 命名不匹配——harness 设 `EXECUTION_SERVE=1` 但平台只认 `DZ_SERVE`，设 `EXECUTION_MOCK_STATE` 但平台只认 `DZ_MOCK_STATE`（respond.js:47 MOCK_STATE_MISSING exit 3），invocation/commitToken/gateSecret 全 null；`allowReal({DZ_ALLOW_REAL:'mock'})=false`——平台 real-execution.js 只认字面量 `'1'`，`'mock'` 是契约未定义值。e658310 新增的 `DZ_ALLOW_REAL` / `DZ_EXECUTOR` 两个名字未按 `docs/environment-variables.md:10` 先登记再进代码，也与 `docs/e2e-ownership.md:138`「环境名一律 `EXECUTION_*`/`FSHINE_*`」的约定冲突。
 - **律法归属**：L4（换域不改代码）+ 跨仓配对依赖。
 - **闭环判据**：17dz w5-tail 合入 main 后，harness 与平台环境变量命名对齐；或 fshine  harness 显式兼容新旧两套变量名后重跑通过。W5 验收条目⑧已将该类 e2e 定为「不作为放行或打回依据」。
 - **归属波次 / 限期**：W5 尾程登记；待 17dz 侧合流后重跑。
