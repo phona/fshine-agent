@@ -1148,4 +1148,4 @@ export type { Boot, BootOptions, Turn };
  * 两表不一致即红，逼着把替身换回平台派生（见 operationSemantics 处的注释）。
  */
 export const harnessOperationSemantics = operationSemantics;
-export { PLATFORM_ROOT, operationScripts, loadOperationScripts };
+export { PLATFORM_ROOT, GATEWAY, operationScripts, loadOperationScripts };
