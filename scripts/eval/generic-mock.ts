@@ -474,6 +474,23 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     checks.push(check('ballot.readback delta = required', afterCount === qCount + 1, String(qCount + 1), String(afterCount)));
     return { id: 'g-ballot-second-domain', pass: checks.every((c) => c.pass), checks };
   } },
+  { id: 'g-structured-parity', run: (ctx) => {
+    // Structured call parity: call --file must produce the same envelope as the direct command.
+    const payload = JSON.stringify({ operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
+    const file = writePayload(ctx, { operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
+    const structured = ctx.run(['call', '--file', file]);
+    const direct = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
+    const sEnv = parseEnvelope(structured.stdout);
+    const dEnv = parseEnvelope(direct.stdout);
+    const sameStatus = sEnv?.status === dEnv?.status;
+    const sameData = JSON.stringify(sEnv?.data) === JSON.stringify(dEnv?.data);
+    return { id: 'g-structured-parity', pass: structured.code === 0 && direct.code === 0 && sameStatus && sameData, checks: [
+      check('structured call exit 0', structured.code === 0, '0', String(structured.code)),
+      check('direct call exit 0', direct.code === 0, '0', String(direct.code)),
+      check('same status', sameStatus, String(dEnv?.status), String(sEnv?.status)),
+      check('same data', sameData, JSON.stringify(dEnv?.data).slice(0, 80), JSON.stringify(sEnv?.data).slice(0, 80)),
+    ] };
+  } },
 ];
 
 interface Baseline { version: number; generatedAt: string; note: string; cases: Record<string, { checks: Record<string, string> }> }
