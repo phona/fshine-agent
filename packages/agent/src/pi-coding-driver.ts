@@ -439,6 +439,8 @@ export interface PiCodingWorkerSessionOptions {
   agentDir: string;
   modelConfig: CodingModelConfig;
   serveGateAudit?: (event: ServeGateEvent) => void;
+  /** 继承环境变量（结构化调用等子进程的基境）。缺省退回到 process.env。 */
+  env?: Record<string, string | undefined>;
   /** 用户可见进度帧出口（宿主 → 渠道）：平台操作帧与计划提交帧都走这里。 */
   onStep?: (text: string) => void;
   onNotice?: (text: string) => Promise<void>;
@@ -744,6 +746,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         requestId: input.requestId,
         agentDir,
         modelConfig: { runtime, model, ...(thinkingLevel ? { thinkingLevel } : {}) },
+        env: options.env,
         operationLabels: await operationLabelsFor(input.cwd),
         operationArgStyles: await operationArgStylesFor(input.cwd),
         // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
@@ -1456,7 +1459,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           mkdirSync(scratchDir, { recursive: true });
           const tempFile = path.join(scratchDir, `structured_call_${toolCallId}.json`);
           writeFileSync(tempFile, JSON.stringify(call));
-          const env = createPlanScopedWorkerEnv(ctx.env, activePlanId());
+          const env = createPlanScopedWorkerEnv(options.env ?? process.env, activePlanId());
           const fallbackLogPath = path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl');
 
           const spawnGateway = (args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> => {

@@ -30,7 +30,8 @@ import type { FailureClass, FailureClassPolicy } from '@fshine/contracts';
 import { FAILURE_CLASS_POLICIES } from '@fshine/contracts';
 import { RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { toolUserErrorFor } from './error-codes';
-import { renderNeedsUserText, renderResourceExhaustedReply } from './turn-relay';
+import { renderNeedsUserText } from './turn-relay';
+import { renderResourceExhaustedReply } from './resource-exhausted';
 import type { DelegationFailureClass } from './delegation-failure';
 import type { PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 
