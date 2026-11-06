@@ -1513,3 +1513,67 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 **F2 表（逐 commit 实测，冻结基线 105 文件/1725+1 skip）**：变基后起点 110/1798+1（W1 增量+23）→ C2 后 110/1799+1 → C4 后 109/1788+0（-9-1skip-1 文件，被删 budget-policy-cross-repo.test.ts；仍 ≥1725）→ C5 后见本 commit 实测行。每 commit `npm run test -- --project unit` 全绿 + `npm run typecheck` exit 0。
 
 **F6**：本波零提示词/零门语义行为变化（C2 数字与比较符一字不动；C4 删的是从未进 CI 的开发面脚本）→ 不取新探针基线；判据=冻结基线 §16 W4（A1/A4/A5）不劣化，需真实 LLM 授权后补跑（未授权不跑，D-076 全程 mock）。
+
+## 30. 公开迁移 · 结构化调用协议波（2026-11-06，w5-structured-protocol：W5 方案记录 C0——裁定 + 双仓改动列表 + 配对表 + 退役判据）
+
+**本节性质**：W5 的**波次方案记录**（本波第一个 commit 落档），不是执行关账——逐 commit 的执行证据随各 commit 落地，关账由方案 C12 同步更新本节。方案全文在 `/tmp/pp-waves-c.json`（waveId=W5）与汇总员分节 `out/parts/19-21-w5`；编号沿用方案 C1–C11（C12 关账合并进本节更新），与 §16 历史波次的 W0–W7 命名空间不冲突（方案 Q8 的建议：编号顺延不硬编码，本节即 §30）。
+
+**目标形状**：按 `docs/a2a-protocol.md` 用结构化调用协议替代现行 env 级接线（`EXECUTION_EXECUTOR` / `EXECUTION_ALLOW_REAL` / `FSHINE_REAL_COMMIT` 一族与网关 spawn 路径），phased cutover（旧路径作 fallback 直到新路径被证明）+ 失败分类全覆盖测试矩阵收口；L4 判据机械化为「新增一个第二业务写域、端到端证明 + fshine 生产 diff=0」；§17 latent 按「声明可守 / 读回计数可守 / 执行层内部不可守」三类分流，不可守子集登记归属与限期，不宣称七项整体闭环。**公开库即终局架构，不带中间态**——fallback 是迁移期形态，其退役判据见下，归宿由波次 4（门面按终局写）收口。
+
+### 四项裁定（owner 2026-11-06；前两项解设计门 Q1/Q2/Q3，Q4 解跨仓排期）
+
+1. **Q1 调用载体**：网关 CLI 结构化子命令 `<gateway> call --file <json>`。worker 侧 typed 调用工具经 driver 的 beforeToolCall 拦截后走同一出口；参数 schema 由执行层自有声明派生，宿主不解析不校验业务参数。
+2. **Q2/Q3 三道门与 mock 选择器归属**：三道门（serve 令牌 / 实执行授权 / 真写授权）与 mock 选择器**整体归执行层**——成为执行层部署配置里的普通声明参数，fail-closed 逐门保留；编排层只持通用确认事实（谁确认、绑哪个计划版本、有效期）；`EXECUTION_*` / `FSHINE_REAL_COMMIT` 等 env 级开关从宿主退役（退役前各执法点拒绝形态与错误码逐字不变）。
+3. **Q4 跨仓形态**：17dz-platform 同批实现，走 PR 给 owner。17dz 侧改动列表（P1–P6）见下；fshine 侧用 mock 接缝证明宿主行为，真实配对用 17dz 集成写 e2e 证明（前置 = 兄弟仓检出，标注「具备前置后跑」）。
+
+### fshine 侧改动列表（C1–C11）
+
+| # | 主题 | 要点 | 状态（2026-11-06 本波第 1 棒实测） |
+|---|---|---|---|
+| C1 | 表征 golden 先行 | `packages/agent/a2a-cutover-golden.test.ts`：现行 env 级接线、委派块、失败分类、spawn 面逐条钉住；翻转点注明 C5/C7 | 本波第 2 commit |
+| C2 | 契约词汇补全（零行为变化） | `packages/contracts/src/a2a-protocol.ts` 增 OperationDeclaration / CapabilityManifest / StructuredCall；清单只作 `<gateway> operation list --json` 的消费投影（不缓存、不复制、不另立名单，L2）；词汇纯度断言落 `packages/agent/a2a-vocabulary.test.ts` | 本波第 3 commit |
+| C3 | 五路链抽纯函数 | `classifyDelegationFailure` 逐字搬移 context.ts 失败链，结构化判据入参（不是 reason 串）；行为零变化，golden 第⑤项保持绿 | 未动 |
+| C4 | 失败分类收口 + 全覆盖矩阵 | 五类（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED）宿主送达义务对齐 + `failure-delivery.test.ts` 全矩阵；措辞仍取 error-codes.ts / resource-exhausted.ts 单一来源 | 未动 |
+| C5 | 委派块按 DelegationBlock 落地 | entities/inputs 进载荷（数据源已存在：entitySources + materializeInputs，不改 ContextTaskRunArgs 签名）；golden 第④项显式翻转（翻转点一）；三处依赖【委派】载荷的 e2e 断言同 commit 更新 | 未动 |
+| C6 | 结构化调用通道【Q1/Q2/Q3】 | WORKER_TOOLS 增加结构化调用工具 + 宿主按 CapabilityManifest 机械复核 + 既有 executor 接缝 spawn（EXECUTION_EXECUTOR=mock 自动覆盖，D-076 不变）；worker 发起走 createPlanScopedWorkerEnv（计划门不绕开）、宿主办调走 hostGatewayEnv（D-081 岔路的法域选择由回归测试钉住） | 未动 |
+| C7 | spawn 路径切 gatewayExecPathForProfile（翻转点二） | 10 个 spawn 消费点全部经 profile 驱动函数、缺声明 fail-closed；修 platform-contract.ts 失真注释；GATEWAY_INVOCATION 文本识别回退（resolveGatewayText / gatewayTextPatterns）随本批退役（小裁示 3） | 主体已由 W1 C7b 达成（见下「现状对账」）；剩余 = 注释修正 + mock-commit-smoke 缺陷修复 |
+| C8 | 三道门只改执法点不改拦什么【Q2】 | 执法从「env 继承正确性」改为「调用处方显式携带 + 宿主持有状态」；任一缺失仍 fail-closed；新 FSHINE_*/EXECUTION_* 名字须同批登记 platform-leak-lint 的 FSHINE_NAME_REGISTRY | 未动 |
+| C9 | phased cutover【Q5】 | profile 级协议选择：缺省新路径；新路径不可用回落旧 bash 路径，事件 a2a_fallback 进审计，回落不许静默；退役判据见下（口径切开：17dz 旧路径 e2e 标为 fallback 覆盖，其回落事件不计入退役计数） | 未动 |
+| C10 | L4 闭环 | 第二非财税写域夹具（命名见小裁示 1）+ 端到端驱动（generic-mock 用例 + 单仓通用 e2e）+ fshine 生产 diff=0 + §17 latent 三类分流守卫 | 未动 |
+| C11 | 关账核对（drafts 待批收缩后） | 原方案「退役 Run17dzTaskArgs + 委派工具协议面中性化」已被 W1 提前完成（见现状对账）；本 commit 只做关账核对——docs-reality.test.ts:125-131 承诺指向的落点确认 + §30 之外不新增改动（小裁示 4：不硬改名） | W1 已完成主体；关账核对未动 |
+
+### 17dz-platform 侧改动列表（P1–P6，owner 2026-11-06 改动列表评审；与 fshine 侧同批，走 PR 给 owner）
+
+- **P1** `bin/17dz` + 网关分发：新增 `call --file <json>` 结构化子命令（Q1 裁定的载体在执行侧的落地），参数 schema 由执行层自有声明，宿主不解析不校验业务参数。配对 C6。
+- **P2** `src/lib/envelope.js`：五类失败分类词汇（cancelled/timeout/model_transient/auth/executor_error → 协议五类）进信封 emit 出口统一收口，与 fshine C4 的映射表逐条对齐。配对 C5。
+- **P3** 各域 `operations.json` 与 `operation list --json` 输出：补 a2a 词汇投影字段——est_seconds/weight/effects/access 已有，补协议版本与失败类声明；CapabilityManifest 在宿主只作它的消费投影（L2：不缓存、不复制、不另立名单）。配对 C5。
+- **P4** `src/lib/real-execution.js` + 执行层部署配置：**三门成为执行层自己的普通参数**——real-execution 授权、commit 授权、executor 模式（mock/real）全部落成执行层配置里的声明参数；fail-closed 逐门保留，标定三问（硬/软、标定依据、误拦什么 + 自愈路径）在执行侧重新回答并留档。配对 C8（宿主侧三个 env 读取点同批退役）。
+- **P5** `scripts/cross-repo/`：通用预算协议 parity 校验器——已在 17dz 本地分支 `w4-budget-protocol`（commit 4f0e2ec，含 rename-immune 解析 + 七态夹具 + 真实解析路径测试），**尚未 push、尚未合入 origin/main**；下一步 = push 该分支 + 开 PR 给 owner，这是同批协作的第一块砖（跨仓改动需 owner 认可的在途形态）。
+- **P6** `test/`：call 子命令的契约测试 + 失败分类映射的双向对账测试（fshine C4 映射表 ↔ 17dz P2 实现）+ 七态夹具扩展。
+
+### 跨仓配对表（必须成对验证）
+
+| fshine | 17dz | 验证形态 |
+|---|---|---|
+| C5 委派块 DelegationBlock 落地 | P2 信封失败分类收口 + P3 operations.json 投影字段 | fshine 单测 + mock 接缝；真实配对走 17dz 集成写 e2e（需兄弟仓检出前置，标注「具备前置后跑」） |
+| C6 结构化调用通道 | P1 `call --file` 子命令 | 同上 |
+| C8 三道门执法点 | P4 三门落执行层配置参数 | 同上 |
+| C10 第二写域夹具 | 第二写域的 stock 网关实例 | generic-mock + 单仓通用 e2e（不依赖兄弟仓）；stock 真网关配对走集成 e2e |
+
+### fallback 退役判据（C9 的机械条件）
+
+`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。
+
+### 四个小裁示（owner 待确认，已带推荐；不堵 C0–C2，C9/C11 开工前需定）
+
+1. **Q9 第二写域名**：推荐 `ballot-platform`（非财税域、与 payroll.*/stock.*/dummy.* 零重叠，避免撞 leak-lint 的 FORBIDDEN 指纹与 L4 判据原文的 payroll 举例）；备选 booking-platform。
+2. **Q10 entities 投影规则**：推荐 DelegationBlock.entities 取四来源（当前消息 / Log / 平台响应 / 会话已确立实体）**全量并集**——执行层复核从宽，宿主不替它做步骤级裁剪；inputs 只带 FrozenTaskInput 的引用清单不带内容。
+3. **Q11 网关文本识别回退退役时机**：`resolveGatewayText`/`gatewayTextPatterns` 的文本识别侧穿透验证随 C7 同批退役（推荐）；不留给 W1 补。
+4. **C11 范围**：只做关账核对（docs-reality 承诺指向 + 本节之外不新增改动），**不硬改名**——W1 已完成工具名参数化（RUN_EXECUTION_TASK_TOOL='run_task' + profile.toolName）与 Run17dzTaskArgs 别名退役，迁移门①（产品面 17dz=0）已达成，硬改名只剩断对外协议的成本。
+
+### 现状对账（2026-11-06 本波第 1 棒实测，影响方案若干条目的表述）
+
+- **W1 已合入集成分支**（`3ad9a82` merge(w1)，在 W2+W3/W4 之下）：`RUN_EXECUTION_TASK_TOOL='run_task'`（context.ts:61）、`DEFAULT_EXECUTOR_LABEL='执行层子 Agent'`（system-prompt.ts:29）、Run17dzTaskArgs deprecated 别名已退役（context.ts 无命中）——小裁示 4 的「W1 已完成」前提坐实。
+- **W1 C7b 已达成 spawn 面 fail-closed 主体**：platform-contract.ts 不再持有 `GATEWAY_INVOCATION` 常量（注释区 :25-33）；`gatewayExecPathForProfile` 生产调用方 = 3（context.ts:582、plan-runtime.ts:126、apps/server/proposal-commit.ts:60）；`gatewayExecPath` 调用方 = 7（operation-labels.ts:88/223/268/389/476/547 + scripts/mock-commit-smoke.ts:57）——合计 10 个 spawn 消费点，与方案计数一致，但全部已是「未声明/非法即抛」，方案原文「静默落到 bin/17dz」的现状表述作废。golden 第⑥项按现行真实行为钉（fail-closed 已达成），C7 的翻转点相应改为「注释修正 + mock-commit-smoke 缺陷修复」。
+- **mock-commit-smoke.ts:57 既存缺陷**（登记，属 C7 收尾范围）：`gatewayExecPath(platformRoot)` 单参数调用缺 gateway，运行时报 `gatewayNotDeclaredError`（本会话 `node --import tsx` 实测）；根 tsconfig include 不含 scripts/ 故 typecheck 不拦。修法随 C7（补 gateway 入参或改 profile 驱动）。
+- **F2 基线记账**：本波起点实测 `npm run test -- --project unit` → **109 文件 / 1795 passed / 0 skipped**（W4 冻结点 105/1725+1 skip；只增不减满足——skipped 归零为前序波次修复所致，如实记录不追认为缺口）。
