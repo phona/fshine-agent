@@ -1869,5 +1869,41 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：D-076（只跑 mock 不碰真实平台）+ 环境限制。
 - **闭环判据**：在无 /tmp 配额限制的环境执行 fresh clone + npm ci + npm run ci 全绿。
 - **归属波次 / 限期**：波次 5；公开推送前。
-- **状态**：登记（环境限制）。
+- **状态**：**已关**（2026-11-06 终门实测：/tmp 已改磁盘绑定 40G + 全员 TMPDIR=~/.tmp 铁律 + 编排层 envRefresh；fresh clone + npm ci + npm run ci 全绿，退出码 0）。
 
+
+### D-191 · 门②第 15 条口径：平台实例名的档案/改造史豁免 vs 全历史零命字面判据
+
+- **位置**：`scripts/history-sensitive-scan.sh`（G1b 逐串扫描）、`docs/debt-ledger.md`（本条）。
+- **触发 / 根因**：终门②首次真正跑通（敏感串表是 gitignored 本地文件，只存在于波次 2 切割 worktree，集成 worktree 不持有它——脚本探针已修为绝对路径，缺表 = exit 2「扫不了」不是通过）。34 条里 33 条全历史零命中；第 15 条（sha256 前 12 位 `b76deef1ee8c`，平台实例名）12 行命中，全部落在三处：① 档案现有内容（debt-ledger D-181 登记段，门①同半径豁免）；② 已移除误提交文件 `pp-waves-c.json` 的历史残影（该文件已从树中删除，D 合入时清）；③ 中性化 commit 对 `packages/agent/execution-identity.test.ts` 的删除 diff（旧值被改掉的 diff 行本身含旧串）。当前树档案外零命中（`git grep` 实测）。即：真实敏感数据（客户名/读数/UserID/路径）33 条全历史干净，唯一命中是平台实例名在档案与改造史里的合法留存。
+- **律法归属**：门② / L2（单一真相源）；门①档案豁免半径（owner 2026-11-06 裁定「只产品面零引用（推荐）」，debt-ledger/change-safety/AGENTS.md/git 历史豁免）。
+- **闭环判据**：owner 二选一落地为正式条目：(a) 第 15 条按门①同半径豁免（档案现有内容 + 改造史 diff + 已移除文件残影），扫描脚本加同口径过滤后 exit 0；(b) 要求字面全历史零命中——须第二次 filter-repo 重写，推翻全部 commit SHA、已合 PR 与 gitee 同步，成本全额重付，需显式批准。 whichever 选定，把口径写进 change-safety §25 门禁判据。
+- **归属波次 / 限期**：波次 5；owner 拍板后当波落地。
+- **状态**：待办（阻塞 gate ② 放行，待 owner 拍板）。
+
+### D-192 · mock-commit-smoke.ts:86 单参 loadOperationProtocols（:57 同族第二处）
+
+- **位置**：`scripts/mock-commit-smoke.ts:86`；同族已登记处见 change-safety.md:1583（gatewayExecPath 单参）。
+- **触发 / 根因**：c27920b 修掉 :105 的 TypeError 后，脚本停在 :86——`loadOperationProtocols(platformRoot)` 单参漏 gateway，C7b（adfd16d）的 fail-closed 返空表 → 抛「平台未声明 proposal.create 角色的 operation（protocol 列缺失），拒绝冒烟」。实测探针：单参 size=0；双参 `(root,'bin/17dz')` size=4 且含 voucher.proposal→proposal.create。全仓生产代码仅剩这一处单参调用；`ci.sh` 不跑该冒烟，运行期无门禁（W5 尾程验收员只读核实，medium）。
+- **律法归属**：L2（协议单一来源）/ 改动防线 F1（表征先行）。
+- **闭环判据**：补 gateway 入参（GATEWAY 常量在 `tests/e2e/harness.ts:41`，本仓一行可修）并修后实跑 `TMPDIR=~/.tmp EXECUTION_EXECUTOR=mock node --import tsx scripts/mock-commit-smoke.ts` 退出码 0；同时裁定冒烟是否进 CI（进 = 加 job；不进 = 显式登记理由）。
+- **归属波次 / 限期**：波次 5 或 W6；公开推送前。
+- **状态**：待办。
+
+### D-193 · 17dz-platform 兄弟仓 5 项待清（C 流独立验收员只读核实）
+
+- **位置**：17dz-platform 仓的 a2a 并行检出 worktree（与宿主同机，目录名 17dz-platform-a2a；分支 a2a-structured-call，已 push，compare URL 见 C 流返回）。
+- **触发 / 根因**（逐条，均 low 但登记）：① `test/test-error-codes.js:437-441`「显式传入 failureClass 原样使用」断言对「覆盖自动派生」语义空转——用例用 PLATFORM_TIMEOUT + 显式 'PLATFORM_ERROR'，而 PLATFORM_TIMEOUT 本身就映射 PLATFORM_ERROR（error-codes.js:470），即使派生优先也照过；实现经 node 探针核实是对的（BAD_PERIOD + 显式 PLATFORM_ERROR → 信封出 PLATFORM_ERROR 而非派生的 NEEDS_INPUT），断言没钉住它。② `src/voucher/scripts/fill.js:88` 并发卡点（CONCURRENT_ENTRY，status=needs_input）在 error-codes.js:507 错分 PLATFORM_ERROR，与「需要用户决策」状态语义相反；当前无活消费者（宿主不解析该字段，熔断分类只读 status==='failed'），属声明面遗留错分。③ f5a4795 的 fail-loud 使默认 `npm test`（不设 CROSS_REPO_FSHINE_ROOT）整门 RED，本仓无 CI 也无任何文档登记该前置——换机器/新执行员直接红灯且无据可查。④ `test-error-codes.js:220-231` 与 :283-295 两份重复「P6 失败分类映射双向对账」注释头，旧头仍写「未指向时大声说明跳过」，与已实现的 fail-loud 矛盾。⑤ `test-budget-protocol.js:159-167` 同类形态的 ⑦ 真实宿主 budget-policy 比对在未设变量时仍 SKIP-NOTICE——「默认 npm test 绿灯不含真实跨仓对账」只修了一半（该处已挂宿主侧 D-154 在册）。
+- **律法归属**：L2（跨仓协议单一来源）；D-076 mock 纪律不受影响（全程 mock）。
+- **闭环判据**：① 换 BAD_PERIOD 类用例钉住派生优先于显式传入；② 映射表 needs_input 态改 NEEDS_INPUT 或显式登记为声明面遗留；③ docs/ 或 package.json 登记 CROSS_REPO_FSHINE_ROOT 前置；④ 删旧注释头；⑤ 与宿主侧 D-154 同口径登记。五项落地后兄弟仓默认 npm test 绿。
+- **归属波次 / 限期**：17dz 侧 P7（随 owner 审合该 PR）；迁移完成前。
+- **状态**：待办（PR 已 push，待 owner 审合）。
+
+### D-194 · 波次4/W5尾程收口残留合集（关账数字 + 覆盖缺口）
+
+- **位置**：`docs/change-safety.md` §31（波次4 关账段）/ §30（W5 尾程验收段）/ `packages/agent/src/failure-delivery.ts:9` / `packages/agent/src/pi-coding-driver.ts:1635`。
+- **触发 / 根因**（逐条，均为 low；发现者为独立验收员只读核实）：① §31 每 commit 实测记录表止于 C32（0e0c845），漏记 8d0ff31/11c9a35/a4e6a12 三笔最后批实质修复（逐 SHA grep change-safety.md 命中 0）；防线表 e2e 行仍写「波次末验证（未跑）」，而 af02d35/a4e6a12 已落地 cwd 修复，⑳ 现成立。② §31 就绪检查 d) 是永不失败死项——四文件（platform-mock/runtime-mode/harness/.env.example）DZ_EXECUTOR|DZ_ALLOW_REAL 命中恒 0（平台 origin/main 已改回 EXECUTION_*），门永绿；c) 判据翻转（11c9a35：只在 AGENTS.md 声称「迁移完成」时才红）未记。③ §31 未验项数字与 HEAD 实测不符：public-surface-lint 实跑 10/10（文档 9/9）；unit 实跑 112 文件/1835 passed（文档 1834）；无 config e2e 实跑 36 文件/153 失败（文档 37/156）。④ §30 验收⑫「实际 commit 51 个」字面假（实测 57），表列 52 缺 047dee8/c949e55/6a46a12/0bdd23f/7758c6d 五个。⑤ debt-ledger D-180 条目标题仍写「guard-latent-declaration 未实现」，与正文「已由 da36f44 实现」矛盾。⑥ failure-delivery.ts:9 模块头来源枚举只写 error-codes.ts/resource-exhausted.ts，未含 turn-relay.ts（实质声明「不产生第二份用户回复要求」仍成立）。⑦ D-181 归属波次行把首阻塞点表述成依赖兄弟仓，实际该阻塞点是本仓 harness.ts:500 两参调用（与 D-192 同族），闭环判据未区分「本仓可修」与「待兄弟仓合流」。⑧ pi-coding-driver.ts:1635 写关闭拦截分支与 :1630 requiresPlan 拦截分支零用例覆盖；parseCapabilityManifest（operation-labels.ts:638-693）全仓无测试引用，fail-closed 缺省无测试钉住；本轮 12 commit 的 diff 面（8 文件）零测试文件。
+- **律法归属**：F7（文档同提交同步）/ L2 / 改动防线 F1。
+- **闭环判据**：①-⑦ 逐条对齐 HEAD 实测（数字以复跑输出为准、死项改判据或删、矛盾标题改、枚举补、归属表述拆分）；⑧ 补写关闭/requiresPlan 两分支用例 + parseCapabilityManifest fail-closed 用例。对齐后两波关账段可复现。
+- **归属波次 / 限期**：W6 前；公开推送前（数字类不影响安全，但必须在库内登记）。
+- **状态**：待办。
