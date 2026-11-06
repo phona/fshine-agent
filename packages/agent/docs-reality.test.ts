@@ -150,6 +150,15 @@ describe('docs-reality：文档主张与代码现实对账', () => {
       expect(text, `${rel} 重新出现宿主侧跨仓校验脚本名——跨仓机器细节入住通用策略`).not.toContain(`check-budget-` + `thresholds`);
     }
   });
+
+  it('C9（fallback 退役）：packages/agent 内 a2a-cutover 与 fallback 分支在册', () => {
+    // 退役判据要求 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言）。
+    const driver = read('packages/agent/src/pi-coding-driver.ts');
+    expect(driver.includes("path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl')"), 'structured_call fallback 日志路径失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('fallback: true'), 'structured_call fallback 事件标识失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('protocolVersion'), 'structured_call fallback 三元组之 protocolVersion 失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('corpusVersion'), 'structured_call fallback 三元组之 corpusVersion 失踪——C9 在册断言').toBe(true);
+  });
 });
 
 // ── W3-A 渲染级机械锁（2026-11-05）：worker 提示词静态文本零执行层名 ──────────
