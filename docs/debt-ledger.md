@@ -1842,7 +1842,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：L6（公开库治理）。
 - **闭环判据**：runbook 中回滚命令存在且可执行；公开库维护边界文档化并获 owner 认可。
 - **归属波次 / 限期**：波次 5；迁移完成前。
-- **状态**：登记（2026-11-07 部分落地：私有仓已建并推 main，runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线；公开翻转待 owner 第二声点头）。
+- **状态**：登记（2026-11-07 部分落地：私有仓已建并推 main，PR #1 合入 codex PR review 全套，runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线 / Free+私有无分支保护的三条路；公开翻转与分支保护待 owner 选定公开或 Pro）。
 
 ### D-187 · gitee/github 历史分叉
 
