@@ -1,15 +1,15 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：长任务拆解（roadmap Phase 6，架构 §3 规划者/执行者分工）。共享替身见 ./harness.ts。
  *
  * Main Agent 拆解 → 逐步派单 → 汇总；任一步失败不阻塞其他步骤；用户通知带「第 N/M 步」。
- * 三步续跑同一个 17dz 子任务（continueTaskId），平台累计账本因此跨步累积——闸口看到的是
+ * 三步续跑同一个 example-gateway 子任务（continueTaskId），平台累计账本因此跨步累积——闸口看到的是
  * 全局重量，这是"闸口能做全局预算"的落地。
  *
  * 夹具口径（Wave 1 收尾）：账套名一律用 mock 种子状态里**真实存在**的规范名
- * （`17dz-platform/src/execution/mocks/fixtures/seed.json`）。本文件的主旨是长任务拆解
+ * （`fictional-execution-layer/src/execution/mocks/fixtures/seed.json`）。本文件的主旨是长任务拆解
  * 本身（逐步派单 / 同任务续跑 / 步号接续），不是"平台说没有"——用捏造名时，平台 not_found
  * 信封带 data.query 会激活宿主的结构化澄清（selectionClarificationOf），澄清问题把回合
  * 收口，后续步骤根本派不出去。计划步骤的失败面由 6.2（needs）、7.3（平台没找到→宿主澄清）

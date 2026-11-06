@@ -1,9 +1,9 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：附件/文件消息的真实渠道路径。
- * 共享替身见 ./harness.ts（真企微 adapter、真 handler、真 SQLite、真 bin/17dz 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真企微 adapter、真 handler、真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
  *
  * apps/server/handler.test.ts 已把暂存/FIFO/迟到文件的 handler 语义钉死，但那些用例直接调
  * handler、附件是手工造的 IncomingAttachment——"用户发文件 → SDK 下载 → 落盘 → 暂存/交付 →

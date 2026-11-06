@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -36,7 +36,7 @@ const PLAN_FACTS = {
   label: '工资表计算',
 };
 
-/** patchProfile 打进 contextProfiles['17dz'] 的 worker 超时（毫秒级，离线夹具不引入秒级等待）。 */
+/** patchProfile 打进 contextProfiles['example-gateway'] 的 worker 超时（毫秒级，离线夹具不引入秒级等待）。 */
 const WORKER_TIMEOUT_MS = 250;
 const PAST_DEADLINE_EPSILON_MS = 15;
 

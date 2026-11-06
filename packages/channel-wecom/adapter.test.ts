@@ -708,7 +708,7 @@ describe('WecomBotChannel 独立主动交付', () => {
 
 // ── 附件链路（2026-10-07）───────────────────────────────────────────────────────
 // 背景：此前只监听 message.text，`body['msgtype'] !== 'text'` 直接 return——用户发的
-// Excel 连下载都没有。而 17dz 薪酬域要求先吸收多份 Excel 才能产出 PayrollContract，
+// Excel 连下载都没有。而 example-gateway 薪酬域要求先吸收多份 Excel 才能产出 PayrollContract，
 // "帮我做工资表"因此永远无输入。这里锁住 file/mixed 三条路径 + 三条纪律。
 describe('WecomBotChannel 附件(file 消息)', () => {
   it('文件下载未完成时,后到正文要等附件落盘后再交给 handler', async () => {
