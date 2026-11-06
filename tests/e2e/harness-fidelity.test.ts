@@ -27,12 +27,15 @@
  * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 EXECUTION_/FSHINE_ 开关，绝不
  * FSHINE_REAL_COMMIT=1；护栏②的一次 CLI spawn 走 mock 执行器，不开浏览器不触网。
  */
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
 import { CURRENT_PERIOD, GATEWAY, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope, operationScripts } from './harness';
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 describe('[L4 集成] harness 保真度绊线', () => {
   // 平台未 checkout（config/agent.yaml 缺失 + FSHINE_PLATFORM_ROOT 未设）→ 护栏必须有真实平台才跑
@@ -42,6 +45,8 @@ describe('[L4 集成] harness 保真度绊线', () => {
       expect(PLATFORM_ROOT, 'PLATFORM_ROOT 未配：设置 FSHINE_PLATFORM_ROOT 或建 config/agent.yaml').toBe('');
     });
   }
+
+  describe.skipIf(!platformAvailable)('护栏①-④（平台已配时才跑，避免平台未配时整组照红产生噪音）', () => {
 
   // ── 护栏①：access 语义表替身 vs 平台派生 ────────────────────────────────
 
@@ -189,5 +194,6 @@ describe('[L4 集成] harness 保真度绊线', () => {
     const opScriptUsages = (harnessSrc.match(/operationScripts\.get\(/g) ?? []).length;
     expect(opScriptUsages, `harness 中 operationScripts.get 出现 ${opScriptUsages} 次（预期 ≥ 2：execute 分支 + gatedWorker query 分支）——少于 2 说明有消费点仍用手抄表或空转`).toBeGreaterThanOrEqual(2);
     expect(harnessSrc, 'harness 中仍存在手抄表 SCRIPTS 常量——C5 的「消费点改用派生表」未彻底落地').not.toMatch(/^const SCRIPTS\s*[:=]/m);
+  });
   });
 });
