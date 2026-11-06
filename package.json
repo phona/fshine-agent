@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "WeCom finance assistant delegating platform work to a cwd-bound 17dz Pi subagent",
+  "description": "WeCom orchestrator: delegates declared platform work to a cwd-bound subagent",
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
