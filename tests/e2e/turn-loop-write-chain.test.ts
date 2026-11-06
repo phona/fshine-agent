@@ -1,6 +1,9 @@
 // [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
+// **fallback 覆盖**：本文件头部显式标注 fallback 覆盖用例——结构化调用通道（call --file）
+// 的 fallback 事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）；本文件
+// 不触发 fallback，其排除语义由 harness 的 mock 执行层 + call 新路径直接覆盖。
 /**
  * 离线全链 e2e：凭证写链路（两步确认完整闭环，B 组）。共享替身见 ./harness.ts。
  *
