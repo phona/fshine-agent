@@ -293,7 +293,7 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
     expect(readme.includes('FSHINE_REAL_COMMIT'), 'README 缺 FSHINE_REAL_COMMIT 保险丝说明').toBe(true);
   });
 
-  it.skip('业务用例与口径断言移出守卫：manual-test-wecom.md 业务词命中 = 0（C4 整篇重写后移除 .skip()）', () => {
+  it('业务用例与口径断言移出守卫：manual-test-wecom.md 业务词命中 = 0（C4 整篇重写后移除 .skip()）', () => {
     const doc = readFile('docs/manual-test-wecom.md');
     const hits = doc.match(new RegExp(BUSINESS_WORD_RE.source, 'g')) ?? [];
     expect(hits, [
@@ -303,7 +303,7 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
     ].join('\n')).toEqual([]);
   });
 
-  it.skip('Tier A wave scope 已清零（波次末启用：移除 .skip() 后运行）', () => {
+  it('Tier A wave scope 已清零（波次末启用：移除 .skip() 后运行）', () => {
     const stale: string[] = [];
     for (const entry of TIER_A) {
       if (fileMatchesNeedle(entry.file, entry.needle)) {
