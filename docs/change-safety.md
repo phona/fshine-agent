@@ -1606,7 +1606,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | L4 走查机械面 | `git diff --name-only <波次起点> -- packages apps | grep -v '\.test\.ts'` 输出为空 | 波次末验证 |
 | F3 变异验证 | 五项各改错即红、立即还原、留档进本节 | 波次末执行 |
 | F2 基线 diff | unit Test Files ≥ 就绪检查记录值、Tests passed ≥ 记录值；generic-mock baseline 未变 | 波次末验证 |
-| e2e 失败集合不劣化 | 波次起点基线：26 文件 / 93 用例失败；波次末失败集合 ⊆ 基线 | 波次末验证（未跑，见未验项） |
+| e2e 失败集合不劣化 | 波次起点基线：22 文件 / 86 用例失败（配平台环境，§29 实测口径，取代方案冻结的 26/93）；波次末失败集合 ⊆ 基线 | 波次末验证（未跑，见未验项） |
 
 ### 每 commit 实测记录
 
@@ -1623,6 +1623,27 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | C9 | F7 五篇同步 | architecture-laws L2 补「守卫定义不是泄漏」；v0-architecture 补日期戳；debt-ledger 追加 D-175–D-180；rule-landing 同步；本节新增 | 两处按实测保守形式 |
 | C10 | CI 注释中性化 | public-surface-lint .github/workflows/ci.yml 17dz=0 | 基线即 0 命中，无需销账；TIER_A 注册表注释「当前 0 命中，不登记」 |
 | C11 | package.json 元数据中性化 | public-surface-lint package.json description 17dz=0 | description 去实例名；private 不动 |
+| C12 | config.test.ts 适配中性 profile id | public-surface-lint config/agent.example.yaml 17dz=0 | C6 模板中性化后续 |
+| C13 | harness 平台未配不阻断 import + HF-4 第三重源码检查 | harness-fidelity HF-4 第三重可跑 | PLATFORM_ROOT/GATEWAY 空串回退，load* 不阻断 import |
+| C14 | public-surface-lint 收尾——scripts 全扫描 + 双向命令守卫 | public-surface-lint 全绿 | 扫描面收窄 + 双向守卫 |
+| C15 | CI 徽章 + 目录表补全 + 命令修正 | public-surface-lint README.md 17dz=0 | README 目录表与命令对齐 |
+| C16 | docs 索引页 | public-surface-lint docs/index.md 17dz=0 | README docs 行改链索引页 |
+| C17 | 波次 4 关账记录（防线表 / F3 留档 / 未验项） | 本节记录 | 本节首次写入 |
+| C18 | HF-4 第三重 import 期死代码修复 | harness-fidelity HF-4 第三重通过 | readFileSync 修正导入 + describe 闭合 |
+| C19 | public-surface-lint golden ② directory table + mock fuse + acceptance ① fidelity | public-surface-lint 全绿 | directory table 补全 + mock fuse |
+| C20 | change-safety §31 F3 ③→未成立, add F3 ⑥ golden ② mutation, fix baselines | F3 表更新 | 基线数字更正 |
+| C21 | D-181 状态更新 + F3 弱点 D-183–D-185 登记 | debt-ledger 更新 | D-181 ① 登记为未成立 |
+| C22 | acceptance ① (b) 改用节标题格式匹配 change-safety.md | public-surface-lint 全绿 | ## 27.–## 30. 格式匹配 |
+| C23 | DZ_* 治理变量旧名兼容注记（回应 issue ③） | public-surface-lint .env.example 17dz=0 | DZ_* 兼容注记 |
+| C24 | gatedWorker/getCli 切 gatewayExecPath（回应 issue ⑥） | public-surface-lint harness.ts 17dz=0 | gatewayExecPath 切换 |
+| C25 | 补全波次总览表（回应就绪检查） | roadmap.md W1–W5 在册 | 波次总览表补全 |
+| C26 | 预算档位决定归属更新为通用策略（回应 W5 关账） | AGENTS.md 现状断言更新 | 0742aa6 原提交 |
+| C27 | Revert "fix(env): DZ_* 治理变量旧名兼容注记" | public-surface-lint .env.example 17dz=0 | 回滚 C23 |
+| C28 | readiness check d) 逻辑条件修正——DZ_* 有命中时才报错 | public-surface-lint 全绿 | be195ca 原提交 |
+| C29 | gatedWorker 两处 spawnSync 补 cwd: PLATFORM_ROOT | harness-fidelity 5 文件回归归零 | 回应 issue ① |
+| C30 | §31 就绪检查对齐实测 + D-179 漂移前提过期登记 | lint + debt-ledger 更新 | 回应 issue ② |
+| C31 | 回滚预算档位归属现状断言——仍在 17dz | AGENTS.md 现状回滚 | 回应 issue ③ |
+| C32 | F3 ③⑤ 记录对齐实测 + D-181 ① 已闭环 + Tier B tag 四标签集合校验 | lint + F3 + debt-ledger 更新 | 回应 issue ④ |
 
 ### F3 变异留档表
 
