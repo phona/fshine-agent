@@ -8,6 +8,7 @@
  * 按 delegate 申报委派并透传加工后的请求、未授权用户、群聊 @ 剥离、跳过申报时失败关闭。
  */
 import { describe, expect, it } from 'vitest';
+import { A2A_PROTOCOL_VERSION } from '../../packages/contracts/src/a2a-protocol';
 import { boot, gatedWorker, mainDriver, silentDriver, totalActualCalls } from './harness';
 
 /** 记录 worker 实际收到的委派请求（宿主透传 intent.request，不做二次加工）。 */
@@ -54,10 +55,11 @@ describe('[L4 集成] 离线全链 e2e：申报路由与安全边界', () => {
     });
     const reply = await send('帮我查一下猫一杯的应收账款还有多少');
 
-    // 宿主据申报直接委派，request 逐字透传进【委派】块（②：载荷走消息通道）
+    // 宿主据申报直接委派，request 逐字透传进 DelegationBlock JSON（②：载荷走消息通道）
     expect(worker.requests).toHaveLength(1);
-    expect(worker.requests[0]).toContain('【委派】');
-    expect(worker.requests[0]).toContain('范围：查询猫一杯的应收账款余额');
+    const delegationBlock = JSON.parse(worker.requests[0] as string) as Record<string, unknown>;
+    expect(delegationBlock.request).toBe('查询猫一杯的应收账款余额');
+    expect(delegationBlock.protocolVersion).toBe(A2A_PROTOCOL_VERSION);
     expect(reply).toContain('猫一杯');
     expect(reply).not.toContain('不应外发');
     await assembly.close();

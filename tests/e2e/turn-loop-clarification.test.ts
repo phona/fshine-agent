@@ -14,6 +14,7 @@
  *   ③ 用户回答后 → 真实查询落地（澄清不是终点，回路照常续跑）。
  */
 import { describe, expect, it } from 'vitest';
+import { A2A_PROTOCOL_VERSION } from '../../packages/contracts/src/a2a-protocol';
 import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
 import { clarificationTextFor } from '../../packages/agent/src/error-codes';
 import { boot, gatedWorker, mainDriver, platformCorrectForm, totalActualCalls, type WorkerStep } from './harness';
@@ -108,9 +109,10 @@ describe('[L4 集成] 离线全链 e2e：结构化歧义 → 宿主机械组装�
     expect(executionLanguageFingerprints(reply)).toEqual([]);
     // 用户要先回答"查哪个"：第二步没有派发（worker 只被调用一次）
     expect(worker.requests).toHaveLength(1);
-    // ② 委派块随载荷走 user message：范围原文在【委派】块里
-    expect(worker.requests[0]).toContain('【委派】');
-    expect(worker.requests[0]).toContain('范围：查询幻辰的应收账款');
+    // ② 委派块随载荷走 user message：DelegationBlock JSON 进载荷，request 字段保留范围原文
+    const delegationBlock = JSON.parse(worker.requests[0] as string) as Record<string, unknown>;
+    expect(delegationBlock.request).toBe('查询幻辰的应收账款');
+    expect(delegationBlock.protocolVersion).toBe(A2A_PROTOCOL_VERSION);
     await assembly.close();
   });
 

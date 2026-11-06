@@ -42,6 +42,7 @@ import type {
   PlatformTaskRecord,
   PlatformTaskRepo,
   TrustedContext,
+  type DelegationBlock,
 } from '@fshine/contracts';
 import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS, resolveActiveProfileId } from '@fshine/contracts';
 import {
@@ -1198,15 +1199,27 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         strippedCount,
       }));
     }
+    // C5：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷；数据源
+    // entitySources + materializeInputs 已存在，不改 ContextTaskRunArgs 签名）。
+    const entities = [
+      ...(args.entitySources?.platformEntities ?? []),
+      ...(args.entitySources?.sessionEntities ?? []),
+    ];
+    const frozenInputs = await materializeTaskInputs({
+      platformRoot: profile.root,
+      workspaceDir: scratchDir,
+      runId: taskId,
+      files: ctx.trusted.inputFiles ?? [],
+    });
+    const delegationBlock: DelegationBlock = {
+      request: guardedScope.text,
+      entities,
+      workspace: scratchDir,
+      inputs: frozenInputs.map(f => f.path),
+      protocolVersion: A2A_PROTOCOL_VERSION,
+    };
     const workerRequest = args.turnDeclaration && guardedScope
-      ? [
-        '【委派】',
-        `范围：${guardedScope.text}`,
-        `工作区：${scratchDir}`,
-        `协议版本：${A2A_PROTOCOL_VERSION}`,
-        '',
-        guardedRequest.text,
-      ].join('\n')
+      ? `${JSON.stringify(delegationBlock)}\n\n${guardedRequest.text}`
       : guardedRequest.text;
     const previousMessages = structuredClone((existing?.workerMessages ?? []) as DriverMessage[]);
     const messages = [
