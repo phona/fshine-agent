@@ -1,0 +1,42 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "verdict", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Chinese review summary. State whether anything blocks merge."
+    },
+    "verdict": {
+      "type": "string",
+      "enum": ["request_changes", "comment"],
+      "description": "request_changes only when at least one finding is blocking. Otherwise comment. There is no approve value."
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "title", "path", "body"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "major", "minor", "nit"]
+          },
+          "title": {
+            "type": "string",
+            "description": "Short Chinese title."
+          },
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path, or an empty string when the finding is not file-specific."
+          },
+          "body": {
+            "type": "string",
+            "description": "Chinese explanation with the concrete consequence. Do not include secrets."
+          }
+        }
+      }
+    }
+  }
+}
