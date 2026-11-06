@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPiCodingWorkerSession } from './src/pi-coding-driver';
 import { createPlanScopedWorkerEnv } from './src/plan-runtime';
 import type { PiCodingWorkerSessionOptions } from './src/pi-coding-driver';
+import type { AgentToolResult, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -44,6 +45,8 @@ const mockMakeSession = vi.hoisted(() => {
   };
 });
 
+const spawnCalls = vi.hoisted(() => [] as Array<{ args: string[]; env: NodeJS.ProcessEnv }>);
+
 vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@earendil-works/pi-coding-agent')>();
   return {
@@ -54,6 +57,19 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
       }
       return mockMakeSession.makeSession();
     },
+  };
+});
+
+vi.mock('node:child_process', async () => {
+  const actual = await vi.importActual<typeof import('node:child_process')>('node:child_process');
+  return {
+    ...actual,
+    spawn: vi.fn((command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) => {
+      if (typeof command === 'string' && command.includes('17dz')) {
+        spawnCalls.push({ args: args as string[], env: options?.env ?? {} });
+      }
+      return actual.spawn('echo', ['ok']);
+    }),
   };
 });
 
@@ -122,6 +138,33 @@ describe('C6 structured_call 通道回归', () => {
     expect(env.EXECUTION_REQUIRE_PLAN).toBe('1');
     expect(env.EXECUTION_PLAN_ID).toBe('plan_123');
     expect(env.FOO).toBe('bar');
+  });
+
+  it('structured_call execute 路径：spawn env 含 EXECUTION_REQUIRE_PLAN=1', async () => {
+    spawnCalls.length = 0;
+
+    await createPiCodingWorkerSession(baseOptions({
+      capabilityManifest: {
+        version: '1.0',
+        operations: [
+          { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [] },
+          { operation: 'ballot.query', requiresPlan: false, effects: [], estSeconds: 10, label: 'Ballot Query', serveMatrix: [] },
+        ],
+      },
+    }));
+
+    // structured_call 工具在 capturedCustomTools 中
+    const tools = mockMakeSession.state.capturedCustomTools as Array<Record<string, unknown>>;
+    const structuredCall = tools.find((t) => t.name === 'structured_call');
+    expect(structuredCall).toBeDefined();
+    const execute = structuredCall!.execute as (toolCallId: string, params: { operation: string; args: Record<string, unknown> }, signal: AbortSignal | undefined, onUpdate: ((details: unknown) => void) | undefined, ctx: ExtensionContext) => Promise<AgentToolResult<unknown>>;
+
+    const result = await execute('call_1', { operation: 'ballot.query', args: { topic: 'alpha' } }, undefined, undefined, { cwd: baseOptions().cwd } as never);
+
+    expect(spawnCalls.length).toBeGreaterThanOrEqual(1);
+    const callEnv = spawnCalls[0]!.env;
+    expect(callEnv.EXECUTION_REQUIRE_PLAN).toBe('1');
+    // EXECUTION_PLAN_ID 仅在活跃计划存在时设置（createPlanScopedWorkerEnv 行为）；此处无 activePlan，故不断言该键。
   });
 
   it('C9 fallback：structured_call 含旧路径回退与 a2a-cutover 审计日志', () => {
