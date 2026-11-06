@@ -42,7 +42,7 @@ import type {
   PlatformTaskRecord,
   PlatformTaskRepo,
   TrustedContext,
-  type DelegationBlock,
+  DelegationBlock,
 } from '@fshine/contracts';
 import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS, resolveActiveProfileId } from '@fshine/contracts';
 import {
@@ -1201,24 +1201,34 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     }
     // C5：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷；数据源
     // entitySources + materializeInputs 已存在，不改 ContextTaskRunArgs 签名）。
+    // 小裁示 2 偏离登记（W5 尾程）：推荐取 PlanEntitySources 四来源全量并集（①②③④），
+    // 实现只取结构化字段 platformEntities + sessionEntities（④′ + ⑤），文本来源
+    // currentMessage / quotedEvidence / referenceEvidence / platformResponses 全部排除。
+    // 理由：文本来源含用户正文与平台响应全文，体积大且含噪声；结构化实体值已足够 worker
+    // 做范围判定，且取值卫生与 session-entities 同一把尺。若后续需要补文本来源，在此扩展。
     const entities = [
       ...(args.entitySources?.platformEntities ?? []),
       ...(args.entitySources?.sessionEntities ?? []),
     ];
-    const frozenInputs = await materializeTaskInputs({
-      platformRoot: profile.root,
-      workspaceDir: scratchDir,
-      runId: taskId,
-      files: ctx.trusted.inputFiles ?? [],
-    });
-    const delegationBlock: DelegationBlock = {
-      request: guardedScope.text,
-      entities,
-      workspace: scratchDir,
-      inputs: frozenInputs.map(f => f.path),
-      protocolVersion: A2A_PROTOCOL_VERSION,
-    };
-    const workerRequest = args.turnDeclaration && guardedScope
+    let frozenInputs: FrozenTaskInput[] = [];
+    if (args.turnDeclaration && guardedScope) {
+      frozenInputs = await materializeTaskInputs({
+        platformRoot: profile.root,
+        workspaceDir: scratchDir,
+        runId: taskId,
+        files: ctx.trusted.inputFiles ?? [],
+      });
+    }
+    const delegationBlock: DelegationBlock | null = args.turnDeclaration && guardedScope
+      ? {
+          request: guardedScope.text,
+          entities,
+          workspace: scratchDir,
+          inputs: frozenInputs.map(f => f.path),
+          protocolVersion: A2A_PROTOCOL_VERSION,
+        }
+      : null;
+    const workerRequest = delegationBlock
       ? `${JSON.stringify(delegationBlock)}\n\n${guardedRequest.text}`
       : guardedRequest.text;
     const previousMessages = structuredClone((existing?.workerMessages ?? []) as DriverMessage[]);

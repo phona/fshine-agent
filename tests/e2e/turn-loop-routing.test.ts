@@ -57,7 +57,7 @@ describe('[L4 集成] 离线全链 e2e：申报路由与安全边界', () => {
 
     // 宿主据申报直接委派，request 逐字透传进 DelegationBlock JSON（②：载荷走消息通道）
     expect(worker.requests).toHaveLength(1);
-    const delegationBlock = JSON.parse(worker.requests[0] as string) as Record<string, unknown>;
+    const delegationBlock = JSON.parse(String(worker.requests[0]).split('\n\n')[0]) as Record<string, unknown>;
     expect(delegationBlock.request).toBe('查询猫一杯的应收账款余额');
     expect(delegationBlock.protocolVersion).toBe(A2A_PROTOCOL_VERSION);
     expect(reply).toContain('猫一杯');

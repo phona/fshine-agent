@@ -110,7 +110,7 @@ describe('[L4 集成] 离线全链 e2e：结构化歧义 → 宿主机械组装�
     // 用户要先回答"查哪个"：第二步没有派发（worker 只被调用一次）
     expect(worker.requests).toHaveLength(1);
     // ② 委派块随载荷走 user message：DelegationBlock JSON 进载荷，request 字段保留范围原文
-    const delegationBlock = JSON.parse(worker.requests[0] as string) as Record<string, unknown>;
+    const delegationBlock = JSON.parse(String(worker.requests[0]).split('\n\n')[0]) as Record<string, unknown>;
     expect(delegationBlock.request).toBe('查询幻辰的应收账款');
     expect(delegationBlock.protocolVersion).toBe(A2A_PROTOCOL_VERSION);
     await assembly.close();

@@ -204,21 +204,20 @@ describe('④ 委派块当前文本形状（翻转点：C5）', () => {
     expect(A2A_PROTOCOL_VERSION).toBe('1.0');
   });
 
-  it('四行组装在位：【委派】/范围/工作区/协议版本', () => {
-    expect(contextSrc).toContain("'【委派】'");
-    expect(contextSrc).toContain('`范围：${guardedScope.text}`');
-    expect(contextSrc).toContain('`工作区：${scratchDir}`');
-    expect(contextSrc).toContain('`协议版本：${A2A_PROTOCOL_VERSION}`');
-    // request 走正文合并（不是块内字段）。
-    expect(contextSrc).toContain('guardedRequest.text');
+  it('委派块五字段在场（C5 结构化载荷）', () => {
+    const blockStart = contextSrc.indexOf('const delegationBlock:');
+    expect(blockStart).toBeGreaterThan(-1);
+    const blockSegment = contextSrc.slice(blockStart, blockStart + 500);
+    expect(blockSegment).toContain('request: guardedScope.text');
+    expect(blockSegment).toContain('entities,');
+    expect(blockSegment).toContain('workspace: scratchDir,');
+    expect(blockSegment).toContain('inputs: frozenInputs.map(f => f.path),');
+    expect(blockSegment).toContain('protocolVersion: A2A_PROTOCOL_VERSION,');
   });
 
-  it('C5 翻转点：entities/inputs 尚未进委派块载荷', () => {
-    const anchor = contextSrc.indexOf('const workerRequest = args.turnDeclaration && guardedScope');
-    expect(anchor).toBeGreaterThan(-1);
-    const blockSegment = contextSrc.slice(anchor, anchor + 600);
-    expect(blockSegment).not.toContain('entities');
-    expect(blockSegment).not.toContain('inputs');
+  it('workerRequest 走结构化块合并', () => {
+    expect(contextSrc).toContain('JSON.stringify(delegationBlock)');
+    expect(contextSrc).toContain('guardedRequest.text');
   });
 
   it('契约侧 DelegationBlock 五字段已定义（C5 落地对象的形状基准）', () => {
@@ -280,12 +279,15 @@ describe('⑤ 委派失败五路链与话术单一来源', () => {
     expect(isPlatformAuthError(null)).toBe(false);
   });
 
-  it('话术选择分支在位：auth 挂码抛出，其余四路各走各的话术', () => {
-    expect(contextSrc).toContain("toolUserErrorFor('DELEGATION_AUTH_FAILURE')");
-    expect(contextSrc).toContain('DELEGATION_CANCELLED');
-    expect(contextSrc).toContain('DELEGATION_TIMEOUT_FAILURE');
-    expect(contextSrc).toContain('DELEGATION_MODEL_TRANSIENT_FAILURE');
-    expect(contextSrc).toContain('DELEGATION_EXECUTOR_FAILURE');
+  it('话术选择分支在位：C4 收口后统一在 failure-delivery.ts，context.ts 接线 deliverFailure', () => {
+    const failureSrc = srcOf(SRC_DIR, 'failure-delivery.ts');
+    expect(failureSrc).toContain("toolUserErrorFor('DELEGATION_AUTH_FAILURE')");
+    expect(failureSrc).toContain('DELEGATION_CANCELLED');
+    expect(failureSrc).toContain('DELEGATION_TIMEOUT_FAILURE');
+    expect(failureSrc).toContain('DELEGATION_MODEL_TRANSIENT_FAILURE');
+    expect(failureSrc).toContain('DELEGATION_EXECUTOR_FAILURE');
+    // context.ts 不再内联五路，改走 deliverFailure。
+    expect(contextSrc).toContain('deliverFailure');
   });
 
   it('五条话术逐字取自 error-codes 表（唯一来源，C3/C4 不得新建第二份）', () => {
