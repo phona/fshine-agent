@@ -1596,7 +1596,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 验收⑫ commit 集合与方案对应关系说明
 
-方案 C1–C12 共 12 项，实际 commit 25 个（`git rev-list --count migration/public-release..w5-tail` = 25）：
+方案 C1–C12 共 12 项，实际 commit 32 个（`git rev-list --count migration/public-release..w5-tail` = 32）：
 - `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 25）；
 - C3：`d5e645d` feat(agent)：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷）；
 - C4：`9392df6` feat(agent)：五类失败分类的宿主送达义务收口 + 全覆盖测试矩阵；
@@ -1623,7 +1623,14 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - C12：`ccec18a` docs(C12)：关账——§30 更新 + D-031 三类分流留档 + 判断项收口；
         `923928c` docs(C12)：W5 关账同步 + 债务登记；
 - 尾程修复轮 / 关账同步：`a4f209f` docs(W5)：W5 尾程关账同步 + 债务登记 + 变异留档；
-        `62b67fc` docs(debt-ledger)：D-178 状态更新——ballot vitest e2e 结构性无法运行，改为 skipped + 文档修正。
+        `62b67fc` docs(debt-ledger)：D-178 状态更新——ballot vitest e2e 已落地（虚假关账，被 cd28f2e 修正）；
+        `cd28f2e` fix(e2e)：ballot 第二写域结构性跳过 + D-178 虚假关账修正 + execution-layer-admission 证据更新；
+        `412e4f7` docs(change-safety)：§30 commit 对账补全 + spawn 消费点 10→12 + fallback 归档/轮转说明；
+        `c0e4225` test(a2a-cutover-golden)：spawn 消费点盘点计数 11→12；
+        `ee60b8a` fix(agent)：serve-gate/plan-runtime/error-codes/failure-delivery 注释 fail-closed；
+        `49c376a` fix(eval)：count-a2a-fallback 归档/轮转 + generic-mock 死代码清理；
+        `e658310` test(e2e)：harness 兼容 17dz 新环境变量名 DZ_ALLOW_REAL/DZ_EXECUTOR；
+        `10ca2cb` docs(debt-ledger)：D-181 登记 17dz 集成 e2e 跨仓配对红。
 
 无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
 
