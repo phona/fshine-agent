@@ -26,7 +26,12 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 = 全量历史。packages/agent/history-hygiene.test.ts 的四类敏感物
+      # 零命中判据要 git log --all -p 看全历史；浅克隆（默认 depth=1）下该守卫显式失败
+      # （不拿「扫不到」当「干净」），波次 4 门面重写时漏改，私有仓首轮 CI 踩中后补上。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: 24
