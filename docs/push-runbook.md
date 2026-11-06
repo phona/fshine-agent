@@ -1,9 +1,11 @@
 # Push Runbook · 公开到 GitHub
 
 > 落地状态（2026-11-07）：**私有仓已建并推 main**（https://github.com/phona/fshine-agent，private），
-> Actions 首轮红（fetch-depth 浅克隆，已修，2c40687）后第二轮 success；fresh clone 复证
-> K1/K3/K4/K5/K6 全过。**公开翻转未执行**——待 owner 第二声点头（路径 A 第 4 步）。
-> 本文件此后作为公开推送与回滚的操作记录。
+> Actions 首轮红（fetch-depth 浅克隆，已修，2c40687）后 success；fresh clone 复证 K1/K3/K4/K5/K6 全过。
+> **codex PR review 已抄入并经 PR #1 合入**（9ca1667；`.github/codex/` + `.github/prompts/`）；
+> `CODEX_AUTH_JSON` secret 待 owner 设置（见文末激活段）。**公开翻转未执行**——待 owner 第二声点头
+> （路径 A 第 4 步）。另：Free + 私有仓无分支保护（实测 403，见文末），「禁直推 main」要等公开或 Pro。
+> 本文件此后作为公开推送、门禁与回滚的操作记录。
 
 ---
 
@@ -111,4 +113,42 @@ npm run ci
 - 回滚会丢失公开后收到的 star / issue / PR（路径 A 切私有可保留）。
 - `~/fshine-agent-backup-20261105.bundle` 须在 push 前准备好（波次 2 产物；2026-11-07 实测 verify exit 0）。
 - GitHub 侧只推 `migration/public-release:main` 一条线；波次分支（w5-tail / facade / sweep / wave5-prep 等）留在 gitee——它们的树含中性化前的实例名引用，不公开。
-- 本地 `main`（179ffe0，gitee 老线）与 clean 线分叉，任何 push/force-push 都必须显式写 refspec。
+- 本地 `main`（179ffe0，gitee 老线）与 clean 线分叉，任何 push/force-push/起分支都必须显式写 refspec（2026-11-07 两次踩中：一次 push 被 non-FF 拒、一次建分支起错线）。
+
+## 分支保护：Free + 私有 = 没有（2026-11-07 实测）
+
+`PUT /repos/{owner}/{repo}/branches/main/protection` 与 `POST /repos/{owner}/{repo}/rulesets`
+在 Free 计划的**私有**仓上一律 403：`Upgrade to GitHub Pro or make this repository public`。
+即 CI 照跑、红绿照显示，但**没有任何服务端手段拦合并**。三条路：
+
+1. **翻公开**：分支保护立即可用（required checks + 禁直推），Actions 分钟同时转无限。代价 = 仓库内容对外可见（门禁已为此清过场）。
+2. **GitHub Pro**（约 $4/月）：私有仓分支保护 + 3000 分钟/月。
+3. **暂靠约定**：PR 流程靠纪律执行；CI 红绿与 codex review 的 REQUEST_CHANGES 只呈不拦。
+
+选定后（公开或 Pro 均可）执行：
+
+```bash
+# 禁直推 main（含 admin）+ PR 必须过 ci 与 codex-review-scripts
+gh api -X PUT repos/phona/fshine-agent/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {"strict": false, "contexts": ["ci", "codex-review-scripts"]},
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_linear_history": false,
+  "required_conversation_resolution": false
+}
+JSON
+```
+
+codex review 就位并首轮绿之后，再把 `codex-pr-review` 加进 `contexts`（它 REQUEST_CHANGES 时 exit 1，专为 required check 设计）。
+
+## Codex review 激活（owner 动作）
+
+1. 本机 `codex login`（ChatGPT OAuth）得到 `~/.codex/auth.json`。
+2. `gh secret set CODEX_AUTH_JSON < ~/.codex/auth.json`（仓库变量 `CODEX_MODEL` / `CODEX_EFFORT` 可选，见 `.github/codex/README.md`）。
+3. secret 就位前 `codex-pr-review` job 按设计失败（不打印 secret、不阻塞合并）；就位后首轮绿即把它加进 required checks（见上）。
+
+铁律不变：身份是 OAuth auth.json，**不是 API key**；fork PR 在读 secret 之前失败；`render-review.mjs` 的 `decideEvent` 与 `blocking` 口径不许改软。
