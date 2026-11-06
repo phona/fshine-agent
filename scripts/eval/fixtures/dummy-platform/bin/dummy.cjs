@@ -527,7 +527,7 @@ async function planActivate(argv) {
 }
 function usage() {
   return [
-    'Usage: dummy [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local> [args...]',
+    'Usage: dummy [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
     'Examples:',
     '  dummy plan evaluate --task-id task-1 --stdin',
     '  dummy plan current --task-id task-1',
@@ -538,6 +538,7 @@ function usage() {
     '  dummy query dummy.query --collection alpha --window W1',
     '  dummy prepare dummy.proposal <payload-file>  # proposal.create, by operation name',
     '  dummy commit dummy.proposal-commit --proposal-id prop_1234',
+    '  dummy call --file <structured-call.json>  # structured call protocol',
   ].join('\n') + '\n';
 }
 async function main() {
@@ -566,6 +567,63 @@ async function main() {
     const { flags } = parseFlags(argv.slice(2));
     if (!flags['proposal-id']) { process.stderr.write('proposal status requires --proposal-id\n'); return 2; }
     return doProposalStatus(flags['proposal-id']);
+  }
+  if (cmd === 'call') {
+    const { flags } = parseFlags(argv.slice(1));
+    const file = flags['file'];
+    if (!file) { process.stderr.write('call requires --file <structured-call.json>\n'); return 2; }
+    let call;
+    try { call = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`CALL_REFUSE payload unreadable: ${e.message}\n`); return 3; }
+    if (!call.operation || !Array.isArray(call.args)) { process.stderr.write('CALL_REFUSE payload must be { operation: string, args: string[] }\n'); return 3; }
+    const op = resolveOperation(call.operation);
+    if (!op) { process.stderr.write(`CALL_REFUSE unregistered operation: ${call.operation}\n`); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    if (op.protocol === 'proposal.create') {
+      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      return doProposalCreate(op.name, call.args);
+    }
+    if (op.protocol === 'proposal.commit') {
+      const { flags: innerFlags } = parseFlags(call.args);
+      if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
+      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      return doProposalCommit(op.name, call.args);
+    }
+    // Determine mode from operation access.
+    const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
+    const verdict = decide(accessMode, op, call.args);
+    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: verdict.reason }); return 3; }
+    const planId = env2('DUMMY_PLAN_ID', 'EXECUTION_PLAN_ID', '');
+    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
+    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
+    let code;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') code = doQuery(op.name, call.args);
+    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
+    else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
+      const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
+      const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
+      if (secret) {
+        let ok = false;
+        try {
+          const [body, sig] = String(token).split('.');
+          const expect = crypto.createHmac('sha256', secret).update(body).digest();
+          const got = Buffer.from(sig, 'base64url');
+          const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+          ok = expect.length === got.length && crypto.timingSafeEqual(expect, got) && p.script === op.name && new Date(p.expiresAt).getTime() > Date.now();
+        } catch { ok = false; }
+        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'commit-token' }); return 3; }
+      }
+      code = doCommit(op.name, call.args);
+    } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
+    audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
+      try {
+        const plans = loadPlans();
+        const plan = plans.plans[planId];
+        if (plan) { plan.actual.calls += 1; plan.actual.seconds += op.est_seconds; savePlans(plans); }
+      } catch { /* accounting must not turn a success into a failure */ }
+    }
+    return code;
   }
   if (['query', 'prepare', 'commit', 'local'].includes(cmd)) {
     const target = argv[1];
