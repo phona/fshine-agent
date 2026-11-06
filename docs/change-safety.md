@@ -1596,7 +1596,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 验收⑫ commit 集合与方案对应关系说明
 
-方案 C1–C12 共 12 项，实际 commit 40 个（`git rev-list --count migration/public-release..w5-tail` = 40）：
+方案 C1–C12 共 12 项，实际 commit 51 个（`git rev-list --count migration/public-release..w5-tail` = 51）：
 - `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 38）；
 - C3：`d5e645d` feat(agent)：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷）；
 - C4：`9392df6` feat(agent)：五类失败分类的宿主送达义务收口 + 全覆盖测试矩阵；
@@ -1608,6 +1608,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - C6：`5971868` feat(C6)：注册 structured_call 工具并挂载 beforeToolCall 机械验证；
        `f095d67` test(agent)：C6 structured_call 通道回归（execute 路径 + spawn env 验证）；
        `fdc8879` feat(eval)：C6 网关结构化子命令 dummy.cjs call --file；
+       `da36f44` feat(a2a)：OperationDeclaration 补 args schema + validateStructuredCall 参数级 fail-closed + dummy.cjs 对象格式兼容 + generic-mock g-structured-undeclared-arg（回应 issue ③ D-180）；
 - C7：`0f604ae` feat(C7)：spawn 路径切 gatewayExecPathForProfile + mock-commit-smoke 修复 + Q11 退役；
        `b42ddcb` fix(agent)：C7 收尾——serve-gate 注释修正（fail-closed 语义）；
        `fbc9fba` fix(agent)：C7 收尾——platform-contract.ts 注释修正；
@@ -1638,7 +1639,17 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
         `0fba745` docs(change-safety)：fallback 退役计数口径措辞修正（回应 issue ⑤）；
         `8d0f99a` docs(change-safety)：gatewayExecPath 行号补全（回应 issue ⑥）；
         `b174409` docs(e2e-ownership)：turn-loop-ballot.test.ts 补录归属（回应 issue ⑦）；
-        `161cb10` docs(rule-landing)：unit 测试用例数 1848→1850 对齐（回应 issue ⑧）。
+        `161cb10` docs(rule-landing)：unit 测试用例数 1848→1850 对齐（回应 issue ⑧）；
+        `afd8c6e` docs(change-safety)：§30 commit 计数 32→40 并补入 8 个尾程修复 commit（回应 issue ④）；
+        `65e84b1` docs(change-safety + pp-waves-c)：验收⑤⑥ 措辞修正 + 验收⑬ 0→0 不可达登记 + 敏感串脱敏（回应 issue ④⑧⑨）；
+        `215abb4` test(e2e)：turn-loop-write-chain 头部标注与 §30 fallback 口径对齐（回应 issue ⑦）；
+        `126887b` test(e2e) + docs(env)：harness 兼容 17dz DZ_* 治理 env 族 + environment-variables.md 登记（回应 issue ②）；
+- 尾程修复轮（W5 尾程·第 2 轮）：`c27920b` fix(smoke)：mock-commit-smoke 传 process.env 给 ensureMockStatePath（回应 W5 验收 scripts/mock-commit-smoke.ts:105 参数缺失）；
+        `9eb3110` fix(agent)：failure-delivery NEEDS_INPUT 措辞改用 renderNeedsUserText 单一来源（回应 W5 验收 failure-delivery.ts:132 措辞模板重复）；
+        `1c509df` fix(agent)：operation-labels requiresPlan 改 fail-closed 缺省（回应 W5 验收 operation-labels.ts:659-661 宽严不一致）；
+        `32d6a07` fix(agent)：structured_call 执行路径改用 ctx.env 而非 process.env（回应 W5 验收 pi-coding-driver.ts:1459 env 来源不一致）；
+        `d768ea4` fix(agent)：validateStructuredCall 增 writeEnabled 与 planWriteClosed 拦截（回应 W5 验收 pi-coding-driver.ts:1611-1637 结构化通道缺写门扫描）；
+        `0540f2c` fix(pp-waves)：guard-latent-declaration 落点修正为 pi-coding-driver-structured-call.test.ts（回应 W5 验收 pp-waves-c.json:116 命名漂移）；
 
 无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
 
