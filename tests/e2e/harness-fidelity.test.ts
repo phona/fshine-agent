@@ -32,7 +32,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
-import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope } from './harness';
+import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope, operationScripts } from './harness';
 
 describe('[L4 集成] harness 保真度绊线', () => {
   // ── 护栏①：access 语义表替身 vs 平台派生 ────────────────────────────────
@@ -160,5 +160,18 @@ describe('[L4 集成] harness 保真度绊线', () => {
       spec!.flagStyles.get('--period'),
       '锚点 flag 缺声明：--period 不在 finance.query-receivables 的规格里——PERIOD_NO_DATA 终局话术与事实里的期间会静默消失',
     ).toBeDefined();
+  });
+
+  // ── 护栏④：operation 脚本表必须平台派生、非空、消费点使用派生表 ─────────────
+
+  it('HF-4 operation 脚本表必须平台派生、非空、消费点使用派生表（手抄表/空表=假绿）', async () => {
+    // 第一重：派生表必须非空。harness 的 execute 分支与 gatedWorker 的 query 分支都从
+    // 该表取 script，空表 = 执行路径静默失效（要么抛错要么不执行）。
+    expect(operationScripts.size, '平台 operation scripts 表为空或派生失败——harness execute 分支会静默手抄或不执行').toBeGreaterThan(0);
+
+    // 第二重：夹具用到的 operation 必须在表内。
+    for (const op of ['finance.query-receivables', 'finance.search-account-sets', 'voucher.query-saved']) {
+      expect(operationScripts.has(op), `operation scripts 表缺少 ${op}——execute 分支会抛错或降级`).toBe(true);
+    }
   });
 });

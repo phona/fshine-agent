@@ -1,13 +1,13 @@
-// [L4 集成基础设施] tests/e2e 的共享替身：加载即派生兄弟仓 operation 表，beforeAll 要求 bin/17dz 在场。
+// [L4 集成基础设施] tests/e2e 的共享替身：加载即派生兄弟仓 operation 表，beforeAll 要求网关 CLI 在场。
 /**
  * 离线全链 e2e 共享替身：tests/e2e/turn-loop-*.test.ts 四个文件共用。
  *
  * 与手工企微测试的差别只有两处是假的：
- *   - 模型（Main Agent 与 17dz 子 Agent 都用脚本化驱动回放）
- *   - 平台执行器（EXECUTION_EXECUTOR=mock 的应答器，不开浏览器不触网）
+ *   - 模型（宿主与执行层 worker 都用脚本化驱动回放）
+ *   - 执行器（EXECUTION_EXECUTOR=mock 的应答器，不开浏览器不触网）
  * 其余全是生产代码：企微适配器的 stream/节流/notice 语义、createMessageHandler、
  * createTaxAgentRuntime 的回合契约与出口校验、ContextTaskRunner、计划门禁，
- * 以及真 spawn 的 bin/17dz（plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定）。
+ * 以及真 spawn 的执行层网关（plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定）。
  *
  * 子 Agent 替身不复刻模型行为，但复刻它的门禁行为：提交计划走真实的
  * evaluateAndActivatePlan，执行走真实的 operation run + EXECUTION_PLAN_ID 绑定。
@@ -16,7 +16,7 @@
  * 文件内每个用例再按编号分到独立的平台状态文件；vitest 线程池给每个文件独立的
  * process.env 副本，四个文件并行跑不会串味。
  */
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -31,15 +31,33 @@ import { parseProposalCommand } from '../../packages/agent/src/proposal-runtime'
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
-import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure } from '../../packages/agent/src/platform-contract';
+import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure, validateGatewayInvocation, gatewayExecPath } from '../../packages/agent/src/platform-contract';
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
-const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
-const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
-// C7b 起 profile.gateway 是网关名唯一来源、load* 派生对未声明 gateway 一律降级空表——
-// harness 作为（测试）部署方，按自己 spawn 的 CLI 相对名显式声明，与 PLATFORM_ROOT 同源。
-const GATEWAY = 'bin/17dz';
+const PLATFORM_ROOT = (() => {
+  const envRoot = process.env['FSHINE_PLATFORM_ROOT']?.trim();
+  if (envRoot) return envRoot;
+  const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+  if (!existsSync(configPath)) throw new Error('缺少 config/agent.yaml');
+  const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
+  const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
+  const root = firstProfile?.root as string | undefined;
+  if (!root) throw new Error('config/agent.yaml 缺少 contextProfiles.<profileId>.root');
+  return root;
+})();
+const GATEWAY = (() => {
+  const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+  if (!existsSync(configPath)) throw new Error('缺少 config/agent.yaml');
+  const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+  const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
+  const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
+  const gateway = firstProfile?.gateway as string | undefined;
+  if (!gateway) throw new Error('config/agent.yaml 缺少 contextProfiles.<profileId>.gateway');
+  return gateway;
+})();
+const CLI = path.join(PLATFORM_ROOT, 'bin', GATEWAY);
 
 let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
@@ -48,6 +66,8 @@ let counter = 0;
 // 驱动读同一份平台数据（不镜像、不手抄）。
 const argSpecs = await loadOperationArgSpecs(PLATFORM_ROOT, GATEWAY);
 const operationLabels = await loadOperationLabels(PLATFORM_ROOT, GATEWAY);
+// operation 脚本名表（C5）：从平台 `operation list --json` 的 script 列派生，不手抄。
+const operationScripts = await loadOperationScripts(PLATFORM_ROOT, GATEWAY);
 // 协议角色表（方案 1 · B 波 B3 提案创建拦截的机械来源）：与真实驱动**同一份平台数据**
 // （经 CLI 派生，不注入替身）。为什么这一张不替身：它不是判据的输入而是判据本身——
 // 平台必须真的在 `operation list --json` 带出 protocol 列，宿主才认这条命令；这里塞替身
@@ -103,8 +123,8 @@ afterEach(() => {
 });
 
 /**
- * D-145 fixture：把计划门的两条非次数线——权重线（17dz b424b26 预算容量模型）与估时秒线
- * （query-receivables est_seconds 自 cda6ba9 换芯起 15→60，两次调用即 120s > autoSeconds 60）
+ * D-145 fixture：把计划门的两条非次数线——权重线（平台侧预算容量模型，commit 号与账本在平台仓持有）与估时秒线
+ * （query-receivables est_seconds 自平台换芯起 15→60，两次调用即 120s > autoSeconds 60）
  * ——的全部阈值设为极大值，使档位判定对本用例退回**纯次数线**。测试意图本来就是次数线
  * 语义的用例（AUTO=2/NOTIFY=10/CONFIRM=20 档位边界、轻量计划直执行、续跑零通知）需要它：
  * mock 场景的查询操作每条 weight 6 / est 60 秒，两三次调用就把这两条线推过档，抢走次数线
@@ -128,7 +148,7 @@ export function neutralizePlanGateNonCallLines(): () => void {
 }
 
 beforeAll(() => {
-  if (!existsSync(CLI)) throw new Error(`缺少平台 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向执行层平台仓检出）`);
+  if (!existsSync(CLI)) throw new Error(`缺少网关 CLI: ${CLI}（设置 FSHINE_PLATFORM_ROOT 指向执行层平台仓检出）`);
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {
@@ -154,7 +174,7 @@ beforeAll(() => {
     EXECUTION_PLAN_HARD_CALLS: '50',
     EXECUTION_PLAN_MAX_NOTIFY: '2',
     EXECUTION_PLAN_MAX_REPLANS: '6',
-    // 网关限流有 17dz 自己的专项测试；这里放宽 burst，避免 9 期查询被限流挡住，
+    // 网关限流有执行层侧专项测试；这里放宽 burst，避免查询被限流挡住，
     // 从而测不到"通知先于执行"这条主线。
     EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 60, perMs: 0 }, global: { burst: 120, perMs: 0 } }),
     // 离线环境不发真实模型请求；脚本化驱动覆盖了 Main Agent 与子 Agent。
@@ -355,7 +375,7 @@ export type WorkerStep =
   | { structured_call: { operation: string; args: Record<string, unknown> }; result: string };
 
 /**
- * 17dz 子 Agent 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
+ * 执行层 worker 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
  * 计划激活后按 calls 真跑 operation run（mock executor、真 EXECUTION_PLAN_ID 绑定）。
  *
  * `enforceEntityScope`（显式开启）：复刻真实驱动的实体门禁——计划参数必须逐字来自宿主
@@ -382,7 +402,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
   const terminalEmptyText = options?.terminalEmptyText === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
-    const child = spawnSync(path.join(platformRoot, 'bin', '17dz'), args, {
+    const child = spawnSync(path.join(platformRoot, 'bin', GATEWAY), args, {
       input, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
     });
     if (child.error) return reject(child.error);
@@ -491,12 +511,12 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         if ('proposal' in current) {
           // ── 网关提案路径（方案 1 · B 波 B3）────────────────────────────────────
           // 复刻真实 worker 的两步：把提案 payload 写进本轮 scratchDir（真实 worker 用 write
-          // 工具，落点由门的写边界把着），再发 `bin/17dz prepare <operation> <payload>`。
+          // 工具，落点由门的写边界把着），再发 `<gateway> prepare <operation> <payload>`。
           // 命令形态不在这里解析——走**生产**的 parseProposalCommand 拿 operation 与 payload
           // 路径（与真实驱动同一函数）：平台哪天不再认这个形态，这里立刻响亮失败，而不是
           // 悄悄走成另一条路。
           const requestId = input.requestId ?? 'req_unknown';
-          const command = `bin/17dz prepare voucher.proposal tmp/${requestId}/proposal.json`;
+          const command = `${GATEWAY} prepare voucher.proposal tmp/${requestId}/proposal.json`;
           const call = parseProposalCommand(command, operationProtocols);
           if (!call) throw new Error(`提案创建命令没有被识别层认出（平台 protocol 列没下发？）：${command}`);
           const payloadFile = path.join(PLATFORM_ROOT, call.payloadPath);
@@ -529,7 +549,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           if (!active) throw new Error('宿主未激活任何计划，拒绝执行');
           proof = { planId: active.planId, version: active.version, calls: 0 };
           for (const call of current.execute) {
-            const script = SCRIPTS[call.operation];
+            const script = operationScripts.get(call.operation);
             if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
             const out = spawnSync(CLI, ['query', script, ...call.args.map(String)], {
               encoding: 'utf8', timeout: 30_000,
@@ -610,7 +630,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         }
         proof = { planId: plan.planId, version: plan.version, calls: 0 };
         for (const call of current.plan) {
-          // 与真实 worker 一致：bash 只允许 bin/17dz，且必须走网关形式——
+          // 与真实 worker 一致：bash 只允许网关形式，且必须走网关形式——
           // serve 法域的 EXECUTION_INVOCATION 由网关铸造，直调 operation run 会被拒。
           const script = SCRIPTS[call.operation];
           if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
@@ -751,10 +771,10 @@ interface BootOptions {
   /** 覆盖 Context State 语义抽取驱动（T2）：缺省恒回 '{}'（确定性兜底）。 */
   contextModelDriver?: unknown;
   /**
-   * 补丁 contextProfiles['17dz']（T1 worker 超时全链）：把 config/agent.yaml 复制一份、
+   * 补丁 contextProfiles.<profileId>（T1 worker 超时全链）：把 config/agent.yaml 复制一份、
    * 打上补丁写进 stateDir，经 AGENT_CONFIG_PATH 只对本 boot 生效。不动仓库里的真配置。
    */
-  patchProfile?: { workerTimeoutMs?: number; root?: string };
+  patchProfile?: { workerTimeoutMs?: number; root?: string; profileId?: string };
   /**
    * 平台写开放声明的覆盖（⑧，写关闭 disclosure e2e 用）：缺省按生产规则由
    * isCommitEnabled(bootEnv) 派生（mock ⇒ true）。给 false 时模拟"真平台未置
@@ -770,18 +790,20 @@ async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
   if (options.workerDispatchMode) bootEnv['FSHINE_WORKER_DISPATCH_MODE'] = options.workerDispatchMode;
-  // 隔离运行（FSHINE_PLATFORM_ROOT）：开发仓的 17dz-platform 常被并行任务动到半途（未登记
+  // 隔离运行（FSHINE_PLATFORM_ROOT）：开发仓的执行层平台仓常被并行任务动到半途（未登记
   // 的孤儿脚本会让 operations lint 红掉、boot 拒起）。指向干净快照时把 config 的
-  // profiles['17dz'].root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
+  // profiles.<profileId>.root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
   // e2e 与开发仓的进行中改动互不拖累。缺省（未设该变量）行为一字不变。
   const isolatedRoot = (bootEnv['FSHINE_PLATFORM_ROOT'] ?? '').trim();
   if (options.patchProfile || isolatedRoot !== '') {
     const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
     const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
     const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-    if (!profiles?.['17dz']) throw new Error('patchProfile：仓库配置里找不到 contextProfiles.17dz');
-    if (options.patchProfile) Object.assign(profiles['17dz']!, options.patchProfile);
-    if (isolatedRoot !== '') profiles['17dz']!['root'] = isolatedRoot;
+    const profileId = options.patchProfile?.profileId ?? (profiles ? Object.keys(profiles)[0] : undefined);
+    if (!profileId || !profiles?.[profileId]) throw new Error(`patchProfile：仓库配置里找不到 contextProfiles.${profileId}`);
+    if (options.patchProfile?.workerTimeoutMs) profiles[profileId]!.workerTimeoutMs = options.patchProfile.workerTimeoutMs;
+    if (options.patchProfile?.root) profiles[profileId]!.root = options.patchProfile.root;
+    if (isolatedRoot !== '') profiles[profileId]!['root'] = isolatedRoot;
     const patchedPath = path.join(stateDir, `agent-config-${counter}.yaml`);
     writeFileSync(patchedPath, stringifyYaml(config));
     bootEnv['AGENT_CONFIG_PATH'] = patchedPath;
@@ -946,7 +968,7 @@ function balanceCalls(account: string, period: string): PlanCall[] {
  * 自行组织终稿，worker 文本夹带的信封不会原样外发；替身脚本耗尽时它才拼进 parts 成为回复。
  * 断言"模型不得泄漏执行语言 / 不得把用户没问的对象当答案"必须先剥掉它——否则**平台自己的**
  * 中文 correctForm 与错误码会被当成模型泄漏。2026-09-29 mock 起对无数据期间回
- * not_found + PERIOD_NO_DATA + 中文三要素消息（17dz `src/lib/error-codes.js`），这层
+ * not_found + PERIOD_NO_DATA + 中文三要素消息（平台侧 `src/lib/error-codes.js`），这层
  * "completed 信封恰好无中文无下划线码"的偶然性就被揭穿了：`请确认`/`期间` 出自 correctForm，
  * `PERIOD_NO_DATA` 是平台码，都不是模型说漏嘴。真实平台回中文三要素消息时同样如此。
  *
@@ -956,12 +978,64 @@ function withoutPlatformEnvelope(text: string): string {
   return text.replace(/^执行 \S+: RESULT \{.*\}$/gm, '').replace(/\n{2,}/g, '\n').trim();
 }
 
-/** operation 名 → 平台脚本文件名（网关 query 形式按脚本寻址）。 */
-const SCRIPTS: Record<string, string> = {
-  'finance.query-receivables': 'query-receivables.js',
-  'finance.search-account-sets': 'search-account-sets.js',
-  'voucher.query-saved': 'query-saved.js',
-};
+/** operation 名 → 平台脚本路径（从平台 `operation list --json` 的 script 列派生，不手抄）。 */
+async function loadOperationScripts(platformRoot: string, gateway: string): Promise<Map<string, string>> {
+  if (!platformRoot) return Promise.resolve(new Map());
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
+  const cli = gatewayExecPath(platformRoot, gateway);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (scripts: Map<string, string>): void => {
+      if (settled) return;
+      settled = true;
+      resolve(scripts);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(new Map());
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(new Map());
+    }, 3000);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(new Map()); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        settle(new Map());
+        return;
+      }
+      const text = Buffer.concat(stdout).toString('utf8');
+      const scripts = new Map<string, string>();
+      let operations: unknown[] = [];
+      try {
+        const doc = JSON.parse(text);
+        if (Array.isArray(doc)) operations = doc;
+        else if (doc && Array.isArray((doc as { operations?: unknown[] }).operations)) operations = (doc as { operations: unknown[] }).operations;
+      } catch {
+        settle(scripts);
+        return;
+      }
+      for (const op of operations) {
+        const name = (op as { name?: unknown } | null)?.name;
+        const script = (op as { script?: unknown } | null)?.script;
+        if (typeof name === 'string' && typeof script === 'string' && script) {
+          scripts.set(name, script);
+        }
+      }
+      settle(scripts);
+    });
+  });
+}
 
 /**
  * 网关提案路径的提案 worker 替身（方案 1 · B 波 B3/B4）：先真跑一笔平台检索（与真实
@@ -1036,4 +1110,4 @@ export type { Boot, BootOptions, Turn };
  * 两表不一致即红，逼着把替身换回平台派生（见 operationSemantics 处的注释）。
  */
 export const harnessOperationSemantics = operationSemantics;
-export { PLATFORM_ROOT };
+export { PLATFORM_ROOT, operationScripts, loadOperationScripts };
