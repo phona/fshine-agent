@@ -1662,6 +1662,6 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 2. **F6 探针基线 diff**：需要真实 LLM 授权，本波未获授权未跑。
 3. **exposure-lint 扩展**：凭据/token/主机名三类新增守卫断言，属 C9 登记项 D-180，实际扩展待波次 4 后续或波次 5 落地。
 4. **rule-landing 全量中性化**：C9 只同步「波次 4 主张变更」涉及的行，rule-landing 剩余 30 处（D-169）按 Tier B 在册，待收口波清零。
-5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 仍自述 W4 未完成——属于前置波次责任，本波登记漂移（D-179）但不硬修文档。
+5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 曾自述迁移完成——属前置波次责任。本波已硬修：roadmap.md:240-243 补全 W1–W5、AGENTS.md:25 回滚为『仍在 17dz，迁移通用策略前不得先删平台门』。
 
 6. **unit 基线**：波次起点 `npx vitest run packages/ apps/` = 105 unit 文件（含 e2e 标签的 fixtures 在内）；本波 unit 文件计数同 105。`npx vitest run --project unit` 基线 111 文件 / 1825 passed / 0 skipped；HEAD 112 文件 / 1834 passed / 0 skipped。F2「只增不减」方向成立（HEAD 112 文件/1834 passed/0 skipped ≥ 记录值 105/1825/0）。波次末波次专属的 public-surface-lint 全绿（9/9），platform-leak-lint 全绿（4/4），harness-fidelity 因平台未配而响亮失败（HF-1/2/3 空派生表红、HF-4 平台未配跳过执行期断言，见未验项 1）。

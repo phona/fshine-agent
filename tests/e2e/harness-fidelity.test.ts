@@ -54,7 +54,7 @@ describe('[L4 集成] harness 保真度绊线', () => {
     // loadOperationSemantics 对一切失败路径（CLI 不存在/非零退出/输出不是 JSON/平台
     // 没下发该表）都 resolve 空表、从不 reject——catch 只是照 pi-coding-driver 的同一
     // 防御姿态写，不改变行为。
-    const derived = await loadOperationSemantics(PLATFORM_ROOT).catch(() => new Map<string, AccessSemantics>());
+    const derived = await loadOperationSemantics(PLATFORM_ROOT, GATEWAY).catch(() => new Map<string, AccessSemantics>());
 
     // 第一重：平台真表必须非空。2026-10-16 起 harness 的语义表已从 18 条手注替身换回
     // 平台派生（翻回条件"平台下发 accessSemantics"实测成立：53 条、与替身逐条一致）。
@@ -150,7 +150,7 @@ describe('[L4 集成] harness 保真度绊线', () => {
     // loadOperationArgSpecs 的失败语义与 loadOperationSemantics 同一族：CLI 不存在/非零
     // 退出/输出不是 JSON/顶层形状不认识——一律 resolve 空表、从不 reject。catch 与 HF-1
     // 同因：照 load* 家族的防御姿态写，不改变行为。
-    const specs = await loadOperationArgSpecs(PLATFORM_ROOT).catch(
+    const specs = await loadOperationArgSpecs(PLATFORM_ROOT, GATEWAY).catch(
       () => new Map<string, OperationArgsSpec>(),
     );
 
