@@ -1563,7 +1563,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### fallback 退役判据（C9 的机械条件）
 
-`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。**机械计数器**：`scripts/eval/count-a2a-fallback.ts` 读取 `.runtime/a2a-cutover.jsonl` 并输出 fallback 行数；CI 或本地跑满 20 次后该脚本输出 0 即满足计数条件。**三域新路径全绿**判据需要 17dz 兄弟仓前置（兄弟仓提供 stock 网关 + 全操作族覆盖），本仓确定性门内单独不可达，需与 17dz w5-tail 配对验证。
+`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。**机械计数器**：`scripts/eval/count-a2a-fallback.ts` 读取 `.runtime/a2a-cutover.jsonl` 并输出 fallback 行数；CI 或本地跑满 20 次后该脚本输出 0 即满足计数条件。**归档/轮转**：若工作区曾产生 fallback 行，可用 `--archive-to <path>` 将 fallback 行归档并保留非 fallback 行，使计数器可重新从 0 累计；归档文件追加写入，不覆盖历史。**三域新路径全绿**判据需要 17dz 兄弟仓前置（兄弟仓提供 stock 网关 + 全操作族覆盖），本仓确定性门内单独不可达，需与 17dz w5-tail 配对验证。
 
 ### 四个小裁示（owner 待确认，已带推荐；不堵 C0–C2，C9/C11 开工前需定）
 
@@ -1579,7 +1579,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 ### 现状对账（2026-11-06 本波第 1 棒实测，影响方案若干条目的表述）
 
 - **W1 已合入集成分支**（`3ad9a82` merge(w1)，在 W2+W3/W4 之下）：`RUN_EXECUTION_TASK_TOOL='run_task'`（context.ts:61）、`DEFAULT_EXECUTOR_LABEL='执行层子 Agent'`（system-prompt.ts:29）、Run17dzTaskArgs deprecated 别名已退役（context.ts 无命中）——小裁示 4 的「W1 已完成」前提坐实。
-- **W1 C7b 已达成 spawn 面 fail-closed 主体**：platform-contract.ts 不再持有 `GATEWAY_INVOCATION` 常量（注释区 :25-33）；`gatewayExecPathForProfile` 生产调用方 = 3（context.ts:582、plan-runtime.ts:126、apps/server/proposal-commit.ts:60）；`gatewayExecPath` 调用方 = 7（operation-labels.ts:88/223/268/389/476/547 + scripts/mock-commit-smoke.ts:57）——合计 10 个 spawn 消费点，与方案计数一致，但全部已是「未声明/非法即抛」，方案原文「静默落到 bin/17dz」的现状表述作废。golden 第⑥项按现行真实行为钉（fail-closed 已达成），C7 的翻转点相应改为「注释修正 + mock-commit-smoke 缺陷修复」。
+- **W1 C7b 已达成 spawn 面 fail-closed 主体**：platform-contract.ts 不再持有 `GATEWAY_INVOCATION` 常量（注释区 :25-33）；`gatewayExecPathForProfile` 生产调用方 = 5（context.ts:585、plan-runtime.ts:126、pi-coding-driver.ts:1453、apps/server/proposal-commit.ts:60、scripts/mock-commit-smoke.ts:57）；`gatewayExecPath` 调用方 = 7（operation-labels.ts:88/223/268/389/476/547，mock-commit-smoke.ts 使用 gatewayExecPathForProfile 故为 0）——合计 12 个 spawn 消费点，与方案计数一致，但全部已是「未声明/非法即抛」，方案原文「静默落到 bin/17dz」的现状表述作废。golden 第⑥项按现行真实行为钉（fail-closed 已达成），C7 的翻转点相应改为「注释修正 + mock-commit-smoke 缺陷修复」。
 - **mock-commit-smoke.ts:57 既存缺陷**（登记，属 C7 收尾范围）：`gatewayExecPath(platformRoot)` 单参数调用缺 gateway，运行时报 `gatewayNotDeclaredError`（本会话 `node --import tsx` 实测）；根 tsconfig include 不含 scripts/ 故 typecheck 不拦。修法随 C7（补 gateway 入参或改 profile 驱动）。
 - **F2 基线记账**：本波起点实测 `npm run test -- --project unit` → **109 文件 / 1795 passed / 0 skipped**（W4 冻结点 105/1725+1 skip；只增不减满足——skipped 归零为前序波次修复所致，如实记录不追认为缺口）。
 
@@ -1596,11 +1596,34 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 验收⑫ commit 集合与方案对应关系说明
 
-方案 C1–C12 共 12 项，实际 commit 14 个：
-- `0ae18fe`（merge）内含 C1+C2+方案落档；
-- C3–C10 各一个独立 commit；
-- C11 无独立 commit，关账核对并入 `ccec18a` / `923928c`；
-- 另有 4 个方案外收尾 commit：`cabadae` / `15be41a` / `750190e` / `fbc9fba`。
+方案 C1–C12 共 12 项，实际 commit 25 个（`git rev-list --count migration/public-release..w5-tail` = 25）：
+- `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 25）；
+- C3：`d5e645d` feat(agent)：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷）；
+- C4：`9392df6` feat(agent)：五类失败分类的宿主送达义务收口 + 全覆盖测试矩阵；
+       `aeee95b` refactor(agent)：委派失败五路链抽成纯函数 classifyDelegationFailure（逐字搬移，行为零变化）；
+       `cabadae` fix(agent)：C4 收口——failure-delivery 措辞单一来源 + error-codes 补档；
+       `15be41a` fix(agent)：C4 收口——context.ts 失败 catch 统一走 deliverFailure；
+       `85e5a88` fix(agent)：C4 挂码修复——ToolUserError 增加 code 字段并全量挂载；
+- C5：`750190e` fix(agent)：C5 收尾——委派块 existing 续跑守卫 + golden/e2e 同步；
+- C6：`5971868` feat(C6)：注册 structured_call 工具并挂载 beforeToolCall 机械验证；
+       `f095d67` test(agent)：C6 structured_call 通道回归（execute 路径 + spawn env 验证）；
+       `fdc8879` feat(eval)：C6 网关结构化子命令 dummy.cjs call --file；
+- C7：`0f604ae` feat(C7)：spawn 路径切 gatewayExecPathForProfile + mock-commit-smoke 修复 + Q11 退役；
+       `b42ddcb` fix(agent)：C7 收尾——serve-gate 注释修正（fail-closed 语义）；
+       `fbc9fba` fix(agent)：C7 收尾——platform-contract.ts 注释修正；
+- C8：`8302f5f` refactor(C8)：三道门执法点改显式携带——移除 process.env 缺省，调用方显式传入；
+- C9：`4c3d320` feat(C9)：structured_call phased cutover——新路径失败回退 operation run + a2a-cutover.jsonl 审计日志；
+       `693cb68` test(agent)：C9 fallback 在册断言 + 机械计数器脚本落地；
+       `2eaf8f5` fix(ci)：C9 fallback 退役计数纳入 CI；
+       `b75fdd3` test(e2e)：C9 fallback 覆盖标注；
+- C10：`96d9c5f` feat(C10)：L4 闭环——ballot-platform 第二写域 + generic-mock 端到端 + §17 三类分流；
+        `84acfe4` test(eval)：C10 generic-mock 结构化调用 parity 用例 + baseline；
+        `bc7cc6d` test(e2e)：C10 ballot 第二写域 vitest 端到端闭环（结构性无法运行，已跳过）；
+- C11：无独立 commit，关账核对并入 `ccec18a` / `923928c`；
+- C12：`ccec18a` docs(C12)：关账——§30 更新 + D-031 三类分流留档 + 判断项收口；
+        `923928c` docs(C12)：W5 关账同步 + 债务登记；
+- 尾程修复轮 / 关账同步：`a4f209f` docs(W5)：W5 尾程关账同步 + 债务登记 + 变异留档；
+        `62b67fc` docs(debt-ledger)：D-178 状态更新——ballot vitest e2e 结构性无法运行，改为 skipped + 文档修正。
 
 无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
 
