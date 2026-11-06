@@ -38,7 +38,7 @@ import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOpera
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { parseEnvelope, gatewayExecPath, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
@@ -1450,7 +1450,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
               details: { error: 'gateway_not_configured' },
             };
           }
-          const cli = gatewayExecPath(ctx.cwd, options.gateway);
+          const cli = gatewayExecPathForProfile(ctx.cwd, options);
           const call: StructuredCall = { operation: params.operation, args: params.args };
           const scratchDir = options.scratchDir ? path.join(ctx.cwd, options.scratchDir) : path.join(ctx.cwd, 'tmp');
           mkdirSync(scratchDir, { recursive: true });

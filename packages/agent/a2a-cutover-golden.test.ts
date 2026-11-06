@@ -336,30 +336,31 @@ describe('⑥ spawn 面盘点（翻转点：C7 收尾——W1 C7b 已达成 fail
     expect(contractSrc).not.toContain('GATEWAY_INVOCATION');
   });
 
-  it('spawn 消费点盘点：ForProfile 3 处 + gatewayExecPath 7 处 = 10，全部 fail-closed', () => {
-    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处。
+  it('spawn 消费点盘点：ForProfile 4 处 + gatewayExecPath 7 处 = 11，全部 fail-closed', () => {
+    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处 + 结构化调用一处。
     for (const file of [
       join(SRC_DIR, 'context.ts'),
       join(SRC_DIR, 'plan-runtime.ts'),
       join(APPS_DIR, 'server', 'proposal-commit.ts'),
+      join(SRC_DIR, 'pi-coding-driver.ts'),
     ]) {
       expect(srcOf(file)).toContain('gatewayExecPathForProfile(');
     }
-    // gatewayExecPath（内部同样 fail-closed）：operation-labels 六处 + 冒烟脚本一处。
+    // gatewayExecPath（内部同样 fail-closed）：operation-labels 七处 + 冒烟脚本零处。
     // 'gatewayExecPath(' 作为子串不匹配 'gatewayExecPathForProfile('（其后是 F 不是括号）。
-    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(6);
-    expect(srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts').split('gatewayExecPath(').length - 1).toBe(1);
-    // operation-labels 六处的前置是显式降级（未声明 gateway → 空表），不是静默默认。
+    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(7);
+    expect(srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts').split('gatewayExecPath(').length - 1).toBe(0);
+    // operation-labels 七处的前置是显式降级（未声明 gateway → 空表），不是静默默认。
     const labelsSrc = srcOf(SRC_DIR, 'operation-labels.ts');
     expect(labelsSrc).toContain('validateGatewayInvocation(gateway)');
     expect(labelsSrc).toContain('绝不回退遗留网关名');
   });
 
-  it('mock-commit-smoke.ts:57 单参数调用是既存缺陷（C7 收尾修复，本组钉现状不钉缺陷）', () => {
-    // 运行时报 gatewayNotDeclaredError（本会话 node --import tsx 实测）；根 tsconfig
-    // include 不含 scripts/ 故 typecheck 不拦。修复 = 补 gateway 入参或改 profile 驱动，
-    // 修完本断言的字面形态要随之更新（允许的翻转：从缺陷态到修复态）。
+  it('mock-commit-smoke.ts 已修复（C7 收尾：gatewayExecPathForProfile + gateway 入参）', () => {
+    // 修复：单参数调用 → profile 驱动 + gateway 入参。修完本断言的字面形态随之更新。
     const smokeSrc = srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts');
-    expect(smokeSrc).toContain('gatewayExecPath(platformRoot)');
+    expect(smokeSrc).toContain('gatewayExecPathForProfile(');
+    expect(smokeSrc).toContain('gateway');
+    expect(smokeSrc).not.toContain('gatewayExecPath(platformRoot)');
   });
 });

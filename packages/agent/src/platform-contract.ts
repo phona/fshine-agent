@@ -23,11 +23,9 @@ import path from 'node:path';
  * 改名/迁移网关，只改这一处。泄漏 lint 把网关名字面量的预算压到只剩本常量这一处。
  */
 /**
- * 遗留缺省网关名（过渡期）。
+ * 网关可执行文件路径派生（C7 收口）：以 profile 声明的 `gateway` 为准，
+ * 不回退任何遗留缺省——`gatewayExecPathForProfile` 是宿主 spawn 路径的唯一入口。
  *
- * Package 1 收窄口径：平台执行代码不动、执行端门先留。宿主 spawn 路径
- * 不再以本常量为准——以 profile 声明的 `gateway` 为准
- * （见 `gatewayExecPathForProfile`）。C7b 起本文件不再持有任何实例网关名：
  * 文本识别与诊断渲染一律 fail-closed（resolveGatewayText / gatewayExecPath
  * 未声明有效 gateway 即抛），profile.gateway 是网关名的唯一来源。
  */
