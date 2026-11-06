@@ -32,6 +32,7 @@ import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
+import { classifyDelegationFailure } from './delegation-failure';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -1629,12 +1630,13 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 透传的 result.modelError（模型侧瞬时失败，重试用尽或不可重试）——它只在驱动
         // 正常返回时在场，届时 catch 里的 error 只能是下方空文本检查抛的那句普通 Error，
         // 与 auth 码族无交集；而取消/超时是宿主自己的收尾事实，永远先于模型侧表征。
-        const failureClass = runSignal?.aborted ? 'cancelled'
-          : Date.now() >= deadline ? 'timeout'
-          : result?.modelError ? 'model_transient'
-          : isPlatformAuthError(error) ? 'auth'
-          : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
-          : 'executor_error';
+        const failureClass = classifyDelegationFailure({
+          aborted: runSignal?.aborted ?? false,
+          deadlinePassed: Date.now() >= deadline,
+          modelError: result?.modelError,
+          isPlatformAuthError,
+          error,
+        });
         console.info(JSON.stringify({
           event: 'delegation_span',
           requestId: ctx.trusted.requestId,

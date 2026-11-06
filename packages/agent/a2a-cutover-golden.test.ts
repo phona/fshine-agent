@@ -240,13 +240,14 @@ describe('④ 委派块当前文本形状（翻转点：C5）', () => {
 
 describe('⑤ 委派失败五路链与话术单一来源', () => {
   const contextSrc = srcOf(SRC_DIR, 'context.ts');
+  const failureSrc = srcOf(SRC_DIR, 'delegation-failure.ts');
 
-  it('五路链表达式在位，判定顺序 = 取消 > 超时 > model_transient > auth > executor_error', () => {
-    const cancelled = contextSrc.indexOf("runSignal?.aborted ? 'cancelled'");
-    const timeout = contextSrc.indexOf("Date.now() >= deadline ? 'timeout'");
-    const transient = contextSrc.indexOf("result?.modelError ? 'model_transient'");
-    const auth = contextSrc.indexOf("isPlatformAuthError(error) ? 'auth'");
-    const fallback = contextSrc.indexOf(": 'executor_error'");
+  it('五路链表达式在位（C3 抽纯函数后位于 delegation-failure.ts），判定顺序 = 取消 > 超时 > model_transient > auth > executor_error', () => {
+    const cancelled = failureSrc.indexOf("if (aborted) return 'cancelled'");
+    const timeout = failureSrc.indexOf("if (deadlinePassed) return 'timeout'");
+    const transient = failureSrc.indexOf("if (modelError) return 'model_transient'");
+    const auth = failureSrc.indexOf("if (isPlatformAuthError(error)) return 'auth'");
+    const fallback = failureSrc.indexOf("return 'executor_error'");
     expect(cancelled).toBeGreaterThan(-1);
     expect(timeout).toBeGreaterThan(-1);
     expect(transient).toBeGreaterThan(-1);
@@ -260,11 +261,11 @@ describe('⑤ 委派失败五路链与话术单一来源', () => {
   });
 
   it('/平台登录已过期/ 正则兜底在位且带「平台挂码后即删」的过渡标记', () => {
-    expect(contextSrc).toContain('/平台登录已过期/.test(');
-    expect(contextSrc).toContain('平台侧该消息一带码');
+    expect(failureSrc).toContain('/平台登录已过期/.test(');
+    expect(failureSrc).toContain('平台侧该消息一带码');
     // 兜底只可能把该形态补判为 auth，不改其他四路。
-    const regexIdx = contextSrc.indexOf('/平台登录已过期/.test(');
-    const executorIdx = contextSrc.indexOf(": 'executor_error'");
+    const regexIdx = failureSrc.indexOf('/平台登录已过期/.test(');
+    const executorIdx = failureSrc.indexOf("return 'executor_error'");
     expect(regexIdx).toBeGreaterThan(-1);
     expect(regexIdx).toBeLessThan(executorIdx);
   });
