@@ -582,6 +582,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
             const script = operationScripts.get(call.operation);
             if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
             const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
+              cwd: PLATFORM_ROOT,
               encoding: 'utf8', timeout: 30_000,
               env: { ...process.env, EXECUTION_PLAN_ID: active.planId, EXECUTION_REQUIRE_PLAN: '1' },
             });
@@ -665,6 +666,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           const script = operationScripts.get(call.operation);
           if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
           const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
+            cwd: PLATFORM_ROOT,
             encoding: 'utf8', timeout: 30_000,
             env: { ...process.env, EXECUTION_PLAN_ID: plan.planId, EXECUTION_REQUIRE_PLAN: '1' },
           });
