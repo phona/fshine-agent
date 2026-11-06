@@ -338,13 +338,14 @@ describe('⑥ spawn 面盘点（翻转点：C7 收尾——W1 C7b 已达成 fail
     expect(contractSrc).not.toContain('GATEWAY_INVOCATION');
   });
 
-  it('spawn 消费点盘点：ForProfile 4 处 + gatewayExecPath 7 处 = 11，全部 fail-closed', () => {
-    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处 + 结构化调用一处。
+  it('spawn 消费点盘点：ForProfile 5 处 + gatewayExecPath 7 处 = 12，全部 fail-closed', () => {
+    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处 + 结构化调用一处 + 冒烟脚本一处。
     for (const file of [
       join(SRC_DIR, 'context.ts'),
       join(SRC_DIR, 'plan-runtime.ts'),
       join(APPS_DIR, 'server', 'proposal-commit.ts'),
       join(SRC_DIR, 'pi-coding-driver.ts'),
+      join(SCRIPTS_DIR, 'mock-commit-smoke.ts'),
     ]) {
       expect(srcOf(file)).toContain('gatewayExecPathForProfile(');
     }
