@@ -110,5 +110,5 @@ npm run ci
 - gitee 私有仓保留未重写历史（D-158 已登记，26 个 refs/pull/* 残留）。
 - 回滚会丢失公开后收到的 star / issue / PR（路径 A 切私有可保留）。
 - `~/fshine-agent-backup-20261105.bundle` 须在 push 前准备好（波次 2 产物；2026-11-07 实测 verify exit 0）。
-- GitHub 侧只推 `migration/public-release:main` 一条线；波次分支（w5-tail / facade / sweep / wave5-prep 等）留在 gitee——它们的树含中性化前的 17dz 引用，不公开。
+- GitHub 侧只推 `migration/public-release:main` 一条线；波次分支（w5-tail / facade / sweep / wave5-prep 等）留在 gitee——它们的树含中性化前的实例名引用，不公开。
 - 本地 `main`（179ffe0，gitee 老线）与 clean 线分叉，任何 push/force-push 都必须显式写 refspec。
