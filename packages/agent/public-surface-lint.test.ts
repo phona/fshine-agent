@@ -380,19 +380,18 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
     failures.push('c) AGENTS.md 声称预算档位迁移已完成（实际平台计划门仍为权威，迁移未完成）');
   }
 
-  // d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件有命中
-  const fourFiles = [
-    'packages/agent/src/platform-mock.ts',
-    'apps/server/runtime-mode.ts',
-    'tests/e2e/harness.ts',
-    '.env.example',
-  ];
-  const dzHits = fourFiles.flatMap(f => {
-    const content = readFile(f);
-    return (content.match(/DZ_EXECUTOR|DZ_ALLOW_REAL/g) ?? []).map(() => f);
-  });
-  if (dzHits.length > 0) {
-    failures.push(`d) DZ_EXECUTOR / DZ_ALLOW_REAL 在四文件（platform-mock.ts / runtime-mode.ts / harness.ts / .env.example）中仍有 ${dzHits.length} 命中，未修复漂移`);
+  // d) 跨仓 env 命名空间漂移已按「退役 + 桥接」方案收口（2026-11-06，W5 C8 + 17dz P4 同批落地）：
+  //    fshine 侧 env 级门开关已退役（生产 src 不再读门开关），harness 对兄弟仓改名后的 DZ_* 族做桥接
+  //    （EXECUTION_* 与 DZ_* 并存设 mock），e2e 因此对改名后的执行层仍可验证——DZ_* 提法在 harness 里
+  //    是桥接而非漂移。判据从漂移未修时的代理「零提及 DZ_*」改为已解决架构的机械面：
+  //    ① harness 桥接在位（两族 mock 设定都在）；② 生产/src 与 .env.example 无 DZ_* 门命中。
+  const harnessContent = readFile('tests/e2e/harness.ts');
+  const bridgeKeys = ['EXECUTION_EXECUTOR', 'DZ_EXECUTOR', 'DZ_ALLOW_REAL'];
+  const bridgeMissing = bridgeKeys.filter(k => !harnessContent.includes(k));
+  const prodFiles = ['packages/agent/src/platform-mock.ts', 'apps/server/runtime-mode.ts', '.env.example'];
+  const prodDzHits = prodFiles.reduce((n, f) => n + (readFile(f).match(/DZ_EXECUTOR|DZ_ALLOW_REAL/g) ?? []).length, 0);
+  if (bridgeMissing.length > 0 || prodDzHits > 0) {
+    failures.push(`d) env 命名空间漂移未按既定方案收口：harness 桥接缺 ${bridgeMissing.join('/') || '无'}；生产/src 与 .env.example 有 DZ_* 命中 ${prodDzHits} 处`);
   }
 
   it('四项全部满足才开跑（当前不满足时列出缺口，阻塞硬开跑）', () => {
