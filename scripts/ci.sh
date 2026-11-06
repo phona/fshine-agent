@@ -21,4 +21,6 @@ echo "== unit tests =="
 npm run test -- --project unit
 echo "== generic-mock eval =="
 npm run eval:generic-mock
+echo "== fallback retirement counter =="
+node --import tsx scripts/eval/count-a2a-fallback.ts --threshold 20
 echo "CI deterministic gates: PASS"
