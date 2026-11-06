@@ -86,8 +86,8 @@ export interface ServeGateOptions {
   platformRoot?: string;
   /**
    * profile 声明的网关调用形式（接口文档 §2）：首词规则与 plan 提交
-   * 识别据此派生。未注入时走遗留缺省（见 resolveGatewayText 与
-   * 接口文档 §10），生产路径应由驱动层注入 profile.gateway。
+   * 识别据此派生。未注入或非法时 fail-closed（resolveGatewayText 抛错，见
+   * platform-contract.ts）；生产路径应由驱动层注入 profile.gateway。
    */
   gateway?: string;
   /** 知识面规则（read/ls 白名单），缺省内置。 */
