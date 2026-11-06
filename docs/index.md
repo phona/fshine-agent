@@ -4,7 +4,7 @@
 
 ## ① 终局规格
 
-以下文档描述 fshine-agent 的终局架构与功能规格，不含执行层实例叙述。接入新执行层时以这些文档为准。
+以下文档描述 fshine-agent 的终局架构与功能规格；`v0-architecture.md` 因含架构迁移史叙述仍有执行层实例痕迹（5 处，Tier B 在册、带闭环判据与限期），不代表终局规范已被中性化，阅读时把实例叙述当作"改造史档案"。
 
 - `docs/v0-architecture.md`——架构总览与分层判据
 - `docs/v0-functional-spec.md`——功能规格与能力表
