@@ -107,3 +107,56 @@ export interface DelegationBlock {
   /** 契约版本，取值为 A2A_PROTOCOL_VERSION。 */
   readonly protocolVersion: string;
 }
+
+/**
+ * 单个 operation 的声明（能力清单的一行；执行层持有，宿主只消费）。
+ *
+ * 逐字段对应 docs/a2a-protocol.md 参与方表「执行层持有」那一行，也是
+ * `<gateway> operation list --json` 输出在宿主侧的投影形状。纪律与宿主既有消费面
+ * （packages/agent/src/operation-labels.ts 的 AccessSemantics）一致：
+ *   · requiresPlan 是协议语义（「需不需要计划」的声明事实，宿主据此机械复核）；
+ *   · effects / serveMatrix 是**开放词表**——词汇由执行层自己持有，宿主原样投影、
+ *     不解释业务含义（同「宿主不再自己认 access 取值」：平台加同族取值不静默改写判定）。
+ */
+export interface OperationDeclaration {
+  /** operation 注册名（执行层清单权威字段；宿主不另立名单）。 */
+  readonly operation: string;
+  /** 计划要求：仅清单标记为需要计划的 operation 需要向宿主申请许可（生命周期第③阶段）。 */
+  readonly requiresPlan: boolean;
+  /** 副作用开放词表（执行层自有词汇，如读/写家族取值）；宿主不解释、不枚举。 */
+  readonly effects: readonly string[];
+  /** 估时（秒）；执行层声明，宿主用于预算档位与进度口径，不替执行层重估。 */
+  readonly estSeconds: number | null;
+  /** 人类可读标签；宿主渲染用，语义仍归执行层。 */
+  readonly label: string | null;
+  /** serve 矩阵开放词表（该 operation 的许可/法域声明）；宿主原样投影。 */
+  readonly serveMatrix: readonly string[];
+}
+
+/**
+ * 能力清单：执行层对宿主声明「我有哪些 operation、各自要什么」。
+ *
+ * **只作 `<gateway> operation list --json` 的消费投影**（生命周期第②阶段「发现」）：
+ * 权威是执行器的实时输出，宿主不缓存、不复制、不另立名单（L2 单一来源）——本类型
+ * 不引入任何文件读取路径，清单没有的能力视为不存在。
+ */
+export interface CapabilityManifest {
+  /** 清单对应的协议版本，取值为 A2A_PROTOCOL_VERSION。 */
+  readonly version: string;
+  /** 逐 operation 声明。 */
+  readonly operations: readonly OperationDeclaration[];
+}
+
+/**
+ * 结构化调用：worker → 宿主 → 执行层的调用载体（operation + 结构化参数）。
+ *
+ * 取代裸命令行 JSON 传参：args 的 schema 由执行层能力清单声明派生，宿主按声明做
+ * 机械复核（requiresPlan / effects / serve 矩阵），**不解析不校验业务参数**；
+ * 网关侧出口是 `<gateway> call --file <json>`。
+ */
+export interface StructuredCall {
+  /** 目标 operation 注册名（必须在能力清单内；清单没有的视为不存在）。 */
+  readonly operation: string;
+  /** 结构化参数（不透明给宿主：键值形状由执行层 schema 权威）。 */
+  readonly args: Readonly<Record<string, unknown>>;
+}
