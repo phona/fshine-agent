@@ -1767,9 +1767,9 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/pi-coding-driver.ts`、`packages/contracts/src/a2a-protocol.ts`。
 - **根因**：
   1. `failureClassFor` 的生产入参只覆盖 runtime 五档（cancelled/timeout/model_transient/auth/executor_error），协议五类中的 CAPABILITY_UNAVAILABLE 与 HARD_REJECTED 无任何生产者（worker 侧结构化失败上报通道尚不存在），deliverFailure 的 needs / needsEnrichment 分支同样不可达。
-  2. `OperationDeclaration` 无 args schema 字段，`validateStructuredCall` 只查 operation 声明与 args 是对象，未声明参数名/类型/枚举值不 reject；generic-mock g-structured-undeclared-arg 用例缺失。
+  2. ~~`OperationDeclaration` 无 args schema 字段~~、~~`validateStructuredCall` 只查 operation 声明与 args 是对象~~、~~generic-mock g-structured-undeclared-arg 用例缺失~~（da36f44 已修复：OperationDeclaration 补 argsSchema；validateStructuredCall 增参数级 fail-closed；generic-mock 补 g-structured-undeclared-arg 用例）。
   3. `policyOf` 导出无消费方。
 - **律法归属**：L2（措辞单一来源）+ L4（声明可守）。
 - **闭环判据**：worker 侧结构化失败上报通道落地后，CAPABILITY_UNAVAILABLE / HARD_REJECTED 有生产者；OperationDeclaration 补 args schema 后，validateStructuredCall 实现参数级 fail-closed；policyOf 有消费方。
-- **归属波次 / 限期**：W5 尾程登记；args schema 与结构化失败上报待后续波次。
-- **状态**：登记（函数级覆盖已达成，生产级覆盖待执行层配合）。
+- **归属波次 / 限期**：W5 尾程登记；根因第 1、3 条待后续波次。
+- **状态**：根因第 2 条已修复（da36f44）；根因第 1、3 条仍登记待后续波次。
