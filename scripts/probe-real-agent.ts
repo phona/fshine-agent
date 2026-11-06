@@ -230,7 +230,7 @@ function isolatePlatformState(): void {
     EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
     // 网关限流有 17dz 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
     // 真实平台保持生产限流（"别让下游平台有感知"）：探针节奏天然低于限额，被限就是信号。
-    ...(isPlatformMock() ? { EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
+    ...(isPlatformMock(process.env) ? { EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
   });
 }
 

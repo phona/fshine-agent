@@ -91,7 +91,7 @@ async function proposalCreateOperation(platformRoot: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  if (!isPlatformMock()) {
+  if (!isPlatformMock(process.env)) {
     console.error('拒跑：EXECUTION_EXECUTOR=mock 未设置——本冒烟走真实落账流程，只允许在 mock 保护下执行。');
     process.exit(1);
   }

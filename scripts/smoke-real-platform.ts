@@ -425,7 +425,7 @@ async function main(): Promise<void> {
 
   // ── 写安全三闸（boot 前）──
   const guards: string[] = [];
-  if (isPlatformMock()) guards.push('当前 EXECUTION_EXECUTOR=mock——冒烟集只跑真实平台；mock 行为层全集请用探针 scripts/probe-real-agent.ts');
+  if (isPlatformMock(process.env)) guards.push('当前 EXECUTION_EXECUTOR=mock——冒烟集只跑真实平台；mock 行为层全集请用探针 scripts/probe-real-agent.ts');
   if (process.env['FSHINE_REAL_COMMIT'] === '1') guards.push('FSHINE_REAL_COMMIT=1 已置位——真平台 commit 双闸之一被打开，只读冒烟集拒跑');
   const capabilities = config.principals[AUTHORIZED_KEY]?.capabilities ?? ['read'];
   if (capabilities.some((c) => c !== 'read')) guards.push(`principal capabilities 含非只读项（${capabilities.join('/')}）——冒烟集拒跑`);
@@ -480,8 +480,8 @@ async function main(): Promise<void> {
     mode: 'real-platform-smoke',
     env: {
       executor: process.env['EXECUTION_EXECUTOR'] ?? '(unset=real)',
-      mock: isPlatformMock(),
-      commitEnabled: isCommitEnabled(),
+      mock: isPlatformMock(process.env),
+      commitEnabled: isCommitEnabled(process.env),
       capabilities,
       llm: { base: process.env['LLM_API_BASE_URL'] ?? '', model: process.env['LLM_MODEL'] ?? '' },
       planStateIsolated: true,

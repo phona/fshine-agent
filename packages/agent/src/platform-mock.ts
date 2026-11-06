@@ -26,7 +26,7 @@ export const MOCK_EXECUTOR_ENV = 'EXECUTION_EXECUTOR';
 export const MOCK_STATE_ENV = 'EXECUTION_MOCK_STATE';
 export const REAL_COMMIT_ENV = 'FSHINE_REAL_COMMIT';
 
-export function isPlatformMock(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isPlatformMock(env: NodeJS.ProcessEnv): boolean {
   return env[MOCK_EXECUTOR_ENV] === 'mock';
 }
 
@@ -39,12 +39,12 @@ export function isPlatformMock(env: NodeJS.ProcessEnv = process.env): boolean {
  * proposalCommitEnabled 由本函数单独派生，没有再串第二级。缺 FSHINE_REAL_COMMIT 时
  * 确认码拿到的是确定性拒绝（confirm_held），一次写入都不发生。
  */
-export function isCommitEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+export function isCommitEnabled(env: NodeJS.ProcessEnv): boolean {
   return isPlatformMock(env) || env[REAL_COMMIT_ENV] === '1';
 }
 
 /** mock 开启但状态路径未设时兜底；须在 worker/commit 子进程产生前调用。 */
-export function ensureMockStatePath(platformRoot: string, env: NodeJS.ProcessEnv = process.env): string | null {
+export function ensureMockStatePath(platformRoot: string, env: NodeJS.ProcessEnv): string | null {
   if (!isPlatformMock(env)) return null;
   if (!env[MOCK_STATE_ENV]) {
     env[MOCK_STATE_ENV] = path.join(platformRoot, '.runtime', 'mock-state.json');
