@@ -1741,8 +1741,8 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **根因**：C10 第二写域（ballot）的端到端证据目前仅靠 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本直驱 dummy CLI），未升 vitest e2e；L4「换一个域 fshine 不用改代码」的证明力仅到夹具层。
 - **律法归属**：L4（换域不改代码）。
 - **闭环判据**：tests/e2e 内新增 ballot 第二写域 vitest e2e，或 execution-layer-admission.md 明确登记为「非 vitest e2e，由 generic-mock 一道门覆盖」并获 owner 认可。
-- **归属波次 / 限期**：W5 尾程登记；待 owner 确认是否升 vitest e2e 或维持 generic-mock 一道门。
-- **状态**：登记（C10 已完成 generic-mock 覆盖；vitest e2e 升级待决策）。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：已修复（bc7cc6d 新增 tests/e2e/turn-loop-ballot.test.ts，ballot 读路径 query + 写路径 prepare/proposal/proposal-commit 全链 vitest e2e 闭环；generic-mock g-ballot-second-domain 保留一道门）。
 
 ### D-179 · C5 翻转点过程违规：golden/context.test 未同批翻转（W5 尾程留证）
 
