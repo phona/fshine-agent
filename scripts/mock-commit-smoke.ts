@@ -102,7 +102,7 @@ async function main(): Promise<void> {
   if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles.17dz.root'); process.exit(1); }
   if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles.17dz 未声明 gateway'); process.exit(1); }
 
-  const statePath = ensureMockStatePath(platformRoot)!;
+  const statePath = ensureMockStatePath(platformRoot, process.env)!;
   // 重置状态：每次冒烟从 seed 重新播种，断言才确定
   if (existsSync(statePath)) rmSync(statePath);
 
