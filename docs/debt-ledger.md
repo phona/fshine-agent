@@ -1706,6 +1706,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：W5 尾程。
 - **状态**：已修复（materializeTaskInputs 仅在 `args.turnDeclaration && guardedScope` 时调用）。
 
+
 ### D-175 · C8 三道门部分落地：serve 令牌门与真写门执法点未动
 
 - **位置**：`packages/agent/src/context.ts`、`packages/agent/src/plan-runtime.ts`、`packages/agent/src/platform-mock.ts`、`packages/agent/src/assembly.ts`。
@@ -1774,7 +1775,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：W5 尾程登记；根因第 1、3 条待后续波次。
 - **状态**：根因第 2 条已修复（da36f44）；根因第 1、3 条仍登记待后续波次。
 
-### D-181 · HF-4 第三重源码检查的 import 期死代码与平台未配噪音
+### D-186 · HF-4 第三重源码检查的 import 期死代码与平台未配噪音（原 D-181，与集成分支 D-181 编号冲突，重编号为 D-186）
 
 - **位置**：`tests/e2e/harness-fidelity.test.ts:188`（HF-4 第三重源码检查）。
 - **根因**：C5 落地 HF-4 第三重时遗漏了 `readFileSync` 与 `REPO_ROOT` 的 import/定义，导致平台可用环境下实跑即抛 `readFileSync is not defined`；平台未配时被第一重空表断言掩盖。此外，HF-1..4 未按 `platformAvailable` 条件化，平台未配时整组照跑照红（HF-1/2/3 在基线同因已红，HF-4 为新增噪音）。

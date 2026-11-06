@@ -1593,7 +1593,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 **本节性质**：波次 4 的执行关账记录。波次方案在 `/tmp/pp-waves-c.json`（waveId=波次 4）；本节的防线表、每 commit 实测记录、F3 变异留档表与未验项格式对齐 §24。
 
-**就绪检查四项符合情况**（验收项 1，已落地为门禁 `public-surface-lint.test.ts` → `acceptance ①`）：a) roadmap 对 W1–W5 零记载 → 不满足；b) change-safety 尾部为 §27–§30、W1–W5 在册 → 满足；c) AGENTS.md:25 仍自述预算档位在 17dz → 不满足；d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件全 0 命中 → 不满足。四项仅 b 满足，漂移已登记 D-179，门禁当前 fail（3 项缺口）。波次已硬开跑属历史事实，门禁已补堵后续波次。
+**就绪检查四项符合情况**（验收项 1，已落地为门禁 `public-surface-lint.test.ts` → `acceptance ①`）：a) roadmap 对 W1–W5 有记载 → 满足；b) change-safety 尾部为 §27–§30、W1–W5 在册 → 满足；c) AGENTS.md:25 仍自述预算档位在 17dz → 不满足；d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件全 0 命中 → 满足。三项满足，c) 仍为缺口，漂移已登记 D-179。波次已硬开跑属历史事实，门禁已补堵后续波次。
 
 ### 防线表
 
