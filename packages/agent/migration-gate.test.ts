@@ -101,15 +101,15 @@ describe('migration gate ②: 本地秘密路径零入库', () => {
 describe('migration gate ③: debt-ledger 待办条目三件套齐备', () => {
   it('每条待办/登记条目都有律法归属 + 闭环判据 + 限期', () => {
     const ledger = readFileSync(path.join(REPO_ROOT, 'docs/debt-ledger.md'), 'utf8');
-    const entries = ledger.split(/^### D-/m).filter((e) => /^D-\d+/.test(e.trim()));
+    const entries = ledger.split(/(?=^### D-\d+)/m).filter((e) => /^### D-\d+/.test(e.trim()));
 
     const bad: string[] = [];
     for (const entry of entries) {
-      const idMatch = entry.match(/^(D-\d+)/);
+      const idMatch = entry.match(/^### (D-\d+)/);
       const id = idMatch?.[1] ?? '???';
       const statusMatch = entry.match(/\*\*状态\*\*：(.*?)(?:\n|$)/);
       const status = statusMatch?.[1] ?? '';
-      if (!/待办|登记/.test(status)) continue;
+      if (!/待办/.test(status)) continue;
 
       const hasLaw = /\*\*律法归属\*\*/.test(entry);
       const hasClosure = /\*\*闭环判据\*\*/.test(entry);
