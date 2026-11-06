@@ -69,7 +69,10 @@ if (operationSemantics.size === 0) {
 }
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
-const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
+const PLATFORM_STATE_KEYS = [
+  'EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE',
+  'DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE',
+] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -83,6 +86,11 @@ beforeEach(() => {
     // 提案状态库（A 波新增，B 波网关提案路径的落点）：同样每用例独一份，否则一个用例建的
     // 提案会漏到下一个用例的读回/提交里。
     EXECUTION_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
+    DZ_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
+    DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
+    DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
+    DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    DZ_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
   });
 });
 
@@ -128,11 +136,17 @@ beforeAll(() => {
     EXECUTION_EXECUTOR: 'mock',
     DZ_ALLOW_REAL: 'mock',
     DZ_EXECUTOR: 'mock',
+    DZ_SERVE: '1',
     EXECUTION_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
     EXECUTION_PLAN_STATE: path.join(stateDir, 'plans.json'),
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
     EXECUTION_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
+    DZ_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
+    DZ_PLAN_STATE: path.join(stateDir, 'plans.json'),
+    DZ_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
+    DZ_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
     EXECUTION_REQUIRE_PLAN: '1',
+    DZ_REQUIRE_PLAN: '1',
     EXECUTION_PLAN_ACTIVATION_SECRET: 'turn-loop-test-secret',
     EXECUTION_PLAN_AUTO_CALLS: '2',
     EXECUTION_PLAN_NOTIFY_CALLS: '10',

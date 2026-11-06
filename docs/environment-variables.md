@@ -37,24 +37,33 @@
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
 | `EXECUTION_SERVE` | 宿主装配 / 17dz `execution-env.serve` | 仅 `1` 进 serve 法域；否则走建造法域规则 |
+| `DZ_SERVE` | 17dz `execution-env.serve`（`EXECUTION_SERVE` 新前缀别名） | 与 `EXECUTION_SERVE` 同义；17dz main 治理 env 族改名后与旧名并存 |
 | `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
+| `DZ_INVOCATION` | 网关铸造 / serve 门校验（`EXECUTION_INVOCATION` 新前缀别名） | 与 `EXECUTION_INVOCATION` 同义 |
 | `EXECUTION_ALLOW_REAL` | 部署 / 17dz 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
+| `DZ_ALLOW_REAL` | 部署 / 17dz 实执行门（`EXECUTION_ALLOW_REAL` 新前缀别名） | 与 `EXECUTION_ALLOW_REAL` 同义 |
 | `EXECUTION_EXECUTOR` | 部署 / 网关 spawn 目标切换 | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门 |
+| `DZ_EXECUTOR` | 部署 / 网关 spawn 目标切换（`EXECUTION_EXECUTOR` 新前缀别名） | 与 `EXECUTION_EXECUTOR` 同义 |
 | `EXECUTION_MOCK_STATE` | 部署 / 17dz mock 状态文件 | 缺失时服务端兜底到 `<平台根>/.runtime/mock-state.json`；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3） |
+| `DZ_MOCK_STATE` | 部署 / 17dz mock 状态文件（`EXECUTION_MOCK_STATE` 新前缀别名） | 与 `EXECUTION_MOCK_STATE` 同义 |
 | `EXECUTION_REQUIRE_PLAN` | 宿主 / 17dz runner（serve 执行须 host 注入 plan id） | 宿主直调时显式剥离；worker 路径置 `1` 即强制计划绑定 |
+| `DZ_REQUIRE_PLAN` | 宿主 / 17dz runner（`EXECUTION_REQUIRE_PLAN` 新前缀别名） | 与 `EXECUTION_REQUIRE_PLAN` 同义 |
 | `EXECUTION_PLAN_ID` | 宿主注入 / 17dz runner、gateway | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌 | 缺省 = 装配进程内生成，重启失效 |
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
 | `EXECUTION_PLAN_STATE` | 部署 / 17dz 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
+| `DZ_PLAN_STATE` | 部署 / 17dz 计划账本（`EXECUTION_PLAN_STATE` 新前缀别名） | 与 `EXECUTION_PLAN_STATE` 同义 |
 | `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
+| `DZ_AUDIT_PATH` | 部署 / 调用审计 JSONL（`EXECUTION_AUDIT_PATH` 新前缀别名） | 与 `EXECUTION_AUDIT_PATH` 同义 |
 | `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json` |
+| `DZ_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态（`EXECUTION_RATE_LIMIT_STATE` 新前缀别名） | 与 `EXECUTION_RATE_LIMIT_STATE` 同义 |
 
 ## 3. 执行层治理（17dz 读，宿主只继承 / 按用例隔离）
 
 | 变量族 | 作用 / 默认值 / 缺失行为 |
 | --- | --- |
 | `EXECUTION_RATE_LIMIT` | 限流 JSON 部分覆盖默认桶；`off` 整体旁路（仅排障）；缺省 = 17dz 默认桶 |
-| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位 |
+| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` / `DZ_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位；`DZ_PROPOSAL_STATE` 为 `EXECUTION_PROPOSAL_STATE` 新前缀别名 |
 | `EXECUTION_PROPOSAL_TTL_SECONDS` | 提案 TTL；缺省 30 分钟 |
 | `EXECUTION_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`（8 个）+ `EXECUTION_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT`（4 个） | 计划档位阈值；缺省 calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180；注意权重线第三档真名是 `BUDGET`（`EXECUTION_PLAN_BUDGET_WEIGHT`），不是 `CONFIRM`——`CONFIRM` 只用于 calls/seconds 线，设 `EXECUTION_PLAN_CONFIRM_WEIGHT` 会静默无效 |
 | `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提上限；缺省 30 / 3 / 8 / 3 |
