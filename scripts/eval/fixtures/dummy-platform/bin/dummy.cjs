@@ -574,9 +574,35 @@ async function main() {
     if (!file) { process.stderr.write('call requires --file <structured-call.json>\n'); return 2; }
     let call;
     try { call = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`CALL_REFUSE payload unreadable: ${e.message}\n`); return 3; }
-    if (!call.operation || !Array.isArray(call.args)) { process.stderr.write('CALL_REFUSE payload must be { operation: string, args: string[] }\n'); return 3; }
+    if (!call.operation) { process.stderr.write('CALL_REFUSE payload must be { operation: string, args: ... }\n'); return 3; }
+    // Accept both legacy array format and current protocol object format.
+    if (Array.isArray(call.args)) {
+      // legacy path: args is string[] (flat flag array) — no shape change.
+    } else if (typeof call.args === 'object' && call.args !== null) {
+      // structured-call protocol path: args is Record<string, unknown>.
+      // Validate against operation declaration and convert to flat flag array.
+      const op = resolveOperation(call.operation);
+      if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+      const allowed = new Set();
+      for (const f of (op.args?.flags || [])) allowed.add(f.flag);
+      for (const p of (op.args?.positional || [])) allowed.add(p.name);
+      const undeclared = Object.keys(call.args).filter((k) => !allowed.has(k));
+      if (undeclared.length > 0) {
+        process.stderr.write('CALL_REFUSE undeclared args: ' + undeclared.join(', ') + '\n');
+        return 3;
+      }
+      const flat = [];
+      for (const [key, value] of Object.entries(call.args)) {
+        if (value === false || value === null || value === undefined) continue;
+        flat.push(key);
+        if (value !== true) flat.push(String(value));
+      }
+      call.args = flat;
+    } else {
+      process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
+    }
     const op = resolveOperation(call.operation);
-    if (!op) { process.stderr.write(`CALL_REFUSE unregistered operation: ${call.operation}\n`); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     if (op.protocol === 'proposal.create') {
       audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });

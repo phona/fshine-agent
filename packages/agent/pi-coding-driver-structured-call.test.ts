@@ -79,7 +79,7 @@ vi.mock('./src/operation-labels', () => {
     loadCapabilityManifest: vi.fn(async () => ({
       version: '1.0',
       operations: [
-        { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [] },
+        { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [], argsSchema: ['--account', '--from', '--to'] },
       ],
     })),
     loadOperationArgSpecs: vi.fn(async () => new Map()),
@@ -131,6 +131,31 @@ describe('C6 structured_call 通道回归', () => {
     });
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('未在能力清单中声明');
+  });
+
+  it('structured_call 未声明参数名被 fail-closed', async () => {
+    await createPiCodingWorkerSession(baseOptions({
+      capabilityManifest: {
+        version: '1.0',
+        operations: [
+          { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [], argsSchema: ['--account', '--from', '--to'] },
+        ],
+      },
+    }));
+    const session = mockMakeSession.state.capturedAgent as { beforeToolCall: (ctx: { toolCall: { id: string; type: string; name: string; arguments: Record<string, unknown> }; args: Record<string, unknown> }) => Promise<{ block: true; reason: string } | undefined> };
+    const toolCall = {
+      id: 'call_1',
+      type: 'toolCall',
+      name: 'structured_call',
+      arguments: { operation: 'finance.query-receivables', args: { '--account': 'A1', '--undeclared-flag': 'value' } },
+    };
+    const verdict = await session.beforeToolCall({
+      toolCall,
+      args: toolCall.arguments,
+    });
+    expect(verdict?.block).toBe(true);
+    expect(verdict?.reason).toContain('参数名未声明');
+    expect(verdict?.reason).toContain('--undeclared-flag');
   });
 
   it('createPlanScopedWorkerEnv 钉住 EXECUTION_REQUIRE_PLAN=1', () => {

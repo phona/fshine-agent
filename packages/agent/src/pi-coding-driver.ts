@@ -1631,6 +1631,13 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     if (typeof argsValue !== 'object' || argsValue === null || Array.isArray(argsValue)) {
       return { block: true, reason: 'STRUCTURED_CALL DECLINED：args 必须是对象' };
     }
+    // 参数级 fail-closed：args 只许包含清单声明的参数名。
+    if (declaration.argsSchema && declaration.argsSchema.length > 0) {
+      const undeclared = Object.keys(argsValue).filter((key) => !declaration.argsSchema!.includes(key));
+      if (undeclared.length > 0) {
+        return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 参数名未声明：${undeclared.join(', ')}` };
+      }
+    }
     // effects / serve 矩阵在此只做存在性投影，不解释业务含义（执行层自有词汇）。
     // 宿主不另立枚举、不硬编码白名单——平台加同族取值不静默改写判定。
     return undefined;

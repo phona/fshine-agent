@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generatedAt": "2026-11-06T06:28:22.540Z",
+  "generatedAt": "2026-11-06T11:07:20.805Z",
   "note": "Generic-mock deterministic baseline v2 (Phase 2): protocol checks + host pure-module / scripted checks for the four former SKIP cases + committed_unverified host report. No model, no judge. A check recorded as pass must stay pass; this writer refuses to write a baseline containing a failing case.",
   "cases": {
     "smoke-query": {
@@ -176,6 +176,12 @@
         "direct call exit 0": "pass",
         "same status": "pass",
         "same data": "pass"
+      }
+    },
+    "g-structured-undeclared-arg": {
+      "checks": {
+        "undeclared arg refused exit 3": "pass",
+        "refusal reason present": "pass"
       }
     }
   }

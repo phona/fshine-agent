@@ -490,6 +490,15 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
       check('same data', sameData, JSON.stringify(dEnv?.data).slice(0, 80), JSON.stringify(sEnv?.data).slice(0, 80)),
     ] };
   } },
+  { id: 'g-structured-undeclared-arg', run: (ctx) => {
+    // Structured call object format: undeclared args must be refused (exit 3).
+    const file = writePayload(ctx, { operation: 'dummy.query', args: { '--collection': 'alpha', '--undeclared-flag': 'value' } });
+    const result = ctx.run(['call', '--file', file]);
+    return { id: 'g-structured-undeclared-arg', pass: result.code === 3, checks: [
+      check('undeclared arg refused exit 3', result.code === 3, '3', String(result.code)),
+      check('refusal reason present', result.stderr.includes('CALL_REFUSE undeclared args') || result.stderr.includes('STRUCTURED_CALL DECLINED'), 'CALL_REFUSE undeclared args / STRUCTURED_CALL DECLINED', result.stderr.slice(0, 120)),
+    ] };
+  } },
 ];
 
 interface Baseline { version: number; generatedAt: string; note: string; cases: Record<string, { checks: Record<string, string> }> }

@@ -651,6 +651,7 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
     const estSeconds = (op as { est_seconds?: unknown } | null)?.est_seconds;
     const label = (op as { label?: unknown } | null)?.label;
     const serve = (op as { serve?: unknown } | null)?.serve;
+    const args = (op as { args?: unknown } | null)?.args as { positional?: unknown; flags?: unknown } | null | undefined;
 
     if (typeof name !== 'string' || !name) continue;
     const key = name;
@@ -669,6 +670,23 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
           .map(([k]) => k)
       : [];
 
+    // 从平台 args 规格派生声明式 argsSchema：positional 名 + flag 名（含 -- 前缀）。
+    // 缺失规格（旧版平台 / 平台未给该 operation 起名）→ 空表 = 不做参数级复核（安全缺省）。
+    const argsSchema: string[] = [];
+    if (args) {
+      const positionalNames = Array.isArray(args.positional)
+        ? args.positional
+            .map((item) => (item as { name?: unknown } | null)?.name)
+            .filter((n): n is string => typeof n === 'string' && n.length > 0)
+        : [];
+      const flagNames = Array.isArray(args.flags)
+        ? args.flags
+            .map((flag) => (flag as { flag?: unknown } | null)?.flag)
+            .filter((f): f is string => typeof f === 'string' && f.length > 0)
+        : [];
+      argsSchema.push(...positionalNames, ...flagNames);
+    }
+
     declarations.push({
       operation: key,
       requiresPlan,
@@ -676,6 +694,7 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
       estSeconds: typeof estSeconds === 'number' ? estSeconds : null,
       label: typeof label === 'string' && label ? label : null,
       serveMatrix: serveKeys,
+      argsSchema: argsSchema.length > 0 ? argsSchema : undefined,
     });
   }
 
