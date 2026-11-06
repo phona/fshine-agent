@@ -4,7 +4,7 @@
  *
  * 与手工企微测试的差别只有两处是假的：
  *   - 模型（宿主与执行层 worker 都用脚本化驱动回放）
- *   - 执行器（EXECUTION_EXECUTOR=mock 的应答器，不开浏览器不触网）
+ *   - 执行器（EXECUTION_EXECUTOR=mock 的应答器，不开浏览器不触网；旧名 DZ_EXECUTOR 兼容）
  * 其余全是生产代码：企微适配器的 stream/节流/notice 语义、createMessageHandler、
  * createTaxAgentRuntime 的回合契约与出口校验、ContextTaskRunner、计划门禁，
  * 以及真 spawn 的执行层网关（plan evaluate/activate/status、累计账本、HMAC、逐次参数绑定）。
