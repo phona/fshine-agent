@@ -1539,8 +1539,9 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | C7 | spawn 路径切 gatewayExecPathForProfile（翻转点二） | 10 个 spawn 消费点全部经 profile 驱动函数、缺声明 fail-closed；修 platform-contract.ts 失真注释；GATEWAY_INVOCATION 文本识别回退（resolveGatewayText / gatewayTextPatterns）随本批退役（小裁示 3） | 主体已由 W1 C7b 达成（见下「现状对账」）；剩余 = 注释修正 + mock-commit-smoke 缺陷修复 |
 | C8 | 三道门只改执法点不改拦什么【Q2】 | 执法从「env 继承正确性」改为「调用处方显式携带 + 宿主持有状态」；任一缺失仍 fail-closed；新 FSHINE_*/EXECUTION_* 名字须同批登记 platform-leak-lint 的 FSHINE_NAME_REGISTRY | 未动 |
 | C9 | phased cutover【Q5】 | profile 级协议选择：缺省新路径；新路径不可用回落旧 bash 路径，事件 a2a_fallback 进审计，回落不许静默；退役判据见下（口径切开：17dz 旧路径 e2e 标为 fallback 覆盖，其回落事件不计入退役计数） | 未动 |
-| C10 | L4 闭环 | 第二非财税写域夹具（命名见小裁示 1）+ 端到端驱动（generic-mock 用例 + 单仓通用 e2e）+ fshine 生产 diff=0 + §17 latent 三类分流守卫 | 未动 |
-| C11 | 关账核对（drafts 待批收缩后） | 原方案「退役 Run17dzTaskArgs + 委派工具协议面中性化」已被 W1 提前完成（见现状对账）；本 commit 只做关账核对——docs-reality.test.ts:125-131 承诺指向的落点确认 + §30 之外不新增改动（小裁示 4：不硬改名） | W1 已完成主体；关账核对未动 |
+| C10 | L4 闭环 | 第二非财税写域夹具（命名见小裁示 1）+ 端到端驱动（generic-mock 用例 + 单仓通用 e2e）+ fshine 生产 diff=0 + §17 latent 三类分流守卫 | 已完成：ballot-platform 6 操作进 dummy.cjs + generic-mock.ts 新增 g-ballot-second-domain 用例 + baseline 22 例全绿 + generic-mock.test.ts 断言更新 + D-031 三类分流登记 |
+| C11 | 关账核对（drafts 待批收缩后） | 原方案「退役 Run17dzTaskArgs + 委派工具协议面中性化」已被 W1 提前完成（见现状对账）；本 commit 只做关账核对——docs-reality.test.ts:125-131 承诺指向的落点确认 + §30 之外不新增改动（小裁示 4：不硬改名） | 已完成：docs-reality 11 测试全绿 + Run17dzTaskArgs 全仓绝迹确认 + DelegationBlock 协议中性确认 |
+| C12 | 关账 | 本节（§30）更新 + debt-ledger D-076/D-031 三类分流留档 + 判断项（C9 fallback、C8 显式 env、mock-commit-smoke gateway 修复）收口 | 本 commit |
 
 ### 17dz-platform 侧改动列表（P1–P6，owner 2026-11-06 改动列表评审；与 fshine 侧同批，走 PR 给 owner）
 

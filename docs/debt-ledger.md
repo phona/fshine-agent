@@ -469,16 +469,23 @@
 ### D-031 · §17 写路径卫生七项（生产写开放前必修）
 
 - **位置**：`fshine-agent/docs/rule-landing.md:326`（登记处）。本次逐条核实 17dz 侧现状：
+- **§17 latent 三类分流（C10 收口）**：
 
-  | 项 | 位置（17dz） | 本次核实 |
-  |---|---|---|
-  | S2 | `src/voucher/scripts/fill.js:45,51`（`discoverToken(context, page, contracts[0].accountSet)`、`const firstDate = contracts[0].date`） | **仍在**：批量契约只用 `contracts[0]`，其余静默丢 → 凭证落错账套 |
-  | S3 | `src/voucher/scripts/gen-from-journal.js`（账户下拉子串 + `.first()`） | 登记在案（本次未逐行复勘，Wave 3 开工时复核） |
-  | S4 | `src/voucher/scripts/gen-from-journal.js`（`--direction`/`--date-mode` 无枚举白名单） | 登记在案（同上） |
-  | S5③ | `src/voucher/scripts/fill.js`（`--start-no` NaN 静默丢起始号） | 登记在案（3707bac 只修了 `parseCountFlag` 一族，`--start-no` 是 `parseInt` 另一处） |
-  | S7 | `src/voucher/scripts/upload-all.js`（未找到凭证静默跳过仍 exit 0） | 登记在案（文件存在，`git ls-files` 确认） |
-  | S9 | `src/voucher/scripts/`（`fuzzyFind` 子串 + `stripCity` 静默采纳简称，写路径） | 登记在案 |
-  | S10 | `src/voucher/scripts/parse-tianren-bills.py`（creditRules 未命中静默回落 1122） | 登记在案 |
+  | 类别 | 包含项 | 守卫机制 | fshine 侧现状 |
+  |---|---|---|---|
+  | 声明可守 | S4（枚举白名单）、S5③（NaN 校验） | 能力清单 args schema + host 侧机械校验 | structured_call 的 validateStructuredCall 已覆盖 args shape；枚举白名单需执行层在 CapabilityManifest 声明合法值集，宿主可复核 |
+  | 读回计数可守 | S2（contracts[0] 静默丢）、S7（upload-all 静默跳过） | proposal commit 读回 delta vs required | proposal-commit 的 readBack {before, after, delta, required} + committed_unverified 分类已覆盖；宿主侧有守卫，执行层仍需修正根因 |
+  | 执行层内部不可守 | S3（`.first()` 多候选）、S9（fuzzyFind+stripCity）、S10（creditRules 静默回落） | 无（执行层内部逻辑，宿主无法观测中间形态） | 登记归属 17dz + Wave 3 限期；不宣称七项整体闭环 |
+
+  | 项 | 位置（17dz） | 本次核实 | 分流类别 |
+  |---|---|---|---|
+  | S2 | `src/voucher/scripts/fill.js:45,51`（`discoverToken(context, page, contracts[0].accountSet)`、`const firstDate = contracts[0].date`） | **仍在**：批量契约只用 `contracts[0]`，其余静默丢 → 凭证落错账套 | 读回计数可守 |
+  | S3 | `src/voucher/scripts/gen-from-journal.js`（账户下拉子串 + `.first()`） | 登记在案（本次未逐行复勘，Wave 3 开工时复核） | 执行层内部不可守 |
+  | S4 | `src/voucher/scripts/gen-from-journal.js`（`--direction`/`--date-mode` 无枚举白名单） | 登记在案（同上） | 声明可守 |
+  | S5③ | `src/voucher/scripts/fill.js`（`--start-no` NaN 静默丢起始号） | 登记在案（3707bac 只修了 `parseCountFlag` 一族，`--start-no` 是 `parseInt` 另一处） | 声明可守 |
+  | S7 | `src/voucher/scripts/upload-all.js`（未找到凭证静默跳过仍 exit 0） | 登记在案（文件存在，`git ls-files` 确认） | 读回计数可守 |
+  | S9 | `src/voucher/scripts/`（`fuzzyFind` 子串 + `stripCity` 静默采纳简称，写路径） | 登记在案 | 执行层内部不可守 |
+  | S10 | `src/voucher/scripts/parse-tianren-bills.py`（creditRules 未命中静默回落 1122） | 登记在案 | 执行层内部不可守 |
 
 - **根因**：读路径 live 批（3707bac / 1e8f2ec）已把"静默回落/答非所问"扫清，写路径因为是 latent（生产写关闭）没扫。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套）。
 - **律法归属**：L4。
