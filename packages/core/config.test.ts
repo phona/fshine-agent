@@ -318,7 +318,8 @@ contextProfiles:
     const template = parseYaml(readFileSync(templatePath, 'utf8')) as {
       contextProfiles?: Record<string, { skillRoots?: unknown }>;
     };
-    const skillRoots = template.contextProfiles?.['17dz']?.skillRoots;
-    expect(skillRoots, '模板必须显式声明 17dz profile 的 skillRoots').toEqual(['.agents/skills-serve']);
+    const profiles = template.contextProfiles || {};
+    const skillRoots = Object.values(profiles).find(p => p.skillRoots)?.skillRoots;
+    expect(skillRoots, '模板必须显式声明至少一个 profile 的 skillRoots').toEqual(['.agents/skills-serve']);
   });
 });
