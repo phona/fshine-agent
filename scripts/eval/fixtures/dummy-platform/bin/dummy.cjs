@@ -84,8 +84,53 @@ const OPERATIONS = [
       { flag: '--proposal-id', required: true, style: 'name', desc: 'proposal id returned by proposal.create' },
     ] },
     serve: { query: false, prepare: false, commit: true }, protocol: 'proposal.commit' },
+  // ── ballot-platform (second non-finance write domain, C10 L4 closure) ──────────
+  { name: 'ballot.query', domain: 'ballot', command: 'query', access: 'read',
+    script: 'src/ballot/scripts/query.js', executor: 'ballot-script', est_seconds: 10, weight: 2,
+    args: { positional: [], flags: [
+      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name or keyword' },
+      { flag: '--round', required: false, style: 'code', desc: 'round code, e.g. R1' },
+    ] },
+    serve: { query: true, prepare: true, commit: true }, protocol: null },
+  { name: 'ballot.scratch', domain: 'ballot', command: 'scratch', access: 'scratch',
+    script: 'src/ballot/scripts/scratch.js', executor: 'ballot-script', est_seconds: 5, weight: 1,
+    args: { positional: [], flags: [
+      { flag: '--input', required: true, style: 'name', desc: 'input text file path (local computation only)' },
+      { flag: '--output', required: false, style: 'name', desc: 'output file path; defaults to <input>.out' },
+    ] },
+    serve: { query: true, prepare: true, commit: false }, protocol: null },
+  { name: 'ballot.prepare', domain: 'ballot', command: 'prepare', access: 'write', writeFlag: '--apply',
+    script: 'src/ballot/scripts/prepare.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
+    args: { positional: [], flags: [
+      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
+      { flag: '--round', required: false, style: 'code', desc: 'round code' },
+      { flag: '--count', required: false, style: 'code', desc: 'ballot count to prepare' },
+      { flag: '--apply', required: false, style: 'code', desc: 'write flag: present means this call WOULD write, prepare must refuse it' },
+    ] },
+    serve: { query: false, prepare: true, commit: false }, protocol: null },
+  { name: 'ballot.commit', domain: 'ballot', command: 'commit', access: 'write',
+    script: 'src/ballot/scripts/commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
+    args: { positional: [], flags: [
+      { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
+      { flag: '--round', required: false, style: 'code', desc: 'round code' },
+      { flag: '--count', required: false, style: 'code', desc: 'ballot count to add' },
+    ] },
+    serve: { query: false, prepare: false, commit: true }, protocol: null },
+  { name: 'ballot.proposal', domain: 'ballot', command: 'proposal', access: 'write',
+    script: 'src/ballot/scripts/proposal.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
+    args: { positional: [{ name: 'payload', required: true, desc: 'proposal payload file (opaque to the host)' }], flags: [
+      { flag: '--batch', required: false, style: 'code', desc: 'create multiple proposals (not used in v1, accepted for shape compatibility)' },
+    ] },
+    serve: { query: false, prepare: true, commit: false }, protocol: 'proposal.create' },
+  { name: 'ballot.proposal-commit', domain: 'ballot', command: 'proposal-commit', access: 'write',
+    script: 'src/ballot/scripts/proposal-commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
+    args: { positional: [], flags: [
+      { flag: '--proposal-id', required: true, style: 'name', desc: 'proposal id returned by proposal.create' },
+    ] },
+    serve: { query: false, prepare: false, commit: true }, protocol: 'proposal.commit' },
 ];
-const LABELS = { 'dummy.query': 'query records', 'dummy.scratch': 'local computation', 'dummy.prepare': 'prepare records', 'dummy.commit': 'commit records', 'dummy.proposal': 'create proposal', 'dummy.proposal-commit': 'commit proposal' };
+const LABELS = { 'dummy.query': 'query records', 'dummy.scratch': 'local computation', 'dummy.prepare': 'prepare records', 'dummy.commit': 'commit records', 'dummy.proposal': 'create proposal', 'dummy.proposal-commit': 'commit proposal',
+  'ballot.query': 'query ballots', 'ballot.scratch': 'ballot scratch', 'ballot.prepare': 'prepare ballots', 'ballot.commit': 'commit ballots', 'ballot.proposal': 'create ballot proposal', 'ballot.proposal-commit': 'commit ballot proposal' };
 const ACCESS_SEMANTICS = Object.freeze({
   read: Object.freeze({ plan: true, confirm: false, mock: true }),
   scratch: Object.freeze({ plan: false, confirm: false, mock: false }),
@@ -188,7 +233,8 @@ function resolveOperation(ref) {
   const byName = OPERATIONS.find((o) => o.name === ref);
   if (byName) return byName;
   const base = path.basename(ref).replace(/\.js$/i, '').replace(/\.py$/i, '');
-  const map = { query: 'dummy.query', scratch: 'dummy.scratch', prepare: 'dummy.prepare', commit: 'dummy.commit', proposal: 'dummy.proposal', 'proposal-commit': 'dummy.proposal-commit' };
+  const map = { query: 'dummy.query', scratch: 'dummy.scratch', prepare: 'dummy.prepare', commit: 'dummy.commit', proposal: 'dummy.proposal', 'proposal-commit': 'dummy.proposal-commit',
+    'ballot-query': 'ballot.query', 'ballot-scratch': 'ballot.scratch', 'ballot-prepare': 'ballot.prepare', 'ballot-commit': 'ballot.commit', 'ballot-proposal': 'ballot.proposal', 'ballot-proposal-commit': 'ballot.proposal-commit' };
   const name = map[base];
   return name ? OPERATIONS.find((o) => o.name === name) ?? null : null;
 }
@@ -214,17 +260,18 @@ function findCollection(state, keyword) {
 function doQuery(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.collection || typeof flags.collection !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection')); return 1; }
-  const found = findCollection(state, flags.collection);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${flags.collection}"`)); return 0; }
-  if (found.none) { emit(opName, 'not_found', { query: flags.collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${flags.collection}"`)); return 0; }
+  if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
+  const collection = flags.collection || flags.topic;
+  const found = findCollection(state, collection);
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return 0; }
+  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
   const col = found.exact;
-  if (flags.window && !col.windows.includes(flags.window)) {
-    emit(opName, 'not_found', { query: flags.collection, window: flags.window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${flags.window} has no data for collection ${found.name}`));
+  const window = flags.window || flags.round;
+  if (window && !col.windows.includes(window)) {
+    emit(opName, 'not_found', { query: collection, window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${window} has no data for collection ${found.name}`));
     return 0;
   }
-  // Zero is a real answer: empty-one returns completed with count 0, never not_found.
-  emit(opName, 'completed', { collection: found.name, window: flags.window ?? null, items: col.items, count: col.items.length }, null);
+  emit(opName, 'completed', { collection: found.name, window: window ?? null, items: col.items, count: col.items.length }, null);
   return 0;
 }
 function doScratch(opName, args) {
@@ -241,26 +288,28 @@ function doScratch(opName, args) {
 function doPrepare(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection')); return 1; }
-  if (!Object.prototype.hasOwnProperty.call(state.collections, flags.collection)) { emit(opName, 'not_found', { query: flags.collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${flags.collection}"`)); return 0; }
-  const col = state.collections[flags.collection];
-  if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${flags.collection} is locked`)); return 2; }
+  const collection = flags.collection || flags.topic;
+  if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
+  if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
+  const col = state.collections[collection];
+  if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
   const count = flags.count !== undefined ? Number(flags.count) : 1;
-  emit(opName, 'completed', { collection: flags.collection, window: flags.window ?? null, preparedCount: Number.isFinite(count) ? count : 1, dryRun: true }, null);
+  emit(opName, 'completed', { collection, window: flags.window || flags.round || null, preparedCount: Number.isFinite(count) ? count : 1, dryRun: true }, null);
   return 0;
 }
 function doCommit(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection')); return 1; }
-  if (!Object.prototype.hasOwnProperty.call(state.collections, flags.collection)) { emit(opName, 'not_found', { query: flags.collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${flags.collection}"`)); return 0; }
-  const col = state.collections[flags.collection];
-  if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${flags.collection} is locked`)); return 2; }
+  const collection = flags.collection || flags.topic;
+  if (!collection) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
+  if (!Object.prototype.hasOwnProperty.call(state.collections, collection)) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
+  const col = state.collections[collection];
+  if (col.locked) { emit(opName, 'failed', null, errObj('COLLECTION_LOCKED', `Collection ${collection} is locked`)); return 2; }
   const count = flags.count !== undefined ? Number(flags.count) : 1;
-  const window = flags.window ?? 'W1';
+  const window = flags.window || flags.round || 'W1';
   col.records[window] = (col.records[window] ?? 0) + (Number.isFinite(count) ? count : 1);
   saveState(state);
-  emit(opName, 'completed', { collection: flags.collection, window, added: count, total: col.records[window] }, null);
+  emit(opName, 'completed', { collection, window, added: count, total: col.records[window] }, null);
   return 0;
 }
 function b64url(obj) { return Buffer.from(JSON.stringify(obj)).toString('base64url'); }
@@ -478,7 +527,7 @@ async function planActivate(argv) {
 }
 function usage() {
   return [
-    'Usage: dummy [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local> [args...]',
+    'Usage: dummy [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
     'Examples:',
     '  dummy plan evaluate --task-id task-1 --stdin',
     '  dummy plan current --task-id task-1',
@@ -489,6 +538,7 @@ function usage() {
     '  dummy query dummy.query --collection alpha --window W1',
     '  dummy prepare dummy.proposal <payload-file>  # proposal.create, by operation name',
     '  dummy commit dummy.proposal-commit --proposal-id prop_1234',
+    '  dummy call --file <structured-call.json>  # structured call protocol',
   ].join('\n') + '\n';
 }
 async function main() {
@@ -517,6 +567,89 @@ async function main() {
     const { flags } = parseFlags(argv.slice(2));
     if (!flags['proposal-id']) { process.stderr.write('proposal status requires --proposal-id\n'); return 2; }
     return doProposalStatus(flags['proposal-id']);
+  }
+  if (cmd === 'call') {
+    const { flags } = parseFlags(argv.slice(1));
+    const file = flags['file'];
+    if (!file) { process.stderr.write('call requires --file <structured-call.json>\n'); return 2; }
+    let call;
+    try { call = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { process.stderr.write(`CALL_REFUSE payload unreadable: ${e.message}\n`); return 3; }
+    if (!call.operation) { process.stderr.write('CALL_REFUSE payload must be { operation: string, args: ... }\n'); return 3; }
+    // Accept both legacy array format and current protocol object format.
+    if (Array.isArray(call.args)) {
+      // legacy path: args is string[] (flat flag array) — no shape change.
+    } else if (typeof call.args === 'object' && call.args !== null) {
+      // structured-call protocol path: args is Record<string, unknown>.
+      // Validate against operation declaration and convert to flat flag array.
+      const op = resolveOperation(call.operation);
+      if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+      const allowed = new Set();
+      for (const f of (op.args?.flags || [])) allowed.add(f.flag);
+      for (const p of (op.args?.positional || [])) allowed.add(p.name);
+      const undeclared = Object.keys(call.args).filter((k) => !allowed.has(k));
+      if (undeclared.length > 0) {
+        process.stderr.write('CALL_REFUSE undeclared args: ' + undeclared.join(', ') + '\n');
+        return 3;
+      }
+      const flat = [];
+      for (const [key, value] of Object.entries(call.args)) {
+        if (value === false || value === null || value === undefined) continue;
+        flat.push(key);
+        if (value !== true) flat.push(String(value));
+      }
+      call.args = flat;
+    } else {
+      process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
+    }
+    const op = resolveOperation(call.operation);
+    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    if (op.protocol === 'proposal.create') {
+      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      return doProposalCreate(op.name, call.args);
+    }
+    if (op.protocol === 'proposal.commit') {
+      const { flags: innerFlags } = parseFlags(call.args);
+      if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
+      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      return doProposalCommit(op.name, call.args);
+    }
+    // Determine mode from operation access.
+    const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
+    const verdict = decide(accessMode, op, call.args);
+    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: verdict.reason }); return 3; }
+    const planId = env2('DUMMY_PLAN_ID', 'EXECUTION_PLAN_ID', '');
+    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
+    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
+    let code;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') code = doQuery(op.name, call.args);
+    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
+    else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
+      const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
+      const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
+      if (secret) {
+        let ok = false;
+        try {
+          const [body, sig] = String(token).split('.');
+          const expect = crypto.createHmac('sha256', secret).update(body).digest();
+          const got = Buffer.from(sig, 'base64url');
+          const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+          ok = expect.length === got.length && crypto.timingSafeEqual(expect, got) && p.script === op.name && new Date(p.expiresAt).getTime() > Date.now();
+        } catch { ok = false; }
+        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'commit-token' }); return 3; }
+      }
+      code = doCommit(op.name, call.args);
+    } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
+    audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
+      try {
+        const plans = loadPlans();
+        const plan = plans.plans[planId];
+        if (plan) { plan.actual.calls += 1; plan.actual.seconds += op.est_seconds; savePlans(plans); }
+      } catch { /* accounting must not turn a success into a failure */ }
+    }
+    return code;
   }
   if (['query', 'prepare', 'commit', 'local'].includes(cmd)) {
     const target = argv[1];
@@ -552,10 +685,10 @@ async function main() {
     const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
-    if (op.name === 'dummy.query') code = doQuery(op.name, rest);
-    else if (op.name === 'dummy.scratch') code = doScratch(op.name, rest);
-    else if (op.name === 'dummy.prepare') code = doPrepare(op.name, rest);
-    else if (op.name === 'dummy.commit') {
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') code = doQuery(op.name, rest);
+    else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, rest);
+    else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, rest);
+    else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
       // mirroring gateway commit-token binding (operation name preferred).
       const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');

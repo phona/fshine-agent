@@ -204,21 +204,20 @@ describe('④ 委派块当前文本形状（翻转点：C5）', () => {
     expect(A2A_PROTOCOL_VERSION).toBe('1.0');
   });
 
-  it('四行组装在位：【委派】/范围/工作区/协议版本', () => {
-    expect(contextSrc).toContain("'【委派】'");
-    expect(contextSrc).toContain('`范围：${guardedScope.text}`');
-    expect(contextSrc).toContain('`工作区：${scratchDir}`');
-    expect(contextSrc).toContain('`协议版本：${A2A_PROTOCOL_VERSION}`');
-    // request 走正文合并（不是块内字段）。
-    expect(contextSrc).toContain('guardedRequest.text');
+  it('委派块五字段在场（C5 结构化载荷）', () => {
+    const blockStart = contextSrc.indexOf('const delegationBlock:');
+    expect(blockStart).toBeGreaterThan(-1);
+    const blockSegment = contextSrc.slice(blockStart, blockStart + 500);
+    expect(blockSegment).toContain('request: guardedScope.text');
+    expect(blockSegment).toContain('entities,');
+    expect(blockSegment).toContain('workspace: scratchDir,');
+    expect(blockSegment).toContain('inputs: frozenInputs.map(f => f.path),');
+    expect(blockSegment).toContain('protocolVersion: A2A_PROTOCOL_VERSION,');
   });
 
-  it('C5 翻转点：entities/inputs 尚未进委派块载荷', () => {
-    const anchor = contextSrc.indexOf('const workerRequest = args.turnDeclaration && guardedScope');
-    expect(anchor).toBeGreaterThan(-1);
-    const blockSegment = contextSrc.slice(anchor, anchor + 600);
-    expect(blockSegment).not.toContain('entities');
-    expect(blockSegment).not.toContain('inputs');
+  it('workerRequest 走结构化块合并', () => {
+    expect(contextSrc).toContain('JSON.stringify(delegationBlock)');
+    expect(contextSrc).toContain('guardedRequest.text');
   });
 
   it('契约侧 DelegationBlock 五字段已定义（C5 落地对象的形状基准）', () => {
@@ -240,13 +239,14 @@ describe('④ 委派块当前文本形状（翻转点：C5）', () => {
 
 describe('⑤ 委派失败五路链与话术单一来源', () => {
   const contextSrc = srcOf(SRC_DIR, 'context.ts');
+  const failureSrc = srcOf(SRC_DIR, 'delegation-failure.ts');
 
-  it('五路链表达式在位，判定顺序 = 取消 > 超时 > model_transient > auth > executor_error', () => {
-    const cancelled = contextSrc.indexOf("runSignal?.aborted ? 'cancelled'");
-    const timeout = contextSrc.indexOf("Date.now() >= deadline ? 'timeout'");
-    const transient = contextSrc.indexOf("result?.modelError ? 'model_transient'");
-    const auth = contextSrc.indexOf("isPlatformAuthError(error) ? 'auth'");
-    const fallback = contextSrc.indexOf(": 'executor_error'");
+  it('五路链表达式在位（C3 抽纯函数后位于 delegation-failure.ts），判定顺序 = 取消 > 超时 > model_transient > auth > executor_error', () => {
+    const cancelled = failureSrc.indexOf("if (aborted) return 'cancelled'");
+    const timeout = failureSrc.indexOf("if (deadlinePassed) return 'timeout'");
+    const transient = failureSrc.indexOf("if (modelError) return 'model_transient'");
+    const auth = failureSrc.indexOf("if (isPlatformAuthError(error)) return 'auth'");
+    const fallback = failureSrc.indexOf("return 'executor_error'");
     expect(cancelled).toBeGreaterThan(-1);
     expect(timeout).toBeGreaterThan(-1);
     expect(transient).toBeGreaterThan(-1);
@@ -260,11 +260,11 @@ describe('⑤ 委派失败五路链与话术单一来源', () => {
   });
 
   it('/平台登录已过期/ 正则兜底在位且带「平台挂码后即删」的过渡标记', () => {
-    expect(contextSrc).toContain('/平台登录已过期/.test(');
-    expect(contextSrc).toContain('平台侧该消息一带码');
+    expect(failureSrc).toContain('/平台登录已过期/.test(');
+    expect(failureSrc).toContain('平台侧该消息一带码');
     // 兜底只可能把该形态补判为 auth，不改其他四路。
-    const regexIdx = contextSrc.indexOf('/平台登录已过期/.test(');
-    const executorIdx = contextSrc.indexOf(": 'executor_error'");
+    const regexIdx = failureSrc.indexOf('/平台登录已过期/.test(');
+    const executorIdx = failureSrc.indexOf("return 'executor_error'");
     expect(regexIdx).toBeGreaterThan(-1);
     expect(regexIdx).toBeLessThan(executorIdx);
   });
@@ -279,12 +279,15 @@ describe('⑤ 委派失败五路链与话术单一来源', () => {
     expect(isPlatformAuthError(null)).toBe(false);
   });
 
-  it('话术选择分支在位：auth 挂码抛出，其余四路各走各的话术', () => {
-    expect(contextSrc).toContain("toolUserErrorFor('DELEGATION_AUTH_FAILURE')");
-    expect(contextSrc).toContain('DELEGATION_CANCELLED');
-    expect(contextSrc).toContain('DELEGATION_TIMEOUT_FAILURE');
-    expect(contextSrc).toContain('DELEGATION_MODEL_TRANSIENT_FAILURE');
-    expect(contextSrc).toContain('DELEGATION_EXECUTOR_FAILURE');
+  it('话术选择分支在位：C4 收口后统一在 failure-delivery.ts，context.ts 接线 deliverFailure', () => {
+    const failureSrc = srcOf(SRC_DIR, 'failure-delivery.ts');
+    expect(failureSrc).toContain("toolUserErrorFor('DELEGATION_AUTH_FAILURE')");
+    expect(failureSrc).toContain('DELEGATION_CANCELLED');
+    expect(failureSrc).toContain('DELEGATION_TIMEOUT_FAILURE');
+    expect(failureSrc).toContain('DELEGATION_MODEL_TRANSIENT_FAILURE');
+    expect(failureSrc).toContain('DELEGATION_EXECUTOR_FAILURE');
+    // context.ts 不再内联五路，改走 deliverFailure。
+    expect(contextSrc).toContain('deliverFailure');
   });
 
   it('五条话术逐字取自 error-codes 表（唯一来源，C3/C4 不得新建第二份）', () => {
@@ -335,30 +338,32 @@ describe('⑥ spawn 面盘点（翻转点：C7 收尾——W1 C7b 已达成 fail
     expect(contractSrc).not.toContain('GATEWAY_INVOCATION');
   });
 
-  it('spawn 消费点盘点：ForProfile 3 处 + gatewayExecPath 7 处 = 10，全部 fail-closed', () => {
-    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处。
+  it('spawn 消费点盘点：ForProfile 5 处 + gatewayExecPath 7 处 = 12，全部 fail-closed', () => {
+    // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处 + 结构化调用一处 + 冒烟脚本一处。
     for (const file of [
       join(SRC_DIR, 'context.ts'),
       join(SRC_DIR, 'plan-runtime.ts'),
       join(APPS_DIR, 'server', 'proposal-commit.ts'),
+      join(SRC_DIR, 'pi-coding-driver.ts'),
+      join(SCRIPTS_DIR, 'mock-commit-smoke.ts'),
     ]) {
       expect(srcOf(file)).toContain('gatewayExecPathForProfile(');
     }
-    // gatewayExecPath（内部同样 fail-closed）：operation-labels 六处 + 冒烟脚本一处。
+    // gatewayExecPath（内部同样 fail-closed）：operation-labels 七处 + 冒烟脚本零处。
     // 'gatewayExecPath(' 作为子串不匹配 'gatewayExecPathForProfile('（其后是 F 不是括号）。
-    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(6);
-    expect(srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts').split('gatewayExecPath(').length - 1).toBe(1);
-    // operation-labels 六处的前置是显式降级（未声明 gateway → 空表），不是静默默认。
+    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(7);
+    expect(srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts').split('gatewayExecPath(').length - 1).toBe(0);
+    // operation-labels 七处的前置是显式降级（未声明 gateway → 空表），不是静默默认。
     const labelsSrc = srcOf(SRC_DIR, 'operation-labels.ts');
     expect(labelsSrc).toContain('validateGatewayInvocation(gateway)');
     expect(labelsSrc).toContain('绝不回退遗留网关名');
   });
 
-  it('mock-commit-smoke.ts:57 单参数调用是既存缺陷（C7 收尾修复，本组钉现状不钉缺陷）', () => {
-    // 运行时报 gatewayNotDeclaredError（本会话 node --import tsx 实测）；根 tsconfig
-    // include 不含 scripts/ 故 typecheck 不拦。修复 = 补 gateway 入参或改 profile 驱动，
-    // 修完本断言的字面形态要随之更新（允许的翻转：从缺陷态到修复态）。
+  it('mock-commit-smoke.ts 已修复（C7 收尾：gatewayExecPathForProfile + gateway 入参）', () => {
+    // 修复：单参数调用 → profile 驱动 + gateway 入参。修完本断言的字面形态随之更新。
     const smokeSrc = srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts');
-    expect(smokeSrc).toContain('gatewayExecPath(platformRoot)');
+    expect(smokeSrc).toContain('gatewayExecPathForProfile(');
+    expect(smokeSrc).toContain('gateway');
+    expect(smokeSrc).not.toContain('gatewayExecPath(platformRoot)');
   });
 });

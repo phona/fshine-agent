@@ -147,13 +147,17 @@ describe('17dz Pi subagent adapter', () => {
     }, { trusted: trusted() });
 
     const firstUser = String((observed?.messages[0] as unknown as { content?: string })?.content ?? '');
-    expect(firstUser).toContain('【委派】');
-    expect(firstUser).toContain('（非本任务工作区路径，已由宿主剥离）');
+    // C5 后委派块走结构化 JSON 载荷，不再拼四行文本。
+    const [blockJson, bodyText] = firstUser.split('\n\n');
+    expect(blockJson).toContain('"request"');
+    expect(blockJson).toContain('"workspace"');
+    expect(blockJson).toContain('"protocolVersion":"1.0"');
+    expect(bodyText).toContain('（非本任务工作区路径，已由宿主剥离）');
     // 两份拷贝都不再含外来任务工作区路径（含其绝对前缀形态）
     expect(firstUser).not.toContain('task_d42fffce');
     expect(firstUser).not.toContain('task_11111111');
     // 正向对照：本任务自己的工作区行原样保留（worker 写得动的位置）
-    expect(firstUser).toMatch(/工作区：tmp\/task_[0-9a-f-]+/u);
+    expect(blockJson).toMatch(/"workspace":"tmp\/task_[0-9a-f-]+"/u);
   });
 
   it('账套存在性任务要求只用专用目录搜索 operation', async () => {
@@ -194,9 +198,12 @@ describe('17dz Pi subagent adapter', () => {
 
     // 委派块走 user message（A2A ①：载荷走消息通道，不进身份通道）——提示词不再含申报原文
     expect(prompt).not.toContain('宿主已核验本轮请求');
-    const firstUser = observed?.messages?.[0];
-    expect(String((firstUser as unknown as { content?: string })?.content)).toContain('【委派】');
-    expect(String((firstUser as unknown as { content?: string })?.content)).toContain('查幻辰财税账套里猫一杯的应收账款');
+    const firstUser = String((observed?.messages?.[0] as unknown as { content?: string })?.content);
+    // C5 后委派块走结构化 JSON 载荷 + 正文合并。
+    const [blockJson, bodyText] = firstUser.split('\n\n');
+    expect(blockJson).toContain('"request":"查幻辰财税账套里猫一杯的应收账款"');
+    expect(blockJson).toContain('"protocolVersion":"1.0"');
+    expect(bodyText).toContain('查幻辰财税账套里猫一杯的应收账款');
     // 领域无关的实体来源原样透传到 worker 驱动（宿主不懂业务，只做字符串包含）
     expect(observed?.entitySources).toEqual({
       currentMessage: '查幻辰财税账套里猫一杯的应收账款',

@@ -212,8 +212,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const gateSecret = newGateSecret();
   const planActivationSecret = env['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
 
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
-  if (isPlatformMock()) {
+  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, env) : null;
+  if (isPlatformMock(env)) {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 

@@ -361,6 +361,9 @@ const LITERAL_IF_PROTOCOL_TOKENS: ReadonlySet<string> = new Set([
   'queued', 'running', 'cancelling', 'waiting_input', 'waiting_confirmation', 'interrupted',
   // 宿主内部工具名（step-text.ts 静默帧名单）
   'search_history', 'get_messages', 'route_current_turn',
+  // 协议失败分类（FailureClass / DelegationFailureClass，contracts + failure-delivery 判定用）
+  'NEEDS_INPUT', 'CAPABILITY_UNAVAILABLE', 'PLATFORM_ERROR', 'RESOURCE_EXHAUSTED', 'HARD_REJECTED',
+  'cancelled', 'model_transient', 'executor_error',
   // 渠道来源判别符（可信渠道适配器添加，从不复制模型输出）
   'wecom_user',
   // typeof 守卫与 contextMode 枚举（结构判定，非输入值）

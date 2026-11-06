@@ -105,7 +105,7 @@ describe('docs-reality：文档主张与代码现实对账', () => {
   });
 
   it('worker 工具面双写断言：WORKER_TOOLS 是唯一来源', () => {
-    expect([...WORKER_TOOLS]).toEqual(['read', 'ls', 'bash', 'write', 'edit']);
+    expect([...WORKER_TOOLS]).toEqual(['read', 'ls', 'bash', 'write', 'edit', 'structured_call']);
     const src = read('packages/agent/src/pi-coding-driver.ts');
     // 会话创建必须消费常量，不许另写字面量（第二份来源 = 下一次漂移的起点）
     expect(src.includes('tools: [...WORKER_TOOLS]'), 'pi-coding-driver 的 tools 未消费 WORKER_TOOLS——双写断言被绕过').toBe(true);
@@ -149,6 +149,15 @@ describe('docs-reality：文档主张与代码现实对账', () => {
       // （本波验收 grep 判据），守卫自身的禁令串也不例外——语义不变，grep 可复核。
       expect(text, `${rel} 重新出现宿主侧跨仓校验脚本名——跨仓机器细节入住通用策略`).not.toContain(`check-budget-` + `thresholds`);
     }
+  });
+
+  it('C9（fallback 退役）：packages/agent 内 a2a-cutover 与 fallback 分支在册', () => {
+    // 退役判据要求 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言）。
+    const driver = read('packages/agent/src/pi-coding-driver.ts');
+    expect(driver.includes("path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl')"), 'structured_call fallback 日志路径失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('fallback: true'), 'structured_call fallback 事件标识失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('protocolVersion'), 'structured_call fallback 三元组之 protocolVersion 失踪——C9 在册断言').toBe(true);
+    expect(driver.includes('corpusVersion'), 'structured_call fallback 三元组之 corpusVersion 失踪——C9 在册断言').toBe(true);
   });
 });
 

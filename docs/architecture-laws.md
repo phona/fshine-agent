@@ -97,13 +97,17 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **L4 整体保持开放**：闭环判据的 §17 写路径 latent 七项（D-031，17dz 侧执行器的数据正确性债）仍未闭环——编排层侧不再有违例，不等于写路径可以开放。
 
-**闭环判据**：走查通过 + 写 e2e 改写全绿 + **§17 写路径 latent 七项在新结构里有守卫**——`rule-landing.md:326` 列的 S2（fill.js 批量契约只用 `contracts[0].accountSet`→凭证落错账套）、S3（gen-from-journal 账户下拉子串 + `.first()` 多候选不歧义）、S4（`--direction`/`--date-mode` 无枚举白名单，空转报"无符合条件" + exit 0）、S5③（fill `--start-no` NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串 + stripCity 静默采纳简称）、S10（parse-tianren-bills creditRules 未命中静默回落 1122）。
+**闭环判据**：走查通过 + 写 e2e 改写全绿 + **§17 写路径 latent 七项中，声明可守与读回计数可守两类已有守卫；执行层内部不可守三类（S3/S9/S10）不宣称整体闭环**——`rule-landing.md:326` 列的 S2（fill.js 批量契约只用 `contracts[0].accountSet`→凭证落错账套）、S3（gen-from-journal 账户下拉子串 + `.first()` 多候选不歧义）、S4（`--direction`/`--date-mode` 无枚举白名单，空转报"无符合条件" + exit 0）、S5③（fill `--start-no` NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串 + stripCity 静默采纳简称）、S10（parse-tianren-bills creditRules 未命中静默回落 1122）。
 
 ---
 
 ### L5 失败二分流 + 有界
 
 **陈述**：失败只有两类——**模型可修**（结构化错误，带正确形态自愈）或**用户对齐**（needs，缺什么问什么）。无第三类。全回路有界：任何重试 / 循环 / 空转都有上限。
+
+协议侧五类失败（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED）与二分法的映射：
+- **用户对齐**：NEEDS_INPUT（用户补充信息/确认）、CAPABILITY_UNAVAILABLE（能力边界，用户需调整请求）、RESOURCE_EXHAUSTED（预算/时限耗尽，用户决定是否续跑）。
+- **模型可修**：PLATFORM_ERROR（平台抖动，稍后重试通常可修）、HARD_REJECTED（执行层硬拒绝，模型需改道）。
 
 **机械守卫**：B 审计清单（每条失败路径归这两类之一）+ 熔断上限测试。
 

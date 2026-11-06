@@ -98,6 +98,7 @@ CLI 在场。
 | `plan-awareness.test.ts` | L4 集成 | 直接 spawn 兄弟仓 `bin/17dz`（mock executor），自有计划状态文件；CLI 缺失时跳过 | fshine ↔ 17dz 计划边界：通知/确认门、累计重量、账套存在性专用搜索 |
 | `turn-loop-activated-plan.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 批准了但没执行的收尾 |
 | `turn-loop-attachments.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 附件/文件消息的真实渠道路径 |
+| `turn-loop-ballot.test.ts` | L4 集成（永久跳过） | 经 harness：兄弟仓 + 财税 mock + 配置 | ballot 第二写域结构性不可跑（harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs），describe.skip |
 | `turn-loop-clarification.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 结构化歧义 → 宿主机械组装澄清 |
 | `turn-loop-concurrent.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 并发会话里的多步计划中断/恢复/跳过/确认门 |
 | `turn-loop-confirmation.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 跨轮确认语义 |

@@ -109,6 +109,47 @@ describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
     expect((await store.platformTasks!.get(pending.taskId))?.workerMessages).toHaveLength(4);
   });
 
+  it('C5 委派块结构化：worker 收到 JSON 委派块 + 正文合并', async () => {
+    const store = createSqliteStore(':memory:');
+    stores.push(store);
+    await store.principalScopes.upsert({ wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true });
+    const workerInputs: TurnDriverInput[] = [];
+    const platform = runner(store, workerDriver(['完成。'], workerInputs));
+    const mainDriver: TurnDriver = {
+      run: async (input) => {
+        try {
+          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻辰的应收账款' });
+        } catch (error) {
+          if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
+          throw error;
+        }
+        return { text: '这条文本不应外发', messages: input.messages };
+      },
+    };
+    const main = createTaxAgentRuntime({
+      driver: mainDriver,
+      sessions: store.sessions,
+      platformTask: platform,
+    });
+    const handler = createMessageHandler({ store, runtime: main });
+    await handler(message('查幻辰的应收账款'));
+    expect(workerInputs).toHaveLength(1);
+    const lastMessage = workerInputs[0]?.messages?.at(-1);
+    expect(lastMessage?.role).toBe('user');
+    const content = String(lastMessage?.content);
+    const [block, body] = content.split('\n\n');
+    expect(() => JSON.parse(block)).not.toThrow();
+    const parsed = JSON.parse(block);
+    expect(parsed).toMatchObject({
+      request: '查幻辰的应收账款',
+      workspace: expect.stringMatching(/^tmp\/task_[0-9a-f-]+$/),
+      protocolVersion: '1.0',
+    });
+    expect(Array.isArray(parsed.entities)).toBe(true);
+    expect(Array.isArray(parsed.inputs)).toBe(true);
+    expect(body).toBe('查幻辰的应收账款');
+  });
+
   it('Context Profile 越权路径被拒绝', async () => {
     const store = createSqliteStore(':memory:');
     stores.push(store);

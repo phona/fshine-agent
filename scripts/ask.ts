@@ -60,8 +60,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const platformRoot = config.contextProfiles['17dz']?.root;
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
-  if (isPlatformMock()) {
+  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
+  if (isPlatformMock(process.env)) {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 

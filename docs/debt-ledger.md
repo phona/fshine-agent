@@ -469,16 +469,23 @@
 ### D-031 · §17 写路径卫生七项（生产写开放前必修）
 
 - **位置**：`fshine-agent/docs/rule-landing.md:326`（登记处）。本次逐条核实 17dz 侧现状：
+- **§17 latent 三类分流（C10 收口）**：
 
-  | 项 | 位置（17dz） | 本次核实 |
-  |---|---|---|
-  | S2 | `src/voucher/scripts/fill.js:45,51`（`discoverToken(context, page, contracts[0].accountSet)`、`const firstDate = contracts[0].date`） | **仍在**：批量契约只用 `contracts[0]`，其余静默丢 → 凭证落错账套 |
-  | S3 | `src/voucher/scripts/gen-from-journal.js`（账户下拉子串 + `.first()`） | 登记在案（本次未逐行复勘，Wave 3 开工时复核） |
-  | S4 | `src/voucher/scripts/gen-from-journal.js`（`--direction`/`--date-mode` 无枚举白名单） | 登记在案（同上） |
-  | S5③ | `src/voucher/scripts/fill.js`（`--start-no` NaN 静默丢起始号） | 登记在案（3707bac 只修了 `parseCountFlag` 一族，`--start-no` 是 `parseInt` 另一处） |
-  | S7 | `src/voucher/scripts/upload-all.js`（未找到凭证静默跳过仍 exit 0） | 登记在案（文件存在，`git ls-files` 确认） |
-  | S9 | `src/voucher/scripts/`（`fuzzyFind` 子串 + `stripCity` 静默采纳简称，写路径） | 登记在案 |
-  | S10 | `src/voucher/scripts/parse-tianren-bills.py`（creditRules 未命中静默回落 1122） | 登记在案 |
+  | 类别 | 包含项 | 守卫机制 | fshine 侧现状 |
+  |---|---|---|---|
+  | 声明可守 | S4（枚举白名单）、S5③（NaN 校验） | 能力清单 args schema + host 侧机械校验 | structured_call 的 validateStructuredCall 已覆盖 args shape；枚举白名单需执行层在 CapabilityManifest 声明合法值集，宿主可复核 |
+  | 读回计数可守 | S2（contracts[0] 静默丢）、S7（upload-all 静默跳过） | proposal commit 读回 delta vs required | proposal-commit 的 readBack {before, after, delta, required} + committed_unverified 分类已覆盖；宿主侧有守卫，执行层仍需修正根因 |
+  | 执行层内部不可守 | S3（`.first()` 多候选）、S9（fuzzyFind+stripCity）、S10（creditRules 静默回落） | 无（执行层内部逻辑，宿主无法观测中间形态） | 登记归属 17dz + Wave 3 限期；不宣称七项整体闭环 |
+
+  | 项 | 位置（17dz） | 本次核实 | 分流类别 |
+  |---|---|---|---|
+  | S2 | `src/voucher/scripts/fill.js:45,51`（`discoverToken(context, page, contracts[0].accountSet)`、`const firstDate = contracts[0].date`） | **仍在**：批量契约只用 `contracts[0]`，其余静默丢 → 凭证落错账套 | 读回计数可守 |
+  | S3 | `src/voucher/scripts/gen-from-journal.js`（账户下拉子串 + `.first()`） | 登记在案（本次未逐行复勘，Wave 3 开工时复核） | 执行层内部不可守 |
+  | S4 | `src/voucher/scripts/gen-from-journal.js`（`--direction`/`--date-mode` 无枚举白名单） | 登记在案（同上） | 声明可守 |
+  | S5③ | `src/voucher/scripts/fill.js`（`--start-no` NaN 静默丢起始号） | 登记在案（3707bac 只修了 `parseCountFlag` 一族，`--start-no` 是 `parseInt` 另一处） | 声明可守 |
+  | S7 | `src/voucher/scripts/upload-all.js`（未找到凭证静默跳过仍 exit 0） | 登记在案（文件存在，`git ls-files` 确认） | 读回计数可守 |
+  | S9 | `src/voucher/scripts/`（`fuzzyFind` 子串 + `stripCity` 静默采纳简称，写路径） | 登记在案 | 执行层内部不可守 |
+  | S10 | `src/voucher/scripts/parse-tianren-bills.py`（creditRules 未命中静默回落 1122） | 登记在案 | 执行层内部不可守 |
 
 - **根因**：读路径 live 批（3707bac / 1e8f2ec）已把"静默回落/答非所问"扫清，写路径因为是 latent（生产写关闭）没扫。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套）。
 - **律法归属**：L4。
@@ -1681,6 +1688,33 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：波次 4 执行盘点、波次 5 门⑦检查前完成。
 - **状态**：待办。
 
+### D-176 · C4 宿主送达义务收口未接线（W5 尾程修复）
+
+- **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/context.ts`。
+- **根因**：C4 交付了 `deliverFailure` / `policyOf` 纯函数，但 context.ts 仍以内联五路话术 throw ToolUserError，deliverFailure 在非测试代码零调用方；CAPABILITY_UNAVAILABLE / HARD_REJECTED 在 error-codes.ts 无独立条目，failure-delivery.ts 用硬编码占位话术 + `gap: 'no_error_code_entry'` 审计字段，构成第二份用户回复要求。
+- **律法归属**：L2（措辞单一来源）。
+- **闭环判据**：context.ts 失败 catch 块统一走 deliverFailure；error-codes.ts 五档话术全齐；failure-delivery.ts 审计字段无 `gap` 占位。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：已修复（context.ts 接线 deliverFailure + error-codes.ts 补 DELEGATION_CAPABILITY_UNAVAILABLE / DELEGATION_HARD_REJECTED + failure-delivery.ts 改取 error-codes 单一来源）。
+
+### D-177 · C5 委派块结构化落地回归（materializeTaskInputs 提前到准备阶段）
+
+- **位置**：`packages/agent/src/context.ts:1208`（prepareContextTask 中 materializeTaskInputs 调用）。
+- **根因**：C5 把 `materializeTaskInputs` 从执行阶段移到 prepareContextTask，导致 existing 续跑场景下非 UUID taskId（如测试用 'task_blocked'）触发 scratchDir 格式验证失败，production-wiring.test.ts「交接损坏且转录也缺失」用例红。
+- **律法归属**：L3（回归测试钉住）。
+- **闭环判据**：existing 续跑时 materializeTaskInputs 不因非 UUID taskId 失败；新任务仍验证 scratchDir 格式。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：已修复（materializeTaskInputs 仅在 `args.turnDeclaration && guardedScope` 时调用）。
+
+### D-175 · C8 三道门部分落地：serve 令牌门与真写门执法点未动
+
+- **位置**：`packages/agent/src/context.ts`、`packages/agent/src/plan-runtime.ts`、`packages/agent/src/platform-mock.ts`、`packages/agent/src/assembly.ts`。
+- **根因**：C8（8302f5f）只移除 isPlatformMock/isCommitEnabled/ensureMockStatePath 的 process.env 缺省并改调用方显式传参（platform-mock.ts + assembly.ts + 5 脚本），serve 令牌门（hostGatewayEnv）与真写门（createPlanScopedWorkerEnv）的 env 继承执法点仍在 context.ts/plan-runtime.ts 未动，与方案「三道门执法点改显式携带+宿主持有状态」不符。
+- **律法归属**：L2 / 门②。
+- **闭环判据**：hostGatewayEnv / createPlanScopedWorkerEnv 的 env 读取点改为显式携带或宿主持有状态。
+- **归属波次 / 限期**：待定（owner 确认是否纳入本波或后续波次）。
+- **状态**：登记（部分完成，待 owner 决策）。
+
 ### D-173 · 执行层仓 CI 的真实 12 键 parity 未接线（W4 方案草案 D-154，程序级编号按执行序递补）
 
 - **位置**：17dz-platform 仓（执行层）。W4 C3 已落地一致性校验脚本与七态夹具（`scripts/check-generic-budget-protocol.mjs` + `test/test-budget-protocol.js`，分支 `w4-budget-protocol` 提交 `4f0e2ec`，基于其 origin/main `de41ae3`），但该仓 CI 尚未接线跑真实比对——本地 `npm test` 的 ⑦ 态在未设其检出根目录变量时大声说明「真实比对未跑」（非无声 skip，拒绝语义由 ⑤ 态钉住），真实 parity 目前仍是手动 pinned-ref 证据（2026-11-06 实测：fshine W4 检出 ↔ 17dz origin/main `de41ae3`，exit 0、12/12 一致）。
@@ -1700,3 +1734,42 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **附带登记**：12 个阈值缺省的数字级标定缺失（calls/seconds 线）——与 D-147 步数帽同款闭环二选一（数据标定 or 明确登记为未标定默认值），已在 architecture-laws「预算门标定（2026-11-06，W4）」表逐道登记。
 - **律法归属**：L5（误拦方向的自愈通道）+ 控制的标定审查第三问。
 - **归属波次 / 状态**：W5（推荐）；登记。W4 不先行硬修——硬修需要执行层先在协议里声明该字段，而现协议仅经 budget 回执的 weightBudget 间接暴露（接口文档 §4 定性「仅作呈现」，拿呈现字段当控制输入是第二份真相）。
+
+### D-178 · ballot 第二写域证据未升 vitest e2e（C10 第二写域闭环缺口）
+
+- **位置**：`tests/e2e/`、`scripts/eval/generic-mock.ts`。
+- **根因**：C10 第二写域（ballot）的端到端证据目前仅靠 generic-mock.ts 的 g-ballot-second-domain 用例（node 脚本直驱 dummy CLI），未升 vitest e2e；L4「换一个域 fshine 不用改代码」的证明力仅到夹具层。
+- **律法归属**：L4（换域不改代码）。
+- **闭环判据**：tests/e2e 内新增 ballot 第二写域 vitest e2e，或 execution-layer-admission.md 明确登记为「非 vitest e2e，由 generic-mock 一道门覆盖」并获 owner 认可。
+- **归属波次 / 限期**：W5 尾程。
+- **状态**：登记，待 owner 认可（closure via 选项 2：execution-layer-admission.md 已登记「非 vitest e2e，由 generic-mock 一道门覆盖」；tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；generic-mock g-ballot-second-domain 为有效证据；但 D-178 自身闭环判据要求「并获 owner 认可」，目前无 owner 认可留痕，故状态为登记待认可）。
+
+### D-181 · 17dz 集成 e2e 跨仓配对红（C6↔P1、C8↔P4 环境变量重命名不兼容 + 首阻塞点非 env 族）
+
+- **位置**：`tests/e2e/turn-loop-clarification.test.ts`、`tests/e2e/turn-loop-write-chain.test.ts`。
+- **根因**：17dz 平台 main 分支将执行器环境变量由 `EXECUTION_EXECUTOR` / `EXECUTION_ALLOW_REAL` 重命名为 `DZ_EXECUTOR` / `DZ_ALLOW_REAL`，但 17dz 侧 W5 分支 `a2a-structured-call` 未合入 main；fshine harness 仍设旧名，跨仓配对在当前环境下无绿色集成证据。clarification 3 例全红、write-chain 14/15 红，routing 5/5 与 worker-timeout 3/3 绿。**实质阻塞点在治理 env 族未对齐**：17dz main 的 governance 环境变量（`DZ_SERVE` / `DZ_MOCK_STATE` / `DZ_PLAN_STATE` / `DZ_PROPOSAL_STATE` / `DZ_AUDIT_PATH` / `DZ_REQUIRE_PLAN` / `DZ_INVOCATION` / `DZ_COMMIT_TOKEN` / `DZ_GATE_SECRET`）与 fshine harness 的 `EXECUTION_*` 命名不匹配——harness 设 `EXECUTION_SERVE=1` 但平台只认 `DZ_SERVE`，设 `EXECUTION_MOCK_STATE` 但平台只认 `DZ_MOCK_STATE`（respond.js:47 MOCK_STATE_MISSING exit 3），invocation/commitToken/gateSecret 全 null；`allowReal({DZ_ALLOW_REAL:'mock'})=false`——平台 real-execution.js 只认字面量 `'1'`，`'mock'` 是契约未定义值。e658310 新增的 `DZ_ALLOW_REAL` / `DZ_EXECUTOR` 两个名字未按 `docs/environment-variables.md:10` 先登记再进代码，也与 `docs/e2e-ownership.md:138`「环境名一律 `EXECUTION_*`/`FSHINE_*`」的约定冲突。**第一阻塞点并非 env 族**：write-chain 的 subagent_task_failed 事件错误为「未声明有效的 profile.gateway…」，复现路径为 `parseProposalCommand('bin/17dz prepare voucher.proposal tmp/req_1/proposal.json', protocols)`（harness.ts:500 两参形态）→ proposal-runtime.ts:76 isServeCliInvocation → serve-gate.ts:229 servePatterns → platform-contract.ts:52 resolveGatewayText(undefined)；clarification 已打通到平台、转为平台 main 分支措辞形态不符（实收「执行 finance.query-receivables: serve 执行缺少 host 注入的 平台返回 ，candidates: [幻辰财税, 幻辰实业有限公司]…」vs 期望「没有找到唯一匹配…」）。
+- **律法归属**：L4（换域不改代码）+ 跨仓配对依赖。
+- **闭环判据**：17dz w5-tail 合入 main 后，harness 与平台环境变量命名对齐；或 fshine harness 显式兼容新旧两套变量名后重跑通过（**已实测不成立**：126887b 补双套 env 后，write-chain 首阻塞点仍为 profile.gateway 未声明）。W5 验收条目⑧已将该类 e2e 定为「不作为放行或打回依据」。
+- **归属波次 / 限期**：W5 尾程登记；待 17dz 侧合流 + profile.gateway 声明穿透后重跑。
+- **状态**：登记（env 兼容已补但未解阻塞，profile.gateway 为首阻塞点，不堵 W5 放行）。
+
+### D-179 · C5 翻转点过程违规：golden/context.test 未同批翻转（W5 尾程留证）
+
+- **位置**：`packages/agent/a2a-cutover-golden.test.ts`、`packages/agent/context.test.ts`、`docs/debt-ledger.md`。
+- **根因**：C5 落地时违反 F5 与「两个显式翻转点」纪律：golden 第④项自 d5e645d 起红（1 例）、5971868 起 2 例红、至 15be41a 仍 2 例红，直到收尾 commit 750190e 才显式翻转——比方案规定的「C5 同 commit 翻转」晚 9 个 commit；context.test.ts 同样未在 C5 同批更新（该点 56 例红）。三处 e2e 确系 d5e645d 同批更新（符合⑩前半），但 golden/context.test 没有。
+- **律法归属**：F5（翻转点纪律）。
+- **闭环判据**：golden 第④项与 context.test.ts 已在 C5 收尾 commit 750190e 翻转，过程违规已留证（本条目 + git log 可追溯）。
+- **归属波次 / 限期**：W5 尾程留证；已修复。
+- **状态**：已修复，过程违规留证。
+
+### D-180 · C4 五类全覆盖的函数级限制 + guard-latent-declaration 未实现 + policyOf 无消费方
+
+- **位置**：`packages/agent/src/failure-delivery.ts`、`packages/agent/src/pi-coding-driver.ts`、`packages/contracts/src/a2a-protocol.ts`。
+- **根因**：
+  1. `failureClassFor` 的生产入参只覆盖 runtime 五档（cancelled/timeout/model_transient/auth/executor_error），协议五类中的 CAPABILITY_UNAVAILABLE 与 HARD_REJECTED 无任何生产者（worker 侧结构化失败上报通道尚不存在），deliverFailure 的 needs / needsEnrichment 分支同样不可达。
+  2. ~~`OperationDeclaration` 无 args schema 字段~~、~~`validateStructuredCall` 只查 operation 声明与 args 是对象~~、~~generic-mock g-structured-undeclared-arg 用例缺失~~（da36f44 已修复：OperationDeclaration 补 argsSchema；validateStructuredCall 增参数级 fail-closed；generic-mock 补 g-structured-undeclared-arg 用例）。
+  3. `policyOf` 导出无消费方。
+- **律法归属**：L2（措辞单一来源）+ L4（声明可守）。
+- **闭环判据**：worker 侧结构化失败上报通道落地后，CAPABILITY_UNAVAILABLE / HARD_REJECTED 有生产者；OperationDeclaration 补 args schema 后，validateStructuredCall 实现参数级 fail-closed；policyOf 有消费方。
+- **归属波次 / 限期**：W5 尾程登记；根因第 1、3 条待后续波次。
+- **状态**：根因第 2 条已修复（da36f44）；根因第 1、3 条仍登记待后续波次。

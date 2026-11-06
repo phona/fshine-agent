@@ -61,3 +61,10 @@
   它的作用是证明第 2 条——换一个域，fshine 不用改代码。
 - 它的记忆、熔断、缓存是最小确定性实现（见该夹具的 README），
   不是生产级实现；生产级实现仍由真实执行层自己交（A11–A12）。
+
+## ballot 第二写域证据（第 4 包补充）
+
+- 命名理由：ballot 操作集（ballot.query / ballot.prepare / ballot.proposal / ballot.proposal-commit）复用了 dummy-platform 夹具（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs`）的 6 个操作，未在 `scripts/eval/fixtures/` 下建立独立 `ballot-platform/` 目录。
+- 登记原因：小裁示 1 推荐独立夹具目录，但 ballot 操作与 dummy 共享状态机与操作注册表，拆分会导致两份 mock 状态维护成本；命名空间 `ballot.*` 已与 dummy 内其他操作隔离，不冲突。
+- 共享状态机影响：ballot 与 dummy 共享 collections 状态文件（`dummy-state.json`），因此「第二写域」的域隔离证明力仅限于操作命名空间隔离（ballot.* 前缀），不包含状态文件隔离。若后续需要强域隔离证明，需拆分独立状态文件。
+- 证据位置：`scripts/eval/generic-mock.ts` 用例 `g-ballot-second-domain`（读路径 ballot.query + 写路径 ballot.prepare → ballot.proposal → ballot.proposal-commit）为主；`tests/e2e/turn-loop-ballot.test.ts` 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过，不计入通用闭环。

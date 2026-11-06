@@ -430,6 +430,75 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     ];
     return { id: 'g-committed-unverified-report', pass: checks.every((c) => c.pass), checks };
   } },
+  { id: 'g-ballot-second-domain', run: (ctx) => {
+    const checks: Check[] = [];
+    const list = ctx.run(['operation', 'list', '--json']);
+    const parsed = JSON.parse(list.stdout);
+    const names = parsed.operations.map((o: Record<string, unknown>) => o.name as string);
+    checks.push(check('ballot operations present in list', names.filter((n) => n.startsWith('ballot.')).length === 6, '6 ballot ops', `${names.filter((n) => n.startsWith('ballot.')).length} ballot ops`));
+    const ballotOps = parsed.operations.filter((o: Record<string, unknown>) => (o.name as string).startsWith('ballot.'));
+    checks.push(check('ballot query is read', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access === 'read', 'read', String(ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access)));
+    checks.push(check('ballot prepare/commit are write', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access === 'write' && ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access === 'write', 'write+write', `${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access}/${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access}`));
+    // Read path: ballot.query --topic alpha
+    const q = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
+    const qEnv = parseEnvelope(q.stdout);
+    checks.push(check('ballot.query returns completed', q.code === 0 && qEnv?.status === 'completed', '0 completed', `${q.code} ${qEnv?.status}`));
+    // Write path via proposal: ballot.prepare (dry-run) + ballot.proposal + ballot.proposal-commit
+    const prep = ctx.run(['prepare', 'ballot.prepare', '--topic', 'alpha', '--count', '2']);
+    const prepEnv = parseEnvelope(prep.stdout);
+    const prepOk = prep.code === 0 && prepEnv !== null && prepEnv.status === 'completed';
+    const prepDryRun = prepEnv && (prepEnv.data as Record<string, unknown> | null)?.dryRun === true;
+    checks.push(check('ballot.prepare dry-run', prepOk && prepDryRun, 'completed dryRun=true', `${prep.code} ${prepEnv?.status}`));
+    const mid = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
+    const midEnv = parseEnvelope(mid.stdout);
+    const midCount = midEnv && midEnv.data ? (midEnv.data as Record<string, unknown>).count as number : -1;
+    const qCount = qEnv && qEnv.data ? (qEnv.data as Record<string, unknown>).count as number : -1;
+    checks.push(check('ballot.prepare did not change count', midCount === qCount, String(qCount), String(midCount)));
+    // Create ballot proposal
+    const payloadFile = writePayload(ctx, { collection: 'alpha', window: 'R1', records: [{ name: 'vote-1', value: 100 }] });
+    const { env: propEnv, run: propRun } = createProposal(ctx, { collection: 'alpha', window: 'R1', records: [{ name: 'vote-1', value: 100 }] });
+    const proposalId = propEnv?.data?.proposalId as string;
+    checks.push(check('ballot proposal created pending', propRun.code === 0 && propEnv?.status === 'completed' && typeof proposalId === 'string' && (propEnv.data as Record<string, unknown>)?.status === 'pending', 'completed pending + proposalId', `${propRun.code} ${propEnv?.status}`));
+    const token = proposalToken(proposalId, (propEnv!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
+    const savedEnv = ctx.env;
+    ctx.env = { ...savedEnv, DUMMY_COMMIT_TOKEN: token };
+    const commit2 = ctx.run(['commit', 'ballot.proposal-commit', '--proposal-id', proposalId]);
+    ctx.env = savedEnv;
+    const commitEnv = parseEnvelope(commit2.stdout);
+    const commitOk = commit2.code === 0 && commitEnv?.status === 'completed';
+    const commitVerified = commitEnv && (commitEnv.data as Record<string, unknown>)?.verified === true;
+    checks.push(check('ballot proposal commit verified', commitOk && commitVerified, 'completed verified=true', `${commit2.code} ${commitEnv?.status} verified=${commitEnv && (commitEnv.data as Record<string, unknown>)?.verified}`));
+    const after = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
+    const afterEnv = parseEnvelope(after.stdout);
+    const afterCount = afterEnv && afterEnv.data ? (afterEnv.data as Record<string, unknown>).count as number : -1;
+    checks.push(check('ballot.readback delta = required', afterCount === qCount + 1, String(qCount + 1), String(afterCount)));
+    return { id: 'g-ballot-second-domain', pass: checks.every((c) => c.pass), checks };
+  } },
+  { id: 'g-structured-parity', run: (ctx) => {
+    // Structured call parity: call --file must produce the same envelope as the direct command.
+    const file = writePayload(ctx, { operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
+    const structured = ctx.run(['call', '--file', file]);
+    const direct = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
+    const sEnv = parseEnvelope(structured.stdout);
+    const dEnv = parseEnvelope(direct.stdout);
+    const sameStatus = sEnv?.status === dEnv?.status;
+    const sameData = JSON.stringify(sEnv?.data) === JSON.stringify(dEnv?.data);
+    return { id: 'g-structured-parity', pass: structured.code === 0 && direct.code === 0 && sameStatus && sameData, checks: [
+      check('structured call exit 0', structured.code === 0, '0', String(structured.code)),
+      check('direct call exit 0', direct.code === 0, '0', String(direct.code)),
+      check('same status', sameStatus, String(dEnv?.status), String(sEnv?.status)),
+      check('same data', sameData, JSON.stringify(dEnv?.data).slice(0, 80), JSON.stringify(sEnv?.data).slice(0, 80)),
+    ] };
+  } },
+  { id: 'g-structured-undeclared-arg', run: (ctx) => {
+    // Structured call object format: undeclared args must be refused (exit 3).
+    const file = writePayload(ctx, { operation: 'dummy.query', args: { '--collection': 'alpha', '--undeclared-flag': 'value' } });
+    const result = ctx.run(['call', '--file', file]);
+    return { id: 'g-structured-undeclared-arg', pass: result.code === 3, checks: [
+      check('undeclared arg refused exit 3', result.code === 3, '3', String(result.code)),
+      check('refusal reason present', result.stderr.includes('CALL_REFUSE undeclared args') || result.stderr.includes('STRUCTURED_CALL DECLINED'), 'CALL_REFUSE undeclared args / STRUCTURED_CALL DECLINED', result.stderr.slice(0, 120)),
+    ] };
+  } },
 ];
 
 interface Baseline { version: number; generatedAt: string; note: string; cases: Record<string, { checks: Record<string, string> }> }

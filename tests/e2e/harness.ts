@@ -69,7 +69,10 @@ if (operationSemantics.size === 0) {
 }
 
 /** 平台侧持久化状态：每个用例独一份，避免账本/限流桶跨用例串味。 */
-const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
+const PLATFORM_STATE_KEYS = [
+  'EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE',
+  'DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE',
+] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 beforeEach(() => {
@@ -83,6 +86,11 @@ beforeEach(() => {
     // 提案状态库（A 波新增，B 波网关提案路径的落点）：同样每用例独一份，否则一个用例建的
     // 提案会漏到下一个用例的读回/提交里。
     EXECUTION_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
+    DZ_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
+    DZ_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
+    DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
+    DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    DZ_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
   });
 });
 
@@ -126,11 +134,19 @@ beforeAll(() => {
   Object.assign(process.env, {
     EXECUTION_SERVE: '1',
     EXECUTION_EXECUTOR: 'mock',
+    DZ_ALLOW_REAL: 'mock',
+    DZ_EXECUTOR: 'mock',
+    DZ_SERVE: '1',
     EXECUTION_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
     EXECUTION_PLAN_STATE: path.join(stateDir, 'plans.json'),
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
     EXECUTION_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
+    DZ_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
+    DZ_PLAN_STATE: path.join(stateDir, 'plans.json'),
+    DZ_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
+    DZ_AUDIT_PATH: path.join(stateDir, 'invocations.jsonl'),
     EXECUTION_REQUIRE_PLAN: '1',
+    DZ_REQUIRE_PLAN: '1',
     EXECUTION_PLAN_ACTIVATION_SECRET: 'turn-loop-test-secret',
     EXECUTION_PLAN_AUTO_CALLS: '2',
     EXECUTION_PLAN_NOTIFY_CALLS: '10',
@@ -334,7 +350,9 @@ export type WorkerStep =
   /** 网关提案路径（方案 1 · B 波 B3）：把 payload 写进本轮 scratchDir，再发提案创建网关调用。 */
   | { proposal: object }
   | { end: true }
-  | { text: string };
+  | { text: string }
+  /** 结构化调用通道（C6）：worker 调用 structured_call 工具的替身步型。 */
+  | { structured_call: { operation: string; args: Record<string, unknown> }; result: string };
 
 /**
  * 17dz 子 Agent 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
@@ -453,6 +471,12 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         const current = script.length === 1 ? script[0]! : script[cursor]!;
         cursor += 1;
         if ('text' in current) { parts.push(current.text); continue; }
+        if ('structured_call' in current) {
+          // 结构化调用通道替身：直接返回脚本里预写的 tool_result 文本（真实 worker 由
+          // pi-coding-driver 的 structured_call 工具执行后回传）。
+          parts.push(current.result);
+          continue;
+        }
         if ('need' in current) {
           // 结构化线索直接产出（真实 worker 由 pi-coding-driver 从平台确定性拒绝原因派生）；
           // 宿主据此不 terminate 整轮，任务保持可续。

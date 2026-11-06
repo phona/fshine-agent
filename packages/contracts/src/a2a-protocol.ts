@@ -131,6 +131,8 @@ export interface OperationDeclaration {
   readonly label: string | null;
   /** serve 矩阵开放词表（该 operation 的许可/法域声明）；宿主原样投影。 */
   readonly serveMatrix: readonly string[];
+  /** 声明式 args schema：平台 `operation list --json` 的 args 规格派生的参数名清单（flag 含 `--` 前缀）；宿主只做 fail-closed 复核，不解析业务值。 */
+  readonly argsSchema?: readonly string[];
 }
 
 /**

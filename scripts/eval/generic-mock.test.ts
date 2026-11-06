@@ -40,14 +40,17 @@ describe('generic mock execution layer', () => {
       const r = runDummy(['operation', 'list', '--json'], env);
       expect(r.code).toBe(0);
       const parsed = JSON.parse(r.stdout) as { operations: Array<Record<string, unknown>>; accessSemantics: Record<string, Record<string, boolean>> };
-      expect(parsed.operations.map((o) => o.name)).toEqual(expect.arrayContaining(['dummy.query', 'dummy.scratch', 'dummy.prepare', 'dummy.commit', 'dummy.proposal', 'dummy.proposal-commit']));
+      expect(parsed.operations.map((o) => o.name)).toEqual(expect.arrayContaining(['dummy.query', 'dummy.scratch', 'dummy.prepare', 'dummy.commit', 'dummy.proposal', 'dummy.proposal-commit', 'ballot.query', 'ballot.scratch', 'ballot.prepare', 'ballot.commit', 'ballot.proposal', 'ballot.proposal-commit']));
       expect(parsed.accessSemantics.read).toEqual({ plan: true, confirm: false, mock: true });
       expect(parsed.accessSemantics.scratch).toEqual({ plan: false, confirm: false, mock: false });
       expect(parsed.accessSemantics.write).toEqual({ plan: true, confirm: true, mock: true });
       const byName = Object.fromEntries(parsed.operations.map((o) => [o.name, o]));
       expect(byName['dummy.proposal']?.protocol).toBe('proposal.create');
       expect(byName['dummy.proposal-commit']?.protocol).toBe('proposal.commit');
+      expect(byName['ballot.proposal']?.protocol).toBe('proposal.create');
+      expect(byName['ballot.proposal-commit']?.protocol).toBe('proposal.commit');
       expect(byName['dummy.query']?.protocol).toBeNull();
+      expect(byName['ballot.query']?.protocol).toBeNull();
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 
@@ -66,7 +69,7 @@ describe('generic mock execution layer', () => {
   it('lint-operations passes for the dummy fixture (assembly health gate)', () => {
     const r = spawnSync(process.execPath, [path.join(fixtureRoot, 'scripts', 'lint-operations.js')], { encoding: 'utf8', cwd: fixtureRoot });
     expect(r.status).toBe(0);
-    expect(r.stdout).toContain('dummy operations ok: 6 operations');
+    expect(r.stdout).toContain('dummy operations ok: 12 operations');
   });
 
   it('query / not-found / zero are distinct deterministic answers', () => {

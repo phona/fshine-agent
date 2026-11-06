@@ -36,6 +36,7 @@
  *     "signal.aborted 与超时同刻成立时，分类判取消优先"这个顺序。
  */
 import { describe, expect, it } from 'vitest';
+import { A2A_PROTOCOL_VERSION } from '../../packages/contracts/src/a2a-protocol';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { renderResourceExhaustedReply } from '../../packages/agent/src/resource-exhausted';
 import { LAST_TASK_ID_TOKEN, boot, mainDriver, type Boot } from './harness';
@@ -323,11 +324,12 @@ describe('[L4 集成] 离线全链 e2e：worker 执行超时（功能规格验�
       expect(resumed).toBeDefined();
       expect(JSON.stringify(resumed!.messages)).toContain(DELEGATE_ASK);
       expect(JSON.stringify(resumed!.messages)).toContain(PARTIAL_TRANSCRIPT);
-      // 末条是宿主为本回合新拼的用户请求（续跑请求随【委派】块下行，不是超时回合的旧请求）
+      // 末条是宿主为本回合新拼的用户请求（续跑请求随 DelegationBlock JSON 下行，不是超时回合的旧请求）
       const last = resumed!.messages.at(-1);
       expect(last?.role).toBe('user');
-      expect(String(last?.content)).toContain('【委派】');
-      expect(String(last?.content)).toContain(`范围：${RESUME_DELEGATE_ASK}`);
+      const delegationBlock = JSON.parse(String(last?.content).split('\n\n')[0]) as Record<string, unknown>;
+      expect(delegationBlock.request).toBe(RESUME_DELEGATE_ASK);
+      expect(delegationBlock.protocolVersion).toBe(A2A_PROTOCOL_VERSION);
 
       // ② 续跑是同一任务的继续：底账里仍只有一条记录（continueTaskId 复用了 taskId），
       // 且这次真跑完了，终态从 failed 推到 done

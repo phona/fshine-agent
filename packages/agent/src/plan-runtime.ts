@@ -439,9 +439,8 @@ const EXTRA_PREFIX_MAX_CHARS = 120;
  * 重试是模型的职责，宿主不替它 absorbing。
  */
 /**
- * plan 令牌定位：网关名由调用方注入（profile.gateway），未注入时走
- * 遗留缺省（接口文档 §2/§10）。与 serve-gate 共用 gatewayTextPatterns
- * 的网关名来源，不存在第二份抄写。
+ * plan 令牌定位：网关名由调用方注入（profile.gateway），未注入时 fail-closed 抛错。
+ * 与 serve-gate 共用 gatewayTextPatterns 的网关名来源，不存在第二份抄写。
  */
 function locatePlanSubmission(command: string, gateway?: string): { prefix: string; payload: string } | null {
   const resolved = resolveGatewayText(gateway);

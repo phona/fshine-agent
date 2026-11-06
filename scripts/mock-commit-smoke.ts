@@ -24,7 +24,7 @@ import path from 'node:path';
 import { loadConfig } from '@fshine/core';
 import {
   ensureMockStatePath,
-  gatewayExecPath,
+  gatewayExecPathForProfile,
   hostGatewayEnv,
   isPlatformMock,
   loadOperationProtocols,
@@ -53,8 +53,9 @@ const contracts = [
 ];
 
 /** 与 proposal-commit / context.ts 的缺省 runner 同形状：spawn 网关 + 收 stdio + 超时 kill。 */
-const runCli: PlanCliRunner = ({ platformRoot, args, env }) => new Promise((resolve, reject) => {
-  const child = spawn(gatewayExecPath(platformRoot), args, {
+const runCli: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
+  const cli = gatewayExecPathForProfile(platformRoot, { gateway });
+  const child = spawn(cli, args, {
     cwd: platformRoot,
     env: { ...process.env, ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -90,15 +91,18 @@ async function proposalCreateOperation(platformRoot: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  if (!isPlatformMock()) {
+  if (!isPlatformMock(process.env)) {
     console.error('拒跑：EXECUTION_EXECUTOR=mock 未设置——本冒烟走真实落账流程，只允许在 mock 保护下执行。');
     process.exit(1);
   }
   const config = loadConfig({ env: process.env });
-  const platformRoot = config.contextProfiles['17dz']?.root;
+  const profile = config.contextProfiles['17dz'];
+  const platformRoot = profile?.root;
+  const gateway = profile?.gateway;
   if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles.17dz.root'); process.exit(1); }
+  if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles.17dz 未声明 gateway'); process.exit(1); }
 
-  const statePath = ensureMockStatePath(platformRoot)!;
+  const statePath = ensureMockStatePath(platformRoot, process.env)!;
   // 重置状态：每次冒烟从 seed 重新播种，断言才确定
   if (existsSync(statePath)) rmSync(statePath);
 
@@ -118,6 +122,7 @@ async function main(): Promise<void> {
     platformRoot,
     args: ['prepare', operation, payloadFile],
     env: hostGatewayEnv(),
+    gateway,
   });
   const envelope = parseEnvelope(created.stdout);
   const data = (envelope?.data ?? null) as { proposalId?: unknown; summaryText?: unknown } | null;

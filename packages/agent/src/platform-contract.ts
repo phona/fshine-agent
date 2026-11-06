@@ -3,7 +3,7 @@
  *
  * 本文件是 fshine 仓库中【唯一】允许出现平台实现细节的模块（泄漏 lint 白名单）。
  * 平台输出契约 = RESULT 单行 JSON 信封（schema v1，E2；行协议已随 E2 退役，解析仅认信封）；
- * 操作调用统一使用 operations.json 注册名（E1），不引用脚本文件路径。
+ * 操作调用统一使用平台操作注册名（E1），不引用脚本文件路径。
  *
  * 两类码级判定收口在这里：平台不可用族（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
  * （SELECTION_CLARIFICATION_CODES）——码是数据，消息文案不是，平台演进只改集合不改编排层。
@@ -23,11 +23,9 @@ import path from 'node:path';
  * 改名/迁移网关，只改这一处。泄漏 lint 把网关名字面量的预算压到只剩本常量这一处。
  */
 /**
- * 遗留缺省网关名（过渡期）。
+ * 网关可执行文件路径派生（C7 收口）：以 profile 声明的 `gateway` 为准，
+ * 不回退任何遗留缺省——`gatewayExecPathForProfile` 是宿主 spawn 路径的唯一入口。
  *
- * Package 1 收窄口径：平台执行代码不动、执行端门先留。宿主 spawn 路径
- * 不再以本常量为准——以 profile 声明的 `gateway` 为准
- * （见 `gatewayExecPathForProfile`）。C7b 起本文件不再持有任何实例网关名：
  * 文本识别与诊断渲染一律 fail-closed（resolveGatewayText / gatewayExecPath
  * 未声明有效 gateway 即抛），profile.gateway 是网关名的唯一来源。
  */
@@ -95,7 +93,7 @@ export function gatewayExecPathForProfile(platformRoot: string, profile: { gatew
 }
 
 /**
- * 平台操作名（L2 消费不抄写：宿主只引用平台 `operations.json` 的注册名）。
+ * 平台操作名（L2 消费不抄写：宿主只引用平台操作注册表的注册名）。
  *
  * W2 镜像层退役（2026-11-05）后生产代码零消费：error-codes.ts 的 correctForm 不再
  * 指名 operation（宿主只教"先名称检索再提交"的结构，机械锁 = error-codes.test.ts

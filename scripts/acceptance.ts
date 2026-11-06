@@ -366,12 +366,12 @@ async function main(): Promise<void> {
   const platformRoot = config.contextProfiles['17dz']?.root;
 
   // mock 联调：兜底状态路径 + 每次启动重置 mock 状态（用例的"第 N 张"预期才可重复）。
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot) : null;
-  if (isPlatformMock() && mockStatePath && existsSync(mockStatePath) && !process.env[`${MOCK_STATE_ENV}_KEEP`]) {
+  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
+  if (isPlatformMock(process.env) && mockStatePath && existsSync(mockStatePath) && !process.env[`${MOCK_STATE_ENV}_KEEP`]) {
     rmSync(mockStatePath);
     console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
   }
-  if (isPlatformMock()) {
+  if (isPlatformMock(process.env)) {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 

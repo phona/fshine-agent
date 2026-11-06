@@ -32,6 +32,8 @@ import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
+import { classifyDelegationFailure } from './delegation-failure';
+import { failureClassFor, deliverFailure } from './failure-delivery';
 import type {
   ChangeIntentRecord,
   ChangeIntentRepo,
@@ -40,6 +42,7 @@ import type {
   PlatformTaskRecord,
   PlatformTaskRepo,
   TrustedContext,
+  DelegationBlock,
 } from '@fshine/contracts';
 import { A2A_PROTOCOL_VERSION, DEFAULT_WORKER_TIMEOUT_MS, resolveActiveProfileId } from '@fshine/contracts';
 import {
@@ -918,7 +921,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         };
       }
       const ci = options.changeIntents;
-      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
+      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。', { code: 'WRITE_NOT_ENABLED' });
       // 新提案作废**同任务**的旧 pending（D-117，2026-10-26 拍板 I2：一任务一码）。
       // 跨任务的 pending 并存——后台长任务跑到中途出的提案，不得作废用户前台正要
       // 确认的另一个任务的提案（I1 全会话单窗会让后台提案打断前台确认，与后台
@@ -1196,15 +1199,37 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         strippedCount,
       }));
     }
-    const workerRequest = args.turnDeclaration && guardedScope
-      ? [
-        '【委派】',
-        `范围：${guardedScope.text}`,
-        `工作区：${scratchDir}`,
-        `协议版本：${A2A_PROTOCOL_VERSION}`,
-        '',
-        guardedRequest.text,
-      ].join('\n')
+    // C5：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷；数据源
+    // entitySources + materializeInputs 已存在，不改 ContextTaskRunArgs 签名）。
+    // 小裁示 2 偏离登记（W5 尾程）：推荐取 PlanEntitySources 四来源全量并集（①②③④），
+    // 实现只取结构化字段 platformEntities + sessionEntities（④′ + ⑤），文本来源
+    // currentMessage / quotedEvidence / referenceEvidence / platformResponses 全部排除。
+    // 理由：文本来源含用户正文与平台响应全文，体积大且含噪声；结构化实体值已足够 worker
+    // 做范围判定，且取值卫生与 session-entities 同一把尺。若后续需要补文本来源，在此扩展。
+    const entities = [
+      ...(args.entitySources?.platformEntities ?? []),
+      ...(args.entitySources?.sessionEntities ?? []),
+    ];
+    let frozenInputs: FrozenTaskInput[] = [];
+    if (args.turnDeclaration && guardedScope) {
+      frozenInputs = await materializeTaskInputs({
+        platformRoot: profile.root,
+        workspaceDir: scratchDir,
+        runId: taskId,
+        files: ctx.trusted.inputFiles ?? [],
+      });
+    }
+    const delegationBlock: DelegationBlock | null = args.turnDeclaration && guardedScope
+      ? {
+          request: guardedScope.text,
+          entities,
+          workspace: scratchDir,
+          inputs: frozenInputs.map(f => f.path),
+          protocolVersion: A2A_PROTOCOL_VERSION,
+        }
+      : null;
+    const workerRequest = delegationBlock
+      ? `${JSON.stringify(delegationBlock)}\n\n${guardedRequest.text}`
       : guardedRequest.text;
     const previousMessages = structuredClone((existing?.workerMessages ?? []) as DriverMessage[]);
     const messages = [
@@ -1353,19 +1378,19 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         try {
           ticket = executionGate.enqueue({ requestId: ctx.trusted.requestId, ...(signal ? { signal } : {}) });
         } catch (error) {
-          if (error instanceof PlatformExecutionQueueFullError) throw new ToolUserError('平台执行队列已满，请稍后重试。');
+          if (error instanceof PlatformExecutionQueueFullError) throw new ToolUserError('平台执行队列已满，请稍后重试。', { code: 'PLATFORM_QUEUE_FULL' });
           throw error;
         }
         let lease: PlatformExecutionLease;
         try {
           lease = await ticket.acquired;
         } catch (error) {
-          if (signal?.aborted || error instanceof PlatformExecutionAbortedError) throw new ToolUserError(DELEGATION_CANCELLED);
+          if (signal?.aborted || error instanceof PlatformExecutionAbortedError) throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
           throw error;
         }
         if (signal?.aborted) {
           ticket.cancel();
-          throw new ToolUserError(DELEGATION_CANCELLED);
+          throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
         }
         lease.start();
         const startedAt = Date.now();
@@ -1388,7 +1413,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const runSignal = execution?.signal ?? signal;
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
-      if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED);
+      if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
       // 人工介入的唯一入口：交接损坏且转录也无法重建。此时不调 worker、
       // 不写新交接、不发确认码、不重复提交，只把缺什么交还 Main（needs），
       // 由 Main 决定是人工核对后重发、还是放弃本任务。任务条目原样不动，
@@ -1439,7 +1464,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,
-            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。'); },
+            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。', { code: 'SERVE_WRITE_OUTSIDE_WORKSPACE' }); },
             deadline,
             signal: runSignal,
             ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
@@ -1506,7 +1531,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             code: result.terminalFailure.code,
             ...workerUsage,
           }));
-          throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure));
+          throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure), { code: result.terminalFailure.code });
         }
         if (result.pendingPlan) {
           const pendingPlan: PendingPlanConfirmation = {
@@ -1629,12 +1654,14 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // 透传的 result.modelError（模型侧瞬时失败，重试用尽或不可重试）——它只在驱动
         // 正常返回时在场，届时 catch 里的 error 只能是下方空文本检查抛的那句普通 Error，
         // 与 auth 码族无交集；而取消/超时是宿主自己的收尾事实，永远先于模型侧表征。
-        const failureClass = runSignal?.aborted ? 'cancelled'
-          : Date.now() >= deadline ? 'timeout'
-          : result?.modelError ? 'model_transient'
-          : isPlatformAuthError(error) ? 'auth'
-          : /平台登录已过期/.test(error instanceof Error ? error.message : '') ? 'auth'
-          : 'executor_error';
+        const failureClass = classifyDelegationFailure({
+          aborted: runSignal?.aborted ?? false,
+          deadlinePassed: Date.now() >= deadline,
+          modelError: result?.modelError,
+          isPlatformAuthError,
+          error,
+        });
+        const classified = failureClassFor(failureClass);
         console.info(JSON.stringify({
           event: 'delegation_span',
           requestId: ctx.trusted.requestId,
@@ -1642,6 +1669,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           durationMs: Date.now() - delegationStart,
           outcome: 'failed',
           failureClass,
+          protocolClass: classified.protocolClass,
           // 失败前已产生的部分转录同样计入（超时/取消前 worker 真实消耗过的 token）；
           // result 缺席（驱动没返回过）时字段缺席。
           ...(result ? usageFieldsOf(result.messages) : {}),
@@ -1650,6 +1678,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           event: 'subagent_task_failed',
           taskId,
           failureClass,
+          protocolClass: classified.protocolClass,
           errorType: error instanceof Error ? error.name : 'UnknownError',
           // 失败原因原文截断 160 字符（波次C；先例：platform_task_outcome_writeback_failed
           // 带 message）——errorType 只有 Error 这类名字时，原因一个字都不该再丢。
@@ -1667,15 +1696,18 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // （其 correctForm 已指路重发，不误导）。后续可选项：给这类"宿主已自动重试用尽"
         // 的失败保留一个「待重试」终态（或确认条目侧的续用通道），让「继续」能原地重派
         // 而不必重发全文；本波不扩确认状态机，先把失败分类与观测修准。
-        // auth 类经 toolUserErrorFor 挂码抛出（消息一字不改）：宿主侧的平台健康信号
-        // （platform-health.ts 的连续失败记账）认这个码——码级判据，不嗅探回复文本。
-        // 其余三类维持原样（没有第二类失败需要宿主跨回合记账）。
-        if (failureClass === 'auth') throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');
-        // 取消话术与 failureClass 同一判据（runSignal）：日志分类与用户话术不许分叉。
-        throw new ToolUserError(runSignal?.aborted ? DELEGATION_CANCELLED
-          : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
-          : failureClass === 'model_transient' ? DELEGATION_MODEL_TRANSIENT_FAILURE
-          : DELEGATION_EXECUTOR_FAILURE);
+        const delivery = deliverFailure({
+          classification: classified,
+          platformTasks: options.tasks,
+          principalId: ctx.trusted.principalId,
+          sessionId: ctx.trusted.sessionId,
+          continueTaskId: taskId,
+          requestId: ctx.trusted.requestId,
+          doneSteps: [],
+        });
+        const failureError = new ToolUserError(delivery.userMessage);
+        if (delivery.auditFields.code) Object.assign(failureError, { code: delivery.auditFields.code });
+        throw failureError;
       }
     },
   };
@@ -1696,15 +1728,15 @@ export function withStepLabel(text: string, stepLabel: string): string {
 async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string | undefined): Promise<ResolvedContextProfile> {
   // 消费方 fail-closed（C5）：0 个或多个 profile 且未显式指定 profileId → 拒绝执行，
   // 不静默挑 profile、不回退任何实例名（文案中性，指引部署补配置或显式指定）。
-  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
+  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。', { code: 'CONTEXT_PROFILE_MISSING' });
   const configured = profiles[id];
-  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`);
-  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`); });
+  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`, { code: 'CONTEXT_PROFILE_NOT_CONFIGURED' });
+  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`, { code: 'CONTEXT_PROFILE_ROOT_UNAVAILABLE' }); });
   const skillRoots: string[] = [];
   for (const relative of configured.skillRoots) {
-    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。');
+    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。', { code: 'CONTEXT_SKILL_ROOTS_NOT_RELATIVE' });
     const resolved = await fs.realpath(path.join(root, relative)).catch(() => undefined);
-    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。');
+    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。', { code: 'CONTEXT_SKILL_ROOTS_PATH_SAFETY' });
     skillRoots.push(resolved);
   }
   return {
