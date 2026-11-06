@@ -1818,3 +1818,12 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：Tier A 新增至少一条 stale 条目后，合并判据能正确红；或 Tier A 判据保持独立且与 Tier B 分层验证。
 - **归属波次 / 限期**：迁移完成前。
 - **状态**：登记（F3 变异已留档，弱点已确认）。
+
+### D-176 · 门①口径分歧：测试夹具豁免惯例与"产品面零 17dz"字面判据冲突
+
+- **位置**：`docs/architecture-laws.md`（Tier B 闭环判据与守卫命令）、`packages/agent/platform-leak-lint.test.ts`（豁免惯例）。
+- **触发 / 根因**：门①字面口径（`git grep -il 17dz` 排除 3 档案例外后 = 0）与 platform-leak-lint 的 *.test.ts 豁免惯例存在冲突。本波方案明确"platform-leak-lint 的 *.test.ts 豁免惯例不适用于门①"，但这一口径未在 debt-ledger 或 change-safety 中登记为正式裁定，导致不同执行者对"门①是否应豁免测试夹具"有不同解读。
+- **律法归属**：门① / L2（协议单一来源的守卫口径）。
+- **闭环判据**：口径分歧经 owner 拍板后，在 `change-safety.md` 或 `architecture-laws.md` 中以正式条目形式落地（"豁免"或"不豁免"），且 `platform-leak-lint.test.ts` 的豁免范围与该条目一致。
+- **归属波次 / 限期**：W6 前拍板；W6 落地。
+- **状态**：待办（登记，待 owner 拍板）。
