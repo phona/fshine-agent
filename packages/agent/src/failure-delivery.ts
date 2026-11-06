@@ -82,12 +82,11 @@ export function policyOf(failureClass: FailureClass): FailureClassPolicy {
  *
  * 措辞来源：
  *   · NEEDS_INPUT：原样转达缺口（由调用方传入 needs，本模块不构造）；
- *   · CAPABILITY_UNAVAILABLE：能力边界消息（error-codes.ts 尚无独立条目，
- *     当前路径缺口，见 C4 审计表）；
+ *   · CAPABILITY_UNAVAILABLE：能力边界消息（error-codes.ts 已有 DELEGATION_CAPABILITY_UNAVAILABLE 条目，cabadae 补档）；
  *   · PLATFORM_ERROR：按 sub-reason 选 error-codes.ts 既有话术（auth /
  *     model_transient / executor_error 各有一条）；
  *   · RESOURCE_EXHAUSTED：复用 renderResourceExhaustedReply（resource-exhausted.ts）；
- *   · HARD_REJECTED：拒绝结果消息（error-codes.ts 尚无独立条目，当前路径缺口）。
+ *   · HARD_REJECTED：拒绝结果消息（error-codes.ts 已有 DELEGATION_HARD_REJECTED 条目，cabadae 补档）。
  *
  * 本函数不产生第二份用户回复要求——所有措辞均来自上述单一来源。
  */

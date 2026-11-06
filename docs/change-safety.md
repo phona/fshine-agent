@@ -1572,7 +1572,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 2. **Q10 entities 投影规则**：推荐 DelegationBlock.entities 取四来源（当前消息 / Log / 平台响应 / 会话已确立实体）**全量并集**——执行层复核从宽，宿主不替它做步骤级裁剪；inputs 只带 FrozenTaskInput 的引用清单不带内容。
    - **执行状态**：偏离采纳——实现只取 platformEntities + sessionEntities（结构化字段），文本来源（currentMessage / quotedEvidence / referenceEvidence / platformResponses）全部排除；context.ts:1204-1207 已补偏离登记注释，理由 = 文本来源体积大且含噪声，结构化实体值已足够 worker 做范围判定。待 owner 确认。
 3. **Q11 网关文本识别回退退役时机**：`resolveGatewayText`/`gatewayTextPatterns` 的文本识别侧穿透验证随 C7 同批退役（推荐）；不留给 W1 补。
-   - **执行状态**：已达成（W1 C7b）。`gatewayTextPatterns` 函数仍导出并由 serve-gate.ts / plan-runtime.ts 消费（文本识别正则派生用），但 `GATEWAY_INVOCATION` 常量与文本识别回退语义已退役；`resolveGatewayText` 退为 fail-closed 校验器（platform-contract.ts），serve-gate.ts:224 注释「未注入时走遗留缺省」与 fail-closed 现实不符，需修正。C7 翻转点二已落地。
+   - **执行状态**：已达成（W1 C7b）。`gatewayTextPatterns` 函数仍导出并由 serve-gate.ts / plan-runtime.ts 消费（文本识别正则派生用），但 `GATEWAY_INVOCATION` 常量与文本识别回退语义已退役；`resolveGatewayText` 退为 fail-closed 校验器（platform-contract.ts），serve-gate.ts / plan-runtime.ts / error-codes.ts 的「未注入时走遗留缺省」注释已由 ee60b8a 修正为 fail-closed 表述。C7 翻转点二已落地。
 4. **C11 范围**：只做关账核对（docs-reality 承诺指向 + 本节之外不新增改动），**不硬改名**——W1 已完成工具名参数化（RUN_EXECUTION_TASK_TOOL='run_task' + profile.toolName）与 Run17dzTaskArgs 别名退役，迁移门①（产品面 17dz=0）已达成，硬改名只剩断对外协议的成本。
    - **执行状态**：已达成（C11）。docs-reality.test.ts:125-131 Run17dzTaskArgs 绝迹断言绿；DelegationBlock 协议中性确认；本节未新增改动。
 
