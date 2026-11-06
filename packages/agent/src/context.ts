@@ -1686,15 +1686,16 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         // （其 correctForm 已指路重发，不误导）。后续可选项：给这类"宿主已自动重试用尽"
         // 的失败保留一个「待重试」终态（或确认条目侧的续用通道），让「继续」能原地重派
         // 而不必重发全文；本波不扩确认状态机，先把失败分类与观测修准。
-        // auth 类经 toolUserErrorFor 挂码抛出（消息一字不改）：宿主侧的平台健康信号
-        // （platform-health.ts 的连续失败记账）认这个码——码级判据，不嗅探回复文本。
-        // 其余三类维持原样（没有第二类失败需要宿主跨回合记账）。
-        if (failureClass === 'auth') throw toolUserErrorFor('DELEGATION_AUTH_FAILURE');
-        // 取消话术与 failureClass 同一判据（runSignal）：日志分类与用户话术不许分叉。
-        throw new ToolUserError(runSignal?.aborted ? DELEGATION_CANCELLED
-          : failureClass === 'timeout' ? DELEGATION_TIMEOUT_FAILURE
-          : failureClass === 'model_transient' ? DELEGATION_MODEL_TRANSIENT_FAILURE
-          : DELEGATION_EXECUTOR_FAILURE);
+        const delivery = deliverFailure({
+          classification: classified,
+          platformTasks: options.tasks,
+          principalId: ctx.trusted.principalId,
+          sessionId: ctx.trusted.sessionId,
+          continueTaskId: taskId,
+          requestId: ctx.trusted.requestId,
+          doneSteps: [],
+        });
+        throw new ToolUserError(delivery.userMessage);
       }
     },
   };
