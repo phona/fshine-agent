@@ -1744,6 +1744,15 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **归属波次 / 限期**：W5 尾程。
 - **状态**：已修复（closure via 选项 2：execution-layer-admission.md 已登记「非 vitest e2e，由 generic-mock 一道门覆盖」；tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；generic-mock g-ballot-second-domain 为有效证据）。
 
+### D-181 · 17dz 集成 e2e 跨仓配对红（C6↔P1、C8↔P4 环境变量重命名不兼容）
+
+- **位置**：`tests/e2e/turn-loop-clarification.test.ts`、`tests/e2e/turn-loop-write-chain.test.ts`。
+- **根因**：17dz 平台 main 分支将执行器环境变量由 `EXECUTION_EXECUTOR` / `EXECUTION_ALLOW_REAL` 重命名为 `DZ_EXECUTOR` / `DZ_ALLOW_REAL`，但 17dz 侧 W5 分支 `a2a-structured-call` 未合入 main；fshine harness 仍设旧名，跨仓配对在当前环境下无绿色集成证据。clarification 3 例全红、write-chain 14/15 红，routing 5/5 与 worker-timeout 3/3 绿。
+- **律法归属**：L4（换域不改代码）+ 跨仓配对依赖。
+- **闭环判据**：17dz w5-tail 合入 main 后，harness 与平台环境变量命名对齐；或 fshine  harness 显式兼容新旧两套变量名后重跑通过。W5 验收条目⑧已将该类 e2e 定为「不作为放行或打回依据」。
+- **归属波次 / 限期**：W5 尾程登记；待 17dz 侧合流后重跑。
+- **状态**：登记（已知跨仓不兼容，不堵 W5 放行）。
+
 ### D-179 · C5 翻转点过程违规：golden/context.test 未同批翻转（W5 尾程留证）
 
 - **位置**：`packages/agent/a2a-cutover-golden.test.ts`、`packages/agent/context.test.ts`、`docs/debt-ledger.md`。
