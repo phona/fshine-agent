@@ -334,7 +334,9 @@ export type WorkerStep =
   /** 网关提案路径（方案 1 · B 波 B3）：把 payload 写进本轮 scratchDir，再发提案创建网关调用。 */
   | { proposal: object }
   | { end: true }
-  | { text: string };
+  | { text: string }
+  /** 结构化调用通道（C6）：worker 调用 structured_call 工具的替身步型。 */
+  | { structured_call: { operation: string; args: Record<string, unknown> }; result: string };
 
 /**
  * 17dz 子 Agent 替身：提交计划走真实 evaluateAndActivatePlan（真 CLI、真账本、真 HMAC），
@@ -453,6 +455,12 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
         const current = script.length === 1 ? script[0]! : script[cursor]!;
         cursor += 1;
         if ('text' in current) { parts.push(current.text); continue; }
+        if ('structured_call' in current) {
+          // 结构化调用通道替身：直接返回脚本里预写的 tool_result 文本（真实 worker 由
+          // pi-coding-driver 的 structured_call 工具执行后回传）。
+          parts.push(current.result);
+          continue;
+        }
         if ('need' in current) {
           // 结构化线索直接产出（真实 worker 由 pi-coding-driver 从平台确定性拒绝原因派生）；
           // 宿主据此不 terminate 整轮，任务保持可续。

@@ -105,7 +105,7 @@ describe('docs-reality：文档主张与代码现实对账', () => {
   });
 
   it('worker 工具面双写断言：WORKER_TOOLS 是唯一来源', () => {
-    expect([...WORKER_TOOLS]).toEqual(['read', 'ls', 'bash', 'write', 'edit']);
+    expect([...WORKER_TOOLS]).toEqual(['read', 'ls', 'bash', 'write', 'edit', 'structured_call']);
     const src = read('packages/agent/src/pi-coding-driver.ts');
     // 会话创建必须消费常量，不许另写字面量（第二份来源 = 下一次漂移的起点）
     expect(src.includes('tools: [...WORKER_TOOLS]'), 'pi-coding-driver 的 tools 未消费 WORKER_TOOLS——双写断言被绕过').toBe(true);

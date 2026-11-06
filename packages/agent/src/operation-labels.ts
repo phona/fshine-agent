@@ -614,3 +614,121 @@ export function operationReferenceKey(reference: string): string {
   const dot = bare.indexOf('.');
   return dot > 0 ? bare.slice(dot + 1) : bare;
 }
+
+// ── C6 结构化调用通道：能力清单派生 ───────────────────────────────────────────
+
+import { A2A_PROTOCOL_VERSION, type CapabilityManifest, type OperationDeclaration } from '@fshine/contracts';
+
+export type { CapabilityManifest };
+
+/**
+ * `operation list --json` 顶层文档 → CapabilityManifest。
+ *
+ * 能力清单只作 `<gateway> operation list --json` 的消费投影（生命周期第②阶段「发现」）：
+ * 权威是执行器的实时输出，宿主不缓存、不复制、不另立名单（L2 单一来源）——本类型
+ * 不引入任何文件读取路径，清单没有的能力视为不存在。
+ *
+ * 派生规则（与 label/规格/语义/协议四张表同族安全缺省）：
+ *   · 解析失败 / 非 JSON / 没有 operations 数组 → 空 manifest；
+ *   · 单行缺字段 → 该行不进清单（不猜、不补）；
+ *   · requiresPlan 从 accessSemantics 的 plan 列机械推导；
+ *   · serveMatrix 从 serve 对象提取值为 true 的键；
+ *   · est_seconds 字段不存在时按 null 处理。
+ */
+export function parseCapabilityManifest(stdout: string): CapabilityManifest | null {
+  let document: unknown;
+  try { document = JSON.parse(stdout); } catch { return null; }
+  const operations = operationsArrayOf(stdout);
+  if (!operations) return null;
+
+  const accessTable = parseAccessSemantics(stdout);
+  const declarations: OperationDeclaration[] = [];
+  for (const op of operations) {
+    const name = (op as { name?: unknown } | null)?.name;
+    const command = (op as { command?: unknown } | null)?.command;
+    const access = (op as { access?: unknown } | null)?.access;
+    const effects = (op as { effects?: unknown } | null)?.effects;
+    const estSeconds = (op as { est_seconds?: unknown } | null)?.est_seconds;
+    const label = (op as { label?: unknown } | null)?.label;
+    const serve = (op as { serve?: unknown } | null)?.serve;
+
+    if (typeof name !== 'string' || !name) continue;
+    const key = name;
+
+    const requiresPlan = typeof access === 'string' && accessTable.has(access)
+      ? (accessTable.get(access)!.plan)
+      : false;
+
+    const effectList = Array.isArray(effects)
+      ? effects.filter((e): e is string => typeof e === 'string')
+      : [];
+
+    const serveKeys = serve && typeof serve === 'object' && !Array.isArray(serve)
+      ? Object.entries(serve as Record<string, unknown>)
+          .filter(([, v]) => v === true)
+          .map(([k]) => k)
+      : [];
+
+    declarations.push({
+      operation: key,
+      requiresPlan,
+      effects: effectList,
+      estSeconds: typeof estSeconds === 'number' ? estSeconds : null,
+      label: typeof label === 'string' && label ? label : null,
+      serveMatrix: serveKeys,
+    });
+  }
+
+  return {
+    version: A2A_PROTOCOL_VERSION,
+    operations: declarations,
+  };
+}
+
+/**
+ * 经公共 CLI 派生能力清单（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与 loadOperationLabels / loadOperationArgStyles 完全一致：platformRoot 未配、
+ * CLI 不存在/不可执行、超时、非零退出、输出不是 JSON——一律返回 null。
+ * 派生是增强，不是前提；拿不到清单 = 没有能力 = structured_call 一律 fail-closed。
+ */
+export function loadCapabilityManifest(platformRoot?: string, gateway?: string): Promise<CapabilityManifest | null> {
+  if (!platformRoot) return Promise.resolve(null);
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(null);
+  const cli = gatewayExecPath(platformRoot, gateway);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (manifest: CapabilityManifest | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(manifest);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(null);
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(null); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        settle(null);
+        return;
+      }
+      const text = Buffer.concat(stdout).toString('utf8');
+      settle(parseCapabilityManifest(text));
+    });
+  });
+}

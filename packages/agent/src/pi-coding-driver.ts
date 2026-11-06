@@ -13,27 +13,32 @@
  */
 import {
   type AgentSession,
+  type AgentToolResult,
   createAgentSession,
   DefaultResourceLoader,
+  type ExtensionContext,
   ModelRuntime,
   SessionManager,
   createBashToolDefinition,
 } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
+import type { TextContent } from '@earendil-works/pi-ai';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { Model } from '@earendil-works/pi-ai/compat';
-import type { DiscoveredTool } from '@fshine/contracts';
+import type { DiscoveredTool, StructuredCall } from '@fshine/contracts';
+import Type from 'typebox';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
-import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
+import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { parseEnvelope, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, gatewayExecPath, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
@@ -54,7 +59,7 @@ const MAX_DECLINED_PLANS_PER_TASK = 5;
  * 本文件的头注释曾与真实清单两度漂移未跟（2026-10-16 文档对账实证），
  * 自这份常量起清单只有一个来源。
  */
-export const WORKER_TOOLS = ['read', 'ls', 'bash', 'write', 'edit'] as const;
+export const WORKER_TOOLS = ['read', 'ls', 'bash', 'write', 'edit', 'structured_call'] as const;
 
 /**
  * 本回合 worker 的工作区（`tmp/task_<taskId>`，宿主注入）：worker 唯一可写位置。
@@ -443,6 +448,8 @@ export interface PiCodingWorkerSessionOptions {
   turnDeclaration?: TurnDriverInput['turnDeclaration'];
   /** 领域无关的实体来源：宿主注入，供计划校验做逐字包含判定（架构 §2 第 9 条）。 */
   entitySources?: TurnDriverInput['entitySources'];
+  /** 能力清单（执行层 `operation list --json` 的投影）；缺省本会话自派生一次。 */
+  capabilityManifest?: CapabilityManifest;
   /** script → label 查找表（平台 CLI 派生，驱动侧缓存后传入）；缺省本会话自派生一次。 */
   operationLabels?: OperationLabels;
   /** flag → 取值样式表（平台 args 规格 CLI 派生）；缺省本会话自派生一次。 */
@@ -1366,6 +1373,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
   // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
   const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd, options.gateway));
+  // 能力清单（执行层 `operation list --json` 的投影）：结构化调用通道的声明来源（C6）。
+  // 派生失败/平台还没下发这张表 → 空表 → structured_call 一律 fail-closed（清单没有的
+  // operation 视为不存在），绝不回退到宿主硬编码名单。
+  const capabilityManifest = options.capabilityManifest ?? (await loadCapabilityManifest(options.cwd, options.gateway));
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
@@ -1420,9 +1431,73 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 边界与 write 完全同一组（serve-gate 的 decideFileWrite 一份判据）：只准
     // tmp/<requestId>/、禁敏感路径、有体积上限——加工具不等于放写入面。
     tools: [...WORKER_TOOLS],
-    customTools: [createBashToolDefinition(options.cwd, {
-      spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
-    }) as never],
+    customTools: [
+      createBashToolDefinition(options.cwd, {
+        spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
+      }) as never,
+      {
+        name: 'structured_call',
+        label: 'Structured Call',
+        description: 'Make a typed platform call (operation + structured args). The host validates the operation against the capability manifest before execution.',
+        parameters: Type.Object({
+          operation: Type.String({ description: 'Target operation registered name' }),
+          args: Type.Record(Type.String(), Type.Any(), { description: 'Structured parameters (opaque to host; shape defined by execution layer schema)' }),
+        }),
+        execute: async (toolCallId: string, params: { operation: string; args: Record<string, unknown> }, signal: AbortSignal | undefined, onUpdate: ((details: unknown) => void) | undefined, ctx: ExtensionContext): Promise<AgentToolResult<unknown>> => {
+          if (!options.gateway) {
+            return {
+              content: [{ type: 'text', text: 'STRUCTURED_CALL REFUSED：gateway not configured' } as TextContent],
+              details: { error: 'gateway_not_configured' },
+            };
+          }
+          const cli = gatewayExecPath(ctx.cwd, options.gateway);
+          const call: StructuredCall = { operation: params.operation, args: params.args };
+          const scratchDir = options.scratchDir ? path.join(ctx.cwd, options.scratchDir) : path.join(ctx.cwd, 'tmp');
+          mkdirSync(scratchDir, { recursive: true });
+          const tempFile = path.join(scratchDir, `structured_call_${toolCallId}.json`);
+          writeFileSync(tempFile, JSON.stringify(call));
+          const env = createPlanScopedWorkerEnv(process.env, activePlanId());
+          return new Promise((resolve) => {
+            let settled = false;
+            const settle = (result: AgentToolResult<unknown>) => {
+              if (settled) return;
+              settled = true;
+              resolve(result);
+            };
+            const child = spawn(cli, ['call', '--file', tempFile], {
+              cwd: ctx.cwd,
+              env,
+              stdio: ['ignore', 'pipe', 'pipe'],
+            });
+            const timer = setTimeout(() => {
+              child.kill('SIGTERM');
+              settle({ content: [{ type: 'text', text: `STRUCTURED_CALL TIMEOUT：${call.operation}` } as TextContent], details: { error: 'timeout', operation: call.operation } });
+            }, 30000);
+            const stdout: Buffer[] = [];
+            const stderr: Buffer[] = [];
+            child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+            child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+            child.once('error', () => {
+              clearTimeout(timer);
+              settle({ content: [{ type: 'text', text: `STRUCTURED_CALL FAILED：${call.operation}\n${Buffer.concat(stderr).toString('utf8')}` } as TextContent], details: { error: 'spawn_error', operation: call.operation, stderr: Buffer.concat(stderr).toString('utf8') } });
+            });
+            child.once('close', (code: number | null) => {
+              clearTimeout(timer);
+              const stdoutText = Buffer.concat(stdout).toString('utf8').trim();
+              const stderrText = Buffer.concat(stderr).toString('utf8').trim();
+              if (code !== 0) {
+                settle({ content: [{ type: 'text', text: `STRUCTURED_CALL FAILED（exit ${code}）：${call.operation}\n${stderrText || stdoutText}` } as TextContent], details: { error: 'non_zero_exit', exitCode: code, operation: call.operation, stderr: stderrText } });
+                return;
+              }
+              settle({ content: [{ type: 'text', text: stdoutText || stderrText } as TextContent], details: { operation: call.operation, exitCode: code } });
+            });
+            signal?.addEventListener('abort', () => {
+              child.kill('SIGTERM');
+            });
+          });
+        },
+      } as never,
+    ],
   });
   // G1 工具门：首条 bash 须为网关 plan（方案定价+预算），bash 仅许网关调用，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
@@ -1480,6 +1555,38 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       reason: event.reason,
       detail: (event.detail ?? '').slice(0, AUDIT_DETAIL_MAX_CHARS),
     });
+  }
+
+  /**
+   * 结构化调用的宿主机械复核（C6）：按 CapabilityManifest 校验 requiresPlan / effects /
+   * serve 矩阵 / args 结构。不解析业务参数值——那些是执行层的 schema 权威。
+   */
+  function validateStructuredCall(
+    args: Record<string, unknown>,
+    manifest: CapabilityManifest | null,
+    activePlanId: () => string | null,
+  ): ServeGateVerdict | undefined {
+    const operation = String(args.operation ?? '').trim();
+    if (!operation) {
+      return { block: true, reason: 'STRUCTURED_CALL DECLINED：operation 参数缺失' };
+    }
+    if (!manifest || manifest.operations.length === 0) {
+      return { block: true, reason: 'STRUCTURED_CALL DECLINED：capability manifest 未加载或为空' };
+    }
+    const declaration = manifest.operations.find((op: { operation: string }) => op.operation === operation);
+    if (!declaration) {
+      return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 未在能力清单中声明` };
+    }
+    if (declaration.requiresPlan && !activePlanId()) {
+      return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 需要激活的计划（requiresPlan=true）` };
+    }
+    const argsValue = args.args;
+    if (typeof argsValue !== 'object' || argsValue === null || Array.isArray(argsValue)) {
+      return { block: true, reason: 'STRUCTURED_CALL DECLINED：args 必须是对象' };
+    }
+    // effects / serve 矩阵在此只做存在性投影，不解释业务含义（执行层自有词汇）。
+    // 宿主不另立枚举、不硬编码白名单——平台加同族取值不静默改写判定。
+    return undefined;
   }
 
   /**
@@ -1550,6 +1657,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 那条路后开关退役，拦截恒开。
       const proposalCall = parseProposalCommand(String(args?.['command'] ?? ''), operationProtocols, options.gateway);
       if (proposalCall) return decideProposalCreation(proposalCall);
+    }
+    if (ctx.toolCall.name === 'structured_call') {
+      return validateStructuredCall(args, capabilityManifest, activePlanId);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });
   }

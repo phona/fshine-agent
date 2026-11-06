@@ -79,7 +79,7 @@ describe('pi-coding-agent context worker', () => {
     // 2026-10-08 加 'edit'：实测 worker 的 11KB 脚本崩在 KeyError，只想改一行却没有 edit
     // （原话 "No edit tool"），bash 门又只准网关调用（用不了 sed），只能整份重写——33 秒
     // 生成，而写 11KB 不可能一次对。edit 与 write 共用 decideFileWrite 那一份边界。
-    expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash', 'write', 'edit']);
+    expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash', 'write', 'edit', 'structured_call']);
     expect(worker.skills.map((skill) => skill.name)).toContain('17dz-platform');
     expect(worker.session.systemPrompt).toContain('worker-system-prompt');
     worker.session.agent.state.messages = [{ role: 'user', content: '恢复任务', timestamp: Date.now() } as never];
