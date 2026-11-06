@@ -1596,8 +1596,8 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 验收⑫ commit 集合与方案对应关系说明
 
-方案 C1–C12 共 12 项，实际 commit 32 个（`git rev-list --count migration/public-release..w5-tail` = 32）：
-- `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 25）；
+方案 C1–C12 共 12 项，实际 commit 40 个（`git rev-list --count migration/public-release..w5-tail` = 40）：
+- `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 38）；
 - C3：`d5e645d` feat(agent)：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷）；
 - C4：`9392df6` feat(agent)：五类失败分类的宿主送达义务收口 + 全覆盖测试矩阵；
        `aeee95b` refactor(agent)：委派失败五路链抽成纯函数 classifyDelegationFailure（逐字搬移，行为零变化）；
@@ -1631,6 +1631,14 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
         `49c376a` fix(eval)：count-a2a-fallback 归档/轮转 + generic-mock 死代码清理；
         `e658310` test(e2e)：harness 兼容 17dz 新环境变量名 DZ_ALLOW_REAL/DZ_EXECUTOR；
         `10ca2cb` docs(debt-ledger)：D-181 登记 17dz 集成 e2e 跨仓配对红。
+- 尾程修复轮（前轮评审 issue①–⑬ 补账）：`8301402` docs(change-safety)：§30 commit 计数 25→32 + 归因修正 + 7 commit 补账（回应 issue ①）；
+        `f8cc2a2` docs(debt-ledger + change-safety)：D-178 状态修正为登记待 owner 认可；C10 表述修正（回应 issue ②）；
+        `32d7581` docs(debt-ledger)：D-181 根因补全治理 env 族未对齐 + DZ_* 命名违规登记（回应 issue ③）；
+        `577872e` fix(docs + agent)：failure-delivery 注释修正 DELEGATION_* 条目现状 + 小裁示3 状态同步（回应 issue ④）；
+        `0fba745` docs(change-safety)：fallback 退役计数口径措辞修正（回应 issue ⑤）；
+        `8d0f99a` docs(change-safety)：gatewayExecPath 行号补全（回应 issue ⑥）；
+        `b174409` docs(e2e-ownership)：turn-loop-ballot.test.ts 补录归属（回应 issue ⑦）；
+        `161cb10` docs(rule-landing)：unit 测试用例数 1848→1850 对齐（回应 issue ⑧）。
 
 无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
 
