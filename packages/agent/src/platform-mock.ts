@@ -22,7 +22,7 @@
  */
 import path from 'node:path';
 
-export const MOCK_EXECUTOR_ENV = 'EXECUTION_EXECUTOR'; // 旧名 DZ_EXECUTOR（兼容保留）
+export const MOCK_EXECUTOR_ENV = 'EXECUTION_EXECUTOR';
 export const MOCK_STATE_ENV = 'EXECUTION_MOCK_STATE';
 export const REAL_COMMIT_ENV = 'FSHINE_REAL_COMMIT';
 

@@ -22,7 +22,7 @@ import { isPlatformMock, MOCK_EXECUTOR_ENV, REAL_COMMIT_ENV } from '@fshine/agen
  * 非 mock 且触平台的执行必须显式 `EXECUTION_ALLOW_REAL=1`，否则 REAL_EXECUTION_NOT_ALLOWED。
  * 只认字面量 '1'（'true'/'yes'/'0' 都不算——模糊真值是 fail-open 的入口）。
  */
-export const ALLOW_REAL_ENV = 'EXECUTION_ALLOW_REAL'; // 旧名 DZ_ALLOW_REAL（兼容保留）
+export const ALLOW_REAL_ENV = 'EXECUTION_ALLOW_REAL';
 
 export interface RuntimeModeSummary {
   /** mock = 应答器替身（不触平台）；real = 真平台执行器（EXECUTION_EXECUTOR 空/未设/怪值） */
