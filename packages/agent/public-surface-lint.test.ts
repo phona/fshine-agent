@@ -281,10 +281,10 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
 
     // ② README 目录表条目 ⊆ 仓库真实顶层目录（只查「目录」表，不含「位置」表）
     const dirEntries: string[] = [];
-    const firstTable = readme.split(/^## /m)[0]!; // 取第一个 ## 标题之前
+    const dirSection = readme.split(/^## 目录\n/m)[1]?.split(/^## /m)[0] ?? ''; // 取「## 目录」之后、下一个 ## 之前
     const dirRegex = /^\| `([^`]+)` \|/gm;
     let dirMatch: RegExpExecArray | null;
-    while ((dirMatch = dirRegex.exec(firstTable)) !== null) {
+    while ((dirMatch = dirRegex.exec(dirSection)) !== null) {
       const dir = dirMatch[1]!;
       // 只取顶层目录（不含 .env 等文件与含 / 的子路径）
       if (dir.includes('/')) continue;
@@ -300,8 +300,9 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
     // ③ README 含「不开浏览器、不触网」
     expect(readme.includes('不开浏览器、不触网'), 'README 缺「不开浏览器、不触网」措辞——mock 联调节的读者入口消失').toBe(true);
 
-    // ④ README 含 EXECUTION_EXECUTOR=mock 与 FSHINE_REAL_COMMIT 两道保险丝
-    expect(readme.includes('EXECUTION_EXECUTOR=mock'), 'README 缺 EXECUTION_EXECUTOR=mock 保险丝说明').toBe(true);
+    // ④ README 含 mock 保险丝说明（执行层治理变量名以执行层声明为准，接受 EXECUTION_EXECUTOR 或 DZ_EXECUTOR）
+    const hasMockFuse = readme.includes('EXECUTION_EXECUTOR=mock') || readme.includes('DZ_EXECUTOR=mock');
+    expect(hasMockFuse, 'README 缺 mock 执行器保险丝说明（执行层治理变量名以该执行层声明为准）').toBe(true);
     expect(readme.includes('FSHINE_REAL_COMMIT'), 'README 缺 FSHINE_REAL_COMMIT 保险丝说明').toBe(true);
   });
 
@@ -343,3 +344,52 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
 //   sed -i 's/\.includes(.17dz.)/false/g' packages/agent/public-surface-lint.test.ts
 //   npx vitest run packages/agent/public-surface-lint.test.ts --project unit
 //   git checkout -- packages/agent/public-surface-lint.test.ts
+
+// ── 就绪检查（acceptance ①）──────────────────────────────────────────────
+// 明文：四项全部满足才开跑；任何一项不满足，把对应前置波次列为阻塞而不是硬开。
+describe('acceptance ①：波次开跑就绪检查（四项全部满足才开跑）', () => {
+  const failures: string[] = [];
+
+  // a) roadmap 对 W1–W5 有记载
+  const roadmap = readFile('docs/roadmap.md');
+  if (!roadmap.includes('W1') || !roadmap.includes('W2') || !roadmap.includes('W3') || !roadmap.includes('W4') || !roadmap.includes('W5')) {
+    failures.push('a) docs/roadmap.md 对 W1–W5 零记载（或不全）');
+  }
+
+  // b) change-safety 尾部为 §27–§30、W1–W5 在册
+  const changeSafety = readFile('docs/change-safety.md');
+  const hasW1ToW5 = ['W1', 'W2', 'W3', 'W4', 'W5'].every(w => changeSafety.includes(w));
+  const hasS27ToS30 = ['§27', '§28', '§29', '§30'].every(s => changeSafety.includes(s));
+  if (!hasW1ToW5 || !hasS27ToS30) {
+    failures.push('b) docs/change-safety.md 尾部缺少 §27–§30 或 W1–W5 在册');
+  }
+
+  // c) AGENTS.md 不自述预算档位在 17dz（或已更新）
+  const agentsMd = readFile('AGENTS.md');
+  if (agentsMd.includes('预算档位决定及累计账本仍在 17dz')) {
+    failures.push('c) AGENTS.md 仍自述预算档位在 17dz（未更新）');
+  }
+
+  // d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件有命中
+  const fourFiles = [
+    'packages/agent/src/platform-mock.ts',
+    'apps/server/runtime-mode.ts',
+    'tests/e2e/harness.ts',
+    '.env.example',
+  ];
+  const dzHits = fourFiles.flatMap(f => {
+    const content = readFile(f);
+    return (content.match(/DZ_EXECUTOR|DZ_ALLOW_REAL/g) ?? []).map(() => f);
+  });
+  if (dzHits.length === 0) {
+    failures.push('d) DZ_EXECUTOR / DZ_ALLOW_REAL 在四文件（platform-mock.ts / runtime-mode.ts / harness.ts / .env.example）中全 0 命中');
+  }
+
+  it('四项全部满足才开跑（当前不满足时列出缺口，阻塞硬开跑）', () => {
+    expect(failures, [
+      '就绪检查四项不满足，对应前置波次应列为阻塞而不是硬开：',
+      ...failures.map(f => `  - ${f}`),
+      '修复前置漂移后重跑本测试直至 failures 为空。',
+    ].join('\n')).toEqual([]);
+  });
+});
