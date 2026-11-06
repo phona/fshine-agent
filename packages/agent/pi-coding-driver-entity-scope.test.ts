@@ -75,7 +75,7 @@ async function makeWorker(options: {
   roots.push(root);
   const modelConfig = await fakeModelRuntime();
   return createPiCodingWorkerSession({
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'entity scope test',
@@ -117,7 +117,7 @@ function appendToolResult(worker: Awaited<ReturnType<typeof makeWorker>>, messag
   worker.session.agent.state.messages = [...worker.session.agent.state.messages, message] as never;
 }
 
-const OVERSCOPE_PLAN = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}';
+const OVERSCOPE_PLAN = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}';
 /** 越权的那一个 token：当前消息里没有它，只能由"平台真的返回过"或"宿主的拒绝理由"提供。 */
 const OVERSCOPE_TOKEN = '猫一杯';
 /** 当前消息只给账套名，越权实体一个字都不给。 */
@@ -169,7 +169,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
 
     const verdict = await submit(
       worker,
-      'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
+      'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
       'call_scope_2',
     );
 
@@ -193,7 +193,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
 
     const verdict = await submit(
       worker,
-      'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
+      'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
       'call_scope_1',
     );
 
@@ -218,7 +218,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
 
     const verdict = await submit(
       worker,
-      'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
+      'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
       'call_scope_1',
     );
 
@@ -245,7 +245,7 @@ describe('实体门：宿主自己的拒绝理由不回灌 haystack（D-086）',
 
     const verdict = await submit(
       worker,
-      'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
+      'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司","--customer","猫一杯"]}]}',
       'call_scope_2',
     );
 

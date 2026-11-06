@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -99,11 +99,11 @@ const agentDirs: string[] = [];
 afterEach(() => { for (const dir of agentDirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 /** 首条 bash：提交 JSON calls 方案（实体都在用户消息里，逐字包含判定放行）。 */
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202606"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202606"]}]}';
 /** 真实平台查询：计划已激活 → G1 放行 → 按 label 表出帧。 */
-const QUERY_COMMAND = 'bin/17dz query query-receivables.js --query 幻辰财税 --period 202606';
+const QUERY_COMMAND = 'bin/example-gateway query query-receivables.js --query 幻辰财税 --period 202606';
 /** 换一个期间的同类查询：帧文本不同，用来在两条相同帧之间"插一件事"。 */
-const QUERY_COMMAND_2 = 'bin/17dz query query-receivables.js --query 幻辰财税 --period 202607';
+const QUERY_COMMAND_2 = 'bin/example-gateway query query-receivables.js --query 幻辰财税 --period 202607';
 
 /** label 表直接注入（平台清单第 5 列的替身）：单测里绝不 spawn 平台 CLI 派生。 */
 const OPERATION_LABELS = new Map([['query-receivables', '读取余额']]);
@@ -130,9 +130,9 @@ function workerDriver() {
     operationLabels: OPERATION_LABELS,
     planCliRunner: activatingPlanRunner,
     // C7b 起派生 loader 对未声明 gateway 降级空表（不回退实例名缺省）：本文件是点名
-    // 17dz 的 L4 集成测试（见文件头），按自己驱动的命令前缀显式声明——args 样式表
+    // example-gateway 的 L4 集成测试（见文件头），按自己驱动的命令前缀显式声明——args 样式表
     // 仍从兄弟仓 CLI 真派生（不替身），与 harness.ts 的 GATEWAY 同一口径。
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
   });
 }
 

@@ -8,14 +8,14 @@
 
 - **通用**：单仓就能跑，不依赖兄弟仓、不依赖 `config/agent.yaml`、不依赖财税语义、
   不依赖财税 mock、不依赖真模型。断言面只涉及编排机制本身。
-- **L4 集成**：必须 fshine + 17dz 一起才能跑。只要满足任一条件即判 L4 集成，
+- **L4 集成**：必须 fshine + 执行层 一起才能跑。只要满足任一条件即判 L4 集成，
   不论该用例的断言本身是不是通用机制：
   - import `tests/e2e/harness.ts`（该模块在加载时就派生兄弟仓的 operation 表、
-    并在 beforeAll 要求 `bin/17dz` 存在）；
-  - 或直接 spawn 兄弟仓 `bin/17dz`（如 `plan-awareness`）；
+    并在 beforeAll 要求 `bin/example-gateway` 存在）；
+  - 或直接 spawn 兄弟仓 `bin/example-gateway`（如 `plan-awareness`）；
   - 或断言面涉及财税语义、财税 mock 状态、平台账本、平台审计。
 - L4 集成的证据不得冒充通用证据：通用闭环（CI）只认 typecheck + unit +
-  generic-mock，L4 集成全绿只能证明“fshine + 17dz 这一对实例能跑”，
+  generic-mock，L4 集成全绿只能证明“fshine + 执行层 这一对实例能跑”，
   不能证明“换一个执行层后仍成立”。
 
 ## CI 口径（与 `scripts/ci.sh`、`.github/workflows/ci.yml` 一致）
@@ -42,8 +42,8 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 
 ### L4 集成测试的前置条件（全部都要）
 
-- 兄弟仓在 `FSHINE_PLATFORM_ROOT`（缺省为本仓上一级的 `17dz-platform`），
-  且其中已跑过 `npm ci`（否则 `bin/17dz plan evaluate` 会因缺 `ajv` 等依赖而失败，
+- 兄弟仓在 `FSHINE_PLATFORM_ROOT`（缺省为本仓上一级的 `fictional-execution-layer`），
+  且其中已跑过 `npm ci`（否则 `bin/example-gateway plan evaluate` 会因缺 `ajv` 等依赖而失败，
   这是环境缺陷，不是代码缺陷）；
 - 本仓 gitignored 的 `config/agent.yaml` 存在（部署配置，永不提交），
   harness 的 `boot()` 会读它并按用例打补丁；
@@ -62,8 +62,8 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 
 - **定判 1——main 侧红是环境伪影，不是代码回归。** main 版该测试无回落，
   直接 `readFileSync(<PLATFORM_ROOT>/src/execution/plan-schema.json)`；
-  单仓检出或 `/tmp` 工作树下兄弟仓不在 `../17dz-platform` 时，第 1 用例必以
-  `ENOENT: no such file or directory, open '…/17dz-platform/src/execution/plan-schema.json'`
+  单仓检出或 `/tmp` 工作树下兄弟仓不在 `../fictional-execution-layer` 时，第 1 用例必以
+  `ENOENT: no such file or directory, open '…/fictional-execution-layer/src/execution/plan-schema.json'`
   失败，其余 2 用例仍过（实测：1 failed | 2 passed）。兄弟仓在场时 main 版 3/3 过。
   另注意变量名已改：main 只认旧名 `DZ_PLATFORM_ROOT`，单设新名
   `FSHINE_PLATFORM_ROOT` 救不了 main（实测仍 ENOENT）。
@@ -94,11 +94,11 @@ CLI 在场。
 | `harness-cursor.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | harness 光标保真（断言本身是通用机制，但跑法是 L4，故判 L4） |
 | `harness-fidelity.test.ts` | L4 集成 | 经 harness：兄弟仓派生表 + 真 spawn 一次平台 CLI（mock） | harness 保真度绊线 HF-1/HF-2/HF-3 |
 | `input-shape-variants.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 输入形状变体不改变确定性判定 |
-| `local-fake.test.ts` | 通用 | 无：本仓 cwd 作 profile root，`docs/` 作 skillRoots 占位，脚本化驱动 | 本地 runner：委派透传、transcript 恢复、profile 越权拒绝。注：文件内 profile 键名 `17dz` 是遗留键名，不是兄弟仓依赖，改名是后续清理项，不改变本判据 |
-| `plan-awareness.test.ts` | L4 集成 | 直接 spawn 兄弟仓 `bin/17dz`（mock executor），自有计划状态文件；CLI 缺失时跳过 | fshine ↔ 17dz 计划边界：通知/确认门、累计重量、账套存在性专用搜索 |
+| `local-fake.test.ts` | 通用 | 无：本仓 cwd 作 profile root，`docs/` 作 skillRoots 占位，脚本化驱动 | 本地 runner：委派透传、transcript 恢复、profile 越权拒绝。注：文件内 profile 键名 `<profileId>` 是遗留键名，不是兄弟仓依赖，改名是后续清理项，不改变本判据 |
+| `plan-awareness.test.ts` | L4 集成 | 直接 spawn 兄弟仓 `bin/example-gateway`（mock executor），自有计划状态文件；CLI 缺失时跳过 | fshine ↔ 执行层 计划边界：通知/确认门、累计重量、账套存在性专用搜索 |
 | `turn-loop-activated-plan.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 批准了但没执行的收尾 |
 | `turn-loop-attachments.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 附件/文件消息的真实渠道路径 |
-| `turn-loop-ballot.test.ts` | L4 集成（永久跳过） | 经 harness：兄弟仓 + 财税 mock + 配置 | ballot 第二写域结构性不可跑（harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs），describe.skip |
+| `turn-loop-ballot.test.ts` | L4 集成（永久跳过） | 经 harness：兄弟仓 + 财税 mock + 配置 | ballot 第二写域结构性不可跑（harness 硬编码 bin/example-gateway 且 ballot.* 仅存在于 dummy.cjs），describe.skip |
 | `turn-loop-clarification.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 结构化歧义 → 宿主机械组装澄清 |
 | `turn-loop-concurrent.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 并发会话里的多步计划中断/恢复/跳过/确认门 |
 | `turn-loop-confirmation.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 跨轮确认语义 |
@@ -134,7 +134,7 @@ CLI 在场。
 ## 网关与环境名归属
 
 - 通用测试与通用 eval 走通用网关 `bin/generic`（`scripts/eval/fixtures/dummy-platform`）。
-- L4 集成测试走财税实例网关 `bin/17dz`（兄弟仓），该名只属于该实例 profile，
+- L4 集成测试走财税实例网关 `bin/example-gateway`（兄弟仓），该名只属于该实例 profile，
   不属于通用层。
 - 环境名一律 `EXECUTION_*`（执行层治理）/`FSHINE_*`（宿主自有）；
   工作树 grep 旧前缀保持 0（历史提交里的旧名不重写，度量以工作树为准）。

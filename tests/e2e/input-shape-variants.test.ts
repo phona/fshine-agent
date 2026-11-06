@@ -1,9 +1,9 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：输入形状多样性——口语/标点/空白/长度/语气/错字变体不得改变确定性机器的判定。
- * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
  *
  * 为什么要有这张离线网：既有 turn-loop 用例的用户消息全是规整财务查询句，而真实企微输入
  * 是口语、全角标点、脏空白、超长铺垫、表情和错字。三个锚场景背后各有一台确定性机器：

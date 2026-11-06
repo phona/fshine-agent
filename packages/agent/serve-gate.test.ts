@@ -7,64 +7,64 @@ import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
 
 describe('isServeCliInvocation（首词规则）', () => {
-  it('放行 bin/17dz 的合法形态', () => {
-    expect(isServeCliInvocation('bin/17dz query src/voucher/scripts/query-saved.js 幻晟 202609', 'bin/17dz')).toBe(true);
-    expect(isServeCliInvocation('bin/17dz query query-saved.js 幻晟 202609', 'bin/17dz')).toBe(true);
-    expect(isServeCliInvocation('./bin/17dz prepare src/voucher/scripts/fill.js c.json --batch', 'bin/17dz')).toBe(true);
-    expect(isServeCliInvocation('bash bin/17dz query x', 'bin/17dz')).toBe(true);
-    expect(isServeCliInvocation('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz query x', 'bin/17dz')).toBe(true);
-    expect(isServeCliInvocation('/usr/bin/env bash bin/17dz query x', 'bin/17dz')).toBe(false); // /usr/bin/env 前缀不放行
+  it('放行 bin/example-gateway 的合法形态', () => {
+    expect(isServeCliInvocation('bin/example-gateway query src/voucher/scripts/query-saved.js 幻晟 202609', 'bin/example-gateway')).toBe(true);
+    expect(isServeCliInvocation('bin/example-gateway query query-saved.js 幻晟 202609', 'bin/example-gateway')).toBe(true);
+    expect(isServeCliInvocation('./bin/example-gateway prepare src/voucher/scripts/fill.js c.json --batch', 'bin/example-gateway')).toBe(true);
+    expect(isServeCliInvocation('bash bin/example-gateway query x', 'bin/example-gateway')).toBe(true);
+    expect(isServeCliInvocation('/home/fictional-user/fictional-projects/fictional-execution-layer/bin/example-gateway query x', 'bin/example-gateway')).toBe(true);
+    expect(isServeCliInvocation('/usr/bin/env bash bin/example-gateway query x', 'bin/example-gateway')).toBe(false); // /usr/bin/env 前缀不放行
   });
 
   it('拒绝 env 前缀注入（法域声明不可剥离）', () => {
-    expect(isServeCliInvocation('EXECUTION_SERVE=0 bin/17dz commit src/voucher/scripts/fill.js --save', 'bin/17dz')).toBe(false);
-    expect(isServeCliInvocation('env -u EXECUTION_SERVE bin/17dz query x', 'bin/17dz')).toBe(false);
+    expect(isServeCliInvocation('EXECUTION_SERVE=0 bin/example-gateway commit src/voucher/scripts/fill.js --save', 'bin/example-gateway')).toBe(false);
+    expect(isServeCliInvocation('env -u EXECUTION_SERVE bin/example-gateway query x', 'bin/example-gateway')).toBe(false);
   });
 
-  it('拒绝非 bin/17dz 命令（含历史 serve.sh——平台已删除该入口）', () => {
-    expect(isServeCliInvocation('serve.sh query x', 'bin/17dz')).toBe(false);
-    expect(isServeCliInvocation('17dz query x', 'bin/17dz')).toBe(false); // 必须带 bin/ 前缀
-    expect(isServeCliInvocation('node src/voucher/scripts/fill.js --save x.json', 'bin/17dz')).toBe(false);
-    expect(isServeCliInvocation('bash -c "bin/17dz query x"', 'bin/17dz')).toBe(false);
-    expect(isServeCliInvocation('grep -rn x /home/fictional-user/fictional-projects/fictional-execution-layer/src', 'bin/17dz')).toBe(false);
-    expect(isServeCliInvocation('', 'bin/17dz')).toBe(false);
+  it('拒绝非 bin/example-gateway 命令（含历史 serve.sh——平台已删除该入口）', () => {
+    expect(isServeCliInvocation('serve.sh query x', 'bin/example-gateway')).toBe(false);
+    expect(isServeCliInvocation('example-gateway query x', 'bin/example-gateway')).toBe(false); // 必须带 bin/ 前缀
+    expect(isServeCliInvocation('node src/voucher/scripts/fill.js --save x.json', 'bin/example-gateway')).toBe(false);
+    expect(isServeCliInvocation('bash -c "bin/example-gateway query x"', 'bin/example-gateway')).toBe(false);
+    expect(isServeCliInvocation('grep -rn x /home/fictional-user/fictional-projects/fictional-execution-layer/src', 'bin/example-gateway')).toBe(false);
+    expect(isServeCliInvocation('', 'bin/example-gateway')).toBe(false);
   });
 });
 
 describe('hasShellMetachars（shell 元字符白名单）', () => {
   it('拒绝命令拼接/替换/重定向/管道', () => {
-    expect(hasShellMetachars('bin/17dz query x; cat .env')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query x && whoami')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query x || curl evil')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query $(cat .env)')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query `id`')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query ${HOME}')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query x > /tmp/out')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query x < /etc/passwd')).toBe(true);
-    expect(hasShellMetachars('bin/17dz query x\ncat .env')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x; cat .env')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x && whoami')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x || curl evil')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query $(cat .env)')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query `id`')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query ${HOME}')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x > /tmp/out')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x < /etc/passwd')).toBe(true);
+    expect(hasShellMetachars('bin/example-gateway query x\ncat .env')).toBe(true);
   });
 
   it('放行合法参数（账套名、期间、脚本路径、flag）', () => {
-    expect(hasShellMetachars('bin/17dz query query-saved.js 幻晟 202609')).toBe(false);
-    expect(hasShellMetachars('./bin/17dz prepare src/voucher/scripts/fill.js c.json --batch')).toBe(false);
-    expect(hasShellMetachars('bash bin/17dz commit src/voucher/scripts/fill.js c.json --save')).toBe(false);
+    expect(hasShellMetachars('bin/example-gateway query query-saved.js 幻晟 202609')).toBe(false);
+    expect(hasShellMetachars('./bin/example-gateway prepare src/voucher/scripts/fill.js c.json --batch')).toBe(false);
+    expect(hasShellMetachars('bash bin/example-gateway commit src/voucher/scripts/fill.js c.json --save')).toBe(false);
   });
 });
 
 describe('extractGateScript', () => {
   it('提取 query/prepare/commit 的脚本参数', () => {
-    expect(extractGateScript('bin/17dz query src/voucher/scripts/query-saved.js A 202607')).toBe('src/voucher/scripts/query-saved.js');
-    expect(extractGateScript('bin/17dz commit src/voucher/scripts/fill.js c.json --batch --save')).toBe('src/voucher/scripts/fill.js');
-    expect(extractGateScript('bin/17dz operation run voucher.query-saved x')).toBe('voucher.query-saved');
+    expect(extractGateScript('bin/example-gateway query src/voucher/scripts/query-saved.js A 202607')).toBe('src/voucher/scripts/query-saved.js');
+    expect(extractGateScript('bin/example-gateway commit src/voucher/scripts/fill.js c.json --batch --save')).toBe('src/voucher/scripts/fill.js');
+    expect(extractGateScript('bin/example-gateway operation run voucher.query-saved x')).toBe('voucher.query-saved');
   });
   it('plan/未知形态返回 null', () => {
-    expect(extractGateScript('bin/17dz plan\ngoal: x')).toBeNull();
-    expect(extractGateScript('bin/17dz')).toBeNull();
+    expect(extractGateScript('bin/example-gateway plan\ngoal: x')).toBeNull();
+    expect(extractGateScript('bin/example-gateway')).toBeNull();
   });
 });
 
 const PLAN = [
-  'bin/17dz plan',
+  'bin/example-gateway plan',
   'goal: 查询幻辰财税 202607 凭证',
   'resources:',
   '  account_sets: [幻辰财税]',
@@ -80,7 +80,7 @@ const PLAN = [
 
 function makeGate(extra: Partial<ServeGateOptions> = {}) {
   const events: ServeGateEvent[] = [];
-  const gate = createServeGate({ onEvent: (e) => events.push(e), ...extra , gateway: 'bin/17dz' });
+  const gate = createServeGate({ onEvent: (e) => events.push(e), ...extra , gateway: 'bin/example-gateway' });
   return { gate, events };
 }
 
@@ -94,38 +94,38 @@ function makeGate(extra: Partial<ServeGateOptions> = {}) {
 // 这个能力"。
 describe('serveMetadataCommand（元数据白名单）', () => {
   it('认得出能力面与计划形状两个元数据出口', () => {
-    expect(serveMetadataCommand('bin/17dz operation list', 'bin/17dz')).toBe('operation list');
-    expect(serveMetadataCommand('bin/17dz operation list --json', 'bin/17dz')).toBe('operation list');
-    expect(serveMetadataCommand('bin/17dz operation list payroll', 'bin/17dz')).toBe('operation list');
-    expect(serveMetadataCommand('bin/17dz plan --schema', 'bin/17dz')).toBe('plan --schema');
-    expect(serveMetadataCommand('bin/17dz plan schema', 'bin/17dz')).toBe('plan --schema');
+    expect(serveMetadataCommand('bin/example-gateway operation list', 'bin/example-gateway')).toBe('operation list');
+    expect(serveMetadataCommand('bin/example-gateway operation list --json', 'bin/example-gateway')).toBe('operation list');
+    expect(serveMetadataCommand('bin/example-gateway operation list payroll', 'bin/example-gateway')).toBe('operation list');
+    expect(serveMetadataCommand('bin/example-gateway plan --schema', 'bin/example-gateway')).toBe('plan --schema');
+    expect(serveMetadataCommand('bin/example-gateway plan schema', 'bin/example-gateway')).toBe('plan --schema');
   });
   it('operation run / plan evaluate 等真执行与提方案不在白名单', () => {
     // 这两个一放，计划门等于拆了：run 是真执行（要计划要记账），evaluate 是提交方案
-    expect(serveMetadataCommand('bin/17dz operation run payroll.transform x', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz operation run voucher.query-saved A 202609', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz plan evaluate --task-id t --stdin', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz plan current --task-id t', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz plan activate --stdin', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz query src/voucher/scripts/query-saved.js A 202609', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz prepare src/payroll/scripts/transform.py c.json out', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('bin/17dz', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('', 'bin/17dz')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway operation run payroll.transform x', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway operation run voucher.query-saved A 202609', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway plan evaluate --task-id t --stdin', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway plan current --task-id t', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway plan activate --stdin', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway query src/voucher/scripts/query-saved.js A 202609', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway prepare src/payroll/scripts/transform.py c.json out', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('bin/example-gateway', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('', 'bin/example-gateway')).toBeNull();
   });
   it('首 token 必须是网关：普通命令里拼上元数据字样不得绕过计划前置', () => {
     // 否则 `echo operation list` 之类就能骗过豁免
-    expect(serveMetadataCommand('echo operation list', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('cat operation list', 'bin/17dz')).toBeNull();
-    expect(serveMetadataCommand('env FOO=1 bin/17dz operation list', 'bin/17dz')).toBeNull();
+    expect(serveMetadataCommand('echo operation list', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('cat operation list', 'bin/example-gateway')).toBeNull();
+    expect(serveMetadataCommand('env FOO=1 bin/example-gateway operation list', 'bin/example-gateway')).toBeNull();
   });
 });
 
 describe('createServeGate（通用执行安全门）', () => {
   it('平台计划已激活时仍拒绝模型直调 evaluate/activate 子命令', () => {
-    const gate = createServeGate({ platformRoot: process.cwd(), planActive: () => true , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: process.cwd(), planActive: () => true , gateway: 'bin/example-gateway' });
     for (const command of [
-      'bin/17dz plan evaluate --task-id forged --stdin',
-      '/home/fictional-user/fictional-projects/fictional-execution-layer/bin/17dz plan activate --stdin',
+      'bin/example-gateway plan evaluate --task-id forged --stdin',
+      '/home/fictional-user/fictional-projects/fictional-execution-layer/bin/example-gateway plan activate --stdin',
     ]) {
       const result = gate({ name: 'bash', arguments: { command } });
       expect(result?.block).toBe(true);
@@ -134,16 +134,16 @@ describe('createServeGate（通用执行安全门）', () => {
   });
 
   it('plan 拒绝消息教正确提交形式：单行原始命令，不要代码块/外层引号/多行', () => {
-    const gate = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
     // 围栏版计划命令（真实平台实测的误导来源）与裸 evaluate 都拿到同一条教学消息
     for (const command of [
-      '```json\nbin/17dz plan {"calls":[{"operation":"probe.query","args":[]}]}\n```',
-      'bin/17dz plan evaluate --task-id forged --stdin',
+      '```json\nbin/example-gateway plan {"calls":[{"operation":"probe.query","args":[]}]}\n```',
+      'bin/example-gateway plan evaluate --task-id forged --stdin',
     ]) {
       const reason = gate({ name: 'bash', arguments: { command } })?.reason ?? '';
       // 可行动的方向：唯一合法形式 + 三种常见错误包装
       expect(reason).toContain('单行');
-      expect(reason).toContain('bin/17dz plan');
+      expect(reason).toContain('bin/example-gateway plan');
       expect(reason).toContain('不要');
       expect(reason).toContain('宿主');
       // 措辞纪律：不出现业务词（platform-leak-lint 同款预算），不出现平台脚本文件名
@@ -153,62 +153,62 @@ describe('createServeGate（通用执行安全门）', () => {
   });
 
   it('计划未激活时拒绝平台调用，宿主激活后允许网关调用', () => {
-    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
-    expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } })?.reason).toContain('宿主激活');
-    const active = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
-    expect(active({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } })?.block).toBeUndefined();
+    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js A 202609' } })?.reason).toContain('宿主激活');
+    const active = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    expect(active({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js A 202609' } })?.block).toBeUndefined();
   });
 
   it('E1：元数据查询在计划未激活时放行，且留审计痕', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => false, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
-    for (const cmd of ['bin/17dz operation list', 'bin/17dz operation list --json', 'bin/17dz plan --schema', 'bin/17dz plan schema']) {
+    const gate = createServeGate({ planActive: () => false, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
+    for (const cmd of ['bin/example-gateway operation list', 'bin/example-gateway operation list --json', 'bin/example-gateway plan --schema', 'bin/example-gateway plan schema']) {
       expect(gate({ name: 'bash', arguments: { command: cmd } })?.block, cmd).toBeUndefined();
     }
     // 留痕："宿主放行了什么"必须可复盘，否则能力面在审计里没有痕迹
     expect(events.map((e) => e.detail)).toEqual([
-      'bin/17dz operation list', 'bin/17dz operation list --json', 'bin/17dz plan --schema', 'bin/17dz plan schema',
+      'bin/example-gateway operation list', 'bin/example-gateway operation list --json', 'bin/example-gateway plan --schema', 'bin/example-gateway plan schema',
     ]);
     expect(events.every((e) => e.allowed)).toBe(true);
   });
   it('E1：已解析的 read/prepare 操作在计划未激活时仍要计划；未知子命令/裸命令放行（形态合法性归执行层）', () => {
-    const gate = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
     // 已解析出 operation 且 plan 语义非 false → 计划前置照旧（编排层执法执行层声明）
     for (const cmd of [
-      'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
-      'bin/17dz prepare src/payroll/scripts/transform.py c.json out',
+      'bin/example-gateway query src/voucher/scripts/query-saved.js A 202609',
+      'bin/example-gateway prepare src/payroll/scripts/transform.py c.json out',
     ]) {
       expect(gate({ name: 'bash', arguments: { command: cmd } })?.block, cmd).toBe(true);
     }
     // 未知子命令带脚本 → fail-closed 也要计划（既有防线：未知 op 可能写平台数据）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation run payroll.transform x' } })?.block).toBe(true);
-    // 裸 'bin/17dz operation'（无脚本 → 非网关调用形态）→ 放行，执行层原生处理
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation' } })?.block).toBeUndefined();
-    // 裸 'bin/17dz plan' → 计划提交形状教学（宿主协议职责，保留）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz plan' } })?.block).toBe(true);
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation run payroll.transform x' } })?.block).toBe(true);
+    // 裸 'bin/example-gateway operation'（无脚本 → 非网关调用形态）→ 放行，执行层原生处理
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation' } })?.block).toBeUndefined();
+    // 裸 'bin/example-gateway plan' → 计划提交形状教学（宿主协议职责，保留）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway plan' } })?.block).toBe(true);
   });
   it('E1：后缀污染的元数据命令放行（形态合法性归执行层，编排层不再拦）', () => {
-    const gate = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
-    // 分号后缀使命令不再是干净的元数据形态——编排层放行，bin/17dz 原生拒绝未知形态
-    const v = gate({ name: 'bash', arguments: { command: 'bin/17dz operation list; rm -rf /' } });
+    const gate = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+    // 分号后缀使命令不再是干净的元数据形态——编排层放行，bin/example-gateway 原生拒绝未知形态
+    const v = gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list; rm -rf /' } });
     expect(v?.block).toBeUndefined();
   });
   it('E1：计划已激活后元数据查询照常放行（豁免不改变已激活时的行为）', () => {
-    const gate = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list' } })?.block).toBeUndefined();
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list' } })?.block).toBeUndefined();
   });
   it('bash：元字符软放行（审计留痕），非网关命令照拦', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => true, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
     // 2026-10-18 软约束：元字符硬拦曾把附件名里的 ASCII 括号 (1) 当注入拦死，worker 的
     // 合法路径参数两度被拒（run5 实测）。此刻放行 + detail 软标记；硬拦随沙箱阶段重建。
-    for (const command of ['bin/17dz query x; cat .env', 'bin/17dz query $(cat .env)']) {
+    for (const command of ['bin/example-gateway query x; cat .env', 'bin/example-gateway query $(cat .env)']) {
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
     const metacharEvents = events.filter((e) => e.detail?.includes('软放行'));
     expect(metacharEvents.length).toBe(2);
     // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘
-    for (const command of ['EXECUTION_SERVE=0 bin/17dz query x', 'node script.js']) {
+    for (const command of ['EXECUTION_SERVE=0 bin/example-gateway query x', 'node script.js']) {
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });
@@ -245,24 +245,24 @@ describe('createServeGate（通用执行安全门）', () => {
     const bash = (command: string) => ({ name: 'bash', arguments: { command } });
 
     it('plan:false 的 operation 在计划未激活时放行（不再自相矛盾）', () => {
-      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/17dz' });
+      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/example-gateway' });
       for (const cmd of [
-        'bin/17dz operation run payroll.validate tmp/x.json',
-        'bin/17dz operation run payroll.transform tmp/x.json tmp/out',
-        'bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json',
-        'bin/17dz prepare src/payroll/scripts/transform.py tmp/x.json tmp/out',
+        'bin/example-gateway operation run payroll.validate tmp/x.json',
+        'bin/example-gateway operation run payroll.transform tmp/x.json tmp/out',
+        'bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json',
+        'bin/example-gateway prepare src/payroll/scripts/transform.py tmp/x.json tmp/out',
       ]) {
         expect(gate(bash(cmd))?.block, cmd).toBeUndefined();
       }
     });
 
     it('plan:true 的 operation 在计划未激活时照旧拒 SERVE_PLAN_NOT_ACTIVE', () => {
-      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/17dz' });
+      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/example-gateway' });
       for (const cmd of [
-        'bin/17dz query src/finance/scripts/search-account-sets.js --query x',
-        'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
-        'bin/17dz operation run finance.search-account-sets --query x',
-        'bin/17dz commit src/voucher/scripts/fill.js c.json --save',
+        'bin/example-gateway query src/finance/scripts/search-account-sets.js --query x',
+        'bin/example-gateway query src/voucher/scripts/query-saved.js A 202609',
+        'bin/example-gateway operation run finance.search-account-sets --query x',
+        'bin/example-gateway commit src/voucher/scripts/fill.js c.json --save',
       ]) {
         const v = gate(bash(cmd));
         expect(v?.block, cmd).toBe(true);
@@ -273,14 +273,14 @@ describe('createServeGate（通用执行安全门）', () => {
     it('同名脚本按域解析：payroll 域纯本地放行，voucher 域只读仍要计划', () => {
       // 平台侧同一份脚本名登记在两个域而语义不同（一个纯本地、一个只读平台数据）。
       // 跨域猜就会把"要计划"的判成"不要计划"——那是放松方向，绝不允许。
-      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/17dz' });
-      expect(gate(bash('bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json'))?.block).toBeUndefined();
-      expect(gate(bash('bin/17dz query src/voucher/scripts/validate-contract.js tmp/x.json'))?.block).toBe(true);
+      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/example-gateway' });
+      expect(gate(bash('bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json'))?.block).toBeUndefined();
+      expect(gate(bash('bin/example-gateway query src/voucher/scripts/validate-contract.js tmp/x.json'))?.block).toBe(true);
     });
 
     it('fail-closed：语义表缺失 / 空表 / operation 不在表里 → 照旧要求计划', () => {
-      const inactive = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
-      const empty = createServeGate({ planActive: () => false, operationSemantics: new Map() , gateway: 'bin/17dz' });
+      const inactive = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+      const empty = createServeGate({ planActive: () => false, operationSemantics: new Map() , gateway: 'bin/example-gateway' });
       const missing = createServeGate({
         planActive: () => false,
         // 表里只有只读域：payroll 的两个 operation 查不到
@@ -288,14 +288,14 @@ describe('createServeGate（通用执行安全门）', () => {
           ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
           ['query-saved', { plan: true, confirm: false, mock: true }],
         ]),
-        gateway: 'bin/17dz',
+        gateway: 'bin/example-gateway',
       });
       for (const gate of [inactive, empty, missing]) {
         for (const cmd of [
-          'bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json',
-          'bin/17dz prepare src/payroll/scripts/transform.py tmp/x.json tmp/out',
-          'bin/17dz operation run payroll.validate tmp/x.json',
-          'bin/17dz query src/unknown/scripts/whatever.js x',
+          'bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json',
+          'bin/example-gateway prepare src/payroll/scripts/transform.py tmp/x.json tmp/out',
+          'bin/example-gateway operation run payroll.validate tmp/x.json',
+          'bin/example-gateway query src/unknown/scripts/whatever.js x',
         ]) {
           expect(gate(bash(cmd))?.block, cmd).toBe(true);
         }
@@ -303,39 +303,39 @@ describe('createServeGate（通用执行安全门）', () => {
     });
 
     it('已有激活计划时一切照旧（豁免不改变已激活时的行为）', () => {
-      const gate = createServeGate({ planActive: () => true, operationSemantics: SEMANTICS , gateway: 'bin/17dz' });
+      const gate = createServeGate({ planActive: () => true, operationSemantics: SEMANTICS , gateway: 'bin/example-gateway' });
       for (const cmd of [
-        'bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json',
-        'bin/17dz query src/finance/scripts/search-account-sets.js --query x',
-        'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
+        'bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json',
+        'bin/example-gateway query src/finance/scripts/search-account-sets.js --query x',
+        'bin/example-gateway query src/voucher/scripts/query-saved.js A 202609',
       ]) {
         expect(gate(bash(cmd))?.block, cmd).toBeUndefined();
       }
     });
 
     it('放行的 plan:false 调用仍受其余门约束：非网关 / 敏感路径照拦（元字符已软放行）', () => {
-      const gate = createServeGate({ platformRoot: process.cwd(), planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/17dz' });
+      const gate = createServeGate({ platformRoot: process.cwd(), planActive: () => false, operationSemantics: SEMANTICS , gateway: 'bin/example-gateway' });
       // 元字符 2026-10-18 起软放行（硬拦误伤文件名里的 ASCII 括号），硬拦随沙箱重建
-      expect(gate(bash('bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json; rm -rf /'))?.block).toBeUndefined();
+      expect(gate(bash('bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json; rm -rf /'))?.block).toBeUndefined();
       // 非网关调用放行（首词规则降级为分类；执行层自治）
       expect(gate(bash('cat x'))?.block).toBeUndefined();
       // 敏感路径照拦（read 门与计划分支无关，但同一门内不得因豁免松动）
       expect(gate({ name: 'read', arguments: { file_path: '.env' } })?.block).toBe(true);
       // local 打到工作区外：编排层放行，执行层网关原生拒（自治）
-      expect(gate(bash('bin/17dz local src/payroll/scripts/transform.py'))?.block).toBeUndefined();
+      expect(gate(bash('bin/example-gateway local src/payroll/scripts/transform.py'))?.block).toBeUndefined();
     });
 
     it('放行的 plan:false 调用照常留审计痕（宿主放行了什么必须可复盘）', () => {
       const events: ServeGateEvent[] = [];
-      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
-      gate(bash('bin/17dz query src/payroll/scripts/validate-contract.js tmp/x.json'));
+      const gate = createServeGate({ planActive: () => false, operationSemantics: SEMANTICS, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
+      gate(bash('bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json'));
       expect(events.at(-1)).toMatchObject({ tool: 'bash', allowed: true });
       expect(events.at(-1)?.detail).toContain('validate-contract.js');
     });
   });
 
   it('read 按知识面裁决，ls 只受 workspace 边界与敏感路径约束', () => {
-    const gate = createServeGate({ platformRoot: process.cwd() , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: process.cwd() , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'read', arguments: { file_path: 'docs/guide.md' } })?.block).toBeUndefined();
     expect(gate({ name: 'read', arguments: { file_path: 'src/private.ts' } })?.block).toBe(true);
     expect(gate({ name: 'read', arguments: { file_path: '.env' } })?.block).toBe(true);
@@ -345,12 +345,12 @@ describe('createServeGate（通用执行安全门）', () => {
 
   it('放行与拦截均审计，审计故障不影响裁决', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query q A 202609' } });
+    const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query q A 202609' } });
     gate({ name: 'bash', arguments: { command: 'cat .env' } });
     expect(events.map((event) => event.allowed)).toEqual([true, true]);
-    const brokenAudit = createServeGate({ planActive: () => true, onEvent: () => { throw new Error('audit down'); }, gateway: 'bin/17dz' });
-    expect(brokenAudit({ name: 'bash', arguments: { command: 'bin/17dz query q A 202609' } })?.block).toBeUndefined();
+    const brokenAudit = createServeGate({ planActive: () => true, onEvent: () => { throw new Error('audit down'); }, gateway: 'bin/example-gateway' });
+    expect(brokenAudit({ name: 'bash', arguments: { command: 'bin/example-gateway query q A 202609' } })?.block).toBeUndefined();
   });
 });
 
@@ -369,63 +369,63 @@ describe('createServeGate（通用执行安全门）', () => {
 describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 任务一）', () => {
   /** A1 实测形态：worker 猜出来的调用（缺 mode、缺脚本路径）。 */
   const GUESSED = [
-    'bin/17dz payroll.validate tmp/req_x/contract.json',
-    'bin/17dz payroll.transform tmp/req_x/contract.json out.xlsx',
-    'bin/17dz validate tmp/req_x/contract.json',
-    'bin/17dz operation',
-    'bin/17dz operation run',
-    'bin/17dz query',
-    'bin/17dz',
-    'bash bin/17dz payroll.validate tmp/req_x/contract.json',
+    'bin/example-gateway payroll.validate tmp/req_x/contract.json',
+    'bin/example-gateway payroll.transform tmp/req_x/contract.json out.xlsx',
+    'bin/example-gateway validate tmp/req_x/contract.json',
+    'bin/example-gateway operation',
+    'bin/example-gateway operation run',
+    'bin/example-gateway query',
+    'bin/example-gateway',
+    'bash bin/example-gateway payroll.validate tmp/req_x/contract.json',
   ];
 
   it('猜的形状放行：形态合法性归执行层网关原生裁决（编排层只对认得出的 operation 执法）', () => {
-    const gate = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
     for (const command of GUESSED) {
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });
 
   it('既有拒绝理由语义不变：新码只收"解析不出 operation"这一种', () => {
-    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x' , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x' , gateway: 'bin/example-gateway' });
     // 根本不是网关调用 → 放行（首词拦截退役，审计留痕）
     expect(gate({ name: 'bash', arguments: { command: 'python src/payroll/scripts/transform.py a b' } })?.block).toBeUndefined();
     // shell 元字符（2026-10-18 软放行）：三条旧 METACHAR 拒绝退役，命令放行仅留审计
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query a b; cat .env' } })).toBeUndefined();
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list\nrm -rf /' } })).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway query a b; cat .env' } })).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list\nrm -rf /' } })).toBeUndefined();
     // tmp/req_x 是本测试声明的 scratchDir：区内 local + 元字符 → 软放行
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/x.py && whoami' } })).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local tmp/req_x/x.py && whoami' } })).toBeUndefined();
     // local 打到放行根之外：编排层放行，执行层网关原生拒（自治）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local src/payroll/scripts/transform.py' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local src/payroll/scripts/transform.py' } })?.block).toBeUndefined();
     // 计划提交形状教学（worker 直达 evaluate/activate）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz plan activate --stdin' } })?.reason)
-      .toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING', undefined, 'bin/17dz'));
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway plan activate --stdin' } })?.reason)
+      .toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING', undefined, 'bin/example-gateway'));
     // 计划未激活（形态合法、只是还没计划）
-    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
-    expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz query q.js A 202609' } })?.reason)
+    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/example-gateway query q.js A 202609' } })?.reason)
       .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
     // 元数据查询与合法 local 照旧放行（新码没有把豁免开成拒绝）
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz operation list --json' } })?.block).toBeUndefined();
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/run.py' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list --json' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local tmp/req_x/run.py' } })?.block).toBeUndefined();
   });
 
   it('领域记忆组的计划门行为一字不改（形态认得出来，但今天仍要激活的计划）', () => {
     // 回归锁：memory 是平台技能文档写明给 worker 的出口。新码只堵"猜形状"，不许顺手把它
     // 关掉，也不许为了让它过而放松计划门——两侧现状都必须原样。
-    const active = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
-    expect(active({ name: 'bash', arguments: { command: 'bin/17dz memory list --scope customer --id 甲' } })?.block).toBeUndefined();
-    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/17dz' });
-    expect(inactive({ name: 'bash', arguments: { command: 'bin/17dz memory list --scope customer --id 甲' } })?.reason)
+    const active = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    expect(active({ name: 'bash', arguments: { command: 'bin/example-gateway memory list --scope customer --id 甲' } })?.block).toBeUndefined();
+    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/example-gateway memory list --scope customer --id 甲' } })?.reason)
       .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
   });
 
   it('形态合法时照旧放行且不因新码变严（query/prepare/commit/operation run 四种）', () => {
-    const gate = createServeGate({ planActive: () => true , gateway: 'bin/17dz' });
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
     for (const command of [
-      'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
-      'bin/17dz prepare src/payroll/scripts/transform.py c.json out',
-      'bin/17dz commit src/voucher/scripts/fill.js c.json --save',
-      'bin/17dz operation run payroll.transform c.json',
+      'bin/example-gateway query src/voucher/scripts/query-saved.js A 202609',
+      'bin/example-gateway prepare src/payroll/scripts/transform.py c.json out',
+      'bin/example-gateway commit src/voucher/scripts/fill.js c.json --save',
+      'bin/example-gateway operation run payroll.transform c.json',
     ]) {
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
@@ -436,41 +436,41 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
 // ── A1 任务二：形态族分类（绕开平台执行器的披露判据输入）───────────────────────
 describe('gateInvocationKind（形态族：本地执行 / 平台执行 / 辅助出口）', () => {
   it('三种族各认得出，判据只来自命令词法', () => {
-    expect(gateInvocationKind('bin/17dz local tmp/req_x/run.py', 'bin/17dz')).toBe('local');
-    expect(gateInvocationKind('bin/17dz query src/voucher/scripts/query-saved.js A 202609', 'bin/17dz')).toBe('executor');
-    expect(gateInvocationKind('bin/17dz prepare src/payroll/scripts/transform.py c.json out', 'bin/17dz')).toBe('executor');
-    expect(gateInvocationKind('bin/17dz commit src/voucher/scripts/fill.js c.json --save', 'bin/17dz')).toBe('executor');
-    expect(gateInvocationKind('bin/17dz operation run payroll.transform c.json', 'bin/17dz')).toBe('executor');
-    expect(gateInvocationKind('bin/17dz operation list --json', 'bin/17dz')).toBe('auxiliary');
-    expect(gateInvocationKind('bin/17dz plan --schema', 'bin/17dz')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/example-gateway local tmp/req_x/run.py', 'bin/example-gateway')).toBe('local');
+    expect(gateInvocationKind('bin/example-gateway query src/voucher/scripts/query-saved.js A 202609', 'bin/example-gateway')).toBe('executor');
+    expect(gateInvocationKind('bin/example-gateway prepare src/payroll/scripts/transform.py c.json out', 'bin/example-gateway')).toBe('executor');
+    expect(gateInvocationKind('bin/example-gateway commit src/voucher/scripts/fill.js c.json --save', 'bin/example-gateway')).toBe('executor');
+    expect(gateInvocationKind('bin/example-gateway operation run payroll.transform c.json', 'bin/example-gateway')).toBe('executor');
+    expect(gateInvocationKind('bin/example-gateway operation list --json', 'bin/example-gateway')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/example-gateway plan --schema', 'bin/example-gateway')).toBe('auxiliary');
   });
 
   it('领域记忆组也是认得的平台形态（形态分支不得把合法出口关掉）', () => {
     // 平台技能文档写明：serve worker 的领域记忆读写只经 memory 组。认不出它就会被
     // SERVE_INVOCATION_FORM_UNKNOWN 拒掉——那是把一条合法能力关掉，不是堵"猜形状"。
-    expect(gateInvocationKind('bin/17dz memory list --scope customer --id 甲', 'bin/17dz')).toBe('auxiliary');
-    expect(gateInvocationKind('bin/17dz memory get --key entry-format --scope customer --id 甲', 'bin/17dz')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/example-gateway memory list --scope customer --id 甲', 'bin/example-gateway')).toBe('auxiliary');
+    expect(gateInvocationKind('bin/example-gateway memory get --key entry-format --scope customer --id 甲', 'bin/example-gateway')).toBe('auxiliary');
   });
 
   it('认不出的形态返回 null（缺 mode / 缺脚本路径 / 未注册形式 / 根本不是网关调用）', () => {
-    expect(gateInvocationKind('bin/17dz payroll.validate tmp/x.json', 'bin/17dz')).toBeNull();
-    expect(gateInvocationKind('bin/17dz operation run', 'bin/17dz')).toBeNull();
-    expect(gateInvocationKind('bin/17dz query', 'bin/17dz')).toBeNull();
-    expect(gateInvocationKind('bin/17dz', 'bin/17dz')).toBeNull();
-    expect(gateInvocationKind('python src/payroll/scripts/transform.py a b', 'bin/17dz')).toBeNull();
+    expect(gateInvocationKind('bin/example-gateway payroll.validate tmp/x.json', 'bin/example-gateway')).toBeNull();
+    expect(gateInvocationKind('bin/example-gateway operation run', 'bin/example-gateway')).toBeNull();
+    expect(gateInvocationKind('bin/example-gateway query', 'bin/example-gateway')).toBeNull();
+    expect(gateInvocationKind('bin/example-gateway', 'bin/example-gateway')).toBeNull();
+    expect(gateInvocationKind('python src/payroll/scripts/transform.py a b', 'bin/example-gateway')).toBeNull();
   });
 
   it('bash 前缀与路径前缀走同一套词法（命令解析只此一份）', () => {
-    expect(gateInvocationKind('bash bin/17dz local tmp/req_x/run.py', 'bin/17dz')).toBe('local');
-    expect(gateInvocationKind('/opt/17dz/bin/17dz query q.js A', 'bin/17dz')).toBe('executor');
+    expect(gateInvocationKind('bash bin/example-gateway local tmp/req_x/run.py', 'bin/example-gateway')).toBe('local');
+    expect(gateInvocationKind('/opt/example-gateway/bin/example-gateway query q.js A', 'bin/example-gateway')).toBe('executor');
   });
 
   it('放行的调用把形态族挂进审计事件（执行面据此把"所有被放行的 bash"拆族）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x', onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query q.js A 202609' } });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_x/run.py' } });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz operation list --json' } });
+    const gate = createServeGate({ planActive: () => true, scratchDir: 'tmp/req_x', onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query q.js A 202609' } });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway local tmp/req_x/run.py' } });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list --json' } });
     gate({ name: 'write', arguments: { path: 'tmp/req_x/out.txt', content: 'x' } });
     expect(events.map((e) => e.invocation)).toEqual(['executor', 'local', 'auxiliary', undefined]);
   });
@@ -489,29 +489,29 @@ describe('describeKeyArgs（平台 args 规格消费，无宿主 flag 名单）'
   it('规格是唯一口径：名单外的 flag 不进摘要，宿主不另立第二份名单', () => {
     // D-012：KEY_ARG_FLAGS 硬编码表已删——这里钉住"规格里没有就不渲染"，防止回退。
     expect([...styles.keys()].sort()).not.toContain('--batch');
-    expect(describeKeyArgs('bin/17dz commit fill.js c.json --batch --save', styles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway commit fill.js c.json --batch --save', styles)).toEqual([]);
   });
 
   it('只摘规格内的 flag：名称类加书名号，编号/时间类原样，按命令出现顺序', () => {
-    expect(describeKeyArgs('bin/17dz query query-saved.js 幻晟 202609', styles)).toEqual([]);
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609', styles)).toEqual(['「猫一杯」', '202609']);
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --subject-code 1122 --query 猫一杯', styles)).toEqual(['1122', '「猫一杯」']);
-    expect(describeKeyArgs('bin/17dz operation run finance.query-receivables --query 猫一杯 --customer 狗二', styles)).toEqual(['「猫一杯」', '「狗二」']);
+    expect(describeKeyArgs('bin/example-gateway query query-saved.js 幻晟 202609', styles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway query query-receivables.js --query 猫一杯 --period 202609', styles)).toEqual(['「猫一杯」', '202609']);
+    expect(describeKeyArgs('bin/example-gateway query query-receivables.js --subject-code 1122 --query 猫一杯', styles)).toEqual(['1122', '「猫一杯」']);
+    expect(describeKeyArgs('bin/example-gateway operation run finance.query-receivables --query 猫一杯 --customer 狗二', styles)).toEqual(['「猫一杯」', '「狗二」']);
   });
 
   it('等号写法同样认（--flag=值），样式照样从规格读', () => {
-    expect(describeKeyArgs('bin/17dz query x.js --query=猫一杯 --period=202609', styles)).toEqual(['「猫一杯」', '202609']);
+    expect(describeKeyArgs('bin/example-gateway query x.js --query=猫一杯 --period=202609', styles)).toEqual(['「猫一杯」', '202609']);
   });
 
   it('规格缺失 / 查不到这个 flag → 不进摘要（安全缺省，不回退硬编码名单）', () => {
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609')).toEqual([]);
-    expect(describeKeyArgs('bin/17dz query query-receivables.js --query 猫一杯 --period 202609', new Map())).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway query query-receivables.js --query 猫一杯 --period 202609')).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway query query-receivables.js --query 猫一杯 --period 202609', new Map())).toEqual([]);
     // 布尔开关（平台样式 none，不入表）与后随 flag 的取值都不进摘要
-    expect(describeKeyArgs('bin/17dz query x.js --query --period 202609', styles)).toEqual(['202609']);
+    expect(describeKeyArgs('bin/example-gateway query x.js --query --period 202609', styles)).toEqual(['202609']);
   });
 
   it('超长取值截断到 24 字符（进度帧不是长文）', () => {
-    expect(describeKeyArgs(`bin/17dz query x.js --query ${'名'.repeat(40)}`, styles)).toEqual([`「${'名'.repeat(24)}」`]);
+    expect(describeKeyArgs(`bin/example-gateway query x.js --query ${'名'.repeat(40)}`, styles)).toEqual([`「${'名'.repeat(24)}」`]);
   });
 
   it('服务器路径不进摘要：参数摘要的唯一去处是用户可见进度帧', () => {
@@ -525,19 +525,19 @@ describe('describeKeyArgs（平台 args 规格消费，无宿主 flag 名单）'
       ['--cache', 'name'],
       ['--period', 'code'],
     ]);
-    expect(describeKeyArgs('bin/17dz operation run payroll.detect 工资表.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f', pathStyles)).toEqual([]);
-    expect(describeKeyArgs('bin/17dz operation run payroll.validate --contract /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway operation run payroll.detect 工资表.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f', pathStyles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway operation run payroll.validate --contract /home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
     // 等号写法同样拦
-    expect(describeKeyArgs('bin/17dz operation run payroll.validate --contract=/home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway operation run payroll.validate --contract=/home/fictional-user/fictional-projects/fictional-execution-layer/tmp/task_x/c.json', pathStyles)).toEqual([]);
     // 截断到 24 字符的半截路径也拦（前缀没被截掉）
-    expect(describeKeyArgs('bin/17dz query x.js --cache tmp/task_f695557e-f9b1-4c7-9d2e', pathStyles)).toEqual([]);
+    expect(describeKeyArgs('bin/example-gateway query x.js --cache tmp/task_f695557e-f9b1-4c7-9d2e', pathStyles)).toEqual([]);
     // 拦的是路径，不是这个 flag：同一条命令里的非路径取值照旧进摘要
-    expect(describeKeyArgs('bin/17dz operation run payroll.detect --out-dir tmp/task_f695557e-f9b1-4c7 --query 幻骥达 --period 202609', pathStyles))
+    expect(describeKeyArgs('bin/example-gateway operation run payroll.detect --out-dir tmp/task_f695557e-f9b1-4c7 --query 幻骥达 --period 202609', pathStyles))
       .toEqual(['「幻骥达」', '202609']);
   });
 
   it('bash 前缀与空命令同样走同一套词法', () => {
-    expect(describeKeyArgs('bash bin/17dz query x.js --query 甲', styles)).toEqual(['「甲」']);
+    expect(describeKeyArgs('bash bin/example-gateway query x.js --query 甲', styles)).toEqual(['「甲」']);
     expect(describeKeyArgs('')).toEqual([]);
   });
 });
@@ -549,8 +549,8 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
 
   it('放行的平台调用挂上 label 与参数摘要（数据查表，无分支）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, operationArgStyles: argStyles, onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609' } })?.block).toBeUndefined();
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, operationArgStyles: argStyles, onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-receivables.js --query 猫一杯 --period 202609' } })?.block).toBeUndefined();
     expect(events.at(-1)).toMatchObject({
       tool: 'bash',
       allowed: true,
@@ -561,12 +561,12 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
 
   it('脚本路径/裸名/操作名三种写法命中同一条 label', () => {
     for (const command of [
-      'bin/17dz query query-saved.js A 202609',
-      'bin/17dz query src/voucher/scripts/query-saved.js A 202609',
-      'bin/17dz operation run voucher.query-saved A 202609',
+      'bin/example-gateway query query-saved.js A 202609',
+      'bin/example-gateway query src/voucher/scripts/query-saved.js A 202609',
+      'bin/example-gateway operation run voucher.query-saved A 202609',
     ]) {
       const events: ServeGateEvent[] = [];
-      const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
+      const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
       expect(gate({ name: 'bash', arguments: { command } })?.block).toBeUndefined();
       expect(events.at(-1)?.label).toBe('查询已存档记录');
     }
@@ -575,8 +575,8 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
   it('label 表缺省/查不到 → 不挂字段（绝不回退脚本名或操作名）', () => {
     for (const extra of [{}, { operationLabels: labels }, { operationLabels: new Map() }]) {
       const events: ServeGateEvent[] = [];
-      const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event), ...extra , gateway: 'bin/17dz' });
-      expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query smoke.js A 202609' } })?.block).toBeUndefined();
+      const gate = createServeGate({ planActive: () => true, onEvent: (event) => events.push(event), ...extra , gateway: 'bin/example-gateway' });
+      expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway query smoke.js A 202609' } })?.block).toBeUndefined();
       expect(events.at(-1)?.label).toBeUndefined();
       expect(events.at(-1)?.keyArgs).toBeUndefined();
       expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'invocation', 'reason', 'tool']);
@@ -585,17 +585,17 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
 
   it('args 规格缺省/查不到 flag → 参数摘要为空数组（有 label 也不硬编码名单）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz query query-receivables.js --query 猫一杯' } })?.block).toBeUndefined();
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-receivables.js --query 猫一杯' } })?.block).toBeUndefined();
     expect(events.at(-1)?.label).toBe('读取应收余额');
     expect(events.at(-1)?.keyArgs).toEqual([]);
   });
 
   it('label 帧：真实发生的平台调用照发（元字符软放行不改变进度帧语义）', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, describeArgs: () => ['替身'], onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js; cat .env' } });
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, describeArgs: () => ['替身'], onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js A 202609' } });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js; cat .env' } });
     gate({ name: 'bash', arguments: { command: 'cat .env' } });
     gate({ name: 'read', arguments: { file_path: 'src/private.ts' } });
     // ① 干净网关调用：allowed + label + 参数摘要
@@ -617,20 +617,20 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
       operationLabels: labels,
       describeArgs: () => ['替身'],
       onEvent: (event) => events.push(event),
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
     });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js A 202609' } });
     expect(events.at(-1)).toMatchObject({ label: '查询已存档记录', keyArgs: ['替身'] });
   });
 
   it('既有审计字段与 tool_calls 消费者不受新字段影响', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/17dz' });
-    gate({ name: 'bash', arguments: { command: 'bin/17dz query query-saved.js A 202609' } });
+    const gate = createServeGate({ planActive: () => true, operationLabels: labels, onEvent: (event) => events.push(event) , gateway: 'bin/example-gateway' });
+    gate({ name: 'bash', arguments: { command: 'bin/example-gateway query query-saved.js A 202609' } });
     gate({ name: 'bash', arguments: { command: 'cat .env' } });
     // assembly.ts 的 serveGateAudit 只读这四个字段
     expect(events.map((event) => [event.requestId, event.tool, event.allowed, event.detail])).toEqual([
-      [undefined, 'bash', true, 'bin/17dz query query-saved.js A 202609'],
+      [undefined, 'bash', true, 'bin/example-gateway query query-saved.js A 202609'],
       [undefined, 'bash', true, 'cat .env'],
     ]);
   });
@@ -702,7 +702,7 @@ describe('read/ls 路径规范化门（platformRoot 绑 worker cwd）', () => {
   writeFileSync(path.join(root, 'docs', 'intro.md'), '# intro');
   writeFileSync(path.join(root, 'src', 'gateway.js'), 'secret');
   writeFileSync(path.join(root, '.env'), 'LLM_API_KEY=x');
-  const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+  const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
 
   it('工作区外穿越（读服务端 /proc env 的攻击面）被拦', () => {
     const v = gate({ name: 'read', arguments: { file_path: 'docs/../../../proc/self/environ' } });
@@ -754,7 +754,7 @@ describe('ls 放行后仍守住的边界', () => {
   });
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
-  const gate = () => createServeGate({ platformRoot: root, knowledgePaths: KNOWLEDGE , gateway: 'bin/17dz' });
+  const gate = () => createServeGate({ platformRoot: root, knowledgePaths: KNOWLEDGE , gateway: 'bin/example-gateway' });
 
   it('列目录不再被知识面拦：worker 能发现 mapping 与附件', () => {
     for (const p of ['src/payroll', 'src/payroll/mappings', 'tmp/attachments', 'src', 'docs', '.']) {
@@ -794,47 +794,47 @@ describe('createServeGate 的 write 分支', () => {
 
   it('tmp/ 下放行并留审计痕', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ platformRoot: root, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/contract.json', content: '{"a":1}' } })?.block).toBeUndefined();
     expect(events.at(-1)?.detail).toBe('tmp/contract.json');
     expect(events.at(-1)?.allowed).toBe(true);
   });
 
   it('tmp/ 多级子目录同样放行', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/202608/pay.json', content: '{}' } })?.block).toBeUndefined();
   });
 
   it('越出 tmp/ 一律拒：src/.env/配置/工作区根', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     for (const p of ['src/payroll/scripts/x.py', '.env', 'config/agent.yaml', 'package.json', 'todo.txt', 'tmp', 'tmpx/x']) {
       expect(gate({ name: 'write', arguments: { path: p, content: 'x' } })?.block, p).toBe(true);
     }
   });
 
   it('路径穿越与工作区外一律拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     for (const p of ['../etc/passwd', 'tmp/../../escape.txt', '/etc/passwd', 'tmp/../.env']) {
       expect(gate({ name: 'write', arguments: { path: p, content: 'x' } })?.block, p).toBe(true);
     }
   });
 
   it('敏感路径即使在 tmp/ 命名也拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/auth.json', content: 'x' } })?.block).toBe(true);
   });
 
   it('体积上限', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/ok.json', content: 'x'.repeat(1024) } })?.block).toBeUndefined();
     expect(gate({ name: 'write', arguments: { path: 'tmp/big.json', content: 'x'.repeat(257 * 1024) } })?.block).toBe(true);
   });
 
   it('缺 path 或没有 platformRoot 都拒（无根就无从判断在不在 tmp 下）', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { content: 'x' } })?.block).toBe(true);
     expect(gate({ name: 'write', arguments: { path: 'tmp/a', content: '' } })?.block).toBeUndefined();
-    const noRoot = createServeGate({ gateway: 'bin/17dz' });
+    const noRoot = createServeGate({ gateway: 'bin/example-gateway' });
     expect(noRoot({ name: 'write', arguments: { path: 'tmp/a', content: 'x' } })?.block).toBe(true);
   });
 });
@@ -848,20 +848,20 @@ describe('write 的 scratchDir 隔离', () => {
   const mine = 'tmp/req_abc123';
 
   it('本请求目录内放行(含多级子目录)', () => {
-    const gate = createServeGate({ platformRoot: root, scratchDir: mine , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, scratchDir: mine , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/req_abc123/c.json', content: '{}' } })?.block).toBeUndefined();
     expect(gate({ name: 'write', arguments: { path: 'tmp/req_abc123/sub/x.py', content: 'print()' } })?.block).toBeUndefined();
   });
 
   it('别人的请求目录拒(前缀相似也不算)', () => {
-    const gate = createServeGate({ platformRoot: root, scratchDir: mine , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, scratchDir: mine , gateway: 'bin/example-gateway' });
     for (const p of ['tmp/req_abc124/c.json', 'tmp/req_abc1234/c.json', 'tmp/other/c.json', 'tmp/c.json']) {
       expect(gate({ name: 'write', arguments: { path: p, content: '{}' } })?.block, p).toBe(true);
     }
   });
 
   it('没配 scratchDir 时退回"只允许 tmp/ 下"(向后兼容)', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'write', arguments: { path: 'tmp/anything/c.json', content: '{}' } })?.block).toBeUndefined();
     expect(gate({ name: 'write', arguments: { path: 'src/x.py', content: 'x' } })?.block).toBe(true);
   });
@@ -884,32 +884,32 @@ describe('edit 与 write 同一组边界', () => {
   const LEGAL = [{ oldText: 'a = 1', newText: 'a = 2' }];
 
   it('① tmp/ 下合法 edits 放行', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'edit', arguments: { path: 'tmp/req_x/a.py', edits: LEGAL } })?.block).toBeUndefined();
   });
 
   it('② 回归锁：edit 不能改 src/ 下的实现（那个洞）', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     const v = gate({ name: 'edit', arguments: { path: 'src/payroll/contract.js', edits: LEGAL } });
     expect(v?.block).toBe(true);
     expect(v?.reason).toContain('tmp/');
   });
 
   it('③ 敏感路径拒，理由点名敏感路径', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     const v = gate({ name: 'edit', arguments: { path: '.env', edits: LEGAL } });
     expect(v?.block).toBe(true);
     expect(v?.reason).toContain('敏感路径');
   });
 
   it('④ 工作区外穿越拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'edit', arguments: { path: '../outside.py', edits: LEGAL } })?.block).toBe(true);
     expect(gate({ name: 'edit', arguments: { path: '/etc/passwd', edits: LEGAL } })?.block).toBe(true);
   });
 
   it('⑤ scratchDir 隔离：别人的请求目录拒', () => {
-    const gate = createServeGate({ platformRoot: root, scratchDir: 'tmp/req_mine' , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, scratchDir: 'tmp/req_mine' , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'edit', arguments: { path: 'tmp/req_mine/a.py', edits: LEGAL } })?.block).toBeUndefined();
     for (const p of ['tmp/req_other/a.py', 'tmp/req_minex/a.py', 'tmp/a.py']) {
       expect(gate({ name: 'edit', arguments: { path: p, edits: LEGAL } })?.block, p).toBe(true);
@@ -921,11 +921,11 @@ describe('edit 与 write 同一组边界', () => {
   // 只问"是不是网关 + 有没有计划"。于是 planActive=true 时别人的 req_ 目录、tmp/ 散脚本、
   // ../ 穿越**全部放行**。2026-10-09 验收实证：只在无计划时被拒是假象，有条件拒绝等于没拒绝。
   describe('bash local 的目标根（2026-10-18 起：编排层全放行，越界由执行层网关原生拒）', () => {
-    // GATE_REFUSE 实测（2026-10-18）：`bin/17dz local` 只放行平台 tmp/ 与 .agents/skills-serve/
+    // GATE_REFUSE 实测（2026-10-18）：`bin/example-gateway local` 只放行平台 tmp/ 与 .agents/skills-serve/
     // 下的脚本，其余一律原生拒——执行层自治，编排层不再重复执法（首词拦截/LOCAL_OUTSIDE 退役）。
     const MINE = 'tmp/req_mine', OTHER = 'tmp/req_other';
-    const gate = () => createServeGate({ platformRoot: '/p', scratchDir: MINE, planActive: () => true , gateway: 'bin/17dz' });
-    const local = (target: string) => gate()({ name: 'bash', arguments: { command: `bin/17dz local ${target}` } });
+    const gate = () => createServeGate({ platformRoot: '/p', scratchDir: MINE, planActive: () => true , gateway: 'bin/example-gateway' });
+    const local = (target: string) => gate()({ name: 'bash', arguments: { command: `bin/example-gateway local ${target}` } });
 
     it('自己的 scratchDir（含子路径）放行', () => {
       expect(local(`${MINE}/x.py`)?.block).toBeUndefined();
@@ -953,7 +953,7 @@ describe('edit 与 write 同一组边界', () => {
   });
 
   it('⑥ 体积上限：newText 累计超过 256KB 拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     const ok = [{ oldText: 'a', newText: 'x'.repeat(1024) }];
     expect(gate({ name: 'edit', arguments: { path: 'tmp/a.py', edits: ok } })?.block).toBeUndefined();
     const v = gate({ name: 'edit', arguments: { path: 'tmp/a.py', edits: [{ oldText: 'a', newText: 'x'.repeat(257 * 1024) }] } });
@@ -965,13 +965,13 @@ describe('edit 与 write 同一组边界', () => {
   });
 
   it('⑦ 缺 path 拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'edit', arguments: { edits: LEGAL } })?.block).toBe(true);
     expect(gate({ name: 'edit', arguments: { path: '', edits: LEGAL } })?.block).toBe(true);
   });
 
   it('⑧ edits 缺失/空数组/元素形状不对都拒', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'edit', arguments: { path: 'tmp/a.py' } })?.block).toBe(true);
     expect(gate({ name: 'edit', arguments: { path: 'tmp/a.py', edits: [] } })?.block).toBe(true);
     expect(gate({ name: 'edit', arguments: { path: 'tmp/a.py', edits: 'a=1' } })?.block).toBe(true);
@@ -988,7 +988,7 @@ describe('edit 与 write 同一组边界', () => {
   });
 
   it('⑨ 对照：同一个目标 write 与 edit 都拦（证明两边界真的是同一份）', () => {
-    const gate = createServeGate({ platformRoot: root , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root , gateway: 'bin/example-gateway' });
     for (const p of ['src/payroll/contract.js', '.env', 'package.json', '../escape.py', 'operations.json']) {
       const w = gate({ name: 'write', arguments: { path: p, content: 'x' } });
       const e = gate({ name: 'edit', arguments: { path: p, edits: LEGAL } });
@@ -1002,7 +1002,7 @@ describe('edit 与 write 同一组边界', () => {
 
   it('edit 放行同样留审计痕（detail = 目标路径），被拦不留', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ platformRoot: root, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
     gate({ name: 'edit', arguments: { path: 'tmp/a.py', edits: LEGAL } });
     gate({ name: 'edit', arguments: { path: 'src/x.js', edits: LEGAL } });
     // detail 只在放行时设为路径，与 write 一致：被拦的调用没有落点痕迹可留
@@ -1020,35 +1020,35 @@ describe('edit 与 write 同一组边界', () => {
 // （抄到 tmp/ 会丢它旁边的配置，只能原地跑）。这里放行 local 子命令、且免计划前置（纯本地
 // 计算，不触平台会话）；真正的边界在平台侧——网关只放行本地根目录下、且满足完整判据的
 // 脚本，并剥掉凭据类 env。宿主只判"是本地执行"，不持平台路径名单。
-describe('local 执行（bin/17dz local <本地脚本>）', () => {
+describe('local 执行（bin/example-gateway local <本地脚本>）', () => {
   const root = mkdtempSync(path.join(tmpdir(), 'serve-local-'));
   afterAll(() => rmSync(root, { recursive: true, force: true }));
 
   it('计划未激活时也放行 tmp/ 下的脚本', () => {
     const events: ServeGateEvent[] = [];
-    const gate = createServeGate({ platformRoot: root, planActive: () => false, onEvent: (e) => events.push(e) , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/req_1/p.py --x /tmp/a.xlsx' } })?.block).toBeUndefined();
+    const gate = createServeGate({ platformRoot: root, planActive: () => false, onEvent: (e) => events.push(e) , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local tmp/req_1/p.py --x /tmp/a.xlsx' } })?.block).toBeUndefined();
     expect(events.at(-1)?.detail).toContain('local tmp/req_1/p.py');
   });
 
   it('非工作区路径软放行（执行层网关原生拒，GATE_REFUSE 实测）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
-    for (const c of ['bin/17dz local src/payroll/scripts/x.py', 'bin/17dz local ../escape.py', 'bin/17dz local /etc/x.py']) {
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
+    for (const c of ['bin/example-gateway local src/payroll/scripts/x.py', 'bin/example-gateway local ../escape.py', 'bin/example-gateway local /etc/x.py']) {
       expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBeUndefined();
     }
     // 裸 local（无目标）也是网关形态 → 放行，执行层原生处理
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local' } })?.block).toBeUndefined();
   });
 
   it('shell 元字符软放行(2026-10-18)，绝对路径解析在工作区内也放行(⑨回执一致性)', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local tmp/a.py; rm -rf /' } })?.block).toBeUndefined();
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local tmp/a.py; rm -rf /' } })?.block).toBeUndefined();
     // write 回执是绝对路径：解析后落在工作区内 → 放行（此前一刀切拒，worker 吸收脚本被误伤）
-    expect(gate({ name: 'bash', arguments: { command: `bin/17dz local ${path.join(root, 'tmp', 'a.py')}` } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: `bin/example-gateway local ${path.join(root, 'tmp', 'a.py')}` } })?.block).toBeUndefined();
   });
 
   it('首 token 不是网关 → 普通命令放行（审计留痕）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
     expect(gate({ name: 'bash', arguments: { command: 'python3 tmp/a.py' } })?.block).toBeUndefined();
   });
 
@@ -1057,18 +1057,18 @@ describe('local 执行（bin/17dz local <本地脚本>）', () => {
   // （它从自己真身旁边的配置文件读凭据），只能原地跑。宿主这里只判"是本地执行"，
   // 哪个技能真能跑由平台裁决（软链即选择性暴露）——所以下面这条只证明宿主不拦。
   it('辅助技能面下的脚本判为本地执行（计划未激活也放行）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/parse.py --x /tmp/a.pdf' } })?.block).toBeUndefined();
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/scripts/parse.py --x /tmp/a.pdf' } })?.block).toBeUndefined();
     // 技能面根本身与嵌套子目录都算本地执行
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/sub/x.py' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/scripts/sub/x.py' } })?.block).toBeUndefined();
   });
 
   it('建造本尊路径软放行（暴露控制归执行层：非 skills-serve 脚本由网关原生拒）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
     for (const c of [
-      'bin/17dz local .agents/skills/doc-parse/scripts/parse.py',
-      'bin/17dz local .agents/skills-servex/doc-parse/scripts/parse.py', // 前缀相似不算
-      'bin/17dz local .agents/skillsserve/doc-parse/scripts/parse.py',
+      'bin/example-gateway local .agents/skills/doc-parse/scripts/parse.py',
+      'bin/example-gateway local .agents/skills-servex/doc-parse/scripts/parse.py', // 前缀相似不算
+      'bin/example-gateway local .agents/skillsserve/doc-parse/scripts/parse.py',
     ]) {
       expect(gate({ name: 'bash', arguments: { command: c } })?.block, c).toBeUndefined();
     }
@@ -1078,14 +1078,14 @@ describe('local 执行（bin/17dz local <本地脚本>）', () => {
   // 前缀判断），拒绝发生在平台侧——那里才认"软链 + scripts/"这条完整判据。宿主若在这里
   // 补一份平台路径名单，就变成了镜像即分叉的第二份真相。
   it('技能面根下的非脚本路径宿主不拦（拒绝在平台侧）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/parse.py' } })?.block).toBeUndefined();
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/parse.py' } })?.block).toBeUndefined();
   });
 
   it('辅助技能面与越界 local 均编排层放行（越界由执行层网关原生拒，GATE_REFUSE 实测）', () => {
-    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/17dz' });
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBeUndefined();
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local ../escape.py' } })?.block).toBeUndefined();
-    expect(gate({ name: 'bash', arguments: { command: 'bin/17dz local /etc/passwd' } })?.block).toBeUndefined();
+    const gate = createServeGate({ platformRoot: root, planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local ../escape.py' } })?.block).toBeUndefined();
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local /etc/passwd' } })?.block).toBeUndefined();
   });
 });

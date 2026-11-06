@@ -95,8 +95,8 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]}]}';
-const QUERY_COMMAND = 'bin/17dz query probe-query.js --query 某公司 --period 202609';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]}]}';
+const QUERY_COMMAND = 'bin/example-gateway query probe-query.js --query 某公司 --period 202609';
 const USER_REQUEST = '把本期要查的对象查一遍';
 
 /** 计划 CLI 替身：本任务没有既有计划，提交即激活（execute 档，无需通知/确认）。 */
@@ -125,7 +125,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       // label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单

@@ -227,7 +227,7 @@ function platformStub(initial: 'auth' | 'timeout' | 'ok' = 'auth') {
         };
       }
       if (mode === 'timeout') {
-        // 平台不可用族的另一支：页面等待超时（PLATFORM_TIMEOUT，17dz 对 playwright
+        // 平台不可用族的另一支：页面等待超时（PLATFORM_TIMEOUT，example-gateway 对 playwright
         // Timeout Error 的码级映射）——与登录失效同族，冷却行为相同。
         return {
           taskId: `task_${calls}`,

@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -17,7 +17,7 @@
  *
  * 夹具口径（Wave 1 收尾）：除 7.3 这一例**主旨就是"平台说没有"**（保留捏造名幻东建材，
  * 断言改成宿主组装澄清的形态）之外，账套名一律用 mock 种子状态里真实存在的规范名
- * （`17dz-platform/src/execution/mocks/fixtures/seed.json`）。捏造名会撞上平台 not_found
+ * （`fictional-execution-layer/src/execution/mocks/fixtures/seed.json`）。捏造名会撞上平台 not_found
  * 信封（带 data.query）→ 宿主结构化澄清收口，把本来要测的中断/恢复主线掐断。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -301,7 +301,7 @@ describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/�
       { text: '幻辰财税 202601、202602、202603 平台均未返回该期间数据。' },
       { end: true },
       // 第 2 步：真执行了，但平台对这个对象返回 not_found——有执行痕迹的错误结果。
-      // mock 目录里没有「幻东建材」，not_found 信封带 data.query（17dz 517d952）→ 激活宿主的
+      // mock 目录里没有「幻东建材」，not_found 信封带 data.query（example-gateway 517d952）→ 激活宿主的
       // 结构化澄清：这正是本例的主旨，夹具因此刻意保留这个 mock 里不存在的名字。
       { plan: balanceCalls('幻东建材', '202609') },
       { text: '平台未找到「幻东建材」对应的账套（ACCOUNT_SET_NOT_FOUND），这一步没有查到数据。' },
@@ -343,7 +343,7 @@ describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/�
       expect(first).not.toContain('700 元');
       expect(first).not.toContain('不应外发');
       // 守卫恢复（D-102 已在平台侧修掉）——同 C3：这条 correctForm 曾含裸 operation 名
-      // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；17dz 已改成
+      // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；example-gateway 已改成
       // 不含 operation 名的可行动措辞，所以这里回到零命中。尺子本身没动（D-098）。
       expect(executionLanguageFingerprints(first)).toEqual([]);
       // 两步都委派了（第 2 步真调了平台），第 3 步被委派入口的守卫拦住

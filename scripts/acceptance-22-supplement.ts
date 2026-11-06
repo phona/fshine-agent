@@ -16,7 +16,7 @@ import {
   PLAN_SUBMIT_STEP,
 } from '@fshine/agent';
 import { createMessageHandler } from '../apps/server/handler';
-import { turnBudgetMsFor } from '@fshine/contracts';
+import { turnBudgetMsFor, resolveActiveProfileId } from '@fshine/contracts';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,6 +29,8 @@ function replyText(reply: ChannelReply): string {
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
   // 授权用户 = config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）首个
   // enabled principal（与 acceptance.ts 同一来源）。null = 没人可用：明确报错退出，
   // 不回落写死值（真实 UserID 曾是这里的硬编码）。
@@ -49,12 +51,12 @@ async function main(): Promise<void> {
     driver: createPiTurnDriver({ env: process.env }),
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles[profileId ?? '']),
     platformTask: createContextTaskRunner({
       profiles: config.contextProfiles,
       tasks: store.platformTasks!,
       workerDriver: createPiCodingTurnDriver({ env: process.env }),
-      profileId: '17dz',
+      profileId,
     }),
   });
   const handler = createMessageHandler({ store, runtime });

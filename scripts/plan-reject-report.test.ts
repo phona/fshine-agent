@@ -78,7 +78,7 @@ describe('计划门拒绝明细：分类只认宿主自己的协议前缀', () =
   it('空前提 / 空前缀 / 缺理由都归 other（不猜）', () => {
     expect(classifyPlanReject(null)).toBe('other');
     expect(classifyPlanReject('')).toBe('other');
-    expect(classifyPlanReject('17dz plan CLI 失败：PLAN_REFUSE')).toBe('other');
+    expect(classifyPlanReject('example-gateway plan CLI 失败：PLAN_REFUSE')).toBe('other');
   });
 });
 

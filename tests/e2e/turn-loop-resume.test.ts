@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -22,7 +22,7 @@ import { RESUMED_PLAN_NOT_EXECUTED } from '../../packages/agent/src/runtime';
  * 合成、context.ts 拼在文本尾部）。测试要盯的正是"宿主拿到带注脚的 resumed.text 之后
  * 怎么处理"，所以注脚必须出现在这条链上。
  */
-function receiptWorker(script: WorkerStep[], receipt = '3 次 bin/17dz 调用') {
+function receiptWorker(script: WorkerStep[], receipt = '3 次 bin/example-gateway 调用') {
   const inner = gatedWorker(script);
   return {
     driver: {
@@ -89,7 +89,7 @@ describe('[L4 集成] 离线全链 e2e：计划恢复路径（注脚剥离 + 执
     // 回落的就是 worker 原文（不是整理模型的总结），且注脚被剥干净
     expect(confirmed).toContain('已按你确认的范围查完 1 至 9 月。');
     expect(confirmed).not.toContain('本轮执行面');
-    expect(confirmed).not.toContain('bin/17dz');
+    expect(confirmed).not.toContain('bin/example-gateway');
     // 确认后真的执行了（回落的是有执行痕迹的那一轮）
     expect(totalActualCalls()).toBe(before + 1);    await assembly.close();
   });

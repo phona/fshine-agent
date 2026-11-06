@@ -1,8 +1,8 @@
 /**
- * 真实模型探针：把消息直接注入生产装配，跑真实 LLM + 真实 17dz 计划门禁 + mock 执行器。
+ * 真实模型探针：把消息直接注入生产装配，跑真实 LLM + 真实 example-gateway 计划门禁 + mock 执行器。
  *
  * 与 tests/e2e/turn-loop-*.test.ts 的差别只有一点：那里的 Main Agent 和
- * 17dz 子 Agent 是脚本化驱动，这里用真实 pi driver。企微仍由假 SDK 替代（不起长连接）。
+ * example-gateway 子 Agent 是脚本化驱动，这里用真实 pi driver。企微仍由假 SDK 替代（不起长连接）。
  *
  * 用法：
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts [--only A1,B2]
@@ -68,12 +68,12 @@ interface Turn {
   reply: string;
   ms: number;
   notices: string[];
-  /** 本轮实际产生的平台调用数（17dz plan state 的 actual.calls 增量；隔离状态按用例累计，可逐轮相减）。 */
+  /** 本轮实际产生的平台调用数（example-gateway plan state 的 actual.calls 增量；隔离状态按用例累计，可逐轮相减）。 */
   calls: number;
   group?: boolean;
   /**
    * 本回合真实 token 消耗（纯加法遥测）：main = Main 编排模型（turn_span），worker =
-   * 17dz 子 Agent（delegation_span，多步计划的多次委派已求和）。埋点行没带 token 字段
+   * example-gateway 子 Agent（delegation_span，多步计划的多次委派已求和）。埋点行没带 token 字段
    * （旧路径/网关不回传 usage）时对应分项缺席——缺席与全零必须可区分，不得拿零冒充。
    * aux（context/memory 抽取）不进逐轮结构：它们是回合后的异步落账，可能晚于回复帧，
    * 逐轮归属不可靠，只在 CaseResult.tokens 按用例全局汇总。
@@ -228,7 +228,7 @@ function isolatePlatformState(): void {
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
     EXECUTION_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
     EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
-    // 网关限流有 17dz 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
+    // 网关限流有 example-gateway 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
     // 真实平台保持生产限流（"别让下游平台有感知"）：探针节奏天然低于限额，被限就是信号。
     ...(isPlatformMock(process.env) ? { EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
   });

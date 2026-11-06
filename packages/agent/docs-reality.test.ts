@@ -123,16 +123,16 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(src.includes('serve-gate.ts'), '头注释与授权裁决模块的指向脱钩——读者找不到授信门的权威位置').toBe(true);
   });
 
-  it('D-120（命名债已关，别名已随 C3 退役）：Run17dzTaskArgs 全仓绝迹', () => {
+  it('D-120（命名债已关，别名已随 C3 退役）：RunExampleGatewayTaskArgs 全仓绝迹', () => {
     // task-manager / background-runtime 是通用任务管理基础设施；其公共表面积引用
-    // Run17dzTaskArgs 是"新执行层照抄违例样板"的入口。主名 ContextTaskRunArgs 已
+    // RunExampleGatewayTaskArgs 是"新执行层照抄违例样板"的入口。主名 ContextTaskRunArgs 已
     // 中性化；C3 起过渡别名（context.ts 类型 + index.ts 再导出）整体退役——它是
-    // `git grep -i 17dz` 门①路径集内的执行层名残留，W1 身份面守卫不容它挂签续命。
+    // `git grep -i example-gateway` 门①路径集内的执行层名残留，W1 身份面守卫不容它挂签续命。
     // 此处任何一处复发 = 债回潮。
-    expect(read('packages/agent/src/task-manager.ts').includes('Run17dzTaskArgs'), 'task-manager 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
-    expect(read('packages/agent/src/background-runtime.ts').includes('Run17dzTaskArgs'), 'background-runtime 重新引用 Run17dzTaskArgs——D-120 命名债回潮').toBe(false);
-    expect(read('packages/agent/src/context.ts').includes('Run17dzTaskArgs'), 'context.ts 的过渡别名复活——C3 退役决策被回退').toBe(false);
-    expect(read('packages/agent/src/index.ts').includes('Run17dzTaskArgs'), 'index.ts 重新导出 Run17dzTaskArgs——C3 退役决策被回退').toBe(false);
+    expect(read('packages/agent/src/task-manager.ts').includes('RunExampleGatewayTaskArgs'), 'task-manager 重新引用 RunExampleGatewayTaskArgs——D-120 命名债回潮').toBe(false);
+    expect(read('packages/agent/src/background-runtime.ts').includes('RunExampleGatewayTaskArgs'), 'background-runtime 重新引用 RunExampleGatewayTaskArgs——D-120 命名债回潮').toBe(false);
+    expect(read('packages/agent/src/context.ts').includes('RunExampleGatewayTaskArgs'), 'context.ts 的过渡别名复活——C3 退役决策被回退').toBe(false);
+    expect(read('packages/agent/src/index.ts').includes('RunExampleGatewayTaskArgs'), 'index.ts 重新导出 RunExampleGatewayTaskArgs——C3 退役决策被回退').toBe(false);
   });
 
   it('W4：budget-policy 归属表述——通用协议缺省单一源在宿主，执行层引用零回流', () => {
@@ -143,7 +143,7 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     // （一致性校验的归属与关账口径住在 debt-ledger D-150/D-151，不在本模块注释里）。
     for (const rel of ['packages/agent/src/budget-policy.ts', 'packages/agent/src/budget-policy.test.ts']) {
       const text = read(rel);
-      expect(text, `${rel} 重新出现执行层实例名（/17dz/i）——W4 归属表述回潮`).not.toMatch(/17dz/i);
+      expect(text, `${rel} 重新出现执行层实例名（/example-gateway/i）——W4 归属表述回潮`).not.toMatch(/example-gateway/i);
       expect(text, `${rel} 重新出现执行层源码路径（src/execution/plan.js）——W4 归属表述回潮`).not.toContain('src/execution/plan.js');
       // 禁令串按段拆写：W4 C4 起全仓除台账两文件外不得出现该已删脚本的完整名字
       // （本波验收 grep 判据），守卫自身的禁令串也不例外——语义不变，grep 可复核。
@@ -164,24 +164,24 @@ describe('docs-reality：文档主张与代码现实对账', () => {
 // ── W3-A 渲染级机械锁（2026-11-05）：worker 提示词静态文本零执行层名 ──────────
 //
 // F1/F7——先锁后改：锁的是已为真的事实（W3-A 时点 workerSystemPrompt 函数体
-// `sed -n '1729,1847p' context.ts | grep -i 17dz` 零命中），防 W3-B 文档修正后回潮。
+// `sed -n '1729,1847p' context.ts | grep -i example-gateway` 零命中），防 W3-B 文档修正后回潮。
 // 唯一实现 = 直接调用 workerSystemPrompt 本体（context.ts 纯测试缝导出，零行为变化），
 // 不用 planCommandForm=undefined 的弱实现——那样许可段整段不渲染，会漏掉唯一渗入点
 // （planCommandForm 参数注入，permitNotice 段）。正反双向：
-//   正向：中性值渲染（许可段/工作区段全部渲染、注入值不含 17dz）→ 提示词零 /17dz/i；
-//   反向：注入 'bin/17dz plan …' 时原文出现——证明「唯一网关名渗入点 = 参数注入、
-//         静态文本零贡献」，锁的是结构不是碰巧。root 与注入值刻意取不含 17dz 的
+//   正向：中性值渲染（许可段/工作区段全部渲染、注入值不含 example-gateway）→ 提示词零 /example-gateway/i；
+//   反向：注入 'bin/example-gateway plan …' 时原文出现——证明「唯一网关名渗入点 = 参数注入、
+//         静态文本零贡献」，锁的是结构不是碰巧。root 与注入值刻意取不含 example-gateway 的
 //         中性值，防假红。
 describe('docs-reality：worker 提示词静态文本零执行层名（渲染级机械锁）', () => {
-  it('中性值渲染 → 零 /17dz/i；网关名只能经 planCommandForm 参数注入（静态文本零贡献）', () => {
+  it('中性值渲染 → 零 /example-gateway/i；网关名只能经 planCommandForm 参数注入（静态文本零贡献）', () => {
     const prompt = workerSystemPrompt('/platform-root', 'tmp/req-1', 'gateway plan {"calls":[]}');
     // 前置自证：许可段与工作区段确实渲染了（非 permitNotice 整段缺席的弱实现）
     expect(prompt).toContain('许可：');
     expect(prompt).toContain('写边界：');
-    expect(prompt).not.toMatch(/17dz/i);
+    expect(prompt).not.toMatch(/example-gateway/i);
     // 反向：唯一渗入点 = 参数注入
-    const injected = workerSystemPrompt('/platform-root', 'tmp/req-1', 'bin/17dz plan {"calls":[]}');
-    expect(injected).toContain('bin/17dz');
+    const injected = workerSystemPrompt('/platform-root', 'tmp/req-1', 'bin/example-gateway plan {"calls":[]}');
+    expect(injected).toContain('bin/example-gateway');
   });
 
   it('W3-B 文档级 tripwire：v0-architecture §10 已修正的过期句不得复发', () => {
@@ -191,7 +191,7 @@ describe('docs-reality：worker 提示词静态文本零执行层名（渲染级
     // ② 申报契约已瘦身为三枝四字段（resend 枝 2026-10-20 产物库波，turn-contract.test.ts
     // 钉 schema 恰 4 属性）——「仍 3 字段」与 §10 申报契约行直接矛盾。
     const doc = read('docs/v0-architecture.md');
-    expect(doc.includes('worker 提示词仍包含 17dz 网关用法'), '§10 提示词面积行改回过期句——该句已被 W3-A 渲染级锁伪证').toBe(false);
+    expect(doc.includes('worker 提示词仍包含 example-gateway 网关用法'), '§10 提示词面积行改回过期句——该句已被 W3-A 渲染级锁伪证').toBe(false);
     expect(doc.includes('申报契约仍 3 字段'), '§10 出现「申报契约仍 3 字段」矛盾句——resend 枝 2026-10-20 已新增，契约是三枝四字段').toBe(false);
   });
 });

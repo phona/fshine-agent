@@ -7,7 +7,7 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-/** 造一个假平台根：bin/17dz 把预置 TSV 吐到 stdout（可指定退出码或挂住）。 */
+/** 造一个假平台根：bin/example-gateway 把预置 TSV 吐到 stdout（可指定退出码或挂住）。 */
 async function fakePlatformRoot(tsv: string, options: { exitCode?: number; hang?: boolean } = {}): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'op-labels-'));
   roots.push(root);
@@ -16,8 +16,8 @@ async function fakePlatformRoot(tsv: string, options: { exitCode?: number; hang?
   const script = options.hang
     ? '#!/bin/sh\nexec sleep 30\n'
     : `#!/bin/sh\ncat "$(dirname "$0")/list.tsv"\nexit ${options.exitCode ?? 0}\n`;
-  await writeFile(path.join(root, 'bin', '17dz'), script);
-  await chmod(path.join(root, 'bin', '17dz'), 0o755);
+  await writeFile(path.join(root, 'bin', 'example-gateway'), script);
+  await chmod(path.join(root, 'bin', 'example-gateway'), 0o755);
   return root;
 }
 
@@ -60,7 +60,7 @@ describe('loadOperationLabels（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出 label 表', async () => {
     const root = await fakePlatformRoot(LIST_TSV);
-    expect(await loadOperationLabels(root, 'bin/17dz')).toEqual(parseOperationLabels(LIST_TSV));
+    expect(await loadOperationLabels(root, 'bin/example-gateway')).toEqual(parseOperationLabels(LIST_TSV));
   });
 
   it('CLI 非零退出 → 空表', async () => {
@@ -140,8 +140,8 @@ async function fakePlatformRootWithJson(json: string, options: { exitCode?: numb
   const script = options.hang
     ? '#!/bin/sh\nexec sleep 30\n'
     : `#!/bin/sh\nfor arg in "$@"; do\n  if [ "$arg" = "--json" ]; then cat "$(dirname "$0")/list.json"; exit ${options.exitCode ?? 0}; fi\ndone\ncat "$(dirname "$0")/list.tsv" 2>/dev/null\nexit ${options.exitCode ?? 0}\n`;
-  await writeFile(path.join(root, 'bin', '17dz'), script);
-  await chmod(path.join(root, 'bin', '17dz'), 0o755);
+  await writeFile(path.join(root, 'bin', 'example-gateway'), script);
+  await chmod(path.join(root, 'bin', 'example-gateway'), 0o755);
   return root;
 }
 
@@ -173,7 +173,7 @@ describe('loadOperationArgStyles（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出样式表', async () => {
     const root = await fakePlatformRootWithJson(LIST_JSON);
-    expect(await loadOperationArgStyles(root, 'bin/17dz')).toEqual(parseOperationArgStyles(LIST_JSON));
+    expect(await loadOperationArgStyles(root, 'bin/example-gateway')).toEqual(parseOperationArgStyles(LIST_JSON));
   });
 
   it('CLI 非零退出 / 不存在 / 挂住 → 空表（与 label 派生同一套失败语义）', async () => {
@@ -229,7 +229,7 @@ describe('parseOperationArgSpecs（整份规格：位置参数声明名 + flag �
 describe('loadOperationArgSpecs（经公共 CLI 派生整份规格）', () => {
   it('CLI 正常 → 解析出规格表；非零退出 → 空表', async () => {
     const root = await fakePlatformRootWithJson(LIST_JSON);
-    expect(await loadOperationArgSpecs(root, 'bin/17dz')).toEqual(parseOperationArgSpecs(LIST_JSON));
+    expect(await loadOperationArgSpecs(root, 'bin/example-gateway')).toEqual(parseOperationArgSpecs(LIST_JSON));
     expect((await loadOperationArgSpecs(await fakePlatformRootWithJson(LIST_JSON, { exitCode: 3 }))).size).toBe(0);
   });
 
@@ -349,7 +349,7 @@ describe('loadOperationSemantics（经公共 CLI 派生一次）', () => {
 
   it('CLI 正常 → 解析出语义表；非零退出 → 空表', async () => {
     const root = await fakePlatformRootWithJson(SEMANTICS_LIST_JSON);
-    expect(await loadOperationSemantics(root, 'bin/17dz')).toEqual(parseOperationSemantics(SEMANTICS_LIST_JSON));
+    expect(await loadOperationSemantics(root, 'bin/example-gateway')).toEqual(parseOperationSemantics(SEMANTICS_LIST_JSON));
     expect((await loadOperationSemantics(await fakePlatformRootWithJson(SEMANTICS_LIST_JSON, { exitCode: 3 }))).size).toBe(0);
   });
 

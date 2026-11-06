@@ -1,9 +1,9 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 示例执行层 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：结构化歧义/未找到 → 宿主机械组装澄清（2026-09-27 Stage 3 事故根治包）。
- * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
  *
  * 事故形状：worker 真调了平台（目录/余额查询返回 ACCOUNT_SET_AMBIGUOUS，exit 0，调用被
  * 计入 execution），却把信封翻译成技术报告——脚本路径、原始错误码、candidates: [] 全上屏。
@@ -134,7 +134,7 @@ describe('[L4 集成] 离线全链 e2e：结构化歧义 → 宿主机械组装�
     expect(reply).toBe(`没有找到匹配“胜利”的对象。${platformCorrectForm('ACCOUNT_SET_NOT_FOUND')}我再查。`);
     expect(reply).toContain('没有找到匹配“胜利”的对象');
     // 守卫恢复（D-102 已在平台侧修掉）：这条 correctForm 曾含裸 operation 名
-    // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；17dz
+    // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；执行层
     // 已把它改成不含 operation 名的可行动措辞，所以这里回到零命中。尺子本身没动
     // （runtime.ts 的 EXECUTION_LANGUAGE_FINGERPRINTS 报得出这类形态，见 D-098）。
     expect(executionLanguageFingerprints(reply)).toEqual([]);

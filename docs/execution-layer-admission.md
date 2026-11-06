@@ -48,7 +48,7 @@
    步数帽（纯函数边界或驱动跟踪器）、交接文件往返，至少给出一个
    端到端证明（脚本化 worker 会话即可，不需真模型）。
 4. 归属分清：新域网关名、操作名、环境名前缀、种子数据、skill
-   与已有实例（财税 `bin/17dz`、通用 `bin/generic`）均不重叠；
+   与已有实例（财税实例 `bin/example-gateway`、通用 `bin/generic`）均不重叠；
    工作树 grep 旧前缀（已清零的前缀）保持 0；财税语义不得出现
    在新域的任何文件里。
 
@@ -67,4 +67,4 @@
 - 命名理由：ballot 操作集（ballot.query / ballot.prepare / ballot.proposal / ballot.proposal-commit）复用了 dummy-platform 夹具（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs`）的 6 个操作，未在 `scripts/eval/fixtures/` 下建立独立 `ballot-platform/` 目录。
 - 登记原因：小裁示 1 推荐独立夹具目录，但 ballot 操作与 dummy 共享状态机与操作注册表，拆分会导致两份 mock 状态维护成本；命名空间 `ballot.*` 已与 dummy 内其他操作隔离，不冲突。
 - 共享状态机影响：ballot 与 dummy 共享 collections 状态文件（`dummy-state.json`），因此「第二写域」的域隔离证明力仅限于操作命名空间隔离（ballot.* 前缀），不包含状态文件隔离。若后续需要强域隔离证明，需拆分独立状态文件。
-- 证据位置：`scripts/eval/generic-mock.ts` 用例 `g-ballot-second-domain`（读路径 ballot.query + 写路径 ballot.prepare → ballot.proposal → ballot.proposal-commit）为主；`tests/e2e/turn-loop-ballot.test.ts` 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过，不计入通用闭环。
+- 证据位置：`scripts/eval/generic-mock.ts` 用例 `g-ballot-second-domain`（读路径 ballot.query + 写路径 ballot.prepare → ballot.proposal → ballot.proposal-commit）为主；`tests/e2e/turn-loop-ballot.test.ts` 因 harness 硬编码 bin/example-gateway 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过，不计入通用闭环。

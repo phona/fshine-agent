@@ -65,7 +65,7 @@ vi.mock('node:child_process', async () => {
   return {
     ...actual,
     spawn: vi.fn((command: string, args: string[], options: { env?: NodeJS.ProcessEnv } = {}) => {
-      if (typeof command === 'string' && command.includes('17dz')) {
+      if (typeof command === 'string' && command.includes('example-gateway')) {
         spawnCalls.push({ args: args as string[], env: options?.env ?? {} });
       }
       return actual.spawn('echo', ['ok']);
@@ -94,7 +94,7 @@ function baseOptions(overrides?: Partial<PiCodingWorkerSessionOptions>): PiCodin
   return {
     cwd: '/tmp/fake-platform',
     agentDir: '/tmp/fake-agent',
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     skillRoots: [],
     systemPrompt: 'test',
     modelConfig: { runtime: {} as never, model: {} as never },

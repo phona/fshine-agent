@@ -169,7 +169,7 @@ function setupHost(options: {
     },
   };
   const taskRunner = createContextTaskRunner({
-    profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+    profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
     tasks: tasks.repo,
     workerDriver,
     changeIntents: intents.repo,
@@ -361,7 +361,7 @@ async function workerWith(options: {
   roots.push(cwd);
   const modelConfig = await fakeModelRuntime();
   const worker = await createPiCodingWorkerSession({
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     cwd,
     skillRoots: [],
     systemPrompt: 'proposal flow test',
@@ -405,7 +405,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     // payload 落在本轮 scratchDir 内（门的写边界同一把尺）
     await mkdir(path.join(cwd, 'tmp', 'req_gate'), { recursive: true });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(calls).toEqual([{ operation: 'voucher.proposal', payloadPath: PAYLOAD }]);
     expect(verdict?.block).toBe(true);
@@ -422,7 +422,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     });
 
     for (const payloadPath of ['tmp/other/proposal.json', '/etc/passwd', 'tmp/req_gate/../../secrets.json']) {
-      const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${payloadPath}`);
+      const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${payloadPath}`);
       expect(verdict?.block, payloadPath).toBe(true);
       expect(verdict?.reason, payloadPath).toContain('PROPOSAL REFUSED');
     }
@@ -438,7 +438,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       onCreateProposal: async (call) => { calls.push(call); return { status: 'completed', proposalId: 'p', userText: 'u', workerText: 'w' }; },
     });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(calls).toHaveLength(1);
     expect(verdict?.block).toBe(true);
@@ -454,7 +454,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       onCreateProposal: async (call) => { calls.push(call); return { status: 'completed', proposalId: 'p', userText: 'u', workerText: 'w' }; },
     });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(calls).toHaveLength(0);
     expect(verdict?.reason).not.toContain('PROPOSAL');
@@ -464,7 +464,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
   it('没配宿主出口：fail-closed 拦下（不放到平台去建一个宿主没有条目的提案）', async () => {
     const { worker } = await workerWith({ requestId: 'req_gate' });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('PROPOSAL REFUSED');
@@ -482,7 +482,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       }),
     });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(verdict?.reason).toContain('PROPOSAL NEEDS_INPUT');
     // 纠错环线索随会话留痕（宿主计划拦截同一机制）
@@ -496,7 +496,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       onCreateProposal: async () => ({ status: 'write_closed', userText: messageTextFor('WRITE_NOT_ENABLED'), workerText: messageTextFor('WRITE_NOT_ENABLED') }),
     });
 
-    const verdict = await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     expect(verdict?.reason).toContain('PROPOSAL WRITE_CLOSED');
     expect(verdict?.reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
@@ -510,7 +510,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     roots.push(cwd);
     const modelConfig = await fakeModelRuntime();
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd,
       skillRoots: [],
       systemPrompt: 'proposal flow test',
@@ -527,7 +527,7 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
       serveGateAudit: (event) => { events.push({ tool: event.tool, allowed: event.allowed, reason: event.reason ?? '' }); },
     });
 
-    await submit(worker, `bin/17dz prepare voucher.proposal ${PAYLOAD}`);
+    await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
     // 一次拦截一行，tool 名独立（与 plan_submit 同族：这一跳提前 return，不经 gate()）
     expect(events).toHaveLength(1);
@@ -603,7 +603,7 @@ function setupConfirm(options: {
     };
   });
   const taskRunner = createContextTaskRunner({
-    profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+    profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
     tasks: tasks.repo,
     workerDriver: { run: async (): Promise<TurnDriverResult> => ({ text: '（本组不委派 worker）', messages: [] }) },
     changeIntents: intents.repo,
@@ -750,7 +750,7 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
     const commitCalls: ProposalCommitRequest[] = [];
     const taskRunner = createContextTaskRunner({
-      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
       tasks: tasks.repo,
       workerDriver: { run: async (): Promise<TurnDriverResult> => ({ text: '（本组不委派 worker）', messages: [] }) },
       changeIntents: intents.repo,

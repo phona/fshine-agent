@@ -60,73 +60,73 @@ describe('parseProposalCommand', () => {
   const protocols = protocolsOf(OPERATIONS_JSON);
 
   it('operation 名 + protocol 命中 proposal.create → 拦截，带回 operation 与 payload 路径', () => {
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/17dz'))
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/example-gateway'))
       .toEqual({ operation: 'voucher.proposal', payloadPath: 'tmp/req_1/proposal.json' });
   });
 
   it('command 裸名寻址同样命中（命令里两种写法都合法）', () => {
-    expect(parseProposalCommand('bin/17dz prepare proposal tmp/req_1/proposal.json', protocols, 'bin/17dz'))
+    expect(parseProposalCommand('bin/example-gateway prepare proposal tmp/req_1/proposal.json', protocols, 'bin/example-gateway'))
       .toEqual({ operation: 'proposal', payloadPath: 'tmp/req_1/proposal.json' });
   });
 
   it('bash/sh 前缀与网关路径前缀都认得（复用 serve 门首词规则）', () => {
-    expect(parseProposalCommand('bash bin/17dz prepare voucher.proposal p.json', protocols, 'bin/17dz')?.payloadPath).toBe('p.json');
-    expect(parseProposalCommand('sh ./bin/17dz prepare voucher.proposal p.json', protocols, 'bin/17dz')?.operation).toBe('voucher.proposal');
+    expect(parseProposalCommand('bash bin/example-gateway prepare voucher.proposal p.json', protocols, 'bin/example-gateway')?.payloadPath).toBe('p.json');
+    expect(parseProposalCommand('sh ./bin/example-gateway prepare voucher.proposal p.json', protocols, 'bin/example-gateway')?.operation).toBe('voucher.proposal');
   });
 
   it('payload 位置参数前的 flag 串跳过（一次创建多个提案的开关）', () => {
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal --batch tmp/req_1/list.json', protocols, 'bin/17dz'))
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal --batch tmp/req_1/list.json', protocols, 'bin/example-gateway'))
       .toEqual({ operation: 'voucher.proposal', payloadPath: 'tmp/req_1/list.json' });
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal tmp/req_1/list.json --batch', protocols, 'bin/17dz')?.payloadPath)
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal tmp/req_1/list.json --batch', protocols, 'bin/example-gateway')?.payloadPath)
       .toBe('tmp/req_1/list.json');
   });
 
   it('payload 路径原样带回：宿主不解析、不改写、不补全（不剥后缀、不规范化）', () => {
     const opaque = 'tmp/req_1/proposal.final.json';
-    expect(parseProposalCommand(`bin/17dz prepare voucher.proposal ${opaque}`, protocols, 'bin/17dz')?.payloadPath).toBe(opaque);
+    expect(parseProposalCommand(`bin/example-gateway prepare voucher.proposal ${opaque}`, protocols, 'bin/example-gateway')?.payloadPath).toBe(opaque);
   });
 
   it('按脚本路径寻址 → 不拦截（A 波实证：平台会解析成别的 operation 并报数据错）', () => {
-    expect(parseProposalCommand('bin/17dz prepare src/voucher/scripts/fill.js tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare fill.js tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare ./voucher/fill.py tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare src/voucher/scripts/fill.js tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare fill.js tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare ./voucher/fill.py tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('operation run <operation> 形态同样拦截（A 波对寻址加了 protocol-keyed 守卫，那条路也能建提案）', () => {
-    expect(parseProposalCommand('bin/17dz operation run voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/17dz'))
+    expect(parseProposalCommand('bin/example-gateway operation run voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/example-gateway'))
       .toEqual({ operation: 'voucher.proposal', payloadPath: 'tmp/req_1/proposal.json' });
     // 裸名寻址 + flag 串跳过与 prepare 形态同一套判据
-    expect(parseProposalCommand('bash bin/17dz operation run proposal --batch tmp/req_1/list.json', protocols, 'bin/17dz'))
+    expect(parseProposalCommand('bash bin/example-gateway operation run proposal --batch tmp/req_1/list.json', protocols, 'bin/example-gateway'))
       .toEqual({ operation: 'proposal', payloadPath: 'tmp/req_1/list.json' });
   });
 
   it('operation run 寻址到别的角色 / 脚本路径 / 缺 mode → 不拦截', () => {
-    expect(parseProposalCommand('bin/17dz operation run voucher.commit tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz operation run src/voucher/scripts/fill.js tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz operation tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz operation run', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway operation run voucher.commit tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway operation run src/voucher/scripts/fill.js tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway operation tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway operation run', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('prepare 之外的模式 → 不拦截（commit 角色不是创建提案）', () => {
-    expect(parseProposalCommand('bin/17dz commit voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz query voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway commit voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway query voucher.proposal tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('protocol 表里该 operation 映到别的角色 → 不拦截', () => {
-    expect(parseProposalCommand('bin/17dz prepare voucher.commit tmp/req_1/proposal.json', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.commit tmp/req_1/proposal.json', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('protocol 表为空 / 未配 / 该 operation 不在表里 → 不拦截', () => {
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal p.json', new Map())).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal p.json', undefined)).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare voucher.query-saved p.json', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal p.json', new Map())).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal p.json', undefined)).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.query-saved p.json', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('非网关命令 / 没有 payload 位置参数 → 不拦截', () => {
-    expect(parseProposalCommand('echo bin/17dz prepare voucher.proposal p.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('env EXECUTION_EXECUTOR=mock bin/17dz prepare voucher.proposal p.json', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal', protocols, 'bin/17dz')).toBeNull();
-    expect(parseProposalCommand('bin/17dz prepare voucher.proposal --batch', protocols, 'bin/17dz')).toBeNull();
+    expect(parseProposalCommand('echo bin/example-gateway prepare voucher.proposal p.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('env EXECUTION_EXECUTOR=mock bin/example-gateway prepare voucher.proposal p.json', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal', protocols, 'bin/example-gateway')).toBeNull();
+    expect(parseProposalCommand('bin/example-gateway prepare voucher.proposal --batch', protocols, 'bin/example-gateway')).toBeNull();
   });
 
   it('角色名是跨层协议常量：与平台声明的取值一致', () => {

@@ -50,24 +50,24 @@ function trusted(sessionId = 'session-1', principalId = 'wecom:user-1'): Trusted
 async function profileRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-subagent-'));
   roots.push(root);
-  await mkdir(path.join(root, '.agents', 'skills', '17dz'), { recursive: true });
-  await writeFile(path.join(root, '.agents', 'skills', '17dz', 'SKILL.md'), '---\nname: 17dz\ndescription: 幻账平台工作规范\n---\n使用领域脚本并返回可复核证据。\n');
+  await mkdir(path.join(root, '.agents', 'skills', 'example-gateway'), { recursive: true });
+  await writeFile(path.join(root, '.agents', 'skills', 'example-gateway', 'SKILL.md'), '---\nname: example-gateway\ndescription: 幻账平台工作规范\n---\n使用领域脚本并返回可复核证据。\n');
   return root;
 }
 
 function runner(root: string, tasks: MemoryTasks, driver: TurnDriver, options: { planCommandForm?: string } = {}) {
   const profiles: Record<string, ContextProfileConfig> = {
-    '17dz': { root, skillRoots: ['.agents/skills'] },
+    'example-gateway': { root, skillRoots: ['.agents/skills'] },
   };
   return createContextTaskRunner({ profiles, tasks, workerDriver: driver, ...(options.planCommandForm ? { planCommandForm: options.planCommandForm } : {}) });
 }
 
-describe('17dz Pi subagent adapter', () => {
+describe('example-gateway Pi subagent adapter', () => {
   it('固定 cwd/skillRoots 并原样返回自然语言', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
     let observed: TurnDriverInput | undefined;
-    const scripted = ScriptedTurnDriver([{ text: '已查询完成。\n来源：17dz 领域脚本。' }]);
+    const scripted = ScriptedTurnDriver([{ text: '已查询完成。\n来源：example-gateway 领域脚本。' }]);
     const subagent = runner(root, tasks, {
       run: async (input) => {
         observed = input;
@@ -77,7 +77,7 @@ describe('17dz Pi subagent adapter', () => {
 
     const result = await subagent.run({ request: '查询幻辰余额' }, { trusted: trusted() });
 
-    expect(result.text).toBe('已查询完成。\n来源：17dz 领域脚本。');
+    expect(result.text).toBe('已查询完成。\n来源：example-gateway 领域脚本。');
     expect(result.taskId).toMatch(/^task_/);
     expect(observed?.cwd).toBe(root);
     expect(observed?.skillRoots).toEqual([path.join(root, '.agents', 'skills')]);
@@ -93,7 +93,7 @@ describe('17dz Pi subagent adapter', () => {
     let observed: TurnDriverInput | undefined;
     const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 });
     const subagent = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
       tasks,
       executionGate: gate,
       workerDriver: { run: async (input) => { observed = input; return { text: '已处理。', messages: input.messages }; } },
@@ -162,7 +162,7 @@ describe('17dz Pi subagent adapter', () => {
 
   it('账套存在性任务要求只用专用目录搜索 operation', async () => {
     // Phase 3 起宿主不再做领域判别：操作与任务类型的匹配归执行层 SKILL 与平台门禁
-    // （17dz src/execution/plan.js 的 PLAN_CALL_MISMATCH + 17dz-query SKILL.md）。
+    // （example-gateway src/execution/plan.js 的 PLAN_CALL_MISMATCH + example-gateway-query SKILL.md）。
     // 宿主只保留领域无关的实体来源校验——这里断言新语义：目录检索计划放行，
     // 且越权实体仍被拒。
     // 单次目录检索：实体来自当前消息 → 放行
@@ -366,7 +366,7 @@ describe('17dz Pi subagent adapter', () => {
     // 无 planCommandForm（无平台能力）→ 许可段整段不渲染
     const bare = await capturePrompt();
     expect(bare).not.toContain('执行前先提交方案');
-    expect(bare).not.toContain('bin/17dz');
+    expect(bare).not.toContain('bin/example-gateway');
     // 有命令形态 → 许可段渲染：是否需要许可以清单声明为准（逐 operation 属性，不分类任务）
     const root = await profileRoot();
     let prompt = '';
@@ -375,11 +375,11 @@ describe('17dz Pi subagent adapter', () => {
         prompt = input.systemPrompt;
         return { text: '完成。', messages: input.messages };
       },
-    }, { planCommandForm: 'bin/17dz plan {"goal":"…","calls":[]}' });
+    }, { planCommandForm: 'bin/example-gateway plan {"goal":"…","calls":[]}' });
     await subagent.run({ request: '查一下余额' }, { trusted: trusted() });
     expect(prompt).toContain('以能力清单声明为准');
     expect(prompt).toContain('标了需许可的 operation');
-    expect(prompt).toContain('bin/17dz plan');
+    expect(prompt).toContain('bin/example-gateway plan');
     // 裁决状态机：worker 回合义务逐状态钉住
     for (const state of ['NEEDS_USER_CONFIRM', 'PAUSED', 'DECLINED', 'STOP', 'ACTIVE']) {
       expect(prompt, `裁决状态 ${state} 必须留在提示词里`).toContain(state);
@@ -409,7 +409,7 @@ describe('17dz Pi subagent adapter', () => {
     expect(a).toBe(b);
     // 执行层词汇与已退役散文不在提示词里（迁移期适配仅经参数注入，通用层零硬编码）。
     // 【委派】不进禁词表：静态范围规则合法引用"委派块"一词，禁的是逐任务载荷本身。
-    for (const banned of ['bin/17dz', '授权名单', '能力信封', '执行前先提交方案', '宿主已核验本轮请求']) {
+    for (const banned of ['bin/example-gateway', '授权名单', '能力信封', '执行前先提交方案', '宿主已核验本轮请求']) {
       expect(a, `提示词不得包含已退役内容：${banned}`).not.toContain(banned);
     }
     // 逐任务载荷不进提示词：申报原文只出现在 user message 委派块
@@ -437,7 +437,7 @@ describe('17dz Pi subagent adapter', () => {
     expect(prompt).not.toContain('--<flag>');
     expect(prompt).not.toContain('kebab-case');
     expect(prompt).not.toContain('--flag=值');
-    expect(prompt).not.toContain('bin/17dz query');
+    expect(prompt).not.toContain('bin/example-gateway query');
   });
 
   it('反向：提示词不含文件格式名与具体 operation 名', async () => {
@@ -740,7 +740,7 @@ describe('17dz Pi subagent adapter', () => {
     await expect(subagent.run({ request: '继续', taskId: 'missing' }, { trusted: trusted() })).rejects.toBeInstanceOf(ToolUserError);
 
     const invalid = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['../outside'] } },
+      profiles: { 'example-gateway': { root, skillRoots: ['../outside'] } },
       tasks,
       workerDriver: driver,
     });
@@ -799,7 +799,7 @@ describe('17dz Pi subagent adapter', () => {
     let observed: TurnDriverInput | undefined;
     const started = Date.now();
     const subagent = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'], workerTimeoutMs: 1234 } },
+      profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'], workerTimeoutMs: 1234 } },
       tasks: new MemoryTasks(),
       workerDriver: {
         run: async (input) => {
@@ -819,7 +819,7 @@ describe('17dz Pi subagent adapter', () => {
     const pending = { planId: 'plan_1', version: 3, taskId: 'task_1', decision: 'confirm' as const, userText: '需要确认', evaluation: {} as never };
     let saved: unknown;
     const subagent = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
       tasks: new MemoryTasks(),
       workerDriver: { run: async (input) => ({ text: '需要确认', messages: input.messages, pendingPlan: pending }) },
     });
@@ -833,7 +833,7 @@ describe('17dz Pi subagent adapter', () => {
   it('pending plan 持久化失败时不把确认请求当作正常完成结果返回', async () => {
     const root = await profileRoot();
     const subagent = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
       tasks: new MemoryTasks(),
       workerDriver: { run: async (input) => ({
         text: '需要确认', messages: input.messages,
@@ -848,7 +848,7 @@ describe('17dz Pi subagent adapter', () => {
   it('③-3 宿主未配置 onPlanPending：用户话术指向管理员，不说"执行失败请稍后再试"', async () => {
     const root = await profileRoot();
     const subagent = createContextTaskRunner({
-      profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+      profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
       tasks: new MemoryTasks(),
       workerDriver: { run: async (input) => ({
         text: '需要确认', messages: input.messages,
@@ -856,7 +856,7 @@ describe('17dz Pi subagent adapter', () => {
       }) },
     });
     // trusted() 默认不带 onPlanPending：计划停在确认门却没人接盘——这是部署漏配，
-    // 不是用户能重试好的事。旧实现落进 C5 catch 说"17dz 子任务执行失败，请稍后再试"，
+    // 不是用户能重试好的事。旧实现落进 C5 catch 说"example-gateway 子任务执行失败，请稍后再试"，
     // 把配置故障伪装成平台抖动（③-3：宿主不猜但也没对齐用户）。
     const failure = await subagent.run({ request: '执行较大查询' }, { trusted: trusted() }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(ToolUserError);
@@ -984,7 +984,7 @@ describe('下游平台保护：委派并发闸', () => {
 describe('委派失败分类的用户话术', () => {
   function failingRunner(root: string, message: string, workerTimeoutMs?: number) {
     const profiles: Record<string, ContextProfileConfig> = {
-      '17dz': { root, skillRoots: ['.agents/skills'], ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }) },
+      'example-gateway': { root, skillRoots: ['.agents/skills'], ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }) },
     };
     return createContextTaskRunner({
       profiles,
@@ -1035,7 +1035,7 @@ describe('委派失败分类的用户话术', () => {
 describe('委派失败分类：登录态按错误码判定（不嗅探文案）', () => {
   function codeFailingRunner(root: string, error: Error) {
     const profiles: Record<string, ContextProfileConfig> = {
-      '17dz': { root, skillRoots: ['.agents/skills'] },
+      'example-gateway': { root, skillRoots: ['.agents/skills'] },
     };
     return createContextTaskRunner({
       profiles,
@@ -1047,9 +1047,9 @@ describe('委派失败分类：登录态按错误码判定（不嗅探文案）'
   it('挂码 / 消息码前缀的 auth 码 → auth 话术（AUTH_EXPIRED 等，与中文措辞无关）', async () => {
     const root = await profileRoot();
     const authErrors = [
-      // 17dz errorFor 挂码的载体
+      // example-gateway errorFor 挂码的载体
       Object.assign(new Error('平台会话已失效'), { code: 'AUTH_EXPIRED' }),
-      // 17dz messageFor 渲染：消息以码开头（契约的一部分，不是文案嗅探）
+      // example-gateway messageFor 渲染：消息以码开头（契约的一部分，不是文案嗅探）
       new Error('AUTH_REDIRECTED_TO_LOGIN: 期望 导航后仍留在平台页面；实际 被重定向到登录页，会话已过期；正确形态 用户完成登录后重试'),
       // 领域脚本对 AuthExpiredError 的归一码
       Object.assign(new Error('需要登录'), { code: 'NEEDS_LOGIN' }),
@@ -1085,7 +1085,7 @@ describe('委派失败分类：登录态按错误码判定（不嗅探文案）'
  *
  * 事故链（2026-10-31 实测）：worker 模型请求 ~260ms 瞬时传输失败 → 驱动返回空文本且
  * errorMessage 被吞 → 空文本检查抛普通 Error → catch 分类 executor_error → 用户见
- * 「17dz 子任务执行失败，请稍后再试。」。C1/C2 之后驱动把失败事实透传为
+ * 「example-gateway 子任务执行失败，请稍后再试。」。C1/C2 之后驱动把失败事实透传为
  * `TurnDriverResult.modelError`（重试用尽或不可重试时在场）；这里钉分类与话术：
  *   · modelError 在场 → failureClass=model_transient，文案如实说"已自动重试仍未成功"
  *     （与 executor 故障的"执行面坏了"分开——后者重试大概率没用，前者稍后再试通常就好，
@@ -1100,7 +1100,7 @@ describe('委派失败分类：模型瞬时失败（model_transient，波次C）
 
   function modelErrorRunner(root: string, result: Record<string, unknown>) {
     const profiles: Record<string, ContextProfileConfig> = {
-      '17dz': { root, skillRoots: ['.agents/skills'] },
+      'example-gateway': { root, skillRoots: ['.agents/skills'] },
     };
     return createContextTaskRunner({
       profiles,
@@ -1134,7 +1134,7 @@ describe('委派失败分类：模型瞬时失败（model_transient，波次C）
     const controller = new AbortController();
     // 在 driver 执行途中中止（越过 run() 入口的预检 ：1136，让失败真正走进 catch 的
     // 分类链——预检前置的中止不经过分类，钉不住先后关系）。
-    const profiles: Record<string, ContextProfileConfig> = { '17dz': { root, skillRoots: ['.agents/skills'] } };
+    const profiles: Record<string, ContextProfileConfig> = { 'example-gateway': { root, skillRoots: ['.agents/skills'] } };
     const task = createContextTaskRunner({
       profiles,
       tasks: new MemoryTasks(),
@@ -1163,7 +1163,7 @@ describe('委派失败分类：模型瞬时失败（model_transient，波次C）
     const longMessage = `worker 端异常：${'细节'.repeat(200)}`;
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      const profiles: Record<string, ContextProfileConfig> = { '17dz': { root, skillRoots: ['.agents/skills'] } };
+      const profiles: Record<string, ContextProfileConfig> = { 'example-gateway': { root, skillRoots: ['.agents/skills'] } };
       const failing = createContextTaskRunner({
         profiles,
         tasks: new MemoryTasks(),
@@ -1194,7 +1194,7 @@ describe('错误态快路径 v2：空文本豁免与终局分支的顺序', () =
   /** 空文本 + 结构化收尾的 worker 替身（真实驱动早停路径的形状）。 */
   function earlyStopRunner(root: string, result: Record<string, unknown>) {
     const profiles: Record<string, ContextProfileConfig> = {
-      '17dz': { root, skillRoots: ['.agents/skills'] },
+      'example-gateway': { root, skillRoots: ['.agents/skills'] },
     };
     return createContextTaskRunner({
       profiles,
@@ -1215,7 +1215,7 @@ describe('错误态快路径 v2：空文本豁免与终局分支的顺序', () =
         availablePeriods: ['202606', '平台当前期间'],
       },
     });
-    // 第一版死因回归钉：这一步此前抛的是"17dz 子 Agent 未返回可用结果。"，
+    // 第一版死因回归钉：这一步此前抛的是"执行层子 Agent 未返回可用结果。"，
     // 经 catch 分类成 executor_error，用户拿到兜底话术。
     await expect(task.run({ request: '查A' }, { trusted: trusted() }))
       .rejects.not.toThrow('子 Agent 未返回可用结果。');

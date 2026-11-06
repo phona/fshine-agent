@@ -23,7 +23,7 @@ import { createProposalCommitRunner } from '../apps/server/proposal-commit';
 import { createPlanConfirmationWiring } from '../apps/server/plan-confirmation-route';
 import { loadBusinessSkill } from '../apps/server/business-skill';
 import { createMessageHandler } from '../apps/server/handler';
-import { turnBudgetMsFor } from '@fshine/contracts';
+import { turnBudgetMsFor, resolveActiveProfileId } from '@fshine/contracts';
 import type { ChannelReply, IncomingChannelMessage } from '@fshine/contracts';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -51,6 +51,8 @@ async function main(): Promise<void> {
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   const gateSecret = newGateSecret();
   const config = loadConfig({ env: process.env, yamlPath: process.env['AGENT_CONFIG_PATH'] || undefined });
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
   // 授权用户 = 当次加载的配置（AGENT_CONFIG_PATH 指向的文件，缺省 config/agent.yaml）
   // 首个 enabled principal（与 acceptance.ts 同一来源）。null = 没人可用：明确报错退出，
   // 不回落写死值（真实 UserID 曾是这里的硬编码）。
@@ -59,7 +61,7 @@ async function main(): Promise<void> {
     console.error(`配置 ${process.env['AGENT_CONFIG_PATH'] || 'config/agent.yaml（缺省）'} 里没有 enabled 的 principal——ask 脚本无法派生授权用户（fail-closed，不回落写死值）`);
     process.exit(1);
   }
-  const platformRoot = config.contextProfiles['17dz']?.root;
+  const platformRoot = config.contextProfiles[profileId ?? '']?.root;
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
   if (isPlatformMock(process.env)) {
     console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
@@ -91,7 +93,7 @@ async function main(): Promise<void> {
       async listBySession() { return []; },
     },
     workerDriver,
-    profileId: '17dz',
+    profileId,
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
       // 与生产装配同一份接线（assembly.ts）：落账后端恒接，放行由 isCommitEnabled 单独
@@ -104,14 +106,14 @@ async function main(): Promise<void> {
     driver,
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles[profileId ?? '']),
     platformTask,
     ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
     // 与生产装配同一条加载链：业务 skill（架构 §5）存在才注入
     ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
     // 执行层称谓（C2）：与 assembly 同一来源（active profile 的 executorLabel 声明）；
     // 未声明 = 宿主中性缺省，CLI 与生产装配因此不会漂移。
-    ...(config.contextProfiles['17dz']?.executorLabel ? { executorLabel: config.contextProfiles['17dz']!.executorLabel } : {}),
+    ...(config.contextProfiles[profileId ?? '']?.executorLabel ? { executorLabel: config.contextProfiles[profileId ?? '']!.executorLabel } : {}),
     ...(store.taskPlans ? { taskPlans: store.taskPlans } : {}),
   });
   // 计划确认门（与生产装配同一个工厂：D-013 后不再逐字复刻接线）：待确认计划落 SQLite，

@@ -327,7 +327,7 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 }
 
 async function main(): Promise<void> {
-  // 与生产一致：验收跑在 serve 法域内（平台 bin/17dz 网关与守卫真实生效）。
+  // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
   let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
   if (faultMode) {
@@ -346,14 +346,16 @@ async function main(): Promise<void> {
       '    accountSetScope: all',
       '    enabled: true',
       'contextProfiles:',
-      '  17dz:',
-      '    root: /tmp/nonexistent-17dz-root',
+      '  example-gateway:',
+      '    root: /tmp/nonexistent-example-gateway-root',
       '    skillRoots: [".agents/skills"]',
       '    workerTimeoutMs: 60000',
       '',
     ].join('\n'));
   }
   const config = loadConfig({ env: process.env, yamlPath: configPath });
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
   // 授权用户 = 首个 enabled principal 的裸 userid。null = 部署里没人可用：明确报错
   // 退出，不静默回落任何写死/虚构值（真实 UserID 曾是这里的硬编码）。报错点名当次
   // 实际加载的配置——fault 模式下是上面生成的 fault yaml，否则 AGENT_CONFIG_PATH
@@ -363,7 +365,7 @@ async function main(): Promise<void> {
     console.error(`配置 ${configPath ?? 'config/agent.yaml（缺省）'} 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）`);
     process.exit(1);
   }
-  const platformRoot = config.contextProfiles['17dz']?.root;
+  const platformRoot = config.contextProfiles[profileId ?? '']?.root;
 
   // mock 联调：兜底状态路径 + 每次启动重置 mock 状态（用例的"第 N 张"预期才可重复）。
   const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;

@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -9,7 +9,7 @@
  *   A2：AUTO=2 / NOTIFY=10 / CONFIRM=20 钉死档位边界——1、2 次直执行（execute），
  *       3 次（>AUTO）notify 且通知送达后才执行，10 次（=NOTIFY 上界，开区间）仍 notify，
  *       21 次（>CONFIRM）停在确认门、确认前零执行。
- *       （平台 decision 语义：calls > 档位才算越档，见 17dz src/execution/plan.js
+ *       （平台 decision 语义：calls > 档位才算越档，见 example-gateway src/execution/plan.js
  *       decision()——"达到"档位不升档。）
  *   A3：同一任务连提两个计划（1 调 → 2 调），ledger() 钉累计 actual 与 evaluate 看到的
  *       累计值（第二个计划若按新任务算落在 AUTO 档，实际触发 notify = evaluate 看见了
@@ -52,8 +52,8 @@ import {
   totalActualCalls,
 } from './harness';
 
-const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', '17dz-platform');
-const CLI = path.join(PLATFORM_ROOT, 'bin', '17dz');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', 'fictional-execution-layer');
+const CLI = path.join(PLATFORM_ROOT, 'bin', 'example-gateway');
 
 // ── 真实 pi-coding-worker 会话辅助（A4 / A5③ 用：替身不复刻这两段生产逻辑）────────
 
@@ -296,7 +296,7 @@ describe('[L4 集成] 离线全链 e2e：被拒计划收敛保护（DECLINED_PLA
       entitySources: { currentMessage: '只查当前期间的应收账款' },
     });
     try {
-      const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幽灵账套有限公司","--period","202609"]}]}';
+      const command = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幽灵账套有限公司","--period","202609"]}]}';
       const verdicts: Array<{ block?: boolean; reason?: string } | undefined> = [];
       for (let i = 1; i <= 6; i += 1) {
         verdicts.push(await bashCall(worker, `call_declined_${i}`, command));
@@ -330,7 +330,7 @@ describe('[L4 集成] 离线全链 e2e：被拒计划收敛保护（DECLINED_PLA
       // 2026-10-23 实测形状（req_368b68b3）：worker 把计划 JSON 用单引号包起来。
       // C3 前这类失败在 parsePlanCallsCommand 抛出点提前返回、从不计入 declinedPlans，
       // 11 连撞空转 4 分 11 秒 / 657k tokens；C3 起形状失败计入同一收敛计数器。
-      const command = `bin/17dz plan '{"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202609"]}]}'`;
+      const command = `bin/example-gateway plan '{"calls":[{"operation":"finance.query-receivables","args":["--query","幻辰财税","--period","202609"]}]}'`;
       const verdicts: Array<{ block?: boolean; reason?: string } | undefined> = [];
       for (let i = 1; i <= 6; i += 1) {
         verdicts.push(await bashCall(worker, `call_shape_${i}`, command));
@@ -365,7 +365,7 @@ describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C
       // 2026-10-23 实证的死命令：driver 的计划解析曾把 `plan ` 之后任何东西当 JSON
       // 草案，--schema 吃 PLAN_JSON_PARSE——门里为元数据写的白名单因 driver 先行
       // 拦截而不可达。C4 起分发器认出旗标形态返回 null，这一跳落门的元数据分支。
-      const verdict = await bashCall(worker, 'call_schema', 'bin/17dz plan --schema');
+      const verdict = await bashCall(worker, 'call_schema', 'bin/example-gateway plan --schema');
       // 放行 = 不拦（verdict 无 block）；若被拦 reason 会带 PLAN DECLINED 或教学话术
       expect(verdict?.block).toBeUndefined();
       // 不是提交：不计数、不碰平台计划门
@@ -386,7 +386,7 @@ describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C
     const counter = { evaluates: 0 };
     const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_schema_alias' });
     try {
-      const verdict = await bashCall(worker, 'call_schema_alias', 'bin/17dz plan schema');
+      const verdict = await bashCall(worker, 'call_schema_alias', 'bin/example-gateway plan schema');
       expect(verdict?.block).toBeUndefined();
       expect(counter.evaluates).toBe(0);
     } finally {
@@ -398,7 +398,7 @@ describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C
     const counter = { evaluates: 0 };
     const worker = await makeWorkerSession(counter, { sessionId: 'task_plan_unknown_flag' });
     try {
-      const verdict = await bashCall(worker, 'call_unknown_flag', 'bin/17dz plan --stdin');
+      const verdict = await bashCall(worker, 'call_unknown_flag', 'bin/example-gateway plan --stdin');
       expect(verdict?.block).toBe(true);
       // 话术唯一来源 error-codes.ts（C2 起教两种形态：inline 裸 JSON + --file）
       expect(verdict?.reason).toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING'));
@@ -501,7 +501,7 @@ describe('[L4 集成] 离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯
       ]),
     });
     try {
-      const command = 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻辰财税","202609"]}]}';
+      const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.commit","args":["幻辰财税","202609"]}]}';
       const verdict = await bashCall(worker, 'call_platform_gate', command);
 
       expect(verdict?.block).toBe(true);

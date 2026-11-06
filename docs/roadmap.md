@@ -70,7 +70,7 @@ Phase 0 测试并行化        （不动架构，纯提速）
 | 实际调用必须匹配激活计划 | 平台 `PLAN_CALL_MISMATCH` |
 | 超重 → 通知/确认/停止/试探上限 | 平台 `decision()` + 两个计数器 |
 | 写操作必须服务端确认后执行 | commit token + serve-policy |
-| worker bash 只能 `bin/17dz`、禁元字符、无计划拒绝 | `serve-gate.ts` |
+| worker bash 只能 `bin/example-gateway`、禁元字符、无计划拒绝 | `serve-gate.ts` |
 | 不读 `.runtime/` / `.env` / auth | serve-gate `sensitivePaths` |
 | 申报必须带证据 / 自相矛盾退回 / 零执行不外发 | 三个确定性校验 |
 
@@ -112,17 +112,17 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 3 — 领域判别下沉
 
-**状态：已完成**（由两个并行 subagent 实施：fshine 编排层改造 + 17dz SKILL 去重补全，主代理验收）。编排层不再做领域判别——这是解耦真正发生的一步。
+**状态：已完成**（由两个并行 subagent 实施：fshine 编排层改造 + 执行层 SKILL 去重补全，主代理验收）。编排层不再做领域判别——这是解耦真正发生的一步。
 
 **改动（实际落地）**：
 - `validatePlanAgainstTurnDeclaration` 的 balance/voucher/account_search 三分支 → 领域无关的 `validatePlanEntities(calls, sources)`（`turn-contract.ts`）：每个 call 的 args 里所有字符串（`-` 开头 flag 除外）必须能在「① 当前用户消息 ② 本轮注入的指代消解证据 ③ 本任务迄今的平台响应」并集里逐字找到。来源全部由宿主持有、经 `platformTask.run → TurnDriverInput.entitySources` 注入，**不从申报契约字段推导**（活过 Phase 4）；平台响应在驱动拦截点从会话 tool_result 汇总，"目录查询拿唯一候选 → 按候选名查"天然放行
 - 两个提示词的业务条目改为领域无关表述（能力边界与确认码转达协议保留、不再点名业务动作）；`ROUTE_CURRENT_TURN_TOOL.description` 移除领域判别教学（taskType 业务含义、名称/科目/客户区分、业务示例），8 字段一个没删（Phase 4 才瘦身）
-- 17dz `skills-serve` 两个 SKILL.md 成为 worker 领域规则唯一事实源：补"查询口径（操作与问题类型匹配只由 SKILL+平台门禁保证）""实体参数溯源（三来源逐字，口癖名靠平台候选对齐）"；高危写边界补进 prepare 技能
+- 执行层 `skills-serve` 两个 SKILL.md 成为 worker 领域规则唯一事实源：补"查询口径（操作与问题类型匹配只由 SKILL+平台门禁保证）""实体参数溯源（三来源逐字，口癖名靠平台候选对齐）"；高危写边界补进 prepare 技能
 - 规则落点同步登记：`docs/rule-landing.md` C6–C9 改指新校验、新增 C20；进度/压缩提示词、`NO_EXECUTION_CLARIFICATION` 等领域措辞一并中和
 
 **验收（按实际达成记录）**：
 - `grep -ri "应收\|凭证\|科目\|账套\|期间" packages/agent/src/` 规则文案**清零**；剩余 4 处均为执行机制字面量（长期记忆防泄漏过滤正则、上下文矛盾词表），理由见 `rule-landing.md` §5 ✓
-- 17dz 全量测试 **ALL PASS**（20/20 套件，含 consistency/operations/plan/skills-serve-canary；干净环境下复跑确认）+ `lint:operations` 通过 ✓
+- 执行层 全量测试 **ALL PASS**（20/20 套件，含 consistency/operations/plan/skills-serve-canary；干净环境下复跑确认）+ `lint:operations` 通过 ✓
 - 探针 `--quick` 无回归 ✓：A1 2 次调用（重问必重查）、A4 1 次（只搜目录）、A5 0 次（闲聊不委派）与基线一致；A2 变 2 次是设计内的松动——worker 先用目录查询解析用户给的"猫一杯"（not_found）再追问，旧账套零渗入；B1 的 ⚠ 与基线同性质（探针把回复措辞里的数字也抽来比，5 轮数据全为 0）
 - 跨仓 mock E2E（`plan-awareness`/`local-fake`）全绿；`npm test` 301 全绿、typecheck 0 错误 ✓
 
@@ -183,7 +183,7 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 **改动（实际落地）**：
 - **计划模式协议**（`packages/agent/src/plan-steps.ts`）：delegate 的 request 以「第N/M步：」开头即多步拆解的一步，宿主用正则机械解析（零业务匹配）。**无前缀 = 单步，行为与 Phase 5 之前逐字相同**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent（复用 Phase 5 的"交还"机制），由它继续下一步或申报 conversation 汇总。非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀）按单步处理。**申报契约仍 3 字段，一个都没加**
-- **步骤 2..M 经 continueTaskId 在同一 17dz 子任务内续跑**：平台累计账本因此跨步累积——闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）
+- **步骤 2..M 经 continueTaskId 在同一 执行层子任务内续跑**：平台累计账本因此跨步累积——闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）
 - **任一步失败不阻塞**（含 needs / 零执行的错误结果）：宿主照常派后续步骤，汇总如实报告失败步；纠错环上限在计划模式下**按步计**（同一步反复重报才收口，收口方式是"跳过这一步"而非终止整轮）
 - **任务计划状态**（消费并行 stream 的 `TaskPlanRepo`）：每步委派前 append `started`，结果回来后按步补 `done`/`failed`/`needs`，taskId 写该步最后一条事实；planId 由宿主在第一步生成（`plan_${requestId}`），跨回合经 `latestOpenPlan` 找回（步号接得上且总步数一致）。deps 可选，缺省 = 不落计划状态、功能降级不报错
 - **通知带「第 N/M 步」**：步骤标签经委派参数 `stepLabel` 透传到 `context.ts` 的 onNotice 交付处，前缀插在「计划通知：」标记之后（渠道与 e2e 替身仍按该标记识别通知帧）
@@ -201,15 +201,15 @@ Phase 0 测试并行化        （不动架构，纯提速）
 
 ## Phase 7 — 执行层记忆
 
-**状态：已完成**。17dz 持久化自己的领域记忆，跨任务生效；编排层零改动。
-**改动（实际落地，17dz 仓）**：
-- 新增 `bin/17dz memory <get|put|list|delete>`（与 plan 组同风格：单行 JSON、MEMORY_REFUSE 走 stderr exit 3），存储为平台状态目录 JSON（`EXECUTION_MEMORY_STATE` 可覆盖，默认 `.runtime/memory.json`），scope 白名单 global/customer/accountSet（后两者必须带平台规范名 id），key kebab-case、value ≤2000 字符，机器强制
+**状态：已完成**。执行层 持久化自己的领域记忆，跨任务生效；编排层零改动。
+**改动（实际落地，执行层 仓）**：
+- 新增 `bin/example-gateway memory <get|put|list|delete>`（与 plan 组同风格：单行 JSON、MEMORY_REFUSE 走 stderr exit 3），存储为平台状态目录 JSON（`EXECUTION_MEMORY_STATE` 可覆盖，默认 `.runtime/memory.json`），scope 白名单 global/customer/accountSet（后两者必须带平台规范名 id），key kebab-case、value ≤2000 字符，机器强制
 - 跨进程安全复刻 plan.js 失败模型：'wx' 独占锁 + 原子 rename；状态损坏 **fail-closed**（MEMORY_STATE_CORRUPT，不静默重置）
 - SKILL（serve 两个）新增「领域记忆」节：何时读（计划激活后涉及该客户/账套时、用户说"跟上次一样"时）、何时写（用户当场确认后）、键约定、铁边界（只存领域口径，不存用户偏好/稳定事实；不得要求主 Agent 转述或代存）
-- 边界保证：fshine 零改动；`bin/17dz memory` 天然过 fshine bash 门（首词规则）；memory 不进 operations 清单/矩阵/限流/计划绑定——取数路径上没有任何编排层组件参与
+- 边界保证：fshine 零改动；`bin/example-gateway memory` 天然过 fshine bash 门（首词规则）；memory 不进 operations 清单/矩阵/限流/计划绑定——取数路径上没有任何编排层组件参与
 
 **验收（按实际达成记录）**：
-- 17dz 全量 **21/21 套件全绿**（新增 test-memory.js：往返/覆盖写/scope 三维隔离/17 条坏输入/状态隔离/损坏 fail-closed/serve 法域读取/4 进程跨进程全链路）+ `lint:operations` 通过 ✓
+- 执行层 全量 **21/21 套件全绿**（新增 test-memory.js：往返/覆盖写/scope 三维隔离/17 条坏输入/状态隔离/损坏 fail-closed/serve 法域读取/4 进程跨进程全链路）+ `lint:operations` 通过 ✓
 - 跨任务说"跟上次一样"时执行层自取：3 独立进程共享 EXECUTION_MEMORY_STATE 的 put→get→list 复现实测通过 ✓
 - 已知限制（已记录）：worker 在计划激活前读不了记忆（fshine 门禁要求先有激活计划）——SKILL 将读记忆定在计划激活后；记忆无审计/无版本迁移（对齐 roadmap「明确不做」）
 
@@ -222,12 +222,12 @@ Phase 0 测试并行化        （不动架构，纯提速）
 | 每个 Phase 结束 | `npm run typecheck` + `npm test` | — |
 | Phase 1 | 探针 `--quick`（对比业务层有无回归） | — |
 | Phase 2 / 4 | — | 探针 `--only C1` 两轮 |
-| Phase 3 / 5 / 6 | 17dz `test-plan` / `test-consistency` / `test-operations` | 探针 `--quick` |
+| Phase 3 / 5 / 6 | 执行层 `test-plan` / `test-consistency` / `test-operations` | 探针 `--quick` |
 | 里程碑（Phase 4、6 完成） | 探针全量 | — |
 
-**探针本身的能力**：`scripts/probe-real-agent.ts`，真实 LLM + 真 `bin/17dz` + mock 执行器，`--only` 选用例、`--quick` 快速子集。
+**探针本身的能力**：`scripts/probe-real-agent.ts`，真实 LLM + 真 `bin/example-gateway` + mock 执行器，`--only` 选用例、`--quick` 快速子集。
 
-**覆盖增强（roadmap 之外，验收补强）**：多任务交织与探索型会话两类场景——e2e `turn-loop-interleaved.test.ts` 4 例 + 探针 E1/F1（`--only E1,F1`，不进 quick）。真实模型首测发现与处置记录于 `rule-landing.md` §9：探索型达到设计意图（澄清/不编造）；交织场景抓到 4 类模型/worker 侧失效（零执行轮次编造数据、请求加工 mangling、召回退化、worker 调用形式错误），宿主契约全部正确履职；相应地补了 `conversation_unsourced_amounts` 只记录不拦截的探查器与 17dz SKILL 的相对期间硬规则。
+**覆盖增强（roadmap 之外，验收补强）**：多任务交织与探索型会话两类场景——e2e `turn-loop-interleaved.test.ts` 4 例 + 探针 E1/F1（`--only E1,F1`，不进 quick）。真实模型首测发现与处置记录于 `rule-landing.md` §9：探索型达到设计意图（澄清/不编造）；交织场景抓到 4 类模型/worker 侧失效（零执行轮次编造数据、请求加工 mangling、召回退化、worker 调用形式错误），宿主契约全部正确履职；相应地补了 `conversation_unsourced_amounts` 只记录不拦截的探查器与 执行层 SKILL 的相对期间硬规则。
 
 **从 StepCode 环境跑探针的坑**：harness 进程自带 `LLM_*` 环境变量（指向它自己用的模型），Node `--env-file` 不覆盖已存在变量——直接跑会静默用 harness 的配置而不是 `.env`。正确姿势：`env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL node --env-file=.env --import tsx scripts/probe-real-agent.ts …`。
 

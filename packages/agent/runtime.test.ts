@@ -324,7 +324,7 @@ describe('createTaxAgentRuntime', () => {
     const runtime = createTaxAgentRuntime({
       driver,
       sessions: new FakeSessionRepo(),
-      platformTask: subagent(async () => ({ taskId: 'task_activated', text: '计划已批准但执行入口无响应。\n\n〔本轮执行面：0 次 bin/17dz 调用〕', activatedPlan: { planId: 'plan_active', version: 3 } })),
+      platformTask: subagent(async () => ({ taskId: 'task_activated', text: '计划已批准但执行入口无响应。\n\n〔本轮执行面：0 次 bin/example-gateway 调用〕', activatedPlan: { planId: 'plan_active', version: 3 } })),
     });
 
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_activated_footprint' }), '查幻东账套的应收账款');
@@ -429,7 +429,7 @@ describe('createTaxAgentRuntime', () => {
       sessions: new FakeSessionRepo(),
       platformTask: subagent(async () => ({
         taskId: 'task_1',
-        text: '幻辰财税 202609 应收余额为 51 元。\n\n〔本轮执行面：3 次 bin/17dz 调用〕',
+        text: '幻辰财税 202609 应收余额为 51 元。\n\n〔本轮执行面：3 次 bin/example-gateway 调用〕',
         execution: { planId: 'plan_1', version: 1, calls: 3 },
       })),
     });
@@ -438,7 +438,7 @@ describe('createTaxAgentRuntime', () => {
 
     expect(reply.text).toBe('幻辰财税 202609 应收余额为 51 元。');
     expect(reply.text).not.toContain('本轮执行面');
-    expect(reply.text).not.toContain('bin/17dz');
+    expect(reply.text).not.toContain('bin/example-gateway');
   });
 
   it('零执行但子 Agent 诚实汇报能力边界时，标注来源转发而非整段丢弃', async () => {
@@ -520,7 +520,7 @@ describe('createTaxAgentRuntime', () => {
     expect(states).toHaveLength(2);
   });
 
-  it('records the current 17dz result as a searchable tool_result event with internal ids redacted', async () => {
+  it('records the current example-gateway result as a searchable tool_result event with internal ids redacted', async () => {
     const events: ConversationEventRecord[] = [];
     const runtime = createTaxAgentRuntime({
       driver: {
@@ -600,7 +600,7 @@ describe('createTaxAgentRuntime', () => {
   it('F5 整理模型停嘴时回落 worker 文本：执行面注脚被剥掉，不上屏也不进 durable log', async () => {
     const platformTask = subagent(async (args) => ({
       taskId: args.taskId ?? 'task_resumed',
-      text: '幻辰 202609 应收余额为 42 元。\n\n〔本轮执行面：3 次 bin/17dz 调用〕',
+      text: '幻辰 202609 应收余额为 42 元。\n\n〔本轮执行面：3 次 bin/example-gateway 调用〕',
       execution: { planId: 'plan_resumed', version: 2, calls: 3 },
     }));
     // 整理模型什么都没说 → 走 resumed.text 回落
@@ -616,7 +616,7 @@ describe('createTaxAgentRuntime', () => {
 
     expect(reply.text).toBe('幻辰 202609 应收余额为 42 元。');
     expect(reply.text).not.toContain('本轮执行面');
-    expect(reply.text).not.toContain('bin/17dz');
+    expect(reply.text).not.toContain('bin/example-gateway');
     // durable log 里的 tool_result 事件同样不带注脚（它会被 search_history 再喂回上下文）
     const toolResult = log.events.find((event) => event.kind === 'tool_result');
     expect(toolResult?.content).toBe('幻辰 202609 应收余额为 42 元。');

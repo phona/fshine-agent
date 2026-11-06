@@ -14,7 +14,7 @@
  */
 import { randomUUID } from 'node:crypto';
 import { closeStore, createSqliteStore, firstEnabledPrincipalId, loadConfig, principalScopeRecords, newId } from '@fshine/core';
-import { turnBudgetMsFor } from '@fshine/contracts';
+import { turnBudgetMsFor, resolveActiveProfileId } from '@fshine/contracts';
 import { createContextTaskRunner, createPiCodingTurnDriver, createPiTurnDriver, createTaxAgentRuntime } from '@fshine/agent';
 import { estimateContextTokens, type AgentMessage } from '@earendil-works/pi-agent-core';
 
@@ -60,6 +60,8 @@ function buildTranscript(rounds: number, opts?: { lastUsageInput?: number }): Ag
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
   // 授权用户 = config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）首个
   // enabled principal。null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是
   // 这里的硬编码）。
@@ -76,7 +78,7 @@ async function main(): Promise<void> {
     profiles: config.contextProfiles,
     tasks: store.platformTasks!,
     workerDriver: createPiCodingTurnDriver({ env: process.env }),
-    profileId: '17dz',
+    profileId,
     // 长会话实测不写任何数据：落账后端不注入（proposalCommitEnabled 缺省 false），
     // 确认码只会到达"确认收到但不写"。（这是本脚本刻意选的只读形态，与开关无关——
     // B 波那个"落账后端接不接"的开关已退役，落账放行只由 isCommitEnabled 派生。）
@@ -86,7 +88,7 @@ async function main(): Promise<void> {
     driver: createPiTurnDriver({ env: process.env }),
     sessions: store.sessions,
     sessionTtlMs: config.sessionTtlMs,
-    turnBudgetMs: turnBudgetMsFor(config.contextProfiles['17dz']),
+    turnBudgetMs: turnBudgetMsFor(config.contextProfiles[profileId ?? '']),
     platformTask,
   });
 

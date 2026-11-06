@@ -126,7 +126,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -153,11 +153,11 @@ function runInput(cwd: string): TurnDriverInput {
 }
 
 /** A1 实测形状：worker 自己包 wrapper 跑平台脚本（整轮只有 local，没有 query/prepare/commit）。 */
-const WRAPPER_BASH = 'bin/17dz local tmp/req_bypass/run_transform.py';
+const WRAPPER_BASH = 'bin/example-gateway local tmp/req_bypass/run_transform.py';
 const WRAPPER_WRITE = { path: 'tmp/req_bypass/run_transform.py', content: 'subprocess.run([".venv/bin/python","src/payroll/scripts/transform.py"])' };
 /** 经计划门放行的平台执行调用（prepare 模式：渲染入口）。 */
-const PREPARE_BASH = 'bin/17dz prepare src/payroll/scripts/transform.py';
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"payroll.transform","args":[]}]}';
+const PREPARE_BASH = 'bin/example-gateway prepare src/payroll/scripts/transform.py';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":[]}]}';
 
 describe('绕开平台执行器的披露判据（纯函数：三条件同时成立）', () => {
   it('有本地执行 + 零平台执行 + 有产物 → 告警', () => {
@@ -187,7 +187,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -213,7 +213,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     // 2026-10-18 起 execution.calls = 全部被放行执行的 bash 数（2026-10-18 run6：纯本地
     // 任务的诚实报告曾被"零网关调用 = 零执行"的旧判据顶掉，本地执行也是执行痕迹）
     expect(result.execution).toEqual({ planId: '', version: 0, calls: 2 });
-    expect(result.footprint).toBe('2 次 bin/17dz 调用');
+    expect(result.footprint).toBe('2 次 bin/example-gateway 调用');
     expect(result.text).toBe('表已经算好了。');
   });
 
@@ -221,7 +221,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -241,7 +241,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -259,7 +259,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -267,7 +267,7 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
       onExecutorBypassed: (event) => alerts.push(event),
     });
     fake.setScript([
-      { bash: ['bin/17dz operation list --json', WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
+      { bash: ['bin/example-gateway operation list --json', WRAPPER_BASH], write: [WRAPPER_WRITE], text: '表已经算好了。' },
     ]);
 
     await driver.run(runInput(cwd));
@@ -287,7 +287,7 @@ describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind
    * 点；断言同时认三件事——steer 只送一次且是生产那条 nudge、wind-down 那次
    * local 照旧计入披露、回合结果（execution / footprint / text）一字不变。
    */
-  const METADATA_BASH = 'bin/17dz operation list --json';
+  const METADATA_BASH = 'bin/example-gateway operation list --json';
 
   async function runWithStepCap(script: FakeTurn[], steerThrowCount = 0): Promise<{
     alerts: PlatformExecutorBypassedEvent[];
@@ -297,7 +297,7 @@ describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -329,7 +329,7 @@ describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind
     });
     // 披露只是披露：回合结果一字不变。
     expect(result.execution).toEqual({ planId: '', version: 0, calls: 3 });
-    expect(result.footprint).toBe('3 次 bin/17dz 调用');
+    expect(result.footprint).toBe('3 次 bin/example-gateway 调用');
     expect(result.text).toBe('表已经算好了。');
   });
 
@@ -355,7 +355,7 @@ describe('步数帽 steer 失败补发路径（真 driver）：首次 steer 抛�
    * （不再经已 latch 的跟踪器、不在同一轮内立即重发），最终 steer 恰好
    * 送达一次、内容是生产那条 nudge，回合结果一字不变。
    */
-  const METADATA_BASH = 'bin/17dz operation list --json';
+  const METADATA_BASH = 'bin/example-gateway operation list --json';
 
   async function runWithThrow(script: FakeTurn[], throwCount: number): Promise<{
     alerts: PlatformExecutorBypassedEvent[];
@@ -365,7 +365,7 @@ describe('步数帽 steer 失败补发路径（真 driver）：首次 steer 抛�
     const { cwd } = await makeDriver();
     const alerts: PlatformExecutorBypassedEvent[] = [];
     const driver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),

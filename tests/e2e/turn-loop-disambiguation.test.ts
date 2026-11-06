@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -14,7 +14,7 @@
  * 提供"继续哪个"的编号语义只有紧跟宿主问题时才成立（中间插过任何回合即失效）。
  *
  * 夹具口径（Wave 1 收尾）：账套名一律用 mock 种子状态里**真实存在**的规范名
- * （`17dz-platform/src/execution/mocks/fixtures/seed.json`：幻辰财税 / 新兴五金 /
+ * （`fictional-execution-layer/src/execution/mocks/fixtures/seed.json`：幻辰财税 / 新兴五金 /
  * 新兴建材 / 幻辰实业有限公司）。本文件的主旨是编号消歧，不是"平台说没有"——用捏造名
  * （甲乙丙账套）时，平台 not_found 信封带 data.query 会激活宿主的结构化澄清
  * （selectionClarificationOf），澄清问题整体覆盖 worker 的捏造文本，消歧主线根本走不到。

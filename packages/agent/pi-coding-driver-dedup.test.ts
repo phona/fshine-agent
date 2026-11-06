@@ -97,11 +97,11 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 // 提交即激活的方案（execute 档，不走通知/确认门）——用于帧去重用例。
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]}]}';
 // 真实平台查询（计划已激活 → G1 放行，按 label 表出帧）。
-const QUERY_COMMAND = 'bin/17dz query probe-query.js --query 某公司 --period 202609';
+const QUERY_COMMAND = 'bin/example-gateway query probe-query.js --query 某公司 --period 202609';
 // 参数不同的同类查询：帧文本不同，用来在两条相同帧之间"插一件事"。
-const QUERY_COMMAND_2 = 'bin/17dz query probe-query.js --query 某公司 --period 202610';
+const QUERY_COMMAND_2 = 'bin/example-gateway query probe-query.js --query 某公司 --period 202610';
 
 /** label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单（P0 的 label 数据驱动不变）。 */
 const OPERATION_LABELS = new Map([['probe-query', '读取余额']]);
@@ -153,7 +153,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: OPERATION_LABELS,

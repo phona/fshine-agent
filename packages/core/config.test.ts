@@ -76,14 +76,14 @@ describe('loadConfig', () => {
   it('context profile 解析 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     skillRoots: [".agents/skills"]
     workerTimeoutMs: 600000
 `;
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.contextProfiles['17dz']).toMatchObject({
-      root: '/opt/17dz-platform',
+    expect(config.contextProfiles['example-gateway']).toMatchObject({
+      root: '/opt/fictional-execution-layer',
       skillRoots: ['.agents/skills'],
       workerTimeoutMs: 600000,
     });
@@ -92,17 +92,17 @@ contextProfiles:
   it('context profile 声明 gateway 且拒绝父级逃逸 gateway', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
-    gateway: bin/17dz
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    gateway: bin/example-gateway
     skillRoots: [".agents/skills"]
 `;
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.contextProfiles['17dz']).toMatchObject({ gateway: 'bin/17dz' });
+    expect(config.contextProfiles['example-gateway']).toMatchObject({ gateway: 'bin/example-gateway' });
     const bad = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     gateway: ../escape
     skillRoots: [".agents/skills"]
 `;
@@ -112,19 +112,19 @@ contextProfiles:
   it('context profile 声明 executorLabel 且拒绝空值/超长/控制字符（C2）', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
-    executorLabel: 17dz 子 Agent
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    executorLabel: 执行层子 Agent
     skillRoots: [".agents/skills"]
 `;
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.contextProfiles['17dz']).toMatchObject({ executorLabel: '17dz 子 Agent' });
+    expect(config.contextProfiles['example-gateway']).toMatchObject({ executorLabel: '执行层子 Agent' });
 
     // 空串（trim 后为空）
     const empty = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     executorLabel: "   "
     skillRoots: [".agents/skills"]
 `;
@@ -132,8 +132,8 @@ contextProfiles:
     // 超过 32 字符（它是模型可见文本，加载期挡住畸形值）
     const tooLong = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     executorLabel: ${'x'.repeat(33)}
     skillRoots: [".agents/skills"]
 `;
@@ -141,8 +141,8 @@ contextProfiles:
     // 控制字符（换行会污染提示词渲染）
     const control = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     executorLabel: "label\\nline2"
     skillRoots: [".agents/skills"]
 `;
@@ -152,20 +152,20 @@ contextProfiles:
   it('context profile 声明 toolName 且拒绝非法形状（C3）', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
-    toolName: run_17dz_task
+  example-gateway:
+    root: /opt/fictional-execution-layer
+    toolName: run_example_gateway_task
     skillRoots: [".agents/skills"]
 `;
     const config = loadConfig({ yamlPath: writeFixture(yaml), env: PUBLIC_URL_ENV });
-    expect(config.contextProfiles['17dz']).toMatchObject({ toolName: 'run_17dz_task' });
+    expect(config.contextProfiles['example-gateway']).toMatchObject({ toolName: 'run_example_gateway_task' });
 
     // 大写/连字符/数字开头都不是合法工具名（模型可见协议面，形状必须像标识符）
     for (const bad of ['Run_Task', 'run-task', '1run_task', 'run task']) {
       const badYaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     toolName: "${bad}"
     skillRoots: [".agents/skills"]
 `;
@@ -174,8 +174,8 @@ contextProfiles:
     // 超过 48 字符
     const tooLong = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     toolName: ${'a'.repeat(49)}
     skillRoots: [".agents/skills"]
 `;
@@ -185,8 +185,8 @@ contextProfiles:
   it('context profile 拒绝非正 Worker 预算', () => {
     const yaml = `${VALID_YAML}
 contextProfiles:
-  17dz:
-    root: /opt/17dz-platform
+  example-gateway:
+    root: /opt/fictional-execution-layer
     skillRoots: [".agents/skills"]
     workerTimeoutMs: 0
 `;

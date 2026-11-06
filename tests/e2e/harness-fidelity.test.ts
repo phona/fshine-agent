@@ -1,4 +1,4 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -99,7 +99,7 @@ describe('[L4 集成] harness 保真度绊线', () => {
     // 原样 env 真跑一次网关 query。信封形状全平台只有一个出口（src/lib/envelope.js 的
     // emit），钉住一个 operation 的真实输出即钉住整类。
     const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
-      const child = spawnSync(path.join(platformRoot, 'bin', '17dz'), args, {
+      const child = spawnSync(path.join(platformRoot, 'bin', 'example-gateway'), args, {
         input, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
       });
       if (child.error) return reject(child.error);
@@ -118,7 +118,7 @@ describe('[L4 集成] harness 保真度绊线', () => {
     }
 
     // gatedWorker execute 分支的原样 spawn：网关形式 + EXECUTION_PLAN_ID/EXECUTION_REQUIRE_PLAN 绑定。
-    const out = spawnSync(path.join(PLATFORM_ROOT, 'bin', '17dz'),
+    const out = spawnSync(path.join(PLATFORM_ROOT, 'bin', 'example-gateway'),
       ['query', QUERY_RECEIVABLES_SCRIPT, '--query', '幻辰财税', '--period', CURRENT_PERIOD], {
         encoding: 'utf8', timeout: 30_000,
         env: { ...process.env, EXECUTION_PLAN_ID: activated.planId, EXECUTION_REQUIRE_PLAN: '1' },

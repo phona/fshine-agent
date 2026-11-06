@@ -1,5 +1,5 @@
 // [通用] 单仓就能跑的 e2e：不依赖兄弟仓、config/agent.yaml、财税语义与财税 mock。
-// 见 docs/e2e-ownership.md。文件内 profile 键名 17dz 是遗留键名，不是兄弟仓依赖。
+// 见 docs/e2e-ownership.md。文件内 profile 键名是遗留键名，不是兄弟仓依赖。
 import { afterEach, describe, expect, it } from 'vitest';
 import type { ContextProfileConfig, IncomingChannelMessage, TrustedContext } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from '@fshine/core';
@@ -28,7 +28,7 @@ function runner(store: ReturnType<typeof createSqliteStore>, workerDriver: TurnD
   const profiles: Record<string, ContextProfileConfig> = {
     // skillRoots 只需是 root 内一个真实存在的目录（worker 是脚本替身，不真读技能）。
     // fshine 自带的 .agents/skills 已随 L6 死技能清理删除，故用 docs/ 作占位挂载点。
-    '17dz': { root: process.cwd(), skillRoots: ['docs'] },
+    'example-execution-layer': { root: process.cwd(), skillRoots: ['docs'] },
   };
   const inner = createContextTaskRunner({ profiles, tasks: store.platformTasks!, workerDriver });
   return {
@@ -56,7 +56,7 @@ function workerDriver(responses: string[], observed: TurnDriverInput[] = []): Tu
   };
 }
 
-describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
+describe('本地 E2E × cwd 固定的 example-execution-layer 子 Agent', () => {
   it('Main Agent 申报本轮动作后宿主委派，并透传子 Agent 自然语言', async () => {
     const store = createSqliteStore(':memory:');
     stores.push(store);
@@ -154,7 +154,7 @@ describe('本地 E2E × cwd 固定的 17dz 子 Agent', () => {
     const store = createSqliteStore(':memory:');
     stores.push(store);
     const task = createContextTaskRunner({
-      profiles: { '17dz': { root: process.cwd(), skillRoots: ['../outside'] } },
+      profiles: { 'example-execution-layer': { root: process.cwd(), skillRoots: ['../outside'] } },
       tasks: store.platformTasks!,
       workerDriver: ScriptedTurnDriver([{ text: '不应执行' }]),
     });

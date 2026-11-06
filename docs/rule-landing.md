@@ -19,15 +19,15 @@
 | C3 | 自相矛盾申报退回模型重填，不消耗用户澄清轮次。Phase 4 后唯一检查：delegate 的 request 必须非空（把用户请求加工成自包含的一句话） | `turn-contract.ts` `isSelfContradictoryDeclaration` + `runtime.ts` 路由处 |
 | C4 | 申报 platform_query 但零执行（无激活计划、无平台调用、无待确认计划）→ 不外发财务结论 | `packages/agent/src/runtime.ts` 出口校验（`delegate_without_execution`） |
 | C5 | Main Agent 跳过申报 → 重试一次，仍跳过则失败关闭，丢弃自由文本 | `runtime.ts`（`route_declaration_missing`） |
-| C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 17dz-query SKILL.md） |
+| C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 执行层 `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 执行层查询 SKILL.md） |
 | C7 | ~~余额计划只能调 `finance.query-receivables`；不得夹带凭证查询~~ → 同上（操作匹配归执行层；实体越权仍由 C20 挡下） | 同 C6 |
 | C8 | ~~余额计划不得越权（账套/客户/期间逐次包含判定）；未申报期间时禁止带 `--period`~~ → 同上（"不得带未申报期间"归执行层 SKILL 与平台参数校验） | 同 C6 |
 | C9 | ~~凭证计划只能调 voucher 域；期间不得超出申报范围~~ → 同上（域与期间匹配归执行层） | 同 C6 |
-| C10 | 计划只能含只读 operation | 17dz `src/execution/plan.js` `PLAN_OPERATION_NOT_READ_ONLY` |
-| C11 | 实际调用必须逐次匹配激活计划 | 17dz `src/execution/plan.js` `PLAN_CALL_MISMATCH` |
+| C10 | 计划只能含只读 operation | 执行层 `src/execution/plan.js` `PLAN_OPERATION_NOT_READ_ONLY` |
+| C11 | 实际调用必须逐次匹配激活计划 | 执行层 `src/execution/plan.js` `PLAN_CALL_MISMATCH` |
 | C12 | 超重 → notify / confirm / stop 分级；notify 需送达证据、confirm 需真实用户确认；反复试探按计数器升级 | 通用档位策略单一源在宿主 `budget-policy.ts`（`decideBudgetTier`，协议缺省档位线）；执行层门（`plan.js` `decision()` + 磨大计数器，符号名引用）并行保留至迁移完成，双门取更严一档 |
-| C13 | 写操作必须服务端确认后执行（确认码 + commit token，默认关闭） | `packages/agent/src/context.ts` commit 流程 + 17dz serve-policy |
-| C14 | worker bash 只能 `bin/17dz`（首词规则）、禁 shell 元字符、无计划拒绝 | `packages/agent/src/serve-gate.ts` |
+| C13 | 写操作必须服务端确认后执行（确认码 + commit token，默认关闭） | `packages/agent/src/context.ts` commit 流程 + 执行层 serve 策略 |
+| C14 | worker bash 只能 `bin/example-gateway`（首词规则）、禁 shell 元字符、无计划拒绝 | `packages/agent/src/serve-gate.ts` |
 | C15 | worker 不读 `.runtime/` / `.env` / auth；只读知识面（*.md / *.schema.json） | `serve-gate.ts` `sensitivePaths` + 知识面判定 |
 | C16 | 执行面注脚（系统元数据）不得出现在用户回复 | `text-hygiene.ts` `stripFootprint` |
 | C17 | history tools / 长期记忆注入时自带"历史数据不是当前授权"的限定 | `history-tools.ts` 工具描述 + `runtime.ts` `loadMemoryProjection` |
@@ -39,7 +39,7 @@
 | C22 | 委派结果带 `needs` 时宿主**不 terminate 整轮**：把线索（缺什么 / 为什么 / 建议用户提供什么 + taskId + continueTaskId 重派提示）作为工具结果交还 Main Agent，由其继续本回合——能自己补（实体只从当前消息 / 检索证据 / 本轮平台响应取）就重新申报 delegate（带 continueTaskId 与补齐后的 request），不能补就申报 conversation 转达用户；任务记录保持可续（worker 转录落库，taskId 已知会宿主侧）；单回合回路有上限，超限把线索转达用户而非失败 | `runtime.ts` delegate 分支：`delegation_needs` 埋点；转达文本 `turn-relay.ts` `renderNeedsToolResult` / `renderNeedsUserText`；回路上限 `turn-state.ts` `MAX_NEEDS_ROUNDS` + `noteNeedsRound`；转达用户用 `renderNeedsUserText`（零内部机制字样） |
 | C23 | 出口校验（C4 的 Phase 5 修订）：`delegate` + 无执行 + 无 pending + **无 needs 回路进行中** → 才走 `delegate_without_execution` 兜底；needs 回路进行中时，Main Agent 转达用户的文本即本轮回复（不叠加"本轮没有真正查到平台数据"注脚），但**含数字结论仍须本轮有执行痕迹**——回路本身不是执行痕迹 | `runtime.ts` 出口校验（needs 轮次计数规则住 `turn-state.ts` `noteNeedsRound`；转达文本住 `turn-relay.ts`）：`needsLoop` / `needsRelay` / `needs_loop_relayed` 埋点 |
 | C24 | 计划模式协议（roadmap Phase 6）：delegate 的 request 以「第N/M步：」开头 = 多步拆解的第 N 步（共 M 步）；**无前缀 = 单步模式，行为与 Phase 5 之前完全一样**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent 继续下一步或申报 conversation 汇总。前缀由宿主用正则**机械**解析（`plan-steps.ts`），不做任何业务匹配；非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀没有正文）按单步处理——协议层 fail-open，fail-closed 仍在出口校验 | `plan-steps.ts` `PLAN_STEP_PREFIX_PATTERN` / `parsePlanStep` + `runtime.ts` delegate 分支；协议教学在 `ROUTE_CURRENT_TURN_TOOL.description`（**契约仍 3 字段，一个都没加**） |
-| C25 | 计划模式的步骤 2..M 经 `continueTaskId` 在上一步返回的同一个 17dz 子任务内续跑（宿主透传为 taskId）：平台累计账本因此跨步累积，闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）。宿主不强制该字段——与 request 加工同属模型侧，协议在工具描述里教 | `runtime.ts` 委派参数透传 + `turn-contract.ts` continueTaskId 说明；e2e `turn-loop-plan-steps.test.ts` 6.1/6.2 断言三步 taskId 相同、账本调用数跨步累积 |
+| C25 | 计划模式的步骤 2..M 经 `continueTaskId` 在上一步返回的同一个 执行层子任务内续跑（宿主透传为 taskId）：平台累计账本因此跨步累积，闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）。宿主不强制该字段——与 request 加工同属模型侧，协议在工具描述里教 | `runtime.ts` 委派参数透传 + `turn-contract.ts` continueTaskId 说明；e2e `turn-loop-plan-steps.test.ts` 6.1/6.2 断言三步 taskId 相同、账本调用数跨步累积 |
 | C26 | 任务计划状态（架构 §2 第 6 条）：计划模式每步委派前 append `started` 事实（含 request/stepIndex/totalSteps），委派结果回来后按步补 `done`/`failed`/`needs` 终态事实，**taskId 写进该步的最后一条事实**（事前不知、事后回填）；停在用户确认门的步骤不写终态（投影保持 started，计划"打开"可跨回合续跑）。planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；跨回合续跑的计划绑定按 C31 的优先级机械判定（`openPlans` 候选召回，`latestOpenPlan` 是其便捷形式）。状态只取宿主持机械可验证的信号：needs→needs、有执行痕迹→done、两者皆无→failed——**"这一步业务上成没成"由 Main Agent 汇总如实呈现，宿主不猜**。存储不可用/未注入 = 不落计划状态，功能降级但不报错 | `plan-binding.ts` `resolvePlanBinding`（① 同回合已定的短路仍在 `runtime.ts` 调用点）+ `plan-facts.ts` `createPlanFactWriter` / `planStepSummary` + deps `taskPlans?: TaskPlanRepo`；事实与投影契约在 `packages/contracts/src/store.ts`（并行 stream），SQLite 实现在 `packages/core/src/store.ts` |
 | C27 | 计划模式通知前缀：该步委派过程中平台计划门产出的 notify 文本，交付用户时加「第 N/M 步」前缀，让用户看到拆解的全局进度。前缀插在固定标记「计划通知：」**之后**——渠道适配器与 e2e 替身都按该标记识别通知帧；步骤标签由 runtime 从协议前缀解析，经委派参数 `stepLabel` 透传，宿主不进 Main Agent 工具 schema、不进 worker 提示词 | `runtime.ts` 委派参数 + `context.ts` `withStepLabel`（包装 `ctx.trusted.onNotice`）+ `plan-runtime.ts` `PLAN_NOTICE_PREFIX`；e2e 6.1 断言 `sdk.noticeTexts()` 含"第 1/3 步" |
 | C28 | 汇总回合出口校验（C4/C23 的 Phase 6 扩展）：有计划模式执行痕迹（任一步真跑过）即放行汇总；**全部步骤都零执行时**，"三步都没查成"这种不含数字结论的如实汇总可以外发（不叠加"没有查到平台数据"注脚，埋点 `plan_steps_relayed`），但汇总里带数字结论仍被 `delegate_without_execution` 挡下——回路/拆解本身不是执行痕迹 | `runtime.ts` 出口校验（步骤结局记账住 `turn-state.ts` `notePlanStepOutcome` / `stepOutcomeOf`，复读兜底文本住 `plan-facts.ts` `renderPlanStepsRelayFallback`）：`planModeTurn` / `plan_steps_relayed`；单测 P6.9 |
@@ -47,25 +47,25 @@
 | C30 | 任一步失败不阻塞其他步骤（架构 §3）：单步失败（含 needs/零执行的错误结果）时宿主照常把后续步骤派出去，由汇总如实报告失败或缺信息的步骤。回路上限（`MAX_NEEDS_ROUNDS`）在计划模式下**按步计**——同一步反复重报才收口（收口方式是"跳过这一步继续后续步骤"，不是终止整轮），换一步即重新计数 | `runtime.ts` needs 分支（`needsStepIndex` 与计数规则住 `turn-state.ts`）/ `turn-relay.ts` `renderPlanStepToolResult`；e2e 6.2 + 单测 P6.5 |
 | C31 | 多任务回溯消歧（歧义抛给用户）：跨回合续跑的计划绑定按优先级**机械**判定——① 同回合已定 > ② 显式 `continueTaskId` 按 taskId 反查所属计划（taskId 记在步事实上，比"最近开放"更真；旧代码此处按 latestOpenPlan 猜，最近的计划会抢走续跑事实）> ③ 用户消歧选定（`preferredPlanId`，宿主强制，模型声明与该计划形状不一致就新开、绝不改绑其他计划）> ④ 形状判定（总步数一致且步号接得上的候选**恰一个**时自动续跑）。候选多于一个且无其他依据 → 宿主不绑不出猜，直接发编号消歧问题（`【任务消歧】` 前缀，选项与进度由计划事实机械生成），本回合零委派零新事实；**紧跟问题的纯编号回复**才绑定——判定依据是"上一条 assistant 事件就是该问题"（中间插过任何回合即失效，按新请求处理），宿主不持久化任何 pending 状态（问题文本 + 计划事实即可完全重建消歧现场）。绑定后宿主注入选定证据，模型重新申报"做什么"，本回合计划绑定由宿主强制。宿主不解任务语义，不引入第二个判别模型 | `plan-binding.ts` `resolvePlanBinding` / `matchPlanDisambiguationReply` / `renderDisambiguationQuestion` / `planChoiceLabel` / `fitsPlanShape` / `PLAN_DISAMBIGUATION_PREFIX`；出题（写 turn + 日志 + throw）在 `runtime.ts` 调用点；召回与反查在 `TaskPlanRepo.openPlans` / `planIdForTask`（contracts + SQLite）；单测 P6.11–P6.15 + e2e `turn-loop-disambiguation.test.ts` 9.1/9.2 |
 
-| C32 | 下游平台保护（生产受控上线三件套）：① **写关闭**——`config/agent.yaml` 的 `capabilities: ["read"]`，录入提案在宿主 `createProposalViaGateway` 被确定性拒绝（"未开放写入权限"，零 prepare 零写入；确认时点还有第二道 `confirmProposalViaGateway` 的能力复核，见 D-080）；`FSHINE_REAL_COMMIT` 空 = 真平台 commit 同样拒绝（双闸）。② **并发闸**——`createContextTaskRunner` 内信号量（默认 `FSHINE_PLATFORM_CONCURRENCY=1` 全局串行）：真实平台是 `launchPersistentContext` 共享登录态 profile，并发委派会多开 Chrome 抢同一 profile——那是"被平台感知"的典型方式；闸门只包 `workerDriver.run`（平台访问都在其内），抛错经 finally 释放，排队埋点 `platform_delegation_queued`。③ **限流显式化**——`.env` 声明 `EXECUTION_RATE_LIMIT`（与 17dz 默认一致：read 桶5/3s、global 桶8/2s、api 2/s），防止测试环境放宽值被带进生产。三件套在 mock 下同样生效（串行无害），真实平台切换只需 `EXECUTION_EXECUTOR=` 置空 | `context.ts` 并发闸 + `config/agent.yaml` capabilities + `.env` / `.env.example`；单测：context.test.ts 并发闸 3 例（串行/可配并行/抛错释放）、turn-loop-write-chain.test.ts 写关闭两条（create 时能力不含 write 零办调 / 确认时点能力被收回 D-080） |
+| C32 | 下游平台保护（生产受控上线三件套）：① **写关闭**——`config/agent.yaml` 的 `capabilities: ["read"]`，录入提案在宿主 `createProposalViaGateway` 被确定性拒绝（"未开放写入权限"，零 prepare 零写入；确认时点还有第二道 `confirmProposalViaGateway` 的能力复核，见 D-080）；`FSHINE_REAL_COMMIT` 空 = 真平台 commit 同样拒绝（双闸）。② **并发闸**——`createContextTaskRunner` 内信号量（默认 `FSHINE_PLATFORM_CONCURRENCY=1` 全局串行）：真实平台是 `launchPersistentContext` 共享登录态 profile，并发委派会多开 Chrome 抢同一 profile——那是"被平台感知"的典型方式；闸门只包 `workerDriver.run`（平台访问都在其内），抛错经 finally 释放，排队埋点 `platform_delegation_queued`。③ **限流显式化**——`.env` 声明 `EXECUTION_RATE_LIMIT`（与 执行层默认一致：read 桶5/3s、global 桶8/2s、api 2/s），防止测试环境放宽值被带进生产。三件套在 mock 下同样生效（串行无害），真实平台切换只需 `EXECUTION_EXECUTOR=` 置空 | `context.ts` 并发闸 + `config/agent.yaml` capabilities + `.env` / `.env.example`；单测：context.test.ts 并发闸 3 例（串行/可配并行/抛错释放）、turn-loop-write-chain.test.ts 写关闭两条（create 时能力不含 write 零办调 / 确认时点能力被收回 D-080） |
 | C33 | 召回事实注入（支柱 C：分层知识单一读写契约）：召回线索命中时（与 C18 同一把尺，省 token）宿主把"本会话迄今真实发生过的平台执行"渲染成**执行台账**注入上下文头部。数据源唯一：Conversation Log 的 `tool_result` 事件（每次委派的结果恰好一条，append-only、按会话隔离、时间有序——宿主写下的执行底账）。**不读** `platform_tasks`：任务记录不存对象/时间范围/调用次数，`workerMessages` 是 worker 原始转录，渲染它就是重新注入"转录里偶然提到的文本"（P2 要替代的正是它）。**不并** `task_plan_steps`：每一步在 Log 里已有一条 tool_result，两侧合并会把同一次执行渲染两遍——那正是 T3r"混成两次查询"的形状，且步骤事实里的 taskId 在事件里已脱敏、无从串联。`plan_event` 是查询范围的预告不是执行结果，不收。台账只机械陈述（不解释、不排名、不比较——"哪个余额最高"让模型基于条目自己做），渲染模板零业务词，查不到执行记录 → 不注入（静默降级）。台账**不进** `entitySources`：实体来源并集一个字都不加，否则历史对象会被计划层放行——那是扩大范围不是消解（C18/C20 铁律）。保存转录前按 `【宿主执行事实：` 标记剥离：台账每回合重算，旧副本与新台账并列就是串轮 | `packages/agent/src/execution-facts.ts` + `runtime.ts` 注入点（埋点 `execution_facts_injected` / `execution_facts_empty` / `execution_facts_failed`）；单测 `execution-facts.test.ts` 9 例 + `runtime.test.ts` R6–R9；e2e `turn-loop-recall-facts.test.ts` 10.1–10.3 |
 
 | HG1 | 全历史敏感面守卫（迁移波次 2，与 exposure-lint 的现行树扫描互补：一个管**树**、一个管**历史**）：`git log --all -p`（含提交信息与 diff 增删两行）四类靶子零命中 + 两条重写产物正向锚点 + 假绿自校验。四类 = ① 企微 UserID 的带前缀形态 ② 内部绝对路径前缀形态（扣已登记替换值后计净命中）③ 数字 QQ 邮箱形态 ④ `config/agent.yaml` 与 `.runtime/` 两个本地路径涉史的 commit。**覆盖边界写死**：形态类只覆盖带前缀 UserID（实测 4/22 行，另 18 行是裸常量）、路径与邮箱两类形态；客户名 / 真实读数 / 事故附件名没有形态，只有 owner 侧逐串扫描（G1b）能守——两者**缺一不可**，只跑 HG1 会把"还有 18 行"读成"已干净"。守卫不读替换表（表缺失不会成为红的原因，C1→C2 之间的红必须且只能由四类命中与锚点造成）；表文件本身含全部敏感串原文，只住 gitignored 本地文件。浅克隆（CI 默认 depth=1）下 `--all` 只剩 1 个 commit、四类会全部恒绿 → 显式 skip 并写明原因，不装绿；真判据是全量 clone | `packages/agent/history-hygiene.test.ts`（HG1，进 unit）+ `scripts/history-sensitive-scan.sh`（G1b，**刻意不接 npm test**：表是 gitignored 本地文件，接进 CI 要么泄密、要么表缺失时整条跳过 = 真空绿）；表 = `.sensitive-strings.replace.txt`（`git filter-repo --replace-text` 输入，单一来源 = 波次 1 映射表 v2，长串在前；表内 LHS 的 sha256 前缀与 `exposure-lint` 禁词表可逐条对上，作跨表一致性核对） |
 
-## 2. SKILL 事实（17dz 执行层持有，worker 经 Skill 机制读取）
+## 2. SKILL 事实（执行层 执行层持有，worker 经 Skill 机制读取）
 
-运行态技能面：`17dz-platform/.agents/skills-serve`（`config/agent.yaml` `contextProfiles.17dz.skillRoots`）。
+运行态技能面：`fictional-execution-layer/.agents/skills-serve`（`config/agent.yaml` `contextProfiles.<profileId>.skillRoots`）。
 
 | # | 事实 | 落点 |
 |---|---|---|
-| S1 | 只问账套存在性 → 只调 `finance.search-account-sets --query`，不得用余额/科目/凭证探测 | `17dz-query/SKILL.md` 查询边界 |
+| S1 | 只问账套存在性 → 只调 `finance.search-account-sets --query`，不得用余额/科目/凭证探测 | `执行层查询/SKILL.md` 查询边界 |
 | S2 | 余额未指定期间只查当前期间；查询失败后停止并如实报告，不用凭证跨期回溯估算 | 同上 |
 | S3 | 未给账套且紧邻上下文无唯一指代时先问用户；历史账套不自动成为当前范围 | 同上 |
-| S4 | 网关唯一入口 `bin/17dz query <脚本>`，不加 cd/env 前缀 | 同上，怎么查 |
+| S4 | 网关唯一入口 `bin/example-gateway query <脚本>`，不加 cd/env 前缀 | 同上，怎么查 |
 | S5 | 不读 `.runtime/` / `.env` / auth；不写文件；不调用带 `--save` 的命令 | 同上，红线 |
 | S6 | 账套名以本次查询结果匹配；多候选列出转问用户，禁止自行选择 | 同上，账套与期间解析 |
 | S7 | 回答必含账套全名、期间、来源、截断说明；严禁编造金额 | 同上，回答要求 |
-| S8 | 录入类写操作走 prepare 技能产出变更提案，服务端确认后落账 | `17dz-bookkeeping-prepare/SKILL.md` |
+| S8 | 录入类写操作走 prepare 技能产出变更提案，服务端确认后落账 | `执行层记账提案/SKILL.md` |
 
 ## 3. 提示词现状（Phase 3 后）
 
@@ -121,9 +121,9 @@
 
 已删（Phase 1）：网关调用形式（S4+C14）、账套存在性→search-account-sets（C6+S1）、未指定账套先问/不带入历史（S3+C1）、余额期间与失败停止（C8+S2）、实现源码不可读的展开说明（C15 阻断时自带原因）。
 
-已改（Phase 3）：条目 4 的"只读查询与录入类准备；修改/删除已保存凭证、过账、结账直接报告能力边界"整条改为"按平台 SKILL 与 operation 文档声明的能力边界执行"——能力边界细则归 17dz SKILL.md（另一 agent 并行补充），编排层不再枚举业务动作。
+已改（Phase 3）：条目 4 的"只读查询与录入类准备；修改/删除已保存凭证、过账、结账直接报告能力边界"整条改为"按平台 SKILL 与 operation 文档声明的能力边界执行"——能力边界细则归 执行层 SKILL.md（另一 agent 并行补充），编排层不再枚举业务动作。
 
-已改（Phase 5）：条目 9 并入纠错环规程——"执行不了时报缺什么/为什么/建议用户提供什么"，与条目 10 的总结原则同一份表述（能力不足/不确定/被拒时如实说明并停止，不换口径试探），不新增场景枚举。**17dz SKILL 里教 worker 输出结构化块归 Phase 6 的 17dz stream，本 Phase 不碰 17dz 仓**——所以真实 worker 的线索只能由驱动从确定性原因派生（C21），提示词层只保证"如实报告"。
+已改（Phase 5）：条目 9 并入纠错环规程——"执行不了时报缺什么/为什么/建议用户提供什么"，与条目 10 的总结原则同一份表述（能力不足/不确定/被拒时如实说明并停止，不换口径试探），不新增场景枚举。**执行层 SKILL 里教 worker 输出结构化块归 Phase 6 的 执行层 stream，本 Phase 不碰 执行层 仓**——所以真实 worker 的线索只能由驱动从确定性原因派生（C21），提示词层只保证"如实报告"。
 
 **字符数**：Phase 1 验收时 SYSTEM_PROMPT 1491→908、workerSystemPrompt 1545→885。Phase 3 是改写不是删除（领域词换成领域无关表述，能力边界与协议原样保留），同一把尺子量：SYSTEM_PROMPT 831→845、workerSystemPrompt 838→835，基本持平；真正的删除发生在 `ROUTE_CURRENT_TURN_TOOL.description`（1101→1045，业务示例与字段判别教学整段移除）。
 
@@ -132,9 +132,9 @@
 - **Phase 2（已完成）**：指代规则整条删除；宿主申报前经 `reference-evidence.ts` 注入检索证据（C18）；`route_reference_hint` 与 `looksLikeReference` 已删除。
 - **Phase 3（已完成）**：`validatePlanAgainstTurnDeclaration` 的 balance/voucher/account_search 三分支换成领域无关的 `validatePlanEntities`（C20）；两个提示词的业务条目改为领域无关表述；`ROUTE_CURRENT_TURN_TOOL.description` 的领域判别教学移除；`reference-evidence.ts` 注入材料与进度/压缩提示词同步中和。宿主不再做领域判别，操作与任务类型的匹配归执行层 SKILL 与平台门禁。
 - **Phase 4（已完成）**：`ROUTE_CURRENT_TURN_TOOL` 8 字段 → 3 字段（kind/request/continueTaskId，schema 属性数=3）；`validateTurnDeclarationEvidence`/`previousTurnText`/`applyRouteDeclaration`/clarify 种类全部删除；委派 request 用加工后的 `intent.request`（原始消息只留在 `entitySources.currentMessage`）；申报层只剩结构校验，范围守卫完全靠 C20。
-- **Phase 5（已完成）**：纠错环落地（C21/C22/C23）。`route_current_turn` 契约**一个字段都没加**——"缺什么"挂在委派结果（`SubagentTaskResult.needs`）上，不进申报 schema（宿主多记住一个事实，模型就少填一个字段）；工具描述只补一段回路协议教学（委派被退回时怎么办）。结构化块的教学归 17dz SKILL，留给 Phase 6。
-- **Phase 6（已完成）**：计划模式协议（C24/C25/C30）、任务计划状态（C26）、通知步骤前缀（C27）、汇总出口校验（C28）、业务 skill 注入（C29）。同样**一个 schema 字段都没加**——「第N/M步：」写在 request 里，宿主机械解析。17dz 仓的 worker 结构化块教学不在本 Phase 范围（fshine 侧零改动）。
-- **Phase 5（已完成）**：纠错环落地（C21/C22/C23）。`route_current_turn` 契约**一个字段都没加**——"缺什么"挂在委派结果（`SubagentTaskResult.needs`）上，不进申报 schema（宿主多记住一个事实，模型就少填一个字段）；工具描述只补一段回路协议教学（委派被退回时怎么办）。结构化块的教学归 17dz SKILL，留给 Phase 6。
+- **Phase 5（已完成）**：纠错环落地（C21/C22/C23）。`route_current_turn` 契约**一个字段都没加**——"缺什么"挂在委派结果（`SubagentTaskResult.needs`）上，不进申报 schema（宿主多记住一个事实，模型就少填一个字段）；工具描述只补一段回路协议教学（委派被退回时怎么办）。结构化块的教学归 执行层 SKILL，留给 Phase 6。
+- **Phase 6（已完成）**：计划模式协议（C24/C25/C30）、任务计划状态（C26）、通知步骤前缀（C27）、汇总出口校验（C28）、业务 skill 注入（C29）。同样**一个 schema 字段都没加**——「第N/M步：」写在 request 里，宿主机械解析。执行层 仓的 worker 结构化块教学不在本 Phase 范围（fshine 侧零改动）。
+- **Phase 5（已完成）**：纠错环落地（C21/C22/C23）。`route_current_turn` 契约**一个字段都没加**——"缺什么"挂在委派结果（`SubagentTaskResult.needs`）上，不进申报 schema（宿主多记住一个事实，模型就少填一个字段）；工具描述只补一段回路协议教学（委派被退回时怎么办）。结构化块的教学归 执行层 SKILL，留给 Phase 6。
 
 ## 5. Phase 3 验收 grep 的剩余命中（为什么允许）
 
@@ -156,7 +156,7 @@
 
 **根因**：Phase 4 删除申报层实体校验（C1）后，"新话题不得沿用旧实体"失去结构性防线；C20 挡不住它——worker 的目录搜索响应会让该实体变成"平台解析出来的合法实体"。这是"实体只从当前消息/证据取"原则的模型侧违反，不是宿主契约漏洞。
 
-**审计证据**（复刻探针保留 stateDir 后查 17dz audit.jsonl）：渗入轮的 worker 调用是 `query-receivables --query 幻辰财税`——即 Main Agent 把上一轮实体加工进了 request，宿主不再拦截（C1 已删），worker 的目录搜索响应又让该实体成为 C20 的合法"平台响应"来源。宿主契约无洞：C20 正确校验了实体**来源**，但按设计无法区分"解析用户的指代"与"沿用上一轮实体"——后者是 request 加工质量，归模型。
+**审计证据**（复刻探针保留 stateDir 后查 执行层 audit.jsonl）：渗入轮的 worker 调用是 `query-receivables --query 幻辰财税`——即 Main Agent 把上一轮实体加工进了 request，宿主不再拦截（C1 已删），worker 的目录搜索响应又让该实体成为 C20 的合法"平台响应"来源。宿主契约无洞：C20 正确校验了实体**来源**，但按设计无法区分"解析用户的指代"与"沿用上一轮实体"——后者是 request 加工质量，归模型。
 
 **处置与实测**：工具描述 request 加工节补原则句"用户另起新话题（新的查询对象）时，不得把上一轮的实体顺带沿用"（一行原则，非场景枚举——Phase 1 原则 3）。复测结果为**偶发**：同一代码下两次 A2，一次仍渗入（模型把幻辰加工进 request），一次worker 直接 `--query 猫一杯` 被平台以 ACCOUNT_SET_NOT_FOUND 拒并如实追问（零渗入）。与历史结论一致：提示词原则降低概率但不根除，归类为**模型侧已知失效**，由 A2/C1 类探针持续观察；若后续要结构性收敛，方向在 Phase 5 纠错环或宿主对 request 的轻量范围锚，不在提示词加规则。
 
@@ -178,7 +178,7 @@
 **已知取舍（记录待观察）**：
 - 工具结果里带 continueTaskId 字样与任务编号，是给模型的内部协议材料。模型若把工具结果原样贴给用户会泄漏协议文案——归提示词第 5 条与 C16 兜底的模型侧失效类别，与 Phase 2 记录的同类问题一致；任务编号在落 Conversation Log 时已被 `redactInternalIds` 脱敏。
 - 回路轮数上限 `MAX_NEEDS_ROUNDS = 3`：超限停止重派，把线索转达给用户（转达不是失败）。防的是模型在同一回合里反复空转，每轮都是一次完整委派。
-- 真实 worker 的自由文本（"平台要求凭单查询必须显式给出期间"这类诚实汇报）仍走 terminate 路径，由 C4 的既有转发兜底——本 Phase 没有把它升级成结构化线索，因为那需要 17dz SKILL 教 worker 输出结构化块（Phase 6 的 17dz stream）。
+- 真实 worker 的自由文本（"平台要求凭单查询必须显式给出期间"这类诚实汇报）仍走 terminate 路径，由 C4 的既有转发兜底——本 Phase 没有把它升级成结构化线索，因为那需要 执行层 SKILL 教 worker 输出结构化块（Phase 6 的 执行层 stream）。
 
 ---
 
@@ -217,9 +217,9 @@
 | 1 | **零执行轮次编造数据** | T8/T11：模型编造"新兴五金凭证 bills 2025-12，此前共 4 笔、已展示前 3 笔"——本会话从未查到任何凭证；T12 汇总继续传播 | 模型侧，无代码兜底（§3.1 条目 4 只约束"不得重放"，约束不了"无中生有"）。处置：runtime 加 `conversation_unsourced_amounts` **只记录不拦截**的探查器（千分位小数格式的金额在转录/证据/当前消息里逐字找不到即告警）——不拦截是因为模型对真实数字做算术（对比/合计）会产生新数值，宿主无法在"算术"与"编造"间确定性区分。e2e 2 例钉住日志行为 |
 | 2 | **交织下的请求加工 mangling** | T3：用户答"202609 的"（延续 B=新兴五金凭证），模型把**新兴五金降级成"客户"、把 A 任务的幻辰财税带进来**，worker 实际查的是幻辰财税 202609 凭证；T5 同模式（新兴建材被当成幻辰财税的客户）。C20 挡住了第三参数尝试，但回退查询在（被 mangling 的）请求范围内是合法的 | 模型侧（Phase 4 记录的 A2 家族加重变体：不是"顺带沿用"而是"实体降级+串任务"）。宿主契约无洞；探针 E1 的 amountViolations 抓住了金额串台 |
 | 3 | **召回轮退化** | T4 召回正确但泄漏协议元话（"已按规矩先申报本轮动作"）；T7"这两个数分别是多少"重新委派并撞上确认门而非从会话记录回答 | 模型侧。e2e 1.3 钉住路由（召回=conversation 零调用） |
-| 4 | **worker 调用形式错误** | T10：worker 试了 `bin/17dz voucher query-saved` / `operation run` / `--mode serve` 三种错形式全被门拒（正确形式是 `bin/17dz query <脚本>`）；并由此催生了 #1 的编造（把门拒解读为"通道没打通"） | worker 侧 SKILL 遵从 |
+| 4 | **worker 调用形式错误** | T10：worker 试了 `bin/example-gateway voucher query-saved` / `operation run` / `--mode serve` 三种错形式全被门拒（正确形式是 `bin/example-gateway query <脚本>`）；并由此催生了 #1 的编造（把门拒解读为"通道没打通"） | worker 侧 SKILL 遵从 |
 
-**相对期间落地失败（F1 T4）**：用户补"幻辰财税，本月"后，worker 把"本月"翻译成 `--period 202609` 被 C20 拒 → needs 回路 3 轮上限 → 回落 NO_EXECUTION。与 D1 的派生期间同族。已修：17dz 两个 SKILL 补**相对期间硬规则**（"本月/当期"不传 --period；"上月/某月"请用户给 YYYYMM，禁止自行翻译编码）。
+**相对期间落地失败（F1 T4）**：用户补"幻辰财税，本月"后，worker 把"本月"翻译成 `--period 202609` 被 C20 拒 → needs 回路 3 轮上限 → 回落 NO_EXECUTION。与 D1 的派生期间同族。已修：执行层 两个 SKILL 补**相对期间硬规则**（"本月/当期"不传 --period；"上月/某月"请用户给 YYYYMM，禁止自行翻译编码）。
 
 **探针降噪**：金额抽取把"千分位/小数/万亿"高置信金额与裸整数（科目编号 1122/100201/22210101 等噪声）分开呈现，note 信噪比提升。
 
@@ -305,9 +305,9 @@
 
 背景：真实平台单轮 60-180s（mock 15-90s），用户全程黑箱；progress 管道（企微 adapter ≤4 帧/≥3s → handler `trusted.onStep` → driver）早已全通，但 worker 驱动外发的是内部事件名（`worker_tool:bash` / `worker_agent_*`）——用户直接看到协议泄漏，watch list 里"meta-talk tic"的机制根源即此。
 
-**决策**（用户确认，含防散射要求）：进度帧的业务措辞**只有一个来源**——平台 `operations.json` 的 `label` 字段，经公共 CLI `bin/17dz operation list` 第 5 列派生。防散射合约四条：① 映射只有一份且是数据不是代码（fshine 零 per-operation 分支，渲染器唯一模板 `正在${label}${keyArgs.join('·')}…`）；② 内部事件名永不出厂（SDK 会话事件的 subscribe 接线整体删除）；③ 解析只发生一次（serve gate 既有 `extractGateScript` + 新抽 `splitCommandTokens` 共用，参数摘要是声明式 flag 名单 `--query/--period/--subject-code` + 样式表）；④ 守卫进 CI——`platform-leak-lint.test.ts` 业务词命中集**只减不增**（子集断言；窄口径基线 5 行：memory-candidate-extractor ×3 执行层正则、context-extractor ×1 scope 检测、context.ts ×1 时间义注释）。安全缺省：无 label（旧平台/CLI 失败/operation 没起名）→ 静默不发帧，**绝不回退显示脚本名或操作名**。label 表按平台根路径缓存派生一次（3s 超时），绝不每条命令 spawn CLI。计划提交帧 `正在向平台提交执行方案…`（无业务词）在宿主 evaluateAndActivatePlan 前发射。主 agent 模型自述帧（pi-driver phrase，用用户原话）保持原状——最快的确认，占用 4 帧预算里的第 1 帧。
+**决策**（用户确认，含防散射要求）：进度帧的业务措辞**只有一个来源**——平台 `operations.json` 的 `label` 字段，经公共 CLI `bin/example-gateway operation list` 第 5 列派生。防散射合约四条：① 映射只有一份且是数据不是代码（fshine 零 per-operation 分支，渲染器唯一模板 `正在${label}${keyArgs.join('·')}…`）；② 内部事件名永不出厂（SDK 会话事件的 subscribe 接线整体删除）；③ 解析只发生一次（serve gate 既有 `extractGateScript` + 新抽 `splitCommandTokens` 共用，参数摘要是声明式 flag 名单 `--query/--period/--subject-code` + 样式表）；④ 守卫进 CI——`platform-leak-lint.test.ts` 业务词命中集**只减不增**（子集断言；窄口径基线 5 行：memory-candidate-extractor ×3 执行层正则、context-extractor ×1 scope 检测、context.ts ×1 时间义注释）。安全缺省：无 label（旧平台/CLI 失败/operation 没起名）→ 静默不发帧，**绝不回退显示脚本名或操作名**。label 表按平台根路径缓存派生一次（3s 超时），绝不每条命令 spawn CLI。计划提交帧 `正在向平台提交执行方案…`（无业务词）在宿主 evaluateAndActivatePlan 前发射。主 agent 模型自述帧（pi-driver phrase，用用户原话）保持原状——最快的确认，占用 4 帧预算里的第 1 帧。
 
-**验收**：47 文件 439 用例全绿（新增 30 例：渲染器属性 400 随机例严格匹配唯一模板、替身 session 驱动生产接线 `createServeGateAuditSink` 断言帧全形如「正在…」且无 `worker_` 前缀、空表/无 CLI 降级零帧且审计字段一字不少、TSV 解析/超时/非零退出）；mock 实测帧序：模型自述 → 计划提交 → `正在检索账套目录「幻辰财税」…` → `正在查应收账款余额「幻辰财税」…`。17dz 侧 `303a0db`（13 个 read operation 起 label + TSV 第 5 列）、fshine 侧 `1aa51c4`。
+**验收**：47 文件 439 用例全绿（新增 30 例：渲染器属性 400 随机例严格匹配唯一模板、替身 session 驱动生产接线 `createServeGateAuditSink` 断言帧全形如「正在…」且无 `worker_` 前缀、空表/无 CLI 降级零帧且审计字段一字不少、TSV 解析/超时/非零退出）；mock 实测帧序：模型自述 → 计划提交 → `正在检索账套目录「幻辰财税」…` → `正在查应收账款余额「幻辰财税」…`。执行层 侧 `303a0db`（13 个 read operation 起 label + TSV 第 5 列）、fshine 侧 `1aa51c4`。
 
 **同轮修掉的相邻缺陷**：① `operation list | head` EPIPE 崩溃（printList 裸写，同步抛掷 + 异步 error 事件双面，safeWrite + main 里 process.stdout 守卫，`303a0db` 后修）；② 验收脚本 `delegated` 判定原依赖 `worker_tool:` 文本，改判 `PLAN_SUBMIT_STEP`（宿主代提交方案帧是"真委派了"的确定性信号）；③ lint 测试"只减不增"曾实现成精确相等（合理收缩被误判），改子集断言。
 
@@ -325,16 +325,16 @@
 
 ## 17. 调用方输入卫生批修（2026-09-27，双仓库只读审计后）
 
-背景：一天内抓到三同族事故——① 计划命令形状不符收到权限话术（答非所问）② 17dz 驼峰 flag 静默回落默认科目（静默错答）③ 宿主替模型猜（剥围栏/C2 兜底）。用户拍板架构：**宿主只保证错误诚实可行动 + 爆炸有界，重试智慧归模型，不建容忍层**。据此删了 stripCommandWrapping 与 C2（`95b584b`/`348648e`），计划命令改结构化期望/实际错误（`9fcbf4c`）。
+背景：一天内抓到三同族事故——① 计划命令形状不符收到权限话术（答非所问）② 执行层 驼峰 flag 静默回落默认科目（静默错答）③ 宿主替模型猜（剥围栏/C2 兜底）。用户拍板架构：**宿主只保证错误诚实可行动 + 爆炸有界，重试智慧归模型，不建容忍层**。据此删了 stripCommandWrapping 与 C2（`95b584b`/`348648e`），计划命令改结构化期望/实际错误（`9fcbf4c`）。
 
-随后双 subagent 只读审计同一把尺子（静默回落/答非所问/宿主代猜/只说不做），fshine 9 项、17dz 14 项。**已修（读路径 live 批）**：
+随后双 subagent 只读审计同一把尺子（静默回落/答非所问/宿主代猜/只说不做），fshine 9 项、执行层 14 项。**已修（读路径 live 批）**：
 
-- 17dz `3707bac`：S1 共用取 token 三态（多候选账套 fail-loud 列候选，绝不再 `.first()` 代选——旧形态会拿别家账套 token 且读回校验盖 verified:true）；S6 期间格式 lib 收口（`queryVoucherPage` 一處断言 YYYYMM+月份，BAD_PERIOD）；S5 `parseCountFlag`+`driftVerdict`（NaN→非 0 退出；`checked===0` → NO_SAMPLES+exit 2，**零样本不是无漂移**）；S8 计划范围摘要诚实化（SCOPE_FORMS 声明形态，flag token 绝不当账套名，customer/subject-code 入摘要，认不出计 unknownScopeCalls；与脚本 LEGAL_FLAGS 机械对齐）；S11 UNKNOWN_DOMAIN exit 2；S13 login-pwd 滤 flag。
+- 执行层 `3707bac`：S1 共用取 token 三态（多候选账套 fail-loud 列候选，绝不再 `.first()` 代选——旧形态会拿别家账套 token 且读回校验盖 verified:true）；S6 期间格式 lib 收口（`queryVoucherPage` 一處断言 YYYYMM+月份，BAD_PERIOD）；S5 `parseCountFlag`+`driftVerdict`（NaN→非 0 退出；`checked===0` → NO_SAMPLES+exit 2，**零样本不是无漂移**）；S8 计划范围摘要诚实化（SCOPE_FORMS 声明形态，flag token 绝不当账套名，customer/subject-code 入摘要，认不出计 unknownScopeCalls；与脚本 LEGAL_FLAGS 机械对齐）；S11 UNKNOWN_DOMAIN exit 2；S13 login-pwd 滤 flag。
 - fshine `1e8f2ec`：F4 计划模式复读工具结果不再外发协议 JSON（needsRelay 兜底=步骤事实汇总，守夜事件 plan_steps_relayed_fallback）；F5 恢复路径回落过 stripFootprint（含 durable tool_result）；F6 内部工具名不上进度帧（INTERNAL_TOOLS 静默 + 模型短语钳制，泄漏特征形状判定）；F7 failureClass→用户话术（auth 类可行动："平台登录态过期，需要重新登录后才能继续查询"）；F8 计划恢复路径补执行痕迹校验（零执行不再被整理成"已完成"）。
 
-**遗留（写路径 latent 批，生产写开放前必修）**：17dz S2（fill.js 批量契约只用 contracts[0].accountSet，其余静默丢→凭证落错账套）、S3（gen-from-journal 账户下拉子串+.first() 多候选不歧义）、S4（--direction/--date-mode 无枚举白名单，过滤空转报"无符合条件"+exit 0）、S5③（fill --start-no NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串+stripCity 静默采纳简称，写路径）、S10（parse-tianren-bills creditRules 未命中静默回落 1122，未裁决口径可能落库）；fshine F1（`extractChangeProposal` 剥 ```json 围栏——与被删的 stripCommandWrapping 同族，写提案路径）**已随 C 波闭环（D-032，2026-10-13）**：宿主不再解析 worker 终稿，围栏剥离这件事连同 `extractChangeProposal` 一起消失。另：17dz 新错误码（ACCOUNT_SET_AMBIGUOUS/BAD_PERIOD/INVALID_LIMIT/INVALID_COUNT/NO_SAMPLES/UNKNOWN_DOMAIN）尚未登域文档；fshine F4 残留（回合真有过执行时出口校验跳过，模型复读仍可能外发——待单独一刀）。
+**遗留（写路径 latent 批，生产写开放前必修）**：执行层 S2（fill.js 批量契约只用 contracts[0].accountSet，其余静默丢→凭证落错账套）、S3（gen-from-journal 账户下拉子串+.first() 多候选不歧义）、S4（--direction/--date-mode 无枚举白名单，过滤空转报"无符合条件"+exit 0）、S5③（fill --start-no NaN 静默丢起始号）、S7（upload-all 未找到凭证静默跳过仍 exit 0）、S9（voucher.js fuzzyFind 子串+stripCity 静默采纳简称，写路径）、S10（parse-tianren-bills creditRules 未命中静默回落 1122，未裁决口径可能落库）；fshine F1（`extractChangeProposal` 剥 ```json 围栏——与被删的 stripCommandWrapping 同族，写提案路径）**已随 C 波闭环（D-032，2026-10-13）**：宿主不再解析 worker 终稿，围栏剥离这件事连同 `extractChangeProposal` 一起消失。另：执行层 新错误码（ACCOUNT_SET_AMBIGUOUS/BAD_PERIOD/INVALID_LIMIT/INVALID_COUNT/NO_SAMPLES/UNKNOWN_DOMAIN）尚未登域文档；fshine F4 残留（回合真有过执行时出口校验跳过，模型复读仍可能外发——待单独一刀）。
 
-**审计的结构性结论**（值得记住）：17dz 执行层"单点极高、面状不及格"——flag-guard 是全网最高水准但止步于 flag 名，值校验/positional 语义/参数间一致性全靠每个脚本作者当时的警惕（同文件自相矛盾：验 --merge 不验 --direction、验三个查询的期间不验 queryAllVouchers）。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套/漂移检测器报无漂移），而执行层是唯一能同时防住两边的一侧。方向：把"值校验+三态+不代选"下沉为共用入口卫生，别再依赖个体警惕。
+**审计的结构性结论**（值得记住）：执行层 执行层"单点极高、面状不及格"——flag-guard 是全网最高水准但止步于 flag 名，值校验/positional 语义/参数间一致性全靠每个脚本作者当时的警惕（同文件自相矛盾：验 --merge 不验 --direction、验三个查询的期间不验 queryAllVouchers）。风险不对称：编排层错误廉价高频，执行层错误昂贵低频（静默落错公司账套/漂移检测器报无漂移），而执行层是唯一能同时防住两边的一侧。方向：把"值校验+三态+不代选"下沉为共用入口卫生，别再依赖个体警惕。
 
 ## 18. 召回事实注入：召回轮次读执行台账（支柱 C 第一刀，2026-09-27）
 
@@ -348,7 +348,7 @@
 |---|---|---|
 | `platform_tasks` | taskId / 归属会话 / worker 原始转录 / 时间戳。**没有对象、没有时间范围、没有调用次数**；接口也只有 get/upsert，没有按会话列举的入口 | 不贡献任何事实。想要"每任务：对象×时间范围×calls"就得先改契约落库——那是另一刀，本刀不猜字段 |
 | `task_plan_steps` | 步骤事实（request / status / taskId / summary），**只有多步拆解才写** | 不作第二来源：每一步在 Log 里已有一条 tool_result，合并即把一次执行渲染两遍（正是要修的串轮形状），且 taskId 在事件里已脱敏、没有可串联的键 |
-| Conversation Log `tool_result` | 每次委派的结果恰好一条（terminate / needs / 计划步三种路径都由 `extract17dzToolResultEvents` 写），append-only、按会话隔离、时间有序 | **唯一事实源**：无缺口也无重复 |
+| Conversation Log `tool_result` | 每次委派的结果恰好一条（terminate / needs / 计划步三种路径都由 `extract执行层ToolResultEvents` 写），append-only、按会话隔离、时间有序 | **唯一事实源**：无缺口也无重复 |
 | `plan_event` | 计划门给用户的通知（查询范围预告） | 不收：把"准备查"当"查过"注入是另一种归因错误 |
 
 因此事实块采用保守渲染：`① <时间>｜<记录原文>`（一条目一次委派、按时间正序、超 300 字截断、最多 5 条并标记截断），**不解析**记录里的对象/时间范围/操作名——那是对业务文本做模糊匹配，正是 C21 禁掉的"猜"。模板零业务词（泄漏预算第二条），业务词只可能作为数据出现在记录原文里。
@@ -374,9 +374,9 @@
 - profileId：`resolveActiveProfileId(profiles, explicit?)` 纯函数（contracts/config.ts）——显式优先、单 profile 派生其键、零/多 fail-closed；assembly 与 runner 共用同一份判定。
 - 网关名：`GATEWAY_INVOCATION` 常量退役（platform-contract.ts），`resolveGatewayText`/`gatewayExecPathForProfile` fail-closed；渲染面（error-codes 惰性模板 + plan-runtime 14 处 + pi-coding-driver 6 处）与 spawn 面全部显式穿线（C7a→C7b 两步，先行为不变后删常量）。
 - 文案：错误码表/确认路由/上下文 profile 拒绝/plan CLI 运维文案全部去实例名（error-codes.ts、plan-confirmation-route.ts、context.ts、plan-runtime.ts）。
-- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "17dz"；两级待办排除机制（预算测试文件整文件签、跨仓变量行内签）已随 W4 清账整体退役（2026-11-06：C2 清预算注释并移出一个整文件排除，C4 删跨仓校验脚本后守卫语义收敛为无条件零，自反断言随机制一并移除）；F3 六项变异红→还原→复绿留档 change-safety §27。
+- 守卫：`packages/agent/execution-identity-surface.test.ts`——W1 scope（四包 src + apps + ci.yml + ci.sh）大小写不敏感零 "执行层"；两级待办排除机制（预算测试文件整文件签、跨仓变量行内签）已随 W4 清账整体退役（2026-11-06：C2 清预算注释并移出一个整文件排除，C4 删跨仓校验脚本后守卫语义收敛为无条件零，自反断言随机制一并移除）；F3 六项变异红→还原→复绿留档 change-safety §27。
 
-**测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（Run17dzTaskArgs 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
+**测试与波次记录**：golden（execution-identity.test.ts）+ config 校验用例 + tripwire 反转（该任务参数过渡别名 全仓绝迹）；全量对账见 `docs/change-safety.md` §27、debt-ledger D-160~D-167。中性缺省值（run_task /「执行层子 Agent」）是模型可见协议面选择，按方案推荐值落地、待 run owner 确认（D-161，改值面已收敛为单常量 + golden 两块）。
 
 **已知边界**：W1 scope 外剩余门①命中约 202 行（docs/scripts/README/config 模板等）归 W3 与波次 4（openDecisions #6，D-166）；两预算测试文件与跨仓变量名挂的 W4 签已随 D-165 关账清空退役（2026-11-06）；F6 模型探针待真实 LLM 授权后补跑（D-167，字节同一性 golden 已兜底）。
 

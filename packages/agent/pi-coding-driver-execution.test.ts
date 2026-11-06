@@ -115,13 +115,13 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 // 首条 bash：提交 JSON calls 方案，实体"对象甲/202609"都在 currentMessage 里 → 宿主放行并激活。
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]}]}';
 // 真实平台查询：计划已激活 → G1 放行（gateCalls++，latch 计划身份）。
-const QUERY_COMMAND = 'bin/17dz query query-receivables.js --query 对象甲 --period 202609';
+const QUERY_COMMAND = 'bin/example-gateway query query-receivables.js --query 对象甲 --period 202609';
 // 第二次真实查询（A4 的 query-receivables ×2 形态）。
-const QUERY_COMMAND_2 = 'bin/17dz query query-receivables.js --query 对象甲 --period 202610';
+const QUERY_COMMAND_2 = 'bin/example-gateway query query-receivables.js --query 对象甲 --period 202610';
 // 真实调用之后 worker 重提方案：实体"对象乙"不在任何来源里 → scope 识别失败 → activePlan 置空。
-const DECLINED_PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象乙","--period","202609"]}]}';
+const DECLINED_PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象乙","--period","202609"]}]}';
 
 /** 宿主注入的实体来源：含"对象甲/202609"，不含"对象乙"（决定哪条方案会被 scope 拒绝）。 */
 const ENTITY_SOURCES = { currentMessage: '核对对象甲 202609 的应收余额' };
@@ -142,7 +142,7 @@ async function makeDriver(planCliRunner: PlanCliRunner = activatingPlanRunner): 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       // label 表直接注入：单测里绝不 spawn 平台 CLI 派生能力清单
@@ -186,8 +186,8 @@ describe('执行足迹：真实调用发生过就不误判空（A3/A4 回归）'
     expect(result.activatedPlan).toBeUndefined();
     // needs 不派生：真执行过的回合不缺信息（scope 拒绝虽推了 needsClue，但执行面跑过就压制它）。
     expect(result.needs).toBeUndefined();
-    // 注脚如实：1 次 bin/17dz 调用。
-    expect(result.footprint).toBe('1 次 bin/17dz 调用');
+    // 注脚如实：1 次 bin/example-gateway 调用。
+    expect(result.footprint).toBe('1 次 bin/example-gateway 调用');
   });
 
   it('两次真实调用：calls 如实报 2（A4 的 query-receivables ×2 形态）', async () => {
@@ -201,7 +201,7 @@ describe('执行足迹：真实调用发生过就不误判空（A3/A4 回归）'
     expect(result.execution).toEqual({ planId: 'plan_activated', version: 7, calls: 2 });
     expect(result.activatedPlan).toBeUndefined();
     expect(result.needs).toBeUndefined();
-    expect(result.footprint).toBe('2 次 bin/17dz 调用');
+    expect(result.footprint).toBe('2 次 bin/example-gateway 调用');
   });
 
   it('P1 互斥：真实执行过后方案被重置的回合，结果带 execution 不带 activatedPlan', async () => {
@@ -290,7 +290,7 @@ describe('C26 投影：真实执行过的步骤记 done，不被足迹误判污�
   it('真实 driver 执行后方案被重置：计划模式步骤事实终态是 done', async () => {
     const { driver, cwd } = await makeDriver();
     const taskPlans = new FakeTaskPlanRepo();
-    const profiles: Record<string, ContextProfileConfig> = { '17dz': { root: cwd, skillRoots: [] } };
+    const profiles: Record<string, ContextProfileConfig> = { 'example-gateway': { root: cwd, skillRoots: [] } };
     // 真实 driver 经 ContextTaskRunner 接入 runtime——足迹误判的完整链条在此复现。
     const platformTask = createContextTaskRunner({ profiles, tasks: new FakePlatformTaskRepo(), workerDriver: driver });
     const runtime = createTaxAgentRuntime({

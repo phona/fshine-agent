@@ -1,9 +1,9 @@
-// [L4 集成] fshine + 17dz 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：会话实体——实体门禁的第四来源（任务 1 标定修复）。
- * 共享替身见 ./harness.ts（真 SQLite、真 bin/17dz 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
  *
  * 2026-09-27 一次真实企微通话暴露的事故：实体门按**每轮无状态**标定，产品是**连续会话**——
  * 用户"查完某个对象"之后只补一个范围编码（本轮消息里没有对象名），对象不在「本轮消息 /
