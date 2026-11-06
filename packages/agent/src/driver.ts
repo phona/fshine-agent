@@ -343,13 +343,17 @@ export class ToolUserError extends Error {
   delegationCompleted = false;
   /** Host receipt kind persisted into the tool result; background acceptance is not execution proof. */
   readonly routeReceipt?: 'delegate' | 'precondition' | 'background';
+  /** 错误码（挂码修复：runtime.isAuthDelegationFailure 等码级判据依赖此字段）。 */
+  code?: string;
 
   constructor(message: string, options?: {
     delegationCompleted?: boolean;
     routeReceipt?: 'delegate' | 'precondition' | 'background';
+    code?: string;
   }) {
     super(message);
     this.name = 'ToolUserError';
+    this.code = options?.code;
     this.routeReceipt = options?.routeReceipt
       ?? (options?.delegationCompleted === true ? 'delegate' : undefined);
     this.delegationCompleted = this.routeReceipt === 'delegate' || options?.delegationCompleted === true;

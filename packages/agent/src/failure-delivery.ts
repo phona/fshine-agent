@@ -10,6 +10,19 @@
  *      的既有单一来源，本模块不产生第二份用户回复要求。
  *
  * 未分类（unclassified）不离网：记 unclassified 并走既有兜底话术。
+ *
+ * 当前生产者缺口（W5 尾程登记，待 worker 侧结构化失败上报通道落地后补齐）：
+ *   · CAPABILITY_UNAVAILABLE / HARD_REJECTED：runtime 五档无对应生产者，这两类
+ *     协议失败目前仅由 failure-delivery.ts 函数级覆盖，生产路径不可达。
+ *   · NEEDS_INPUT 的 needs 分支：需调用方传入 needs 缺口，当前 context.ts 未传。
+ *   · RESOURCE_EXHAUSTED 的 needsEnrichment 分支：需 platformTasks + principalId +
+ *     sessionId 且 subReason 非 timeout，当前 failureClassFor 只把 timeout 映射到
+ *     RESOURCE_EXHAUSTED，因此该分支不可达。
+ *
+ * auditFields 独立产物：deliverFailure 返回 auditFields（protocolClass / subReason /
+ * code / needs / degraded / needsRecordLoad），调用方 context.ts 仅用 code 挂回
+ * error.code；其余字段当前仅通过 delegation_span / subagent_task_failed 事件间接
+ * 留档，未写入独立审计表。待 owner 确认是否追加独立审计产物。
  */
 
 import type { FailureClass, FailureClassPolicy } from '@fshine/contracts';

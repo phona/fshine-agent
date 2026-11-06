@@ -921,7 +921,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         };
       }
       const ci = options.changeIntents;
-      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。');
+      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。', { code: 'WRITE_NOT_ENABLED' });
       // 新提案作废**同任务**的旧 pending（D-117，2026-10-26 拍板 I2：一任务一码）。
       // 跨任务的 pending 并存——后台长任务跑到中途出的提案，不得作废用户前台正要
       // 确认的另一个任务的提案（I1 全会话单窗会让后台提案打断前台确认，与后台
@@ -1378,19 +1378,19 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         try {
           ticket = executionGate.enqueue({ requestId: ctx.trusted.requestId, ...(signal ? { signal } : {}) });
         } catch (error) {
-          if (error instanceof PlatformExecutionQueueFullError) throw new ToolUserError('平台执行队列已满，请稍后重试。');
+          if (error instanceof PlatformExecutionQueueFullError) throw new ToolUserError('平台执行队列已满，请稍后重试。', { code: 'PLATFORM_QUEUE_FULL' });
           throw error;
         }
         let lease: PlatformExecutionLease;
         try {
           lease = await ticket.acquired;
         } catch (error) {
-          if (signal?.aborted || error instanceof PlatformExecutionAbortedError) throw new ToolUserError(DELEGATION_CANCELLED);
+          if (signal?.aborted || error instanceof PlatformExecutionAbortedError) throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
           throw error;
         }
         if (signal?.aborted) {
           ticket.cancel();
-          throw new ToolUserError(DELEGATION_CANCELLED);
+          throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
         }
         lease.start();
         const startedAt = Date.now();
@@ -1413,7 +1413,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const runSignal = execution?.signal ?? signal;
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
-      if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED);
+      if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
       // 人工介入的唯一入口：交接损坏且转录也无法重建。此时不调 worker、
       // 不写新交接、不发确认码、不重复提交，只把缺什么交还 Main（needs），
       // 由 Main 决定是人工核对后重发、还是放弃本任务。任务条目原样不动，
@@ -1464,7 +1464,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             sessionId: taskId,
             requestId: ctx.trusted.requestId,
             onStep,
-            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。'); },
+            exec: async () => { throw new ToolUserError('子 Agent 只能使用其工作目录内配置的原生工具。', { code: 'SERVE_WRITE_OUTSIDE_WORKSPACE' }); },
             deadline,
             signal: runSignal,
             ...(args.turnDeclaration ? { turnDeclaration: args.turnDeclaration } : {}),
@@ -1531,7 +1531,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             code: result.terminalFailure.code,
             ...workerUsage,
           }));
-          throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure));
+          throw new ToolUserError(renderTerminalFailureReply(result.terminalFailure), { code: result.terminalFailure.code });
         }
         if (result.pendingPlan) {
           const pendingPlan: PendingPlanConfirmation = {
@@ -1705,7 +1705,9 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           requestId: ctx.trusted.requestId,
           doneSteps: [],
         });
-        throw new ToolUserError(delivery.userMessage);
+        const failureError = new ToolUserError(delivery.userMessage);
+        if (delivery.auditFields.code) Object.assign(failureError, { code: delivery.auditFields.code });
+        throw failureError;
       }
     },
   };
@@ -1726,15 +1728,15 @@ export function withStepLabel(text: string, stepLabel: string): string {
 async function resolveContextProfile(profiles: Record<string, ContextProfileConfig>, id: string | undefined): Promise<ResolvedContextProfile> {
   // 消费方 fail-closed（C5）：0 个或多个 profile 且未显式指定 profileId → 拒绝执行，
   // 不静默挑 profile、不回退任何实例名（文案中性，指引部署补配置或显式指定）。
-  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。');
+  if (id === undefined) throw new ToolUserError('未指定执行层 profile：contextProfiles 为空或有多个时，必须显式指定 profileId。', { code: 'CONTEXT_PROFILE_MISSING' });
   const configured = profiles[id];
-  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`);
-  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`); });
+  if (!configured) throw new ToolUserError(`未配置执行层上下文 profile:${id}`, { code: 'CONTEXT_PROFILE_NOT_CONFIGURED' });
+  const root = await fs.realpath(configured.root).catch(() => { throw new ToolUserError(`执行层上下文目录不可用:${id}`, { code: 'CONTEXT_PROFILE_ROOT_UNAVAILABLE' }); });
   const skillRoots: string[] = [];
   for (const relative of configured.skillRoots) {
-    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。');
+    if (path.isAbsolute(relative)) throw new ToolUserError('skillRoots 必须是相对 root 的路径。', { code: 'CONTEXT_SKILL_ROOTS_NOT_RELATIVE' });
     const resolved = await fs.realpath(path.join(root, relative)).catch(() => undefined);
-    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。');
+    if (!resolved || !isInside(root, resolved)) throw new ToolUserError('skillRoots 未通过路径安全校验。', { code: 'CONTEXT_SKILL_ROOTS_PATH_SAFETY' });
     skillRoots.push(resolved);
   }
   return {
