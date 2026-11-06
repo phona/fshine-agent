@@ -126,6 +126,8 @@ beforeAll(() => {
   Object.assign(process.env, {
     EXECUTION_SERVE: '1',
     EXECUTION_EXECUTOR: 'mock',
+    DZ_ALLOW_REAL: 'mock',
+    DZ_EXECUTOR: 'mock',
     EXECUTION_MOCK_STATE: path.join(stateDir, 'mock-state.json'),
     EXECUTION_PLAN_STATE: path.join(stateDir, 'plans.json'),
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, 'rate-limit.json'),
