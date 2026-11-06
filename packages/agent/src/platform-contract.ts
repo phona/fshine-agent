@@ -3,7 +3,7 @@
  *
  * 本文件是 fshine 仓库中【唯一】允许出现平台实现细节的模块（泄漏 lint 白名单）。
  * 平台输出契约 = RESULT 单行 JSON 信封（schema v1，E2；行协议已随 E2 退役，解析仅认信封）；
- * 操作调用统一使用 operations.json 注册名（E1），不引用脚本文件路径。
+ * 操作调用统一使用平台操作注册名（E1），不引用脚本文件路径。
  *
  * 两类码级判定收口在这里：平台不可用族（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
  * （SELECTION_CLARIFICATION_CODES）——码是数据，消息文案不是，平台演进只改集合不改编排层。
@@ -93,7 +93,7 @@ export function gatewayExecPathForProfile(platformRoot: string, profile: { gatew
 }
 
 /**
- * 平台操作名（L2 消费不抄写：宿主只引用平台 `operations.json` 的注册名）。
+ * 平台操作名（L2 消费不抄写：宿主只引用平台操作注册表的注册名）。
  *
  * W2 镜像层退役（2026-11-05）后生产代码零消费：error-codes.ts 的 correctForm 不再
  * 指名 operation（宿主只教"先名称检索再提交"的结构，机械锁 = error-codes.test.ts
