@@ -38,3 +38,16 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run ci
+
+  # codex 审查脚本的自测（.github/codex 下的 node:test）。单独 job、不进 unit 基线——
+  # 基线只增不减纪律见 AGENTS.md；这里只保证抄过来的审查机制自身有测试钉住。
+  codex-review-scripts:
+    name: codex-review-scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node --test .github/codex/*.test.mjs
