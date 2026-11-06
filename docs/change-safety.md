@@ -1665,3 +1665,57 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 曾自述迁移完成——属前置波次责任。本波已硬修：roadmap.md:240-243 补全 W1–W5、AGENTS.md:25 回滚为『仍在 17dz，迁移通用策略前不得先删平台门』。
 
 6. **unit 基线**：波次起点 `npx vitest run packages/ apps/` = 105 unit 文件（含 e2e 标签的 fixtures 在内）；本波 unit 文件计数同 105。`npx vitest run --project unit` 基线 111 文件 / 1825 passed / 0 skipped；HEAD 112 文件 / 1834 passed / 0 skipped。F2「只增不减」方向成立（HEAD 112 文件/1834 passed/0 skipped ≥ 记录值 105/1825/0）。波次末波次专属的 public-surface-lint 全绿（9/9），platform-leak-lint 全绿（4/4），harness-fidelity 因平台未配而响亮失败（HF-1/2/3 空派生表红、HF-4 平台未配跳过执行期断言，见未验项 1）。
+
+## 32. 公开迁移 · 公开到 GitHub（2026-11-06，wave5-migration-prep：LICENSE 占位已合入 + CI 最小权限 + 迁移门守卫 + debt-ledger 三件套 + push runbook + 七门判据）
+
+### 本波 commit 边界
+
+| Commit | 内容 | 门禁 |
+|---|---|---|
+| C1 | `chore(license): 添加开源许可证（MIT 占位，定稿前不 push）` | 已合入 wave5-license 分支，本波不碰 |
+| C2 | `ci(actions): 公开库 CI 最小权限与并发取消 + 注释去平台名` | permissions: contents: read + concurrency group/cancel-in-progress |
+| C3a | `docs(debt-ledger): 字段约定表补「限期」+ 27 条待办补三件套 + D-172–D-175` | 字段表新增限期；pending 45 条 → 44 条三件套齐备 |
+| C3b | `test(guards): 迁移门常驻断言——产品面零引用 / 本地秘密路径零入库 / debt-ledger 三件套` | migration-gate.test.ts 3/3 全绿；F3 变异留档（README 加 17dz → 红） |
+| C4 | `docs(runbook): push runbook 两条路径 + 复证清单 + 回滚命令` | 只落文档，不执行 |
+| C5 | `docs(change-safety): §32 波次 5 迁移方案 + F7 三处现状对齐` | v0-architecture §10 补「公开迁移」行；architecture-laws 当前违例对齐；roadmap 迁移阶段状态 |
+
+### 防线表
+
+| 防线 | 命令 | 预期 |
+|---|---|---|
+| 门① 产品面零引用 | `git grep -il 17dz \| grep -v -E '^(docs/debt-ledger.md\|docs/change-safety.md\|AGENTS.md)$' \| wc -l` | 0 |
+| 门② 全历史敏感串 | `git log --all -p \| grep -F "<S>" \| wc -l`（逐串） | 每条 0 |
+| 门③ fresh clone | `git clone <public-url> /tmp/fshine-public && cd /tmp/fshine-public && npm ci && npm run ci` | 退出码 0 |
+| 门④ 三道守卫 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
+| 门⑤ payroll 写路径 | `git diff --name-only <wave5-起点> -- packages apps \| grep -v '\.test\.ts'` | 空 |
+| 门⑥ 扫描工作流 | `git log --all -p \| grep -F "17dz" \| wc -l` | 0 |
+| 门⑦ debt-ledger | `grep -c '状态.*待办' docs/debt-ledger.md` + 三件套核对 | 每条待办三件套齐备 |
+
+### 验收对账（本棒实测）
+
+- **门①**：`git grep -il 17dz`（过滤三档案）现行树 = 0（产品面扫描面已清零；docs 归档面由 TIER B 台账跟踪）。
+- **门②**：`git log --all -p` 逐串扫描未跑（需 filter-repo 后历史，本波只做现行树门禁）。
+- **门③**：fresh clone 未跑（owner 2026-11-06：做完再搞）。
+- **门④**：`npx vitest run packages/agent/migration-gate.test.ts` = 3/3 全绿（2026-11-06 实测）。
+- **门⑤**：本波未新增 payroll 写路径，`packages/ apps/` 生产代码零改动。
+- **门⑥**：扫描工作流未跑（dwfrun 明细待取回，D-174）。
+- **门⑦**：debt-ledger 45 条待办/登记 → 44 条三件套齐备（D-006 状态为接受不修，不堵门）。
+
+### F7 文档同步记录
+
+| 文档 | 本棒改动 | 同步 commit |
+|---|---|---|
+| `docs/debt-ledger.md` | 字段表补限期；27 条待办补三件套；D-155 已关 | C3a |
+| `docs/v0-architecture.md` | §10 补「公开迁移」行 | C5 |
+| `docs/architecture-laws.md` | D-155 遗留待清 → 已关对齐 | C5 |
+| `docs/roadmap.md` | 波次总览补「波次 5 公开到 GitHub」行 | C5 |
+| `docs/change-safety.md` | 本§32 波次 5 方案 + 七门判据 | C5 |
+| `docs/push-runbook.md` | 新增 push runbook 两条路径 + 复证清单 + 回滚 | C4 |
+
+### 未做 / 已知项（不冒充已完成）
+
+1. **LICENSE 定稿**：C1 MIT 占位已合入 wave5-license 分支，定稿待 owner（本波不碰）。
+2. **push / fresh clone / 回滚**：owner 2026-11-06 明确「做完再搞」，runbook 已落文档。
+3. **门② 全历史敏感串扫描**：需 filter-repo 后历史，本波只守现行树。
+4. **门⑥ 扫描工作流**：dwfrun-0637e7fe 明细取回前不可验收（D-174）。
+5. **product surface 零 17dz 终局**：docs 归档面（architecture-laws / roadmap / v0-architecture / v0-implementation-decisions 等）仍含 17dz 历史叙述，由 TIER B 台账跟踪，不归 migration-gate 门①；终局清零待后续波次。
