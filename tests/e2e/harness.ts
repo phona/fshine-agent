@@ -70,7 +70,7 @@ const GATEWAY: string = (() => {
 /** 平台 CLI 路径（延迟求值：PLATFORM_ROOT 为 null 时不抛，用到时才组装）。 */
 function getCli(): string {
   if (!PLATFORM_ROOT || !GATEWAY) throw new Error('PLATFORM_ROOT / GATEWAY 未配（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）');
-  return path.join(PLATFORM_ROOT, 'bin', GATEWAY);
+  return gatewayExecPath(PLATFORM_ROOT, GATEWAY);
 }
 // 暴露给 gatedWorker 等运行时函数的延迟求值 CLI
 const CLI = /* #__PURE__*/ getCli;
@@ -432,7 +432,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
   const terminalEmptyText = options?.terminalEmptyText === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
-    const child = spawnSync(path.join(platformRoot, 'bin', GATEWAY), args, {
+    const child = spawnSync(gatewayExecPath(platformRoot, GATEWAY), args, {
       input, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
     });
     if (child.error) return reject(child.error);
