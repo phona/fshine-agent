@@ -1563,7 +1563,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### fallback 退役判据（C9 的机械条件）
 
-`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例，其回落事件被退役计数口径显式排除（不排除则该判据在本波内永不可达）。**机械计数器**：`scripts/eval/count-a2a-fallback.ts` 读取 `.runtime/a2a-cutover.jsonl` 并输出 fallback 行数；CI 或本地跑满 20 次后该脚本输出 0 即满足计数条件。**归档/轮转**：若工作区曾产生 fallback 行，可用 `--archive-to <path>` 将 fallback 行归档并保留非 fallback 行，使计数器可重新从 0 累计；归档文件追加写入，不覆盖历史。**三域新路径全绿**判据需要 17dz 兄弟仓前置（兄弟仓提供 stock 网关 + 全操作族覆盖），本仓确定性门内单独不可达，需与 17dz w5-tail 配对验证。
+`a2a_fallback` 事件**连续 20 跑次为 0**（阈值可配）+ 覆盖域 = 17dz 全操作族 + 第二写域 + 证据落 `.runtime/a2a-cutover.jsonl`（每行带协议版本 / 域 / corpusVersion 三元组）+ 评审接受人 = owner。退役前 fallback 分支与 a2a_fallback 事件在册（packages/agent 内存在性断言，docs-reality 同款形态）；`tests/e2e/turn-loop-write-chain.test.ts` 头部标注 fallback 覆盖用例——该文件不产生 fallback 行（不走 structured_call），并非计数器口径显式排除；计数器本身无域过滤，对 `.runtime/a2a-cutover.jsonl` 全局数 `fallback === true` 行。**机械计数器**：`scripts/eval/count-a2a-fallback.ts` 读取 `.runtime/a2a-cutover.jsonl` 并输出 fallback 行数；CI 或本地跑满 20 次后该脚本输出 0 即满足计数条件。**归档/轮转**：若工作区曾产生 fallback 行，可用 `--archive-to <path>` 将 fallback 行归档并保留非 fallback 行，使计数器可重新从 0 累计；归档文件追加写入，不覆盖历史。**三域新路径全绿**判据需要 17dz 兄弟仓前置（兄弟仓提供 stock 网关 + 全操作族覆盖），本仓确定性门内单独不可达，需与 17dz w5-tail 配对验证。
 
 ### 四个小裁示（owner 待确认，已带推荐；不堵 C0–C2，C9/C11 开工前需定）
 
