@@ -1627,6 +1627,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     if (declaration.requiresPlan && !activePlanId()) {
       return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 需要激活的计划（requiresPlan=true）` };
     }
+    // 写关闭拦截：与 bash 计划评估的 planWriteClosed 同口径——writeEnabled 为假且
+    // 该 operation 在 access 语义表里confirm=true 时，structured_call 也须拦截。
+    if (!options.writeEnabled && operationSemantics.size > 0 && isWriteAccess(operationSemantics.get(operation))) {
+      return { block: true, reason: `STRUCTURED_CALL DECLINED：write 未开放（operation "${operation}" 需要写入权限）` };
+    }
     const argsValue = args.args;
     if (typeof argsValue !== 'object' || argsValue === null || Array.isArray(argsValue)) {
       return { block: true, reason: 'STRUCTURED_CALL DECLINED：args 必须是对象' };
