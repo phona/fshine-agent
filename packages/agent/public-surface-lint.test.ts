@@ -374,10 +374,10 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
     failures.push('b) docs/change-safety.md 尾部缺少 §27–§30 或 W1–W5 在册');
   }
 
-  // c) AGENTS.md 不自述预算档位在 17dz（或已更新）
+  // c) AGENTS.md 不声称预算档位迁移已完成（实际平台 plan evaluate 仍为权威）
   const agentsMd = readFile('AGENTS.md');
-  if (agentsMd.includes('预算档位决定及累计账本仍在 17dz')) {
-    failures.push('c) AGENTS.md 仍自述预算档位在 17dz（未更新）');
+  if (agentsMd.includes('预算档位决定及累计账本由通用策略管理（迁移完成）')) {
+    failures.push('c) AGENTS.md 声称预算档位迁移已完成（实际平台计划门仍为权威，迁移未完成）');
   }
 
   // d) DZ_EXECUTOR / DZ_ALLOW_REAL 四文件有命中
