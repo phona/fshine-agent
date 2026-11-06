@@ -52,7 +52,7 @@ const TIER_B: Entry[] = [
   { needle: 'grep -rn "bin/17dz"', file: 'docs/architecture-laws.md', tier: 'B', tag: '警职执法', closure: '该 grep 的靶子改名或退役后命令同步更新', deadline: '迁移完成' },
   { needle: '17dz', file: 'docs/architecture-laws.md', tier: 'B', tag: '警职执法', closure: '守卫定义原文保留，靶子退役后同步更新', deadline: '迁移完成' },
 
-  // Docs: 环境变量 / roadmap / e2e-ownership / v0-implementation-decisions / execution-layer-interface / execution-layer-admission / rule-landing / test-hardening / v0-architecture
+  // Docs: 环境变量 / roadmap / e2e-ownership / v0-implementation-decisions / execution-layer-interface / execution-layer-admission / rule-landing / test-hardening / v0-architecture / push-runbook
   { needle: '17dz', file: 'docs/environment-variables.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
   { needle: '17dz', file: 'docs/roadmap.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
   { needle: '17dz', file: 'docs/e2e-ownership.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
@@ -62,6 +62,7 @@ const TIER_B: Entry[] = [
   { needle: '17dz', file: 'docs/rule-landing.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
   { needle: '17dz', file: 'docs/test-hardening.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
   { needle: '17dz', file: 'docs/v0-architecture.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
+  { needle: '17dz', file: 'docs/push-runbook.md', tier: 'B', tag: '遗留待清', closure: 'runbook 命令示例保留原样，终局由收口波改写为中性占位', deadline: '迁移完成' },
   // business-skill.md 当前 0 命中，不登记
 
   // Scripts（非 .test.ts，负面夹具行挂 // leak-lint: fixture 豁免）
