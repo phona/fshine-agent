@@ -33,7 +33,7 @@ import type { PlanCliRunner } from './src/plan-runtime';
 type FakeTurn = { bash?: Array<{ command: string; envelope: string }>; text?: string; errorMessage?: string };
 
 const OK_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"completed","data":{"ok":true},"error":null}';
-/** PERIOD_NO_DATA 信封（与 17dz mock respond.js receivables() 逐字段同形）。 */
+/** PERIOD_NO_DATA 信封（与 example-gateway mock respond.js receivables() 逐字段同形）。 */
 const PERIOD_NO_DATA_ENVELOPE = 'RESULT {"v":1,"op":"finance.query-receivables","status":"not_found","data":{"query":"对象甲","accountSet":"对象甲","subject":{"code":"1122","name":"应收账款"},"period":"202609","availablePeriods":["202606"]},"error":{"code":"PERIOD_NO_DATA","message":"PERIOD_NO_DATA: 期间 202609 无余额数据（有数据的期间：202606）","correctForm":"该期间平台无数据，请确认期间编码或改查其他期间"}}';
 /** AMBIGUOUS 信封的 mock 形状：只带 candidates，不带 data.customer（真脚本带）。 */
 const AMBIGUOUS_MOCK_ENVELOPE = 'RESULT {"v":1,"op":"finance.query-receivables","status":"needs_input","data":{"query":"对象甲","candidates":[{"name":"幻电设备有限公司"},{"name":"机电贸易有限公司"}]},"error":{"code":"ASSISTANT_AMBIGUOUS","message":"ASSISTANT_AMBIGUOUS: 客户匹配到多个候选","correctForm":"把候选呈现给用户选择——绝不代选"}}';
@@ -113,11 +113,11 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 // 首条 bash：提交单调用方案（实体"对象甲/202609"都在 currentMessage 里 → 宿主放行并激活）。
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]}]}';
 // 两调用方案（多调用计划的零变化用例）。
-const TWO_CALL_PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]},{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202606"]}]}';
-const QUERY_COMMAND = 'bin/17dz query query-receivables.js --query 对象甲 --period 202609';
-const QUERY_COMMAND_OK = 'bin/17dz query query-receivables.js --query 对象甲 --period 202606';
+const TWO_CALL_PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]},{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202606"]}]}';
+const QUERY_COMMAND = 'bin/example-gateway query query-receivables.js --query 对象甲 --period 202609';
+const QUERY_COMMAND_OK = 'bin/example-gateway query query-receivables.js --query 对象甲 --period 202606';
 const ENTITY_SOURCES = { currentMessage: '核对对象甲 202609 的应收余额' };
 
 /** 计划 CLI 替身：本任务没有既有计划，提交即激活。 */
@@ -136,7 +136,7 @@ async function makeDriver(): Promise<{ driver: TurnDriver; cwd: string }> {
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
@@ -265,7 +265,7 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
       async upsert(record: PlatformTaskRecord) { this.records.set(record.taskId, structuredClone(record)); }
       async listBySession() { return []; }
     })();
-    const profiles: Record<string, ContextProfileConfig> = { '17dz': { root: cwd, skillRoots: [] } };
+    const profiles: Record<string, ContextProfileConfig> = { 'example-gateway': { root: cwd, skillRoots: [] } };
     const task = createContextTaskRunner({ profiles, tasks, workerDriver: driver });
 
     // 宿主终局分支（背带的常规位）：ToolUserError 语义 = 这段文本成为本轮回复。

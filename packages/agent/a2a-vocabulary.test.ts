@@ -32,7 +32,7 @@ const CONTRACTS_DIR = join(__dirname, '..', 'contracts', 'src');
 const REPO_ROOT = join(__dirname, '..', '..');
 
 /** 契约工件禁入模式：网关名/脚本路径/业务字段（guard-contract-purity 判据的机械面）。 */
-const FORBIDDEN_IN_CONTRACT = ['bin/', '17dz', '应收', '凭证', '科目', '账套', '期间', 'operations.json'];
+const FORBIDDEN_IN_CONTRACT = ['bin/', 'example-gateway', '应收', '凭证', '科目', '账套', '期间', 'operations.json'];
 
 /** 非测试 .ts 里不得出现平台内部清单文件字面量（guard-manifest-not-file-read）。 */
 const FORBIDDEN_MANIFEST_FILE = 'operations.json';

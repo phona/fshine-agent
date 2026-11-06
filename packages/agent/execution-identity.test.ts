@@ -8,7 +8,7 @@
  *   · C2 块：执行层称谓 DEFAULT_EXECUTOR_LABEL / SYSTEM_PROMPT（system-prompt.ts）
  *   · C3 块：委派工具名 RUN_EXECUTION_TASK_TOOL（context.ts:54）
  *   · C4 块：委派工具描述与 schema 两条 description（context.ts:81 / :467-468）
- *   · C5 块：profileId 缺省 '17dz'（context.ts:752）
+ *   · C5 块：profileId 缺省 'example-gateway'（context.ts:752）
  *   · C6 块：用户可见与运维文案（error-codes.ts:352-353、plan-confirmation-route.ts:87/94、
  *     context.ts resolveContextProfile 五条 + 1414/1455、plan-runtime.ts CLI 失败文案）
  *   · C7 块：网关名 GATEWAY_INVOCATION 与 resolveGatewayText 回退、planDraftExample/
@@ -22,7 +22,7 @@
  * 恰好出现一次"的结构事实。
  *
  * 取值口径：全部为 C1 落地时（波次 2 之后 HEAD，merge 7ba775d）的实测当前值。注意
- * 波次 1 脱敏已把部分 "17dz 平台" 字样换成 "幻账平台"（如 RUN_EXECUTION_TASK_DESCRIPTION
+ * 波次 1 脱敏已把部分 "example-gateway 平台" 字样换成 "幻账平台"（如 RUN_EXECUTION_TASK_DESCRIPTION
  * 首行、plan-confirmation-route 的 fail-loud 文案）——golden 钉的是**当前树实况**，
  * 不是方案文本里的旧值。
  */
@@ -86,7 +86,7 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
   describe('C2 块：执行层称谓（system-prompt.ts）', () => {
     it('DEFAULT_EXECUTOR_LABEL 当前值（C2 起中性缺省）', () => {
       expect(DEFAULT_EXECUTOR_LABEL).toBe('执行层子 Agent');
-      expect(DEFAULT_EXECUTOR_LABEL).not.toContain('17dz');
+      expect(DEFAULT_EXECUTOR_LABEL).not.toContain('example-gateway');
     });
 
     it('SYSTEM_PROMPT = buildSystemPrompt(缺省称谓)，且称谓恰好出现一次', () => {
@@ -96,16 +96,16 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
     });
 
     it('注入实例称谓时委派句随参数替换（财税部署经 profile.executorLabel 声明）', () => {
-      expect(buildSystemPrompt('17dz 子 Agent')).toContain('委派 17dz 子 Agent 执行');
+      expect(buildSystemPrompt('执行层子 Agent')).toContain('委派 执行层子 Agent 执行');
     });
 
     // 恢复回合整理提示词与 :149 同一模板块（runtime.ts）：C2 同commit翻转，避免 F4
-    // 归因撕裂——两条 17dz 字面量随该块一起去实例名。
+    // 归因撕裂——两条 example-gateway 字面量随该块一起去实例名。
     it('恢复回合整理提示词两条话术已去实例名（runtime.ts，源码逐字）', () => {
       const src = readSrc('packages/agent/src/runtime.ts');
       expect(src).toContain('本轮子任务按用户确认重跑后没有产生任何平台执行。');
       expect(src).toContain('本轮子任务已由宿主根据用户确认的计划执行完毕。');
-      expect(src).not.toContain('本轮 17dz 子任务');
+      expect(src).not.toContain('本轮 example-gateway 子任务');
     });
   });
 
@@ -113,19 +113,19 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
   describe('C3 块：委派工具名（context.ts）', () => {
     it('RUN_EXECUTION_TASK_TOOL 当前值（C3 起中性缺省）', () => {
       expect(RUN_EXECUTION_TASK_TOOL).toBe('run_task');
-      expect(RUN_EXECUTION_TASK_TOOL).not.toContain('17dz');
+      expect(RUN_EXECUTION_TASK_TOOL).not.toContain('example-gateway');
     });
 
     it('runner.tool.name 随 profile.toolName 声明；未声明走中性缺省', async () => {
       const root = await profileRoot();
       const declared = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'], toolName: 'run_17dz_task' } },
+        profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'], toolName: 'run_example_gateway_task' } },
         tasks: new MemoryTasks(),
         workerDriver: scriptedDriver('完成。'),
       });
-      expect(declared.tool.name).toBe('run_17dz_task');
+      expect(declared.tool.name).toBe('run_example_gateway_task');
       const neutral = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
         tasks: new MemoryTasks(),
         workerDriver: scriptedDriver('完成。'),
       });
@@ -143,7 +143,7 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
         '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
         '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
       ].join('\n'));
-      expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('17dz');
+      expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('example-gateway');
       expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('幻账');
       expect(RUN_EXECUTION_TASK_DESCRIPTION).not.toContain('财税');
     });
@@ -152,37 +152,37 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       const properties = RUN_EXECUTION_TASK_SCHEMA.properties as Record<string, { description?: string }>;
       expect(properties.request?.description).toBe('交给 执行层子 Agent 的完整任务或用户最新补充');
       expect(properties.taskId?.description).toBe('仅在继续此前子任务时使用返回的 taskId');
-      expect(JSON.stringify(RUN_EXECUTION_TASK_SCHEMA)).not.toContain('17dz');
+      expect(JSON.stringify(RUN_EXECUTION_TASK_SCHEMA)).not.toContain('example-gateway');
     });
 
     it('注入实例称谓时描述与 schema 逐字节（称谓槽唯一可变点，F6 豁免论证的锚点）', () => {
-      const label = '17dz 子 Agent';
+      const label = '执行层子 Agent';
       const description = buildRunExecutionTaskDescription(label);
       expect(description).toBe([
-        '当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 17dz 子 Agent。',
-        '17dz 子 Agent 在受信的工作目录中加载平台 Skill，并返回自然语言结果。',
+        '当用户的问题需要访问或处理执行层平台的实时数据时，将任务委托给 执行层子 Agent。',
+        '执行层子 Agent 在受信的工作目录中加载平台 Skill，并返回自然语言结果。',
         '你负责理解该结果：可以直接回答用户、把子 Agent 的问题转达给用户，或携带 taskId 继续同一个任务。',
         '涉及执行层实时数据时必须调用本工具，不得凭历史对话猜测平台标识或实时结果。',
         '继续同一任务时传入此前返回的 taskId，并把用户最新补充完整放入 request；新任务不要复用 taskId。',
       ].join('\n'));
       const schema = buildRunExecutionTaskSchema(label);
       const properties = schema.properties as Record<string, { description?: string }>;
-      expect(properties.request?.description).toBe('交给 17dz 子 Agent 的完整任务或用户最新补充');
+      expect(properties.request?.description).toBe('交给 执行层子 Agent 的完整任务或用户最新补充');
       expect(properties.taskId?.description).toBe('仅在继续此前子任务时使用返回的 taskId');
     });
 
     it('runner.tool.description/inputSchema 随 profile.executorLabel 声明；未声明走中性缺省', async () => {
       const root = await profileRoot();
       const declared = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'], executorLabel: '17dz 子 Agent' } },
+        profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'], executorLabel: '执行层子 Agent' } },
         tasks: new MemoryTasks(),
         workerDriver: scriptedDriver('完成。'),
       });
-      expect(declared.tool.description).toContain('17dz 子 Agent');
+      expect(declared.tool.description).toContain('执行层子 Agent');
       expect(declared.tool.description).not.toContain('幻账');
-      expect((declared.tool.inputSchema as { properties: Record<string, { description?: string }> }).properties['request']?.description).toBe('交给 17dz 子 Agent 的完整任务或用户最新补充');
+      expect((declared.tool.inputSchema as { properties: Record<string, { description?: string }> }).properties['request']?.description).toBe('交给 执行层子 Agent 的完整任务或用户最新补充');
       const neutral = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
         tasks: new MemoryTasks(),
         workerDriver: scriptedDriver('完成。'),
       });
@@ -274,8 +274,8 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
     it('委派失败两条用户话术（C6 起中性，error-codes.ts）', () => {
       expect(DELEGATION_EXECUTOR_FAILURE).toBe('子任务执行失败，请稍后再试。');
       expect(DELEGATION_CANCELLED).toBe('子任务已取消。');
-      expect(DELEGATION_EXECUTOR_FAILURE).not.toContain('17dz');
-      expect(DELEGATION_CANCELLED).not.toContain('17dz');
+      expect(DELEGATION_EXECUTOR_FAILURE).not.toContain('example-gateway');
+      expect(DELEGATION_CANCELLED).not.toContain('example-gateway');
     });
 
     it('resolveContextProfile 四条拒绝文案逐字（C6 起中性，显式 profileId 路径）', async () => {
@@ -289,20 +289,20 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
         },
         {
           name: '上下文目录不可用',
-          profileId: '17dz',
-          profiles: { '17dz': { root: path.join(os.tmpdir(), 'fshine-identity-missing-dir-xyz'), skillRoots: [] } },
-          expected: '执行层上下文目录不可用:17dz',
+          profileId: 'example-gateway',
+          profiles: { 'example-gateway': { root: path.join(os.tmpdir(), 'fshine-identity-missing-dir-xyz'), skillRoots: [] } },
+          expected: '执行层上下文目录不可用:example-gateway',
         },
         {
           name: 'skillRoots 绝对路径',
-          profileId: '17dz',
-          profiles: { '17dz': { root, skillRoots: [path.join(os.tmpdir(), 'abs-skill-root')] } },
+          profileId: 'example-gateway',
+          profiles: { 'example-gateway': { root, skillRoots: [path.join(os.tmpdir(), 'abs-skill-root')] } },
           expected: 'skillRoots 必须是相对 root 的路径。',
         },
         {
           name: 'skillRoots 逃逸 root',
-          profileId: '17dz',
-          profiles: { '17dz': { root, skillRoots: ['../escape-skill-root'] } },
+          profileId: 'example-gateway',
+          profiles: { 'example-gateway': { root, skillRoots: ['../escape-skill-root'] } },
           expected: 'skillRoots 未通过路径安全校验。',
         },
       ];
@@ -321,7 +321,7 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       const root = await profileRoot();
       let execError: unknown;
       const subagent = createContextTaskRunner({
-        profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+        profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
         tasks: new MemoryTasks(),
         workerDriver: {
           run: async (input) => {
@@ -340,7 +340,7 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       try {
         const emptyText = createContextTaskRunner({
-          profiles: { '17dz': { root, skillRoots: ['.agents/skills'] } },
+          profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
           tasks: new MemoryTasks(),
           workerDriver: scriptedDriver('   '),
         });
@@ -391,22 +391,22 @@ describe('W1 执行层身份面 golden（C1 冻结）', () => {
     it('planDraftExample/planFileExample：无参抛错（fail-closed）；显式注入即用注入值', () => {
       expect(() => planDraftExample()).toThrow('未声明有效的 profile.gateway');
       expect(() => planFileExample()).toThrow('未声明有效的 profile.gateway');
-      expect(planDraftExample('bin/17dz')).toBe('bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
-      expect(planFileExample('bin/17dz')).toBe('bin/17dz plan --file <本轮工作区内的计划文件路径>');
+      expect(planDraftExample('bin/example-gateway')).toBe('bin/example-gateway plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
+      expect(planFileExample('bin/example-gateway')).toBe('bin/example-gateway plan --file <本轮工作区内的计划文件路径>');
       expect(planDraftExample('bin/generic')).toBe('bin/generic plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}');
     });
 
     it('PLAN_SHAPE_PREFIX 整条渲染（expected 网关名 + correctForm；显式 gateway 注入）', () => {
-      expect(messageFor('PLAN_SHAPE_PREFIX', '（围栏）', undefined, 'bin/17dz')).toBe(
-        'PLAN_SHAPE_PREFIX: 期望 bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 （围栏）；正确形态 方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/17dz plan --file <本轮工作区内的计划文件路径> 提交',
+      expect(messageFor('PLAN_SHAPE_PREFIX', '（围栏）', undefined, 'bin/example-gateway')).toBe(
+        'PLAN_SHAPE_PREFIX: 期望 bin/example-gateway plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 （围栏）；正确形态 方案是单行原始命令：bin/example-gateway plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/example-gateway plan --file <本轮工作区内的计划文件路径> 提交',
       );
       // 渲染 PLAN_* 诊断而不注入 gateway = 部署未声明网关 → 响亮失败（fail-closed 语义）。
       expect(() => messageFor('PLAN_SHAPE_PREFIX', '（围栏）')).toThrow('未声明有效的 profile.gateway');
     });
 
     it('PLAN_SUBCOMMAND_RESERVED 整条渲染（correctForm 的 planDraftExample；显式注入）', () => {
-      expect(messageFor('PLAN_SUBCOMMAND_RESERVED', 'evaluate', undefined, 'bin/17dz')).toBe(
-        'PLAN_SUBCOMMAND_RESERVED: 期望 worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用；实际 evaluate；正确形态 bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}（单行原始命令）',
+      expect(messageFor('PLAN_SUBCOMMAND_RESERVED', 'evaluate', undefined, 'bin/example-gateway')).toBe(
+        'PLAN_SUBCOMMAND_RESERVED: 期望 worker 只提交 JSON calls 方案；evaluate / activate / current / status 由宿主调用；实际 evaluate；正确形态 bin/example-gateway plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}（单行原始命令）',
       );
     });
   });

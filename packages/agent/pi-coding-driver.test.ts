@@ -53,17 +53,17 @@ describe('pi-coding-agent context worker', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-coding-'));
     roots.push(root);
     const skillRoot = path.join(root, '.agents', 'skills');
-    await mkdir(path.join(skillRoot, '17dz'), { recursive: true });
-    await writeFile(path.join(skillRoot, '17dz', 'SKILL.md'), [
+    await mkdir(path.join(skillRoot, 'example-gateway'), { recursive: true });
+    await writeFile(path.join(skillRoot, 'example-gateway', 'SKILL.md'), [
       '---',
-      'name: 17dz-platform',
+      'name: fictional-execution-layer',
       'description: 幻账平台工作规范',
       '---',
       '只读查询必须给出可复核证据。',
     ].join('\n'));
     const modelConfig = await fakeModelRuntime();
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [skillRoot],
       systemPrompt: 'worker-system-prompt',
@@ -80,7 +80,7 @@ describe('pi-coding-agent context worker', () => {
     // （原话 "No edit tool"），bash 门又只准网关调用（用不了 sed），只能整份重写——33 秒
     // 生成，而写 11KB 不可能一次对。edit 与 write 共用 decideFileWrite 那一份边界。
     expect(worker.session.getActiveToolNames()).toEqual(['read', 'ls', 'bash', 'write', 'edit', 'structured_call']);
-    expect(worker.skills.map((skill) => skill.name)).toContain('17dz-platform');
+    expect(worker.skills.map((skill) => skill.name)).toContain('fictional-execution-layer');
     expect(worker.session.systemPrompt).toContain('worker-system-prompt');
     worker.session.agent.state.messages = [{ role: 'user', content: '恢复任务', timestamp: Date.now() } as never];
     expect(worker.session.messages).toHaveLength(1);
@@ -102,7 +102,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'resume plan test',
@@ -111,7 +111,7 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
     });
-    const command = 'bin/17dz query voucher.query-saved A 202609';
+    const command = 'bin/example-gateway query voucher.query-saved A 202609';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_1', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -136,7 +136,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'stop plan test',
@@ -151,9 +151,9 @@ describe('pi-coding-agent context worker', () => {
       args: { command },
       context: {} as never,
     });
-    const stopped = await call('bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}');
+    const stopped = await call('bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}');
     expect(stopped?.reason).toContain('PLAN STOP');
-    const existingScope = await call('bin/17dz query voucher.query-saved A 202609');
+    const existingScope = await call('bin/example-gateway query voucher.query-saved A 202609');
     expect(existingScope?.block).toBeUndefined();
     worker.session.dispose();
   });
@@ -177,7 +177,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'stop exit3 test',
@@ -188,12 +188,12 @@ describe('pi-coding-agent context worker', () => {
     });
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
-      toolCall: { id: 'call_stop3', type: 'toolCall', name: 'bash', arguments: { command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' } } as never,
-      args: { command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' },
+      toolCall: { id: 'call_stop3', type: 'toolCall', name: 'bash', arguments: { command: 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' } } as never,
+      args: { command: 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}' },
       context: {} as never,
     });
     // 走到结构化 stop 分支：PLAN STOP + formatPlanMessage 输出（计划通知前缀 + 平台安全摘要），
-    // 而不是 catch 分支的泛化 "PLAN PAUSED：17dz plan CLI 失败（...）exit 3"
+    // 而不是 catch 分支的泛化 "PLAN PAUSED：example-gateway plan CLI 失败（...）exit 3"
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('PLAN STOP');
     expect(verdict?.reason).toContain('计划通知：');
@@ -215,7 +215,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('unexpected CLI call');
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write closed test',
@@ -228,7 +228,7 @@ describe('pi-coding-agent context worker', () => {
       writeEnabled: true,
     });
     // 平台语义表说 voucher.fill 要用户确认（confirm=true）→ 部署没开放写的事实
-    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.fill","args":["幻辰财税","202609"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.fill","args":["幻辰财税","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_write', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -281,7 +281,7 @@ describe('pi-coding-agent context worker', () => {
       return NOT_READ_ONLY_REJECTION(request);
     };
     return createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -297,7 +297,7 @@ describe('pi-coding-agent context worker', () => {
   }
 
   async function submitPlan(worker: Awaited<ReturnType<typeof createPiCodingWorkerSession>>, calls: string): Promise<string | undefined> {
-    const command = `bin/17dz plan {"calls":[${calls}]}`;
+    const command = `bin/example-gateway plan {"calls":[${calls}]}`;
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_split', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -344,7 +344,7 @@ describe('pi-coding-agent context worker', () => {
     const closedRoot = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_closed-'));
     roots.push(closedRoot);
     const closedWorker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: closedRoot,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -443,7 +443,7 @@ describe('pi-coding-agent context worker', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_nowrite-'));
     roots.push(root);
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'plan split test',
@@ -477,7 +477,7 @@ describe('pi-coding-agent context worker', () => {
   });
 
   it('点名名单按平台 plan ∧ ¬confirm 机械得出：不按错误码名猜、不按 access 词表猜', () => {
-    // 纯函数：名单判据是平台的真判据 planAccessAllows = plan && !confirm（17dz plan.js）。
+    // 纯函数：名单判据是平台的真判据 planAccessAllows = plan && !confirm（example-gateway plan.js）。
     // 只读 plan 一列会漏掉写类——而写类正是最常被 worker 排进计划的那一种。
     expect(nonPlannableOperations([
       { operation: 'payroll.transform', args: [] },
@@ -541,7 +541,7 @@ describe('pi-coding-agent context worker', () => {
     ['payroll.transform', { plan: false, confirm: false, mock: false }],
     ['fill', { plan: true, confirm: true, mock: true }],
     ['voucher.fill', { plan: true, confirm: true, mock: true }],
-    // voucher.proposal：17dz a683df2（D-090）之后的真声明——access:write ⇒ 三列与 fill 同形。
+    // voucher.proposal：example-gateway a683df2（D-090）之后的真声明——access:write ⇒ 三列与 fill 同形。
     // 它是 2026-10-14 实测假归因的主角：写开放 + 它被排进计划，平台 PLAN_OPERATION_NOT_READ_ONLY
     // 拒，改前的宿主回"未开放写入权限"且点不出名字（plan 列为 true，旧判据漏它）。
     ['voucher.proposal', { plan: true, confirm: true, mock: true }],
@@ -560,7 +560,7 @@ describe('pi-coding-agent context worker', () => {
       throw new Error('写关闭拦截后不得再调平台计划门');
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write scan test',
@@ -570,7 +570,7 @@ describe('pi-coding-agent context worker', () => {
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_scan', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -601,7 +601,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_open', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 2, seconds: 20, weight: 2 }, delta: { addedCalls: 2 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write open test',
@@ -613,7 +613,7 @@ describe('pi-coding-agent context worker', () => {
       // 写开放（平台声明 writeEnabled）：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
       writeEnabled: true,
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.prepare","args":["A","202609"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.prepare","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_open', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -638,7 +638,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_unknown', planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'write unknown test',
@@ -649,7 +649,7 @@ describe('pi-coding-agent context worker', () => {
       operationSemantics: SEMANTICS_TABLE,
     });
     // 未登记的 operation：查不到 access 就不猜它是写类——平台计划门按既有路径裁决
-    const command = 'bin/17dz plan {"calls":[{"operation":"voucher.batch","args":["A","202609"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.batch","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_unknown', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -673,7 +673,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'intent scope test',
@@ -686,7 +686,7 @@ describe('pi-coding-agent context worker', () => {
         referenceEvidence: '【宿主主动回溯】tool_result：幻东 202609 余额 51 元',
       },
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司","--customer","猫一杯"]},{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202609"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司","--customer","猫一杯"]},{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -711,7 +711,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'intent scope test',
@@ -728,7 +728,7 @@ describe('pi-coding-agent context worker', () => {
       content: [{ type: 'text', text: 'RESULT {"op":"finance.search-account-sets","data":{"accountSets":[{"id":"as_1","name":"胜利五金有限责任公司"}]}}' }],
       timestamp: 1,
     } as never];
-    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","胜利五金有限责任公司"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -759,7 +759,7 @@ describe('pi-coding-agent context worker', () => {
         return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
       };
       const worker = await createPiCodingWorkerSession({
-        gateway: 'bin/17dz',
+        gateway: 'bin/example-gateway',
         cwd: root,
         skillRoots: [],
         systemPrompt: 'intent scope test',
@@ -783,7 +783,7 @@ describe('pi-coding-agent context worker', () => {
 
     // 本轮任务工作区内的产物路径 → 放行（当前消息里没有这个路径，但它不是领域实体）
     const own = await session({ currentMessage: '把幻辰财税 202606 的应收做成提案' });
-    const verdict = await submit(own.worker, `bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["${scratchDir}/proposal.json"]}]}`);
+    const verdict = await submit(own.worker, `bin/example-gateway plan {"calls":[{"operation":"voucher.proposal","args":["${scratchDir}/proposal.json"]}]}`);
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(own.evaluated.some((args) => args[1] === 'evaluate')).toBe(true);
@@ -791,7 +791,7 @@ describe('pi-coding-agent context worker', () => {
 
     // 同一形状但落在别轮次的 scratch → 仍是越权参数（判据是路径解析结果，不是字符串长相）
     const foreign = await session({ currentMessage: '把幻辰财税 202606 的应收做成提案' });
-    const rejected = await submit(foreign.worker, 'bin/17dz plan {"calls":[{"operation":"voucher.proposal","args":["tmp/req_别的任务/proposal.json"]}]}');
+    const rejected = await submit(foreign.worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.proposal","args":["tmp/req_别的任务/proposal.json"]}]}');
     expect(rejected?.reason).toContain('未在当前请求、检索证据、平台响应或本会话已确立实体中出现的参数');
     foreign.worker.session.dispose();
   });
@@ -807,7 +807,7 @@ describe('pi-coding-agent context worker', () => {
       return { code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: 'plan_new', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: {}, cumulative: {}, reasonCode: 'WITHIN_AUTO_THRESHOLD', status: 'active' }), stderr: '' };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'no sources test',
@@ -816,7 +816,7 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","任何名称"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","任何名称"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -841,7 +841,7 @@ describe('pi-coding-agent context worker', () => {
       code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
     });
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'needs clue test',
@@ -855,8 +855,8 @@ describe('pi-coding-agent context worker', () => {
 
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
-      toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command: 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' } } as never,
-      args: { command: 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' },
+      toolCall: { id: 'call_scope', type: 'toolCall', name: 'bash', arguments: { command: 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' } } as never,
+      args: { command: 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}' },
       context: {} as never,
     });
 
@@ -875,7 +875,7 @@ describe('pi-coding-agent context worker', () => {
       code: 0, stdout: JSON.stringify({ taskId: 'task_scope', planId: null, version: null, status: 'none' }), stderr: '',
     });
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline cap test',
@@ -885,7 +885,7 @@ describe('pi-coding-agent context worker', () => {
       planCliRunner,
       entitySources: { currentMessage: '查一下幻东的应收' },
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","幻州幻东制造有限公司"]}]}';
     const submit = () => worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
       toolCall: { id: 'call_cap', type: 'toolCall', name: 'bash', arguments: { command } } as never,
@@ -936,7 +936,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline reset test',
@@ -960,8 +960,8 @@ describe('pi-coding-agent context worker', () => {
       args: { command },
       context: {} as never,
     });
-    const legal = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
-    const rogue = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
+    const legal = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
+    const rogue = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
 
     // 3 次成功激活 + 1 次 CLI 失败暂停（旧语义下计数器此刻已经是 4）
     for (let i = 0; i < 3; i += 1) {
@@ -1008,7 +1008,7 @@ describe('pi-coding-agent context worker', () => {
       };
     };
     const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       cwd: root,
       skillRoots: [],
       systemPrompt: 'decline message test',
@@ -1030,8 +1030,8 @@ describe('pi-coding-agent context worker', () => {
       args: { command },
       context: {} as never,
     });
-    const legal = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
-    const rogue = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
+    const legal = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["幻辰财税","202606"]}]}';
+    const rogue = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["幻州幻东制造有限公司","202606"]}]}';
 
     // 先两次成功激活：计数器归零，后面的计数从这两次之后算起
     expect((await submit('call_active_0', legal))?.reason).toContain('PLAN ACTIVE');
@@ -1124,7 +1124,7 @@ async function driveBash(options: {
   const steps: string[] = [];
   const events: ServeGateEvent[] = [];
   const worker = await createPiCodingWorkerSession({
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'progress frame test',
@@ -1209,7 +1209,7 @@ describe('进度帧渲染器（唯一模板，零 per-operation 分支）', () =
     // 真机原帧：`正在盘点薪酬数据源 + 契约草稿 「tmp/task_f695557e-f9b1-4」…`
     // 修后：路径值不进参数摘要，帧照旧发（用户仍知道在干什么），只是不再有路径。
     const { steps, events } = await driveBash({
-      command: 'bin/17dz operation run payroll.detect 工资表2026-8月.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f',
+      command: 'bin/example-gateway operation run payroll.detect 工资表2026-8月.xlsx --out-dir tmp/task_f695557e-f9b1-4c7-9d2e-8a1b3c4d5e6f',
       operationLabels: new Map([['detect', '盘点薪酬数据源 + 契约草稿']]),
       operationArgStyles: new Map([['--out-dir', 'name']]),
     });
@@ -1226,7 +1226,7 @@ describe('进度帧渲染器（唯一模板，零 per-operation 分支）', () =
 describe('防泄漏：内部事件名不出现在用户可见进度帧里', () => {
   it('驱动一次带 bash 工具调用的 worker session：帧形如「正在…」，无 worker_ 前缀', async () => {
     const { steps, events } = await driveBash({
-      command: 'bin/17dz query query-receivables.js --query 猫一杯 --period 202609',
+      command: 'bin/example-gateway query query-receivables.js --query 猫一杯 --period 202609',
       operationLabels: new Map([['query-receivables', '读取余额']]),
       // 平台 args 规格（flag → 样式）：生产中经 `operation list --json` 派生后注入，
       // 与 label 表同一条数据链；缺规格就不渲染参数摘要（D-012 后的安全缺省）。
@@ -1249,7 +1249,7 @@ describe('防泄漏：内部事件名不出现在用户可见进度帧里', () =
 
   it('计划提交帧与业务无关，宿主评估方案前发出', async () => {
     const { steps, verdict } = await driveBash({
-      command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]}]}',
+      command: 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]}]}',
       planCliRunner: evaluatingPlanRunner,
     });
     expect(verdict?.reason).toContain('PLAN ACTIVE');
@@ -1261,7 +1261,7 @@ describe('防泄漏：内部事件名不出现在用户可见进度帧里', () =
     // 计划分支提前 return、不经 gate()，serve-gate 的 onEvent 不会触发——宿主必须自己
     // 上报一次，否则排查时对不上（已实证的审计缺口）。detail 是摘要不是计划 JSON 全文。
     const { events, verdict } = await driveBash({
-      command: 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]},{"operation":"voucher.prepare","args":["甲","202609"]}]}',
+      command: 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["甲","202609"]},{"operation":"voucher.prepare","args":["甲","202609"]}]}',
       planCliRunner: evaluatingPlanRunner,
     });
     expect(verdict?.reason).toContain('PLAN ACTIVE');
@@ -1291,7 +1291,7 @@ describe('防泄漏：内部事件名不出现在用户可见进度帧里', () =
 });
 describe('降级：没有 label 就零进度帧，审计字段一字不少', () => {
   it('operationLabels 空表 → 零帧，审计事件四个既有字段照旧', async () => {
-    const command = 'bin/17dz query query-receivables.js --query 甲 --period 202609';
+    const command = 'bin/example-gateway query query-receivables.js --query 甲 --period 202609';
     const { steps, events } = await driveBash({ command, operationLabels: new Map() });
     expect(steps).toEqual([]);
     expect(events.at(-1)).toEqual({
@@ -1308,7 +1308,7 @@ describe('降级：没有 label 就零进度帧，审计字段一字不少', () 
   });
 
   it('未注入 label 表且平台根没有 CLI → 派生为空表，零帧', async () => {
-    const { steps, events } = await driveBash({ command: 'bin/17dz query query-receivables.js --query 甲 --period 202609' });
+    const { steps, events } = await driveBash({ command: 'bin/example-gateway query query-receivables.js --query 甲 --period 202609' });
     expect(steps).toEqual([]);
     expect(events.at(-1)?.allowed).toBe(true);
     expect(events.at(-1)?.label).toBeUndefined();
@@ -1316,7 +1316,7 @@ describe('降级：没有 label 就零进度帧，审计字段一字不少', () 
 
   it('被拦改软放行后：元字符调用真实执行，label 帧照发、审计带软标记', async () => {
     const { steps, events } = await driveBash({
-      command: 'bin/17dz query query-receivables.js --query 甲; cat .env',
+      command: 'bin/example-gateway query query-receivables.js --query 甲; cat .env',
       operationLabels: new Map([['query-receivables', '读取余额']]),
     });
     // 2026-10-18 元字符软放行：调用真实放行 → label 帧照发（真实调用就该有进度帧）

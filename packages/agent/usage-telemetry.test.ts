@@ -117,14 +117,14 @@ function trusted(): TrustedContext {
 async function profileRoot(): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-usage-'));
   roots.push(root);
-  await mkdir(path.join(root, '.agents', 'skills', '17dz'), { recursive: true });
-  await writeFile(path.join(root, '.agents', 'skills', '17dz', 'SKILL.md'), '---\nname: 17dz\ndescription: 幻账平台工作规范\n---\n使用领域脚本并返回可复核证据。\n');
+  await mkdir(path.join(root, '.agents', 'skills', 'example-gateway'), { recursive: true });
+  await writeFile(path.join(root, '.agents', 'skills', 'example-gateway', 'SKILL.md'), '---\nname: example-gateway\ndescription: 幻账平台工作规范\n---\n使用领域脚本并返回可复核证据。\n');
   return root;
 }
 
 function runner(root: string, driver: TurnDriver) {
   const profiles: Record<string, ContextProfileConfig> = {
-    '17dz': { root, skillRoots: ['.agents/skills'] },
+    'example-gateway': { root, skillRoots: ['.agents/skills'] },
   };
   return createContextTaskRunner({ profiles, tasks: new MemoryTasks(), workerDriver: driver });
 }

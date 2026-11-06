@@ -20,7 +20,7 @@ import {
 } from './src/platform-contract';
 
 describe('平台不可用族错误码集合（唯一适配层）', () => {
-  it('覆盖 17dz 侧 AUTH_* 四档 + 脚本层归一码 NEEDS_LOGIN + D-076 登录流程两码 + 平台页面响应超时 PLATFORM_TIMEOUT', () => {
+  it('覆盖 example-gateway 侧 AUTH_* 四档 + 脚本层归一码 NEEDS_LOGIN + D-076 登录流程两码 + 平台页面响应超时 PLATFORM_TIMEOUT', () => {
     expect([...PLATFORM_AUTH_ERROR_CODES].sort()).toEqual([
       'AUTH_EXPIRED',
       'AUTH_REDIRECTED_TO_LOGIN',
@@ -176,7 +176,7 @@ describe('终局快路径信封判据（terminalFastPathOf）', () => {
     expect(terminalFastPathOf(terminalEnvelope('not_found', { query: 'x' }, 'ACCOUNT_SET_NOT_FOUND'))).toBeUndefined();
   });
 
-  it('PERIOD_NO_DATA：查询词/期间/可改查清单机械提取（与 17dz mock 信封逐字段对齐）', () => {
+  it('PERIOD_NO_DATA：查询词/期间/可改查清单机械提取（与 example-gateway mock 信封逐字段对齐）', () => {
     expect(terminalFastPathOf(terminalEnvelope('not_found', {
       query: '幻辰财税',
       accountSet: '幻辰财税',

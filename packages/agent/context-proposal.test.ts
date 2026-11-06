@@ -25,16 +25,16 @@ const ctx = {
 describe('委派结果的处理（与写路径无关的部分）', () => {
   it('执行面回账：普通结果尾部拼接系统注脚', async () => {
     const runner = createContextTaskRunner({
-      profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+      profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
       tasks: noopTasks,
       workerDriver: {
         run: async (): Promise<{ text: string; messages: unknown[]; footprint?: string }> => ({
-          text: '幻晟本期凭证 0 张。', messages: [], footprint: '3/6 次 bin/17dz 调用',
+          text: '幻晟本期凭证 0 张。', messages: [], footprint: '3/6 次 bin/example-gateway 调用',
         }),
       } as unknown as TurnDriver,
     });
     const r = await runner.run({ request: '查凭证' }, ctx);
     expect(r.text.startsWith('幻晟本期凭证 0 张。')).toBe(true);
-    expect(r.text).toContain('〔本轮执行面：3/6 次 bin/17dz 调用〕');
+    expect(r.text).toContain('〔本轮执行面：3/6 次 bin/example-gateway 调用〕');
   });
 });

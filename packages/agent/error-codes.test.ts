@@ -41,9 +41,9 @@ import {
 } from './src/runtime';
 describe('fshine 错误码表（错误即数据）', () => {
   it('错误类码渲染三要素：码 + 期望/实际/正确形态，动态 actual 由拒绝点填', () => {
-    expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/17dz')).toBe('PLAN_SHAPE_PREFIX: 期望 bin/17dz plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 ```json；正确形态 方案是单行原始命令：bin/17dz plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/17dz plan --file <本轮工作区内的计划文件路径> 提交');
+    expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/example-gateway')).toBe('PLAN_SHAPE_PREFIX: 期望 bin/example-gateway plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 ```json；正确形态 方案是单行原始命令：bin/example-gateway plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/example-gateway plan --file <本轮工作区内的计划文件路径> 提交');
     // 索引类 actual 原样进消息（第几项出错要点得出来）
-    expect(messageFor('PLAN_CALL_NOT_OBJECT', 2, undefined, 'bin/17dz')).toContain('实际 2；');
+    expect(messageFor('PLAN_CALL_NOT_OBJECT', 2, undefined, 'bin/example-gateway')).toContain('实际 2；');
     // 稳定实际形态的码不传 actual 也有"实际"段
     expect(messageFor('TASK_ID_INVALID')).toContain('实际 taskId 为空或不是字符串；');
   });
@@ -117,7 +117,7 @@ describe('fshine 错误码表（错误即数据）', () => {
     // 镜像 platform-leak-lint 的业务词集合：执行层持有领域词，编排层不替平台说话
     const business = /应收|凭证|科目|账套|期间|目录/u;
     for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'WRITE_NOT_ENABLED', 'PLAN_NOT_PLANNABLE']) {
-      expect(messageFor(code, undefined, undefined, 'bin/17dz'), code).not.toMatch(business);
+      expect(messageFor(code, undefined, undefined, 'bin/example-gateway'), code).not.toMatch(business);
     }
     // 平台健康冷却话术（Lane 2）：占位符用分钟数填充后同样零业务词
     expect(platformUnavailableTextFor(10)).not.toMatch(business);

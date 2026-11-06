@@ -75,7 +75,7 @@ function auditSink(): { events: ServeGateEvent[]; sink: (event: ServeGateEvent) 
   return { events, sink: (event) => { events.push(event); } };
 }
 
-const PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"payroll.transform","args":["幻骥达","202608"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":["幻骥达","202608"]}]}';
 
 /** 造一个挂了审计替身的 worker 会话（计划 CLI 与能力面由各用例注入）。 */
 async function workerWith(options: {
@@ -91,7 +91,7 @@ async function workerWith(options: {
   roots.push(root);
   const modelConfig = await fakeModelRuntime();
   return createPiCodingWorkerSession({
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'plan audit test',
@@ -150,7 +150,7 @@ async function fileWorkerWith(options: {
   }
   const modelConfig = await fakeModelRuntime();
   const worker = await createPiCodingWorkerSession({
-    gateway: 'bin/17dz',
+    gateway: 'bin/example-gateway',
     cwd: root,
     skillRoots: [],
     systemPrompt: 'plan audit test',
@@ -276,7 +276,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       writeEnabled: true,
     });
 
-    const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
+    const verdict = await submit(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
 
     // 2026-10-14 修正：写已开放时这不是权限问题而是形状问题，点名它（假归因修复）。
     // 审计一侧的要求不变：每个裁决出口仍落一行，detail 照旧是 calls 摘要。
@@ -313,7 +313,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       entitySources: { currentMessage: '帮我做幻骥达 202608 的工资表' },
     });
 
-    const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}');
+    const verdict = await submit(worker, 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}');
 
     expect(verdict?.reason).toContain('ENTITY_OUT_OF_SCOPE');
     expect(events).toHaveLength(1);
@@ -331,7 +331,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       semantics: SEMANTICS,
     });
 
-    const verdict = await submit(worker, 'bin/17dz plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
+    const verdict = await submit(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
 
     expect(verdict?.reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
     expect(events).toHaveLength(1);
@@ -343,7 +343,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     const worker = await workerWith({ sessionId: 'shape', events, planCliRunner: activatingRunner });
 
     // 真实运行里 worker 的第一种错法：把 JSON 用单引号包起来（2026-10-10 实证）
-    const verdict = await submit(worker, `bin/17dz plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`);
+    const verdict = await submit(worker, `bin/example-gateway plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`);
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_JSON_PARSE');
@@ -362,7 +362,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       planCliRunner: activatingRunner,
       entitySources: { currentMessage: '帮我做幻骥达 202608 的工资表' },
     });
-    const command = 'bin/17dz plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}';
+    const command = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}';
 
     const reasons: (string | undefined)[] = [];
     for (let i = 0; i < 6; i += 1) {
@@ -390,7 +390,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     // parsePlanCallsCommand 抛出点提前返回、从不计数，熔断器整类失效；C3 起形状
     // 失败计入同一 declinedPlans（语义不变：自上次成功激活以来未激活的提交数，
     // 归零点仍只有 ACTIVE——本会话零激活，所以第 6 次即终局）。
-    const command = `bin/17dz plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`;
+    const command = `bin/example-gateway plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`;
 
     const reasons: (string | undefined)[] = [];
     for (let i = 0; i < 6; i += 1) {
@@ -414,11 +414,11 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
 
     // 无活动计划时的普通网关调用：被 G1 门拦下，落的是门那一行（detail = 命令原文），
     // 不是计划摘要那一行
-    const verdict = await submit(worker, 'bin/17dz query payroll-transform.js A 202608');
+    const verdict = await submit(worker, 'bin/example-gateway query payroll-transform.js A 202608');
 
     expect(verdict?.block).toBe(true);
     expect(events).toHaveLength(1);
-    expect(events[0]?.detail).toBe('bin/17dz query payroll-transform.js A 202608');
+    expect(events[0]?.detail).toBe('bin/example-gateway query payroll-transform.js A 202608');
     worker.session.dispose();
   });
 });
@@ -470,7 +470,7 @@ describe('计划提交审计：真 SDK AgentSession 链路', () => {
     const events: ServeGateEvent[] = [];
     const steps: string[] = [];
     const driver: TurnDriver = createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: `http://127.0.0.1:${port}`, LLM_API_KEY: 'test-key', LLM_MODEL: 'audit-model' },
       agentDir: path.join(cwd, '.fshine-agent'),
       planCliRunner: activatingRunner,
@@ -534,7 +534,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-ok', events, planCliRunner: activatingRunner, planContent: PLAN_JSON });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json');
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(events).toHaveLength(1);
@@ -552,7 +552,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     };
     const { worker } = await fileWorkerWith({ sessionId: 'file-out', events, planCliRunner: spyRunner, planContent: PLAN_JSON });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file ../outside-plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file ../outside-plan.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_FILE_OUT_OF_WORKSPACE');
@@ -567,7 +567,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-bad', events, planCliRunner: activatingRunner, planContent: '{"calls":[}' });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_JSON_PARSE');
@@ -583,7 +583,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-missing', events, planCliRunner: activatingRunner });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/nope.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/nope.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('计划文件读取失败');
@@ -599,7 +599,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-noscratch', events, planCliRunner: activatingRunner, planContent: PLAN_JSON, noScratch: true });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_FILE_OUT_OF_WORKSPACE');
@@ -617,7 +617,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     // bash（python3 落盘）绕得过 write 工具的 256KB 上限，宿主读路径必须有自己的界
     const { worker } = await fileWorkerWith({ sessionId: 'file-huge', events, planCliRunner: spyRunner, planContent: `{"calls":[{"operation":"payroll.transform","args":["${'x'.repeat(300 * 1024)}"]}]}` });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_FILE_TOO_LARGE');
@@ -635,7 +635,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     // 合法计划放在 tmp/ 下（工作区外、平台 tmp 内）：原始串以 tmp/task_file/ 开头
     await writeFile(path.join(root, 'tmp', 'evil.json'), PLAN_JSON, 'utf8');
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/../evil.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/../evil.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_FILE_OUT_OF_WORKSPACE');
@@ -650,7 +650,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     await writeFile(outside, PLAN_JSON, 'utf8');
     await symlink(outside, path.join(root, 'tmp', 'task_file', 'link.json'));
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/link.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/link.json');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('PLAN_FILE_OUT_OF_WORKSPACE');
@@ -661,7 +661,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker, root } = await fileWorkerWith({ sessionId: 'file-abs', events, planCliRunner: activatingRunner, planContent: PLAN_JSON });
 
-    const verdict = await submit(worker, `bin/17dz plan --file ${path.join(root, 'tmp', 'task_file', 'plan.json')}`);
+    const verdict = await submit(worker, `bin/example-gateway plan --file ${path.join(root, 'tmp', 'task_file', 'plan.json')}`);
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     // 2026-10-18 实证：worker 手里拿到的 write 回执就是绝对路径，"拒绝对路径"的加固
@@ -674,7 +674,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-subdir', events, planCliRunner: activatingRunner, planContent: PLAN_JSON, planName: 'sub/plan.json' });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/sub/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/sub/plan.json');
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(events[0]?.detail).toBe('tmp/task_file/sub/plan.json payroll.transform A 202608');
@@ -685,7 +685,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-dir', events, planCliRunner: activatingRunner });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file');
 
     expect(verdict?.reason).toContain('PLAN DECLINED');
     expect(verdict?.reason).toContain('计划文件读取失败');
@@ -698,7 +698,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
   it('文件内容坏连提 6 次：第 6 次收敛（文件通道与 inline 共享计数器，C3 覆盖主通道）', async () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-loop', events, planCliRunner: activatingRunner, planContent: '{"calls":[}' });
-    const command = 'bin/17dz plan --file tmp/task_file/plan.json';
+    const command = 'bin/example-gateway plan --file tmp/task_file/plan.json';
 
     const reasons: (string | undefined)[] = [];
     for (let i = 0; i < 6; i += 1) {
@@ -718,7 +718,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const { events } = auditSink();
     const { worker } = await fileWorkerWith({ sessionId: 'file-schema-tail', events, planCliRunner: activatingRunner });
 
-    const verdict = await submit(worker, 'bin/17dz plan --schema 2>&1 | head -20');
+    const verdict = await submit(worker, 'bin/example-gateway plan --schema 2>&1 | head -20');
 
     // 元数据白名单是前缀匹配（与 operation list 同族），尾巴按元字符软放行政策留痕放行
     expect(verdict?.block).toBeUndefined();
@@ -747,7 +747,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
       onNotice: async (text) => { notices.push(text); },
     });
 
-    const verdict = await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json');
+    const verdict = await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json');
 
     expect(verdict?.reason).toContain('PLAN NEEDS_USER_CONFIRM');
     // 通知送达是激活授权的一部分：模型声明不能替代它（与 inline 通道同一判据）
@@ -763,7 +763,7 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
     const longName = `${'x'.repeat(220)}.json`;
     const { worker } = await fileWorkerWith({ sessionId: 'file-longname', events, planCliRunner: activatingRunner, planContent: PLAN_JSON, planName: longName });
 
-    const verdict = await submit(worker, `bin/17dz plan --file tmp/task_file/${longName}`);
+    const verdict = await submit(worker, `bin/example-gateway plan --file tmp/task_file/${longName}`);
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(events[0]?.detail?.length).toBe(AUDIT_DETAIL_MAX_CHARS);
@@ -779,8 +779,8 @@ describe('计划提交审计：--file 文件通道（C2）', () => {
  * 两条——混合历史、终局后续跳、元数据不计入、跨通道归零四个性质无主人。
  */
 describe('计划提交审计：收敛计数器的跨形态语义（C3）', () => {
-  const SHAPE_COMMAND = `bin/17dz plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`;
-  const ROGUE_COMMAND = 'bin/17dz plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}';
+  const SHAPE_COMMAND = `bin/example-gateway plan '{"calls":[{"operation":"payroll.transform","args":["A","202608"]}]}'`;
+  const ROGUE_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":["查无此实体","202608"]}]}';
 
   it('形状失败与实体越权混合计数：3+3 后第 6 次收敛，终局串与纯形状历史逐字一致', async () => {
     const { events } = auditSink();
@@ -824,7 +824,7 @@ describe('计划提交审计：收敛计数器的跨形态语义（C3）', () =>
     const worker = await workerWith({ sessionId: 'schema-nocount', events, planCliRunner: activatingRunner });
 
     for (let i = 0; i < 6; i += 1) {
-      const verdict = await submit(worker, 'bin/17dz plan --schema');
+      const verdict = await submit(worker, 'bin/example-gateway plan --schema');
       expect(verdict?.block).toBeUndefined();
     }
     const verdict = await submit(worker, PLAN_COMMAND);
@@ -850,7 +850,7 @@ describe('计划提交审计：收敛计数器的跨形态语义（C3）', () =>
     // 为什么是 4 不是 5：熔断判据是 >5，第 6 跳在抵达 evaluate 之前就被 cap 挡下——
     // "5 败后接合法提交"里那次合法提交自己就是第 6 跳，根本到不了激活。
     for (let i = 0; i < 4; i += 1) reasons.push((await submit(worker, ROGUE_COMMAND))?.reason);
-    reasons.push((await submit(worker, 'bin/17dz plan --file tmp/task_file/plan.json'))?.reason);
+    reasons.push((await submit(worker, 'bin/example-gateway plan --file tmp/task_file/plan.json'))?.reason);
     // 归零后预算足额：再 5 次越权全部逐次暴露（计数 1-5），第 6 次才收敛。
     // 判别点：若归零没发生，文件激活后的第 1 次失败（计数 6）就会立即 STOP。
     for (let i = 0; i < 6; i += 1) reasons.push((await submit(worker, ROGUE_COMMAND))?.reason);

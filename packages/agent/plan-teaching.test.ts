@@ -14,9 +14,9 @@
  *   ③ 6 处副本确已收敛为 1 处：两个源文件里除 planDraftExample 外零第二种形状字面量，
  *      worker 提示词那处由同一个函数派生。
  *
- * 跨仓读平台文件是可接受的（L2 单一来源就在平台侧）：这里读 17dz 的 plan-schema.json
+ * 跨仓读平台文件是可接受的（L2 单一来源就在平台侧）：这里读 example-gateway 的 plan-schema.json
  * 与 plan.js 的字段读取面，**不在 fshine 仓里抄一份平台事实**——抄了就又是第二份真相。
- * （2026-10-23 C4 起 `bin/17dz plan --schema` 已是真实可用的元数据出口——driver 的
+ * （2026-10-23 C4 起 `bin/example-gateway plan --schema` 已是真实可用的元数据出口——driver 的
  * 计划解析认出旗标形态返回 null，门的 SERVE_METADATA_COMMANDS 白名单放行它到平台
  * CLI 逐字打印 plan-schema.json，e2e A6 spawn 实证 exit 0。本测试仍走读文件核验：
  * 教学形态与平台声明的逐字一致是 L2 判据，与 CLI 出口是否可用是两个事实。）
@@ -29,11 +29,11 @@ import { messageFor, planDraftExample } from './src/error-codes';
 import { parsePlanCallsCommand } from './src/plan-runtime';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', '17dz-platform');
+const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', 'fictional-execution-layer');
 
 /**
  * 平台计划草案 schema。
- * 同仓在场时读 17dz 的 plan-schema.json（L2 跨仓单一来源，fshine 不镜像）。
+ * 同仓在场时读 example-gateway 的 plan-schema.json（L2 跨仓单一来源，fshine 不镜像）。
  * 同仓不在场时（单仓 GitHub CI：只检出 fshine-agent），回落到仓内通用
  * mock 执行层的 plan --schema 输出——那是 dummy 平台自己的 schema，
  * 不是财税 schema 的副本，校验的只是协议顶层形状（calls 必填、
@@ -55,7 +55,7 @@ function planSchema(): { required?: unknown; additionalProperties?: unknown; pro
 
 /** 教学示例里的占位符（…）→ 具体合法值，得到一条可解析的真草案命令。 */
 function concreteDraftCommand(): string {
-  return planDraftExample('bin/17dz')
+  return planDraftExample('bin/example-gateway')
     .replace('"goal":"…"', '"goal":"查询某公司本期的应收余额"')
     .replace('"operation":"…"', '"operation":"finance.query-receivables"')
     .replace('"args":[…]', '"args":["--query","某公司","--period","202609"]');
@@ -87,14 +87,14 @@ describe('计划草案教学：单一来源与平台 schema 一致（D-011）', 
   });
 
   it('宿主解析器认这个形状：教学 → 解析 → 同一批 calls（教学与解析不打架）', () => {
-    const parsed = parsePlanCallsCommand(concreteDraftCommand(), 'bin/17dz');
+    const parsed = parsePlanCallsCommand(concreteDraftCommand(), 'bin/example-gateway');
     expect(parsed).toEqual({
       kind: 'inline',
       calls: [{ operation: 'finance.query-receivables', args: ['--query', '某公司', '--period', '202609'] }],
     });
     // 形状类错误的 correctForm 就是从同一份教学派生（消息文本不得另写一种形状）
-    expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/17dz')).toContain(planDraftExample('bin/17dz'));
-    expect(messageFor('PLAN_CALLS_NOT_ARRAY', 0, undefined, 'bin/17dz')).toContain(planDraftExample('bin/17dz'));
+    expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/example-gateway')).toContain(planDraftExample('bin/example-gateway'));
+    expect(messageFor('PLAN_CALLS_NOT_ARRAY', 0, undefined, 'bin/example-gateway')).toContain(planDraftExample('bin/example-gateway'));
   });
 
   it('6 处副本收敛为 1 处：源文件里除 planDraftExample 外零第二种形状字面量', () => {

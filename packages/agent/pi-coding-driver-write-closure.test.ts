@@ -112,7 +112,7 @@ const SEMANTICS_TABLE = new Map<string, { plan: boolean; confirm: boolean; mock:
 ]);
 
 /** T7 形态的 worker 脚本：准备流程（只读摸底）+ 含写类 operation 的计划 + 停在准备阶段的承诺。 */
-const WRITE_PLAN_COMMAND = 'bin/17dz plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
+const WRITE_PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
 const T7_PROMISE = '已核实账套、日期与贷方科目，借贷平衡，即可产出录入提案。';
 
 async function makeDriver(options: { planCliRunner: PlanCliRunner }): Promise<{ driver: TurnDriver; cwd: string }> {
@@ -121,7 +121,7 @@ async function makeDriver(options: { planCliRunner: PlanCliRunner }): Promise<{ 
   return {
     cwd,
     driver: createPiCodingTurnDriver({
-      gateway: 'bin/17dz',
+      gateway: 'bin/example-gateway',
       env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
       agentDir: path.join(cwd, '.fshine-agent'),
       // 三张平台清单派生表全部显式注入：单测里绝不 spawn 平台 CLI

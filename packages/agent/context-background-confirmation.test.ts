@@ -68,7 +68,7 @@ function createRunner(args: { gate?: ReturnType<typeof createPlatformExecutionGa
     return { ok: true, verified: true, summaryText: '平台提交已完成。', output: 'mock commit output' };
   });
   const runner = createContextTaskRunner({
-    profiles: { '17dz': { root: '/tmp', skillRoots: [] } },
+    profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
     tasks,
     workerDriver: { run: async (): Promise<{ text: string; messages: [] }> => ({ text: 'unused', messages: [] }) } as unknown as TurnDriver,
     executionGate: gate,
