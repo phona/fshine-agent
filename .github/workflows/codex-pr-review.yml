@@ -1,0 +1,244 @@
+# 同一仓库 PR 的 Codex 审查。身份是 ChatGPT OAuth 的 auth.json（Actions secret CODEX_AUTH_JSON），
+# 不是 API key。fork PR 在读取 secret 之前失败。密钥怎么生成和更新见 .github/codex/README.md。
+# 本 workflow 不改分支保护；required check 由业主配置。
+name: Codex PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+# 一份 ChatGPT auth.json 不能被两个 job 同时刷新。排队，不取消正在跑的审查。
+concurrency:
+  group: codex-pr-review-${{ github.repository }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  codex-pr-review:
+    name: codex-pr-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Reject fork pull requests
+        id: guard
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [ "$HEAD_REPO" != "$THIS_REPO" ]; then
+            {
+              echo "### Codex PR review 未运行"
+              echo
+              echo "来源仓库是 \`$HEAD_REPO\`，不是 \`$THIS_REPO\`。"
+              echo "fork pull request 不会读取 CODEX_AUTH_JSON。"
+              echo "把分支推到本仓库后再跑审查。这个检查失败是故意的，避免 fork 绕过 required check。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "same_repo=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "same_repo=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@v4
+        with:
+          # 审查三方点 diff 需要 base 与 head 都在本地。浅克隆拿不到 base 提交。
+          fetch-depth: 0
+          persist-credentials: true
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Fetch the pull request base
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "unexpected pull request sha" >&2
+            exit 1
+          fi
+          if [[ ! "$BASE_REF" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo "unexpected base ref" >&2
+            exit 1
+          fi
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags origin "$BASE_SHA" || git fetch --no-tags origin "refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          fi
+          git cat-file -e "${BASE_SHA}^{commit}" >/dev/null
+          git cat-file -e "${HEAD_SHA}^{commit}" >/dev/null
+          git config --unset-all "http.https://github.com/.extraheader" || true
+          if git config --local --get-regexp 'extraheader' >/dev/null 2>&1; then
+            echo "git extraheader is still set" >&2
+            exit 1
+          fi
+          echo "reviewing ${BASE_SHA}...${HEAD_SHA}"
+
+      - name: Setup Node
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install Codex CLI
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        run: |
+          set -euo pipefail
+          # 2026-11-03 npm latest。升级后确认 -a/-s 仍要写在 exec 前面。
+          npm install --global @openai/codex@0.166.0
+          codex --version
+
+      - name: Restore ChatGPT auth.json
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "${CODEX_AUTH_JSON//[[:space:]]/}" ]; then
+            {
+              echo "### CODEX_AUTH_JSON 未设置"
+              echo
+              echo "见 .github/codex/README.md。本步骤没有打印 secret。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "CODEX_AUTH_JSON is empty. See .github/codex/README.md." >&2
+            exit 1
+          fi
+          export CODEX_HOME="${HOME}/.codex"
+          echo "CODEX_HOME=${HOME}/.codex" >> "$GITHUB_ENV"
+          mkdir -p "$CODEX_HOME"
+          chmod 700 "$CODEX_HOME"
+          umask 077
+          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+          chmod 600 "$CODEX_HOME/auth.json"
+          printf '%s\n' 'cli_auth_credentials_store = "file"' > "$CODEX_HOME/config.toml"
+          chmod 600 "$CODEX_HOME/config.toml"
+          node .github/codex/check-auth.mjs "$CODEX_HOME/auth.json"
+          unset CODEX_AUTH_JSON
+
+      - name: Review the pull request
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          CODEX_MODEL: ${{ vars.CODEX_MODEL }}
+          CODEX_EFFORT: ${{ vars.CODEX_EFFORT }}
+        run: |
+          set -euo pipefail
+          node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
+          cmd=(
+            codex
+            -a never
+            -s read-only
+            exec
+            --ephemeral
+            --ignore-rules
+            --color never
+            --cd "$GITHUB_WORKSPACE"
+            --output-schema "$GITHUB_WORKSPACE/.github/codex/review-schema.json"
+            -o "$RUNNER_TEMP/codex-review.json"
+          )
+          if [ -n "${CODEX_MODEL:-}" ]; then
+            cmd+=(-m "$CODEX_MODEL")
+          fi
+          # 0.166.0 的 exec 不接受 effort 长选项。空变量不传，沿用账号或 CLI 默认思考力度。
+          if [ -n "${CODEX_EFFORT:-}" ]; then
+            if [[ ! "$CODEX_EFFORT" =~ ^[A-Za-z0-9_-]+$ ]]; then
+              echo "CODEX_EFFORT must be one token (none, minimal, low, medium, high, xhigh)." >&2
+              exit 1
+            fi
+            cmd+=(-c "model_reasoning_effort=\"${CODEX_EFFORT}\"")
+          fi
+          unset GITHUB_TOKEN GH_TOKEN
+          set +e
+          "${cmd[@]}" - < "$RUNNER_TEMP/codex-prompt.md" >"$RUNNER_TEMP/codex-stdout.txt" 2>"$RUNNER_TEMP/codex-stderr.txt"
+          status=$?
+          set -e
+          node .github/codex/render-review.mjs scrub "$status" \
+            "$RUNNER_TEMP/codex-stdout.txt" \
+            "$RUNNER_TEMP/codex-stderr.txt" \
+            "$RUNNER_TEMP/codex-review.json"
+
+      - name: Post the pull request review
+        if: success() && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "unexpected pull request number" >&2
+            exit 1
+          fi
+          if [[ ! "$THIS_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "unexpected repository" >&2
+            exit 1
+          fi
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "unexpected head sha" >&2
+            exit 1
+          fi
+          node .github/codex/render-review.mjs publish \
+            "$RUNNER_TEMP/codex-review.json" \
+            "$RUNNER_TEMP/review.md" \
+            "$RUNNER_TEMP/review-event" \
+            "$HEAD_SHA"
+          event=$(tr -d '[:space:]' < "$RUNNER_TEMP/review-event")
+          case "$event" in
+            COMMENT|REQUEST_CHANGES) ;;
+            *)
+              echo "refusing review event" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "## Codex review (${event})"
+            echo
+            cat "$RUNNER_TEMP/review.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq -n \
+            --arg commit_id "$HEAD_SHA" \
+            --arg event "$event" \
+            --rawfile body "$RUNNER_TEMP/review.md" \
+            '{commit_id:$commit_id, event:$event, body:$body}' \
+            | gh api --method POST \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews" \
+                --input - > "$RUNNER_TEMP/gh-review.json"
+          echo posted > "$RUNNER_TEMP/codex-review-posted"
+          jq -r '"posted review id=\(.id) state=\(.state)"' "$RUNNER_TEMP/gh-review.json"
+          if [ "$event" = "REQUEST_CHANGES" ]; then
+            echo "已提交 REQUEST_CHANGES，检查失败，便于把它设为 required check。" >&2
+            exit 1
+          fi
+
+      - name: Record an infrastructure failure
+        if: failure() && steps.guard.outputs.same_repo == 'true'
+        run: |
+          set -euo pipefail
+          if [ -f "$RUNNER_TEMP/codex-review-posted" ]; then
+            exit 0
+          fi
+          {
+            echo "### Codex PR review 失败"
+            echo
+            echo "审查没有发到 pull request。日志不打印 auth.json。"
+            echo "若是 OAuth 失效，按 .github/codex/README.md 重新 \`codex login\` 并更新 secret CODEX_AUTH_JSON。"
+          } >> "$GITHUB_STEP_SUMMARY"
