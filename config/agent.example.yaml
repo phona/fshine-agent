@@ -3,8 +3,8 @@
 # config/agent.yaml 不进版本库(本地部署参数),秘密一律放 .env。
 # 结构对应 @fshine/contracts 的 AppConfig(架构 §8)。
 #
-# 【与 .env 的边界】本文件管"结构与授权"(谁能用、连哪个数据源、授权哪些账套);
-# .env 只管"秘密与连接"(企微凭证、LLM key/model)。账套访问范围由 accountSetScope 控制；
+# 【与 .env 的边界】本文件管"结构与授权"(谁能用、连哪个数据源、授权哪些数据范围);
+# .env 只管"秘密与连接"(企微凭据、LLM key/model)。数据范围由 accountSetScope 控制；
 # allowlist 模式下才需要每用户维护 accountSetIds。
 # ============================================================
 
@@ -13,32 +13,33 @@
 #只有列在这里且 enabled 的用户才能使用机器人。
 principals:
   "wecom:<你的企微UserID>":
-    # 账套范围:all=允许动态搜索全部账套;allowlist=仅允许 accountSetIds(旧配置默认 allowlist)
+    # 数据范围:all=允许动态搜索全部数据;allowlist=仅允许 accountSetIds(旧配置默认 allowlist)
     accountSetScope: all
-    # allowlist 模式下填写授权账套 id(以 17dz search_account_sets 返回的 as_xxx 为准)
-    # accountSetIds: ["as_001"]
+    # allowlist 模式下填写授权数据 id(以执行层 search_<entity> 返回的 id 为准)
+    # accountSetIds: ["id_001"]
     enabled: true
     # 能力集(可选,缺省 read):read=只读;validate/write 开启写链路(V1)
     # capabilities: ["read"]
 
 # ---- 通用 Worker 的受信上下文(路径只能由管理员配置,模型不能传入) ----
 contextProfiles:
-  17dz:
-    root: /path/to/17dz-platform
+  <profileId>:
+    root: /path/to/execution-layer
     # 每个 profile 声明自己的网关调用形式（相对 root，宿主 spawn 用它，不硬编码）。
     # 换执行层时只改这里：root + gateway + skillRoots 三件套随 profile 走。
-    gateway: bin/17dz
+    # 实例自选 id，三件套随 profile 走。
+    gateway: bin/<gateway>
     # 运行态技能面:只认 .agents/skills-serve(平台仓 skills-lock 同步过来的 SKILL.md)。
     # 与建造期技能面 .agents/skills 互斥——worker 驱动 noSkills:true 只加载显式
     # skillRoots,指向建造面会让"技能注入静默失效"(D-055:模板曾写着旧路径)。
     skillRoots: [".agents/skills-serve"]
     # 执行层称谓(可选,≤32 字符无控制字符):进 Main Agent 系统提示词的委派句。
-    # 缺省 = 宿主中性缺省「执行层子 Agent」,不静默取任何实例名;财税实例按自己的
-    # 已发布协议声明实例称谓(如 executorLabel: 17dz 子 Agent)。
-    # executorLabel: 17dz 子 Agent
+    # 缺省 = 宿主中性缺省「执行层子 Agent」,不静默取任何实例名;实例按自己的
+    # 已发布协议声明实例称谓(如 executorLabel: <实例称谓>)。
+    # executorLabel: <实例称谓>
     # 委派工具名(可选,≤48 字符,小写字母开头仅小写字母/数字/下划线):模型可见协议面。
     # 缺省 = 宿主中性缺省 run_task;已发布过实例工具名的部署在此声明保持协议连续。
-    # toolName: run_17dz_task
+    # toolName: <实例工具名>
     # Worker 单次任务预算(可选，默认 10 分钟)
     workerTimeoutMs: 600000
 
@@ -53,8 +54,8 @@ contextProfiles:
 
 # ---- 编排层业务 skill(可选,架构 §5):只含程序性知识(任务类别与拆解表/每类必需信息/拆解原则),
 #      用于长任务拆解与信息补齐;不含任何执行口径(那归执行层 SKILL)。
-#      相对仓库根目录或绝对路径;文件缺失 = 跳过,不影响启动。范文见 docs/business-skill.md。
+#      相对仓库根路径或绝对路径;文件缺失 = 跳过,不影响启动。范文见 docs/business-skill.md。
 # businessSkillPath: docs/business-skill.md
 
 # ---- 秘密(WECOM_BOT_ID/WECOM_BOT_SECRET/LLM_*)见 .env.example,放 .env ----
-# ---- 17dz 自动登录凭据见 17dz-platform 仓库:根 .env 的 EXECUTION_PHONE + ~/.config/17dz/password ----
+# ---- 执行层治理变量的权威名以该执行层声明为准，见 .env.example 头部说明 ----

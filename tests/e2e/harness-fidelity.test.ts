@@ -27,21 +27,34 @@
  * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 EXECUTION_/FSHINE_ 开关，绝不
  * FSHINE_REAL_COMMIT=1；护栏②的一次 CLI spawn 走 mock 执行器，不开浏览器不触网。
  */
+import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationSemantics, type AccessSemantics, type OperationArgsSpec } from '../../packages/agent/src/operation-labels';
-import { CURRENT_PERIOD, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope } from './harness';
+import { CURRENT_PERIOD, GATEWAY, harnessOperationSemantics, PLATFORM_ROOT, withoutPlatformEnvelope, operationScripts } from './harness';
+
+const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 describe('[L4 集成] harness 保真度绊线', () => {
+  // 平台未 checkout（config/agent.yaml 缺失 + FSHINE_PLATFORM_ROOT 未设）→ 护栏必须有真实平台才跑
+  const platformAvailable = PLATFORM_ROOT !== '' && GATEWAY !== '';
+  if (!platformAvailable) {
+    it('平台未配，全组护栏跳过（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）', () => {
+      expect(PLATFORM_ROOT, 'PLATFORM_ROOT 未配：设置 FSHINE_PLATFORM_ROOT 或建 config/agent.yaml').toBe('');
+    });
+  }
+
+  describe.skipIf(!platformAvailable)('护栏①-④（平台已配时才跑，避免平台未配时整组照红产生噪音）', () => {
+
   // ── 护栏①：access 语义表替身 vs 平台派生 ────────────────────────────────
 
   it('HF-1 语义表必须平台派生、非空、含确认类锚点（空表/手注漂移=写关闭判据失效）', async () => {
     // loadOperationSemantics 对一切失败路径（CLI 不存在/非零退出/输出不是 JSON/平台
     // 没下发该表）都 resolve 空表、从不 reject——catch 只是照 pi-coding-driver 的同一
     // 防御姿态写，不改变行为。
-    const derived = await loadOperationSemantics(PLATFORM_ROOT).catch(() => new Map<string, AccessSemantics>());
+    const derived = await loadOperationSemantics(PLATFORM_ROOT, GATEWAY).catch(() => new Map<string, AccessSemantics>());
 
     // 第一重：平台真表必须非空。2026-10-16 起 harness 的语义表已从 18 条手注替身换回
     // 平台派生（翻回条件"平台下发 accessSemantics"实测成立：53 条、与替身逐条一致）。
@@ -137,7 +150,7 @@ describe('[L4 集成] harness 保真度绊线', () => {
     // loadOperationArgSpecs 的失败语义与 loadOperationSemantics 同一族：CLI 不存在/非零
     // 退出/输出不是 JSON/顶层形状不认识——一律 resolve 空表、从不 reject。catch 与 HF-1
     // 同因：照 load* 家族的防御姿态写，不改变行为。
-    const specs = await loadOperationArgSpecs(PLATFORM_ROOT).catch(
+    const specs = await loadOperationArgSpecs(PLATFORM_ROOT, GATEWAY).catch(
       () => new Map<string, OperationArgsSpec>(),
     );
 
@@ -160,5 +173,27 @@ describe('[L4 集成] harness 保真度绊线', () => {
       spec!.flagStyles.get('--period'),
       '锚点 flag 缺声明：--period 不在 finance.query-receivables 的规格里——PERIOD_NO_DATA 终局话术与事实里的期间会静默消失',
     ).toBeDefined();
+  });
+
+  // ── 护栏④：operation 脚本表必须平台派生、非空、消费点使用派生表 ─────────────
+
+  it('HF-4 operation 脚本表必须平台派生、非空、消费点使用派生表（手抄表/空表=假绿）', async () => {
+    // 第一重：派生表必须非空。harness 的 execute 分支与 gatedWorker 的 query 分支都从
+    // 该表取 script，空表 = 执行路径静默失效（要么抛错要么不执行）。
+    expect(operationScripts.size, '平台 operation scripts 表为空或派生失败——harness execute 分支会静默手抄或不执行').toBeGreaterThan(0);
+
+    // 第二重：夹具用到的 operation 必须在表内。
+    for (const op of ['finance.query-receivables', 'finance.search-account-sets', 'voucher.query-saved']) {
+      expect(operationScripts.has(op), `operation scripts 表缺少 ${op}——execute 分支会抛错或降级`).toBe(true);
+    }
+
+    // 第三重：源码机械检查——两个消费点都用 operationScripts.get，且无手抄 SCRIPTS 常量残留。
+    // C5 把手抄表 SCRIPTS 换成了 loadOperationScripts 派生表；如果有人把某一消费点换回
+    // 手抄表（或加回 const SCRIPTS = {...}），这里当场红，HF-4 才算真兜住。
+    const harnessSrc = readFileSync(path.join(REPO_ROOT, 'tests', 'e2e', 'harness.ts'), 'utf8');
+    const opScriptUsages = (harnessSrc.match(/operationScripts\.get\(/g) ?? []).length;
+    expect(opScriptUsages, `harness 中 operationScripts.get 出现 ${opScriptUsages} 次（预期 ≥ 2：execute 分支 + gatedWorker query 分支）——少于 2 说明有消费点仍用手抄表或空转`).toBeGreaterThanOrEqual(2);
+    expect(harnessSrc, 'harness 中仍存在手抄表 SCRIPTS 常量——C5 的「消费点改用派生表」未彻底落地').not.toMatch(/^const SCRIPTS\s*[:=]/m);
+  });
   });
 });
