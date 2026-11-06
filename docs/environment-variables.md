@@ -15,7 +15,7 @@
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
 | `FSHINE_REAL_COMMIT` | 部署声明 / `platform-mock.isCommitEnabled` | 仅字面量 `1` 算真写授权；缺失 = 确认码只到 `confirm_held`，不写；mock 下 `isCommitEnabled` 恒真，与本变量无关 |
-| `FSHINE_PLATFORM_ROOT` | 测试 / e2e harness、`plan-teaching.test` | 缺失 = 回退到 fshine 仓旁边的 `17dz-platform`；生产装配以 `config/agent.yaml` 的 profile root 为准，不靠本变量 |
+| `FSHINE_PLATFORM_ROOT` | 测试 / e2e harness、`plan-teaching.test` | 缺失 = 回退到 fshine 仓旁边的 `fictional-execution-layer`；生产装配以 `config/agent.yaml` 的 profile root 为准，不靠本变量 |
 | `FSHINE_PLATFORM_QUEUE_CAPACITY` | 部署 / 共享 `PlatformExecutionGate`（assembly、context） | 缺省 / 非法 = 100 |
 | `FSHINE_PLATFORM_CONCURRENCY` | 部署 / 委派并发闸 | 缺省 = 1（全局串行） |
 | `FSHINE_PLATFORM_COOLDOWN_MS` | 部署 / 平台健康冷却 | 缺省 = 600000（10 分钟） |
@@ -36,33 +36,33 @@
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `EXECUTION_SERVE` | 宿主装配 / 17dz `execution-env.serve` | 仅 `1` 进 serve 法域；否则走建造法域规则 |
-| `DZ_SERVE` | 17dz `execution-env.serve`（`EXECUTION_SERVE` 新前缀别名） | 与 `EXECUTION_SERVE` 同义；17dz main 治理 env 族改名后与旧名并存 |
+| `EXECUTION_SERVE` | 宿主装配 / 执行层 `execution-env.serve` | 仅 `1` 进 serve 法域；否则走建造法域规则 |
+| `DZ_SERVE` | 执行层 `execution-env.serve`（`EXECUTION_SERVE` 新前缀别名） | 与 `EXECUTION_SERVE` 同义；执行层仓 main 治理 env 族改名后与旧名并存 |
 | `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
 | `DZ_INVOCATION` | 网关铸造 / serve 门校验（`EXECUTION_INVOCATION` 新前缀别名） | 与 `EXECUTION_INVOCATION` 同义 |
-| `EXECUTION_ALLOW_REAL` | 部署 / 17dz 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
-| `DZ_ALLOW_REAL` | 部署 / 17dz 实执行门（`EXECUTION_ALLOW_REAL` 新前缀别名） | 与 `EXECUTION_ALLOW_REAL` 同义 |
+| `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
+| `DZ_ALLOW_REAL` | 部署 / 执行层 实执行门（`EXECUTION_ALLOW_REAL` 新前缀别名） | 与 `EXECUTION_ALLOW_REAL` 同义 |
 | `EXECUTION_EXECUTOR` | 部署 / 网关 spawn 目标切换 | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门 |
 | `DZ_EXECUTOR` | 部署 / 网关 spawn 目标切换（`EXECUTION_EXECUTOR` 新前缀别名） | 与 `EXECUTION_EXECUTOR` 同义 |
-| `EXECUTION_MOCK_STATE` | 部署 / 17dz mock 状态文件 | 缺失时服务端兜底到 `<平台根>/.runtime/mock-state.json`；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3） |
-| `DZ_MOCK_STATE` | 部署 / 17dz mock 状态文件（`EXECUTION_MOCK_STATE` 新前缀别名） | 与 `EXECUTION_MOCK_STATE` 同义 |
-| `EXECUTION_REQUIRE_PLAN` | 宿主 / 17dz runner（serve 执行须 host 注入 plan id） | 宿主直调时显式剥离；worker 路径置 `1` 即强制计划绑定 |
-| `DZ_REQUIRE_PLAN` | 宿主 / 17dz runner（`EXECUTION_REQUIRE_PLAN` 新前缀别名） | 与 `EXECUTION_REQUIRE_PLAN` 同义 |
-| `EXECUTION_PLAN_ID` | 宿主注入 / 17dz runner、gateway | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 |
+| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时服务端兜底到 `<平台根>/.runtime/mock-state.json`；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3） |
+| `DZ_MOCK_STATE` | 部署 / 执行层 mock 状态文件（`EXECUTION_MOCK_STATE` 新前缀别名） | 与 `EXECUTION_MOCK_STATE` 同义 |
+| `EXECUTION_REQUIRE_PLAN` | 宿主 / 执行层 runner（serve 执行须 host 注入 plan id） | 宿主直调时显式剥离；worker 路径置 `1` 即强制计划绑定 |
+| `DZ_REQUIRE_PLAN` | 宿主 / 执行层 runner（`EXECUTION_REQUIRE_PLAN` 新前缀别名） | 与 `EXECUTION_REQUIRE_PLAN` 同义 |
+| `EXECUTION_PLAN_ID` | 宿主注入 / 执行层 runner、gateway | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌 | 缺省 = 装配进程内生成，重启失效 |
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
-| `EXECUTION_PLAN_STATE` | 部署 / 17dz 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
-| `DZ_PLAN_STATE` | 部署 / 17dz 计划账本（`EXECUTION_PLAN_STATE` 新前缀别名） | 与 `EXECUTION_PLAN_STATE` 同义 |
+| `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
+| `DZ_PLAN_STATE` | 部署 / 执行层 计划账本（`EXECUTION_PLAN_STATE` 新前缀别名） | 与 `EXECUTION_PLAN_STATE` 同义 |
 | `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
 | `DZ_AUDIT_PATH` | 部署 / 调用审计 JSONL（`EXECUTION_AUDIT_PATH` 新前缀别名） | 与 `EXECUTION_AUDIT_PATH` 同义 |
 | `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json` |
 | `DZ_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态（`EXECUTION_RATE_LIMIT_STATE` 新前缀别名） | 与 `EXECUTION_RATE_LIMIT_STATE` 同义 |
 
-## 3. 执行层治理（17dz 读，宿主只继承 / 按用例隔离）
+## 3. 执行层治理（执行层 读，宿主只继承 / 按用例隔离）
 
 | 变量族 | 作用 / 默认值 / 缺失行为 |
 | --- | --- |
-| `EXECUTION_RATE_LIMIT` | 限流 JSON 部分覆盖默认桶；`off` 整体旁路（仅排障）；缺省 = 17dz 默认桶 |
+| `EXECUTION_RATE_LIMIT` | 限流 JSON 部分覆盖默认桶；`off` 整体旁路（仅排障）；缺省 = 执行层默认桶 |
 | `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` / `DZ_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位；`DZ_PROPOSAL_STATE` 为 `EXECUTION_PROPOSAL_STATE` 新前缀别名 |
 | `EXECUTION_PROPOSAL_TTL_SECONDS` | 提案 TTL；缺省 30 分钟 |
 | `EXECUTION_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`（8 个）+ `EXECUTION_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT`（4 个） | 计划档位阈值；缺省 calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180；注意权重线第三档真名是 `BUDGET`（`EXECUTION_PLAN_BUDGET_WEIGHT`），不是 `CONFIRM`——`CONFIRM` 只用于 calls/seconds 线，设 `EXECUTION_PLAN_CONFIRM_WEIGHT` 会静默无效 |
@@ -71,9 +71,9 @@
 | `EXECUTION_BREAKER_FAIL_STREAK` / `EXECUTION_BREAKER_COOLDOWN_MS` / `EXECUTION_BREAKER_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_CRASH_WARN` | 熔断与软信号阈值；缺省 5 / 30 分钟 / 默认窗口 / 1 小时 / 2 |
 | `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS` / `EXECUTION_EXPORTS_DIR` | 缓存与导出文件目录 / TTL；缺省为 `.runtime/` 下默认目录与默认 TTL |
 | `EXECUTION_RESULT_FILE` | 网关边车镜像：信封同步追加到的文件；网关 spawn 前设置，不设则不镜像 |
-| `EXECUTION_PASS_FILE` / `EXECUTION_PHONE` / `EXECUTION_PASSWORD` | 登录凭据面：密码文件路径（缺省 `~/.config/17dz/password`）、手机号、密码；**Agent 不读 `.env` 凭据**（见 17dz AGENTS.md 登录红线），本行只作盘点，不作调用方 |
+| `EXECUTION_PASS_FILE` / `EXECUTION_PHONE` / `EXECUTION_PASSWORD` | 登录凭据面：密码文件路径（缺省 `~/.config/执行层/password`）、手机号、密码；**Agent 不读 `.env` 凭据**（见 执行层 AGENTS.md 登录红线），本行只作盘点，不作调用方 |
 | `EXECUTION_BROWSER_KEEP_OPEN` | platform-session 置位时跳过浏览器关闭；仅 `1` 生效 |
-| `ENV_PATH` / `RUNTIME_DIR` / `BROWSER_PROFILE_DIR` / `BROWSER_CACHE_DIR` / `SCREEN_DIR` / `AUTH_STATE` / `TOKEN_CACHE_PATH` / `CHROME_PATH` / `BROWSER_UA` / `BROWSER_HEADLESS` | 17dz 路径与浏览器面：缺省各为仓内 `.runtime/`、`.browser-profile/`、`/usr/bin/chromium` 等默认；`BROWSER_HEADLESS` 仅 `1` 算无头 |
+| `ENV_PATH` / `RUNTIME_DIR` / `BROWSER_PROFILE_DIR` / `BROWSER_CACHE_DIR` / `SCREEN_DIR` / `AUTH_STATE` / `TOKEN_CACHE_PATH` / `CHROME_PATH` / `BROWSER_UA` / `BROWSER_HEADLESS` | 执行层 路径与浏览器面：缺省各为仓内 `.runtime/`、`.browser-profile/`、`/usr/bin/chromium` 等默认；`BROWSER_HEADLESS` 仅 `1` 算无头 |
 
 ## 4. 通用夹具（fshine generic-mock，隔离语义）
 
@@ -136,13 +136,13 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
 ## 6. 已退役、测试负向断言保留（不是现行接口，删了反而丢守卫）
 
 - `FSHINE_MODE` / `FSHINE_INVOCATION` / `FSHINE_EXECUTOR` / `FSHINE_GATE_SECRET` /
-  `FSHINE_COMMIT_TOKEN` / `FSHINE_MOCK_STATE`：17dz 旧名，兼容读取已删；
+  `FSHINE_COMMIT_TOKEN` / `FSHINE_MOCK_STATE`：执行层 旧名，兼容读取已删；
   `test-gate.js` / `test-auth.js` 故意注入旧名断言其**不**算法域，删测试即丢退役证明。
-- `EXECUTION_REAL_COMMIT`：17dz 从不读取，只在 `test-all.js` 的泄漏剥离名单里
+- `EXECUTION_REAL_COMMIT`：执行层 从不读取，只在 `test-all.js` 的泄漏剥离名单里
   出现（防止测试环境把它带进真写）；宿主的真写闸是 `FSHINE_REAL_COMMIT`。
 - `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT`：fshine 写路径旧开关，
   已随 C 波退役；`docs-reality.test.ts` 断言其在生产代码中零复现，删断言即丢闭环守卫。
-- `STEALTH_MODE` / `STEALTH_DELAY_SCALE`：只出现在 17dz 未实现特性的旧规格文档
+- `STEALTH_MODE` / `STEALTH_DELAY_SCALE`：只出现在 执行层 未实现特性的旧规格文档
   （`docs/superpowers/`）里，代码 0 读；规格文档是 dated 记录，不为清零改写，
   也不计入现行接口。
 
@@ -150,7 +150,7 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
 
 | 删了什么 | 位置 | 为什么删 |
 | --- | --- | --- |
-| 跨仓账套白名单部署 env 注释句（原句称它是 17dz 服务端部署 env） | fshine `.env.example` 头部边界说明 | 两仓代码 0 读：17dz 没有任何读取点，fshine 也不设它，是 stale 引用。删后改为只说账套白名单看 `config/agent.yaml` 的 `accountSetIds`；被删名本身不在本文档出现，全仓 grep 亦为 0 |
+| 跨仓账套白名单部署 env 注释句（原句称它是 执行层 服务端部署 env） | fshine `.env.example` 头部边界说明 | 两仓代码 0 读：执行层 没有任何读取点，fshine 也不设它，是 stale 引用。删后改为只说账套白名单看 `config/agent.yaml` 的 `accountSetIds`；被删名本身不在本文档出现，全仓 grep 亦为 0 |
 
 > 盘点方法：`rg` 全仓扫 `process.env` / `env[...]` / 子进程 env 注入 /
 > `.env.example` / 示例配置，再按“代码真读 / 测试真依赖 / 仅文档出现 / 仅历史记录”
@@ -168,7 +168,7 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
   特此注明免后人按字面复核时误判：跨仓校验脚本里的 `DZ_ENV`（JS 标识符，映射表
   键名）与原 §4c 的跨仓检出根目录变量。两处已随 W4 一并出宿主——跨仓校验移交
   执行层仓（脚本连同映射表与该变量同批移除，见 §4c 处的注记），本节口径回归
-  "只指旧 env 名"。17dz 工作树本身实测仍为 0 处。
+  "只指旧 env 名"。执行层 工作树本身实测仍为 0 处。
 - 唯一例外是 git 历史：改名前的提交里自然还有旧名，重写历史会破坏
   现有分支与 PR 基线，故不重写；“工作树污染”的度量是工作树 grep，
   不是历史 grep。

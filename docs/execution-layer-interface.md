@@ -12,18 +12,18 @@
 | 层 | 归属 | 例子 |
 | --- | --- | --- |
 | 编排层 fshine-agent | 通用机制：身份、上下文、任务、计划门、确认、续跑、审计、呈现 | 本仓 `packages/`、`apps/` |
-| 执行层 | 业务实体与口径、能力声明、命令语法、提案结构、领域记忆、执行步骤、业务校验、保存与读回判定 | 财税实例：17dz-platform；通用夹具：本仓 `scripts/eval/fixtures/dummy-platform/` |
+| 执行层 | 业务实体与口径、能力声明、命令语法、提案结构、领域记忆、执行步骤、业务校验、保存与读回判定 | 财税实例：fictional-execution-layer；通用夹具：本仓 `scripts/eval/fixtures/dummy-platform/` |
 | 通用夹具 | **不是**执行层实例，只是证明编排层可换执行层的测试替身 | 网关名 `bin/generic`、操作名 `dummy.*`，**不得**以任何执行层实例的名字命名 |
 
 命名纪律：
 
 - 通用层（夹具、文档、测试名、网关入口）出现执行层实例名即为越界。
   通用夹具的网关是 `bin/generic`（指向 `bin/dummy`），不是任何实例的网关名。
-- 执行层实例自己的网关名只属于该实例：财税实例是 `bin/17dz`，
+- 执行层实例自己的网关名只属于该实例：财税实例是 `bin/example-gateway`，
   只出现在该实例的 profile（`contextProfiles.<id>.gateway`）与该实例
   的文档里，不进入通用层代码、通用夹具与通用文档。
 - 工具名同理（C3）：委派工具名是模型可见协议面，宿主缺省中性（`run_task`）；
-  实例已发布的协议名（如财税集成 `run_17dz_task`）由该实例 profile 的
+  实例已发布的协议名（如财税集成 `run_<instance>_task`）由该实例 profile 的
   `toolName` 声明保持连续，不进入通用层代码、通用夹具与通用文档。
 
 ## 1. Profile / 网关声明（受信配置）
@@ -35,11 +35,11 @@
   的 `executorLabel` 注入）。
 - **字段**（三件套随 profile 走，缺一不可；称谓一件可选，缺省中性）：
   - `root`：执行层仓根绝对路径；worker 的 cwd 即 root。
-  - `gateway`：相对 root 的网关调用形式，如财税实例 `bin/17dz`、
+  - `gateway`：相对 root 的网关调用形式，如财税实例 `bin/example-gateway`、
     通用夹具 `bin/generic`。模型绝不传入、绝不由模型文本派生。
   - `skillRoots`：相对 root 的运行态技能面（如 `.agents/skills-serve`）。
   - `executorLabel`（C2 新增，可选）：该执行层子 Agent 的称谓，进 Main
-    Agent 系统提示词的委派句；如财税实例 `17dz 子 Agent`。模型绝不传入。
+    Agent 系统提示词的委派句；如财税实例 `执行层子 Agent`。模型绝不传入。
 - **校验**（加载时）：`gateway` 经 `validateGatewayInvocation`——相对
   路径、无父级 `..`、无绝对路径、无 shell 元字符，任一不满足即加载失败；
   `executorLabel` 非空、≤32 字符、无控制字符（模型可见文本，畸形值加载期挡下）。
@@ -226,7 +226,7 @@
 | Mock | 归属 | 测什么 | 不测什么 |
 | --- | --- | --- | --- |
 | 通用 mock（本仓 `scripts/eval/fixtures/dummy-platform/`） | fshine 的测试夹具 | 编排协议：operation list、plan、proposal、信封、退出码、每案状态隔离 | 任何执行层实例的业务语义与真实平台兼容性 |
-| 执行层自有 mock（如 17dz 的 `EXECUTION_EXECUTOR=mock`） | 执行层自己的测试替身 | 该执行层的集成：网关门、令牌、审计仍走，平台脚本被替身替换 | 编排层的通用性（它只证明这一个实例） |
+| 执行层自有 mock（如 执行层的 `EXECUTION_EXECUTOR=mock`） | 执行层自己的测试替身 | 该执行层的集成：网关门、令牌、审计仍走，平台脚本被替身替换 | 编排层的通用性（它只证明这一个实例） |
 
 - **隔离**：通用 mock 的状态文件（state / plans / proposals / audit）
   按案隔离，删除即重置；执行层 mock 的状态文件与种子只属于该执行层，
@@ -241,8 +241,8 @@
 | --- | --- | --- |
 | ~~`GATEWAY_INVOCATION` 缺省~~（**已退役**，C7b） | 无——常量已删；`resolveGatewayText`/`gatewayExecPath` fail-closed（未声明有效 gateway 即抛中性错），渲染面（C7a 穿线）与 spawn 面（`gatewayExecPathForProfile`）全部经显式注入 | 无断点：实例网关名唯一来源 = 部署的 `contextProfiles.<id>.gateway` 声明 |
 | spawn 路径的旧回退 | `plan-runtime.ts` 默认 runner、`context.ts` 默认提案 runner：未声明 gateway 时回退旧值 | profile 必填 gateway 的配置校验落地后删除回退，改为 fail-closed |
-| `run_17dz_task` 工具名实例值 | 财税部署的 `contextProfiles.<id>.toolName` 声明（C3 起）；宿主侧 `RUN_EXECUTION_TASK_TOOL` 已为中性缺省 `run_task`，`extractDelegationToolResultEvents` 经 `runner.tool.name` 注入认名 | 无断点：工具名经 profile 声明注入，宿主不持实例缺省；`Run17dzTaskArgs` 过渡别名已随 C3 退役（docs-reality tripwire 盯绝迹） |
-| `17dz 子 Agent` 称谓实例值 | 财税部署的 `contextProfiles.<id>.executorLabel` 声明（C2 起）；宿主侧 `DEFAULT_EXECUTOR_LABEL` 已为中性缺省，不含实例名 | 无断点：称谓经 profile 声明注入（`buildSystemPrompt`），宿主不持实例缺省；注入实例称谓时提示词与参数化前逐字节相同（D-122 golden） |
+| `run_<instance>_task` 工具名实例值 | 财税部署的 `contextProfiles.<id>.toolName` 声明（C3 起）；宿主侧 `RUN_EXECUTION_TASK_TOOL` 已为中性缺省 `run_task`，`extractDelegationToolResultEvents` 经 `runner.tool.name` 注入认名 | 无断点：工具名经 profile 声明注入，宿主不持实例缺省；`该任务参数过渡别名` 过渡别名已随 C3 退役（docs-reality tripwire 盯绝迹） |
+| `执行层子 Agent` 称谓实例值 | 财税部署的 `contextProfiles.<id>.executorLabel` 声明（C2 起）；宿主侧 `DEFAULT_EXECUTOR_LABEL` 已为中性缺省，不含实例名 | 无断点：称谓经 profile 声明注入（`buildSystemPrompt`），宿主不持实例缺省；注入实例称谓时提示词与参数化前逐字节相同（D-122 golden） |
 | 协议形状解析中的实例痕迹 | `plan-runtime.ts` 的 PlanDraft `{calls}` 形状解析（协议形状，非业务逻辑）、`error-codes.ts` 中个别实例操作名示例 | 仅当实例协议本身演进时随协议改，不为改名而改名 |
 | 宿主侧的业务词兜底 | `error-codes.ts` 的 `{hint}` 兜底字符串（平台全域携带 correctForm 后即删，见该文件注释） | 平台全域携带 correctForm 后删除 |
 
@@ -293,11 +293,11 @@
   `plan-runtime.ts` / `serve-gate.ts` 注释里的实测记录、
   `platform-contract.ts` 关于已删 legacy 执行器的历史注。
   为改名而改名会破坏历史记录的可读性，故保留，见 §10 表。
-- `run_17dz_task` 工具名实例值不再是宿主常量（C3）：宿主缺省中性
+- `run_<instance>_task` 工具名实例值不再是宿主常量（C3）：宿主缺省中性
   （`RUN_EXECUTION_TASK_TOOL` = `run_task`），财税部署经 profile 的
-  `toolName` 声明保持已发布工具协议连续；`Run17dzTaskArgs` 过渡别名
+  `toolName` 声明保持已发布工具协议连续；`该任务参数过渡别名` 过渡别名
   同批退役（tripwire 盯绝迹，§0、§10）。
-- `17dz 子 Agent` 称谓不再是宿主常量（C2）：宿主缺省中性
+- `执行层子 Agent` 称谓不再是宿主常量（C2）：宿主缺省中性
   （`DEFAULT_EXECUTOR_LABEL`），财税部署经 profile 的 `executorLabel`
   声明保持已发布行为逐字节一致（D-122 golden 钉死注入值与改前相等）。
 

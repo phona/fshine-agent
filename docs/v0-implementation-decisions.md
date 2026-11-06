@@ -9,7 +9,7 @@
 - Node 24+、TypeScript strict、ESM；单 npm 项目，不使用 workspaces。
 - Main Agent 使用 `pi-agent-core` 的轻量 driver。
 - 每回合由 Main Agent 先调用 `route_current_turn` 申报结构化动作；宿主校验证据并决定分流。不引入第二个路由模型——多一次模型调用，且让上下文更少的模型替上下文更多的模型做判断。
-- 17dz 子 Agent 使用官方 `pi-coding-agent` 的 headless `AgentSession`，由 adapter 固定 cwd、Skills、模型和生命周期。
+- 执行层子 Agent 使用官方 `pi-coding-agent` 的 headless `AgentSession`，由 adapter 固定 cwd、Skills、模型和生命周期。
 - 依赖统一声明在根 `package.json`，子 Agent 不在运行时安装依赖。
 - SQLite 通过 repository 接口保存 principal、会话、任务和审计数据。
 
@@ -47,7 +47,7 @@ Main Agent 每回合先调用 `route_current_turn` 申报本轮动作；宿主�
 宿主在 `route_current_turn` 申报为委派时，用当前消息直接调用子 Agent，不经过 Main Agent 转发：
 
 ```ts
-run_17dz_task({
+run_<instance>_task({
   request: string,           // 宿主加工后的用户请求
   taskId?: string,           // 继续同一任务时填写
   turnDeclaration?: ...,     // 宿主持有的结构化范围，用于校验子 Agent 提交的计划
@@ -66,8 +66,8 @@ run_17dz_task({
 
 ```yaml
 contextProfiles:
-  17dz:
-    root: /path/to/17dz-platform
+  执行层:
+    root: /path/to/fictional-execution-layer
     skillRoots: [".agents/skills"]
     workerTimeoutMs: 600000
 ```
@@ -97,7 +97,7 @@ V0 只验收只读查询。任何未来写路径都必须先实现领域侧的 d
 
 ### 7.1 计划重量反馈
 
-Agent 提交精确 operation 调用草案，不能自行批准预算。`17dz-platform` 通过 `plan evaluate` 根据操作目录计算调用数、预计耗时、范围变化和累计用量，并返回 `execute`、`notify`、`confirm` 或 `stop`。`notify` 必须先由 fshine 等待企微通知送达再激活；`confirm` 只能由宿主依据真实企微用户消息激活。模型提交的 `user_confirmed` 字段不是授权凭据。
+Agent 提交精确 operation 调用草案，不能自行批准预算。`fictional-execution-layer` 通过 `plan evaluate` 根据操作目录计算调用数、预计耗时、范围变化和累计用量，并返回 `execute`、`notify`、`confirm` 或 `stop`。`notify` 必须先由 fshine 等待企微通知送达再激活；`confirm` 只能由宿主依据真实企微用户消息激活。模型提交的 `user_confirmed` 字段不是授权凭据。
 
 计划状态跨进程持久化，实际 query/operation run 逐次核对计划、参数和累计预算。计划激活密钥只在宿主激活子进程中使用，不进入 worker 环境。
 
@@ -110,6 +110,6 @@ Pi transcript 仍作为兼容和恢复状态保存；默认 Main 上下文使用
 - `npm run typecheck` 和 `npm test` 是本地完成门。
 - 子 Agent 的 cwd、Skill 发现、task 恢复、取消和自然语言透传必须有自动化测试。
 - 脚本化 Pi driver 只用于单元测试；真实平台回归从 AI 消息入口开始，企微只做通道抽样。
-- 不维护第二套平台协议；平台行为由 `17dz-platform` 的 Skills 和领域脚本定义。
+- 不维护第二套平台协议；平台行为由 `fictional-execution-layer` 的 Skills 和领域脚本定义。
 - **业务规则只允许有两个落点**：代码里的断言，或执行层的 SKILL.md。不允许第三种存在形态——提示词散文。判据见 `v0-architecture.md` §1。
 - 提示词只写原则，不枚举场景。"如果用户只问 X 那么只准调 Y"这类分支必须下沉成代码断言；枚举场景等于在提示词里写 if-else，不可测、会漂移。
