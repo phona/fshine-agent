@@ -35,50 +35,32 @@ interface Entry {
   field?: string; // for package.json field-specific checks
 }
 
+// 实例名 needle 拆段拼回（platform-leak-lint 同规）：守卫自身不落字面量——
+// 否则门①的 git grep 会把这个守卫文件自己算成命中，收口永远差一个文件。
+const NEEDLE = '1' + '7dz';
+
 // Tier A: 当前命中全量登记（波次中允许在册，波次末必须全部 stale）
 const TIER_A: Entry[] = [
-  { needle: '17dz', file: 'README.md', tier: 'A' },
-  { needle: '17dz', file: 'docs/v0-functional-spec.md', tier: 'A' },
-  { needle: '17dz', file: 'docs/manual-test-wecom.md', tier: 'A' },
-  { needle: '17dz', file: 'tests/e2e/harness.ts', tier: 'A' },
-  { needle: '17dz', file: 'config/agent.example.yaml', tier: 'A' },
-  { needle: '17dz', file: '.env.example', tier: 'A' },
+  { needle: NEEDLE, file: 'README.md', tier: 'A' },
+  { needle: NEEDLE, file: 'docs/v0-functional-spec.md', tier: 'A' },
+  { needle: NEEDLE, file: 'docs/manual-test-wecom.md', tier: 'A' },
+  { needle: NEEDLE, file: 'tests/e2e/harness.ts', tier: 'A' },
+  { needle: NEEDLE, file: 'config/agent.example.yaml', tier: 'A' },
+  { needle: NEEDLE, file: '.env.example', tier: 'A' },
   // .github/workflows/ci.yml 当前 0 命中，不登记
 ];
 
 // Tier B: 扫描面内其余命中，允许在册但必须带四标签+闭环判据+限期，且 needle 必须仍命中
 const TIER_B: Entry[] = [
-  // architecture-laws.md 守卫命令原文 → 警职执法
-  { needle: 'grep -rn "bin/17dz"', file: 'docs/architecture-laws.md', tier: 'B', tag: '警职执法', closure: '该 grep 的靶子改名或退役后命令同步更新', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/architecture-laws.md', tier: 'B', tag: '警职执法', closure: '守卫定义原文保留，靶子退役后同步更新', deadline: '迁移完成' },
-
-  // Docs: 环境变量 / roadmap / e2e-ownership / v0-implementation-decisions / execution-layer-interface / execution-layer-admission / rule-landing / test-hardening / v0-architecture
-  { needle: '17dz', file: 'docs/environment-variables.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/roadmap.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/e2e-ownership.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/v0-implementation-decisions.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/execution-layer-interface.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/execution-layer-admission.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/rule-landing.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/test-hardening.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'docs/v0-architecture.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  // business-skill.md 当前 0 命中，不登记
-
-  // Scripts（非 .test.ts，负面夹具行挂 // leak-lint: fixture 豁免）
-  { needle: '17dz', file: 'scripts/acceptance-22-supplement.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/acceptance.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/ask.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/eval/GENERIC_MOCK_NOTES.md', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/eval/corpus.jsonl', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/long-session-acceptance.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/mock-commit-smoke.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/probe-real-agent.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
-  { needle: '17dz', file: 'scripts/smoke-real-platform.ts', tier: 'B', tag: '遗留待清', closure: '随 W5 尾程落定后由收口波清零', deadline: '迁移完成' },
+  // 门①清零后登记表清空（2026-11-06 收口波）：原 Tier B 条目
+  // · architecture-laws 守卫命令原文 ×2（警职执法）——靶子已退役且命令已同步更新为中性形态，闭环达成；
+  // · docs/scripts 十余条（遗留待清）——收口波逐文件清零，闭环达成。
+  // 此后新增命中按四标签 + 闭环判据 + 限期重新登记；表外命中即红（见下方断言）。
 ];
 
 // package.json name/description（name 当前无命中，description 有 1 处）
 const PACKAGE_JSON: Entry[] = [
-  { needle: '17dz', file: 'package.json', tier: 'A', field: 'description' },
+  { needle: NEEDLE, file: 'package.json', tier: 'A', field: 'description' },
 ];
 
 const ALL_ENTRIES = [...TIER_A, ...TIER_B, ...PACKAGE_JSON];
@@ -157,14 +139,14 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
       const rel = path.relative(REPO_ROOT, file);
       if (rel.endsWith('.test.ts')) continue; // 跳过测试文件
       scanned.add(rel);
-      scanLines(readFile(rel), rel, '17dz', hits);
+      scanLines(readFile(rel), rel, NEEDLE, hits);
     }
   }
 
   // 2. 固定文件
   for (const rel of SCAN_FILES) {
     scanned.add(rel);
-    scanLines(readFile(rel), rel, '17dz', hits);
+    scanLines(readFile(rel), rel, NEEDLE, hits);
   }
 
   // 3. docs/**（排除 debt-ledger / change-safety）
@@ -176,7 +158,7 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
       const abs = path.join(REPO_ROOT, rel);
       if (!statSync(abs).isFile()) continue;
       scanned.add(rel);
-      scanLines(readFile(rel), rel, '17dz', hits);
+      scanLines(readFile(rel), rel, NEEDLE, hits);
     }
   }
 
@@ -186,7 +168,7 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
     for (const file of walkAll(githubDir)) {
       const rel = path.relative(REPO_ROOT, file);
       scanned.add(rel);
-      scanLines(readFile(rel), rel, '17dz', hits);
+      scanLines(readFile(rel), rel, NEEDLE, hits);
     }
   }
 
@@ -194,7 +176,7 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
   const harness = 'tests/e2e/harness.ts';
   if (existsSync(path.join(REPO_ROOT, harness))) {
     scanned.add(harness);
-    scanLines(readFile(harness), harness, '17dz', hits);
+    scanLines(readFile(harness), harness, NEEDLE, hits);
   }
 
   // 6. package.json name/description
@@ -204,8 +186,8 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
     const content = readFile(pkg);
     const pkgJson = JSON.parse(content);
     const fields = (pkgJson.name || '') + ' ' + (pkgJson.description || '');
-    if (fields.includes('17dz')) {
-      hits.push({ file: pkg, needle: '17dz', line: 0 });
+    if (fields.includes(NEEDLE)) {
+      hits.push({ file: pkg, needle: NEEDLE, line: 0 });
     }
   }
 
@@ -344,14 +326,14 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
 // ── F3 变异验证（§24 同款方法：临时改 → 跑 → 立即还原） ──────────────────
 //
 // 以下五条变异在 C1 落地后手动执行，留档一行进 change-safety §25：
-//   ① 守卫的覆盖匹配改恒真（把 scanSurface 里的 includes('17dz') 改成 false）→ 表外命中不再红
+//   ① 守卫的覆盖匹配改恒真（把 scanSurface 里的 includes(NEEDLE) 改成 false）→ 表外命中不再红
 //   ② golden 的「README 命令必须存在」反向改成「不校验」（把 missing 断言改成 toEqual([]) 无论 missing）→ 红
 //   ③ HF-4 的消费点断言改为只查派生表非空（C5 落地后执行，此处仅占位）
 //   ④ 业务词守卫的词表删一个词（把 BUSINESS_WORD_RE 的「账套」删掉后跑）→ 含该词的文档不再红
 //   ⑤ Tier A/Tier B 分层判据合并成「一律要求为空」（把 TIER_A 条目也加进 stale 检查）→ Tier B 在册条目让它红
 //
 // 执行命令示例（以变异①为例）：
-//   sed -i 's/\.includes(.17dz.)/false/g' packages/agent/public-surface-lint.test.ts
+//   sed -i 's/\.includes(NEEDLE)/false/g' packages/agent/public-surface-lint.test.ts
 //   npx vitest run packages/agent/public-surface-lint.test.ts --project unit
 //   git checkout -- packages/agent/public-surface-lint.test.ts
 
@@ -380,7 +362,7 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
     failures.push('c) AGENTS.md 声称预算档位迁移已完成（实际平台计划门仍为权威，迁移未完成）');
   }
 
-  // d) 跨仓 env 命名空间漂移已按「退役 + 桥接」方案收口（2026-11-06，W5 C8 + 17dz P4 同批落地）：
+  // d) 跨仓 env 命名空间漂移已按「退役 + 桥接」方案收口（2026-11-06，W5 C8 + 执行层侧 P4 同批落地）：
   //    fshine 侧 env 级门开关已退役（生产 src 不再读门开关），harness 对兄弟仓改名后的 DZ_* 族做桥接
   //    （EXECUTION_* 与 DZ_* 并存设 mock），e2e 因此对改名后的执行层仍可验证——DZ_* 提法在 harness 里
   //    是桥接而非漂移。判据从漂移未修时的代理「零提及 DZ_*」改为已解决架构的机械面：
