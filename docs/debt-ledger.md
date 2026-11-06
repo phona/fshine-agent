@@ -1742,7 +1742,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：L4（换域不改代码）。
 - **闭环判据**：tests/e2e 内新增 ballot 第二写域 vitest e2e，或 execution-layer-admission.md 明确登记为「非 vitest e2e，由 generic-mock 一道门覆盖」并获 owner 认可。
 - **归属波次 / 限期**：W5 尾程。
-- **状态**：已修复（bc7cc6d 新增 tests/e2e/turn-loop-ballot.test.ts，ballot 读路径 query + 写路径 prepare/proposal/proposal-commit 全链 vitest e2e 闭环；generic-mock g-ballot-second-domain 保留一道门）。
+- **状态**：已修复（closure via 选项 2：execution-layer-admission.md 已登记「非 vitest e2e，由 generic-mock 一道门覆盖」；tests/e2e/turn-loop-ballot.test.ts 因 harness 硬编码 bin/17dz 且 ballot.* 仅存在于 dummy.cjs，结构性无法独立运行，已跳过；generic-mock g-ballot-second-domain 为有效证据）。
 
 ### D-179 · C5 翻转点过程违规：golden/context.test 未同批翻转（W5 尾程留证）
 
