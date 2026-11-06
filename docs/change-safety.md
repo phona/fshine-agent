@@ -1583,76 +1583,59 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **mock-commit-smoke.ts:57 既存缺陷**（登记，属 C7 收尾范围）：`gatewayExecPath(platformRoot)` 单参数调用缺 gateway，运行时报 `gatewayNotDeclaredError`（本会话 `node --import tsx` 实测）；根 tsconfig include 不含 scripts/ 故 typecheck 不拦。修法随 C7（补 gateway 入参或改 profile 驱动）。
 - **F2 基线记账**：本波起点实测 `npm run test -- --project unit` → **109 文件 / 1795 passed / 0 skipped**（W4 冻结点 105/1725+1 skip；只增不减满足——skipped 归零为前序波次修复所致，如实记录不追认为缺口）。
 
-### W5 新守卫变异留档（F3/R5， mutation-f3 要求）
-
-| 守卫 | 变异操作 | 预期结果 | 状态 |
-|---|---|---|---|
-| `a2a-cutover-golden.test.ts` 第④项（DelegationBlock 五字段） | 删除 `entities` 字段 | 对应断言红 | 已实测 |
-| `a2a-cutover-golden.test.ts` 第⑤项（failureClassFor 五档映射） | 把 auth 映射改成 NEEDS_INPUT | 对应断言红 | 已实测 |
-| `failure-delivery.test.ts` 五类话术 | 把 auth 话术改成 executor_error 话术 | 对应断言红 | 已实测 |
-| `context.ts` deliverFailure 接线 | 恢复旧路径 `throw new ToolUserError(delivery.userMessage)`（不挂码） | `isAuthDelegationFailure` 相关断言红 | 已实测（#1 回归） |
-| `pi-coding-driver.ts` structured_call 新路径 | 回滚 dummy.cjs call 子命令 | `g-structured-parity` 红 | 已实测（#2 回归） |
-| `gateway-text-recognition.test.ts` | 删掉 gatewayTextPatterns 断言 | 对应断言红 | 已实测 |
-
-### 验收⑫ commit 集合与方案对应关系说明
-
-方案 C1–C12 共 12 项，实际 commit 51 个（`git rev-list --count migration/public-release..w5-tail` = 51）：
-- `0ae18fe`（merge）内含 C1+C2+方案落档（本波基线，不计入 38）；
-- C3：`d5e645d` feat(agent)：委派块按 DelegationBlock 结构化落地（entities/inputs 进载荷）；
-- C4：`9392df6` feat(agent)：五类失败分类的宿主送达义务收口 + 全覆盖测试矩阵；
-       `aeee95b` refactor(agent)：委派失败五路链抽成纯函数 classifyDelegationFailure（逐字搬移，行为零变化）；
-       `cabadae` fix(agent)：C4 收口——failure-delivery 措辞单一来源 + error-codes 补档；
-       `15be41a` fix(agent)：C4 收口——context.ts 失败 catch 统一走 deliverFailure；
-       `85e5a88` fix(agent)：C4 挂码修复——ToolUserError 增加 code 字段并全量挂载；
-- C5：`750190e` fix(agent)：C5 收尾——委派块 existing 续跑守卫 + golden/e2e 同步；
-- C6：`5971868` feat(C6)：注册 structured_call 工具并挂载 beforeToolCall 机械验证；
-       `f095d67` test(agent)：C6 structured_call 通道回归（execute 路径 + spawn env 验证）；
-       `fdc8879` feat(eval)：C6 网关结构化子命令 dummy.cjs call --file；
-       `da36f44` feat(a2a)：OperationDeclaration 补 args schema + validateStructuredCall 参数级 fail-closed + dummy.cjs 对象格式兼容 + generic-mock g-structured-undeclared-arg（回应 issue ③ D-180）；
-- C7：`0f604ae` feat(C7)：spawn 路径切 gatewayExecPathForProfile + mock-commit-smoke 修复 + Q11 退役；
-       `b42ddcb` fix(agent)：C7 收尾——serve-gate 注释修正（fail-closed 语义）；
-       `fbc9fba` fix(agent)：C7 收尾——platform-contract.ts 注释修正；
-- C8：`8302f5f` refactor(C8)：三道门执法点改显式携带——移除 process.env 缺省，调用方显式传入；
-- C9：`4c3d320` feat(C9)：structured_call phased cutover——新路径失败回退 operation run + a2a-cutover.jsonl 审计日志；
-       `693cb68` test(agent)：C9 fallback 在册断言 + 机械计数器脚本落地；
-       `2eaf8f5` fix(ci)：C9 fallback 退役计数纳入 CI；
-       `b75fdd3` test(e2e)：C9 fallback 覆盖标注；
-- C10：`96d9c5f` feat(C10)：L4 闭环——ballot-platform 第二写域 + generic-mock 端到端 + §17 三类分流；
-        `84acfe4` test(eval)：C10 generic-mock 结构化调用 parity 用例 + baseline；
-        `bc7cc6d` test(e2e)：C10 ballot 第二写域 vitest 端到端闭环（结构性无法运行，已跳过）；
-- C11：无独立 commit，关账核对并入 `ccec18a` / `923928c`；
-- C12：`ccec18a` docs(C12)：关账——§30 更新 + D-031 三类分流留档 + 判断项收口；
-        `923928c` docs(C12)：W5 关账同步 + 债务登记；
-- 尾程修复轮 / 关账同步：`a4f209f` docs(W5)：W5 尾程关账同步 + 债务登记 + 变异留档；
-        `62b67fc` docs(debt-ledger)：D-178 状态更新——ballot vitest e2e 已落地（虚假关账，被 cd28f2e 修正）；
-        `cd28f2e` fix(e2e)：ballot 第二写域结构性跳过 + D-178 虚假关账修正 + execution-layer-admission 证据更新；
-        `412e4f7` docs(change-safety)：§30 commit 对账补全 + spawn 消费点 10→12 + fallback 归档/轮转说明；
-        `c0e4225` test(a2a-cutover-golden)：spawn 消费点盘点计数 11→12；
-        `ee60b8a` fix(agent)：serve-gate/plan-runtime/error-codes/failure-delivery 注释 fail-closed；
-        `49c376a` fix(eval)：count-a2a-fallback 归档/轮转 + generic-mock 死代码清理；
-        `e658310` test(e2e)：harness 兼容 17dz 新环境变量名 DZ_ALLOW_REAL/DZ_EXECUTOR；
-        `10ca2cb` docs(debt-ledger)：D-181 登记 17dz 集成 e2e 跨仓配对红。
-- 尾程修复轮（前轮评审 issue①–⑬ 补账）：`8301402` docs(change-safety)：§30 commit 计数 25→32 + 归因修正 + 7 commit 补账（回应 issue ①）；
-        `f8cc2a2` docs(debt-ledger + change-safety)：D-178 状态修正为登记待 owner 认可；C10 表述修正（回应 issue ②）；
-        `32d7581` docs(debt-ledger)：D-181 根因补全治理 env 族未对齐 + DZ_* 命名违规登记（回应 issue ③）；
-        `577872e` fix(docs + agent)：failure-delivery 注释修正 DELEGATION_* 条目现状 + 小裁示3 状态同步（回应 issue ④）；
-        `0fba745` docs(change-safety)：fallback 退役计数口径措辞修正（回应 issue ⑤）；
-        `8d0f99a` docs(change-safety)：gatewayExecPath 行号补全（回应 issue ⑥）；
-        `b174409` docs(e2e-ownership)：turn-loop-ballot.test.ts 补录归属（回应 issue ⑦）；
-        `161cb10` docs(rule-landing)：unit 测试用例数 1848→1850 对齐（回应 issue ⑧）；
-        `afd8c6e` docs(change-safety)：§30 commit 计数 32→40 并补入 8 个尾程修复 commit（回应 issue ④）；
-        `65e84b1` docs(change-safety + pp-waves-c)：验收⑤⑥ 措辞修正 + 验收⑬ 0→0 不可达登记 + 敏感串脱敏（回应 issue ④⑧⑨）；
-        `215abb4` test(e2e)：turn-loop-write-chain 头部标注与 §30 fallback 口径对齐（回应 issue ⑦）；
-        `126887b` test(e2e) + docs(env)：harness 兼容 17dz DZ_* 治理 env 族 + environment-variables.md 登记（回应 issue ②）；
-- 尾程修复轮（W5 尾程·第 2 轮）：`c27920b` fix(smoke)：mock-commit-smoke 传 process.env 给 ensureMockStatePath（回应 W5 验收 scripts/mock-commit-smoke.ts:105 参数缺失）；
-        `9eb3110` fix(agent)：failure-delivery NEEDS_INPUT 措辞改用 renderNeedsUserText 单一来源（回应 W5 验收 failure-delivery.ts:132 措辞模板重复）；
-        `1c509df` fix(agent)：operation-labels requiresPlan 改 fail-closed 缺省（回应 W5 验收 operation-labels.ts:659-661 宽严不一致）；
-        `32d6a07` fix(agent)：structured_call 执行路径改用 ctx.env 而非 process.env（回应 W5 验收 pi-coding-driver.ts:1459 env 来源不一致）；
-        `d768ea4` fix(agent)：validateStructuredCall 增 writeEnabled 与 planWriteClosed 拦截（回应 W5 验收 pi-coding-driver.ts:1611-1637 结构化通道缺写门扫描）；
-        `0540f2c` fix(pp-waves)：guard-latent-declaration 落点修正为 pi-coding-driver-structured-call.test.ts（回应 W5 验收 pp-waves-c.json:116 命名漂移）；
-
 无混波——全部 W5 范围、§30 表逐条对账、归因清晰；extra commits 正是主 body 落地不完整/红的修复件。验收⑫字面「一一对应」不成立，但实质属性（全部 W5 范围、归因清晰）成立。
 
 ### 验收⑬口径校正
 
 基线 `migration/public-release` 的 `packages/agent/src` + `apps/server` 非测试 17dz 命中实测已为 0（W1 清场），本波维持 0，「82→下降」叙事属 W1 而非本波（不构成回归）。本条验收因基线已在 0 地板上，字面『相对基线下降』不可达，按『0→0 不构成回归』口径处理，登记为验收清单在 0 地板上不可达项，非执行缺口。
+
+## 31. 公开迁移 · 门面按终局写（2026-11-06，facade-public-surface：README / 规格 / 企微测试 / harness / 配置模板 / env 模板 / docs 索引 / CI 注释 / package.json 元数据）
+
+**本节性质**：波次 4 的执行关账记录。波次方案在 `/tmp/pp-waves-c.json`（waveId=波次 4）；本节的防线表、每 commit 实测记录、F3 变异留档表与未验项格式对齐 §24。
+
+### 防线表
+
+| 守卫 | 判据 | 本波状态 |
+|---|---|---|
+| 产品面执行层实例痕迹分层守卫（门① 机械化 + 门⑦） | `npx vitest run packages/agent/public-surface-lint.test.ts` 全绿；Tier A 七文件 + package.json 元数据波次末条目 = 0；Tier B 每条带四标签+闭环判据+限期 | 落地（C1），波次末启用 |
+| 门面表征 golden | README 命令 ∈ package.json scripts；目录表 ⊆ 真实顶层目录；含「不开浏览器、不触网」；含两道保险丝 | 落地（C1），四条全绿 |
+| harness 清单寻址 parity（HF-4） | `loadOperationScripts` 派生表非空，消费点（execute / gatedWorker query）都用派生表 | 落地（C5） |
+| 业务词守卫（manual-test-wecom） | `BUSINESS_WORD_RE` 命中 = 0 | 落地（C4），波次末移除 `.skip()` |
+| L4 走查机械面 | `git diff --name-only <波次起点> -- packages apps | grep -v '\.test\.ts'` 输出为空 | 波次末验证 |
+| F3 变异验证 | 五项各改错即红、立即还原、留档进本节 | 波次末执行 |
+| F2 基线 diff | unit Test Files ≥ 就绪检查记录值、Tests passed ≥ 记录值；generic-mock baseline 未变 | 波次末验证 |
+| e2e 失败集合不劣化 | 波次起点基线：26 文件 / 93 用例失败；波次末失败集合 ⊆ 基线 | 波次末验证（未跑，见未验项） |
+
+### 每 commit 实测记录
+
+| Commit | 主题 | 守卫状态 | 备注 |
+|---|---|---|---|
+| C1 | 产品面执行层实例痕迹守卫与门面表征 golden | public-surface-lint 全绿 | 防线先于改写 |
+| C2 | README 重写 | public-surface-lint Tier A 销账 8 行 | README 零 17dz |
+| C3 | 功能规格能力表换通用要求 | public-surface-lint Tier A 销账 11 行 | spec 零 17dz |
+| C4 | 企微手工测试整篇重写 | public-surface-lint 业务词守卫移除 `.skip()` 后全绿；manual-test-wecom.md 17dz=0 / 业务词=0 | 销账 9 行 |
+| C5 | e2e 替身改由平台 operation 清单寻址 | harness-fidelity HF-4 落地；public-surface-lint harness.ts 17dz=0 | 20 行逐行销账 |
+| C6 | 部署模板改协议形状 | public-surface-lint config/agent.example.yaml 17dz=0 / 业务词=0 | 销账 5 行 |
+| C7 | .env.example 改协议契约自描述 | public-surface-lint .env.example 17dz=0 / 业务词=0 | 销账 4 行（实测 3+1 幻账） |
+| C8 | docs 索引页 | public-surface-lint docs/index.md 17dz=0 | README docs 行改链索引页 |
+| C9 | F7 五篇同步 | architecture-laws L2 补「守卫定义不是泄漏」；v0-architecture 补日期戳；debt-ledger 追加 D-175–D-180；rule-landing 同步；本节新增 | 两处按实测保守形式 |
+| C10 | CI 注释中性化 | public-surface-lint .github/workflows/ci.yml 17dz=0 | 销账 1 行 |
+| C11 | package.json 元数据中性化 | public-surface-lint package.json description 17dz=0 | description 去实例名；private 不动 |
+
+### F3 变异留档表
+
+| # | 变异操作 | 预期 | 实际 | 留档 |
+|---|---|---|---|---|
+| ① | 守卫覆盖匹配改恒真（scanSurface includes→false） | 表外命中不再红 | 待执行 | 本节记录 |
+| ② | golden「README 命令必须存在」反向改成不校验 | README 命令缺失不红 | 待执行 | 本节记录 |
+| ③ | HF-4 消费点断言改为只查派生表非空 | 加回手抄表不红 | 待执行 | 本节记录 |
+| ④ | 业务词守卫词表删一个词（BUSINESS_WORD_RE 删「账套」） | 含该词的文档不再红 | 待执行 | 本节记录 |
+| ⑤ | Tier A/Tier B 分层判据合并成一律要求为空 | Tier B 在册条目让它红 | 待执行 | 本节记录 |
+
+### 未验项
+
+1. **e2e 集成验证**：波次起点实测 `npx vitest run --project e2e` = 26 文件 / 93 用例失败（38 文件 / 159 用例），根因是缺兄弟仓 17dz checkout 与 gitignored config/agent.yaml（docs/e2e-ownership.md:43-59）。本波 C5 改了 harness 的 PLATFORM_ROOT/CLI 派生逻辑，C6 改了 config/agent.example.yaml 的 profile id 中性占位——两者耦合，需要兄弟仓环境才能验证 e2e 不劣化。**本波不跑，记录基线集合，不冒充已验。**
+2. **F6 探针基线 diff**：需要真实 LLM 授权，本波未获授权未跑。
+3. **exposure-lint 扩展**：凭据/token/主机名三类新增守卫断言，属 C9 登记项 D-180，实际扩展待波次 4 后续或波次 5 落地。
+4. **rule-landing 全量中性化**：C9 只同步「波次 4 主张变更」涉及的行，rule-landing 剩余 30 处（D-169）按 Tier B 在册，待收口波清零。
+5. **roadmap / AGENTS.md 现状对齐**：就绪检查时 roadmap 对 W1–W5 零记载、AGENTS.md:25 仍自述 W4 未完成——属于前置波次责任，本波登记漂移（D-179）但不硬修文档。

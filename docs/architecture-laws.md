@@ -55,6 +55,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **机械守卫**：`grep -rn "bin/17dz" packages/*/src apps/server --include='*.ts' | grep -v '\.test\.ts'` 计数**只减不增**；镜像表存在性检查（错误码表 / KEY_ARG_FLAGS 不得在宿主另立真相源）。
 
+> 本行是守卫定义，不是泄漏。命令原文与基线数字保留不变，待靶子退役后同步更新。
+
 **当前违例**：
 
 - **网关名 `bin/17dz`：代码字面量已归零（2026-11-05 W1 C7b，L2 断点达成）**——`GATEWAY_INVOCATION` 常量已删除：文本识别与诊断渲染 fail-closed（`resolveGatewayText` 未声明有效 gateway 即抛中性错），spawn 路径 `gatewayExecPathForProfile` 同判据，渲染面先行经 C7a 穿线（`plan-runtime` 14 处 errorFor、`pi-coding-driver` 6 处 messageFor/errorFor、`error-codes.ts` 惰性模板全部按注入 gateway 求值）。实例网关名唯一来源 = 部署的 `contextProfiles.<id>.gateway` 声明。历史口径（C7b 前）：代码字面量收敛至 1（该常量），注释/示例字面量除外；历史窗口内曾 20→35 增长（+15，+75%），增长源=错误码表与提示词的消息文本——已由配置派生修复，现为终态归零。src 注释里的 `bin/17dz` 字面量由 W1 C8 的身份面守卫接管（排除与签机制见该守卫）。
