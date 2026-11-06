@@ -1630,9 +1630,9 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 |---|---|---|---|---|
 | ① | scanSurface scripts/** 改用 walk（只扫 .ts，漏 .md/.jsonl/.sh） | 表外命中不再红 | **改错即红：未成立**（scripts 下非 .ts 文件的 17dz 命中已在 TIER_B 在册，fileMatchesNeedle 直接读文件内容，扫描面变更不影响 stale 判定；守卫弱点已登记为潜在洞） | 本节记录 |
 | ② | golden 双向守卫移除 + README 删 typecheck | README 命令缺失不红 | **改错即红：成立**（双向守卫缺失时删 typecheck → 测试 PASS；守卫在位时删 typecheck → golden 测试 FAIL；守卫有效） | 本节记录 |
-| ③ | HF-4 第三重源码检查移除 + 加回 const SCRIPTS 手抄表 | 加回手抄表不红 | **改错即红：未成立**（HF-4 第三重源码检查在工作区因 readFileSync 错模块导入而 esbuild Transform failed，HEAD 态平台未配时被第一重空表断言掩盖，两种环境都不能机械判定消费点形态；D-181 已登记该守卫弱点） | 本节记录 |
+| ③ | HF-4 第三重源码检查移除 + 加回 const SCRIPTS 手抄表 | 加回手抄表不红 | **改错即红：成立**（558bc92 已修 readFileSync 导入与 describe 闭合，第三重可机械判定消费点形态；重放『加回手抄表 + 一个消费点改用它』HF-4 第三重当场红） | 本节记录 |
 | ④ | BUSINESS_WORD_RE 删「期间」 | 含该词的文档不再红 | **改错即红：未成立**（当前扫描范围内「期间」的 2 处命中均在 BUSINESS_WORD_ALLOWLIST 内，删正则后无未归属命中可触发；守卫弱点已登记） | 本节记录 |
-| ⑤ | Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline） | Tier B 在册条目让它红 | **改错即红：未成立**（Tier A 当前无命中，合并判据后无 stale 条目；守卫弱点已登记） | 本节记录 |
+| ⑤ | Tier A 清零判据改为同 Tier B（要求 tag/closure/deadline） | Tier B 在册条目让它红 | **改错即红：成立**（将 TIER_A 并入 TIER_B 字段/stale 判据循环，Tier B 字段检查立刻红：六条 Tier A 条目缺 tag/closure/deadline） | 本节记录 |
 | ⑥ | README 目录表注入不存在的顶层目录 `nonexistent-dir-xyz` | 目录表缺失不红 | **改错即红：成立**（注入 `| \`nonexistent-dir-xyz\` |` 进目录表 → golden 测试红，missingDirs = ['nonexistent-dir-xyz']；目录表真空已堵实） | 本节记录 |
 
 ### 未验项

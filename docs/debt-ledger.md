@@ -1782,7 +1782,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：守卫弱点（门① 机械化）。
 - **闭环判据**：① `readFileSync`/`REPO_ROOT` 导入与定义在场，平台可用环境下第三重可机械判定；② HF-1..4 按 `platformAvailable` 条件化，平台未配时整组跳过不产生噪音。
 - **归属波次 / 限期**：波次 4。
-- **状态**：登记（① 未成立：readFileSync 错模块导入 + describe 未闭合两条新伤导致 import 崩；② 待本波或后续波次落地）。
+- **状态**：登记（① 558bc92 已修 readFileSync 导入与 describe 闭合，第三重可机械判定消费点形态；② 待本波或后续波次落地）。
 
 ### D-182 · e2e 扫描面外文件 plan-awareness.test.ts 的实例路径硬编码
 

@@ -227,9 +227,14 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
   it('Tier B 条目字段齐全且 needle 仍命中（条目不陈旧）', () => {
     const missing: string[] = [];
     const stale: string[] = [];
+    const invalidTags: string[] = [];
+    const ALLOWED_TAGS = new Set(['警职执法', '防御排除', '平台下发', '遗留待清']);
     for (const entry of TIER_B) {
       if (!entry.tag || !entry.closure || !entry.deadline) {
         missing.push(`${entry.file}:${entry.needle} → 缺字段（tag=${entry.tag ?? '无'}, closure=${entry.closure ?? '无'}, deadline=${entry.deadline ?? '无'}）`);
+      }
+      if (entry.tag && !ALLOWED_TAGS.has(entry.tag)) {
+        invalidTags.push(`${entry.file}:${entry.needle} → tag="${entry.tag}" 不在四标签集合（警职执法/防御排除/平台下发/遗留待清）内`);
       }
       if (entry.file === 'package.json') {
         const pkg = JSON.parse(readFile(entry.file));
@@ -248,6 +253,11 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
       'Tier B 条目已陈旧（needle 不再命中任何行）——若已清除应移出 Tier B，不得静默保留过期条目：',
       ...stale,
       '真清除 → 从 TIER_B 删除该条目；未清除 → 改回正确 needle。',
+    ].join('\n')).toEqual([]);
+    expect(invalidTags, [
+      'Tier B 条目 tag 不在四标签集合（警职执法/防御排除/平台下发/遗留待清）内：',
+      ...invalidTags,
+      '非法 tag → 改为合法标签或删除条目。',
     ].join('\n')).toEqual([]);
   });
 
