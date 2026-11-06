@@ -1,5 +1,7 @@
 # fshine-agent
 
+[![CI](https://gitee.com/phona/fshine-agent/actions/workflow/ci.yml/badge.svg)](https://gitee.com/phona/fshine-agent/actions/workflow/ci.yml)
+
 通用编排层：负责可信身份、渠道与会话、上下文、委派、预算与计划门、确认、审计、进度与结果呈现。执行层经声明面接入，通用层代码零改动。
 
 ```text
@@ -24,7 +26,9 @@ WeCom
 | `config` | 部署配置模板 |
 | `scripts` | 验收、探针与 eval 脚本 |
 | `tests` | 单测与 e2e 夹具 |
-| [`docs`](docs/index.md) | 文档索引（终局规格 / 协议与准入 / 改造史档案 / 运行与验收） |
+| [`docs`](docs/index.md) | 文档索引 |
+| [`docs/execution-layer-interface.md`](docs/execution-layer-interface.md) | 执行层声明面接口规格 |
+| [`docs/execution-layer-admission.md`](docs/execution-layer-admission.md) | 执行层接入准入门槛 |
 
 ## 命令
 
@@ -53,7 +57,7 @@ npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非
 
 ```bash
 npm run acceptance                  # mock 保护下全量验收（含写链路、污染用例）
-EXECUTION_EXECUTOR= npm run acceptance  # 临时切真平台只读回归（真环境变量优先于 .env）
+EXECUTION_EXECUTOR=mock npm run acceptance  # mock 模式（真执行层变量优先于 .env，设为 mock 显式覆盖）
 ```
 
 本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。
