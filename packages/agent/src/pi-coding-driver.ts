@@ -24,11 +24,11 @@ import {
 import type { AgentMessage, BeforeToolCallContext } from '@earendil-works/pi-agent-core';
 import type { TextContent } from '@earendil-works/pi-ai';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
-import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync, appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import type { Model } from '@earendil-works/pi-ai/compat';
-import type { DiscoveredTool, StructuredCall } from '@fshine/contracts';
+import { A2A_PROTOCOL_VERSION, type DiscoveredTool, type StructuredCall } from '@fshine/contracts';
 import Type from 'typebox';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
@@ -1457,6 +1457,61 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
           const tempFile = path.join(scratchDir, `structured_call_${toolCallId}.json`);
           writeFileSync(tempFile, JSON.stringify(call));
           const env = createPlanScopedWorkerEnv(process.env, activePlanId());
+          const fallbackLogPath = path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl');
+
+          const spawnGateway = (args: string[]): Promise<{ stdout: string; stderr: string; code: number | null }> => {
+            return new Promise((resolve) => {
+              const child = spawn(cli, args, {
+                cwd: ctx.cwd,
+                env,
+                stdio: ['ignore', 'pipe', 'pipe'],
+              });
+              const timer = setTimeout(() => {
+                child.kill('SIGTERM');
+                resolve({ stdout: '', stderr: 'timeout', code: null });
+              }, 30000);
+              const stdout: Buffer[] = [];
+              const stderr: Buffer[] = [];
+              child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+              child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+              child.once('error', () => {
+                clearTimeout(timer);
+                resolve({ stdout: '', stderr: 'spawn_error', code: null });
+              });
+              child.once('close', (code: number | null) => {
+                clearTimeout(timer);
+                resolve({ stdout: Buffer.concat(stdout).toString('utf8').trim(), stderr: Buffer.concat(stderr).toString('utf8').trim(), code });
+              });
+              signal?.addEventListener('abort', () => {
+                child.kill('SIGTERM');
+                resolve({ stdout: '', stderr: 'aborted', code: null });
+              }, { once: true });
+            });
+          };
+
+          const parseResult = (stdout: string): { text: string; envelope: PlatformEnvelope | null } => {
+            const envelope = parseEnvelope(stdout);
+            if (envelope) {
+              return { text: ((envelope.data as Record<string, unknown> | null)?.summaryText ?? (envelope.data as Record<string, unknown> | null)?.result ?? stdout) as string, envelope };
+            }
+            return { text: stdout, envelope: null };
+          };
+
+          const logFallback = (): void => {
+            try {
+              mkdirSync(path.dirname(fallbackLogPath), { recursive: true });
+              appendFileSync(fallbackLogPath, JSON.stringify({
+                protocolVersion: A2A_PROTOCOL_VERSION,
+                domain: params.operation,
+                corpusVersion: capabilityManifest?.version ?? 'unknown',
+                fallback: true,
+                timestamp: new Date().toISOString(),
+              }) + '\n');
+            } catch {
+              // best-effort
+            }
+          };
+
           return new Promise((resolve) => {
             let settled = false;
             const settle = (result: AgentToolResult<unknown>) => {
@@ -1464,36 +1519,28 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
               settled = true;
               resolve(result);
             };
-            const child = spawn(cli, ['call', '--file', tempFile], {
-              cwd: ctx.cwd,
-              env,
-              stdio: ['ignore', 'pipe', 'pipe'],
-            });
-            const timer = setTimeout(() => {
-              child.kill('SIGTERM');
-              settle({ content: [{ type: 'text', text: `STRUCTURED_CALL TIMEOUT：${call.operation}` } as TextContent], details: { error: 'timeout', operation: call.operation } });
-            }, 30000);
-            const stdout: Buffer[] = [];
-            const stderr: Buffer[] = [];
-            child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
-            child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
-            child.once('error', () => {
-              clearTimeout(timer);
-              settle({ content: [{ type: 'text', text: `STRUCTURED_CALL FAILED：${call.operation}\n${Buffer.concat(stderr).toString('utf8')}` } as TextContent], details: { error: 'spawn_error', operation: call.operation, stderr: Buffer.concat(stderr).toString('utf8') } });
-            });
-            child.once('close', (code: number | null) => {
-              clearTimeout(timer);
-              const stdoutText = Buffer.concat(stdout).toString('utf8').trim();
-              const stderrText = Buffer.concat(stderr).toString('utf8').trim();
-              if (code !== 0) {
-                settle({ content: [{ type: 'text', text: `STRUCTURED_CALL FAILED（exit ${code}）：${call.operation}\n${stderrText || stdoutText}` } as TextContent], details: { error: 'non_zero_exit', exitCode: code, operation: call.operation, stderr: stderrText } });
+
+            (async () => {
+              const newResult = await spawnGateway(['call', '--file', tempFile]);
+              if (newResult.code === 0 && newResult.stdout) {
+                const { text, envelope } = parseResult(newResult.stdout);
+                settle({ content: [{ type: 'text', text } as TextContent], details: { operation: call.operation, exitCode: newResult.code, envelope, fallback: false } });
                 return;
               }
-              settle({ content: [{ type: 'text', text: stdoutText || stderrText } as TextContent], details: { operation: call.operation, exitCode: code } });
-            });
-            signal?.addEventListener('abort', () => {
-              child.kill('SIGTERM');
-            });
+
+              const oldResult = await spawnGateway(['operation', 'run', params.operation, tempFile]);
+              if (oldResult.code === 0 && oldResult.stdout) {
+                const { text, envelope } = parseResult(oldResult.stdout);
+                logFallback();
+                settle({ content: [{ type: 'text', text } as TextContent], details: { operation: call.operation, exitCode: oldResult.code, envelope, fallback: true } });
+                return;
+              }
+
+              settle({
+                content: [{ type: 'text', text: `STRUCTURED_CALL FAILED：${call.operation}\n新路径（exit ${newResult.code}）：${newResult.stderr || newResult.stdout}\n旧路径（exit ${oldResult.code}）：${oldResult.stderr || oldResult.stdout}` } as TextContent],
+                details: { error: 'call_failed', operation: call.operation, newPathCode: newResult.code, fallbackCode: oldResult.code },
+              });
+            })();
           });
         },
       } as never,

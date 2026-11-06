@@ -10,6 +10,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { createPiCodingWorkerSession } from './src/pi-coding-driver';
 import { createPlanScopedWorkerEnv } from './src/plan-runtime';
 import type { PiCodingWorkerSessionOptions } from './src/pi-coding-driver';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 const mockMakeSession = vi.hoisted(() => {
   const state = {
@@ -120,5 +122,14 @@ describe('C6 structured_call 通道回归', () => {
     expect(env.EXECUTION_REQUIRE_PLAN).toBe('1');
     expect(env.EXECUTION_PLAN_ID).toBe('plan_123');
     expect(env.FOO).toBe('bar');
+  });
+
+  it('C9 fallback：structured_call 含旧路径回退与 a2a-cutover 审计日志', () => {
+    const src = readFileSync(join(__dirname, 'src', 'pi-coding-driver.ts'), 'utf8');
+    expect(src).toContain("['operation', 'run', params.operation, tempFile]");
+    expect(src).toContain("path.join(ctx.cwd, '.runtime', 'a2a-cutover.jsonl')");
+    expect(src).toContain('fallback: true');
+    expect(src).toContain('protocolVersion');
+    expect(src).toContain('corpusVersion');
   });
 });
