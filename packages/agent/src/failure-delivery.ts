@@ -30,7 +30,7 @@ import type { FailureClass, FailureClassPolicy } from '@fshine/contracts';
 import { FAILURE_CLASS_POLICIES } from '@fshine/contracts';
 import { RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { toolUserErrorFor } from './error-codes';
-import { renderResourceExhaustedReply } from './resource-exhausted';
+import { renderNeedsUserText, renderResourceExhaustedReply } from './turn-relay';
 import type { DelegationFailureClass } from './delegation-failure';
 import type { PlatformTaskRepo, TrustedContext } from '@fshine/contracts';
 
@@ -127,9 +127,9 @@ export function deliverFailure(input: DeliverFailureInput): DeliverFailureResult
           needsEnrichment: false,
         };
       }
-      // 原样转达缺口，不改写、不折损。
+      // 原样转达缺口，不改写、不折损——措辞取单一来源 renderNeedsUserText。
       const userMessage = needs
-        ? `缺少必要输入：${needs.reason}。建议：${needs.suggestion}。缺：${needs.missing.join('、')}。`
+        ? renderNeedsUserText(needs, '')
         : '需要用户补充信息。';
       return {
         userMessage,
