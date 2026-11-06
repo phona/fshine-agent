@@ -476,7 +476,6 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
   } },
   { id: 'g-structured-parity', run: (ctx) => {
     // Structured call parity: call --file must produce the same envelope as the direct command.
-    const payload = JSON.stringify({ operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
     const file = writePayload(ctx, { operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
     const structured = ctx.run(['call', '--file', file]);
     const direct = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
