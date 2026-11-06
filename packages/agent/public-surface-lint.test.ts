@@ -147,12 +147,15 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
   const hits: { file: string; needle: string; line: number }[] = [];
   const scanned = new Set<string>();
 
-  // 1. packages/*/src 与 apps/** 的非测试 .ts
+  // 1. packages/*/src 与 apps/** 的非测试 .ts；scripts/** 全部文件（含 .mjs/.sh/.md/.jsonl）
   for (const dir of SCAN_DIRS) {
     const absDir = path.join(REPO_ROOT, dir);
     if (!existsSync(absDir)) continue;
-    for (const file of walk(absDir)) {
+    // scripts/** 用 walkAll（含 .mjs/.sh/.md/.jsonl——CI 入口脚本不全在 .ts 里），其余用 walk
+    const walker = dir === 'scripts' ? walkAll : walk;
+    for (const file of walker(absDir)) {
       const rel = path.relative(REPO_ROOT, file);
+      if (rel.endsWith('.test.ts')) continue; // 跳过测试文件
       scanned.add(rel);
       scanLines(readFile(rel), rel, '17dz', hits);
     }
@@ -265,6 +268,15 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
       'README 提到的 npm 命令在 package.json  scripts 中不存在：',
       ...missing.map(cmd => `  npm run ${cmd}`),
       '新增命令 → 同步 package.json；删除命令 → 同步 README。',
+    ].join('\n')).toEqual([]);
+
+    // ①-reverse：读者必需命令（6 个）必须在 README 中出现（双向守卫，防 README 侧删）
+    const essential = new Set(['acceptance', 'ci', 'smoke:commit:mock', 'smoke:wecom', 'test', 'typecheck']);
+    const missingFromReadme = [...essential].filter(cmd => !mentioned.has(cmd));
+    expect(missingFromReadme, [
+      'package.json scripts 中的读者必需命令在 README 中未提及（双向守卫）：',
+      ...missingFromReadme.map(cmd => `  npm run ${cmd}`),
+      'README 删必需命令 → 还原或同步标记非必需。',
     ].join('\n')).toEqual([]);
 
     // ② README 目录表条目 ⊆ 仓库真实顶层目录（只查「目录」表，不含「位置」表）
