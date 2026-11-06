@@ -22,6 +22,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '@fshine/core';
+import { resolveActiveProfileId } from '@fshine/contracts';
 import {
   ensureMockStatePath,
   gatewayExecPathForProfile,
@@ -96,11 +97,13 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const config = loadConfig({ env: process.env });
-  const profile = config.contextProfiles['17dz'];
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
+  const profile = config.contextProfiles[profileId ?? ''];
   const platformRoot = profile?.root;
   const gateway = profile?.gateway;
-  if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles.17dz.root'); process.exit(1); }
-  if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles.17dz 未声明 gateway'); process.exit(1); }
+  if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles（active）.root'); process.exit(1); }
+  if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles（active） 未声明 gateway'); process.exit(1); }
 
   const statePath = ensureMockStatePath(platformRoot, process.env)!;
   // 重置状态：每次冒烟从 seed 重新播种，断言才确定

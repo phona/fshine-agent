@@ -115,7 +115,7 @@ number from here.
   generic gateway name (see docs/execution-layer-interface.md §0):
   fshine's `gatewayExecPath(platformRoot, 'bin/generic')` resolves to
   `<root>/bin/generic`. The finance instance's own gateway name
-  (`bin/17dz`) lives only in that instance's profile, not here.
+  (`bin/example-gateway`) lives only in that instance's profile, not here.
   The dummy's primary entry is still `bin/dummy`; the symlink is not a
   second implementation.
 - `scripts/lint-operations.js` in the fixture, for fshine's assembly health

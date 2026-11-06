@@ -17,7 +17,7 @@
  *
  * 跑前纪律（人执行，脚本不替代）：
  *   · pgrep -af "probe-real|ask\.ts|smoke-real" 有空才跑（Lane B 探针错开）；
- *   · 17dz-platform 侧 login.sh 确认 LOGIN_OK（失败就停，报告）；
+ *   · fictional-execution-layer 侧 login.sh 确认 LOGIN_OK（失败就停，报告）；
  *   · 白天跑；任何异常立即停：write 调用、审计异常、限流连续触发、进程失控；
  *   · 挂起检测：5 分钟无新日志且停在 declaration 后 → kill 重试一次，再失败记为
  *     端点抖动数据并停（模型端点不稳是已登记的 watch，D-074 同篇）。
@@ -42,6 +42,7 @@ import path from 'node:path';
 import { executionLanguageFingerprints, isCommitEnabled, isPlatformMock } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
+import { resolveActiveProfileId } from '@fshine/contracts';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 
 /**
@@ -148,7 +149,7 @@ function ledgerCalls(): number {
 
 /**
  * 平台审计文件：EXECUTION_AUDIT_PATH 未设（冒烟集刻意不隔离）时即平台默认路径
- * （17dz-platform/.runtime/invocations.jsonl，src/execution/audit.js 同源）。
+ * （fictional-execution-layer/.runtime/invocations.jsonl，src/execution/audit.js 同源）。
  */
 function platformAuditFile(platformRoot: string): string {
   return process.env['EXECUTION_AUDIT_PATH']
@@ -411,6 +412,8 @@ async function boot(stateDir: string, principalUser: string): Promise<{ send: (t
 
 async function main(): Promise<void> {
   const config = loadConfig({ env: process.env });
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  const profileId = resolveActiveProfileId(config.contextProfiles);
   // 授权用户 = config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）首个
   // enabled principal。null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是
   // 这里的硬编码）。
@@ -420,8 +423,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const AUTHORIZED_KEY = `wecom:${PRINCIPAL_USER}`;
-  const platformRoot = config.contextProfiles['17dz']?.root;
-  if (!platformRoot) throw new Error('config/agent.yaml 未配置 17dz contextProfiles.root——无法定位平台仓');
+  const platformRoot = config.contextProfiles[profileId ?? '']?.root;
+  if (!platformRoot) throw new Error('config/agent.yaml 未配置 example-gateway contextProfiles.root——无法定位平台仓');
 
   // ── 写安全三闸（boot 前）──
   const guards: string[] = [];
