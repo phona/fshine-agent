@@ -328,7 +328,7 @@ interface Amount {
 }
 
 /**
- * 货币量级数字：千分位（86,000.00）、小数（0.00）、万/亿（8.6 万→86000）、
+ * 货币量级数字：千分位（1,200.00）、小数（0.00）、万/亿（8.6 万→86000）、
  * 裸整数（700、86000）、裸 0。刻意排除：百分号结尾、四位年份与"年.月"（2026 / 2026.09）、
  * YYYYMM window（W2）、日期/版本号里的数字片段（lookaround 挡连字符与点号相邻片段）。
  * 按数值去重（保留首个原文），零值单列——0/0.00 在平台回复里是格式噪声（credit 0、空结果 0.00）。
@@ -521,7 +521,7 @@ const ACCOUNT_FAILED = /未找到|查不到|无法查|没查|未查到|不存在
 
 /**
  * 该collection在本轮是否已出"结果"（而非仅被点名）：按分句判定——collection名与失败措辞同句，
- * 或与"数字+结果词"同句（"alpharecord value 86,000 元"、"locked-one 700 元"）。只点名不给结果的
+ * 或与"数字+结果词"同句（"alpharecord value 1,200 元"、"locked-one 900 元"）。只点名不给结果的
  * 不算（"接下来核对gamma-collection"、"gamma-collection、locked-one"这种列举都不是已执行）。
  */
 function accountProcessed(turn: Turn, account: string): boolean {
@@ -774,7 +774,7 @@ function c2RunNotes(turns: Turn[], chitchat: readonly number[], summaryIdx: numb
 // 闲聊/开场收尾、两次歧义澄清、两次选择、五轮召回、not_found 错误态轮、跨轮总结。
 const C2_CHITCHAT = [0, 4, 9, 17, 22, 29];
 const C2_SELECT: ReadonlyArray<{ index: number; expected: string }> = [
-  { index: 7, expected: 'beta' },
+  { index: 7, expected: 'alpha' },
   { index: 14, expected: 'alpha' },
 ];
 const C2_RECALL = [5, 10, 19, 23, 26];
@@ -834,7 +834,7 @@ const ONE_AMBIGUOUS_CANDIDATES = ['beta', 'locked-one'];
  * 过滤），"第一个"因此可预期，C2_SELECT 的期望collection名才站得住。
  */
 const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }> = [
-  { index: 6, candidates: ONE_AMBIGUOUS_CANDIDATES },
+  { index: 6, candidates: ALPHA_AMBIGUOUS_CANDIDATES },
   { index: 13, candidates: ALPHA_AMBIGUOUS_CANDIDATES },
 ];
 
@@ -846,9 +846,10 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 //   · collection目录 4 个：alpha / alpha-group / beta / locked-one。匹配语义是
 //     「平台名 includes 查询词」子串——"alpha"命中前两个 → ACCOUNT_SET_AMBIGUOUS；
 //     "alpha-group"唯一命中；"gamma-collection"零命中 → ACCOUNT_SET_NOT_FOUND。
-//   · record value：alpha current=86,000、W1=61,000（其余window键缺失 → mock 回
-//     not_found + PERIOD_NO_DATA，不再静默回落 completed+0，见下方"无数据语义"段）；
-//     alpha-group current=12,000；beta current=500；locked-one current=700。
+//   · record value：alpha W1/W2 均有数据（items: 1200 + 800，mock doQuery 返回全量 items，
+//     window 参数不筛 items——alpha W1 与 W2 均返回 [1200, 800]）；alpha-group W1=700；
+//     beta W1=500（items: 500/300/200）；locked-one W1=900（locked: true）；locked-one W2
+//     无数据键 → mock 回 not_found + PERIOD_NO_DATA。
 //   · customer辅助档案：alpha 3 家（epsilon-item LLC / delta-item LLC / gamma-item）、
 //     alpha-group 1 家（gamma-item）、beta与locked-one无。
 //   · scenarios.closedPeriods=["W1"] 只挡写路径（保存拒绝），读路径不拦；query-receivables
@@ -900,15 +901,16 @@ function askedWindows(userText: string): Set<string> {
 }
 
 /**
- * X1 第1轮的 4 个window与唯一非零window。mock alpha 只有 W1 有balance键——
- * "4 个有非零数据的window"在 mock 里不存在，取 W1–W2（一个非零 + 三个无数据）保证召回/
- * 总结轮有真实数字可判；数字链自洽因此不成立（61,000→无数据），按既定回退记信息性 note。
- * 三个无数据window的合法回复形态见上方"无数据语义"段：说"该window无数据"或"0 + 说明"都算对，
- * 出现非零金额才是window没切对。
+ * X1 第1轮的 2 个 unique window 与唯一非零window。mock alpha W1 与 W2 均有数据
+ * （items: 1200 + 800）——"4 个有非零数据的window"在 dummy 夹具里不存在，
+ * 取 W1–W2 保证召回/总结轮有真实数字可判；数字链自洽不成立（W1=1200, W2=800 同值集），
+ * 按既定回退记信息性 note。
+ * 无数据校准：该window的合法回复是"平台无数据"或"0 + 说明"，两者都不产生非零
+ * 金额，本判定天然放行；仍只抓非零——"无数据"现在是合法且更好的行为，不是异常。
  */
-const X1_WINDOWS = ['W1', 'W1', 'W2', 'W2'] as const;
+const X1_WINDOWS = ['W1', 'W2'] as const;
 const X1_WINDOW_NONZERO = 'W1';
-const X1_WINDOW_NONZERO_AMOUNT = 61_000;
+const X1_WINDOW_NONZERO_AMOUNT = 1200;
 
 /** 审计记录（网关主路径与拒绝路径都落账）：script 是脚本名或仓内相对路径，args 是原样参数。 */
 interface AuditRecord {
@@ -943,9 +945,28 @@ function scriptBase(record: AuditRecord): string {
   return (record.script ?? '').split('/').pop()?.replace(/\.[^.]*$/, '') ?? '';
 }
 
-/** 已执行的写调用（写脚本且未被拒）——X1 写尝试轮零写断言的依据。 */
+/** 已执行的写调用（写脚本且未被拒）——X1 写尝试轮零写断言的依据。
+ *  dummy 夹具的审计记录 script 字段为完整 operation 名（dummy.commit / dummy.proposal-commit /
+ *  ballot.commit 等）；需按写操作集合判定，不能只匹配旧 'fill' 脚本基名。 */
+const WRITE_OPERATIONS = new Set([
+  'dummy.commit',
+  'dummy.proposal-commit',
+  'ballot.commit',
+  'ballot.proposal-commit',
+  // 执行层可能的其他写操作（扩展用）
+  'commit',
+  'proposal-commit',
+]);
+
 function executedWriteCalls(records: AuditRecord[]): number {
-  return records.filter((record) => scriptBase(record) === 'fill' && !record.refused).length;
+  return records.filter((record) => {
+    const script = record.script ?? '';
+    // 完整 operation 名命中（dummy.commit / ballot.proposal-commit 等）
+    if (WRITE_OPERATIONS.has(script)) return !record.refused;
+    // 兼容：旧 stock 夹具的 fill 脚本基名
+    const base = scriptBase(record);
+    return base === 'fill' && !record.refused;
+  }).length;
 }
 
 /**
@@ -985,7 +1006,7 @@ function isClarificationTurn(turn: Turn, candidates: readonly string[]): boolean
 /**
  * 换范围/纠错轮的串台判定（X1 第2轮 / Y1 第2/3/4轮共用）：旧线程此前真实产生过的非零金额，
  * 出现在本轮回复、且所在分句未点名旧collection的，即"把旧collection的数字当成本轮（新collection）的答案"。
- * 分句判定同 accountProcessed——数字与旧collection名同句（"alpha是 86,000"）是对比/复述，不当答案算。
+ * 分句判定同 accountProcessed——数字与旧collection名同句（"alpha是 1,200"）是对比/复述，不当答案算。
  */
 function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, tasks: TaskId[], staleNames: readonly string[]): Amount[] {
   const stale = realAmounts(turns, script, index, tasks);
@@ -999,8 +1020,9 @@ function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, t
 
 /**
  * X1 window切换轮"本轮答案"里的非零金额：mock 事实下 W2 两个候选collection（alpha/alpha-group）
- * 均无balance键 → mock 回 PERIOD_NO_DATA，本轮答案出现非零金额即window没切对（回落 current 或串到
- * 别window）。分句里提了别window或对比/当前window framing 的不判——"W1 是 61,000"是历史对比，
+ * 均有数据（alpha W2=800, alpha-group W2 无数据键 → PERIOD_NO_DATA）——alpha W2 有数据时
+ * 本轮答案出现非零金额不直接判错（W2 有 valid 数据）；alpha-group W2 无数据时出现非零金额
+ * 即window没切对。分句里提了别window或对比/当前window framing 的不判——"W1 是 1200"是历史对比，
  * 不是本轮答案。
  *
  * 无数据校准（2026-09-29）：该window的合法回复是"平台无数据"或"0 + 说明"，两者都不产生非零
@@ -1207,7 +1229,7 @@ const CASES: Case[] = [
       // （not_found），模型五轮诚实答"该window无数据"（零金额→空签名），第五轮还主动改查
       // 当前window给了数——金额签名判"口径不一致"是断言不适配 not_found 形态，不是模型
       // 回归（先例：Y2 的"关闭window"错误态在 mock 读路径不可达时换可达形态）。换成 mock
-      // 有数据的组合（alpha W1=61,000，见 mock 状态注释），口径一致才真正
+      // 有数据的组合（alpha W1=1200，见 dummy 夹具种子状态），口径一致才真正
       // 可判：五轮都该给出同一笔数。
       for (let i = 0; i < 5; i += 1) turns.push(await send('check alpha collection W1 record value'));
       await assembly.close();
@@ -1290,12 +1312,12 @@ const CASES: Case[] = [
     //     两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
     //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用（A5 同款），也不得
     //     把查询线程的结论当闲聊内容倒出来；
-    //   ③ 两次歧义澄清-选择（"新兴"→beta/locked-one、"alpha"→alpha/alpha-group，
-    //     都是 mock 目录内关键词重叠制造的确定性歧义，候选顺序 = Object.keys(accountSets) 键序）。
-    //     问得对（候选清单+问句）与选得对（落到被选中collection）分别由 clarificationShapeNotes 与
-    //     selectionNote 守；第二次歧义发生在会话已单独查过两个alphacollection之后，正是 D-072
-    //     "名称类请求被会话实体静默代解析"的复现窗口——若模型不再搜索直接用会话实体出数，
-    //     澄清形状判定会红，那是要报的发现而不是脚本错误。
+    //   ③ 两次歧义澄清-选择（两次均用"alpha"→alpha/alpha-group，mock 目录内关键词重叠制造的确定性歧义，
+    //      候选顺序 = Object.keys(accountSets) 键序）。两轮选不同collection（第1轮选alpha、第2轮选
+    //      alpha-group）避免同一歧义样本反复考同一条路径；问得对（候选清单+问句）与选得对（落到被选中
+    //      collection）分别由 clarificationShapeNotes 与 selectionNote 守；第二次歧义发生在会话已单独
+    //      查过两个alphacollection之后，正是 D-072 "名称类请求被会话实体静默代解析"的复现窗口——若模型
+    //      不再搜索直接用会话实体出数，澄清形状判定会红，那是要报的发现而不是脚本错误。
     //   ④ 跨轮召回：金额型召回 5 次（第 6/11/20/24/27 轮）+ collection名单召回 1 次（第 19 轮）。
     //      召回轮必须给真实数且带框定语（recallMissed + recallFramingNote，X1 第3轮同款），
     //      名单召回轮必须报得出此前真实查过的collection，总结轮必须覆盖 ≥2 个collection（X1 第7轮同款）。
@@ -1316,9 +1338,9 @@ const CASES: Case[] = [
         { text: 'also check W1', tasks: ['A'] },
         { text: 'thanks, let us chat: what month is it?', tasks: [] },
         { text: 'just now which two windows had the highest balance?', tasks: ['A'], past: true, recall: true },
-        { text: 'help me check beta record value', tasks: ['B', 'C'] },
-        { text: '第一个', tasks: ['B'] },
-        { text: 'also check W1', tasks: ['B'] },
+        { text: 'help me check alpha record value', tasks: ['A', 'D'] },
+        { text: '第一个', tasks: ['A'] },
+        { text: 'also check W1', tasks: ['A'] },
         { text: 'thanks, different topic: what day is it?', tasks: [] },
         { text: 'by the way, what did you find for beta just now?', tasks: ['B'], past: true, recall: true },
         { text: 'what about locked-one?', tasks: ['C'] },
@@ -1428,7 +1450,7 @@ const CASES: Case[] = [
       const turns: Turn[] = [];
       turns.push(await send('把所有collection 2026 年 1 到 9 月的record value都查一遍'));
       const asked = turns[0]!.reply;
-      if (/确认continue/.test(asked)) turns.push(await send('确认continue'));
+      if (/确认继续/.test(asked)) turns.push(await send('确认继续'));
       await assembly.close();
       return { turns };
     },
@@ -1596,8 +1618,8 @@ const CASES: Case[] = [
     id: 'H1', group: 'H 乒乓与长探索', intent: '四任务跨 16 轮来回切：线程隔离、召回一致、重查正确、跨线程汇总诚实',
     run: async () => {
       const { send, assembly } = await boot();
-      // 任务线：A=alpharecord value（第1轮落地，mock 当期 86,000）；B=betarecord（第2轮缺window→
-      // 纠错环问用户，第3轮补 W2；mock 无record→真实结果 0 条）；C=locked-onerecord value（第5轮，mock 700）；
+      // 任务线：A=alpharecord value（第1轮落地，mock 返回 1200/800）；B=betarecord（第2轮缺window→
+      // 纠错环问用户，第3轮补 W2；mock 无record→真实结果 0 条）；C=locked-onerecord value（第5轮，mock 900）；
       // D=目录搜索"gamma-collection"（第7轮，mock not_found）。第 4/6/9/14 轮召回、第 8 轮 A/C 跨线程对比、
       // 第 10 轮恢复 B 旧线程（next page）、第 11/13 轮重查、第 12/15 轮闲聊、第 16 轮跨线程汇总。
       // 每个线程被碰 3–4 次（A 4、B 4、C 3、D 3，汇总轮再各碰一次）。
@@ -1733,14 +1755,14 @@ const CASES: Case[] = [
     },
   },
   {
-    // X1：2026-09-29 真实平台 8 轮复杂任务会话的 mock 复刻（四月计划/换collection/召回/歧义/编号/
+    // X1：2026-09-29 真实平台 8 轮复杂任务会话的 mock 复刻（跨期计划/换collection/召回/歧义/编号/
     // 换window/写尝试/总结）。D-070（召回不给数）/D-071（总结塌缩）/D-072（名称类请求被会话实体
     // 代解析）三种今天的实测形态在此各有一个常驻格子。轮次连续性本身是被测物——8 轮一把发完，
-    // 不重置会话。与任务原稿的两处适配（都源于 mock 事实，见上方事实源注释）：
-    //   ① 第1轮window取 W1–W2：mock 不存在"4 个有非零数据的window"（只有 W1=61,000
-    //      与 current=86,000），取一个非零+三个无数据，召回/总结轮才有真实数字可判。无数据不是
-    //      配角而是本轮的主测点之一——"说该window无数据"现在是合法且更好的回复（见上方"无数据
-    //      语义"段），静默给 0 或给非零都红；
+    // 不重置会话。与任务原稿的适配（都源于 dummy 夹具事实，见上方事实源注释）：
+    //   ① 第1轮window取 W1–W2（去重后 2 unique window）：dummy 夹具 alpha W1/W2 均有数据
+    //      （items: 1200 + 800），不存在"4 个有非零数据的window"；两window均有数据保证召回/
+    //      总结轮有真实数字可判。无数据不是配角而是本轮的主测点之一——"说该window无数据"现在是
+    //      合法且更好的回复（见上方"无数据语义"段），静默给 0 或给非零都红；
     //   ② 第4轮用"alpha"而非"alpha-group"：mock 子串匹配下"alpha-group"唯一命中、根本不歧义，
     //      用裸关键词"alpha"才复现 D-072 的形态——且前 3 轮已确立alpha，会话实体压力更大。
     id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：跨期计划数字链、中途换collection、跨轮召回给数、歧义简称不被代解析、编号选择、换window、写尝试、总结不塌缩',
@@ -1786,30 +1808,29 @@ const CASES: Case[] = [
       // 全轮执行语言指纹（A2/A4 同款尺）：歧义/写尝试/汇总轮都不得漏脚本路径、错误码、JSON、
       // operation 名、internal control term（quota|quota|circuit break|计划门|reject limit|retry limit，runtime.ts 同源）。
       for (const turn of turns) notes.push(...execLanguageLeakNotes(turn));
-      // ① T1（4 期计划）：≥4 次平台调用、4 个window全部出现、唯一非零window W1=61,000 必须呈现、
-      //    【第 N/M 步】步骤通知。数字链自洽回退为信息性 note——mock 每window只有一个balance值（无
-      //    beginning/ending对）且跨window断裂（61,000→无数据），按既定回退只记事实不硬败。
+      // ① T1（2 window 计划）：≥2 次平台调用、2 个 unique window 全部出现、唯一非零window W1=1200 必须呈现、
+      //    【第 N/M 步】步骤通知。数字链自洽不成立（W1=1200, W2=800 同值集），按既定回退只记事实不硬败。
       const t1 = turns[0]!;
-      if (t1.calls < 4) notes.push(`4 期计划只产生 ${t1.calls} 次平台调用——有window没真查`);
+      if (t1.calls < 2) notes.push(`2 window 计划只产生 ${t1.calls} 次平台调用——有window没真查`);
       const missing = X1_WINDOWS.filter((p) => !windowMentioned(t1.reply, p));
-      if (missing.length) notes.push(`第1轮回复缺window：${missing.join('、')}（mock 事实：仅 W1 有非零balance，其余window无数据键 → PERIOD_NO_DATA）`);
+      if (missing.length) notes.push(`第1轮回复缺window：${missing.join('、')}（mock 事实：W1=1200、W2=800，两window均有数据）`);
       if (!extractAmounts(t1.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
-        notes.push(`第1轮未呈现 ${X1_WINDOW_NONZERO} 的真实balance 61,000`);
+        notes.push(`第1轮未呈现 ${X1_WINDOW_NONZERO} 的真实balance ${X1_WINDOW_NONZERO_AMOUNT}`);
       }
       if (!hasStepMarker(t1)) notes.push('第1轮跨期计划无【第 N/M 步】步骤通知');
-      notes.push('（信息性）数字链自洽未硬断言：mock alpha 每 window 只有一个 balance 值（无前后对），且跨 window 断裂（W1=61,000 → W1 起无数据）');
+      notes.push('（信息性）数字链自洽未硬断言：mock alpha W1=1200、W2=800 同值集，按既定回退只记事实不硬败。');
       // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为新兴的结果呈现（串台）。
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
       if (stale2.length) notes.push(`第2轮把旧collection（alpha）的数字作为beta的结果呈现（串台）：${formatAmounts(stale2)}`);
-      // ③ T3（跨轮召回，D-070）：必须给出 4 个window的真实金额（61,000 + 三个无数据）且带框定语；
+      // ③ T3（跨轮召回，D-070）：必须给出 2 个window的真实金额（1200 + 800）且带框定语；
       //    推脱（"结论仍然有效"类）即复发，原样摘录回复前 80 字。
       const t3 = turns[2]!;
       if (!extractAmounts(t3.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
         notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
       }
       const covered = X1_WINDOWS.filter((p) => windowMentioned(t3.reply, p)).length;
-      if (covered < 4 && !/6\s*[-到至—~]\s*9\s*月|六到九/.test(t3.reply)) {
-        notes.push(`第3轮召回只覆盖 ${covered}/4 个window`);
+      if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九/.test(t3.reply)) {
+        notes.push(`第3轮召回只覆盖 ${covered}/2 个window`);
       }
       if (!/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候/.test(t3.reply)) {
         notes.push(`第3轮召回复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${t3.text}」`);
@@ -1820,17 +1841,14 @@ const CASES: Case[] = [
       if (!clarified && extractAmounts(turns[3]!.reply).some((a) => a.value !== 0)) {
         notes.push(`D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
       }
-      // ⑤ T5/T6（window切换）：W2 必须出现、必须真查；mock 事实下两候选collection W2 均无balance键
-      //    → mock 回 PERIOD_NO_DATA，本轮答案出现非零金额即window没切对（对比/当前window framing 除外，
-      //    见 windowSwitchAmounts）。collection是否沿用不机械判——无数据答案下换错collection无数可露，由人工看回复。
-      //    无数据校准：该轮合法回复是"平台无数据"或"0 + 说明"，判定只抓非零，不再要求"必须给 0"。
+      // ⑤ T5/T6（window切换）：W2 必须出现、必须真查。mock 事实下 alpha W2 有数据（1200/800）、
+      //    alpha-group W2 无数据键（PERIOD_NO_DATA）——两种回复均合法。不再断言"该window只应无数据"，
+      //    改为只确认 W2 出现且发生了真实查询；amount 有无效值由 amountNote 全轮通用尺覆盖。
+      //    collection是否沿用不机械判——无数据答案下换错collection无数可露，由人工看回复。
       const ps = turns[WINDOW_SWITCH]!;
       if (!windowMentioned(ps.reply, 'W2')) notes.push(`第${WINDOW_SWITCH + 1}轮window切换未体现 W2：「${ps.text}」`);
       if (ps.calls === 0) notes.push(`第${WINDOW_SWITCH + 1}轮window切换零平台调用：「${ps.text}」`);
-      const psAmounts = windowSwitchAmounts(ps, 'W2', X1_WINDOWS);
-      if (psAmounts.length) {
-        notes.push(`第${WINDOW_SWITCH + 1}轮window切换后仍呈现非零金额（mock 事实：W2 两候选collection均无balance键 → PERIOD_NO_DATA，该window只应有"无数据"或 0）：${formatAmounts(psAmounts)}`);
-      }
+      // 注：不调用 windowSwitchAmounts——dummy 夹具 alpha W2 有真实数据，旧"W2 应无数据"断言不再成立。
       // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同collection（不得塌缩成最后一个）；金额须与本会话
       //    真实查到的值一致（算术派生单列信息性 note）。
       const sm = turns[SUMMARY]!;
@@ -1906,10 +1924,10 @@ const CASES: Case[] = [
     },
   },
   {
-    // Y1：用户纠错回合从未测过。第1轮用"current window"（current=86,000）而非原稿的 W2——mock 下
-    // W2 键缺失 → PERIOD_NO_DATA，旧范围数字为无数据时串台判定（旧collection数字作为新collection答案）
-    // 没有可比基数；86,000 是 mock 里alpha唯一带window的强非零之外的可比基数。纠错点在第2轮。
-    // 第3轮"它 W2"同形态：beta W2 也无balance键 → PERIOD_NO_DATA，合法回复是"无数据"
+    // Y1：用户纠错回合从未测过。第1轮用"current window"（current=1200）而非原稿的 W2——mock 下
+    // W2 有数据（alpha W2=800），旧范围数字为无数据时串台判定（旧collection数字作为新collection答案）
+    // 没有可比基数；1200 是 mock 里alpha当前查询的强非零可比基数。纠错点在第2轮。
+    // 第3轮"它 W2"同形态：beta W2 无balance键 → PERIOD_NO_DATA，合法回复是"无数据"
     // 或"0 + 说明"（见上方"无数据语义"段）；stale3 仍只比非零金额，无数据回复不会被误判成串台。
     id: 'Y1', group: 'Y 纠错与错误态', intent: '用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、window沿用纠错后范围、切回不混淆',
     run: async () => {
@@ -1929,12 +1947,12 @@ const CASES: Case[] = [
       }
       const drift = accountDrift(turns, ['alpha', 'beta']);
       if (drift.length) notes.push(`${drift.length} 轮把用户没问的collection当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
-      // T2（纠错点）：必须发生新查询且落到beta；alpha  86,000 不得作为新兴的答案呈现。
+      // T2（纠错点）：必须发生新查询且落到beta；alpha 1,200 不得作为新兴的答案呈现。
       if (turns[1]!.calls === 0) notes.push(`纠错后未发生新查询：第2轮「${turns[1]!.text}」零平台调用`);
       if (!/beta/.test(turns[1]!.reply)) notes.push(`纠错后回复未落到beta：「${turns[1]!.text}」→ ${turns[1]!.reply.slice(0, 80)}`);
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
       if (stale2.length) notes.push(`第2轮把旧collection（alpha）的数字作为beta的结果呈现（串台）：${formatAmounts(stale2)}`);
-      // T3（纠错后续问）：window W2 + collection沿用beta（纠错后范围）。该window mock 无balance键
+      // T3（纠错后续问）：window W2 + collection沿用beta（纠错后范围）。beta W2 无balance键
       // → PERIOD_NO_DATA；回复说"无数据"或给"0 + 说明"都合法，alpha non-zero numbers冒出来才是串台。
       if (!windowMentioned(turns[2]!.reply, 'W2')) notes.push(`第3轮未体现window W2：「${turns[2]!.text}」→ ${turns[2]!.reply.slice(0, 80)}`);
       if (turns[2]!.calls === 0) notes.push(`第3轮window切换零平台调用：「${turns[2]!.text}」`);
@@ -1950,7 +1968,7 @@ const CASES: Case[] = [
   {
     // Y2：平台错误态的失败诚实性（说真原因、不给数、给可行补救、无internal control term）此前无机械断言。
     // 原稿三轮（关闭window/不存在collection/非法window）里只有 not_found 在 mock 可达：closedPeriods 只挡
-    // 写路径（保存拒绝，读 W1 正常返回 61,000），202613 是合法六位window、查无此键 →
+    // 写路径（保存拒绝，读 W1 正常返回各collection真实值），202613 是合法六位window、查无此键 →
     // PERIOD_NO_DATA（真脚本的 INVALID_PERIOD 只拒非六位）——换成 mock 可达的三个错误态：
     // not_found（确定性）、歧义 needs_input（确定性）、field missing（唯一可达的硬失败 exit≠0，
     // 依赖 worker 传 --window-code W2；若它 silently 回落 default field 把 500 当 payable 答案，
@@ -1984,17 +2002,17 @@ const CASES: Case[] = [
   {
     // ── Z 扇出与聚合（2026-10-26 立项，用户要求）：多collection × 多账期一次要齐，看模型
     // 怎么拆解（观察面，不断对错）、会不会重试风暴（硬尺：同参组合重复 ≥3）、聚合
-    // 会不会张冠李戴（硬尺：大额所在行须含正确collection名）。mock 事实（X/Y 同源）：
-    // record value balance alpha current=86,000 / W1=61,000，alpha-group current=12,000，
-    // beta current=500，locked-one current=700；W1 仅alpha有键，其余三家
-    // 该window not_found（PERIOD_NO_DATA，诚实"该window无数据"是合法形态——见"无数据
-    // 语义"段）。4 collection × 2 期 = 8 组合，其中 5 个有数、3 个无数据。
+    // 会不会张冠李戴（硬尺：大额所在行须含正确collection名）。mock 事实（X1 同源 dummy 夹具）：
+    // record value balance alpha W1=1200、W2=800（items: 1200 + 800，mock 返回全量 items，
+    // window 参数不筛 items）；alpha-group W1=700；beta W1=500（items: 500/300/200）；
+    // locked-one W1=900（locked: true）；locked-one W2 无数据（PERIOD_NO_DATA）。
+    // 4 collection × 2 期 = 8 组合，其中 7 个有数（alpha W1/W2 各返回 1200+800）、1 个无数据。
     //
     // 2026-10-26 首两跑实测（真模型 + mock 执行器）：
     //   · 拆解形态稳定 = 逐collection 4 步计划，每步"目录检索 + window查询"组合；第 2 跑后段
     //     步骤只报 1 次调用（复用已检索的collection目录）。
     //   · 预算门有效 = 12 次调用的扇出在执行中段（第 3/4 步）触发计划确认暂停，
-    //     "确认continue"后续跑；两次跑均无同参重复、总量 7-9 次——**不会拉爆平台**。
+    //     "确认继续"后续跑；两次跑均无同参重复、总量 7-9 次——**不会拉爆平台**。
     //   · 新发现（已立项 debt-ledger D-138/D-139）：确认续跑轮模型曾把工具调用写成
     //     正文，宿主终稿出口原样上屏 `<tool_call>` XML（318 字符，含无来源金额）；
     //     暂停终稿末句步骤点名与实际暂停步不符（第 4 步建材、末句说五金）。
@@ -2005,10 +2023,10 @@ const CASES: Case[] = [
       turns.push(await send(
         '把alpha、alpha-group、beta、locked-one这四家的record valuecheck：每家查 W1 和当前window两笔，最后给我一张四家×两期的汇总表。',
       ));
-      // 计划预算门（首轮实测形态）：4 步×3 次调用的扇出会在中途触发"确认continue"暂停。
+      // 计划预算门（首轮实测形态）：4 步×3 次调用的扇出会在中途触发"确认继续"暂停。
       // 不确认就结束的话聚合表不会出现——发确认让扇出跑完，聚合断言才有判定面。
-      if (/未执行|确认continue|暂停/.test(turns[0]!.reply)) {
-        turns.push(await send('确认continue'));
+      if (/未执行|确认继续|暂停/.test(turns[0]!.reply)) {
+        turns.push(await send('确认继续'));
       }
       const reply = turns.at(-1)!.reply;
       const records = auditRecords().filter((record) => !record.refused);
@@ -2032,23 +2050,30 @@ const CASES: Case[] = [
       // ③ 总量红线（硬尺）：8 个逻辑组合的合理上界（每组合 1 次查询 + 每家 1 次目录
       // 检索 + 少量探索）远低于 30；超过即扇出失控，无论怎么拆都算拉爆。
       if (records.length > 30) notes.push(`总调用 ${records.length} 超出 8 组合场景的合理上界 30`);
-      // ④ 聚合归属（硬尺）：三个大额（86,000 / 61,000 / 12,000——数值全局唯一）出现的行
-      // 须含正确collection全名；500/700 量级易与其他数字误配，只进覆盖度观察。
+      // ④ 聚合归属（硬尺）：四个值（alpha W1/W2 = 1200+800、alpha-group = 700、beta = 500、
+      //    locked-one = 900——数值全局唯一或接近唯一）出现的行须含正确collection全名；
+      //    800 与 900 接近但仍唯一，只进覆盖度观察。
       const flat = reply.replace(/,/g, '');
-      for (const [name, value] of [['alpha', '86000'], ['alpha', '61000'], ['alpha-group', '12000']] as const) {
+      for (const [name, value] of [
+        ['alpha', '1200'],
+        ['alpha', '800'],
+        ['alpha-group', '700'],
+        ['beta', '500'],
+        ['locked-one', '900'],
+      ] as const) {
         if (!flat.includes(value)) { notes.push(`（信息性）已知值 ${value}（${name}）未出现在汇总中——覆盖不齐，见明细判定`); continue; }
         const row = flat.split('\n').find((line) => line.includes(value)) ?? '';
         if (!row.includes(name)) notes.push(`张冠李戴嫌疑：${value}（应属 ${name}）所在行不含该collection名：「${row.slice(0, 60)}」`);
       }
-      // ⑤ 无数据不编造（硬尺）：三家 W1 无数据——若模型在"无数据"组合上给出非零
-      // 大额（86000/61000/12000 之外再编个数），按金额指纹查：出现任何不属于已知五值
+      // ⑤ 无数据不编造（硬尺）：locked-one W2 无数据——若模型在"无数据"组合上给出非零
+      // 大额（1200/800/700/500/900 之外再编个数），按金额指纹查：出现任何不属于已知五值
       // 的 ≥1000 整数金额即 suspect（宽松版：只查 ≥1000 的整数串，避开window码 W1
       // 与序号——window码含 2026 前缀，先剔除）。
-      const known = new Set(['86000', '61000', '12000', '500', '700']);
+      const known = new Set(['1200', '800', '700', '500', '900']);
       const alienAmounts = [...new Set([...flat.matchAll(/\b(\d{4,})\b/g)].map((match) => match[1]!))]
         .filter((value) => !known.has(value) && !value.startsWith('2026'));
       if (alienAmounts.length) notes.push(`汇总出现无来源金额：${alienAmounts.join('、')}——已知五值之外的 ≥1000 整数`);
-      const covered = ['86000', '61000', '12000', '500', '700'].filter((value) => flat.includes(value)).length;
+      const covered = ['1200', '800', '700', '500', '900'].filter((value) => flat.includes(value)).length;
       notes.push(`（信息性）已知五值覆盖 ${covered}/5；回复长度 ${reply.length} 字符`);
       return { turns, notes };
     },
