@@ -47,8 +47,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p .runtime
-          npm run eval:probe
-          npm run eval:score --judge 2>&1 | tee .runtime/eval-full-summary.txt
+          python3 scripts/eval/generic-model-eval.py --rounds 3 --out .runtime/probe-full.json 2>&1 | tee .runtime/eval-full-summary.txt
 
       - name: Upload full eval report
         if: always()
@@ -56,9 +55,8 @@ jobs:
         with:
           name: generic-eval-full
           path: |
-            .runtime/probe-*.json
+            .runtime/probe-full.json
             .runtime/eval-full-summary.txt
-            .runtime/scores.jsonl
           retention-days: 30
 
       - name: Write full eval summary to step summary
@@ -106,10 +104,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p .runtime
-          npm run eval:probe -- --quick
-          PROBE=$(ls -t .runtime/probe-*.json | head -1)
-          cp "$PROBE" .runtime/probe-strong.json
-          npm run eval:score --judge --probe-report .runtime/probe-strong.json 2>&1 | tee .runtime/score-strong.txt
+          python3 scripts/eval/generic-model-eval.py --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-strong.json 2>&1 | tee .runtime/score-strong.txt
 
       - name: Run weak model (quick suite)
         id: weak
@@ -117,10 +112,8 @@ jobs:
           LLM_MODEL: step-3.5-flash
         run: |
           set -o pipefail
-          npm run eval:probe -- --quick
-          PROBE=$(ls -t .runtime/probe-*.json | head -1)
-          cp "$PROBE" .runtime/probe-weak.json
-          npm run eval:score --judge --probe-report .runtime/probe-weak.json 2>&1 | tee .runtime/score-weak.txt
+          mkdir -p .runtime
+          python3 scripts/eval/generic-model-eval.py --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-weak.json 2>&1 | tee .runtime/score-weak.txt
 
       - name: Compute discrimination report
         id: discrimination
@@ -130,34 +123,35 @@ jobs:
           import json, sys
           from pathlib import Path
 
-          scores_path = Path('.runtime/scores.jsonl')
+          scores_path = Path('.runtime/probe-strong.json')
           PROBE_STRONG = 'probe-strong.json'
           PROBE_WEAK = 'probe-weak.json'
 
           def load_judge_scores(p, probe_filter):
               if not p.exists():
                   return {}
-              entries = []
-              for line in p.read_text().split('\n'):
-                  line = line.strip()
-                  if not line:
-                      continue
-                  try:
-                      entry = json.loads(line)
-                  except json.JSONDecodeError:
-                      continue
-                  if entry.get('probeReport') == probe_filter:
-                      entries.append(entry)
-              if not entries:
+              data = json.loads(p.read_text())
+              rows = [r for r in data.get('results', []) if r.get('id') == probe_filter.replace('.json', '')]
+              # For quick suite, aggregate judge scores across all rounds and cases
+              # Use summary if available, otherwise compute from results
+              summary = data.get('summary', {})
+              if summary:
+                  return {cid: summary.get(cid, {}).get('judge_mean', {}) for cid in summary}
+              return {}
+
+          def load_probe(p):
+              if not p.exists():
                   return {}
-              # Use the latest entry for this probe report
-              latest = sorted(entries, key=lambda e: e.get('at', ''))[-1]
-              return {v['id']: v for v in latest.get('verdicts', [])}
+              return json.loads(p.read_text())
 
-          strong = load_judge_scores(scores_path, PROBE_STRONG)
-          weak = load_judge_scores(scores_path, PROBE_WEAK)
+          strong_data = load_probe(Path(PROBE_STRONG))
+          weak_data = load_probe(Path(PROBE_WEAK))
 
-          all_ids = sorted(set(list(strong.keys()) + list(weak.keys())))
+          strong_summary = strong_data.get('summary', {})
+          weak_summary = weak_data.get('summary', {})
+
+          all_ids = sorted(set(list(strong_summary.keys()) + list(weak_summary.keys())))
+
           rows = []
           strong_total = 0
           weak_total = 0
@@ -165,15 +159,16 @@ jobs:
           weak_count = 0
 
           for cid in all_ids:
-              s_info = strong.get(cid, {})
-              w_info = weak.get(cid, {})
-              s_judge = s_info.get('judge', {}).get('scores', {})
-              w_judge = w_info.get('judge', {}).get('scores', {})
+              s_info = strong_summary.get(cid, {})
+              w_info = weak_summary.get(cid, {})
+              s_judge = s_info.get('judge_mean', {})
+              w_judge = w_info.get('judge_mean', {})
               s_sum = sum(v for v in s_judge.values() if isinstance(v, (int, float)))
               w_sum = sum(v for v in w_judge.values() if isinstance(v, (int, float)))
-              s_ok = s_info.get('pass', '-')
-              w_ok = w_info.get('pass', '-')
+              s_ok = s_info.get('mechanical_pass_count', 0) == s_info.get('rounds', 0)
+              w_ok = w_info.get('mechanical_pass_count', 0) == w_info.get('rounds', 0)
               rows.append((cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum))
+
               if s_sum:
                   strong_total += s_sum
                   strong_count += 1
@@ -189,7 +184,7 @@ jobs:
               '- Strong model: step-5-preview (LLM_MODEL)',
               '- Weak model: step-3.5-flash',
               '- Judge: step-5-preview (same for both tiers)',
-              '- Rounds: 3 per case (quick suite: A1, A2, A4, A5, B1)',
+              '- Rounds: 1 per case (quick suite: G-A1, G-A2, G-A3, G-A4, G-A5, G-B1, G-Y2)',
               '',
               '## Per-case comparison',
               '',
@@ -213,7 +208,13 @@ jobs:
               f'**Advisory**: { "YES — weak model is not clearly worse; discrimination insufficient." if overall_advisory else "NO — weak model is clearly worse; discrimination sufficient." }',
               '',
               '_This is an advisory signal only. The workflow is not a required check._',
+              '',
           ]
+
+          # If one of the models has no judge data at all, mark as insufficient data instead of asserting sufficiency.
+          if strong_count == 0 or weak_count == 0:
+              report_lines.append('**Advisory**: Insufficient judge data for one or both tiers; cannot determine discrimination.')
+              sys.exit(1)
 
           report = '\n'.join(report_lines)
           Path('.runtime/discrimination-report.md').write_text(report)

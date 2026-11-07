@@ -49,18 +49,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run generic-model eval probe (quick)
-        run: npm run eval:probe -- --quick
-
-      - name: Run generic-model eval acceptance
-        run: npm run eval:acceptance
-
-      - name: Run generic-model eval score (mechanical gate, no judge)
-        id: eval-score
+      - name: Run generic-model eval probe (quick, no judge)
         run: |
           set -o pipefail
           mkdir -p .runtime
-          npm run eval:score 2>&1 | tee .runtime/eval-score-summary.txt
+          python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-generic.json 2>&1 | tee .runtime/eval-probe-summary.txt
 
       - name: Upload eval report artifact
         if: always()
@@ -68,9 +61,8 @@ jobs:
         with:
           name: generic-eval-report
           path: |
-            .runtime/probe-*.json
-            .runtime/eval-score-summary.txt
-            .runtime/scores.jsonl
+            .runtime/probe-generic.json
+            .runtime/eval-probe-summary.txt
           retention-days: 14
 
       - name: Comment PR with eval report
@@ -80,7 +72,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = require('path');
-            const summaryPath = '.runtime/eval-score-summary.txt';
+            const summaryPath = '.runtime/eval-probe-summary.txt';
             const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '(no summary)';
             // Find latest probe report
             const runtimeDir = '.runtime';
@@ -98,31 +90,19 @@ jobs:
                 const data = JSON.parse(fs.readFileSync(probePath, 'utf8'));
                 const lines = [];
                 for (const result of (data.results || [])) {
-                  const mech = result.dims ? Object.values(result.dims).reduce((a, b) => a + b, 0) : '-';
-                  lines.push(`| ${result.id} | ${result.ok ? 'pass' : 'fail'} | ${mech} |`);
+                  const mech = result.mechanical_pass ? 'PASS' : 'FAIL';
+                  lines.push(`| ${result.id} | ${result.mechanical_pass ? 'pass' : 'fail'} | ${mech} |`);
                 }
                 probeSection = [
                   '### Probe results (quick)',
                   '',
-                  '| Case | Status | Mechanical violations |',
+                  '| Case | Status | Mechanical |',
                   '| --- | --- | --- |',
                   ...lines,
                 ].join('\n');
               } catch (e) {
                 probeSection = `_(probe report parse error: ${e.message})_`;
               }
-            }
-            // Parse score verdicts from summary
-            const verdictLines = summary.split('\n').filter(l => /^[✓✗]/.test(l));
-            let verdictSection = '(no score verdicts)';
-            if (verdictLines.length > 0) {
-              verdictSection = [
-                '### Score verdicts',
-                '',
-                '```',
-                ...verdictLines,
-                '```',
-              ].join('\n');
             }
             const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
             const report = [
@@ -131,8 +111,6 @@ jobs:
               'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
               '',
               probeSection,
-              '',
-              verdictSection,
               '',
               '### Key output tail',
               '```',
