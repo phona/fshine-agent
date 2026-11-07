@@ -66,7 +66,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'entityFidelity', pattern: /范围渗入/, source: 'A2 旧collection渗入' },
   // ── 失败诚实 ──
   { dim: 'failureHonesty', pattern: /^错误态回复出现无所属金额数字|^错误回复无可行动补救指引|^错误轮同一调用重复/, source: 'errorStateNotes 四判' },
-  { dim: 'failureHonesty', pattern: /^写尝试轮发生 \d+ 次已执行写调用|^写未开放措辞未到达用户|出现编造的录入成功/, source: 'writeAttemptNotes' },
+  { dim: 'failureHonesty', pattern: /^写尝试轮发生 \d+ 次已执行写调用|^写未开放(?:\/阻塞原因)?措辞未到达用户|出现编造的录入成功/, source: 'writeAttemptNotes' },
   // ── 有据 ──
   // 「无来源」不带「金额」尾：amountNote 的 label 覆盖有两族——「汇总出现无来源金额」与
   // 「判断轮出现无来源基准数字」（H2 判断轮），收尾不同。
@@ -74,7 +74,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'groundedness', pattern: /^明确请求未落地/, source: 'landingNote' },
   { dim: 'groundedness', pattern: /未召回也未重查|召回未给出真实金额|召回只覆盖 \d/, source: 'recallMissed / X1③' },
   { dim: 'groundedness', pattern: /window切换后仍呈现非零金额|window切换未体现|window切换零平台调用|未体现window|回复未体现请求的window/, source: 'X1⑤ / Y1 / B2 window' },
-  { dim: 'groundedness', pattern: /^第1轮回复缺window|^第1轮未呈现 |^4 期计划只产生/, source: 'X1①' },
+  { dim: 'groundedness', pattern: /^第1轮回复缺window|^第1轮未呈现 |^\d+ window 计划只产生/, source: 'X1①' },
   { dim: 'groundedness', pattern: /^5 轮只产生|^5 轮数据口径不一致|^两轮回复完全一致/, source: 'B1 / A1' },
   { dim: 'groundedness', pattern: /^重查轮未发生真实调用|^纠错后未发生新查询|同一查询连发须每轮真查/, source: 'H1③ / Y1 / B1 每轮真查' },
   { dim: 'groundedness', pattern: /^D-073：|挂了平台来源/, source: 'X2 数据呈现/来源' },
