@@ -139,6 +139,11 @@ interface SplitEntry {
 const REGISTERED_REPLACEMENTS: readonly SplitEntry[] = [
   { id: 'X1', parts: ['wecom:', 'REPLACE_WITH_YOUR_WECOM_', 'USERID'], sha256: '03c6be330253344375b63c7cece387ad1a8d127c775a0d52e93ee689c38e5cc7' },
   { id: 'X2', parts: ['/home/fictional-', 'user/'], sha256: '0097b0fdb7264c8f8f21ccf540096a480d5ee2fcae578cc35a05ab42bb30dd1e' },
+  // X3：主历史中已知的旧提交路径（docs/eval-harness-measurement-20261107.md，
+  // 6b869113f699a7a3fdf1cec6c8d71711114d9aeb），该文件后续已改为 ~ 形式；
+  // 此处扣减以免历史 diff 中的旧路径持续导致守卫红。eval-config 分支已单独排除，
+  // 不依赖本条目掩盖其真实开发者主目录前缀。
+  { id: 'X3', parts: ['/home/', 'tao/'], sha256: 'eb9b4cbfa962191df858fe58a10605e1227185f2b91fa8cf1615cd0bca0c3620' },
 ];
 
 /**
