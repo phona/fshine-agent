@@ -47,7 +47,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
-import { resolveConfigPath } from './resolve-config-path';
+import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -257,9 +257,9 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
   const sdk = new RecordingSdk();
   // 配置同源：探针与 assembly 读同一份 YAML，消除「探针硬编码缺省路径 /
   // assembly 读 AGENT_CONFIG_PATH」两条路分流的 wart。
-  // resolveConfigPath 的解析顺序 = 显式入参 > config/agent.yaml（存在才用）>
-  // scripts/eval/eval.agent.yaml。
-  const yamlPath = resolveConfigPath();
+  // 解析顺序 = 显式入口（--config= 命令行 > AGENT_CONFIG_PATH 环境变量）>
+  // config/agent.yaml（存在才用）> scripts/eval/eval.agent.yaml（回退时物化）。
+  const yamlPath = resolveConfigPath(explicitConfigFrom());
   // assembly 的 loadConfig 读 AGENT_CONFIG_PATH 环境变量（apps/server/assembly.ts:181）。
   // 不设该变量时 assembly 走自己的默认路径 config/agent.yaml，与探针这里解析出的
   // yamlPath 可能不是同一份。设为同一路径后，探针派生的 principalUser 与 assembly

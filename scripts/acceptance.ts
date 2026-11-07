@@ -25,7 +25,7 @@ import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/con
 import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
 import type { PlanRejectRow } from './plan-reject-report';
 import { collectWriteChainFacts, hasWriteChainSignal, renderWriteChainLine, type ConversationWriteChainFacts } from './eval/write-chain';
-import { resolveConfigPath } from './resolve-config-path';
+import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
@@ -331,9 +331,11 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
-  // 统一配置路径：与探针脚本同源（resolve-config-path.ts），不走 AGENT_CONFIG_PATH 环境变量。
+  // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
+  // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
+  // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。
   // fault 模式下下面会覆盖为临时 fault yaml。
-  let configPath = resolveConfigPath();
+  let configPath = resolveConfigPath(explicitConfigFrom());
   if (faultMode) {
     // fault 配置的授权用户同样派生自当次加载的配置（AGENT_CONFIG_PATH 指向的文件，
     // 缺省 config/agent.yaml）首个 enabled principal：UserID 不落代码，principal 的既定家
