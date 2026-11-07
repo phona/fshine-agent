@@ -59,19 +59,35 @@ export function isDerivedAmount(value: number, base: Set<number>): boolean {
  *     商集含一级和差值（2100 本身是 1500+600 的和）。
  * 算不出来的数字照旧硬红（评审原话：无法验证的数字保留硬失败）。
  */
+/**
+ * 诚实算术核验（2026-11-07 评审 blocking ② 收紧）：金额必须是**互异真实值**的带符号
+ * 组合（每个种子值在整条式子里至多出现一次，正=加数、负=减数），或互异真实值之间的一层商。
+ *
+ * 为什么不再做两级闭包 + 同值复用：那两条会推出种子里根本不存在的合计——
+ *   · "beta-item-1 total value is 1000"：该 item 唯一真实值 500，1000=500+500（同值复用）；
+ *   · "beta total is 1600"：beta 真实值 500/300/200（实计 1000），1600=(500+300)+(500+300)
+ *     （派生值 800 复用两次）。
+ * 合法形态照旧放行：实体实际聚合（contoso-trade 1500+600=2100、beta 500+300+200=1000）、
+ * 实体内差额（|1500-600|=900）、跨实体差额（2100-450=1650）、比率（2100/450≈4.7）。
+ * 派生值不可能当加数——叶子只能是种子真实值，中转层被整个去掉。
+ */
 export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
-  const base = [...new Set(pool)];
-  if (isDerivedAmount(value, new Set(base))) return true;
-  const level1: number[] = [];
-  for (const a of base) {
-    for (const b of base) {
-      level1.push(a + b, Math.abs(a - b));
+  const base = [...new Set(pool)].filter((v) => v > 0);
+  if (base.length === 0) return false;
+  const sums = new Set<number>([0]);
+  for (const v of base) {
+    for (const s of [...sums]) { sums.add(s + v); sums.add(s - v); }
+  }
+  if (sums.has(value) || sums.has(-value)) return true;
+  // 比率同样建在互异叶子的组合之上："约为其 4.7 倍" = (1500+600)/450——分子是聚合值，
+  // 不是叶子；但聚合值本身已是互异叶子的一次组合，复用同一 sums 集即可，不新开中转层。
+  const positive = [...sums].filter((s) => s > 0);
+  for (const a of positive) {
+    for (const b of positive) {
+      if (Math.round((a / b) * 10) / 10 === value) return true;
     }
   }
-  const pool2 = [...base, ...level1];
-  if (isDerivedAmount(value, new Set(pool2))) return true;
-  return pool2.some((a) => pool2.some((b) => b !== 0
-    && (Math.round((a / b) * 10) / 10 === value || Math.round((b / a) * 10) / 10 === value)));
+  return false;
 }
 
 /** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
