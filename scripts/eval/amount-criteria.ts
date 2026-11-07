@@ -161,6 +161,26 @@ export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>)
 
 /** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
 /**
+ * 数值的格式无关匹配模式（2026-11-08 评审 blocking）：探针 extractAmounts 按**值**去重、
+ * 只留首次原文，按原文匹配会漏掉同值不同格式的出现——"alpha … is 1,200; beta … is 1200"
+ * 的 beta 串台（无千分位）与 "500" / "500.00" 都因此漏判。模式覆盖：千分位可选
+ * （1,?200 同时匹配 "1,200" 与 "1200"）、小数可选（500(?:\.\d{1,2})?）。
+ */
+export function amountValuePattern(value: number): string {
+  const intPart = Math.trunc(value);
+  const grouped = intPart.toLocaleString('en-US').replace(/,/g, ',?');
+  const decimal = Number.isInteger(value) ? '(?:\\.[\\d]{1,2})?' : `(?:\\.${String(value).split('.')[1] ?? ''})?`;
+  return `(?:${grouped}|${String(intPart)})${decimal}`;
+}
+
+/** 按模式（非原文）找数字边界的出现位置——amountValuePattern 的载体。 */
+function patternPositions(clause: string, pattern: string): number[] {
+  const out: number[] = [];
+  for (const match of clause.matchAll(new RegExp('(?<![\\d.,%％])' + pattern + '(?!\\d)', 'g'))) out.push(match.index ?? 0);
+  return out;
+}
+
+/**
  * 分句里某金额原文的全部**数字边界**出现位置。indexOf 不行——"100" 会命中进 "1500"、
  * "500" 会命中进 "1500"，位置绑定整个错掉（2026-11-08 实测：跨实体差额用例的 100 被绑到
  * 1500 里的假位置上，gap 取成 "0+600"，差额措辞匹配不到，诚实算术被判红）。
@@ -289,7 +309,7 @@ export function classifyErrorStateAmounts(
     // 千分位逗号与句法逗号：`,<数字>` 是千分位延续（不许把 "1,500" 里的 500 当独立金额），
     // `", "`/`，` 是句法逗号（CLAUSE_SPLIT 不切逗号），金额后跟它必须照常找到分句。
     // 前向保持原禁止集（数字/./%/千分位逗号）。
-    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)(?![.%％])(?!,\\d)`);
+    const boundary = new RegExp(`(?<![\\d.,%％])${amountValuePattern(amount.value)}(?!\\d)(?![.%％])(?!,\\d)`);
     let assertedHit = false;
     let hard = false;
     let soft = false;
@@ -333,9 +353,9 @@ export function classifyErrorStateAmounts(
       // 分句内全部金额出现（带位置，含同值多次）——gap 与"列举加数"都按位置算，不按值去重
       // （同值重复时按值过滤会把另一笔同值加数误排，2026-11-08 实测）。
       const occs = extractAmounts(clause)
-        .flatMap((a) => boundaryPositions(clause, a.raw).map((at) => ({ value: a.value, raw: a.raw, at })))
+        .flatMap((a) => patternPositions(clause, amountValuePattern(a.value)).map((at) => ({ value: a.value, raw: a.raw, at })))
         .sort((a, b) => a.at - b.at);
-      const positions = boundaryPositions(clause, amount.raw);
+      const positions = patternPositions(clause, amountValuePattern(amount.value));
       // 逐笔绑定（2026-11-08 评审 blocking 三连收口）：每一笔出现各自找**它之前最近**的
       // 实体提及，各自算 gap（与上一笔金额之间的文本）和自己那段里列举的加数。
       //   · 有绑定实体 = 直接断言或它自称的运算：值须属于该实体；自称合计时列举 ≥2 个

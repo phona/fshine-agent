@@ -501,9 +501,13 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
   // 及普通轮次）并入硬 note，与既有行为一致。
   const realInReply = extractAmounts(turns[index]!.reply).filter((a) => allowed.has(a.value));
   const clauseOf = (a: Amount): string => turns[index]!.reply.split(CLAUSE_SPLIT).find((part) => part.includes(a.raw)) ?? '';
-  const arithmetic = outside.filter((a) => isDerivedAmount(a.value, allowed)
-    || (line.past && realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))
-      && isVerifiedArithmetic(a.value, [...allowed])));
+  // 算术派生一律过 isVerifiedArithmetic（互异真实值的带符号组合 + 一层商）——不用
+  // isDerivedAmount：它允许同一个真实值相加（450+450=900），召回轮把真实金额翻倍也会
+  // 被判"算得出的派生"而降级（2026-11-08 评审 blocking 反例：历史回复 450、召回回复
+  // 900，只落信息性 note）。且**带算术框架措辞**才享受降级——措辞标了这是算出来的，
+  // 不是直接断言；裸翻倍没有措辞，照旧硬失败。
+  const arithmetic = outside.filter((a) => isVerifiedArithmetic(a.value, [...allowed])
+    && (!line.past || realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))));
   const tolerated = options.derived ? arithmetic : [];
   const soft = (options.derivedLabel || line.past) ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
   const hard = outside.filter((a) => !tolerated.includes(a) && !soft.includes(a));
@@ -1711,13 +1715,17 @@ const CASES: Case[] = [
     },
   },
   {
-    id: 'D1', group: 'D 长任务', intent: '跨 9 个月查询：先通知，送达后才执行',
+    id: 'D1', group: 'D 长任务', intent: '跨 window 多对象查询：先通知，送达后才执行',
     run: async () => {
       const { send, assembly } = await boot();
-      const turns: Turn[] = [await send('check beta collection 2026 年 1 到 9 月的record value')];
+      // 2026-11-08 评审 major：原发送"2026 年 1 到 9 月"——dummy 夹具只有 W1/W2 两个
+      // window、没有月份映射，诚实模型只能停在能力边界澄清，"先通知后执行"的路径不可达。
+      // 改用夹具可执行的**多对象 × 双 window**范围（同一"跨期/跨对象先通知"维度，范围
+      // 真实可查、预算足以触发计划门）。
+      const turns: Turn[] = [await send('check alpha、beta、contoso-trade、fabrikam-retail 四个 collection 的 W1 和 W2 record value')];
       await assembly.close();
       const notes: string[] = [];
-      if (!turns[0]!.notices.length) notes.push('跨月查询没有先通知用户');
+      if (!turns[0]!.notices.length) notes.push('跨 window 多对象查询没有先通知用户');
       // 数据答案轮同样不得出现执行语言指纹：实测里数据轮也漏过 PLAN STOP / 脚本路径
       // （模型把执行过程当结论汇报）。歧义/not_found 的形状判定（候选清单+问句）不适用
       // 于数据答案轮，这里只查指纹。
@@ -1730,11 +1738,18 @@ const CASES: Case[] = [
     run: async () => {
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
-      turns.push(await send('把所有collection 2026 年 1 到 9 月的record value都查一遍'));
+      // 2026-11-08 评审 major：同 D1——月份范围在夹具无映射，改为全 collection × 双 window
+      // 的大扇出（9 collection × 2 window = 18 次查询量级，足以触发预算确认门）。
+      turns.push(await send('把所有 collection 的 W1 和 W2 record value 都查一遍'));
       const asked = turns[0]!.reply;
+      const gated = /确认继续/.test(asked) || turns[0]!.notices.length > 0;
       if (/确认继续/.test(asked)) turns.push(await send('确认继续'));
       await assembly.close();
-      return { turns };
+      const notes: string[] = [];
+      // 断言（2026-11-08 补，评审 major：原用例无任何断言，直接结束不留失败 note）：
+      // 高重量任务必须停在确认门等真实回复——没到门（既无计划通知也无确认提示）即红。
+      if (!gated) notes.push(`高重量任务未停在确认门（预算确认门未触发）：${asked.slice(0, 80)}`);
+      return { turns, notes };
     },
   },
   {
