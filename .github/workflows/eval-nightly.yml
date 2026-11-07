@@ -1,0 +1,246 @@
+# GitHub Actions workflow: real-model eval nightly (generic domain).
+#
+# Boundary:
+#   - Nightly only (schedule), not per-push.
+#   - Two stages: (1) full generic eval with judge for the primary model;
+#     (2) dual-tier matrix (strong vs weak model) for discrimination report.
+#   - The dual-tier stage is advisory: 笨模型分数 ≥ 强模型 = 区分度不足，
+#     job exit 1 with a clear advisory message. This is NOT a blocking signal
+#     (the workflow is not a required check).
+#   -财税域 eval 留在 Tier B 手动运行。
+name: Eval Nightly (generic domain)
+
+on:
+  schedule:
+    - cron: '0 17 * * *'   # daily UTC 17:00
+  workflow_dispatch:       # allow manual re-runs
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1: full generic eval with judge (primary model: step-5-preview).
+  eval-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
+    env:
+      EXECUTION_EXECUTOR: mock
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run full generic eval with judge
+        id: eval-full
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          npm run eval:probe
+          npm run eval:score --judge 2>&1 | tee .runtime/eval-full-summary.txt
+
+      - name: Upload full eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generic-eval-full
+          path: |
+            .runtime/probe-*.json
+            .runtime/eval-full-summary.txt
+            .runtime/scores.jsonl
+          retention-days: 30
+
+      - name: Write full eval summary to step summary
+        if: always()
+        run: |
+          {
+            echo "## Full generic eval (judge enabled)"
+            echo ""
+            echo "\`\`\`"
+            cat .runtime/eval-full-summary.txt 2>/dev/null || echo "(no summary)"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Stage 2: dual-tier discrimination comparison.
+  # Primary (strong) model = step-5-preview, secondary (weak) model = step-3.5-flash.
+  # Judge = step-5-preview for both runs (same judge, fair comparison).
+  # Criterion: weak model mean score >= strong model mean score = insufficient discrimination.
+  # Exit 1 is advisory (not a required check), so it does not block merges.
+  eval-discrimination:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    needs: eval-full
+    env:
+      EXECUTION_EXECUTOR: mock
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run strong model (quick suite)
+        id: strong
+        env:
+          LLM_MODEL: step-5-preview
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          npm run eval:probe -- --quick
+          PROBE=$(ls -t .runtime/probe-*.json | head -1)
+          cp "$PROBE" .runtime/probe-strong.json
+          npm run eval:score --judge --probe-report .runtime/probe-strong.json 2>&1 | tee .runtime/score-strong.txt
+
+      - name: Run weak model (quick suite)
+        id: weak
+        env:
+          LLM_MODEL: step-3.5-flash
+        run: |
+          set -o pipefail
+          npm run eval:probe -- --quick
+          PROBE=$(ls -t .runtime/probe-*.json | head -1)
+          cp "$PROBE" .runtime/probe-weak.json
+          npm run eval:score --judge --probe-report .runtime/probe-weak.json 2>&1 | tee .runtime/score-weak.txt
+
+      - name: Compute discrimination report
+        id: discrimination
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+          from pathlib import Path
+
+          scores_path = Path('.runtime/scores.jsonl')
+          PROBE_STRONG = 'probe-strong.json'
+          PROBE_WEAK = 'probe-weak.json'
+
+          def load_judge_scores(p, probe_filter):
+              if not p.exists():
+                  return {}
+              entries = []
+              for line in p.read_text().split('\n'):
+                  line = line.strip()
+                  if not line:
+                      continue
+                  try:
+                      entry = json.loads(line)
+                  except json.JSONDecodeError:
+                      continue
+                  if entry.get('probeReport') == probe_filter:
+                      entries.append(entry)
+              if not entries:
+                  return {}
+              # Use the latest entry for this probe report
+              latest = sorted(entries, key=lambda e: e.get('at', ''))[-1]
+              return {v['id']: v for v in latest.get('verdicts', [])}
+
+          strong = load_judge_scores(scores_path, PROBE_STRONG)
+          weak = load_judge_scores(scores_path, PROBE_WEAK)
+
+          all_ids = sorted(set(list(strong.keys()) + list(weak.keys())))
+          rows = []
+          strong_total = 0
+          weak_total = 0
+          strong_count = 0
+          weak_count = 0
+
+          for cid in all_ids:
+              s_info = strong.get(cid, {})
+              w_info = weak.get(cid, {})
+              s_judge = s_info.get('judge', {}).get('scores', {})
+              w_judge = w_info.get('judge', {}).get('scores', {})
+              s_sum = sum(v for v in s_judge.values() if isinstance(v, (int, float)))
+              w_sum = sum(v for v in w_judge.values() if isinstance(v, (int, float)))
+              s_ok = s_info.get('pass', '-')
+              w_ok = w_info.get('pass', '-')
+              rows.append((cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum))
+              if s_sum:
+                  strong_total += s_sum
+                  strong_count += 1
+              if w_sum:
+                  weak_total += w_sum
+                  weak_count += 1
+
+          overall_advisory = (weak_total >= strong_total) if (strong_count > 0 and weak_count > 0) else False
+
+          report_lines = [
+              '# Discrimination Report: dual-tier matrix',
+              '',
+              '- Strong model: step-5-preview (LLM_MODEL)',
+              '- Weak model: step-3.5-flash',
+              '- Judge: step-5-preview (same for both tiers)',
+              '- Rounds: 3 per case (quick suite: A1, A2, A4, A5, B1)',
+              '',
+              '## Per-case comparison',
+              '',
+              '| Case | Strong pass | Strong judge (sum) | Weak pass | Weak judge (sum) |',
+              '| --- | --- | --- | --- | --- |',
+          ]
+          for cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum in rows:
+              s_judge_str = '/'.join(str(v) for v in s_judge.values()) if s_judge else 'n/a'
+              w_judge_str = '/'.join(str(v) for v in w_judge.values()) if w_judge else 'n/a'
+              report_lines.append(f'| {cid} | {s_ok} | {s_judge_str} ({s_sum}) | {w_ok} | {w_judge_str} ({w_sum}) |')
+
+          report_lines += [
+              '',
+              '## Aggregate',
+              f'- Strong total judge sum: {strong_total} ({strong_count} cases)',
+              f'- Weak total judge sum: {weak_total} ({weak_count} cases)',
+              '',
+              '## Criterion',
+              '> 笨模型分数 ≥ 强模型 = harness 区分度不足 → advisory 红（不是放行信号）',
+              '',
+              f'**Advisory**: { "YES — weak model is not clearly worse; discrimination insufficient." if overall_advisory else "NO — weak model is clearly worse; discrimination sufficient." }',
+              '',
+              '_This is an advisory signal only. The workflow is not a required check._',
+          ]
+
+          report = '\n'.join(report_lines)
+          Path('.runtime/discrimination-report.md').write_text(report)
+          print(report)
+
+          if overall_advisory:
+              print('::warning::Discrimination advisory: weak model >= strong model. See report.')
+              sys.exit(1)
+          sys.exit(0)
+          PYEOF
+
+      - name: Write discrimination to step summary
+        if: always()
+        run: |
+          if [ -f .runtime/discrimination-report.md ]; then
+            cat .runtime/discrimination-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload discrimination report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discrimination-report
+          path: |
+            .runtime/probe-strong.json
+            .runtime/probe-weak.json
+            .runtime/score-strong.txt
+            .runtime/score-weak.txt
+            .runtime/discrimination-report.md
+          retention-days: 30

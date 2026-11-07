@@ -1,0 +1,147 @@
+# GitHub Actions workflow: real-model eval (generic domain, per-push).
+#
+# Boundary:
+#   - This workflow is the per-push information surface for real-model eval.
+#     It is NOT a required check yet (本轮先只呈不拦).
+#   - Judge conclusions are advisory only and never blocking.
+#   - The mechanical score exit code IS the job exit code (so a future
+#     required-check conversion is a one-line change).
+#   -财税域真实 eval（probe-real-agent / acceptance / score.ts）需要
+#     真实执行层 + 本地 config/agent.yaml，留在 Tier B 手动运行。
+#     CI 的真实模型面走通用域 stock fixture，零平台路径依赖。
+name: Eval Real (generic domain)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  eval-real:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EXECUTION_EXECUTOR: mock
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        # default depth (1) is enough; eval does not need full history.
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run generic-model eval probe (quick)
+        run: npm run eval:probe -- --quick
+
+      - name: Run generic-model eval acceptance
+        run: npm run eval:acceptance
+
+      - name: Run generic-model eval score (mechanical gate, no judge)
+        id: eval-score
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          npm run eval:score 2>&1 | tee .runtime/eval-score-summary.txt
+
+      - name: Upload eval report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generic-eval-report
+          path: |
+            .runtime/probe-*.json
+            .runtime/eval-score-summary.txt
+            .runtime/scores.jsonl
+          retention-days: 14
+
+      - name: Comment PR with eval report
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const summaryPath = '.runtime/eval-score-summary.txt';
+            const summary = fs.existsSync(summaryPath) ? fs.readFileSync(summaryPath, 'utf8') : '(no summary)';
+            // Find latest probe report
+            const runtimeDir = '.runtime';
+            let probePath = null;
+            if (fs.existsSync(runtimeDir)) {
+              const files = fs.readdirSync(runtimeDir).filter(f => f.startsWith('probe-') && f.endsWith('.json'));
+              if (files.length > 0) {
+                files.sort();
+                probePath = path.join(runtimeDir, files[files.length - 1]);
+              }
+            }
+            let probeSection = '(no probe report)';
+            if (probePath) {
+              try {
+                const data = JSON.parse(fs.readFileSync(probePath, 'utf8'));
+                const lines = [];
+                for (const result of (data.results || [])) {
+                  const mech = result.dims ? Object.values(result.dims).reduce((a, b) => a + b, 0) : '-';
+                  lines.push(`| ${result.id} | ${result.ok ? 'pass' : 'fail'} | ${mech} |`);
+                }
+                probeSection = [
+                  '### Probe results (quick)',
+                  '',
+                  '| Case | Status | Mechanical violations |',
+                  '| --- | --- | --- |',
+                  ...lines,
+                ].join('\n');
+              } catch (e) {
+                probeSection = `_(probe report parse error: ${e.message})_`;
+              }
+            }
+            // Parse score verdicts from summary
+            const verdictLines = summary.split('\n').filter(l => /^[✓✗]/.test(l));
+            let verdictSection = '(no score verdicts)';
+            if (verdictLines.length > 0) {
+              verdictSection = [
+                '### Score verdicts',
+                '',
+                '```',
+                ...verdictLines,
+                '```',
+              ].join('\n');
+            }
+            const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
+            const report = [
+              '## Real-model eval (generic domain, mechanical gate)',
+              '',
+              'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
+              '',
+              probeSection,
+              '',
+              verdictSection,
+              '',
+              '### Key output tail',
+              '```',
+              tail,
+              '```',
+            ].join('\n');
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: report,
+            });
