@@ -367,7 +367,7 @@ function extractAmounts(text: string): Amount[] {
  * past 标记，allowedAmounts 因此为空集——错误态回复出现任何非零金额都算无所属（A2/A4 同族
  * 判据，那里靠人眼看，这里机械化）。tasks 留空的轮次（闲聊/汇总/跨线程）放行全会话真实结果。
  */
-type TaskId = 'A' | 'B' | 'C' | 'D' | 'E';
+type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
 
 /**
  * E/F/G/H 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
@@ -776,8 +776,8 @@ function c2RunNotes(turns: Turn[], chitchat: readonly number[], summaryIdx: numb
 // 闲聊/开场收尾、两次歧义澄清、两次选择、五轮召回、not_found 错误态轮、跨轮总结。
 const C2_CHITCHAT = [0, 4, 9, 17, 22, 29];
 const C2_SELECT: ReadonlyArray<{ index: number; expected: string }> = [
-  { index: 7, expected: 'alpha' },
-  { index: 14, expected: 'alpha' },
+  { index: 7, expected: 'contoso-trade' },
+  { index: 14, expected: 'fabrikam-retail' },
 ];
 const C2_RECALL = [5, 10, 19, 23, 26];
 const C2_NOT_FOUND = 20;
@@ -801,6 +801,17 @@ function execLanguageLeakNotes(turn: Turn): string[] {
 }
 
 /**
+ * 澄清问句的双语识别（clarificationShapeNotes 的"问句"判据）。三族：
+ *   ① 真问号（中英）；
+ *   ② 中文无疑号问句/请求确认："告诉 / 请回复 / 需要你 / 请提供 / 请确认 / 确认哪 / 哪一个 / 哪一 / 请问"；
+ *   ③ 英文无疑号问句/请求确认："which one / which / please confirm / confirm which / let me know /
+ *      could you / would you / do you / please provide / please specify / tell me"。
+ * 反向不含："没有找到"类结论句（那是 not_found 分支的事）——但含"哪"的中文问句与 not_found
+ * 结论不互斥（"没有找到 X，你要查的是哪个？"两者皆真），由 candidates 分支分流，无冲突。
+ */
+const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|请确认|确认哪|哪一个|哪一[家个条]|请问|which one|which\b|please confirm|confirm which|let me know|could you|would you|do you\b|please provide|please specify|tell me/i;
+
+/**
  * 澄清轮的形状判定（歧义 / not_found 两种收尾，宿主机械组装的模板必然两者俱全）：
  *   · 歧义：候选清单（回复里出现 ≥2 个平台候选名）+ 问句——少一样用户就没法回答"选哪个"；
  *   · not_found：明确的"没有找到"结论——那是模板的第一句，也是用户唯一需要的信息。
@@ -811,33 +822,48 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
   if (candidates.length >= 2) {
     const listed = candidates.filter((name) => turn.reply.includes(name));
     if (listed.length < 2) notes.push(`澄清回复未列候选清单（命中 ${listed.length}/${candidates.length}）：「${turn.text}」`);
-    if (!/[?？]|告诉|请回复/.test(turn.reply)) notes.push(`澄清回复没有问句：「${turn.text}」`);
+    // 问句判定不能只认问号：模型（尤其是中文系统提示词下）常用无疑号句式发问——
+    // "需要你确认查哪一个" / "需要你提供：确切的 collection 名称" / "please confirm which one" /
+    // "let me know which"。2026-11-07 实证：A3 的 contoso 轮模型两候选全列、拒绝猜、
+    // 请用户确认，只因全篇没有一个 '?' 被误判"没有问句"。判据要的是"用户收到能回答选哪个"，
+    // 不是标点形态。
+    if (!CLARIFICATION_QUESTION_RE.test(turn.reply)) notes.push(`澄清回复没有问句：「${turn.text}」`);
   } else if (!/没有|未找到|查不到|不存在|无匹配/.test(turn.reply)) {
     notes.push(`not_found 回复未给出"没有找到"的结论：「${turn.text}」`);
   }
   return notes;
 }
 
-/** mock collection目录里"alpha"的两个候选（seed.json）：A3 歧义场景的期望候选集。 */
-const ALPHA_AMBIGUOUS_CANDIDATES = ['alpha', 'alpha-group'];
-
 /**
- * mock collection目录里"新兴"的两个候选（seed.json 键序：alpha / alpha-group / beta /
- * locked-one）。与"alpha"同为目录内关键词重叠制造的歧义，C2 用它做第二次澄清-选择——
- * 两次歧义走不同关键词，避免同一歧义样本反复考同一条路径。候选顺序即
- * Object.keys(accountSets) 顺序（mock 应答器按目录键序过滤），"第一个/the second one"因此可预期。
+ * 自然名歧义对 1：查询 "contoso" 不是精确键，子串命中 contoso-trade 与 contoso-logistics
+ * 两个 → 平台回 COLLECTION_AMBIGUOUS。A3 歧义场景、C2 第一次澄清、X1 编号选择轮共用。
+ *
+ * 为什么必须是自然名而不是 "alph" 这类截断词：夹具的匹配语义是精确键优先、其后平台名
+ * includes 查询词——"alpha"是精确键直接命中不歧义，要造歧义只能用非精确共同子串。但
+ * "alph/alp" 这类截断词在英文里读作缩写，模型把它当"指代不明"直接问用户全名，根本不委派
+ * 平台，候选清单永远等不到（2026-11-07 实测：A3 零平台调用、澄清形状 0/2）。原 17dz 语料
+ * 用"幻辰"命中 幻辰财税/幻辰实业——同一个设计：查询词是自然名，不是键，也不是截断词。
+ * 机械断言面（generic-mock.ts 的 alp→alpha,alpha-group）不受影响，仍走截断词通道。
  */
-const ONE_AMBIGUOUS_CANDIDATES = ['beta', 'locked-one'];
+const CONTOOSO_AMBIGUOUS_CANDIDATES = ['contoso-trade', 'contoso-logistics'];
 
 /**
- * C2 的两次歧义澄清点（0-based 轮次 + 该轮期望候选集）。用两个不同关键词（"新兴"/"alpha"）
- * 考同一条澄清路径，第二次发生在会话已单独查过两个alphacollection之后——D-072"名称类请求被会话
- * 实体静默代解析"的复现窗口。候选顺序 = Object.keys(accountSets)（mock 应答器按目录键序
- * 过滤），"第一个"因此可预期，C2_SELECT 的期望collection名才站得住。
+ * 自然名歧义对 2：查询 "fabrikam" → 子串命中 fabrikam-retail 与 fabrikam-wholesale。
+ * C2 用它做第二次澄清-选择——与 contoso 对分开，避免同一歧义样本反复考同一条路径
+ * （原 17dz 语料的 新兴五金/新兴建材 同款设计）。候选顺序 = Object.keys(collections)
+ * 键序（夹具按目录键序过滤），"第一个/the second one"因此可预期。
+ */
+const FABRIKAM_AMBIGUOUS_CANDIDATES = ['fabrikam-retail', 'fabrikam-wholesale'];
+
+/**
+ * C2 的两次歧义澄清点（0-based 轮次 + 该轮期望候选集）。用两个不同关键词（"contoso"/
+ * "fabrikam"）考同一条澄清路径，第二次发生在会话已单独查过 contoso-trade 与 alpha 之后
+ * ——D-072"名称类请求被会话实体静默代解析"的复现窗口。候选顺序 = Object.keys(collections)
+ * （夹具按目录键序过滤），"第一个"因此可预期，C2_SELECT 的期望collection名才站得住。
  */
 const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }> = [
-  { index: 6, candidates: ALPHA_AMBIGUOUS_CANDIDATES },
-  { index: 13, candidates: ALPHA_AMBIGUOUS_CANDIDATES },
+  { index: 6, candidates: CONTOOSO_AMBIGUOUS_CANDIDATES },
+  { index: 13, candidates: FABRIKAM_AMBIGUOUS_CANDIDATES },
 ];
 
 // ─── X/Y 用例（复杂任务会话 / 纠错与错误态）的 mock 事实源与判定 helper ───
@@ -846,8 +872,10 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 // 探针每用例的 EXECUTION_MOCK_STATE 指向临时空文件，mock 应答器自动从同仓 fixtures 的种子状态播种，
 // 两份balance事实一致——此处以种子为准，改动任何数字前先重读状态文件）：
 //   · collection目录 4 个：alpha / alpha-group / beta / locked-one。匹配语义是
-//     「平台名 includes 查询词」子串——"alpha"命中前两个 → ACCOUNT_SET_AMBIGUOUS；
-//     "alpha-group"唯一命中；"gamma-collection"零命中 → ACCOUNT_SET_NOT_FOUND。
+//     「精确键优先，其后平台名 includes 查询词」——"alpha"是精确键、直接命中不歧义；
+//     要造歧义必须用非精确共同子串（"alph"命中 alpha 与 alpha-group 两个 →
+//     COLLECTION_AMBIGUOUS，A3/C2/X1/Y2 的歧义轮因此用 "alph" 提问）；
+//     "alpha-group"唯一命中；"gamma-collection"零命中 → COLLECTION_NOT_FOUND。
 //   · record value：alpha W1/W2 均有数据（items: 1200 + 800，mock doQuery 返回全量 items，
 //     window 参数不筛 items——alpha W1 与 W2 均返回 [1200, 800]）；alpha-group W1=700；
 //     beta W1=500（items: 500/300/200）；locked-one W1=900（locked: true）；locked-one W2
@@ -876,7 +904,7 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 //     回复现在会被当成"有结论"而不是"没执行"，G1 的 accountProcessed 与召回判定因此更准。
 
 /** mock collection目录：X1 换collection/总结覆盖、X2 域混淆判定的名单来源。 */
-const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one'] as const;
+const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale'] as const;
 
 /** mock customer辅助档案（按collection）：X2 第1轮 D-073 判定的命中依据（与 QIANLONG_ITEMS 同源）。 */
 const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
@@ -884,6 +912,10 @@ const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
   'alpha-group': ['gamma-item'],
   beta: [],
   'locked-one': [],
+  'contoso-trade': [],
+  'contoso-logistics': [],
+  'fabrikam-retail': [],
+  'fabrikam-wholesale': [],
 };
 
 /**
@@ -1002,7 +1034,7 @@ function windowMentioned(text: string, period: string): boolean {
  */
 function isClarificationTurn(turn: Turn, candidates: readonly string[]): boolean {
   return candidates.filter((name) => turn.reply.includes(name)).length >= 2
-    && /[?？]|告诉|请回复/.test(turn.reply);
+    && CLARIFICATION_QUESTION_RE.test(turn.reply);
 }
 
 /**
@@ -1189,12 +1221,15 @@ const CASES: Case[] = [
     id: 'A3', group: 'A 说胡话', intent: '歧义collection先澄清，不猜也不自动遍历多个collection',
     run: async () => {
       const { send, assembly } = await boot();
-      const turns: Turn[] = [await send('check alpha record value')];
+      const turns: Turn[] = [await send('check contoso collection record value')];
       await assembly.close();
       const notes: string[] = [];
-      // Stage 3 事故原型：平台返回 ACCOUNT_SET_AMBIGUOUS（候选：alpha / alpha-group）。
+      // Stage 3 事故原型：平台返回 COLLECTION_AMBIGUOUS（候选：contoso-trade /
+      // contoso-logistics）。"contoso"是目录内两个全名的共同自然名（非精确键、非截断词），
+      // 模型因此会把它当名字委派平台，平台才回得了歧义——截断词会被模型当成指代不明直接
+      // 问用户，平台一次都不调用（见 CONTOOSO_AMBIGUOUS_CANDIDATES 注释的实测记录）。
       // 回复必须是澄清问句（候选清单 + 问句），且零执行语言指纹（五类，见 execLanguageLeakNotes）。
-      notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, ALPHA_AMBIGUOUS_CANDIDATES));
+      notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, CONTOOSO_AMBIGUOUS_CANDIDATES));
       return { turns, notes };
     },
   },
@@ -1310,15 +1345,16 @@ const CASES: Case[] = [
     // C2：>20 轮超长会话无用例（C1 是 20 轮天花板）。C1 已证明 20 轮内不漂移，但"更长会不会
     // 慢到不可用/旧范围会不会渗进来/跨 4 个collection的线程还会不会混"没有数据。C2 把 C1 的混合
     // 形态拉到 30 轮并加码到 C1 没有的四个维度，每条都能机械判：
-    //   ① 4 个 mock collection轮转（alpha/beta/locked-one/alpha-group）——线程隔离的量纲比 C1 的
-    //     两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
+    //   ① mock collection轮转（alpha/beta/locked-one/alpha-group + contoso/fabrikam 两个歧义对）
+    //      ——线程隔离的量纲比 C1 的两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
     //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用（A5 同款），也不得
-    //     把查询线程的结论当闲聊内容倒出来；
-    //   ③ 两次歧义澄清-选择（两次均用"alpha"→alpha/alpha-group，mock 目录内关键词重叠制造的确定性歧义，
-    //      候选顺序 = Object.keys(accountSets) 键序）。两轮选不同collection（第1轮选alpha、第2轮选
-    //      alpha-group）避免同一歧义样本反复考同一条路径；问得对（候选清单+问句）与选得对（落到被选中
+    //      把查询线程的结论当闲聊内容倒出来；
+    //   ③ 两次歧义澄清-选择（"contoso"→contoso-trade/contoso-logistics、"fabrikam"→fabrikam-retail/
+    //      fabrikam-wholesale，都是目录内共同自然名制造的确定性歧义，候选顺序 =
+    //      Object.keys(collections) 键序）。两轮选不同collection（第1轮选contoso-trade、第2轮选
+    //      fabrikam-retail）避免同一歧义样本反复考同一条路径；问得对（候选清单+问句）与选得对（落到被选中
     //      collection）分别由 clarificationShapeNotes 与 selectionNote 守；第二次歧义发生在会话已单独
-    //      查过两个alphacollection之后，正是 D-072 "名称类请求被会话实体静默代解析"的复现窗口——若模型
+    //      查过 contoso-trade 与 alpha 之后，正是 D-072 "名称类请求被会话实体静默代解析"的复现窗口——若模型
     //      不再搜索直接用会话实体出数，澄清形状判定会红，那是要报的发现而不是脚本错误。
     //   ④ 跨轮召回：金额型召回 5 次（第 6/11/20/24/27 轮）+ collection名单召回 1 次（第 19 轮）。
     //      召回轮必须给真实数且带框定语（recallMissed + recallFramingNote，X1 第3轮同款），
@@ -1331,7 +1367,8 @@ const CASES: Case[] = [
     id: 'C2', group: 'C 长会话', intent: '30 轮混合对话：4 collection轮转的线程隔离、话题切换、澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩',
     run: async () => {
       const { send, assembly } = await boot();
-      // 线程：A=alpha、B=beta、C=locked-one、D=alpha-group、E=not_found 错误态。
+      // 线程：A=alpha、B=beta、C=locked-one、D=alpha-group、E=not_found 错误态、
+      // F=contoso 歧义对、G=fabrikam 歧义对。
       // 轮次文案照 C1 的写法（短句、口语、"collection/current window/just now"、先查后聊）。
       const script: ScriptLine[] = [
         { text: '你好，你能做什么？', tasks: [] },
@@ -1340,15 +1377,15 @@ const CASES: Case[] = [
         { text: 'also check W1', tasks: ['A'] },
         { text: 'thanks, let us chat: what month is it?', tasks: [] },
         { text: 'just now which two windows had the highest balance?', tasks: ['A'], past: true, recall: true },
-        { text: 'help me check alpha record value', tasks: ['A', 'D'] },
-        { text: '第一个', tasks: ['A'] },
-        { text: 'also check W1', tasks: ['A'] },
+        { text: 'help me check contoso record value', tasks: ['F'] },
+        { text: '第一个', tasks: ['F'] },
+        { text: 'also check W1', tasks: ['F'] },
         { text: 'thanks, different topic: what day is it?', tasks: [] },
         { text: 'by the way, what did you find for beta just now?', tasks: ['B'], past: true, recall: true },
         { text: 'what about locked-one?', tasks: ['C'] },
         { text: 'which has higher balance, beta or locked-one?', tasks: ['B', 'C'], past: true },
-        { text: 'what is alpha record value?', tasks: ['A', 'D'] },
-        { text: '第一个', tasks: ['A'] },
+        { text: 'what is fabrikam record value?', tasks: ['G'] },
+        { text: '第一个', tasks: ['G'] },
         { text: 'what about alpha-group record value?', tasks: ['D'] },
         { text: 'list alpha W1 records', tasks: ['A'] },
         { text: 'thanks, let us chat: can you help me write a weekly report?', tasks: [] },
@@ -1765,8 +1802,11 @@ const CASES: Case[] = [
     //      （items: 1200 + 800），不存在"4 个有非零数据的window"；两window均有数据保证召回/
     //      总结轮有真实数字可判。无数据不是配角而是本轮的主测点之一——"说该window无数据"现在是
     //      合法且更好的回复（见上方"无数据语义"段），静默给 0 或给非零都红；
-    //   ② 第4轮用"alpha"而非"alpha-group"：mock 子串匹配下"alpha-group"唯一命中、根本不歧义，
-    //      用裸关键词"alpha"才复现 D-072 的形态——且前 3 轮已确立alpha，会话实体压力更大。
+    //   ② 第4轮用自然名"contoso"制造歧义：夹具精确键优先，裸"alpha"是精确键直接命中不歧义，
+    //      截断词（"alph/alp"）虽能触发子串歧义但读作缩写、模型不委派平台（实测零调用）。
+    //      "contoso"是 contoso-trade / contoso-logistics 的共同自然名——非精确键、非截断词，
+    //      模型会当名字委派，平台才回得了 COLLECTION_AMBIGUOUS；且前 3 轮已确立alpha，
+    //      会话实体压力更大，正是 D-072"名称类请求被会话实体静默代解析"的复现窗口。
     id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：跨期计划数字链、中途换collection、跨轮召回给数、歧义简称不被代解析、编号选择、换window、写尝试、总结不塌缩',
     run: async () => {
       const { send, assembly } = await boot();
@@ -1775,13 +1815,13 @@ const CASES: Case[] = [
         'checkalpha W1、W1、W2、W2 各期的record value',
         '那beta W2record value',
         'just nowalpha查到了哪几个月，数字是多少',
-        'check alpha record value',
+        'check contoso collection record value',
       ];
       for (const text of fixed) turns.push(await send(text));
       // T4→T5 适配：send 完第4轮后检查它的实际形态——宿主对歧义的收尾是机械组装澄清问题
       // （候选清单+问句），用户第5轮按编号选候选（今日 X 系列的"编号"轮）；若第4轮静默选定
       // （D-072 复发），第5轮直接续window。两种格局下 T5/T6/T7 的下标随动（WINDOW_SWITCH/WRITE/SUMMARY）。
-      const clarified = isClarificationTurn(turns[3]!, ALPHA_AMBIGUOUS_CANDIDATES);
+      const clarified = isClarificationTurn(turns[3]!, CONTOOSO_AMBIGUOUS_CANDIDATES);
       const writeText = '帮我add a record：2026年9月15日，note office expense，debit admin expense500元，creditbank500元';
       const rest = clarified
         ? ['the second one', 'what about W2?', writeText, 'summarize what we checked today']
@@ -1837,20 +1877,22 @@ const CASES: Case[] = [
       if (!/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候/.test(t3.reply)) {
         notes.push(`第3轮召回复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${t3.text}」`);
       }
-      // ④ T4（歧义简称 + 会话实体，D-072）：回复必须是候选清单+问句的澄清形态；静默选定
+      // ④ T4（自然名歧义 + 会话实体，D-072）：回复必须是候选清单+问句的澄清形态；静默选定
       //    （直接用会话里已确立的alpha出数）即复发，原样摘录回复前 80 字。
-      notes.push(...clarificationShapeNotes(turns[3]!, ALPHA_AMBIGUOUS_CANDIDATES));
+      notes.push(...clarificationShapeNotes(turns[3]!, CONTOOSO_AMBIGUOUS_CANDIDATES));
       if (!clarified && extractAmounts(turns[3]!.reply).some((a) => a.value !== 0)) {
         notes.push(`D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
       }
-      // ⑤ T5/T6（window切换）：W2 必须出现、必须真查。mock 事实下 alpha W2 有数据（1200/800）、
-      //    alpha-group W2 无数据键（PERIOD_NO_DATA）——两种回复均合法。不再断言"该window只应无数据"，
-      //    改为只确认 W2 出现且发生了真实查询；amount 有无效值由 amountNote 全轮通用尺覆盖。
+      // ⑤ T5/T6（window切换）：W2 必须出现、必须真查。第5轮选 "the second one" 落到
+      //    contoso-logistics——该 collection 只有 W1（夹具刻意不给 W2 键），问 W2 的合法回复是
+      //    "该window无数据"；若模型把 W1 的 450 当成 W2 的答案呈上，amountNote 的全轮金额尺会红。
+      //    不再机械断言"该window只应无数据"，只确认 W2 出现且发生了真实查询。
       //    collection是否沿用不机械判——无数据答案下换错collection无数可露，由人工看回复。
       const ps = turns[WINDOW_SWITCH]!;
       if (!windowMentioned(ps.reply, 'W2')) notes.push(`第${WINDOW_SWITCH + 1}轮window切换未体现 W2：「${ps.text}」`);
       if (ps.calls === 0) notes.push(`第${WINDOW_SWITCH + 1}轮window切换零平台调用：「${ps.text}」`);
-      // 注：不调用 windowSwitchAmounts——dummy 夹具 alpha W2 有真实数据，旧"W2 应无数据"断言不再成立。
+      // 注：不调用 windowSwitchAmounts——dummy 夹具的 W2 有无数据随 collection 而变
+      // （alpha W2 有数据、contoso-logistics W2 无键），旧"W2 应无数据"断言不再成立。
       // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同collection（不得塌缩成最后一个）；金额须与本会话
       //    真实查到的值一致（算术派生单列信息性 note）。
       const sm = turns[SUMMARY]!;
@@ -1979,12 +2021,12 @@ const CASES: Case[] = [
     id: 'Y2', group: 'Y 纠错与错误态', intent: '平台错误态 3 轮：not_found/歧义/field missing——失败诚实性（说真原因、不给数、给补救、无internal control term、不重试风暴）',
     run: async () => {
       const { send, assembly } = await boot();
-      const candidates: ReadonlyArray<readonly string[]> = [[], ALPHA_AMBIGUOUS_CANDIDATES, []];
+      const candidates: ReadonlyArray<readonly string[]> = [[], CONTOOSO_AMBIGUOUS_CANDIDATES, []];
       const turns: Turn[] = [];
       const audits: AuditRecord[][] = [];
       for (const text of [
         'check gamma-collection这个collection W2record value',
-        'check alpha record value',
+        'check alph collection record value',
         'checkbeta的payablebalance',
       ]) {
         const mark = auditRecords().length;

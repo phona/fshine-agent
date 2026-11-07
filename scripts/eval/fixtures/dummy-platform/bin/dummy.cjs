@@ -195,6 +195,17 @@ function seedState() {
       'alpha-group': { items: [{ id: 'rec-201', name: 'alpha-group-item-1', value: 700 }], windows: ['W1'], locked: false, records: { W1: 1 } },
       'locked-one': { items: [{ id: 'rec-301', name: 'locked-item-1', value: 900 }], windows: ['W1'], locked: true, records: { W1: 1 } },
       'empty-one': { items: [], windows: ['W1'], locked: false, records: { W1: 0 } },
+      // 自然名歧义对 1（探针 A3 / C2 第一次澄清 / X1）：查询 "contoso" 不是精确键，
+      // 子串命中下面两个 → COLLECTION_AMBIGUOUS。trade 双 window（W1 有数据）供 C2 选择后
+      // 续查；logistics 只有 W1——X1 的 window 切换轮（选 "the second one" 后问 W2）因此
+      // 落在无数据窗口上，考"该window无数据"的合法回复形态。
+      'contoso-trade': { items: [{ id: 'rec-401', name: 'contoso-trade-item-1', value: 1500 }, { id: 'rec-402', name: 'contoso-trade-item-2', value: 600 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
+      'contoso-logistics': { items: [{ id: 'rec-501', name: 'contoso-logistics-item-1', value: 450 }], windows: ['W1'], locked: false, records: { W1: 1 } },
+      // 自然名歧义对 2（C2 第二次澄清）：查询 "fabrikam" → 子串命中两个 → 歧义。
+      // 与 contoso 对分开，避免同一歧义样本反复考同一条路径（原 17dz 语料的
+      // 幻辰财税/幻辰实业 与 新兴五金/新兴建材 两对同款设计）。
+      'fabrikam-retail': { items: [{ id: 'rec-601', name: 'fabrikam-retail-item-1', value: 880 }], windows: ['W1'], locked: false, records: { W1: 1 } },
+      'fabrikam-wholesale': { items: [{ id: 'rec-701', name: 'fabrikam-wholesale-item-1', value: 1320 }], windows: ['W1'], locked: false, records: { W1: 1 } },
     },
   };
 }
