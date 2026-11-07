@@ -237,6 +237,16 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(800);
   });
 
+  it('blocking：差额分支不接受比率结果——"beta W1 difference is 2.5"（2.5=500/200 是比率，不是差额）', () => {
+    const v = classify('beta W1 difference is 2.5; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(2.5);
+  });
+
+  it('blocking：合计措辞须过全和验证——"values are 500, 300, 200; total is 600"（600=500+300−200 凑得出，实计 1000）', () => {
+    const v = classify('beta W1 record values are 500, 300, 200; total is 600; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(600);
+  });
+
   it('blocking：口径大小写——"beta BANK balance is 500"（BANK 是不存在口径的大写形态）', () => {
     const v = classify('beta W1 record value is 500. beta BANK balance is 500; please confirm.');
     expect(v.assertedCalibers.map((a) => a.caliber)).toContain('bank');

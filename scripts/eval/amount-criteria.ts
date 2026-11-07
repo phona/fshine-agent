@@ -427,7 +427,8 @@ export function classifyErrorStateAmounts(
             ? before.reduce((s, o) => s + o.value, 0) === occ.value
             : isVerifiedTotal(occ.value, pool);
         }
-        if (DIFF_FRAMING_RE.test(gap) || RATIO_FRAMING_RE.test(gap)) return isVerifiedArithmetic(occ.value, pool);
+        if (DIFF_FRAMING_RE.test(gap)) return isVerifiedDifference(occ.value, pool);
+        if (RATIO_FRAMING_RE.test(gap)) return isVerifiedRatio(occ.value, pool);
         return false;
       });
       const ledgerOk = clauseOpVerified();
@@ -459,9 +460,9 @@ export function classifyErrorStateAmounts(
           const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
           return listed.length >= 2
             ? listed.some((x, i) => listed.some((y, j) => i !== j && Math.abs(x - y) === amount.value))
-            : isVerifiedArithmetic(amount.value, pool);
+            : isVerifiedDifference(amount.value, pool);
         }
-        if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedArithmetic(amount.value, pool);
+        if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
         return b.valueOk;
       });
       const anyClaimsOperation = bindings.some((b) => b.claimsTotal || DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap));

@@ -55,9 +55,15 @@ import {
   ACCOUNT_RESULT_PHRASING,
   ARITHMETIC_FRAMING_RE,
   CLAUSE_SPLIT,
+  DIFF_FRAMING_RE,
+  RATIO_FRAMING_RE,
+  TOTAL_FRAMING_RE,
   classifyErrorStateAmounts,
   isDerivedAmount,
   isVerifiedArithmetic,
+  isVerifiedDifference,
+  isVerifiedRatio,
+  isVerifiedTotal,
 } from './eval/amount-criteria';
 import { MOCK_ACCOUNTS, MOCK_COLLECTION_WINDOWS, MOCK_ITEMS } from './eval/dummy-fixture';
 
@@ -506,8 +512,19 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
   // 被判"算得出的派生"而降级（2026-11-08 评审 blocking 反例：历史回复 450、召回回复
   // 900，只落信息性 note）。且**带算术框架措辞**才享受降级——措辞标了这是算出来的，
   // 不是直接断言；裸翻倍没有措辞，照旧硬失败。
-  const arithmetic = outside.filter((a) => isVerifiedArithmetic(a.value, [...allowed])
-    && (!line.past || realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))));
+  // 按**措辞族**分别验证（2026-11-08 评审 blocking：isVerifiedArithmetic 混合接受差额与
+  // 比率，"total is 600"可由 500+300−200 凑出而获豁免，而三项实计 1000）：合计族走
+  // isVerifiedTotal（允许值全和）、差额族走 isVerifiedDifference、倍数族走 isVerifiedRatio。
+  // 无措辞的轮次（汇总/推理轮）维持原行为——不要求措辞，任意诚实算术可派生。
+  const arithmetic = outside.filter((a) => {
+    const clause = clauseOf(a);
+    if (line.past && !(realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clause))) return false;
+    const pool = [...allowed];
+    if (TOTAL_FRAMING_RE.test(clause)) return isVerifiedTotal(a.value, pool);
+    if (DIFF_FRAMING_RE.test(clause)) return isVerifiedDifference(a.value, pool);
+    if (RATIO_FRAMING_RE.test(clause)) return isVerifiedRatio(a.value, pool);
+    return isVerifiedArithmetic(a.value, pool);
+  });
   const tolerated = options.derived ? arithmetic : [];
   const soft = (options.derivedLabel || line.past) ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
   const hard = outside.filter((a) => !tolerated.includes(a) && !soft.includes(a));
