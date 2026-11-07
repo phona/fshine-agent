@@ -23,7 +23,7 @@
 # 语料是财税域。本配置保证的是「fresh clone 零配置可加载 + 委派真正 spawn 到
 # 夹具 + 端到端接线跑通」；财税域的查询稳定性与提案/确认/提交链路覆盖属于
 # Tier B 本地验证（需真实执行层，见 ci.sh 头部说明），不在本配置的证明范围内。
-# CI 的真实模型面是通用域 eval（.github/workflows/eval-real.yml）。
+# CI 的真实模型面（通用域 eval 工作流）另行落地，本配置不声称它已存在。
 # ============================================================
 
 # ---- 授权名单：eval 专用虚构 UserID，不泄漏真实身份 ----
@@ -31,6 +31,10 @@ principals:
   "wecom:eval-fixture-user":
     accountSetScope: all
     enabled: true
+    # 写链路所需权限：parseCapabilities 缺省 ['read']，不显式声明则提案/确认/提交
+    # 用例不可达（packages/core/src/config.ts）。stock 夹具对写操作确定性拒绝
+    # （dry-run 即被 fixture 挡回），授权 write 不触达任何真实执行层。
+    capabilities: ["read", "validate", "write"]
 
 # ---- 通用 Worker 的受信上下文（eval 用 stock 夹具） ----
 contextProfiles:
