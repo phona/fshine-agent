@@ -66,7 +66,7 @@ jobs:
           retention-days: 14
 
       - name: Comment PR with eval report
-        if: always()
+        if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           script: |
@@ -90,13 +90,16 @@ jobs:
                 const data = JSON.parse(fs.readFileSync(probePath, 'utf8'));
                 const lines = [];
                 for (const result of (data.results || [])) {
-                  const mech = result.mechanical_pass ? 'PASS' : 'FAIL';
-                  lines.push(`| ${result.id} | ${result.mechanical_pass ? 'pass' : 'fail'} | ${mech} |`);
+                  const status = result.mechanical_pass ? 'pass' : 'fail';
+                  const detail = result.mechanical_pass
+                    ? `calls=${result.calls}`
+                    : `calls=${result.calls} final=${(result.final_text || '').slice(0, 120).replace(/\|/g, '\\|')}`;
+                  lines.push(`| ${result.id} | ${status} | ${detail} |`);
                 }
                 probeSection = [
                   '### Probe results (quick)',
                   '',
-                  '| Case | Status | Mechanical |',
+                  '| Case | Status | Detail |',
                   '| --- | --- | --- |',
                   ...lines,
                 ].join('\n');

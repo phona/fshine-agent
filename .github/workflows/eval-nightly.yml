@@ -123,26 +123,35 @@ jobs:
           import json, sys
           from pathlib import Path
 
-          scores_path = Path('.runtime/probe-strong.json')
-          PROBE_STRONG = 'probe-strong.json'
-          PROBE_WEAK = 'probe-weak.json'
-
-          def load_judge_scores(p, probe_filter):
-              if not p.exists():
-                  return {}
-              data = json.loads(p.read_text())
-              rows = [r for r in data.get('results', []) if r.get('id') == probe_filter.replace('.json', '')]
-              # For quick suite, aggregate judge scores across all rounds and cases
-              # Use summary if available, otherwise compute from results
-              summary = data.get('summary', {})
-              if summary:
-                  return {cid: summary.get(cid, {}).get('judge_mean', {}) for cid in summary}
-              return {}
+          PROBE_STRONG = '.runtime/probe-strong.json'
+          PROBE_WEAK = '.runtime/probe-weak.json'
+          EXPECTED_CASES = {'G-A1', 'G-A2', 'G-A3', 'G-A4', 'G-A5', 'G-B1', 'G-Y2'}
+          JUDGE_DIMS = {'groundedness', 'entityFidelity', 'failureHonesty', 'presentationHygiene'}
 
           def load_probe(p):
               if not p.exists():
                   return {}
               return json.loads(p.read_text())
+
+          def validate_judge_data(summary, label):
+              missing_cases = EXPECTED_CASES - set(summary.keys())
+              if missing_cases:
+                  print(f'::error::{label} missing cases: {sorted(missing_cases)}')
+                  return False
+              for cid in EXPECTED_CASES:
+                  judge_mean = summary.get(cid, {}).get('judge_mean', {})
+                  if not isinstance(judge_mean, dict):
+                      print(f'::error::{label} {cid} judge_mean is not a dict: {type(judge_mean).__name__}')
+                      return False
+                  missing_dims = JUDGE_DIMS - set(judge_mean.keys())
+                  if missing_dims:
+                      print(f'::error::{label} {cid} missing judge dims: {sorted(missing_dims)}')
+                      return False
+                  for dim, val in judge_mean.items():
+                      if not isinstance(val, (int, float)):
+                          print(f'::error::{label} {cid} {dim} is not numeric: {val!r}')
+                          return False
+              return True
 
           strong_data = load_probe(Path(PROBE_STRONG))
           weak_data = load_probe(Path(PROBE_WEAK))
@@ -150,13 +159,20 @@ jobs:
           strong_summary = strong_data.get('summary', {})
           weak_summary = weak_data.get('summary', {})
 
-          all_ids = sorted(set(list(strong_summary.keys()) + list(weak_summary.keys())))
+          strong_ok = validate_judge_data(strong_summary, 'strong')
+          weak_ok = validate_judge_data(weak_summary, 'weak')
 
+          if not strong_ok or not weak_ok:
+              Path('.runtime/discrimination-report.md').write_text(
+                  '**Advisory**: Insufficient or invalid judge data for one or both tiers; cannot determine discrimination.'
+              )
+              print('::error::Insufficient or invalid judge data; discrimination report aborted.')
+              sys.exit(1)
+
+          all_ids = sorted(EXPECTED_CASES)
           rows = []
           strong_total = 0
           weak_total = 0
-          strong_count = 0
-          weak_count = 0
 
           for cid in all_ids:
               s_info = strong_summary.get(cid, {})
@@ -168,15 +184,10 @@ jobs:
               s_ok = s_info.get('mechanical_pass_count', 0) == s_info.get('rounds', 0)
               w_ok = w_info.get('mechanical_pass_count', 0) == w_info.get('rounds', 0)
               rows.append((cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum))
+              strong_total += s_sum
+              weak_total += w_sum
 
-              if s_sum:
-                  strong_total += s_sum
-                  strong_count += 1
-              if w_sum:
-                  weak_total += w_sum
-                  weak_count += 1
-
-          overall_advisory = (weak_total >= strong_total) if (strong_count > 0 and weak_count > 0) else False
+          overall_advisory = weak_total >= strong_total
 
           report_lines = [
               '# Discrimination Report: dual-tier matrix',
@@ -199,8 +210,8 @@ jobs:
           report_lines += [
               '',
               '## Aggregate',
-              f'- Strong total judge sum: {strong_total} ({strong_count} cases)',
-              f'- Weak total judge sum: {weak_total} ({weak_count} cases)',
+              f'- Strong total judge sum: {strong_total} (7 cases)',
+              f'- Weak total judge sum: {weak_total} (7 cases)',
               '',
               '## Criterion',
               '> 笨模型分数 ≥ 强模型 = harness 区分度不足 → advisory 红（不是放行信号）',
@@ -208,13 +219,7 @@ jobs:
               f'**Advisory**: { "YES — weak model is not clearly worse; discrimination insufficient." if overall_advisory else "NO — weak model is clearly worse; discrimination sufficient." }',
               '',
               '_This is an advisory signal only. The workflow is not a required check._',
-              '',
           ]
-
-          # If one of the models has no judge data at all, mark as insufficient data instead of asserting sufficiency.
-          if strong_count == 0 or weak_count == 0:
-              report_lines.append('**Advisory**: Insufficient judge data for one or both tiers; cannot determine discrimination.')
-              sys.exit(1)
 
           report = '\n'.join(report_lines)
           Path('.runtime/discrimination-report.md').write_text(report)
