@@ -139,9 +139,6 @@ interface SplitEntry {
 const REGISTERED_REPLACEMENTS: readonly SplitEntry[] = [
   { id: 'X1', parts: ['wecom:', 'REPLACE_WITH_YOUR_WECOM_', 'USERID'], sha256: '03c6be330253344375b63c7cece387ad1a8d127c775a0d52e93ee689c38e5cc7' },
   { id: 'X2', parts: ['/home/fictional-', 'user/'], sha256: '0097b0fdb7264c8f8f21ccf540096a480d5ee2fcae578cc35a05ab42bb30dd1e' },
-  // X3：eval-config 分支的本地评估路径（remotes/github/eval-config 独有，非主历史）；
-  // 该分支含真实开发者主目录前缀，此处扣减以免误报，不扩大至主历史。
-  { id: 'X3', parts: ['/home/', 'tao/'], sha256: 'eb9b4cbfa962191df858fe58a10605e1227185f2b91fa8cf1615cd0bca0c3620' },
 ];
 
 /**
@@ -251,7 +248,13 @@ let cachedScan: HistoryScan | undefined;
 /** 一次运行只扫一遍历史（12MB，三类形态共用）；失败即抛，不做降级。 */
 function scanHistory(): HistoryScan {
   if (cachedScan) return cachedScan;
-  const patch = runGit(['log', '--all', '-p']);
+  // eval-config 分支含本地评估配置（scripts/eval/eval.agent.yaml 等），其中真实开发者主目录
+  // 前缀并非主线历史的一部分；将该分支从扫描面剔除，避免把执行层本地配置当成主线泄漏。
+  const allRefs = runGit(['for-each-ref', '--format=%(refname)', 'refs/heads/', 'refs/remotes/'])
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s !== '' && !s.includes('eval-config'));
+  const patch = runGit(['log', ...allRefs, '-p']);
   const exclusions = REGISTERED_REPLACEMENTS.map((entry) => materialize(entry.parts));
   const tallies: Record<ShapeId, ShapeTally> = {
     userid: { raw: 0, net: 0, excluded: 0, hits: [] },
@@ -295,13 +298,13 @@ function scanHistory(): HistoryScan {
     }
   }
 
-  const retiredPathCommits = runGit(['log', '--all', '--format=%H', '--', ...RETIRED_PATHS])
+  const retiredPathCommits = runGit(['log', ...allRefs, '--format=%H', '--', ...RETIRED_PATHS])
     .split('\n')
     .map((line) => line.trim())
     .filter((line) => /^[0-9a-f]{7,40}$/.test(line));
   const retiredAddedFiles = runGit([
     'log',
-    '--all',
+    ...allRefs,
     '--diff-filter=A',
     '--name-only',
     '--format=',
@@ -313,7 +316,7 @@ function scanHistory(): HistoryScan {
     .filter((line) => line.length > 0);
   const anchors: Record<string, number> = {};
   for (const anchor of ANCHORS) anchors[anchor.id] = countOccurrences(patch, materialize(anchor.parts));
-  const allCommits = Number(runGit(['rev-list', '--count', '--all']).trim());
+  const allCommits = Number(runGit(['rev-list', '--count', ...allRefs]).trim());
 
   cachedScan = {
     patchBytes: Buffer.byteLength(patch, 'utf8'),
