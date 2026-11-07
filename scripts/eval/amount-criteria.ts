@@ -363,8 +363,11 @@ export function classifyErrorStateAmounts(
       const summands = occs.filter((o) => !positions.includes(o.at) && REAL_DATA_VALUES.includes(o.value));
       const boundValues = [...new Set(bindings.flatMap((b) => b.mentionEntity ? b.mentionEntity.values : []))];
       const scopedSummands = summands.filter((a) => boundValues.length === 0 || boundValues.includes(a.value));
+      // 加数还须是**不同值**（2026-11-08 评审 blocking：出现位置不同但值相同的两笔是同一笔
+      // 记录的复用——"contoso-trade-item-2 … is 1200 (600 + 600)"用该记录唯一的 600 加两次
+      // 冒充 1200；夹具种子值互异，同值相加必然意味着同一记录被用两次）。
       const isSum = windowOk
-        && scopedSummands.some((a) => scopedSummands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
+        && scopedSummands.some((a) => scopedSummands.filter((b) => b !== a && b.value !== a.value).some((b) => a.value + b.value === amount.value));
       const totalFramed = TOTAL_FRAMING_RE.test(clause);
       const framed = windowOk
         && ((totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2

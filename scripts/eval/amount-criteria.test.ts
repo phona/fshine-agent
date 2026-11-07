@@ -221,6 +221,11 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(1200);
   });
 
+  it('blocking：求和豁免同值复用——"contoso-trade-item-2 record value is 1200 (600 + 600)"（该记录唯一真实值 600）', () => {
+    const v = classify('contoso-trade-item-2 record value is 1200 (600 + 600); please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+  });
+
   it('blocking：差额措辞豁免同句串台断言——"beta … is 1200, alpha … is 500, difference is 100"（前两笔直接断言各自串台）', () => {
     const v = classify('beta W1 record value is 1200, alpha W1 record value is 500, difference is 100; please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(1200);

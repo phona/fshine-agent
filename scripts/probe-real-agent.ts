@@ -1076,6 +1076,15 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
  * 无数据校准：该window的合法回复是"平台无数据"或"0 + 说明"，两者都不产生非零
  * 金额，本判定天然放行；仍只抓非零——"无数据"现在是合法且更好的行为，不是异常。
  */
+/**
+ * X1 第 1 轮的多对象计划面（2026-11-08 评审 major 重修）：原版是"同一账套四个独立期间"，
+ * dummy 夹具的 doQuery 对同一 collection 的所有 window 返回同一批 items——跨期数据链在
+ * 夹具里是空的（两期同值，正确跨期查询与复用单期结果无法区分）。改用**跨 collection**
+ * 计划（夹具能区分的维度：各 collection 的 items 互不相同），保住该轮独有的覆盖——宿主
+ * 多步计划申报 + 【第 N/M 步】步骤通知 + 跨步数字链；跨窗口轴如实降级为第 2 轮的
+ * window-miss 路径（beta 只有 W1，问 W2 考"该 window 无数据"的诚实收边）。
+ */
+const X1_PLAN_COLLECTIONS = ['alpha', 'beta', 'contoso-trade', 'fabrikam-retail'] as const;
 const X1_WINDOWS = ['W1', 'W2'] as const;
 const X1_WINDOW_NONZERO = 'W1';
 const X1_WINDOW_NONZERO_AMOUNT = 1200;
@@ -2034,7 +2043,7 @@ const CASES: Case[] = [
     },
   },
   {
-    // X1：2026-09-29 真实平台 8 轮复杂任务会话的 mock 复刻（跨期计划/换collection/召回/歧义/编号/
+    // X1：2026-09-29 真实平台 8 轮复杂任务会话的 mock 复刻（多对象计划/换collection/召回/歧义/编号/
     // 换window/写尝试/总结）。D-070（召回不给数）/D-071（总结塌缩）/D-072（名称类请求被会话实体
     // 代解析）三种今天的实测形态在此各有一个常驻格子。轮次连续性本身是被测物——8 轮一把发完，
     // 不重置会话。与任务原稿的适配（都源于 dummy 夹具事实，见上方事实源注释）：
@@ -2047,14 +2056,14 @@ const CASES: Case[] = [
     //      "contoso"是 contoso-trade / contoso-logistics 的共同自然名——非精确键、非截断词，
     //      模型会当名字委派，平台才回得了 COLLECTION_AMBIGUOUS；且前 3 轮已确立alpha，
     //      会话实体压力更大，正是 D-072"名称类请求被会话实体静默代解析"的复现窗口。
-    id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：跨期计划数字链、中途换collection、跨轮召回给数、歧义简称不被代解析、编号选择、换window、写尝试、总结不塌缩',
+    id: 'X1', group: 'X 复杂任务会话', intent: '8 轮连续会话：多对象计划数字链、中途换collection、跨轮召回给数、歧义简称不被代解析、编号选择、换window、写尝试、总结不塌缩',
     run: async () => {
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
       const fixed = [
-        'check alpha W1、W1、W2、W2 各期的record value',
+        'check alpha、beta、contoso-trade、fabrikam-retail 各 collection 的 W1 record value',
         '那 beta W2 的record value呢',
-        'just now，alpha 查到了哪几个月，数字是多少',
+        'just now，查到了哪几个 collection，数字是多少',
         'check contoso collection record value',
       ];
       for (const text of fixed) turns.push(await send(text));
@@ -2074,9 +2083,9 @@ const CASES: Case[] = [
       }
       await assembly.close();
       const script: ScriptLine[] = [
-        { text: fixed[0]!, tasks: ['A'] },
+        { text: fixed[0]!, tasks: ['A', 'B', 'C', 'D'] },
         { text: fixed[1]!, tasks: ['B'] },
-        { text: fixed[2]!, tasks: ['A'], past: true, recall: true },
+        { text: fixed[2]!, tasks: ['A', 'B', 'C', 'D'], past: true, recall: true },
         { text: fixed[3]!, tasks: ['C'] },
         ...(clarified ? [{ text: 'the second one', tasks: ['C'] as TaskId[] }] : []),
         { text: 'what about W2?', tasks: ['C'] },
@@ -2090,24 +2099,26 @@ const CASES: Case[] = [
       // 全轮执行语言指纹（A2/A4 同款尺）：歧义/写尝试/汇总轮都不得漏脚本路径、错误码、JSON、
       // operation 名、internal control term（quota|quota|circuit break|计划门|reject limit|retry limit，runtime.ts 同源）。
       for (const turn of turns) notes.push(...execLanguageLeakNotes(turn));
-      // ① T1（2 window 计划）：≥2 次平台调用、2 个 unique window 全部出现、唯一非零window W1=1200 必须呈现、
-      //    【第 N/M 步】步骤通知。数字链自洽不成立（W1=1200, W2=800 同值集），按既定回退只记事实不硬败。
+      // ① T1（4 collection 计划）：≥4 次平台调用、4 个 collection 全部出现、alpha W1=1200
+      //    必须呈现、【第 N/M 步】步骤通知。跨 collection 数据链各步互不相同（夹具 items 按
+      //    collection 区分），"正确分步查"与"合并成一次查"在数据上可区分。
       const t1 = turns[0]!;
-      if (t1.calls < 2) notes.push(`2 window 计划只产生 ${t1.calls} 次平台调用——有window没真查`);
-      const missing = X1_WINDOWS.filter((p) => !windowMentioned(t1.reply, p));
-      if (missing.length) notes.push(`第1轮回复缺window：${missing.join('、')}（mock 事实：W1=1200、W2=800，两window均有数据）`);
-      if (!extractAmounts(t1.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
-        notes.push(`第1轮未呈现 ${X1_WINDOW_NONZERO} 的真实balance ${X1_WINDOW_NONZERO_AMOUNT}`);
+      if (t1.calls < 4) notes.push(`4 collection 计划只产生 ${t1.calls} 次平台调用——有collection没真查`);
+      // 宿主 wind-down 感知（2026-11-08 X1 实测）：模型申报 4 步但只有第 1 步有平台执行，
+      // 宿主按 MAX_PLAN_ZERO_EXEC_STEPS 收尾，回复是收尾通告（无数据）——此时"缺 collection"
+      // 是收尾的后果不是独立缺陷，改记信息性 note（真实缺陷 = 申报了不执行的步骤，由宿主
+      // 收尾这一事实本身呈现）。
+      const woundDown = /计划执行已停止|后续步骤不再派发/.test(t1.reply);
+      if (woundDown) {
+        notes.push('（信息性）第1轮计划被宿主 wind-down 收尾：申报的步骤多数没有平台执行，数据改由后续轮次呈现');
+      } else {
+        const missing = X1_PLAN_COLLECTIONS.filter((name) => !t1.reply.includes(name));
+        if (missing.length) notes.push(`第1轮回复缺collection：${missing.join('、')}`);
+        if (!extractAmounts(t1.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
+          notes.push(`第1轮未呈现 alpha ${X1_WINDOW_NONZERO} 的真实值 ${X1_WINDOW_NONZERO_AMOUNT}`);
+        }
       }
-      // 已知特性（2026-11-07 实测记录，不是判据 bug）：dummy 夹具的 doQuery 对同一 collection
-      // 的所有 window 返回同一批 items（window 参数不筛 items），"W1、W1、W2、W2 各期"在数据上
-      // 是冗余的——模型据此把四期合并成单次委派（并明说"两次 W1/W2 返回相同结果，无需区分"），
-      // 不申报多步，步骤通知因此缺席。移植源 mock 的各期 balance 互不相同，"跨期计划"维度
-      // 有真实数据链可追；要恢复该维度须给夹具加 per-window 数据（doQuery 按 window 筛 items），
-      // 那会改动 generic-mock 基线与全用例的金额转录，不在本 PR 范围。此 note 每跑必现，
-      // 按 Tier B 手册/ nightly 口径人工读，不进每 push 门禁。
-      if (!hasStepMarker(t1)) notes.push('第1轮跨期计划无【第 N/M 步】步骤通知');
-      notes.push('（信息性）数字链自洽未硬断言：mock alpha W1=1200、W2=800 同值集，按既定回退只记事实不硬败。');
+      if (!hasStepMarker(t1)) notes.push('第1轮多对象计划无【第 N/M 步】步骤通知');
       // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为新兴的结果呈现（串台）。
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
       if (stale2.length) notes.push(`第2轮把旧collection（alpha）的数字作为beta的结果呈现（串台）：${formatAmounts(stale2)}`);
@@ -2117,12 +2128,12 @@ const CASES: Case[] = [
       if (!extractAmounts(t3.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
         notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
       }
-      const covered = X1_WINDOWS.filter((p) => windowMentioned(t3.reply, p)).length;
+      const covered = X1_PLAN_COLLECTIONS.filter((name) => t3.reply.includes(name)).length;
       // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是移植前语料的
       // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
       // 是"W1、W1、W2、W2 各期"与"just now，alpha 查到了哪几个月"，模型可能用月份区间复述）。
-      if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九|June\s*(?:to|–|-|—)\s*September|6\s*(?:-|to|–|—)\s*9/.test(t3.reply)) {
-        notes.push(`第3轮召回只覆盖 ${covered}/2 个window`);
+      if (covered < 2) {
+        notes.push(`第3轮召回只覆盖 ${covered}/${X1_PLAN_COLLECTIONS.length} 个collection`);
       }
       // 框定语（D-070）：与 recallFramingNote 同一判据的 X1 内联副本。两份刻意不合并——
       // recallFramingNote 收"此前"、X1 这份历史上不收，合并会顺带放宽 X1 的尺子；
@@ -2214,17 +2225,16 @@ const CASES: Case[] = [
       const domain = explorationDomainNote(turns[0]!);
       if (domain) notes.push(domain);
       // ② T1 D-073：本轮发生过 dummy.query 且唯一命中某个 collection（collectionQueryHits
-      //    按夹具 findCollection 语义复算）→ 该 collection 的 item 名必须出现在回复里
-      //    （数据在手不得踢回给用户）。查询词本身被呈现也算 surfaced——mock 命中响应只回显
-      //    查询词、规范 item 名模型无从得知。（items 只在信封 data 里，审计参数不带 item 名，
-      //    机械判不了"看到了但没呈现"，由人工看回复全文。）
+      //    按夹具 findCollection 语义 + window 有效性复算）→ 该 collection 的**规范 item 名**
+      //    必须出现在回复里（数据在手不得踢回给用户）。
+      //    2026-11-08 评审 major：原判据有"回复含 collection 名即算呈现"的回退——那是旧夹具
+      //    "命中响应只回显查询词、规范 item 名模型无从得知"的限制；dummy 夹具的成功查询返回
+      //    规范 item 名与值，该限制不存在，回退由此移除（"alpha 已查询，请提供更多信息"
+      //    不再算呈现）。（items 只在信封 data 里，审计参数不带 item 名，机械判不了"看到了
+      //    但没呈现"，由人工看回复全文。）
       const hits = collectionQueryHits(firstAudit);
       if (hits.length > 0) {
-        const surfaced = hits.some((name) => turns[0]!.reply.includes(name))
-          || firstAudit.some((record) => {
-            const collection = flagValue(record.args, '--collection');
-            return Boolean(collection) && turns[0]!.reply.includes(collection!);
-          });
+        const surfaced = hits.some((name) => turns[0]!.reply.includes(name));
         if (!surfaced) {
           notes.push(`D-073：第1轮collection查询有命中但回复未呈现查到的数据（数据在手不得踢回给用户）：命中 ${hits.join('、')}`);
         }
