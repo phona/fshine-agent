@@ -1,0 +1,35 @@
+# ============================================================
+# 仓内 eval 专用配置。
+# 不走平台根路径/配置路径类环境变量，改用提交进仓的 eval 配置 + 脚本侧解析。
+# 由脚本侧 resolve-config-path.ts 解析，全仓统一入口。
+#
+# 为什么只放一个 profile（stock）：
+#   resolveActiveProfileId 对「0 个或多个 profile 且未显式指定」返回
+#   undefined，消费方（createContextTaskRunner / resolveContextProfile）
+#   会 fail-closed 抛 CONTEXT_PROFILE_MISSING。eval 脚本走默认派生路径，
+#   未设 AGENT_CONFIG_PATH 时 assembly 只能从单 profile map 取到活跃项。
+#   多 profile + 显式选择是生产关注点（contextProfiles 一对多），
+#   由 config/agent.example.yaml 的 deploy 配置承载，不扩散到这里。
+# ============================================================
+
+# ---- 授权名单：eval 专用虚构 UserID，不泄漏真实身份 ----
+principals:
+  "wecom:eval-fixture-user":
+    accountSetScope: all
+    enabled: true
+
+# ---- 通用 Worker 的受信上下文（eval 用 stock 夹具） ----
+contextProfiles:
+  stock:
+    # 绝对路径：loadConfig 的 parseContextProfiles 要求 root 是绝对路径
+    # （packages/core/src/config.ts: 路径校验逻辑），相对路径会在启动时报错。
+    root: /home/fictional-user/repo/scripts/eval/fixtures/stock-platform
+    # 相对 root 的网关调用形式（host spawn 用它，不硬编码全路径）。
+    gateway: bin/stock
+    # 运行态技能面：按 fixture 实际结构填（stock-platform/skills-serve/stock-routing-examples/SKILL.md）。
+    # 生产部署用 .agents/skills-serve，但 fixtures 的 skills-serve 直接挂在 root 下。
+    skillRoots: ["./skills-serve"]
+    # Worker 单次任务预算（可选，默认 10 分钟）。eval 探针/验收以脚本超时为准，
+    # 这里留默认值即可；如需调参，在脚本侧通过 AGENT_CONFIG_PATH 指向打补丁的副本
+    #（参见 tests/e2e/harness.ts 的 patchProfile 模式）。
+    # workerTimeoutMs: 600000
