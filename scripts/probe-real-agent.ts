@@ -247,8 +247,10 @@ function ledgerCalls(): number {
   const file = process.env['EXECUTION_PLAN_STATE'];
   if (!file || !existsSync(file)) return 0;
   try {
-    const state = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: Record<string, { actual?: { calls?: number } }> };
-    return Object.values(state.tasks ?? {}).reduce((sum, task) => sum + (task.actual?.calls ?? 0), 0);
+    const state = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: Record<string, { actual?: { calls?: number } }>; plans?: Record<string, { actual?: { calls?: number } }> };
+    const taskCalls = Object.values(state.tasks ?? {}).reduce((sum, task) => sum + (task.actual?.calls ?? 0), 0);
+    const planCalls = Object.values(state.plans ?? {}).reduce((sum, plan) => sum + (plan.actual?.calls ?? 0), 0);
+    return taskCalls + planCalls;
   } catch { return 0; }
 }
 
