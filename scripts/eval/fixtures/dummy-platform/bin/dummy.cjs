@@ -202,8 +202,8 @@ function seedState() {
       'contoso-trade': { items: [{ id: 'rec-401', name: 'contoso-trade-item-1', value: 1500 }, { id: 'rec-402', name: 'contoso-trade-item-2', value: 600 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
       'contoso-logistics': { items: [{ id: 'rec-501', name: 'contoso-logistics-item-1', value: 450 }], windows: ['W1'], locked: false, records: { W1: 1 } },
       // 自然名歧义对 2（C2 第二次澄清）：查询 "fabrikam" → 子串命中两个 → 歧义。
-      // 与 contoso 对分开，避免同一歧义样本反复考同一条路径（原 17dz 语料的
-      // 幻辰财税/幻辰实业 与 新兴五金/新兴建材 两对同款设计）。
+      // 与 contoso 对分开，避免同一歧义样本反复考同一条路径（移植前中文财税域语料的
+      // 两对公司名歧义对同款设计）。
       'fabrikam-retail': { items: [{ id: 'rec-601', name: 'fabrikam-retail-item-1', value: 880 }], windows: ['W1'], locked: false, records: { W1: 1 } },
       'fabrikam-wholesale': { items: [{ id: 'rec-701', name: 'fabrikam-wholesale-item-1', value: 1320 }], windows: ['W1'], locked: false, records: { W1: 1 } },
     },

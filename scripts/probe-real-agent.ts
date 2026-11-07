@@ -610,7 +610,7 @@ const EN_STOPWORD_PREFIX = /^(?:which|the|a|an|this|that|these|those|it|they|we|
 
 /**
  * dummy 域的"具体对象名"形态：<collection>-item-<序号>（夹具 seedState() 的 items[].name，
- * 如 alpha-item-1 / contoso-trade-item-1 / locked-item-1）。原 17dz 域靠公司后缀识别
+ * 如 alpha-item-1 / contoso-trade-item-1 / locked-item-1）。移植前的中文财税域靠公司后缀识别
  * 对象名，dummy 域没有这类构词法——忠实对位是 items 的命名约定本身，已从夹具读出而非臆造。
  * 没有这一族时 namedItems/referentialBreak/H2 收窄判定在 dummy 域恒不命中（对象名
  * 一个都抽不到），正是本轮要消除的 vacuous check。
@@ -748,7 +748,7 @@ function requeryMismatch(turns: Turn[], script: ScriptLine[], index: number): Am
 
 /**
  * mock 的"具体对象名"全集（dummy 夹具 seedState() 的 collections[*].items[].name）。
- * 原 17dz 域这里是 alphacustomer辅助档案三家（epsilon-item LLC / delta-item LLC /
+ * 移植前这里按 collection 列的 customer 辅助档案三家（epsilon-item LLC / delta-item LLC /
  * gamma-item），dummy 夹具里**没有 customer 维度**，这三名是端口残留、在夹具中无对位
  * 实体——留着只会让 namedItems 匹配永不出现的字符串。改为逐个从夹具抄录的真实 item 名，
  * 语义同构：判定只问"回复有没有落到具体对象"，不关心对象在真实平台叫什么。
@@ -979,8 +979,8 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
  * 为什么必须是自然名而不是 "alph" 这类截断词：夹具的匹配语义是精确键优先、其后平台名
  * includes 查询词——"alpha"是精确键直接命中不歧义，要造歧义只能用非精确共同子串。但
  * "alph/alp" 这类截断词在英文里读作缩写，模型把它当"指代不明"直接问用户全名，根本不委派
- * 平台，候选清单永远等不到（2026-11-07 实测：A3 零平台调用、澄清形状 0/2）。原 17dz 语料
- * 用"幻辰"命中 幻辰财税/幻辰实业——同一个设计：查询词是自然名，不是键，也不是截断词。
+ * 平台，候选清单永远等不到（2026-11-07 实测：A3 零平台调用、澄清形状 0/2）。移植前的中文
+ * 财税语料用白名命中两个公司全名——同一个设计：查询词是自然名，不是键，也不是截断词。
  * 机械断言面（generic-mock.ts 的 alp→alpha,alpha-group）不受影响，仍走截断词通道。
  */
 const CONTOOSO_AMBIGUOUS_CANDIDATES = ['contoso-trade', 'contoso-logistics'];
@@ -988,7 +988,7 @@ const CONTOOSO_AMBIGUOUS_CANDIDATES = ['contoso-trade', 'contoso-logistics'];
 /**
  * 自然名歧义对 2：查询 "fabrikam" → 子串命中 fabrikam-retail 与 fabrikam-wholesale。
  * C2 用它做第二次澄清-选择——与 contoso 对分开，避免同一歧义样本反复考同一条路径
- * （原 17dz 语料的 新兴五金/新兴建材 同款设计）。候选顺序 = Object.keys(collections)
+ * （移植前中文财税语料的两对公司名歧义对同款设计）。候选顺序 = Object.keys(collections)
  * 键序（夹具按目录键序过滤），"第一个/the second one"因此可预期。
  */
 const FABRIKAM_AMBIGUOUS_CANDIDATES = ['fabrikam-retail', 'fabrikam-wholesale'];
@@ -1020,7 +1020,7 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 //     无数据键 → mock 回 not_found + PERIOD_NO_DATA。
 //   · **dummy 夹具没有 customer 维度**（2026-11-07 端口对账：OPERATIONS 里唯一的读操作是
 //     dummy.query --collection <name> [--window W1|W2]，collections 里只有 items）。原
-//     17dz 的"customer辅助档案"（alpha 3 家、alpha-group 1 家）在夹具中无对位实体，
+//     移植前域的"customer辅助档案"（alpha 3 家、alpha-group 1 家）在夹具中无对位实体，
 //     同源判据（D-073：平台查到的数据不踢回给用户）改按"查询真实命中的 collection 的
 //     items"度量，见 MOCK_ITEMS 与 collectionQueryHits。
 //   · scenarios.closedPeriods=["W1"] 只挡写路径（保存拒绝），读路径不拦；query-receivables
@@ -1049,7 +1049,7 @@ const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'contoso-tr
 
 /**
  * mock 各 collection 的 item 清单（X2 第1轮 D-073 判定的"数据在手"依据）。
- * 原 17dz 域这里是按 collection 列的 customer辅助档案（alpha 3 家 / alpha-group 1 家），
+ * 移植前这里是按 collection 列的 customer 辅助档案（alpha 3 家 / alpha-group 1 家），
  * dummy 夹具没有 customer 维度，同源判据改按"查询真实命中的 collection 的 items"度量：
  * 模型查过 collection X 之后，X 的 item 名就是它手上有的数据。
  * 名单逐个抄自 scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState()
@@ -1071,7 +1071,7 @@ const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
 /**
  * mock window 码表（Y2 错误态金额判定的"有所属"依据）。
  *
- * 决策记录（原 MOCK_WINDOWS = [] 的端口缺陷）：原 17dz 这里是**field 码表**（码与名成对，
+ * 决策记录（原 MOCK_WINDOWS = [] 的端口缺陷）：移植前这里是**field 码表**（码与名成对，
  * 从 mock-state.json 各 collection 的 subjects 并集读出），dummy 夹具**没有 field 维度**
  * （dummy.query 只声明 --collection/--window，见 OPERATIONS），端口时留成空数组。空数组让
  * errorStateNotes 的归属豁免 `!MOCK_WINDOWS.some(...)` 恒为真——每一笔非零金额都被判
@@ -1085,7 +1085,7 @@ const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
  * window 码，语义同构：金额所在分句点名了**用户没问的 window 码**即"有所属"（那是模型
  * 在引用手头别的真实数据），挂在所问 window 上或无所属才红。
  * 夹具只有码没有人类别名，故 name 与 code 同值（windowMentioned 的 YYYYMM 分支原样保留，
- * 兼容 17dz 语料里 "2026年06月" 这类月份读法）。
+ * 兼容移植前语料里 "2026年06月" 这类月份读法）。
  */
 const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [
   { code: 'W1', name: 'W1' },
@@ -1200,7 +1200,7 @@ function executedWriteCalls(records: AuditRecord[]): number {
 /**
  * dummy.query 命中返回的 item 名：D-073（平台查到的数据不踢回给用户 / 不编造）的"数据在手"依据。
  *
- * X2 重端口说明（2026-11-07）：原 17dz 版读 `query-receivables` 脚本 + `--customer` flag，
+ * X2 重端口说明（2026-11-07）：移植前版本读 `query-receivables` 脚本 + `--customer` flag，
  * 按 mock 的 customer辅助档案复算命中。dummy 域**没有 customer 维度**——唯一读操作是
  * `dummy.query --collection <name> [--window W1|W2]`（OPERATIONS 声明），夹具 collections
  * 里只有 items。同一判据的意图（"平台查到的数据不踢回给用户"）改按查询真正命中的
@@ -2112,7 +2112,7 @@ const CASES: Case[] = [
         notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
       }
       const covered = X1_WINDOWS.filter((p) => windowMentioned(t3.reply, p)).length;
-      // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是原 17dz 语料的
+      // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是移植前语料的
       // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
       // 是"W1、W1、W2、W2 各期"与"just nowalpha查到了哪几个月"，模型可能用月份区间复述）。
       if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九|June\s*(?:to|–|-|—)\s*September|6\s*(?:-|to|–|—)\s*9/.test(t3.reply)) {
