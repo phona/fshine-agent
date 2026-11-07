@@ -216,8 +216,9 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
 /**
  * 错误态回复的金额三分归类（errorStateNotes 的判定核，探针只做 note 文案组装）：
  *   · 有所属（放行）＝ 分句点名用户没问的 window 码或真实数据标识（pointed），且过了
- *     实体绑定（分句点名实体时金额须属于**最具体**的那个实体，或可由该实体自身真实值
- *     算得——"beta 合计 800" 是 500+300 的诚实账，"beta-item-1 … is 300" 蹭不来）、
+ *     实体绑定（金额按出现位置绑到**最近一次未作废提及**——长名跨度内的短名提及作废、
+ *     独立短名提及保留；或可由所绑实体真实值算得——"beta 合计 800" 是 500+300 的诚实账，
+ *     "beta-item-1 … is 300" 蹭不来）、
  *     window×实体有效性（windowClaimOk）与全局值核对；
  *   · 算术派生（信息性）＝ 加数在**同一分句**里可见（原判据），或分句带算术框架措辞且
  *     数字过与措辞同族的验证（合计族=子集和 isVerifiedTotal，差额/倍数族=isVerifiedArithmetic）
@@ -265,13 +266,35 @@ export function classifyErrorStateAmounts(
       const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
         && (clause.includes(subject.code) || clause.includes(subject.name)))
         || REAL_DATA_TOKENS.some((token) => clause.includes(token));
-      // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
-      // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
-      // 直接陈述的值**严格**等于该实体真实值才算对上（2026-11-07 评审 blocking：算术豁免
-      // 放过"contoso-trade-item-2 is 1200"——item 真实 600，1200=600+600 且是别的实体的
-      // 种子值；算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
-      const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
-      const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
+      // 实体绑定：按**出现位置**处理名称重叠（2026-11-08 评审 blocking）——短名的某一次
+      // 出现若落在更长名出现的跨度内，作废的只是那一次（beta ⊂ beta-item-1、alpha ⊂
+      // alpha-group 的那一次），不是整句剔除："alpha-group … is 700, alpha … is 700" 的
+      // 第二笔 700 须绑到后半句**独立的** alpha（真实 1200/800）——整句剔除会把独立 alpha
+      // 一并丢掉，串台金额挂到 alpha-group（真实恰为 700）上全绿。直接陈述的值**严格**等于
+      // 所绑实体真实值才算对上（2026-11-07 评审 blocking：算术豁免放过
+      // "contoso-trade-item-2 is 1200"——item 真实 600，1200=600+600 且是别的实体的种子值；
+      // 算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
+      const mentions: Array<{ entity: { name: string; values: readonly number[] }; at: number }> = [];
+      for (const entity of ENTITY_REAL_VALUES) {
+        for (let from = 0; ;) {
+          const at = clause.indexOf(entity.name, from);
+          if (at < 0) break;
+          const end = at + entity.name.length;
+          const shadowed = ENTITY_REAL_VALUES.some((other) => {
+            if (other.name.length <= entity.name.length) return false;
+            for (let o = 0; ;) {
+              const oat = clause.indexOf(other.name, o);
+              if (oat < 0) return false;
+              if (oat <= at && oat + other.name.length >= end) return true;
+              o = oat + 1;
+            }
+          });
+          if (!shadowed) mentions.push({ entity, at });
+          from = at + 1;
+        }
+      }
+      mentions.sort((a, b) => a.at - b.at);
+      const specific = [...new Map(mentions.map((m) => [m.entity.name, m.entity])).values()];
       // 断言绑定（2026-11-08 评审 blocking 两连修）：金额必须绑定到**它所断言的那个实体**，
       // 且**每一次出现各自绑定**——不是"任一点名的实体"，也不是只绑首次出现。
       //   · "beta W1 … is 1200, alpha W1 … is 500"：两笔都串台，却因分句同时点名两个实体、
@@ -291,19 +314,15 @@ export function classifyErrorStateAmounts(
         from = at + amount.raw.length;
       }
       const bindings = positions.map((at) => {
-        const mentionAt = specific
-          .filter((entity) => clause.lastIndexOf(entity.name, at) >= 0)
-          .sort((a, b) => clause.lastIndexOf(b.name, at) - clause.lastIndexOf(a.name, at))[0];
-        const start = mentionAt === undefined ? 0 : clause.lastIndexOf(mentionAt.name, at);
-        const end = specific
-          .filter((entity) => clause.indexOf(entity.name, at) > at)
-          .reduce((min, entity) => Math.min(min, clause.indexOf(entity.name, at)), clause.length);
-        const segment = clause.slice(start, end);
+        let mention: { entity: { name: string; values: readonly number[] }; at: number } | undefined;
+        for (const m of mentions) { if (m.at > at) break; mention = m; }
+        const next = mentions.find((m) => m.at > at);
+        const segment = clause.slice(mention ? mention.at : 0, next ? next.at : clause.length);
         return {
-          valueOk: mentionAt === undefined
+          valueOk: mention === undefined
             ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
-            : mentionAt.values.includes(amount.value),
-          windowOk: windowClaimOk(segment, mentionAt === undefined ? specific : [mentionAt]),
+            : mention.entity.values.includes(amount.value),
+          windowOk: windowClaimOk(segment, mention === undefined ? specific : [mention.entity]),
         };
       });
       const entityOk = bindings.every((b) => b.valueOk);

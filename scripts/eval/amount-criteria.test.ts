@@ -221,12 +221,30 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(600);
     expect(v.derived.map((a) => a.value)).not.toContain(600);
   });
+
+  it('blocking：名称重叠按出现位置作废——"alpha-group … is 700, alpha … is 700"（第二笔须绑独立 alpha，真实 1200/800）', () => {
+    const v = classify('alpha-group record value is 700, alpha record value is 700');
+    expect(v.unattributed.map((a) => a.value)).toContain(700);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('blocking：长名跨度内的短名提及不进绑定池——"beta-item-1 record value is 500, total is 800"（800=500+300 是 collection 级账，item 级只有 500）', () => {
+    const v = classify('beta-item-1 record value is 500, total is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived).toEqual([]);
+  });
 });
 
 describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿）', () => {
   it('合计实计正确——"values are 500, 300, 200, total is 1000"（非负子集和成立）', () => {
     const v = classify('beta W1 record values are 500, 300, 200, total is 1000', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
+  });
+
+  it('重叠名各自独立提及——"alpha-group … is 700, alpha … is 1200"（各绑各的真实值）', () => {
+    const v = classify('alpha-group record value is 700, alpha record value is 1200');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
   });
 });
 
