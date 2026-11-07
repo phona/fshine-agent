@@ -1,0 +1,194 @@
+/**
+ * 金额判据纯核（探针 errorStateNotes / amountNote 共用的**单一来源**，无 I/O、不跑模型）。
+ *
+ * 抽出原因（2026-11-07 评审 blocking：错误态实体绑定要有反例的变异测试）：探针
+ * scripts/probe-real-agent.ts 顶层就跑 main()（真实 LLM 装配），测试无法 import；纯核
+ * 抽到这里后 amount-criteria.test.ts 才能把评审的反例形态钉成表征锁。夹具事实表在
+ * dummy-fixture.ts（单一转录点），本模块只做判定。
+ */
+
+import {
+  ENTITY_REAL_VALUES,
+  MOCK_COLLECTION_WINDOWS,
+  MOCK_WINDOWS,
+  REAL_DATA_TOKENS,
+  REAL_DATA_VALUES,
+} from './dummy-fixture';
+
+/**
+ * 分句切分：中日标点 + 英文句点。英文句点必须进集合——否则一整段英文只有一个"分句"，
+ * accountProcessed / staleScopeAmounts / windowSwitchAmounts / errorStateNotes 的
+ * 分句归属全部失效（旧collection名出现在段落任何位置就把陈旧金额赦免掉）。
+ * 小数点护栏：**只有夹在两个数字之间的点不切**（1,200.00 完整保留）。这里比直觉形式
+ * `(?<!\d)\.(?!\d)` 更宽一档——后者连"…is 500. locked-one…"这种以数字结尾的句子也不切，
+ * 而那正是英文回复里最常见的形态（金额结尾句 + 下一句），不切就等于分句归属在最该起作用的
+ * 地方失效。各站点同一把尺（本常量即单一来源）。
+ */
+export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
+
+/**
+ * 算术框架措辞（中英）：模型自己标注"这是算出来的"——高出/相差/合计/多出/倍数/total/
+ * difference/combined/higher by…。与 isDerivedAmount 的配对求和取差合起来判定"诚实算术"，
+ * 覆盖 ratio 形态（"约为其 4.7 倍"不是任何两个真实值的和差，但是标好的算术）。
+ * 第二个条件（调用处判）= 同一回复里有 ≥2 个真实数值——模型把账摊开了（show your work），
+ * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。且该数字须过 isVerifiedArithmetic
+ * 具体验证（2026-11-07 评审 blocking：措辞不能豁免算不出来的数，"difference 999999" 照旧红）。
+ * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
+ * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
+ */
+export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
+
+/**
+ * 由已查数字算术得出的新数值（汇总/对比轮的合计、差额）：等于基集里某两个的和或差。
+ * 宿主无法在"算术"与"编造"间确定性区分（§9 记录的同族问题），探针侧只把"算不出来"的金额送审。
+ */
+export function isDerivedAmount(value: number, base: Set<number>): boolean {
+  const values = [...base];
+  return values.some((a) => values.some((b) => a + b === value || Math.abs(a - b) === value));
+}
+
+/**
+ * 具体验证（2026-11-07 评审 blocking：算术措辞不能豁免任意错误数字）：带算术框架措辞的
+ * 数字不再仅凭"措辞 + 回复里有 ≥2 个真实值"降信息性——那放得过宽，"Earlier: 1500 and
+ * 450; difference 999999" 里 999999 蹭 difference 的车就溜过去了。降级前须验证该数字
+ * 确由真实值算得：
+ *   · 和/差：两两配对，含两级——"contoso-trade 比 logistics 高出 1650" =
+ *     (1500+600)−450，先合计再比较的中间和 2100 不是种子值（2026-11-07 C2 第 13/25 轮
+ *     实测形态："相差 100" = 2100−2000 同为两级差）；
+ *   · 倍数：与真实值两两的商（1 位小数舍入）一致——"约为其 4.7 倍" = 2100/450≈4.7，
+ *     商集含一级和差值（2100 本身是 1500+600 的和）。
+ * 算不出来的数字照旧硬红（评审原话：无法验证的数字保留硬失败）。
+ */
+export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
+  const base = [...new Set(pool)];
+  if (isDerivedAmount(value, new Set(base))) return true;
+  const level1: number[] = [];
+  for (const a of base) {
+    for (const b of base) {
+      level1.push(a + b, Math.abs(a - b));
+    }
+  }
+  const pool2 = [...base, ...level1];
+  if (isDerivedAmount(value, new Set(pool2))) return true;
+  return pool2.some((a) => pool2.some((b) => b !== 0
+    && (Math.round((a / b) * 10) / 10 === value || Math.round((b / a) * 10) / 10 === value)));
+}
+
+/** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
+export function askedWindows(userText: string): Set<string> {
+  const asked = new Set<string>();
+  for (const subject of MOCK_WINDOWS) {
+    if (userText.includes(subject.name)) { asked.add(subject.code); asked.add(subject.name); }
+    if (userText.includes(subject.code)) asked.add(subject.code);
+  }
+  return asked;
+}
+
+/**
+ * 错误态金额的口径绑定（2026-11-07 评审 blocking）：金额所在分句把平台没有的口径当答案
+ * 口径（"beta payable balance is 500"——500 确是 beta-item-1 的真实 record value，但
+ * 夹具权威 schema 只有 records{name,value}，即 record value 一个口径），静默回落照红。
+ * 口径词表按语料实据收：payable（Y2 T3 问句、corpus）、bank（acceptance 6.4/7.5 问句、
+ * 探针 field 词表）、debt（corpus）；record value / value / balance 是夹具口径或回复侧
+ * 中性金额词（语料诚实形态 "balance 500"），不收。分句带否定/让步限定（"平台没有
+ * payable""no payable caliber""只有 record value"）是诚实澄清不是断言，不触发——诚实
+ * 形态（"平台没有 payable 这个口径，beta W1 的 record value 是 500/300/200"）里口径词
+ * 与否定限定同分句（CLAUSE_SPLIT 不切省略号/逗号），分句级判定恰好覆盖；断言形态
+ * （"beta payable balance is 500; please confirm"）的分句没有否定词，照红。
+ * 无法确定性区分的残余形态（否定词被反用、"not" 蹭车）按 §9 惯例交 Tier B 评审读。
+ */
+export const MISSING_CALIBERS: readonly string[] = ['payable', 'bank', 'debt'];
+export const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\bwithout\b|\blacks?\b|\bonly\b|\binstead\b|\bneither\b/i;
+
+/** 判据输入的最小金额形状（探针传自己的 extractAmounts 产物，保留 raw/confident 供回显）。 */
+export interface AmountLike {
+  raw: string;
+  value: number;
+  confident?: boolean;
+}
+
+export interface AssertedCaliber {
+  caliber: string;
+  clause: string;
+}
+
+export interface ErrorStateAmountVerdict {
+  /** 无所属（红）：既无可绑定实体/window，也不是可验证的算术。 */
+  unattributed: AmountLike[];
+  /** 算术派生（信息性）：加数在分句或全回复里可见，且数字算得出来。 */
+  derived: AmountLike[];
+  /** 口径编造（红）：分句把平台没有的口径当答案口径。 */
+  assertedCalibers: AssertedCaliber[];
+}
+
+/**
+ * window×实体有效性（2026-11-07 评审 blocking 反例）："beta W2 record value is 500"
+ * ——beta 种子只有 W1，夹具对 (beta, W2) 回 WINDOW_NO_DATA，任何挂上该组合的金额都无据。
+ * 分句出现 W<数字> 形态的 window 词元且点名了具体实体时：每个词元要么是某点名实体的有效
+ * window，要么在句内紧邻"无数据"类免责措辞（"窗口 W2、W3 均无数据"是诚实说明不是断言）。
+ * 没点名实体的分句不判（window 码证据路径的金额常不带实体名，退回全局值核对）。
+ */
+function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>): boolean {
+  if (!specific.length) return true;
+  const tokens = [...new Set(clause.match(/W\d{1,3}/g) ?? [])];
+  if (!tokens.length) return true;
+  return tokens.every((token) => {
+    if (specific.some((entity) => (MOCK_COLLECTION_WINDOWS[entity.name] ?? []).includes(token))) return true;
+    return new RegExp(`${token}[^。；;\\n]{0,12}(?:无数据|没有数据|no data)`, 'i').test(clause);
+  });
+}
+
+/**
+ * 错误态回复的金额三分归类（errorStateNotes 的判定核，探针只做 note 文案组装）：
+ *   · 有所属（放行）＝ 分句点名用户没问的 window 码或真实数据标识（pointed），且过了
+ *     实体绑定（分句点名实体时金额须属于**最具体**的那个实体——"beta-item-1 … is 300"
+ *     不能蹭 collection 级 beta 值集里 beta-item-3 的 300，子串层 some 是放行漏洞，
+ *     2026-11-07 评审 blocking）、window×实体有效性（windowClaimOk）与全局值核对；
+ *   · 算术派生（信息性）＝ 加数在**同一分句**里可见（原判据），或分句带算术框架措辞且
+ *     加数池扩大到**全回复**的真实值、数字过 isVerifiedArithmetic 具体验证——表格摊账
+ *     形态（加数 500/300/200 在表格行、合计 1000 在散文句）分句级看不见，2026-11-07
+ *     Y2 实测被误判"无所属"，和值诚实、账摊开了，属算术可见不是编造；
+ *   · 无所属（红）＝ 其余；口径编造独立成第三类（assertedCalibers，同样红）。
+ * 零值不算金额（调用方过滤）；分句按数值边界重匹配（裸串 includes 会把 "500" 命中进 "1500"）。
+ */
+export function classifyErrorStateAmounts(
+  reply: string,
+  userText: string,
+  extractAmounts: (text: string) => AmountLike[],
+): ErrorStateAmountVerdict {
+  const asked = askedWindows(userText);
+  const unattributed: AmountLike[] = [];
+  const derived: AmountLike[] = [];
+  const asserted = new Map<string, string>();
+  // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
+  // 500/300/200 推出 1000；凭空数即便带"合计"措辞也推不出来，照旧红。
+  const replyRealValues = [...new Set(extractAmounts(reply).map((a) => a.value).filter((v) => REAL_DATA_VALUES.includes(v)))];
+  for (const amount of extractAmounts(reply)) {
+    if (amount.value === 0) continue;
+    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
+    const clause = reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
+    // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
+    const caliber = MISSING_CALIBERS.find((c) => clause.includes(c) && !CALIBER_DISCLAIM_RE.test(clause));
+    if (caliber) { asserted.set(caliber, clause); continue; }
+    // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
+    const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
+      && (clause.includes(subject.code) || clause.includes(subject.name)))
+      || REAL_DATA_TOKENS.some((token) => clause.includes(token));
+    // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
+    // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
+    const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
+    const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
+    const entityOk = specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value));
+    const windowOk = windowClaimOk(clause, specific);
+    if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
+    const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
+    const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
+    const framed = ARITHMETIC_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, replyRealValues);
+    if (isSum || framed) derived.push(amount); else unattributed.push(amount);
+  }
+  return {
+    unattributed,
+    derived,
+    assertedCalibers: [...asserted].map(([caliber, clause]) => ({ caliber, clause })),
+  };
+}

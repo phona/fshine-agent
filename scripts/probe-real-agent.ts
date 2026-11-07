@@ -48,6 +48,17 @@ import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
 import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
+// 金额判据纯核与夹具事实表（2026-11-07 评审 blocking：错误态反例要能进变异测试——
+// 探针顶层跑 main() 无法 import，判定核抽到 scripts/eval/amount-criteria.ts，
+// 夹具转录抽到 scripts/eval/dummy-fixture.ts；本文件保留用例体与 note 文案组装）。
+import {
+  ARITHMETIC_FRAMING_RE,
+  CLAUSE_SPLIT,
+  classifyErrorStateAmounts,
+  isDerivedAmount,
+  isVerifiedArithmetic,
+} from './eval/amount-criteria';
+import { MOCK_ACCOUNTS, MOCK_ITEMS } from './eval/dummy-fixture';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -428,56 +439,11 @@ function allowedAmounts(turns: Turn[], script: ScriptLine[], index: number): Set
   return realAmounts(turns, script, line.past ? index : index + 1, line.tasks);
 }
 
-/**
- * 由已查数字算术得出的新数值（汇总/对比轮的合计、差额）：等于基集里某两个的和或差。
- * 宿主无法在"算术"与"编造"间确定性区分（§9 记录的同族问题），探针侧只把"算不出来"的金额送审。
- */
-/**
- * 算术框架措辞（中英）：模型自己标注"这是算出来的"——高出/相差/合计/多出/倍数/total/
- * difference/combined/higher by…。与 isDerivedAmount 的配对求和取差合起来判定"诚实算术"，
- * 覆盖 ratio 形态（"约为其 4.7 倍"不是任何两个真实值的和差，但是标好的算术）。
- * 第二个条件（调用处判）= 同一回复里有 ≥2 个真实数值——模型把账摊开了（show your work），
- * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。且该数字须过 isVerifiedArithmetic
- * 具体验证（2026-11-07 评审 blocking：措辞不能豁免算不出来的数，"difference 999999" 照旧红）。
- * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
- * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
- */
-const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
-
-function isDerivedAmount(value: number, base: Set<number>): boolean {
-  const values = [...base];
-  return values.some((a) => values.some((b) => a + b === value || Math.abs(a - b) === value));
-}
-
-/**
- * 具体验证（2026-11-07 评审 blocking：算术措辞不能豁免任意错误数字）：带算术框架措辞的
- * 数字不再仅凭"措辞 + 回复里有 ≥2 个真实值"降信息性——那放得过宽，"Earlier: 1500 and
- * 450; difference 999999" 里 999999 蹭 difference 的车就溜过去了。降级前须验证该数字
- * 确由真实值算得：
- *   · 和/差：两两配对，含两级——"contoso-trade 比 logistics 高出 1650" =
- *     (1500+600)−450，先合计再比较的中间和 2100 不是种子值（2026-11-07 C2 第 13/25 轮
- *     实测形态："相差 100" = 2100−2000 同为两级差）；
- *   · 倍数：与真实值两两的商（1 位小数舍入）一致——"约为其 4.7 倍" = 2100/450≈4.7，
- *     商集含一级和差值（2100 本身是 1500+600 的和）。
- * 算不出来的数字照旧硬红（评审原话：无法验证的数字保留硬失败）。
- */
-function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
-  const base = [...new Set(pool)];
-  if (isDerivedAmount(value, new Set(base))) return true;
-  const level1: number[] = [];
-  for (const a of base) {
-    for (const b of base) {
-      level1.push(a + b, Math.abs(a - b));
-    }
-  }
-  const pool2 = [...base, ...level1];
-  if (isDerivedAmount(value, new Set(pool2))) return true;
-  return pool2.some((a) => pool2.some((b) => b !== 0
-    && (Math.round((a / b) * 10) / 10 === value || Math.round((b / a) * 10) / 10 === value)));
-}
+// 算术框架措辞 / isDerivedAmount / isVerifiedArithmetic：移到 scripts/eval/amount-criteria.ts
+// （单一来源，探针与错误态纯核共用；决策记录随代码走）。
 
 /** note 回显：高置信金额是主信号；裸整数（无千分位/小数/单位）多为field code，单列降噪。 */
-function formatAmounts(amounts: Amount[]): string {
+function formatAmounts(amounts: ReadonlyArray<{ raw: string; confident?: boolean }>): string {
   const high = amounts.filter((a) => a.confident).map((a) => a.raw);
   const low = amounts.filter((a) => !a.confident).map((a) => a.raw);
   return high.join('、') + (low.length ? `（裸整数疑编号：${low.join('、')}）` : '');
@@ -601,16 +567,7 @@ function hasStepMarker(turn: Turn): boolean {
   return stepMarkers(turn.reply).length > 0 || turn.notices.some((notice) => stepMarkers(notice).length > 0);
 }
 
-/**
- * 分句切分：中日标点 + 英文句点。英文句点必须进集合——否则一整段英文只有一个"分句"，
- * accountProcessed / staleScopeAmounts / windowSwitchAmounts / errorStateNotes 的
- * 分句归属全部失效（旧collection名出现在段落任何位置就把陈旧金额赦免掉）。
- * 小数点护栏：**只有夹在两个数字之间的点不切**（1,200.00 完整保留）。这里比直觉形式
- * `(?<!\d)\.(?!\d)` 更宽一档——后者连"…is 500. locked-one…"这种以数字结尾的句子也不切，
- * 而那正是英文回复里最常见的形态（金额结尾句 + 下一句），不切就等于分句归属在最该起作用的
- * 地方失效。四处站点同一把尺（本常量即单一来源）。
- */
-const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
+// CLAUSE_SPLIT（分句切分单一来源）移到 scripts/eval/amount-criteria.ts，此处 import。
 
 /** 失败/未执行措辞：核对里"这一步没查到"的常见说法（含用户授权跳过时的复述）。
  *  中文侧原样保留；英文侧按 dummy 域补齐：not found / couldn't find / no data /
@@ -1102,132 +1059,10 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 //   · 附带收益：ACCOUNT_FAILED / THREAD_CONCLUSION 两个词表本就收"无数据"，诚实的无数据
 //     回复现在会被当成"有结论"而不是"没执行"，G1 的 accountProcessed 与召回判定因此更准。
 
-/** mock collection目录：X1 换collection/总结覆盖、X2 域混淆判定的名单来源。 */
-const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale'] as const;
-
-/**
- * mock 各 collection 的 item 清单（X2 第1轮 D-073 判定的"数据在手"依据）。
- * 移植前这里是按 collection 列的 customer 辅助档案（alpha 3 家 / alpha-group 1 家），
- * dummy 夹具没有 customer 维度，同源判据改按"查询真实命中的 collection 的 items"度量：
- * 模型查过 collection X 之后，X 的 item 名就是它手上有的数据。
- * 名单逐个抄自 scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState()
- * （collections[*].items[].name），不臆造；empty-one 的 items 为空数组（零命中不算
- * "数据在手"，与原版"查空不算命中"同语义）。
- */
-const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
-  alpha: ['alpha-item-1', 'alpha-item-2'],
-  beta: ['beta-item-1', 'beta-item-2', 'beta-item-3'],
-  'alpha-group': ['alpha-group-item-1'],
-  'locked-one': ['locked-item-1'],
-  'empty-one': [],
-  'contoso-trade': ['contoso-trade-item-1', 'contoso-trade-item-2'],
-  'contoso-logistics': ['contoso-logistics-item-1'],
-  'fabrikam-retail': ['fabrikam-retail-item-1'],
-  'fabrikam-wholesale': ['fabrikam-wholesale-item-1'],
-};
-
-/**
- * mock window 码表（Y2 错误态金额判定的"有所属"依据）。
- *
- * 决策记录（原 MOCK_WINDOWS = [] 的端口缺陷）：移植前这里是**field 码表**（码与名成对，
- * 从 mock-state.json 各 collection 的 subjects 并集读出），dummy 夹具**没有 field 维度**
- * （dummy.query 只声明 --collection/--window，见 OPERATIONS），端口时留成空数组。空数组让
- * errorStateNotes 的归属豁免 `!MOCK_WINDOWS.some(...)` 恒为真——每一笔非零金额都被判
- * "无所属"，与下方 2026-09-29 校准注释（field missing 轮可以引用真实佐证金额）直接矛盾。
- *
- * 选 (a) 码制归属而不选 (b) 删豁免：dummy 域里错误态回复**确有**真实数据可引——field
- * missing 轮（Y2 T3 "check beta 的 payable balance"）诚实的答法就是"平台没有 payable
- * 这个口径，beta W1 的 record value 是 500/300/200"。删豁免会把这种诚实佐证判红，
- * 正是校准注释记录的误报形态；而 dummy 夹具里与 field 同构的维度是 **window**
- * （每个 collection 有 windows: ['W1','W2']，码全局唯一）。故归属维度从 field 换成
- * window 码，语义同构：金额所在分句点名了**用户没问的 window 码**即"有所属"（那是模型
- * 在引用手头别的真实数据），挂在所问 window 上或无所属才红。
- * 夹具只有码没有人类别名，故 name 与 code 同值（windowMentioned 的 YYYYMM 分支原样保留，
- * 兼容移植前语料里 "2026年06月" 这类月份读法）。
- */
-const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [
-  { code: 'W1', name: 'W1' },
-  { code: 'W2', name: 'W2' },
-];
-
-/** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
-function askedWindows(userText: string): Set<string> {
-  const asked = new Set<string>();
-  for (const subject of MOCK_WINDOWS) {
-    if (userText.includes(subject.name)) { asked.add(subject.code); asked.add(subject.name); }
-    if (userText.includes(subject.code)) asked.add(subject.code);
-  }
-  return asked;
-}
-
-/**
- * dummy 夹具 items[].id（seedState 抄录）：模型回复里常写成 "(rec-101)"，与 item 名同源。
- */
-const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701'];
-
-/**
- * dummy 夹具 items[].value（seedState 抄录，item 名 → 真实数值）。错误态金额归属的
- * **值核对**依据：分句里出现真实数据标识只证明"这笔钱有出处指向"，不证明数字本身
- * 是真的——"beta-item-1 payable balance is 999999" 同样带标识，而夹具里 beta-item-1
- * 的真实 value 是 500、且根本没有 payable 口径（2026-11-07 评审 blocking ③）。
- * 与 MOCK_ITEMS / MOCK_ITEM_IDS 同源转录：改动任何数字前先重读夹具种子
- * （scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState）。
- */
-const MOCK_ITEM_VALUES: Readonly<Record<string, number>> = {
-  'alpha-item-1': 1200, 'alpha-item-2': 800,
-  'beta-item-1': 500, 'beta-item-2': 300, 'beta-item-3': 200,
-  'alpha-group-item-1': 700,
-  'locked-item-1': 900,
-  'contoso-trade-item-1': 1500, 'contoso-trade-item-2': 600,
-  'contoso-logistics-item-1': 450,
-  'fabrikam-retail-item-1': 880,
-  'fabrikam-wholesale-item-1': 1320,
-};
-
-/** 夹具种子里的全部真实数值（去重）：归属判据的"值也得对得上"全集。 */
-const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOCK_ITEM_VALUES))];
-
-/**
- * 实体绑定表（2026-11-07 评审 blocking：错误态金额不能只对全局数值集核对）：collection →
- * 该 collection 各 item 的真实值；item 名 → 单值。逐条转录自 seedState（与 MOCK_ITEMS /
- * MOCK_ITEM_VALUES 同源），empty-one 空数组——点名 empty-one 的任何非零金额都无据。
- * 记录号（MOCK_ITEM_IDS）不进本表：夹具没有 id→值的独立维度，id 只当"指向"证据，值核对
- * 退回全局集。分句点名了表中实体时，金额必须属于**该实体**——"beta payable balance is
- * 1200"（1200 是 alpha 的真实值，beta 真实 500/300/200）按全局核对会放行，按实体绑定
- * 照红。这就是评审要的"按实际查询证据核对实体与数值"：夹具种子即平台真实数据面，
- * 回复里的数与点名实体的种子值对不上，就是没有查询证据支撑。
- */
-const ENTITY_REAL_VALUES: ReadonlyArray<{ name: string; values: readonly number[] }> = [
-  ...Object.entries(MOCK_ITEMS).map(([collection, items]) => ({ name: collection, values: items.map((item) => MOCK_ITEM_VALUES[item]) })),
-  ...Object.entries(MOCK_ITEM_VALUES).map(([item, value]) => ({ name: item, values: [value] })),
-];
-
-/**
- * 错误态金额归属的**第二类**证据（item 名 + 记录号）：金额所在分句出现真实数据标识，
- * 说明这笔钱是平台真实数据的一行（"| beta-item-1 (rec-101) | 500 |"），不是编出来的答案。
- * 第一类是 window 码（MOCK_WINDOWS）：分句点名用户没问的 window。
- *
- * 为什么需要第二类（2026-11-07 Y2 首跑校准）：只认 window 码时，模型把真实数据放进
- * 表格的两种形态全部落空——T2 的未确认参照查询（alpha 的 1200/800）与 T3 的明细
- * （beta 的 500/300/200）都把 window 说明写在**引导句**里、金额在表格行里，分句级
- * 归属看不见，两批真实数据全被判"无所属"。那正是 2026-09-29 校准注释要防的误报形态
- * （"500 全程有所属，却被一条红"）。补上 item 名证据后，同一轮里真正编出来的答案
- * （T3 的 "**beta 的 payable balance：1000**"，所在分句既无 window 码也无 item 名）
- * 照旧红——尺子不松这条。
- *
- * 两类证据都**必须再过值核对**（REAL_DATA_VALUES，2026-11-07 评审 blocking ③）：
- * 光有标识不能证明数字真实——"beta-item-1 payable balance is 999999" 带标识但值不在
- * 种子里；光有真实值也不能证明归属——1200 出现在错误态回复里也可能是编的。两者同时
- * 满足（分句点名真实数据所在维度 + 金额是种子里的真实数值）才放行。
- *
- * 标识集合含 collection 名（2026-11-07 Y2 二跑校准）：not_found 轮模型重探索后会在回复里
- * 带上有归属的真实数据（"contoso-trade 的 W2 窗口下有两条记录（值 1500、600）"）——分句
- * 点名了真实 collection、金额是种子真实值，归属清清楚楚；只认 item 名/记录号时这波真实
- * 数据全被判无所属。collection 名与 item 名同一族：都是"分句点名了真实数据所在维度"，
- * 且都过同一道值核对——"beta 的 payable balance = 1,000" 点名 beta 但 1000 不是真实值，
- * 照旧红。
- */
-const REAL_DATA_TOKENS: readonly string[] = [...new Set([...Object.values(MOCK_ITEMS).flat(), ...MOCK_ITEM_IDS, ...MOCK_ACCOUNTS])];
+// 夹具事实表（MOCK_ACCOUNTS / MOCK_ITEMS / 各 collection 有效 window / item 值 / 实体
+// 绑定表 / 真实数据标识全集）移到 scripts/eval/dummy-fixture.ts——seedState 的单一转录点，
+// 错误态金额纯核（amount-criteria.ts）与 collectionQueryHits 共用；决策记录随代码走。
+// 本文件经顶部 import 取用 MOCK_ACCOUNTS / MOCK_ITEMS。
 
 /**
  * X1 第1轮的 2 个 unique window 与唯一非零window。mock alpha W1 与 W2 均有数据
@@ -1515,52 +1350,19 @@ const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmis
  */
 function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[]): string[] {
   const notes: string[] = [];
-  const asked = askedWindows(turn.text);
-  // 错误态金额三分：有所属（放行）/ 算术派生（信息性）/ 无所属（红）。
-  const unattributed: Amount[] = [];
-  const derived: Amount[] = [];
-  const assertedCalibers = new Map<string, string>();
-  for (const amount of extractAmounts(turn.reply)) {
-    if (amount.value === 0) continue;
-    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
-    const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
-    // 口径绑定（MISSING_CALIBERS 处的决策记录）：分句把平台没有的口径当答案口径 → 红，
-    // 不再看归属豁免（挂真实值也不例外——"beta payable balance is 500" 的 500 是真的，
-    // 静默回落正是要抓的形态）；同分句带否定限定是诚实澄清，不触发。
-    const asserted = MISSING_CALIBERS.find((caliber) => clause.includes(caliber)
-      && !CALIBER_DISCLAIM_RE.test(clause));
-    if (asserted) { assertedCalibers.set(asserted, clause); continue; }
-    // 有所属 = 分句点名用户没问的 window 码，或分句带真实数据标识（item 名/记录号）。
-    const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
-      && (clause.includes(subject.code) || clause.includes(subject.name)))
-      || REAL_DATA_TOKENS.some((token) => clause.includes(token));
-    // 实体绑定（ENTITY_REAL_VALUES 处的决策记录）：分句点名了有已知真实值的实体
-    // （collection/item）时，金额必须属于该实体；没点名实体时退回全局值核对（window 码
-    // 证据路径的金额常常不带实体名）。
-    const namedEntities = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
-    const entityOk = namedEntities.length === 0
-      || namedEntities.some((entity) => entity.values.includes(amount.value));
-    // 值核对（2026-11-07 评审 blocking ③）：光有指向不够——"beta-item-1 payable
-    // balance is 999999" 带标识但值不在夹具种子里（beta-item-1 真实 500，且无 payable
-    // 口径）。指向 + 实体绑定 + 真实数值同时满足才放行；只满足其一的金额继续往下判。
-    if (pointed && entityOk && REAL_DATA_VALUES.includes(amount.value)) continue;
-    // 算术派生降级为信息性（2026-11-07 Y2 实测校准）：模型在歧义轮把查到的真实记录
-    // 加总呈上（"记录值为 1500 和 600（合计 2100）"）——加数同在分句、都是真实值，
-    // 这是诚实算术不是编造；而"beta 的 payable balance = 1,000"这种把加总挂到平台没有
-    // 的口径上的形态，其分句里没有可加的真实值，照旧红。区分点就是"分句里有没有
-    // 能加出它的真实值"。
-    const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
-    const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
-    if (isSum) derived.push(amount); else unattributed.push(amount);
-  }
-  for (const [caliber, clause] of assertedCalibers) {
+  // 错误态金额三分（判定核在 amount-criteria.classifyErrorStateAmounts，反例变异测试在
+  // amount-criteria.test.ts——2026-11-07 评审 blocking 点名）：有所属（放行，须过实体绑定
+  // 最具体匹配 + window×实体有效性 + 全局值核对）/ 算术派生（信息性，同分句加数或全回复
+  // 范围 + 算术框架措辞 + 两级验证）/ 无所属（红）+ 口径编造（红，独立第三类）。
+  const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
+  for (const { caliber, clause } of verdict.assertedCalibers) {
     notes.push(`错误态回复把平台没有的口径「${caliber}」当答案口径（静默回落；挂真实值也不例外）：「${turn.text}」→ ${clause.slice(0, 80)}`);
   }
-  if (unattributed.length) {
-    notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
+  if (verdict.unattributed.length) {
+    notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(verdict.unattributed)}`);
   }
-  if (derived.length) {
-    notes.push(`（信息性）错误态回复出现真实数据加总（分句内含可加出它的真实值，算术可见不计违例）：「${turn.text}」→ ${formatAmounts(derived)}`);
+  if (verdict.derived.length) {
+    notes.push(`（信息性）错误态回复出现真实数据加总（分句内含可加出它的真实值，算术可见不计违例）：「${turn.text}」→ ${formatAmounts(verdict.derived)}`);
   }
   if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家|please|suggest|\btry\b|\bcheck\b|confirm|you could|let me|re-?run|\bagain\b|\bwhich\b|instead|alternatively|would you like/i.test(turn.reply)) {
     notes.push(`错误回复无可行动补救指引：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
