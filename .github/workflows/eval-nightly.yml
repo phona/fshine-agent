@@ -110,6 +110,10 @@ jobs:
 
       - name: Run weak model (quick suite)
         id: weak
+        # 两档独立执行：强模型任一用例机械失败（exit 1）时，本腿仍要跑——
+        # 否则对照赛恰好在「强模型出问题」这个最需要区分的时点被跳过。
+        # !cancelled() 而非 always()：并发取消时不白烧 token。
+        if: ${{ !cancelled() }}
         env:
           LLM_MODEL: step-3.5-flash
         run: |
@@ -202,6 +206,10 @@ jobs:
 
           overall_advisory = weak_total >= strong_total
 
+          # 保留各自退出状态：强模型腿的机械失败是回归信号。报告照常产出（否则丢了
+          # 区分度证据），但 job 结论要红——两档独立、各自的退出状态都作数。
+          strong_mech_fail = [cid for cid, s_ok, _sj, _wo, _wj, _ss, _ws in rows if not s_ok]
+
           report_lines = [
               '# Discrimination Report: dual-tier matrix',
               '',
@@ -225,6 +233,7 @@ jobs:
               '## Aggregate',
               f'- Strong total judge sum: {strong_total} (7 cases)',
               f'- Weak total judge sum: {weak_total} (7 cases)',
+              f'- Strong mechanical failures: {strong_mech_fail if strong_mech_fail else "none"}',
               '',
               '## Criterion',
               '> 笨模型分数 ≥ 强模型 = harness 区分度不足 → advisory 红（不是放行信号）',
@@ -240,6 +249,9 @@ jobs:
 
           if overall_advisory:
               print('::warning::Discrimination advisory: weak model >= strong model. See report.')
+              sys.exit(1)
+          if strong_mech_fail:
+              print(f'::error::Strong model mechanical failures (regression signal): {strong_mech_fail}')
               sys.exit(1)
           sys.exit(0)
           PYEOF
