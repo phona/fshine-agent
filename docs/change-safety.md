@@ -1688,22 +1688,22 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | 防线 | 命令 | 预期 |
 |---|---|---|
 | 门① 产品面零引用 | `git grep -il 17dz \| grep -v -E '^(docs/debt-ledger.md\|docs/change-safety.md\|AGENTS.md)$' \| wc -l` | 0 |
-| 门② 全历史敏感串 | `git log --all -p \| grep -F "<S>" \| wc -l`（逐串） | 每条 0 |
+| 门② 全历史敏感串 | `git log --all -p \| grep -F "<S>" \| wc -l`（逐串） | 非豁免条目 0；豁免条目按 `scripts/history-scan-exemptions.txt` 口径（archive / commit / 已移除文件） |
 | 门③ fresh clone | `git clone <public-url> /tmp/fshine-public && cd /tmp/fshine-public && npm ci && npm run ci` | 退出码 0 |
 | 门④ 三道守卫 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
 | 门⑤ payroll 写路径 | `git diff --name-only <wave5-起点> -- packages apps \| grep -v '\.test\.ts'` | 空 |
-| 门⑥ 扫描工作流 | `git log --all -p \| grep -F "17dz" \| wc -l` | 0 |
+| 门⑥ 扫描工作流 | 裸计数 `git log --all -p \| grep -F "17dz" \| wc -l`（含档案与改造史留存，本身不是泄漏判据）+ 同口径判定 `bash scripts/history-sensitive-scan.sh <敏感串表>` | 裸计数 >0（档案/改造史留存属登记豁免）；**判据权威 = 脚本 exit 0**（表内每条全历史零命中），不是裸计数的那一行 |
 | 门⑦ debt-ledger | `grep -c '状态.*待办' docs/debt-ledger.md` + 三件套核对 | 每条待办三件套齐备 |
 
 ### 验收对账（本棒实测）
 
 - **门①**：`git grep -il 17dz`（过滤三档案）现行树 = 0（产品面扫描面已清零；docs 归档面由 TIER B 台账跟踪）。
-- **门②**：`git log --all -p` 逐串扫描未跑（需 filter-repo 后历史，本波只做现行树门禁）。
+- **门②**：`git log --all -p` 逐串扫描未跑（需 filter-repo 后历史，本波只做现行树门禁）。D-191 已关闭第 15 条平台实例名的 archive/commit/已移除文件豁免；`scripts/history-sensitive-scan.sh` 按 `scripts/history-scan-exemptions.txt` 执行，仅对明确登记的平台实例名条目应用三类豁免，其余条目保留全历史零命中判据。
 - **门③**：fresh clone 未跑（owner 2026-11-06：做完再搞）。
 - **门④**：`npx vitest run packages/agent/migration-gate.test.ts` = 3/3 全绿（2026-11-06 实测）。
 - **门⑤**：本波未新增 payroll 写路径，`packages/ apps/` 生产代码零改动。
-- **门⑥**：扫描工作流未跑（dwfrun 明细待取回，D-174）。
-- **门⑦**：debt-ledger 45 条待办/登记 → 44 条三件套齐备（D-006 状态为接受不修，不堵门）。
+- **门⑥**：扫描工作流未跑（dwfrun 明细待取回，D-174）；已与门② 口径对齐，实例名全历史零命中判据由门② 承载。
+- **门⑦**：debt-ledger 42 行匹配「状态.*待办」（含字段表头 1 行，实际条目 41 条）；三件套齐备性未逐条核对（D-172 登记，不冒充盘点）。
 
 ### F7 文档同步记录
 

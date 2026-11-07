@@ -1,0 +1,37 @@
+# scripts/history-scan-exemptions.txt —— 门②同口径豁免清单（D-191）
+#
+# 口径与 why 见 scripts/history-sensitive-scan.sh 头注释。本清单是提交进仓的登记数据，
+# 改动必须同步 docs/debt-ledger.md 的 D-191 销账记录（清单改必同步 ledger，互相引用）。
+#
+# 安全底线：新 commit 永不在清单内。清单是冻结的历史登记，只覆盖平台实例名在
+# 档案、改造史与已移除文件里的留存；未来任何新 commit（哪怕消息体里）出现真实
+# 敏感数据都照样红。
+#
+# 格式（每行一条；空行与 # 开头为注释）：
+#   archive <仓库内路径>   档案路径：与门①档案豁免同半径，该文件全部 diff 行豁免
+#                          （现有内容 + 删除行改造史）。
+#   commit <完整 40 位 SHA> 已登记改造 commit：该 commit 的 diff 行与 message 行豁免
+#                          （脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
+#                          **必须恰好一个 cutoff 行，且每个 commit SHA 必须是 cutoff 的
+#                          祖先**——cutoff 是冻结的历史截止点，不是可移动的 main：否则
+#                          commit 一旦合入 main 就能被事后加进清单，豁免范围随 main 前移
+#                          扩大。前移 cutoff = 显式可审查动作，必同步 debt-ledger D-191。
+#   cutoff <完整 40 位 SHA> 冻结截止点：改造 commit 类的校验边界（见上）。本清单登记时
+#                          取当时 main 的 tip。
+#   已移除文件（不在清单登记，机械判定）：文件不在当前树 + commit 是 cutoff 祖先才豁免
+#   （冻结历史里的残影，如已删除的误提交方案文件）；cutoff 之后的新 commit 一律照算
+#   （未来「先加引用再删文件」或重建同名文件都逃不掉）。
+#
+# 档案三类（= 门① 的豁免半径；已移除误提交文件归「已移除文件」机械判定，不登记路径）：
+archive docs/debt-ledger.md
+archive docs/change-safety.md
+archive AGENTS.md
+# 已登记改造 commit（D-191 实测五处分布里的第 3~5 处，sha256 前 12 位 b76deef1ee8c 的
+# 平台实例名留存；登记理由见 debt-ledger D-191 销账记录）：
+commit 053343e221e80bf973a71ff327820793b0300a12
+commit 0ae2833512dc3eb3fcbc966c82cd09a40145949d
+commit 7cb814911c03cedda5ce375ec6d8e4b7ea411281
+
+# 获准豁免的平台实例名条目（sha256 前 12 位，只对这些条目应用 archive / commit 豁免）：
+entry b76deef1ee8c
+cutoff 9aa21a68ed68b23adcb0ba1e424f962939a19a94
