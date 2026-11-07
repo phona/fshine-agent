@@ -47,6 +47,7 @@ import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
+import { resolveConfigPath } from './resolve-config-path';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -254,14 +255,19 @@ function ledgerCalls(): number {
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
   isolatePlatformState();
   const sdk = new RecordingSdk();
-  // 授权用户 = config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）首个
-  // enabled principal。null = 没人可用：明确报错退出，不回落写死值（真实 UserID 曾是
-  // 这里的硬编码）。每次 boot 现取现派生；注意与下面 createServerAssembly 自带的
-  // loadConfig 只在未设 AGENT_CONFIG_PATH 时同源——assembly 读该变量、缺省同为
-  // config/agent.yaml，设了就分行，派生处按缺省路径报错点名。
-  const principalUser = firstEnabledPrincipalId(loadConfig({ env: process.env }));
+  // 配置同源：探针与 assembly 读同一份 YAML，消除「探针硬编码缺省路径 /
+  // assembly 读 AGENT_CONFIG_PATH」两条路分流的 wart。
+  // resolveConfigPath 的解析顺序 = 显式入参 > config/agent.yaml（存在才用）>
+  // scripts/eval/eval.agent.yaml。
+  const yamlPath = resolveConfigPath();
+  // assembly 的 loadConfig 读 AGENT_CONFIG_PATH 环境变量（apps/server/assembly.ts:181）。
+  // 不设该变量时 assembly 走自己的默认路径 config/agent.yaml，与探针这里解析出的
+  // yamlPath 可能不是同一份。设为同一路径后，探针派生的 principalUser 与 assembly
+  // 看到的配置完全同源。
+  process.env.AGENT_CONFIG_PATH = yamlPath;
+  const principalUser = firstEnabledPrincipalId(loadConfig({ env: process.env, yamlPath }));
   if (!principalUser) {
-    console.error('config/agent.yaml（缺省配置路径，本脚本不读 AGENT_CONFIG_PATH）里没有 enabled 的 principal——探针脚本无法派生授权用户（fail-closed，不回落写死值）');
+    console.error(`${yamlPath} 里没有 enabled 的 principal——探针脚本无法派生授权用户（fail-closed，不回落写死值）`);
     process.exit(1);
   }
   const assembly = await createServerAssembly({

@@ -29,6 +29,9 @@ const repoRoot = path.resolve(evalDir, '..', '..');
 const CORPUS_PATH = path.join(evalDir, 'corpus.jsonl');
 const BASELINE_PATH = path.join(evalDir, 'baseline.json');
 const SCORES_PATH = path.join(repoRoot, '.runtime', 'scores.jsonl');
+// 配置同源：本脚本目前不加载 agent config（只读 probe/acceptance 报告 + 基线），
+// 但遵循同一 resolveConfigPath 约定——若未来需要读取配置，走同一 helper。
+// 详见 scripts/resolve-config-path.ts。
 
 // ── 数据形状 ──
 
