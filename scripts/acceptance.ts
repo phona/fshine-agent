@@ -50,6 +50,12 @@ interface CaseSpec {
 }
 
 const CASES: CaseSpec[] = [
+  // ── 1.x/3.x 能力边界登记（2026-11-07 评审 major）：默认 eval 配置已切到 dummy 夹具
+  // （只有 collection/window/records{name,value}），"幻晟/current/tax/admin expense/field
+  // system" 在夹具里不存在——这些用例在 dummy 域的预期是**诚实能力边界回复**（不存在的
+  // 实体/口径如实说明、给可行动出口），不再覆盖原财税 mock 的成功查询与分页链路（dummy
+  // 的 dummy.query 无分页操作，"下一页"考的正是诚实收边）。报告判读按此口径；1.3 上下文
+  // 召回、1.4 越权拒绝、3.5（alpha）与 2.x 不受影响。──
   { id: '1.1', conv: 'acc-basic', text: 'check幻晟current的record' },
   { id: '1.2', conv: 'acc-basic', text: '下一页' },
   { id: '1.3', conv: 'acc-basic', text: '刚才查的是哪个collection？' },
