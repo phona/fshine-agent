@@ -313,18 +313,39 @@ export function classifyErrorStateAmounts(
         positions.push(at);
         from = at + amount.raw.length;
       }
+      // 分句内全部金额出现位置（claimsTotal 的"与前一笔的间隔"依据）。
+      const clauseAmountSpans: Array<{ start: number; end: number }> = [];
+      for (const amt of extractAmounts(clause)) {
+        for (let from = 0; ;) {
+          const at2 = clause.indexOf(amt.raw, from);
+          if (at2 < 0) break;
+          clauseAmountSpans.push({ start: at2, end: at2 + amt.raw.length });
+          from = at2 + amt.raw.length;
+        }
+      }
+      clauseAmountSpans.sort((a, b) => a.start - b.start);
       const bindings = positions.map((at) => {
         let mention: { entity: { name: string; values: readonly number[] }; at: number } | undefined;
         for (const m of mentions) { if (m.at > at) break; mention = m; }
         const next = mentions.find((m) => m.at > at);
         const segment = clause.slice(mention ? mention.at : 0, next ? next.at : clause.length);
+        // 该笔出现是否在**声称合计**：它与前一笔金额之间的间隔里出现合计族措辞
+        // （"…200, total is 800" 的 800 ✓；加数 500/300 自己的间隔里没有 total 词 ✗）——
+        // 完整合计的全和规则只管声称合计的那一笔，不管被列举的加数本身。
+        const prevAmount = [...clauseAmountSpans].reverse().find((s) => s.end <= at);
+        const gapStart = prevAmount ? prevAmount.end : 0;
+        const claimsTotal = TOTAL_FRAMING_RE.test(clause.slice(gapStart, at));
         return {
           mentionEntity: mention?.entity,
           segment,
+          claimsTotal,
           valueOk: mention === undefined
             ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
             : mention.entity.values.includes(amount.value),
           windowOk: windowClaimOk(segment, mention === undefined ? specific : [mention.entity]),
+          // 该笔出现自己那段里列出的真实加数（不含它自己）：声称合计 + 列举 ≥2 笔在场时，
+          // 完整合计必须等于列举加数的全和（评审 blocking ②）。
+          segSummands: extractAmounts(segment).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value)),
         };
       });
       const entityOk = bindings.every((b) => b.valueOk);
@@ -343,13 +364,22 @@ export function classifyErrorStateAmounts(
       // 且**按每笔断言的实体**核验——降级池不得用整句实体并集去豁免某笔已失败的直接断言
       // （2026-11-08 评审 blocking："beta … is 1200, alpha … is 500, combined total is 2000"
       // ——句尾一个 total 词把两笔串台金额全放成信息性结果；合计的账本 = 该笔所绑实体
-      // 自己的值，没绑到实体时才退回整句并集/全回复池）；差额/倍数族照旧取整句并集
+      // 自己的值，没绑到实体时才退回整句并集/全回复池）。且该笔自己那段里**列举了 ≥2 个
+      // 真实加数**时，完整合计必须等于列举加数的全和——任意子集和冒充不了完整合计
+      // （2026-11-08 评审 blocking ②："values are 500, 300, 200, total is 800" 的 800=
+      // 500+300 是摘樱桃，三项实计 1000）；差额/倍数族照旧取整句并集
       // （跨实体差额"2100−2000 相差 100"的账本本就跨实体，2026-11-07 校准）。
+      const totalFramed = TOTAL_FRAMING_RE.test(clause);
       const framed = windowOk
-        && ((TOTAL_FRAMING_RE.test(clause) && bindings.every((b) => isVerifiedTotal(amount.value, b.mentionEntity ? b.mentionEntity.values : pool)))
+        && ((totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2
+              ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
+              : isVerifiedTotal(amount.value, b.mentionEntity ? b.mentionEntity.values : pool)))
           || (DIFF_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, pool))
           || (RATIO_FRAMING_RE.test(clause) && isVerifiedRatio(amount.value, pool)));
-      if (isSum || framed) { soft = true; } else { hard = true; }
+      // 完整合计的列举在场时，pairwise isSum 的摘樱桃通道一并关闭（"500+300=800" 不能
+      // 冒充"500、300、200 的合计"）；未列举（"beta 合计 800" 的部分聚合校准形态）照旧。
+      const enumeratedTotal = totalFramed && bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
+      if ((isSum && !enumeratedTotal) || framed) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     if (hard) unattributed.set(amount.value, amount);

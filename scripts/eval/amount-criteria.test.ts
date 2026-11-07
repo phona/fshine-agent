@@ -229,6 +229,12 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).not.toContain(2000);
   });
 
+  it('blocking：完整合计必须等于列举加数全和——"values are 500, 300, 200, total is 800"（800=500+300 摘樱桃，三项实计 1000）', () => {
+    const v = classify('beta W1 record values are 500, 300, 200, total is 800; please confirm.', 'checkbeta的payablebalance');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived).toEqual([]);
+  });
+
   it('blocking：名称重叠按出现位置作废——"alpha-group … is 700, alpha … is 700"（第二笔须绑独立 alpha，真实 1200/800）', () => {
     const v = classify('alpha-group record value is 700, alpha record value is 700');
     expect(v.unattributed.map((a) => a.value)).toContain(700);
@@ -245,6 +251,11 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
 describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿）', () => {
   it('合计实计正确——"values are 500, 300, 200, total is 1000"（非负子集和成立）', () => {
     const v = classify('beta W1 record values are 500, 300, 200, total is 1000', 'checkbeta的payablebalance');
+    expect(v.unattributed).toEqual([]);
+  });
+
+  it('未列举加数的部分聚合照旧——"beta 合计 800"（500+300，无列举、无摘樱桃问题）', () => {
+    const v = classify('beta 合计 800', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
   });
 
