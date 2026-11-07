@@ -264,6 +264,28 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
     expect(v.unattributed).toEqual([]);
     expect(v.derived).toEqual([]);
   });
+
+  it('major 修复：item 名的窗口校验映射到所属 collection——"beta-item-1 W1 record value is 500"（beta W1 真实有效）', () => {
+    const v = classify('beta-item-1 W1 record value is 500');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('major 修复：记录号的窗口校验映射到所属 collection——"rec-101 W1 record value is 500"（rec-101 属 beta，W1 有效）', () => {
+    const v = classify('rec-101 W1 record value is 500');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('major 修复不放宽：item 名挂无效 window 照红——"beta-item-1 W2 record value is 500"（beta 只有 W1）', () => {
+    const v = classify('beta-item-1 W2 record value is 500');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
+  it('major 修复不放宽：记录号挂无效 window 照红——"rec-101 W2 record value is 500"', () => {
+    const v = classify('rec-101 W2 record value is 500');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
 });
 
 describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 blocking）', () => {

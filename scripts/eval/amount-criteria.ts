@@ -10,6 +10,8 @@
 import {
   ENTITY_REAL_VALUES,
   MOCK_COLLECTION_WINDOWS,
+  MOCK_ITEM_ID_BINDINGS,
+  MOCK_ITEMS,
   MOCK_WINDOWS,
   REAL_DATA_TOKENS,
   REAL_DATA_VALUES,
@@ -197,6 +199,21 @@ export interface ErrorStateAmountVerdict {
 }
 
 /**
+ * 实体名 → 所属 collection 的 window 表（2026-11-08 评审 major）：实体绑定表有三族名字
+ * （collection / item / 记录号），window 表只有 collection 键——item 名与记录号直接查表
+ * 落空，"beta-item-1 W1 record value is 500"（该记录及所属 beta 的 W1 都真实有效）被误判
+ * 无据。先解析到所属 collection 再查窗：collection 原名直查；记录号经
+ * MOCK_ITEM_ID_BINDINGS 映射；item 名在 MOCK_ITEMS 各 collection 的 items 里找归属。
+ */
+function collectionWindowsOf(name: string): readonly string[] {
+  if (MOCK_COLLECTION_WINDOWS[name]) return MOCK_COLLECTION_WINDOWS[name];
+  const viaId = MOCK_ITEM_ID_BINDINGS[name];
+  if (viaId) return MOCK_COLLECTION_WINDOWS[viaId.entity] ?? [];
+  const owner = Object.entries(MOCK_ITEMS).find(([, items]) => items.includes(name));
+  return owner ? MOCK_COLLECTION_WINDOWS[owner[0]] ?? [] : [];
+}
+
+/**
  * window×实体有效性（2026-11-07 评审 blocking 反例）："beta W2 record value is 500"
  * ——beta 种子只有 W1，夹具对 (beta, W2) 回 WINDOW_NO_DATA，任何挂上该组合的金额都无据。
  * 分句出现 W<数字> 形态的 window 词元且点名了具体实体时：每个词元要么是某点名实体的有效
@@ -208,7 +225,7 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
   const tokens = [...new Set(clause.match(/W\d{1,3}/g) ?? [])];
   if (!tokens.length) return true;
   return tokens.every((token) => {
-    if (specific.some((entity) => (MOCK_COLLECTION_WINDOWS[entity.name] ?? []).includes(token))) return true;
+    if (specific.some((entity) => collectionWindowsOf(entity.name).includes(token))) return true;
     return new RegExp(`${token}[^。；;\\n]{0,12}(?:无数据|没有数据|no data)`, 'i').test(clause);
   });
 }
