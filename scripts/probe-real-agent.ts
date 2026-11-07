@@ -1153,13 +1153,19 @@ function auditRecords(): AuditRecord[] {
   } catch { return []; }
 }
 
-/** 记录里某个 flag 的值（--flag 值 / --flag=值 两种形式都认）。 */
-function flagValue(args: string[] | undefined, flag: string): string | null {
-  if (!args) return null;
-  const inline = args.find((arg) => arg.startsWith(`${flag}=`));
+/**
+ * 记录里某个 flag 的值（--flag 值 / --flag=值 两种形式都认）。
+ * 非数组 args 一律返回 null：审计记录来自 JSONL，structured_call 通道的 args 是对象
+ * （{operation, args}）而非字符串数组——不挡这一下，`.find` 会在判据里抛 TypeError，
+ * 把整条用例探针崩掉（判定静默丢失比崩掉更糟，但崩掉本身也没必要）。
+ */
+function flagValue(args: unknown, flag: string): string | null {
+  if (!Array.isArray(args)) return null;
+  const list = args.filter((arg): arg is string => typeof arg === 'string');
+  const inline = list.find((arg) => arg.startsWith(`${flag}=`));
   if (inline) return inline.slice(flag.length + 1);
-  const at = args.indexOf(flag);
-  return at >= 0 && at + 1 < args.length ? args[at + 1]! : null;
+  const at = list.indexOf(flag);
+  return at >= 0 && at + 1 < list.length ? list[at + 1]! : null;
 }
 
 /** 脚本基名（去目录与扩展名）：审计里 script 可能是仓内相对路径或裸名，两种形态同一判。 */
@@ -2274,7 +2280,7 @@ const CASES: Case[] = [
       const audits: AuditRecord[][] = [];
       for (const text of [
         'check gamma-collection这个collection W2record value',
-        'check alph collection record value',
+        'check contoso collection record value',
         'checkbeta的payablebalance',
       ]) {
         const mark = auditRecords().length;
