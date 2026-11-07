@@ -214,6 +214,51 @@ export function askedWindows(userText: string): Set<string> {
  * （"beta payable balance is 500; please confirm"）的分句没有否定词，照红。
  * 无法确定性区分的残余形态（否定词被反用、"not" 蹭车）按 §9 惯例交 Tier B 评审读。
  */
+/** 窗口码不是金额（X1 首跑：numeric code 被当金额判串台，误报）。 */
+const MOCK_WINDOW_CODES = new Set(['W1', 'W2']);
+
+/** 金额匹配模式：千分位 / 小数 / 万亿 / ≥3 位裸整数 / 单独的 0。 */
+const AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*[万亿]|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])|(?<![\d.])0(?![\d.])/g;
+
+/** 提取器产出的最小金额形状（探针与测试共用）。 */
+export interface ExtractedAmount {
+  raw: string;
+  value: number;
+  confident?: boolean;
+}
+
+/**
+ * 生产金额提取器（2026-11-08 从探针搬来，单一真相源）：千分位/小数/万亿/≥3 位裸整数。
+ * 排除三类非金额：
+ *   ① **年份语境**（后随"年"或"年.月"小数形态）——旧实现按裸区间 1900–2099 排除，把新
+ *      夹具 alpha 的真实合计 2000 当年份静默排除，错误金额整个消失（"beta total is
+ *      2000"提取为空、三个判定数组全空；写成 2,000 才判红）——评审 blocking；
+ *   ② YYYYMM window 码（20\d{4}）；
+ *   ③ 标识符尾段（rec-401 的 401：数字紧跟字母-连字符）。
+ * 按数值去重（保留首个原文）——同值不同格式的位置匹配由 amountValuePattern 负责。
+ */
+export function extractAmounts(text: string): ExtractedAmount[] {
+  const seen = new Map<number, ExtractedAmount>();
+  for (const match of text.matchAll(AMOUNT_PATTERN)) {
+    const raw = match[0]!;
+    const at = match.index ?? 0;
+    const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // 年份只在年份语境里排除：后随"年"（2026 年），或"年.月"小数形态后随"月"
+    if (new RegExp(`${escaped}\\s*年`).test(text.slice(at))) continue;
+    if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && new RegExp(`${escaped}\\s*月`).test(text.slice(at))) continue;
+    if (/^20\d{4}$/.test(raw)) continue;
+    if (MOCK_WINDOW_CODES.has(raw)) continue;
+    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
+    const value = /[万亿]/.test(raw)
+      ? parseFloat(raw) * (raw.includes('亿') ? 1e8 : 1e4)
+      : parseFloat(raw.replace(/,/g, ''));
+    if (!Number.isFinite(value) || seen.has(value)) continue;
+    const confident = /,\d{3}/.test(raw) || /\.\d/.test(raw) || /[万亿]/.test(raw);
+    seen.set(value, { raw, value, confident });
+  }
+  return [...seen.values()];
+}
+
 export const MISSING_CALIBERS: readonly string[] = ['payable', 'bank', 'debt'];
 export const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\bwithout\b|\blacks?\b|\bonly\b|\binstead\b|\bneither\b/i;
 
@@ -433,15 +478,24 @@ export function classifyErrorStateAmounts(
       });
       const ledgerOk = clauseOpVerified();
       const perOccurrence = bindings.map((b) => {
-        // 无绑定实体（摊账/未点名形态）：自称合计时同样按完整合计核验（池 = 全回复真实
-        // 值——"记录值为 500 和 300（合计 800）"列举了加数走列举通道；没列举的"total is
-        // 800"必须等于回复里全部真实值之和）；其余走分句级摊账通道。
+        // 无绑定实体（摊账/未点名形态）同样按**每笔自己 gap 里的措辞族**验证（2026-11-08
+        // 评审 blocking：未绑定差额曾直接吃 isSum/framed——"values are 500 and 300,
+        // difference is 800"的和被记成派生、改成 2.5 也没有硬失败）：合计族同绑定规则
+        // （列举全和 / 全回复值全和）、差额族走列举操作数约束、倍数族走商；都没自称
+        // 运算的加数才走摊账通道。
         if (b.mentionEntity === undefined) {
           if (b.claimsTotal) {
             return b.segSummands.length >= 2
               ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
               : isVerifiedTotal(amount.value, replyRealValues);
           }
+          if (DIFF_FRAMING_RE.test(b.gap)) {
+            const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
+            return listed.length >= 2
+              ? listed.some((x, i) => listed.some((y, j) => i !== j && Math.abs(x - y) === amount.value))
+              : isVerifiedDifference(amount.value, pool);
+          }
+          if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
           return (REAL_DATA_VALUES.includes(amount.value) && ledgerOk) || isSum || framed;
         }
         if (b.claimsTotal) {

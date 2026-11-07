@@ -16,24 +16,16 @@ import {
  * 里的 1 不是金额）；分句/边界逻辑在纯核内自足。
  */
 
-function amounts(text: string): Array<{ raw: string; value: number }> {
-  // 与探针 extractAmounts 同形态学（千分位/小数/≥3 位裸整数；rec-401 记录号尾段、W1 里
-  // 的 1、共 3 条的 3 都不是金额）——单字符与两位数不在 AMOUNT_PATTERN 内。
-  const pattern = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])/g;
-  const out: Array<{ raw: string; value: number }> = [];
-  for (const match of text.matchAll(pattern)) {
-    const at = match.index ?? 0;
-    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
-    out.push({ raw: match[0], value: Number(match[0].replace(/,/g, '')) });
-  }
-  return out;
-}
+// 与生产探针同一提取器（单一真相源）——年份语境排除、rec-NNN 尾段排除都在里面，
+// 测试不再另养一份（曾因两份形态学不同，生产侧把 2000 当年份排除而测试侧不排除，
+// 纯核测试因此看不见生产漏判）。
+const amounts = extractAmounts;
 
 function classify(reply: string, userText = '') {
   return classifyErrorStateAmounts(reply, userText, amounts);
 }
 
-import { ACCOUNT_RESULT_PHRASING } from './amount-criteria';
+import { ACCOUNT_RESULT_PHRASING, extractAmounts } from './amount-criteria';
 
 describe('错误态金额三分：评审反例（必须红）', () => {
   it('blocking：跨实体冒用——"beta payable balance is 1200"（1200 是 alpha 的值）', () => {
