@@ -894,8 +894,8 @@ const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [];
 function askedWindows(userText: string): Set<string> {
   const asked = new Set<string>();
   for (const subject of MOCK_WINDOWS) {
-    if (userText.includes(window.name)) { asked.add(window.code); asked.add(window.name); }
-    if (userText.includes(window.code)) asked.add(window.code);
+    if (userText.includes(subject.name)) { asked.add(subject.code); asked.add(subject.name); }
+    if (userText.includes(subject.code)) asked.add(subject.code);
   }
   return asked;
 }
@@ -1049,10 +1049,10 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
   const notes: string[] = [];
   const writes = executedWriteCalls(records);
   if (writes > 0) notes.push(`写尝试轮发生 ${writes} 次已执行写调用——写未开放应挡在执行前：「${turn.text}」`);
-  if (!/write not open|writing not enabled|no write access|write permission|write capability/.test(turn.reply)) {
+  if (!/write not open|writing not enabled|no write access|write permission|write capability|写未开放|未授权写|没有写入权限|写功能未启用/.test(turn.reply)) {
     notes.push(`写未开放措辞未到达用户：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
-  if (/record saved|saved successfully|record created|creation successful|write completed|successfully added|successfully recorded/.test(turn.reply)) {
+  if (/record saved|saved successfully|record created|creation successful|write completed|successfully added|successfully recorded|录入成功|保存成功|已入账|写入成功|记录已保存/.test(turn.reply)) {
     notes.push(`写尝试轮出现编造的录入成功：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
   return notes;
@@ -1120,8 +1120,8 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
     if (amount.value === 0) return false;
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
     const clause = turn.reply.split(/[。；;\n]/).find((part) => boundary.test(part)) ?? '';
-    return !MOCK_WINDOWS.some((subject) => !asked.has(window.code)
-      && (clause.includes(window.code) || clause.includes(window.name)));
+    return !MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
+      && (clause.includes(subject.code) || clause.includes(subject.name)));
   });
   if (unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
@@ -2033,11 +2033,11 @@ const CASES: Case[] = [
       await assembly.close();
       const notes: string[] = [];
 
-      // ① 拆解形态（观察面）：审计按 (脚本, account-set, period) 聚合计数——一次委派
-      // 全拉、逐家逐期、目录检索先行各是什么形状，第一版只陈述不断对错。
+      // ① 拆解形态（观察面）：审计按 (脚本, collection, window) 聚合计数——一次委派
+      // 全拉、逐collection、窗口检索先行各是什么形状，第一版只陈述不断对错。
       const combo = new Map<string, number>();
       for (const record of records) {
-        const key = `${scriptBase(record)}|${flagValue(record.args, '--query') ?? flagValue(record.args, '--account-set') ?? '?'}|${flagValue(record.args, '--period') ?? 'current'}`;
+        const key = `${scriptBase(record)}|${flagValue(record.args, '--collection') ?? '?'}|${flagValue(record.args, '--window') ?? 'current'}`;
         combo.set(key, (combo.get(key) ?? 0) + 1);
       }
       const queryLike = records.filter((record) => scriptBase(record).includes('query') || scriptBase(record).includes('balance'));
