@@ -17,12 +17,12 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRequest, type PlanCliRunner, type PlanEvaluation } from '../../packages/agent/src/plan-runtime';
-import { resolveConfigPath } from '../../scripts/resolve-config-path';
+import { resolveConfigPath, explicitConfigFrom } from '../../scripts/resolve-config-path';
 import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 
 function resolvePlatformRoot(): string {
   try {
-    const configPath = resolveConfigPath();
+    const configPath = resolveConfigPath(explicitConfigFrom());
     const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
     const profiles = config['contextProfiles'] as Record<string, ContextProfileConfig> | undefined;
     const profileId = resolveActiveProfileId(profiles ?? {});

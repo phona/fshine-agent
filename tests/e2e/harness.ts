@@ -836,15 +836,22 @@ async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
   if (options.workerDispatchMode) bootEnv['FSHINE_WORKER_DISPATCH_MODE'] = options.workerDispatchMode;
+  // 配置单一来源贯穿：assembly 的 loadConfig 只读 AGENT_CONFIG_PATH，harness 解析出的
+  // 配置必须写进 bootEnv——否则命令行/回退配置与 assembly 实际加载的各读一份，两边可能
+  // 落在不同执行层与计划状态上（codex review major）。
+  if (RESOLVED_CONFIG) bootEnv['AGENT_CONFIG_PATH'] = RESOLVED_CONFIG;
   // 隔离运行：指向干净快照时把 config 的 profiles.<profileId>.root 一并对齐——
   // 启动 lint、operation 规格表与委派全部落在快照上，e2e 与开发仓的进行中改动互不拖累。
-  // 使用 patchProfile 选项覆盖 root。
+  // 使用 patchProfile 选项覆盖 root。基准配置取 harness 解析出的那份（不再是硬编码的
+  // config/agent.yaml——只给 AGENT_CONFIG_PATH 而无本地配置时旧代码直接读不到文件）；
+  // profile 取 active profile（resolveActiveProfileId 语义），不再盲取第一个。
   if (options.patchProfile) {
-    const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
-    const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
+    const baseConfig = RESOLVED_CONFIG ?? path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+    const config = parseYaml(readFileSync(baseConfig, 'utf8')) as Record<string, unknown>;
     const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-    const profileId = options.patchProfile?.profileId ?? (profiles ? Object.keys(profiles)[0] : undefined);
-    if (!profileId || !profiles?.[profileId]) throw new Error(`patchProfile：仓库配置里找不到 contextProfiles.${profileId}`);
+    const profileId = options.patchProfile?.profileId
+      ?? (profiles ? resolveActiveProfileId(profiles as Record<string, ContextProfileConfig>) : undefined);
+    if (!profileId || !profiles?.[profileId]) throw new Error(`patchProfile：基准配置里找不到 contextProfiles.${profileId ?? '(active profile 未定，多 profile 需显式指定)'}`);
     if (options.patchProfile?.workerTimeoutMs) profiles[profileId]!.workerTimeoutMs = options.patchProfile.workerTimeoutMs;
     if (options.patchProfile?.root) profiles[profileId]!.root = options.patchProfile.root;
     const patchedPath = path.join(stateDir, `agent-config-${counter}.yaml`);
