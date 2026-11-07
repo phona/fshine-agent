@@ -52,6 +52,7 @@ import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 // 探针顶层跑 main() 无法 import，判定核抽到 scripts/eval/amount-criteria.ts，
 // 夹具转录抽到 scripts/eval/dummy-fixture.ts；本文件保留用例体与 note 文案组装）。
 import {
+  ACCOUNT_RESULT_PHRASING,
   ARITHMETIC_FRAMING_RE,
   CLAUSE_SPLIT,
   classifyErrorStateAmounts,
@@ -527,7 +528,8 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
  * "record value is 1,200"——故显式收 record value，否则整条漂移尺在英文回复上恒不
  * 命中（vacuous check）。
  */
-const ACCOUNT_RESULT_PHRASING = /已查|查到|balance\s*为|record\s*(?:\d|value\b)|结果如下|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
+// 漂移尺措辞三族（中文原有 + 中文中性域 + 英文）：抽到 amount-criteria 纯核并可测——见那里的
+// 2026-11-08 评审记录（中文分支曾被双语化漏补，导致中文回复的串台漏判）。
 
 /**
  * 任务串台的文本侧证据（E1/H1 共用）：用户点明了某些collection的轮次，回复把"用户没点名的collection"

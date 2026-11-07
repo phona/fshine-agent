@@ -1941,3 +1941,12 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **同轮发现已修（本 PR）**：验收脚本 sessionKey 拼错（`wecom:${user}:${conv}`，而宿主 sessionId = `wecom:${conversationId}`，apps/server/handler.ts:576-577 不含 user 段）——`platform_tasks`/`change_intents` 两条按 session 的查询永远查不到，write-chain 的 intents 恒空、taskId 恒 None，即使宿主写链全对 `intentCreated`/`committed`/`readbackVerified` 仍读 false。修法 = `scripts/acceptance.ts` 三处统一走 `sessionKeyOf(spec)`（先存缺陷，d6e3fc8 建脚本时就写错，非移植回归）。
 - **归属波次 / 限期**：宿主修复单独一轮（不混进 eval 域移植 PR）；公开推送前。
 - **状态**：待办（放行漏洞 + 复核近因未修；尺子缺陷已修待复跑验证）。
+
+### D-198 · dummy 夹具能力缺口：验收 1.x/3.x 的正向覆盖映射与待补清单
+
+- **位置**：`scripts/acceptance.ts` 用例清单头注释（三类映射）；夹具 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs` 的 OPERATIONS（当前能力面 = collection/window/records{name,value} + 提案写链）。
+- **触发 / 根因**（2026-11-08 评审 major）：eval 域移植把 acceptance 的 1.1/1.2 与多项 3.x 改成"不存在实体/不支持口径"的边界回复，且发送里残留旧域实体名——原财税 mock 的成功查询与分页链路失去覆盖，查询链路损坏也可能只得到符合新预期的边界说明。
+- **律法归属**：L2（验收覆盖的单一权威在用例清单）/ F1（表征先行：覆盖映射先于能力补齐）。
+- **闭环判据**：① 1.1/1.4/3.5 迁回正向查询（夹具支持的成功查询 + 越权拒绝），1.3 的上下文召回因此有可召回的真实查询；② 边界类逐条登记夹具缺口：**分页**（dummy.query 无分页操作，"下一页"只能考诚实收边）、**进度**（3.1）、**tax 口径**（3.2）、**admin expense 口径**（3.3）、**field system**（3.4）、**不存在的实体**（4.3）；③ 缺口补齐前，正向执行回归的独立覆盖 = 上述三条 + 探针正向用例（A1/B1/C2/H1/X1 全部真实查询）——写进 PR 描述与基线 v4 报告；④ 每补一个夹具能力，同步把对应边界用例迁回正向并在此条目销项。
+- **归属波次 / 限期**：Wave 6 之后（不阻塞基线 v4 建线——映射已登记，独立覆盖已声明）。
+- **状态**：部分闭环（① 已完成：1.1/1.4 迁回正向、旧域实体名清零、三类映射写进用例清单头；② 缺口待补）。

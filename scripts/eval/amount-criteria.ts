@@ -36,6 +36,19 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
  * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
  * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
  */
+/**
+ * "当成本轮已查结果"的措辞（accountDrift 与 C1 漂移尺共用一把尺）。三族：
+ *   ① 中文原有分支（已查/查到/结果如下 + **余额为**）——原样保留；
+ *   ② 中文中性域分支（记录值/记录 N）——移植时原版的「凭证 N」（旧财税域词）映射到
+ *      中性域的「记录」，双语化那轮只补了英文、没补回纯中文形态，中文回复的漂移
+ *      因此漏判（2026-11-08 评审 major：用户问 beta、回复「alpha 余额为 1,200」时
+ *      accountDrift 认不出来）；
+ *   ③ 英文分支（checked/queried/found/balance is|of/record value is/the result/…）。
+ * 语料仍有中文与混合语言发送、且不强制英文回复，所以三族都得在。
+ */
+// 中文分支不能用 \b 收尾——CJK 字符都不是 \w，「值」「为」之间不存在词边界，值\b 恒不匹配。
+export const ACCOUNT_RESULT_PHRASING = /已查|查到|结果如下|余额\s*为|记录\s*(?:\d|值)|凭证\s*\d|balance\s*为|record\s*(?:\d|value\b)|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
+
 export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
 
 /**
@@ -212,8 +225,20 @@ export function classifyErrorStateAmounts(
       // 种子值；算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
       const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
       const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
-      const entityOk = specific.length === 0
-        || specific.some((entity) => entity.values.includes(amount.value));
+      // 断言绑定（2026-11-08 评审 blocking）：金额必须绑定到**它所断言的那个实体**——分句内
+      // 距该金额最近（在其之前）的实体提及，而不是"任一点名的实体"。否则同分句里的多笔金额
+      // 会相互提供豁免："beta W1 record value is 1200, alpha W1 record value is 500"——
+      // 两笔都串台（beta 真实 500/300/200、alpha 真实 1200/800），却因分句同时点名两个实体、
+      // 每笔都匹配到*某个*被点名实体的值而全绿（逗号不切分句）。取最近前置提及即绑定：
+      // 1200 断言的是 beta（∉ beta 的值）→ 红；500 断言的是 alpha（∉ alpha 的值）→ 红。
+      // 表格行 "| beta-item-1 (rec-101) | 500 |" 的最近前置提及是 rec-101（值 500）→ 对上 ✓。
+      const amountAt = clause.indexOf(amount.raw);
+      const assertedEntity = amountAt < 0 ? undefined
+        : specific.filter((entity) => clause.lastIndexOf(entity.name, amountAt) >= 0)
+            .sort((a, b) => clause.lastIndexOf(b.name, amountAt) - clause.lastIndexOf(a.name, amountAt))[0];
+      const entityOk = assertedEntity === undefined
+        ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
+        : assertedEntity.values.includes(amount.value);
       const windowOk = windowClaimOk(clause, specific);
       if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
       const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));

@@ -25,6 +25,8 @@ function classify(reply: string, userText = '') {
   return classifyErrorStateAmounts(reply, userText, amounts);
 }
 
+import { ACCOUNT_RESULT_PHRASING } from './amount-criteria';
+
 describe('错误态金额三分：评审反例（必须红）', () => {
   it('blocking：跨实体冒用——"beta payable balance is 1200"（1200 是 alpha 的值）', () => {
     const v = classify('beta payable balance is 1200; please confirm.', 'checkbeta的payablebalance');
@@ -43,6 +45,12 @@ describe('错误态金额三分：评审反例（必须红）', () => {
 
   it('blocking：无数据 window——"beta W2 record value is 500"（beta 只有 W1）', () => {
     const v = classify('beta W2 record value is 500');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
+  it('blocking：同分句多实体相互豁免——"beta W1 record value is 1200, alpha W1 record value is 500"（两笔都串台）', () => {
+    const v = classify('Not found; beta W1 record value is 1200, alpha W1 record value is 500; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
 
@@ -202,5 +210,29 @@ describe('isVerifiedArithmetic：算术豁免的具体验证', () => {
     expect(isVerifiedArithmetic(1600, [500, 300, 200])).toBe(false); // (500+300)*2（实计 1000）
     expect(isVerifiedArithmetic(999999, pool)).toBe(false);      // "difference 999999" 照旧红
     expect(isVerifiedArithmetic(1000, [1500, 450])).toBe(false);
+  });
+});
+
+describe('ACCOUNT_RESULT_PHRASING：漂移尺三族措辞（2026-11-08 评审 major）', () => {
+  it('中文原有分支：已查/查到/结果如下/余额为', () => {
+    expect(ACCOUNT_RESULT_PHRASING.test('alpha 余额为 1,200')).toBe(true);
+    expect(ACCOUNT_RESULT_PHRASING.test('已查到 alpha 的记录')).toBe(true);
+    expect(ACCOUNT_RESULT_PHRASING.test('结果如下')).toBe(true);
+  });
+
+  it('中文中性域分支：记录值/记录 N/凭证 N（原 17dz 域词的映射保留）', () => {
+    expect(ACCOUNT_RESULT_PHRASING.test('alpha 的记录值为 1,200')).toBe(true);
+    expect(ACCOUNT_RESULT_PHRASING.test('alpha 记录 1200')).toBe(true);
+    expect(ACCOUNT_RESULT_PHRASING.test('alpha 凭证 003 的金额')).toBe(true);
+  });
+
+  it('英文分支', () => {
+    expect(ACCOUNT_RESULT_PHRASING.test('alpha record value is 1,200')).toBe(true);
+    expect(ACCOUNT_RESULT_PHRASING.test('checked alpha: balance is 1200')).toBe(true);
+  });
+
+  it('反问/澄清不带结果措辞时不匹配（尺子不放宽）', () => {
+    expect(ACCOUNT_RESULT_PHRASING.test('which collection do you mean?')).toBe(false);
+    expect(ACCOUNT_RESULT_PHRASING.test('请确认是哪一个')).toBe(false);
   });
 });

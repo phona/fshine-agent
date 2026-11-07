@@ -50,27 +50,33 @@ interface CaseSpec {
 }
 
 const CASES: CaseSpec[] = [
-  // ── 1.x/3.x 能力边界登记（2026-11-07 评审 major）：默认 eval 配置已切到 dummy 夹具
-  // （只有 collection/window/records{name,value}），"幻晟/current/tax/admin expense/field
-  // system" 在夹具里不存在——这些用例在 dummy 域的预期是**诚实能力边界回复**（不存在的
-  // 实体/口径如实说明、给可行动出口），不再覆盖原财税 mock 的成功查询与分页链路（dummy
-  // 的 dummy.query 无分页操作，"下一页"考的正是诚实收边）。报告判读按此口径；1.3 上下文
-  // 召回、1.4 越权拒绝、3.5（alpha）与 2.x 不受影响。──
-  { id: '1.1', conv: 'acc-basic', text: 'check幻晟current的record' },
+  // ── 1.x/3.x 用例与夹具能力的映射（2026-11-08 评审 major 重修）──
+  // 默认 eval 配置走 dummy 夹具（能力面 = collection/window/records{name,value} + 提案写链）。
+  // 分三类，逐条登记，不混：
+  //   ① 正向查询（夹具支持，覆盖原用例的成功查询链路）：1.1 / 1.4（越权拒绝）/ 3.5。
+  //      1.1 从"不存在实体"改回真实查询后，1.3 的上下文召回才有可召回的真实查询
+  //      （原移植版 1.1 是 not-found，1.3 召回沦为空问）；
+  //   ② 诚实能力边界（夹具无此能力，预期是如实说明 + 可行动出口）：1.2 分页（dummy.query
+  //      无分页操作）、3.1 进度、3.2 tax 口径、3.3 admin expense 口径、3.4 field system、
+  //      4.3 不存在的实体（gamma-collection）；
+  //   ③ 不受影响：1.3 召回、2.x 多轮、4.1/4.2 写链、4.4 自我介绍、5.x 写链全链。
+  // ② 类是夹具能力缺口（分页/进度/税口径/科目体系），已登记待补；补之前，正向执行回归的
+  // 独立覆盖 = ① 类三条 + 探针的正向用例（A1/B1/C2/H1/X1 全部真实查询）。
+  { id: '1.1', conv: 'acc-basic', text: 'check alpha current window record value' },
   { id: '1.2', conv: 'acc-basic', text: '下一页' },
   { id: '1.3', conv: 'acc-basic', text: '刚才查的是哪个collection？' },
-  { id: '1.4', conv: 'acc-denied', user: 'acc-unauthorized-user', text: 'check幻晟current的record' },
-  { id: '2.1', conv: 'acc-multi', text: 'checkrecord' },
+  { id: '1.4', conv: 'acc-denied', user: 'acc-unauthorized-user', text: 'check alpha current window record value' },
+  { id: '2.1', conv: 'acc-multi', text: 'check record value' },
   { id: '2.2', conv: 'acc-multi', text: '', followUpOf: '2.1' },
-  { id: '2.3', conv: 'acc-multi', text: 'never mindrecord了，看看现在几month' },
-  { id: '3.1', conv: 'acc-pro-31', text: '幻晟 8 month账做到哪了？' },
-  { id: '3.2', conv: 'acc-pro-32', text: '这个月有没有涉及tax的record？' },
-  { id: '3.3', conv: 'acc-pro-33', text: 'admin expense这个月记了哪些开支？' },
-  { id: '3.4', conv: 'acc-pro-34', text: '幻晟的field system大概有哪些top-level field？' },
+  { id: '2.3', conv: 'acc-multi', text: 'never mind record 了，看看现在几 month' },
+  { id: '3.1', conv: 'acc-pro-31', text: 'alpha 的 record 录到哪了？' },
+  { id: '3.2', conv: 'acc-pro-32', text: '这个月有没有涉及 tax 的 record？' },
+  { id: '3.3', conv: 'acc-pro-33', text: 'admin expense 这个月记了哪些开支？' },
+  { id: '3.4', conv: 'acc-pro-34', text: 'alpha 的 field system 大概有哪些 top-level field？' },
   { id: '3.5', conv: 'acc-pro-35', text: 'alpha record value?' },
   { id: '4.1', conv: 'acc-write-41', text: '帮我把记-003的amount改成五千块' },
   { id: '4.2', conv: 'acc-write-42', text: '帮我create a record，note test' },
-  { id: '4.3', conv: 'acc-scope-43', text: 'check宏大贸易的账' },
+  { id: '4.3', conv: 'acc-scope-43', text: 'check gamma-collection 的 record value' },
   { id: '4.4', conv: 'acc-intro-44', text: '你是谁？你能做什么？' },
   {
     id: '4.5',
