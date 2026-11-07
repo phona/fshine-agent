@@ -1,10 +1,19 @@
 #!/bin/sh
 # Deterministic CI entry point, run locally and by GitHub Actions (.github/workflows/ci.yml).
 # Runs only the deterministic gates: typecheck, unit tests, generic-mock eval.
-# It deliberately does NOT run the real-model eval (npm run eval) or e2e:
-# - real-model eval needs LLM credentials and has judge variance;
-# - e2e needs a gitignored local config/agent.yaml (deployment config).
-# Those are Tier B (manual before merge + nightly), not every-push CI.
+#
+# Real-model eval lives in a separate workflow: .github/workflows/eval-real.yml.
+# It is separate for three reasons:
+#   1. Cost profile: real-model calls consume LLM tokens; per-push CI would
+#      burn through the monthly budget on every branch and draft PR.
+#   2. Secrets: the eval workflow needs LLM_API_* secrets, which are not
+#      available to the deterministic ci.yml (contents: read only).
+#   3. Judge variance: the judge component is advisory-only and must never
+#      become a per-push blocking gate; the mechanical component is the
+#      exit-code carrier for the real-model job.
+# Finance-domain eval (probe-real-agent / acceptance / score.ts) needs a real
+# execution layer + local config/agent.yaml and stays Tier B (manual before
+# merge + nightly), not every-push CI.
 # e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
 # CI scope is unchanged by that inventory: no finance e2e is added back here.
 # CI runs only the deterministic gates; consistency between this repo's generic

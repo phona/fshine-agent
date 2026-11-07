@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """Generic-domain real-model eval (Package 5).
 
-Worker model: step-5-preview. Judge model: step-3.5-flash (different model;
-same-source judging is invalid and is never used here).
+Worker model: step-5-preview by default (overridable via LLM_MODEL).
+Judge model: step-3.5-flash by default (overridable via LLM_JUDGE_MODEL).
 Execution layer: stock fixture only (scripts/eval/fixtures/stock-platform,
 bin/stock). No real platform, no finance domain, no real write: the only
 write-like call is a dry-run prepare against a locked shelf, which the
 fixture refuses deterministically.
 
-Harness (honest boundary): this script is a MINIMAL tool loop, not fshine's
-full Main/Pi worker. It prompts the worker with a system prompt that offers
-exactly two output forms (CALL json or FINAL text), executes the stock CLI
-itself, and returns the RESULT envelope data to the worker. What it proves
-is real-model trustworthiness on the stock domain (re-query, contamination,
-ambiguity, not-found, idle, stability, error honesty). What it does NOT
-prove is that fshine's full Main would drive the same cases the same way;
-that would require the Pi SDK path and is listed as an open item, not claimed.
-
 Credentials: never in this file, never in arguments, never in env files.
-Every model call goes through ~/workspace/custom-connectors/custom.stepfun/bin/stepfun.py,
-which attaches a Vault surrogate (hsurr:) and Muse swaps in the real key
-only on an approved request to api.stepfun.com.
+Two modes:
+  Local (default): uses ~/workspace/custom-connectors/custom.stepfun/bin/stepfun.py,
+  which attaches a Vault surrogate (hsurr:) and Muse swaps in the real key
+  only on an approved request to api.stepfun.com.
+  Direct (CI / vault-less): when LLM_API_BASE_URL and LLM_API_KEY are set,
+  this script calls the OpenAI-compatible /chat/completions endpoint directly.
+  LLM_MODEL / LLM_JUDGE_MODEL override the hardcoded defaults.
 
 Usage:
-  python3 scripts/eval/generic-model-eval.py [--rounds N] [--only ID,...] [--out FILE]
+  python3 scripts/eval/generic-model-eval.py [--rounds N] [--only ID,...] [--out FILE] [--no-judge]
   python3 scripts/eval/generic-model-eval.py --write-baseline [--rounds 3]
+  --no-judge: skip judge calls; mechanical_pass only (CI gate mode).
 Baseline: scripts/eval/generic-model-baseline.json (separate file; never
 overwrites finance baseline v3 or protocol baseline v2). --write-baseline
 refuses to write if any round has a mechanical failure.
@@ -42,9 +38,12 @@ REPO = Path(__file__).resolve().parents[2]
 FIXTURE = REPO / "scripts" / "eval" / "fixtures" / "stock-platform"
 STOCK_BIN = str(FIXTURE / "bin" / "stock")
 HELPER = Path.home() / "workspace" / "custom-connectors" / "custom.stepfun" / "bin" / "stepfun.py"
-WORKER_MODEL = "step-5-preview"
-JUDGE_MODEL = "step-3.5-flash"
+WORKER_MODEL = os.environ.get("LLM_MODEL", "step-5-preview")
+JUDGE_MODEL = os.environ.get("LLM_JUDGE_MODEL", "step-3.5-flash")
 BASELINE_PATH = Path(__file__).resolve().parent / "generic-model-baseline.json"
+DIRECT_BASE_URL = os.environ.get("LLM_API_BASE_URL", "")
+DIRECT_API_KEY = os.environ.get("LLM_API_KEY", "")
+USE_DIRECT = bool(DIRECT_BASE_URL and DIRECT_API_KEY)
 
 SYSTEM = """You are a stock assistant. You help the user with shelf stock only.
 You have exactly two output forms, and nothing else:
@@ -88,7 +87,7 @@ CASES = [
     ], "mechanical": "south final contains 3 and south, and does not present north 2 as south"},
     {"id": "G-A3", "name": "ambiguity", "turns": [
         "How many items are on the nor shelf?",
-    ], "mechanical": "final lists north and north-wing and asks/confirms which exact shelf"},
+    ], "mechanical": "final lists BOTH candidates (north and north-wing as distinct mentions) and asks the user to choose (which/exact/confirm/did you mean/clarify/ambiguous/choose/either or an explicit 'north or north-wing' choice); a bare question mark is not a clarification"},
     {"id": "G-A4", "name": "not-found", "turns": [
         "How many items are on the nope shelf?",
     ], "mechanical": "final says no such shelf, no numbers invented, no leak"},
@@ -110,7 +109,37 @@ CASES = [
 LEAK_PATTERNS = [r"src/", r"\.cjs", r"bin/", r"[A-Z]{3,}(?:_[A-Z]+)+", r"\{[^}]*\""]
 
 
+def _direct_chat(model, message, system="", max_tokens=1024, reasoning_effort=""):
+    """Direct HTTP to LLM_API_BASE_URL/chat/completions (CI / vault-less mode)."""
+    import urllib.request
+    headers = {"content-type": "application/json", "authorization": f"Bearer {DIRECT_API_KEY}"}
+    body = {"model": model, "temperature": 0, "messages": [], "max_tokens": max_tokens}
+    if system:
+        body["messages"].append({"role": "system", "content": system})
+    body["messages"].append({"role": "user", "content": message})
+    if reasoning_effort:
+        body["reasoning_effort"] = reasoning_effort
+    req = urllib.request.Request(
+        f"{DIRECT_BASE_URL.rstrip('/')}/chat/completions",
+        data=json.dumps(body).encode(),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as e:
+        raise RuntimeError(f"direct LLM call failed ({model}): {e}")
+    msg = payload.get("choices", [{}])[0].get("message", {})
+    text = (msg.get("content") or "").strip()
+    if not text and msg.get("reasoning_content"):
+        text = ""
+    return text, payload.get("usage", {})
+
+
 def chat(model, message, system="", max_tokens=1024, reasoning_effort=""):
+    if USE_DIRECT:
+        return _direct_chat(model, message, system=system, max_tokens=max_tokens, reasoning_effort=reasoning_effort)
     cmd = [sys.executable, str(HELPER), "chat", "--model", model, "--message", message, "--max-tokens", str(max_tokens)]
     if reasoning_effort:
         cmd += ["--reasoning-effort", reasoning_effort]
@@ -205,7 +234,22 @@ def mechanical_pass(case, result):
         last = result["finals"][-1] if result["finals"] else ""
         return "3" in last and "south" in last.lower() and not leak
     if cid == "G-A3":
-        return "north" in f.lower() and "north-wing" in f.lower() and ("which" in f.lower() or "exact" in f.lower() or "confirm" in f.lower()) and not leak
+        # 期望行为 = 两个候选都列出 + 请求用户选择（用例名 ambiguity）。判据钉行为：
+        # ① 两个候选作为独立候选出现——「north-wing」含子串「north」，先把 wing 形态
+        #    剥掉再找 north，否则只提一个候选的回答能蒙混过关（review 反例：
+        #    「north-wing has 99 items. Anything else?」旧判据 False、子串判据 True，
+        #    会放行漏候选 + 编造数字）；裸问号也不算澄清（「Anything else?」不是选择请求）。
+        # 2026-11-07 两轮修正：第一轮把澄清措辞白名单从三词放宽，被上面这个反例抓住
+        # 放行洞；本轮补齐独立候选识别与选择语义。取证：PR #4 eval-real 评论
+        # 6700930026（模型以「did you mean "north" or "north-wing"?」作答曾被误判 FAIL）。
+        f_lower = f.lower()
+        has_wing = "north-wing" in f_lower
+        has_north = "north" in f_lower.replace("north-wing", "")
+        asks_choice = (
+            any(x in f_lower for x in ["which", "exact", "confirm", "did you mean", "clarif", "ambiguous", "choose", "either"])
+            or re.search(r"north.{0,40}\bor\b.{0,40}north-wing", f_lower) is not None
+        )
+        return has_north and has_wing and asks_choice and not leak
     if cid == "G-A4":
         no_shelf = any(x in f.lower() for x in ["no such", "does not exist", "not found", "no shelf named", "is no shelf", "no shelf called", "not a shelf"])
         return (no_shelf and not re.search(r"\b\d+\s+items?\b", f) and not leak)
@@ -254,6 +298,7 @@ def main():
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default="")
     ap.add_argument("--write-baseline", action="store_true")
+    ap.add_argument("--no-judge", action="store_true", help="Skip judge calls; mechanical_pass only (CI gate mode).")
     args = ap.parse_args()
     only = set(x.strip() for x in args.only.split(",") if x.strip())
     selected = [c for c in CASES if not only or c["id"] in only]
@@ -263,31 +308,46 @@ def main():
             with tempfile.TemporaryDirectory(prefix="generic-model-") as td:
                 result = run_case(case, Path(td))
                 mech = mechanical_pass(case, result)
-                judged = judge(result["transcript"])
-                scores = (judged or {}).get("scores") if judged and "scores" in judged else None
+                if args.no_judge:
+                    scores = None
+                    judge_raw = None
+                    judge_raw_ok = False
+                else:
+                    judged = judge(result["transcript"])
+                    scores = (judged or {}).get("scores") if judged and "scores" in judged else None
+                    judge_raw = (judged or {}).get("_judge_raw") if scores is None else None
+                    judge_raw_ok = scores is not None
                 row = {"round": rnd, "id": case["id"], "name": case["name"],
                        "calls": result["calls"], "mechanical_pass": mech,
-                       "judge_scores": scores, "judge_raw_ok": scores is not None,
-                       "judge_raw": (judged or {}).get("_judge_raw") if scores is None else None,
+                       "judge_scores": scores, "judge_raw_ok": judge_raw_ok,
+                       "judge_raw": judge_raw,
+                       "judge_skipped": args.no_judge,
                        "transcript": result["transcript"][:4000],
                        "final_text": result["final_text"][:1000]}
                 all_results.append(row)
-                print(f"ROUND {rnd} {case['id']} calls={result['calls']} mechanical={'PASS' if mech else 'FAIL'} judge={scores}", flush=True)
+                print(f"ROUND {rnd} {case['id']} calls={result['calls']} mechanical={'PASS' if mech else 'FAIL'} judge={'skipped' if args.no_judge else scores}", flush=True)
     summary = {}
     for case in selected:
         rows = [r for r in all_results if r["id"] == case["id"]]
         mech_passes = sum(1 for r in rows if r["mechanical_pass"])
         judge_means = {}
-        for dim in ["groundedness", "entityFidelity", "failureHonesty", "presentationHygiene"]:
-            vals = [r["judge_scores"][dim] for r in rows if r["judge_scores"] and dim in r["judge_scores"]]
-            judge_means[dim] = round(sum(vals) / len(vals), 2) if vals else None
+        if not args.no_judge:
+            for dim in ["groundedness", "entityFidelity", "failureHonesty", "presentationHygiene"]:
+                vals = [r["judge_scores"][dim] for r in rows if r["judge_scores"] and dim in r["judge_scores"]]
+                judge_means[dim] = round(sum(vals) / len(vals), 2) if vals else None
+        else:
+            judge_means = "skipped (--no-judge)"
         summary[case["id"]] = {"mechanical_pass_count": mech_passes, "rounds": len(rows), "judge_mean": judge_means}
     output = {"worker_model": WORKER_MODEL, "judge_model": JUDGE_MODEL, "rounds": args.rounds,
               "execution_layer": "stock fixture (bin/stock), mock only, no real platform",
               "harness": "minimal tool loop in this script, NOT fshine full Main/Pi worker (see header boundary)",
               "summary": summary, "results": all_results}
     if args.out:
-        Path(args.out).write_text(json.dumps(output, indent=2, ensure_ascii=False) + "\n")
+        out_path = Path(args.out)
+        # 自给自足：调用方（工作流）虽已 mkdir -p .runtime，直接跑脚本时不该因缺父目录
+        # 在最后一步崩掉（本轮本地复现撞到过一次 FileNotFoundError）。
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False) + "\n")
         print(f"Wrote {args.out}")
     if args.write_baseline:
         failed = [r for r in all_results if not r["mechanical_pass"]]

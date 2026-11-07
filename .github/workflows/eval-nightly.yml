@@ -1,0 +1,277 @@
+# GitHub Actions workflow: real-model eval nightly (generic domain).
+#
+# Boundary:
+#   - Nightly only (schedule), not per-push.
+#   - Two stages: (1) full generic eval with judge for the primary model;
+#     (2) dual-tier matrix (strong vs weak model) for discrimination report.
+#   - The dual-tier stage is advisory: 笨模型分数 ≥ 强模型 = 区分度不足，
+#     job exit 1 with a clear advisory message. This is NOT a blocking signal
+#     (the workflow is not a required check).
+#   -财税域 eval 留在 Tier B 手动运行。
+name: Eval Nightly (generic domain)
+
+on:
+  schedule:
+    - cron: '0 17 * * *'   # daily UTC 17:00
+  workflow_dispatch:       # allow manual re-runs
+
+permissions:
+  contents: read
+
+jobs:
+  # Stage 1: full generic eval with judge (primary model: step-5-preview).
+  eval-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 160
+    env:
+      EXECUTION_EXECUTOR: mock
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_MODEL: ${{ secrets.LLM_MODEL }}
+      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run full generic eval with judge
+        id: eval-full
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          python3 scripts/eval/generic-model-eval.py --rounds 3 --out .runtime/probe-full.json 2>&1 | tee .runtime/eval-full-summary.txt
+
+      - name: Upload full eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: generic-eval-full
+          path: |
+            .runtime/probe-full.json
+            .runtime/eval-full-summary.txt
+          retention-days: 30
+
+      - name: Write full eval summary to step summary
+        if: always()
+        run: |
+          {
+            echo "## Full generic eval (judge enabled)"
+            echo ""
+            echo "\`\`\`"
+            cat .runtime/eval-full-summary.txt 2>/dev/null || echo "(no summary)"
+            echo "\`\`\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Stage 2: dual-tier discrimination comparison.
+  # Primary (strong) model = step-5-preview, secondary (weak) model = step-3.5-flash.
+  # Judge = step-5-preview for both runs (same judge, fair comparison).
+  # Criterion: weak model mean score >= strong model mean score = insufficient discrimination.
+  # Exit 1 is advisory (not a required check), so it does not block merges.
+  eval-discrimination:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Do not gate discrimination on eval-full success; mechanical failures in
+    # full eval should not prevent the dual-tier comparison from running.
+    # needs: eval-full
+    env:
+      EXECUTION_EXECUTOR: mock
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run strong model (quick suite)
+        id: strong
+        env:
+          LLM_MODEL: step-5-preview
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          python3 scripts/eval/generic-model-eval.py --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-strong.json 2>&1 | tee .runtime/score-strong.txt
+
+      - name: Run weak model (quick suite)
+        id: weak
+        # 两档独立执行：强模型任一用例机械失败（exit 1）时，本腿仍要跑——
+        # 否则对照赛恰好在「强模型出问题」这个最需要区分的时点被跳过。
+        # !cancelled() 而非 always()：并发取消时不白烧 token。
+        if: ${{ !cancelled() }}
+        env:
+          LLM_MODEL: step-3.5-flash
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          python3 scripts/eval/generic-model-eval.py --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-weak.json 2>&1 | tee .runtime/score-weak.txt
+
+      - name: Compute discrimination report
+        id: discrimination
+        if: always()
+        run: |
+          python3 - <<'PYEOF'
+          import json, sys
+          from pathlib import Path
+
+          PROBE_STRONG = '.runtime/probe-strong.json'
+          PROBE_WEAK = '.runtime/probe-weak.json'
+          EXPECTED_CASES = {'G-A1', 'G-A2', 'G-A3', 'G-A4', 'G-A5', 'G-B1', 'G-Y2'}
+          JUDGE_DIMS = {'groundedness', 'entityFidelity', 'failureHonesty', 'presentationHygiene'}
+
+          def load_probe(p):
+              if not p.exists():
+                  return {}
+              return json.loads(p.read_text())
+
+          def validate_judge_data(summary, label):
+              missing_cases = EXPECTED_CASES - set(summary.keys())
+              if missing_cases:
+                  print(f'::error::{label} missing cases: {sorted(missing_cases)}')
+                  return False
+              for cid in EXPECTED_CASES:
+                  judge_mean = summary.get(cid, {}).get('judge_mean', {})
+                  if not isinstance(judge_mean, dict):
+                      print(f'::error::{label} {cid} judge_mean is not a dict: {type(judge_mean).__name__}')
+                      return False
+                  missing_dims = JUDGE_DIMS - set(judge_mean.keys())
+                  if missing_dims:
+                      print(f'::error::{label} {cid} missing judge dims: {sorted(missing_dims)}')
+                      return False
+                  for dim, val in judge_mean.items():
+                      if not isinstance(val, (int, float)):
+                          print(f'::error::{label} {cid} {dim} is not numeric: {val!r}')
+                          return False
+              return True
+
+          strong_data = load_probe(Path(PROBE_STRONG))
+          weak_data = load_probe(Path(PROBE_WEAK))
+
+          strong_summary = strong_data.get('summary', {})
+          weak_summary = weak_data.get('summary', {})
+
+          # Extract actual model names from probe reports
+          strong_worker_model = strong_data.get('worker_model', 'unknown')
+          weak_worker_model = weak_data.get('worker_model', 'unknown')
+          judge_model = strong_data.get('judge_model', weak_data.get('judge_model', 'unknown'))
+
+          # Validate judge models match (same judge for both tiers)
+          if strong_data.get('judge_model') != weak_data.get('judge_model'):
+              print(f'::warning::Judge model mismatch: strong={strong_data.get("judge_model")} weak={weak_data.get("judge_model")}')
+
+          strong_ok = validate_judge_data(strong_summary, 'strong')
+          weak_ok = validate_judge_data(weak_summary, 'weak')
+
+          all_ids = sorted(EXPECTED_CASES)
+
+          if not strong_ok or not weak_ok:
+              Path('.runtime/discrimination-report.md').write_text(
+                  '**Advisory**: Insufficient or invalid judge data for one or both tiers; cannot determine discrimination.'
+              )
+              print('::error::Insufficient or invalid judge data; discrimination report aborted.')
+              sys.exit(1)
+
+          all_ids = sorted(EXPECTED_CASES)
+          rows = []
+          strong_total = 0
+          weak_total = 0
+
+          for cid in all_ids:
+              s_info = strong_summary.get(cid, {})
+              w_info = weak_summary.get(cid, {})
+              s_judge = s_info.get('judge_mean', {})
+              w_judge = w_info.get('judge_mean', {})
+              s_sum = sum(v for v in s_judge.values() if isinstance(v, (int, float)))
+              w_sum = sum(v for v in w_judge.values() if isinstance(v, (int, float)))
+              s_ok = s_info.get('mechanical_pass_count', 0) == s_info.get('rounds', 0)
+              w_ok = w_info.get('mechanical_pass_count', 0) == w_info.get('rounds', 0)
+              rows.append((cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum))
+              strong_total += s_sum
+              weak_total += w_sum
+
+          overall_advisory = weak_total >= strong_total
+
+          # 保留各自退出状态：强模型腿的机械失败是回归信号。报告照常产出（否则丢了
+          # 区分度证据），但 job 结论要红——两档独立、各自的退出状态都作数。
+          strong_mech_fail = [cid for cid, s_ok, _sj, _wo, _wj, _ss, _ws in rows if not s_ok]
+
+          report_lines = [
+              '# Discrimination Report: dual-tier matrix',
+              '',
+              f'- Strong model: {strong_worker_model} (LLM_MODEL)',
+              f'- Weak model: {weak_worker_model}',
+              f'- Judge: {judge_model} (same for both tiers)',
+              '- Rounds: 1 per case (quick suite: G-A1, G-A2, G-A3, G-A4, G-A5, G-B1, G-Y2)',
+              '',
+              '## Per-case comparison',
+              '',
+              '| Case | Strong pass | Strong judge (sum) | Weak pass | Weak judge (sum) |',
+              '| --- | --- | --- | --- | --- |',
+          ]
+          for cid, s_ok, s_judge, w_ok, w_judge, s_sum, w_sum in rows:
+              s_judge_str = '/'.join(str(v) for v in s_judge.values()) if s_judge else 'n/a'
+              w_judge_str = '/'.join(str(v) for v in w_judge.values()) if w_judge else 'n/a'
+              report_lines.append(f'| {cid} | {s_ok} | {s_judge_str} ({s_sum}) | {w_ok} | {w_judge_str} ({w_sum}) |')
+
+          report_lines += [
+              '',
+              '## Aggregate',
+              f'- Strong total judge sum: {strong_total} (7 cases)',
+              f'- Weak total judge sum: {weak_total} (7 cases)',
+              f'- Strong mechanical failures: {strong_mech_fail if strong_mech_fail else "none"}',
+              '',
+              '## Criterion',
+              '> 笨模型分数 ≥ 强模型 = harness 区分度不足 → advisory 红（不是放行信号）',
+              '',
+              f'**Advisory**: { "YES — weak model is not clearly worse; discrimination insufficient." if overall_advisory else "NO — weak model is clearly worse; discrimination sufficient." }',
+              '',
+              '_This is an advisory signal only. The workflow is not a required check._',
+          ]
+
+          report = '\n'.join(report_lines)
+          Path('.runtime/discrimination-report.md').write_text(report)
+          print(report)
+
+          if overall_advisory:
+              print('::warning::Discrimination advisory: weak model >= strong model. See report.')
+              sys.exit(1)
+          if strong_mech_fail:
+              print(f'::error::Strong model mechanical failures (regression signal): {strong_mech_fail}')
+              sys.exit(1)
+          sys.exit(0)
+          PYEOF
+
+      - name: Write discrimination to step summary
+        if: always()
+        run: |
+          if [ -f .runtime/discrimination-report.md ]; then
+            cat .runtime/discrimination-report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload discrimination report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discrimination-report
+          path: |
+            .runtime/probe-strong.json
+            .runtime/probe-weak.json
+            .runtime/score-strong.txt
+            .runtime/score-weak.txt
+            .runtime/discrimination-report.md
+          retention-days: 30
