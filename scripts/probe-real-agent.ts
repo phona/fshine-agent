@@ -441,12 +441,22 @@ function amountViolations(turns: Turn[], script: ScriptLine[], index: number): A
 }
 
 /**
+ * 英文客套词表（原中文客套表的对偶侧）：dummy 域 send 全是英文，模型客套也全是英文，
+ * 原剥词表只有 receive 与 OK|ok 两个英文成员——英文客套回复（"sure"、"happy to
+ * help"、"got it"）剥完仍有实词，纯客套/空转 note 在 C2/F1/H1/H2 上几乎不响（假阴性）。
+ * 每条都带 \b 边界：不边界会把 "sure" 命中进 "ensure"、"ok" 命中进 "look"。
+ * 剥词只影响"剥完为空"这一个判定，实质内容（数据/collection名/澄清问句）一律剥不掉。
+ */
+const EN_PLEASANTRY = /\bsure\b|\bsurely\b|\bof course\b|\bcourse\b|happy to help|glad to help|you'?re welcome|\bwelcome\b|\bgot it\b|\bno problem\b|\bno worries\b|sounds good|\bmy pleasure\b|\banytime\b|\babsolutely\b|\bcertainly\b|right away|\bon it\b|\bwill do\b|\bokay\b|\byes\b|\byeah\b|\byep\b|sure thing|thanks|thank you|\bhello\b|\bhi\b/gi;
+
+/**
  * 纯客套：剥掉客套词、语气词、标点后不剩任何实质内容。
  * 澄清问句、能力边界说明、带数据/带collection名的回复都剩下内容，不算客套。
  */
 function isPurePleasantry(text: string): boolean {
   const stripped = text
     .replace(/好的|好|嗯|行|receive|明白|了解|清楚|稍等|稍候|马上|立刻|谢谢|感谢|多谢|不客气|辛苦|OK|ok|请|呀|啊|呢|吧|嘛|哦|噢|你|您|我|它|他|她|咱们|大家|了|的|是|就|也|和|跟|吗|么/g, '')
+    .replace(EN_PLEASANTRY, '')
     .replace(/[\s。！!？?，,、~～.…:：;；"“”'‘’]/g, '');
   return stripped.length === 0;
 }
@@ -487,6 +497,18 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
 }
 
 /**
+ * "当成本轮已查结果"的措辞（accountDrift 与 C1 漂移尺共用一把尺，原先是两处各自内联
+ * 同一表达式——同源尺子分叉正是本次双语化要治的病灶，提成单一来源）。
+ * 中文侧原样保留（已查/查到/balance为/record N/结果如下）；英文侧按 dummy 域全英文
+ * send 的实证形态补齐：checked / queried / found / balance is|of / record value is /
+ * the result / here are / as follows（A2/A3/C1/C2/E1/H1/X1/X2/Y1 的回复都是英文）。
+ * 旧中文侧 `record\s*\d` 只能匹配 "record 1200" 这种数字紧贴形态，英文回复说的是
+ * "record value is 1,200"——故显式收 record value，否则整条漂移尺在英文回复上恒不
+ * 命中（vacuous check）。
+ */
+const ACCOUNT_RESULT_PHRASING = /已查|查到|balance\s*为|record\s*(?:\d|value\b)|结果如下|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
+
+/**
  * 任务串台的文本侧证据（E1/H1 共用）：用户点明了某些collection的轮次，回复把"用户没点名的collection"
  * 当成本轮已查结果。只在用户点名了collection的轮次查——裸window、闲聊、汇总轮带collection名是正确行为。
  * 思路同 C1 的漂移判定：只认"当成本轮结果"，不认"被点名"。
@@ -494,7 +516,7 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
 function accountDrift(turns: Turn[], accounts: string[]): number[] {
   return turns.flatMap((turn, i) => (accounts.some((a) => turn.text.includes(a))
     && accounts.some((a) => !turn.text.includes(a) && turn.reply.includes(a)
-      && /已查|查到|balance为|record\s*\d|结果如下/.test(turn.reply)) ? [i] : []));
+      && ACCOUNT_RESULT_PHRASING.test(turn.reply)) ? [i] : []));
 }
 
 /** 落地轮判定（F1/H2 共用）：用户补充明确后必须真查，且回复含真实结果。 */
@@ -509,7 +531,13 @@ function landingNote(turns: Turn[], script: ScriptLine[], index: number): string
 
 // ─── G 用例（并发多线程）判定 helper ───
 
-/** 计划步骤措辞：「第2/3步」「第 2 步」「第二步」。宿主只给带前缀的计划步骤通知加【第 N/M 步】前缀。 */
+/**
+ * 计划步骤措辞：「第2/3步」「第 2 步」「第二步」。宿主只给带前缀的计划步骤通知加【第 N/M 步】前缀。
+ * **刻意保持中文-only，不做双语化**：这一族标记的权威来源是宿主通知（宿主自己生成的中文
+ * 前缀，packages/agent/src/plan-steps.ts），不是模型回复——X1① 判的是"步骤通知有没有到达
+ * 用户"。若给模型回复补上 "step 1 of 2" 这类英文形态，模型自己复述计划就能满足判据，
+ * 宿主通知缺失反而被放过，那是把尺子放松，不是消除不可达。
+ */
 function stepMarkers(text: string): string[] {
   return [...text.matchAll(/第\s*([0-9一二三四五六])\s*(?:[/／]\s*[0-9一二三四五六]\s*)?步/g)].map((m) => m[0].replace(/\s/g, ''));
 }
@@ -518,17 +546,32 @@ function hasStepMarker(turn: Turn): boolean {
   return stepMarkers(turn.reply).length > 0 || turn.notices.some((notice) => stepMarkers(notice).length > 0);
 }
 
-/** 失败/未执行措辞：核对里"这一步没查到"的常见说法（含用户授权跳过时的复述）。 */
-const ACCOUNT_FAILED = /未找到|查不到|无法查|没查|未查到|不存在|失败|无数据|跳过/;
+/**
+ * 分句切分：中日标点 + 英文句点。英文句点必须进集合——否则一整段英文只有一个"分句"，
+ * accountProcessed / staleScopeAmounts / windowSwitchAmounts / errorStateNotes 的
+ * 分句归属全部失效（旧collection名出现在段落任何位置就把陈旧金额赦免掉）。
+ * 小数点护栏：**只有夹在两个数字之间的点不切**（1,200.00 完整保留）。这里比直觉形式
+ * `(?<!\d)\.(?!\d)` 更宽一档——后者连"…is 500. locked-one…"这种以数字结尾的句子也不切，
+ * 而那正是英文回复里最常见的形态（金额结尾句 + 下一句），不切就等于分句归属在最该起作用的
+ * 地方失效。四处站点同一把尺（本常量即单一来源）。
+ */
+const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
+
+/** 失败/未执行措辞：核对里"这一步没查到"的常见说法（含用户授权跳过时的复述）。
+ *  中文侧原样保留；英文侧按 dummy 域补齐：not found / couldn't find / no data /
+ *  does not exist / failed / skipped / unable / no records（G1 恢复窗与跳过授权扫描的
+ *  命中共用——没有英文侧时 skipIgnored 的 failedBefore 恒 false，"授权跳过被尊重"
+ *  这条判定静默返回空数组）。 */
+const ACCOUNT_FAILED = /未找到|查不到|无法查|没查|未查到|不存在|失败|无数据|跳过|not found|couldn'?t find|no data|does not exist|failed|skipped|unable|no records/i;
 
 /**
  * 该collection在本轮是否已出"结果"（而非仅被点名）：按分句判定——collection名与失败措辞同句，
- * 或与"数字+结果词"同句（"alpharecord value 1,200 元"、"locked-one 900 元"）。只点名不给结果的
+ * 或与"数字+结果词"同句（"alpha record value 1,200 元"、"locked-one 900 元"）。只点名不给结果的
  * 不算（"接下来核对gamma-collection"、"gamma-collection、locked-one"这种列举都不是已执行）。
  */
 function accountProcessed(turn: Turn, account: string): boolean {
   return turn.reply
-    .split(/[。；;\n]/)
+    .split(CLAUSE_SPLIT)
     .some((clause) => clause.includes(account)
       && (ACCOUNT_FAILED.test(clause) || (/[\d,．.]+/.test(clause) && /balance|record value|payable|debt|为|是|：|:|元/.test(clause))));
 }
@@ -557,14 +600,51 @@ function planResumeState(turns: Turn[], planAccounts: string[], resumeIdx: numbe
 }
 
 /**
- * 文本里的对象名（customer/supplier等：公司后缀结尾）。贪婪前缀会把"alpha里epsilon-item LLC"
- * 整段吞进匹配，按前导语境词（collection/里/中/的/为/是…）裁掉上下文再返回——刻意不含"有"：
- * "有限公司"自身带"有"，拿它当边界会把名字切断。
+ * 英文公司后缀族（原中文后缀族「有限公司/公司/工厂/商行/经营部/分公司」的对偶侧）。
+ * dummy 夹具里没有任何带公司后缀的实体，这一族当前不可达——按"双语对偶、不删中文也不
+ * 删英文"的纪律保留：换一个执行层（或语料里出现真实公司名）时它立刻可用。
+ * 前缀若是英文功能词（"which Company"）就不是实体名，由 EN_STOPWORD_PREFIX 滤掉。
+ */
+const COMPANY_SUFFIX_EN = /\b[A-Za-z][A-Za-z0-9&.'-]{1,30}(?:[ .-](?:LLC|Ltd|Inc|GmbH|Co|Corp|Company))\b/g;
+const EN_STOPWORD_PREFIX = /^(?:which|the|a|an|this|that|these|those|it|they|we|you|our|your|his|her|their|my|me|us|there|here|what|who|and|or|but|if|so|as|at|by|for|from|in|of|on|to|with)$/i;
+
+/**
+ * dummy 域的"具体对象名"形态：<collection>-item-<序号>（夹具 seedState() 的 items[].name，
+ * 如 alpha-item-1 / contoso-trade-item-1 / locked-item-1）。原 17dz 域靠公司后缀识别
+ * 对象名，dummy 域没有这类构词法——忠实对位是 items 的命名约定本身，已从夹具读出而非臆造。
+ * 没有这一族时 namedItems/referentialBreak/H2 收窄判定在 dummy 域恒不命中（对象名
+ * 一个都抽不到），正是本轮要消除的 vacuous check。
+ */
+const DUMMY_ITEM_NAME = /[a-z0-9][a-z0-9-]*-item-\d+/gi;
+
+/**
+ * 文本里的对象名（customer/supplier等：公司后缀结尾）。中文侧沿用原判据——贪婪前缀会把
+ * "alpha里epsilon-item LLC"整段吞进匹配，按前导语境词（collection/里/中/的/为/是…）裁掉
+ * 上下文再返回；刻意不含"有"："有限公司"自身带"有"，拿它当边界会把名字切断。
+ * 英文侧两条：公司后缀族（上面 COMPANY_SUFFIX_EN）+ dummy item 名族（DUMMY_ITEM_NAME，
+ * 形态自带边界，不需要中文那套前缀裁剪）。
  */
 function objectNames(text: string): string[] {
-  return [...text.matchAll(/[\u4e00-\u9fa5]{2,8}(?:有限公司|有限责任公司|公司|工厂|商行|经营部|分公司)/g)]
+  const chinese = [...text.matchAll(/[\u4e00-\u9fa5]{2,8}(?:有限公司|有限责任公司|公司|工厂|商行|经营部|分公司)/g)]
     .map((m) => m[0].replace(/^[\s\S]*[collection里中内的为是和及与、（，。：:；;\s]/, ''));
+  const english = [...text.matchAll(COMPANY_SUFFIX_EN)].map((m) => m[0])
+    .filter((name) => !EN_STOPWORD_PREFIX.test(name.split(/[ .-]/)[0]!));
+  const items = [...text.matchAll(DUMMY_ITEM_NAME)].map((m) => m[0]);
+  return [...new Set([...chinese, ...english, ...items])];
 }
+
+/**
+ * 汇总轮"分隔措辞"（探索线程的结果没有被算进核对汇总的豁免信号）。
+ * 双语化：中文侧原样保留（另外/此外/补充/之前/前面/你还问/你问过/问过）；英文侧收
+ * additionally / in addition / separately / earlier / previously / you also asked /
+ * as I mentioned / on a separate note，以及 also + 回忆动词（also asked|mentioned|
+ * noted|found|queried）——G1 第9轮 send 是英文 "summarize what we checked today"，
+ * 中文-only 版本下这条豁免恒不触发，正确分隔的汇总也会被判污染（假红）。
+ * **刻意不收裸 `\balso\b`**：英文汇总里 "also" 出现概率极高（"we also checked…"），
+ * 收进来等于把整条污染判定豁免掉——那正是本轮要消除的 vacuous 方向。诚实分隔的英文
+ * 实证形态是 "you also asked …" / "separately …"，不是任一个 also。
+ */
+const SUMMARY_SEPARATOR = /另外|此外|补充|之前|前面|你还问|你问过|问过|additionally|in addition|separately|earlier|previously|you also asked|as I mentioned|as noted earlier|on a separate note|also (?:asked|mentioned|noted|found|queried)/i;
 
 /**
  * G1 探索轮结果污染核对汇总：探索落地轮（customer级查询）回复里的对象名/金额，若原样出现在
@@ -573,7 +653,7 @@ function objectNames(text: string): string[] {
  */
 function explorationPollution(turns: Turn[], landingIdx: number, summaryIdx: number, threadIdxs: number[]): { objects: string[]; amounts: string[] } {
   const summary = turns[summaryIdx]!.reply;
-  if (/另外|此外|补充|之前|前面|你还问|你问过|问过/.test(summary)) return { objects: [], amounts: [] };
+  if (SUMMARY_SEPARATOR.test(summary)) return { objects: [], amounts: [] };
   const threadText = threadIdxs.map((i) => turns[i]?.reply ?? '').join('\n');
   const objects = [...new Set(objectNames(turns[landingIdx]!.reply))]
     .filter((name) => name.length >= 4 && !threadText.includes(name) && summary.includes(name));
@@ -583,6 +663,15 @@ function explorationPollution(turns: Turn[], landingIdx: number, summaryIdx: num
     .map((a) => a.raw);
   return { objects, amounts };
 }
+
+/**
+ * "授权前已失败过"的复述豁免（转述旧失败 ≠ 重试）。
+ * 双语化：中文侧原样保留（如前/已经查过/此前/之前已/已跳过/按你说的跳过/不再重试/无需）；
+ * 英文侧收 as found earlier / already checked / as you asked / skipped as instructed /
+ * no need / won't retry / as agreed / as requested——ACCOUNT_FAILED 补了英文失败措辞后
+ * failedBefore 才可能为真，这条豁免不同步补，英文复述旧失败会被误判成重试（假红）。
+ */
+const SKIP_RECAP = /如前|just now|已经查过|此前|之前已|已跳过|按你说的跳过|不再重试|无需|as (?:I )?(?:found|mentioned|noted|said) earlier|already (?:checked|tried|queried)|as you (?:asked|said|instructed)|skipped (?:as|per) (?:you|your) (?:asked|instructed)|no need|won'?t retry|as agreed|as requested/i;
 
 /**
  * G1 跳过授权判定：授权轮之后若又把"授权前已失败过"的collection查了一遍（同对象再次失败），
@@ -596,25 +685,30 @@ function skipIgnored(turns: Turn[], authIdx: number, skipObject: string): number
   for (let i = authIdx; i < turns.length; i += 1) {
     const turn = turns[i]!;
     if (turn.calls > 0 && turn.reply.includes(skipObject) && ACCOUNT_FAILED.test(turn.reply)
-      && !/如前|just now|已经查过|此前|之前已|已跳过|按你说的跳过|不再重试|无需/.test(turn.reply)) {
+      && !SKIP_RECAP.test(turn.reply)) {
       retried.push(i + 1);
     }
   }
   return retried;
 }
 
-/** 规划性措辞：「先…再…」「第 N 步」「分 N 步」「分别」「逐步」；或列出两个以上待查collection/window（清单式提议）。 */
-const PROPOSAL_PHRASING = /先[^。！？!?\n]{0,40}(再|然后|接着)|第[一二三四五六1-6]\s*步|分\s*[两二三四五1-5]\s*步|分别|逐步|一步步/;
+/** 规划性措辞：「先…再…」「第 N 步」「分 N 步」「分别」「逐步」；或列出两个以上待查collection/window（清单式提议）。
+ *  英文侧（G2 第1轮 send 是 "how should I check?"，回复全英文）：first … then/next/after that、
+ *  step N、in N steps、separately、step by step、one by one。中文侧原样保留。 */
+const PROPOSAL_PHRASING = /先[^。！？!?\n]{0,40}(再|然后|接着)|第[一二三四五六1-6]\s*步|分\s*[两二三四五1-5]\s*步|分别|逐步|一步步|first[^.\n]{0,40}(then|next|after that)|step\s*\d+|in\s+(?:\d+|two|three|four|five)\s+steps|separately|step by step|one by one/i;
 
 /**
  * G2 判定——第 1 轮是否真的"提议了查法"（业务 skill 拆解表 surfaced）。
  * 纯澄清问句不算提议：问句形式列对象（"查alpha还是新兴？"）是澄清，不是方案。
+ * 清单式回退的"账期"形态双语化：中文侧原样保留（2026年07月 / 202607）；英文侧补
+ * 月份名 + 年份（July 2026 / Jul. 2026）与 2026-07 / 2026/07（G2 第1轮 send 全英文，
+ * 模型列多期时写的是英文月份）。collection 名那条支本来就是语言中性的。
  */
 function hasPlanProposal(text: string): boolean {
   if (PROPOSAL_PHRASING.test(text)) return true;
   if (/[?？]/.test(text)) return false;
   const accounts = ['alpha', 'alpha-group', 'beta', 'locked-one'].filter((account) => text.includes(account));
-  const periods = new Set([...text.matchAll(/20\d{2}\s*年?\s*\d{1,2}\s*月?|20\d{4}/g)].map((m) => m[0]));
+  const periods = new Set([...text.matchAll(/20\d{2}\s*年?\s*\d{1,2}\s*月?|20\d{4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s*20\d{2}|20\d{2}\s*[-/]\s*\d{1,2}/g)].map((m) => m[0]));
   return accounts.length >= 2 || periods.size >= 2;
 }
 
@@ -624,8 +718,11 @@ function hasPlanProposal(text: string): boolean {
  * 线程结论措辞：线程真实结果为"空/未找到"时（B 的 0 条record、D 的目录 not_found），
  * 召回轮复述结论即算召回。刻意不收裸"没有"——出口校验的兜底话术
  * （"本轮没有产生任何平台查询"）也含"没有"，那不是线程结论。
+ * 英文侧（C2/E1/H1 的空结果线程召回轮全英文）：not found / no records / no results /
+ * no data / none / nothing / no more / no need / not needed / declined / skipped /
+ * failed / 0 records / zero records / did not return。中文侧原样保留。
  */
-const THREAD_CONCLUSION = /未找到|没找到|查不到|查无|不存在|无数据|无record|没有已保存|没有record|没有匹配|没有更多|没有next page|无需|不必|不用再|拒绝|跳过|失败|0\s*[条张笔家]|零\s*[条张笔家]|没有(?=[。！？!?，,、\s]|$)/;
+const THREAD_CONCLUSION = /未找到|没找到|查不到|查无|不存在|无数据|无record|没有已保存|没有record|没有匹配|没有更多|没有next page|无需|不必|不用再|拒绝|跳过|失败|0\s*[条张笔家]|零\s*[条张笔家]|没有(?=[。！？!?，,、\s]|$)|not found|no records|no results|no data|\bnone\b|\bnothing\b|no more|no need|not needed|declined|skipped|failed|0 records|zero records|did not return/i;
 
 /**
  * 召回轮"既没召回也没重查"（E1/H1 共用）：线程真实结果带金额时，一个数都没有即中
@@ -649,10 +746,17 @@ function requeryMismatch(turns: Turn[], script: ScriptLine[], index: number): Am
   return extractAmounts(turns[index]!.reply).filter((a) => a.value !== 0 && !base.has(a.value));
 }
 
-/** mock alphacustomer辅助档案（seed.json）：customer级查询的落点。真实平台同名不同数，判定只问"有没有落到具体customer"。 */
-const QIANLONG_ITEMS = ['epsilon-item LLC', 'delta-item LLC', 'gamma-item'];
+/**
+ * mock 的"具体对象名"全集（dummy 夹具 seedState() 的 collections[*].items[].name）。
+ * 原 17dz 域这里是 alphacustomer辅助档案三家（epsilon-item LLC / delta-item LLC /
+ * gamma-item），dummy 夹具里**没有 customer 维度**，这三名是端口残留、在夹具中无对位
+ * 实体——留着只会让 namedItems 匹配永不出现的字符串。改为逐个从夹具抄录的真实 item 名，
+ * 语义同构：判定只问"回复有没有落到具体对象"，不关心对象在真实平台叫什么。
+ * （objectNames 的 -item-\d+ 形态已能覆盖同一族，本常量是显式锚点 + note 回显用。）
+ */
+const QIANLONG_ITEMS = ['alpha-item-1', 'alpha-item-2', 'alpha-group-item-1', 'beta-item-1', 'beta-item-2', 'beta-item-3', 'locked-item-1', 'contoso-trade-item-1', 'contoso-trade-item-2', 'contoso-logistics-item-1', 'fabrikam-retail-item-1', 'fabrikam-wholesale-item-1'];
 
-/** 回复里点名的具体customer：已知辅助档案名 + 通用公司名抽取（objectNames 捞不到无后缀的"gamma-item"）。 */
+/** 回复里点名的具体对象：已知 item 名全集 + 通用对象名抽取（DUMMY_ITEM_NAME 捞得到全部 item 名，这里是显式锚点）。 */
 function namedItems(text: string): string[] {
   return [...new Set([...QIANLONG_ITEMS.filter((name) => text.includes(name)), ...objectNames(text)])];
 }
@@ -660,18 +764,24 @@ function namedItems(text: string): string[] {
 /**
  * 探索线程丢上下文（H2 第 3 轮）：用户第 2 轮已给collection，本轮回复又把collection当成待补信息问一遍。
  * 回复带上该collection名的不判——它只是在同一线程内continue问别的（如"按哪个customer拆"）。
+ * 问句措辞双语化：中文侧原样保留；英文侧收 which / please / could you / would you /
+ * let me know / need / clarify / specify / confirm / tell me（H2 第3轮 send 是英文
+ * "break down by customer"，无 '?' 的英文请求句只有靠这些词形才判得出来）。
  */
 function asksAccountAgain(turn: Turn, account: string): boolean {
   if (turn.reply.includes(account)) return false;
-  return /collection/.test(turn.reply) && /[?？]|请告诉|需要您|需要你|补充|明确|确认/.test(turn.reply);
+  return /collection/.test(turn.reply) && /[?？]|请告诉|需要您|需要你|补充|明确|确认|which|please|could you|would you|let me know|\bneed\b|clarif|specify|confirm|tell me/i.test(turn.reply);
 }
 
 /**
  * 跨轮指代断裂（H2 第 5 轮）："它"应指第 4 轮点名的customer。反问"它是谁/哪家customer"即断裂；
  * 或转而谈另一家customer（上一轮点名的customer在本轮回复里消失、且换成了别家）。
+ * 反问措辞双语化：中文侧原样保留；英文侧收 which one / who is that / which customer /
+ * which company / what do you mean / refer to（H2 第 4/5 轮 send 全英文，英文反问
+ * 是唯一可达形态）。
  */
 function referentialBreak(prev: Turn, cur: Turn): boolean {
-  if (/哪家|哪个customer|哪位|它是谁|指哪家|你说的是哪|哪一个/.test(cur.reply)) return true;
+  if (/哪家|哪个customer|哪位|它是谁|指哪家|你说的是哪|哪一个|which one|who is that|which customer|which company|what do you mean|refer to/i.test(cur.reply)) return true;
   const prevNames = namedItems(prev.reply);
   if (prevNames.length === 0) return false;
   return !prevNames.some((name) => cur.reply.includes(name)) && namedItems(cur.reply).length > 0;
@@ -695,9 +805,12 @@ const H2_SUMMARY = 7;
  * （"既没召回也没重查"由 recallMissed 判），且复述旧结果须带"本会话早前查询"类框定语——
  * 否则用户分不清这是刚查的还是先前查到的。D-070 的两种复发形态（承认查过但拒绝给数、
  * 无框定复述）都落在这一条上，故与 recallMissed 配对使用、缺一即 note。
+ * 框定语双语化：中文侧原样保留；英文侧收 earlier / previously / before / as found earlier /
+ * earlier in this conversation / from our earlier / in this session / you asked earlier
+ * （C2 五轮召回 send 全英文，"earlier"/"previously" 是唯一可达形态）。
  */
 function recallFramingNote(turn: Turn): string | null {
-  if (/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候|此前/.test(turn.reply)) return null;
+  if (/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候|此前|earlier|previously|\bbefore\b|as found earlier|earlier in this conversation|from our earlier|in this session|you asked earlier/i.test(turn.reply)) return null;
   return `召回轮复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
 }
 
@@ -788,6 +901,27 @@ const C2_ROSTER_RECALL = 18;
 // ─── 歧义 / not_found 用例的执行语言指纹断言（Stage 3 事故根治包） ───
 
 /**
+ * 内部控制词的英文词形补丁（宿主词表未收，探针侧补一层）。
+ *
+ * 决策记录：宿主的生产尺在 packages/agent/src/execution-language.ts:27
+ * （`内部控制词`：额度|配额|熔断|计划门|拒绝上限|重试上限），只收中文词形——英文回复
+ * 说 "查询 plan quota" 一条都不中。本轮按「只改探针」的边界**不动宿主文件**：
+ * 该尺被 runtime.ts / runtime-quality.ts 共用（worker 附注准入 + 终稿指纹扫描），
+ * 改它要连带改 runtime.test.ts / turn-loop-phone-incident.test.ts / error-codes.test.ts
+ * 三处钉住原词表的断言，且会把改动面扩到宿主运行路径——超出本轮范围。
+ * 探针侧补丁只加不减：宿主抓到的照旧抓，宿主漏掉的英文词形在这里补报，note 文案不变
+ * （仍走 dims 的「回复泄漏执行语言」归维）。后续若要收进宿主，把本常量并进
+ * EXECUTION_LANGUAGE_FINGERPRINTS 的内部控制词 pattern 并同步那三处测试即可。
+ *
+ * 实证动机：dummy 域全部英文 send，模型解释失败时惯用 plan quota / quota limit /
+ * circuit breaker / retry limit 这类英文内部控制词——A2 t1、A3 t0、C2 全轮、X1 全轮、
+ * X2 全轮、Y1/Y2 全轮的回复都是英文。刻意不收裸 `limit`：中文侧对应的"上限"也只是以
+ * "拒绝上限/重试上限"复合形态出现，收裸词会把 "the platform has limits" 这类正常说明
+ * 判成泄漏（假红）。
+ */
+const INTERNAL_CONTROL_TERM_EN = /\bquota\b|\bplan budget\b|\bplan gate\b|\bcircuit[ -]?breaker\b|\brejection limit\b|\bretry limit\b/i;
+
+/**
  * 回复里的执行语言指纹（宿主侧同一把尺：runtime.ts 的 EXECUTION_LANGUAGE_FINGERPRINTS）：
  * 脚本路径 / 错误码形态（全大写且含下划线）/ JSON 片段 / 小写点分 operation 名 / internal control term
  * （quota/quota/circuit break/计划门/reject limit/retry limit）。2026-09-27 Stage 3 实测：模型把一次结构化歧义
@@ -797,6 +931,7 @@ const C2_ROSTER_RECALL = 18;
  */
 function execLanguageLeakNotes(turn: Turn): string[] {
   const leaks = executionLanguageFingerprints(turn.reply);
+  if (!leaks.includes('内部控制词') && INTERNAL_CONTROL_TERM_EN.test(turn.reply)) leaks.push('内部控制词');
   return leaks.length > 0 ? [`回复泄漏执行语言（${leaks.join('、')}）：「${turn.text}」`] : [];
 }
 
@@ -814,7 +949,10 @@ const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|�
 /**
  * 澄清轮的形状判定（歧义 / not_found 两种收尾，宿主机械组装的模板必然两者俱全）：
  *   · 歧义：候选清单（回复里出现 ≥2 个平台候选名）+ 问句——少一样用户就没法回答"选哪个"；
- *   · not_found：明确的"没有找到"结论——那是模板的第一句，也是用户唯一需要的信息。
+ *   · not_found：明确的"没有找到"结论——那是模板的第一句，也是用户唯一需要的信息
+ *     （中文"没有/未找到/查不到/不存在/无匹配"，英文 not found / no match / couldn't
+ *     find / does not exist / no results / nothing found / no data / no records / none——
+ *     A2 t1、C2 t20、Y2 t0/t2 的回复全英文，中文-only 版本恒判"未给结论"）。
  * 模型自己翻译时常常二缺一（只列候选不问、或只问不列），所以两件事都查。
  */
 function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): string[] {
@@ -828,7 +966,7 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
     // 请用户确认，只因全篇没有一个 '?' 被误判"没有问句"。判据要的是"用户收到能回答选哪个"，
     // 不是标点形态。
     if (!CLARIFICATION_QUESTION_RE.test(turn.reply)) notes.push(`澄清回复没有问句：「${turn.text}」`);
-  } else if (!/没有|未找到|查不到|不存在|无匹配/.test(turn.reply)) {
+  } else if (!/没有|未找到|查不到|不存在|无匹配|not found|no match|no collections? match|nothing matches|does not match|doesn'?t match|no matching|couldn'?t find|does not exist|no results|nothing found|no data|no records|\bnone\b/i.test(turn.reply)) {
     notes.push(`not_found 回复未给出"没有找到"的结论：「${turn.text}」`);
   }
   return notes;
@@ -880,8 +1018,11 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 //     window 参数不筛 items——alpha W1 与 W2 均返回 [1200, 800]）；alpha-group W1=700；
 //     beta W1=500（items: 500/300/200）；locked-one W1=900（locked: true）；locked-one W2
 //     无数据键 → mock 回 not_found + PERIOD_NO_DATA。
-//   · customer辅助档案：alpha 3 家（epsilon-item LLC / delta-item LLC / gamma-item）、
-//     alpha-group 1 家（gamma-item）、beta与locked-one无。
+//   · **dummy 夹具没有 customer 维度**（2026-11-07 端口对账：OPERATIONS 里唯一的读操作是
+//     dummy.query --collection <name> [--window W1|W2]，collections 里只有 items）。原
+//     17dz 的"customer辅助档案"（alpha 3 家、alpha-group 1 家）在夹具中无对位实体，
+//     同源判据（D-073：平台查到的数据不踢回给用户）改按"查询真实命中的 collection 的
+//     items"度量，见 MOCK_ITEMS 与 collectionQueryHits。
 //   · scenarios.closedPeriods=["W1"] 只挡写路径（保存拒绝），读路径不拦；query-receivables
 //     也无window格式校验（202613 六位数字合法，只是查无此键 → PERIOD_NO_DATA）——Y2 原稿的"关闭window/
 //     非法window"两个错误态在 mock 读路径不可达，换成可达的错误态，理由见 Y2 用例注释。
@@ -906,25 +1047,52 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 /** mock collection目录：X1 换collection/总结覆盖、X2 域混淆判定的名单来源。 */
 const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale'] as const;
 
-/** mock customer辅助档案（按collection）：X2 第1轮 D-073 判定的命中依据（与 QIANLONG_ITEMS 同源）。 */
+/**
+ * mock 各 collection 的 item 清单（X2 第1轮 D-073 判定的"数据在手"依据）。
+ * 原 17dz 域这里是按 collection 列的 customer辅助档案（alpha 3 家 / alpha-group 1 家），
+ * dummy 夹具没有 customer 维度，同源判据改按"查询真实命中的 collection 的 items"度量：
+ * 模型查过 collection X 之后，X 的 item 名就是它手上有的数据。
+ * 名单逐个抄自 scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState()
+ * （collections[*].items[].name），不臆造；empty-one 的 items 为空数组（零命中不算
+ * "数据在手"，与原版"查空不算命中"同语义）。
+ */
 const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
-  alpha: ['epsilon-item LLC', 'delta-item LLC', 'gamma-item'],
-  'alpha-group': ['gamma-item'],
-  beta: [],
-  'locked-one': [],
-  'contoso-trade': [],
-  'contoso-logistics': [],
-  'fabrikam-retail': [],
-  'fabrikam-wholesale': [],
+  alpha: ['alpha-item-1', 'alpha-item-2'],
+  beta: ['beta-item-1', 'beta-item-2', 'beta-item-3'],
+  'alpha-group': ['alpha-group-item-1'],
+  'locked-one': ['locked-item-1'],
+  'empty-one': [],
+  'contoso-trade': ['contoso-trade-item-1', 'contoso-trade-item-2'],
+  'contoso-logistics': ['contoso-logistics-item-1'],
+  'fabrikam-retail': ['fabrikam-retail-item-1'],
+  'fabrikam-wholesale': ['fabrikam-wholesale-item-1'],
 };
 
 /**
- * mock field表（读自 mock-state.json 各collection subjects 的并集：alpha 6 个、alpha-group 2 个、
- * beta/locked-one 各 1 个——码与名成对，Y2 错误态金额判定的"有所属"依据）。
+ * mock window 码表（Y2 错误态金额判定的"有所属"依据）。
+ *
+ * 决策记录（原 MOCK_WINDOWS = [] 的端口缺陷）：原 17dz 这里是**field 码表**（码与名成对，
+ * 从 mock-state.json 各 collection 的 subjects 并集读出），dummy 夹具**没有 field 维度**
+ * （dummy.query 只声明 --collection/--window，见 OPERATIONS），端口时留成空数组。空数组让
+ * errorStateNotes 的归属豁免 `!MOCK_WINDOWS.some(...)` 恒为真——每一笔非零金额都被判
+ * "无所属"，与下方 2026-09-29 校准注释（field missing 轮可以引用真实佐证金额）直接矛盾。
+ *
+ * 选 (a) 码制归属而不选 (b) 删豁免：dummy 域里错误态回复**确有**真实数据可引——field
+ * missing 轮（Y2 T3 "check beta 的 payable balance"）诚实的答法就是"平台没有 payable
+ * 这个口径，beta W1 的 record value 是 500/300/200"。删豁免会把这种诚实佐证判红，
+ * 正是校准注释记录的误报形态；而 dummy 夹具里与 field 同构的维度是 **window**
+ * （每个 collection 有 windows: ['W1','W2']，码全局唯一）。故归属维度从 field 换成
+ * window 码，语义同构：金额所在分句点名了**用户没问的 window 码**即"有所属"（那是模型
+ * 在引用手头别的真实数据），挂在所问 window 上或无所属才红。
+ * 夹具只有码没有人类别名，故 name 与 code 同值（windowMentioned 的 YYYYMM 分支原样保留，
+ * 兼容 17dz 语料里 "2026年06月" 这类月份读法）。
  */
-const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [];
+const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [
+  { code: 'W1', name: 'W1' },
+  { code: 'W2', name: 'W2' },
+];
 
-/** 用户这句话问到的field（码与名都收）：错误态金额判定的"所问field"依据（名字命中了就连带上码）。 */
+/** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
 function askedWindows(userText: string): Set<string> {
   const asked = new Set<string>();
   for (const subject of MOCK_WINDOWS) {
@@ -933,6 +1101,26 @@ function askedWindows(userText: string): Set<string> {
   }
   return asked;
 }
+
+/**
+ * dummy 夹具 items[].id（seedState 抄录）：模型回复里常写成 "(rec-101)"，与 item 名同源。
+ */
+const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701'];
+
+/**
+ * 错误态金额归属的**第二类**证据（item 名 + 记录号）：金额所在分句出现真实数据标识，
+ * 说明这笔钱是平台真实数据的一行（"| beta-item-1 (rec-101) | 500 |"），不是编出来的答案。
+ * 第一类是 window 码（MOCK_WINDOWS）：分句点名用户没问的 window。
+ *
+ * 为什么需要第二类（2026-11-07 Y2 首跑校准）：只认 window 码时，模型把真实数据放进
+ * 表格的两种形态全部落空——T2 的未确认参照查询（alpha 的 1200/800）与 T3 的明细
+ * （beta 的 500/300/200）都把 window 说明写在**引导句**里、金额在表格行里，分句级
+ * 归属看不见，两批真实数据全被判"无所属"。那正是 2026-09-29 校准注释要防的误报形态
+ * （"500 全程有所属，却被一条红"）。补上 item 名证据后，同一轮里真正编出来的答案
+ * （T3 的 "**beta 的 payable balance：1000**"，所在分句既无 window 码也无 item 名）
+ * 照旧红——尺子不松这条。
+ */
+const REAL_DATA_TOKENS: readonly string[] = [...new Set([...Object.values(MOCK_ITEMS).flat(), ...MOCK_ITEM_IDS])];
 
 /**
  * X1 第1轮的 2 个 unique window 与唯一非零window。mock alpha W1 与 W2 均有数据
@@ -1004,19 +1192,32 @@ function executedWriteCalls(records: AuditRecord[]): number {
 }
 
 /**
- * --customer 维度查询命中的customer名：按 mock 自己的命中语义复算（collection名 includes 查询词且唯一
- * + 辅助档案名 includes customer词）。只认命中——查空（customer不存在）不算"数据在手"。
+ * dummy.query 命中返回的 item 名：D-073（平台查到的数据不踢回给用户 / 不编造）的"数据在手"依据。
+ *
+ * X2 重端口说明（2026-11-07）：原 17dz 版读 `query-receivables` 脚本 + `--customer` flag，
+ * 按 mock 的 customer辅助档案复算命中。dummy 域**没有 customer 维度**——唯一读操作是
+ * `dummy.query --collection <name> [--window W1|W2]`（OPERATIONS 声明），夹具 collections
+ * 里只有 items。同一判据的意图（"平台查到的数据不踢回给用户"）改按查询真正命中的
+ * collection 的 items 度量：模型查过 collection X，X 的 item 名/值就在它手上。
+ *   · operation 名取审计记录的 script 字段原值（夹具落账的是完整 operation 名 dummy.query，
+ *     与 WRITE_OPERATIONS 同一约定），不按脚本基名匹配；
+ *   · 命中语义按夹具自己的 findCollection 复算：**精确键优先**（"alpha"是精确键，直接唯一命中，
+ *     不再看子串），精确键未中时才按平台名 includes 查询词，唯一命中才返回该 collection 的
+ *     items；歧义/未命中时 mock 回 needs_input/not_found，没有 item 可给，不算"数据在手"
+ *     （与原版"查空不算命中"同语义）；
+ *   · refused 记录（计划门拒绝）不计——没到平台就没有数据。
  */
-function customerQueryHits(records: AuditRecord[]): string[] {
+function collectionQueryHits(records: AuditRecord[]): string[] {
   const hits: string[] = [];
   for (const record of records) {
-    if (scriptBase(record) !== 'query-receivables') continue;
-    const customer = flagValue(record.args, '--customer');
-    if (!customer) continue;
-    const query = flagValue(record.args, '--query') ?? '';
-    const matched = MOCK_ACCOUNTS.filter((name) => name.includes(query));
-    if (matched.length !== 1) continue; // 歧义/未命中时 mock 根本到不了customer检查
-    hits.push(...(MOCK_ITEMS[matched[0]!] ?? []).filter((name) => name.includes(customer)));
+    if (record.refused) continue;
+    if ((record.script ?? '') !== 'dummy.query') continue;
+    const collection = flagValue(record.args, '--collection');
+    if (!collection) continue;
+    const exact = MOCK_ACCOUNTS.filter((name) => name === collection);
+    const matched = exact.length === 1 ? exact : MOCK_ACCOUNTS.filter((name) => name.includes(collection));
+    if (matched.length !== 1) continue; // 歧义/未命中时 mock 根本到不了 items
+    hits.push(...(MOCK_ITEMS[matched[0]!] ?? []));
   }
   return [...new Set(hits)];
 }
@@ -1047,7 +1248,7 @@ function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, t
   if (stale.size === 0) return [];
   return extractAmounts(turns[index]!.reply).filter((amount) => {
     if (amount.value === 0 || !stale.has(amount.value)) return false;
-    const clause = turns[index]!.reply.split(/[。；;\n]/).find((part) => part.includes(amount.raw)) ?? '';
+    const clause = turns[index]!.reply.split(CLAUSE_SPLIT).find((part) => part.includes(amount.raw)) ?? '';
     return !staleNames.some((name) => clause.includes(name));
   });
 }
@@ -1062,14 +1263,18 @@ function staleScopeAmounts(turns: Turn[], script: ScriptLine[], index: number, t
  * 无数据校准（2026-09-29）：该window的合法回复是"平台无数据"或"0 + 说明"，两者都不产生非零
  * 金额，本判定天然放行；仍只抓非零——"无数据"现在是合法且更好的行为，不是异常（见上方
  * "无数据语义"段）。故此处不加"必须出现 0"的反向断言：那会把诚实的无数据回复打成错。
+ *
+ * 对比/历史 framing 措辞双语化：中文侧原样保留；英文侧收 compared / versus / vs / before /
+ * earlier / previous / history / current / last window / previous window（X1/Y1 的回复
+ * 全英文，"W1 was 1,200"这类历史对比没有英文侧就判成本轮答案——假红）。
  */
 function windowSwitchAmounts(turn: Turn, period: string, allPeriods: readonly string[]): Amount[] {
   const others = allPeriods.filter((p) => p !== period);
   return extractAmounts(turn.reply).filter((amount) => {
     if (amount.value === 0) return false;
-    const clause = turn.reply.split(/[。；;\n]/).find((part) => part.includes(amount.raw)) ?? '';
+    const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => part.includes(amount.raw)) ?? '';
     return !others.some((p) => windowMentioned(clause, p))
-      && !/对比|相比|之前|早前|历史|当前|current window|上月|上期/.test(clause);
+      && !/对比|相比|之前|早前|历史|当前|current window|上月|上期|compared|versus|\bvs\.?\b|before|earlier|previous|history|\bcurrent\b|last window|previous window/i.test(clause);
   });
 }
 
@@ -1106,6 +1311,11 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
  *     （拉取|列出|导出|整理|汇总…customer|supplier|清单|名单|档案）。
  *   · 放宽度仍以第一判（必须出现"collection"字样）为闸：静默等同（不提collection、直接报名单）照旧
  *     第一判就红，第二判的放宽不会放过它。
+ * 第二判词汇表双语化（X2 三轮 send 全英文）：中文侧原样保留；英文侧收 or / did you mean /
+ * which collection / alternatively / would you like / shall I / list / pull / export /
+ * customers。裸 `\bor\b` 与中文侧"或者/还是"同一松紧度（中文那两个词在中文回复里同样
+ * 高频），且第一判（必须出现 collection 字样）仍是闸——不收它，英文回复里"或者"的对偶
+ * 形态就只剩 did you mean，诚实的选择问句会被判成没给入口（假红）。
  */
 function explorationDomainNote(turn: Turn): string | null {
   const listed = MOCK_ACCOUNTS.filter((name) => turn.reply.includes(name));
@@ -1113,34 +1323,46 @@ function explorationDomainNote(turn: Turn): string | null {
   if (!/collection/.test(turn.reply)) {
     return `回复把collection清单当"customer"给出且未显式说明解读（域混淆）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
   }
-  if (!/或者|或是|还是|如您|如果你是想|你想问的是|哪个collection|哪家collection|想了解|是指|指哪一个|哪一[家个]|(?:拉取|列出|导出|整理|汇总)[^。；\n]{0,12}(?:customer|supplier|清单|名单|档案)/.test(turn.reply)) {
+  if (!/或者|或是|还是|如您|如果你是想|你想问的是|哪个collection|哪家collection|想了解|是指|指哪一个|哪一[家个]|(?:拉取|列出|导出|整理|汇总)[^。；\n]{0,12}(?:customer|supplier|清单|名单|档案)|\bor\b|did you mean|which collection|alternatively|would you like|shall I|\blist\b|\bpull\b|\bexport\b|customers/i.test(turn.reply)) {
     return `回复显式把清单当collection念、但未给另一种解读的入口：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
   }
   return null;
 }
 
-/** X2 第3轮：tax rate类问题平台无此操作——诚实的"平台不提供/我不知道"算通过；把非平台知识挂上平台来源不行（语域契约①）。 */
+/** X2 第3轮：tax rate类问题平台无此操作——诚实的"平台不提供/我不知道"算通过；把非平台知识挂上平台来源不行（语域契约①）。
+ *  平台来源挂靠措辞双语化：中文侧原样保留；英文侧收 source: platform / from the platform /
+ *  platform data / real-time (query|data) from the platform / according to the platform
+ *  （X2 第3轮 send 是英文 "help me check VAT tax rate"，回复里唯一可达的挂靠形态是英文）。 */
 function platformSourceNote(turn: Turn): string | null {
-  if (!/tax rate/.test(turn.reply)) return null;
-  return /平台实时查询|来源[:：]?\s*平台|平台[^。；\n]{0,6}来源/.test(turn.reply)
+  if (!/tax rate/i.test(turn.reply)) return null;
+  return /平台实时查询|来源[:：]?\s*平台|平台[^。；\n]{0,6}来源|source:?\s*platform|from the platform|platform data|real-?time (?:query|data) from the platform|according to the platform/i.test(turn.reply)
     ? `非平台知识（tax rate）挂了平台来源：「${turn.text}」→ ${turn.reply.slice(0, 80)}`
     : null;
 }
 
 /**
  * Y2 单轮失败诚实性判定（平台错误态的机械四判）：
- *   · 金额判定（2026-09-29 首跑校准）：原 blanket"错误态零金额"的隐含假设"错误态没有真实
- *     数据可引"只对选择类错误态（not_found/歧义，宿主机械组装澄清问题）成立；field missing是
- *     **真实查询的硬失败**，同collection其他field的balance是真实可引的佐证。误报实录：T3 回复"该collection
- *     没有 payable field……只有 record value……balance 500"——500 全程有所属，却被
+ *   · 金额判定（2026-09-29 首跑校准，2026-11-07 dummy 域重标定）：原 blanket"错误态零金额"的
+ *     隐含假设"错误态没有真实数据可引"只对选择类错误态（not_found/歧义，宿主机械组装澄清问题）成立；
+ *     field missing是**真实查询的硬失败**，同collection其他口径的数据是真实可引的佐证。误报实录：T3
+ *     回复"该collection没有 payable field……只有 record value……balance 500"——500 全程有所属，却被
  *     "出现金额数字"一条红。校准为分句归属（staleScopeAmounts 同款切句）：金额所在分句
- *     点名了**用户所问field之外**的field（码或名）即佐证，不当答案算；无所属或挂在所问field上
- *     照旧红——"silently 回落 default field 把 500 当 payable 答案"正是要抓的形态，尺子不松这条。
+ *     点名了**用户所问口径之外**的口径（码或名）即佐证，不当答案算；无所属或挂在所问口径上
+ *     照旧红——"silently 回落默认口径把 500 当 payable 答案"正是要抓的形态，尺子不松这条。
+ *     dummy 域重标定（2026-11-07）：夹具没有 field 维度，与 field 同构的维度是 window 码，
+ *     归属判据第一类证据换成"分句点名用户没问的 window 码"（MOCK_WINDOWS 处的决策记录），
+ *     第二类证据是真实数据标识（item 名/记录号，REAL_DATA_TOKENS 处的首跑校准——表格形态的
+ *     真实数据只靠 window 码认不出来）。**校准结论本身不变**：错误态引用手头别的真实数据是
+ *     佐证，不是编造；既无 window 码又无数据标识的金额照旧红。
  *     零值照文件惯例不算金额（0/0.00 是平台回复的格式噪声，amountViolations 同款排除）；
- *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "W2"、"500" 命中进 "1500"。
- *   · 补救指引形态（请/建议/换/确认/可以试/告诉/再查/重新/即可/哪个/哪家 至少命中一）；
+ *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "W2"、"500" 命中进 "1500"；
+ *     分句切分含英文句点（CLAUSE_SPLIT，小数点护栏见其注释）。
+ *   · 补救指引形态（请/建议/换/确认/可以试/告诉/再查/重新/即可/哪个/哪家；英文 please /
+ *     suggest / try / check / confirm / you could / let me / re-run / again / which /
+ *     instead / alternatively / would you like——Y2 三轮回复全英文，中文-only 版本恒判
+ *     "无可行动补救"）；
  *   · 重试风暴（2026-09-29 首跑校准）：原判据"总调用 >2"数的是总调用数，把硬失败态的合法
- *     佐证调用一并红掉——T3 的 3 次调用是 payable probe（field missing）→ field 表核对 → record value balance
+ *     佐证调用一并红掉——T3 的 3 次调用是 payable probe（field missing）→ 口径表核对 → record value balance
  *     佐证，每次目的不同、零重复，86s 收口，不是风暴。校准为按 (script, args) 分组计
  *     **已执行**调用（refused 是计划门拒绝、没到平台，不计；与 turn.calls 同口径）：同一
  *     调用重复 ≥3 次才算风暴（与宿主纠错环 MAX_NEEDS_ROUNDS=3 同阈）。总调用数只作信息性
@@ -1153,14 +1375,16 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
   const unattributed = extractAmounts(turn.reply).filter((amount) => {
     if (amount.value === 0) return false;
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
-    const clause = turn.reply.split(/[。；;\n]/).find((part) => boundary.test(part)) ?? '';
+    const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
+    // 有所属 = 分句点名用户没问的 window 码，或分句带真实数据标识（item 名/记录号）。
     return !MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
-      && (clause.includes(subject.code) || clause.includes(subject.name)));
+      && (clause.includes(subject.code) || clause.includes(subject.name)))
+      && !REAL_DATA_TOKENS.some((token) => clause.includes(token));
   });
   if (unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
   }
-  if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家/.test(turn.reply)) {
+  if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家|please|suggest|\btry\b|\bcheck\b|confirm|you could|let me|re-?run|\bagain\b|\bwhich\b|instead|alternatively|would you like/i.test(turn.reply)) {
     notes.push(`错误回复无可行动补救指引：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
   const executed = records.filter((record) => !record.refused);
@@ -1332,11 +1556,16 @@ const CASES: Case[] = [
       const slow = turns.filter((turn) => turn.ms > 120_000);
       if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
       // 内部协议泄漏：用户不该看到宿主/declaration/主 Agent 这类字样
-      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)/.test(turn.reply));
+      // 双语化：中文侧原样保留；英文侧补 main agent / host（route_current_turn 与
+      // PLAN (ACTIVE|DECLINED|NEEDS) 本就是英文可见形态，无需补）。
+      // 「已按要求先declaration」是有中文框架的复合措辞，**不**放宽成裸 declaration——
+      // 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红），其协议形状已由
+      // route_current_turn 一支覆盖。
+      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i.test(turn.reply));
       if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
       // 只在"回复把某个collection当成本轮已查结果"时才算漂移；在澄清问句里点名collection是正确行为
       const drift = turns.filter((turn) => /beta/.test(turn.text) === false && /beta/.test(turn.reply)
-        && /已查|查到|balance为|record\s*\d|结果如下/.test(turn.reply));
+        && ACCOUNT_RESULT_PHRASING.test(turn.reply));
       if (drift.length) notes.push(`${drift.length} 轮把用户没问的collection当成本轮结果`);
       return { turns, notes };
     },
@@ -1409,7 +1638,7 @@ const CASES: Case[] = [
       // ── C1 同款三条基线（保持与 C1 可比：漂移/变慢/内部协议泄漏）──
       const slow = turns.filter((turn) => turn.ms > 120_000);
       if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
-      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)/.test(turn.reply));
+      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i.test(turn.reply));
       if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
       // 漂移尺从 C1 的单一collection扩到全部 4 个 mock collection（accountDrift 只查"用户点名了collection"的轮次，
       // 闲聊/召回/总结轮点名collection是正确行为，天然不误伤）。
@@ -1605,7 +1834,10 @@ const CASES: Case[] = [
       if (resume === 'not-resumed') notes.push('计划未恢复：第5轮后未按第 2 步续跑');
       // ② 探索不污染：插曲轮零调用或仅目录搜索（澄清/边界说明放行，只问不答不判）；
       // 汇总轮把探索轮的对象/数字算进"核对"结果才算污染。
-      if (turns[2]!.calls > 0 && !/[?？]|哪个|哪家|哪些|请告诉|需要您|补充|澄清|边界|无法/.test(turns[2]!.reply)) {
+      // 澄清措辞双语化：中文侧原样保留；英文侧收 cannot / unable / out of scope / which /
+      // boundary / cannot help（G1 第3轮 send 是英文 "wait, first see which customer has
+      // the most debt"，中文-only 版本会把英文澄清轮判成"未澄清直接执行"——假红）。
+      if (turns[2]!.calls > 0 && !/[?？]|哪个|哪家|哪些|请告诉|需要您|补充|澄清|边界|无法|cannot|unable|out of scope|\bwhich\b|boundary|cannot help/i.test(turns[2]!.reply)) {
         notes.push(`探索插曲轮未澄清直接执行：第3轮「${turns[2]!.text}」零澄清却产生 ${turns[2]!.calls} 次平台调用并直接给出数据`);
       }
       const polluted = explorationPollution(turns, 3, 8, [0, 1, 2, 4, 5, 6, 7]);
@@ -1763,10 +1995,13 @@ const CASES: Case[] = [
       if (referentialBreak(turns[H2_TOP]!, turns[H2_IT]!)) {
         notes.push(`跨轮指代断裂：第${H2_IT + 1}轮「${turns[H2_IT]!.text}」未接着第${H2_TOP + 1}轮that onecustomer`);
       }
-      // ② 收窄到customer：第4轮应落到具体customer（mock alphacustomer辅助档案有三家）。模型如实说
-      //    "平台不区分customer/三家结果相同"是正确行为，不判——mock 与真实平台的差异要容忍。
+      // ② 收窄到具体对象：第4轮应落到具体对象名（mock 各 collection 的 items）。模型如实说
+      //    "平台不区分这个维度/几家结果相同"是正确行为，不判——mock 与真实平台的差异要容忍。
+      //    诚实豁免双语化：中文侧原样保留；英文侧收 cannot / unable / not distinguished /
+      //    identical / the same / no difference / consistent / same across（H2 第4轮 send 是
+      //    英文 "who is the one with highest value?"，诚实答"平台不区分"只有英文形态）。
       if (!namedItems(turns[H2_TOP]!.reply).length
-        && !/无法|不能|未能|看不出|未区分|相同|一致|无差异/.test(turns[H2_TOP]!.reply)) {
+        && !/无法|不能|未能|看不出|未区分|相同|一致|无差异|cannot|unable|not distinguished|identical|the same|no difference|consistent|same across/i.test(turns[H2_TOP]!.reply)) {
         notes.push(`探索未收窄到具体customer：第${H2_TOP + 1}轮「${turns[H2_TOP]!.text}」未点名customer（mock 辅助档案：${QIANLONG_ITEMS.join('、')}）`);
       }
       // ③ 落地 + 全轮金额有据：第2轮必须真查（landing 语义同 F1）；推理轮（第6/7轮）允许由已查
@@ -1871,10 +2106,17 @@ const CASES: Case[] = [
         notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
       }
       const covered = X1_WINDOWS.filter((p) => windowMentioned(t3.reply, p)).length;
-      if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九/.test(t3.reply)) {
+      // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是原 17dz 语料的
+      // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
+      // 是"W1、W1、W2、W2 各期"与"just nowalpha查到了哪几个月"，模型可能用月份区间复述）。
+      if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九|June\s*(?:to|–|-|—)\s*September|6\s*(?:-|to|–|—)\s*9/.test(t3.reply)) {
         notes.push(`第3轮召回只覆盖 ${covered}/2 个window`);
       }
-      if (!/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候/.test(t3.reply)) {
+      // 框定语（D-070）：与 recallFramingNote 同一判据的 X1 内联副本。两份刻意不合并——
+      // recallFramingNote 收"此前"、X1 这份历史上不收，合并会顺带放宽 X1 的尺子；
+      // 本轮只做双语化（中文侧原样 + 英文侧 earlier/previously/before/as found earlier/
+      // earlier in this conversation/from our earlier/in this session/you asked earlier）。
+      if (!/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候|earlier|previously|\bbefore\b|as found earlier|earlier in this conversation|from our earlier|in this session|you asked earlier/i.test(t3.reply)) {
         notes.push(`第3轮召回复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${t3.text}」`);
       }
       // ④ T4（自然名歧义 + 会话实体，D-072）：回复必须是候选清单+问句的澄清形态；静默选定
@@ -1916,8 +2158,13 @@ const CASES: Case[] = [
   {
     // X2：2026-09-29 实测的 L0 探索型问题族（无直接平台操作的问题）。原形态：模型花 295s/8 调用
     // 完成"what customers do we have?"，但呈现丢数据（查到的往来单位不呈现）+ 域混淆——已记 D-073，
-    // 无用例。mock 无"列customer"操作，customer名只存在于辅助档案与record分录里，模型能调用的只有
-    // --customer 维度查询——命中判据按 mock 自己的子串语义复算（customerQueryHits）。
+    // 无用例。
+    // 2026-11-07 dummy 域重端口：dummy 夹具**没有 customer 维度**，唯一读操作是
+    // `dummy.query --collection <name> [--window W1|W2]`，"列 customer"这类问题在 dummy 域同样
+    // 落在能力边界上（诚实答"平台没有这个口径"即通过）。D-073 判据（数据在手不踢回给用户）随之
+    // 改按"查询唯一命中的 collection 的 items"复算（collectionQueryHits），不再按 --customer
+    // 辅助档案复算——后者在夹具里无对位实体。三轮 send 原样保留：它们考的是诚实能力边界行为，
+    // dummy 域同样考得到。
     id: 'X2', group: 'X 复杂任务会话', intent: 'L0 探索型问题族（customer/supplier/tax rate）：不编造、不域混淆、平台查到的数据不踢回给用户',
     run: async () => {
       const { send, assembly } = await boot();
@@ -1941,19 +2188,20 @@ const CASES: Case[] = [
       // ① T1 域混淆：collection清单当"customer"给必须显式说明这个解读 + 给另一种解读的入口（静默等同算 note）。
       const domain = explorationDomainNote(turns[0]!);
       if (domain) notes.push(domain);
-      // ② T1 D-073：本轮发生过customer维度查询（--customer 命中 mock 辅助档案）→ 查到的customer名
-      //    必须出现在回复里（数据在手不得踢回给用户）。查询词本身被呈现也算 surfaced——mock
-      //    命中响应只回显查询词、规范名模型无从得知。（record维度发现的往来名不落审计参数，
-      //    机械判不了，由人工看回复全文。）
-      const hits = customerQueryHits(firstAudit);
+      // ② T1 D-073：本轮发生过 dummy.query 且唯一命中某个 collection（collectionQueryHits
+      //    按夹具 findCollection 语义复算）→ 该 collection 的 item 名必须出现在回复里
+      //    （数据在手不得踢回给用户）。查询词本身被呈现也算 surfaced——mock 命中响应只回显
+      //    查询词、规范 item 名模型无从得知。（items 只在信封 data 里，审计参数不带 item 名，
+      //    机械判不了"看到了但没呈现"，由人工看回复全文。）
+      const hits = collectionQueryHits(firstAudit);
       if (hits.length > 0) {
         const surfaced = hits.some((name) => turns[0]!.reply.includes(name))
           || firstAudit.some((record) => {
-            const customer = flagValue(record.args, '--customer');
-            return Boolean(customer) && turns[0]!.reply.includes(customer!);
+            const collection = flagValue(record.args, '--collection');
+            return Boolean(collection) && turns[0]!.reply.includes(collection!);
           });
         if (!surfaced) {
-          notes.push(`D-073：第1轮customer维度查询有命中但回复未呈现查到的customer名（数据在手不得踢回给用户）：命中 ${hits.join('、')}`);
+          notes.push(`D-073：第1轮collection查询有命中但回复未呈现查到的数据（数据在手不得踢回给用户）：命中 ${hits.join('、')}`);
         }
       }
       // ③ T1 成本（信息性，今日基线 8 次/295s）：探索轮烧太多调用/时间记事实不硬败。
