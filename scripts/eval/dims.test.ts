@@ -83,7 +83,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       'D-073：第1轮客户维度查询有命中但回复未呈现查到的客户名（数据在手不得踢回给用户）：命中 epsilon-item LLC',
       '非平台知识（tax rate）挂了平台来源：「帮我看下tax rate是多少」→ ……',
       '总结塌缩成 1 个collection（D-071：本会话跨alpha+beta，总结不得只剩最后一个）：命中  alpha',
-      '第19轮跨轮召回collection名单只覆盖 1/3（此前真实查过：alpha、beta、locked-one）：命中  locked-one',
+      '第19轮跨轮召回collection名单只覆盖 1/3（此前真实查过：alpha、contoso-trade、contoso-logistics）：命中  contoso-logistics',
     ],
   },
 ];
