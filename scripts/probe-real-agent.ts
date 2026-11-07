@@ -2233,7 +2233,7 @@ const CASES: Case[] = [
       // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同collection（不得塌缩成最后一个）；金额须与本会话
       //    真实查到的值一致（算术派生单列信息性 note）。
       const sm = turns[SUMMARY]!;
-      const inSummary = MOCK_ACCOUNTS.filter((name) => sm.reply.includes(name));
+      const inSummary = MOCK_ACCOUNTS.filter((name) => entityMentioned(sm.reply, name));
       if (inSummary.length < 2) {
         notes.push(`总结塌缩成 ${inSummary.length} 个collection（D-071：本会话跨alpha+beta，总结不得只剩最后一个）：命中 ${inSummary.join('、') || '无'}`);
       }

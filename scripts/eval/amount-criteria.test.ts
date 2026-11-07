@@ -239,6 +239,17 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(600);
   });
 
+  it('blocking：年份排除不吞前文金额——"beta record value is 999; reference 999 年"（999 是编造额，后面的 999 年不是它）', () => {
+    const v = classify('beta record value is 999; reference 999 年; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(999);
+  });
+
+  it('blocking：万元写法可定位——"beta W1 record value is 0.05万"（500 的合法明细不误判）', () => {
+    const v = classify('beta W1 record value is 0.05万; please confirm.');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+  });
+
   it('blocking：差额两侧必须不相交——"beta W1 difference is 800"（只能 1000−200，复用 200）', () => {
     const v = classify('beta W1 difference is 800; please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(800);

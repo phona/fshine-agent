@@ -175,7 +175,23 @@ export function amountValuePattern(value: number): string {
   const intPart = Math.trunc(value);
   const grouped = intPart.toLocaleString('en-US').replace(/,/g, ',?');
   const decimal = Number.isInteger(value) ? '(?:\\.[\\d]{1,2})?' : `(?:\\.${String(value).split('.')[1] ?? ''})?`;
-  return `(?:${grouped}|${String(intPart)})${decimal}`;
+  // 单位缩放形态（2026-11-08 评审 minor）：提取器把"0.05万"归一成 500，但分类器按 500
+  // 找字面量找不到——中文回复的单位缩写被误判无所属。补上万/亿的缩放字面量
+  // （500 ↔ "0.05万"、86000 ↔ "8.6万"），尾随零与单位前空格都可选。
+  const unitForms: string[] = [];
+  // 万/亿缩放：value/10000（或 /1e8）至多两位小数时成立（500↔0.05万、86000↔8.6万）；
+  // 判据用 (value×100) % 10000 === 0——直接取模会漏掉 0.05 这类非整数商。
+  if (value > 0 && (value * 100) % 10000 === 0) {
+    const wan = (value / 10000).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    unitForms.push(`${wan.replace('.', '\\.')}0*\\s*万`);
+  }
+  if (value > 0 && (value * 100) % 1e10 === 0) {
+    const yi = (value / 1e8).toFixed(4).replace(/0+$/, '').replace(/\.$/, '');
+    unitForms.push(`${yi.replace('.', '\\.')}0*\\s*亿`);
+  }
+  const plain = `(?:${grouped}|${String(intPart)})${decimal}`;
+  // 无单位形态时不追加空分支——"(?:a|)" 会匹配空串，位置绑定整个错掉。
+  return unitForms.length > 0 ? `(?:${plain}|${unitForms.join('|')})` : plain;
 }
 
 /** 按模式（非原文）找数字边界的出现位置——amountValuePattern 的载体。 */
@@ -248,9 +264,13 @@ export function extractAmounts(text: string): ExtractedAmount[] {
     const raw = match[0]!;
     const at = match.index ?? 0;
     const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    // 年份只在年份语境里排除：后随"年"（2026 年），或"年.月"小数形态后随"月"
-    if (new RegExp(`${escaped}\\s*年`).test(text.slice(at))) continue;
-    if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && new RegExp(`${escaped}\\s*月`).test(text.slice(at))) continue;
+    // 年份只在**紧邻**语境里排除：数字后 1-2 个字符内出现"年"（"2026 年"），或
+    // "年.月"小数形态后紧跟"月"。曾用 text.slice(at)（后文全文）搜索——后文出现同值
+    // 年份会把前面的金额一起吞掉（"beta record value is 999; reference 999 年"提取
+    // 为空，编造的 999 因此不触发金额失败，2026-11-08 评审 blocking）。
+    const tail = text.slice(at + raw.length, at + raw.length + 3);
+    if (/^\s{0,2}年/.test(tail)) continue;
+    if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && /^\s{0,2}月/.test(tail)) continue;
     if (/^20\d{4}$/.test(raw)) continue;
     if (MOCK_WINDOW_CODES.has(raw)) continue;
     if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
