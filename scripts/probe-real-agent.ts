@@ -437,7 +437,8 @@ function allowedAmounts(turns: Turn[], script: ScriptLine[], index: number): Set
  * difference/combined/higher by…。与 isDerivedAmount 的配对求和取差合起来判定"诚实算术"，
  * 覆盖 ratio 形态（"约为其 4.7 倍"不是任何两个真实值的和差，但是标好的算术）。
  * 第二个条件（调用处判）= 同一回复里有 ≥2 个真实数值——模型把账摊开了（show your work），
- * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。
+ * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。且该数字须过 isVerifiedArithmetic
+ * 具体验证（2026-11-07 评审 blocking：措辞不能豁免算不出来的数，"difference 999999" 照旧红）。
  * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
  * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
  */
@@ -446,6 +447,33 @@ const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|diff
 function isDerivedAmount(value: number, base: Set<number>): boolean {
   const values = [...base];
   return values.some((a) => values.some((b) => a + b === value || Math.abs(a - b) === value));
+}
+
+/**
+ * 具体验证（2026-11-07 评审 blocking：算术措辞不能豁免任意错误数字）：带算术框架措辞的
+ * 数字不再仅凭"措辞 + 回复里有 ≥2 个真实值"降信息性——那放得过宽，"Earlier: 1500 and
+ * 450; difference 999999" 里 999999 蹭 difference 的车就溜过去了。降级前须验证该数字
+ * 确由真实值算得：
+ *   · 和/差：两两配对，含两级——"contoso-trade 比 logistics 高出 1650" =
+ *     (1500+600)−450，先合计再比较的中间和 2100 不是种子值（2026-11-07 C2 第 13/25 轮
+ *     实测形态："相差 100" = 2100−2000 同为两级差）；
+ *   · 倍数：与真实值两两的商（1 位小数舍入）一致——"约为其 4.7 倍" = 2100/450≈4.7，
+ *     商集含一级和差值（2100 本身是 1500+600 的和）。
+ * 算不出来的数字照旧硬红（评审原话：无法验证的数字保留硬失败）。
+ */
+function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
+  const base = [...new Set(pool)];
+  if (isDerivedAmount(value, new Set(base))) return true;
+  const level1: number[] = [];
+  for (const a of base) {
+    for (const b of base) {
+      level1.push(a + b, Math.abs(a - b));
+    }
+  }
+  const pool2 = [...base, ...level1];
+  if (isDerivedAmount(value, new Set(pool2))) return true;
+  return pool2.some((a) => pool2.some((b) => b !== 0
+    && (Math.round((a / b) * 10) / 10 === value || Math.round((b / a) * 10) / 10 === value)));
 }
 
 /** note 回显：高置信金额是主信号；裸整数（无千分位/小数/单位）多为field code，单列降噪。 */
@@ -499,11 +527,14 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
   const allowed = allowedAmounts(turns, script, index);
   // 算术派生的新数值（合计/差额/倍数）四种处理：推理轮（derived）直接放行——算术正是这类轮次该做的事；
   // 汇总轮（derivedLabel）与召回/比较轮（line.past，见 ARITHMETIC_FRAMING_RE）单列信息性 note——算术
-  // 可见，但不与"真无来源"混为一张脸；其余轮次（E1/F1/G1/G2 及普通轮次）并入硬 note，与既有行为一致。
+  // 可见，但不与"真无来源"混为一张脸；召回/比较轮的措辞通道须再过 isVerifiedArithmetic 具体验证
+  // （2026-11-07 评审 blocking：措辞 + 两个真实值不够，数字本身要算得出来）；其余轮次（E1/F1/G1/G2
+  // 及普通轮次）并入硬 note，与既有行为一致。
   const realInReply = extractAmounts(turns[index]!.reply).filter((a) => allowed.has(a.value));
   const clauseOf = (a: Amount): string => turns[index]!.reply.split(CLAUSE_SPLIT).find((part) => part.includes(a.raw)) ?? '';
   const arithmetic = outside.filter((a) => isDerivedAmount(a.value, allowed)
-    || (line.past && realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))));
+    || (line.past && realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))
+      && isVerifiedArithmetic(a.value, [...allowed])));
   const tolerated = options.derived ? arithmetic : [];
   const soft = (options.derivedLabel || line.past) ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
   const hard = outside.filter((a) => !tolerated.includes(a) && !soft.includes(a));
