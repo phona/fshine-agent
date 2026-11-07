@@ -88,7 +88,7 @@ if [ -z "$REPO" ]; then
 fi
 
 # ── 加载豁免清单 scripts/history-scan-exemptions.txt ──
-# 格式：archive <path> / commit <40 位 SHA> / 空行 / # 开头注释。
+# 格式：archive <path> / commit <40 位 SHA> / entry <sha256 前 12 位> / 空行 / # 开头注释。
 EXEMPT_FILE="$REPO/scripts/history-scan-exemptions.txt"
 if [ ! -f "$EXEMPT_FILE" ]; then
   echo "豁免清单不存在：$EXEMPT_FILE（口径不完整，无法扫描）" >&2
@@ -99,22 +99,26 @@ if [ ! -s "$EXEMPT_FILE" ]; then
   exit 2
 fi
 
-# 用 awk 预解析豁免清单，输出到临时文件：
-#   第一段：archive 路径列表（每行一个，重复自动去重）
-#   第二段：commit SHA 列表（每行一个，重复自动去重）
-EXEMPT_PARSED=$(mktemp "${TMPDIR:-/tmp}/history-scan-exempt.XXXXXX") || exit 2
+# 用 awk 预解析豁免清单，分别输出到三个临时文件：
+#   ARCHIVE_TMP：archive 路径列表（每行一个，重复自动去重）
+#   COMMIT_TMP：commit SHA 列表（每行一个，重复自动去重）
+#   ENTRY_TMP：entry  sha256 前 12 位列表（每行一个，重复自动去重）
+ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-arch.XXXXXX") || exit 2
+COMMIT_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-commit.XXXXXX") || exit 2
+ENTRY_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-entry.XXXXXX") || exit 2
 awk '
   /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
-  /^archive[[:space:]]+/ { sub(/^archive[[:space:]]+/, ""); print > "'"$EXEMPT_PARSED"'"; next }
-  /^commit[[:space:]]+/ { sub(/^commit[[:space:]]+/, ""); print >> "'"$EXEMPT_PARSED"'"; next }
+  /^archive[[:space:]]+/ { sub(/^archive[[:space:]]+/, ""); print > "'"$ARCHIVE_TMP"'"; next }
+  /^commit[[:space:]]+/ { sub(/^commit[[:space:]]+/, ""); print >> "'"$COMMIT_TMP"'"; next }
+  /^entry[[:space:]]+/ { sub(/^entry[[:space:]]+/, ""); print >> "'"$ENTRY_TMP"'"; next }
   { print "豁免清单不可解析行（第 " NR " 行）：[" $0 "]" > "/dev/stderr"; exit 2 }
 ' "$EXEMPT_FILE" || {
   echo "豁免清单含不可解析行——先修清单再谈命中（退出码 2，不是通过）" >&2
-  rm -f "$EXEMPT_PARSED"
+  rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
   exit 2
 }
 
-# 从解析结果读取 archive / commit 集合
+# 从解析结果读取 archive / commit / entry 集合
 ARCHIVE_SET=""
 while IFS= read -r a_path; do
   [ -z "$a_path" ] && continue
@@ -124,29 +128,29 @@ while IFS= read -r a_path; do
     ARCHIVE_SET="$ARCHIVE_SET
 $a_path"
   fi
-done < "$EXEMPT_PARSED"
-rm -f "$EXEMPT_PARSED"
+done < "$ARCHIVE_TMP"
 
 COMMIT_SET=""
-# Re-read from original file for commit SHAs
-while IFS= read -r line; do
-  case "$line" in
-    '' | '#'*) continue ;;
-    archive*) continue ;;
-    commit*)
-      sha=${line#commit }
-      sha=$(echo "$sha" | tr -d '[:space:]')
-      if [ -n "$sha" ]; then
-        if [ -z "$COMMIT_SET" ]; then
-          COMMIT_SET="$sha"
-        else
-          COMMIT_SET="$COMMIT_SET
-$sha"
-        fi
-      fi
-      ;;
-  esac
-done < "$EXEMPT_FILE"
+while IFS= read -r c_sha; do
+  [ -z "$c_sha" ] && continue
+  if [ -z "$COMMIT_SET" ]; then
+    COMMIT_SET="$c_sha"
+  else
+    COMMIT_SET="$COMMIT_SET
+$c_sha"
+  fi
+done < "$COMMIT_TMP"
+
+ENTRY_SET=""
+while IFS= read -r e_prefix; do
+  [ -z "$e_prefix" ] && continue
+  if [ -z "$ENTRY_SET" ]; then
+    ENTRY_SET="$e_prefix"
+  else
+    ENTRY_SET="$ENTRY_SET
+$e_prefix"
+  fi
+done < "$ENTRY_TMP"
 
 # 一次性dump 全历史 patch，再逐串 grep：与"每条串各跑一次 git log --all -p | grep"
 # 完全同内容同计数（grep -c 数的是行），只是把 13MB 的 git 输出从 N 次降成 1 次。
@@ -238,6 +242,19 @@ while IFS= read -r line || [ -n "$line" ]; do
     shown="$lhs"
   fi
 
+  # 预计算当前条目的 sha256 前缀，检查是否在 entry 集合里
+  # （只对明确登记的平台实例名条目应用 archive / commit 豁免）
+  entry_match=0
+  if [ -n "$ENTRY_SET" ]; then
+    lhs_prefix=$(printf '%s' "$lhs" | sha256sum 2>/dev/null | cut -c1-12)
+    while IFS= read -r e_prefix; do
+      if [ "$e_prefix" = "$lhs_prefix" ]; then
+        entry_match=1
+        break
+      fi
+    done <<< "$ENTRY_SET"
+  fi
+
   # ── 同口径豁免：命中行按 diff 头归文件，三类豁免 ──
   # 口径与 why 见文件头注释。net = 豁免后仍照算的行数；只有 net 计入命中。
   # 归不了文件（message 行，但当前 commit 不在豁免清单）照算不豁免。
@@ -269,7 +286,8 @@ while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$COMMIT_SET" > "$COMMIT_TMP"
 
     exout=$(awk -v linefile="$HITLINES" -v treefile="$TREE" \
-      -v archfile="$ARCHIVE_TMP" -v commitfile="$COMMIT_TMP" '
+      -v archfile="$ARCHIVE_TMP" -v commitfile="$COMMIT_TMP" \
+      -v entry_match="$entry_match" '
       BEGIN {
         while ((getline t < treefile) > 0) tree[t] = 1
         close(treefile)
@@ -284,6 +302,9 @@ while IFS= read -r line || [ -n "$line" ]; do
         ec = 0; ea = 0; er = 0
       }
       function classify(pref) {
+        # 只对明确登记的平台实例名条目应用 archive / commit 豁免；
+        # 其余条目保留完整历史扫描（不拆防线）。
+        if (entry_match != "1") { er++; return }
         if (cur_commit in commit_exempt) { ec++; return }
         if (!indiff || apath == "?") { er++; return }
         f = (pref == "-") ? apath : bpath

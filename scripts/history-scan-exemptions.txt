@@ -24,3 +24,6 @@ commit 053343e221e80bf973a71ff327820793b0300a12
 commit 8c9e6848e1267a979fb1505605de88cd85488c32
 commit 0ae2833512dc3eb3fcbc966c82cd09a40145949d
 commit 7cb814911c03cedda5ce375ec6d8e4b7ea411281
+
+# 获准豁免的平台实例名条目（sha256 前 12 位，只对这些条目应用 archive / commit 豁免）：
+entry b76deef1ee8c
