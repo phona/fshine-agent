@@ -1352,6 +1352,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         platformRoot: options.cwd,
         taskId: options.sessionId,
         runCli: options.planCliRunner,
+        // gateway 穿线（C7b 漏穿补课）：本会话的 gateway 与 serve-gate / plan 解析同一份
+        // （input.gateway ?? 工厂声明），漏传则默认 runner spawn 前 fail-closed 抛错。
+        ...(options.gateway ? { gateway: options.gateway } : {}),
       });
     } catch {
       // Fail closed; resumed queries remain blocked until the worker obtains a host-approved plan.
@@ -2001,6 +2004,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         userConfirmed: parsed.userConfirmed,
         runCli: options.planCliRunner,
         activationSecret: options.planActivationSecret,
+        // gateway 穿线（C7b 漏穿补课）：EvaluateAndActivatePlanOptions.gateway 文档写明
+        // "透传给默认 runner"，但调用点从未传——默认 runner 拿不到网关名，spawn 前
+        // fail-closed 抛错，每次计划提交都以 PLAN DECLINED（网关未声明）收场，平台一次
+        // 都没执行（实测 2026-11-07：探针 ledgerCalls 恒 0，模型只能诚实报阻塞）。
+        ...(options.gateway ? { gateway: options.gateway } : {}),
       });
       if (plan.status === 'active') {
         // D-099：唯一的归零点。计划真的激活了（平台批准 + 本跳执行权已授予）才算一次确凿
