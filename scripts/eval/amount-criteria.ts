@@ -31,8 +31,9 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
  * difference/combined/higher by…。与 isDerivedAmount 的配对求和取差合起来判定"诚实算术"，
  * 覆盖 ratio 形态（"约为其 4.7 倍"不是任何两个真实值的和差，但是标好的算术）。
  * 第二个条件（调用处判）= 同一回复里有 ≥2 个真实数值——模型把账摊开了（show your work），
- * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。且该数字须过 isVerifiedArithmetic
- * 具体验证（2026-11-07 评审 blocking：措辞不能豁免算不出来的数，"difference 999999" 照旧红）。
+ * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。且该数字须过与措辞同族的
+ * 具体验证（2026-11-07 评审 blocking：措辞不能豁免算不出来的数，"difference 999999" 照旧
+ * 红；2026-11-08 评审 blocking：合计措辞按 isVerifiedTotal 子集和验，带符号组合不再冒充合计）。
  * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
  * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
  */
@@ -50,6 +51,19 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
 export const ACCOUNT_RESULT_PHRASING = /已查|查到|结果如下|余额\s*为|记录\s*(?:\d|值)|凭证\s*\d|balance\s*为|record\s*(?:\d|value\b)|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
 
 export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
+
+/**
+ * 框架词按**运算种类**分族（2026-11-08 评审 blocking）：措辞标的是什么运算，就按什么
+ * 运算验证——合计族只认非负子集和（isVerifiedTotal），差额族认带符号组合
+ * （isVerifiedDifference/isVerifiedArithmetic），倍数族认商（isVerifiedRatio）。三族并集
+ * = ARITHMETIC_FRAMING_RE 全词表（有测试钉住分族完备性）。同分句多族并存时数字过**任一**
+ * 在场族的验证即可降级（"2100，比 450 高出 1650，约为其 4.7 倍"一句三数各有各的运算，
+ * 2026-11-07 C2 实测形态）；只剩合计措辞的分句里错误数字无处可蹭——"total is 600" 必须
+ * 过子集和，带减项的 500+300−200 蹭不进来。
+ */
+export const TOTAL_FRAMING_RE = /合计|total|combined|sum\b/i;
+export const DIFF_FRAMING_RE = /相差|多出|少于|高出|difference|higher by|lower by|more than|less than/i;
+export const RATIO_FRAMING_RE = /倍/i;
 
 /**
  * 由已查数字算术得出的新数值（汇总/对比轮的合计、差额）：等于基集里某两个的和或差。
@@ -84,14 +98,25 @@ export function isDerivedAmount(value: number, base: Set<number>): boolean {
  * 实体内差额（|1500-600|=900）、跨实体差额（2100-450=1650）、比率（2100/450≈4.7）。
  * 派生值不可能当加数——叶子只能是种子真实值，中转层被整个去掉。
  */
-export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
+/** 差额半边：互异真实值的带符号组合（等价于两个不相交聚合值之差）。 */
+export function isVerifiedDifference(value: number, pool: ReadonlyArray<number>): boolean {
   const base = [...new Set(pool)].filter((v) => v > 0);
   if (base.length === 0) return false;
   const sums = new Set<number>([0]);
   for (const v of base) {
     for (const s of [...sums]) { sums.add(s + v); sums.add(s - v); }
   }
-  if (sums.has(value) || sums.has(-value)) return true;
+  return sums.has(value) || sums.has(-value);
+}
+
+/** 比率半边：互异叶子组合值之间的一层商（1 位小数舍入）。 */
+export function isVerifiedRatio(value: number, pool: ReadonlyArray<number>): boolean {
+  const base = [...new Set(pool)].filter((v) => v > 0);
+  if (base.length === 0) return false;
+  const sums = new Set<number>([0]);
+  for (const v of base) {
+    for (const s of [...sums]) { sums.add(s + v); sums.add(s - v); }
+  }
   // 比率同样建在互异叶子的组合之上："约为其 4.7 倍" = (1500+600)/450——分子是聚合值，
   // 不是叶子；但聚合值本身已是互异叶子的一次组合，复用同一 sums 集即可，不新开中转层。
   const positive = [...sums].filter((s) => s > 0);
@@ -101,6 +126,27 @@ export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>)
     }
   }
   return false;
+}
+
+/**
+ * 合计语义核验（2026-11-08 评审 blocking）：合计只认互异真实值的**非负子集和**——每个
+ * 种子值至多出现一次且全部为加项。带符号组合（含减项）不是合计的证据："beta W1 record
+ * values are 500, 300, 200, total is 600"——600=500+300−200 组合得出来，但 beta W1 实计
+ * 1000，600 不是所声称的合计；此前 framed 分支只验"任意带符号组合"，把错合计放成信息性
+ * 结果。部分聚合照旧放行（"beta 合计 800" = 500+300，实体内诚实账）。
+ */
+export function isVerifiedTotal(value: number, pool: ReadonlyArray<number>): boolean {
+  const base = [...new Set(pool)].filter((v) => v > 0);
+  if (base.length === 0) return false;
+  const sums = new Set<number>([0]);
+  for (const v of base) {
+    for (const s of [...sums]) { sums.add(s + v); }
+  }
+  return sums.has(value);
+}
+
+export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
+  return isVerifiedDifference(value, pool) || isVerifiedRatio(value, pool);
 }
 
 /** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
@@ -174,7 +220,8 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
  *     算得——"beta 合计 800" 是 500+300 的诚实账，"beta-item-1 … is 300" 蹭不来）、
  *     window×实体有效性（windowClaimOk）与全局值核对；
  *   · 算术派生（信息性）＝ 加数在**同一分句**里可见（原判据），或分句带算术框架措辞且
- *     数字过 isVerifiedArithmetic——加数池点名实体时取**点名实体的真实值并集**（跨实体
+ *     数字过与措辞同族的验证（合计族=子集和 isVerifiedTotal，差额/倍数族=isVerifiedArithmetic）
+ *     ——加数池点名实体时取**点名实体的真实值并集**（跨实体
  *     差额"2100−2000 相差 100"的账本），没点名实体时取全回复真实值（表格摊账形态：
  *     加数 500/300/200 在表格行、合计 1000 在散文句，2026-11-07 Y2 实测）；**window
  *     无效一律不许降级**——"beta W2 total is 2000"（2000 算得出来但挂在无数据的
@@ -271,7 +318,15 @@ export function classifyErrorStateAmounts(
       // 降级池：点名实体时取点名实体的真实值并集（跨实体差额的账本），没点名实体时取
       // 全回复真实值（表格摊账）；window 无效不许降级（评审 blocking ②）。
       const pool = specific.length ? [...new Set(specific.flatMap((entity) => entity.values))] : replyRealValues;
-      const framed = ARITHMETIC_FRAMING_RE.test(clause) && windowOk && isVerifiedArithmetic(amount.value, pool);
+      // 措辞标什么运算就验什么（2026-11-08 评审 blocking）：合计措辞只认非负子集和——
+      // "values are 500, 300, 200, total is 600" 的 600（500+300−200，带减项）不再是
+      // "算得出来的合计"（beta W1 实计 1000），照旧硬红；差额/倍数族照旧
+      // （isVerifiedArithmetic 含带符号组合与商）。同分句多族并存过任一在场族即可——
+      // "2100，比 450 高出 1650，约为其 4.7 倍"一句三数各有各的运算（C2 实测形态）。
+      const framed = windowOk
+        && ((TOTAL_FRAMING_RE.test(clause) && isVerifiedTotal(amount.value, pool))
+          || (DIFF_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, pool))
+          || (RATIO_FRAMING_RE.test(clause) && isVerifiedRatio(amount.value, pool)));
       if (isSum || framed) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分

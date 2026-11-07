@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { classifyErrorStateAmounts, isVerifiedArithmetic } from './amount-criteria';
+import {
+  ARITHMETIC_FRAMING_RE,
+  classifyErrorStateAmounts,
+  DIFF_FRAMING_RE,
+  isVerifiedArithmetic,
+  isVerifiedTotal,
+  RATIO_FRAMING_RE,
+  TOTAL_FRAMING_RE,
+} from './amount-criteria';
 
 /**
  * 金额判据纯核的表征锁（2026-11-07 评审 blocking 点名的反例变异测试 + 既有校准的诚实形态）。
@@ -204,6 +212,52 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
   it('两级差："alpha 2000（1200+800）、contoso-trade 2100（1500+600），两者相差 100"', () => {
     const v = classify('alpha 2000（1200+800）、contoso-trade 2100（1500+600），两者相差 100');
     expect(v.unattributed).toEqual([]);
+  });
+});
+
+describe('错误态金额三分：2026-11-08 评审反例（必须红）', () => {
+  it('blocking：合计只认非负子集和——"values are 500, 300, 200, total is 600"（600=500+300−200 带减项，实计 1000）', () => {
+    const v = classify('beta W1 record values are 500, 300, 200, total is 600', 'checkbeta的payablebalance');
+    expect(v.unattributed.map((a) => a.value)).toContain(600);
+    expect(v.derived.map((a) => a.value)).not.toContain(600);
+  });
+});
+
+describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿）', () => {
+  it('合计实计正确——"values are 500, 300, 200, total is 1000"（非负子集和成立）', () => {
+    const v = classify('beta W1 record values are 500, 300, 200, total is 1000', 'checkbeta的payablebalance');
+    expect(v.unattributed).toEqual([]);
+  });
+});
+
+describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 blocking）', () => {
+  const pool = [500, 300, 200];
+  it('互异真实值的纯加总成立（实体实际聚合与部分聚合）', () => {
+    expect(isVerifiedTotal(1000, pool)).toBe(true);  // 500+300+200
+    expect(isVerifiedTotal(800, pool)).toBe(true);   // 500+300（"beta 合计 800" 校准形态）
+    expect(isVerifiedTotal(2100, [1500, 600])).toBe(true);
+  });
+  it('带减项的组合与同值复用不成立（错合计必须红）', () => {
+    expect(isVerifiedTotal(600, pool)).toBe(false);  // 500+300−200（评审反例）
+    expect(isVerifiedTotal(1600, pool)).toBe(false); // (500+300)*2（实计 1000）
+    expect(isVerifiedTotal(1000, [500])).toBe(false); // 500+500
+    expect(isVerifiedTotal(999999, [1500, 600, 450])).toBe(false);
+  });
+});
+
+describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某一运算族', () => {
+  it('total/difference/ratio 三族并集覆盖全词表（漏词 = 该措辞静默失去降级通道）', () => {
+    const words = [
+      '高出', '相差', '合计', '多出', '少于', '倍', 'total', 'difference',
+      'combined', 'sum', 'higher by', 'lower by', 'more than', 'less than',
+    ];
+    for (const word of words) {
+      expect(
+        TOTAL_FRAMING_RE.test(word) || DIFF_FRAMING_RE.test(word) || RATIO_FRAMING_RE.test(word),
+        `框架词 ${word} 未落入任何运算族`,
+      ).toBe(true);
+      expect(ARITHMETIC_FRAMING_RE.test(word), `框架词 ${word} 应仍在 ARITHMETIC_FRAMING_RE 全词表`).toBe(true);
+    }
   });
 });
 
