@@ -239,7 +239,7 @@ export function askedWindows(userText: string): Set<string> {
 const MOCK_WINDOW_CODES = new Set(['W1', 'W2']);
 
 /** 金额匹配模式：千分位 / 小数 / 万亿 / ≥3 位裸整数 / 单独的 0。 */
-const AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*[万亿]|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])|(?<![\d.])0(?![\d.])/g;
+const AMOUNT_PATTERN = /-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?\s*[万亿]|-?\d+\.\d+(?![\d%％])|(?<![\d.])-?\d{3,}(?![\d.%％])|(?<![\d.])-?0(?![\d.])/g;
 
 /** 提取器产出的最小金额形状（探针与测试共用）。 */
 export interface ExtractedAmount {
@@ -273,7 +273,12 @@ export function extractAmounts(text: string): ExtractedAmount[] {
     if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && /^\s{0,2}月/.test(tail)) continue;
     if (/^20\d{4}$/.test(raw)) continue;
     if (MOCK_WINDOW_CODES.has(raw)) continue;
-    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
+    // 标识符尾段排除的锚点是**数字位**（不是匹配起点）——模式的可选负号会让匹配从 "-"
+    // 开始，"rec-101" 的 -101 曾因锚点错位漏排（2026-11-08 负号支持引入时踩到）。
+    const digitAt = raw.startsWith('-') ? at + 1 : at;
+    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, digitAt - 8), digitAt))) continue;
+    // 符号保留（2026-11-08 评审 blocking）："-500" 曾被归一成 +500 混过实体绑定
+    // （beta 真实值是正 500，符号反转的答案因此过机械门）。parseFloat 保留前导负号。
     const value = /[万亿]/.test(raw)
       ? parseFloat(raw) * (raw.includes('亿') ? 1e8 : 1e4)
       : parseFloat(raw.replace(/,/g, ''));

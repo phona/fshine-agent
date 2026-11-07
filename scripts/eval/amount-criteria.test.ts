@@ -244,6 +244,11 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(999);
   });
 
+  it('blocking：负号不得归一成正值——"beta W1 record value is -500"（beta 真实值是正 500）', () => {
+    const v = classify('beta W1 record value is -500; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(-500);
+  });
+
   it('blocking：万元写法可定位——"beta W1 record value is 0.05万"（500 的合法明细不误判）', () => {
     const v = classify('beta W1 record value is 0.05万; please confirm.');
     expect(v.unattributed).toEqual([]);
