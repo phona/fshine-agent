@@ -178,7 +178,7 @@ const CORRECT_FORM = {
 function env(name, fallback) { const v = process.env[name]; return v === undefined || v === '' ? fallback : v; }
 function env2(a, b, fallback) { return env(a, env(b, fallback)); }
 function statePaths() {
-  const stateFile = env('DUMMY_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
+  const stateFile = env2('DUMMY_STATE', 'EXECUTION_MOCK_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
   const dir = path.dirname(stateFile);
   return {
     stateFile,

@@ -4,7 +4,7 @@
 # 由脚本侧 resolve-config-path.ts 解析，全仓统一入口；显式入口是
 # --config=<path> 命令行与 AGENT_CONFIG_PATH 环境变量（原有契约保留）。
 #
-# 为什么只放一个 profile（stock）：
+# 为什么只放一个 profile（dummy）：
 #   resolveActiveProfileId 对「0 个或多个 profile 且未显式指定」返回
 #   undefined，消费方（createContextTaskRunner / resolveContextProfile）
 #   会 fail-closed 抛 CONTEXT_PROFILE_MISSING。eval 脚本走默认派生路径，
@@ -19,11 +19,9 @@
 # materializeEvalConfig 相对仓根解析成绝对路径、物化到 .runtime/eval-agent-config.yaml
 # （与 tests/e2e/harness.ts:830-842 的 patchProfile 同款模式）。
 #
-# 域边界（如实记录，不装作已验证）：stock 是通用域夹具，而 probe / acceptance 的
-# 语料是财税域。本配置保证的是「fresh clone 零配置可加载 + 委派真正 spawn 到
-# 夹具 + 端到端接线跑通」；财税域的查询稳定性与提案/确认/提交链路覆盖属于
-# Tier B 本地验证（需真实执行层，见 ci.sh 头部说明），不在本配置的证明范围内。
-# CI 的真实模型面（通用域 eval 工作流）另行落地，本配置不声称它已存在。
+# 域边界：dummy 是仓内通用域夹具（collection / window / record 词汇 + ballot.* 第二
+# 写域），probe / acceptance 的语料已同域端口（Wave 6）——eval 自此不依赖任何外部仓。
+# 本配置保证的是「fresh clone 零配置可加载 + 委派真正 spawn 到夹具 + 端到端接线跑通」。
 # ============================================================
 
 # ---- 授权名单：eval 专用虚构 UserID，不泄漏真实身份 ----
@@ -36,16 +34,16 @@ principals:
     # （dry-run 即被 fixture 挡回），授权 write 不触达任何真实执行层。
     capabilities: ["read", "validate", "write"]
 
-# ---- 通用 Worker 的受信上下文（eval 用 stock 夹具） ----
+# ---- 通用 Worker 的受信上下文（eval 用 dummy 夹具） ----
 contextProfiles:
-  stock:
+  dummy:
     # 仓内相对路径：加载前由 materializeEvalConfig 解析成绝对路径（见文件头）。
-    root: scripts/eval/fixtures/stock-platform
+    root: scripts/eval/fixtures/dummy-platform
     # 相对 root 的网关调用形式（host spawn 用它，不硬编码全路径）。
-    gateway: bin/stock
-    # 运行态技能面：按 fixture 实际结构填（stock-platform/skills-serve/stock-routing-examples/SKILL.md）。
-    # 生产部署用 .agents/skills-serve，但 fixtures 的 skills-serve 直接挂在 root 下。
-    skillRoots: ["./skills-serve"]
+    gateway: bin/dummy
+    # 运行态技能面：dummy 夹具的技能面在 .agents/skills-serve 下（与 stock 夹具的
+    # root 下直挂不同——fixture 各自的结构以实际目录为准）。
+    skillRoots: [".agents/skills-serve"]
     # Worker 单次任务预算（可选，默认 10 分钟）。eval 探针/验收以脚本超时为准，
     # 这里留默认值即可；如需调参，在脚本侧通过 --config / AGENT_CONFIG_PATH 指向
     # 打补丁的副本（参见 tests/e2e/harness.ts 的 patchProfile 模式）。
