@@ -32,6 +32,7 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
@@ -51,8 +52,27 @@ import {
   neutralizePlanGateNonCallLines,
   totalActualCalls,
 } from './harness';
+import { resolveConfigPath } from '../../scripts/resolve-config-path';
+import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 
-const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(__dirname, '..', '..', '..', 'fictional-execution-layer');
+function resolvePlatformRoot(): string {
+  try {
+    const configPath = resolveConfigPath();
+    const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    const profiles = config['contextProfiles'] as Record<string, ContextProfileConfig> | undefined;
+    const profileId = resolveActiveProfileId(profiles ?? {});
+    if (profileId) {
+      const profile = profiles![profileId] as Record<string, unknown> | undefined;
+      const root = String(profile?.root ?? '');
+      if (root) return root;
+    }
+  } catch {
+    // 无配置或 active profile 未定 → 走回退
+  }
+  return path.resolve(__dirname, '..', '..', '..', 'fictional-execution-layer');
+}
+
+const PLATFORM_ROOT = resolvePlatformRoot();
 const CLI = path.join(PLATFORM_ROOT, 'bin', 'example-gateway');
 
 // ── 真实 pi-coding-worker 会话辅助（A4 / A5③ 用：替身不复刻这两段生产逻辑）────────

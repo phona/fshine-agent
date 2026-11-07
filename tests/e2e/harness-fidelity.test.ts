@@ -38,11 +38,11 @@ import { CURRENT_PERIOD, GATEWAY, harnessOperationSemantics, PLATFORM_ROOT, with
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 describe('[L4 集成] harness 保真度绊线', () => {
-  // 平台未 checkout（config/agent.yaml 缺失 + FSHINE_PLATFORM_ROOT 未设）→ 护栏必须有真实平台才跑
+  // 平台未 checkout（config/agent.yaml 缺失或 active profile 未配置）→ 护栏必须有真实平台才跑
   const platformAvailable = PLATFORM_ROOT !== '' && GATEWAY !== '';
   if (!platformAvailable) {
-    it('平台未配，全组护栏跳过（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）', () => {
-      expect(PLATFORM_ROOT, 'PLATFORM_ROOT 未配：设置 FSHINE_PLATFORM_ROOT 或建 config/agent.yaml').toBe('');
+    it('平台未配，全组护栏跳过（config/agent.yaml 缺失或 active profile 未配置）', () => {
+      expect(PLATFORM_ROOT, 'PLATFORM_ROOT 未配：建 config/agent.yaml 并配置 active profile').toBe('');
     });
   }
 

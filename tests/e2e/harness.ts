@@ -23,6 +23,8 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { afterAll, afterEach, beforeAll, beforeEach } from 'vitest';
+import { resolveConfigPath, explicitConfigFrom } from '../../scripts/resolve-config-path';
+import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
@@ -35,41 +37,53 @@ import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf,
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
-const PLATFORM_ROOT: string = (() => {
-  const envRoot = process.env['FSHINE_PLATFORM_ROOT']?.trim();
-  if (envRoot) return envRoot;
+const RESOLVED_CONFIG: string | undefined = (() => {
   try {
-    const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
-    if (existsSync(configPath)) {
-      const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-      const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-      const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
-      const root = firstProfile?.root as string | undefined;
-      if (root) return root;
+    const explicit = explicitConfigFrom();
+    if (explicit) {
+      return resolveConfigPath(explicit);
     }
+    // 无显式配置时，只找本地 config/agent.yaml，不 fallback 到 eval.agent.yaml
+    // （eval 配置是 stock 夹具，不是 example-gateway 的平台配置）
+    const rootConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
+    if (existsSync(rootConfig)) {
+      return rootConfig;
+    }
+    return undefined;
   } catch {
-    // config/agent.yaml 缺失或格式异常 → 走空串（不阻断 import，load* 函数对空串返回空表）
+    return undefined;
   }
-  return '';
 })();
-const GATEWAY: string = (() => {
+
+const CONFIG_CACHE: Record<string, unknown> | undefined = (() => {
+  if (!RESOLVED_CONFIG) return undefined;
   try {
-    const configPath = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
-    if (existsSync(configPath)) {
-      const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
-      const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
-      const firstProfile = profiles ? Object.values(profiles)[0] : undefined;
-      const gateway = firstProfile?.gateway as string | undefined;
-      if (gateway) return gateway;
-    }
+    return parseYaml(readFileSync(RESOLVED_CONFIG, 'utf8')) as Record<string, unknown>;
   } catch {
-    // config/agent.yaml 缺失或格式异常 → 走空串（不阻断 import）
+    return undefined;
   }
-  return '';
+})();
+
+const PROFILE_CACHE: { id: string; profile: Record<string, unknown> } | undefined = (() => {
+  if (!CONFIG_CACHE) return undefined;
+  const profiles = CONFIG_CACHE['contextProfiles'] as Record<string, ContextProfileConfig> | undefined;
+  const profileId = resolveActiveProfileId(profiles ?? {});
+  if (!profileId) return undefined;
+  return { id: profileId, profile: profiles![profileId] as Record<string, unknown> };
+})();
+
+const PLATFORM_ROOT: string = (() => {
+  if (!PROFILE_CACHE) return '';
+  return String(PROFILE_CACHE.profile?.root ?? '');
+})();
+
+const GATEWAY: string = (() => {
+  if (!PROFILE_CACHE) return '';
+  return String(PROFILE_CACHE.profile?.gateway ?? '');
 })();
 /** 平台 CLI 路径（延迟求值：PLATFORM_ROOT 为 null 时不抛，用到时才组装）。 */
 function getCli(): string {
-  if (!PLATFORM_ROOT || !GATEWAY) throw new Error('PLATFORM_ROOT / GATEWAY 未配（config/agent.yaml 缺失或 FSHINE_PLATFORM_ROOT 未设）');
+  if (!PLATFORM_ROOT || !GATEWAY) throw new Error('PLATFORM_ROOT / GATEWAY 未配（config/agent.yaml 缺失或未配置 active profile）');
   return gatewayExecPath(PLATFORM_ROOT, GATEWAY);
 }
 // 暴露给 gatedWorker 等运行时函数的延迟求值 CLI
@@ -822,12 +836,10 @@ async function boot(options: BootOptions): Promise<Boot> {
   const sdk = new RecordingSdkClient();
   const bootEnv: NodeJS.ProcessEnv = { ...process.env, FSHINE_INBOUND_DEBOUNCE_MS: '0' };
   if (options.workerDispatchMode) bootEnv['FSHINE_WORKER_DISPATCH_MODE'] = options.workerDispatchMode;
-  // 隔离运行（FSHINE_PLATFORM_ROOT）：开发仓的执行层平台仓常被并行任务动到半途（未登记
-  // 的孤儿脚本会让 operations lint 红掉、boot 拒起）。指向干净快照时把 config 的
-  // profiles.<profileId>.root 一并对齐——启动 lint、operation 规格表与委派全部落在快照上，
-  // e2e 与开发仓的进行中改动互不拖累。缺省（未设该变量）行为一字不变。
-  const isolatedRoot = (bootEnv['FSHINE_PLATFORM_ROOT'] ?? '').trim();
-  if (options.patchProfile || isolatedRoot !== '') {
+  // 隔离运行：指向干净快照时把 config 的 profiles.<profileId>.root 一并对齐——
+  // 启动 lint、operation 规格表与委派全部落在快照上，e2e 与开发仓的进行中改动互不拖累。
+  // 使用 patchProfile 选项覆盖 root。
+  if (options.patchProfile) {
     const repoConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
     const config = parseYaml(readFileSync(repoConfig, 'utf8')) as Record<string, unknown>;
     const profiles = config['contextProfiles'] as Record<string, Record<string, unknown>> | undefined;
@@ -835,7 +847,6 @@ async function boot(options: BootOptions): Promise<Boot> {
     if (!profileId || !profiles?.[profileId]) throw new Error(`patchProfile：仓库配置里找不到 contextProfiles.${profileId}`);
     if (options.patchProfile?.workerTimeoutMs) profiles[profileId]!.workerTimeoutMs = options.patchProfile.workerTimeoutMs;
     if (options.patchProfile?.root) profiles[profileId]!.root = options.patchProfile.root;
-    if (isolatedRoot !== '') profiles[profileId]!['root'] = isolatedRoot;
     const patchedPath = path.join(stateDir, `agent-config-${counter}.yaml`);
     writeFileSync(patchedPath, stringifyYaml(config));
     bootEnv['AGENT_CONFIG_PATH'] = patchedPath;

@@ -42,9 +42,6 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 
 ### L4 集成测试的前置条件（全部都要）
 
-- 兄弟仓在 `FSHINE_PLATFORM_ROOT`（缺省为本仓上一级的 `fictional-execution-layer`），
-  且其中已跑过 `npm ci`（否则 `bin/example-gateway plan evaluate` 会因缺 `ajv` 等依赖而失败，
-  这是环境缺陷，不是代码缺陷）；
 - 本仓 gitignored 的 `config/agent.yaml` 存在（部署配置，永不提交），
   harness 的 `boot()` 会读它并按用例打补丁；
 - 执行层 mock：harness 在 beforeAll 钉死 `EXECUTION_EXECUTOR=mock`、
@@ -65,15 +62,13 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
   单仓检出或 `/tmp` 工作树下兄弟仓不在 `../fictional-execution-layer` 时，第 1 用例必以
   `ENOENT: no such file or directory, open '…/fictional-execution-layer/src/execution/plan-schema.json'`
   失败，其余 2 用例仍过（实测：1 failed | 2 passed）。兄弟仓在场时 main 版 3/3 过。
-  另注意变量名已改：main 只认旧名 `DZ_PLATFORM_ROOT`，单设新名
-  `FSHINE_PLATFORM_ROOT` 救不了 main（实测仍 ENOENT）。
 - **定判 2——p1 版 dummy 回落成立，但口径只到协议顶层形状。** p1 版兄弟仓不在场时
   回落到仓内 `scripts/eval/fixtures/dummy-platform/bin/dummy plan --schema`，无兄弟仓布局下
   实测 3/3 过；dummy 与真实 schema 在本测试断言的顶层字段上一致
-  （`required: ["calls"]`、`additionalProperties: false`、
-  `properties: calls / goal / requestId`）。因此 dummy 绿只证明“教学形态符合协议顶层形状”，
+  （`required: [“calls”]`、`additionalProperties: false`、
+  `properties: calls / goal / requestId`）。因此 dummy 绿只证明”教学形态符合协议顶层形状”，
   不证明教学与财税 schema 的描述、逐调用校验一致；真 schema 核验仍需兄弟仓在场的那一跑
-  （p1 版指 `FSHINE_PLATFORM_ROOT` 向真实兄弟仓时实测亦 3/3 过）。
+  （p1 版指 active profile 指向真实兄弟仓时实测亦 3/3 过）。
 - **本定判不改生产逻辑、不放松门禁。** 不得把 dummy 绿读成“已对真实财税 schema 验过”。
 
 例外：`plan-awareness.test.ts` 用 `describe.skipIf(!existsSync(cliPath))`，
