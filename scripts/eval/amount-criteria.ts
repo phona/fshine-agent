@@ -201,7 +201,11 @@ export function classifyErrorStateAmounts(
       const windowOk = windowClaimOk(clause, specific);
       if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
       const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
-      const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
+      // 同分句加总同样受 window 约束（2026-11-07 评审 major："beta W2 values 500 and 300
+      // total 800"——beta W2 无数据，加数与合计都不得降级；注释承诺的"window 无效一律
+      // 不许降级"此前只罩住 framed 分支）。
+      const isSum = windowOk
+        && summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
       // 降级池：点名实体时取点名实体的真实值并集（跨实体差额的账本），没点名实体时取
       // 全回复真实值（表格摊账）；window 无效不许降级（评审 blocking ②）。
       const pool = specific.length ? [...new Set(specific.flatMap((entity) => entity.values))] : replyRealValues;
