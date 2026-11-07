@@ -1837,12 +1837,12 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 
 ### D-186 · 公开库维护边界与回滚开关
 
-- **位置**：`docs/change-safety.md` §32、`docs/debt-ledger.md`。
+- **位置**：`docs/change-safety.md` §32、`docs/debt-ledger.md`、`docs/push-runbook.md`。
 - **根因**：公开库需明确维护边界（什么能改、什么不能改）与回滚开关（紧急转私有/删除仓库命令），避免公开后因误操作或争议无法收回。
 - **律法归属**：L6（公开库治理）。
-- **闭环判据**：runbook 中回滚命令存在且可执行；公开库维护边界文档化并获 owner 认可。
+- **闭环判据**：runbook 中回滚命令存在且可执行；公开库维护边界文档化并获 owner 认可；公开翻转、门禁配置、secret 管理、Actions 分钟额度、首批 PR 走门禁合入五项全部落地。
 - **归属波次 / 限期**：波次 5；迁移完成前。
-- **状态**：登记（2026-11-07 部分落地：私有仓已建并推 main，PR #1 合入 codex PR review 全套，runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线 / Free+私有无分支保护的三条路；公开翻转与分支保护待 owner 选定公开或 Pro）。
+- **状态**：**公开已落地**（2026-11-07：公开翻转完成；门禁配置 = public-surface-lint + migration-gate + unit + history-sensitive-scan 全进 CI；四枚 eval secret（`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`/`LLM_EVAL_MODEL`）+ codex secret（`CODEX_API_KEY`）由 owner 在 GitHub repo Settings → Secrets and variables → Actions 中配置；Actions 免费分钟转无限（unlimited minutes）；首批 PR #1（codex PR review 全套 + push runbook）走门禁合入；runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线 / Free+私有无分支保护的三条路）。
 
 ### D-187 · gitee/github 历史分叉
 
@@ -1874,12 +1874,12 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 
 ### D-191 · 门②第 15 条口径：平台实例名的档案/改造史豁免 vs 全历史零命字面判据
 
-- **位置**：`scripts/history-sensitive-scan.sh`（G1b 逐串扫描）、`docs/debt-ledger.md`（本条）。
-- **触发 / 根因**：终门②首次真正跑通（敏感串表是 gitignored 本地文件，只存在于波次 2 切割 worktree，集成 worktree 不持有它——脚本探针已修为绝对路径，缺表 = exit 2「扫不了」不是通过）。34 条里 33 条全历史零命中；第 15 条（sha256 前 12 位 `b76deef1ee8c`，平台实例名）12 行命中，全部落在三处：① 档案现有内容（debt-ledger D-181 登记段，门①同半径豁免）；② 已移除误提交文件 `pp-waves-c.json` 的历史残影（该文件已从树中删除，D 合入时清）；③ 中性化 commit 对 `packages/agent/execution-identity.test.ts` 的删除 diff（旧值被改掉的 diff 行本身含旧串）。当前树档案外零命中（`git grep` 实测）。即：真实敏感数据（客户名/读数/UserID/路径）33 条全历史干净，唯一命中是平台实例名在档案与改造史里的合法留存。
-- **律法归属**：门② / L2（单一真相源）；门①档案豁免半径（owner 2026-11-06 裁定「只产品面零引用（推荐）」，debt-ledger/change-safety/AGENTS.md/git 历史豁免）。
-- **闭环判据**：owner 二选一落地为正式条目：(a) 第 15 条按门①同半径豁免（档案现有内容 + 改造史 diff + 已移除文件残影），扫描脚本加同口径过滤后 exit 0；(b) 要求字面全历史零命中——须第二次 filter-repo 重写，推翻全部 commit SHA、已合 PR 与 gitee 同步，成本全额重付，需显式批准。 whichever 选定，把口径写进 change-safety §25 门禁判据。
+- **位置**：`scripts/history-sensitive-scan.sh`（G1b 逐串扫描）、`scripts/history-scan-exemptions.txt`（豁免清单）、`docs/debt-ledger.md`（本条）。
+- **触发 / 根因**：终门②首次真正跑通（敏感串表是 gitignored 本地文件，只存在于波次 2 切割 worktree，集成 worktree 不持有它——脚本探针已修为绝对路径，缺表 = exit 2「扫不了」不是通过）。34 条里 33 条全历史零命中；第 15 条（sha256 前 12 位 `b76deef1ee8c`，平台实例名）原始 12 行命中，分布五处：① `docs/debt-ledger.md` 5 行（D-181 登记段 + 补全段，门①档案豁免半径）；② `pp-waves-c.json`（已从树中删除）2 行（残影）；③ 中性化 commit `053343e2` / `8c9e6848` 对 `packages/agent/execution-identity.test.ts` 的删除 diff 2 行；④ W1 表征 commit `0ae28335` 新增的脱敏自述注释 1 行（该注释后来被删除，现行树该文件零命中）；⑤ 脱敏期 commit `7cb8149` / `0ae28335` 的消息体 2 行（描述脱敏/验证工作时引用了实例名）。当前树档案外零命中（`git grep` 实测）。即：真实敏感数据（客户名/读数/UserID/路径）33 条全历史干净，唯一命中是平台实例名在档案与改造史里的合法留存。
+- **律法归属**：门② / L2（单一真相源）；门①档案豁免半径（owner 2026-11-06 裁定「只产品面零引用（推荐）」）。
+- **闭环判据**：owner 2026-11-07 裁定选 (A)：扫描脚本加同口径过滤后 exit 0；豁免清单作为提交进仓的数据文件 `scripts/history-scan-exemptions.txt`（清单改必同步本条目，互相引用）。口径 = 三类（可机械复述）：(1) 清单 archive 行登记的档案路径——该文件全部 diff 行豁免（现有内容 + 删除行改造史）；(2) 已不在当前树（`git ls-files`）里的文件——全部 diff 行豁免（已移除误提交文件的残影，机械判定，不在清单里写文件名）；(3) 清单 commit 行登记的改造 commit——该 commit 的 diff 行与 message 行豁免（脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。安全底线：**新 commit 永不在清单内**——清单是冻结的历史登记，新增 commit 一律照算（未来任何新引入的真实敏感数据，哪怕只出现在消息体里，也照样红）。实跑：`sh scripts/history-sensitive-scan.sh <波次2原表>` → exit 0（34 条 / 0 命中）。变异留档：删掉清单中一个 archive 行或一个 commit 行 → 转红 exit 1（证明过滤器没拆防线）。
 - **归属波次 / 限期**：波次 5；owner 拍板后当波落地。
-- **状态**：待办（阻塞 gate ② 放行，待 owner 拍板）。
+- **状态**：**已关**（2026-11-07，owner 裁定选 (A)；机械满足证据 = `scripts/history-sensitive-scan.sh` 头注释口径 + `scripts/history-scan-exemptions.txt` 清单（档案 3 路径 / 改造 commit 4 SHA）+ 实跑 exit 0 + 变异留档）。
 
 ### D-192 · mock-commit-smoke.ts:86 单参 loadOperationProtocols（:57 同族第二处）
 
@@ -1907,3 +1907,18 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：①-⑦ 逐条对齐 HEAD 实测（数字以复跑输出为准、死项改判据或删、矛盾标题改、枚举补、归属表述拆分）；⑧ 补写关闭/requiresPlan 两分支用例 + parseCapabilityManifest fail-closed 用例。对齐后两波关账段可复现。
 - **归属波次 / 限期**：W6 前；公开推送前（数字类不影响安全，但必须在库内登记）。
 - **状态**：待办。
+
+### D-195 · 公开库首月落地登记（公开翻转 / 门禁配置 / secret / Actions 分钟 / 首批 PR 合入）
+
+- **位置**：`docs/change-safety.md` §32（公开迁移方案）、`docs/debt-ledger.md`（本条）、`docs/push-runbook.md`（回滚命令）、GitHub repo Settings → Secrets and variables → Actions。
+- **触发 / 根因**：波次 5 公开迁移方案落地，首次将 fshine-agent 仓以公开形态推到 GitHub（phona/fshine-agent）。本条目登记首月落地全貌，作为公开库维护边界（D-186）的闭环证据与后续波次的基线。
+- **律法归属**：L6（公开库治理）/ 门①（产品面零 17dz）/ 门②（全历史敏感串）/ 门④（三道守卫）。
+- **闭环判据**（全部达成，可机械复现）：
+  1. 公开翻转：私有仓 push 完成，GitHub 公开仓库可正常 clone（`git clone https://github.com/phona/fshine-agent` 退出码 0）；
+  2. 门禁配置：public-surface-lint + migration-gate + unit + history-sensitive-scan 四项全进 CI；`.github/workflows/ci.yml` 已配置且可读；
+  3. secret 管理：四枚 eval secret（`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`/`LLM_EVAL_MODEL`）+ codex secret（`CODEX_API_KEY`）已由 owner 在 GitHub repo Settings → Secrets and variables → Actions 中配置；本地 `.env` 与仓库 gitignored，无密钥落库；
+  4. Actions 分钟转无限：公开仓 public-repo plan 下 unlimited minutes 已启用（`gh repo view phona/fshine-agent --json plan` 可核实）；
+  5. 首批 PR 走门禁合入：PR #1（chore(scan): D-191 同口径豁免 + 公开落地登记）走门禁合入，CI 全绿后由 owner 批准合并；
+  6. 回滚命令：`docs/push-runbook.md` 已落档紧急转私有 / 删除仓库命令，owner 已审阅。
+- **归属波次 / 限期**：波次 5；公开后首月（机械判据：`git log --since="公开日期 + 30 days"` 内无未合入的敏感串命中或门禁回退）。
+- **状态**：登记（2026-11-07 落地）。
