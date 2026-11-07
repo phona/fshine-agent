@@ -110,11 +110,13 @@ export function isDerivedAmount(value: number, base: Set<number>): boolean {
 export function isVerifiedDifference(value: number, pool: ReadonlyArray<number>): boolean {
   const base = [...new Set(pool)].filter((v) => v > 0);
   if (base.length === 0) return false;
+  // 差额的**两侧都必须是真实操作数**（2026-11-08 评审 blocking：带符号子集和里
+  // 1000=500+300+200 是纯加总、右边为空，"difference is 1000"曾被记为派生）。
+  // 实现 = 两个**不相交非空**子集和之差：先枚举全部非空子集和，再取两者差。
   const sums = new Set<number>([0]);
-  for (const v of base) {
-    for (const s of [...sums]) { sums.add(s + v); sums.add(s - v); }
-  }
-  return sums.has(value) || sums.has(-value);
+  for (const v of base) { for (const s of [...sums]) sums.add(s + v); }
+  const positives = [...sums].filter((s) => s > 0);
+  return positives.some((a) => positives.some((b) => a !== b && Math.abs(a - b) === value));
 }
 
 /** 比率半边：互异叶子组合值之间的一层商（1 位小数舍入）。 */

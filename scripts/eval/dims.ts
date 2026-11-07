@@ -54,7 +54,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'presentationHygiene', pattern: /^澄清回复未列候选清单|^澄清回复没有问句|^not_found 回复未给出/, source: 'clarificationShapeNotes' },
   { dim: 'presentationHygiene', pattern: /复述缺框定语/, source: 'recallFramingNote / X1③' },
   { dim: 'presentationHygiene', pattern: /^回复把collection清单当|^回复显式把清单当collection念/, source: 'explorationDomainNote（域混淆两判）' },
-  { dim: 'presentationHygiene', pattern: /^跨月查询没有先通知用户|无【第 N\/M 步】步骤通知/, source: 'D1 / X1① 长任务通知' },
+  { dim: 'presentationHygiene', pattern: /^跨 window 多对象查询没有先通知用户|无【第 N\/M 步】步骤通知/, source: 'D1 / X1① 长任务通知' },
   // ── 实体保真 ──
   { dim: 'entityFidelity', pattern: /轮把用户没问的collection当成本轮结果/, source: 'accountDrift' },
   { dim: 'entityFidelity', pattern: /（串台）/, source: 'staleScopeAmounts' },

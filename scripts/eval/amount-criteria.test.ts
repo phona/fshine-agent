@@ -239,6 +239,21 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(600);
   });
 
+  it('blocking：差额验证不接受纯加总——"beta W1 difference is 1000"（1000 是三项总额，不是差额）', () => {
+    const v = classify('beta W1 difference is 1000; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1000);
+  });
+
+  it('blocking：未绑定差额按族校验——"Record values are 500 and 300, difference is 800"（真实差 200）', () => {
+    const v = classify('Record values are 500 and 300, difference is 800; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('blocking：未绑定差额不接受比率——"Record values are 500 and 300, difference is 2.5"', () => {
+    const v = classify('Record values are 500 and 300, difference is 2.5; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(2.5);
+  });
+
   it('blocking：口径大小写——"beta BANK balance is 500"（BANK 是不存在口径的大写形态）', () => {
     const v = classify('beta W1 record value is 500. beta BANK balance is 500; please confirm.');
     expect(v.assertedCalibers.map((a) => a.caliber)).toContain('bank');
@@ -371,7 +386,7 @@ describe('isVerifiedArithmetic：算术豁免的具体验证', () => {
     expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)-450（跨实体真差额）
     expect(isVerifiedArithmetic(4.7, pool)).toBe(true);    // 2100/450 约 4.7（聚合值之比）
     expect(isVerifiedArithmetic(100, [1200, 800, 1500, 600])).toBe(true); // 1500+600-1200-800
-    expect(isVerifiedArithmetic(1000, [500, 300, 200])).toBe(true);       // beta 三项实计（纯函数层；类型分流见下方 classify 反例）
+    expect(isVerifiedArithmetic(1000, [500, 300, 200])).toBe(false);      // 1000=500+300+200 是纯加总——差额/比率族都不收（合计走 isVerifiedTotal/isSum 通道）
     // 评审 blocking ② 反例：同值复用与派生值复用推出的假合计，必须红
     expect(isVerifiedArithmetic(1000, [500])).toBe(false);        // 500+500（beta-item-1 唯一值）
     expect(isVerifiedArithmetic(1600, [500, 300, 200])).toBe(false); // (500+300)*2（实计 1000）

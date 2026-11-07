@@ -59,6 +59,7 @@ import {
   RATIO_FRAMING_RE,
   TOTAL_FRAMING_RE,
   classifyErrorStateAmounts,
+  extractAmounts as extractAmountsPure,
   isDerivedAmount,
   isVerifiedArithmetic,
   isVerifiedDifference,
@@ -353,41 +354,14 @@ interface Amount {
  * YYYYMM window（W2）、日期/版本号里的数字片段（lookaround 挡连字符与点号相邻片段）。
  * 按数值去重（保留首个原文），零值单列——0/0.00 在平台回复里是格式噪声（credit 0、空结果 0.00）。
  */
-// 金额提取。已知限制（2026-11-07 C2 实测登记，不在本波修）：裸整数分支只收 ≥3 位，
-// 两位数编造额（模型给不存在的 alpha W2 编了「25、10、5，合计 40」）因此不进提取器、
-// 逃过金额尺——收两位数会把窗口码/条数/步号（「2 条」「第 2/5 步」）全搅进来，
+// 金额提取（含年份语境排除、rec-NNN 尾段排除、按值去重）与匹配模式已搬到
+// scripts/eval/amount-criteria.ts——探针与单测共用同一真源：曾因两份实现形态学不同
+// （生产侧按裸区间 1900–2099 排除年份、测试侧不排除），纯核测试看不见生产把 alpha
+// 真实合计 2000 当年份静默排除的漏判（2026-11-08 评审 blocking）。
+// 已知限制（2026-11-07 C2 实测登记，不在本波修）：裸整数分支只收 ≥3 位，两位数编造额
+// （「25、10、5，合计 40」）不进提取器——收两位数会把窗口码/条数/步号全搅进来，
 // 那是另一个设计题（按「所在分句有金额语境」收窄），留待专门一轮。
-const AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*[万亿]|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])|(?<![\d.])0(?![\d.])/g;
-
-/**
- * mock field表里的field code（读自 mock-state.json 各collection subjects.code）。
- * 串台/无源金额判定会把裸整数当金额，而field code（record value/bank/payable…）
- * 在每个collection的回复里都出现——旧collection的代码出现在新collection回复里是正常的，不是串台。
- */
-const MOCK_WINDOW_CODES = new Set(['W1', 'W2']);
-
-function extractAmounts(text: string): Amount[] {
-  const seen = new Map<number, Amount>();
-  for (const match of text.matchAll(AMOUNT_PATTERN)) {
-    const raw = match[0]!;
-    if (/^(?:19|20)\d{2}(?:\.\d{1,2})?$/.test(raw)) continue; // 年份/年.月不是金额
-    if (/^20\d{4}$/.test(raw)) continue;                     // YYYYMM window不是金额
-    if (MOCK_WINDOW_CODES.has(raw)) continue;               // numeric code is not an amount（X1 首跑：numeric code 被当金额判串台，误报）
-    // 标识符尾段不是金额："rec-401 contoso-trade-item-1：1500" 里的 401/501 是记录号，
-    // 裸整数分支（\d{3,}）会把它们当金额抓出来，错误态轮因此假红（2026-11-07 Y2 实测：
-    // 模型列候选记录时带 rec-401/rec-402/rec-501，三个编号全被判"无所属金额"）。
-    // 判据 = 数字紧跟字母-连字符（rec-401 / x-401）；真实金额前不会有这种形态。
-    const at = match.index ?? 0;
-    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
-    const value = /[万亿]/.test(raw)
-      ? parseFloat(raw) * (raw.includes('亿') ? 1e8 : 1e4)
-      : parseFloat(raw.replace(/,/g, ''));
-    if (!Number.isFinite(value) || seen.has(value)) continue;
-    const confident = /,\d{3}/.test(raw) || /\.\d/.test(raw) || /[万亿]/.test(raw);
-    seen.set(value, { raw, value, confident });
-  }
-  return [...seen.values()];
-}
+const extractAmounts = extractAmountsPure as (text: string) => Amount[];
 
 /**
  * 话题线程代号。C1/C2 各线程一个字母（C2：A=alpha、B=beta、C=locked-one、D=alpha-group）。
@@ -1119,6 +1093,18 @@ interface AuditRecord {
 }
 
 /** 读审计日志（EXECUTION_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
+/** 宿主持有的待确认计划（计划门 confirm 档的挂起）：计划状态文件里 status=pending 的计划。
+ *  D2 的"停在确认门"判据用它而不是 notices 非空——普通多步计划的进度通知也会落
+ *  notices，那不是暂停（2026-11-08 评审 major）。 */
+function recordsHasPendingPlan(): boolean {
+  const file = process.env['EXECUTION_PLAN_STATE'];
+  if (!file || !existsSync(file)) return false;
+  try {
+    const state = JSON.parse(readFileSync(file, 'utf8')) as { plans?: Record<string, { status?: string }> };
+    return Object.values(state.plans ?? {}).some((plan) => plan.status === 'pending');
+  } catch { return false; }
+}
+
 function auditRecords(): AuditRecord[] {
   const file = process.env['EXECUTION_AUDIT_PATH'];
   if (!file || !existsSync(file)) return [];
@@ -1753,19 +1739,31 @@ const CASES: Case[] = [
   {
     id: 'D2', group: 'D 长任务', intent: '更高重量任务应停在确认门，等用户真实回复',
     run: async () => {
+      // 预算 setup（2026-11-08）：夹具默认 confirmCalls=20，而全量扇出只有 18 次查询——
+      // 确认门在默认阈值下**不可达**（实测：模型 call 数随方差波动，门时触发时不触发，
+      // 用例随之 flaky）。显式把确认阈值降到 6（夹具的 env 调参口，DUMMY_PLAN_CONFIRM_
+      // CALLS），让"高重量任务停在确认门"这条维度确定可达——改的是夹具预算配置，
+      // 不是判据（判据仍是：门触发了就必须等真实确认）。
+      process.env.DUMMY_PLAN_CONFIRM_CALLS = '6';
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
       // 2026-11-08 评审 major：同 D1——月份范围在夹具无映射，改为全 collection × 双 window
       // 的大扇出（9 collection × 2 window = 18 次查询量级，足以触发预算确认门）。
       turns.push(await send('把所有 collection 的 W1 和 W2 record value 都查一遍'));
       const asked = turns[0]!.reply;
-      const gated = /确认继续/.test(asked) || turns[0]!.notices.length > 0;
-      if (/确认继续/.test(asked)) turns.push(await send('确认继续'));
+      // 暂停判据（2026-11-08 评审 major）：普通多步计划的**进度通知**不是暂停——曾用
+      // "notices 非空"当门，模型不等确认就跑完全部查询也算过。改看宿主持有的待确认
+      // 状态（计划门 confirm 档的挂起）：回复给确认提示、或审计里留下未执行的待确认
+      // 计划，二者其一才算停在确认门。
+      const pausePrompted = /确认继续/.test(asked);
+      const pendingConfirm = recordsHasPendingPlan();
+      if (pausePrompted) turns.push(await send('确认继续'));
       await assembly.close();
       const notes: string[] = [];
-      // 断言（2026-11-08 补，评审 major：原用例无任何断言，直接结束不留失败 note）：
-      // 高重量任务必须停在确认门等真实回复——没到门（既无计划通知也无确认提示）即红。
-      if (!gated) notes.push(`高重量任务未停在确认门（预算确认门未触发）：${asked.slice(0, 80)}`);
+      // 断言：高重量任务必须停在确认门等真实回复——没到门即红。
+      if (!pausePrompted && !pendingConfirm) {
+        notes.push(`高重量任务未停在确认门（预算确认门未触发，或模型未等确认越界先行）：${asked.slice(0, 80)}`);
+      }
       return { turns, notes };
     },
   },

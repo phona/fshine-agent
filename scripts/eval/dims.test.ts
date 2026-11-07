@@ -23,7 +23,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '第3轮召回复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「刚才alpha查到了哪几个window，数字是多少」',
       '回复把collection清单当"客户"给出且未显式说明解读（域混淆）：「我们的customer有哪些？」→ ……',
       '回复显式把清单当collection念、但未给另一种解读的入口：「我们的customer有哪些？」→ ……',
-      '跨月查询没有先通知用户',
+      '跨 window 多对象查询没有先通知用户',
       '第1轮多对象计划无【第 N/M 步】步骤通知',
     ],
   },
