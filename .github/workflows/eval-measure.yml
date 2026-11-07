@@ -1,0 +1,101 @@
+# Eval harness 测量：稳定性（同模型 N 轮）+ 区分度（强/弱双档 judge）。
+# 手动触发（workflow_dispatch），也可被 nightly 之外按需重跑——「量尺」的常驻入口。
+#
+# 为什么单独一个 workflow 而不并进 eval-real：eval-real 是每 push 的 1 轮信号
+# （advisory），测量是 N 轮统计，要的是通过率矩阵和双档分差，不是单轮红绿；
+# 跑一次几分钟到几十分钟，不该挂在每次 push 上。
+#
+# 边界（与 ci.sh 头部一致）：只跑通用域自包含 eval（stock 夹具 + mock 执行器），
+# 不碰真实平台、不依赖兄弟仓检出与 gitignored 配置——真实执行层的基线可比性
+# 测量是 Tier B 本地活，不在 CI。
+name: Eval harness measurement
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: '稳定性轮数（强模型，no-judge）'
+        required: true
+        default: '5'
+      weak_model:
+        description: '区分度对照（弱）模型'
+        required: true
+        default: 'step-3.5-flash'
+      cases:
+        description: '用例集（逗号分隔）'
+        required: false
+        default: 'G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2'
+
+permissions:
+  contents: read
+
+# 测量跑得久，别被并发取消打断；同一 ref 同时只跑一个。
+concurrency:
+  group: eval-measure-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    name: measure
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
+      LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+      LLM_JUDGE_MODEL: step-5-preview
+      EXECUTION_EXECUTOR: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+
+      - name: 稳定性（强模型 × N 轮，no-judge）
+        env:
+          LLM_MODEL: step-5-preview
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          python3 scripts/eval/generic-model-eval.py --no-judge \
+            --rounds "${{ inputs.rounds }}" \
+            --only "${{ inputs.cases }}" \
+            --out .runtime/measure-stability.json 2>&1 | tee .runtime/measure-stability.txt
+
+      - name: 区分度（强 / 弱 各 2 轮，judge）
+        run: |
+          set -o pipefail
+          mkdir -p .runtime
+          LLM_MODEL=step-5-preview python3 scripts/eval/generic-model-eval.py \
+            --rounds 2 --only "${{ inputs.cases }}" \
+            --out .runtime/measure-strong.json 2>&1 | tee .runtime/measure-strong.txt
+          LLM_MODEL="${{ inputs.weak_model }}" python3 scripts/eval/generic-model-eval.py \
+            --rounds 2 --only "${{ inputs.cases }}" \
+            --out .runtime/measure-weak.json 2>&1 | tee .runtime/measure-weak.txt
+
+      - name: 汇总（通过率矩阵 + 双档分差 + 判据结论）
+        run: |
+          {
+            echo "## Eval harness 测量（$(date -u +%Y-%m-%dT%H:%MZ)）"
+            echo ""
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo "- 强模型: step-5-preview · 弱模型: ${{ inputs.weak_model }} · judge: step-5-preview"
+            echo ""
+            node scripts/eval/measure-summary.mjs \
+              .runtime/measure-stability.json -- \
+              .runtime/measure-strong.json .runtime/measure-weak.json
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传测量产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-measure-${{ github.run_id }}
+          path: |
+            .runtime/measure-stability.json
+            .runtime/measure-stability.txt
+            .runtime/measure-strong.json
+            .runtime/measure-weak.json
+          retention-days: 30
