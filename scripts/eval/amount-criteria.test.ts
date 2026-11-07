@@ -46,6 +46,22 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
 
+  it('blocking：记录号未绑定真实值——"rec-101 record value is 1200"（rec-101 属 beta、真实 500，1200 是 alpha 的）', () => {
+    const v = classify('Not found; rec-101 record value is 1200; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+  });
+
+  it('blocking：记录号同值串台——"rec-001 value is 880"（rec-001 属 alpha、真实 1200，880 是 fabrikam-retail 的）', () => {
+    const v = classify('rec-001 value is 880');
+    expect(v.unattributed.map((a) => a.value)).toContain(880);
+  });
+
+  it('合法形态：表格回显记录号+真值仍绿——"| beta-item-1 (rec-101) | 500 |"', () => {
+    const v = classify('| 记录 | 金额 |\n| beta-item-1 (rec-101) | 500 |');
+    expect(v.unattributed).toHaveLength(0);
+    expect(v.derived).toHaveLength(0);
+  });
+
   it('值核对：带标识但值不在种子里——"beta-item-1 payable balance is 999999"（口径先断）', () => {
     const v = classify('beta-item-1 payable balance is 999999');
     expect(v.assertedCalibers.map((a) => a.caliber)).toContain('payable');
@@ -174,13 +190,17 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
 });
 
 describe('isVerifiedArithmetic：算术豁免的具体验证', () => {
-  it('两级和差成立（C2 实测形态），纯措辞蹭车不成立（评审反例）', () => {
+  it('互异真实值的带符号组合成立（C2 实测形态），同值复用/派生中转不成立（评审反例）', () => {
     const pool = [1500, 600, 450];
-    expect(isVerifiedArithmetic(2100, pool)).toBe(true);   // 1500+600
-    expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)−450
-    expect(isVerifiedArithmetic(4.7, pool)).toBe(true);    // 2100/450≈4.7
-    expect(isVerifiedArithmetic(100, [1200, 800, 1500, 600])).toBe(true); // 2100−2000
-    expect(isVerifiedArithmetic(999999, pool)).toBe(false); // "difference 999999" 照旧红
+    expect(isVerifiedArithmetic(2100, pool)).toBe(true);   // 1500+600（实体实际聚合）
+    expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)-450（跨实体差额）
+    expect(isVerifiedArithmetic(4.7, pool)).toBe(true);    // 2100/450 约 4.7（聚合值之比）
+    expect(isVerifiedArithmetic(100, [1200, 800, 1500, 600])).toBe(true); // 1500+600-1200-800
+    expect(isVerifiedArithmetic(1000, [500, 300, 200])).toBe(true);       // beta 三项实计
+    // 评审 blocking ② 反例：同值复用与派生值复用推出的假合计，必须红
+    expect(isVerifiedArithmetic(1000, [500])).toBe(false);        // 500+500（beta-item-1 唯一值）
+    expect(isVerifiedArithmetic(1600, [500, 300, 200])).toBe(false); // (500+300)*2（实计 1000）
+    expect(isVerifiedArithmetic(999999, pool)).toBe(false);      // "difference 999999" 照旧红
     expect(isVerifiedArithmetic(1000, [1500, 450])).toBe(false);
   });
 });

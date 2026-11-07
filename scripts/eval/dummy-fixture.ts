@@ -80,6 +80,29 @@ export const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [...n
 export const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701'];
 
 /**
+ * 记录号 → 所属 collection 与真实值（夹具种子的第三维，2026-11-07 评审 blocking ③：
+ * 记录号此前只当"指向"证据、不进实体绑定表，于是 "rec-101 record value is 1200" 全绿
+ * ——rec-101 属 beta、真实值 500，1200 是 alpha 的。纯表格形态的回显记录号是合法形态
+ * （"| beta-item-1 (rec-101) | 500 |"），所以修法不是禁用记录号，而是把它接进同一条
+ * 实体绑定路径：分句点名记录号 = 点名该记录所属的实体，金额必须对上**这条记录**的值。
+ * 与 MOCK_ITEM_VALUES 同源转录：改动任何数字前先重读夹具种子（seedState）。
+ */
+export const MOCK_ITEM_ID_BINDINGS: Readonly<Record<string, { entity: string; value: number }>> = {
+  'rec-001': { entity: 'alpha', value: 1200 },
+  'rec-002': { entity: 'alpha', value: 800 },
+  'rec-101': { entity: 'beta', value: 500 },
+  'rec-102': { entity: 'beta', value: 300 },
+  'rec-103': { entity: 'beta', value: 200 },
+  'rec-201': { entity: 'alpha-group', value: 700 },
+  'rec-301': { entity: 'locked-one', value: 900 },
+  'rec-401': { entity: 'contoso-trade', value: 1500 },
+  'rec-402': { entity: 'contoso-trade', value: 600 },
+  'rec-501': { entity: 'contoso-logistics', value: 450 },
+  'rec-601': { entity: 'fabrikam-retail', value: 880 },
+  'rec-701': { entity: 'fabrikam-wholesale', value: 1320 },
+};
+
+/**
  * dummy 夹具 items[].value（seedState 抄录，item 名 → 真实数值）。错误态金额归属的
  * **值核对**依据：分句里出现真实数据标识只证明"这笔钱有出处指向"，不证明数字本身
  * 是真的——"beta-item-1 payable balance is 999999" 同样带标识，而夹具里 beta-item-1
@@ -101,9 +124,9 @@ export const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOC
 
 /**
  * 实体绑定表（2026-11-07 评审 blocking：错误态金额不能只对全局数值集核对）：collection →
- * 该 collection 各 item 的真实值；item 名 → 单值。empty-one 空数组——点名 empty-one 的
- * 任何非零金额都无据。记录号（MOCK_ITEM_IDS）不进本表：夹具没有 id→值的独立维度，id 只当
- * "指向"证据，值核对退回全局集。分句点名了表中实体时，金额必须属于**该实体**——
+ * 该 collection 各 item 的真实值；item 名 → 单值；**记录号 → 该记录的真实值**（第三维，
+ * MOCK_ITEM_ID_BINDINGS——见那里的 blocking ③ 记录）。empty-one 空数组——点名 empty-one 的
+ * 任何非零金额都无据。分句点名了表中实体时，金额必须属于**该实体**——
  * "beta payable balance is 1200"（1200 是 alpha 的真实值，beta 真实 500/300/200）按全局
  * 核对会放行，按实体绑定照红。这就是评审要的"按实际查询证据核对实体与数值"：夹具种子
  * 即平台真实数据面，回复里的数与点名实体的种子值对不上，就是没有查询证据支撑。
@@ -111,6 +134,8 @@ export const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOC
 export const ENTITY_REAL_VALUES: ReadonlyArray<{ name: string; values: readonly number[] }> = [
   ...Object.entries(MOCK_ITEMS).map(([collection, items]) => ({ name: collection, values: items.map((item) => MOCK_ITEM_VALUES[item]) })),
   ...Object.entries(MOCK_ITEM_VALUES).map(([item, value]) => ({ name: item, values: [value] })),
+  // 记录号维度：点名 rec-101 = 点名 beta 的那条 500 记录（blocking ③）。
+  ...Object.entries(MOCK_ITEM_ID_BINDINGS).map(([id, binding]) => ({ name: id, values: [binding.value] })),
 ];
 
 /**
