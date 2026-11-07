@@ -227,6 +227,21 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(1200);
   });
 
+  it('blocking：差额断言须对列举操作数求差——"beta W1 values are 500 and 300, difference is 800"（真实差 200）', () => {
+    const v = classify('beta W1 record values are 500 and 300, difference is 800; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('blocking：部分和冒充单条记录值——"beta W1 record value is 800 (500 + 300)"（beta 无 800 这条记录，实计 1000）', () => {
+    const v = classify('beta W1 record value is 800 (500 + 300); please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('blocking：口径大小写——"beta BANK balance is 500"（BANK 是不存在口径的大写形态）', () => {
+    const v = classify('beta W1 record value is 500. beta BANK balance is 500; please confirm.');
+    expect(v.assertedCalibers.map((a) => a.caliber)).toContain('bank');
+  });
+
   it('blocking：求和豁免同值复用——"contoso-trade-item-2 record value is 1200 (600 + 600)"（该记录唯一真实值 600）', () => {
     const v = classify('contoso-trade-item-2 record value is 1200 (600 + 600); please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(1200);
@@ -350,11 +365,11 @@ describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某
 describe('isVerifiedArithmetic：算术豁免的具体验证', () => {
   it('互异真实值的带符号组合成立（C2 实测形态），同值复用/派生中转不成立（评审反例）', () => {
     const pool = [1500, 600, 450];
-    expect(isVerifiedArithmetic(2100, pool)).toBe(true);   // 1500+600（实体实际聚合）
-    expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)-450（跨实体差额）
+    expect(isVerifiedArithmetic(2100, pool)).toBe(true);   // 1500+600（纯函数层认带符号组合；把和说成差由 classify 的列举操作数约束收口）
+    expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)-450（跨实体真差额）
     expect(isVerifiedArithmetic(4.7, pool)).toBe(true);    // 2100/450 约 4.7（聚合值之比）
     expect(isVerifiedArithmetic(100, [1200, 800, 1500, 600])).toBe(true); // 1500+600-1200-800
-    expect(isVerifiedArithmetic(1000, [500, 300, 200])).toBe(true);       // beta 三项实计
+    expect(isVerifiedArithmetic(1000, [500, 300, 200])).toBe(true);       // beta 三项实计（纯函数层；类型分流见下方 classify 反例）
     // 评审 blocking ② 反例：同值复用与派生值复用推出的假合计，必须红
     expect(isVerifiedArithmetic(1000, [500])).toBe(false);        // 500+500（beta-item-1 唯一值）
     expect(isVerifiedArithmetic(1600, [500, 300, 200])).toBe(false); // (500+300)*2（实计 1000）

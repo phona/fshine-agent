@@ -101,6 +101,12 @@ export function isDerivedAmount(value: number, base: Set<number>): boolean {
  * 派生值不可能当加数——叶子只能是种子真实值，中转层被整个去掉。
  */
 /** 差额半边：互异真实值的带符号组合（等价于两个不相交聚合值之差）。 */
+/**
+ * 差额半边：互异真实值的带符号组合（等价于两个不相交聚合值之差）。注意它挡不住
+ * "values are 500 and 300, difference is 800"——800=|1000−200| 仍是合法组合；
+ * 那种形态由调用处的**列举操作数约束**收口（分句列了 ≥2 个真实值时，差额必须
+ * 等于其中两个的差），不在这条纯函数里。
+ */
 export function isVerifiedDifference(value: number, pool: ReadonlyArray<number>): boolean {
   const base = [...new Set(pool)].filter((v) => v > 0);
   if (base.length === 0) return false;
@@ -291,7 +297,10 @@ export function classifyErrorStateAmounts(
     if (!hits.length) { unattributed.set(amount.value, amount); continue; } // 边界异常宁可红，不静默消失
     for (const clause of hits) {
       // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
-      const caliber = MISSING_CALIBERS.find((c) => clause.includes(c) && !CALIBER_DISCLAIM_RE.test(clause));
+      // 口径检测大小写不敏感（2026-11-08 评审 blocking：模型把不存在的口径写成
+      // "BANK"/"Payable" 就能绕过全小写 includes 匹配——编造口径漏判，500 又因真实
+      // 实体和值获豁免）。
+      const caliber = MISSING_CALIBERS.find((c) => new RegExp(c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(clause) && !CALIBER_DISCLAIM_RE.test(clause));
       if (caliber) { assertedHit = true; asserted.set(caliber, clause); continue; }
       // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
       const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
@@ -368,8 +377,14 @@ export function classifyErrorStateAmounts(
       // 加数还须是**不同值**（2026-11-08 评审 blocking：出现位置不同但值相同的两笔是同一笔
       // 记录的复用——"contoso-trade-item-2 … is 1200 (600 + 600)"用该记录唯一的 600 加两次
       // 冒充 1200；夹具种子值互异，同值相加必然意味着同一记录被用两次）。
-      const isSum = windowOk
-        && scopedSummands.some((a) => scopedSummands.filter((b) => b !== a && b.value !== a.value).some((b) => a.value + b.value === amount.value));
+      // 等式通道（无框架词的"2000（1200+800）"形态）：绑定时金额必须是所绑实体的**全额
+      // 聚合**（isVerifiedTotal）且加数互异可见——部分和冒充记录值/总额都堵死（"beta …
+      // is 800 (500 + 300)"beta 无 800 这条记录、实计 1000）；没绑实体时（摊账）才退回
+      // 分句内互异加数的两两和。
+      const pairSum = scopedSummands.some((a) => scopedSummands.filter((b) => b !== a && b.value !== a.value).some((b) => a.value + b.value === amount.value));
+      const isSum = windowOk && (boundValues.length > 0
+        ? isVerifiedTotal(amount.value, boundValues) && pairSum
+        : pairSum);
       const totalFramed = TOTAL_FRAMING_RE.test(clause);
       const framed = windowOk
         && ((totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2
@@ -413,9 +428,20 @@ export function classifyErrorStateAmounts(
             ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
             : isVerifiedTotal(amount.value, b.mentionEntity.values);
         }
-        if (DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap)) {
-          return isVerifiedArithmetic(amount.value, pool);
+        if (DIFF_FRAMING_RE.test(b.gap)) {
+          // 差额断言（2026-11-08 评审 blocking）：分句里列举了 ≥2 个真实值时，差额必须
+          // 等于其中两个的差——"beta values are 500 and 300, difference is 800"把和说成
+          // 差（真实差 200），池层面的 |1000−200| 救不了它；没列举操作数时（表格摊账、
+          // 跨实体差额）才退回池验证。
+          // 操作数取**整句**金额（含聚合值——"alpha 2000（1200+800）、contoso-trade
+          // 2100（1500+600），两者相差 100"的操作数是 2000 与 2100 两个聚合值，按 segment
+          // 取会漏掉跨实体那半个）；只排除这一笔自己的出现。
+          const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
+          return listed.length >= 2
+            ? listed.some((x, i) => listed.some((y, j) => i !== j && Math.abs(x - y) === amount.value))
+            : isVerifiedArithmetic(amount.value, pool);
         }
+        if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedArithmetic(amount.value, pool);
         return b.valueOk;
       });
       const anyClaimsOperation = bindings.some((b) => b.claimsTotal || DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap));
@@ -427,7 +453,10 @@ export function classifyErrorStateAmounts(
       const enumeratedTotal = bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
       // 运算通道只给自称运算结果的金额；没自称的直接断言若没进直接通道必须落红，不能被
       // "值恰好算得出来"救走（"只有 record value……balance 500" 的 500 无归属也无框架词）。
-      if ((isSum && !enumeratedTotal) || (anyClaimsOperation && allVerified && windowOk)) { soft = true; } else { hard = true; }
+      // 自称运算结果的金额只走它自己那族的验证（anyClaimsOperation ⇒ 逐笔判定），不被
+      // isSum 等式通道救回——"values are 500 and 300, difference is 800"的 800 虽是
+      // 500+300 的和，但它自称差额，差额验证不通过就红。
+      if ((isSum && !enumeratedTotal && !anyClaimsOperation) || (anyClaimsOperation && allVerified && windowOk)) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     if (hard) unattributed.set(amount.value, amount);

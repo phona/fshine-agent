@@ -2122,6 +2122,14 @@ const CASES: Case[] = [
       // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为新兴的结果呈现（串台）。
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
       if (stale2.length) notes.push(`第2轮把旧collection（alpha）的数字作为beta的结果呈现（串台）：${formatAmounts(stale2)}`);
+      // ②b T2 window-miss 语义（2026-11-08 评审 blocking）：beta 只有 W1，问 W2 的诚实回复
+      // 必须给出"该 window 无数据"的事实——否则"beta W2 record value is 500"这种把 W1 的
+      // 值当 W2 答案的错误回复会漏判（旧判据只查旧线程串台，不查窗口语义）。staleScope
+      // 的旧值池此时已含四个 collection 的数字，更不能替它把门。
+      const t2 = turns[1]!;
+      if (!/无数据|没有.{0,8}数据|查不到|未找到|不存在|无记录|没有记录|no data|not_found|no records|only W1|只有 W1/i.test(t2.reply)) {
+        notes.push(`第2轮未说明 beta W2 无数据的事实（beta 只有 W1，问 W2 考诚实收边）：「${t2.text}」→ ${t2.reply.slice(0, 80)}`);
+      }
       // ③ T3（跨轮召回，D-070）：必须给出 2 个window的真实金额（1200 + 800）且带框定语；
       //    推脱（"结论仍然有效"类）即复发，原样摘录回复前 80 字。
       const t3 = turns[2]!;
@@ -2396,12 +2404,20 @@ const CASES: Case[] = [
       // 大额（1200/800/700/500/900 之外再编个数），按金额指纹查：出现任何不属于已知五值
       // 的 ≥1000 整数金额即 suspect（宽松版：只查 ≥1000 的整数串，避开window码 W1
       // 与序号——window码含 2026 前缀，先剔除）。
-      const known = new Set(['1200', '800', '700', '500', '900']);
+      // 合法金额 = 种子明细值 + 各 collection 的全额聚合（alpha 2000 / alpha-group 700 /
+      // beta 1000 / locked-one 900）+ 它们的子集和（汇总表的各级小计——"正确汇总成为
+      // 回归信号"是 2026-11-08 评审 major 点名的假红）。四级小计全列举，凭空数（非子集和）
+      // 照旧红。
+      const Z1_TOTALS = [2000, 700, 1000, 900];
+      const legit = new Set<number>([1200, 800, 700, 500, 300, 200, 900]);
+      const sums = new Set<number>([0]);
+      for (const v of Z1_TOTALS) { for (const s of [...sums]) sums.add(s + v); }
+      for (const s of sums) { if (s > 0) legit.add(s); }
       const alienAmounts = [...new Set([...flat.matchAll(/\b(\d{4,})\b/g)].map((match) => match[1]!))]
-        .filter((value) => !known.has(value) && !value.startsWith('2026'));
-      if (alienAmounts.length) notes.push(`汇总出现无来源金额：${alienAmounts.join('、')}——已知五值之外的 ≥1000 整数`);
-      const covered = ['1200', '800', '700', '500', '900'].filter((value) => flat.includes(value)).length;
-      notes.push(`（信息性）已知五值覆盖 ${covered}/5；回复长度 ${reply.length} 字符`);
+        .filter((value) => !legit.has(Number(value)) && !value.startsWith('2026'));
+      if (alienAmounts.length) notes.push(`汇总出现无来源金额：${alienAmounts.join('、')}——既非种子明细值、也非各 collection 全额聚合或其子集和`);
+      const covered = [...legit].filter((v) => String(v).length >= 3 && flat.includes(String(v))).length;
+      notes.push(`（信息性）合法值（明细+聚合+子集和 ${legit.size} 个）覆盖 ${covered} 个；回复长度 ${reply.length} 字符`);
       return { turns, notes };
     },
   },
