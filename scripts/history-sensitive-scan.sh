@@ -319,13 +319,27 @@ while IFS= read -r line || [ -n "$line" ]; do
       /^diff --git a\// {
         h = $0
         sub(/^diff --git a\//, "", h)
-        p = index(h, " b/")
-        if (p > 1 && index(h, "\"") == 0) {
-          apath = substr(h, 1, p - 1)
-          bpath = substr(h, p + 3)
-          indiff = 1
-        } else {
-          apath = "?"; bpath = "?"; indiff = 0
+        apath = "?"; bpath = "?"; indiff = 0
+        if (index(h, "\"") == 0) {
+          # 路径可能含空格或 " b/"（如 "x b/y.txt"），只取 a/ == b/ 的 split；
+          # 其余情况归不可解析，保留命中，不拆防线。
+          rest = h
+          p = 0
+          p2 = index(rest, " b/")
+          while (p2 > 0) {
+            p = p + p2
+            try_apath = substr(h, 1, p - 1)
+            try_bpath = substr(h, p + 3)
+            if (try_apath == try_bpath && try_apath != "") {
+              apath = try_apath
+              bpath = try_bpath
+              indiff = 1
+              rest = ""
+            } else {
+              rest = substr(rest, p2 + 1)
+            }
+            p2 = (rest != "") ? index(rest, " b/") : 0
+          }
         }
         if (FNR in want) classify(substr($0, 1, 1))
         next

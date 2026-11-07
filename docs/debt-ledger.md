@@ -1842,7 +1842,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：L6（公开库治理）。
 - **闭环判据**：runbook 中回滚命令存在且可执行；公开库维护边界文档化并获 owner 认可；公开翻转、门禁配置、secret 管理、Actions 分钟额度、首批 PR 走门禁合入五项全部落地。
 - **归属波次 / 限期**：波次 5；迁移完成前。
-- **状态**：**公开已落地**（2026-11-07：公开翻转完成；门禁配置 = public-surface-lint + migration-gate + unit 全进 CI；history-sensitive-scan 刻意留在 CI 之外（表文件本身含全部敏感串原文，是 gitignored 的本地文件——接进 CI 要么得把表提交进库（泄密），要么表缺失时整条跳过（真空绿），两样都不接受）；四枚 eval secret（`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`/`LLM_EVAL_MODEL`）+ codex secret（`CODEX_API_KEY`）由 owner 在 GitHub repo Settings → Secrets and variables → Actions 中配置；Actions 免费分钟转无限（unlimited minutes）；首批 PR（codex PR review 全套 + push runbook）已走门禁合入；runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线 / Free+私有无分支保护的三条路）。
+- **状态**：**公开已落地**（2026-11-07：公开翻转完成；门禁配置 = public-surface-lint + migration-gate + unit 全进 CI；history-sensitive-scan 刻意留在 CI 之外（表文件本身含全部敏感串原文，是 gitignored 的本地文件——接进 CI 要么得把表提交进库（泄密），要么表缺失时整条跳过（真空绿），两样都不接受）；四枚 eval secret（`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`/`LLM_EVAL_MODEL`）+ codex secret（`CODEX_API_KEY`）由 owner 在 GitHub repo Settings → Secrets and variables → Actions 中配置；Actions 免费分钟转无限（unlimited minutes）；首批 PR（codex PR review 全套 + push runbook）待走门禁合入；runbook 已按实测修订——远端命名 / 显式 refspec / fetch-depth: 0 / 只推 clean 线 / Free+私有无分支保护的三条路）。
 
 ### D-187 · gitee/github 历史分叉
 
@@ -1918,7 +1918,7 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
   2. 门禁配置：public-surface-lint + migration-gate + unit 全进 CI；history-sensitive-scan 刻意留在 CI 之外（表文件本身含全部敏感串原文，是 gitignored 的本地文件——接进 CI 要么得把表提交进库（泄密），要么表缺失时整条跳过（真空绿），两样都不接受）；`.github/workflows/ci.yml` 已配置且可读；
   3. secret 管理：四枚 eval secret（`LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`/`LLM_EVAL_MODEL`）+ codex secret（`CODEX_API_KEY`）已由 owner 在 GitHub repo Settings → Secrets and variables → Actions 中配置；本地 `.env` 与仓库 gitignored，无密钥落库；
   4. Actions 分钟转无限：公开仓 public-repo plan 下 unlimited minutes 已启用（`gh repo view phona/fshine-agent --json plan` 可核实）；
-  5. 首批 PR 走门禁合入：首批 PR（chore(scan): D-191 同口径豁免 + 公开落地登记）已走门禁合入，CI 全绿后由 owner 批准合并；
+  5. 首批 PR 走门禁合入：首批 PR（chore(scan): D-191 同口径豁免 + 公开落地登记）待走门禁合入，CI 全绿后由 owner 批准合并；
   6. 回滚命令：`docs/push-runbook.md` 已落档紧急转私有 / 删除仓库命令，owner 已审阅。
 - **归属波次 / 限期**：波次 5；公开后首月（机械判据：`git log --since="公开日期 + 30 days"` 内无未合入的敏感串命中或门禁回退）。
 - **状态**：登记（2026-11-07 落地）。
