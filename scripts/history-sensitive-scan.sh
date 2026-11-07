@@ -26,9 +26,9 @@
 #   a/ 侧路径，其余行归 b/ 侧路径）。然后按三类豁免：
 #     (1) 清单 archive 行登记的档案路径（与门①档案豁免同半径）——该文件全部
 #         diff 行豁免（现有内容 + 删除行改造史）；
-#     (2) 已不在当前树（git ls-files）且存在于基线树（origin/main / github/main /
-#         main）里的文件——全部 diff 行豁免（已移除误提交文件的残影；机械判定，
-#         不在清单里写文件名；不在基线树中的已移除文件按新增后删除处理，不豁免）；
+#     (2) 已不在当前树（git ls-files）的文件——全部 diff 行豁免（已移除误提交文件的
+#         残影；机械判定，不在清单里写文件名），但当前 commit 必须是冻结 cutoff 的
+#         祖先（cutoff 之后的新 commit——先加引用再删、重建同名文件——一律照算）；
 #     (3) 清单 commit 行登记的改造 commit——该 commit 的 diff 行与 message 行
 #         豁免（脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
 # 新 commit 机械校验（两层边界）：改造 commit 类按清单登记的冻结 cutoff 校验祖先
@@ -40,8 +40,8 @@
 #   消息体里，也照样红。真实敏感数据不在本豁免口径内，为它们开洞就是拆防线；
 #   本豁免只覆盖平台实例名在档案、改造史与已移除文件里的留存。
 # why（第 15 条平台实例名实测 12 行，分布五处，D-191 销账记录如实登记）：
-#   debt-ledger 档案 5 行（门①同半径）、pp-waves-c.json 2 行（残影，已移至 archive
-#   行登记）、中性化 commit 删除 diff 2 行、W1 表征 commit 新增脱敏自述注释 1 行、
+#   debt-ledger 档案 5 行（门①同半径）、pp-waves-c.json 2 行（残影，归 (2) 机械覆盖、
+#   不登记路径）、中性化 commit 删除 diff 2 行、W1 表征 commit 新增脱敏自述注释 1 行、
 #   脱敏期 commit message 2 行——后三处是改造史留存，由 (3) 覆盖。其余 33 条（真实敏感
 #   数据）全历史零命中，与本豁免无关。
 # 兜底（宁可红不可假绿）：
@@ -162,12 +162,15 @@ rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
 
 # 一次性dump 全历史 patch，再逐串 grep：与"每条串各跑一次 git log --all -p | grep"
 # 完全同内容同计数（grep -c 数的是行），只是把 13MB 的 git 输出从 N 次降成 1 次。
+# --format=medium 显式钉死：用户 git 配置的 format.pretty（如 oneline）会消掉
+# "commit <40-hex>" 边界行——那会让命中行归不了 commit、post_cutoff 闸门失效、
+# 消息体被省略（codex review blocking）。
 PATCH=$(mktemp "${TMPDIR:-/tmp}/history-sensitive-scan.XXXXXX") || exit 2
 TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-tree.XXXXXX") || exit 2
 HITLINES=$(mktemp "${TMPDIR:-/tmp}/history-scan-lines.XXXXXX") || exit 2
 POST_CUTOFF_LIST=""
 trap 'rm -f "$PATCH" "$TREE" "$POST_CUTOFF_LIST" "$HITLINES"' EXIT INT TERM
-if ! git -C "$REPO" log --all -p >"$PATCH"; then
+if ! git -C "$REPO" log --all -p --format=medium >"$PATCH"; then
   echo "git log --all -p 失败（取不到全历史即扫不了，不是干净）" >&2
   exit 2
 fi
@@ -368,6 +371,12 @@ while IFS= read -r line || [ -n "$line" ]; do
         ec = 0; ea = 0; er = 0
       }
       function classify(pref) {
+        # 命中行归不了 commit（日志格式被外部配置改坏）→ 扫不了，不是干净：
+        # 归不了身份就无法过 post_cutoff 闸门，豁免会退化为无差别放行。
+        if (cur_commit == "") {
+          print "history-scan: 命中行无法归属 commit（git log 输出格式异常）——扫不了" > "/dev/stderr"
+          exit 2
+        }
         # 只对明确登记的平台实例名条目应用 archive / commit 豁免；
         # 其余条目保留完整历史扫描（不拆防线）。
         if (entry_match != "1") { er++; return }
