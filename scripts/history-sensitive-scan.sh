@@ -161,8 +161,9 @@ rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
 PATCH=$(mktemp "${TMPDIR:-/tmp}/history-sensitive-scan.XXXXXX") || exit 2
 TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-tree.XXXXXX") || exit 2
 BASELINE_TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-baseline-tree.XXXXXX") || exit 2
+NEW_COMMIT_LIST=""
 HITLINES=$(mktemp "${TMPDIR:-/tmp}/history-scan-lines.XXXXXX") || exit 2
-trap 'rm -f "$PATCH" "$TREE" "$BASELINE_TREE" "$HITLINES"' EXIT INT TERM
+trap 'rm -f "$PATCH" "$TREE" "$BASELINE_TREE" "$NEW_COMMIT_LIST" "$HITLINES"' EXIT INT TERM
 if ! git -C "$REPO" log --all -p >"$PATCH"; then
   echo "git log --all -p 失败（取不到全历史即扫不了，不是干净）" >&2
   exit 2
@@ -207,15 +208,30 @@ for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
   fi
 done
 if [ -n "$BASELINE_REF" ]; then
+  COMMIT_SET_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-commit-set.XXXXXX") || exit 2
+  printf '%s\n' "$COMMIT_SET" > "$COMMIT_SET_TMP"
   while IFS= read -r c_sha; do
     [ -z "$c_sha" ] && continue
     if ! git -C "$REPO" merge-base --is-ancestor "$c_sha" "$BASELINE_REF" 2>/dev/null; then
       echo "豁免清单含非基线 commit：$c_sha（不在 $BASELINE_REF 历史中，可能是新 commit）——先修清单再谈命中（退出码 2，不是通过）" >&2
+      rm -f "$COMMIT_SET_TMP"
       exit 2
     fi
-  done <<< "$COMMIT_SET"
+  done < "$COMMIT_SET_TMP"
+  rm -f "$COMMIT_SET_TMP"
 else
   echo "警告：取不到基线 ref（origin/main / github/main / main 均不存在），跳过新 commit 校验" >&2
+fi
+
+# 新 commit 集合（不在基线 ref 历史中的 commit）：用于已移除文件豁免的 commit 级闸门。
+NEW_COMMIT_LIST=$(mktemp "${TMPDIR:-/tmp}/history-scan-new-commits.XXXXXX") || exit 2
+if [ -n "$BASELINE_REF" ]; then
+  git -C "$REPO" rev-list --all --not "$BASELINE_REF" >"$NEW_COMMIT_LIST" 2>/dev/null || {
+    echo "git rev-list --all --not $BASELINE_REF 失败（取不到新 commit 集合即无法归口径，不是干净）" >&2
+    exit 2
+  }
+else
+  : > "$NEW_COMMIT_LIST"
 fi
 
 index=0
@@ -327,7 +343,7 @@ while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$COMMIT_SET" > "$COMMIT_TMP"
 
     exout=$(awk -v linefile="$HITLINES" -v treefile="$TREE" \
-      -v baselinefile="$BASELINE_TREE" \
+      -v baselinefile="$BASELINE_TREE" -v newcommitfile="$NEW_COMMIT_LIST" \
       -v archfile="$ARCHIVE_TMP" -v commitfile="$COMMIT_TMP" \
       -v entry_match="$entry_match" '
       BEGIN {
@@ -335,6 +351,8 @@ while IFS= read -r line || [ -n "$line" ]; do
         close(treefile)
         while ((getline b < baselinefile) > 0) baseline[b] = 1
         close(baselinefile)
+        while ((getline n < newcommitfile) > 0) new_commit[n] = 1
+        close(newcommitfile)
         while ((getline n < linefile) > 0) want[n + 0] = 1
         close(linefile)
         while ((getline a < archfile) > 0) { gsub(/[[:space:]]*$/, "", a); if (a != "") archive[a] = 1 }
@@ -354,8 +372,8 @@ while IFS= read -r line || [ -n "$line" ]; do
         f = (pref == "-") ? apath : bpath
         if (f in archive) { ea++; return }
         if (f in tree) { er++; return }
-        # 不在当前树里 = 已移除文件；只在基线树里存在的才豁免（新增后删除的不豁免）。
-        if (f in baseline) { erm++; return }
+        # 不在当前树里 = 已移除文件；只在基线树里存在 且 当前 commit 是基线祖先时才豁免。
+        if (f in baseline && !(cur_commit in new_commit)) { erm++; return }
         er++
       }
       /^commit [0-9a-f]{40}/ {
