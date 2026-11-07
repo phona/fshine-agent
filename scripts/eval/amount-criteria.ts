@@ -281,6 +281,10 @@ export function extractAmounts(text: string): ExtractedAmount[] {
     const tail = text.slice(at + raw.length, at + raw.length + 3);
     if (/^\s{0,2}年/.test(tail)) continue;
     if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && /^\s{0,2}月/.test(tail)) continue;
+    // 日期/区间延续（"2026-11-02" / "2026 年 1 到 9 月"里的 2026）：1900–2099 的裸四位
+    // 数后随 "-<数字>" 是日期或区间，不是金额（2026-11-08 C2 实测：召回轮报"本周
+    // 2026-11-02 至 11-08"，2026 被当金额判无来源）。该范围外的数不受影响。
+    if (/^(?:19|20)\d{2}$/.test(raw) && /^-\d{1,2}/.test(tail)) continue;
     if (/^20\d{4}$/.test(raw)) continue;
     if (MOCK_WINDOW_CODES.has(raw)) continue;
     // 标识符尾段排除的锚点是**数字位**（不是匹配起点）——模式的可选负号会让匹配从 "-"
