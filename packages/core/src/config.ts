@@ -102,13 +102,25 @@ function parsePrincipals(raw: unknown): Record<string, PrincipalConfig> {
   return principals;
 }
 
-function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig> {
+function resolveEnvVars(value: string, env: NodeJS.ProcessEnv): string {
+  return value.replace(/\$\{([^}]+)\}/g, (_match, varName) => {
+    const trimmed = varName.trim();
+    if (!trimmed) return '';
+    const envValue = env[trimmed];
+    if (envValue === undefined || envValue === '') {
+      throw new Error(`环境变量 ${trimmed} 未设置或为空，无法解析配置中的 $${trimmed}`);
+    }
+    return envValue;
+  });
+}
+
+function parseContextProfiles(raw: unknown, env: NodeJS.ProcessEnv = process.env): Record<string, ContextProfileConfig> {
   if (raw === undefined) return {};
   const entries = asRecord(raw, 'contextProfiles');
   const profiles: Record<string, ContextProfileConfig> = {};
   for (const [name, value] of Object.entries(entries)) {
     const item = asRecord(value, `contextProfiles.${name}`);
-    const root = asString(item['root']).trim();
+    const root = resolveEnvVars(asString(item['root']).trim(), env);
     if (!root) throw new Error(`配置项 contextProfiles.${name}.root 不能为空`);
     if (!path.isAbsolute(root)) throw new Error(`配置项 contextProfiles.${name}.root 必须是绝对路径`);
     const skillRootsRaw = item['skillRoots'];
@@ -182,7 +194,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   assertNoPlaceholders(root['principals'], 'principals');
 
   const principals = parsePrincipals(root['principals']);
-  const contextProfiles = parseContextProfiles(root['contextProfiles']);
+  const contextProfiles = parseContextProfiles(root['contextProfiles'], env);
 
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
 

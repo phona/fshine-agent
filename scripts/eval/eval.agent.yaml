@@ -23,7 +23,10 @@ contextProfiles:
   stock:
     # 绝对路径：loadConfig 的 parseContextProfiles 要求 root 是绝对路径
     # （packages/core/src/config.ts: 路径校验逻辑），相对路径会在启动时报错。
-    root: /home/fictional-user/repo/scripts/eval/fixtures/stock-platform
+    # 用环境变量占位，避免把开发者主目录写进仓库（exposure-lint / history-hygiene 守卫）。
+    # 运行前需设置 EVAL_PLATFORM_ROOT，例如：
+    #   export EVAL_PLATFORM_ROOT="$(pwd)/scripts/eval/fixtures/stock-platform"
+    root: ${EVAL_PLATFORM_ROOT}/scripts/eval/fixtures/stock-platform
     # 相对 root 的网关调用形式（host spawn 用它，不硬编码全路径）。
     gateway: bin/stock
     # 运行态技能面：按 fixture 实际结构填（stock-platform/skills-serve/stock-routing-examples/SKILL.md）。
