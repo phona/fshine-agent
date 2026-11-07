@@ -78,7 +78,9 @@ jobs:
   eval-discrimination:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    needs: eval-full
+    # Do not gate discrimination on eval-full success; mechanical failures in
+    # full eval should not prevent the dual-tier comparison from running.
+    # needs: eval-full
     env:
       EXECUTION_EXECUTOR: mock
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}

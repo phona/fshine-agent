@@ -93,7 +93,7 @@ jobs:
                   const status = result.mechanical_pass ? 'pass' : 'fail';
                   const detail = result.mechanical_pass
                     ? `calls=${result.calls}`
-                    : `calls=${result.calls} final=${(result.final_text || '').slice(0, 120).replace(/\|/g, '\\|')}`;
+                    : `calls=${result.calls} final=${(result.final_text || '').slice(0, 120).replace(/\|/g, '\\|').replace(/\n/g, ' ')}`;
                   lines.push(`| ${result.id} | ${status} | ${detail} |`);
                 }
                 probeSection = [
