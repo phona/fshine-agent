@@ -58,6 +58,7 @@ import {
   DIFF_FRAMING_RE,
   RATIO_FRAMING_RE,
   TOTAL_FRAMING_RE,
+  amountValuePattern,
   classifyErrorStateAmounts,
   extractAmounts as extractAmountsPure,
   isDerivedAmount,
@@ -501,12 +502,28 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
   // （2026-11-07 评审 blocking：措辞 + 两个真实值不够，数字本身要算得出来）；其余轮次（E1/F1/G1/G2
   // 及普通轮次）并入硬 note，与既有行为一致。
   const realInReply = extractAmounts(turns[index]!.reply).filter((a) => allowed.has(a.value));
-  const clauseOf = (a: Amount): string => turns[index]!.reply.split(CLAUSE_SPLIT).find((part) => part.includes(a.raw)) ?? '';
-  // 算术派生一律过 isVerifiedArithmetic（互异真实值的带符号组合 + 一层商）——不用
-  // isDerivedAmount：它允许同一个真实值相加（450+450=900），召回轮把真实金额翻倍也会
-  // 被判"算得出的派生"而降级（2026-11-08 评审 blocking 反例：历史回复 450、召回回复
-  // 900，只落信息性 note）。且**带算术框架措辞**才享受降级——措辞标了这是算出来的，
-  // 不是直接断言；裸翻倍没有措辞，照旧硬失败。
+  // 分句定位按**数字边界**（2026-11-08 C2 实测：part.includes(raw) 会把 "100" 命中进
+  // "2100" 的表格行，取错分句 → 框架词测试落空 → 诚实差额被判硬失败）。
+  const clauseOf = (a: Amount): string => turns[index]!.reply.split(CLAUSE_SPLIT)
+    .find((part) => new RegExp(`(?<![\\d.,%％])${amountValuePattern(a.value)}(?!\\d)`).test(part)) ?? '';
+  // 运算族按**金额之前最近**的框架词判定（整句首个词会误路由——C2 实测："contoso-trade
+  // 的合计数值更高，比 contoso-logistics 高出 1650"一句里"合计数值"在前，整句分发把差额
+  // 送进合计族、按全和核验而假红）。
+  const framingFamilyOf = (clause: string, a: Amount): 'total' | 'diff' | 'ratio' | null => {
+    const at = clause.search(new RegExp(`(?<![\\d.,%％])${amountValuePattern(a.value)}(?!\\d)`));
+    if (at < 0) return null;
+    const before = clause.slice(0, at);
+    let best: { family: 'total' | 'diff' | 'ratio'; at: number } | null = null;
+    for (const [family, re] of [['total', TOTAL_FRAMING_RE], ['diff', DIFF_FRAMING_RE], ['ratio', RATIO_FRAMING_RE]] as const) {
+      const hit = [...before.matchAll(new RegExp(re.source, 'gi'))].pop();
+      if (hit && (best === null || (hit.index ?? 0) > best.at)) best = { family, at: hit.index ?? 0 };
+    }
+    return best?.family ?? null;
+  };
+  // 算术派生一律过与措辞族对应的验证（不用 isDerivedAmount：它允许同一个真实值相加，
+  // 450+450=900，召回轮把真实金额翻倍也会被判"算得出的派生"而降级——2026-11-08 评审
+  // blocking 反例）。且**带算术框架措辞**才享受降级——措辞标了这是算出来的，不是直接
+  // 断言；裸翻倍没有措辞，照旧硬失败。
   // 按**措辞族**分别验证（2026-11-08 评审 blocking：isVerifiedArithmetic 混合接受差额与
   // 比率，"total is 600"可由 500+300−200 凑出而获豁免，而三项实计 1000）：合计族走
   // isVerifiedTotal（允许值全和）、差额族走 isVerifiedDifference、倍数族走 isVerifiedRatio。
@@ -515,9 +532,10 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
     const clause = clauseOf(a);
     if (line.past && !(realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clause))) return false;
     const pool = [...allowed];
-    if (TOTAL_FRAMING_RE.test(clause)) return isVerifiedTotal(a.value, pool);
-    if (DIFF_FRAMING_RE.test(clause)) return isVerifiedDifference(a.value, pool);
-    if (RATIO_FRAMING_RE.test(clause)) return isVerifiedRatio(a.value, pool);
+    const family = framingFamilyOf(clause, a);
+    if (family === 'total') return isVerifiedTotal(a.value, pool);
+    if (family === 'diff') return isVerifiedDifference(a.value, pool);
+    if (family === 'ratio') return isVerifiedRatio(a.value, pool);
     return isVerifiedArithmetic(a.value, pool);
   });
   const tolerated = options.derived ? arithmetic : [];
