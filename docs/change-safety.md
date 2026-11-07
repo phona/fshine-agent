@@ -1692,7 +1692,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | 门③ fresh clone | `git clone <public-url> /tmp/fshine-public && cd /tmp/fshine-public && npm ci && npm run ci` | 退出码 0 |
 | 门④ 三道守卫 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
 | 门⑤ payroll 写路径 | `git diff --name-only <wave5-起点> -- packages apps \| grep -v '\.test\.ts'` | 空 |
-| 门⑥ 扫描工作流 | `git log --all -p \| grep -F "17dz" \| wc -l` | >0（豁免前）；0（豁免后，见 scripts/history-sensitive-scan.sh / 门②） |
+| 门⑥ 扫描工作流 | 裸计数 `git log --all -p \| grep -F "17dz" \| wc -l`（含档案与改造史留存，本身不是泄漏判据）+ 同口径判定 `bash scripts/history-sensitive-scan.sh <敏感串表>` | 裸计数 >0（档案/改造史留存属登记豁免）；**判据权威 = 脚本 exit 0**（表内每条全历史零命中），不是裸计数的那一行 |
 | 门⑦ debt-ledger | `grep -c '状态.*待办' docs/debt-ledger.md` + 三件套核对 | 每条待办三件套齐备 |
 
 ### 验收对账（本棒实测）
