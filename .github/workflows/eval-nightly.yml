@@ -159,8 +159,19 @@ jobs:
           strong_summary = strong_data.get('summary', {})
           weak_summary = weak_data.get('summary', {})
 
+          # Extract actual model names from probe reports
+          strong_worker_model = strong_data.get('worker_model', 'unknown')
+          weak_worker_model = weak_data.get('worker_model', 'unknown')
+          judge_model = strong_data.get('judge_model', weak_data.get('judge_model', 'unknown'))
+
+          # Validate judge models match (same judge for both tiers)
+          if strong_data.get('judge_model') != weak_data.get('judge_model'):
+              print(f'::warning::Judge model mismatch: strong={strong_data.get("judge_model")} weak={weak_data.get("judge_model")}')
+
           strong_ok = validate_judge_data(strong_summary, 'strong')
           weak_ok = validate_judge_data(weak_summary, 'weak')
+
+          all_ids = sorted(EXPECTED_CASES)
 
           if not strong_ok or not weak_ok:
               Path('.runtime/discrimination-report.md').write_text(
@@ -192,9 +203,9 @@ jobs:
           report_lines = [
               '# Discrimination Report: dual-tier matrix',
               '',
-              '- Strong model: step-5-preview (LLM_MODEL)',
-              '- Weak model: step-3.5-flash',
-              '- Judge: step-5-preview (same for both tiers)',
+              f'- Strong model: {strong_worker_model} (LLM_MODEL)',
+              f'- Weak model: {weak_worker_model}',
+              f'- Judge: {judge_model} (same for both tiers)',
               '- Rounds: 1 per case (quick suite: G-A1, G-A2, G-A3, G-A4, G-A5, G-B1, G-Y2)',
               '',
               '## Per-case comparison',

@@ -18,7 +18,7 @@
     "eval:score": "node --env-file=.env --import tsx scripts/eval/score.ts",
     "eval:score:judge": "node --env-file=.env --import tsx scripts/eval/score.ts --judge",
     "eval:baseline": "node --env-file=.env --import tsx scripts/eval/score.ts --judge --write-baseline",
-    "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score --judge",
+    "eval": "npm run eval:probe && npm run eval:acceptance && npm run eval:score:judge",
     "perf:suite": "node --import tsx scripts/perf/run-suite.ts 3",
     "perf:report": "node --import tsx scripts/perf/analyze.ts",
     "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
