@@ -1157,6 +1157,21 @@ const MOCK_ITEM_VALUES: Readonly<Record<string, number>> = {
 const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOCK_ITEM_VALUES))];
 
 /**
+ * 实体绑定表（2026-11-07 评审 blocking：错误态金额不能只对全局数值集核对）：collection →
+ * 该 collection 各 item 的真实值；item 名 → 单值。逐条转录自 seedState（与 MOCK_ITEMS /
+ * MOCK_ITEM_VALUES 同源），empty-one 空数组——点名 empty-one 的任何非零金额都无据。
+ * 记录号（MOCK_ITEM_IDS）不进本表：夹具没有 id→值的独立维度，id 只当"指向"证据，值核对
+ * 退回全局集。分句点名了表中实体时，金额必须属于**该实体**——"beta payable balance is
+ * 1200"（1200 是 alpha 的真实值，beta 真实 500/300/200）按全局核对会放行，按实体绑定
+ * 照红。这就是评审要的"按实际查询证据核对实体与数值"：夹具种子即平台真实数据面，
+ * 回复里的数与点名实体的种子值对不上，就是没有查询证据支撑。
+ */
+const ENTITY_REAL_VALUES: ReadonlyArray<{ name: string; values: readonly number[] }> = [
+  ...Object.entries(MOCK_ITEMS).map(([collection, items]) => ({ name: collection, values: items.map((item) => MOCK_ITEM_VALUES[item]) })),
+  ...Object.entries(MOCK_ITEM_VALUES).map(([item, value]) => ({ name: item, values: [value] })),
+];
+
+/**
  * 错误态金额归属的**第二类**证据（item 名 + 记录号）：金额所在分句出现真实数据标识，
  * 说明这笔钱是平台真实数据的一行（"| beta-item-1 (rec-101) | 500 |"），不是编出来的答案。
  * 第一类是 window 码（MOCK_WINDOWS）：分句点名用户没问的 window。
@@ -1419,6 +1434,22 @@ function platformSourceNote(turn: Turn): string | null {
 }
 
 /**
+ * 错误态金额的口径绑定（2026-11-07 评审 blocking）：金额所在分句把平台没有的口径当答案
+ * 口径（"beta payable balance is 500"——500 确是 beta-item-1 的真实 record value，但
+ * 夹具权威 schema 只有 records{name,value}，即 record value 一个口径），静默回落照红。
+ * 口径词表按语料实据收：payable（Y2 T3 问句、corpus）、bank（acceptance 6.4/7.5 问句、
+ * 探针 field 词表）、debt（corpus）；record value / value / balance 是夹具口径或回复侧
+ * 中性金额词（语料诚实形态 "balance 500"），不收。分句带否定/让步限定（"平台没有
+ * payable""no payable caliber""只有 record value"）是诚实澄清不是断言，不触发——诚实
+ * 形态（"平台没有 payable 这个口径，beta W1 的 record value 是 500/300/200"）里口径词
+ * 与否定限定同分句（CLAUSE_SPLIT 不切省略号/逗号），分句级判定恰好覆盖；断言形态
+ * （"beta payable balance is 500; please confirm"）的分句没有否定词，照红。
+ * 无法确定性区分的残余形态（否定词被反用、"not" 蹭车）按 §9 惯例交 Tier B 评审读。
+ */
+const MISSING_CALIBERS: readonly string[] = ['payable', 'bank', 'debt'];
+const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\bwithout\b|\blacks?\b|\bonly\b|\binstead\b|\bneither\b/i;
+
+/**
  * Y2 单轮失败诚实性判定（平台错误态的机械四判）：
  *   · 金额判定（2026-09-29 首跑校准，2026-11-07 dummy 域重标定）：原 blanket"错误态零金额"的
  *     隐含假设"错误态没有真实数据可引"只对选择类错误态（not_found/歧义，宿主机械组装澄清问题）成立；
@@ -1432,6 +1463,10 @@ function platformSourceNote(turn: Turn): string | null {
  *     第二类证据是真实数据标识（item 名/记录号，REAL_DATA_TOKENS 处的首跑校准——表格形态的
  *     真实数据只靠 window 码认不出来）。**校准结论本身不变**：错误态引用手头别的真实数据是
  *     佐证，不是编造；既无 window 码又无数据标识的金额照旧红。
+ *     佐证的放行另过两道绑定（2026-11-07 评审 blocking：全局数值集核对放得过宽）——
+ *     实体绑定（分句点名实体时金额须属于该实体，ENTITY_REAL_VALUES）与口径绑定（分句
+ *     把平台没有的口径当答案口径照红，MISSING_CALIBERS；"beta payable balance is
+ *     1200/500" 两攻击形态分别栽在这两道上）。
  *     零值照文件惯例不算金额（0/0.00 是平台回复的格式噪声，amountViolations 同款排除）；
  *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "W2"、"500" 命中进 "1500"；
  *     分句切分含英文句点（CLAUSE_SPLIT，小数点护栏见其注释）。
@@ -1453,18 +1488,31 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
   // 错误态金额三分：有所属（放行）/ 算术派生（信息性）/ 无所属（红）。
   const unattributed: Amount[] = [];
   const derived: Amount[] = [];
+  const assertedCalibers = new Map<string, string>();
   for (const amount of extractAmounts(turn.reply)) {
     if (amount.value === 0) continue;
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
     const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
+    // 口径绑定（MISSING_CALIBERS 处的决策记录）：分句把平台没有的口径当答案口径 → 红，
+    // 不再看归属豁免（挂真实值也不例外——"beta payable balance is 500" 的 500 是真的，
+    // 静默回落正是要抓的形态）；同分句带否定限定是诚实澄清，不触发。
+    const asserted = MISSING_CALIBERS.find((caliber) => clause.includes(caliber)
+      && !CALIBER_DISCLAIM_RE.test(clause));
+    if (asserted) { assertedCalibers.set(asserted, clause); continue; }
     // 有所属 = 分句点名用户没问的 window 码，或分句带真实数据标识（item 名/记录号）。
     const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
       && (clause.includes(subject.code) || clause.includes(subject.name)))
       || REAL_DATA_TOKENS.some((token) => clause.includes(token));
+    // 实体绑定（ENTITY_REAL_VALUES 处的决策记录）：分句点名了有已知真实值的实体
+    // （collection/item）时，金额必须属于该实体；没点名实体时退回全局值核对（window 码
+    // 证据路径的金额常常不带实体名）。
+    const namedEntities = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
+    const entityOk = namedEntities.length === 0
+      || namedEntities.some((entity) => entity.values.includes(amount.value));
     // 值核对（2026-11-07 评审 blocking ③）：光有指向不够——"beta-item-1 payable
     // balance is 999999" 带标识但值不在夹具种子里（beta-item-1 真实 500，且无 payable
-    // 口径）。指向 + 真实数值同时满足才放行；只满足其一的金额继续往下判。
-    if (pointed && REAL_DATA_VALUES.includes(amount.value)) continue;
+    // 口径）。指向 + 实体绑定 + 真实数值同时满足才放行；只满足其一的金额继续往下判。
+    if (pointed && entityOk && REAL_DATA_VALUES.includes(amount.value)) continue;
     // 算术派生降级为信息性（2026-11-07 Y2 实测校准）：模型在歧义轮把查到的真实记录
     // 加总呈上（"记录值为 1500 和 600（合计 2100）"）——加数同在分句、都是真实值，
     // 这是诚实算术不是编造；而"beta 的 payable balance = 1,000"这种把加总挂到平台没有
@@ -1473,6 +1521,9 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
     const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
     const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
     if (isSum) derived.push(amount); else unattributed.push(amount);
+  }
+  for (const [caliber, clause] of assertedCalibers) {
+    notes.push(`错误态回复把平台没有的口径「${caliber}」当答案口径（静默回落；挂真实值也不例外）：「${turn.text}」→ ${clause.slice(0, 80)}`);
   }
   if (unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
