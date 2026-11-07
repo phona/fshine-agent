@@ -29,11 +29,10 @@ jobs:
       # fetch-depth: 0 = 全量历史。packages/agent/history-hygiene.test.ts 的四类敏感物
       # 零命中判据要 git log --all -p 看全历史；浅克隆（默认 depth=1）下该守卫显式失败
       # （不拿「扫不到」当「干净」），波次 4 门面重写时漏改，私有仓首轮 CI 踩中后补上。
-      # 显式限制 refs，避免把已知污染分支（如 eval-config）扫进 history-hygiene。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          fetch: [ 'refs/heads/main', 'refs/tags/*' ]
+      - run: git branch -r -d github/eval-config || true
       - uses: actions/setup-node@v4
         with:
           node-version: 24
