@@ -48,6 +48,16 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
 
+  it('blocking：同分句同值重复金额——"beta W1 record value is 500, alpha W1 record value is 500"（第二笔不属于 alpha）', () => {
+    const v = classify('Not found; beta W1 record value is 500, alpha W1 record value is 500; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
+  it('blocking：窗口有效性被同句其他实体掩护——"beta W2 value is 500, alpha W1 value is 1200"（beta 只有 W1）', () => {
+    const v = classify('Not found; beta W2 value is 500, alpha W1 value is 1200; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
   it('blocking：同分句多实体相互豁免——"beta W1 record value is 1200, alpha W1 record value is 500"（两笔都串台）', () => {
     const v = classify('Not found; beta W1 record value is 1200, alpha W1 record value is 500; please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(1200);
@@ -220,7 +230,7 @@ describe('ACCOUNT_RESULT_PHRASING：漂移尺三族措辞（2026-11-08 评审 ma
     expect(ACCOUNT_RESULT_PHRASING.test('结果如下')).toBe(true);
   });
 
-  it('中文中性域分支：记录值/记录 N/凭证 N（原 17dz 域词的映射保留）', () => {
+  it('中文中性域分支：记录值/记录 N/凭证 N（旧财税域词的映射保留）', () => {
     expect(ACCOUNT_RESULT_PHRASING.test('alpha 的记录值为 1,200')).toBe(true);
     expect(ACCOUNT_RESULT_PHRASING.test('alpha 记录 1200')).toBe(true);
     expect(ACCOUNT_RESULT_PHRASING.test('alpha 凭证 003 的金额')).toBe(true);

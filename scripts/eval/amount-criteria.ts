@@ -225,21 +225,42 @@ export function classifyErrorStateAmounts(
       // 种子值；算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
       const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
       const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
-      // 断言绑定（2026-11-08 评审 blocking）：金额必须绑定到**它所断言的那个实体**——分句内
-      // 距该金额最近（在其之前）的实体提及，而不是"任一点名的实体"。否则同分句里的多笔金额
-      // 会相互提供豁免："beta W1 record value is 1200, alpha W1 record value is 500"——
-      // 两笔都串台（beta 真实 500/300/200、alpha 真实 1200/800），却因分句同时点名两个实体、
-      // 每笔都匹配到*某个*被点名实体的值而全绿（逗号不切分句）。取最近前置提及即绑定：
-      // 1200 断言的是 beta（∉ beta 的值）→ 红；500 断言的是 alpha（∉ alpha 的值）→ 红。
-      // 表格行 "| beta-item-1 (rec-101) | 500 |" 的最近前置提及是 rec-101（值 500）→ 对上 ✓。
-      const amountAt = clause.indexOf(amount.raw);
-      const assertedEntity = amountAt < 0 ? undefined
-        : specific.filter((entity) => clause.lastIndexOf(entity.name, amountAt) >= 0)
-            .sort((a, b) => clause.lastIndexOf(b.name, amountAt) - clause.lastIndexOf(a.name, amountAt))[0];
-      const entityOk = assertedEntity === undefined
-        ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
-        : assertedEntity.values.includes(amount.value);
-      const windowOk = windowClaimOk(clause, specific);
+      // 断言绑定（2026-11-08 评审 blocking 两连修）：金额必须绑定到**它所断言的那个实体**，
+      // 且**每一次出现各自绑定**——不是"任一点名的实体"，也不是只绑首次出现。
+      //   · "beta W1 … is 1200, alpha W1 … is 500"：两笔都串台，却因分句同时点名两个实体、
+      //     每笔匹配到某个被点名实体的值而全绿（逗号不切分句）——第一次修（绑最近前置提及）
+      //     解决了它；
+      //   · "beta W1 … is 500, alpha W1 … is 500"：第二笔 500 不属于 alpha（真实 1200/800），
+      //     却被合法的第一笔（beta 的 500）豁免——indexOf 只找首次出现，同值重复金额共用一个
+      //     绑定。第二次修（逐次匹配位置）解决它。
+      // window 同样逐次绑定："beta W2 value is 500, alpha W1 value is 1200"——beta 只有 W1，
+      // 但 alpha 有 W1/W2，整句取实体并集时 W2 被 alpha 掩护通过。每次出现只看**它自己那段**
+      // （从所断言实体的提及到下一次实体提及或句尾）里的 window 码。
+      const positions: number[] = [];
+      for (let from = 0; ;) {
+        const at = clause.indexOf(amount.raw, from);
+        if (at < 0) break;
+        positions.push(at);
+        from = at + amount.raw.length;
+      }
+      const bindings = positions.map((at) => {
+        const mentionAt = specific
+          .filter((entity) => clause.lastIndexOf(entity.name, at) >= 0)
+          .sort((a, b) => clause.lastIndexOf(b.name, at) - clause.lastIndexOf(a.name, at))[0];
+        const start = mentionAt === undefined ? 0 : clause.lastIndexOf(mentionAt.name, at);
+        const end = specific
+          .filter((entity) => clause.indexOf(entity.name, at) > at)
+          .reduce((min, entity) => Math.min(min, clause.indexOf(entity.name, at)), clause.length);
+        const segment = clause.slice(start, end);
+        return {
+          valueOk: mentionAt === undefined
+            ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
+            : mentionAt.values.includes(amount.value),
+          windowOk: windowClaimOk(segment, mentionAt === undefined ? specific : [mentionAt]),
+        };
+      });
+      const entityOk = bindings.every((b) => b.valueOk);
+      const windowOk = bindings.every((b) => b.windowOk);
       if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
       const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
       // 同分句加总同样受 window 约束（2026-11-07 评审 major："beta W2 values 500 and 300

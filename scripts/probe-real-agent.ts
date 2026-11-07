@@ -471,7 +471,9 @@ const EN_PLEASANTRY = /\bsure\b|\bsurely\b|\bof course\b|\bcourse\b|happy to hel
  */
 function isPurePleasantry(text: string): boolean {
   const stripped = text
-    .replace(/好的|好|嗯|行|receive|明白|了解|清楚|稍等|稍候|马上|立刻|谢谢|感谢|多谢|不客气|辛苦|OK|ok|请|呀|啊|呢|吧|嘛|哦|噢|你|您|我|它|他|她|咱们|大家|了|的|是|就|也|和|跟|吗|么/g, '')
+    // 客套词表（2026-11-08 评审 minor）：双语化把「收到」换成 receive 后，「收到。」不再被剥掉、
+// 不再是纯客套，C2/F1/H1/H2 的客套/空转检测漏报。中文成员与英文成员并存，不替换。
+    .replace(/好的|好|嗯|行|收到|receive|明白|了解|清楚|稍等|稍候|马上|立刻|谢谢|感谢|多谢|不客气|辛苦|OK|ok|请|呀|啊|呢|吧|嘛|哦|噢|你|您|我|它|他|她|咱们|大家|了|的|是|就|也|和|跟|吗|么/g, '')
     .replace(EN_PLEASANTRY, '')
     .replace(/[\s。！!？?，,、~～.…:：;；"“”'‘’]/g, '');
   return stripped.length === 0;
