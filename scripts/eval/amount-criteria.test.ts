@@ -216,6 +216,17 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
 });
 
 describe('错误态金额三分：2026-11-08 评审反例（必须红）', () => {
+  it('blocking：真实明细值绕过完整合计——"alpha values are 1200 and 800, total is 1200"（列举全和 2000，1200 是明细不是合计）', () => {
+    const v = classify('alpha W1 record values are 1200 and 800, total is 1200; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+  });
+
+  it('blocking：差额措辞豁免同句串台断言——"beta … is 1200, alpha … is 500, difference is 100"（前两笔直接断言各自串台）', () => {
+    const v = classify('beta W1 record value is 1200, alpha W1 record value is 500, difference is 100; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
   it('blocking：合计只认非负子集和——"values are 500, 300, 200, total is 600"（600=500+300−200 带减项，实计 1000）', () => {
     const v = classify('beta W1 record values are 500, 300, 200, total is 600', 'checkbeta的payablebalance');
     expect(v.unattributed.map((a) => a.value)).toContain(600);

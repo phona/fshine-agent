@@ -152,6 +152,18 @@ export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>)
 }
 
 /** 用户这句话问到的window（码与名都收）：错误态金额判定的"所问window"依据（名字命中了就连带上码）。 */
+/**
+ * 分句里某金额原文的全部**数字边界**出现位置。indexOf 不行——"100" 会命中进 "1500"、
+ * "500" 会命中进 "1500"，位置绑定整个错掉（2026-11-08 实测：跨实体差额用例的 100 被绑到
+ * 1500 里的假位置上，gap 取成 "0+600"，差额措辞匹配不到，诚实算术被判红）。
+ */
+function boundaryPositions(clause: string, raw: string): number[] {
+  const pattern = new RegExp(`(?<![\\d.,%％])${raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)`, 'g');
+  const out: number[] = [];
+  for (const match of clause.matchAll(pattern)) out.push(match.index ?? 0);
+  return out;
+}
+
 export function askedWindows(userText: string): Set<string> {
   const asked = new Set<string>();
   for (const subject of MOCK_WINDOWS) {
@@ -293,99 +305,66 @@ export function classifyErrorStateAmounts(
       // 算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
       const mentions: Array<{ entity: { name: string; values: readonly number[] }; at: number }> = [];
       for (const entity of ENTITY_REAL_VALUES) {
-        for (let from = 0; ;) {
-          const at = clause.indexOf(entity.name, from);
-          if (at < 0) break;
+        for (const at of boundaryPositions(clause, entity.name)) {
           const end = at + entity.name.length;
           const shadowed = ENTITY_REAL_VALUES.some((other) => {
             if (other.name.length <= entity.name.length) return false;
-            for (let o = 0; ;) {
-              const oat = clause.indexOf(other.name, o);
-              if (oat < 0) return false;
+            for (const oat of boundaryPositions(clause, other.name)) {
               if (oat <= at && oat + other.name.length >= end) return true;
-              o = oat + 1;
             }
+            return false;
           });
           if (!shadowed) mentions.push({ entity, at });
-          from = at + 1;
         }
       }
       mentions.sort((a, b) => a.at - b.at);
       const specific = [...new Map(mentions.map((m) => [m.entity.name, m.entity])).values()];
-      // 断言绑定（2026-11-08 评审 blocking 两连修）：金额必须绑定到**它所断言的那个实体**，
-      // 且**每一次出现各自绑定**——不是"任一点名的实体"，也不是只绑首次出现。
-      //   · "beta W1 … is 1200, alpha W1 … is 500"：两笔都串台，却因分句同时点名两个实体、
-      //     每笔匹配到某个被点名实体的值而全绿（逗号不切分句）——第一次修（绑最近前置提及）
-      //     解决了它；
-      //   · "beta W1 … is 500, alpha W1 … is 500"：第二笔 500 不属于 alpha（真实 1200/800），
-      //     却被合法的第一笔（beta 的 500）豁免——indexOf 只找首次出现，同值重复金额共用一个
-      //     绑定。第二次修（逐次匹配位置）解决它。
-      // window 同样逐次绑定："beta W2 value is 500, alpha W1 value is 1200"——beta 只有 W1，
-      // 但 alpha 有 W1/W2，整句取实体并集时 W2 被 alpha 掩护通过。每次出现只看**它自己那段**
-      // （从所断言实体的提及到下一次实体提及或句尾）里的 window 码。
-      const positions: number[] = [];
-      for (let from = 0; ;) {
-        const at = clause.indexOf(amount.raw, from);
-        if (at < 0) break;
-        positions.push(at);
-        from = at + amount.raw.length;
-      }
-      // 分句内全部金额出现位置（claimsTotal 的"与前一笔的间隔"依据）。
-      const clauseAmountSpans: Array<{ start: number; end: number }> = [];
-      for (const amt of extractAmounts(clause)) {
-        for (let from = 0; ;) {
-          const at2 = clause.indexOf(amt.raw, from);
-          if (at2 < 0) break;
-          clauseAmountSpans.push({ start: at2, end: at2 + amt.raw.length });
-          from = at2 + amt.raw.length;
-        }
-      }
-      clauseAmountSpans.sort((a, b) => a.start - b.start);
+      // 分句内全部金额出现（带位置，含同值多次）——gap 与"列举加数"都按位置算，不按值去重
+      // （同值重复时按值过滤会把另一笔同值加数误排，2026-11-08 实测）。
+      const occs = extractAmounts(clause)
+        .flatMap((a) => boundaryPositions(clause, a.raw).map((at) => ({ value: a.value, raw: a.raw, at })))
+        .sort((a, b) => a.at - b.at);
+      const positions = boundaryPositions(clause, amount.raw);
+      // 逐笔绑定（2026-11-08 评审 blocking 三连收口）：每一笔出现各自找**它之前最近**的
+      // 实体提及，各自算 gap（与上一笔金额之间的文本）和自己那段里列举的加数。
+      //   · 有绑定实体 = 直接断言或它自称的运算：值须属于该实体；自称合计时列举 ≥2 个
+      //     加数就必须等于列举全和（"1200 and 800, total is 1200" → 全和 2000 ≠ 1200 红）；
+      //   · 无绑定实体 = 摊账/未点名形态：走分句级算术通道（isSum/framed），值须真实——
+      //     "记录值为 500 和 300（合计 800）"的加数由此放行，而"只有 record value……
+      //     balance 500"（无运算可摊）照红。
       const bindings = positions.map((at) => {
         let mention: { entity: { name: string; values: readonly number[] }; at: number } | undefined;
         for (const m of mentions) { if (m.at > at) break; mention = m; }
         const next = mentions.find((m) => m.at > at);
-        const segment = clause.slice(mention ? mention.at : 0, next ? next.at : clause.length);
-        // 该笔出现是否在**声称合计**：它与前一笔金额之间的间隔里出现合计族措辞
-        // （"…200, total is 800" 的 800 ✓；加数 500/300 自己的间隔里没有 total 词 ✗）——
-        // 完整合计的全和规则只管声称合计的那一笔，不管被列举的加数本身。
-        const prevAmount = [...clauseAmountSpans].reverse().find((s) => s.end <= at);
-        const gapStart = prevAmount ? prevAmount.end : 0;
-        const claimsTotal = TOTAL_FRAMING_RE.test(clause.slice(gapStart, at));
+        const segStart = mention ? mention.at : 0;
+        const segment = clause.slice(segStart, next ? next.at : clause.length);
+        const prevOcc = [...occs].reverse().find((o) => o.at + o.raw.length <= at);
+        const gap = clause.slice(prevOcc ? prevOcc.at + prevOcc.raw.length : 0, at);
         return {
           mentionEntity: mention?.entity,
           segment,
-          claimsTotal,
+          gap,
+          claimsTotal: TOTAL_FRAMING_RE.test(gap),
           valueOk: mention === undefined
             ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
             : mention.entity.values.includes(amount.value),
           windowOk: windowClaimOk(segment, mention === undefined ? specific : [mention.entity]),
-          // 该笔出现自己那段里列出的真实加数（不含它自己）：声称合计 + 列举 ≥2 笔在场时，
-          // 完整合计必须等于列举加数的全和（评审 blocking ②）。
-          segSummands: extractAmounts(segment).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value)),
+          segSummands: occs.filter((o) => o.at >= segStart && o.at + o.raw.length <= at && REAL_DATA_VALUES.includes(o.value)),
         };
       });
       const entityOk = bindings.every((b) => b.valueOk);
       const windowOk = bindings.every((b) => b.windowOk);
-      if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
-      const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
-      // 同分句加总同样受 window 约束（2026-11-07 评审 major："beta W2 values 500 and 300
-      // total 800"——beta W2 无数据，加数与合计都不得降级；注释承诺的"window 无效一律
-      // 不许降级"此前只罩住 framed 分支）。
-      const isSum = windowOk
-        && summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
       // 降级池：点名实体时取点名实体的真实值并集（跨实体差额的账本），没点名实体时取
       // 全回复真实值（表格摊账）；window 无效不许降级（评审 blocking ②）。
       const pool = specific.length ? [...new Set(specific.flatMap((entity) => entity.values))] : replyRealValues;
-      // 措辞标什么运算就验什么（2026-11-08 评审 blocking 两轮）：合计措辞只认非负子集和，
-      // 且**按每笔断言的实体**核验——降级池不得用整句实体并集去豁免某笔已失败的直接断言
-      // （2026-11-08 评审 blocking："beta … is 1200, alpha … is 500, combined total is 2000"
-      // ——句尾一个 total 词把两笔串台金额全放成信息性结果；合计的账本 = 该笔所绑实体
-      // 自己的值，没绑到实体时才退回整句并集/全回复池）。且该笔自己那段里**列举了 ≥2 个
-      // 真实加数**时，完整合计必须等于列举加数的全和——任意子集和冒充不了完整合计
-      // （2026-11-08 评审 blocking ②："values are 500, 300, 200, total is 800" 的 800=
-      // 500+300 是摘樱桃，三项实计 1000）；差额/倍数族照旧取整句并集
-      // （跨实体差额"2100−2000 相差 100"的账本本就跨实体，2026-11-07 校准）。
+      // 等式形态的加数 = 分句里除**这一笔自身出现**外的真实值（加数可以在金额之后——
+      // "alpha 2000（1200+800）"的加数就跟在后面；按位置排除而不是按值排除，同值重复的
+      // 另一笔仍是合法加数，由 claimsTotal 的 segSummands 通道各自把关）。
+      const summands = occs.filter((o) => !positions.includes(o.at) && REAL_DATA_VALUES.includes(o.value));
+      const boundValues = [...new Set(bindings.flatMap((b) => b.mentionEntity ? b.mentionEntity.values : []))];
+      const scopedSummands = summands.filter((a) => boundValues.length === 0 || boundValues.includes(a.value));
+      const isSum = windowOk
+        && scopedSummands.some((a) => scopedSummands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
       const totalFramed = TOTAL_FRAMING_RE.test(clause);
       const framed = windowOk
         && ((totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2
@@ -393,10 +372,30 @@ export function classifyErrorStateAmounts(
               : isVerifiedTotal(amount.value, b.mentionEntity ? b.mentionEntity.values : pool)))
           || (DIFF_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, pool))
           || (RATIO_FRAMING_RE.test(clause) && isVerifiedRatio(amount.value, pool)));
-      // 完整合计的列举在场时，pairwise isSum 的摘樱桃通道一并关闭（"500+300=800" 不能
-      // 冒充"500、300、200 的合计"）；未列举（"beta 合计 800" 的部分聚合校准形态）照旧。
-      const enumeratedTotal = totalFramed && bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
-      if ((isSum && !enumeratedTotal) || framed) { soft = true; } else { hard = true; }
+      // 逐笔判定：有绑定实体走严格通道（值∈该实体 / 它自称的运算各自验）；无绑定实体走
+      // 分句级摊账通道（isSum/framed）。
+      const perOccurrence = bindings.map((b) => {
+        if (b.mentionEntity === undefined) return isSum || framed;
+        if (b.claimsTotal) {
+          return b.segSummands.length >= 2
+            ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
+            : isVerifiedTotal(amount.value, b.mentionEntity.values);
+        }
+        if (DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap)) {
+          return isVerifiedArithmetic(amount.value, pool);
+        }
+        return b.valueOk;
+      });
+      const anyClaimsOperation = bindings.some((b) => b.claimsTotal || DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap));
+      const allVerified = perOccurrence.every(Boolean);
+      // 直接放行：每一笔都是直接断言（无运算自称）且核对上，且有所属（pointed）或摊账
+      // 通道成立（isSum/framed）。但凡有一笔自称运算结果，整笔走运算通道。
+      if (!anyClaimsOperation && allVerified && windowOk && REAL_DATA_VALUES.includes(amount.value)
+        && (pointed || isSum || framed)) continue;
+      const enumeratedTotal = bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
+      // 运算通道只给自称运算结果的金额；没自称的直接断言若没进直接通道必须落红，不能被
+      // "值恰好算得出来"救走（"只有 record value……balance 500" 的 500 无归属也无框架词）。
+      if ((isSum && !enumeratedTotal) || (anyClaimsOperation && allVerified && windowOk)) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     if (hard) unattributed.set(amount.value, amount);
