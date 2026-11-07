@@ -12,16 +12,18 @@
 #                          （现有内容 + 删除行改造史）。
 #   commit <完整 40 位 SHA> 已登记改造 commit：该 commit 的 diff 行与 message 行豁免
 #                          （脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
-#   已移除文件（如 pp-waves-c.json）不用登记：按「git ls-files 不存在」机械判定。
+#   已移除文件须满足「基线树存在」才豁免：按「git ls-files 不存在 + 基线树存在」
+#   机械判定；不在基线树中的已移除文件按新增后删除处理，不豁免（pp-waves-c.json
+#   已移至 archive 行登记，见下）。
 #
-# 档案三类（= 门① 的豁免半径）：
+# 档案四类（= 门① 的豁免半径 + 已移除误提交文件）：
 archive docs/debt-ledger.md
 archive docs/change-safety.md
 archive AGENTS.md
+archive pp-waves-c.json
 # 已登记改造 commit（D-191 实测五处分布里的第 3~5 处，sha256 前 12 位 b76deef1ee8c 的
 # 平台实例名留存；登记理由见 debt-ledger D-191 销账记录）：
 commit 053343e221e80bf973a71ff327820793b0300a12
-commit 8c9e6848e1267a979fb1505605de88cd85488c32
 commit 0ae2833512dc3eb3fcbc966c82cd09a40145949d
 commit 7cb814911c03cedda5ce375ec6d8e4b7ea411281
 

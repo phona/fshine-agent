@@ -1692,7 +1692,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | 门③ fresh clone | `git clone <public-url> /tmp/fshine-public && cd /tmp/fshine-public && npm ci && npm run ci` | 退出码 0 |
 | 门④ 三道守卫 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
 | 门⑤ payroll 写路径 | `git diff --name-only <wave5-起点> -- packages apps \| grep -v '\.test\.ts'` | 空 |
-| 门⑥ 扫描工作流 | `git log --all -p \| grep -F "17dz" \| wc -l` | 0（未豁免实例名命中）；已豁免条目见门② |
+| 门⑥ 扫描工作流 | `git log --all -p \| grep -F "17dz" \| wc -l` | >0（豁免前）；0（豁免后，见 scripts/history-sensitive-scan.sh / 门②） |
 | 门⑦ debt-ledger | `grep -c '状态.*待办' docs/debt-ledger.md` + 三件套核对 | 每条待办三件套齐备 |
 
 ### 验收对账（本棒实测）
@@ -1703,7 +1703,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 - **门④**：`npx vitest run packages/agent/migration-gate.test.ts` = 3/3 全绿（2026-11-06 实测）。
 - **门⑤**：本波未新增 payroll 写路径，`packages/ apps/` 生产代码零改动。
 - **门⑥**：扫描工作流未跑（dwfrun 明细待取回，D-174）；已与门② 口径对齐，实例名全历史零命中判据由门② 承载。
-- **门⑦**：debt-ledger 45 条待办/登记 → 44 条三件套齐备（D-006 状态为接受不修，不堵门）。
+- **门⑦**：debt-ledger 42 行匹配「状态.*待办」（含字段表头 1 行，实际条目 41 条）；三件套齐备性未逐条核对（D-172 登记，不冒充盘点）。
 
 ### F7 文档同步记录
 

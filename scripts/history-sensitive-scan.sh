@@ -26,18 +26,21 @@
 #   a/ 侧路径，其余行归 b/ 侧路径）。然后按三类豁免：
 #     (1) 清单 archive 行登记的档案路径（与门①档案豁免同半径）——该文件全部
 #         diff 行豁免（现有内容 + 删除行改造史）；
-#     (2) 已不在当前树（git ls-files）里的文件——全部 diff 行豁免（已移除误提交
-#         文件的残影；机械判定，不在清单里写文件名）；
+#     (2) 已不在当前树（git ls-files）且存在于基线树（origin/main / github/main /
+#         main）里的文件——全部 diff 行豁免（已移除误提交文件的残影；机械判定，
+#         不在清单里写文件名；不在基线树中的已移除文件按新增后删除处理，不豁免）；
 #     (3) 清单 commit 行登记的改造 commit——该 commit 的 diff 行与 message 行
 #         豁免（脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
+# 新 commit 机械校验：清单 commit 行登记的 SHA 必须是基线 ref 的祖先；非基线
+#   祖先的 commit 直接 exit 2「扫不了」，不拆安全底线。
 # 安全底线：**新 commit 永不在清单内**——清单是冻结的历史登记，新增 commit 一律
 #   照算。未来任何新引入的真实敏感数据（客户名/读数/UserID/路径），哪怕只出现在
 #   消息体里，也照样红。真实敏感数据不在本豁免口径内，为它们开洞就是拆防线；
 #   本豁免只覆盖平台实例名在档案、改造史与已移除文件里的留存。
 # why（第 15 条平台实例名实测 12 行，分布五处，D-191 销账记录如实登记）：
-#   debt-ledger 档案 5 行（门①同半径）、已移除文件 pp-waves-c.json 2 行（残影）、
-#   中性化 commit 删除 diff 2 行、W1 表征 commit 新增脱敏自述注释 1 行、脱敏期
-#   commit message 2 行——后三处是改造史留存，由 (3) 覆盖。其余 33 条（真实敏感
+#   debt-ledger 档案 5 行（门①同半径）、pp-waves-c.json 2 行（残影，已移至 archive
+#   行登记）、中性化 commit 删除 diff 2 行、W1 表征 commit 新增脱敏自述注释 1 行、
+#   脱敏期 commit message 2 行——后三处是改造史留存，由 (3) 覆盖。其余 33 条（真实敏感
 #   数据）全历史零命中，与本豁免无关。
 # 兜底（宁可红不可假绿）：
 #   清单文件缺失或含不可解析行 = 口径不完整 = exit 2 扫不了；diff 头带引号（git
@@ -157,8 +160,9 @@ rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
 # 完全同内容同计数（grep -c 数的是行），只是把 13MB 的 git 输出从 N 次降成 1 次。
 PATCH=$(mktemp "${TMPDIR:-/tmp}/history-sensitive-scan.XXXXXX") || exit 2
 TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-tree.XXXXXX") || exit 2
+BASELINE_TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-baseline-tree.XXXXXX") || exit 2
 HITLINES=$(mktemp "${TMPDIR:-/tmp}/history-scan-lines.XXXXXX") || exit 2
-trap 'rm -f "$PATCH" "$TREE" "$HITLINES"' EXIT INT TERM
+trap 'rm -f "$PATCH" "$TREE" "$BASELINE_TREE" "$HITLINES"' EXIT INT TERM
 if ! git -C "$REPO" log --all -p >"$PATCH"; then
   echo "git log --all -p 失败（取不到全历史即扫不了，不是干净）" >&2
   exit 2
@@ -168,12 +172,51 @@ if ! git -C "$REPO" ls-files >"$TREE"; then
   echo "git ls-files 失败（取不到当前树清单即无法归口径，不是干净）" >&2
   exit 2
 fi
+# 基线树清单：已移除文件豁免的前提是该文件在基线树中存在；不在基线树中的已移除文件
+# 按新增后删除处理，不豁免（关闭新 commit 加文件再删的 loophole）。
+BASELINE_REF=""
+for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
+  if git -C "$REPO" show-ref --verify --quiet "$ref" 2>/dev/null; then
+    BASELINE_REF="$ref"
+    break
+  fi
+done
+if [ -n "$BASELINE_REF" ]; then
+  if ! git -C "$REPO" ls-tree -r --name-only "$BASELINE_REF" >"$BASELINE_TREE"; then
+    echo "git ls-tree -r $BASELINE_REF 失败（取不到基线树清单即无法归口径，不是干净）" >&2
+    exit 2
+  fi
+else
+  echo "警告：取不到基线 ref（origin/main / github/main / main 均不存在），已移除文件豁免退化为仅按当前树判定" >&2
+  : > "$BASELINE_TREE"
+fi
 PATCH_BYTES=$(wc -c <"$PATCH" | tr -d ' ')
 ALL_COMMITS=$(git -C "$REPO" rev-list --count --all 2>/dev/null | tr -d ' ')
 echo "扫描面：git log --all -p = ${PATCH_BYTES} 字节 / ${ALL_COMMITS} 个 commit（全 ref）"
 echo "表：$TABLE"
 echo "豁免清单：$EXEMPT_FILE（档案 $(echo "$ARCHIVE_SET" | grep -c '.' || echo 0) 个路径 / 改造 commit $(echo "$COMMIT_SET" | grep -c '.' || echo 0) 个）"
 echo "----"
+
+# ── 新 commit 机械校验（D-191 安全底线：新 commit 永不在清单内）──
+# 基线 ref 取 origin/main / github/main / main 之一；取不到则警告后跳过（不真空绿）。
+BASELINE_REF=""
+for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
+  if git -C "$REPO" show-ref --verify --quiet "$ref" 2>/dev/null; then
+    BASELINE_REF="$ref"
+    break
+  fi
+done
+if [ -n "$BASELINE_REF" ]; then
+  while IFS= read -r c_sha; do
+    [ -z "$c_sha" ] && continue
+    if ! git -C "$REPO" merge-base --is-ancestor "$c_sha" "$BASELINE_REF" 2>/dev/null; then
+      echo "豁免清单含非基线 commit：$c_sha（不在 $BASELINE_REF 历史中，可能是新 commit）——先修清单再谈命中（退出码 2，不是通过）" >&2
+      exit 2
+    fi
+  done <<< "$COMMIT_SET"
+else
+  echo "警告：取不到基线 ref（origin/main / github/main / main 均不存在），跳过新 commit 校验" >&2
+fi
 
 index=0
 malformed=0
@@ -284,11 +327,14 @@ while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$COMMIT_SET" > "$COMMIT_TMP"
 
     exout=$(awk -v linefile="$HITLINES" -v treefile="$TREE" \
+      -v baselinefile="$BASELINE_TREE" \
       -v archfile="$ARCHIVE_TMP" -v commitfile="$COMMIT_TMP" \
       -v entry_match="$entry_match" '
       BEGIN {
         while ((getline t < treefile) > 0) tree[t] = 1
         close(treefile)
+        while ((getline b < baselinefile) > 0) baseline[b] = 1
+        close(baselinefile)
         while ((getline n < linefile) > 0) want[n + 0] = 1
         close(linefile)
         while ((getline a < archfile) > 0) { gsub(/[[:space:]]*$/, "", a); if (a != "") archive[a] = 1 }
@@ -308,8 +354,9 @@ while IFS= read -r line || [ -n "$line" ]; do
         f = (pref == "-") ? apath : bpath
         if (f in archive) { ea++; return }
         if (f in tree) { er++; return }
-        # 不在当前树里 = 已移除文件，豁免（第 2 类）
-        erm++
+        # 不在当前树里 = 已移除文件；只在基线树里存在的才豁免（新增后删除的不豁免）。
+        if (f in baseline) { erm++; return }
+        er++
       }
       /^commit [0-9a-f]{40}/ {
         cur_commit = $2
