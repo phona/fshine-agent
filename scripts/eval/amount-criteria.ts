@@ -160,6 +160,16 @@ export function isVerifiedTotal(value: number, pool: ReadonlyArray<number>): boo
   return base.reduce((sum, v) => sum + v, 0) === value;
 }
 
+/**
+ * 列举合计核验（2026-11-08 评审 blocking）：加数必须**互异**——同值重复等于把同一笔
+ * 记录用两次（"alpha values are 1200 and 1200, total is 2400"而 alpha 实计 2000）。
+ * 加数还须是真实种子值（调用处的 segSummands 已过滤 REAL_DATA_VALUES）。
+ */
+function enumeratedTotalOk(summands: ReadonlyArray<{ value: number }>, total: number): boolean {
+  const values = summands.map((a) => a.value);
+  return new Set(values).size === values.length && values.reduce((s, v) => s + v, 0) === total;
+}
+
 export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
   return isVerifiedDifference(value, pool) || isVerifiedRatio(value, pool);
 }
@@ -516,7 +526,7 @@ export function classifyErrorStateAmounts(
         if (b.mentionEntity === undefined) {
           if (b.claimsTotal) {
             return b.segSummands.length >= 2
-              ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
+              ? enumeratedTotalOk(b.segSummands, amount.value)
               : isVerifiedTotal(amount.value, replyRealValues);
           }
           if (DIFF_FRAMING_RE.test(b.gap)) {
@@ -530,7 +540,7 @@ export function classifyErrorStateAmounts(
         }
         if (b.claimsTotal) {
           return b.segSummands.length >= 2
-            ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
+            ? enumeratedTotalOk(b.segSummands, amount.value)
             : isVerifiedTotal(amount.value, b.mentionEntity.values);
         }
         if (DIFF_FRAMING_RE.test(b.gap)) {

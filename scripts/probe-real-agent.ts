@@ -2414,7 +2414,7 @@ const CASES: Case[] = [
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
       turns.push(await send(
-        '把alpha、alpha-group、beta、locked-one这四家的record valuecheck：每家查 W1 和当前window两笔，最后给我一张四家×两期的汇总表。',
+        '把alpha、alpha-group、beta、locked-one这四家的record valuecheck：每家查 W1 和 W2 两笔，最后给我一张四家×两窗口的汇总表。',
       ));
       // 计划预算门（首轮实测形态）：4 步×3 次调用的扇出会在中途触发"确认继续"暂停。
       // 不确认就结束的话聚合表不会出现——发确认让扇出跑完，聚合断言才有判定面。
@@ -2458,10 +2458,11 @@ const CASES: Case[] = [
         const row = flat.split('\n').find((line) => line.includes(value)) ?? '';
         if (!row.includes(name)) notes.push(`张冠李戴嫌疑：${value}（应属 ${name}）所在行不含该collection名：「${row.slice(0, 60)}」`);
       }
-      // ⑤ 无数据不编造（硬尺）：locked-one W2 无数据——若模型在"无数据"组合上给出非零
-      // 大额（1200/800/700/500/900 之外再编个数），按金额指纹查：出现任何不属于已知五值
-      // 的 ≥1000 整数金额即 suspect（宽松版：只查 ≥1000 的整数串，避开window码 W1
-      // 与序号——window码含 2026 前缀，先剔除）。
+      // ⑤ 无数据不编造（硬尺）：四家里只有 alpha 支持 W2（MOCK_COLLECTION_WINDOWS）——
+      // alpha-group / beta / locked-one 的 W2 都是无数据组合（发送已明确请求 W1 和 W2
+      // 两个窗口，2026-11-08 评审 major：原发送问"当前window"，夹具不传 window 时返回
+      // 全量 items，无数据场景根本触达不到）。若模型在无数据组合上给出非零大额，
+      // 按金额指纹查：出现任何不属合法集的 ≥1000 整数金额即 suspect。
       // 合法金额 = 种子明细值 + 各 collection 的全额聚合（alpha 2000 / alpha-group 700 /
       // beta 1000 / locked-one 900）+ 它们的子集和（汇总表的各级小计——"正确汇总成为
       // 回归信号"是 2026-11-08 评审 major 点名的假红）。四级小计全列举，凭空数（非子集和）

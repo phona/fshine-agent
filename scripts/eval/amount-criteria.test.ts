@@ -244,6 +244,11 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(999);
   });
 
+  it('blocking：列举合计不得重复使用同一记录——"alpha values are 1200 and 1200, total is 2400"（alpha 实计 2000）', () => {
+    const v = classify('alpha W1 values are 1200 and 1200, total is 2400; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(2400);
+  });
+
   it('blocking：负号不得归一成正值——"beta W1 record value is -500"（beta 真实值是正 500）', () => {
     const v = classify('beta W1 record value is -500; please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(-500);
