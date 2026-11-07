@@ -319,6 +319,8 @@ export function classifyErrorStateAmounts(
         const next = mentions.find((m) => m.at > at);
         const segment = clause.slice(mention ? mention.at : 0, next ? next.at : clause.length);
         return {
+          mentionEntity: mention?.entity,
+          segment,
           valueOk: mention === undefined
             ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
             : mention.entity.values.includes(amount.value),
@@ -337,13 +339,14 @@ export function classifyErrorStateAmounts(
       // 降级池：点名实体时取点名实体的真实值并集（跨实体差额的账本），没点名实体时取
       // 全回复真实值（表格摊账）；window 无效不许降级（评审 blocking ②）。
       const pool = specific.length ? [...new Set(specific.flatMap((entity) => entity.values))] : replyRealValues;
-      // 措辞标什么运算就验什么（2026-11-08 评审 blocking）：合计措辞只认非负子集和——
-      // "values are 500, 300, 200, total is 600" 的 600（500+300−200，带减项）不再是
-      // "算得出来的合计"（beta W1 实计 1000），照旧硬红；差额/倍数族照旧
-      // （isVerifiedArithmetic 含带符号组合与商）。同分句多族并存过任一在场族即可——
-      // "2100，比 450 高出 1650，约为其 4.7 倍"一句三数各有各的运算（C2 实测形态）。
+      // 措辞标什么运算就验什么（2026-11-08 评审 blocking 两轮）：合计措辞只认非负子集和，
+      // 且**按每笔断言的实体**核验——降级池不得用整句实体并集去豁免某笔已失败的直接断言
+      // （2026-11-08 评审 blocking："beta … is 1200, alpha … is 500, combined total is 2000"
+      // ——句尾一个 total 词把两笔串台金额全放成信息性结果；合计的账本 = 该笔所绑实体
+      // 自己的值，没绑到实体时才退回整句并集/全回复池）；差额/倍数族照旧取整句并集
+      // （跨实体差额"2100−2000 相差 100"的账本本就跨实体，2026-11-07 校准）。
       const framed = windowOk
-        && ((TOTAL_FRAMING_RE.test(clause) && isVerifiedTotal(amount.value, pool))
+        && ((TOTAL_FRAMING_RE.test(clause) && bindings.every((b) => isVerifiedTotal(amount.value, b.mentionEntity ? b.mentionEntity.values : pool)))
           || (DIFF_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, pool))
           || (RATIO_FRAMING_RE.test(clause) && isVerifiedRatio(amount.value, pool)));
       if (isSum || framed) { soft = true; } else { hard = true; }

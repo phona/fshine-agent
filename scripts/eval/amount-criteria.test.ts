@@ -222,6 +222,13 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.derived.map((a) => a.value)).not.toContain(600);
   });
 
+  it('blocking：整句 total 词不得豁免已失败的直接断言——"beta … is 1200, alpha … is 500, combined total is 2000"（合计账本=各笔所绑实体自己的值；2000 恰是 alpha 自身实计，照旧信息性）', () => {
+    const v = classify('beta W1 record value is 1200, alpha W1 record value is 500, combined total is 2000; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+    expect(v.unattributed.map((a) => a.value)).not.toContain(2000);
+  });
+
   it('blocking：名称重叠按出现位置作废——"alpha-group … is 700, alpha … is 700"（第二笔须绑独立 alpha，真实 1200/800）', () => {
     const v = classify('alpha-group record value is 700, alpha record value is 700');
     expect(v.unattributed.map((a) => a.value)).toContain(700);
