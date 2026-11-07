@@ -18,12 +18,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
+import { resolveActiveProfileId } from '@fshine/contracts';
 import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
 import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
 import type { PlanRejectRow } from './plan-reject-report';
 import { collectWriteChainFacts, hasWriteChainSignal, renderWriteChainLine, type ConversationWriteChainFacts } from './eval/write-chain';
+import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
@@ -329,7 +331,11 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
-  let configPath = process.env['AGENT_CONFIG_PATH'] || undefined;
+  // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
+  // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
+  // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。
+  // fault 模式下下面会覆盖为临时 fault yaml。
+  let configPath = resolveConfigPath(explicitConfigFrom());
   if (faultMode) {
     // fault 配置的授权用户同样派生自当次加载的配置（AGENT_CONFIG_PATH 指向的文件，
     // 缺省 config/agent.yaml）首个 enabled principal：UserID 不落代码，principal 的既定家
@@ -353,6 +359,9 @@ async function main(): Promise<void> {
       '',
     ].join('\n'));
   }
+  // 配置同源：与 resolveConfigPath 解析出的 yamlPath 保持一致，让 createServerAssembly
+  // 读到的配置与验收脚本这里加载的完全同源（assembly 读 AGENT_CONFIG_PATH 环境变量）。
+  process.env.AGENT_CONFIG_PATH = configPath;
   const config = loadConfig({ env: process.env, yamlPath: configPath });
   // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
   const profileId = resolveActiveProfileId(config.contextProfiles);
