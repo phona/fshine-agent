@@ -12,9 +12,14 @@
 #                          （现有内容 + 删除行改造史）。
 #   commit <完整 40 位 SHA> 已登记改造 commit：该 commit 的 diff 行与 message 行豁免
 #                          （脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
-#   已移除文件须满足「基线树存在」才豁免：按「git ls-files 不存在 + 基线树存在」
-#   机械判定；不在基线树中的已移除文件按新增后删除处理，不豁免（pp-waves-c.json
-#   已移至 archive 行登记，见下）。
+#                          **必须恰好一个 cutoff 行，且每个 commit SHA 必须是 cutoff 的
+#                          祖先**——cutoff 是冻结的历史截止点，不是可移动的 main：否则
+#                          commit 一旦合入 main 就能被事后加进清单，豁免范围随 main 前移
+#                          扩大。前移 cutoff = 显式可审查动作，必同步 debt-ledger D-191。
+#   cutoff <完整 40 位 SHA> 冻结截止点：改造 commit 类的校验边界（见上）。本清单登记时
+#                          取当时 main 的 tip。
+#   已移除文件须满足「基线树存在 + 当前 commit 是基线祖先」才豁免；不在基线树中的已移除
+#   文件按新增后删除处理，不豁免（pp-waves-c.json 已移至 archive 行登记，见下）。
 #
 # 档案四类（= 门① 的豁免半径 + 已移除误提交文件）：
 archive docs/debt-ledger.md
@@ -29,3 +34,4 @@ commit 7cb814911c03cedda5ce375ec6d8e4b7ea411281
 
 # 获准豁免的平台实例名条目（sha256 前 12 位，只对这些条目应用 archive / commit 豁免）：
 entry b76deef1ee8c
+cutoff 9aa21a68ed68b23adcb0ba1e424f962939a19a94

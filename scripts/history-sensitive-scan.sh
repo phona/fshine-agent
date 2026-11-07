@@ -31,8 +31,10 @@
 #         不在清单里写文件名；不在基线树中的已移除文件按新增后删除处理，不豁免）；
 #     (3) 清单 commit 行登记的改造 commit——该 commit 的 diff 行与 message 行
 #         豁免（脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
-# 新 commit 机械校验：三类豁免（archive / commit / 已移除文件）只对基线祖先
-#   commit 生效；非基线祖先的 commit 直接 exit 2「扫不了」，不拆安全底线。
+# 新 commit 机械校验（两层边界）：改造 commit 类按清单登记的冻结 cutoff 校验祖先
+#   关系（cutoff 不是可移动的 main——防「合入后再加清单」）；已移除文件类按当前基线
+#   main 校验（防未来「先加再删」）；档案类不设 commit 闸门（owner 半径，含未合入
+#   PR 的档案更新）。任一层验不过 = exit 2「扫不了」，不拆安全底线。
 # 安全底线：**新 commit 永不在清单内**——清单是冻结的历史登记，新增 commit 一律
 #   照算。未来任何新引入的真实敏感数据（客户名/读数/UserID/路径），哪怕只出现在
 #   消息体里，也照样红。真实敏感数据不在本豁免口径内，为它们开洞就是拆防线；
@@ -109,15 +111,17 @@ fi
 ARCHIVE_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-arch.XXXXXX") || exit 2
 COMMIT_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-commit.XXXXXX") || exit 2
 ENTRY_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-entry.XXXXXX") || exit 2
+CUTOFF_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-cutoff.XXXXXX") || exit 2
 awk '
   /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
   /^archive[[:space:]]+/ { sub(/^archive[[:space:]]+/, ""); print > "'"$ARCHIVE_TMP"'"; next }
   /^commit[[:space:]]+/ { sub(/^commit[[:space:]]+/, ""); print >> "'"$COMMIT_TMP"'"; next }
   /^entry[[:space:]]+/ { sub(/^entry[[:space:]]+/, ""); print >> "'"$ENTRY_TMP"'"; next }
+  /^cutoff[[:space:]]+/ { sub(/^cutoff[[:space:]]+/, ""); print >> "'"$CUTOFF_TMP"'"; next }
   { print "豁免清单不可解析行（第 " NR " 行）：[" $0 "]" > "/dev/stderr"; exit 2 }
 ' "$EXEMPT_FILE" || {
   echo "豁免清单含不可解析行——先修清单再谈命中（退出码 2，不是通过）" >&2
-  rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
+  rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP" "$CUTOFF_TMP"
   exit 2
 }
 
@@ -197,31 +201,40 @@ echo "表：$TABLE"
 echo "豁免清单：$EXEMPT_FILE（档案 $(echo "$ARCHIVE_SET" | grep -c '.' || echo 0) 个路径 / 改造 commit $(echo "$COMMIT_SET" | grep -c '.' || echo 0) 个）"
 echo "----"
 
-# ── 新 commit 机械校验（D-191 安全底线：新 commit 永不在清单内）──
-# 基线 ref 取 origin/main / github/main / main 之一；取不到则警告后跳过（不真空绿）。
-BASELINE_REF=""
-for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
-  if git -C "$REPO" show-ref --verify --quiet "$ref" 2>/dev/null; then
-    BASELINE_REF="$ref"
-    break
-  fi
-done
-if [ -n "$BASELINE_REF" ]; then
-  COMMIT_SET_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-commit-set.XXXXXX") || exit 2
-  printf '%s\n' "$COMMIT_SET" > "$COMMIT_SET_TMP"
-  while IFS= read -r c_sha; do
-    [ -z "$c_sha" ] && continue
-    if ! git -C "$REPO" merge-base --is-ancestor "$c_sha" "$BASELINE_REF" 2>/dev/null; then
-      echo "豁免清单含非基线 commit：$c_sha（不在 $BASELINE_REF 历史中，可能是新 commit）——先修清单再谈命中（退出码 2，不是通过）" >&2
-      rm -f "$COMMIT_SET_TMP"
-      exit 2
-    fi
-  done < "$COMMIT_SET_TMP"
-  rm -f "$COMMIT_SET_TMP"
-else
-  echo "取不到基线 ref（origin/main / github/main / main 均不存在）——无法验证冻结历史边界，扫不了（退出码 2，不是通过）" >&2
+# ── D-191 安全底线：豁免清单是冻结的历史登记，新 commit 永不在清单内 ──
+# 两层边界，分工不同（codex review 2026-11-07 两轮 blocking 的落点）：
+#   基线 ref（当前 main，可移动）→ 只用于「新 commit 集合」判定：已移除文件类豁免的
+#     闸门（未来「先加引用再删文件」的 commit 不是基线祖先，照算）。
+#   冻结截止点 cutoff（清单里登记的固定 SHA）→ 改造 commit 类的校验边界：登记的每个
+#     commit 必须是 cutoff 的祖先。**不能用可移动的 main 校验**——否则某个 commit 一旦
+#     合入 main，后续 PR 就能把它加进清单并通过校验，豁免范围随 main 前移扩大。
+#     要把新 commit 加进清单，必须显式前移 cutoff——这是可审查的动作（改清单必同步
+#     debt-ledger D-191），不是一次普通的合并能顺手完成的。
+CUTOFF_COUNT=$(grep -c '.' "$CUTOFF_TMP" 2>/dev/null || echo 0)
+if [ "$CUTOFF_COUNT" != "1" ]; then
+  echo "豁免清单的 cutoff 行必须恰好一个（冻结截止点；现有 $CUTOFF_COUNT 个）——口径不完整，扫不了（退出码 2，不是通过）" >&2
   exit 2
 fi
+CUTOFF_SHA=$(head -1 "$CUTOFF_TMP")
+if ! git -C "$REPO" cat-file -e "${CUTOFF_SHA}^{commit}" 2>/dev/null; then
+  echo "cutoff $CUTOFF_SHA 不是本仓 commit——先修清单再谈命中（退出码 2，不是通过）" >&2
+  exit 2
+fi
+if ! git -C "$REPO" merge-base --is-ancestor "$CUTOFF_SHA" "$BASELINE_REF" 2>/dev/null; then
+  echo "cutoff $CUTOFF_SHA 不在基线 $BASELINE_REF 历史中（截止点必须是已进入基线的历史点）——先修清单再谈命中（退出码 2，不是通过）" >&2
+  exit 2
+fi
+COMMIT_CHECK_TMP=$(mktemp "${TMPDIR:-/tmp}/history-scan-commit-check.XXXXXX") || exit 2
+printf '%s\n' "$COMMIT_SET" > "$COMMIT_CHECK_TMP"
+while IFS= read -r c_sha; do
+  [ -z "$c_sha" ] && continue
+  if ! git -C "$REPO" merge-base --is-ancestor "$c_sha" "$CUTOFF_SHA" 2>/dev/null; then
+    echo "豁免清单含非截止点祖先 commit：$c_sha（不在 cutoff $CUTOFF_SHA 历史中，可能是 cutoff 之后的新 commit）——先修清单再谈命中（退出码 2，不是通过）" >&2
+    rm -f "$COMMIT_CHECK_TMP"
+    exit 2
+  fi
+done < "$COMMIT_CHECK_TMP"
+rm -f "$COMMIT_CHECK_TMP"
 
 # 新 commit 集合（不在基线 ref 历史中的 commit）：用于已移除文件豁免的 commit 级闸门。
 NEW_COMMIT_LIST=$(mktemp "${TMPDIR:-/tmp}/history-scan-new-commits.XXXXXX") || exit 2
@@ -367,14 +380,16 @@ while IFS= read -r line || [ -n "$line" ]; do
         # 只对明确登记的平台实例名条目应用 archive / commit 豁免；
         # 其余条目保留完整历史扫描（不拆防线）。
         if (entry_match != "1") { er++; return }
-        # 新 commit 一律照算：archive / commit / 已移除文件豁免只对基线祖先 commit 生效。
-        if (cur_commit in new_commit) { er++; return }
+        # 改造 commit 类：shell 侧已按冻结 cutoff 校验过清单，这里直接豁免该 commit 全部行。
         if (cur_commit in commit_exempt) { ec++; return }
         if (!indiff || apath == "?") { er++; return }
         f = (pref == "-") ? apath : bpath
+        # 档案类：不设 commit 闸门——三个档案路径的现有内容（含未合入 PR 对档案的更新）
+        # 属 owner 划定的豁免半径；真实敏感数据不在此列（entry 级闸门在上面）。
         if (f in archive) { ea++; return }
         if (f in tree) { er++; return }
-        if (f in baseline) { erm++; return }
+        # 已移除文件类：只对基线祖先 commit 生效——未来「先加引用再删文件」照算。
+        if (f in baseline && !(cur_commit in new_commit)) { erm++; return }
         er++
       }
       /^commit [0-9a-f]{40}/ {
