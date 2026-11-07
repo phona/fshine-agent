@@ -351,6 +351,12 @@ function extractAmounts(text: string): Amount[] {
     if (/^(?:19|20)\d{2}(?:\.\d{1,2})?$/.test(raw)) continue; // 年份/年.月不是金额
     if (/^20\d{4}$/.test(raw)) continue;                     // YYYYMM window不是金额
     if (MOCK_WINDOW_CODES.has(raw)) continue;               // numeric code is not an amount（X1 首跑：numeric code 被当金额判串台，误报）
+    // 标识符尾段不是金额："rec-401 contoso-trade-item-1：1500" 里的 401/501 是记录号，
+    // 裸整数分支（\d{3,}）会把它们当金额抓出来，错误态轮因此假红（2026-11-07 Y2 实测：
+    // 模型列候选记录时带 rec-401/rec-402/rec-501，三个编号全被判"无所属金额"）。
+    // 判据 = 数字紧跟字母-连字符（rec-401 / x-401）；真实金额前不会有这种形态。
+    const at = match.index ?? 0;
+    if (/(?:[A-Za-z])-$/.test(text.slice(Math.max(0, at - 8), at))) continue;
     const value = /[万亿]/.test(raw)
       ? parseFloat(raw) * (raw.includes('亿') ? 1e8 : 1e4)
       : parseFloat(raw.replace(/,/g, ''));
@@ -944,7 +950,7 @@ function execLanguageLeakNotes(turn: Turn): string[] {
  * 反向不含："没有找到"类结论句（那是 not_found 分支的事）——但含"哪"的中文问句与 not_found
  * 结论不互斥（"没有找到 X，你要查的是哪个？"两者皆真），由 candidates 分支分流，无冲突。
  */
-const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|请确认|确认哪|哪一个|哪一[家个条]|请问|which one|which\b|please confirm|confirm which|let me know|could you|would you|do you\b|please provide|please specify|tell me/i;
+const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|请确认|确认哪|哪个|哪些|哪一[家个条些]|哪一个|请问|which one|which\b|please confirm|confirm which|let me know|could you|would you|do you\b|please provide|please specify|tell me/i;
 
 /**
  * 澄清轮的形状判定（歧义 / not_found 两种收尾，宿主机械组装的模板必然两者俱全）：
@@ -1146,8 +1152,15 @@ const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOCK_ITEM_
  * 光有标识不能证明数字真实——"beta-item-1 payable balance is 999999" 带标识但值不在
  * 种子里；光有真实值也不能证明归属——1200 出现在错误态回复里也可能是编的。两者同时
  * 满足（分句点名真实数据所在维度 + 金额是种子里的真实数值）才放行。
+ *
+ * 标识集合含 collection 名（2026-11-07 Y2 二跑校准）：not_found 轮模型重探索后会在回复里
+ * 带上有归属的真实数据（"contoso-trade 的 W2 窗口下有两条记录（值 1500、600）"）——分句
+ * 点名了真实 collection、金额是种子真实值，归属清清楚楚；只认 item 名/记录号时这波真实
+ * 数据全被判无所属。collection 名与 item 名同一族：都是"分句点名了真实数据所在维度"，
+ * 且都过同一道值核对——"beta 的 payable balance = 1,000" 点名 beta 但 1000 不是真实值，
+ * 照旧红。
  */
-const REAL_DATA_TOKENS: readonly string[] = [...new Set([...Object.values(MOCK_ITEMS).flat(), ...MOCK_ITEM_IDS])];
+const REAL_DATA_TOKENS: readonly string[] = [...new Set([...Object.values(MOCK_ITEMS).flat(), ...MOCK_ITEM_IDS, ...MOCK_ACCOUNTS])];
 
 /**
  * X1 第1轮的 2 个 unique window 与唯一非零window。mock alpha W1 与 W2 均有数据
@@ -1321,7 +1334,12 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
   const notes: string[] = [];
   const writes = executedWriteCalls(records);
   if (writes > 0) notes.push(`写尝试轮发生 ${writes} 次已执行写调用——写未开放应挡在执行前：「${turn.text}」`);
-  if (!/write not open|writing not enabled|no write access|write permission|write capability|写未开放|未授权写|没有写入权限|写功能未启用/.test(turn.reply)) {
+  // 写未开放措辞到达用户（双语）：宿主 canonical 话术是"当前未开放写入权限，如有需要请联系
+  // 管理员开通。"，但模型自己转述时用等义措辞——"受写权限管控""写入调用被平台拒绝""writes
+  // are blocked""not permitted in this workflow"都算到达（2026-11-07 X1 实测：模型说
+  // "受写权限管控：任何写入调用都被平台侧拒绝"，substance 到位只因不在旧词表里被判红）。
+  // 判据要的是"用户知道写没开、为什么没写成"，不是某一固定句式。
+  if (!/write not open|writing not enabled|no write access|write permission|write capability|not permitted|not allowed|writes? (?:are|is) (?:blocked|rejected|refused|not)|写未开放|未授权写|没有写入权限|写功能未启用|受写权限|写入.*(?:被拒|拒绝|管控|不允许|未开放)|不开放写入/.test(turn.reply)) {
     notes.push(`写未开放措辞未到达用户：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
   if (/record saved|saved successfully|record created|creation successful|write completed|successfully added|successfully recorded|录入成功|保存成功|已入账|写入成功|记录已保存/.test(turn.reply)) {
@@ -1405,8 +1423,11 @@ function platformSourceNote(turn: Turn): string | null {
 function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[]): string[] {
   const notes: string[] = [];
   const asked = askedWindows(turn.text);
-  const unattributed = extractAmounts(turn.reply).filter((amount) => {
-    if (amount.value === 0) return false;
+  // 错误态金额三分：有所属（放行）/ 算术派生（信息性）/ 无所属（红）。
+  const unattributed: Amount[] = [];
+  const derived: Amount[] = [];
+  for (const amount of extractAmounts(turn.reply)) {
+    if (amount.value === 0) continue;
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
     const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
     // 有所属 = 分句点名用户没问的 window 码，或分句带真实数据标识（item 名/记录号）。
@@ -1415,11 +1436,22 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
       || REAL_DATA_TOKENS.some((token) => clause.includes(token));
     // 值核对（2026-11-07 评审 blocking ③）：光有指向不够——"beta-item-1 payable
     // balance is 999999" 带标识但值不在夹具种子里（beta-item-1 真实 500，且无 payable
-    // 口径）。指向 + 真实数值同时满足才放行；只满足其一的金额照旧判无所属。
-    return !(pointed && REAL_DATA_VALUES.includes(amount.value));
-  });
+    // 口径）。指向 + 真实数值同时满足才放行；只满足其一的金额继续往下判。
+    if (pointed && REAL_DATA_VALUES.includes(amount.value)) continue;
+    // 算术派生降级为信息性（2026-11-07 Y2 实测校准）：模型在歧义轮把查到的真实记录
+    // 加总呈上（"记录值为 1500 和 600（合计 2100）"）——加数同在分句、都是真实值，
+    // 这是诚实算术不是编造；而"beta 的 payable balance = 1,000"这种把加总挂到平台没有
+    // 的口径上的形态，其分句里没有可加的真实值，照旧红。区分点就是"分句里有没有
+    // 能加出它的真实值"。
+    const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
+    const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
+    if (isSum) derived.push(amount); else unattributed.push(amount);
+  }
   if (unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
+  }
+  if (derived.length) {
+    notes.push(`（信息性）错误态回复出现真实数据加总（分句内含可加出它的真实值，算术可见不计违例）：「${turn.text}」→ ${formatAmounts(derived)}`);
   }
   if (!/请|建议|换|确认|可以试|告诉|再查|重新|即可|哪个|哪家|please|suggest|\btry\b|\bcheck\b|confirm|you could|let me|re-?run|\bagain\b|\bwhich\b|instead|alternatively|would you like/i.test(turn.reply)) {
     notes.push(`错误回复无可行动补救指引：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
@@ -2095,9 +2127,9 @@ const CASES: Case[] = [
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
       const fixed = [
-        'checkalpha W1、W1、W2、W2 各期的record value',
-        '那beta W2record value',
-        'just nowalpha查到了哪几个月，数字是多少',
+        'check alpha W1、W1、W2、W2 各期的record value',
+        '那 beta W2 的record value呢',
+        'just now，alpha 查到了哪几个月，数字是多少',
         'check contoso collection record value',
       ];
       for (const text of fixed) turns.push(await send(text));
@@ -2105,7 +2137,7 @@ const CASES: Case[] = [
       // （候选清单+问句），用户第5轮按编号选候选（今日 X 系列的"编号"轮）；若第4轮静默选定
       // （D-072 复发），第5轮直接续window。两种格局下 T5/T6/T7 的下标随动（WINDOW_SWITCH/WRITE/SUMMARY）。
       const clarified = isClarificationTurn(turns[3]!, CONTOOSO_AMBIGUOUS_CANDIDATES);
-      const writeText = '帮我add a record：2026年9月15日，note office expense，debit admin expense500元，creditbank500元';
+      const writeText = '帮我add a record：2026年9月15日，note office expense，debit admin expense 500 元，credit bank 500 元';
       const rest = clarified
         ? ['the second one', 'what about W2?', writeText, 'summarize what we checked today']
         : ['what about W2?', writeText, 'summarize what we checked today'];
@@ -2156,7 +2188,7 @@ const CASES: Case[] = [
       const covered = X1_WINDOWS.filter((p) => windowMentioned(t3.reply, p)).length;
       // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是移植前语料的
       // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
-      // 是"W1、W1、W2、W2 各期"与"just nowalpha查到了哪几个月"，模型可能用月份区间复述）。
+      // 是"W1、W1、W2、W2 各期"与"just now，alpha 查到了哪几个月"，模型可能用月份区间复述）。
       if (covered < 2 && !/6\s*[-到至—~]\s*9\s*月|六到九|June\s*(?:to|–|-|—)\s*September|6\s*(?:-|to|–|—)\s*9/.test(t3.reply)) {
         notes.push(`第3轮召回只覆盖 ${covered}/2 个window`);
       }
@@ -2170,6 +2202,13 @@ const CASES: Case[] = [
       // ④ T4（自然名歧义 + 会话实体，D-072）：回复必须是候选清单+问句的澄清形态；静默选定
       //    （直接用会话里已确立的alpha出数）即复发，原样摘录回复前 80 字。
       notes.push(...clarificationShapeNotes(turns[3]!, CONTOOSO_AMBIGUOUS_CANDIDATES));
+      // 自动遍历成本（信息性，2026-11-07 X1 实测）：模型列出双候选后把两个候选都查了才问
+      // （该轮 17 次调用）——透明度没问题（候选与各自数据都呈上了），但"先澄清再查"的路径
+      // 没走。成本可见不计违例：违例判定归 clarificationShapeNotes（候选清单+问句）与
+      // D-072（静默选定不出声）。
+      if (turns[3]!.calls > 4) {
+        notes.push(`（信息性）歧义轮平台调用 ${turns[3]!.calls} 次——列出候选后仍把候选逐个查了才问（先澄清再查可省掉这些调用）：「${turns[3]!.text}」`);
+      }
       if (!clarified && extractAmounts(turns[3]!.reply).some((a) => a.value !== 0)) {
         notes.push(`D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
       }
@@ -2327,7 +2366,7 @@ const CASES: Case[] = [
       const turns: Turn[] = [];
       const audits: AuditRecord[][] = [];
       for (const text of [
-        'check gamma-collection这个collection W2record value',
+        'check gamma-collection 这个 collection W2 的 record value',
         'check contoso collection record value',
         'checkbeta的payablebalance',
       ]) {
