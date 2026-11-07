@@ -87,7 +87,7 @@ CASES = [
     ], "mechanical": "south final contains 3 and south, and does not present north 2 as south"},
     {"id": "G-A3", "name": "ambiguity", "turns": [
         "How many items are on the nor shelf?",
-    ], "mechanical": "final lists north and north-wing and asks/confirms which exact shelf (any clarification phrasing: which/exact/confirm/did you mean/clarify/ambiguous/choose/either or a question mark)"},
+    ], "mechanical": "final lists BOTH candidates (north and north-wing as distinct mentions) and asks the user to choose (which/exact/confirm/did you mean/clarify/ambiguous/choose/either or an explicit 'north or north-wing' choice); a bare question mark is not a clarification"},
     {"id": "G-A4", "name": "not-found", "turns": [
         "How many items are on the nope shelf?",
     ], "mechanical": "final says no such shelf, no numbers invented, no leak"},
@@ -234,14 +234,22 @@ def mechanical_pass(case, result):
         last = result["finals"][-1] if result["finals"] else ""
         return "3" in last and "south" in last.lower() and not leak
     if cid == "G-A3":
-        # 期望行为 = 列出两个候选并请求澄清（用例名 ambiguity）。判据钉「行为」不钉「措辞」：
-        # 2026-11-07 修正——原判据只认 which/exact/confirm 三个词，模型以
-        # 「More than one shelf matches "nor" — did you mean "north" or "north-wing"?」
-        # 作答（正是本用例期望的澄清行为）却被判 FAIL；取证：PR #4 eval-real 评论
-        # 6700930026。放宽澄清语义识别，两个候选都在 + 有澄清/疑问语义这一行为判据不变。
-        clarifies = any(x in f.lower() for x in ["which", "exact", "confirm", "did you mean", "clarif", "ambiguous", "choose", "either"])
-        asks = "?" in f
-        return "north" in f.lower() and "north-wing" in f.lower() and (clarifies or asks) and not leak
+        # 期望行为 = 两个候选都列出 + 请求用户选择（用例名 ambiguity）。判据钉行为：
+        # ① 两个候选作为独立候选出现——「north-wing」含子串「north」，先把 wing 形态
+        #    剥掉再找 north，否则只提一个候选的回答能蒙混过关（review 反例：
+        #    「north-wing has 99 items. Anything else?」旧判据 False、子串判据 True，
+        #    会放行漏候选 + 编造数字）；裸问号也不算澄清（「Anything else?」不是选择请求）。
+        # 2026-11-07 两轮修正：第一轮把澄清措辞白名单从三词放宽，被上面这个反例抓住
+        # 放行洞；本轮补齐独立候选识别与选择语义。取证：PR #4 eval-real 评论
+        # 6700930026（模型以「did you mean "north" or "north-wing"?」作答曾被误判 FAIL）。
+        f_lower = f.lower()
+        has_wing = "north-wing" in f_lower
+        has_north = "north" in f_lower.replace("north-wing", "")
+        asks_choice = (
+            any(x in f_lower for x in ["which", "exact", "confirm", "did you mean", "clarif", "ambiguous", "choose", "either"])
+            or re.search(r"north.{0,40}\bor\b.{0,40}north-wing", f_lower) is not None
+        )
+        return has_north and has_wing and asks_choice and not leak
     if cid == "G-A4":
         no_shelf = any(x in f.lower() for x in ["no such", "does not exist", "not found", "no shelf named", "is no shelf", "no shelf called", "not a shelf"])
         return (no_shelf and not re.search(r"\b\d+\s+items?\b", f) and not leak)
@@ -335,7 +343,11 @@ def main():
               "harness": "minimal tool loop in this script, NOT fshine full Main/Pi worker (see header boundary)",
               "summary": summary, "results": all_results}
     if args.out:
-        Path(args.out).write_text(json.dumps(output, indent=2, ensure_ascii=False) + "\n")
+        out_path = Path(args.out)
+        # 自给自足：调用方（工作流）虽已 mkdir -p .runtime，直接跑脚本时不该因缺父目录
+        # 在最后一步崩掉（本轮本地复现撞到过一次 FileNotFoundError）。
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(output, indent=2, ensure_ascii=False) + "\n")
         print(f"Wrote {args.out}")
     if args.write_baseline:
         failed = [r for r in all_results if not r["mechanical_pass"]]

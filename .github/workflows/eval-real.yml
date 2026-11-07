@@ -108,8 +108,15 @@ jobs:
               }
             }
             const tail = summary.split('\n').slice(-60).join('\n') || '(empty)';
+            // 版本绑定：评论必须说清结果属于哪个 head、哪次 run——否则审查者无法
+            // 在多次推送间区分「最新评论」与「当前 head 的结果」，always() 步骤在
+            // 取消的 run 上也可能追加评论（codex review major，PR #4）。
             const report = [
               '## Real-model eval (generic domain, mechanical gate)',
+              '',
+              `- Commit: \`${context.sha}\` (PR head at run time)`,
+              `- Run: ${context.payload.repository.html_url}/actions/runs/${context.runId}`,
+              `- Event: ${context.eventName}`,
               '',
               'Boundary: this workflow is NOT a required check yet. Judge conclusions are advisory only.',
               '',
