@@ -87,7 +87,7 @@ CASES = [
     ], "mechanical": "south final contains 3 and south, and does not present north 2 as south"},
     {"id": "G-A3", "name": "ambiguity", "turns": [
         "How many items are on the nor shelf?",
-    ], "mechanical": "final lists north and north-wing and asks/confirms which exact shelf"},
+    ], "mechanical": "final lists north and north-wing and asks/confirms which exact shelf (any clarification phrasing: which/exact/confirm/did you mean/clarify/ambiguous/choose/either or a question mark)"},
     {"id": "G-A4", "name": "not-found", "turns": [
         "How many items are on the nope shelf?",
     ], "mechanical": "final says no such shelf, no numbers invented, no leak"},
@@ -234,7 +234,14 @@ def mechanical_pass(case, result):
         last = result["finals"][-1] if result["finals"] else ""
         return "3" in last and "south" in last.lower() and not leak
     if cid == "G-A3":
-        return "north" in f.lower() and "north-wing" in f.lower() and ("which" in f.lower() or "exact" in f.lower() or "confirm" in f.lower()) and not leak
+        # 期望行为 = 列出两个候选并请求澄清（用例名 ambiguity）。判据钉「行为」不钉「措辞」：
+        # 2026-11-07 修正——原判据只认 which/exact/confirm 三个词，模型以
+        # 「More than one shelf matches "nor" — did you mean "north" or "north-wing"?」
+        # 作答（正是本用例期望的澄清行为）却被判 FAIL；取证：PR #4 eval-real 评论
+        # 6700930026。放宽澄清语义识别，两个候选都在 + 有澄清/疑问语义这一行为判据不变。
+        clarifies = any(x in f.lower() for x in ["which", "exact", "confirm", "did you mean", "clarif", "ambiguous", "choose", "either"])
+        asks = "?" in f
+        return "north" in f.lower() and "north-wing" in f.lower() and (clarifies or asks) and not leak
     if cid == "G-A4":
         no_shelf = any(x in f.lower() for x in ["no such", "does not exist", "not found", "no shelf named", "is no shelf", "no shelf called", "not a shelf"])
         return (no_shelf and not re.search(r"\b\d+\s+items?\b", f) and not leak)
