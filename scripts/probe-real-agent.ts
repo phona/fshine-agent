@@ -1339,8 +1339,14 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
   // are blocked""not permitted in this workflow"都算到达（2026-11-07 X1 实测：模型说
   // "受写权限管控：任何写入调用都被平台侧拒绝"，substance 到位只因不在旧词表里被判红）。
   // 判据要的是"用户知道写没开、为什么没写成"，不是某一固定句式。
-  if (!/write not open|writing not enabled|no write access|write permission|write capability|not permitted|not allowed|writes? (?:are|is) (?:blocked|rejected|refused|not)|写未开放|未授权写|没有写入权限|写功能未启用|受写权限|写入.*(?:被拒|拒绝|管控|不允许|未开放)|不开放写入/.test(turn.reply)) {
-    notes.push(`写未开放措辞未到达用户：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
+  // 两族合法阻塞措辞（2026-11-07 X1 实测校准）：
+  //   ① 写未开放族（原 17dz mock 的形态：stock 夹具对写确定性拒绝）——原样保留；
+  //   ② 承载结构不匹配族（dummy 夹具的形态：写链路开放，但记录模型只有「名称+数值」两列，
+  //      用户要求的日期/摘要/借贷科目落不进去）——模型说"平台这一侧没有对应的承载结构"
+  //      是诚实且可行动的，旧词表只认①，把这族全判红。
+  // 判据要的是"用户知道为什么没写成"，不是某一固定句式；编造的录入成功仍由下方断言抓。
+  if (!/write not open|writing not enabled|no write access|write permission|write capability|not permitted|not allowed|writes? (?:are|is) (?:blocked|rejected|refused|not)|写未开放|未授权写|没有写入权限|写功能未启用|受写权限|写入.*(?:被拒|拒绝|管控|不允许|未开放)|不开放写入|没有对应的承载结构|不支持.*(?:字段|结构|日期|摘要|科目)|(?:字段|结构|schema).*(?:不匹配|不支持|没有)|无法按你描述|cannot represent|no (?:such )?field|does ?n'?t support|not supported|no corresponding/.test(turn.reply)) {
+    notes.push(`写未开放/阻塞原因措辞未到达用户：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
   }
   if (/record saved|saved successfully|record created|creation successful|write completed|successfully added|successfully recorded|录入成功|保存成功|已入账|写入成功|记录已保存/.test(turn.reply)) {
     notes.push(`写尝试轮出现编造的录入成功：「${turn.text}」→ ${turn.reply.slice(0, 80)}`);
@@ -2174,6 +2180,13 @@ const CASES: Case[] = [
       if (!extractAmounts(t1.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
         notes.push(`第1轮未呈现 ${X1_WINDOW_NONZERO} 的真实balance ${X1_WINDOW_NONZERO_AMOUNT}`);
       }
+      // 已知特性（2026-11-07 实测记录，不是判据 bug）：dummy 夹具的 doQuery 对同一 collection
+      // 的所有 window 返回同一批 items（window 参数不筛 items），"W1、W1、W2、W2 各期"在数据上
+      // 是冗余的——模型据此把四期合并成单次委派（并明说"两次 W1/W2 返回相同结果，无需区分"），
+      // 不申报多步，步骤通知因此缺席。原 17dz mock 的各期 balance 互不相同，"跨期计划"维度
+      // 有真实数据链可追；要恢复该维度须给夹具加 per-window 数据（doQuery 按 window 筛 items），
+      // 那会改动 generic-mock 基线与全用例的金额转录，不在本 PR 范围。此 note 每跑必现，
+      // 按 Tier B 手册/ nightly 口径人工读，不进每 push 门禁。
       if (!hasStepMarker(t1)) notes.push('第1轮跨期计划无【第 N/M 步】步骤通知');
       notes.push('（信息性）数字链自洽未硬断言：mock alpha W1=1200、W2=800 同值集，按既定回退只记事实不硬败。');
       // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为新兴的结果呈现（串台）。
