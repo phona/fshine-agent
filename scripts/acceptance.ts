@@ -387,6 +387,17 @@ async function main(): Promise<void> {
   // 实际加载的配置——fault 模式下是上面生成的 fault yaml，否则 AGENT_CONFIG_PATH
   // 或缺省 config/agent.yaml。
   const AUTHORIZED_USER = firstEnabledPrincipalId(config);
+
+/**
+ * 验收脚本侧的 session key（2026-11-08 修，先存缺陷非移植回归）：宿主 handler 的
+ * sessionId = `${channel}:${message.conversationId}`（apps/server/handler.ts:576-577），
+ * **不含 user 段**。本脚本此前拼 `wecom:${user}:${conv}`，于是 platform_tasks 与
+ * change_intents 两条按 session 的查询永远查不到——write-chain 的 intents 恒空、
+ * taskId 恒 None，即使宿主写链全对，intentCreated/committed/readbackVerified 三项
+ * 仍读 false（2026-11-07 acceptance 5.1 实测两次都如此）。与宿主对齐后这三项才有
+ * 真值；record 的 sessionKey 也统一走本 helper（write-chain.ts 按它分组）。
+ */
+const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   if (!AUTHORIZED_USER) {
     console.error(`配置 ${configPath ?? 'config/agent.yaml（缺省）'} 里没有 enabled 的 principal——验收脚本无法派生授权用户（fail-closed，不回落写死值）`);
     process.exit(1);
@@ -424,7 +435,7 @@ async function main(): Promise<void> {
       if (!code) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv,
-          sessionKey: `wecom:${spec.user ?? AUTHORIZED_USER}:${spec.conv}`, taskId: null,
+          sessionKey: sessionKeyOf(spec), taskId: null,
           subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.confirmOf} 的回复未含确认码,无法构造确认)`,
           durationMs: 0, leakFlags: [],
@@ -439,7 +450,7 @@ async function main(): Promise<void> {
       if (!choice) {
         records.push({
           id: spec.id, messageId: '-', requestId: null, conversationId: spec.conv,
-          sessionKey: `wecom:${spec.user ?? AUTHORIZED_USER}:${spec.conv}`, taskId: null,
+          sessionKey: sessionKeyOf(spec), taskId: null,
           subagentFinalText: null, progressSteps: [], notices: [], planRejects: [],
           reply: `(跳过:用例 ${spec.followUpOf} 未产生编号候选,无法构造追问)`,
           durationMs: 0, leakFlags: [],
@@ -476,7 +487,7 @@ async function main(): Promise<void> {
     // 就同步落库，所以回合返回后立刻查得到（不必等 drainBackgroundPersistence）。
     // requestId 缺席（被拒的回合可能一条事件都不留）时没有任何 tool_calls 行可读。
     const planRejects = request?.requestId ? planRejectsOf(auditDb, request.requestId) : [];
-    const sessionKey = `wecom:${user}:${spec.conv}`;
+    const sessionKey = sessionKeyOf(spec);
     const taskRow = auditDb.prepare(
       'SELECT task_id, worker_messages FROM platform_tasks WHERE parent_session_id = ? ORDER BY rowid DESC LIMIT 1',
     ).get(sessionKey) as { task_id: string; worker_messages: string } | undefined;
