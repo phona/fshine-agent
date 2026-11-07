@@ -129,6 +129,16 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
 
+  it('blocking：金额后跟句末句点不再静默漏判——"beta W2 record value is 500."（beta 只有 W1，编造额不能因句点消失）', () => {
+    const v = classify('beta W2 record value is 500.');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
+  it('blocking：句末句点同样拦编造值——"beta W1 record value is 999."（999 不在 beta 种子里）', () => {
+    const v = classify('beta W1 record value is 999.');
+    expect(v.unattributed.map((a) => a.value)).toContain(999);
+  });
+
   it('blocking：直接陈述的 item 值严格核对——"contoso-trade-item-2 is 1200"（真实 600，1200=600+600 蹭不来）', () => {
     const v = classify('contoso-trade-item-2 record value is 1200');
     expect(v.unattributed.map((a) => a.value)).toContain(1200);
@@ -347,6 +357,24 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
 
   it('重叠名各自独立提及——"alpha-group … is 700, alpha … is 1200"（各绑各的真实值）', () => {
     const v = classify('alpha-group record value is 700, alpha record value is 1200');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('句末句点的诚实真实值照常放行——"alpha W1 record value is 1200."（提取修复不得引入误报）', () => {
+    const v = classify('alpha W1 record value is 1200.');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('小数延续仍由小数分支整体提取——"beta W1 record value is 500.50."只出 500.50 不拆 500', () => {
+    const v = classify('beta W1 record value is 500.50.');
+    expect(v.unattributed.map((a) => a.value)).toContain(500.5);
+    expect(v.unattributed.map((a) => a.value)).not.toContain(500);
+  });
+
+  it('年份紧邻语境排除不受影响——"records are from 2026 年."不把 2026 当金额', () => {
+    const v = classify('records are from 2026 年.');
     expect(v.unattributed).toEqual([]);
     expect(v.derived).toEqual([]);
   });
