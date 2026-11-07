@@ -90,6 +90,11 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.derived.map((a) => a.value)).not.toContain(2000);
   });
 
+  it('blocking：金额后跟句法逗号不再静默漏判——"is 500, please confirm"（beta W2 无数据）', () => {
+    const v = classify('beta W2 record value is 500, please confirm');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
   it('跨实体差额降级保留：点名实体的真实值并集作池——"2100（1500+600）与 2000（1200+800）相差 100"', () => {
     const v = classify('alpha 2000（1200+800）、contoso-trade 2100（1500+600），两者相差 100');
     expect(v.unattributed).toEqual([]);

@@ -171,11 +171,17 @@ export function classifyErrorStateAmounts(
   const parts = reply.split(CLAUSE_SPLIT);
   for (const amount of extractAmounts(reply)) {
     if (amount.value === 0) continue;
-    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
+    // 金额边界（2026-11-07 评审 blocking：紧跟英文逗号的金额静默漏判）——后向禁止集区分
+    // 千分位逗号与句法逗号：`,<数字>` 是千分位延续（不许把 "1,500" 里的 500 当独立金额），
+    // `", "`/`，` 是句法逗号（CLAUSE_SPLIT 不切逗号），金额后跟它必须照常找到分句。
+    // 前向保持原禁止集（数字/./%/千分位逗号）。
+    const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!\\d)(?![.%％])(?!,\\d)`);
     let assertedHit = false;
     let hard = false;
     let soft = false;
-    for (const clause of parts.filter((part) => boundary.test(part))) {
+    const hits = parts.filter((part) => boundary.test(part));
+    if (!hits.length) { unattributed.set(amount.value, amount); continue; } // 边界异常宁可红，不静默消失
+    for (const clause of hits) {
       // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
       const caliber = MISSING_CALIBERS.find((c) => clause.includes(c) && !CALIBER_DISCLAIM_RE.test(clause));
       if (caliber) { assertedHit = true; asserted.set(caliber, clause); continue; }
@@ -185,7 +191,6 @@ export function classifyErrorStateAmounts(
         || REAL_DATA_TOKENS.some((token) => clause.includes(token));
       // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
       // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
-      // 该实体自身真实值算得出的和（"beta 合计 800"=500+300）也算对得上。
       const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
       const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
       const entityOk = specific.length === 0
