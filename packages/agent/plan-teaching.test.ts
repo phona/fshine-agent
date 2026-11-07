@@ -24,12 +24,33 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { describe, expect, it } from 'vitest';
 import { messageFor, planDraftExample } from './src/error-codes';
 import { parsePlanCallsCommand } from './src/plan-runtime';
+import { resolveConfigPath, explicitConfigFrom } from '../../scripts/resolve-config-path';
+import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
-const PLATFORM_ROOT = process.env['FSHINE_PLATFORM_ROOT'] ?? path.resolve(REPO_ROOT, '..', 'fictional-execution-layer');
+
+function resolvePlatformRoot(): string {
+  try {
+    const configPath = resolveConfigPath(explicitConfigFrom());
+    const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
+    const profiles = config['contextProfiles'] as Record<string, ContextProfileConfig> | undefined;
+    const profileId = resolveActiveProfileId(profiles ?? {});
+    if (profileId) {
+      const profile = profiles![profileId] as Record<string, unknown> | undefined;
+      const root = String(profile?.root ?? '');
+      if (root) return root;
+    }
+  } catch {
+    // 无配置或 active profile 未定 → 走回退
+  }
+  return path.resolve(REPO_ROOT, '..', 'fictional-execution-layer');
+}
+
+const PLATFORM_ROOT = resolvePlatformRoot();
 
 /**
  * 平台计划草案 schema。

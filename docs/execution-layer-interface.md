@@ -218,7 +218,7 @@
     真写落账不发生。
   - 一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。
 - **命名**：执行层治理接口统一用 `EXECUTION_*` 前缀，宿主自用参数用
-  `FSHINE_*` 前缀（如 `FSHINE_REAL_COMMIT`、`FSHINE_PLATFORM_ROOT`），
+  `FSHINE_*` 前缀（如 `FSHINE_REAL_COMMIT`），
   通用夹具只认执行层接口名作别名；旧前缀已全量清零，不留别名 shim。
 
 ## 9. Mock 契约（归属与隔离）

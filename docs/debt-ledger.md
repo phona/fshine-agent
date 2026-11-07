@@ -1500,7 +1500,7 @@ F6 重场景批（G1,G2,X1,X2,Y1,Y2）3/6 无异常，三个 ⚠ 经 3b97f51 基
 - **位置**：`tests/e2e/harness.ts:38-39`（`PLATFORM_ROOT` 缺省指向 `../../../17dz-platform`，`CLI = <root>/bin/17dz`，真 spawn 兄弟仓 CLI）；兄弟仓 `src/execution/mocks/respond.js:50`（把 `fixtures/seed.json` 拷为 mock 状态文件）；该 seed 的账套键现行仍是脱敏前的真实名（fshine 侧夹具已按映射表改为 幻辰财税 / 幻辰实业有限公司 两支，seed 未动；真实→虚构对照只住映射表 `.sensitive-strings.replace.txt`，不在本文件重述），另两支 新兴五金 / 新兴建材 不在映射表内、两仓天然一致。
 - **根因**：脱敏波只改了 fshine 一侧夹具名，兄弟仓 seed 未同批改名——两套名字对不上，经 mock 目录的 Tier B 链（tests/e2e、probe-real-agent、acceptance、smoke-real-platform、mock-commit-smoke）预期与实测失配。实例：`tests/e2e/turn-loop-disambiguation.test.ts:107` 期望「幻辰财税 202609 平台未返回该期间数据」，而 mock 应答仍按 seed 里的脱敏前键名组织返回。失配面只在被改名的两支。
 - **处置边界（不冒充绿）**：本波不把 Tier B 写成绿，也不在本波重定任何基线；CI 三门（ci.sh：typecheck + unit + generic-mock）不 spawn 兄弟仓、自洽不受影响（实测）。seed 同步改名是 mock-only 机械替换，合 D-076 纪律。
-- **闭环判据**：兄弟仓 seed 与 respond 夹具按同一张映射表同步机械改名后，`FSHINE_PLATFORM_ROOT=<17dz 检出> npx vitest run tests/e2e` 全绿；同步前 Tier B 红是已知状态，任何报告不得写成绿。
+- **闭环判据**：兄弟仓 seed 与 respond 夹具按同一张映射表同步机械改名后，`FSHINE_PLATFORM_ROOT=<执行层检出> npx vitest run tests/e2e` 全绿；同步前 Tier B 红是已知状态，任何报告不得写成绿。2026-11-07 附注（非销账）：harness 改统一配置解析后实测 e2e 失败集合不增——仅无回归证据，seed 改名失配未修，本条维持待办。
 - **律法归属**：L2（跨仓面：mock seed 住兄弟仓、fshine Tier B 链消费它，两仓夹具改名未同批——与 D-015「17dz mock 夹具手抄、无机械锁」同族）。
 - **归属波次 / 限期**：W5 前（结构化调用协议波次要以 Tier B 全绿作证据）。
 - **状态**：待办。
@@ -1922,3 +1922,12 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
   6. 回滚命令：`docs/push-runbook.md` 已落档紧急转私有 / 删除仓库命令，owner 已审阅。
 - **归属波次 / 限期**：波次 5；公开后首月（机械判据：`git log --since="公开日期 + 30 days"` 内无未合入的敏感串命中或门禁回退）。
 - **状态**：部分落地（2026-11-07：公开翻转 / 门禁配置 / secret / Actions 分钟 / runbook 已完成；首批 PR 待走门禁合入）。
+
+### D-196 · 退役 FSHINE_PLATFORM_ROOT，harness 改用统一配置解析
+
+- **位置**：`tests/e2e/harness.ts`（PLATFORM_ROOT / GATEWAY 解析）、`packages/agent/plan-teaching.test.ts`、`tests/e2e/plan-awareness.test.ts`、`tests/e2e/turn-loop-plan-gate-boundaries.test.ts`、`tests/e2e/harness-fidelity.test.ts`、`docs/environment-variables.md`、`docs/e2e-ownership.md`、`docs/architecture-laws.md`（D-154 判据维持原样，本波只贡献无回归附注）。
+- **触发 / 根因**：FSHINE_PLATFORM_ROOT 是半吊子环境变量——生产装配以 `config/agent.yaml` 的 profile root 为准，不靠本变量；测试侧却仍读它作兜底，形成两条配置路径分流。owner 裁定：全仓一套配置机制，删半吊子环境变量。harness 改用与 eval 同一套配置解析（`scripts/resolve-config-path.ts` + `resolveActiveProfileId`），显式 > 单 profile 取其键 > 0 个或多个 = undefined（消费方 fail-closed）。
+- **律法归属**：L2（配置单一来源）/ F7（文档同提交同步）。
+- **闭环判据**：① `npx vitest run --project unit` 全绿；② e2e 失败集合与改前逐文件比较不增大（集合比较，不拿总数糊弄）；③ `npm run ci` 全绿；④ `grep -rn FSHINE_PLATFORM_ROOT` 全仓（除 git 历史）应为空或仅剩档案登记；⑤ harness 拿不到配置时 fail-closed 且报错说人话（不抛原始异常、不提 FSHINE_PLATFORM_ROOT）。
+- **归属波次 / 限期**：harness-config-unify；合入前。
+- **状态**：待办（PR #5 已开，待验证）。

@@ -15,7 +15,6 @@
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
 | `FSHINE_REAL_COMMIT` | 部署声明 / `platform-mock.isCommitEnabled` | 仅字面量 `1` 算真写授权；缺失 = 确认码只到 `confirm_held`，不写；mock 下 `isCommitEnabled` 恒真，与本变量无关 |
-| `FSHINE_PLATFORM_ROOT` | 测试 / e2e harness、`plan-teaching.test` | 缺失 = 回退到 fshine 仓旁边的 `fictional-execution-layer`；生产装配以 `config/agent.yaml` 的 profile root 为准，不靠本变量 |
 | `FSHINE_PLATFORM_QUEUE_CAPACITY` | 部署 / 共享 `PlatformExecutionGate`（assembly、context） | 缺省 / 非法 = 100 |
 | `FSHINE_PLATFORM_CONCURRENCY` | 部署 / 委派并发闸 | 缺省 = 1（全局串行） |
 | `FSHINE_PLATFORM_COOLDOWN_MS` | 部署 / 平台健康冷却 | 缺省 = 600000（10 分钟） |
