@@ -31,8 +31,8 @@
 #         不在清单里写文件名；不在基线树中的已移除文件按新增后删除处理，不豁免）；
 #     (3) 清单 commit 行登记的改造 commit——该 commit 的 diff 行与 message 行
 #         豁免（脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
-# 新 commit 机械校验：清单 commit 行登记的 SHA 必须是基线 ref 的祖先；非基线
-#   祖先的 commit 直接 exit 2「扫不了」，不拆安全底线。
+# 新 commit 机械校验：三类豁免（archive / commit / 已移除文件）只对基线祖先
+#   commit 生效；非基线祖先的 commit 直接 exit 2「扫不了」，不拆安全底线。
 # 安全底线：**新 commit 永不在清单内**——清单是冻结的历史登记，新增 commit 一律
 #   照算。未来任何新引入的真实敏感数据（客户名/读数/UserID/路径），哪怕只出现在
 #   消息体里，也照样红。真实敏感数据不在本豁免口径内，为它们开洞就是拆防线；
@@ -182,14 +182,13 @@ for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
     break
   fi
 done
-if [ -n "$BASELINE_REF" ]; then
-  if ! git -C "$REPO" ls-tree -r --name-only "$BASELINE_REF" >"$BASELINE_TREE"; then
-    echo "git ls-tree -r $BASELINE_REF 失败（取不到基线树清单即无法归口径，不是干净）" >&2
-    exit 2
-  fi
-else
-  echo "警告：取不到基线 ref（origin/main / github/main / main 均不存在），已移除文件豁免退化为仅按当前树判定" >&2
-  : > "$BASELINE_TREE"
+if [ -z "$BASELINE_REF" ]; then
+  echo "取不到基线 ref（origin/main / github/main / main 均不存在）——无法验证冻结历史边界，扫不了（退出码 2，不是通过）" >&2
+  exit 2
+fi
+if ! git -C "$REPO" ls-tree -r --name-only "$BASELINE_REF" >"$BASELINE_TREE"; then
+  echo "git ls-tree -r $BASELINE_REF 失败（取不到基线树清单即无法归口径，不是干净）" >&2
+  exit 2
 fi
 PATCH_BYTES=$(wc -c <"$PATCH" | tr -d ' ')
 ALL_COMMITS=$(git -C "$REPO" rev-list --count --all 2>/dev/null | tr -d ' ')
@@ -220,7 +219,8 @@ if [ -n "$BASELINE_REF" ]; then
   done < "$COMMIT_SET_TMP"
   rm -f "$COMMIT_SET_TMP"
 else
-  echo "警告：取不到基线 ref（origin/main / github/main / main 均不存在），跳过新 commit 校验" >&2
+  echo "取不到基线 ref（origin/main / github/main / main 均不存在）——无法验证冻结历史边界，扫不了（退出码 2，不是通过）" >&2
+  exit 2
 fi
 
 # 新 commit 集合（不在基线 ref 历史中的 commit）：用于已移除文件豁免的 commit 级闸门。
@@ -367,13 +367,14 @@ while IFS= read -r line || [ -n "$line" ]; do
         # 只对明确登记的平台实例名条目应用 archive / commit 豁免；
         # 其余条目保留完整历史扫描（不拆防线）。
         if (entry_match != "1") { er++; return }
+        # 新 commit 一律照算：archive / commit / 已移除文件豁免只对基线祖先 commit 生效。
+        if (cur_commit in new_commit) { er++; return }
         if (cur_commit in commit_exempt) { ec++; return }
         if (!indiff || apath == "?") { er++; return }
         f = (pref == "-") ? apath : bpath
         if (f in archive) { ea++; return }
         if (f in tree) { er++; return }
-        # 不在当前树里 = 已移除文件；只在基线树里存在 且 当前 commit 是基线祖先时才豁免。
-        if (f in baseline && !(cur_commit in new_commit)) { erm++; return }
+        if (f in baseline) { erm++; return }
         er++
       }
       /^commit [0-9a-f]{40}/ {
