@@ -2132,7 +2132,7 @@ const CASES: Case[] = [
       // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是移植前语料的
       // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
       // 是"W1、W1、W2、W2 各期"与"just now，alpha 查到了哪几个月"，模型可能用月份区间复述）。
-      if (covered < 2) {
+      if (covered < X1_PLAN_COLLECTIONS.length) {
         notes.push(`第3轮召回只覆盖 ${covered}/${X1_PLAN_COLLECTIONS.length} 个collection`);
       }
       // 框定语（D-070）：与 recallFramingNote 同一判据的 X1 内联副本。两份刻意不合并——

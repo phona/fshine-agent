@@ -137,14 +137,16 @@ export function isVerifiedRatio(value: number, pool: ReadonlyArray<number>): boo
  * 1000，600 不是所声称的合计；此前 framed 分支只验"任意带符号组合"，把错合计放成信息性
  * 结果。部分聚合照旧放行（"beta 合计 800" = 500+300，实体内诚实账）。
  */
+/**
+ * 完整合计核验（2026-11-08 owner 裁决的校准反转）：未列举加数的"合计"必须等于池中
+ * **全部**真实值之和——部分和冒充合计就是错合计（"beta total is 800"而 beta 实计
+ * 1000，是把 500+300 两颗.item 的和说成总额）。要报部分和就得在分句里列举加数，
+ * 走列举通道（列举加数全和）。子集和通道由此关闭——它正是摘樱桃的口子。
+ */
 export function isVerifiedTotal(value: number, pool: ReadonlyArray<number>): boolean {
   const base = [...new Set(pool)].filter((v) => v > 0);
   if (base.length === 0) return false;
-  const sums = new Set<number>([0]);
-  for (const v of base) {
-    for (const s of [...sums]) { sums.add(s + v); }
-  }
-  return sums.has(value);
+  return base.reduce((sum, v) => sum + v, 0) === value;
 }
 
 export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
@@ -377,8 +379,35 @@ export function classifyErrorStateAmounts(
           || (RATIO_FRAMING_RE.test(clause) && isVerifiedRatio(amount.value, pool)));
       // 逐笔判定：有绑定实体走严格通道（值∈该实体 / 它自称的运算各自验）；无绑定实体走
       // 分句级摊账通道（isSum/framed）。
+      // 本分句是否有**成立的运算**（摊账判据）：某笔出现自称运算结果且按该族验证通过。
+      // 无绑定实体又没自称运算的加数（"记录值为 500 和 300（合计 800）"里的 500/300）
+      // 靠它获得归属——账本诚实时加数是合法佐证；"只有 record value……balance 500"
+      // 没有任何运算可摊，照红。
+      const clauseOpVerified = (): boolean => occs.some((occ) => {
+        const prev = [...occs].reverse().find((o) => o.at + o.raw.length <= occ.at);
+        const gap = clause.slice(prev ? prev.at + prev.raw.length : 0, occ.at);
+        const before = occs.filter((o) => o.at + o.raw.length <= occ.at && REAL_DATA_VALUES.includes(o.value) && o.value !== occ.value);
+        if (TOTAL_FRAMING_RE.test(gap)) {
+          return before.length >= 2
+            ? before.reduce((s, o) => s + o.value, 0) === occ.value
+            : isVerifiedTotal(occ.value, pool);
+        }
+        if (DIFF_FRAMING_RE.test(gap) || RATIO_FRAMING_RE.test(gap)) return isVerifiedArithmetic(occ.value, pool);
+        return false;
+      });
+      const ledgerOk = clauseOpVerified();
       const perOccurrence = bindings.map((b) => {
-        if (b.mentionEntity === undefined) return isSum || framed;
+        // 无绑定实体（摊账/未点名形态）：自称合计时同样按完整合计核验（池 = 全回复真实
+        // 值——"记录值为 500 和 300（合计 800）"列举了加数走列举通道；没列举的"total is
+        // 800"必须等于回复里全部真实值之和）；其余走分句级摊账通道。
+        if (b.mentionEntity === undefined) {
+          if (b.claimsTotal) {
+            return b.segSummands.length >= 2
+              ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
+              : isVerifiedTotal(amount.value, replyRealValues);
+          }
+          return (REAL_DATA_VALUES.includes(amount.value) && ledgerOk) || isSum || framed;
+        }
         if (b.claimsTotal) {
           return b.segSummands.length >= 2
             ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
@@ -394,7 +423,7 @@ export function classifyErrorStateAmounts(
       // 直接放行：每一笔都是直接断言（无运算自称）且核对上，且有所属（pointed）或摊账
       // 通道成立（isSum/framed）。但凡有一笔自称运算结果，整笔走运算通道。
       if (!anyClaimsOperation && allVerified && windowOk && REAL_DATA_VALUES.includes(amount.value)
-        && (pointed || isSum || framed)) continue;
+        && (pointed || isSum || framed || ledgerOk)) continue;
       const enumeratedTotal = bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
       // 运算通道只给自称运算结果的金额；没自称的直接断言若没进直接通道必须落红，不能被
       // "值恰好算得出来"救走（"只有 record value……balance 500" 的 500 无归属也无框架词）。

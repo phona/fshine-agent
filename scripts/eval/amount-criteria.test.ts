@@ -155,9 +155,15 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.derived.map((a) => a.value)).toContain(100);
   });
 
-  it('实体自身真实值的和算对得上——"beta 合计 800"（500+300）不判无所属', () => {
+  it('校准反转（2026-11-08 owner 裁决）：未列举合计必须全额——"beta 合计 800"（beta 实计 1000，800 是 500+300 的部分和冒充总额）', () => {
     const v = classify('beta 合计 800', 'checkbeta的payablebalance');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('完整合计成立——"beta 合计 1000"（500+300+200 全额）', () => {
+    const v = classify('beta 合计 1000', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 });
 
@@ -270,9 +276,15 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
     expect(v.unattributed).toEqual([]);
   });
 
-  it('未列举加数的部分聚合照旧——"beta 合计 800"（500+300，无列举、无摘樱桃问题）', () => {
+  it('校准反转：未列举加数的部分和不再冒充合计——"beta 合计 800"（要报部分和必须列举加数）', () => {
     const v = classify('beta 合计 800', 'checkbeta的payablebalance');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('列举加数的部分聚合照旧成立——"beta W1 values are 500 and 300, total is 800"（列举全和）', () => {
+    const v = classify('beta W1 values are 500 and 300, total is 800', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toContain(800);
   });
 
   it('重叠名各自独立提及——"alpha-group … is 700, alpha … is 1200"（各绑各的真实值）', () => {
@@ -306,10 +318,10 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
 
 describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 blocking）', () => {
   const pool = [500, 300, 200];
-  it('互异真实值的纯加总成立（实体实际聚合与部分聚合）', () => {
-    expect(isVerifiedTotal(1000, pool)).toBe(true);  // 500+300+200
-    expect(isVerifiedTotal(800, pool)).toBe(true);   // 500+300（"beta 合计 800" 校准形态）
+  it('完整合计成立（实体实际聚合）；部分和不成立（校准反转）', () => {
+    expect(isVerifiedTotal(1000, pool)).toBe(true);  // 500+300+200 全额
     expect(isVerifiedTotal(2100, [1500, 600])).toBe(true);
+    expect(isVerifiedTotal(800, pool)).toBe(false);  // 500+300 部分和——不是完整合计（校准反转）
   });
   it('带减项的组合与同值复用不成立（错合计必须红）', () => {
     expect(isVerifiedTotal(600, pool)).toBe(false);  // 500+300−200（评审反例）

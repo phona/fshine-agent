@@ -75,7 +75,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'groundedness', pattern: /^明确请求未落地/, source: 'landingNote' },
   { dim: 'groundedness', pattern: /未召回也未重查|召回未给出真实金额|召回只覆盖 \d/, source: 'recallMissed / X1③' },
   { dim: 'groundedness', pattern: /window切换后仍呈现非零金额|window切换未体现|window切换零平台调用|未体现window|回复未体现请求的window|把旧window（W\d+）的数字作为/, source: 'X1⑤ / Y1 / B2 / X1 window切换串台' },
-  { dim: 'groundedness', pattern: /^第1轮回复缺window|^第1轮未呈现 |^\d+ window 计划只产生/, source: 'X1①' },
+  { dim: 'groundedness', pattern: /^第1轮回复缺collection|^第1轮未呈现 |^\d+ collection 计划只产生|^第1轮多对象计划无【/, source: 'X1①' },
   { dim: 'groundedness', pattern: /^5 轮只产生|^5 轮数据口径不一致|^两轮回复完全一致/, source: 'B1 / A1' },
   { dim: 'groundedness', pattern: /^重查轮未发生真实调用|^纠错后未发生新查询|同一查询连发须每轮真查/, source: 'H1③ / Y1 / B1 每轮真查' },
   { dim: 'groundedness', pattern: /^D-073：|挂了平台来源/, source: 'X2 数据呈现/来源' },
