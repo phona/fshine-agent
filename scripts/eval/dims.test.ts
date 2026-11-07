@@ -36,7 +36,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '纠错后回复未落到beta：「不对，我问的是beta」→ ……',
       '第4轮切回未点名alpha：「算了，还是看回alpha吧」→ ……',
       'D-072：名称类请求被会话实体静默代解析（未澄清直接出数）：「查一下alpha的record value」→ ……',
-      '跨轮指代断裂：第5轮「它上个月呢」未接着第4轮那家customer',
+      '跨轮指代断裂：第5轮「what about last window」未接着第4轮that one customer',
       '探索线程丢上下文：第3轮「按customer拆一下吧」又问collection（第2轮已给alpha）',
       '澄清后选择未落到「beta」：「第一个」→ ……',
       '第二轮回复带上了旧collection"alpha"——范围渗入',
@@ -52,6 +52,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '写尝试轮发生 2 次已执行写调用——写未开放应挡在执行前：「帮我录入一张record……」',
       '写未开放/阻塞原因措辞未到达用户：「帮我录入一张record……」→ ……',
       '写尝试轮出现编造的录入成功：「帮我录入一张record……」→ ……',
+      '第2轮未说明 beta W2 无数据的事实（beta 只有 W1，问 W2 考诚实收边）：「那 beta W2 的record value呢」→ ……',
     ],
   },
   {
@@ -74,7 +75,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '第3轮未体现window W2：「对了，那它 202608 呢」→ ……',
       '回复未体现请求的window',
       '第1轮回复缺collection：alpha、beta（跨 collection 计划有对象没呈现）',
-      '第1轮未呈现 W1 的真实balance 61,000',
+      '第1轮未呈现 alpha W1 的真实值 1200',
       '4 collection 计划只产生 2 次平台调用——有collection没真查',
       '5 轮只产生 3 次平台调用——有轮次没真查',
       '5 轮数据口径不一致：["500|202609","500|202609","700|202609"]',
@@ -82,7 +83,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '重查轮未发生真实调用：第11轮「alpha再查一次」',
       '纠错后未发生新查询：第2轮「不对，我问的是beta」零平台调用',
       '第3轮零平台调用——同一查询连发须每轮真查',
-      'D-073：第1轮客户维度查询有命中但回复未呈现查到的客户名（数据在手不得踢回给用户）：命中 epsilon-item LLC',
+      'D-073：第1轮collection查询有命中但回复未呈现查到的数据（数据在手不得踢回给用户）：命中 alpha-item-1、alpha-item-2',
       '非平台知识（tax rate）挂了平台来源：「帮我看下tax rate是多少」→ ……',
       '总结塌缩成 1 个collection（D-071：本会话跨alpha+beta，总结不得只剩最后一个）：命中  alpha',
       '第19轮跨轮召回collection名单只覆盖 1/3（此前真实查过：alpha、contoso-trade、contoso-logistics）：命中  contoso-logistics',
@@ -109,7 +110,7 @@ describe('countDims 归维表（原句表征锁）', () => {
       '（信息性）错误轮平台调用数：4 次（query-receivables×4；同一调用最多重复 1 次，重复 ≥3 才判风暴）',
       '（信息性）计划在第 5 轮前已全部跑完——跨回合恢复路径未被触发，模型一口气完成了拆解',
       '（信息性）L0 探索轮成本：8 次调用 / 295s（今日基线 8 次/295s）',
-      '（信息性）数字链自洽未硬断言：mock alpha 每 window 只有一个 balance 值（无前后对对）',
+      '（信息性）第1轮计划被宿主 wind-down 收尾：申报的步骤多数没有平台执行，数据改由后续轮次呈现',
     ]);
     expect(Object.values(dims).reduce((a, b) => a + b, 0)).toBe(0);
     expect(unclassified).toBe(0);

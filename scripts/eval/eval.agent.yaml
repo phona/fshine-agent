@@ -22,6 +22,12 @@
 # 域边界：dummy 是仓内通用域夹具（collection / window / record 词汇 + ballot.* 第二
 # 写域），probe / acceptance 的语料已同域端口（Wave 6）——eval 自此不依赖任何外部仓。
 # 本配置保证的是「fresh clone 零配置可加载 + 委派真正 spawn 到夹具 + 端到端接线跑通」。
+#
+# 夹具口径注记（2026-11-08 评审，与 .github/workflows/eval-real.yml 头注对齐）：仓内
+# 另有一套**最小工具环**真实模型面（scripts/eval/generic-model-eval.py、second-layer.ts、
+# fixtures/generic-model-baseline.json）按设计仍走 stock fixture——它不经过本配置与全
+# worker。本配置的 dummy 只服务全 worker 面（probe-real-agent / acceptance / score.ts），
+# 两套面的「真实模型面用哪个夹具」以此段为准。
 # ============================================================
 
 # ---- 授权名单：eval 专用虚构 UserID，不泄漏真实身份 ----

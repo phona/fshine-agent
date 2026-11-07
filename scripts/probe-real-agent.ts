@@ -749,7 +749,7 @@ const PROPOSAL_PHRASING = /先[^。！？!?\n]{0,40}(再|然后|接着)|第[一�
 
 /**
  * G2 判定——第 1 轮是否真的"提议了查法"（业务 skill 拆解表 surfaced）。
- * 纯澄清问句不算提议：问句形式列对象（"查alpha还是新兴？"）是澄清，不是方案。
+ * 纯澄清问句不算提议：问句形式列对象（"查alpha还是beta？"）是澄清，不是方案。
  * 清单式回退的"账期"形态双语化：中文侧原样保留（2026年07月 / 202607）；英文侧补
  * 月份名 + 年份（July 2026 / Jul. 2026）与 2026-07 / 2026/07（G2 第1轮 send 全英文，
  * 模型列多期时写的是英文月份）。collection 名那条支本来就是语言中性的。
@@ -1824,13 +1824,13 @@ const CASES: Case[] = [
         { text: 'check alpha collection current window record value', tasks: ['A'] },
         { text: 'list beta records', tasks: ['B'] },
         { text: 'W2', tasks: ['B'] },
-        { text: 'by the way，alphajust now查出来balance是多少？', tasks: ['A'], past: true, recall: true },
+        { text: 'by the way，alpha just now 查出来 balance 是多少？', tasks: ['A'], past: true, recall: true },
         { text: 'also check locked-one record value', tasks: ['C'] },
         { text: 'which has higher balance, alpha or locked-one?', tasks: ['A', 'C'], past: true },
         { text: 'what are these two numbers?', tasks: ['A', 'C'], past: true, recall: true },
         { text: 'were beta records checked later?', tasks: ['B'], past: true },
         { text: 'thanks, that is all', tasks: [] },
-        { text: '哦对，beta的recordnext page', tasks: ['B'] },
+        { text: '哦对，beta的record next page', tasks: ['B'] },
         { text: 'nice weather', tasks: [] },
         { text: 'summarize what we checked today', tasks: [] },
       ];
@@ -1996,7 +1996,7 @@ const CASES: Case[] = [
         { text: 'by the way, is there a gamma-collection?', tasks: ['D'] },
         { text: 'which has higher balance, alpha or locked-one?', tasks: ['A', 'C'], reasoning: true },
         { text: 'what happened with that gamma-collection search?', tasks: ['D'], past: true, recall: true },
-        { text: 'beta的recordnext page', tasks: ['B'] },
+        { text: 'beta的record next page', tasks: ['B'] },
         { text: 'query alpha again', tasks: ['A'], requery: true },
         { text: 'nice weather', tasks: [] },
         { text: 'query locked-one last window again', tasks: ['C'], requery: true },
@@ -2083,7 +2083,7 @@ const CASES: Case[] = [
         notes.push(`探索线程丢上下文：第${H2_NARROW + 1}轮「${turns[H2_NARROW]!.text}」又问collection（第2轮已给alpha）`);
       }
       if (referentialBreak(turns[H2_TOP]!, turns[H2_IT]!)) {
-        notes.push(`跨轮指代断裂：第${H2_IT + 1}轮「${turns[H2_IT]!.text}」未接着第${H2_TOP + 1}轮that onecustomer`);
+        notes.push(`跨轮指代断裂：第${H2_IT + 1}轮「${turns[H2_IT]!.text}」未接着第${H2_TOP + 1}轮that one customer`);
       }
       // ② 收窄到具体对象：第4轮应落到具体对象名（mock 各 collection 的 items）。模型如实说
       //    "平台不区分这个维度/几家结果相同"是正确行为，不判——mock 与真实平台的差异要容忍。
@@ -2195,7 +2195,7 @@ const CASES: Case[] = [
         }
       }
       if (!hasStepMarker(t1)) notes.push('第1轮多对象计划无【第 N/M 步】步骤通知');
-      // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为新兴的结果呈现（串台）。
+      // ② T2（中途换collection）：beta的范围正确——alpha numbers不得作为beta的结果呈现（串台）。
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
       if (stale2.length) notes.push(`第2轮把旧collection（alpha）的数字作为beta的结果呈现（串台）：${formatAmounts(stale2)}`);
       // ②b T2 window-miss 语义（2026-11-08 评审 blocking）：beta 只有 W1，问 W2 的诚实回复
@@ -2358,7 +2358,7 @@ const CASES: Case[] = [
       }
       const drift = accountDrift(turns, ['alpha', 'beta']);
       if (drift.length) notes.push(`${drift.length} 轮把用户没问的collection当成本轮结果：${drift.map((i) => turns[i]!.text).join(' / ')}`);
-      // T2（纠错点）：必须发生新查询且落到beta；alpha 1,200 不得作为新兴的答案呈现。
+      // T2（纠错点）：必须发生新查询且落到beta；alpha 1,200 不得作为beta的答案呈现。
       if (turns[1]!.calls === 0) notes.push(`纠错后未发生新查询：第2轮「${turns[1]!.text}」零平台调用`);
       if (!/beta/.test(turns[1]!.reply)) notes.push(`纠错后回复未落到beta：「${turns[1]!.text}」→ ${turns[1]!.reply.slice(0, 80)}`);
       const stale2 = staleScopeAmounts(turns, script, 1, ['A'], ['alpha', 'alpha']);
@@ -2371,7 +2371,9 @@ const CASES: Case[] = [
       if (stale3.length) notes.push(`第3轮把alpha数字作为beta W2结果呈现（串台）：${formatAmounts(stale3)}`);
       // T4（切回）：回到alpha，不把beta的结果当alpha 答案。
       if (!/alpha/.test(turns[3]!.reply)) notes.push(`第4轮切回未点名alpha：「${turns[3]!.text}」→ ${turns[3]!.reply.slice(0, 80)}`);
-      const stale4 = staleScopeAmounts(turns, script, 3, ['B'], ['beta', '新兴']);
+      // staleNames 逐条对位复核（2026-11-08 评审）：旧域账套名「新兴」在 dummy 域永不出现，
+      // 是死条目——T4 的陈旧线程是 beta，豁免名单只收 beta。
+      const stale4 = staleScopeAmounts(turns, script, 3, ['B'], ['beta']);
       if (stale4.length) notes.push(`第4轮把beta的数字作为alpha结果呈现（串台）：${formatAmounts(stale4)}`);
       return { turns, notes };
     },
@@ -2432,7 +2434,7 @@ const CASES: Case[] = [
       const { send, assembly } = await boot();
       const turns: Turn[] = [];
       turns.push(await send(
-        '把alpha、alpha-group、beta、locked-one这四家的record valuecheck：每家查 W1 和 W2 两笔，最后给我一张四家×两窗口的汇总表。',
+        '把alpha、alpha-group、beta、locked-one 这四家的 record value check：每家查 W1 和 W2 两笔，最后给我一张四家×两窗口的汇总表。',
       ));
       // 计划预算门（首轮实测形态）：4 步×3 次调用的扇出会在中途触发"确认继续"暂停。
       // 不确认就结束的话聚合表不会出现——发确认让扇出跑完，聚合断言才有判定面。

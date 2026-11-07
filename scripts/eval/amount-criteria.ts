@@ -180,11 +180,19 @@ export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>)
  * 只留首次原文，按原文匹配会漏掉同值不同格式的出现——"alpha … is 1,200; beta … is 1200"
  * 的 beta 串台（无千分位）与 "500" / "500.00" 都因此漏判。模式覆盖：千分位可选
  * （1,?200 同时匹配 "1,200" 与 "1200"）、小数可选（500(?:\.\d{1,2})?）。
+ *
+ * 小数可选**只对整数值成立**（2026-11-08 评审：裸整数部分同现抢分句）：非整数值的小数
+ * 部分必须**必选**——2.5 曾产出 `(?:2)(?:\.5)?`，裸整数 "2" 也命中（回复前置句
+ * "We checked 2 collections" 抢走 2.5 的分句定位、运算族丢失、退回通用算术判定通过），
+ * 判据被静默放松。尾随零至多两位可选（"2.50" 同值形态）；整数值保持可选
+ * （"500" / "500.00" 同值形态不回归）。
  */
 export function amountValuePattern(value: number): string {
   const intPart = Math.trunc(value);
   const grouped = intPart.toLocaleString('en-US').replace(/,/g, ',?');
-  const decimal = Number.isInteger(value) ? '(?:\\.[\\d]{1,2})?' : `(?:\\.${String(value).split('.')[1] ?? ''})?`;
+  const decimal = Number.isInteger(value)
+    ? '(?:\\.[\\d]{1,2})?'
+    : `\\.${String(value).split('.')[1] ?? ''}(?:0{1,2})?`;
   // 单位缩放形态（2026-11-08 评审 minor）：提取器把"0.05万"归一成 500，但分类器按 500
   // 找字面量找不到——中文回复的单位缩写被误判无所属。补上万/亿的缩放字面量
   // （500 ↔ "0.05万"、86000 ↔ "8.6万"），尾随零与单位前空格都可选。

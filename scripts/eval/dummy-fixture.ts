@@ -11,8 +11,9 @@
  * 事实表与纯判据抽到这里后，amount-criteria.test.ts 才能把评审的反例形态钉成表征锁。
  */
 
-/** mock collection目录：X1 换collection/总结覆盖、X2 域混淆判定、collectionQueryHits 的名单来源。 */
-export const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale'] as const;
+/** mock collection目录（seedState 全部 9 个 collection，empty-one 曾漏收——2026-11-08 评审）：
+ * X1 换collection/总结覆盖、X2 域混淆判定、collectionQueryHits 的名单来源。 */
+export const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'empty-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale'] as const;
 
 /**
  * mock 各 collection 的 item 清单（X2 第1轮 D-073 判定的"数据在手"依据）。

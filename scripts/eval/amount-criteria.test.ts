@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   ARITHMETIC_FRAMING_RE,
+  amountValuePattern,
   classifyErrorStateAmounts,
   DIFF_FRAMING_RE,
   isVerifiedArithmetic,
@@ -470,5 +471,28 @@ describe('ACCOUNT_RESULT_PHRASING：漂移尺三族措辞（2026-11-08 评审 ma
   it('反问/澄清不带结果措辞时不匹配（尺子不放宽）', () => {
     expect(ACCOUNT_RESULT_PHRASING.test('which collection do you mean?')).toBe(false);
     expect(ACCOUNT_RESULT_PHRASING.test('请确认是哪一个')).toBe(false);
+  });
+});
+
+describe('amountValuePattern：非整数值的小数部分必选（2026-11-08 评审：裸整数部分同现）', () => {
+  // 与两处消费方同形的边界包装（classifyErrorStateAmounts 的 boundary 与探针
+  // patternPositions 都是这层 lookahead/lookbehind 包着 amountValuePattern 用）。
+  const rgx = (value: number) => new RegExp(`(?<![\\d.,%％])${amountValuePattern(value)}(?!\\d)`);
+
+  it('2.5 不再匹配裸整数 "2"——前置句 "We checked 2 collections" 抢不走 2.5 的分句定位', () => {
+    expect(rgx(2.5).test('We checked 2 collections')).toBe(false);
+    expect(rgx(2.5).test('difference is 2.5')).toBe(true);
+    // 尾随零同值形态仍命中（提取器对 "2.50" 产出的值同样是 2.5）
+    expect(rgx(2.5).test('difference is 2.50')).toBe(true);
+  });
+
+  it('4.7 同洞同修（评审第二例）', () => {
+    expect(rgx(4.7).test('we ran 4 checks')).toBe(false);
+    expect(rgx(4.7).test('ratio is 4.7')).toBe(true);
+  });
+
+  it('整数值的小数部分保持可选——"500" / "500.00" 同值形态不回归', () => {
+    expect(rgx(500).test('value 500')).toBe(true);
+    expect(rgx(500).test('value 500.00')).toBe(true);
   });
 });
