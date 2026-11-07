@@ -367,7 +367,7 @@ function extractAmounts(text: string): Amount[] {
  * past 标记，allowedAmounts 因此为空集——错误态回复出现任何非零金额都算无所属（A2/A4 同族
  * 判据，那里靠人眼看，这里机械化）。tasks 留空的轮次（闲聊/汇总/跨线程）放行全会话真实结果。
  */
-type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F' | 'G';
+type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
 
 /**
  * E/F/G/H 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
@@ -1108,6 +1108,28 @@ function askedWindows(userText: string): Set<string> {
 const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701'];
 
 /**
+ * dummy 夹具 items[].value（seedState 抄录，item 名 → 真实数值）。错误态金额归属的
+ * **值核对**依据：分句里出现真实数据标识只证明"这笔钱有出处指向"，不证明数字本身
+ * 是真的——"beta-item-1 payable balance is 999999" 同样带标识，而夹具里 beta-item-1
+ * 的真实 value 是 500、且根本没有 payable 口径（2026-11-07 评审 blocking ③）。
+ * 与 MOCK_ITEMS / MOCK_ITEM_IDS 同源转录：改动任何数字前先重读夹具种子
+ * （scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState）。
+ */
+const MOCK_ITEM_VALUES: Readonly<Record<string, number>> = {
+  'alpha-item-1': 1200, 'alpha-item-2': 800,
+  'beta-item-1': 500, 'beta-item-2': 300, 'beta-item-3': 200,
+  'alpha-group-item-1': 700,
+  'locked-item-1': 900,
+  'contoso-trade-item-1': 1500, 'contoso-trade-item-2': 600,
+  'contoso-logistics-item-1': 450,
+  'fabrikam-retail-item-1': 880,
+  'fabrikam-wholesale-item-1': 1320,
+};
+
+/** 夹具种子里的全部真实数值（去重）：归属判据的"值也得对得上"全集。 */
+const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOCK_ITEM_VALUES))];
+
+/**
  * 错误态金额归属的**第二类**证据（item 名 + 记录号）：金额所在分句出现真实数据标识，
  * 说明这笔钱是平台真实数据的一行（"| beta-item-1 (rec-101) | 500 |"），不是编出来的答案。
  * 第一类是 window 码（MOCK_WINDOWS）：分句点名用户没问的 window。
@@ -1119,6 +1141,11 @@ const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-
  * （"500 全程有所属，却被一条红"）。补上 item 名证据后，同一轮里真正编出来的答案
  * （T3 的 "**beta 的 payable balance：1000**"，所在分句既无 window 码也无 item 名）
  * 照旧红——尺子不松这条。
+ *
+ * 两类证据都**必须再过值核对**（REAL_DATA_VALUES，2026-11-07 评审 blocking ③）：
+ * 光有标识不能证明数字真实——"beta-item-1 payable balance is 999999" 带标识但值不在
+ * 种子里；光有真实值也不能证明归属——1200 出现在错误态回复里也可能是编的。两者同时
+ * 满足（分句点名真实数据所在维度 + 金额是种子里的真实数值）才放行。
  */
 const REAL_DATA_TOKENS: readonly string[] = [...new Set([...Object.values(MOCK_ITEMS).flat(), ...MOCK_ITEM_IDS])];
 
@@ -1383,9 +1410,13 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
     const clause = turn.reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
     // 有所属 = 分句点名用户没问的 window 码，或分句带真实数据标识（item 名/记录号）。
-    return !MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
+    const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
       && (clause.includes(subject.code) || clause.includes(subject.name)))
-      && !REAL_DATA_TOKENS.some((token) => clause.includes(token));
+      || REAL_DATA_TOKENS.some((token) => clause.includes(token));
+    // 值核对（2026-11-07 评审 blocking ③）：光有指向不够——"beta-item-1 payable
+    // balance is 999999" 带标识但值不在夹具种子里（beta-item-1 真实 500，且无 payable
+    // 口径）。指向 + 真实数值同时满足才放行；只满足其一的金额照旧判无所属。
+    return !(pointed && REAL_DATA_VALUES.includes(amount.value));
   });
   if (unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(unattributed)}`);
@@ -1580,17 +1611,22 @@ const CASES: Case[] = [
     // C2：>20 轮超长会话无用例（C1 是 20 轮天花板）。C1 已证明 20 轮内不漂移，但"更长会不会
     // 慢到不可用/旧范围会不会渗进来/跨 4 个collection的线程还会不会混"没有数据。C2 把 C1 的混合
     // 形态拉到 30 轮并加码到 C1 没有的四个维度，每条都能机械判：
-    //   ① mock collection轮转（alpha/beta/locked-one/alpha-group + contoso/fabrikam 两个歧义对）
-    //      ——线程隔离的量纲比 C1 的两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
+    //   ① mock collection轮转（alpha / contoso-trade / contoso-logistics / fabrikam-retail /
+    //      fabrikam-wholesale 五个 + not_found 的 gamma-collection）——线程隔离的量纲比 C1 的
+    //      两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
     //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用（A5 同款），也不得
     //      把查询线程的结论当闲聊内容倒出来；
-    //   ③ 两次歧义澄清-选择（"contoso"→contoso-trade/contoso-logistics、"fabrikam"→fabrikam-retail/
-    //      fabrikam-wholesale，都是目录内共同自然名制造的确定性歧义，候选顺序 =
-    //      Object.keys(collections) 键序）。两轮选不同collection（第1轮选contoso-trade、第2轮选
-    //      fabrikam-retail）避免同一歧义样本反复考同一条路径；问得对（候选清单+问句）与选得对（落到被选中
+    //   ③ 两次歧义澄清-选择，线程结构与移植前原版同构：第一次歧义（"contoso"→contoso-trade /
+    //      contoso-logistics）就是 B/C 两个线程——澄清后选中的 contoso-trade 续查、跨轮召回、
+    //      与另一候选比较，另一候选随后也被单独查询；第二次歧义（"fabrikam"→fabrikam-retail /
+    //      fabrikam-wholesale）是 D/E 两个线程。候选都是目录内共同自然名制造的确定性歧义，候选顺序 =
+    //      Object.keys(collections) 键序。问得对（候选清单+问句）与选得对（落到被选中
     //      collection）分别由 clarificationShapeNotes 与 selectionNote 守；第二次歧义发生在会话已单独
-    //      查过 contoso-trade 与 alpha 之后，正是 D-072 "名称类请求被会话实体静默代解析"的复现窗口——若模型
+    //      查过 contoso 一对与 alpha 之后，正是 D-072 "名称类请求被会话实体静默代解析"的复现窗口——若模型
     //      不再搜索直接用会话实体出数，澄清形状判定会红，那是要报的发现而不是脚本错误。
+    //      每个被召回/比较的线程都必须先有成功查询（2026-11-07 评审 major：原移植版留了个从未
+    //      查询的 beta 线程，召回轮与比较轮因此两难——诚实答"没查过"被判缺框定语，真去查又被
+    //      past 金额判判无来源）。
     //   ④ 跨轮召回：金额型召回 5 次（第 6/11/20/24/27 轮）+ collection名单召回 1 次（第 19 轮）。
     //      召回轮必须给真实数且带框定语（recallMissed + recallFramingNote，X1 第3轮同款），
     //      名单召回轮必须报得出此前真实查过的collection，总结轮必须覆盖 ≥2 个collection（X1 第7轮同款）。
@@ -1602,8 +1638,14 @@ const CASES: Case[] = [
     id: 'C2', group: 'C 长会话', intent: '30 轮混合对话：4 collection轮转的线程隔离、话题切换、澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩',
     run: async () => {
       const { send, assembly } = await boot();
-      // 线程：A=alpha、B=beta、C=locked-one、D=alpha-group、E=not_found 错误态、
-      // F=contoso 歧义对、G=fabrikam 歧义对。
+      // 线程（与移植前原版同构）：A=alpha（主线，查 1-3/16/21，召回 5/23）、
+      // B=contoso-trade（第一次歧义对的首选：澄清 6→选 7→续查 8→召回 10→比较 12/24）、
+      // C=contoso-logistics（第一次歧义对的另一候选：查 11→比较 12→重查 25→召回 26/27）、
+      // D=fabrikam-retail（第二次歧义对的首选：澄清 13→选 14）、
+      // E=fabrikam-wholesale（第二次歧义对的另一候选：查 15）、F=not_found 错误态。
+      // 每个被召回/比较的线程都必须先有成功查询——原移植版把 beta 留成从未查询的线程，
+      // 召回轮（第 10 轮）与比较轮（第 12/24 轮）因此既不能诚实答"没查过"（缺框定语）
+      // 也不能真去查（past 金额判无来源），2026-11-07 评审记为 major。
       // 轮次文案照 C1 的写法（短句、口语、"collection/current window/just now"、先查后聊）。
       const script: ScriptLine[] = [
         { text: '你好，你能做什么？', tasks: [] },
@@ -1612,26 +1654,26 @@ const CASES: Case[] = [
         { text: 'also check W1', tasks: ['A'] },
         { text: 'thanks, let us chat: what month is it?', tasks: [] },
         { text: 'just now which two windows had the highest balance?', tasks: ['A'], past: true, recall: true },
-        { text: 'help me check contoso record value', tasks: ['F'] },
-        { text: '第一个', tasks: ['F'] },
-        { text: 'also check W1', tasks: ['F'] },
+        { text: 'help me check contoso record value', tasks: ['B', 'C'] },
+        { text: '第一个', tasks: ['B'] },
+        { text: 'also check W1', tasks: ['B'] },
         { text: 'thanks, different topic: what day is it?', tasks: [] },
-        { text: 'by the way, what did you find for beta just now?', tasks: ['B'], past: true, recall: true },
-        { text: 'what about locked-one?', tasks: ['C'] },
-        { text: 'which has higher balance, beta or locked-one?', tasks: ['B', 'C'], past: true },
-        { text: 'what is fabrikam record value?', tasks: ['G'] },
-        { text: '第一个', tasks: ['G'] },
-        { text: 'what about alpha-group record value?', tasks: ['D'] },
+        { text: 'by the way, what did you find for contoso-trade just now?', tasks: ['B'], past: true, recall: true },
+        { text: 'what about contoso-logistics?', tasks: ['C'] },
+        { text: 'which has higher balance, contoso-trade or contoso-logistics?', tasks: ['B', 'C'], past: true },
+        { text: 'what is fabrikam record value?', tasks: ['D', 'E'] },
+        { text: '第一个', tasks: ['D'] },
+        { text: 'what about fabrikam-wholesale record value?', tasks: ['E'] },
         { text: 'list alpha W1 records', tasks: ['A'] },
         { text: 'thanks, let us chat: can you help me write a weekly report?', tasks: [] },
         { text: 'which collections did we check today?', tasks: ['A', 'B', 'C'], past: true },
         { text: 'report their current window record values', tasks: ['A', 'B', 'C'], past: true, recall: true },
-        { text: 'check gamma-collection record value', tasks: ['E'], past: true },
+        { text: 'check gamma-collection record value', tasks: ['F'], past: true },
         { text: 'what about alpha payable?', tasks: ['A'] },
         { text: 'thanks, let us chat: tell me a joke', tasks: [] },
         { text: 'back to business, what was alpha W1 record value?', tasks: ['A'], past: true, recall: true },
-        { text: 'which has higher balance, alpha or beta?', tasks: ['A', 'B'], past: true },
-        { text: 'query locked-one current window record value again', tasks: ['C'] },
+        { text: 'which has higher balance, alpha or contoso-trade?', tasks: ['A', 'B'], past: true },
+        { text: 'query contoso-logistics current window record value again', tasks: ['C'] },
         { text: 'same as just now?', tasks: ['C'], past: true, recall: true },
         { text: 'which one if different?', tasks: ['C'], past: true },
         { text: 'organize the collections and conclusions we checked today', tasks: [], summary: true },
@@ -2133,14 +2175,20 @@ const CASES: Case[] = [
       }
       // ⑤ T5/T6（window切换）：W2 必须出现、必须真查。第5轮选 "the second one" 落到
       //    contoso-logistics——该 collection 只有 W1（夹具刻意不给 W2 键），问 W2 的合法回复是
-      //    "该window无数据"；若模型把 W1 的 450 当成 W2 的答案呈上，amountNote 的全轮金额尺会红。
-      //    不再机械断言"该window只应无数据"，只确认 W2 出现且发生了真实查询。
-      //    collection是否沿用不机械判——无数据答案下换错collection无数可露，由人工看回复。
+      //    "该window无数据"或"0 + 说明"。因此 clarified 格局下恢复硬断言（2026-11-07 评审
+      //    blocking ②：所选 collection 的 W2 无数据是确定性事实，删掉断言会把"把 W1 的 450
+      //    当 W2 答案呈上"这类旧窗口数字冒充放行）：非零金额若所在分句既没点名别的 window
+      //    也不是对比/历史 framing，即旧窗口数字冒充本轮答案。未澄清格局下第5轮续的是 alpha
+      //    线程，alpha W2 有真实数据（800），不断言。
       const ps = turns[WINDOW_SWITCH]!;
       if (!windowMentioned(ps.reply, 'W2')) notes.push(`第${WINDOW_SWITCH + 1}轮window切换未体现 W2：「${ps.text}」`);
       if (ps.calls === 0) notes.push(`第${WINDOW_SWITCH + 1}轮window切换零平台调用：「${ps.text}」`);
-      // 注：不调用 windowSwitchAmounts——dummy 夹具的 W2 有无数据随 collection 而变
-      // （alpha W2 有数据、contoso-logistics W2 无键），旧"W2 应无数据"断言不再成立。
+      if (clarified) {
+        const staleWindow = windowSwitchAmounts(ps, 'W2', X1_WINDOWS);
+        if (staleWindow.length) {
+          notes.push(`第${WINDOW_SWITCH + 1}轮把旧window（W1）的数字作为 W2 的结果呈现（contoso-logistics 只有 W1，W2 无数据）：${formatAmounts(staleWindow)}`);
+        }
+      }
       // ⑥ T7（总结，D-071）：必须覆盖 ≥2 个不同collection（不得塌缩成最后一个）；金额须与本会话
       //    真实查到的值一致（算术派生单列信息性 note）。
       const sm = turns[SUMMARY]!;
