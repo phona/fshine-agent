@@ -58,7 +58,7 @@ import {
   isDerivedAmount,
   isVerifiedArithmetic,
 } from './eval/amount-criteria';
-import { MOCK_ACCOUNTS, MOCK_ITEMS } from './eval/dummy-fixture';
+import { MOCK_ACCOUNTS, MOCK_COLLECTION_WINDOWS, MOCK_ITEMS } from './eval/dummy-fixture';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -1159,13 +1159,23 @@ function collectionQueryHits(records: AuditRecord[]): string[] {
   const hits: string[] = [];
   for (const record of records) {
     if (record.refused) continue;
+    if ((record.exitCode ?? 0) !== 0) continue;
     if ((record.script ?? '') !== 'dummy.query') continue;
     const collection = flagValue(record.args, '--collection');
-    if (!collection) continue;
+    if (!collection) continue; // QUERY_REQUIRED 失败，无 items 可给
     const exact = MOCK_ACCOUNTS.filter((name) => name === collection);
     const matched = exact.length === 1 ? exact : MOCK_ACCOUNTS.filter((name) => name.includes(collection));
     if (matched.length !== 1) continue; // 歧义/未命中时 mock 根本到不了 items
-    hits.push(...(MOCK_ITEMS[matched[0]!] ?? []));
+    const name = matched[0]!;
+    // 成功查询才算"数据在手"（2026-11-07 评审 major）：夹具 doQuery 对 window 不在
+    // col.windows 的查询回 WINDOW_NO_DATA（not_found，进程退出码仍 0）——exitCode 区分
+    // 不了，按夹具语义用 args + MOCK_COLLECTION_WINDOWS 重算：该 (collection, window)
+    // 必须真有数据；未带 --window 时夹具返回全量 items。失败查询（如 dummy.query
+    // --collection beta --window W2）不再给 beta 的 items——X2 对诚实说明无数据的回复
+    // 不再误判"数据在手却未呈现"。
+    const window = flagValue(record.args, '--window') ?? flagValue(record.args, '--round');
+    if (window && !(MOCK_COLLECTION_WINDOWS[name] ?? []).includes(window)) continue;
+    hits.push(...(MOCK_ITEMS[name] ?? []));
   }
   return [...new Set(hits)];
 }
