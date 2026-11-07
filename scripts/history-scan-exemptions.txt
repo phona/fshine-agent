@@ -1,0 +1,26 @@
+# scripts/history-scan-exemptions.txt —— 门②同口径豁免清单（D-191）
+#
+# 口径与 why 见 scripts/history-sensitive-scan.sh 头注释。本清单是提交进仓的登记数据，
+# 改动必须同步 docs/debt-ledger.md 的 D-191 销账记录（清单改必同步 ledger，互相引用）。
+#
+# 安全底线：新 commit 永不在清单内。清单是冻结的历史登记，只覆盖平台实例名在
+# 档案、改造史与已移除文件里的留存；未来任何新 commit（哪怕消息体里）出现真实
+# 敏感数据都照样红。
+#
+# 格式（每行一条；空行与 # 开头为注释）：
+#   archive <仓库内路径>   档案路径：与门①档案豁免同半径，该文件全部 diff 行豁免
+#                          （现有内容 + 删除行改造史）。
+#   commit <完整 40 位 SHA> 已登记改造 commit：该 commit 的 diff 行与 message 行豁免
+#                          （脱敏/中性化/表征冻结工作在测试文件与消息体里的自述留存）。
+#   已移除文件（如 pp-waves-c.json）不用登记：按「git ls-files 不存在」机械判定。
+#
+# 档案三类（= 门① 的豁免半径）：
+archive docs/debt-ledger.md
+archive docs/change-safety.md
+archive AGENTS.md
+# 已登记改造 commit（D-191 实测五处分布里的第 3~5 处，sha256 前 12 位 b76deef1ee8c 的
+# 平台实例名留存；登记理由见 debt-ledger D-191 销账记录）：
+commit 053343e221e80bf973a71ff327820793b0300a12
+commit 8c9e6848e1267a979fb1505605de88cd85488c32
+commit 0ae2833512dc3eb3fcbc966c82cd09a40145949d
+commit 7cb814911c03cedda5ce375ec6d8e4b7ea411281
