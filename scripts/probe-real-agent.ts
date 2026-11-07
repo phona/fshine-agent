@@ -66,6 +66,27 @@ import {
   isVerifiedRatio,
   isVerifiedTotal,
 } from './eval/amount-criteria';
+
+/**
+ * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
+ * 2026-11-08 评审 major：双语化曾把原中文「已按要求先申报」替换成「已按要求先
+ * declaration」，中文系统提示下的既有回归检测因此失效。保留中文原形（申报/主 Agent/
+ * 宿主）+ 英文形态（route_current_turn / main agent / host / PLAN 三态）。
+ * 「已按要求先申报/declaration」是有中文框架的复合措辞，**不**放宽成裸 declaration——
+ * 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红），其协议形状已由
+ * route_current_turn 一支覆盖。
+ */
+const PROTOCOL_LEAK_RE = /主 Agent|route_current_turn|已按要求先申报|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i;
+
+/**
+ * 实体是否被**完整提及**（2026-11-08 评审 major）：名称后不连字符——"alpha-group"、
+ * "contoso-trade-item-1" 里的 alpha / contoso-trade 是更长名字的一段，不算独立提及。
+ * 旧的 reply.includes(name) 会把只提 alpha-group 的总结计成两个 collection，绕过
+ * D-071 的总结塌缩断言（X1 的 plan/recall 覆盖计数同款问题）。
+ */
+function entityMentioned(reply: string, name: string): boolean {
+  return new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!-)`).test(reply);
+}
 import { MOCK_ACCOUNTS, MOCK_COLLECTION_WINDOWS, MOCK_ITEMS } from './eval/dummy-fixture';
 
 /**
@@ -888,11 +909,11 @@ function c2DesignNotes(input: {
  */
 function c2RunNotes(turns: Turn[], chitchat: readonly number[], summaryIdx: number): string[] {
   const notes: string[] = [];
-  const rotated = MOCK_ACCOUNTS.filter((name) => turns.some((t) => t.calls > 0 && t.reply.includes(name)));
+  const rotated = MOCK_ACCOUNTS.filter((name) => turns.some((t) => t.calls > 0 && entityMentioned(t.reply, name)));
   if (rotated.length < 4) notes.push(`collection轮转只真实覆盖 ${rotated.length}/4 个 mock collection：${rotated.join('、') || '无'}`);
   const switches = topicSwitches(turns, chitchat);
   if (switches < 3) notes.push(`查询↔闲聊话题切换只有 ${switches} 次（设计 ≥3）`);
-  const inSummary = MOCK_ACCOUNTS.filter((name) => turns[summaryIdx]!.reply.includes(name));
+  const inSummary = MOCK_ACCOUNTS.filter((name) => entityMentioned(turns[summaryIdx]!.reply, name));
   if (inSummary.length < 2) {
     notes.push(`总结塌缩成 ${inSummary.length} 个collection（本会话跨 4 个collection，总结不得只剩最后一个）：命中 ${inSummary.join('、') || '无'}`);
   }
@@ -1571,7 +1592,7 @@ const CASES: Case[] = [
       // 「已按要求先declaration」是有中文框架的复合措辞，**不**放宽成裸 declaration——
       // 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红），其协议形状已由
       // route_current_turn 一支覆盖。
-      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i.test(turn.reply));
+      const leaked = turns.filter((turn) => PROTOCOL_LEAK_RE.test(turn.reply));
       if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
       // 只在"回复把某个collection当成本轮已查结果"时才算漂移；在澄清问句里点名collection是正确行为
       const drift = turns.filter((turn) => /beta/.test(turn.text) === false && /beta/.test(turn.reply)
@@ -1659,7 +1680,7 @@ const CASES: Case[] = [
       // ── C1 同款三条基线（保持与 C1 可比：漂移/变慢/内部协议泄漏）──
       const slow = turns.filter((turn) => turn.ms > 120_000);
       if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
-      const leaked = turns.filter((turn) => /主 Agent|route_current_turn|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i.test(turn.reply));
+      const leaked = turns.filter((turn) => PROTOCOL_LEAK_RE.test(turn.reply));
       if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
       // 漂移尺从 C1 的单一collection扩到全部 4 个 mock collection（accountDrift 只查"用户点名了collection"的轮次，
       // 闲聊/召回/总结轮点名collection是正确行为，天然不误伤）。
@@ -2142,7 +2163,7 @@ const CASES: Case[] = [
       if (woundDown) {
         notes.push('（信息性）第1轮计划被宿主 wind-down 收尾：申报的步骤多数没有平台执行，数据改由后续轮次呈现');
       } else {
-        const missing = X1_PLAN_COLLECTIONS.filter((name) => !t1.reply.includes(name));
+        const missing = X1_PLAN_COLLECTIONS.filter((name) => !entityMentioned(t1.reply, name));
         if (missing.length) notes.push(`第1轮回复缺collection：${missing.join('、')}`);
         if (!extractAmounts(t1.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
           notes.push(`第1轮未呈现 alpha ${X1_WINDOW_NONZERO} 的真实值 ${X1_WINDOW_NONZERO_AMOUNT}`);
@@ -2166,7 +2187,7 @@ const CASES: Case[] = [
       if (!extractAmounts(t3.reply).some((a) => a.value === X1_WINDOW_NONZERO_AMOUNT)) {
         notes.push(`第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「${t3.text}」→ ${t3.reply.slice(0, 80)}`);
       }
-      const covered = X1_PLAN_COLLECTIONS.filter((name) => t3.reply.includes(name)).length;
+      const covered = X1_PLAN_COLLECTIONS.filter((name) => entityMentioned(t3.reply, name)).length;
       // window 覆盖回退词双语化：中文侧原样保留（"6 到 9 月"/"六到九"是移植前语料的
       // 月份区间读法）；英文侧补 June to September / 6-9 / 6 to 9（X1 第1/3 轮 send
       // 是"W1、W1、W2、W2 各期"与"just now，alpha 查到了哪几个月"，模型可能用月份区间复述）。

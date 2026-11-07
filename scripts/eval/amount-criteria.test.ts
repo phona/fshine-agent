@@ -239,6 +239,11 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.unattributed.map((a) => a.value)).toContain(600);
   });
 
+  it('blocking：差额两侧必须不相交——"beta W1 difference is 800"（只能 1000−200，复用 200）', () => {
+    const v = classify('beta W1 difference is 800; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
   it('blocking：差额验证不接受纯加总——"beta W1 difference is 1000"（1000 是三项总额，不是差额）', () => {
     const v = classify('beta W1 difference is 1000; please confirm.');
     expect(v.unattributed.map((a) => a.value)).toContain(1000);
@@ -382,7 +387,7 @@ describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某
 describe('isVerifiedArithmetic：算术豁免的具体验证', () => {
   it('互异真实值的带符号组合成立（C2 实测形态），同值复用/派生中转不成立（评审反例）', () => {
     const pool = [1500, 600, 450];
-    expect(isVerifiedArithmetic(2100, pool)).toBe(true);   // 1500+600（纯函数层认带符号组合；把和说成差由 classify 的列举操作数约束收口）
+    expect(isVerifiedArithmetic(2100, pool)).toBe(false);  // 1500+600 是纯和——互斥子集规则下不是差额（实体实际聚合走 isSum/合计通道）
     expect(isVerifiedArithmetic(1650, pool)).toBe(true);   // (1500+600)-450（跨实体真差额）
     expect(isVerifiedArithmetic(4.7, pool)).toBe(true);    // 2100/450 约 4.7（聚合值之比）
     expect(isVerifiedArithmetic(100, [1200, 800, 1500, 600])).toBe(true); // 1500+600-1200-800
