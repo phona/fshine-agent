@@ -95,6 +95,12 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
 
+  it('blocking：直接陈述的 item 值严格核对——"contoso-trade-item-2 is 1200"（真实 600，1200=600+600 蹭不来）', () => {
+    const v = classify('contoso-trade-item-2 record value is 1200');
+    expect(v.unattributed.map((a) => a.value)).toContain(1200);
+    expect(v.derived.map((a) => a.value)).not.toContain(1200);
+  });
+
   it('跨实体差额降级保留：点名实体的真实值并集作池——"2100（1500+600）与 2000（1200+800）相差 100"', () => {
     const v = classify('alpha 2000（1200+800）、contoso-trade 2100（1500+600），两者相差 100');
     expect(v.unattributed).toEqual([]);

@@ -191,11 +191,13 @@ export function classifyErrorStateAmounts(
         || REAL_DATA_TOKENS.some((token) => clause.includes(token));
       // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
       // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
+      // 直接陈述的值**严格**等于该实体真实值才算对上（2026-11-07 评审 blocking：算术豁免
+      // 放过"contoso-trade-item-2 is 1200"——item 真实 600，1200=600+600 且是别的实体的
+      // 种子值；算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
       const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
       const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
       const entityOk = specific.length === 0
-        || specific.some((entity) => entity.values.includes(amount.value)
-          || isVerifiedArithmetic(amount.value, entity.values));
+        || specific.some((entity) => entity.values.includes(amount.value));
       const windowOk = windowClaimOk(clause, specific);
       if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
       const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
