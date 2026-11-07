@@ -151,6 +151,7 @@ while IFS= read -r e_prefix; do
 $e_prefix"
   fi
 done < "$ENTRY_TMP"
+rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
 
 # 一次性dump 全历史 patch，再逐串 grep：与"每条串各跑一次 git log --all -p | grep"
 # 完全同内容同计数（grep -c 数的是行），只是把 13MB 的 git 输出从 N 次降成 1 次。
@@ -247,12 +248,9 @@ while IFS= read -r line || [ -n "$line" ]; do
   entry_match=0
   if [ -n "$ENTRY_SET" ]; then
     lhs_prefix=$(printf '%s' "$lhs" | sha256sum 2>/dev/null | cut -c1-12)
-    while IFS= read -r e_prefix; do
-      if [ "$e_prefix" = "$lhs_prefix" ]; then
-        entry_match=1
-        break
-      fi
-    done <<< "$ENTRY_SET"
+    if printf '%s\n' "$ENTRY_SET" | grep -qFx "$lhs_prefix"; then
+      entry_match=1
+    fi
   fi
 
   # ── 同口径豁免：命中行按 diff 头归文件，三类豁免 ──
