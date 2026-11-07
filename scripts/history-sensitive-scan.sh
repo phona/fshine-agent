@@ -164,10 +164,9 @@ rm -f "$ARCHIVE_TMP" "$COMMIT_TMP" "$ENTRY_TMP"
 # 完全同内容同计数（grep -c 数的是行），只是把 13MB 的 git 输出从 N 次降成 1 次。
 PATCH=$(mktemp "${TMPDIR:-/tmp}/history-sensitive-scan.XXXXXX") || exit 2
 TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-tree.XXXXXX") || exit 2
-BASELINE_TREE=$(mktemp "${TMPDIR:-/tmp}/history-scan-baseline-tree.XXXXXX") || exit 2
-NEW_COMMIT_LIST=""
 HITLINES=$(mktemp "${TMPDIR:-/tmp}/history-scan-lines.XXXXXX") || exit 2
-trap 'rm -f "$PATCH" "$TREE" "$BASELINE_TREE" "$NEW_COMMIT_LIST" "$HITLINES"' EXIT INT TERM
+POST_CUTOFF_LIST=""
+trap 'rm -f "$PATCH" "$TREE" "$POST_CUTOFF_LIST" "$HITLINES"' EXIT INT TERM
 if ! git -C "$REPO" log --all -p >"$PATCH"; then
   echo "git log --all -p 失败（取不到全历史即扫不了，不是干净）" >&2
   exit 2
@@ -187,11 +186,7 @@ for ref in refs/remotes/origin/main refs/remotes/github/main refs/heads/main; do
   fi
 done
 if [ -z "$BASELINE_REF" ]; then
-  echo "取不到基线 ref（origin/main / github/main / main 均不存在）——无法验证冻结历史边界，扫不了（退出码 2，不是通过）" >&2
-  exit 2
-fi
-if ! git -C "$REPO" ls-tree -r --name-only "$BASELINE_REF" >"$BASELINE_TREE"; then
-  echo "git ls-tree -r $BASELINE_REF 失败（取不到基线树清单即无法归口径，不是干净）" >&2
+  echo "取不到基线 ref（origin/main / github/main / main 均不存在）——无法校验 cutoff 是否在基线历史中，扫不了（退出码 2，不是通过）" >&2
   exit 2
 fi
 PATCH_BYTES=$(wc -c <"$PATCH" | tr -d ' ')
@@ -236,15 +231,13 @@ while IFS= read -r c_sha; do
 done < "$COMMIT_CHECK_TMP"
 rm -f "$COMMIT_CHECK_TMP"
 
-# 新 commit 集合（不在基线 ref 历史中的 commit）：用于已移除文件豁免的 commit 级闸门。
-NEW_COMMIT_LIST=$(mktemp "${TMPDIR:-/tmp}/history-scan-new-commits.XXXXXX") || exit 2
-if [ -n "$BASELINE_REF" ]; then
-  git -C "$REPO" rev-list --all --not "$BASELINE_REF" >"$NEW_COMMIT_LIST" 2>/dev/null || {
-    echo "git rev-list --all --not $BASELINE_REF 失败（取不到新 commit 集合即无法归口径，不是干净）" >&2
-    exit 2
-  }
-else
-  : > "$NEW_COMMIT_LIST"
+# cutoff 之后的新 commit 集合：已移除文件类豁免的 commit 级闸门。用冻结 cutoff 而不用
+# 可移动的 main——否则「先加引用、后删文件」的两个 commit 都在 main 历史里时会被豁免
+# （codex review blocking：豁免范围会随 main 前移扩大）。
+POST_CUTOFF_LIST=$(mktemp "${TMPDIR:-/tmp}/history-scan-post-cutoff.XXXXXX") || exit 2
+if ! git -C "$REPO" rev-list --all --not "$CUTOFF_SHA" >"$POST_CUTOFF_LIST" 2>/dev/null; then
+  echo "git rev-list --all --not $CUTOFF_SHA 失败（取不到新 commit 集合即无法归口径，不是干净）" >&2
+  exit 2
 fi
 
 index=0
@@ -356,16 +349,14 @@ while IFS= read -r line || [ -n "$line" ]; do
     printf '%s\n' "$COMMIT_SET" > "$COMMIT_TMP"
 
     exout=$(awk -v linefile="$HITLINES" -v treefile="$TREE" \
-      -v baselinefile="$BASELINE_TREE" -v newcommitfile="$NEW_COMMIT_LIST" \
+      -v postcutofffile="$POST_CUTOFF_LIST" \
       -v archfile="$ARCHIVE_TMP" -v commitfile="$COMMIT_TMP" \
       -v entry_match="$entry_match" '
       BEGIN {
         while ((getline t < treefile) > 0) tree[t] = 1
         close(treefile)
-        while ((getline b < baselinefile) > 0) baseline[b] = 1
-        close(baselinefile)
-        while ((getline n < newcommitfile) > 0) new_commit[n] = 1
-        close(newcommitfile)
+        while ((getline n < postcutofffile) > 0) post_cutoff[n] = 1
+        close(postcutofffile)
         while ((getline n < linefile) > 0) want[n + 0] = 1
         close(linefile)
         while ((getline a < archfile) > 0) { gsub(/[[:space:]]*$/, "", a); if (a != "") archive[a] = 1 }
@@ -388,9 +379,11 @@ while IFS= read -r line || [ -n "$line" ]; do
         # 属 owner 划定的豁免半径；真实敏感数据不在此列（entry 级闸门在上面）。
         if (f in archive) { ea++; return }
         if (f in tree) { er++; return }
-        # 已移除文件类：只对基线祖先 commit 生效——未来「先加引用再删文件」照算。
-        if (f in baseline && !(cur_commit in new_commit)) { erm++; return }
-        er++
+        # 已移除文件类：不在当前树 + commit 是 cutoff 祖先（冻结历史残影）才豁免；
+        # cutoff 之后的新 commit（先加引用再删、重建同名文件）一律照算。
+        if (cur_commit in post_cutoff) { er++; return }
+        erm++
+        return
       }
       /^commit [0-9a-f]{40}/ {
         cur_commit = $2

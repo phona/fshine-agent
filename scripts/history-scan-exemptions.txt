@@ -18,14 +18,14 @@
 #                          扩大。前移 cutoff = 显式可审查动作，必同步 debt-ledger D-191。
 #   cutoff <完整 40 位 SHA> 冻结截止点：改造 commit 类的校验边界（见上）。本清单登记时
 #                          取当时 main 的 tip。
-#   已移除文件须满足「基线树存在 + 当前 commit 是基线祖先」才豁免；不在基线树中的已移除
-#   文件按新增后删除处理，不豁免（pp-waves-c.json 已移至 archive 行登记，见下）。
+#   已移除文件（不在清单登记，机械判定）：文件不在当前树 + commit 是 cutoff 祖先才豁免
+#   （冻结历史里的残影，如已删除的误提交方案文件）；cutoff 之后的新 commit 一律照算
+#   （未来「先加引用再删文件」或重建同名文件都逃不掉）。
 #
-# 档案四类（= 门① 的豁免半径 + 已移除误提交文件）：
+# 档案三类（= 门① 的豁免半径；已移除误提交文件归「已移除文件」机械判定，不登记路径）：
 archive docs/debt-ledger.md
 archive docs/change-safety.md
 archive AGENTS.md
-archive pp-waves-c.json
 # 已登记改造 commit（D-191 实测五处分布里的第 3~5 处，sha256 前 12 位 b76deef1ee8c 的
 # 平台实例名留存；登记理由见 debt-ledger D-191 销账记录）：
 commit 053343e221e80bf973a71ff327820793b0300a12
