@@ -335,6 +335,10 @@ interface Amount {
  * YYYYMM window（W2）、日期/版本号里的数字片段（lookaround 挡连字符与点号相邻片段）。
  * 按数值去重（保留首个原文），零值单列——0/0.00 在平台回复里是格式噪声（credit 0、空结果 0.00）。
  */
+// 金额提取。已知限制（2026-11-07 C2 实测登记，不在本波修）：裸整数分支只收 ≥3 位，
+// 两位数编造额（模型给不存在的 alpha W2 编了「25、10、5，合计 40」）因此不进提取器、
+// 逃过金额尺——收两位数会把窗口码/条数/步号（「2 条」「第 2/5 步」）全搅进来，
+// 那是另一个设计题（按「所在分句有金额语境」收窄），留待专门一轮。
 const AMOUNT_PATTERN = /\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?\s*[万亿]|\d+\.\d+(?![\d%％])|(?<![\d.])\d{3,}(?![\d.%％])|(?<![\d.])0(?![\d.])/g;
 
 /**
@@ -428,6 +432,17 @@ function allowedAmounts(turns: Turn[], script: ScriptLine[], index: number): Set
  * 由已查数字算术得出的新数值（汇总/对比轮的合计、差额）：等于基集里某两个的和或差。
  * 宿主无法在"算术"与"编造"间确定性区分（§9 记录的同族问题），探针侧只把"算不出来"的金额送审。
  */
+/**
+ * 算术框架措辞（中英）：模型自己标注"这是算出来的"——高出/相差/合计/多出/倍数/total/
+ * difference/combined/higher by…。与 isDerivedAmount 的配对求和取差合起来判定"诚实算术"，
+ * 覆盖 ratio 形态（"约为其 4.7 倍"不是任何两个真实值的和差，但是标好的算术）。
+ * 第二个条件（调用处判）= 同一回复里有 ≥2 个真实数值——模型把账摊开了（show your work），
+ * 不是凭空蹦一个数；凭空一个数即便带"合计"措辞也照旧红。
+ * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
+ * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
+ */
+const ARITHMETIC_FRAMING_RE = /高出|相差|合计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
+
 function isDerivedAmount(value: number, base: Set<number>): boolean {
   const values = [...base];
   return values.some((a) => values.some((b) => a + b === value || Math.abs(a - b) === value));
@@ -482,12 +497,15 @@ function amountNote(turns: Turn[], script: ScriptLine[], index: number, options:
   if (!outside.length) return [];
   const line = script[index]!;
   const allowed = allowedAmounts(turns, script, index);
-  // 算术派生的新数值（合计/差额）三种处理：推理轮（derived）直接放行——算术正是这类轮次该做的事；
-  // 汇总轮（derivedLabel）单列信息性 note——算术可见，但不与"真无来源"混为一张脸；其余轮次
-  // （E1/F1/G1/G2 及普通轮次）并入硬 note，与既有行为一致。
-  const arithmetic = outside.filter((a) => isDerivedAmount(a.value, allowed));
+  // 算术派生的新数值（合计/差额/倍数）四种处理：推理轮（derived）直接放行——算术正是这类轮次该做的事；
+  // 汇总轮（derivedLabel）与召回/比较轮（line.past，见 ARITHMETIC_FRAMING_RE）单列信息性 note——算术
+  // 可见，但不与"真无来源"混为一张脸；其余轮次（E1/F1/G1/G2 及普通轮次）并入硬 note，与既有行为一致。
+  const realInReply = extractAmounts(turns[index]!.reply).filter((a) => allowed.has(a.value));
+  const clauseOf = (a: Amount): string => turns[index]!.reply.split(CLAUSE_SPLIT).find((part) => part.includes(a.raw)) ?? '';
+  const arithmetic = outside.filter((a) => isDerivedAmount(a.value, allowed)
+    || (line.past && realInReply.length >= 2 && ARITHMETIC_FRAMING_RE.test(clauseOf(a))));
   const tolerated = options.derived ? arithmetic : [];
-  const soft = options.derivedLabel ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
+  const soft = (options.derivedLabel || line.past) ? arithmetic.filter((a) => !tolerated.includes(a)) : [];
   const hard = outside.filter((a) => !tolerated.includes(a) && !soft.includes(a));
   const where = `第${index + 1}轮「${turns[index]!.text}」`;
   const topic = line.tasks.length ? `（该轮话题：${line.tasks.join('+')}）` : '';
@@ -816,7 +834,10 @@ const H2_SUMMARY = 7;
  * （C2 五轮召回 send 全英文，"earlier"/"previously" 是唯一可达形态）。
  */
 function recallFramingNote(turn: Turn): string | null {
-  if (/早前|历史|本会话|之前|just now|前述|上述|前面|早些时候|此前|earlier|previously|\bbefore\b|as found earlier|earlier in this conversation|from our earlier|in this session|you asked earlier/i.test(turn.reply)) return null;
+  // 框定语表（2026-11-07 C2 实测补）：模型用「上一条关于 contoso-trade 的查询结果」复述——
+  // 「上一条 / 上一轮 / 刚才」都是自然的框定形态，缺了它们 D-070 在中文回复上假红。
+  // 英文侧 just now / earlier / previously 原有，保留。
+  if (/早前|历史|本会话|之前|上一条|上一轮|刚才|前述|上述|前面|早些时候|just now|earlier|previously|\bbefore\b|as found earlier|earlier in this conversation|from our earlier|in this session|you asked earlier/i.test(turn.reply)) return null;
   return `召回轮复述缺框定语（D-070 判据：复述旧结果须带"本会话早前查询"类措辞）：「${turn.text}」→ ${turn.reply.slice(0, 80)}`;
 }
 
@@ -1704,8 +1725,8 @@ const CASES: Case[] = [
         { text: 'what about fabrikam-wholesale record value?', tasks: ['E'] },
         { text: 'list alpha W1 records', tasks: ['A'] },
         { text: 'thanks, let us chat: can you help me write a weekly report?', tasks: [] },
-        { text: 'which collections did we check today?', tasks: ['A', 'B', 'C'], past: true },
-        { text: 'report their current window record values', tasks: ['A', 'B', 'C'], past: true, recall: true },
+        { text: 'which collections did we check today?', tasks: ['A', 'B', 'C', 'D', 'E'], past: true },
+        { text: 'report their current window record values', tasks: ['A', 'B', 'C', 'D', 'E'], past: true, recall: true },
         { text: 'check gamma-collection record value', tasks: ['F'], past: true },
         { text: 'what about alpha payable?', tasks: ['A'] },
         { text: 'thanks, let us chat: tell me a joke', tasks: [] },
