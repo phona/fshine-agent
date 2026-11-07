@@ -1931,3 +1931,13 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：① `npx vitest run --project unit` 全绿；② e2e 失败集合与改前逐文件比较不增大（集合比较，不拿总数糊弄）；③ `npm run ci` 全绿；④ `grep -rn FSHINE_PLATFORM_ROOT` 全仓（除 git 历史）应为空或仅剩档案登记；⑤ harness 拿不到配置时 fail-closed 且报错说人话（不抛原始异常、不提 FSHINE_PLATFORM_ROOT）。
 - **归属波次 / 限期**：harness-config-unify；合入前。
 - **状态**：待办（PR #5 已开，待验证）。
+
+### D-197 · acceptance 5.1 实测暴露：写链在宿主确认门之外闭环 + 隔离复核间歇失败
+
+- **位置**：宿主侧 `packages/agent/src/pi-coding-driver.ts:1809-1817`（提案创建拦截三态审计）、`packages/agent/src/proposal-review.ts:77-130`（隔离复核门）；夹具侧 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:615-625`（`call` 模式按 protocol 列把 `dummy.proposal`/`dummy.proposal-commit` 路由到 `doProposalCreate`/`doProposalCommit`——bash 直连写链的入口）；验收侧 `scripts/acceptance.ts`（sessionKey，见下）。
+- **触发 / 根因**（2026-11-07 acceptance 5.1 实测，四路证据坐实）：该跑宿主根本没铸出确认码——隔离复核 fail-closed（审计行 `serve_gate:proposal_create` / GATE_BLOCKED / `PROPOSAL FAILED：提案隔离复核未通过，未发确认码，请重新发起录入`，`change_intents` 零行），宿主把 worker 放回去后，**worker 用被放行的 bash 直调平台 CLI 把写链整个走完了**（`bin/dummy proposal src/dummy/scripts/proposal.js tmp/…/proposal.json` → `bin/dummy proposal status --proposal-id …` → `bin/dummy call --file call-proposal.json`/`call-commit.json`/`call-verify.json`，全部 `serve_gate:bash` status=ok；夹具 proposals.json 里 `prop_… status=committed` 是 worker 自建自投的那份）。模型那句"记录已新增完成并验证通过"是在没有码的前提下自述它绕过宿主的一次写。同一用例单例重跑证明宿主这条路是通的（复核 verdict=consistent、码 `DM994A` 正常出现在确定性回复里、confirmCodeOffered=true），所以 21:43 那次是**间歇失败 + 放行漏洞**的组合，不是模型侧呈现问题。
+- **律法归属**：L2（写路径宿主确认状态的单一来源）/ 改动防线 F1（安全门禁不许被旁路）。
+- **闭环判据**：① 复核门失败后宿主不得把 worker 放回去重试同一写路径——要么终止本轮写意图并向用户说明，要么把该会话的写能力收回（二选一，裁定后实现）；② 宿主 serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口（或其等价封堵：worker 的 bash 不得触达 `dummy.proposal`/`dummy.proposal-commit` 的创建与提交），封堵后重跑 acceptance 5.1：复核失败场景下夹具 `committed` 提案数不增；③ 复核间歇失败的近因定性（10s 隔离模型回合超时 vs 语义不一致——两种都产生空 fields，需在审计行补字段列表才能区分）；④ `npm run ci` + 六守卫全绿。
+- **同轮发现已修（本 PR）**：验收脚本 sessionKey 拼错（`wecom:${user}:${conv}`，而宿主 sessionId = `wecom:${conversationId}`，apps/server/handler.ts:576-577 不含 user 段）——`platform_tasks`/`change_intents` 两条按 session 的查询永远查不到，write-chain 的 intents 恒空、taskId 恒 None，即使宿主写链全对 `intentCreated`/`committed`/`readbackVerified` 仍读 false。修法 = `scripts/acceptance.ts` 三处统一走 `sessionKeyOf(spec)`（先存缺陷，d6e3fc8 建脚本时就写错，非移植回归）。
+- **归属波次 / 限期**：宿主修复单独一轮（不混进 eval 域移植 PR）；公开推送前。
+- **状态**：待办（放行漏洞 + 复核近因未修；尺子缺陷已修待复跑验证）。
