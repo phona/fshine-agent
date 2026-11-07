@@ -212,12 +212,18 @@ function seedState() {
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
-function saveJson(file, data) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n'); }
-function loadState() { const p = statePaths(); const s = loadJson(p.stateFile, null); if (!s || !s.collections) { const seed = seedState(); saveJson(p.stateFile, seed); return seed; } return s; }
+// 原子写（2026-11-08 修）：writeFileSync 是截断+写，读者在半写窗口读到不完整 JSON 会触发
+// loadPlans/loadProposals 的重新初始化——把累计的计划/提案/调用计数连锅端。读者多起来后
+// （宿主每次建会话都问一次 plan current）这个窗口必被踩：实测 C2 跑批 ledgerCalls 变负、
+// 模型工具调用被拒后开始说元话语。tmp + renameSync 在同一文件系统上原子替换，消除半写窗口。
+function saveJson(file, data) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n'); fs.renameSync(tmp, file); }
+function loadState() { const s = loadJson(statePaths().stateFile, null); return (s && s.collections) ? s : seedState(); }
 function saveState(s) { saveJson(statePaths().stateFile, s); }
-function loadPlans() { const p = statePaths(); const s = loadJson(p.planFile, null); if (!s || !s.plans) { const init = { plans: {}, tasks: {} }; saveJson(p.planFile, init); return init; } return s; }
+// loader 一律只读不写（2026-11-08 修）：读失败/缺键时返回空状态即可，写回初始化是破坏性竞态——
+// 并发的另一个进程刚 saveJson 出新状态，这个进程读到旧内容（或半写内容）后一 save 就把它盖掉。
+function loadPlans() { const s = loadJson(statePaths().planFile, null); return (s && s.plans) ? s : { plans: {}, tasks: {} }; }
 function savePlans(s) { saveJson(statePaths().planFile, s); }
-function loadProposals() { const p = statePaths(); const s = loadJson(p.proposalFile, null); if (!s || !s.proposals) { const init = { proposals: {} }; saveJson(p.proposalFile, init); return init; } return s; }
+function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
 function audit(row) { const f = statePaths().auditFile; if (!f) return; try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n'); } catch { /* audit is best-effort */ } }
 function emit(op, status, data, error) {
