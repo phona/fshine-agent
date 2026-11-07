@@ -73,6 +73,33 @@ describe('错误态金额三分：评审反例（必须红）', () => {
     expect(v.assertedCalibers).toEqual([]);
     expect(v.unattributed.map((a) => a.value)).toContain(500);
   });
+
+  it('blocking：重复金额逐次核对——首句合法、第二句编造口径，整笔照红', () => {
+    const v = classify('beta W1 record value is 500; beta payable balance is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.assertedCalibers.map((a) => a.caliber)).toContain('payable');
+  });
+
+  it('blocking：重复金额逐次核对——第二句换成无数据 window 照红', () => {
+    const v = classify('beta W1 record value is 500; beta W2 record value is 500; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  });
+
+  it('blocking：算术豁免不得绕过实体/窗口绑定——"beta W2 total is 2000"（2000 算得出但挂无数据组合）', () => {
+    const v = classify('alpha W1 values are 1200 and 800; beta W2 total is 2000; please confirm.');
+    expect(v.unattributed.map((a) => a.value)).toContain(2000);
+    expect(v.derived.map((a) => a.value)).not.toContain(2000);
+  });
+
+  it('跨实体差额降级保留：点名实体的真实值并集作池——"2100（1500+600）与 2000（1200+800）相差 100"', () => {
+    const v = classify('alpha 2000（1200+800）、contoso-trade 2100（1500+600），两者相差 100');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toContain(100);
+  });
+
+  it('实体自身真实值的和算对得上——"beta 合计 800"（500+300）不判无所属', () => {
+    const v = classify('beta 合计 800', 'checkbeta的payablebalance');
+    expect(v.unattributed).toEqual([]);
+  });
 });
 
 describe('错误态金额三分：校准过的诚实形态（必须绿）', () => {

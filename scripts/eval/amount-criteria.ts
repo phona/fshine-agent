@@ -141,14 +141,19 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
 /**
  * 错误态回复的金额三分归类（errorStateNotes 的判定核，探针只做 note 文案组装）：
  *   · 有所属（放行）＝ 分句点名用户没问的 window 码或真实数据标识（pointed），且过了
- *     实体绑定（分句点名实体时金额须属于**最具体**的那个实体——"beta-item-1 … is 300"
- *     不能蹭 collection 级 beta 值集里 beta-item-3 的 300，子串层 some 是放行漏洞，
- *     2026-11-07 评审 blocking）、window×实体有效性（windowClaimOk）与全局值核对；
+ *     实体绑定（分句点名实体时金额须属于**最具体**的那个实体，或可由该实体自身真实值
+ *     算得——"beta 合计 800" 是 500+300 的诚实账，"beta-item-1 … is 300" 蹭不来）、
+ *     window×实体有效性（windowClaimOk）与全局值核对；
  *   · 算术派生（信息性）＝ 加数在**同一分句**里可见（原判据），或分句带算术框架措辞且
- *     加数池扩大到**全回复**的真实值、数字过 isVerifiedArithmetic 具体验证——表格摊账
- *     形态（加数 500/300/200 在表格行、合计 1000 在散文句）分句级看不见，2026-11-07
- *     Y2 实测被误判"无所属"，和值诚实、账摊开了，属算术可见不是编造；
+ *     数字过 isVerifiedArithmetic——加数池点名实体时取**点名实体的真实值并集**（跨实体
+ *     差额"2100−2000 相差 100"的账本），没点名实体时取全回复真实值（表格摊账形态：
+ *     加数 500/300/200 在表格行、合计 1000 在散文句，2026-11-07 Y2 实测）；**window
+ *     无效一律不许降级**——"beta W2 total is 2000"（2000 算得出来但挂在无数据的
+ *     beta W2 上）照旧红（2026-11-07 评审 blocking：算术豁免不得绕过实体/窗口绑定）；
  *   · 无所属（红）＝ 其余；口径编造独立成第三类（assertedCalibers，同样红）。
+ * 同一数值的**每次出现**逐分句核对（2026-11-07 评审 blocking：find 只看首次出现——
+ * "beta W1 record value is 500; beta payable balance is 500" 的第二句被首句的合法
+ * 上下文豁免），任一次出现判红即红；报告按数值/口径去重。
  * 零值不算金额（调用方过滤）；分句按数值边界重匹配（裸串 includes 会把 "500" 命中进 "1500"）。
  */
 export function classifyErrorStateAmounts(
@@ -157,38 +162,52 @@ export function classifyErrorStateAmounts(
   extractAmounts: (text: string) => AmountLike[],
 ): ErrorStateAmountVerdict {
   const asked = askedWindows(userText);
-  const unattributed: AmountLike[] = [];
-  const derived: AmountLike[] = [];
+  const unattributed = new Map<number, AmountLike>();
+  const derived = new Map<number, AmountLike>();
   const asserted = new Map<string, string>();
   // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
   // 500/300/200 推出 1000；凭空数即便带"合计"措辞也推不出来，照旧红。
   const replyRealValues = [...new Set(extractAmounts(reply).map((a) => a.value).filter((v) => REAL_DATA_VALUES.includes(v)))];
+  const parts = reply.split(CLAUSE_SPLIT);
   for (const amount of extractAmounts(reply)) {
     if (amount.value === 0) continue;
     const boundary = new RegExp(`(?<![\\d.,%％])${amount.raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\d.,%％])`);
-    const clause = reply.split(CLAUSE_SPLIT).find((part) => boundary.test(part)) ?? '';
-    // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
-    const caliber = MISSING_CALIBERS.find((c) => clause.includes(c) && !CALIBER_DISCLAIM_RE.test(clause));
-    if (caliber) { asserted.set(caliber, clause); continue; }
-    // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
-    const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
-      && (clause.includes(subject.code) || clause.includes(subject.name)))
-      || REAL_DATA_TOKENS.some((token) => clause.includes(token));
-    // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
-    // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
-    const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
-    const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
-    const entityOk = specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value));
-    const windowOk = windowClaimOk(clause, specific);
-    if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
-    const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
-    const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
-    const framed = ARITHMETIC_FRAMING_RE.test(clause) && isVerifiedArithmetic(amount.value, replyRealValues);
-    if (isSum || framed) derived.push(amount); else unattributed.push(amount);
+    let assertedHit = false;
+    let hard = false;
+    let soft = false;
+    for (const clause of parts.filter((part) => boundary.test(part))) {
+      // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
+      const caliber = MISSING_CALIBERS.find((c) => clause.includes(c) && !CALIBER_DISCLAIM_RE.test(clause));
+      if (caliber) { assertedHit = true; asserted.set(caliber, clause); continue; }
+      // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
+      const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
+        && (clause.includes(subject.code) || clause.includes(subject.name)))
+        || REAL_DATA_TOKENS.some((token) => clause.includes(token));
+      // 实体绑定：只按**最具体**实体核对——被点名长名内含的短名（beta ⊂ beta-item-1、
+      // alpha ⊂ alpha-group）剔除，否则 collection 值集混着其他 item 的值，串台数字照样过。
+      // 该实体自身真实值算得出的和（"beta 合计 800"=500+300）也算对得上。
+      const named = ENTITY_REAL_VALUES.filter((entity) => clause.includes(entity.name));
+      const specific = named.filter((entity) => !named.some((other) => other !== entity && other.name.includes(entity.name)));
+      const entityOk = specific.length === 0
+        || specific.some((entity) => entity.values.includes(amount.value)
+          || isVerifiedArithmetic(amount.value, entity.values));
+      const windowOk = windowClaimOk(clause, specific);
+      if (pointed && entityOk && windowOk && REAL_DATA_VALUES.includes(amount.value)) continue;
+      const summands = extractAmounts(clause).filter((a) => a.value !== amount.value && REAL_DATA_VALUES.includes(a.value));
+      const isSum = summands.some((a) => summands.filter((b) => b !== a).some((b) => a.value + b.value === amount.value));
+      // 降级池：点名实体时取点名实体的真实值并集（跨实体差额的账本），没点名实体时取
+      // 全回复真实值（表格摊账）；window 无效不许降级（评审 blocking ②）。
+      const pool = specific.length ? [...new Set(specific.flatMap((entity) => entity.values))] : replyRealValues;
+      const framed = ARITHMETIC_FRAMING_RE.test(clause) && windowOk && isVerifiedArithmetic(amount.value, pool);
+      if (isSum || framed) { soft = true; } else { hard = true; }
+    }
+    if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
+    if (hard) unattributed.set(amount.value, amount);
+    else if (soft) derived.set(amount.value, amount);
   }
   return {
-    unattributed,
-    derived,
+    unattributed: [...unattributed.values()],
+    derived: [...derived.values()],
     assertedCalibers: [...asserted].map(([caliber, clause]) => ({ caliber, clause })),
   };
 }
