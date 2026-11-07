@@ -68,6 +68,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
       '第3轮召回未给出真实金额（D-070：承认查过但拒绝给数）：「刚才alpha查到了哪几个window，数字是多少」→ ……',
       '第3轮召回只覆盖 2/4 个window',
       '第5轮window切换后仍呈现非零金额（mock 事实：W2 两候选collection均无balance键 → PERIOD_NO_DATA，该window只应有"无数据"或 0）：61,000',
+      '第6轮把旧window（W1）的数字作为 W2 的结果呈现（contoso-logistics 只有 W1，W2 无数据）：450',
       '第5轮window切换未体现 W2：「202608 呢」',
       '第5轮window切换零平台调用：「202608 呢」',
       '第3轮未体现window W2：「对了，那它 202608 呢」→ ……',
