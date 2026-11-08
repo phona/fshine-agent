@@ -261,12 +261,13 @@ export function writeUnifiedReport(dir: string, report: UnifiedReport): { json: 
 /** 人读摘要（终端用）：聚合指标 + 阶梯分布。 */
 export function summarizeReport(report: UnifiedReport): string {
   const rungCounts = new Map<string, number>();
-  for (const line of report.calls) rungCounts.set(line.rung, (rungCounts.get(line.rung) ?? 0) + 1);
+  for (const line of report.calls) rungCounts.set(line.rung, rungCounts.get(line.rung) ?? 0 + 1);
   const rungs = [...rungCounts.entries()].map(([rung, count]) => `${rung} ${count}`).join('、') || '无调用';
   const tokenNote = report.metrics.tokens === undefined ? 'usage 无证据' : `tokens ${report.metrics.tokens}`;
   return [
     `用例 ${report.metrics.passed}/${report.metrics.cases}（通过率 ${(report.metrics.passRate * 100).toFixed(0)}%）`,
     `干预 ${report.metrics.interventions} 次`,
+    `门拒绝 ${report.metrics.gateRefusals} 次`,
     `安全违规 ${report.metrics.safetyViolations}`,
     `耗时 ${(report.metrics.durationMs / 1000).toFixed(1)}s`,
     tokenNote,

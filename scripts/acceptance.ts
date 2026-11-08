@@ -41,7 +41,8 @@ interface CaseSpec {
   id: string;
   conv: string;
   user?: string;
-  text: string;
+  /** 用户消息原文；confirmOf / followUpOf 行没有 text——文本由 acceptance 侧从被引用回复或确认码生成。 */
+  text?: string;
   /** 2.2 这类依赖上一条回复澄清候选的用例 */
   followUpOf?: string;
   /** 从被引用用例的回复提取确认码，自动发送「确认/取消 码」（5.x 写链路） */
@@ -221,7 +222,7 @@ function pickClarification(text: string): string | null {
   const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
   for (const line of lines) {
     const m = line.match(/^([0-9]+)[.、)）]\s*(.+)/);
-    if (m) return `就用第 ${m[1]} 个：${m[2].replace(/[*_`#]/g, '').slice(0, 40)}`;
+    if (m) return `就用第 ${m[1]!} 个：${m[2]!.replace(/[*_`#]/g, '').slice(0, 40)}`;
   }
   return null;
 }
@@ -449,7 +450,7 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   const repliesById = new Map<string, string>();
 
   for (const spec of ONLY ? CASES.filter((c) => ONLY.has(c.id)) : CASES) {
-    let text = spec.text;
+    let text = spec.text ?? '';
     if (spec.confirmOf) {
       const prev = repliesById.get(spec.confirmOf) ?? '';
       const code = prev.match(/确认\s*([A-Z0-9]{6})/)?.[1];
@@ -486,7 +487,8 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
       conversationId: spec.conv,
       messageId: `accmsg_${randomUUID()}`,
       chatType: 'single',
-      text,
+      text: text ?? '',
+      receivedAt: new Date().toISOString(),
     };
     const steps: string[] = [];
     const notices: string[] = [];

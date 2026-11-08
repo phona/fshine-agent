@@ -126,7 +126,7 @@ describe('宿主意图事实（verified 档的写路径证据）', () => {
 });
 
 describe('最小聚合指标（通过率 / 干预 / 安全违规 / 耗时 / Token）', () => {
-  it('通过率按用例计，被拒行计安全违规，干预按停点计，token 缺席不造零', () => {
+  it('通过率按用例计，被拒行计门拒绝，干预按停点计，token 缺席不造零', () => {
     const refused = classifyExecutionCall({ row: { script: 'dummy.commit', refused: 'commit-token' }, readbackVerified: false, delivered: false });
     const clean = classifyExecutionCall({ row: { script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
     const metrics = aggregateMetrics([
@@ -136,14 +136,15 @@ describe('最小聚合指标（通过率 / 干预 / 安全违规 / 耗时 / Toke
     expect(metrics.cases).toBe(2);
     expect(metrics.passed).toBe(1);
     expect(metrics.passRate).toBeCloseTo(0.5);
-    expect(metrics.safetyViolations).toBe(1);
+    expect(metrics.gateRefusals).toBe(1);
+    expect(metrics.safetyViolations).toBe(0);
     expect(metrics.interventions).toBe(2);
     expect(metrics.durationMs).toBe(2000);
     expect(metrics.tokens).toBe(500);
   });
 
   it('空集：通过率 0（不造 100%）', () => {
-    expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, safetyViolations: 0 });
+    expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, gateRefusals: 0, safetyViolations: 0 });
   });
 });
 

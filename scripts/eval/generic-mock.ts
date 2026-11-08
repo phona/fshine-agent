@@ -461,12 +461,12 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
   { id: 'g-ballot-second-domain', run: (ctx) => {
     const checks: Check[] = [];
     const list = ctx.run(['operation', 'list', '--json']);
-    const parsed = JSON.parse(list.stdout);
-    const names = parsed.operations.map((o: Record<string, unknown>) => o.name as string);
+    const parsed = JSON.parse(list.stdout) as { operations: Array<{ name: string; access: string }> };
+    const names = parsed.operations.map((o) => o.name);
     checks.push(check('ballot operations present in list', names.filter((n) => n.startsWith('ballot.')).length === 6, '6 ballot ops', `${names.filter((n) => n.startsWith('ballot.')).length} ballot ops`));
-    const ballotOps = parsed.operations.filter((o: Record<string, unknown>) => (o.name as string).startsWith('ballot.'));
-    checks.push(check('ballot query is read', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access === 'read', 'read', String(ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access)));
-    checks.push(check('ballot prepare/commit are write', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access === 'write' && ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access === 'write', 'write+write', `${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access}/${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access}`));
+    const ballotOps = parsed.operations.filter((o) => o.name.startsWith('ballot.'));
+    checks.push(check('ballot query is read', ballotOps.find((o) => o.name === 'ballot.query')?.access === 'read', 'read', String(ballotOps.find((o) => o.name === 'ballot.query')?.access)));
+    checks.push(check('ballot prepare/commit are write', ballotOps.find((o) => o.name === 'ballot.prepare')?.access === 'write' && ballotOps.find((o) => o.name === 'ballot.commit')?.access === 'write', 'write+write', `${ballotOps.find((o) => o.name === 'ballot.prepare')?.access}/${ballotOps.find((o) => o.name === 'ballot.commit')?.access}`));
     // Read path: ballot.query --topic alpha
     const q = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const qEnv = parseEnvelope(q.stdout);
@@ -475,7 +475,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     const prep = ctx.run(['prepare', 'ballot.prepare', '--topic', 'alpha', '--count', '2']);
     const prepEnv = parseEnvelope(prep.stdout);
     const prepOk = prep.code === 0 && prepEnv !== null && prepEnv.status === 'completed';
-    const prepDryRun = prepEnv && (prepEnv.data as Record<string, unknown> | null)?.dryRun === true;
+    const prepDryRun = Boolean(prepEnv && (prepEnv.data as Record<string, unknown> | null)?.dryRun === true);
     checks.push(check('ballot.prepare dry-run', prepOk && prepDryRun, 'completed dryRun=true', `${prep.code} ${prepEnv?.status}`));
     const mid = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const midEnv = parseEnvelope(mid.stdout);
@@ -494,7 +494,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     ctx.env = savedEnv;
     const commitEnv = parseEnvelope(commit2.stdout);
     const commitOk = commit2.code === 0 && commitEnv?.status === 'completed';
-    const commitVerified = commitEnv && (commitEnv.data as Record<string, unknown>)?.verified === true;
+    const commitVerified = Boolean(commitEnv && (commitEnv.data as Record<string, unknown>)?.verified === true);
     checks.push(check('ballot proposal commit verified', commitOk && commitVerified, 'completed verified=true', `${commit2.code} ${commitEnv?.status} verified=${commitEnv && (commitEnv.data as Record<string, unknown>)?.verified}`));
     const after = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const afterEnv = parseEnvelope(after.stdout);

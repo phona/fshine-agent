@@ -327,6 +327,14 @@ async function main(): Promise<void> {
     console.error(`探针报告是旧格式（${path.basename(probePath!)} 的 ${staleProbe.id} 无 dims；L7 归维前的产物），打分须先重跑：npm run eval:probe（exit 2）`);
     process.exit(2);
   }
+  // 格式守卫：旧报告可能缺 execution/calls 列，期望值层会把它读成「零调用轮次」制造假红。
+  const staleExecution = probeReport.results.find((result) =>
+    (result.turns ?? []).some((turn) => turn.execution === undefined || turn.calls === undefined),
+  );
+  if (staleExecution) {
+    console.error(`探针报告格式过旧，请重跑：npm run eval:probe（${path.basename(probePath!)} 的 ${staleExecution.id} 缺 execution/calls 列）（exit 2）`);
+    process.exit(2);
+  }
   const acceptanceJson = JSON.parse(readFileSync(acceptancePath!, 'utf8')) as {
     records: Array<{ id: string; reply?: string; durationMs?: number }>;
     writeChain: ConversationWriteChainFacts[];

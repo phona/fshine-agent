@@ -258,8 +258,16 @@ class RecordingSdk implements SdkClientLike {
     this.frames.push({ content, finish });
     return {};
   }
-  async uploadMedia(): Promise<{ media_id: string }> { return { media_id: 'unused' }; }
+  async uploadMedia(_data: Buffer, _options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }> {
+    return { media_id: 'unused' };
+  }
   async replyMedia(): Promise<unknown> { return {}; }
+  async sendMessage(_chatid: string, _body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
+    return {};
+  }
+  async downloadFile(_url: string, _aesKey?: string): Promise<{ buffer: Buffer; filename?: string }> {
+    return { buffer: Buffer.from(''), filename: 'unused' };
+  }
 }
 
 /** message id 探针自己造并记住（宿主库 agent_requests 按 messageId 反查 requestId 的关联键）。 */
@@ -288,11 +296,14 @@ function openReadonlyDb(dbPath: string): Database.Database {
 }
 
 /**
- * 探针等一条最终回复的轮询上限（10 分钟）。与 DEFAULT_WORKER_TIMEOUT_MS 数值相同是
- * 巧合而非同源：这是探针自己的等待地平线（必须 ≥ 一个回合预算，否则会在回合自然结束
- * 前放弃轮询），故意不随配置漂移——D-014 收敛的是 worker 超时公式，不是这个等待。
+ * 探针等一条最终回复的轮询上限（2.5 分钟）。与 DEFAULT_WORKER_TIMEOUT_MS 数值不同源：
+ * 这是探针自己的等待地平线（必须 ≥ 一个回合预算，否则会在回合自然结束前放弃轮询），
+ * 故意不随配置漂移——D-014 收敛的是 worker 超时公式，不是这个等待。
+ *
+ * 6 例实测跑满 21 分钟（CPU 0），根因是模型挂起后干等 10 分钟/轮；缩短到 2.5 分钟后
+ * 单轮最多 150s，整探针快速失败而不是静默跳过。
  */
-const PROBE_REPLY_WAIT_MS = 600_000;
+const PROBE_REPLY_WAIT_MS = 150_000;
 
 const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
@@ -525,7 +536,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      throw new Error(`等待回复超时(10min)：${text}`);
+      throw new Error(`等待回复超时(${PROBE_REPLY_WAIT_MS / 1000}s)：${text}`);
     },
   };
 }
