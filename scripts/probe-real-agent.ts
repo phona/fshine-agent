@@ -2500,6 +2500,41 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
  * 本表有 id 而 yaml 没有 = 判定体已成死代码。fixture.env 由这里的包装器在用例前后设置与
  * 还原（D2 的 DUMMY_PLAN_CONFIRM_CALLS 曾在用例体里手动还原，泄漏过到后续用例）。
  */
+/**
+ * 逐用例的报告输入（**纯函数**，导出供单测）。
+ *
+ * intents / gateRows / delegations 都按**全部轮次**累积（2026-11-09 八审 major）：旧写法
+ * `intents: turns.at(-1)?.intents` 只取最后一轮，而 report.ts 的 countInterventionPoints 只数
+ * status=pending——提案等用户确认后提交成功时最终态是 committed，那个"用户必须确认"的停点
+ * 就从干预指标里消失，完整写链被报成零次干预。按轮累积后，任一轮出现过 pending 就算一次
+ * （countInterventionPoints 内部按 intentId 去重，不会重复计）。
+ */
+export function caseReportInputOf(
+  item: { id: string; group: string; intent: string },
+  turns: readonly Turn[],
+  extra: { ok: boolean; notes: readonly string[] },
+): ReportCaseInput {
+  return {
+    caseId: item.id,
+    group: item.group,
+    intent: item.intent,
+    ok: extra.ok,
+    notes: [...extra.notes],
+    turns: turns.map((turn) => ({
+      messageId: turn.messageId,
+      text: turn.text,
+      reply: turn.reply,
+      notices: turn.notices,
+      ms: turn.ms,
+      execution: turn.execution,
+      ...(turn.tokens ? { tokens: { ...(turn.tokens.main ? { main: turn.tokens.main.total } : {}), ...(turn.tokens.worker ? { worker: turn.tokens.worker.total } : {}) } } : {}),
+    })),
+    intents: turns.flatMap((turn) => turn.intents),
+    gateRows: turns.flatMap((turn) => turn.gateRows),
+    delegations: turns.flatMap((turn) => turn.delegations),
+  };
+}
+
 function loadProbeCases(): Case[] {
   const specs = loadCases().filter((spec) => spec.kind === 'probe');
   const cases: Case[] = [];
@@ -2637,25 +2672,7 @@ async function main(): Promise<void> {
         ok,
       });
       // 报告输入：逐轮回复（用户可见交付）+ 执行层审计行 + 宿主门裁决/委派/意图事实。
-      reportInputs.push({
-        caseId: item.id,
-        group: item.group,
-        intent: item.intent,
-        ok,
-        notes,
-        turns: turns.map((turn) => ({
-          messageId: turn.messageId,
-          text: turn.text,
-          reply: turn.reply,
-          notices: turn.notices,
-          ms: turn.ms,
-          execution: turn.execution,
-          ...(turn.tokens ? { tokens: { ...(turn.tokens.main ? { main: turn.tokens.main.total } : {}), ...(turn.tokens.worker ? { worker: turn.tokens.worker.total } : {}) } } : {}),
-        })),
-        intents: turns.at(-1)?.intents ?? [],
-        gateRows: turns.flatMap((turn) => turn.gateRows),
-        delegations: turns.flatMap((turn) => turn.delegations),
-      });
+      reportInputs.push(caseReportInputOf(item, turns, { ok, notes }));
       for (const turn of turns) {
         console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
         console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);

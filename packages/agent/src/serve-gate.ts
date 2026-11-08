@@ -272,8 +272,38 @@ export function hasShellMetachars(command: string): boolean {
  * 命令分词（剥离 bash/sh 前缀）：脚本提取与参数摘要共用同一套词法——
  * 解析只此一份，不存在第二套命令解析。
  */
+/**
+ * 命令 → token 表（**认 shell 引号与转义**：单引号内字面、双引号内可转义、反斜杠转义）。
+ *
+ * 2026-11-09 八审 major：旧写法 `trim().split(/\s+/)` 是纯空白分词，`--collection "alpha"`
+ * 会产出 token `"alpha"`（带引号），与计划里的 `alpha` 比对不上——**语义相同的合法写调用被
+ * 误拒**；名称含空格时更被拆成多个参数。覆盖判据要与"实际 shell 看到的参数"一致，分词器就
+ * 必须和 shell 一致，否则判据比的是另一回事。
+ */
 export function splitCommandTokens(command: string): string[] {
-  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  const tokens: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (const ch of command.trim()) {
+    if (escaped) { current += ch; started = true; escaped = false; continue; }
+    // 单引号内反斜杠是字面（POSIX），其余位置可转义
+    if (ch === '\\' && quote !== "'") { escaped = true; started = true; continue; }
+    if (quote !== null) {
+      if (ch === quote) { quote = null; continue; }
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) {
+      if (started) { tokens.push(current); current = ''; started = false; }
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (started) tokens.push(current);
   if (tokens[0] === 'bash' || tokens[0] === 'sh') tokens.shift();
   return tokens;
 }
@@ -961,6 +991,12 @@ export function structuredPlanGateVerdict(
   const declaredNames = new Set(names.flatMap((declared) => [declared, `--${declared}`]));
   for (const [name, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
+    // 布尔 **false 整个不入表**（2026-11-09 八审 blocking）：夹具对 `value === false` 的键
+    // 直接跳过、连 token 都不产出（dummy.cjs 的 args 扁平化）。旧写法把 true/false 都归一成
+    // ''，于是计划声明了裸开关、调用传 false 也能匹配上——而实际执行里那个开关根本不存在，
+    // 执行层靠开关约束的副作用（如 --dry-run）被静默移除却通过了覆盖检查。
+    // 省略 = 与执行端实际参数一致；计划若要求该开关在场，少一个键自然判不覆盖。
+    if (value === false) continue;
     if (declaredNames.has(name)) continue;
     got.set(name.startsWith('--') ? name : `--${name}`, typeof value === 'boolean' ? '' : String(value));
   }

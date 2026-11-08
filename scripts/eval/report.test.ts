@@ -107,3 +107,34 @@ describe('summarizeReport：阶梯计数修括号（四审 minor）', () => {
     expect(summary).toContain('delivered 4');
   });
 });
+
+describe('干预停点：提案确认后提交成功仍计入（八审 major）', () => {
+  it('最后一轮快照是 committed 时，早前的 pending 停点不消失', () => {
+    // 复现缺陷：探针旧写法只把最后一轮的 intents 传给 buildCaseReport，而
+    // countInterventionPoints 只数 status=pending。提案等确认→提交成功后最终态是
+    // committed，那个"用户必须确认"的停点从干预指标里消失，完整写链报成零次干预。
+    const line = buildCaseReport(caseInput({
+      turns: [{
+        messageId: 'm1',
+        text: '录入',
+        reply: '已登记，等待确认',
+        notices: [],
+        ms: 100,
+        execution: [{ mode: 'prepare', script: 'dummy.proposal', exitCode: 0, proposalId: 'p1' }],
+      }],
+      // 累积全部轮次快照：早前 pending + 最终 committed（同一 intentId）
+      intents: [
+        { intentId: 'i1', proposalId: 'p1', status: 'pending', hasReadback: false },
+        { intentId: 'i1', proposalId: 'p1', status: 'committed', hasReadback: true },
+      ],
+    }));
+    expect(line.interventionPoints).toBe(1);
+  });
+
+  it('从未 pending 的意图不计停点', () => {
+    const line = buildCaseReport(caseInput({
+      intents: [{ intentId: 'i1', proposalId: 'p1', status: 'committed', hasReadback: true }],
+    }));
+    expect(line.interventionPoints).toBe(0);
+  });
+});

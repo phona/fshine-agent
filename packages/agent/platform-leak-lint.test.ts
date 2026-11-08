@@ -385,6 +385,11 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
   // YAML frontmatter 标量去引号：判断"是不是被引号包住"——结构形状检查，非内容嗅探。
   ['packages/agent/src/skills.ts:"', 'frontmatter 标量去引号（结构形状检查）'],
   ["packages/agent/src/skills.ts:'", 'frontmatter 标量去引号（结构形状检查）'],
+  // shell 分词器的引号定界符：判断"是不是引号字符"——语法形状检查，非内容嗅探。
+  // 与 skills.ts 的 frontmatter 去引号同型（八审 major：splitCommandTokens 改成认引号，
+  // 否则 --collection "alpha" 会被当成带引号的 token 而误拒合法写调用）。
+  ['packages/agent/src/serve-gate.ts:"', 'shell 分词器引号定界符（语法形状检查）'],
+  ["packages/agent/src/serve-gate.ts:'", 'shell 分词器引号定界符（语法形状检查）'],
   // L6：step-text.ts 的 6 个已退役直接平台工具名 case（search_account_sets 等）已随
   // 沉积清理删除，对应白名单条目一并移除——主 Agent 工具面早已只剩宿主内部工具与
   // run_task 委派（实例名经 profile.toolName 声明，C3），任何新的具名 case 不在表内，照样红。
