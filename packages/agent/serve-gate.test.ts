@@ -1434,6 +1434,15 @@ describe('splitCommandTokens：只认 Bash 真正当分隔符的空白（十四�
     expect(splitCommandTokens('g commit w --target alpha\u3000beta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u3000beta']);
   });
 
+  it('回车/换页/垂直制表符不是分隔符，Bash 把它们保留在参数里', () => {
+    // 十五审 blocking：上一轮把 \r \f \v 也当分隔符是改错了。Bash 实测
+    // `alpha<CR>beta` 是单个参数——拆成 alpha + beta 会让计划只声明 --target alpha 时
+    // 判覆盖并忽略多出的位置参数，放行实际指向别名的写调用。
+    expect(splitCommandTokens('g commit w --target alpha\rbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\rbeta']);
+    expect(splitCommandTokens('g commit w --target alpha\x0cbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\x0cbeta']);
+    expect(splitCommandTokens('g commit w --target alpha\x0bbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\x0bbeta']);
+  });
+
   it('ASCII 空白（空格/制表符/换行）照常分词', () => {
     expect(splitCommandTokens('g w --t a b')).toEqual(['g', 'w', '--t', 'a', 'b']);
     expect(splitCommandTokens('g\tw\t--t\ta')).toEqual(['g', 'w', '--t', 'a']);

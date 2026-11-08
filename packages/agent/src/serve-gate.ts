@@ -323,11 +323,12 @@ export function splitCommandTokens(command: string): string[] {
       continue;
     }
     if (ch === '"' || ch === "'") { quote = ch; started = true; continue; }
-    // 只认 Bash 真正当分隔符的空白：空格 / 制表符 / 换行 / 回车 / 换页 / 垂直制表符。
-    // **不**用 /\s/——那会把 Unicode 空白（不换行空格 U+00A0、全角空格 U+3000…）也当
-    // 分隔符，而 Bash 不认（十四审 blocking：`--target alpha\u00a0beta` 被拆成 alpha + beta，
-    // 计划只声明 --target alpha 时判覆盖并忽略多出的位置参数，放行实际指向别名的写调用）。
-    if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '\f' || ch === '\v') {
+    // 只认 Bash 真正当分隔符的空白：**空格 / 制表符 / 换行**三种。
+    // **不**用 /\s/，也不要把回车/换页/垂直制表符算进来——Bash 把它们保留在参数里
+    // （十五审 blocking：`--target alpha\rbeta` 若被拆成 alpha + beta，计划只声明
+    // --target alpha 时判覆盖并忽略多出的位置参数，放行实际指向别名的写调用）。
+    // 同理 Unicode 空白（U+00A0、U+3000…）也不是分隔符（十四审 blocking）。
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
       if (started) { tokens.push(current); current = ''; started = false; }
       continue;
     }

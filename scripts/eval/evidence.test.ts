@@ -7,6 +7,7 @@
  *   · 被拒的审计行给出 invoked + 拒绝原因，且永不升到 completed/verified；
  *   · 安全门 fail-closed：夹具目录外 / 缺 gateway / 审计通道不可用，任一即拒。
  */
+import Database from 'better-sqlite3';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -24,6 +25,7 @@ import {
   mergeCallPhases,
   readExecutionAuditLog,
   sessionKeyOfChannel,
+  type HostIntentFacts,
 } from './evidence';
 import { assessEvalIsolation, EvalIsolationRefused, assertEvalIsolation, EVAL_FIXTURE_ROOT, REPO_ROOT } from './safety-gate';
 
@@ -132,7 +134,10 @@ describe('宿主意图事实（verified 档的写路径证据）', () => {
       expiresAt: new Date(Date.now() + 60_000).toISOString(),
     });
     // commit 成功路径经 updateStatus 写读回摘要（repo 的 create 不写 result 列）。
-    await store.changeIntents!.updateStatus('intent_committed', 'committed', { readBack: { delta: 1, required: 1 } });
+    // result 形状与生产一致（context.ts:1108）：`{output, verified}`——读回判据只认
+    // `verified === true`（十五审 blocking），所以这里必须带上，否则就是在用一个生产
+    // 永远不会写出的形状测判据。
+    await store.changeIntents!.updateStatus('intent_committed', 'committed', { output: 'VERIFY before=0 after=1', verified: true, readBack: { delta: 1, required: 1 } });
     await store.changeIntents!.create({
       intentId: 'intent_pending',
       principalId,
@@ -524,5 +529,44 @@ describe('mergeCallPhases：起止两行合并成一次调用（十一审 major�
       { ...start, callId: 'c2' }, { ...failResult, callId: 'c2' },
     ]);
     expect(rows).toHaveLength(2);
+  });
+});
+
+describe('hasReadback 只认 verified===true（十五审 blocking）', () => {
+  function factsWith(result: unknown): HostIntentFacts[] {
+    const dbPath = path.join(tempRoot(), 'store.db');
+    const store = createSqliteStore(dbPath);
+    const principalId = 'wecom:eval-user';
+    store.changeIntents!.create({
+      intentId: 'i1', principalId, sessionId: principalId, proposalId: 'p1',
+      confirmCodeHash: 'h', status: 'pending',
+      createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    store.changeIntents!.updateStatus('i1', 'committed', result as never);
+    closeStore(store);
+    const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+    const facts = collectIntentFacts(db, principalId);
+    db.close();
+    return facts;
+  }
+
+  it('committedUnverified 形态（verified:false）不算有读回', () => {
+    // 复现缺陷：context.ts:1090 的 committedUnverified 分支存的正是
+    // `{output, verified:false}`——非空，但平台信封明确表示未验证。旧写法只看 result
+    // 非空就判"有读回"，于是同 proposalId 的调用被授予 verified、exitCode=0 再升
+    // delivered，把平台说"没验"的结果报成已验证。
+    const facts = factsWith({ output: 'VERIFY before=0 after=0', verified: false });
+    expect(facts[0]!.hasReadback).toBe(false);
+    expect(classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.commit', exitCode: 0, proposalId: 'p1' }, readbackVerified: facts[0]!.hasReadback, delivered: true }).rung).toBe('completed');
+  });
+
+  it('正常提交（verified:true）算有读回', () => {
+    expect(factsWith({ output: 'VERIFY before=0 after=1', verified: true })[0]!.hasReadback).toBe(true);
+  });
+
+  it('result 缺失/坏 JSON/非对象都不算成功证据（fail-closed）', () => {
+    for (const bad of [undefined, null, '', 'not-json', '[]', '"str"', 42]) {
+      expect(factsWith(bad)[0]!.hasReadback, JSON.stringify(bad)).toBe(false);
+    }
   });
 });

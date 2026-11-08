@@ -243,8 +243,25 @@ export function collectIntentFacts(db: Database.Database, sessionKey: string): H
     ...(row.proposal_id ? { proposalId: row.proposal_id } : {}),
     ...(row.task_id ? { taskId: row.task_id } : {}),
     status: row.status as ChangeIntentRecord['status'],
-    hasReadback: row.result !== null && row.result !== undefined && row.result !== '',
+    // 读回验证 = result 里**明确写着 verified:true**（十五审 blocking）。旧写法只看
+    // result 非空——而 context.ts 的 committedUnverified 分支存的正是
+    // `result={output, verified:false, ...}`：非空，但平台信封明确表示未验证。那种记录
+    // 旧写法会判"有读回"，于是 ask-session/probe/report 据此给同 proposalId 的调用授予
+    // verified，exitCode=0 再升 delivered——把平台说"没验"的结果报成已验证。
+    // 字段损坏/缺失一律不算成功证据（fail-closed）。
+    hasReadback: readbackVerifiedOf(row.result),
   }));
+}
+
+/** 持久化 result → 是否真的读回验证过。只认 `verified === true`，其余（缺失/损坏/false）都不算。 */
+function readbackVerifiedOf(result: unknown): boolean {
+  if (result === null || result === undefined || result === '') return false;
+  let parsed: unknown = result;
+  if (typeof result === 'string') {
+    try { parsed = JSON.parse(result); } catch { return false; }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return false;
+  return (parsed as { verified?: unknown }).verified === true;
 }
 
 // ── 状态阶梯 ──
