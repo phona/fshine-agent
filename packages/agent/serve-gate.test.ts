@@ -1557,3 +1557,37 @@ describe('布尔开关不吞后续 flag（十七审 major）', () => {
     expect(structuredPlanGateVerdict('ledger.write', { account: 'beta', period: 'W1', window: 'W2' }, ctx)?.block).toBe(true);
   });
 });
+
+describe('keyArgsOf 也按 flagStyles 区分布尔开关（十八审 major）', () => {
+  const SPECS: OperationArgsSpecs = new Map([
+    // --dry-run 是布尔开关；target 是位置参数
+    ['domain.write', { positionalNames: ['target'], flagStyles: new Map([['--window', 'code']]) }],
+  ]);
+  const ctx = {
+    planActive: () => true,
+    operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]) as OperationSemantics,
+    operationArgsSpecs: SPECS,
+    activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', 'alpha'] }] as readonly PlanCall[],
+  };
+
+  it('计划 --dry-run + 位置 alpha 与结构化 dryRun=true,target=alpha 互相覆盖', () => {
+    // 复现缺陷：keyArgsOf 不读规格，把布尔开关后的位置参数当成开关取值——计划侧得到
+    // dry-run='alpha'，结构化侧得到 dry-run=''，两侧分叉 ⇒ 合法写调用被拒。
+    expect(structuredPlanGateVerdict('domain.write', { '--dry-run': true, target: 'alpha' }, ctx)?.block).toBeUndefined();
+  });
+
+  it('目标不同仍要拒', () => {
+    expect(structuredPlanGateVerdict('domain.write', { '--dry-run': true, target: 'beta' }, ctx)?.block).toBe(true);
+  });
+
+  it('bash 侧同形调用同样覆盖', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: ctx.operationSemantics,
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run alpha' } })?.block).toBeUndefined();
+  });
+});

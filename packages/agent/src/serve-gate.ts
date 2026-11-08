@@ -839,7 +839,20 @@ function sameOperation(planOperation: string, reference: string): boolean {
  * 回答（collection / window / 编号）；payload 本体对宿主是不透明的（提案读回归执行层），
  * 逐字比路径只会造出假拒——同一份 payload 换个工作区名就"不在计划里"了。
  */
-function keyArgsOf(tokens: readonly string[]): Map<string, string> {
+/**
+ * token 串 → flag 取值表（`--flag 值` / `--flag=值` / 布尔开关 `--flag` 三种写法都认）。
+ *
+ * 布尔开关的判定同样依据执行层 flagStyles（2026-11-09 十八审 major）：**不读规格时**
+ * 无法区分 `--dry-run alpha` 里的 alpha 是开关的取值还是紧跟的位置参数——旧写法把它当
+ * 取值，于是计划侧得到 `dry-run='alpha'`、结构化侧得到 `dry-run=''`，两侧不一致，
+ * 合法的写调用被拒。给了规格就按规格判（布尔 none 不入表），拿不到时保守地当作**带值**
+ * （与 positionalsOf 同一立场：宁可少放行，也不制造两侧分叉）。
+ *
+ * 位置参数**不入表**：它们多是 payload 路径与名称，而"这次写落在哪个对象上"由关键 flag
+ * 回答（collection / window / 编号）；payload 本体对宿主是不透明的（提案读回归执行层），
+ * 逐字比路径只会造出假拒——同一份 payload 换个工作区名就"不在计划里"了。
+ */
+function keyArgsOf(tokens: readonly string[], flagStyles?: ReadonlyMap<string, KeyArgStyle>): Map<string, string> {
   const args = new Map<string, string>();
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
@@ -847,6 +860,11 @@ function keyArgsOf(tokens: readonly string[]): Map<string, string> {
     const eq = token.indexOf('=');
     if (eq > 0) {
       args.set(token.slice(0, eq), token.slice(eq + 1));
+      continue;
+    }
+    // 布尔开关（规格明确说不带值）⇒ 不吞下一项，占位为 ''（两侧同为开关才匹配）
+    if (flagStyles && !flagStyles.has(token)) {
+      args.set(token, '');
       continue;
     }
     const value = tokens[index + 1];
@@ -957,7 +975,7 @@ function coversPlanStep(
 ): boolean {
   if (!sameOperation(step.operation, reference)) return false;
   const stepTokens = step.args.map((value) => (typeof value === 'string' ? value : String(value)));
-  const wanted = keyArgsOf(stepTokens);
+  const wanted = keyArgsOf(stepTokens, flagStyles);
   for (const [flag, value] of wanted) {
     if (gotKeyArgs.get(flag) !== value) return false;
   }
@@ -1000,7 +1018,8 @@ function planGateVerdict(
   // （`bin/<gw> prepare dummy.proposal tmp/task_x/payload.json` → ['tmp/task_x/payload.json']）。
   const headLength = reference === null ? 0 : tokens.indexOf(reference) + 1;
   const specs = ctx.operationArgsSpecs;
-  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens), positionalsOf(tokens.slice(headLength), flagStylesFor(reference, specs)), positionalNamesFor(reference, specs), ctx);
+  const flagStyles = flagStylesFor(reference, specs);
+  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens, flagStyles), positionalsOf(tokens.slice(headLength), flagStyles), positionalNamesFor(reference, specs), ctx);
 }
 
 /**

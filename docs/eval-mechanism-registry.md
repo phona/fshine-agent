@@ -41,8 +41,8 @@
 | exposure-lint 的自校验拆不掉 | **成立** | 守卫头注释 F3 变异表 ④a/④b：stub `git ls-files` 返空、`git rm --cached` 真删锚点文件，两次都是范围自校验红而四类断言仍全绿——抓住假绿的是自校验；本次实跑 `npx vitest run --project unit packages/agent/exposure-lint.test.ts` → 7 passed |
 | HG1 只看可达历史（悬空 commit 是覆盖洞） | **成立，且守卫自己没写这条边界** | 机制实测：临时仓里用 `git commit-tree` 造一个无 ref 引用的 commit，`git log --all -p \| grep -c <串>` = 0、`git rev-list --all \| grep -c` = 0（`--all` = 全部 ref，悬空 commit 不在内）；`history-hygiene.test.ts` 的扫描口是 `git log --all -p` 与 `git rev-list --count --all`，文件头未把"只看可达历史"写成已知边界 |
 | 评委 21/28 个维检查有真实门限而 7 个恒过 | **数字对不上，按实测改写** | 从 `scripts/eval/baseline.json` 逐项算（容差 1，阈值 = 基线 − 容差）：6 个 probe 用例 × 4 维 = **24** 个评委维检查，其中**20** 个阈值 ≥1（真实门限）、**4** 个恒过（A2/A4/B1 的 presentationHygiene 基线 0 → 阈值 −1；A3 的 presentationHygiene 基线 1 → 阈值 0）。审计的 21/28/7 与文件不符，本表以实测为准 |
-| 探针 CASES 实际只有 A1–A4、无 A5 | **成立** | A5 已在更早阶段删除；本次 `cases.yaml` 22 条（21 probe + 1 acceptance）无 A5，`loadProbeCases` 对 yaml/判定体双向核对，多一条少一条都抛错 |
-| generic-mock 与探针 A1–A5 1:1 同名 | **部分成立** | `generic-mock.ts` 有 `g-a1-requery` / `g-a2-cross-contamination` / `g-a3-ambiguity-mechanical` / `g-a4-not-found-zero-leak` / `g-a5-idle-zero-calls` / `g-b1-stability` / `g-y2-error-honesty`——`g-a5-idle-zero-calls` 确无探针对应轮（A5 已删），1:1 说法与文件不符；其余 6 个同名 |
+| 探针 CASES 实际只有 A1–A4、无 A5 | **已不成立（2026-11-09 十八审 minor 同步）** | A5 已恢复：`cases.yaml` 现 25 条（24 probe + 1 acceptance）含 A5，且 `inBaseline: true`、`baseline.json` 有 `probe-A5` 项。`loadProbeCases` 对 yaml/判定体双向核对，多一条少一条都抛错 |
+| generic-mock 与探针 A1–A5 1:1 同名 | **成立（2026-11-09 同步）** | `generic-mock.ts` 的 `g-a1-requery` / `g-a2-cross-contamination` / `g-a3-ambiguity-mechanical` / `g-a4-not-found-zero-leak` / `g-a5-idle-zero-calls` / `g-b1-stability` / `g-y2-error-honesty` 七个用例**都有**探针对应轮（A5 已恢复），1:1 说法与文件相符 |
 
 ## 审计留账（切片 C 审计结果点名、本轮**没有**修的洞）
 
