@@ -1387,3 +1387,28 @@ describe('splitCommandTokens 与 Bash 转义语义一致（十审 blocking）', 
     expect(splitCommandTokens('bin/gw query q --path \\a')).toEqual(['bin/gw', 'query', 'q', '--path', 'a']);
   });
 });
+
+describe('positionalsOf：空位置参数不吞后续目标（十二审 blocking）', () => {
+  it("['', 'alpha'] 与 ['', 'beta'] 解析出不同目标", () => {
+    // 复现缺陷：空串被当成 flag，连后面目标参数一起跳过 ⇒ 两者都解析成 [] ⇒ 覆盖检查
+    // 直接放行任意目标。允许空的前置位 + 后续位带目标是合法的通用接口形态。
+    expect(splitCommandTokens('g prepare w "" alpha').slice(3)).toEqual(['', 'alpha']);
+    expect(splitCommandTokens('g prepare w "" beta').slice(3)).toEqual(['', 'beta']);
+  });
+
+  it('flag 仍连取值一起跳过（不因修空串而放松）', () => {
+    expect(splitCommandTokens('g query q --collection alpha x').slice(3)).toEqual(['--collection', 'alpha', 'x']);
+  });
+
+  it('覆盖判据层面：计划前置位为空、目标 alpha 时不允许 beta', () => {
+    const SPECS: OperationArgsSpecs = new Map([['ledger.write', { positionalNames: ['slot', 'target'], flagStyles: new Map() }]]);
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+      activePlanCalls: () => [{ operation: 'ledger.write', args: ['', 'alpha'] }] as readonly PlanCall[],
+      operationArgsSpecs: SPECS,
+    };
+    expect(structuredPlanGateVerdict('ledger.write', { slot: '', target: 'alpha' }, ctx)?.block).toBeUndefined();
+    expect(structuredPlanGateVerdict('ledger.write', { slot: '', target: 'beta' }, ctx)?.block).toBe(true);
+  });
+});

@@ -719,15 +719,24 @@ async function main() {
     const op = resolveOperation(target);
     if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
+    // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
+    // 提交也永远停在 invoked，mechanicallyPassed 判失败、令牌拒绝也没有 refused 证据。
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
-      return doProposalCreate(op.name, rest);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
+      const code = doProposalCreate(op.name, rest);
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     if (op.protocol === 'proposal.commit' && cmd === 'commit') {
       const { flags } = parseFlags(rest);
       if (!flags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
-      return doProposalCommit(op.name, rest);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
+      const code = doProposalCommit(op.name, rest);
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     const verdict = decide(cmd, op, rest);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }

@@ -534,8 +534,11 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
               .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
               .map((intent) => intent.proposalId!),
           );
-          // 起止两行按 callId 合并成一次调用一行（十一审 major，同 ask-session）。
-          const ladder = mergeCallPhases(windowRows).map((row) => classifyExecutionCall({
+          // 起止两行按 callId 合并成一次调用一行（十一审 major，同 ask-session）；
+          // 调用数（calls/refusedCalls）与 evidence 也走合并后的行，不再按原始审计行数
+          // （十二审 major：否则一次成功提案被计两次、一次被拒提交被计成已执行）。
+          const mergedRows = mergeCallPhases(windowRows);
+          const ladder = mergedRows.map((row) => classifyExecutionCall({
             row,
             readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
             delivered,
@@ -546,11 +549,15 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
             ms: Date.now() - startedAt,
             messageId,
             notices: sdk.frames.filter((frame) => !frame.finish && frame.content.startsWith('计划通知：')).map((frame) => frame.content),
-            calls: windowRows.filter((row) => !row.refused).length,
-            refusedCalls: windowRows.filter((row) => row.refused).length,
+            // 调用数也按**合并后**的调用计（十二审 major）：提案路径起止两行若不先合并，
+            // 一次成功调用被计成两次；一次被令牌门拒的提交，start 行没有 refused，又会被
+            // 计成一次"已执行"——这些数进期望值与报告，会让最小调用数检查假绿、重试风暴
+            // 检查假红。口径与 ladder 同源：先 mergeCallPhases，再按最终结果分执行/拒绝。
+            calls: mergedRows.filter((row) => !row.refused).length,
+            refusedCalls: mergedRows.filter((row) => row.refused).length,
             ...(requestId ? { requestId } : {}),
             taskIds,
-            execution: windowRows,
+            execution: mergedRows,
             gateRows: host.gateRows,
             intents,
             delegations: host.delegations,
@@ -2650,7 +2657,9 @@ async function main(): Promise<void> {
     try {
       const { turns, notes = [] } = await item.run();
       const auditRowsAfter = executionAuditRows();
-      const caseRows: ExecutionAuditRow[] = auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore);
+      // 用例级行也先合并起止（十二审 major）：否则报告里的 platformCalls 会把一次成功提案
+      // 计成两次。与逐轮的 calls/refusedCalls 同源。
+      const caseRows: ExecutionAuditRow[] = mergeCallPhases(auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore));
       // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
       const ok = notes.every((note) => note.startsWith('（信息性）'));
       const counted = countDims(notes);

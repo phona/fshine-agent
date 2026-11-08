@@ -866,9 +866,13 @@ function positionalNamesFor(reference: string | null, specs: OperationArgsSpecs 
 function positionalsOf(tokens: readonly string[]): string[] {
   const out: string[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
-    const token = tokens[index];
-    if (!token || token.startsWith('--')) {
-      if (token && token.includes('=')) continue;        // --flag=值：单个 token
+    const token = tokens[index] ?? '';
+    // 只有**真的是 flag**（以 -- 开头）才连它的取值一起跳过。空串是空的位置参数、
+    // 是合法的通用接口形态（前置位留空 + 后续位带目标），旧写法把它当 flag 处理会把后面
+    // 的目标参数一起吞掉——于是 ['', 'alpha'] 与 ['', 'beta'] 都解析成 []，覆盖检查
+    // 直接放行任意目标（十二审 blocking）。
+    if (token.startsWith('--')) {
+      if (token.includes('=')) continue;                // --flag=值：单个 token
       index += 1;                                        // --flag 值：跳过取值
       continue;
     }

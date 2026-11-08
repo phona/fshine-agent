@@ -8,6 +8,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { caseReportInputOf } from './probe-real-agent';
+import { mergeCallPhases } from './eval/evidence';
 import { buildCaseReport } from './eval/report';
 
 const turn = (messageId: string, intents: Array<{ intentId: string; status: 'pending' | 'committed' }>) => ({
@@ -66,3 +67,34 @@ describe('caseReportInputOf：宿主事实按全部轮次累积（八审 major�
 function buildCaseInput_safe(input: ReturnType<typeof caseReportInputOf>): number {
   return buildCaseReport(input).interventionPoints;
 }
+
+/**
+ * 注意（2026-11-09 十二审）：本文件钉住 mergeCallPhases 的口径，但**钉不住探针真的用了它**。
+ * 探针的 calls/refusedCalls 取 mergedRows 这件事，变异测试打不到——那条路只有真模型回合
+ * 才走得到（本文件全程离线）。已做的补偿：① 直接读代码确认接线在位（探针 :540/:556/:560
+ * 与用例级 caseRows 都走 mergeCallPhases）；② 真跑一次 --only A1 确认调用数正常。
+ * 后续若要把这条也钉住，需要给探针的 send 注入替身审计行——那是另一个工程量，登记在案。
+ */
+describe('起止合并后的调用数口径（十二审 major）', () => {
+  it('一次成功提案调用计 1 次，不是 2 次', () => {
+    // 复现缺陷：calls/refusedCalls 直接数审计行，而起止两行让一次成功提案被计成两次。
+    const rows = [
+      { callId: 'c1', phase: 'start' as const, mode: 'commit', script: 'dummy.proposal-commit' },
+      { callId: 'c1', phase: 'result' as const, mode: 'commit', script: 'dummy.proposal-commit', exitCode: 0 },
+    ];
+    const merged = mergeCallPhases(rows);
+    expect(merged.filter((r) => !r.refused)).toHaveLength(1);
+    expect(merged.filter((r) => r.refused)).toHaveLength(0);
+  });
+
+  it('一次被令牌门拒的提交计 1 次拒绝，不是 1 次已执行', () => {
+    // 复现缺陷：start 行没有 refused，按原始行数会被计成"已执行"——让最小调用数检查假绿。
+    const rows = [
+      { callId: 'c1', phase: 'start' as const, mode: 'commit', script: 'dummy.proposal-commit' },
+      { callId: 'c1', phase: 'result' as const, mode: 'commit', script: 'dummy.proposal-commit', exitCode: 3, refused: 'proposal' },
+    ];
+    const merged = mergeCallPhases(rows);
+    expect(merged.filter((r) => !r.refused)).toHaveLength(0);
+    expect(merged.filter((r) => r.refused)).toHaveLength(1);
+  });
+});
