@@ -178,7 +178,7 @@ const CORRECT_FORM = {
 function env(name, fallback) { const v = process.env[name]; return v === undefined || v === '' ? fallback : v; }
 function env2(a, b, fallback) { return env(a, env(b, fallback)); }
 function statePaths() {
-  const stateFile = env('DUMMY_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
+  const stateFile = env2('DUMMY_STATE', 'EXECUTION_MOCK_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
   const dir = path.dirname(stateFile);
   return {
     stateFile,
@@ -195,18 +195,35 @@ function seedState() {
       'alpha-group': { items: [{ id: 'rec-201', name: 'alpha-group-item-1', value: 700 }], windows: ['W1'], locked: false, records: { W1: 1 } },
       'locked-one': { items: [{ id: 'rec-301', name: 'locked-item-1', value: 900 }], windows: ['W1'], locked: true, records: { W1: 1 } },
       'empty-one': { items: [], windows: ['W1'], locked: false, records: { W1: 0 } },
+      // 自然名歧义对 1（探针 A3 / C2 第一次澄清 / X1）：查询 "contoso" 不是精确键，
+      // 子串命中下面两个 → COLLECTION_AMBIGUOUS。trade 双 window（W1 有数据）供 C2 选择后
+      // 续查；logistics 只有 W1——X1 的 window 切换轮（选 "the second one" 后问 W2）因此
+      // 落在无数据窗口上，考"该window无数据"的合法回复形态。
+      'contoso-trade': { items: [{ id: 'rec-401', name: 'contoso-trade-item-1', value: 1500 }, { id: 'rec-402', name: 'contoso-trade-item-2', value: 600 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
+      'contoso-logistics': { items: [{ id: 'rec-501', name: 'contoso-logistics-item-1', value: 450 }], windows: ['W1'], locked: false, records: { W1: 1 } },
+      // 自然名歧义对 2（C2 第二次澄清）：查询 "fabrikam" → 子串命中两个 → 歧义。
+      // 与 contoso 对分开，避免同一歧义样本反复考同一条路径（移植前中文财税域语料的
+      // 两对公司名歧义对同款设计）。
+      'fabrikam-retail': { items: [{ id: 'rec-601', name: 'fabrikam-retail-item-1', value: 880 }], windows: ['W1'], locked: false, records: { W1: 1 } },
+      'fabrikam-wholesale': { items: [{ id: 'rec-701', name: 'fabrikam-wholesale-item-1', value: 1320 }], windows: ['W1'], locked: false, records: { W1: 1 } },
     },
   };
 }
 function loadJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return fallback; }
 }
-function saveJson(file, data) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n'); }
-function loadState() { const p = statePaths(); const s = loadJson(p.stateFile, null); if (!s || !s.collections) { const seed = seedState(); saveJson(p.stateFile, seed); return seed; } return s; }
+// 原子写（2026-11-08 修）：writeFileSync 是截断+写，读者在半写窗口读到不完整 JSON 会触发
+// loadPlans/loadProposals 的重新初始化——把累计的计划/提案/调用计数连锅端。读者多起来后
+// （宿主每次建会话都问一次 plan current）这个窗口必被踩：实测 C2 跑批 ledgerCalls 变负、
+// 模型工具调用被拒后开始说元话语。tmp + renameSync 在同一文件系统上原子替换，消除半写窗口。
+function saveJson(file, data) { fs.mkdirSync(path.dirname(file), { recursive: true }); const tmp = `${file}.${process.pid}.tmp`; fs.writeFileSync(tmp, JSON.stringify(data, null, 2) + '\n'); fs.renameSync(tmp, file); }
+function loadState() { const s = loadJson(statePaths().stateFile, null); return (s && s.collections) ? s : seedState(); }
 function saveState(s) { saveJson(statePaths().stateFile, s); }
-function loadPlans() { const p = statePaths(); const s = loadJson(p.planFile, null); if (!s || !s.plans) { const init = { plans: {}, tasks: {} }; saveJson(p.planFile, init); return init; } return s; }
+// loader 一律只读不写（2026-11-08 修）：读失败/缺键时返回空状态即可，写回初始化是破坏性竞态——
+// 并发的另一个进程刚 saveJson 出新状态，这个进程读到旧内容（或半写内容）后一 save 就把它盖掉。
+function loadPlans() { const s = loadJson(statePaths().planFile, null); return (s && s.plans) ? s : { plans: {}, tasks: {} }; }
 function savePlans(s) { saveJson(statePaths().planFile, s); }
-function loadProposals() { const p = statePaths(); const s = loadJson(p.proposalFile, null); if (!s || !s.proposals) { const init = { proposals: {} }; saveJson(p.proposalFile, init); return init; } return s; }
+function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
 function audit(row) { const f = statePaths().auditFile; if (!f) return; try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n'); } catch { /* audit is best-effort */ } }
 function emit(op, status, data, error) {

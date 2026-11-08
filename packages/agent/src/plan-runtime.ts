@@ -92,10 +92,15 @@ export async function loadCurrentActivePlan(options: {
   taskId: string;
   runCli?: PlanCliRunner;
   env?: NodeJS.ProcessEnv;
+  /** Profile 声明的网关调用形式（C7b）：与 evaluateAndActivatePlan 同源透传给默认
+   * runner。漏穿的后果不是降级而是断链——defaultCliRunner spawn 前 fail-closed 抛错，
+   * 会话恢复时"当前有没有激活计划"这一问永远问不到平台（实测 2026-11-07：委派每次
+   * 重建会话都撞这里，恢复查询整条路径断在第一跳）。 */
+  gateway?: string;
 }): Promise<{ planId: string; version: number } | null> {
   const current = await runJson<{ taskId: string; planId: string | null; version: number | null; status: string }>(
     options.runCli ?? defaultCliRunner,
-    { platformRoot: options.platformRoot, args: ['plan', 'current', '--task-id', options.taskId], env: options.env },
+    { platformRoot: options.platformRoot, args: ['plan', 'current', '--task-id', options.taskId], env: options.env, ...(options.gateway ? { gateway: options.gateway } : {}) },
   );
   if (current.taskId !== options.taskId || current.status !== 'active' || typeof current.planId !== 'string' || !current.planId) return null;
   return { planId: current.planId, version: typeof current.version === 'number' ? current.version : 0 };

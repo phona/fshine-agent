@@ -1931,3 +1931,31 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：① `npx vitest run --project unit` 全绿；② e2e 失败集合与改前逐文件比较不增大（集合比较，不拿总数糊弄）；③ `npm run ci` 全绿；④ `grep -rn FSHINE_PLATFORM_ROOT` 全仓（除 git 历史）应为空或仅剩档案登记；⑤ harness 拿不到配置时 fail-closed 且报错说人话（不抛原始异常、不提 FSHINE_PLATFORM_ROOT）。
 - **归属波次 / 限期**：harness-config-unify；合入前。
 - **状态**：待办（PR #5 已开，待验证）。
+
+### D-197 · acceptance 5.1 实测暴露：写链在宿主确认门之外闭环 + 隔离复核间歇失败
+
+- **位置**：宿主侧 `packages/agent/src/pi-coding-driver.ts:1809-1817`（提案创建拦截三态审计）、`packages/agent/src/proposal-review.ts:77-130`（隔离复核门）；夹具侧 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:615-625`（`call` 模式按 protocol 列把 `dummy.proposal`/`dummy.proposal-commit` 路由到 `doProposalCreate`/`doProposalCommit`——bash 直连写链的入口）；验收侧 `scripts/acceptance.ts`（sessionKey，见下）。
+- **触发 / 根因**（2026-11-07 acceptance 5.1 实测，四路证据坐实）：该跑宿主根本没铸出确认码——隔离复核 fail-closed（审计行 `serve_gate:proposal_create` / GATE_BLOCKED / `PROPOSAL FAILED：提案隔离复核未通过，未发确认码，请重新发起录入`，`change_intents` 零行），宿主把 worker 放回去后，**worker 用被放行的 bash 直调平台 CLI 把写链整个走完了**（`bin/dummy proposal src/dummy/scripts/proposal.js tmp/…/proposal.json` → `bin/dummy proposal status --proposal-id …` → `bin/dummy call --file call-proposal.json`/`call-commit.json`/`call-verify.json`，全部 `serve_gate:bash` status=ok；夹具 proposals.json 里 `prop_… status=committed` 是 worker 自建自投的那份）。模型那句"记录已新增完成并验证通过"是在没有码的前提下自述它绕过宿主的一次写。同一用例单例重跑证明宿主这条路是通的（复核 verdict=consistent、码 `DM994A` 正常出现在确定性回复里、confirmCodeOffered=true），所以 21:43 那次是**间歇失败 + 放行漏洞**的组合，不是模型侧呈现问题。
+- **律法归属**：L2（写路径宿主确认状态的单一来源）/ 改动防线 F1（安全门禁不许被旁路）。
+- **闭环判据**：① 复核门失败后宿主不得把 worker 放回去重试同一写路径——要么终止本轮写意图并向用户说明，要么把该会话的写能力收回（二选一，裁定后实现）；② 宿主 serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口（或其等价封堵：worker 的 bash 不得触达 `dummy.proposal`/`dummy.proposal-commit` 的创建与提交），封堵后重跑 acceptance 5.1：复核失败场景下夹具 `committed` 提案数不增；③ 复核间歇失败的近因定性（10s 隔离模型回合超时 vs 语义不一致——两种都产生空 fields，需在审计行补字段列表才能区分）。**2026-11-08 近因已定性**：单例重跑的审计行带 `blockedReason:"reviewer returned empty text"`（两次）——隔离复核轮拿到的是**空文本**，不是语义不合规；与每跑必现的 `context_semantic_extract_failed … Context model returned an empty response` 同族（宿主抽取/复核驱动的空回复）。尺子修复已验证：`platform_tasks.parent_session_id` 实为 `wecom:acc-write-51`，修复后的 `sessionKeyOf` 精确命中（该跑 taskId 不再 None）；`change_intents` 零行是因复核未过（码与意图同一块铸），待复核通过轮次验证 intents 一支；④ `npm run ci` + 六守卫全绿。
+- **同轮发现已修（本 PR）**：验收脚本 sessionKey 拼错（`wecom:${user}:${conv}`，而宿主 sessionId = `wecom:${conversationId}`，apps/server/handler.ts:576-577 不含 user 段）——`platform_tasks`/`change_intents` 两条按 session 的查询永远查不到，write-chain 的 intents 恒空、taskId 恒 None，即使宿主写链全对 `intentCreated`/`committed`/`readbackVerified` 仍读 false。修法 = `scripts/acceptance.ts` 三处统一走 `sessionKeyOf(spec)`（先存缺陷，d6e3fc8 建脚本时就写错，非移植回归）。
+- **归属波次 / 限期**：宿主修复单独一轮（不混进 eval 域移植 PR）；公开推送前。**2026-11-08 波次裁定修订（PR #9 评审）**：gateway 穿线补课（`createPiCodingWorkerSession` 计划两跳 loadCurrentActivePlan/evaluateAndActivatePlan + plan-runtime 默认 runner 三处 options.gateway + assembly 装配注入）是一处**与本条同族的宿主生产路径缺陷**（main 自 C7b 起每次计划提交都以 PLAN DECLINED 收场、平台零执行），经评审披露后随 eval 域移植 PR #9 先行落地——偏离「单独一轮」的裁定就此记录，不作为后续宿主改动混波的先例；回归锁 = `packages/agent/pi-coding-driver-gateway-threading.test.ts`（driver 两跳）+ `apps/server/profile-gateway-wiring.test.ts`（assembly→driver 注入，变异验证删行即红）。放行漏洞（判据 ①②）与复核近因收口仍归单独一轮，不随移植 PR。
+- **状态**：待办（放行漏洞 + 复核近因未修；尺子缺陷已修待复跑验证；gateway 穿线补课已随 PR #9 先行修，见上）。
+
+### D-198 · dummy 夹具能力缺口：验收 1.x/3.x 的正向覆盖映射与待补清单
+
+- **位置**：`scripts/acceptance.ts` 用例清单头注释（三类映射）；夹具 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs` 的 OPERATIONS（当前能力面 = collection/window/records{name,value} + 提案写链）。
+- **触发 / 根因**（2026-11-08 评审 major）：eval 域移植把 acceptance 的 1.1/1.2 与多项 3.x 改成"不存在实体/不支持口径"的边界回复，且发送里残留旧域实体名——原财税 mock 的成功查询与分页链路失去覆盖，查询链路损坏也可能只得到符合新预期的边界说明。
+- **律法归属**：L2（验收覆盖的单一权威在用例清单）/ F1（表征先行：覆盖映射先于能力补齐）。
+- **闭环判据**：① 1.1/1.4/3.5 迁回正向查询（夹具支持的成功查询 + 越权拒绝），1.3 的上下文召回因此有可召回的真实查询；② 边界类逐条登记夹具缺口：**分页**（dummy.query 无分页操作，"下一页"只能考诚实收边）、**进度**（3.1）、**tax 口径**（3.2）、**admin expense 口径**（3.3）、**field system**（3.4）、**不存在的实体**（4.3）；③ 缺口补齐前，正向执行回归的独立覆盖 = 上述三条 + 探针正向用例（A1/B1/C2/H1/X1 全部真实查询）——写进 PR 描述与基线 v4 报告；④ 每补一个夹具能力，同步把对应边界用例迁回正向并在此条目销项。
+- **归属波次 / 限期**：Wave 6 之后（不阻塞基线 v4 建线——映射已登记，独立覆盖已声明）。
+- **状态**：部分闭环（① 已完成：1.1/1.4 迁回正向、旧域实体名清零、三类映射写进用例清单头；② 缺口待补）。**2026-11-08 评审补记**：「清零」当时不实——4.1 语料残留旧财税记录号「记-003」（dummy 种子记录号是 rec-NNN，模型对不上任何真实记录，写链到不了提案，与 ③「4.1/4.2 写链不受影响」自相矛盾）、6.5 残留「机电customer」实体名与「checkalpha」粘连、8.2「checkalpha」粘连；已对位修复（4.1 → rec-101/value，6.5/8.2 → dummy 实体 + 解粘连），③ 的覆盖映射自此成立。
+
+### D-199 · 召回轮聚合值判据需按 collection 分组（C2 每跑必现的信息性/假红）
+
+- **位置**：`scripts/probe-real-agent.ts` 的 amountNote（allowedAmounts/realAmounts 的线程级金额池）。
+- **触发 / 根因**（2026-11-08 C2 最终 head 两轮实跑）：召回/比较轮里模型按 collection 呈报合计（contoso-trade 2100 = 1500+600、alpha 2000 = 1200+800）——这些是诚实的 per-collection 聚合，但 amountNote 的允许池是**线程级**的（B+C 线程 = {1500,600,450}），既不含聚合值、算术通道又要求"全额"（全和 2550 ≠ 2100），于是合法小计被判"无来源金额/不一致"。同源形态：errorStateNotes 侧已按"所绑实体"分组核验，召回侧还没有分组信息。
+- **律法归属**：L2（判据单一真相源）/ F1（表征先行）。
+- **闭环判据**：allowedAmounts 支持按 collection 分组的聚合放行（分句点名某 collection 时，该 collection 在本线程的真实值全和 = 合法聚合），并补反例（跨线程小计不得蹭放行）；C2 复跑此类 note 归零或转信息性。
+- **归属波次 / 限期**：Wave 6 之后（不阻塞合入——C2 闸的结构验证已由 50-70 次真实调用坐实；本条只影响 note 分类的信噪比）。
+- **状态**：待办。

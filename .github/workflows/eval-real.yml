@@ -6,9 +6,12 @@
 #   - Judge conclusions are advisory only and never blocking.
 #   - The mechanical score exit code IS the job exit code (so a future
 #     required-check conversion is a one-line change).
-#   -财税域真实 eval（probe-real-agent / acceptance / score.ts）需要
-#     真实执行层 + 本地 config/agent.yaml，留在 Tier B 手动运行。
-#     CI 的真实模型面走通用域 stock fixture，零平台路径依赖。
+#   - 全 worker 真实 eval（probe-real-agent / acceptance / score.ts）走仓内 dummy
+#     夹具（scripts/eval/eval.agent.yaml，Wave 6 域端口后不依赖外部执行层），
+#     因需真实 LLM 额度仍留在 Tier B 手动运行。
+#     CI 的真实模型面 = generic-model-eval.py 最小工具环 harness（不经过全 worker），
+#     走仓内 stock fixture（bin/stock），零平台路径依赖——两套面各自的夹具口径以
+#     scripts/eval/eval.agent.yaml 头注「域边界」段为准。
 name: Eval Real (generic domain)
 
 on:

@@ -11,9 +11,13 @@
 #   3. Judge variance: the judge component is advisory-only and must never
 #      become a per-push blocking gate; the mechanical component is the
 #      exit-code carrier for the real-model job.
-# Finance-domain eval (probe-real-agent / acceptance / score.ts) needs a real
-# execution layer + local config/agent.yaml and stays Tier B (manual before
-# merge + nightly), not every-push CI.
+# Full-worker real-model eval (probe-real-agent / acceptance / score.ts) runs on
+# the in-repo dummy fixture via scripts/eval/eval.agent.yaml (no external
+# execution layer since the Wave 6 domain port) and stays Tier B (manual before
+# merge + nightly) because it consumes real LLM quota — not every-push CI.
+# The CI real-model face (eval-real.yml) is the minimal tool-loop harness
+# (generic-model-eval.py) on the in-repo stock fixture; fixture-per-surface
+# wording lives in scripts/eval/eval.agent.yaml's 域边界 note.
 # e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
 # CI scope is unchanged by that inventory: no finance e2e is added back here.
 # CI runs only the deterministic gates; consistency between this repo's generic
