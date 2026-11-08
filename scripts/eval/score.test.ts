@@ -139,8 +139,11 @@ describe('真实语料/基线文件一致性锁', () => {
     }
   });
 
-  it('write-chain-51 的写链用例组覆盖确认链（5.1→5.1b→5.2）', () => {
+  // 2026-11-08 切片 C：corpus.jsonl 并进 cases.yaml 时核对 acceptance.ts 的 CASES——
+  // 原语料只列到 5.3，漏了同会话的 5.4（复用码二次确认）。以 acceptance.ts 的实际
+  // 用例组为准（5.4 是该写链的「复用码不双计」格，不是新会话）。
+  it('write-chain-51 的写链用例组覆盖确认链（5.1→5.1b→5.2→5.3→5.4）', () => {
     const entry = corpus.find((item) => item.id === 'write-chain-51');
-    expect(entry!.cases).toEqual(['5.1', '5.1b', '5.2', '5.3']);
+    expect(entry!.cases).toEqual(['5.1', '5.1b', '5.2', '5.3', '5.4']);
   });
 });

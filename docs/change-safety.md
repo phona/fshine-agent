@@ -607,7 +607,7 @@ E 波末尾"下一处该投的是 L7"的兑现：Tier-1 打分器建成（D-060 
 |---|---|---|
 | 四维归维表 | `scripts/eval/dims.ts` | 探针 note → 有据/实体保真/失败诚实/呈现卫生，单一来源；原句表征锁（`dims.test.ts`）钉住每条规则 |
 | 写链三指标 | `scripts/eval/write-chain.ts` | 提案尝试（`serve_gate:proposal_create` 行）/ 落账+读回（`change_intents`）/ 确认码——§E 波末尾手工提取的三个指标自此机械提取 |
-| 语料库 | `scripts/eval/corpus.jsonl` | 存量事故→用例的版本化映射：围栏→写链全链、驼峰→Y2、抽象泄漏→A3/A4、2048→D1（观察面）、复读→A2/A4、实体串台→A2 |
+| 语料库 | `scripts/eval/corpus.jsonl`（2026-11-08 切片 C 起并入 `scripts/eval/cases.yaml`：inBaseline/incidents/expect 与消息序列、轮次标记、期望值同一份数据） | 存量事故→用例的版本化映射：围栏→写链全链、驼峰→Y2、抽象泄漏→A3/A4、2048→D1（观察面）、复读→A2/A4、实体串台→A2 |
 | 评委 | `scripts/eval/judge-prompt.md` + `judge.ts` | 四维 0/1/2 + 引文证据；只吃转录（与机械分量互不锚定）；版本 = 内容 sha256 |
 | 打分器 | `scripts/eval/score.ts` + `baseline.json` | 四类阈值（dims 上限 / judge 下限−容差 / 写链布尔面 / okMode）；记分台 `.runtime/scores.jsonl`；回归 exit 1 |
 

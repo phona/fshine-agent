@@ -22,11 +22,15 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DIM_LABELS_ZH, NOTE_DIMS, type DimCounts, type NoteDim } from './dims';
 import { judgeEnvReady, judgeModel, judgePromptVersion, judgeTranscript, type JudgeResult } from './judge';
+// 用例语料（issue 切片 C）：corpus.jsonl 已并进 cases.yaml——inBaseline / incidents /
+// expect 与消息序列、期望值同一份数据，不再有两处可漂移的语料。
+import { CASES_PATH, loadCases, toCorpusEntries, type CaseSpec, type CorpusEntry } from './cases';
+import { evaluateCaseExpectations } from './expectations';
+import type { ExecutionAuditRow } from './evidence';
 import type { ConversationWriteChainFacts } from './write-chain';
 
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(evalDir, '..', '..');
-const CORPUS_PATH = path.join(evalDir, 'corpus.jsonl');
 const BASELINE_PATH = path.join(evalDir, 'baseline.json');
 const SCORES_PATH = path.join(repoRoot, '.runtime', 'scores.jsonl');
 // 配置同源：本脚本目前不加载 agent config（只读 probe/acceptance 报告 + 基线），
@@ -35,19 +39,7 @@ const SCORES_PATH = path.join(repoRoot, '.runtime', 'scores.jsonl');
 
 // ── 数据形状 ──
 
-export interface CorpusEntry {
-  id: string;
-  kind: 'probe' | 'acceptance';
-  inBaseline: boolean;
-  /** probe 用例 id（探针报告 results[].id）。 */
-  case?: string;
-  /** acceptance 会话 id（spec.conv）。 */
-  conversation?: string;
-  /** acceptance 组内用例（仅文档用；取数按会话）。 */
-  cases?: string[];
-  incidents: string[];
-  expect: string;
-}
+export type { CorpusEntry } from './cases';
 
 export interface BaselineCase {
   /** 四维违例数上限（只增才算劣化）。 */
@@ -87,7 +79,17 @@ export interface ProbeResultRow {
   dims: DimCounts;
   unclassifiedNotes: number;
   notes: string[];
-  turns: Array<{ text: string; reply: string; notices: string[] }>;
+  turns: Array<{
+    text: string;
+    reply: string;
+    notices: string[];
+    /** 该轮已执行的平台调用数（期望值层的每轮真查/调用数判定用）。 */
+    calls?: number;
+    /** 该轮被门拒的调用数。 */
+    refusedCalls?: number;
+    /** 该轮审计窗口内的执行层审计行（期望值层的门禁时序/无风暴/写尝试判定用）。 */
+    execution?: ExecutionAuditRow[];
+  }>;
 }
 
 export interface ProbeReport { at: string; results: ProbeResultRow[] }
@@ -108,28 +110,9 @@ export interface CaseVerdict {
 
 // ── 加载与定位 ──
 
-export function loadCorpus(corpusPath: string = CORPUS_PATH): CorpusEntry[] {
-  const entries = readFileSync(corpusPath, 'utf8').split('\n')
-    .map((line) => line.trim()).filter(Boolean)
-    .map((line, index) => {
-      const entry = JSON.parse(line) as CorpusEntry;
-      if (!entry.id || (entry.kind !== 'probe' && entry.kind !== 'acceptance')) {
-        throw new Error(`语料第 ${index + 1} 行缺 id 或 kind 非法：${line.slice(0, 80)}`);
-      }
-      if (!Array.isArray(entry.incidents) || entry.incidents.length === 0) {
-        throw new Error(`语料 ${entry.id} 缺 incidents（每条用例必须挂事故标签）`);
-      }
-      if (entry.kind === 'probe' && !entry.case) throw new Error(`语料 ${entry.id} 是 probe 但缺 case`);
-      if (entry.kind === 'acceptance' && !entry.conversation) throw new Error(`语料 ${entry.id} 是 acceptance 但缺 conversation`);
-      if (typeof entry.inBaseline !== 'boolean') throw new Error(`语料 ${entry.id} 缺 inBaseline`);
-      return entry;
-    });
-  const ids = new Set<string>();
-  for (const entry of entries) {
-    if (ids.has(entry.id)) throw new Error(`语料 id 重复：${entry.id}`);
-    ids.add(entry.id);
-  }
-  return entries;
+/** 语料（cases.yaml 的语料元数据视图；inBaseline 已从 corpus.jsonl 并进 yaml）。 */
+export function loadCorpus(casesPath: string = CASES_PATH): CorpusEntry[] {
+  return toCorpusEntries(loadCases(casesPath));
 }
 
 export function loadBaseline(baselinePath: string = BASELINE_PATH): Baseline {
@@ -138,8 +121,8 @@ export function loadBaseline(baselinePath: string = BASELINE_PATH): Baseline {
   return baseline;
 }
 
-export function corpusVersion(corpusPath: string = CORPUS_PATH): string {
-  return createHash('sha256').update(readFileSync(corpusPath, 'utf8')).digest('hex').slice(0, 8);
+export function corpusVersion(casesPath: string = CASES_PATH): string {
+  return createHash('sha256').update(readFileSync(casesPath, 'utf8')).digest('hex').slice(0, 8);
 }
 
 /** 目录下最新一份报告（mtime 最大）。 */
@@ -155,11 +138,23 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
 
 // ── 逐例判定（纯函数，单测面） ──
 
+/**
+ * 探针逐例判定：四层并列，**不替换任何一层**。
+ *   ① 四维违例上限（基线 cap，只增才算劣化）
+ *   ② 探针自身 ok（strict/free）
+ *   ③ 评委分下限（--judge 时）
+ *   ④ 期望值层（scripts/eval/expectations.ts）：应报的值/条数/collection、逐线程真值、
+ *      跨线程隔离、总结收敛、门禁时序/无风暴/大额行归属。这一层**不受基线 cap 影响**——
+ *      B1 的 2000、Y2 的 payable=1000、A2 的 alpha 渗入都是「各自有据所以 cap 放过」的
+ *      形态，只有它能变成硬失败。
+ * spec 缺 expectations（未审计占位条目）时第四层不出检查——不猜期望值。
+ */
 export function evaluateProbeCase(
   corpusId: string,
   row: ProbeResultRow | undefined,
   baselineCase: BaselineCase | undefined,
   judge?: JudgeResult,
+  spec?: CaseSpec,
 ): CaseVerdict {
   const id = row?.id ?? corpusId;
   if (!row) {
@@ -191,13 +186,29 @@ export function evaluateProbeCase(
       checks.push({ name: `评委·${DIM_LABELS_ZH[dim]}`, pass: actual >= expected - tolerance, expected: `≥${expected - tolerance}`, actual: String(actual) });
     }
   }
+  // ④ 期望值层（issue 切片 C）：与上面三层并列。期望值只活在判定层，不进任何 prompt。
+  if (spec) checks.push(...expectationChecksOf(spec, row));
   return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
+}
+
+/** 探针报告行 → 期望值层输入（逐轮回复 + 该轮审计窗口行）。 */
+function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[] {
+  return evaluateCaseExpectations(spec, (row.turns ?? []).map((turn) => ({
+    text: turn.text,
+    reply: turn.reply,
+    notices: turn.notices ?? [],
+    calls: turn.calls,
+    refusedCalls: turn.refusedCalls,
+    execution: turn.execution ?? [],
+  }))).checks;
 }
 
 export function evaluateWriteChainCase(
   entry: CorpusEntry,
   facts: ConversationWriteChainFacts | undefined,
   group: BaselineWriteChainGroup | undefined,
+  spec?: CaseSpec,
+  records?: ReadonlyArray<{ id: string; reply?: string; durationMs?: number }>,
 ): CaseVerdict {
   const expectedTrue = (name: string, expected: boolean | undefined, actual: boolean): Check => ({
     name,
@@ -224,6 +235,18 @@ export function evaluateWriteChainCase(
     expectedTrue('落账 committed', group.committed ?? true, committed),
     expectedTrue('读回校验在', group.readbackVerified ?? true, committed && facts.intents.some((intent) => intent.status === 'committed' && intent.hasResult)),
   ];
+  // ④ 期望值层（acceptance 侧）：5.1 给确认码、5.3 读回条数、5.4 复用码不双计。
+  // 取数面 = 验收报告的 records（回复文本）；calls/execution 审计面 acceptance 报告不载，
+  // 因此 acceptance 的期望值只覆盖文本面断言，过程不变量里依赖审计行的几条不出检查
+  // （没有证据不出判定——不造零也不造成功）。
+  if (spec && records) {
+    const byId = new Map((spec.messages ?? []).map((message, index) => [message.id ?? String(index), message]));
+    const turns = records
+      .filter((record) => byId.has(record.id))
+      .sort((a, b) => [...byId.keys()].indexOf(a.id) - [...byId.keys()].indexOf(b.id))
+      .map((record) => ({ text: byId.get(record.id)?.text ?? record.id, reply: record.reply ?? '', notices: [] }));
+    checks.push(...evaluateCaseExpectations(spec, turns).checks);
+  }
   return { corpusId: entry.id, id: entry.id, kind: 'acceptance', pass: checks.every((check) => check.pass), checks };
 }
 
@@ -266,10 +289,10 @@ function fmtVerdict(verdict: CaseVerdict): string {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const corpus = loadCorpus(CORPUS_PATH);
+  const corpus = loadCorpus(CASES_PATH);
   const baselinePath = args.baselinePath ?? BASELINE_PATH;
   const baseline = loadBaseline(baselinePath);
-  const corpusVer = corpusVersion(CORPUS_PATH);
+  const corpusVer = corpusVersion(CASES_PATH);
   const promptVer = judgePromptVersion();
 
   // 语料 ⊆ 基线锁：进基线的语料必须有基线项（反向多余项只提示不拦——删语料时基线项随 --write-baseline 清理）。
@@ -301,7 +324,7 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const acceptanceJson = JSON.parse(readFileSync(acceptancePath!, 'utf8')) as {
-    records: Array<{ id: string }>;
+    records: Array<{ id: string; reply?: string; durationMs?: number }>;
     writeChain: ConversationWriteChainFacts[];
   };
   console.log(`== L7 打分 == 语料 v${corpusVer} · 评委提示词 v${promptVer} · 基线 v${baseline.version}（${baseline.generatedAt}）`);
@@ -311,6 +334,11 @@ async function main(): Promise<void> {
     console.error('评委缺环境变量（exit 2）：LLM_API_BASE_URL / LLM_API_KEY / LLM_MODEL（--env-file=.env）');
     process.exit(2);
   }
+
+  // 用例规格（期望值层的取数面）：语料 id → CaseSpec（acceptance 按条目 id 找）。
+  const cases = loadCases(CASES_PATH);
+  const specOf = (entry: CorpusEntry): CaseSpec | undefined =>
+    cases.find((item) => (item.kind === 'probe' ? item.id === entry.case : item.id === entry.id));
 
   const verdicts: CaseVerdict[] = [];
   for (const entry of inBaseline) {
@@ -324,10 +352,10 @@ async function main(): Promise<void> {
           turns: row.turns.map((turn) => ({ user: turn.text, reply: turn.reply, notices: turn.notices })),
         });
       }
-      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult));
+      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry)));
     } else {
       const facts = acceptanceJson.writeChain.find((item) => item.conversationId === entry.conversation);
-      verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!]));
+      verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!], specOf(entry), acceptanceJson.records));
     }
   }
   const skipped = corpus.filter((entry) => !entry.inBaseline);

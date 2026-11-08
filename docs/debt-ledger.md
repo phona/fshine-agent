@@ -2004,3 +2004,15 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**（判据 ①② 一字未放宽，只重写理由段）：① 复核门失败后宿主不得把 worker 放回去重试同一写路径——要么终止本轮写意图并向用户说明，要么把该会话的写能力收回（二选一，裁定后实现）；② 宿主 serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口（或其等价封堵：worker 的 bash 不得触达创建与提交），封堵后重跑 acceptance 5.1：复核失败场景下夹具 `committed` 提案数不增；③ 复核间歇失败的近因定性（隔离复核轮拿到空文本 vs 语义不一致，需审计行补字段列表才能区分）；④ `npm run ci` + 六守卫全绿。
 - **归属波次 / 限期**：宿主修复单独一轮（不混进 eval 域移植 PR）；公开推送前。射程按 2026-11-08 裁定重写不改变波次归属；gateway 穿线补课已随 PR #9 先行落地（偏离「单独一轮」的裁定记录在 D-197 原条目，不作为后续混波先例）。
 - **状态**：待办（判据 ①② 未收口；尺子缺陷已修待复跑验证；gateway 穿线已修）。射程已按 2026-11-08 裁定重写，实现要求一字未放宽。
+
+### D-198 · eval 用例落数据 + 期望值判定层 + 状态阶梯报告（issue 切片 C/D 落地）
+
+- **位置**：`scripts/eval/cases.yaml`（用例语料唯一数据源）+ `scripts/eval/cases.ts`（加载/校验）+ `scripts/probe-real-agent.ts`（CASES 数组删除，改 `CASE_RUNNERS` 判定体登记表 + `loadProbeCases`）+ `scripts/eval/expectations.ts`（第四层判据）+ `scripts/eval/report.ts`（统一 JSON/JSONL 报告）+ `scripts/eval/expectations.test.ts` / `cases.test.ts`（回归锁）+ `docs/eval-mechanism-registry.md`（机制登记表）。`scripts/eval/corpus.jsonl` 已删除（inBaseline/incidents/expect 并进 yaml）。
+- **防什么**：① 语料与判据混住一个文件——改用例要碰判定逻辑、改判据会悄悄改语料；② 前三层只判「数字有没有来源」，不判「对不对得上这个用例的期望」——B1 第 1/5 轮多报 2000、Y2 把平台没有的 payable 答成 1000、A2 第二轮带 alpha 三条已发生缺陷全因基线上限 1 而只留 note；③ 每条调用成没成被模型自述代言。
+- **落地形态**：yaml 22 条（21 probe + 1 acceptance）。审计过的 12 条写全四元组（businessGoal / fixture / allowedSideEffects / expectations）+ 既有信息（messages + 轮次标记 past/recall/requery/landing/reasoning/summary）；未审计的 11 条（B2/C1/E1/F1/G1/G2/H1/H2/X2/Y1/Z1）是占位条目——消息序列从代码机械搬过来，`expectations: null`、businessGoal 标「切片 E 扩充」，不凭猜补。探针 `loadProbeCases` 双向核对 yaml ↔ 判定体（任一不符抛错，fail-fast）；`fixture.env` 由包装器在用例前后设置与还原（D2 的 `DUMMY_PLAN_CONFIRM_CALLS=6` 原先手写在用例体里，泄漏过到后续用例）。期望值层四类断言（短用例期望值 / 逐线程真值 / 跨线程隔离 / 收敛正确性）+ 三个过程不变量（门禁时序 / 无风暴 / 大额行归属），结果进 `score.ts` 的 `CaseVerdict.checks`（`期望·*` 前缀），与既有三层并列不替换；**期望值只活在判定层，不进任何 prompt**。状态阶梯与统一报告：探针逐轮按持久化 id 反查三源证据（执行层审计行 / 宿主门裁决与委派 / change_intents 读回），每条调用标 authorized/invoked/completed/verified/delivered，无证据标 INCONCLUSIVE；落 `.runtime/eval-report-<runId>.json`（全量）+ 同名 `.jsonl`（一行一次调用）+ 最小聚合指标（通过率/干预/安全违规/耗时/Token）。
+- **实测**：`npx vitest run --project unit scripts/eval/expectations.test.ts cases.test.ts score.test.ts` → 41 passed（三条缺陷各同时断言「旧三层放过」+「新层硬失败」+ 干净形态不红的正控制）；`npm run eval:generic-mock` → 24 cases pass, 0 skipped；五个静态守卫 33 passed；`npm run typecheck` exit 0。类型覆盖缺口实测：`tsconfig.json` 的 include 不含 `scripts/`，新增文件的类型用临时 tsconfig（extends 根配置 + include scripts）单独核过，新增文件零错误。
+- **未覆盖（登记，不装作已覆盖）**：① 未审计的 11 条在第四层上裸奔；② acceptance 侧期望值只覆盖文本面（审计行不载 acceptance 报告，门禁时序/无风暴在验收侧不出检查）；③ yaml ↔ 判定体负路径（故意不匹配就抛错）无用例；④ 探针报告新增 `execution`/`calls` 字段没有旧报告格式守卫，旧报告会被期望值层读成「零调用轮次」；⑤ 审计结论「评委 21/28 有真实门限、7 个恒过」与 `baseline.json` 实测不符（实测 24 个评委维检查 / 20 个真实门限 / 4 个恒过），已按实测改写进机制登记表。
+- **律法归属**：L7（可信度可量化）/ architecture-laws「可信度靠 eval 基线跑漂移」的机械守卫延伸。
+- **闭环判据**：① `npm run ci` 全绿；② 三条已发生缺陷在 `expectations.test.ts` 里从"通过"变"失败"（已实现测）；③ 未审计用例补审计后把占位换成完整四元组（切片 E）；④ 基线下一次重定走 `score.ts --write-baseline` 唯一入口（期望值层新增的 `期望·*` 检查会进基线，strict 用例 ok 翻转仍拒绝烤入）。
+- **归属波次 / 限期**：切片 C/D 本轮已落地；**限期 = 切片 E 开工前**补齐三件未覆盖项（未审计 11 条的期望值、acceptance 侧审计行取数、yaml↔判定体负路径用例、探针报告旧格式守卫）。
+- **状态**：本轮已落地（切片 C/D 的用例数据 + 期望值层 + 状态阶梯报告）；切片 E（未审计 11 条的审计与期望值）待办。

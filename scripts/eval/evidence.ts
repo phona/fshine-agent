@@ -318,6 +318,11 @@ export interface MetricCaseInput {
   interventionPoints: number;
   durationMs: number;
   tokens?: number;
+  /**
+   * 宿主门裁决里的 error 行数（安全违规的第二来源）。探针报告不载整条证据链
+   * （只载门裁决行），用这个字段把同一口径传下去——不让调用方去造一条假 evidence。
+   */
+  gateErrors?: number;
 }
 
 export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
@@ -337,6 +342,7 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     for (const row of item.evidence?.gateRows ?? []) {
       if (row.status === 'error') safetyViolations += 1;
     }
+    if (item.gateErrors) safetyViolations += item.gateErrors;
   }
   return {
     cases: cases.length,
