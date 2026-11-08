@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     const lastRound = round(39);
     const reply = await runtime.handleTurn({
       requestId: newId('req'), principalId: `wecom:${USER}`,
-      allowedAccountSetIds: [], sessionId: SESSION, capabilities: ['read', 'write'],
+      sessionId: SESSION, capabilities: ['read', 'write'],
     }, '我们之前一共查过哪些账套？把最后一个账套的名字和它最后一次翻页用的 nextCursor 原值告诉我。');
     console.log(JSON.stringify({ event: 'probe_reply', text: reply.text.slice(0, 600) }));
     console.log(`探针期望参考（最后一条历史）：账套=${lastRound.assistant.slice(0, 20)}…`);
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ event: 'seed_done', mode, rounds, estTokens: est, threshold: 111_616 }));
     const reply = await runtime.handleTurn({
       requestId: newId('req'), principalId: `wecom:${USER}`,
-      allowedAccountSetIds: [], sessionId: SESSION, capabilities: ['read', 'write'],
+      sessionId: SESSION, capabilities: ['read', 'write'],
     }, '这个会话里我们主要在查什么？最近几次查询围绕哪些账套？');
     console.log(JSON.stringify({ event: 'probe_reply', text: reply.text.slice(0, 600) }));
   }

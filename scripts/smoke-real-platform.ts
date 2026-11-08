@@ -116,8 +116,16 @@ class RecordingSdk implements SdkClientLike {
     this.frames.push({ content, finish });
     return {};
   }
-  async uploadMedia(): Promise<{ media_id: string }> { return { media_id: 'unused' }; }
+  async uploadMedia(_data: Buffer, _options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }> {
+    return { media_id: 'unused' };
+  }
   async replyMedia(): Promise<unknown> { return {}; }
+  async sendMessage(_chatid: string, _body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
+    return {};
+  }
+  async downloadFile(_url: string, _aesKey?: string): Promise<{ buffer: Buffer; filename?: string }> {
+    return { buffer: Buffer.from(''), filename: 'unused' };
+  }
 }
 
 function wecomText(userid: string, content: string): { headers: { req_id: string }; body: Record<string, unknown> } {

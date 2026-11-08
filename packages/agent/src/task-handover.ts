@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 export const HANDOVER_FILE_NAME = 'handover.json';
-export const HANDOVER_VERSION = 1;
+export const HANDOVER_VERSION = 1 as const;
 
 export interface HandoverExecutedCall {
   operation: string;

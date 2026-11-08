@@ -151,7 +151,7 @@ export default function setup(): void {
    * 注册自己的处理器，主进程会被信号挂住不退。
    */
   for (const [signal, code] of Object.entries(SIGNAL_EXIT)) {
-    process.prependListener(signal, () => {
+    process.prependListener(signal as NodeJS.Signals, () => {
       sweep(`signal:${signal}`);
       process.exit(code);
     });

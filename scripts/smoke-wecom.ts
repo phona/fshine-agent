@@ -3,9 +3,9 @@
  * 用法:node --env-file=.env --import tsx scripts/smoke-wecom.ts
  * 注意:该机器人同时只允许一条连接,冒烟会踢掉已有连接。
  */
-import { NodeWebSocketImpl, WecomBotChannel } from '@fshine/channel-wecom';
+import { WecomBotChannel } from '@fshine/channel-wecom';
 
-const channel = new WecomBotChannel({ env: process.env, WebSocketImpl: NodeWebSocketImpl });
+const channel = new WecomBotChannel({ env: process.env });
 const timeout = setTimeout(() => {
   console.error('SMOKE_FAIL: 30 秒内未完成订阅');
   process.exit(1);

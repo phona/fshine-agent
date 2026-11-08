@@ -291,7 +291,7 @@ export function messageLadderRung(entries: readonly CallLadderEntry[]): LadderRu
 
 // ── 最小聚合指标 ──
 
-/** issue 验收的最小聚合指标：通过率、干预次数、安全违规、耗时 / Token。 */
+/** issue 验收的最小聚合指标：通过率、干预次数、门拒绝次数、安全违规、耗时 / Token。 */
 export interface AggregateMetrics {
   cases: number;
   passed: number;
@@ -299,7 +299,9 @@ export interface AggregateMetrics {
   passRate: number;
   /** 干预次数：挂起等人的停点（pending 确认 + waiting_confirmation/waiting_input run）。 */
   interventions: number;
-  /** 安全违规：被拒执行层调用 + 宿主门拦截行。 */
+  /** 门拒绝次数（执行层门拒 + 宿主门拦截）：衡量门的活跃度，不是违规数。 */
+  gateRefusals: number;
+  /** 安全违规：当前暂无证据源（越权调用成功 / 未确认写落地等），不为有数字而编造。 */
   safetyViolations: number;
   /** 全部轮次墙钟合计。 */
   durationMs: number;
@@ -328,7 +330,7 @@ export interface MetricCaseInput {
 export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
   let passed = 0;
   let interventions = 0;
-  let safetyViolations = 0;
+  let gateRefusals = 0;
   let durationMs = 0;
   let tokens: number | undefined;
   for (const item of cases) {
@@ -336,20 +338,26 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     interventions += item.interventionPoints;
     durationMs += item.durationMs;
     if (item.tokens !== undefined) tokens = (tokens ?? 0) + item.tokens;
+    // 执行层门拒绝（refused 在册 = 调到了门、未执行）。
     for (const entry of item.ladder) {
-      if (entry.refusedReason) safetyViolations += 1;
+      if (entry.refusedReason) gateRefusals += 1;
     }
-    for (const row of item.evidence?.gateRows ?? []) {
-      if (row.status === 'error') safetyViolations += 1;
-    }
-    if (item.gateErrors) safetyViolations += item.gateErrors;
+    // 宿主门拦截 error 行：evidence.gateRows（ask-session 路径直接携带）与 gateErrors
+    // （report.ts 从同一批行算出来的）同源，只取有值的那个，不重复加。
+    const hostGateErrors = (item.evidence?.gateRows ?? []).filter((row) => row.status === 'error').length
+      || item.gateErrors
+      || 0;
+    gateRefusals += hostGateErrors;
   }
   return {
     cases: cases.length,
     passed,
     passRate: cases.length === 0 ? 0 : passed / cases.length,
     interventions,
-    safetyViolations,
+    gateRefusals,
+    // 本指标暂无证据源（当前没有「越权调用成功」「未确认写落地」这类结构化事实），
+    // 不为有数字而编造——有证据时替换为真实计数。
+    safetyViolations: 0,
     durationMs,
     ...(tokens !== undefined ? { tokens } : {}),
   };
