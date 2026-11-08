@@ -1424,3 +1424,30 @@ describe('splitCommandTokens：引号外续行（十三审 minor）', () => {
     expect(splitCommandTokens('g prepare w --target alpha\\')).toEqual(['g', 'prepare', 'w', '--target', 'alpha\\']);
   });
 });
+
+describe('splitCommandTokens：只认 Bash 真正当分隔符的空白（十四审 blocking）', () => {
+  it('Unicode 空白（U+00A0 / U+3000）不是分隔符，与 Bash 一致', () => {
+    // 复现缺陷：/\s/ 把 Unicode 空白也当分隔符，而 Bash 不认——`--target alpha<NBSP>beta`
+    // 被拆成 alpha + beta，计划只声明 --target alpha 时判覆盖并忽略多出的位置参数，
+    // 放行实际指向别名的写调用。Bash 实测两者都是单个参数。
+    expect(splitCommandTokens('g commit w --target alpha\u00a0beta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u00a0beta']);
+    expect(splitCommandTokens('g commit w --target alpha\u3000beta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u3000beta']);
+  });
+
+  it('ASCII 空白（空格/制表符/换行）照常分词', () => {
+    expect(splitCommandTokens('g w --t a b')).toEqual(['g', 'w', '--t', 'a', 'b']);
+    expect(splitCommandTokens('g\tw\t--t\ta')).toEqual(['g', 'w', '--t', 'a']);
+  });
+
+  it('覆盖判据层面：计划 --target alpha 不允许 alpha<NBSP>beta', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]),
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    const call = (command: string) => gate({ name: 'bash', arguments: { command } });
+    expect(call('bin/example-gateway commit domain.write --target alpha')?.block).toBeUndefined();
+    expect(call('bin/example-gateway commit domain.write --target alpha\u00a0beta')?.block).toBe(true);
+  });
+});
