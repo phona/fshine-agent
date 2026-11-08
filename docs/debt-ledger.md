@@ -2082,4 +2082,15 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：① 执行层审计行带关联 id（宿主经 env 注入 `EXECUTION_REQUEST_ID` 一类键，夹具 `audit()` 落账），`ExecutionAuditRow` 补类型声明；② ask-session / probe 按该 id 过滤窗口行，筛不掉的单列 `unattributedRows` 并在报告里披露计数，不并进当前消息的 ladder；③ 变异验证：并发写一行带别的 requestId 的审计行 → 当前消息 ladder 不含它、`unattributedRows` 计数 +1；④ 既有 234 条脚本测试不退。
 - **律法归属**：issue #10 切片 D「结果与证据独立验收」+ architecture-laws 执行纪律 4（可判主张与代码现实对账）。
 - **归属波次 / 限期**：与结构化调用协议（`docs/a2a-protocol.md`）推进同批——它本来就要定跨层关联 id 的形状，届时一并落地，不单独造一套。
-- **状态**：待办（本轮只修注释与登记，未改行为）。
+- **已做（2026-11-09 七审，第三轮被提，升级 blocking 后收口）**：
+  ① `ask-session.ts` 的 `delivered` 增加前提——宿主认不出这条消息（`host.request` 反查为
+  null）时不给 delivered，窗口内的审计行不许被"有回复"背书（审查点名的机械口子）；
+  ② 可达性已查证（不是推测）：
+    · 评测路径**不可达**——`sendMessage` 经 `tail.then(() => sendOne(text))` 串行化
+      （ask-session.ts:240），并发发消息也排队；`background-delivery.ts` 里
+      `spawn`/`child_process` 计数为 0（后台投递不写执行层，产不出审计行）；dispatch 缺省
+      inline（dispatch-mode.ts:6），评测配置未覆盖；用例本身也是顺序跑的。
+    · 生产路径**可达**——同一装配内多个会话并发，且共享装配级 `EXECUTION_AUDIT_PATH`
+      （部署级 env，一个装配一条路径）时，A 会话的窗口里会混进 B 会话的行。
+  ③ 剩余缺口因此精确化为一条：**执行层审计行不带关联 id**，无法按请求过滤。
+- **状态**：待办（机械口子已堵 + 可达性已查证；真正的按请求过滤仍缺关联 id，见闭环判据）。

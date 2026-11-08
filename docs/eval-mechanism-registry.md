@@ -70,4 +70,4 @@
 - **acceptance 侧 turns 按 yaml 下标稀疏落位**：中间某条记录缺席（`--only` 子集、该轮没跑起来）时，后续轮次不再向前错位——错位会让「第 N 轮」的期望值判到另一轮回复上，是比缺判更坏的假信号（D-097 实测报告只有 5.1/5.2 两条记录时踩过）。缺席轮本身不出判定（短用例缺轮会红「没有回复」）。
 - **yaml ↔ 判定体的负路径没有单测**：`loadProbeCases` 的双向 fail-fast（yaml 有 id 无判定体 / 判定体有 id 无 yaml）本次只跑了正路径（`--only A1` 走到安全门拒绝），没有用例钉"故意不匹配就抛错"。
 - **探针报告新增字段没有兼容旧报告的守卫**：`score.ts` 的旧格式守卫只查 `dims` 缺缺失。`calls` 缺列已被期望值层按"无证据"处理（不出判定，不再造零假红）；`execution` 缺列仍按"空审计窗口"处理——门禁时序/无风暴/大额行归属可能假阴性。下一轮补一条格式断言（旧报告显式拒绝，而不是逐字段猜）。
-- **`npm run typecheck` 不覆盖 `scripts/`**：`tsconfig.json` 的 include 只有 `packages/**` 与 `apps/**`，`scripts/eval/*.ts` 的类型错误只在 vitest 运行时暴露（vitest 不做类型检查）。本次用临时 `tsconfig.scripts.tmp.json`（extends 根配置 + include scripts）单独核过：新增文件零错误，`probe-real-agent.ts` 仅剩 HEAD 上已有的 2 条 `RecordingSdk implements SdkClientLike` 旧错。
+- **`npm run typecheck` 已覆盖 `scripts/`**（2026-11-09 七审 minor 同步）：`tsconfig.json` 的 include 现已含 `scripts/**`（eval 域移植那轮补的），脚本面的类型错误走同一条 `npm run typecheck`，不再需要临时 tsconfig。本条原先是「不覆盖 scripts/」的现状描述，随 include 变更一并更正——留着旧描述会让后续维护者继续用临时配置去核，白做一遍。

@@ -306,7 +306,17 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     const executionRows: ExecutionAuditRow[] = auditAfter === null
       ? [] // 审计路径未设/读失败：执行层证据缺席，阶梯如实 INCONCLUSIVE
       : auditAfter.slice(auditBefore);
-    const delivered = error === null && reply.length > 0;
+    // delivered 的授予条件（2026-11-09 七审 blocking 收口一个机械口子）：
+    //   ① handler 没抛错且回复非空（用户面事实）；
+    //   ② **宿主认得出这条消息**（host.request 非 null）——messageId → requestId 反查得到，
+    //      说明这一轮确实走过宿主的受理与门。反查为空 = 断链，此时窗口里的审计行无从归因，
+    //      不许拿"有回复"给它们背书（旧写法在 host.request 缺失时照样升 delivered）。
+    // 剩余的归因粒度受 D-205 约束：窗口内是否只有本消息的行，取决于"同一装配内是否有多会话
+    // 并发共享 EXECUTION_AUDIT_PATH"。评测路径上不可达——sendMessage 经 tail 链串行、
+    // background-delivery 不 spawn 平台、dispatch 缺省 inline；生产上并发会话可达，须靠执行层
+    // 审计行带关联 id 才能真正按请求过滤（D-205 闭环判据）。
+    const attributable = host.request !== null;
+    const delivered = error === null && reply.length > 0 && attributable;
     // 读回证据**逐条调用**关联，不拿会话级的"任意一条历史意图读过回"给本轮所有调用背书
     // （PR #21 审查 blocking）：旧写法 `intents.some(...)` 在同一会话早先成功提交过一笔后
     // 恒真，后续另一笔完全没读回的写只要 exitCode=0 就会被标 verified 甚至 delivered——
