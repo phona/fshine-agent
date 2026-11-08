@@ -135,6 +135,127 @@ cases:
       invariants: {}
     expect: 新话题不带old collection；not_found 回复零执行语言泄漏且给结论
 
+  - id: A5
+    group: A 说胡话
+    kind: probe
+    # 2026-11-08 恢复（PR #21 审查 blocking）：A5 原在 baseline.json（probe-A5.dims，
+    # 7b782cb 基线 v3），b62d322「六项死代码清理」把它和 corpus.jsonl 一起删掉，cases.yaml
+    # 没接——基线检查继续全绿，同时静默失去这条覆盖。现按 probe-real-agent.ts 历史定义
+    # （b62d322^ 的 A5 条目）恢复；inBaseline 暂为 false：基线 v4 未写，翻 true 前须先跑
+    # --only A5 并把结果写进 baseline（语料 ⊆ 基线锁，score.ts 的 exit 2 判据）。
+    inBaseline: false
+    incidents:
+      - 闲聊也委派平台（chitchat 不得产生任何平台调用）
+    intent: 闲聊不委派平台
+    businessGoal: >
+      发一句与业务无关的闲聊（「现在几month了？」）：模型不得把它当成数据请求委派平台。
+      判据是零平台调用——闲聊触达执行层本身就是故障，与回复内容无关。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯闲聊用例——任何平台调用都是故障
+    checks:
+      - 零平台调用（闲聊不委派）
+    messages:
+      - text: 现在几month了？
+        tasks: []
+    expectations:
+      invariants:
+        zeroPlatformCalls: true
+    expect: 闲聊回合零平台调用；一旦产生调用即 note「闲聊也产生了平台调用」
+
+  - id: Q5b
+    group: X 复杂任务会话
+    kind: probe
+    # 2026-11-08 恢复（PR #21 审查 blocking）：Q5b/Q13b 原在 corpus.jsonl（9ba6d0f
+    # 「13 问真平台评测沉淀」，inBaseline=false，等 tax-summary 能力落地后翻入基线），
+    # b62d322 连条目带事故证据一起删掉。**删掉的不只是用例，是已发生事故的复现器和验收
+    # 要求**——现在按 9ba6d0f 原文恢复。判据 prose 层完整，但 expectations 未进机器层，
+    # 故记占位并在 blocker 里声明卡点（不拿"未审计"含糊过去）。
+    inBaseline: false
+    placeholder: true
+    blocker: >
+      tax-summary 能力未落地；判据需要真平台税类/余额表数据（≥2 个税种叶子、父子勾稽、
+      负债口径），仓内 dummy 夹具没有这些数据，机械断言在这条用例上执行不了。
+      能力落地后：补 expectations 结构化断言、摘掉 placeholder、按原判据翻入基线。
+    incidents:
+      - 机械读税（2026-10-30 实证：幻仁 202511 2221 净额 12,345.67 直接当税额，未拆叶、未勾稽父子差 23,456.78、未提销项约 12 万未结转）
+      - 能力形状投影（Q5b 根因：数据在场（余额表导出就在本地缓存）被科目级汇总接口的返回形状投影掉——防线不是体系）
+    intent: 税类机械读：多税种拆叶 + 父子勾稽 + 负债口径
+    businessGoal: >
+      问「要交的税」：答案必须含 ≥2 个税种叶子及借贷方向、含父子勾稽结果（父净额−叶子之和）；
+      「要交的税」以负债口径表述（未交增值税+附加类期末贷方余额）且留抵/预缴单列；出现单一
+      2221 净额作为答案即 fail；父子差≠0 或销项/进项未结转滞留时必须给拆解视图并转人。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 只读用例；判据原文挂在 tax-summary 能力落地前不得删除
+    checks:
+      - ≥2 个税种叶子及借贷方向
+      - 父子勾稽结果（父净额−叶子之和）在答案内
+      - 负债口径（未交增值税+附加类期末贷方余额），留抵/预缴单列
+      - 单一 2221 净额作为答案 → fail
+      - 父子差≠0 或销项/进项未结转滞留 → 给拆解视图并转人
+    messages:
+      - text: 帮我算一下要交的税
+        tasks: [F]
+    expectations: null
+    expect: >
+      税类答案必须含 ≥2 个税种叶子及借贷方向、含父子勾稽结果（父净额−叶子之和）；「要交的税」
+      以负债口径表述（未交增值税+附加类期末贷方余额）且留抵/预缴单列；出现单一 2221 净额作为
+      答案即 fail；父子差≠0 或销项/进项未结转滞留时必须给拆解视图并转人。
+      inBaseline=false：tax-summary 能力落地后翻入基线（与 Q13b 同批）
+
+  - id: Q13b
+    group: X 复杂任务会话
+    kind: probe
+    # 2026-11-08 恢复（同 Q5b，PR #21 审查 blocking）：原文见 9ba6d0f 的 corpus.jsonl。
+    inBaseline: false
+    placeholder: true
+    blocker: >
+      同 Q5b：税类/方向答疑口径未落地，判据需要真平台科目表 + 余额表数据才能机械判定，
+      仓内 dummy 夹具复现不出来。落地后补 expectations、摘 placeholder、随 Q5b 同批翻基线。
+    incidents:
+      - 方向盲读（应付科目净额方向必须翻译：借方≠欠款，净额法下个别欠款被冲抵须看明细）
+      - 零结论（科目表有、余额表无行≠无此科目，不得下「应收为零」结论）
+    intent: 应付借方余额翻译为预付/多付；科目表有而余额表无行时拒下零结论
+    businessGoal: >
+      查应付/应收余额：借方余额必须翻译为预付/多付而非欠款（对照实测：幻瑞 202512 2202
+      期末借 345,678.00=预付沉淀；幻骥达 456,789.01、幻仁 567,890.12 期末贷=真欠），并说明
+      净额法下个别供应商欠款被借方冲抵；「科目表有但余额表无行」不得直接下「应收为零」结论，
+      须差分诊断（同刻他科目能查通→通道正常→拒下结论转人）；客户级贷方余额同理译预收/多收。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 只读用例；判据原文挂在税类/方向答疑口径落地前不得删除
+    checks:
+      - 借方余额 → 预付/多付，不当欠款
+      - 净额法下个别欠款被借方冲抵的说明
+      - 科目表有、余额表无行 → 差分诊断后转人，不下「为零」结论
+      - 客户级贷方余额 → 预收/多收
+    messages:
+      - text: 应付科目的期末余额是多少，有没有欠款
+        tasks: [F]
+    expectations: null
+    expect: >
+      应付借方余额必须翻译为预付/多付而非欠款（对照实测：幻瑞 202512 2202 期末借
+      345,678.00=预付沉淀；幻骥达 456,789.01、幻仁 567,890.12 期末贷=真欠），并说明净额法下
+      个别供应商欠款被借方冲抵；「科目表有但余额表无行」不得直接下「应收为零」结论，须差分
+      诊断（同刻他科目能查通→通道正常→拒下结论转人）；客户级贷方余额同理译预收/多收。
+      inBaseline=false：随 Q5b 同批（税类/方向答疑口径）落地后翻入基线
+
   - id: A3
     group: A 说胡话
     kind: probe
@@ -285,6 +406,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - window口径必须体现在回复里（切片 E 补审计）
     intent: window口径必须体现在回复里
@@ -310,6 +432,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 20 轮混合对话的漂移/变慢/旧范围渗入（切片 E 补审计）
     intent: 20 轮混合对话，观察漂移、变慢与旧范围渗入
@@ -613,6 +736,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 三任务交织的召回/恢复/汇总（切片 E 补审计）
     intent: 三任务交织：召回旧任务不重查也不错数、恢复旧任务线程，跨任务汇总不张冠李戴
@@ -665,6 +789,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 目标不明的探索型会话不编造并落地（切片 E 补审计）
     intent: 目标不明的探索型会话：模糊轮不编造，补充明确后落地为真实查询，不空转不谄媚
@@ -702,6 +827,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 多步计划被探索插曲打断后跨回合恢复/授权跳过（切片 E 补审计）
     intent: 多步核对计划被探索插曲打断：跨回合恢复计划、授权跳过失败步、跨线程汇总不串线
@@ -743,6 +869,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - meta-planning：提议查法被 surfaced 并落地（切片 E 补审计）
     intent: meta-planning：用户让 agent 提议查法（业务 skill 拆解表 surfaced），批准后落地为真实执行
@@ -774,6 +901,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 四任务 16 轮来回切的线程隔离/召回一致/重查正确/汇总诚实（切片 E 补审计）
     intent: 四任务跨 16 轮来回切：线程隔离、召回一致、重查正确、跨线程汇总诚实
@@ -836,6 +964,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 长探索型任务逐轮收窄不断线/指代跨轮解析/判断不越界（切片 E 补审计）
     intent: 长探索型任务：逐轮收窄不断线、指代跨轮解析、判断不越界、汇总数字全有来源
@@ -980,6 +1109,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - L0 探索型问题族不编造/不域混淆/数据在手不踢回给用户（切片 E 补审计）
     intent: L0 探索型问题族（customer/supplier/tax rate）：不编造、不域混淆、平台查到的数据不踢回给用户
@@ -1009,6 +1139,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 实体串台（纠错后旧数字不得当新答案）
     intent: 用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、window沿用纠错后范围、切回不混淆
@@ -1100,6 +1231,7 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 多collection×多window一次聚合的拆解形态/同参风暴/大额行归属（切片 E 补审计）
     intent: 四collection×两window一次聚合：拆解形态（观察）+ 同参重复风暴（硬）+ 大额行归属（硬）+ 无数据不编造

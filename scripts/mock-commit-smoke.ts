@@ -11,11 +11,15 @@
  * **C 波改写**：本脚本原先直驱 apps/server/commit.ts 的 legacy prepare/commit runner
  * （按文件路径落账、宿主自己解提案自己物化契约）。那条路已整文件删除，冒烟随之改指新路径
  * ——W3 把"smoke:commit:mock + acceptance 5.x 写链路 mock 下全绿"定为波次唯一验收，
- * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。脚本自带的保险丝已按新边界重定义
- * （见 main() 头一段：判据从宿主的 EXECUTION_EXECUTOR 读取换成执行层自己的状态文件事实）。
+ * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。
  *
- * 保险丝：拿不到 EXECUTION_MOCK_STATE（执行层应答器的状态文件路径）直接拒跑——本脚本会
- * 真实走落账并读 mock 状态断言，判据缺失时不允许默认放行。
+ * 保险丝（两道，都 fail-closed，见 main() 头一段）：
+ *   ① EXECUTION_MOCK_STATE 已声明——本脚本要读它做凭证数断言；
+ *   ② 活跃 profile 的 root 落在仓内夹具目录 scripts/eval/fixtures 之下（判据复用评测
+ *      安全门 assessEvalIsolation）——这是**文件系统事实**：root 在仓内 ⇒ 执行层就是仓内
+ *      应答器，不是任何真实平台。曾只有第 ① 道（2026-11-08 第一版把判据从
+ *      EXECUTION_EXECUTOR 换成"路径已声明"），但"声明路径"不决定执行层用哪个执行器，
+ *      留着 env 同时切真实执行器就会照常落账——PR #21 审查 blocking，补上第 ② 道。
  * 用法：EXECUTION_MOCK_STATE=<路径> npm run smoke:commit:mock
  */
 import { randomUUID } from 'node:crypto';
@@ -24,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node
 import path from 'node:path';
 import { loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';
+import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 import {
   gatewayExecPathForProfile,
   hostGatewayEnv,
@@ -91,25 +96,41 @@ async function proposalCreateOperation(platformRoot: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  // 保险丝（2026-11-08 按"执行层自己的门"重新定义）：原判据是宿主读 EXECUTION_EXECUTOR=mock
-  // ——那是编排层替执行层判"现在跑的是不是 mock 应答器"，随裁定一起删除。新判据取执行层
-  // 自己的事实：本脚本要读的 mock 状态文件（EXECUTION_MOCK_STATE）必须被显式声明，且内容
-  // 必须是应答器播种的假状态而不是真平台状态。看不到这一条就拒跑——冒烟要走完整落账，
-  // 判据缺失时不允许默认放行。跑真平台落账用 smoke-real-platform 一族（那只读不写），
-  // 真实写链路由执行层自己的上线门把守。
+  // 保险丝（2026-11-08 二次收紧，PR #21 审查 blocking）：
+  //
+  // 第一版把判据从「宿主读 EXECUTION_EXECUTOR=mock」换成「EXECUTION_MOCK_STATE 已声明」。
+  // 后者不成立：**声明一个状态文件路径并不能决定执行层用哪个执行器**——部署完全可能留着
+  // 这个 env、同时把执行层切到真实执行器并放开实执行。此时本脚本仍会 rmSync 那个路径、
+  // 照常走完整提案+落账，而后续的 mock 状态断言既撤销不了真实写入，也发现不了它。
+  // 一个能 fail-open 的保险丝比没有更危险（D-076：全程只跑 mock 不碰真实平台）。
+  //
+  // 新判据 = 复用评测安全门（scripts/eval/safety-gate.ts）里那条**可证明**的隔离事实：
+  // 活跃 profile 的 root 必须落在仓内夹具目录 scripts/eval/fixtures 之下、夹具与网关
+  // 都在位、审计通道可写。root 在仓内 ⇒ 执行层就是仓内应答器（dummy/stock），不是任何
+  // 真实平台——这是文件系统事实，不是部署约定。
   const statePath = process.env['EXECUTION_MOCK_STATE'];
   if (!statePath) {
     console.error('拒跑：未声明 EXECUTION_MOCK_STATE——本冒烟读 mock 状态断言凭证数增长，拿不到状态路径就无法确认跑在 mock 应答器上。');
     process.exit(1);
   }
   const config = loadConfig({ env: process.env });
-  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键，0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
+  // 执行层 profile id 无关派生（W1 C5 规矩）：单 profile 取其键；0/多个 -> undefined，消费方 fail-closed；宿主不把实例名当缺省。
   const profileId = resolveActiveProfileId(config.contextProfiles);
   const profile = config.contextProfiles[profileId ?? ''];
   const platformRoot = profile?.root;
   const gateway = profile?.gateway;
   if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles（active）.root'); process.exit(1); }
   if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles（active） 未声明 gateway'); process.exit(1); }
+
+  // 可证明的隔离判据（在原有两项存在性检查之上）：root 必须在仓内夹具目录之下。
+  try {
+    assertEvalIsolation(assessEvalIsolation({ env: process.env, platformRoot, gateway }), 'mock 写链冒烟');
+  } catch (error) {
+    console.error(`拒跑：${(error as Error).message}`);
+    console.error('  本冒烟要真实走落账，只允许打在仓内夹具（scripts/eval/fixtures/*）上。');
+    console.error('  真实平台落账路由执行层自己的上线门，不经本脚本。');
+    process.exit(1);
+  }
 
   // 重置状态：每次冒烟从 seed 重新播种，断言才确定
   if (existsSync(statePath)) rmSync(statePath);

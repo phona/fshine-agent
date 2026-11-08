@@ -128,10 +128,17 @@ export interface MessageEvidenceChain {
 /**
  * 从宿主审计库按 messageId 反查宿主持有事实。auditStore 缺表（旧替身）时对应档降级为
  * 空——如实缺证据，不造空成功。
+ *
+ * `sessionKey` 是**主会话键**（`channel:conversationId`，handler.ts 同款），必须由调用方
+ * 按它自己那条消息的真实 conversationId 给出，不能从 principalId 推导——handler.ts:571
+ * 明确定义"session = 聊天窗口、principal = 发消息的人，两个身份分开…不互相推导"。
+ * 单聊时两者同形，所以旧代码一直蒙混过关；`ask-session` 支持固定且独立的 conversationId，
+ * 一旦两者不同，按 principalId 反查 taskRuns 会整批查空，委派与确认事实凭空消失。
  */
 export async function collectHostFacts(
   store: AuditStore,
   messageId: string,
+  sessionKey: string,
 ): Promise<{
   request: HostRequestFacts | null;
   delegations: HostDelegationFacts[];
@@ -159,7 +166,7 @@ export async function collectHostFacts(
       ...(typeof row.safeArguments['detail'] === 'string' ? { detail: row.safeArguments['detail'] as string } : {}),
     }));
   const runs: TaskRunRecord[] = store.taskRuns
-    ? await store.taskRuns.listBySession(found.principalId, sessionKeyOf(found.principalId)).catch(() => [])
+    ? await store.taskRuns.listBySession(found.principalId, sessionKey).catch(() => [])
     : [];
   const delegations = runs
     .filter((run) => run.originRequestId === found.requestId)
@@ -177,11 +184,16 @@ export async function collectHostFacts(
 
 /**
  * 主会话键（handler 同款，apps/server/handler.ts：sessionId = `channel:conversationId`）。
- * 单聊 conversationId == userid，因此 sessionId 与 principalId 同形不同义（不同表不同列）；
- * 证据链按 principal 反查 run/intent 时用同形键，群聊接入时这里要换成真实 conversation 键。
+ *
+ * 2026-11-08 删掉原先的 `sessionKeyOf(principalId) { return principalId }`：那是把主体 ID
+ * 当会话键用，而 handler.ts:571 自己写着"session = 聊天窗口、principal = 发消息的人，
+ * 两个身份分开…不互相推导"。单聊时 conversationId == userid 所以同形，旧写法一直蒙混；
+ * 但 ask-session 支持固定且独立的 conversationId，两者不同时按 principalId 反查
+ * taskRuns / change_intents 会整批查空，把真实发生的委派与确认事实报成断链。
+ * 现在由调用方按自己那条消息的真实 conversationId 构造后传入。
  */
-function sessionKeyOf(principalId: string): string {
-  return principalId;
+export function sessionKeyOfChannel(conversationId: string, channel = 'wecom'): string {
+  return `${channel}:${conversationId}`;
 }
 
 /**
@@ -230,9 +242,10 @@ export interface CallLadderEntry {
  *     authorized/completed 永不成立——「调用获准」与「实际执行」是两档，被拒行恰恰
  *     证明前档不成立；
  *   · 行在册且无 refused → authorized + invoked；exitCode === 0 → completed；
- *   · verified 只由宿主读回证据授予（change_intents committed 且读回摘要在），执行层
- *     自己说"成了"不算（判定独立于 Agent/worker 自述）；
- *   · delivered 由 handler 返回非空授予（消息级，随链上每条调用披露）；
+ *   · verified 由两种证据之一授予：宿主 change_intents 读回校验在（写类），或该行是
+ *     读类调用（mode=query，无副作用要读回，exitCode=0 即结果已在手）。执行层自己说
+ *     "成了"不算（判定独立于 Agent/worker 自述）；
+ *   · delivered 只从 verified 升——送达是用户面事实，不能补齐缺失的执行验证链；
  *   · 没有任何执行层行（auditPath 未设/空窗口）→ INCONCLUSIVE，不标成功。
  */
 export function classifyExecutionCall(args: {
@@ -258,13 +271,20 @@ export function classifyExecutionCall(args: {
     rung = 'completed';
     basis.push('exitCode=0');
   }
-  if (readbackVerified && rung === 'completed') {
+  // 读类调用（夹具 mode=query：ACCESS 语义表 read/scratch 走 query、write 走 prepare/commit）
+  // 没有副作用要读回——exitCode=0 即"结果已在手"，直接到 verified。写类必须靠宿主
+  // change_intents 的读回校验才到 verified。
+  const readClass = row.mode === 'query';
+  if ((readbackVerified || readClass) && rung === 'completed') {
     rung = 'verified';
-    basis.push('宿主 change_intents 读回校验在');
+    basis.push(readClass ? '读类调用：exitCode=0 即结果已在手（无副作用要读回）' : '宿主 change_intents 读回校验在');
   }
-  // delivered 只升已完成/已验证的调用：调用失败（exitCode≠0）但 handler 送达了一句
-  // 诚实的失败回复，是"invoked + 用户知情"，不是这条调用 delivered。
-  if (delivered && (rung === 'completed' || rung === 'verified')) {
+  // delivered 只从 verified 升（2026-11-08 修，PR #21 审查 blocking）：
+  // 旧写法 `delivered && (rung === 'completed' || rung === 'verified')` 允许 completed
+  // 直接升 delivered，而 delivered 在阶梯里排在 verified 之上，于是"退出码 0 但没读回"
+  // 的写调用呈现得比"已读回"的更高——用户收到一句回复就把缺失的读回链补上了。
+  // 送达是用户面事实、执行验证是执行面事实，前者不能补齐后者。
+  if (delivered && rung === 'verified') {
     rung = 'delivered';
     basis.push('handler 返回了最终回复');
   }

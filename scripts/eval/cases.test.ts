@@ -62,12 +62,29 @@ describe('审计过的用例（四元组完整）与未审计占位（不猜）'
     }
   });
 
-  it('占位条目不猜内容：expectations 为 null，expect 标明切片 E', () => {
+  it('占位条目不猜内容：expectations 为 null，且必须声明卡点', () => {
     const placeholders = cases.filter((item) => item.placeholder);
     expect(placeholders.length).toBeGreaterThan(0);
     for (const spec of placeholders) {
       expect(spec.expectations, `${spec.id} 是占位条目却带了期望值`).toBeNull();
-      expect(spec.expect, `${spec.id} 占位条目未标明切片 E`).toContain('切片 E');
+      // 2026-11-08 升级（PR #21 审查 blocking 的修复一部分）：原守卫只 grep expect 里的
+      // "切片 E"——那是把"卡在哪"编码成一个魔法子串，Q5b/Q13b 这类"判据齐全但需要真平台
+      // 数据"的条目就会被误判。现在每个占位条目必须显式声明 blocker， Parsing 层缺了就 fail
+      // （cases.ts 的 fail），测试层再钉一遍非空。
+      expect((spec.blocker ?? '').trim().length, `${spec.id} 占位条目未声明 blocker`).toBeGreaterThan(0);
+    }
+  });
+
+  it('占位不等于没审计：prose 层（businessGoal/checks）可以齐全', () => {
+    // Q5b/Q13b 按 9ba6d0f 原文恢复：判据 prose 层完整，只差机械层（需真平台数据）。
+    // 防止有人把"占位"当成"可以只写一句话"的借口——那正是静默丢覆盖的形态。
+    for (const id of ['Q5b', 'Q13b']) {
+      const spec = cases.find((item) => item.id === id);
+      expect(spec, `${id} 应已恢复`).toBeDefined();
+      expect(spec!.businessGoal.length).toBeGreaterThan(40);
+      expect(spec!.checks.length).toBeGreaterThan(0);
+      expect(spec!.incidents.length).toBeGreaterThan(0);
+      expect(spec!.blocker).toContain('dummy 夹具');
     }
   });
 

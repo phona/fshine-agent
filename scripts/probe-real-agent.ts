@@ -69,6 +69,7 @@ import {
   collectHostFacts,
   collectIntentFacts,
   messageLadderRung,
+  sessionKeyOfChannel,
   type CallLadderEntry,
   type HostDelegationFacts,
   type HostGateRow,
@@ -504,11 +505,15 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
           const rowsAfter = executionAuditRows();
           const windowRows: ExecutionAuditRow[] = rowsAfter === null ? [] : rowsAfter.slice(auditBefore);
           // ── 三源证据（issue 切片 D）：宿主持有事实 + 执行层审计行 + handler 返回 ──
-          // 门裁决行与委派事实按 messageId → requestId 反查；提案意图按主会话键取
-          // （单聊 conversationId == userid，sessionId 与 principalId 同形，handler 同款）。
-          const host = await collectHostFacts(assembly.store, messageId);
+          // 门裁决行与委派事实按 messageId → requestId 反查；提案意图按主会话键取。
+          // 会话键 = handler 同款 `channel:conversationId`，**不从 principalId 推导**
+          // （handler.ts:571"两个身份分开…不互相推导"）。探针发的是 chattype=single、
+          // 无显式会话 id，渠道因此把 conversationId 取为 userid——两者同形是这条探针的
+          // 事实，不是可推广的等式；显式写出来，群聊/固定会话接入时才不会悄悄查空。
+          const sessionKey = sessionKeyOfChannel(principalUser);
+          const host = await collectHostFacts(assembly.store, messageId, sessionKey);
           const intents: HostIntentFacts[] = intentsDb
-            ? collectIntentFacts(intentsDb, host.request?.principalId ?? principalUser)
+            ? collectIntentFacts(intentsDb, sessionKey)
             : [];
           const delivered = finals.at(-1)!.content.length > 0;
           // 写后读回：committed 且读回摘要在的意图是 verified 的唯一授予依据

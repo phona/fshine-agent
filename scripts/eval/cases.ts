@@ -65,8 +65,15 @@ export interface CaseSpec {
   /** acceptance 会话 id（spec.conv，如 acc-write-51）。 */
   conversation?: string;
   inBaseline: boolean;
-  /** 未审计占位条目：只承载消息序列与轮次标记，businessGoal/expectations 标「切片 E 扩充」。 */
+  /**
+   * 期望值未进机器判定层的条目。语义 = 「这条用例的 expectations 还没审计成结构化断言」，
+   * **不等于**「这条用例没审计过」——prose 层的 businessGoal / checks / expect 可以已经
+   * 完整（Q5b/Q13b 就是：判据原文齐全，但需要真平台税类数据，仓内夹具跑不出来）。
+   * 因此每个占位条目必须用 `blocker` 声明它卡在哪，而不是靠 expect 里 grep 一个词。
+   */
   placeholder?: boolean;
+  /** 占位条目卡在哪：必填（切片 E 未审计 / 能力未落地 / 需真平台数据…）。 */
+  blocker?: string;
   incidents: string[];
   intent: string;
   businessGoal: string;
@@ -434,6 +441,12 @@ function parseCase(raw: unknown, index: number): CaseSpec {
     ...(typeof record['conversation'] === 'string' ? { conversation: record['conversation'] } : {}),
     inBaseline: record['inBaseline'],
     ...(record['placeholder'] === true ? { placeholder: true } : {}),
+    // 占位条目必须声明卡点；缺了就是失败（不允许"不知道为什么没进基线"的条目存在）。
+    ...(record['placeholder'] === true
+      ? { blocker: typeof record['blocker'] === 'string' && record['blocker'].trim().length > 0
+          ? record['blocker']
+          : fail(`${where} 是占位条目却没声明 blocker（卡在哪）`) }
+      : {}),
     incidents,
     intent: typeof record['intent'] === 'string' ? record['intent'] : fail(`${where}.intent 不是字符串`),
     businessGoal: typeof record['businessGoal'] === 'string' ? record['businessGoal'] : fail(`${where}.businessGoal 不是字符串`),

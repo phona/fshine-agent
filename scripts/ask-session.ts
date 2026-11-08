@@ -31,6 +31,7 @@ import {
   collectIntentFacts,
   messageLadderRung,
   readExecutionAuditLog,
+  sessionKeyOfChannel,
   type AggregateMetrics,
   type CallLadderEntry,
   type ExecutionAuditRow,
@@ -267,10 +268,13 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
       error = cause instanceof Error ? cause.message : String(cause);
     }
     // ── 关联 ID 链（持久化 id 逐档反查，断链如实置 null/缺席）──
-    const host = await collectHostFacts(assembly.store, messageId);
-    // 主会话键（handler 同款）：单聊 conversationId == userid → sessionId 与 principalId
-    // 同形（channel:conversation）。群聊接入时这里要换成真实 conversation 键。
-    const sessionKey = host.request?.principalId ?? `wecom:${userId}`;
+    // 主会话键 = handler 同款 `channel:conversationId`。**不能**用 principalId 代替：
+    // handler.ts:571 定义"session = 聊天窗口、principal = 发消息的人，两个身份分开…
+    // 不互相推导"。单聊时两者同形所以旧写法蒙混过关，但本适配器支持固定且独立的
+    // conversationId（--conversation），一旦不同，按 principalId 反查 change_intents /
+    // taskRuns 会整批查空，把真实发生的确认与读回事实报成断链（PR #21 审查 major）。
+    const sessionKey = sessionKeyOfChannel(conversationId);
+    const host = await collectHostFacts(assembly.store, messageId, sessionKey);
     const intents: HostIntentFacts[] = intentsDb ? collectIntentFacts(intentsDb, sessionKey) : [];
     const auditAfter = readExecutionAuditLog(auditPath);
     const executionRows: ExecutionAuditRow[] = auditAfter === null
