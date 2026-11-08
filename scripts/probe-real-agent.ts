@@ -297,14 +297,20 @@ function openReadonlyDb(dbPath: string): Database.Database {
 }
 
 /**
- * 探针等一条最终回复的轮询上限（2.5 分钟）。与 DEFAULT_WORKER_TIMEOUT_MS 数值不同源：
+ * 探针等一条最终回复的轮询上限（5 分钟）。与 DEFAULT_WORKER_TIMEOUT_MS 数值不同源：
  * 这是探针自己的等待地平线（必须 ≥ 一个回合预算，否则会在回合自然结束前放弃轮询），
  * 故意不随配置漂移——D-014 收敛的是 worker 超时公式，不是这个等待。
  *
- * 6 例实测跑满 21 分钟（CPU 0），根因是模型挂起后干等 10 分钟/轮；缩短到 2.5 分钟后
- * 单轮最多 150s，整探针快速失败而不是静默跳过。
+ * 2026-11-08 二次校正（150s → 300s）：上一轮把它从 600s 砍到 150s，理由写的是"模型挂起后
+ * 干等 10 分钟/轮"。**那个诊断是错的**——被引作证据的那次 6 例跑 21 分钟，逐例耗时
+ * 99.7+181.3+139.5+103.5+348.6+398.9 = 1271.5s，没有一轮接近 600s 上限，21 分钟是合法
+ * 耗时不是挂起。砍到 150s 后的实测：Y2 三回合 62s / 93s / >150s，第三回合里还夹了一次
+ * `Context model call exceeded 60000 ms`——上下文模型那 60 秒 stall 直接吃进回合预算，
+ * 于是合法回合被判超时（Y2 因此 ⚠，基线重定也被拒）。
+ * 300s = 观测最大合法回合（93s）的 3 倍，容纳一次上下文模型 stall，同时仍把真挂起 bounded
+ * 在 5 分钟/轮。若日后再调，先看逐回合 turn_span 分布，别再看总耗时。
  */
-const PROBE_REPLY_WAIT_MS = 150_000;
+const PROBE_REPLY_WAIT_MS = 300_000;
 
 const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH'] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
@@ -518,8 +524,20 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
           const delivered = finals.at(-1)!.content.length > 0;
           // 写后读回：committed 且读回摘要在的意图是 verified 的唯一授予依据
           // （执行层自己说"成了"不算——判定独立于 Agent/worker 自述）。
-          const readbackVerified = intents.some((intent) => intent.status === 'committed' && intent.hasReadback);
-          const ladder = windowRows.map((row) => classifyExecutionCall({ row, readbackVerified, delivered }));
+          // 但必须**逐条调用**关联（PR #21 审查 blocking）：旧写法 `intents.some(...)` 是会话级
+          // 的，同一会话早先成功提交过一笔后恒真，后续另一笔没读回的写只要 exitCode=0 就被标
+          // verified——用历史成功给新调用造假证据。关联键 = 该行 proposalId ↔ 意图 proposalId；
+          // 读类调用（无 proposalId）不适用读回，由 classifyExecutionCall 的 mode=query 分支处理。
+          const verifiedProposals = new Set(
+            intents
+              .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
+              .map((intent) => intent.proposalId!),
+          );
+          const ladder = windowRows.map((row) => classifyExecutionCall({
+            row,
+            readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
+            delivered,
+          }));
           return {
             text,
             reply: finals.at(-1)!.content,
@@ -1731,6 +1749,33 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, CONTOOSO_AMBIGUOUS_CANDIDATES));
     return { turns, notes };
   },
+  // 2026-11-08 恢复（PR #21 审查 blocking + 二审 blocking）：A5 原在 b62d322^ 的 CASES 数组
+  // （id 'A5'，intent '闲聊不委派平台'，单轮「现在几month了？」，判据 ledgerCalls() > 0 → note）。
+  // 该 commit 删 corpus.jsonl 时连它一起删、cases.yaml 没接，基线项（baseline.json 的
+  // probe-A5.dims）也一并消失——静默失去覆盖。现按原判据登记判定体；消息文本住 cases.yaml。
+  A5: async (spec) => {
+    const { send, assembly } = await boot();
+    const turns: Turn[] = [await send(spec.messages[0]!.text!)];
+    await assembly.close();
+    const notes: string[] = [];
+    // 判据与历史一致：闲聊触达执行层本身就是故障，与回复内容无关。
+    // 口径同 B1——calls 取执行层审计行里无 refused 的行数（issue #10 切片 D 换源不换义）。
+    if (turns.reduce((sum, turn) => sum + turn.calls, 0) > 0) notes.push('闲聊也产生了平台调用');
+    return { turns, notes };
+  },
+  // 2026-11-08 恢复（PR #21 审查 blocking）：Q5b/Q13b 原在 corpus.jsonl（9ba6d0f），
+  // b62d322 连条目带事故证据一起删。判据 prose 层已按原文恢复进 cases.yaml，但**仓内
+  // dummy 夹具没有税类/余额表数据，机械判定执行不了**——所以判定体不做真跑，只如实上报
+  // "这条不可在仓内跑 + 卡在哪"。用（信息性）前缀：探针把这种 note 当事实陈述、不算异常，
+  // 于是既不会假装成功（没有 turns 就没有证据链），也不会让每轮全量探针都红一次训练人忽略红。
+  Q5b: async () => ({
+    turns: [],
+    notes: ['（信息性）Q5b 税类机械读：需要真平台税类/余额表数据（≥2 个税种叶子、父子勾稽、负债口径），仓内 dummy 夹具复现不出来，本条不在仓内跑。判据与事故证据见 cases.yaml 的 Q5b 条目；tax-summary 能力落地后补真判定体并摘掉 placeholder。'],
+  }),
+  Q13b: async () => ({
+    turns: [],
+    notes: ['（信息性）Q13b 方向翻译：需要真平台科目表 + 余额表数据（应付借方译预付、科目表有而余额表无行的差分诊断），仓内 dummy 夹具复现不出来，本条不在仓内跑。判据与事故证据见 cases.yaml 的 Q13b 条目；随 Q5b 同批落地后补真判定体。'],
+  }),
   A4: async (spec) => {
     const { send, assembly } = await boot();
     const turns: Turn[] = [await send(spec.messages[0]!.text!)];
@@ -2486,8 +2531,10 @@ function loadProbeCases(): Case[] {
   return cases;
 }
 
-/** 日常快速子集：说胡话主线（A1/A2/A4）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
-const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'B1']);
+/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
+// 2026-11-08：A5 随 b62d322 删 corpus 时一并从 quick 摘掉，本随覆盖恢复一起加回
+// （历史 --quick 就是 A1/A2/A4/A5 + B1，见 b62d322^ 的文件头）。
+const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
 /** 用例级 token 汇总：main/worker 逐轮求和；aux 按 kind 用全局捕获求和（异步落账逐轮归属不可靠）。 */
 function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | undefined {

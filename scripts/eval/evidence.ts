@@ -39,6 +39,13 @@ export interface ExecutionAuditRow {
   exitCode?: number;
   planId?: string;
   protocol?: string;
+  /**
+   * 提案 id（proposal.create / proposal.commit 行由夹具写入）。readExecutionAuditLog 是
+   * `JSON.parse(line) as ExecutionAuditRow` 盲转，所以这个字段**运行时一直在**，只是此前
+   * 没在类型上声明——读回证据按它逐条关联到具体调用（PR #21 审查 blocking：会话级的
+   * `intents.some(...)` 会用历史成功给新调用造假证据）。
+   */
+  proposalId?: string;
 }
 
 /**

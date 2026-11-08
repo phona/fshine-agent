@@ -33,7 +33,13 @@ vi.mock('@fshine/agent', async (importOriginal) => {
   };
 });
 
+vi.mock('./proposal-commit', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./proposal-commit')>();
+  return { ...actual, createProposalCommitRunner: vi.fn(actual.createProposalCommitRunner) };
+});
+
 import { createServerAssembly } from './assembly';
+import { createProposalCommitRunner } from './proposal-commit';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -121,5 +127,23 @@ describe('profile.gateway 装配接线（assembly → worker 驱动）', () => {
   it('profile 声明 root 但未声明 gateway：装配 fail-closed 拒绝启动（planCommandForm 无缺省网关名可渲染）', async () => {
     const platformRoot = fakePlatformRoot();
     await expect(bootSeam(seamEnv(platformRoot, []))).rejects.toThrow(/未声明有效的 profile\.gateway/);
+  });
+
+  // 2026-11-08 修（PR #21 过程中定位的生产 bug）：落账后端是装配层唯一漏传 gateway 的一处。
+  // C7b 起 loadOperationProtocols(root, gateway) 对未声明的 gateway 一律降级**空表**
+  // （operation-labels.ts，绝不回退遗留网关名）⇒ operationForProtocol 找不到 proposal.commit
+  // 角色 ⇒ refuseCommit ⇒ 每条写链都死在 commit（acceptance 5.2 实测
+  // change_intent_commit_failed、意图 failed、基线 write-chain-51 从 committed:true 掉 false）。
+  // 同文件的 schema loader(:312)/plan 确认(:330)/operation 规格(:368) 都传了，只漏这一处——
+  // 删掉 assembly.ts 里那一行 `...(activeProfile?.gateway ? …)`，本断言即回归锁。
+  it('profile 声明 gateway：落账后端也收到同值 gateway 与 platformRoot', async () => {
+    const platformRoot = fakePlatformRoot();
+    await bootSeam(seamEnv(platformRoot, ['    gateway: bin/gw-under-test']));
+
+    const calls = vi.mocked(createProposalCommitRunner).mock.calls;
+    expect(calls.length, 'createProposalCommitRunner 应被装配调用').toBeGreaterThan(0);
+    const options = calls.at(-1)![0] as { platformRoot: string; gateway?: string };
+    expect(options.platformRoot).toBe(platformRoot);
+    expect(options.gateway).toBe('bin/gw-under-test');
   });
 });

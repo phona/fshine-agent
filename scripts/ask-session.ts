@@ -280,9 +280,23 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     const executionRows: ExecutionAuditRow[] = auditAfter === null
       ? [] // 审计路径未设/读失败：执行层证据缺席，阶梯如实 INCONCLUSIVE
       : auditAfter.slice(auditBefore);
-    const readbackVerified = intents.some((intent) => intent.status === 'committed' && intent.hasReadback);
     const delivered = error === null && reply.length > 0;
-    const ladder = executionRows.map((row) => classifyExecutionCall({ row, readbackVerified, delivered }));
+    // 读回证据**逐条调用**关联，不拿会话级的"任意一条历史意图读过回"给本轮所有调用背书
+    // （PR #21 审查 blocking）：旧写法 `intents.some(...)` 在同一会话早先成功提交过一笔后
+    // 恒真，后续另一笔完全没读回的写只要 exitCode=0 就会被标 verified 甚至 delivered——
+    // 用历史成功给新调用造假证据。关联键 = 该行的 proposalId ↔ 意图的 proposalId；
+    // 读类调用（无 proposalId）不适用读回，由 classifyExecutionCall 的 mode=query 分支处理。
+    // 关联不上 = 这条调用未验证，宁可停在 completed。
+    const verifiedProposals = new Set(
+      intents
+        .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
+        .map((intent) => intent.proposalId!),
+    );
+    const ladder = executionRows.map((row) => classifyExecutionCall({
+      row,
+      readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
+      delivered,
+    }));
     const evidence: MessageEvidenceChain = {
       evalRunId,
       caseId,

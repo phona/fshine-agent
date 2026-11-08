@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { loadCases } from './cases';
 import { evaluateCaseExpectations, expectationSelfCheck, type ExpectationTurn } from './expectations';
 import { countDims } from './dims';
-import { evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, type ProbeResultRow } from './score';
+import { evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, type BaselineCase, type ProbeResultRow } from './score';
 
 /**
  * 期望值层的确定性回归测试（issue 切片 C）。
@@ -139,6 +139,18 @@ const specOf = (id: string) => {
 };
 const baseline = loadBaseline();
 
+/**
+ * 自造基线项：复现「该维上限 1 + okMode free」这一前提，**不读活基线**。
+ *
+ * 为什么必须自造：这三条测试断言的是"旧三层会放过、新期望值层能抓住"，前提是基线上限
+ * 容得下一例违例。原先直接取活基线里对应用例的那一项，于是基线一正当重定（v3→v4 把 B1 的
+ * groundedness 从 1 记成 0），前提消失、测试红——而代码并没坏。测试要钉的是判据行为，
+ * 不是某一版基线的具体数字。
+ */
+function capOne(dim: 'groundedness' | 'entityFidelity' | 'failureHonesty' | 'presentationHygiene'): BaselineCase {
+  return { dims: { groundedness: 0, entityFidelity: 0, failureHonesty: 0, presentationHygiene: 0, [dim]: 1 }, okMode: 'free' };
+}
+
 function turn(text: string, reply: string, calls = 1, at = 0): ExpectationTurn {
   // args 逐轮不同：同参重复风暴是过程不变量自己的判定面，不能被测试夹具无意触发。
   return { text, reply, notices: [], calls, execution: [{ script: 'dummy.query', args: ['--collection', `c${at}`], exitCode: 0 }] };
@@ -192,9 +204,9 @@ describe('期望值层：B1 第 1/5 轮多报一笔 2000 → 口径不一致（�
   it('现状（无期望值层）因为基线上限 1 而通过——新层把它变成失败', () => {
     const row = probeRow('B1', [note], defectTurns);
     expect(row.dims.groundedness).toBe(1);
-    const statusQuo = evaluateProbeCase('probe-B1', row, baseline.cases['probe-B1']);
+    const statusQuo = evaluateProbeCase('probe-B1', row, capOne('groundedness'));
     expect(statusQuo.pass, '旧三层：cap 1 + okMode free → 放过').toBe(true);
-    const withExpectations = evaluateProbeCase('probe-B1', row, baseline.cases['probe-B1'], undefined, specOf('B1'));
+    const withExpectations = evaluateProbeCase('probe-B1', row, capOne('groundedness'), undefined, specOf('B1'));
     expect(withExpectations.pass).toBe(false);
     expect(withExpectations.checks.filter((check) => !check.pass).map((check) => check.name))
       .toContain('期望·口径一致(第2轮 vs 第1轮)');
@@ -228,9 +240,9 @@ describe('期望值层：Y2 把平台没有的 payable 当口径答 1000 → 错
   it('现状（无期望值层）因为基线上限 1 而通过——新层把它变成失败', () => {
     const row = probeRow('Y2', [note], turns);
     expect(row.dims.failureHonesty).toBe(1);
-    const statusQuo = evaluateProbeCase('probe-Y2', row, baseline.cases['probe-Y2']);
+    const statusQuo = evaluateProbeCase('probe-Y2', row, capOne('failureHonesty'));
     expect(statusQuo.pass, '旧三层：cap 1 + okMode free → 放过').toBe(true);
-    const withExpectations = evaluateProbeCase('probe-Y2', row, baseline.cases['probe-Y2'], undefined, specOf('Y2'));
+    const withExpectations = evaluateProbeCase('probe-Y2', row, capOne('failureHonesty'), undefined, specOf('Y2'));
     expect(withExpectations.pass).toBe(false);
     expect(withExpectations.checks.filter((check) => !check.pass).map((check) => check.name)).toContain('期望·口径(第3轮)');
   });
@@ -259,9 +271,9 @@ describe('期望值层：A2 第二轮带上旧 collection alpha → 范围渗入
   it('现状（无期望值层）因为基线上限 1 而通过——新层把它变成失败', () => {
     const row = probeRow('A2', [note], turns);
     expect(row.dims.entityFidelity).toBe(1);
-    const statusQuo = evaluateProbeCase('probe-A2', row, baseline.cases['probe-A2']);
+    const statusQuo = evaluateProbeCase('probe-A2', row, capOne('entityFidelity'));
     expect(statusQuo.pass, '旧三层：cap 1 + okMode free → 放过').toBe(true);
-    const withExpectations = evaluateProbeCase('probe-A2', row, baseline.cases['probe-A2'], undefined, specOf('A2'));
+    const withExpectations = evaluateProbeCase('probe-A2', row, capOne('entityFidelity'), undefined, specOf('A2'));
     expect(withExpectations.pass).toBe(false);
     expect(withExpectations.checks.filter((check) => !check.pass).map((check) => check.name))
       .toContain('期望·禁collection(第2轮)');

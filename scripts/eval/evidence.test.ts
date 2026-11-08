@@ -7,7 +7,7 @@
  *   · 被拒的审计行给出 invoked + 拒绝原因，且永不升到 completed/verified；
  *   · 安全门 fail-closed：夹具目录外 / 缺 gateway / 审计通道不可用，任一即拒。
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,14 +185,31 @@ describe('评测安全门（fail-closed，不静默落真实平台）', () => {
     expect(() => assertEvalIsolation(facts, '测试')).not.toThrow();
   });
 
-  it('root 指向仓外（真实执行层 checkout）→ 拒，且点名路径', () => {
+  it('root 指向仓外（真实存在的执行层 checkout）→ 拒，且点名路径', () => {
+    // 用真实存在的仓外目录：realpath 能解析出来，走"不在仓内"分支并点名真实路径。
+    const realOutside = mkdtempSync(path.join(tmpdir(), 'real-platform-root-'));
+    roots.push(realOutside);
+    const facts = assessEvalIsolation({
+      env: { EXECUTION_AUDIT_PATH: auditPath() },
+      platformRoot: realOutside,
+      gateway: 'bin/real',
+    });
+    expect(facts.fixtureWithinRepo).toBe(false);
+    expect(facts.problems.join('\n')).toContain('不允许把消息打到真实执行层');
+    expect(facts.problems.join('\n')).toContain(realOutside);
+    expect(() => assertEvalIsolation(facts, '测试')).toThrow(EvalIsolationRefused);
+  });
+
+  it('root 解析不出真实路径（不存在/符号链接断裂）→ 按拒跑处理，不按词法位置放行', () => {
+    // 无法证明在仓内 ≠ 在仓内。旧词法判据下不存在的路径只是"fixturePresent=false"，
+    // 但路径若指向别处仍可能通过边界判断；realpath 失败即拒，报错点名原因。
     const facts = assessEvalIsolation({
       env: { EXECUTION_AUDIT_PATH: auditPath() },
       platformRoot: '/some/real/platform-root',
       gateway: 'bin/real',
     });
     expect(facts.fixtureWithinRepo).toBe(false);
-    expect(facts.problems.join('\n')).toContain('不允许把消息打到真实执行层');
+    expect(facts.problems.join('\n')).toContain('解析不出真实路径');
     expect(() => assertEvalIsolation(facts, '测试')).toThrow(EvalIsolationRefused);
   });
 
@@ -290,5 +307,92 @@ describe('主会话键（PR #21 审查 major：不许从 principalId 推导）',
     expect(seen[0]!.principalId).toBe('wecom:user-alice');   // 主体键照传
     expect(seen[0]!.sessionId).toBe('wecom:conv-room-7');    // 会话键用调用方给的
     expect(seen[0]!.sessionId).not.toBe(seen[0]!.principalId);
+  });
+});
+
+describe('读回证据逐条关联（PR #21 审查 blocking：会话级 some() 会给新调用造假证据）', () => {
+  /** 与 ask-session / probe 同一条关联逻辑：只认本行 proposalId 命中的 committed+读回意图。 */
+  function verifiedProposalIds(intents: Array<{ proposalId?: string; status: string; hasReadback: boolean }>): Set<string> {
+    return new Set(intents.filter((i) => i.status === 'committed' && i.hasReadback && i.proposalId).map((i) => i.proposalId!));
+  }
+  const readbackFor = (row: { proposalId?: string }, verified: Set<string>): boolean => // 结构子集
+    row.proposalId !== undefined && verified.has(row.proposalId);
+
+  it('同一会话早先成功提交过，新写的调用仍因未关联而停在 completed', () => {
+    const verified = verifiedProposalIds([{ proposalId: 'prop_old', status: 'committed', hasReadback: true }]);
+    // 本轮另一笔写：exitCode=0、有自己的 proposalId，但那个提案没有读回证据
+    const newWrite = { mode: 'prepare', script: 'dummy.proposal-commit', exitCode: 0, proposalId: 'prop_new' };
+    expect(readbackFor(newWrite, verified)).toBe(false);
+    expect(classifyExecutionCall({ row: newWrite, readbackVerified: readbackFor(newWrite, verified), delivered: true }).rung).toBe('completed');
+  });
+
+  it('本行 proposalId 命中 committed+读回 → verified，送达后 delivered', () => {
+    const verified = verifiedProposalIds([{ proposalId: 'prop_new', status: 'committed', hasReadback: true }]);
+    const row = { mode: 'prepare', script: 'dummy.proposal-commit', exitCode: 0, proposalId: 'prop_new' };
+    expect(readbackFor(row, verified)).toBe(true);
+    expect(classifyExecutionCall({ row, readbackVerified: true, delivered: true }).rung).toBe('delivered');
+  });
+
+  it('pending / 无读回的提案不贡献 verified，即使 exitCode=0', () => {
+    const verified = verifiedProposalIds([
+      { proposalId: 'p_pending', status: 'pending', hasReadback: false },
+      { proposalId: 'p_noreadback', status: 'committed', hasReadback: false },
+    ]);
+    for (const pid of ['p_pending', 'p_noreadback']) {
+      const row = { mode: 'prepare', script: 'dummy.proposal-commit', exitCode: 0, proposalId: pid };
+      expect(readbackFor(row, verified), pid).toBe(false);
+    }
+  });
+
+  it('读类调用无 proposalId → 不靠读回升级，由 mode=query 分支负责', () => {
+    const verified = verifiedProposalIds([{ proposalId: 'prop_old', status: 'committed', hasReadback: true }]);
+    const read = { mode: 'query', script: 'dummy.query', exitCode: 0, proposalId: undefined };
+    expect(readbackFor(read, verified)).toBe(false);
+    // 但读类仍到 verified（无副作用要读回）
+    expect(classifyExecutionCall({ row: read, readbackVerified: false, delivered: true }).rung).toBe('delivered');
+  });
+
+  it('会话级 some() 的旧写法会把 prop_new 也判成已验证（本条钉住缺陷形态）', () => {
+    const intents = [{ proposalId: 'prop_old', status: 'committed', hasReadback: true }];
+    const sessionWide = intents.some((i) => i.status === 'committed' && i.hasReadback);   // = true
+    expect(sessionWide).toBe(true);                        // 旧判据：恒真
+    const verified = verifiedProposalIds(intents);
+    expect(readbackFor({ proposalId: 'prop_new' }, verified)).toBe(false);  // 新判据：不背书
+    expect(sessionWide).not.toBe(readbackFor({ proposalId: 'prop_new' }, verified));
+  });
+});
+
+describe('夹具隔离判据解析符号链接（PR #21 审查 major）', () => {
+  it('夹具目录下指向仓外的 symlink 不被当作已证明的 mock 隔离', () => {
+    // 词法判据（path.resolve + path.relative）下，fixtures/<link> → /real/platform 会判"在仓内"；
+    // realpath 后真实路径落在仓外，必须拒。这条钉住判据不能退化为词法目录位置。
+    const outside = mkdtempSync(path.join(tmpdir(), 'real-platform-'));
+    const link = path.join(EVAL_FIXTURE_ROOT, 'zz-evil-link');
+    roots.push(outside);
+    try { rmSync(link, { recursive: true, force: true }); } catch { /* 原本不存在 */ }
+    symlinkSync(outside, link, 'dir');
+    try {
+      const facts = assessEvalIsolation({
+        env: { EXECUTION_AUDIT_PATH: path.join(outside, 'audit.jsonl') },
+        platformRoot: link,
+        gateway: 'bin/generic',
+      });
+      expect(facts.fixtureWithinRepo).toBe(false);
+      expect(facts.problems.join('\n')).toContain('不在仓内夹具目录');
+      // 报错必须点名真实路径，否则排查时看不出是 symlink 打的
+      expect(facts.problems.join('\n')).toContain(outside);
+    } finally {
+      rmSync(link, { recursive: true, force: true });
+    }
+  });
+
+  it('真实位于夹具目录下的 root 照旧通过（realpath 不误伤合法路径）', () => {
+    const facts = assessEvalIsolation({
+      env: { EXECUTION_AUDIT_PATH: path.join(tmpdir(), 'ok-audit.jsonl') },
+      platformRoot: path.join(EVAL_FIXTURE_ROOT, 'dummy-platform'),
+      gateway: 'bin/generic',
+    });
+    expect(facts.fixtureWithinRepo).toBe(true);
+    expect(facts.problems).toHaveLength(0);
   });
 });

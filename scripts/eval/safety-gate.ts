@@ -16,7 +16,7 @@
  * 判据刻意只认**配置与文件系统事实**（root 路径、gateway 声明、审计通道读写探针），
  * 不认任何"我觉得是 mock"的约定字符串；每条拒绝都列出缺什么、怎么补（可行动反馈）。
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -58,6 +58,30 @@ export class EvalIsolationRefused extends Error {
 }
 
 /**
+ * 把路径解析成**真实**路径（跟随符号链接）。解析失败（不存在/权限）返回 null——调用方
+ * 按"无法证明"处理，不按词法位置放行。
+ *
+ * 为什么必须 realpath 而不是 path.resolve：resolve 只做词法归一化，`fixtures/evil` 若是指向
+ * 真实执行层 checkout 的符号链接，resolve 后仍落在夹具目录内，`path.relative` 判"在仓内"、
+ * `existsSync` 判"文件在"——两项全过，于是 mock 冒烟可以打到真实网关（PR #21 审查 major：
+ * 不能把词法目录位置当作已证明的 mock 隔离事实）。
+ */
+function realPathOrNull(target: string): string | null {
+  try {
+    return realpathSync(target);
+  } catch {
+    return null;
+  }
+}
+
+/** 仓内夹具目录的真实路径（懒算一次：夹具目录本身也可能是指针）。 */
+let fixtureRootReal: string | null | undefined;
+function fixtureRootRealPath(): string | null {
+  if (fixtureRootReal === undefined) fixtureRootReal = realPathOrNull(EVAL_FIXTURE_ROOT);
+  return fixtureRootReal;
+}
+
+/**
  * 评估评测隔离事实。输入 = 已加载配置里的活跃 profile 两项 + 进程 env；只读文件系统
  * 做存在性判断，唯一的写动作是审计通道探针（写入临时文件后立即删除）。
  */
@@ -68,26 +92,33 @@ export function assessEvalIsolation(input: {
 }): EvalIsolationFacts {
   const problems: string[] = [];
   const { env } = input;
+  // 真实路径判据：root / 夹具根 / 网关全部 realpath 后再比边界。任一层解析不出（不存在、
+  // 断链、权限）都按"无法证明"处理——fixtureWithinRepo 恒假、gatewayPresent 恒假。
   const platformRoot = input.platformRoot ? path.resolve(input.platformRoot) : undefined;
+  const platformRootReal = platformRoot !== undefined ? realPathOrNull(platformRoot) : null;
   const gateway = input.gateway;
+  const fixtureRootReal = fixtureRootRealPath();
 
-  const fixtureWithinRepo = platformRoot !== undefined
-    && path.relative(EVAL_FIXTURE_ROOT, platformRoot) !== ''
-    && !path.relative(EVAL_FIXTURE_ROOT, platformRoot).startsWith('..');
-  const fixturePresent = platformRoot !== undefined && existsSync(platformRoot);
+  const fixtureWithinRepo = platformRootReal !== null && fixtureRootReal !== null
+    && path.relative(fixtureRootReal, platformRootReal) !== ''
+    && !path.relative(fixtureRootReal, platformRootReal).startsWith('..');
+  const fixturePresent = platformRootReal !== null && existsSync(platformRootReal);
   const gatewayPath = platformRoot !== undefined && gateway
     ? path.join(platformRoot, gateway)
     : undefined;
-  const gatewayPresent = gatewayPath !== undefined && existsSync(gatewayPath);
+  const gatewayReal = gatewayPath !== undefined ? realPathOrNull(gatewayPath) : null;
+  const gatewayPresent = gatewayReal !== null && existsSync(gatewayReal);
 
-  // ① 隔离 mock：root 必须在仓内夹具目录之下。root 未配同样拒——"没有平台根"对评测
-  // 不是安全态，是跑不出证据的假跑。
+  // ① 隔离 mock：root 必须在仓内夹具目录之下（**真实路径**）。root 未配同样拒——"没有平台根"
+  // 对评测不是安全态，是跑不出证据的假跑。
   if (platformRoot === undefined) {
     problems.push('活跃 contextProfile 没有声明 root——未指定隔离 mock（评测脚本走 scripts/eval/eval.agent.yaml，或显式 --config= 指向夹具配置）');
+  } else if (platformRootReal === null) {
+    problems.push(`活跃 profile.root（${platformRoot}）解析不出真实路径（不存在或符号链接断裂）——无法证明它在仓内夹具目录之下，按拒跑处理`);
   } else if (!fixtureWithinRepo) {
-    problems.push(`活跃 profile.root（${platformRoot}）不在仓内夹具目录 ${EVAL_FIXTURE_ROOT} 之下——评测不允许把消息打到真实执行层`);
+    problems.push(`活跃 profile.root（真实路径 ${platformRootReal}）不在仓内夹具目录（真实路径 ${fixtureRootReal ?? EVAL_FIXTURE_ROOT}）之下——评测不允许把消息打到真实执行层`);
   }
-  // ② 缺 fixture：目录与 gateway 可执行文件都要真实存在。
+  // ② 缺 fixture：目录与 gateway 可执行文件都要真实存在（同样按真实路径判）。
   if (platformRoot !== undefined && !fixturePresent) {
     problems.push(`夹具目录不存在：${platformRoot}`);
   }

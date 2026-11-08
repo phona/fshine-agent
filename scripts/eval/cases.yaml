@@ -10,7 +10,8 @@
 #
 # inBaseline 纪律：true 的条目必须在 scripts/eval/baseline.json 里有对应项（语料 ⊆ 基线
 # 锁，score.ts 的 exit 2 判据）。本次从 corpus.jsonl 平移：probe-A1/A2/A3/A4/B1/Y2 与
-# write-chain-51 为 true，其余（含未审计用例）为 false。
+# write-chain-51 为 true，其余（含未审计用例）为 false。2026-11-08 补：probe-A5 恢复进
+# 门禁（b62d322 曾把它连 baseline 项一起删掉，PR #21 二审 blocking），故 true 现为 8 条。
 #
 # 「未审计」条目（placeholder: true）只承载从代码机械搬过来的消息序列与轮次标记；
 # businessGoal / allowedSideEffects / expectations 一律标「切片 E 扩充」，不凭猜补。
@@ -141,9 +142,13 @@ cases:
     # 2026-11-08 恢复（PR #21 审查 blocking）：A5 原在 baseline.json（probe-A5.dims，
     # 7b782cb 基线 v3），b62d322「六项死代码清理」把它和 corpus.jsonl 一起删掉，cases.yaml
     # 没接——基线检查继续全绿，同时静默失去这条覆盖。现按 probe-real-agent.ts 历史定义
-    # （b62d322^ 的 A5 条目）恢复；inBaseline 暂为 false：基线 v4 未写，翻 true 前须先跑
-    # --only A5 并把结果写进 baseline（语料 ⊆ 基线锁，score.ts 的 exit 2 判据）。
-    inBaseline: false
+    # （b62d322^ 的 A5 条目）恢复。
+    # 2026-11-08 二轮修（PR #21 二审 blocking）：第一轮只把 inBaseline 设成 false，等于
+    # 「恢复了语料没恢复门禁」——score.ts:313 只对 inBaseline=true 的条目做基线判定，
+    # 闲聊误委派就算回归，默认打分照样全绿。A5 的判据（零平台调用）是纯机械断言、v3 基线里
+    # 本来就有 probe-A5 项（dims 全 0 / judge 全 2），故翻回 true；baseline.json 的对应项
+    # 由 npm run eval:baseline 重定写入（纪律：基线只走 --write-baseline，不手改文件）。
+    inBaseline: true
     incidents:
       - 闲聊也委派平台（chitchat 不得产生任何平台调用）
     intent: 闲聊不委派平台

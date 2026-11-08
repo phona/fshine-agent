@@ -317,7 +317,19 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
       // "这个部署允不允许落账"的开关位（2026-11-08 架构裁定）——写能不能真落地归执行层，
       // 由平台自己的 commit 门裁决并给出拒绝 / warning / dryrun 提示，宿主经既有失败链路
       // 如实转述。宿主只承诺自己确实做到的事（后端已注入），做不到就如实说配置故障。
-      proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
+      //
+      // gateway 必须一起传（2026-11-08 修，PR #21 过程中定位）：C7b 起
+      // `loadOperationProtocols(root, gateway)` 对未声明/非法的 gateway **一律降级空表**
+      // （operation-labels.ts，绝不回退遗留网关名），而空表 ⇒ `operationForProtocol` 找不到
+      // `proposal.commit` 角色 ⇒ `refuseCommit` ⇒ 每条写链都死在 commit 这一步
+      // （acceptance 5.2 实跑 `change_intent_commit_failed`、意图 status=failed、基线
+      // write-chain-51 从 committed:true 掉到 false）。同文件的 schema loader(:312)、
+      // plan 确认接线(:330)、operation 规格(:368) 都传了 gateway，只漏了这一处。
+      proposalCommitRunner: createProposalCommitRunner({
+        platformRoot,
+        gateSecret,
+        ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
+      }),
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample(activeProfile?.gateway)（C7b 起
       // gateway 未声明即抛，宿主不持任何实例网关名缺省；形状与平台 plan schema 的一致性

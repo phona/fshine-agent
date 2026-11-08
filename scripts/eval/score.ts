@@ -300,11 +300,20 @@ async function main(): Promise<void> {
   const promptVer = judgePromptVersion();
 
   // 语料 ⊆ 基线锁：进基线的语料必须有基线项（反向多余项只提示不拦——删语料时基线项随 --write-baseline 清理）。
+  // 2026-11-08 修（PR #21 二审 blocking 的过程中发现）：`--write-baseline` 时**不锁**。原写法
+  // 无条件 exit 2，于是"给一条新用例开门禁"这件唯一正当的事恰好被锁挡住——A5 从 b62d322
+  // 被删后恢复进 cases.yaml（inBaseline: true），却没有任何 sanctioned 路径能把它的基线项
+  // 写进去，只能手改文件（违反"基线只走 --write-baseline"）。锁的用途是防止**拿着陈旧基线
+  // 打分**，不是阻止基线自身演进；写基线正是消解失配的那个动作，逻辑上该放行。
   const missingBaseline = corpus.filter((entry) => entry.inBaseline
     && (entry.kind === 'probe' ? !(entry.id in baseline.cases) : !(entry.conversation! in baseline.writeChain)));
-  if (missingBaseline.length) {
+  if (missingBaseline.length && !args.writeBaseline) {
     console.error(`语料-基线失配（exit 2）：${missingBaseline.map((entry) => entry.id).join('、')} 进基线但 baseline.json 无对应项`);
+    console.error('  （--write-baseline 可消解此失配：把本轮实值写进去；不写基线则先跑 npm run eval:probe）');
     process.exit(2);
+  }
+  if (missingBaseline.length && args.writeBaseline) {
+    console.log(`重定基线：新增 ${missingBaseline.map((entry) => entry.id).join('、')} 的基线项（语料 ⊆ 基线锁在写基线时不拦）`);
   }
 
   const probePath = args.probeReport ?? latestReport(path.join(repoRoot, '.runtime'), 'probe-', '.json');
