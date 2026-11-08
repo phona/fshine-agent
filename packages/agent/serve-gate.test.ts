@@ -5,6 +5,7 @@ import { describe, expect, it, afterAll, beforeAll } from 'vitest';
 import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
+import type { PlanCall } from './src/plan-runtime';
 
 describe('isServeCliInvocation（首词规则）', () => {
   it('放行 bin/example-gateway 的合法形态', () => {
@@ -331,6 +332,125 @@ describe('createServeGate（通用执行安全门）', () => {
       gate(bash('bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json'));
       expect(events.at(-1)).toMatchObject({ tool: 'bash', allowed: true });
       expect(events.at(-1)?.detail).toContain('validate-contract.js');
+    });
+  });
+
+  // ── 计划前置三级判据：scratch 免计划 / read 要激活计划 / write 要被某一步覆盖 ──────
+  //
+  // 病根（2026-11-08 修）：旧判据 `!planActive() && !planExempt(...)` 只查"有没有激活
+  // 计划"，不查"这份计划覆不覆盖这次调用"。实测后果：激活的计划全是 dummy.query（读），
+  // 4 次 plan_submit 全被拒，而 dummy.proposal / dummy.proposal-commit（写）照样调通——
+  // 数据落地，用户从未确认。门自己的注释写着"未知 op 可能写平台数据，宁拦勿猜"，实现
+  // 却没做到。
+  //
+  // 分级依据只有平台语义表（`operation list --json` 的 access 列 × 顶层 accessSemantics
+  // 表），宿主不认 access 词表、不另立 operation 名单。这里守四件事，外加三条边界
+  // （读不锁死、未登记形态不回退、跨域同名不算覆盖）。
+  describe('计划前置三级判据：scratch 免计划 / read 要计划 / write 要覆盖', () => {
+    /** 与 dummy 夹具 `operation list --json` 同形的替身语义表（access 三族各一条）。 */
+    const DUMMY: OperationSemantics = new Map<string, AccessSemantics>([
+      ['dummy.query', { plan: true, confirm: false }],           // access=read
+      ['dummy.scratch', { plan: false, confirm: false }],        // access=scratch（纯本地计算）
+      ['dummy.commit', { plan: true, confirm: true }],           // access=write
+      ['dummy.proposal', { plan: true, confirm: true }],         // access=write
+      ['dummy.proposal-commit', { plan: true, confirm: true }],  // access=write
+      ['ballot.proposal', { plan: true, confirm: true }],        // 另一域的同一个脚本名
+    ]);
+    const bash = (command: string) => ({ name: 'bash', arguments: { command } });
+    /** 带激活计划（calls 由调用方给）的门。 */
+    const withPlan = (calls: readonly PlanCall[], extra: Partial<ServeGateOptions> = {}) => createServeGate({
+      planActive: () => true,
+      operationSemantics: DUMMY,
+      activePlanCalls: () => calls,
+      ...extra,
+      gateway: 'bin/example-gateway',
+    });
+
+    it('① 激活计划只有读（dummy.query）→ 写类调用被拒，理由点名是哪个 operation 不在计划里', () => {
+      const gate = withPlan([{ operation: 'dummy.query', args: ['--collection', 'alpha'] }]);
+      for (const command of [
+        'bin/example-gateway prepare dummy.proposal tmp/task_x/payload.json',
+        'bin/example-gateway commit dummy.proposal-commit --proposal-id P-1',
+      ]) {
+        const verdict = gate(bash(command));
+        expect(verdict?.block, command).toBe(true);
+        // 措辞收口在 error-codes.ts：既有消息一字不差，只追加"哪个 operation 不在计划里"
+        expect(verdict?.reason, command).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+        expect(verdict?.reason, command).toContain('dummy.proposal');
+      }
+    });
+
+    it('② 激活计划只有读 → 另一个读（不同 collection）放行：探索性查询不锁死', () => {
+      const gate = withPlan([{ operation: 'dummy.query', args: ['--collection', 'alpha'] }]);
+      // 计划里写查 alpha，worker 看了结果想查 beta——正当探索，不能拦死
+      expect(gate(bash('bin/example-gateway query dummy.query --collection beta'))?.block).toBeUndefined();
+      // 计划里那一步本身（含计划没带的 --window）照旧放行
+      expect(gate(bash('bin/example-gateway query dummy.query --collection alpha --window W1'))?.block).toBeUndefined();
+    });
+
+    it('③ 计划含该写声明的关键参数 → 放行；同 operation 不同参数 → 拒', () => {
+      const covered = withPlan([{ operation: 'dummy.commit', args: ['--collection', 'alpha'] }]);
+      expect(covered(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
+      // 关键参数一致 ≠ 全等：调用比计划多带 --window/--count 仍算覆盖（全等会误判）
+      expect(covered(bash('bin/example-gateway commit dummy.commit --collection alpha --window W1 --count 3'))?.block).toBeUndefined();
+      // 同 operation 不同值 → 不覆盖
+      const other = covered(bash('bin/example-gateway commit dummy.commit --collection beta'));
+      expect(other?.block).toBe(true);
+      expect(other?.reason).toContain('dummy.commit');
+      // 反方向不放松：计划声明了 --window 而这次调用没带，目标就不一定是那一个
+      const windowed = withPlan([{ operation: 'dummy.commit', args: ['--collection', 'alpha', '--window', 'W1'] }]);
+      expect(windowed(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBe(true);
+      // 编号类关键参数：proposal id 运行时才产生，计划步骤不带它即覆盖任意 id；带了就只覆盖那一个
+      const anyId = withPlan([{ operation: 'dummy.proposal-commit', args: [] }]);
+      expect(anyId(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-9'))?.block).toBeUndefined();
+      const pinned = withPlan([{ operation: 'dummy.proposal-commit', args: ['--proposal-id', 'P-1'] }]);
+      expect(pinned(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-1'))?.block).toBeUndefined();
+      const wrongId = pinned(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-2'));
+      expect(wrongId?.block).toBe(true);
+      expect(wrongId?.reason).toContain('dummy.proposal-commit');
+    });
+
+    it('④ scratch（plan=false）无计划也放行：既有豁免口径一字不回退', () => {
+      const gate = createServeGate({ planActive: () => false, operationSemantics: DUMMY, gateway: 'bin/example-gateway' });
+      expect(gate(bash('bin/example-gateway query dummy.scratch --input tmp/x.json'))?.block).toBeUndefined();
+      expect(gate(bash('bin/example-gateway operation run dummy.scratch --input tmp/x.json'))?.block).toBeUndefined();
+    });
+
+    it('边界：写类在没有激活计划时照旧拒（存在性判据先于覆盖判据）', () => {
+      const gate = createServeGate({
+        planActive: () => false,
+        operationSemantics: DUMMY,
+        activePlanCalls: () => [{ operation: 'dummy.commit', args: ['--collection', 'alpha'] }],
+        gateway: 'bin/example-gateway',
+      });
+      // 没有计划：只有既有消息，不带覆盖后缀（覆盖判据轮不到它说话）
+      expect(gate(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.reason)
+        .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+    });
+
+    it('边界：恢复的会话拿不到计划内容（calls 空）→ 写类拒、读类照旧放行', () => {
+      const gate = createServeGate({ planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      // 读不锁死
+      expect(gate(bash('bin/example-gateway query dummy.query --collection alpha'))?.block).toBeUndefined();
+      // 写 fail-closed：不知道这份计划覆盖什么就不写，直到本会话重新激活一份计划
+      expect(gate(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBe(true);
+    });
+
+    it('边界：语义表缺失 / operation 未登记 → 只要求激活计划（2026-10-09 起的既有防线）', () => {
+      const unknownOp = createServeGate({ planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      expect(unknownOp(bash('bin/example-gateway commit src/unknown/scripts/whatever.js c.json'))?.block).toBeUndefined();
+      const emptyTable = createServeGate({ planActive: () => true, operationSemantics: new Map(), activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      expect(emptyTable(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
+    });
+
+    it('覆盖匹配按 operation 认：脚本路径与注册名两种引用都认，跨域同名不算覆盖', () => {
+      // 计划里是 ballot 域的 proposal；调用的是 dummy 域的同一个脚本名 → 不是同一步
+      const crossDomain = withPlan([{ operation: 'ballot.proposal', args: [] }]);
+      expect(crossDomain(bash('bin/example-gateway prepare src/dummy/scripts/proposal.js tmp/p.json'))?.block).toBe(true);
+      // 同域：脚本路径形态与注册名直呼都算同一步
+      const same = withPlan([{ operation: 'dummy.proposal', args: [] }]);
+      expect(same(bash('bin/example-gateway prepare src/dummy/scripts/proposal.js tmp/p.json'))?.block).toBeUndefined();
+      expect(same(bash('bin/example-gateway operation run dummy.proposal tmp/p.json'))?.block).toBeUndefined();
     });
   });
 

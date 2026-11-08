@@ -519,6 +519,79 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
+  // ── 计划前置的覆盖判据（2026-11-08）：写类必须被激活计划的某一步覆盖 ────────────
+  //
+  // 病根：门的旧判据 `planActive() !== null` 只查"有没有激活计划"，不查"这份计划覆不覆盖
+  // 这次调用"。实测形态：激活的计划全是只读 operation，plan_submit 连番被拒，而写类网关
+  // 调用照样放行——数据落地，用户从未确认。这里在**驱动级**（真 gate + 真计划解析）钉两
+  // 件事：计划里只有读 → 写被门拒；计划里含该写 → 放行。
+  describe('激活计划的覆盖判据：写类要被计划的某一步覆盖', () => {
+    /** 提交即激活（execute 档）的计划 CLI 替身；evaluate 被咨询的次数可查。 */
+    const activatingRunner = (taskId: string, evaluated: unknown[][]): PlanCliRunner => async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId, planId: null, version: null, status: 'none' }), stderr: '' };
+      evaluated.push(args);
+      return { code: 0, stdout: JSON.stringify({ taskId, planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+    };
+
+    async function workerFor(taskId: string, evaluated: unknown[][]) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `fshine-pi-coverage-${taskId}-`));
+      roots.push(root);
+      return createPiCodingWorkerSession({
+        gateway: 'bin/example-gateway',
+        cwd: root,
+        skillRoots: [],
+        systemPrompt: 'coverage test',
+        sessionId: taskId,
+        agentDir: path.join(root, '.fshine-agent'),
+        modelConfig: await fakeModelRuntime(),
+        planCliRunner: activatingRunner(taskId, evaluated),
+        operationSemantics: SEMANTICS_TABLE,
+      });
+    }
+
+    const call = async (worker: Awaited<ReturnType<typeof createPiCodingWorkerSession>>, command: string, id = 'call_x') =>
+      worker.session.agent.beforeToolCall?.({
+        assistantMessage: {} as never,
+        toolCall: { id, type: 'toolCall', name: 'bash', arguments: { command } } as never,
+        args: { command },
+        context: {} as never,
+      });
+
+    it('计划里只有读（query-saved）→ 写类网关调用被门拒，点名该 operation', async () => {
+      const evaluated: unknown[][] = [];
+      const worker = await workerFor('task_cov_read', evaluated);
+      // 激活一份只读计划（与实测形态一致：worker 想查，提交即激活）
+      const activated = await call(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}', 'plan_1');
+      expect(activated?.reason).toContain('PLAN ACTIVE');
+      // 读照旧放行（计划里那一步）
+      expect((await call(worker, 'bin/example-gateway query query-saved.js A 202609', 'read_1'))?.block).toBeUndefined();
+      // 写类：门问"覆不覆盖"，计划里没有这一步 → 拒（改前这里放行，数据直接落地）
+      const blocked = await call(worker, 'bin/example-gateway commit src/voucher/scripts/fill.js c.json --save', 'write_1');
+      expect(blocked?.block).toBe(true);
+      expect(blocked?.reason).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+      // 点名用语义表里的注册名，不把脚本路径塞进消息
+      expect(blocked?.reason).toContain('voucher.fill');
+      expect(blocked?.reason).not.toContain('fill.js');
+      // 平台一次都没被写调用惊动（门在宿主侧就拦下了）
+      expect(evaluated).toHaveLength(1);
+      worker.session.dispose();
+    });
+
+    it('计划里含该写 → 同参数放行；同 operation 不同参数被拒', async () => {
+      const evaluated: unknown[][] = [];
+      const worker = await workerFor('task_cov_write', evaluated);
+      const activated = await call(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.prepare","args":["--account-set","幻辰财税","--period","202609"]}]}', 'plan_1');
+      expect(activated?.reason).toContain('PLAN ACTIVE');
+      // 关键参数一致（多带一个 --batch 仍算覆盖）
+      expect((await call(worker, 'bin/example-gateway prepare src/voucher/scripts/prepare.js --account-set 幻辰财税 --period 202609 --batch', 'write_1'))?.block).toBeUndefined();
+      // 同 operation 不同参数 → 不覆盖
+      const other = await call(worker, 'bin/example-gateway prepare src/voucher/scripts/prepare.js --account-set 幻亨纸业 --period 202609', 'write_2');
+      expect(other?.block).toBe(true);
+      expect(other?.reason).toContain('voucher.prepare');
+      worker.session.dispose();
+    });
+  });
+
   it('未登记的 operation 也不前置拦：平台计划门按既有路径裁决（宁缺勿猜）', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-unknown-'));
     roots.push(root);
