@@ -33,7 +33,7 @@ import Type from 'typebox';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
-import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { createServeGate, describePlanCalls, isInsideScratch, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
@@ -1558,6 +1558,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     args: Record<string, unknown>,
     manifest: CapabilityManifest | null,
     activePlanId: () => string | null,
+    activePlanCalls: () => readonly PlanCall[] | null,
   ): ServeGateVerdict | undefined {
     const operation = String(args.operation ?? '').trim();
     if (!operation) {
@@ -1573,6 +1574,23 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     if (declaration.requiresPlan && !activePlanId()) {
       return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 需要激活的计划（requiresPlan=true）` };
     }
+    // 计划覆盖判据（2026-11-09 四审 blocking）：与 bash 侧**同一份实现**
+    // （serve-gate 的 planCoverageVerdict），不是这里另写一套。此前这条分支只查
+    // requiresPlan 的存在性——于是一份纯读计划激活后，清单里已登记的写 operation 仍能经
+    // structured_call 进网关，"计划里全是读、写照样调通"这个根因在这条路上原样存在。
+    // 注意提案创建仍走宿主既有拦截路由（decideProposalCreation），不经过这里。
+    // args 形状校验在下面；这里先安全取出对象（取不到 = 空关键参数表——写类若声明了关键
+    // 参数，空表自然判"不覆盖"，不会因为形状非法就绕过计划门）。
+    const rawArgs = args.args;
+    const structuredArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+      ? (rawArgs as Record<string, unknown>)
+      : {};
+    const planVerdict = structuredPlanGateVerdict(operation, structuredArgs, {
+      planActive: () => activePlanId() !== null,
+      operationSemantics,
+      activePlanCalls,
+    });
+    if (planVerdict) return planVerdict;
     const argsValue = args.args;
     if (typeof argsValue !== 'object' || argsValue === null || Array.isArray(argsValue)) {
       return { block: true, reason: 'STRUCTURED_CALL DECLINED：args 必须是对象' };
@@ -1659,7 +1677,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       if (proposalCall) return decideProposalCreation(proposalCall);
     }
     if (ctx.toolCall.name === 'structured_call') {
-      return validateStructuredCall(args, capabilityManifest, activePlanId);
+      return validateStructuredCall(args, capabilityManifest, activePlanId, () => activePlan?.calls ?? null);
     }
     return gate({ name: ctx.toolCall.name, arguments: args });
   }

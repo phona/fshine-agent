@@ -622,9 +622,23 @@ function planSemanticsEntryOf(
   command: string,
   semantics: OperationSemantics | undefined,
 ): { key: string; access: AccessSemantics } | undefined {
-  if (!semantics || semantics.size === 0) return undefined;
-  const reference = extractGateScript(command);
+  return planSemanticsEntryForReference(extractGateScript(command) ?? '', semantics);
+}
+
+/**
+ * 按**已取到的 operation 引用**查语义表（命令字符串的解析在外层）。
+ *
+ * 2026-11-09 拆出来：结构化调用（structured_call）手里本来就是注册名，没有命令串可解析。
+ * 它必须与 bash 走同一份覆盖判据（PR #21 四审 blocking：structured_call 分支原先只查
+ * requiresPlan 的存在性，激活一份纯读计划后写 operation 照样进网关）——复用同一个查表函数
+ * 是"只有一份真相"的前提，否则迟早漂移。
+ */
+function planSemanticsEntryForReference(
+  reference: string,
+  semantics: OperationSemantics | undefined,
+): { key: string; access: AccessSemantics } | undefined {
   if (!reference) return undefined;
+  if (!semantics || semantics.size === 0) return undefined;
   const direct = semantics.get(reference);
   if (direct) return { key: reference, access: direct };
   const parts = scriptPathParts(reference);
@@ -758,13 +772,12 @@ function keyArgsOf(tokens: readonly string[]): Map<string, string> {
  * 反方向不放松：计划声明了 `--window W1` 而这次调用没带，目标就不一定是那一个——
  * 拒，让 worker 改对或重提计划。
  */
-function coversPlanStep(step: PlanCall, command: string, reference: string): boolean {
+function coversPlanStep(step: PlanCall, reference: string, gotKeyArgs: ReadonlyMap<string, string>): boolean {
   if (!sameOperation(step.operation, reference)) return false;
   const wanted = keyArgsOf(step.args.map((value) => (typeof value === 'string' ? value : String(value))));
   if (wanted.size === 0) return true;   // 该步没声明关键参数 → 覆盖这个 operation 的任何调用
-  const got = keyArgsOf(splitCommandTokens(command));
   for (const [flag, value] of wanted) {
-    if (got.get(flag) !== value) return false;
+    if (gotKeyArgs.get(flag) !== value) return false;
   }
   return true;
 }
@@ -785,14 +798,40 @@ function planGateVerdict(
   },
 ): ServeGateVerdict | undefined {
   const { tier, key } = planGateTier(command, ctx.operationSemantics);
+  const reference = extractGateScript(command);
+  return planCoverageVerdict(tier, key, reference, keyArgsOf(splitCommandTokens(command)), ctx);
+}
+
+/**
+ * 计划覆盖判据的**唯一实现**（bash 与 structured_call 两条路都走它）。
+ *
+ * 为什么提成这一个函数：2026-11-09 四审 blocking——`structured_call` 分支原先只查
+ * `requiresPlan` 的存在性，于是一份纯读计划激活后，清单里已登记的写 operation 仍能经
+ * structured_call 进网关，完全绕过 bash 侧新加的覆盖检查。把判据收成一处，两条路不可能
+ * 再漂移；在任一路旁另写一份，就等于给"计划里全是读、写照样调通"留后门。
+ *
+ * tier / key 由调用方按自己的取 reference 方式算好（bash 解命令串，结构化直接用注册名），
+ * gotKeyArgs 是关键参数表（口径同 keyArgsOf：只比 flag，位置参数不入表）。
+ */
+function planCoverageVerdict(
+  tier: PlanGateTier,
+  key: string | undefined,
+  reference: string | null,
+  gotKeyArgs: ReadonlyMap<string, string>,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    /** 激活计划的 calls（宿主注入）。undefined = 调用方没接这一路 → 写类一律拒（fail-closed）。 */
+    activePlanCalls?: () => readonly PlanCall[] | null;
+  },
+): ServeGateVerdict | undefined {
   // scratch：平台自己声明不要计划（纯本地计算），免前置——与旧的 planExempt 同一列同一判据
   if (tier === 'scratch') return undefined;
   if (!ctx.planActive?.()) return { block: true, reason: messageTextFor('SERVE_PLAN_NOT_ACTIVE') };
   // 读与未登记形态：只要有激活计划（探索性查询不锁死；未知 op 按既有防线只要求有计划）
   if (tier !== 'write') return undefined;
   const steps = ctx.activePlanCalls?.();
-  const reference = extractGateScript(command);
-  if (reference && steps?.some((step) => coversPlanStep(step, command, reference))) return undefined;
+  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs))) return undefined;
   // 措辞收口在 error-codes.ts（SERVE_PLAN_NOT_ACTIVE 一字不差地复用），这里只追加**数据**：
   // 被拒的是哪个 operation——没有它，worker 不知道该把哪个调用补进计划，只能整份重提。
   // 点名用语义表里的注册名（`voucher.fill`），不拿命令里的脚本路径顶替（消息纪律：脚本名/
@@ -800,8 +839,40 @@ function planGateVerdict(
   // 计划分支同样用「表内消息 + 追加数据」的写法，如 `PLAN ACTIVE（id vN）：…`）。
   return {
     block: true,
-    reason: `${messageTextFor('SERVE_PLAN_NOT_ACTIVE')}未被已激活计划覆盖的 operation：${key ?? reference ?? command}。`,
+    reason: `${messageTextFor('SERVE_PLAN_NOT_ACTIVE')}未被已激活计划覆盖的 operation：${key ?? reference ?? '(未解析)'}。`,
   };
+}
+
+/**
+ * 结构化调用（structured_call）的计划前置判据——与 bash 同一份实现。
+ *
+ * 入参就是结构化调用自己的形状：operation 注册名 + args 对象。args 规范化成 flag 表后
+ * 直接进 planCoverageVerdict，不合成命令串再解析（合成串会让两条路的措辞/边界慢慢分叉）。
+ * 提案创建仍走宿主既有拦截路由，不经过这里。
+ */
+export function structuredPlanGateVerdict(
+  operation: string,
+  args: Record<string, unknown>,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    activePlanCalls?: () => readonly PlanCall[] | null;
+  },
+): ServeGateVerdict | undefined {
+  const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
+  // 语义表里没有这个 operation（未登记/空表）→ 按既有防线当 unknown：只要求有激活计划。
+  const tier: PlanGateTier = entry === undefined ? 'unknown' : entry.access.plan === false ? 'scratch' : entry.access.confirm === true ? 'write' : 'read';
+  // args 对象 → flag 表。键名归一成 `--flag`：清单 argsSchema 用的是带横杠形（`--account`），
+  // 但也有的部署声明不带横杠，两种都按"剥掉再补一个 --"归一，否则同一件事两种写法会判成
+  // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
+  // `--flag 值` / `--flag` 的判定同形；数组/对象不猜（结构化 args 已被清单校验只能是标量）。
+  const got = new Map<string, string>();
+  for (const [name, value] of Object.entries(args)) {
+    if (value === undefined || value === null) continue;
+    const flag = name.startsWith('--') ? name : `--${name}`;
+    got.set(flag, typeof value === 'boolean' ? '' : String(value));
+  }
+  return planCoverageVerdict(tier, entry?.key, operation, got, ctx);
 }
 
 export function createServeGate(options: ServeGateOptions = {}) {

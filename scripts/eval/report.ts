@@ -149,12 +149,22 @@ function countInterventionPoints(
 
 /** 逐用例事实 → 报告行（纯函数：同一输入同一输出，可单测）。 */
 export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
-  // 写后读回：本用例任何 committed 且读回摘要在的意图都算证据（verified 的授予依据）。
-  const readbackVerified = input.intents.some((intent) => intent.status === 'committed' && intent.hasReadback);
+  // 读回证据**逐条调用**关联（2026-11-09 四审 blocking）：旧写法
+  // `input.intents.some(committed && hasReadback)` 是**用例级**的——本用例只要成功提交过
+  // 一笔，后续另一 proposalId 的未验证写调用也会被判 verified/delivered，甚至更早轮次被
+  // 追认成功。ask-session 侧已按 proposalId 修过，这个生产报告入口是同一条判据的第二个
+  // 落点，一并收口。关联键 = 该行 proposalId ↔ 意图 proposalId；关联不上 = 未验证。
+  const verifiedProposals = new Set(
+    input.intents
+      .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
+      .map((intent) => intent.proposalId!),
+  );
+  const readbackFor = (row: { proposalId?: string }): boolean =>
+    row.proposalId !== undefined && verifiedProposals.has(row.proposalId);
   const ladder: CallLadderEntry[] = [];
   const turns: ReportTurnLine[] = input.turns.map((turn, index) => {
     const delivered = typeof turn.reply === 'string' && turn.reply.length > 0;
-    const turnLadder = turn.execution.map((row) => classifyExecutionCall({ row, readbackVerified, delivered }));
+    const turnLadder = turn.execution.map((row) => classifyExecutionCall({ row, readbackVerified: readbackFor(row), delivered }));
     ladder.push(...turnLadder);
     const main = turn.tokens?.main;
     const worker = turn.tokens?.worker;
@@ -261,7 +271,10 @@ export function writeUnifiedReport(dir: string, report: UnifiedReport): { json: 
 /** 人读摘要（终端用）：聚合指标 + 阶梯分布。 */
 export function summarizeReport(report: UnifiedReport): string {
   const rungCounts = new Map<string, number>();
-  for (const line of report.calls) rungCounts.set(line.rung, rungCounts.get(line.rung) ?? 0 + 1);
+  // 2026-11-09 四审 minor：旧写法 `get(...) ?? 0 + 1` 被解析成 `get(...) ?? (0 + 1)`
+  // ——空值合并优先级低于加法，于是键已存在时原样返回旧计数、永不递增，同档十次调用也显示 1，
+  // 终端摘要低报调用量。加括号修正。
+  for (const line of report.calls) rungCounts.set(line.rung, (rungCounts.get(line.rung) ?? 0) + 1);
   const rungs = [...rungCounts.entries()].map(([rung, count]) => `${rung} ${count}`).join('、') || '无调用';
   const tokenNote = report.metrics.tokens === undefined ? 'usage 无证据' : `tokens ${report.metrics.tokens}`;
   // 安全违规：null = 未测（无证据源），不是 0。渲染成"未测"，别让它读起来像"测过、0 违规"。

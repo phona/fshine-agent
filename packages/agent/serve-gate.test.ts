@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
 import type { PlanCall } from './src/plan-runtime';
@@ -441,6 +441,60 @@ describe('createServeGate（通用执行安全门）', () => {
       expect(unknownOp(bash('bin/example-gateway commit src/unknown/scripts/whatever.js c.json'))?.block).toBeUndefined();
       const emptyTable = createServeGate({ planActive: () => true, operationSemantics: new Map(), activePlanCalls: () => [], gateway: 'bin/example-gateway' });
       expect(emptyTable(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
+    });
+
+    // ── 结构化调用（structured_call）与 bash 共用同一份覆盖判据 ──────────────────────
+    // 2026-11-09 四审 blocking：structured_call 分支原先只查 requiresPlan 的存在性，于是一份
+    // 纯读计划激活后，清单里已登记的写 operation 仍能经结构化通道进网关——bash 侧新加的覆盖
+    // 检查在这条路上原样不存在。现在两条路都走 planCoverageVerdict，这里钉住结构化这一侧。
+    it('结构化写调用：纯读计划激活后被拒，理由点名 operation（与 bash 同措辞）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      for (const operation of ['dummy.proposal', 'dummy.proposal-commit', 'dummy.commit']) {
+        const verdict = structuredPlanGateVerdict(operation, { '--collection': 'alpha' }, ctx);
+        expect(verdict?.block, operation).toBe(true);
+        expect(verdict?.reason, operation).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+        expect(verdict?.reason, operation).toContain('dummy.');
+      }
+    });
+
+    it('结构化读调用：纯读计划下另一个 collection 放行（探索性查询不锁死，同 bash）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.query', { '--collection': 'beta' }, ctx)?.block).toBeUndefined();
+    });
+
+    it('结构化 scratch 调用：免计划前置（与 bash 同一列同一判据）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.scratch', {}, ctx)?.block).toBeUndefined();
+    });
+
+    it('结构化写调用：计划含同 operation 同关键参数 → 放行；参数不同 → 拒', () => {
+      const covered = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.proposal', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'alpha' }, covered)?.block).toBeUndefined();
+      // 计划声明了 --collection alpha，这次调 beta → 目标不一定同一个，拒
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'beta' }, covered)?.block).toBe(true);
+      // 计划没声明关键参数 → 覆盖该 operation 的任何调用
+      const bare = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.proposal', args: [] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'whatever' }, bare)?.block).toBeUndefined();
+    });
+
+    it('结构化调用：无激活计划 → 读写都要先有计划；未登记 operation 同判据', () => {
+      const noPlan = { planActive: () => false, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.query', {}, noPlan)?.block).toBe(true);
+      expect(structuredPlanGateVerdict('dummy.proposal', {}, noPlan)?.block).toBe(true);
+      // 语义表里没有 → unknown 档：按既有防线只要求有计划（不因未登记就放行）
+      const unknown = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('not.registered', {}, unknown)?.block).toBeUndefined();
+    });
+
+    it('结构化与 bash 对同一场景给同一结论（防两条路漂移）', () => {
+      const calls = [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[];
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => calls };
+      const viaStructured = structuredPlanGateVerdict('dummy.proposal', { '--collection': 'alpha' }, ctx);
+      const viaBash = withPlan(calls)(bash('bin/example-gateway prepare dummy.proposal tmp/task_x/payload.json'));
+      expect(viaStructured?.block).toBe(true);
+      expect(viaBash?.block).toBe(true);
+      expect(viaStructured?.reason).toContain('未被已激活计划覆盖');
+      expect(viaBash?.reason).toContain('未被已激活计划覆盖');
     });
 
     it('覆盖匹配按 operation 认：脚本路径与注册名两种引用都认，跨域同名不算覆盖', () => {
