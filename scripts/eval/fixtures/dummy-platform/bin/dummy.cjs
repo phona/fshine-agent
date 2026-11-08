@@ -225,7 +225,16 @@ function loadPlans() { const s = loadJson(statePaths().planFile, null); return (
 function savePlans(s) { saveJson(statePaths().planFile, s); }
 function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
-function audit(row) { const f = statePaths().auditFile; if (!f) return; try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n'); } catch { /* audit is best-effort */ } }
+// 审计写失败要响（2026-11-08）：audit 是执行层证据的唯一来源（评测按 EXECUTION_AUDIT_PATH
+// 的行数与 refused 判定），写失败还静默继续 = 调用无痕，评测只能得出 INCONCLUSIVE 甚至
+// 假绿。改为失败即抛——外层 main().catch 会把栈打到 stderr 并以非零码退出，这次调用
+// 因此整体失败（fail-closed），绝不出现"执行了但没留痕"的成功。
+function audit(row) {
+  const f = statePaths().auditFile;
+  if (!f) return;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
+}
 function emit(op, status, data, error) {
   const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}) } : null };
   process.stdout.write('RESULT ' + JSON.stringify(envelope) + '\n');

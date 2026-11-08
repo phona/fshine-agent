@@ -18,7 +18,11 @@ interface ProbeResult {
     notices: unknown[];
     calls: number;
   }>;
-  ledgerCalls: number;
+  /** 执行层审计行总数（2026-11-08 换源：原 ledgerCalls 读宿主 EXECUTION_PLAN_STATE 账本，
+   * 现为数 EXECUTION_AUDIT_PATH 的审计行，被拒行也数）。旧字段名随源退役。 */
+  platformCalls: number;
+  /** 其中被执行层门拒绝的行数。 */
+  refusedCalls?: number;
   notes: string[];
   dims: Record<string, number>;
   unclassifiedNotes: number;
@@ -117,7 +121,7 @@ function aggregateProbes(files: ProbeFile[]): Map<CaseKey, CaseStats> {
         map.set(key, stats);
       }
       stats.runs += 1;
-      stats.platformCalls += typeof r.ledgerCalls === 'number' ? r.ledgerCalls : 0;
+      stats.platformCalls += typeof r.platformCalls === 'number' ? r.platformCalls : 0;
       const tokens = sumTokens(r);
       if (tokens === undefined) {
         stats.tokenSkipped += 1;

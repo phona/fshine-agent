@@ -1,0 +1,350 @@
+/**
+ * 任务级证据链与状态阶梯（issue #10 切片 D）。
+ *
+ * 判定的唯一依据是三类**宿主/执行层持有的结构化事实**，不读模型自述、也不按
+ * console.info 日志下标归因（下标 + 串行窗口在并发与后台完成时会错，issue 目标 5
+ * 明确不让人长期依赖它）：
+ *   ① 执行层审计日志 —— EXECUTION_AUDIT_PATH 的 JSONL 行（mode/script/args/serve/
+ *     refused/exitCode），被拒的行也在册且信息更多（「调用了」与「被拒+原因」可分）；
+ *   ② 宿主审计库 —— agent_requests（messageId → requestId 关联）、tool_calls
+ *     （serve_gate:* 的门裁决）、task_runs / platform_tasks（taskId 与交付状态）、
+ *     change_intents（提案与读回校验）；
+ *   ③ handler 返回 —— 最终回复是否非空（delivered 的唯一判据）。
+ *
+ * 关联 ID 链：evalRunId → caseId → messageId → requestId → taskId/delegationId →
+ * execution evidence。每一档都由上一档的持久化 id 查出（messageId 在宿主库里有唯一
+ * requestId；requestId 在 tool_calls/task_runs 里有 task/delegation 事实），断链时
+ * 如实置 null/INCONCLUSIVE，绝不回落「时间窗内最近一条」这种猜测。
+ *
+ * 状态阶梯（每条平台调用）：authorized → invoked → completed → verified → delivered。
+ * 无证据的档不标成功——标 INCONCLUSIVE（issue 验收标准「无证据标为 INCONCLUSIVE 而非
+ * 成功」）。阶梯语义见 classifyExecutionCall 的注释。
+ */
+import { existsSync, readFileSync } from 'node:fs';
+import type Database from 'better-sqlite3';
+import type { AuditStore, ChangeIntentRecord, TaskRunRecord, ToolCallRecord } from '@fshine/contracts';
+
+// ── ① 执行层审计日志 ──
+
+/** 执行层审计日志行（夹具网关 audit() 落账的形状；字段缺席 = 夹具没写，不是假）。 */
+export interface ExecutionAuditRow {
+  ts?: string;
+  mode?: string;
+  /** 操作注册名或本地脚本相对路径。 */
+  script?: string;
+  args?: unknown;
+  serve?: boolean;
+  /** 门拒绝原因；在册 = 该调用被执行层自己的门拒了，从未执行。 */
+  refused?: string;
+  exitCode?: number;
+  planId?: string;
+  protocol?: string;
+}
+
+/**
+ * 读执行层审计日志。路径未设/文件缺失/坏行各自如实处理：未设 = 没有证据来源（返回
+ * null，调用方按 INCONCLUSIVE 处理，不得当零调用）；文件在 = 逐行解析，坏行跳过。
+ */
+export function readExecutionAuditLog(auditPath: string | undefined): ExecutionAuditRow[] | null {
+  if (!auditPath) return null;
+  if (!existsSync(auditPath)) return [];
+  try {
+    return readFileSync(auditPath, 'utf8').split('\n').filter(Boolean)
+      .map((line) => {
+        try { return JSON.parse(line) as ExecutionAuditRow; } catch { return null; }
+      })
+      .filter((row): row is ExecutionAuditRow => row !== null);
+  } catch {
+    return null;
+  }
+}
+
+// ── ② 宿主审计库事实 ──
+
+/** agent_requests 一行（messageId → requestId 的唯一关联档）。 */
+export interface HostRequestFacts {
+  requestId: string;
+  messageId: string;
+  principalId: string;
+  outcome: string;
+}
+
+/** tool_calls 里的门裁决行（serve_gate:* / platform_executor_bypassed）。 */
+export interface HostGateRow {
+  requestId: string;
+  toolName: string;
+  status: string;
+  errorCode?: string;
+  /** 被拦原因 / 命令摘要（assembly 的 serveGateAudit 落两处：detail + reason）。 */
+  reason?: string;
+  detail?: string;
+}
+
+/** 一次委派/后台 run 的宿主持有事实（taskId / delegationId 档）。 */
+export interface HostDelegationFacts {
+  taskId: string;
+  runId?: string;
+  planId?: string;
+  state?: TaskRunRecord['state'];
+  deliveryState?: TaskRunRecord['deliveryState'];
+  resultHandlingState?: TaskRunRecord['resultHandlingState'];
+  hasResultText: boolean;
+}
+
+/** 提案意图的宿主持有事实（verified 档的写路径证据）。 */
+export interface HostIntentFacts {
+  intentId: string;
+  proposalId?: string;
+  taskId?: string;
+  status: ChangeIntentRecord['status'];
+  /** commit 读回校验输出摘要是否在（committed 路径写入）。 */
+  hasReadback: boolean;
+}
+
+// ── 关联 ID 链 ──
+
+/**
+ * 一条消息的完整证据链。任何一档查不到就置 null / INCONCLUSIVE——断链是结论的一部分，
+ * 不是可以绕过的障碍（fallback 到时间窗归因正是要禁掉的做法）。
+ */
+export interface MessageEvidenceChain {
+  evalRunId: string;
+  caseId: string;
+  messageId: string;
+  /** 宿主 agent_requests 按 messageId 查出的请求 id；null = 关联断（INCONCLUSIVE）。 */
+  requestId: string | null;
+  /** 该请求下的委派事实（task_runs.origin_request_id）。 */
+  delegations: HostDelegationFacts[];
+  /** 该请求下的提案意图（change_intents）。 */
+  intents: HostIntentFacts[];
+  /** 该请求下的宿主门裁决行（tool_calls.serve_gate:*）。 */
+  gateRows: HostGateRow[];
+  /** 该消息窗口内的执行层审计行。 */
+  executionRows: ExecutionAuditRow[];
+  /** handler 返回的最终回复（delivered 判据）；null = handler 抛错/未返回。 */
+  finalReply: string | null;
+}
+
+/**
+ * 从宿主审计库按 messageId 反查宿主持有事实。auditStore 缺表（旧替身）时对应档降级为
+ * 空——如实缺证据，不造空成功。
+ */
+export async function collectHostFacts(
+  store: AuditStore,
+  messageId: string,
+): Promise<{
+  request: HostRequestFacts | null;
+  delegations: HostDelegationFacts[];
+  gateRows: HostGateRow[];
+}> {
+  const found = await store.requests.findByWecomMessageId(messageId).catch(() => null);
+  if (!found) {
+    return { request: null, delegations: [], gateRows: [] };
+  }
+  const request: HostRequestFacts = {
+    requestId: found.requestId,
+    messageId: found.wecomMessageId,
+    principalId: found.principalId,
+    outcome: String(found.outcome),
+  };
+  const toolRows: ToolCallRecord[] = await store.toolCalls.listByRequest(found.requestId).catch(() => []);
+  const gateRows: HostGateRow[] = toolRows
+    .filter((row) => row.toolName.startsWith('serve_gate:') || row.toolName === 'platform_executor_bypassed')
+    .map((row) => ({
+      requestId: row.requestId,
+      toolName: row.toolName,
+      status: row.status,
+      ...(row.errorCode ? { errorCode: row.errorCode } : {}),
+      ...(typeof row.safeArguments['reason'] === 'string' ? { reason: row.safeArguments['reason'] as string } : {}),
+      ...(typeof row.safeArguments['detail'] === 'string' ? { detail: row.safeArguments['detail'] as string } : {}),
+    }));
+  const runs: TaskRunRecord[] = store.taskRuns
+    ? await store.taskRuns.listBySession(found.principalId, sessionKeyOf(found.principalId)).catch(() => [])
+    : [];
+  const delegations = runs
+    .filter((run) => run.originRequestId === found.requestId)
+    .map((run) => ({
+      taskId: run.taskId,
+      ...(run.runId ? { runId: run.runId } : {}),
+      ...(run.planId ? { planId: run.planId } : {}),
+      ...(run.state ? { state: run.state } : {}),
+      ...(run.deliveryState ? { deliveryState: run.deliveryState } : {}),
+      ...(run.resultHandlingState ? { resultHandlingState: run.resultHandlingState } : {}),
+      hasResultText: typeof run.resultText === 'string' && run.resultText.length > 0,
+    }));
+  return { request, delegations, gateRows };
+}
+
+/**
+ * 主会话键（handler 同款，apps/server/handler.ts：sessionId = `channel:conversationId`）。
+ * 单聊 conversationId == userid，因此 sessionId 与 principalId 同形不同义（不同表不同列）；
+ * 证据链按 principal 反查 run/intent 时用同形键，群聊接入时这里要换成真实 conversation 键。
+ */
+function sessionKeyOf(principalId: string): string {
+  return principalId;
+}
+
+/**
+ * 提案意图事实（verified 档的写路径证据）。AuditStore 的 ChangeIntentRepo 只暴露
+ * pending 查询，完整清单走与 scripts/eval/write-chain.ts 同一条只读 SQL——同一张表、
+ * 同一个键（change_intents.session_id），口径不另起一份。
+ */
+export function collectIntentFacts(db: Database.Database, sessionKey: string): HostIntentFacts[] {
+  let rows: Array<{ intent_id: string; proposal_id: string | null; task_id: string | null; status: string; result: unknown }>;
+  try {
+    rows = db.prepare(
+      'SELECT intent_id, proposal_id, task_id, status, result FROM change_intents WHERE session_id = ? ORDER BY created_at, rowid',
+    ).all(sessionKey) as Array<{ intent_id: string; proposal_id: string | null; task_id: string | null; status: string; result: unknown }>;
+  } catch {
+    // 只读旁路被写方短暂锁住等读失败：意图档缺席（verified 档因此不授予——宁可
+    // INCONCLUSIVE，不造证据），不抛错打断整条链。
+    return [];
+  }
+  return rows.map((row) => ({
+    intentId: row.intent_id,
+    ...(row.proposal_id ? { proposalId: row.proposal_id } : {}),
+    ...(row.task_id ? { taskId: row.task_id } : {}),
+    status: row.status as ChangeIntentRecord['status'],
+    hasReadback: row.result !== null && row.result !== undefined && row.result !== '',
+  }));
+}
+
+// ── 状态阶梯 ──
+
+export type LadderRung = 'authorized' | 'invoked' | 'completed' | 'verified' | 'delivered';
+
+/** 一条平台调用的阶梯判定。rung = 已被证据支撑的最高档；INCONCLUSIVE = 无证据。 */
+export interface CallLadderEntry {
+  /** 操作注册名/脚本名（执行层审计行的 script）。 */
+  script: string;
+  rung: LadderRung | 'INCONCLUSIVE';
+  /** 门拒绝原因（refused 在册时必填）。 */
+  refusedReason?: string;
+  /** 每一档判定的证据出处（人可读；判定独立于 Agent 自述的凭据）。 */
+  basis: string[];
+}
+
+/**
+ * 单条调用的阶梯（机械，纯函数）：
+ *   · 执行层审计行 refused 在册 → 门拒了这次调用：invoked（调到了门）+ 拒绝原因，
+ *     authorized/completed 永不成立——「调用获准」与「实际执行」是两档，被拒行恰恰
+ *     证明前档不成立；
+ *   · 行在册且无 refused → authorized + invoked；exitCode === 0 → completed；
+ *   · verified 只由宿主读回证据授予（change_intents committed 且读回摘要在），执行层
+ *     自己说"成了"不算（判定独立于 Agent/worker 自述）；
+ *   · delivered 由 handler 返回非空授予（消息级，随链上每条调用披露）；
+ *   · 没有任何执行层行（auditPath 未设/空窗口）→ INCONCLUSIVE，不标成功。
+ */
+export function classifyExecutionCall(args: {
+  row: ExecutionAuditRow;
+  readbackVerified: boolean;
+  delivered: boolean;
+}): CallLadderEntry {
+  const { row, readbackVerified, delivered } = args;
+  const script = row.script ?? '(unknown)';
+  if (row.refused) {
+    const basis = [`执行层审计行 refused=${row.refused}`];
+    if (delivered) basis.push('handler 返回了最终回复');
+    return {
+      script,
+      rung: 'invoked',
+      refusedReason: row.refused,
+      basis,
+    };
+  }
+  const basis = ['执行层审计行在册（无 refused）'];
+  let rung: LadderRung = 'invoked';
+  if (row.exitCode === 0) {
+    rung = 'completed';
+    basis.push('exitCode=0');
+  }
+  if (readbackVerified && rung === 'completed') {
+    rung = 'verified';
+    basis.push('宿主 change_intents 读回校验在');
+  }
+  // delivered 只升已完成/已验证的调用：调用失败（exitCode≠0）但 handler 送达了一句
+  // 诚实的失败回复，是"invoked + 用户知情"，不是这条调用 delivered。
+  if (delivered && (rung === 'completed' || rung === 'verified')) {
+    rung = 'delivered';
+    basis.push('handler 返回了最终回复');
+  }
+  return { script, rung, basis };
+}
+
+/**
+ * 一条消息的整体阶梯：链上没有任何执行层证据时 INCONCLUSIVE；有证据取链上最低档
+ * （最弱一环决定整体——有一行只到 invoked，这条消息就到不了 completed）。
+ */
+export function messageLadderRung(entries: readonly CallLadderEntry[]): LadderRung | 'INCONCLUSIVE' {
+  // 零执行层证据 = INCONCLUSIVE（issue 验收标准：无证据不标成功）。
+  if (entries.length === 0) return 'INCONCLUSIVE';
+  // 阶梯从弱到强排序；INCONCLUSIVE 弱于一切（有行缺证据也要看得见）。
+  const order: ReadonlyArray<LadderRung | 'INCONCLUSIVE'> = ['INCONCLUSIVE', 'invoked', 'authorized', 'completed', 'verified', 'delivered'];
+  const rank = (rung: LadderRung | 'INCONCLUSIVE'): number => order.indexOf(rung);
+  let min = order.length - 1;
+  for (const entry of entries) {
+    const value = rank(entry.rung);
+    if (value >= 0 && value < min) min = value;
+  }
+  return order[min]!;
+}
+
+// ── 最小聚合指标 ──
+
+/** issue 验收的最小聚合指标：通过率、干预次数、安全违规、耗时 / Token。 */
+export interface AggregateMetrics {
+  cases: number;
+  passed: number;
+  /** passed / cases（cases=0 时 0，不造 100%）。 */
+  passRate: number;
+  /** 干预次数：挂起等人的停点（pending 确认 + waiting_confirmation/waiting_input run）。 */
+  interventions: number;
+  /** 安全违规：被拒执行层调用 + 宿主门拦截行。 */
+  safetyViolations: number;
+  /** 全部轮次墙钟合计。 */
+  durationMs: number;
+  /** 真实 token 消耗合计（分项缺席时 undefined，不造零）。 */
+  tokens?: number;
+}
+
+/** 聚合输入：每用例一行（通过与否、阶梯、干预停点、耗时、token）。 */
+export interface MetricCaseInput {
+  caseId: string;
+  pass: boolean;
+  /** 该用例的证据链（可空：用例整体没跑起来时也要进聚合）。 */
+  evidence?: MessageEvidenceChain;
+  ladder: ReadonlyArray<CallLadderEntry>;
+  /** 挂起等人的停点（宿主确认门 pending / run waiting_*）。 */
+  interventionPoints: number;
+  durationMs: number;
+  tokens?: number;
+}
+
+export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
+  let passed = 0;
+  let interventions = 0;
+  let safetyViolations = 0;
+  let durationMs = 0;
+  let tokens: number | undefined;
+  for (const item of cases) {
+    if (item.pass) passed += 1;
+    interventions += item.interventionPoints;
+    durationMs += item.durationMs;
+    if (item.tokens !== undefined) tokens = (tokens ?? 0) + item.tokens;
+    for (const entry of item.ladder) {
+      if (entry.refusedReason) safetyViolations += 1;
+    }
+    for (const row of item.evidence?.gateRows ?? []) {
+      if (row.status === 'error') safetyViolations += 1;
+    }
+  }
+  return {
+    cases: cases.length,
+    passed,
+    passRate: cases.length === 0 ? 0 : passed / cases.length,
+    interventions,
+    safetyViolations,
+    durationMs,
+    ...(tokens !== undefined ? { tokens } : {}),
+  };
+}

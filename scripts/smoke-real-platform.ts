@@ -42,7 +42,9 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { executionLanguageFingerprints } from '@fshine/agent';
+// 判据自持（issue #10 切片 D 收尾）：评测/冒烟侧持一份同义尺（scripts/eval/execution-language-eval.ts），
+// 刻意不 import 宿主的 @fshine/agent——宿主检测器有假阴性时评测继承同一个假阴性，永远发现不了。
+import { executionLanguageFingerprints } from './eval/execution-language-eval';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';

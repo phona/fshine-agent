@@ -42,11 +42,19 @@ import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { executionLanguageFingerprints } from '@fshine/agent';
+// 判据自持（issue #10 切片 D 收尾）：评测侧持一份同义尺（scripts/eval/execution-language-eval.ts），
+// 刻意不 import 宿主的 @fshine/agent——宿主检测器有假阴性时评测继承同一个假阴性，永远发现不了。
+import { executionLanguageFingerprints } from './eval/execution-language-eval';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
 import { countDims, dimsSummary, emptyDimCounts, type DimCounts } from './eval/dims';
+// 执行层审计日志读取（issue #10 切片 D：执行证据的唯一采集口，证据形状见 evidence.ts）。
+import { readExecutionAuditLog, type ExecutionAuditRow } from './eval/evidence';
+// 评测安全门（issue #10 验收标准：未指定隔离 mock / 缺 fixture / 执行层状态无法验证时
+// 拒绝跑危险用例，不静默落真实平台）。
+import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
+import { resolveActiveProfileId } from '@fshine/contracts';
 import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 // 金额判据纯核与夹具事实表（2026-11-07 评审 blocking：错误态反例要能进变异测试——
 // 探针顶层跑 main() 无法 import，判定核抽到 scripts/eval/amount-criteria.ts，
@@ -110,8 +118,21 @@ interface Turn {
   reply: string;
   ms: number;
   notices: string[];
-  /** 本轮实际产生的平台调用数（example-gateway plan state 的 actual.calls 增量；隔离状态按用例累计，可逐轮相减）。 */
+  /** 本轮消息 id（探针自造；关联链的起点，宿主库按它反查 requestId）。 */
+  messageId: string;
+  /**
+   * 本轮**已执行**的平台调用数（issue #10 切片 D 换源：执行层审计日志窗口内无 refused
+   * 的行数——原为 example-gateway plan state 的 actual.calls 增量，那是宿主内部状态文件
+   * EXECUTION_PLAN_STATE，评测改读执行层自己落的审计行）。判定函数沿用"已执行"口径不
+   * 变；被拒的行单列 refusedCalls，不丢。
+   */
   calls: number;
+  /** 本轮审计窗口内被执行层门拒绝的调用行数（refused 在册 = 调到了门、未执行）。 */
+  refusedCalls: number;
+  /** 本轮消息的宿主 requestId（宿主库 agent_requests 按 messageId 反查：链上 messageId → requestId 档）。 */
+  requestId?: string;
+  /** 本轮委派的任务 id（delegation_span 按 requestId 关联：链上 taskId/delegationId 档）。 */
+  taskIds: string[];
   group?: boolean;
   /**
    * 本回合真实 token 消耗（纯加法遥测）：main = Main 编排模型（turn_span），worker =
@@ -131,7 +152,24 @@ interface CaseResult {
   group: string;
   intent: string;
   turns: Turn[];
-  ledgerCalls: number;
+  /** 本用例审计窗口内的执行层审计行总数（被拒的行也数——报告口径比 ok 判定更全）。 */
+  platformCalls: number;
+  /** 其中被执行层门拒绝的行数（refused + 原因逐行在 chain 的审计窗口里）。 */
+  refusedCalls: number;
+  /**
+   * 关联 ID 链（issue #10 切片 D）：evalRunId → caseId → messageIds → requestIds →
+   * taskIds → 执行层审计行。全部由持久化 id 逐档反查（messageId → 宿主库 requestId →
+   * 埋点/委派事实），不再用 console.info 日志下标 + 串行窗口归因。
+   */
+  chain: {
+    evalRunId: string;
+    caseId: string;
+    messageIds: string[];
+    requestIds: string[];
+    taskIds: string[];
+    /** 执行层审计日志文件名（证据来源①；宿主审计库与 handler 返回随逐轮 turns 在）。 */
+    auditLog?: string;
+  };
   notes: string[];
   /**
    * 四维可信度机械分量（L7 / D-060）：notes 的归维计数。归维表在 scripts/eval/dims.ts
@@ -175,11 +213,12 @@ class RecordingSdk implements SdkClientLike {
   async replyMedia(): Promise<unknown> { return {}; }
 }
 
-function wecomText(userid: string, content: string): { headers: { req_id: string }; body: Record<string, unknown> } {
-  const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
+/** message id 探针自己造并记住（宿主库 agent_requests 按 messageId 反查 requestId 的关联键）。 */
+function wecomText(userid: string, content: string, messageId: string = `msg_${Math.random().toString(36).slice(2, 10)}`): { headers: { req_id: string }; body: Record<string, unknown>; messageId: string } {
   return {
     headers: { req_id: `req_${messageId}` },
     body: { msgtype: 'text', from: { userid }, msgid: messageId, chattype: 'single', text: { content } },
+    messageId,
   };
 }
 
@@ -199,10 +238,11 @@ let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
 // 拦截 console.info 里 event 为 turn_span / delegation_span / aux_model_usage 的 JSON 行，
-// 其余原样透传（探针进程的日志行为不变）。归属判据：探针的 send 严格串行（等最终回复帧
-// 才发下一条），而 turn_span/delegation_span 在 handleTurn 返回前同步落账、先于回复帧，
-// 所以"本条 send 起点之后的埋点行"就是本回合的——按缓冲区下标切片即可，不需要 requestId
-// 关联（handler 自造 requestId，与企微 req_id 不同源，关联不上）。
+// 其余原样透传（探针进程的日志行为不变）。**归属判据（issue #10 目标 5 改定）**：不再
+// 按"本条 send 起点之后的埋点行"缓冲区下标切片——串行窗口在并发与后台完成时会错；
+// turn_span/delegation_span 都带 requestId，探针经宿主库 agent_requests 按 messageId
+// 反查 requestId 后按 id 关联（breakdownForRequest / taskIdsForRequest）。缓冲区下标
+// 只剩一个用途：aux_model_usage 的用例级汇总（该事件无可关联 id，见 breakdownSince）。
 type TelemetryEvent = Record<string, unknown>;
 const telemetryEvents: TelemetryEvent[] = [];
 const TELEMETRY_EVENT_NAMES = new Set(['turn_span', 'delegation_span', 'aux_model_usage']);
@@ -252,7 +292,36 @@ function addBreakdown(a: UsageBreakdown | null, b: UsageBreakdown | null): Usage
   };
 }
 
-/** 自 mark 起的埋点行里，按事件名求和出的 token 分项（无证据返回 null）。 */
+/**
+ * 按 requestId 关联的埋点行求和（issue #10 目标 5：埋点归属从「console.info 日志下标 +
+ * 串行窗口」改成持久化 id 关联——并发与后台完成时下标法会错）。宿主 runtime/context 的
+ * turn_span / delegation_span 都带 requestId（runtime.ts / context.ts 落账点），探针经
+ * 宿主库 agent_requests 按 messageId 反查后按 id 取本回合的行。无证据返回 null。
+ */
+function breakdownForRequest(requestId: string, eventName: string): UsageBreakdown | null {
+  let total: UsageBreakdown | null = null;
+  for (const event of telemetryEvents) {
+    if (event['event'] !== eventName || event['requestId'] !== requestId) continue;
+    total = addBreakdown(total, usageBreakdownOf(event));
+  }
+  return total;
+}
+
+/** 该 requestId 名下的委派任务 id（delegation_span 的 taskId；taskId/delegationId 关联档）。 */
+function taskIdsForRequest(requestId: string): string[] {
+  const ids = new Set<string>();
+  for (const event of telemetryEvents) {
+    if (event['event'] !== 'delegation_span' || event['requestId'] !== requestId) continue;
+    if (typeof event['taskId'] === 'string') ids.add(event['taskId']);
+  }
+  return [...ids];
+}
+
+/**
+ * 自 mark 起的埋点行里按事件名求和（仅 aux_model_usage 用：该事件不携带 requestId——
+ * context/记忆抽取是回合后的异步落账，宿主埋点没有可关联 id，逐轮归属本来就不可靠，
+ * 只做用例级全局汇总；main/worker 的逐轮归属已改走 breakdownForRequest 的 id 关联）。
+ */
 function breakdownSince(mark: number, eventName: string): UsageBreakdown | null {
   let total: UsageBreakdown | null = null;
   for (const event of telemetryEvents.slice(mark)) {
@@ -287,15 +356,15 @@ function restorePlatformState(): void {
   }
 }
 
-function ledgerCalls(): number {
-  const file = process.env['EXECUTION_PLAN_STATE'];
-  if (!file || !existsSync(file)) return 0;
-  try {
-    const state = JSON.parse(readFileSync(file, 'utf8')) as { tasks?: Record<string, { actual?: { calls?: number } }>; plans?: Record<string, { actual?: { calls?: number } }> };
-    const taskCalls = Object.values(state.tasks ?? {}).reduce((sum, task) => sum + (task.actual?.calls ?? 0), 0);
-    const planCalls = Object.values(state.plans ?? {}).reduce((sum, plan) => sum + (plan.actual?.calls ?? 0), 0);
-    return taskCalls + planCalls;
-  } catch { return 0; }
+/**
+ * 执行层审计日志行（issue #10 切片 D 的执行证据唯一采集口）。不再读 EXECUTION_PLAN_STATE
+ * 的 actual.calls 账本——那是宿主不可观测的内部状态文件，评测改数执行层自己落的审计行
+ * （EXECUTION_AUDIT_PATH：mode/script/args/serve/refused/exitCode）。同一捕获窗口内被拒
+ * 的行也数：它信息更多，能分「调用了」和「被拒+原因」。
+ * 返回 null = 审计路径未设/读失败：证据缺席（判定往 INCONCLUSIVE 方向收），不得当零调用。
+ */
+function executionAuditRows(): ExecutionAuditRow[] | null {
+  return readExecutionAuditLog(process.env['EXECUTION_AUDIT_PATH']);
 }
 
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
@@ -329,24 +398,40 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
     assembly,
     send: async (text: string): Promise<Turn> => {
       const before = sdk.frames.filter((frame) => frame.finish).length;
-      const callsBefore = ledgerCalls();
-      // 埋点切片起点：send 起点之后的 turn_span/delegation_span 都归属本回合（串行保证）。
-      const telemetryMark = telemetryEvents.length;
+      // 执行层审计窗口游标（采集边界，不是归因依据）：窗口圈住这条消息的 handler 调用；
+      // 链上归因按持久化 id（messageId → requestId → taskId）。每用例一个隔离审计文件，
+      // 游标 = 窗口前的行数。
+      const auditBefore = executionAuditRows()?.length ?? 0;
+      // message id 探针自己造并记住：宿主库 agent_requests 按 messageId 反查 requestId。
+      const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
       const startedAt = Date.now();
-      sdk.emit('message.text', wecomText(principalUser, text));
+      sdk.emit('message.text', wecomText(principalUser, text, messageId));
       const deadline = Date.now() + PROBE_REPLY_WAIT_MS;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
         if (finals.length > before) {
+          // 关联链（持久化 id 逐档反查，断链如实缺席）：messageId → 宿主库 requestId →
+          // 该请求名下的埋点行与委派任务。不再按埋点缓冲区下标归属。
+          const request = await assembly.store.requests.findByWecomMessageId(messageId).catch(() => null);
+          const requestId = request?.requestId;
+          const taskIds = requestId ? taskIdsForRequest(requestId) : [];
           // token 分项（纯加法遥测）：无 usage 证据时分项缺席，不编零。
-          const main = breakdownSince(telemetryMark, 'turn_span');
-          const worker = breakdownSince(telemetryMark, 'delegation_span');
+          const main = requestId ? breakdownForRequest(requestId, 'turn_span') : null;
+          const worker = requestId ? breakdownForRequest(requestId, 'delegation_span') : null;
+          // 执行层审计窗口行：calls = 已执行（无 refused）行数——判定函数沿用"已执行"
+          // 口径不变；被拒行单列 refusedCalls（调到了门、带着原因）。
+          const rowsAfter = executionAuditRows();
+          const windowRows: ExecutionAuditRow[] = rowsAfter === null ? [] : rowsAfter.slice(auditBefore);
           return {
             text,
             reply: finals.at(-1)!.content,
             ms: Date.now() - startedAt,
+            messageId,
             notices: sdk.frames.filter((frame) => !frame.finish && frame.content.startsWith('计划通知：')).map((frame) => frame.content),
-            calls: ledgerCalls() - callsBefore,
+            calls: windowRows.filter((row) => !row.refused).length,
+            refusedCalls: windowRows.filter((row) => row.refused).length,
+            ...(requestId ? { requestId } : {}),
+            taskIds,
             ...((main || worker) ? { tokens: { ...(main ? { main } : {}), ...(worker ? { worker } : {}) } } : {}),
           };
         }
@@ -1540,7 +1625,10 @@ const CASES: Case[] = [
       for (let i = 0; i < 5; i += 1) turns.push(await send('check alpha collection W1 record value'));
       await assembly.close();
       const notes: string[] = [];
-      const calls = ledgerCalls();
+      // 判据口径保持"已执行"（issue #10 切片 D 换源不换义）：calls 现在取执行层审计行里
+      // 无 refused 的行数（原为 EXECUTION_PLAN_STATE 的 actual.calls——宿主内部状态文件，
+      // 评测不再读）。被拒的行单列 refusedCalls，不并入"真查"。
+      const calls = turns.reduce((sum, turn) => sum + turn.calls, 0);
       if (calls < 5) notes.push(`5 轮只产生 ${calls} 次平台调用——有轮次没真查`);
       // 每轮真查是直接判据（2026-10-16 标定）：总调用数 ≥5 会被"有的轮查多次、有的轮零查"
       // 抵消——首跑轮① calls 总数恰为 5，但第 3/5 轮零调用，回复却声称"已经过本轮实时查询
@@ -2538,22 +2626,61 @@ async function main(): Promise<void> {
     : CASES;
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-probe-'));
   savedEnv = { ...process.env };
+  // 关联链的 run id（报告文件名同源，台账/基线引用可对上）。
+  const evalRunId = `probe-${path.basename(stateDir)}`;
+
+  // ── 评测安全门（issue #10 验收标准，fail-closed）：先隔离执行层状态面，再验
+  // 夹具与审计通道。未指定隔离 mock / 缺 fixture / 执行层状态无法验证 = 拒跑（exit 2），
+  // 不静默落真实平台。宿主不再持写门不改变这一条：宿主管生产写（执行层的事），
+  // 评测管住自己别打到真平台。
+  const yamlPath = resolveConfigPath(explicitConfigFrom());
+  // assembly 的 loadConfig 读 AGENT_CONFIG_PATH 环境变量；设为同一路径后，探针派生的
+  // principalUser 与 assembly 看到的配置完全同源（boot 内的同一段解析自此读到同一份）。
+  process.env.AGENT_CONFIG_PATH = yamlPath;
+  isolatePlatformState();
+  try {
+    const gateConfig = loadConfig({ env: process.env, yamlPath });
+    const gateProfile = gateConfig.contextProfiles[resolveActiveProfileId(gateConfig.contextProfiles) ?? ''];
+    assertEvalIsolation(assessEvalIsolation({
+      env: process.env,
+      ...(gateProfile?.root ? { platformRoot: gateProfile.root } : {}),
+      ...(gateProfile?.gateway ? { gateway: gateProfile.gateway } : {}),
+    }), `真实模型探针（evalRunId=${evalRunId}）`);
+  } catch (error) {
+    restorePlatformState();
+    process.env = savedEnv;
+    rmSync(stateDir, { recursive: true, force: true });
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(2);
+  }
 
   const results: CaseResult[] = [];
   for (const item of selected) {
     console.log(`\n=== ${item.id} ${item.intent} ===`);
-    const before = ledgerCalls();
+    const auditBefore = executionAuditRows()?.length ?? 0;
     // 用例级 aux 捕获窗口（caseTokensOf）：从用例开始前的缓冲区下标切到用例结束。
     const caseMark = telemetryEvents.length;
     try {
       const { turns, notes = [] } = await item.run();
-      const after = ledgerCalls();
+      const auditRowsAfter = executionAuditRows();
+      const caseRows: ExecutionAuditRow[] = auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore);
       // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
       const ok = notes.every((note) => note.startsWith('（信息性）'));
       const counted = countDims(notes);
       const tokens = caseTokensOf(turns, caseMark);
       results.push({
-        id: item.id, group: item.group, intent: item.intent, turns, ledgerCalls: after - before, notes,
+        id: item.id, group: item.group, intent: item.intent, turns,
+        platformCalls: caseRows.length,
+        refusedCalls: caseRows.filter((row) => row.refused).length,
+        chain: {
+          evalRunId,
+          caseId: item.id,
+          messageIds: turns.map((turn) => turn.messageId),
+          requestIds: [...new Set(turns.map((turn) => turn.requestId).filter((v): v is string => typeof v === 'string'))],
+          taskIds: [...new Set(turns.flatMap((turn) => turn.taskIds))],
+          ...(process.env['EXECUTION_AUDIT_PATH'] ? { auditLog: path.basename(process.env['EXECUTION_AUDIT_PATH']!) } : {}),
+        },
+        notes,
         dims: counted.dims, unclassifiedNotes: counted.unclassified,
         ...(tokens ? { tokens } : {}),
         ok,
@@ -2563,11 +2690,14 @@ async function main(): Promise<void> {
         console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);
         if (turn.notices.length) console.log(`         通知: ${turn.notices.join(' | ')}`);
       }
-      console.log(`  平台调用: ${after - before}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
+      const refused = caseRows.filter((row) => row.refused).length;
+      console.log(`  平台调用: ${caseRows.length}${refused ? `（其中被拒 ${refused}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
     } catch (error) {
       results.push({
         id: item.id, group: item.group, intent: item.intent, turns: [],
-        ledgerCalls: 0, notes: [error instanceof Error ? error.message : String(error)],
+        platformCalls: 0, refusedCalls: 0,
+        chain: { evalRunId, caseId: item.id, messageIds: [], requestIds: [], taskIds: [] },
+        notes: [error instanceof Error ? error.message : String(error)],
         dims: emptyDimCounts(), unclassifiedNotes: 0, ok: false,
       });
       console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
@@ -2593,7 +2723,8 @@ async function main(): Promise<void> {
       // token 概览（纯加法遥测）：只报 main+worker 的合计；aux 明细看 json。没证据不打印。
       const tokenTotal = (result.tokens?.main?.total ?? 0) + (result.tokens?.worker?.total ?? 0);
       const tokenNote = tokenTotal > 0 ? ` tokens ${tokenTotal}` : '';
-      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.ledgerCalls}${tokenNote} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
+      const refusedNote = result.refusedCalls > 0 ? `（被拒 ${result.refusedCalls}）` : '';
+      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.platformCalls}${refusedNote}${tokenNote} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
     }
   }
   const bad = results.filter((result) => !result.ok);
