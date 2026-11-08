@@ -280,12 +280,29 @@ export function hasShellMetachars(command: string): boolean {
  * 误拒**；名称含空格时更被拆成多个参数。覆盖判据要与"实际 shell 看到的参数"一致，分词器就
  * 必须和 shell 一致，否则判据比的是另一回事。
  */
+/**
+ * 只剥** Bash 词法空白**（空格/制表符/换行），不动 Unicode 空白与控制字符。
+ *
+ * 2026-11-09 十六审 blocking：`String.trim()` 用的是 Unicode 空白定义，会把尾部的
+ * U+00A0、U+3000、\r 一起剥掉——而 Bash 把它们保留在参数里。计划批准 `--target alpha`
+ * 时，实际传入 `alpha\u00a0`（另一个目标）会被判成覆盖。判据必须与 Bash 看到的一致，
+ * 预处理就不能比 Bash 多删字符。
+ */
+function trimShellWhitespace(command: string): string {
+  let start = 0;
+  let end = command.length;
+  const isSep = (ch: string): boolean => ch === ' ' || ch === '\t' || ch === '\n';
+  while (start < end && isSep(command[start]!)) start += 1;
+  while (end > start && isSep(command[end - 1]!)) end -= 1;
+  return command.slice(start, end);
+}
+
 export function splitCommandTokens(command: string): string[] {
   const tokens: string[] = [];
   let current = '';
   let started = false;
   let quote: '"' | "'" | null = null;
-  const src = command.trim();
+  const src = trimShellWhitespace(command);
   // 双引号内**只有** $ ` " \ 换行 五个字符前的反斜杠是转义序列，其余位置反斜杠
   // **字面保留**（POSIX/Bash 语义）。旧写法在双引号内无条件吞反斜杠：`"\alpha"` 被解析成
   // alpha，而 Bash 实际传入 `\alpha`——计划批准 --collection alpha 时，覆盖判据会放行
@@ -1082,7 +1099,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
     let progress: { label: string; keyArgs: string[] } | undefined;
 
     if (name === 'bash') {
-      const command = String(args['command'] ?? '').trim();
+      // 预 trim 同样只剥 Bash 词法空白（十六审 blocking）：用 String.trim() 会把尾部的
+      // Unicode 空白/回车删掉，之后所有判据都比 Bash 少看见一些字符。
+      const command = trimShellWhitespace(String(args['command'] ?? ''));
       detail = command;
       invocation = gateInvocationKind(command, gateway);
       // 元数据查询先行（且必须排在 plan 教学分支之前）：

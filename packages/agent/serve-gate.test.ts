@@ -1460,3 +1460,30 @@ describe('splitCommandTokens：只认 Bash 真正当分隔符的空白（十四�
     expect(call('bin/example-gateway commit domain.write --target alpha\u00a0beta')?.block).toBe(true);
   });
 });
+
+describe('预处理只剥 Bash 词法空白（十六审 blocking）', () => {
+  it('命令尾部的 Unicode 空白/回车不被剥掉', () => {
+    // 复现缺陷：String.trim() 按 Unicode 空白定义剥字符，会把尾部的 U+00A0、\r 一起删掉，
+    // 而 Bash 把它们保留在参数里。计划批准 --target alpha 时，实际传入 alpha<NBSP>
+    // （另一个目标）会被判成覆盖。
+    expect(splitCommandTokens('g commit w --target alpha\u00a0')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u00a0']);
+    expect(splitCommandTokens('g commit w --target alpha\r')).toEqual(['g', 'commit', 'w', '--target', 'alpha\r']);
+  });
+
+  it('命令首尾的 Bash 空白仍照常剥掉', () => {
+    expect(splitCommandTokens('  g commit w --target alpha  ')).toEqual(['g', 'commit', 'w', '--target', 'alpha']);
+  });
+
+  it('覆盖判据层面：计划 --target alpha 不允许 alpha<NBSP>', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]),
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    const call = (command: string) => gate({ name: 'bash', arguments: { command } });
+    expect(call('bin/example-gateway commit domain.write --target alpha')?.block).toBeUndefined();
+    expect(call('bin/example-gateway commit domain.write --target alpha\u00a0')?.block).toBe(true);
+    expect(call('bin/example-gateway commit domain.write --target alpha\r')?.block).toBe(true);
+  });
+});
