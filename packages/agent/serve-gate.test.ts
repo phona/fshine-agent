@@ -1487,3 +1487,73 @@ describe('预处理只剥 Bash 词法空白（十六审 blocking）', () => {
     expect(call('bin/example-gateway commit domain.write --target alpha\r')?.block).toBe(true);
   });
 });
+
+describe('布尔开关不吞后续 flag（十七审 major）', () => {
+  const SPECS: OperationArgsSpecs = new Map([
+    // --dry-run 是布尔开关（none 不入 flagStyles）；--target 是带值 flag
+    ['domain.write', { positionalNames: [], flagStyles: new Map([['--target', 'name']]) }],
+    ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map([['--window', 'code']]) }],
+  ]);
+  const sem = (op: string) => new Map([[op, { plan: true, confirm: true }]]) as OperationSemantics;
+
+  it('bash 侧：计划 --dry-run --target alpha，调用同形 ⇒ 覆盖', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    // 复现缺陷：--dry-run 把 --target 当取值吞掉 ⇒ alpha 被误提成位置参数 ⇒ 该操作没有
+    // 位置参数声明 ⇒ 判未覆盖，合法调用被拒。
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target alpha' } })?.block).toBeUndefined();
+  });
+
+  it('结构化侧：同形调用同样覆盖（结构化按声明名取值，不经分词）', () => {
+    // 结构化调用的 args 是对象、按 positionalNames 逐项取值，本来就不受"开关吞 flag"影响；
+    // 这条钉住的是**两侧结论一致**——同一个计划步，bash 与 structured_call 都给"覆盖"。
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }] as readonly PlanCall[],
+    };
+    expect(structuredPlanGateVerdict('domain.write', { target: 'alpha' }, ctx)?.block).toBeUndefined();
+  });
+
+  it('计划步里开关不吞 flag：--dry-run --target alpha 只提出一个位置参数', () => {
+    // 复现缺陷：旧写法 positionalsOf 无条件跳下一项，--dry-run 把 --target 当取值吞掉，
+    // alpha 被误提成位置参数；而该操作没声明位置参数 ⇒ 判未覆盖，合法调用被拒。
+    // 修后 --dry-run 不吞，--target 带值跳过，只提出 alpha（一个位置参数）。
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target alpha' } })?.block).toBeUndefined();
+  });
+
+  it('目标不同仍要拒（修开关误吞没有放松范围）', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target beta' } })?.block).toBe(true);
+  });
+
+  it('位置参数声明 + 布尔开关并存：位置参数仍逐位比对', () => {
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: sem('ledger.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1', '--window', 'W2'] }] as readonly PlanCall[],
+    };
+    expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1', window: 'W2' }, ctx)?.block).toBeUndefined();
+    expect(structuredPlanGateVerdict('ledger.write', { account: 'beta', period: 'W1', window: 'W2' }, ctx)?.block).toBe(true);
+  });
+});

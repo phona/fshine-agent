@@ -41,7 +41,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
-import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyle, type KeyArgStyles, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 import { hasServerPath } from './server-paths';
 import type { PlanCall } from './plan-runtime';
@@ -889,17 +889,45 @@ function positionalNamesFor(reference: string | null, specs: OperationArgsSpecs 
   return undefined;
 }
 
-function positionalsOf(tokens: readonly string[]): string[] {
+/**
+ * token 串 → 位置参数表。
+ *
+ * 三处判据都与 Bash 实际所见一致：
+ *   ① 只有**真的是 flag**（以 -- 开头）才可能连取值一起跳过；空串是空的位置参数，
+ *      是合法的通用接口形态（前置位留空 + 后续位带目标）——旧写法把它当 flag 会把后面
+ *      的目标一起吞掉（十二审 blocking）；
+ *   ② **布尔开关不吞下一项**（十七审 major）：`--dry-run --target alpha` 里的
+ *      --dry-run 是开关、--target 才是带值 flag，旧写法无条件跳下一项会把 --target
+ *      当成 --dry-run 的取值，于是 alpha 被误提成位置参数；
+ *   ③ 开关/带值由执行层的 flagStyles 判定（只收 name/code 两种有取值的，布尔 none 不
+ *      入表）——拿不到规格时不猜：保守地当作**带值**（宁可少提位置参数，也不把开关后面
+ *      的 flag 吞掉）。
+ */
+/**
+ * 该 operation 声明了哪些 flag 是**带值**的（布尔开关不在表里）。拿不到返回 undefined，
+ * 调用方按"保守当作带值"处理——宁可少提位置参数，也不把开关后面的 flag 吞掉。
+ */
+function flagStylesFor(reference: string | null, specs: OperationArgsSpecs | undefined): ReadonlyMap<string, KeyArgStyle> | undefined {
+  if (!reference || !specs || specs.size === 0) return undefined;
+  const direct = specs.get(reference);
+  if (direct) return direct.flagStyles;
+  const parts = scriptPathParts(reference);
+  if (!parts) return undefined;
+  const prefix = `${parts.domain}.`;
+  for (const [name, spec] of specs) {
+    if (name.startsWith(prefix) && name.slice(prefix.length) === parts.file) return spec.flagStyles;
+  }
+  return undefined;
+}
+
+function positionalsOf(tokens: readonly string[], flagStyles?: ReadonlyMap<string, KeyArgStyle>): string[] {
   const out: string[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index] ?? '';
-    // 只有**真的是 flag**（以 -- 开头）才连它的取值一起跳过。空串是空的位置参数、
-    // 是合法的通用接口形态（前置位留空 + 后续位带目标），旧写法把它当 flag 处理会把后面
-    // 的目标参数一起吞掉——于是 ['', 'alpha'] 与 ['', 'beta'] 都解析成 []，覆盖检查
-    // 直接放行任意目标（十二审 blocking）。
     if (token.startsWith('--')) {
       if (token.includes('=')) continue;                // --flag=值：单个 token
-      index += 1;                                        // --flag 值：跳过取值
+      if (flagStyles && !flagStyles.has(token)) continue;   // 布尔开关：不吞下一项
+      index += 1;                                        // 带值 flag：跳过取值
       continue;
     }
     out.push(token);
@@ -925,6 +953,7 @@ function coversPlanStep(
   gotKeyArgs: ReadonlyMap<string, string>,
   gotPositionals: ReadonlyArray<string | undefined>,
   positionalNames: readonly string[] | undefined,
+  flagStyles?: ReadonlyMap<string, KeyArgStyle>,
 ): boolean {
   if (!sameOperation(step.operation, reference)) return false;
   const stepTokens = step.args.map((value) => (typeof value === 'string' ? value : String(value)));
@@ -934,7 +963,10 @@ function coversPlanStep(
   }
   // 位置参数：执行层声明了才有判据（declared positional names）；声明缺失而计划步又带了
   // 位置参数 ⇒ 无法证明范围一致 ⇒ 不覆盖。空声明 + 空位置参数 = 该步只按 operation 约束。
-  const wantedPositionals = positionalsOf(stepTokens);
+  // 计划步与调用侧用**同一套** flagStyles 提位置参数（十七审 major）：只有一侧区分布尔
+  // 开关，计划写 `--dry-run --target alpha` 而结构化调用只给这两个 flag 时，两侧提出的
+  // 位置参数不一致，合法调用会被判未覆盖。
+  const wantedPositionals = positionalsOf(stepTokens, flagStyles);
   if (wantedPositionals.length === 0) return true;
   if (positionalNames === undefined || positionalNames.length === 0) return false;
   for (let index = 0; index < wantedPositionals.length; index += 1) {
@@ -967,7 +999,8 @@ function planGateVerdict(
   // 命令里的位置参数要去掉"网关词 + 子命令 + operation 引用"这三段，剩下的才是目标参数
   // （`bin/<gw> prepare dummy.proposal tmp/task_x/payload.json` → ['tmp/task_x/payload.json']）。
   const headLength = reference === null ? 0 : tokens.indexOf(reference) + 1;
-  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens), positionalsOf(tokens.slice(headLength)), positionalNamesFor(reference, ctx.operationArgsSpecs), ctx);
+  const specs = ctx.operationArgsSpecs;
+  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens), positionalsOf(tokens.slice(headLength), flagStylesFor(reference, specs)), positionalNamesFor(reference, specs), ctx);
 }
 
 /**
@@ -1003,7 +1036,7 @@ function planCoverageVerdict(
   // 读与未登记形态：只要有激活计划（探索性查询不锁死；未知 op 按既有防线只要求有计划）
   if (tier !== 'write') return undefined;
   const steps = ctx.activePlanCalls?.();
-  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames))) return undefined;
+  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames, ctx.operationArgsSpecs ? flagStylesFor(reference, ctx.operationArgsSpecs) : undefined))) return undefined;
   // 措辞收口在 error-codes.ts（SERVE_PLAN_NOT_ACTIVE 一字不差地复用），这里只追加**数据**：
   // 被拒的是哪个 operation——没有它，worker 不知道该把哪个调用补进计划，只能整份重提。
   // 点名用语义表里的注册名（`voucher.fill`），不拿命令里的脚本路径顶替（消息纪律：脚本名/
