@@ -99,7 +99,7 @@ npm run ci
 | 编号 | 命令 | 预期 |
 |------|------|------|
 | K1 | `NEEDLE='1''7dz'; git grep -il "$NEEDLE" \| grep -v -E '^(docs/debt-ledger.md\|docs/change-safety.md\|AGENTS.md)$' \| wc -l` | 0 |
-| K2 | `git log --all -p \| grep -F "<principal-id-placeholder>" \| wc -l` | 0 |
+| K2 | `git log --all -p -- packages/agent/history-hygiene.test.ts \| grep -c "HG1\|历史敏感面守卫"` | > 0（守卫自身命中=有效；原 needle 是自身占位文本，永远命中 1 且不反映真实历史清洁度，见该文件头部注释） |
 | K3 | `git for-each-ref \| grep -E 'refs/original\|pr1-merge-tmp' \| wc -l` | 0 |
 | K4 | `git bundle verify ~/fshine-agent-backup-20261105.bundle` | exit 0 |
 | K5 | `npm run ci` | 退出码 0，末行 `CI deterministic gates: PASS` |

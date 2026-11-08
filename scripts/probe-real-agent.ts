@@ -12,12 +12,12 @@
  * 压过 --env-file（Node 不覆盖已存在变量），静默用到 harness 的模型而不是 .env 的。
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
  *
- * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
+ * --quick 只跑 A1/A2/A4 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及declaration/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
  * C2/E/F/G/H/X/Y 是重场景（30 轮超长会话、多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only C2 / --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
  *
  * 用例分组：
- *   A 说胡话（A1–A5）：重放历史、范围渗入、歧义澄清、闲聊不委派。
+ *   A 说胡话（A1–A4）：重放历史、范围渗入、歧义澄清、闲聊不委派。
  *   B 稳定性（B1/B2）：连发重查口径一致、window口径体现在回复。
  *   C 长会话（C1/C2）：20/30 轮混合对话的漂移、变慢与旧范围渗入；C2 在 C1 形态上加码——4 个 mock collection轮转、查询↔闲聊话题切换、两次歧义澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩。
  *   D 长任务（D1/D2）：跨月查询先通知、高重量任务停在确认门。
@@ -1520,17 +1520,6 @@ const CASES: Case[] = [
     },
   },
   {
-    id: 'A5', group: 'A 说胡话', intent: '闲聊不委派平台',
-    run: async () => {
-      const { send, assembly } = await boot();
-      const turns: Turn[] = [await send('现在几month了？')];
-      await assembly.close();
-      const notes: string[] = [];
-      if (ledgerCalls() > 0) notes.push('闲聊也产生了平台调用');
-      return { turns, notes };
-    },
-  },
-  {
     id: 'B1', group: 'B 稳定性', intent: '同一查询连发 5 次，每次都真查且口径一致',
     run: async () => {
       const { send, assembly } = await boot();
@@ -1626,7 +1615,7 @@ const CASES: Case[] = [
     //   ① mock collection轮转（alpha / contoso-trade / contoso-logistics / fabrikam-retail /
     //      fabrikam-wholesale 五个 + not_found 的 gamma-collection）——线程隔离的量纲比 C1 的
     //      两个collection大一倍，金额归因走 amountNote 的 tasks 维度；
-    //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用（A5 同款），也不得
+    //   ② 查询↔闲聊话题切换 4 次（第 5/10/18/23 轮）——闲聊轮不得产生调用，也不得
     //      把查询线程的结论当闲聊内容倒出来；
     //   ③ 两次歧义澄清-选择，线程结构与移植前原版同构：第一次歧义（"contoso"→contoso-trade /
     //      contoso-logistics）就是 B/C 两个线程——澄清后选中的 contoso-trade 续查、跨轮召回、
@@ -1707,7 +1696,7 @@ const CASES: Case[] = [
       // ── 设计指标自证（静态）+ 运行时形态（轮转/切换真发生了才算）──
       notes.push(...c2DesignNotes({ script, chitchat: C2_CHITCHAT, clarify: C2_CLARIFY, select: C2_SELECT, recall: C2_RECALL, notFound: C2_NOT_FOUND, summary: C2_SUMMARY }));
       notes.push(...c2RunNotes(turns, C2_CHITCHAT, C2_SUMMARY));
-      // ── 闲聊轮：零调用 + 不空转（A5/F1 同款）──
+      // ── 闲聊轮：零调用 + 不空转（F1 同款）──
       for (const i of C2_CHITCHAT) {
         if (turns[i]!.calls > 0) notes.push(`闲聊轮产生了平台调用：第${i + 1}轮「${turns[i]!.text}」`);
       }
@@ -2502,8 +2491,8 @@ const CASES: Case[] = [
   },
 ];
 
-/** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
-const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
+/** 日常快速子集：说胡话主线（A1/A2/A4）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
+const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'B1']);
 
 /** 用例级 token 汇总：main/worker 逐轮求和；aux 按 kind 用全局捕获求和（异步落账逐轮归属不可靠）。 */
 function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | undefined {

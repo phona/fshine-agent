@@ -18,7 +18,7 @@
  * 两份都是**只读消费**——宿主不镜像 flag 名单，平台加了 flag 这边自动看得见。
  *
  * access 语义同理（本模块的第三份只读消费）：`--json` 的顶层 `accessSemantics`
- * 表声明每个 access 取值的 plan/confirm/mock 三列，宿主据此判"这个调用要不要
+ * 表声明每个 access 取值的 plan/confirm 两列，宿主据此判"这个调用要不要
  * 用户确认"（= 是不是写）。语义只活在平台的那张表里，宿主一个字节都不猜——
  * 拿不到表就什么都不算写（fail-closed，与 label/规格缺失同族的安全缺省）。
  *
@@ -301,18 +301,16 @@ export function loadOperationArgSpecs(platformRoot?: string, gateway?: string): 
 /**
  * 平台 access 语义（`operation list --json` 顶层 `accessSemantics` 表的一行，数据不是逻辑）：
  *   · plan    要不要过计划门（进计划、被记账）；
- *   · confirm 要不要用户确认（确认码 + commit token）——**是不是写**的唯一判据；
- *   · mock    联调时执行器替身换不换掉。
+ *   · confirm 要不要用户确认（确认码 + commit token）——**是不是写**的唯一判据。
  *
  * 为什么宿主不再自己认 access 取值：语义只活在平台的这张表里。宿主曾用
  * `access.startsWith('write')` 判写家族——平台加一个同族取值（如批量写）就静默
  * 算写，而"要不要用户确认"这件事只有平台说了算。现在判据只有一列：confirm。
- * 三列缺一项/不是布尔一律按 false（宁缺勿猜：判据不成立时绝不放大权限）。
+ * 两列缺一项/不是布尔一律按 false（宁缺勿猜：判据不成立时绝不放大权限）。
  */
 export interface AccessSemantics {
   plan: boolean;
   confirm: boolean;
-  mock: boolean;
 }
 
 /** operation 注册名（也收 command 裸名）→ 平台声明的 access 语义。 */
@@ -338,7 +336,7 @@ export function parseAccessSemantics(stdout: string): AccessSemanticsTable {
   for (const [access, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!access || !value || typeof value !== 'object' || Array.isArray(value)) continue;
     const row = value as Record<string, unknown>;
-    table.set(access, { plan: row.plan === true, confirm: row.confirm === true, mock: row.mock === true });
+    table.set(access, { plan: row.plan === true, confirm: row.confirm === true });
   }
   return table;
 }
@@ -348,7 +346,7 @@ export function parseAccessSemantics(stdout: string): AccessSemanticsTable {
  *
  * 两个平台数据面的机械连接，没有一步是宿主判断：
  *   ① operation 的 `access` 列（连接键，平台清单权威字段）；
- *   ② 顶层 `accessSemantics` 表（access → plan/confirm/mock）。
+ *   ② 顶层 `accessSemantics` 表（access → plan/confirm）。
  * 键同时收注册名（voucher.prepare）与 command 裸名（prepare）——与规格表同口径。
  * access 缺失 / 语义表里查不到该 access（旧版平台、平台未登记）→ 该 operation
  * 不进表：它不参与写类判定（宁缺勿猜），平台门禁与提案路径的既有拒绝照旧兜底。
