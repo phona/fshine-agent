@@ -360,6 +360,14 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
+  // 执行审计（2026-11-08 修）：夹具 auditFile 缺省 null（dummy.cjs statePaths 的 env2
+  // fallback），不设 EXECUTION_AUDIT_PATH 时写链整条跑下来没有任何执行层审计痕迹，
+  // 提案失败原因（拒绝行/退出码只落在审计文件里）不可诊。参考 probe-real-agent.ts
+  // isolatePlatformState 的 per-case 隔离做法；验收是单次运行，一个路径即可。runId
+  // 精度是分钟，同分钟重跑会撞同一路径——先清掉，保证该文件只含本次运行的证据。
+  const auditPath = path.join(dataDir, `acceptance-audit-${runId}.jsonl`);
+  rmSync(auditPath, { force: true });
+  process.env.EXECUTION_AUDIT_PATH = auditPath;
   // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
   // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
   // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。
@@ -587,11 +595,15 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
       '',
     ]),
     // 写链指标节（L7）：有信号的会话 + 写意图会话（判据见上方 writeChainReported）。
-    ...(writeChainReported.length ? ['## 写链指标', '', ...writeChainReported.map(renderWriteChainLine), ''] : []),
+    // 节首带本次运行的执行层审计文件路径（EXECUTION_AUDIT_PATH）：提案提交失败的原因
+    // 只落在那个 JSONL 里（拒绝行含 refused 原因与退出码），报告指标对不上时按它核对。
+    ...(writeChainReported.length ? ['## 写链指标', '', `- 执行审计:${auditPath}`, ...writeChainReported.map(renderWriteChainLine), ''] : []),
   ].join('\n'));
   // JSON 顶层形状（L7 起）：{ records, writeChain }——writeChain 是打分器对 baseline
-  // 比对的取数面（此前顶层是裸数组；无程序化消费方，md 报告形状不变）。
-  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify({ records, writeChain }, null, 2));
+  // 比对的取数面（此前顶层是裸数组；无程序化消费方，md 报告形状不变）。auditPath
+  // 是 additive 字段（score.ts 只取 records/writeChain）：执行层审计文件路径，机器侧
+  // 与 md 报告同源可核对。
+  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify({ records, writeChain, auditPath }, null, 2));
   console.log(JSON.stringify({ event: 'acceptance_done', report: reportPath }));
 
   await assembly.close();

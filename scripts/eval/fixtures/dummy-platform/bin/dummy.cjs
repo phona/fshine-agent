@@ -400,7 +400,13 @@ function doProposalCommit(opName, args) {
   if (new Date(rec.expiresAt).getTime() < Date.now()) { process.stderr.write('PROPOSAL_REFUSE proposal expired\n'); emit(opName, 'failed', null, errObj('PROPOSAL_EXPIRED', rec.expiresAt)); return 3; }
   const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
   const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
-  if (secret && !verifyProposalToken(token, proposalId, rec.expiresAt, secret)) { process.stderr.write('PROPOSAL_REFUSE proposal token untrusted\n'); emit(opName, 'failed', null, errObj('PROPOSAL_TOKEN_UNTRUSTED', 'Token does not match this proposal or has expired')); return 3; }
+  // Fail-closed（2026-11-08 修）：secret 缺失不再跳过整道门。宿主只把 gate secret 程序化
+  // 注入给自己的 commit runner（从不进 process.env），worker bash 直调时恰好没有 secret——
+  // 旧写法 `secret && !verify(...)` 恰好在那条路上把门整个跳过，无令牌也能提交。现在
+  // secret 为空或令牌不符一律拒（verifyProposalToken 对 !secret || !token 返回 false）。
+  // 注意：dummy.commit 直提路径（无提案状态）仍是另一套 `if (secret)` 有门才验的契约，
+  // 两者不一致已登记 debt-ledger，本轮不合并。
+  if (!verifyProposalToken(token, proposalId, rec.expiresAt, secret)) { process.stderr.write('PROPOSAL_REFUSE proposal token untrusted\n'); emit(opName, 'failed', null, errObj('PROPOSAL_TOKEN_UNTRUSTED', 'Token does not match this proposal or has expired')); return 3; }
   // Pre-commit readback baseline, then apply, then post-commit readback.
   const state = loadState();
   const col = state.collections[rec.payload.collection];

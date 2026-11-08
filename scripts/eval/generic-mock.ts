@@ -309,6 +309,34 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     return { id: 'g-proposal-token-untrusted', pass: commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED',
       checks: [check('bad token refused exit 3', commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED', '3 PROPOSAL_TOKEN_UNTRUSTED', `${commit.code} ${commitEnv?.error?.code}`)] };
   } },
+  { id: 'g-proposal-no-token-env', run: (ctx) => {
+    // 不带令牌 env 直调 proposal-commit 被拒（fail-closed 钉子，2026-11-08）。宿主只把
+    // gate secret 程序化注入自己的 commit runner，从不进 process.env——worker bash 直调时
+    // secret 与 token 两个 env 都没有，旧写法 `secret && !verify(...)` 恰好在直调路径上把
+    // 整道令牌门跳过（无令牌提交照常落账）。修后 secret 缺失一律拒，这条用例钉住该行为：
+    // 拒绝形态与 g-proposal-token-untrusted 同款（exit 3 + PROPOSAL_TOKEN_UNTRUSTED）。
+    const checks: Check[] = [];
+    const before = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']).stdout);
+    const beforeCount = before?.data?.count as number;
+    const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'notok-1', value: 100 }] });
+    const proposalId = env?.data?.proposalId as string;
+    // 复刻直调形态：从进程 env 里剥掉 secret 与 token 两个键（Ctx 缺省带 secret）。
+    const bareEnv: NodeJS.ProcessEnv = { ...ctx.env };
+    delete bareEnv.DUMMY_GATE_SECRET;
+    delete bareEnv.DUMMY_COMMIT_TOKEN;
+    checks.push(check('bare env has neither secret nor token', !bareEnv.DUMMY_GATE_SECRET && !bareEnv.DUMMY_COMMIT_TOKEN, 'both absent', `${Boolean(bareEnv.DUMMY_GATE_SECRET)}/${Boolean(bareEnv.DUMMY_COMMIT_TOKEN)}`));
+    const saved = ctx.env;
+    ctx.env = bareEnv;
+    const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
+    ctx.env = saved;
+    const commitEnv = parseEnvelope(commit.stdout);
+    checks.push(check('no-token-env commit refused exit 3', commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED', '3 PROPOSAL_TOKEN_UNTRUSTED', `${commit.code} ${commitEnv?.error?.code}`));
+    const status = ctx.run(['proposal', 'status', '--proposal-id', proposalId]);
+    checks.push(check('proposal still pending after refused commit', status.stdout.includes('"status":"pending"'), 'pending', status.stdout.trim()));
+    const after = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']).stdout);
+    checks.push(check('refused commit wrote nothing', (after?.data?.count as number) === beforeCount, String(beforeCount), String(after?.data?.count)));
+    return { id: 'g-proposal-no-token-env', pass: checks.every((c) => c.pass), checks };
+  } },
   { id: 'g-state-isolation', run: (ctx) => {
     const ctx2 = new Ctx();
     try {

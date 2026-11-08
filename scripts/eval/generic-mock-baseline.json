@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "generatedAt": "2026-11-06T11:07:20.805Z",
+  "generatedAt": "2026-11-08T12:18:46.192Z",
   "note": "Generic-mock deterministic baseline v2 (Phase 2): protocol checks + host pure-module / scripted checks for the four former SKIP cases + committed_unverified host report. No model, no judge. A check recorded as pass must stay pass; this writer refuses to write a baseline containing a failing case.",
   "cases": {
     "smoke-query": {
@@ -105,6 +105,14 @@
     "g-proposal-token-untrusted": {
       "checks": {
         "bad token refused exit 3": "pass"
+      }
+    },
+    "g-proposal-no-token-env": {
+      "checks": {
+        "bare env has neither secret nor token": "pass",
+        "no-token-env commit refused exit 3": "pass",
+        "proposal still pending after refused commit": "pass",
+        "refused commit wrote nothing": "pass"
       }
     },
     "g-state-isolation": {
