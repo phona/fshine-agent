@@ -640,18 +640,24 @@ async function main() {
     // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
     // 正常确认并读回成功的写链也只能停在 invoked——mechanicallyPassed 恒 false、令牌拒绝也
     // 进不了 gateRefusals。执行层自己的账必须含"这次调用最终成没成"，否则调用方无从判定。
+    // 起止两行共用同一个 callId（2026-11-09 十一审 major）：评测侧据此把"开始"与"结果"
+    // 合并成同一次调用——否则开始行（无 exitCode）会永久停在 invoked，messageLadderRung 取
+    // 最低档后即使提交成功也报 invoked/机械失败，且调用数被重复计一次。开始行仍然要留：
+    // 进程在调用中途崩溃时只有它，那是"这次调用发出过但没有结果"的唯一证据。
     if (op.protocol === 'proposal.create') {
-      audit({ mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
       const code = doProposalCreate(op.name, call.args);
-      audit({ mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     if (op.protocol === 'proposal.commit') {
       const { flags: innerFlags } = parseFlags(call.args);
       if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
       const code = doProposalCommit(op.name, call.args);
-      audit({ mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     // Determine mode from operation access.

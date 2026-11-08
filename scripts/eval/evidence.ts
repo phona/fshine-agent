@@ -56,6 +56,15 @@ export interface ExecutionAuditRow {
    * 分级、载体单列一个字段，两件事不再挤同一个键。
    */
   via?: string;
+  /**
+   * 一次调用的关联 id（起止两行共用；bash 单行调用没有这个字段）。
+   * 2026-11-09 十一审 major：提案路径记「开始 + 结果」两行，评测若不按 callId 合并，
+   * 开始行（无 exitCode）会永久停在 invoked，把一次成功的提交拖成 invoked/机械失败，
+   * 调用数还多计一次。
+   */
+  callId?: string;
+  /** 起止两行中的哪一行：`start` = 调用已发出、结果未知；`result` = 最终结果。 */
+  phase?: 'start' | 'result';
 }
 
 /**
@@ -251,6 +260,37 @@ export interface CallLadderEntry {
   refusedReason?: string;
   /** 每一档判定的证据出处（人可读；判定独立于 Agent 自述的凭据）。 */
   basis: string[];
+}
+
+/**
+ * 把执行层审计行按 callId 合并成**一次调用一行**（导出供单测）。
+ *
+ * 2026-11-09 十一审 major：提案路径记「开始 + 结果」两行（开始行留在册上，用于识别"调用
+ * 发出过但没有结果"的中途崩溃）。评测侧若不合并，开始行没有 exitCode 会永久停在 invoked，
+ * messageLadderRung 取最低档后即使提交成功也报 invoked / 机械失败，调用数还多计一次。
+ * 合并规则：同 callId 的 start 与 result 合成一行，取 result 的 exitCode/refused，
+ * 保留 start 的 mode/script/args/protocol/proposalId；**只有 start 没有 result** 的原样
+ * 留下（那就是中途崩溃，理应停在 invoked）。没有 callId 的行原样通过。
+ */
+export function mergeCallPhases(rows: readonly ExecutionAuditRow[]): ExecutionAuditRow[] {
+  const results = new Map<string, ExecutionAuditRow>();
+  const starts = new Map<string, ExecutionAuditRow>();
+  const passthrough: ExecutionAuditRow[] = [];
+  for (const row of rows) {
+    if (row.callId === undefined || row.phase === undefined) { passthrough.push(row); continue; }
+    if (row.phase === 'result') results.set(row.callId, row);
+    else starts.set(row.callId, row);
+  }
+  const merged: ExecutionAuditRow[] = [];
+  for (const [callId, result] of results) {
+    const start = starts.get(callId);
+    merged.push(start ? { ...start, ...result } : result);
+  }
+  // 只有开始行（结果没落账）= 调用发出过但没有结果：原样保留，让阶梯停在 invoked。
+  for (const [callId, start] of starts) {
+    if (!results.has(callId)) merged.push(start);
+  }
+  return [...merged, ...passthrough];
 }
 
 /**

@@ -68,6 +68,7 @@ import {
   classifyExecutionCall,
   collectHostFacts,
   collectIntentFacts,
+  mergeCallPhases,
   messageLadderRung,
   sessionKeyOfChannel,
   type CallLadderEntry,
@@ -533,7 +534,8 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
               .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
               .map((intent) => intent.proposalId!),
           );
-          const ladder = windowRows.map((row) => classifyExecutionCall({
+          // 起止两行按 callId 合并成一次调用一行（十一审 major，同 ask-session）。
+          const ladder = mergeCallPhases(windowRows).map((row) => classifyExecutionCall({
             row,
             readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
             delivered,

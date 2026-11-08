@@ -21,6 +21,7 @@ import {
   messageLadderRung,
   collectHostFacts,
   mechanicallyPassed,
+  mergeCallPhases,
   readExecutionAuditLog,
   sessionKeyOfChannel,
 } from './evidence';
@@ -485,5 +486,43 @@ describe('读类判据不随调用载体变化（九审 major）', () => {
   it('写类调用不受影响（mode:prepare/commit 都不是 query）', () => {
     expect(classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.proposal', exitCode: 0, proposalId: 'p1' }, readbackVerified: true, delivered: true }).rung).toBe('delivered');
     expect(classifyExecutionCall({ row: { mode: 'commit', script: 'dummy.proposal-commit', exitCode: 0, proposalId: 'p1' }, readbackVerified: false, delivered: true }).rung).toBe('completed');
+  });
+});
+
+describe('mergeCallPhases：起止两行合并成一次调用（十一审 major）', () => {
+  const start = { callId: 'c1', phase: 'start' as const, mode: 'commit', script: 'dummy.proposal-commit', exitCode: undefined, proposalId: 'p1' };
+  const okResult = { callId: 'c1', phase: 'result' as const, mode: 'commit', script: 'dummy.proposal-commit', exitCode: 0, proposalId: 'p1' };
+  const failResult = { callId: 'c1', phase: 'result' as const, mode: 'commit', script: 'dummy.proposal-commit', exitCode: 3, proposalId: 'p1', refused: 'proposal' };
+
+  it('start + result(0) 合成一行且带 exitCode=0（成功的提交不再停在 invoked）', () => {
+    const rows = mergeCallPhases([start, okResult]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ callId: 'c1', exitCode: 0, script: 'dummy.proposal-commit', proposalId: 'p1' });
+  });
+
+  it('start + result(3) 合成一行且带 refused（令牌拒绝能进 gateRefusals）', () => {
+    const rows = mergeCallPhases([start, failResult]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ exitCode: 3, refused: 'proposal' });
+  });
+
+  it('只有 start 没有 result → 原样保留（中途崩溃，理应停在 invoked）', () => {
+    const rows = mergeCallPhases([start]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.exitCode).toBeUndefined();
+    expect(classifyExecutionCall({ row: rows[0]!, readbackVerified: true, delivered: true }).rung).toBe('invoked');
+  });
+
+  it('没有 callId 的普通行原样通过、不被合并', () => {
+    const plain = { mode: 'query' as const, script: 'dummy.query', exitCode: 0 };
+    expect(mergeCallPhases([plain])).toEqual([plain]);
+  });
+
+  it('合并后调用数不重复计（两次写调用 → 两行）', () => {
+    const rows = mergeCallPhases([
+      { ...start, callId: 'c1' }, { ...okResult, callId: 'c1' },
+      { ...start, callId: 'c2' }, { ...failResult, callId: 'c2' },
+    ]);
+    expect(rows).toHaveLength(2);
   });
 });

@@ -30,6 +30,7 @@ import {
   collectHostFacts,
   collectIntentFacts,
   mechanicallyPassed,
+  mergeCallPhases,
   messageLadderRung,
   readExecutionAuditLog,
   sessionKeyOfChannel,
@@ -328,7 +329,9 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
         .filter((intent) => intent.status === 'committed' && intent.hasReadback && intent.proposalId)
         .map((intent) => intent.proposalId!),
     );
-    const ladder = executionRows.map((row) => classifyExecutionCall({
+    // 起止两行按 callId 合并成一次调用一行（十一审 major）：提案路径记「开始 + 结果」，
+    // 不合并时开始行（无 exitCode）永远停在 invoked，把成功的提交拖成 invoked/机械失败。
+    const ladder = mergeCallPhases(executionRows).map((row) => classifyExecutionCall({
       row,
       readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
       delivered,
