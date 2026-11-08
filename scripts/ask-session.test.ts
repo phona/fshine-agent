@@ -16,7 +16,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WecomBotChannel } from '@fshine/channel-wecom';
-import { createAskSession, setAskCaseId, setAskEvalRunId } from './ask-session';
+import {metricInputsOf,
+   createAskSession, setAskCaseId, setAskEvalRunId } from './ask-session';
 import { EVAL_FIXTURE_ROOT } from './eval/safety-gate';
 
 const thisDir = path.dirname(fileURLToPath(import.meta.url));
@@ -152,6 +153,29 @@ describe('ask-session 适配器（唯一装配 + 同进程多轮 + 证据链）'
     }
   });
 
+  it('metrics() 重复读取一致（去重不写回会话，六审 minor）', async () => {
+    // 旧写法把 counted* 集合做成语义级可变状态并在遍历时写入：第一次 metrics() 后停点已进
+    // 集合，再读一次同一会话的指标就全计 0；继续发消息后累计干预数不升反降。
+    const root = tempRoot();
+    const session = await bootSession(root, fixtureEnv(root, true), '直接回答：收到。');
+    try {
+      await session.sendMessage('第一条');
+      await session.sendMessage('第二条');
+      const first = session.metrics();
+      const second = session.metrics();
+      expect(second.interventions).toBe(first.interventions);
+      expect(second.passed).toBe(first.passed);
+      expect(second.cases).toBe(first.cases);
+      // 再发一轮，累计干预数不下降
+      await session.sendMessage('第三条');
+      const third = session.metrics();
+      expect(third.cases).toBe(3);
+      expect(third.interventions).toBeGreaterThanOrEqual(first.interventions);
+    } finally {
+      await session.close();
+    }
+  });
+
   it('聚合指标：两轮全零证据 → 通过率 0、干预 0、安全违规未测、耗时为两轮墙钟和', async () => {
     const root = tempRoot();
     const session = await bootSession(root, fixtureEnv(root, true), '直接回答：收到。');
@@ -169,5 +193,65 @@ describe('ask-session 适配器（唯一装配 + 同进程多轮 + 证据链）'
     } finally {
       await session.close();
     }
+  });
+});
+
+describe('metricInputsOf：干预停点跨轮去重且读取幂等（六审 minor）', () => {
+  const turn = (messageId: string, intents: Array<{ intentId: string; status: string }>, delegations: Array<{ taskId: string; state: string; runId?: string }> = []) => ({
+    messageId,
+    conversationId: 'c',
+    text: 't',
+    reply: 'r',
+    notices: [],
+    progress: [],
+    ms: 10,
+    error: null,
+    ladderRung: 'INCONCLUSIVE' as const,
+    ladder: [],
+    evidence: {
+      evalRunId: 'r',
+      caseId: messageId,
+      messageId,
+      requestId: null,
+      delegations: delegations.map((d) => ({ taskId: d.taskId, ...(d.runId ? { runId: d.runId } : {}), state: d.state as 'waiting_confirmation' | 'waiting_input' | 'completed', hasResultText: false })),
+      intents: intents.map((i) => ({ intentId: i.intentId, status: i.status as 'pending' | 'committed' | 'expired' | 'cancelled' | 'superseded' | 'failed', hasReadback: false })),
+      gateRows: [],
+      executionRows: [],
+      finalReply: null,
+    },
+  });
+
+  it('同一 pending 意图跨轮复现只计一次', () => {
+    const inputs = metricInputsOf([
+      turn('m1', [{ intentId: 'i1', status: 'pending' }]),
+      turn('m2', [{ intentId: 'i1', status: 'pending' }]),
+    ]);
+    expect(inputs.map((i) => i.interventionPoints)).toEqual([1, 0]);
+  });
+
+  it('重复读取同一会话得到同一结果（旧写法第二次全读成 0）', () => {
+    const turns = [
+      turn('m1', [{ intentId: 'i1', status: 'pending' }]),
+      turn('m2', [{ intentId: 'i2', status: 'pending' }]),
+    ];
+    const first = metricInputsOf(turns);
+    const second = metricInputsOf(turns);
+    expect(second.map((i) => i.interventionPoints)).toEqual(first.map((i) => i.interventionPoints));
+    expect(second.map((i) => i.interventionPoints)).toEqual([1, 1]);
+  });
+
+  it('非 pending 意图与已完结委派不计停点', () => {
+    const inputs = metricInputsOf([
+      turn('m1', [{ intentId: 'i1', status: 'committed' }], [{ taskId: 't1', state: 'completed' }]),
+    ]);
+    expect(inputs[0]!.interventionPoints).toBe(0);
+  });
+
+  it('等待确认的委派按 runId/taskId 去重', () => {
+    const inputs = metricInputsOf([
+      turn('m1', [], [{ taskId: 't1', state: 'waiting_confirmation', runId: 'r1' }]),
+      turn('m2', [], [{ taskId: 't1', state: 'waiting_confirmation', runId: 'r1' }]),
+    ]);
+    expect(inputs.map((i) => i.interventionPoints)).toEqual([1, 0]);
   });
 });

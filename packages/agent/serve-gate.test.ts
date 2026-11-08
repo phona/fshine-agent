@@ -509,6 +509,29 @@ describe('createServeGate（通用执行安全门）', () => {
       expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
     });
 
+    it('位置参数按声明顺序取值，对象键序不影响判定（六审 blocking）', () => {
+      // 复现缺陷：声明 [account, period]、计划 ['alpha','W1']。调用方把键序换成
+      // {period:'alpha', account:'W1'}——按插入顺序收集会得到 ['alpha','W1'] 从而放行，
+      // 但 account 实际拿到的是 'W1'、period 拿到 'alpha'，目标已经互换。
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        operationArgsSpecs: SPECS,
+      };
+      // 正确键序 → 放行
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBeUndefined();
+      // 键序换过但名值对应关系不变 → 仍放行（键序是调用方自由）
+      expect(structuredPlanGateVerdict('ledger.write', { period: 'W1', account: 'alpha' }, ctx)?.block).toBeUndefined();
+      // 键序换且名值互换 → 必须拒（旧代码这里放行）
+      expect(structuredPlanGateVerdict('ledger.write', { period: 'alpha', account: 'W1' }, ctx)?.block).toBe(true);
+      // 缺一个位置参数 → 拒
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
+    });
+
     it('位置参数：执行层没声明 positionalNames 而计划步带了位置参数 ⇒ 不覆盖（fail-closed）', () => {
       // 拿不到声明就无法证明范围一致——不能把"没解析出 flag"解释成"授权任意目标"。
       const ctx = {

@@ -825,7 +825,7 @@ function coversPlanStep(
   step: PlanCall,
   reference: string,
   gotKeyArgs: ReadonlyMap<string, string>,
-  gotPositionals: readonly string[],
+  gotPositionals: ReadonlyArray<string | undefined>,
   positionalNames: readonly string[] | undefined,
 ): boolean {
   if (!sameOperation(step.operation, reference)) return false;
@@ -840,7 +840,8 @@ function coversPlanStep(
   if (wantedPositionals.length === 0) return true;
   if (positionalNames === undefined || positionalNames.length === 0) return false;
   for (let index = 0; index < wantedPositionals.length; index += 1) {
-    if (gotPositionals[index] !== wantedPositionals[index]) return false;
+    // 缺失（undefined）与不同值都判不覆盖：范围说不清就不放行。
+    if (gotPositionals[index] === undefined || gotPositionals[index] !== wantedPositionals[index]) return false;
   }
   return true;
 }
@@ -887,7 +888,7 @@ function planCoverageVerdict(
   key: string | undefined,
   reference: string | null,
   gotKeyArgs: ReadonlyMap<string, string>,
-  gotPositionals: readonly string[],
+  gotPositionals: ReadonlyArray<string | undefined>,
   positionalNames: readonly string[] | undefined,
   ctx: {
     planActive?: () => boolean;
@@ -942,17 +943,26 @@ export function structuredPlanGateVerdict(
   // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
   // `--flag 值` / `--flag` 的判定同形；数组/对象不猜（结构化 args 已被清单校验只能是标量）。
   const got = new Map<string, string>();
-  const positionals: string[] = [];
   const names = positionalNamesFor(operation, ctx.operationArgsSpecs) ?? [];
+  // 位置参数**按声明顺序**逐项取值（2026-11-09 六审 blocking）：旧写法按
+  // Object.entries(args) 的插入顺序 push，于是调用方换个 JSON 键序就能让
+  // `{period:'alpha', account:'W1'}` 与计划 `['alpha','W1']` 对上——参数名与目标实际已经
+  // 互换，覆盖检查却放行。对象键序是调用方的自由，绝不许它决定写授权范围。
+  // 缺失的位置留 undefined（与"少给一个位置参数"同形，判据侧按不覆盖处理）。
+  const positionals: Array<string | undefined> = names.map((declared) => {
+    const hit = Object.keys(args).find((key) => key === declared || key === `--${declared}`);
+    if (hit === undefined) return undefined;
+    const value = args[hit];
+    if (value === undefined || value === null) return undefined;
+    return typeof value === 'boolean' ? '' : String(value);
+  });
+  // 其余键按 flag 处理（清单 argsSchema 常用带横杠形，也有的部署不带，两种都归一——
+  // 不归一就是放松方向的漏洞）。布尔值当无取值开关，其余 String()。
+  const declaredNames = new Set(names.flatMap((declared) => [declared, `--${declared}`]));
   for (const [name, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
-    const flag = name.startsWith('--') ? name : `--${name}`;
-    // 执行层声明为位置参数的名 ⇒ 进位置参数表（按声明顺序）；其余按 flag 处理。
-    if (names.some((declared) => declared === name || declared === flag)) {
-      positionals.push(typeof value === 'boolean' ? '' : String(value));
-      continue;
-    }
-    got.set(flag, typeof value === 'boolean' ? '' : String(value));
+    if (declaredNames.has(name)) continue;
+    got.set(name.startsWith('--') ? name : `--${name}`, typeof value === 'boolean' ? '' : String(value));
   }
   return planCoverageVerdict(tier, entry?.key, operation, got, positionals, names.length > 0 ? names : undefined, ctx);
 }

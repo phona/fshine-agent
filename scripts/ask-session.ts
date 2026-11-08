@@ -133,6 +133,52 @@ export function setAskCaseId(id: string): void {
  * 建会话：生产装配一次，多轮复用。授权用户缺省 fail-closed（配置里没有 enabled
  * principal 就抛错，绝不回落写死值——真实 UserID 曾是这里的硬编码）。
  */
+/**
+ * 逐轮指标输入（**纯函数**，导出供单测；同一次聚合内去重，不碰任何会话状态）。
+ *
+ * 2026-11-09 六审 minor：旧写法把 countedIntents/countedDelegations 做成**会话级可变集合并
+ * 在遍历时写入**——于是第一次 metrics() 之后，停点已进集合，再读一次同一会话的指标就全计
+ * 成 0；继续发消息后也只剩新停点，累计干预数不升反降。读取指标必须是幂等的：去重集合在每次
+ * 聚合时重建，跨轮只计首次出现（同一 pending 意图常在多轮 evidence 里复现）。
+ */
+export function metricInputsOf(turns: readonly MessageTurn[]): MetricCaseInput[] {
+  const seenIntents = new Set<string>();
+  const seenDelegations = new Set<string>();
+  const out: MetricCaseInput[] = [];
+  for (const turn of turns) {
+    // 干预停点（机械口径）：本轮首次出现的 pending 提案意图 + 挂起等人的委派 run。
+    let interventionPoints = 0;
+    for (const intent of turn.evidence.intents) {
+      if (intent.status !== 'pending') continue;
+      if (!seenIntents.has(intent.intentId)) {
+        seenIntents.add(intent.intentId);
+        interventionPoints += 1;
+      }
+    }
+    for (const run of turn.evidence.delegations) {
+      if (run.state !== 'waiting_confirmation' && run.state !== 'waiting_input') continue;
+      const key = run.runId ?? run.taskId;
+      if (!seenDelegations.has(key)) {
+        seenDelegations.add(key);
+        interventionPoints += 1;
+      }
+    }
+    out.push({
+      caseId: turn.messageId,
+      // pass 的机械下界（2026-11-08 三审 blocking）：旧写法把"有证据"当"通过"——执行层明确
+      // refused 的调用、exitCode≠0 的调用阶梯都是 invoked，handler 没抛错就算 passed。现在
+      // 要求最低档 ≥ completed 且链上无 refused 行。这仍是机械下界，不是用例判定（那由
+      // score.ts 的期望值层 + 基线说了算）。
+      pass: turn.error === null && mechanicallyPassed(turn.ladder),
+      evidence: turn.evidence,
+      ladder: turn.ladder,
+      interventionPoints,
+      durationMs: turn.ms,
+    });
+  }
+  return out;
+}
+
 export async function createAskSession(options: AskSessionOptions = {}): Promise<AskSession> {
   const env = options.env ?? process.env;
   const dbPath = options.dbPath
@@ -181,8 +227,7 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
 
   const turns: MessageTurn[] = [];
   // 干预停点去重账（pending 意图/挂起 run 会话级常驻，只在首次出现计一次）。
-  const countedIntents = new Set<string>();
-  const countedDelegations = new Set<string>();
+
   // 调用侧串行：上一轮证据采集完才发下一轮（同一会话内消息本就按序处理）。
   let tail: Promise<unknown> = Promise.resolve();
 
@@ -196,8 +241,10 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
       tail = run.catch(() => undefined);
       return run;
     },
+    // 指标聚合走纯函数 metricInputsOf（六审 minor）：去重集合每次聚合重建、不写回会话，
+    // 重复读取 metrics() 得到同一结果。
     metrics(): AggregateMetrics {
-      return aggregateMetrics(turns.map((turn) => metricInputOf(turn)));
+      return aggregateMetrics(metricInputsOf(turns));
     },
     close(): Promise<void> {
       return tail.then(async () => {
@@ -208,41 +255,6 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     },
   };
   return session;
-
-  function metricInputOf(turn: MessageTurn): MetricCaseInput {
-    // 干预停点（机械口径）：本轮首次出现的 pending 提案意图 + 挂起等人的委派 run。
-    let interventionPoints = 0;
-    for (const intent of turn.evidence.intents) {
-      if (intent.status !== 'pending') continue;
-      if (!countedIntents.has(intent.intentId)) {
-        countedIntents.add(intent.intentId);
-        interventionPoints += 1;
-      }
-    }
-    for (const run of turn.evidence.delegations) {
-      if (run.state !== 'waiting_confirmation' && run.state !== 'waiting_input') continue;
-      const key = run.runId ?? run.taskId;
-      if (!countedDelegations.has(key)) {
-        countedDelegations.add(key);
-        interventionPoints += 1;
-      }
-    }
-    return {
-      caseId: turn.messageId,
-      // pass 的机械下界（2026-11-08 三审 blocking）：旧写法 `error===null && rung!=='INCONCLUSIVE'`
-      // 把"有证据"当成"通过"——执行层明确 refused 的调用、exitCode≠0 的调用阶梯都是 invoked，
-      // 只要 handler 没抛错就计入 passed/passRate，失败轮被算成成功。
-      // 现在要求：① 整条链最低档至少 completed（有调用真的执行成功，而不是全被拒/全失败）；
-      //      ② 链上没有任何 refused 行（调到了门 = 这一步没办成）。
-      // 注意这仍是**机械下界**，不是用例判定——用例层面的通过与否由 score.ts 的期望值层
-      // 与基线比对说了算，这里不重复发明一个判官。
-      pass: turn.error === null && mechanicallyPassed(turn.ladder),
-      evidence: turn.evidence,
-      ladder: turn.ladder,
-      interventionPoints,
-      durationMs: turn.ms,
-    };
-  }
 
   async function sendOne(text: string): Promise<MessageTurn> {
     const messageId = `ask_${randomUUID()}`;
