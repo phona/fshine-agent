@@ -2040,3 +2040,15 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **律法归属**：L2（判据单一真相源）/ L7。
 - **归属波次 / 限期**：**切片 E 开工前**（不阻塞最小场景集首跑——X1/C2 均 `inBaseline: false`）。
 - **状态**：待办（核心问题已核实并写明；4 处 X1 明细待重导）。
+
+### D-202 · dummy 夹具两套 commit 令牌契约不一致（proposal-commit 与 dummy.commit 直提）
+
+- **位置**：`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs` 的 `doProposalCommit`（`proposal-commit` 路径，令牌体 = `{proposalId, expiresAt}`）+ `dummy.commit` 直提路径（内联校验，令牌体额外要求 `p.script === op.name`）。
+- **触发 / 根因**（2026-11-08 修 1 实测）：修 1 把 `doProposalCommit` 的令牌门从 `secret && !verify(...)` 改成 `!verify(...)` fail-closed，使 secret 缺失一律拒绝。但同文件里 `dummy.commit` 直提路径仍保留旧写法 `if (secret)`——有 secret 才验令牌，且校验逻辑要求令牌体带 `script` 字段并与操作名匹配。两套契约的差异：
+  1. proposal-commit 路径：`verifyProposalToken` 解析 `{proposalId, expiresAt}`，不校验 script；
+  2. dummy.commit 直提路径：内联解析要求 `p.script === op.name`，多一个 script 绑定。
+- **影响**：同一 `DUMMY_GATE_SECRET` / `EXECUTION_GATE_SECRET` 签出来的令牌，在 proposal-commit 路径可用，在 dummy.commit 直提路径却会因缺 script 字段而被拒——反之，为 dummy.commit 签的带 script 令牌在 proposal-commit 路径虽能通过签名校验，但 proposal-commit 根本不读 script 字段，语义上是"多签了不该有的内容"。两条路对同一 secret 的期望形状不同，维护者容易签错令牌。
+- **律法归属**：L2（判据单一真相源）/ F1（表征先行：统一契约前阴性用例先钉住）。
+- **闭环判据**：统一两套令牌体为同一形状（建议 proposal-commit 也绑定 script，或 dummy.commit 也去掉 script 校验），并补一条"为 dummy.commit 签的令牌不能用于 proposal-commit"或反之的阴性用例。
+- **归属波次 / 限期**：Wave 6 之后（不阻塞本轮修 1 的回归锁）。
+- **状态**：已登记，待办。
