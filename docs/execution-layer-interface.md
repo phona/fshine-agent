@@ -203,9 +203,10 @@
     HMAC 提案 / 提交令牌；
   - `EXECUTION_ALLOW_REAL=1`：执行层实执行授权（缺它 = 触平台执行被拒，
     `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响）；
-  - `FSHINE_REAL_COMMIT=1`：宿主真写落账授权（缺它 = 确认码只到
-    `confirm_held`，不写）。
-- **正交性**：三道门互相独立，缺一不可叠加；mock 之下实执行门
+  - ~~`FSHINE_REAL_COMMIT=1`：宿主真写落账授权~~ **该门 2026-11-08 退役**：
+    写能不能真落地归执行层，宿主不再持有写授权位；落账授权/拒绝由执行层自己的
+    commit 门给出，宿主只如实转述（见 `docs/debt-ledger.md` 的 D-075/D-197 重登记节）。
+- **正交性**：两道门互相独立，缺一不可叠加；mock 之下实执行门
   不可达，真平台之下缺任一门即拒绝，不降级。
 - **缺失时（各门拒绝形态，语义不变）**：
   - `EXECUTION_SERVE` 未设为 `1`：不进入 serve 法域，serve 调用
@@ -214,11 +215,9 @@
     （统一 CLI 之外直调 operation run 会被拒），不以模型自报确认放行；
   - `EXECUTION_ALLOW_REAL` 未设为字面量 `1`：触平台执行被拒
     `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算（scratch / mock）不受影响；
-  - `FSHINE_REAL_COMMIT` 未设为 `1`：确认码只到 `confirm_held`，不写，
-    真写落账不发生。
   - 一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。
 - **命名**：执行层治理接口统一用 `EXECUTION_*` 前缀，宿主自用参数用
-  `FSHINE_*` 前缀（如 `FSHINE_REAL_COMMIT`），
+  `FSHINE_*` 前缀（写授权类开关不再有宿主侧代表——归执行层自己声明），
   通用夹具只认执行层接口名作别名；旧前缀已全量清零，不留别名 shim。
 
 ## 9. Mock 契约（归属与隔离）

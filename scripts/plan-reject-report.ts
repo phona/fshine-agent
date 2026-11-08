@@ -56,8 +56,10 @@ export type PlanRejectKind = 'declined' | 'active' | 'confirm' | 'paused' | 'oth
  * 协议前缀 → 分类。顺序即优先级（都是互斥前缀，但 `NEEDS_USER_CONFIRM` 比泛化的更长，
  * 写在前面更稳）。
  *
- * `PLAN STOP` 归到 declined：它覆盖 DECLINED_PLAN_LIMIT / WRITE_NOT_ENABLED /
- * PLAN_NOT_PLANNABLE 一族，语义都是"这一跳不许真调平台、worker 被挡回来"。
+ * `PLAN STOP` 归到 declined：它覆盖 DECLINED_PLAN_LIMIT / PLAN_NOT_PLANNABLE 一族，
+ * 语义都是"这一跳不许真调平台、worker 被挡回来"。（WRITE_NOT_ENABLED 是 2026-11-08 前
+ * 这一族里的一员：宿主合成写关闭话术的分支已随架构裁定删除，本分类器按前缀归组、
+ * 不解释错误码语义，历史报告里的那一族照旧归 declined。）
  */
 const PLAN_VERDICT_PREFIXES: ReadonlyArray<readonly [string, PlanRejectKind]> = [
   ['PLAN NEEDS_USER_CONFIRM', 'confirm'],

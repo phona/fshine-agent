@@ -2,13 +2,11 @@ import { describe, expect, it } from 'vitest';
 import type { SubagentTaskResult } from './src/context';
 import type { PlanStepLabel } from './src/plan-steps';
 import type { SelectionClarification } from './src/platform-contract';
-import { messageTextFor } from './src/error-codes';
 import {
   renderClarificationToolResult,
   renderNeedsToolResult,
   renderNeedsUserText,
   renderPlanStepToolResult,
-  renderWriteClosureReply,
 } from './src/turn-relay';
 
 /**
@@ -140,30 +138,5 @@ describe('renderPlanStepToolResult', () => {
   it('最后一步的 next 让模型输出汇总', () => {
     const rendered = renderPlanStepToolResult(step({ stepIndex: 3, totalSteps: 3, label: '第 3/3 步' }), result());
     expect(rendered.next).toBe('全部 3 步已派发完毕：申报 conversation 输出汇总。汇总必须覆盖每一步的结果；失败或缺信息的步骤如实报告，不要掩盖，也不要用估计值填充。');
-  });
-});
-
-describe('renderWriteClosureReply', () => {
-  it('单步：原句即终稿，一字不差', () => {
-    expect(renderWriteClosureReply(null, result({ text: '当前未开放写入权限，如有需要请联系管理员开通。' }), [
-      { label: '第 1/1 步', outcome: 'failed' },
-    ])).toBe('当前未开放写入权限，如有需要请联系管理员开通。');
-  });
-
-  it('worker 文本为空：退回宿主兜底文案', () => {
-    expect(renderWriteClosureReply(null, result({ text: '' }), [])).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-  });
-
-  it('多步计划：原句在前，其余来自宿主持有的步骤事实汇总', () => {
-    expect(renderWriteClosureReply(step(), result({ text: '当前未开放写入权限，如有需要请联系管理员开通。' }), [
-      { label: '第 1/3 步', outcome: 'done' },
-      { label: '第 2/3 步', outcome: 'needs' },
-    ])).toBe([
-      '当前未开放写入权限，如有需要请联系管理员开通。',
-      '',
-      '本轮拆解的进度如下：',
-      '已执行成功的步骤：第 1/3 步。',
-      '缺信息未执行的步骤：第 2/3 步。',
-    ].join('\n'));
   });
 });

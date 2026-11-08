@@ -14,7 +14,6 @@
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_REAL_COMMIT` | 部署声明 / `platform-mock.isCommitEnabled` | 仅字面量 `1` 算真写授权；缺失 = 确认码只到 `confirm_held`，不写；mock 下 `isCommitEnabled` 恒真，与本变量无关 |
 | `FSHINE_PLATFORM_QUEUE_CAPACITY` | 部署 / 共享 `PlatformExecutionGate`（assembly、context） | 缺省 / 非法 = 100 |
 | `FSHINE_PLATFORM_CONCURRENCY` | 部署 / 委派并发闸 | 缺省 = 1（全局串行） |
 | `FSHINE_PLATFORM_COOLDOWN_MS` | 部署 / 平台健康冷却 | 缺省 = 600000（10 分钟） |
@@ -38,8 +37,8 @@
 | `EXECUTION_SERVE` | 宿主装配 / 执行层 `execution-env.serve` | 仅 `1` 进 serve 法域；否则走建造法域规则 |
 | `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
 | `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
-| `EXECUTION_EXECUTOR` | 部署 / 网关 spawn 目标切换 | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门 |
-| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时服务端兜底到 `<平台根>/.runtime/mock-state.json`；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3） |
+| `EXECUTION_EXECUTOR` | 部署 / **执行层自己的**执行器切换（宿主不读） | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门。2026-11-08 起宿主侧读取已删（`platform-mock.ts` 整模块退役）：编排层不判"这个部署允不允许写" |
+| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。宿主脚本只重置显式声明过的这一个 |
 | `EXECUTION_REQUIRE_PLAN` | 宿主 / 执行层 runner（serve 执行须 host 注入 plan id） | 宿主直调时显式剥离；worker 路径置 `1` 即强制计划绑定 |
 | `EXECUTION_PLAN_ID` | 宿主注入 / 执行层 runner、gateway | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌 | 缺省 = 装配进程内生成，重启失效 |
@@ -129,7 +128,11 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
   `FSHINE_COMMIT_TOKEN` / `FSHINE_MOCK_STATE`：执行层 旧名，兼容读取已删；
   `test-gate.js` / `test-auth.js` 故意注入旧名断言其**不**算法域，删测试即丢退役证明。
 - `EXECUTION_REAL_COMMIT`：执行层 从不读取，只在 `test-all.js` 的泄漏剥离名单里
-  出现（防止测试环境把它带进真写）；宿主的真写闸是 `FSHINE_REAL_COMMIT`。
+  出现（防止测试环境把它带进真写）。
+- `FSHINE_REAL_COMMIT`：**已退役（2026-11-08 架构裁定）**——宿主侧的落账授权总闸连判据源
+  （`platform-mock.ts` 的 `isCommitEnabled`）一起删除，"编排层不判这个部署允不允许写"。
+  执行层要自己的写授权接口应由执行层自己声明并登记进第 2/3 节；代码树里仅剩解释其退役
+  原因的注释引用（leak-lint 的 FSHINE_* 登记表以「遗留待清」挂着它，清空即删）。
 - `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT`：fshine 写路径旧开关，
   已随 C 波退役；`docs-reality.test.ts` 断言其在生产代码中零复现，删断言即丢闭环守卫。
 - `STEALTH_MODE` / `STEALTH_DELAY_SCALE`：只出现在 执行层 未实现特性的旧规格文档

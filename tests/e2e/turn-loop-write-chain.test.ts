@@ -25,11 +25,13 @@
  *
  * **D 波（两个写流程开关退役）后本文件不设任何 env 开关**：B 波的
  * `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 已删，宿主恒定拦截提案命令、
- * 落账后端恒接，默认部署（.env 只有 EXECUTION_EXECUTOR=mock）就走完整链——"不设开关也走网关
- * 路径"由本文件每条用例直接钉住。原先靠"关掉落账开关"才可达的 confirm_held（确认收到但不写）
- * 随之成为**真平台专属态**：mock 之下 isCommitEnabled 恒真，那个 fail-closed 在本文件里
- * 已不可达，改由 packages/agent/proposal-flow.test.ts（proposalCommitEnabled=false 一支）
- * + 同文件的 isCommitEnabled 语义组（真平台缺 FSHINE_REAL_COMMIT ⇒ 假）共同钉住。
+ * 落账后端恒接，默认部署就走完整链——"不设开关也走网关路径"由本文件每条用例直接钉住。
+ *
+ * **2026-11-08 架构裁定后进一步没有任何写授权位可设**：原 writeEnabled /
+ * proposalCommitEnabled 两位（由部署 env 经 isCommitEnabled 派生）整支删除——宿主不再判
+ * "这个部署允不允许写 / 落账"，提案与确认都照常走到平台，执行层自己的拒绝 / warning /
+ * dryrun 提示由平台信封给出并走既有失败链路上行。原"部署关写 ⇒ 宿主当场合成写关闭话术"
+ * 与"落账声明关闭 ⇒ 确认被确定性拒绝"两条 e2e 随之退役（见下方替换后的用例）。
  *
  * 只在 mock 执行器下跑（harness beforeAll 固定 EXECUTION_EXECUTOR=mock，落的是假状态文件），
  * 数据瞄准 seed.json：幻辰财税 + 202609（未结账、无存量凭证）。
@@ -40,7 +42,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { boot, gatewayProposalWorker, gatedWorker, mainDriver, type WorkerStep } from './harness';
-import { messageTextFor } from '../../packages/agent/src/error-codes';
 
 // harness 全局设 EXECUTION_REQUIRE_PLAN=1 是为 worker 侧计划绑定保真；服务进程自己并不带这个
 // mandate。宿主持有的两条直调（提案创建、提案落账）都经 hostGatewayEnv() **显式剥**它
@@ -129,8 +130,8 @@ function proposalWorker(...proposals: object[]) {
 
 /**
  * 放开写能力：harness boot 默认只读（与 config/agent.yaml 的 capabilities: ["read"] 同形态）。
- * ⑧ 后执法判据 = 平台写开放声明（writeEnabled，mock 默认放开），principal capabilities 不再
- * 参与执法——本函数保留是为了维持"合法 principal"的夹具形状，不再承载授权语义。
+ * 2026-11-08 后 principal capabilities 是纯遗留数据位（执法路径不读它），本函数保留只是
+ * 为了维持"合法 principal"的夹具形状。
  */
 async function grantWrite(assembly: Awaited<ReturnType<typeof boot>>['assembly']) {
   await assembly.store.principalScopes.upsert({
@@ -183,13 +184,10 @@ describe('[L4 集成] 网关提案路径 · 提案创建（无开关，默认部
     await assembly.close();
   });
 
-  it('mock 之下落账恒放行：一个 env 开关都不设，确认码也直接走到落账（零 fail-closed 停留）', async () => {
-    // B 波那两个开关（FSHINE_PROPOSAL_VIA_GATEWAY / FSHINE_PROPOSAL_COMMIT）退役后，
-    // 默认部署 = 完整链。原先"关掉落账开关"才可达的 confirm_held（确认收到但不写）随之成为
-    // **真平台专属态**：mock 之下 isCommitEnabled 恒真，这里已没有任何 env 能让确认停留在
-    // "不写"——那条 fail-closed 的机械判据搬到了 packages/agent/proposal-flow.test.ts
-    // （proposalCommitEnabled=false 一支 + isCommitEnabled 语义组：真平台缺
-    // FSHINE_REAL_COMMIT ⇒ 假 ⇒ 确认码得到确定性拒绝、零写入）。
+  it('mock 之下落账恒放行：一个开关都不设，确认码也直接走到落账（零 fail-closed 停留）', async () => {
+    // B 波那两个开关（FSHINE_PROPOSAL_VIA_GATEWAY / FSHINE_PROPOSAL_COMMIT）与 D 波的写授权位
+    // （writeEnabled / proposalCommitEnabled）都已退役：默认部署 = 完整链，没有任何 env 能让
+    // 确认停留在"不写"。执行层自己的拒绝走 commit 信封的 unavailable / !ok 分支上行。
     const { send, assembly } = await boot({
       main: writeChainMain([
         { kind: 'delegate', request: '录入一笔 9 月凭证' },
@@ -215,20 +213,21 @@ describe('[L4 集成] 网关提案路径 · 提案创建（无开关，默认部
     await assembly.close();
   });
 
-  it('能力不含 write：宿主当场合成写关闭话术，平台一次都没被办调（无提案落库）', async () => {
+  it('提案创建没有办调前复核：能力声明只读也照常登记并给出确认码', async () => {
+    // 2026-11-08 裁定前这一条钉"能力不含 write ⇒ 宿主当场合成写关闭话术、平台一次都没被
+    // 办调"。裁定后宿主不再持那个布尔，办调照常发生；执行层自己的拒绝走 failed 分支上行。
     const { send, assembly } = await boot({
-      // ⑧ 部署关写（writeEnabled: false）：提案路径的写开放复核据此拒绝
-      writeEnabled: false,
       main: writeChainMain([{ kind: 'delegate', request: '录入一笔 9 月凭证' }]),
       worker: gatewayProposalWorker(singleValidProposal()),
     });
-    // 部署写声明关闭
+    // 不调 grantWrite：principal 保持只读的遗留数据位（执法路径不读它）
 
     const reply = await send('录入一笔 9 月凭证');
 
-    expect(reply).toContain('未开放写入权限');
-    // 平台零提案：没有 intent 条目，也没有取物单
-    expect(await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION)).toBeNull();
+    // 提案真被登记：确认码出现在确定性回复里，没有 intent 条目"不存在"那一支
+    expect(reply).toMatch(CONFIRM_RE);
+    expect(reply).not.toContain('未开放写入权限');
+    expect(await assembly.store.changeIntents!.findPendingBySession(PRINCIPAL, SESSION)).not.toBeNull();
     await assembly.close();
   });
 
@@ -372,14 +371,11 @@ describe('[L4 集成] 网关提案路径 · 完整落账链（默认部署，无
     await assembly.close();
   });
 
-  it('落账声明关闭时确认被确定性拒绝：零写入、提案保持待确认（D-080 端到端）', async () => {
-    // ⑧ 后 D-080 的时点纪律由双声明分离表达：提案时点看 writeEnabled（开，提案成立并
-    // 发码），确认时点看 proposalCommitEnabled（关，确认被拒）——两个判点、两份声明，
-    // 证明确认步确实重新复核而不是沿用提案时点的放行。部署中途收写是运维面动作，
-    // e2e 以静态双声明覆盖同一执法分支。
+  it('平台说落账未完成：确认如实报失败，零增量、意图 failed、任务终态回写', async () => {
+    // 2026-11-08 裁定前这一条钉"落账声明关闭 ⇒ 确认被宿主确定性拒绝、提案保持 pending"
+    // （D-080 的双声明时点纪律）。裁定后确认时点没有宿主侧复核：commit 照常办调，执行层
+    // 自己的拒绝走 !ok 分支上行——零写入、意图 failed、任务终态回写 failed（D-082）。
     const { send, assembly } = await boot({
-      writeEnabled: true,
-      proposalCommitEnabled: false,
       main: writeChainMain([
         { kind: 'delegate', request: '录入一笔 9 月凭证' },
         { kind: 'conversation', text: '模型自由回答。' },
@@ -396,11 +392,11 @@ describe('[L4 集成] 网关提案路径 · 完整落账链（默认部署，无
 
     const done = await send(`确认 ${code}`);
 
-    expect(done).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    // 通用失败话术：只说事实与下一步，不把平台错误码/内部状态带上屏
+    expect(done).toContain('执行失败');
     expect(done).not.toContain('已执行');
     expect(mockVoucherCount(ACCOUNT, PERIOD)).toBe(before);
-    // 提案在平台侧仍然有效：意图保持 pending，用户修好权限或作废后仍可继续
-    expect((await assembly.store.changeIntents!.get(pending!.intentId))?.status).toBe('pending');
+    expect((await assembly.store.changeIntents!.get(pending!.intentId))?.status).toBe('failed');
     await assembly.close();
   });
 });

@@ -42,7 +42,7 @@ import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { existsSync, readFileSync } from 'node:fs';
-import { executionLanguageFingerprints, isPlatformMock } from '@fshine/agent';
+import { executionLanguageFingerprints } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
@@ -270,9 +270,12 @@ function isolatePlatformState(): void {
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
     EXECUTION_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
     EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
-    // 网关限流有 example-gateway 专项测试；mock 上探针要跑长任务，放宽 burst 以免被限流挡住主线。
-    // 真实平台保持生产限流（"别让下游平台有感知"）：探针节奏天然低于限额，被限就是信号。
-    ...(isPlatformMock(process.env) ? { EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 200, perMs: 0 }, global: { burst: 400, perMs: 0 } }) } : {}),
+    // 网关限流有 example-gateway 专项测试；真实平台保持生产限流（"别让下游平台有感知"）：
+    // 探针节奏天然低于限额，被限就是信号。
+    // 2026-11-08 删除宿主侧的 mock 判据（isPlatformMock / EXECUTION_EXECUTOR）：原来只在
+    // mock 下注入的 EXECUTION_RATE_LIMIT 放宽旋钮随之删除——它是一处宿主替执行层调限流
+    // 参数的行为，且当前仓内夹具根本不读该 env（限流配置归平台自己的 DZ_* 命名，见
+    // debt-ledger D-163 的 env 家族对齐）。要放宽就改执行层自己的限流配置，不在编排层开关。
   });
 }
 
@@ -1296,8 +1299,12 @@ function windowSwitchAmounts(turn: Turn, period: string, allPeriods: readonly st
 }
 
 /**
- * X1 写尝试轮：零已执行写调用 + WRITE_NOT_ENABLED 关键片段到达用户（error-codes.ts 唯一来源：
- * "当前未开放写入权限，如有需要请联系管理员开通。"）+ 不得出现编造的录入成功。
+ * X1 写尝试轮：零已执行写调用 + 写没写成的原因到达用户 + 不得出现编造的录入成功。
+ *
+ * 2026-11-08 架构裁定后这句话**由执行层说**：宿主不再持有"这个部署允不允许写"的布尔，
+ * 也不合成 canonical 写关闭话术（原 error-codes.ts 的 WRITE_NOT_ENABLED）。判据因此是
+ * "用户知不知道写为什么没写成"——措辞族同时收执行层自己的拒绝 / warning / dryrun 提示与
+ * 承载结构不匹配，不收某一固定句式（那会把诚实的等义转述判红）。
  * 金额判定整体跳过（X1 主循环里 continue）——回复回显的是用户给定的拟录入金额（500 元），
  * 不是查询结论。
  */
@@ -1305,9 +1312,9 @@ function writeAttemptNotes(turn: Turn, records: AuditRecord[]): string[] {
   const notes: string[] = [];
   const writes = executedWriteCalls(records);
   if (writes > 0) notes.push(`写尝试轮发生 ${writes} 次已执行写调用——写未开放应挡在执行前：「${turn.text}」`);
-  // 写未开放措辞到达用户（双语）：宿主 canonical 话术是"当前未开放写入权限，如有需要请联系
-  // 管理员开通。"，但模型自己转述时用等义措辞——"受写权限管控""写入调用被平台拒绝""writes
-  // are blocked""not permitted in this workflow"都算到达（2026-11-07 X1 实测：模型说
+  // 写未开放措辞到达用户（双语）：宿主不再合成 canonical 话术，这句话由执行层自己的拒绝 /
+  // warning / dryrun 提示给出，模型转述时用等义措辞——"受写权限管控""写入调用被平台拒绝"
+  // "writes are blocked""not permitted in this workflow"都算到达（2026-11-07 X1 实测：模型说
   // "受写权限管控：任何写入调用都被平台侧拒绝"，substance 到位只因不在旧词表里被判红）。
   // 判据要的是"用户知道写没开、为什么没写成"，不是某一固定句式。
   // 两族合法阻塞措辞（2026-11-07 X1 实测校准）：

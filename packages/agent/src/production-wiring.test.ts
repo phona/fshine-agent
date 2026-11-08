@@ -130,7 +130,6 @@ function setupProposal(options: {
       calls.push({ platformRoot, args });
       return { code: 0, stdout: COMPLETED_ENVELOPE, stderr: '' };
     },
-    writeEnabled: true,
     generateCode: () => 'D3F2K9',
     intentTtlMs: 10 * 60_000,
     ...(options.proposalReviewTurn ? { proposalReviewTurn: options.proposalReviewTurn } : {}),

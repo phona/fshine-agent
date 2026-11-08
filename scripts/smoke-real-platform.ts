@@ -8,11 +8,10 @@
  * "有没有真查/是不是平台来的/像不像人话"。
  *
  * 用法（纪律同探针：StepCode 衍生的 shell 会带 harness 的 LLM_*，Node --env-file
- * 不覆盖已存在变量，必须先剥；真实平台还须剥 EXECUTION_EXECUTOR/FSHINE_REAL_COMMIT）：
+ * 不覆盖已存在变量，必须先剥）：
  *   env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL \
- *       -u EXECUTION_EXECUTOR -u FSHINE_REAL_COMMIT \
  *       node --env-file=/tmp/env-real --import tsx scripts/smoke-real-platform.ts
- * 自检（不碰平台：只验环境三闸 + 断言尺子在好坏两种Fixture上各自该响的响、该静的音）：
+ * 自检（不碰平台：只验环境闸 + 断言尺子在好坏两种Fixture上各自该响的响、该静的音）：
  *   同上命令追加 --check
  *
  * 跑前纪律（人执行，脚本不替代）：
@@ -30,16 +29,20 @@
  *     天然低于限额，被限就是信号（RATE_LIMITED 落审计，≥2 次记异常）；
  *   · dbPath 用临时目录——绝不碰生产 data/agent.db。
  *
- * 写安全三闸（boot 前校验，任一不过直接拒跑 exit 2）：非 mock / FSHINE_REAL_COMMIT
- * 空（真平台 commit 双闸之一）/ principal capabilities 只读。跑完机械核对审计新增
+ * 写安全闸（boot 前校验，任一不过直接拒跑 exit 2）：principal capabilities 只读
+ * ——本脚本只发读请求，主体声明了写能力就说明配置与用法不匹配，拒跑。跑完机械核对审计新增
  * 条目：mode 全 query、exit 0 或干净拒绝（refused 即门禁在执行前挡下）。
+ * 2026-11-08 架构裁定后删掉原先的两道 env 闸（EXECUTION_EXECUTOR=mock / FSHINE_REAL_COMMIT
+ * 置位）：那是编排层替执行层判"跑的是不是 mock、允不允许 commit"，判据源已归执行层。
+ * "这一轮有没有真发生写"由跑后的审计核对承担（mode ≠ query 立即记异常并停），比 boot 前
+ * 猜环境更硬。
  *
  * 结果写 .runtime/smoke-<ts>.json（turns/notes/audit/env 快照）；硬断言失败 exit 1。
  */
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { executionLanguageFingerprints, isCommitEnabled, isPlatformMock } from '@fshine/agent';
+import { executionLanguageFingerprints } from '@fshine/agent';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';
@@ -426,10 +429,11 @@ async function main(): Promise<void> {
   const platformRoot = config.contextProfiles[profileId ?? '']?.root;
   if (!platformRoot) throw new Error('config/agent.yaml 未配置 example-gateway contextProfiles.root——无法定位平台仓');
 
-  // ── 写安全三闸（boot 前）──
+  // ── 写安全闸（boot 前）──
+  // 2026-11-08 裁定后只剩主体能力这一道：原先的"非 mock"与"FSHINE_REAL_COMMIT 置位"两道
+  // env 闸已删——判"跑的是不是 mock 应答器、允不允许 commit"归执行层，编排层不再替它读
+  // 环境。本轮有没有真发生写由跑后的审计核对兜底（mode ≠ query 立即记异常并停）。
   const guards: string[] = [];
-  if (isPlatformMock(process.env)) guards.push('当前 EXECUTION_EXECUTOR=mock——冒烟集只跑真实平台；mock 行为层全集请用探针 scripts/probe-real-agent.ts');
-  if (process.env['FSHINE_REAL_COMMIT'] === '1') guards.push('FSHINE_REAL_COMMIT=1 已置位——真平台 commit 双闸之一被打开，只读冒烟集拒跑');
   const capabilities = config.principals[AUTHORIZED_KEY]?.capabilities ?? ['read'];
   if (capabilities.some((c) => c !== 'read')) guards.push(`principal capabilities 含非只读项（${capabilities.join('/')}）——冒烟集拒跑`);
 
@@ -482,9 +486,6 @@ async function main(): Promise<void> {
     at: new Date().toISOString(),
     mode: 'real-platform-smoke',
     env: {
-      executor: process.env['EXECUTION_EXECUTOR'] ?? '(unset=real)',
-      mock: isPlatformMock(process.env),
-      commitEnabled: isCommitEnabled(process.env),
       capabilities,
       llm: { base: process.env['LLM_API_BASE_URL'] ?? '', model: process.env['LLM_MODEL'] ?? '' },
       planStateIsolated: true,

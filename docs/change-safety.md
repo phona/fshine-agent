@@ -12,7 +12,9 @@
 
 **允许**：`npm test`、`npm run typecheck`、`npm run acceptance`、`npm run smoke:commit:mock`、`node --env-file=.env --import tsx scripts/probe-real-agent.ts`（真实 LLM + 真实 `bin/17dz` 计划门 + **mock 执行器**）、L7 打分链 `npm run eval` / `eval:probe` / `eval:acceptance` / `eval:score` / `eval:baseline`（前者两段与探针同法域；`eval:score`/`eval:baseline` 只读报告 + 调评委模型，不触平台）。
 
-**禁止**：`EXECUTION_EXECUTOR=`（置空切真平台）、`scripts/smoke-real-platform.ts`、任何不带 `EXECUTION_EXECUTOR=mock` 的 `bin/17dz` 调用、`FSHINE_REAL_COMMIT=1`。`.env` 默认 `EXECUTION_EXECUTOR=mock` 且 `FSHINE_REAL_COMMIT` 未置位——双重保险丝都在，**不许摘**。
+**禁止**：`EXECUTION_EXECUTOR=`（置空切真平台）、`scripts/smoke-real-platform.ts`、任何不带 `EXECUTION_EXECUTOR=mock` 的 `bin/17dz` 调用。`.env` 默认 `EXECUTION_EXECUTOR=mock`——这道保险丝由**执行层平台**自己读，编排层不读它（2026-11-08 裁定：宿主侧 `isCommitEnabled` / `FSHINE_REAL_COMMIT` 那道写授权闸已连判据源一起删除，真平台的落账授权/拒绝归执行层自己的门，编排层只如实转述）。
+
+> **2026-11-08 保险丝账（如实记账，不冒充双重）**：原"双重保险丝"里的第二道（宿主侧 `FSHINE_REAL_COMMIT`）已退役——`platform-mock.ts` 整模块删除，宿主不再持有"这个部署允不允许写"的布尔。剩下的 `EXECUTION_EXECUTOR=mock` 是执行层自己的开关；`scripts/smoke-real-platform.ts` 的 boot 前 env 闸随之换成"主体能力只读 + 跑后审计核对 mode 全 query"，`scripts/mock-commit-smoke.ts` 的 fuse 换成"必须显式声明 `EXECUTION_MOCK_STATE`（执行层应答器的状态文件路径）"。判据依据写在本波 commit message；本节的禁止清单本身一字未放宽。
 
 ### mock 能证 / 不能证（验收边界的依据）
 
@@ -1523,7 +1525,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 ### 四项裁定（owner 2026-11-06；前两项解设计门 Q1/Q2/Q3，Q4 解跨仓排期）
 
 1. **Q1 调用载体**：网关 CLI 结构化子命令 `<gateway> call --file <json>`。worker 侧 typed 调用工具经 driver 的 beforeToolCall 拦截后走同一出口；参数 schema 由执行层自有声明派生，宿主不解析不校验业务参数。
-2. **Q2/Q3 三道门与 mock 选择器归属**：三道门（serve 令牌 / 实执行授权 / 真写授权）与 mock 选择器**整体归执行层**——成为执行层部署配置里的普通声明参数，fail-closed 逐门保留；编排层只持通用确认事实（谁确认、绑哪个计划版本、有效期）；`EXECUTION_*` / `FSHINE_REAL_COMMIT` 等 env 级开关从宿主退役（退役前各执法点拒绝形态与错误码逐字不变）。
+2. **Q2/Q3 三道门与 mock 选择器归属**：三道门（serve 令牌 / 实执行授权 / 真写授权）与 mock 选择器**整体归执行层**——成为执行层部署配置里的普通声明参数，fail-closed 逐门保留；编排层只持通用确认事实（谁确认、绑哪个计划版本、有效期）；`EXECUTION_*` / `FSHINE_REAL_COMMIT` 等 env 级开关从宿主退役（退役前各执法点拒绝形态与错误码逐字不变）。**2026-11-08 已执行**：宿主侧读 `EXECUTION_EXECUTOR` / `FSHINE_REAL_COMMIT` 的模块（`platform-mock.ts`）、启动模式报告（`runtime-mode.ts`）、以及由它们派生的写执法位（`writeEnabled` / `proposalCommitEnabled`）与写关闭合成话术全部删除；serve 令牌门与实执行门的执法点不变（那两门的 env 由执行层自己读）。
 3. **Q4 跨仓形态**：17dz-platform 同批实现，走 PR 给 owner。17dz 侧改动列表（P1–P6）见下；fshine 侧用 mock 接缝证明宿主行为，真实配对用 17dz 集成写 e2e 证明（前置 = 兄弟仓检出，标注「具备前置后跑」）。
 
 ### fshine 侧改动列表（C1–C11）

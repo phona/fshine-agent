@@ -53,7 +53,7 @@ npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非
 
 ## mock 联调（执行层侧 fake 保护）
 
-`.env` 设 `EXECUTION_EXECUTOR=mock`（默认已设；**执行层治理变量权威名以该执行层声明为准**，现行平台已改回 `EXECUTION_*` 前缀，旧 `DZ_*` 别名已移除）后，执行层网关把执行器替换为 mock 应答器：不开浏览器、不触网，gate 矩阵 / commit 令牌 / 审计照真生效，落账写进 mock 状态文件（默认 `<profile.root>/.runtime/mock-state.json`，删文件即重置）。此模式下落账全链路默认放开（写的是假状态）；切回真平台后落账默认拒绝，须显式 `FSHINE_REAL_COMMIT=1`。
+`.env` 设 `EXECUTION_EXECUTOR=mock`（默认已设；**执行层治理变量权威名以该执行层声明为准**，现行平台已改回 `EXECUTION_*` 前缀，旧 `DZ_*` 别名已移除）后，执行层网关把执行器替换为 mock 应答器：不开浏览器、不触网，gate 矩阵 / commit 令牌 / 审计照真生效，落账写进 mock 状态文件（默认 `<profile.root>/.runtime/mock-state.json`，删文件即重置）。该开关由**执行层自己读取**：编排层不读它，也不据此判"这个部署允不允许写"——写能不能真落地（含真平台落账的授权 / dryrun 提示）由执行层自己的门裁决并给出拒绝或 warning，宿主只如实转述。
 
 ```bash
 npm run acceptance                  # mock 保护下全量验收（含写链路、污染用例）

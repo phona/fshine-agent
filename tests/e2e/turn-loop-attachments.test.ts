@@ -22,7 +22,8 @@
  *   ④ 突发形态（2026-10-19）：几个文件 + 一条指令连发时，文件消息一个气泡都不开，收据
  *      只由指令回合带一次（实测 3 文件 + 1 指令曾出现 4 条气泡且互相穿插）。
  *
- * 纪律：EXECUTION_EXECUTOR=mock 由 harness 钉死；本文件只新增用例，不改 harness 与既有文件。
+ * 纪律：mock 执行器由 harness 钉死（平台侧自己读它的执行器开关，宿主不读）；本文件只新增
+ * 用例，不改 harness 与既有文件。
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';

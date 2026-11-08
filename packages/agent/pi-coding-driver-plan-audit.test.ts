@@ -82,7 +82,6 @@ async function workerWith(options: {
   sessionId: string;
   events: ServeGateEvent[];
   planCliRunner?: PlanCliRunner;
-  writeEnabled?: boolean;
   entitySources?: PlanEntitySources;
   semantics?: OperationSemantics;
   onNotice?: (text: string) => Promise<void>;
@@ -100,7 +99,6 @@ async function workerWith(options: {
     agentDir: path.join(root, '.fshine-agent'),
     modelConfig,
     ...(options.planCliRunner ? { planCliRunner: options.planCliRunner } : {}),
-    ...(options.writeEnabled !== undefined ? { writeEnabled: options.writeEnabled } : {}),
     ...(options.entitySources ? { entitySources: options.entitySources } : {}),
     ...(options.semantics ? { operationSemantics: options.semantics } : {}),
     ...(options.onNotice ? { onNotice: options.onNotice } : {}),
@@ -250,8 +248,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY\n' };
       throw new Error('unexpected CLI call');
     };
-    // 写开放（平台声明 writeEnabled）：不走前置扫描，这句话必须来自 evaluate 失败分支的分流
-    const worker = await workerWith({ sessionId: 'notplannable', events, planCliRunner: rejectingRunner, semantics: SEMANTICS, writeEnabled: true });
+    const worker = await workerWith({ sessionId: 'notplannable', events, planCliRunner: rejectingRunner, semantics: SEMANTICS });
 
     const verdict = await submit(worker, PLAN_COMMAND);
 
@@ -261,7 +258,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     worker.session.dispose();
   });
 
-  it('平台按"只读"拒绝计划，语义表说要用户确认：写开放时点名该 operation，照旧落一行', async () => {
+  it('平台按"只读"拒绝计划，语义表说要用户确认：点名该 operation，照旧落一行', async () => {
     const { events } = auditSink();
     const rejectingRunner: PlanCliRunner = async ({ args }) => {
       if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
@@ -273,12 +270,12 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
       events,
       planCliRunner: rejectingRunner,
       semantics: SEMANTICS,
-      writeEnabled: true,
     });
 
     const verdict = await submit(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
 
-    // 2026-10-14 修正：写已开放时这不是权限问题而是形状问题，点名它（假归因修复）。
+    // 这不是权限问题而是形状问题，点名它（2026-10-14 假归因修复；2026-11-08 起"未开放
+    // 写入权限"那一支已删除，宿主不判这个部署允不允许写）。
     // 审计一侧的要求不变：每个裁决出口仍落一行，detail 照旧是 calls 摘要。
     expect(verdict?.reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.commit' }));
     expect(verdict?.reason).not.toContain('当前未开放写入权限');
@@ -321,9 +318,10 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
     worker.session.dispose();
   });
 
-  it('写关闭前置拦截（平台声明写未开放）→ WRITE_NOT_ENABLED，落一行', async () => {
+  it('含写类 operation 的计划不再被前置拦：直达平台评估并激活，照旧落一行', async () => {
     const { events } = auditSink();
-    // 平台声明写未开放 + 语义表说 voucher.commit 要用户确认：宿主在 evaluate 之前就拦
+    // 2026-11-08 删除写关闭前置拦截：宿主不判"这个部署允不允许写"，含写类 operation 的
+    // 计划照常提交平台评估（激活即放行执行），审计口径不变——每个出口仍落一行。
     const worker = await workerWith({
       sessionId: 'prewrite',
       events,
@@ -333,7 +331,7 @@ describe('计划提交审计：每个裁决出口都落一行 tool_calls', () =>
 
     const verdict = await submit(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.commit","args":["幻骥达","202608"]}]}');
 
-    expect(verdict?.reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(events).toHaveLength(1);
     worker.session.dispose();
   });

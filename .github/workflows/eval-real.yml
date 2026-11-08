@@ -33,7 +33,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      EXECUTION_EXECUTOR: mock
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}

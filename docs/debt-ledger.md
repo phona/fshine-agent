@@ -1959,3 +1959,48 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：allowedAmounts 支持按 collection 分组的聚合放行（分句点名某 collection 时，该 collection 在本线程的真实值全和 = 合法聚合），并补反例（跨线程小计不得蹭放行）；C2 复跑此类 note 归零或转信息性。
 - **归属波次 / 限期**：Wave 6 之后（不阻塞合入——C2 闸的结构验证已由 50-70 次真实调用坐实；本条只影响 note 分类的信噪比）。
 - **状态**：待办。
+
+---
+
+## D-075 / D-197 按 2026-11-08 架构裁定重登记（宿主写判断整层退役）
+
+**裁定（owner 拍板）**：写能不能真落地是执行层的事，编排层不管。编排层只保留 ① 这个操作要不要用户确认（accessSemantics 的 `confirm` 列驱动，已在消费）② 如实描述「提交什么」③ 编排没做到自己说的事要如实说。执行层自己报错 / warning / 返回「当前 dryrun 模式」提示，编排层转述。
+
+### D-075 · 「用户一定知道写权限关闭」的机械保证 → 机械保证本身退役
+
+- **原条目位置**：本篇 2026-09-29「四路并行验收记录」表内 D-075 行 + D-073/D-075 残留收尾段（历史记录，原文不动，以本节为准）。
+- **原职责**：T7 事故（模型走完"录入准备"、停在准备阶段、承诺"即可产出录入提案"却永不抵达提案步）下，保证用户一定知道写权限是关闭的。实现分两层：① 机械兜底——宿主在 evaluate 之前用「calls（宿主解析）× access 语义表 `confirm` 列 × 平台写开放声明（`writeEnabled`）」判一次"这个部署允不允许写"，不成立就合成 `WRITE_NOT_ENABLED` 终稿终结该轮、零平台调用；② 能力信封注入 worker 提示词（软层，⑦ 已退役）。
+- **为什么退役**：第①层正是"编排层判这个部署允不允许写"。裁定后这一层归执行层——平台计划门 / 提案门 / commit 门的拒绝与 warning 由执行层自己给出，宿主只如实转述。附带消掉一类已实证的伤害：D-096 记的假归因（宿主回「请联系管理员开通写入权限」，用户被指去找管理员要一个他已经有的权限，这一轮放弃）。
+- **谁来接管**：执行层自己的门（计划门 `PLAN_OPERATION_NOT_READ_ONLY` / 提案门 / commit 门的拒绝、warning、dryrun 提示）+ 宿主既有的失败链路上行（`failed` 分支的 errorCode/workerText、commit 信封的 `unavailable` / `!ok`）。宿主保留的是"该不该进计划"的形状判据（`nonPlannableOperations`：平台 `plan ∧ ¬confirm` 两列合取）——那是描述，不是权限判断。
+- **同批删除的东西**（逐项，原职责 → 接管方）：
+  | 删除项 | 原职责 | 接管方 |
+  |---|---|---|
+  | `packages/agent/src/platform-mock.ts` 整模块（`isPlatformMock` / `isCommitEnabled` / `ensureMockStatePath` + 三个 env 常量） | 宿主侧集中读 `EXECUTION_EXECUTOR` / `FSHINE_REAL_COMMIT`，派生"是不是 mock、允不许落账" | 执行层自己读自己的治理变量；脚本侧 mock 状态路径改为显式声明 |
+  | `apps/server/runtime-mode.ts` 整模块 + `main.ts` 的 `runtime_mode` 日志行 | 启动时汇总 mock/commit 授权状态（判据源已删，模块只剩报告） | 无（判据源不存在，报告失去对象） |
+  | `TurnDriverInput.writeEnabled` / `PiCodingWorkerSessionOptions.writeEnabled` / `ContextTaskRunnerOptions.writeEnabled` | 宿主把"写开放声明"透传给写关闭扫描 | 无（不再有这道扫描） |
+  | `planWriteClosed`（plan-runtime）+ `planNotReadOnlyCode`（pi-coding-driver） | 写关闭前置判据 / "该说哪句话"的权限分流 | `nonPlannableOperations` 只留形状点名 |
+  | `plan_write_not_enabled` 事件 + `PLAN STOP\nWRITE_NOT_ENABLED` 拦截支 | evaluate 前终结该轮并合成终稿 | 平台计划门拒绝 → `planNotReadOnlyReason` 点名 |
+  | `TurnDriverResult.writeClosed` / `SubagentTaskResult.writeClosed` / worker 会话 `writeClosed()` / runtime 的 writeClosed 分支 / `renderWriteClosureReply`（turn-relay） | 宿主持有并发音的写关闭终稿，不经模型翻译、不经出口校验标注 | 无（终稿回到既有失败链路：worker 文本 / 平台信封转述） |
+  | `ProposalCreationOutcome` 的 `write_closed` 态 + `createProposalViaGateway` 的办调前写开放复核 | 提案创建前判"平台声明写未开放"，不成立即零办调 + 合成话术 | 平台 `failed` 信封的 errorCode/workerText |
+  | `proposalCommitEnabled` 选项 + 确认时点的写开放复核 + `confirmLineFor` 的"当前落账执行未启用"那一支 | 确认前判"落账放不放行"，不成立即 `confirm_held` | commit 信封的 `unavailable` / `!ok`；宿主只说自己没做到的事（后端未注入 = 配置故障） |
+  | `error-codes.ts` 的 `WRITE_NOT_ENABLED` 话术条目 | 写关闭终稿的唯一措辞来源 | 新码 `PROPOSAL_FLOW_NOT_CONFIGURED`（只描述"写流程未接线"这一件宿主自己的事实） |
+  | `validateStructuredCall` 的 structured_call 写关闭拦截 | 与 bash 计划评估同口径的写拦截 | 平台能力门/计划门自己裁决 |
+  | assembly 的 `writeEnabled` / `proposalCommitEnabled` 三处派生（mock 状态路径 + 两位声明） | 部署层把 env 派生结果注入执法路径 | 无（执法路径不再持这两位） |
+- **状态**：**已关（2026-11-08，随本轮删除落地）**。原机械保证的目标（用户知道写没写成）由执行层自己的拒绝/warning 承担，宿主不再代判；"编排没做到自己说的事要如实说"由保留的确认行 + 失败链路上行承担。
+- **残留（如实登记）**：① 宿主不再保证"写权限关闭"这句话到达用户——这是裁定的直接后果，不是漏修；若某执行层在关闭态下静默成功，那是执行层的债，由 X1 写尝试轮（探针已改判据：只核"用户知不知道为什么没写成"，措辞族同时收执行层自己的拒绝与承载结构不匹配）盯。② `TrustedContext.capabilities` / `principal_scopes.capabilities` 成为纯遗留数据位（执法路径不读），删除待配置面收敛后另行立项。③ `scripts/acceptance.ts` 的 mock 状态重置从"宿主兜底路径"改为"只重置显式声明的 `EXECUTION_MOCK_STATE`"——未显式设时执行层平台用自己的缺省状态文件，宿主不碰。
+
+### D-197 · 放行漏洞判据 ①② 按新边界重写（尺子缺陷与 gateway 穿线部分不变）
+
+- **原条目位置**：本篇 D-197 全条（历史记录保留；本节只重写判据 ①② 的射程，其余原文不动）。
+- **不变的后果**：D-197 发现的放行漏洞本身**没有**因退役而消失，反而更需要收口——宿主承诺"要用户确认的写操作经宿主办调、用户拿到确认码"，而 worker 用被放行的 bash 直调平台 CLI 把写链整个走完了，一次确认都没有。这正是裁定保留的第 ③ 条（编排没做到自己说的事要如实说）的反面：编排说了要走确认门，实际没走。
+- **判据 ①② 的原射程与被看守的东西**：原判据写在"宿主写拦截 + 写授权位"的语境里（闸① = 复核门失败后不把 worker 放回同一写路径；闸② = serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口）。那道"写授权拦截"（`writeEnabled` / `proposalCommitEnabled` / 计划扫描）已随裁定删除，因此判据 ①② 的**理由段**要重写，**判据本身不用改**：
+  | 判据 | 原理由（已退役的射程） | 新理由（2026-11-08） |
+  |---|---|---|
+  | ① 复核门失败后宿主不得把 worker 放回去重试同一写路径——要么终止本轮写意图并向用户说明，要么把该会话的写能力收回（二选一，裁定后实现） | 守的是"部署没开放写"那道拦截：放回去 = 绕过写关闭判据 | 守的是**确认路由**不变量：复核失败后放回去，worker 就可能在宿主铸不出确认码的情况下自建自投（2026-11-07 实测形状）。终止本轮写意图或收回该会话写能力，都是让"要用户确认的操作确实经过用户确认"成立的手段，与写授权位是否在位无关 |
+  | ② 宿主 serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口（或其等价封堵：worker 的 bash 不得触达创建与提交），封堵后重跑 acceptance 5.1：复核失败场景下夹具 `committed` 提案数不增 | 同上：防绕过写关闭拦截 | 同上：防绕过**宿主确认门**。execute 层（平台 CLI 自带的 proposal/call 子命令）是宿主声明"提案经我办调、确认码由我发"之外的第二条路，封堵它与写授权位无关 |
+- **保留不动的部分**：尺子缺陷（`sessionKeyOf` 拼错，已修待复跑验证——`platform_tasks.parent_session_id` 实为 `wecom:<conversationId>`，修复后的 `sessionKeyOf` 精确命中）与 gateway 穿线补课（已随 PR #9 先行落地，回归锁 `packages/agent/pi-coding-driver-gateway-threading.test.ts` + `apps/server/profile-gateway-wiring.test.ts`）均与本条射程调整无关，原文有效。
+- **新增的时点纪律真空（如实登记，不冒充已覆盖）**：裁定后确认时点没有宿主复核，commit 一律办调。执行层的拒绝走 `unavailable` / `!ok` 分支上行——覆盖在 `packages/agent/proposal-flow.test.ts`（"平台说提案已过期" / "落账失败" / "后端没注入"三条）与 `tests/e2e/turn-loop-write-chain.test.ts`（"平台说落账未完成"）。**真空在于**：宿主不再在确认前复核任何授权，若执行层在 commit 门静默接受一个本不该落的账，宿主只能如实报告执行结果、不能预先拦下——这是裁定的代价，登记在此。
+- **律法归属**：L2（写路径宿主确认状态的单一来源）/ 改动防线 F1（安全门禁不许被旁路）——与 D-197 原条目同归属，射程改写不改归属。
+- **闭环判据**（判据 ①② 一字未放宽，只重写理由段）：① 复核门失败后宿主不得把 worker 放回去重试同一写路径——要么终止本轮写意图并向用户说明，要么把该会话的写能力收回（二选一，裁定后实现）；② 宿主 serve-gate 覆盖平台 CLI 自带的 proposal/call 写入口（或其等价封堵：worker 的 bash 不得触达创建与提交），封堵后重跑 acceptance 5.1：复核失败场景下夹具 `committed` 提案数不增；③ 复核间歇失败的近因定性（隔离复核轮拿到空文本 vs 语义不一致，需审计行补字段列表才能区分）；④ `npm run ci` + 六守卫全绿。
+- **归属波次 / 限期**：宿主修复单独一轮（不混进 eval 域移植 PR）；公开推送前。射程按 2026-11-08 裁定重写不改变波次归属；gateway 穿线补课已随 PR #9 先行落地（偏离「单独一轮」的裁定记录在 D-197 原条目，不作为后续混波先例）。
+- **状态**：待办（判据 ①② 未收口；尺子缺陷已修待复跑验证；gateway 穿线已修）。射程已按 2026-11-08 裁定重写，实现要求一字未放宽。

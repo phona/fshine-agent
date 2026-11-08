@@ -2,7 +2,7 @@ import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { decideBudgetTier } from './budget-policy';
 import { errorFor } from './error-codes';
-import { isWriteAccess, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayExecPathForProfile, gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
@@ -377,34 +377,11 @@ export function validateCalls(calls: readonly PlanCall[], gateway?: string): voi
 }
 
 /**
- * 写关闭判据（D-075）：计划里出现写类 operation，而平台侧声明本部署写未开放。
- *
- * 为什么必须是机械判据（而不是等模型走到提案步）：2026-09-29 真实平台 T7 事故——用户
- * 发起录入请求，模型走了完整的"录入准备"流程（行为优秀），然后停在准备阶段，承诺"即可
- * 产出录入提案"却永不抵达提案步。WRITE_NOT_ENABLED 原先只挂在提案路径的 capability
- * 检查（context.ts 的 createProposalViaGateway）与平台计划门拒绝上，模型不走到那儿，用户就永远
- * 不知道写权限是关闭的。计划成形时（宿主已机械解析出 calls 的 operation 名）就能判：
- * 这份计划注定跑不完，因为部署没开放写。
- *
- * 三个输入全是宿主/平台已有的确定性材料，没有一个字节从 worker 文本解析：
- *   · calls：宿主自己从计划命令解析出来的（parsePlanCallsCommand）；
- *   · semantics：平台 `operation list --json` 的 access 语义表（operation-labels 派生，
- *     判据是平台声明的 confirm 列——要不要用户确认）；
- *   · writeEnabled：平台侧的写开放声明（部署层经 isCommitEnabled() 从平台状态派生，
- *     变更项 ⑧——不再是委托主体自持的能力布尔）。缺省（false）视为只读。
- *
- * 宁缺勿猜：语义表缺失（CLI 派生失败 / 平台还没下发 accessSemantics）或 operation 查不到
- * 语义时，该 operation 不算写类——不触发布防，平台计划门与提案路径的既有拒绝照旧兜底。
+ * 平台计划门对"计划里含非只读 operation"的拒绝名单（`plan && !confirm` 两列的合取判据）
+ * 与"该给用户哪句话"的分流，都在 pi-coding-driver 的 nonPlannableOperations /
+ * planNotReadOnlyReason 一处——本模块不再持有任何"这个部署允不允许写"的判据
+ * （2026-11-08 架构裁定：写能不能真落地归执行层，编排层只管描述与如实转述）。
  */
-export function planWriteClosed(
-  calls: readonly PlanCall[],
-  semantics: OperationSemantics | undefined,
-  writeEnabled: boolean,
-): boolean {
-  if (writeEnabled) return false;
-  if (!semantics || semantics.size === 0) return false;
-  return calls.some((call) => isWriteAccess(semantics.get(call.operation)));
-}
 
 /** Build the per-command environment for a worker bash subprocess. */
 export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePlanId: string | null): NodeJS.ProcessEnv {

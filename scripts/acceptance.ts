@@ -4,9 +4,9 @@
  * 使用独立的验收数据库,不触碰生产数据/生产连接。
  * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault]
  * --fault:使用指向不存在目录的临时配置,验收 2.5 的失败降级。
- * mock 联调:.env 设 EXECUTION_EXECUTOR=mock 后,写链路用例(5.x)走
- * 提案→确认码→dry-run→commit→读回全链(落假状态,零真平台影响),
- * 且每次启动重置 mock 状态文件保证用例可重复。
+ * mock 联调:.env 设 EXECUTION_MOCK_STATE=<路径> 后,写链路用例(5.x)走
+ * 提案→确认码→dry-run→commit→读回全链,且每次启动重置该状态文件保证用例可重复
+ * (未显式设 EXECUTION_MOCK_STATE 时执行层平台用自己的缺省状态文件,宿主不碰)。
  * 出口保真:progress 与 notice 都按生产 adapter 的三个参数交给 handler
  * (channel-wecom/src/adapter.ts 的 dispatchMessage)。notice 原文收进报告与
  * records JSON——少了它,plan-runtime 的 fail-closed 守卫会把任何走计划门的
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';
-import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
+import { PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
 import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
@@ -416,14 +416,15 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   }
   const platformRoot = config.contextProfiles[profileId ?? '']?.root;
 
-  // mock 联调：兜底状态路径 + 每次启动重置 mock 状态（用例的"第 N 张"预期才可重复）。
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
-  if (isPlatformMock(process.env) && mockStatePath && existsSync(mockStatePath) && !process.env[`${MOCK_STATE_ENV}_KEEP`]) {
+  // mock 联调：重置 mock 状态，用例的"第 N 张"预期才可重复。判据只剩一个脚本自己显式
+  // 设的 EXECUTION_MOCK_STATE——宿主不再读 EXECUTION_EXECUTOR 判"是不是 mock"，也不再
+  // 替执行层发明默认状态路径（2026-11-08 删除 platform-mock.ts 的 ensureMockStatePath：
+  // 那是宿主侧的环境读取，写/跑什么模式归执行层与部署配置）。未显式设时平台侧用自己的
+  // 缺省状态文件，本脚本不碰。
+  const mockStatePath = process.env['EXECUTION_MOCK_STATE'];
+  if (mockStatePath && existsSync(mockStatePath) && !process.env['EXECUTION_MOCK_STATE_KEEP']) {
     rmSync(mockStatePath);
     console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
-  }
-  if (isPlatformMock(process.env)) {
-    console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 
   // 与生产共用同一份装配：避免验收脚本和生产各写一遍、悄悄漂移。

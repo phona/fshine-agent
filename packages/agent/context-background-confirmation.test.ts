@@ -73,7 +73,6 @@ function createRunner(args: { gate?: ReturnType<typeof createPlatformExecutionGa
     workerDriver: { run: async (): Promise<{ text: string; messages: [] }> => ({ text: 'unused', messages: [] }) } as unknown as TurnDriver,
     executionGate: gate,
     changeIntents: intents,
-    proposalCommitEnabled: true,
     proposalCommitRunner: commit,
   });
   return { runner, gate, intents, commit };

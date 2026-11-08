@@ -79,9 +79,9 @@ async function main(): Promise<void> {
     tasks: store.platformTasks!,
     workerDriver: createPiCodingTurnDriver({ env: process.env }),
     profileId,
-    // 长会话实测不写任何数据：落账后端不注入（proposalCommitEnabled 缺省 false），
-    // 确认码只会到达"确认收到但不写"。（这是本脚本刻意选的只读形态，与开关无关——
-    // B 波那个"落账后端接不接"的开关已退役，落账放行只由 isCommitEnabled 派生。）
+    // 长会话实测不写任何数据：落账后端不注入（proposalCommitRunner 缺省 = 未接线），
+    // 确认码只会到达"执行失败：落账执行器未配置"——这是宿主如实说自己没做到，
+    // 不是对"这个部署允不允许写"的判断（2026-11-08 裁定后没有 commit 授权位）。
     changeIntents: store.changeIntents,
   });
   const runtime = createTaxAgentRuntime({

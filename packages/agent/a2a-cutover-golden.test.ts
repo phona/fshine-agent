@@ -1,15 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import {
-  ensureMockStatePath,
-  isCommitEnabled,
-  isPlatformMock,
-  MOCK_EXECUTOR_ENV,
-  MOCK_STATE_ENV,
-  REAL_COMMIT_ENV,
-} from './src/platform-mock';
-import { runtimeModeOf, ALLOW_REAL_ENV } from '../../apps/server/runtime-mode';
 import { hostGatewayEnv } from './src/context';
 import { createPlanScopedWorkerEnv } from './src/plan-runtime';
 import {
@@ -26,16 +17,10 @@ import { A2A_PROTOCOL_VERSION, type DelegationBlock } from '@fshine/contracts';
 /**
  * W5 cutover 表征 golden（F1：先于一切改动的现行行为冻结）。
  *
- * 背景：本波要用结构化调用协议替代现行 env 级接线（EXECUTION_EXECUTOR /
- * EXECUTION_ALLOW_REAL / FSHINE_REAL_COMMIT 一族与网关 spawn 路径）。cutover 期间
+ * 背景：本波要用结构化调用协议替代现行 env 级接线（网关 spawn 路径）。cutover 期间
  * 旧路径是 fallback——**必须先能证明它逐字不变**，否则 C3 之后任何一红都无法归因到
- * 新路径还是旧路径（F5 的 revert 决策会变成猜）。本文件把六组现状钉死：
+ * 新路径还是旧路径（F5 的 revert 决策会变成猜）。本文件把四组现状钉死：
  *
- *   ① platform-mock.ts 的 isPlatformMock / isCommitEnabled 真值表
- *      （MOCK_EXECUTOR_ENV='EXECUTION_EXECUTOR'、REAL_COMMIT_ENV='FSHINE_REAL_COMMIT'，
- *      真写仅字面量 '1' 放行——'true'/'0' 都不算）；
- *   ② apps/server/runtime-mode.ts 的 runtimeModeOf / ALLOW_REAL_ENV
- *      （'true' 不算授权，模糊真值是 fail-open 入口）；
  *   ③ env 法域两把尺：context.ts 的 hostGatewayEnv（剥 EXECUTION_REQUIRE_PLAN、
  *      置 EXECUTION_SERVE=1，宿主办调直调法域）与 plan-runtime.ts 的
  *      createPlanScopedWorkerEnv（EXECUTION_REQUIRE_PLAN=1 + EXECUTION_PLAN_ID
@@ -48,6 +33,14 @@ import { A2A_PROTOCOL_VERSION, type DelegationBlock } from '@fshine/contracts';
  *   ⑥ spawn 面盘点：全部消费点经 fail-closed 的 gatewayExecPath /
  *      gatewayExecPathForProfile，未声明/非法即抛；GATEWAY_INVOCATION 实例名缺省
  *      已不在（W1 C7b 达成，2026-11-06 实测）。
+ *
+ * **2026-11-08 退役的两组（原①②，整组删除）**：
+ *   · 原① platform-mock.ts 的 isPlatformMock / isCommitEnabled 真值表；
+ *   · 原② apps/server/runtime-mode.ts 的 runtimeModeOf / ALLOW_REAL_ENV。
+ * 两者钉的都是"宿主读 EXECUTION_EXECUTOR / FSHINE_REAL_COMMIT 判这个部署允不允许写"，
+ * 随架构裁定（写能不能真落地归执行层）把判据源整个删除——连同被测模块
+ * （platform-mock.ts / runtime-mode.ts）一起退场，故没有可改写的替代断言。
+ * 编号保留③起，避免后续条目大面积重排。
  *
  * **显式翻转点（全波只有两处，其余条目任何 commit 不得改断）**：
  *   · 第④组在 C5（委派块按 DelegationBlock 五字段落地）显式翻转——entities/inputs
@@ -67,89 +60,6 @@ const SCRIPTS_DIR = join(__dirname, '..', '..', 'scripts');
 function srcOf(...segments: string[]): string {
   return readFileSync(join(...segments), 'utf8');
 }
-
-describe('① platform-mock 的 env 读取（EXECUTION_EXECUTOR / FSHINE_REAL_COMMIT）', () => {
-  it('三个 env 常量名逐个在位（改一个名字，全链路接线断）', () => {
-    expect(MOCK_EXECUTOR_ENV).toBe('EXECUTION_EXECUTOR');
-    expect(REAL_COMMIT_ENV).toBe('FSHINE_REAL_COMMIT');
-    expect(MOCK_STATE_ENV).toBe('EXECUTION_MOCK_STATE');
-  });
-
-  it('isPlatformMock 只认字面量 mock（怪值/空/大小写变体都不是 mock）', () => {
-    expect(isPlatformMock({ [MOCK_EXECUTOR_ENV]: 'mock' })).toBe(true);
-    expect(isPlatformMock({ [MOCK_EXECUTOR_ENV]: 'real' })).toBe(false);
-    expect(isPlatformMock({ [MOCK_EXECUTOR_ENV]: '' })).toBe(false);
-    expect(isPlatformMock({ [MOCK_EXECUTOR_ENV]: 'Mock' })).toBe(false);
-    expect(isPlatformMock({ [MOCK_EXECUTOR_ENV]: 'mock ' })).toBe(false);
-    expect(isPlatformMock({})).toBe(false);
-  });
-
-  it('isCommitEnabled 真值表：mock 全放开，real 只认 FSHINE_REAL_COMMIT=1', () => {
-    // mock 之下写的是假状态，落账全链路默认放开（REAL_COMMIT 在 mock 下无意义）。
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'mock' })).toBe(true);
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'mock', [REAL_COMMIT_ENV]: '0' })).toBe(true);
-    // 真平台默认拒绝 commit，唯一放行形态是字面量 '1'。
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'real', [REAL_COMMIT_ENV]: '1' })).toBe(true);
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'real', [REAL_COMMIT_ENV]: 'true' })).toBe(false);
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'real', [REAL_COMMIT_ENV]: '1 ' })).toBe(false);
-    expect(isCommitEnabled({ [MOCK_EXECUTOR_ENV]: 'real' })).toBe(false);
-    expect(isCommitEnabled({})).toBe(false);
-  });
-
-  it('ensureMockStatePath：mock 开启时兜底状态路径，已设不覆盖，非 mock 不兜底', () => {
-    expect(ensureMockStatePath('/root', { [MOCK_EXECUTOR_ENV]: 'mock' }))
-      .toBe('/root/.runtime/mock-state.json');
-    expect(ensureMockStatePath('/root', { [MOCK_EXECUTOR_ENV]: 'mock', [MOCK_STATE_ENV]: '/custom/state.json' }))
-      .toBe('/custom/state.json');
-    expect(ensureMockStatePath('/root', { [MOCK_EXECUTOR_ENV]: 'real' })).toBeNull();
-  });
-});
-
-describe('② runtime-mode 的 EXECUTION_ALLOW_REAL 读取', () => {
-  it('ALLOW_REAL_ENV 常量在位', () => {
-    expect(ALLOW_REAL_ENV).toBe('EXECUTION_ALLOW_REAL');
-  });
-
-  it('runtimeModeOf 真值表：mock / real / 授权键只认 1 / 怪值原样露出', () => {
-    const mock = runtimeModeOf({ [MOCK_EXECUTOR_ENV]: 'mock' });
-    expect(mock.executor).toBe('mock');
-    expect(mock.realExecutionAllowed).toBe(false);
-    expect(mock.realCommitAuthorized).toBe(false);
-    expect(mock.note).toContain('不触真平台');
-
-    const real = runtimeModeOf({ [MOCK_EXECUTOR_ENV]: 'real' });
-    expect(real.executor).toBe('real');
-    expect(real.executorRaw).toBe('real');
-    expect(real.realExecutionAllowed).toBe(false);
-    expect(real.note).toContain('REAL_EXECUTION_NOT_ALLOWED');
-
-    // 'true' 不算授权：模糊真值是 fail-open 的入口。
-    const fuzzy = runtimeModeOf({ [MOCK_EXECUTOR_ENV]: 'real', [ALLOW_REAL_ENV]: 'true' });
-    expect(fuzzy.realExecutionAllowed).toBe(false);
-
-    const granted = runtimeModeOf({ [MOCK_EXECUTOR_ENV]: 'real', [ALLOW_REAL_ENV]: '1' });
-    expect(granted.realExecutionAllowed).toBe(true);
-    expect(granted.realCommitAuthorized).toBe(false);
-
-    const full = runtimeModeOf({
-      [MOCK_EXECUTOR_ENV]: 'real',
-      [ALLOW_REAL_ENV]: '1',
-      [REAL_COMMIT_ENV]: '1',
-    });
-    expect(full.realExecutionAllowed).toBe(true);
-    expect(full.realCommitAuthorized).toBe(true);
-
-    const fuzzyCommit = runtimeModeOf({
-      [MOCK_EXECUTOR_ENV]: 'real',
-      [ALLOW_REAL_ENV]: '1',
-      [REAL_COMMIT_ENV]: 'true',
-    });
-    expect(fuzzyCommit.realCommitAuthorized).toBe(false);
-
-    // 怪值原样露出便于诊断（不猜、不归一）。
-    expect(runtimeModeOf({ [MOCK_EXECUTOR_ENV]: 'Mock' }).executorRaw).toBe('Mock');
-  });
-});
 
 describe('③ env 法域两把尺（hostGatewayEnv / createPlanScopedWorkerEnv）', () => {
   it('hostGatewayEnv：剥 EXECUTION_REQUIRE_PLAN、置 EXECUTION_SERVE=1，不动原 env', () => {

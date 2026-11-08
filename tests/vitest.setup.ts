@@ -10,6 +10,10 @@
  *
  * 时序保证：vitest 的 setupFiles 在每个测试文件之前运行，早于该文件的 beforeAll——
  * 所以这里 unset 的是"环境泄漏"，harness 随后设的值不受影响。
+ *
+ * 2026-11-08 注：`EXECUTION_EXECUTOR` / `FSHINE_REAL_COMMIT` 已从本清单删除——宿主侧不再
+ * 读这两个变量（架构裁定：写能不能真落地归执行层），它们不再能改变任何测试基线。清单仍
+ * 保留 `EXECUTION_*` / `FSHINE_*` 里其余确实被宿主/脚本读取的键。
  */
 const LEAKED_ENV_KEYS: readonly string[] = [
   'LLM_API_BASE_URL',
@@ -20,8 +24,6 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // 产物"的理由纳入密封——测试要钉的"缺省回落 LLM_MODEL"不该依赖运行者没 export 它。
   'LLM_MAIN_MODEL',
   'LLM_MAIN_THINKING_LEVEL',
-  'EXECUTION_EXECUTOR',
-  'FSHINE_REAL_COMMIT',
   // New deployment switches must not change the default inline/queue baseline of mock tests.
   'FSHINE_WORKER_DISPATCH_MODE',
   'FSHINE_PLATFORM_QUEUE_CAPACITY',

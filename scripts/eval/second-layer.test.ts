@@ -13,8 +13,9 @@
  * - the stock layer's own mock, memory, breaker and cache (admission
  *   A10-A12) are deterministic and state-isolated.
  * It does NOT prove a real model would drive this domain, and it does NOT
- * touch any real platform: EXECUTION_ALLOW_REAL / FSHINE_REAL_COMMIT are
- * never set here.
+ * touch any real platform: the host holds no "may this deployment write"
+ * switch at all (2026-11-08 architecture ruling), and no execution-layer
+ * authorization variable is set here.
  */
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';

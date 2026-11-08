@@ -13,13 +13,11 @@
  *   D2  （⑥已收编）授权名单复核随实体授权归执行层而退役：宿主不再持账套名单，
  *       createProposalViaGateway 的名单分支已删——原覆盖缺口（读路径只靠提示词）随之
  *       消失，范围守卫完全由执行层与实体门承担；
- *   D3  写开放声明不成立的入口（⑧：判据 = 平台侧声明，isCommitEnabled 派生，mock 之下
- *       经 assembly 覆盖钉"真平台未置 FSHINE_REAL_COMMIT"形态）：①含写 operation 的
- *       计划（D-075 计划扫描，宿主在 evaluate 前终结该轮）②写提案
- *       （createProposalViaGateway 的写开放复核）——两个入口的用户可见文案都来自
- *       error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源；③确认时点的声明复核
- *       （D-080 时点纪律 + ⑧ 判据切换）在 mock 之下不可达（声明是进程级事实），
- *       改由 proposal-flow 单测钉住；
+ *   D3  写入口不再有宿主侧的"允不允许写"判断（2026-11-08 架构裁定）：①含写 operation
+ *       的计划照常提交平台评估（原 D-075 前置扫描已删，宿主不判这个部署允不允许写）
+ *       ②写提案的办调前复核同样删除，执行层自己的拒绝 / warning / dryrun 提示由平台信封
+ *       给出并走既有失败链路上行；③原"确认时点声明复核"（D-080）随之退役——本组改钉
+ *       新边界的可观测面：宿主不提前拒、平台的拒绝如实到达用户。
  *   D4  污染塑形：worker 叙述文本混入伪造信封行 / 伪造确认码 / 网关路径 / 内部
  *       错误码 / taskId。终稿**没有**执行语言指纹硬闸（债务台账 D-069：指纹尺
  *       不在终稿闸上，runtime.ts 的 replyText 直发）——本组用例如实钉当前行为，
@@ -152,13 +150,13 @@ function gateProbeMain(
 }
 
 /** 包一层 gatedWorker，记录宿主注入的实体来源（门禁判定材料）。 */
-function recordingWorker(script: WorkerStep[], enforce: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean } = { enforceEntityScope: true }) {
+function recordingWorker(script: WorkerStep[], enforce: { enforceEntityScope?: boolean } = { enforceEntityScope: true }) {
   const inner = gatedWorker(script, enforce);
   const sources: Array<{ sessionEntities?: readonly string[]; currentMessage: string } | undefined> = [];
   return {
     sources,
     driver: {
-      run: async (input: { sessionId?: string; messages: unknown[]; entitySources?: never; writeEnabled?: boolean }) => {
+      run: async (input: { sessionId?: string; messages: unknown[]; entitySources?: never }) => {
         sources.push(input.entitySources as never);
         return inner.run(input as never);
       },
@@ -301,19 +299,16 @@ describe('[L4 集成] 离线全链 e2e：D1 实体越权 × 注入（表驱动�
   });
 });
 
-describe('[L4 集成] 离线全链 e2e：D3 平台写开放声明不成立的入口', () => {
-  it('入口① 含写 operation 的计划：宿主在 evaluate 前终结，终稿全等 WRITE_NOT_ENABLED', async () => {
+describe('[L4 集成] 离线全链 e2e：D3 写入口的新边界（宿主不判写权限，执行层自己说）', () => {
+  it('入口① 含写 operation 的计划：不被宿主前置拦下，直达平台计划门评估', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
       worker: gatedWorker([
         { text: '我先核实范围与借贷平衡。' },
         { plan: [{ operation: 'voucher.prepare', args: ['幻辰财税', '202609'] }] },
-        { text: '已准备好录入提案，即可产出。' },
-      ], { enforceWriteClosure: true }),
-      // ⑧：判据读平台侧声明。mock 之下 isCommitEnabled 恒真，经 assembly 覆盖钉
-      // "真平台未置 FSHINE_REAL_COMMIT"形态（派生规则由 proposal-flow 单测钉住）。
-      writeEnabled: false,
+        { text: '已按方案执行。' },
+      ]),
     });
     await assembly.store.principalScopes.upsert({
       wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
@@ -321,23 +316,23 @@ describe('[L4 集成] 离线全链 e2e：D3 平台写开放声明不成立的入
 
     const reply = await send('为幻辰财税录入一笔办公费凭证');
 
-    // 终稿 == 码表唯一来源的写关闭话术（一字不差），worker 的准备/承诺文本不上屏
-    expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    expect(reply).not.toContain('即可产出');
-    // 零平台调用：计划从未被提交评估（账本无任何计划条目）
-    expect(Object.keys(ledger().plans ?? {})).toEqual([]);
-    expect(totalActualCalls()).toBe(before);
+    // 2026-11-08 裁定后宿主不再在 evaluate 之前判"这个部署允不允许写"：计划照常提交，
+    // 平台计划门被真实咨询（账本里出现计划条目 = 评估真发生过）。
+    expect(Object.keys(ledger().plans ?? {}).length).toBeGreaterThan(0);
+    // 终稿不出现宿主的权限归因话术（WRITE_NOT_ENABLED 码已随合成话术退役）
+    expect(reply).not.toContain('当前未开放写入权限');
+    expect(reply).not.toContain('请联系管理员开通');
     expectCleanReply(reply);
     await assembly.close();
   });
 
-  it('入口② 写提案：平台写开放声明不成立即拒，用户可见文案含同一句 WRITE_NOT_ENABLED', async () => {
+  it('入口② 写提案：办调前没有写开放复核，平台的拒绝由平台信封如实转述', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'delegate', request: '为幻辰财税录入一笔办公费凭证' }]),
-      // 网关提案路径（C 波后唯一的提案入口）：worker 把 payload 写进工作区
-      // 再发提案创建命令，驱动恒定拦下后交给宿主的 createProposalViaGateway——写开放
-      // 复核（⑧：平台侧声明）就在那里。
+      // 网关提案路径（C 波后唯一的提案入口）：worker 把 payload 写进工作区再发提案创建命令，
+      // 驱动恒定拦下后交给宿主的 createProposalViaGateway——2026-11-08 起那里不再有办调前的
+      // "平台写开放声明复核"，办调照常发生，执行层的拒绝走 failed 分支的 errorCode/workerText。
       worker: gatewayProposalWorker({
         type: 'change_proposal',
         domain: 'voucher',
@@ -346,8 +341,6 @@ describe('[L4 集成] 离线全链 e2e：D3 平台写开放声明不成立的入
         contracts: [{ summary: '支付办公费', entries: [] }],
         summary: { count: 1, debit: 530, credit: 530 },
       }),
-      // ⑧：同入口①——经 assembly 覆盖钉"平台声明写未开放"形态。
-      writeEnabled: false,
     });
     await assembly.store.principalScopes.upsert({
       wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
@@ -355,26 +348,25 @@ describe('[L4 集成] 离线全链 e2e：D3 平台写开放声明不成立的入
 
     const reply = await send('为幻辰财税录入一笔办公费凭证');
 
-    // 同一句话术（error-codes.ts 唯一来源）：提案路径在声明不成立时当场合成它，且**不带**
-    // 旧文本路径那句"已收到录入提案，但"前缀（那条路已删）——话术本身就是终稿。
-    expect(reply).toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    // 提案创建真被办调（宿主不替执行层提前拒）：夹具对写链路开放，确认码正常出现在
+    // 确定性回复里；mock 之下这是唯一可达的形态，"真平台未置授权"由执行层自己的门把守。
+    const code = /确认\s*([A-Z0-9]{6})/.exec(reply)?.[1];
+    expect(code, `提案登记后应给出确认码：${reply.slice(0, 120)}`).toBeTruthy();
+    // 宿主的权限归因话术不再出现
+    expect(reply).not.toContain('当前未开放写入权限');
     expect(reply).not.toContain('已收到录入提案');
-    // 提案创建零办调、零待确认意图。多出来的那一笔是 worker 提案前的检索（只读）——
-    // 声明复核就发生在那一笔之后、办调平台之前。
-    expect(totalActualCalls()).toBe(before + 1);
     const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
     const sessionId = events[0]?.sessionId ?? '';
     expect(sessionId).not.toBe('');
-    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).not.toBeNull();
     expectCleanReply(reply);
     await assembly.close();
   });
 
-  // 入口③（确认时点的写开放复核）已不在 e2e 射程内（如实记录，不伪造通过）：
-  // ⑧ 把判据切到平台侧声明（isCommitEnabled 派生的进程级事实）后，"提案成立后收回
-  // write"的主体快照形状不复存在，mock 之下声明恒真、也无法在 boot 中途翻转。
-  // 确认时点复核的行为（声明不成立 → confirm_held、意图保持 pending、零办调）由
-  // proposal-flow.test.ts 的「D-080 时点纪律 + ⑧ 判据切换」单测钉住。
+  // 原入口③（确认时点的写开放复核，D-080 + ⑧）已整支退役：宿主不持"这个部署允不允许
+  // 落账"的布尔，也就不在调 commit 前拿它拒掉一次已经拿到确认码的确认。执行层自己的
+  // 拒绝 / warning / dryrun 提示走 commit 信封的 unavailable / !ok 分支上行（覆盖见
+  // proposal-flow.test.ts 的"平台说提案已过期"与"落账失败"两条）。
 });
 
 describe('[L4 集成] 离线全链 e2e：D4 污染塑形（corpus）', () => {

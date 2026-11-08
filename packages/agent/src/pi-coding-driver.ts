@@ -36,7 +36,7 @@ import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
-import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
+import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
 import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
@@ -264,53 +264,10 @@ export function createServeGateAuditSink(sink: {
 }
 
 /**
- * 平台计划门以"计划里含非只读 operation"拒绝时，该给用户哪句话。
- *
- * 为什么必须分流：平台按"是不是只读"拒绝计划，而拒绝名单里混着两类完全不同的调用——
- *   ① 要用户确认的写类调用（平台语义表 confirm=true）：部署没开放写，用户该找管理员
- *      → WRITE_NOT_ENABLED；
- *   ② 根本不需要计划的调用（平台语义表 plan=false，如纯本地处理）：它不该被放进计划，
- *      直接调用即可 → PLAN_NOT_PLANNABLE。
- * ②曾被①的话术答复（"请联系管理员开通写入权限"），用户照着去要一个本来就不该要的权限
- * ——已实证的误导。判据因此是平台 access 语义表的 confirm 列（要不要用户确认），不是
- * 错误码名：宿主不按码名猜语义，也不镜像平台的 access 词表。
- *
- * 宁缺勿猜：拿不到语义表（平台还没下发 / 派生失败 / operation 未登记）时按②处理——
- * "不要放进计划"对任何调用都是安全的下一步，而"未开放写入权限"是一句可能错误的归因。
- *
- * 本条只判"该说哪句话"（confirm 列）；"该点名谁"由 nonPlannableOperations 判（plan 列），
- * 两列都是平台声明，合起来成 planNotReadOnlyReason。
- */
-/**
- * 计划门"含非只读 operation"拒绝 → 该说哪句话（`confirm` 列 + 平台写开放声明）。
- *
- * 分流判据读平台语义表的 `confirm` 列（要不要用户确认）；但**"未开放写入权限"是一句归因，
- * 只有当平台侧真的声明写未开放时它才为真**。写已开放时平台照样拒——写类的放行路径是确认码 +
- * commit token，`planAccessAllows = plan && !confirm` 永远为假，它根本不该进计划。那时它是
- * **形状问题**：该点名、该让 worker 把那个调用移出计划改为直接调用。
- *
- * 2026-10-14 实测的假归因：写开放 + 计划里排了 `voucher.proposal`，宿主回
- * 「当前未开放写入权限，如有需要请联系管理员开通」，worker 原样转达给用户，用户被指去找
- * 管理员要一个他已经有的权限，然后这一轮就此放弃。这比不点名更糟——它是一句错话。
- *
- * 第三个参数缺省（测试替身 / 老路径）时按只读判，与 `planWriteClosed` 的"writeEnabled
- * 缺省视为只读"同一约定，既有判定一字不变。
- */
-export function planNotReadOnlyCode(
-  calls: readonly PlanCall[],
-  semantics: OperationSemantics | undefined,
-  writeEnabled?: boolean,
-): 'WRITE_NOT_ENABLED' | 'PLAN_NOT_PLANNABLE' {
-  const needsConfirm = calls.some((call) => isWriteAccess(semantics?.get(call.operation)));
-  if (needsConfirm && writeEnabled !== true) return 'WRITE_NOT_ENABLED';
-  return 'PLAN_NOT_PLANNABLE';
-}
-
-/**
  * 计划里"不该进计划"的 operation 名单（去重、保序）：平台 access 语义表的 **plan 列与
  * confirm 列合起来的真判据**。
  *
- * 平台的真判据是 `planAccessAllows = plan && !confirm`（平台仓 `src/execution/plan.js`）：两列
+ * 平台的真判据是 `planAccessAllows = plan && !confirm`（平台仓 `src/execution/plan.js`）：
  * 任一为假就进不了计划。只读 `plan` 一列会**漏掉写类**——而写类恰恰是最常被 worker 排进计划
  * 的那一种。2026-10-14 实测：`voucher.proposal`（`write` ⇒ `plan:true, confirm:true`）被排进
  * 计划，平台以 `PLAN_OPERATION_NOT_READ_ONLY` 拒，宿主按 `plan` 列点名得到空名单，退回零名单
@@ -340,29 +297,24 @@ export function nonPlannableOperations(
 /**
  * 计划门"含非只读 operation"拒绝 → 交给 worker 的停止原因正文（PLAN STOP 之后那段）。
  *
- * 分流判据一字未动（planNotReadOnlyCode：平台语义表的 confirm 列）；② 的理由带上**点名**——
- * 2026-10-13 真平台实测：worker 的计划里有 4 个调用，其中一个是不该进计划的本地处理类，
- * 宿主每次只回"该调用不需要计划"而不说是哪个，它无法定位该删哪一个，原样重提 5 次后撞
+ * 唯一判据 = nonPlannableOperations（平台 `plan && !confirm` 两列合取）。2026-10-13 真平台
+ * 实测：worker 的计划里有 4 个调用，其中一个是不该进计划的本地处理类，宿主每次只回"该调用
+ * 不需要计划"而不说是哪个，它无法定位该删哪一个，原样重提 5 次后撞
  * MAX_DECLINED_PLANS_PER_TASK terminal block，只能向用户承认"登记环节连续被拒后已关闭"。
  * 点名即自愈通道：删掉它、改为直接调用、重提剩余 calls。
  *
  * 措辞唯一出处是 error-codes.ts 的表：点名版 PLAN_NOT_PLANNABLE_OPERATIONS（带 {operations}
  * 数据），点不出名字时退回零名单版 PLAN_NOT_PLANNABLE——调用点只选码、不拼句。
  *
- * 什么时候才说 WRITE_NOT_ENABLED：**平台侧声明写未开放**（writeEnabled 非真）且计划里有
- * 要用户确认的写类。那时归属确实是"找管理员开通写入权限"。写已开放时同一形态是形状问题，
- * 点名、让 worker 把那个调用移出计划改为直接调用——说成权限问题是假归因（见
- * planNotReadOnlyCode 的注释与 2026-10-14 实测）。`planWriteClosed` 已经在 evaluate 之前
- * 拦过"没开放写"的那一种，所以走到这里还看见写类，多半是写已开放。
+ * 2026-11-08 架构裁定后这里**不再有"未开放写入权限"那一支**：写能不能真落地是执行层的事，
+ * 编排层不判"这个部署允不允许写"，也就不合成"权限未开放"的归因话术（D-096 记的正是这类
+ * 假归因把用户指去找管理员要一个他已经有的权限）。写类调用被平台计划门拒绝时，宿主只如实
+ * 点名该调用、让它移出计划改为直接调用——之后的放行/拒绝/warning 由执行层自己说。
  */
 export function planNotReadOnlyReason(
   calls: readonly PlanCall[],
   semantics: OperationSemantics | undefined,
-  writeEnabled?: boolean,
 ): string {
-  if (planNotReadOnlyCode(calls, semantics, writeEnabled) === 'WRITE_NOT_ENABLED') {
-    return messageTextFor('WRITE_NOT_ENABLED');
-  }
   const named = nonPlannableOperations(calls, semantics);
   return named.length > 0
     ? messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: named.join('、') })
@@ -462,13 +414,6 @@ export interface PiCodingWorkerSessionOptions {
    */
   onPlanSubmitted?: (calls: readonly PlanCall[]) => void;
   /**
-   * 平台侧的写开放声明（宿主注入，TurnDriverInput.writeEnabled 的透传；缺省视为只读）。
-   * 写关闭判据（D-075）的输入：计划含写类 operation 且平台声明写未开放时，宿主在
-   * 计划评估前拦截并合成写关闭话术。判据依据是平台/部署侧声明（部署层经 isCommitEnabled()
-   * 派生），不是委托主体自持的能力布尔（变更项 ⑧）。
-   */
-  writeEnabled?: boolean;
-  /**
    * 本回合 worker 的工作区（宿主注入，TurnDriverInput.scratchDir 的透传，如
    * `tmp/task_<taskId>`）：write/edit 门、提案 payload 边界与计划产物路径豁免共用的
    * 判据输入。缺省（未注入，测试替身 / 老路径）= 三支边界整支不出现，判定与从前一字不差。
@@ -490,10 +435,10 @@ export interface PiCodingWorkerSessionOptions {
    */
   onCreateProposal?: (call: ProposalCreateCall) => Promise<ProposalCreationOutcome>;
   /**
-   * 提案创建拦截的结局出口（驱动侧 latch 用，与 onPendingPlan 同族）：completed /
-   * write_closed 时调用，驱动据此在结果时刻用宿主持有的文本终结本回合。
+   * 提案创建拦截的结局出口（驱动侧 latch 用，与 onPendingPlan 同族）：completed 时调用，
+   * 驱动据此在结果时刻用宿主持有的文本（平台 summaryText + 确认行）终结本回合。
    */
-  onProposalOutcome?: (outcome: Extract<ProposalCreationOutcome, { status: 'completed' | 'write_closed' }>) => void;
+  onProposalOutcome?: (outcome: Extract<ProposalCreationOutcome, { status: 'completed' }>) => void;
 }
 
 export interface PiCodingWorkerSession {
@@ -506,13 +451,6 @@ export interface PiCodingWorkerSession {
    * 驱动用它派生"缺什么"交还规划者——只认确定性原因，不看 worker 的自由文本。
    */
   needsClue: () => SubagentNeeds | null;
-  /**
-   * 本回合是否发生过写关闭拦截（D-075）：worker 提交过含写类 operation 的计划而部署
-   * 未开放 write 能力，宿主在计划评估前当场拦下。驱动据此在结果时刻用宿主合成的写关闭
-   * 话术整体替换终稿——T7 事故形态（模型停在准备阶段、承诺"即可产出录入提案"却永不
-   * 抵达提案步）下，worker 文本不能原样成为用户回复。
-   */
-  writeClosed: () => boolean;
 }
 
 interface CodingModelConfig {
@@ -689,7 +627,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       let pendingPlan: PendingPlanConfirmation | undefined;
       // 提案创建拦截的结局（B 波 B3）：宿主办调平台成功后本回合以此终结，所以它必须
       // latch 在 run() 作用域里——beforeToolCall 在会话里跑，结果时刻才读它。
-      let proposalOutcome: Extract<ProposalCreationOutcome, { status: 'completed' | 'write_closed' }> | undefined;
+      let proposalOutcome: Extract<ProposalCreationOutcome, { status: 'completed' }> | undefined;
       // 错误态快路径的早停 latch（v2，2026-10-16 重做；第一版 2026-10-17 凌晨因真模型
       // 探针回归被整波回退）：平台确定性终局码（TERMINAL_FAST_PATH_CODES）以"整份答案"
       // 收尾时，宿主在此合成话术终结本跳，不再付每轮约 31s 的 worker 重规划循环——
@@ -737,7 +675,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }
         : undefined;
       const argSpecs = await operationArgSpecsFor(input.cwd);
-      const { session, currentPlan, needsClue, writeClosed } = await createPiCodingWorkerSession({
+      const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
@@ -749,8 +687,8 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         env: options.env,
         operationLabels: await operationLabelsFor(input.cwd),
         operationArgStyles: await operationArgStylesFor(input.cwd),
-        // access 语义表（D-075 写关闭前置判据与计划门拒绝分流的平台数据面）与能力声明
-        // （宿主持有）一起进会话：beforeToolCall 里对提交的计划做写类扫描。
+        // access 语义表（计划门拒绝分流的平台数据面）与能力声明（宿主持有）一起进会话：
+        // beforeToolCall 里对提交的计划做"该不该进计划"的判读。
         operationSemantics: await operationSemanticsFor(input.cwd),
         // gateway（C7b fail-closed）：run 输入显式指定优先，工厂声明兜底——两处都来自
         // profile.gateway（runtime 按任务注入 / 装配按工厂注入）；都未声明时 session 内
@@ -759,7 +697,6 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // 协议角色表（提案创建拦截的机械来源）与宿主出口一起进会话。
         operationProtocols: await operationProtocolsFor(input.cwd),
         ...(input.onCreateProposal ? { onCreateProposal: input.onCreateProposal } : {}),
-        writeEnabled: input.writeEnabled === true,
         scratchDir: input.scratchDir,
         // G1 事件 → 审计 + 进度帧：同一条生产接线（createServeGateAuditSink）
         serveGateAudit: createServeGateAuditSink({
@@ -849,26 +786,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }
       };
       const footprint = (): string => `${gateCalls} 次 ${resolveGatewayText(options.gateway)} 调用`;
-      // 写关闭终稿（D-075）：本回合拦下过含写类 operation 的计划（部署未开放 write 能力）
-      // 时，委派结果的文本由宿主合成的话术整体替换。为什么必须在结果时刻合成而不是只给
-      // worker 一条 PLAN STOP：T7 事故形态——模型走了完整的"录入准备"流程（行为优秀），
-      // 然后停在准备阶段、承诺"即可产出录入提案"，永不抵达提案步。若只把写关闭话术当作
-      // 拦截理由交给 worker，终稿就是 worker 的准备过程与承诺——用户永远不知道写权限是
-      // 关闭的。宿主在此直接把确定性话说清楚，措辞复用 error-codes.ts 的 WRITE_NOT_ENABLED
-      // 唯一来源（与计划门拒绝、提案路径 capability 检查同一句），不新写第二份。
-      // 等用户确认门（pendingPlan）不替换：那一轮的真实状态是"等宿主验证真实确认"，
-      // 确认机制不被这层覆盖。结构化字段（planFacts/execution/activatedPlan…）原样保留
-      // ——它们是宿主机械事实，与终稿文本的替换互不相干。
-      const closureText = (): string | null =>
-        writeClosed() && !pendingPlan ? messageTextFor('WRITE_NOT_ENABLED') : null;
-      // 提案创建拦截的终稿（B 波 B3）：宿主办调平台 create 成功（或宿主写授权不成立）时，
-      // 本回合以此终结，`text` 是宿主持有的确定性文本——平台 summaryText 原样 + 通用确认行
-      // （completed）或写关闭话术（write_closed）。为什么必须整体替换而不是让 worker 接着说：
-      // 用户这一刻需要的是"提案已登记 + 确认码"，worker 的后续叙述只会稀释它；而确认码**只**
-      // 出现在这段文本里（给 worker 的拦截理由不含码），所以终稿必须来自这里而不是转录。
-      // 结构化字段（planFacts/execution）照常带上：它们是宿主机械事实。
-      // 优先于 closureText()：写关闭那一态的文本由宿主按具体原因合成（能力关闭 / 授权名单
-      // 限制模式），不是一句通用 WRITE_NOT_ENABLED。
+      // 提案创建拦截的终稿（B 波 B3）：宿主办调平台 create 成功时，本回合以此终结，
+      // `text` 是宿主持有的确定性文本——平台 summaryText 原样 + 通用确认行。为什么必须
+      // 整体替换而不是让 worker 接着说：用户这一刻需要的是"提案已登记 + 确认码"，worker
+      // 的后续叙述只会稀释它；而确认码**只**出现在这段文本里（给 worker 的拦截理由不含码），
+      // 所以终稿必须来自这里而不是转录。结构化字段（planFacts/execution）照常带上：
+      // 它们是宿主机械事实。
       const proposalReply = async (): Promise<TurnDriverResult | null> => {
         const outcome = proposalOutcome;
         if (!outcome) return null;
@@ -882,7 +805,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           footprint: footprint(),
           ...(facts ? { planFacts: facts } : {}),
           ...(proof ? { execution: proof } : {}),
-          ...(outcome.status === 'completed' ? { proposalCreated: { proposalId: outcome.proposalId } } : { writeClosed: true }),
+          ...(outcome.status === 'completed' ? { proposalCreated: { proposalId: outcome.proposalId } } : {}),
         };
       };
       // 错误态快路径的结果时刻出口（与 proposalReply 同构）：早停 latch 在场时本回合以
@@ -1159,7 +1082,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           // agent.state 里残留的 errorMessage 是中止的伴生物不是模型故障）随结果上交，
           // 宿主据此分类 model_transient，不再只看得到空文本。
           const modelError = timedOut || cancelled ? undefined : session.agent.state.errorMessage; // MUTATION-F
-          return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
+          return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
         }
         // P1 收尾兜底：方案已批准、计划通知已送达，worker 却零平台调用就收手。每回合最多补
         // 一刀（activatedPlanNudged 是 run() 内的局部标志，边界理由见其声明处）——追问无效
@@ -1195,7 +1118,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             // C1 透传（与上方非补刀出口同一把尺）：模型侧失败事实上交宿主分类；
             // 超时/取消同样不透传（取消伴生的 errorMessage 不是模型故障）。
             const modelError = timedOut || cancelled ? undefined : session.agent.state.errorMessage; // MUTATION-F
-            return { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
+            return { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(modelError ? { modelError } : {}), ...authFailureResult() };
           }
         }
         const proof = execution();
@@ -1203,7 +1126,6 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         const plan = currentPlan();
         const choice = clarification();
         const facts = planFactsOf(argSpecs, plannedCalls, await operationLabelsFor(input.cwd));
-        const closed = closureText();
         // 补刀后拦截成功也要发声（提案可能在补刀轮才抵达）：与上面同一个理由——
         // 确认码只在这段文本里。恒为 null 时走原有收尾，行为一字不变。
         const settledAfterNudge = await proposalReply();
@@ -1211,8 +1133,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // lastAssistantText 在早停后必为空串——那正是第一版死因的形状）。
         const terminalAfterNudge = await terminalReply();
         return terminalAfterNudge ?? settledAfterNudge ?? {
-          text: closed ?? lastAssistantText(session.agent.state.messages),
-          ...(closed ? { writeClosed: true } : {}),
+          text: lastAssistantText(session.agent.state.messages),
           messages: session.agent.state.messages,
           footprint: footprint(),
           ...(facts ? { planFacts: facts } : {}),
@@ -1241,7 +1162,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         // 而确认码只在这段文本里——丢了用户就永远拿不到码。终局早停同理（防御性：stop
         // 之后循环正常返回，正常不进 catch，但 latch 一旦在场就是真实收尾）。
         const settledAfterError = await proposalReply() ?? await terminalReply();
-        return settledAfterError ?? { text: closureText() ?? '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...(closureText() ? { writeClosed: true } : {}), ...authFailureResult() };
+        return settledAfterError ?? { text: '', messages: session.agent.state.messages, footprint: footprint(), ...(facts ? { planFacts: facts } : {}), ...(proof ? { execution: proof } : {}), ...(pendingPlan ? { pendingPlan } : {}), ...authFailureResult() };
       } finally {
         clearTimeout(abortTimer);
         // 收尾信号计时器与 abort 计时器同命运：回合已收尾（含正常完成）就不再注入——
@@ -1344,8 +1265,6 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    * 为准（同 error-codes.ts 对该码名"名字是历史"的声明）。
    */
   let declinedPlans = 0;
-  /** 写关闭拦截标志（D-075）：本回合拦过含写类 operation 的计划即置位，驱动据此替换终稿。 */
-  let writeClosed = false;
   if (options.sessionId) {
     try {
       activePlan = await loadCurrentActivePlan({
@@ -1556,7 +1475,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
   // label 表（平台清单第 5 列）在此传入：放行的平台调用才有人类可读进度帧。
   // access 语义表同样在此传入：计划前置豁免的机械来源——"这个调用要不要过计划门"
-  // 读平台语义表的 plan 列，与计划拒绝分流（planNotReadOnlyCode）同一份表、同一个
+  // 读平台语义表的 plan 列，与计划拒绝分流（nonPlannableOperations）同一份表、同一个
   // 来源，不存在第二份真相。表由本会话上方加载一次（失败/平台未下发 = 空表 = 一律
   // 照旧要求计划，fail-closed），门内部不再自己 spawn 平台 CLI。
   const gate = createServeGate({
@@ -1632,11 +1551,6 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     }
     if (declaration.requiresPlan && !activePlanId()) {
       return { block: true, reason: `STRUCTURED_CALL DECLINED：operation "${operation}" 需要激活的计划（requiresPlan=true）` };
-    }
-    // 写关闭拦截：与 bash 计划评估的 planWriteClosed 同口径——writeEnabled 为假且
-    // 该 operation 在 access 语义表里confirm=true 时，structured_call 也须拦截。
-    if (!options.writeEnabled && operationSemantics.size > 0 && isWriteAccess(operationSemantics.get(operation))) {
-      return { block: true, reason: `STRUCTURED_CALL DECLINED：write 未开放（operation "${operation}" 需要写入权限）` };
     }
     const argsValue = args.args;
     if (typeof argsValue !== 'object' || argsValue === null || Array.isArray(argsValue)) {
@@ -1798,18 +1712,16 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       return { block: true, reason };
     }
     const outcome = await create(call);
-    // completed / write_closed 两种结局交给驱动侧 latch：本回合以此终结，结果时刻的文本
-    // 由宿主持有（平台 summaryText + 确认行 / 写关闭话术），不是 worker 文本。
-    if (outcome.status === 'completed' || outcome.status === 'write_closed') {
-      if (outcome.status === 'write_closed') writeClosed = true;
+    // completed 结局交给驱动侧 latch：本回合以此终结，结果时刻的文本由宿主持有
+    // （平台 summaryText + 确认行），不是 worker 文本。
+    if (outcome.status === 'completed') {
       options.onProposalOutcome?.(outcome);
     }
     // 给 worker 的确定性消息（**绝不含确认码**：码只出现在给用户的文本里，见 driver 侧
     // proposalReply 的 userText）。措辞是宿主协议前缀 + 平台错误码 / 平台状态，不解释业务。
     const reason = outcome.status === 'completed' ? `PROPOSAL CREATED：${outcome.workerText}`
-      : outcome.status === 'write_closed' ? `PROPOSAL WRITE_CLOSED：${outcome.workerText}`
-        : outcome.status === 'needs_input' ? `PROPOSAL NEEDS_INPUT：${outcome.workerText}`
-          : `PROPOSAL FAILED：${outcome.workerText}`;
+      : outcome.status === 'needs_input' ? `PROPOSAL NEEDS_INPUT：${outcome.workerText}`
+        : `PROPOSAL FAILED：${outcome.workerText}`;
     // needs_input 的线索进纠错环（与宿主计划拦截同一机制）：missing/reason 来自平台信封的
     // 结构化字段，**绝不**对 worker 自由文本做模糊匹配。
     if (outcome.status === 'needs_input') needsClues.push(outcome.needs);
@@ -1904,31 +1816,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     // 结构化事实（D-065）：calls 是宿主自己解析的不是 worker 文本——上报给驱动侧
     // latch，结果时刻随 TurnDriverResult.planFacts 上交（规格声明名机械提取取值）。
     options.onPlanSubmitted?.(parsed.calls);
-    // ── 写关闭前置拦截（D-075，计划扫描）────────────────────────────────────
-    // 为什么拦在这里（而不是等平台计划门拒绝、或等模型走到提案步）：这是宿主已机械
-    // 解析出 calls 的 operation 名、且尚未放模型执行的最早一点。真实平台 T7 事故——
-    // 用户发起录入请求，模型走了完整的"录入准备"流程（逐一核实范围、日期与平衡关系），
-    // 行为优秀，但停在准备阶段、承诺"即可产出录入提案"却永不抵达提案步。写关闭话术
-    // （WRITE_NOT_ENABLED）原先只挂在提案路径的 capability 检查与平台计划门拒绝上，
-    // 模型不走到那儿，用户就永远不知道写权限是关闭的。计划里出现写类 operation 而
-    // 本部署能力不含 write 时，这份计划注定跑不完——宿主当场合成写关闭话术终结该轮，
-    // 不依赖模型自觉披露。
-    // 判据是机械的：calls（宿主解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled
-    // （平台侧写开放声明，部署层经 isCommitEnabled() 派生——变更项 ⑧），三个输入没有一个
-    // 字节从 worker 文本解析。拦截理由复用 error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源
-    // （与平台门拒绝/提案路径同一句），不新写措辞；PLAN STOP 是协议前缀（worker 提示词认
-    // 它 = 直接说明停止原因）。
-    // 与实体门禁并列不合并：那个管"参数越权"（可自愈的诊断），这个管"部署没开放写"
-    // （终局事实，无可自愈动作）。拦在 evaluate 之前：零平台调用、零写尝试。
-    if (planWriteClosed(parsed.calls, operationSemantics, options.writeEnabled === true)) {
-      writeClosed = true;
-      console.info(JSON.stringify({
-        event: 'plan_write_not_enabled',
-        requestId: options.requestId,
-        operations: parsed.calls.map((call) => call.operation).length,
-      }));
-      return { block: true, reason: `PLAN STOP\n${messageTextFor('WRITE_NOT_ENABLED')}` };
-    }
+    // ── 写关闭前置拦截（2026-11-08 架构裁定后删除）────────────────────────────────
+    // 原职责：宿主在 evaluate 之前用"计划含写类 operation × 平台写开放声明"判一次
+    // "这个部署允不允许写"，不成立就合成 WRITE_NOT_ENABLED 终稿终结该轮（D-075 的
+    // T7 事故修复）。裁定后这一层归执行层：写能不能真落地由平台自己的计划门 / 提案门 /
+    // commit 门裁决并给出拒绝/warning，宿主只如实转述。宿主在此不再提前判权限，
+    // 含写类 operation 的计划照常提交平台评估。
     // 计划提交的收敛保护（D-099 起语义修正）：计划被拒是确定性信号（实体越权/平台
     // 拒绝），CLI 失败同样说明这一跳没成——反复重提同一请求只会空转模型预算。超过上限就
     // terminal block，让 worker 收手向用户说明，而不是把回合拖到 executor 超时（实测 D1
@@ -2032,26 +1925,25 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 只能汇报卡点，"未开放写入权限"到不了用户（2026-09-27 第三波实测）。
       //
       // 匹配这个码**只为定位失败点**（平台暂时还抛它），语义判断读平台语义表：
-      // 同一张拒绝名单里混着两类调用——要用户确认的写类调用（**且这个部署没开放写** →
-      // WRITE_NOT_ENABLED）与根本不需要计划的本地处理（曾经被用户看到"请联系管理员
-      // 开通写入权限"，已实证的误导 → PLAN_NOT_PLANNABLE）。按码名猜语义就是按字符串
-      // 判权限，那正是本次要拆掉的东西。既有活跃计划照常恢复：被拒的是新提交，
-      // 不是已激活的范围。
+      // 拒绝名单里混着两类调用——要用户确认的写类调用与根本不需要计划的本地处理，
+      // 但两者给 worker 的答复现在同形：点名该调用、让它移出计划改为直接调用
+      // （planNotReadOnlyReason）。宿主不在这里判"这个部署允不允许写"，也不合成
+      // "未开放写入权限"的归因（D-096 的假归因形态）。既有活跃计划照常恢复：被拒的是
+      // 新提交，不是已激活的范围。
       //
       // ② 的理由带点名（planNotReadOnlyReason → PLAN_NOT_PLANNABLE_OPERATIONS）：不说
       // "该调用"而说"哪个调用"，worker 才删得动那一个、改为直接调用、重提剩余部分——
       // 2026-10-13 实测它就是在这一句上无从下手，原样重提 5 次后 terminal block。
       //
-      // 2026-10-14 修一处假归因：分流必须带平台写开放声明。写已开放时写类在场仍然是形状
-      // 问题（写类走确认码 + commit token，`plan && !confirm` 永远为假，它不该进计划），此时回
-      // "未开放写入权限"是错的——实测 worker 原样转达给用户，用户被指去找管理员要一个他已经
-      // 有的权限，这一轮就此放弃。所以平台声明写开放时走②：点名 + 让 worker 改成
-      // 直接调用（B3 的提案拦截就在那条路上等着）。
+      // 2026-10-14 起这里就只有②一条路：不再有"未开放写入权限"那一支（宿主不判这个部署
+      // 允不允许写，写类的放行/拒绝/warning 归执行层自己说）。写类被平台计划门拒绝时，
+      // 宿主只如实点名该调用、让 worker 把它移出计划改为直接调用——D-096 记的假归因
+      // （用户被指去找管理员要一个他已经有的权限）自此没有发生位。
       if (error instanceof Error && error.message.includes('PLAN_OPERATION_NOT_READ_ONLY')) {
         activePlan = previousPlan;
         return {
           block: true,
-          reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics, options.writeEnabled === true)}`,
+          reason: `PLAN STOP\n${planNotReadOnlyReason(parsed.calls, operationSemantics)}`,
         };
       }
       return { block: true, reason: `PLAN PAUSED：${error instanceof Error ? error.message : '计划评估失败'}；未执行平台操作。` };
@@ -2063,7 +1955,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     description: skill.description,
     filePath: skill.filePath,
   }));
-  return { session, skills: loaded, currentPlan: () => activePlan, needsClue: () => needsClues.at(-1) ?? null, writeClosed: () => writeClosed };
+  return { session, skills: loaded, currentPlan: () => activePlan, needsClue: () => needsClues.at(-1) ?? null };
 }
 
 async function createCodingModel(options: PiCodingTurnDriverOptions): Promise<CodingModelConfig> {

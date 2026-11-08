@@ -11,11 +11,12 @@
  * **C 波改写**：本脚本原先直驱 apps/server/commit.ts 的 legacy prepare/commit runner
  * （按文件路径落账、宿主自己解提案自己物化契约）。那条路已整文件删除，冒烟随之改指新路径
  * ——W3 把"smoke:commit:mock + acceptance 5.x 写链路 mock 下全绿"定为波次唯一验收，
- * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。旧脚本自带的 mock 保险丝原样保留。
+ * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。脚本自带的保险丝已按新边界重定义
+ * （见 main() 头一段：判据从宿主的 EXECUTION_EXECUTOR 读取换成执行层自己的状态文件事实）。
  *
- * 保险丝：检测不到 EXECUTION_EXECUTOR=mock 直接拒跑——本脚本会真实走落账，
- * 绝不允许误打真平台。
- * 用法：npm run smoke:commit:mock（=.env 需含 EXECUTION_EXECUTOR=mock）
+ * 保险丝：拿不到 EXECUTION_MOCK_STATE（执行层应答器的状态文件路径）直接拒跑——本脚本会
+ * 真实走落账并读 mock 状态断言，判据缺失时不允许默认放行。
+ * 用法：EXECUTION_MOCK_STATE=<路径> npm run smoke:commit:mock
  */
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
@@ -24,10 +25,8 @@ import path from 'node:path';
 import { loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';
 import {
-  ensureMockStatePath,
   gatewayExecPathForProfile,
   hostGatewayEnv,
-  isPlatformMock,
   loadOperationProtocols,
   newGateSecret,
   parseEnvelope,
@@ -92,8 +91,15 @@ async function proposalCreateOperation(platformRoot: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  if (!isPlatformMock(process.env)) {
-    console.error('拒跑：EXECUTION_EXECUTOR=mock 未设置——本冒烟走真实落账流程，只允许在 mock 保护下执行。');
+  // 保险丝（2026-11-08 按"执行层自己的门"重新定义）：原判据是宿主读 EXECUTION_EXECUTOR=mock
+  // ——那是编排层替执行层判"现在跑的是不是 mock 应答器"，随裁定一起删除。新判据取执行层
+  // 自己的事实：本脚本要读的 mock 状态文件（EXECUTION_MOCK_STATE）必须被显式声明，且内容
+  // 必须是应答器播种的假状态而不是真平台状态。看不到这一条就拒跑——冒烟要走完整落账，
+  // 判据缺失时不允许默认放行。跑真平台落账用 smoke-real-platform 一族（那只读不写），
+  // 真实写链路由执行层自己的上线门把守。
+  const statePath = process.env['EXECUTION_MOCK_STATE'];
+  if (!statePath) {
+    console.error('拒跑：未声明 EXECUTION_MOCK_STATE——本冒烟读 mock 状态断言凭证数增长，拿不到状态路径就无法确认跑在 mock 应答器上。');
     process.exit(1);
   }
   const config = loadConfig({ env: process.env });
@@ -105,7 +111,6 @@ async function main(): Promise<void> {
   if (!platformRoot) { console.error('拒跑：config/agent.yaml 缺少 contextProfiles（active）.root'); process.exit(1); }
   if (!gateway) { console.error('拒跑：config/agent.yaml 的 contextProfiles（active） 未声明 gateway'); process.exit(1); }
 
-  const statePath = ensureMockStatePath(platformRoot, process.env)!;
   // 重置状态：每次冒烟从 seed 重新播种，断言才确定
   if (existsSync(statePath)) rmSync(statePath);
 

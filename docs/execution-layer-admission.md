@@ -26,7 +26,7 @@
 | A6 | Proposal 创建 / 提交 / 读回 | 干跑创建（TTL，缺省 30 分钟）→ 用户确认（HMAC 提案/提交令牌，服务器签发）→ 提交前读回、提交后读回；读回不足记 `committed_unverified`，绝不说成成功。 | 端到端证明：创建 pending → 提交 verified → 读回 delta = required → 二次提交被拒且计数不变；读回不足时状态为 committed、verified=false、宿主分类为 committed_unverified。 |
 | A7 | RESULT 信封 | stdout 末行 `RESULT {v:1, op, status, data, error}`，`status` ∈ completed / failed / needs_input / not_found；`not_found` 是确定性无数据，绝不洗成零值。 | 每个命令的末行信封可解析且 v=1；无信封/非法信封时宿主视为网关失败，fail-closed。 |
 | A8 | 退出码与错误码家族 | 退出码 0/1/2/3（0 成功、1 失败、2 用法错误、3 网关/提案拒绝）；错误码只判族不判文案（平台不可用族、选择类、终局快路径、输入类等，互不混用）。 | 宿主判据是码与信封，不嗅探消息文本；新增码只在唯一适配层加码。 |
-| A9 | Serve 令牌与实执行门 | `EXECUTION_SERVE=1` + `EXECUTION_INVOCATION`（serve 法域声明，服务器签发 HMAC 令牌）；`EXECUTION_ALLOW_REAL=1`（执行层实执行授权，缺它 = 触平台执行被拒，纯本地计算不受影响）；`FSHINE_REAL_COMMIT=1`（宿主真写授权，缺它 = 确认码只到 confirm_held，不写）。三门正交，缺一不可叠加。 | 缺任一门即拒绝，不以“本地测试”或“模型已确认”为由放行；mock 之下实执行门不可达。 |
+| A9 | Serve 令牌与实执行门 | `EXECUTION_SERVE=1` + `EXECUTION_INVOCATION`（serve 法域声明，服务器签发 HMAC 令牌）；`EXECUTION_ALLOW_REAL=1`（执行层实执行授权，缺它 = 触平台执行被拒，纯本地计算不受影响）；`FSHINE_REAL_COMMIT=1`（宿主真写授权，缺它 = 确认码只到 confirm_held，不写）——**该门已于 2026-11-08 退役**：写能不能真落地归执行层，宿主不再持有写授权位，落账授权/拒绝由执行层自己的门给出并如实转述。三门随之变两门（serve 令牌 + 实执行授权），仍正交、仍缺一不可叠加。 | 缺任一门即拒绝，不以“本地测试”或“模型已确认”为由放行；mock 之下实执行门不可达。 |
 | A10 | 自己的 mock | 执行层自己的测试替身：状态文件按案隔离，删除即重置；未 mock 的脚本响亮失败（`OPERATION_NOT_MOCKED`，exit 3），缺状态响亮失败（`MOCK_STATE_MISSING`，exit 3），绝不静默走真平台。 | 通用 mock 与执行层自有 mock 互不冒充证据：通用 mock 测编排协议，执行层 mock 测该实例集成。 |
 | A11 | 自己的记忆 | 领域记忆的读写规程与内容边界：记忆按什么键读写、缺失时返回什么、写记忆是否需要确认、记忆不得覆盖宿主计划/确认/审计。 | 记忆 set/get/list 有确定性命令与状态文件；缺失键返回 not_found，不编造值；记忆文件删除即重置。 |
 | A12 | 自己的熔断 / 缓存 | 熔断状态机（closed / open / reset 的转换条件与拒绝形态）与缓存读写（命中/未命中/清除的确定性语义），二者状态文件与业务状态文件分离。 | 熔断打开时调用被拒且错误码明确；缓存命中与未命中可区分；清除后未命中；状态删除即重置。 |

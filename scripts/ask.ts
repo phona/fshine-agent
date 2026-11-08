@@ -2,7 +2,8 @@
  * 单条消息联调入口：把一条用户消息灌进与生产一致的 handler 链路
  * （store → runtime → handler，真 LLM + .env 声明的平台模式），打印最终回复。
  * 用法：npm run ask -- "查一下幻辰财税本期的凭证"
- * 独立验收库（data/ask-<ts>.db），不碰生产数据；写链路与验收相同（mock 下放开）。
+ * 独立验收库（data/ask-<ts>.db），不碰生产数据；写链路与生产装配同一份接线
+ * （后端恒定注入，放行/拒绝由执行层自己说）。
  */
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
@@ -14,9 +15,6 @@ import {
   createPiCodingTurnDriver,
   createPiTurnDriver,
   createTaxAgentRuntime,
-  ensureMockStatePath,
-  isCommitEnabled,
-  isPlatformMock,
   newGateSecret,
 } from '@fshine/agent';
 import { createProposalCommitRunner } from '../apps/server/proposal-commit';
@@ -62,10 +60,6 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const platformRoot = config.contextProfiles[profileId ?? '']?.root;
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
-  if (isPlatformMock(process.env)) {
-    console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
-  }
 
   mkdirSync(path.join(repoRoot, 'data'), { recursive: true });
   // --db <path>：固定库文件供多轮脚本跨进程复用会话历史；缺省独立时间戳库。
@@ -96,10 +90,9 @@ async function main(): Promise<void> {
     profileId,
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
-      // 与生产装配同一份接线（assembly.ts）：落账后端恒接，放行由 isCommitEnabled 单独
-      // 派生（mock ⇒ 真；真平台 ⇒ 需 FSHINE_REAL_COMMIT=1，否则确认码只到 confirm_held）。
+      // 与生产装配同一份接线（assembly.ts）：落账后端恒定接线，没有第二级开关——
+      // 写能不能真落地由执行层自己的 commit 门裁决并给出拒绝/warning，宿主如实转述。
       proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
-      proposalCommitEnabled: isCommitEnabled(process.env),
     } : {}),
   });
   const runtime = createTaxAgentRuntime({

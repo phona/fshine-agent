@@ -11,7 +11,6 @@ import { fileURLToPath } from 'node:url';
 import { sweepScratchDirs, listScratchDirNames } from '@fshine/agent';
 import { createServerAssembly, repoRoot } from './assembly';
 import { createShutdownGuard, shutdownDrainMsOf } from './main-shutdown';
-import { runtimeModeOf } from './runtime-mode';
 
 /**
  * 终态任务工作区的保留时长（grace）：交付物已在回合末复制进会话产物库
@@ -81,9 +80,6 @@ async function main(): Promise<void> {
     // C5：打 active profile 的实际键（派生自 contextProfiles），不再硬编码实例名。
     contextProfiles: assembly.activeProfileId !== undefined ? [assembly.activeProfileId] : [],
   }));
-  // 生效模式一行可观测（2026-10-21 真平台切换事故补丁）：executor / 运维授权 / 写授权
-  // 一屏可查，不用再做法医式核查。只含三个模式键——绝不全量打 env（.env 有 LLM 密钥）。
-  console.log(JSON.stringify({ event: 'runtime_mode', ...runtimeModeOf(process.env) }));
 
   // 停机在飞闸（D-132a）：连按两次信号只在飞跑一遍停机体，第二次只打一行
   // shutdown_already_in_progress——并发第二遍会在第一遍排干中途就停渠道关库。

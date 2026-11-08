@@ -176,13 +176,6 @@ export interface SubagentTaskResult {
    */
   terminalFailure?: TerminalFastPathFailure;
   /**
-   * 写关闭终稿标记（D-075，驱动侧 writeClosed 的透传）：本回合宿主拦下过含写类
-   * operation 的计划（部署未开放 write），text 是宿主合成的写关闭话术而非 worker
-   * 文本。宿主据此把这段确定性话术直接作为本轮回复——出口校验的零执行标注不得
-   * 覆盖或误标其来源（与澄清问题同一家族：宿主持有并发音）。
-   */
-  writeClosed?: boolean;
-  /**
    * 平台健康信号（Lane 2，驱动侧 authFailure 的透传）：本回合平台交互以登录/凭据类
    * 失败收尾（驱动从平台错误信封机械派生，判据在 platform-contract）。宿主据此做
    * 会话级连续失败记账与冷却；与 execution 不互斥——失败的那次调用真发生过。
@@ -191,7 +184,7 @@ export interface SubagentTaskResult {
   /**
    * 提案已登记（方案 1 · B 波 B3 网关提案路径，驱动侧 proposalCreated 的透传）：`text` 是
    * **宿主持有的确定性文本**（平台 `summaryText` 原样 + 通用确认行）。宿主据此把这段文本
-   * 作为本轮回复——与 writeClosed 同一家族：出口校验的零执行标注不得覆盖它（提案这一步
+   * 作为本轮回复——与澄清问题同一家族：出口校验的零执行标注不得覆盖它（提案这一步
    * 可能零网关执行，而"提案已登记、等用户确认"是真实状态）。
    */
   proposalCreated?: { proposalId: string };
@@ -373,24 +366,16 @@ export interface ContextTaskRunnerOptions {
    */
   proposalGatewayRunner?: PlanCliRunner;
   /**
-   * 新路径的落账后端是否已接（B4 接线后由部署层置真）。派生规则由部署层经 isCommitEnabled()
-   * 计算：mock 模式下写的是假状态，部署层应传 true 放开全链联调；真平台下须显式
-   * FSHINE_REAL_COMMIT=1 才传 true。false 时给用户的确认行明说"确认不会写入任何数据"
-   * ——不承诺还没接上的事：承诺了而确认步只会 fail-closed，是把用户往一句谎话上引。
-   */
-  proposalCommitEnabled?: boolean;
-  /**
    * 新路径的落账后端（B4）：确认码命中带 proposalId 的条目时，由服务端直调平台 commit
-   * （cwd = platformRoot，serve 法域）。缺省 = 未接线；此时 proposalCommitEnabled 也必须
-   * 为假（接线与开关同进同退），确认步只到达"确认收到但不写"。
+   * （cwd = platformRoot，serve 法域）。缺省 = 未接线；此时确认步只到达"确认收到但不写"
+   * 的配置故障报告（host 侧如实说自己没做到，不承诺还没接上的事）。
+   *
+   * 2026-11-08 架构裁定后这里**没有**"这个部署允不允许落账"的开关位：写能不能真落地归
+   * 执行层，宿主不再持有一个由部署 env 派生的 commit 授权布尔。宿主只如实描述"要提交
+   * 什么"（平台 summaryText + 确认行），执行层的拒绝 / warning / dryrun 提示由平台自己的
+   * commit 信封给出，宿主经既有失败链路上行转述。
    */
   proposalCommitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
-  /**
-   * 平台侧的写开放声明（部署层从平台状态派生，如 isCommitEnabled()；缺省视为只读）。
-   * 写关闭执法路径（worker 驱动的计划扫描 + 本文件的提案路径）统一以它为判据——
-   * 不再读委托主体自持的能力布尔（TrustedContext.capabilities 保留但执法不读，变更项 ⑧）。
-   */
-  writeEnabled?: boolean;
   /**
    * 平台 plan 申请的命令形态（调用方从平台适配层取值注入，如 planDraftExample()）：
    * worker 系统提示词的许可段据此渲染，通用编排层不硬编码网关名（变更项 ②）。
@@ -794,12 +779,17 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     inputSchema: buildRunExecutionTaskSchema(effectiveExecutorLabel),
   };
 
-  /** 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。 */
-  function confirmLineFor(code: string, commitLive: boolean): string {
+  /**
+   * 宿主通用确认行（协议文本，唯一来源）：确认码 + 取消码 + 有效期。
+   *
+   * 2026-11-08 架构裁定后只有一种形态：宿主如实描述"提交什么"（这条指令会让服务端把提案
+   * 交回平台落账），不预先声明"会不会写入"——那是执行层的事，它的拒绝 / warning / dryrun
+   * 提示由平台信封给出并在此后的失败链路上行。原来那句"当前落账执行未启用——确认不会写入
+   * 任何数据"是宿主拿部署 env 派生出来的承诺，随派生位一起删除。
+   */
+  function confirmLineFor(code: string): string {
     const ttlMinutes = Math.round(intentTtlMs / 60_000);
-    return commitLive
-      ? `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`
-      : `回复「确认 ${code}」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
+    return `回复「确认 ${code}」执行录入；回复「取消 ${code}」作废。${ttlMinutes} 分钟内有效。`;
   }
 
   /**
@@ -844,8 +834,12 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * proposalId + 通用确认状态。用户可见文本因此只有两个来源：平台 `summaryText`
    * 原样 + 宿主通用确认行，不写任何业务摘要。
    *
-   * 顺序即安全：写开放声明复核（平台侧声明，⑧）→ 办调平台 → 落意图条目
-   * → 生成确认码。声明不成立时**零平台调用**（不办调），当场合成写关闭话术。
+   * 顺序即安全：办调平台 → 落意图条目 → 生成确认码。
+   *
+   * 2026-11-08 架构裁定后**没有**办调前的"写开放复核"：写能不能真落地是执行层的事，
+   * 宿主不再持有一个"这个部署允不允许写"的布尔，也不在办调前拿它拒掉请求。执行层自己的
+   * 拒绝 / warning / dryrun 提示由平台信封给出，宿主经 `failed` 分支的 errorCode /
+   * workerText 如实转述给用户与 worker。
    * 实体授权不在此复核：宿主不解释业务实体（payload 不透明），读写语义归执行层。
    */
   async function createProposalViaGateway(
@@ -855,14 +849,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
     platformRoot: string,
     gateway?: string,
   ): Promise<ProposalCreationOutcome> {
-    // ① 写开放复核（平台侧声明，Generic，不依赖任何 operation 名）：判据与 worker 驱动的
-    // 计划扫描（D-075）同源——部署层经 isCommitEnabled() 从平台状态派生。话术唯一来源在
-    // error-codes.ts（WRITE_NOT_ENABLED），与计划门拒绝同一句。声明不成立时零平台调用。
-    if (options.writeEnabled !== true) {
-      const text = messageTextFor('WRITE_NOT_ENABLED');
-      return { status: 'write_closed', userText: text, workerText: text };
-    }
-    // ② 办调平台（serve 法域；env 显式剥 EXECUTION_REQUIRE_PLAN——修 D-081：宿主直调不该被
+    // 办调平台（serve 法域；env 显式剥 EXECUTION_REQUIRE_PLAN——修 D-081：宿主直调不该被
     // worker 的计划门拦，那个 mandate 是给 worker 子进程的）。operation 名来自驱动拦截时
     // 从命令里取到的目标 token（平台 protocol 列已声明它扮演创建提案角色），宿主不另持
     // 一份业务 operation 名单。
@@ -921,7 +908,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         };
       }
       const ci = options.changeIntents;
-      if (!ci) throw new ToolUserError('写流程未启用（未配置 changeIntents 仓库）。', { code: 'WRITE_NOT_ENABLED' });
+      if (!ci) throw new ToolUserError(messageTextFor('PROPOSAL_FLOW_NOT_CONFIGURED'), { code: 'PROPOSAL_FLOW_NOT_CONFIGURED' });
       // 新提案作废**同任务**的旧 pending（D-117，2026-10-26 拍板 I2：一任务一码）。
       // 跨任务的 pending 并存——后台长任务跑到中途出的提案，不得作废用户前台正要
       // 确认的另一个任务的提案（I1 全会话单窗会让后台提案打断前台确认，与后台
@@ -959,7 +946,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         status: 'completed',
         proposalId,
         // 用户可见文本 = 平台 summaryText 原样 + 通用确认行（宿主不拼任何业务摘要）。
-        userText: [summaryText, confirmLineFor(code, options.proposalCommitEnabled === true)].join('\n'),
+        userText: [summaryText, confirmLineFor(code)].join('\n'),
         // 给 worker 的确定性消息：提案已登记 + 等用户确认，**不含确认码**。
         workerText: '提案已在平台登记，等待用户确认。本回合到此结束：不要再输出提案 JSON，也不要尝试提交或确认。',
       };
@@ -1012,9 +999,11 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
    * 宿主**只持有一个取物单**——payload 在平台侧，宿主连"在提交什么业务"都不知道。用户
    * 可见文本因此只有两个来源：平台 `summaryText` 原样 + 宿主通用状态行。
    *
-   * 写开放的复核在确认时点照旧发生（D-080 的时点纪律），但判据已切到平台侧声明
-   * （⑧）：读的是**此刻**的部署声明（isCommitEnabled 派生位），不是提案成立时的任何
-   * 主体快照——主体授权归执行层后，"提案之后被收回"的形状只可能是部署声明翻转。
+   * 2026-11-08 架构裁定后确认时点**不再有宿主侧的写开放复核**：宿主不持"这个部署允不允许
+   * 落账"的布尔（原 proposalCommitEnabled 由部署 env 派生），也就不在调 commit 前拿它拒掉
+   * 一次已经拿到确认码的确认。写能不能真落地由执行层的 commit 门裁决：它的拒绝 / warning /
+   * dryrun 提示走下面既有的 `unavailable` / `!ok` 失败链路上行，用户看到的是平台自己说的
+   * 话，不是宿主代判的"未开放写入权限"。
    * 两笔旧债的落点：
    *   · D-081 由 commit 后端的 env 纪律承担（hostGatewayEnv 剥 EXECUTION_REQUIRE_PLAN）；
    *   · D-082 由 writeBackTaskOutcome 承担（committed / confirm_failed 都回写终态）。
@@ -1068,23 +1057,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       return { text: `该确认码对应的提案${latest ? why[latest.status] : '已不可用'}。`, outcome: 'confirm_stale' };
     }
     rec = stillPending;
-    // ① 确认时点复核平台写开放声明（D-080 的时点纪律 + ⑧ 的判据切换合流为一支）：
-    // 声明不成立 → 确定性拒绝，意图保持 pending：提案还在平台侧有效，部署恢复写开放或
-    // 作废后仍可继续，不借"过期"说谎，也零办调。
-    if (options.proposalCommitEnabled !== true) {
-      console.warn(JSON.stringify({
-        event: 'change_intent_confirm_declined',
-        intentId: rec.intentId,
-        reason: 'platform_write_not_enabled_at_confirm',
-      }));
-      return {
-        text: `确认已收到，但${messageTextFor('WRITE_NOT_ENABLED')}本次未写入任何数据，提案保持待确认。`,
-        outcome: 'confirm_held',
-      };
-    }
     const commitRunner = options.proposalCommitRunner;
     if (!commitRunner) {
-      // 开关说接了、后端却没注入 = 配置故障。fail-closed：不猜一个执行器出来。
+      // 后端没注入 = 配置故障。fail-closed：不猜一个执行器出来。这是"编排没做到自己说
+      // 的话"（确认行承诺了执行录入）就如实说，不是对"这个部署允不允许写"的判断。
       console.error(JSON.stringify({ event: 'change_intent_commit_failed', intentId: rec.intentId, reason: 'proposal_commit_runner_missing' }));
       await ci.updateStatus(rec.intentId, 'failed', { error: 'proposal commit runner 未配置' });
       await writeBackTaskOutcome(rec.taskId, 'failed');
@@ -1139,7 +1115,7 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   async function prepareConfirmation(ctx: TrustedContext, message: string): Promise<PreparedContextTaskRun | null> {
     const match = message.match(CONFIRM_RE);
     const ci = options.changeIntents;
-    if (!match || !ci || options.proposalCommitEnabled !== true || !options.proposalCommitRunner) return null;
+    if (!match || !ci || !options.proposalCommitRunner) return null;
     const rec = await ci.findPendingByConfirm(ctx.principalId, ctx.sessionId, hashCode(match[1]!), new Date());
     if (!rec?.proposalId) return null;
     const taskId = rec.taskId ?? `task_${randomUUID()}`;
@@ -1472,10 +1448,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             ...(profile.knowledgePaths ? { knowledgePaths: profile.knowledgePaths } : {}),
             ...(profile.sensitivePaths ? { sensitivePaths: profile.sensitivePaths } : {}),
             ...(onNotice ? { onNotice } : {}),
-            // 写关闭判据（D-075）的宿主持有输入：计划里出现写类 operation 而平台侧声明
-            // 写未开放时，worker 驱动在计划评估前就拦下并合成写关闭话术。缺省 = 只读（⑧：
-            // 判据依据是平台声明，不再是 TrustedContext.capabilities——字段保留但执法不读）。
-            writeEnabled: options.writeEnabled === true,
             // worker 工作区（⑨）：write/edit 门、提案 payload 边界与计划产物路径豁免共用。
             scratchDir,
             // 提案创建网关路径（C 波后唯一的提案路径，B 波那个"提案创建走不走网关"的开关
@@ -1608,9 +1580,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           // 平台健康信号（Lane 2）：登录/凭据类失败的事实原样上交——宿主据此记账与冷却。
           // 与 execution 不互斥（失败的那次调用真发生过），所以两条并列挂载。
           ...(result.authFailure ? { authFailure: result.authFailure } : {}),
-          // 写关闭终稿标记（D-075）：text 是宿主合成的确定性话术，原样上交——宿主据此
-          // 直接终结本轮，不经模型翻译、不经出口校验标注。
-          ...(result.writeClosed ? { writeClosed: true } : {}),
           // 收尾兜底（P1）：批准了但零执行，原样上交——宿主需要这个事实才能说对状态
           ...(result.activatedPlan ? { activatedPlan: result.activatedPlan } : {}),
           // 结构化歧义/未找到：平台请用户"选一个"的澄清事实，原样上交——宿主据此机械

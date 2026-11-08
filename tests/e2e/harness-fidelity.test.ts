@@ -23,9 +23,10 @@
  *      整份退化为空表/空声明，事实链静默退化，所有 e2e 照样绿。这里钉住派生非空 +
  *      锚点 flag（--query/--period）在声明里，形状漂移当天就响。
  *
- * mock 铁律：本文件只经 import harness 拿环境（EXECUTION_EXECUTOR=mock 已在其 beforeAll 钉死，
- * setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设任何 EXECUTION_/FSHINE_ 开关，绝不
- * FSHINE_REAL_COMMIT=1；护栏②的一次 CLI spawn 走 mock 执行器，不开浏览器不触网。
+ * mock 铁律：本文件只经 import harness 拿环境（执行器的 mock 开关由 harness 在 beforeAll
+ * 替**执行层平台**钉死，宿主不读它；setupFiles 再把运行者环境的泄漏变量抹掉），本文件不设
+ * 任何宿主侧开关（2026-11-08 后宿主也不再持有写授权位）；护栏②的一次 CLI spawn 走 mock
+ * 执行器，不开浏览器不触网。
  */
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';

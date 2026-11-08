@@ -155,18 +155,6 @@ describe('noteZeroExecStep', () => {
     expect(state.planZeroExecSteps).toBe(MAX_PLAN_ZERO_EXEC_STEPS);
   });
 
-  it('写关闭步骤不计入熔断：计数照记，但不返回 true', () => {
-    const state = createTurnState();
-    noteZeroExecStep(state, { failed: true });
-    noteZeroExecStep(state, { failed: true });
-
-    // 第 3 步是写关闭：那句话必须由宿主说给用户，不能被熔断汇总顶上
-    expect(noteZeroExecStep(state, { failed: true, writeClosed: true })).toBe(false);
-    expect(state.planZeroExecSteps).toBe(3);
-    // 连续计数已满：下一步真失败时立刻熔断
-    expect(noteZeroExecStep(state, { failed: true })).toBe(true);
-  });
-
   it('停在用户确认门的步骤（pendingPlan）不计数也不熔断', () => {
     const state = createTurnState();
     noteZeroExecStep(state, { failed: true });

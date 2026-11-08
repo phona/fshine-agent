@@ -18,9 +18,11 @@ export interface TrustedContext {
   principalId: string;
   sessionId: string;
   /**
-   * Effective capabilities of the principal（缺省视为只读）。V1 遗留数据位：写开放的执法
-   * 判据已切到平台侧声明（部署层的 isCommitEnabled 派生），执法路径不再读本字段；
-   * 字段保留是为既有存储/配置形状的兼容，新代码不得给它新的消费者。
+   * Effective capabilities of the principal（缺省视为只读）。**遗留数据位，无执法消费者**：
+   * 2026-11-08 架构裁定后"写能不能真落地"完全归执行层——编排层不判这个部署允不允许写，
+   * 也就不再读任何主体/部署侧的能力布尔。字段保留只为既有存储与配置形状的兼容
+   * （config/agent.yaml 的 principals[].capabilities 仍是合法配置键），新代码不得给它
+   * 新的消费者；执行层的放行/拒绝/warning 由执行层自己的门给出并如实转述。
    */
   capabilities?: readonly string[];
   onStep?: (text: string) => void;

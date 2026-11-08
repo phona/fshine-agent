@@ -18,15 +18,15 @@
  *       gatedWorker 替身不复刻它），这里用真 createPiCodingWorkerSession + 真 CLI 驱动：
  *       实体越权计划连提 6 次，前 5 次 PLAN DECLINED，第 6 次 PLAN STOP：
  *       DECLINED_PLAN_LIMIT，且 evaluate 从未被调用（第 6 次不再产生新计划）。
- *   A5：写关闭三个入口各一条——
- *       ① 计划扫描（gatedWorker enforceWriteClosure 复刻宿主 beforeToolCall 拦截）；
- *       ② 提案路径 capability 拒（worker 走网关提案调用，驱动拦下后交 context.ts 的
- *          createProposalViaGateway；终稿就是 error-codes.ts 的 WRITE_NOT_ENABLED 本身，
- *          C 波删掉旧文本路径后不再有"已收到录入提案，但"那句前缀）；
- *       ③ 平台计划门兜底（真 createPiCodingWorkerSession + 真 CLI：capabilities 声明
- *          含 write 使宿主前置扫描不触发，voucher.commit 被平台 canonicalCall 以
- *          PLAN_OPERATION_NOT_READ_ONLY exit 3 拒绝，驱动 catch 分支按平台语义表的
- *          confirm 列分流——要用户确认 → 写关闭话术）。
+ *   A5：写入口的新边界（2026-11-08 架构裁定：写能不能真落地归执行层，宿主不判"这个部署
+ *       允不允许写"）——
+ *       ① 计划扫描那一支已删：含写类 operation 的计划照常提交平台评估，平台计划门被真实
+ *          咨询（原"evaluate 前拦截 + 合成 WRITE_NOT_ENABLED 终稿"整支退役）；
+ *       ② 提案路径的办调前复核已删：worker 的提案创建命令照旧被驱动拦下交宿主办调，
+ *          执行层自己的拒绝走 failed 分支上行（原"写声明关闭即确定性拒绝"整支退役）；
+ *       ③ 平台计划门兜底保留并成为唯一分流点：voucher.commit 被平台 canonicalCall 以
+ *          PLAN_OPERATION_NOT_READ_ONLY exit 3 拒绝，宿主只按平台语义表点名该调用、
+ *          让它移出计划改为直接调用——不合成"未开放写入权限"的归因。
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
@@ -123,8 +123,6 @@ interface SessionExtra {
   sessionId: string;
   entitySources?: PlanEntitySources;
   capabilities?: readonly string[];
-  /** 平台写开放声明（⑧）：写开时宿主前置扫描放行，裁决落到平台计划门。 */
-  writeEnabled?: boolean;
   /** 平台 access 语义表替身（判据是平台数据：不在测试里跑 CLI 派生它）。 */
   operationSemantics?: ReadonlyMap<string, { plan: boolean; confirm: boolean; mock: boolean }>;
 }
@@ -140,7 +138,6 @@ async function makeWorkerSession(counter: { evaluates: number }, extra: SessionE
     agentDir: path.join(root, '.fshine-agent'),
     modelConfig,
     planCliRunner: countingCliRunner(counter),
-    ...(extra.writeEnabled !== undefined ? { writeEnabled: extra.writeEnabled } : {}),
     ...extra,
     ...(extra.operationSemantics ? { operationSemantics: extra.operationSemantics } : {}),
   });
@@ -430,45 +427,38 @@ describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C
   });
 });
 
-// ── A5：写关闭三闸 ────────────────────────────────────────────────────────
-
-describe('[L4 集成] 离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯一话术）', () => {
-  it('A5 闸① 计划扫描拒：含 voucher.commit 的计划在 evaluate 前被拦，终稿一字不差', async () => {
+describe('[L4 集成] 离线全链 e2e：写入口的新边界（宿主不判写权限）', () => {
+  it('A5 闸① 含写类 operation 的计划不被前置拦：直达平台评估，平台门自己裁决', async () => {
     const before = totalActualCalls();
     const { send, assembly } = await boot({
-      // ⑧ 权威源归一：写关闭判据 = 平台侧写开放声明（writeEnabled），不再是 principal
-      // capabilities——部署关写时计划扫描在 evaluate 前拦截并合成终稿。
-      writeEnabled: false,
       main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
       worker: gatedWorker([
         { text: '我先核实一下范围、日期与借贷平衡。' },
         { plan: [{ operation: 'voucher.commit', args: ['幻辰财税', '202609'] }] },
         { text: '已提交录入。' },
-      ], { enforceWriteClosure: true }),
+      ]),
     });
-    // 生产保真：principal 的能力声明显示为只读（与 config/agent.yaml 的 capabilities: ["read"] 同形态）
     await assembly.store.principalScopes.upsert({
       wecomUserId: 'e2e_user', accountSetIds: [], accountSetScope: 'all', enabled: true, capabilities: ['read'],
     });
 
     const reply = await send('帮我录入一笔办公费凭证');
 
-    // 终稿 = error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源，一字不差；
-    // worker 的准备/承诺文本没有成为终稿
-    expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    expect(reply).not.toContain('已提交录入');
-    // 零平台调用：evaluate 从未发生（账本里没有任何计划条目）
-    expect(Object.keys(ledger().plans ?? {})).toEqual([]);
-    expect(totalActualCalls()).toBe(before);
+    // 平台计划门被真实咨询（账本里出现计划条目 = evaluate 真发生过）——宿主不再在
+    // evaluate 之前判"这个部署允不允许写"（原 D-075 前置扫描已删）。
+    expect(Object.keys(ledger().plans ?? {}).length).toBeGreaterThan(0);
+    // 终稿不出现宿主的权限归因（WRITE_NOT_ENABLED 码已随合成话术退役）
+    expect(reply).not.toContain('当前未开放写入权限');
+    expect(reply).not.toContain('请联系管理员开通');
     await assembly.close();
   });
 
-  it('A5 闸② 提案路径部署关写拒：写声明关闭时走到提案步也被确定性拒绝', async () => {
+  it('A5 闸② 提案路径没有办调前复核：提案照常登记并给出确认码', async () => {
     const before = totalActualCalls();
     // 网关提案路径（C 波后唯一的提案入口，开关已退役）：worker 的提案创建命令被驱动
-    // 恒定拦下，交到宿主的 createProposalViaGateway 做写开放复核（⑧：判据=平台声明）。
+    // 恒定拦下，交到宿主的 createProposalViaGateway 办调——2026-11-08 起那里不再有
+    // "平台写开放声明复核"，办调照常发生，执行层的拒绝走 failed 分支上行。
     const { send, assembly } = await boot({
-      writeEnabled: false,
       main: mainDriver([{ kind: 'delegate', request: '帮我录入一笔办公费凭证' }]),
       worker: gatewayProposalWorker({
         type: 'change_proposal',
@@ -485,37 +475,30 @@ describe('[L4 集成] 离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯
 
     const reply = await send('帮我录入一笔办公费凭证');
 
-    // 终稿 == 码表唯一来源的写关闭话术（一字不差）。C 波前这一入口是
-    // "已收到录入提案，但" + 同一句（finalizeProposal 的收件确认）；删掉旧文本路径后
-    // 宿主不再"收件"，话术本身就是终稿。
-    expect(reply).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    // 提案创建零办调（多出来的一笔是 worker 提案前的只读检索）、零待确认意图。
-    // 注意不再断言"平台侧无计划"：网关夹具那一笔检索自己就是一条**只读**计划，
-    // 平台计划门照常放行它——闸② 判的是提案这一步，不是计划门（那是闸③）。
-    expect(totalActualCalls()).toBe(before + 1);
+    // 提案真被登记：确认码出现在确定性回复里（mock 之下这是唯一可达形态；真平台的
+    // 落账授权由执行层自己的门把守，宿主不代判）。
+    const code = /确认\s*([A-Z0-9]{6})/.exec(reply)?.[1];
+    expect(code, `提案登记后应给出确认码：${reply.slice(0, 120)}`).toBeTruthy();
+    expect(reply).not.toContain('当前未开放写入权限');
     const events = await assembly.store.conversationLog.list({ principalId: 'wecom:e2e_user', limit: 10 });
     const sessionId = events[0]?.sessionId ?? '';
     expect(sessionId).not.toBe('');
-    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).toBeNull();
+    expect(await assembly.store.changeIntents.findPendingBySession('wecom:e2e_user', sessionId)).not.toBeNull();
     await assembly.close();
   });
 
-  it('A5 闸③ 平台计划门兜底：宿主前置扫描放行后，平台以 PLAN_OPERATION_NOT_READ_ONLY 拒绝', async () => {
+  it('A5 闸③ 平台计划门兜底：写类被平台拒绝，宿主只点名该调用、不假称权限', async () => {
     const counter = { evaluates: 0 };
-    // capabilities 声明含 write：闸①的 planWriteClosed 前置扫描不触发（D-075 判据），
-    // 裁决完全落到平台计划门——serve 法域的 plan 只接受 read operation，
-    // voucher.commit（write-flag）被平台 canonicalCall 确定性拒绝（CLI exit 3）。
+    // 2026-11-08 后这是唯一的分流点：宿主不再有前置扫描，含写类 operation 的计划照常
+    // 提交平台评估；serve 法域的 plan 只接受 read operation，voucher.commit（write-flag）
+    // 被平台 canonicalCall 确定性拒绝（CLI exit 3）。
     const worker = await makeWorkerSession(counter, {
       sessionId: 'task_platform_write_gate',
       capabilities: ['read', 'write'],
-      // ⑧ 写开放声明（部署写开着）：闸①前置扫描不触发，裁决完全落到平台计划门——
-      // serve 法域的 plan 只接受 read operation，voucher.commit（write-flag）被平台
-      // canonicalCall 确定性拒绝（CLI exit 3）。
-      writeEnabled: true,
       // 平台语义表替身：voucher.commit 要用户确认（confirm=true）。为什么不经平台 CLI 派生：
       // 语义表是**判据**不是普通数据，平台侧顶层 accessSemantics 正在并行改造、尚未下发，
       // 此刻派生只会得到空表——宿主 fail-closed 到"不该进计划"（PLAN_NOT_PLANNABLE），
-      // 这条"平台门兜底 → 写关闭话术"的断言就静默失真。平台下发该表后可换回派生。
+      // 这条"平台门兜底 → 点名该调用"的断言就静默失真。平台下发该表后可换回派生。
       operationSemantics: new Map([
         ['commit', { plan: true, confirm: true, mock: true }],
         ['voucher.commit', { plan: true, confirm: true, mock: true }],
@@ -526,16 +509,16 @@ describe('[L4 集成] 离线全链 e2e：写关闭三闸（WRITE_NOT_ENABLED 唯
       const verdict = await bashCall(worker, 'call_platform_gate', command);
 
       expect(verdict?.block).toBe(true);
-      // 驱动的 evaluate 失败分支把平台拒绝码换成用户/worker 可行动的话术。
-      // 2026-10-14 修正：capabilities 含 write（闸①刻意放行），所以这不是权限问题而是形状
-      // 问题——点名 voucher.commit、让它移出计划改直接调用。改前这里回 WRITE_NOT_ENABLED，
-      // 是假归因（worker 原样转达给用户"请联系管理员开通写入权限"，而写明明是开的）。
+      // 驱动的 evaluate 失败分支把平台拒绝码换成用户/worker 可行动的话术：点名
+      // voucher.commit、让它移出计划改为直接调用。2026-10-14 起不再回 WRITE_NOT_ENABLED
+      // （那是假归因：worker 原样转达给用户"请联系管理员开通写入权限"，而写明明是开的）；
+      // 2026-11-08 起那一支整个删除，宿主不判这个部署允不允许写。
       expect(verdict?.reason).toBe(
         `PLAN STOP\n${messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.commit' })}`,
       );
       // 平台内部错误码不得透传给 worker
       expect(verdict?.reason).not.toContain('PLAN_OPERATION_NOT_READ_ONLY');
-      // 平台门确实被咨询了（与闸①的差别：这是最后一道闸，发生在 evaluate 时）
+      // 平台门确实被咨询了（evaluate 真发生过）
       expect(counter.evaluates).toBe(1);
       // 拒绝发生在账本写入之前：平台侧无计划残留
       expect(Object.keys(ledger().plans ?? {})).toEqual([]);
