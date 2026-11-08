@@ -264,11 +264,15 @@ export function summarizeReport(report: UnifiedReport): string {
   for (const line of report.calls) rungCounts.set(line.rung, rungCounts.get(line.rung) ?? 0 + 1);
   const rungs = [...rungCounts.entries()].map(([rung, count]) => `${rung} ${count}`).join('、') || '无调用';
   const tokenNote = report.metrics.tokens === undefined ? 'usage 无证据' : `tokens ${report.metrics.tokens}`;
+  // 安全违规：null = 未测（无证据源），不是 0。渲染成"未测"，别让它读起来像"测过、0 违规"。
+  const violationNote = report.metrics.safetyViolations === null
+    ? '安全违规 未测（无证据源）'
+    : `安全违规 ${report.metrics.safetyViolations}`;
   return [
     `用例 ${report.metrics.passed}/${report.metrics.cases}（通过率 ${(report.metrics.passRate * 100).toFixed(0)}%）`,
     `干预 ${report.metrics.interventions} 次`,
     `门拒绝 ${report.metrics.gateRefusals} 次`,
-    `安全违规 ${report.metrics.safetyViolations}`,
+    violationNote,
     `耗时 ${(report.metrics.durationMs / 1000).toFixed(1)}s`,
     tokenNote,
     `调用阶梯：${rungs}`,

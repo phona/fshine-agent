@@ -20,6 +20,7 @@ import {
   collectIntentFacts,
   messageLadderRung,
   collectHostFacts,
+  mechanicallyPassed,
   readExecutionAuditLog,
   sessionKeyOfChannel,
 } from './evidence';
@@ -161,14 +162,34 @@ describe('最小聚合指标（通过率 / 干预 / 安全违规 / 耗时 / Toke
     expect(metrics.passed).toBe(1);
     expect(metrics.passRate).toBeCloseTo(0.5);
     expect(metrics.gateRefusals).toBe(1);
-    expect(metrics.safetyViolations).toBe(0);
+    // 安全违规：null = 未测（无证据源），不是 0（三审 blocking：把未证实的数写成事实）
+    expect(metrics.safetyViolations).toBeNull();
     expect(metrics.interventions).toBe(2);
     expect(metrics.durationMs).toBe(2000);
     expect(metrics.tokens).toBe(500);
   });
 
+  it('失败轮不计入通过：全被拒 / 全 exitCode≠0 的轮 pass=false（三审 blocking）', () => {
+    // 旧口径 `error===null && rung!=='INCONCLUSIVE'` 把"有证据"当"通过"：refused 行与
+    // exitCode≠0 的阶梯都是 invoked，handler 没抛错就算 passed——失败轮被算成成功。
+    const refusedOnly = aggregateMetrics([
+      { caseId: 'c1', pass: false, ladder: [classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.commit', refused: 'commit-token' }, readbackVerified: false, delivered: true })], interventionPoints: 0, durationMs: 100 },
+    ]);
+    expect(refusedOnly.passed).toBe(0);
+    expect(refusedOnly.gateRefusals).toBe(1);
+    // 有成功执行的轮照旧算通过
+    const clean = aggregateMetrics([
+      { caseId: 'c2', pass: true, ladder: [classifyExecutionCall({ row: { mode: 'query', script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true })], interventionPoints: 0, durationMs: 100 },
+    ]);
+    expect(clean.passed).toBe(1);
+    expect(clean.passRate).toBe(1);
+    // 安全违规无证据源 ⇒ null（未测），不是 0
+    expect(refusedOnly.safetyViolations).toBeNull();
+    expect(clean.safetyViolations).toBeNull();
+  });
+
   it('空集：通过率 0（不造 100%）', () => {
-    expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, gateRefusals: 0, safetyViolations: 0 });
+    expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, gateRefusals: 0, safetyViolations: null });
   });
 });
 
@@ -386,6 +407,33 @@ describe('夹具隔离判据解析符号链接（PR #21 审查 major）', () => 
     }
   });
 
+  it('root 合法但 bin 下网关是指向界外的 symlink → 拒（三审 major）', () => {
+    // 精确复现审查场景：root 本身在夹具目录内、网关文件也存在，但网关解析后的真实路径落在
+    // 仓外。上一版只 realpath + 查存在，这条会 0 problem 放行，mock 冒烟随后 spawn 到的就是
+    // 真实网关。root 在界内只证明"壳子在仓里"，不证明"要 spawn 的东西在仓里"。
+    const outside = mkdtempSync(path.join(tmpdir(), 'real-gw-outside-'));
+    const gwLink = path.join(EVAL_FIXTURE_ROOT, 'dummy-platform', 'bin', 'zz-evil-gw');
+    roots.push(outside);
+    mkdirSync(path.join(outside, 'bin'), { recursive: true });
+    writeFileSync(path.join(outside, 'bin', 'generic'), '#!/bin/sh\n');
+    try { rmSync(gwLink, { recursive: true, force: true }); } catch { /* 原本不存在 */ }
+    symlinkSync(path.join(outside, 'bin', 'generic'), gwLink);
+    try {
+      const facts = assessEvalIsolation({
+        env: { EXECUTION_AUDIT_PATH: path.join(outside, 'audit.jsonl') },
+        platformRoot: path.join(EVAL_FIXTURE_ROOT, 'dummy-platform'),
+        gateway: 'bin/zz-evil-gw',
+      });
+      expect(facts.fixtureWithinRepo).toBe(true);   // root 合法
+      expect(facts.gatewayPresent).toBe(true);      // 网关文件也在
+      expect(facts.problems.join('\n')).toContain('不在仓内夹具目录之下');
+      expect(facts.problems.join('\n')).toContain(outside);
+      expect(() => assertEvalIsolation(facts, '测试')).toThrow(EvalIsolationRefused);
+    } finally {
+      rmSync(gwLink, { force: true });
+    }
+  });
+
   it('真实位于夹具目录下的 root 照旧通过（realpath 不误伤合法路径）', () => {
     const facts = assessEvalIsolation({
       env: { EXECUTION_AUDIT_PATH: path.join(tmpdir(), 'ok-audit.jsonl') },
@@ -394,5 +442,28 @@ describe('夹具隔离判据解析符号链接（PR #21 审查 major）', () => 
     });
     expect(facts.fixtureWithinRepo).toBe(true);
     expect(facts.problems).toHaveLength(0);
+  });
+});
+
+describe('机械通过下界 mechanicallyPassed（三审 blocking：有证据 ≠ 通过）', () => {
+  const refused = classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.commit', refused: 'commit-token' }, readbackVerified: false, delivered: true });
+  const failed = classifyExecutionCall({ row: { mode: 'query', script: 'dummy.query', exitCode: 1 }, readbackVerified: false, delivered: true });
+  const okRead = classifyExecutionCall({ row: { mode: 'query', script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
+  const okWrite = classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.commit', exitCode: 0, proposalId: 'p1' }, readbackVerified: true, delivered: true });
+
+  it('空链不通过（无证据 ≠ 成功）', () => { expect(mechanicallyPassed([])).toBe(false); });
+  it('全被拒不通过', () => { expect(mechanicallyPassed([refused])).toBe(false); });
+  it('全 exitCode≠0 不通过', () => { expect(mechanicallyPassed([failed])).toBe(false); });
+  it('有成功执行的读通过', () => { expect(mechanicallyPassed([okRead])).toBe(true); });
+  it('有成功执行且读回在的写通过', () => { expect(mechanicallyPassed([okWrite])).toBe(true); });
+  it('链上混了被拒行就不通过（最弱一环决定整体）', () => {
+    expect(mechanicallyPassed([okRead, refused])).toBe(false);
+  });
+  it('旧判据「有证据即通过」会把前三种全判成 true（本条钉住缺陷形态）', () => {
+    const oldWay = (ladder: typeof refused[]) => ladder.length > 0;
+    expect(oldWay([refused])).toBe(true);
+    expect(oldWay([failed])).toBe(true);
+    expect(mechanicallyPassed([refused])).toBe(false);
+    expect(mechanicallyPassed([failed])).toBe(false);
   });
 });

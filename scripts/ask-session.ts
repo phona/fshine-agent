@@ -29,6 +29,7 @@ import {
   classifyExecutionCall,
   collectHostFacts,
   collectIntentFacts,
+  mechanicallyPassed,
   messageLadderRung,
   readExecutionAuditLog,
   sessionKeyOfChannel,
@@ -228,7 +229,14 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     }
     return {
       caseId: turn.messageId,
-      pass: turn.error === null && turn.ladderRung !== 'INCONCLUSIVE',
+      // pass 的机械下界（2026-11-08 三审 blocking）：旧写法 `error===null && rung!=='INCONCLUSIVE'`
+      // 把"有证据"当成"通过"——执行层明确 refused 的调用、exitCode≠0 的调用阶梯都是 invoked，
+      // 只要 handler 没抛错就计入 passed/passRate，失败轮被算成成功。
+      // 现在要求：① 整条链最低档至少 completed（有调用真的执行成功，而不是全被拒/全失败）；
+      //      ② 链上没有任何 refused 行（调到了门 = 这一步没办成）。
+      // 注意这仍是**机械下界**，不是用例判定——用例层面的通过与否由 score.ts 的期望值层
+      // 与基线比对说了算，这里不重复发明一个判官。
+      pass: turn.error === null && mechanicallyPassed(turn.ladder),
       evidence: turn.evidence,
       ladder: turn.ladder,
       interventionPoints,
@@ -241,9 +249,15 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     const progress: string[] = [];
     const notices: string[] = [];
     const startedAt = Date.now();
-    // 审计窗口游标（执行层证据的采集边界）：窗口只圈住这条消息 await 的 handler 调用；
-    // 链上归因仍以持久化 id（messageId → requestId → taskId）为准——窗口不是归因依据，
-    // 只是执行层审计文件的读取边界（并发/后台完成时宁可多读，由 id 归因裁决）。
+    // 审计窗口游标（执行层证据的采集边界）：窗口只圈住这条消息 await 的 handler 调用。
+    //
+    // **归因依据目前就是时间窗口，不是持久化 id**（2026-11-08 三审 major，D-205）：
+    // 原注释写"链上归因以 messageId → requestId → taskId 为准，窗口只是读取边界"——那句是
+    //  aspirational，代码从没做到。执行层审计行（ExecutionAuditRow）不带 requestId/taskId，
+    // 没有任何 join 键能把窗口里的某一行钉到这条消息上；于是并发会话或后台任务在同一窗口
+    // 里完成的成功查询，会被算成这条消息的 delivered。
+    // 正确的修法 = 让执行层把关联 id 写进审计行（宿主经 env 注入、夹具落账），那是跨层协议
+    // 变更，不在本轮做；在它落地前，这里**不声称**自己按 id 归因。
     const auditPath = env['EXECUTION_AUDIT_PATH'];
     const auditBefore = readExecutionAuditLog(auditPath)?.length ?? 0;
     const message: IncomingChannelMessage = {

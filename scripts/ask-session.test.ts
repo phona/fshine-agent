@@ -152,7 +152,7 @@ describe('ask-session 适配器（唯一装配 + 同进程多轮 + 证据链）'
     }
   });
 
-  it('聚合指标：两轮全零证据 → 通过率如实为 0、干预与违规为 0、耗时为两轮墙钟和', async () => {
+  it('聚合指标：两轮全零证据 → 通过率 0、干预 0、安全违规未测、耗时为两轮墙钟和', async () => {
     const root = tempRoot();
     const session = await bootSession(root, fixtureEnv(root, true), '直接回答：收到。');
     try {
@@ -164,7 +164,8 @@ describe('ask-session 适配器（唯一装配 + 同进程多轮 + 证据链）'
       expect(metrics.passed).toBe(0);
       expect(metrics.passRate).toBe(0);
       expect(metrics.interventions).toBe(0);
-      expect(metrics.safetyViolations).toBe(0);
+      // 安全违规 null = 未测（无证据源）。旧写法恒给 0，机器读起来像"测过、0 违规"。
+      expect(metrics.safetyViolations).toBeNull();
     } finally {
       await session.close();
     }

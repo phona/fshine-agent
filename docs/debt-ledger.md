@@ -2073,3 +2073,13 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：统一两套令牌体为同一形状（建议 proposal-commit 也绑定 script，或 dummy.commit 也去掉 script 校验），并补一条"为 dummy.commit 签的令牌不能用于 proposal-commit"或反之的阴性用例。
 - **归属波次 / 限期**：Wave 6 之后（不阻塞本轮修 1 的回归锁）。
 - **状态**：已登记，待办。
+
+### D-205 · 执行证据按时间窗口归因，不按持久化 id（三审 major，待跨层协议变更）
+
+- **位置**：`scripts/ask-session.ts` 的 `sendOne`（`auditBefore` / `auditAfter.slice(auditBefore)` → `turn.ladder`）、`scripts/probe-real-agent.ts` 同款窗口切片；根因在 `scripts/eval/evidence.ts` 的 `ExecutionAuditRow`——**没有 requestId / taskId 字段**，执行层审计行与宿主持有事实之间没有 join 键。
+- **触发 / 根因**（2026-11-09 PR #21 三审）：代码注释原写"链上归因以 messageId → requestId → taskId 为准，窗口只是读取边界"，但实现从来只做窗口切片。`ExecutionAuditRow` 只有 ts/mode/script/args/serve/refused/exitCode/planId/protocol/proposalId，没有任何能把某一行钉到某条消息上的标识。于是并发会话或后台任务在同一窗口内完成的成功查询，会被算成当前消息的 `delivered`——与文件宣称的"持久化 id 归因、断链 INCONCLUSIVE"不符。
+- **已做（本轮）**：把注释改成如实描述（不再声称按 id 归因），并把本条登记在册。**没有**做"筛不掉就标未归因"的半修——那会让大量正常用例退成 INCONCLUSIVE，比如实记着更糟。
+- **闭环判据**：① 执行层审计行带关联 id（宿主经 env 注入 `EXECUTION_REQUEST_ID` 一类键，夹具 `audit()` 落账），`ExecutionAuditRow` 补类型声明；② ask-session / probe 按该 id 过滤窗口行，筛不掉的单列 `unattributedRows` 并在报告里披露计数，不并进当前消息的 ladder；③ 变异验证：并发写一行带别的 requestId 的审计行 → 当前消息 ladder 不含它、`unattributedRows` 计数 +1；④ 既有 234 条脚本测试不退。
+- **律法归属**：issue #10 切片 D「结果与证据独立验收」+ architecture-laws 执行纪律 4（可判主张与代码现实对账）。
+- **归属波次 / 限期**：与结构化调用协议（`docs/a2a-protocol.md`）推进同批——它本来就要定跨层关联 id 的形状，届时一并落地，不单独造一套。
+- **状态**：待办（本轮只修注释与登记，未改行为）。

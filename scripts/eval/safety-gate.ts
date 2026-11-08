@@ -108,6 +108,12 @@ export function assessEvalIsolation(input: {
     : undefined;
   const gatewayReal = gatewayPath !== undefined ? realPathOrNull(gatewayPath) : null;
   const gatewayPresent = gatewayReal !== null && existsSync(gatewayReal);
+  // 网关也必须在夹具边界**之内**（2026-11-08 三审 major）：上一版只 realpath + 查存在，
+  // 于是「root 合法、但 bin 下网关是指向仓外真实执行层的 symlink」整条过——mock 冒烟随后
+  // spawn 到的就是真实网关。root 在界内只证明"壳子在仓里"，不证明"要 spawn 的东西在仓里"。
+  const gatewayWithinFixture = gatewayReal !== null && fixtureRootReal !== null
+    && path.relative(fixtureRootReal, gatewayReal) !== ''
+    && !path.relative(fixtureRootReal, gatewayReal).startsWith('..');
 
   // ① 隔离 mock：root 必须在仓内夹具目录之下（**真实路径**）。root 未配同样拒——"没有平台根"
   // 对评测不是安全态，是跑不出证据的假跑。
@@ -124,6 +130,10 @@ export function assessEvalIsolation(input: {
   }
   if (platformRoot !== undefined && (!gateway || !gatewayPresent)) {
     problems.push(`夹具 profile 未声明 gateway 或网关文件缺失（gateway=${gateway ?? '(未声明)'}${gatewayPath ? `，路径 ${gatewayPath}` : ''}）——委派 spawn 不到执行层`);
+  }
+  // ②b 网关越界：root 在界内但网关解析后落在界外（符号链接逃逸）——spawn 的会是真实执行层。
+  if (platformRoot !== undefined && gateway && gatewayPresent && !gatewayWithinFixture) {
+    problems.push(`网关 ${gatewayPath} 解析后的真实路径 ${gatewayReal} 不在仓内夹具目录之下——root 在界内不等于要 spawn 的网关在界内（符号链接逃逸），按拒跑处理`);
   }
   // ③ 执行层状态无法验证：审计路径未设，或写/读探针失败。
   const auditPath = env['EXECUTION_AUDIT_PATH'];

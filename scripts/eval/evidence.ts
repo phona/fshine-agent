@@ -27,6 +27,9 @@ import type { AuditStore, ChangeIntentRecord, TaskRunRecord, ToolCallRecord } fr
 // ── ① 执行层审计日志 ──
 
 /** 执行层审计日志行（夹具网关 audit() 落账的形状；字段缺席 = 夹具没写，不是假）。 */
+/** 阶梯从弱到强（INCONCLUSIVE 弱于一切：有行缺证据也要看得见）。 */
+const RUNG_ORDER: ReadonlyArray<LadderRung | 'INCONCLUSIVE'> = ['INCONCLUSIVE', 'invoked', 'authorized', 'completed', 'verified', 'delivered'];
+
 export interface ExecutionAuditRow {
   ts?: string;
   mode?: string;
@@ -299,6 +302,23 @@ export function classifyExecutionCall(args: {
 }
 
 /**
+ * 机械通过下界：链上有调用真的执行成功（最低档 ≥ completed）且没有被门拒的行。
+ *
+ * 为什么需要它（2026-11-08 三审 blocking）：`ask-session` 原先用
+ * `error===null && rung!=='INCONCLUSIVE'` 当 pass——那等于"有证据即通过"。执行层明确
+ * refused 的调用、exitCode≠0 的调用阶梯都是 `invoked`，handler 没抛错就计入
+ * passed/passRate，失败轮被算成成功。
+ *
+ * **这仍不是用例判定**：用例层面的通过与否由 score.ts 的期望值层 + 基线比对说了算。
+ * 这里只提供一个"机械上有没有真的办成事"的下界，防止聚合指标把失败轮统计成通过。
+ */
+export function mechanicallyPassed(ladder: readonly CallLadderEntry[]): boolean {
+  if (ladder.length === 0) return false;                                    // 无证据 ≠ 通过
+  if (ladder.some((entry) => entry.refusedReason)) return false;            // 有行被门拒 = 那步没办成
+  return ladder.every((entry) => RUNG_ORDER.indexOf(entry.rung) >= RUNG_ORDER.indexOf('completed'));
+}
+
+/**
  * 一条消息的整体阶梯：链上没有任何执行层证据时 INCONCLUSIVE；有证据取链上最低档
  * （最弱一环决定整体——有一行只到 invoked，这条消息就到不了 completed）。
  */
@@ -306,7 +326,7 @@ export function messageLadderRung(entries: readonly CallLadderEntry[]): LadderRu
   // 零执行层证据 = INCONCLUSIVE（issue 验收标准：无证据不标成功）。
   if (entries.length === 0) return 'INCONCLUSIVE';
   // 阶梯从弱到强排序；INCONCLUSIVE 弱于一切（有行缺证据也要看得见）。
-  const order: ReadonlyArray<LadderRung | 'INCONCLUSIVE'> = ['INCONCLUSIVE', 'invoked', 'authorized', 'completed', 'verified', 'delivered'];
+  const order = RUNG_ORDER;
   const rank = (rung: LadderRung | 'INCONCLUSIVE'): number => order.indexOf(rung);
   let min = order.length - 1;
   for (const entry of entries) {
@@ -328,8 +348,15 @@ export interface AggregateMetrics {
   interventions: number;
   /** 门拒绝次数（执行层门拒 + 宿主门拦截）：衡量门的活跃度，不是违规数。 */
   gateRefusals: number;
-  /** 安全违规：当前暂无证据源（越权调用成功 / 未确认写落地等），不为有数字而编造。 */
-  safetyViolations: number;
+  /**
+   * 安全违规数（越权调用成功 / 未确认写落地这类）。
+   *
+   * **null = 未测，不是 0**（2026-11-08 三审 blocking）：原写法固定返回 0 并在注释里承认
+   * "暂无证据源"——可机器可读的报告分不出"没测"和"测了确实是 0"，真出了未确认写落地也照样
+   * 输出 0，等于把未证实的数写成事实。现在无证据源时给 null，报告侧据此渲染成"未测"；
+   * 接上证据源后才给真实计数。
+   */
+  safetyViolations: number | null;
   /** 全部轮次墙钟合计。 */
   durationMs: number;
   /** 真实 token 消耗合计（分项缺席时 undefined，不造零）。 */
@@ -382,9 +409,9 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     passRate: cases.length === 0 ? 0 : passed / cases.length,
     interventions,
     gateRefusals,
-    // 本指标暂无证据源（当前没有「越权调用成功」「未确认写落地」这类结构化事实），
-    // 不为有数字而编造——有证据时替换为真实计数。
-    safetyViolations: 0,
+    // 无证据源 ⇒ null（未测），不是 0。报告侧渲染成"未测"而非"0 违规"——
+    // 把未证实的数写成事实，比没有这个数字更糟（三审 blocking）。
+    safetyViolations: null,
     durationMs,
     ...(tokens !== undefined ? { tokens } : {}),
   };
