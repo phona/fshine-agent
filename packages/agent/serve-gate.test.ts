@@ -509,6 +509,34 @@ describe('createServeGate（通用执行安全门）', () => {
       expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
     });
 
+    it('confirm:true 优先于 plan:false——要确认的操作不当成免计划（九审 blocking）', () => {
+      // 复现缺陷：解析器明确产出 {plan:false, confirm:true}（operation-labels.test.ts 的
+      // partial 用例）。旧分级先看 plan===false 判 scratch ⇒ 免激活计划、免写覆盖，
+      // 于是"要用户确认却没有任何计划"的操作被放行。免计划档是整个门里最松的一档。
+      const PARTIAL: OperationSemantics = new Map([
+        ['ledger.partial', { plan: false, confirm: true }],
+        ['ledger.plain', { plan: false, confirm: false }],
+      ]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: PARTIAL,
+        activePlanCalls: () => [{ operation: 'ledger.query', args: [] }] as readonly PlanCall[],
+      };
+      // confirm:true ⇒ 写类 ⇒ 不被任何计划步骤覆盖 ⇒ 拒
+      expect(structuredPlanGateVerdict('ledger.partial', {}, ctx)?.block).toBe(true);
+      // 对照：真的 scratch（plan:false, confirm:false）仍免计划
+      expect(structuredPlanGateVerdict('ledger.plain', {}, ctx)?.block).toBeUndefined();
+      // bash 侧同规（同一分级函数）
+      const gate = createServeGate({
+        planActive: () => true,
+        operationSemantics: PARTIAL,
+        activePlanCalls: () => [{ operation: 'ledger.query', args: [] }],
+        gateway: 'bin/example-gateway',
+      });
+      expect(gate(bash('bin/example-gateway prepare ledger.partial x'))?.block).toBe(true);
+      expect(gate(bash('bin/example-gateway prepare ledger.plain x'))?.block).toBeUndefined();
+    });
+
     it('位置参数按声明顺序取值，对象键序不影响判定（六审 blocking）', () => {
       // 复现缺陷：声明 [account, period]、计划 ['alpha','W1']。调用方把键序换成
       // {period:'alpha', account:'W1'}——按插入顺序收集会得到 ['alpha','W1'] 从而放行，

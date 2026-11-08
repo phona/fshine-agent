@@ -467,3 +467,23 @@ describe('机械通过下界 mechanicallyPassed（三审 blocking：有证据 �
     expect(mechanicallyPassed([failed])).toBe(false);
   });
 });
+
+describe('读类判据不随调用载体变化（九审 major）', () => {
+  it('mode 按 access 分级时，同一 query 走 bash 与走结构化同档', () => {
+    const viaBash = classifyExecutionCall({ row: { mode: 'query', script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
+    const viaStructured = classifyExecutionCall({ row: { mode: 'query', via: 'structured', script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
+    expect(viaBash.rung).toBe('delivered');
+    expect(viaStructured.rung).toBe('delivered');
+  });
+
+  it('旧形态 mode:"call" 的读调用会被低报（本条钉住缺陷形状）', () => {
+    // 修复前结构化成功路径一律记 mode:'call'，readClass 只认 'query' ⇒ 停在 completed。
+    const stale = classifyExecutionCall({ row: { mode: 'call', script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
+    expect(stale.rung).toBe('completed');
+  });
+
+  it('写类调用不受影响（mode:prepare/commit 都不是 query）', () => {
+    expect(classifyExecutionCall({ row: { mode: 'prepare', script: 'dummy.proposal', exitCode: 0, proposalId: 'p1' }, readbackVerified: true, delivered: true }).rung).toBe('delivered');
+    expect(classifyExecutionCall({ row: { mode: 'commit', script: 'dummy.proposal-commit', exitCode: 0, proposalId: 'p1' }, readbackVerified: false, delivered: true }).rung).toBe('completed');
+  });
+});

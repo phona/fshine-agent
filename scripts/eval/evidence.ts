@@ -49,6 +49,13 @@ export interface ExecutionAuditRow {
    * `intents.some(...)` 会用历史成功给新调用造假证据）。
    */
   proposalId?: string;
+  /**
+   * 调用载体：`structured` = 经 structured_call 协议进来（bash 直调为 undefined）。
+   * 2026-11-09 九审 major 补：此前结构化成功路径一律记 `mode:'call'`，与 bash 路径按 access
+   * 分级的 query/prepare 不一致，评测据 mode 判读类时结构化查询全被漏掉。现在 mode 按 access
+   * 分级、载体单列一个字段，两件事不再挤同一个键。
+   */
+  via?: string;
 }
 
 /**
@@ -284,6 +291,8 @@ export function classifyExecutionCall(args: {
   // 读类调用（夹具 mode=query：ACCESS 语义表 read/scratch 走 query、write 走 prepare/commit）
   // 没有副作用要读回——exitCode=0 即"结果已在手"，直接到 verified。写类必须靠宿主
   // change_intents 的读回校验才到 verified。
+  // 读类判据 = 执行层按 access 分级落的 mode（query/prepare；结构化调用同样分级，载体另记
+  // 在 row.via）。不看载体、不看脚本名——同一个 dummy.query 走 bash 与走 structured 必须同档。
   const readClass = row.mode === 'query';
   if ((readbackVerified || readClass) && rung === 'completed') {
     rung = 'verified';

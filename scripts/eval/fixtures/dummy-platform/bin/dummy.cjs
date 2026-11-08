@@ -673,7 +673,12 @@ async function main() {
       }
       code = doCommit(op.name, call.args);
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
-    audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // mode 记**按 access 分级**的值（2026-11-09 九审 major）：旧写法这里无脑记 'call'，
+    // 而 bash 路径按 access 算 query/prepare——于是同一次 dummy.query，走 bash 落
+    // mode:'query'、走结构化落 mode:'call'，评测侧据 mode 判读类的逻辑只认前者，结构化查询
+    // 就算 exitCode=0 且已送达也只能停在 completed，报告随调用载体变化。
+    // 载体信息不丢：另记 via:'structured'。
+    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
         const plans = loadPlans();

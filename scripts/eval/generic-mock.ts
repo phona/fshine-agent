@@ -108,6 +108,15 @@ function createProposal(ctx: Ctx, payload: Record<string, unknown>): { env: Enve
   return { env: parseEnvelope(run.stdout), run };
 }
 
+/** 读本用例夹具落的审计行（mode/script/via 判据的取数面；坏行跳过）。 */
+function readAuditRows(ctx: Ctx): Array<{ mode?: string; script?: string; via?: string; exitCode?: number }> {
+  const file = ctx.env.DUMMY_AUDIT_PATH;
+  if (!file || !existsSync(file)) return [];
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line) as { mode?: string; script?: string; via?: string; exitCode?: number }]; } catch { return []; }
+  });
+}
+
 const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseResult> }> = [
   { id: 'smoke-query', run: (ctx) => {
     const r = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
@@ -516,6 +525,24 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
       check('direct call exit 0', direct.code === 0, '0', String(direct.code)),
       check('same status', sameStatus, String(dEnv?.status), String(sEnv?.status)),
       check('same data', sameData, JSON.stringify(dEnv?.data).slice(0, 80), JSON.stringify(sEnv?.data).slice(0, 80)),
+    ] };
+  } },
+  { id: 'g-structured-audit-mode', run: (ctx) => {
+    // 结构化调用的审计行 mode 必须与 bash 同规（九审 major）：旧写法结构化成功路径无脑记
+    // mode:'call'，而 bash 按 access 分级记 query/prepare——同一次 dummy.query 走两条路落的
+    // mode 不同，评测据 mode 判读类时结构化查询全被漏掉（exitCode=0 且已送达也只能停在
+    // completed），报告随调用载体变化。本用例真走夹具钉住这个形状。
+    const file = writePayload(ctx, { operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
+    const structured = ctx.run(['call', '--file', file]);
+    const direct = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
+    const rows = readAuditRows(ctx);
+    const sRow = rows.filter((r) => r.script === 'dummy.query' && r.via === 'structured').at(-1);
+    const dRow = rows.filter((r) => r.script === 'dummy.query' && r.via === undefined).at(-1);
+    return { id: 'g-structured-audit-mode', pass: structured.code === 0 && direct.code === 0
+      && sRow?.mode === 'query' && dRow?.mode === 'query', checks: [
+      check('structured query audit mode=query', sRow?.mode === 'query', 'query', String(sRow?.mode)),
+      check('direct query audit mode=query', dRow?.mode === 'query', 'query', String(dRow?.mode)),
+      check('carrier recorded', sRow?.via === 'structured', 'structured', String(sRow?.via)),
     ] };
   } },
   { id: 'g-structured-undeclared-arg', run: (ctx) => {

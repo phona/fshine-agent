@@ -736,11 +736,25 @@ function planSemanticsEntryForReference(
  */
 type PlanGateTier = 'scratch' | 'read' | 'write' | 'unknown';
 
-function planGateTier(command: string, semantics: OperationSemantics | undefined): { tier: PlanGateTier; key?: string } {
-  const entry = planSemanticsEntryOf(command, semantics);
+/**
+ * 语义表条目 → 计划门档位（**bash 与 structured_call 共用的唯一分级**）。
+ *
+ * 2026-11-09 九审 blocking：旧写法先看 `plan === false` 判 scratch，于是
+ * `{plan:false, confirm:true}` 被归成免计划——而 confirm 列正是"这个操作要用户确认"。
+ * 该组合可由现有解析器产出（operation-labels.test.ts 的 partial 用例明确解析成这个值：
+ * plan 缺省 ⇒ false、confirm:true 保留），即"不需要计划但要确认"的矛盾声明。
+ * **confirm:true 优先**：要用户确认的操作一律按写类办（必须有激活计划且被某一步覆盖）。
+ * 放行的方向是"多拦一次"，不是"少拦一次"——免计划档是整个门里最松的那一档。
+ */
+function tierOfEntry(entry: { key: string; access: AccessSemantics } | undefined): { tier: PlanGateTier; key?: string } {
   if (!entry) return { tier: 'unknown' };
+  if (entry.access.confirm === true) return { tier: 'write', key: entry.key };
   if (entry.access.plan === false) return { tier: 'scratch', key: entry.key };
-  return { tier: entry.access.confirm === true ? 'write' : 'read', key: entry.key };
+  return { tier: 'read', key: entry.key };
+}
+
+function planGateTier(command: string, semantics: OperationSemantics | undefined): { tier: PlanGateTier; key?: string } {
+  return tierOfEntry(planSemanticsEntryOf(command, semantics));
 }
 
 /**
@@ -967,7 +981,7 @@ export function structuredPlanGateVerdict(
 ): ServeGateVerdict | undefined {
   const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
   // 语义表里没有这个 operation（未登记/空表）→ 按既有防线当 unknown：只要求有激活计划。
-  const tier: PlanGateTier = entry === undefined ? 'unknown' : entry.access.plan === false ? 'scratch' : entry.access.confirm === true ? 'write' : 'read';
+  const { tier } = tierOfEntry(entry);
   // args 对象 → flag 表。键名归一成 `--flag`：清单 argsSchema 用的是带横杠形（`--account`），
   // 但也有的部署声明不带横杠，两种都按"剥掉再补一个 --"归一，否则同一件事两种写法会判成
   // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
