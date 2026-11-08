@@ -40,6 +40,10 @@ import type { ExecutionAuditRow } from './evidence';
  *
  * 与既有正则的关系：本层自带一套形状正则（问句 / not_found / 无数据 / 框定语）。这是
  * **刻意的冗余**——第四层要能在任一既有层漂移时独立抓住同一形态；两套都抓不到才是洞。
+ *
+ * 无证据不出判定：调用数族断言（minExecutedCalls / requeryPerTurn / chitchatZeroCalls）
+ * 在取数面不载 calls 时（acceptance 的 records、旧格式探针报告）不产 check——把缺席当零
+ * 会制造永远修不好的假红（2026-11-08 实测：全合规 write-chain-51 只因这一条红）。
  */
 
 /** 与 score.ts 的 Check 同形（score.ts 直接并进 CaseVerdict.checks）。 */
@@ -117,13 +121,27 @@ function linesWith(reply: string, value: number): string[] {
     && new RegExp(`(?<![\\d.,%％])${amountValuePattern(value)}(?!\\d)`).test(line));
 }
 
-function turnOf(turns: readonly ExpectationTurn[], index: number): ExpectationTurn | undefined {
+function turnOf(turns: readonly (ExpectationTurn | undefined)[], index: number): ExpectationTurn | undefined {
   return turns[index];
+}
+
+/**
+ * 调用数证据：`undefined` = 取数面不载调用数（acceptance 报告的 records 只有回复文本；
+ * 旧格式探针报告没有 calls 列），`0` = 有证据表明这一轮零已执行调用。
+ *
+ * 两者**不是同一件事**：把缺席当零会制造永久假红——2026-11-08 实测，一份全合规的
+ * write-chain-51（提案/确认码/落账/读回全绿）只因「期望·调用数(第1轮)」这一条
+ * `pass=false`，而 acceptance 取数面从来就不载 calls，这条红永远不可能被修好。
+ * 判据纪律因此是：无证据**不出判定**（不造零，也不造成功），与 score.ts 对
+ * execution 依赖型过程不变量的同一惯例（`evaluateWriteChainCase` 头注释）。
+ */
+function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined {
+  return turn?.calls;
 }
 
 // ── ① 短用例期望值 ──
 
-function shortCaseChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   for (const want of spec.expectations?.shortCase?.turns ?? []) {
     const turn = turnOf(turns, want.index);
@@ -205,9 +223,14 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
           `${label}数据口径与第${want.sameValueSetAs + 1}轮不一致（${mine || '空'} vs ${theirs || '空'}）——同查询连发必须报同一个数`);
       }
     }
-    if (want.minExecutedCalls !== undefined && (turn.calls ?? 0) < want.minExecutedCalls) {
-      push(`期望·调用数(${label})`, `≥${want.minExecutedCalls} 次已执行调用`, String(turn.calls ?? 0),
-        `${label}已执行平台调用不足（${turn.calls ?? 0} < ${want.minExecutedCalls}）——有对象没真查`);
+    if (want.minExecutedCalls !== undefined) {
+      const calls = callsEvidenceOf(turn);
+      // 取数面不载 calls 时不出判定（见 callsEvidenceOf：不造零）。acceptance 侧同族
+      // 判据由 write-chain 三指标承载（提案尝试 ≥1 = tool_calls 的 serve_gate:proposal_create）。
+      if (calls !== undefined && calls < want.minExecutedCalls) {
+        push(`期望·调用数(${label})`, `≥${want.minExecutedCalls} 次已执行调用`, String(calls),
+          `${label}已执行平台调用不足（${calls} < ${want.minExecutedCalls}）——有对象没真查`);
+      }
     }
     if (want.noticesAtLeast !== undefined && (turn.notices?.length ?? 0) < want.noticesAtLeast) {
       push(`期望·通知(${label})`, `≥${want.noticesAtLeast} 条计划通知`, String(turn.notices?.length ?? 0),
@@ -235,7 +258,7 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
 
 // ── ② 长用例逐线程真值 ──
 
-function recallChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function recallChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   const threads = spec.expectations?.threads ?? {};
   for (const want of spec.expectations?.recalls ?? []) {
@@ -264,7 +287,7 @@ function recallChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Expect
 
 // ── ③ 长用例跨线程隔离 ──
 
-function isolationChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function isolationChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   const threads = spec.expectations?.threads ?? {};
   for (const want of spec.expectations?.recalls ?? []) {
@@ -296,7 +319,7 @@ function isolationChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
 
 // ── ④ 收敛正确性（总结轮）──
 
-function convergenceChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function convergenceChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const want: SummaryExpectation | undefined = spec.expectations?.summary;
   if (!want) return [];
   const turn = turnOf(turns, want.turn);
@@ -343,7 +366,7 @@ function convergenceChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): E
 
 // ── 澄清-选择落点（④ 的伴生断言：选得对）──
 
-function selectChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function selectChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   for (const want of spec.expectations?.selects ?? []) {
     const turn = turnOf(turns, want.turn);
@@ -367,17 +390,18 @@ function selectChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Expect
 
 // ── 过程不变量 ──
 
-function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): ExpectationViolation[] {
+function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   const want: InvariantExpectation | undefined = spec.expectations?.invariants;
   if (!want) return out;
   const at = (index: number): ExpectationTurn | undefined => turnOf(turns, index);
 
-  // 每轮真查（重查轮机械面）：该轮零已执行调用即违例。
+  // 每轮真查（重查轮机械面）：该轮零已执行调用即违例。取数面不载 calls 时不出判定。
   for (const index of want.requeryPerTurn ?? []) {
     const turn = at(index);
-    if (!turn) continue;
-    if ((turn.calls ?? 0) === 0) {
+    const calls = callsEvidenceOf(turn);
+    if (!turn || calls === undefined) continue;
+    if (calls === 0) {
       out.push({
         kind: 'shortCase',
         turn: index,
@@ -392,11 +416,12 @@ function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
     }
   }
 
-  // 闲聊轮零调用。
+  // 闲聊轮零调用。同理：无 calls 证据时不出判定（不把缺席当零放行）。
   for (const index of want.chitchatZeroCalls ?? []) {
     const turn = at(index);
-    if (!turn) continue;
-    if ((turn.calls ?? 0) > 0) {
+    const calls = callsEvidenceOf(turn);
+    if (!turn || calls === undefined) continue;
+    if (calls > 0) {
       out.push({
         kind: 'shortCase',
         turn: index,
@@ -459,7 +484,7 @@ function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
     const confirmTurn = want.gateOrder.confirmTurn;
     const limit = confirmTurn < 0 ? turns.length : confirmTurn;
     const early = turns.slice(0, limit).flatMap((turn, index) =>
-      (turn.execution ?? [])
+      (turn?.execution ?? [])
         .filter((row) => !row.refused && WRITE_OP_RE.test(row.script ?? ''))
         .map((row) => ({ index, row })));
     if (early.length) {
@@ -481,7 +506,7 @@ function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
   if (want.noStorm) {
     const groups = new Map<string, number>();
     for (const turn of turns) {
-      for (const row of turn.execution ?? []) {
+      for (const row of turn?.execution ?? []) {
         if (row.refused) continue;
         const key = `${row.script ?? '(unknown)'}|${JSON.stringify(row.args ?? [])}`;
         groups.set(key, (groups.get(key) ?? 0) + 1);
@@ -505,6 +530,7 @@ function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
   // 大额行归属：出现该数值的行必须点名正确的 collection。
   for (const attribution of want.largeAmountAttribution ?? []) {
     for (const [index, turn] of turns.entries()) {
+      if (!turn) continue;
       const rows = linesWith(turn.reply, attribution.value);
       for (const row of rows) {
         if (mentioned(row, attribution.collection)) continue;
@@ -530,10 +556,13 @@ function invariantChecks(spec: CaseSpec, turns: readonly ExpectationTurn[]): Exp
 /**
  * 跑一个用例的期望值判定。expectations 为 null（未审计占位条目）时返回空——
  * 不猜期望值，也不因为没期望就报绿之外的东西。
+ *
+ * turns 允许稀疏（undefined 孔 = 该轮没跑起来/取数面没这条记录）：按下标取轮，
+ * 孔位不出判定（短用例缺轮会红「没有回复」，其余静默）——不把孔位当零调用轮。
  */
 export function evaluateCaseExpectations(
   spec: CaseSpec,
-  turns: readonly ExpectationTurn[],
+  turns: readonly (ExpectationTurn | undefined)[],
 ): ExpectationOutcome {
   if (!spec.expectations) return { violations: [], checks: [] };
   const violations = [
@@ -547,26 +576,11 @@ export function evaluateCaseExpectations(
   return { violations, checks: violations.map((violation) => violation.check) };
 }
 
-/** 判定类别 → 人读名（报告与 note 用）。 */
-export const EXPECTATION_KIND_LABELS: Record<ExpectationViolation['kind'], string> = {
-  shortCase: '短用例期望值',
-  threadTruth: '逐线程真值',
-  threadIsolation: '跨线程隔离',
-  convergence: '收敛正确性',
-  gateOrder: '门禁时序',
-  noStorm: '无风暴',
-  largeAmountAttribution: '大额行归属',
-};
-
 /**
- * 把期望值违例转成 note 文案（探针/打分器落 scores.jsonl 与人读用）。
- * 前缀「期望值」让 dims 归维表能单独认它——第四层与前三层并列，不混维。
+ * 判定类别里用到的两个词表/一个正则是否仍在（自检：词表被清空时本层会静默失效）。
+ * 与 exposure-lint 的自校验同族——判据词表不是数据，是机制的一部分；由
+ * expectations.test.ts 钉住（自检恒 ok），清空词表的改动会同时红在测试上。
  */
-export function expectationNote(violation: ExpectationViolation): string {
-  return `期望值违例（${EXPECTATION_KIND_LABELS[violation.kind]}）：${violation.message}`;
-}
-
-/** 判定类别里用到的两个词表是否仍在（自检：词表被清空时本层会静默失效）。 */
 export function expectationSelfCheck(): { ok: boolean; problems: string[] } {
   const problems: string[] = [];
   if (MISSING_CALIBERS.length === 0) problems.push('MISSING_CALIBERS 为空——口径绑定判定失效');

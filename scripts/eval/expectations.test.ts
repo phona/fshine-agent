@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { loadCases } from './cases';
-import { evaluateCaseExpectations, type ExpectationTurn } from './expectations';
+import { evaluateCaseExpectations, expectationSelfCheck, type ExpectationTurn } from './expectations';
 import { countDims } from './dims';
-import { evaluateProbeCase, loadBaseline, type ProbeResultRow } from './score';
+import { evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, type ProbeResultRow } from './score';
 
 /**
  * 期望值层的确定性回归测试（issue 切片 C）。
@@ -268,6 +268,67 @@ describe('期望值层：A2 第二轮带上旧 collection alpha → 范围渗入
   });
 });
 
+// ── ④ acceptance 取数面不载 calls：无证据不出判定（不造零）──
+
+describe('期望值层：调用数族断言在无 calls 证据时不出判定（不造零，也不造成功）', () => {
+  const spec = specOf('write-chain-51');
+  /** acceptance 取数面的一轮：records 只有回复文本，没有 calls/execution 列。 */
+  const noEvidenceTurn: ExpectationTurn = {
+    text: '帮我在alpha W1 add a record：name epsilon-note-1，value 2000',
+    reply: '已创建提案：alpha W1 新增 name epsilon-note-1，value 2000。请确认 A1B2C3 后落账。',
+    notices: [],
+  };
+
+  it('全合规 acceptance 会话 → 期望值层全绿（审计点名的「永远不可能全绿」被打破）', () => {
+    // 2026-11-08 审计结论：minExecutedCalls: 1 在 acceptance 取数面上恒红（records 无 calls），
+    // write-chain-51 在第四层上永远不可能全绿。修法不是删期望值，是区分「无证据」与「零」。
+    const records = [
+      { id: '5.1', reply: '已创建提案：alpha W1 新增 name epsilon-note-1，value 2000。请确认 A1B2C3 后落账。' },
+      { id: '5.1b', reply: '夹具没有月份概念。' },
+      { id: '5.2', reply: '确认 A1B2C3，已落账并读回核对一致。' },
+      { id: '5.3', reply: 'alpha W1 现在共 3 条记录。' },
+      { id: '5.4', reply: '该确认码已用过，不能重复确认。' },
+    ];
+    const entry = loadCorpus().find((item) => item.id === 'write-chain-51')!;
+    const verdict = evaluateWriteChainCase(entry, {
+      conversationId: 'acc-write-51',
+      sessionKey: 'wecom:u:acc-write-51',
+      cases: ['5.1', '5.1b', '5.2', '5.3', '5.4'],
+      proposalAttempts: 1,
+      intents: [{ status: 'committed', hasResult: true }],
+      confirmCodeOffered: true,
+    }, baseline.writeChain['acc-write-51']!, spec, records);
+    expect(verdict.pass).toBe(true);
+    expect(verdict.checks.some((check) => check.name.startsWith('期望·'))).toBe(false);
+  });
+
+  it('同一期望值在 probe 取数面（calls 在册）照判：calls=0 即红', () => {
+    const failing = evaluateCaseExpectations(spec, [{ ...noEvidenceTurn, calls: 0 }]).checks;
+    expect(failing.some((check) => check.name === '期望·调用数(第1轮)' && !check.pass)).toBe(true);
+    // 有证据且够 → 不红（证明不是恒红）。
+    const enough = evaluateCaseExpectations(spec, [{ ...noEvidenceTurn, calls: 1 }]).checks;
+    expect(enough.some((check) => check.name === '期望·调用数(第1轮)')).toBe(false);
+  });
+
+  it('D-097 反例形状仍然逐项红（修边界没有放过真失败）', () => {
+    const entry = loadCorpus().find((item) => item.id === 'write-chain-51')!;
+    const verdict = evaluateWriteChainCase(entry, {
+      conversationId: 'acc-write-51',
+      sessionKey: 'wecom:u:acc-write-51',
+      cases: ['5.1', '5.2'],
+      proposalAttempts: 0,
+      intents: [],
+      confirmCodeOffered: false,
+    }, baseline.writeChain['acc-write-51']!, spec, [
+      { id: '5.1', reply: '已完成录入。' },
+      { id: '5.2', reply: '确认。' },
+    ]);
+    expect(verdict.pass).toBe(false);
+    expect(verdict.checks.filter((check) => !check.pass).map((check) => check.name))
+      .toEqual(expect.arrayContaining(['提案尝试', '确认码已给出', '落账 committed']));
+  });
+});
+
 // ── 四类断言 + 三个过程不变量的覆盖（合成输入，钉判定面本身）──
 
 describe('期望值层：四类断言与三个过程不变量各自可判', () => {
@@ -335,6 +396,13 @@ describe('期望值层：四类断言与三个过程不变量各自可判', () =
 });
 
 describe('期望值层：数据面自检', () => {
+  it('判据词表自检恒 ok（词表被清空 → 口径绑定判定静默失效，这条钉住它）', () => {
+    // 与 exposure-lint 的自校验同族：判据词表是机制的一部分，不是可清的数据。
+    const selfCheck = expectationSelfCheck();
+    expect(selfCheck.problems).toEqual([]);
+    expect(selfCheck.ok).toBe(true);
+  });
+
   it('未审计占位条目没有 expectations——不猜期望值，也不因此多报', () => {
     for (const spec of cases.filter((item) => item.placeholder)) {
       expect(spec.expectations, `${spec.id} 是占位条目，不应有期望值`).toBeNull();

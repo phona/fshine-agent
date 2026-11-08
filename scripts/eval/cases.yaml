@@ -1171,6 +1171,11 @@ cases:
       - id: '5.4'
         confirmOf: '5.1'
     expectations:
+      # 取数面现实：acceptance 报告的 records 只有回复文本，不载 calls/execution——
+      # minExecutedCalls 与 gateOrder 在 acceptance 侧不出判定（没有证据不出判定，
+      # 不造零也不造成功；见 expectations.ts 的 callsEvidenceOf）。「5.1 真调用了平台」
+      # 的同族判据是上面的 write-chain 三指标（提案尝试 ≥1 = tool_calls 的
+      # serve_gate:proposal_create）；这两条声明保留是为了取数面补齐时自动生效。
       shortCase:
         turns:
           - index: 0

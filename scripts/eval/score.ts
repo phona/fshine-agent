@@ -238,14 +238,18 @@ export function evaluateWriteChainCase(
   // ④ 期望值层（acceptance 侧）：5.1 给确认码、5.3 读回条数、5.4 复用码不双计。
   // 取数面 = 验收报告的 records（回复文本）；calls/execution 审计面 acceptance 报告不载，
   // 因此 acceptance 的期望值只覆盖文本面断言，过程不变量里依赖审计行的几条不出检查
-  // （没有证据不出判定——不造零也不造成功）。
+  // （没有证据不出判定——不造零也不造成功；调用数族同理，见 expectations.ts 的
+  // callsEvidenceOf）。turns 按 yaml 消息下标**稀疏**落位：中间某条记录缺席（--only
+  // 子集或该轮没跑起来）时后续轮次不错位——错位会让「第 N 轮」的期望值判到另一轮回复上，
+  // 是比缺判更坏的假信号（2026-11-08 实测 D-097 报告只有 5.1/5.2 两条记录时踩过）。
   if (spec && records) {
-    const byId = new Map((spec.messages ?? []).map((message, index) => [message.id ?? String(index), message]));
-    const turns = records
-      .filter((record) => byId.has(record.id))
-      .sort((a, b) => [...byId.keys()].indexOf(a.id) - [...byId.keys()].indexOf(b.id))
-      .map((record) => ({ text: byId.get(record.id)?.text ?? record.id, reply: record.reply ?? '', notices: [] }));
-    checks.push(...evaluateCaseExpectations(spec, turns).checks);
+    const slots: Array<{ text: string; reply: string; notices: string[] } | undefined> = (spec.messages ?? []).map(() => undefined);
+    for (const record of records) {
+      const index = (spec.messages ?? []).findIndex((message) => message.id === record.id);
+      if (index < 0) continue; // 报告里没有对应消息（acceptance 只跑了子集）→ 该轮缺席
+      slots[index] = { text: spec.messages[index]?.text ?? record.id, reply: record.reply ?? '', notices: [] };
+    }
+    checks.push(...evaluateCaseExpectations(spec, slots).checks);
   }
   return { corpusId: entry.id, id: entry.id, kind: 'acceptance', pass: checks.every((check) => check.pass), checks };
 }
