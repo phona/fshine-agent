@@ -285,11 +285,34 @@ export function splitCommandTokens(command: string): string[] {
   let current = '';
   let started = false;
   let quote: '"' | "'" | null = null;
-  let escaped = false;
-  for (const ch of command.trim()) {
-    if (escaped) { current += ch; started = true; escaped = false; continue; }
-    // 单引号内反斜杠是字面（POSIX），其余位置可转义
-    if (ch === '\\' && quote !== "'") { escaped = true; started = true; continue; }
+  const src = command.trim();
+  // 双引号内**只有** $ ` " \ 换行 五个字符前的反斜杠是转义序列，其余位置反斜杠
+  // **字面保留**（POSIX/Bash 语义）。旧写法在双引号内无条件吞反斜杠：`"\alpha"` 被解析成
+  // alpha，而 Bash 实际传入 `\alpha`——计划批准 --collection alpha 时，覆盖判据会放行
+  // 实际指向别名的写调用（十审 blocking：分词与 Bash 语义不一致 = 判据比的是另一回事）。
+  const escapableInDoubleQuote = new Set(['$', '`', '"', '\\', '\n']);
+  for (let index = 0; index < src.length; index += 1) {
+    const ch = src[index]!;
+    if (quote === null && ch === '\\') {
+      const next = src[index + 1];
+      if (next === undefined) { current += ch; started = true; continue; }   // 行尾孤立反斜杠：字面
+      current += next;
+      started = true;
+      index += 1;
+      continue;
+    }
+    if (quote === '"' && ch === '\\') {
+      const next = src[index + 1];
+      if (next !== undefined && escapableInDoubleQuote.has(next)) {
+        current += next === '\n' ? '' : next;
+        started = true;
+        index += 1;
+        continue;
+      }
+      current += ch;   // 不可转义：反斜杠字面保留
+      started = true;
+      continue;
+    }
     if (quote !== null) {
       if (ch === quote) { quote = null; continue; }
       current += ch;
@@ -307,6 +330,7 @@ export function splitCommandTokens(command: string): string[] {
   if (tokens[0] === 'bash' || tokens[0] === 'sh') tokens.shift();
   return tokens;
 }
+
 
 /**
  * 计划前置豁免的**元数据**子命令白名单——显式枚举，绝不开成"任意子命令豁免"。

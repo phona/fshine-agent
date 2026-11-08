@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, splitCommandTokens, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationArgsSpecs, OperationSemantics } from './src/operation-labels';
 import type { PlanCall } from './src/plan-runtime';
@@ -1363,5 +1363,27 @@ describe('local 执行（bin/example-gateway local <本地脚本>）', () => {
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBeUndefined();
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local ../escape.py' } })?.block).toBeUndefined();
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local /etc/passwd' } })?.block).toBeUndefined();
+  });
+});
+
+describe('splitCommandTokens 与 Bash 转义语义一致（十审 blocking）', () => {
+  it('双引号内不可转义的字符前，反斜杠字面保留', () => {
+    // Bash 实测：`"\alpha"` 传入的是 `\alpha`（反斜杠在）。旧写法无条件吞反斜杠解析成
+    // alpha——计划批准 --collection alpha 时，覆盖判据会放行实际指向别名的写调用。
+    expect(splitCommandTokens('bin/gw prepare x.write --collection "\\alpha"'))
+      .toEqual(['bin/gw', 'prepare', 'x.write', '--collection', '\\alpha']);
+  });
+
+  it('双引号内可转义的五个字符（$ ` " \\ 换行）照常转义', () => {
+    expect(splitCommandTokens('bin/gw query q --name "a\\"b"')).toEqual(['bin/gw', 'query', 'q', '--name', 'a"b']);
+    expect(splitCommandTokens('bin/gw query q --path "a\\\\b"')).toEqual(['bin/gw', 'query', 'q', '--path', 'a\\b']);
+  });
+
+  it('单引号内反斜杠是字面（POSIX）', () => {
+    expect(splitCommandTokens("bin/gw query q --name 'a\\b'")).toEqual(['bin/gw', 'query', 'q', '--name', 'a\\b']);
+  });
+
+  it('无引号处反斜杠转义任意字符', () => {
+    expect(splitCommandTokens('bin/gw query q --path \\a')).toEqual(['bin/gw', 'query', 'q', '--path', 'a']);
   });
 });

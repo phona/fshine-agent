@@ -636,15 +636,23 @@ async function main() {
     const op = resolveOperation(call.operation);
     if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
+    // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
+    // 正常确认并读回成功的写链也只能停在 invoked——mechanicallyPassed 恒 false、令牌拒绝也
+    // 进不了 gateRefusals。执行层自己的账必须含"这次调用最终成没成"，否则调用方无从判定。
     if (op.protocol === 'proposal.create') {
-      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
-      return doProposalCreate(op.name, call.args);
+      audit({ mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      const code = doProposalCreate(op.name, call.args);
+      audit({ mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     if (op.protocol === 'proposal.commit') {
       const { flags: innerFlags } = parseFlags(call.args);
       if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
-      return doProposalCommit(op.name, call.args);
+      audit({ mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      const code = doProposalCommit(op.name, call.args);
+      audit({ mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     // Determine mode from operation access.
     const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';

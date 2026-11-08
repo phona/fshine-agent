@@ -86,7 +86,13 @@ async function collectProbeFiles(dir: string): Promise<ProbeFile[]> {
   return files;
 }
 
-async function collectAcceptanceFiles(dir: string): Promise<AcceptanceEntry[]> {
+/**
+ * 收集验收报告条目（**导出供单测**，2026-11-09 十审 minor）。
+ *
+ * 报告的根形状有两种：L7 起是 `{records, writeChain, auditPath}` 对象，更早是裸数组。
+ * 旧写法只认数组，于是当前生成的报告全被静默跳过、台账显示"无数据"。
+ */
+export async function collectAcceptanceFiles(dir: string): Promise<AcceptanceEntry[]> {
   if (!existsSync(dir)) return [];
   const entries = await readdir(dir);
   const acc: AcceptanceEntry[] = [];
@@ -96,11 +102,18 @@ async function collectAcceptanceFiles(dir: string): Promise<AcceptanceEntry[]> {
     try {
       const text = await (await import('node:fs/promises')).readFile(full, 'utf-8');
       const parsed = JSON.parse(text);
-      if (Array.isArray(parsed)) {
-        for (const item of parsed) {
-          if (item && typeof item === 'object' && typeof item.id === 'string') {
-            acc.push(item as AcceptanceEntry);
-          }
+      // 报告的根形状（2026-11-09 十审 minor）：L7 起 acceptance.ts 写出的是
+      // `{records, writeChain, auditPath}` 对象，不是裸数组。旧写法只认数组，于是
+      // **当前生成的验收报告全被静默跳过**、台账显示"无数据"——记录明明在，读法不对。
+      // 两种形状都收（裸数组是 L7 之前的旧报告）；都不是就明确跳过，不猜。
+      const rows: unknown[] = Array.isArray(parsed)
+        ? parsed
+        : (parsed && typeof parsed === 'object' && Array.isArray((parsed as { records?: unknown }).records)
+          ? ((parsed as { records: unknown[] }).records)
+          : []);
+      for (const item of rows) {
+        if (item && typeof item === 'object' && typeof (item as { id?: unknown }).id === 'string') {
+          acc.push(item as AcceptanceEntry);
         }
       }
     } catch {
