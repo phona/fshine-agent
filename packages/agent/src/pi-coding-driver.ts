@@ -1242,7 +1242,21 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   });
   await loader.reload();
   const sessionManager = SessionManager.inMemory(options.cwd, { id: options.sessionId });
-  let activePlan: { planId: string; version: number } | null = null;
+  /**
+   * 本会话的激活计划：身份 + **这份计划的 calls**（宿主自己从 worker 提交的那份解析出来，
+   * 平台 evaluate 的 `delta.calls` 与之同源）。
+   *
+   * 为什么要带 calls：serve-gate 的计划前置对写类调用问的是"覆不覆盖"，而覆盖判据的
+   * 唯一事实来源就是激活时提交的 calls（`planGateVerdict`）。旧形态只存 planId/version，
+   * 门因此只能问"有没有计划"——计划里全是读、写照样调通，数据落地而用户从未确认
+   * （2026-11-08 修的根因）。宿主不另去读平台的 plans.json：那份是执行层的状态，宿主
+   * 已经持有同一份内容的解析结果，再读一遍就是第二份真相。
+   *
+   * 恢复的会话：`loadCurrentActivePlan` 只从平台拿回 planId/version（平台 `plan current`
+   * 不下发 calls），于是 calls = 空数组 = **不知道这份计划覆盖什么**。写类调用在此状态
+   * 下一律被门拒（fail-closed：宁多拦，不放松），直到本会话重新提交并激活一份计划。
+   */
+  let activePlan: { planId: string; version: number; calls: readonly PlanCall[] } | null = null;
   /**
    * **自上次计划成功激活以来**的提交次数（收敛保护，防 worker 反复重提空转整回合）。
    *
@@ -1267,7 +1281,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   let declinedPlans = 0;
   if (options.sessionId) {
     try {
-      activePlan = await loadCurrentActivePlan({
+      const resumed = await loadCurrentActivePlan({
         platformRoot: options.cwd,
         taskId: options.sessionId,
         runCli: options.planCliRunner,
@@ -1275,6 +1289,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // （input.gateway ?? 工厂声明），漏传则默认 runner spawn 前 fail-closed 抛错。
         ...(options.gateway ? { gateway: options.gateway } : {}),
       });
+      // calls 留空：平台 plan current 只回身份，不回计划内容（见 activePlan 注释）——
+      // 写类调用在恢复态下拿不到覆盖判据，由门 fail-closed 拒到本会话重新激活计划为止。
+      activePlan = resumed ? { ...resumed, calls: [] } : null;
     } catch {
       // Fail closed; resumed queries remain blocked until the worker obtains a host-approved plan.
       activePlan = null;
@@ -1474,10 +1491,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // G1 工具门：首条 bash 须为网关 plan（方案定价+预算），bash 仅许网关调用，
   // read/ls 限知识面；放行与拦截都留痕。platformRoot 用于派生能力清单定价。
   // label 表（平台清单第 5 列）在此传入：放行的平台调用才有人类可读进度帧。
-  // access 语义表同样在此传入：计划前置豁免的机械来源——"这个调用要不要过计划门"
-  // 读平台语义表的 plan 列，与计划拒绝分流（nonPlannableOperations）同一份表、同一个
-  // 来源，不存在第二份真相。表由本会话上方加载一次（失败/平台未下发 = 空表 = 一律
-  // 照旧要求计划，fail-closed），门内部不再自己 spawn 平台 CLI。
+  // access 语义表同样在此传入：计划前置三级判据的机械来源——"这个调用要不要过计划门、
+  // 过了之后还要不要被计划覆盖"读平台语义表的 plan/confirm 两列，与计划拒绝分流
+  // （nonPlannableOperations）同一份表、同一个来源，不存在第二份真相。表由本会话上方
+  // 加载一次（失败/平台未下发 = 空表 = 一律照旧要求计划，fail-closed），门内部不再自己
+  // spawn 平台 CLI。
   const gate = createServeGate({
     onEvent: (event) => {
       options.serveGateAudit?.({ ...event, requestId: options.requestId });
@@ -1489,6 +1507,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
+    // 写类调用的覆盖判据：激活计划在本会话提交的那份 calls（宿主自己解析的那一份，
+    // 见 activePlan 声明处）。恢复态 = 空数组 = 写类一律拒，直到重新激活一份计划。
+    activePlanCalls: () => activePlan?.calls ?? null,
     ...(options.gateway ? { gateway: options.gateway } : {}),
     // 本回合工作区：宿主按任务注入（`tmp/task_<taskId>`，续跑同任务共享）。宿主有随机源
     // （taskId），不必让 worker 自己随机（它也没有随机手段）。给了它，write 只放行这一个
@@ -1908,7 +1929,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // 成功——"连续未激活"就此中断，计数从零开始。熔断器只在这里放松：不放松到"没报错
         // 就算"（PLAN PAUSED / PLAN STOP / 实体越权照旧计数，那一维没有放松）。
         declinedPlans = 0;
-        activePlan = { planId: plan.planId, version: plan.version };
+        // calls 存**宿主解析出的那一份**（parsed.calls）：它与平台 evaluate 收到的
+        // `delta.calls` 同源（同一份 JSON 原样转发），而平台只在 evaluate 响应里回一份
+        // 摘要。写类调用的覆盖判据读这里（serve-gate 的 activePlanCalls）。
+        activePlan = { planId: plan.planId, version: plan.version, calls: parsed.calls };
         return { block: true, reason: `PLAN ACTIVE（${plan.planId} v${plan.version}）：按已提交 calls 执行；平台会逐次校验本计划。` };
       }
       if (plan.status === 'confirm') {
