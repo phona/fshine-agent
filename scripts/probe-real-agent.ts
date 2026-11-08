@@ -1308,15 +1308,19 @@ interface AuditRecord {
 }
 
 /** 读审计日志（EXECUTION_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
-/** 宿主持有的待确认计划（计划门 confirm 档的挂起）：计划状态文件里 status=pending 的计划。
- *  D2 的"停在确认门"判据用它而不是 notices 非空——普通多步计划的进度通知也会落
- *  notices，那不是暂停（2026-11-08 评审 major）。 */
-function recordsHasPendingPlan(): boolean {
-  const file = process.env['EXECUTION_PLAN_STATE'];
+/** 执行层自己持有的待确认提案（D2「停在确认门」判据的第二信号）。
+ *  2026-11-08 换源：原 recordsHasPendingPlan 读宿主 EXECUTION_PLAN_STATE——那是编排层
+ *  内部的计划账本，不在可观测面内。同一个「有未执行的待确认提案」信息改从执行层自己的
+ *  proposals.json 取（夹具缺省落在 EXECUTION_MOCK_STATE 同目录，或 DUMMY_PROPOSAL_STATE
+ *  显式指定）。执行层状态是可观测面，宿主计划账本不是。 */
+function executionHasPendingProposal(): boolean {
+  const stateFile = process.env['EXECUTION_MOCK_STATE'];
+  const explicit = process.env['DUMMY_PROPOSAL_STATE'];
+  const file = explicit ?? (stateFile ? path.join(path.dirname(stateFile), 'proposals.json') : '');
   if (!file || !existsSync(file)) return false;
   try {
-    const state = JSON.parse(readFileSync(file, 'utf8')) as { plans?: Record<string, { status?: string }> };
-    return Object.values(state.plans ?? {}).some((plan) => plan.status === 'pending');
+    const doc = JSON.parse(readFileSync(file, 'utf8')) as { proposals?: Record<string, { status?: string }> };
+    return Object.values(doc.proposals ?? {}).some((proposal) => proposal.status === 'pending');
   } catch { return false; }
 }
 
@@ -1890,11 +1894,11 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     turns.push(await send(spec.messages[0]!.text!));
     const asked = turns[0]!.reply;
     // 暂停判据（2026-11-08 评审 major）：普通多步计划的**进度通知**不是暂停——曾用
-    // "notices 非空"当门，模型不等确认就跑完全部查询也算过。改看宿主持有的待确认
-    // 状态（计划门 confirm 档的挂起）：回复给确认提示、或审计里留下未执行的待确认
-    // 计划，二者其一才算停在确认门。
+    // "notices 非空"当门，模型不等确认就跑完全部查询也算过。两个信号任一即算停在确认门：
+    // ① 回复给了确认提示（用户可见面，黑盒）；② 执行层自己留着未执行的待确认提案
+    //    （proposals.json，可观测面）。二者都不成立才红。
     const pausePrompted = /确认继续/.test(asked);
-    const pendingConfirm = recordsHasPendingPlan();
+    const pendingConfirm = executionHasPendingProposal();
     if (pausePrompted) {
       const confirm = (spec.followUps ?? []).find((message) => message.when === 'pausePrompted');
       if (confirm?.text) turns.push(await send(confirm.text));

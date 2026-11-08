@@ -2016,3 +2016,27 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **闭环判据**：① `npm run ci` 全绿；② 三条已发生缺陷在 `expectations.test.ts` 里从"通过"变"失败"（已实现测）；③ 未审计用例补审计后把占位换成完整四元组（切片 E）；④ 基线下一次重定走 `score.ts --write-baseline` 唯一入口（期望值层新增的 `期望·*` 检查会进基线，strict 用例 ok 翻转仍拒绝烤入）。
 - **归属波次 / 限期**：切片 C/D 本轮已落地；**限期 = 切片 E 开工前**补齐三件未覆盖项（未审计 11 条的期望值、acceptance 侧审计行取数、yaml↔判定体负路径用例、探针报告旧格式守卫）。
 - **状态**：本轮已落地（切片 C/D 的用例数据 + 期望值层 + 状态阶梯报告）；切片 E（未审计 11 条的审计与期望值）待办。
+
+### D-200 · 探针 D2 判据换源：宿主计划账本 → 执行层待确认提案
+
+- **位置**：`scripts/probe-real-agent.ts` 的 `executionHasPendingProposal`（原 `recordsHasPendingPlan`），调用点 D2 的「停在确认门」判据。
+- **根因**：原判据读宿主 `EXECUTION_PLAN_STATE` 的 `plans[].status === 'pending'`——那是**编排层内部的计划账本**，不在可观测面内（issue #10 目标 2/5 的判据）。同一个「有未执行的待确认提案」信息，执行层自己的 `proposals.json` 里也有（夹具缺省落在 `EXECUTION_MOCK_STATE` 同目录，或 `DUMMY_PROPOSAL_STATE` 显式指定，每条带 `status: 'pending' | 'committed'`）。
+- **换源后的判据**：两个信号任一即算停在确认门——① 回复给了确认提示（`/确认继续/`，用户可见面）；② 执行层留着未执行的待确认提案（`proposals.json`）。二者都不成立才红。
+- **实测**：换源后 `grep -n "process.env\['EXECUTION_PLAN_STATE'\]" scripts/probe-real-agent.ts` 零命中；`npm run ci`（typecheck + unit + generic-mock + fallback 计数器）PASS。
+- **律法归属**：L2（判据单一真相源）/ issue #10 目标 2（不读宿主内部状态）。
+- **归属波次 / 限期**：2026-11-08 切片 C/D 收尾时清掉；限期 = 切片 E 前。
+- **状态**：已修复。
+
+### D-201 · X1/C2 的线程标签与期望值不一致（切片 E 开工前必须核）
+
+- **位置**：`scripts/eval/cases.yaml` 的 X1 与 C2 条目（`messages[].tasks` 线程标签 ↔ `expectations.threads`）。
+- **发现**：2026-11-08 两路审计报 **X1 有 5 处、C2 有 1 处**标签不一致（明细只在 workflow 运行数据里，仓库无落盘——这是本条要补的第一个洞）。
+- **编排层复核（2026-11-08，逐条读脚本核过一部分）**：
+  - **X1 · 已核实的核心问题**：线程 **C 的身份在会话中漂移**。第 0 轮 `check alpha、beta、contoso-trade、fabrikam-retail` 的 `tasks: [A,B,C,D]` 里 C = contoso-trade；第 3 轮澄清后用户选 `the second one` = contoso-logistics，而 `expectations.threads.C` 写的是 `contoso-logistics`。于是第 0/2 轮标 C 时它其实是 trade，**标签和期望值对不上**——按标签做跨线程隔离断言会张冠李戴。
+  - **C2 · 定位到一处，待确认**：第 21 轮 `check gamma-collection record value` 标了 `marks: [past]`，但 gamma 是**从未查过的新** collection，不是召回旧线程。标 `past` 会让它按召回轮判据（允许池/算术派生）核验，而它该按 not_found 新查询判。
+  - **其余 4 处（X1）明细未重导出**：审计明细只存在于 workflow 运行数据，本条目只记了计数。切片 E 开工前要重导或重审。
+- **影响**：线程标签是长用例跨线程隔离断言（G3 的第二类）的基础，标签错则断言错——而期望值层只对声明了期望的用例生效，错标签会让「隔离断言」保护错的对象。
+- **闭环判据**：① 把审计明细重导或重审，逐条落到本条目；② X1 的线程 C 二义性定性（是「澄清前后同一逻辑线程换对象」还是「标签写错」），据此修 `tasks` 或修 `expectations.threads`；③ C2 第 21 轮的 `marks: [past]` 定性并修；④ 修完重跑 `expectations.test.ts` 与对应用例。
+- **律法归属**：L2（判据单一真相源）/ L7。
+- **归属波次 / 限期**：**切片 E 开工前**（不阻塞最小场景集首跑——X1/C2 均 `inBaseline: false`）。
+- **状态**：待办（核心问题已核实并写明；4 处 X1 明细待重导）。
