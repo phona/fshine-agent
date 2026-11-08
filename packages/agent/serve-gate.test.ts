@@ -4,7 +4,7 @@ import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
 import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
-import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
+import type { AccessSemantics, KeyArgStyles, OperationArgsSpecs, OperationSemantics } from './src/operation-labels';
 import type { PlanCall } from './src/plan-runtime';
 
 describe('isServeCliInvocation（首词规则）', () => {
@@ -484,6 +484,57 @@ describe('createServeGate（通用执行安全门）', () => {
       // 语义表里没有 → unknown 档：按既有防线只要求有计划（不因未登记就放行）
       const unknown = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
       expect(structuredPlanGateVerdict('not.registered', {}, unknown)?.block).toBeUndefined();
+    });
+
+    it('位置参数声明的执行层：计划与调用位置参数不同 ⇒ 不覆盖（五审 blocking）', () => {
+      // 复现缺陷：某执行层以位置参数声明目标（args=['alpha','W1'] 而不是
+      // --collection alpha）。旧判据只提取 flag，位置参数整批丢弃 ⇒ wanted 为空 ⇒
+      // 直接 return true，于是计划查 alpha、实际写 beta 也判"已覆盖"。
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.query', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const writeTier: OperationSemantics = new Map([['ledger.write', { plan: true, confirm: true }]]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: writeTier,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        operationArgsSpecs: SPECS,
+      };
+      // 同名同位置参数 → 覆盖
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBeUndefined();
+      // 位置参数不同 → 不覆盖（旧代码这里放行）
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'beta', period: 'W2' }, ctx)?.block).toBe(true);
+      // 少给一个位置参数 → 也不覆盖（范围说不清）
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
+    });
+
+    it('位置参数：执行层没声明 positionalNames 而计划步带了位置参数 ⇒ 不覆盖（fail-closed）', () => {
+      // 拿不到声明就无法证明范围一致——不能把"没解析出 flag"解释成"授权任意目标"。
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        // 故意不给 operationArgsSpecs
+      };
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBe(true);
+    });
+
+    it('bash 侧位置参数判据同规（去掉了网关词/子命令/operation 引用再比）', () => {
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const gate = createServeGate({
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]),
+        operationArgsSpecs: SPECS,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }],
+        gateway: 'bin/example-gateway',
+      });
+      // 位置参数一致 → 放行
+      expect(gate(bash('bin/example-gateway prepare ledger.write alpha W1'))?.block).toBeUndefined();
+      // 位置参数不同 → 拒（旧代码只看 flag，这里 wanted 为空直接放行）
+      expect(gate(bash('bin/example-gateway prepare ledger.write beta W2'))?.block).toBe(true);
     });
 
     it('结构化与 bash 对同一场景给同一结论（防两条路漂移）', () => {

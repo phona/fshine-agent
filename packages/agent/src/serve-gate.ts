@@ -41,7 +41,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
-import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 import { hasServerPath } from './server-paths';
 import type { PlanCall } from './plan-runtime';
@@ -82,6 +82,12 @@ export interface ServeGateToolCall {
 }
 
 export interface ServeGateOptions {
+  /**
+   * operation → args 规格（positionalNames / flagStyles）。计划覆盖判据据此知道哪些位置
+   * 参数是目标（2026-11-09 五审 blocking：只看 flag 会让以位置参数声明目标的执行层失去
+   * 写授权范围保护）。缺省 = 无法证明位置范围，计划步带位置参数即不覆盖。
+   */
+  operationArgsSpecs?: OperationArgsSpecs;
   onEvent?: (event: ServeGateEvent) => void;
   /** 平台根目录：用于经公共 CLI 派生能力清单（定价与脚本存在性校验）。缺省降级。 */
   platformRoot?: string;
@@ -761,6 +767,49 @@ function keyArgsOf(tokens: readonly string[]): Map<string, string> {
 }
 
 /**
+ * token 串 → 位置参数表（flag 及其取值都不算）。
+ *
+ * 2026-11-09 五审 blocking：覆盖判据原先只看 flag，位置参数整批丢弃——于是一份
+ * `args: ['alpha','W1']` 的计划步与一次 `args: ['beta','W2']` 的调用，只要 operation 同名
+ * 就判"已覆盖"。对以位置参数声明目标的执行层，写授权范围检查等于不存在。
+ * 现在位置参数也进判据；哪些位置参数是"目标"由执行层的 args 声明（positionalNames）说，
+ * 宿主不猜。声明缺失而计划步又带了位置参数 ⇒ 无法证明范围一致 ⇒ 不覆盖（fail-closed，
+ * 不把"没解析出 flag"当成"授权任意目标"）。
+ */
+/**
+ * 该 operation 声明了哪些位置参数（执行层 args 声明的 positionalNames）。
+ *
+ * 拿不到（表未加载 / 平台没下发 / operation 不在表里）返回 undefined——调用方据此走
+ * fail-closed：计划步带了位置参数而这里说不出哪些是目标，就不判定覆盖。
+ */
+function positionalNamesFor(reference: string | null, specs: OperationArgsSpecs | undefined): readonly string[] | undefined {
+  if (!reference || !specs || specs.size === 0) return undefined;
+  const direct = specs.get(reference);
+  if (direct) return direct.positionalNames;
+  const parts = scriptPathParts(reference);
+  if (!parts) return undefined;
+  const prefix = `${parts.domain}.`;
+  for (const [name, spec] of specs) {
+    if (name.startsWith(prefix) && name.slice(prefix.length) === parts.file) return spec.positionalNames;
+  }
+  return undefined;
+}
+
+function positionalsOf(tokens: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || token.startsWith('--')) {
+      if (token && token.includes('=')) continue;        // --flag=值：单个 token
+      index += 1;                                        // --flag 值：跳过取值
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
+}
+
+/**
  * 激活计划的某一步是否覆盖这次网关调用（写类的前置判据）。
  *
  * 两条判据，都是机械的：
@@ -772,12 +821,26 @@ function keyArgsOf(tokens: readonly string[]): Map<string, string> {
  * 反方向不放松：计划声明了 `--window W1` 而这次调用没带，目标就不一定是那一个——
  * 拒，让 worker 改对或重提计划。
  */
-function coversPlanStep(step: PlanCall, reference: string, gotKeyArgs: ReadonlyMap<string, string>): boolean {
+function coversPlanStep(
+  step: PlanCall,
+  reference: string,
+  gotKeyArgs: ReadonlyMap<string, string>,
+  gotPositionals: readonly string[],
+  positionalNames: readonly string[] | undefined,
+): boolean {
   if (!sameOperation(step.operation, reference)) return false;
-  const wanted = keyArgsOf(step.args.map((value) => (typeof value === 'string' ? value : String(value))));
-  if (wanted.size === 0) return true;   // 该步没声明关键参数 → 覆盖这个 operation 的任何调用
+  const stepTokens = step.args.map((value) => (typeof value === 'string' ? value : String(value)));
+  const wanted = keyArgsOf(stepTokens);
   for (const [flag, value] of wanted) {
     if (gotKeyArgs.get(flag) !== value) return false;
+  }
+  // 位置参数：执行层声明了才有判据（declared positional names）；声明缺失而计划步又带了
+  // 位置参数 ⇒ 无法证明范围一致 ⇒ 不覆盖。空声明 + 空位置参数 = 该步只按 operation 约束。
+  const wantedPositionals = positionalsOf(stepTokens);
+  if (wantedPositionals.length === 0) return true;
+  if (positionalNames === undefined || positionalNames.length === 0) return false;
+  for (let index = 0; index < wantedPositionals.length; index += 1) {
+    if (gotPositionals[index] !== wantedPositionals[index]) return false;
   }
   return true;
 }
@@ -795,11 +858,17 @@ function planGateVerdict(
     operationSemantics?: OperationSemantics;
     /** 激活计划的 calls（宿主注入）。undefined = 调用方没接这一路 → 写类一律拒（fail-closed）。 */
     activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
+    operationArgsSpecs?: OperationArgsSpecs;
   },
 ): ServeGateVerdict | undefined {
   const { tier, key } = planGateTier(command, ctx.operationSemantics);
   const reference = extractGateScript(command);
-  return planCoverageVerdict(tier, key, reference, keyArgsOf(splitCommandTokens(command)), ctx);
+  const tokens = splitCommandTokens(command);
+  // 命令里的位置参数要去掉"网关词 + 子命令 + operation 引用"这三段，剩下的才是目标参数
+  // （`bin/<gw> prepare dummy.proposal tmp/task_x/payload.json` → ['tmp/task_x/payload.json']）。
+  const headLength = reference === null ? 0 : tokens.indexOf(reference) + 1;
+  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens), positionalsOf(tokens.slice(headLength)), positionalNamesFor(reference, ctx.operationArgsSpecs), ctx);
 }
 
 /**
@@ -818,11 +887,15 @@ function planCoverageVerdict(
   key: string | undefined,
   reference: string | null,
   gotKeyArgs: ReadonlyMap<string, string>,
+  gotPositionals: readonly string[],
+  positionalNames: readonly string[] | undefined,
   ctx: {
     planActive?: () => boolean;
     operationSemantics?: OperationSemantics;
     /** 激活计划的 calls（宿主注入）。undefined = 调用方没接这一路 → 写类一律拒（fail-closed）。 */
     activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明）。缺省 = 无法证明位置范围，计划步带位置参数即不覆盖。 */
+    operationArgsSpecs?: OperationArgsSpecs;
   },
 ): ServeGateVerdict | undefined {
   // scratch：平台自己声明不要计划（纯本地计算），免前置——与旧的 planExempt 同一列同一判据
@@ -831,7 +904,7 @@ function planCoverageVerdict(
   // 读与未登记形态：只要有激活计划（探索性查询不锁死；未知 op 按既有防线只要求有计划）
   if (tier !== 'write') return undefined;
   const steps = ctx.activePlanCalls?.();
-  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs))) return undefined;
+  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames))) return undefined;
   // 措辞收口在 error-codes.ts（SERVE_PLAN_NOT_ACTIVE 一字不差地复用），这里只追加**数据**：
   // 被拒的是哪个 operation——没有它，worker 不知道该把哪个调用补进计划，只能整份重提。
   // 点名用语义表里的注册名（`voucher.fill`），不拿命令里的脚本路径顶替（消息纪律：脚本名/
@@ -857,6 +930,8 @@ export function structuredPlanGateVerdict(
     planActive?: () => boolean;
     operationSemantics?: OperationSemantics;
     activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
+    operationArgsSpecs?: OperationArgsSpecs;
   },
 ): ServeGateVerdict | undefined {
   const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
@@ -867,12 +942,19 @@ export function structuredPlanGateVerdict(
   // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
   // `--flag 值` / `--flag` 的判定同形；数组/对象不猜（结构化 args 已被清单校验只能是标量）。
   const got = new Map<string, string>();
+  const positionals: string[] = [];
+  const names = positionalNamesFor(operation, ctx.operationArgsSpecs) ?? [];
   for (const [name, value] of Object.entries(args)) {
     if (value === undefined || value === null) continue;
     const flag = name.startsWith('--') ? name : `--${name}`;
+    // 执行层声明为位置参数的名 ⇒ 进位置参数表（按声明顺序）；其余按 flag 处理。
+    if (names.some((declared) => declared === name || declared === flag)) {
+      positionals.push(typeof value === 'boolean' ? '' : String(value));
+      continue;
+    }
     got.set(flag, typeof value === 'boolean' ? '' : String(value));
   }
-  return planCoverageVerdict(tier, entry?.key, operation, got, ctx);
+  return planCoverageVerdict(tier, entry?.key, operation, got, positionals, names.length > 0 ? names : undefined, ctx);
 }
 
 export function createServeGate(options: ServeGateOptions = {}) {

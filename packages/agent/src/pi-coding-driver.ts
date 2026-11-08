@@ -348,6 +348,8 @@ export interface PiCodingTurnDriverOptions {
    * operation 名单（L2）。缺省经平台 CLI 派生一次。
    */
   operationSemantics?: OperationSemantics;
+  /** operation → args 规格（位置参数声明，计划覆盖判据用）。 */
+  operationArgsSpecs?: OperationArgsSpecs;
   /**
    * operation → 平台协议角色表（`operation list --json` 的 `protocol` 列，A 波新增；测试
    * 替身注入点）。提案创建拦截的机械来源：宿主据此认出"这个 operation 在写流程里扮演
@@ -424,6 +426,8 @@ export interface PiCodingWorkerSessionOptions {
    * 缺省本会话自派生一次（失败 = 空表 = 写类判定不生效，平台门禁照旧兜底）。
    */
   operationSemantics?: OperationSemantics;
+  /** operation → args 规格（位置参数声明，计划覆盖判据用；与工厂级同名同义）。 */
+  operationArgSpecs?: OperationArgsSpecs;
   /**
    * operation → 平台协议角色表（`operation list --json` 的 `protocol` 列）：提案创建拦截
    * 的机械来源（B 波 B3）。缺省本会话自派生一次（失败 = 空表 = 不拦截，落回 serve 门）。
@@ -687,6 +691,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         env: options.env,
         operationLabels: await operationLabelsFor(input.cwd),
         operationArgStyles: await operationArgStylesFor(input.cwd),
+        // args 规格（positionalNames）：计划覆盖判据要知道哪些位置参数是目标
+        // （五审 blocking）。与 label/样式/语义/协议四张表同一手法——工厂已注入的直接用，
+        // 没注入才按 cwd 现派生一次。
+        ...(argSpecs && argSpecs.size > 0 ? { operationArgSpecs: argSpecs } : {}),
         // access 语义表（计划门拒绝分流的平台数据面）与能力声明（宿主持有）一起进会话：
         // beforeToolCall 里对提交的计划做"该不该进计划"的判读。
         operationSemantics: await operationSemanticsFor(input.cwd),
@@ -1311,6 +1319,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案路径的既有拒绝照旧兜底），
   // 绝不回退到宿主硬编码 operation 名单或 access 词表。
   const operationSemantics = options.operationSemantics ?? (await loadOperationSemantics(options.cwd, options.gateway));
+  // args 规格（positionalNames / flagStyles）：计划覆盖判据据此知道哪些位置参数是目标
+  // （2026-11-09 五审 blocking：只看 flag 会让以位置参数声明目标的执行层失去写授权范围
+  // 保护）。派生失败/平台没下发 → 空表 → 计划步带位置参数时不判定覆盖（fail-closed）。
+  const operationArgSpecs = options.operationArgSpecs ?? (await loadOperationArgSpecs(options.cwd, options.gateway));
   // 协议角色表（平台 `operation list --json` 的 protocol 列）：提案创建拦截的机械来源
   // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
   // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
@@ -1504,6 +1516,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     operationLabels,
     operationArgStyles,
     operationSemantics,
+    ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgsSpecs: operationArgSpecs } : {}),
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
     planActive: () => activePlan !== null,
@@ -1589,6 +1602,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       planActive: () => activePlanId() !== null,
       operationSemantics,
       activePlanCalls,
+      ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgsSpecs: operationArgSpecs } : {}),
     });
     if (planVerdict) return planVerdict;
     const argsValue = args.args;
