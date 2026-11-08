@@ -65,8 +65,8 @@ async function fakeModelRuntime(): Promise<{ runtime: ModelRuntime; model: Model
 
 /** 平台 access 语义表（`operation list --json` 派生面的替身）：本地处理 + 要确认的写类。 */
 const SEMANTICS: OperationSemantics = new Map<string, AccessSemantics>([
-  ['payroll.transform', { plan: false, confirm: false, mock: false }],
-  ['voucher.commit', { plan: true, confirm: true, mock: true }],
+  ['payroll.transform', { plan: false, confirm: false }],
+  ['voucher.commit', { plan: true, confirm: true }],
 ]);
 
 /** 审计事件收集器 + 落账替身（与 assembly 的 serveGateAudit 同形状：event → 一行）。 */

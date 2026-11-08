@@ -228,19 +228,19 @@ describe('createServeGate（通用执行安全门）', () => {
     /** 与平台 `operation list --json` 同形的替身表（注册名 + command 裸名双键）。 */
     const SEMANTICS: OperationSemantics = new Map<string, AccessSemantics>([
       // 纯本地计算：不触平台会话、不耗令牌、不写平台数据 → 不要计划
-      ['payroll.validate', { plan: false, confirm: false, mock: false }],
-      ['validate', { plan: false, confirm: false, mock: false }],
-      ['payroll.transform', { plan: false, confirm: false, mock: false }],
-      ['transform', { plan: false, confirm: false, mock: false }],
+      ['payroll.validate', { plan: false, confirm: false }],
+      ['validate', { plan: false, confirm: false }],
+      ['payroll.transform', { plan: false, confirm: false }],
+      ['transform', { plan: false, confirm: false }],
       // 只读平台数据 / 写：受过计划门管辖 → 要计划
-      ['finance.search-account-sets', { plan: true, confirm: false, mock: true }],
-      ['search-account-sets', { plan: true, confirm: false, mock: true }],
-      ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-      ['query-saved', { plan: true, confirm: false, mock: true }],
-      ['voucher.commit', { plan: true, confirm: true, mock: true }],
-      ['commit', { plan: true, confirm: true, mock: true }],
+      ['finance.search-account-sets', { plan: true, confirm: false }],
+      ['search-account-sets', { plan: true, confirm: false }],
+      ['voucher.query-saved', { plan: true, confirm: false }],
+      ['query-saved', { plan: true, confirm: false }],
+      ['voucher.commit', { plan: true, confirm: true }],
+      ['commit', { plan: true, confirm: true }],
       // 同名脚本登记在两个域、语义不同：域内解析的分界线
-      ['voucher.validate', { plan: true, confirm: false, mock: true }],
+      ['voucher.validate', { plan: true, confirm: false }],
     ]);
     const bash = (command: string) => ({ name: 'bash', arguments: { command } });
 
@@ -285,8 +285,8 @@ describe('createServeGate（通用执行安全门）', () => {
         planActive: () => false,
         // 表里只有只读域：payroll 的两个 operation 查不到
         operationSemantics: new Map<string, AccessSemantics>([
-          ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-          ['query-saved', { plan: true, confirm: false, mock: true }],
+          ['voucher.query-saved', { plan: true, confirm: false }],
+          ['query-saved', { plan: true, confirm: false }],
         ]),
         gateway: 'bin/example-gateway',
       });

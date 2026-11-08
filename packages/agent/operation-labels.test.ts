@@ -268,11 +268,11 @@ const SEMANTICS_WITH_UNKNOWN_ACCESS = JSON.stringify({
 });
 
 describe('parseAccessSemantics（顶层 accessSemantics 表）', () => {
-  it('按 access 取值收三列语义（plan/confirm/mock 都是平台数据）', () => {
+  it('按 access 取值收两列语义（plan/confirm 都是平台数据）', () => {
     expect([...parseAccessSemantics(SEMANTICS_LIST_JSON).entries()]).toEqual([
-      ['read', { plan: true, confirm: false, mock: true }],
-      ['scratch', { plan: false, confirm: false, mock: false }],
-      ['write', { plan: true, confirm: true, mock: true }],
+      ['read', { plan: true, confirm: false }],
+      ['scratch', { plan: false, confirm: false }],
+      ['write', { plan: true, confirm: true }],
     ]);
   });
 
@@ -286,9 +286,9 @@ describe('parseAccessSemantics（顶层 accessSemantics 表）', () => {
       },
     }));
     expect([...table.entries()]).toEqual([
-      ['read', { plan: true, confirm: false, mock: true }],
-      ['partial', { plan: false, confirm: true, mock: false }],
-      ['broken', { plan: false, confirm: false, mock: false }],
+      ['read', { plan: true, confirm: false }],
+      ['partial', { plan: false, confirm: true }],
+      ['broken', { plan: false, confirm: false }],
     ]);
   });
 
@@ -306,20 +306,20 @@ describe('parseOperationSemantics（--json 的 access 列 × 顶层语义表）'
   it('按 operation 收录语义对象，注册名与 command 裸名同表', () => {
     const semantics = parseOperationSemantics(SEMANTICS_LIST_JSON);
     expect([...semantics.entries()]).toEqual([
-      ['finance.query-receivables', { plan: true, confirm: false, mock: true }],
-      ['query-receivables', { plan: true, confirm: false, mock: true }],
-      ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-      ['query-saved', { plan: true, confirm: false, mock: true }],
-      ['voucher.precheck', { plan: false, confirm: false, mock: false }],
-      ['precheck', { plan: false, confirm: false, mock: false }],
-      ['payroll.transform', { plan: false, confirm: false, mock: false }],
-      ['transform', { plan: false, confirm: false, mock: false }],
-      ['voucher.prepare', { plan: true, confirm: true, mock: true }],
-      ['prepare', { plan: true, confirm: true, mock: true }],
-      ['voucher.commit', { plan: true, confirm: true, mock: true }],
-      ['commit', { plan: true, confirm: true, mock: true }],
-      ['voucher.unregistered', { plan: true, confirm: false, mock: true }],
-      ['unregistered', { plan: true, confirm: false, mock: true }],
+      ['finance.query-receivables', { plan: true, confirm: false }],
+      ['query-receivables', { plan: true, confirm: false }],
+      ['voucher.query-saved', { plan: true, confirm: false }],
+      ['query-saved', { plan: true, confirm: false }],
+      ['voucher.precheck', { plan: false, confirm: false }],
+      ['precheck', { plan: false, confirm: false }],
+      ['payroll.transform', { plan: false, confirm: false }],
+      ['transform', { plan: false, confirm: false }],
+      ['voucher.prepare', { plan: true, confirm: true }],
+      ['prepare', { plan: true, confirm: true }],
+      ['voucher.commit', { plan: true, confirm: true }],
+      ['commit', { plan: true, confirm: true }],
+      ['voucher.unregistered', { plan: true, confirm: false }],
+      ['unregistered', { plan: true, confirm: false }],
     ]);
   });
 

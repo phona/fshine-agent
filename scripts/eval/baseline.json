@@ -62,19 +62,6 @@
       },
       "note": "评委两轮都给卫生 0（「平台返回/无候选」技术报告口吻），机械指纹不报——两个分量在此用例上独立可见"
     },
-      "dims": {
-        "groundedness": 0,
-        "entityFidelity": 0,
-        "failureHonesty": 0,
-        "presentationHygiene": 0
-      },
-      "judge": {
-        "groundedness": 2,
-        "entityFidelity": 2,
-        "failureHonesty": 2,
-        "presentationHygiene": 2
-      }
-    },
     "probe-B1": {
       "dims": {
         "groundedness": 1,
