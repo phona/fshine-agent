@@ -79,6 +79,7 @@ import {
 } from './eval/evidence';
 // 统一报告（JSON + JSONL 两份面）与最小聚合指标。
 import { buildUnifiedReport, summarizeReport, writeUnifiedReport, type ReportCaseInput } from './eval/report';
+import { expectationChecksOf, type ProbeResultRow } from './eval/score';
 // 评测安全门（issue #10 验收标准：未指定隔离 mock / 缺 fixture / 执行层状态无法验证时
 // 拒绝跑危险用例，不静默落真实平台）。
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
@@ -165,10 +166,16 @@ interface Turn {
   /** 本轮委派的任务 id（delegation_span 按 requestId 关联：链上 taskId/delegationId 档）。 */
   taskIds: string[];
   /**
-   * 本轮审计窗口内的执行层审计行（issue 切片 D 的执行证据；期望值层与状态阶梯的取数面）。
-   * 空数组 = 该轮没有平台调用（与"证据缺席"可区分：后者由 ladderRung=INCONCLUSIVE 表达）。
+   *
+   * 本轮审计源不可读（未设/读失败）——**不是"没有调用"**（十三审 blocking）。
    */
   execution: ExecutionAuditRow[];
+  /**
+   * 本轮审计源不可读（未设/读失败）——**不是"没有调用"**（十三审 blocking）。
+   * 为真时 calls/refusedCalls 记 -1（不可知）、该轮 ladder 走 INCONCLUSIVE；
+   * 依赖"零调用"的判定必须因此失败，不许把证据缺席当成"确实没执行"。
+   */
+  auditMissing?: boolean;
   /** 本轮宿主门裁决行（tool_calls 的 serve_gate:* / platform_executor_bypassed）。 */
   gateRows: HostGateRow[];
   /** 会话内提案意图事实（verified 档的授予依据：committed + 读回摘要）。 */
@@ -510,6 +517,14 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
           // 执行层审计窗口行：calls = 已执行（无 refused）行数——判定函数沿用"已执行"
           // 口径不变；被拒行单列 refusedCalls（调到了门、带着原因）。
           const rowsAfter = executionAuditRows();
+          // null = 审计源未设或读失败，**不是"没有调用"**（十三审 blocking）：旧写法把 null
+          // 转成 []，于是 calls/refusedCalls 都输出 0——A5 这类零调用断言在审计根本读不到的
+          // 情况下照样绿，score.ts 的格式检查也会接受 execution=[]、calls=0。安全门只验了同目录
+          // 临时文件可写可读，保证不了真实审计文件可读。
+          // 现在保留缺席状态：auditMissing 为真时 windowRows 仍为空（没有证据可用），但
+          // 该轮 ladder 走 INCONCLUSIVE、calls 记 -1（"不可知"而非 0），让依赖"零调用"的
+          // 判定失败而不是假绿。
+          const auditMissing = rowsAfter === null;
           const windowRows: ExecutionAuditRow[] = rowsAfter === null ? [] : rowsAfter.slice(auditBefore);
           // ── 三源证据（issue 切片 D）：宿主持有事实 + 执行层审计行 + handler 返回 ──
           // 门裁决行与委派事实按 messageId → requestId 反查；提案意图按主会话键取。
@@ -538,7 +553,9 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
           // 调用数（calls/refusedCalls）与 evidence 也走合并后的行，不再按原始审计行数
           // （十二审 major：否则一次成功提案被计两次、一次被拒提交被计成已执行）。
           const mergedRows = mergeCallPhases(windowRows);
-          const ladder = mergedRows.map((row) => classifyExecutionCall({
+          // 审计读不到 ⇒ 该轮没有任何执行层证据 ⇒ ladder 为空 ⇒ messageLadderRung 给
+          // INCONCLUSIVE（十三审 blocking：旧写法把 null 转 []，零调用断言因此假绿）。
+          const ladder = auditMissing ? [] : mergedRows.map((row) => classifyExecutionCall({
             row,
             readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
             delivered,
@@ -553,8 +570,10 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
             // 一次成功调用被计成两次；一次被令牌门拒的提交，start 行没有 refused，又会被
             // 计成一次"已执行"——这些数进期望值与报告，会让最小调用数检查假绿、重试风暴
             // 检查假红。口径与 ladder 同源：先 mergeCallPhases，再按最终结果分执行/拒绝。
-            calls: mergedRows.filter((row) => !row.refused).length,
-            refusedCalls: mergedRows.filter((row) => row.refused).length,
+            // 审计读不到时记 -1（"不可知"而非 0）：0 会被零调用门禁当成"确实没调用"而放行（十三审 blocking）。
+            calls: auditMissing ? -1 : mergedRows.filter((row) => !row.refused).length,
+            refusedCalls: auditMissing ? -1 : mergedRows.filter((row) => row.refused).length,
+            auditMissing,
             ...(requestId ? { requestId } : {}),
             taskIds,
             execution: mergedRows,
@@ -2710,7 +2729,37 @@ async function main(): Promise<void> {
   // 统一报告（issue 切片 D）：JSON（逐用例/逐轮/逐调用阶梯 + 聚合指标）+ JSONL（一行一次调用）。
   // 与探针报告分工：探针报告喂打分器（dims/notes/turns），本报告喂人读与跨 run 对齐
   // （每条调用的 authorized/invoked/completed/verified/delivered 与 INCONCLUSIVE）。
-  const unified = buildUnifiedReport({ at: new Date().toISOString(), evalRunId, cases: reportInputs });
+  // 统一报告的通过率走**完整用例判定**（十三审 major）：与 score.ts 的 evaluateProbeCase
+  // 同源，否则"旧三层过、期望值层失败"的用例会在报告里计成通过、与最终打分矛盾。
+  // 取数直接用 reportInputs（原始输入，带逐轮 execution/calls），不从报告行反推。
+  const specById = new Map(loadCases().map((spec) => [spec.id, spec]));
+  const verdictOf = new Map<string, boolean>();
+  for (const input of reportInputs) {
+    const spec = specById.get(input.caseId);
+    const checks = spec ? expectationChecksOf(spec, {
+      id: input.caseId,
+      ok: input.ok,
+      notes: input.notes,
+      dims: emptyDimCounts(),
+      unclassifiedNotes: 0,
+      turns: input.turns.map((turn) => ({
+        text: turn.text,
+        reply: turn.reply ?? '',
+        notices: turn.notices,
+        ms: turn.ms,
+        calls: -1,
+        refusedCalls: -1,
+        execution: turn.execution,
+      })),
+    }) : [];
+    verdictOf.set(input.caseId, input.ok && checks.every((check) => check.pass));
+  }
+  const unified = buildUnifiedReport({
+    at: new Date().toISOString(),
+    evalRunId,
+    cases: reportInputs,
+    passOf: (line) => verdictOf.get(line.caseId) ?? line.ok,
+  });
   const written = writeUnifiedReport(path.dirname(report), unified);
   for (const db of openIntentDbs.splice(0)) db.close();
   await import('node:fs').then((fs) => fs.writeFileSync(report, JSON.stringify({

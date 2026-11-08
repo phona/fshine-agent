@@ -1412,3 +1412,15 @@ describe('positionalsOf：空位置参数不吞后续目标（十二审 blocking
     expect(structuredPlanGateVerdict('ledger.write', { slot: '', target: 'beta' }, ctx)?.block).toBe(true);
   });
 });
+
+describe('splitCommandTokens：引号外续行（十三审 minor）', () => {
+  it('反斜杠 + 换行两者都删掉（与 Bash 一致）', () => {
+    // Bash 实测：`al\<换行>pha` 传入 alpha。旧写法只跳过反斜杠、把换行留在参数里，
+    // 于是与计划里的 alpha 比对不上，合法写调用被误判成未覆盖。
+    expect(splitCommandTokens('g prepare w --target al\\\npha')).toEqual(['g', 'prepare', 'w', '--target', 'alpha']);
+  });
+
+  it('行尾孤立反斜杠按字面保留', () => {
+    expect(splitCommandTokens('g prepare w --target alpha\\')).toEqual(['g', 'prepare', 'w', '--target', 'alpha\\']);
+  });
+});

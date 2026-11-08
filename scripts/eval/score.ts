@@ -191,8 +191,11 @@ export function evaluateProbeCase(
   return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
 }
 
-/** 探针报告行 → 期望值层输入（逐轮回复 + 该轮审计窗口行）。 */
-function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[] {
+/**
+ * 探针报告行 → 期望值层检查（**导出**：统一报告的通过率也要吃这一层，2026-11-09 十三审
+ * major）。导出而不是在探针里重写一份——判据只能有一个实现，两份必然漂移。
+ */
+export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[] {
   return evaluateCaseExpectations(spec, (row.turns ?? []).map((turn) => ({
     text: turn.text,
     reply: turn.reply,

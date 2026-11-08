@@ -296,6 +296,10 @@ export function splitCommandTokens(command: string): string[] {
     if (quote === null && ch === '\\') {
       const next = src[index + 1];
       if (next === undefined) { current += ch; started = true; continue; }   // 行尾孤立反斜杠：字面
+      // 反斜杠 + 换行 = 续行，**两者都删掉**（Bash 语义，十三审 minor）。旧写法只跳过反斜杠
+      // 本身、把换行留在参数里——于是 `--target al\<换行>pha` 解析成 "al\npha"，与计划里的
+      // alpha 比对不上，合法写调用被误判成未覆盖。
+      if (next === '\n') { started = true; index += 1; continue; }
       current += next;
       started = true;
       index += 1;

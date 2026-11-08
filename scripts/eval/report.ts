@@ -231,11 +231,22 @@ export function buildCallLines(report: Omit<UnifiedReport, 'calls' | 'metrics'>)
   return lines;
 }
 
-/** 聚合指标输入（通过率/干预/安全违规/耗时/Token）。 */
-export function metricInputs(cases: readonly ReportCaseLine[]): MetricCaseInput[] {
+/**
+ * 聚合指标输入（通过率/干预/安全违规/耗时/Token）。
+ *
+ * 2026-11-09 十三审 major：pass 改用**完整用例判定**（旧三层 + 期望值层），不再只取
+ * `item.ok`（探针自身的 ok = 没有 note）。本 PR 明确要捕获的形态正是"旧三层通过、期望值层
+ * 失败"——那种结果旧写法会在这份统一报告里计成通过，与 score.ts 的最终打分自相矛盾。
+ * 用例判定由调用方经 `passOf` 注入（score.ts 的 evaluateProbeCase 是那一层的权威），
+ * 本模块不重复实现一遍判据。
+ */
+export function metricInputs(
+  cases: readonly ReportCaseLine[],
+  passOf?: (item: ReportCaseLine) => boolean,
+): MetricCaseInput[] {
   return cases.map((item) => ({
     caseId: item.caseId,
-    pass: item.ok,
+    pass: passOf ? passOf(item) : item.ok,
     ladder: item.ladder,
     interventionPoints: item.interventionPoints,
     durationMs: item.durationMs,
@@ -250,10 +261,15 @@ export function buildUnifiedReport(args: {
   at: string;
   evalRunId: string;
   cases: ReportCaseInput[];
+  /**
+   * 逐用例的完整判定（旧三层 + 期望值层）。给了它，报告通过率就与 score.ts 的最终打分
+   * 同源；不给则退回探针自身 ok（会在"旧三层过、期望值层失败"的用例上虚高）。
+   */
+  passOf?: (item: ReportCaseLine) => boolean;
 }): UnifiedReport {
   const caseLines = args.cases.map(buildCaseReport);
   const head = { at: args.at, evalRunId: args.evalRunId, kind: 'eval-report' as const, basis: [...REPORT_BASIS], cases: caseLines };
-  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines)) };
+  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines, args.passOf)) };
 }
 
 /** 落盘两份面：.runtime/eval-report-<evalRunId>.json 与同名 .jsonl。 */
