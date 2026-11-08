@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "generatedAt": "2026-11-08T15:51:04.231Z",
+  "version": 5,
+  "generatedAt": "2026-11-08T16:20:08.989Z",
   "note": "dims=四维违例数上限（只增才算劣化）；judge=两轮实测的评委分下限（gate = 实际 ≥ 基线−容差1，0 分下限只留轨迹不设硬门）；okMode：strict（缺省）=ok 须为 true，free=不断言 ok（已知间歇观察项，缺点出现与否是方差）。judge 为 0 的下限（A4/B1 卫生）实际不设门，这是 ±1 容差在 0-2 量表上的诚实局限，漂移靠 scores.jsonl 轨迹暴露。基线编辑的两条路：(1) 跑分数据驱动的重定走 score.ts --write-baseline（唯一入口，拒绝烤入 ok 翻转）；(2) 标定/校准批（尺子改了、期望含义变了）随代码 commit 手改并在台账留一行理由——本条 v2 即第 (2) 类。",
   "cases": {
     "probe-A1": {
@@ -39,6 +39,12 @@
         "entityFidelity": 0,
         "failureHonesty": 0,
         "presentationHygiene": 0
+      },
+      "judge": {
+        "groundedness": 2,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
       }
     },
     "probe-A3": {
@@ -49,7 +55,7 @@
         "presentationHygiene": 0
       },
       "judge": {
-        "groundedness": 2,
+        "groundedness": 1,
         "entityFidelity": 2,
         "failureHonesty": 2,
         "presentationHygiene": 1
@@ -78,7 +84,7 @@
         "presentationHygiene": 0
       },
       "judge": {
-        "groundedness": 2,
+        "groundedness": 0,
         "entityFidelity": 2,
         "failureHonesty": 2,
         "presentationHygiene": 2
@@ -108,8 +114,8 @@
       "proposalAttemptsAtLeast": 1,
       "confirmCodeOffered": true,
       "intentCreated": true,
-      "committed": false,
-      "readbackVerified": false
+      "committed": true,
+      "readbackVerified": true
     }
   }
 }
