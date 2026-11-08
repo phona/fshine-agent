@@ -51,7 +51,11 @@ export type ProposalReviewTurn = (input: ProposalReviewInput) => Promise<Proposa
 
 const REVIEW_SYSTEM_PROMPT = `You are an isolated proposal reviewer. You receive only a proposal schema, a domain dry-run envelope, and a platform-rendered summary. Compare the summary against the dry-run envelope only. Return exactly one JSON object and no markdown or extra prose: {"verdict": "consistent" | "inconsistent", "fields": ["<field name>", ...]}. List only field names that disagree; never repeat values, never invent fields, never use any other source. If the dry-run did not complete or the summary is empty, verdict is "inconsistent".`;
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+// 2026-11-08 从 10_000 加宽到 60_000：与 context-model.ts 同一驱动面、同一理由——推理模型的
+// 隔离复核回合经常超过 10 秒，超时即空文本 → 复核 fail-closed → 宿主不发确认码 →
+// 写链断在提案创建那一步（acceptance 5.1 实跑每轮都伴随
+// "Context model call exceeded 10000 ms"）。60 秒远低于回合预算，不会吊住回合。
+const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_INPUT_BYTES = 32_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 12_000;
 

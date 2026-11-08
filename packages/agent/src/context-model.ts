@@ -18,7 +18,12 @@ export interface TurnDriverContextModelOptions {
 
 export interface ExtractContextWithTurnDriverInput extends ContextSemanticModelInput, TurnDriverContextModelOptions {}
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+// 2026-11-08 从 10_000 加宽到 60_000：推理模型（step-5-preview）的上下文抽取回合经常超过 10 秒，
+// 超时后 extract 落空 → context_semantic_extract_failed / model_failure → 上下文退化、
+// 写链的隔离复核同驱动面一并受累（acceptance 5.1 三次实跑每轮都出现
+// "Context model call exceeded 10000 ms"，写链因此间歇不通）。60 秒仍远低于回合预算
+// （worker 超时 + 2 分钟），不会吊住回合。调用方可经 timeoutMs 覆盖。
+const DEFAULT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_INPUT_BYTES = 32_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 12_000;
 const EMPTY_TOOLS: TurnDriverInput['tools'] = [];

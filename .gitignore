@@ -34,3 +34,4 @@ config/agent.yaml
 # 跑完 unit / npm run ci 后偶发的临时产物：不忽略会让「git status --porcelain 为空」这条
 # 判据时红时绿（防御性修复，见 docs/change-safety.md §26 的登记）。
 tmp/
+out/
