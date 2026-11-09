@@ -407,6 +407,58 @@ describe('期望值层：四类断言与三个过程不变量各自可判', () =
   });
 });
 
+/**
+ * audited 申报模式的申报块归一化（2026-11-09 独立评审，D-207 未决一）：audited 轮次的
+ * `reply` 含模型追加的 `[audit]…[/audit]` 申报块——harness 注入指令换来的机器 annex，不是
+ * 答案。不剥的后果是整层判据被块里的值改写（Y2 第 1/2 轮 forbidValues = 全部 12 个种子值，
+ * 块行里的真实值会让它假红；notFoundZeroAmounts / sameValueSetAs 同理；块行里的记录号还是
+ * 真实数据标识，会把正文金额洗成"有所属"而放过 missingCaliber）。
+ */
+describe('期望值层：audited 轮次的申报块按机器 annex 剥掉（D-207 未决一）', () => {
+  const BLOCK = ['[audit]', '500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200', '[/audit]'].join('\n');
+  const audited = (text: string, reply: string, calls = 1, at = 0): ExpectationTurn =>
+    ({ text, reply: `${reply}\n${BLOCK}`, notices: [], calls, execution: turn(text, reply, calls, at).execution, audited: true });
+  const Y2_TURNS = [
+    turn('check gamma-collection 这个 collection W2 的 record value', Y2_T0, 1, 0),
+    turn('check contoso collection record value', Y2_T1, 1, 1),
+    turn('checkbeta的payablebalance', Y2_T2, 3, 2),
+  ];
+
+  it('Y2 三轮：带块 audited 与不带块黑盒判定逐字一致（块值不进禁值/零金额）', () => {
+    const auditedTurns = Y2_TURNS.map((item, at) => audited(item.text, item.reply, item.calls, at));
+    expect(failingChecks('Y2', [], auditedTurns)).toEqual(failingChecks('Y2', [], Y2_TURNS));
+    // 干净 not_found 轮（第 1 轮）不该因申报块假红——Y2 第 1/2 轮的 forbidValues 是全部种子值。
+    expect(failingChecks('Y2', [], auditedTurns).filter((name) => name.includes('第1轮'))).toEqual([]);
+  });
+
+  it('同一事实：audited 标志缺席时块值照样污染（证明剥块这行代码真在干活）', () => {
+    const raw = failingChecks('Y2', [], [turn('check gamma-collection 这个 collection W2 的 record value', `${Y2_T0}\n${BLOCK}`, 1, 0)]);
+    expect(raw).toContain('期望·禁值(第1轮)');
+    expect(raw).toContain('期望·错误态零金额(第1轮)');
+  });
+
+  it('Y2 第 3 轮：口径编造照红（申报块洗不掉它——块不是答案）', () => {
+    const auditedTurns = Y2_TURNS.map((item, at) => audited(item.text, item.reply, item.calls, at));
+    expect(failingChecks('Y2', [], auditedTurns)).toEqual(['期望·口径(第3轮)']);
+  });
+
+  it('已申报值不再算"无所属"；没申报的照红（块不是万能豁免）', () => {
+    // 夹具里 1000 永远走算术派生通道，换一个凭空数才能走到"无所属"这条判据。
+    // 分句里带口径词（且无免责措辞）时金额归"口径编造"那一类、不进三分——所以这里用带
+    // 免责措辞的诚实分句 + 另一个分句的凭空数，单独隔离"已申报值豁免"这一条。
+    const spec = structuredClone(specOf('Y2'));
+    spec.expectations!.shortCase!.turns[2]!.forbidCaliberValues = [4321];
+    const prose = '平台没有 payable 这个口径。其中 4321 待确认。';
+    const failing = (t2: ExpectationTurn): string[] =>
+      evaluateCaseExpectations(spec, [Y2_TURNS[0]!, Y2_TURNS[1]!, { ...t2, audited: true }])
+        .checks.filter((check) => !check.pass).map((check) => check.name);
+    expect(failing(turn('checkbeta的payablebalance', `${prose}\n[audit]\n4321 <- rec-101\n[/audit]`, 3, 2)))
+      .toEqual([]);
+    expect(failing(turn('checkbeta的payablebalance', `${prose}\n[audit]\n500 <- rec-101\n[/audit]`, 3, 2)))
+      .toEqual(['期望·禁值(第3轮)']);
+  });
+});
+
 describe('期望值层：数据面自检', () => {
   it('判据词表自检恒 ok（词表被清空 → 口径绑定判定静默失效，这条钉住它）', () => {
     // 与 exposure-lint 的自校验同族：判据词表是机制的一部分，不是可清的数据。

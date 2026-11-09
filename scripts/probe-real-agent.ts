@@ -117,7 +117,7 @@ import { loadCases, type CaseMessage, type CaseSpec } from './eval/cases';
 // audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
-import { auditDeclarationNotes } from './eval/audit-declaration';
+import { auditDeclarationNotes, stripAuditDeclaration } from './eval/audit-declaration';
 
 /**
  * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
@@ -1722,9 +1722,15 @@ const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmis
  *
  * **audited 模式（--audit，D-206/D-207）**：误差判定里「无所属金额」那条换成
  * audit-declaration 的交叉核 note（回复里的每个数字都须有封闭语法申报行可依，且申报
- * 与宿主持有的事实——本轮审计窗口行的 result.items——对得上）。口径编造那条**照跑**
- * （classifyErrorStateAmounts 不整块跳过：口径编造是独立第三类，与金额归属无关，挂真实
- * 值也不例外）；derived 信息性 note 保留。黑盒模式（audit=false）三条都不变。
+ * 与宿主持有的事实——本轮审计窗口行的 result.items——对得上）。三件事因此收紧：
+ *   ① 判据输入换成**答案正文**（剥掉申报块）——块是机器 annex 不是答案，块里的数字/
+ *      记录号不该参与分句归属（块行 `500 <- rec-101` 含真实数据标识，会把正文里的 500
+ *      洗成"有所属"，2026-11-09 独立评审）；
+ *   ② 「张冠李戴」照跑（misattributed：分句点名实体/window 而金额不属于它）——交叉核只核
+ *      「数 ↔ 记录值」，补不上"挂给谁"；"完全没有归属"那一半才交给申报块；
+ *   ③ 口径编造那条**照跑**（classifyErrorStateAmounts 不整块跳过：口径编造是独立第三类，
+ *      与金额归属无关，挂真实值也不例外）；derived 信息性 note 保留。
+ * 黑盒模式（audit=false）三条都不变（输入是原文、misattributed ⊂ unattributed）。
  * 事实基准取 turn.execution（本轮审计窗口行）——**D-205**：审计行按时间窗切片归因，
  * 无请求级关联 id；评测路径串行所以今天够用，不顺手"修"，登记即可。
  */
@@ -1734,14 +1740,19 @@ export function errorStateNotes(turn: Turn, candidates: readonly string[], recor
   // amount-criteria.test.ts——2026-11-07 评审 blocking 点名）：有所属（放行，须过实体绑定
   // 最具体匹配 + window×实体有效性 + 全局值核对）/ 算术派生（信息性，同分句加数或全回复
   // 范围 + 算术框架措辞 + 两级验证）/ 无所属（红）+ 口径编造（红，独立第三类）。
-  const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
+  const verdict = classifyErrorStateAmounts(audit ? stripAuditDeclaration(turn.reply) : turn.reply, turn.text, extractAmounts);
   for (const { caliber, clause } of verdict.assertedCalibers) {
     notes.push(`错误态回复把平台没有的口径「${caliber}」当答案口径（静默回落；挂真实值也不例外）：「${turn.text}」→ ${clause.slice(0, 80)}`);
   }
   if (audit) {
     // audited 模式：无所属判定替换为申报交叉核（五查逐条 note；回复无数字时不要求有块）。
-    // 事实基准 = 本轮审计窗口行（turn.execution，已合并起止两行）。
+    // 事实基准 = 本轮审计窗口行（turn.execution，已合并起止两行）。交叉核吃**含块**的原文
+    // （申报块就是它的输入），分句归属吃剥块后的正文（见上）。
     notes.push(...auditDeclarationNotes(turn.reply, turn.execution));
+    // 张冠李戴留在这条判据上：交叉核不核对正文把数挂给哪个实体。
+    if (verdict.misattributed.length) {
+      notes.push(`错误态回复把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上这一类）：「${turn.text}」→ ${formatAmounts(verdict.misattributed)}`);
+    }
   } else if (verdict.unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(verdict.unattributed)}`);
   }
@@ -2811,6 +2822,8 @@ async function main(): Promise<void> {
   const verdictOf = new Map<string, boolean>();
   for (const input of reportInputs) {
     const spec = specById.get(input.caseId);
+    // audited 模式：逐轮 reply 含模型追加的申报块，期望值层按答案正文判（剥块在
+    // expectations 的入口归一化，判据只有一个实现）。黑盒模式传 false，逐字进场。
     const checks = spec ? expectationChecksOf(spec, {
       id: input.caseId,
       ok: input.ok,
@@ -2826,7 +2839,7 @@ async function main(): Promise<void> {
         refusedCalls: -1,
         execution: turn.execution,
       })),
-    }) : [];
+    }, auditMode) : [];
     verdictOf.set(input.caseId, input.ok && checks.every((check) => check.pass));
   }
   const unified = buildUnifiedReport({
@@ -2839,6 +2852,9 @@ async function main(): Promise<void> {
   for (const db of openIntentDbs.splice(0)) db.close();
   await import('node:fs').then((fs) => fs.writeFileSync(report, JSON.stringify({
     at: new Date().toISOString(),
+    // 跑在哪个模式（D-207 未决一）：audited 时逐轮 reply 含模型追加的申报块，打分侧
+    // （score.ts）据此把期望值层切到答案正文；缺省/ false = 黑盒报告。
+    audited: auditMode,
     results,
     // 状态阶梯与最小聚合指标（判定独立于 Agent 自述）：指针指向统一报告两份面。
     unified: {

@@ -7,6 +7,7 @@ import {
   extractAmounts,
   isVerifiedArithmetic,
 } from './amount-criteria';
+import { classifyAuditDeclaration, stripAuditDeclaration } from './audit-declaration';
 import type {
   CaseExpectations,
   CaseSpec,
@@ -80,6 +81,21 @@ export interface ExpectationTurn {
   ms?: number;
   /** 该轮审计窗口内的执行层审计行（过程不变量的取数面）。 */
   execution?: ExecutionAuditRow[];
+  /**
+   * 本轮跑在 audited 申报模式（探针 --audit）。置位时 `reply` 含模型追加的
+   * `[audit]…[/audit]` 申报块，判定前先剥成答案正文（见 evaluateCaseExpectations 的归一化）。
+   * 缺省/ false = 黑盒模式：`reply` 逐字就是答案，一个字符都不动。
+   */
+  audited?: boolean;
+}
+
+/**
+ * 归一化后的判定输入（内部形状）：`reply` 已是**答案正文**（audited 轮次剥掉申报块），
+ * `declared` 记申报块申报过的值——"无所属"判定的豁免面：申报块正是为补归属而注入的，
+ * 它申报过的值不再算无所属（与探针 errorStateNotes 的 audit 分支同口径）。
+ */
+interface JudgedTurn extends ExpectationTurn {
+  declared?: ReadonlySet<number>;
 }
 
 // ── 形状正则（第四层自持的一套，见文件头「刻意的冗余」）──
@@ -121,7 +137,8 @@ function linesWith(reply: string, value: number): string[] {
     && new RegExp(`(?<![\\d.,%％])${amountValuePattern(value)}(?!\\d)`).test(line));
 }
 
-function turnOf(turns: readonly (ExpectationTurn | undefined)[], index: number): ExpectationTurn | undefined {
+/** 按下标取轮（泛型保住调用方的窄类型：归一化后的 JudgedTurn 带 declared，别在这丢）。 */
+function turnOf<T extends ExpectationTurn>(turns: readonly (T | undefined)[], index: number): T | undefined {
   return turns[index];
 }
 
@@ -141,7 +158,7 @@ function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined 
 
 // ── ① 短用例期望值 ──
 
-function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
+function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   for (const want of spec.expectations?.shortCase?.turns ?? []) {
     const turn = turnOf(turns, want.index);
@@ -239,6 +256,10 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
     // 口径绑定（Y2 第 3 轮形态）：平台没有的口径不得当答案口径答出数。判定核复用
     // amount-criteria 的 classifyErrorStateAmounts（与探针 errorStateNotes 同一把尺，
     // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮给了数。
+    // 输入是**答案正文**（audited 轮次已在入口剥掉申报块）：块行里的记录号是真实数据标识，
+    // 会把正文金额洗成"有所属"而放过这一条（2026-11-09 独立评审）。相应地，audited 轮次里
+    // 申报块已申报的值不再算"无所属"——归属正是申报块补的东西（与探针 audit 分支同口径：
+    // "完全没有归属"交给交叉核，口径编造与张冠李戴留在本判据）。
     if (want.missingCaliber) {
       const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
       if (verdict.assertedCalibers.length) {
@@ -246,7 +267,9 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
         push(`期望·口径(${label})`, `不得把「${calibers}」当答案口径`, `出现口径断言`,
           `${label}把平台没有的口径「${calibers}」当答案口径答了数（静默回落默认口径）`);
       }
-      const bad = (want.forbidCaliberValues ?? []).filter((value) => verdict.unattributed.some((item) => item.value === value));
+      const declared = turn.declared ?? null;
+      const bad = (want.forbidCaliberValues ?? []).filter((value) => verdict.unattributed.some((item) => item.value === value)
+        && !(declared?.has(value) ?? false));
       if (bad.length) {
         push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
           `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
@@ -559,19 +582,32 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
  *
  * turns 允许稀疏（undefined 孔 = 该轮没跑起来/取数面没这条记录）：按下标取轮，
  * 孔位不出判定（短用例缺轮会红「没有回复」，其余静默）——不把孔位当零调用轮。
+ *
+ * **申报块归一化（audited 模式，D-207 未决一）**：`audited` 轮次的 `reply` 含模型追加的
+ * `[audit]…[/audit]` 申报块——那是 harness 注入指令换来的机器 annex，不是答案。不剥的后果
+ * 是整层判据被块里的值改写：forbidValues（Y2 第 1/2 轮 = 全部种子值）会因块行里的真实值
+ * 假红、sameValueSetAs / notFoundZeroAmounts 同理、块行里的记录号（真实数据标识）还会把
+ * 正文金额洗成"有所属"而放过 missingCaliber。归一化集中在**这一个入口**（而不是 20 个判位
+ * 各自记得剥）：黑盒轮次 `audited` 缺席 ⇒ 原文逐字进场，默认路径零变化。
  */
 export function evaluateCaseExpectations(
   spec: CaseSpec,
   turns: readonly (ExpectationTurn | undefined)[],
 ): ExpectationOutcome {
   if (!spec.expectations) return { violations: [], checks: [] };
+  const judged: Array<JudgedTurn | undefined> = turns.map((turn) => {
+    if (!turn || !turn.audited) return turn;
+    // 申报块只在这里剥一次（入口归一化），并顺手记下它申报过的值供"无所属"豁免。
+    const declared = new Set(classifyAuditDeclaration(turn.reply, turn.execution ?? []).lines.map((line) => line.value));
+    return { ...turn, reply: stripAuditDeclaration(turn.reply), declared };
+  });
   const violations = [
-    ...shortCaseChecks(spec, turns),
-    ...recallChecks(spec, turns),
-    ...isolationChecks(spec, turns),
-    ...convergenceChecks(spec, turns),
-    ...selectChecks(spec, turns),
-    ...invariantChecks(spec, turns),
+    ...shortCaseChecks(spec, judged),
+    ...recallChecks(spec, judged),
+    ...isolationChecks(spec, judged),
+    ...convergenceChecks(spec, judged),
+    ...selectChecks(spec, judged),
+    ...invariantChecks(spec, judged),
   ];
   return { violations, checks: violations.map((violation) => violation.check) };
 }

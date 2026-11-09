@@ -354,6 +354,17 @@ export interface AssertedCaliber {
 export interface ErrorStateAmountVerdict {
   /** 无所属（红）：既无可绑定实体/window，也不是可验证的算术。 */
   unattributed: AmountLike[];
+  /**
+   * 张冠李戴（红，`unattributed` 的子集）：分句点名了实体或 window，而金额**不属于它**
+   * （或该 window 对该实体无效）——错在"挂给谁"，不在"有没有来源"。
+   *
+   * 为什么单列（2026-11-09 独立评审）：audited 申报模式把「无所属」整条换成申报交叉核，
+   * 而交叉核只核「数 ↔ 记录号在 result.items 里的 value」，不看这个数在正文里挂给哪个
+   * 实体——"alpha-item-1 record value is 500" 配 `500 <- rec-101`（beta 真实 500）能五查
+   * 全过。实体/window 绑定因此必须留在 audited 路径上，而"完全没有归属"那一半才可以交给
+   * 申报块（申报块本来就是为补它而注入的）。黑盒路径两条都红（子集关系 ⇒ 合并口径不变）。
+   */
+  misattributed: AmountLike[];
   /** 算术派生（信息性）：加数在分句或全回复里可见，且数字算得出来。 */
   derived: AmountLike[];
   /** 口径编造（红）：分句把平台没有的口径当答案口径。 */
@@ -406,7 +417,10 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
  *     加数 500/300/200 在表格行、合计 1000 在散文句，2026-11-07 Y2 实测）；**window
  *     无效一律不许降级**——"beta W2 total is 2000"（2000 算得出来但挂在无数据的
  *     beta W2 上）照旧红（2026-11-07 评审 blocking：算术豁免不得绕过实体/窗口绑定）；
- *   · 无所属（红）＝ 其余；口径编造独立成第三类（assertedCalibers，同样红）。
+ *   · 无所属（红）＝ 其余；其中"分句点名实体/window 而金额不属于它"另记 **misattributed**
+ *     （张冠李戴，unattributed 的子集）——audited 申报模式只把"完全没有归属"交给申报块，
+ *     这一类留在原判据上（见 ErrorStateAmountVerdict.misattributed）；口径编造独立成第三类
+ *     （assertedCalibers，同样红）。
  * 同一数值的**每次出现**逐分句核对（2026-11-07 评审 blocking：find 只看首次出现——
  * "beta W1 record value is 500; beta payable balance is 500" 的第二句被首句的合法
  * 上下文豁免），任一次出现判红即红；报告按数值/口径去重。
@@ -419,6 +433,7 @@ export function classifyErrorStateAmounts(
 ): ErrorStateAmountVerdict {
   const asked = askedWindows(userText);
   const unattributed = new Map<number, AmountLike>();
+  const misattributed = new Map<number, AmountLike>();
   const derived = new Map<number, AmountLike>();
   const asserted = new Map<string, string>();
   // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
@@ -435,6 +450,8 @@ export function classifyErrorStateAmounts(
     let assertedHit = false;
     let hard = false;
     let soft = false;
+    // 张冠李戴信号（只在分句循环里能算：要逐分句的实体提及与 window 核）——见循环末尾。
+    let misbound = false;
     const hits = parts.filter((part) => boundary.test(part));
     if (!hits.length) { unattributed.set(amount.value, amount); continue; } // 边界异常宁可红，不静默消失
     for (const clause of hits) {
@@ -683,13 +700,25 @@ export function classifyErrorStateAmounts(
       if ((isSum && !enumeratedTotal && !anyClaimsOperation)
         || (anyClaimsOperation && allVerified && windowOk)
         || (totalFamilyOk && allVerified && windowOk)) { soft = true; } else { hard = true; }
+      // 张冠李戴信号在本分句内判定（bindings / specific / windowOk 都只在这一层可见）：
+      // 点名了实体而金额不属于它，或该 window 对点名实体无效。任一分句挂错即记——同一数值
+      // 的每次出现各自核对（与上面"任一次出现判红即红"同口径）。
+      misbound ||= bindings.some((b) => !b.windowOk
+        || (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value))
+        || (b.mentionEntity === undefined && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
-    if (hard) unattributed.set(amount.value, amount);
-    else if (soft) derived.set(amount.value, amount);
+    if (hard) {
+      unattributed.set(amount.value, amount);
+      // 张冠李戴 = 硬红里"挂给了谁"那一类。只在硬红时记：软红/派生的合计、差额都有合法的
+      // 跨实体账本，不是挂错。它是 unattributed 的子集 ⇒ 黑盒路径合并口径不变
+      // （见 ErrorStateAmountVerdict.misattributed）。
+      if (misbound) misattributed.set(amount.value, amount);
+    } else if (soft) derived.set(amount.value, amount);
   }
   return {
     unattributed: [...unattributed.values()],
+    misattributed: [...misattributed.values()],
     derived: [...derived.values()],
     assertedCalibers: [...asserted].map(([caliber, clause]) => ({ caliber, clause })),
   };

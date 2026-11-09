@@ -15,6 +15,9 @@
  * 正是自由文本推断，不许以任何形式复活）；② 把申报与宿主持有的结构化事实（审计行
  * `result.items`）做五查交叉核，每条不过产出一条 note（判红）。
  *
+ * 块分界只认**独占行首的 `[audit]` 与独占行尾的 `[/audit]`**：夹在句子中间的标记是正文
+ * （模型复述申报指令的形态），不是分界——判据见 AUDIT_OPEN_LINE_RE 处。
+ *
  * **五查**（不过 ⇒ 对应 note）：
  *   覆盖    —— 回复里每个数字都有申报行（引用或运算）；回复无数字则不要求有块；
  *   幻影源  —— 申报的 rec 号不出现在任何审计行 result.items 里；
@@ -106,10 +109,19 @@ const OPERATION_LINE_RE = new RegExp(`^(${NUMBER_SOURCE})\\s*:=\\s*(.+)$`);
 /** RHS 只认 `数 (op 数)+` 的 + / - 链——至少一个运算符（"链"），乘除/括号/运算词一律不匹配。 */
 const OPERATION_RHS_RE = new RegExp(`^${NUMBER_SOURCE}(?:\\s*[+-]\\s*${NUMBER_SOURCE})+$`);
 const NUMBER_RE = new RegExp(NUMBER_SOURCE, 'g');
-/** 申报块（非全局：封闭格式只允许一个，多个按格式查处理）。 */
-const AUDIT_BLOCK_RE = /\[audit\]([\s\S]*?)\[\/audit\]/;
-const AUDIT_OPEN_RE = /\[audit\]/g;
-const AUDIT_CLOSE_RE = /\[\/audit\]/g;
+/**
+ * 开标记必须**独占行首**（该行在它之前只有空白）、闭标记必须**独占行尾**（该行在它之后
+ * 只有空白）。标记夹在句子中间是**正文**，不是块分界——申报指令本身含这两个字面标记
+ * （"以 [audit] 开始、以 [/audit] 结束"），模型复述指令时它们随句子进正文；若按字面出现
+ * 当分界，合法的无数字轮会被判成「块内正文 malformed」（两个标记都复述）、「块未闭合」
+ * （只复述开标记）、或「正文被吞进块、数字逃过覆盖查 + malformed 行」（两个标记夹住真实
+ * 正文）——三种都是假红（D-207 未决二⑦）。一行式块仍成立：`[audit] 500 <- rec-101
+ * [/audit]` 的开标记在行首、闭标记在行尾，块内容照解析。
+ */
+const AUDIT_OPEN_LINE_RE = /(?:^|\n)[^\S\r\n]*\[audit\]/g;
+const AUDIT_CLOSE_LINE_RE = /\[\/audit\][^\S\r\n]*(?=\r?\n|$)/g;
+const AUDIT_OPEN_TOKEN = '[audit]';
+const AUDIT_CLOSE_TOKEN = '[/audit]';
 
 interface BlockScan {
   /** 唯一且闭合完好的申报块内容；null = 没有可解析的块（缺块/未闭合/多个/顺序颠倒）。 */
@@ -118,42 +130,42 @@ interface BlockScan {
   blockFault: string | null;
   /** 剥掉申报块后的回复正文——覆盖检查的数字来源（块内数字不算"回复里的数字"）。 */
   prose: string;
-  /** 开/闭标记计数（块级故障文案用）。 */
-  opens: number;
-  closes: number;
 }
 
 /**
- * 扫描申报块。块级只认「恰好一个 `[audit]` + 恰好一个 `[/audit]` 且开在闭前」：
+ * 扫描申报块。块级只认「恰好一个行首 `[audit]` + 恰好一个行尾 `[/audit]` 且开在闭前」：
  * 缺块、未闭合、多个块、顺序颠倒都记 blockFault 且**不解析任何行**——没有可解析的块就
  * 没有申报，覆盖/幻影源/值不符/运算闭合随之无对象可查（格式查一条 note 说清根因，
- * 不把同一根因摊成五条）。
+ * 不把同一根因摊成五条）。块级故障时 `prose` = 全文（没有可认定的块，就没有"块外正文"）。
  */
 function scanAuditBlock(reply: string): BlockScan {
-  const opens = reply.match(AUDIT_OPEN_RE)?.length ?? 0;
-  const closes = reply.match(AUDIT_CLOSE_RE)?.length ?? 0;
-  const match = reply.match(AUDIT_BLOCK_RE);
-  const prose = match ? reply.slice(0, match.index ?? 0) + reply.slice((match.index ?? 0) + match[0].length) : reply;
-  if (opens === 0 && closes === 0) return { content: null, blockFault: null, prose, opens, closes };
-  if (opens === 0) {
-    return { content: null, blockFault: '申报块格式：回复有 [/audit] 没有 [audit] 申报块', prose, opens, closes };
+  const opens = [...reply.matchAll(AUDIT_OPEN_LINE_RE)].map((m) => {
+    const end = (m.index ?? 0) + m[0].length;
+    return { start: end - AUDIT_OPEN_TOKEN.length, end };
+  });
+  const closes = [...reply.matchAll(AUDIT_CLOSE_LINE_RE)].map((m) => ({ start: m.index ?? 0, end: (m.index ?? 0) + m[0].length }));
+  const block = opens.length === 1 && closes.length === 1 && opens[0]!.end <= closes[0]!.start
+    ? { start: opens[0]!.start, end: closes[0]!.end }
+    : null;
+  const prose = block ? reply.slice(0, block.start) + reply.slice(block.end) : reply;
+  if (opens.length === 0 && closes.length === 0) return { content: null, blockFault: null, prose };
+  if (opens.length === 0) {
+    return { content: null, blockFault: '申报块格式：回复有 [/audit] 没有 [audit] 申报块', prose };
   }
-  if (closes === 0) {
-    return { content: null, blockFault: '申报块格式：块未闭合——回复有 [audit] 没有 [/audit]', prose, opens, closes };
+  if (closes.length === 0) {
+    return { content: null, blockFault: '申报块格式：块未闭合——回复有 [audit] 没有 [/audit]', prose };
   }
-  if (opens > 1 || closes > 1) {
+  if (opens.length > 1 || closes.length > 1) {
     return {
       content: null,
-      blockFault: `申报块格式：回复出现 ${opens} 个 [audit] 与 ${closes} 个 [/audit]（封闭格式只允许一个申报块）`,
+      blockFault: `申报块格式：回复出现 ${opens.length} 个 [audit] 与 ${closes.length} 个 [/audit]（封闭格式只允许一个申报块）`,
       prose,
-      opens,
-      closes,
     };
   }
-  if (!match) {
-    return { content: null, blockFault: '申报块格式：标记顺序颠倒——[/audit] 出现在 [audit] 之前', prose, opens, closes };
+  if (!block) {
+    return { content: null, blockFault: '申报块格式：标记顺序颠倒——[/audit] 出现在 [audit] 之前', prose };
   }
-  return { content: match[1] ?? '', blockFault: null, prose, opens, closes };
+  return { content: reply.slice(block.start + AUDIT_OPEN_TOKEN.length, closes[0]!.start), blockFault: null, prose };
 }
 
 /**
@@ -221,21 +233,34 @@ function collectRecordFacts(rows: readonly ExecutionAuditRow[]): Map<string, num
 }
 
 /**
- * 加数闭合：某个数有申报行可依，且若那是运算行则**递归到引用行**（D-206 五查之运算闭合）。
- * `used` 防自引用环——"1000 := 1000 + 500" 的 1000 只有自己这一行可依，自引用不算闭合
- * （递归永远到不了引用行）。每个顶层加数各用一份全新的 used：同一行可以同时给两个加数作依据
- * （"1000 := 500 + 500" 配一条 `500 <- rec-101` 是闭合的）。
+ * 加数闭合表：哪些**值**有申报行可依，且若那是运算行则递归到引用行（D-206 五查之运算闭合）。
+ *
+ * 按值做最小不动点，而不是按行下标做深度优先展开：同值互引的病态块（k 条同值运算行）会让
+ * 按行下标的搜索摊成 O(2^k)——真实块远小于此，但探针的 note 计算是同步的，一块病态申报
+ * 能把整轮挂住（D-207 未决二⑧）。不动点语义与按行下标搜索同构：
+ *   · 有引用行的值直接闭合；
+ *   · 运算行的值闭合 ⇔ 它的每个加数都闭合。
+ * 自引用环因此不闭合——"1000 := 1000 + 500" 的 1000 只有自己这一行可依，不动点永远推不到
+ * 它（与旧实现的 used 集合同结论：递归到不了引用行）。同一行可同时给两个加数作依据
+ * （"1000 := 500 + 500" 配一条 `500 <- rec-101` 是闭合的）——不动点按值判定，天然如此。
  */
-function addendClosesWith(addend: number, lines: readonly AuditDeclarationLine[], used: ReadonlySet<number>): boolean {
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    if (line === undefined || line.value !== addend || used.has(index)) continue;
-    if (line.kind === 'reference') return true;
-    const next = new Set(used);
-    next.add(index);
-    if (line.addends.every((inner) => addendClosesWith(inner, lines, next))) return true;
+function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
+  const closed = new Set<number>();
+  for (const line of lines) {
+    if (line.kind === 'reference') closed.add(line.value);
   }
-  return false;
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const line of lines) {
+      if (line.kind !== 'operation' || closed.has(line.value)) continue;
+      if (line.addends.every((addend) => closed.has(addend))) {
+        closed.add(line.value);
+        grew = true;
+      }
+    }
+  }
+  return closed;
 }
 
 /** note 回显的回复摘要（探针同款：截断不省略，长回复不刷屏）。 */
@@ -257,10 +282,15 @@ export function classifyAuditDeclaration(
   const parsed = scan.content === null
     ? { lines: [] as AuditDeclarationLine[], malformed: [] as string[] }
     : parseDeclarationLines(scan.content);
-  // 「回复里的数字」= 申报块之外的金额（extractAmounts 口径：金额形态的数字，标识符尾段/
-  // 年份/window 码已排除）。复用生产提取器而不是另养一份——两份形态学不同会让这里看不见
-  // 生产侧的漏判（amount-criteria.test.ts 顶部记着这个坑）。
-  const amounts = extractAmounts(scan.prose).map((amount) => amount.value);
+  // 「回复里的数字」= 申报块之外的**金额**（extractAmounts 口径：金额形态的数字，标识符尾段/
+  // 年份/window 码已排除）+ 文件惯例的零值排除。复用生产提取器而不是另养一份——两份形态学
+  // 不同会让这里看不见生产侧的漏判（amount-criteria.test.ts 顶部记着这个坑）。
+  // 零值排除与 amount-criteria 错误态路径（:429 `if (amount.value === 0) continue`）和
+  // expectations 的 valuesIn（同款过滤）同口径：0/0.00 是平台回复的格式噪声，不是金额。
+  // 不排除的后果：独立 0 会被提取，而夹具没有任何记录值为 0 ⇒ 诚实的 `0 <- rec-NNN` 永远
+  // 栽在值不符上，无成功查询的轮次连 `0 := 500 - 500` 都写不出来——合法「0 results」式回复
+  // 只能假红（D-207 未决二①）。
+  const amounts = extractAmounts(scan.prose).map((amount) => amount.value).filter((value) => value !== 0);
   const facts = collectRecordFacts(auditRows);
   const findings: AuditDeclarationFinding[] = [];
 
@@ -302,15 +332,18 @@ export function classifyAuditDeclaration(
   }
 
   // ── 运算闭合：:= 右侧每个数都有申报行（递归到引用行）；不验算 ──
-  for (const line of parsed.lines) {
-    if (line.kind !== 'operation') continue;
-    for (const addend of line.addends) {
-      if (addendClosesWith(addend, parsed.lines, new Set())) continue;
-      findings.push({
-        check: 'operationClosure',
-        subject: String(addend),
-        note: `申报运算不闭合：${line.value} := … 的加数 ${addend} 没有申报行（递归到引用行）：「${line.raw}」`,
-      });
+  if (parsed.lines.some((line) => line.kind === 'operation')) {
+    const closed = closingValues(parsed.lines);
+    for (const line of parsed.lines) {
+      if (line.kind !== 'operation') continue;
+      for (const addend of line.addends) {
+        if (closed.has(addend)) continue;
+        findings.push({
+          check: 'operationClosure',
+          subject: String(addend),
+          note: `申报运算不闭合：${line.value} := … 的加数 ${addend} 没有申报行（递归到引用行）：「${line.raw}」`,
+        });
+      }
     }
   }
 
@@ -344,4 +377,17 @@ export function auditDeclarationNotes(
   auditRows: readonly ExecutionAuditRow[],
 ): string[] {
   return classifyAuditDeclaration(reply, auditRows).findings.map((finding) => finding.note);
+}
+
+/**
+ * 答案正文 = 剥掉申报块的回复。申报块是**机器 annex**（harness 注入指令换来的结构化申报），
+ * 不是答案本身：期望值层（expectations.ts）判"该报什么"与误差判定的分句核对都要看正文，
+ * 否则只在块里出现的申报值会改价值集合判定、块行里的记录号会让金额凭空"有所属"
+ * （D-207 未决一）。块级故障（多个/未闭合/顺序颠倒）时没有可认定的块 ⇒ 原样返回——
+ * 那种轮次格式查已经判红，不在这里二次猜。
+ *
+ * 与 scanAuditBlock 同源（prose 就是它算的），不另写一份标记匹配——两份标记形态学会漂移。
+ */
+export function stripAuditDeclaration(reply: string): string {
+  return scanAuditBlock(reply).prose;
 }

@@ -92,7 +92,7 @@ export interface ProbeResultRow {
   }>;
 }
 
-export interface ProbeReport { at: string; results: ProbeResultRow[] }
+export interface ProbeReport { at: string; results: ProbeResultRow[]; /** 探针跑在 audited 申报模式（--audit）；旧报告无此字段 = 黑盒。 */ audited?: boolean }
 
 export interface Check { name: string; pass: boolean; expected: string; actual: string }
 export interface CaseVerdict {
@@ -155,6 +155,7 @@ export function evaluateProbeCase(
   baselineCase: BaselineCase | undefined,
   judge?: JudgeResult,
   spec?: CaseSpec,
+  audited = false,
 ): CaseVerdict {
   const id = row?.id ?? corpusId;
   if (!row) {
@@ -187,15 +188,19 @@ export function evaluateProbeCase(
     }
   }
   // ④ 期望值层（issue 切片 C）：与上面三层并列。期望值只活在判定层，不进任何 prompt。
-  if (spec) checks.push(...expectationChecksOf(spec, row));
+  if (spec) checks.push(...expectationChecksOf(spec, row, audited));
   return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
 }
 
 /**
  * 探针报告行 → 期望值层检查（**导出**：统一报告的通过率也要吃这一层，2026-11-09 十三审
  * major）。导出而不是在探针里重写一份——判据只能有一个实现，两份必然漂移。
+ *
+ * `audited` = 该报告跑在 audited 申报模式（探针 --audit）：置位时逐轮 reply 含模型追加的
+ * `[audit]…[/audit]` 申报块，期望值层先剥成答案正文再判（见 evaluateCaseExpectations 的
+ * 归一化）。缺省 false = 黑盒报告，逐字进场。
  */
-export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[] {
+export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow, audited = false): Check[] {
   return evaluateCaseExpectations(spec, (row.turns ?? []).map((turn) => ({
     text: turn.text,
     reply: turn.reply,
@@ -203,6 +208,7 @@ export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[
     calls: turn.calls,
     refusedCalls: turn.refusedCalls,
     execution: turn.execution ?? [],
+    audited,
   }))).checks;
 }
 
@@ -333,6 +339,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const probeReport = JSON.parse(readFileSync(probePath!, 'utf8')) as ProbeReport;
+  // audited 申报模式（探针 --audit）：报告记着自己跑在哪个模式。置位时逐轮 reply 含模型
+  // 追加的申报块，期望值层按答案正文判（D-207 未决一：申报块是机器 annex 不是答案）。
+  // 缺省 false = 黑盒报告（旧报告没有这个字段），逐字进场——模式未知时不猜。
+  const probeAudited = probeReport.audited === true;
   // 格式守卫：L7 之前生成的探针报告没有 dims 字段，静默按零违例通过会制造假绿。
   const staleProbe = probeReport.results.find((result) => !result.dims);
   if (staleProbe) {
@@ -376,7 +386,7 @@ async function main(): Promise<void> {
           turns: row.turns.map((turn) => ({ user: turn.text, reply: turn.reply, notices: turn.notices })),
         });
       }
-      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry)));
+      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry), probeAudited));
     } else {
       const facts = acceptanceJson.writeChain.find((item) => item.conversationId === entry.conversation);
       verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!], specOf(entry), acceptanceJson.records));

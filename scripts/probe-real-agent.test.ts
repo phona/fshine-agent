@@ -269,4 +269,49 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
     expect(blackbox.some((n) => n.startsWith('错误态回复出现无所属金额数字'))).toBe(true);
     expect(blackbox.some((n) => n.startsWith('申报值不符'))).toBe(false);
   });
+
+  /**
+   * 张冠李戴留在原判据上（2026-11-09 独立评审）：交叉核只核「数 ↔ 记录号在 result.items 里
+   * 的 value」，不看这个数在正文里挂给哪个实体——"alpha-item-1 record value is 500" 配
+   * `500 <- rec-101`（beta 真实 500）能五查全过。所以 audited 路径不是把整条"无所属"note
+   * 换掉，而是只把"完全没有归属"那一半交给申报块；实体/window 绑定照跑。
+   */
+  it('audited 模式：张冠李戴照红（交叉核对不上"挂给谁"这一类）', () => {
+    const reply = 'alpha-item-1 record value is 500. Please try another name.\n[audit]\n500 <- rec-101\n[/audit]';
+    const rows: ExecutionAuditRow[] = [
+      { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1 } },
+    ];
+    const audited = errorStateNotes(auditTurn(reply, 'check beta record value', rows), [], [], true);
+    // 申报与事实对得上（500 确是 rec-101 的值）⇒ 五查无 note；但 500 挂在 alpha-item-1 上。
+    expect(audited.some((n) => n.startsWith('申报'))).toBe(false);
+    expect(audited.some((n) => n.startsWith('错误态回复把金额挂到不属于它的实体/window'))).toBe(true);
+    // 黑盒路径同一条（misattributed ⊂ unattributed，合并口径不变）。
+    const blackbox = errorStateNotes(auditTurn(reply, 'check beta record value', rows), [], []);
+    expect(blackbox.some((n) => n.startsWith('错误态回复出现无所属金额数字'))).toBe(true);
+  });
+
+  it('audited 模式：申报块补上的归属不判张冠李戴（"完全没有归属"才交给交叉核）', () => {
+    // 正文没点名任何实体、只给了合计：黑盒会算"无所属"，audited 由申报块补归属，且不挂错实体。
+    const reply = 'The total is 1000. Please let me know.\n[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]';
+    const rows: ExecutionAuditRow[] = [
+      { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: { items: [
+        { id: 'rec-101', name: 'beta-item-1', value: 500 },
+        { id: 'rec-102', name: 'beta-item-2', value: 300 },
+        { id: 'rec-103', name: 'beta-item-3', value: 200 },
+      ], count: 3 } },
+    ];
+    const audited = errorStateNotes(auditTurn(reply, 'check beta record value', rows), [], [], true);
+    expect(audited.filter((n) => n.startsWith('错误态回复把金额挂到不属于它的实体/window'))).toEqual([]);
+    expect(audited.filter((n) => n.startsWith('申报'))).toEqual([]);
+  });
+
+  it('audited 模式：误差判定吃答案正文——块行本身不额外判成张冠李戴', () => {
+    // 块行 `700 <- rec-101`（rec-101 真实 500）自己就是"点名 rec-101 而金额不属于它"的形态：
+    // 分句判定若吃含块原文，会在申报值不符之外再多判一条张冠李戴（同一根因摊成两条 note）。
+    // 剥块后只留交叉核那一票。
+    const reply = 'The platform returned no data. Please try another name.\n[audit]\n700 <- rec-101\n[/audit]';
+    const audited = errorStateNotes(auditTurn(reply, 'check beta record value', mismatchRows), [], [], true);
+    expect(audited.some((n) => n.startsWith('申报值不符：记录号 rec-101 申报 700'))).toBe(true);
+    expect(audited.filter((n) => n.startsWith('错误态回复把金额挂到不属于它的实体/window'))).toEqual([]);
+  });
 });

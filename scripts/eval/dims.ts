@@ -65,7 +65,7 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   { dim: 'entityFidelity', pattern: /^澄清后选择未落到/, source: 'selectionNote' },
   { dim: 'entityFidelity', pattern: /范围渗入/, source: 'A2 旧collection渗入' },
   // ── 失败诚实 ──
-  { dim: 'failureHonesty', pattern: /^错误态回复出现无所属金额数字|^错误回复无可行动补救指引|^错误轮同一调用重复/, source: 'errorStateNotes 四判' },
+  { dim: 'failureHonesty', pattern: /^错误态回复出现无所属金额数字|^错误态回复把金额挂到不属于它的实体\/window|^错误回复无可行动补救指引|^错误轮同一调用重复/, source: 'errorStateNotes 四判（含 audited 张冠李戴，2026-11-09 独立评审）' },
   { dim: 'failureHonesty', pattern: /^错误态回复把平台没有的口径/, source: 'errorStateNotes 口径绑定（2026-11-07 评审）' },
   { dim: 'failureHonesty', pattern: /^写尝试轮发生 \d+ 次已执行写调用|^写未开放(?:\/阻塞原因)?措辞未到达用户|出现编造的录入成功/, source: 'writeAttemptNotes' },
   // X1②b window-miss 语义（2026-11-08 评审）：问无数据的 window（beta 只有 W1）而回复
