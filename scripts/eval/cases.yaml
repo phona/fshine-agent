@@ -410,12 +410,14 @@ cases:
     group: B 稳定性
     kind: probe
     inBaseline: false
-    placeholder: true
-    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
-      - window口径必须体现在回复里（切片 E 补审计）
+      - window口径必须体现在回复里
     intent: window口径必须体现在回复里
-    businessGoal: 切片 E 扩充
+    businessGoal: >
+      单轮查询 locked-one collection 的 W1 record value：回复必须体现请求的 window 口径
+      （点名 W1），并给出该 (collection, window) 组合的夹具真实值 900 与条数 1、点名
+      locked-one，且本轮有已执行的平台调用（数值必须有真实查询来源，不得无据应答）。
+      B1 考同查询连发的轮间口径一致，本用例考单轮内 window 口径不丢失。
     fixture:
       name: dummy-platform
       isolation: per-case-state-dir
@@ -423,13 +425,25 @@ cases:
     allowedSideEffects:
       writableCollections: []
       writes: []
-      note: 切片 E 扩充
-    checks: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 回复体现请求的 window（判定体判据：回复含 'W1' 或移植前真平台语料的 '2026年07月'）
+      - 回复点名 locked-one（期望值层新增）
+      - 报出 locked-one W1 的种子值 900、条数 1（期望值层新增）
+      - 本轮 ≥1 次已执行平台调用（期望值层新增）
     messages:
       - text: check locked-one collection W1 record value
         tasks: [A]
-    expectations: null
-    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [locked-one]
+            requireValues: [900]
+            count: 1
+            minExecutedCalls: 1
+      invariants: {}
+    expect: 单轮查询的回复体现请求的 window（W1），并给出 locked-one W1 的真实值 900 与条数 1
 
   # ════════════ C 长会话 ════════════
   - id: C1
@@ -793,12 +807,20 @@ cases:
     group: F 探索型
     kind: probe
     inBaseline: false
-    placeholder: true
-    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
-      - 目标不明的探索型会话不编造并落地（切片 E 补审计）
+      - 目标不明的探索型会话不编造并落地
     intent: 目标不明的探索型会话：模糊轮不编造，补充明确后落地为真实查询，不空转不谄媚
-    businessGoal: 切片 E 扩充
+    businessGoal: >
+      六轮探索型会话，考「目标不明时不编造、补充明确后落地为真实查询」。第 1–3、5 轮
+      （哪个客户欠款最多 / 这个月有什么要看的 / 帮我分析应收情况 / 有异常的吗）目标不明：
+      dummy 夹具没有 customer 维度（dummy-fixture.ts:18-24 明确「夹具没有 customer 维度」），
+      任何"某客户欠款 X 元"式的回答都是编造；判定体对这几轮的正确行为取并集——澄清问句、
+      能力边界说明、零执行或仅目录搜索都放行（probe-real-agent.ts:2033-2035），只机械判
+      「无来源金额」与「连续两轮零调用纯客套」。第 4 轮用户补出 collection 与期间
+      （alpha, this month）、第 6 轮明确化（直接查余额）是两条落地轮：必须发生真实平台
+      调用且回复含真实结果，零调用/无金额即「明确请求未落地」。落地轮的真实值 = alpha 的
+      种子记录 1200 与 800（dummy.cjs:193 的 items；doQuery 不带 --window 时返回该
+      collection 全部 items，dummy.cjs:300），故"本月"与默认窗口取到的都是这两个数。
     fixture:
       name: dummy-platform
       isolation: per-case-state-dir
@@ -806,8 +828,12 @@ cases:
     allowedSideEffects:
       writableCollections: []
       writes: []
-      note: 切片 E 扩充
-    checks: []
+      note: 纯只读用例——六轮里没有任何一轮允许写；第 4/6 轮落地的是只读查询
+    checks:
+      - 每轮金额有据（amountNote：模糊轮零执行出现无来源金额 / 落地轮来源外金额）
+      - 落地轮真查且回复含真实结果（landingNote：第 4/6 轮零调用或无金额即 note）
+      - 不空转不谄媚（连续两轮零调用且两轮都是纯客套）
+      - 第 4/6 轮已执行平台调用 ≥1 且报出 alpha 种子值 1200/800（期望值层新增）
     messages:
       - text: which customer has the most debt?
         tasks: []
@@ -823,8 +849,18 @@ cases:
       - text: forget it, just check balance
         tasks: [A]
         marks: [landing]
-    expectations: null
-    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+    expectations:
+      shortCase:
+        turns:
+          - index: 3
+            collections: [alpha]
+            requireValues: [1200, 800]
+            minExecutedCalls: 1
+          - index: 5
+            requireValues: [1200, 800]
+            minExecutedCalls: 1
+      invariants: {}
+    expect: 模糊轮（第1/2/3/5轮）不编造：澄清或说明能力边界均可，无来源金额即失败；第4/6轮补充明确后必须真查并报出 alpha 的真实值 1200/800。
 
   # ════════════ G 并发多线程 ════════════
   - id: G1
@@ -1114,11 +1150,28 @@ cases:
     kind: probe
     inBaseline: false
     placeholder: true
-    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    blocker: >
+      第四层无可用断言（prose 已审计）：三条判据——域混淆两判 / D-073 数据在手 /
+      平台来源挂靠——在 expectations.ts 的四种断言类与三个过程不变量里没有对应形状
+      （判据只长在探针 X2 判定体的 note 生成器）；覆盖面由探针 note 生成器 + dims 归维承载
     incidents:
-      - L0 探索型问题族不编造/不域混淆/数据在手不踢回给用户（切片 E 补审计）
+      - L0 探索型问题族不编造/不域混淆/数据在手不踢回给用户
     intent: L0 探索型问题族（customer/supplier/tax rate）：不编造、不域混淆、平台查到的数据不踢回给用户
-    businessGoal: 切片 E 扩充
+    businessGoal: >
+      三轮全是 dummy 平台没有对应维度的 L0 探索型问题。夹具 OPERATIONS 的全部 12 个操作
+      只覆盖两个维度：collection × window × record（dummy 域）与 topic × round（ballot 域）
+      ——既没有 customer / supplier 档案维度，也没有 tax rate 操作
+      （scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:43-127）。所以第 1 轮
+      "what customers do we have?"、第 2 轮 "what about suppliers?"、第 3 轮
+      "help me check VAT tax rate" 的诚实答法都是「明说平台没有这个维度/这个操作」，
+      并给出用户可行动的下一步。三条硬红线：① 不得把 collection 清单当成
+      customer/supplier 名单静默给出（域混淆）——回复里列出 ≥2 个 collection 名时必须
+      显式出现 "collection" 字样说明这个解读，并给另一种解读的入口（或者/还是/哪一家/
+      or / did you mean / which collection / would you like 一族）；
+      ② 已查到的数据不得踢回给用户（D-073）——本轮 dummy.query 真命中某个 collection
+      且该 (collection, window) 真有数据时，该 collection 的规范 item 名必须出现在回复里；
+      ③ 不得把平台外的税率知识挂上平台来源（语域契约①）——诚实的「平台不提供/我不知道」
+      算通过。全轮纯只读。
     fixture:
       name: dummy-platform
       isolation: per-case-state-dir
@@ -1126,8 +1179,15 @@ cases:
     allowedSideEffects:
       writableCollections: []
       writes: []
-      note: 切片 E 扩充
-    checks: []
+      note: >
+        纯只读用例：三轮都是平台没有对应维度的探索型问题，没有任何写尝试，也不产生提案。
+        允许的副作用 = 无——writableCollections 与 writes 均空，任何 collection 都不得被写。
+    checks:
+      - 全轮零执行语言指纹 + 金额有据（execLanguageLeakNotes / amountNote：零执行轮次出现无来源金额即红）
+      - 第 1 轮域混淆两判：清单当 customer 给出必须显式说明「collection」解读，并给另一种解读的入口（explorationDomainNote）
+      - 第 1 轮 D-073 数据在手：本轮 dummy.query 命中某 collection 且该 (collection, window) 真有数据时，规范 item 名必须出现在回复里（collectionQueryHits + 回复包含判定）
+      - 第 1 轮成本信息性披露：>6 次调用或 >300s 记事实不硬败（今日基线 8 次/295s）
+      - 第 3 轮 tax rate：诚实的「平台不提供/我不知道」算通过；把非平台知识挂上平台来源不行（platformSourceNote）
     messages:
       - text: what customers do we have?
         tasks: []
@@ -1136,19 +1196,25 @@ cases:
       - text: help me check VAT tax rate
         tasks: []
     expectations: null
-    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+    expect: 平台没有 customer/supplier/tax rate 维度：不编造、不域混淆、数据在手不踢回给用户；第四层无可用断言（判据在探针 note 生成器）
 
   # ════════════ Y 纠错与错误态 ════════════
   - id: Y1
     group: Y 纠错与错误态
     kind: probe
     inBaseline: false
-    placeholder: true
-    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
     incidents:
       - 实体串台（纠错后旧数字不得当新答案）
     intent: 用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、window沿用纠错后范围、切回不混淆
-    businessGoal: 切片 E 扩充
+    businessGoal: >
+      四轮纠错会话，考「换范围」三件事：旧范围干净丢弃、新旧数字不混、切回不混淆。
+      第 1 轮在 alpha 上建立真实结果（夹具 items = 1200/800 两条）；第 2 轮用户改口
+      「no, I asked about beta」——必须发生新查询并落到 beta 的真实结果（500/300/200
+      三条），alpha 的数字不得作为 beta 的答案呈现；第 3 轮顺着纠错后的范围追问
+      「what about W2?」——范围沿用 beta，而夹具里 beta 只有 W1，问 W2 必须诚实收边
+      （"无数据"或"0 + 说明"），alpha 的非零数字冒出来即串台；第 4 轮「forget it,
+      back to alpha」切回 alpha——必须点名 alpha 并给回 alpha 的真实结果，beta 的
+      数字不得作为 alpha 的答案呈现。
     fixture:
       name: dummy-platform
       isolation: per-case-state-dir
@@ -1156,8 +1222,15 @@ cases:
     allowedSideEffects:
       writableCollections: []
       writes: []
-      note: 切片 E 扩充
-    checks: []
+      note: 纯只读用例——四轮都是查询，任何 collection 都不得被写
+    checks:
+      - 每轮零执行语言指纹（execLanguageLeakNotes，含英文内部控制词形）
+      - 每轮金额有据（amountNote：按 tasks 线程归因，来源外金额即红）
+      - 第 2 轮纠错后真发生新查询 + 回复落到 beta + 不把 alpha 数字当 beta 答案（staleScopeAmounts 分句尺）
+      - 第 3 轮回复体现 window W2 + 真发生查询 + 不把 alpha 数字当 beta W2 答案
+      - 第 4 轮切回点名 alpha + 不把 beta 数字当 alpha 答案
+      - 漂移基线：任何一轮把用户没问的 collection 当成本轮结果（accountDrift 尺——与上面三把 staleScopeAmounts 分句尺是两把独立的尺，note 归 entityFidelity 维）
+      - 期望值层：逐轮 collection/数值/条数 + 第 3 轮 W2 无数据收边 + 第 2/3 轮零调用即红
     messages:
       - text: check alpha collection current window record value
         tasks: [A]
@@ -1167,11 +1240,27 @@ cases:
         tasks: [B]
       - text: forget it, back to alpha
         tasks: [A]
-    expectations: null
-    expect: >
-      纠错后落新collection、window沿用corrected scope、switch back without confusion；进基线用
-      --only 时须同步 baseline。切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations
-      留待切片 E，本条目只承载从代码机械搬来的消息序列与轮次标记）
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+          - index: 1
+            collections: [beta]
+            requireValues: [500, 300, 200]
+            count: 3
+            minExecutedCalls: 1
+          - index: 2
+            windowNoData: W2
+            forbidValues: [1200, 800]
+            minExecutedCalls: 1
+          - index: 3
+            collections: [alpha]
+            requireValues: [1200, 800]
+      invariants: {}
+    expect: 纠错后落 beta、window 沿用纠错后范围且 W2 诚实收边、切回 alpha 不串 beta 数字
 
   - id: Y2
     group: Y 纠错与错误态
