@@ -17,10 +17,17 @@
  * 用法：
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts [--only A1,B2]
  *   node --env-file=.env --import tsx scripts/probe-real-agent.ts --quick
+ *   node --env-file=.env --import tsx scripts/probe-real-agent.ts --only Y2 --audit
  *
  * 注意：若从 StepCode（step）进程衍生的 shell 里跑，harness 自带的 LLM_* 环境变量会
  * 压过 --env-file（Node 不覆盖已存在变量），静默用到 harness 的模型而不是 .env 的。
  * 先剥掉再跑：env -u LLM_API_BASE_URL -u LLM_API_KEY -u LLM_MODEL -u LLM_THINKING_LEVEL
+ *
+ * --audit（audited 申报模式，D-206/D-207）：与 --only/--quick 正交。开 = ① 每会话第一条
+ * 用户消息带上申报指令前缀（只第一条，经转录对后续轮次持续可见）——模型每轮回复末尾按
+ * 封闭语法追加 [audit]…[/audit] 申报块；② Y2 错误态金额「无所属」note 换成申报-事实
+ * 五查交叉核 note（口径编造/derived 照旧）。关（默认）= 黑盒：出站文本逐字等于 yaml
+ * 文本，note 集合不变。指令词表纪律与回归钉子见 AUDIT_INSTRUCTION 注释。
  *
  * --quick 只跑 A1/A2/A4 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及declaration/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
@@ -107,6 +114,10 @@ import {
 // 用例语料（issue 切片 C）：消息序列 / 轮次标记 / 夹具与隔离 / 期望值全在 yaml，
 // 本文件只留判定体（CASE_RUNNERS）。
 import { loadCases, type CaseMessage, type CaseSpec } from './eval/cases';
+// audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
+// 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
+// （见 errorStateNotes 的 audit 分支）。
+import { auditDeclarationNotes } from './eval/audit-declaration';
 
 /**
  * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
@@ -454,6 +465,47 @@ function executionAuditRows(): ExecutionAuditRow[] | null {
   return readExecutionAuditLog(process.env['EXECUTION_AUDIT_PATH']);
 }
 
+/**
+ * audited 模式开关（`--audit`，默认关；main() 解析）。打开后两件事生效：
+ *   ① 每会话**第一条**用户消息带上 AUDIT_INSTRUCTION 前缀再逐字发出；
+ *   ② errorStateNotes 的「无所属金额」note 换成 audit-declaration 的交叉核 note。
+ * 黑盒模式（默认）两条都不生效——出站文本逐字等于 yaml 文本，note 集合不变。
+ */
+let auditMode = false;
+
+/**
+ * audited 申报指令（D-206 闭环判据第二块：提示词注入；解析与五查在
+ * scripts/eval/audit-declaration.ts）。只加在会话第一条消息前，经转录对后续轮次
+ * 持续可见——**不逐轮重复**：重复注入会把指令本身变成回复里的高频噪声，还会把
+ * 「多块/未闭合」格式查的假阳性抬起来。
+ *
+ * 词表纪律（回归钉子：probe-real-agent.test.ts 拿本常量对夹具真实词表断言，词表
+ * 清空/被真实词污染即红）：
+ *   · 文案与示例**一律占位符**——rec-XXX、数值只作「某笔记录的 value」式描述，
+ *     一个数字都不许出现。turn.text 喂 asked windows / account 提及 / 公司名 /
+ *     期间多条判定正则，rec-101/alpha/beta/W1/500 这类真实词漏进来会造假红；
+ *     指令若带数字，模型回显时它就成了「回复里的数字」，覆盖查随之假红。
+ *   · 简短中性：不带业务口径（payable/bank/debt/collection/window 一概不提），
+ *     不提 eval/测试字样——这是发给生产装配的用户消息，不是 harness 的自白。
+ */
+export const AUDIT_INSTRUCTION = `【输出格式要求，本轮起每轮回复都适用】每轮回复末尾，如果回复里出现了具体数字，请追加一个申报块：以 [audit] 开始、以 [/audit] 结束，块内每行一条申报，只有两种行——
+引用行：某笔记录的 value <- 该笔记录的记录号（记录号用平台返回的标识，形如 rec-XXX）
+运算行：某个合计结果的 value := 一个数 + 另一个数 + …
+value 写具体数字。回复里没有数字时不需要块。
+`;
+
+/**
+ * audited 模式下 send 的出站文本（纯函数，导出供单测钉）：
+ *   · audit=false（黑盒，默认）：**逐字返回原文**——现有全绿即是这条的证据；
+ *   · audit=true：仅 roundIndex=0（会话第一条）加指令前缀，后续轮原样。
+ * spec.messages 本身不改：轮次下标与逐轮期望值（yaml）不受影响，turn.text 记的是
+ * 实际发出的文本（前缀在内），喂各判定正则的因此是出站真相。
+ */
+export function auditOutgoingText(text: string, roundIndex: number, audit: boolean): string {
+  if (!audit || roundIndex > 0) return text;
+  return `${AUDIT_INSTRUCTION}${text}`;
+}
+
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
   isolatePlatformState();
   const sdk = new RecordingSdk();
@@ -489,10 +541,15 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
   const starting = assembly.channel.start(assembly.replyHandler);
   sdk.emit('authenticated');
   await starting;
+  // 会话内轮次计数（audited 指令前缀只加第一条：指令经转录持续可见，不逐轮重复）。
+  let roundIndex = 0;
   return {
     sdk,
     assembly,
     send: async (text: string): Promise<Turn> => {
+      // audited 模式：第一条消息加申报指令前缀再逐字发出（黑盒模式原样）。
+      const outgoing = auditOutgoingText(text, roundIndex, auditMode);
+      roundIndex += 1;
       const before = sdk.frames.filter((frame) => frame.finish).length;
       // 执行层审计窗口游标（采集边界，不是归因依据）：窗口圈住这条消息的 handler 调用；
       // 链上归因按持久化 id（messageId → requestId → taskId）。每用例一个隔离审计文件，
@@ -501,7 +558,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
       // message id 探针自己造并记住：宿主库 agent_requests 按 messageId 反查 requestId。
       const messageId = `msg_${Math.random().toString(36).slice(2, 10)}`;
       const startedAt = Date.now();
-      sdk.emit('message.text', wecomText(principalUser, text, messageId));
+      sdk.emit('message.text', wecomText(principalUser, outgoing, messageId));
       const deadline = Date.now() + PROBE_REPLY_WAIT_MS;
       while (Date.now() < deadline) {
         const finals = sdk.frames.filter((frame) => frame.finish);
@@ -561,7 +618,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
             delivered,
           }));
           return {
-            text,
+            text: outgoing,
             reply: finals.at(-1)!.content,
             ms: Date.now() - startedAt,
             messageId,
@@ -587,7 +644,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
-      throw new Error(`等待回复超时(${PROBE_REPLY_WAIT_MS / 1000}s)：${text}`);
+      throw new Error(`等待回复超时(${PROBE_REPLY_WAIT_MS / 1000}s)：${outgoing}`);
     },
   };
 }
@@ -1662,8 +1719,16 @@ const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmis
  *     调用重复 ≥3 次才算风暴（与宿主纠错环 MAX_NEEDS_ROUNDS=3 同阈）。总调用数只作信息性
  *     披露（附分脚本计数，校准依据自证）。
  *   · not_found 须给"没有找到"的结论、歧义须列候选+问句（clarificationShapeNotes 同款）。
+ *
+ * **audited 模式（--audit，D-206/D-207）**：误差判定里「无所属金额」那条换成
+ * audit-declaration 的交叉核 note（回复里的每个数字都须有封闭语法申报行可依，且申报
+ * 与宿主持有的事实——本轮审计窗口行的 result.items——对得上）。口径编造那条**照跑**
+ * （classifyErrorStateAmounts 不整块跳过：口径编造是独立第三类，与金额归属无关，挂真实
+ * 值也不例外）；derived 信息性 note 保留。黑盒模式（audit=false）三条都不变。
+ * 事实基准取 turn.execution（本轮审计窗口行）——**D-205**：审计行按时间窗切片归因，
+ * 无请求级关联 id；评测路径串行所以今天够用，不顺手"修"，登记即可。
  */
-function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[]): string[] {
+export function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[], audit = false): string[] {
   const notes: string[] = [];
   // 错误态金额三分（判定核在 amount-criteria.classifyErrorStateAmounts，反例变异测试在
   // amount-criteria.test.ts——2026-11-07 评审 blocking 点名）：有所属（放行，须过实体绑定
@@ -1673,7 +1738,11 @@ function errorStateNotes(turn: Turn, candidates: readonly string[], records: rea
   for (const { caliber, clause } of verdict.assertedCalibers) {
     notes.push(`错误态回复把平台没有的口径「${caliber}」当答案口径（静默回落；挂真实值也不例外）：「${turn.text}」→ ${clause.slice(0, 80)}`);
   }
-  if (verdict.unattributed.length) {
+  if (audit) {
+    // audited 模式：无所属判定替换为申报交叉核（五查逐条 note；回复无数字时不要求有块）。
+    // 事实基准 = 本轮审计窗口行（turn.execution，已合并起止两行）。
+    notes.push(...auditDeclarationNotes(turn.reply, turn.execution));
+  } else if (verdict.unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(verdict.unattributed)}`);
   }
   if (verdict.derived.length) {
@@ -2446,8 +2515,9 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     const notes: string[] = [];
     for (let i = 0; i < turns.length; i += 1) {
       // 执行语言指纹（含internal control term quota|quota|circuit break|计划门|reject limit|retry limit，runtime.ts 同源）
-      // + 失败诚实性四判（金额有所属/可行动/同参重复判风暴/澄清形状；审计切片供风暴分组）。
-      notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!));
+      // + 失败诚实性四判（金额所属/可行动/同参重复判风暴/澄清形状；审计切片供风暴分组）。
+      // audited 模式（--audit）：金额所属那条换成申报交叉核 note（口径编造/derived 不变）。
+      notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!, auditMode));
     }
     return { turns, notes };
   },
@@ -2631,6 +2701,11 @@ async function main(): Promise<void> {
     : null;
   const quick = process.argv.includes('--quick');
   if (only && quick) throw new Error('--only 与 --quick 互斥：--quick 本身就是固定子集');
+  // audited 申报模式（D-206/D-207）：与 --only/--quick 正交（模式修饰，不是子集选择）。
+  // 开 = 首轮消息带申报指令前缀 + 错误态金额所属判定换成申报交叉核；关（默认）=
+  // 黑盒，出站文本与 note 集合逐字不变。
+  auditMode = process.argv.includes('--audit');
+  console.log(auditMode ? 'audited 申报模式：首轮注入申报指令，错误轮金额所属改判申报交叉核' : '黑盒模式');
   const cases = loadProbeCases();
   const selected = only ? cases.filter((c) => only.has(c.id))
     : quick ? cases.filter((c) => QUICK_CASE_IDS.has(c.id))
