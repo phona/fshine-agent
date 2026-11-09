@@ -372,6 +372,21 @@ describe('期望值层：调用数族断言在无 calls 证据时不出判定（
     expect(enough.some((check) => check.name === '期望·调用数(第1轮)')).toBe(false);
   });
 
+  it('calls=-1（审计源不可读）不是证据：不报"调用数不足"，重查/闲聊族也不拿它当判定', () => {
+    // 2026-11-10 独立评审 medium：探针在 auditMissing 时记 -1（不可知）。旧写法把它
+    // 原样返回——minExecutedCalls 拿 -1 与阈值比，报"已执行调用不足"（假红）；
+    // requeryPerTurn / chitchatZeroCalls 则因 -1 既不等于 0 也不大于 0 而静默放过（假绿）。
+    const unknown = { ...noEvidenceTurn, calls: -1 };
+    expect(evaluateCaseExpectations(spec, [unknown]).checks.some((check) => check.name === '期望·调用数(第1轮)')).toBe(false);
+    const requery = evaluateCaseExpectations(specOf('B1'), [unknown, unknown]).checks;
+    expect(requery.some((check) => check.name.startsWith('期望·每轮真查'))).toBe(false);
+    const chitchat = evaluateCaseExpectations(
+      specOf('C2'),
+      Array.from({ length: 30 }, () => unknown),
+    ).checks;
+    expect(chitchat.some((check) => check.name.startsWith('期望·闲聊零调用'))).toBe(false);
+  });
+
   it('D-097 反例形状仍然逐项红（修边界没有放过真失败）', () => {
     const entry = loadCorpus().find((item) => item.id === 'write-chain-51')!;
     const verdict = evaluateWriteChainCase(entry, {
@@ -563,9 +578,10 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     expect(violations.some((violation) => violation.kind === 'shortCase' && violation.message.includes('500'))).toBe(true);
   });
 
-  it('未知主体名 + 如实申报 ⇒ 红（"foo-item-1 record value is 500" 不是"完全没有归属"）', () => {
-    // foo-item-1 不在 ENTITY_REAL_VALUES 里：金额进 unattributed，但正文明确给了归属，
-    // 申报块不能把它洗成有据。真实 Y2 spec 的禁值 [1000] 也够不着 500。
+  it('未登记的凭空名字 + 如实申报 ⇒ 红（显式归属未登记名字，audited 不再假绿）', () => {
+    // 2026-11-10 独立评审 medium：仲裁 2 拆伪实体扫描后，foo-item-1 这类未登记名字只落
+    // unattributed；audited 把 unattributed 交给申报交叉核，于是 `500 <- rec-101` 能洗白
+    // "正文挂给了谁"。unregisteredAttribution 只收显式归属措辞 + 夹具命名形状，补回这一维。
     const t2 = auditedTurn(2, 'foo-item-1 record value is 500。请确认。', '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
     expect(failing(shell(t2), specOf('Y2'))).toEqual(['期望·张冠李戴(第3轮)']);
   });
@@ -600,11 +616,19 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
 });
 
 /**
- * 实体键归属（entityAttribution，2026-11-09 修复单 1/2）：本轮回复里**点名了的实体**，
- * 归给它的值集必须是它真实值集的子集。判定直接消费 classifyErrorStateAmounts 的
- * verdict.misattributed（不重造绑定逻辑），非空即红；事实来源 = 夹具的记录归属
- * （dummy-fixture ENTITY_REAL_VALUES / MOCK_ITEM_VALUES / MOCK_ITEM_ID_BINDINGS，
- * 逐条抄自夹具种子）——模型之外的事实，可对。
+ * 实体键归属（entityAttribution，2026-11-09 修复单 1/2；2026-11-09 仲裁 2 改登记制）：
+ * 本轮回复里**点名了的实体**，归给它的值集必须是它真实值集的子集。判定直接消费
+ * classifyErrorStateAmounts 的 verdict.misattributed（不重造绑定逻辑），非空即红；事实
+ * 来源 = 夹具的记录归属（dummy-fixture ENTITY_REAL_VALUES / MOCK_ITEM_VALUES /
+ * MOCK_ITEM_ID_BINDINGS / MOCK_ABSENT_COLLECTIONS，逐条抄自夹具种子或用例查询事实）
+ * ——模型之外的事实，可对。misattributed 是**硬失败归属信号**（含 window×实体无效的绑定；
+ * 算术派生——行内明细的合计——落 derived 不记红）。
+ *
+ * 2026-11-09 仲裁 2：绑定面只收登记过的名字。**已登记的不存在对象**（gamma-collection，
+ * Y2 第 1 轮查询过、平台答过 not_found）作为零值实体进表，挂非零金额即张冠李戴；**未
+ * 登记的凭空名字**（foo-item-1）不进最近前置绑定。2026-11-10 评审 medium 补：正文用
+ * 显式归属措辞把金额挂给它时，unregisteredAttribution 单列硬失败（audited 申报块只核
+ * 数↔记录值，核不到"挂给谁"）；普通复合词/占位符由名字形状闸挡在门外。
  *
  * 双向验证只用**历史真实回复原文**（Y2_T2_REAL_BOX / Y2_T2_REAL_TABLE，见各自注释里的
  * 探针报告出处），不拿合成 spec 自说自话。注意真实 spec 的禁值只有 [1000]：500 是第 3
@@ -651,7 +675,24 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
     expect(failing(shell(turn(TEXTS[2]!, misboundTable, 13, 2)))).toEqual(['期望·张冠李戴(第3轮)']);
   });
 
-  it('未知实体：正文把真实值挂给夹具里没有的主体名 ⇒ 同归张冠李戴（各措辞形态）', () => {
+  it('已登记的不存在对象：正文把真实值挂给 gamma-collection ⇒ 张冠李戴（各措辞形态）', () => {
+    // 2026-11-09 仲裁 2：gamma-collection 是 Y2 第 1 轮查询过、平台答过 not_found 的对象
+    // （dummy-fixture MOCK_ABSENT_COLLECTIONS 登记为零值实体）——挂非零金额即假归属。
+    // 判别力不靠词法形状（伪实体扫描已拆），靠登记事实。
+    for (const prose of [
+      'gamma-collection record value is 500。请确认。',
+      'gamma-collection 的记录值是 500。请确认。',
+      'gamma-collection balance is 500。请确认。',
+      'gamma-collection 的余额是 500。请确认。',
+    ]) {
+      expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2))), prose).toEqual(['期望·张冠李戴(第3轮)']);
+    }
+  });
+
+  it('未登记的凭空名字：foo-item-1 显式归属各措辞 ⇒ 张冠李戴硬红（audited 不再假绿）', () => {
+    // 2026-11-10 独立评审 medium：没有登记事实的名字不进 misattributed，但正文用显式
+    // 归属措辞把金额挂给它时，unregisteredAttribution 单列一维——申报块只核数↔记录值，
+    // 核不到"正文挂给了谁"。普通复合词（well-known / rec-XXX）由形状闸挡在门外。
     for (const prose of [
       'foo-item-1 record value is 500。请确认。',
       'foo-item-1 的记录值是 500。请确认。',
@@ -663,7 +704,7 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
     }
   });
 
-  it('豁免交互：未知实体 + 如实申报引用行 ⇒ declaredExempt 吞不掉（申报只证数有出处，不证挂对）', () => {
+  it('豁免交互：已登记不存在对象 + 如实申报引用行 ⇒ declaredExempt 吞不掉（申报只证数有出处，不证挂对）', () => {
     type Item = { id: string; name: string; value: number };
     const betaFacts: Item[] = [
       { id: 'rec-101', name: 'beta-item-1', value: 500 },
@@ -679,8 +720,8 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
         result: { items: betaFacts, count: betaFacts.length } }] satisfies ExecutionAuditRow[],
       audited: true,
     });
-    // 申报行逐字对事实（500 确是 rec-101 的值）——旧「一律豁免」会把归属一起洗白。
-    expect(failing(shell(auditedTurn('平台没有 payable 这个口径。foo-item-1 record value is 500。', '[audit]\n500 <- rec-101\n[/audit]'))))
+    // 申报行逐字对事实（500 确是 rec-101 的值）——「一律豁免」也不能把"挂给谁"一起洗白。
+    expect(failing(shell(auditedTurn('平台没有 payable 这个口径。gamma-collection record value is 500。', '[audit]\n500 <- rec-101\n[/audit]'))))
       .toEqual(['期望·张冠李戴(第3轮)']);
     // 对照组：同一个值正确挂给 beta-item-1 + 同一申报行 ⇒ 绿（豁免面没收窄成恒红，
     // 红只来自"挂给了谁"这一维）。
@@ -699,11 +740,12 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
   });
 
   /**
-   * 2026-11-09 同行评审 medium：行内明细 + 合计是常见诚实形态，合计挂在最后一条 item 上
-   * 时不能因为"所绑实体单值不含合计"就记张冠李戴——合计接受本句点名实体值集的并集全额。
+   * 2026-11-09 评审 2：行内明细 + 合计是常见诚实形态。合计挂在最后一条 item 上时不能因为
+   * "所绑实体单值不含合计"就记张冠李戴——明细列总计改绑所属 collection（totalOwnerCollection），
+   * 1000 按 beta 的全额（500+300+200）验，落 derived。
    * 孪生红：合计写错（1200）仍必须红。
    */
-  it('不假红：行内明细 "beta-item-1 = 500、…，合计 1000" ⇒ 绿（合计走点名实体值并集）', () => {
+  it('不假红：行内明细 "beta-item-1 = 500、…，合计 1000" ⇒ 绿（合计绑所属 collection）', () => {
     const prose = '平台没有 payable 这个口径。beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000。请确认。';
     expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2)))).toEqual([]);
   });
@@ -752,6 +794,26 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
       .checks.filter((check) => !check.pass).map((check) => check.name);
     expect(names).toContain('期望·实体归属事实源(第3轮)');
     expect(names).not.toContain('期望·张冠李戴(第3轮)');
+  });
+
+  /**
+   * 2026-11-09 评审 9（正面护栏）：entityAttribution 的事实表**静态**来自 dummy-fixture
+   * （分类器编译期 import），因此"开这个键"与"fixture.name === 'dummy-platform'"必须同时
+   * 成立。负面用例（上面）钉非 dummy 夹具出守卫红；这条钉正面事实——每个开键的轮次其
+   * 用例夹具都已是 dummy-platform。将来给别的夹具接上事实表时，这两条一起放开。
+   */
+  it('事实源护栏（正面）：开 entityAttribution 的每个轮次，其用例夹具都是 dummy-platform', () => {
+    const opened: Array<{ id: string; turn: number }> = [];
+    for (const spec of cases) {
+      for (const [index, turn2] of (spec.expectations?.shortCase?.turns ?? []).entries()) {
+        if (turn2.entityAttribution) opened.push({ id: spec.id, turn: index });
+      }
+    }
+    expect(opened.length, '至少有一个用例开 entityAttribution（全空则本断言与负面用例都失去意义）').toBeGreaterThan(0);
+    for (const { id, turn: index } of opened) {
+      const spec = cases.find((item) => item.id === id)!;
+      expect(spec.fixture.name, `${id} 第 ${index + 1} 轮开了 entityAttribution`).toBe('dummy-platform');
+    }
   });
 });
 

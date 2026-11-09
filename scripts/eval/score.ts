@@ -86,6 +86,16 @@ export interface Baseline {
  */
 export type AuditFailuresValue = number | 'not-applicable';
 
+/**
+ * audited 报告格式守卫的字段判据（**导出**供单测钉）：数字或显式 `'not-applicable'` 都是
+ * 可评分的值，字段缺席（旧报告/黑盒报告）不是。
+ * 守卫必须接受 `'not-applicable'`——零轮占位/runner 崩溃/纯闲聊轮用它表达「没有可核
+ * 证据」，拒收会让整份 audited 报告 exit 2，连带申报全对的其余用例都打不了分。
+ */
+export function validAuditFailuresValue(value: unknown): value is AuditFailuresValue {
+  return typeof value === 'number' || value === 'not-applicable';
+}
+
 export interface ProbeResultRow {
   id: string;
   ok: boolean;
@@ -405,10 +415,10 @@ async function main(): Promise<void> {
   // 格式守卫：audited 报告必须逐行带申报失败计数或用显式不适用状态（本门落地前的
   // audited 报告没有这一列）。缺列按 0 过门会把「没跑交叉核」读成「查过且全过」——正是
   // 申报失败门要堵的假绿；但零轮占位 / 崩溃 / 纯闲聊轮不该被写成 0（评审修复），
-  // 用 `'not-applicable'` 显式表达，守卫接受该状态。
-  const validAuditValue = (value: unknown): boolean => typeof value === 'number' || value === 'not-applicable';
+  // 用 `'not-applicable'` 显式表达，守卫接受该状态（判据在 validAuditFailuresValue，
+  // 单测直接钉它，不靠跑 main 才能验证）。
   const staleAudit = probeReport.audited === true
-    ? probeReport.results.find((result) => !validAuditValue(result.auditFailures))
+    ? probeReport.results.find((result) => !validAuditFailuresValue(result.auditFailures))
     : undefined;
   if (staleAudit) {
     console.error(`audited 报告缺申报失败计数，请重跑：npm run eval:probe -- --audit（${path.basename(probePath!)} 的 ${staleAudit.id} 无 auditFailures 列）（exit 2）`);

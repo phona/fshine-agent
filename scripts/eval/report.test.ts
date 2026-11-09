@@ -6,7 +6,7 @@
  *   ② 阶梯摘要计数修括号（旧写法 `?? 0 + 1` 让同档计数永不递增）。
  */
 import { describe, expect, it } from 'vitest';
-import { buildCaseReport, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
+import { buildCaseReport, metricInputs, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
 
 function caseInput(overrides: Partial<ReportCaseInput> = {}): ReportCaseInput {
   return {
@@ -136,5 +136,15 @@ describe('干预停点：提案确认后提交成功仍计入（八审 major）'
       intents: [{ intentId: 'i1', proposalId: 'p1', status: 'committed', hasReadback: true }],
     }));
     expect(line.interventionPoints).toBe(0);
+  });
+});
+
+describe('metricInputs：跳过用例不进通过率分母（占位/未跑）', () => {
+  it('passOf 返回 undefined ⇒ 该用例被排除，cases 与 passRate 分母同步', () => {
+    // 2026-11-10 独立评审 medium：Q5b/Q13b 占位条目从未跑过，不能计入通过率。
+    const ran = buildCaseReport(caseInput({ caseId: 'a1' }));
+    const placeholder = buildCaseReport(caseInput({ caseId: 'Q5b' }));
+    const inputs = metricInputs([ran, placeholder], (item) => (item.caseId === 'Q5b' ? undefined : true));
+    expect(inputs.map((item) => item.caseId)).toEqual(['a1']);
   });
 });

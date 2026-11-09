@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
-  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus,
+  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, validAuditFailuresValue,
   type Baseline, type ProbeResultRow,
 } from './score';
 import type { ConversationWriteChainFacts } from './write-chain';
@@ -110,6 +110,17 @@ describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能�
     const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'not-applicable' }), baselineCase, undefined, undefined, true);
     expect(auditCheckOf(verdict)).toMatchObject({ pass: true, actual: '不适用' });
     expect(verdict.pass).toBe(true);
+  });
+
+  it('报告格式守卫：接受数字与显式不适用，拒收缺列（零轮占位不让整份报告 exit 2）', () => {
+    // 探针报告行 → score.ts 的格式守卫（main() 里用它筛 staleAudit）。判据导出后单测
+    // 直接钉：N/A 若被拒收，--quick --audit 里有零轮占位/崩溃用例就会整份报告 exit 2，
+    // 连带申报全对的其余用例都打不了分；缺列仍必须 fail-closed。
+    expect(validAuditFailuresValue(0)).toBe(true);
+    expect(validAuditFailuresValue(2)).toBe(true);
+    expect(validAuditFailuresValue('not-applicable')).toBe(true);
+    expect(validAuditFailuresValue(undefined)).toBe(false);
+    expect(validAuditFailuresValue(null)).toBe(false);
   });
 });
 

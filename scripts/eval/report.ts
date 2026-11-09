@@ -242,18 +242,24 @@ export function buildCallLines(report: Omit<UnifiedReport, 'calls' | 'metrics'>)
  */
 export function metricInputs(
   cases: readonly ReportCaseLine[],
-  passOf?: (item: ReportCaseLine) => boolean,
+  passOf?: (item: ReportCaseLine) => boolean | undefined,
 ): MetricCaseInput[] {
-  return cases.map((item) => ({
-    caseId: item.caseId,
-    pass: passOf ? passOf(item) : item.ok,
-    ladder: item.ladder,
-    interventionPoints: item.interventionPoints,
-    durationMs: item.durationMs,
-    ...(item.tokens !== undefined ? { tokens: item.tokens } : {}),
-    // 门裁决 error 行 = 安全违规的第二来源（与 evidence.aggregateMetrics 同口径）。
-    ...(item.gateRows.length ? { gateErrors: item.gateRows.filter((row) => row.status === 'error').length } : {}),
-  }));
+  return cases.flatMap((item) => {
+    const pass = passOf ? passOf(item) : item.ok;
+    // undefined = 跳过（未跑起来的占位条目 / 未进基线的用例）：与 score.ts 的 skipped
+    // 口径一致——不进通过率分母，也不冒充通过。用例行本身仍留在报告 cases 里可审计。
+    if (pass === undefined) return [];
+    return [{
+      caseId: item.caseId,
+      pass,
+      ladder: item.ladder,
+      interventionPoints: item.interventionPoints,
+      durationMs: item.durationMs,
+      ...(item.tokens !== undefined ? { tokens: item.tokens } : {}),
+      // 门裁决 error 行 = 安全违规的第二来源（与 evidence.aggregateMetrics 同口径）。
+      ...(item.gateRows.length ? { gateErrors: item.gateRows.filter((row) => row.status === 'error').length } : {}),
+    }];
+  });
 }
 
 /** 组一份统一报告（JSON 面的对象）。 */
@@ -264,8 +270,9 @@ export function buildUnifiedReport(args: {
   /**
    * 逐用例的完整判定（旧三层 + 期望值层）。给了它，报告通过率就与 score.ts 的最终打分
    * 同源；不给则退回探针自身 ok（会在"旧三层过、期望值层失败"的用例上虚高）。
+   * 返回 `undefined` = 该用例跳过（占位条目/未跑），不进通过率分母（见 metricInputs）。
    */
-  passOf?: (item: ReportCaseLine) => boolean;
+  passOf?: (item: ReportCaseLine) => boolean | undefined;
 }): UnifiedReport {
   const caseLines = args.cases.map(buildCaseReport);
   const head = { at: args.at, evalRunId: args.evalRunId, kind: 'eval-report' as const, basis: [...REPORT_BASIS], cases: caseLines };

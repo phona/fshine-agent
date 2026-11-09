@@ -164,7 +164,7 @@ describe('audited 申报交叉核：运算闭合（:= 右侧每个数都有申�
     expect(v.findings[0]!.subject).toBe('500');
     expect(v.findings[0]!.note).toContain('复用同一来源');
     expect(v.findings[0]!.note).toContain('展开后出现 2 次');
-    expect(v.findings[0]!.note).toContain('只有 1 条记录值为 500');
+    expect(v.findings[0]!.note).toContain('已申报且核验通过的引用行只锚到 1 条记录值为 500');
     expect(v.checks).toEqual({ ...ALL_GREEN, operationClosure: false });
   });
 
@@ -212,7 +212,7 @@ describe('audited 申报交叉核：运算闭合（:= 右侧每个数都有申�
     expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
     expect(v.findings[0]!.subject).toBe('500');
     expect(v.findings[0]!.note).toContain('复用同一来源');
-    expect(v.findings[0]!.note).toContain('只有 1 条记录值为 500');
+    expect(v.findings[0]!.note).toContain('已申报且核验通过的引用行只锚到 1 条记录值为 500');
   });
 
   it('绿：同值加数但审计事实有两条不同记录——不是同一记录复用', () => {
@@ -233,15 +233,197 @@ describe('audited 申报交叉核：运算闭合（:= 右侧每个数都有申�
     expect(v.checks.operationClosure).toBe(true);
   });
 
-  it('绿：领头负号的闭合源值同样是幅值——`1000 := -500 + 1500` 配 `500 <- rec-a`', () => {
+  it('绿：领头负号读作"对正值记录施加减号"——`1000 := -500 + 1500` 配 `500 <- rec-a`', () => {
     // 2026-11-09 评审 low：记录值 +500 只能如实申报 `500 <- rec-a`（申报 -500 会 valueMismatch）；
-    // 旧实现首项保留字面符号，去找一条 -500 的记录，把合法申报判成不闭合。
+    // 2026-11-10 起负加数认两种读法（见 AuditAddendSource），这一条钉"施加减号"那一读法：
+    // -500 的候选 = [-500, 500]，幅值候选命中 `500 <- rec-a`。同形态的"记录自身为负"读法
+    // 钉在下面的负值记录组。
     const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 1500 }]);
     const reply = '合计 1000。\n[audit]\n500 <- rec-a\n1500 <- rec-b\n1000 := -500 + 1500\n[/audit]';
     const v = classify(reply, rows);
     expect(v.findings).toEqual([]);
     expect(v.checks.operationClosure).toBe(true);
     expect(v.checks.operationMismatch).toBe(true);
+  });
+});
+
+/**
+ * 放行口径（2026-11-10 codex blocking）：运算闭合的复用查只按**已申报且核验通过**的引用行
+ * 放行——审计事实里有几条同值记录不作数。旧实现按"审计事实里该值的不同记录数"放行 ⇒ 审计
+ * 行有 rec-a=500、rec-b=500 时，模型只申报 `500 <- rec-a` 却写 `1000 := 500 + 500` 全绿，
+ * 等于借了未申报的 rec-b 的配额。申报即承诺"这个数出自这条记录"，没申报的记录不进可用来源。
+ */
+describe('audited 申报交叉核：可用来源只算已申报且核验通过的引用行（codex blocking）', () => {
+  /** 审计事实：两条 500 记录（同值不同身份）。 */
+  const TWO_FIVES = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 500 }]);
+
+  it('红：两条 500 记录但只申报一条——1000 := 500 + 500 借了未申报记录的配额', () => {
+    const v = classify('合计 1000。\n[audit]\n500 <- rec-a\n1000 := 500 + 500\n[/audit]', TWO_FIVES);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.findings[0]!.note).toContain('复用同一来源');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+    expect(v.findings[0]!.note).toContain('只锚到 1 条记录值为 500');
+    expect(v.checks).toEqual({ ...ALL_GREEN, operationClosure: false });
+  });
+
+  it('孪生诚实：两个同值记录都申报——1000 := 500 + 500 照过', () => {
+    const v = classify('合计 1000。\n[audit]\n500 <- rec-a\n500 <- rec-b\n1000 := 500 + 500\n[/audit]', TWO_FIVES);
+    expect(v.findings).toEqual([]);
+    expect(v.checks).toEqual(ALL_GREEN);
+  });
+
+  it('红：跨运算链借配额——800 := 500 + 300 与 1300 := 800 + 500 只申报一条 500', () => {
+    // 两条 500 记录在场，但 rec-c 从未申报 ⇒ 1300 那次 500 没有可用来源（跨链展开后聚合两次）。
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }, { id: 'rec-c', value: 500 }]);
+    const reply = '小计 800，合计 1300。\n[audit]\n500 <- rec-a\n300 <- rec-b\n800 := 500 + 300\n1300 := 800 + 500\n[/audit]';
+    const v = classify(reply, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+  });
+
+  it('孪生诚实：同链形把 rec-c 也申报 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }, { id: 'rec-c', value: 500 }]);
+    const reply = '小计 800，合计 1300。\n[audit]\n500 <- rec-a\n500 <- rec-c\n300 <- rec-b\n800 := 500 + 300\n1300 := 800 + 500\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：两条同值记录一条都没申报——闭合查先红（"审计事实里有"不等于"申报了"）', () => {
+    const v = classify('合计 1000。\n[audit]\n1000 := 500 + 500\n[/audit]', TWO_FIVES);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure', 'operationClosure']);
+    expect(v.findings.map((f) => f.subject)).toEqual(['500', '500']);
+    expect(v.findings.every((f) => f.note.includes('没有申报行'))).toBe(true);
+  });
+
+  it('红：配额不认幻影源引用行——500 <- rec-999 不给 1000 := 500 + 500 作来源', () => {
+    const v = classify('合计 1000。\n[audit]\n500 <- rec-999\n1000 := 500 + 500\n[/audit]', TWO_FIVES);
+    expect(v.findings.map((f) => f.check)).toEqual(['phantomSource', 'operationClosure']);
+    expect(v.findings[1]!.note).toContain('复用同一来源');
+    expect(v.findings[1]!.note).toContain('只锚到 0 条记录值为 500');
+  });
+
+  it('红：配额不认值不符引用行——500 <- rec-a 但 rec-a 真实 600', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 600 }, { id: 'rec-b', value: 500 }]);
+    const v = classify('合计 1000。\n[audit]\n500 <- rec-a\n1000 := 500 + 500\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['valueMismatch', 'operationClosure']);
+    expect(v.findings[1]!.note).toContain('只锚到 0 条记录值为 500');
+  });
+
+  it('红：同一个号写两遍不放大配额——审计只有一条 500 记录', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 500 }]);
+    const v = classify('合计 1000。\n[audit]\n500 <- rec-a\n500 <- rec-a\n1000 := 500 + 500\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.note).toContain('只锚到 1 条记录值为 500');
+  });
+});
+
+/**
+ * 负值记录（2026-11-10 codex major + 独立评审 6）：闭合源过去一律取绝对值，而引用行保留
+ * 真实符号——记录 -300 与 500 的诚实申报（`-300 <- rec-a`、`500 <- rec-b`、
+ * `200 := -300 + 500`）算式成立却判 operationClosure 失败。现在负加数认两种读法：
+ *   · **记录自身是负值**：引用行的值必须等于 result.items 的 value，负记录只能如实申报成
+ *     负数，`200 := -300 + 500` 里的 -300 就是那条记录本身；
+ *   · **对正值记录施加减号**：记录值是 +500，如实申报 `500 <- rec-a`，算式写
+ *     `1000 := -500 + 1500`——负号属于运算行的算术写法。
+ * 两种读法按字面值优先；复用查按接地值计数，所以"借未申报的负记录"与"负记录自身被用两次"
+ * 都照红。
+ */
+describe('audited 申报交叉核：负值记录参与运算（记录自身为负 vs 对正值记录施加减号）', () => {
+  /** 审计事实：一条负记录 -300 与一条正记录 500。 */
+  const NEG_ROWS = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 500 }]);
+
+  it('绿：负值记录如实申报参与运算——-300 <- rec-a、500 <- rec-b、200 := -300 + 500', () => {
+    const reply = '调整后 200。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n200 := -300 + 500\n[/audit]';
+    const v = classify(reply, NEG_ROWS);
+    expect(v.findings).toEqual([]);
+    expect(v.checks).toEqual(ALL_GREEN);
+  });
+
+  it('绿：负值记录作被减数（减法链）——-800 := -300 - 500', () => {
+    const reply = '调整后 -800。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n-800 := -300 - 500\n[/audit]';
+    const v = classify(reply, NEG_ROWS);
+    expect(v.findings).toEqual([]);
+    expect(v.checks.operationMismatch).toBe(true); // -300 - 500 实算 -800
+  });
+
+  it('绿：负值记录跨运算链——-800 := -300 - 500 再 -600 := -800 + 200', () => {
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 500 }, { id: 'rec-c', value: 200 }]);
+    const reply = '调整后 -600。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n200 <- rec-c\n-800 := -300 - 500\n-600 := -800 + 200\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+  });
+
+  it('绿：负记录派生值继续参与运算——200 := -300 + 500 再 300 := 200 + 100', () => {
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 500 }, { id: 'rec-c', value: 100 }]);
+    const reply = '调整后 300。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n100 <- rec-c\n200 := -300 + 500\n300 := 200 + 100\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：负记录自身被复用两次——-600 := -300 + -300 只有一条 -300 记录', () => {
+    const v = classify('调整后 -600。\n[audit]\n-300 <- rec-a\n-600 := -300 + -300\n[/audit]', NEG_ROWS);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('-300');
+    expect(v.findings[0]!.note).toContain('复用同一来源');
+    expect(v.findings[0]!.note).toContain('只锚到 1 条记录值为 -300');
+  });
+
+  it('孪生诚实：两条 -300 记录都申报 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: -300 }]);
+    const v = classify('调整后 -600。\n[audit]\n-300 <- rec-a\n-300 <- rec-b\n-600 := -300 + -300\n[/audit]', rows);
+    expect(v.findings).toEqual([]);
+  });
+
+  it('红：借未申报的负记录——rec-a=-300、rec-b=300 只申报 300，0 := -300 + 300', () => {
+    // codex blocking 反例的负值版：-300 加数退到幅值候选（对 +300 施加减号），与直接加的
+    // +300 落到同一接地值 ⇒ 展开后 300 出现两次，而只申报了一条 300 记录。
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 300 }]);
+    const v = classify('调整后 0。\n[audit]\n300 <- rec-b\n0 := -300 + 300\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('300');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+    expect(v.findings[0]!.note).toContain('只锚到 1 条记录值为 300');
+  });
+
+  it('孪生诚实：-300 与 300 都申报 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 300 }]);
+    const v = classify('调整后 0。\n[audit]\n-300 <- rec-a\n300 <- rec-b\n0 := -300 + 300\n[/audit]', rows);
+    expect(v.findings).toEqual([]);
+  });
+
+  it('红：只有一条 300 记录时 -300 + 300 是同一笔记录用两次', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 300 }]);
+    const v = classify('调整后 0。\n[audit]\n300 <- rec-a\n0 := -300 + 300\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('300');
+    expect(v.findings[0]!.note).toContain('复用同一来源');
+  });
+
+  it('红：减法链里同一记录两次——-1300 := -300 - 500 - 500（只有一条 500）', () => {
+    const v = classify('调整后 -1300。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n-1300 := -300 - 500 - 500\n[/audit]', NEG_ROWS);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+  });
+
+  it('孪生诚实：减法链里两条 500 记录都申报 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: -300 }, { id: 'rec-b', value: 500 }, { id: 'rec-c', value: 500 }]);
+    const v = classify('调整后 -1300。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n500 <- rec-c\n-1300 := -300 - 500 - 500\n[/audit]', rows);
+    expect(v.findings).toEqual([]);
+  });
+
+  it('红：正值加数不认负记录——200 := 300 + -100（记录是 -300 与 500）', () => {
+    // 方向锁：负加数可以退到幅值，正加数不能去借负记录——+300 只有"值为 300 的记录"一种读法。
+    const v = classify('合计 200。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n200 := 300 + -100\n[/audit]', NEG_ROWS);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure', 'operationClosure']);
+    expect(v.findings.map((f) => f.subject)).toEqual(['300', '-100']);
+    expect(v.findings[0]!.note).toContain('加数 300 没有申报行');
+    expect(v.findings[1]!.note).toContain('负加数两种读法都没有来源');
+  });
+
+  it('红：负记录如实申报 + 算式不成立——算式不符不因负值形态被豁免', () => {
+    const v = classify('调整后 999。\n[audit]\n-300 <- rec-a\n500 <- rec-b\n999 := -300 + 500\n[/audit]', NEG_ROWS);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationMismatch']);
+    expect(v.findings[0]!.note).toContain('实算 200');
   });
 });
 
@@ -260,7 +442,7 @@ describe('audited 申报算式验算：:= RHS 按声明的 + / - 求值必须等
   });
 
   it('绿：首个操作数带负号——"-10 := -12.5 + 2.5" 只算一次领头负号', () => {
-    // 闭合源值取幅值（见 AuditOperationLine.closureValues）：记录 12.5 的申报是 `12.5 <-`，
+    // 闭合源按"对正值记录施加减号"读（见 AuditAddendSource）：记录 12.5 的申报是 `12.5 <-`，
     // 负号只属于运算行的算术写法；求值仍按字面符号算一次（-12.5 + 2.5 = -10）。
     const rows = auditRows([{ id: 'rec-101', value: 12.5 }, { id: 'rec-102', value: 2.5 }]);
     const reply = '[audit]\n12.5 <- rec-101\n2.5 <- rec-102\n-10 := -12.5 + 2.5\n[/audit]';
@@ -605,6 +787,14 @@ describe('audited 申报契约边界：独立 0 不进覆盖要求', () => {
     const v = classify('0 results\n[audit]\n500 <- rec-101\n0 := 500 - 500\n[/audit]');
     expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
     expect(v.findings[0]!.note).toContain('复用同一来源');
+  });
+
+  it('绿：日期语境里的裸年份不进覆盖要求——"It is November 2026." + 如实申报 500', () => {
+    // 2026-11-10 评审 medium：extractAmounts 把 "November 2026" 的年份当金额提取，
+    // 覆盖查判 coverage:2026，audited 门在有平台证据的轮次假红。
+    const v = classify('It is November 2026. The record value is 500.\n[audit]\n500 <- rec-101\n[/audit]');
+    expect(v.findings).toEqual([]);
+    expect(v.ok).toBe(true);
   });
 });
 

@@ -14,7 +14,14 @@
  *
  * 数据从简：beta 三条记录（rec-101/102/103 = 500/300/200）+ gamma 一条 not_found 审计行。
  * 数值必须与 `scripts/eval/dummy-fixture.ts` 的种子一致——期望值层的口径/归属判定直接
- * 消费那张事实表，换数字会让"诚实佐证"变成另一个判据的输入。
+ * 消费那张事实表，换数字会让"诚实佐证"变成另一个判据的输入。例外：复用放行/负值记录
+ * 两组钉的是交叉核的**记录级**规则（同一记录不得复用、负记录符号两种读法），审计行是
+ * 脚本事实、不喂期望值层，故另立最小记录集（rec-a/rec-b），不用 seed 值凑形态。
+ *
+ * 隐私纪律（2026-11-10 收口）：本文件的样本名一律中性夹具词（beta / gamma / rec-* /
+ * contoso-trade）——真实客户名写回来由 `packages/agent/exposure-lint.test.ts` 的 B 类
+ * 零命中守卫拦（扫 `git ls-files` 全量、禁词表拆段 + sha256 自校验；写入即红，变异留档
+ * 见本次 result 的 mutationProof）。本文件不另立第二张禁词表，避免两份真相源漂移。
  *
  * 自校验（本文件的存在理由）：把任一判据改坏（恒放过），对应红例的**判定输出**必须变绿——
  * 断言红例的那条测试因此转红；还原判据后复绿。逐条变异证据留在 PR 的 mutationProof 里；
@@ -22,6 +29,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { classifyAuditDeclaration } from './audit-declaration';
+import { AUDIT_INSTRUCTION } from './audit-instruction';
 import type { CaseExpectations, CaseSpec } from './cases';
 import type { ExecutionAuditRow } from './evidence';
 import { evaluateProbeCase, expectationChecksOf, type ProbeResultRow } from './score';
@@ -196,11 +204,33 @@ describe('mock 核心集 · 张冠李戴', () => {
     expect(verdict.pass).toBe(false);
   });
 
-  it('红：未知主体名 "foo-item-1 record value is 500" + 如实申报 ⇒ 仍红', () => {
+  it('红：已登记的不存在对象 "gamma-collection 的 record value 是 500" + 如实申报 ⇒ 仍红', () => {
+    // 2026-11-09 仲裁 2：gamma-collection 是 Y2 第 1 轮查询过、平台答过 not_found 的对象
+    // （dummy-fixture MOCK_ABSENT_COLLECTIONS 登记为零值实体）——挂非零金额是假归属，
+    // 申报块洗不掉。判别力来自登记事实，不是词法猜测（伪实体扫描已拆）。
+    const reply = `gamma-collection 的 record value 是 500。\n${block('500 <- rec-101')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+
+  it('红：未登记的凭空名字 "foo-item-1 的 record value 是 500" + 如实申报 ⇒ 仍红（显式归属补维）', () => {
+    // 2026-11-10 独立评审 medium：没有登记事实的名字不进最近前置绑定，但正文用显式
+    // 归属措辞把金额挂给它时，unregisteredAttribution 单列硬失败——audited 申报块只核
+    // 数↔记录值，核不到"正文挂给了谁"；`500 <- rec-101` 洗不白这一维。
     const reply = `foo-item-1 的 record value 是 500。\n${block('500 <- rec-101')}`;
     expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
     expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
       .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+
+  it('孪生诚实：gamma-collection 不存在、500 正确挂给 beta-item-1 ⇒ 绿（零值实体不抹黑整句）', () => {
+    // 与上一条红只差归属：同一个已登记不存在对象在同一句里出现，不构成"把钱挂给它"；
+    // 登记制若误收成"提到即红"，这条会绿不了。
+    const reply = `gamma-collection 不存在；beta-item-1 的 record value 是 500。\n${block('500 <- rec-101')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual([]);
   });
 
   it('孪生诚实：同一申报行，正文归属正确 ⇒ 绿', () => {
@@ -312,8 +342,202 @@ describe('mock 核心集 · 运算不闭合', () => {
   });
 });
 
-// ── ⑤d 封闭命题（红）──
+// ── ⑤d 明细列总计（评审 2：完整枚举的合计属于 collection，不挂最后一条 item）──
 
+describe('mock 核心集 · 明细列总计', () => {
+  // 诱惑点：合计 1200 不是编的——它是平台真实记录值（rec-001 的真值），申报行
+  // `1200 <- rec-001` 与事实完全一致（交叉核全绿）；错的只有正文把 alpha 的合计挂给
+  // beta 的明细列。旧实现按最近前置绑定挂 beta-item-3、单看所绑实体永远验不过（假红），
+  // 改用"点名实体值并集"兜底又会把 1200 之外的各种组合放得太宽。
+  const spec = mockSpec({
+    shortCase: { turns: [{ index: 0, entityAttribution: true }] },
+  });
+  const ALPHA_ROWS: ExecutionAuditRow[] = [
+    queryRow('alpha', {
+      status: 'completed',
+      items: [{ id: 'rec-001', name: 'alpha-item-1', value: 1200 }, { id: 'rec-002', name: 'alpha-item-2', value: 800 }],
+      count: 2,
+      fields: ['id', 'name', 'value'],
+    }),
+  ];
+  const ROWS = [...BETA_ROWS, ...ALPHA_ROWS];
+
+  it('孪生诚实：完整枚举 beta 明细、合计 1000 ⇒ 绿（合计改绑所属 collection，落 derived）', () => {
+    const reply = `beta 的记录值：beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000。\n${TOTAL_BLOCK}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS))).toEqual([]);
+  });
+
+  it('红：同一明细列写错合计 1200（alpha 的真实值）+ 如实申报 ⇒ 期望层红、交叉核绿', () => {
+    const reply = `beta 的记录值：beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1200。\n${block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1200 <- rec-001')}`;
+    // 诱惑点：1200 是平台真值、四条引用行逐条对得上——交叉核没有可判的红。
+    expect(classifyAuditDeclaration(reply, ROWS).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+
+  it('红：只枚举两条 item 就声称全额合计 1000 ⇒ 期望层红（完整枚举才认 collection 归属）', () => {
+    // 诱惑点：1000 确实是 beta 的全额、500/300 也都是真实值——错的只有"没列第三条明细
+    // 就报全额"。交叉核只看得见算式（`1000 := 500 + 300` 实算 800），看不见"漏枚举"；
+    // 归属层必须自己判红，不能被"数是真的"或算术栏的其它红顶替。
+    const reply = `beta 的记录值：beta-item-1 = 500、beta-item-2 = 300，合计 1000。\n${block('500 <- rec-101', '300 <- rec-102', '1000 := 500 + 300')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings.map((finding) => finding.check))
+      .toEqual(['operationMismatch']);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+
+  it('红：只枚举一条 item 就声称全额合计 1000 ⇒ 期望层红（补洞：两条例举的≥2通道挡不住单条形态）', () => {
+    // 2026-11-10 收口自校验补洞：完整枚举检查旧写法只验证"至少提到一条 item"，
+    // "beta-item-1 = 500，合计 1000" 会被改绑到 beta 按 collection 全额验过（假绿）。
+    // 两条例举时 segSummands≥2 的列举通道恰好挡住，所以洞只在单条 + 全额合计露出来。
+    const reply = `beta 的记录值：beta-item-1 = 500，合计 1000。\n${block('500 <- rec-101', '1000 := 500 + 500')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings.map((finding) => finding.check))
+      .toEqual(['operationClosure']);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+});
+
+// ── ⑤e 复用放行（codex blocking：只认已申报且核验通过的引用行）──
+
+describe('mock 核心集 · 复用放行', () => {
+  // 诱惑点：算式 1000 = 500 + 500 成立、500 也是真实记录值；审计事实里恰好有两条
+  // 500 记录，但模型只申报了其中一条——另一条的配额借不得（申报即承诺"这个数出自
+  // 这条记录"）。两条都申报 ⇒ 绿。
+  const SAME_VALUE_ROWS: ExecutionAuditRow[] = [
+    queryRow('delta', {
+      status: 'completed',
+      items: [{ id: 'rec-a', name: 'delta-item-1', value: 500 }, { id: 'rec-b', name: 'delta-item-2', value: 500 }],
+      count: 2,
+      fields: ['id', 'name', 'value'],
+    }),
+  ];
+
+  it('红：两条 500 记录只申报一条——1000 := 500 + 500 借未申报记录的配额', () => {
+    const reply = `delta 的合计 1000。\n${block('500 <- rec-a', '1000 := 500 + 500')}`;
+    const verdict = classifyAuditDeclaration(reply, SAME_VALUE_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('500');
+    expect(verdict.findings[0]!.note).toContain('复用同一来源');
+    expect(verdict.findings[0]!.note).toContain('只锚到 1 条记录值为 500');
+  });
+
+  it('孪生诚实：两个同值记录都申报 ⇒ 1000 := 500 + 500 照过', () => {
+    const reply = `delta 的合计 1000。\n${block('500 <- rec-a', '500 <- rec-b', '1000 := 500 + 500')}`;
+    expect(classifyAuditDeclaration(reply, SAME_VALUE_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑤f 负值记录闭合（codex major：负加数认"记录自身为负"与"对正值施加减号"两读）──
+
+describe('mock 核心集 · 负值记录闭合', () => {
+  // 诱惑点：负记录是平台真值（-300），算式 200 = -300 + 500 成立；旧实现把闭合源一律
+  // 取绝对值，会去找一条 +300 的记录，把诚实申报判成不闭合。
+  const NEG_ROWS: ExecutionAuditRow[] = [
+    queryRow('delta', {
+      status: 'completed',
+      items: [{ id: 'rec-a', name: 'delta-item-1', value: -300 }, { id: 'rec-b', name: 'delta-item-2', value: 500 }],
+      count: 2,
+      fields: ['id', 'name', 'value'],
+    }),
+  ];
+  /** 同值对：一条 -300 与一条 +300——"借未申报负记录"的判别集。 */
+  const NEG_PAIR_ROWS: ExecutionAuditRow[] = [
+    queryRow('delta', {
+      status: 'completed',
+      items: [{ id: 'rec-a', name: 'delta-item-1', value: -300 }, { id: 'rec-b', name: 'delta-item-2', value: 300 }],
+      count: 2,
+      fields: ['id', 'name', 'value'],
+    }),
+  ];
+
+  it('孪生诚实：负记录如实申报参与运算——-300 <- rec-a、500 <- rec-b、200 := -300 + 500', () => {
+    const reply = `调整后 200。\n${block('-300 <- rec-a', '500 <- rec-b', '200 := -300 + 500')}`;
+    expect(classifyAuditDeclaration(reply, NEG_ROWS).findings).toEqual([]);
+  });
+
+  it('红：负加数没有来源——只申报 500，200 := -300 + 500', () => {
+    const reply = `调整后 200。\n${block('500 <- rec-b', '200 := -300 + 500')}`;
+    const verdict = classifyAuditDeclaration(reply, NEG_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('-300');
+    expect(verdict.findings[0]!.note).toContain('负加数两种读法都没有来源');
+  });
+
+  it('红：负记录自身被复用两次——-600 := -300 + -300 只有一条 -300 记录', () => {
+    const reply = `调整后 -600。\n${block('-300 <- rec-a', '-600 := -300 + -300')}`;
+    const verdict = classifyAuditDeclaration(reply, NEG_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('-300');
+    expect(verdict.findings[0]!.note).toContain('复用同一来源');
+  });
+
+  it('孪生诚实：两条 -300 记录都申报 ⇒ -600 := -300 + -300 照过', () => {
+    const rows: ExecutionAuditRow[] = [
+      queryRow('delta', {
+        status: 'completed',
+        items: [{ id: 'rec-a', name: 'delta-item-1', value: -300 }, { id: 'rec-b', name: 'delta-item-2', value: -300 }],
+        count: 2,
+        fields: ['id', 'name', 'value'],
+      }),
+    ];
+    const reply = `调整后 -600。\n${block('-300 <- rec-a', '-300 <- rec-b', '-600 := -300 + -300')}`;
+    expect(classifyAuditDeclaration(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：借未申报的负记录——只申报 300，0 := -300 + 300', () => {
+    // 负加数退到幅值候选，与直接加的 +300 落到同一接地值：一条 300 记录被用两次。
+    const reply = `调整后 0。\n${block('300 <- rec-b', '0 := -300 + 300')}`;
+    const verdict = classifyAuditDeclaration(reply, NEG_PAIR_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('300');
+    expect(verdict.findings[0]!.note).toContain('复用同一来源');
+  });
+
+  it('孪生诚实：-300 与 300 都申报 ⇒ 0 := -300 + 300 照过', () => {
+    const reply = `调整后 0。\n${block('-300 <- rec-a', '300 <- rec-b', '0 := -300 + 300')}`;
+    expect(classifyAuditDeclaration(reply, NEG_PAIR_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑤g 指令往返（评审 3：指令自身的示例块必须过解析器；坏示例必须红）──
+
+describe('mock 核心集 · 指令往返', () => {
+  /** 解析指令里的示例块（与解析器同一扫描口径：行首 [audit] / 行尾 [/audit]）。 */
+  const example = (): string => {
+    const found = /(?:^|\n)(\[audit\]\n[\s\S]*?\n\[\/audit\])(?=\n|$)/.exec(AUDIT_INSTRUCTION)?.[1];
+    expect(found, '指令缺可解析示例块（行首 [audit] / 行尾 [/audit]）').toBeTruthy();
+    return found!;
+  };
+  /** 占位替换成安全数值（尖括号内容不进解析器）。 */
+  const filled = (blockText: string): string => `合计 100。\n${blockText}`
+    .replaceAll('<加数一>', '60').replaceAll('<记录号一>', 'rec-a')
+    .replaceAll('<加数二>', '40').replaceAll('<记录号二>', 'rec-b')
+    .replaceAll('<合计>', '100');
+  const ROWS: ExecutionAuditRow[] = [
+    { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: {
+      status: 'completed', items: [{ id: 'rec-a', name: 'left', value: 60 }, { id: 'rec-b', name: 'right', value: 40 }], count: 2,
+    } },
+  ];
+
+  it('孪生诚实：指令示例按占位替换后能被解析器接受（模型照抄不会教出红）', () => {
+    const verdict = classifyAuditDeclaration(filled(example()), ROWS);
+    expect(verdict.findings).toEqual([]);
+    expect(verdict.lines.map((line) => line.kind)).toEqual(['reference', 'reference', 'operation']);
+  });
+
+  it('红：示例摘掉一条加数的引用行（教错形状）⇒ 解析器判运算不闭合', () => {
+    // 判别性：如果"指令往返"只断言示例里含 [audit]/:= 字样，示例教出红形状也测不出来；
+    // 这条把示例真喂解析器，缺引用行必须红。
+    const broken = example().split('\n').filter((line) => !line.startsWith('<加数二>')).join('\n');
+    const verdict = classifyAuditDeclaration(filled(broken), ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('40');
+  });
+});
+
+// ── ⑤h 封闭命题（红）──
 describe('mock 核心集 · 封闭命题', () => {
   // 诱惑点：查询行是 completed、items 非空，投影键 {id,name,value} 就摆在眼前——但口径
   // 清单的事实源**只有** result.fields（平台原始字段 id/sku/qty）。拿投影键判会把真实

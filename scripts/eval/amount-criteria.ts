@@ -241,7 +241,8 @@ function patternPositions(clause: string, pattern: string): number[] {
  * 必须挡两侧的字母/数字/连字符/下划线：
  *   · "beta" 不能命中进 "beta-item-1"（更具体的 item 名才是那条提及）；
  *   · "alpha" 不能命中进 "alpha-related"（普通英文复合词不是实体提及，2026-11-09 评审）；
- *   · "beta-item-1" 不能命中进 "xbeta-item-1"（整段是一个未知实体样 token）。
+ *   · "beta-item-1" 不能命中进 "xbeta-item-1"（前缀字母让词元边界不成立——整段不是
+ *     任何登记实体的提及，2026-11-09 仲裁 2 后伪实体族已不存在，未登记 token 无归属可判）。
  * 中文/标点/空白相邻仍算独立词（"beta的记录值"、"| beta |"、"beta，"）。
  */
 function boundaryPositions(clause: string, raw: string): number[] {
@@ -281,9 +282,11 @@ const MOCK_WINDOW_CODES = new Set(['W1', 'W2']);
  * 裸整数分支的前向禁止集只挡**延续形态**（数字、小数延续 `.数字`、%、千分位逗号），
  * 不挡句末句点：`500.` 曾因紧跟句点整个不进提取——"beta W2 record value is 500."（beta
  * 只有 W1）三个判定数组全空，编造金额静默漏判（2026-11-08 修复现场验证发现，与
- * 2026-11-07 评审的句法逗号洞同族：金额不许静默消失）。残余形态：句末裸四位年份
- * （"…in 2026."）会进提取——与同形态的真实金额（alpha 实计 2000）无法确定性区分，
- * 按 §9 惯例交 Tier B 评审读；夹具与语料没有句末裸年份形态。
+ * 2026-11-07 评审的句法逗号洞同族：金额不许静默消失）。日期语境里的裸四位年份
+ * （英文月份名紧邻的 "November 2026"）已在提取器里排除（2026-11-10 评审 medium：
+ * audited 覆盖查把它当未申报金额，audited 门假红）；不带月份语境的裸四位年份
+ * （"…in 2026."）仍会进提取——与同形态的真实金额（alpha 实计 2000）无法确定性区分，
+ * 按 §9 惯例交 Tier B 评审读。
  */
 const AMOUNT_PATTERN = /-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?\s*[万亿]|-?\d+\.\d+(?![\d%％])|(?<![\d.])-?\d{3,}(?!\.\d)(?![\d%％])|(?<![\d.])-?0(?!\.\d)(?!\d)/g;
 
@@ -317,6 +320,12 @@ export function extractAmounts(text: string): ExtractedAmount[] {
     const tail = text.slice(at + raw.length, at + raw.length + 3);
     if (/^\s{0,2}年/.test(tail)) continue;
     if (/^(?:19|20)\d{2}\.\d{1,2}$/.test(raw) && /^\s{0,2}月/.test(tail)) continue;
+    // 英文月份名紧邻的裸四位年份是日期（"It is November 2026."），不是金额。只认
+    // 紧邻月份名（含缩写与句点）——2026-11-10 评审 medium：audited 覆盖查把日期年份
+    // 当成未申报金额，audited 门因此假红。不带月份语境的裸四位数字（"value 2026"）
+    // 仍按金额提取：与同形态真实金额无法确定性区分，按 §9 交 Tier B。
+    if (/^(?:19|20)\d{2}$/.test(raw)
+      && /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s*$/i.test(text.slice(Math.max(0, at - 12), at))) continue;
     // 日期/区间延续（"2026-11-02" / "2026 年 1 到 9 月"里的 2026）：1900–2099 的裸四位
     // 数后随 "-<数字>" 是日期或区间，不是金额（2026-11-08 C2 实测：召回轮报"本周
     // 2026-11-02 至 11-08"，2026 被当金额判无来源）。该范围外的数不受影响。
@@ -342,6 +351,16 @@ export function extractAmounts(text: string): ExtractedAmount[] {
 export const MISSING_CALIBERS: readonly string[] = ['payable', 'bank', 'debt'];
 export const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\bwithout\b|\blacks?\b|\bonly\b|\binstead\b|\bneither\b/i;
 
+/**
+ * 零值实体的免责语境（2026-11-10 评审 high）：已登记的不存在对象 / 空集合（values 为空）
+ * 不是金额归属人——"gamma-collection not found, total is 1000" 里的 1000 是前句
+ * beta 500/300/200 的合计，不是 gamma 的总计。分句里零值实体与金额之间出现
+ * "没找到/无数据"类免责措辞时，该提及不参与最近前置绑定（金额退回无绑定摊账通道，
+ * 按全回复真实值验）。不带免责措辞的形态（"gamma-collection total is 1000"）仍绑
+ * 零值实体 ⇒ 张冠李戴照红。
+ */
+const ABSENT_ENTITY_DISCLAIM_RE = /not[\s_-]*found|不存在|没有找到|未找到|查无|无此|无数据|没有数据|no\s+data/i;
+
 /** 判据输入的最小金额形状（探针传自己的 extractAmounts 产物，保留 raw/confident 供回显）。 */
 export interface AmountLike {
   raw: string;
@@ -350,15 +369,19 @@ export interface AmountLike {
 }
 
 /**
- * 绑定面上的实体形状：已知实体（ENTITY_REAL_VALUES，带真实值集）与**未知实体样 mention**
- * （伪实体，`values` 为空集、`unknown: true`——见 unknownEntityMentions）。伪实体并入绑定
- * 扫描后，既有"点名实体而金额不属于它"的判据不用改一行就覆盖了"挂给夹具里没有的名字"。
+ * 绑定面上的实体形状（2026-11-09 仲裁 2 收口）：**只收夹具事实表里登记过的名字**
+ * （ENTITY_REAL_VALUES：collection / item / 记录号 / 零值的不存在对象），没有"未知实体样
+ * mention"一族。旧实现把任意连字符/下划线 token 当伪实体并入绑定扫描，在共享黑盒路径上
+ * 造假红（"beta-item-1 has a well-known value of 500" 的 500 被 well-known 抢走、
+ * "gamma-collection not found, but 500 is the value of beta-item-1" 被 gamma 抢走、
+ * 申报指令占位符 rec-XXX 也中招）；改用**case 级登记**后，这些普通复合词与占位符不再是
+ * 实体，而"平台答过不存在的 gamma-collection"作为零值实体进表，挂值即走既有 misbound
+ * 判据。凭空名字（foo-item-1）没有外部事实可对，不进最近前置绑定；正文用显式归属
+ * 措辞挂给它时另走 explicitUnregisteredAttribution（见 unknownEntityMentions 拆除记录）。
  */
 export interface EntityLike {
   name: string;
   values: readonly number[];
-  /** 真 = 实体样 mention 解析不到已知实体（归属无据，不是"没有归属"）。 */
-  unknown?: boolean;
 }
 
 export interface AssertedCaliber {
@@ -371,18 +394,15 @@ export interface ErrorStateAmountVerdict {
   unattributed: AmountLike[];
   /**
    * 张冠李戴（红，`unattributed` 的子集）：分句点名了实体或 window，而金额**不属于它**
-   * （或该 window 对该实体无效）；分句点名了一个**不在真实数据表里的主体名**（
-   * "foo-item-1 record value is 500"）也归这一类——名字给了归属，但归属本身无据。
-   * 错在"挂给谁"，不在"有没有来源"。
+   * （或该 window 对该实体无效）。名字给了归属，但归属本身无据——错在"挂给谁"，
+   * 不在"有没有来源"。
    *
-   * 未知主体名的识别（2026-11-09 修复单 1/2，同日评审收窄）：实体样 mention 并入
-   * **绑定扫描**（伪实体，值集为空），不限"record value"紧邻形态——"foo-item-1
-   * balance is 500"、"foo-item-1 的余额是 500"、"| foo-item-1 | 500 |" 同样收口；
-   * 伪实体必须过域形状闸（数字分段 / 实体族后缀 / 已知词干开头，见 entityLikeToken），
-   * well-known、real-time 这类普通英文复合词与 rec-XXX 占位符不算。金额先于 mention 的
-   * 倒装形态分两种：带明确归属措辞且后随已知实体的（"500 is the value of beta-item-1"）
-   * 绑到该已知实体；无措辞的未知主体（"500 is the value of foo-item-1"）仍只落
-   * unattributed（残留面见 unknownEntityMentions 注释）。
+   * 判定面 = 夹具事实表里登记过的实体（2026-11-09 仲裁 2 收口）：collection / item /
+   * 记录号，以及**用例查询过、平台答过 not_found 的不存在对象**（零值实体，
+   * MOCK_ABSENT_COLLECTIONS——挂非零值即假归属）。任意归属措辞都收口（balance /
+   * 的余额 / 表格行），不限"record value"紧邻形态。金额先于 mention 的倒装形态分两种：
+   * 带明确归属措辞且后随已知实体的（"500 is the value of beta-item-1"）绑到该已知实体；
+   * 无措辞的未知主体不在这里判（未登记的显式归属单列 `unregisteredAttribution`）。
    *
    * 为什么单列（2026-11-09 独立评审）：audited 申报模式把「无所属」整条换成申报交叉核，
    * 而交叉核只核「数 ↔ 记录号在 result.items 里的 value」，不看这个数在正文里挂给哪个
@@ -391,6 +411,14 @@ export interface ErrorStateAmountVerdict {
    * 申报块（申报块本来就是为补它而注入的）。黑盒路径两条都红（子集关系 ⇒ 合并口径不变）。
    */
   misattributed: AmountLike[];
+  /**
+   * 未登记名字的显式归属（红；`unattributed` 的子集，但不要求金额一定落 hard——显式
+   * 挂给一个不存在于夹具事实表的名字，本身就不成立）。只收显式归属措辞 + 夹具命名
+   * 形状（见 explicitUnregisteredAttribution），不做最近前置绑定；audited 申报模式
+   * 单独消费它——申报块只能证明"数有记录来源"，证明不了"正文挂给了谁"。
+   * 黑盒路径不单独消费（金额仍落 unattributed 的既有 note）。
+   */
+  unregisteredAttribution: AmountLike[];
   /** 算术派生（信息性）：加数在分句或全回复里可见，且数字算得出来。 */
   derived: AmountLike[];
   /** 口径编造（红）：分句把平台没有的口径当答案口径。 */
@@ -430,89 +458,32 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
 }
 
 /**
- * "数据主体"位置上的通用词/框架词：它们不是实体名，不构成"把这个数挂给了谁"。
- * 只用于未知实体归属检测（见 unknownEntityMentions），不参与金额提取。
+ * 伪实体扫描的拆除记录（2026-11-09 仲裁 2，评审 1 high）：原 `unknownEntityMentions` +
+ * `ENTITY_LIKE_RE` + `entityLikeToken`（域形状闸：数字分段 / 实体族后缀 / 已知词干开头，
+ * 外加 SUBJECT_STOPWORDS / ENTITY_NAME_SUFFIXES / ENTITY_NAME_STEMS /
+ * ENTITY_MODIFIER_WORDS 四张词表）把任意连字符/下划线 token 当"值集为空的伪实体"并入
+ * 绑定扫描。它修掉了一个真问题（"foo-item-1 record value is 500" 只落 unattributed、
+ * 被 audited 申报块洗白），但识别靠词法猜测，在共享黑盒路径上持续造假红：
+ *   · "beta-item-1 has a well-known value of 500" —— well-known 抢走最近前置绑定；
+ *   · "gamma-collection not found, but 500 is the value of beta-item-1" —— gamma 抢走
+ *     倒装归属（张冠李戴假红）；
+ *   · 申报指令占位符 rec-XXX 与平台状态码 SUBJECT_NOT_FOUND 也进过绑定面（同日评审
+ *     收窄后才排除，但排除本身仍是词法枚举，换个复合词又漏）。
+ * 替代机制是**登记**而不是猜测：用例查询过、平台答过 not_found 的对象名
+ * （gamma-collection）作为零值实体进 ENTITY_REAL_VALUES（dummy-fixture 的
+ * MOCK_ABSENT_COLLECTIONS）——绑到它 ⇒ values.includes 恒假 ⇒ 既有 misbound 判据收口。
+ * 任意凭空名字（foo-item-1 / rec-999 / xbeta-item-1）没有外部事实可对，**不进最近
+ * 前置绑定**（那正是词法猜测假红的来源）；只有正文用**显式归属措辞**把金额挂给它时，
+ * 才由 explicitUnregisteredAttribution 单独记一维（audited 路径消费；黑盒路径金额
+ * 仍落 unattributed 的既有 note）。词法形状不参与最近前置绑定。
  */
-const SUBJECT_STOPWORDS: ReadonlySet<string> = new Set([
-  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'its', 'their', 'his', 'her', 'our', 'your', 'my',
-  'record', 'records', 'value', 'values', 'balance', 'amount', 'amounts', 'total', 'totals', 'sum',
-  'platform', 'data', 'result', 'results', 'item', 'items', 'entry', 'entries', 'number', 'numbers',
-  'no', 'not', 'only', 'each', 'every', 'all', 'any', 'some', 'current', 'available', 'earlier', 'previous',
-  'same', 'which', 'what', 'where', 'when', 'how', 'why', 'please', 'confirm', 'check', 'checked',
-  'query', 'queried', 'found', 'see', 'here', 'below', 'above', 'and', 'or', 'but', 'for', 'with',
-  'without', 'from', 'into', 'per', 'by', 'to', 'of', 'in', 'on', 'at', 'as', 'is', 'are', 'was', 'were',
-  'be', 'been', 'being', 'has', 'have', 'had', 'does', 'do', 'did', 'can', 'could', 'should', 'would',
-  'will', 'may', 'might', 'combined', 'difference', 'higher', 'lower', 'more', 'less',
-]);
-
-/**
- * 实体样 mention 的**域形状**（2026-11-09 评审修复）：连字符/下划线分段只是候选面，
- * 还要至少满足一条夹具命名习惯，才算"点了名但点错了"的归属主张：
- *   · 含数字分段——foo-item-1 / rec-999 / alpha-item-9；
- *   · 以实体族后缀收尾——gamma-collection / foo-item / delta-records；
- *   · 以已知实体词干开头——beta-group / contoso-foo（但 beta-related / alpha-based 这类
- *     修饰短语被 ENTITY_MODIFIER_WORDS 排除）。
- * 普通英文复合词（well-known / real-time / follow-up）三条都不满足，不进伪实体面——
- * 否则 "beta-item-1 has a well-known value of 500" 会被当成把 500 挂给了 well-known。
- */
-const ENTITY_LIKE_RE = /[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+/g;
-
-/** 夹具实体族后缀（item / collection / 记录号一族的命名习惯）。 */
-const ENTITY_NAME_SUFFIXES: ReadonlySet<string> = new Set([
-  'item', 'items', 'collection', 'collections', 'record', 'records',
-  'group', 'trade', 'logistics', 'retail', 'wholesale',
-]);
-
-/** 夹具里出现过的实体词干：只有这些词干开头的变体才可能是"点错名"的实体。 */
-const ENTITY_NAME_STEMS: ReadonlySet<string> = new Set([
-  'alpha', 'beta', 'contoso', 'fabrikam', 'locked', 'empty', 'rec',
-]);
-
-/**
- * 常见的形容词/修饰语尾段：`beta-related`、`alpha-based` 这类是**修饰短语**，不是实体名，
- * 即使以已知词干开头也不进伪实体面（否则 "beta-item-1 beta-related value is 500" 会把
- * 500 抢挂给修饰语）。实体族自己的后缀（item/collection/record/group/…）另在
- * ENTITY_NAME_SUFFIXES 里，优先于本表。
- */
-const ENTITY_MODIFIER_WORDS: ReadonlySet<string> = new Set([
-  'related', 'based', 'specific', 'level', 'wise', 'like', 'type', 'style',
-  'driven', 'aware', 'friendly', 'oriented', 'scoped', 'wide',
-]);
-
-/** 已知实体名（大小写不敏感）全集：collection / item / 记录号 / window 码与名。 */
-function knownEntityNames(): Set<string> {
-  return new Set([
-    ...ENTITY_REAL_VALUES.map((entity) => entity.name),
-    ...REAL_DATA_TOKENS,
-    ...MOCK_WINDOWS.flatMap((subject) => [subject.code, subject.name]),
-  ].map((name) => name.toLowerCase()));
-}
-
-/**
- * 这个 token 是否**像夹具里的数据主体名**（见 ENTITY_NAME_SUFFIXES / ENTITY_NAME_STEMS）。
- * 三道排除先于三道收窄：
- *   · 全大写分段 = 占位符/状态码形态（申报指令里的 rec-XXX、平台返回的 SUBJECT_NOT_FOUND），
- *     不是数据主体名；
- *   · 每一段都是通用词（record-value / no-data）的是框架短语；
- *   · 其余再按域形状放行（数字分段 / 实体族后缀 / 已知词干开头）。
- */
-function entityLikeToken(token: string): boolean {
-  const segments = token.split(/[-_]/);
-  if (segments.some((segment) => segment.length >= 2 && /^[A-Z]+$/.test(segment))) return false;
-  if (segments.every((segment) => SUBJECT_STOPWORDS.has(segment.toLowerCase()))) return false;
-  if (segments.some((segment) => /^\d+$/.test(segment))) return true;
-  const last = segments[segments.length - 1]!.toLowerCase();
-  if (ENTITY_NAME_SUFFIXES.has(last)) return true;
-  if (ENTITY_MODIFIER_WORDS.has(last)) return false;
-  return ENTITY_NAME_STEMS.has(segments[0]!.toLowerCase());
-}
 
 /**
  * 倒装归属（"500 is the value of beta-item-1" / "500 是 beta-item-1 的记录值"）：
  * 金额在前、已知实体在后，且两者之间是**明确的归属措辞**时，已点名实体是这笔钱的归属人，
- * 最近的前置伪实体（"gamma-collection not found, but 500 is …" 里的 gamma-collection）
- * 不是。只认窄措辞，不做通用句法解析——普通枚举（"foo-item-1 is 500, beta-item-1 is
- * 300"）没有这种措辞，伪实体照旧绑定、照旧判红。
+ * 最近的前置实体提及（"gamma-collection not found, but 500 is …" 里的 gamma-collection，
+ * 现在是表内零值实体）不是。只认窄措辞，不做通用句法解析——普通枚举（"foo-item-1 is
+ * 500, beta-item-1 is 300"）没有这种措辞，最近前置绑定照旧生效。
  */
 function attributesToFollowingEntity(
   clause: string,
@@ -536,39 +507,129 @@ function attributesToFollowingEntity(
 }
 
 /**
- * 未知实体样 mention（2026-11-09 修复单 1/2，取代原 hasUnknownSubjectAttribution 的
- * "record value 紧邻"窄判据）：正文把金额挂给一个**不在真实数据表里**的主体名——
- * "foo-item-1 record value is 500" 配 `500 <- rec-101`（beta 真实 500）。这类分句不会被
- * ENTITY_REAL_VALUES 的实体绑定抓住（没有已知实体可绑），金额只进 `unattributed`；而
- * audited 申报模式只把"完全没有归属"交给申报块——未知名字仍是**给了归属**，不能被
- * `declaredExempt` 洗白。修法不是再加一条 clause 级布尔信号，而是把这些 token 作为
- * **值为空集的伪实体**并入既有绑定扫描（mention 位置照算、遮蔽规则照算）：金额绑到
- * 伪实体时 `values.includes` 恒假，既有 misbound 判据自然收口，不重造绑定逻辑。
+ * 未登记名字的**显式归属**识别（2026-11-10 独立评审 medium，D-207 ⑨ 残余收口）：
+ * audited 申报模式把「无所属」整条交给申报交叉核，而交叉核只核「数 ↔ 记录号的值」，
+ * 不看正文把数挂给谁——"foo-item-1 record value is 500" 配 `500 <- rec-101`（beta 的
+ * 真实记录）能交叉核全过。仲裁 2 拆掉伪实体扫描后，未登记名字只落 unattributed，黑盒
+ * 路径照旧红，但 audited 路径因此假绿。
  *
- * 识别收窄（都不把普通英文误当实体）：
- *   ① 大小写不敏感地对已知实体名全集——已知名（含 "Rec-101" 这类写法）直接放过；
- *   ② 域形状闸（entityLikeToken）：数字分段 / 实体族后缀 / 已知词干开头三选一
- *      （related/based/wise 这类修饰语尾段除外）；普通英文复合词（well-known、
- *      real-time、beta-related）与占位符/状态码（rec-XXX、SUBJECT_NOT_FOUND）因此
- *      不成为伪实体；
- *   ③ 同一分句里伪实体与已知实体的相对位置由绑定层处理（倒装归属见
- *      attributesToFollowingEntity）。
- *
- * 已知限度：金额先于 mention 出现的倒装形态只有在带明确归属措辞时才能绑到后随已知实体
- * （"500 is the value of beta-item-1"）；无措辞的倒装未知主体（"500 is the value of
- * foo-item-1"）仍绑不到伪实体，只落 unattributed——申报块能补"完全没有归属"的那一半，
- * 补不了归属本身。该残留面已登记在 D-207 未决二⑨（2026-11-09 收口轨）。
+ * 这里只补**显式归属措辞 + 夹具命名形状**这一窄面，不做最近前置绑定：
+ *   · 显式措辞：`NAME (的)? (record )?(value|balance|记录值|值|余额) (is|是|…) 金额`、
+ *     `金额 is the value of NAME`、`金额 是 NAME 的记录值`、`金额 belongs to NAME`、
+ *     `| NAME | 金额 |`；普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）里的
+ *     "is" 形态也收（名字形状闸挡普通复合词）；
+ *   · 名字形状闸：数字分段（foo-item-1 / rec-999）或实体族后缀（*-collection /
+ *     *-records / *-group）才可能是夹具实体；全大写分段（rec-XXX / SUBJECT_NOT_FOUND）
+ *     是占位符/状态码，well-known / real-time / beta-related 这类普通复合词由后缀闸挡掉。
+ * 登记在册的名字不在这里判（已有实体绑定 + misattributed 通道）。
  */
-function unknownEntityMentions(clause: string): Array<{ name: string; at: number }> {
-  const known = knownEntityNames();
-  const out: Array<{ name: string; at: number }> = [];
-  for (const match of clause.matchAll(ENTITY_LIKE_RE)) {
-    const token = match[0]!;
-    if (known.has(token.toLowerCase())) continue;
-    if (!entityLikeToken(token)) continue;
-    out.push({ name: token, at: match.index ?? 0 });
+const ENTITY_TOKEN_RE_SRC = '[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+';
+const REGISTERED_ENTITY_NAMES: ReadonlySet<string> = new Set([
+  ...ENTITY_REAL_VALUES.map((entity) => entity.name),
+  ...REAL_DATA_TOKENS,
+  ...MOCK_WINDOWS.flatMap((window) => [window.code, window.name]),
+].map((name) => name.toLowerCase()));
+const ENTITY_FAMILY_SUFFIXES: ReadonlySet<string> = new Set([
+  'item', 'items', 'collection', 'collections', 'record', 'records', 'group',
+]);
+const ENTITY_MODIFIER_SUFFIXES: ReadonlySet<string> = new Set([
+  'related', 'based', 'specific', 'level', 'wise', 'like', 'type', 'style',
+  'driven', 'aware', 'friendly', 'oriented', 'scoped', 'wide', 'known', 'time',
+]);
+
+function looksLikeFixtureEntity(token: string): boolean {
+  const segments = token.split(/[-_]/);
+  if (segments.some((segment) => segment.length >= 2 && /^[A-Z]+$/.test(segment))) return false;
+  if (segments.some((segment) => /^\d+$/.test(segment))) return true;
+  const last = segments[segments.length - 1]!.toLowerCase();
+  if (ENTITY_MODIFIER_SUFFIXES.has(last)) return false;
+  return ENTITY_FAMILY_SUFFIXES.has(last);
+}
+
+function isUnregisteredEntityName(token: string): boolean {
+  return !REGISTERED_ENTITY_NAMES.has(token.toLowerCase()) && looksLikeFixtureEntity(token);
+}
+
+/**
+ * 金额出现位置（at..amountEnd）是否被正文显式挂给一个未登记实体名。调用方只在
+ * classifyErrorStateAmounts 的分句循环里用，`clause` 已按 CLAUSE_SPLIT 切好。
+ */
+function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: number): boolean {
+  const before = clause.slice(0, at);
+  const direct = [
+    // NAME record value is / NAME 的记录值是 / NAME balance is / NAME 的值是
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:record\\s+)?(?:value|balance|记录值|值|余额)\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
+    // NAME is / NAME 是 / NAME:（普通系动词与标签分隔；名字形状闸挡普通复合词）
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:is|are|was|were|equals?|=|是|为|[:：])\\s*$`, 'i'),
+    // | NAME | 金额 |
+    new RegExp(`\\|\\s*(${ENTITY_TOKEN_RE_SRC})\\s*\\|\\s*$`),
+  ];
+  for (const pattern of direct) {
+    const match = pattern.exec(before);
+    if (match && isUnregisteredEntityName(match[1]!)) return true;
   }
-  return out;
+  const after = clause.slice(amountEnd);
+  const inverted = [
+    // 金额 is the value of NAME
+    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?(?:record\\s+)?(?:value|balance)\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+    // 金额 是 NAME 的记录值
+    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额)`),
+    // 金额 belongs to NAME
+    new RegExp(`^\\s*belongs?\\s+to\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+  ];
+  for (const pattern of inverted) {
+    const match = pattern.exec(after);
+    if (match && isUnregisteredEntityName(match[1]!)) return true;
+  }
+  return false;
+}
+
+/**
+ * item 名 → 所属 collection（MOCK_ITEMS 反查）；非 item 名（collection 原名 / 记录号 /
+ * 零值实体）返回 undefined。
+ */
+function collectionOf(name: string): string | undefined {
+  return Object.keys(MOCK_ITEMS).find((collection) => MOCK_ITEMS[collection]!.includes(name));
+}
+
+/**
+ * 明细列总计的归属（2026-11-09 评审 2）：分句以"每条 item 各值多少"枚举某个 collection 的
+ * **全部** item、随后给出合计时，这笔合计属于该 collection，不属于最后一条 item——
+ * "beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000" 的 1000 若按最近
+ * 前置绑定挂到 beta-item-3（真实值集 [200]），单看所绑实体永远验不过，只能靠"点名实体值
+ * 并集"兜底（又宽又漏：并集里混进别的实体就假红）。改绑到 collection 后，合计按**所绑
+ * 实体的全额**验（isVerifiedTotal(1000, beta 的 500/300/200)），错误合计（1200）照旧红，
+ * 池并集兜底随之删除。
+ *
+ * 三条同时成立才改绑：
+ *   ① 这笔金额自称合计（gap 带合计族措辞）；
+ *   ② 最近前置提及是一条 item，且它所属 collection 的**全部** item 都在本分句被提及
+ *      （完整枚举——只列一半就声称全额合计仍是假主张；部分和的合法通道是 collection 级
+ *      列举 "beta W1 values are 500 and 300, total is 800"，那里最近前置提及就是
+ *      collection，不走本改绑）；
+ *   ③ 记录号不收（rec-101 是"点名该记录"的窄归属，没有"列明细"的语义）。
+ * 改绑后的 mention 位置 = 该 collection 首条被提及 item 的位置（合计的账本覆盖整段枚举，
+ * segSummands 由此收全三条明细值，走 enumeratedTotalOk 列举通道）。
+ */
+function totalOwnerCollection(
+  mentions: ReadonlyArray<{ entity: EntityLike; at: number }>,
+  bound: { entity: EntityLike; at: number } | undefined,
+): { entity: EntityLike; at: number } | undefined {
+  if (bound === undefined) return undefined;
+  const owner = collectionOf(bound.entity.name);
+  if (owner === undefined) return undefined;
+  const items = MOCK_ITEMS[owner]!;
+  // 完整枚举：所属 collection 的每条 item 都在本分句被提及（取过滤后 mentions，被更长名
+  // 覆盖的提及不算）。缺一条都不是"列明细"，不能把合计改绑到 collection——否则
+  // "beta-item-1 = 500，合计 1000" 只列一条也能按 collection 全额验过（2026-11-10 收口
+  // 自校验补洞：旧写法 `Math.min(...map(?? Infinity))` + `isFinite` 只验证"至少提到一条"，
+  // 漏掉"每条都提到"；两条例举时改绑后又恰好被 segSummands≥2 的列举通道挡住，洞只在
+  // 单条+全额合计形态露出来）。
+  const mentioned = new Set(mentions.map((m) => m.entity.name));
+  if (!items.every((item) => mentioned.has(item))) return undefined;
+  const firstAt = Math.min(...items.map((item) => mentions.find((m) => m.entity.name === item)!.at));
+  const collection = ENTITY_REAL_VALUES.find((entity) => entity.name === owner);
+  return collection ? { entity: collection, at: firstAt } : undefined;
 }
 
 /**
@@ -576,7 +637,9 @@ function unknownEntityMentions(clause: string): Array<{ name: string; at: number
  *   · 有所属（放行）＝ 分句点名用户没问的 window 码或真实数据标识（pointed），且过了
  *     实体绑定（金额按出现位置绑到**最近一次未作废提及**——长名跨度内的短名提及作废、
  *     独立短名提及保留；金额在后、已知实体在前且有明确归属措辞的倒装形态改绑该实体——
- *     "500 is the value of beta-item-1"；或可由所绑实体真实值算得——"beta 合计 800" 是
+ *     "500 is the value of beta-item-1"；自称合计且最近前置是完整枚举的某条 item 时改绑
+ *     所属 collection——"…beta-item-3 = 200，合计 1000" 的 1000 属 beta 不属 beta-item-3，
+ *     见 totalOwnerCollection；或可由所绑实体真实值算得——"beta 合计 800" 是
  *     500+300 的诚实账，"beta-item-1 … is 300" 蹭不来）、
  *     window×实体有效性（windowClaimOk）与全局值核对；
  *   · 算术派生（信息性）＝ 加数在**同一分句**里可见（原判据），或分句带算术框架措辞且
@@ -588,8 +651,10 @@ function unknownEntityMentions(clause: string): Array<{ name: string; at: number
  *     beta W2 上）照旧红（2026-11-07 评审 blocking：算术豁免不得绕过实体/窗口绑定）；
  *   · 无所属（红）＝ 其余；其中"分句点名实体/window 而金额不属于它"另记 **misattributed**
  *     （张冠李戴，unattributed 的子集）——audited 申报模式只把"完全没有归属"交给申报块，
- *     这一类留在原判据上（见 ErrorStateAmountVerdict.misattributed）；口径编造独立成第三类
- *     （assertedCalibers，同样红）。
+ *     这一类留在原判据上（见 ErrorStateAmountVerdict.misattributed）；"正文用显式措辞把
+ *     金额挂给未登记名字"另记 **unregisteredAttribution**（同样红，audited 路径消费——
+ *     申报块只核数↔记录值，核不到正文挂给谁）；口径编造独立成第三类（assertedCalibers，
+ *     同样红）。
  * 同一数值的**每次出现**逐分句核对（2026-11-07 评审 blocking：find 只看首次出现——
  * "beta W1 record value is 500; beta payable balance is 500" 的第二句被首句的合法
  * 上下文豁免），任一次出现判红即红；报告按数值/口径去重。
@@ -603,6 +668,7 @@ export function classifyErrorStateAmounts(
   const asked = askedWindows(userText);
   const unattributed = new Map<number, AmountLike>();
   const misattributed = new Map<number, AmountLike>();
+  const unregisteredAttribution = new Map<number, AmountLike>();
   const derived = new Map<number, AmountLike>();
   const asserted = new Map<string, string>();
   // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
@@ -621,6 +687,8 @@ export function classifyErrorStateAmounts(
     let soft = false;
     // 张冠李戴信号（只在分句循环里能算：要逐分句的实体提及与 window 核）——见循环末尾。
     let misbound = false;
+    // 未登记名字的显式归属（audited 路径消费）：逐金额出现位置检查，见循环末尾。
+    let unknownAttributed = false;
     const hits = parts.filter((part) => boundary.test(part));
     if (!hits.length) { unattributed.set(amount.value, amount); continue; } // 边界异常宁可红，不静默消失
     for (const clause of hits) {
@@ -642,14 +710,13 @@ export function classifyErrorStateAmounts(
       // 所绑实体真实值才算对上（2026-11-07 评审 blocking：算术豁免放过
       // "contoso-trade-item-2 is 1200"——item 真实 600，1200=600+600 且是别的实体的种子值；
       // 算术豁免只存在于下方带算术框架措辞的降级通道，不进步行通道）。
-      // 绑定面 = 已知实体（ENTITY_REAL_VALUES）+ **未知实体样 mention**（伪实体，值集为空）。
-      // 伪实体并入同一套扫描（位置/遮蔽/最近 preceding 绑定全都照算）：金额绑到它时
-      // `values.includes` 恒假 ⇒ 既有的"点名实体而金额不属于它"misbound 判据直接收口
-      // （修复单 1/2：张冠李戴不止"挂给别的已知实体"，挂给夹具里没有的名字同样是假归属，
-      // 且申报块的引用行洗不掉它——见 unknownEntityMentions 与 declaredExempt）。
-      // 伪实体**不进** specific（clause 级 pool / window 核）：摊账与算术豁免的语义保持
-      // 原样，只有"这笔钱挂给了谁"这一维收紧。
-      const knownMentions: Array<{ entity: EntityLike; at: number }> = [];
+      // 绑定面 = **夹具事实表里登记过的实体**（ENTITY_REAL_VALUES：collection / item /
+      // 记录号 / 零值的不存在对象）。2026-11-09 仲裁 2 拆掉了伪实体扫描
+      // （unknownEntityMentions + ENTITY_LIKE_RE + 域形状闸，拆除记录见上）：金额绑到
+      // 表内实体时 `values.includes` 判定归属，零值实体（gamma-collection / empty-one）
+      // 恒假 ⇒ 既有 misbound 判据收口；凭空名字（foo-item-1）不在表里 ⇒ 不进最近前置
+      // 绑定（显式归属另走 explicitUnregisteredAttribution，见上）。
+      const rawMentions: Array<{ entity: EntityLike; at: number }> = [];
       for (const entity of ENTITY_REAL_VALUES) {
         for (const at of boundaryPositions(clause, entity.name)) {
           const end = at + entity.name.length;
@@ -660,24 +727,24 @@ export function classifyErrorStateAmounts(
             }
             return false;
           });
-          if (!shadowed) knownMentions.push({ entity, at });
+          if (!shadowed) rawMentions.push({ entity, at });
         }
       }
-      const pseudoMentions: Array<{ entity: EntityLike; at: number }> = unknownEntityMentions(clause)
-        .map((mention) => ({ entity: { name: mention.name, values: [] as readonly number[], unknown: true }, at: mention.at }));
-      // 长名覆盖短名（跨已知/伪两族）："xalpha-item-1" 里的 alpha-item-1 作废，保留更长的伪实体。
-      const rawMentions = [...knownMentions, ...pseudoMentions];
+      // 长名覆盖短名（同族内）："beta-item-1 … is 700, beta … is 700" 里 beta ⊂ beta-item-1
+      // 的那一次作废。伪实体拆除后没有跨族遮蔽了——"xalpha-item-1" 里的 alpha-item-1 由词元
+      // 边界匹配直接挡掉（前缀字母让边界不成立，整段不是一个已知实体提及）。
       const mentions = rawMentions.filter((m) => {
         const end = m.at + m.entity.name.length;
         return !rawMentions.some((other) => other.entity.name.length > m.entity.name.length
           && other.at <= m.at && other.at + other.entity.name.length >= end);
       });
       mentions.sort((a, b) => a.at - b.at);
-      // specific 必须来自**过滤后**的 mentions（2026-11-09 评审修复）：被更长伪实体覆盖的
-      // 已知名不再参与 clause 级值核对——"xalpha-item-1" 里的 alpha-item-1 已作废，若
-      // specific 仍收未过滤的 knownMentions，挂在伪实体上的金额会被错记成"挂给该已知名"
-      // （misattributed），挡住 declaredExempt 并误红 entityAttribution。
-      const specific = [...new Map(mentions.filter((m) => !m.entity.unknown).map((m) => [m.entity.name, m.entity])).values()];
+      // specific = 过滤后的**有值**实体（零值实体只进绑定面，不进 clause 级值核对/池）：
+      // 2026-11-10 评审 high——零值实体进 specific 会让 pool 从全回复真实值退化成空池，
+      // 未绑定到实体的真实金额随后被下方 clause 级 misbound 分支记成张冠李戴
+      // （"gamma-collection not found, total is 1000" 的 1000）。零值实体仍留在 mentions
+      // 里：显式归属（"gamma-collection record value is 500"）照旧绑到它并判 misbound。
+      const specific = [...new Map(mentions.filter((m) => m.entity.values.length > 0).map((m) => [m.entity.name, m.entity])).values()];
       // 分句内全部金额出现（带位置，含同值多次）——gap 与"列举加数"都按位置算，不按值去重
       // （同值重复时按值过滤会把另一笔同值加数误排，2026-11-08 实测）。
       const occs = extractAmounts(clause)
@@ -693,25 +760,43 @@ export function classifyErrorStateAmounts(
       //     balance 500"（无运算可摊）照红。
       const bindings = positions.map((at) => {
         let mention: { entity: EntityLike; at: number } | undefined;
-        for (const m of mentions) { if (m.at > at) break; mention = m; }
+        for (const m of mentions) {
+          if (m.at > at) break;
+          // 零值实体只在**非免责语境**里当最近前置归属人（见 ABSENT_ENTITY_DISCLAIM_RE）：
+          // "gamma-collection not found, total is 1000" 的 gamma 是错误对象，不是 1000 的
+          // 归属人；跳过它后金额走无绑定摊账通道（1000 = 前句 500+300+200）。
+          if (m.entity.values.length === 0
+            && ABSENT_ENTITY_DISCLAIM_RE.test(clause.slice(m.at + m.entity.name.length, at))) continue;
+          mention = m;
+        }
         // 倒装归属优先于最近前置绑定（2026-11-09 评审修复）："gamma-collection not found,
-        // but 500 is the value of beta-item-1" 里 gamma 是错误对象、beta 才是归属人；
-        // "500 是 beta-item-1 的记录值" 同理。只在金额与后随已知实体之间有明确归属措辞时
-        // 改绑，普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）不受影响。
+        // but 500 is the value of beta-item-1" 里 gamma 是错误对象（表内零值实体）、beta
+        // 才是归属人；"500 是 beta-item-1 的记录值" 同理。只在金额与后随实体之间有明确
+        // 归属措辞时改绑，普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）不受影响。
         const self = clause.slice(at).match(boundary);
         const amountEnd = at + (self ? self[0].length : amount.raw.length);
-        const followingKnown = mentions.find((m) => m.at > at && !m.entity.unknown);
-        const inverted = followingKnown !== undefined
-          && attributesToFollowingEntity(clause, amountEnd, followingKnown.at, followingKnown.entity.name)
-          ? followingKnown : undefined;
+        // 未登记名字的显式归属（见 explicitUnregisteredAttribution）：只在这一笔出现的
+        // 前后看显式措辞，不做最近前置绑定——普通枚举不误伤。
+        if (explicitUnregisteredAttribution(clause, at, amountEnd)) unknownAttributed = true;
+        const following = mentions.find((m) => m.at > at);
+        const inverted = following !== undefined
+          && attributesToFollowingEntity(clause, amountEnd, following.at, following.entity.name)
+          ? following : undefined;
         if (inverted) mention = inverted;
         // segment / segSummands 的右界：正常绑定看金额之后的下一处提及；倒装绑定看**该实体
         // 之后**的下一处提及（金额在实体之前，不能把实体本身当右界，否则 segment 为空）。
         const next = mentions.find((m) => m.at > (inverted ? inverted.at : at));
-        const segStart = mention ? mention.at : 0;
-        const segment = clause.slice(segStart, next ? next.at : clause.length);
         const prevOcc = [...occs].reverse().find((o) => o.at + o.raw.length <= at);
         const gap = clause.slice(prevOcc ? prevOcc.at + prevOcc.raw.length : 0, at);
+        // 明细列总计改绑（评审 2）：自称合计、最近前置是完整枚举的某条 item ⇒ 合计属于
+        // 所属 collection，不挂最后一条 item（见 totalOwnerCollection）。倒装归属优先
+        // （显式措辞比位置推断更强），故只在前者未命中时试本条。
+        if (!inverted && TOTAL_FRAMING_RE.test(gap)) {
+          const owner = totalOwnerCollection(mentions, mention);
+          if (owner !== undefined) mention = owner;
+        }
+        const segStart = mention ? mention.at : 0;
+        const segment = clause.slice(segStart, next ? next.at : clause.length);
         return {
           at,
           mentionEntity: mention?.entity,
@@ -809,6 +894,10 @@ export function classifyErrorStateAmounts(
         return REAL_DATA_VALUES.includes(amount.value);
       };
       const perOccurrence = bindings.map((b) => {
+        // 零值实体（不存在对象 / 空集合）没有任何真实值可归属：显式绑到它一律硬红，
+        // 不让池/算式通道洗白（2026-11-10 评审 high——specific 过滤后 pool 会回退到
+        // 全回复真实值，"gamma-collection difference is 100" 这类会蹭真实值的差额验算）。
+        if (b.mentionEntity !== undefined && b.mentionEntity.values.length === 0) return false;
         // 无绑定实体（摊账/未点名形态）同样按**每笔自己 gap 里的措辞族**验证（2026-11-08
         // 评审 blocking：未绑定差额曾直接吃 isSum/framed——"values are 500 and 300,
         // difference is 800"的和被记成派生、改成 2.5 也没有硬失败）：合计族同绑定规则
@@ -845,15 +934,15 @@ export function classifyErrorStateAmounts(
         if (b.claimsTotal) {
           // 自称合计验不过时同样先按加数判一遍（issue #24：绑定分支原来直接落红，
           // "…名下记录的合计，则为 500 + 300 + 200 = 1000" 的加数被误判无所属）。
-          // 未列举加数时，合计可以是**所绑实体**的全额，也可以是**本分句点名实体值集的
-          // 并集**全额（2026-11-09 评审修复）：行内明细 "beta-item-1 = 500、beta-item-2 =
-          // 300、beta-item-3 = 200，合计 1000" 的 1000 按最近前置绑定挂在 beta-item-3
-          // （单值 200）上，单看所绑实体永远验不过；而 500+300+200 正是本句点名记录的
-          // 诚实合计，属算术派生（derived），不该记张冠李戴。
+          // 未列举加数时，合计必须是**所绑实体**的全额。行内明细 "beta-item-1 = 500、
+          // beta-item-2 = 300、beta-item-3 = 200，合计 1000" 的 1000 由明细列总计改绑
+          // （totalOwnerCollection）挂到所属 collection beta 上，500+300+200 正是 beta
+          // 的全额 ⇒ 派生；旧实现这里还有一条"本分句点名实体值并集全额"兜底，改绑后删除
+          // （2026-11-09 评审 2：兜底又宽又漏——并集里混进别的实体就假红，且掩盖了
+          // "1000 其实挂错了对象"这一事实）。
           const claimed = b.segSummands.length >= 2
             ? enumeratedTotalOk(b.segSummands, amount.value)
-            : isVerifiedTotal(amount.value, b.mentionEntity.values)
-              || (specific.length > 0 && isVerifiedTotal(amount.value, pool));
+            : isVerifiedTotal(amount.value, b.mentionEntity.values);
           return claimed || expressionAdjacentOk(b, true);
         }
         if (DIFF_FRAMING_RE.test(b.gap)) {
@@ -912,15 +1001,19 @@ export function classifyErrorStateAmounts(
         || (anyClaimsOperation && allVerified && windowOk)
         || (totalFamilyOk && allVerified && windowOk)) { soft = true; } else { hard = true; }
       // 张冠李戴信号在本分句内判定（bindings / specific / windowOk 都只在这一层可见）：
-      // 点名了实体而金额不属于它、该 window 对点名实体无效。绑到**未知实体样 mention**
-      // （伪实体，值集为空 ⇒ `values.includes` 恒假）也走这条：点名了夹具里没有的主体名，
-      // 归属同样不成立（修复单 1/2）。任一分句挂错即记——同一数值的每次出现各自核对
-      // （与上面"任一次出现判红即红"同口径）。
+      // 点名了实体而金额不属于它、该 window 对点名实体无效。绑到**零值实体**（不存在对象
+      // gamma-collection / 空集合 empty-one ⇒ `values.includes` 恒假）也走这条：点名了
+      // 平台答过不存在（或零命中）的主体，归属同样不成立（2026-11-09 仲裁 2 的登记机制）。
+      // 任一分句挂错即记——同一数值的每次出现各自核对（与上面"任一次出现判红即红"同口径）。
       misbound ||= bindings.some((b) => !b.windowOk
         || (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value))
         || (b.mentionEntity === undefined && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
+    // 未登记名字的显式归属单独成维（不要求金额落 hard：显式挂给不存在的名字本身
+    // 就不成立）。黑盒路径不消费（金额仍在 unattributed 里照旧红），audited 路径
+    // 用它在申报交叉核之外补"挂给谁"这一维。
+    if (unknownAttributed) unregisteredAttribution.set(amount.value, amount);
     if (hard) {
       unattributed.set(amount.value, amount);
       // 张冠李戴 = 硬红里"挂给了谁"那一类。只在硬红时记：软红/派生的合计、差额都有合法的
@@ -932,6 +1025,7 @@ export function classifyErrorStateAmounts(
   return {
     unattributed: [...unattributed.values()],
     misattributed: [...misattributed.values()],
+    unregisteredAttribution: [...unregisteredAttribution.values()],
     derived: [...derived.values()],
     assertedCalibers: [...asserted].map(([caliber, clause]) => ({ caliber, clause })),
   };

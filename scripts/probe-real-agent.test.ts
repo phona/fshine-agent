@@ -8,9 +8,10 @@
  */
 import { describe, expect, it } from 'vitest';
 import {
-  AUDIT_INSTRUCTION, QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
+  QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
   auditOutgoingText, caseReportInputOf, errorStateNotes, loadBaselineForProbe, unifiedCasePassedOf,
 } from './probe-real-agent';
+import { AUDIT_INSTRUCTION } from './eval/audit-instruction';
 import { mergeCallPhases, type ExecutionAuditRow } from './eval/evidence';
 import { classifyAuditDeclaration } from './eval/audit-declaration';
 import { buildCaseReport } from './eval/report';
@@ -224,17 +225,35 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
   });
 
   /**
-   * 指令回路（2026-11-09 评审 medium）：按指令字面教出的形状（标记独占行 + 引用行 +
-   * 运算行 + 每个加数都有引用行）必须被解析器接受；反过来，指令遗漏的三种义务各造一个
-   * 违例，确认解析器确实会判红（否则指令补义务是空话）。
+   * 指令回路（2026-11-09 评审 3）：**指令自身的示例块**必须能被解析器接受——模型照抄
+   * 示例，示例错了等于指令教出红。示例只用尖括号占位（零数字纪律），这里把占位替换成
+   * 安全数值后进场；义务段三句也在本测试内断言——删掉任一条义务，本测试先红，而不是只
+   * 让旁边的字符串断言红。
    */
-  it('指令所教形状可被解析器接受（标记独占行 + 加数递归引用）', () => {
+  it('指令自身示例块（占位替换后）能过解析器；义务段三句缺一即红', () => {
+    // 机器会核的三条义务必须在指令里（删义务段 ⇒ 本测试先红）。
+    for (const clause of [
+      '两个标记各独占一行',
+      '正文里出现的每个数字都必须有一条引用行或运算行申报',
+      '运算行右侧的每个加数也必须有申报行可依',
+    ]) {
+      expect(AUDIT_INSTRUCTION, `指令缺机器义务「${clause}」`).toContain(clause);
+    }
+    // 取示例块：行首 [audit] 到行尾 [/audit]。首句里的行中标记是正文（模型复述指令的
+    // 形态），不是示例块；这里与解析器同一扫描口径，示例块缺失/未锚定即红。
+    const example = /(?:^|\n)(\[audit\]\n[\s\S]*?\n\[\/audit\])(?=\n|$)/.exec(AUDIT_INSTRUCTION)?.[1];
+    expect(example, '指令缺可解析示例块（行首 [audit] / 行尾 [/audit]）').toBeTruthy();
+    const reply = `合计 <合计>。\n${example!}`
+      .replaceAll('<加数一>', '60')
+      .replaceAll('<记录号一>', 'rec-a')
+      .replaceAll('<加数二>', '40')
+      .replaceAll('<记录号二>', 'rec-b')
+      .replaceAll('<合计>', '100');
     const rows: ExecutionAuditRow[] = [
       { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: {
         status: 'completed', items: [{ id: 'rec-a', name: 'left', value: 60 }, { id: 'rec-b', name: 'right', value: 40 }], count: 2,
       } },
     ];
-    const reply = '合计 100。\n[audit]\n60 <- rec-a\n40 <- rec-b\n100 := 60 + 40\n[/audit]';
     const verdict = classifyAuditDeclaration(reply, rows);
     expect(verdict.findings).toEqual([]);
     expect(verdict.lines.map((line) => line.kind)).toEqual(['reference', 'reference', 'operation']);
@@ -527,8 +546,22 @@ describe('统一报告与 score.ts 同源判定（unifiedCasePassedOf）', () =>
       id: 'D1',
       turns: [{ text: d1.messages[0]!.text!, reply, notices: ['计划通知'], calls, refusedCalls: 0, execution: [] }],
     });
-    expect(unifiedCasePassedOf(rowOf(8), d1, baselineCase, false, 'probe-D1')).toBe(true);
-    expect(unifiedCasePassedOf(rowOf(4), d1, baselineCase, false, 'probe-D1')).toBe(false);
+    // D1 不在 baseline.json（inBaseline=false）：main() 的统一报告对它走的就是「无基线项 +
+    // 期望值层」这条最小口径。测试必须同样传 undefined——塞一个假基线项会走
+    // evaluateProbeCase，反而测不到 D1 的真实路径（旧实现把 calls 固定成 -1 的回归就从
+    // 这里漏过去）。
+    expect(unifiedCasePassedOf(rowOf(8), d1, undefined, false, 'probe-D1')).toBe(true);
+    expect(unifiedCasePassedOf(rowOf(4), d1, undefined, false, 'probe-D1')).toBe(false);
+  });
+
+  it('占位条目（Q5b/Q13b）从未跑 ⇒ undefined 跳过，不冒充通过', () => {
+    // 2026-11-10 独立评审 medium：占位 runner 返回 turns: []、ok=true、expectations: null，
+    // 旧写法走最小口径 row.ok && 空 checks ⇒ 统一报告计为通过，与 score.ts 跳过非基线
+    // 用例不一致。跳过值不进通过率分母（report.metricInputs 同口径）。
+    const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
+    expect(q5b.placeholder).toBe(true);
+    expect(unifiedCasePassedOf(probeRow({ id: 'Q5b' }), q5b, undefined, false)).toBeUndefined();
+    expect(unifiedCasePassedOf(probeRow({ id: 'Q5b' }), q5b, undefined, true)).toBeUndefined();
   });
 
   it('okMode free：free 模式不因探针 ok=false 判负（dims 仍按基线 cap）', () => {

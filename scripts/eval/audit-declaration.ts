@@ -25,10 +25,15 @@
  *   幻影源  —— 申报的 rec 号不出现在任何审计行 result.items 里；
  *   值不符  —— 申报值 ≠ 该记录在 result.items 里的 value；
  *   运算闭合 —— := 右侧每个数都有申报行（递归到引用行）；0 是格式噪声不是金额，不要求
- *              申报；派生加数沿运算行展开到引用行后，同一记录/值的使用次数不得超过审计
- *              事实里该值的不同记录数（同一记录不得在一次运算**链**里复用两次冒充合计——
- *              跨链也查：`800 := 500 + 300` + `1300 := 800 + 500` 单看第二行 500 只出现
- *              一次，展开后被聚合两次 ⇒ 红）；
+ *              申报；负加数认两种读法（见 AuditAddendSource：`-300` 既是"记录自身为负"
+ *              ——如实申报 `-300 <- rec-a`，也是"对 +300 这条记录施加减号"——如实申报
+ *              `300 <- rec-a`）；派生加数沿运算行展开到引用行后，同一记录/值的使用次数
+ *              不得超过**已申报且核验通过**的引用行所锚到的不同记录数（同一记录不得在
+ *              一次运算**链**里复用两次冒充合计——跨链也查：`800 := 500 + 300` +
+ *              `1300 := 800 + 500` 单看第二行 500 只出现一次，展开后被聚合两次 ⇒ 红；
+ *              只申报一条同值引用行时，审计事实里另一条同值记录的配额借不得——
+ *              2026-11-10 codex blocking 反例：rec-a=500、rec-b=500 只申报 rec-a 却写
+ *              `1000 := 500 + 500` ⇒ 红；两个同值记录都申报 ⇒ 绿）；
  *   算式不符 —— := 右侧按声明的 + / - 精确十进制求值必须等于左侧（"999 := 500 + 300 +
  *              200" 实算 1000 ⇒ 红；"0.3 := 0.1 + 0.2" 十进制精确相等 ⇒ 绿——JS 浮点
  *              不参与判定）；
@@ -83,6 +88,28 @@ export interface AuditReferenceLine {
   raw: string;
 }
 
+/**
+ * 运算行右侧一个加数的**闭合源**（:= RHS 的闭合查与复用查都按它认"这个加数说的是哪条
+ * 记录的值"）。与 `addends` 分工：addends 保留字面符号供算式验算（operationMismatch），
+ * 本结构供闭合查认记录值——同一个 -300 加数有两种都合法的读法，见 `values`。
+ */
+export interface AuditAddendSource {
+  /** 这个加数的字面值（保留符号，与 `addends` 同序同值；note 回显用）。 */
+  literal: number;
+  /**
+   * 可依的**记录值**候选（按优先级）：
+   *   · 非负加数只有一种读法——`500` 说的就是值为 500 的那条记录；
+   *   · 负加数有两种读法（2026-11-10 codex major + 独立评审 6）：
+   *     ① **记录自身是负值**：引用行的值必须等于 result.items 的 value，所以负记录只能
+   *        如实申报成 `-300 <- rec-a`；`200 := -300 + 500` 里的 -300 就是那条记录本身；
+   *     ② **对正值记录施加减号**：记录值是 +500，如实申报 `500 <- rec-a`，算式里写
+   *        `1000 := -500 + 1500`——负号属于运算行的算术写法，不是记录的符号。
+   *     两种都合法 ⇒ 候选 = [字面值, 幅值]，按字面值优先（① 先于 ②）。
+   *   · 零加数 = 空候选：0 是格式噪声不是金额，不要求申报（见 closingValues）。
+   */
+  values: readonly number[];
+}
+
 /** 运算行：`值 := 数 + 数 …`。RHS 按声明的 + / - 求值，必须等于左侧申报值。 */
 export interface AuditOperationLine {
   kind: 'operation';
@@ -90,12 +117,8 @@ export interface AuditOperationLine {
   value: number;
   /** := 右侧的加数链（原顺序、保留字面符号——运算验算用）。 */
   addends: readonly number[];
-  /**
-   * 闭合查用的源值：**每一项都取绝对值**（"500 + -300"、"500 - 300" 与 "-500 + 1500" 说的
-   * 都是 300 / 500 这些记录；记录值本身带符号的申报不存在——引用行的值必须等于
-   * result.items 的 value，负号加在运算行才是算术写法）。零不进闭合要求（零不是金额）。
-   */
-  closureValues: readonly number[];
+  /** := 右侧每个加数的闭合源（与 addends 同序；零加数的候选为空）。 */
+  addendSources: readonly AuditAddendSource[];
   /** := 右侧按声明运算符（+ / -，左结合）精确十进制求出的值——note 回显用。 */
   computed: number;
   /** 精确十进制比较：右侧实算是否等于左侧申报值（JS 浮点误差不参与判定）。 */
@@ -262,6 +285,20 @@ function decimalToNumber(value: DecimalValue): number {
 }
 
 /**
+ * 一个加数可依的**记录值**候选（闭合查用；求值不用它——求值按 addends 的字面符号）。
+ *   · 非负加数：只有"值为它的那条记录"一种读法；
+ *   · 负加数：`-300` 既可能是**记录自身为负**（如实申报 `-300 <- rec-a`），也可能是
+ *     **对 +300 这条记录施加减号**（如实申报 `300 <- rec-a`，算式写 `1000 := -500 + 1500`
+ *     同款）——引用行的值必须等于 result.items 的 value，负记录的申报只能是负数，所以
+ *     两种读法都必须认，按字面值优先（记录自身为负先于施加减号）；
+ *   · 零加数：空候选——0 是格式噪声不是金额，不要求申报（见 closingValues）。
+ */
+function addendSourceValues(literal: number): number[] {
+  if (literal === 0) return [];
+  return literal < 0 ? [literal, -literal] : [literal];
+}
+
+/**
  * 按 RHS 里声明的运算符（+ / -，左结合）求值。只对已过 OPERATION_RHS_RE 的串调用；
  * 数字与运算符都是封闭字面量，没有优先级问题（纯 + / - 链）。求值用十进制整数
  * （units + scale）而不是 JS 浮点：0.1 + 0.2 在浮点下是 0.30000000000000004，会把
@@ -271,18 +308,19 @@ function decimalToNumber(value: DecimalValue): number {
 function evaluateOperationRhs(
   rhs: string,
   declared: DecimalValue,
-): { addends: number[]; closureValues: number[]; computed: number; arithmeticOk: boolean } | null {
+): { addends: number[]; addendSources: AuditAddendSource[]; computed: number; arithmeticOk: boolean } | null {
   const first = rhs.match(new RegExp(`^(${NUMBER_SOURCE})`));
   if (!first) return null;
   const firstLiteral = first[1]!;
   let total = parseDecimalLiteral(firstLiteral);
   if (!total) return null;
-  const addends = [Number(firstLiteral)];
-  // 闭合源值一律取绝对值（2026-11-09 评审修复）：首项保留字面符号会让 "-500 + 1500"
-  // 去找一条 -500 的记录，而记录值是 +500——模型如实写 `500 <- rec-a` 反而判不闭合；
-  // 后续操作数早已取绝对值（"500 + -300" 与 "500 - 300" 说的都是 300 这笔记录），
-  // 首项对齐同一口径。求值仍用字面符号（total 从 parseDecimalLiteral 起算）。
-  const closureValues = [Math.abs(Number(firstLiteral))];
+  const firstValue = Number(firstLiteral);
+  const addends = [firstValue];
+  // 闭合源按"记录值"认（addendSourceValues）：负加数同时认"负记录自身"与"对正值记录
+  // 施加减号"两种读法——2026-11-10 修：旧实现一律取绝对值，引用行却保留真实符号，于是
+  // 记录 -300 与 500 的诚实申报（`-300 <- rec-a`、`500 <- rec-b`、`200 := -300 + 500`）
+  // 算式成立却判不闭合。求值仍用字面符号（total 从 parseDecimalLiteral 起算）。
+  const addendSources: AuditAddendSource[] = [{ literal: firstValue, values: addendSourceValues(firstValue) }];
   // 从首个数字之后开始扫运算符项：NUMBER_SOURCE 自带可选负号，若从 0 开始扫，
   // "-12.5 + 2.5" 的领头负号会被当成减法再算一遍（首个数字因此单独取出）。
   const rest = rhs.slice(first[0].length);
@@ -290,13 +328,14 @@ function evaluateOperationRhs(
     const operandLiteral = term[2]!;
     const operand = parseDecimalLiteral(operandLiteral);
     if (!operand) return null;
-    addends.push(Number(operandLiteral));
-    closureValues.push(Math.abs(Number(operandLiteral)));
+    const operandValue = Number(operandLiteral);
+    addends.push(operandValue);
+    addendSources.push({ literal: operandValue, values: addendSourceValues(operandValue) });
     total = addDecimal(total, term[1] === '-' ? negateDecimal(operand) : operand);
   }
   return {
     addends,
-    closureValues,
+    addendSources,
     computed: decimalToNumber(total),
     arithmeticOk: decimalEquals(total, declared),
   };
@@ -357,29 +396,59 @@ function parseDeclarationLines(content: string): { lines: AuditDeclarationLine[]
 
 // ── 事实基准 ──
 
+/** 一条记录在审计事实里的身份与可核数值（放行查按身份数"不同记录"）。 */
+interface RecordEntry {
+  /** 记录身份：id 优先、退到 name、再退到 `行号#位次`（别名不分成两条记录）。 */
+  identity: string;
+  value: number;
+}
+
 /**
- * 审计行 → 记录号事实表：`记录号 → 该号在 result.items 里出现过的全部可核数值`。
+ * 审计行 → 记录号事实表：`记录号 → 该号在 result.items 里对应的记录条目`。
  * 匹配按契约的字面读法——记录号**出现在 result.items 里**（id 或 name 命中均可，
- * stock 夹具的域字段投影成 name/value，只认 id 会把它整个判成幻影源）。数值收集跨
+ * stock 夹具的域字段投影成 name/value，只认 id 会把它整个判成幻影源）。条目收集跨
  * 全部审计行（"任何审计行"，与幻影源查同域）；同一行里同一个号只收一次。
+ *
+ * 收**条目**（身份 + 值）而不是裸数值：同一个号可能对应多条记录（同名不同 id），
+ * 值核对要看到该号的全部可核数值（collectRecordValues），放行查要按**身份**数不同
+ * 记录（declaredRecordCountsByValue）——一张扫描供两查，避免两份事实表漂移。
  */
-function collectRecordFacts(rows: readonly ExecutionAuditRow[]): Map<string, number[]> {
-  const facts = new Map<string, number[]>();
-  for (const row of rows) {
+function collectRecordEntries(rows: readonly ExecutionAuditRow[]): Map<string, RecordEntry[]> {
+  const entries = new Map<string, RecordEntry[]>();
+  for (const [rowIndex, row] of rows.entries()) {
     const items = Array.isArray(row.result?.items) ? row.result!.items! : [];
-    for (const item of items) {
+    for (const [index, item] of items.entries()) {
       if (!item || typeof item !== 'object') continue;
+      const identity = typeof item.id === 'string' && item.id.length > 0
+        ? item.id
+        : typeof item.name === 'string' && item.name.length > 0
+          ? item.name
+          : `${row.ts ?? rowIndex}#${index}`;
+      const value = typeof item.value === 'number' && Number.isFinite(item.value) ? item.value : null;
       for (const key of [item.id, item.name]) {
         if (typeof key !== 'string' || key.length === 0) continue;
-        const bucket = facts.get(key) ?? [];
-        if (typeof item.value === 'number' && Number.isFinite(item.value) && !bucket.includes(item.value)) {
-          bucket.push(item.value);
+        const bucket = entries.get(key) ?? [];
+        if (value !== null && !bucket.some((entry) => entry.identity === identity && entry.value === value)) {
+          bucket.push({ identity, value });
         }
-        facts.set(key, bucket);
+        entries.set(key, bucket);
       }
     }
   }
-  return facts;
+  return entries;
+}
+
+/** 记录号 → 该号在 result.items 里出现过的全部可核数值（幻影源 / 值不符的事实基准）。 */
+function collectRecordValues(entries: ReadonlyMap<string, readonly RecordEntry[]>): Map<string, number[]> {
+  const values = new Map<string, number[]>();
+  for (const [ref, list] of entries) {
+    const bucket = values.get(ref) ?? [];
+    for (const entry of list) {
+      if (!bucket.includes(entry.value)) bucket.push(entry.value);
+    }
+    values.set(ref, bucket);
+  }
+  return values;
 }
 
 /**
@@ -388,13 +457,15 @@ function collectRecordFacts(rows: readonly ExecutionAuditRow[]): Map<string, num
  * 按值做最小不动点，而不是按行下标做深度优先展开：同值互引的病态块（k 条同值运算行）会让
  * 按行下标的搜索摊成 O(2^k)——真实块远小于此，但探针的 note 计算是同步的，一块病态申报
  * 能把整轮挂住（D-207 未决二⑧）。不动点语义与按行下标搜索同构：
- *   · 有引用行的值直接闭合；
- *   · 运算行的值闭合 ⇔ 它的每个加数都闭合。
+ *   · 有引用行的值直接闭合（引用行的值带真实符号——负记录申报成 `-300 <- rec-a`）；
+ *   · 运算行的值闭合 ⇔ 它的每个加数都有一个候选源值已闭合（见 AuditAddendSource：
+ *     负加数同时认"负记录自身"与"对正值记录施加减号"）。
  * 自引用环因此不闭合——"1000 := 1000 + 500" 的 1000 只有自己这一行可依，不动点永远推不到
  * 它（与旧实现的 used 集合同结论：递归到不了引用行）。不动点按值判定，只回答"这个值有没有
  * 申报行可依"；**同一记录不得复用两次**（含跨运算链：派生加数沿运算行展开到引用行后统一
- * 计数，见 expandedAddendCounts）由 recordCountsByValue 按审计事实的记录数放行
- * （"1000 := 500 + 500" 配一条 `500 <- rec-101` 虽然闭合，但只有一条 500 记录 ⇒ 红）。
+ * 计数，见 expandedAddendCounts）由 declaredRecordCountsByValue 按**已申报且核验通过**的
+ * 引用行放行（"1000 := 500 + 500" 配一条 `500 <- rec-101` 虽然闭合，但只申报了一条 500
+ * 记录 ⇒ 红）。
  */
 function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
   const closed = new Set<number>();
@@ -406,7 +477,7 @@ function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
     grew = false;
     for (const line of lines) {
       if (line.kind !== 'operation' || closed.has(line.value)) continue;
-      if (line.closureValues.filter((addend) => addend !== 0).every((addend) => closed.has(addend))) {
+      if (line.addendSources.every((source) => addendCloses(source, closed))) {
         closed.add(line.value);
         grew = true;
       }
@@ -416,34 +487,62 @@ function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
 }
 
 /**
- * 审计事实里每个数值对应多少条**不同记录**。闭合查照值核对，但"同一记录复用两次冒充
- * 合计"（`1000 := 500 + 500` 配一条 `500 <- rec-101`）必须单列：值级不动点会让同一份
- * 来源同时给两个加数作依据。跨运算链的复用（`800 := 500 + 300` + `1300 := 800 + 500`）
- * 由 expandedAddendCounts 先展开成接地值计数，再照本表的记录数放行。夹具种子值互异，
- * 同值两笔必然意味着同一记录被用两次（与 amount-criteria 的"加数互异/同一记录不复用"
- * 同口径）；换一个执行层后若确有多条同值记录，这里按不同记录数放行——不硬编码夹具形态。
+ * 放行表：每个**申报值**有几条不同记录可作来源（运算闭合的复用查照它放行）。
  *
- * 逐 item 取身份（id 优先、退到 name），不用 collectRecordFacts 的键——那张表把同一
- * 记录的 id 与 name 都当键，会把自己的别名数成两条记录。
+ * 只数**已申报且核验通过**的引用行所锚到的记录身份（2026-11-10 codex blocking 反例）：
+ * 审计行有 rec-a=500、rec-b=500，模型只申报 `500 <- rec-a` 却写 `1000 := 500 + 500`——
+ * 旧实现按"审计事实里有几条 500"放行（2 条）⇒ 全绿，等于借了未申报的 rec-b 的配额。
+ * 申报即承诺"这个数出自这条记录"，**没申报的记录不进可用来源**；两个同值记录都申报时
+ * `1000 := 500 + 500` 照过（孪生诚实）。
+ *
+ * 核验不过的引用行不计：幻影源（记录号不在 result.items）与值不符（申报值 ≠ 该记录的
+ * value）两种都已各自判红，不能同时又给加数当来源配额。引用行锚到的身份按记录号解析
+ * （id 或 name 命中均可，与幻影源查同域），按身份去重——同一个号写两遍不放大配额；同一
+ * 号若同时命中多条同值记录（同名不同 id），该行锚到的是这几条身份的并集（声明本身有歧义，
+ * 按"它可能指的就是这些"计，不挑一条——挑哪条都是任意的；夹具种子号互异，此形态不出现）。
  */
-function recordCountsByValue(rows: readonly ExecutionAuditRow[]): Map<number, number> {
-  const recordsByValue = new Map<number, Set<string>>();
-  for (const [rowIndex, row] of rows.entries()) {
-    const items = Array.isArray(row.result?.items) ? row.result.items : [];
-    for (const [index, item] of items.entries()) {
-      if (!item || typeof item !== 'object') continue;
-      if (typeof item.value !== 'number' || !Number.isFinite(item.value)) continue;
-      const identity = typeof item.id === 'string' && item.id.length > 0
-        ? item.id
-        : typeof item.name === 'string' && item.name.length > 0
-          ? item.name
-          : `${row.ts ?? rowIndex}#${index}`;
-      const records = recordsByValue.get(item.value) ?? new Set<string>();
-      records.add(identity);
-      recordsByValue.set(item.value, records);
+function declaredRecordCountsByValue(
+  lines: readonly AuditDeclarationLine[],
+  entries: ReadonlyMap<string, readonly RecordEntry[]>,
+): Map<number, number> {
+  const identities = new Map<number, Set<string>>();
+  for (const line of lines) {
+    if (line.kind !== 'reference') continue;
+    const list = entries.get(line.ref);
+    if (!list) continue;
+    const matched = list.filter((entry) => entry.value === line.value);
+    if (matched.length === 0) continue;
+    for (const entry of matched) {
+      const bucket = identities.get(line.value) ?? new Set<string>();
+      bucket.add(entry.identity);
+      identities.set(line.value, bucket);
     }
   }
-  return new Map([...recordsByValue].map(([value, records]) => [value, records.size]));
+  return new Map([...identities].map(([value, records]) => [value, records.size]));
+}
+
+/**
+ * 一个加数是否已闭合（有申报行可依）。零加数（候选为空）**视为已闭合**：0 是格式噪声
+ * 不是金额，不要求申报（见 AuditAddendSource.values）——若不豁免，`200 := 500 - 300 + 0`
+ * 这条本身合法的行永远推不进闭合表，后面引用 200 的运算行会被假红。
+ */
+function addendCloses(source: AuditAddendSource, closed: ReadonlySet<number>): boolean {
+  return source.values.length === 0 || source.values.some((value) => closed.has(value));
+}
+
+/**
+ * 一个加数闭合时依的**接地值**（候选源里第一个已闭合的；都不闭合返回 null）。
+ *
+ * 负加数的两个候选按字面值优先（AuditAddendSource）：记录自身为负的申报（`-300 <- rec-a`）
+ * 盖过"对 +300 施加减号"的读法。反过来只申报 `300 <- rec-a` 时，`-300` 退到幅值候选——
+ * 这正是"500 - 500"与"-500 + 500"同源的口径：两种写法用的是同一笔记录，复用查据此把
+ * 两次出现数到同一个接地值上。零加数候选为空 ⇒ 永远 null（零不要求申报，也不展开）。
+ */
+function groundValueOf(source: AuditAddendSource, closed: ReadonlySet<number>): number | null {
+  for (const value of source.values) {
+    if (closed.has(value)) return value;
+  }
+  return null;
 }
 
 /**
@@ -459,7 +558,8 @@ function recordCountsByValue(rows: readonly ExecutionAuditRow[]): Map<number, nu
  *
  * 展开规则：
  *   · 有引用行的值是**接地值**，一次出现计一次（引用行条数不放大计数——同值多条引用行
- *     意味着审计事实里可能有多条同值记录，放行尺度由 recordCountsByValue 按记录数给）；
+ *     意味着可能申报了多条同值记录，放行尺度由 declaredRecordCountsByValue 按**已申报
+ *     且核验通过**的引用行给）；
  *   · 没有引用行的派生值沿**全部**同值运算行展开（同值多行是病态形态，向红偏）；
  *   · 不闭合的加数不展开（闭合查已就同一根因判红，不摊成复用第二条）；
  *   · 环在展开路径上截断；按值记忆化且只缓存未触环的结果——链式派生
@@ -475,7 +575,7 @@ function addendExpander(
   // 当前子树是否撞过环：撞过的结果依赖截断位置，不记忆化（只缓存干净结果）。
   let sawBackEdge = false;
   const expand = (value: number): Map<number, number> => {
-    // 不闭合的加数不展开：闭合查已就同一根因判红，不摊成复用第二条（自引用环因此也不会
+    // 不闭合的值不展开：闭合查已就同一根因判红，不摊成复用第二条（自引用环因此也不会
     // 顺着环线贡献半个展开）。
     if (!closed.has(value)) return new Map();
     const cached = memo.get(value);
@@ -493,10 +593,11 @@ function addendExpander(
     } else {
       for (const other of lines) {
         if (other.kind !== 'operation' || other.value !== value) continue;
-        for (const addend of other.closureValues) {
-          if (addend === 0) continue;
-          for (const [ground, count] of expand(addend)) {
-            out.set(ground, (out.get(ground) ?? 0) + count);
+        for (const source of other.addendSources) {
+          const ground = groundValueOf(source, closed);
+          if (ground === null) continue;
+          for (const [groundValue, count] of expand(ground)) {
+            out.set(groundValue, (out.get(groundValue) ?? 0) + count);
           }
         }
       }
@@ -516,13 +617,15 @@ function addendExpander(
  */
 function expandedAddendCounts(
   line: AuditOperationLine,
+  closed: ReadonlySet<number>,
   expand: (value: number) => Map<number, number>,
 ): Map<number, number> {
   const counts = new Map<number, number>();
-  for (const addend of line.closureValues) {
-    if (addend === 0) continue;
-    for (const [ground, count] of expand(addend)) {
-      counts.set(ground, (counts.get(ground) ?? 0) + count);
+  for (const source of line.addendSources) {
+    const ground = groundValueOf(source, closed);
+    if (ground === null) continue;
+    for (const [groundValue, count] of expand(ground)) {
+      counts.set(groundValue, (counts.get(groundValue) ?? 0) + count);
     }
   }
   return counts;
@@ -635,7 +738,8 @@ export function classifyAuditDeclaration(
   // 栽在值不符上，无成功查询的轮次连 `0 := 500 - 500` 都写不出来——合法「0 results」式回复
   // 只能假红（D-207 未决二①）。
   const amounts = extractAmounts(scan.prose).map((amount) => amount.value).filter((value) => value !== 0);
-  const facts = collectRecordFacts(auditRows);
+  const entries = collectRecordEntries(auditRows);
+  const facts = collectRecordValues(entries);
   const findings: AuditDeclarationFinding[] = [];
 
   // ── 覆盖：回复里每个数字都有申报行（引用或运算）──
@@ -681,35 +785,43 @@ export function classifyAuditDeclaration(
   // ── 运算闭合：:= 右侧每个数都有申报行（递归到引用行）──
   // 两件事同属"这个加数有没有可依的来源"：① 值级闭合（缺申报行）；② 同一记录的复用
   // （值级闭合只回答"有行可依"，`1000 := 500 + 500` 配一条 `500 <- rec-101` 会让同一份
-  // 来源同时给两个加数作依据）。零不是金额，不进闭合要求。
+  // 来源同时给两个加数作依据）。零不是金额，不进闭合要求（候选为空 ⇒ addendCloses 永真、
+  // groundValueOf 永假——既不要求申报，也不展开计数）。
   if (parsed.lines.some((line) => line.kind === 'operation')) {
     const closed = closingValues(parsed.lines);
-    const recordCounts = recordCountsByValue(auditRows);
+    // 可用来源只算**已申报且核验通过**的引用行（declaredRecordCountsByValue）：审计事实里
+    // 有两条同值记录但只申报一条时，另一条的配额借不得（2026-11-10 codex blocking）。
+    const available = declaredRecordCountsByValue(parsed.lines, entries);
     // 展开器跨运算行共享记忆化（按值的纯函数，见 addendExpander）。
     const expand = addendExpander(parsed.lines, closed);
     for (const line of parsed.lines) {
       if (line.kind !== 'operation') continue;
-      for (const addend of line.closureValues) {
-        if (addend === 0 || closed.has(addend)) continue;
+      for (const source of line.addendSources) {
+        if (addendCloses(source, closed)) continue;
         findings.push({
           check: 'operationClosure',
-          subject: String(addend),
-          note: `申报运算不闭合：${line.value} := … 的加数 ${addend} 没有申报行（递归到引用行）：「${line.raw}」`,
+          subject: String(source.literal),
+          note: `申报运算不闭合：${line.value} := … 的加数 ${source.literal} 没有申报行（递归到引用行）`
+            + (source.values.length > 1
+              ? `（负加数两种读法都没有来源：记录自身为 ${source.literal}，或对 ${-source.literal} 这条记录施加减号）`
+              : '')
+            + `：「${line.raw}」`,
         });
       }
       // 复用查按**展开后**的计数（expandedAddendCounts）：派生加数沿运算行递归展开到
       // 接地值，跨运算链复用同一记录因此看得见（`800 := 500 + 300` + `1300 := 800 + 500`
       // 配一条 `500 <- rec-a`——单看 1300 那行 500 只出现一次，展开后被聚合两次）。
       // 展开只含闭合的接地值：不闭合的加数已由上一段判红，不把同一根因摊成复用第二条。
-      // recordCounts 为 0 时（加数由另一条运算行闭合、审计事实里没有同值记录），
-      // 至多允许出现一次；出现两次就是同一份派生账被复用。
-      for (const [addend, count] of expandedAddendCounts(line, expand)) {
-        if (count <= Math.max(recordCounts.get(addend) ?? 0, 1)) continue;
+      // available 为 0 时（加数由另一条运算行闭合、没有已申报的同值记录），至多允许出现
+      // 一次；出现两次就是同一份派生账被复用。
+      for (const [addend, count] of expandedAddendCounts(line, closed, expand)) {
+        if (count <= Math.max(available.get(addend) ?? 0, 1)) continue;
         findings.push({
           check: 'operationClosure',
           subject: String(addend),
           note: `申报运算复用同一来源：${line.value} := … 的加数 ${addend} 展开后出现 ${count} 次，`
-            + `审计事实里只有 ${recordCounts.get(addend) ?? 0} 条记录值为 ${addend}——同一记录不得在一次运算里复用两次：「${line.raw}」`,
+            + `已申报且核验通过的引用行只锚到 ${available.get(addend) ?? 0} 条记录值为 ${addend} 的记录`
+            + `——同一记录不得在一次运算里复用两次：「${line.raw}」`,
         });
       }
     }

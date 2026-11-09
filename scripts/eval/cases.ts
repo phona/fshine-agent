@@ -127,19 +127,25 @@ export interface ShortCaseTurnExpectation {
   missingCaliber?: string;
   forbidCaliberValues?: number[];
   /**
-   * 实体键归属（2026-11-09 修复单 1/2）：判定消费 amount-criteria 的
+   * 实体键归属（2026-11-09 修复单 1/2；仲裁 2 改登记制）：判定消费 amount-criteria 的
    * `classifyErrorStateAmounts` 产物 `verdict.misattributed`（不重造绑定逻辑），非空即红。
-   * `misattributed` 是**硬失败归属信号**，不是"点名实体值集 ⊆ 真实值集"的字面检查：
-   *   · 包含"把金额挂给别的实体/window"与"挂给夹具里没有的主体名"两类；
-   *   · **不含**算术派生（如行内明细 500+300+200 的合计 1000）——派生值落 derived；
-   *   · 包含 window×实体无效的绑定（"beta W2 … 500"）。
+   * `misattributed` 是**硬失败归属信号**（misbinding），不是"点名实体值集 ⊆ 真实值集"的
+   * 字面检查：
+   *   · 包含"把金额挂给别的实体/window"与"挂给零值实体"两类——后者是**已登记的不存在
+   *     对象**（用例查询过、平台答过 not_found 的 gamma-collection）与空集合 empty-one；
+   *   · 包含 window×实体无效的绑定（"beta W2 … 500"）；
+   *   · **不含**算术派生（如行内明细 500+300+200 的合计 1000）——明细列总计改绑所属
+   *     collection，按所绑实体全额验，落 derived；
+   *   · **不含**未登记的凭空名字（"foo-item-1 … 500"）的**最近前置绑定**——没有外部
+   *     事实可对，机械层不猜；但正文用显式归属措辞挂给它时，`unregisteredAttribution`
+   *     单列硬失败（audited 申报块核不到"挂给谁"），期望值层同样消费这一维。
    *
    * 考什么：回复把哪个金额挂给了哪个实体——"beta-item-1 … 500" 合法，"alpha-item-1 … 500"
-   * （500 是 beta 的真值）、"foo-item-1 … 500"（夹具里没有这个主体）都是假归属。
+   * （500 是 beta 的真值）、"gamma-collection … 500"（平台答过不存在）都是假归属。
    * 事实来源：夹具的记录归属（dummy-fixture 的 ENTITY_REAL_VALUES / MOCK_ITEM_VALUES /
-   * MOCK_ITEM_ID_BINDINGS，逐条抄自夹具种子 seedState）——模型之外的事实，可对。
-   * 事实表只属于 dummy-platform：expectedCheck 在 fixture.name 不是 dummy-platform 时
-   * 出红（不能拿 dummy 的值去核另一个夹具的回复）。
+   * MOCK_ITEM_ID_BINDINGS / MOCK_ABSENT_COLLECTIONS，逐条抄自夹具种子或用例查询事实）
+   * ——模型之外的事实，可对。事实表只属于 dummy-platform：expectedCheck 在 fixture.name
+   * 不是 dummy-platform 时出红（不能拿 dummy 的值去核另一个夹具的回复）。
    * 与 `missingCaliber` 正交：口径绑定判"编了哪个口径"，本条判"数挂给了谁"；错误态轮
    * 两样都该核（Y2 第 3 轮同开两个键）。申报块的引用行洗不掉它（见 declaredExempt）。
    */

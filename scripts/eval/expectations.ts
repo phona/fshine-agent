@@ -155,9 +155,16 @@ function turnOf<T extends ExpectationTurn>(turns: readonly (T | undefined)[], in
  * `pass=false`，而 acceptance 取数面从来就不载 calls，这条红永远不可能被修好。
  * 判据纪律因此是：无证据**不出判定**（不造零，也不造成功），与 score.ts 对
  * execution 依赖型过程不变量的同一惯例（`evaluateWriteChainCase` 头注释）。
+ *
+ * 负数是探针的**不可知哨兵**（`auditMissing` 时 calls/refusedCalls 记 -1，见
+ * probe-real-agent 的 Turn 注释）：它同样不是证据——旧写法把 -1 原样返回，
+ * minExecutedCalls 会拿 -1 与阈值比较报"已执行调用不足"（假红），requeryPerTurn /
+ * chitchatZeroCalls 则因 -1 既不是 0 也不大于 0 而静默放过（假绿）。两种方向都错，
+ * 这里统一收口成 undefined（2026-11-10 独立评审 medium）。
  */
 function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined {
-  return turn?.calls;
+  const calls = turn?.calls;
+  return calls === undefined || calls < 0 ? undefined : calls;
 }
 
 // ── ① 短用例期望值 ──
@@ -165,7 +172,8 @@ function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined 
 /**
  * 申报豁免（窄，2026-11-09 PR #26 评审 major）：一个"无所属"值只有在
  *   ① 由**引用行**（`值 <- 记录号`）申报过（`declared` 只收引用行，见归一化），且
- *   ② 不属于 `verdict.misattributed`（正文把它挂给了不属于它的实体/window）
+ *   ② 不属于 `verdict.misattributed`（正文把它挂给了不属于它的实体/window），也不属于
+ *      `verdict.unregisteredAttribution`（正文用显式措辞挂给未登记名字）
  * 两个条件同时成立时，才从 `forbidCaliberValues` 豁免。
  *
  * 这与探针 errorStateNotes 的 audit 分支同口径：交叉核只核「数 ↔ 记录号在 result.items
@@ -182,8 +190,8 @@ function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined 
  * `notFoundZeroAmounts` 不看 `declared`——申报证明"数有出处"，不证明"这轮该说"。
  * 真实值出现在不该给数的轮次，即使申报属实也照红（2026-11-09 PR #26 评审 major）。
  */
-function declaredExempt(value: number, turn: JudgedTurn, misattributed: ReadonlySet<number>): boolean {
-  return (turn.declared?.has(value) ?? false) && !misattributed.has(value);
+function declaredExempt(value: number, turn: JudgedTurn, attributionBad: ReadonlySet<number>): boolean {
+  return (turn.declared?.has(value) ?? false) && !attributionBad.has(value);
 }
 
 function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined)[]): ExpectationViolation[] {
@@ -289,19 +297,27 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
     // 给了数，misattributed = 硬失败归属信号（红）。两个断言各自独立开门：
     //   · `missingCaliber`（口径绑定）——历史上与归属核对同块落地，保留该耦合（口径编造轮
     //     必然同时要核归属）；不需要口径断言的用例不因此被迫开；
-    //   · `entityAttribution`（实体键归属）——判"数挂给了谁"这一维；`misattributed` 不是
-    //     "点名实体值集 ⊆ 真实值集"的字面检查：算术派生（行内明细 500+300+200 的合计
-    //     1000）落 derived 不记红，window×实体无效的绑定算红。事实来源 = 夹具的记录归属
-    //     （dummy-fixture ENTITY_REAL_VALUES，模型之外可对）；夹具不是 dummy-platform 时
-    //     出事实源守卫红，不拿 dummy 的值去核别的域（见下方 attributionFacts）。
+    //   · `entityAttribution`（实体键归属）——判"数挂给了谁"这一维；消费的是
+    //     classifyErrorStateAmounts 的 **misbinding 硬红信号**（verdict.misattributed）：
+    //     分句点名了登记在册的实体/window 而金额不属于它（含 window×实体无效的绑定，
+    //     以及挂给零值实体——已登记的不存在对象 gamma-collection / 空集合 empty-one）。
+    //     它不是"点名实体值集 ⊆ 真实值集"的字面检查：**算术派生允许**（行内明细
+    //     500+300+200 的合计 1000 走明细列总计改绑，落 derived 不记红）。事实来源 = 夹具
+    //     的记录归属（dummy-fixture ENTITY_REAL_VALUES 含 MOCK_ABSENT_COLLECTIONS，
+    //     模型之外可对）；夹具不是 dummy-platform 时出事实源守卫红，不拿 dummy 的值去核
+    //     别的域（见下方 attributionFacts）。未登记的凭空名字（foo-item-1）不进最近
+    //     前置绑定（仲裁 2），但正文用显式归属措辞挂给它时由 unregisteredAttribution
+    //     单列硬失败（2026-11-10 评审 medium，见下方 attributionBad）。
     // 输入是**答案正文**（audited 轮次已在入口剥掉申报块）：块行里的记录号是真实数据标识，
     // 会把正文金额洗成"有所属"而放过这一条（2026-11-09 独立评审）。相应地，audited 轮次里
     // 申报块已申报的**引用行**值不再算"无所属"——归属正是申报块补的东西；但张冠李戴
     // （verdict.misattributed）单列硬失败、`:=` 行申报值不豁免（见 declaredExempt）。
     const wantCaliber = want.missingCaliber !== undefined;
-    // 事实源守卫（2026-11-09 评审 low）：entityAttribution 的实体归属表静态来自
-    // dummy-fixture，generic 键换个夹具就会被拿去核另一个域的值。键打开时只允许
-    // dummy-platform；其它夹具出红并**不跑**归属判定，等事实表按夹具接进判据再开。
+    // 事实源守卫（2026-11-09 评审 low/9）：entityAttribution 的实体归属表**静态**来自
+    // dummy-fixture（分类器 import 的是编译期常量），generic 键换个夹具就会被拿去核另一个
+    // 域的值。键打开时只允许 dummy-platform；其它夹具出红并**不跑**归属判定，等事实表按
+    // 夹具接进判据再开。期望值层测试钉住正面事实：开此键的用例其 fixture.name 必须已是
+    // dummy-platform（否则守卫一被绕过就是静默跨域核对）。
     const attributionFacts = spec.fixture.name === 'dummy-platform';
     if (want.entityAttribution && !attributionFacts) {
       push(`期望·实体归属事实源(${label})`, 'entityAttribution 仅支持 dummy-platform 夹具',
@@ -316,26 +332,32 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
           `${label}把平台没有的口径「${calibers}」当答案口径答了数（静默回落默认口径）`);
       }
       const misattributed = new Set(verdict.misattributed.map((item) => item.value));
+      // 未登记名字的显式归属（2026-11-10 独立评审 medium）：audited 路径把 unattributed
+      // 交给申报交叉核后，正文"foo-item-1 record value is 500" + `500 <- rec-101` 会全绿。
+      // 这里与 misattributed 同权：既挡 forbidCaliberValues 豁免，也单独出硬失败。
+      const unregistered = new Set(verdict.unregisteredAttribution.map((item) => item.value));
+      const attributionBad = new Set([...misattributed, ...unregistered]);
       if (wantCaliber) {
         // 禁值只报 "forbidCaliberValues 里、确实无所属、且没有被合法申报豁免" 的值。
         // misattributed 单列（下面），避免同一数值出两条 note。
-        const bad = (want.forbidCaliberValues ?? []).filter((value) => !misattributed.has(value)
+        const bad = (want.forbidCaliberValues ?? []).filter((value) => !attributionBad.has(value)
           && verdict.unattributed.some((item) => item.value === value)
-          && !declaredExempt(value, turn, misattributed));
+          && !declaredExempt(value, turn, attributionBad));
         if (bad.length) {
           push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
             `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
         }
       }
       // 实体键归属（entityAttribution，或 missingCaliber 的历史耦合）：misattributed 是
-      // **硬失败归属信号**，不由 forbidCaliberValues 的范围决定——Y2 的禁值声明只有合计
-      // 1000（"把 payable 当口径答 1000"），但正文把 beta 的 500 挂给 alpha-item-1 再用
-      // `500 <- rec-101` 如实申报，交叉核全过、禁值声明也够不着——这仍是错误态编造归属，
-      // 必须红。未知主体名（"foo-item-1 … 500"，夹具里没有这个实体）同属这一类
-      // （amount-criteria 的绑定扫描把它收进 misattributed，且引用行申报豁免不掉它——
-      // declaredExempt 的第二个条件就是"不在 misattributed 里"）。算术派生（行内明细的
-      // 合计 1000）落在 derived，不在此列；事实表只属 dummy-platform，见 attributionFacts。
-      const misbound = [...misattributed].sort((left, right) => left - right);
+      // **硬失败归属信号**（misbinding），不由 forbidCaliberValues 的范围决定——Y2 的禁值
+      // 声明只有合计 1000（"把 payable 当口径答 1000"），但正文把 beta 的 500 挂给
+      // alpha-item-1 再用 `500 <- rec-101` 如实申报，交叉核全过、禁值声明也够不着——这
+      // 仍是错误态编造归属，必须红。信号面（2026-11-09 仲裁 2 登记制 + 2026-11-10 评审
+      // medium）：登记在册的实体/window/零值实体（不存在对象、空集合）挂错即红；正文用
+      // 显式措辞挂给未登记名字（foo-item-1）也红（unregisteredAttribution，补 audited
+      // 假绿）；**算术派生允许**（行内明细的合计 1000 走明细列总计改绑落 derived）。
+      // 事实表只属 dummy-platform，见 attributionFacts。
+      const misbound = [...attributionBad].sort((left, right) => left - right);
       if (attributionFacts && misbound.length) {
         push(`期望·张冠李戴(${label})`, `不得把 ${misbound.join('、')} 挂给不属于它的实体/window`,
           `出现 ${misbound.join('、')}`,

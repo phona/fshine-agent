@@ -58,6 +58,7 @@
 import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 // 判据自持（issue #10 切片 D 收尾）：评测侧持一份同义尺（scripts/eval/execution-language-eval.ts），
@@ -121,6 +122,11 @@ import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './e
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
 import { auditDeclarationNotes, classifyAuditDeclaration, stripAuditDeclaration } from './eval/audit-declaration';
+// 申报指令是纯文本常量，抽到叶子模块（scripts/eval/audit-instruction.ts）：mock 核心集要
+// import 它做往返测试，而本文件顶层跑 main()——测试 import 本文件会真实装配一次探针。
+// 探针侧只 import + re-export，现有导入面不变。
+import { AUDIT_INSTRUCTION } from './eval/audit-instruction';
+export { AUDIT_INSTRUCTION } from './eval/audit-instruction';
 
 /**
  * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
@@ -483,31 +489,6 @@ function executionAuditRows(): ExecutionAuditRow[] | null {
 let auditMode = false;
 
 /**
- * audited 申报指令（D-206 闭环判据第二块：提示词注入；解析与七查在
- * scripts/eval/audit-declaration.ts）。只加在会话第一条消息前，经转录对后续轮次
- * 持续可见——**不逐轮重复**：重复注入会把指令本身变成回复里的高频噪声，还会把
- * 「多块/未闭合」格式查的假阳性抬起来。
- *
- * 词表纪律（回归钉子：probe-real-agent.test.ts 拿本常量对夹具真实词表断言，词表
- * 清空/被真实词污染即红）：
- *   · 文案与示例**一律占位符**——rec-XXX、数值只作「某笔记录的 value」式描述，
- *     一个数字都不许出现。turn.text 喂 asked windows / account 提及 / 公司名 /
- *     期间多条判定正则，rec-101/alpha/beta/W1/500 这类真实词漏进来会造假红；
- *     指令若带数字，模型回显时它就成了「回复里的数字」，覆盖查随之假红。
- *   · 简短中性：不带业务口径（payable/bank/debt/collection/window 一概不提），
- *     不提 eval/测试字样——这是发给生产装配的用户消息，不是 harness 的自白。
- *   · 机器会核的义务必须教齐（2026-11-09 评审 medium）：只教三种行还不够——覆盖查要求
- *     正文每个数字有申报行、闭合查要求 := 每个加数递归有引用行、格式查要求标记行首/
- *     行尾锚定；指令漏掉任一条，照字面执行的合作模型仍会因这些义务判红。
- */
-export const AUDIT_INSTRUCTION = `【输出格式要求，本轮起每轮回复都适用】每轮回复末尾，如果回复里出现了具体数字，请追加一个申报块：以 [audit] 开始、以 [/audit] 结束，两个标记各独占一行——[audit] 写在行首、[/audit] 写在行尾，不要与正文或其他内容同行。块内每行一条申报，共三种行——
-引用行：某笔记录的 value <- 该笔记录的记录号（记录号用平台返回的标识，形如 rec-XXX）
-运算行：某个合计结果的 value := 一个数 + 另一个数 + …（右侧只能写加/减的数链，按写的运算符实算必须等于左侧 value）
-命题行：nocaliber(对象名, 字段名) —— 表示该对象的查询结果里没有这个字段；notfound(对象名) —— 表示该对象最近一次查询确实没有找到。只有这两种命题，不要发明其他命题。
-value 写具体数字。正文里出现的每个数字都必须有一条引用行或运算行申报（没有申报的数字不要写进正文）；运算行右侧的每个加数也必须有申报行可依——引用行或另一条运算行，逐层递归到引用行，没有来源的数字不要写进运算行。回复里没有数字时不需要块；但若要说明"这个对象没有这个字段"或"最近一次查询确实没有找到"，可以在块里只写对应的命题行。
-`;
-
-/**
  * audited 模式下 send 的出站文本（纯函数，导出供单测钉）：
  *   · audit=false（黑盒，默认）：**逐字返回原文**——现有全绿即是这条的证据；
  *   · audit=true：仅 roundIndex=0（会话第一条）加指令前缀，后续轮原样。
@@ -545,6 +526,10 @@ export function auditFailureCount(turns: readonly Turn[]): number {
  * 黑盒没有跑交叉核，把缺席写成 0 会被打分侧读成「查过且全过」——两种语义不能混（与
  * turn.calls 的 -1 = 不可知同一条纪律）。audited 模式下 `failures` 缺席同样**不写 0**：
  * 只有真正跑过 `auditFailureCount` 的调用点才配报告"失败数 0"。
+ *
+ * **不要拿它兜异常/零轮/无证据轮**：那会把「没跑交叉核」写成缺列（score.ts 整份报告
+ * exit 2）或 0（冒充全过）。这类轮次走 `auditFailuresOf`——它产出显式 `'not-applicable'`。
+ * 本函数只给已有确定计数的调用点（当前生产收集点统一在 auditFailuresOf）。
  */
 export function auditFailuresFieldOf(audit: boolean, failures: number | undefined): { auditFailures?: number } {
   return audit && failures !== undefined ? { auditFailures: failures } : {};
@@ -1814,7 +1799,8 @@ const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmis
  *   ① 判据输入换成**答案正文**（剥掉申报块）——块是机器 annex 不是答案，块里的数字/
  *      记录号不该参与分句归属（块行 `500 <- rec-101` 含真实数据标识，会把正文里的 500
  *      洗成"有所属"，2026-11-09 独立评审）；
- *   ② 「张冠李戴」照跑（misattributed：分句点名实体/window 而金额不属于它）——交叉核只核
+ *   ② 「张冠李戴」照跑（misattributed：分句点名实体/window 而金额不属于它；以及
+ *      unregisteredAttribution：正文用显式措辞把金额挂给未登记名字）——交叉核只核
  *      「数 ↔ 记录值」，补不上"挂给谁"；"完全没有归属"那一半才交给申报块；
  *   ③ 口径编造那条**照跑**（classifyErrorStateAmounts 不整块跳过：口径编造是独立第三类，
  *      与金额归属无关，挂真实值也不例外）；derived 信息性 note 保留。
@@ -1840,6 +1826,12 @@ export function errorStateNotes(turn: Turn, candidates: readonly string[], recor
     // 张冠李戴留在这条判据上：交叉核不核对正文把数挂给哪个实体。
     if (verdict.misattributed.length) {
       notes.push(`错误态回复把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上这一类）：「${turn.text}」→ ${formatAmounts(verdict.misattributed)}`);
+    }
+    // 未登记名字的显式归属（2026-11-10 独立评审 medium）：仲裁 2 拆伪实体扫描后，
+    // "foo-item-1 record value is 500" 只落 unattributed；audited 把 unattributed 交给
+    // 申报交叉核，于是 `500 <- rec-101`（真实记录）就能洗白"挂给了谁"。这一维补回。
+    if (verdict.unregisteredAttribution.length) {
+      notes.push(`错误态回复把金额挂给未登记的名字（申报块只核数值与记录号，补不上归属）：「${turn.text}」→ ${formatAmounts(verdict.unregisteredAttribution)}`);
     }
   } else if (verdict.unattributed.length) {
     notes.push(`错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「${turn.text}」→ ${formatAmounts(verdict.unattributed)}`);
@@ -2805,8 +2797,9 @@ function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | u
  * -1、dims 固定成空、直接吃 `input.ok`——minExecutedCalls（D1/X1）会因 -1 假红，okMode
  * free（A2/B1/Y2）与 dims cap 也完全没消费，与 score.ts 的 passed 不一致。现在直接把
  * 探针真实的 CaseResult 行交给 score.ts 的 `evaluateProbeCase`（同一 row、同一基线项、
- * 同一期望值层、同一申报门）；只有**未进基线**的用例（--only 子集/占位条目）才退回
- * 探针 ok + 期望值层 + 申报门这一最小口径，并明确不冒充基线条目。
+ * 同一期望值层、同一申报门）；只有**未进基线且真跑过**的用例（--only 子集）才退回
+ * 探针 ok + 期望值层 + 申报门这一最小口径，并明确不冒充基线条目。未审计占位条目
+ * （Q5b/Q13b，placeholder=true）从未跑过，返回 undefined 跳过（见函数体）。
  */
 export function unifiedCasePassedOf(
   row: ProbeResultRow | undefined,
@@ -2814,11 +2807,16 @@ export function unifiedCasePassedOf(
   baselineCase: BaselineCase | undefined,
   audited: boolean,
   corpusId = row?.id ?? '',
-): boolean {
+): boolean | undefined {
   if (!row) return false;
   if (baselineCase) {
     return evaluateProbeCase(corpusId, row, baselineCase, undefined, spec, audited).pass;
   }
+  // 未审计占位条目（Q5b/Q13b）：runner 返回 turns: []、expectations: null，从未跑过。
+  // 旧写法走下面的最小口径 ⇒ row.ok && 空 checks ⇒ 统一报告计为通过，与 score.ts
+  // "跳过非基线用例"不一致（2026-11-10 独立评审 medium）。这里返回 undefined（跳过），
+  // 不进通过率分母；用例行仍留在报告 cases 里，信息性 note 可审计。
+  if (spec?.placeholder === true) return undefined;
   const checks = spec ? expectationChecksOf(spec, row, audited) : [];
   if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, 0));
   return row.ok && checks.every((check) => check.pass);
@@ -2918,17 +2916,22 @@ async function main(): Promise<void> {
       const refused = caseRows.filter((row) => row.refused).length;
       console.log(`  平台调用: ${caseRows.length}${refused ? `（其中被拒 ${refused}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
     } catch (error) {
+      const failureNotes = [error instanceof Error ? error.message : String(error)];
       results.push({
         id: item.id, group: item.group, intent: item.intent, turns: [],
         platformCalls: 0, refusedCalls: 0,
         chain: { evalRunId, caseId: item.id, messageIds: [], requestIds: [], taskIds: [] },
-        notes: [error instanceof Error ? error.message : String(error)],
+        notes: failureNotes,
         dims: emptyDimCounts(), unclassifiedNotes: 0,
         // 崩溃的用例没有可核轮次：显式不适用，不写缺列（缺列会让 score.ts 对整份报告
         // exit 2，连带其它用例都打不了分），也不写 0（没跑交叉核不等于全过）。
         ...auditFailuresOf(auditMode, []),
         ladder: [], ok: false,
       });
+      // 崩溃用例同样进统一报告（2026-11-10 独立评审 medium）：旧写法只 push results、
+      // 不 push reportInputs ⇒ 该用例从统一报告里静默消失，用例计数与通过率被缩小。
+      // 以 ok=false + 空轮次呈现，判定走正常路径（有基线项 ⇒ 失败；占位 ⇒ 跳过）。
+      reportInputs.push(caseReportInputOf(item, [], { ok: false, notes: failureNotes }));
       console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
     }
     restorePlatformState();
@@ -2960,7 +2963,7 @@ async function main(): Promise<void> {
   // audited 路径需要申报上限，仍 fail-closed（见 loadBaselineForProbe）。
   const baseline = loadBaselineForProbe(auditMode);
   const resultById = new Map(results.map((row) => [row.id, row]));
-  const verdictOf = new Map<string, boolean>();
+  const verdictOf = new Map<string, boolean | undefined>();
   for (const input of reportInputs) {
     // 未进基线的用例（--only 子集/占位条目）baselineCase 缺席，走最小口径；其余用例
     // 直接复用 evaluateProbeCase（同一 row 的真实 calls/dims、同一基线 okMode/caps、
@@ -2978,7 +2981,9 @@ async function main(): Promise<void> {
     at: new Date().toISOString(),
     evalRunId,
     cases: reportInputs,
-    passOf: (line) => verdictOf.get(line.caseId) ?? line.ok,
+    // undefined = 占位条目跳过：不能用 `?? line.ok` 把跳过重新折成 ok（占位 runner
+    // 返回 ok=true，那正是旧实现把从未跑的用例计成通过的地方）。
+    passOf: (line) => (verdictOf.has(line.caseId) ? verdictOf.get(line.caseId) : line.ok),
   });
   const written = writeUnifiedReport(path.dirname(report), unified);
   for (const db of openIntentDbs.splice(0)) db.close();
@@ -3035,7 +3040,16 @@ async function main(): Promise<void> {
   rmSync(stateDir, { recursive: true, force: true });
 }
 
-main().catch((error) => {
-  console.error('探针失败:', error);
-  process.exit(1);
-});
+// 入口守卫（2026-11-10 独立评审 high）：本文件顶层导出大量纯函数供单测 import；
+// 无守卫时 import 即执行 main()，有 LLM 环境就是一次真模型调用（audit-instruction.ts
+// 的抽出注释记着同一条）。ESM 入口判定 = argv[1] 的 file URL 等于本模块 URL；直接
+// `node --import tsx scripts/probe-real-agent.ts` 与 npm script 都满足，测试/被 import
+// 时不满足。
+const invokedAsEntrypoint = process.argv[1] !== undefined
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (invokedAsEntrypoint) {
+  main().catch((error) => {
+    console.error('探针失败:', error);
+    process.exit(1);
+  });
+}
