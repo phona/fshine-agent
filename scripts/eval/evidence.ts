@@ -65,6 +65,15 @@ export interface ExecutionAuditRow {
   callId?: string;
   /** 起止两行中的哪一行：`start` = 调用已发出、结果未知；`result` = 最终结果。 */
   phase?: 'start' | 'result';
+  /**
+   * query 类调用实际返回的响应载荷（2026-11-09 audited 申报模式交叉核的事实基准）。
+   * 夹具在 query completed 时把**该次**返回的 items/count 写进这里，使"回复里的数平台
+   * 确实拉回过"可以独立核对，不再只靠模型自述传递（空数组 + count 0 也是真答案：
+   * 平台拉回过、只是没有数据）。被拒/失败/无数据（not_found/needs_input）行不带这个
+   * 字段——那些调用没有拉回过任何 items。字段缺席 = 没写过，不是假。
+   * stock 夹具的域字段是 sku/qty，落账时按同一契约投影成 name/value。
+   */
+  result?: { items?: Array<{ id?: string; name?: string; value?: number }>; count?: number };
 }
 
 /**

@@ -213,22 +213,29 @@ function findShelf(state, keyword) {
   if (matches.length > 1) return { ambiguous: matches };
   return { none: true };
 }
+// 返回 { code, result }（2026-11-09 audited 申报模式）：result 只在 completed 时带**该次
+// query 实际返回的** items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核
+// 的事实基准（"回复里的数平台确实拉回过"要能独立核对，不能只靠模型自述传递）。失败/无数据/
+// 歧义行没有拉回过任何 items，返回的 code 不带 result，审计行因此也不会出现载荷。
+// stock 域字段是 sku/qty，按交叉核的同一契约投影成 { id, name, value }：不投影的话，按
+// value 找数的核对对 stock 行永远空手（响应里明明是 qty，审计行却查不到值）。
 function doQuery(opName, args) {
-  if (breakerOpen()) { emit(opName, 'failed', null, { code: 'BREAKER_OPEN', message: 'Breaker is open; reset it before querying' }); return 1; }
+  if (breakerOpen()) { emit(opName, 'failed', null, { code: 'BREAKER_OPEN', message: 'Breaker is open; reset it before querying' }); return { code: 1 }; }
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.shelf || typeof flags.shelf !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --shelf')); return 1; }
+  if (!flags.shelf || typeof flags.shelf !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --shelf')); return { code: 1 }; }
   const found = findShelf(state, flags.shelf);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return 0; }
-  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches "${flags.shelf}"`)); return 0; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return { code: 0 }; }
+  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches "${flags.shelf}"`)); return { code: 0 }; }
   const col = found.exact;
   if (flags.batch && !col.batches.includes(flags.batch)) {
     emit(opName, 'not_found', { query: flags.shelf, batch: flags.batch, availableBatches: col.batches }, errObj('BATCH_NO_DATA', `Batch ${flags.batch} has no data for shelf ${found.name}`));
-    return 0;
+    return { code: 0 };
   }
   // Zero is a real answer: empty-shelf returns completed with count 0, never not_found.
-  emit(opName, 'completed', { shelf: found.name, batch: flags.batch ?? null, items: col.items, count: col.items.length }, null);
-  return 0;
+  const items = col.items;
+  emit(opName, 'completed', { shelf: found.name, batch: flags.batch ?? null, items, count: items.length }, null);
+  return { code: 0, result: { items: items.map((it) => ({ id: it.id, name: it.sku, value: it.qty })), count: items.length } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -618,7 +625,8 @@ async function main() {
     const requirePlan = env2('STOCK_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
-    if (op.name === 'stock.query') code = doQuery(op.name, rest);
+    let queryResult;
+    if (op.name === 'stock.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
     else if (op.name === 'stock.scratch') code = doScratch(op.name, rest);
     else if (op.name === 'stock.prepare') code = doPrepare(op.name, rest);
     else if (op.name === 'stock.commit') {
@@ -639,7 +647,9 @@ async function main() {
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
-    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
+    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {

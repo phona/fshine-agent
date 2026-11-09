@@ -283,22 +283,27 @@ function findCollection(state, keyword) {
   if (matches.length > 1) return { ambiguous: matches };
   return { none: true };
 }
+// 返回 { code, result }（2026-11-09 audited 申报模式）：result 只在 completed 时带**该次
+// query 实际返回的** items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核
+// 的事实基准（"回复里的数平台确实拉回过"要能独立核对，不能只靠模型自述传递）。失败/无数据/
+// 歧义行没有拉回过任何 items，返回的 code 不带 result，审计行因此也不会出现载荷。
 function doQuery(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return 1; }
+  if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return { code: 1 }; }
   const collection = flags.collection || flags.topic;
   const found = findCollection(state, collection);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return 0; }
-  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return 0; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0 }; }
+  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return { code: 0 }; }
   const col = found.exact;
   const window = flags.window || flags.round;
   if (window && !col.windows.includes(window)) {
     emit(opName, 'not_found', { query: collection, window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${window} has no data for collection ${found.name}`));
-    return 0;
+    return { code: 0 };
   }
-  emit(opName, 'completed', { collection: found.name, window: window ?? null, items: col.items, count: col.items.length }, null);
-  return 0;
+  const items = col.items;
+  emit(opName, 'completed', { collection: found.name, window: window ?? null, items, count: items.length }, null);
+  return { code: 0, result: { items, count: items.length } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -668,7 +673,8 @@ async function main() {
     const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') code = doQuery(op.name, call.args);
+    let queryResult;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, call.args); code = q.code; queryResult = q.result; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
     else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
@@ -692,7 +698,9 @@ async function main() {
     // mode:'query'、走结构化落 mode:'call'，评测侧据 mode 判读类的逻辑只认前者，结构化查询
     // 就算 exitCode=0 且已送达也只能停在 completed，报告随调用载体变化。
     // 载体信息不丢：另记 via:'structured'。
-    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
+    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
         const plans = loadPlans();
@@ -745,7 +753,8 @@ async function main() {
     const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
-    if (op.name === 'dummy.query' || op.name === 'ballot.query') code = doQuery(op.name, rest);
+    let queryResult;
+    if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, rest);
     else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, rest);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
@@ -766,7 +775,9 @@ async function main() {
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
-    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
+    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
