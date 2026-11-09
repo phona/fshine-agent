@@ -3,9 +3,9 @@
  * scripts/eval/audit-declaration.ts）。
  *
  * 抽到独立模块的原因（2026-11-10 收口）：指令的往返测试必须能进 mock 核心集（per-push
- * 硬门），而 `scripts/probe-real-agent.ts` 顶层跑 main()——测试 import 它会真实装配探针
- * （有 LLM 环境时就是一次真模型调用）。指令是纯文本常量，与探针装配无关，放这里两边
- * 都能安全消费；探针侧只 import 并 re-export，现有导入面不变。
+ * 硬门）。探针 `scripts/probe-real-agent.ts` 已有入口守卫（import 不跑 main()），但 import
+ * 它仍会拖入完整装配链；指令是纯文本常量，与探针装配无关，放这里两边都能安全消费。
+ * 探针侧只 import 并 re-export，现有导入面不变。
  *
  * 只加在会话第一条消息前，经转录对后续轮次持续可见——**不逐轮重复**：重复注入会把
  * 指令本身变成回复里的高频噪声，还会把「多块/未闭合」格式查的假阳性抬起来。

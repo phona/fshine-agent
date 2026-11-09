@@ -9,8 +9,9 @@
  * 不做判定。
  *
  * 抽成独立模块的原因（2026-11-07 评审 blocking：错误态实体绑定要有变异测试）：探针
- * scripts/probe-real-agent.ts 顶层就跑 main()（真实 LLM 装配），测试无法 import；把
- * 事实表与纯判据抽到这里后，amount-criteria.test.ts 才能把评审的反例形态钉成表征锁。
+ * scripts/probe-real-agent.ts 已有入口守卫（import 不跑 main()），但它仍会拖入真实装配
+ * 链；把事实表与纯判据抽到这里后，amount-criteria.test.ts 只 import 判定本身，就能把
+ * 评审的反例形态钉成表征锁。
  */
 
 /** mock collection目录（seedState 全部 9 个 collection，empty-one 曾漏收——2026-11-08 评审）：

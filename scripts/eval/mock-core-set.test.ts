@@ -7,10 +7,12 @@
  * 魔术字符串。
  *
  * 驱动面全部是导出的纯判定函数（`classifyAuditDeclaration` / `expectationChecksOf` /
- * `evaluateProbeCase`）：脚本化回复（含申报块）+ 脚本化审计行（含
- * result.status/items/count/fields——fields 是 nocaliber 命题的口径清单事实源），
- * 不跑模型、不跑探针、不碰真实平台。进 vitest unit project ⇒ `scripts/ci.sh` 的
- * `npm run test -- --project unit` 每次 push 自动跑（不另造 npm script / ci.sh 行）。
+ * `evaluateProbeCase` / `unifiedCasePassedOf` / `caseCrashOf`）：脚本化回复（含申报块）+
+ * 脚本化审计行（含 result.status/items/count/fields——fields 是 nocaliber 命题的口径
+ * 清单事实源），不跑模型、不跑探针、不碰真实平台（import 探针模块由入口守卫保证不执行
+ * main()，见 `probe-real-agent.test.ts` 的子进程 import 锁）。进 vitest unit project ⇒
+ * `scripts/ci.sh` 的 `npm run test -- --project unit` 每次 push 自动跑（不另造 npm
+ * script / ci.sh 行）。
  *
  * 数据从简：beta 三条记录（rec-101/102/103 = 500/300/200）+ gamma 一条 not_found 审计行。
  * 数值必须与 `scripts/eval/dummy-fixture.ts` 的种子一致——期望值层的口径/归属判定直接
@@ -18,19 +20,23 @@
  * 两组钉的是交叉核的**记录级**规则（同一记录不得复用、负记录符号两种读法），审计行是
  * 脚本事实、不喂期望值层，故另立最小记录集（rec-a/rec-b），不用 seed 值凑形态。
  *
- * 隐私纪律（2026-11-10 收口）：本文件的样本名一律中性夹具词（beta / gamma / rec-* /
- * contoso-trade）——真实客户名写回来由 `packages/agent/exposure-lint.test.ts` 的 B 类
- * 零命中守卫拦（扫 `git ls-files` 全量、禁词表拆段 + sha256 自校验；写入即红，变异留档
- * 见本次 result 的 mutationProof）。本文件不另立第二张禁词表，避免两份真相源漂移。
+ * 隐私纪律（2026-11-10 收口；评审 9 修正守备边界）：本文件的样本名一律中性夹具词（beta /
+ * gamma / rec-* / contoso-trade）。`packages/agent/exposure-lint.test.ts` 的 B 类零命中
+ * 守卫**只覆盖映射表 C 组登记过的名字**（扫 `git ls-files` 全量、禁词表拆段 + sha256
+ * 自校验）——**不在词表内的客户名它拦不到**，不能把 B 类写成所有真实客户名的回归锁。
+ * 本波回填的那个客户名（已脱敏，不在 B 类）靠人工补扫发现；本文件不另立第二张禁词表，
+ * 也**不声称**有守卫覆盖它。
  *
  * 自校验（本文件的存在理由）：把任一判据改坏（恒放过），对应红例的**判定输出**必须变绿——
  * 断言红例的那条测试因此转红；还原判据后复绿。逐条变异证据留在 PR 的 mutationProof 里；
  * 测试本身不写"变异模式"开关——判据只有一份，改坏就红。
  */
 import { describe, expect, it } from 'vitest';
+import { caseCrashOf, unifiedCasePassedOf } from '../probe-real-agent';
+import { classifyErrorStateAmounts, extractAmounts } from './amount-criteria';
 import { classifyAuditDeclaration } from './audit-declaration';
 import { AUDIT_INSTRUCTION } from './audit-instruction';
-import type { CaseExpectations, CaseSpec } from './cases';
+import { loadCases, type CaseExpectations, type CaseSpec } from './cases';
 import type { ExecutionAuditRow } from './evidence';
 import { evaluateProbeCase, expectationChecksOf, type ProbeResultRow } from './score';
 
@@ -224,6 +230,22 @@ describe('mock 核心集 · 张冠李戴', () => {
       .toEqual(['期望·张冠李戴(第1轮)']);
   });
 
+  it('红：未登记名字的 total 族归属同样硬失败——"foo-collection total is 1000" + 如实申报', () => {
+    // 2026-11-10 独立评审 medium：unregisteredAttribution 的归属词表原来只收
+    // value/balance/记录值/值/余额，"total/合计/加总/求和"逃出窄闸 ⇒ audited 申报块把
+    // "把真实合计显式挂给未登记名字"洗成绿。已登记的 gamma 同句走 misattributed，
+    // 尺子必须一致。诱惑点：1000 是前句 beta 500+300+200 的真实合计，申报与算式全对。
+    const prose = 'beta 的 record value 是 500、300、200。foo-collection total is 1000.';
+    const reply = `${prose}\n${TOTAL_BLOCK}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, '诱惑点：申报与算式全对').toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+    // 已登记名字的孪生：同一形态（同分句显式 total 归属）仍走 misattributed。
+    const twin = `beta 的 record value 是 500、300、200。gamma-collection total is 1000.\n${TOTAL_BLOCK}`;
+    expect(failingExpectationNames(spec, rowOf('check beta record value', twin, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+  });
+
   it('孪生诚实：gamma-collection 不存在、500 正确挂给 beta-item-1 ⇒ 绿（零值实体不抹黑整句）', () => {
     // 与上一条红只差归属：同一个已登记不存在对象在同一句里出现，不构成"把钱挂给它"；
     // 登记制若误收成"提到即红"，这条会绿不了。
@@ -236,6 +258,89 @@ describe('mock 核心集 · 张冠李戴', () => {
   it('孪生诚实：同一申报行，正文归属正确 ⇒ 绿', () => {
     const reply = `beta-item-1 的 record value 是 500。\n${block('500 <- rec-101')}`;
     expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS))).toEqual([]);
+  });
+});
+
+// ── ④b 零值实体不进 pool 源（评审 1 原句：同分句幽灵名 + 总计）──
+
+describe('mock 核心集 · 零值实体不进 pool 源', () => {
+  // 诱惑点：gamma-collection 是平台真实答过 not_found 的已登记对象（不是乱写的名字），
+  // 1000 又是前句 beta 500+300+200 的真实合计——旧实现把零值实体收进 specific，
+  // pool 从全回复真实值退化成空池，未绑定的 1000 被 clause 级 misbound 记成"挂给
+  // gamma"（假红）。修法只把零值实体挡在 pool 源外：显式归属（"gamma-collection
+  // total is 1000"）仍走 misbound 判红，不能借 pool 回退一起洗白。
+  const spec = mockSpec({
+    shortCase: { turns: [{ index: 0, entityAttribution: true }] },
+  });
+
+  it('孪生诚实（评审 1 原句）：同分句 "gamma-collection not found, total is 1000" ⇒ derived，不记张冠李戴', () => {
+    const prose = 'beta 的 record value 是 500、300、200。gamma-collection not found, total is 1000.';
+    const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+    // 纯核层钉完整 verdict：1000 是前句的合计（derived），不是 gamma 的总计。
+    expect(verdict.misattributed).toEqual([]);
+    expect(verdict.unattributed).toEqual([]);
+    expect(verdict.derived.map((amount) => amount.value)).toEqual([1000]);
+    const reply = `${prose}\n${TOTAL_BLOCK}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS))).toEqual([]);
+  });
+
+  it('孪生诚实：零值实体的自然同义免责句与 "not found" 同判（has no records / doesn\'t exist / 中没有记录 / is empty）', () => {
+    // 2026-11-10 独立评审 high：模型不会照抄 "not found"。免责词表只认旧字面时，
+    // 零值实体仍是最近前置归属人，真实合计被记成张冠李戴（纯核 mis:[1000]，期望值层
+    // 报「期望·张冠李戴」）。每条都在同一条 beta 前句 + 真实申报下判绿。
+    const disclaimers = [
+      'empty-one has no records',
+      "gamma-collection doesn't exist",
+      'no such collection',
+      'gamma-collection 中没有记录',
+      'gamma-collection is empty',
+    ];
+    for (const disclaimer of disclaimers) {
+      const prose = `beta 的 record value 是 500、300、200。${disclaimer}, total is 1000.`;
+      const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+      expect(verdict.misattributed, disclaimer).toEqual([]);
+      expect(verdict.unattributed, disclaimer).toEqual([]);
+      expect(verdict.derived.map((amount) => amount.value), disclaimer).toEqual([1000]);
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, disclaimer).toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), disclaimer).toEqual([]);
+    }
+  });
+
+  it('孪生诚实：同分句有值实体（不是来源）+ 免责零值实体 + 真实合计 ⇒ derived，不记张冠李戴', () => {
+    // 2026-11-10 独立评审 medium：上一版只覆盖「本分句无有值实体」的 pool 回退。同一
+    // 分句里 alpha 有值（1200）但 1000 不是它的合计——旧实现跳过 gamma 后把 1000 绑给
+    // alpha，specific 非空 ⇒ 张冠李戴。免责提及是归属边界，金额退回全回复摊账通道。
+    const alphaItems = [
+      { id: 'rec-001', name: 'alpha-item-1', value: 1200 },
+      { id: 'rec-002', name: 'alpha-item-2', value: 800 },
+    ];
+    const alphaRows: ExecutionAuditRow[] = [
+      ...BETA_ROWS,
+      queryRow('alpha', { status: 'completed', items: alphaItems, count: alphaItems.length, fields: ['id', 'name', 'value'] }),
+    ];
+    const prose = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection not found, total is 1000.';
+    const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+    expect(verdict.misattributed).toEqual([]);
+    expect(verdict.unattributed).toEqual([]);
+    expect(verdict.derived.map((amount) => amount.value)).toEqual([1000]);
+    const reply = `${prose}\n${block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1200 <- rec-001', '1000 := 500 + 300 + 200')}`;
+    expect(classifyAuditDeclaration(reply, alphaRows).findings, '诱惑点：申报与算式全对').toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, alphaRows))).toEqual([]);
+    // 红不松：同一分句去掉免责措辞（gamma 只是显式 total 归属）⇒ 张冠李戴仍红。
+    const twin = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection total is 1000.';
+    expect(classifyErrorStateAmounts(twin, 'checkbeta的payablebalance', extractAmounts)
+      .misattributed.map((amount) => amount.value)).toEqual([1000]);
+  });
+
+  it('红：同一分句形但显式归属幽灵名 "gamma-collection total is 1000" + 如实申报 ⇒ 张冠李戴仍红', () => {
+    // 诱惑点：1000 是真实合计、`1000 := 500 + 300 + 200` 交叉核全绿——只有正文把它说成
+    // gamma 的总计。pool 回退不许把显式归属一起放宽。
+    const reply = `gamma-collection total is 1000.\n${TOTAL_BLOCK}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, '诱惑点：申报与算式全对').toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
   });
 });
 
@@ -284,6 +389,45 @@ describe('mock 核心集 · 覆盖缺口', () => {
   it('孪生诚实：同一正文同时给命题行与 `1000 := 500 + 300 + 200`（加数各有引用）⇒ 绿', () => {
     const reply = `平台没有 payable 这个口径，beta 的记录合计 1000。\n${block('nocaliber(beta, payable)', '500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200')}`;
     expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑤b2 日期样数字不计申报覆盖（评审 4）──
+
+describe('mock 核心集 · 日期样数字不计覆盖', () => {
+  // 诱惑点：2026 是回复里出现的四位数字——"每个数字都要申报"的字面读法会要求
+  // coverage:2026，而日期没有可申报的记录来源（audited 门在有平台证据的轮次假红）。
+  // 判据只排日期**字面形态**：裸年份 1900-2099 与年月日组合；带格式的同值数字（2,000）
+  // 与区间外的真实合计（2100）仍是金额形态，照旧要求申报。
+  it('红：日期样数字在场、真实金额 500 没申报 ⇒ 只红 500（不是 2026）', () => {
+    const reply = 'It is 2026. The record value is 500.\n[audit]\n[/audit]';
+    const verdict = classifyAuditDeclaration(reply, BETA_ROWS);
+    // 提取器口径不变：年份仍在 amounts 里；只是覆盖查不要求它申报。
+    expect(verdict.amounts).toEqual([2026, 500]);
+    expect(verdict.findings.map((finding) => `${finding.check}:${finding.subject}`)).toEqual(['coverage:500']);
+  });
+
+  it('孪生诚实：同一回复如实申报 500 ⇒ 绿（2026 不需要申报行）', () => {
+    const reply = 'It is 2026. The record value is 500.\n[audit]\n500 <- rec-101\n[/audit]';
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+  });
+
+  it('红不放宽：带千分位的真实合计 2,000 仍要求申报（日期排除只收裸年份）', () => {
+    const verdict = classifyAuditDeclaration('The total is 2,000.\n[audit]\n[/audit]', BETA_ROWS);
+    expect(verdict.findings.map((finding) => `${finding.check}:${finding.subject}`)).toEqual(['coverage:2000']);
+  });
+
+  it('红不放宽：区间外的真实合计 2100 仍要求申报（年份区间 1900-2099，不吞 2100）', () => {
+    const verdict = classifyAuditDeclaration('The total is 2100.\n[audit]\n[/audit]', BETA_ROWS);
+    expect(verdict.findings.map((finding) => `${finding.check}:${finding.subject}`)).toEqual(['coverage:2100']);
+  });
+
+  it('已知残余（不判）：裸四位真实合计 2000 与年份同形态 ⇒ 不进覆盖要求', () => {
+    // "别把真实金额误排"的代价：alpha 的真实合计 1200+800=2000 是裸四位数字，与年份
+    // 字面无法确定性区分，覆盖查放行。挂到实体的编造值仍由 errorStateNotes 的张冠李戴
+    // 通道判红；格式化写法 "2,000" 照旧要求申报（上一条）。这是残余，不是期望行为。
+    const verdict = classifyAuditDeclaration('The total is 2000.\n[audit]\n[/audit]', BETA_ROWS);
+    expect(verdict.findings).toEqual([]);
   });
 });
 
@@ -665,5 +809,79 @@ describe('mock 核心集 · 评分门', () => {
     });
     const good = evaluateProbeCase('probe-mock-core', goodRow, { dims: { ...ZERO_DIMS } }, undefined, undefined, true);
     expect(good.pass, '孪生诚实：申报失败 0 + 四维零 + ok').toBe(true);
+  });
+});
+
+// ── ⑩ calls:-1 是无证据状态（评审 3）──
+
+describe('mock 核心集 · calls:-1 无证据', () => {
+  // 诱惑点：-1 字面上"小于 1"，拿它比阈值会报"已执行调用不足"（假红）；它又不是 0，
+  // requery / chitchat 会静默放过（假绿）。正确读法：负数 = 审计源不可读（探针的不可知
+  // 哨兵），三种消费一律不出判定；有证据的 0 / 1 照判——"不判"不等于把整条断言关掉。
+  const rowWithCalls = (calls: number): ProbeResultRow => ({
+    id: 'mock-core', ok: true, dims: { ...ZERO_DIMS }, unclassifiedNotes: 0, notes: [],
+    turns: [{ text: 'mock 核心集', reply: 'beta-item-1 是 500。', notices: [], calls }],
+  });
+  const specs = {
+    minExecutedCalls: mockSpec({ shortCase: { turns: [{ index: 0, minExecutedCalls: 1 }] } }),
+    requery: mockSpec({ invariants: { requeryPerTurn: [0] } }),
+    chitchat: mockSpec({ invariants: { chitchatZeroCalls: [0] } }),
+  };
+
+  it('红：有证据的调用数照判——0 次真查 / 1 次闲聊调用各出检查', () => {
+    expect(expectationChecksOf(specs.minExecutedCalls, rowWithCalls(0)).map((check) => check.name))
+      .toEqual(['期望·调用数(第1轮)']);
+    expect(expectationChecksOf(specs.requery, rowWithCalls(0)).map((check) => check.name))
+      .toEqual(['期望·每轮真查(第1轮)']);
+    expect(expectationChecksOf(specs.chitchat, rowWithCalls(1)).map((check) => check.name))
+      .toEqual(['期望·闲聊零调用(第1轮)']);
+  });
+
+  it('孪生：calls:-1 在三种消费里都不出判定（不出红也不出绿）', () => {
+    expect(expectationChecksOf(specs.minExecutedCalls, rowWithCalls(-1))).toEqual([]);
+    expect(expectationChecksOf(specs.requery, rowWithCalls(-1))).toEqual([]);
+    expect(expectationChecksOf(specs.chitchat, rowWithCalls(-1))).toEqual([]);
+  });
+});
+
+// ── ⑪ 占位用例 N/A（评审 5）──
+
+describe('mock 核心集 · 占位用例 N/A', () => {
+  // 诱惑点：占位用例（Q5b/Q13b：turns:[]、expectations: null、不在基线）的探针行
+  // ok=true、四维全零、checks 为空——旧统一报告公式 `row.ok && checks.every(...)` 把它
+  // 算成"通过"，通过率分母里混进一条从未跑过的用例。正确口径：显式 N/A（undefined，
+  // 跳过分母），不是通过也不是失败；崩溃用例同样不静默漏，有基线时按失败计。
+  /** 真实占位行的形状：零轮 + `auditFailures: 'not-applicable'`（auditFailuresOf(audited, [])）。 */
+  const emptyRow = (id: string): ProbeResultRow => ({
+    id, ok: true, dims: { ...ZERO_DIMS }, unclassifiedNotes: 0, notes: [], turns: [],
+    auditFailures: 'not-applicable',
+  });
+
+  it('红：占位用例不被计为通过——显式 N/A（undefined）', () => {
+    const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
+    expect(q5b.placeholder, 'Q5b 必须是占位用例').toBe(true);
+    expect(unifiedCasePassedOf(emptyRow('Q5b'), q5b, undefined, true)).toBeUndefined();
+  });
+
+  it('孪生：同形但不是占位的非基线用例同样跳过（C2/D1/D2/X1——与 score.ts 的 skipped 同口径）', () => {
+    // 2026-11-10 独立评审 medium：旧实现只对占位条目返回 undefined，非占位的
+    // inBaseline:false 用例（C2/D1/D2/X1）退回最小口径并计进 metrics.cases；score.ts
+    // 则把所有 !inBaseline 记 skipped——同一份报告两套通过率口径。现在统一按基线跳过。
+    const spec = mockSpec({ shortCase: { turns: [] } });
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, false)).toBeUndefined();
+    // 只有基线整份不可读（baselineKnown=false，黑盒降级）才退回最小口径：没有"进没进
+    // 基线"的信息，不能把整份报告的通过率清空。
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, false, 'mock-core', false)).toBe(true);
+  });
+
+  it('红：runner 崩溃的占位用例同样 N/A；有基线的崩溃用例判失败（不静默漏）', () => {
+    const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
+    const crashedPlaceholder = caseCrashOf(q5b, new Error('runner 崩了'), 'probe-x', true);
+    expect(crashedPlaceholder.result.auditFailures).toBe('not-applicable');
+    expect(unifiedCasePassedOf(crashedPlaceholder.result, q5b, undefined, true)).toBeUndefined();
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const crashedBaseline = caseCrashOf(a1, 'boom', 'probe-x', true);
+    expect(crashedBaseline.result.ok).toBe(false);
+    expect(unifiedCasePassedOf(crashedBaseline.result, a1, { dims: { ...ZERO_DIMS } }, true)).toBe(false);
   });
 });

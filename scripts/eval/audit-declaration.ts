@@ -52,7 +52,7 @@
  * 落账在评测/执行层适配边界，不在本模块。本模块无 I/O、不跑模型，纯函数，可被单测直接 import
  * （与 amount-criteria.ts 同款抽法）。
  */
-import { extractAmounts } from './amount-criteria';
+import { extractAmounts, isDateLikeAmount } from './amount-criteria';
 import type { ExecutionAuditRow } from './evidence';
 
 // ── 形状 ──
@@ -163,7 +163,7 @@ export interface AuditDeclarationVerdict {
   checks: Record<AuditDeclarationCheck, boolean>;
   /** 解析出的申报行（块级格式故障时为空——没有可解析的块就没有申报）。 */
   lines: readonly AuditDeclarationLine[];
-  /** 回复（申报块外）提取到的金额值（extractAmounts 口径，按值去重）。 */
+  /** 回复（申报块外）提取到的金额值（extractAmounts 口径，按值去重；含日期样数字——覆盖查只对其中像金额的要求申报，见 classifyAuditDeclaration 内 declarable）。 */
   amounts: readonly number[];
   /** 逐条违例（顺序 = AUDIT_DECLARATION_CHECKS 列举序）。 */
   findings: readonly AuditDeclarationFinding[];
@@ -737,7 +737,15 @@ export function classifyAuditDeclaration(
   // 不排除的后果：独立 0 会被提取，而夹具没有任何记录值为 0 ⇒ 诚实的 `0 <- rec-NNN` 永远
   // 栽在值不符上，无成功查询的轮次连 `0 := 500 - 500` 都写不出来——合法「0 results」式回复
   // 只能假红（D-207 未决二①）。
-  const amounts = extractAmounts(scan.prose).map((amount) => amount.value).filter((value) => value !== 0);
+  const extracted = extractAmounts(scan.prose).filter((amount) => amount.value !== 0);
+  const amounts = extracted.map((amount) => amount.value);
+  // 覆盖/格式只对**像金额的**数字提要求（2026-11-10 评审 4）：日期样数字（裸年份
+  // 1900-2099、年月日组合）没有可申报的记录来源——回复提一句"It is 2026."不申报年份，
+  // audited 门却在有平台证据的轮次判 coverage:2026 假红。判据（字面形态）在 amount-criteria
+  // 的 isDateLikeAmount——金额形态学的权威位置（区间为何取 2099 而非 2100 见那里的决策
+  // 记录）；黑盒提取器口径不变（那边按 §9 把无语境裸年份当金额）。真实金额（500/300/200/
+  // 1000，带千分位或小数的同值数字）照旧要求申报。
+  const declarable = extracted.filter((amount) => !isDateLikeAmount(amount, scan.prose));
   const entries = collectRecordEntries(auditRows);
   const facts = collectRecordValues(entries);
   const findings: AuditDeclarationFinding[] = [];
@@ -745,16 +753,17 @@ export function classifyAuditDeclaration(
   // ── 覆盖：回复里每个数字都有申报行（引用或运算）──
   // 只在块可解析时查：块缺/坏时格式查已判红（同一根因一条 note，不摊成五条）。
   // 命题行不是金额申报，不参与覆盖（nocaliber/notfound 只申报"没有"什么）。
+  // 只对 declarable（日期样数字已排除，见上）提要求。
   if (scan.content !== null) {
     const declared = new Set(
       parsed.lines.flatMap((line) => (line.kind === 'proposition' ? [] : [line.value])),
     );
-    for (const value of amounts) {
-      if (declared.has(value)) continue;
+    for (const amount of declarable) {
+      if (declared.has(amount.value)) continue;
       findings.push({
         check: 'coverage',
-        subject: String(value),
-        note: `申报覆盖缺口：回复里的数字 ${value} 没有对应申报行（引用或运算）：「${snippet(reply)}」`,
+        subject: String(amount.value),
+        note: `申报覆盖缺口：回复里的数字 ${amount.value} 没有对应申报行（引用或运算）：「${snippet(reply)}」`,
       });
     }
   }
@@ -898,9 +907,11 @@ export function classifyAuditDeclaration(
   }
 
   // ── 格式：块级故障 / 有数字但缺块 / 行不可解析 ──
+  // 「有数字」同样只数 declarable：纯日期回复（"It is 2026."）没有可申报的数，不要求块
+  // （与独立 0 同款——回复无（可申报的）数字则不要求有块）。
   if (scan.blockFault !== null) {
     findings.push({ check: 'format', subject: 'block', note: scan.blockFault });
-  } else if (scan.content === null && amounts.length > 0) {
+  } else if (scan.content === null && declarable.length > 0) {
     findings.push({
       check: 'format',
       subject: 'block',

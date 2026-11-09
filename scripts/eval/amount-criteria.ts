@@ -2,9 +2,9 @@
  * 金额判据纯核（探针 errorStateNotes / amountNote 共用的**单一来源**，无 I/O、不跑模型）。
  *
  * 抽出原因（2026-11-07 评审 blocking：错误态实体绑定要有反例的变异测试）：探针
- * scripts/probe-real-agent.ts 顶层就跑 main()（真实 LLM 装配），测试无法 import；纯核
- * 抽到这里后 amount-criteria.test.ts 才能把评审的反例形态钉成表征锁。夹具事实表在
- * dummy-fixture.ts（单一转录点），本模块只做判定。
+ * scripts/probe-real-agent.ts 已有入口守卫（import 不跑 main()），但仍会拖入真实装配
+ * 链；纯核抽到这里后 amount-criteria.test.ts 只 import 判定本身，就能把评审的反例形态
+ * 钉成表征锁。夹具事实表在 dummy-fixture.ts（单一转录点），本模块只做判定。
  */
 
 import {
@@ -38,8 +38,8 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
  * 红；2026-11-08 评审 blocking：合计措辞按 isVerifiedTotal 子集和验，带符号组合不再冒充合计）。
  * 2026-11-07 C2 实测：比较轮答"contoso-trade 2100，比 contoso-logistics（450）高出 1650，
  * 约为其 4.7 倍"与"两者相差 100"——三条全是标好的算术，旧判据全当"金额与真实结果不一致"红。
- * 2026-11-09 成本轮实测补词：Y2 第 3 轮答"三条数值合计 1000……1000 是这三条数值的加总，
- * 不等同于应付余额科目"——第二处 1000 明写"加总"且紧跟口径免责，却因词表只有"合计"落进
+ * 2026-11-09 成本轮实测补词：答"三条数值合计 1000……1000 是这三条数值的加总，不等同于
+ * 任何单条记录的值"——第二处 1000 明写"加总"且紧跟口径免责，却因词表只有"合计"落进
  * 无所属（红）。合计的同义措辞（加总/求和）补进词表，语义与既有的"合计 1000 降信息性"
  * （expectations 表格摊账用例）一致：加总照样要过 isVerifiedTotal 子集和验，算不出来照红。
  */
@@ -187,6 +187,23 @@ function enumeratedTotalOk(summands: ReadonlyArray<{ value: number }>, total: nu
   return new Set(values).size === values.length && values.reduce((s, v) => s + v, 0) === total;
 }
 
+/**
+ * 可见实体的**完整**全额聚合（2026-11-10 独立评审 medium）：detached 合计的候选账本。
+ *
+ * 免责切断后的合计（"alpha 的 record value 是 1200，gamma-collection not found, total
+ * is 1000"）不属于本分句任何有值实体，也不能用"全回复真实值之和"验——回复里还有 alpha
+ * 的 1200，全和是 2200。但 1000 确是一个登记实体（beta = 500+300+200）的全额，且它的
+ * 每条值都出现在回复里——这是"加数可见 + 完整聚合"，不是摘樱桃的部分和。只对 detached
+ * 合计开放（其余无绑定合计仍走全回复全和，保持"部分和冒充合计"的收紧），并要求实体
+ * 值集长度 ≥2（单值实体的"全额"就是该值本身，不构成合计证据）。
+ */
+function visibleEntityTotal(value: number, visibleValues: ReadonlyArray<number>): boolean {
+  const visible = new Set(visibleValues);
+  return ENTITY_REAL_VALUES.some((entity) => entity.values.length >= 2
+    && entity.values.every((v) => visible.has(v))
+    && isVerifiedTotal(value, entity.values));
+}
+
 export function isVerifiedArithmetic(value: number, pool: ReadonlyArray<number>): boolean {
   return isVerifiedDifference(value, pool) || isVerifiedRatio(value, pool);
 }
@@ -234,6 +251,78 @@ function patternPositions(clause: string, pattern: string): number[] {
   const out: number[] = [];
   for (const match of clause.matchAll(new RegExp('(?<![\\d.,%％])' + pattern + '(?!\\d)', 'g'))) out.push(match.index ?? 0);
   return out;
+}
+
+/**
+ * 日期样数字的形态判据（2026-11-10 评审 4）。**只被 audited 申报覆盖查消费**
+ * （audit-declaration 的 declarable 集），extractAmounts 自己不调它。
+ *
+ * 与 extractAmounts 内部的年份排除是**两个问题**，不复用同一实现：
+ *   · extractAmounts 按**紧邻语境**排除（后随"年/月"、英文月份名在前、`-<数字>` 日期
+ *     延续），因为黑盒金额判据必须把"不带语境的裸四位数字"当金额——它与真实合计 2000
+ *     同形态，无法确定性区分（2026-11-08 评审 blocking：旧实现按 1900–2099 裸区间排除，
+ *     把 alpha 的真实合计 2000 静默吞掉，编造金额整个消失）。那边漏掉的形态（"In
+ *     November, 2026," 的逗号、点分/斜杠年月日、无月份语境的裸年份）对黑盒判据是已知
+ *     残余（§9 交 Tier B），对覆盖查却是假红：日期没有可申报的记录来源，要求申报 =
+ *     audited 门在有平台证据的轮次红。
+ *   · 覆盖查问的是"这个数字要不要申报"，判据是**字面形态**：裸年份（无千分位/小数/
+ *     单位的四位 1900–2099）与年月日组合。带格式的同值数字（"2,000" / "2000.00"）仍是
+ *     金额形态，照旧要求申报。
+ *
+ * 已知残余（如实记账）：按区间排除裸年份会连带放过**未申报的**真实合计 2000（alpha
+ * 1200+800 的实计）——它与年份同形态。挂到实体的编造值仍由 errorStateNotes 的张冠李戴
+ * 通道判红，缺口只在"无实体可绑的裸四位编造数"。区间取 1900–2099（(?:19|20)\d{2}，
+ * 与 extractAmounts 既有的年份形态同源）而不是字面的 1900–2100：2100 恰是 contoso-trade
+ * 的真实合计（1500+600），当年份排除会让它免于申报——"别把真实金额误排"优先。
+ */
+const BARE_YEAR_RE = /^(?:19|20)\d{2}$/;
+/**
+ * 年月日组合的**锚定**匹配（从数字出现位置起算）：`YYYY[-/.／]MM(-DD)?`（"2026-11-02"、
+ * "2026.11.02"、"2026/11/2"）。月/日分量按**有效值**收（月 1–12、日 1–31）——否则
+ * "2000.00" 这种格式化金额会被当月日（month=00）读成日期、免于申报，正是要堵的误排形态。
+ * 锚定而不是整段搜索（2026-11-10 独立评审 low）：整段 `matchAll` 会让回复别处的
+ * "2026-11-02" 把任意位置的 2026 金额一起免申报；只认**数字出现位置**上的日期组合。
+ */
+const DATE_COMBO_AT_START_RE = /^((?:19|20)\d{2})([-/.／])(0?[1-9]|1[0-2])(?:[-/.／](0?[1-9]|[12]\d|3[01]))?(?!\d)/;
+/**
+ * 紧跟数字的货币/缩放单位：带单位的 1900–2099 四位数字是金额，不是裸年份
+ * （2026-11-10 独立评审 low："2026 元" 被当日期样从覆盖要求里剔除）。
+ */
+const CURRENCY_SUFFIX_RE = /^\s*(?:元|块|人民币|美元|欧元|英镑|日元|万|亿|RMB|CNY|USD|EUR|GBP|JPY)/i;
+
+/** 同一 raw 在正文里的出现位置（按词元边界；`amount.at` 缺席时用于逐次回退判定）。 */
+function rawOccurrences(text: string, raw: string): number[] {
+  const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return [...text.matchAll(new RegExp(`(?<![\\d.,])${escaped}(?!\\d)`, 'g'))]
+    .map((match) => match.index ?? 0);
+}
+
+/**
+ * 该次出现是否是日期样（不计入申报覆盖要求）。`text` = 该数字所在的回复正文。
+ *
+ * 判据按**出现位置**而不是全文任意同值字面量（2026-11-10 独立评审 low）：
+ *   · 裸年份：四位、无千分位/小数/单位——带格式的同值数字（"2,000"）是金额形态；
+ *     紧跟货币/缩放单位（"2026 元" / "2026 RMB"）同样不是裸年份，照旧要求申报；
+ *   · 年月日组合只在数字出现位置起算（DATE_COMBO_AT_START_RE）。
+ * `amount.at` 缺席（测试/旧调用方）时回退到全文同 raw 的全部出现：**每一处**都日期样才
+ * 排除——任一处是金额（含带单位形态）就必须申报，不能借别处的日期豁免。
+ */
+export function isDateLikeAmount(amount: { raw: string; value: number; at?: number }, text: string): boolean {
+  const positions = amount.at !== undefined ? [amount.at] : rawOccurrences(text, amount.raw);
+  if (positions.length === 0) return false;
+  const dateLikeAt = (at: number): boolean => {
+    if (BARE_YEAR_RE.test(amount.raw)) {
+      // 裸年份 + 货币/缩放单位 = 金额（"The total is 2026 元."）。
+      return !CURRENCY_SUFFIX_RE.test(text.slice(at + amount.raw.length));
+    }
+    const match = DATE_COMBO_AT_START_RE.exec(text.slice(at));
+    if (!match) return false;
+    const [, year, separator, month] = match;
+    // 点分组合（"2026.11.02"）被 AMOUNT_PATTERN 的小数分支读成十进制 2026.11；短横/
+    // 斜杠组合只读出年份。按提取器的读法比对字面量，同源才排除。
+    return (separator === '.' ? `${year}.${month}` : year) === amount.raw;
+  };
+  return positions.every(dateLikeAt);
 }
 
 /**
@@ -290,11 +379,17 @@ const MOCK_WINDOW_CODES = new Set(['W1', 'W2']);
  */
 const AMOUNT_PATTERN = /-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?\s*[万亿]|-?\d+\.\d+(?![\d%％])|(?<![\d.])-?\d{3,}(?!\.\d)(?![\d%％])|(?<![\d.])-?0(?!\.\d)(?!\d)/g;
 
-/** 提取器产出的最小金额形状（探针与测试共用）。 */
+/** 提取器产出的最小金额形状（探针与测试共用）。`at` = 该值**首次**出现的正文下标。 */
 export interface ExtractedAmount {
   raw: string;
   value: number;
   confident?: boolean;
+  /**
+   * 首次出现的正文下标（match 起点，含负号）。日期样判定按位置核（isDateLikeAmount）：
+   * 同值不同位置的语义可以不同（一处是日期、一处是金额），按值去重后保留首现位置，
+   * 全文同值回退由 isDateLikeAmount 自己处理。
+   */
+  at?: number;
 }
 
 /**
@@ -343,7 +438,7 @@ export function extractAmounts(text: string): ExtractedAmount[] {
       : parseFloat(raw.replace(/,/g, ''));
     if (!Number.isFinite(value) || seen.has(value)) continue;
     const confident = /,\d{3}/.test(raw) || /\.\d/.test(raw) || /[万亿]/.test(raw);
-    seen.set(value, { raw, value, confident });
+    seen.set(value, { raw, value, confident, at });
   }
   return [...seen.values()];
 }
@@ -358,8 +453,34 @@ export const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\
  * "没找到/无数据"类免责措辞时，该提及不参与最近前置绑定（金额退回无绑定摊账通道，
  * 按全回复真实值验）。不带免责措辞的形态（"gamma-collection total is 1000"）仍绑
  * 零值实体 ⇒ 张冠李戴照红。
+ *
+ * 措辞表按语料实据收自然同义句（2026-11-10 独立评审 high）：模型不会照抄 "not found"，
+ * 同一事实会说 "has no records" / "doesn't exist" / "no such collection" / "is empty" /
+ * "中没有记录"。只认前一组字面会把真实合计重新记成张冠李戴（零值实体仍是最近前置
+ * 归属人）。表只作用于**零值实体与金额之间**的片段，不参与全局措辞判定。
  */
-const ABSENT_ENTITY_DISCLAIM_RE = /not[\s_-]*found|不存在|没有找到|未找到|查无|无此|无数据|没有数据|no\s+data/i;
+const ABSENT_ENTITY_DISCLAIM_RE = new RegExp([
+  'not[\\s_-]*found',
+  '不存在',
+  '没有找到',
+  '未找到',
+  '查无',
+  '无此',
+  '无数据',
+  '没有数据',
+  'no\\s+data',
+  'no\\s+such',
+  'no\\s+(?:records?|entries|items?|values?|results?)',
+  '(?:has|have|contains?)\\s+no\\s+(?:records?|entries|items?|values?|data)',
+  "(?:does|do|did)(?:n['’]t|\\s+not)\\s+exist",
+  '(?:is|are)\\s+empty',
+  '中没有记录',
+  '没有记录',
+  '无记录',
+  '为空',
+  '是空的',
+  '空集合',
+].join('|'), 'i');
 
 /** 判据输入的最小金额形状（探针传自己的 extractAmounts 产物，保留 raw/confident 供回显）。 */
 export interface AmountLike {
@@ -514,10 +635,10 @@ function attributesToFollowingEntity(
  * 路径照旧红，但 audited 路径因此假绿。
  *
  * 这里只补**显式归属措辞 + 夹具命名形状**这一窄面，不做最近前置绑定：
- *   · 显式措辞：`NAME (的)? (record )?(value|balance|记录值|值|余额) (is|是|…) 金额`、
- *     `金额 is the value of NAME`、`金额 是 NAME 的记录值`、`金额 belongs to NAME`、
- *     `| NAME | 金额 |`；普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）里的
- *     "is" 形态也收（名字形状闸挡普通复合词）；
+ *   · 显式措辞：`NAME (的)? (record )?(value|balance|total|记录值|值|余额|合计|加总|求和|总计)
+ *     (is|是|…) 金额`、`金额 is the value/total of NAME`、`金额 是 NAME 的记录值/合计`、
+ *     `金额 belongs to NAME`、`| NAME | 金额 |`；普通枚举（"foo-item-1 is 500,
+ *     beta-item-1 is 300"）里的 "is" 形态也收（名字形状闸挡普通复合词）；
  *   · 名字形状闸：数字分段（foo-item-1 / rec-999）或实体族后缀（*-collection /
  *     *-records / *-group）才可能是夹具实体；全大写分段（rec-XXX / SUBJECT_NOT_FOUND）
  *     是占位符/状态码，well-known / real-time / beta-related 这类普通复合词由后缀闸挡掉。
@@ -553,12 +674,17 @@ function isUnregisteredEntityName(token: string): boolean {
 /**
  * 金额出现位置（at..amountEnd）是否被正文显式挂给一个未登记实体名。调用方只在
  * classifyErrorStateAmounts 的分句循环里用，`clause` 已按 CLAUSE_SPLIT 切好。
+ *
+ * 归属口径词按语料实据收（2026-11-10 独立评审 medium 补 total 族）：`value/balance/
+ * 记录值/值/余额` 之外，`total/合计/加总/求和/总计` 同样是显式归属——"foo-collection
+ * total is 1000" 把真实合计挂给未登记名字，不能因为词表窄就漏判（已登记的 gamma 同句
+ * 走 misattributed 照红，尺子必须一致）。
  */
 function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: number): boolean {
   const before = clause.slice(0, at);
   const direct = [
-    // NAME record value is / NAME 的记录值是 / NAME balance is / NAME 的值是
-    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:record\\s+)?(?:value|balance|记录值|值|余额)\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
+    // NAME record value is / NAME total is / NAME 的记录值/合计 是 / NAME balance is
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:record\\s+)?(?:value|balance|total|记录值|值|余额|合计|加总|求和|总计)\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
     // NAME is / NAME 是 / NAME:（普通系动词与标签分隔；名字形状闸挡普通复合词）
     new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:is|are|was|were|equals?|=|是|为|[:：])\\s*$`, 'i'),
     // | NAME | 金额 |
@@ -570,10 +696,10 @@ function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: 
   }
   const after = clause.slice(amountEnd);
   const inverted = [
-    // 金额 is the value of NAME
-    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?(?:record\\s+)?(?:value|balance)\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
-    // 金额 是 NAME 的记录值
-    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额)`),
+    // 金额 is the value/total of NAME
+    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?(?:record\\s+)?(?:value|balance|total)\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+    // 金额 是 NAME 的记录值/合计
+    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额|合计|加总|求和|总计)`),
     // 金额 belongs to NAME
     new RegExp(`^\\s*belongs?\\s+to\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
   ];
@@ -760,14 +886,27 @@ export function classifyErrorStateAmounts(
       //     balance 500"（无运算可摊）照红。
       const bindings = positions.map((at) => {
         let mention: { entity: EntityLike; at: number } | undefined;
+        // 免责提及切断归属（2026-11-10 独立评审 medium）：零值实体在免责语境里不参与
+        // 最近前置绑定，且它的免责提及是归属边界——金额不属于**更早**的实体。
+        // "alpha 的 record value 是 1200，gamma-collection not found, total is 1000" 的
+        // 1000 是前句 beta 的合计，不是 alpha 的；旧实现跳过 gamma 后回落到 alpha，
+        // specific 非空把 1000 记成张冠李戴（假红）。detached 标记让这笔金额走无绑定
+        // 摊账通道（按全回复真实值验），不再拿 specific 的值集核它。
+        let detachedByDisclaimer = false;
         for (const m of mentions) {
           if (m.at > at) break;
           // 零值实体只在**非免责语境**里当最近前置归属人（见 ABSENT_ENTITY_DISCLAIM_RE）：
           // "gamma-collection not found, total is 1000" 的 gamma 是错误对象，不是 1000 的
           // 归属人；跳过它后金额走无绑定摊账通道（1000 = 前句 500+300+200）。
           if (m.entity.values.length === 0
-            && ABSENT_ENTITY_DISCLAIM_RE.test(clause.slice(m.at + m.entity.name.length, at))) continue;
+            && ABSENT_ENTITY_DISCLAIM_RE.test(clause.slice(m.at + m.entity.name.length, at))) {
+            mention = undefined;
+            detachedByDisclaimer = true;
+            continue;
+          }
           mention = m;
+          // 免责提及之后又出现有值实体：金额的最近前置归属人是它，免责边界不再生效。
+          detachedByDisclaimer = false;
         }
         // 倒装归属优先于最近前置绑定（2026-11-09 评审修复）："gamma-collection not found,
         // but 500 is the value of beta-item-1" 里 gamma 是错误对象（表内零值实体）、beta
@@ -783,6 +922,8 @@ export function classifyErrorStateAmounts(
           && attributesToFollowingEntity(clause, amountEnd, following.at, following.entity.name)
           ? following : undefined;
         if (inverted) mention = inverted;
+        // 明确归属措辞比免责边界更强：金额被显式挂给后随实体时，免责实体不是归属人。
+        const detached = detachedByDisclaimer && inverted === undefined;
         // segment / segSummands 的右界：正常绑定看金额之后的下一处提及；倒装绑定看**该实体
         // 之后**的下一处提及（金额在实体之前，不能把实体本身当右界，否则 segment 为空）。
         const next = mentions.find((m) => m.at > (inverted ? inverted.at : at));
@@ -800,12 +941,18 @@ export function classifyErrorStateAmounts(
         return {
           at,
           mentionEntity: mention?.entity,
+          detached,
           segment,
           gap,
           claimsTotal: TOTAL_FRAMING_RE.test(gap),
-          valueOk: mention === undefined
-            ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
-            : mention.entity.values.includes(amount.value),
+          // 免责切断的金额没有归属人：不拿 specific 的值集核它（否则 specific 非空时
+          // 必然 valueOk=false，又在 clause 级 misbound 里记成张冠李戴）。它由下方
+          // 无绑定摊账通道按全回复真实值验，验不过照旧硬红。
+          valueOk: detached
+            ? true
+            : mention === undefined
+              ? specific.length === 0 || specific.some((entity) => entity.values.includes(amount.value))
+              : mention.entity.values.includes(amount.value),
           windowOk: windowClaimOk(segment, mention === undefined ? specific : [mention.entity]),
           segSummands: occs.filter((o) => o.at >= segStart && o.at + o.raw.length <= at && REAL_DATA_VALUES.includes(o.value)),
         };
@@ -917,15 +1064,19 @@ export function classifyErrorStateAmounts(
             // 列举了 ≥2 个加数还验不过的（明写"这些加起来等于我"而算不对，
             // 摘 Cherry 反例）由 claimedSummands 收紧挡在门外。
             if (claimed) return true;
+            // detached 合计：全回复全和验不过时，再看"可见实体的完整全额"（见
+            // visibleEntityTotal——1000 是前句 beta 500+300+200 的实计，回复里另有
+            // alpha 1200 时全和是 2200，不能因此把真实合计判红）。
+            if (b.detached && visibleEntityTotal(amount.value, replyRealValues)) return true;
             return expressionAdjacentOk(b, true);
           }
           if (DIFF_FRAMING_RE.test(b.gap)) {
             const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
             return listed.length >= 2
               ? listed.some((x, i) => listed.some((y, j) => i !== j && Math.abs(x - y) === amount.value))
-              : isVerifiedDifference(amount.value, pool);
+              : isVerifiedDifference(amount.value, b.detached ? replyRealValues : pool);
           }
-          if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
+          if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, b.detached ? replyRealValues : pool);
           // R3 算式相邻：无自称运算时，与同分句另一笔金额只隔运算符/连接词的真实值是算式的
           // 操作数——"合计：500 + 300 + 200 = 1000" 的 300/200 各自 gap 里没有框架词（自称
           // 合计认不出来），只靠相邻获得归属（2026-11-09 owner 裁定：算式对错归 judge）。
@@ -1007,7 +1158,8 @@ export function classifyErrorStateAmounts(
       // 任一分句挂错即记——同一数值的每次出现各自核对（与上面"任一次出现判红即红"同口径）。
       misbound ||= bindings.some((b) => !b.windowOk
         || (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value))
-        || (b.mentionEntity === undefined && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
+        || (b.mentionEntity === undefined && !b.detached
+          && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     // 未登记名字的显式归属单独成维（不要求金额落 hard：显式挂给不存在的名字本身

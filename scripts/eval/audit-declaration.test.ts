@@ -799,6 +799,88 @@ describe('audited 申报契约边界：独立 0 不进覆盖要求', () => {
 });
 
 /**
+ * 日期样数字不计入申报覆盖（2026-11-10 评审 4）。extractAmounts 只按**紧邻语境**排年份
+ * （月份名在前/后随"年"/`-<数字>` 延续），漏掉的形态——无月份语境的裸年份（"It is 2026."）、
+ * 月份与年份之间的逗号（"In November, 2026,"）、点分/斜杠年月日（"2026.11.02"、"2026/11/02"）
+ * ——都进了覆盖查的"回复里的数字"，audited 门判 coverage:<年份> 假红。覆盖查改为只对
+ * **像金额的**数字要求申报（isDateLikeAmount 字面形态判据，amount-criteria 持有）；
+ * 真实金额（500/300/200/1000，带千分位或小数的同值数字）照旧要求申报。
+ */
+describe('audited 申报契约边界：日期样数字不进覆盖要求', () => {
+  const yearForms = [
+    'It is 2026. The record value is 500.',
+    'In November, 2026, the record value is 500.',
+    'On 2026-11-02 the record value is 500.',
+    'The date is 2026.11.02 and the record value is 500.',
+    'As of 2026/11/02 the record value is 500.',
+    'From 2026 to 2027 the record value is 500.',
+  ];
+  for (const prose of yearForms) {
+    it(`绿：${prose} + 如实申报 500`, () => {
+      const v = classify(`${prose}\n[audit]\n500 <- rec-101\n[/audit]`);
+      expect(v.findings).toEqual([]);
+      expect(v.ok).toBe(true);
+      // 提取器口径不变（年份仍在 amounts 里），只是不要求申报。
+      expect(v.amounts).toContain(500);
+    });
+  }
+
+  it('红：金额没申报 ⇒ 仍红——且红的是金额 500，不是年份', () => {
+    const v = classify('It is 2026. The record value is 500.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.checks).toEqual({ ...ALL_GREEN, coverage: false });
+  });
+
+  it('红：点分年月日 + 金额没申报 ⇒ 仍红（subject 是金额）', () => {
+    const v = classify('The date is 2026.11.02 and the record value is 500.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('500');
+  });
+
+  it('绿：纯日期回复 + 没有申报块（没有可申报的数，不要求块）', () => {
+    const v = classify('It is 2026. No records to report for that window.');
+    expect(v.findings).toEqual([]);
+    expect(v.ok).toBe(true);
+  });
+
+  it('红不放宽：格式化的真实合计仍要求申报——"The total is 2,000." 没申报照红', () => {
+    // 带千分位的 2000 是金额形态（isDateLikeAmount 只收裸四位年份），alpha 的真实合计
+    // 1200+800=2000 不得借"像年份"免于申报。
+    const v = classify('The total is 2,000.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('2000');
+  });
+
+  it('红不放宽：带单位的 1900–2099 金额仍要求申报——"The total is 2026 元."（2026-11-10 独立评审 low）', () => {
+    // 注释口径是"裸年份（无千分位/小数/单位）"；实现旧写法只看 raw 的 1900–2099 形态，
+    // 连紧跟"元"的真实金额也当日期样免申报。带单位 = 金额形态，照旧要求申报。
+    const v = classify('The total is 2026 元.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('2026');
+  });
+
+  it('红不放宽：回复别处的日期组合不豁免同值金额——"2026 元 ... 2026-11-02" 仍要求申报', () => {
+    // 旧实现整段 matchAll DATE_COMBO_RE：别处的 2026-11-02 会让 2026 金额一起免申报。
+    const v = classify('The total is 2026 元. Reference date 2026-11-02.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('2026');
+  });
+
+  it('红不放宽：contoso-trade 的真实合计 2100 仍要求申报（区间只到 2099）', () => {
+    const v = classify('The total is 2100.\n[audit]\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['coverage']);
+    expect(v.findings[0]!.subject).toBe('2100');
+  });
+
+  it('绿：年份进申报块也不冲突（引用行照核，值不符仍红）', () => {
+    // 日期不**要求**申报，但模型若把年份当金额申报，引用行仍按事实核（rec-101 是 500）。
+    const v = classify('It is 2026. The record value is 500.\n[audit]\n500 <- rec-101\n2026 <- rec-101\n[/audit]');
+    expect(v.findings.map((f) => f.check)).toEqual(['valueMismatch']);
+  });
+});
+
+/**
  * 覆盖可被运算行 LHS 全额满足（2026-11-09 独立评审 + D-207 未决二⑥；本轮补算式验算后的
  * 残余面）："The total is 1000" 配 `1000 := 500 + 300 + 200` + 三条真实引用行仍然全绿——
  * 加数真实、算式内部成立，但 1000 平台从未返回过。机械层只能核「数 ← 记录值」与算式

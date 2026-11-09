@@ -6,7 +6,7 @@
  *   ② 阶梯摘要计数修括号（旧写法 `?? 0 + 1` 让同档计数永不递增）。
  */
 import { describe, expect, it } from 'vitest';
-import { buildCaseReport, metricInputs, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
+import { buildCaseReport, buildUnifiedReport, metricInputs, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
 
 function caseInput(overrides: Partial<ReportCaseInput> = {}): ReportCaseInput {
   return {
@@ -146,5 +146,33 @@ describe('metricInputs：跳过用例不进通过率分母（占位/未跑）', 
     const placeholder = buildCaseReport(caseInput({ caseId: 'Q5b' }));
     const inputs = metricInputs([ran, placeholder], (item) => (item.caseId === 'Q5b' ? undefined : true));
     expect(inputs.map((item) => item.caseId)).toEqual(['a1']);
+  });
+});
+
+describe('buildUnifiedReport：跳过用例在 cases[] 里显式标 verdict', () => {
+  it('passOf undefined ⇒ verdict=skip（ok 原值保留但不冒充通过），metrics 分母同步', () => {
+    // 2026-11-10 独立评审 medium：旧报告 cases[] 只有 ok:true，跳过用例（未进基线）
+    // 只看 cases 的消费者会误读为通过。verdict 与 metricInputs 同源（passOf）。
+    const report = buildUnifiedReport({
+      at: 'now',
+      evalRunId: 'r',
+      cases: [caseInput({ caseId: 'a1' }), caseInput({ caseId: 'D1' })],
+      passOf: (line) => (line.caseId === 'D1' ? undefined : true),
+    });
+    expect(report.cases.map((line) => [line.caseId, line.verdict, line.ok]))
+      .toEqual([['a1', 'pass', true], ['D1', 'skip', true]]);
+    expect(report.metrics.cases).toBe(1);
+    expect(report.metrics.passed).toBe(1);
+  });
+
+  it('没有 passOf 时 verdict 退回 ok（旧调用方不伪造跳过）', () => {
+    const report = buildUnifiedReport({
+      at: 'now',
+      evalRunId: 'r',
+      cases: [caseInput({ caseId: 'a1' }), caseInput({ caseId: 'a2', ok: false })],
+    });
+    expect(report.cases.map((line) => line.verdict)).toEqual(['pass', 'fail']);
+    expect(report.metrics.cases).toBe(2);
+    expect(report.metrics.passed).toBe(1);
   });
 });

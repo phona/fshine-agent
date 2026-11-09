@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { classifyErrorStateAmounts, extractAmounts } from './amount-criteria';
 import { loadCases } from './cases';
 import { evaluateCaseExpectations, expectationSelfCheck, type ExpectationTurn } from './expectations';
 import type { ExecutionAuditRow } from './evidence';
@@ -584,6 +585,27 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     // "正文挂给了谁"。unregisteredAttribution 只收显式归属措辞 + 夹具命名形状，补回这一维。
     const t2 = auditedTurn(2, 'foo-item-1 record value is 500。请确认。', '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
     expect(failing(shell(t2), specOf('Y2'))).toEqual(['期望·张冠李戴(第3轮)']);
+  });
+
+  /**
+   * 已知残余（2026-11-10 评审 6，仲裁 2）：凭空名字（foo-item-1）没有外部事实可对，
+   * 机械层不判"挂给了谁"是**已登记残余**，不是期望行为。unregisteredAttribution 只覆盖
+   * 显式归属的窄措辞（record value / balance / 值 / 余额 / is / 表格行）；"has 500" /
+   * "500 for …" 这类宽措辞逃出窄闸 ⇒ audited 申报路径仍绿。黑盒路径不消费申报块：
+   * 分类器的 unattributed 非空，probe-real-agent 的 errorStateNotes 非 audit 分支会发
+   * 「无所属金额」note（scripts/probe-real-agent.ts 的 errorStateNotes），同一形态照红。
+   * 要收这一维需要外部事实或更宽的措辞闸；未做，登记在 D-207 未决二⑨。
+   */
+  it('已知残余（不判）：窄措辞闸外的未登记名字归属 ⇒ audited 绿、黑盒仍红', () => {
+    const prose = 'foo-item-1 has 500。请确认。';
+    const t2 = auditedTurn(2, prose, '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
+    // 残余：audited 路径全绿（这是缺陷面，不是"应绿"的判据）。
+    expect(failing(shell(t2), specOf('Y2'))).toEqual([]);
+    // 黑盒路径的 red 输入：金额没有可核对归属 ⇒ errorStateNotes 会发「无所属金额」。
+    const verdict = classifyErrorStateAmounts(prose, TEXTS[2]!, extractAmounts);
+    expect(verdict.unattributed.map((item) => item.value)).toEqual([500]);
+    expect(verdict.unregisteredAttribution).toEqual([]);
+    expect(verdict.misattributed).toEqual([]);
   });
 
   it('not_found 轮的真实值 + 如实申报 ⇒ 红（回归锁：forbidValues/零金额本来就不看 declared）', () => {

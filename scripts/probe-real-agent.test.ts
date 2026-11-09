@@ -6,15 +6,19 @@
  * countInterventionPoints 只数 status=pending——提案等用户确认后提交成功时最终态是
  * committed，那个"用户必须确认"的停点就从干预指标里消失，完整写链被报成零次干预。
  */
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
-  auditOutgoingText, caseReportInputOf, errorStateNotes, loadBaselineForProbe, unifiedCasePassedOf,
+  auditOutgoingText, caseCrashOf, caseReportInputOf, errorStateNotes, loadBaselineForProbe,
+  realAmounts, recallMissed, unifiedCasePassedOf,
+  type ScriptLine, type Turn,
 } from './probe-real-agent';
 import { AUDIT_INSTRUCTION } from './eval/audit-instruction';
 import { mergeCallPhases, type ExecutionAuditRow } from './eval/evidence';
 import { classifyAuditDeclaration } from './eval/audit-declaration';
-import { buildCaseReport } from './eval/report';
+import { buildCaseReport, buildUnifiedReport } from './eval/report';
 import { auditFailuresCheckOf, evaluateProbeCase, type ProbeResultRow } from './eval/score';
 import { emptyDimCounts } from './eval/dims';
 import { loadCases } from './eval/cases';
@@ -546,12 +550,14 @@ describe('统一报告与 score.ts 同源判定（unifiedCasePassedOf）', () =>
       id: 'D1',
       turns: [{ text: d1.messages[0]!.text!, reply, notices: ['计划通知'], calls, refusedCalls: 0, execution: [] }],
     });
-    // D1 不在 baseline.json（inBaseline=false）：main() 的统一报告对它走的就是「无基线项 +
-    // 期望值层」这条最小口径。测试必须同样传 undefined——塞一个假基线项会走
-    // evaluateProbeCase，反而测不到 D1 的真实路径（旧实现把 calls 固定成 -1 的回归就从
-    // 这里漏过去）。
-    expect(unifiedCasePassedOf(rowOf(8), d1, undefined, false, 'probe-D1')).toBe(true);
-    expect(unifiedCasePassedOf(rowOf(4), d1, undefined, false, 'probe-D1')).toBe(false);
+    // D1 不在 baseline.json（inBaseline=false）：基线已加载时统一报告按 score.ts 的
+    // skipped 同口径跳过（unifiedCasePassedOf 返回 undefined，见下一条）。这里显式传
+    // baselineKnown=false 模拟"基线整份不可读的黑盒降级"——只有这条最小口径才逐条消费
+    // expectations，用它钉住真实 calls（旧实现固定 -1 的回归从这里漏过去）。
+    expect(unifiedCasePassedOf(rowOf(8), d1, undefined, false, 'probe-D1', false)).toBe(true);
+    expect(unifiedCasePassedOf(rowOf(4), d1, undefined, false, 'probe-D1', false)).toBe(false);
+    // 基线可读但 D1 不在基线：跳过，不冒充通过也不计入分母（与 score.ts 一致）。
+    expect(unifiedCasePassedOf(rowOf(8), d1, undefined, false, 'probe-D1')).toBeUndefined();
   });
 
   it('占位条目（Q5b/Q13b）从未跑 ⇒ undefined 跳过，不冒充通过', () => {
@@ -573,6 +579,177 @@ describe('统一报告与 score.ts 同源判定（unifiedCasePassedOf）', () =>
   it('dims cap 参与判定：超过基线上限 ⇒ passed=false', () => {
     const capped = { dims: { ...emptyDimCounts(), groundedness: 0 } };
     expect(unifiedCasePassedOf(probeRow({ dims: { ...emptyDimCounts(), groundedness: 1 } }), undefined, capped, false)).toBe(false);
+  });
+
+  it('calls=-1（审计源不可读）在 score.ts 与统一报告两条路径都不出调用数判定', () => {
+    // 2026-11-10 独立评审 medium：-1 是探针的不可知哨兵，不是"零调用"。两个消费面
+    // （score.ts 的 evaluateProbeCase / 统一报告的 unifiedCasePassedOf）共用
+    // expectations.ts 的 callsEvidenceOf，任一边把它当证据都会漂移：minExecutedCalls
+    // 拿 -1 比阈值假红，requery/chitchat 拿 -1 当零假绿。
+    const d1 = loadCases().find((spec) => spec.id === 'D1')!;
+    const reply = 'alpha、beta、contoso-trade、fabrikam-retail：1200、800、500、300、200、1500、600、880';
+    const rowOf = (calls: number): ProbeResultRow => probeRow({
+      id: 'D1',
+      turns: [{ text: d1.messages[0]!.text!, reply, notices: ['计划通知'], calls, refusedCalls: 0, execution: [] }],
+    });
+    const scored = evaluateProbeCase('probe-D1', rowOf(-1), { dims: emptyDimCounts() }, undefined, d1, false);
+    expect(scored.checks.some((check) => check.name === '期望·调用数(第1轮)')).toBe(false);
+    expect(scored.pass).toBe(true);
+    // D1 不在基线：基线可读时统一报告按 score.ts 的 skipped 跳过（undefined）；基线整份
+    // 不可读的黑盒降级（baselineKnown=false）才走「探针 ok + 期望值层」最小口径——-1 在
+    // 这条路径同样不出调用数判定。
+    expect(unifiedCasePassedOf(rowOf(-1), d1, undefined, false, 'probe-D1')).toBeUndefined();
+    expect(unifiedCasePassedOf(rowOf(-1), d1, undefined, false, 'probe-D1', false)).toBe(true);
+    // 有证据的 0 仍照判（证明 -1 的"不判"没有把整条断言关掉）。
+    expect(unifiedCasePassedOf(rowOf(0), d1, undefined, false, 'probe-D1', false)).toBe(false);
+  });
+});
+
+/**
+ * 入口守卫（2026-11-10 独立评审 high）：本模块顶层导出大量纯函数供单测 import，
+ * `main()` 只能直接运行时执行。行为锁用子进程 import——若守卫被去掉，import 即装配探针
+ * （先打"黑盒模式/audited 申报模式"并继续跑 main），这个测试会在输出/退出码上变红。
+ * 直接在 vitest 进程里 import 测不出：守卫失效会先污染测试进程本身。
+ */
+describe('入口守卫：import 模块不执行 main()', () => {
+  it('子进程 import 探针模块 ⇒ 退出码 0 且无探针装配输出', () => {
+    const probeUrl = new URL('./probe-real-agent.ts', import.meta.url).href;
+    const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+    const child = spawnSync(
+      process.execPath,
+      ['--import', 'tsx', '--input-type=module', '--eval', `await import(${JSON.stringify(probeUrl)})`],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 60_000, env: { ...process.env } },
+    );
+    expect(child.status, child.stderr).toBe(0);
+    expect(child.stdout).not.toContain('=== ');
+    expect(child.stdout).not.toContain('黑盒模式');
+    expect(child.stdout).not.toContain('audited 申报模式');
+    expect(child.stderr).not.toContain('探针失败');
+  });
+});
+
+/**
+ * runner 抛错（2026-11-10 独立评审 medium）：崩溃用例必须同时进探针报告与统一报告。
+ * 旧写法 catch 只 push results ⇒ 统一报告的用例计数与通过率被静默缩小。
+ */
+describe('runner 抛错：崩溃用例进统一报告，不被静默漏掉', () => {
+  it('崩溃产物同时含 result 与 report input；占位 N/A、有基线项判失败', () => {
+    const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
+    const crash = caseCrashOf(q5b, new Error('runner 崩了'), 'probe-x', true);
+    expect(crash.result.ok).toBe(false);
+    expect(crash.result.turns).toEqual([]);
+    // 零轮崩溃没有可核轮次：显式不适用，不写缺列（score.ts 会整份 exit 2）也不写 0。
+    expect(crash.result.auditFailures).toBe('not-applicable');
+    expect(crash.input.caseId).toBe('Q5b');
+    expect(crash.input.ok).toBe(false);
+    expect(crash.input.notes).toEqual(['runner 崩了']);
+    // 未跑的占位条目：N/A 跳过（不进通过率分母），但用例行仍在报告里。
+    expect(unifiedCasePassedOf(crash.result, q5b, undefined, true)).toBeUndefined();
+
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const landed = caseCrashOf(a1, new Error('runner 崩了'), 'probe-x', true);
+    expect(unifiedCasePassedOf(landed.result, a1, { dims: emptyDimCounts() }, true)).toBe(false);
+    // 黑盒崩溃不产申报列（没跑交叉核，0 不成立），同样按失败计入。
+    const black = caseCrashOf(a1, 'boom', 'probe-x', false);
+    expect(black.result.auditFailures).toBeUndefined();
+    expect(unifiedCasePassedOf(black.result, a1, { dims: emptyDimCounts() }, false)).toBe(false);
+  });
+
+  it('中途中止：崩溃前审计窗口的调用保留在 result / 统一报告 JSONL，不再静默清零', () => {
+    // 2026-11-10 独立评审 medium：caseCrashOf 被任何 runner 抛错消费时无条件写
+    // platformCalls/refusedCalls=0、ladder=[]、turns=[]——跑了若干调用后崩溃的用例在
+    // 探针汇总显示"平台调用 0"，统一报告也没有这些调用的 JSONL 行。main 的 catch 手里
+    // 有 auditBefore 与 executionAuditRows()，按真实窗口重建。
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const before: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'pre'], exitCode: 0 };
+    const rows: ExecutionAuditRow[] = [
+      { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 },
+      { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], refused: 'serve_gate:token' },
+    ];
+    const crash = caseCrashOf(a1, new Error('boom after calls'), 'probe-x', true, {
+      auditBefore: 1, auditRows: [before, ...rows], elapsedMs: 2500,
+    });
+    expect(crash.result.platformCalls).toBe(2);
+    expect(crash.result.refusedCalls).toBe(1);
+    expect(crash.result.ladder).toHaveLength(2);
+    expect(crash.input.turns).toHaveLength(1);
+    expect(crash.input.turns[0]!.reply).toBeNull();
+    expect(crash.input.turns[0]!.execution).toHaveLength(2);
+    expect(crash.input.notes.some((note) => note.includes('保留 2 次平台调用'))).toBe(true);
+    // 统一报告 JSONL 面：崩溃前的两次调用各有自己的行（旧写法 0 行）。
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+    expect(report.calls.every((line) => line.messageId.includes('crash-window'))).toBe(true);
+    // 申报计数仍不适用（没有完整回复可交叉核），但执行证据不再被清零。
+    expect(crash.result.auditFailures).toBe('not-applicable');
+  });
+
+  it('审计源不可读：platformCalls 记 -1（不可知），不冒充零调用', () => {
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', true, { auditRows: null });
+    expect(crash.result.platformCalls).toBe(-1);
+    expect(crash.result.refusedCalls).toBe(-1);
+    expect(crash.result.ladder).toEqual([]);
+    expect(crash.input.turns).toEqual([]);
+  });
+
+  it('中途中止：已完成轮次保住（申报计数不再一律 N/A），正在跑的轮次单列、JSONL 不重复', () => {
+    // send 逐轮追加 turnsInFlight（见 probe-real-agent 的崩溃证据注释）：runner 在
+    // 第 2 轮抛错时，第 1 轮的回复/审计窗口仍在 catch 手里。旧写法 turns:[] ⇒
+    // auditFailures 只有 'not-applicable' 一种值；现在有可核轮次就照常算。
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const completedRow: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const completed: Turn = {
+      text: 'q1', reply: 'alpha 查完了。', ms: 10, notices: [], messageId: 'm1',
+      calls: 1, refusedCalls: 0, taskIds: [], execution: [completedRow],
+      gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+    };
+    const tail: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0 };
+    const crash = caseCrashOf(a1, new Error('boom on turn 2'), 'probe-x', true, {
+      auditRows: [completedRow, tail], turns: [completed], elapsedMs: 500,
+    });
+    expect(crash.result.turns).toEqual([completed]);
+    expect(crash.result.auditFailures).toBe(0);
+    expect(crash.input.turns).toHaveLength(2);
+    expect(crash.input.turns[0]!.messageId).toBe('m1');
+    expect(crash.input.turns[1]!.messageId).toContain('crash-window');
+    expect(crash.input.turns[0]!.execution).toHaveLength(1);
+    expect(crash.input.turns[1]!.execution).toHaveLength(1);
+    // 两次调用各一行，不因"完整轮次 + 崩溃窗口"重复计数。
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+  });
+});
+
+/**
+ * calls=-1（审计源不可读）在探针 **note 面**也按无证据处理（2026-11-10 独立评审 low）：
+ * 评分/期望值面已走 callsEvidenceOf 跳过，但 realAmounts / recallMissed 旧写法用
+ * `calls <= 0` 把 -1 当零——跳过该轮金额、发"既没召回也没重查"假红。`=== 0` 系列
+ * 只在有证据的零调用上成立；-1 的证据缺口由 main 的用例级信息性 note 呈现。
+ */
+describe('calls=-1 在探针 note 面按无证据处理', () => {
+  const probeTurn = (overrides: Partial<Turn> = {}): Turn => ({
+    text: 'q', reply: 'r', ms: 1, notices: [], messageId: 'm1',
+    calls: 1, refusedCalls: 0, taskIds: [], execution: [],
+    gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+    ...overrides,
+  });
+  const script: ScriptLine[] = [{ text: 'q', tasks: [] }, { text: 'q', tasks: [] }];
+
+  it('realAmounts 不把 -1 当零排除（否则召回轮允许集会缺该轮金额）', () => {
+    const turns = [
+      probeTurn({ calls: -1, reply: 'value 500' }),
+      probeTurn({ calls: 0, reply: 'value 300' }),
+    ];
+    expect([...realAmounts(turns, script, 2, [])]).toEqual([500]);
+  });
+
+  it('recallMissed 只在有证据的 0 且未复述结论时成立', () => {
+    expect(recallMissed(probeTurn({ calls: -1, reply: 'let me check that later' }), new Set())).toBe(false);
+    expect(recallMissed(probeTurn({ calls: 0, reply: 'let me check that later' }), new Set())).toBe(true);
+    expect(recallMissed(probeTurn({ calls: 0, reply: 'no records' }), new Set())).toBe(false);
+    // 线程有金额时先看回复有没有数，calls 不参与。
+    expect(recallMissed(probeTurn({ calls: -1, reply: 'nothing' }), new Set([500]))).toBe(true);
   });
 });
 

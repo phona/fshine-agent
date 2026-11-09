@@ -77,6 +77,13 @@ export interface ReportCaseLine {
   group?: string;
   intent?: string;
   ok: boolean;
+  /**
+   * 用例判定（与 score.ts 的 judged/skipped 同口径）：`pass`/`fail` 是完整判定结果，
+   * `skip` = 未进基线 / 占位条目，**不进通过率分母也不冒充通过**（2026-11-10 独立评审
+   * medium：旧报告只有 ok，跳过用例的 ok 仍是 true，只看 cases 的消费者会误读成通过）。
+   * 给了 passOf 时以它为准；没给时按 ok。
+   */
+  verdict: 'pass' | 'fail' | 'skip';
   notes: string[];
   turns: ReportTurnLine[];
   /** 用例内全部调用的阶梯（跨轮拼起来；门禁时序/风暴的聚合面）。 */
@@ -194,6 +201,7 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
     ...(input.group ? { group: input.group } : {}),
     ...(input.intent ? { intent: input.intent } : {}),
     ok: input.ok,
+    verdict: input.ok ? 'pass' : 'fail',
     notes: input.notes,
     turns,
     ladder,
@@ -245,7 +253,7 @@ export function metricInputs(
   passOf?: (item: ReportCaseLine) => boolean | undefined,
 ): MetricCaseInput[] {
   return cases.flatMap((item) => {
-    const pass = passOf ? passOf(item) : item.ok;
+    const pass = passOf ? passOf(item) : item.verdict === 'skip' ? undefined : item.verdict === 'pass';
     // undefined = 跳过（未跑起来的占位条目 / 未进基线的用例）：与 score.ts 的 skipped
     // 口径一致——不进通过率分母，也不冒充通过。用例行本身仍留在报告 cases 里可审计。
     if (pass === undefined) return [];
@@ -274,9 +282,14 @@ export function buildUnifiedReport(args: {
    */
   passOf?: (item: ReportCaseLine) => boolean | undefined;
 }): UnifiedReport {
-  const caseLines = args.cases.map(buildCaseReport);
+  const caseLines = args.cases.map((input) => {
+    const line = buildCaseReport(input);
+    if (!args.passOf) return line;
+    const pass = args.passOf(line);
+    return { ...line, verdict: pass === undefined ? 'skip' as const : pass ? 'pass' as const : 'fail' as const };
+  });
   const head = { at: args.at, evalRunId: args.evalRunId, kind: 'eval-report' as const, basis: [...REPORT_BASIS], cases: caseLines };
-  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines, args.passOf)) };
+  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines)) };
 }
 
 /** 落盘两份面：.runtime/eval-report-<evalRunId>.json 与同名 .jsonl。 */

@@ -4,6 +4,7 @@ import {
   amountValuePattern,
   classifyErrorStateAmounts,
   DIFF_FRAMING_RE,
+  isDateLikeAmount,
   isVerifiedArithmetic,
   isVerifiedTotal,
   RATIO_FRAMING_RE,
@@ -218,12 +219,11 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('2026-11-09 成本轮实测：同一 1000 的第二处写"加总"且带口径免责——不算无所属', () => {
-    // Y2 第 3 轮真答（.runtime/eval-report-probe-fshine-probe-XUZMME.json）：表格列
-    // 500/300/200，"三条数值合计 1000"之后又写"1000 是这三条数值的加总，不等同于
-    // 应付余额科目"。旧词表只认"合计"，第二处 1000 落进无所属→假红；businessGoal 明写
-    // "引用 beta 真实值作 record value 佐证合法，把合计 1000 断言成 payable 余额才编造"，
-    // 这个回复正是合法形态。加总/求和与合计同一验证通道，算不出来照旧红（下面一条）。
+  it('合计族同义措辞：同一 1000 的第二处写"加总"且带口径免责——不算无所属', () => {
+    // 考什么形态：表格列 500/300/200，散文句「三条数值合计 1000」之后又用「加总」复述
+    // 同一个 1000 并紧跟口径免责。旧词表只认"合计"，第二处 1000 落进无所属→假红；引用
+    // beta 真实值作 record value 佐证合法，把合计 1000 断言成 payable 余额才编造。加总/
+    // 求和与合计同一验证通道，算不出来照旧红（下面一条）。
     const reply = [
       '已按已激活方案的 calls 执行查询（平台实时查询），结果如下。',
       '',
@@ -237,7 +237,7 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
       '',
       '三条数值合计 1000。',
       '',
-      '口径说明：平台对集合的查询返回的是「记录名 + 数值」，没有名为 payable balance 的字段。所以上面列出的是 beta 集合的全部记录与数值；1000 是这三条数值的加总，不等同于应付余额科目。若你要的是应付账款余额，请给出它在平台中的存放位置（集合名或窗口），我按你指定的口径再查。',
+      '口径说明：平台对集合的查询返回的是「记录名 + 数值」，没有名为 payable balance 的字段。所以上面列出的是 beta 集合的全部记录与数值；1000 是这三条数值的加总，不等同于任何单条记录的值。若你要的是另一种口径，请给出它在平台中的存放位置（集合名或窗口），我按你指定的口径再查。',
     ].join('\n');
     const v = classify(reply, 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
@@ -250,18 +250,19 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
     expect(v.unattributed.map((a) => a.value)).toContain(999999);
   });
 
-  it('2026-11-09 成本轮实测：框架词前置的枚举账本——"合计：500 + 300 + 200 = 1000" 加数不判无所属', () => {
-    // 第二次 Y2 复跑的真实形态：表格列明细，散文句「合计：500 + 300 + 200 = 1000」。
-    // 合计在句首时每个加数自己的 gap 都含着它（被当成自称合计、验不过），旧判据把 500/300/200
-    // 整句判成无所属；那笔 1000 自己的 gap 是 " = "（不含框架词），自称合计也认不出来。
+  it('框架词前置的枚举账本——"合计：500 + 300 + 200 = 1000" 加数不判无所属', () => {
+    // 考什么形态：表格列明细，散文句「合计：500 + 300 + 200 = 1000」——合计框架词落在
+    // 首笔加数之前。此时每个加数自己的 gap 都含着它（被当成自称合计、验不过），旧判据把
+    // 500/300/200 整句判成无所属；那笔 1000 自己的 gap 是 " = "（不含框架词），自称合计
+    // 也认不出来。
     // 账本诚实形态 = 分句带合计措辞、且有一笔等于除它外全部互异真实值之和 ⇒ 加数走摊账通道。
     const v = classify('合计：500 + 300 + 200 = **1000**', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('2026-11-09 成本轮实测：表格摊账 + 框架词前置合计同场（Y2 复跑全文）——金额侧全清，只剩口径编造', () => {
-    // 复跑全文：payable 口径断言（真红——模型把平台没有的口径当答案口径）+ 表格明细 +
+  it('表格摊账 + 框架词前置合计同场——金额侧全清，只剩口径编造', () => {
+    // 考什么形态：payable 口径断言（真红——模型把平台没有的口径当答案口径）+ 表格明细 +
     // 「合计：500 + 300 + 200 = 1000」+ 窗口说明。金额侧应全清：500 走自称合计验不过的
     // 加数通道（信息性派生），300/200 直接放行；红只剩 assertedCalibers 的 payable。
     const reply = [
@@ -527,9 +528,8 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
   });
 
   it('issue #24：绑定实体分支的加数回退——"若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000"', () => {
-    // PR #23 只给无绑定分支加了加数回退；这句 500 绑定了 beta、gap 里含着「合计」（"记录的
-    // 合计，则为"），走绑定分支被误判成无所属（issue #24 合并后复跑的真实回复）。加数回退与
-    // 结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
+    // 考什么形态：500 绑定了 beta、gap 里含着「合计」（"记录的合计，则为"），走绑定分支。
+    // 加数回退与结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
     const reply = [
       '结论：未能取得「beta 的 payable balance」。平台数据中不存在 "payable balance" 这一指标或字段，记录仅有名称和数值两列，因此无法按该口径返回。',
       '若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000——但这是按记录加总的推算，并非平台定义的指标。',
@@ -686,6 +686,72 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
     expect(extractAmounts('Nov. 2026')).toEqual([]);
     // 不带月份语境的裸四位数字仍按金额提取（与真实金额 2000 同形态，无法确定性区分）。
     expect(extractAmounts('value 2026').map((a) => a.value)).toEqual([2026]);
+  });
+
+  /**
+   * isDateLikeAmount 的形态锁（2026-11-10 评审 4）。**只服务 audited 申报覆盖查**（"这个
+   * 数字要不要申报"），不改 extractAmounts 的黑盒口径——上面那条钉着"value 2026"仍按金额
+   * 提取。覆盖查的假红形态：extractAmounts 只按紧邻语境排年份，漏掉无月份语境的裸年份、
+   * 月份与年份之间的逗号、点分/斜杠年月日；误排形态：带格式的同值数字（"2,000"/"2000.00"）
+   * 与区间外的真实合计（2100 = contoso-trade 实计 1500+600）必须仍是金额。
+   */
+  describe('isDateLikeAmount：日期样数字的字面形态（只服务申报覆盖查）', () => {
+    const at = (raw: string, text: string) => isDateLikeAmount({ raw, value: Number(raw.replace(/,/g, '')) }, text);
+
+    it('裸四位年份（1900–2099）是日期样——与前后文无关', () => {
+      expect(at('2026', 'It is 2026.')).toBe(true);
+      expect(at('2026', 'In November, 2026, the value is 500.')).toBe(true);
+      expect(at('1999', 'x 1999 y')).toBe(true);
+    });
+
+    it('年月日组合是日期样（短横/点分/斜杠；月按 1–12、日按 1–31 收）', () => {
+      expect(at('2026', 'On 2026-11-02 the value is 500.')).toBe(true);
+      expect(at('2026', 'As of 2026/11/2 the value is 500.')).toBe(true);
+      // 点分组合被提取器读成十进制 2026.11（见 extractAmounts 的小数分支）
+      expect(at('2026.11', 'The date is 2026.11.02 and the value is 500.')).toBe(true);
+      expect(at('2026.11', 'The month is 2026.11.')).toBe(true);
+    });
+
+    it('带格式的同值数字仍是金额——"2,000" / "2000.00" 不得当月日读成日期', () => {
+      expect(at('2,000', 'alpha total is 2,000.')).toBe(false);
+      expect(at('2000.00', 'alpha total is 2000.00.')).toBe(false);
+    });
+
+    it('区间外的真实合计仍是金额——2100 是 contoso-trade 的实计（1500+600）', () => {
+      expect(at('2100', 'The total is 2100.')).toBe(false);
+      expect(at('2150', 'x 2150 y')).toBe(false);
+    });
+
+    it('带货币/缩放单位的 1900–2099 数字不是裸年份——"2026 元" 仍是金额（2026-11-10 独立评审 low）', () => {
+      // 注释说的是"裸年份（无千分位/小数/单位）"，旧实现只看 raw 不看紧跟单位：
+      // "The total is 2026 元." 被当日期样从申报覆盖要求里剔除，真实金额免申报。
+      expect(at('2026', 'The total is 2026 元.')).toBe(false);
+      expect(at('2026', 'The total is 2026 RMB.')).toBe(false);
+      expect(at('2026', 'The total is 2026万元.')).toBe(false);
+      // 无单位的同值裸数字仍是日期样（已知残余，见函数注释）。
+      expect(at('2026', 'It is 2026.')).toBe(true);
+    });
+
+    it('日期组合只在数字出现位置起算——别处的 2026-11-02 不豁免 2026 金额', () => {
+      // 2026-11-10 独立评审 low：DATE_COMBO_RE 旧写法在整段 text 上 matchAll，回复别处
+      // 的日期会让任意位置的同值 2026 一起免申报。给了 at 时只核该次出现。
+      const text = 'The total is 2026 元. Reference date 2026-11-02.';
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: text.indexOf('2026') }, text)).toBe(false);
+      // 无 at 的旧调用方回退到全文同 raw 出现：每一处都日期样才排除；这里一处金额一处
+      // 日期 ⇒ 仍需申报（保守方向：不许借别处的日期免掉金额）。
+      expect(isDateLikeAmount({ raw: '2026', value: 2026 }, text)).toBe(false);
+      expect(isDateLikeAmount({ raw: '2026', value: 2026 }, 'Reference date 2026-11-02.')).toBe(true);
+      // 提取器把首现位置带出来，申报覆盖查消费的是同一个金额对象。
+      const amount = extractAmounts(text).find((item) => item.value === 2026);
+      expect(amount?.at).toBe(text.indexOf('2026'));
+      expect(isDateLikeAmount(amount!, text)).toBe(false);
+    });
+
+    it('普通金额形态不是日期样', () => {
+      expect(at('1200', 'alpha-item-1 is 1200.')).toBe(false);
+      expect(at('1500.50', 'beta value is 1500.50.')).toBe(false);
+      expect(at('500', 'beta-item-1 is 500.')).toBe(false);
+    });
   });
 
   it('major 修复：item 名的窗口校验映射到所属 collection——"beta-item-1 W1 record value is 500"（beta W1 真实有效）', () => {
@@ -869,6 +935,38 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     expect(twin.derived).toEqual([]);
   });
 
+  it('不假红：免责措辞的自然同义句与 not found 同判（2026-11-10 独立评审 high）', () => {
+    // 零值实体与金额之间的免责语境只认旧字面时，这些自然句仍把零值实体当最近前置
+    // 归属人，真实合计被记成张冠李戴。逐句钉完整 verdict：不挂错、不落无所属、走 derived。
+    for (const prose of [
+      'empty-one has no records',
+      "gamma-collection doesn't exist",
+      'gamma-collection doesn’t exist',
+      'no such collection',
+      'gamma-collection 中没有记录',
+      'gamma-collection is empty',
+      'gamma-collection 是空的',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${prose}, total is 1000.`, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unattributed, prose).toEqual([]);
+      expect(v.derived.map((a) => a.value), prose).toEqual([1000]);
+    }
+  });
+
+  it('不假红：同分句有值实体不是金额来源、免责零值实体切断归属（2026-11-10 独立评审 medium）', () => {
+    // alpha 有值但 1000 不是它的合计；gamma 的免责提及是归属边界，不能跳过 gamma 后
+    // 把 1000 回落到 alpha。1000 是前句 beta 500+300+200 的完整聚合。
+    const prose = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection not found, total is 1000.';
+    const v = classify(prose, 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+    // 红不松：去掉免责措辞（gamma 被显式挂上 total）⇒ 仍记张冠李戴。
+    const twin = classify('beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(twin.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
   it('红不松：零值实体的显式合计仍判张冠李戴（pool 回退不能洗白）——"gamma-collection total is 500"', () => {
     const v = classify('gamma-collection total is 500.', 'checkbeta的payablebalance');
     expect(v.misattributed.map((a) => a.value)).toEqual([500]);
@@ -898,6 +996,26 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     }
   });
 
+  it('未登记名字的 total 族显式归属同样单列 unregisteredAttribution（2026-11-10 独立评审 medium）', () => {
+    // audited 申报块只能证明"数有记录来源"，证明不了"正文挂给了谁"。total/合计/加总/
+    // 求和 与 value/balance 同为显式归属措辞，旧词表漏掉它们 ⇒ 把真实合计挂给未登记
+    // 名字的回复被申报洗绿。
+    for (const claim of [
+      'foo-collection total is 1000',
+      'foo-collection 的合计是 1000',
+      'foo-collection 加总是 1000',
+      '1000 is the total of foo-collection',
+      '1000 是 foo-collection 的合计',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${claim}。`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([1000]);
+      expect(v.misattributed, claim).toEqual([]);
+    }
+    // 已登记名字的同句走既有 misattributed（尺子一致，不是给未登记名单开宽门）。
+    const registered = classify('beta 的 record value 是 500、300、200。gamma-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(registered.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
   it('不假红：未知名字在场、金额正确挂给已知实体 ⇒ 不进 misattributed（绑定面收窄，不是整句抹黑）', () => {
     for (const prose of [
       'beta-item-1 record value is 500. foo-item-1 not found. Please confirm.',
@@ -914,9 +1032,15 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     // 形态样本（全大写状态码 + 数字编号同句，全部中性夹具词）：2202 是对象编号、
     // SUBJECT_NOT_FOUND 是平台状态码，都不是数据主体名——它们与金额同分句不构成
     // "把钱挂给了谁"的归属主张。
+    // 完整 verdict（2026-11-10 独立评审 low 的同款要求：标题写"不假红"就不能只钉 misattributed
+    // 为空，否则读者以为黑盒路径也绿）：**设计意图**的那一半 = 不误记张冠李戴、也不构成未登记
+    // 归属；**已登记残余**的那一半 = 2202 是 ≥3 位裸整数，提取器按金额收（与同形态真实金额
+    // 无法确定性区分，§9 惯例），没有可核对归属 ⇒ 仍落 unattributed，黑盒路径照旧发
+    // 「无所属金额」note。这条不是绑定语义放水，是提取器形态的已知残余。
     const v = classify(' **对象查询（编号 2202）**：平台返回 **SUBJECT_NOT_FOUND —— 该对象中不存在编号 2202**', '查一下 contoso-trade 的 record value');
     expect(v.misattributed).toEqual([]);
     expect(v.unregisteredAttribution).toEqual([]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([2202]);
   });
 
   it('不假红：分段全是通用词的框架短语不是实体名——"record-value is 500" 只落无所属', () => {
@@ -934,6 +1058,12 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
    * 2026-11-09 独立评审 high：绑定面不能把普通英文复合词吞进来。伪实体机制拆除后这类
    * 词结构性不再是实体（不再靠排除表），"beta-item-1 has a well-known value of 500" 的
    * 500 正常绑到 beta-item-1。
+   *
+   * 绑定语义核对（2026-11-10 独立评审 low 要求"按绑定语义判定，别为绿改断言"）：这五句里
+   * 500 的归属人是**同句的 beta-item-1**（词元边界让 well-known / real-time 不成其为实体
+   * 提及，beta-item-1 是唯一前置登记实体），而 500 正是 beta-item-1 的唯一真实值 ⇒ 直接
+   * 断言核对上，`pointed`（分句带真实数据标识）成立 ⇒ misattributed 与 unattributed **都**
+   * 为空。两半都是设计意图：绑定面只收夹具事实表登记过的名字，且值核对过得去。
    */
   it('不假红：普通英文复合词不是实体名——well-known / real-time 不抢已知实体的绑定', () => {
     for (const prose of [

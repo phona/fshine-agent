@@ -97,8 +97,9 @@ import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 import { resolveActiveProfileId } from '@fshine/contracts';
 import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 // 金额判据纯核与夹具事实表（2026-11-07 评审 blocking：错误态反例要能进变异测试——
-// 探针顶层跑 main() 无法 import，判定核抽到 scripts/eval/amount-criteria.ts，
-// 夹具转录抽到 scripts/eval/dummy-fixture.ts；本文件保留用例体与 note 文案组装）。
+// 探针已有入口守卫（import 不跑 main()），但纯核仍抽到 scripts/eval/amount-criteria.ts、
+// 夹具转录抽到 scripts/eval/dummy-fixture.ts：测试只 import 判定，不拖入探针的装配依赖；
+// 本文件保留用例体与 note 文案组装）。
 import {
   ACCOUNT_RESULT_PHRASING,
   ARITHMETIC_FRAMING_RE,
@@ -123,8 +124,8 @@ import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './e
 // （见 errorStateNotes 的 audit 分支）。
 import { auditDeclarationNotes, classifyAuditDeclaration, stripAuditDeclaration } from './eval/audit-declaration';
 // 申报指令是纯文本常量，抽到叶子模块（scripts/eval/audit-instruction.ts）：mock 核心集要
-// import 它做往返测试，而本文件顶层跑 main()——测试 import 本文件会真实装配一次探针。
-// 探针侧只 import + re-export，现有导入面不变。
+// import 它做往返测试，而本文件即使有入口守卫也会拖入完整装配链——叶子模块让纯文本
+// 消费方不必 import 探针。探针侧只 import + re-export，现有导入面不变。
 import { AUDIT_INSTRUCTION } from './eval/audit-instruction';
 export { AUDIT_INSTRUCTION } from './eval/audit-instruction';
 
@@ -165,7 +166,7 @@ interface UsageBreakdown {
   total: number;
 }
 
-interface Turn {
+export interface Turn {
   text: string;
   reply: string;
   ms: number;
@@ -185,15 +186,14 @@ interface Turn {
   requestId?: string;
   /** 本轮委派的任务 id（delegation_span 按 requestId 关联：链上 taskId/delegationId 档）。 */
   taskIds: string[];
-  /**
-   *
-   * 本轮审计源不可读（未设/读失败）——**不是"没有调用"**（十三审 blocking）。
-   */
+  /** 本轮审计窗口内的执行层审计行（已合并起止；calls/refusedCalls 由它计数）。 */
   execution: ExecutionAuditRow[];
   /**
    * 本轮审计源不可读（未设/读失败）——**不是"没有调用"**（十三审 blocking）。
-   * 为真时 calls/refusedCalls 记 -1（不可知）、该轮 ladder 走 INCONCLUSIVE；
-   * 依赖"零调用"的判定必须因此失败，不许把证据缺席当成"确实没执行"。
+   * 为真时 calls/refusedCalls 记 -1（不可知）、该轮 ladder 走 INCONCLUSIVE。
+   * 依赖调用数的判定统一按"无证据"处理：评分/期望值面经 callsEvidenceOf 跳过（不出红也
+   * 不出绿），探针 note 面的零调用判定只在 calls === 0（有证据）时成立——`<= 0` 会把
+   * -1 当零，制造假红/假绿；-1 只由用例级信息性 note 显式呈现，不冒充"确实没执行"。
    */
   auditMissing?: boolean;
   /** 本轮宿主门裁决行（tool_calls 的 serve_gate:* / platform_executor_bypassed）。 */
@@ -358,6 +358,13 @@ let platformStateBackup: Record<string, string | undefined> = {};
 // 只剩一个用途：aux_model_usage 的用例级汇总（该事件无可关联 id，见 breakdownSince）。
 type TelemetryEvent = Record<string, unknown>;
 const telemetryEvents: TelemetryEvent[] = [];
+/**
+ * 当前用例已完成的轮次（崩溃证据，2026-11-10 独立评审 medium）：runner 的 turns 是
+ * 函数局部变量，抛错时整批丢失——中途中止的用例因此拿不到已跑完轮次的回复/审计窗口，
+ * 申报计数只能记 not-applicable、报告也缺这些轮次的行。send 每返回一轮就追加到这里，
+ * main 在用例开始时清空、catch 里交给 caseCrashOf（仅作崩溃证据，不影响正常路径）。
+ */
+const turnsInFlight: Turn[] = [];
 const TELEMETRY_EVENT_NAMES = new Set(['turn_span', 'delegation_span', 'aux_model_usage']);
 const originalConsoleInfo = console.info.bind(console);
 console.info = (...args: unknown[]): void => {
@@ -680,7 +687,7 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
             readbackVerified: row.proposalId !== undefined && verifiedProposals.has(row.proposalId),
             delivered,
           }));
-          return {
+          const turn: Turn = {
             text: outgoing,
             reply: finals.at(-1)!.content,
             ms: Date.now() - startedAt,
@@ -704,6 +711,9 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
             ladderRung: messageLadderRung(ladder),
             ...((main || worker) ? { tokens: { ...(main ? { main } : {}), ...(worker ? { worker } : {}) } } : {}),
           };
+          // 崩溃证据：本轮已完成，runner 后续抛错时 catch 仍能拿到它（见 turnsInFlight）。
+          turnsInFlight.push(turn);
+          return turn;
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
@@ -759,7 +769,7 @@ const extractAmounts = extractAmountsPure as (text: string) => Amount[];
  * past 标记，allowedAmounts 因此为空集——错误态回复出现任何非零金额都算无所属（A2/A4 同族
  * 判据，那里靠人眼看，这里机械化）。tasks 留空的轮次（闲聊/汇总/跨线程）放行全会话真实结果。
  */
-type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
+export type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
 
 /**
  * E/F/G/H 脚本行。tasks=该轮话题涉及的任务（空=闲聊/汇总/目标未明的探索轮；G 组多对象多线程，
@@ -773,7 +783,7 @@ type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
  *   算不出来的基准数字（行业均值、历史对比基准）照旧送审；
  * summary=汇总轮：非零金额必须全部能在本会话真实结果里找到。
  */
-interface ScriptLine {
+export interface ScriptLine {
   text: string;
   tasks: TaskId[];
   past?: boolean;
@@ -785,14 +795,16 @@ interface ScriptLine {
 }
 
 /**
- * [0, end) 轮次里"本会话真实产生过"的非零金额：只认产生过平台调用的轮次（calls>0），
- * tasks 非空时只放行同话题线程的轮次——谈 B 的轮次出现 A/C 的数即任务串台；
- * 跨任务/闲聊轮次（tasks 空）放行全会话真实结果。
+ * [0, end) 轮次里"本会话真实产生过"的非零金额：只认**有证据表明产生过平台调用**的轮次
+ * （calls>0；calls=-1 = 审计源不可读，调用数不可知——不能当零排除，否则该轮的金额从
+ * 允许集里消失，后续召回/对比轮会被误判为串台）。tasks 非空时只放行同话题线程的轮次
+ * ——谈 B 的轮次出现 A/C 的数即任务串台；跨任务/闲聊轮次（tasks 空）放行全会话真实结果。
  */
-function realAmounts(turns: Turn[], script: ScriptLine[], end: number, tasks: TaskId[]): Set<number> {
+export function realAmounts(turns: Turn[], script: ScriptLine[], end: number, tasks: TaskId[]): Set<number> {
   const values = new Set<number>();
   for (let j = 0; j < end && j < turns.length; j += 1) {
-    if (turns[j]!.calls <= 0) continue;
+    // 只有**有证据的零调用**才排除；-1 是不可知哨兵（见 Turn.auditMissing），不是零。
+    if (turns[j]!.calls === 0) continue;
     if (tasks.length > 0 && !tasks.some((task) => script[j]!.tasks.includes(task))) continue;
     for (const amount of extractAmounts(turns[j]!.reply)) {
       if (amount.value !== 0) values.add(amount.value);
@@ -1147,10 +1159,13 @@ const THREAD_CONCLUSION = /未找到|没找到|查不到|查无|不存在|无数
  * （E1 原 expectAmount 同款）；线程结果为空时（B/D 线程），零调用还没复述结论才算 miss
  * ——否则 D 的召回轮必然误报（目录搜索的正确答案本来就没有金额）。
  */
-function recallMissed(turn: Turn, threadAmounts: Set<number>): boolean {
+export function recallMissed(turn: Turn, threadAmounts: Set<number>): boolean {
   if (extractAmounts(turn.reply).some((a) => a.value !== 0)) return false;
   if (threadAmounts.size > 0) return true;
-  return turn.calls <= 0 && !THREAD_CONCLUSION.test(turn.reply);
+  // 线程结果为空时，只有**有证据的零调用**且没复述结论才算 miss。calls=-1 = 审计源
+  // 不可读（不可知，见 Turn.auditMissing）：不能据此发"既没召回也没重查"的假红；
+  // 证据缺口由 main 的用例级信息性 note 显式呈现。
+  return turn.calls === 0 && !THREAD_CONCLUSION.test(turn.reply);
 }
 
 /**
@@ -2797,9 +2812,15 @@ function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | u
  * -1、dims 固定成空、直接吃 `input.ok`——minExecutedCalls（D1/X1）会因 -1 假红，okMode
  * free（A2/B1/Y2）与 dims cap 也完全没消费，与 score.ts 的 passed 不一致。现在直接把
  * 探针真实的 CaseResult 行交给 score.ts 的 `evaluateProbeCase`（同一 row、同一基线项、
- * 同一期望值层、同一申报门）；只有**未进基线且真跑过**的用例（--only 子集）才退回
- * 探针 ok + 期望值层 + 申报门这一最小口径，并明确不冒充基线条目。未审计占位条目
- * （Q5b/Q13b，placeholder=true）从未跑过，返回 undefined 跳过（见函数体）。
+ * 同一期望值层、同一申报门）。
+ *
+ * 口径与 score.ts 的 judged/skipped 对齐（2026-11-10 独立评审 medium）：**未进基线的用例
+ * 一律跳过**（返回 undefined，不进通过率分母），不再按"是否占位"分叉。旧写法对
+ * C2/D1/D2/X1 这类 inBaseline:false、非占位、有 expectations 的用例退回最小口径并计入
+ * metrics，而 score.ts 把它们记 skipped——同一份报告的两处通过率口径相反。
+ * `baselineKnown=false` 只用于基线整份不可读的黑盒降级（loadBaselineForProbe 返回
+ * undefined）：此时没有"进没进基线"的信息，退回探针 ok + 期望值层 + 申报门的最小口径，
+ * 不让缺失基线把整份报告的通过率清空。占位条目从未跑过，无论基线是否可读都跳过。
  */
 export function unifiedCasePassedOf(
   row: ProbeResultRow | undefined,
@@ -2807,19 +2828,118 @@ export function unifiedCasePassedOf(
   baselineCase: BaselineCase | undefined,
   audited: boolean,
   corpusId = row?.id ?? '',
+  baselineKnown = true,
 ): boolean | undefined {
   if (!row) return false;
   if (baselineCase) {
     return evaluateProbeCase(corpusId, row, baselineCase, undefined, spec, audited).pass;
   }
   // 未审计占位条目（Q5b/Q13b）：runner 返回 turns: []、expectations: null，从未跑过。
-  // 旧写法走下面的最小口径 ⇒ row.ok && 空 checks ⇒ 统一报告计为通过，与 score.ts
-  // "跳过非基线用例"不一致（2026-11-10 独立评审 medium）。这里返回 undefined（跳过），
-  // 不进通过率分母；用例行仍留在报告 cases 里，信息性 note 可审计。
   if (spec?.placeholder === true) return undefined;
+  // 基线已加载、该用例不在基线：与 score.ts 的 skipped 同口径（--include/移入基线前不计分）。
+  if (baselineKnown) return undefined;
   const checks = spec ? expectationChecksOf(spec, row, audited) : [];
   if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, 0));
   return row.ok && checks.every((check) => check.pass);
+}
+
+/**
+ * 崩溃时仍可采集的执行证据（main 的 catch 手里有审计游标与执行层审计源）。
+ * `auditRows` 缺省 = 调用方没提供证据（单测/旧调用点）；显式 `null` = 审计源不可读，
+ * 与 Turn.calls 的 -1 同一条纪律——不可知不写 0。
+ */
+export interface CrashEvidence {
+  /** 用例开始前的审计窗口游标（main 的 auditBefore）。 */
+  auditBefore?: number;
+  /** 崩溃时读到的执行层审计行；null = 审计源不可读（证据缺席）。 */
+  auditRows?: readonly ExecutionAuditRow[] | null;
+  /** 崩溃前已完成的轮次（turnsInFlight）：申报计数与逐轮报告的取数面。 */
+  turns?: readonly Turn[];
+  /** 用例开始到崩溃的墙钟毫秒（崩溃窗口唯一的时延证据；缺席不编零）。 */
+  elapsedMs?: number;
+}
+
+/**
+ * runner 抛错时的两条产物（纯函数，导出供单测）：崩溃用例必须**同时**进探针报告
+ * （results）与统一报告（reportInputs）。旧写法只 push results ⇒ 用例从统一报告里
+ * 静默消失，用例计数与通过率被缩小（2026-11-10 独立评审 medium）。
+ *
+ * 崩溃前已经发生的调用不能丢（2026-11-10 独立评审 medium）：旧写法无条件写
+ * platformCalls/refusedCalls=0、ladder=[]、turns=[]，中途中止的用例在探针汇总里显示
+ * "平台调用 0"、统一报告也没有这些调用的 JSONL 行——执行证据被静默清零，违反本分支
+ * "无证据 ≠ 0"的口径。给了 `evidence.auditRows` 时按审计窗口重建真实调用（可能为 -1 =
+ * 不可知）、阶梯与报告行；`evidence.turns`（send 逐轮追加的 turnsInFlight）保住已完成
+ * 轮次的回复与申报计数。两者都没有时才回到旧形状——没证据与"零"仍然可区分。
+ */
+export function caseCrashOf(
+  item: { id: string; group: string; intent: string },
+  error: unknown,
+  evalRunId: string,
+  audited: boolean,
+  evidence: CrashEvidence = {},
+): { result: CaseResult; input: ReportCaseInput } {
+  const notes = [error instanceof Error ? error.message : String(error)];
+  const turns = [...(evidence.turns ?? [])];
+  // 调用窗口：缺省没提供证据时保持旧形状（0/空）；审计源显式不可读时记 -1。
+  const windowRows = evidence.auditRows === undefined || evidence.auditRows === null
+    ? []
+    : evidence.auditRows.slice(evidence.auditBefore ?? 0);
+  const mergedRows = mergeCallPhases(windowRows);
+  const refusedCalls = mergedRows.filter((row) => row.refused).length;
+  const platformCalls = evidence.auditRows === undefined
+    ? 0
+    : evidence.auditRows === null ? -1 : mergedRows.length;
+  const refusedCount = evidence.auditRows === undefined
+    ? 0
+    : evidence.auditRows === null ? -1 : refusedCalls;
+  const ladder = mergedRows.map((row) => classifyExecutionCall({
+    row,
+    // 崩溃用例没有已验证的读回与用户可见交付：不授予 verified/delivered。
+    readbackVerified: false,
+    delivered: false,
+  }));
+  if (mergedRows.length > 0) {
+    notes.push(`（信息性）崩溃前审计窗口保留 ${mergedRows.length} 次平台调用（被拒 ${refusedCalls}）；已完成轮次 ${turns.length} 条`);
+  }
+  // 已完成轮次之外的审计行（崩溃时正在跑的轮次）没有 Turn 承载：单列一条显式的部分
+  // 轮次，保证统一报告 JSONL 里每个真实调用都有行。messageId 标记为崩溃窗口，
+  // reply=null（没有用户可见交付），时延取用例墙钟。
+  const coveredRows = turns.reduce((sum, turn) => sum + turn.execution.length, 0);
+  const tailRows = mergedRows.slice(coveredRows);
+  const partialTurn: ReportCaseInput['turns'][number] | undefined = tailRows.length > 0
+    ? {
+      messageId: `${evalRunId}:${item.id}:crash-window`,
+      text: '(runner 崩溃：该轮未形成完整轮次)',
+      reply: null,
+      notices: [],
+      ms: evidence.elapsedMs ?? 0,
+      execution: tailRows,
+    }
+    : undefined;
+  const input = caseReportInputOf(item, turns, { ok: false, notes });
+  return {
+    result: {
+      id: item.id, group: item.group, intent: item.intent, turns,
+      platformCalls, refusedCalls: refusedCount,
+      chain: {
+        evalRunId, caseId: item.id,
+        messageIds: turns.map((turn) => turn.messageId),
+        requestIds: [...new Set(turns.map((turn) => turn.requestId).filter((v): v is string => typeof v === 'string'))],
+        taskIds: [...new Set(turns.flatMap((turn) => turn.taskIds))],
+        ...(process.env['EXECUTION_AUDIT_PATH'] ? { auditLog: path.basename(process.env['EXECUTION_AUDIT_PATH']!) } : {}),
+      },
+      notes,
+      dims: emptyDimCounts(), unclassifiedNotes: 0,
+      // 有已完成轮次时申报计数照常算；零轮/无平台证据轮才是显式不适用（不写缺列，
+      // 也不写 0——没跑交叉核不等于全过）。
+      ...auditFailuresOf(audited, turns),
+      ladder, ok: false,
+    },
+    input: {
+      ...input,
+      turns: [...input.turns, ...(partialTurn ? [partialTurn] : [])],
+    },
+  };
 }
 
 async function main(): Promise<void> {
@@ -2875,8 +2995,17 @@ async function main(): Promise<void> {
     const auditBefore = executionAuditRows()?.length ?? 0;
     // 用例级 aux 捕获窗口（caseTokensOf）：从用例开始前的缓冲区下标切到用例结束。
     const caseMark = telemetryEvents.length;
+    const caseStartedAt = Date.now();
+    // 崩溃证据：清空上一用例的已完成轮次（send 每轮追加，见 turnsInFlight）。
+    turnsInFlight.length = 0;
     try {
       const { turns, notes = [] } = await item.run();
+      // 审计源不可读时调用数记 -1（不可知）。零调用类 note 只在有证据的 0 上触发，
+      // 但"没有判定"不能完全静默——这里出一条信息性 note 显式呈现证据缺口（不算异常）。
+      const unknownCallTurns = turns.flatMap((turn, index) => (turn.auditMissing ? [index + 1] : []));
+      if (unknownCallTurns.length) {
+        notes.push(`（信息性）审计源不可读：第${unknownCallTurns.join('、')}轮调用数不可知，零调用类判定按无证据跳过`);
+      }
       // 公共收集入口（不依赖 runner 自报）：audited 下每个用例都跑逐轮交叉核计数。
       const auditField = auditFailuresOf(auditMode, turns);
       const auditRowsAfter = executionAuditRows();
@@ -2916,22 +3045,18 @@ async function main(): Promise<void> {
       const refused = caseRows.filter((row) => row.refused).length;
       console.log(`  平台调用: ${caseRows.length}${refused ? `（其中被拒 ${refused}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
     } catch (error) {
-      const failureNotes = [error instanceof Error ? error.message : String(error)];
-      results.push({
-        id: item.id, group: item.group, intent: item.intent, turns: [],
-        platformCalls: 0, refusedCalls: 0,
-        chain: { evalRunId, caseId: item.id, messageIds: [], requestIds: [], taskIds: [] },
-        notes: failureNotes,
-        dims: emptyDimCounts(), unclassifiedNotes: 0,
-        // 崩溃的用例没有可核轮次：显式不适用，不写缺列（缺列会让 score.ts 对整份报告
-        // exit 2，连带其它用例都打不了分），也不写 0（没跑交叉核不等于全过）。
-        ...auditFailuresOf(auditMode, []),
-        ladder: [], ok: false,
+      // 崩溃用例同时进探针报告与统一报告（2026-11-10 独立评审 medium，纯函数见
+      // caseCrashOf）：旧写法只 push results ⇒ 该用例从统一报告里静默消失，用例计数
+      // 与通过率被缩小。崩溃前已发生的平台调用按审计窗口保留（auditBefore/行源在这里，
+      // 不写 0）；审计源不可读时记 -1（不可知），同样不冒充零调用。
+      const crash = caseCrashOf(item, error, evalRunId, auditMode, {
+        auditBefore,
+        auditRows: executionAuditRows(),
+        turns: [...turnsInFlight],
+        elapsedMs: Date.now() - caseStartedAt,
       });
-      // 崩溃用例同样进统一报告（2026-11-10 独立评审 medium）：旧写法只 push results、
-      // 不 push reportInputs ⇒ 该用例从统一报告里静默消失，用例计数与通过率被缩小。
-      // 以 ok=false + 空轮次呈现，判定走正常路径（有基线项 ⇒ 失败；占位 ⇒ 跳过）。
-      reportInputs.push(caseReportInputOf(item, [], { ok: false, notes: failureNotes }));
+      results.push(crash.result);
+      reportInputs.push(crash.input);
       console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
     }
     restorePlatformState();
@@ -2965,9 +3090,11 @@ async function main(): Promise<void> {
   const resultById = new Map(results.map((row) => [row.id, row]));
   const verdictOf = new Map<string, boolean | undefined>();
   for (const input of reportInputs) {
-    // 未进基线的用例（--only 子集/占位条目）baselineCase 缺席，走最小口径；其余用例
-    // 直接复用 evaluateProbeCase（同一 row 的真实 calls/dims、同一基线 okMode/caps、
-    // 同一期望值层、同一申报门）——统一报告不再自建一份近似判定。
+    // 未进基线的用例（占位条目/默认全量里的 inBaseline:false）与 score.ts 的 skipped 同口径：
+    // baselineCase 缺席 + 基线已加载 ⇒ 跳过（见 unifiedCasePassedOf）；其余用例直接复用
+    // evaluateProbeCase（同一 row 的真实 calls/dims、同一基线 okMode/caps、同一期望值层、
+    // 同一申报门）——统一报告不再自建一份近似判定。基线整份不可读时 baselineKnown=false，
+    // 黑盒退回最小口径（不让缺失基线清空报告通过率）。
     const corpusId = corpusIdOfCase.get(input.caseId) ?? input.caseId;
     verdictOf.set(input.caseId, unifiedCasePassedOf(
       resultById.get(input.caseId),
@@ -2975,6 +3102,7 @@ async function main(): Promise<void> {
       baseline?.cases[corpusId],
       auditMode,
       corpusId,
+      baseline !== undefined,
     ));
   }
   const unified = buildUnifiedReport({
