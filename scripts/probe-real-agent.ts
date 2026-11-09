@@ -357,6 +357,14 @@ function openReadonlyDb(dbPath: string): Database.Database {
 const PROBE_REPLY_WAIT_MS = 300_000;
 
 const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH'] as const;
+/**
+ * dummy 夹具的 ambient 专名（per-case 隔离的击穿面）。夹具按 `env2(DUMMY_*, EXECUTION_*)`
+ * 查找状态文件，专名优先；评测进程若从 shell 继承任一 DUMMY_*，它就会盖过本用例注入的
+ * EXECUTION_* 路径，22 条用例静默共用同一个状态/审计文件。故这四个键与上面四个通用名
+ * 一起备份、一起删除、一起恢复（backup/restore 对称）。
+ */
+const FIXTURE_AMBIENT_STATE_KEYS = ['DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH'] as const;
+const ISOLATED_STATE_KEYS = [...PLATFORM_STATE_KEYS, ...FIXTURE_AMBIENT_STATE_KEYS] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
@@ -461,14 +469,14 @@ function breakdownSince(mark: number, eventName: string): UsageBreakdown | null 
   return total;
 }
 
-function isolatePlatformState(): void {
-  platformStateBackup = Object.fromEntries(PLATFORM_STATE_KEYS.map((key) => [key, process.env[key]]));
+export function isolatePlatformState(dir: string = stateDir): void {
+  platformStateBackup = Object.fromEntries(ISOLATED_STATE_KEYS.map((key) => [key, process.env[key]]));
   counter += 1;
   Object.assign(process.env, {
-    EXECUTION_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
-    EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
-    EXECUTION_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
-    EXECUTION_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
+    EXECUTION_PLAN_STATE: path.join(dir, `plans-${counter}.json`),
+    EXECUTION_RATE_LIMIT_STATE: path.join(dir, `rate-${counter}.json`),
+    EXECUTION_MOCK_STATE: path.join(dir, `mock-${counter}.json`),
+    EXECUTION_AUDIT_PATH: path.join(dir, `audit-${counter}.jsonl`),
     // 网关限流有 example-gateway 专项测试；真实平台保持生产限流（"别让下游平台有感知"）：
     // 探针节奏天然低于限额，被限就是信号。
     // 2026-11-08 删除宿主侧的 mock 判据（isPlatformMock / EXECUTION_EXECUTOR）：原来只在
@@ -476,10 +484,12 @@ function isolatePlatformState(): void {
     // 参数的行为，且当前仓内夹具根本不读该 env（限流配置归平台自己的 DZ_* 命名，见
     // debt-ledger D-163 的 env 家族对齐）。要放宽就改执行层自己的限流配置，不在编排层开关。
   });
+  // 专名必须在通用名之外单独删除：夹具 env2 的专名支路优先于通用名（issue #20 owner 评论）。
+  for (const key of FIXTURE_AMBIENT_STATE_KEYS) delete process.env[key];
 }
 
-function restorePlatformState(): void {
-  for (const key of PLATFORM_STATE_KEYS) {
+export function restorePlatformState(): void {
+  for (const key of ISOLATED_STATE_KEYS) {
     const value = platformStateBackup[key];
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;

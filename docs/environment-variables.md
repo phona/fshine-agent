@@ -58,11 +58,12 @@
 | `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提上限；缺省 30 / 3 / 8 / 3 |
 | `EXECUTION_DAILY_SOFT_CAP` / `EXECUTION_DAILY_HARD_CAP` / `EXECUTION_API_CALL_SOFT_CAP` / `EXECUTION_API_CALL_HARD_CAP` | 日调用与日 API 调用软硬上限；缺省 120 / 400 / 150 / 300 |
 | `EXECUTION_BREAKER_FAIL_STREAK` / `EXECUTION_BREAKER_COOLDOWN_MS` / `EXECUTION_BREAKER_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_CRASH_WARN` | 熔断与软信号阈值；缺省 5 / 30 分钟 / 默认窗口 / 1 小时 / 2 |
-| `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS` / `EXECUTION_EXPORTS_DIR` | 缓存与导出文件目录 / TTL；缺省为 `.runtime/` 下默认目录与默认 TTL |
+| `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS` | 缓存目录 / TTL；缺省为 `.runtime/` 下默认目录与默认 TTL |
 | `EXECUTION_RESULT_FILE` | 网关边车镜像：信封同步追加到的文件；网关 spawn 前设置，不设则不镜像 |
-| `EXECUTION_PASS_FILE` / `EXECUTION_PHONE` / `EXECUTION_PASSWORD` | 登录凭据面：密码文件路径（缺省 `~/.config/执行层/password`）、手机号、密码；**Agent 不读 `.env` 凭据**（见 执行层 AGENTS.md 登录红线），本行只作盘点，不作调用方 |
+| `EXECUTION_PASS_FILE` | 登录凭据面：密码文件路径（缺省 `~/.config/执行层/password`）；**Agent 不读 `.env` 凭据**（见 执行层 AGENTS.md 登录红线），本行只作盘点，不作调用方 |
 | `EXECUTION_BROWSER_KEEP_OPEN` | platform-session 置位时跳过浏览器关闭；仅 `1` 生效 |
-| `ENV_PATH` / `RUNTIME_DIR` / `BROWSER_PROFILE_DIR` / `BROWSER_CACHE_DIR` / `SCREEN_DIR` / `AUTH_STATE` / `TOKEN_CACHE_PATH` / `CHROME_PATH` / `BROWSER_UA` / `BROWSER_HEADLESS` | 执行层 路径与浏览器面：缺省各为仓内 `.runtime/`、`.browser-profile/`、`/usr/bin/chromium` 等默认；`BROWSER_HEADLESS` 仅 `1` 算无头 |
+
+兄弟执行层仓自有的 18 个环境变量中，原登记在本节的 13 个机器本地 / 凭据 / 浏览器路径面条目（`ENV_PATH` / `RUNTIME_DIR` / `BROWSER_PROFILE_DIR` / `BROWSER_CACHE_DIR` / `BROWSER_UA` / `BROWSER_HEADLESS` / `SCREEN_DIR` / `AUTH_STATE` / `TOKEN_CACHE_PATH` / `CHROME_PATH` / `EXECUTION_EXPORTS_DIR` / `EXECUTION_PHONE` / `EXECUTION_PASSWORD`）移出本清单，由兄弟仓文档维护；其余退役 / 历史名与非环境变量示例见 §6、§8 及文末盘点方法。本清单只留这一行指向，不复制其默认值与语义。
 
 ## 4. 通用夹具（fshine generic-mock，隔离语义）
 
