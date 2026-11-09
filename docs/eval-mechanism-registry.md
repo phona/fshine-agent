@@ -65,7 +65,7 @@
 
 ## 待验证 / 未覆盖（登记，不装作已覆盖）
 
-- **期望值层的覆盖面**：本次只给审计过的 11 个用例（A1/A2/A3/A4/B1/C2/D1/D2/X1/Y2 + write-chain-51）写了期望值；11 个未审计用例（B2/C1/E1/F1/G1/G2/H1/H2/X2/Y1/Z1）是占位条目，`expectations: null`——它们在第四层上裸奔，靠前三层护。
+- **期望值层的覆盖面**：期望值现已覆盖 15 个用例（A1/A2/A3/A4/A5/B1/B2/C2/D1/D2/F1/X1/Y1/Y2 + write-chain-51；2026-11-09 切片 E 补入 B2/F1/Y1）；未覆盖的 10 个（Q5b/Q13b/C1/E1/G1/G2/H1/H2/X2/Z1）仍是占位条目，`expectations: null`——它们在第四层上裸奔，靠前三层护（Q5b/Q13b 另卡 tax-summary 能力未落地、机械断言在 dummy 夹具上执行不了，与其余八条的「未审计」不同，见各自 blocker）。
 - **acceptance 侧期望值只覆盖文本面**：`evaluateWriteChainCase` 从验收报告的 `records` 取回复文本，`calls`/`execution` 审计面 acceptance 报告不载，因此调用数族（`minExecutedCalls` / `requeryPerTurn` / `chitchatZeroCalls`）与依赖审计行的过程不变量（门禁时序/无风暴/写尝试零写）在 acceptance 侧都不出检查——没有证据不出判定（不造零也不造成功）。2026-11-08 修过一个反向缺陷：调用数族原先把"calls 缺席"当零，一份全合规的 write-chain-51 只因「期望·调用数(第1轮)」永远红（实测 + `expectations.test.ts` 的变异锁钉住）。「5.1 真调用了平台」在 acceptance 侧由 write-chain 三指标（提案尝试 ≥1）承载。
 - **acceptance 侧 turns 按 yaml 下标稀疏落位**：中间某条记录缺席（`--only` 子集、该轮没跑起来）时，后续轮次不再向前错位——错位会让「第 N 轮」的期望值判到另一轮回复上，是比缺判更坏的假信号（D-097 实测报告只有 5.1/5.2 两条记录时踩过）。缺席轮本身不出判定（短用例缺轮会红「没有回复」）。
 - **yaml ↔ 判定体的负路径没有单测**：`loadProbeCases` 的双向 fail-fast（yaml 有 id 无判定体 / 判定体有 id 无 yaml）本次只跑了正路径（`--only A1` 走到安全门拒绝），没有用例钉"故意不匹配就抛错"。
