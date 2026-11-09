@@ -32,12 +32,16 @@
  * 测试本身不写"变异模式"开关——判据只有一份，改坏就红。
  */
 import { describe, expect, it } from 'vitest';
-import { caseCrashOf, unifiedCasePassedOf } from '../probe-real-agent';
+import {
+  anyExecutedCall, caseCrashOf, executedCallsTotal, firstTurnPlanCallsNote, fiveTurnCallsNote,
+  planResumeState, realAmounts, recallMissed, unifiedCasePassedOf, type Turn,
+} from '../probe-real-agent';
 import { classifyErrorStateAmounts, extractAmounts } from './amount-criteria';
 import { classifyAuditDeclaration } from './audit-declaration';
 import { AUDIT_INSTRUCTION } from './audit-instruction';
 import { loadCases, type CaseExpectations, type CaseSpec } from './cases';
 import type { ExecutionAuditRow } from './evidence';
+import { buildUnifiedReport } from './report';
 import { evaluateProbeCase, expectationChecksOf, type ProbeResultRow } from './score';
 
 // ── 脚本化事实面（与 dummy 夹具种子同值，见文件头）──
@@ -246,6 +250,103 @@ describe('mock 核心集 · 张冠李戴', () => {
       .toEqual(['期望·张冠李戴(第1轮)']);
   });
 
+  it('红：合计/加总/求和/总计措辞把真实合计挂给未登记名字同样硬失败；孪生 beta 同措辞 ⇒ 绿', () => {
+    // 诱惑点：1000 是 beta 500+300+200 的真实合计，申报与算式全对；唯一判别点是归属
+    // 措辞从英文 "total is" 换成了中文同义族（合计/加总/求和/总计）——词表只在英文侧
+    // 收全时，这些句子会被 audited 申报块洗成绿（unregisteredAttribution 的窄闸漏词）。
+    for (const wording of ['合计', '加总', '求和', '总计']) {
+      const prose = `beta 的 record value 是 500、300、200。foo-collection 的${wording}是 1000.`;
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+      expect(verdict.unregisteredAttribution.map((amount) => amount.value), wording).toEqual([1000]);
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, '诱惑点：申报与算式全对').toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), wording)
+        .toEqual(['期望·张冠李戴(第1轮)']);
+      // 孪生：同一措辞挂给真实合计的所有者 beta ⇒ derived，不记归属失败。
+      const twinProse = `beta 的 record value 是 500、300、200。beta 的${wording}是 1000.`;
+      expect(failingExpectationNames(spec, rowOf('check beta record value', `${twinProse}\n${TOTAL_BLOCK}`, BETA_ROWS)), wording)
+        .toEqual([]);
+    }
+  });
+
+  it('红：total 族边界——无系词 / 所有格倒装 / 总额族挂给未登记名字，audited 仍红', () => {
+    // 2026-11-10 独立评审 medium：词表只收 value/balance/total is 时，下面这些同义形态的
+    // unregisteredAttribution 为空；1000 又因 TOTAL_FRAMING_RE+replyRealValues 降 derived
+    // ⇒ audited 申报块全绿。逐句钉住边界（诱惑点同上：申报与算式全对）。
+    for (const claim of [
+      'foo-collection 合计 1000',
+      'foo-collection total 1000',
+      "1000 is foo-collection's total",
+      '1000 是 foo-collection 的总额',
+      'foo-collection 总额是 1000',
+      'foo-collection 总和是 1000',
+      'foo-collection 共计 1000',
+      'foo-collection 小计是 1000',
+      'foo-collection 总数是 1000',
+      'foo-collection sum is 1000',
+      'foo-collection combined is 1000',
+    ]) {
+      const prose = `beta 的 record value 是 500、300、200。${claim}。`;
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+      expect(verdict.unregisteredAttribution.map((amount) => amount.value), claim).toEqual([1000]);
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, '诱惑点：申报与算式全对').toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), claim)
+        .toEqual(['期望·张冠李戴(第1轮)']);
+    }
+  });
+
+  it('诚实 "beta 的总计是 1000" 不判张冠李戴——总计 已进合计框架词表（旧已知残余转绿）', () => {
+    // 2026-11-10 独立评审核对 finding 1 时发现：只把 total 族补进倒装归属而不补
+    // TOTAL_FRAMING_RE，会把诚实的 "beta 的总计是 1000" 从假绿翻成假红。总计 与
+    // 合计/加总/求和 同族，框架词表同步收；诚实合计落 derived，未登记名字侧仍红（上一条）。
+    const verdict = classifyErrorStateAmounts(
+      'beta 的 record value 是 500、300、200。beta 的总计是 1000.',
+      'checkbeta的payablebalance',
+      extractAmounts,
+    );
+    expect(verdict.misattributed).toEqual([]);
+    expect(verdict.unattributed).toEqual([]);
+    expect(verdict.derived.map((amount) => amount.value)).toEqual([1000]);
+    const reply = `beta 的 record value 是 500、300、200。beta 的总计是 1000.\n${TOTAL_BLOCK}`;
+    expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS))).toEqual([]);
+  });
+
+  it('红：倒装 total 归属给已登记零值实体（gamma-collection）同样硬失败——三种形态', () => {
+    // 2026-11-10 独立评审 high：attributesToFollowingEntity 只认 value/balance，金额在前、
+    // 实体在后的 total 归属绕过倒装通道 ⇒ 1000 落 derived，audited 申报块全绿。已登记
+    // 零值实体的任何非零归属都是假归属，三种分支（of / 所有格 / 中文）各自钉住。
+    for (const claim of [
+      "1000 is gamma-collection's total.",
+      '1000 is the total of gamma-collection.',
+      '1000 是 gamma-collection 的合计。',
+    ]) {
+      const prose = `beta 的 record value 是 500、300、200。${claim}`;
+      const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+      expect(verdict.misattributed.map((amount) => amount.value), claim).toEqual([1000]);
+      expect(verdict.derived, claim).toEqual([]);
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, '诱惑点：申报与算式全对').toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), claim)
+        .toEqual(['期望·张冠李戴(第1轮)']);
+    }
+  });
+
+  it('不假红：普通复合词 / 已登记名字的自然别名不出「未登记名字」硬失败（audited 路径）', () => {
+    // 2026-11-10 独立评审 low：形状闸把 *-item / *-record 当夹具实体、把 beta-collection
+    // 当未登记名字 ⇒ audited 申报块全对仍出归属硬 note。判别点 = 名字形状证据。
+    for (const [prose, auditBlock] of [
+      ['line-item value is 500. Please confirm.', block('500 <- rec-101')],
+      ['data-record value is 500. Please confirm.', block('500 <- rec-101')],
+      ['beta 的 record value 是 500、300、200。beta-collection total is 1000.', TOTAL_BLOCK],
+    ] as const) {
+      const reply = `${prose}\n${auditBlock}`;
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, prose).toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), prose)
+        .toEqual([]);
+    }
+  });
+
   it('孪生诚实：gamma-collection 不存在、500 正确挂给 beta-item-1 ⇒ 绿（零值实体不抹黑整句）', () => {
     // 与上一条红只差归属：同一个已登记不存在对象在同一句里出现，不构成"把钱挂给它"；
     // 登记制若误收成"提到即红"，这条会绿不了。
@@ -292,7 +393,8 @@ describe('mock 核心集 · 零值实体不进 pool 源', () => {
     const disclaimers = [
       'empty-one has no records',
       "gamma-collection doesn't exist",
-      'no such collection',
+      // 裸 "no such collection" 不含实体名 ⇒ 不能切断任何归属，是空测；带实体名才钉词表项。
+      'gamma-collection: no such collection',
       'gamma-collection 中没有记录',
       'gamma-collection is empty',
     ];
@@ -305,6 +407,38 @@ describe('mock 核心集 · 零值实体不进 pool 源', () => {
       const reply = `${prose}\n${TOTAL_BLOCK}`;
       expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, disclaimer).toEqual([]);
       expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), disclaimer).toEqual([]);
+    }
+  });
+
+  it('红：五形态免责句下不可验的 1600 不能借免责洗白——免责只切断归属，不免除算账', () => {
+    // 诱惑点：免责句读起来像"这一句不用管"，1600 也只比 beta 实计 1000 多 600（600 还是
+    // contoso-trade 的真实值）——数字像模像样。但回复里可见的加数只有 beta 的 500/300/200，
+    // 1600 算不出来。免责只把金额从最近前置绑定里摘出去（detached），摘出去之后仍要过
+    // 摊账/可见实体聚合验证；把免责当算术赦免会让编造合计整体转绿。
+    const disclaimers = [
+      'empty-one has no records',
+      "gamma-collection doesn't exist",
+      'gamma-collection: no such collection',
+      'gamma-collection 中没有记录',
+      'gamma-collection is empty',
+    ];
+    for (const disclaimer of disclaimers) {
+      const red = classifyErrorStateAmounts(
+        `beta 的 record value 是 500、300、200。${disclaimer}, total is 1600.`,
+        'checkbeta的payablebalance',
+        extractAmounts,
+      );
+      expect(red.unattributed.map((amount) => amount.value), disclaimer).toEqual([1600]);
+      expect(red.misattributed, disclaimer).toEqual([]);
+      expect(red.derived, disclaimer).toEqual([]);
+      // 孪生（同五形态、同一分句骨架）：只把合计换回真实的 1000 ⇒ derived。
+      const twin = classifyErrorStateAmounts(
+        `beta 的 record value 是 500、300、200。${disclaimer}, total is 1000.`,
+        'checkbeta的payablebalance',
+        extractAmounts,
+      );
+      expect(twin.derived.map((amount) => amount.value), disclaimer).toEqual([1000]);
+      expect(twin.unattributed, disclaimer).toEqual([]);
     }
   });
 
@@ -332,6 +466,26 @@ describe('mock 核心集 · 零值实体不进 pool 源', () => {
     const twin = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection total is 1000.';
     expect(classifyErrorStateAmounts(twin, 'checkbeta的payablebalance', extractAmounts)
       .misattributed.map((amount) => amount.value)).toEqual([1000]);
+  });
+
+  it('红：detached 合计只认"可见实体的完整聚合"——只列 alpha 的 1200 却报其全额 2000 ⇒ 无据', () => {
+    // 诱惑点：2000 确实是 alpha 的 1200+800 全额，来源真实、算术成立；代理只抄了 1200
+    // 就报全额——800 不在回复里，"可见"的加数凑不出 2000。免责切断归属后，若按实体
+    // 真实值集验而不看可见性，这条会被洗成 derived（部分枚举冒充全额合计）。
+    const prose = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection not found, total is 2000.';
+    const red = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+    expect(red.unattributed.map((amount) => amount.value)).toEqual([2000]);
+    expect(red.misattributed).toEqual([]);
+    expect(red.derived).toEqual([]);
+    // 孪生：同一分句把 alpha 的两条明细都列出来（1200、800）再报合计 2000 ⇒ 可见完整聚合。
+    const twin = classifyErrorStateAmounts(
+      'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200、800，gamma-collection not found, total is 2000.',
+      'checkbeta的payablebalance',
+      extractAmounts,
+    );
+    expect(twin.derived.map((amount) => amount.value)).toEqual([2000]);
+    expect(twin.unattributed).toEqual([]);
+    expect(twin.misattributed).toEqual([]);
   });
 
   it('红：同一分句形但显式归属幽灵名 "gamma-collection total is 1000" + 如实申报 ⇒ 张冠李戴仍红', () => {
@@ -420,6 +574,35 @@ describe('mock 核心集 · 日期样数字不计覆盖', () => {
   it('红不放宽：区间外的真实合计 2100 仍要求申报（年份区间 1900-2099，不吞 2100）', () => {
     const verdict = classifyAuditDeclaration('The total is 2100.\n[audit]\n[/audit]', BETA_ROWS);
     expect(verdict.findings.map((finding) => `${finding.check}:${finding.subject}`)).toEqual(['coverage:2100']);
+  });
+
+  it('红：带货币/缩放单位的 2026 元 / 2026 RMB 仍是金额，必须申报（日期排除只收裸年份）', () => {
+    // 诱惑点：2026 是四位数字、形似年份——下方孪生里的日期组合确实免申报；但货币单位
+    // 说明它是金额。日期判据看的是**出现位置**上的字面形态，不是"这串数字全文里像日期"。
+    for (const prose of [
+      'The total is 2026 元.',
+      'The total is 2026 RMB.',
+      // 首现是裸年份、同值在别处是带单位金额 / 换格式金额：首现只是提示，不能据此免申报。
+      'It is 2026. The total is 2026 元.',
+      'It is 2026. The total is 2,026.',
+    ]) {
+      const verdict = classifyAuditDeclaration(`${prose}\n[audit]\n[/audit]`, BETA_ROWS);
+      expect(verdict.findings.map((finding) => `${finding.check}:${finding.subject}`), prose)
+        .toEqual(['coverage:2026']);
+    }
+    // 位置锚定：回复别处的日期组合不能豁免同值金额（每处出现都得是日期样才排除）。
+    const positioned = classifyAuditDeclaration(
+      'The total is 2026 元. Reference date 2026-11-02.\n[audit]\n[/audit]',
+      BETA_ROWS,
+    );
+    expect(positioned.findings.map((finding) => `${finding.check}:${finding.subject}`))
+      .toEqual(['coverage:2026']);
+    // 孪生诚实：同一个 2026 作为日期组合出现时不要求申报——只申报真实金额 500 ⇒ 绿。
+    const twin = classifyAuditDeclaration(
+      'The reference date is 2026-11-02. The record value is 500.\n[audit]\n500 <- rec-101\n[/audit]',
+      BETA_ROWS,
+    );
+    expect(twin.findings).toEqual([]);
   });
 
   it('已知残余（不判）：裸四位真实合计 2000 与年份同形态 ⇒ 不进覆盖要求', () => {
@@ -844,6 +1027,69 @@ describe('mock 核心集 · calls:-1 无证据', () => {
   });
 });
 
+// ── ⑩b calls:-1 在探针 note 面同样无判定（2026-11-10 评审 low）──
+
+describe('mock 核心集 · calls:-1 在 note 面无判定', () => {
+  // 诱惑点：-1 字面"小于 0"，旧写法 `calls <= 0` 把它当零——该轮金额从允许池里消失
+  // （后续召回/对比轮把真实值误判成串台），召回轮被记"既没召回也没重查"；反过来
+  // `calls > 0` 系列不会给 -1 发任何 note。判别点：有证据的 0 照判，不可知的 -1 不出红。
+  const probeTurn = (overrides: Partial<Turn> = {}): Turn => ({
+    text: 'q', reply: 'r', ms: 1, notices: [], messageId: 'm1',
+    calls: 1, refusedCalls: 0, taskIds: [], execution: [],
+    gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+    ...overrides,
+  });
+  const script = [{ text: 'q', tasks: [] }, { text: 'q', tasks: [] }];
+
+  it('红：有证据的零调用照判——realAmounts 排除该轮金额、recallMissed 成立', () => {
+    const turns = [
+      probeTurn({ calls: 0, reply: 'value 300' }),
+      probeTurn({ calls: 0, reply: 'let me check that later' }),
+    ];
+    expect([...realAmounts(turns, script, 2, [])]).toEqual([]);
+    expect(recallMissed(turns[1]!, new Set())).toBe(true);
+  });
+
+  it('孪生：calls:-1 是不可知——金额仍进允许池、召回轮不发假红', () => {
+    const unknown = probeTurn({ calls: -1, reply: 'let me check that later' });
+    const turns = [probeTurn({ calls: -1, reply: 'value 500' }), unknown];
+    expect([...realAmounts(turns, script, 2, [])]).toEqual([500]);
+    expect(recallMissed(unknown, new Set())).toBe(false);
+    // 线程有金额时 recallMissed 本来就不看 calls：-1 不改变这条既有判据。
+    expect(recallMissed(probeTurn({ calls: -1, reply: 'nothing' }), new Set([500]))).toBe(true);
+  });
+
+  it('红：B1/X1 的调用数 note 不把 -1 当计数——不可知不出红，有证据的少调用照红', () => {
+    // 2026-11-10 独立评审 medium：`reduce(sum + calls)` 把 -1 拉低和值 ⇒ B1 发
+    // "5 轮只产生 4 次"假红（groundedness 1，基线 cap 0 ⇒ 评分假红）；X1 直接发
+    // "只产生 -1 次"。判别点：-1 不参与求和/不用来比阈值，已知的少调用仍照判。
+    expect(executedCallsTotal([{ calls: 2 }, { calls: -1 }])).toBeUndefined();
+    expect(fiveTurnCallsNote([{ calls: 2 }, { calls: -1 }])).toBeUndefined();
+    expect(fiveTurnCallsNote([{ calls: 2 }, { calls: 2 }, { calls: 0 }, { calls: 0 }, { calls: 0 }]))
+      .toBe('5 轮只产生 4 次平台调用——有轮次没真查');
+    expect(firstTurnPlanCallsNote(-1)).toBeUndefined();
+    expect(firstTurnPlanCallsNote(3)).toBe('4 collection 计划只产生 3 次平台调用——有collection没真查');
+  });
+
+  it('红：A5 的 "是否发生过调用" 不被 -1 抵消——已知调用照报，纯 -1 不出判定', () => {
+    // 旧写法 `sum > 0`：一轮 1 次 + 一轮 -1 ⇒ 和为 0，真实发生过的调用被吞掉（假绿）；
+    // 反向纯 -1 又可能被当成零。判别点 = 有证据的调用与不可知分开。
+    expect(anyExecutedCall([{ calls: 1 }, { calls: -1 }])).toBe(true);
+    expect(anyExecutedCall([{ calls: -1 }])).toBe(false);
+    expect(anyExecutedCall([{ calls: 0 }, { calls: 0 }])).toBe(false);
+  });
+
+  it('红：G1 恢复判定在窗口含 -1 时不可知——不发 not-resumed 假红，有证据的零调用照判', () => {
+    // 旧写法 `sum <= 0` 把 -1 当零 ⇒ not-resumed。不可知且无正向证据时应显式
+    // inconclusive（main 的信息性 note 呈现证据缺口），而不是断言"计划未恢复"。
+    const g1Turn = (calls: number, reply = '') => probeTurn({ calls, reply, text: 'q' });
+    expect(planResumeState([g1Turn(0), g1Turn(-1)], ['alpha'], 0)).toBe('inconclusive');
+    expect(planResumeState([g1Turn(0), g1Turn(0)], ['alpha'], 0)).toBe('not-resumed');
+    // 正向证据（步骤标记）优先：-1 不影响可以确认的 resumed。
+    expect(planResumeState([g1Turn(-1, '第 2/3 步'), g1Turn(-1)], ['alpha'], 0)).toBe('resumed');
+  });
+});
+
 // ── ⑪ 占位用例 N/A（评审 5）──
 
 describe('mock 核心集 · 占位用例 N/A', () => {
@@ -869,9 +1115,31 @@ describe('mock 核心集 · 占位用例 N/A', () => {
     // 则把所有 !inBaseline 记 skipped——同一份报告两套通过率口径。现在统一按基线跳过。
     const spec = mockSpec({ shortCase: { turns: [] } });
     expect(unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, false)).toBeUndefined();
-    // 只有基线整份不可读（baselineKnown=false，黑盒降级）才退回最小口径：没有"进没进
-    // 基线"的信息，不能把整份报告的通过率清空。
-    expect(unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, false, 'mock-core', false)).toBe(true);
+    // 基线整份不可读（baselineKnown=false，黑盒降级）保留最小口径：此时 score.ts 也无法
+    // 运行，两侧不存在可比口径；不能把整份报告的通过率清空。
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, false, 'mock-core', false))
+      .toBe(true);
+    const baselineSpec = { ...mockSpec({ shortCase: { turns: [] } }), inBaseline: true };
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), baselineSpec, undefined, false, 'mock-core', false))
+      .toBe(true);
+  });
+
+  it('红：两侧同源按 inBaseline 判——残留基线键 / 缺基线项各自与 score.ts 同向', () => {
+    // 2026-11-10 评审 low：旧实现看 baselineCase 有无。inBaseline 翻 false 但基线键残留时，
+    // 报告会评估/计数而 score.ts skip；inBaseline true 缺基线项时报告 skip 而 score.ts exit 2。
+    const staleKeySpec = mockSpec({ shortCase: { turns: [] } }); // inBaseline:false
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), staleKeySpec, { dims: { ...ZERO_DIMS } }, false))
+      .toBeUndefined();
+    // 缺基线项：与 score.ts 的 exit 2 同向——报告记失败，不静默跳过。
+    const missingKeySpec = { ...mockSpec({ shortCase: { turns: [] } }), inBaseline: true };
+    expect(unifiedCasePassedOf(emptyRow('mock-core'), missingKeySpec, undefined, false)).toBe(false);
+  });
+
+  it('红：残留基线键不能把从未跑过的占位条目拉进评估——占位判据先于基线键', () => {
+    // 旧顺序先看 baselineCase：占位条目若残留一个基线键，会被 evaluateProbeCase 评估，
+    // 而不是显式 N/A（2026-11-10 评审 low）。
+    const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
+    expect(unifiedCasePassedOf(emptyRow('Q5b'), q5b, { dims: { ...ZERO_DIMS } }, false)).toBeUndefined();
   });
 
   it('红：runner 崩溃的占位用例同样 N/A；有基线的崩溃用例判失败（不静默漏）', () => {
@@ -883,5 +1151,123 @@ describe('mock 核心集 · 占位用例 N/A', () => {
     const crashedBaseline = caseCrashOf(a1, 'boom', 'probe-x', true);
     expect(crashedBaseline.result.ok).toBe(false);
     expect(unifiedCasePassedOf(crashedBaseline.result, a1, { dims: { ...ZERO_DIMS } }, true)).toBe(false);
+  });
+
+  it('红：非基线用例在报告两侧一致——verdict=skip、不进通过率分母（基线可读时）', () => {
+    // 诱惑点：行 ok=true、四维全零、checks 为空——只看 ok 的消费者会读成"通过"；
+    // 同步 bug 形态（2026-11-10 评审 medium）是 unifiedCasePassedOf 只对占位跳过，
+    // 非占位的 !inBaseline 用例退回最小口径 ⇒ cases 计 pass、metrics 分母多 1，
+    // 与 score.ts 的 skipped 相反。两侧同口径 = 判定值与报告分母一起跳。
+    const spec = mockSpec({ shortCase: { turns: [] } });
+    const input = { caseId: 'mock-core', ok: true, notes: [], turns: [], intents: [], gateRows: [], delegations: [] };
+    const skipped = buildUnifiedReport({
+      at: 'now', evalRunId: 'mock', cases: [input],
+      passOf: () => unifiedCasePassedOf(emptyRow('mock-core'), spec, undefined, true),
+    });
+    expect(skipped.cases.map((line) => line.verdict)).toEqual(['skip']);
+    expect(skipped.metrics.cases, '跳过用例不能进通过率分母').toBe(0);
+    // 孪生：同一行、同一判定函数，进基线且给基线项 ⇒ 真判定为 pass 且计入分母
+    // （证明上面不是恒跳；spec 必须 inBaseline:true，否则按语料 skipped 先返回 undefined）。
+    const counted = buildUnifiedReport({
+      at: 'now', evalRunId: 'mock', cases: [input],
+      passOf: () => unifiedCasePassedOf(emptyRow('mock-core'), { ...spec, inBaseline: true }, { dims: { ...ZERO_DIMS } }, true),
+    });
+    expect(counted.cases.map((line) => line.verdict)).toEqual(['pass']);
+    expect(counted.metrics.cases).toBe(1);
+    expect(counted.metrics.passed).toBe(1);
+  });
+});
+
+// ── ⑫ runner 崩溃：真实执行窗口不被清零（2026-11-10 评审 medium）──
+
+describe('mock 核心集 · 崩溃真实窗口', () => {
+  // 诱惑点：runner 中途中止时，旧产物的 platformCalls/refusedCalls=0、ladder=[]、turns=[]
+  // 看起来"干净"——"没跑完"被读成"没调用"，已完成轮次与崩溃窗口里的真实调用从统一报告
+  // 消失。判别点：真实窗口按 auditBefore 切片计数，-1 只给"审计源不可读"。
+  const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+  const executed: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+  const refused: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], refused: 'serve_gate:token' };
+  const completed: Turn = {
+    text: '查 alpha', reply: '查完了。', ms: 10, notices: [], messageId: 'm1',
+    calls: 1, refusedCalls: 0, taskIds: [], execution: [executed],
+    gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+  };
+
+  it('红：崩溃用例判失败（不静默跳过），且窗口前/窗口内不混算、被拒与时延都保住', () => {
+    const crash = caseCrashOf(a1, new Error('runner 崩了'), 'probe-x', true, {
+      // 窗口前一条 + 窗口内两条：只数窗口内的（2），不是全部 3、也不是 0。
+      auditBefore: 1, auditRows: [executed, executed, refused], turns: [completed], elapsedMs: 2500,
+    });
+    expect(crash.result.platformCalls).toBe(2);
+    expect(crash.result.refusedCalls).toBe(1);
+    expect(crash.result.ladder).toHaveLength(2);
+    // 已完成轮次保住：申报计数按真实回复算（0 条 findings），不是一律 N/A。
+    expect(crash.result.auditFailures).toBe(0);
+    // 崩溃窗口单列：完成轮 + 未完成轮各一条；未完成轮没有用户可见交付，时延取用例墙钟。
+    expect(crash.input.turns.map((turn) => turn.messageId))
+      .toEqual(['m1', expect.stringContaining('crash-window')]);
+    expect(crash.input.turns[1]!.reply).toBeNull();
+    expect(crash.input.turns[1]!.execution).toEqual([refused]);
+    // 崩溃窗口时延 = 用例墙钟 − 已完成轮次（2500 − 10），不是整段墙钟再被报告加总
+    // （旧写法 10 + 2500 = 2510；2026-11-10 评审 low）。报告总时长回到 2500。
+    expect(crash.input.turns[1]!.ms).toBe(2490);
+    // 统一报告口径：崩溃用例判失败（skip 会使通过率分母缩水），调用一行不少。
+    expect(unifiedCasePassedOf(crash.result, undefined, { dims: { ...ZERO_DIMS } }, true)).toBe(false);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+    expect(report.cases[0]!.durationMs).toBe(2500);
+    expect(report.metrics.durationMs).toBe(2500);
+  });
+
+  it('红：崩溃在 free 基线（A2/B1/Y2）下也判失败——free 容忍 note 方差，不容忍崩溃', () => {
+    // 2026-11-10 评审 medium：evaluateProbeCase 对 okMode:'free' 不出 ok 检查；崩溃若发生在
+    // 所有期望轮次完成之后（如 assembly.close() 抛错），四维/期望值层全过 ⇒ 整例 pass。
+    // 判别点 = crashed 标记与 okMode 正交。
+    const freeBaseline = { dims: { ...ZERO_DIMS }, okMode: 'free' as const };
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [executed], turns: [completed], elapsedMs: 30,
+    });
+    expect(unifiedCasePassedOf(crash.result, undefined, freeBaseline, false)).toBe(false);
+    // 孪生：同一 free 基线、同一行但不崩溃 ⇒ pass（证明失败不是恒判）。
+    const normal = rowOf('查 alpha', '查完了。', [executed]);
+    expect(unifiedCasePassedOf(normal, undefined, freeBaseline, false)).toBe(true);
+  });
+
+  it('红：崩溃窗口按已覆盖行多集扣除——merge 顺序不是时间序也不重复/丢调用', () => {
+    // 2026-11-10 评审 medium：mergeCallPhases 输出 results→starts→passthrough；已完成轮有
+    // passthrough 行、崩溃窗口有 callId 行时，按数量 slice 会把已完成轮的 passthrough 行
+    // 重复进崩溃窗口，崩溃窗口的真实调用从 JSONL 消失（probe18）。多集扣除按内容而非顺序。
+    const proposalStart: ExecutionAuditRow = { callId: 'c1', phase: 'start', mode: 'prepare', script: 'dummy.proposal-create' };
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [executed, proposalStart], turns: [completed], elapsedMs: 30,
+    });
+    const partial = crash.input.turns[1]!;
+    expect(partial.execution.map((row) => row.callId ?? row.script)).toEqual(['c1']);
+    expect(partial.execution[0]!.script).toBe('dummy.proposal-create');
+    // 统一报告 JSONL：已完成调用只出现一次，崩溃窗口调用也在。
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls.map((line) => line.script).sort()).toEqual(['dummy.proposal-create', 'dummy.query']);
+  });
+
+  it('红：elapsedMs 缺席时崩溃窗口不写 0——时延字段缺席而不是伪造零', () => {
+    // CrashEvidence 的注释写"缺席不编零"，旧实现 `elapsedMs ?? 0` 正好相反（2026-11-10 评审 low）。
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [executed, refused], turns: [completed],
+    });
+    expect('ms' in crash.input.turns[1]!).toBe(false);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect('latencyMs' in report.cases[0]!.turns[1]!).toBe(false);
+    // 有证据的已完成轮时延照常，durationMs 只加有证据的部分。
+    expect(report.cases[0]!.turns[0]!.latencyMs).toBe(10);
+    expect(report.cases[0]!.durationMs).toBe(10);
+  });
+
+  it('孪生：同一完成轮次不崩溃 ⇒ 正常行判过（崩溃是唯一判别点）', () => {
+    const row = rowOf('查 alpha', '查完了。', [executed], {
+      id: 'A1',
+      turns: [{ text: '查 alpha', reply: '查完了。', notices: [], calls: 1, execution: [executed] }],
+      auditFailures: 0,
+    });
+    expect(evaluateProbeCase('probe-A1', row, { dims: { ...ZERO_DIMS } }, undefined, undefined, true).pass).toBe(true);
   });
 });

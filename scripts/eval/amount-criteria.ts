@@ -56,7 +56,7 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
 // 中文分支不能用 \b 收尾——CJK 字符都不是 \w，「值」「为」之间不存在词边界，值\b 恒不匹配。
 export const ACCOUNT_RESULT_PHRASING = /已查|查到|结果如下|余额\s*为|记录\s*(?:\d|值)|凭证\s*\d|balance\s*为|record\s*(?:\d|value\b)|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
 
-export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|加总|求和|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
+export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|加总|求和|总计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
 
 /**
  * 框架词按**运算种类**分族（2026-11-08 评审 blocking）：措辞标的是什么运算，就按什么
@@ -69,7 +69,7 @@ export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|加总|求和|多出|
  * 合计族含"合计"的三个同义措辞（2026-11-09 成本轮：Y2 用"加总"）——加总/求和与合计同一
  * 验证通道（isVerifiedTotal），不是新开口子。
  */
-export const TOTAL_FRAMING_RE = /合计|加总|求和|total|combined|sum\b/i;
+export const TOTAL_FRAMING_RE = /合计|加总|求和|总计|total|combined|sum\b/i;
 export const DIFF_FRAMING_RE = /相差|多出|少于|高出|difference|higher by|lower by|more than|less than/i;
 export const RATIO_FRAMING_RE = /倍/i;
 
@@ -290,13 +290,6 @@ const DATE_COMBO_AT_START_RE = /^((?:19|20)\d{2})([-/.／])(0?[1-9]|1[0-2])(?:[-
  */
 const CURRENCY_SUFFIX_RE = /^\s*(?:元|块|人民币|美元|欧元|英镑|日元|万|亿|RMB|CNY|USD|EUR|GBP|JPY)/i;
 
-/** 同一 raw 在正文里的出现位置（按词元边界；`amount.at` 缺席时用于逐次回退判定）。 */
-function rawOccurrences(text: string, raw: string): number[] {
-  const escaped = raw.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return [...text.matchAll(new RegExp(`(?<![\\d.,])${escaped}(?!\\d)`, 'g'))]
-    .map((match) => match.index ?? 0);
-}
-
 /**
  * 该次出现是否是日期样（不计入申报覆盖要求）。`text` = 该数字所在的回复正文。
  *
@@ -304,25 +297,31 @@ function rawOccurrences(text: string, raw: string): number[] {
  *   · 裸年份：四位、无千分位/小数/单位——带格式的同值数字（"2,000"）是金额形态；
  *     紧跟货币/缩放单位（"2026 元" / "2026 RMB"）同样不是裸年份，照旧要求申报；
  *   · 年月日组合只在数字出现位置起算（DATE_COMBO_AT_START_RE）。
- * `amount.at` 缺席（测试/旧调用方）时回退到全文同 raw 的全部出现：**每一处**都日期样才
- * 排除——任一处是金额（含带单位形态）就必须申报，不能借别处的日期豁免。
+ * **每一处**同值出现都日期样才排除——任一处是金额（带单位 / 带格式 / 裸金额）就必须
+ * 申报，不能借别处的日期豁免。按**值**扫全部出现（`amountValuePattern` 覆盖千分位与
+ * 小数格式），不按 `amount.raw` 字面扫：extractAmounts 按值去重只留首现的 raw/at，
+ * 同值在别处可能换了格式（"It is 2026. The total is 2,026."）或换了形态（"…2026 元."）
+ * ——只看首现/同字面会把那些金额免于申报（2026 元不放宽的两处洞，2026-11-10 第三轮
+ * 自校验实测）。`amount.at` 只作"正文里一个字面都扫不到"时的兜底。
  */
 export function isDateLikeAmount(amount: { raw: string; value: number; at?: number }, text: string): boolean {
-  const positions = amount.at !== undefined ? [amount.at] : rawOccurrences(text, amount.raw);
-  if (positions.length === 0) return false;
-  const dateLikeAt = (at: number): boolean => {
-    if (BARE_YEAR_RE.test(amount.raw)) {
+  const occurrences = [...text.matchAll(new RegExp('(?<![\\d.,%％])' + amountValuePattern(amount.value) + '(?!\\d)', 'g'))]
+    .map((match) => ({ at: match.index ?? 0, raw: match[0] }));
+  if (occurrences.length === 0 && amount.at !== undefined) occurrences.push({ at: amount.at, raw: amount.raw });
+  if (occurrences.length === 0) return false;
+  const dateLikeAt = (at: number, raw: string): boolean => {
+    if (BARE_YEAR_RE.test(raw)) {
       // 裸年份 + 货币/缩放单位 = 金额（"The total is 2026 元."）。
-      return !CURRENCY_SUFFIX_RE.test(text.slice(at + amount.raw.length));
+      return !CURRENCY_SUFFIX_RE.test(text.slice(at + raw.length));
     }
     const match = DATE_COMBO_AT_START_RE.exec(text.slice(at));
     if (!match) return false;
     const [, year, separator, month] = match;
     // 点分组合（"2026.11.02"）被 AMOUNT_PATTERN 的小数分支读成十进制 2026.11；短横/
     // 斜杠组合只读出年份。按提取器的读法比对字面量，同源才排除。
-    return (separator === '.' ? `${year}.${month}` : year) === amount.raw;
+    return (separator === '.' ? `${year}.${month}` : year) === raw;
   };
-  return positions.every(dateLikeAt);
+  return occurrences.every((occurrence) => dateLikeAt(occurrence.at, occurrence.raw));
 }
 
 /**
@@ -600,8 +599,9 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
  */
 
 /**
- * 倒装归属（"500 is the value of beta-item-1" / "500 是 beta-item-1 的记录值"）：
- * 金额在前、已知实体在后，且两者之间是**明确的归属措辞**时，已点名实体是这笔钱的归属人，
+ * 倒装归属（"500 is the value of beta-item-1" / "500 is gamma-collection's total"
+ * / "500 是 beta-item-1 的合计"）：金额在前、已知实体在后，且两者之间是**明确的归属
+ * 措辞**时，已点名实体是这笔钱的归属人，
  * 最近的前置实体提及（"gamma-collection not found, but 500 is …" 里的 gamma-collection，
  * 现在是表内零值实体）不是。只认窄措辞，不做通用句法解析——普通枚举（"foo-item-1 is
  * 500, beta-item-1 is 300"）没有这种措辞，最近前置绑定照旧生效。
@@ -614,15 +614,15 @@ function attributesToFollowingEntity(
 ): boolean {
   const between = clause.slice(amountEnd, entityAt);
   const after = clause.slice(entityAt + entityName.length, entityAt + entityName.length + 16);
-  // 英文：500 is the (record) value of beta-item-1 / 500 = value for beta-item-1
-  if (/^\s*(?:[,，:：]\s*)?(?:is|are|was|were|equals?|=)\s+(?:the\s+)?(?:record\s+)?(?:value|balance)\s+(?:of|for)\s*$/i.test(between)
+  // 英文：500 is the (record) value/balance/total of beta-item-1 / 500 = total for beta-item-1
+  if (/^\s*(?:[,，:：]\s*)?(?:is|are|was|were|equals?|=)\s+(?:the\s+)?(?:record\s+)?(?:value|balance|total)\s+(?:of|for)\s*$/i.test(between)
     && /^\s*(?:[,.，。;；:：]|$)/.test(after)) return true;
-  // 英文所有格：500 is beta-item-1's (record) value
+  // 英文所有格：500 is beta-item-1's (record) value/balance/total
   if (/^\s*(?:[,，:：]\s*)?(?:is|are|was|were|equals?|=)\s*$/i.test(between)
-    && /^\s*(?:'s|’s|s')\s+(?:record\s+)?(?:value|balance)\b/i.test(after)) return true;
-  // 中文：500 是/为 beta-item-1 的记录值 / 余额
+    && /^\s*(?:'s|’s|s')\s+(?:record\s+)?(?:value|balance|total)\b/i.test(after)) return true;
+  // 中文：500 是/为 beta-item-1 的记录值 / 余额 / 合计 / 加总 / 求和 / 总计
   if (/^\s*[，,]?\s*(?:是|为|即|=)\s*$/.test(between)
-    && /^\s*的\s*(?:记录值|值|余额)/.test(after)) return true;
+    && /^\s*的\s*(?:记录值|值|余额|合计|加总|求和|总计)/.test(after)) return true;
   // 显式从属：500 belongs to beta-item-1 / 500 属于 beta-item-1
   return /^\s*(?:belongs?\s+to|属于)\s*$/i.test(between);
 }
@@ -635,13 +635,18 @@ function attributesToFollowingEntity(
  * 路径照旧红，但 audited 路径因此假绿。
  *
  * 这里只补**显式归属措辞 + 夹具命名形状**这一窄面，不做最近前置绑定：
- *   · 显式措辞：`NAME (的)? (record )?(value|balance|total|记录值|值|余额|合计|加总|求和|总计)
- *     (is|是|…) 金额`、`金额 is the value/total of NAME`、`金额 是 NAME 的记录值/合计`、
- *     `金额 belongs to NAME`、`| NAME | 金额 |`；普通枚举（"foo-item-1 is 500,
- *     beta-item-1 is 300"）里的 "is" 形态也收（名字形状闸挡普通复合词）；
- *   · 名字形状闸：数字分段（foo-item-1 / rec-999）或实体族后缀（*-collection /
- *     *-records / *-group）才可能是夹具实体；全大写分段（rec-XXX / SUBJECT_NOT_FOUND）
- *     是占位符/状态码，well-known / real-time / beta-related 这类普通复合词由后缀闸挡掉。
+ *   · 显式措辞：`NAME (的)? (record )?(value|balance|total|sum|combined|记录值|值|余额|
+ *     合计|加总|求和|总计|总额|总和|共计|小计|总数) (is|是|…) 金额`、无系词的合计族
+ *     （`NAME total 金额` / `NAME 合计 金额`）、`金额 is the value/total/sum of NAME`、
+ *     `金额 is NAME's total`、`金额 是 NAME 的记录值/合计`、`金额 belongs to NAME`、
+ *     `| NAME | 金额 |`；普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）里的 "is"
+ *     形态也收（名字形状闸挡普通复合词）；
+ *   · 名字形状闸：数字分段（foo-item-1 / rec-999），或 **collection/group 族**的
+ *     未登记词干（foo-collection）才可能是夹具实体；全大写分段（rec-XXX /
+ *     SUBJECT_NOT_FOUND）是占位符/状态码，well-known / real-time / beta-related 这类
+ *     普通复合词由后缀闸挡掉；`item` / `record` 后缀单独不算形状证据（line-item /
+ *     data-record / order-item 是普通英文复合词，2026-11-10 独立评审 low），已登记词干
+ *     的别名（beta-collection）也不是未登记名字。
  * 登记在册的名字不在这里判（已有实体绑定 + misattributed 通道）。
  */
 const ENTITY_TOKEN_RE_SRC = '[A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+';
@@ -650,9 +655,13 @@ const REGISTERED_ENTITY_NAMES: ReadonlySet<string> = new Set([
   ...REAL_DATA_TOKENS,
   ...MOCK_WINDOWS.flatMap((window) => [window.code, window.name]),
 ].map((name) => name.toLowerCase()));
-const ENTITY_FAMILY_SUFFIXES: ReadonlySet<string> = new Set([
-  'item', 'items', 'collection', 'collections', 'record', 'records', 'group',
-]);
+/**
+ * 无数字分段的未登记名字只认 collection/group 族：`item` / `record` 是最常见的普通英文
+ * 复合词后缀（line-item / data-record / order-item），只按后缀收会把它们当夹具实体，
+ * 在 audited 路径上出"挂给未登记名字"假红（2026-11-10 独立评审 low）。数字分段
+ * （foo-item-1 / rec-999）仍按夹具命名形状收——那是强形状证据。
+ */
+const ENTITY_FAMILY_SUFFIXES: ReadonlySet<string> = new Set(['collection', 'collections', 'group']);
 const ENTITY_MODIFIER_SUFFIXES: ReadonlySet<string> = new Set([
   'related', 'based', 'specific', 'level', 'wise', 'like', 'type', 'style',
   'driven', 'aware', 'friendly', 'oriented', 'scoped', 'wide', 'known', 'time',
@@ -664,7 +673,12 @@ function looksLikeFixtureEntity(token: string): boolean {
   if (segments.some((segment) => /^\d+$/.test(segment))) return true;
   const last = segments[segments.length - 1]!.toLowerCase();
   if (ENTITY_MODIFIER_SUFFIXES.has(last)) return false;
-  return ENTITY_FAMILY_SUFFIXES.has(last);
+  if (!ENTITY_FAMILY_SUFFIXES.has(last)) return false;
+  // 已登记实体的自然别名（beta-collection / alpha-group）不是"未登记名字"：数字形状
+  // 之外的复合词只有在词干本身是登记名时才算已知别名的变体。foo-collection 的词干
+  // foo 不在册 ⇒ 仍是未登记名字（方向正确）。
+  const stem = segments.slice(0, -1).join('-').toLowerCase();
+  return !REGISTERED_ENTITY_NAMES.has(stem);
 }
 
 function isUnregisteredEntityName(token: string): boolean {
@@ -676,15 +690,26 @@ function isUnregisteredEntityName(token: string): boolean {
  * classifyErrorStateAmounts 的分句循环里用，`clause` 已按 CLAUSE_SPLIT 切好。
  *
  * 归属口径词按语料实据收（2026-11-10 独立评审 medium 补 total 族）：`value/balance/
- * 记录值/值/余额` 之外，`total/合计/加总/求和/总计` 同样是显式归属——"foo-collection
- * total is 1000" 把真实合计挂给未登记名字，不能因为词表窄就漏判（已登记的 gamma 同句
- * 走 misattributed 照红，尺子必须一致）。
+ * 记录值/值/余额` 之外，`total/sum/combined/合计/加总/求和/总计/总额/总和/共计/小计/
+ * 总数` 同样是显式归属——"foo-collection total is 1000" 把真实合计挂给未登记名字，
+ * 不能因为词表窄就漏判（已登记的 gamma 同句走 misattributed 照红，尺子必须一致）。
+ * 无系词形态（"foo-collection total 1000" / "foo-collection 合计 1000"）只收合计族：
+ * value/balance 无系词太宽，普通标签文本会误伤。
  */
 function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: number): boolean {
   const before = clause.slice(0, at);
+  // 归属名词：value/balance 与合计族同权（合计族收 total/sum/combined 与中文同义词——
+  // 词表按语料实据只增不减；2026-11-10 独立评审核对：总额/总和/共计/小计/总数 同样是
+  // 显式归属，漏收就会让"把真实合计挂给未登记名字"在 audited 申报块下洗绿）。
+  const ownedNoun = '(?:record\\s+)?(?:value|balance|total|sum|combined|记录值|值|余额|合计|加总|求和|总计|总额|总和|共计|小计|总数)';
+  // 无系词的合计族归属（"foo-collection total 1000" / "foo-collection 合计 1000"）。
+  const bareTotalNoun = '(?:total|sum|combined|合计|加总|求和|总计|总额|总和|共计|小计|总数)';
   const direct = [
     // NAME record value is / NAME total is / NAME 的记录值/合计 是 / NAME balance is
-    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:record\\s+)?(?:value|balance|total|记录值|值|余额|合计|加总|求和|总计)\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?${ownedNoun}\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
+    // NAME total 1000 / NAME, total 1000 / NAME 合计 1000（无系词；只收合计族，
+    // value/balance 仍要求系词）
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?[，,:：]?\\s*${bareTotalNoun}\\s*$`, 'i'),
     // NAME is / NAME 是 / NAME:（普通系动词与标签分隔；名字形状闸挡普通复合词）
     new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:is|are|was|were|equals?|=|是|为|[:：])\\s*$`, 'i'),
     // | NAME | 金额 |
@@ -696,10 +721,12 @@ function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: 
   }
   const after = clause.slice(amountEnd);
   const inverted = [
-    // 金额 is the value/total of NAME
-    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?(?:record\\s+)?(?:value|balance|total)\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
-    // 金额 是 NAME 的记录值/合计
-    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额|合计|加总|求和|总计)`),
+    // 金额 is the value/total/sum of NAME / 金额 = total for NAME
+    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?${ownedNoun}\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+    // 金额 is NAME's (record) total / 金额 is NAME's value
+    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(${ENTITY_TOKEN_RE_SRC})(?:'s|’s|s')\\s+(?:record\\s+)?(?:value|balance|total|sum|combined)\\b`, 'i'),
+    // 金额 是 NAME 的记录值/合计/总额/…
+    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额|合计|加总|求和|总计|总额|总和|共计|小计|总数)`),
     // 金额 belongs to NAME
     new RegExp(`^\\s*belongs?\\s+to\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
   ];

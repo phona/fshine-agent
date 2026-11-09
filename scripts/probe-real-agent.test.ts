@@ -506,7 +506,8 @@ describe('auditFailures 公共收集入口：默认子集每个 runner 都产列
 /**
  * 统一报告判定与 score.ts 同源（2026-11-09 评审 low）：旧实现自建空 dims / -1 calls /
  * 恒吃 input.ok，minExecutedCalls（D1/X1）与 okMode free（A2/B1/Y2）都会与 score.ts 打架。
- * 现在直接复用 evaluateProbeCase；只有未进基线的用例走最小口径。
+ * 现在直接复用 evaluateProbeCase；未进基线的用例与 score.ts 的 skipped 同口径跳过
+ * （baselineKnown 时返回 undefined），只有基线整份不可读（baselineKnown=false）才走最小口径。
  */
 describe('统一报告与 score.ts 同源判定（unifiedCasePassedOf）', () => {
   const probeRow = (over: Partial<ProbeResultRow> = {}): ProbeResultRow => ({

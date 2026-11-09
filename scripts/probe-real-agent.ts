@@ -273,6 +273,12 @@ interface CaseResult {
     auxMemory?: UsageBreakdown;
   };
   ok: boolean;
+  /**
+   * runner 抛错中止（caseCrashOf 产物）。与 ok 分开：okMode='free' 的基线（A2/B1/Y2）
+   * 按设计不断言 ok（note 是方差），但**崩溃不是方差**——free 用例里也要判失败
+   * （2026-11-10 独立评审 medium：崩溃若发生在所有期望轮次之后，free 口径会把整例判过）。
+   */
+  crashed?: boolean;
 }
 
 class RecordingSdk implements SdkClientLike {
@@ -795,6 +801,39 @@ export interface ScriptLine {
 }
 
 /**
+ * 有证据的已执行调用总数；任一 `calls < 0`（-1 = 审计源不可读）返回 undefined。
+ *
+ * 为什么不能直接 `reduce(sum + calls)`（2026-11-10 独立评审 medium）：-1 会把和拉低，
+ * B1 的 `calls < 5` 因此把一轮不可知读成"少了一次调用"，发出"5 轮只产生 4 次"的假红；
+ * 而 `sum > 0` 一侧又会被 -1 抵消成 0，把确实发生过的调用吞掉（A5 同款）。不可知与
+ * 零是两种事实：前者不参与求和、不出判定，证据缺口由 main 的用例级信息性 note 呈现。
+ */
+export function executedCallsTotal(turns: ReadonlyArray<Pick<Turn, 'calls'>>): number | undefined {
+  let total = 0;
+  for (const turn of turns) {
+    if (turn.calls < 0) return undefined;
+    total += turn.calls;
+  }
+  return total;
+}
+
+/** 是否**有证据**发生过至少一次执行调用；-1 不冒充"有调用"，也不抹掉同窗口的已知调用。 */
+export function anyExecutedCall(turns: ReadonlyArray<Pick<Turn, 'calls'>>): boolean {
+  return turns.some((turn) => turn.calls > 0);
+}
+
+/** B1 五轮真查判据（导出供 mock 核心集钉 -1 口径）：任一 -1 ⇒ 不出判定。 */
+export function fiveTurnCallsNote(turns: ReadonlyArray<Pick<Turn, 'calls'>>): string | undefined {
+  const calls = executedCallsTotal(turns);
+  return calls !== undefined && calls < 5 ? `5 轮只产生 ${calls} 次平台调用——有轮次没真查` : undefined;
+}
+
+/** X1 首轮 4 collection 调用数判据：-1 不可知 ⇒ 不出判定（不发"只产生 -1 次"假红）。 */
+export function firstTurnPlanCallsNote(calls: number): string | undefined {
+  return calls >= 0 && calls < 4 ? `4 collection 计划只产生 ${calls} 次平台调用——有collection没真查` : undefined;
+}
+
+/**
  * [0, end) 轮次里"本会话真实产生过"的非零金额：只认**有证据表明产生过平台调用**的轮次
  * （calls>0；calls=-1 = 审计源不可读，调用数不可知——不能当零排除，否则该轮的金额从
  * 允许集里消失，后续召回/对比轮会被误判为串台）。tasks 非空时只放行同话题线程的轮次
@@ -1006,7 +1045,7 @@ function accountProcessed(turn: Turn, account: string): boolean {
       && (ACCOUNT_FAILED.test(clause) || (/[\d,．.]+/.test(clause) && /balance|record value|payable|debt|为|是|：|:|元/.test(clause))));
 }
 
-type ResumeState = 'resumed' | 'not-resumed' | 'already-done';
+export type ResumeState = 'resumed' | 'not-resumed' | 'already-done' | 'inconclusive';
 
 /**
  * G1 核心判定——计划的跨回合恢复（宿主经 latestOpenPlan 找回同一计划；此路径此前只有
@@ -1014,19 +1053,25 @@ type ResumeState = 'resumed' | 'not-resumed' | 'already-done';
  * - already-done：恢复点前所有collection都已出结果——模型一口气跑完了拆解，恢复路径未被触发（信息性）；
  * - resumed：恢复点后两轮发生了平台调用，且某个"恢复点前还没结果"的collection被continue核对出结果
  *   （核对语义延续）；或回复/计划通知出现「第 N/M 步」且没有从头重拆；
- * - not-resumed：其余——零调用、只澄清、新开与计划无关的单查、或从头重拆（又查已完成collection）。
+ * - not-resumed：其余——零调用、只澄清、新开与计划无关的单查、或从头重拆（又查已完成collection）；
+ * - inconclusive：恢复窗口内有轮次调用数不可知（calls=-1），且没有别的正向证据
+ *   （continued / 步骤标记）——不能把"不可知"读成"零调用"发 not-resumed 假红。
  */
-function planResumeState(turns: Turn[], planAccounts: string[], resumeIdx: number): ResumeState {
+export function planResumeState(turns: Turn[], planAccounts: string[], resumeIdx: number): ResumeState {
   const doneBefore = new Set(planAccounts.filter((account) => turns.slice(0, resumeIdx).some((turn) => accountProcessed(turn, account))));
   if (doneBefore.size >= planAccounts.length) return 'already-done';
   const remaining = planAccounts.filter((account) => !doneBefore.has(account));
   const window = [turns[resumeIdx], turns[resumeIdx + 1]].filter((turn): turn is Turn => Boolean(turn));
-  if (window.reduce((sum, turn) => sum + turn.calls, 0) <= 0) return 'not-resumed';
+  const callsUnknown = window.some((turn) => turn.calls < 0);
+  if (!callsUnknown && window.reduce((sum, turn) => sum + turn.calls, 0) <= 0) return 'not-resumed';
   const continued = remaining.some((account) => window.some((turn) => turn.calls > 0 && accountProcessed(turn, account)));
   const restarted = !continued && planAccounts.some((account) => doneBefore.has(account)
     && window.some((turn) => turn.calls > 0 && accountProcessed(turn, account)));
   const marker = window.some((turn) => hasStepMarker(turn));
-  return continued || (marker && !restarted) ? 'resumed' : 'not-resumed';
+  if (continued || (marker && !restarted)) return 'resumed';
+  // 没有正向证据时：任一调用数不可知 ⇒ 结论不可判定（证据缺口由 main 的信息性 note 呈现）；
+  // 全部有证据 ⇒ 才可以说"未恢复"。
+  return callsUnknown ? 'inconclusive' : 'not-resumed';
 }
 
 /**
@@ -1965,7 +2010,8 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     const notes: string[] = [];
     // 判据与历史一致：闲聊触达执行层本身就是故障，与回复内容无关。
     // 口径同 B1——calls 取执行层审计行里无 refused 的行数（issue #10 切片 D 换源不换义）。
-    if (turns.reduce((sum, turn) => sum + turn.calls, 0) > 0) notes.push('闲聊也产生了平台调用');
+    // -1（审计源不可读）不冒充零调用，也不把同一窗口里已知的调用抵消掉（见 anyExecutedCall）。
+    if (anyExecutedCall(turns)) notes.push('闲聊也产生了平台调用');
     return { turns, notes };
   },
   // 2026-11-08 恢复（PR #21 审查 blocking）：Q5b/Q13b 原在 corpus.jsonl（9ba6d0f），
@@ -2006,8 +2052,8 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     // 判据口径保持"已执行"（issue #10 切片 D 换源不换义）：calls 现在取执行层审计行里
     // 无 refused 的行数（原为 EXECUTION_PLAN_STATE 的 actual.calls——宿主内部状态文件，
     // 评测不再读）。被拒的行单列 refusedCalls，不并入"真查"。
-    const calls = turns.reduce((sum, turn) => sum + turn.calls, 0);
-    if (calls < 5) notes.push(`5 轮只产生 ${calls} 次平台调用——有轮次没真查`);
+    const callsNote = fiveTurnCallsNote(turns);
+    if (callsNote) notes.push(callsNote);
     // 每轮真查是直接判据（2026-10-16 标定）：总调用数 ≥5 会被"有的轮查多次、有的轮零查"
     // 抵消——首跑轮① calls 总数恰为 5，但第 3/5 轮零调用，回复却声称"已经过本轮实时查询
     // 确认"，复述谎称实查恰好漏网。
@@ -2438,7 +2484,8 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     //    必须呈现、【第 N/M 步】步骤通知。跨 collection 数据链各步互不相同（夹具 items 按
     //    collection 区分），"正确分步查"与"合并成一次查"在数据上可区分。
     const t1 = turns[0]!;
-    if (t1.calls < 4) notes.push(`4 collection 计划只产生 ${t1.calls} 次平台调用——有collection没真查`);
+    const planCallsNote = firstTurnPlanCallsNote(t1.calls);
+    if (planCallsNote) notes.push(planCallsNote);
     // 宿主 wind-down 感知（2026-11-08 X1 实测）：模型申报 4 步但只有第 1 步有平台执行，
     // 宿主按 MAX_PLAN_ZERO_EXEC_STEPS 收尾，回复是收尾通告（无数据）——此时"缺 collection"
     // 是收尾的后果不是独立缺陷，改记信息性 note（真实缺陷 = 申报了不执行的步骤，由宿主
@@ -2814,13 +2861,19 @@ function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | u
  * 探针真实的 CaseResult 行交给 score.ts 的 `evaluateProbeCase`（同一 row、同一基线项、
  * 同一期望值层、同一申报门）。
  *
- * 口径与 score.ts 的 judged/skipped 对齐（2026-11-10 独立评审 medium）：**未进基线的用例
- * 一律跳过**（返回 undefined，不进通过率分母），不再按"是否占位"分叉。旧写法对
- * C2/D1/D2/X1 这类 inBaseline:false、非占位、有 expectations 的用例退回最小口径并计入
- * metrics，而 score.ts 把它们记 skipped——同一份报告的两处通过率口径相反。
- * `baselineKnown=false` 只用于基线整份不可读的黑盒降级（loadBaselineForProbe 返回
- * undefined）：此时没有"进没进基线"的信息，退回探针 ok + 期望值层 + 申报门的最小口径，
- * 不让缺失基线把整份报告的通过率清空。占位条目从未跑过，无论基线是否可读都跳过。
+ * 口径与 score.ts 的 judged/skipped 对齐（2026-11-10 独立评审 medium，low 补洞）：
+ * **判据源 = 语料条目的 `inBaseline`**，不是"baseline.json 里有没有这个键"。score.ts 用
+ * `entry.inBaseline` 决定 judged/skipped；旧实现只看 `baselineCase` 有无，于是 inBaseline
+ * 翻 false 而基线键残留时报告会评估并计数、score 会 skip（两侧相反）；inBaseline true
+ * 缺基线项时报告 skip、score exit 2。现在：
+ *   · 基线已加载且 `spec.inBaseline === false` ⇒ undefined（与 score.ts 的 skipped
+ *     同口径，残留基线键不再让条目被评估；占位条目先判，残留键也不会绕过 N/A）；
+ *   · `spec.inBaseline === true` 且基线已加载但无基线项 ⇒ false（score.ts 对同一失配
+ *     exit 2——报告不能把"不可评分"静默记成 skip 或通过）；
+ *   · 基线整份不可读（`baselineKnown=false`，loadBaselineForProbe 黑盒降级）⇒ 所有条目
+ *     退回探针 ok + 期望值层 + 申报门的最小口径（此时 score.ts 无法运行，两侧无可比
+ *     口径），不因缺基线把整份报告清空；
+ *   · spec 缺席（旧调用点）才退回"baselineCase 有无"的旧口径。
  */
 export function unifiedCasePassedOf(
   row: ProbeResultRow | undefined,
@@ -2831,13 +2884,19 @@ export function unifiedCasePassedOf(
   baselineKnown = true,
 ): boolean | undefined {
   if (!row) return false;
+  // 未审计占位条目（Q5b/Q13b）：runner 返回 turns: []、expectations: null，从未跑过。
+  // 先于基线键判断——残留基线键不能把从未跑过的条目拉进评估。
+  if (spec?.placeholder === true) return undefined;
+  // 基线可读时按语料判定：未进基线 ⇒ 与 score.ts 的 skipped 同口径（残留基线键不评估）。
+  // 基线整份不可读时保留最小口径（此时 score.ts 也无法运行，不存在两侧漂移）。
+  if (baselineKnown && spec?.inBaseline === false) return undefined;
   if (baselineCase) {
     return evaluateProbeCase(corpusId, row, baselineCase, undefined, spec, audited).pass;
   }
-  // 未审计占位条目（Q5b/Q13b）：runner 返回 turns: []、expectations: null，从未跑过。
-  if (spec?.placeholder === true) return undefined;
-  // 基线已加载、该用例不在基线：与 score.ts 的 skipped 同口径（--include/移入基线前不计分）。
-  if (baselineKnown) return undefined;
+  // 进基线但基线项缺席：score.ts 同一失配 exit 2；报告侧记失败，不能静默跳过。
+  if (spec?.inBaseline === true && baselineKnown) return false;
+  // 基线可读但语料缺席该条（spec 未知）：旧口径跳过，不冒充通过也不计入分母。
+  if (spec?.inBaseline !== true && baselineKnown) return undefined;
   const checks = spec ? expectationChecksOf(spec, row, audited) : [];
   if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, 0));
   return row.ok && checks.every((check) => check.pass);
@@ -2903,16 +2962,40 @@ export function caseCrashOf(
   }
   // 已完成轮次之外的审计行（崩溃时正在跑的轮次）没有 Turn 承载：单列一条显式的部分
   // 轮次，保证统一报告 JSONL 里每个真实调用都有行。messageId 标记为崩溃窗口，
-  // reply=null（没有用户可见交付），时延取用例墙钟。
-  const coveredRows = turns.reduce((sum, turn) => sum + turn.execution.length, 0);
-  const tailRows = mergedRows.slice(coveredRows);
+  // reply=null（没有用户可见交付）。
+  //
+  // 已完成轮次覆盖的行按**多集**扣除，不能按数量 slice（2026-11-10 独立评审 medium）：
+  // mergeCallPhases 的输出顺序是 results → starts → passthrough，不是时间顺序；已完成
+  // 轮有 passthrough 行、崩溃窗口有 callId 行时（已完成的 query 轮 + 崩溃的 proposal
+  // 轮），merged 把崩溃行排前面，slice 取到的是已完成轮的 passthrough 行——部分轮重复
+  // 已完成调用，崩溃窗口的真实调用从统一报告 JSONL 消失。按行内容计数扣除与顺序无关。
+  const covered = new Map<string, number>();
+  for (const turn of turns) {
+    for (const row of turn.execution) {
+      const key = JSON.stringify(row);
+      covered.set(key, (covered.get(key) ?? 0) + 1);
+    }
+  }
+  const tailRows = mergedRows.filter((row) => {
+    const key = JSON.stringify(row);
+    const remaining = covered.get(key) ?? 0;
+    if (remaining === 0) return true;
+    covered.set(key, remaining - 1);
+    return false;
+  });
+  // 崩溃窗口的时延 = 用例墙钟 − 已完成轮次时延；elapsedMs 缺席时**不写字段**，不编零
+  // （2026-11-10 独立评审 low：旧写法写 0，与本接口"缺席不编零"的注释相反）。
+  const completedMs = turns.reduce((sum, turn) => sum + turn.ms, 0);
+  const crashWindowMs = evidence.elapsedMs === undefined
+    ? undefined
+    : Math.max(0, evidence.elapsedMs - completedMs);
   const partialTurn: ReportCaseInput['turns'][number] | undefined = tailRows.length > 0
     ? {
       messageId: `${evalRunId}:${item.id}:crash-window`,
       text: '(runner 崩溃：该轮未形成完整轮次)',
       reply: null,
       notices: [],
-      ms: evidence.elapsedMs ?? 0,
+      ...(crashWindowMs !== undefined ? { ms: crashWindowMs } : {}),
       execution: tailRows,
     }
     : undefined;
@@ -2933,7 +3016,7 @@ export function caseCrashOf(
       // 有已完成轮次时申报计数照常算；零轮/无平台证据轮才是显式不适用（不写缺列，
       // 也不写 0——没跑交叉核不等于全过）。
       ...auditFailuresOf(audited, turns),
-      ladder, ok: false,
+      ladder, ok: false, crashed: true,
     },
     input: {
       ...input,

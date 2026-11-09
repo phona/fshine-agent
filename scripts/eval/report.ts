@@ -49,7 +49,8 @@ export interface ReportCallLine {
   basis: string[];
   /** 该轮整体阶梯（链上最低档；无执行层证据 = INCONCLUSIVE）。 */
   turnRung: LadderRung | 'INCONCLUSIVE';
-  latencyMs: number;
+  /** 该轮时延；崩溃窗口的墙钟证据缺席时整个字段省略（缺席不编零）。 */
+  latencyMs?: number;
 }
 
 /** 一轮的报告行（用户可见交付 + 该轮调用阶梯 + 时延 + usage）。 */
@@ -61,7 +62,8 @@ export interface ReportTurnLine {
   reply: string | null;
   notices: string[];
   delivered: boolean;
-  latencyMs: number;
+  /** 该轮时延；证据缺席时整个字段省略（缺席不编零）。 */
+  latencyMs?: number;
   ladderRung: LadderRung | 'INCONCLUSIVE';
   ladder: CallLadderEntry[];
   /** 该轮已执行 / 被拒的调用数（执行层审计口径）。 */
@@ -123,7 +125,8 @@ export interface ReportCaseInput {
     text: string;
     reply: string | null;
     notices: string[];
-    ms: number;
+    /** 时延；崩溃窗口的墙钟证据缺席时字段省略（不写 0）。 */
+    ms?: number;
     execution: ExecutionAuditRow[];
     tokens?: { main?: number; worker?: number };
   }>;
@@ -182,7 +185,7 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
       reply: turn.reply,
       notices: turn.notices,
       delivered,
-      latencyMs: turn.ms,
+      ...(turn.ms !== undefined ? { latencyMs: turn.ms } : {}),
       ladderRung: messageLadderRung(turnLadder),
       ladder: turnLadder,
       executedCalls: turn.execution.filter((row) => !row.refused).length,
@@ -192,7 +195,8 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
         : {}),
     };
   });
-  const durationMs = turns.reduce((sum, turn) => sum + turn.latencyMs, 0);
+  // 缺席的时延（崩溃窗口无墙钟证据）不参与求和，不拿 0 冒充；durationMs 是有证据部分的下限。
+  const durationMs = turns.reduce((sum, turn) => sum + (turn.latencyMs ?? 0), 0);
   const mainTotal = input.turns.reduce((sum, turn) => sum + (turn.tokens?.main ?? 0), 0);
   const workerTotal = input.turns.reduce((sum, turn) => sum + (turn.tokens?.worker ?? 0), 0);
   const hasTokens = input.turns.some((turn) => turn.tokens?.main !== undefined || turn.tokens?.worker !== undefined);
@@ -278,7 +282,7 @@ export function buildUnifiedReport(args: {
   /**
    * 逐用例的完整判定（旧三层 + 期望值层）。给了它，报告通过率就与 score.ts 的最终打分
    * 同源；不给则退回探针自身 ok（会在"旧三层过、期望值层失败"的用例上虚高）。
-   * 返回 `undefined` = 该用例跳过（占位条目/未跑），不进通过率分母（见 metricInputs）。
+   * 返回 `undefined` = 该用例跳过（占位条目 / 未进基线），不进通过率分母（见 metricInputs）。
    */
   passOf?: (item: ReportCaseLine) => boolean | undefined;
 }): UnifiedReport {

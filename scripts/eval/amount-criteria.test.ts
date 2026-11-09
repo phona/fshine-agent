@@ -734,17 +734,28 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
 
     it('日期组合只在数字出现位置起算——别处的 2026-11-02 不豁免 2026 金额', () => {
       // 2026-11-10 独立评审 low：DATE_COMBO_RE 旧写法在整段 text 上 matchAll，回复别处
-      // 的日期会让任意位置的同值 2026 一起免申报。给了 at 时只核该次出现。
+      // 的日期会让任意位置的同值 2026 一起免申报。现在按**每一处**同值出现各自锚定
+      // 判定（at 只是首现提示，不把判定缩成只看首现）。
       const text = 'The total is 2026 元. Reference date 2026-11-02.';
       expect(isDateLikeAmount({ raw: '2026', value: 2026, at: text.indexOf('2026') }, text)).toBe(false);
-      // 无 at 的旧调用方回退到全文同 raw 出现：每一处都日期样才排除；这里一处金额一处
-      // 日期 ⇒ 仍需申报（保守方向：不许借别处的日期免掉金额）。
       expect(isDateLikeAmount({ raw: '2026', value: 2026 }, text)).toBe(false);
       expect(isDateLikeAmount({ raw: '2026', value: 2026 }, 'Reference date 2026-11-02.')).toBe(true);
       // 提取器把首现位置带出来，申报覆盖查消费的是同一个金额对象。
       const amount = extractAmounts(text).find((item) => item.value === 2026);
       expect(amount?.at).toBe(text.indexOf('2026'));
       expect(isDateLikeAmount(amount!, text)).toBe(false);
+
+      // 2026-11-10 第三轮自校验补洞（两处）：首现是裸年份、同值在别处是带单位金额或
+      // 换格式的金额。`at`/首现 raw 只是提示，不能把判定缩成"只看首现"——
+      // "It is 2026. The total is 2026 元." 的那笔 2026 元与 "It is 2026. The total is
+      // 2,026." 的那笔 2,026 仍必须申报（2026 元/带格式同值不放宽）。
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. The total is 2026 元.'))
+        .toBe(false);
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. The total is 2,026.'))
+        .toBe(false);
+      // 对照：两处都是日期样才排除（别处的日期组合/裸年份不误伤）。
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. See also 2026.'))
+        .toBe(true);
     });
 
     it('普通金额形态不是日期样', () => {
@@ -795,7 +806,7 @@ describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 b
 describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某一运算族', () => {
   it('total/difference/ratio 三族并集覆盖全词表（漏词 = 该措辞静默失去降级通道）', () => {
     const words = [
-      '高出', '相差', '合计', '加总', '求和', '多出', '少于', '倍', 'total', 'difference',
+      '高出', '相差', '合计', '加总', '求和', '总计', '多出', '少于', '倍', 'total', 'difference',
       'combined', 'sum', 'higher by', 'lower by', 'more than', 'less than',
     ];
     for (const word of words) {
@@ -942,7 +953,9 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
       'empty-one has no records',
       "gamma-collection doesn't exist",
       'gamma-collection doesn’t exist',
-      'no such collection',
+      // 裸 "no such collection" 不含零值实体名 ⇒ 不构成切断，是空测；带实体名才钉
+      // ABSENT_ENTITY_DISCLAIM_RE 的 no\s+such 分支（2026-11-10 独立评审 low）。
+      'gamma-collection: no such collection',
       'gamma-collection 中没有记录',
       'gamma-collection is empty',
       'gamma-collection 是空的',
@@ -1004,8 +1017,20 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
       'foo-collection total is 1000',
       'foo-collection 的合计是 1000',
       'foo-collection 加总是 1000',
+      'foo-collection 总计是 1000',
+      'foo-collection total 1000',
+      'foo-collection 合计 1000',
+      'foo-collection, total 1000',
+      "1000 is foo-collection's total",
       '1000 is the total of foo-collection',
       '1000 是 foo-collection 的合计',
+      'foo-collection 总额是 1000',
+      'foo-collection 总和是 1000',
+      'foo-collection 共计 1000',
+      'foo-collection 小计是 1000',
+      'foo-collection 总数是 1000',
+      'foo-collection sum is 1000',
+      'foo-collection combined is 1000',
     ]) {
       const v = classify(`beta 的 record value 是 500、300、200。${claim}。`, 'checkbeta的payablebalance');
       expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([1000]);
@@ -1014,6 +1039,43 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     // 已登记名字的同句走既有 misattributed（尺子一致，不是给未登记名单开宽门）。
     const registered = classify('beta 的 record value 是 500、300、200。gamma-collection total is 1000.', 'checkbeta的payablebalance');
     expect(registered.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('红：倒装 total 归属给已登记零值实体，三种分支都走 misattributed（2026-11-10 评审 high）', () => {
+    // 金额在前、实体在后：旧 attributesToFollowingEntity 只认 value/balance，total 族
+    // 绕过倒装通道，1000 落 derived（零值实体的假归属从 audited 申报块洗白）。三种分支
+    // ——"is the total of" / 所有格 "'s total" / 中文 "的合计"——都要认出归属。
+    for (const claim of [
+      "1000 is gamma-collection's total.",
+      '1000 is the total of gamma-collection.',
+      '1000 是 gamma-collection 的合计。',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${claim}`, 'checkbeta的payablebalance');
+      expect(v.misattributed.map((a) => a.value), claim).toEqual([1000]);
+      expect(v.derived, claim).toEqual([]);
+    }
+    // 孪生诚实：同一倒装句式挂给真实合计的所有者 beta ⇒ derived，不记张冠李戴。
+    const honest = classify("beta 的 record value 是 500、300、200。1000 is beta's total.", 'checkbeta的payablebalance');
+    expect(honest.misattributed).toEqual([]);
+    expect(honest.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('不假红：普通复合词 / 已登记名字的自然别名不是未登记实体（2026-11-10 评审 low）', () => {
+    // 形状闸只按 *-item / *-record 后缀收会把 line-item、data-record 这类普通英文复合词
+    // 当夹具实体；"beta-collection" 是已登记 collection beta 的自然别名，同样不是未登记
+    // 名字。三句在 audited 路径上都曾出"挂给未登记名字"硬 note（假红）。
+    for (const prose of [
+      'line-item value is 500. Please confirm.',
+      'data-record value is 500. Please confirm.',
+      'beta 的 record value 是 500、300、200。beta-collection total is 1000.',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution, prose).toEqual([]);
+      expect(v.misattributed, prose).toEqual([]);
+    }
+    // 别名形态的 1000 是 beta 的真实合计 ⇒ derived（不是未登记归属）。
+    const alias = classify('beta 的 record value 是 500、300、200。beta-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(alias.derived.map((a) => a.value)).toEqual([1000]);
   });
 
   it('不假红：未知名字在场、金额正确挂给已知实体 ⇒ 不进 misattributed（绑定面收窄，不是整句抹黑）', () => {

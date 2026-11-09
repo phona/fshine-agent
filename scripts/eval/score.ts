@@ -99,6 +99,8 @@ export function validAuditFailuresValue(value: unknown): value is AuditFailuresV
 export interface ProbeResultRow {
   id: string;
   ok: boolean;
+  /** runner 抛错中止（caseCrashOf 产物）：与 okMode 无关，任何模式都判失败。 */
+  crashed?: boolean;
   dims: DimCounts;
   unclassifiedNotes: number;
   /**
@@ -225,6 +227,12 @@ export function evaluateProbeCase(
   // （2026-11-09 独立评审：此前 ?? 0 让缺列在单行评分面静默变绿）。判定实现在
   // auditFailuresCheckOf（探针统一报告也吃这一份，不另写）。
   if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, baselineCase.auditFailures ?? 0));
+  // 崩溃是硬事实，不是 okMode='free' 要容忍的模型方差（2026-11-10 独立评审 medium）：
+  // 旧写法 free 基线不查 ok，崩溃若发生在所有期望轮次之后，四维/期望值层全过 ⇒ 整例
+  // 判 pass。crashed 标记与 ok 分开，free 用例同样判失败。
+  if (row.crashed) {
+    checks.push({ name: '探针未崩溃', pass: false, expected: 'runner 正常完成', actual: 'runner 崩溃（用例未完成）' });
+  }
   const okMode = baselineCase.okMode ?? 'strict';
   if (okMode === 'strict') {
     checks.push({ name: '探针ok', pass: row.ok, expected: 'true', actual: String(row.ok) });

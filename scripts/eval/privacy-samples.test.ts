@@ -27,8 +27,9 @@
  *     （`凭证\s*\d` 分支，见 amount-criteria.ts 的中性域分支注释），其表征锁的标题就要
  *     点名它。收它进来会让判据的兼容分支与守卫互相打架。
  *   · 本守卫文件自身不是扫描目标（禁词字面就住在表里）。防假绿的不是自我豁免，而是下方
- *     的**范围自校验**：目标清单非空、逐个存在、逐个非空、数量与登记数一致——把扫描面
- *     砍空 / 砍窄都会红。
+ *     的**范围自校验**（目标清单非空、逐个存在、逐个非空、数量与登记数一致——把扫描面
+ *     砍空 / 砍窄都会红）与**合成红例**（把片段放进被扫描形状的内容，走与文件扫描同一条
+ *     `scanContents` 路径——扫描器恒空会红，红例不是只构造 Hit）。
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -84,10 +85,14 @@ function readTarget(rel: string): string {
   }
 }
 
-function scan(): Hit[] {
+/**
+ * 扫描一份（相对路径, 内容）集合——纯函数。文件扫描与下方合成红例共用同一条路径，
+ * 防止"红例只构造 Hit、真正的 scan 恒空"式假绿（2026-11-10 第三轮收口）。
+ */
+function scanContents(targets: ReadonlyArray<{ rel: string; text: string }>): Hit[] {
   const hits: Hit[] = [];
-  for (const rel of SCAN_TARGETS) {
-    const lines = readTarget(rel).split('\n');
+  for (const { rel, text } of targets) {
+    const lines = text.split('\n');
     for (const [index, fragment] of OLD_DOMAIN_FRAGMENTS.entries()) {
       for (let line = 0; line < lines.length; line += 1) {
         if (lines[line]!.includes(fragment)) hits.push({ rel, line: line + 1, fragment: index + 1 });
@@ -95,6 +100,10 @@ function scan(): Hit[] {
     }
   }
   return hits;
+}
+
+function scan(): Hit[] {
+  return scanContents(SCAN_TARGETS.map((rel) => ({ rel, text: readTarget(rel) })));
 }
 
 function failureMessage(hits: Hit[]): string {
@@ -126,10 +135,33 @@ describe('隐私样本守卫：金额判据面的旧域报告片段零命中', (
     const message = failureMessage([fake]);
     expect(message).toContain('scripts/eval/amount-criteria.ts:1  [#2]');
     for (const fragment of OLD_DOMAIN_FRAGMENTS) {
-      expect(message, '失败信息不得包含禁词文本').not.toContain(fragment);
+      // 布尔断言而不是 `.not.toContain(fragment)`：后者失败时 Vitest 的 diff 会把片段
+      // 字面抄进日志（投影漏词的瞬间正好是最需要不抄词的时候，2026-11-10 独立评审 low）。
+      expect(message.includes(fragment), '失败信息不得包含禁词文本').toBe(false);
     }
     expect(Object.keys(fake).sort()).toEqual(['fragment', 'line', 'rel']);
     expect(typeof fake.fragment).toBe('number');
+  });
+
+  it('红：真实 scan 路径检出合成违规，且失败信息 / toEqual 投影都不抄禁词', () => {
+    // 2026-11-10 第三轮收口：上一条只构造 Hit，绕过 scan()——扫描器恒空也能过。
+    // 这里把一条旧域片段放进被扫描形状的合成内容：守卫必须报 hit（把 scan 改坏成
+    // 恒空 ⇒ 违规"转绿"，本测试红），同时失败消息与 JSON 投影不得出现片段字面
+    // （把命中文本塞进 Hit ⇒ toEqual diff 会把片段抄进 CI 日志，本测试红）。
+    const planted = `beta 的 record value 是 500。\n${OLD_DOMAIN_FRAGMENTS[1]}\n`;
+    const hits = scanContents([{ rel: 'synthetic/planted.ts', text: planted }]);
+    expect(hits).toHaveLength(1);
+    expect(hits[0]).toMatchObject({ rel: 'synthetic/planted.ts', line: 2, fragment: 2 });
+    expect(Object.keys(hits[0]!).sort()).toEqual(['fragment', 'line', 'rel']);
+    const message = failureMessage(hits);
+    expect(message).toContain('synthetic/planted.ts:2  [#2]');
+    for (const fragment of OLD_DOMAIN_FRAGMENTS) {
+      // 布尔断言：投影真的漏词时，失败输出只报 "expected true to be false"，不打印片段本身。
+      expect(message.includes(fragment), '失败信息不得包含禁词文本').toBe(false);
+      expect(JSON.stringify(hits).includes(fragment), 'toEqual diff 不得包含禁词文本').toBe(false);
+    }
+    // 孪生：同一扫描器对干净内容零命中（证明红例不是扫描器恒命中）。
+    expect(scanContents([{ rel: 'synthetic/clean.ts', text: 'beta 的 record value 是 500。\n' }])).toEqual([]);
   });
 
   it('扫描范围自校验：目标清单非空、逐个存在且非空、数量与登记数一致（防假绿）', () => {
