@@ -36,7 +36,7 @@ describe('generic mock execution layer', () => {
   it('operation list is machine-readable and covers read/scratch/write + protocol roles', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-test-'));
     try {
-      const env = { ...process.env, DUMMY_STATE: path.join(dir, 'state.json'), DUMMY_PLAN_STATE: path.join(dir, 'plans.json'), DUMMY_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
+      const env = { ...process.env, EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'), EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
       const r = runDummy(['operation', 'list', '--json'], env);
       expect(r.code).toBe(0);
       const parsed = JSON.parse(r.stdout) as { operations: Array<Record<string, unknown>>; accessSemantics: Record<string, Record<string, boolean>> };
@@ -75,7 +75,7 @@ describe('generic mock execution layer', () => {
   it('query / not-found / zero are distinct deterministic answers', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-test-'));
     try {
-      const env = { ...process.env, DUMMY_STATE: path.join(dir, 'state.json'), DUMMY_PLAN_STATE: path.join(dir, 'plans.json'), DUMMY_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
+      const env = { ...process.env, EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'), EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
       const ok = runDummy(['query', 'dummy.query', '--collection', 'alpha'], env);
       expect(ok.code).toBe(0);
       expect(ok.stdout).toContain('"status":"completed"');

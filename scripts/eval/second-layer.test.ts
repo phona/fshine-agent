@@ -48,15 +48,17 @@ function makeCtx(extraEnv: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-'));
   const env = {
     ...process.env,
-    STOCK_STATE: path.join(dir, 'state.json'),
-    STOCK_PLAN_STATE: path.join(dir, 'plans.json'),
-    STOCK_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
-    STOCK_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
-    STOCK_MEMORY_STATE: path.join(dir, 'memory.json'),
-    STOCK_BREAKER_STATE: path.join(dir, 'breaker.json'),
-    STOCK_CACHE_STATE: path.join(dir, 'cache.json'),
-    STOCK_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
-    STOCK_GATE_SECRET: 'second-layer-gate-secret',
+    // 只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）；STOCK_* 是夹具的
+    // 调试专名，评测进程不设它，规范名优先保证 ambient 专名无法改道 per-case 隔离。
+    EXECUTION_MOCK_STATE: path.join(dir, 'state.json'),
+    EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
+    EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
+    EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
+    EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'),
+    EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
+    EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'),
+    EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
+    EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
     // 用例声明的 C 类旋钮（如 STOCK_READBACK_SHORT）；不在用例体里逐调用改 env。
     ...extraEnv,
   };
@@ -156,7 +158,7 @@ describe('second execution layer: stock', () => {
       const status = ctx.run(['proposal', 'status', '--proposal-id', proposalId]);
       expect(status.stdout).toContain('"status":"pending"');
       const saved = ctx.env;
-      const env2 = { ...saved, STOCK_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
+      const env2 = { ...saved, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
       const commitRun = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       const commitEnv = envelope(commitRun.stdout ?? '');
       expect(commitRun.status).toBe(0); expect((commitEnv?.data as Record<string, unknown>)?.verified).toBe(true);
@@ -174,7 +176,7 @@ describe('second execution layer: stock', () => {
       writeFileSync(payloadFile, JSON.stringify({ shelf: 'north', batch: 'B1', items: [{ sku: 's1', qty: 1 }, { sku: 's2', qty: 2 }] }));
       const ce = envelope(ctx.run(['prepare', 'stock.proposal', payloadFile]).stdout);
       const proposalId = ce?.data?.proposalId as string;
-      const env2 = { ...ctx.env, STOCK_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
+      const env2 = { ...ctx.env, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
       const commitRun = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       const commitEnv = envelope(commitRun.stdout ?? '');
       expect(commitEnv?.status).toBe('failed'); expect((commitEnv?.data as Record<string, unknown>)?.verified).toBe(false);
@@ -228,7 +230,7 @@ describe('second execution layer: stock', () => {
       writeFileSync(payloadFile, JSON.stringify({ shelf: 'south', batch: 'B1', items: [{ sku: 'iso-1', qty: 10 }] }));
       const ce = envelope(a.run(['prepare', 'stock.proposal', payloadFile]).stdout);
       const proposalId = ce?.data?.proposalId as string;
-      const env2 = { ...a.env, STOCK_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
+      const env2 = { ...a.env, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
       spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       expect(envelope(a.run(['query', 'stock.query', '--shelf', 'south']).stdout)?.data?.count).toBe(4);
       expect(envelope(b.run(['query', 'stock.query', '--shelf', 'south']).stdout)?.data?.count).toBe(3);

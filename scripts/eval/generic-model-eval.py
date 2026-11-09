@@ -178,11 +178,13 @@ def envelope(stdout):
 
 
 def run_case(case, tmpdir):
+    # Canonical family only (docs/env-naming-ruling-20261110.md): the stock fixture
+    # still accepts STOCK_* as a debug fallback, but the eval process never sets it.
     env = {**os.environ,
-           "STOCK_STATE": str(tmpdir / "state.json"), "STOCK_PLAN_STATE": str(tmpdir / "plans.json"),
-           "STOCK_PROPOSAL_STATE": str(tmpdir / "proposals.json"), "STOCK_AUDIT_PATH": str(tmpdir / "audit.jsonl"),
-           "STOCK_MEMORY_STATE": str(tmpdir / "memory.json"), "STOCK_BREAKER_STATE": str(tmpdir / "breaker.json"),
-           "STOCK_CACHE_STATE": str(tmpdir / "cache.json")}
+           "EXECUTION_MOCK_STATE": str(tmpdir / "state.json"), "EXECUTION_PLAN_STATE": str(tmpdir / "plans.json"),
+           "EXECUTION_PROPOSAL_STATE": str(tmpdir / "proposals.json"), "EXECUTION_AUDIT_PATH": str(tmpdir / "audit.jsonl"),
+           "EXECUTION_MEMORY_STATE": str(tmpdir / "memory.json"), "EXECUTION_BREAKER_STATE": str(tmpdir / "breaker.json"),
+           "EXECUTION_CACHE_STATE": str(tmpdir / "cache.json")}
     transcript = []
     calls = 0
     finals = []
