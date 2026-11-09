@@ -623,6 +623,44 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(note.unattributed).toEqual([]);
   });
 
+  it('issue #24：绑定实体分支的加数回退——"若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000"', () => {
+    // PR #23 只给无绑定分支加了加数回退；这句 500 绑定了 beta、gap 里含着「合计」（"记录的
+    // 合计，则为"），走绑定分支被误判成无所属（issue #24 合并后复跑的真实回复）。加数回退与
+    // 结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
+    const reply = [
+      '结论：未能取得「beta 的 payable balance」。平台数据中不存在 "payable balance" 这一指标或字段，记录仅有名称和数值两列，因此无法按该口径返回。',
+      '若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000——但这是按记录加总的推算，并非平台定义的指标。',
+    ].join('\n');
+    const v = classify(reply, 'checkbeta的payablebalance');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toContain(500);
+    expect(v.derived.map((a) => a.value)).toContain(1000);
+    expect(v.assertedCalibers).toEqual([]);
+  });
+
+  it('issue #24 反例：绑定分支的加数回退不放过错误合计——"beta-item-1 record value is 500, total is 800"', () => {
+    // 摘 Cherry 反例照旧红（800=500+300 是 collection 级账、item 级只有 500）：加数回退要求
+    // 金额之后只隔运算符/连接词就有下一笔（算式的左操作数），这句 800 后面没有金额。
+    const v = classify('beta-item-1 record value is 500, total is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('PR #25 一审 blocking A：结果值豁免只认结果位那一处——"…= 800; beta record value is 800" 后一句的直接断言照旧红', () => {
+    // 同句有成立算式不能连带豁免别处的同值直接断言：后一句的 800 既不是 beta 的记录值也不是
+    // 全额，必须红；算式里那笔 800（结果位）本身仍放行。
+    const v = classify('beta record values are 500 + 300 = 800; beta record value is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('PR #25 一审 blocking B：绑定分支的加数回退核加数属于所绑定实体——"beta total is 800 + 200 = 1000" 的 800 是 alpha 的值', () => {
+    // 算式成立只证明算得出来，不证明操作数归属：800 ∉ beta 的 {500,300,200}，正确的等式不能
+    // 把编造的记录明细洗成合法加数。1000 是结果位，仍信息性派生。
+    const v = classify('beta total is 800 + 200 = 1000');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived.map((a) => a.value)).toContain(1000);
+  });
+
   it('codex-pr-review #23 十八审 blocking：结果位后逗号开头的运算续断言也拒——"= 800，减去 200 后余 500"（800−200=600）', () => {
     // 运算动词在 gap 开头（只允许标点/空白在前）就是算术续断言：这句 800−200 应为 600，
     // 回复说 500，错误等式。动词前面有行文（"另外加上"）或不在四则闭集（"减少"）的放行。

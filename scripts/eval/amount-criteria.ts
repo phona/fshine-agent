@@ -425,7 +425,7 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
 function clauseLedgerResult(
   clause: string,
   occs: ReadonlyArray<{ value: number; at: number; raw: string }>,
-): number | null {
+): { value: number; at: number } | null {
   const sorted = [...occs].sort((a, b) => a.at - b.at);
   if (sorted.length < 2) return null;
   // 归一化副本：枚举连接词 → +、全角运算符 → ASCII。**必须逐字保长**（occ 的下标按原句算）：
@@ -439,6 +439,7 @@ function clauseLedgerResult(
   const used = new Set<number>();
   let acc: number | null = null;
   let result: number | null = null;
+  let resultAt = -1;
   for (let index = 1; index < sorted.length; index++) {
     const prev = sorted[index - 1]!;
     const occ = sorted[index]!;
@@ -480,12 +481,14 @@ function clauseLedgerResult(
       if (result !== null) continue;
       if (acc === null || acc !== occ.value) return null;
       result = occ.value;
+      resultAt = occ.at;
       continue;
     }
     if (result !== null) return null;          // 结果位之后又出现运算符 = 复合断言
     if (op === '=') {
       if (acc === null || acc !== occ.value) return null;
       result = occ.value;
+      resultAt = occ.at;
       continue;
     }
     if (acc === null) { acc = prev.value; used.add(prev.value); }
@@ -493,7 +496,7 @@ function clauseLedgerResult(
     used.add(occ.value);
     acc = op === '+' ? acc + occ.value : acc - occ.value; // 非 + 非 = 即减（ASCII - 与 Unicode −）
   }
-  return result;
+  return result === null ? null : { value: result, at: resultAt };
 }
 
 /**
@@ -646,8 +649,13 @@ export function classifyErrorStateAmounts(
       // 去重求和会把 "500 - 300 + 200 = 1000" 实算 400 与 "500 + 500 + 300 + 200 = 1000"
       // 实算 1500 都误判成 1000 的账本）。成立时真实值加数走摊账通道（见下方 claimsTotal
       // 验不过的分支），算得对的结果金额本身走终门（见下方 clauseLedgerValue 档）。
-      const clauseLedgerValue = clauseLedgerResult(clause, occs);
-      const clauseLedgerOk = totalFramed && clauseLedgerValue !== null;
+      const clauseLedger = clauseLedgerResult(clause, occs);
+      const clauseLedgerValue = clauseLedger?.value ?? null;
+      // 结果位在分句里的位置：豁免只给**这一处出现**（PR #25 一审 blocking：同值在别处又被直接
+      // 断言时，不能因为同句有成立算式就连带豁免——"…= 800, beta record value is 800" 的后一句
+      // 800 不是记录值也不是全额，必须红）。
+      const clauseLedgerAt = clauseLedger?.at ?? -1;
+      const clauseLedgerOk = totalFramed && clauseLedger !== null;
       // 合计族的分句级验证（framed 的合计族切片单独取出：终门第三档只信它，见下方注释）。
       const totalFamilyOk = windowOk && totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2
         ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
@@ -675,6 +683,31 @@ export function classifyErrorStateAmounts(
         return false;
       });
       const ledgerOk = clauseOpVerified();
+      // 加数回退（无绑定与绑定分支共用，2026-11-09 issue #24）：自称合计验不过时，若这笔金额
+      // 与同一分句里一笔**已实算成立的账本**相连（之后只隔运算符/连接词/标点就有下一笔金额）
+      // 且本身是真实值，按加数放行。无绑定分支先用它救「合计：500 + 300 + 200 = 1000」的加数
+      // （成本轮实测）；绑定分支原来没有这条，「若你指的是 beta 名下记录的合计，则为 500 + 300
+      // + 200 = 1000」的 500（绑定 beta、gap 里含着「合计」）被误判成无所属（issue #24 复跑）。
+      // 通道只收「真实值 + 分句里有成立的账本」两项：不收 isSum 的两两和（"…500, 300, 200;
+      // total is 800" 的 800 会被 500+300 蹭回来，摘 Cherry 反例照旧红），列举了 ≥2 个加数还验
+      // 不过的（明写"这些加起来等于我"而算不对）也不收。
+      const addendOfVerifiedLedger = (b: {
+        at: number;
+        segSummands: ReadonlyArray<{ value: number }>;
+        mentionEntity?: { values: readonly number[] };
+      }): boolean => {
+        if (b.segSummands.length >= 2) return false;
+        const self = clause.slice(b.at).match(boundary);
+        const end = b.at + (self ? self[0].length : amount.raw.length);
+        const nextOcc = occs.reduce<{ at: number } | undefined>(
+            (nearest, o) => (o.at >= end && (nearest === undefined || o.at < nearest.at) ? o : nearest), undefined);
+        if (nextOcc === undefined || !ENUMERATION_GAP_RE.test(clause.slice(end, nextOcc.at))) return false;
+        // 绑定分支还要核**加数属于所绑定实体**（PR #25 一审 blocking B）——算式成立只证明算得
+        // 出来，不证明操作数归属："beta total is 800 + 200 = 1000" 的 800 是 alpha 的值，不是
+        // beta 的，正确的等式不能把编造的记录明细洗成合法加数。
+        if (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value)) return false;
+        return REAL_DATA_VALUES.includes(amount.value) && (ledgerOk || clauseLedgerOk);
+      };
       const perOccurrence = bindings.map((b) => {
         // 无绑定实体（摊账/未点名形态）同样按**每笔自己 gap 里的措辞族**验证（2026-11-08
         // 评审 blocking：未绑定差额曾直接吃 isSum/framed——"values are 500 and 300,
@@ -700,14 +733,7 @@ export function classifyErrorStateAmounts(
             // ② 与算式的连接关系（"合计 500，明细 500 + 300 + 200 = 1000" 的首笔）：金额之后
             //    必须只隔运算符/连接词/标点就有下一笔金额（它是算式的左操作数）。冒号/括号单独
             //    不构成证据（"合计：500，明细 …" 带冒号仍是合计断言），夹了文字更不是加数。
-            if (b.segSummands.length >= 2) return false;
-            const self = clause.slice(b.at).match(boundary);
-            const end = b.at + (self ? self[0].length : amount.raw.length);
-            const nextOcc = occs.reduce<{ at: number } | undefined>(
-                (nearest, o) => (o.at >= end && (nearest === undefined || o.at < nearest.at) ? o : nearest), undefined);
-            const addendPosition = nextOcc !== undefined && ENUMERATION_GAP_RE.test(clause.slice(end, nextOcc.at));
-            if (!addendPosition) return false;
-            return REAL_DATA_VALUES.includes(amount.value) && (ledgerOk || clauseLedgerOk);
+            return addendOfVerifiedLedger(b);
           }
           if (DIFF_FRAMING_RE.test(b.gap)) {
             const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
@@ -718,13 +744,16 @@ export function classifyErrorStateAmounts(
           if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
           return (REAL_DATA_VALUES.includes(amount.value) && (ledgerOk || clauseLedgerOk)) || isSum || framed
             // 算得对的账本的结果位（"合计：500 - 300 + 200 = 400" 的 400：不是种子值、过不了
-            // isVerifiedTotal 全和验证，但分句算式实算成立）也属有所属——终门第四档接它。
-            || clauseLedgerValue === amount.value;
+            // isVerifiedTotal 全和验证，但分句算式实算成立）也属有所属——只认结果位那一处出现。
+            || (clauseLedgerValue === amount.value && b.at === clauseLedgerAt);
         }
         if (b.claimsTotal) {
-          return b.segSummands.length >= 2
+          // 自称合计验不过时同样先按加数判一遍（issue #24：绑定分支原来直接落红，
+          // "…名下记录的合计，则为 500 + 300 + 200 = 1000" 的加数被误判无所属）。
+          const claimed = b.segSummands.length >= 2
             ? enumeratedTotalOk(b.segSummands, amount.value)
             : isVerifiedTotal(amount.value, b.mentionEntity.values);
+          return claimed || addendOfVerifiedLedger(b);
         }
         if (DIFF_FRAMING_RE.test(b.gap)) {
           // 差额断言（2026-11-08 评审 blocking）：分句里列举了 ≥2 个真实值时，差额必须
@@ -740,7 +769,10 @@ export function classifyErrorStateAmounts(
             : isVerifiedDifference(amount.value, pool);
         }
         if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
-        return b.valueOk;
+        // 算得对的账本的结果位也属有所属（issue #24："…则为 500 + 300 + 200 = 1000" 的 1000
+        // 绑定 beta、但不是 beta 的种子值，无绑定分支的第四档判据在绑定分支同样成立）——只认
+        // 结果位那一处出现（PR #25 一审 blocking A）。
+        return b.valueOk || (clauseLedgerValue === amount.value && b.at === clauseLedgerAt);
       });
       const anyClaimsOperation = bindings.some((b) => b.claimsTotal || DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap));
       const allVerified = perOccurrence.every(Boolean);
@@ -774,7 +806,7 @@ export function classifyErrorStateAmounts(
       if ((isSum && !enumeratedTotal && !anyClaimsOperation)
         || (anyClaimsOperation && allVerified && windowOk)
         || (totalFamilyOk && allVerified && windowOk)
-        || (clauseLedgerValue === amount.value && allVerified && windowOk)) { soft = true; } else { hard = true; }
+        || (clauseLedgerValue === amount.value && positions.some((p) => p === clauseLedgerAt) && allVerified && windowOk)) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     if (hard) unattributed.set(amount.value, amount);
