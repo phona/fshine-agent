@@ -393,110 +393,6 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
 }
 
 /**
- * 分句账本实算（2026-11-09 codex-pr-review #23 五～十六审 blocking 逐轮收紧）：clauseLedgerOk
- * 原先用 Set 去重真实值后求和，忽略运算符与重复加数——"500 - 300 + 200 = 1000"（实算 400）与
- * "500 + 500 + 300 + 200 = 1000"（实算 1500）都被误判成成立账本，错误合计经加数回退放行。
- * 改为按出现顺序实算，返回**算得对的结果金额**（没有成立账本返回 null）。逐轮补上的纪律：
- *   · 归一化副本（逐字替换、长度不变，位置不受影响）：枚举连接词 和/与/plus/and → +，全角
- *     ＋－＝ → ASCII。gap 与 span 都从副本切——整句替换会改变串长、后续下标全偏（六审 minor：
- *     "500 plus 300 …" 的诚实账本被误红），全角 ＋ 也才不会撞符号检查（十一审 A）；
- *   · 减号 ASCII "-" 与 Unicode "−" 都按减算（六审 blocking）；
- *   · 只认 + -；乘除形态不认——符号用 Unicode 数学符号类 \p{Sm} **全覆盖**（× ÷ ∗ ± …逐个
- *     枚举总有漏：十三/十四/十六审三次都漏在符号上），受支持的 + - = 用负向断言排除；
- *     % ‰ ^ / ／ 不在 Sm 类，显式补（十/十三/十六审）。数字夹着的乘号写法 x X * ＊ 也不在
- *     Sm 类，按数字相邻认（"800 X 200" / "800 *200"）；
- *   · 运算词按**数字相邻**认（十四/十五/十六审）：乘/减/除/加/minus/mod/times/multiplied
- *     （容忍 "by"）/divided/product/quotient/sum/difference/ratio——"800乘200" "800 mod 200"
- *     "800 减 200" "800 multiplied by 200" 都曾在结果位之后被当成文字备注放行。"除了 alpha"、
- *     "减少 800" 的除/减后面不接数字，是行文不是运算，不误拒；
- *   · 加数**互异**（七审 B）：夹具种子值互异，同值重复 = 同一笔记录用两次（"500 + 500 = 1000"
- *     不是合法记录聚合——与 enumeratedTotalOk/scopedSummands 同规）；
- *   · 括号**不解析**（七审 A）：「500 - (300 + 200) = 400」顺序累计算成 400、实应 0。表达式里
- *     出现括号即拒绝账本豁免——往红偏，也不为实现括号优先级引入一份递归下降；
- *   · 语法完整性：一个 gap 里多个运算符（"500 − − 300"）即拒绝；gap 只由运算符与空白组成才算
- *     运算连接（"，即等于" 含汉字，是行文不是等号——不当成备注后面的运算符）；
- *   · 结果位（等号右边那笔）之后只能跟文字备注（"= 1000，另外 800 是 alpha 的"仍认），再出现
- *     运算符/乘除/运算词即拒绝；无等号的结果位（"…，共 1000"）同纪律——记结果后继续走完剩余
- *     表达式（九审 blocking：提前返回会放过 "…，共 800 × 200" 这类复合断言）；
- *   · markdown 强调号（**1000**）不是运算符：剥只剥**成对**包着操作数的（操作数前后各有一串
- *     * 才剥）——"800 * **200**" 的强调号会让 *=数字 失配（十一审 B），"800 *200" 的 * 后面没有
- *     配对闭口、是紧贴操作数的真乘号不能剥（十二审）。
- */
-function clauseLedgerResult(
-  clause: string,
-  occs: ReadonlyArray<{ value: number; at: number; raw: string }>,
-): number | null {
-  const sorted = [...occs].sort((a, b) => a.at - b.at);
-  if (sorted.length < 2) return null;
-  // 归一化副本：枚举连接词 → +、全角运算符 → ASCII。**必须逐字保长**（occ 的下标按原句算）：
-  // 和/与 与全角运算符都是 1→1；plus/and 是多字符，替换成"一个 + 加空格补齐"（4→4、3→3），
-  // 否则 "500 plus 300" 里 plus 变 + 之后后续金额下标全偏（实测：诚实英文枚举整句误红）。
-  const norm = clause
-    .replace(/和|与/g, '+')
-    .replace(/plus/gi, '+   ')
-    .replace(/and/gi, '+  ')
-    .replace(/＋/g, '+').replace(/－/g, '-').replace(/＝/g, '=');
-  const used = new Set<number>();
-  let acc: number | null = null;
-  let result: number | null = null;
-  for (let index = 1; index < sorted.length; index++) {
-    const prev = sorted[index - 1]!;
-    const occ = sorted[index]!;
-    const between = norm.slice(prev.at + prev.raw.length, occ.at);
-    if (/[()（）]/.test(between)) return null; // 括号不解析：拒绝账本豁免
-    // 跨度副本（符号/运算词检测用）：剥掉**成对**包着操作数的 markdown 强调号（见文件头）。
-    const spanParts: string[] = [];
-    const pushAmount = (at: number, end: number): void => {
-      const openRun = /(\*+)$/.exec(norm.slice(0, at))?.[1] ?? '';
-      const closeRun = /^(\*+)/.exec(norm.slice(end))?.[1] ?? '';
-      const paired = openRun !== '' && closeRun !== '';
-      spanParts.push(paired ? '' : openRun, norm.slice(at, end), paired ? '' : closeRun);
-    };
-    pushAmount(prev.at, prev.at + prev.raw.length);
-    spanParts.push(between);
-    pushAmount(occ.at, occ.at + occ.raw.length);
-    const spanText = spanParts.join('');
-    // 未受支持的运算：数学符号（\p{Sm} 全覆盖，受支持的加减等——含 Unicode 减号 − 与全角
-    // －（归一后就是 -）——用负向断言排除）+ % ‰ ^ / ／ 显式补；
-    // 数字夹着的乘号写法；运算词（数字相邻认，容忍 multiplied/divided by）。
-    // 注意 u 模式下类里不能写 \- ，连字符放类首。
-    if (/(?![-+−－=])\p{Sm}|[%‰^/／]/u.test(spanText)) return null;
-    if (/\d\s*[xX*＊]+(?:\s*[xX*＊]+)*\s*\d/.test(spanText)) return null;
-    // 运算续断言（十四～十八审 blocking：符号总会漏，词表也要收全）：运算动词出现在 **gap
-    // 开头**（只允许标点/空白在前）= 算术续断言，不是文字备注——"，减去 200 后余 500"（800−200
-    // 应为 600，回复说 500，错误等式）拒；"，另外加上 200 条明细"（动词前面有"另外"，是行文）
-    // 与"，减少 800"（减少不在四则闭集）放行。中文四则动词是闭集——乘/减/除/加 + 可选后缀
-    // （以/上/去）覆盖「乘以/减去/除以/加上」；英文同理（minus/mod/times/multiplied/divided/
-    // product/quotient/sum/difference/ratio，容忍 by）。gap 后面本来就是下一笔金额，"动词跟着
-    // 一笔金额"是结构保证，不用再往 gap 里找数字。
-    if (/^[\s，,、；;。.]*(?:[加减乘除][以上去]?|minus|plus|mod|times|multiplied|divided|product|quotient|sum|difference|ratio)(?:\s+by)?/i.test(between)) return null;
-    // gap 只由运算符与空白组成才算运算连接；一个 gap 多个运算符 = 形态不认（"− −"）。
-    const opChars = between.match(/[+\-−=]/g) ?? [];
-    if (opChars.length > 1) return null;
-    const op = /^[+\-−=\s]+$/.test(between) ? opChars[0] : undefined;
-    if (op === undefined) {
-      // 无运算符：还没结果位时这一笔就是声称的结果（"…，共 1000"）；已有结果位则是文字备注。
-      // 记了结果位也要继续走完剩余表达式（九审 blocking）。
-      if (result !== null) continue;
-      if (acc === null || acc !== occ.value) return null;
-      result = occ.value;
-      continue;
-    }
-    if (result !== null) return null;          // 结果位之后又出现运算符 = 复合断言
-    if (op === '=') {
-      if (acc === null || acc !== occ.value) return null;
-      result = occ.value;
-      continue;
-    }
-    if (acc === null) { acc = prev.value; used.add(prev.value); }
-    if (used.has(occ.value)) return null;                                  // 加数须互异（同值复用）
-    used.add(occ.value);
-    acc = op === '+' ? acc + occ.value : acc - occ.value; // 非 + 非 = 即减（ASCII - 与 Unicode −）
-  }
-  return result;
-}
-
-/**
  * 错误态回复的金额三分归类（errorStateNotes 的判定核，探针只做 note 文案组装）：
  *   · 有所属（放行）＝ 分句点名用户没问的 window 码或真实数据标识（pointed），且过了
  *     实体绑定（金额按出现位置绑到**最近一次未作废提及**——长名跨度内的短名提及作废、
@@ -633,21 +529,6 @@ export function classifyErrorStateAmounts(
         ? isVerifiedTotal(amount.value, boundValues) && pairSum
         : pairSum);
       const totalFramed = TOTAL_FRAMING_RE.test(clause);
-      // 框架词前置的枚举账本（2026-11-09 成本轮实测）：「合计：500 + 300 + 200 = 1000」——
-      // 合计在句首，加数各自 gap 里都含着它（被当成自称合计、验不过），而那笔 1000 自己的
-      // gap 是 " = "（不含框架词，自称合计也认不出来）。账本的诚实形态 = 分句带合计措辞，
-      // 且有一笔金额等于除它自己外全部互异真实值之和。成立时真实值加数走摊账通道（见下方
-      // claimsTotal 验不过的分支）。摘 Cherry 形态（"…500, 300, 200, total is 800"没有一笔
-      // 等于三项全和）不成立，照旧红。
-      // 框架词前置的枚举账本（2026-11-09 成本轮实测 + codex #23 五审 blocking）：「合计：
-      // 500 + 300 + 200 = 1000」——合计在句首，加数各自 gap 里都含着它（被当成自称合计、
-      // 验不过），而那笔 1000 自己的 gap 是 " = "（不含框架词，自称合计也认不出来）。
-      // 账本诚实 = 分句带合计措辞，且按**实际运算符与操作数次数**实算成立（clauseLedgerResult：
-      // 去重求和会把 "500 - 300 + 200 = 1000" 实算 400 与 "500 + 500 + 300 + 200 = 1000"
-      // 实算 1500 都误判成 1000 的账本）。成立时真实值加数走摊账通道（见下方 claimsTotal
-      // 验不过的分支），算得对的结果金额本身走终门（见下方 clauseLedgerValue 档）。
-      const clauseLedgerValue = clauseLedgerResult(clause, occs);
-      const clauseLedgerOk = totalFramed && clauseLedgerValue !== null;
       // 合计族的分句级验证（framed 的合计族切片单独取出：终门第三档只信它，见下方注释）。
       const totalFamilyOk = windowOk && totalFramed && bindings.every((b) => b.claimsTotal && b.segSummands.length >= 2
         ? b.segSummands.reduce((s, a) => s + a.value, 0) === amount.value
@@ -675,6 +556,37 @@ export function classifyErrorStateAmounts(
         return false;
       });
       const ledgerOk = clauseOpVerified();
+      // 算式相邻（无绑定与绑定分支共用，2026-11-09 owner 裁定后由 addendPositionOk 泛化）：
+      // 这笔金额与同一分句里另一笔金额之间只隔运算符/连接词/标点（ENUMERATION_GAP_RE）——
+      // 它是算式的操作数，不是自称的运算结果。**双向**：左操作数看后面一笔（"500 + 300"
+      // 的 500），右操作数看前面一笔（"…= 1000 = 500 + 300" 的 300、"total is 800" 前面
+      // 的 300）——单向会把三连枚举的末位与框架词后置形态的中间项误红。
+      // **不验算**：算式对不对称是 judge 层的职守，机械层只判归属（删掉 clauseLedgerResult
+      // 表达式解析器，假阴性面归零；错误算式由 claimsTotal 严格性与 judge 分别接管）。
+      // claimedSummands：自称合计的形态另有一道收紧——列举了 ≥2 个加数还验不过 = 明写
+      // "这些加起来等于我"而算不对（"500, 300, total 900 + 200" 的错误合计断言），不是加数。
+      // 这道收紧**只属于 claimsTotal 调用点**：无自称路径里前置真实值是同算式的其他操作数
+      // 而不是它的加数清单（"合计：500 + 300 + 200 = 1000" 的 200 前面就有两笔），收进去
+      // 会把每段三连枚举的末位判红。
+      const expressionAdjacentOk = (b: {
+        at: number;
+        segSummands: ReadonlyArray<{ value: number }>;
+        mentionEntity?: { values: readonly number[] };
+      }, claimedSummands = false): boolean => {
+        if (claimedSummands && b.segSummands.length >= 2) return false;
+        const self = clause.slice(b.at).match(boundary);
+        const end = b.at + (self ? self[0].length : amount.raw.length);
+        const nextOcc = occs.reduce<{ at: number } | undefined>(
+            (nearest, o) => (o.at >= end && (nearest === undefined || o.at < nearest.at) ? o : nearest), undefined);
+        const prevOcc = [...occs].reverse().find((o) => o.at + o.raw.length <= b.at);
+        const forward = nextOcc !== undefined && ENUMERATION_GAP_RE.test(clause.slice(end, nextOcc.at));
+        const backward = prevOcc !== undefined && ENUMERATION_GAP_RE.test(clause.slice(prevOcc.at + prevOcc.raw.length, b.at));
+        if (!forward && !backward) return false;
+        // 绑定分支核加数属于所绑定实体：算式成立不证明操作数归属（"beta total is 800 + 200
+        // = 1000" 的 800 是 alpha 的值）。
+        if (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value)) return false;
+        return REAL_DATA_VALUES.includes(amount.value);
+      };
       const perOccurrence = bindings.map((b) => {
         // 无绑定实体（摊账/未点名形态）同样按**每笔自己 gap 里的措辞族**验证（2026-11-08
         // 评审 blocking：未绑定差额曾直接吃 isSum/framed——"values are 500 and 300,
@@ -686,28 +598,15 @@ export function classifyErrorStateAmounts(
             const claimed = b.segSummands.length >= 2
               ? enumeratedTotalOk(b.segSummands, amount.value)
               : isVerifiedTotal(amount.value, replyRealValues);
-            // 自称合计验不过时，按**加数**再判一遍才落红（2026-11-09 成本轮实测）：框架词前置的
-            // 枚举形态「合计：500 + 300 + 200 = 1000」里，每个加数自己的 gap 都含「合计」，
-            // 会被当成自称合计——它不是合计（验不过），但它是同一分句里那笔**已验证**运算的
-            // 加数（摊账通道，与框架词后置时加数走的同一条）。直接 return false 会把诚实列
-            // 加数的回复整句判成无所属。通道只收「真实值 + 分句里有成立的账本」两项：不收
-            // isSum 的两两和（"values are 500, 300, 200; total is 800" 的 800 会被 500+300
-            // 蹭回来，摘 Cherry 反例照旧红），也不要 framed（族验证在上面自称合计处已判过）。
+            // 自称合计验不过时，按**算式相邻**再判一遍才落红（2026-11-09 成本轮实测 + owner
+            // 裁定）：框架词前置的枚举形态「合计：500 + 300 + 200 = 1000」里，每个加数自己的
+            // gap 都含「合计」，会被当成自称合计——它不是合计（验不过），但它是同一分句算式
+            // 的操作数（与框架词后置时加数走的同一条）。直接 return false 会把诚实列加数的
+            // 回复整句判成无所属。通道只收「真实值 + 与另一笔金额只隔运算符/连接词」：不验算
+            // （算式对错归 judge），列举了 ≥2 个加数还验不过的（明写"这些加起来等于我"而算不对，
+            // 摘 Cherry 反例）由 claimedSummands 收紧挡在门外。
             if (claimed) return true;
-            // 回退**只给没列举加数、且与算式相连**的自称合计（三轮 codex blocking 复现后收紧）：
-            // ① 列举了 ≥2 个加数还验不过 = 明写"这些加起来等于我"而算不对
-            //    （"…= 1000，total is 500"），是错误合计断言；
-            // ② 与算式的连接关系（"合计 500，明细 500 + 300 + 200 = 1000" 的首笔）：金额之后
-            //    必须只隔运算符/连接词/标点就有下一笔金额（它是算式的左操作数）。冒号/括号单独
-            //    不构成证据（"合计：500，明细 …" 带冒号仍是合计断言），夹了文字更不是加数。
-            if (b.segSummands.length >= 2) return false;
-            const self = clause.slice(b.at).match(boundary);
-            const end = b.at + (self ? self[0].length : amount.raw.length);
-            const nextOcc = occs.reduce<{ at: number } | undefined>(
-                (nearest, o) => (o.at >= end && (nearest === undefined || o.at < nearest.at) ? o : nearest), undefined);
-            const addendPosition = nextOcc !== undefined && ENUMERATION_GAP_RE.test(clause.slice(end, nextOcc.at));
-            if (!addendPosition) return false;
-            return REAL_DATA_VALUES.includes(amount.value) && (ledgerOk || clauseLedgerOk);
+            return expressionAdjacentOk(b, true);
           }
           if (DIFF_FRAMING_RE.test(b.gap)) {
             const listed = occs.filter((o) => !positions.includes(o.at)).map((o) => o.value);
@@ -716,15 +615,18 @@ export function classifyErrorStateAmounts(
               : isVerifiedDifference(amount.value, pool);
           }
           if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
-          return (REAL_DATA_VALUES.includes(amount.value) && (ledgerOk || clauseLedgerOk)) || isSum || framed
-            // 算得对的账本的结果位（"合计：500 - 300 + 200 = 400" 的 400：不是种子值、过不了
-            // isVerifiedTotal 全和验证，但分句算式实算成立）也属有所属——终门第四档接它。
-            || clauseLedgerValue === amount.value;
+          // R3 算式相邻：无自称运算时，与同分句另一笔金额只隔运算符/连接词的真实值是算式的
+          // 操作数——"合计：500 + 300 + 200 = 1000" 的 300/200 各自 gap 里没有框架词（自称
+          // 合计认不出来），只靠相邻获得归属（2026-11-09 owner 裁定：算式对错归 judge）。
+          return expressionAdjacentOk(b) || (REAL_DATA_VALUES.includes(amount.value) && ledgerOk) || isSum || framed;
         }
         if (b.claimsTotal) {
-          return b.segSummands.length >= 2
+          // 自称合计验不过时同样先按加数判一遍（issue #24：绑定分支原来直接落红，
+          // "…名下记录的合计，则为 500 + 300 + 200 = 1000" 的加数被误判无所属）。
+          const claimed = b.segSummands.length >= 2
             ? enumeratedTotalOk(b.segSummands, amount.value)
             : isVerifiedTotal(amount.value, b.mentionEntity.values);
+          return claimed || expressionAdjacentOk(b, true);
         }
         if (DIFF_FRAMING_RE.test(b.gap)) {
           // 差额断言（2026-11-08 评审 blocking）：分句里列举了 ≥2 个真实值时，差额必须
@@ -740,17 +642,28 @@ export function classifyErrorStateAmounts(
             : isVerifiedDifference(amount.value, pool);
         }
         if (RATIO_FRAMING_RE.test(b.gap)) return isVerifiedRatio(amount.value, pool);
-        return b.valueOk;
+        // 与无绑定分支拉平（issue #24）：绑定金额没自称运算时，同样走「真实值 + 摊账通道」
+        // ——"…则为 500 + 300 + 200 = 1000" 的 1000 绑定 beta 但不是种子值，靠 totalFamilyOk
+        // （所绑实体全额 + 分句合计措辞）获得归属，降为信息性派生。
+        // **不接 R3 算式相邻**：绑定金额是成员时 valueOk 已覆盖，非成员还相邻正是要红的编造
+        // （"beta total is 800 + 200 = 1000" 的 800 是 alpha 的值——算式成立不证明操作数归属）。
+        // **也不接分句级摊账（ledgerOk）与差额/倍数族 framed**：那两条是未点名形态的退路
+        // （没有实体可核才退到分句/跨实体池）。绑定形态有实体可核——"beta … is 1200, alpha
+        // … is 500, difference is 100" 的 1200 是 alpha 的值，分句里成立的差额验算
+        // （300−200=100）与跨实体池算术都洗不白它（2026-11-09 PR #25：工作区把无绑定形态
+        // 整段搬进绑定分支时连带 reintroduce 的假绿，main 同形态是红的）。
+        return b.valueOk || isSum || totalFamilyOk;
       });
       const anyClaimsOperation = bindings.some((b) => b.claimsTotal || DIFF_FRAMING_RE.test(b.gap) || RATIO_FRAMING_RE.test(b.gap));
       const allVerified = perOccurrence.every(Boolean);
+      // R3 算式相邻（第二条无自称路径）：perOccurrence 里相邻只保证这一笔不落红，直接放行档
+      // 还要认这个信号——否则"500 + 300"（无框架词、无摊账）的真实值加数全会掉进运算通道
+      // 判硬红。与 pointed/isSum/framed/ledgerOk 同档：windowOk 与真实值前提不变。
+      const expressionAdjacent = bindings.every((b) => expressionAdjacentOk(b));
       // 直接放行：每一笔都是直接断言（无运算自称）且核对上，且有所属（pointed）或摊账
       // 通道成立（isSum/framed）。但凡有一笔自称运算结果，整笔走运算通道。
-      // clauseLedgerOk = 框架词前置的枚举账本（「合计：500 + 300 + 200 = 1000」的加数
-      // 所属通道，2026-11-09 成本轮）：加数自己没自称运算，gap 里也没有框架词，所属证据
-      // 就是同一分句里那笔已验证的全和。
       if (!anyClaimsOperation && allVerified && windowOk && REAL_DATA_VALUES.includes(amount.value)
-        && (pointed || isSum || framed || ledgerOk || clauseLedgerOk)) continue;
+        && (pointed || isSum || framed || ledgerOk || expressionAdjacent)) continue;
       const enumeratedTotal = bindings.some((b) => b.claimsTotal && b.segSummands.length >= 2);
       // 运算通道只给自称运算结果的金额；没自称的直接断言若没进直接通道必须落红，不能被
       // "值恰好算得出来"救走（"只有 record value……balance 500" 的 500 无归属也无框架词）。
@@ -767,14 +680,9 @@ export function classifyErrorStateAmounts(
       // 真差额是 300，按差额族该红；放开这一档就会把它洗成派生（codex-pr-review #23 blocking
       // 复现）。要开放差额/倍数族的措辞后置形态，得先把该族验证按族收紧（差额只认列举操作数
       // 之差、倍数只认商），那是另一个改动；没见到实测形态前不放。
-      // 第四档（clauseLedgerValue）：金额是分句里**算得对的账本的结果**（"合计：500 - 300
-      // + 200 = 400" 的 400——不是种子值、也过不了 isVerifiedTotal 的全和验证，但算式本身
-      // 实算成立）。只认结果位，加数走上面的直接放行档；账本不成立（实算值对不上）时
-      // clauseLedgerValue 是 null，这档不开。
       if ((isSum && !enumeratedTotal && !anyClaimsOperation)
         || (anyClaimsOperation && allVerified && windowOk)
-        || (totalFamilyOk && allVerified && windowOk)
-        || (clauseLedgerValue === amount.value && allVerified && windowOk)) { soft = true; } else { hard = true; }
+        || (totalFamilyOk && allVerified && windowOk)) { soft = true; } else { hard = true; }
     }
     if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     if (hard) unattributed.set(amount.value, amount);

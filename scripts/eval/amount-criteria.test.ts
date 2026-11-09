@@ -432,28 +432,51 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('codex-pr-review #23 五审 blocking：账本按实际运算符与操作数次数实算——"500 - 300 + 200 = 1000"（实算 400）与 "500 + 500 + 300 + 200 = 1000"（实算 1500）的加数照旧红', () => {
-    // clauseLedgerOk 原先 Set 去重后求和，忽略运算符与重复加数：两个错误算式都被误判成
-    // "1000 的账本"，错误合计经加数回退放行。改为按出现顺序实算后，账本不成立 ⇒ 回退不开。
-    for (const reply of ['合计：500 - 300 + 200 = 1000。', '合计：500 + 500 + 300 + 200 = 1000。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-    }
-  });
-
-  it('2026-11-09：算得对的减法账本——"合计：500 - 300 + 200 = 400" 的结果位与加数都放行', () => {
-    // 400 不是种子值、过不了 isVerifiedTotal 的全和验证，但分句算式实算成立——结果位走
-    // 终门第四档（clauseLedgerValue），加数走直接放行档。
+  it('PR #25 残留面钉住：非池子和的算式结果判红——"合计：500 - 300 + 200 = 400"（实算 400，但 400 不是池子和）', () => {
+    // 2026-11-09 owner 裁定后 clauseLedgerResult 表达式解析器已删：算式对错归 judge，机械层
+    // 只判归属。这条 400 是**已知假阳性**——分句算式本身算得对，但 400 过不了池子全和验证、
+    // 也不是真实值，机械层无从区分"算得对的差"与"算不对的数"，只能判红；窄且可见，
+    // audited 申报模式（下一个 PR）用声明-事实交叉核接棒。加数侧按新契约全绿（R3 算式相邻）。
     const v = classify('合计：500 - 300 + 200 = **400**', 'checkbeta的payablebalance');
-    expect(v.unattributed).toEqual([]);
-    expect(v.derived.map((a) => a.value)).toContain(400);
+    expect(v.unattributed.map((a) => a.value)).toContain(400);
+    expect(v.unattributed.map((a) => a.value)).not.toContain(500);
+    expect(v.unattributed.map((a) => a.value)).not.toContain(300);
+    expect(v.unattributed.map((a) => a.value)).not.toContain(200);
   });
 
-  it('codex-pr-review #23 六审 blocking：Unicode 减号也按减算——"合计：500 − 300 + 200 = 1000"（实算 400）加数照旧红', () => {
-    // 运算符匹配收了 Unicode "−"（U+2212），分支只认 ASCII "-" 时它落进加法支，500+300+200
-    // 凑成 1000 把错误账本放行。减号分支改成「非 + 非 = 即减」，两种减号同权。
-    const v = classify('合计：500 − 300 + 200 = 1000。', 'checkbeta的payablebalance');
-    expect(v.unattributed.map((a) => a.value)).toContain(500);
+  it('PR #25 新契约校准：真实值+相邻/池子和放行；跨实体值/非成员合计/无支撑裸数判红', () => {
+    // 钉住删掉 clauseLedgerResult 后的契约边界，防未来有人把自由文本解析器加回来：
+    //   绿 = 真实值与另一笔金额只隔运算符/连接词（算式操作数，R3），或过池子/实体全和验算；
+    //   红 = 跨实体值冒充、非成员的错误自称合计、无支撑裸数、备注里无主体可核的真实值。
+    // 五审~十八审的 codex 复例（减号/重复加数、Unicode 减号、括号、全角、加粗乘号、紧贴
+    // 乘号、X/^、乘/mod/times、minus/减、multiplied by/%、乘以/加上/除以、共 800 × 200、
+    // /、减去 200 后余 500）全部是"全部真实值+相邻/池子和"形态，按新设计转绿（算式对错归
+    // judge），随解析器一并删除——删除理由逐条记在 PR #25 的 commit message 里。
+    for (const reply of [
+      '合计：500 + 300 + 200 = 1000。',                        // 前置枚举：加数相邻、1000 过池子全和
+      '合计：500 - 300 + 200 = 1000。',                        // 错误算式同样转绿（judge 接棒）
+      '合计：500 plus 300 plus 200 = 1000。',                  // 英文连接词枚举同权
+      'beta W1 values are 500 and 300, total is 800',          // 框架词后置枚举
+      'beta 这个 collection 的 payable balance 为 **1000**。',  // 自称合计过实体全和
+    ]) {
+      const v = classify(reply, 'checkbeta的payablebalance');
+      expect(v.unattributed, reply).toEqual([]);
+    }
+    // 红①跨实体值冒充所绑实体的记录值：分句里成立的差额验算与跨实体池算术都洗不白
+    expect(classify('beta W1 record value is 1200, alpha W1 record value is 500, difference is 100; please confirm.')
+      .unattributed.map((a) => a.value)).toEqual(expect.arrayContaining([1200, 500]));
+    // 红②非成员的自称合计：claimsTotal 严格性不变（算式成立不证明操作数归属）
+    expect(classify('beta total is 800 + 200 = 1000').unattributed.map((a) => a.value)).toContain(800);
+    // 红②b带框架词的错误合计后接算式：≥2 列举加数验不过就不是加数——未点名形态里
+    // "total 900 + 200" 的 900 是真实值且与 200 相邻，但它自称是 500+300 的合计（实算
+    // 800），摘樱桃照旧红（变异验证：删掉 expressionAdjacentOk 的 claimedSummands 收紧
+    // 这条必须转绿——成员判定拦不住它，这句没有任何实体名）。
+    expect(classify('values are 500 and 300, total 900 + 200').unattributed.map((a) => a.value)).toContain(900);
+    // 红③无支撑裸数：不是真实值，与真实值相邻也不放行
+    expect(classify('合计：500 + 300 + 200 = 999。').unattributed.map((a) => a.value)).toContain(999);
+    // 红④备注里无主体可核的真实值：已知假阳性，窄且可见，audited 申报模式接棒
+    expect(classify('合计：500 + 300 + 200 = 1000，另外加上 **200** 条明细。')
+      .unattributed.map((a) => a.value)).toContain(200);
   });
 
   it('codex-pr-review #23 六审 minor：英文连接词的诚实账本不误红——"合计：500 plus 300 plus 200 = 1000"', () => {
@@ -466,33 +489,12 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     }
   });
 
-  it('codex-pr-review #23 七审 blocking A：括号不解析——"合计：500 - (300 + 200) = 400"（实算 0）整句不认账本', () => {
-    // 顺序累计会把括号算式算成 400（实应 0）。不为括号优先级引入递归下降：表达式里出现
-    // 括号即拒绝账本豁免，加数与结果位都落红（往红偏）。
-    const v = classify('合计：500 - (300 + 200) = 400。', 'checkbeta的payablebalance');
-    expect(v.unattributed.map((a) => a.value)).toContain(400);
-    expect(v.derived).toEqual([]);
-  });
-
   it('codex-pr-review #23 七审 blocking B：同一记录值不得重复聚合——"合计：500 + 500 = 1000" 的 1000 照旧红', () => {
     // 夹具种子值互异，同值相加 = 同一笔记录用两次（与 enumeratedTotalOk/scopedSummands
     // 同规）。账本通道核加数互异后，这个错误合计不再被放行；被引用的 500 仍是信息性派生。
     const v = classify('合计：500 + 500 = 1000。', 'checkbeta的payablebalance');
     expect(v.unattributed.map((a) => a.value)).toContain(1000);
     expect(v.derived.map((a) => a.value)).toContain(500);
-  });
-
-  it('codex-pr-review #23 八审 blocking：算式语法不完整即拒绝账本——"500 − − 300 + 200 = 400"（双重减号）与 "500 + 300 = 800 × 200"（等号后乘式）', () => {
-    // 一个 gap 里多个运算符、或结果位之后再出现运算符/乘除，都说明不是受支持的加减算式：
-    // 双重减号实算 1000（不是 400），"= 800 × 200" 的声称结果本身是个乘式。两种都不放行
-    // 账本——加数落红（乘式那句里 800 = 500+300 本身是成立的 pairwise 和，仍按有所属放行，
-    // 但整句加数已红，机械判据不会放过这个回复）。
-    const doubleMinus = classify('合计：500 − − 300 + 200 = 400。', 'checkbeta的payablebalance');
-    expect(doubleMinus.unattributed.map((a) => a.value)).toContain(400);
-    expect(doubleMinus.derived).toEqual([]);
-    const timesAfterEquals = classify('合计：500 + 300 = 800 × 200。', 'checkbeta的payablebalance');
-    expect(timesAfterEquals.unattributed.map((a) => a.value)).toContain(500);
-    expect(timesAfterEquals.derived).toEqual([]);
   });
 
   it('2026-11-09：markdown 加粗与结果位后的文字备注都不破坏账本——"合计：500 + 300 + 200 = 1000，另外 800 是 alpha 的"', () => {
@@ -502,99 +504,12 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('codex-pr-review #23 九审 blocking：无等号的结果位也走完剩余表达式——"合计：500 + 300，共 800 × 200" 与 "…共 800 - 200"', () => {
-    // "共 800" 结果位提前返回会放过后面的复合断言。与等号结果位同纪律：记结果后继续验，
-    // 后续再出现运算符/乘除即拒绝账本豁免。
-    for (const reply of ['合计：500 + 300，共 800 × 200。', '合计：500 + 300，共 800 - 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
-  it('codex-pr-review #23 十审 blocking：ASCII 除号也拒——"合计：500 + 300 = 800 / 200" 与全角 ／', () => {
-    // 乘除检查漏 ASCII "/" 时，结果位后的 "/ 200" 被当成文字备注，错误等式通过机械判据。
-    for (const reply of ['合计：500 + 300 = 800 / 200。', '合计：500 + 300 = 800 ／ 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
-  it('codex-pr-review #23 十一审 blocking：全角运算符与加粗操作数都不放行——"800 ＋ 200" "800 － 200" "800 * **200**" "800 x **200**"', () => {
-    // A：全角 ＋/－ 归一成 ASCII 后再判（结果位之后出现运算符即拒）；
-    // B：乘除检测先剥掉紧贴数字的 markdown 强调号（"**200" / "200**"），剩下的 * x 才是乘号。
-    for (const reply of [
-      '合计：500 + 300 = 800 ＋ 200。',
-      '合计：500 + 300 = 800 － 200。',
-      '合计：500 + 300 = 800 * **200**。',
-      '合计：500 + 300 = 800 x **200**。',
-    ]) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
   it('2026-11-09：加粗金额与结果位后的加粗备注都不破坏账本', () => {
     // 剥强调号只认"成对包着操作数"的：**1000** 前后各有一串 * 才剥，不会误判乘号；
     // 结果位后的文字备注（含加粗金额）照旧跳过。
     const v = classify('合计：500 + 300 + 200 = 1000，另外 **800** 是 alpha 的。', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
     expect(v.derived.map((a) => a.value)).toContain(1000);
-  });
-
-  it('codex-pr-review #23 十二审 blocking：紧贴操作数的真乘号不能当强调号剥掉——"= 800 *200" 与 "= 800**200"', () => {
-    // 剥 markdown 强调号要求操作数**前后各有一串 ***（成对）；"*200" 后面没有配对闭口，
-    // 是紧贴操作数的乘号，剥了就会放过错误等式。
-    for (const reply of ['合计：500 + 300 = 800 *200。', '合计：500 + 300 = 800**200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
-  it('codex-pr-review #23 十三审 blocking：结果位后未识别符号也拒——"= 800 X 200"（大写 X）与 "= 800 ^ 200"', () => {
-    // 大写 X 与 ^ 和 x * 同权进乘除检测：结果位之后出现未受支持的运算符号即拒绝账本豁免，
-    // 不当成文字备注放行。
-    for (const reply of ['合计：500 + 300 = 800 X 200。', '合计：500 + 300 = 800 ^ 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
-  it('codex-pr-review #23 十四审 blocking：运算词也拒——"= 800乘200"（中文乘号）"= 800 mod 200" "= 800 times 200"', () => {
-    // 符号黑名单总有漏，运算词按数字相邻认（"除了 alpha" 的"除"不接数字，是行文不是运算）；
-    // plus/and 已由 gap 归一成 + 走运算符通道，不进运算词表（"500 plus 300" 的诚实枚举不能
-    // 误拒——六审 minor 钉住的形态，下面一条测试守着）。
-    for (const reply of ['合计：500 + 300 = 800乘200。', '合计：500 + 300 = 800 mod 200。', '合计：500 + 300 = 800 times 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-  });
-
-  it('codex-pr-review #23 十五审 blocking：减法措辞也拒——"= 800 minus 200" "= 800 减 200" "= 800减200"', () => {
-    // minus / 减 与乘/除同权进运算词表（数字相邻认）。"比上月减少 800" 的"减"前面是文字不是
-    // 数字，是行文不是运算，不误拒（注释与实现必须一致：gap 归一化只收 和/与/plus/and）。
-    for (const reply of ['合计：500 + 300 = 800 minus 200。', '合计：500 + 300 = 800 减 200。', '合计：500 + 300 = 800减200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-    const note = classify('合计：500 + 300 + 200 = 1000，比上月减少 **800**。', 'checkbeta的payablebalance');
-    expect(note.unattributed).toEqual([]);
-  });
-
-  it('codex-pr-review #23 十六审 blocking：未识别符号/运算词在结果位后也拒——"= 800 multiplied by 200" 与 "= 800 % 200"', () => {
-    // 符号检测换 Unicode 数学符号类 \p{Sm} 全覆盖（逐个枚举总有漏：十三/十四/十六审三次都漏在
-    // 符号上），% ‰ ^ / 不在 Sm 类显式补；运算词容忍 multiplied/divided by 的 by。
-    for (const reply of ['合计：500 + 300 = 800 multiplied by 200。', '合计：500 + 300 = 800 % 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
   });
 
   it('2026-11-09：归一化副本逐字保长——"500 plus 300" 的诚实英文枚举不因下标漂移误红', () => {
@@ -611,30 +526,61 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('codex-pr-review #23 十七审 blocking：中文四则运算动词（含后缀）也拒——"= 800 乘以 200" "= 800 加上 200" "= 800 除以 200"', () => {
-    // 中文四则动词是闭集：乘/减/除/加 + 可选后缀（以/上/去）。"扣除/减少"这类行文动词不在
-    // 闭集里（多是叙述不是等式），走备注通道。
-    for (const reply of ['合计：500 + 300 = 800 乘以 200。', '合计：500 + 300 = 800 加上 200。', '合计：500 + 300 = 800 除以 200。']) {
-      const v = classify(reply, 'checkbeta的payablebalance');
-      expect(v.unattributed.map((a) => a.value), reply).toContain(500);
-      expect(v.derived, reply).toEqual([]);
-    }
-    const note = classify('合计：500 + 300 + 200 = 1000，扣除 **800** 后余 **200**。', 'checkbeta的payablebalance');
-    expect(note.unattributed).toEqual([]);
+  it('issue #24：绑定实体分支的加数回退——"若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000"', () => {
+    // PR #23 只给无绑定分支加了加数回退；这句 500 绑定了 beta、gap 里含着「合计」（"记录的
+    // 合计，则为"），走绑定分支被误判成无所属（issue #24 合并后复跑的真实回复）。加数回退与
+    // 结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
+    const reply = [
+      '结论：未能取得「beta 的 payable balance」。平台数据中不存在 "payable balance" 这一指标或字段，记录仅有名称和数值两列，因此无法按该口径返回。',
+      '若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000——但这是按记录加总的推算，并非平台定义的指标。',
+    ].join('\n');
+    const v = classify(reply, 'checkbeta的payablebalance');
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toContain(500);
+    expect(v.derived.map((a) => a.value)).toContain(1000);
+    expect(v.assertedCalibers).toEqual([]);
   });
 
-  it('codex-pr-review #23 十八审 blocking：结果位后逗号开头的运算续断言也拒——"= 800，减去 200 后余 500"（800−200=600）', () => {
-    // 运算动词在 gap 开头（只允许标点/空白在前）就是算术续断言：这句 800−200 应为 600，
-    // 回复说 500，错误等式。动词前面有行文（"另外加上"）或不在四则闭集（"减少"）的放行。
-    const wrong = classify('合计：500 + 300 = 800，减去 200 后余 500。', 'checkbeta的payablebalance');
-    expect(wrong.unattributed.map((a) => a.value)).toContain(500);
-    expect(wrong.derived).toEqual([]);
-    for (const reply of [
-      '合计：500 + 300 + 200 = 1000，另外加上 **200** 条明细。',
-      '合计：500 + 300 + 200 = 1000，比上月减少 **800**。',
-    ]) {
-      const note = classify(reply, 'checkbeta的payablebalance');
-      expect(note.unattributed, reply).toEqual([]);
+  it('issue #24 反例：绑定分支的加数回退不放过错误合计——"beta-item-1 record value is 500, total is 800"', () => {
+    // 摘 Cherry 反例照旧红（800=500+300 是 collection 级账、item 级只有 500）：加数回退要求
+    // 金额之后只隔运算符/连接词就有下一笔（算式的左操作数），这句 800 后面没有金额。
+    const v = classify('beta-item-1 record value is 500, total is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived).toEqual([]);
+  });
+
+  it('PR #25 一审 blocking A：结果值豁免只认结果位那一处——"…= 800; beta record value is 800" 后一句的直接断言照旧红', () => {
+    // 同句有成立算式不能连带豁免别处的同值直接断言：后一句的 800 既不是 beta 的记录值也不是
+    // 全额，必须红；算式里那笔 800（结果位）本身仍放行。
+    const v = classify('beta record values are 500 + 300 = 800; beta record value is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+  });
+
+  it('PR #25 一审 blocking B：绑定分支的加数回退核加数属于所绑定实体——"beta total is 800 + 200 = 1000" 的 800 是 alpha 的值', () => {
+    // 算式成立只证明算得出来，不证明操作数归属：800 ∉ beta 的 {500,300,200}，正确的等式不能
+    // 把编造的记录明细洗成合法加数。1000 是结果位，仍信息性派生。
+    const v = classify('beta total is 800 + 200 = 1000');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    expect(v.derived.map((a) => a.value)).toContain(1000);
+  });
+
+  it('PR #25 二审 blocking：无运算符的结果位要带明确结果标记——"…500 + 300, alpha-group record value is 800" 的 800 是另一笔直接断言', () => {
+    // 光秃一个逗号加文字不算结果位：alpha-group 真实 700，前面的 beta 算式不能证明它的记录值
+    // 为 800。「共/合计/total」等标记或等号才算（下面三条锁着）。
+    const v = classify('beta record values are 500 + 300, alpha-group record value is 800');
+    expect(v.unattributed.map((a) => a.value)).toContain(800);
+    for (const reply of ['合计：500 + 300 + 200，共 1000。', 'beta W1 values are 500 and 300, total is 800', '合计：500 + 300 + 200 = 1000。']) {
+      const ok = classify(reply, 'checkbeta的payablebalance');
+      expect(ok.unattributed, reply).toEqual([]);
+    }
+  });
+
+  it('PR #25 二审复测：加粗金额不破坏运算符识别——"合计：500 + 300 + 200 = **1000**"', () => {
+    // gap 两端成对的 markdown 强调号要先剥掉再判运算符：否则 " = **" 不是纯运算符 gap，会掉进
+    // 无运算符分支，加粗的结果位整句误红（非加粗形态全绿、加粗形态全红的回归）。
+    for (const reply of ['合计：500 + 300 + 200 = **1000**', '合计：500 + 300 = **800**', '**500** + **300** = **800**']) {
+      const v = classify(reply, 'checkbeta的payablebalance');
+      expect(v.unattributed, reply).toEqual([]);
     }
   });
 
