@@ -356,11 +356,13 @@ export interface ErrorStateAmountVerdict {
   unattributed: AmountLike[];
   /**
    * 张冠李戴（红，`unattributed` 的子集）：分句点名了实体或 window，而金额**不属于它**
-   * （或该 window 对该实体无效）——错在"挂给谁"，不在"有没有来源"。
+   * （或该 window 对该实体无效）；分句点名了一个**不在真实数据表里的主体名**（
+   * "foo-item-1 record value is 500"）也归这一类——名字给了归属，但归属本身无据。
+   * 错在"挂给谁"，不在"有没有来源"。
    *
    * 为什么单列（2026-11-09 独立评审）：audited 申报模式把「无所属」整条换成申报交叉核，
    * 而交叉核只核「数 ↔ 记录号在 result.items 里的 value」，不看这个数在正文里挂给哪个
-   * 实体——"alpha-item-1 record value is 500" 配 `500 <- rec-101`（beta 真实 500）能五查
+   * 实体——"alpha-item-1 record value is 500" 配 `500 <- rec-101`（beta 真实 500）能交叉核
    * 全过。实体/window 绑定因此必须留在 audited 路径上，而"完全没有归属"那一半才可以交给
    * 申报块（申报块本来就是为补它而注入的）。黑盒路径两条都红（子集关系 ⇒ 合并口径不变）。
    */
@@ -401,6 +403,47 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
     if (specific.some((entity) => collectionWindowsOf(entity.name).includes(token))) return true;
     return new RegExp(`${token}[^。；;\\n]{0,12}(?:无数据|没有数据|no data)`, 'i').test(clause);
   });
+}
+
+/**
+ * "数据主体"位置上的通用词/框架词：它们不是实体名，不构成"把这个数挂给了谁"。
+ * 只用于未知实体归属检测（见 hasUnknownSubjectAttribution），不参与金额提取。
+ */
+const SUBJECT_STOPWORDS: ReadonlySet<string> = new Set([
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'its', 'their', 'his', 'her', 'our', 'your', 'my',
+  'record', 'records', 'value', 'values', 'balance', 'amount', 'amounts', 'total', 'totals', 'sum',
+  'platform', 'data', 'result', 'results', 'item', 'items', 'entry', 'entries', 'number', 'numbers',
+  'no', 'not', 'only', 'each', 'every', 'all', 'any', 'some', 'current', 'available', 'earlier', 'previous',
+  'same', 'which', 'what', 'where', 'when', 'how', 'why', 'please', 'confirm', 'check', 'checked',
+  'query', 'queried', 'found', 'see', 'here', 'below', 'above', 'and', 'or', 'but', 'for', 'with',
+  'without', 'from', 'into', 'per', 'by', 'to', 'of', 'in', 'on', 'at', 'as', 'is', 'are', 'was', 'were',
+  'be', 'been', 'being', 'has', 'have', 'had', 'does', 'do', 'did', 'can', 'could', 'should', 'would',
+  'will', 'may', 'might', 'combined', 'difference', 'higher', 'lower', 'more', 'less',
+]);
+
+/**
+ * 未知实体归属（2026-11-09 独立评审 medium）：正文把真实值挂给一个**不在真实数据表里**
+ * 的主体名——"foo-item-1 record value is 500" 配 `500 <- rec-101`（beta 真实 500）。
+ * 这类分句不会被 ENTITY_REAL_VALUES 的实体绑定抓住（没有已知实体可绑），金额进
+ * `unattributed`；但 audited 申报模式只把"完全没有归属"交给申报块，未知名字仍是**给了
+ * 归属**，不能被 `declaredExempt` 洗白。识别只看紧邻 "record value / 记录值" 的标识符
+ * 形态主体，并排除通用词与已知实体/window：这是窄判据，不把普通英文短语误当实体。
+ */
+const UNKNOWN_SUBJECT_RECORD_RE = /(?:^|[^A-Za-z0-9_-])([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)*)\s*(?:'s|’s|s')?\s*(?:的\s*)?(?:record\s+value|记录值)/gi;
+
+function hasUnknownSubjectAttribution(clause: string): boolean {
+  const known = new Set([
+    ...ENTITY_REAL_VALUES.map((entity) => entity.name),
+    ...REAL_DATA_TOKENS,
+    ...MOCK_WINDOWS.flatMap((subject) => [subject.code, subject.name]),
+  ].map((name) => name.toLowerCase()));
+  for (const match of clause.matchAll(UNKNOWN_SUBJECT_RECORD_RE)) {
+    const token = match[1]!;
+    if (SUBJECT_STOPWORDS.has(token.toLowerCase())) continue;
+    if (known.has(token.toLowerCase())) continue;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -461,6 +504,9 @@ export function classifyErrorStateAmounts(
       // 实体和值获豁免）。
       const caliber = MISSING_CALIBERS.find((c) => new RegExp(c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i').test(clause) && !CALIBER_DISCLAIM_RE.test(clause));
       if (caliber) { assertedHit = true; asserted.set(caliber, clause); continue; }
+      // 未知主体名（"foo-item-1 record value is 500"）：名字不在真实数据表里，但正文明确
+      // 给了归属——这不是"完全没有归属"，申报块不能把它补成有据。
+      const unknownSubject = hasUnknownSubjectAttribution(clause);
       // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
       const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
         && (clause.includes(subject.code) || clause.includes(subject.name)))
@@ -578,8 +624,10 @@ export function classifyErrorStateAmounts(
       // 它是算式的操作数，不是自称的运算结果。**双向**：左操作数看后面一笔（"500 + 300"
       // 的 500），右操作数看前面一笔（"…= 1000 = 500 + 300" 的 300、"total is 800" 前面
       // 的 300）——单向会把三连枚举的末位与框架词后置形态的中间项误红。
-      // **不验算**：算式对不对称是 judge 层的职守，机械层只判归属（删掉 clauseLedgerResult
-      // 表达式解析器，假阴性面归零；错误算式由 claimsTotal 严格性与 judge 分别接管）。
+      // **本模块不验算**：自由文本算式的对错是 judge 层的职守，这里只判归属（删掉
+      // clauseLedgerResult 表达式解析器，假阴性面归零；错误算式由 claimsTotal 严格性与
+      // judge 分别接管）。audited 申报块里的 := 是封闭语法，由 audit-declaration 的
+      // operationMismatch 精确十进制验算，不在这里重复。
       // claimedSummands：自称合计的形态另有一道收紧——列举了 ≥2 个加数还验不过 = 明写
       // "这些加起来等于我"而算不对（"500, 300, total 900 + 200" 的错误合计断言），不是加数。
       // 这道收紧**只属于 claimsTotal 调用点**：无自称路径里前置真实值是同算式的其他操作数
@@ -619,8 +667,9 @@ export function classifyErrorStateAmounts(
             // 裁定）：框架词前置的枚举形态「合计：500 + 300 + 200 = 1000」里，每个加数自己的
             // gap 都含「合计」，会被当成自称合计——它不是合计（验不过），但它是同一分句算式
             // 的操作数（与框架词后置时加数走的同一条）。直接 return false 会把诚实列加数的
-            // 回复整句判成无所属。通道只收「真实值 + 与另一笔金额只隔运算符/连接词」：不验算
-            // （算式对错归 judge），列举了 ≥2 个加数还验不过的（明写"这些加起来等于我"而算不对，
+            // 回复整句判成无所属。通道只收「真实值 + 与另一笔金额只隔运算符/连接词」：本模块
+            // 不验算（自由文本算式对错归 judge；封闭申报块的 := 由 audit-declaration 验），
+            // 列举了 ≥2 个加数还验不过的（明写"这些加起来等于我"而算不对，
             // 摘 Cherry 反例）由 claimedSummands 收紧挡在门外。
             if (claimed) return true;
             return expressionAdjacentOk(b, true);
@@ -701,9 +750,10 @@ export function classifyErrorStateAmounts(
         || (anyClaimsOperation && allVerified && windowOk)
         || (totalFamilyOk && allVerified && windowOk)) { soft = true; } else { hard = true; }
       // 张冠李戴信号在本分句内判定（bindings / specific / windowOk 都只在这一层可见）：
-      // 点名了实体而金额不属于它，或该 window 对点名实体无效。任一分句挂错即记——同一数值
-      // 的每次出现各自核对（与上面"任一次出现判红即红"同口径）。
-      misbound ||= bindings.some((b) => !b.windowOk
+      // 点名了实体而金额不属于它、该 window 对点名实体无效、或点名了一个真实数据表之外的
+      // 主体名（unknownSubject）。任一分句挂错即记——同一数值的每次出现各自核对（与上面
+      // "任一次出现判红即红"同口径）。
+      misbound ||= unknownSubject || bindings.some((b) => !b.windowOk
         || (b.mentionEntity !== undefined && !b.mentionEntity.values.includes(amount.value))
         || (b.mentionEntity === undefined && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
     }

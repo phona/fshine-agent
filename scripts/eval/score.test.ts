@@ -70,6 +70,43 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
   });
 });
 
+describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能对评分零影响）', () => {
+  const baselineCase = { dims: { ...ZERO_DIMS } };
+  const auditCheckOf = (verdict: ReturnType<typeof evaluateProbeCase>) =>
+    verdict.checks.find((check) => check.name === 'audited·申报失败');
+
+  it('申报失败数 > 0 ⇒ 该检查红（计数是 findings 全量，不枚举失败种类）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 3 }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, expected: '≤0', actual: '3' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('申报失败数 = 0 ⇒ 该检查绿，整例通过（变异口径：actual <= limit 改成 < ⇒ 此断言红）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 0 }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: true, expected: '≤0', actual: '0' });
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('基线放宽上限时 = limit 也过（只增才算劣化）', () => {
+    const verdict = evaluateProbeCase(
+      'probe-X', probeRow({ auditFailures: 2 }), { ...baselineCase, auditFailures: 2 }, undefined, undefined, true,
+    );
+    expect(auditCheckOf(verdict)!.pass).toBe(true);
+  });
+
+  it('黑盒模式 ⇒ 无此检查（即使报告行带了计数也不门）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 9 }), baselineCase);
+    expect(auditCheckOf(verdict)).toBeUndefined();
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('audited 行缺计数 ⇒ fail-closed（缺列不是 0："没跑交叉核"不能冒充"查过且全过"）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow(), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, actual: '缺计数（未跑申报交叉核）' });
+    expect(verdict.pass).toBe(false);
+  });
+});
+
 describe('evaluateWriteChainCase（写链判定）', () => {
   const group = {
     proposalAttemptsAtLeast: 1, confirmCodeOffered: true, intentCreated: true, committed: true, readbackVerified: true,

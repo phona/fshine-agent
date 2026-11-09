@@ -67,13 +67,24 @@ export interface ExecutionAuditRow {
   phase?: 'start' | 'result';
   /**
    * query 类调用实际返回的响应载荷（2026-11-09 audited 申报模式交叉核的事实基准）。
-   * 夹具在 query completed 时把**该次**返回的 items/count 写进这里，使"回复里的数平台
-   * 确实拉回过"可以独立核对，不再只靠模型自述传递（空数组 + count 0 也是真答案：
-   * 平台拉回过、只是没有数据）。被拒/失败/无数据（not_found/needs_input）行不带这个
-   * 字段——那些调用没有拉回过任何 items。字段缺席 = 没写过，不是假。
-   * stock 夹具的域字段是 sku/qty，落账时按同一契约投影成 name/value。
+   * 夹具在 query 的 completed / not_found / needs_input 三种确定性答案上都把**该次**结果
+   * 状态写进 `result.status`，completed 另带该次返回的 items/count，使"回复里的数平台
+   * 确实拉回过"与"平台确实说过 not_found"可以独立核对，不再只靠模型自述传递（空数组 +
+   * count 0 也是真答案：平台拉回过、只是没有数据）。被拒/失败（行内无 queryResult）的行
+   * 不带这个字段——那些调用没有可申报的结果。字段缺席 = 没写过，不是假；旧日志没有
+   * status 时，带 items 的行按 completed 读。
+   * stock 夹具的域字段是 sku/qty，落账时按同一契约投影成 name/value；平台原始字段名
+   * （投影前）单列在 `fields`，供 nocaliber 命题核对——只看投影后的 items 会把
+   * `nocaliber(north, sku)` 假过（sku 正是被投影掉的原始字段）。
    */
-  result?: { items?: Array<{ id?: string; name?: string; value?: number }>; count?: number };
+  result?: {
+    /** 查询结果状态：completed / not_found / needs_input（旧日志可能缺席）。 */
+    status?: 'completed' | 'not_found' | 'needs_input';
+    items?: Array<{ id?: string; name?: string; value?: number }>;
+    count?: number;
+    /** 平台原始 items 的字段名（completed 时由夹具落账；旧日志/空结果可能缺席）。 */
+    fields?: string[];
+  };
 }
 
 /**

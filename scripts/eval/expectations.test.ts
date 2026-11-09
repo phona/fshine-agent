@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { loadCases } from './cases';
 import { evaluateCaseExpectations, expectationSelfCheck, type ExpectationTurn } from './expectations';
+import type { ExecutionAuditRow } from './evidence';
 import { countDims } from './dims';
 import { evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, type BaselineCase, type ProbeResultRow } from './score';
 
@@ -456,6 +457,96 @@ describe('期望值层：audited 轮次的申报块按机器 annex 剥掉（D-20
       .toEqual([]);
     expect(failing(turn('checkbeta的payablebalance', `${prose}\n[audit]\n500 <- rec-101\n[/audit]`, 3, 2)))
       .toEqual(['期望·禁值(第3轮)']);
+  });
+});
+
+/**
+ * 申报豁免收窄（2026-11-09 PR #26 评审 major）：PR #26 把「已申报值」一律移出
+ * `forbidCaliberValues` 检查，于是正文把 beta 的 500 挂给 alpha-item-1、再如实申报
+ * `500 <- rec-101`，交叉核过、禁值检查也被消掉。豁免必须收窄为
+ * 「引用行（<-）申报过 + 不在 verdict.misattributed 里」，且不得洗白轮次适当性：
+ * 申报证明"数有出处"，不证明"挂对了"，也不证明"这轮该说"。
+ *
+ * 校准用 cases.yaml 的 Y2 第 1/3 轮：第 3 轮引用真实值作佐证是合法形态（继续绿），
+ * 第 1 轮（not_found）给数必须红——即使申报属实。
+ */
+describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
+  const TEXTS = [
+    'check gamma-collection 这个 collection W2 的 record value',
+    'check contoso collection record value',
+    'checkbeta的payablebalance',
+  ];
+  type Item = { id: string; name: string; value: number };
+  const betaFacts: Item[] = [
+    { id: 'rec-101', name: 'beta-item-1', value: 500 },
+    { id: 'rec-102', name: 'beta-item-2', value: 300 },
+    { id: 'rec-103', name: 'beta-item-3', value: 200 },
+  ];
+  const contosoFacts: Item[] = [
+    { id: 'rec-401', name: 'contoso-trade-item-1', value: 1500 },
+    { id: 'rec-402', name: 'contoso-trade-item-2', value: 600 },
+  ];
+  // args 逐轮不同：同参重复风暴是过程不变量自己的判定面（与 turn() 同款理由）。
+  const auditedTurn = (index: number, prose: string, block: string, items: Item[]): ExpectationTurn => ({
+    text: TEXTS[index]!,
+    reply: `${prose}\n${block}`,
+    notices: [],
+    calls: 1,
+    execution: [{ script: 'dummy.query', args: ['--collection', `a${index}`], exitCode: 0,
+      result: { items, count: items.length } }] satisfies ExecutionAuditRow[],
+    audited: true,
+  });
+  const failing = (turns: ExpectationTurn[], spec = specOf('Y2')): string[] =>
+    evaluateCaseExpectations(spec, turns).checks.filter((check) => !check.pass).map((check) => check.name);
+  /** 三轮 Y2 外壳（第 1/2 轮用原回复/原判据，第 3 轮由调用方给）。 */
+  const shell = (turn2: ExpectationTurn): ExpectationTurn[] => [
+    turn(TEXTS[0]!, Y2_T0, 1, 0),
+    turn(TEXTS[1]!, Y2_T1, 1, 1),
+    turn2,
+  ];
+
+  it('张冠李戴 + 如实申报 ⇒ 红（真实 Y2 spec：禁值只有 1000，500 的挂错仍必须红）', () => {
+    // 不把 500 塞进 forbidCaliberValues——真实 Y2 只禁 1000。正文把 beta 的 500 挂给
+    // alpha-item-1；申报行 `500 <- rec-101` 与事实完全对得上。张冠李戴是独立硬失败。
+    const t2 = auditedTurn(2, 'alpha-item-1 record value is 500。请确认。', '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
+    expect(failing(shell(t2), specOf('Y2'))).toEqual(['期望·张冠李戴(第3轮)']);
+    const violations = evaluateCaseExpectations(specOf('Y2'), shell(t2)).violations;
+    expect(violations.some((violation) => violation.kind === 'shortCase' && violation.message.includes('500'))).toBe(true);
+  });
+
+  it('未知主体名 + 如实申报 ⇒ 红（"foo-item-1 record value is 500" 不是"完全没有归属"）', () => {
+    // foo-item-1 不在 ENTITY_REAL_VALUES 里：金额进 unattributed，但正文明确给了归属，
+    // 申报块不能把它洗成有据。真实 Y2 spec 的禁值 [1000] 也够不着 500。
+    const t2 = auditedTurn(2, 'foo-item-1 record value is 500。请确认。', '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
+    expect(failing(shell(t2), specOf('Y2'))).toEqual(['期望·张冠李戴(第3轮)']);
+  });
+
+  it('not_found 轮的真实值 + 如实申报 ⇒ 红（回归锁：forbidValues/零金额本来就不看 declared）', () => {
+    // 这条钉的是既有的轮次适当性判据——forbidValues / notFoundZeroAmounts 从未把 declared
+    // 当豁免面，因此它是回归锁，不是"申报豁免收窄"的修复证据。收窄的修复证据见上一条
+    // 张冠李戴 + 真实 Y2 spec 的用例。
+    const prose = `${Y2_T0}\n另：contoso-trade 的 W2 窗口下有两条记录（值 1500、600）。`;
+    const t0 = auditedTurn(0, prose, '[audit]\n1500 <- rec-401\n600 <- rec-402\n[/audit]', contosoFacts);
+    const checks = evaluateCaseExpectations(specOf('Y2'), [t0, turn(TEXTS[1]!, Y2_T1, 1, 1), turn(TEXTS[2]!, '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。', 1, 2)]).checks;
+    const names = checks.filter((check) => !check.pass).map((check) => check.name);
+    // 禁值（forbidValues）与错误态零金额两条都不看 declared，是轮次适当性的硬边界。
+    expect(names).toContain('期望·禁值(第1轮)');
+    expect(names).toContain('期望·错误态零金额(第1轮)');
+  });
+
+  it('第 3 轮引用真实值作佐证（引用行申报、非张冠李戴）⇒ 绿', () => {
+    // 与上面同一批真实值、同一申报块，只是放在允许引用佐证的第 3 轮（Y2 现有合法形态）。
+    const t2 = auditedTurn(2, '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。',
+      '[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]', betaFacts);
+    expect(failing(shell(t2))).toEqual([]);
+  });
+
+  it('`:=` 行申报的值不豁免（验算归 cross-check，期望值层只认引用行）', () => {
+    const spec = structuredClone(specOf('Y2'));
+    spec.expectations!.shortCase!.turns[2]!.forbidCaliberValues = [4321];
+    // 4321 只在运算行里申报，正文里无所属——旧「一律豁免」会把它洗白。
+    const t2 = auditedTurn(2, '平台没有 payable 这个口径。其中 4321 待确认。', '[audit]\n4321 := 4000 + 321\n[/audit]', []);
+    expect(failing(shell(t2), spec)).toEqual(['期望·禁值(第3轮)']);
   });
 });
 

@@ -283,27 +283,31 @@ function findCollection(state, keyword) {
   if (matches.length > 1) return { ambiguous: matches };
   return { none: true };
 }
-// 返回 { code, result }（2026-11-09 audited 申报模式）：result 只在 completed 时带**该次
-// query 实际返回的** items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核
-// 的事实基准（"回复里的数平台确实拉回过"要能独立核对，不能只靠模型自述传递）。失败/无数据/
-// 歧义行没有拉回过任何 items，返回的 code 不带 result，审计行因此也不会出现载荷。
+// 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
+// not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
+// 另带该次返回的 items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
+// 事实基准（"回复里的数平台确实拉回过"与"平台确实说过 not_found"都要能独立核对，不能只靠
+// 模型自述传递）。failed/被拒没有可申报的结果，返回的 code 不带 result，审计行因此也不会
+// 出现载荷。
 function doQuery(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
   if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return { code: 1 }; }
   const collection = flags.collection || flags.topic;
   const found = findCollection(state, collection);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0 }; }
-  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return { code: 0 }; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0, result: { status: 'needs_input' } }; }
+  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return { code: 0, result: { status: 'not_found' } }; }
   const col = found.exact;
   const window = flags.window || flags.round;
   if (window && !col.windows.includes(window)) {
     emit(opName, 'not_found', { query: collection, window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${window} has no data for collection ${found.name}`));
-    return { code: 0 };
+    return { code: 0, result: { status: 'not_found' } };
   }
   const items = col.items;
   emit(opName, 'completed', { collection: found.name, window: window ?? null, items, count: items.length }, null);
-  return { code: 0, result: { items, count: items.length } };
+  // fields = 平台原始 items 的字段名（nocaliber 命题的事实基准）：items 本身按 value 核对
+  // 契约落账，字段名单独保留，避免"投影后的形状"冒充平台原始数据模型。
+  return { code: 0, result: { status: 'completed', items, count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -698,8 +702,9 @@ async function main() {
     // mode:'query'、走结构化落 mode:'call'，评测侧据 mode 判读类的逻辑只认前者，结构化查询
     // 就算 exitCode=0 且已送达也只能停在 completed，报告随调用载体变化。
     // 载体信息不丢：另记 via:'structured'。
-    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
-    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
+    // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
+    // 行没有 queryResult，不带 result。
     audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
@@ -775,8 +780,9 @@ async function main() {
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
-    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
-    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
+    // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
+    // 行没有 queryResult，不带 result。
     audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {

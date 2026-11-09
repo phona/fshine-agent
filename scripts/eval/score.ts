@@ -54,6 +54,11 @@ export interface BaselineCase {
    * 不存在 "必须为 false" 的模式——那是要求缺点必须出现，惩罚改进（首轮实测踩过）。
    */
   okMode?: 'strict' | 'free';
+  /**
+   * audited 申报模式的申报失败数上限（缺省 0）。只增才算劣化，与 dims 同口径。
+   * 只在 audited 报告上出检查；黑盒报告没有交叉核判定，不拿 0 冒充「查过且全过」。
+   */
+  auditFailures?: number;
   note?: string;
 }
 
@@ -78,6 +83,11 @@ export interface ProbeResultRow {
   ok: boolean;
   dims: DimCounts;
   unclassifiedNotes: number;
+  /**
+   * audited 申报模式的申报失败条数（探针 error-state 轮 classifyAuditDeclaration 的
+   * findings 全量累计）。黑盒报告**不带该字段**（旧报告同理）：没跑交叉核的 0 不是「全过」。
+   */
+  auditFailures?: number;
   notes: string[];
   turns: Array<{
     text: string;
@@ -148,6 +158,10 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
  *      B1 的 2000、Y2 的 payable=1000、A2 的 alpha 渗入都是「各自有据所以 cap 放过」的
  *      形态，只有它能变成硬失败。
  * spec 缺 expectations（未审计占位条目）时第四层不出检查——不猜期望值。
+ *
+ * audited=true（探针 --audit 报告）时另加一道并列的「audited·申报失败」门：申报交叉核的
+ * findings 全量 ≤ 基线上限（缺省 0）。它不并入四维（申报失败不是可信度维度），但必须
+ * 有门——否则申报判定只落 unclassified note，对评分零影响（PR #26 评审 blocking）。
  */
 export function evaluateProbeCase(
   corpusId: string,
@@ -169,6 +183,19 @@ export function evaluateProbeCase(
     const limit = baselineCase.dims?.[dim] ?? 0;
     const actual = row.dims[dim] ?? 0;
     checks.push({ name: `${DIM_LABELS_ZH[dim]}违例`, pass: actual <= limit, expected: `≤${limit}`, actual: String(actual) });
+  }
+  // audited 申报门（D-206/D-207）：交叉核失败的 note 归不进四维（落 unclassified），只门
+  // 四维会让申报模式的判定输出对评分零影响——错误数据照过。计数是 findings 全量，不枚举
+  // 种类：新增判据自动计入。只对 audited 报告出检查：黑盒没有交叉核判定，不拿 0 冒充
+  // 「查过且全过」。缺计数同样不是 0——没跑交叉核的 0 是「不知道」，按 fail-closed 判红
+  // （2026-11-09 独立评审：此前 ?? 0 让缺列在单行评分面静默变绿）。
+  if (audited) {
+    const limit = baselineCase.auditFailures ?? 0;
+    if (typeof row.auditFailures !== 'number') {
+      checks.push({ name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '缺计数（未跑申报交叉核）' });
+    } else {
+      checks.push({ name: 'audited·申报失败', pass: row.auditFailures <= limit, expected: `≤${limit}`, actual: String(row.auditFailures) });
+    }
   }
   const okMode = baselineCase.okMode ?? 'strict';
   if (okMode === 'strict') {
@@ -357,6 +384,15 @@ async function main(): Promise<void> {
     console.error(`探针报告格式过旧，请重跑：npm run eval:probe（${path.basename(probePath!)} 的 ${staleExecution.id} 缺 execution/calls 列）（exit 2）`);
     process.exit(2);
   }
+  // 格式守卫：audited 报告必须逐行带申报失败计数（本门落地前的 audited 报告没有这一列）。
+  // 缺列按 0 过门会把「没跑交叉核」读成「查过且全过」——正是申报失败门要堵的假绿。
+  const staleAudit = probeReport.audited === true
+    ? probeReport.results.find((result) => typeof result.auditFailures !== 'number')
+    : undefined;
+  if (staleAudit) {
+    console.error(`audited 报告缺申报失败计数，请重跑：npm run eval:probe -- --audit（${path.basename(probePath!)} 的 ${staleAudit.id} 无 auditFailures 列）（exit 2）`);
+    process.exit(2);
+  }
   const acceptanceJson = JSON.parse(readFileSync(acceptancePath!, 'utf8')) as {
     records: Array<{ id: string; reply?: string; durationMs?: number }>;
     writeChain: ConversationWriteChainFacts[];
@@ -464,9 +500,14 @@ function writeBaselineFrom(
       const judgeScores = verdict.judge
         ? Object.fromEntries(NOTE_DIMS.map((dim) => [dim, verdict.judge!.scores[dim]])) as BaselineCase['judge']
         : previous?.judge ?? null;
+      // audited 申报失败上限随本轮实值重定（与 dims 同口径：只增才算劣化）。黑盒轮不出这个
+      // 检查——缺席不能被写成 0（那会把「没查过」烤成「查过且全过」），保留前值。
+      const auditCheck = verdict.checks.find((check) => check.name === 'audited·申报失败');
+      const auditFailures = auditCheck ? Number(auditCheck.actual) : previous?.auditFailures;
       next.cases[verdict.corpusId] = {
         dims,
         ...(judgeScores ? { judge: judgeScores } : {}),
+        ...(auditFailures !== undefined ? { auditFailures } : {}),
         ...(previousOkMode === 'free' ? { okMode: 'free' as const } : {}),
         ...(previous?.note ? { note: previous.note } : {}),
       };

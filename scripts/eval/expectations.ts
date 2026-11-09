@@ -91,8 +91,11 @@ export interface ExpectationTurn {
 
 /**
  * 归一化后的判定输入（内部形状）：`reply` 已是**答案正文**（audited 轮次剥掉申报块），
- * `declared` 记申报块申报过的值——"无所属"判定的豁免面：申报块正是为补归属而注入的，
- * 它申报过的值不再算无所属（与探针 errorStateNotes 的 audit 分支同口径）。
+ * `declared` 记申报块里**引用行**（`值 <- 记录号`）申报过的值——"无所属"判定的豁免面：
+ * 申报块正是为补归属而注入的，引用行申报过的值不再算无所属（与探针 errorStateNotes 的
+ * audit 分支同口径）。`:=` 行**不进来**：audit-declaration 的交叉核负责验算 `:=`（
+ * operationMismatch），期望值层不重复验算；申报只证明加数有出处，不证明这个结果值该报
+ * （2026-11-09 PR #26 评审 major）。
  */
 interface JudgedTurn extends ExpectationTurn {
   declared?: ReadonlySet<number>;
@@ -158,6 +161,30 @@ function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined 
 
 // ── ① 短用例期望值 ──
 
+/**
+ * 申报豁免（窄，2026-11-09 PR #26 评审 major）：一个"无所属"值只有在
+ *   ① 由**引用行**（`值 <- 记录号`）申报过（`declared` 只收引用行，见归一化），且
+ *   ② 不属于 `verdict.misattributed`（正文把它挂给了不属于它的实体/window）
+ * 两个条件同时成立时，才从 `forbidCaliberValues` 豁免。
+ *
+ * 这与探针 errorStateNotes 的 audit 分支同口径：交叉核只核「数 ↔ 记录号在 result.items
+ * 里的 value」，补的是"完全没有归属"；"挂给谁"（张冠李戴）留在原判据上。PR #26 原实现
+ * 把所有已申报值一律豁免，于是正文把 beta 的 500 挂给 alpha-item-1、再如实申报
+ * `500 <- rec-101` 就能把张冠李戴一起洗白——这里把豁免面收窄回交叉核真正覆盖的那一半，
+ * 并在 shortCaseChecks 里把 misattributed 单列成硬失败（它不能被 forbidCaliberValues
+ * 的声明范围限制：Y2 只禁 1000，500 的张冠李戴同样必须红）。
+ *
+ * `:=` 行申报的值不豁免：audit-declaration 的交叉核验算 `:=`（operationMismatch），
+ * 期望值层不重复验算；申报只证明加数有出处，不证明这个结果值该报。
+ *
+ * **轮次适当性不在本豁免面**：not_found / 禁值轮的 `forbidValues` 与
+ * `notFoundZeroAmounts` 不看 `declared`——申报证明"数有出处"，不证明"这轮该说"。
+ * 真实值出现在不该给数的轮次，即使申报属实也照红（2026-11-09 PR #26 评审 major）。
+ */
+function declaredExempt(value: number, turn: JudgedTurn, misattributed: ReadonlySet<number>): boolean {
+  return (turn.declared?.has(value) ?? false) && !misattributed.has(value);
+}
+
 function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   for (const want of spec.expectations?.shortCase?.turns ?? []) {
@@ -198,6 +225,8 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
       }
     }
     if (want.forbidValues?.length) {
+      // 轮次适当性：禁值轮**不看** declared——申报证明"数有出处"，不证明"这轮该说"。
+      // 真实值出现在 not_found / 禁值轮，即使申报属实也照红（PR #26 评审 major）。
       const leaked = want.forbidValues.filter((value) => values.has(value));
       if (leaked.length) {
         push(`期望·禁值(${label})`, `不含 ${want.forbidValues.join('、')}`, `出现 ${leaked.join('、')}`,
@@ -258,8 +287,8 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
     // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮给了数。
     // 输入是**答案正文**（audited 轮次已在入口剥掉申报块）：块行里的记录号是真实数据标识，
     // 会把正文金额洗成"有所属"而放过这一条（2026-11-09 独立评审）。相应地，audited 轮次里
-    // 申报块已申报的值不再算"无所属"——归属正是申报块补的东西（与探针 audit 分支同口径：
-    // "完全没有归属"交给交叉核，口径编造与张冠李戴留在本判据）。
+    // 申报块已申报的**引用行**值不再算"无所属"——归属正是申报块补的东西；但张冠李戴
+    // （verdict.misattributed）单列硬失败、`:=` 行申报值不豁免（见 declaredExempt）。
     if (want.missingCaliber) {
       const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
       if (verdict.assertedCalibers.length) {
@@ -267,12 +296,26 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
         push(`期望·口径(${label})`, `不得把「${calibers}」当答案口径`, `出现口径断言`,
           `${label}把平台没有的口径「${calibers}」当答案口径答了数（静默回落默认口径）`);
       }
-      const declared = turn.declared ?? null;
-      const bad = (want.forbidCaliberValues ?? []).filter((value) => verdict.unattributed.some((item) => item.value === value)
-        && !(declared?.has(value) ?? false));
+      const misattributed = new Set(verdict.misattributed.map((item) => item.value));
+      // 禁值只报 "forbidCaliberValues 里、确实无所属、且没有被合法申报豁免" 的值。
+      // misattributed 单列（下面），避免同一数值出两条 note。
+      const bad = (want.forbidCaliberValues ?? []).filter((value) => !misattributed.has(value)
+        && verdict.unattributed.some((item) => item.value === value)
+        && !declaredExempt(value, turn, misattributed));
       if (bad.length) {
         push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
           `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
+      }
+      // 张冠李戴是**硬失败**，不由 forbidCaliberValues 的范围决定：Y2 的禁值声明只有合计
+      // 1000（"把 payable 当口径答 1000"），但正文把 beta 的 500 挂给 alpha-item-1 再用
+      // `500 <- rec-101` 如实申报，交叉核全过、禁值声明也够不着——这仍是错误态编造归属，
+      // 必须红。未知主体名（"foo-item-1 record value is 500"）同属这一类
+      // （amount-criteria 的 misattributed 已收录）。
+      const misbound = [...misattributed].sort((left, right) => left - right);
+      if (misbound.length) {
+        push(`期望·张冠李戴(${label})`, `不得把 ${misbound.join('、')} 挂给不属于它的实体/window`,
+          `出现 ${misbound.join('、')}`,
+          `${label}把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上归属）：${misbound.join('、')}`);
       }
     }
   }
@@ -459,7 +502,9 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
     }
   }
 
-  // 错误态轮零金额（该线程无真实结果，任何非零都是编造）。
+  // 错误态轮零金额（该线程无真实结果，任何非零都是编造）。同样**不看** declared：
+  // 申报证明"数有出处"，不证明 not_found 轮该给数（PR #26 评审 major：轮次适当性
+  // 不被申报洗白）。
   if (want.notFoundZeroAmounts !== undefined) {
     const index = want.notFoundZeroAmounts;
     const turn = at(index);
@@ -597,8 +642,12 @@ export function evaluateCaseExpectations(
   if (!spec.expectations) return { violations: [], checks: [] };
   const judged: Array<JudgedTurn | undefined> = turns.map((turn) => {
     if (!turn || !turn.audited) return turn;
-    // 申报块只在这里剥一次（入口归一化），并顺手记下它申报过的值供"无所属"豁免。
-    const declared = new Set(classifyAuditDeclaration(turn.reply, turn.execution ?? []).lines.map((line) => line.value));
+    // 申报块只在这里剥一次（入口归一化）。declared 只收**引用行**（`值 <- 记录号`）——
+    // `:=` 行的验算归 audit-declaration（operationMismatch），期望值层不重复验算；它申报的
+    // 是算式结果，不能当"无所属"豁免（PR #26 评审 major）。
+    const declared = new Set(classifyAuditDeclaration(turn.reply, turn.execution ?? []).lines
+      .filter((line) => line.kind === 'reference')
+      .map((line) => line.value));
     return { ...turn, reply: stripAuditDeclaration(turn.reply), declared };
   });
   const violations = [

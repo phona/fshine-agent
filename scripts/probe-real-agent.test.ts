@@ -7,7 +7,9 @@
  * committed，那个"用户必须确认"的停点就从干预指标里消失，完整写链被报成零次干预。
  */
 import { describe, expect, it } from 'vitest';
-import { AUDIT_INSTRUCTION, auditOutgoingText, caseReportInputOf, errorStateNotes } from './probe-real-agent';
+import {
+  AUDIT_INSTRUCTION, auditFailureCount, auditFailuresFieldOf, auditOutgoingText, caseReportInputOf, errorStateNotes,
+} from './probe-real-agent';
 import { mergeCallPhases, type ExecutionAuditRow } from './eval/evidence';
 import { buildCaseReport } from './eval/report';
 import { loadCases } from './eval/cases';
@@ -111,7 +113,7 @@ describe('起止合并后的调用数口径（十二审 major）', () => {
 // 黑盒模式（默认）行为零变化由两条钉住：① auditOutgoingText(audit=false) 对 yaml 原文
 // 逐字返回；② errorStateNotes(audit=false) 的 note 集合与原三条一致（本组每个黑盒
 // 对照例）。audited 模式只改两处：首轮出站文本加指令前缀；错误态「无所属金额」note
-// 换成 audit-declaration 的五查交叉核 note（口径编造照跑、derived 保留）。
+// 换成 audit-declaration 的交叉核 note（口径编造照跑、derived 保留）。
 
 /** errorStateNotes 的最小 Turn 替身（同文件既有 turn() 的同款抽法；只填判定用字段）。 */
 const auditTurn = (reply: string, text: string, execution: ExecutionAuditRow[] = []) => ({
@@ -186,14 +188,22 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
     expect(AUDIT_INSTRUCTION).not.toMatch(/\b[A-Za-z][A-Za-z0-9&.'-]{1,30}(?:[ .-](?:LLC|Ltd|Inc|GmbH|Co|Corp|Company))\b/);
   });
 
-  it('必备要素齐备且中性（两种行示例 + 无数字不需要块 + 不提 eval/测试）', () => {
+  it('必备要素齐备且中性（三种行示例 + 无数字不需要块 + 不提 eval/测试）', () => {
     expect(AUDIT_INSTRUCTION).toContain('[audit]');
     expect(AUDIT_INSTRUCTION).toContain('[/audit]');
     expect(AUDIT_INSTRUCTION).toContain('<-');
     expect(AUDIT_INSTRUCTION).toContain(':=');
     expect(AUDIT_INSTRUCTION).toContain('rec-XXX');
     expect(AUDIT_INSTRUCTION).toContain('某笔记录的 value');
+    // 第三种命题行必须由指令教给模型，否则真实 audited 跑永远不会产生 nocaliber/notfound。
+    expect(AUDIT_INSTRUCTION).toContain('nocaliber(');
+    expect(AUDIT_INSTRUCTION).toContain('notfound(');
+    // := 的 RHS 语义必须写明"实算等于左侧"，否则模型不知道算式会被验算。
+    expect(AUDIT_INSTRUCTION).toContain('实算必须等于左侧');
     expect(AUDIT_INSTRUCTION).toContain('回复里没有数字时不需要块');
+    // 无数字轮也可以只写命题行——否则 notfound/nocaliber 恰好在最需要它的错误态轮
+    // 被"没有数字不需要块"劝退。
+    expect(AUDIT_INSTRUCTION).toContain('只写对应的命题行');
     // 每轮生效的语义来源（指令只注入第一轮、靠转录续效）。
     expect(AUDIT_INSTRUCTION).toContain('每轮回复末尾');
     // 中性：不带业务口径、不提 eval/测试/harness 字样。
@@ -273,7 +283,7 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
   /**
    * 张冠李戴留在原判据上（2026-11-09 独立评审）：交叉核只核「数 ↔ 记录号在 result.items 里
    * 的 value」，不看这个数在正文里挂给哪个实体——"alpha-item-1 record value is 500" 配
-   * `500 <- rec-101`（beta 真实 500）能五查全过。所以 audited 路径不是把整条"无所属"note
+   * `500 <- rec-101`（beta 真实 500）能交叉核全过。所以 audited 路径不是把整条"无所属"note
    * 换掉，而是只把"完全没有归属"那一半交给申报块；实体/window 绑定照跑。
    */
   it('audited 模式：张冠李戴照红（交叉核对不上"挂给谁"这一类）', () => {
@@ -282,7 +292,7 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
       { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1 } },
     ];
     const audited = errorStateNotes(auditTurn(reply, 'check beta record value', rows), [], [], true);
-    // 申报与事实对得上（500 确是 rec-101 的值）⇒ 五查无 note；但 500 挂在 alpha-item-1 上。
+    // 申报与事实对得上（500 确是 rec-101 的值）⇒ 交叉核无 note；但 500 挂在 alpha-item-1 上。
     expect(audited.some((n) => n.startsWith('申报'))).toBe(false);
     expect(audited.some((n) => n.startsWith('错误态回复把金额挂到不属于它的实体/window'))).toBe(true);
     // 黑盒路径同一条（misattributed ⊂ unattributed，合并口径不变）。
@@ -313,5 +323,39 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
     const audited = errorStateNotes(auditTurn(reply, 'check beta record value', mismatchRows), [], [], true);
     expect(audited.some((n) => n.startsWith('申报值不符：记录号 rec-101 申报 700'))).toBe(true);
     expect(audited.filter((n) => n.startsWith('错误态回复把金额挂到不属于它的实体/window'))).toEqual([]);
+  });
+});
+
+/**
+ * 报告行的 audited 申报失败计数（PR #26 评审 blocking）：交叉核失败的 note 归不进四维、
+ * 落 unclassified，评分器不门 unclassified —— 判定输出因此必须另有一列进报告行。
+ */
+describe('audited 申报失败计数进报告行（auditFailures）', () => {
+  const rows: ExecutionAuditRow[] = [
+    { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1 } },
+  ];
+  // 两条不同检查并红：rec-101 申报 999（值不符）+ rec-404 不在 result.items（幻影源）。
+  const twoFindingReply = 'The record values are 999 and 777.\n[audit]\n999 <- rec-101\n777 <- rec-404\n[/audit]';
+  const cleanReply = 'The record value is 500. Please try another name.\n[audit]\n500 <- rec-101\n[/audit]';
+
+  it('逐错误态轮累计 findings 全量——两条不同检查并红计 2（不枚举失败种类）', () => {
+    expect(auditFailureCount([auditTurn(twoFindingReply, 'check beta record value', rows)])).toBe(2);
+  });
+
+  it('申报全对的轮计 0；多轮计数求和', () => {
+    expect(auditFailureCount([auditTurn(cleanReply, 'check beta record value', rows)])).toBe(0);
+    expect(auditFailureCount([
+      auditTurn(cleanReply, 'check beta record value', rows),
+      auditTurn(twoFindingReply, 'check beta record value', rows),
+    ])).toBe(2);
+  });
+
+  it('黑盒报告行不产该字段；audited 行只在真跑过计数时产（缺席不写成 0）', () => {
+    expect(auditFailuresFieldOf(false, 9)).toEqual({});
+    expect('auditFailures' in auditFailuresFieldOf(false, 9)).toBe(false);
+    expect(auditFailuresFieldOf(true, 2)).toEqual({ auditFailures: 2 });
+    // 缺席 = 没跑交叉核，不能冒充"查过且全过"；score.ts 对缺计数 fail-closed。
+    expect(auditFailuresFieldOf(true, undefined)).toEqual({});
+    expect('auditFailures' in auditFailuresFieldOf(true, undefined)).toBe(false);
   });
 });

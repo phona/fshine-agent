@@ -213,10 +213,12 @@ function findShelf(state, keyword) {
   if (matches.length > 1) return { ambiguous: matches };
   return { none: true };
 }
-// 返回 { code, result }（2026-11-09 audited 申报模式）：result 只在 completed 时带**该次
-// query 实际返回的** items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核
-// 的事实基准（"回复里的数平台确实拉回过"要能独立核对，不能只靠模型自述传递）。失败/无数据/
-// 歧义行没有拉回过任何 items，返回的 code 不带 result，审计行因此也不会出现载荷。
+// 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
+// not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
+// 另带该次返回的 items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
+// 事实基准（"回复里的数平台确实拉回过"与"平台确实说过 not_found"都要能独立核对，不能只靠
+// 模型自述传递）。failed/被拒没有可申报的结果，返回的 code 不带 result，审计行因此也不会
+// 出现载荷。
 // stock 域字段是 sku/qty，按交叉核的同一契约投影成 { id, name, value }：不投影的话，按
 // value 找数的核对对 stock 行永远空手（响应里明明是 qty，审计行却查不到值）。
 function doQuery(opName, args) {
@@ -225,17 +227,19 @@ function doQuery(opName, args) {
   const state = loadState();
   if (!flags.shelf || typeof flags.shelf !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --shelf')); return { code: 1 }; }
   const found = findShelf(state, flags.shelf);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return { code: 0 }; }
-  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches "${flags.shelf}"`)); return { code: 0 }; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return { code: 0, result: { status: 'needs_input' } }; }
+  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches "${flags.shelf}"`)); return { code: 0, result: { status: 'not_found' } }; }
   const col = found.exact;
   if (flags.batch && !col.batches.includes(flags.batch)) {
     emit(opName, 'not_found', { query: flags.shelf, batch: flags.batch, availableBatches: col.batches }, errObj('BATCH_NO_DATA', `Batch ${flags.batch} has no data for shelf ${found.name}`));
-    return { code: 0 };
+    return { code: 0, result: { status: 'not_found' } };
   }
   // Zero is a real answer: empty-shelf returns completed with count 0, never not_found.
   const items = col.items;
   emit(opName, 'completed', { shelf: found.name, batch: flags.batch ?? null, items, count: items.length }, null);
-  return { code: 0, result: { items: items.map((it) => ({ id: it.id, name: it.sku, value: it.qty })), count: items.length } };
+  // fields = 平台原始 items 的字段名（id/sku/qty）——items 按 value 核对契约投影成
+  // { id, name, value }，若字段名也只看投影，nocaliber(north, sku) 会假过。
+  return { code: 0, result: { status: 'completed', items: items.map((it) => ({ id: it.id, name: it.sku, value: it.qty })), count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -647,8 +651,9 @@ async function main() {
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
-    // query completed 时把该次实际返回的 items/count 写进审计行 result（audited 申报模式
-    // 交叉核的事实基准）；被拒/失败/无数据的行没有 queryResult，不带 result。
+    // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
+    // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
+    // 行没有 queryResult，不带 result。
     audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
