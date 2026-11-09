@@ -412,7 +412,7 @@ export async function processBackgroundTaskEvent(
   const planContinuation = !hostConfirmation && Boolean(planId && stepIndex !== undefined && totalSteps !== undefined)
     && event.run.state === 'completed'
     && !result?.needs && !result?.pendingPlan && !result?.clarification
-    && !result?.terminalFailure && !result?.writeClosed && !result?.proposalCreated;
+    && !result?.terminalFailure && !result?.proposalCreated;
   let projection: TaskPlanProjection | null = null;
   if (planContinuation && planId && hooks.taskPlans) {
     try {
@@ -466,7 +466,7 @@ export async function processBackgroundTaskEvent(
   else if (result?.clarification) replyText = hooks.renderClarification(result);
   else if (result?.needs) replyText = hooks.renderNeeds(result.needs);
   else if (result?.pendingPlan) replyText = result.text || result.pendingPlan.userText;
-  else if (result?.terminalFailure || result?.writeClosed || result?.proposalCreated) replyText = result.text;
+  else if (result?.terminalFailure || result?.proposalCreated) replyText = result.text;
   else if (hostConfirmation) {
     const confirmation = event.result && typeof event.result === 'object' ? event.result as { text?: unknown } : null;
     replyText = typeof confirmation?.text === 'string' ? confirmation.text : event.run.resultText ?? hooks.fallbackFailure;

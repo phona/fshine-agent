@@ -4,9 +4,9 @@
  * 使用独立的验收数据库,不触碰生产数据/生产连接。
  * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault]
  * --fault:使用指向不存在目录的临时配置,验收 2.5 的失败降级。
- * mock 联调:.env 设 EXECUTION_EXECUTOR=mock 后,写链路用例(5.x)走
- * 提案→确认码→dry-run→commit→读回全链(落假状态,零真平台影响),
- * 且每次启动重置 mock 状态文件保证用例可重复。
+ * mock 联调:.env 设 EXECUTION_MOCK_STATE=<路径> 后,写链路用例(5.x)走
+ * 提案→确认码→dry-run→commit→读回全链,且每次启动重置该状态文件保证用例可重复
+ * (未显式设 EXECUTION_MOCK_STATE 时执行层平台用自己的缺省状态文件,宿主不碰)。
  * 出口保真:progress 与 notice 都按生产 adapter 的三个参数交给 handler
  * (channel-wecom/src/adapter.ts 的 dispatchMessage)。notice 原文收进报告与
  * records JSON——少了它,plan-runtime 的 fail-closed 守卫会把任何走计划门的
@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import Database from 'better-sqlite3';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { resolveActiveProfileId } from '@fshine/contracts';
-import { ensureMockStatePath, isPlatformMock, MOCK_STATE_ENV, PLAN_SUBMIT_STEP } from '@fshine/agent';
+import { PLAN_SUBMIT_STEP } from '@fshine/agent';
 import { createServerAssembly } from '../apps/server/assembly';
 import type { ChannelReply, IncomingChannelMessage, NoticeFn } from '@fshine/contracts';
 import { classifyPlanReject, planRejectsOf, renderPlanRejectLines, renderPlanRejectSummary } from './plan-reject-report';
@@ -41,7 +41,8 @@ interface CaseSpec {
   id: string;
   conv: string;
   user?: string;
-  text: string;
+  /** 用户消息原文；confirmOf / followUpOf 行没有 text——文本由 acceptance 侧从被引用回复或确认码生成。 */
+  text?: string;
   /** 2.2 这类依赖上一条回复澄清候选的用例 */
   followUpOf?: string;
   /** 从被引用用例的回复提取确认码，自动发送「确认/取消 码」（5.x 写链路） */
@@ -221,7 +222,7 @@ function pickClarification(text: string): string | null {
   const lines = text.split('\n').map((line) => line.trim()).filter(Boolean);
   for (const line of lines) {
     const m = line.match(/^([0-9]+)[.、)）]\s*(.+)/);
-    if (m) return `就用第 ${m[1]} 个：${m[2].replace(/[*_`#]/g, '').slice(0, 40)}`;
+    if (m) return `就用第 ${m[1]!} 个：${m[2]!.replace(/[*_`#]/g, '').slice(0, 40)}`;
   }
   return null;
 }
@@ -360,6 +361,14 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
+  // 执行审计（2026-11-08 修）：夹具 auditFile 缺省 null（dummy.cjs statePaths 的 env2
+  // fallback），不设 EXECUTION_AUDIT_PATH 时写链整条跑下来没有任何执行层审计痕迹，
+  // 提案失败原因（拒绝行/退出码只落在审计文件里）不可诊。参考 probe-real-agent.ts
+  // isolatePlatformState 的 per-case 隔离做法；验收是单次运行，一个路径即可。runId
+  // 精度是分钟，同分钟重跑会撞同一路径——先清掉，保证该文件只含本次运行的证据。
+  const auditPath = path.join(dataDir, `acceptance-audit-${runId}.jsonl`);
+  rmSync(auditPath, { force: true });
+  process.env.EXECUTION_AUDIT_PATH = auditPath;
   // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
   // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
   // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。
@@ -416,14 +425,15 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   }
   const platformRoot = config.contextProfiles[profileId ?? '']?.root;
 
-  // mock 联调：兜底状态路径 + 每次启动重置 mock 状态（用例的"第 N 张"预期才可重复）。
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, process.env) : null;
-  if (isPlatformMock(process.env) && mockStatePath && existsSync(mockStatePath) && !process.env[`${MOCK_STATE_ENV}_KEEP`]) {
+  // mock 联调：重置 mock 状态，用例的"第 N 张"预期才可重复。判据只剩一个脚本自己显式
+  // 设的 EXECUTION_MOCK_STATE——宿主不再读 EXECUTION_EXECUTOR 判"是不是 mock"，也不再
+  // 替执行层发明默认状态路径（2026-11-08 删除 platform-mock.ts 的 ensureMockStatePath：
+  // 那是宿主侧的环境读取，写/跑什么模式归执行层与部署配置）。未显式设时平台侧用自己的
+  // 缺省状态文件，本脚本不碰。
+  const mockStatePath = process.env['EXECUTION_MOCK_STATE'];
+  if (mockStatePath && existsSync(mockStatePath) && !process.env['EXECUTION_MOCK_STATE_KEEP']) {
     rmSync(mockStatePath);
     console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
-  }
-  if (isPlatformMock(process.env)) {
-    console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
   }
 
   // 与生产共用同一份装配：避免验收脚本和生产各写一遍、悄悄漂移。
@@ -440,7 +450,7 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   const repliesById = new Map<string, string>();
 
   for (const spec of ONLY ? CASES.filter((c) => ONLY.has(c.id)) : CASES) {
-    let text = spec.text;
+    let text = spec.text ?? '';
     if (spec.confirmOf) {
       const prev = repliesById.get(spec.confirmOf) ?? '';
       const code = prev.match(/确认\s*([A-Z0-9]{6})/)?.[1];
@@ -477,7 +487,8 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
       conversationId: spec.conv,
       messageId: `accmsg_${randomUUID()}`,
       chatType: 'single',
-      text,
+      text: text ?? '',
+      receivedAt: new Date().toISOString(),
     };
     const steps: string[] = [];
     const notices: string[] = [];
@@ -586,11 +597,15 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
       '',
     ]),
     // 写链指标节（L7）：有信号的会话 + 写意图会话（判据见上方 writeChainReported）。
-    ...(writeChainReported.length ? ['## 写链指标', '', ...writeChainReported.map(renderWriteChainLine), ''] : []),
+    // 节首带本次运行的执行层审计文件路径（EXECUTION_AUDIT_PATH）：提案提交失败的原因
+    // 只落在那个 JSONL 里（拒绝行含 refused 原因与退出码），报告指标对不上时按它核对。
+    ...(writeChainReported.length ? ['## 写链指标', '', `- 执行审计:${auditPath}`, ...writeChainReported.map(renderWriteChainLine), ''] : []),
   ].join('\n'));
   // JSON 顶层形状（L7 起）：{ records, writeChain }——writeChain 是打分器对 baseline
-  // 比对的取数面（此前顶层是裸数组；无程序化消费方，md 报告形状不变）。
-  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify({ records, writeChain }, null, 2));
+  // 比对的取数面（此前顶层是裸数组；无程序化消费方，md 报告形状不变）。auditPath
+  // 是 additive 字段（score.ts 只取 records/writeChain）：执行层审计文件路径，机器侧
+  // 与 md 报告同源可核对。
+  writeFileSync(reportPath.replace(/\.md$/, '.json'), JSON.stringify({ records, writeChain, auditPath }, null, 2));
   console.log(JSON.stringify({ event: 'acceptance_done', report: reportPath }));
 
   await assembly.close();

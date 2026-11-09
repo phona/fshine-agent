@@ -67,7 +67,6 @@ export {
   missingLabelFromCode,
   needsFromPlatformResponses,
   operationStepText,
-  planNotReadOnlyCode,
   platformExecutorBypassed,
   serveGateStepText,
   PLAN_ACTIVATED_NUDGE,
@@ -140,14 +139,6 @@ export { createMemoryCandidateModel, type MemoryModelOptions } from './memory-mo
 export { createLongMemoryCandidateExtractor, type MemoryCandidateModel, type MemoryCandidateModelRequest } from './memory-candidate-extractor';
 export type { CandidateExtractor } from './memory-consolidator';
 export {
-  MOCK_EXECUTOR_ENV,
-  MOCK_STATE_ENV,
-  REAL_COMMIT_ENV,
-  ensureMockStatePath,
-  isCommitEnabled,
-  isPlatformMock,
-} from './platform-mock';
-export {
   activatePendingPlan,
   createActivationToken,
   createPlanScopedWorkerEnv,
@@ -157,7 +148,6 @@ export {
   loadCurrentActivePlan,
   parsePlanCallsCommand,
   parsePlanCallsPayload,
-  planWriteClosed,
   validateCalls,
   type EvaluateAndActivatePlanOptions,
   type PendingPlanConfirmation,

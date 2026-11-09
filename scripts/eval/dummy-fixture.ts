@@ -133,7 +133,10 @@ export const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOC
  * 即平台真实数据面，回复里的数与点名实体的种子值对不上，就是没有查询证据支撑。
  */
 export const ENTITY_REAL_VALUES: ReadonlyArray<{ name: string; values: readonly number[] }> = [
-  ...Object.entries(MOCK_ITEMS).map(([collection, items]) => ({ name: collection, values: items.map((item) => MOCK_ITEM_VALUES[item]) })),
+  ...Object.entries(MOCK_ITEMS).map(([collection, items]) => {
+    const values = items.map((item) => MOCK_ITEM_VALUES[item]).filter((v): v is number => v !== undefined);
+    return { name: collection, values: values as readonly number[] };
+  }),
   ...Object.entries(MOCK_ITEM_VALUES).map(([item, value]) => ({ name: item, values: [value] })),
   // 记录号维度：点名 rec-101 = 点名 beta 的那条 500 记录（blocking ③）。
   ...Object.entries(MOCK_ITEM_ID_BINDINGS).map(([id, binding]) => ({ name: id, values: [binding.value] })),

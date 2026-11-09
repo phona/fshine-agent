@@ -108,6 +108,15 @@ function createProposal(ctx: Ctx, payload: Record<string, unknown>): { env: Enve
   return { env: parseEnvelope(run.stdout), run };
 }
 
+/** 读本用例夹具落的审计行（mode/script/via 判据的取数面；坏行跳过）。 */
+function readAuditRows(ctx: Ctx): Array<{ mode?: string; script?: string; via?: string; exitCode?: number }> {
+  const file = ctx.env.DUMMY_AUDIT_PATH;
+  if (!file || !existsSync(file)) return [];
+  return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
+    try { return [JSON.parse(line) as { mode?: string; script?: string; via?: string; exitCode?: number }]; } catch { return []; }
+  });
+}
+
 const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseResult> }> = [
   { id: 'smoke-query', run: (ctx) => {
     const r = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
@@ -309,6 +318,34 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     return { id: 'g-proposal-token-untrusted', pass: commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED',
       checks: [check('bad token refused exit 3', commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED', '3 PROPOSAL_TOKEN_UNTRUSTED', `${commit.code} ${commitEnv?.error?.code}`)] };
   } },
+  { id: 'g-proposal-no-token-env', run: (ctx) => {
+    // 不带令牌 env 直调 proposal-commit 被拒（fail-closed 钉子，2026-11-08）。宿主只把
+    // gate secret 程序化注入自己的 commit runner，从不进 process.env——worker bash 直调时
+    // secret 与 token 两个 env 都没有，旧写法 `secret && !verify(...)` 恰好在直调路径上把
+    // 整道令牌门跳过（无令牌提交照常落账）。修后 secret 缺失一律拒，这条用例钉住该行为：
+    // 拒绝形态与 g-proposal-token-untrusted 同款（exit 3 + PROPOSAL_TOKEN_UNTRUSTED）。
+    const checks: Check[] = [];
+    const before = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']).stdout);
+    const beforeCount = before?.data?.count as number;
+    const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'notok-1', value: 100 }] });
+    const proposalId = env?.data?.proposalId as string;
+    // 复刻直调形态：从进程 env 里剥掉 secret 与 token 两个键（Ctx 缺省带 secret）。
+    const bareEnv: NodeJS.ProcessEnv = { ...ctx.env };
+    delete bareEnv.DUMMY_GATE_SECRET;
+    delete bareEnv.DUMMY_COMMIT_TOKEN;
+    checks.push(check('bare env has neither secret nor token', !bareEnv.DUMMY_GATE_SECRET && !bareEnv.DUMMY_COMMIT_TOKEN, 'both absent', `${Boolean(bareEnv.DUMMY_GATE_SECRET)}/${Boolean(bareEnv.DUMMY_COMMIT_TOKEN)}`));
+    const saved = ctx.env;
+    ctx.env = bareEnv;
+    const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
+    ctx.env = saved;
+    const commitEnv = parseEnvelope(commit.stdout);
+    checks.push(check('no-token-env commit refused exit 3', commit.code === 3 && commitEnv?.error?.code === 'PROPOSAL_TOKEN_UNTRUSTED', '3 PROPOSAL_TOKEN_UNTRUSTED', `${commit.code} ${commitEnv?.error?.code}`));
+    const status = ctx.run(['proposal', 'status', '--proposal-id', proposalId]);
+    checks.push(check('proposal still pending after refused commit', status.stdout.includes('"status":"pending"'), 'pending', status.stdout.trim()));
+    const after = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']).stdout);
+    checks.push(check('refused commit wrote nothing', (after?.data?.count as number) === beforeCount, String(beforeCount), String(after?.data?.count)));
+    return { id: 'g-proposal-no-token-env', pass: checks.every((c) => c.pass), checks };
+  } },
   { id: 'g-state-isolation', run: (ctx) => {
     const ctx2 = new Ctx();
     try {
@@ -433,12 +470,12 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
   { id: 'g-ballot-second-domain', run: (ctx) => {
     const checks: Check[] = [];
     const list = ctx.run(['operation', 'list', '--json']);
-    const parsed = JSON.parse(list.stdout);
-    const names = parsed.operations.map((o: Record<string, unknown>) => o.name as string);
+    const parsed = JSON.parse(list.stdout) as { operations: Array<{ name: string; access: string }> };
+    const names = parsed.operations.map((o) => o.name);
     checks.push(check('ballot operations present in list', names.filter((n) => n.startsWith('ballot.')).length === 6, '6 ballot ops', `${names.filter((n) => n.startsWith('ballot.')).length} ballot ops`));
-    const ballotOps = parsed.operations.filter((o: Record<string, unknown>) => (o.name as string).startsWith('ballot.'));
-    checks.push(check('ballot query is read', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access === 'read', 'read', String(ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.query')?.access)));
-    checks.push(check('ballot prepare/commit are write', ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access === 'write' && ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access === 'write', 'write+write', `${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.prepare')?.access}/${ballotOps.find((o: Record<string, unknown>) => o.name === 'ballot.commit')?.access}`));
+    const ballotOps = parsed.operations.filter((o) => o.name.startsWith('ballot.'));
+    checks.push(check('ballot query is read', ballotOps.find((o) => o.name === 'ballot.query')?.access === 'read', 'read', String(ballotOps.find((o) => o.name === 'ballot.query')?.access)));
+    checks.push(check('ballot prepare/commit are write', ballotOps.find((o) => o.name === 'ballot.prepare')?.access === 'write' && ballotOps.find((o) => o.name === 'ballot.commit')?.access === 'write', 'write+write', `${ballotOps.find((o) => o.name === 'ballot.prepare')?.access}/${ballotOps.find((o) => o.name === 'ballot.commit')?.access}`));
     // Read path: ballot.query --topic alpha
     const q = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const qEnv = parseEnvelope(q.stdout);
@@ -447,7 +484,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     const prep = ctx.run(['prepare', 'ballot.prepare', '--topic', 'alpha', '--count', '2']);
     const prepEnv = parseEnvelope(prep.stdout);
     const prepOk = prep.code === 0 && prepEnv !== null && prepEnv.status === 'completed';
-    const prepDryRun = prepEnv && (prepEnv.data as Record<string, unknown> | null)?.dryRun === true;
+    const prepDryRun = Boolean(prepEnv && (prepEnv.data as Record<string, unknown> | null)?.dryRun === true);
     checks.push(check('ballot.prepare dry-run', prepOk && prepDryRun, 'completed dryRun=true', `${prep.code} ${prepEnv?.status}`));
     const mid = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const midEnv = parseEnvelope(mid.stdout);
@@ -466,7 +503,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     ctx.env = savedEnv;
     const commitEnv = parseEnvelope(commit2.stdout);
     const commitOk = commit2.code === 0 && commitEnv?.status === 'completed';
-    const commitVerified = commitEnv && (commitEnv.data as Record<string, unknown>)?.verified === true;
+    const commitVerified = Boolean(commitEnv && (commitEnv.data as Record<string, unknown>)?.verified === true);
     checks.push(check('ballot proposal commit verified', commitOk && commitVerified, 'completed verified=true', `${commit2.code} ${commitEnv?.status} verified=${commitEnv && (commitEnv.data as Record<string, unknown>)?.verified}`));
     const after = ctx.run(['query', 'ballot.query', '--topic', 'alpha']);
     const afterEnv = parseEnvelope(after.stdout);
@@ -488,6 +525,24 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
       check('direct call exit 0', direct.code === 0, '0', String(direct.code)),
       check('same status', sameStatus, String(dEnv?.status), String(sEnv?.status)),
       check('same data', sameData, JSON.stringify(dEnv?.data).slice(0, 80), JSON.stringify(sEnv?.data).slice(0, 80)),
+    ] };
+  } },
+  { id: 'g-structured-audit-mode', run: (ctx) => {
+    // 结构化调用的审计行 mode 必须与 bash 同规（九审 major）：旧写法结构化成功路径无脑记
+    // mode:'call'，而 bash 按 access 分级记 query/prepare——同一次 dummy.query 走两条路落的
+    // mode 不同，评测据 mode 判读类时结构化查询全被漏掉（exitCode=0 且已送达也只能停在
+    // completed），报告随调用载体变化。本用例真走夹具钉住这个形状。
+    const file = writePayload(ctx, { operation: 'dummy.query', args: ['--collection', 'alpha', '--window', 'W1'] });
+    const structured = ctx.run(['call', '--file', file]);
+    const direct = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
+    const rows = readAuditRows(ctx);
+    const sRow = rows.filter((r) => r.script === 'dummy.query' && r.via === 'structured').at(-1);
+    const dRow = rows.filter((r) => r.script === 'dummy.query' && r.via === undefined).at(-1);
+    return { id: 'g-structured-audit-mode', pass: structured.code === 0 && direct.code === 0
+      && sRow?.mode === 'query' && dRow?.mode === 'query', checks: [
+      check('structured query audit mode=query', sRow?.mode === 'query', 'query', String(sRow?.mode)),
+      check('direct query audit mode=query', dRow?.mode === 'query', 'query', String(dRow?.mode)),
+      check('carrier recorded', sRow?.via === 'structured', 'structured', String(sRow?.via)),
     ] };
   } },
   { id: 'g-structured-undeclared-arg', run: (ctx) => {

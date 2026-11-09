@@ -2,9 +2,10 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, splitCommandTokens, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
-import type { AccessSemantics, KeyArgStyles, OperationSemantics } from './src/operation-labels';
+import type { AccessSemantics, KeyArgStyles, OperationArgsSpecs, OperationSemantics } from './src/operation-labels';
+import type { PlanCall } from './src/plan-runtime';
 
 describe('isServeCliInvocation（首词规则）', () => {
   it('放行 bin/example-gateway 的合法形态', () => {
@@ -228,19 +229,19 @@ describe('createServeGate（通用执行安全门）', () => {
     /** 与平台 `operation list --json` 同形的替身表（注册名 + command 裸名双键）。 */
     const SEMANTICS: OperationSemantics = new Map<string, AccessSemantics>([
       // 纯本地计算：不触平台会话、不耗令牌、不写平台数据 → 不要计划
-      ['payroll.validate', { plan: false, confirm: false, mock: false }],
-      ['validate', { plan: false, confirm: false, mock: false }],
-      ['payroll.transform', { plan: false, confirm: false, mock: false }],
-      ['transform', { plan: false, confirm: false, mock: false }],
+      ['payroll.validate', { plan: false, confirm: false }],
+      ['validate', { plan: false, confirm: false }],
+      ['payroll.transform', { plan: false, confirm: false }],
+      ['transform', { plan: false, confirm: false }],
       // 只读平台数据 / 写：受过计划门管辖 → 要计划
-      ['finance.search-account-sets', { plan: true, confirm: false, mock: true }],
-      ['search-account-sets', { plan: true, confirm: false, mock: true }],
-      ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-      ['query-saved', { plan: true, confirm: false, mock: true }],
-      ['voucher.commit', { plan: true, confirm: true, mock: true }],
-      ['commit', { plan: true, confirm: true, mock: true }],
+      ['finance.search-account-sets', { plan: true, confirm: false }],
+      ['search-account-sets', { plan: true, confirm: false }],
+      ['voucher.query-saved', { plan: true, confirm: false }],
+      ['query-saved', { plan: true, confirm: false }],
+      ['voucher.commit', { plan: true, confirm: true }],
+      ['commit', { plan: true, confirm: true }],
       // 同名脚本登记在两个域、语义不同：域内解析的分界线
-      ['voucher.validate', { plan: true, confirm: false, mock: true }],
+      ['voucher.validate', { plan: true, confirm: false }],
     ]);
     const bash = (command: string) => ({ name: 'bash', arguments: { command } });
 
@@ -285,8 +286,8 @@ describe('createServeGate（通用执行安全门）', () => {
         planActive: () => false,
         // 表里只有只读域：payroll 的两个 operation 查不到
         operationSemantics: new Map<string, AccessSemantics>([
-          ['voucher.query-saved', { plan: true, confirm: false, mock: true }],
-          ['query-saved', { plan: true, confirm: false, mock: true }],
+          ['voucher.query-saved', { plan: true, confirm: false }],
+          ['query-saved', { plan: true, confirm: false }],
         ]),
         gateway: 'bin/example-gateway',
       });
@@ -331,6 +332,281 @@ describe('createServeGate（通用执行安全门）', () => {
       gate(bash('bin/example-gateway query src/payroll/scripts/validate-contract.js tmp/x.json'));
       expect(events.at(-1)).toMatchObject({ tool: 'bash', allowed: true });
       expect(events.at(-1)?.detail).toContain('validate-contract.js');
+    });
+  });
+
+  // ── 计划前置三级判据：scratch 免计划 / read 要激活计划 / write 要被某一步覆盖 ──────
+  //
+  // 病根（2026-11-08 修）：旧判据 `!planActive() && !planExempt(...)` 只查"有没有激活
+  // 计划"，不查"这份计划覆不覆盖这次调用"。实测后果：激活的计划全是 dummy.query（读），
+  // 4 次 plan_submit 全被拒，而 dummy.proposal / dummy.proposal-commit（写）照样调通——
+  // 数据落地，用户从未确认。门自己的注释写着"未知 op 可能写平台数据，宁拦勿猜"，实现
+  // 却没做到。
+  //
+  // 分级依据只有平台语义表（`operation list --json` 的 access 列 × 顶层 accessSemantics
+  // 表），宿主不认 access 词表、不另立 operation 名单。这里守四件事，外加三条边界
+  // （读不锁死、未登记形态不回退、跨域同名不算覆盖）。
+  describe('计划前置三级判据：scratch 免计划 / read 要计划 / write 要覆盖', () => {
+    /** 与 dummy 夹具 `operation list --json` 同形的替身语义表（access 三族各一条）。 */
+    const DUMMY: OperationSemantics = new Map<string, AccessSemantics>([
+      ['dummy.query', { plan: true, confirm: false }],           // access=read
+      ['dummy.scratch', { plan: false, confirm: false }],        // access=scratch（纯本地计算）
+      ['dummy.commit', { plan: true, confirm: true }],           // access=write
+      ['dummy.proposal', { plan: true, confirm: true }],         // access=write
+      ['dummy.proposal-commit', { plan: true, confirm: true }],  // access=write
+      ['ballot.proposal', { plan: true, confirm: true }],        // 另一域的同一个脚本名
+    ]);
+    const bash = (command: string) => ({ name: 'bash', arguments: { command } });
+    /** 带激活计划（calls 由调用方给）的门。 */
+    const withPlan = (calls: readonly PlanCall[], extra: Partial<ServeGateOptions> = {}) => createServeGate({
+      planActive: () => true,
+      operationSemantics: DUMMY,
+      activePlanCalls: () => calls,
+      ...extra,
+      gateway: 'bin/example-gateway',
+    });
+
+    it('① 激活计划只有读（dummy.query）→ 写类调用被拒，理由点名是哪个 operation 不在计划里', () => {
+      const gate = withPlan([{ operation: 'dummy.query', args: ['--collection', 'alpha'] }]);
+      for (const command of [
+        'bin/example-gateway prepare dummy.proposal tmp/task_x/payload.json',
+        'bin/example-gateway commit dummy.proposal-commit --proposal-id P-1',
+      ]) {
+        const verdict = gate(bash(command));
+        expect(verdict?.block, command).toBe(true);
+        // 措辞收口在 error-codes.ts：既有消息一字不差，只追加"哪个 operation 不在计划里"
+        expect(verdict?.reason, command).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+        expect(verdict?.reason, command).toContain('dummy.proposal');
+      }
+    });
+
+    it('② 激活计划只有读 → 另一个读（不同 collection）放行：探索性查询不锁死', () => {
+      const gate = withPlan([{ operation: 'dummy.query', args: ['--collection', 'alpha'] }]);
+      // 计划里写查 alpha，worker 看了结果想查 beta——正当探索，不能拦死
+      expect(gate(bash('bin/example-gateway query dummy.query --collection beta'))?.block).toBeUndefined();
+      // 计划里那一步本身（含计划没带的 --window）照旧放行
+      expect(gate(bash('bin/example-gateway query dummy.query --collection alpha --window W1'))?.block).toBeUndefined();
+    });
+
+    it('③ 计划含该写声明的关键参数 → 放行；同 operation 不同参数 → 拒', () => {
+      const covered = withPlan([{ operation: 'dummy.commit', args: ['--collection', 'alpha'] }]);
+      expect(covered(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
+      // 关键参数一致 ≠ 全等：调用比计划多带 --window/--count 仍算覆盖（全等会误判）
+      expect(covered(bash('bin/example-gateway commit dummy.commit --collection alpha --window W1 --count 3'))?.block).toBeUndefined();
+      // 同 operation 不同值 → 不覆盖
+      const other = covered(bash('bin/example-gateway commit dummy.commit --collection beta'));
+      expect(other?.block).toBe(true);
+      expect(other?.reason).toContain('dummy.commit');
+      // 反方向不放松：计划声明了 --window 而这次调用没带，目标就不一定是那一个
+      const windowed = withPlan([{ operation: 'dummy.commit', args: ['--collection', 'alpha', '--window', 'W1'] }]);
+      expect(windowed(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBe(true);
+      // 编号类关键参数：proposal id 运行时才产生，计划步骤不带它即覆盖任意 id；带了就只覆盖那一个
+      const anyId = withPlan([{ operation: 'dummy.proposal-commit', args: [] }]);
+      expect(anyId(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-9'))?.block).toBeUndefined();
+      const pinned = withPlan([{ operation: 'dummy.proposal-commit', args: ['--proposal-id', 'P-1'] }]);
+      expect(pinned(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-1'))?.block).toBeUndefined();
+      const wrongId = pinned(bash('bin/example-gateway commit dummy.proposal-commit --proposal-id P-2'));
+      expect(wrongId?.block).toBe(true);
+      expect(wrongId?.reason).toContain('dummy.proposal-commit');
+    });
+
+    it('④ scratch（plan=false）无计划也放行：既有豁免口径一字不回退', () => {
+      const gate = createServeGate({ planActive: () => false, operationSemantics: DUMMY, gateway: 'bin/example-gateway' });
+      expect(gate(bash('bin/example-gateway query dummy.scratch --input tmp/x.json'))?.block).toBeUndefined();
+      expect(gate(bash('bin/example-gateway operation run dummy.scratch --input tmp/x.json'))?.block).toBeUndefined();
+    });
+
+    it('边界：写类在没有激活计划时照旧拒（存在性判据先于覆盖判据）', () => {
+      const gate = createServeGate({
+        planActive: () => false,
+        operationSemantics: DUMMY,
+        activePlanCalls: () => [{ operation: 'dummy.commit', args: ['--collection', 'alpha'] }],
+        gateway: 'bin/example-gateway',
+      });
+      // 没有计划：只有既有消息，不带覆盖后缀（覆盖判据轮不到它说话）
+      expect(gate(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.reason)
+        .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+    });
+
+    it('边界：恢复的会话拿不到计划内容（calls 空）→ 写类拒、读类照旧放行', () => {
+      const gate = createServeGate({ planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      // 读不锁死
+      expect(gate(bash('bin/example-gateway query dummy.query --collection alpha'))?.block).toBeUndefined();
+      // 写 fail-closed：不知道这份计划覆盖什么就不写，直到本会话重新激活一份计划
+      expect(gate(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBe(true);
+    });
+
+    it('边界：语义表缺失 / operation 未登记 → 只要求激活计划（2026-10-09 起的既有防线）', () => {
+      const unknownOp = createServeGate({ planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      expect(unknownOp(bash('bin/example-gateway commit src/unknown/scripts/whatever.js c.json'))?.block).toBeUndefined();
+      const emptyTable = createServeGate({ planActive: () => true, operationSemantics: new Map(), activePlanCalls: () => [], gateway: 'bin/example-gateway' });
+      expect(emptyTable(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
+    });
+
+    // ── 结构化调用（structured_call）与 bash 共用同一份覆盖判据 ──────────────────────
+    // 2026-11-09 四审 blocking：structured_call 分支原先只查 requiresPlan 的存在性，于是一份
+    // 纯读计划激活后，清单里已登记的写 operation 仍能经结构化通道进网关——bash 侧新加的覆盖
+    // 检查在这条路上原样不存在。现在两条路都走 planCoverageVerdict，这里钉住结构化这一侧。
+    it('结构化写调用：纯读计划激活后被拒，理由点名 operation（与 bash 同措辞）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      for (const operation of ['dummy.proposal', 'dummy.proposal-commit', 'dummy.commit']) {
+        const verdict = structuredPlanGateVerdict(operation, { '--collection': 'alpha' }, ctx);
+        expect(verdict?.block, operation).toBe(true);
+        expect(verdict?.reason, operation).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+        expect(verdict?.reason, operation).toContain('dummy.');
+      }
+    });
+
+    it('结构化读调用：纯读计划下另一个 collection 放行（探索性查询不锁死，同 bash）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.query', { '--collection': 'beta' }, ctx)?.block).toBeUndefined();
+    });
+
+    it('结构化 scratch 调用：免计划前置（与 bash 同一列同一判据）', () => {
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.scratch', {}, ctx)?.block).toBeUndefined();
+    });
+
+    it('结构化写调用：计划含同 operation 同关键参数 → 放行；参数不同 → 拒', () => {
+      const covered = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.proposal', args: ['--collection', 'alpha'] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'alpha' }, covered)?.block).toBeUndefined();
+      // 计划声明了 --collection alpha，这次调 beta → 目标不一定同一个，拒
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'beta' }, covered)?.block).toBe(true);
+      // 计划没声明关键参数 → 覆盖该 operation 的任何调用
+      const bare = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [{ operation: 'dummy.proposal', args: [] }] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.proposal', { '--collection': 'whatever' }, bare)?.block).toBeUndefined();
+    });
+
+    it('结构化调用：无激活计划 → 读写都要先有计划；未登记 operation 同判据', () => {
+      const noPlan = { planActive: () => false, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('dummy.query', {}, noPlan)?.block).toBe(true);
+      expect(structuredPlanGateVerdict('dummy.proposal', {}, noPlan)?.block).toBe(true);
+      // 语义表里没有 → unknown 档：按既有防线只要求有计划（不因未登记就放行）
+      const unknown = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => [] as readonly PlanCall[] };
+      expect(structuredPlanGateVerdict('not.registered', {}, unknown)?.block).toBeUndefined();
+    });
+
+    it('位置参数声明的执行层：计划与调用位置参数不同 ⇒ 不覆盖（五审 blocking）', () => {
+      // 复现缺陷：某执行层以位置参数声明目标（args=['alpha','W1'] 而不是
+      // --collection alpha）。旧判据只提取 flag，位置参数整批丢弃 ⇒ wanted 为空 ⇒
+      // 直接 return true，于是计划查 alpha、实际写 beta 也判"已覆盖"。
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.query', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const writeTier: OperationSemantics = new Map([['ledger.write', { plan: true, confirm: true }]]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: writeTier,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        operationArgsSpecs: SPECS,
+      };
+      // 同名同位置参数 → 覆盖
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBeUndefined();
+      // 位置参数不同 → 不覆盖（旧代码这里放行）
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'beta', period: 'W2' }, ctx)?.block).toBe(true);
+      // 少给一个位置参数 → 也不覆盖（范围说不清）
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
+    });
+
+    it('confirm:true 优先于 plan:false——要确认的操作不当成免计划（九审 blocking）', () => {
+      // 复现缺陷：解析器明确产出 {plan:false, confirm:true}（operation-labels.test.ts 的
+      // partial 用例）。旧分级先看 plan===false 判 scratch ⇒ 免激活计划、免写覆盖，
+      // 于是"要用户确认却没有任何计划"的操作被放行。免计划档是整个门里最松的一档。
+      const PARTIAL: OperationSemantics = new Map([
+        ['ledger.partial', { plan: false, confirm: true }],
+        ['ledger.plain', { plan: false, confirm: false }],
+      ]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: PARTIAL,
+        activePlanCalls: () => [{ operation: 'ledger.query', args: [] }] as readonly PlanCall[],
+      };
+      // confirm:true ⇒ 写类 ⇒ 不被任何计划步骤覆盖 ⇒ 拒
+      expect(structuredPlanGateVerdict('ledger.partial', {}, ctx)?.block).toBe(true);
+      // 对照：真的 scratch（plan:false, confirm:false）仍免计划
+      expect(structuredPlanGateVerdict('ledger.plain', {}, ctx)?.block).toBeUndefined();
+      // bash 侧同规（同一分级函数）
+      const gate = createServeGate({
+        planActive: () => true,
+        operationSemantics: PARTIAL,
+        activePlanCalls: () => [{ operation: 'ledger.query', args: [] }],
+        gateway: 'bin/example-gateway',
+      });
+      expect(gate(bash('bin/example-gateway prepare ledger.partial x'))?.block).toBe(true);
+      expect(gate(bash('bin/example-gateway prepare ledger.plain x'))?.block).toBeUndefined();
+    });
+
+    it('位置参数按声明顺序取值，对象键序不影响判定（六审 blocking）', () => {
+      // 复现缺陷：声明 [account, period]、计划 ['alpha','W1']。调用方把键序换成
+      // {period:'alpha', account:'W1'}——按插入顺序收集会得到 ['alpha','W1'] 从而放行，
+      // 但 account 实际拿到的是 'W1'、period 拿到 'alpha'，目标已经互换。
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        operationArgsSpecs: SPECS,
+      };
+      // 正确键序 → 放行
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBeUndefined();
+      // 键序换过但名值对应关系不变 → 仍放行（键序是调用方自由）
+      expect(structuredPlanGateVerdict('ledger.write', { period: 'W1', account: 'alpha' }, ctx)?.block).toBeUndefined();
+      // 键序换且名值互换 → 必须拒（旧代码这里放行）
+      expect(structuredPlanGateVerdict('ledger.write', { period: 'alpha', account: 'W1' }, ctx)?.block).toBe(true);
+      // 缺一个位置参数 → 拒
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha' }, ctx)?.block).toBe(true);
+    });
+
+    it('位置参数：执行层没声明 positionalNames 而计划步带了位置参数 ⇒ 不覆盖（fail-closed）', () => {
+      // 拿不到声明就无法证明范围一致——不能把"没解析出 flag"解释成"授权任意目标"。
+      const ctx = {
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }] as readonly PlanCall[],
+        // 故意不给 operationArgsSpecs
+      };
+      expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1' }, ctx)?.block).toBe(true);
+    });
+
+    it('bash 侧位置参数判据同规（去掉了网关词/子命令/operation 引用再比）', () => {
+      const SPECS: OperationArgsSpecs = new Map([
+        ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map() }],
+      ]);
+      const gate = createServeGate({
+        planActive: () => true,
+        operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]),
+        operationArgsSpecs: SPECS,
+        activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1'] }],
+        gateway: 'bin/example-gateway',
+      });
+      // 位置参数一致 → 放行
+      expect(gate(bash('bin/example-gateway prepare ledger.write alpha W1'))?.block).toBeUndefined();
+      // 位置参数不同 → 拒（旧代码只看 flag，这里 wanted 为空直接放行）
+      expect(gate(bash('bin/example-gateway prepare ledger.write beta W2'))?.block).toBe(true);
+    });
+
+    it('结构化与 bash 对同一场景给同一结论（防两条路漂移）', () => {
+      const calls = [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] as readonly PlanCall[];
+      const ctx = { planActive: () => true, operationSemantics: DUMMY, activePlanCalls: () => calls };
+      const viaStructured = structuredPlanGateVerdict('dummy.proposal', { '--collection': 'alpha' }, ctx);
+      const viaBash = withPlan(calls)(bash('bin/example-gateway prepare dummy.proposal tmp/task_x/payload.json'));
+      expect(viaStructured?.block).toBe(true);
+      expect(viaBash?.block).toBe(true);
+      expect(viaStructured?.reason).toContain('未被已激活计划覆盖');
+      expect(viaBash?.reason).toContain('未被已激活计划覆盖');
+    });
+
+    it('覆盖匹配按 operation 认：脚本路径与注册名两种引用都认，跨域同名不算覆盖', () => {
+      // 计划里是 ballot 域的 proposal；调用的是 dummy 域的同一个脚本名 → 不是同一步
+      const crossDomain = withPlan([{ operation: 'ballot.proposal', args: [] }]);
+      expect(crossDomain(bash('bin/example-gateway prepare src/dummy/scripts/proposal.js tmp/p.json'))?.block).toBe(true);
+      // 同域：脚本路径形态与注册名直呼都算同一步
+      const same = withPlan([{ operation: 'dummy.proposal', args: [] }]);
+      expect(same(bash('bin/example-gateway prepare src/dummy/scripts/proposal.js tmp/p.json'))?.block).toBeUndefined();
+      expect(same(bash('bin/example-gateway operation run dummy.proposal tmp/p.json'))?.block).toBeUndefined();
     });
   });
 
@@ -1087,5 +1363,231 @@ describe('local 执行（bin/example-gateway local <本地脚本>）', () => {
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local .agents/skills-serve/doc-parse/scripts/parse.py; cat .env' } })?.block).toBeUndefined();
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local ../escape.py' } })?.block).toBeUndefined();
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway local /etc/passwd' } })?.block).toBeUndefined();
+  });
+});
+
+describe('splitCommandTokens 与 Bash 转义语义一致（十审 blocking）', () => {
+  it('双引号内不可转义的字符前，反斜杠字面保留', () => {
+    // Bash 实测：`"\alpha"` 传入的是 `\alpha`（反斜杠在）。旧写法无条件吞反斜杠解析成
+    // alpha——计划批准 --collection alpha 时，覆盖判据会放行实际指向别名的写调用。
+    expect(splitCommandTokens('bin/gw prepare x.write --collection "\\alpha"'))
+      .toEqual(['bin/gw', 'prepare', 'x.write', '--collection', '\\alpha']);
+  });
+
+  it('双引号内可转义的五个字符（$ ` " \\ 换行）照常转义', () => {
+    expect(splitCommandTokens('bin/gw query q --name "a\\"b"')).toEqual(['bin/gw', 'query', 'q', '--name', 'a"b']);
+    expect(splitCommandTokens('bin/gw query q --path "a\\\\b"')).toEqual(['bin/gw', 'query', 'q', '--path', 'a\\b']);
+  });
+
+  it('单引号内反斜杠是字面（POSIX）', () => {
+    expect(splitCommandTokens("bin/gw query q --name 'a\\b'")).toEqual(['bin/gw', 'query', 'q', '--name', 'a\\b']);
+  });
+
+  it('无引号处反斜杠转义任意字符', () => {
+    expect(splitCommandTokens('bin/gw query q --path \\a')).toEqual(['bin/gw', 'query', 'q', '--path', 'a']);
+  });
+});
+
+describe('positionalsOf：空位置参数不吞后续目标（十二审 blocking）', () => {
+  it("['', 'alpha'] 与 ['', 'beta'] 解析出不同目标", () => {
+    // 复现缺陷：空串被当成 flag，连后面目标参数一起跳过 ⇒ 两者都解析成 [] ⇒ 覆盖检查
+    // 直接放行任意目标。允许空的前置位 + 后续位带目标是合法的通用接口形态。
+    expect(splitCommandTokens('g prepare w "" alpha').slice(3)).toEqual(['', 'alpha']);
+    expect(splitCommandTokens('g prepare w "" beta').slice(3)).toEqual(['', 'beta']);
+  });
+
+  it('flag 仍连取值一起跳过（不因修空串而放松）', () => {
+    expect(splitCommandTokens('g query q --collection alpha x').slice(3)).toEqual(['--collection', 'alpha', 'x']);
+  });
+
+  it('覆盖判据层面：计划前置位为空、目标 alpha 时不允许 beta', () => {
+    const SPECS: OperationArgsSpecs = new Map([['ledger.write', { positionalNames: ['slot', 'target'], flagStyles: new Map() }]]);
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: new Map([['ledger.write', { plan: true, confirm: true }]]) as OperationSemantics,
+      activePlanCalls: () => [{ operation: 'ledger.write', args: ['', 'alpha'] }] as readonly PlanCall[],
+      operationArgsSpecs: SPECS,
+    };
+    expect(structuredPlanGateVerdict('ledger.write', { slot: '', target: 'alpha' }, ctx)?.block).toBeUndefined();
+    expect(structuredPlanGateVerdict('ledger.write', { slot: '', target: 'beta' }, ctx)?.block).toBe(true);
+  });
+});
+
+describe('splitCommandTokens：引号外续行（十三审 minor）', () => {
+  it('反斜杠 + 换行两者都删掉（与 Bash 一致）', () => {
+    // Bash 实测：`al\<换行>pha` 传入 alpha。旧写法只跳过反斜杠、把换行留在参数里，
+    // 于是与计划里的 alpha 比对不上，合法写调用被误判成未覆盖。
+    expect(splitCommandTokens('g prepare w --target al\\\npha')).toEqual(['g', 'prepare', 'w', '--target', 'alpha']);
+  });
+
+  it('行尾孤立反斜杠按字面保留', () => {
+    expect(splitCommandTokens('g prepare w --target alpha\\')).toEqual(['g', 'prepare', 'w', '--target', 'alpha\\']);
+  });
+});
+
+describe('splitCommandTokens：只认 Bash 真正当分隔符的空白（十四审 blocking）', () => {
+  it('Unicode 空白（U+00A0 / U+3000）不是分隔符，与 Bash 一致', () => {
+    // 复现缺陷：/\s/ 把 Unicode 空白也当分隔符，而 Bash 不认——`--target alpha<NBSP>beta`
+    // 被拆成 alpha + beta，计划只声明 --target alpha 时判覆盖并忽略多出的位置参数，
+    // 放行实际指向别名的写调用。Bash 实测两者都是单个参数。
+    expect(splitCommandTokens('g commit w --target alpha\u00a0beta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u00a0beta']);
+    expect(splitCommandTokens('g commit w --target alpha\u3000beta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u3000beta']);
+  });
+
+  it('回车/换页/垂直制表符不是分隔符，Bash 把它们保留在参数里', () => {
+    // 十五审 blocking：上一轮把 \r \f \v 也当分隔符是改错了。Bash 实测
+    // `alpha<CR>beta` 是单个参数——拆成 alpha + beta 会让计划只声明 --target alpha 时
+    // 判覆盖并忽略多出的位置参数，放行实际指向别名的写调用。
+    expect(splitCommandTokens('g commit w --target alpha\rbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\rbeta']);
+    expect(splitCommandTokens('g commit w --target alpha\x0cbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\x0cbeta']);
+    expect(splitCommandTokens('g commit w --target alpha\x0bbeta')).toEqual(['g', 'commit', 'w', '--target', 'alpha\x0bbeta']);
+  });
+
+  it('ASCII 空白（空格/制表符/换行）照常分词', () => {
+    expect(splitCommandTokens('g w --t a b')).toEqual(['g', 'w', '--t', 'a', 'b']);
+    expect(splitCommandTokens('g\tw\t--t\ta')).toEqual(['g', 'w', '--t', 'a']);
+  });
+
+  it('覆盖判据层面：计划 --target alpha 不允许 alpha<NBSP>beta', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]),
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    const call = (command: string) => gate({ name: 'bash', arguments: { command } });
+    expect(call('bin/example-gateway commit domain.write --target alpha')?.block).toBeUndefined();
+    expect(call('bin/example-gateway commit domain.write --target alpha\u00a0beta')?.block).toBe(true);
+  });
+});
+
+describe('预处理只剥 Bash 词法空白（十六审 blocking）', () => {
+  it('命令尾部的 Unicode 空白/回车不被剥掉', () => {
+    // 复现缺陷：String.trim() 按 Unicode 空白定义剥字符，会把尾部的 U+00A0、\r 一起删掉，
+    // 而 Bash 把它们保留在参数里。计划批准 --target alpha 时，实际传入 alpha<NBSP>
+    // （另一个目标）会被判成覆盖。
+    expect(splitCommandTokens('g commit w --target alpha\u00a0')).toEqual(['g', 'commit', 'w', '--target', 'alpha\u00a0']);
+    expect(splitCommandTokens('g commit w --target alpha\r')).toEqual(['g', 'commit', 'w', '--target', 'alpha\r']);
+  });
+
+  it('命令首尾的 Bash 空白仍照常剥掉', () => {
+    expect(splitCommandTokens('  g commit w --target alpha  ')).toEqual(['g', 'commit', 'w', '--target', 'alpha']);
+  });
+
+  it('覆盖判据层面：计划 --target alpha 不允许 alpha<NBSP>', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]),
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    const call = (command: string) => gate({ name: 'bash', arguments: { command } });
+    expect(call('bin/example-gateway commit domain.write --target alpha')?.block).toBeUndefined();
+    expect(call('bin/example-gateway commit domain.write --target alpha\u00a0')?.block).toBe(true);
+    expect(call('bin/example-gateway commit domain.write --target alpha\r')?.block).toBe(true);
+  });
+});
+
+describe('布尔开关不吞后续 flag（十七审 major）', () => {
+  const SPECS: OperationArgsSpecs = new Map([
+    // --dry-run 是布尔开关（none 不入 flagStyles）；--target 是带值 flag
+    ['domain.write', { positionalNames: [], flagStyles: new Map([['--target', 'name']]) }],
+    ['ledger.write', { positionalNames: ['account', 'period'], flagStyles: new Map([['--window', 'code']]) }],
+  ]);
+  const sem = (op: string) => new Map([[op, { plan: true, confirm: true }]]) as OperationSemantics;
+
+  it('bash 侧：计划 --dry-run --target alpha，调用同形 ⇒ 覆盖', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    // 复现缺陷：--dry-run 把 --target 当取值吞掉 ⇒ alpha 被误提成位置参数 ⇒ 该操作没有
+    // 位置参数声明 ⇒ 判未覆盖，合法调用被拒。
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target alpha' } })?.block).toBeUndefined();
+  });
+
+  it('结构化侧：同形调用同样覆盖（结构化按声明名取值，不经分词）', () => {
+    // 结构化调用的 args 是对象、按 positionalNames 逐项取值，本来就不受"开关吞 flag"影响；
+    // 这条钉住的是**两侧结论一致**——同一个计划步，bash 与 structured_call 都给"覆盖"。
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--target', 'alpha'] }] as readonly PlanCall[],
+    };
+    expect(structuredPlanGateVerdict('domain.write', { target: 'alpha' }, ctx)?.block).toBeUndefined();
+  });
+
+  it('计划步里开关不吞 flag：--dry-run --target alpha 只提出一个位置参数', () => {
+    // 复现缺陷：旧写法 positionalsOf 无条件跳下一项，--dry-run 把 --target 当取值吞掉，
+    // alpha 被误提成位置参数；而该操作没声明位置参数 ⇒ 判未覆盖，合法调用被拒。
+    // 修后 --dry-run 不吞，--target 带值跳过，只提出 alpha（一个位置参数）。
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target alpha' } })?.block).toBeUndefined();
+  });
+
+  it('目标不同仍要拒（修开关误吞没有放松范围）', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: sem('domain.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', '--target', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run --target beta' } })?.block).toBe(true);
+  });
+
+  it('位置参数声明 + 布尔开关并存：位置参数仍逐位比对', () => {
+    const ctx = {
+      planActive: () => true,
+      operationSemantics: sem('ledger.write'),
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'ledger.write', args: ['alpha', 'W1', '--window', 'W2'] }] as readonly PlanCall[],
+    };
+    expect(structuredPlanGateVerdict('ledger.write', { account: 'alpha', period: 'W1', window: 'W2' }, ctx)?.block).toBeUndefined();
+    expect(structuredPlanGateVerdict('ledger.write', { account: 'beta', period: 'W1', window: 'W2' }, ctx)?.block).toBe(true);
+  });
+});
+
+describe('keyArgsOf 也按 flagStyles 区分布尔开关（十八审 major）', () => {
+  const SPECS: OperationArgsSpecs = new Map([
+    // --dry-run 是布尔开关；target 是位置参数
+    ['domain.write', { positionalNames: ['target'], flagStyles: new Map([['--window', 'code']]) }],
+  ]);
+  const ctx = {
+    planActive: () => true,
+    operationSemantics: new Map([['domain.write', { plan: true, confirm: true }]]) as OperationSemantics,
+    operationArgsSpecs: SPECS,
+    activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', 'alpha'] }] as readonly PlanCall[],
+  };
+
+  it('计划 --dry-run + 位置 alpha 与结构化 dryRun=true,target=alpha 互相覆盖', () => {
+    // 复现缺陷：keyArgsOf 不读规格，把布尔开关后的位置参数当成开关取值——计划侧得到
+    // dry-run='alpha'，结构化侧得到 dry-run=''，两侧分叉 ⇒ 合法写调用被拒。
+    expect(structuredPlanGateVerdict('domain.write', { '--dry-run': true, target: 'alpha' }, ctx)?.block).toBeUndefined();
+  });
+
+  it('目标不同仍要拒', () => {
+    expect(structuredPlanGateVerdict('domain.write', { '--dry-run': true, target: 'beta' }, ctx)?.block).toBe(true);
+  });
+
+  it('bash 侧同形调用同样覆盖', () => {
+    const gate = createServeGate({
+      planActive: () => true,
+      operationSemantics: ctx.operationSemantics,
+      operationArgsSpecs: SPECS,
+      activePlanCalls: () => [{ operation: 'domain.write', args: ['--dry-run', 'alpha'] }],
+      gateway: 'bin/example-gateway',
+    });
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway commit domain.write --dry-run alpha' } })?.block).toBeUndefined();
   });
 });

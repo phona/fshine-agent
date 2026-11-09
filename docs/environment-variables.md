@@ -14,7 +14,6 @@
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_REAL_COMMIT` | 部署声明 / `platform-mock.isCommitEnabled` | 仅字面量 `1` 算真写授权；缺失 = 确认码只到 `confirm_held`，不写；mock 下 `isCommitEnabled` 恒真，与本变量无关 |
 | `FSHINE_PLATFORM_QUEUE_CAPACITY` | 部署 / 共享 `PlatformExecutionGate`（assembly、context） | 缺省 / 非法 = 100 |
 | `FSHINE_PLATFORM_CONCURRENCY` | 部署 / 委派并发闸 | 缺省 = 1（全局串行） |
 | `FSHINE_PLATFORM_COOLDOWN_MS` | 部署 / 平台健康冷却 | 缺省 = 600000（10 分钟） |
@@ -36,33 +35,24 @@
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
 | `EXECUTION_SERVE` | 宿主装配 / 执行层 `execution-env.serve` | 仅 `1` 进 serve 法域；否则走建造法域规则 |
-| `DZ_SERVE` | 执行层 `execution-env.serve`（`EXECUTION_SERVE` 新前缀别名） | 与 `EXECUTION_SERVE` 同义；执行层仓 main 治理 env 族改名后与旧名并存 |
 | `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
-| `DZ_INVOCATION` | 网关铸造 / serve 门校验（`EXECUTION_INVOCATION` 新前缀别名） | 与 `EXECUTION_INVOCATION` 同义 |
 | `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
-| `DZ_ALLOW_REAL` | 部署 / 执行层 实执行门（`EXECUTION_ALLOW_REAL` 新前缀别名） | 与 `EXECUTION_ALLOW_REAL` 同义 |
-| `EXECUTION_EXECUTOR` | 部署 / 网关 spawn 目标切换 | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门 |
-| `DZ_EXECUTOR` | 部署 / 网关 spawn 目标切换（`EXECUTION_EXECUTOR` 新前缀别名） | 与 `EXECUTION_EXECUTOR` 同义 |
-| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时服务端兜底到 `<平台根>/.runtime/mock-state.json`；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3） |
-| `DZ_MOCK_STATE` | 部署 / 执行层 mock 状态文件（`EXECUTION_MOCK_STATE` 新前缀别名） | 与 `EXECUTION_MOCK_STATE` 同义 |
+| `EXECUTION_EXECUTOR` | 部署 / **执行层自己的**执行器切换（宿主不读） | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门。2026-11-08 起宿主侧读取已删（`platform-mock.ts` 整模块退役）：编排层不判"这个部署允不允许写" |
+| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。宿主脚本只重置显式声明过的这一个 |
 | `EXECUTION_REQUIRE_PLAN` | 宿主 / 执行层 runner（serve 执行须 host 注入 plan id） | 宿主直调时显式剥离；worker 路径置 `1` 即强制计划绑定 |
-| `DZ_REQUIRE_PLAN` | 宿主 / 执行层 runner（`EXECUTION_REQUIRE_PLAN` 新前缀别名） | 与 `EXECUTION_REQUIRE_PLAN` 同义 |
 | `EXECUTION_PLAN_ID` | 宿主注入 / 执行层 runner、gateway | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌 | 缺省 = 装配进程内生成，重启失效 |
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
 | `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
-| `DZ_PLAN_STATE` | 部署 / 执行层 计划账本（`EXECUTION_PLAN_STATE` 新前缀别名） | 与 `EXECUTION_PLAN_STATE` 同义 |
 | `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
-| `DZ_AUDIT_PATH` | 部署 / 调用审计 JSONL（`EXECUTION_AUDIT_PATH` 新前缀别名） | 与 `EXECUTION_AUDIT_PATH` 同义 |
 | `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json` |
-| `DZ_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态（`EXECUTION_RATE_LIMIT_STATE` 新前缀别名） | 与 `EXECUTION_RATE_LIMIT_STATE` 同义 |
 
 ## 3. 执行层治理（执行层 读，宿主只继承 / 按用例隔离）
 
 | 变量族 | 作用 / 默认值 / 缺失行为 |
 | --- | --- |
 | `EXECUTION_RATE_LIMIT` | 限流 JSON 部分覆盖默认桶；`off` 整体旁路（仅排障）；缺省 = 执行层默认桶 |
-| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` / `DZ_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位；`DZ_PROPOSAL_STATE` 为 `EXECUTION_PROPOSAL_STATE` 新前缀别名 |
+| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位 |
 | `EXECUTION_PROPOSAL_TTL_SECONDS` | 提案 TTL；缺省 30 分钟 |
 | `EXECUTION_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`（8 个）+ `EXECUTION_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT`（4 个） | 计划档位阈值；缺省 calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180；注意权重线第三档真名是 `BUDGET`（`EXECUTION_PLAN_BUDGET_WEIGHT`），不是 `CONFIRM`——`CONFIRM` 只用于 calls/seconds 线，设 `EXECUTION_PLAN_CONFIRM_WEIGHT` 会静默无效 |
 | `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提上限；缺省 30 / 3 / 8 / 3 |
@@ -138,7 +128,11 @@ stock 夹具与 `DUMMY_*` 同族：只被 `scripts/eval/` 的第二执行层证�
   `FSHINE_COMMIT_TOKEN` / `FSHINE_MOCK_STATE`：执行层 旧名，兼容读取已删；
   `test-gate.js` / `test-auth.js` 故意注入旧名断言其**不**算法域，删测试即丢退役证明。
 - `EXECUTION_REAL_COMMIT`：执行层 从不读取，只在 `test-all.js` 的泄漏剥离名单里
-  出现（防止测试环境把它带进真写）；宿主的真写闸是 `FSHINE_REAL_COMMIT`。
+  出现（防止测试环境把它带进真写）。
+- `FSHINE_REAL_COMMIT`：**已退役（2026-11-08 架构裁定）**——宿主侧的落账授权总闸连判据源
+  （`platform-mock.ts` 的 `isCommitEnabled`）一起删除，"编排层不判这个部署允不允许写"。
+  执行层要自己的写授权接口应由执行层自己声明并登记进第 2/3 节；代码树里仅剩解释其退役
+  原因的注释引用（leak-lint 的 FSHINE_* 登记表以「遗留待清」挂着它，清空即删）。
 - `FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT`：fshine 写路径旧开关，
   已随 C 波退役；`docs-reality.test.ts` 断言其在生产代码中零复现，删断言即丢闭环守卫。
 - `STEALTH_MODE` / `STEALTH_DELAY_SCALE`：只出现在 执行层 未实现特性的旧规格文档

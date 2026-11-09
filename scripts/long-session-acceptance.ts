@@ -79,9 +79,9 @@ async function main(): Promise<void> {
     tasks: store.platformTasks!,
     workerDriver: createPiCodingTurnDriver({ env: process.env }),
     profileId,
-    // 长会话实测不写任何数据：落账后端不注入（proposalCommitEnabled 缺省 false），
-    // 确认码只会到达"确认收到但不写"。（这是本脚本刻意选的只读形态，与开关无关——
-    // B 波那个"落账后端接不接"的开关已退役，落账放行只由 isCommitEnabled 派生。）
+    // 长会话实测不写任何数据：落账后端不注入（proposalCommitRunner 缺省 = 未接线），
+    // 确认码只会到达"执行失败：落账执行器未配置"——这是宿主如实说自己没做到，
+    // 不是对"这个部署允不允许写"的判断（2026-11-08 裁定后没有 commit 授权位）。
     changeIntents: store.changeIntents,
   });
   const runtime = createTaxAgentRuntime({
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     const lastRound = round(39);
     const reply = await runtime.handleTurn({
       requestId: newId('req'), principalId: `wecom:${USER}`,
-      allowedAccountSetIds: [], sessionId: SESSION, capabilities: ['read', 'write'],
+      sessionId: SESSION, capabilities: ['read', 'write'],
     }, '我们之前一共查过哪些账套？把最后一个账套的名字和它最后一次翻页用的 nextCursor 原值告诉我。');
     console.log(JSON.stringify({ event: 'probe_reply', text: reply.text.slice(0, 600) }));
     console.log(`探针期望参考（最后一条历史）：账套=${lastRound.assistant.slice(0, 20)}…`);
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
     console.log(JSON.stringify({ event: 'seed_done', mode, rounds, estTokens: est, threshold: 111_616 }));
     const reply = await runtime.handleTurn({
       requestId: newId('req'), principalId: `wecom:${USER}`,
-      allowedAccountSetIds: [], sessionId: SESSION, capabilities: ['read', 'write'],
+      sessionId: SESSION, capabilities: ['read', 'write'],
     }, '这个会话里我们主要在查什么？最近几次查询围绕哪些账套？');
     console.log(JSON.stringify({ event: 'probe_reply', text: reply.text.slice(0, 600) }));
   }

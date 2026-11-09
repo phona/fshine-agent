@@ -68,6 +68,7 @@ async function main(): Promise<void> {
     messageId: `accmsg_${randomUUID()}`,
     chatType: 'single',
     text: '那不查幻海升了，换成幻晟，帮我查幻晟本期的凭证',
+    receivedAt: new Date().toISOString(),
   };
   const steps: string[] = [];
   const started = Date.now();

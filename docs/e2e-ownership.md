@@ -44,16 +44,17 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 
 - 本仓 gitignored 的 `config/agent.yaml` 存在（部署配置，永不提交），
   harness 的 `boot()` 会读它并按用例打补丁；
-- 执行层 mock：harness 在 beforeAll 钉死 `EXECUTION_EXECUTOR=mock`、
-  `EXECUTION_SERVE=1`，并给每个用例独一份平台状态文件
+- 执行层 mock：harness 在 beforeAll 替**执行层平台**钉死它自己的执行器开关
+  （`EXECUTION_EXECUTOR=mock`，宿主不读这个变量）、`EXECUTION_SERVE=1`，并给每个用例独一份平台状态文件
   （`EXECUTION_PLAN_STATE` / `EXECUTION_RATE_LIMIT_STATE` /
   `EXECUTION_MOCK_STATE` / `EXECUTION_AUDIT_PATH` /
   `EXECUTION_PROPOSAL_STATE`），不开浏览器、不触网、不碰真平台；
 - 模型：不需要真模型。Main 与 worker 都是脚本化驱动回放；
   harness 注入的 `LLM_API_BASE_URL` 指向不可达地址、`LLM_MODEL` 记为 unused，
   企微凭据是确定性假值（注入的假 SDK 从不真连企微）；
-- 真写：`FSHINE_REAL_COMMIT` 不设、`EXECUTION_ALLOW_REAL` 不设；
-  写链路用例跑的是 mock 下的提案创建/确认/读回，不是真落账。
+- 真写：`EXECUTION_ALLOW_REAL` 不设；写链路用例跑的是 mock 下的提案创建/确认/读回，
+  不是真落账。2026-11-08 起宿主侧不再有 `FSHINE_REAL_COMMIT` 这道写授权闸（已退役，
+  见 debt-ledger 的 D-075/D-197 重登记节）——真平台的落账授权归执行层自己的门。
 
 ### 已知限制：`plan-teaching.test.ts` 的跨仓读与 dummy 回落（#31/#32 定判，2026-11-04）
 

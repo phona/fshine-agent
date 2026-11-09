@@ -54,7 +54,8 @@
 共享替身在 `tests/e2e/harness.ts`，多个文件按主题拆分、并行执行。
 
 只有两样是假的：**模型**（宿主与子 Agent 用脚本化驱动回放）和**执行器**
-（`EXECUTION_EXECUTOR=mock`）。企微投递语义、计划门禁、跨进程账本全是生产代码。
+（`EXECUTION_EXECUTOR=mock`，由执行层平台自己读，宿主不读它）。企微投递语义、计划门禁、
+跨进程账本全是生产代码。
 
 ```bash
 npm test -- tests/e2e/turn-loop
@@ -115,7 +116,8 @@ npm test -- tests/e2e/turn-loop
 
 - 真实企微收发、长连接稳定性、Markdown 渲染（5.2）
 - 真实执行层返回结果的查询一致性与金额一致性
-- 写操作两步确认的真实落账（归执行层仓库持有，需 `FSHINE_REAL_COMMIT=1`；见文末「已移出事项」）
+- 写操作两步确认的真实落账（归执行层仓库持有：写授权/拒绝由执行层自己的门给出，
+  编排层不再持有 `FSHINE_REAL_COMMIT` 那道闸——2026-11-08 裁定，见文末「已移出事项」）
 - 真实模型下的委派合规率：日志关注 `turn_declaration`、`route_declaration_missing` 与 `reference_evidence_injected`（宿主主动回溯的注入条数/截断）
 
 ### 8.4 文件消息的气泡归属（文件收据波，mock 证不了）

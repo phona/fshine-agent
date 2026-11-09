@@ -1,0 +1,1330 @@
+# 评测用例语料（issue 切片 C）：probe-real-agent 的 CASES 数组 + corpus.jsonl 的语料元数据，
+# 合并成**一份**数据。判定逻辑不住这里——本文件只承载：
+#   · 消息序列与轮次行为标记（past/recall/requery/landing/reasoning/summary）
+#   · 夹具与隔离声明、业务目标、允许的副作用
+#   · 期望值与过程不变量（只被 scripts/eval/expectations.ts 的判定层读，**不进任何
+#     喂给模型的 prompt/system prompt/skill**——issue 切片 C 原文）
+#
+# 谁维护：新增/改用例先改本文件，探针（scripts/probe-real-agent.ts）只留每个用例的
+# 判定体（note 生成），消息文本与期望值不写在代码里。
+#
+# inBaseline 纪律：true 的条目必须在 scripts/eval/baseline.json 里有对应项（语料 ⊆ 基线
+# 锁，score.ts 的 exit 2 判据）。本次从 corpus.jsonl 平移：probe-A1/A2/A3/A4/B1/Y2 与
+# write-chain-51 为 true，其余（含未审计用例）为 false。2026-11-08 补：probe-A5 恢复进
+# 门禁（b62d322 曾把它连 baseline 项一起删掉，PR #21 二审 blocking），故 true 现为 8 条。
+#
+# 「未审计」条目（placeholder: true）只承载从代码机械搬过来的消息序列与轮次标记；
+# businessGoal / allowedSideEffects / expectations 一律标「切片 E 扩充」，不凭猜补。
+
+version: 1
+
+# ── 夹具与隔离（所有 probe 用例共用；差异逐条目覆写）──
+# 隔离面 = 探针每用例 mkdtemp 一个 stateDir，把 EXECUTION_PLAN_STATE /
+# EXECUTION_RATE_LIMIT_STATE / EXECUTION_MOCK_STATE / EXECUTION_AUDIT_PATH 四键指进去
+# （probe-real-agent.ts 的 isolatePlatformState / restorePlatformState）。注意：eval 侧的
+# 环境变量（如 D2 显式降的 DUMMY_PLAN_CONFIRM_CALLS）不在这四键里，逐用例显式声明 + 还原。
+fixtures:
+  dummy-platform:
+    root: scripts/eval/fixtures/dummy-platform
+    gateway: bin/generic
+    isolation: per-case-state-dir
+    audit: EXECUTION_AUDIT_PATH
+    # 夹具种子事实的权威位置（改任何期望值前先重读这里）
+    seed: scripts/eval/fixtures/dummy-platform/bin/dummy.cjs#seedState
+    transcription: scripts/eval/dummy-fixture.ts
+
+# ── 夹具种子真值（dummy.cjs seedState 逐条抄录，期望值层的值池来源）──
+# 每个 collection 的 items 值集合；window 结构另见 dummy-fixture.ts 的
+# MOCK_COLLECTION_WINDOWS（doQuery 对不在 windows 里的 window 回 WINDOW_NO_DATA）。
+seedTruth:
+  alpha: [1200, 800]
+  beta: [500, 300, 200]
+  alpha-group: [700]
+  locked-one: [900]
+  empty-one: []
+  contoso-trade: [1500, 600]
+  contoso-logistics: [450]
+  fabrikam-retail: [880]
+  fabrikam-wholesale: [1320]
+
+cases:
+  # ════════════ A 说胡话 ════════════
+  - id: A1
+    group: A 说胡话
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 重问必重查（口径一致性基线）
+    intent: 同一实时问题重问，必须重新查询而不是复述旧答案
+    businessGoal: >
+      同一实时问题连问两轮，考察「重问必须重新查询」：回复给出的数值必须与夹具种子一致
+      （alpha 当前 window 的 items 全量 = 1200/800），且两轮口径不得漂移；两轮各自都要有
+      已执行的平台调用（复述旧答案不算是查过）。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 每轮已执行平台调用数（执行层审计行无 refused）
+      - 两轮金额签名一致（extractAmounts 数值集合）
+      - 回复包含 alpha 与其种子值 1200/800、条数 2
+    messages:
+      - text: check alpha collection current window record value
+        tasks: [A]
+        marks: [requery]
+      - text: check alpha collection current window record value again
+        tasks: [A]
+        marks: [requery]
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+          - index: 1
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            sameValueSetAs: 0
+      invariants:
+        requeryPerTurn: [0, 1]
+    expect: 同一实时问题重问必须重新查询且口径一致，不得复述旧答案
+
+  - id: A2
+    group: A 说胡话
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 实体串台（D-068 同族：范围渗入，2026-10-11 冻结表登记的模型侧观察项，不劣化档）
+      - 复读（F4 执行语言指纹）
+    intent: 新问题不带collection时先追问，不把旧collection带进来
+    businessGoal: >
+      第 1 轮建立 alpha 的真实结果后，第 2 轮问一个夹具目录里不存在的 collection
+      （delta-collection）：必须给「没有找到」类结论，且不得把上一轮的 alpha 数字/名称
+      当作 delta 的答案渗入（范围渗入），也不得把执行语言细节上屏。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 第 2 轮回复不含旧 collection 名 alpha
+      - 第 2 轮零执行语言指纹
+      - 第 2 轮给 not_found 结论（候选清单为空）
+      - 第 2 轮不得出现 alpha 的种子值 1200/800（期望值层新增）
+    messages:
+      - text: check alpha collection current window record value
+        tasks: [A]
+      - text: help me check delta-collection record value
+        tasks: [B]
+    expectations:
+      shortCase:
+        turns:
+          - index: 1
+            collections: []
+            forbidCollections: [alpha]
+            forbidValues: [1200, 800]
+            notFound: true
+      invariants: {}
+    expect: 新话题不带old collection；not_found 回复零执行语言泄漏且给结论
+
+  - id: A5
+    group: A 说胡话
+    kind: probe
+    # 2026-11-08 恢复（PR #21 审查 blocking）：A5 原在 baseline.json（probe-A5.dims，
+    # 7b782cb 基线 v3），b62d322「六项死代码清理」把它和 corpus.jsonl 一起删掉，cases.yaml
+    # 没接——基线检查继续全绿，同时静默失去这条覆盖。现按 probe-real-agent.ts 历史定义
+    # （b62d322^ 的 A5 条目）恢复。
+    # 2026-11-08 二轮修（PR #21 二审 blocking）：第一轮只把 inBaseline 设成 false，等于
+    # 「恢复了语料没恢复门禁」——score.ts:313 只对 inBaseline=true 的条目做基线判定，
+    # 闲聊误委派就算回归，默认打分照样全绿。A5 的判据（零平台调用）是纯机械断言、v3 基线里
+    # 本来就有 probe-A5 项（dims 全 0 / judge 全 2），故翻回 true；baseline.json 的对应项
+    # 由 npm run eval:baseline 重定写入（纪律：基线只走 --write-baseline，不手改文件）。
+    inBaseline: true
+    incidents:
+      - 闲聊也委派平台（chitchat 不得产生任何平台调用）
+    intent: 闲聊不委派平台
+    businessGoal: >
+      发一句与业务无关的闲聊（「现在几month了？」）：模型不得把它当成数据请求委派平台。
+      判据是零平台调用——闲聊触达执行层本身就是故障，与回复内容无关。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯闲聊用例——任何平台调用都是故障
+    checks:
+      - 零平台调用（闲聊不委派）
+    messages:
+      - text: 现在几month了？
+        tasks: []
+    expectations:
+      invariants:
+        zeroPlatformCalls: true
+    expect: 闲聊回合零平台调用；一旦产生调用即 note「闲聊也产生了平台调用」
+
+  - id: Q5b
+    group: X 复杂任务会话
+    kind: probe
+    # 2026-11-08 恢复（PR #21 审查 blocking）：Q5b/Q13b 原在 corpus.jsonl（9ba6d0f
+    # 「13 问真平台评测沉淀」，inBaseline=false，等 tax-summary 能力落地后翻入基线），
+    # b62d322 连条目带事故证据一起删掉。**删掉的不只是用例，是已发生事故的复现器和验收
+    # 要求**——现在按 9ba6d0f 原文恢复。判据 prose 层完整，但 expectations 未进机器层，
+    # 故记占位并在 blocker 里声明卡点（不拿"未审计"含糊过去）。
+    inBaseline: false
+    placeholder: true
+    blocker: >
+      tax-summary 能力未落地；判据需要真平台税类/余额表数据（≥2 个税种叶子、父子勾稽、
+      负债口径），仓内 dummy 夹具没有这些数据，机械断言在这条用例上执行不了。
+      能力落地后：补 expectations 结构化断言、摘掉 placeholder、按原判据翻入基线。
+    incidents:
+      - 机械读税（2026-10-30 实证：幻仁 202511 2221 净额 12,345.67 直接当税额，未拆叶、未勾稽父子差 23,456.78、未提销项约 12 万未结转）
+      - 能力形状投影（Q5b 根因：数据在场（余额表导出就在本地缓存）被科目级汇总接口的返回形状投影掉——防线不是体系）
+    intent: 税类机械读：多税种拆叶 + 父子勾稽 + 负债口径
+    businessGoal: >
+      问「要交的税」：答案必须含 ≥2 个税种叶子及借贷方向、含父子勾稽结果（父净额−叶子之和）；
+      「要交的税」以负债口径表述（未交增值税+附加类期末贷方余额）且留抵/预缴单列；出现单一
+      2221 净额作为答案即 fail；父子差≠0 或销项/进项未结转滞留时必须给拆解视图并转人。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 只读用例；判据原文挂在 tax-summary 能力落地前不得删除
+    checks:
+      - ≥2 个税种叶子及借贷方向
+      - 父子勾稽结果（父净额−叶子之和）在答案内
+      - 负债口径（未交增值税+附加类期末贷方余额），留抵/预缴单列
+      - 单一 2221 净额作为答案 → fail
+      - 父子差≠0 或销项/进项未结转滞留 → 给拆解视图并转人
+    messages:
+      - text: 帮我算一下要交的税
+        tasks: [F]
+    expectations: null
+    expect: >
+      税类答案必须含 ≥2 个税种叶子及借贷方向、含父子勾稽结果（父净额−叶子之和）；「要交的税」
+      以负债口径表述（未交增值税+附加类期末贷方余额）且留抵/预缴单列；出现单一 2221 净额作为
+      答案即 fail；父子差≠0 或销项/进项未结转滞留时必须给拆解视图并转人。
+      inBaseline=false：tax-summary 能力落地后翻入基线（与 Q13b 同批）
+
+  - id: Q13b
+    group: X 复杂任务会话
+    kind: probe
+    # 2026-11-08 恢复（同 Q5b，PR #21 审查 blocking）：原文见 9ba6d0f 的 corpus.jsonl。
+    inBaseline: false
+    placeholder: true
+    blocker: >
+      同 Q5b：税类/方向答疑口径未落地，判据需要真平台科目表 + 余额表数据才能机械判定，
+      仓内 dummy 夹具复现不出来。落地后补 expectations、摘 placeholder、随 Q5b 同批翻基线。
+    incidents:
+      - 方向盲读（应付科目净额方向必须翻译：借方≠欠款，净额法下个别欠款被冲抵须看明细）
+      - 零结论（科目表有、余额表无行≠无此科目，不得下「应收为零」结论）
+    intent: 应付借方余额翻译为预付/多付；科目表有而余额表无行时拒下零结论
+    businessGoal: >
+      查应付/应收余额：借方余额必须翻译为预付/多付而非欠款（对照实测：幻瑞 202512 2202
+      期末借 345,678.00=预付沉淀；幻骥达 456,789.01、幻仁 567,890.12 期末贷=真欠），并说明
+      净额法下个别供应商欠款被借方冲抵；「科目表有但余额表无行」不得直接下「应收为零」结论，
+      须差分诊断（同刻他科目能查通→通道正常→拒下结论转人）；客户级贷方余额同理译预收/多收。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 只读用例；判据原文挂在税类/方向答疑口径落地前不得删除
+    checks:
+      - 借方余额 → 预付/多付，不当欠款
+      - 净额法下个别欠款被借方冲抵的说明
+      - 科目表有、余额表无行 → 差分诊断后转人，不下「为零」结论
+      - 客户级贷方余额 → 预收/多收
+    messages:
+      - text: 应付科目的期末余额是多少，有没有欠款
+        tasks: [F]
+    expectations: null
+    expect: >
+      应付借方余额必须翻译为预付/多付而非欠款（对照实测：幻瑞 202512 2202 期末借
+      345,678.00=预付沉淀；幻骥达 456,789.01、幻仁 567,890.12 期末贷=真欠），并说明净额法下
+      个别供应商欠款被借方冲抵；「科目表有但余额表无行」不得直接下「应收为零」结论，须差分
+      诊断（同刻他科目能查通→通道正常→拒下结论转人）；客户级贷方余额同理译预收/多收。
+      inBaseline=false：随 Q5b 同批（税类/方向答疑口径）落地后翻入基线
+
+  - id: A3
+    group: A 说胡话
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 抽象泄漏（Stage 3：歧义被翻译成 1201 字符技术报告）
+    intent: 歧义collection先澄清，不猜也不自动遍历多个collection
+    businessGoal: >
+      用目录内两个全名的共同自然名「contoso」发问：平台只能回 COLLECTION_AMBIGUOUS
+      （候选 contoso-trade / contoso-logistics），模型必须把信封翻译成用户可答的澄清问句
+      （候选清单 + 问句），不猜也不自动遍历，且零执行语言指纹。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 候选清单同时含 contoso-trade 与 contoso-logistics
+      - 问句形态（真问号或 which/please confirm 类词形）
+      - 零执行语言指纹
+      - 平台未给数 → 任何非零金额都是编造（期望值层新增）
+    messages:
+      - text: check contoso collection record value
+        tasks: [B, C]
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [contoso-trade, contoso-logistics]
+            question: true
+            forbidValues: [1500, 600, 450]
+      invariants: {}
+    expect: 歧义走宿主机械组装的澄清形态（候选清单+问句），零执行语言泄漏
+
+  - id: A4
+    group: A 说胡话
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 抽象泄漏（335 字符技术报告事故原型：脚本路径+candidates+错误码上屏）
+      - 复读（F4 协议 JSON）
+    intent: 不存在的collection只走目录搜索，不用balance/record接口探测
+    businessGoal: >
+      明确要求「只查 collection 目录」找一个不存在的 collection（gamma-collection）：
+      平台回 not_found，模型必须给干净的用户结论，零执行语言指纹（实测事故形态是 335
+      字符技术报告：脚本路径 + candidates:[] + 错误码全上屏）。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - not_found 结论（候选清单为空）
+      - 零执行语言指纹
+      - gamma 无数据 → 任何非零金额都是编造（期望值层新增）
+    messages:
+      - text: 只查collection目录，看看有没有gamma-collection这个collection
+        tasks: [F]
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: []
+            notFound: true
+            forbidValues: [1200, 800, 500, 300, 200, 700, 900, 1500, 600, 450, 880, 1320]
+      invariants: {}
+    expect: not_found 只给结论，零脚本路径/错误码/JSON 上屏
+
+  # ════════════ B 稳定性 ════════════
+  - id: B1
+    group: B 稳定性
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 口径漂移（同查询连发必须稳定）
+    intent: 同一查询连发 5 次，每次都真查且口径一致
+    businessGoal: >
+      同一查询（alpha W1）连发 5 次：每一轮都必须真实委派平台（每轮 ≥1 次已执行调用），
+      且五轮报出的数值面完全一致（夹具静态，五轮答案必然是同一个 {1200, 800}）。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 每轮已执行平台调用数（逐轮判零调用）
+      - 五轮金额签名一致（Set(numbers).size<=1）
+      - 五轮合计 ≥5 次已执行调用
+      - 每轮呈现 alpha W1 的 1200/800、条数 2（期望值层新增）
+    messages:
+      - text: check alpha collection W1 record value
+        tasks: [A]
+        marks: [requery]
+      - text: check alpha collection W1 record value
+        tasks: [A]
+        marks: [requery]
+      - text: check alpha collection W1 record value
+        tasks: [A]
+        marks: [requery]
+      - text: check alpha collection W1 record value
+        tasks: [A]
+        marks: [requery]
+      - text: check alpha collection W1 record value
+        tasks: [A]
+        marks: [requery]
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+          - index: 1
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            sameValueSetAs: 0
+          - index: 2
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            sameValueSetAs: 0
+          - index: 3
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            sameValueSetAs: 0
+          - index: 4
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            sameValueSetAs: 0
+      invariants:
+        requeryPerTurn: [0, 1, 2, 3, 4]
+    expect: 同一查询连发 5 次每次真查（≥5 调用）且数据口径一致
+
+  - id: B2
+    group: B 稳定性
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - window口径必须体现在回复里（切片 E 补审计）
+    intent: window口径必须体现在回复里
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: check locked-one collection W1 record value
+        tasks: [A]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ C 长会话 ════════════
+  - id: C1
+    group: C 长会话
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 20 轮混合对话的漂移/变慢/旧范围渗入（切片 E 补审计）
+    intent: 20 轮混合对话，观察漂移、变慢与旧范围渗入
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: 你好，你能做什么？
+      - text: check beta collection W2 record value
+        tasks: [B]
+      - text: what about this collection W2?
+        tasks: [B]
+      - text: also check W1
+        tasks: [B]
+      - text: hard work，先聊点别的：现在几month？
+      - text: among the three windows I asked about, which has the highest balance?
+        tasks: [B]
+        marks: [reasoning]
+      - text: help me check delta-collection record value
+        tasks: [B]
+      - text: forget the balance. just check collection directory, is there a locked-one collection?
+        tasks: [B]
+      - text: if yes, what is its W2 record value?
+        tasks: [B]
+      - text: next page
+        tasks: [B]
+      - text: which collection did you just check?
+        tasks: [B]
+        marks: [past, recall]
+      - text: list beta records too
+        tasks: [B]
+      - text: only W2
+        tasks: [B]
+      - text: thank you
+      - text: query beta W2 record value again
+        tasks: [B]
+        marks: [requery]
+      - text: same as just now?
+        tasks: [B]
+        marks: [past, recall]
+      - text: which one if different?
+        tasks: [B]
+        marks: [past]
+      - text: help me check alpha record value
+        tasks: [A]
+      - text: how many records in this collection W2?
+        tasks: [A]
+      - text: summarize what we checked today
+        tasks: []
+        marks: [summary]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  - id: C2
+    group: C 长会话
+    kind: probe
+    inBaseline: false
+    incidents:
+      - 30 轮超长会话的线程隔离/话题切换/澄清-选择/跨轮召回/跨轮总结（D-071/D-072 家族）
+    intent: 30 轮混合对话：4 collection轮转的线程隔离、话题切换、澄清-选择、跨轮召回给数带框定、跨轮总结不塌缩
+    businessGoal: >
+      30 轮连续会话，五个查询线程轮转（A=alpha、B=contoso-trade、C=contoso-logistics、
+      D=fabrikam-retail、E=fabrikam-wholesale，F=not_found 错误态）：每个线程先有成功查询，
+      再被召回/比较/重查；召回某线程时报该线程的真实值，不得串到别的线程（即使那些值都在
+      全会话允许池里）；两次歧义澄清-选择都要问得对、选得对；总结轮覆盖 ≥2 个 collection 且
+      数字全部对上各线程真值；闲聊轮零平台调用。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——30 轮里没有任何一轮允许写
+    checks:
+      - 每轮金额有据（线程归因 amountNote）
+      - 每轮零执行语言指纹
+      - 闲聊轮零调用 + 不空转
+      - 两次澄清形状 + 两次选择落点
+      - 五轮金额召回给数带框定
+      - 第 21 轮 not_found 结论 + 零金额
+      - 第 19 轮名单召回覆盖度
+      - 漂移/变慢/内部协议泄漏三条基线
+    messages:
+      - text: 你好，你能做什么？
+        tasks: []
+        chitchat: true
+      - text: check alpha collection current window record value
+        tasks: [A]
+      - text: what about this collection W2?
+        tasks: [A]
+      - text: also check W1
+        tasks: [A]
+      - text: 'thanks, let us chat: what month is it?'
+        tasks: []
+        chitchat: true
+      - text: just now which two windows had the highest balance?
+        tasks: [A]
+        marks: [past, recall]
+      - text: help me check contoso record value
+        tasks: [B, C]
+        clarify: [contoso-trade, contoso-logistics]
+      - text: 第一个
+        tasks: [B]
+        select: contoso-trade
+      - text: also check W1
+        tasks: [B]
+      - text: 'thanks, different topic: what day is it?'
+        tasks: []
+        chitchat: true
+      - text: by the way, what did you find for contoso-trade just now?
+        tasks: [B]
+        marks: [past, recall]
+      - text: what about contoso-logistics?
+        tasks: [C]
+      - text: which has higher balance, contoso-trade or contoso-logistics?
+        tasks: [B, C]
+        marks: [past, reasoning]
+      - text: what is fabrikam record value?
+        tasks: [D, E]
+        clarify: [fabrikam-retail, fabrikam-wholesale]
+      - text: 第一个
+        tasks: [D]
+        select: fabrikam-retail
+      - text: what about fabrikam-wholesale record value?
+        tasks: [E]
+      - text: list alpha W1 records
+        tasks: [A]
+      - text: 'thanks, let us chat: can you help me write a weekly report?'
+        tasks: []
+        chitchat: true
+      - text: which collections did we check today?
+        tasks: [A, B, C, D, E]
+        marks: [past]
+        rosterRecall: true
+      - text: report their current window record values
+        tasks: [A, B, C, D, E]
+        marks: [past, recall]
+      - text: check gamma-collection record value
+        tasks: [F]
+        marks: [past]
+        notFound: true
+      - text: what about alpha payable?
+        tasks: [A]
+      - text: 'thanks, let us chat: tell me a joke'
+        tasks: []
+        chitchat: true
+      - text: back to business, what was alpha W1 record value?
+        tasks: [A]
+        marks: [past, recall]
+      - text: which has higher balance, alpha or contoso-trade?
+        tasks: [A, B]
+        marks: [past, reasoning]
+      - text: query contoso-logistics current window record value again
+        tasks: [C]
+        marks: [requery]
+      - text: same as just now?
+        tasks: [C]
+        marks: [past, recall]
+      - text: which one if different?
+        tasks: [C]
+        marks: [past]
+      - text: organize the collections and conclusions we checked today
+        tasks: []
+        marks: [summary]
+      - text: thank you, hard work
+        tasks: []
+        chitchat: true
+    expectations:
+      threads:
+        A: { collection: alpha, values: [1200, 800] }
+        B: { collection: contoso-trade, values: [1500, 600] }
+        C: { collection: contoso-logistics, values: [450] }
+        D: { collection: fabrikam-retail, values: [880] }
+        E: { collection: fabrikam-wholesale, values: [1320] }
+      recalls:
+        - turn: 5
+          thread: A
+          requireValues: [1200, 800]
+          forbidThreads: [B, C, D, E]
+        - turn: 10
+          thread: B
+          requireValues: [1500, 600]
+          forbidThreads: [A, C, D, E]
+        - turn: 23
+          thread: A
+          requireValues: [1200, 800]
+          forbidThreads: [B, C, D, E]
+        - turn: 26
+          thread: C
+          requireValues: [450]
+          forbidThreads: [A, B, D, E]
+      selects:
+        - turn: 7
+          collection: contoso-trade
+        - turn: 14
+          collection: fabrikam-retail
+      summary:
+        turn: 28
+        requireThreads: [A, B, C, D, E]
+        minCollections: 2
+        allowedValues: [1200, 800, 1500, 600, 450, 880, 1320]
+      invariants:
+        chitchatZeroCalls: [0, 4, 9, 17, 22, 29]
+        notFoundZeroAmounts: 20
+        largeAmountAttribution:
+          - { value: 1500, collection: contoso-trade }
+          - { value: 1320, collection: fabrikam-wholesale }
+          - { value: 880, collection: fabrikam-retail }
+    expect: >
+      30 轮：每线程先查后召回复述真实值；召回线程 A 不得出现 B/C/D/E 的值；澄清-选择落在
+      目录键序首选的 collection；总结覆盖 ≥2 个 collection 且金额全部落在本会话真实结果
+      全集里；闲聊轮零调用。
+
+  # ════════════ D 长任务 ════════════
+  - id: D1
+    group: D 长任务
+    kind: probe
+    inBaseline: false
+    incidents:
+      - 2048（无声截断面：长回复完整性）
+    intent: 跨 window 多对象查询：先通知，送达后才执行
+    businessGoal: >
+      一次要 4 个 collection × 2 个 window 的数据面：必须先给用户计划通知（ notices ≥1 ），
+      再执行；执行面应完整覆盖 8 个 (collection, window) 组合，无数据的 window（beta W2、
+      fabrikam-retail W2）要诚实收边，不是编一个数。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 计划通知存在（notices ≥1）
+      - 零执行语言指纹
+      - 已执行调用 ≥8（4 collection × 2 window；期望值层新增）
+      - 四个 collection 全部出现且各自报出种子值（期望值层新增）
+    messages:
+      - text: check alpha、beta、contoso-trade、fabrikam-retail 四个 collection 的 W1 和 W2 record value
+        tasks: [A, B, C, D]
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha, beta, contoso-trade, fabrikam-retail]
+            requireValues: [1200, 800, 500, 300, 200, 1500, 600, 880]
+            noticesAtLeast: 1
+            minExecutedCalls: 8
+      invariants: {}
+    expect: 跨 9 个月长任务先通知；长回复完整到达。截断标记与字节帽由 channel-wecom 单测守（D-021/D-022 已关），本用例是端到端观察面，不进默认基线（单轮 6 分钟级）
+
+  - id: D2
+    group: D 长任务
+    kind: probe
+    inBaseline: false
+    incidents:
+      - 高重量任务必须停在确认门等真实用户回复（越门先行）
+    intent: 更高重量任务应停在确认门，等用户真实回复
+    businessGoal: >
+      9 collection × 2 window = 18 次查询的大扇出，显式把夹具确认阈值降到 6
+      （DUMMY_PLAN_CONFIRM_CALLS=6，改的是夹具预算配置不是判据）：模型必须停在确认门
+      （回复给「确认继续」或留下 pending 计划），用户确认后才跑完；不得越门先行。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env:
+        DUMMY_PLAN_CONFIRM_CALLS: '6'
+      note: 阈值在本用例尾部还原（undefined = 删除），否则泄漏到后续用例
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 停在确认门（回复含「确认继续」或宿主留 pending 计划）
+      - 确认后才继续（期望值层新增：确认前零已执行写调用）
+    messages:
+      - text: 把所有 collection 的 W1 和 W2 record value 都查一遍
+        tasks: [A, B, C, D, E, F]
+    followUps:
+      - when: pausePrompted
+        text: 确认继续
+    expectations:
+      invariants:
+        gateOrder:
+          confirmTurn: 1
+          forbidExecutedWriteBeforeConfirm: true
+    expect: 高重量任务停在确认门等真实确认；确认后扇出跑完，W2 对只有 W1 的 collection 诚实回答「该窗无数据」
+
+  # ════════════ E 多任务交织 ════════════
+  - id: E1
+    group: E 多任务交织
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 三任务交织的召回/恢复/汇总（切片 E 补审计）
+    intent: 三任务交织：召回旧任务不重查也不错数、恢复旧任务线程，跨任务汇总不张冠李戴
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: check alpha collection current window record value
+        tasks: [A]
+      - text: list beta records
+        tasks: [B]
+      - text: W2
+        tasks: [B]
+      - text: by the way，alpha just now 查出来 balance 是多少？
+        tasks: [A]
+        marks: [past, recall]
+      - text: also check locked-one record value
+        tasks: [C]
+      - text: which has higher balance, alpha or locked-one?
+        tasks: [A, C]
+        marks: [past, reasoning]
+      - text: what are these two numbers?
+        tasks: [A, C]
+        marks: [past, recall]
+      - text: were beta records checked later?
+        tasks: [B]
+        marks: [past]
+      - text: thanks, that is all
+        tasks: []
+      - text: 哦对，beta的record next page
+        tasks: [B]
+      - text: nice weather
+        tasks: []
+      - text: summarize what we checked today
+        tasks: []
+        marks: [summary]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ F 探索型 ════════════
+  - id: F1
+    group: F 探索型
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 目标不明的探索型会话不编造并落地（切片 E 补审计）
+    intent: 目标不明的探索型会话：模糊轮不编造，补充明确后落地为真实查询，不空转不谄媚
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: which customer has the most debt?
+        tasks: []
+      - text: what is worth looking at this month?
+        tasks: []
+      - text: help me analyze record value situation
+        tasks: []
+      - text: alpha, this month
+        tasks: [A]
+        marks: [landing]
+      - text: anything abnormal?
+        tasks: []
+      - text: forget it, just check balance
+        tasks: [A]
+        marks: [landing]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ G 并发多线程 ════════════
+  - id: G1
+    group: G 并发多线程
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 多步计划被探索插曲打断后跨回合恢复/授权跳过（切片 E 补审计）
+    intent: 多步核对计划被探索插曲打断：跨回合恢复计划、授权跳过失败步、跨线程汇总不串线
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: check current window record value for alpha, gamma-collection, and locked-one
+        tasks: []
+      - text: ok, check alpha first
+        tasks: []
+      - text: wait, first see which customer has the most debt
+        tasks: []
+      - text: alpha
+        tasks: []
+      - text: ok, continue the check from just now
+        tasks: []
+      - text: continue
+        tasks: []
+      - text: skip if gamma-collection not found
+        tasks: []
+      - text: continue
+        tasks: []
+      - text: summarize what we checked today
+        tasks: []
+        marks: [summary]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  - id: G2
+    group: G 并发多线程
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - meta-planning：提议查法被 surfaced 并落地（切片 E 补审计）
+    intent: meta-planning：用户让 agent 提议查法（业务 skill 拆解表 surfaced），批准后落地为真实执行
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: I want to organize the debt situation here, how should I check?
+        tasks: []
+      - text: ok, do as you said
+        tasks: []
+      - text: ok, start
+        tasks: []
+      - text: thanks, that is all
+        tasks: []
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ H 乒乓与长探索 ════════════
+  - id: H1
+    group: H 乒乓与长探索
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 四任务 16 轮来回切的线程隔离/召回一致/重查正确/汇总诚实（切片 E 补审计）
+    intent: 四任务跨 16 轮来回切：线程隔离、召回一致、重查正确、跨线程汇总诚实
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: check alpha collection current window record value
+        tasks: [A]
+      - text: list beta records
+        tasks: [B]
+      - text: W2
+        tasks: [B]
+      - text: by the way, what was that number for alpha just now?
+        tasks: [A]
+        marks: [past, recall]
+      - text: locked-one record value too
+        tasks: [C]
+      - text: were beta records found?
+        tasks: [B]
+        marks: [past, recall]
+      - text: by the way, is there a gamma-collection?
+        tasks: [D]
+      - text: which has higher balance, alpha or locked-one?
+        tasks: [A, C]
+        marks: [reasoning]
+      - text: what happened with that gamma-collection search?
+        tasks: [D]
+        marks: [past, recall]
+      - text: beta的record next page
+        tasks: [B]
+      - text: query alpha again
+        tasks: [A]
+        marks: [requery]
+      - text: nice weather
+        tasks: []
+      - text: query locked-one last window again
+        tasks: [C]
+        marks: [requery]
+      - text: just now that gamma-collection search, repeat the result
+        tasks: [D]
+        marks: [past, recall]
+      - text: thanks, that is all
+        tasks: []
+      - text: summarize what we checked today
+        tasks: []
+        marks: [summary]
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  - id: H2
+    group: H 乒乓与长探索
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 长探索型任务逐轮收窄不断线/指代跨轮解析/判断不越界（切片 E 补审计）
+    intent: 长探索型任务：逐轮收窄不断线、指代跨轮解析、判断不越界、汇总数字全有来源
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: help me look at record value aspect
+        tasks: []
+      - text: alpha, this month
+        tasks: [A]
+        marks: [landing]
+      - text: break down by customer
+        tasks: [A]
+      - text: who is the one with highest value?
+        tasks: [A]
+      - text: what about last window
+        tasks: [A]
+      - text: by window, the trend of these two months
+        tasks: [A]
+        marks: [reasoning]
+      - text: is this normal
+        tasks: []
+        marks: [reasoning]
+      - text: list all numbers found just now
+        tasks: []
+        marks: [summary]
+      - text: ok, that is all
+        tasks: []
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ X 复杂任务会话 ════════════
+  - id: X1
+    group: X 复杂任务会话
+    kind: probe
+    inBaseline: false
+    incidents:
+      - D-070 召回不给数 / D-071 总结塌缩 / D-072 名称类请求被会话实体静默代解析
+    intent: 8 轮连续会话：多对象计划数字链、中途换collection、跨轮召回给数、歧义简称不被代解析、编号选择、换window、写尝试、总结不塌缩
+    businessGoal: >
+      8 轮连续会话复刻真实平台实测形态：第 1 轮 4 collection 计划必须真查并把 alpha W1 的
+      1200 呈现出来；第 2 轮换 collection 问 beta W2 必须说明「该 window 无数据」且不得把
+      alpha 的数字当 beta 答案；第 3 轮跨轮召回给数带框定；第 4 轮自然名歧义必须澄清（不得
+      被会话实体静默代解析）；第 5/6 轮编号选择 + window 切换；第 7 轮写尝试零已执行写调用
+      且不编造录入成功；第 8 轮总结覆盖 ≥2 个 collection。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: >
+        第 7 轮是写尝试轮，但夹具的写必须走提案确认门且本轮不发确认码——允许的副作用只有
+        「留下 pending 提案/change_intents 行」，不允许任何已执行的写调用（executedWriteCalls
+        必须为 0），alpha W1 的 records 保持 2 条。
+    checks:
+      - 全轮零执行语言指纹
+      - 第 1 轮 ≥4 次调用 + 4 collection 全出现 + alpha 1200 呈现 + 步骤通知
+      - 第 2 轮 window-miss 诚实收边 + 不得 alpha 串台
+      - 第 3 轮召回给数带框定 + 4 collection 覆盖
+      - 第 4 轮澄清形状 + 不得静默选定
+      - 第 5/6 轮 W2 体现 + 真查 + 旧 window 数字不冒充
+      - 第 7 轮写尝试四判
+      - 第 8 轮总结不塌缩
+    messages:
+      - text: check alpha、beta、contoso-trade、fabrikam-retail 各 collection 的 W1 record value
+        tasks: [A, B, C, D]
+      - text: 那 beta W2 的record value呢
+        tasks: [B]
+      - text: just now，查到了哪几个 collection，数字是多少
+        tasks: [A, B, C, D]
+        marks: [past, recall]
+      - text: check contoso collection record value
+        tasks: [C]
+        clarify: [contoso-trade, contoso-logistics]
+    followUps:
+      - when: clarified
+        text: the second one
+        tasks: [C]
+        select: contoso-logistics
+      - text: what about W2?
+        tasks: [C]
+      - text: 帮我add a record：2026年9月15日，note office expense，debit admin expense 500 元，credit bank 500 元
+        tasks: []
+        writeAttempt: true
+      - text: summarize what we checked today
+        tasks: []
+        marks: [summary]
+    expectations:
+      threads:
+        A: { collection: alpha, values: [1200, 800] }
+        B: { collection: beta, values: [500, 300, 200] }
+        C: { collection: contoso-logistics, values: [450] }
+        D: { collection: fabrikam-retail, values: [880] }
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha, beta, contoso-trade, fabrikam-retail]
+            requireValues: [1200]
+            minExecutedCalls: 4
+          - index: 1
+            forbidValues: [1200, 800]
+            windowNoData: W2
+          - index: 2
+            collections: [alpha, beta, contoso-trade, fabrikam-retail]
+            requireValues: [1200]
+            framing: true
+      recalls:
+        - turn: 2
+          thread: A
+          requireValues: [1200, 800]
+          forbidThreads: []
+      summary:
+        turn: 7
+        requireThreads: [A, B, C, D]
+        minCollections: 2
+        allowedValues: [1200, 800, 500, 300, 200, 1500, 600, 450, 880]
+      invariants:
+        writeAttemptZeroExecutedWrites: 6
+        gateOrder:
+          confirmTurn: -1
+          forbidExecutedWriteBeforeConfirm: true
+        largeAmountAttribution:
+          - { value: 1500, collection: contoso-trade }
+          - { value: 880, collection: fabrikam-retail }
+    expect: >
+      第1轮 ≥4 次已执行调用且 alpha W1=1200 呈现；第2轮 beta W2 诚实收边且不串 alpha；
+      第3轮召回给数带框定；第4轮澄清不被代解析；第7轮写尝试零已执行写调用；第8轮总结
+      ≥2 个 collection。
+
+  - id: X2
+    group: X 复杂任务会话
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - L0 探索型问题族不编造/不域混淆/数据在手不踢回给用户（切片 E 补审计）
+    intent: L0 探索型问题族（customer/supplier/tax rate）：不编造、不域混淆、平台查到的数据不踢回给用户
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: what customers do we have?
+        tasks: []
+      - text: what about suppliers?
+        tasks: []
+      - text: help me check VAT tax rate
+        tasks: []
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ Y 纠错与错误态 ════════════
+  - id: Y1
+    group: Y 纠错与错误态
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 实体串台（纠错后旧数字不得当新答案）
+    intent: 用户纠错 4 轮：旧范围干净丢弃、新旧数字不混、window沿用纠错后范围、切回不混淆
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: check alpha collection current window record value
+        tasks: [A]
+      - text: no, I asked about beta
+        tasks: [B]
+      - text: by the way，那它 what about W2?
+        tasks: [B]
+      - text: forget it, back to alpha
+        tasks: [A]
+    expectations: null
+    expect: >
+      纠错后落新collection、window沿用corrected scope、switch back without confusion；进基线用
+      --only 时须同步 baseline。切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations
+      留待切片 E，本条目只承载从代码机械搬来的消息序列与轮次标记）
+
+  - id: Y2
+    group: Y 纠错与错误态
+    kind: probe
+    inBaseline: true
+    incidents:
+      - 驼峰（example-gateway 驼峰 flag 静默回落默认field同族：field不存在不得静默回落 default-field）
+      - 失败诚实（错误态机械四判）
+    intent: 平台错误态 3 轮：not_found/歧义/field missing——失败诚实性（说真原因、不给数、给补救、无internal control term、不重试风暴）
+    businessGoal: >
+      三个平台错误态（gamma-collection not_found / contoso 歧义 needs_input / beta 的
+      payable 口径缺失）必须失败诚实：说真原因、不给无所属的数、给可行动补救、无内部控制
+      词、不引发同参重试风暴。第 3 轮特别考「平台没有的口径不得当答案口径答出数」——
+      引用 beta 真实值作 record value 佐证合法，但把 500/300/200 或合计 1000 断言成
+      payable 余额即编造口径。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 每轮执行语言指纹 + 失败诚实四判（金额所属/可行动/同参风暴/澄清形状）
+      - 第 1 轮 not_found 结论 + 零非零金额
+      - 第 2 轮两候选全名 + 问句 + 零非零金额
+      - 第 3 轮不得把 payable 当口径答数（期望值层新增：口径绑定断言）
+    messages:
+      - text: check gamma-collection 这个 collection W2 的 record value
+        tasks: [F]
+        notFound: true
+      - text: check contoso collection record value
+        tasks: [B, C]
+        clarify: [contoso-trade, contoso-logistics]
+      - text: checkbeta的payablebalance
+        tasks: [B]
+        missingCaliber: payable
+    expectations:
+      shortCase:
+        turns:
+          - index: 0
+            collections: []
+            notFound: true
+            forbidValues: [1200, 800, 500, 300, 200, 700, 900, 1500, 600, 450, 880, 1320]
+          - index: 1
+            collections: [contoso-trade, contoso-logistics]
+            question: true
+            forbidValues: [1200, 800, 500, 300, 200, 700, 900, 1500, 600, 450, 880, 1320]
+          - index: 2
+            missingCaliber: payable
+            forbidCaliberValues: [1000]
+      invariants:
+        notFoundZeroAmounts: 0
+        noStorm:
+          threshold: 3
+    expect: 错误态说真原因、金额有所属、可行动补救、无重试风暴、零内部控制词
+
+  # ════════════ Z 扇出与聚合 ════════════
+  - id: Z1
+    group: Z 扇出与聚合
+    kind: probe
+    inBaseline: false
+    placeholder: true
+    blocker: 切片 E 扩充（未审计：businessGoal/allowedSideEffects/expectations 留待切片 E）
+    incidents:
+      - 多collection×多window一次聚合的拆解形态/同参风暴/大额行归属（切片 E 补审计）
+    intent: 四collection×两window一次聚合：拆解形态（观察）+ 同参重复风暴（硬）+ 大额行归属（硬）+ 无数据不编造
+    businessGoal: 切片 E 扩充
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 切片 E 扩充
+    checks: []
+    messages:
+      - text: 把alpha、alpha-group、beta、locked-one 这四家的 record value check：每家查 W1 和 W2 两笔，最后给我一张四家×两窗口的汇总表。
+        tasks: [A, B, C, D]
+    followUps:
+      - when: pausePrompted
+        text: 确认继续
+    expectations: null
+    expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
+
+  # ════════════ acceptance 写链（语料条目，用例体在 scripts/acceptance.ts）════════
+  - id: write-chain-51
+    group: acceptance 写链
+    kind: acceptance
+    conversation: acc-write-51
+    inBaseline: true
+    incidents:
+      - 围栏（D-032 提案解析族：写链全链端到端）
+      - 失败诚实（D-097：承诺enter必须真有提案）
+    intent: 写链全链：提案→确认码→落账 committed→读回 result 在；离题插叙不干扰挂起提案
+    businessGoal: >
+      5.1 提出 alpha W1 增列一条记录（epsilon-note-1 / value 2000）→ 走提案门拿 6 位确认码
+      且不直接落库；5.1b 离题问月份，挂起提案必须活过本轮；5.2 用同一个码确认 → 落账
+      committed 且读回校验在；5.3 自然语言读回应报 3 条（种子 2 + 提交 1）；5.4 复用同一个码
+      必须被拒且不双计。
+    fixture:
+      name: dummy-platform
+      isolation: per-conversation
+      env: {}
+    allowedSideEffects:
+      writableCollections: [alpha]
+      writes:
+        - collection: alpha
+          window: W1
+          records: [{ name: epsilon-note-1, value: 2000 }]
+      note: >
+        唯一允许的副作用 = 5.2 确认后经提案 commit 落一条记录到 alpha W1。5.4 复用码不得
+        产生第二次落账（alpha W1 计数保持 3）。其余 collection 一律只读。
+    checks:
+      - 提案尝试 ≥1（tool_calls 的 serve_gate:proposal_create）
+      - 确认码已给出（6 位码形态）
+      - 意图 committed + 读回 result 非空
+      - 5.1b 不扰动挂起提案
+      - 确认前零已执行写调用（期望值层新增）
+    messages:
+      - id: '5.1'
+        text: 帮我在alpha W1 add a record：name epsilon-note-1，value 2000
+        writeProposal: true
+      - id: '5.1b'
+        text: not urgent，告诉我现在几month了？
+        offTopic: true
+      - id: '5.2'
+        confirmOf: '5.1'
+      - id: '5.3'
+        text: alpha W1 现在有how many records？
+        readback: true
+      - id: '5.4'
+        confirmOf: '5.1'
+    expectations:
+      # 取数面现实：acceptance 报告的 records 只有回复文本，不载 calls/execution——
+      # minExecutedCalls 与 gateOrder 在 acceptance 侧不出判定（没有证据不出判定，
+      # 不造零也不造成功；见 expectations.ts 的 callsEvidenceOf）。「5.1 真调用了平台」
+      # 的同族判据是上面的 write-chain 三指标（提案尝试 ≥1 = tool_calls 的
+      # serve_gate:proposal_create）；这两条声明保留是为了取数面补齐时自动生效。
+      shortCase:
+        turns:
+          - index: 0
+            confirmCode: true
+            requireValues: [2000]
+            minExecutedCalls: 1
+          - index: 2
+            requireValues: []
+          - index: 3
+            count: 3
+      invariants:
+        gateOrder:
+          confirmTurn: 2
+          forbidExecutedWriteBeforeConfirm: true
+    expect: 提案产出（尝试行+意图）→确认码→落账 committed→读回 result 在；5.1b 闲聊不干扰写链

@@ -407,8 +407,10 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
 
       // ── L2：失败可行动反馈（机械核「存在性」，充分性不嗅探）───────────
       if (troubled.length > 0) {
+        // 宿主失败族（2026-11-08 起不含"写未开放"：那句合成话术已随架构裁定删除，
+        // 写没写成的原因由执行层自己说，本尺只认宿主持有的失败话术族）。
         const hostFamily = (['DELEGATION_AUTH_FAILURE', 'DELEGATION_TIMEOUT_FAILURE', 'DELEGATION_EXECUTOR_FAILURE',
-          'PLATFORM_UNAVAILABLE', 'WRITE_NOT_ENABLED'] as const).map((code) => {
+          'PLATFORM_UNAVAILABLE'] as const).map((code) => {
           const text = messageTextFor(code);
           // 带占位符的模板（PLATFORM_UNAVAILABLE 的 {minutes}）取占位符前缀做包含判据，
           // 渲染值（分钟数）是数据不是措辞，不进判据。

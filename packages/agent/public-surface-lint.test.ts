@@ -292,10 +292,13 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
     // ③ README 含「不开浏览器、不触网」
     expect(readme.includes('不开浏览器、不触网'), 'README 缺「不开浏览器、不触网」措辞——mock 联调节的读者入口消失').toBe(true);
 
-    // ④ README 含 mock 保险丝说明（执行层治理变量名以执行层声明为准，接受 EXECUTION_EXECUTOR 或 DZ_EXECUTOR）
+    // ④ README 含 mock 执行器说明（执行层治理变量名以执行层声明为准，接受 EXECUTION_EXECUTOR 或 DZ_EXECUTOR）。
+    // 2026-11-08 起不再要求 README 提 FSHINE_REAL_COMMIT：那是宿主侧的落账授权开关，
+    // 已随"编排层不判这个部署允不允许写"的裁定删除——README 只说明执行层自己的 mock 开关，
+    // 并明说编排层不读它、写授权归执行层。
     const hasMockFuse = readme.includes('EXECUTION_EXECUTOR=mock') || readme.includes('DZ_EXECUTOR=mock');
-    expect(hasMockFuse, 'README 缺 mock 执行器保险丝说明（执行层治理变量名以该执行层声明为准）').toBe(true);
-    expect(readme.includes('FSHINE_REAL_COMMIT'), 'README 缺 FSHINE_REAL_COMMIT 保险丝说明').toBe(true);
+    expect(hasMockFuse, 'README 缺 mock 执行器说明（执行层治理变量名以该执行层声明为准）').toBe(true);
+    expect(readme.includes('编排层不读它'), 'README 未说明 mock 开关由执行层自己读取（宿主不再据此判写权限）').toBe(true);
   });
 
   it('业务用例与口径断言移出守卫：manual-test-wecom.md 业务词命中 = 0（C4 整篇重写后移除 .skip()）', () => {
@@ -370,7 +373,10 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
   const harnessContent = readFile('tests/e2e/harness.ts');
   const bridgeKeys = ['EXECUTION_EXECUTOR', 'DZ_EXECUTOR', 'DZ_ALLOW_REAL'];
   const bridgeMissing = bridgeKeys.filter(k => !harnessContent.includes(k));
-  const prodFiles = ['packages/agent/src/platform-mock.ts', 'apps/server/runtime-mode.ts', '.env.example'];
+  // 2026-11-08：platform-mock.ts（宿主读 EXECUTION_EXECUTOR/FSHINE_REAL_COMMIT）与
+  // runtime-mode.ts（启动日志汇总 mock/commit 状态）已整模块删除，判据源归执行层，
+  // 这里只扫仍然存在的生产/src 面。
+  const prodFiles = ['packages/agent/src/context.ts', 'packages/agent/src/pi-coding-driver.ts', '.env.example'];
   const prodDzHits = prodFiles.reduce((n, f) => n + (readFile(f).match(/DZ_EXECUTOR|DZ_ALLOW_REAL/g) ?? []).length, 0);
   if (bridgeMissing.length > 0 || prodDzHits > 0) {
     failures.push(`d) env 命名空间漂移未按既定方案收口：harness 桥接缺 ${bridgeMissing.join('/') || '无'}；生产/src 与 .env.example 有 DZ_* 命中 ${prodDzHits} 处`);

@@ -20,5 +20,5 @@
       "@fshine/channel-wecom": ["packages/channel-wecom/src/index.ts"]
     }
   },
-  "include": ["packages/**/*.ts", "apps/**/*.ts"]
+  "include": ["packages/**/*.ts", "apps/**/*.ts", "scripts/**/*.ts"]
 }

@@ -23,9 +23,6 @@ import {
   createPiCodingTurnDriver,
   createPiTurnDriver,
   createTaxAgentRuntime,
-  ensureMockStatePath,
-  isCommitEnabled,
-  isPlatformMock,
   loadOperationArgSpecs,
   loadProposalSchema,
   reviewProposalWithDriver,
@@ -108,15 +105,6 @@ export interface ServerAssemblyOverrides {
   /** Isolated tool-free driver for Context State extraction. Defaults to `driver`. */
   contextModelDriver?: TurnDriver;
   memoryCandidateExtractor?: CandidateExtractor;
-  /**
-   * 平台写开放声明的显式覆盖（变更项 ⑧）。缺省按生产规则由 isCommitEnabled(env) 派生；
-   * 离线 e2e 用它钉"真平台未置 FSHINE_REAL_COMMIT"形态（mock 之下该形态不可达，
-   * 执法流程的接线仍要可验）。派生规则本身由 proposal-flow 的 isCommitEnabled 语义组钉住。
-   */
-  writeEnabled?: boolean;
-  /** 落账声明覆盖（D-080 e2e 用）：确认时点复核的是这一位而非 writeEnabled——提案成立
-   * ≠落账放行。缺省按生产规则 isCommitEnabled(env) 派生，与 writeEnabled 同源但判点不同。 */
-  proposalCommitEnabled?: boolean;
   /** Inject the WeCom SDK client (offline harness); defaults to the real WSClient. */
   channelClientFactory?: () => SdkClientLike;
   /** Inject the whole channel (offline harness):装配硬前提（D-126/D-134）的失败形态注入用。 */
@@ -211,11 +199,6 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
   const gateSecret = newGateSecret();
   const planActivationSecret = env['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
-
-  const mockStatePath = platformRoot ? ensureMockStatePath(platformRoot, env) : null;
-  if (isPlatformMock(env)) {
-    console.log(JSON.stringify({ event: 'platform_mock_enabled', state: mockStatePath, commitEnabled: true }));
-  }
 
   // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
   const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
@@ -319,11 +302,6 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     executionGate: platformExecutionGate,
     // C5：active profile 派生（单 profile → 其键；零/多 → undefined，消费方 fail-closed）。
     profileId: activeProfileId,
-    // 写开放的执法判据（变更项 ⑧）：平台侧声明，isCommitEnabled 单独派生（mock ⇒ 写链路
-    // 全放开；真平台 ⇒ 还须显式 FSHINE_REAL_COMMIT=1）。worker 驱动的计划扫描与本层的
-    // 提案/确认路径都以这一位为准——委托主体自持的 capabilities 保留但执法路径不读。
-    // e2e 覆盖（overrides.writeEnabled）只换取值来源，不换派生规则。
-    writeEnabled: overrides.writeEnabled ?? isCommitEnabled(env),
     // 写路径隔离复核（第 2 包生产接线）：装配必须注入真实复核驱动，
     // 未注入时提案创建路径直接失败（不再记 skipped 就继续）。
     // 驱动 = contextModelDriver（隔离回合、无工具，与上下文抽取同一驱动面），
@@ -335,12 +313,23 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
-      // 提案落账后端（B 波 B4，C 波后唯一的落账路径；B 波那个"落账后端接不接"的开关已
-      // 退役，后端恒接）：是否放行由 isCommitEnabled 单独派生——mock ⇒ 全链路放开；真平台 ⇒
-      // 还须显式 FSHINE_REAL_COMMIT=1，否则确认码只到达"确认收到但不写"（confirm_held），
-      // 零写入。没有第二级接线开关可串，真平台的那道闸因此也少一个能被人忘掉的环节。
-      proposalCommitRunner: createProposalCommitRunner({ platformRoot, gateSecret }),
-      proposalCommitEnabled: overrides.proposalCommitEnabled ?? isCommitEnabled(env),
+      // 提案落账后端（B 波 B4，C 波后唯一的落账路径）：配了平台根就恒定接线。这里**没有**
+      // "这个部署允不允许落账"的开关位（2026-11-08 架构裁定）——写能不能真落地归执行层，
+      // 由平台自己的 commit 门裁决并给出拒绝 / warning / dryrun 提示，宿主经既有失败链路
+      // 如实转述。宿主只承诺自己确实做到的事（后端已注入），做不到就如实说配置故障。
+      //
+      // gateway 必须一起传（2026-11-08 修，PR #21 过程中定位）：C7b 起
+      // `loadOperationProtocols(root, gateway)` 对未声明/非法的 gateway **一律降级空表**
+      // （operation-labels.ts，绝不回退遗留网关名），而空表 ⇒ `operationForProtocol` 找不到
+      // `proposal.commit` 角色 ⇒ `refuseCommit` ⇒ 每条写链都死在 commit 这一步
+      // （acceptance 5.2 实跑 `change_intent_commit_failed`、意图 status=failed、基线
+      // write-chain-51 从 committed:true 掉到 false）。同文件的 schema loader(:312)、
+      // plan 确认接线(:330)、operation 规格(:368) 都传了 gateway，只漏了这一处。
+      proposalCommitRunner: createProposalCommitRunner({
+        platformRoot,
+        gateSecret,
+        ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
+      }),
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample(activeProfile?.gateway)（C7b 起
       // gateway 未声明即抛，宿主不持任何实例网关名缺省；形状与平台 plan schema 的一致性

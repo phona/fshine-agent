@@ -38,6 +38,7 @@
 - `docs/perf-baseline.md`——性能基线
 - `docs/methodology.md`——方法论与验收纪律
 - `docs/rule-landing.md`——规则落点索引
+- `docs/eval-mechanism-registry.md`——eval harness 机制登记表（每个机制防什么、拆了会怎样、成本；含审计结论逐条核对记录）
 - `docs/roadmap.md`——路线图
 - `docs/artifacts.md`——产物清单
 - `docs/interactive-session-plan.md`——会话交互方案

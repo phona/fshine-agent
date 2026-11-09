@@ -225,7 +225,16 @@ function loadPlans() { const s = loadJson(statePaths().planFile, null); return (
 function savePlans(s) { saveJson(statePaths().planFile, s); }
 function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
-function audit(row) { const f = statePaths().auditFile; if (!f) return; try { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n'); } catch { /* audit is best-effort */ } }
+// 审计写失败要响（2026-11-08）：audit 是执行层证据的唯一来源（评测按 EXECUTION_AUDIT_PATH
+// 的行数与 refused 判定），写失败还静默继续 = 调用无痕，评测只能得出 INCONCLUSIVE 甚至
+// 假绿。改为失败即抛——外层 main().catch 会把栈打到 stderr 并以非零码退出，这次调用
+// 因此整体失败（fail-closed），绝不出现"执行了但没留痕"的成功。
+function audit(row) {
+  const f = statePaths().auditFile;
+  if (!f) return;
+  fs.mkdirSync(path.dirname(f), { recursive: true });
+  fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
+}
 function emit(op, status, data, error) {
   const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}) } : null };
   process.stdout.write('RESULT ' + JSON.stringify(envelope) + '\n');
@@ -391,7 +400,13 @@ function doProposalCommit(opName, args) {
   if (new Date(rec.expiresAt).getTime() < Date.now()) { process.stderr.write('PROPOSAL_REFUSE proposal expired\n'); emit(opName, 'failed', null, errObj('PROPOSAL_EXPIRED', rec.expiresAt)); return 3; }
   const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
   const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
-  if (secret && !verifyProposalToken(token, proposalId, rec.expiresAt, secret)) { process.stderr.write('PROPOSAL_REFUSE proposal token untrusted\n'); emit(opName, 'failed', null, errObj('PROPOSAL_TOKEN_UNTRUSTED', 'Token does not match this proposal or has expired')); return 3; }
+  // Fail-closed（2026-11-08 修）：secret 缺失不再跳过整道门。宿主只把 gate secret 程序化
+  // 注入给自己的 commit runner（从不进 process.env），worker bash 直调时恰好没有 secret——
+  // 旧写法 `secret && !verify(...)` 恰好在那条路上把门整个跳过，无令牌也能提交。现在
+  // secret 为空或令牌不符一律拒（verifyProposalToken 对 !secret || !token 返回 false）。
+  // 注意：dummy.commit 直提路径（无提案状态）仍是另一套 `if (secret)` 有门才验的契约，
+  // 两者不一致已登记 debt-ledger，本轮不合并。
+  if (!verifyProposalToken(token, proposalId, rec.expiresAt, secret)) { process.stderr.write('PROPOSAL_REFUSE proposal token untrusted\n'); emit(opName, 'failed', null, errObj('PROPOSAL_TOKEN_UNTRUSTED', 'Token does not match this proposal or has expired')); return 3; }
   // Pre-commit readback baseline, then apply, then post-commit readback.
   const state = loadState();
   const col = state.collections[rec.payload.collection];
@@ -621,15 +636,29 @@ async function main() {
     const op = resolveOperation(call.operation);
     if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
+    // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
+    // 正常确认并读回成功的写链也只能停在 invoked——mechanicallyPassed 恒 false、令牌拒绝也
+    // 进不了 gateRefusals。执行层自己的账必须含"这次调用最终成没成"，否则调用方无从判定。
+    // 起止两行共用同一个 callId（2026-11-09 十一审 major）：评测侧据此把"开始"与"结果"
+    // 合并成同一次调用——否则开始行（无 exitCode）会永久停在 invoked，messageLadderRung 取
+    // 最低档后即使提交成功也报 invoked/机械失败，且调用数被重复计一次。开始行仍然要留：
+    // 进程在调用中途崩溃时只有它，那是"这次调用发出过但没有结果"的唯一证据。
     if (op.protocol === 'proposal.create') {
-      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
-      return doProposalCreate(op.name, call.args);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      const code = doProposalCreate(op.name, call.args);
+      audit({ callId, phase: 'result', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     if (op.protocol === 'proposal.commit') {
       const { flags: innerFlags } = parseFlags(call.args);
       if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
-      return doProposalCommit(op.name, call.args);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      const code = doProposalCommit(op.name, call.args);
+      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     // Determine mode from operation access.
     const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
@@ -658,7 +687,12 @@ async function main() {
       }
       code = doCommit(op.name, call.args);
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
-    audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // mode 记**按 access 分级**的值（2026-11-09 九审 major）：旧写法这里无脑记 'call'，
+    // 而 bash 路径按 access 算 query/prepare——于是同一次 dummy.query，走 bash 落
+    // mode:'query'、走结构化落 mode:'call'，评测侧据 mode 判读类的逻辑只认前者，结构化查询
+    // 就算 exitCode=0 且已送达也只能停在 completed，报告随调用载体变化。
+    // 载体信息不丢：另记 via:'structured'。
+    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
         const plans = loadPlans();
@@ -685,15 +719,24 @@ async function main() {
     const op = resolveOperation(target);
     if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
+    // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
+    // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
+    // 提交也永远停在 invoked，mechanicallyPassed 判失败、令牌拒绝也没有 refused 证据。
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
-      return doProposalCreate(op.name, rest);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
+      const code = doProposalCreate(op.name, rest);
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     if (op.protocol === 'proposal.commit' && cmd === 'commit') {
       const { flags } = parseFlags(rest);
       if (!flags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
-      return doProposalCommit(op.name, rest);
+      const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
+      const code = doProposalCommit(op.name, rest);
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      return code;
     }
     const verdict = decide(cmd, op, rest);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }

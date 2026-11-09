@@ -203,7 +203,7 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
-  it('计划门拒绝含"要用户确认"operation 的计划：拒绝原因是用户可行动的写关闭话术，不是 CLI 失败串', async () => {
+  it('计划门拒绝含"要用户确认"operation 的计划：拒绝原因是用户可行动的下一步指令，不是 CLI 失败串', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-closed-'));
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
@@ -224,10 +224,8 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      // 写开放（平台声明 writeEnabled）：前置扫描不触发，这句话必须来自 evaluate 失败分支（平台门真的被咨询了）
-      writeEnabled: true,
     });
-    // 平台语义表说 voucher.fill 要用户确认（confirm=true）→ 部署没开放写的事实
+    // 平台语义表说 voucher.fill 要用户确认（confirm=true）→ 计划门拒绝它，宿主给可行动的下一步
     const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.fill","args":["幻辰财税","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
       assistantMessage: {} as never,
@@ -239,15 +237,14 @@ describe('pi-coding-agent context worker', () => {
     expect(verdict?.block).toBe(true);
     // 拒绝原因是用户/worker 可行动的话术，且**不是 CLI 失败串**：平台内部错误码、operation 名
     // 都不以"透传"形式上屏，宿主只给结构化的下一步。
-    // 2026-10-14 修正：这里平台声明写开放（writeEnabled: true），所以这句话不再是
-    // "未开放写入权限"——那是假归因（实测 worker 原样转达给用户，用户被指去找管理员要一个
-    // 他已经有的权限，这一轮就此放弃）。写开放时它是形状问题：点名 + 移出计划改直接调用。
+    // 2026-11-08 架构裁定后这里**只有形状问题一条路**：宿主不判这个部署允不允许写，
+    // 也就不合成"未开放写入权限"的归因（2026-10-14 实测的假归因：用户被指去找管理员要一个
+    // 他已经有的权限）。写类被计划门拒绝时只点名、让 worker 移出计划改为直接调用。
     expect(verdict?.reason).toContain('PLAN STOP');
     expect(verdict?.reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.fill' }));
     expect(verdict?.reason).toContain('移除');
     expect(verdict?.reason).toContain('直接调用');
     expect(verdict?.reason).toContain('重新提交剩余的 calls');
-    // 写关闭部署下同一形态才归写关闭话术（见下方"同一形态但部署没开放写"那条）
     expect(verdict?.reason).not.toContain('当前未开放写入权限');
     // 不再是"等宿主验证确认"的暂停语义；平台内部错误码原文不得透传
     expect(verdict?.reason).not.toContain('PLAN PAUSED');
@@ -257,11 +254,12 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
-  // ── 平台拒绝分流：按语义表的 confirm 列，不按错误码名 ────────────────────────
-  // 平台按"是不是只读"拒绝计划，而拒绝名单里混着两类调用：要用户确认的写类调用
-  // （部署没开放写 → WRITE_NOT_ENABLED）与根本不需要计划的本地处理（不该进计划 →
-  // PLAN_NOT_PLANNABLE）。第二类曾被第一类的话术答复——纯本地处理被用户看到"请联系
-  // 管理员开通写入权限"（已实证的误导）。匹配平台错误码只为定位失败点，语义判断读表。
+  // ── 平台拒绝分流：按语义表的 plan ∧ ¬confirm 机械点名，不按错误码名 ─────────────
+  // 平台按"是不是只读"拒绝计划，而拒绝名单里混着两类调用：要用户确认的写类调用与
+  // 根本不需要计划的本地处理。2026-11-08 裁定后两者给 worker 的答复同形——点名该调用、
+  // 让它移出计划改为直接调用（宿主不判这个部署允不允许写，也不合成"未开放写入权限"的
+  // 归因；那种假归因曾把纯本地处理说成"请联系管理员开通写入权限"，已实证的误导）。
+  // 匹配平台错误码只为定位失败点，语义判断读表。
   const NOT_READ_ONLY_REJECTION: PlanCliRunner = async ({ args }) => {
     if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_split', planId: null, version: null, status: 'none' }), stderr: '' };
     if (args[1] === 'evaluate') return { code: 3, stdout: '', stderr: 'PLAN_REFUSE PLAN_OPERATION_NOT_READ_ONLY\n' };
@@ -290,9 +288,6 @@ describe('pi-coding-agent context worker', () => {
       modelConfig: await fakeModelRuntime(),
       planCliRunner,
       operationSemantics: semantics,
-      // 写开放（平台声明 writeEnabled）：前置扫描（D-075）不触发，裁决完全落到平台计划门——否则写类计划在
-      // evaluate 之前就被拦下，测不到 evaluate 失败分支的分流。
-      writeEnabled: true,
     });
   }
 
@@ -323,46 +318,17 @@ describe('pi-coding-agent context worker', () => {
     worker.session.dispose();
   });
 
-  it('计划含 write（要用户确认）类 operation 被平台拒绝：写开放时点名、写关闭时才说权限', async () => {
+  it('计划含 write（要用户确认）类 operation 被平台拒绝：点名它、让 worker 改成直接调用', async () => {
     const counter = { evaluates: 0 };
-    // 写开放部署：前置扫描不触发，这句话来自 evaluate 失败分支的分流（不是前置拦截）
     const worker = await rejectingWorker('task_split', SEMANTICS_TABLE, counter);
     const reason = await submitPlan(worker, '{"operation":"voucher.commit","args":["A","202609"]}');
     expect(counter.evaluates).toBe(1);
     expect(reason).toContain('PLAN STOP');
-    // 2026-10-14 修正：写已开放 ⇒ 写类进不了计划是形状问题，点名它、让 worker 改成直接调用。
-    // 改前这里回 WRITE_NOT_ENABLED，是假归因（用户被指去找管理员要一个他已经有的权限）。
+    // 写类进不了计划是形状问题：点名它、让 worker 改成直接调用。2026-10-14 曾在这里回
+    // WRITE_NOT_ENABLED，是假归因（用户被指去找管理员要一个他已经有的权限）。
     expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.commit' }));
     expect(reason).not.toContain('当前未开放写入权限');
     worker.session.dispose();
-
-    // 同一形态、部署没开放写 ⇒ 仍是写关闭话术（那句话的归属没变）。
-    // 注意这条走的是**前置扫描**（D-075）：writeEnabled 缺省只读 ⇒ planWriteClosed 在
-    // evaluate 之前就拦下，平台门一次都不咨询（evaluates 保持 0）。两条路——前置扫描与
-    // 平台门拒绝的映射——在"没开放写"上给出同一句话，这正是想要的效果。
-    const closed = { evaluates: 0 };
-    const closedRoot = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_closed-'));
-    roots.push(closedRoot);
-    const closedWorker = await createPiCodingWorkerSession({
-      gateway: 'bin/example-gateway',
-      cwd: closedRoot,
-      skillRoots: [],
-      systemPrompt: 'plan split test',
-      sessionId: 'task_closed',
-      agentDir: path.join(closedRoot, '.fshine-agent'),
-      modelConfig: await fakeModelRuntime(),
-      planCliRunner: async (request) => {
-        if (request.args[1] === 'evaluate') closed.evaluates += 1;
-        return NOT_READ_ONLY_REJECTION(request);
-      },
-      operationSemantics: SEMANTICS_TABLE,
-      // 不传 writeEnabled = 只读（与 planWriteClosed 的"缺省视为只读"同约定）
-    });
-    const closedReason = await submitPlan(closedWorker, '{"operation":"voucher.commit","args":["A","202609"]}');
-    expect(closed.evaluates).toBe(0);
-    expect(closedReason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
-    expect(closedReason).not.toContain('该调用不需要计划');
-    closedWorker.session.dispose();
   });
 
   it('拿不到语义表（平台还没下发 / 派生失败）→ 按"不该进计划"说，不猜是写未开放', async () => {
@@ -426,40 +392,16 @@ describe('pi-coding-agent context worker', () => {
       '{"operation":"voucher.commit","args":["A","202609"]}',
     ].join(','));
     expect(counter.evaluates).toBe(1);
-    // 写已开放（rejectingWorker 声明 writeEnabled）⇒ 不是权限问题，是"这两个都不该进计划"。
-    // 2026-10-14 实测：改前这里回 WRITE_NOT_ENABLED，worker 原样转达给用户"请联系管理员
-    // 开通写入权限"——用户要一个他已经有的权限，这一轮就此放弃。
-    expect(reason).not.toContain(messageTextFor('WRITE_NOT_ENABLED'));
+    // 不是权限问题，是"这两个都不该进计划"。2026-10-14 实测：改前这里回 WRITE_NOT_ENABLED，
+    // worker 原样转达给用户"请联系管理员开通写入权限"——用户要一个他已经有的权限，这一轮就此放弃。
+    // 2026-11-08 起"未开放写入权限"那一支已删除：这里只可能是形状问题（点名版），
+    // 绝不出现宿主的权限归因（WRITE_NOT_ENABLED 码已随合成话术一起退役）。
+    expect(reason).not.toContain('当前未开放写入权限');
     expect(reason).toContain(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform、voucher.commit' }));
     // 下一步三件套照旧：从 calls 移除、改为直接调用、重提剩余部分
     expect(reason).toContain('移除');
     expect(reason).toContain('直接调用');
     expect(reason).toContain('重新提交剩余的 calls');
-    worker.session.dispose();
-  });
-
-  it('同一形态但部署没开放写：仍归 WRITE_NOT_ENABLED（那句话的归属没变）', async () => {
-    const counter = { evaluates: 0 };
-    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-split-task_nowrite-'));
-    roots.push(root);
-    const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/example-gateway',
-      cwd: root,
-      skillRoots: [],
-      systemPrompt: 'plan split test',
-      sessionId: 'task_nowrite',
-      agentDir: path.join(root, '.fshine-agent'),
-      modelConfig: await fakeModelRuntime(),
-      planCliRunner: async () => NOT_READ_ONLY_REJECTION({ args: ['plan', 'evaluate'], platformRoot: root }),
-      operationSemantics: SEMANTICS_TABLE,
-      // 缺省（不传 writeEnabled）= 只读：语义表说有写类 ⇒ 权限问题，与 planWriteClosed 同约定
-    });
-    const reason = await submitPlan(worker, [
-      '{"operation":"payroll.transform","args":["A","202609"]}',
-      '{"operation":"voucher.commit","args":["A","202609"]}',
-    ].join(','));
-    expect(counter.evaluates).toBe(0);
-    expect(reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
     worker.session.dispose();
   });
 
@@ -489,25 +431,20 @@ describe('pi-coding-agent context worker', () => {
       { operation: 'voucher.proposal', args: [] },
       { operation: 'voucher.query-saved', args: [] },
     ], SEMANTICS_TABLE)).toEqual(['voucher.proposal']);
-    // 同一份表、写类在场也照实判：confirm 列归分流（planNotReadOnlyCode），plan∧¬confirm 归点名
+    // 同一份表、写类在场也照实判：plan∧¬confirm 一个判据同时管点名与措辞，没有"权限"那一支
     expect(planNotReadOnlyReason([
       { operation: 'voucher.query-saved', args: [] },
       { operation: 'payroll.transform', args: [] },
     ], SEMANTICS_TABLE)).toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform' }));
-    // 不传 writeEnabled（缺省只读）⇒ 写类在场仍是权限问题，判定一字不变
+    // 写类（voucher.commit / voucher.proposal）同样点名，不说成"未开放写入权限"
     expect(planNotReadOnlyReason([
       { operation: 'payroll.transform', args: [] },
       { operation: 'voucher.commit', args: [] },
-    ], SEMANTICS_TABLE)).toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    // 写已开放 ⇒ 同一形态是形状问题：两个都点名，不说成权限（2026-10-14 假归因修复）
-    expect(planNotReadOnlyReason([
-      { operation: 'payroll.transform', args: [] },
-      { operation: 'voucher.commit', args: [] },
-    ], SEMANTICS_TABLE, true))
+    ], SEMANTICS_TABLE))
       .toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'payroll.transform、voucher.commit' }));
     expect(planNotReadOnlyReason([
       { operation: 'voucher.proposal', args: [] },
-    ], SEMANTICS_TABLE, true))
+    ], SEMANTICS_TABLE))
       .toBe(messageTextFor('PLAN_NOT_PLANNABLE_OPERATIONS', { operations: 'voucher.proposal' }));
     // 拿不到语义表 → 空名单 → 零名单措辞（不把整份计划统统说成不该进计划）
     expect(nonPlannableOperations([{ operation: 'voucher.commit', args: [] }], undefined)).toEqual([]);
@@ -517,12 +454,12 @@ describe('pi-coding-agent context worker', () => {
       .toContain(messageTextFor('PLAN_NOT_PLANNABLE'));
   });
 
-  // ── 写关闭前置拦截（D-075：计划扫描）────────────────────────────────────
-  // T7 事故形态的机械版：用户发起录入请求，模型停在"录入准备"阶段、承诺"即可产出录入
-  // 提案"，永不抵达提案步——写关闭话术原先只挂在提案路径与平台计划门拒绝上，模型不
-  // 走到那儿用户就永远不知道。宿主在计划评估前（calls 已机械解析、尚未放模型执行的
-  // 最早一点）自己判定：这份计划含"要用户确认"的 operation 而部署未开放 write，注定跑不完。
-  // 判据是平台 access 语义表的 confirm 列（要不要用户确认），不是 access 字符串前缀。
+  // ── 计划提交一律直达平台评估（2026-11-08 删除写关闭前置拦截）──────────────────
+  // 原 D-075 的机械版：宿主在 evaluate 之前用"计划含写类 operation × 部署写开放声明"判一次，
+  // 不成立就合成 WRITE_NOT_ENABLED 终稿（T7 事故：模型停在准备阶段永不抵达提案步，用户
+  // 永远不知道写权限是关闭的）。裁定后这一层归执行层——含写类 operation 的计划照常提交
+  // 平台评估，平台计划门 / 提案门 / commit 门的拒绝与 warning 由执行层自己说，宿主转述。
+  // 下面三条钉的是新边界：计划不被前置拦、平台被咨询、终稿不出现宿主的权限归因。
 
   /** 平台 `operation list --json` 的语义表同形替身（三列由平台声明，宿主只读消费）。 */
   const SEMANTICS_TABLE = new Map<string, { plan: boolean; confirm: boolean; mock: boolean }>([
@@ -548,49 +485,7 @@ describe('pi-coding-agent context worker', () => {
     // voucher.batch 故意不登记：未登记的 operation 不猜语义（宁缺勿猜那条用例要用）
   ]);
 
-  /** 写关闭部署：计划含写类 operation 时宿主在 evaluate 前拦截，拒绝理由即写关闭话术。 */
-  it('write-closed deployment: a plan with a write-class operation is blocked before the evaluator runs', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-scan-'));
-    roots.push(root);
-    const modelConfig = await fakeModelRuntime();
-    const calls: string[][] = [];
-    const planCliRunner: PlanCliRunner = async ({ args }) => {
-      calls.push(args);
-      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 'task_write_scan', planId: null, version: null, status: 'none' }), stderr: '' };
-      throw new Error('写关闭拦截后不得再调平台计划门');
-    };
-    const worker = await createPiCodingWorkerSession({
-      gateway: 'bin/example-gateway',
-      cwd: root,
-      skillRoots: [],
-      systemPrompt: 'write scan test',
-      sessionId: 'task_write_scan',
-      agentDir: path.join(root, '.fshine-agent'),
-      modelConfig,
-      planCliRunner,
-      operationSemantics: SEMANTICS_TABLE,
-    });
-    const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]},{"operation":"voucher.prepare","args":["A","202609"]}]}';
-    const verdict = await worker.session.agent.beforeToolCall?.({
-      assistantMessage: {} as never,
-      toolCall: { id: 'call_scan', type: 'toolCall', name: 'bash', arguments: { command } } as never,
-      args: { command },
-      context: {} as never,
-    });
-
-    expect(verdict?.block).toBe(true);
-    // 拒绝理由复用 error-codes.ts 的 WRITE_NOT_ENABLED 唯一来源（与平台门拒绝/提案路径同一句）
-    expect(verdict?.reason).toContain('PLAN STOP');
-    expect(verdict?.reason).toContain('当前未开放写入权限');
-    expect(verdict?.reason).toContain('请联系管理员开通');
-    // 拦在 evaluate 之前：平台计划门从未被调用（本任务只有会话创建时的 plan current）
-    expect(calls.filter((args) => args[1] === 'evaluate')).toEqual([]);
-    // 拦截事实上抛给驱动侧：结果时刻据此合成终稿
-    expect(worker.writeClosed()).toBe(true);
-    worker.session.dispose();
-  });
-
-  it('write-enabled deployment or read-only plan: the scan does not fire and evaluation proceeds', async () => {
+  it('含写类 operation 的计划不再被宿主前置拦下：直达平台评估，平台门自己裁决', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-open-'));
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
@@ -610,8 +505,6 @@ describe('pi-coding-agent context worker', () => {
       modelConfig,
       planCliRunner,
       operationSemantics: SEMANTICS_TABLE,
-      // 写开放（平台声明 writeEnabled）：同一份含写类 operation 的计划照常提交平台评估（平台门禁按既有规则裁决）
-      writeEnabled: true,
     });
     const command = 'bin/example-gateway plan {"calls":[{"operation":"voucher.prepare","args":["A","202609"]}]}';
     const verdict = await worker.session.agent.beforeToolCall?.({
@@ -623,11 +516,83 @@ describe('pi-coding-agent context worker', () => {
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(evaluated).toHaveLength(1);
-    expect(worker.writeClosed()).toBe(false);
     worker.session.dispose();
   });
 
-  it('write-closed deployment but operation not in the access table: no pre-emptive block (宁缺勿猜)', async () => {
+  // ── 计划前置的覆盖判据（2026-11-08）：写类必须被激活计划的某一步覆盖 ────────────
+  //
+  // 病根：门的旧判据 `planActive() !== null` 只查"有没有激活计划"，不查"这份计划覆不覆盖
+  // 这次调用"。实测形态：激活的计划全是只读 operation，plan_submit 连番被拒，而写类网关
+  // 调用照样放行——数据落地，用户从未确认。这里在**驱动级**（真 gate + 真计划解析）钉两
+  // 件事：计划里只有读 → 写被门拒；计划里含该写 → 放行。
+  describe('激活计划的覆盖判据：写类要被计划的某一步覆盖', () => {
+    /** 提交即激活（execute 档）的计划 CLI 替身；evaluate 被咨询的次数可查。 */
+    const activatingRunner = (taskId: string, evaluated: unknown[][]): PlanCliRunner => async ({ args }) => {
+      if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId, planId: null, version: null, status: 'none' }), stderr: '' };
+      evaluated.push(args);
+      return { code: 0, stdout: JSON.stringify({ taskId, planId: 'plan_ok', version: 1, decision: 'execute', estimate: { calls: 1, seconds: 10, weight: 2 }, delta: { addedCalls: 1 }, cumulative: {}, reasonCode: 'ok', status: 'active' }), stderr: '' };
+    };
+
+    async function workerFor(taskId: string, evaluated: unknown[][]) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `fshine-pi-coverage-${taskId}-`));
+      roots.push(root);
+      return createPiCodingWorkerSession({
+        gateway: 'bin/example-gateway',
+        cwd: root,
+        skillRoots: [],
+        systemPrompt: 'coverage test',
+        sessionId: taskId,
+        agentDir: path.join(root, '.fshine-agent'),
+        modelConfig: await fakeModelRuntime(),
+        planCliRunner: activatingRunner(taskId, evaluated),
+        operationSemantics: SEMANTICS_TABLE,
+      });
+    }
+
+    const call = async (worker: Awaited<ReturnType<typeof createPiCodingWorkerSession>>, command: string, id = 'call_x') =>
+      worker.session.agent.beforeToolCall?.({
+        assistantMessage: {} as never,
+        toolCall: { id, type: 'toolCall', name: 'bash', arguments: { command } } as never,
+        args: { command },
+        context: {} as never,
+      });
+
+    it('计划里只有读（query-saved）→ 写类网关调用被门拒，点名该 operation', async () => {
+      const evaluated: unknown[][] = [];
+      const worker = await workerFor('task_cov_read', evaluated);
+      // 激活一份只读计划（与实测形态一致：worker 想查，提交即激活）
+      const activated = await call(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.query-saved","args":["A","202609"]}]}', 'plan_1');
+      expect(activated?.reason).toContain('PLAN ACTIVE');
+      // 读照旧放行（计划里那一步）
+      expect((await call(worker, 'bin/example-gateway query query-saved.js A 202609', 'read_1'))?.block).toBeUndefined();
+      // 写类：门问"覆不覆盖"，计划里没有这一步 → 拒（改前这里放行，数据直接落地）
+      const blocked = await call(worker, 'bin/example-gateway commit src/voucher/scripts/fill.js c.json --save', 'write_1');
+      expect(blocked?.block).toBe(true);
+      expect(blocked?.reason).toContain(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+      // 点名用语义表里的注册名，不把脚本路径塞进消息
+      expect(blocked?.reason).toContain('voucher.fill');
+      expect(blocked?.reason).not.toContain('fill.js');
+      // 平台一次都没被写调用惊动（门在宿主侧就拦下了）
+      expect(evaluated).toHaveLength(1);
+      worker.session.dispose();
+    });
+
+    it('计划里含该写 → 同参数放行；同 operation 不同参数被拒', async () => {
+      const evaluated: unknown[][] = [];
+      const worker = await workerFor('task_cov_write', evaluated);
+      const activated = await call(worker, 'bin/example-gateway plan {"calls":[{"operation":"voucher.prepare","args":["--account-set","幻辰财税","--period","202609"]}]}', 'plan_1');
+      expect(activated?.reason).toContain('PLAN ACTIVE');
+      // 关键参数一致（多带一个 --batch 仍算覆盖）
+      expect((await call(worker, 'bin/example-gateway prepare src/voucher/scripts/prepare.js --account-set 幻辰财税 --period 202609 --batch', 'write_1'))?.block).toBeUndefined();
+      // 同 operation 不同参数 → 不覆盖
+      const other = await call(worker, 'bin/example-gateway prepare src/voucher/scripts/prepare.js --account-set 幻亨纸业 --period 202609', 'write_2');
+      expect(other?.block).toBe(true);
+      expect(other?.reason).toContain('voucher.prepare');
+      worker.session.dispose();
+    });
+  });
+
+  it('未登记的 operation 也不前置拦：平台计划门按既有路径裁决（宁缺勿猜）', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-write-unknown-'));
     roots.push(root);
     const modelConfig = await fakeModelRuntime();
@@ -659,7 +624,6 @@ describe('pi-coding-agent context worker', () => {
 
     expect(verdict?.reason).toContain('PLAN ACTIVE');
     expect(evaluated).toHaveLength(1);
-    expect(worker.writeClosed()).toBe(false);
     worker.session.dispose();
   });
 
@@ -906,8 +870,8 @@ describe('pi-coding-agent context worker', () => {
   });
 
   it('D-099：只有成功激活才归零——3 次 ACTIVE + 1 次 PAUSED + 1 次 DECLINED 之后，合法方案仍能走到实体校验', async () => {
-    // 事故原形（2026-10-15 acceptance 8.1）：declinedPlans 曾对**每一跳通过形状解析与写关闭
-    // 检查的提交**自增，PLAN ACTIVE 与 PLAN PAUSED 同样计数、成功后不归零——于是它数的是提交
+    // 事故原形（2026-10-15 acceptance 8.1）：declinedPlans 曾对**每一跳通过形状解析的提交**
+    // 自增，PLAN ACTIVE 与 PLAN PAUSED 同样计数、成功后不归零——于是它数的是提交
     // 次数，消息却说"已被连续拒绝 N 次"。终局落在第 6 次提交上，而那一次本身合法（期间编码
     // 已由平台 subject-list 响应确立），没走到实体校验就被挡掉，worker 只能回头向用户要已经
     // 给过的信息。

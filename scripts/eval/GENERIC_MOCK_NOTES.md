@@ -159,7 +159,9 @@ number from here.
   The correct pre-PR check on a machine with a real deployment config
   is to re-run the full suite there; in this sandbox, unit + generic
   mock eval are the honest green gates.
-- Existing Tier-1 (`scripts/eval/baseline.json`, `corpus.jsonl`) untouched.
+- Existing Tier-1 (`scripts/eval/baseline.json`, `scripts/eval/cases.yaml` — 原
+  `corpus.jsonl` 的语料元数据已于 2026-11-08 切片 C 并进 cases.yaml，与消息序列、
+  轮次标记、期望值同一份数据) untouched.
   Old-domain cases stay as L4 integration, not in this core baseline.
 - No LLM was available in this environment (no `.env`, no LLM_* env), so
   `npm run eval` (real-model probe) was NOT run here and must NOT be

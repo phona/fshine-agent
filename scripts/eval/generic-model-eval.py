@@ -45,6 +45,16 @@ DIRECT_BASE_URL = os.environ.get("LLM_API_BASE_URL", "")
 DIRECT_API_KEY = os.environ.get("LLM_API_KEY", "")
 USE_DIRECT = bool(DIRECT_BASE_URL and DIRECT_API_KEY)
 
+# 单轮生成的 token 上限（2026-11-09 修，PR #21 三审 blocking）：
+# 原为 1024，而 worker 走的是推理模型（step-5-preview）——**推理 token 记入 max_tokens**。
+# 实测 G-B1（同一问题连发 5 轮）第 5 轮推理吃光 1024 预算、content 为空，脚本按约定把
+# "只有 reasoning_content、没有 content" 当无答案处理 → calls=4 → mechanical=FAIL。
+# 那一轮测的其实是"token 预算够不够"，不是"模型是否每轮都查"。抬到 8192 后 G-B1
+# calls=5 / mechanical=PASS。同文件的评委调用（下面 JUDGE 段）本来就用的 8192 +
+# reasoning_effort=low，worker 这一处是漏网的。
+# 换更省的模型时可经 EVAL_MAX_TOKENS 调低；**别**为迁就预算把这个值压回 1024。
+MAX_TOKENS = int(os.environ.get("EVAL_MAX_TOKENS", "8192"))
+
 SYSTEM = """You are a stock assistant. You help the user with shelf stock only.
 You have exactly two output forms, and nothing else:
 1. To query stock, output exactly one line: CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>"]} or, when the user gave a batch, CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>", "--batch", "<batch>"]}. The batch argument is optional; omit it when the user gave no batch.
@@ -181,7 +191,7 @@ def run_case(case, tmpdir):
         history = "\n".join(transcript)
         for _step in range(8):
             prompt = history + "\nAssistant:" if _step == 0 else history + "\nTool result received. Now output FINAL only, do not output CALL."
-            reply, _u = chat(WORKER_MODEL, prompt, system=SYSTEM, max_tokens=1024)
+            reply, _u = chat(WORKER_MODEL, prompt, system=SYSTEM, max_tokens=MAX_TOKENS)
             if reply.startswith("CALL:"):
                 try:
                     call = json.loads(reply[5:].strip())

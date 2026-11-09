@@ -16,7 +16,7 @@ import type { OperationArgsSpecs } from './operation-labels';
 import { parsePlanStep, type PlanStepLabel } from './plan-steps';
 import { createPlanFactWriter, planStepSummary, renderPlanCircuitBreak, renderPlanStepOutcomeLines } from './plan-facts';
 import { matchPlanDisambiguationReply, renderDisambiguationQuestion, resolvePlanBinding } from './plan-binding';
-import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult, renderWriteClosureReply } from './turn-relay';
+import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult } from './turn-relay';
 import { decideTurnExit, type TurnExitEvent } from './turn-exit';
 import { buildRequestKey, findRepeatedDelegatedRequest } from './repeat-request';
 import { createCurrentUserMessage, getQuotedEvidence } from './message-reference';
@@ -921,15 +921,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 形状：提计划被拒/把方案当文本打印）。有执行或交还即重置——合法步骤必然
               // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
               // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
-              // 写关闭步骤不计入熔断：它的零执行是"部署没开放写"的终局事实，不是 worker
-              // 空转——那句话必须由宿主说给用户（见下方 writeClosed 分支），而被熔断汇总
-              // 顶上就永远说不出来了；且熔断汇总结尾的"可以回复继续重跑未完成的步骤"在
-              // 写计划下是假承诺（写类步骤永远不会被放行）。
+              // 提案已登记步骤不计入熔断：它的零执行是"提案在平台侧建好、等用户确认"的
+              // 终局事实，用户要的是确认码；被熔断汇总顶上，确认码就永远到不了用户。
               // 计数与判据住 turn-state.ts（notePlanStepOutcome / noteZeroExecStep）。
               if (step && planId && !delegated.pendingPlan) {
                 const outcome = stepOutcomeOf(delegated);
                 notePlanStepOutcome(turn, step.label, outcome);
-                if (noteZeroExecStep(turn, { failed: outcome === 'failed', writeClosed: delegated.writeClosed, proposalCreated: Boolean(delegated.proposalCreated), pendingPlan: Boolean(delegated.pendingPlan) })) {
+                if (noteZeroExecStep(turn, { failed: outcome === 'failed', proposalCreated: Boolean(delegated.proposalCreated), pendingPlan: Boolean(delegated.pendingPlan) })) {
                   // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
                   // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
                   // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
@@ -1020,25 +1018,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
                 return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
               }
-              // 写关闭 disclosure（D-075）：本回合的计划被宿主以"部署未开放写入"拦下
-              // （计划里出现写类 operation 而能力声明不含 write），delegated.text 是宿主
-              // 合成的写关闭话术而非 worker 文本——T7 事故形态（模型停在"录入准备"阶段、
-              // 承诺"即可产出录入提案"却永不抵达提案步）里，这是用户唯一能知道写权限关闭
-              // 的通道。它以确定性话术终结该轮：不经模型翻译（与澄清问题同家族），出口
-              // 校验的零执行标注（"以上是子 Agent 的说明；本轮没有真正查到平台数据"）
-              // 也不得覆盖或误标其来源——那句话是宿主说的确定性事实，不是子 Agent 的
-              // 说明。delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
-              // 单步与多步同一机械保证：本检查必须在计划模式步骤交还
-              // （renderPlanStepToolResult）**之前**——多步计划里写关闭那一步一旦走交还链，
-              // 宿主原句就只是工具结果里的一段文本，终稿变成 Main Agent 的转述版，
-              // "用户一定知道写权限是关闭的"这个机械保证随之失效（D-075 残留）。
-              if (delegated.writeClosed) {
-                turn.delegationFailed = true;
-                console.info(JSON.stringify({ event: 'write_not_enabled', requestId: ctx.requestId, taskId: delegated.taskId, ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}) }));
-                throw new ToolUserError(renderWriteClosureReply(step, delegated, turn.planStepOutcomes), { delegationCompleted: true });
-              }
-              // 提案已登记（B 波 B3 网关提案路径）：与写关闭同一家族——delegated.text 是
-              // **宿主持有的确定性文本**（平台 summaryText 原样 + 通用确认行），本回合以此
+              // 提案已登记（B 波 B3 网关提案路径）：delegated.text 是**宿主持有的确定性文本**
               // 终结。为什么必须走这条而不是通用的 terminate 分支：提案这一步可能零网关执行
               // （拦截发生在 gate 之前，那一条 bash 没被放行），出口校验的零执行门会把它整段
               // 换成 NO_EXECUTION_CLARIFICATION——确认码随之消失，用户永远拿不到码。

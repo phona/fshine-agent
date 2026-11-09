@@ -3,8 +3,8 @@
  *
  * 分两半，都不起 driver harness：
  *   · **宿主半**（context.ts 的 onCreateProposal / confirmProposalViaGateway）：用一个
- *     "捕获回调"的替身 worker 驱动直接调到那个回调——写开放声明复核（⑧，平台侧声明）、
- *     平台信封三态、意图条目形状、用户可见文本拼法、env 纪律（剥 EXECUTION_REQUIRE_PLAN）、确认落账四态；
+ *     "捕获回调"的替身 worker 驱动直接调到那个回调——平台信封三态、意图条目形状、用户可见
+ *     文本拼法、env 纪律（剥 EXECUTION_REQUIRE_PLAN）、确认落账四态；
  *   · **驱动半**（pi-coding-driver 的 beforeToolCall 拦截点）：用真 createPiCodingWorkerSession
  *     + 直接调 beforeToolCall（与 plan-audit 同一手法）——认不认这条命令、payload 路径越界
  *     拦不拦、三态各交还什么。
@@ -12,6 +12,11 @@
  * B 波那两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）已退役：
  * 宿主恒定注入回调、驱动恒定拦截、落账后端恒接，本文件因此**不再设任何 env 开关**——
  * "不设开关也走网关路径"本身就是被钉住的行为（原先"开关关着"的两条用例已改为恒真断言）。
+ *
+ * 2026-11-08 架构裁定后进一步删掉两处宿主持有的写判断：提案创建前的"平台写开放声明复核"
+ * 与确认时点的"落账放行复核"（原 writeEnabled / proposalCommitEnabled 两位，由部署 env 经
+ * isCommitEnabled 派生）。写能不能真落地归执行层，宿主只如实描述"提交什么"，执行层的拒绝 /
+ * warning / dryrun 提示由平台信封给出并走既有失败链路上行。
  *
  * 为什么值得单独立一个文件：这条路径是"平台有提案、宿主持确认码"的唯一接缝。任一半失效
  * （不拦 / 拦了不办调 / 办调了不落条目 / 落了条目不给用户码）用户侧的表现都是同一个——
@@ -26,8 +31,6 @@ import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import { createContextTaskRunner, type ConfirmationReply, type ProposalCommitRequest, type ProposalCommitResult } from './src/context';
 import { createPiCodingWorkerSession, type PiCodingWorkerSession } from './src/pi-coding-driver';
-import { messageTextFor } from './src/error-codes';
-import { isCommitEnabled } from './src/platform-mock';
 import type { ProposalCreateCall } from './src/proposal-runtime';
 import type { PlanCliRunner } from './src/plan-runtime';
 import type { OperationProtocols } from './src/operation-labels';
@@ -149,8 +152,6 @@ interface HostSetup {
  * onCreateProposal 交出来给用例直接调——于是宿主半的每条判定都能不起 harness 地钉住。
  */
 function setupHost(options: {
-  /** 平台写开放声明（⑧）：缺省 true（mock 部署恒放行的形态）；false = 真平台未置 REAL_COMMIT。 */
-  writeEnabled?: boolean;
   stdout?: string;
   gatewayRunner?: PlanCliRunner;
 }): HostSetup {
@@ -174,7 +175,6 @@ function setupHost(options: {
     workerDriver,
     changeIntents: intents.repo,
     proposalGatewayRunner: runner,
-    writeEnabled: options.writeEnabled ?? true,
     generateCode: () => 'D3F2K9',
     intentTtlMs: 10 * 60_000,
     // 第 2 包生产契约：提案创建必须经过隔离复核 + 真实下发的 schema，
@@ -228,16 +228,20 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
     expect(host.rows.size).toBe(1);
   });
 
-  it('平台声明写未开放（writeEnabled=false）：当场合成写关闭话术，零平台调用', async () => {
-    const host = setupHost({ writeEnabled: false });
+  it('没有办调前的写开放复核：平台拒绝由平台信封说，宿主如实转述', async () => {
+    // 2026-11-08 裁定前这里还有一支"平台声明写未开放 ⇒ 当场合成写关闭话术、零平台调用"。
+    // 裁定后宿主不再持那个布尔，办调照常发生；执行层自己的拒绝走 failed 分支的
+    // errorCode/workerText 上交，终稿由用户看到的那句话来自平台而不是宿主代判。
+    const host = setupHost({
+      stdout: envelope('voucher.proposal', 'failed', null, { code: 'WRITE_NOT_OPEN', message: '当前 dryrun 模式，未落账' }),
+    });
 
     const outcome = await host.invoke();
 
-    expect(outcome?.status).toBe('write_closed');
-    // 话术唯一来源在 error-codes.ts（与计划门拒绝、旧提案路径同一句）
-    expect(outcome && 'userText' in outcome ? outcome.userText : '').toBe(messageTextFor('WRITE_NOT_ENABLED'));
-    // 不办调平台：声明不成立时一次网关调用都不发生
-    expect(host.calls).toHaveLength(0);
+    expect(outcome?.status).toBe('failed');
+    expect(outcome && 'errorCode' in outcome ? outcome.errorCode : '').toBe('WRITE_NOT_OPEN');
+    // 办调真发生了（宿主不替执行层提前拒），平台的拒绝原样进入转述材料
+    expect(host.calls).toHaveLength(1);
     expect(host.rows.size).toBe(0);
   });
 
@@ -265,7 +269,9 @@ describe('网关提案路径 · 宿主办调（context.ts 的 onCreateProposal�
     // 用户可见文本：平台 summaryText 原样 + 通用确认行，宿主不拼任何业务摘要
     expect(outcome.userText).toBe([
       '待确认提案 prop_abc123：账套「幻辰财税」2026年9月，共 2 张凭证，借方合计 1,500.00，贷方合计 1,500.00。确认后由系统执行录入；有效期至 2026-10-12T02:30:00.000Z。',
-      '回复「确认 D3F2K9」完成确认流程（当前落账执行未启用——确认不会写入任何数据）；回复「取消 D3F2K9」作废。10 分钟内有效。',
+      // 确认行只描述"提交什么"（2026-11-08：删掉"当前落账执行未启用——确认不会写入任何数据"
+      // 那一支，写能不能真落地归执行层，它的拒绝/warning 由平台信封给出并上行转述）
+      '回复「确认 D3F2K9」执行录入；回复「取消 D3F2K9」作废。10 分钟内有效。',
     ].join('\n'));
 
     // 意图条目：proposalId（取物单）+ taskId + 通用确认字段，零业务字段、零 payload
@@ -490,17 +496,16 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
     worker.session.dispose();
   });
 
-  it('write_closed：宿主写授权不成立，交还写关闭话术', async () => {
+  it('failed：平台拒绝创建提案，交还平台错误码（宿主不代判写权限）', async () => {
     const { worker } = await workerWith({
       requestId: 'req_gate',
-      onCreateProposal: async () => ({ status: 'write_closed', userText: messageTextFor('WRITE_NOT_ENABLED'), workerText: messageTextFor('WRITE_NOT_ENABLED') }),
+      onCreateProposal: async () => ({ status: 'failed', workerText: '平台拒绝创建提案：WRITE_NOT_OPEN：当前 dryrun 模式，未落账（exit 3）', errorCode: 'WRITE_NOT_OPEN' }),
     });
 
     const verdict = await submit(worker, `bin/example-gateway prepare voucher.proposal ${PAYLOAD}`);
 
-    expect(verdict?.reason).toContain('PROPOSAL WRITE_CLOSED');
-    expect(verdict?.reason).toContain(messageTextFor('WRITE_NOT_ENABLED'));
-    expect(worker.writeClosed()).toBe(true);
+    expect(verdict?.reason).toContain('PROPOSAL FAILED');
+    expect(verdict?.reason).toContain('WRITE_NOT_OPEN');
     worker.session.dispose();
   });
 
@@ -541,8 +546,9 @@ describe('网关提案路径 · 驱动拦截点（pi-coding-driver 的 beforeToo
 
 /**
  * 确认步的宿主任意半边替身：种子条目直接塞进 fake 意图库（不走创建路径），于是每条判定
- * （capability 时点复核 / 落账放行 / 后端缺失 / 成败 / 不可用三态）都能不起平台地钉住。
- * `proposalCommitEnabled` 由部署层经 isCommitEnabled() 派生，这里直接注入那一位的真假。
+ * （后端缺失 / 成败 / 不可用三态）都能不起平台地钉住。2026-11-08 裁定后没有"落账放行复核"
+ * 一支（原 proposalCommitEnabled 由部署 env 派生）——执行层自己的拒绝走 commit 信封的
+ * `unavailable` / `!ok` 分支上行。
  * 任务仓库也是假的，用来断言 D-082 的终态回写。
  */
 const CONFIRM_CODE = 'D3F2K9';
@@ -581,7 +587,6 @@ interface ConfirmSetup {
 }
 
 function setupConfirm(options: {
-  proposalCommitEnabled?: boolean;
   commitRunner?: (req: ProposalCommitRequest) => Promise<ProposalCommitResult>;
   result?: Partial<ProposalCommitResult>;
   /** 不注入落账后端（"放行说接了但执行器没配"的配置故障形态）。 */
@@ -607,7 +612,6 @@ function setupConfirm(options: {
     tasks: tasks.repo,
     workerDriver: { run: async (): Promise<TurnDriverResult> => ({ text: '（本组不委派 worker）', messages: [] }) },
     changeIntents: intents.repo,
-    proposalCommitEnabled: options.proposalCommitEnabled === true,
     ...(options.withoutRunner ? {} : { proposalCommitRunner: runner }),
     generateCode: () => CONFIRM_CODE,
     intentTtlMs: 10 * 60_000,
@@ -637,28 +641,25 @@ function setupConfirm(options: {
 }
 
 describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 分流）', () => {
-  it('D-080 时点纪律 + ⑧ 判据切换：确认时点平台声明写未开放 → confirm_held、意图保持 pending、零办调', async () => {
-    // 主体授权归执行层（⑥）后，"提案之后被收回"的形状只剩部署声明翻转——确认时点读
-    // 此刻的声明位（isCommitEnabled 派生），不认任何主体快照。声明不成立：不落账、
-    // 不借"过期"说谎，提案保持 pending，一次平台调用都不发生。
+  it('平台说提案已过期（执行层自己的拒绝）：confirm_stale + 意图 expired、零谎称', async () => {
+    // 2026-11-08 裁定后确认时点没有宿主侧的"落账放行复核"。执行层自己的拒绝/warning 走
+    // commit 信封的 unavailable / !ok 分支上行：这一支钉"平台说过期"——提案在平台侧不可用，
+    // 宿主如实转述，不借"过期"说谎也不谎称执行失败。
     const setup = setupConfirm({
-      proposalCommitEnabled: false,
-      commitRunner: async () => { throw new Error('声明不成立时不该办调平台'); },
+      result: { ok: false, verified: false, summaryText: '', output: '', error: '平台侧有效期已过', unavailable: 'expired' },
     });
 
     const reply = await setup.reply();
 
-    // 确定性拒绝：话术唯一来源在 error-codes.ts（与提案时那一刀同一句）
-    expect(reply?.text).toContain(messageTextFor('WRITE_NOT_ENABLED'));
-    expect(reply?.outcome).toBe('confirm_held');
-    // 提案在平台侧仍然有效：意图保持 pending（不借"过期"说谎，也不落账）
-    expect(setup.rows.get(INTENT_ID)?.status).toBe('pending');
-    expect(setup.commitCalls).toHaveLength(0);
+    expect(reply?.outcome).toBe('confirm_stale');
+    expect(reply?.text).toContain('已过期（超过有效期）');
+    expect(setup.rows.get(INTENT_ID)?.status).toBe('expired');
+    expect(setup.commitCalls).toHaveLength(1);
     expect(setup.taskUpserts).toHaveLength(0);
   });
 
-  it('开关说接了但后端没注入（配置故障）：fail-closed → confirm_failed + 意图 failed + 任务终态 failed', async () => {
-    const setup = setupConfirm({ proposalCommitEnabled: true, withoutRunner: true });
+  it('后端没注入（宿主自己的配置故障）：fail-closed → confirm_failed + 意图 failed + 任务终态 failed', async () => {
+    const setup = setupConfirm({ withoutRunner: true });
 
     const reply = await setup.reply();
 
@@ -669,7 +670,7 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
   });
 
   it('落账成功：用户文本 = 平台 summaryText 原样 + 通用状态行；意图 committed + 任务终态 done', async () => {
-    const setup = setupConfirm({ proposalCommitEnabled: true });
+    const setup = setupConfirm({});
 
     const reply = await setup.reply();
 
@@ -682,7 +683,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
 
   it('落账失败：通用失败话术（宿主不拼业务摘要）+ 意图 failed + 任务终态 failed', async () => {
     const setup = setupConfirm({
-      proposalCommitEnabled: true,
       result: { ok: false, verified: false, summaryText: '', output: 'SAVE_REJECTED', error: 'SAVE_REJECTED: 此会计期已结账' },
     });
 
@@ -696,7 +696,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
 
   it('提案在平台侧已过期：confirm_stale + 意图 expired，不谎称执行失败', async () => {
     const setup = setupConfirm({
-      proposalCommitEnabled: true,
       result: { ok: false, verified: false, summaryText: '', output: '', error: '平台侧有效期已过', unavailable: 'expired' },
     });
 
@@ -709,7 +708,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
 
   it('提案在平台侧已终结：confirm_stale + 意图 expired，明说无需重复确认', async () => {
     const setup = setupConfirm({
-      proposalCommitEnabled: true,
       result: { ok: false, verified: false, summaryText: '', output: '', error: '平台侧状态=committed', unavailable: 'not_pending' },
     });
 
@@ -725,7 +723,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     // 有没有 proposalId。没有 → 拿不到取物单就无法定位平台提案，commit 等于盲写。
     const setup = setupConfirm({
       legacyRow: true,
-      proposalCommitEnabled: true,
       commitRunner: async () => { throw new Error('旧行业不该被办调'); },
     });
 
@@ -754,7 +751,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
       tasks: tasks.repo,
       workerDriver: { run: async (): Promise<TurnDriverResult> => ({ text: '（本组不委派 worker）', messages: [] }) },
       changeIntents: intents.repo,
-      proposalCommitEnabled: true,
       proposalCommitRunner: async (req) => {
         commitCalls.push(req);
         return { ok: true, verified: true, summaryText: '平台渲染的落账摘要（原样转述）', output: 'VERIFY delta=1' };
@@ -798,30 +794,4 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(commitCalls).toEqual([{ proposalId: 'prop_abc123' }]);
     expect(intents.rows.get(INTENT_ID)?.status).toBe('committed');
   }, 3_000);
-});
-
-// ── 落账放行闸：isCommitEnabled（B 波"落账接不接"开关退役后唯一的分真假处）───────────
-
-describe('落账放行闸 isCommitEnabled：mock 放开 / 真平台须 FSHINE_REAL_COMMIT=1', () => {
-  // 这条是安全判据的机械钉子：确认步的 proposalCommitEnabled 现在由本函数**单独**派生
-  // （assembly / ask.ts 直接调它，不再串第二级接线开关）。它恒假 ⇒ 真平台无 REAL_COMMIT 时
-  // 确认码拿到 confirm_held、零写入；它恒真 ⇒ mock 之下那道 fail-closed 消失。所以这四行
-  // 必须独立成用例，而不是只靠 e2e 间接覆盖。
-  it('mock 之下恒真（写的是假状态，全链路联调放开）', () => {
-    expect(isCommitEnabled({ EXECUTION_EXECUTOR: 'mock' })).toBe(true);
-    // 即使 FSHINE_REAL_COMMIT 显式为空也不影响（mock 不需要它）
-    expect(isCommitEnabled({ EXECUTION_EXECUTOR: 'mock', FSHINE_REAL_COMMIT: '' })).toBe(true);
-  });
-
-  it('真平台缺 FSHINE_REAL_COMMIT 恒假（fail-closed：确认码只到 confirm_held，零写入）', () => {
-    expect(isCommitEnabled({})).toBe(false);
-    expect(isCommitEnabled({ EXECUTION_EXECUTOR: '' })).toBe(false);
-    // 'true'/'yes'/'0' 都不算授权——"模糊真值"正是 fail-open 的入口
-    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: 'true' })).toBe(false);
-    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: '0' })).toBe(false);
-  });
-
-  it('真平台显式 FSHINE_REAL_COMMIT=1 才放行真写', () => {
-    expect(isCommitEnabled({ FSHINE_REAL_COMMIT: '1' })).toBe(true);
-  });
 });

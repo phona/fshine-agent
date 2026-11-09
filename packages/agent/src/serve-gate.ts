@@ -4,8 +4,9 @@
  * 四层治理里本门负责 worker 的通用原生工具安全：
  *   - bash 仅允许网关调用（首词规则 + shell 元字符白名单：env 前缀、命令拼接、
  *     命令替换、重定向均被拒；法域声明无法剥离）
- *   - 平台计划命令只允许 host 管理；活跃计划由平台执行入口逐次校验，且"要不要计划"
- *     由平台语义表的 plan 列决定（纯本地计算免计划前置，见 planExempt）
+ *   - 平台计划命令只允许 host 管理；活跃计划由平台执行入口逐次校验，且计划前置按平台
+ *     语义表**三级判据**执行（scratch 免计划、read 要激活计划、write 要被激活计划的
+ *     某一步覆盖，见 planGateTier）
  *   - read 限知识面（*.md、*.schema.json、.agents/、docs/、mappings/）——**内容层**裁决，
  *     白名单外的文件读不到内容；worker 工具面已无 grep/find，代码扫描失去入口。
  *   - ls **不**限知识面，只受 workspace 边界与敏感路径约束（理由见 LS_NOT_KNOWLEDGE_GATED）。
@@ -40,7 +41,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
-import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyles, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyle, type KeyArgStyles, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 import { hasServerPath } from './server-paths';
 import type { PlanCall } from './plan-runtime';
@@ -81,6 +82,12 @@ export interface ServeGateToolCall {
 }
 
 export interface ServeGateOptions {
+  /**
+   * operation → args 规格（positionalNames / flagStyles）。计划覆盖判据据此知道哪些位置
+   * 参数是目标（2026-11-09 五审 blocking：只看 flag 会让以位置参数声明目标的执行层失去
+   * 写授权范围保护）。缺省 = 无法证明位置范围，计划步带位置参数即不覆盖。
+   */
+  operationArgsSpecs?: OperationArgsSpecs;
   onEvent?: (event: ServeGateEvent) => void;
   /** 平台根目录：用于经公共 CLI 派生能力清单（定价与脚本存在性校验）。缺省降级。 */
   platformRoot?: string;
@@ -96,6 +103,20 @@ export interface ServeGateOptions {
   sensitivePaths?: readonly string[];
   /** Platform-backed plan active for this worker session. */
   planActive?: () => boolean;
+  /**
+   * **激活计划的 calls**（宿主注入，写类调用的覆盖判据）。
+   *
+   * 为什么单开一路而不塞进 planActive：两者答的是两个问题——planActive 答"有没有计划"，
+   * 本项答"这份计划覆不覆盖这次调用"。写类必须两问都为真才放行（否则"计划里全是读、
+   * 写照样调通"：数据落地而用户从未确认）；读类只问前一问。
+   *
+   * 数据来自宿主自己：驱动层在计划激活时把**本会话提交的那份 calls** 存进 activePlan
+   * （`plan.evaluation.delta.calls` 与宿主解析出的 parsed.calls 同源），不去读平台的
+   * plans.json，也不扫 worker 文本。返回 null = 宿主拿不到计划内容（典型：恢复的会话，
+   * 平台 `plan current` 只回 planId/version）→ 写类一律拒（fail-closed：不知道覆盖
+   * 什么就不写，直到本会话重新激活一份计划）。缺省不接 → 同样一律拒。
+   */
+  activePlanCalls?: () => readonly PlanCall[] | null;
   /** script → label 查找表（平台 CLI 派生，调用方持有并注入）。缺省即不挂 label。 */
   operationLabels?: OperationLabels;
   /** flag → 取值样式表（平台 args 规格 CLI 派生，调用方持有并注入）。缺省即不挂参数摘要。 */
@@ -251,11 +272,91 @@ export function hasShellMetachars(command: string): boolean {
  * 命令分词（剥离 bash/sh 前缀）：脚本提取与参数摘要共用同一套词法——
  * 解析只此一份，不存在第二套命令解析。
  */
+/**
+ * 命令 → token 表（**认 shell 引号与转义**：单引号内字面、双引号内可转义、反斜杠转义）。
+ *
+ * 2026-11-09 八审 major：旧写法 `trim().split(/\s+/)` 是纯空白分词，`--collection "alpha"`
+ * 会产出 token `"alpha"`（带引号），与计划里的 `alpha` 比对不上——**语义相同的合法写调用被
+ * 误拒**；名称含空格时更被拆成多个参数。覆盖判据要与"实际 shell 看到的参数"一致，分词器就
+ * 必须和 shell 一致，否则判据比的是另一回事。
+ */
+/**
+ * 只剥** Bash 词法空白**（空格/制表符/换行），不动 Unicode 空白与控制字符。
+ *
+ * 2026-11-09 十六审 blocking：`String.trim()` 用的是 Unicode 空白定义，会把尾部的
+ * U+00A0、U+3000、\r 一起剥掉——而 Bash 把它们保留在参数里。计划批准 `--target alpha`
+ * 时，实际传入 `alpha\u00a0`（另一个目标）会被判成覆盖。判据必须与 Bash 看到的一致，
+ * 预处理就不能比 Bash 多删字符。
+ */
+function trimShellWhitespace(command: string): string {
+  let start = 0;
+  let end = command.length;
+  const isSep = (ch: string): boolean => ch === ' ' || ch === '\t' || ch === '\n';
+  while (start < end && isSep(command[start]!)) start += 1;
+  while (end > start && isSep(command[end - 1]!)) end -= 1;
+  return command.slice(start, end);
+}
+
 export function splitCommandTokens(command: string): string[] {
-  const tokens = command.trim().split(/\s+/).filter(Boolean);
+  const tokens: string[] = [];
+  let current = '';
+  let started = false;
+  let quote: '"' | "'" | null = null;
+  const src = trimShellWhitespace(command);
+  // 双引号内**只有** $ ` " \ 换行 五个字符前的反斜杠是转义序列，其余位置反斜杠
+  // **字面保留**（POSIX/Bash 语义）。旧写法在双引号内无条件吞反斜杠：`"\alpha"` 被解析成
+  // alpha，而 Bash 实际传入 `\alpha`——计划批准 --collection alpha 时，覆盖判据会放行
+  // 实际指向别名的写调用（十审 blocking：分词与 Bash 语义不一致 = 判据比的是另一回事）。
+  const escapableInDoubleQuote = new Set(['$', '`', '"', '\\', '\n']);
+  for (let index = 0; index < src.length; index += 1) {
+    const ch = src[index]!;
+    if (quote === null && ch === '\\') {
+      const next = src[index + 1];
+      if (next === undefined) { current += ch; started = true; continue; }   // 行尾孤立反斜杠：字面
+      // 反斜杠 + 换行 = 续行，**两者都删掉**（Bash 语义，十三审 minor）。旧写法只跳过反斜杠
+      // 本身、把换行留在参数里——于是 `--target al\<换行>pha` 解析成 "al\npha"，与计划里的
+      // alpha 比对不上，合法写调用被误判成未覆盖。
+      if (next === '\n') { started = true; index += 1; continue; }
+      current += next;
+      started = true;
+      index += 1;
+      continue;
+    }
+    if (quote === '"' && ch === '\\') {
+      const next = src[index + 1];
+      if (next !== undefined && escapableInDoubleQuote.has(next)) {
+        current += next === '\n' ? '' : next;
+        started = true;
+        index += 1;
+        continue;
+      }
+      current += ch;   // 不可转义：反斜杠字面保留
+      started = true;
+      continue;
+    }
+    if (quote !== null) {
+      if (ch === quote) { quote = null; continue; }
+      current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; started = true; continue; }
+    // 只认 Bash 真正当分隔符的空白：**空格 / 制表符 / 换行**三种。
+    // **不**用 /\s/，也不要把回车/换页/垂直制表符算进来——Bash 把它们保留在参数里
+    // （十五审 blocking：`--target alpha\rbeta` 若被拆成 alpha + beta，计划只声明
+    // --target alpha 时判覆盖并忽略多出的位置参数，放行实际指向别名的写调用）。
+    // 同理 Unicode 空白（U+00A0、U+3000…）也不是分隔符（十四审 blocking）。
+    if (ch === ' ' || ch === '\t' || ch === '\n') {
+      if (started) { tokens.push(current); current = ''; started = false; }
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (started) tokens.push(current);
   if (tokens[0] === 'bash' || tokens[0] === 'sh') tokens.shift();
   return tokens;
 }
+
 
 /**
  * 计划前置豁免的**元数据**子命令白名单——显式枚举，绝不开成"任意子命令豁免"。
@@ -586,7 +687,11 @@ function scriptPathParts(reference: string): { domain: string; file: string } | 
 }
 
 /**
- * 命令 → 平台声明的 access 语义（计划前置豁免的判据来源）。undefined = 判据不成立。
+ * 命令 → 平台声明的 access 语义**连同它在表里的键**（undefined = 判据不成立）。
+ *
+ * 为什么连键一起返回：拒绝理由要点名"哪个 operation 不在计划里"，而点名只能用表里的
+ * 注册名（`voucher.fill`），不能拿命令里的脚本路径顶替——消息纪律明写脚本名/路径不进
+ * 消息（同 SERVE_INVOCATION_FORM_UNKNOWN）。梯子因此只有一份，键与语义同源产出。
  *
  * 解析梯子，全部机械、无一步是宿主判断；任一环不命中即停，绝不猜：
  *   ① 引用原样——`operation run <注册名>` 与已规范化的引用直接就是表键；
@@ -599,12 +704,29 @@ function scriptPathParts(reference: string): { domain: string; file: string } | 
  * 不同（一个纯本地、一个只读平台数据）。跨域猜就会把"要计划"的调用判成"不要计划"——
  * 那是放松方向，绝不允许；宁可判据不成立而多拦一道。
  */
-function planSemanticsOf(command: string, semantics: OperationSemantics | undefined): AccessSemantics | undefined {
-  if (!semantics || semantics.size === 0) return undefined;
-  const reference = extractGateScript(command);
+function planSemanticsEntryOf(
+  command: string,
+  semantics: OperationSemantics | undefined,
+): { key: string; access: AccessSemantics } | undefined {
+  return planSemanticsEntryForReference(extractGateScript(command) ?? '', semantics);
+}
+
+/**
+ * 按**已取到的 operation 引用**查语义表（命令字符串的解析在外层）。
+ *
+ * 2026-11-09 拆出来：结构化调用（structured_call）手里本来就是注册名，没有命令串可解析。
+ * 它必须与 bash 走同一份覆盖判据（PR #21 四审 blocking：structured_call 分支原先只查
+ * requiresPlan 的存在性，激活一份纯读计划后写 operation 照样进网关）——复用同一个查表函数
+ * 是"只有一份真相"的前提，否则迟早漂移。
+ */
+function planSemanticsEntryForReference(
+  reference: string,
+  semantics: OperationSemantics | undefined,
+): { key: string; access: AccessSemantics } | undefined {
   if (!reference) return undefined;
+  if (!semantics || semantics.size === 0) return undefined;
   const direct = semantics.get(reference);
-  if (direct) return direct;
+  if (direct) return { key: reference, access: direct };
   const parts = scriptPathParts(reference);
   if (parts) {
     const prefix = `${parts.domain}.`;
@@ -612,37 +734,393 @@ function planSemanticsOf(command: string, semantics: OperationSemantics | undefi
       .filter((key) => key.startsWith(prefix))
       .map((key) => key.slice(prefix.length));
     const exact = commands.filter((cmd) => cmd === parts.file);
-    if (exact.length === 1) return semantics.get(`${prefix}${exact[0]}`);
+    if (exact.length === 1) {
+      const key = `${prefix}${exact[0]}`;
+      const access = semantics.get(key);
+      return access ? { key, access } : undefined;
+    }
     // 脚本名比 command 长：只认"command + 连字符 + 描述后缀"这一种，且必须唯一。
     const extended = commands.filter((cmd) => parts.file.startsWith(`${cmd}-`));
-    if (extended.length === 1) return semantics.get(`${prefix}${extended[0]}`);
+    if (extended.length === 1) {
+      const key = `${prefix}${extended[0]}`;
+      const access = semantics.get(key);
+      return access ? { key, access } : undefined;
+    }
     return undefined;
   }
-  return semantics.get(operationReferenceKey(reference));
+  const bare = operationReferenceKey(reference);
+  const access = semantics.get(bare);
+  return access ? { key: bare, access } : undefined;
 }
 
 /**
- * 这次平台调用**要不要过计划门**——判据只有一列：平台语义表的 `plan`。
+ * 这次平台调用在计划门前的**分级**——判据只有一份：平台 access 语义表的两列
+ * （`options.operationSemantics`，`operation list --json` 的 access 列 × 顶层
+ * accessSemantics 表；宿主不认 access 词表、不另立 operation 名单，L2）：
  *
- * 为什么宿主不再单方面要求"一切平台调用必须有激活计划"：计划门提供三样价值——预算
- * 硬闸（调用数/秒数/通知与重划上限）、范围摘要给人签字、写操作确认门——而对平台自己
- * 声明 `plan:false` 的 operation（纯本地计算：不触平台会话、不耗令牌、不写平台数据）
- * **三样全部不成立**：几秒的本地处理没有预算可言、不碰任何平台实体没有范围可摘要、
- * 不写平台数据无须人认账。宿主此前给 `bin/<gateway> local <脚本>` 免了计划，却给同样是纯
- * 本地计算的 `bin/<gateway> query <平台脚本>` 不免——判据看的是调用形态，不是调用性质。
+ *   · `scratch` —— `plan` 列 false：平台声明纯本地计算（不触平台会话、不耗令牌、
+ *     不写平台数据）。**免计划前置**，口径与旧的 planExempt 一字不差（同一列、同一个
+ *     解析函数），既有的 local / 元数据豁免一行未动。
+ *   · `read`    —— `plan` 列 true 且 `confirm` 列 false：只读平台数据。**要有激活计划，
+ *     但不强求覆盖**——计划里写查 alpha，worker 看了结果想查 beta，这是正当探索，
+ *     拦死它等于让计划门反过来制造空转。
+ *   · `write`   —— `confirm` 列 true：**是不是写的唯一判据**（operation-labels.ts 的
+ *     AccessSemantics 注释：confirm = 要不要用户确认）。必须被**激活计划的某一步覆盖**
+ *     才放行：operation 名匹配，且该步声明的关键参数（collection / window / 编号…）
+ *     与这次调用一致。
+ *   · `unknown` —— 语义表缺失 / 空表 / 该 operation 不在表里：判据不成立 → 按 2026-10-09
+ *     起的既有防线只要求激活计划（未知 op 可能写平台数据，宁拦勿猜）。
  *
- * 更关键的是平台侧本来就不要求：对 `plan:false` 的 operation，平台 `planEligible` 为假、
- * `reserveInvocation` 根本不调。这道要求是宿主单方面加的，于是出现自相矛盾——宿主在
- * 计划拒绝分流处说"该调用不需要计划、也不要放进计划，直接调用即可"，转身在本书门前
- * 说"尚无宿主激活的平台计划"。同一份平台语义表两处读，矛盾自此消失。
+ * 为什么写要覆盖而读不要：计划门的三样价值里，"范围摘要给人签字"与"写操作确认门"只对
+ * 写成立。旧判据 `activePlan !== null` 只查存在性，于是"计划里全是读、写照样调通"——
+ * 数据落地而用户从未确认（本次修的根因）。读不锁死是因为探索性查询本就该有出口，
+ * 而读不落数据、不需要人认账。
  *
- * fail-closed 方向（宁多拦，不放松）：语义表缺失 / 空表 / 该 operation 不在表里 /
- * `plan` 列取不到 → **不免**，照旧拒 `SERVE_PLAN_NOT_ACTIVE`。放行的调用仍受本门其余
- * 判据约束（首词规则、shell 元字符、local 根、敏感路径一行未改），平台侧矩阵/令牌/
- * 限流/计划校验也一行未改——这里只回答"要不要计划"这一个问题。
+ * scratch 那一级为什么免前置（原 planExempt 的判据，一字未改）：宿主不再单方面要求
+ * "一切平台调用必须有激活计划"——对平台自己声明 `plan:false` 的 operation（纯本地计算：
+ * 不触平台会话、不耗令牌、不写平台数据），计划门的三样价值全部不成立，而平台侧本来就不
+ * 要求（`planEligible` 为假、`reserveInvocation` 根本不调）。宿主此前给
+ * `bin/<gateway> local <脚本>` 免了计划，却给同样是纯本地计算的 `bin/<gateway> query
+ * <平台脚本>` 不免——判据看的是调用性质，不是调用形态。fail-closed 方向不变：语义表
+ * 缺失 / 空表 / operation 不在表里 → 不免，照旧拒 `SERVE_PLAN_NOT_ACTIVE`。
  */
-function planExempt(command: string, semantics: OperationSemantics | undefined): boolean {
-  return planSemanticsOf(command, semantics)?.plan === false;
+type PlanGateTier = 'scratch' | 'read' | 'write' | 'unknown';
+
+/**
+ * 语义表条目 → 计划门档位（**bash 与 structured_call 共用的唯一分级**）。
+ *
+ * 2026-11-09 九审 blocking：旧写法先看 `plan === false` 判 scratch，于是
+ * `{plan:false, confirm:true}` 被归成免计划——而 confirm 列正是"这个操作要用户确认"。
+ * 该组合可由现有解析器产出（operation-labels.test.ts 的 partial 用例明确解析成这个值：
+ * plan 缺省 ⇒ false、confirm:true 保留），即"不需要计划但要确认"的矛盾声明。
+ * **confirm:true 优先**：要用户确认的操作一律按写类办（必须有激活计划且被某一步覆盖）。
+ * 放行的方向是"多拦一次"，不是"少拦一次"——免计划档是整个门里最松的那一档。
+ */
+function tierOfEntry(entry: { key: string; access: AccessSemantics } | undefined): { tier: PlanGateTier; key?: string } {
+  if (!entry) return { tier: 'unknown' };
+  if (entry.access.confirm === true) return { tier: 'write', key: entry.key };
+  if (entry.access.plan === false) return { tier: 'scratch', key: entry.key };
+  return { tier: 'read', key: entry.key };
+}
+
+function planGateTier(command: string, semantics: OperationSemantics | undefined): { tier: PlanGateTier; key?: string } {
+  return tierOfEntry(planSemanticsEntryOf(command, semantics));
+}
+
+/**
+ * 引用里的域名：注册名 `<域>.<名>`，或平台脚本路径 `src/<域>/scripts/<名>`；
+ * 两种都取不到 → undefined（裸脚本名 / 裸 command 名不带域）。
+ *
+ * 为什么需要它：归一键（operationReferenceKey）会把 `dummy.query` 与 `ballot.query`
+ * 归成同一个 `query`，而它们在不同域里是不同的 operation。跨域猜中就是把别的域的写
+ * 判成"计划里那一步"——那是放松方向，绝不允许（与 planSemanticsEntryOf 的域内判据同向）。
+ */
+function operationDomain(reference: string): string | undefined {
+  const parts = scriptPathParts(reference);
+  if (parts) return parts.domain;
+  const bare = reference.replace(/\.(?:js|py)$/i, '');
+  const dot = bare.indexOf('.');
+  return dot > 0 ? bare.slice(0, dot) : undefined;
+}
+
+/** 计划步骤的 operation 与命令引用是否指向同一个 operation（域名都对得上才认）。 */
+function sameOperation(planOperation: string, reference: string): boolean {
+  if (planOperation === reference) return true;
+  if (operationReferenceKey(planOperation) !== operationReferenceKey(reference)) return false;
+  const wanted = operationDomain(planOperation);
+  const got = operationDomain(reference);
+  return !wanted || !got || wanted === got;
+}
+
+/**
+ * token 串 → flag 取值表（`--flag 值` / `--flag=值` / 布尔开关 `--flag` 三种写法都认）。
+ *
+ * 位置参数**不入表**：它们多是 payload 路径与名称，而"这次写落在哪个对象上"由关键 flag
+ * 回答（collection / window / 编号）；payload 本体对宿主是不透明的（提案读回归执行层），
+ * 逐字比路径只会造出假拒——同一份 payload 换个工作区名就"不在计划里"了。
+ */
+/**
+ * token 串 → flag 取值表（`--flag 值` / `--flag=值` / 布尔开关 `--flag` 三种写法都认）。
+ *
+ * 布尔开关的判定同样依据执行层 flagStyles（2026-11-09 十八审 major）：**不读规格时**
+ * 无法区分 `--dry-run alpha` 里的 alpha 是开关的取值还是紧跟的位置参数——旧写法把它当
+ * 取值，于是计划侧得到 `dry-run='alpha'`、结构化侧得到 `dry-run=''`，两侧不一致，
+ * 合法的写调用被拒。给了规格就按规格判（布尔 none 不入表），拿不到时保守地当作**带值**
+ * （与 positionalsOf 同一立场：宁可少放行，也不制造两侧分叉）。
+ *
+ * 位置参数**不入表**：它们多是 payload 路径与名称，而"这次写落在哪个对象上"由关键 flag
+ * 回答（collection / window / 编号）；payload 本体对宿主是不透明的（提案读回归执行层），
+ * 逐字比路径只会造出假拒——同一份 payload 换个工作区名就"不在计划里"了。
+ */
+function keyArgsOf(tokens: readonly string[], flagStyles?: ReadonlyMap<string, KeyArgStyle>): Map<string, string> {
+  const args = new Map<string, string>();
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!token || !token.startsWith('--')) continue;
+    const eq = token.indexOf('=');
+    if (eq > 0) {
+      args.set(token.slice(0, eq), token.slice(eq + 1));
+      continue;
+    }
+    // 布尔开关（规格明确说不带值）⇒ 不吞下一项，占位为 ''（两侧同为开关才匹配）
+    if (flagStyles && !flagStyles.has(token)) {
+      args.set(token, '');
+      continue;
+    }
+    const value = tokens[index + 1];
+    if (value !== undefined && !value.startsWith('--')) {
+      args.set(token, value);
+      index += 1;
+    } else {
+      args.set(token, '');   // 布尔开关：无取值，占位为''（两侧同为开关才匹配）
+    }
+  }
+  return args;
+}
+
+/**
+ * token 串 → 位置参数表（flag 及其取值都不算）。
+ *
+ * 2026-11-09 五审 blocking：覆盖判据原先只看 flag，位置参数整批丢弃——于是一份
+ * `args: ['alpha','W1']` 的计划步与一次 `args: ['beta','W2']` 的调用，只要 operation 同名
+ * 就判"已覆盖"。对以位置参数声明目标的执行层，写授权范围检查等于不存在。
+ * 现在位置参数也进判据；哪些位置参数是"目标"由执行层的 args 声明（positionalNames）说，
+ * 宿主不猜。声明缺失而计划步又带了位置参数 ⇒ 无法证明范围一致 ⇒ 不覆盖（fail-closed，
+ * 不把"没解析出 flag"当成"授权任意目标"）。
+ */
+/**
+ * 该 operation 声明了哪些位置参数（执行层 args 声明的 positionalNames）。
+ *
+ * 拿不到（表未加载 / 平台没下发 / operation 不在表里）返回 undefined——调用方据此走
+ * fail-closed：计划步带了位置参数而这里说不出哪些是目标，就不判定覆盖。
+ */
+function positionalNamesFor(reference: string | null, specs: OperationArgsSpecs | undefined): readonly string[] | undefined {
+  if (!reference || !specs || specs.size === 0) return undefined;
+  const direct = specs.get(reference);
+  if (direct) return direct.positionalNames;
+  const parts = scriptPathParts(reference);
+  if (!parts) return undefined;
+  const prefix = `${parts.domain}.`;
+  for (const [name, spec] of specs) {
+    if (name.startsWith(prefix) && name.slice(prefix.length) === parts.file) return spec.positionalNames;
+  }
+  return undefined;
+}
+
+/**
+ * token 串 → 位置参数表。
+ *
+ * 三处判据都与 Bash 实际所见一致：
+ *   ① 只有**真的是 flag**（以 -- 开头）才可能连取值一起跳过；空串是空的位置参数，
+ *      是合法的通用接口形态（前置位留空 + 后续位带目标）——旧写法把它当 flag 会把后面
+ *      的目标一起吞掉（十二审 blocking）；
+ *   ② **布尔开关不吞下一项**（十七审 major）：`--dry-run --target alpha` 里的
+ *      --dry-run 是开关、--target 才是带值 flag，旧写法无条件跳下一项会把 --target
+ *      当成 --dry-run 的取值，于是 alpha 被误提成位置参数；
+ *   ③ 开关/带值由执行层的 flagStyles 判定（只收 name/code 两种有取值的，布尔 none 不
+ *      入表）——拿不到规格时不猜：保守地当作**带值**（宁可少提位置参数，也不把开关后面
+ *      的 flag 吞掉）。
+ */
+/**
+ * 该 operation 声明了哪些 flag 是**带值**的（布尔开关不在表里）。拿不到返回 undefined，
+ * 调用方按"保守当作带值"处理——宁可少提位置参数，也不把开关后面的 flag 吞掉。
+ */
+function flagStylesFor(reference: string | null, specs: OperationArgsSpecs | undefined): ReadonlyMap<string, KeyArgStyle> | undefined {
+  if (!reference || !specs || specs.size === 0) return undefined;
+  const direct = specs.get(reference);
+  if (direct) return direct.flagStyles;
+  const parts = scriptPathParts(reference);
+  if (!parts) return undefined;
+  const prefix = `${parts.domain}.`;
+  for (const [name, spec] of specs) {
+    if (name.startsWith(prefix) && name.slice(prefix.length) === parts.file) return spec.flagStyles;
+  }
+  return undefined;
+}
+
+function positionalsOf(tokens: readonly string[], flagStyles?: ReadonlyMap<string, KeyArgStyle>): string[] {
+  const out: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index] ?? '';
+    if (token.startsWith('--')) {
+      if (token.includes('=')) continue;                // --flag=值：单个 token
+      if (flagStyles && !flagStyles.has(token)) continue;   // 布尔开关：不吞下一项
+      index += 1;                                        // 带值 flag：跳过取值
+      continue;
+    }
+    out.push(token);
+  }
+  return out;
+}
+
+/**
+ * 激活计划的某一步是否覆盖这次网关调用（写类的前置判据）。
+ *
+ * 两条判据，都是机械的：
+ *   ① operation 名匹配（sameOperation：注册名 / 裸名 / 脚本路径三种引用同源）；
+ *   ② 关键参数一致——**该步声明过的每个 flag，这次调用必须同值**（计划 ⊆ 调用）。
+ *
+ * 为什么是"计划 ⊆ 调用"而不是全等：计划写 `--collection alpha`、worker 补上
+ * `--window W1` 再调，是同一件事的更精确写法，全等会把这种正当调用误判成不覆盖。
+ * 反方向不放松：计划声明了 `--window W1` 而这次调用没带，目标就不一定是那一个——
+ * 拒，让 worker 改对或重提计划。
+ */
+function coversPlanStep(
+  step: PlanCall,
+  reference: string,
+  gotKeyArgs: ReadonlyMap<string, string>,
+  gotPositionals: ReadonlyArray<string | undefined>,
+  positionalNames: readonly string[] | undefined,
+  flagStyles?: ReadonlyMap<string, KeyArgStyle>,
+): boolean {
+  if (!sameOperation(step.operation, reference)) return false;
+  const stepTokens = step.args.map((value) => (typeof value === 'string' ? value : String(value)));
+  const wanted = keyArgsOf(stepTokens, flagStyles);
+  for (const [flag, value] of wanted) {
+    if (gotKeyArgs.get(flag) !== value) return false;
+  }
+  // 位置参数：执行层声明了才有判据（declared positional names）；声明缺失而计划步又带了
+  // 位置参数 ⇒ 无法证明范围一致 ⇒ 不覆盖。空声明 + 空位置参数 = 该步只按 operation 约束。
+  // 计划步与调用侧用**同一套** flagStyles 提位置参数（十七审 major）：只有一侧区分布尔
+  // 开关，计划写 `--dry-run --target alpha` 而结构化调用只给这两个 flag 时，两侧提出的
+  // 位置参数不一致，合法调用会被判未覆盖。
+  const wantedPositionals = positionalsOf(stepTokens, flagStyles);
+  if (wantedPositionals.length === 0) return true;
+  if (positionalNames === undefined || positionalNames.length === 0) return false;
+  for (let index = 0; index < wantedPositionals.length; index += 1) {
+    // 缺失（undefined）与不同值都判不覆盖：范围说不清就不放行。
+    if (gotPositionals[index] === undefined || gotPositionals[index] !== wantedPositionals[index]) return false;
+  }
+  return true;
+}
+
+/**
+ * 计划前置的三级判据（本门对非 local 网关调用的唯一裁决入口）。
+ *
+ * 顺序固定：先分级，再问"有没有激活计划"，最后才对写类问"覆不覆盖"——读类与未登记形态
+ * 到第二步就返回，不会被第三步误伤。
+ */
+function planGateVerdict(
+  command: string,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    /** 激活计划的 calls（宿主注入）。undefined = 调用方没接这一路 → 写类一律拒（fail-closed）。 */
+    activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
+    operationArgsSpecs?: OperationArgsSpecs;
+  },
+): ServeGateVerdict | undefined {
+  const { tier, key } = planGateTier(command, ctx.operationSemantics);
+  const reference = extractGateScript(command);
+  const tokens = splitCommandTokens(command);
+  // 命令里的位置参数要去掉"网关词 + 子命令 + operation 引用"这三段，剩下的才是目标参数
+  // （`bin/<gw> prepare dummy.proposal tmp/task_x/payload.json` → ['tmp/task_x/payload.json']）。
+  const headLength = reference === null ? 0 : tokens.indexOf(reference) + 1;
+  const specs = ctx.operationArgsSpecs;
+  const flagStyles = flagStylesFor(reference, specs);
+  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens, flagStyles), positionalsOf(tokens.slice(headLength), flagStyles), positionalNamesFor(reference, specs), ctx);
+}
+
+/**
+ * 计划覆盖判据的**唯一实现**（bash 与 structured_call 两条路都走它）。
+ *
+ * 为什么提成这一个函数：2026-11-09 四审 blocking——`structured_call` 分支原先只查
+ * `requiresPlan` 的存在性，于是一份纯读计划激活后，清单里已登记的写 operation 仍能经
+ * structured_call 进网关，完全绕过 bash 侧新加的覆盖检查。把判据收成一处，两条路不可能
+ * 再漂移；在任一路旁另写一份，就等于给"计划里全是读、写照样调通"留后门。
+ *
+ * tier / key 由调用方按自己的取 reference 方式算好（bash 解命令串，结构化直接用注册名），
+ * gotKeyArgs 是关键参数表（口径同 keyArgsOf：只比 flag，位置参数不入表）。
+ */
+function planCoverageVerdict(
+  tier: PlanGateTier,
+  key: string | undefined,
+  reference: string | null,
+  gotKeyArgs: ReadonlyMap<string, string>,
+  gotPositionals: ReadonlyArray<string | undefined>,
+  positionalNames: readonly string[] | undefined,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    /** 激活计划的 calls（宿主注入）。undefined = 调用方没接这一路 → 写类一律拒（fail-closed）。 */
+    activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明）。缺省 = 无法证明位置范围，计划步带位置参数即不覆盖。 */
+    operationArgsSpecs?: OperationArgsSpecs;
+  },
+): ServeGateVerdict | undefined {
+  // scratch：平台自己声明不要计划（纯本地计算），免前置——与旧的 planExempt 同一列同一判据
+  if (tier === 'scratch') return undefined;
+  if (!ctx.planActive?.()) return { block: true, reason: messageTextFor('SERVE_PLAN_NOT_ACTIVE') };
+  // 读与未登记形态：只要有激活计划（探索性查询不锁死；未知 op 按既有防线只要求有计划）
+  if (tier !== 'write') return undefined;
+  const steps = ctx.activePlanCalls?.();
+  if (reference && steps?.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames, ctx.operationArgsSpecs ? flagStylesFor(reference, ctx.operationArgsSpecs) : undefined))) return undefined;
+  // 措辞收口在 error-codes.ts（SERVE_PLAN_NOT_ACTIVE 一字不差地复用），这里只追加**数据**：
+  // 被拒的是哪个 operation——没有它，worker 不知道该把哪个调用补进计划，只能整份重提。
+  // 点名用语义表里的注册名（`voucher.fill`），不拿命令里的脚本路径顶替（消息纪律：脚本名/
+  // 路径不进消息）。不新开错误码：本次补的是"覆盖"这一维，不是新的失败模式族（驱动层的
+  // 计划分支同样用「表内消息 + 追加数据」的写法，如 `PLAN ACTIVE（id vN）：…`）。
+  return {
+    block: true,
+    reason: `${messageTextFor('SERVE_PLAN_NOT_ACTIVE')}未被已激活计划覆盖的 operation：${key ?? reference ?? '(未解析)'}。`,
+  };
+}
+
+/**
+ * 结构化调用（structured_call）的计划前置判据——与 bash 同一份实现。
+ *
+ * 入参就是结构化调用自己的形状：operation 注册名 + args 对象。args 规范化成 flag 表后
+ * 直接进 planCoverageVerdict，不合成命令串再解析（合成串会让两条路的措辞/边界慢慢分叉）。
+ * 提案创建仍走宿主既有拦截路由，不经过这里。
+ */
+export function structuredPlanGateVerdict(
+  operation: string,
+  args: Record<string, unknown>,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
+    operationArgsSpecs?: OperationArgsSpecs;
+  },
+): ServeGateVerdict | undefined {
+  const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
+  // 语义表里没有这个 operation（未登记/空表）→ 按既有防线当 unknown：只要求有激活计划。
+  const { tier } = tierOfEntry(entry);
+  // args 对象 → flag 表。键名归一成 `--flag`：清单 argsSchema 用的是带横杠形（`--account`），
+  // 但也有的部署声明不带横杠，两种都按"剥掉再补一个 --"归一，否则同一件事两种写法会判成
+  // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
+  // `--flag 值` / `--flag` 的判定同形；数组/对象不猜（结构化 args 已被清单校验只能是标量）。
+  const got = new Map<string, string>();
+  const names = positionalNamesFor(operation, ctx.operationArgsSpecs) ?? [];
+  // 位置参数**按声明顺序**逐项取值（2026-11-09 六审 blocking）：旧写法按
+  // Object.entries(args) 的插入顺序 push，于是调用方换个 JSON 键序就能让
+  // `{period:'alpha', account:'W1'}` 与计划 `['alpha','W1']` 对上——参数名与目标实际已经
+  // 互换，覆盖检查却放行。对象键序是调用方的自由，绝不许它决定写授权范围。
+  // 缺失的位置留 undefined（与"少给一个位置参数"同形，判据侧按不覆盖处理）。
+  const positionals: Array<string | undefined> = names.map((declared) => {
+    const hit = Object.keys(args).find((key) => key === declared || key === `--${declared}`);
+    if (hit === undefined) return undefined;
+    const value = args[hit];
+    if (value === undefined || value === null) return undefined;
+    return typeof value === 'boolean' ? '' : String(value);
+  });
+  // 其余键按 flag 处理（清单 argsSchema 常用带横杠形，也有的部署不带，两种都归一——
+  // 不归一就是放松方向的漏洞）。布尔值当无取值开关，其余 String()。
+  const declaredNames = new Set(names.flatMap((declared) => [declared, `--${declared}`]));
+  for (const [name, value] of Object.entries(args)) {
+    if (value === undefined || value === null) continue;
+    // 布尔 **false 整个不入表**（2026-11-09 八审 blocking）：夹具对 `value === false` 的键
+    // 直接跳过、连 token 都不产出（dummy.cjs 的 args 扁平化）。旧写法把 true/false 都归一成
+    // ''，于是计划声明了裸开关、调用传 false 也能匹配上——而实际执行里那个开关根本不存在，
+    // 执行层靠开关约束的副作用（如 --dry-run）被静默移除却通过了覆盖检查。
+    // 省略 = 与执行端实际参数一致；计划若要求该开关在场，少一个键自然判不覆盖。
+    if (value === false) continue;
+    if (declaredNames.has(name)) continue;
+    got.set(name.startsWith('--') ? name : `--${name}`, typeof value === 'boolean' ? '' : String(value));
+  }
+  return planCoverageVerdict(tier, entry?.key, operation, got, positionals, names.length > 0 ? names : undefined, ctx);
 }
 
 export function createServeGate(options: ServeGateOptions = {}) {
@@ -673,7 +1151,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
     let progress: { label: string; keyArgs: string[] } | undefined;
 
     if (name === 'bash') {
-      const command = String(args['command'] ?? '').trim();
+      // 预 trim 同样只剥 Bash 词法空白（十六审 blocking）：用 String.trim() 会把尾部的
+      // Unicode 空白/回车删掉，之后所有判据都比 Bash 少看见一些字符。
+      const command = trimShellWhitespace(String(args['command'] ?? ''));
       detail = command;
       invocation = gateInvocationKind(command, gateway);
       // 元数据查询先行（且必须排在 plan 教学分支之前）：
@@ -700,13 +1180,13 @@ export function createServeGate(options: ServeGateOptions = {}) {
         };
       } else if (isGateway && invocation !== null && localModeTarget(command, gateway) === null) {
         // 计划前置（宿主保留的执法）：非 local 的网关调用 fail-closed——已登记 operation
-        // 按语义表（scratch plan=false 直调、read/write 需激活计划）；未登记/未知形态也
-        // 要求先有激活计划（2026-10-09 起的既有防线：未知 op 可能写平台数据，宁拦勿猜；
-        // 正确形态由指路文案引导）。首词非网关的 bash 自 2026-10-18 起放行（首词拦截退役，
-        // 非网关命令审计留痕；硬约束随沙箱阶段在共享空间边界重建）。
-        if (!options.planActive?.() && !planExempt(command, options.operationSemantics)) {
-          verdict = { block: true, reason: messageTextFor('SERVE_PLAN_NOT_ACTIVE') };
-        } else {
+        // 按语义表分级（scratch plan=false 直调、read 要激活计划、write 要被激活计划的
+        // 某一步覆盖）；未登记/未知形态也要求先有激活计划（2026-10-09 起的既有防线：
+        // 未知 op 可能写平台数据，宁拦勿猜；正确形态由指路文案引导）。首词非网关的 bash
+        // 自 2026-10-18 起放行（首词拦截退役，非网关命令审计留痕；硬约束随沙箱阶段在
+        // 共享空间边界重建）。
+        verdict = planGateVerdict(command, options);
+        if (!verdict) {
           const label = operationLabel(options.operationLabels, extractGateScript(command));
           if (label) progress = { label, keyArgs: describeArgs(command) };
         }

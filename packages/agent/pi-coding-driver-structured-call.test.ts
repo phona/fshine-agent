@@ -141,6 +141,11 @@ describe('C6 structured_call 通道回归', () => {
           { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [], argsSchema: ['--account', '--from', '--to'] },
         ],
       },
+      // 语义表声明该 operation 是 scratch（plan 列 false）⇒ 计划门免前置，本条测试因此能
+      // 隔离"参数名未声明"这一维。2026-11-09 起计划覆盖判据排在参数校验之前（四审
+      // blocking：structured_call 原先完全不查覆盖），不给语义表时未登记形态按既有防线
+      // 先要求"有激活计划"，拿到的是 SERVE_PLAN_NOT_ACTIVE 而不是参数名报错。
+      operationSemantics: new Map([['finance.query-receivables', { plan: false, confirm: false, mock: true }]]),
     }));
     const session = mockMakeSession.state.capturedAgent as { beforeToolCall: (ctx: { toolCall: { id: string; type: string; name: string; arguments: Record<string, unknown> }; args: Record<string, unknown> }) => Promise<{ block: true; reason: string } | undefined> };
     const toolCall = {
@@ -156,6 +161,43 @@ describe('C6 structured_call 通道回归', () => {
     expect(verdict?.block).toBe(true);
     expect(verdict?.reason).toContain('参数名未声明');
     expect(verdict?.reason).toContain('--undeclared-flag');
+  });
+
+  it('结构化写调用不再因 requiresPlan=false 绕过计划门（四审 blocking 的精确复现）', async () => {
+    // 缺陷形态：manifest 声明 requiresPlan=false，旧代码就此放行——完全不看激活计划覆不覆盖。
+    // 语义表说它是写类（confirm 列 true）⇒ 按三级判据必须先被计划某一步覆盖。
+    // 本会话没有激活计划 ⇒ 必须拒。旧代码这里会返回 undefined（放行）。
+    const semantics = new Map([['finance.post-voucher', { plan: true, confirm: true, mock: true }]]);
+    await createPiCodingWorkerSession(baseOptions({
+      capabilityManifest: {
+        version: '1.0',
+        operations: [
+          { operation: 'finance.post-voucher', requiresPlan: false, effects: [], estSeconds: 10, label: 'Post', serveMatrix: [], argsSchema: ['--collection'] },
+        ],
+      },
+      operationSemantics: semantics,
+    }));
+    const session = mockMakeSession.state.capturedAgent as { beforeToolCall: (ctx: { toolCall: { id: string; type: string; name: string; arguments: Record<string, unknown> }; args: Record<string, unknown> }) => Promise<{ block: true; reason: string } | undefined> };
+    const args = { operation: 'finance.post-voucher', args: { '--collection': 'alpha' } };
+    const verdict = await session.beforeToolCall({ toolCall: { id: 'c', type: 'toolCall', name: 'structured_call', arguments: args }, args });
+    expect(verdict?.block, '写类结构化调用无激活计划必须被拒').toBe(true);
+    expect(verdict?.reason).toContain('计划');
+
+    // 对照：同一个 operation 若语义表说它是 scratch（plan 列 false）⇒ 免计划前置，放行。
+    // 证明判据真的按语义表分级，不是一律拒。
+    await createPiCodingWorkerSession(baseOptions({
+      capabilityManifest: {
+        version: '1.0',
+        operations: [
+          { operation: 'finance.scratch-thing', requiresPlan: false, effects: [], estSeconds: 10, label: 'Scratch', serveMatrix: [], argsSchema: ['--name'] },
+        ],
+      },
+      operationSemantics: new Map([['finance.scratch-thing', { plan: false, confirm: false, mock: true }]]),
+    }));
+    const session2 = mockMakeSession.state.capturedAgent as { beforeToolCall: (ctx: { toolCall: { id: string; type: string; name: string; arguments: Record<string, unknown> }; args: Record<string, unknown> }) => Promise<{ block: true; reason: string } | undefined> };
+    const scratchArgs = { operation: 'finance.scratch-thing', args: { '--name': 'x' } };
+    const scratchVerdict = await session2.beforeToolCall({ toolCall: { id: 'c2', type: 'toolCall', name: 'structured_call', arguments: scratchArgs }, args: scratchArgs });
+    expect(scratchVerdict?.block, 'scratch 类免计划前置，应放行').toBeUndefined();
   });
 
   it('createPlanScopedWorkerEnv 钉住 EXECUTION_REQUIRE_PLAN=1', () => {

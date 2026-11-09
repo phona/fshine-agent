@@ -6,11 +6,10 @@
  * （worker 干净说明的准入尺、澄清回复组装）住 runtime.ts，两个使用方共用的文本原语
  * （stripFootprint）住 text-hygiene.ts。
  */
-import { messageTextFor, terminalFailureTextFor } from './error-codes';
+import { terminalFailureTextFor } from './error-codes';
 import type { SubagentNeeds } from './driver';
 import type { SubagentTaskResult } from './context';
 import { planStepNextHint, type PlanStepLabel, type PlanStepToolResult } from './plan-steps';
-import { renderPlanStepOutcomeLines } from './plan-facts';
 import type { SelectionClarification, TerminalFastPathFailure } from './platform-contract';
 import { stripFootprint } from './text-hygiene';
 
@@ -92,29 +91,4 @@ export function renderTerminalFailureReply(failure: TerminalFastPathFailure): st
     ...(failure.period ? { period: failure.period } : {}),
     ...(failure.availablePeriods ? { availablePeriods: failure.availablePeriods } : {}),
   });
-}
-
-/**
- * 写关闭终稿（D-075）：宿主原句终结该轮，多步计划附步骤事实汇总。
- *
- * 单步：原句即终稿，一字不差（e2e turn-loop-write-closure 钉住）——与 D-075 主体
- * 修复的行为完全一致，不因多步支持而漂移。
- *
- * 多步计划：写关闭往往只是拆解中的一步（写请求的前置步都是读）。原句必须出现且不被
- * 转述稀释，所以它整体在前、其余一字不来自模型；前序步骤的真实发生由宿主持有的步骤
- * 事实汇总兜底——与熔断汇总/复读兜底同一份事实源（renderPlanStepOutcomeLines），只
- * 陈述步号与结局、不含业务数据，因此也不含财务数字（出口校验的零执行数字拦截不会
- * 误伤它）。写关闭一步自身按机械事实记 'failed'（确实零平台执行），一并列出。
- *
- * 不附"可以回复继续重跑未完成的步骤"（熔断/复读兜底的那句）：写关闭是部署级终局
- * 事实，写类步骤永远不会被放行，那句提示在写计划下是假承诺——宿主不陈无根据的下一步。
- */
-export function renderWriteClosureReply(
-  step: PlanStepLabel | null,
-  delegated: SubagentTaskResult,
-  outcomes: readonly { label: string; outcome: 'done' | 'needs' | 'failed' }[],
-): string {
-  const sentence = stripFootprint(delegated.text) || messageTextFor('WRITE_NOT_ENABLED');
-  if (!step) return sentence;
-  return [sentence, '', '本轮拆解的进度如下：', ...renderPlanStepOutcomeLines(outcomes)].join('\n');
 }

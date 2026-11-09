@@ -1,9 +1,39 @@
 {
-  "version": 3,
-  "generatedAt": "2026-10-16 标定批#2（第三轮实测后：A2/Y2 呈现卫生各现一次间歇缺陷，cap 0→1；v1→v3 delta 见 debt-ledger D-060 关账记录）",
+  "version": 5,
+  "generatedAt": "2026-11-08T16:20:08.989Z",
   "note": "dims=四维违例数上限（只增才算劣化）；judge=两轮实测的评委分下限（gate = 实际 ≥ 基线−容差1，0 分下限只留轨迹不设硬门）；okMode：strict（缺省）=ok 须为 true，free=不断言 ok（已知间歇观察项，缺点出现与否是方差）。judge 为 0 的下限（A4/B1 卫生）实际不设门，这是 ±1 容差在 0-2 量表上的诚实局限，漂移靠 scores.jsonl 轨迹暴露。基线编辑的两条路：(1) 跑分数据驱动的重定走 score.ts --write-baseline（唯一入口，拒绝烤入 ok 翻转）；(2) 标定/校准批（尺子改了、期望含义变了）随代码 commit 手改并在台账留一行理由——本条 v2 即第 (2) 类。",
   "cases": {
     "probe-A1": {
+      "dims": {
+        "groundedness": 0,
+        "entityFidelity": 0,
+        "failureHonesty": 0,
+        "presentationHygiene": 0
+      },
+      "judge": {
+        "groundedness": 1,
+        "entityFidelity": 2,
+        "failureHonesty": 2,
+        "presentationHygiene": 2
+      }
+    },
+    "probe-A2": {
+      "dims": {
+        "groundedness": 0,
+        "entityFidelity": 1,
+        "failureHonesty": 0,
+        "presentationHygiene": 0
+      },
+      "judge": {
+        "groundedness": 2,
+        "entityFidelity": 1,
+        "failureHonesty": 2,
+        "presentationHygiene": 1
+      },
+      "okMode": "free",
+      "note": "已知模型侧观察项：范围渗入（rule-landing §6，轮①③出现）+ 轮③ not_found 轮执行语言泄漏（错误码形态）一次。okMode free：机械 cap 承载「不劣化」；评委卫生基线按 free 案规则取含缺陷转录的实测下限 0（同一转录两次评委一致给 0——评委可复现），该维硬门让位、漂移看 scores.jsonl 轨迹"
+    },
+    "probe-A5": {
       "dims": {
         "groundedness": 0,
         "entityFidelity": 0,
@@ -17,22 +47,6 @@
         "presentationHygiene": 2
       }
     },
-    "probe-A2": {
-      "dims": {
-        "groundedness": 0,
-        "entityFidelity": 1,
-        "failureHonesty": 0,
-        "presentationHygiene": 1
-      },
-      "judge": {
-        "groundedness": 2,
-        "entityFidelity": 2,
-        "failureHonesty": 2,
-        "presentationHygiene": 0
-      },
-      "okMode": "free",
-      "note": "已知模型侧观察项：范围渗入（rule-landing §6，轮①③出现）+ 轮③ not_found 轮执行语言泄漏（错误码形态）一次。okMode free：机械 cap 承载「不劣化」；评委卫生基线按 free 案规则取含缺陷转录的实测下限 0（同一转录两次评委一致给 0——评委可复现），该维硬门让位、漂移看 scores.jsonl 轨迹"
-    },
     "probe-A3": {
       "dims": {
         "groundedness": 0,
@@ -41,7 +55,7 @@
         "presentationHygiene": 0
       },
       "judge": {
-        "groundedness": 2,
+        "groundedness": 1,
         "entityFidelity": 2,
         "failureHonesty": 2,
         "presentationHygiene": 1
@@ -62,7 +76,7 @@
       },
       "note": "评委两轮都给卫生 0（「平台返回/无候选」技术报告口吻），机械指纹不报——两个分量在此用例上独立可见"
     },
-    "probe-A5": {
+    "probe-B1": {
       "dims": {
         "groundedness": 0,
         "entityFidelity": 0,
@@ -70,24 +84,10 @@
         "presentationHygiene": 0
       },
       "judge": {
-        "groundedness": 2,
+        "groundedness": 0,
         "entityFidelity": 2,
         "failureHonesty": 2,
         "presentationHygiene": 2
-      }
-    },
-    "probe-B1": {
-      "dims": {
-        "groundedness": 1,
-        "entityFidelity": 0,
-        "failureHonesty": 0,
-        "presentationHygiene": 0
-      },
-      "judge": {
-        "groundedness": 2,
-        "entityFidelity": 2,
-        "failureHonesty": 2,
-        "presentationHygiene": 0
       },
       "okMode": "free",
       "note": "轮①实证间歇观察项：部分轮零调用却声称「已经过本轮实时查询确认」（复述谎称实查，rule-landing §6 同族）——「每轮真查」判据（B1 二次标定新增）落到有据维，cap 1 不劣化"
@@ -97,7 +97,7 @@
         "groundedness": 0,
         "entityFidelity": 0,
         "failureHonesty": 1,
-        "presentationHygiene": 1
+        "presentationHygiene": 0
       },
       "judge": {
         "groundedness": 2,

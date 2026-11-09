@@ -24,7 +24,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 160
     env:
-      EXECUTION_EXECUTOR: mock
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
@@ -82,7 +81,6 @@ jobs:
     # full eval should not prevent the dual-tier comparison from running.
     # needs: eval-full
     env:
-      EXECUTION_EXECUTOR: mock
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_JUDGE_MODEL: ${{ secrets.LLM_JUDGE_MODEL }}

@@ -220,7 +220,8 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/context.ts: 目录', { tag: '遗留待清', reason: 'worker 系统提示词与文件注释里的"工作目录"（文件系统义，非领域检索动作）：2026-10-08 重构已清掉提示词中的账套检索/域目录前缀描述，只剩 cwd 告知；理想形态（Wave 2 D）是把 cwd 也收敛为平台 SKILL 指针，届时本条关闭' }],
   ['packages/agent/src/context.ts: 期间', { tag: '遗留待清', reason: '并发注释"会话期间"的时间描述（非业务期间口径）：待改写成中性"过程/时间"' }],
   ['packages/agent/src/history-tools.ts: 财务', { tag: '遗留待清', reason: '通用历史工具描述误用"财务"限定（search_history/get_messages 领域无关）：待改成"实时数据/历史结果"中性措辞' }],
-  ['packages/agent/src/platform-mock.ts: 目录', { tag: '遗留待清', reason: 'mock 状态路径注释"该目录已 gitignore"（文件系统目录）：待改成"路径"' }],
+  // 2026-11-08：原 'packages/agent/src/platform-mock.ts: 目录' 一条随该模块整文件退役而删除
+  // （mock 状态路径注释"该目录已 gitignore"）。文件已不存在，留着就是一条指向空气的登记。
 ]);
 
 /** 防御排除类命中（L1：必须 100% 挂「防御排除」，删条目/改标签即红，见上方第二条断言）。 */
@@ -244,11 +245,15 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
  *
  * 为什么不是统统禁绝：这些不是执行层治理接口，而是宿主自己的安全
  * 开关/运行参数——按新命名规则，宿主自用参数保留 FSHINE_* 前缀，不跟进 EXECUTION_*；
- * 其中 FSHINE_REAL_COMMIT 是真写放行总闸（比治理接口更危险），须显式登记。
+ * 2026-11-08 起 FSHINE_REAL_COMMIT 挂在「遗留待清」而不是「警职执法」：它是宿主侧的落账
+ * 授权总闸，随"编排层不判这个部署允不允许写"的裁定连判据源一起删除（platform-mock.ts 已
+ * 整模块退场，宿主不再持有这一位）。执行层要自己的写授权接口应由执行层自己声明并在这里
+ * 登记。本条目保留至代码树里最后一批解释性引用清空即删——在那之前它必须可见，不能靠
+ * "名字不再出现"假装没发生过。
  * 每条挂且仅挂一类标签；宿主自用参数一律保留 FSHINE_*，不改 EXECUTION_*。
  */
 const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }> = new Map([
-  ['FSHINE_REAL_COMMIT', { tag: '警职执法', reason: '真平台落账放行总闸（安全开关，platform-mock.ts 读它决定写放行）：宿主自用，不改 EXECUTION_*；example-gateway 侧 LEAKY_EXACT 仅作泄漏剥离（EXECUTION_REAL_COMMIT），不读取；此前面向生产的"显式声明"语义不变' }],
+  ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账授权总闸（已退役，2026-11-08 架构裁定）：宿主侧的 isCommitEnabled 派生与整个 platform-mock.ts 判据源已删除，写能不能真落地归执行层；代码树里仅剩解释其退役原因的注释引用，清空后删除本登记项' }],
   ['FSHINE_PI_AGENT_DIR', { tag: '警职执法', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
   ['FSHINE_PLATFORM_CONCURRENCY', { tag: '警职执法', reason: '委派并发闸（context.ts，默认 1）：宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
   ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '警职执法', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
@@ -380,6 +385,11 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
   // YAML frontmatter 标量去引号：判断"是不是被引号包住"——结构形状检查，非内容嗅探。
   ['packages/agent/src/skills.ts:"', 'frontmatter 标量去引号（结构形状检查）'],
   ["packages/agent/src/skills.ts:'", 'frontmatter 标量去引号（结构形状检查）'],
+  // shell 分词器的引号定界符：判断"是不是引号字符"——语法形状检查，非内容嗅探。
+  // 与 skills.ts 的 frontmatter 去引号同型（八审 major：splitCommandTokens 改成认引号，
+  // 否则 --collection "alpha" 会被当成带引号的 token 而误拒合法写调用）。
+  ['packages/agent/src/serve-gate.ts:"', 'shell 分词器引号定界符（语法形状检查）'],
+  ["packages/agent/src/serve-gate.ts:'", 'shell 分词器引号定界符（语法形状检查）'],
   // L6：step-text.ts 的 6 个已退役直接平台工具名 case（search_account_sets 等）已随
   // 沉积清理删除，对应白名单条目一并移除——主 Agent 工具面早已只剩宿主内部工具与
   // run_task 委派（实例名经 profile.toolName 声明，C3），任何新的具名 case 不在表内，照样红。

@@ -27,7 +27,7 @@ import { resolveConfigPath, explicitConfigFrom } from '../../scripts/resolve-con
 import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
-import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, planWriteClosed, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
+import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols, loadOperationSemantics } from '../../packages/agent/src/operation-labels';
 import { parseProposalCommand } from '../../packages/agent/src/proposal-runtime';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
@@ -106,7 +106,7 @@ const operationScripts = await loadOperationScripts(PLATFORM_ROOT ?? undefined, 
 // 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
 const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
-// 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明注入）。
+// 解析）× 语义表（平台 access 声明，confirm 列）。
 // 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
 // accessSemantics 表尚未下发时派生只得空表 = 写关闭扫描静默失效，故注入替身防假绿）。
 // 翻回条件已成立：实测派生 53 条、与替身 18 条逐条一致（护栏 HF-1 验证）。替身缺的
@@ -426,13 +426,6 @@ export type WorkerStep =
  * 注入的实体来源 + 本任务平台响应，越权即确定性拒绝（PLAN DECLINED → needs）。默认关闭：
  * 既有共享夹具先于门禁存在，参数并非都逐字可溯源（见下方拦截处的说明）。
  *
- * `enforceWriteClosure`（显式开启）：复刻真实驱动的写关闭计划扫描（D-075）——宿主解析出
- * 的 calls 含"要用户确认"的 operation（平台 access 语义表的 confirm 列，替身注入）而宿主
- * 注入的能力不含 write 时，在 evaluate **之前**终结该轮：终稿是宿主合成的
- * WRITE_NOT_ENABLED（error-codes.ts 唯一来源），worker 的准备/承诺文本不会成为终稿
- * （T7 形态的机械版），零平台调用发生。与实体门禁同性质：真实驱动的扫描在
- * pi-coding-driver 的 beforeToolCall，单测钉拦截点与理由，这里钉宿主级终稿行为。
- *
  * `terminalEmptyText`（显式开启）：错误态快路径替身契约镜像的**翻车点复现档**——真实
  * 驱动的早停本会经"皮带"合成非空话术，但第一版（2026-10-17 凌晨回退）的早停返回的是
  * **空 text**，宿主空文本检查先于一切分支抛"未返回可用结果"，真模型探针 4/4 全数触发。
@@ -440,9 +433,8 @@ export type WorkerStep =
  * happy path**。本开关让镜像刻意按第一版的失败形状返回 `text: ''` + 挂 terminalFailure，
  * 验宿主侧防线（空文本豁免 + 终局分支）独立成立：哪怕皮带失手，用户仍收到话术。
  */
-function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; enforceWriteClosure?: boolean; terminalEmptyText?: boolean }) {
+function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: boolean; terminalEmptyText?: boolean }) {
   const enforceEntityScope = options?.enforceEntityScope === true;
-  const enforceWriteClosure = options?.enforceWriteClosure === true;
   const terminalEmptyText = options?.terminalEmptyText === true;
   let cursor = 0;
   const runCli: PlanCliRunner = ({ platformRoot, args, input, env }) => new Promise((resolve, reject) => {
@@ -460,8 +452,6 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       onNotice?: (text: string) => Promise<void>;
       /** 宿主注入的实体来源（架构 §2 第 9 条）：替身按它复刻真实驱动的计划门禁。 */
       entitySources?: PlanEntitySources;
-      /** 宿主注入的平台写开放声明（D-075 + ⑧）：替身按它复刻真实驱动的写关闭计划扫描。 */
-      writeEnabled?: boolean;
       /** 宿主注入的提案创建出口（方案 1 · B 波 B3，开关开着才注入）。 */
       onCreateProposal?: (call: { operation: string; payloadPath: string }) => Promise<{
         status: string;
@@ -569,15 +559,16 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           const create = input.onCreateProposal;
           if (!create) throw new Error('开关开着但宿主没有注入 onCreateProposal（context.ts 的接线断了？）');
           const outcome = await create(call);
-          // completed / write_closed：与真实驱动同一形状——宿主持有的文本成为回合终稿，
-          // 提案引用随结果上交（宿主据此把确认码交给用户）。
-          if (outcome.status === 'completed' || outcome.status === 'write_closed') {
+          // completed：与真实驱动同一形状——宿主持有的文本（平台 summaryText + 确认行）
+          // 成为回合终稿，提案引用随结果上交（宿主据此把确认码交给用户）。
+          // 2026-11-08 起没有 write_closed 一支：宿主不再在办调前判写权限。
+          if (outcome.status === 'completed') {
             const text = outcome.userText ?? '';
             return {
               text,
               messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
               ...(proof ? { execution: proof } : {}),
-              ...(outcome.status === 'completed' && outcome.proposalId ? { proposalCreated: { proposalId: outcome.proposalId } } : { writeClosed: true }),
+              ...(outcome.proposalId ? { proposalCreated: { proposalId: outcome.proposalId } } : {}),
             };
           }
           // needs_input / failed：按确定性线索交还 worker（与真实驱动的 block reason 同族），
@@ -627,21 +618,9 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
             break;
           }
         }
-        // 写关闭计划扫描（D-075）：与真实驱动 beforeToolCall 同一把机械尺——calls（宿主
-        // 解析）× 语义表（平台 access 声明，confirm 列）× writeEnabled（平台侧写开放声明，
-        // ⑧）。命中即在 evaluate 之前终结该轮，终稿是宿主合成的写关闭话术：T7 形态里模型
-        // 停在"录入准备"阶段永不抵达提案步，这句话必须由宿主说，且 worker 的准备/承诺
-        // 文本不得外发。
-        if (enforceWriteClosure && planWriteClosed(current.plan, operationSemantics, input.writeEnabled === true)) {
-          const text = messageTextFor('WRITE_NOT_ENABLED');
-          return {
-            text,
-            messages: [...input.messages, { role: 'assistant', content: text, timestamp: Date.now() }],
-            // 与真实驱动一致：终稿标记随结果上交——宿主据此把这段确定性话术直接作为
-            // 本轮回复（出口校验的零执行标注不覆盖它）。
-            writeClosed: true,
-          };
-        }
+        // 2026-11-08 删除写关闭计划扫描（原 D-075 的 enforceWriteClosure 档）：含写类
+        // operation 的计划照常提交平台评估，平台计划门 / 提案门 / commit 门的拒绝与 warning
+        // 由执行层自己说，宿主只如实转述。
         const plan = await evaluateAndActivatePlan({
           platformRoot: PLATFORM_ROOT,
           taskId,
@@ -821,15 +800,6 @@ interface BootOptions {
    * 打上补丁写进 stateDir，经 AGENT_CONFIG_PATH 只对本 boot 生效。不动仓库里的真配置。
    */
   patchProfile?: { workerTimeoutMs?: number; root?: string; profileId?: string };
-  /**
-   * 平台写开放声明的覆盖（⑧，写关闭 disclosure e2e 用）：缺省按生产规则由
-   * isCommitEnabled(bootEnv) 派生（mock ⇒ true）。给 false 时模拟"真平台未置
-   * FSHINE_REAL_COMMIT"的部署——mock 之下该形态不可达，但 D-075 执法流程的接线
-   * （计划扫描 → 终稿替换 → 零调用）仍要可验；派生规则本身由 proposal-flow 单测钉住。
-   */
-  writeEnabled?: boolean;
-  /** 落账声明覆盖（D-080）：确认时点复核的是这一位——提案成立 ≠ 落账放行。 */
-  proposalCommitEnabled?: boolean;
 }
 
 async function boot(options: BootOptions): Promise<Boot> {
@@ -883,8 +853,6 @@ async function boot(options: BootOptions): Promise<Boot> {
     contextModelDriver: options.contextModelDriver
       ?? { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) },
     memoryCandidateExtractor: options.memoryCandidateExtractor ?? (async () => []),
-    ...(options.writeEnabled !== undefined ? { writeEnabled: options.writeEnabled } : {}),
-    ...(options.proposalCommitEnabled !== undefined ? { proposalCommitEnabled: options.proposalCommitEnabled } : {}),
   });
   // 与生产一致：principal 由可信的企微用户 ID 解析，先开通查询权限
   await assembly.store.principalScopes.upsert({
