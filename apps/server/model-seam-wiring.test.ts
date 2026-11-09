@@ -111,6 +111,9 @@ describe('分层模型接缝装配（LLM_MAIN_MODEL → Main 驱动；worker 恒
     const workerOptions = workerCall();
     expect(workerOptions.env['LLM_MODEL']).toBe('worker-strong-model');
     expect(workerOptions).not.toHaveProperty('modelId');
+    // 部署配置切片（issue #20 C+D）的恒等面：yaml 缺 host.piAgentDir 时不新增 agentDir——
+    // 驱动保持自己的 process.env → <cwd>/data/pi-agent 回落链，与切片前逐字段一致。
+    expect(workerOptions).not.toHaveProperty('agentDir');
 
     // Context 抽取缺省跟随 Main：全程只构造一次 Main 驱动（contextModelDriver ?? driver
     // 复用同一实例，而不是按 env 另建第二个）

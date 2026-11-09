@@ -1,6 +1,6 @@
 /**
  * 服务装配入口:配置 → SQLite 任务/审计存储 → Agent runtime + Context Worker → 企微长连接。
- * 启动:npm start(即 node --env-file=.env --import tsx apps/server/main.ts)
+ * 启动:npm start(即 node --env-file-if-exists=.env --import tsx apps/server/main.ts)
  * 平台 Context 未提供通用执行能力时，任务会以 capability_unavailable 阻断。
  *
  * 装配本身在 assembly.ts，生产和离线全链 e2e 共用同一份。
@@ -91,7 +91,9 @@ async function main(): Promise<void> {
     // the channel and durable stores are still available. 排干上限（D-132c）读
     // FSHINE_SHUTDOWN_DRAIN_MS（缺省/非法回退 30s）：排干到期仍未落定的终态投递不在
     // 停机期强收，由下次启动的 sweepUndeliveredTaskRuns 清扫兜底（assembly 接线）。
-    await assembly.backgroundTasks.shutdown({ drainMs: shutdownDrainMsOf(process.env) });
+    // 用装配的 effectiveEnv（yaml `host.shutdownDrainMs` 已派生、非空 env 覆盖），
+    // 不直读 process.env——否则部署写在 config/agent.yaml 里的值会被静默忽略。
+    await assembly.backgroundTasks.shutdown({ drainMs: shutdownDrainMsOf(assembly.effectiveEnv) });
     await assembly.channel.stop();
     await assembly.close();
     process.exit(0);

@@ -91,6 +91,58 @@ export function resolveActiveProfileId(
   return keys.length === 1 ? keys[0] : undefined;
 }
 
+/**
+ * LLM 连接与模型选择（部署配置，issue #20 切片 C+D）。
+ *
+ * 源 = config/agent.yaml 的 `llm` 段（gitignored）；同名环境变量（LLM_*）只作
+ * 非空值覆盖口。键缺省 = 未配置，由消费方按既有缺省或启动校验处理——加载期不拒启。
+ */
+export interface LlmConfig {
+  apiBaseUrl?: string;
+  apiKey?: string;
+  model?: string;
+  mainModel?: string;
+  thinkingLevel?: string;
+  mainThinkingLevel?: string;
+}
+
+/** 企微智能机器人凭据（部署配置；同名环境变量 WECOM_* 只作非空值覆盖口）。 */
+export interface WecomConfig {
+  botId?: string;
+  botSecret?: string;
+}
+
+/** 委派调度模式：inline = 回合内同步；background = 后台 Worker 主动交付。 */
+export type WorkerDispatchMode = 'inline' | 'background';
+
+/**
+ * 宿主运行参数（原 FSHINE_* 部署面，issue #20 切片 C）。
+ *
+ * 源 = config/agent.yaml 的 `host` 段；同名 FSHINE_* 环境变量只作非空值覆盖口。
+ * 数值项缺省 / 非法 = 不收进本结构，由各消费点的既有缺省兜底（不在这里复制缺省值）。
+ */
+export interface HostConfig {
+  platformConcurrency?: number;
+  platformQueueCapacity?: number;
+  platformCooldownMs?: number;
+  shutdownDrainMs?: number;
+  workerDispatchMode?: WorkerDispatchMode;
+  workerStepCap?: number;
+  inboundDebounceMs?: number;
+  attachmentDir?: string;
+  piAgentDir?: string;
+}
+
+/**
+ * 执行层交接的宿主持有配置（issue #20 切片 D）。
+ *
+ * 目前只有计划激活令牌密钥：宿主读入后随 worker 环境逐次注入执行层，不在宿主内解释
+ * 业务含义。缺省 = 装配进程内生成（重启失效）。
+ */
+export interface ExecutionConfig {
+  planActivationSecret?: string;
+}
+
 export interface AppConfig {
   principals: Record<string, PrincipalConfig>;
   /** Trusted platform subagent context profiles. */
@@ -102,4 +154,14 @@ export interface AppConfig {
   };
   /** 澄清候选等瞬态会话状态的过期时间(ms) */
   sessionTtlMs: number;
+  /** LLM 连接与模型选择（yaml `llm` 段；env 非空值覆盖）。 */
+  llm?: LlmConfig;
+  /** 企微机器人凭据（yaml `wecom` 段；env 非空值覆盖）。 */
+  wecom?: WecomConfig;
+  /** 宿主运行参数（yaml `host` 段；env 非空值覆盖）。 */
+  host?: HostConfig;
+  /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
+  execution?: ExecutionConfig;
+  /** 编排层业务 skill 的文件路径（相对仓库根或绝对路径；env 非空值覆盖）。 */
+  businessSkillPath?: string;
 }

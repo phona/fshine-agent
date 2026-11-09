@@ -66,7 +66,7 @@ EXECUTION_EXECUTOR=mock npm run acceptance  # mock 模式（真执行层变量�
 
 | 位置 | 内容 |
 |---|---|
-| `.env` | `WECOM_BOT_ID`、`WECOM_BOT_SECRET`、`LLM_API_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL` |
-| `config/agent.yaml` | 配置企微 principal；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots` |
+| `config/agent.yaml`（复制 `config/agent.example.yaml`；gitignored） | 企微 principal；`llm.*`（接口地址 / key / model）与 `wecom.*`（BotID / Secret）；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots`；可选 `host.*` 宿主运行参数 |
+| `.env`（可选，兼容旧部署） | 同名环境变量非空值覆盖 `config/agent.yaml`；`AGENT_CONFIG_PATH` 与 eval 工具面变量（`LLM_JUDGE_MODEL`）仍只从 env 读 |
 
 `contextProfiles.<profileId>.root` 是受信的执行层工作目录，不由用户输入或模型生成。执行层子 Agent 的会话通过任务 ID 恢复，并绑定到发起它的企微用户和 Main Agent 会话。
