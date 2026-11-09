@@ -105,6 +105,12 @@ describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能�
     expect(auditCheckOf(verdict)).toMatchObject({ pass: false, actual: '缺计数（未跑申报交叉核）' });
     expect(verdict.pass).toBe(false);
   });
+
+  it('显式不适用（无平台证据轮次）⇒ 检查照出、pass=true、actual=不适用（不冒充 0）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'not-applicable' }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: true, actual: '不适用' });
+    expect(verdict.pass).toBe(true);
+  });
 });
 
 describe('evaluateWriteChainCase（写链判定）', () => {

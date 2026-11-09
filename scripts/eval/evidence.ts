@@ -68,7 +68,8 @@ export interface ExecutionAuditRow {
   /**
    * query 类调用实际返回的响应载荷（2026-11-09 audited 申报模式交叉核的事实基准）。
    * 夹具在 query 的 completed / not_found / needs_input 三种确定性答案上都把**该次**结果
-   * 状态写进 `result.status`，completed 另带该次返回的 items/count，使"回复里的数平台
+   * 状态写进 `result.status`，completed 另带该次返回的 items/count/fields（fields = 平台原始
+   * 字段名，nocaliber 命题的事实源），使"回复里的数平台
    * 确实拉回过"与"平台确实说过 not_found"可以独立核对，不再只靠模型自述传递（空数组 +
    * count 0 也是真答案：平台拉回过、只是没有数据）。被拒/失败（行内无 queryResult）的行
    * 不带这个字段——那些调用没有可申报的结果。字段缺席 = 没写过，不是假；旧日志没有

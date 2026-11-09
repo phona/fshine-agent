@@ -29,7 +29,7 @@
  * 交叉核 note（口径编造/derived 照旧）。关（默认）= 黑盒：出站文本逐字等于 yaml
  * 文本，note 集合不变。指令词表纪律与回归钉子见 AUDIT_INSTRUCTION 注释。
  *
- * --quick 只跑 A1/A2/A4 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
+ * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及declaration/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
  * C2/E/F/G/H/X/Y 是重场景（30 轮超长会话、多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only C2 / --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
  *
@@ -86,7 +86,10 @@ import {
 } from './eval/evidence';
 // 统一报告（JSON + JSONL 两份面）与最小聚合指标。
 import { buildUnifiedReport, summarizeReport, writeUnifiedReport, type ReportCaseInput } from './eval/report';
-import { expectationChecksOf, type ProbeResultRow } from './eval/score';
+import {
+  auditFailuresCheckOf, evaluateProbeCase, expectationChecksOf, loadBaseline,
+  type AuditFailuresValue, type Baseline, type BaselineCase, type ProbeResultRow,
+} from './eval/score';
 // 评测安全门（issue #10 验收标准：未指定隔离 mock / 缺 fixture / 执行层状态无法验证时
 // 拒绝跑危险用例，不静默落真实平台）。
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
@@ -113,7 +116,7 @@ import {
 } from './eval/amount-criteria';
 // 用例语料（issue 切片 C）：消息序列 / 轮次标记 / 夹具与隔离 / 期望值全在 yaml，
 // 本文件只留判定体（CASE_RUNNERS）。
-import { loadCases, type CaseMessage, type CaseSpec } from './eval/cases';
+import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './eval/cases';
 // audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
@@ -248,11 +251,11 @@ interface CaseResult {
   /** 归不进四维的 note 数（任务行为类：计划恢复/空转/成本等，continue驱动 ok，不冒充可信度分数）。 */
   unclassifiedNotes: number;
   /**
-   * audited 申报模式的申报失败条数（逐轮七查 findings 全量，auditFailureCount 累计）。
-   * **黑盒模式整字段缺席**——没跑交叉核就没有「失败数=0」这回事；打分侧只对 audited 报告
-   * 出「audited·申报失败」门（score.ts）。
+   * audited 申报模式的申报失败条数（只对有平台证据的轮次累计 findings；零轮占位/崩溃/
+   * 纯闲聊轮记 `'not-applicable'`）。**黑盒模式整字段缺席**——没跑交叉核就没有
+   * 「失败数=0」这回事；打分侧只对 audited 报告出「audited·申报失败」门（score.ts）。
    */
-  auditFailures?: number;
+  auditFailures?: AuditFailuresValue;
   /**
    * 用例级 token 汇总（纯加法遥测）：main/worker 由逐轮 tokens 求和；aux 按 kind 全局捕获
    * （异步落账晚于回复帧，逐轮归属不可靠）。没有任何 usage 证据时整个字段缺席。
@@ -493,12 +496,15 @@ let auditMode = false;
  *     指令若带数字，模型回显时它就成了「回复里的数字」，覆盖查随之假红。
  *   · 简短中性：不带业务口径（payable/bank/debt/collection/window 一概不提），
  *     不提 eval/测试字样——这是发给生产装配的用户消息，不是 harness 的自白。
+ *   · 机器会核的义务必须教齐（2026-11-09 评审 medium）：只教三种行还不够——覆盖查要求
+ *     正文每个数字有申报行、闭合查要求 := 每个加数递归有引用行、格式查要求标记行首/
+ *     行尾锚定；指令漏掉任一条，照字面执行的合作模型仍会因这些义务判红。
  */
-export const AUDIT_INSTRUCTION = `【输出格式要求，本轮起每轮回复都适用】每轮回复末尾，如果回复里出现了具体数字，请追加一个申报块：以 [audit] 开始、以 [/audit] 结束，块内每行一条申报，共三种行——
+export const AUDIT_INSTRUCTION = `【输出格式要求，本轮起每轮回复都适用】每轮回复末尾，如果回复里出现了具体数字，请追加一个申报块：以 [audit] 开始、以 [/audit] 结束，两个标记各独占一行——[audit] 写在行首、[/audit] 写在行尾，不要与正文或其他内容同行。块内每行一条申报，共三种行——
 引用行：某笔记录的 value <- 该笔记录的记录号（记录号用平台返回的标识，形如 rec-XXX）
 运算行：某个合计结果的 value := 一个数 + 另一个数 + …（右侧只能写加/减的数链，按写的运算符实算必须等于左侧 value）
 命题行：nocaliber(对象名, 字段名) —— 表示该对象的查询结果里没有这个字段；notfound(对象名) —— 表示该对象最近一次查询确实没有找到。只有这两种命题，不要发明其他命题。
-value 写具体数字。回复里没有数字时不需要块；但若要说明"这个对象没有这个字段"或"最近一次查询确实没有找到"，可以在块里只写对应的命题行。
+value 写具体数字。正文里出现的每个数字都必须有一条引用行或运算行申报（没有申报的数字不要写进正文）；运算行右侧的每个加数也必须有申报行可依——引用行或另一条运算行，逐层递归到引用行，没有来源的数字不要写进运算行。回复里没有数字时不需要块；但若要说明"这个对象没有这个字段"或"最近一次查询确实没有找到"，可以在块里只写对应的命题行。
 `;
 
 /**
@@ -520,23 +526,62 @@ export function auditOutgoingText(text: string, roundIndex: number, audit: boole
  * 绝不按失败种类枚举（`checks.coverage` 之类）——按种类枚举会让后续新增的判据漏出
  * 计数。`findings` 是判定的全量违例清单，新增判据自动计入。
  * 事实基准与 errorStateNotes 的 audited 分支同源：本轮审计窗口行 turn.execution。
+ *
+ * 只核**有平台证据**的轮次（2026-11-09 评审 medium）：
+ *   · `auditMissing` = 审计源不可读，证据缺席 ≠ 零申报——拿 `[]` 去核会把证据缺失判成
+ *     phantomSource，红在"没证据"而不是"假申报"；
+ *   · execution 为空 = 该轮没有平台调用（纯闲聊/日期轮、模型没查就答）——申报块没有
+ *     可核的事实基准，覆盖/幻影源只会假红。黑盒 errorStateNotes 仍按原判据管正文金额。
  */
 export function auditFailureCount(turns: readonly Turn[]): number {
-  return turns.reduce(
-    (sum, turn) => sum + classifyAuditDeclaration(turn.reply, turn.execution).findings.length,
-    0,
-  );
+  return turns.reduce((sum, turn) => {
+    if (turn.auditMissing || turn.execution.length === 0) return sum;
+    return sum + classifyAuditDeclaration(turn.reply, turn.execution).findings.length;
+  }, 0);
 }
 
 /**
  * 探针报告行的申报失败字段：audited 轮产出计数（逐轮全过时为 0），**黑盒轮不产字段**。
  * 黑盒没有跑交叉核，把缺席写成 0 会被打分侧读成「查过且全过」——两种语义不能混（与
  * turn.calls 的 -1 = 不可知同一条纪律）。audited 模式下 `failures` 缺席同样**不写 0**：
- * 只有真正跑过 `auditFailureCount` 的判定体才配报告"失败数 0"；忘记返回计数的 runner
- * 会以缺列形式暴露（score.ts 的「audited·申报失败」与报告格式守卫都按 fail-closed 处理）。
+ * 只有真正跑过 `auditFailureCount` 的调用点才配报告"失败数 0"。
  */
 export function auditFailuresFieldOf(audit: boolean, failures: number | undefined): { auditFailures?: number } {
   return audit && failures !== undefined ? { auditFailures: failures } : {};
+}
+
+/**
+ * 公共收集入口的申报失败计数（报告行与统一报告判定共用这一处）：
+ * audited 模式下对**每个** runner 的 turns 统一跑 auditFailureCount（逐轮
+ * classifyAuditDeclaration 累计 findings），不再依赖各 runner 自己记得返回值。
+ * 缺列会在 score.ts 的格式守卫处 exit 2（哪怕申报全对也打不了分），所以计数必须由
+ * 收集口统一产出，而不是靠每个判定体自觉。黑盒返回空对象（没跑交叉核，0 不成立）。
+ *
+ * 没有一个可核轮次时返回显式 `'not-applicable'`（评审修复）：零轮占位 Q5b/Q13b、
+ * runner 崩溃、纯闲聊轮都没有可核的申报——写 0 会被读成「查过且全过」，写缺列会让
+ * score.ts 对整份报告 exit 2；不适用状态让检查照出但不冒充 0。
+ */
+export function auditFailuresOf(audit: boolean, turns: readonly Turn[]): { auditFailures?: AuditFailuresValue } {
+  if (!audit) return {};
+  const auditable = turns.some((turn) => !turn.auditMissing && turn.execution.length > 0);
+  return { auditFailures: auditable ? auditFailureCount(turns) : 'not-applicable' };
+}
+
+/**
+ * 探针的基线取数（2026-11-09 评审 low）：
+ *   · 黑盒路径**不消费**基线，不能让缺失/损坏的 `baseline.json` 在所有用例跑完后把探针
+ *     打挂——返回 undefined 并提示，统一报告退回探针 ok + 期望值层的最小口径；
+ *   · audited 路径的申报失败门需要基线项，保持 fail-closed（原样抛出）。
+ * 抽出成纯函数是为了能单测"缺失基线不打死黑盒、audited 仍拒绝"这两条行为。
+ */
+export function loadBaselineForProbe(audit: boolean, baselinePath?: string): Baseline | undefined {
+  try {
+    return loadBaseline(baselinePath);
+  } catch (error) {
+    if (audit) throw error;
+    console.warn(`基线不可读（${error instanceof Error ? error.message : String(error)}）；黑盒统一报告退回探针 ok + 期望值层判定（不影响探针报告）`);
+    return undefined;
+  }
 }
 
 async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly: ServerAssembly; sdk: RecordingSdk }> {
@@ -682,11 +727,14 @@ async function boot(): Promise<{ send: (text: string) => Promise<Turn>; assembly
   };
 }
 
-/** 用例判定体返回值：audited 轮另带申报失败计数，黑盒轮不产（缺席 ≠ 0）。 */
+/**
+ * 用例判定体返回值。runner **不**各自返回申报失败计数：计数由 main() 的公共收集入口
+ * 对每个 runner 的 turns 统一计算（见 auditFailuresOf）——漏返回一个就是缺列，而
+ * score.ts 对 audited 报告任一缺列直接 exit 2（--quick --audit 曾因此整份报告打不了分）。
+ */
 interface CaseRunResult {
   turns: Turn[];
   notes?: string[];
-  auditFailures?: number;
 }
 
 interface Case {
@@ -1882,9 +1930,9 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     if (turns[1]!.reply.includes('alpha')) notes.push('第二轮回复带上了旧collection"alpha"——范围渗入');
     // 第二轮是 not_found（平台collection目录里没有"delta-collection"）：回复同样不得出现执行语言指纹
     notes.push(...execLanguageLeakNotes(turns[1]!), ...clarificationShapeNotes(turns[1]!, []));
-    // audited 申报模式的失败计数不能只在 Y2 产出：A2/A3/A4 也有错误态轮且 --audit 同样
-    // 注入指令，缺计数会被报告行写成 0、评分器出绿的「audited·申报失败」。
-    return { turns, notes, ...(auditMode ? { auditFailures: auditFailureCount(turns) } : {}) };
+    // audited 申报计数不在这里产出：main() 的公共收集入口对每个 runner 统一算
+    // （auditFailuresOf），A1/A5/B1 等无错误态轮的用例同样有列，不许漏。
+    return { turns, notes };
   },
   A3: async (spec) => {
     const { send, assembly } = await boot();
@@ -1897,7 +1945,7 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     // 问用户，平台一次都不调用（见 CONTOOSO_AMBIGUOUS_CANDIDATES 注释的实测记录）。
     // 回复必须是澄清问句（候选清单 + 问句），且零执行语言指纹（五类，见 execLanguageLeakNotes）。
     notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, CONTOOSO_AMBIGUOUS_CANDIDATES));
-    return { turns, notes, ...(auditMode ? { auditFailures: auditFailureCount(turns) } : {}) };
+    return { turns, notes };
   },
   // 2026-11-08 恢复（PR #21 审查 blocking + 二审 blocking）：A5 原在 b62d322^ 的 CASES 数组
   // （id 'A5'，intent '闲聊不委派平台'，单轮「现在几month了？」，判据 ledgerCalls() > 0 → note）。
@@ -1934,7 +1982,7 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     // not_found（ACCOUNT_SET_NOT_FOUND）：给出"没有找到"的结论，且零执行语言指纹
     // （实测事故里这一轮是 335 字符技术报告：脚本路径 + candidates: [] + 错误码全上屏）
     notes.push(...execLanguageLeakNotes(turns[0]!), ...clarificationShapeNotes(turns[0]!, []));
-    return { turns, notes, ...(auditMode ? { auditFailures: auditFailureCount(turns) } : {}) };
+    return { turns, notes };
   },
   B1: async (spec) => {
     const { send, assembly } = await boot();
@@ -2572,10 +2620,9 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
       // audited 模式（--audit）：金额所属那条换成申报交叉核 note（口径编造/derived 不变）。
       notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!, auditMode));
     }
-    // audited 申报模式的判定输出不能只活在 note 里（交叉核 note 归不进四维、落 unclassified，
-    // 打分器不门 unclassified ⇒ 对评分零影响）。逐轮累计 findings 全量，进报告行，
-    // 由 score.ts 的「audited·申报失败」门对照基线上限。黑盒不产该字段。
-    return { turns, notes, ...(auditMode ? { auditFailures: auditFailureCount(turns) } : {}) };
+    // audited 申报计数的产出点在 main() 的公共收集入口（auditFailuresOf）：这里只负责
+    // 判定 note，不各自返回计数——逐个 runner 记得返回正是缺列（score.ts exit 2）的来源。
+    return { turns, notes };
   },
   Z1: async (spec) => {
     const { send, assembly } = await boot();
@@ -2723,7 +2770,7 @@ function loadProbeCases(): Case[] {
 /** 日常快速子集：说胡话主线（A1/A2/A4/A5）+ 一次稳定性（B1）。E/F/G/H/X/Y 是重场景，按需 --only，不进 quick。 */
 // 2026-11-08：A5 随 b62d322 删 corpus 时一并从 quick 摘掉，本随覆盖恢复一起加回
 // （历史 --quick 就是 A1/A2/A4/A5 + B1，见 b62d322^ 的文件头）。
-const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
+export const QUICK_CASE_IDS = new Set(['A1', 'A2', 'A4', 'A5', 'B1']);
 
 /** 用例级 token 汇总：main/worker 逐轮求和；aux 按 kind 用全局捕获求和（异步落账逐轮归属不可靠）。 */
 function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | undefined {
@@ -2749,6 +2796,32 @@ function caseTokensOf(turns: Turn[], caseMark: number): CaseResult['tokens'] | u
     ...(auxContext ? { auxContext } : {}),
     ...(auxMemory ? { auxMemory } : {}),
   };
+}
+
+/**
+ * 统一报告的逐用例判定（纯函数，导出供单测）：**与 score.ts 同一判定实现**。
+ *
+ * 2026-11-09 评审 low 修复：旧写法自建 `ProbeResultRow` 并把每轮 calls/refusedCalls 固定成
+ * -1、dims 固定成空、直接吃 `input.ok`——minExecutedCalls（D1/X1）会因 -1 假红，okMode
+ * free（A2/B1/Y2）与 dims cap 也完全没消费，与 score.ts 的 passed 不一致。现在直接把
+ * 探针真实的 CaseResult 行交给 score.ts 的 `evaluateProbeCase`（同一 row、同一基线项、
+ * 同一期望值层、同一申报门）；只有**未进基线**的用例（--only 子集/占位条目）才退回
+ * 探针 ok + 期望值层 + 申报门这一最小口径，并明确不冒充基线条目。
+ */
+export function unifiedCasePassedOf(
+  row: ProbeResultRow | undefined,
+  spec: CaseSpec | undefined,
+  baselineCase: BaselineCase | undefined,
+  audited: boolean,
+  corpusId = row?.id ?? '',
+): boolean {
+  if (!row) return false;
+  if (baselineCase) {
+    return evaluateProbeCase(corpusId, row, baselineCase, undefined, spec, audited).pass;
+  }
+  const checks = spec ? expectationChecksOf(spec, row, audited) : [];
+  if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, 0));
+  return row.ok && checks.every((check) => check.pass);
 }
 
 async function main(): Promise<void> {
@@ -2805,7 +2878,9 @@ async function main(): Promise<void> {
     // 用例级 aux 捕获窗口（caseTokensOf）：从用例开始前的缓冲区下标切到用例结束。
     const caseMark = telemetryEvents.length;
     try {
-      const { turns, notes = [], auditFailures } = await item.run();
+      const { turns, notes = [] } = await item.run();
+      // 公共收集入口（不依赖 runner 自报）：audited 下每个用例都跑逐轮交叉核计数。
+      const auditField = auditFailuresOf(auditMode, turns);
       const auditRowsAfter = executionAuditRows();
       // 用例级行也先合并起止（十二审 major）：否则报告里的 platformCalls 会把一次成功提案
       // 计成两次。与逐轮的 calls/refusedCalls 同源。
@@ -2828,7 +2903,7 @@ async function main(): Promise<void> {
         },
         notes,
         dims: counted.dims, unclassifiedNotes: counted.unclassified,
-        ...auditFailuresFieldOf(auditMode, auditFailures),
+        ...auditField,
         ladder: turns.flatMap((turn) => turn.ladder),
         ...(tokens ? { tokens } : {}),
         ok,
@@ -2849,7 +2924,9 @@ async function main(): Promise<void> {
         chain: { evalRunId, caseId: item.id, messageIds: [], requestIds: [], taskIds: [] },
         notes: [error instanceof Error ? error.message : String(error)],
         dims: emptyDimCounts(), unclassifiedNotes: 0,
-        ...auditFailuresFieldOf(auditMode, undefined),
+        // 崩溃的用例没有可核轮次：显式不适用，不写缺列（缺列会让 score.ts 对整份报告
+        // exit 2，连带其它用例都打不了分），也不写 0（没跑交叉核不等于全过）。
+        ...auditFailuresOf(auditMode, []),
         ladder: [], ok: false,
       });
       console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
@@ -2863,32 +2940,39 @@ async function main(): Promise<void> {
   // 统一报告（issue 切片 D）：JSON（逐用例/逐轮/逐调用阶梯 + 聚合指标）+ JSONL（一行一次调用）。
   // 与探针报告分工：探针报告喂打分器（dims/notes/turns），本报告喂人读与跨 run 对齐
   // （每条调用的 authorized/invoked/completed/verified/delivered 与 INCONCLUSIVE）。
-  // 统一报告的通过率走**完整用例判定**（十三审 major）：与 score.ts 的 evaluateProbeCase
-  // 同源，否则"旧三层过、期望值层失败"的用例会在报告里计成通过、与最终打分矛盾。
-  // 取数直接用 reportInputs（原始输入，带逐轮 execution/calls），不从报告行反推。
-  const specById = new Map(loadCases().map((spec) => [spec.id, spec]));
+  // 统一报告的通过率走**完整用例判定**（十三审 major + 2026-11-09 评审 low）：与 score.ts
+  // 的判据同源——有基线条目时直接调 evaluateProbeCase（真实 calls/dims、okMode、dims
+  // caps、期望值层、申报门全是同一实现），否则"旧三层过、期望值层失败"或"申报失败但
+  // 探针 ok"的用例会在报告里计成通过、与最终打分矛盾。取数用 results 的 CaseResult 行
+  // （逐轮 execution/calls/dims 都是探针真实值），不从报告行反推。
+  // 语料 id ↔ 探针 id 的对照（基线上限按语料 id 存：probe-A1 …）。与 score.ts 同一份
+  // toCorpusEntries 映射，不手写 `probe-${id}` 前缀。
+  const specs = loadCases();
+  const specById = new Map(specs.map((spec) => [spec.id, spec]));
+  const corpusIdOfCase = new Map(
+    toCorpusEntries(specs)
+      .filter((entry) => entry.kind === 'probe' && entry.case !== undefined)
+      .map((entry) => [entry.case!, entry.id]),
+  );
+  // 基线取数：统一报告与 score.ts 用**同一基线项**（dims caps / okMode / 申报失败上限）。
+  // 2026-11-09 评审 low：黑盒路径本不消费基线，不能让缺失/损坏的 baseline.json 把所有
+  // 用例跑完后把黑盒探针打挂——基线不可读时黑盒退回"探针 ok + 期望值层"的最小口径；
+  // audited 路径需要申报上限，仍 fail-closed（见 loadBaselineForProbe）。
+  const baseline = loadBaselineForProbe(auditMode);
+  const resultById = new Map(results.map((row) => [row.id, row]));
   const verdictOf = new Map<string, boolean>();
   for (const input of reportInputs) {
-    const spec = specById.get(input.caseId);
-    // audited 模式：逐轮 reply 含模型追加的申报块，期望值层按答案正文判（剥块在
-    // expectations 的入口归一化，判据只有一个实现）。黑盒模式传 false，逐字进场。
-    const checks = spec ? expectationChecksOf(spec, {
-      id: input.caseId,
-      ok: input.ok,
-      notes: input.notes,
-      dims: emptyDimCounts(),
-      unclassifiedNotes: 0,
-      turns: input.turns.map((turn) => ({
-        text: turn.text,
-        reply: turn.reply ?? '',
-        notices: turn.notices,
-        ms: turn.ms,
-        calls: -1,
-        refusedCalls: -1,
-        execution: turn.execution,
-      })),
-    }, auditMode) : [];
-    verdictOf.set(input.caseId, input.ok && checks.every((check) => check.pass));
+    // 未进基线的用例（--only 子集/占位条目）baselineCase 缺席，走最小口径；其余用例
+    // 直接复用 evaluateProbeCase（同一 row 的真实 calls/dims、同一基线 okMode/caps、
+    // 同一期望值层、同一申报门）——统一报告不再自建一份近似判定。
+    const corpusId = corpusIdOfCase.get(input.caseId) ?? input.caseId;
+    verdictOf.set(input.caseId, unifiedCasePassedOf(
+      resultById.get(input.caseId),
+      specById.get(input.caseId),
+      baseline?.cases[corpusId],
+      auditMode,
+      corpusId,
+    ));
   }
   const unified = buildUnifiedReport({
     at: new Date().toISOString(),

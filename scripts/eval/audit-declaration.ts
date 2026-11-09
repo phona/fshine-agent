@@ -9,13 +9,13 @@
  *   [audit]
  *   500 <- rec-101           ← 引用行：申报值 ← 记录号
  *   1000 := 500 + 300 + 200  ← 运算行：申报值 := 加数链（只认 + / - 链，RHS 实算必须等于申报值）
- *   nocaliber(beta, payable) ← 命题行：beta 的查询结果 items 没有 payable 这个字段
+ *   nocaliber(beta, payable) ← 命题行：beta 的查询结果没有 payable 这个口径（平台原始字段）
  *   notfound(gamma)          ← 命题行：gamma 的最近一次查询结果状态是 not_found
  *   [/audit]
  *
  * 本模块只做两件事：① 按封闭语法解析申报块（**不做任何自由文本推断**——clauseLedgerResult
  * 正是自由文本推断，不许以任何形式复活）；② 把申报与宿主持有的结构化事实（审计行
- * `result.items` / `result.status`）做交叉核，每条不过产出一条 note（判红）。
+ * `result.items` / `result.status` / `result.fields`）做交叉核，每条不过产出一条 note（判红）。
  *
  * 块分界只认**独占行首的 `[audit]` 与独占行尾的 `[/audit]`**：夹在句子中间的标记是正文
  * （模型复述申报指令的形态），不是分界——判据见 AUDIT_OPEN_LINE_RE 处。
@@ -25,16 +25,22 @@
  *   幻影源  —— 申报的 rec 号不出现在任何审计行 result.items 里；
  *   值不符  —— 申报值 ≠ 该记录在 result.items 里的 value；
  *   运算闭合 —— := 右侧每个数都有申报行（递归到引用行）；0 是格式噪声不是金额，不要求
- *              申报；同一加数值的出现次数不得超过审计事实里该值的不同记录数（同一记录
- *              不得在一次运算里复用两次冒充合计）；
+ *              申报；派生加数沿运算行展开到引用行后，同一记录/值的使用次数不得超过审计
+ *              事实里该值的不同记录数（同一记录不得在一次运算**链**里复用两次冒充合计——
+ *              跨链也查：`800 := 500 + 300` + `1300 := 800 + 500` 单看第二行 500 只出现
+ *              一次，展开后被聚合两次 ⇒ 红）；
  *   算式不符 —— := 右侧按声明的 + / - 精确十进制求值必须等于左侧（"999 := 500 + 300 +
  *              200" 实算 1000 ⇒ 红；"0.3 := 0.1 + 0.2" 十进制精确相等 ⇒ 绿——JS 浮点
  *              不参与判定）；
- *   封闭命题 —— `nocaliber(collection, caliber)`（caliber 不是该 collection 查询结果
- *              items 的字段名）与 `notfound(collection)`（该 collection 最近一次查询结果
- *              状态是 not_found）两种命题必须与审计行事实一致；只有这两种，不发明第三种。
- *              nocaliber 需要**非空字段证据**：not_found / needs_input / completed 但
- *              items 为空时字段集不可知，命题 fail-closed（不能从空结果断言"没有这个字段"）；
+ *   封闭命题 —— `nocaliber(collection, caliber)`（caliber 不是该 collection 的平台原始
+ *              字段）与 `notfound(collection)`（该 collection 最近一次查询结果状态是
+ *              not_found）两种命题必须与审计行事实一致；只有这两种，不发明第三种。
+ *              nocaliber 的口径清单事实源**只有 `result.fields`**（执行层夹具随 completed
+ *              查询落账的平台原始字段名，契约见 evidence.ts）；投影后的 items 键**不是**
+ *              数据模型（stock 的 sku/qty 投影成 name/value 后，只看 items 键会把
+ *              `nocaliber(north, name)` 假红、`nocaliber(north, sku)` 假过）。没有
+ *              completed 查询行声明 fields 时字段集不可知，命题 fail-closed（不能从空结果
+ *              断言"没有这个字段"，也不拿空集当恒真）；
  *   格式    —— 有数字但没有审计块，或行不可解析（命题行参数不闭合也算 malformed）。
  *
  * **归属**：封闭世界查表是 fshine 通用机制（AGENTS.md 改动归属）；申报格式的注入与夹具
@@ -85,8 +91,9 @@ export interface AuditOperationLine {
   /** := 右侧的加数链（原顺序、保留字面符号——运算验算用）。 */
   addends: readonly number[];
   /**
-   * 闭合查用的源值：首项按字面符号，后续项取操作数绝对值（"500 + -300" 说的是 300 这笔
-   * 记录、不是一条 -300 的记录；"500 - 300" 同理）。零不进闭合要求（零不是金额）。
+   * 闭合查用的源值：**每一项都取绝对值**（"500 + -300"、"500 - 300" 与 "-500 + 1500" 说的
+   * 都是 300 / 500 这些记录；记录值本身带符号的申报不存在——引用行的值必须等于
+   * result.items 的 value，负号加在运算行才是算术写法）。零不进闭合要求（零不是金额）。
    */
   closureValues: readonly number[];
   /** := 右侧按声明运算符（+ / -，左结合）精确十进制求出的值——note 回显用。 */
@@ -103,7 +110,8 @@ export type AuditPropositionName = 'nocaliber' | 'notfound';
 
 /**
  * 命题行：不申报金额，申报一个可被审计行机械核对的封闭事实。
- *   · `nocaliber(collection, caliber)` —— caliber 不是该 collection 查询结果 items 的字段名；
+ *   · `nocaliber(collection, caliber)` —— caliber 不是该 collection 查询结果的平台原始
+ *     字段名（事实源 = result.fields，见 collectionFieldNames）；
  *   · `notfound(collection)`           —— 该 collection 最近一次查询结果状态是 not_found。
  */
 export interface AuditPropositionLine {
@@ -270,9 +278,11 @@ function evaluateOperationRhs(
   let total = parseDecimalLiteral(firstLiteral);
   if (!total) return null;
   const addends = [Number(firstLiteral)];
-  // 首项按字面符号（"-12.5 + 2.5" 的 -12.5 是一笔负值记录）；后续操作数取绝对值作为
-  // 闭合源值（"500 + -300" 与 "500 - 300" 说的都是 300 这笔记录）。
-  const closureValues = [Number(firstLiteral)];
+  // 闭合源值一律取绝对值（2026-11-09 评审修复）：首项保留字面符号会让 "-500 + 1500"
+  // 去找一条 -500 的记录，而记录值是 +500——模型如实写 `500 <- rec-a` 反而判不闭合；
+  // 后续操作数早已取绝对值（"500 + -300" 与 "500 - 300" 说的都是 300 这笔记录），
+  // 首项对齐同一口径。求值仍用字面符号（total 从 parseDecimalLiteral 起算）。
+  const closureValues = [Math.abs(Number(firstLiteral))];
   // 从首个数字之后开始扫运算符项：NUMBER_SOURCE 自带可选负号，若从 0 开始扫，
   // "-12.5 + 2.5" 的领头负号会被当成减法再算一遍（首个数字因此单独取出）。
   const rest = rhs.slice(first[0].length);
@@ -382,7 +392,8 @@ function collectRecordFacts(rows: readonly ExecutionAuditRow[]): Map<string, num
  *   · 运算行的值闭合 ⇔ 它的每个加数都闭合。
  * 自引用环因此不闭合——"1000 := 1000 + 500" 的 1000 只有自己这一行可依，不动点永远推不到
  * 它（与旧实现的 used 集合同结论：递归到不了引用行）。不动点按值判定，只回答"这个值有没有
- * 申报行可依"；**同一记录不得复用两次**由下面的 recordCountsByValue 在闭合之后另查
+ * 申报行可依"；**同一记录不得复用两次**（含跨运算链：派生加数沿运算行展开到引用行后统一
+ * 计数，见 expandedAddendCounts）由 recordCountsByValue 按审计事实的记录数放行
  * （"1000 := 500 + 500" 配一条 `500 <- rec-101` 虽然闭合，但只有一条 500 记录 ⇒ 红）。
  */
 function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
@@ -407,9 +418,10 @@ function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
 /**
  * 审计事实里每个数值对应多少条**不同记录**。闭合查照值核对，但"同一记录复用两次冒充
  * 合计"（`1000 := 500 + 500` 配一条 `500 <- rec-101`）必须单列：值级不动点会让同一份
- * 来源同时给两个加数作依据。夹具种子值互异，同值两笔必然意味着同一记录被用两次（与
- * amount-criteria 的"加数互异/同一记录不复用"同口径）；换一个执行层后若确有多条同值
- * 记录，这里按不同记录数放行——不硬编码夹具形态。
+ * 来源同时给两个加数作依据。跨运算链的复用（`800 := 500 + 300` + `1300 := 800 + 500`）
+ * 由 expandedAddendCounts 先展开成接地值计数，再照本表的记录数放行。夹具种子值互异，
+ * 同值两笔必然意味着同一记录被用两次（与 amount-criteria 的"加数互异/同一记录不复用"
+ * 同口径）；换一个执行层后若确有多条同值记录，这里按不同记录数放行——不硬编码夹具形态。
  *
  * 逐 item 取身份（id 优先、退到 name），不用 collectRecordFacts 的键——那张表把同一
  * 记录的 id 与 name 都当键，会把自己的别名数成两条记录。
@@ -432,6 +444,88 @@ function recordCountsByValue(rows: readonly ExecutionAuditRow[]): Map<number, nu
     }
   }
   return new Map([...recordsByValue].map(([value, records]) => [value, records.size]));
+}
+
+/**
+ * 建**展开器**（跨运算行共享记忆化）：value → 该值一次出现所依托的接地值计数。展开是
+ * 按值的纯函数（与行无关），记忆化因此可跨块内全部运算行共享——否则每条运算行各建一张
+ * 记忆表，长派生链会把总代价摊成 O(行数³)（实测 501 行链 323ms）。
+ *
+ * 为什么不能只数当前 RHS（2026-11 codex blocking 反例）：审计行有 rec-a=500、rec-b=300，
+ * 申报 `500 <- rec-a`、`300 <- rec-b`，再写 `800 := 500 + 300`、`1300 := 800 + 500`——
+ * 单看 1300 那行，500 只出现一次、闭合也成立，findings 为空；展开后 500 被聚合两次
+ * （800 里一次、直接加的一次），同一笔记录冒充了两笔。黑盒侧"同一记录不复用"的纪律
+ * （amount-criteria 加数互异）在跨运算链上同样成立。
+ *
+ * 展开规则：
+ *   · 有引用行的值是**接地值**，一次出现计一次（引用行条数不放大计数——同值多条引用行
+ *     意味着审计事实里可能有多条同值记录，放行尺度由 recordCountsByValue 按记录数给）；
+ *   · 没有引用行的派生值沿**全部**同值运算行展开（同值多行是病态形态，向红偏）；
+ *   · 不闭合的加数不展开（闭合查已就同一根因判红，不摊成复用第二条）；
+ *   · 环在展开路径上截断；按值记忆化且只缓存未触环的结果——链式派生
+ *     （v₁ := v₂ + v₂、v₂ := v₃ + v₃ …）不会指数爆炸（D-207 未决二⑧ 同款教训：病态
+ *     申报块不能挂住探针的同步 note 计算）。
+ */
+function addendExpander(
+  lines: readonly AuditDeclarationLine[],
+  closed: ReadonlySet<number>,
+): (value: number) => Map<number, number> {
+  const memo = new Map<number, Map<number, number>>();
+  const stack = new Set<number>();
+  // 当前子树是否撞过环：撞过的结果依赖截断位置，不记忆化（只缓存干净结果）。
+  let sawBackEdge = false;
+  const expand = (value: number): Map<number, number> => {
+    // 不闭合的加数不展开：闭合查已就同一根因判红，不摊成复用第二条（自引用环因此也不会
+    // 顺着环线贡献半个展开）。
+    if (!closed.has(value)) return new Map();
+    const cached = memo.get(value);
+    if (cached) return cached;
+    if (stack.has(value)) {
+      sawBackEdge = true;
+      return new Map();
+    }
+    stack.add(value);
+    const before = sawBackEdge;
+    sawBackEdge = false;
+    const out = new Map<number, number>();
+    if (lines.some((other) => other.kind === 'reference' && other.value === value)) {
+      out.set(value, 1);
+    } else {
+      for (const other of lines) {
+        if (other.kind !== 'operation' || other.value !== value) continue;
+        for (const addend of other.closureValues) {
+          if (addend === 0) continue;
+          for (const [ground, count] of expand(addend)) {
+            out.set(ground, (out.get(ground) ?? 0) + count);
+          }
+        }
+      }
+    }
+    const clean = !sawBackEdge;
+    sawBackEdge = before || sawBackEdge;
+    stack.delete(value);
+    if (clean) memo.set(value, out);
+    return out;
+  };
+  return expand;
+}
+
+/**
+ * 一条运算行的加数**展开计数**（复用查的事实）：每个加数经展开器落到接地值，数每个接地
+ * 值在这条运算的展开里被用了几次（跨运算链的复用因此看得见，见 addendExpander 的反例）。
+ */
+function expandedAddendCounts(
+  line: AuditOperationLine,
+  expand: (value: number) => Map<number, number>,
+): Map<number, number> {
+  const counts = new Map<number, number>();
+  for (const addend of line.closureValues) {
+    if (addend === 0) continue;
+    for (const [ground, count] of expand(addend)) {
+      counts.set(ground, (counts.get(ground) ?? 0) + count);
+    }
+  }
+  return counts;
 }
 
 /**
@@ -484,30 +578,29 @@ function queryResultStatus(row: ExecutionAuditRow): 'completed' | 'not_found' | 
 }
 
 /**
- * 该 collection 的查询结果字段名集合。**事实源优先用 `result.fields`**（夹具把平台原始
- * 数据的字段名随 query 响应落账）：stock 夹具的 items 按 value 核对契约投影成
- * { id, name, value }，只看 items 会让 `nocaliber(north, sku)` 假过——sku 正是被投影掉
- * 的原始字段。旧日志没有 fields 时才回退到 items 的键。
+ * 该 collection 的口径（字段名）清单。**事实源只有 `result.fields`**——执行层夹具把平台
+ * 原始数据模型的字段名随 completed 查询落账（dummy.cjs:310 / stock.cjs:242，契约见
+ * evidence.ts 的 result.fields）：stock 的 items 按 value 核对契约投影成
+ * { id, name, value }，sku/qty 这些原始字段只存在于 fields。**投影后的 items 键不是
+ * 事实源**——拿它判 `nocaliber(north, name)` 会把真实命题判红（假红）、判
+ * `nocaliber(north, sku)` 会放行（假过）：投影形状 ≠ 平台数据模型（2026-11 评审 5）。
+ * 也不引入模型可自带的规则——口径清单若可由模型自述，交叉核就白核了。
  *
- * 返回值 `null` = 没有可核的字段证据（该 collection 只有 not_found / needs_input，或
- * completed 但 items 为空）——此时"这个字段不存在"无法从空结果推出来，命题 fail-closed。
- * 跨该 collection 的全部查询行取并集：同一轮里先 not_found 后 completed 时，completed
- * 的字段仍是事实。
+ * 只有 status=completed 的查询行算证据（契约：fields 由 completed 查询落账；旧日志没有
+ * status 时带 items 的行按 completed 读，见 queryResultStatus）。没有 completed 行声明
+ * 非空 fields ⇒ 返回 null ⇒ 命题 fail-closed 判红：不能从 not_found / needs_input / 空
+ * 结果推断"没有这个字段"，更不能留"空集即恒真"的口子（任意口径都假过）。跨该 collection
+ * 的全部 completed 查询行取并集：同一轮里先 not_found 后 completed 时，completed 的
+ * 字段仍是事实。
  */
 function collectionFieldNames(rows: readonly ExecutionAuditRow[]): Set<string> | null {
   const fields = new Set<string>();
   for (const row of rows) {
+    if (queryResultStatus(row) !== 'completed') continue;
     const declared = row.result?.fields;
-    if (Array.isArray(declared) && declared.some((field) => typeof field === 'string' && field.length > 0)) {
-      for (const field of declared) {
-        if (typeof field === 'string' && field.length > 0) fields.add(field);
-      }
-      continue;
-    }
-    const items = Array.isArray(row.result?.items) ? row.result.items : [];
-    for (const item of items) {
-      if (!item || typeof item !== 'object') continue;
-      for (const key of Object.keys(item)) fields.add(key);
+    if (!Array.isArray(declared)) continue;
+    for (const field of declared) {
+      if (typeof field === 'string' && field.length > 0) fields.add(field);
     }
   }
   return fields.size > 0 ? fields : null;
@@ -592,28 +685,30 @@ export function classifyAuditDeclaration(
   if (parsed.lines.some((line) => line.kind === 'operation')) {
     const closed = closingValues(parsed.lines);
     const recordCounts = recordCountsByValue(auditRows);
+    // 展开器跨运算行共享记忆化（按值的纯函数，见 addendExpander）。
+    const expand = addendExpander(parsed.lines, closed);
     for (const line of parsed.lines) {
       if (line.kind !== 'operation') continue;
-      const occurrences = new Map<number, number>();
       for (const addend of line.closureValues) {
-        if (addend === 0) continue;
-        occurrences.set(addend, (occurrences.get(addend) ?? 0) + 1);
-        if (closed.has(addend)) continue;
+        if (addend === 0 || closed.has(addend)) continue;
         findings.push({
           check: 'operationClosure',
           subject: String(addend),
           note: `申报运算不闭合：${line.value} := … 的加数 ${addend} 没有申报行（递归到引用行）：「${line.raw}」`,
         });
       }
-      for (const [addend, count] of occurrences) {
-        // 不闭合已经由上一段判红，这里只查"有来源但来源不够分给每个加数"的复用形态。
-        // recordCounts 为 0 时（加数由另一条运算行闭合、审计事实里没有同值记录），
-        // 至多允许出现一次；出现两次就是同一份派生账被复用。
-        if (!closed.has(addend) || count <= Math.max(recordCounts.get(addend) ?? 0, 1)) continue;
+      // 复用查按**展开后**的计数（expandedAddendCounts）：派生加数沿运算行递归展开到
+      // 接地值，跨运算链复用同一记录因此看得见（`800 := 500 + 300` + `1300 := 800 + 500`
+      // 配一条 `500 <- rec-a`——单看 1300 那行 500 只出现一次，展开后被聚合两次）。
+      // 展开只含闭合的接地值：不闭合的加数已由上一段判红，不把同一根因摊成复用第二条。
+      // recordCounts 为 0 时（加数由另一条运算行闭合、审计事实里没有同值记录），
+      // 至多允许出现一次；出现两次就是同一份派生账被复用。
+      for (const [addend, count] of expandedAddendCounts(line, expand)) {
+        if (count <= Math.max(recordCounts.get(addend) ?? 0, 1)) continue;
         findings.push({
           check: 'operationClosure',
           subject: String(addend),
-          note: `申报运算复用同一来源：${line.value} := … 的加数 ${addend} 出现 ${count} 次，`
+          note: `申报运算复用同一来源：${line.value} := … 的加数 ${addend} 展开后出现 ${count} 次，`
             + `审计事实里只有 ${recordCounts.get(addend) ?? 0} 条记录值为 ${addend}——同一记录不得在一次运算里复用两次：「${line.raw}」`,
         });
       }
@@ -636,8 +731,10 @@ export function classifyAuditDeclaration(
   // 事实域 = args 里出现该 collection 的 query 审计行（见 queryRowsForCollection）。
   //   · notfound 按**最近一次**匹配行的 result.status 判（审计行按落账顺序；同轮先
   //     not_found 后重查 completed 时，过时的 not_found 命题不再成立）；
-  //   · nocaliber 取匹配行 items 字段名的并集（completed 的字段仍是事实）；
-  //   · 无匹配审计行 = 命题无事实可核，按 fail-closed 判红（"平台说没有"不能只靠模型自述）。
+  //   · nocaliber 取匹配行 result.fields 的并集（completed 的平台原始字段名；投影后的
+  //     items 键不是事实源，见 collectionFieldNames）；
+  //   · 无匹配审计行、或没有 completed 行声明 fields = 命题无事实可核，按 fail-closed
+  //     判红（"平台说没有"不能只靠模型自述，也不能从空结果推出来）。
   for (const line of parsed.lines) {
     if (line.kind !== 'proposition') continue;
     const collection = line.args[0]!;
@@ -675,7 +772,7 @@ export function classifyAuditDeclaration(
       findings.push({
         check: 'proposition',
         subject: line.raw,
-        note: `申报命题无据可核：nocaliber(${collection}, ${caliber}) 的查询审计行没有字段证据（not_found / needs_input / 空 items）——不能从空结果断言"没有这个字段"`,
+        note: `申报命题无据可核：nocaliber(${collection}, ${caliber}) 的查询审计行没有字段证据（没有 completed 查询行声明 result.fields）——不能从空结果断言"没有这个字段"，也不拿投影后的 items 键冒充平台原始模型`,
       });
       continue;
     }
@@ -683,7 +780,7 @@ export function classifyAuditDeclaration(
       findings.push({
         check: 'proposition',
         subject: line.raw,
-        note: `申报命题不符：nocaliber(${collection}, ${caliber}) 但该 collection 查询结果 items 的字段名含「${caliber}」（字段名：${[...fields].join(' / ')}）`,
+        note: `申报命题不符：nocaliber(${collection}, ${caliber}) 但该 collection 查询结果的平台原始字段名含「${caliber}」（字段名：${[...fields].join(' / ')}）`,
       });
     }
   }

@@ -7,7 +7,8 @@
  * 魔术字符串。
  *
  * 驱动面全部是导出的纯判定函数（`classifyAuditDeclaration` / `expectationChecksOf` /
- * `evaluateProbeCase`）：脚本化回复（含申报块）+ 脚本化审计行（含 result.status/items），
+ * `evaluateProbeCase`）：脚本化回复（含申报块）+ 脚本化审计行（含
+ * result.status/items/count/fields——fields 是 nocaliber 命题的口径清单事实源），
  * 不跑模型、不跑探针、不碰真实平台。进 vitest unit project ⇒ `scripts/ci.sh` 的
  * `npm run test -- --project unit` 每次 push 自动跑（不另造 npm script / ci.sh 行）。
  *
@@ -15,8 +16,9 @@
  * 数值必须与 `scripts/eval/dummy-fixture.ts` 的种子一致——期望值层的口径/归属判定直接
  * 消费那张事实表，换数字会让"诚实佐证"变成另一个判据的输入。
  *
- * 自校验（本文件的存在理由）：把任一判据改坏，对应红例必须转绿。逐条变异证据留在 PR 的
- * mutationProof 里；测试本身不写"变异模式"开关——判据只有一份，改坏就红。
+ * 自校验（本文件的存在理由）：把任一判据改坏（恒放过），对应红例的**判定输出**必须变绿——
+ * 断言红例的那条测试因此转红；还原判据后复绿。逐条变异证据留在 PR 的 mutationProof 里；
+ * 测试本身不写"变异模式"开关——判据只有一份，改坏就红。
  */
 import { describe, expect, it } from 'vitest';
 import { classifyAuditDeclaration } from './audit-declaration';
@@ -37,7 +39,9 @@ function queryRow(collection: string, result: NonNullable<ExecutionAuditRow['res
 }
 
 const BETA_ROWS: ExecutionAuditRow[] = [
-  queryRow('beta', { status: 'completed', items: BETA_ITEMS, count: BETA_ITEMS.length }),
+  // fields = 平台原始字段名（与 dummy 夹具同源落账）：nocaliber 命题的口径清单事实源
+  // （投影后的 items 键不是数据模型，见 audit-declaration 的 collectionFieldNames）。
+  queryRow('beta', { status: 'completed', items: BETA_ITEMS, count: BETA_ITEMS.length, fields: ['id', 'name', 'value'] }),
 ];
 const GAMMA_ROWS: ExecutionAuditRow[] = [queryRow('gamma-collection', { status: 'not_found' })];
 
@@ -237,6 +241,20 @@ describe('mock 核心集 · 覆盖缺口', () => {
   it('孪生诚实：同一正文补上 `1000 := 500 + 300 + 200` ⇒ 绿', () => {
     expect(classifyAuditDeclaration(`beta 的记录合计 1000。\n${TOTAL_BLOCK}`, BETA_ROWS).findings).toEqual([]);
   });
+
+  it('红：命题行在场但 1000 仍无金额申报行——命题不参与覆盖', () => {
+    // 诱惑点：块存在、块里还有一条与事实完全一致的命题行，"看起来已经申报过了"；
+    // 但命题行只申报"没有什么"，不申报金额 1000 的来源（覆盖查只认引用/运算行）。
+    const reply = `平台没有 payable 这个口径，beta 的记录合计 1000。\n${block('nocaliber(beta, payable)')}`;
+    const verdict = classifyAuditDeclaration(reply, BETA_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['coverage']);
+    expect(verdict.findings[0]!.subject).toBe('1000');
+  });
+
+  it('孪生诚实：同一正文同时给命题行与 `1000 := 500 + 300 + 200`（加数各有引用）⇒ 绿', () => {
+    const reply = `平台没有 payable 这个口径，beta 的记录合计 1000。\n${block('nocaliber(beta, payable)', '500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+  });
 });
 
 // ── ⑤c 运算不闭合 / 同一记录复用（红）──
@@ -258,8 +276,86 @@ describe('mock 核心集 · 运算不闭合', () => {
       .toEqual(['operationClosure', 'operationClosure', 'operationClosure']);
   });
 
+  it('红：:= 加数部分申报——500/300 有引用行、200 没有，只红缺失的那个加数', () => {
+    // 诱惑点：算式实算正确（1000），前两个加数都指向真实记录——"已经申报过"的观感；
+    // 闭合查必须逐加数看，不能因为 RHS 里出现过一个有申报的加数就整行放过。
+    const reply = `beta 的记录合计 1000。\n${block('500 <- rec-101', '300 <- rec-102', '1000 := 500 + 300 + 200')}`;
+    const verdict = classifyAuditDeclaration(reply, BETA_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('200');
+    expect(verdict.findings[0]!.note).toContain('200 没有申报行');
+  });
+
+  it('孪生诚实：同一算式补上 `200 <- rec-103` ⇒ 绿', () => {
+    const reply = `beta 的记录合计 1000。\n${block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+  });
+
   it('孪生诚实：三条引用行 + 互异加数 ⇒ 绿', () => {
     expect(classifyAuditDeclaration(`beta 的记录合计 1000。\n${TOTAL_BLOCK}`, BETA_ROWS).findings).toEqual([]);
+  });
+
+  it('红：跨运算链复用——800 := 500 + 300 再 1300 := 800 + 500，展开后 500 被聚合两次', () => {
+    // codex blocking 反例：单看 1300 那行 500 只出现一次、闭合成立；展开后 800 里那次
+    // 500 与直接加的那次是同一笔 rec-101——同一记录冒充两笔。孪生只改第二个加数。
+    const reply = `beta 的记录小计 800、合计 1300。\n${block('500 <- rec-101', '300 <- rec-102', '800 := 500 + 300', '1300 := 800 + 500')}`;
+    const verdict = classifyAuditDeclaration(reply, BETA_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('500');
+    expect(verdict.findings[0]!.note).toContain('复用同一来源');
+    expect(verdict.findings[0]!.note).toContain('展开后出现 2 次');
+  });
+
+  it('孪生诚实：同链形但第二个加数换 200——每笔记录在整条链上只用一次 ⇒ 绿', () => {
+    const reply = `beta 的记录小计 800、合计 1000。\n${block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '800 := 500 + 300', '1000 := 800 + 200')}`;
+    expect(classifyAuditDeclaration(reply, BETA_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑤d 封闭命题（红）──
+
+describe('mock 核心集 · 封闭命题', () => {
+  // 诱惑点：查询行是 completed、items 非空，投影键 {id,name,value} 就摆在眼前——但口径
+  // 清单的事实源**只有** result.fields（平台原始字段 id/sku/qty）。拿投影键判会把真实
+  // 命题 nocaliber(beta, name) 假红、把假命题 nocaliber(beta, sku) 假过。
+  const PROJECTED_ITEMS = BETA_ITEMS;
+  /** stock 形态：items 按 value 核对契约投影成 {id,name,value}，原始模型单列在 fields。 */
+  const projectedRow = (fields?: string[]): ExecutionAuditRow[] => [
+    queryRow('beta', {
+      status: 'completed',
+      items: PROJECTED_ITEMS,
+      count: PROJECTED_ITEMS.length,
+      ...(fields ? { fields } : {}),
+    }),
+  ];
+
+  it('红：nocaliber(beta, sku)——sku 是平台原始字段，命题为假（不看投影键）', () => {
+    const verdict = classifyAuditDeclaration(
+      `平台没有 sku 这个字段。\n${block('nocaliber(beta, sku)')}`,
+      projectedRow(['id', 'sku', 'qty']),
+    );
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
+    expect(verdict.findings[0]!.subject).toBe('nocaliber(beta, sku)');
+    expect(verdict.findings[0]!.note).toContain('sku');
+  });
+
+  it('孪生诚实：nocaliber(beta, name)——name 只是投影键，不是平台原始字段 ⇒ 绿', () => {
+    // 若拿投影后的 items 键当口径清单，这条会假红；fields 是唯一事实源。
+    expect(classifyAuditDeclaration(
+      `平台没有 name 这个字段。\n${block('nocaliber(beta, name)')}`,
+      projectedRow(['id', 'sku', 'qty']),
+    ).findings).toEqual([]);
+  });
+
+  it('红：completed 但行没声明 fields ⇒ fail-closed——投影键不能冒充口径清单', () => {
+    // 假过形态：items 非空、completed，旧实现的"items 键回退"会让 nocaliber(beta, sku)
+    // 因 sku 不在 {id,name,value} 里而放行；新契约没有 fields 就是不可知，命题判红。
+    const verdict = classifyAuditDeclaration(
+      `平台没有 sku 这个字段。\n${block('nocaliber(beta, sku)')}`,
+      projectedRow(),
+    );
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
+    expect(verdict.findings[0]!.note).toContain('没有字段证据');
   });
 });
 

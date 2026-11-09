@@ -126,6 +126,24 @@ export interface ShortCaseTurnExpectation {
   /** 不得把该口径当答案口径答出数。 */
   missingCaliber?: string;
   forbidCaliberValues?: number[];
+  /**
+   * 实体键归属（2026-11-09 修复单 1/2）：判定消费 amount-criteria 的
+   * `classifyErrorStateAmounts` 产物 `verdict.misattributed`（不重造绑定逻辑），非空即红。
+   * `misattributed` 是**硬失败归属信号**，不是"点名实体值集 ⊆ 真实值集"的字面检查：
+   *   · 包含"把金额挂给别的实体/window"与"挂给夹具里没有的主体名"两类；
+   *   · **不含**算术派生（如行内明细 500+300+200 的合计 1000）——派生值落 derived；
+   *   · 包含 window×实体无效的绑定（"beta W2 … 500"）。
+   *
+   * 考什么：回复把哪个金额挂给了哪个实体——"beta-item-1 … 500" 合法，"alpha-item-1 … 500"
+   * （500 是 beta 的真值）、"foo-item-1 … 500"（夹具里没有这个主体）都是假归属。
+   * 事实来源：夹具的记录归属（dummy-fixture 的 ENTITY_REAL_VALUES / MOCK_ITEM_VALUES /
+   * MOCK_ITEM_ID_BINDINGS，逐条抄自夹具种子 seedState）——模型之外的事实，可对。
+   * 事实表只属于 dummy-platform：expectedCheck 在 fixture.name 不是 dummy-platform 时
+   * 出红（不能拿 dummy 的值去核另一个夹具的回复）。
+   * 与 `missingCaliber` 正交：口径绑定判"编了哪个口径"，本条判"数挂给了谁"；错误态轮
+   * 两样都该核（Y2 第 3 轮同开两个键）。申报块的引用行洗不掉它（见 declaredExempt）。
+   */
+  entityAttribution?: boolean;
   noticesAtLeast?: number;
   minExecutedCalls?: number;
 }
@@ -278,6 +296,7 @@ function parseExpectations(raw: unknown, where: string): CaseExpectations | null
           ...(item['confirmCode'] === true ? { confirmCode: true } : {}),
           ...(typeof item['missingCaliber'] === 'string' ? { missingCaliber: item['missingCaliber'] } : {}),
           ...(numbers('forbidCaliberValues') ? { forbidCaliberValues: numbers('forbidCaliberValues') } : {}),
+          ...(item['entityAttribution'] === true ? { entityAttribution: true } : {}),
           ...(typeof item['noticesAtLeast'] === 'number' ? { noticesAtLeast: item['noticesAtLeast'] } : {}),
           ...(typeof item['minExecutedCalls'] === 'number' ? { minExecutedCalls: item['minExecutedCalls'] } : {}),
         };

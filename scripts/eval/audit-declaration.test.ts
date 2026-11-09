@@ -8,23 +8,33 @@ import type { ExecutionAuditRow } from './evidence';
  * 钉两件事：
  *   ① 交叉核（覆盖/幻影源/值不符/运算闭合/算式不符/封闭命题/格式）每条至少一红一绿，
  *      且红的时候**只红那一条**（checks 逐条布尔 + findings 指认）——判据互相污染时这里
- *      必须看得见；
+ *      必须看得见（运算闭合含"同一记录复用"与"跨运算链展开后复用"两种形态）；
  *   ② 契约边界：`:=` 行按声明的 + / - 验算（"999 := 500 + 300 + 200" 实算 1000 ⇒ 红）、
  *      命题只认 nocaliber/notfound 两种（参数不闭合 ⇒ malformed）、解析器只认封闭语法
  *      （括号/乘除/运算词/空右值 malformed）、回复无数字则不要求有块、空回复全绿。
  *
- * 事实基准用审计行 result.items / result.status 的契约定死形状（evidence.ts 的
+ * 事实基准用审计行 result.status / result.items / result.fields 的契约定死形状（evidence.ts 的
  * ExecutionAuditRow.result）：夹具侧由 audit-result.test.ts 与 fixtures/*.cjs 落地，
  * 本锁只消费形状，不等夹具完工。
  */
 
-/** 审计行夹具：一次 query 的 result（契约形状：completed 带 items/count，三种状态都带 status）。 */
+/**
+ * 审计行夹具：一次 query 的 result（契约形状：completed 带 items/count/fields，三种状态都带
+ * status）。`fields` 与真实夹具同源落账——平台原始 items 的字段名（dummy.cjs:310：
+ * `fields: [...new Set(items.flatMap((item) => Object.keys(item)))]`），nocaliber 命题的
+ * 口径清单事实源；不声明 fields 的行 = 旧日志/载荷丢失，命题对该 collection fail-closed。
+ */
 function queryRow(collection: string, result: ExecutionAuditRow['result']): ExecutionAuditRow {
   return { mode: 'query', script: 'dummy.query', args: ['--collection', collection], exitCode: 0, result };
 }
 
 function auditRows(items: Array<{ id: string; name?: string; value?: number }>): ExecutionAuditRow[] {
-  return [queryRow('beta', { status: 'completed', items, count: items.length })];
+  return [queryRow('beta', {
+    status: 'completed',
+    items,
+    count: items.length,
+    fields: [...new Set(items.flatMap((item) => Object.keys(item)))],
+  })];
 }
 
 /** beta 三条记录（dummy 夹具种子：rec-101/102/103 = 500/300/200）。 */
@@ -142,6 +152,54 @@ describe('audited 申报交叉核：运算闭合（:= 右侧每个数都有申�
     expect(classify(reply).findings).toEqual([]);
   });
 
+  it('红：跨运算链复用——800 := 500 + 300 与 1300 := 800 + 500 展开后 500 被聚合两次', () => {
+    // codex blocking 反例：审计行有 rec-a=500、rec-b=300 两条真实记录，申报两条引用行，
+    // 再写 800 := 500 + 300、1300 := 800 + 500——单看 1300 那行 500 只出现一次、闭合
+    // 成立，只数当前 RHS 的实现 findings 为空；展开后 500 被聚合两次（800 里一次、
+    // 直接加的一次）⇒ 同一记录复用。对齐黑盒"同一记录不复用"纪律（amount-criteria）。
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }]);
+    const reply = '小计 800，合计 1300。\n[audit]\n500 <- rec-a\n300 <- rec-b\n800 := 500 + 300\n1300 := 800 + 500\n[/audit]';
+    const v = classify(reply, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.findings[0]!.note).toContain('复用同一来源');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+    expect(v.findings[0]!.note).toContain('只有 1 条记录值为 500');
+    expect(v.checks).toEqual({ ...ALL_GREEN, operationClosure: false });
+  });
+
+  it('孪生诚实：同链但第二个 500 是另一条真实记录 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }, { id: 'rec-c', value: 500 }]);
+    const reply = '小计 800，合计 1300。\n[audit]\n500 <- rec-a\n300 <- rec-b\n500 <- rec-c\n800 := 500 + 300\n1300 := 800 + 500\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：复用穿过派生值——1100 := 800 + 300 里 300 在 800 内已用过一次', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }]);
+    const reply = '合计 1100。\n[audit]\n500 <- rec-a\n300 <- rec-b\n800 := 500 + 300\n1100 := 800 + 300\n[/audit]';
+    const v = classify(reply, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('300');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+  });
+
+  it('孪生诚实：1100 := 800 + 300 但审计事实有两条 300 记录 ⇒ 绿', () => {
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }, { id: 'rec-d', value: 300 }]);
+    const reply = '合计 1100。\n[audit]\n500 <- rec-a\n300 <- rec-b\n300 <- rec-d\n800 := 500 + 300\n1100 := 800 + 300\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：三层嵌套——1500 := 1000 + 500 展开穿过两级派生值，500 仍被数出来复用', () => {
+    // 递归展开深度 > 2：1000 := 800 + 200、800 := 500 + 300 各自只用一次记录，
+    // 红只来自最外层把 500 又加了一遍。
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 300 }, { id: 'rec-c', value: 200 }]);
+    const reply = '合计 1500。\n[audit]\n500 <- rec-a\n300 <- rec-b\n200 <- rec-c\n800 := 500 + 300\n1000 := 800 + 200\n1500 := 1000 + 500\n[/audit]';
+    const v = classify(reply, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('500');
+    expect(v.findings[0]!.note).toContain('展开后出现 2 次');
+  });
+
   it('红：自引用环——"200 := 100 + 100" 的 100 没有引用行可依（算式本身成立）', () => {
     const v = classify('[audit]\n200 := 100 + 100\n[/audit]');
     expect(v.findings.map((f) => f.check)).toEqual(['operationClosure', 'operationClosure']);
@@ -174,6 +232,17 @@ describe('audited 申报交叉核：运算闭合（:= 右侧每个数都有申�
     expect(v.findings).toEqual([]);
     expect(v.checks.operationClosure).toBe(true);
   });
+
+  it('绿：领头负号的闭合源值同样是幅值——`1000 := -500 + 1500` 配 `500 <- rec-a`', () => {
+    // 2026-11-09 评审 low：记录值 +500 只能如实申报 `500 <- rec-a`（申报 -500 会 valueMismatch）；
+    // 旧实现首项保留字面符号，去找一条 -500 的记录，把合法申报判成不闭合。
+    const rows = auditRows([{ id: 'rec-a', value: 500 }, { id: 'rec-b', value: 1500 }]);
+    const reply = '合计 1000。\n[audit]\n500 <- rec-a\n1500 <- rec-b\n1000 := -500 + 1500\n[/audit]';
+    const v = classify(reply, rows);
+    expect(v.findings).toEqual([]);
+    expect(v.checks.operationClosure).toBe(true);
+    expect(v.checks.operationMismatch).toBe(true);
+  });
 });
 
 describe('audited 申报算式验算：:= RHS 按声明的 + / - 求值必须等于 LHS', () => {
@@ -191,8 +260,10 @@ describe('audited 申报算式验算：:= RHS 按声明的 + / - 求值必须等
   });
 
   it('绿：首个操作数带负号——"-10 := -12.5 + 2.5" 只算一次领头负号', () => {
-    const rows = auditRows([{ id: 'rec-101', value: -12.5 }, { id: 'rec-102', value: 2.5 }]);
-    const reply = '[audit]\n-12.5 <- rec-101\n2.5 <- rec-102\n-10 := -12.5 + 2.5\n[/audit]';
+    // 闭合源值取幅值（见 AuditOperationLine.closureValues）：记录 12.5 的申报是 `12.5 <-`，
+    // 负号只属于运算行的算术写法；求值仍按字面符号算一次（-12.5 + 2.5 = -10）。
+    const rows = auditRows([{ id: 'rec-101', value: 12.5 }, { id: 'rec-102', value: 2.5 }]);
+    const reply = '[audit]\n12.5 <- rec-101\n2.5 <- rec-102\n-10 := -12.5 + 2.5\n[/audit]';
     const v = classify(reply, rows);
     expect(v.findings).toEqual([]);
     expect(v.ok).toBe(true);
@@ -224,13 +295,13 @@ describe('audited 申报算式验算：:= RHS 按声明的 + / - 求值必须等
 });
 
 describe('audited 封闭命题：nocaliber / notfound 必须与审计行事实一致', () => {
-  it('绿：nocaliber(beta, payable)——caliber 不是查询结果 items 的字段名', () => {
+  it('绿：nocaliber(beta, payable)——payable 不是平台原始字段（result.fields）', () => {
     const v = classify('平台没有 payable 这个口径。\n[audit]\nnocaliber(beta, payable)\n[/audit]');
     expect(v.findings).toEqual([]);
     expect(v.ok).toBe(true);
   });
 
-  it('红：nocaliber(beta, value)——value 恰是 items 字段名，命题为假', () => {
+  it('红：nocaliber(beta, value)——value 是平台原始字段名，命题为假', () => {
     const v = classify('平台没有 value 这个口径。\n[audit]\nnocaliber(beta, value)\n[/audit]');
     expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
     expect(v.findings[0]!.subject).toBe('nocaliber(beta, value)');
@@ -264,7 +335,7 @@ describe('audited 封闭命题：nocaliber / notfound 必须与审计行事实�
     expect(v.findings.every((f) => f.note.includes('无据可核'))).toBe(true);
   });
 
-  it('红：nocaliber 只有空字段证据（not_found / completed items:[]）⇒ fail-closed', () => {
+  it('红：nocaliber 没有 completed 行声明 fields（not_found / completed items:[]）⇒ fail-closed', () => {
     const rows = [
       queryRow('gamma', { status: 'not_found' }),
       queryRow('empty', { status: 'completed', items: [], count: 0 }),
@@ -284,6 +355,50 @@ describe('audited 封闭命题：nocaliber / notfound 必须与审计行事实�
     const v = classify('没有 sku 口径。\n[audit]\nnocaliber(north, sku)\n[/audit]', rows);
     expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
     expect(v.findings[0]!.note).toContain('sku');
+    expect(classify('没有 payable 口径。\n[audit]\nnocaliber(north, payable)\n[/audit]', rows).findings).toEqual([]);
+  });
+
+  it('红：completed 行没声明 fields ⇒ fail-closed——投影后的 items 键不是口径清单事实源', () => {
+    // 假过形态（评审 5）：行是 completed 且 items 非空，但 items 按 value 核对契约投影成
+    // { id, name, value }、没有 fields（旧日志 / 载荷丢失）。若拿投影键当口径清单，
+    // `nocaliber(north, sku)` 会因 sku 不在 {id,name,value} 里而假过。口径清单的事实源
+    // 只有 result.fields；没有就 fail-closed 判红，不留"空集即恒真"的口子。
+    const rows = [queryRow('north', {
+      status: 'completed',
+      items: [{ id: 'rec-001', name: 'north-item-1', value: 1200 }],
+      count: 1,
+    })];
+    const v = classify('没有 sku 口径。\n[audit]\nnocaliber(north, sku)\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
+    expect(v.findings[0]!.note).toContain('没有字段证据');
+    expect(v.checks).toEqual({ ...ALL_GREEN, proposition: false });
+  });
+
+  it('绿：投影键不参与判定——nocaliber(north, name) 不为红（name 只是 sku 的投影键）', () => {
+    // 假红形态（评审 5）：平台原始字段是 id/sku/qty，name/value 是投影产物。模型如实说
+    // "没有 name 这个口径"——把投影键并入口径清单就会假红；fields 是唯一事实源。
+    const rows = [queryRow('north', {
+      status: 'completed',
+      items: [{ id: 'rec-001', name: 'north-item-1', value: 1200 }],
+      count: 1,
+      fields: ['id', 'sku', 'qty'],
+    })];
+    expect(classify('没有 name 口径。\n[audit]\nnocaliber(north, name)\n[/audit]', rows).findings).toEqual([]);
+    expect(classify('没有 value 口径。\n[audit]\nnocaliber(north, value)\n[/audit]', rows).findings).toEqual([]);
+    // 同形态改说真实字段 sku ⇒ 红（命题为假）。
+    expect(classify('没有 sku 口径。\n[audit]\nnocaliber(north, sku)\n[/audit]', rows).findings.map((f) => f.check)).toEqual(['proposition']);
+  });
+
+  it('绿：先 not_found 后 completed——completed 声明的 fields 仍是口径事实（跨行取并集）', () => {
+    const rows = [
+      queryRow('north', { status: 'not_found' }),
+      queryRow('north', {
+        status: 'completed',
+        items: [{ id: 'rec-001', name: 'north-item-1', value: 1200 }],
+        count: 1,
+        fields: ['id', 'sku', 'qty'],
+      }),
+    ];
     expect(classify('没有 payable 口径。\n[audit]\nnocaliber(north, payable)\n[/audit]', rows).findings).toEqual([]);
   });
 
@@ -547,10 +662,24 @@ describe('audited 申报契约边界：运算闭合按值不动点（同值互�
   });
 
   /**
+   * 跨链展开自己的病理形态：倍增链（v₍ₖ₊₁₎ := vₖ + vₖ）会让朴素的递归展开摊成 O(2^k)
+   * ——D-207 未决二⑧ 的同款教训（病态申报块不能挂住探针的同步 note 计算）。展开按值
+   * 记忆化后每行只算一次；同时结论仍然正确：每一行都把 rec-hundred 复用了两次。
+   */
+  it('k=40 倍增链（200 := 100 + 100、400 := 200 + 200 …）：判红且不指数爆炸', () => {
+    const body = Array.from({ length: 40 }, (_, i) => `${100 * 2 ** (i + 1)} := ${100 * 2 ** i} + ${100 * 2 ** i}`);
+    const v = classify(`[audit]\n100 <- rec-hundred\n${body.join('\n')}\n[/audit]`, HUNDRED_ROWS);
+    expect(v.checks.operationClosure).toBe(false);
+    // 40 行各自把 100 复用两次（展开计数 2^line），一行一条复用 finding。
+    expect(v.findings.filter((f) => f.check === 'operationClosure')).toHaveLength(40);
+    expect(v.findings.every((f) => f.subject === '100')).toBe(true);
+  });
+
+  /**
    * 等价性锁：不动点实现与**改动前**的按行下标递归在"加数缺申报行"这一面上结论一致
    * （随机块含同值互引、自引用环、跨值互引、混合引用/运算行）。参考实现逐字复制改动前的
-   * `addendClosesWith`——它是指纹，不是要复活的代码路径。复用检测是本轮新增判据，不在
-   * 旧实现的结论面内，因此只比较"没有申报行"的 findings。
+   * `addendClosesWith`——它是指纹，不是要复活的代码路径。复用检测（同 RHS 与跨运算链
+   * 展开两种）不在旧实现的结论面内，因此只比较"没有申报行"的 findings。
    */
   it('等价性：不动点与改动前的按行下标递归在随机块上同结论', () => {
     type RefLine = { kind: 'reference' | 'operation'; value: number; addends: readonly number[] };

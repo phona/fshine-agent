@@ -78,16 +78,24 @@ export interface Baseline {
   writeChain: Record<string, BaselineWriteChainGroup>;
 }
 
+/**
+ * 报告行的申报失败计数：数字 = 在该轮平台证据上跑过交叉核；`'not-applicable'` =
+ * **没有可核的平台证据轮次**（零轮占位、runner 崩溃、纯闲聊轮）——显式不适用，不是 0
+ * （0 会被读成「查过且全过」，与「没查过」混为一谈）。字段缺席（undefined）= 旧报告/
+ * 黑盒报告没有这一列，仍按 fail-closed 处理。
+ */
+export type AuditFailuresValue = number | 'not-applicable';
+
 export interface ProbeResultRow {
   id: string;
   ok: boolean;
   dims: DimCounts;
   unclassifiedNotes: number;
   /**
-   * audited 申报模式的申报失败条数（探针 error-state 轮 classifyAuditDeclaration 的
-   * findings 全量累计）。黑盒报告**不带该字段**（旧报告同理）：没跑交叉核的 0 不是「全过」。
+   * audited 申报模式的申报失败条数（只对**有平台证据**的轮次累计 findings；零轮/崩溃/
+   * 纯闲聊轮记 `'not-applicable'`）。黑盒报告**不带该字段**（旧报告同理）。
    */
-  auditFailures?: number;
+  auditFailures?: AuditFailuresValue;
   notes: string[];
   turns: Array<{
     text: string;
@@ -149,6 +157,22 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
 // ── 逐例判定（纯函数，单测面） ──
 
 /**
+ * audited 申报失败检查（**导出**：探针统一报告的通过率与打分器共用同一实现）。
+ *
+ * 判定只有一处：缺计数 fail-closed（没跑交叉核的 0 是「不知道」，不是「查过且全过」）；
+ * 数字则对照基线上限（只增才算劣化）；显式 `'not-applicable'`（没有可核的平台证据轮次）
+ * **不失败也不冒充 0**——检查照出（可审计），actual 写「不适用」。
+ */
+export function auditFailuresCheckOf(auditFailures: AuditFailuresValue | undefined, limit = 0): Check {
+  if (auditFailures === 'not-applicable') {
+    return { name: 'audited·申报失败', pass: true, expected: '（无平台证据轮次，不适用）', actual: '不适用' };
+  }
+  return typeof auditFailures === 'number'
+    ? { name: 'audited·申报失败', pass: auditFailures <= limit, expected: `≤${limit}`, actual: String(auditFailures) }
+    : { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '缺计数（未跑申报交叉核）' };
+}
+
+/**
  * 探针逐例判定：四层并列，**不替换任何一层**。
  *   ① 四维违例上限（基线 cap，只增才算劣化）
  *   ② 探针自身 ok（strict/free）
@@ -188,15 +212,9 @@ export function evaluateProbeCase(
   // 四维会让申报模式的判定输出对评分零影响——错误数据照过。计数是 findings 全量，不枚举
   // 种类：新增判据自动计入。只对 audited 报告出检查：黑盒没有交叉核判定，不拿 0 冒充
   // 「查过且全过」。缺计数同样不是 0——没跑交叉核的 0 是「不知道」，按 fail-closed 判红
-  // （2026-11-09 独立评审：此前 ?? 0 让缺列在单行评分面静默变绿）。
-  if (audited) {
-    const limit = baselineCase.auditFailures ?? 0;
-    if (typeof row.auditFailures !== 'number') {
-      checks.push({ name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '缺计数（未跑申报交叉核）' });
-    } else {
-      checks.push({ name: 'audited·申报失败', pass: row.auditFailures <= limit, expected: `≤${limit}`, actual: String(row.auditFailures) });
-    }
-  }
+  // （2026-11-09 独立评审：此前 ?? 0 让缺列在单行评分面静默变绿）。判定实现在
+  // auditFailuresCheckOf（探针统一报告也吃这一份，不另写）。
+  if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, baselineCase.auditFailures ?? 0));
   const okMode = baselineCase.okMode ?? 'strict';
   if (okMode === 'strict') {
     checks.push({ name: '探针ok', pass: row.ok, expected: 'true', actual: String(row.ok) });
@@ -384,10 +402,13 @@ async function main(): Promise<void> {
     console.error(`探针报告格式过旧，请重跑：npm run eval:probe（${path.basename(probePath!)} 的 ${staleExecution.id} 缺 execution/calls 列）（exit 2）`);
     process.exit(2);
   }
-  // 格式守卫：audited 报告必须逐行带申报失败计数（本门落地前的 audited 报告没有这一列）。
-  // 缺列按 0 过门会把「没跑交叉核」读成「查过且全过」——正是申报失败门要堵的假绿。
+  // 格式守卫：audited 报告必须逐行带申报失败计数或用显式不适用状态（本门落地前的
+  // audited 报告没有这一列）。缺列按 0 过门会把「没跑交叉核」读成「查过且全过」——正是
+  // 申报失败门要堵的假绿；但零轮占位 / 崩溃 / 纯闲聊轮不该被写成 0（评审修复），
+  // 用 `'not-applicable'` 显式表达，守卫接受该状态。
+  const validAuditValue = (value: unknown): boolean => typeof value === 'number' || value === 'not-applicable';
   const staleAudit = probeReport.audited === true
-    ? probeReport.results.find((result) => typeof result.auditFailures !== 'number')
+    ? probeReport.results.find((result) => !validAuditValue(result.auditFailures))
     : undefined;
   if (staleAudit) {
     console.error(`audited 报告缺申报失败计数，请重跑：npm run eval:probe -- --audit（${path.basename(probePath!)} 的 ${staleAudit.id} 无 auditFailures 列）（exit 2）`);
@@ -501,9 +522,12 @@ function writeBaselineFrom(
         ? Object.fromEntries(NOTE_DIMS.map((dim) => [dim, verdict.judge!.scores[dim]])) as BaselineCase['judge']
         : previous?.judge ?? null;
       // audited 申报失败上限随本轮实值重定（与 dims 同口径：只增才算劣化）。黑盒轮不出这个
-      // 检查——缺席不能被写成 0（那会把「没查过」烤成「查过且全过」），保留前值。
+      // 检查——缺席不能被写成 0（那会把「没查过」烤成「查过且全过」），保留前值；显式
+      // 不适用（actual=不适用）同样保留前值，不把 "not-applicable" 烤成数字。
       const auditCheck = verdict.checks.find((check) => check.name === 'audited·申报失败');
-      const auditFailures = auditCheck ? Number(auditCheck.actual) : previous?.auditFailures;
+      const auditFailures = auditCheck && /^\d+$/.test(auditCheck.actual)
+        ? Number(auditCheck.actual)
+        : previous?.auditFailures;
       next.cases[verdict.corpusId] = {
         dims,
         ...(judgeScores ? { judge: judgeScores } : {}),

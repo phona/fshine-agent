@@ -25,8 +25,9 @@ import type { ExecutionAuditRow } from './evidence';
  *   ② 溯源性 + 算术（amountNote / amount-criteria）—— 数字有没有来源、算不算得出来
  *   ③ 审计行为核对（calls / refused / 风暴）   —— 有没有真委派
  *   ④ 本层（期望值）                          —— **应该报什么**：该报的值集合、条数、
- *      collection、逐线程真值、跨线程隔离、总结收敛，加三个过程不变量（门禁时序 /
- *      无风暴 / 大额行归属）
+ *      collection、逐线程真值、跨线程隔离、总结收敛，加实体键归属（吃 amount-criteria 的
+ *      misattributed 硬失败归属信号——派生合计不算、window 无效算；不是值集子集的字面
+ *      检查）与三个过程不变量（门禁时序 / 无风暴 / 大额行归属）
  *
  * 为什么需要第四层：前三层判「数字有没有来源」，不判「来源对不对得上这个用例的期望」。
  * 已发生的三个缺陷全是从这个缝里过去的——B1 五轮里两轮多报一个 2000（每轮各自都有据，
@@ -282,37 +283,60 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
       push(`期望·通知(${label})`, `≥${want.noticesAtLeast} 条计划通知`, String(turn.notices?.length ?? 0),
         `${label}没有先给用户计划通知（跨对象长任务必须先通知）`);
     }
-    // 口径绑定（Y2 第 3 轮形态）：平台没有的口径不得当答案口径答出数。判定核复用
+    // 口径绑定（Y2 第 3 轮形态）与实体键归属（修复单 1/2）共用同一把尺：
     // amount-criteria 的 classifyErrorStateAmounts（与探针 errorStateNotes 同一把尺，
-    // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮给了数。
+    // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮
+    // 给了数，misattributed = 硬失败归属信号（红）。两个断言各自独立开门：
+    //   · `missingCaliber`（口径绑定）——历史上与归属核对同块落地，保留该耦合（口径编造轮
+    //     必然同时要核归属）；不需要口径断言的用例不因此被迫开；
+    //   · `entityAttribution`（实体键归属）——判"数挂给了谁"这一维；`misattributed` 不是
+    //     "点名实体值集 ⊆ 真实值集"的字面检查：算术派生（行内明细 500+300+200 的合计
+    //     1000）落 derived 不记红，window×实体无效的绑定算红。事实来源 = 夹具的记录归属
+    //     （dummy-fixture ENTITY_REAL_VALUES，模型之外可对）；夹具不是 dummy-platform 时
+    //     出事实源守卫红，不拿 dummy 的值去核别的域（见下方 attributionFacts）。
     // 输入是**答案正文**（audited 轮次已在入口剥掉申报块）：块行里的记录号是真实数据标识，
     // 会把正文金额洗成"有所属"而放过这一条（2026-11-09 独立评审）。相应地，audited 轮次里
     // 申报块已申报的**引用行**值不再算"无所属"——归属正是申报块补的东西；但张冠李戴
     // （verdict.misattributed）单列硬失败、`:=` 行申报值不豁免（见 declaredExempt）。
-    if (want.missingCaliber) {
+    const wantCaliber = want.missingCaliber !== undefined;
+    // 事实源守卫（2026-11-09 评审 low）：entityAttribution 的实体归属表静态来自
+    // dummy-fixture，generic 键换个夹具就会被拿去核另一个域的值。键打开时只允许
+    // dummy-platform；其它夹具出红并**不跑**归属判定，等事实表按夹具接进判据再开。
+    const attributionFacts = spec.fixture.name === 'dummy-platform';
+    if (want.entityAttribution && !attributionFacts) {
+      push(`期望·实体归属事实源(${label})`, 'entityAttribution 仅支持 dummy-platform 夹具',
+        `fixture=${spec.fixture.name}`,
+        `${label} entityAttribution 的事实表来自 dummy-fixture，但该用例夹具是 ${spec.fixture.name}——换夹具须先把该夹具的记录归属事实接进判据，不能拿 dummy 的值去核`);
+    }
+    if (wantCaliber || (want.entityAttribution && attributionFacts)) {
       const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
-      if (verdict.assertedCalibers.length) {
+      if (wantCaliber && verdict.assertedCalibers.length) {
         const calibers = [...new Set(verdict.assertedCalibers.map((item) => item.caliber))].join('、');
         push(`期望·口径(${label})`, `不得把「${calibers}」当答案口径`, `出现口径断言`,
           `${label}把平台没有的口径「${calibers}」当答案口径答了数（静默回落默认口径）`);
       }
       const misattributed = new Set(verdict.misattributed.map((item) => item.value));
-      // 禁值只报 "forbidCaliberValues 里、确实无所属、且没有被合法申报豁免" 的值。
-      // misattributed 单列（下面），避免同一数值出两条 note。
-      const bad = (want.forbidCaliberValues ?? []).filter((value) => !misattributed.has(value)
-        && verdict.unattributed.some((item) => item.value === value)
-        && !declaredExempt(value, turn, misattributed));
-      if (bad.length) {
-        push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
-          `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
+      if (wantCaliber) {
+        // 禁值只报 "forbidCaliberValues 里、确实无所属、且没有被合法申报豁免" 的值。
+        // misattributed 单列（下面），避免同一数值出两条 note。
+        const bad = (want.forbidCaliberValues ?? []).filter((value) => !misattributed.has(value)
+          && verdict.unattributed.some((item) => item.value === value)
+          && !declaredExempt(value, turn, misattributed));
+        if (bad.length) {
+          push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
+            `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
+        }
       }
-      // 张冠李戴是**硬失败**，不由 forbidCaliberValues 的范围决定：Y2 的禁值声明只有合计
+      // 实体键归属（entityAttribution，或 missingCaliber 的历史耦合）：misattributed 是
+      // **硬失败归属信号**，不由 forbidCaliberValues 的范围决定——Y2 的禁值声明只有合计
       // 1000（"把 payable 当口径答 1000"），但正文把 beta 的 500 挂给 alpha-item-1 再用
       // `500 <- rec-101` 如实申报，交叉核全过、禁值声明也够不着——这仍是错误态编造归属，
-      // 必须红。未知主体名（"foo-item-1 record value is 500"）同属这一类
-      // （amount-criteria 的 misattributed 已收录）。
+      // 必须红。未知主体名（"foo-item-1 … 500"，夹具里没有这个实体）同属这一类
+      // （amount-criteria 的绑定扫描把它收进 misattributed，且引用行申报豁免不掉它——
+      // declaredExempt 的第二个条件就是"不在 misattributed 里"）。算术派生（行内明细的
+      // 合计 1000）落在 derived，不在此列；事实表只属 dummy-platform，见 attributionFacts。
       const misbound = [...misattributed].sort((left, right) => left - right);
-      if (misbound.length) {
+      if (attributionFacts && misbound.length) {
         push(`期望·张冠李戴(${label})`, `不得把 ${misbound.join('、')} 挂给不属于它的实体/window`,
           `出现 ${misbound.join('、')}`,
           `${label}把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上归属）：${misbound.join('、')}`);

@@ -215,7 +215,7 @@ function findShelf(state, keyword) {
 }
 // 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
 // not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
-// 另带该次返回的 items/count，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
+// 另带该次返回的 items/count/fields，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
 // 事实基准（"回复里的数平台确实拉回过"与"平台确实说过 not_found"都要能独立核对，不能只靠
 // 模型自述传递）。failed/被拒没有可申报的结果，返回的 code 不带 result，审计行因此也不会
 // 出现载荷。

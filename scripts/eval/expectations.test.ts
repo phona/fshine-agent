@@ -130,6 +130,55 @@ const Y2_T2 = `查询结果：**beta 的 payable balance：1000**
 
 平台实时查询：beta collection W1 窗口下共 3 条记录（beta-item-1=500、beta-item-2=300、beta-item-3=200），合计 1000。`;
 
+/**
+ * Y2 第 3 轮**历史真实回复原文**（修复单 1/2 的原料，逐字转录，不混合成）：
+ *   · Y2_T2_REAL_BOX = `.runtime/probe-fshine-probe-cZ07DK.json`（2026-11-09 09:46 黑盒
+ *     实测跑）Y2 turns[2].reply——"beta-item-1 — value 500" 就是正确引用 beta 明细那句；
+ *   · Y2_T2_REAL_TABLE = `.runtime/probe-fshine-probe-pr0c9f.json`（2026-11-09 09:52
+ *     audited 实测跑，该轮回复未附申报块）Y2 turns[2].reply——表格明细 + "合计 1000"
+ *     （1000 走算术派生通道）同场，且正文多处置身 gamma-collection（夹具外名字）。
+ * 新断言（entityAttribution）必须先在这两条原文上双向验证：跑新断言必须空（不假红），
+ * 把 beta 的 500 挂给 alpha-item-1 必须红（真能抓）。不用合成 spec 自说自话——上一轮
+ * 的病就是把 forbidCaliberValues 改成 [500] 自证；真实 Y2 spec 的禁值只有 [1000]，
+ * 500 的红只能来自归属本身。
+ */
+const Y2_T2_REAL_BOX = `查询完成。结果如下：
+
+**collection "beta" 中不存在名为 "payable balance"（应付余额）的 record，因此无法返回其 value。**
+
+平台实时查询确认：
+
+- collection "beta" 存在，仅有窗口 W1，共 3 条记录：
+  - beta-item-1 — value 500
+  - beta-item-2 — value 300
+  - beta-item-3 — value 200
+- 该 collection 内没有名为 "payable balance" 的记录，也没有窗口 W2（beta 只有 W1）。
+
+为排除名称歧义，我还核查了平台上其余可见 collection（alpha、alpha-group、contoso-trade、contoso-logistics、fabrikam-retail、fabrikam-wholesale、locked-one、empty-one），均无 "payable balance" 这条记录；另外，线索中的 "gamma-collection" 在平台上不存在。
+
+如需进一步定位，请确认该记录的确切名称或其所属 collection 名称，我可以重新查询。`;
+
+const Y2_T2_REAL_TABLE = `按方案执行的查询已跑完，结果如下：
+
+**方案中的调用（gamma-collection / W2）→ 未能取到数据**
+
+平台返回：\`gamma-collection\` 这个集合名匹配不到任何集合，候选为空。也就是说该名称在平台上不存在，不是数据缺失或窗口无数据的问题，而是名称本身无法解析。
+
+**已另行查到的、与「beta」相关的结果（唯一窗口 W1）**
+
+| 记录 | 数值 |
+|---|---|
+| beta-item-1 | 500 |
+| beta-item-2 | 300 |
+| beta-item-3 | 200 |
+| 合计 | 1000 |
+
+另需说明两点：
+- \`W2\` 窗口对 beta 集合没有数据，beta 只有 W1 一个窗口。
+- 平台记录只有「名称」和「数值」两列，没有名为 payable balance 的字段，因此无法按该名称定位到具体余额；上表是 beta 集合 W1 下的全部记录及合计。
+
+**具体阻碍**：方案里指定的集合名 \`gamma-collection\` 在平台上不存在，现有集合为 alpha、beta、alpha-group、contoso-trade、fabrikam-retail、fabrikam-wholesale。要拿到目标数据，需要你确认这个名称是否笔误、正确集合名是什么；如果本意就是查 beta，则 W1 的数据已在上面给出，但「payable balance」这个字段名平台侧没有对应列，也需你确认它指合计还是某一项。`;
+
 // ── 小工具 ──
 
 const cases = loadCases();
@@ -547,6 +596,162 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     // 4321 只在运算行里申报，正文里无所属——旧「一律豁免」会把它洗白。
     const t2 = auditedTurn(2, '平台没有 payable 这个口径。其中 4321 待确认。', '[audit]\n4321 := 4000 + 321\n[/audit]', []);
     expect(failing(shell(t2), spec)).toEqual(['期望·禁值(第3轮)']);
+  });
+});
+
+/**
+ * 实体键归属（entityAttribution，2026-11-09 修复单 1/2）：本轮回复里**点名了的实体**，
+ * 归给它的值集必须是它真实值集的子集。判定直接消费 classifyErrorStateAmounts 的
+ * verdict.misattributed（不重造绑定逻辑），非空即红；事实来源 = 夹具的记录归属
+ * （dummy-fixture ENTITY_REAL_VALUES / MOCK_ITEM_VALUES / MOCK_ITEM_ID_BINDINGS，
+ * 逐条抄自夹具种子）——模型之外的事实，可对。
+ *
+ * 双向验证只用**历史真实回复原文**（Y2_T2_REAL_BOX / Y2_T2_REAL_TABLE，见各自注释里的
+ * 探针报告出处），不拿合成 spec 自说自话。注意真实 spec 的禁值只有 [1000]：500 是第 3
+ * 轮合法佐证，所以"beta 的 500 挂给 alpha-item-1"的红**只能**来自归属断言本身。
+ */
+describe('期望值层：实体键归属（entityAttribution——点名实体的值集 ⊆ 真实值集）', () => {
+  const TEXTS = [
+    'check gamma-collection 这个 collection W2 的 record value',
+    'check contoso collection record value',
+    'checkbeta的payablebalance',
+  ];
+  /** 三轮 Y2 外壳（第 1/2 轮用既有干净夹具回复，第 3 轮由调用方给）。 */
+  const shell = (turn2: ExpectationTurn): ExpectationTurn[] => [
+    turn(TEXTS[0]!, Y2_T0, 1, 0),
+    turn(TEXTS[1]!, Y2_T1, 1, 1),
+    turn2,
+  ];
+  const failing = (turns: ExpectationTurn[]): string[] =>
+    evaluateCaseExpectations(specOf('Y2'), turns).checks.filter((check) => !check.pass).map((check) => check.name);
+
+  it('schema：断言进真实 Y2 用例（cases.yaml 第 3 轮 entityAttribution: true），不靠隐藏耦合', () => {
+    const turn2 = specOf('Y2').expectations!.shortCase!.turns[2]!;
+    expect(turn2.entityAttribution).toBe(true);
+    // 与口径绑定正交：同轮两个键各管一头（"编了哪个口径" / "数挂给了谁"）。
+    expect(turn2.missingCaliber).toBe('payable');
+  });
+
+  it('不假红：Y2 第 3 轮真实回复原文（正确引用 beta 明细）跑新断言全绿', () => {
+    // 黑盒实测原文（beta-item-1 — value 500 逐字）。
+    expect(failing(shell(turn(TEXTS[2]!, Y2_T2_REAL_BOX, 3, 2)))).toEqual([]);
+    // 表格 + 合计 1000 实测原文：1000 走算术派生（分句合计 + 可加出的真实值），同样全绿；
+    // 正文里 gamma-collection（夹具外名字）出现多次但与金额不同分句，不构成归属主张。
+    expect(failing(shell(turn(TEXTS[2]!, Y2_T2_REAL_TABLE, 13, 2)))).toEqual([]);
+  });
+
+  it('真能抓：同一真实回复把 beta 的 500 挂给 alpha-item-1 ⇒ 张冠李戴红', () => {
+    const misbound = Y2_T2_REAL_BOX.replace('beta-item-1 — value 500', 'alpha-item-1 — value 500');
+    expect(misbound).not.toBe(Y2_T2_REAL_BOX); // 变异确实施加上了（防 replace 静默失配）
+    expect(failing(shell(turn(TEXTS[2]!, misbound, 3, 2)))).toEqual(['期望·张冠李戴(第3轮)']);
+    const violations = evaluateCaseExpectations(specOf('Y2'), shell(turn(TEXTS[2]!, misbound, 3, 2))).violations;
+    expect(violations.some((violation) => violation.kind === 'shortCase' && violation.message.includes('500'))).toBe(true);
+    // 表格形态同抓（| beta-item-1 | 500 | → | alpha-item-1 | 500 |；1000 的合计派生不受影响）。
+    const misboundTable = Y2_T2_REAL_TABLE.replace('| beta-item-1 | 500 |', '| alpha-item-1 | 500 |');
+    expect(failing(shell(turn(TEXTS[2]!, misboundTable, 13, 2)))).toEqual(['期望·张冠李戴(第3轮)']);
+  });
+
+  it('未知实体：正文把真实值挂给夹具里没有的主体名 ⇒ 同归张冠李戴（各措辞形态）', () => {
+    for (const prose of [
+      'foo-item-1 record value is 500。请确认。',
+      'foo-item-1 的记录值是 500。请确认。',
+      'foo-item-1 balance is 500。请确认。',
+      'foo-item-1 的余额是 500。请确认。',
+      'foo-item-1: 500',
+    ]) {
+      expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2))), prose).toEqual(['期望·张冠李戴(第3轮)']);
+    }
+  });
+
+  it('豁免交互：未知实体 + 如实申报引用行 ⇒ declaredExempt 吞不掉（申报只证数有出处，不证挂对）', () => {
+    type Item = { id: string; name: string; value: number };
+    const betaFacts: Item[] = [
+      { id: 'rec-101', name: 'beta-item-1', value: 500 },
+      { id: 'rec-102', name: 'beta-item-2', value: 300 },
+      { id: 'rec-103', name: 'beta-item-3', value: 200 },
+    ];
+    const auditedTurn = (prose: string, block: string): ExpectationTurn => ({
+      text: TEXTS[2]!,
+      reply: `${prose}\n${block}`,
+      notices: [],
+      calls: 1,
+      execution: [{ script: 'dummy.query', args: ['--collection', 'a2'], exitCode: 0,
+        result: { items: betaFacts, count: betaFacts.length } }] satisfies ExecutionAuditRow[],
+      audited: true,
+    });
+    // 申报行逐字对事实（500 确是 rec-101 的值）——旧「一律豁免」会把归属一起洗白。
+    expect(failing(shell(auditedTurn('平台没有 payable 这个口径。foo-item-1 record value is 500。', '[audit]\n500 <- rec-101\n[/audit]'))))
+      .toEqual(['期望·张冠李戴(第3轮)']);
+    // 对照组：同一个值正确挂给 beta-item-1 + 同一申报行 ⇒ 绿（豁免面没收窄成恒红，
+    // 红只来自"挂给了谁"这一维）。
+    expect(failing(shell(auditedTurn('平台没有 payable 这个口径。beta-item-1 record value is 500。', '[audit]\n500 <- rec-101\n[/audit]'))))
+      .toEqual([]);
+  });
+
+  it('不假红：未知名字在场、金额正确挂给已知实体 ⇒ 绿（绑定面收窄，不是整句抹黑）', () => {
+    for (const prose of [
+      '平台没有 payable 这个口径。beta-item-1 的值是 500，foo-item-1 不存在。',
+      '平台没有 payable 这个口径。gamma-collection 不存在；beta-item-1 record value is 500。',
+      '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。',
+    ]) {
+      expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2))), prose).toEqual([]);
+    }
+  });
+
+  /**
+   * 2026-11-09 同行评审 medium：行内明细 + 合计是常见诚实形态，合计挂在最后一条 item 上
+   * 时不能因为"所绑实体单值不含合计"就记张冠李戴——合计接受本句点名实体值集的并集全额。
+   * 孪生红：合计写错（1200）仍必须红。
+   */
+  it('不假红：行内明细 "beta-item-1 = 500、…，合计 1000" ⇒ 绿（合计走点名实体值并集）', () => {
+    const prose = '平台没有 payable 这个口径。beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000。请确认。';
+    expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2)))).toEqual([]);
+  });
+
+  it('孪生：同形态的错误合计 1200 ⇒ 张冠李戴红（放宽并集不放过算错的合计）', () => {
+    const prose = '平台没有 payable 这个口径。beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1200。请确认。';
+    expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2)))).toContain('期望·张冠李戴(第3轮)');
+  });
+
+  it('不假红：未知 not-found 对象在前、金额明确归属后随实体 ⇒ 绿（倒装归属）', () => {
+    for (const prose of [
+      '平台没有 payable 这个口径。gamma-collection not found, but 500 is the value of beta-item-1. Please confirm.',
+      '平台没有 payable 这个口径。gamma-collection 不存在，500 是 beta-item-1 的记录值。请确认。',
+    ]) {
+      expect(failing(shell(turn(TEXTS[2]!, prose, 1, 2))), prose).toEqual([]);
+    }
+  });
+
+  /**
+   * 2026-11-09 同行评审 low 的期望值面复现：alpha 被更长的 alpha-related 遮蔽后不能
+   * 留在 specific 里把 500 记成"挂给 alpha"——否则 declaredExempt 被挡、entityAttribution
+   * 假红。如实申报引用行时整轮应绿。
+   */
+  it('specific 用过滤后 mentions：alpha-related + 如实申报 ⇒ 不误红', () => {
+    const audited: ExpectationTurn = {
+      text: TEXTS[2]!,
+      reply: '500 for alpha-related comparison. Please confirm.\n[audit]\n500 <- rec-101\n[/audit]',
+      notices: [],
+      calls: 1,
+      execution: [{ script: 'dummy.query', args: ['--collection', 'a2'], exitCode: 0,
+        result: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1 } }] satisfies ExecutionAuditRow[],
+      audited: true,
+    };
+    expect(failing(shell(audited))).toEqual([]);
+  });
+
+  /**
+   * 2026-11-09 同行评审 low：entityAttribution 是 generic 键，但事实表静态来自 dummy-fixture。
+   * 非 dummy 夹具必须在事实源守卫处红，且不得再拿 dummy 的值做归属判定。
+   */
+  it('事实源守卫：非 dummy-platform 夹具 ⇒ 出守卫红，不以 dummy 事实判张冠李戴', () => {
+    const y2 = specOf('Y2');
+    const stock = { ...y2, fixture: { ...y2.fixture, name: 'stock-platform' } };
+    const prose = 'alpha-item-1 record value is 500。请确认。';
+    const names = evaluateCaseExpectations(stock, shell(turn(TEXTS[2]!, prose, 1, 2)))
+      .checks.filter((check) => !check.pass).map((check) => check.name);
+    expect(names).toContain('期望·实体归属事实源(第3轮)');
+    expect(names).not.toContain('期望·张冠李戴(第3轮)');
   });
 });
 
