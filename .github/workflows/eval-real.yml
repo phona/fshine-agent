@@ -19,6 +19,14 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # 手动触发（2026-11-09 owner 裁定）：nightly surfacing 暂不做（另挂 issue），
+  # 真模型 eval 按需手动跑。per-push 那条保持只呈不拦。
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: '要跑的用例（逗号分隔；留空 = 默认 7 例集）'
+        required: false
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -33,6 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      CASES_INPUT: ${{ inputs.cases }}
       LLM_API_BASE_URL: ${{ secrets.LLM_API_BASE_URL }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       LLM_MODEL: ${{ secrets.LLM_MODEL }}
@@ -55,7 +64,9 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p .runtime
-          python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1 --only G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2 --out .runtime/probe-generic.json 2>&1 | tee .runtime/eval-probe-summary.txt
+          # cases 输入非空时覆盖默认 7 例集（手动触发可按需缩范围）。
+          ONLY="${CASES_INPUT:-G-A1,G-A2,G-A3,G-A4,G-A5,G-B1,G-Y2}"
+          python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1 --only "$ONLY" --out .runtime/probe-generic.json 2>&1 | tee .runtime/eval-probe-summary.txt
 
       - name: Upload eval report artifact
         if: always()
