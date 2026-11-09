@@ -311,7 +311,18 @@ def main():
     ap.add_argument("--no-judge", action="store_true", help="Skip judge calls; mechanical_pass only (CI gate mode).")
     args = ap.parse_args()
     only = set(x.strip() for x in args.only.split(",") if x.strip())
+    known = {c["id"] for c in CASES}
+    # 未知 ID 静默过滤 + 空选择 all([]) 判绿 = 拼错用例名也能跑出一次模型调用都没执行的
+    # 绿色（codex-pr-review #23 minor：eval-real.yml 的 cases 输入直通 --only）。拒绝未知
+    # ID 与空选择，退出码 2 与「机械失败」的 1 区分开。
+    unknown = sorted(only - known)
+    if unknown:
+        print(f"error: unknown case id(s) in --only: {unknown}; known ids: {sorted(known)}", file=sys.stderr)
+        return 2
     selected = [c for c in CASES if not only or c["id"] in only]
+    if not selected:
+        print("error: --only selected no cases", file=sys.stderr)
+        return 2
     all_results = []
     for rnd in range(1, args.rounds + 1):
         for case in selected:
