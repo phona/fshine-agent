@@ -15,6 +15,28 @@
 #
 # 「未审计」条目（placeholder: true）只承载从代码机械搬过来的消息序列与轮次标记；
 # businessGoal / allowedSideEffects / expectations 一律标「切片 E 扩充」，不凭猜补。
+#
+# ── 可声明的按用例旋钮（这里只列名字，不填值；机制与缺省见 docs/environment-variables.md §9）──
+# 机制：探针在用例前后注入/还原（probe-real-agent.ts 的 loadProbeCases 包装器）。
+# 部署面不应出现这些键；夹具自己的缺省是唯一缺省来源（未声明的档/线不注入）。
+# 本切片只做声明注入，不清理 ambient 同名键：评测进程不得 export 这些变量；
+# 未声明的键仍从 process.env 继承（夹具 env2 的 EXECUTION_* 回退也仍在）。
+#
+# fixture.env 平铺标量（dummy 夹具）：
+#   DUMMY_PLAN_ID / DUMMY_REQUIRE_PLAN
+#   DUMMY_READBACK_SHORT / DUMMY_PROPOSAL_TTL_SECONDS
+#   DUMMY_PLAN_{AUTO,NOTIFY,CONFIRM,HARD}_{CALLS,SECONDS}
+#   DUMMY_PLAN_{AUTO,NOTIFY,BUDGET,HARD}_WEIGHT（权重线第三档真名是 BUDGET，不是 CONFIRM）
+#
+# fixture.env 平铺标量（stock 夹具，仅第二执行层证明用）：
+#   STOCK_PLAN_ID / STOCK_REQUIRE_PLAN
+#   STOCK_READBACK_SHORT / STOCK_PROPOSAL_TTL_SECONDS
+#   12 个 STOCK_PLAN_* 预算阈值不要在这里平铺——用 fixture.planPolicy。
+#
+# fixture.planPolicy（仅 stock-platform）：四档 auto/notify/confirm/hard × 三线
+# calls/seconds/weight；每档可只声明部分线，未声明的档/线走夹具缺省。confirm.weight
+# 拍平成 STOCK_PLAN_BUDGET_WEIGHT（不是 STOCK_PLAN_CONFIRM_WEIGHT）。解析层校验：
+# 档位/线名封闭、值为正整数、与 fixture.env 不得重复声明同一 STOCK_PLAN_* 键。
 
 version: 1
 

@@ -76,6 +76,49 @@ export interface AllowedWrite {
   records: Array<{ name: string; value: number }>;
 }
 
+// ── 四档预算表（stock 夹具的 12 个按用例旋钮）──
+
+/** 四档预算表的档位：与 stock 夹具 planPolicy() / planDecision() 的档位同名同序。 */
+export const PLAN_POLICY_TIERS = ['auto', 'notify', 'confirm', 'hard'] as const;
+export type PlanPolicyTier = (typeof PLAN_POLICY_TIERS)[number];
+
+/** 三线：调用数 / 估时秒 / 权重。 */
+export const PLAN_POLICY_LINES = ['calls', 'seconds', 'weight'] as const;
+export type PlanPolicyLine = (typeof PLAN_POLICY_LINES)[number];
+
+export type PlanPolicyTierValues = Partial<Record<PlanPolicyLine, number>>;
+/** 缺档/缺线合法：未声明的档位不注入，由夹具自己的缺省补足。 */
+export type PlanPolicy = Partial<Record<PlanPolicyTier, PlanPolicyTierValues>>;
+
+/**
+ * 四档表 → stock 夹具 env 键。夹具 `planPolicy()` 的读取点不动，仍是这 12 个键。
+ *
+ * 权重线第三档在夹具里的真名是 `STOCK_PLAN_BUDGET_WEIGHT`（不是 `CONFIRM`）：
+ * 四档表统一叫 `confirm.weight`，拍平时映射到 BUDGET 键；写
+ * `STOCK_PLAN_CONFIRM_WEIGHT` 会被夹具静默忽略（docs/environment-variables.md 有同样的警告）。
+ */
+export const PLAN_POLICY_ENV_KEYS: Readonly<Record<PlanPolicyTier, Readonly<Record<PlanPolicyLine, string>>>> = {
+  auto: { calls: 'STOCK_PLAN_AUTO_CALLS', seconds: 'STOCK_PLAN_AUTO_SECONDS', weight: 'STOCK_PLAN_AUTO_WEIGHT' },
+  notify: { calls: 'STOCK_PLAN_NOTIFY_CALLS', seconds: 'STOCK_PLAN_NOTIFY_SECONDS', weight: 'STOCK_PLAN_NOTIFY_WEIGHT' },
+  confirm: { calls: 'STOCK_PLAN_CONFIRM_CALLS', seconds: 'STOCK_PLAN_CONFIRM_SECONDS', weight: 'STOCK_PLAN_BUDGET_WEIGHT' },
+  hard: { calls: 'STOCK_PLAN_HARD_CALLS', seconds: 'STOCK_PLAN_HARD_SECONDS', weight: 'STOCK_PLAN_HARD_WEIGHT' },
+};
+
+/** 目前只有 stock 夹具读四档表；dummy 夹具的阈值仍走 fixture.env 的 DUMMY_PLAN_* 键。 */
+export const PLAN_POLICY_FIXTURE = 'stock-platform';
+
+/** 拍平已声明的档/线；未声明的键不出现在结果里（夹具缺省即唯一缺省来源）。 */
+export function planPolicyEnv(policy: PlanPolicy | undefined): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const tier of PLAN_POLICY_TIERS) {
+    for (const line of PLAN_POLICY_LINES) {
+      const value = policy?.[tier]?.[line];
+      if (value !== undefined) env[PLAN_POLICY_ENV_KEYS[tier][line]] = String(value);
+    }
+  }
+  return env;
+}
+
 export interface CaseSpec {
   id: string;
   group: string;
@@ -99,6 +142,8 @@ export interface CaseSpec {
     name: string;
     isolation: string;
     env: Record<string, string>;
+    /** stock 夹具的四档预算表（拍平成 STOCK_PLAN_* env 键；其他夹具不接受此字段）。 */
+    planPolicy?: PlanPolicy;
     note?: string;
   };
   allowedSideEffects: {
@@ -113,6 +158,16 @@ export interface CaseSpec {
   expectations: CaseExpectations | null;
   /** 人类可读的期望（语料 expect 字段，评委输入也用这一份）。 */
   expect: string;
+}
+
+/**
+ * 用例夹具实际注入的 env：`fixture.env` 平铺键 + 四档表拍平键。
+ *
+ * 探针的 loadProbeCases 包装器用它设置/还原 process.env；解析层已拒绝两处重复声明，
+ * 所以这里只需合并。未声明的档/线不产生键，夹具缺省继续生效。
+ */
+export function fixtureEnvOf(fixture: CaseSpec['fixture']): Record<string, string> {
+  return { ...fixture.env, ...planPolicyEnv(fixture.planPolicy) };
 }
 
 // ── 期望值（结构化，只被 expectations.ts 读）──
@@ -459,6 +514,34 @@ function parseExpectations(raw: unknown, where: string): CaseExpectations | null
   };
 }
 
+function parsePlanPolicy(raw: unknown, where: string): PlanPolicy | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const record = asRecord(raw, where);
+  const policy: PlanPolicy = {};
+  let declared = 0;
+  for (const [tierKey, tierRaw] of Object.entries(record)) {
+    if (!PLAN_POLICY_TIERS.includes(tierKey as PlanPolicyTier)) {
+      fail(`${where}.${tierKey} 不是四档之一（${PLAN_POLICY_TIERS.join('/')}）`);
+    }
+    const tier = asRecord(tierRaw, `${where}.${tierKey}`);
+    const values: PlanPolicyTierValues = {};
+    for (const [lineKey, lineRaw] of Object.entries(tier)) {
+      if (!PLAN_POLICY_LINES.includes(lineKey as PlanPolicyLine)) {
+        fail(`${where}.${tierKey}.${lineKey} 不是三线之一（${PLAN_POLICY_LINES.join('/')}）`);
+      }
+      if (typeof lineRaw !== 'number' || !Number.isInteger(lineRaw) || lineRaw <= 0) {
+        fail(`${where}.${tierKey}.${lineKey} 必须是正整数（收到 ${JSON.stringify(lineRaw)}）`);
+      }
+      values[lineKey as PlanPolicyLine] = lineRaw;
+      declared += 1;
+    }
+    if (Object.keys(values).length === 0) fail(`${where}.${tierKey} 是空档——要么声明至少一条线，要么整档省略`);
+    policy[tierKey as PlanPolicyTier] = values;
+  }
+  if (declared === 0) fail(`${where} 为空——至少声明一条档位阈值`);
+  return policy;
+}
+
 function parseCase(raw: unknown, index: number): CaseSpec {
   const where = `cases[${index}]`;
   const record = asRecord(raw, where);
@@ -477,10 +560,24 @@ function parseCase(raw: unknown, index: number): CaseSpec {
       ? record['followUps'].map((message, at) => parseMessage(message, `${where}.followUps[${at}]`, kind))
       : fail(`${where}.followUps 不是数组`));
   const fixture = asRecord(record['fixture'], `${where}.fixture`);
+  const fixtureName = typeof fixture['name'] === 'string'
+    ? fixture['name']
+    : fail(`${where}.fixture.name 不是字符串`);
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(asRecord(fixture['env'] ?? {}, `${where}.fixture.env`))) {
     if (typeof value !== 'string' && typeof value !== 'number') fail(`${where}.fixture.env.${key} 不是标量`);
     env[key] = String(value);
+  }
+  // 四档预算表是 stock 夹具的按用例旋钮；拍平成 STOCK_PLAN_* 键后与 fixture.env 合并注入。
+  const planPolicy = parsePlanPolicy(fixture['planPolicy'], `${where}.fixture.planPolicy`);
+  if (planPolicy && fixtureName !== PLAN_POLICY_FIXTURE) {
+    fail(`${where}.fixture.planPolicy 只适用于 ${PLAN_POLICY_FIXTURE}（拍平为 STOCK_PLAN_*）；${fixtureName} 的预算阈值请用 fixture.env 的夹具专名`);
+  }
+  if (planPolicy) {
+    const conflicts = Object.keys(planPolicyEnv(planPolicy)).filter((key) => key in env);
+    if (conflicts.length) {
+      fail(`${where}.fixture.env 与 fixture.planPolicy 重复声明 ${conflicts.join('、')}——四档阈值只走 planPolicy`);
+    }
   }
   const side = asRecord(record['allowedSideEffects'], `${where}.allowedSideEffects`);
   const writes = Array.isArray(side['writes'])
@@ -517,9 +614,10 @@ function parseCase(raw: unknown, index: number): CaseSpec {
     intent: typeof record['intent'] === 'string' ? record['intent'] : fail(`${where}.intent 不是字符串`),
     businessGoal: typeof record['businessGoal'] === 'string' ? record['businessGoal'] : fail(`${where}.businessGoal 不是字符串`),
     fixture: {
-      name: typeof fixture['name'] === 'string' ? fixture['name'] : fail(`${where}.fixture.name 不是字符串`),
+      name: fixtureName,
       isolation: typeof fixture['isolation'] === 'string' ? fixture['isolation'] : fail(`${where}.fixture.isolation 不是字符串`),
       env,
+      ...(planPolicy ? { planPolicy } : {}),
       ...(typeof fixture['note'] === 'string' ? { note: fixture['note'] } : {}),
     },
     allowedSideEffects: {

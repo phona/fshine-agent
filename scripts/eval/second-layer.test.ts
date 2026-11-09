@@ -44,7 +44,7 @@ const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
 const stockBin = path.join(fixtureRoot, 'bin', 'stock');
 
-function makeCtx() {
+function makeCtx(extraEnv: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-'));
   const env = {
     ...process.env,
@@ -57,6 +57,8 @@ function makeCtx() {
     STOCK_CACHE_STATE: path.join(dir, 'cache.json'),
     STOCK_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
     STOCK_GATE_SECRET: 'second-layer-gate-secret',
+    // 用例声明的 C 类旋钮（如 STOCK_READBACK_SHORT）；不在用例体里逐调用改 env。
+    ...extraEnv,
   };
   return { dir, env, run: (args: string[], input?: string) => {
     const r = spawnSync(stockBin, args, { encoding: 'utf8', cwd: fixtureRoot, env, input });
@@ -166,13 +168,13 @@ describe('second execution layer: stock', () => {
   });
 
   it('readback-short classifies committed_unverified on the host, never completed', () => {
-    const ctx = makeCtx();
+    const ctx = makeCtx({ STOCK_READBACK_SHORT: '1' });
     try {
       const payloadFile = path.join(ctx.dir, 'payload.json');
       writeFileSync(payloadFile, JSON.stringify({ shelf: 'north', batch: 'B1', items: [{ sku: 's1', qty: 1 }, { sku: 's2', qty: 2 }] }));
       const ce = envelope(ctx.run(['prepare', 'stock.proposal', payloadFile]).stdout);
       const proposalId = ce?.data?.proposalId as string;
-      const env2 = { ...ctx.env, STOCK_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret'), STOCK_READBACK_SHORT: '1' };
+      const env2 = { ...ctx.env, STOCK_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
       const commitRun = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       const commitEnv = envelope(commitRun.stdout ?? '');
       expect(commitEnv?.status).toBe('failed'); expect((commitEnv?.data as Record<string, unknown>)?.verified).toBe(false);
