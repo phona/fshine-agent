@@ -1,10 +1,10 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
+import { deploymentEnvOf, effectiveDeploymentEnv, loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
 
 const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
 
@@ -321,5 +321,228 @@ contextProfiles:
     const profiles = template.contextProfiles || {};
     const skillRoots = Object.values(profiles).find(p => p.skillRoots)?.skillRoots;
     expect(skillRoots, '模板必须显式声明至少一个 profile 的 skillRoots').toEqual(['.agents/skills-serve']);
+  });
+});
+
+describe('部署配置（issue #20 切片 C+D）：yaml 是源，非空 env 覆盖', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'fshine-deployment-config-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeFixture(content: string): string {
+    const path = join(dir, 'agent.yaml');
+    writeFileSync(path, content, 'utf8');
+    return path;
+  }
+
+  const DEPLOYMENT_YAML = `principals:
+  "wecom:user_a":
+    enabled: true
+llm:
+  apiBaseUrl: https://llm.example/v1
+  apiKey: yaml-key
+  model: yaml-model
+  mainModel: yaml-main-model
+  thinkingLevel: high
+  mainThinkingLevel: low
+wecom:
+  botId: yaml-bot-id
+  botSecret: yaml-bot-secret
+host:
+  platformConcurrency: 2
+  platformQueueCapacity: 7
+  platformCooldownMs: 60000
+  shutdownDrainMs: 0
+  workerDispatchMode: background
+  workerStepCap: 12
+  inboundDebounceMs: 0
+  attachmentDir: /srv/attachments
+  piAgentDir: /srv/pi-agent
+execution:
+  planActivationSecret: yaml-plan-secret
+businessSkillPath: docs/other-business-skill.md
+`;
+
+  it('yaml 段解析：llm / wecom / host / execution / businessSkillPath', () => {
+    const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
+
+    expect(config.llm).toEqual({
+      apiBaseUrl: 'https://llm.example/v1',
+      apiKey: 'yaml-key',
+      model: 'yaml-model',
+      mainModel: 'yaml-main-model',
+      thinkingLevel: 'high',
+      mainThinkingLevel: 'low',
+    });
+    expect(config.wecom).toEqual({ botId: 'yaml-bot-id', botSecret: 'yaml-bot-secret' });
+    expect(config.host).toEqual({
+      platformConcurrency: 2,
+      platformQueueCapacity: 7,
+      platformCooldownMs: 60000,
+      shutdownDrainMs: 0,
+      workerDispatchMode: 'background',
+      workerStepCap: 12,
+      inboundDebounceMs: 0,
+      attachmentDir: '/srv/attachments',
+      piAgentDir: '/srv/pi-agent',
+    });
+    expect(config.execution).toEqual({ planActivationSecret: 'yaml-plan-secret' });
+    expect(config.businessSkillPath).toBe('docs/other-business-skill.md');
+  });
+
+  it('非空 env 覆盖 yaml；空串 env 不覆盖（--env-file 的 KEY= 形态）', () => {
+    const overridden = loadConfig({
+      yamlPath: writeFixture(DEPLOYMENT_YAML),
+      env: {
+        LLM_MODEL: 'env-model',
+        WECOM_BOT_ID: 'env-bot-id',
+        FSHINE_PLATFORM_CONCURRENCY: '5',
+        FSHINE_PLATFORM_QUEUE_CAPACITY: '9',
+        BUSINESS_SKILL_PATH: '/srv/env-skill.md',
+        EXECUTION_PLAN_ACTIVATION_SECRET: 'env-plan-secret',
+        APP_PORT: '8080',
+      },
+    });
+    expect(overridden.llm?.model).toBe('env-model');
+    expect(overridden.llm?.apiKey).toBe('yaml-key');
+    expect(overridden.wecom?.botId).toBe('env-bot-id');
+    expect(overridden.host?.platformConcurrency).toBe(5);
+    expect(overridden.host?.platformQueueCapacity).toBe(9);
+    expect(overridden.businessSkillPath).toBe('/srv/env-skill.md');
+    expect(overridden.execution?.planActivationSecret).toBe('env-plan-secret');
+    expect(overridden.channel.port).toBe(8080);
+
+    const blank = loadConfig({
+      yamlPath: writeFixture(DEPLOYMENT_YAML.replace('principals:', 'channel:\n  port: 3100\nprincipals:')),
+      env: {
+        LLM_MODEL: '',
+        WECOM_BOT_ID: '',
+        FSHINE_PLATFORM_CONCURRENCY: '',
+        FSHINE_PLATFORM_QUEUE_CAPACITY: '   ',
+        BUSINESS_SKILL_PATH: '',
+        EXECUTION_PLAN_ACTIVATION_SECRET: '',
+        APP_PORT: '',
+      },
+    });
+    expect(blank.llm?.model).toBe('yaml-model');
+    expect(blank.wecom?.botId).toBe('yaml-bot-id');
+    expect(blank.host?.platformConcurrency).toBe(2);
+    expect(blank.host?.platformQueueCapacity).toBe(7);
+    expect(blank.businessSkillPath).toBe('docs/other-business-skill.md');
+    expect(blank.execution?.planActivationSecret).toBe('yaml-plan-secret');
+    // 空串 APP_PORT 也回落到 yaml 的 channel.port（旧行为会退回默认 3000）。
+    expect(blank.channel.port).toBe(3100);
+  });
+
+  it('缺段 / 空段 / 缺键 = 未配置（不拒启），不给 AppConfig 造空段', () => {
+    const config = loadConfig({
+      yamlPath: writeFixture([
+        'principals:',
+        '  "wecom:user_a":',
+        '    enabled: true',
+        'llm:',
+        '# 段里只有注释 → YAML 解析为 null，也按未配置处理',
+        'wecom:',
+        'host:',
+        'execution:',
+      ].join('\n')),
+      env: {},
+    });
+    expect(config.llm).toBeUndefined();
+    expect(config.wecom).toBeUndefined();
+    expect(config.host).toBeUndefined();
+    expect(config.execution).toBeUndefined();
+    expect(config.businessSkillPath).toBeUndefined();
+    expect(deploymentEnvOf(config)).toEqual({});
+  });
+
+  it('非法数值 / 非法派发模式：数值按未配置回缺省，派发模式 fail-fast 点名键', () => {
+    const invalidNumbers = `principals:
+  "wecom:user_a":
+    enabled: true
+host:
+  platformQueueCapacity: -1
+  workerStepCap: nope
+  platformCooldownMs: 0
+  inboundDebounceMs: -5
+`;
+    const config = loadConfig({ yamlPath: writeFixture(invalidNumbers), env: {} });
+    // 非法值不落进 AppConfig（缺省住各消费点，加载层不复制第二份）。
+    expect(config.host).toBeUndefined();
+
+    expect(() => loadConfig({
+      yamlPath: writeFixture(DEPLOYMENT_YAML.replace('workerDispatchMode: background', 'workerDispatchMode: yolo')),
+      env: {},
+    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
+    expect(() => loadConfig({
+      yamlPath: writeFixture(DEPLOYMENT_YAML),
+      env: { FSHINE_WORKER_DISPATCH_MODE: 'yolo' },
+    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
+  });
+
+  it('deploymentEnvOf：只映射已配置值，env 覆盖后的生效值进入映射', () => {
+    const config = loadConfig({
+      yamlPath: writeFixture(DEPLOYMENT_YAML),
+      env: { LLM_MODEL: 'env-model', FSHINE_PLATFORM_CONCURRENCY: '5' },
+    });
+    expect(deploymentEnvOf(config)).toEqual({
+      LLM_API_BASE_URL: 'https://llm.example/v1',
+      LLM_API_KEY: 'yaml-key',
+      LLM_MODEL: 'env-model',
+      LLM_MAIN_MODEL: 'yaml-main-model',
+      LLM_THINKING_LEVEL: 'high',
+      LLM_MAIN_THINKING_LEVEL: 'low',
+      WECOM_BOT_ID: 'yaml-bot-id',
+      WECOM_BOT_SECRET: 'yaml-bot-secret',
+      FSHINE_PLATFORM_CONCURRENCY: '5',
+      FSHINE_PLATFORM_QUEUE_CAPACITY: '7',
+      FSHINE_PLATFORM_COOLDOWN_MS: '60000',
+      FSHINE_SHUTDOWN_DRAIN_MS: '0',
+      FSHINE_WORKER_DISPATCH_MODE: 'background',
+      FSHINE_WORKER_STEP_CAP: '12',
+      FSHINE_INBOUND_DEBOUNCE_MS: '0',
+      FSHINE_ATTACHMENT_DIR: '/srv/attachments',
+      FSHINE_PI_AGENT_DIR: '/srv/pi-agent',
+      BUSINESS_SKILL_PATH: 'docs/other-business-skill.md',
+      EXECUTION_PLAN_ACTIVATION_SECRET: 'yaml-plan-secret',
+    });
+  });
+
+  it('effectiveDeploymentEnv：yaml 派生值打底，非空 env 覆盖、空串不覆盖、未建模键透传', () => {
+    const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
+    const effective = effectiveDeploymentEnv(config, {
+      // node --env-file 的 `KEY=` 形态：空串按未配置，yaml 值补位。
+      LLM_API_KEY: '',
+      // 非空 env 覆盖 yaml。
+      LLM_MODEL: 'env-model',
+      // 未建模键原样透传（子进程继承面不变）。
+      UNMODELED_FLAG: 'kept',
+    });
+    expect(effective['LLM_API_KEY']).toBe('yaml-key');
+    expect(effective['LLM_MODEL']).toBe('env-model');
+    expect(effective['WECOM_BOT_SECRET']).toBe('yaml-bot-secret');
+    expect(effective['UNMODELED_FLAG']).toBe('kept');
+  });
+
+  it('fresh clone：config/agent.example.yaml 复制到临时路径后可直接加载', () => {
+    const templatePath = fileURLToPath(new URL('../../config/agent.example.yaml', import.meta.url));
+    const copied = join(dir, 'copied-agent.yaml');
+    copyFileSync(templatePath, copied);
+
+    const config = loadConfig({ yamlPath: copied, env: {} });
+    expect(Object.keys(config.contextProfiles)).toEqual(['<profileId>']);
+    expect(config.contextProfiles['<profileId>']?.root).toBe('/path/to/execution-layer');
+    expect(config.contextProfiles['<profileId>']?.gateway).toBe('bin/your-gateway');
+    expect(config.contextProfiles['<profileId>']?.skillRoots).toEqual(['.agents/skills-serve']);
+    expect(config.llm?.model).toBe('kimi-for-coding');
+    // 模板不填真值：空 secret 不进入 AppConfig，也不伪造 env。
+    expect(config.wecom).toBeUndefined();
+    expect(deploymentEnvOf(config)['WECOM_BOT_SECRET']).toBeUndefined();
   });
 });

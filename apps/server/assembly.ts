@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import {
   closeStore,
   createSqliteStore,
+  effectiveDeploymentEnv,
   loadConfig,
   principalScopeRecords,
 } from '@fshine/core';
@@ -160,13 +161,24 @@ export interface ServerAssembly {
   activeProfileId?: string;
   planActivationSecret: string;
   workerDispatchMode: WorkerDispatchMode;
+  /**
+   * 部署配置生效后的环境：config/agent.yaml 的 yaml 派生值打底，非空 env 覆盖。
+   * 驱动 / 渠道 / handler / business skill 都用这一份；暴露给 main.ts 的停机排干
+   * 这类装配外读取点，避免它们再去读 process.env 而漏掉 yaml 源。
+   */
+  effectiveEnv: NodeJS.ProcessEnv;
   close(): Promise<void>;
 }
 
 export async function createServerAssembly(overrides: ServerAssemblyOverrides = {}): Promise<ServerAssembly> {
   const env = overrides.env ?? process.env;
-  const workerDispatchMode = overrides.workerDispatchMode ?? workerDispatchModeOf(env);
   const config = loadConfig({ env, yamlPath: env['AGENT_CONFIG_PATH'] || undefined });
+  // 部署配置（issue #20 切片 C+D）：yaml 是源、非空 env 是覆盖口。合并规则唯一实现
+  // 在 @fshine/core 的 effectiveDeploymentEnv（非空 env 覆盖 yaml、空串不覆盖、未建模
+  // 键原样透传）；这里集中构造一次，沿既有 seam 下传——驱动 / 渠道 / handler /
+  // business skill 继续按 env 读取，消费方零改动。scripts/smoke-wecom.ts 复用同一函数。
+  const effectiveEnv: NodeJS.ProcessEnv = effectiveDeploymentEnv(config, env);
+  const workerDispatchMode = overrides.workerDispatchMode ?? workerDispatchModeOf(effectiveEnv);
   // Active profile 派生（C5）：单 profile → 其键；零/多 profile → undefined（各消费点
   // 按无平台能力降级，runner 侧 resolveContextProfile fail-closed）。宿主不取实例名缺省。
   const activeProfileId = resolveActiveProfileId(config.contextProfiles);
@@ -183,9 +195,14 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // One host-owned FIFO gate is shared by inline Workers, background Workers, resumes, and
   // proposal commits executed by a prepared host-confirmation run.
-  const platformQueueRaw = Number.parseInt(env['FSHINE_PLATFORM_QUEUE_CAPACITY'] ?? '', 10);
+  const platformQueueRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_QUEUE_CAPACITY'] ?? '', 10);
+  // 并发闸的读取点在 createPlatformExecutionGate（缺省 process.env.FSHINE_PLATFORM_CONCURRENCY）。
+  // yaml 派生值只活在 effectiveEnv 里，故显式传入；未配置时不传，保持与旧装配相同的
+  // options 形状（门自己读 process.env / 回退 1）。
+  const platformConcurrencyRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_CONCURRENCY'] ?? '', 10);
   const platformExecutionGate: PlatformExecutionGate = createPlatformExecutionGate({
     maxQueue: Number.isFinite(platformQueueRaw) && platformQueueRaw >= 0 ? platformQueueRaw : 100,
+    ...(Number.isFinite(platformConcurrencyRaw) && platformConcurrencyRaw > 0 ? { concurrency: platformConcurrencyRaw } : {}),
   });
 
   for (const record of principalScopeRecords(config)) {
@@ -194,21 +211,27 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
   // 提案落账都受平台网关与 serve-policy 守卫的矩阵裁决。
-  env.EXECUTION_SERVE = '1';
+  // 注入 env 的测试里旧代码改的就是那个注入对象（不是真实进程 env），这里保持同一
+  // 取舍；生产 / 脚本传入的 env 就是 process.env，而服务端直调的 plan CLI 等 spawn
+  // 点以 {...process.env} 为基境——这层进程级声明必须留在原地，否则法域被削弱。
+  if (env === process.env) process.env.EXECUTION_SERVE = '1';
+  effectiveEnv.EXECUTION_SERVE = '1';
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效。EXECUTION_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
   const gateSecret = newGateSecret();
-  const planActivationSecret = env['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? newGateSecret();
+  // 计划激活密钥：yaml `execution.planActivationSecret` > 非空 env；都缺省 = 进程内生成。
+  // 空串按未配置处理（--env-file 的空 `KEY=` 不该把密钥变成空串）。
+  const planActivationSecret = (effectiveEnv['EXECUTION_PLAN_ACTIVATION_SECRET'] ?? '').trim() || newGateSecret();
 
   // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
   const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
   // 平台健康冷却时长（Lane 2 治标补法）：连续 AUTH 类平台失败达阈值后，会话在此时长内
   // 不再发起平台调用（宿主前置拦截 + 合成终稿）。部署侧可用 FSHINE_PLATFORM_COOLDOWN_MS
   // 覆盖；非法/缺省值忽略并用默认 10 分钟（platform-health.ts 的唯一定义）。
-  const cooldownRaw = Number.parseInt(env['FSHINE_PLATFORM_COOLDOWN_MS'] ?? '', 10);
+  const cooldownRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_COOLDOWN_MS'] ?? '', 10);
   const platformCooldownMs = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : undefined;
   // 业务 skill（架构 §5）：读文件失败/文件缺失都只记日志，不影响启动。
-  const businessSkill = await loadBusinessSkill(env);
+  const businessSkill = await loadBusinessSkill(effectiveEnv);
   console.log(JSON.stringify(businessSkill.text
     ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
     : { event: 'business_skill_skipped', path: businessSkill.path }));
@@ -220,13 +243,13 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   // 逐字段一致（恒等断言钉在 model-seam-wiring.test.ts），行为零变化。
   // 空白值视为未配置：注释掉值留空不该挡启动（模型选择器不是安全门，宽进）；真正要
   // fail-fast 的是思考深度词表——非法值在此即抛，报错点名 LLM_MAIN_THINKING_LEVEL。
-  const mainModelOverride = (env['LLM_MAIN_MODEL'] ?? '').trim();
-  const mainThinkingRaw = (env['LLM_MAIN_THINKING_LEVEL'] ?? '').trim();
+  const mainModelOverride = (effectiveEnv['LLM_MAIN_MODEL'] ?? '').trim();
+  const mainThinkingRaw = (effectiveEnv['LLM_MAIN_THINKING_LEVEL'] ?? '').trim();
   const mainThinkingLevel = mainThinkingRaw
     ? parsePiThinkingLevel(mainThinkingRaw, 'LLM_MAIN_THINKING_LEVEL')
     : undefined;
   const driver = overrides.driver ?? createPiTurnDriver({
-    env,
+    env: effectiveEnv,
     ...(mainModelOverride ? { modelId: mainModelOverride } : {}),
     ...(mainThinkingLevel ? { thinkingLevel: mainThinkingLevel } : {}),
   });
@@ -238,7 +261,13 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const memoryCandidateExtractor = overrides.memoryCandidateExtractor
     ?? createLongMemoryCandidateExtractor(createMemoryCandidateModel(contextModelDriver, { timeoutMs: 15_000 }));
   const workerDriver = overrides.workerDriver ?? createPiCodingTurnDriver({
-    env,
+    env: effectiveEnv,
+    // Pi 会话存放位置（FSHINE_PI_AGENT_DIR）：驱动读的是 process.env 直连而非 options.env
+    // （切片约定消费方零改动），故装配把 yaml / env 生效值显式下传；缺省不传，
+    // 驱动保持原回落链（process.env → <cwd>/data/pi-agent）。
+    ...((effectiveEnv['FSHINE_PI_AGENT_DIR'] ?? '').trim()
+      ? { agentDir: (effectiveEnv['FSHINE_PI_AGENT_DIR'] ?? '').trim() }
+      : {}),
     // label 表派生根：平台操作的人类可读名来自平台公共 CLI 的第 5 列
     ...(platformRoot ? { platformRoot } : {}),
     // 网关调用形式（C7b 收口补漏）：label/规格/语义/协议四张派生表与 serve 门共用同一
@@ -413,7 +442,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   // platformRoot 必须传给渠道：附件要落在平台工作区内，否则 worker 的路径守卫会把每个
   // 附件都判成"工作区外"，症状是"读不到附件"这种指代不清的报错（2026-10-07 实测）。
   const channel = overrides.channel ?? new WecomBotChannel({
-    env,
+    env: effectiveEnv,
     ...(platformRoot ? { platformRoot } : {}),
     ...(overrides.channelClientFactory ? { clientFactory: overrides.channelClientFactory } : {}),
   });
@@ -444,7 +473,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     store,
     runtime,
     planConfirmation,
-    env,
+    env: effectiveEnv,
     workerDispatchMode,
     pushToConversation,
     ...(platformRoot ? { platformRoot } : {}),
@@ -466,6 +495,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(activeProfileId !== undefined ? { activeProfileId } : {}),
     planActivationSecret,
     workerDispatchMode,
+    effectiveEnv,
     close: async () => {
       await backgroundTasks.shutdown();
       unsubscribeTaskEvents();

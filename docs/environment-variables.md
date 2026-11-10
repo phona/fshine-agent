@@ -9,23 +9,40 @@
 >
 > 前缀规则：执行层治理接口用 `EXECUTION_*`，宿主自用参数用 `FSHINE_*`，
 > 通用夹具用 `DUMMY_*`（夹具隔离语义，见夹具一节）。上一轮的旧前缀已全量清零。
+>
+> 配置承载（issue #20 切片 C+D）：**部署配置与秘密的源是 `config/agent.yaml`**
+> （gitignored；模板 `config/agent.example.yaml`）。同名环境变量只作**非空值覆盖口**：
+> `node --env-file` 会把模板里的 `KEY=` 设成空串，空串不算覆盖。例外两类：
+> ① `AGENT_CONFIG_PATH` 自指配置路径，永远只从 env 读；
+> ② 隔离路径 / 夹具旋钮 / eval 工具面变量仍按各自机制留在 env（见 §1 后半、§4、§9）。
+> `.env` / `.env.example` 的定位是“兼容旧部署的覆盖入口”，不再是唯一秘密源。
 
-## 1. 宿主自用（fshine-agent 读）
+## 1. 宿主自用（fshine-agent 读；部署值源 = config/agent.yaml）
+
+下表是部署配置：yaml 键是源，env 是覆盖口。缺段 / 缺键 = 未配置，`loadConfig` 层
+不拒启、各消费点按表中缺省兜底；但服务启动仍会校验必填凭据（Main 驱动装配时缺
+`LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 即启动失败，企微凭据在渠道 `start`
+时校验，见 §5）。
+
+| 变量（env 覆盖口） | yaml 键（源） | 默认值 / 缺失行为 |
+| --- | --- | --- |
+| `FSHINE_PLATFORM_QUEUE_CAPACITY` | `host.platformQueueCapacity` | 缺省 / 非法 = 100 |
+| `FSHINE_PLATFORM_CONCURRENCY` | `host.platformConcurrency` | 缺省 = 1（全局串行） |
+| `FSHINE_PLATFORM_COOLDOWN_MS` | `host.platformCooldownMs` | 缺省 = 600000（10 分钟） |
+| `FSHINE_WORKER_DISPATCH_MODE` | `host.workerDispatchMode` | 缺省 `inline`；`background` 才启用后台委派 |
+| `FSHINE_SHUTDOWN_DRAIN_MS` | `host.shutdownDrainMs` | 缺省 / 非法 = 30000 |
+| `FSHINE_INBOUND_DEBOUNCE_MS` | `host.inboundDebounceMs` | 缺省 = 2000（0 = 关闭） |
+| `FSHINE_ATTACHMENT_DIR` | `host.attachmentDir` | 缺省 = `<平台根>/tmp/attachments` |
+| `FSHINE_PI_AGENT_DIR` | `host.piAgentDir` | 缺省 = `<cwd>/data/pi-agent` |
+| `FSHINE_WORKER_STEP_CAP` | `host.workerStepCap` | 缺省 / 非法 = 50，第 51 次放行送 wind-down |
+| `APP_PORT` / `APP_PUBLIC_URL` / `APP_CALLBACK_PATH` | `channel.port` / `channel.publicUrl` / `channel.callbackPath` | 端口非法即启动失败；URL / 回调路径缺省为空 / 默认回调路径 |
+| `BUSINESS_SKILL_PATH` | `businessSkillPath` | 优先级：本变量 > yaml `businessSkillPath` > 默认 skill 文件 |
+
+下表仍只从 env 读（不是部署配置）：
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_PLATFORM_QUEUE_CAPACITY` | 部署 / 共享 `PlatformExecutionGate`（assembly、context） | 缺省 / 非法 = 100 |
-| `FSHINE_PLATFORM_CONCURRENCY` | 部署 / 委派并发闸 | 缺省 = 1（全局串行） |
-| `FSHINE_PLATFORM_COOLDOWN_MS` | 部署 / 平台健康冷却 | 缺省 = 600000（10 分钟） |
-| `FSHINE_WORKER_DISPATCH_MODE` | 部署 / 委派调度 | 缺省 `inline`；`background` 才启用后台委派 |
-| `FSHINE_SHUTDOWN_DRAIN_MS` | 部署 / 停机排干 | 缺省 / 非法 = 30000 |
-| `FSHINE_INBOUND_DEBOUNCE_MS` | 部署 / 入站防抖 | 缺省 = 2000（0 = 关闭） |
-| `FSHINE_ATTACHMENT_DIR` | 部署 / WeCom 附件落盘 | 缺省 = `<平台根>/tmp/attachments` |
-| `FSHINE_PI_AGENT_DIR` | 部署 / Pi worker 会话目录 | 缺省 = `<cwd>/data/pi-agent` |
-| `FSHINE_WORKER_STEP_CAP` | 部署 / 自由 worker 步数帽 | 缺省 / 非法 = 50，第 51 次放行送 wind-down |
-| `AGENT_CONFIG_PATH` | 部署 / `loadConfig`、business-skill 解析 | 缺省 = `config/agent.yaml` |
-| `APP_PORT` / `APP_PUBLIC_URL` / `APP_CALLBACK_PATH` | 部署 / 渠道配置（yaml 同名键作回退） | 端口非法即启动失败；URL / 回调路径缺省为空 / 默认回调路径 |
-| `BUSINESS_SKILL_PATH` | 部署 / business-skill 加载 | 优先级：本变量 > yaml `businessSkillPath` > 默认 skill 文件 |
+| `AGENT_CONFIG_PATH` | 部署 / `loadConfig`、business-skill 解析 | 缺省 = `config/agent.yaml`；自指配置路径，永远不进 yaml |
 | `DB_PATH` | 部署 / 服务与 daily-summary 的库路径 | 缺省 = `data/agent.db` |
 | `ACCEPTANCE_DB_PATH` | 仅 acceptance-22 补充脚本 | 缺省 = `data/acceptance-202609181621.db` |
 | `EXECUTION_MOCK_STATE_KEEP` | 操作者 export / 仅 acceptance 脚本读取（`process.env`） | 缺省 = mock 运行后删状态文件；置位则保留；仓内没有自动注入点 |
@@ -41,7 +58,7 @@
 | `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
 | `EXECUTION_EXECUTOR` | 部署 / **执行层自己的**执行器切换（宿主不读） | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门。2026-11-08 起宿主侧读取已删（`platform-mock.ts` 整模块退役）：编排层不判"这个部署允不允许写" |
 | `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。宿主脚本只重置显式声明过的这一个 |
-| `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌 | 缺省 = 装配进程内生成，重启失效 |
+| `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌（yaml `execution.planActivationSecret` 是源；本变量为非空覆盖口） | 缺省 = 装配进程内生成，重启失效 |
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
 | `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
 | `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
@@ -77,6 +94,14 @@
 | --- | --- |
 | `DUMMY_STATE` / `DUMMY_PLAN_STATE` / `DUMMY_PROPOSAL_STATE` / `DUMMY_AUDIT_PATH` | 隔离路径：夹具集合、计划、提案、审计状态文件；generic-mock 评价按案隔离覆盖 |
 | `DUMMY_GATE_SECRET` / `DUMMY_COMMIT_TOKEN` / `DUMMY_PLAN_ACTIVATION_SECRET` | 夹具令牌面；`EXECUTION_*` 同名作回退 |
+
+夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的夹具令牌键
+（`DUMMY_GATE_SECRET` / `DUMMY_COMMIT_TOKEN` / `DUMMY_PLAN_ACTIVATION_SECRET` 与
+`STOCK_*` 三个同名键）由评测代码内联设置（`generic-mock.ts` / `second-layer.ts`），
+不进 `config/agent.yaml`。`EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` 按安全
+设计在装配进程内生成，故意不进任何配置文件——`config/agent.example.yaml` 不为它们留键
+（进程级注入会让模型经 read/工具面拿到密钥）。`EXECUTION_PLAN_ACTIVATION_SECRET` 是
+部署侧真实密钥，源在 `config/agent.yaml` 的 `execution.planActivationSecret`。
 
 按用例旋钮（`DUMMY_READBACK_SHORT` / `DUMMY_PROPOSAL_TTL_SECONDS` / `DUMMY_PLAN_*`
 12 个阈值 / `DUMMY_PLAN_ID` / `DUMMY_REQUIRE_PLAN`）不属于部署 env 面；声明机制、
@@ -120,6 +145,18 @@ stock 专名。
 `LLM_THINKING_LEVEL` / `LLM_MAIN_THINKING_LEVEL` / `LLM_JUDGE_MODEL`（模型侧）、
 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`（渠道侧）。缺失时：模型侧无 LLM 即无法跑
 真模型评价与生产对话（确定性测试不受影响）；渠道侧缺失即渠道拒绝启动。
+
+承载（issue #20 切片 C+D）：模型侧前 6 个键与渠道侧 2 个键的**源**是
+`config/agent.yaml` 的 `llm.*` / `wecom.*`（gitignored；模板只留键名与获取方式，
+不填真值）；同名环境变量只作非空值覆盖口。`LLM_JUDGE_MODEL` 例外：它只被 eval
+评分脚本（`scripts/eval/score.ts --judge` 的 judge 链路）直读，不经过装配，属
+**eval 工具面**，不随部署配置走——`config/agent.example.yaml` 不为它留键。
+
+注意 eval 工具的读取面：`scripts/eval/judge.ts` / `score.ts` 直读 **process env**，
+不加载 `config/agent.yaml`。LLM 连接只写在 yaml 的部署，跑 `eval:score:judge` /
+`eval:baseline` 前需 export 同名 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`
+（或保留 `.env` 覆盖）；这是"eval 工具面不随部署配置走"的已知边界，不是宿主运行期
+行为——生产装配经 effectiveEnv 正常读 yaml。
 
 ## 6. 已退役、测试负向断言保留（不是现行接口，删了反而丢守卫）
 

@@ -1,12 +1,27 @@
 /**
- * 配置加载:config/agent.yaml(结构)+ 环境变量(秘密与本地参数)→ AppConfig。
- * 类型契约见 @fshine/contracts(config.ts);部署形状见 config/agent.yaml。
+ * 配置加载:config/agent.yaml(部署配置与秘密的源)+ 非空环境变量(覆盖口)→ AppConfig。
+ * 类型契约见 @fshine/contracts(config.ts);部署形状见 config/agent.example.yaml。
+ *
+ * 覆盖判据（issue #20 切片 C+D）：`node --env-file` 会把模板里的 `KEY=` 设成空串,
+ * 空串不是覆盖值——只有非空 env 才压过 yaml。缺段 / 缺键 = 未配置,loadConfig 不拒启
+ * （服务启动的必填项校验在各消费点,不在加载层）。
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import path from 'node:path';
-import type { AccountSetScope, AppConfig, ContextProfileConfig, PrincipalCapability, PrincipalConfig } from '@fshine/contracts';
+import type {
+  AccountSetScope,
+  AppConfig,
+  ContextProfileConfig,
+  ExecutionConfig,
+  HostConfig,
+  LlmConfig,
+  PrincipalCapability,
+  PrincipalConfig,
+  WecomConfig,
+  WorkerDispatchMode,
+} from '@fshine/contracts';
 import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -34,6 +49,124 @@ function asRecord(value: unknown, label: string): Record<string, unknown> {
 
 function asString(value: unknown): string {
   return typeof value === 'string' ? value : value === undefined || value === null ? '' : String(value);
+}
+
+/**
+ * 非空环境变量值（issue #20 切片 C+D 的覆盖口判据）。
+ *
+ * `node --env-file` 会把模板里所有 `KEY=` 都设成**空串**——空串代表"模板没填"，不是
+ * 覆盖值。部署配置的源是 config/agent.yaml；只有非空 env 才覆盖它。
+ */
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const raw = env[name];
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+function yamlString(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const trimmed = String(value).trim();
+  return trimmed === '' ? undefined : trimmed;
+}
+
+/** 字符串项：env 非空值 > yaml 值；两边都空 = 未配置。 */
+function pickString(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown): string | undefined {
+  return envValue(env, name) ?? yamlString(yamlValue);
+}
+
+/**
+ * 数值项：env 非空值优先，非法 = 未配置（不回退 yaml——覆盖口写错不该被 yaml 静默
+ * 掩盖）；yaml 值缺省 / 非法同样按未配置处理。缺省值住各消费点，加载层不复制第二份。
+ */
+function pickInteger(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown, min: number): number | undefined {
+  const fromEnv = envValue(env, name);
+  const raw: unknown = fromEnv !== undefined ? fromEnv : yamlValue;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isSafeInteger(parsed) || parsed < min) return undefined;
+  return parsed;
+}
+
+/** 可选映射段：缺段 / 空段（`llm:` 后全是注释 → null）= 空映射，不拒启；非映射 = 配置错误。 */
+function optionalSection(root: Record<string, unknown>, key: string): Record<string, unknown> {
+  const raw = root[key];
+  if (raw === undefined || raw === null) return {};
+  return asRecord(raw, key);
+}
+
+function parseWorkerDispatchMode(
+  value: string | undefined,
+  label: string,
+): WorkerDispatchMode | undefined {
+  if (value === undefined) return undefined;
+  if (value === 'inline' || value === 'background') return value;
+  throw new Error(`配置项 ${label} 必须是 inline 或 background（当前: ${value}）`);
+}
+
+function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConfig | undefined {
+  const config: LlmConfig = {};
+  const fields: ReadonlyArray<[keyof LlmConfig, string]> = [
+    ['apiBaseUrl', 'LLM_API_BASE_URL'],
+    ['apiKey', 'LLM_API_KEY'],
+    ['model', 'LLM_MODEL'],
+    ['mainModel', 'LLM_MAIN_MODEL'],
+    ['thinkingLevel', 'LLM_THINKING_LEVEL'],
+    ['mainThinkingLevel', 'LLM_MAIN_THINKING_LEVEL'],
+  ];
+  for (const [key, envName] of fields) {
+    const value = pickString(env, envName, raw[key]);
+    if (value !== undefined) config[key] = value;
+  }
+  return Object.keys(config).length === 0 ? undefined : config;
+}
+
+function parseWecom(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): WecomConfig | undefined {
+  const config: WecomConfig = {};
+  const botId = pickString(env, 'WECOM_BOT_ID', raw['botId']);
+  const botSecret = pickString(env, 'WECOM_BOT_SECRET', raw['botSecret']);
+  if (botId !== undefined) config.botId = botId;
+  if (botSecret !== undefined) config.botSecret = botSecret;
+  return Object.keys(config).length === 0 ? undefined : config;
+}
+
+type NumericHostKey =
+  | 'platformConcurrency'
+  | 'platformQueueCapacity'
+  | 'platformCooldownMs'
+  | 'shutdownDrainMs'
+  | 'workerStepCap'
+  | 'inboundDebounceMs';
+
+function parseHost(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): HostConfig | undefined {
+  const config: HostConfig = {};
+  const integers: ReadonlyArray<[NumericHostKey, string, number]> = [
+    ['platformConcurrency', 'FSHINE_PLATFORM_CONCURRENCY', 1],
+    ['platformQueueCapacity', 'FSHINE_PLATFORM_QUEUE_CAPACITY', 0],
+    ['platformCooldownMs', 'FSHINE_PLATFORM_COOLDOWN_MS', 1],
+    ['shutdownDrainMs', 'FSHINE_SHUTDOWN_DRAIN_MS', 0],
+    ['workerStepCap', 'FSHINE_WORKER_STEP_CAP', 1],
+    ['inboundDebounceMs', 'FSHINE_INBOUND_DEBOUNCE_MS', 0],
+  ];
+  for (const [key, envName, min] of integers) {
+    const value = pickInteger(env, envName, raw[key], min);
+    if (value !== undefined) config[key] = value;
+  }
+  const dispatchMode = parseWorkerDispatchMode(
+    pickString(env, 'FSHINE_WORKER_DISPATCH_MODE', raw['workerDispatchMode']),
+    'host.workerDispatchMode（环境变量 FSHINE_WORKER_DISPATCH_MODE）',
+  );
+  if (dispatchMode !== undefined) config.workerDispatchMode = dispatchMode;
+  const attachmentDir = pickString(env, 'FSHINE_ATTACHMENT_DIR', raw['attachmentDir']);
+  if (attachmentDir !== undefined) config.attachmentDir = attachmentDir;
+  const piAgentDir = pickString(env, 'FSHINE_PI_AGENT_DIR', raw['piAgentDir']);
+  if (piAgentDir !== undefined) config.piAgentDir = piAgentDir;
+  return Object.keys(config).length === 0 ? undefined : config;
+}
+
+function parseExecution(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): ExecutionConfig | undefined {
+  const planActivationSecret = pickString(env, 'EXECUTION_PLAN_ACTIVATION_SECRET', raw['planActivationSecret']);
+  return planActivationSecret === undefined ? undefined : { planActivationSecret };
 }
 
 const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
@@ -186,30 +319,102 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
 
   const channelRaw: Record<string, unknown> = isRecord(root['channel']) ? root['channel'] : {};
 
-  const portRaw = env['APP_PORT'] ?? channelRaw['port'];
-  const port = Number(portRaw === undefined || portRaw === null || portRaw === '' ? DEFAULT_PORT : portRaw);
+  // 空串 env 不算覆盖：`--env-file` 会把未填的 APP_PORT= 设成空串，此时仍应落到 yaml。
+  const portRaw = envValue(env, 'APP_PORT') ?? channelRaw['port'];
+  const port = Number(portRaw === undefined || portRaw === null || String(portRaw).trim() === '' ? DEFAULT_PORT : portRaw);
   if (!Number.isFinite(port)) {
     throw new Error(`环境变量 APP_PORT 不是有效的端口号:${asString(portRaw)}`);
   }
 
   // V0 渠道为智能机器人 WebSocket 长连接,无需公网 URL;publicUrl 仅作可选信息保留。
-  const publicUrl = String(env['APP_PUBLIC_URL'] ?? '').trim() || asString(channelRaw['publicUrl']).trim();
+  const publicUrl = pickString(env, 'APP_PUBLIC_URL', channelRaw['publicUrl']) ?? '';
 
-  const callbackPath = String(env['APP_CALLBACK_PATH'] ?? '').trim()
-    || asString(channelRaw['callbackPath']).trim()
-    || DEFAULT_CALLBACK_PATH;
+  const callbackPath = pickString(env, 'APP_CALLBACK_PATH', channelRaw['callbackPath']) ?? DEFAULT_CALLBACK_PATH;
 
   const sessionTtlRaw = root['sessionTtlMs'];
   const sessionTtlMs = typeof sessionTtlRaw === 'number' && Number.isFinite(sessionTtlRaw) && sessionTtlRaw > 0
     ? sessionTtlRaw
     : DEFAULT_SESSION_TTL_MS;
 
+  // 部署配置（issue #20 切片 C+D）：yaml 是源，非空 env 覆盖。缺段 / 缺键 = 未配置，
+  // loadConfig 不拒启——各消费点按既有缺省处理。注意服务启动仍会校验必填项：Main 驱动
+  // 在装配时即校验 LLM_API_BASE_URL / LLM_API_KEY / LLM_MODEL（pi-driver.ts），渠道凭据
+  // 在 channel.start 校验（channel-wecom/adapter.ts）；与切片前一致。
+  const llm = parseLlm(optionalSection(root, 'llm'), env);
+  const wecom = parseWecom(optionalSection(root, 'wecom'), env);
+  const host = parseHost(optionalSection(root, 'host'), env);
+  const execution = parseExecution(optionalSection(root, 'execution'), env);
+  const businessSkillPath = pickString(env, 'BUSINESS_SKILL_PATH', root['businessSkillPath']);
+
   return {
     principals,
     contextProfiles,
     channel: { port, publicUrl, callbackPath },
     sessionTtlMs,
+    ...(llm ? { llm } : {}),
+    ...(wecom ? { wecom } : {}),
+    ...(host ? { host } : {}),
+    ...(execution ? { execution } : {}),
+    ...(businessSkillPath === undefined ? {} : { businessSkillPath }),
   };
+}
+
+/**
+ * AppConfig 的部署值 → 同名环境变量（issue #20 切片 C+D 的唯一派生点）。
+ *
+ * 驱动 / 渠道 / handler 等既有消费面继续按 env 读取；装配在这里把 yaml 源翻译成 env
+ * 名，再让非空环境变量覆盖（合并规则唯一实现是本文件的 effectiveDeploymentEnv）。
+ * 未配置的值不出现——不伪造 env，也不在这里复制任何缺省值。
+ *
+ * `channel.*` 不在此列：它由 loadConfig 直接产出 AppConfig.channel，没有 env 消费方。
+ */
+export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  const put = (name: string, value: string | number | undefined): void => {
+    if (value === undefined) return;
+    const text = String(value);
+    if (text === '') return;
+    env[name] = text;
+  };
+  put('LLM_API_BASE_URL', config.llm?.apiBaseUrl);
+  put('LLM_API_KEY', config.llm?.apiKey);
+  put('LLM_MODEL', config.llm?.model);
+  put('LLM_MAIN_MODEL', config.llm?.mainModel);
+  put('LLM_THINKING_LEVEL', config.llm?.thinkingLevel);
+  put('LLM_MAIN_THINKING_LEVEL', config.llm?.mainThinkingLevel);
+  put('WECOM_BOT_ID', config.wecom?.botId);
+  put('WECOM_BOT_SECRET', config.wecom?.botSecret);
+  put('FSHINE_PLATFORM_CONCURRENCY', config.host?.platformConcurrency);
+  put('FSHINE_PLATFORM_QUEUE_CAPACITY', config.host?.platformQueueCapacity);
+  put('FSHINE_PLATFORM_COOLDOWN_MS', config.host?.platformCooldownMs);
+  put('FSHINE_SHUTDOWN_DRAIN_MS', config.host?.shutdownDrainMs);
+  put('FSHINE_WORKER_DISPATCH_MODE', config.host?.workerDispatchMode);
+  put('FSHINE_WORKER_STEP_CAP', config.host?.workerStepCap);
+  put('FSHINE_INBOUND_DEBOUNCE_MS', config.host?.inboundDebounceMs);
+  put('FSHINE_ATTACHMENT_DIR', config.host?.attachmentDir);
+  put('FSHINE_PI_AGENT_DIR', config.host?.piAgentDir);
+  put('BUSINESS_SKILL_PATH', config.businessSkillPath);
+  put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
+  return env;
+}
+
+/**
+ * 部署配置生效环境（唯一合并实现）：env 原样透传（未建模键也保留，子进程继承面
+ * 不变），yaml 派生值只在同名 env 为空/空白时补位。`node --env-file` 会把模板里的
+ * `KEY=` 设成空串，空串因此按未配置处理。
+ *
+ * 消费方：apps/server/assembly.ts（生产装配）与 scripts/smoke-wecom.ts（渠道冒烟）。
+ * 新入口一律复用本函数——优先级规则不允许出现第二份实现。
+ */
+export function effectiveDeploymentEnv(
+  config: AppConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const effective: NodeJS.ProcessEnv = { ...env };
+  for (const [name, value] of Object.entries(deploymentEnvOf(config))) {
+    if ((effective[name] ?? '').trim() === '') effective[name] = value;
+  }
+  return effective;
 }
 
 /**

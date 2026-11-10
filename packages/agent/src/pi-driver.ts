@@ -5,7 +5,17 @@
  */
 import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummary, shouldCompact, type AgentMessage } from '@earendil-works/pi-agent-core';
 import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/context';
-import { createModels, createProvider, envApiKeyAuth, type Message, type Model } from '@earendil-works/pi-ai';
+import {
+  createModels,
+  createProvider,
+  defaultProviderAuthContext,
+  envApiKeyAuth,
+  type Api,
+  type AuthContext,
+  type Message,
+  type Model,
+  type MutableModels,
+} from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
@@ -78,11 +88,47 @@ export interface PiTurnDriverOptions {
   thinkingLevel?: PiThinkingLevel;
 }
 
-/** 从 env 构建 kimi 兼容的 pi 模型集合;env 缺失在创建时即抛中文错误。 */
-export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
-  const baseUrl = (options.env.LLM_API_BASE_URL ?? '').replace(/\/+$/, '');
-  const apiKey = options.env.LLM_API_KEY;
-  const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
+export interface PiModelRuntime {
+  models: MutableModels;
+  model: Model<Api>;
+}
+
+/**
+ * 环境范围认证上下文：先查驱动收到的 env（装配下传的 effectiveEnv / 直连调用方
+ * 传入的 env），缺失才回落库默认上下文（process.env + node:fs）。
+ *
+ * 为什么必须显式织入（issue #20 切片 C+D 回归 / Codex blocking）：pi-ai 默认认证
+ * 上下文只读 process.env（库 auth/context.js 头注："Default auth context: env vars
+ * from process.env"），而部署配置把 LLM_API_KEY 派生进 effectiveEnv——只把它当
+ * options.env 传进来，认证解析看不到它，首次模型请求必然失败。密钥不写回
+ * process.env：装配层设计注释已明令，进程级注入会让模型经工具面拿到密钥。
+ */
+function envScopedAuthContext(
+  env: Record<string, string | undefined>,
+  fallback: AuthContext,
+): AuthContext {
+  return {
+    async env(name: string): Promise<string | undefined> {
+      const value = env[name];
+      if (typeof value === 'string' && value.trim() !== '') return value;
+      return fallback.env(name);
+    },
+    fileExists: (path: string) => fallback.fileExists(path),
+  };
+}
+
+/**
+ * 从 env 构建 kimi 兼容的 pi 模型集合与认证上下文;env 缺失在创建时即抛中文错误。
+ *
+ * 导出给认证链接线测试用（`pi-driver-auth.test.ts` 走库的 `Models.getAuth` 解析面，
+ * 不起网络）。生产入口仍是 `createPiTurnDriver`。
+ */
+export function createPiModelRuntime(
+  env: Record<string, string | undefined>,
+  modelId: string,
+): PiModelRuntime {
+  const baseUrl = (env.LLM_API_BASE_URL ?? '').replace(/\/+$/, '');
+  const apiKey = env.LLM_API_KEY;
   if (!baseUrl || !apiKey || !modelId) {
     const missing = [
       ['LLM_API_BASE_URL', baseUrl],
@@ -93,13 +139,6 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       .map(([k]) => k);
     throw new Error(`缺少环境变量 ${missing.join('、')},无法初始化 LLM 客户端`);
   }
-
-  // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
-  // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
-  // 词表与校验在 parsePiThinkingLevel(模块级唯一定义);装配层显式传入时已校验过,
-  // 走到 env 回落才在这里报错,错误信息仍指向 LLM_THINKING_LEVEL。
-  const thinkingLevel = options.thinkingLevel
-    ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
 
   // kimi coding 端点不接受 developer 角色(pi 对 reasoning 模型的默认行为),
   // 按 pi-ai 文档用 compat.supportsDeveloperRole=false 显式声明,模型推理能力不受影响
@@ -127,10 +166,26 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     models: [kimiModel],
     api: openAICompletionsApi(),
   });
-  const models = createModels();
+  const models = createModels({
+    authContext: envScopedAuthContext(env, defaultProviderAuthContext()),
+  });
   models.setProvider(provider);
   const model = models.getModel('llm', modelId);
   if (!model) throw new Error(`LLM 模型 ${modelId} 注册失败`);
+  return { models, model };
+}
+
+/** 从 env 构建 kimi 兼容的 pi 驱动;env 缺失在创建时即抛中文错误。 */
+export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
+  const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
+  const { models, model } = createPiModelRuntime(options.env, modelId);
+
+  // 思考深度(pi 统一抽象):off/minimal/low/medium/high/xhigh/max。
+  // 是否生效取决于模型/端点是否支持思考参数;不支持的供应商 pi-ai 静默忽略。
+  // 词表与校验在 parsePiThinkingLevel(模块级唯一定义);装配层显式传入时已校验过,
+  // 走到 env 回落才在这里报错,错误信息仍指向 LLM_THINKING_LEVEL。
+  const thinkingLevel = options.thinkingLevel
+    ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
