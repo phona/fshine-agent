@@ -567,32 +567,46 @@ export function parseArgs(argv) {
   const minValid = Number(out.minValidComparisons);
   if (!Number.isInteger(minValid) || minValid < 1) throw new UsageError('--min-valid 必须是正整数');
   out.minValidComparisons = minValid;
-  // 期望结构（--expect-cases / --expect-rounds）：必须成对出现，且格式合法——它是分母的
-  // 声明值，喂错就等于把结构校验关掉（codex 复审 major 的修法）。
-  const hasCases = out.expectCases !== undefined;
-  const hasRounds = out.expectRounds !== undefined;
-  if (hasCases !== hasRounds) {
-    throw new UsageError('--expect-cases 与 --expect-rounds 必须成对给出');
-  }
-  if (hasCases) {
-    const cases = String(out.expectCases).split(',').map((s) => s.trim()).filter(Boolean);
+  // 期望结构（各阶段独立声明，2026-11-10 codex 复审 major 收口）：一条规则——
+  // **任何被测量的输入，都必须带它所属阶段的声明**。汇总工具无法从输入自身知道“期望跑哪些
+  // 用例、跑几轮”，不声明就不许合并下结论（否则缺轮/缺用例/缺逐轮评分都会静默缩小证据面）。
+  //   · --expect-cases        公共用例集（任一阶段有输入即必填）；
+  //   · --expect-rounds       稳定性阶段轮数（有稳定性输入即必填）；
+  //   · --expect-disc-rounds  区分度阶段轮数（有强/弱输入即必填——该阶段固定 2 轮，
+  //                           与稳定性轮数不同，历史上曾把稳定性轮数串给它导致完整产物全判缺失）。
+  const hasStabilityInput = out.stabilityPaths.length > 0;
+  const hasDiscriminationInput = Boolean(out.strongPath || out.weakPath);
+  const parseCases = (raw) => {
+    const cases = String(raw).split(',').map((x) => x.trim()).filter(Boolean);
     if (cases.length === 0 || !cases.every((id) => /^[A-Za-z0-9-]+$/.test(id))) {
-      throw new UsageError('--expect-cases 必须是逗号分隔的用例 id（^[A-Za-z0-9,-]+$，且无空段）')
+      throw new UsageError('--expect-cases 必须是逗号分隔的用例 id（^[A-Za-z0-9,-]+$，且无空段）');
     }
-    const rounds = Number(out.expectRounds);
-    if (!Number.isInteger(rounds) || rounds < 1) throw new UsageError('--expect-rounds 必须是正整数');
-    out.stabilityExpected = { cases, rounds };
-    // 区分度阶段的轮数独立声明（工作流强弱档固定 2 轮，与稳定性轮数不同）——给了区分度
-    // 输入就必须声明，不声明不核轮数（discriminationExpected 缺轮数字段 = 不核）。
-    const hasDisc = out.expectDiscRounds !== undefined;
-    if (hasDisc !== Boolean(out.strongPath || out.weakPath)) {
-      throw new UsageError('--expect-disc-rounds 与区分度输入（强/弱 JSON）必须成对出现');
-    }
-    if (hasDisc) {
-      const discRounds = Number(out.expectDiscRounds);
-      if (!Number.isInteger(discRounds) || discRounds < 1) throw new UsageError('--expect-disc-rounds 必须是正整数');
-      out.discriminationExpected = { cases, rounds: discRounds };
-    }
+    return cases;
+  };
+  const parseRounds = (raw, flag) => {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1) throw new UsageError(`${flag} 必须是正整数`);
+    return n;
+  };
+  if (out.expectCases !== undefined) out.expectCases = parseCases(out.expectCases);
+  if (out.expectRounds !== undefined) out.expectRounds = parseRounds(out.expectRounds, '--expect-rounds');
+  if (out.expectDiscRounds !== undefined) out.expectDiscRounds = parseRounds(out.expectDiscRounds, '--expect-disc-rounds');
+  if ((hasStabilityInput || hasDiscriminationInput) && out.expectCases === undefined) {
+    throw new UsageError('给了测量输入就必须用 --expect-cases 声明期望用例集（分母的声明值）');
+  }
+  if (hasStabilityInput !== (out.expectRounds !== undefined)) {
+    throw new UsageError('--expect-rounds 与稳定性输入必须成对出现');
+  }
+  if (hasDiscriminationInput !== (out.expectDiscRounds !== undefined)) {
+    throw new UsageError('--expect-disc-rounds 与区分度输入（强/弱 JSON）必须成对出现');
+  }
+  if (out.expectCases !== undefined) {
+    out.stabilityExpected = out.expectRounds !== undefined
+      ? { cases: out.expectCases, rounds: out.expectRounds }
+      : null;
+    out.discriminationExpected = out.expectDiscRounds !== undefined
+      ? { cases: out.expectCases, rounds: out.expectDiscRounds }
+      : null;
   }
   return out;
 }
@@ -621,14 +635,6 @@ export function main(argv) {
   const baselineLoad = opts.evalRealBaselinePath ? readJson(opts.evalRealBaselinePath) : null;
   const latestLoad = opts.evalRealLatestPath ? readJson(opts.evalRealLatestPath) : null;
   const regressionLoad = opts.regressionsPath ? readJson(opts.regressionsPath) : null;
-
-  // 期望结构必填（codex 复审 major：默认本地入口曾绕过结构校验）：给了稳定性输入就必须声明
-  // 用例集与轮数——汇总工具无法从输入自身知道“期望跑哪些用例”，不声明就不许合并下结论。
-  if (opts.stabilityPaths.length > 0 && !opts.stabilityExpected) {
-    console.error('给了稳定性输入就必须用 --expect-cases <id,...> --expect-rounds <N> 声明期望结构'
-      + '（分母的声明值；工作流把喂给探针的同一份值传进来）。\n' + USAGE);
-    return 2;
-  }
 
   const evidenceErrors = [];
   const noteLoad = (load, role) => {

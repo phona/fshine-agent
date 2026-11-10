@@ -238,7 +238,9 @@ describe('main：文件输入路径的退出码与结论一致', () => {
     });
     let code: number;
     try {
-      code = main(['--', strongPath, weakPath]);
+      // 声明期望结构（新规则：区分度输入必须带 --expect-cases + --expect-disc-rounds），
+      // 这样才能走到原本要测的“双方 judge 全 null ⇒ 无法判定”路径。
+      code = main(['--expect-cases', 'G-A1', '--expect-disc-rounds', '2', '--', strongPath, weakPath]);
     } finally {
       logSpy.mockRestore();
     }
@@ -522,5 +524,52 @@ describe('合法零分不是缺评分（codex blocking：falsy-zero）', () => {
     const out = evaluateDiscrimination(strong, weak, 1, { cases: ['G-A1'], rounds: 2 });
     expect(out.rows[0].missing).toBe(true);
     expect(out.validComparisons).toBe(0);
+  });
+});
+
+/**
+ * 声明要求覆盖**所有入口**（2026-11-10 codex 复审 major）：规则是一条——任何被测量的输入都
+ * 必须带它所属阶段的声明。旧实现只对稳定性输入要求，区分度-only 调用（只给强弱两份 JSON）
+ * 曾绕过全部结构校验。
+ */
+describe('声明要求覆盖所有入口（codex major：需求面闭合）', () => {
+  const doc = (mean: number) => ({
+    rounds: 2,
+    summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 2, judge_mean: FOUR(mean) } },
+    results: [
+      { id: 'G-A1', round: 1, judge_scores: FOUR(mean) },
+      { id: 'G-A1', round: 2, judge_scores: FOUR(mean) },
+    ],
+  });
+
+  it('区分度-only 调用（无稳定性文件）不给声明 ⇒ 用法错误 exit 2', () => {
+    const dir = tempDir();
+    const strongPath = writeJson(dir, 'strong.json', doc(2));
+    const weakPath = writeJson(dir, 'weak.json', doc(1));
+    const errs: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => { errs.push(String(m)); });
+    let code: number;
+    try {
+      code = main(['--', strongPath, weakPath]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(errs.join('')).toContain('--expect-cases');
+  });
+
+  it('稳定性-only 调用不给轮数声明 ⇒ 用法错误 exit 2', () => {
+    const dir = tempDir();
+    const stabilityPath = writeJson(dir, 'stab.json', { rounds: 2, summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } });
+    const errs: string[] = [];
+    const spy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => { errs.push(String(m)); });
+    let code: number;
+    try {
+      code = main(['--expect-cases', 'G-A1', stabilityPath]);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(errs.join('')).toContain('--expect-rounds');
   });
 });
