@@ -363,8 +363,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
  * AppConfig 的部署值 → 同名环境变量（issue #20 切片 C+D 的唯一派生点）。
  *
  * 驱动 / 渠道 / handler 等既有消费面继续按 env 读取；装配在这里把 yaml 源翻译成 env
- * 名，再让非空环境变量覆盖（见 apps/server/assembly.ts 的 effectiveEnv）。未配置的值
- * 不出现——不伪造 env，也不在这里复制任何缺省值。
+ * 名，再让非空环境变量覆盖（合并规则唯一实现是本文件的 effectiveDeploymentEnv）。
+ * 未配置的值不出现——不伪造 env，也不在这里复制任何缺省值。
  *
  * `channel.*` 不在此列：它由 loadConfig 直接产出 AppConfig.channel，没有 env 消费方。
  */
@@ -396,6 +396,25 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('BUSINESS_SKILL_PATH', config.businessSkillPath);
   put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
   return env;
+}
+
+/**
+ * 部署配置生效环境（唯一合并实现）：env 原样透传（未建模键也保留，子进程继承面
+ * 不变），yaml 派生值只在同名 env 为空/空白时补位。`node --env-file` 会把模板里的
+ * `KEY=` 设成空串，空串因此按未配置处理。
+ *
+ * 消费方：apps/server/assembly.ts（生产装配）与 scripts/smoke-wecom.ts（渠道冒烟）。
+ * 新入口一律复用本函数——优先级规则不允许出现第二份实现。
+ */
+export function effectiveDeploymentEnv(
+  config: AppConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const effective: NodeJS.ProcessEnv = { ...env };
+  for (const [name, value] of Object.entries(deploymentEnvOf(config))) {
+    if ((effective[name] ?? '').trim() === '') effective[name] = value;
+  }
+  return effective;
 }
 
 /**

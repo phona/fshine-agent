@@ -11,7 +11,7 @@ import { execFileSync } from 'node:child_process';
 import {
   closeStore,
   createSqliteStore,
-  deploymentEnvOf,
+  effectiveDeploymentEnv,
   loadConfig,
   principalScopeRecords,
 } from '@fshine/core';
@@ -173,14 +173,11 @@ export interface ServerAssembly {
 export async function createServerAssembly(overrides: ServerAssemblyOverrides = {}): Promise<ServerAssembly> {
   const env = overrides.env ?? process.env;
   const config = loadConfig({ env, yamlPath: env['AGENT_CONFIG_PATH'] || undefined });
-  // 部署配置（issue #20 切片 C+D）：yaml 是源、非空 env 是覆盖口。这里集中构造一次
-  // effectiveEnv，沿既有 seam 下传——驱动 / 渠道 / handler / business skill 继续按 env
-  // 读取，消费方零改动。空串 env 不覆盖 yaml（`node --env-file` 会把模板里的
-  // `KEY=` 设成空串）；非空 env 原样保留，未建模的键也原样透传（子进程继承面不变）。
-  const effectiveEnv: NodeJS.ProcessEnv = { ...env };
-  for (const [name, value] of Object.entries(deploymentEnvOf(config))) {
-    if ((effectiveEnv[name] ?? '').trim() === '') effectiveEnv[name] = value;
-  }
+  // 部署配置（issue #20 切片 C+D）：yaml 是源、非空 env 是覆盖口。合并规则唯一实现
+  // 在 @fshine/core 的 effectiveDeploymentEnv（非空 env 覆盖 yaml、空串不覆盖、未建模
+  // 键原样透传）；这里集中构造一次，沿既有 seam 下传——驱动 / 渠道 / handler /
+  // business skill 继续按 env 读取，消费方零改动。scripts/smoke-wecom.ts 复用同一函数。
+  const effectiveEnv: NodeJS.ProcessEnv = effectiveDeploymentEnv(config, env);
   const workerDispatchMode = overrides.workerDispatchMode ?? workerDispatchModeOf(effectiveEnv);
   // Active profile 派生（C5）：单 profile → 其键；零/多 profile → undefined（各消费点
   // 按无平台能力降级，runner 侧 resolveContextProfile fail-closed）。宿主不取实例名缺省。

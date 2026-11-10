@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { deploymentEnvOf, loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
+import { deploymentEnvOf, effectiveDeploymentEnv, loadConfig, principalScopeRecords, firstEnabledPrincipalId } from './src/index';
 
 const PUBLIC_URL_ENV = { APP_PUBLIC_URL: 'https://tax.example.com' };
 
@@ -512,6 +512,22 @@ host:
       BUSINESS_SKILL_PATH: 'docs/other-business-skill.md',
       EXECUTION_PLAN_ACTIVATION_SECRET: 'yaml-plan-secret',
     });
+  });
+
+  it('effectiveDeploymentEnv：yaml 派生值打底，非空 env 覆盖、空串不覆盖、未建模键透传', () => {
+    const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
+    const effective = effectiveDeploymentEnv(config, {
+      // node --env-file 的 `KEY=` 形态：空串按未配置，yaml 值补位。
+      LLM_API_KEY: '',
+      // 非空 env 覆盖 yaml。
+      LLM_MODEL: 'env-model',
+      // 未建模键原样透传（子进程继承面不变）。
+      UNMODELED_FLAG: 'kept',
+    });
+    expect(effective['LLM_API_KEY']).toBe('yaml-key');
+    expect(effective['LLM_MODEL']).toBe('env-model');
+    expect(effective['WECOM_BOT_SECRET']).toBe('yaml-bot-secret');
+    expect(effective['UNMODELED_FLAG']).toBe('kept');
   });
 
   it('fresh clone：config/agent.example.yaml 复制到临时路径后可直接加载', () => {
