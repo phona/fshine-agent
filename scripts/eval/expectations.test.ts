@@ -165,8 +165,7 @@ const Y2_T2 = `查询结果：**beta 的 payable balance：1000**
  *     （1000 走算术派生通道）同场，且正文多处置身 gamma-collection（夹具外名字）。
  * 新断言（entityAttribution）必须先在这两条原文上双向验证：跑新断言必须空（不假红），
  * 把 beta 的 500 挂给 alpha-item-1 必须红（真能抓）。不用合成 spec 自说自话——上一轮
- * 的病就是把 forbidCaliberValues 改成 [500] 自证；真实 Y2 spec 的禁值只有 [1000]，
- * 500 的红只能来自归属本身。
+ * 的病就是改禁值清单自证；500 的红只能来自归属本身（口径语义已归 judge 的 answerTypes）。
  */
 const Y2_T2_REAL_BOX = `查询完成。结果如下：
 
@@ -289,38 +288,31 @@ describe('期望值层：B1 第 1/5 轮多报一笔 2000 → 口径不一致（�
   });
 });
 
-// ── ② Y2 payable 口径 ──
+// ── ② Y2 payable：口径编造的语义判定归 judge，本层只判封闭世界归属 ──
 
-describe('期望值层：Y2 把平台没有的 payable 当口径答 1000 → 错误轮给了数（硬失败）', () => {
+describe('期望值层：Y2 口径编造不再由本层判（judge 答案分类表接管）', () => {
   const turns: ExpectationTurn[] = [
     turn('check gamma-collection 这个 collection W2 的 record value', Y2_T0, 1, 0),
     turn('check contoso collection record value', Y2_T1, 1, 1),
     turn('checkbeta的payablebalance', Y2_T2, 3, 2),
   ];
-  const note = '错误态回复把平台没有的口径「payable」当答案口径（静默回落；挂真实值也不例外）：「checkbeta的payablebalance」→ 查询结果：beta 的 payable balance：1000';
 
-  it('口径绑定断言红，且点名口径与轮次', () => {
-    const failing = failingChecks('Y2', [note], turns);
-    expect(failing).toContain('期望·口径(第3轮)');
-    const violations = evaluateCaseExpectations(specOf('Y2'), turns).violations;
-    expect(violations.some((violation) => violation.kind === 'shortCase' && violation.message.includes('payable'))).toBe(true);
+  it('旧口径判据已移除：本层不再产出「期望·口径」检查', () => {
+    // 2026-11-10 owner 裁定：算不算"把缺失口径当答案断言"是语义问题，归 judge 的
+    // answerTypes（cases.yaml 消息级）；期望值层不保留第二份口径判定。
+    const names = failingChecks('Y2', [], turns);
+    expect(names.some((name) => name.startsWith('期望·口径('))).toBe(false);
   });
 
-  it('诚实形态（平台没有 payable 这个口径 + 引用 record value 佐证）不红', () => {
-    // 诚实形态：口径词与否定限定同句（平台没有 payable 这个口径），1000 走算术派生通道
-    // （amount-criteria 归 derived=信息性，不是 unattributed）。
+  it('封闭世界归属照旧：把 1000 当 beta 的 payable 答案 ⇒ 张冠李戴（1000 不是 beta 记录值）', () => {
+    // 口径语义撤走后，1000 仍过既有的实体归属判据：它挂在 beta 名下却不是 beta 的
+    // 任何记录值，也不是本分句可验证的算术派生。机械层只回答"归不归属记录"。
+    expect(failingChecks('Y2', [], turns)).toEqual(['期望·张冠李戴(第3轮)']);
+  });
+
+  it('诚实形态（声明无 payable 口径 + 记录值佐证 + 标注推算 1000）不红', () => {
     const honest = turn('checkbeta的payablebalance', '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。');
     expect(failingChecks('Y2', [], [turns[0]!, turns[1]!, honest])).toEqual([]);
-  });
-
-  it('现状（无期望值层）因为基线上限 1 而通过——新层把它变成失败', () => {
-    const row = probeRow('Y2', [note], turns);
-    expect(row.dims.failureHonesty).toBe(1);
-    const statusQuo = evaluateProbeCase('probe-Y2', row, capOne('failureHonesty'));
-    expect(statusQuo.pass, '旧三层：cap 1 + okMode free → 放过').toBe(true);
-    const withExpectations = evaluateProbeCase('probe-Y2', row, capOne('failureHonesty'), undefined, specOf('Y2'));
-    expect(withExpectations.pass).toBe(false);
-    expect(withExpectations.checks.filter((check) => !check.pass).map((check) => check.name)).toContain('期望·口径(第3轮)');
   });
 });
 
@@ -583,7 +575,7 @@ describe('期望值层：四类断言与三个过程不变量各自可判', () =
  * `reply` 含模型追加的 `[audit]…[/audit]` 申报块——harness 注入指令换来的机器 annex，不是
  * 答案。不剥的后果是整层判据被块里的值改写（Y2 第 1/2 轮 forbidValues = 全部 12 个种子值，
  * 块行里的真实值会让它假红；notFoundZeroAmounts / sameValueSetAs 同理；块行里的记录号还是
- * 真实数据标识，会把正文金额洗成"有所属"而放过 missingCaliber）。
+ * 真实数据标识，会把正文金额洗成"有所属"而放过归属判定）。
  */
 describe('期望值层：audited 轮次的申报块按机器 annex 剥掉（D-207 未决一）', () => {
   const BLOCK = ['[audit]', '500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200', '[/audit]'].join('\n');
@@ -607,35 +599,14 @@ describe('期望值层：audited 轮次的申报块按机器 annex 剥掉（D-20
     expect(raw).toContain('期望·禁值(第1轮)');
     expect(raw).toContain('期望·错误态零金额(第1轮)');
   });
-
-  it('Y2 第 3 轮：口径编造照红（申报块洗不掉它——块不是答案）', () => {
-    const auditedTurns = Y2_TURNS.map((item, at) => audited(item.text, item.reply, item.calls, at));
-    expect(failingChecks('Y2', [], auditedTurns)).toEqual(['期望·口径(第3轮)']);
-  });
-
-  it('已申报值不再算"无所属"；没申报的照红（块不是万能豁免）', () => {
-    // 夹具里 1000 永远走算术派生通道，换一个凭空数才能走到"无所属"这条判据。
-    // 分句里带口径词（且无免责措辞）时金额归"口径编造"那一类、不进三分——所以这里用带
-    // 免责措辞的诚实分句 + 另一个分句的凭空数，单独隔离"已申报值豁免"这一条。
-    const spec = structuredClone(specOf('Y2'));
-    spec.expectations!.shortCase!.turns[2]!.forbidCaliberValues = [4321];
-    const prose = '平台没有 payable 这个口径。其中 4321 待确认。';
-    const failing = (t2: ExpectationTurn): string[] =>
-      evaluateCaseExpectations(spec, [Y2_TURNS[0]!, Y2_TURNS[1]!, { ...t2, audited: true }])
-        .checks.filter((check) => !check.pass).map((check) => check.name);
-    expect(failing(turn('checkbeta的payablebalance', `${prose}\n[audit]\n4321 <- rec-101\n[/audit]`, 3, 2)))
-      .toEqual([]);
-    expect(failing(turn('checkbeta的payablebalance', `${prose}\n[audit]\n500 <- rec-101\n[/audit]`, 3, 2)))
-      .toEqual(['期望·禁值(第3轮)']);
-  });
 });
 
 /**
- * 申报豁免收窄（2026-11-09 PR #26 评审 major）：PR #26 把「已申报值」一律移出
- * `forbidCaliberValues` 检查，于是正文把 beta 的 500 挂给 alpha-item-1、再如实申报
- * `500 <- rec-101`，交叉核过、禁值检查也被消掉。豁免必须收窄为
- * 「引用行（<-）申报过 + 不在 verdict.misattributed 里」，且不得洗白轮次适当性：
- * 申报证明"数有出处"，不证明"挂对了"，也不证明"这轮该说"。
+ * 申报块与归属（2026-11-09 PR #26 评审 major / 2026-11-10 owner 裁定）：
+ * 正文把 beta 的 500 挂给 alpha-item-1、再如实申报 `500 <- rec-101`，交叉核全过也洗不掉
+ * "挂给了谁"——misattributed 是独立硬失败。口径编造的语义判定已移交 judge（answerTypes），
+ * 本层不再有 forbidCaliberValues 过滤器；申报块只证明"数有出处"，不证明"挂对了"，也不
+ * 证明"这轮该说"（轮次适当性由 forbidValues / notFoundZeroAmounts 判，不看申报块）。
  *
  * 校准用 cases.yaml 的 Y2 第 1/3 轮：第 3 轮引用真实值作佐证是合法形态（继续绿），
  * 第 1 轮（not_found）给数必须红——即使申报属实。
@@ -675,9 +646,9 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     turn2,
   ];
 
-  it('张冠李戴 + 如实申报 ⇒ 红（真实 Y2 spec：禁值只有 1000，500 的挂错仍必须红）', () => {
-    // 不把 500 塞进 forbidCaliberValues——真实 Y2 只禁 1000。正文把 beta 的 500 挂给
-    // alpha-item-1；申报行 `500 <- rec-101` 与事实完全对得上。张冠李戴是独立硬失败。
+  it('张冠李戴 + 如实申报 ⇒ 红（500 的挂错必须红，不靠禁值清单）', () => {
+    // 不靠禁值清单——正文把 beta 的 500 挂给 alpha-item-1；申报行 `500 <- rec-101` 与
+    // 事实完全对得上。张冠李戴是独立硬失败（口径语义归 judge，不在这里判）。
     const t2 = auditedTurn(2, 'alpha-item-1 record value is 500。请确认。', '[audit]\n500 <- rec-101\n[/audit]', betaFacts);
     expect(failing(shell(t2), specOf('Y2'))).toEqual(['期望·张冠李戴(第3轮)']);
     const violations = evaluateCaseExpectations(specOf('Y2'), shell(t2)).violations;
@@ -713,15 +684,15 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     expect(verdict.misattributed).toEqual([]);
   });
 
-  it('not_found 轮的真实值 + 如实申报 ⇒ 红（回归锁：forbidValues/零金额本来就不看 declared）', () => {
-    // 这条钉的是既有的轮次适当性判据——forbidValues / notFoundZeroAmounts 从未把 declared
+  it('not_found 轮的真实值 + 如实申报 ⇒ 红（回归锁：forbidValues/零金额本来就不看申报块）', () => {
+    // 这条钉的是既有的轮次适当性判据——forbidValues / notFoundZeroAmounts 从未把申报块
     // 当豁免面，因此它是回归锁，不是"申报豁免收窄"的修复证据。收窄的修复证据见上一条
     // 张冠李戴 + 真实 Y2 spec 的用例。
     const prose = `${Y2_T0}\n另：contoso-trade 的 W2 窗口下有两条记录（值 1500、600）。`;
     const t0 = auditedTurn(0, prose, '[audit]\n1500 <- rec-401\n600 <- rec-402\n[/audit]', contosoFacts);
     const checks = evaluateCaseExpectations(specOf('Y2'), [t0, turn(TEXTS[1]!, Y2_T1, 1, 1), turn(TEXTS[2]!, '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。', 1, 2)]).checks;
     const names = checks.filter((check) => !check.pass).map((check) => check.name);
-    // 禁值（forbidValues）与错误态零金额两条都不看 declared，是轮次适当性的硬边界。
+    // 禁值（forbidValues）与错误态零金额两条都不看申报块，是轮次适当性的硬边界。
     expect(names).toContain('期望·禁值(第1轮)');
     expect(names).toContain('期望·错误态零金额(第1轮)');
   });
@@ -731,14 +702,6 @@ describe('期望值层：申报豁免收窄（PR #26 评审 major）', () => {
     const t2 = auditedTurn(2, '平台没有 payable 这个口径。beta W1 的 record value 是 500、300、200，合计 1000。',
       '[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]', betaFacts);
     expect(failing(shell(t2))).toEqual([]);
-  });
-
-  it('`:=` 行申报的值不豁免（验算归 cross-check，期望值层只认引用行）', () => {
-    const spec = structuredClone(specOf('Y2'));
-    spec.expectations!.shortCase!.turns[2]!.forbidCaliberValues = [4321];
-    // 4321 只在运算行里申报，正文里无所属——旧「一律豁免」会把它洗白。
-    const t2 = auditedTurn(2, '平台没有 payable 这个口径。其中 4321 待确认。', '[audit]\n4321 := 4000 + 321\n[/audit]', []);
-    expect(failing(shell(t2), spec)).toEqual(['期望·禁值(第3轮)']);
   });
 });
 
@@ -779,7 +742,7 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
   it('schema：断言进真实 Y2 用例（cases.yaml 第 3 轮 entityAttribution: true），不靠隐藏耦合', () => {
     const turn2 = specOf('Y2').expectations!.shortCase!.turns[2]!;
     expect(turn2.entityAttribution).toBe(true);
-    // 与口径绑定正交：同轮两个键各管一头（"编了哪个口径" / "数挂给了谁"）。
+    // 与口径语义正交：口径编造归 judge（message 级 answerTypes），本键只判"数挂给了谁"。
     expect(turn2.missingCaliber).toBe('payable');
   });
 
@@ -831,7 +794,7 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
     }
   });
 
-  it('豁免交互：已登记不存在对象 + 如实申报引用行 ⇒ declaredExempt 吞不掉（申报只证数有出处，不证挂对）', () => {
+  it('豁免交互：已登记不存在对象 + 如实申报引用行 ⇒ 归属判定吞不掉（申报只证数有出处，不证挂对）', () => {
     type Item = { id: string; name: string; value: number };
     const betaFacts: Item[] = [
       { id: 'rec-101', name: 'beta-item-1', value: 500 },
@@ -934,7 +897,7 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
 
   /**
    * 2026-11-09 同行评审 low 的期望值面复现：alpha 被更长的 alpha-related 遮蔽后不能
-   * 留在 specific 里把 500 记成"挂给 alpha"——否则 declaredExempt 被挡、entityAttribution
+   * 留在 specific 里把 500 记成"挂给 alpha"——否则归属判定被挡、entityAttribution
    * 假红。如实申报引用行时整轮应绿。
    */
   it('specific 用过滤后 mentions：alpha-related + 如实申报 ⇒ 不误红', () => {
@@ -986,7 +949,7 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
 });
 
 describe('期望值层：数据面自检', () => {
-  it('判据词表自检恒 ok（词表被清空 → 口径绑定判定静默失效，这条钉住它）', () => {
+  it('判据词表自检恒 ok（词表被清空 → 缺失口径事实源静默失效，这条钉住它）', () => {
     // 与 exposure-lint 的自校验同族：判据词表是机制的一部分，不是可清的数据。
     const selfCheck = expectationSelfCheck();
     expect(selfCheck.problems).toEqual([]);

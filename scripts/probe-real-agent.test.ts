@@ -20,7 +20,7 @@ import { mergeCallPhases, type ExecutionAuditRow } from './eval/evidence';
 import { classifyAuditDeclaration } from './eval/audit-declaration';
 import { buildCaseReport, buildUnifiedReport } from './eval/report';
 import { auditFailuresCheckOf, evaluateProbeCase, type ProbeResultRow } from './eval/score';
-import { emptyDimCounts } from './eval/dims';
+import { countDims, emptyDimCounts } from './eval/dims';
 import { loadCases } from './eval/cases';
 import {
   MOCK_ACCOUNTS,
@@ -122,7 +122,7 @@ describe('起止合并后的调用数口径（十二审 major）', () => {
 // 黑盒模式（默认）行为零变化由两条钉住：① auditOutgoingText(audit=false) 对 yaml 原文
 // 逐字返回；② errorStateNotes(audit=false) 的 note 集合与原三条一致（本组每个黑盒
 // 对照例）。audited 模式只改两处：首轮出站文本加指令前缀；错误态「无所属金额」note
-// 换成 audit-declaration 的交叉核 note（口径编造照跑、derived 保留）。
+// 换成 audit-declaration 的交叉核 note（缺失口径表面事实/derived 保留）。
 
 /** errorStateNotes 的最小 Turn 替身（同文件既有 turn() 的同款抽法；只填判定用字段）。 */
 const auditTurn = (reply: string, text: string, execution: ExecutionAuditRow[] = []) => ({
@@ -291,13 +291,13 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
   });
 });
 
-describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；口径编造照跑、derived 保留）', () => {
+describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；缺失口径表面事实/derived 保留）', () => {
   const unattributedTurn = () => auditTurn(
     'The platform returned no data for that query. It is 700. Please try another name.',
     'check beta record value',
   );
   const caliberTurn = () => auditTurn(
-    'beta payable balance is 500. Please confirm which record you mean.',
+    '平台没有 payable 口径，beta 的应付余额合计是 1000，请确认。',
     'check beta payable balance',
   );
   const mismatchRows: ExecutionAuditRow[] = [
@@ -331,12 +331,29 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
     expect(notes.some((n) => n.includes('回复有数字但没有 [audit] 申报块'))).toBe(true);
   });
 
-  it('audited 模式：口径编造 note 照跑（classifyErrorStateAmounts 不整块跳过）', () => {
-    const blackbox = errorStateNotes(caliberTurn(), [], []);
-    const audited = errorStateNotes(caliberTurn(), [], [], true);
-    const caliber = (ns: string[]) => ns.filter((n) => n.startsWith('错误态回复把平台没有的口径'));
-    expect(caliber(blackbox)).toHaveLength(1);
-    expect(caliber(audited)).toHaveLength(1);
+  it('口径表面事实只出信息性 note（黑盒/audited 同口径；旧口径违例 note 已删除）', () => {
+    const caliberNotes = (ns: string[]) => ns.filter((n) => n.startsWith('（信息性）缺失口径表面事实'));
+    for (const notes of [
+      errorStateNotes(caliberTurn(), [], []),
+      errorStateNotes(caliberTurn(), [], [], true),
+    ]) {
+      const found = caliberNotes(notes);
+      expect(found).toHaveLength(1);
+      expect(found[0]).toContain('payable');
+      expect(found[0]).toContain('1000');
+      expect(found[0]).toContain('同句');
+      expect(found[0]).toContain('表面事实；口径判定归 judge（答案分类表）');
+      expect(notes.some((n) => n.startsWith('错误态回复把平台没有的口径'))).toBe(false);
+    }
+  });
+
+  it('口径表面事实 note 不计违例：只触发它的回复 ok 不受影响、四维零计数', () => {
+    const reply = '平台没有 payable 口径，beta 的应付余额合计是 1000，请确认。';
+    const notes = errorStateNotes(auditTurn(reply, 'check beta payable balance'), [], []);
+    expect(notes.filter((n) => n.startsWith('（信息性）缺失口径表面事实'))).toHaveLength(1);
+    // ok 判据与探针主循环同式（notes.every 信息性）；信息性 note 也不进四维/未归维计数。
+    expect(notes.every((note) => note.startsWith('（信息性）'))).toBe(true);
+    expect(countDims(notes)).toEqual({ dims: emptyDimCounts(), unclassified: 0 });
   });
 
   it('audited 模式：derived 信息性 note 保留；申报与事实对得上时交叉核不出 note', () => {

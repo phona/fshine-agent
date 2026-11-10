@@ -481,9 +481,13 @@ export function extractAmounts(text: string): ExtractedAmount[] {
  * ——把平台没有的业务口径当答案口径——整句漏判）。词表跟着这三个口径走，不做通用翻译层：
  * 夹具权威 schema 只有 records{name,value}，中文回复只是同一缺失口径的另一种写法。
  *
- * 数组里放**全部可识别写法**（英文原名保留），assertedCalibers.caliber 一律经
- * CALIBER_CANONICAL 规范化回英文原名——消费端（expectations 的口径检查、probe note）
- * 按口径名聚合，不因回复语言分叉；改词表只需同时补 canonical 表。
+ * 数组里放**全部可识别写法**（英文原名保留），消费端按 CALIBER_CANONICAL 规范化回英文
+ * 原名，不因回复语言分叉；改词表只需同时补 canonical 表。
+ *
+ * 2026-11-10 owner 裁定（答案分类表移交 judge）：本表与 CALIBER_CANONICAL 是**封闭世界
+ * 事实源**——只回答「哪些词形是夹具缺失口径」，不再回答「算不算口径断言 / 是不是免责 /
+ * 是不是撤回」这类语义问题（那归 judge 的答案分类表，见 cases.yaml 的 answerTypes 与
+ * judge-prompt.md）。机械层只据此产出表面 token 事实（caliberNumberFacts）。
  */
 export const MISSING_CALIBERS: readonly string[] = [
   'payable', '应付余额', '应付款', '应付',
@@ -497,120 +501,18 @@ const CALIBER_CANONICAL: Readonly<Record<string, string>> = {
   debt: 'debt', 债务: 'debt', 欠款: 'debt', 负债: 'debt',
 };
 /**
- * 口径的**全部写法**（canonical 名 → 写法表），供「跨段免责是否指涉该口径」判定
- * （2026-11-10 codex 复审 major）。取 MISSING_CALIBERS 与 CALIBER_CANONICAL 两表的并集：
- * 两表本该同步，并集让"只补一处"时免责仍认得出该口径（免得免责声明因写法不全而漏认、
- * 把诚实回复重新判红）。
+ * 分句里出现的缺失口径（canonical 英文名）及其位置；大小写不敏感，按出现位置排序。
+ * 只做词表命中，不判否定/免责/断言——那些是语义问题，归 judge。
  */
-const CALIBER_FORMS: ReadonlyMap<string, readonly string[]> = (() => {
-  const forms = new Map<string, string[]>();
-  for (const form of new Set([...MISSING_CALIBERS, ...Object.keys(CALIBER_CANONICAL)])) {
-    const canonical = CALIBER_CANONICAL[form] ?? form;
-    forms.set(canonical, [...(forms.get(canonical) ?? []), form]);
-  }
-  return forms;
-})();
-
-/**
- * 口径免责（2026-11-10 收窄）：只认**否定存在/可用**形——"平台没有/不提供这个口径"、
- * "missing/unavailable/no such …"。旧实现一个「不」字就免责（"不确定""不会"全中），
- * 断言句只要带个「不」就能把口径编造洗绿；「仅/只/非/without/only」这类让步/限定词
- * 同理不是免责。否定词被反用的残余形态按 §9 惯例交 Tier B 评审读。
- *
- * 「不存在」「未能取得/未取得」与列表同族收（2026-11-10 回归自校验）：它们同样是
- * 存在性/可取得性否定，不是语气词；既有诚实判例（issue #24 的「平台数据中不存在
- * payable …」「未能取得 payable balance」）收窄后必须仍然全绿。
- */
-export const CALIBER_DISCLAIM_RE = /没有|不提供|未声明|无此|并非|不是|不存在|未能取得|未取得|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\blacks?\b|\binstead\b/i;
-
-/** 分句里出现的缺失口径（canonical 英文名）；大小写不敏感，没有返回 undefined。 */
-function caliberInClause(clause: string): string | undefined {
+function caliberMentions(clause: string): Array<{ caliber: string; at: number }> {
+  const out: Array<{ caliber: string; at: number }> = [];
   for (const form of MISSING_CALIBERS) {
-    const pattern = new RegExp(form.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    if (pattern.test(clause)) return CALIBER_CANONICAL[form] ?? form;
-  }
-  return undefined;
-}
-
-/**
- * 回复级口径绑定（2026-11-10 Y2 t2，根因 ②）：口径词在标题/前言分句、合计数字在下一行
- * 时，分句级匹配两边各找不到（CLAUSE_SPLIT 按换行切句）。口径词已在**任一非免责分句**
- * 出现时，回复里任何「合计族」数字都是该口径的答案数字，判据：
- *   · 该数值的某处出现，其前一段 gap（同一分句内、上一笔金额之后）带合计族框架措辞
- *     （TOTAL_FRAMING_RE：合计 / total / 共计 / subtotal / sum of …，单一词表同源）；
- *   · 或该数值等于回复里**全部**已展示真实值之和（≥2 个真实值，见调用处的
- *     displayedRealTotal）——模型摊开明细、口径行只给一个数且没写"合计"时的形态。
- *     只认全部展示值之和，不认任意子集和：Y2 t2 的 500 = 300 + 200 会让记录值本身
- *     被误记成口径断言（明细台账不是口径主张）。
- * 只做"数字侧"的识别；口径词是否存在由调用处先算好（replyCalibers），单独一个合计
- * 数字不是口径编造。算术可见性只豁免归属维度（derived），不豁免这一维——本函数不碰
- * derived/attributed 的判定。
- *
- * 返回**分句下标**（不是分句文本）：声明—答案配对的位置关系按 parts 下标算
- * （2026-11-10 codex 复审 major，见 caliberDisclaimedBetween）——同一分句文本可能在
- * parts 里出现多次，用字符串搜索会猜错位置。
- */
-function caliberTotalEvidence(
-  value: number,
-  hitIndices: readonly number[],
-  parts: readonly string[],
-  displayedRealTotal: number | undefined,
-  extract: (text: string) => AmountLike[],
-): number | undefined {
-  const pattern = amountValuePattern(value);
-  for (const index of hitIndices) {
-    const clause = parts[index]!;
-    const occurrences = extract(clause)
-      .flatMap((amount) => patternPositions(clause, amountValuePattern(amount.value))
-        .map((at) => ({ raw: amount.raw, at })))
-      .sort((a, b) => a.at - b.at);
-    for (const at of patternPositions(clause, pattern)) {
-      const prev = [...occurrences].reverse().find((occurrence) => occurrence.at + occurrence.raw.length <= at);
-      const gap = clause.slice(prev ? prev.at + prev.raw.length : 0, at);
-      if (TOTAL_FRAMING_RE.test(gap)) return index;
+    const pattern = new RegExp(escapeRegExpLiteral(form), 'gi');
+    for (const match of clause.matchAll(pattern)) {
+      out.push({ caliber: CALIBER_CANONICAL[form] ?? form, at: match.index ?? 0 });
     }
-    if (displayedRealTotal !== undefined && value === displayedRealTotal) return index;
   }
-  return undefined;
-}
-
-/** 分句是否是**指涉该口径**的口径可用性免责（跨段免责打断的判据单元）。 */
-function isCaliberDisclaimerClause(clause: string, caliber: string): boolean {
-  if (!CALIBER_DISCLAIM_RE.test(clause)) return false;
-  const forms = CALIBER_FORMS.get(caliber) ?? [caliber];
-  if (forms.some((form) => new RegExp(escapeRegExpLiteral(form), 'i').test(clause))) return true;
-  // 指示代词指涉（"平台不提供该口径"）：口径词不重复出现，靠「该/此/这个 + 口径」回指。
-  return /(?:该|此|这个)\s*口径/.test(clause);
-}
-
-/**
- * 声明—答案配对是否被跨段免责打断（2026-11-10 codex 复审 major）：
- * 「口径词首次提及的分句 → 携带合计数字的分句」之间**严格**存在一个指涉该口径的口径
- * 可用性免责分句时，这份配对不成立——该口径不算被断言。
- *
- * 位置一律用 parts 的分句下标（不字符串搜索）：mentionIndex = replyCalibers 登记的
- * 首次出现下标，totalIndex = caliberTotalEvidence 返回的合计数字所在下标。
- * 只认**严格位于两者之间**：免责在合计数字**之后**（Y2 t2 末尾「如果『应付余额』在
- * 你的口径里不是这三笔记录的加总（例如只包含其中某一类），告诉我筛选条件」）不打断
- * 已成立的断言——它是条件句、不是对已给答案的撤回。上界由 amount-criteria.test.ts 的
- * 「跨段免责的边界」用例钉住（合计行不含口径词、只走回复级配对；Y2 原文的合计行含
- * 「应付余额」，同分句通道先命中，不区分回复级规则的宽窄）。免责在首次提及之前同理
- * 不打断（口径尚未被声称）。
- *
- * 前提：调用处已先过次序要求（mentionIndex < totalIndex，2026-11-10 codex 复审 major
- * 第 3 实例）——区间为空（合计数字在口径首次提及之前）时本函数恒 false，单靠它会让
- * 「先给账、后补口径」的收尾结构被误判成断言；次序前提由调用处负责，本函数不重复。
- */
-function caliberDisclaimedBetween(
-  parts: readonly string[],
-  caliber: string,
-  mentionIndex: number,
-  totalIndex: number,
-): boolean {
-  for (let index = mentionIndex + 1; index < totalIndex; index += 1) {
-    if (isCaliberDisclaimerClause(parts[index]!, caliber)) return true;
-  }
-  return false;
+  return out.sort((a, b) => a.at - b.at);
 }
 
 /**
@@ -657,6 +559,81 @@ export interface AmountLike {
 }
 
 /**
+ * 缺失口径 × 数字的**表面 token 事实**（2026-11-10 owner 裁定：口径编造的语义判定移交给
+ * judge，机械层只回答封闭世界问题）。
+ *
+ * `caliber` = MISSING_CALIBERS 的 canonical 英文名；`value` = 与合计族框架措辞相邻的数字；
+ * `sameClause` = 口径词与数字是否在同一分句。它**不回答**「这是不是口径断言 / 是不是免责 /
+ * 是不是撤回」——只陈述「回复里同时出现了缺失口径词和一个带合计措辞的数字」这一可核事实。
+ * judge 拿 cases.yaml 的 answerTypes 给回复定型；本函数只供探针发信息性 note。
+ */
+export interface CaliberNumberFact {
+  caliber: string;
+  value: number;
+  sameClause: boolean;
+}
+
+/**
+ * 产出缺失口径 × 合计族数字的表面事实。判据全部是封闭世界的词表/位置：
+ *   · 口径词：MISSING_CALIBERS（经 CALIBER_CANONICAL 归一）；
+ *   · 数字：extractAmounts 抽出的非零金额，且它与同一分句内上一笔金额之间的 gap 带
+ *     合计族框架措辞（TOTAL_FRAMING_RE，与 claimsTotal 同一把尺）；
+ *   · 同句：数字出现在口径词**之后**的同一分句；
+ *   · 跨句：口径词所在分句与上述数字所在分句不同（不要求先后——纯事实，不做断言推断）。
+ * 同一 (caliber, value) 已有同句事实时不再记跨句事实（同句是更强的表面关系）。
+ * 零语义推断：否定/免责/撤回措辞一概不看（CALIBER_DISCLAIM_RE 已删除）。
+ */
+export function caliberNumberFacts(
+  text: string,
+  extractAmounts: (text: string) => AmountLike[],
+): CaliberNumberFact[] {
+  const clauses = text.split(CLAUSE_SPLIT);
+  // 每个分句的「合计族数字」：与前一笔金额之间的 gap 带合计族框架措辞的非零金额。
+  const framedNumbers = clauses.map((clause) => {
+    const occurrences = extractAmounts(clause)
+      .flatMap((amount) => patternPositions(clause, amountValuePattern(amount.value))
+        .map((at) => ({ value: amount.value, raw: amount.raw, at })))
+      .sort((a, b) => a.at - b.at);
+    return occurrences.filter((occurrence) => {
+      if (occurrence.value === 0) return false;
+      const prev = [...occurrences].reverse().find((other) => other.at + other.raw.length <= occurrence.at);
+      const gap = clause.slice(prev ? prev.at + prev.raw.length : 0, occurrence.at);
+      return TOTAL_FRAMING_RE.test(gap);
+    });
+  });
+  const sameClause: CaliberNumberFact[] = [];
+  const crossClause: CaliberNumberFact[] = [];
+  const seenSame = new Set<string>();
+  const seenCross = new Set<string>();
+  clauses.forEach((clause, index) => {
+    for (const mention of caliberMentions(clause)) {
+      for (const number of framedNumbers[index]!) {
+        // 只认该词之后的数字（同句通道的位置前提）。
+        if (number.at <= mention.at) continue;
+        const key = `${mention.caliber}|${number.value}`;
+        if (seenSame.has(key)) continue;
+        seenSame.add(key);
+        sameClause.push({ caliber: mention.caliber, value: number.value, sameClause: true });
+      }
+    }
+  });
+  framedNumbers.forEach((numbers, numberIndex) => {
+    for (const number of numbers) {
+      for (const [mentionIndex, clause] of clauses.entries()) {
+        if (mentionIndex === numberIndex) continue;
+        for (const mention of caliberMentions(clause)) {
+          const key = `${mention.caliber}|${number.value}`;
+          if (seenSame.has(key) || seenCross.has(key)) continue;
+          seenCross.add(key);
+          crossClause.push({ caliber: mention.caliber, value: number.value, sameClause: false });
+        }
+      }
+    }
+  });
+  return [...sameClause, ...crossClause];
+}
+
+/**
  * 绑定面上的实体形状（2026-11-09 仲裁 2 收口）：**只收夹具事实表里登记过的名字**
  * （ENTITY_REAL_VALUES：collection / item / 记录号 / 零值的不存在对象），没有"未知实体样
  * mention"一族。旧实现把任意连字符/下划线 token 当伪实体并入绑定扫描，在共享黑盒路径上
@@ -670,11 +647,6 @@ export interface AmountLike {
 export interface EntityLike {
   name: string;
   values: readonly number[];
-}
-
-export interface AssertedCaliber {
-  caliber: string;
-  clause: string;
 }
 
 export interface ErrorStateAmountVerdict {
@@ -709,8 +681,6 @@ export interface ErrorStateAmountVerdict {
   unregisteredAttribution: AmountLike[];
   /** 算术派生（信息性）：加数在分句或全回复里可见，且数字算得出来。 */
   derived: AmountLike[];
-  /** 口径编造（红）：分句把平台没有的口径当答案口径。 */
-  assertedCalibers: AssertedCaliber[];
 }
 
 /**
@@ -1135,11 +1105,13 @@ function totalOwnerCollection(
  *     （张冠李戴，unattributed 的子集）——audited 申报模式只把"完全没有归属"交给申报块，
  *     这一类留在原判据上（见 ErrorStateAmountVerdict.misattributed）；"正文用显式措辞把
  *     金额挂给未登记名字"另记 **unregisteredAttribution**（同样红，audited 路径消费——
- *     申报块只核数↔记录值，核不到正文挂给谁）；口径编造独立成第三类（assertedCalibers，
- *     同样红）。
+ *     申报块只核数↔记录值，核不到正文挂给谁）。
+ *     口径编造**不在这里判**（2026-11-10 owner 裁定）：机械层只出封闭世界事实
+ *     （caliberNumberFacts：缺失口径词 × 合计族数字），"算不算断言/免责/撤回"归 judge 的
+ *     答案分类表（cases.yaml 的 answerTypes）；探针只把该事实写成信息性 note。
  * 同一数值的**每次出现**逐分句核对（2026-11-07 评审 blocking：find 只看首次出现——
  * "beta W1 record value is 500; beta payable balance is 500" 的第二句被首句的合法
- * 上下文豁免），任一次出现判红即红；报告按数值/口径去重。
+ * 上下文豁免），任一次出现判红即红；报告按数值去重。
  * 零值不算金额（调用方过滤）；分句按数值边界重匹配（裸串 includes 会把 "500" 命中进 "1500"）。
  */
 export function classifyErrorStateAmounts(
@@ -1158,28 +1130,10 @@ export function classifyErrorStateAmounts(
   const misattributed = new Map<number, AmountLike>();
   const unregisteredAttribution = new Map<number, AmountLike>();
   const derived = new Map<number, AmountLike>();
-  const asserted = new Map<string, string>();
   // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
   // 500/300/200 推出 1000；凭空数即便带"合计"措辞也推不出来，照旧红。
   const replyRealValues = [...new Set(extractAmounts(text).map((a) => a.value).filter((v) => REAL_DATA_VALUES.includes(v)))];
   const parts = text.split(CLAUSE_SPLIT);
-  // 回复级口径词（2026-11-10 Y2 t2，见 caliberTotalEvidence）：先扫**整条回复**的
-  // 非免责分句，登记缺失口径（canonical 名 → 首次出现的**分句下标**）。数字侧在金额
-  // 循环里按「合计族数字」绑定——不再要求口径词与数字同分句（模型把口径名写成标题行时，
-  // 分句级两边各找不到）。下标而不是文本：声明—答案配对的位置关系按 parts 下标算
-  // （2026-11-10 codex 复审 major，跨段免责打断见 caliberDisclaimedBetween；次序前提
-  // 见下方回复级绑定处——口径首次提及须早于合计数字分句）。
-  const replyCalibers = new Map<string, number>();
-  parts.forEach((part, index) => {
-    if (CALIBER_DISCLAIM_RE.test(part)) return;
-    const caliber = caliberInClause(part);
-    if (caliber !== undefined && !replyCalibers.has(caliber)) replyCalibers.set(caliber, index);
-  });
-  // 「≥2 个已展示真实值的和」门槛的账本：全回复真实值（去重）的全额。不足 2 个时
-  // undefined——单个真实值的"和"就是它自己，不构成合计证据。
-  const displayedRealTotal = replyRealValues.length >= 2
-    ? replyRealValues.reduce((sum, value) => sum + value, 0)
-    : undefined;
   for (const amount of extractAmounts(text)) {
     if (amount.value === 0) continue;
     // 金额边界（2026-11-07 评审 blocking：紧跟英文逗号的金额静默漏判）——后向禁止集区分
@@ -1187,7 +1141,6 @@ export function classifyErrorStateAmounts(
     // `", "`/`，` 是句法逗号（CLAUSE_SPLIT 不切逗号），金额后跟它必须照常找到分句。
     // 前向保持原禁止集（数字/./%/千分位逗号）。
     const boundary = new RegExp(`(?<![\\d.,%％])${amountValuePattern(amount.value)}(?!\\d)(?![.%％])(?!,\\d)`);
-    let assertedHit = false;
     let hard = false;
     let soft = false;
     // 张冠李戴信号（只在分句循环里能算：要逐分句的实体提及与 window 核）——见循环末尾。
@@ -1198,13 +1151,6 @@ export function classifyErrorStateAmounts(
     const hits = hitIndices.map((index) => parts[index]!);
     if (!hits.length) { unattributed.set(amount.value, amount); continue; } // 边界异常宁可红，不静默消失
     for (const clause of hits) {
-      // 口径绑定（MISSING_CALIBERS 处的决策记录）：先于归属豁免——挂真实值也不例外。
-      // 口径检测大小写不敏感（2026-11-08 评审 blocking：模型把不存在的口径写成
-      // "BANK"/"Payable" 就能绕过全小写 includes 匹配——编造口径漏判，500 又因真实
-      // 实体和值获豁免）。分句级这一路保留：口径词与数字同分句时直接断言；跨行形态由
-      // 下方的回复级绑定补（2026-11-10 Y2 t2）。
-      const caliber = CALIBER_DISCLAIM_RE.test(clause) ? undefined : caliberInClause(clause);
-      if (caliber !== undefined) { assertedHit = true; asserted.set(caliber, clause); continue; }
       // 有所属第一类 = 分句点名用户没问的 window 码；第二类 = 分句带真实数据标识。
       const pointed = MOCK_WINDOWS.some((subject) => !asked.has(subject.code)
         && (clause.includes(subject.code) || clause.includes(subject.name)))
@@ -1542,33 +1488,6 @@ export function classifyErrorStateAmounts(
         || (b.mentionEntity === undefined && !b.detached
           && specific.length > 0 && !specific.some((entity) => entity.values.includes(amount.value))));
     }
-    // 回复级口径绑定（2026-11-10 Y2 t2，根因 ②③）：口径词在某个非免责分句出现后，
-    // 回复里任何「合计族」数字都是该口径的答案数字——不再要求同分句。这条独立于
-    // attribution 三分：算术可见性（合计验算）只豁免归属维度，不豁免口径维度；命中的
-    // 金额记 assertedCalibers（红，独立第三类），不从 derived 洗白。
-    // 声明—答案配对须**未被跨段免责打断**（2026-11-10 codex 复审 major）：免责声明落在
-    // 口径首次提及与合计数字之间时，该口径不算被断言（诚实回复 "…payable balance：/
-    // 平台不提供该口径。/ …推算为 1000" 不再假红）。
-    // 配对还须满足**次序前提**（2026-11-10 codex 复审 major 第 3 实例）：断言的含义是
-    // 「口径声明 → 答案数字」，口径首次提及必须严格早于合计数字所在分句。合计数字在
-    // 任何口径提及之前是「先给账、后补口径」的收尾结构（"beta 的记录为 500/300/200，
-    // 合计 1000。/ 你问的 payable balance：/ 平台不提供该口径。"），它不可能是该口径的
-    // 答案；次序不成立时该口径不进 assertedCalibers，金额照旧走归属/派生判定。旧实现
-    // 只查 (mentionIndex, evidenceIndex) 之间的免责分句，mentionIndex ≥ evidenceIndex
-    // 时循环体一次都不执行 ⇒ 免责永远查不到。**只加这一条结构性前提**，不再扩充免责
-    // 位置/段落排列枚举——自由文本段落排列是无限面，本轮之后同类实例登记为已知残余。
-    if (!assertedHit && replyCalibers.size > 0) {
-      const evidenceIndex = caliberTotalEvidence(amount.value, hitIndices, parts, displayedRealTotal, extractAmounts);
-      if (evidenceIndex !== undefined) {
-        const evidenceClause = parts[evidenceIndex]!;
-        const surviving = [...replyCalibers].filter(([caliber, mentionIndex]) =>
-          mentionIndex < evidenceIndex
-          && !caliberDisclaimedBetween(parts, caliber, mentionIndex, evidenceIndex));
-        for (const [caliber] of surviving) asserted.set(caliber, evidenceClause);
-        assertedHit = surviving.length > 0;
-      }
-    }
-    if (assertedHit) continue; // 口径编造单独成类，不混进金额三分
     // 未登记名字的显式归属单独成维（不要求金额落 hard：显式挂给不存在的名字本身
     // 就不成立）。黑盒路径不消费（金额仍在 unattributed 里照旧红），audited 路径
     // 用它在申报交叉核之外补"挂给谁"这一维。
@@ -1586,6 +1505,5 @@ export function classifyErrorStateAmounts(
     misattributed: [...misattributed.values()],
     unregisteredAttribution: [...unregisteredAttribution.values()],
     derived: [...derived.values()],
-    assertedCalibers: [...asserted].map(([caliber, clause]) => ({ caliber, clause })),
   };
 }

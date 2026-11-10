@@ -294,6 +294,20 @@ export function evaluateProbeCase(
   }
   // ④ 期望值层（issue 切片 C）：与上面三层并列。期望值只活在判定层，不进任何 prompt。
   if (spec) checks.push(...expectationChecksOf(spec, row, audited));
+  // 口径答案分类门（2026-11-10 三层断言模型②）：口径编造的判定已移交 judge 的 answerTypes
+  // （机械层不再判——正则只做封闭世界查找），但“判定移交了”不等于“默认路径能放过”：
+  // 没跑 --judge 时该轴无人判定，把“没判”读成“没问题”正是申报门堵过的假绿
+  // （auditFailures 缺列不按 0 过门，同一纪律）。需要答案分类的轮次在判定未完成时显式红。
+  // 跑过 --judge 时该轴由评委分承载：回复落入 fail 形态 ⇒ groundedness 0 ⇒ 上面的评委分
+  // 检查红；落入 pass 形态 ⇒ 不扣分。无需在此处另判——judge 的输出就是这一轴的判定。
+  if (spec && spec.messages.some((message) => (message.answerTypes?.length ?? 0) > 0) && !judge) {
+    checks.push({
+      name: '期望·口径答案分类',
+      pass: false,
+      expected: 'judge 按 answerTypes 定型（--judge）',
+      actual: '未判定（默认路径不判口径，需 --judge）',
+    });
+  }
   return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
 }
 
@@ -499,15 +513,26 @@ async function main(): Promise<void> {
   for (const entry of judgedEntries) {
     if (entry.kind === 'probe') {
       const row = probeReport.results.find((result) => result.id === entry.case);
+      const spec = specOf(entry);
       let judgeResult: JudgeResult | undefined;
       if (args.judge && row) {
         judgeResult = await judgeTranscript({
           intent: entry.incidents.join('；'),
           expect: entry.expect,
+          // 用例语境（judge-prompt.md「用例语境」）：businessGoal 给目标，answerTypes 是
+          // 用例作者对本轮问题的封闭答案分类——按消息下标（0-based）组装，没有分类表的
+          // 轮次不出现在列表里（judge 按四维通用定义判）。
+          businessGoal: spec?.businessGoal ?? '',
+          answerTypes: (spec?.messages ?? []).flatMap((message, turn) => message.answerTypes?.length
+            ? [{
+              turn,
+              types: message.answerTypes.map((type) => ({ id: type.id, verdict: type.verdict, shape: type.shape })),
+            }]
+            : []),
           turns: row.turns.map((turn) => ({ user: turn.text, reply: turn.reply, notices: turn.notices })),
         });
       }
-      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry), probeAudited));
+      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, spec, probeAudited));
     } else {
       const facts = acceptanceJson.writeChain.find((item) => item.conversationId === entry.conversation);
       verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!], specOf(entry), acceptanceJson.records));

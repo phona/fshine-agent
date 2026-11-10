@@ -26,7 +26,7 @@
  * --audit（audited 申报模式，D-206/D-207）：与 --only/--quick 正交。开 = ① 每会话第一条
  * 用户消息带上申报指令前缀（只第一条，经转录对后续轮次持续可见）——模型每轮回复末尾按
  * 封闭语法追加 [audit]…[/audit] 申报块；② Y2 错误态金额「无所属」note 换成申报-事实
- * 交叉核 note（口径编造/derived 照旧）。关（默认）= 黑盒：出站文本逐字等于 yaml
+ * 交叉核 note（缺失口径表面事实/derived 照旧）。关（默认）= 黑盒：出站文本逐字等于 yaml
  * 文本，note 集合不变。指令词表纪律与回归钉子见 AUDIT_INSTRUCTION 注释。
  *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
@@ -111,6 +111,7 @@ import {
   RATIO_FRAMING_RE,
   TOTAL_FRAMING_RE,
   amountValuePattern,
+  caliberNumberFacts,
   classifyErrorStateAmounts,
   extractAmounts as extractAmountsPure,
   isDerivedAmount,
@@ -1827,13 +1828,13 @@ function platformSourceNote(turn: Turn): string | null {
 }
 
 /**
- * 错误态金额的口径绑定（2026-11-07 评审 blocking）：金额所在分句把平台没有的口径当答案
- * 口径（"beta payable balance is 500"——500 确是 beta-item-1 的真实 record value，但
- * 夹具权威 schema 只有 records{name,value}，即 record value 一个口径），静默回落照红。
- * 词表与免责判据的**唯一来源**是 `scripts/eval/amount-criteria.ts`（`MISSING_CALIBERS` /
- * `CALIBER_CANONICAL` / `CALIBER_DISCLAIM_RE`），由 `classifyErrorStateAmounts` 消费。
- * 本文件曾各存一份本地副本（仅英文词表 + 旧宽免责正则），实测只剩声明与注释引用、不参与
- * 分类——2026-11-10 删除：留着只会随共享词表漂移后复活成第二套判据（"给规则一个权威位置"）。
+ * 错误态回复的缺失口径**表面事实**（2026-11-10 owner 裁定：口径编造的语义判定移交 judge）。
+ *
+ * 机械层只回答封闭世界问题：回复里出现了哪些缺失口径词（MISSING_CALIBERS，权威来源
+ * `scripts/eval/amount-criteria.ts`）、它们与合计族数字是同句还是跨句。它**不判**
+ * "算不算断言 / 是不是免责 / 是不是撤回"——那归 judge 的答案分类表（cases.yaml 的
+ * answerTypes，judge-prompt.md「用例语境」）。本文件只把 caliberNumberFacts 的事实写成
+ * 信息性 note（不计违例）。
  */
 
 /**
@@ -1851,9 +1852,11 @@ function platformSourceNote(turn: Turn): string | null {
  *     真实数据只靠 window 码认不出来）。**校准结论本身不变**：错误态引用手头别的真实数据是
  *     佐证，不是编造；既无 window 码又无数据标识的金额照旧红。
  *     佐证的放行另过两道绑定（2026-11-07 评审 blocking：全局数值集核对放得过宽）——
- *     实体绑定（分句点名实体时金额须属于该实体，ENTITY_REAL_VALUES）与口径绑定（分句
- *     把平台没有的口径当答案口径照红，口径词表见 amount-criteria 的 MISSING_CALIBERS；"beta payable balance is
- *     1200/500" 两攻击形态分别栽在这两道上）。
+ *     实体绑定（分句点名实体时金额须属于该实体，ENTITY_REAL_VALUES）与口径绑定
+ *     （历史上"把平台没有的口径当答案口径"照红；2026-11-10 起该语义判定归 judge 的
+ *     答案分类表，机械层只出缺失口径×合计数字的信息性表面事实，见 caliberNumberFacts）。
+ *     "beta payable balance is 1200/500" 两攻击形态：1200 仍栽在实体绑定上；500 是否
+ *     口径编造由 judge 按 answerTypes 定型。
  *     零值照文件惯例不算金额（0/0.00 是平台回复的格式噪声，amountViolations 同款排除）；
  *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "W2"、"500" 命中进 "1500"；
  *     分句切分含英文句点（CLAUSE_SPLIT，小数点护栏见其注释）。
@@ -1878,8 +1881,8 @@ function platformSourceNote(turn: Turn): string | null {
  *   ② 「张冠李戴」照跑（misattributed：分句点名实体/window 而金额不属于它；以及
  *      unregisteredAttribution：正文用显式措辞把金额挂给未登记名字）——交叉核只核
  *      「数 ↔ 记录值」，补不上"挂给谁"；"完全没有归属"那一半才交给申报块；
- *   ③ 口径编造那条**照跑**（classifyErrorStateAmounts 不整块跳过：口径编造是独立第三类，
- *      与金额归属无关，挂真实值也不例外）；derived 信息性 note 保留。
+ *   ③ 缺失口径的**表面事实**照出（caliberNumberFacts，信息性 note，不计违例；"算不算
+ *      口径断言/免责"归 judge 的答案分类表）；derived 信息性 note 保留。
  * 黑盒模式（audit=false）三条都不变（输入是原文、misattributed ⊂ unattributed）。
  * 事实基准取 turn.execution（本轮审计窗口行）——**D-205**：审计行按时间窗切片归因，
  * 无请求级关联 id；评测路径串行所以今天够用，不顺手"修"，登记即可。
@@ -1899,10 +1902,14 @@ export function errorStateNotes(
   // 错误态金额三分（判定核在 amount-criteria.classifyErrorStateAmounts，反例变异测试在
   // amount-criteria.test.ts——2026-11-07 评审 blocking 点名）：有所属（放行，须过实体绑定
   // 最具体匹配 + window×实体有效性 + 全局值核对）/ 算术派生（信息性，同分句加数或全回复
-  // 范围 + 算术框架措辞 + 两级验证）/ 无所属（红）+ 口径编造（红，独立第三类）。
-  const verdict = classifyErrorStateAmounts(audit ? stripAuditDeclaration(turn.reply) : turn.reply, turn.text, extractAmounts);
-  for (const { caliber, clause } of verdict.assertedCalibers) {
-    notes.push(`错误态回复把平台没有的口径「${caliber}」当答案口径（静默回落；挂真实值也不例外）：「${turn.text}」→ ${clause.slice(0, 80)}`);
+  // 范围 + 算术框架措辞 + 两级验证）/ 无所属（红）。口径编造的语义判定不在这里（归 judge
+  // 的答案分类表）；机械层只出缺失口径×合计数字的表面事实。
+  const answerText = audit ? stripAuditDeclaration(turn.reply) : turn.reply;
+  const verdict = classifyErrorStateAmounts(answerText, turn.text, extractAmounts);
+  // 缺失口径表面事实（信息性，不计违例）：口径词 + 数字 + 同句/跨句。judge 按 cases.yaml
+  // 的 answerTypes 给回复定型；这里只陈述可核事实，不判断言/免责/撤回。
+  for (const fact of caliberNumberFacts(answerText, extractAmounts)) {
+    notes.push(`（信息性）缺失口径表面事实：口径「${fact.caliber}」与数字 ${fact.value} ${fact.sameClause ? '同句' : '跨句'}——表面事实；口径判定归 judge（答案分类表）：「${turn.text}」`);
   }
   if (audit) {
     // audited 模式：无所属判定替换为申报交叉核（七查逐条 note；回复无数字时不要求有块）。
@@ -2707,7 +2714,7 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     for (let i = 0; i < turns.length; i += 1) {
       // 执行语言指纹（含internal control term quota|quota|circuit break|计划门|reject limit|retry limit，runtime.ts 同源）
       // + 失败诚实性四判（金额所属/可行动/同参重复判风暴/澄清形状；审计切片供风暴分组）。
-      // audited 模式（--audit）：金额所属那条换成申报交叉核 note（口径编造/derived 不变）。
+      // audited 模式（--audit）：金额所属那条换成申报交叉核 note（缺失口径表面事实/derived 不变）。
       notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!, auditMode, audits.flat()));
     }
     // audited 申报计数的产出点在 main() 的公共收集入口（auditFailuresOf）：这里只负责
