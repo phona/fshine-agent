@@ -22,12 +22,19 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { TrustedContext } from '@fshine/contracts';
-import { createPiCodingTurnDriver, platformExecutorBypassed, WORKER_WIND_DOWN_NUDGE, type PlatformExecutorBypassedEvent } from './src/pi-coding-driver';
+import { createPiCodingTurnDriver, DEFAULT_READ_PROBE_CAP, platformExecutorBypassed, READ_PROBE_WIND_DOWN_NUDGE, WORKER_WIND_DOWN_NUDGE, type PlatformExecutorBypassedEvent, type PiCodingTurnDriverOptions } from './src/pi-coding-driver';
 import type { DriverMessage, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver';
+import { AUDIT_DETAIL_MAX_CHARS, type ServeGateEvent } from './src/serve-gate';
+import type { OperationSemantics } from './src/operation-labels';
 import type { PlanCliRunner } from './src/plan-runtime';
 
-/** 假 agent 的单个模型回合：要发起哪些 bash / write。 */
-type FakeTurn = { bash?: string[]; write?: Array<{ path: string; content?: string }>; text?: string };
+/** 假 agent 的单个模型回合：要发起哪些 bash / write / structured_call。 */
+type FakeTurn = {
+  bash?: string[];
+  write?: Array<{ path: string; content?: string }>;
+  structured?: Array<{ operation: string; args?: Record<string, unknown> }>;
+  text?: string;
+};
 
 /** 放行的平台调用回给 worker 的应答：合法的 RESULT 信封。 */
 const OK_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"completed","data":{"ok":true},"error":null}';
@@ -92,6 +99,7 @@ const fake = vi.hoisted(() => {
           };
           for (const command of turn.bash ?? []) await emit('bash', { command });
           for (const file of turn.write ?? []) await emit('write', { path: file.path, content: file.content ?? 'x' });
+          for (const call of turn.structured ?? []) await emit('structured_call', { operation: call.operation, args: call.args ?? {} });
           if (turn.text) {
             record.messages.push({ role: 'assistant', content: [{ type: 'text', text: turn.text }], stopReason: 'stop', timestamp: Date.now() });
           }
@@ -343,6 +351,210 @@ describe('步数帽接线（真 driver）：stepCap=2 时第 3 次放行即 wind
     expect(alerts[0]).toMatchObject({ localCalls: 2, planGateCalls: 0, auxiliaryCalls: 2 });
     expect(result.execution).toEqual({ planId: '', version: 0, calls: 4 });
     expect(result.text).toBe('表已经算好了。');
+  });
+});
+
+describe('读类探测单轮预算帽（真 driver）：达帽注入一次收尾提示，不阻断', () => {
+  /**
+   * 2026-11-10 Y2 实测：一轮十个调用里七个是同一名称的拼写变体、另一轮十四个调用换着词
+   * 试同一条口径——平台被当成猜测缓冲，模型从不"停下来问人"。
+   * 本块钉住生产接线：读类调用达到帽值（缺省 5，测试压到 3）时经既有 steer 收尾通道
+   * 注入 READ_PROBE_WIND_DOWN_NUDGE，只送一次；未达不送；送完回合照常收尾。
+   *
+   * 读类判据不按命令词猜：平台 access 语义表声明 plan:true / confirm:false 才算
+   * （serve-gate read 档的同一份数据、同一条合取）。写类 / scratch（plan:false）不计。
+   */
+  const READ_QUERY = 'bin/example-gateway query src/dummy/scripts/query.js --collection alpha';
+  const SCRATCH_QUERY = 'bin/example-gateway query src/dummy/scripts/scratch.js --input data.txt';
+
+  const SEMANTICS: OperationSemantics = new Map([
+    ['query', { plan: true, confirm: false }],
+    ['scratch', { plan: false, confirm: false }],
+    ['dummy.query', { plan: true, confirm: false }],
+    ['dummy.scratch', { plan: false, confirm: false }],
+  ]);
+
+  const MANIFEST = {
+    version: '1.0',
+    operations: [
+      { operation: 'dummy.query', requiresPlan: true, effects: ['read'], estSeconds: 10, label: 'query records', serveMatrix: [] },
+      { operation: 'dummy.scratch', requiresPlan: false, effects: ['local'], estSeconds: 5, label: 'local computation', serveMatrix: [] },
+    ],
+  };
+
+  async function runProbeScript(
+    script: FakeTurn[],
+    options: { cap?: number; semantics?: OperationSemantics; extra?: Partial<PiCodingTurnDriverOptions> } = {},
+  ): Promise<{ steers: string[]; result: TurnDriverResult }> {
+    const { cwd } = await makeDriver();
+    const driver = createPiCodingTurnDriver({
+      gateway: 'bin/example-gateway',
+      env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
+      agentDir: path.join(cwd, '.fshine-agent'),
+      operationLabels: new Map(),
+      planCliRunner: activatingPlanRunner,
+      operationSemantics: options.semantics ?? SEMANTICS,
+      readProbeCap: options.cap ?? 3,
+      capabilityManifest: MANIFEST,
+      ...options.extra,
+    });
+    fake.setScript(script);
+    const before = fake.records.length;
+    const result = await driver.run(runInput(cwd));
+    return { steers: fake.records[before]?.steers ?? [], result };
+  }
+
+  it('帽值缺省 5（通用预算缺省，不随执行层变化）', () => {
+    expect(DEFAULT_READ_PROBE_CAP).toBe(5);
+  });
+
+  it('未达帽不注入：2 次读类调用（cap=3）不送收尾提示，回合正常', async () => {
+    const { steers, result } = await runProbeScript([
+      { bash: [PLAN_COMMAND, READ_QUERY, READ_QUERY], text: '查询完成。' },
+    ]);
+
+    expect(steers).toEqual([]);
+    expect(result.text).toBe('查询完成。');
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 2 });
+  });
+
+  it('达帽注入：第 3 次读类调用（cap=3）送一次生产收尾提示', async () => {
+    const { steers, result } = await runProbeScript([
+      { bash: [PLAN_COMMAND, READ_QUERY, READ_QUERY, READ_QUERY], text: '查询完成。' },
+    ]);
+
+    expect(steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    // 注入只是提示：调用照常放行、回合结果不变。
+    expect(result.text).toBe('查询完成。');
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 3 });
+  });
+
+  it('注入后仍能正常收尾：继续调用不重复注入，终稿与执行足迹完整', async () => {
+    const { steers, result } = await runProbeScript([
+      { bash: [PLAN_COMMAND, READ_QUERY, READ_QUERY, READ_QUERY, READ_QUERY, READ_QUERY], text: '已按平台返回交付。' },
+    ]);
+
+    expect(steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    expect(result.text).toBe('已按平台返回交付。');
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 5 });
+    expect(result.footprint).toBe('5 次 bin/example-gateway 调用');
+  });
+
+  it('非读类不计：scratch（plan:false）连发多次也不触发', async () => {
+    const { steers, result } = await runProbeScript([
+      { bash: [SCRATCH_QUERY, SCRATCH_QUERY, SCRATCH_QUERY, SCRATCH_QUERY], text: '本地计算完成。' },
+    ], { cap: 2 });
+
+    expect(steers).toEqual([]);
+    expect(result.text).toBe('本地计算完成。');
+    expect(result.execution).toEqual({ planId: '', version: 0, calls: 4 });
+  });
+
+  /**
+   * 2026-11-10 复审 major：读类计数必须复用计划门同一把**域感知**查表
+   * （serve-gate planSemanticsEntryForReference），不能把脚本路径压成裸 command 再查。
+   * 旧写法漏计两种计划门明确支持的形态：
+   *   ① 跨域同名——两个域都注册 query、裸键先登记为写类，另一个域的读类 query.js
+   *      经计划门放行（read 档只要求激活计划）却不被计数；
+   *   ② 描述后缀——`query-detail.js` ↔ command `query` 按域内唯一匹配由计划门放行，
+   *      裸名 `query-detail` 查不到语义表，探测帽漏计。
+   * 期望方向：读那个计数（达帽送收尾提示），写那个即使放行也不计数。
+   */
+  const CROSS_DOMAIN_SEMANTICS: OperationSemantics = new Map([
+    ['query', { plan: true, confirm: true }],
+    ['dummy.query', { plan: true, confirm: false }],
+    ['ballot.query', { plan: true, confirm: true }],
+  ]);
+  // 写类调用必须被激活计划覆盖才放行（被拦的调用到不了 onAllowedBash）；计划里声明同一
+  // operation 即可按 operation 名覆盖（args 留空，避免把测试数据当成待校验的领域实体）。
+  // 读类按 read 档只要求计划已激活。
+  const CROSS_DOMAIN_PLAN = 'bin/example-gateway plan {"calls":[{"operation":"ballot.query","args":[]}]}';
+  const CROSS_READ = 'bin/example-gateway query src/dummy/scripts/query.js --collection alpha';
+  const CROSS_WRITE = 'bin/example-gateway query src/ballot/scripts/query.js --collection alpha';
+  const SUFFIX_READ = 'bin/example-gateway query src/dummy/scripts/query-detail.js --collection alpha';
+
+  it('跨域同名：计划门放行的读类 query 计数，另一个域的写类 query 不计数', async () => {
+    const readSide = await runProbeScript([
+      { bash: [CROSS_DOMAIN_PLAN, CROSS_READ, CROSS_READ], text: '查询完成。' },
+    ], { cap: 2, semantics: CROSS_DOMAIN_SEMANTICS });
+
+    expect(readSide.steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    // 两次调用都经计划门放行（calls 证明计数不是靠"被拦下的调用"凑出来的）。
+    expect(readSide.result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 2 });
+
+    const writeSide = await runProbeScript([
+      { bash: [CROSS_DOMAIN_PLAN, CROSS_WRITE, CROSS_WRITE], text: '写查询完成。' },
+    ], { cap: 2, semantics: CROSS_DOMAIN_SEMANTICS });
+
+    // 写类同样放行（calls=2），但不计入读类帽：语义表声明 confirm:true，不是读档。
+    expect(writeSide.steers).toEqual([]);
+    expect(writeSide.result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 2 });
+  });
+
+  it('描述后缀脚本名：query-detail.js 按域内唯一匹配（command query）计数', async () => {
+    const { steers, result } = await runProbeScript([
+      { bash: [CROSS_DOMAIN_PLAN, SUFFIX_READ, SUFFIX_READ], text: '查询完成。' },
+    ], { cap: 2, semantics: CROSS_DOMAIN_SEMANTICS });
+
+    expect(steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 2 });
+  });
+
+  /**
+   * 2026-11-10 复审 major：计数不得依赖有损的审计展示文本。
+   * 事件 detail 落账前已截到 AUDIT_DETAIL_MAX_CHARS（200）；长绝对脚本路径 + 多参数时，
+   * 从 detail 反解析 operation 会看到截断的路径——查不到语义表，读类帽漏计、持续读取
+   * 不触发收尾提示。门现在把**裁决时解析出的档位**作为独立字段带出来，计数改吃它；
+   * detail 仍是展示面（截断行为不变）。
+   */
+  const LONG_SERVER_SCRIPT = `/srv/fictional-workspace/${Array.from({ length: 12 }, (_, index) => `layer-${index}-segment`).join('/')}/src/dummy/scripts/query.js`;
+  const LONG_READ = `bin/example-gateway query ${LONG_SERVER_SCRIPT} --collection alpha --window 202608 --view summary`;
+
+  it('长引用（>200 字符）：detail 截断不影响读类计数，达帽仍送一次收尾提示', async () => {
+    expect(LONG_READ.length).toBeGreaterThan(AUDIT_DETAIL_MAX_CHARS);
+    const auditEvents: ServeGateEvent[] = [];
+    const { steers, result } = await runProbeScript([
+      { bash: [PLAN_COMMAND, LONG_READ, LONG_READ], text: '查询完成。' },
+    ], { cap: 2, extra: { serveGateAudit: (event) => auditEvents.push(event) } });
+
+    expect(steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 2 });
+
+    const bashEvents = auditEvents.filter((event) => event.tool === 'bash' && event.allowed);
+    expect(bashEvents).toHaveLength(2);
+    // 展示行为不变：审计 detail 仍是命令原文截到 AUDIT_DETAIL_MAX_CHARS。
+    expect(bashEvents[0]?.detail?.length).toBe(AUDIT_DETAIL_MAX_CHARS);
+    expect(bashEvents[0]?.detail).not.toContain('query.js');
+    // 计数看的是门解析出的档位（完整引用解析的结果），不是截断文本。
+    expect(bashEvents[0]?.operationTier).toBe('read');
+  });
+
+  it('structured_call 读类同样计数：达帽注入一次，未达不注入', async () => {
+    // 同一回合先放一次 local（gateCalls > 0）：避免撞上"计划已激活却零执行"的补刀
+    // ——那一路会重放最后一轮，把计数变成两倍（与本测试无关的既有收尾路径）。
+    const turn = (count: number): FakeTurn => ({
+      bash: [PLAN_COMMAND, WRAPPER_BASH],
+      structured: Array.from({ length: count }, (_, index) => ({ operation: 'dummy.query', args: { '--collection': `c${index}` } })),
+      text: '查询完成。',
+    });
+    const below = await runProbeScript([turn(2)]);
+    expect(below.steers).toEqual([]);
+
+    const atCap = await runProbeScript([turn(3)]);
+    expect(atCap.steers).toEqual([READ_PROBE_WIND_DOWN_NUDGE]);
+    expect(atCap.result.text).toBe('查询完成。');
+  });
+
+  it('structured_call 的 scratch（plan:false）不计入读类帽', async () => {
+    const { steers } = await runProbeScript([
+      { structured: [
+        { operation: 'dummy.scratch', args: { '--input': 'a.txt' } },
+        { operation: 'dummy.scratch', args: { '--input': 'b.txt' } },
+        { operation: 'dummy.scratch', args: { '--input': 'c.txt' } },
+      ], text: '本地计算完成。' },
+    ], { cap: 2 });
+
+    expect(steers).toEqual([]);
   });
 });
 

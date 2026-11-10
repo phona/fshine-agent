@@ -69,6 +69,18 @@ export interface ServeGateEvent {
    * 要披露的偏离（A1）。放行的与拦截的都挂：被拦的形态同样是"它想怎么调"的证据。
    */
   invocation?: GateInvocationKind;
+  /**
+   * 这次网关调用在计划门前**已解析的档位**（仅走到计划门裁决的 bash 调用；分级函数与
+   * 计划前置同一份，见 tierOfEntry）。
+   *
+   * 为什么不复用 detail：detail 是审计展示面，落账前已截到 AUDIT_DETAIL_MAX_CHARS；
+   * 而控制面（读类探测计数）要的是门实际裁决时用的那个完整的 operation 语义。两者共用
+   * 一个字段，长绝对脚本路径会让计数看到残缺引用、查不到语义表（2026-11-10 复审 major：
+   * 计划门放行、计数漏计，持续读取不触发收尾提示）。档位是解析结果的小枚举，不随引用
+   * 变长，天然满足"控制字段不撑审计"；它也只是控制面数据——assembly 落 tool_calls 时
+   * 只取 detail/reason，本字段不落库。
+   */
+  operationTier?: PlanGateTier;
 }
 
 export interface ServeGateVerdict {
@@ -718,8 +730,14 @@ function planSemanticsEntryOf(
  * 它必须与 bash 走同一份覆盖判据（PR #21 四审 blocking：structured_call 分支原先只查
  * requiresPlan 的存在性，激活一份纯读计划后写 operation 照样进网关）——复用同一个查表函数
  * 是"只有一份真相"的前提，否则迟早漂移。
+ *
+ * 2026-11-10 导出：读类探测帽（pi-coding-driver 的 isDeclaredReadOperation）也走这把梯子。
+ * 它原先自己拿 operationReferenceKey 把脚本路径压成裸 command 再查表——裸键可能属于另一个
+ * 域（两个域都注册 `query`、一个读一个写），或表里根本没有（`query-detail.js` ↔ 命令
+ * `query`），于是计划门放行的读类调用不被计数。域感知解析只此一份，任何按引用查语义表的
+ * 调用方都必须从这里进来。
  */
-function planSemanticsEntryForReference(
+export function planSemanticsEntryForReference(
   reference: string,
   semantics: OperationSemantics | undefined,
 ): { key: string; access: AccessSemantics } | undefined {
@@ -784,7 +802,7 @@ function planSemanticsEntryForReference(
  * <平台脚本>` 不免——判据看的是调用性质，不是调用形态。fail-closed 方向不变：语义表
  * 缺失 / 空表 / operation 不在表里 → 不免，照旧拒 `SERVE_PLAN_NOT_ACTIVE`。
  */
-type PlanGateTier = 'scratch' | 'read' | 'write' | 'unknown';
+export type PlanGateTier = 'scratch' | 'read' | 'write' | 'unknown';
 
 /**
  * 语义表条目 → 计划门档位（**bash 与 structured_call 共用的唯一分级**）。
@@ -795,8 +813,11 @@ type PlanGateTier = 'scratch' | 'read' | 'write' | 'unknown';
  * plan 缺省 ⇒ false、confirm:true 保留），即"不需要计划但要确认"的矛盾声明。
  * **confirm:true 优先**：要用户确认的操作一律按写类办（必须有激活计划且被某一步覆盖）。
  * 放行的方向是"多拦一次"，不是"少拦一次"——免计划档是整个门里最松的那一档。
+ *
+ * 2026-11-10 导出：读类探测帽按同一个档位判"是不是读类"（isDeclaredReadOperation），
+ * 不再在驱动侧另写一份 `plan && !confirm`——档位只有一个来源，计划门改判据时探测帽同步。
  */
-function tierOfEntry(entry: { key: string; access: AccessSemantics } | undefined): { tier: PlanGateTier; key?: string } {
+export function tierOfEntry(entry: { key: string; access: AccessSemantics } | undefined): { tier: PlanGateTier; key?: string } {
   if (!entry) return { tier: 'unknown' };
   if (entry.access.confirm === true) return { tier: 'write', key: entry.key };
   if (entry.access.plan === false) return { tier: 'scratch', key: entry.key };
@@ -999,6 +1020,9 @@ function coversPlanStep(
  *
  * 顺序固定：先分级，再问"有没有激活计划"，最后才对写类问"覆不覆盖"——读类与未登记形态
  * 到第二步就返回，不会被第三步误伤。
+ *
+ * 档位随裁决一起交回调用方（而不是在事件里按 detail 反解析一遍）：门只解析一次，事件
+ * 携带的就是裁决用的那一份——控制计数与门裁决不可能看到两个不同的 operation。
  */
 function planGateVerdict(
   command: string,
@@ -1010,7 +1034,7 @@ function planGateVerdict(
     /** operation → args 规格（位置参数声明，覆盖判据用）。 */
     operationArgsSpecs?: OperationArgsSpecs;
   },
-): ServeGateVerdict | undefined {
+): { verdict: ServeGateVerdict | undefined; tier: PlanGateTier } {
   const { tier, key } = planGateTier(command, ctx.operationSemantics);
   const reference = extractGateScript(command);
   const tokens = splitCommandTokens(command);
@@ -1019,7 +1043,8 @@ function planGateVerdict(
   const headLength = reference === null ? 0 : tokens.indexOf(reference) + 1;
   const specs = ctx.operationArgsSpecs;
   const flagStyles = flagStylesFor(reference, specs);
-  return planCoverageVerdict(tier, key, reference, keyArgsOf(tokens, flagStyles), positionalsOf(tokens.slice(headLength), flagStyles), positionalNamesFor(reference, specs), ctx);
+  const verdict = planCoverageVerdict(tier, key, reference, keyArgsOf(tokens, flagStyles), positionalsOf(tokens.slice(headLength), flagStyles), positionalNamesFor(reference, specs), ctx);
+  return { verdict, tier };
 }
 
 /**
@@ -1146,6 +1171,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
     // 形态族（仅 bash）：放行的与拦截的都随审计事件出来，供执行面把"所有被放行的 bash"
     // 拆成本地执行 / 平台执行 / 元数据三族——绕开平台执行器要可观测，缺它就只有总数。
     let invocation: GateInvocationKind | null = null;
+    // 计划门解析出的档位（仅走到计划门裁决的网关调用）：随事件出去给控制面计数，
+    // 与给审计展示的截断 detail 分开（见 ServeGateEvent.operationTier）。
+    let operationTier: PlanGateTier | undefined;
     // 放行的平台调用才有人类可读投影：label 与参数摘要都来自平台数据（清单第 5 列 /
     // args 规格），查不到 label 就不挂——调用方没有帧可发，静默降级。
     let progress: { label: string; keyArgs: string[] } | undefined;
@@ -1185,7 +1213,9 @@ export function createServeGate(options: ServeGateOptions = {}) {
         // 未知 op 可能写平台数据，宁拦勿猜；正确形态由指路文案引导）。首词非网关的 bash
         // 自 2026-10-18 起放行（首词拦截退役，非网关命令审计留痕；硬约束随沙箱阶段在
         // 共享空间边界重建）。
-        verdict = planGateVerdict(command, options);
+        const decision = planGateVerdict(command, options);
+        verdict = decision.verdict;
+        operationTier = decision.tier;
         if (!verdict) {
           const label = operationLabel(options.operationLabels, extractGateScript(command));
           if (label) progress = { label, keyArgs: describeArgs(command) };
@@ -1285,6 +1315,8 @@ export function createServeGate(options: ServeGateOptions = {}) {
         // 只增补字段：既有消费者（审计留痕）读的那几个字段一字未动
         ...(progress ? { label: progress.label, keyArgs: progress.keyArgs } : {}),
         ...(invocation ? { invocation } : {}),
+        // 控制面档位：不截断、不进审计展示（detail 仍是上面那条 200 字上限的字符串）。
+        ...(operationTier ? { operationTier } : {}),
       });
     } catch {}
     return verdict;

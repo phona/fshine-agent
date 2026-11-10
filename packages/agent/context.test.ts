@@ -338,6 +338,18 @@ describe('example-gateway Pi subagent adapter', () => {
     expect(prompt).toContain('不主动交代表能力边界');
   });
 
+  it('输出纪律：口径以平台声明为准（不自造口径 / 缺口径先说明 / 推算要标注依据）', async () => {
+    const prompt = await capturePrompt();
+    // 2026-11-10 Y2：平台没有用户所问的口径，模型把平台返回的几条数据加总后
+    // 套上一个平台未声明的名称答出去——编排层越权发明执行层业务口径。三要点各自一票：
+    // ① 平台未声明的口径不得用平台数据自行定义后作答
+    expect(prompt).toContain('平台未声明的口径，不得用平台数据自行定义后作答');
+    // ② 用户问到的口径平台没有时，先说平台不提供该口径，再说明平台实际提供什么
+    expect(prompt).toContain('先说平台不提供该口径，再说明平台实际提供什么');
+    // ③ 确需计算时明确标注推算值并给出所依据的平台数据
+    expect(prompt).toContain('明确标注这是推算值并给出所依据的平台数据');
+  });
+
   it('输出纪律：名称类请求先经平台检索（新名称不豁免 + 同名续查豁免）+ 已取结果必须呈现', async () => {
     const prompt = await capturePrompt();
     // D-072：会话已确立实体只回答"只给参数的续问"，新名称一律重新检索（防张冠李戴）；
@@ -345,8 +357,11 @@ describe('example-gateway Pi subagent adapter', () => {
     expect(prompt).toContain('名称类请求仍须先经平台检索确认规范名称');
     expect(prompt).toContain('即使用户本会话已用过某个对象也不例外');
     expect(prompt).toContain('同一会话内已检索确认过的同一名称，同口径续查可直接复用已确认的规范名，不再重复检索');
-    // D-073：数据在手时把用户推回重新发起 = 球踢回给用户
-    expect(prompt).toContain('本轮已经取到的执行结果必须呈现在终稿里');
+    // D-073：为回答用户所问而取到的数据必须呈现（数据在手不踢回给用户）；
+    // 2026-11-10 Y2 补边界：探索试探取的数据不必呈现，用户没问的不主动抖出
+    expect(prompt).toContain('本轮为回答用户所问而取到的执行结果必须呈现');
+    expect(prompt).toContain('为探索试探而取的数据不必呈现');
+    expect(prompt).toContain('用户没问的不主动抖出');
     expect(prompt).toContain('明示缺席原因');
   });
 
