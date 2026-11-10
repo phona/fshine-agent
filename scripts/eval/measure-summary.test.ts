@@ -355,3 +355,51 @@ describe('默认入口收口：期望结构必填（codex major 第三轮）', (
     expect(writes.join('')).toContain('--expect-cases');
   });
 });
+
+/**
+ * 区分度的逐轮完整性（2026-11-10 codex 复审 major）：judge_mean 四维齐全会掩盖逐轮缺失——
+ * 探针跳过失缺失的轮次再算均值，一轮 judge 失败、一轮成功照样“四维齐全”，形成假比较。
+ * 判据：声明了期望轮数时，results 里每一轮都得有四维 judge_scores。
+ */
+describe('区分度逐轮评分完整性（codex major 第三轮）', () => {
+  it('一轮 judge 失败、一轮成功（均值四维齐全）⇒ 该用例 missing，不形成假比较', () => {
+    const strong = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 2, judge_mean: FOUR(6) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(6) },
+        { id: 'G-A1', round: 2, judge_scores: null },
+      ],
+    };
+    const weak = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 0, rounds: 2, judge_mean: FOUR(4) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(4) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(4) },
+      ],
+    };
+    const out = evaluateDiscrimination(strong, weak, 1, { cases: ['G-A1'], rounds: 2 });
+    expect(out.rows).toHaveLength(1);
+    expect(out.rows[0].missing).toBe(true);
+    expect(out.rows[0].missingReason).toContain('逐轮评分不完整');
+    expect(out.validComparisons).toBe(0);
+    expect(out.insufficient).toBe(true);
+    expect(out.verdict).toContain('无法判定');
+  });
+
+  it('逐轮齐全才计入有效比较（正控制）', () => {
+    const doc = (mean: number, passes: number) => ({
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: passes, rounds: 2, judge_mean: FOUR(mean) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(mean) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(mean) },
+      ],
+    });
+    const out = evaluateDiscrimination(doc(7, 2), doc(5, 1), 1, { cases: ['G-A1'], rounds: 2 });
+    expect(out.rows[0].missing).toBe(false);
+    expect(out.validComparisons).toBe(1);
+    expect(out.verdict).toContain('强模型明显更优');
+  });
+});

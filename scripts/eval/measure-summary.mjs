@@ -240,15 +240,31 @@ export function evaluateRequiredReadiness(rate, evidence = {}) {
  * 区分度比较：有效比较与缺失项分开统计。
  * - 只有双方该用例四维齐全（judgeSum 非 null）才计入 validComparisons；
  * - 缺一侧用例、缺维度、judge_mean 为 null/跳过，全部计入 missing；
+ * - **逐轮评分完整性**（2026-11-10 codex 复审 major）：judge_mean 四维齐全会掩盖逐轮缺失——
+ *   探针跳过失缺失的轮次再算均值，一轮 judge 失败、一轮成功照样“四维齐全”。因此声明了期望
+ *   轮数时，还要求该用例的 results 里**每一轮**都有四维 judge_scores（按声明结构核，不按均值反推）；
  * - validComparisons < minValidComparisons 时 verdict 固定为「无法判定（数据不足）」。
  */
-export function evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons = DEFAULT_MIN_VALID_COMPARISONS) {
+export function evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons = DEFAULT_MIN_VALID_COMPARISONS, expected = null) {
   const strongSummary = strongDoc && typeof strongDoc === 'object' ? (strongDoc.summary ?? {}) : {};
   const weakSummary = weakDoc && typeof weakDoc === 'object' ? (weakDoc.summary ?? {}) : {};
-  const ids = [...new Set([...Object.keys(strongSummary), ...Object.keys(weakSummary)])];
+  const declaredIds = expected && Array.isArray(expected.cases) && expected.cases.length > 0 ? expected.cases : null;
+  const ids = declaredIds ?? [...new Set([...Object.keys(strongSummary), ...Object.keys(weakSummary)])];
+  const expectedRounds = expected && Number.isInteger(expected.rounds) && expected.rounds > 0 ? expected.rounds : null;
   const rows = [];
   let validComparisons = 0;
   let missing = 0;
+
+  /** 该文档里这个用例的逐轮 judge 评分缺口（声明了轮数时才核；没声明不核，宁少报不多猜）。 */
+  const roundGaps = (doc, id) => {
+    if (!expectedRounds || !doc || typeof doc !== 'object') return [];
+    const results = Array.isArray(doc.results) ? doc.results.filter((r) => r && r.id === id) : [];
+    const gaps = [];
+    if (results.length < expectedRounds) gaps.push(`轮次 ${results.length}/${expectedRounds}`);
+    const incompleteRounds = results.filter((r) => !judgeSum(r.judge_scores)).length;
+    if (incompleteRounds > 0) gaps.push(`${incompleteRounds} 轮缺四维评分`);
+    return gaps;
+  };
 
   for (const id of ids) {
     const s = strongSummary[id];
@@ -257,14 +273,17 @@ export function evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons =
     const weakSum = w ? judgeSum(w.judge_mean) : null;
     const strongMech = mechanicalRate(s);
     const weakMech = mechanicalRate(w);
+    const strongRoundGaps = roundGaps(strongDoc, id);
+    const weakRoundGaps = roundGaps(weakDoc, id);
 
-    if (strongSum === null || weakSum === null) {
+    if (strongSum === null || weakSum === null || strongRoundGaps.length > 0 || weakRoundGaps.length > 0) {
       let reason;
       if (!s) reason = '强模型缺该用例';
       else if (!w) reason = '弱模型缺该用例';
       else if (strongSum === null && weakSum === null) reason = '双方 judge 四维不全或全缺';
       else if (strongSum === null) reason = '强模型 judge 四维不全';
-      else reason = '弱模型 judge 四维不全';
+      else if (weakSum === null) reason = '弱模型 judge 四维不全';
+      else reason = `逐轮评分不完整（强：${strongRoundGaps.join('、') || '齐全'}；弱：${weakRoundGaps.join('、') || '齐全'}）`;
       missing += 1;
       rows.push({ id, strongSum, weakSum, strongMech, weakMech, gap: null, verdict: `数据缺失（${reason}；不计入比较）`, missing: true, missingReason: reason });
       continue;
@@ -448,7 +467,7 @@ export function buildReport({
   let discriminationResult = null;
   if (discriminationRequested) {
     lines.push('### 2. 区分度（强模型 vs 弱模型，judge 均分）', '');
-    const comparison = evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons);
+    const comparison = evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons, stabilityExpected);
     discriminationResult = comparison;
     lines.push(markdownTableRow(['用例', '强模型 judge 合计', '弱模型 judge 合计', '差', '强机械', '弱机械', '区分度判定']));
     lines.push(markdownTableRow(['---', '---', '---', '---', '---', '---', '---']));
