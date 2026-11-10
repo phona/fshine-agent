@@ -45,7 +45,7 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 - 本仓 gitignored 的 `config/agent.yaml` 存在（部署配置，永不提交），
   harness 的 `boot()` 会读它并按用例打补丁；
 - 执行层 mock：harness 在 beforeAll 替**执行层平台**钉死它自己的执行器开关
-  （`EXECUTION_EXECUTOR=mock`，宿主不读这个变量）、`EXECUTION_SERVE=1`，并给每个用例独一份平台状态文件
+  （`EXECUTION_EXECUTOR=mock`，宿主不读这个变量；2026-11-10 起也不再注入法域标记），并给每个用例独一份平台状态文件
   （`EXECUTION_PLAN_STATE` / `EXECUTION_RATE_LIMIT_STATE` /
   `EXECUTION_MOCK_STATE` / `EXECUTION_AUDIT_PATH` /
   `EXECUTION_PROPOSAL_STATE`），不开浏览器、不触网、不碰真平台；

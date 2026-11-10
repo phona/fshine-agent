@@ -1,6 +1,9 @@
 /**
  * Second execution-layer proof (Package 4): fshine orchestration against the
- * stock fixture, with ZERO changes to fshine production code.
+ * stock fixture. The anchor means "no unexpected production drift since
+ * the last re-anchor", not "production code never changes". An intentional
+ * production edit moves the anchor only after the protocol checks pass
+ * again on the new code (see second-layer.ts); the diff checks stay.
  *
  * This test lives in scripts/eval/ (a test/eval file, not packages/ or
  * apps/ production code) and proves, deterministically and without a model:

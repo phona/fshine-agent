@@ -21,8 +21,8 @@ import { A2A_PROTOCOL_VERSION, type DelegationBlock } from '@fshine/contracts';
  * 旧路径是 fallback——**必须先能证明它逐字不变**，否则 C3 之后任何一红都无法归因到
  * 新路径还是旧路径（F5 的 revert 决策会变成猜）。本文件把四组现状钉死：
  *
- *   ③ env 法域两把尺：context.ts 的 hostGatewayEnv（剥 EXECUTION_REQUIRE_PLAN、
- *      置 EXECUTION_SERVE=1，宿主办调直调法域）与 plan-runtime.ts 的
+ *   ③ env 两把尺：context.ts 的 hostGatewayEnv（剥 EXECUTION_REQUIRE_PLAN、
+ *      不声明法域 env——2026-11-10 声明面归零）与 plan-runtime.ts 的
  *      createPlanScopedWorkerEnv（EXECUTION_REQUIRE_PLAN=1 + EXECUTION_PLAN_ID
  *      注入，worker 子进程法域——D-081 的岔路，C6 新通道的法域选择以此为基线）；
  *   ④ 委派块当前文本形状（【委派】/范围/工作区/协议版本 + A2A_PROTOCOL_VERSION，
@@ -61,16 +61,18 @@ function srcOf(...segments: string[]): string {
   return readFileSync(join(...segments), 'utf8');
 }
 
-describe('③ env 法域两把尺（hostGatewayEnv / createPlanScopedWorkerEnv）', () => {
-  it('hostGatewayEnv：剥 EXECUTION_REQUIRE_PLAN、置 EXECUTION_SERVE=1，不动原 env', () => {
+describe('③ env 两把尺（hostGatewayEnv / createPlanScopedWorkerEnv）', () => {
+  it('hostGatewayEnv：剥 EXECUTION_REQUIRE_PLAN、不设 EXECUTION_SERVE、不动原 env', () => {
     const saved = { ...process.env };
     try {
       process.env.EXECUTION_REQUIRE_PLAN = '1';
-      process.env.EXECUTION_SERVE = '';
+      delete process.env.EXECUTION_SERVE;
       process.env.GOLDEN_SENTINEL_KEY = 'keep-me';
       const env = hostGatewayEnv();
       expect('EXECUTION_REQUIRE_PLAN' in env).toBe(false);
-      expect(env.EXECUTION_SERVE).toBe('1');
+      // 宿主不声明法域：返回的 env 与进程 env 都不带这个键。
+      expect(env.EXECUTION_SERVE).toBeUndefined();
+      expect(process.env.EXECUTION_SERVE).toBeUndefined();
       // 其余键原样继承（哨兵不被误删）。
       expect(env.GOLDEN_SENTINEL_KEY).toBe('keep-me');
       // 函数内部 copy，调用方 env 不被污染。

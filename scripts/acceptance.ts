@@ -363,8 +363,7 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 }
 
 async function main(): Promise<void> {
-  // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
-  process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
+  // 与生产一致：宿主不向执行层声明法域（2026-11-10 声明面归零，判定归执行层）。
   // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
   // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
   // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。

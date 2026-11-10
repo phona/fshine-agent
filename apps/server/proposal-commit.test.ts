@@ -5,7 +5,7 @@
  * 不起平台：`runCli` 与协议角色表都是注入点，于是能机械钉住四件事——
  *   · operation 名按 protocol 角色列解析，**表拿不到就拒绝落账**（不回落硬编码网关名）；
  *   · 令牌只绑 {proposalId, expiresAt}（不绑脚本名/业务字段），且只经 env 传给子进程；
- *   · env 纪律：serve 法域 + 剥 EXECUTION_REQUIRE_PLAN（D-081）；
+ *   · env 纪律：剥 EXECUTION_REQUIRE_PLAN（D-081），且不声明法域 env、命令不带 --mode；
  *   · 落账前先取问平台状态，把"已过期/已终结/读不到"在办调之前现形。
  *
  * 真网关 + mock 执行器的全链覆盖在 tests/e2e/turn-loop-write-chain.test.ts。
@@ -94,6 +94,7 @@ const OK_SCRIPT = { status: { stdout: statusJson() }, commit: { stdout: COMMIT_O
 
 afterEach(() => {
   delete process.env['EXECUTION_REQUIRE_PLAN'];
+  delete process.env['EXECUTION_SERVE'];
 });
 
 describe('createProposalCommitRunner：operation 寻址（protocol 角色列，不硬编码）', () => {
@@ -146,7 +147,8 @@ describe('createProposalCommitRunner：令牌与 env 纪律', () => {
     expect(commit.env['EXECUTION_GATE_SECRET']).toBe(SECRET);
   });
 
-  it('D-081：进程带着 EXECUTION_REQUIRE_PLAN=1，宿主直调仍然把它剥掉并显式声明 serve 法域', async () => {
+  it('D-081：进程带着 EXECUTION_REQUIRE_PLAN=1，宿主直调仍然把它剥掉，且不设 EXECUTION_SERVE、命令不带 --mode', async () => {
+    delete process.env['EXECUTION_SERVE'];
     process.env['EXECUTION_REQUIRE_PLAN'] = '1';
     const cli = makeRunner(OK_SCRIPT);
 
@@ -154,8 +156,10 @@ describe('createProposalCommitRunner：令牌与 env 纪律', () => {
 
     for (const call of cli.calls) {
       expect(call.env['EXECUTION_REQUIRE_PLAN']).toBeUndefined();
-      expect(call.env['EXECUTION_SERVE']).toBe('1');
+      expect(call.env['EXECUTION_SERVE']).toBeUndefined();
+      expect(call.args.join(' ')).not.toContain('--mode');
     }
+    expect(process.env['EXECUTION_SERVE']).toBeUndefined();
   });
 });
 

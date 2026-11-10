@@ -199,24 +199,26 @@
 - **缺失时**：无信封 / 信封非法 → 宿主视为网关失败，fail-closed，
   不把自由文本当数据答案。
 
-## 8. Serve 令牌与实执行门（两道正交门）
+## 8. 调用上下文与实执行门
 
-- **生产者**：部署环境与宿主（不是模型）。
+- **生产者**：宿主在每次编排调用上带上协议材料（计划绑定与签名令牌）。
+  不是模型。宿主不声明执行法域：不写域 env，不在命令模板上加法域 flag。
 - **字段**：
-  - `EXECUTION_SERVE=1` + `EXECUTION_INVOCATION`：serve 法域声明，服务器签发
-    HMAC 提案 / 提交令牌；
+  - 计划绑定（`EXECUTION_PLAN_ID`）与签名令牌随该次调用走。执行层从这些
+    材料在不在，自己判断这次是不是被编排驱动；
   - `EXECUTION_ALLOW_REAL=1`：执行层实执行授权（缺它 = 触平台执行被拒，
     `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响）；
   - ~~`FSHINE_REAL_COMMIT=1`：宿主真写落账授权~~ **该门 2026-11-08 退役**：
     写能不能真落地归执行层，宿主不再持有写授权位；落账授权/拒绝由执行层自己的
     commit 门给出，宿主只如实转述（见 `docs/debt-ledger.md` 的 D-075/D-197 重登记节）。
-- **正交性**：两道门互相独立，缺一不可叠加；mock 之下实执行门
-  不可达，真平台之下缺任一门即拒绝，不降级。
-- **缺失时（各门拒绝形态，语义不变）**：
-  - `EXECUTION_SERVE` 未设为 `1`：不进入 serve 法域，serve 调用
-    走建造法域规则，缺合法 `EXECUTION_INVOCATION` 即被 serve 门拒绝；
-  - `EXECUTION_INVOCATION` 缺失或非法：serve 法域调用一律拒绝
-    （统一 CLI 之外直调 operation run 会被拒），不以模型自报确认放行；
+- **正交性**：实执行授权与「这次调用带不带协议材料」互相独立。mock 之下
+  实执行门不可达。宿主侧不再叠一道 serve 令牌门。
+- **缺失时**：
+  - 旧描述作废：不再有「宿主置 `EXECUTION_SERVE=1` + 网关铸造并校验
+    `EXECUTION_INVOCATION`，缺合法令牌则 serve 调用一律拒绝」。调用上下文
+    随调用走，没有单独的 serve 令牌信封要由宿主或网关铸造；
+  - 执行层若自己的实现仍把域 env 或 `--mode` 当准入，缺了由执行层响亮拒绝，
+    宿主不补这道声明；
   - `EXECUTION_ALLOW_REAL` 未设为字面量 `1`：触平台执行被拒
     `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算（scratch / mock）不受影响；
   - 一律 fail-closed，不以“本地测试”或“模型已确认”为由放行。

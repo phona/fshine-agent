@@ -51,12 +51,13 @@
 
 ## 2. 共享接口（宿主写或继承，执行层读）
 
-> 宿主按执行法域 / 活跃计划逐次注入的 `EXECUTION_SERVE` / `EXECUTION_REQUIRE_PLAN` /
-> `EXECUTION_PLAN_ID` 不是部署期环境变量，已移入 §9.3「逐次注入」。
+> 宿主按活跃计划逐次注入的 `EXECUTION_REQUIRE_PLAN` / `EXECUTION_PLAN_ID`
+> 不是部署期环境变量，已移入 §9.3「逐次注入」。法域不在此列：2026-11-10 起
+> 宿主声明面归零，不注入域标记。
 
 | 变量 | 生产者 / 消费者 | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
+| `EXECUTION_INVOCATION` | 旧的「网关铸造 / serve 门校验」描述已作废（2026-11-10） | 调用上下文随调用走（计划绑定与签名令牌）。宿主不铸造、不校验这道单独信封；执行层从调用形状自己判断是不是被编排驱动 |
 | `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
 | `EXECUTION_EXECUTOR` | 部署 / **执行层自己的**执行器切换（宿主不读） | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门。2026-11-08 起宿主侧读取已删（`platform-mock.ts` 整模块退役）：编排层不判"这个部署允不允许写" |
 | `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。**宿主不再注入**（2026-11-10 消费端边界裁定）；仓内夹具不读该键（状态根走测试专用 `--state-dir`，§4a）。真平台契约行保留——生产本就零注入 |
@@ -322,10 +323,11 @@ generic-mock / second-layer / generic-model-eval.py 同批；探针在
 
 | 变量 | 缺省 / 行为 | 谁在注入 |
 | --- | --- | --- |
-| `EXECUTION_PLAN_ID` | serve 执行缺失 = 拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 | 宿主 `createPlanScopedWorkerEnv` / e2e harness，按计划逐次注入 |
+| `EXECUTION_PLAN_ID` | 执行层若要求计划绑定而缺失，由执行层拒绝；宿主每回合按激活计划重写，测试注入的伪造值被剥离 | 宿主 `createPlanScopedWorkerEnv` / e2e harness，按计划逐次注入 |
 | `EXECUTION_REQUIRE_PLAN` | 仅字面量 `1` 强制计划绑定；宿主直调时显式剥离 | 宿主 worker 路径逐次注入 |
-| `EXECUTION_SERVE` | 仅字面量 `1` 进 serve 法域；否则走建造法域规则 | 宿主装配 / acceptance 脚本按执行法域逐次注入 |
 
-这三个键由宿主按计划 / 法域逐次注入：worker 路径置 `EXECUTION_REQUIRE_PLAN=1` 并按
-激活计划写 `EXECUTION_PLAN_ID`；宿主直调路径显式剥离 `EXECUTION_REQUIRE_PLAN`；
-serve 路径显式置 `EXECUTION_SERVE=1`。宿主路径上 ambient 的同名值会被重写或剥离。
+这两个键由宿主按计划逐次注入：worker 路径置 `EXECUTION_REQUIRE_PLAN=1` 并按
+激活计划写 `EXECUTION_PLAN_ID`；宿主直调路径显式剥离 `EXECUTION_REQUIRE_PLAN`。
+宿主不注入法域标记（2026-11-10 声明面归零）：编排驱动的信号是随调用走的协议材料
+（计划绑定与签名令牌），法域判定归执行层。计划绑定键上，宿主路径的 ambient
+同名值会被重写或剥离。
