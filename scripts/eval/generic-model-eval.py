@@ -55,6 +55,14 @@ USE_DIRECT = bool(DIRECT_BASE_URL and DIRECT_API_KEY)
 # 换更省的模型时可经 EVAL_MAX_TOKENS 调低；**别**为迁就预算把这个值压回 1024。
 MAX_TOKENS = int(os.environ.get("EVAL_MAX_TOKENS", "8192"))
 
+# Aux-group B-class isolation keys (canonical + debug names). The fixture's env2 lookup
+# prefers canonical and falls back to the debug name, so an ambient value would override
+# the per-run path derived by auxPaths() from EXECUTION_MOCK_STATE's directory.
+AUX_GROUP_ENV_KEYS = (
+    "EXECUTION_MEMORY_STATE", "EXECUTION_BREAKER_STATE", "EXECUTION_CACHE_STATE",
+    "STOCK_MEMORY_STATE", "STOCK_BREAKER_STATE", "STOCK_CACHE_STATE",
+)
+
 SYSTEM = """You are a stock assistant. You help the user with shelf stock only.
 You have exactly two output forms, and nothing else:
 1. To query stock, output exactly one line: CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>"]} or, when the user gave a batch, CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>", "--batch", "<batch>"]}. The batch argument is optional; omit it when the user gave no batch.
@@ -180,11 +188,15 @@ def envelope(stdout):
 def run_case(case, tmpdir):
     # Canonical family only (docs/env-naming-ruling-20261110.md): the stock fixture
     # still accepts STOCK_* as a debug fallback, but the eval process never sets it.
+    # Aux groups (memory / breaker / cache) are not injected per run: the fixture's
+    # auxPaths() derives them from the main state file's directory, which is already
+    # per-case isolated through EXECUTION_MOCK_STATE. Ambient values (canonical or
+    # debug) would override that derivation via env2, so clear them first.
     env = {**os.environ,
            "EXECUTION_MOCK_STATE": str(tmpdir / "state.json"), "EXECUTION_PLAN_STATE": str(tmpdir / "plans.json"),
-           "EXECUTION_PROPOSAL_STATE": str(tmpdir / "proposals.json"), "EXECUTION_AUDIT_PATH": str(tmpdir / "audit.jsonl"),
-           "EXECUTION_MEMORY_STATE": str(tmpdir / "memory.json"), "EXECUTION_BREAKER_STATE": str(tmpdir / "breaker.json"),
-           "EXECUTION_CACHE_STATE": str(tmpdir / "cache.json")}
+           "EXECUTION_PROPOSAL_STATE": str(tmpdir / "proposals.json"), "EXECUTION_AUDIT_PATH": str(tmpdir / "audit.jsonl")}
+    for _key in AUX_GROUP_ENV_KEYS:
+        env.pop(_key, None)
     transcript = []
     calls = 0
     finals = []

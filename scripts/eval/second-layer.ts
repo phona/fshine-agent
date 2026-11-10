@@ -20,16 +20,27 @@ const repoRoot = path.resolve(evalDir, '..', '..');
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
 const stockBin = path.join(fixtureRoot, 'bin', 'stock');
 const baseline = process.argv[2] ?? '17aafe3';
+/**
+ * 辅助组的 B 类隔离键（规范名 + 调试专名）。辅助组不再按 run 注入后，ambient 值会经
+ * 夹具的 env2 查找盖过 auxPaths() 的 per-run 派生，必须在子进程 env 里清场。
+ */
+const AUX_GROUP_ENV_KEYS = [
+  'EXECUTION_MEMORY_STATE', 'EXECUTION_BREAKER_STATE', 'EXECUTION_CACHE_STATE',
+  'STOCK_MEMORY_STATE', 'STOCK_BREAKER_STATE', 'STOCK_CACHE_STATE',
+] as const;
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-run-'));
 // 只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）：夹具仍认 STOCK_*
 // 调试专名，但评测进程不设它；规范名优先保证 ambient 专名无法改道 per-case 隔离。
-const env = { ...process.env,
+// 辅助组（memory / breaker / cache）不按 run 注入：stock.cjs 的 auxPaths() 从
+// statePaths().stateFile 的目录派生，状态路径按 run 隔离后辅助文件自动落进同一目录。
+// 但 ambient 的辅助组键（规范名或调试名）会盖过该派生，故先清场（见 AUX_GROUP_ENV_KEYS）。
+const env: NodeJS.ProcessEnv = { ...process.env,
   EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
   EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'), EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
-  EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'), EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
-  EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'), EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
+  EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
   EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret' };
+for (const key of AUX_GROUP_ENV_KEYS) delete env[key];
 function run(args: string[], input?: string) {
   const r = spawnSync(stockBin, args, { encoding: 'utf8', cwd: fixtureRoot, env, input });
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };

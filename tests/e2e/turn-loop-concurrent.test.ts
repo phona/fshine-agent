@@ -20,7 +20,7 @@
  * （`fictional-execution-layer/src/execution/mocks/fixtures/seed.json`）。捏造名会撞上平台 not_found
  * 信封（带 data.query）→ 宿主结构化澄清收口，把本来要测的中断/恢复主线掐断。
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
 import { clarificationTextFor } from '../../packages/agent/src/error-codes';
 import {
@@ -36,14 +36,12 @@ import {
 } from './harness';
 
 /**
- * 三步续跑会让同一子任务的累计调用数一直越过高 weight 自动档：每一步重提计划都是 notify。
- * 这里把同一任务的 notify 上限放宽（平台侧默认 2），否则最后一步会被升级成"必须等用户
- * 确认"——那是单步试探收口的规则，不是长任务拆解该有的形状（与 turn-loop-plan-steps 同因）。
- * confirm 门槛本身由累计重量触发（EXECUTION_PLAN_CONFIRM_CALLS=20），不受此上限影响，
- * 用例 4 的确认门因此照旧能观察到。
+ * 计划重通知上限（EXECUTION_PLAN_MAX_NOTIFY）是执行层自己的策略参数：值源在执行层
+ * 配置层（2026-11 env 治理 v2 起 env 不再是通道），宿主 e2e 不设。本用例的计划都
+ * 申报即执行、无「磨大」差额，不会触发 NOTIFY_REPEAT_LIMIT；confirm 门槛本身由累计
+ * 重量触发（EXECUTION_PLAN_CONFIRM_CALLS=20），不受此上限影响，用例 4 的确认门
+ * 因此照旧能观察到。
  */
-beforeAll(() => { process.env['EXECUTION_PLAN_MAX_NOTIFY'] = '6'; });
-afterAll(() => { delete process.env['EXECUTION_PLAN_MAX_NOTIFY']; });
 
 /** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
 const PRINCIPAL_ID = 'wecom:e2e_user';
