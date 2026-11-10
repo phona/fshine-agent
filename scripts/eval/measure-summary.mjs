@@ -359,6 +359,8 @@ export function buildReport({
     const merged = mergeStability(stabilityDocs);
     const entries = merged ? Object.entries(merged.summary) : [];
     // 结构校验：分母不完整（缺用例/缺轮/非期望用例）时，本节不出任何通过率结论。
+    // 期望结构由调用方声明（CLI --expect-cases / --expect-rounds 必填，见 main）——汇总
+    // 工具无法从输入自身知道“期望跑哪些用例”，声明值就是分母的唯一权威来源。
     const structuralGaps = stabilityStructureGaps(entries, stabilityExpected);
     const effectiveComplete = stabilityComplete && structuralGaps.length === 0;
     const incompleteReason = structuralGaps.length > 0
@@ -566,6 +568,14 @@ export function main(argv) {
   const baselineLoad = opts.evalRealBaselinePath ? readJson(opts.evalRealBaselinePath) : null;
   const latestLoad = opts.evalRealLatestPath ? readJson(opts.evalRealLatestPath) : null;
   const regressionLoad = opts.regressionsPath ? readJson(opts.regressionsPath) : null;
+
+  // 期望结构必填（codex 复审 major：默认本地入口曾绕过结构校验）：给了稳定性输入就必须声明
+  // 用例集与轮数——汇总工具无法从输入自身知道“期望跑哪些用例”，不声明就不许合并下结论。
+  if (opts.stabilityPaths.length > 0 && !opts.stabilityExpected) {
+    console.error('给了稳定性输入就必须用 --expect-cases <id,...> --expect-rounds <N> 声明期望结构'
+      + '（分母的声明值；工作流把喂给探针的同一份值传进来）。\n' + USAGE);
+    return 2;
+  }
 
   const evidenceErrors = [];
   const noteLoad = (load, role) => {

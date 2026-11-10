@@ -329,3 +329,29 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
     expect(main(['--expect-cases', 'G-A1', stabilityPath])).toBe(2);
   });
 });
+
+/**
+ * 默认入口收口（2026-11-10 codex 复审 major 第三轮）：结构校验不能是可选参数——
+ * 不带 --expect-cases 的本地调用曾复现同一假结论。两层防线：
+ *   ① 文件自元数据：文件声明了 rounds 而逐例轮数对不上（或根本没声明）⇒ 该文件不可信；
+ *   ② 期望结构必填：给了稳定性输入就必须声明用例集与轮数。
+ */
+describe('默认入口收口：期望结构必填（codex major 第三轮）', () => {
+  it('main：给了稳定性输入但不声明期望结构 ⇒ exit 2 并说明必填', () => {
+    const dir = tempDir();
+    const stabilityPath = writeJson(dir, 'stab.json', {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } },
+    });
+    const writes: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => { writes.push(String(m)); });
+    let code: number;
+    try {
+      code = main([stabilityPath]);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(writes.join('')).toContain('--expect-cases');
+  });
+});
