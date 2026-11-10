@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus,
+  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, partitionCorpusForScoring,
+  validAuditFailuresValue,
   type Baseline, type ProbeResultRow,
 } from './score';
 import type { ConversationWriteChainFacts } from './write-chain';
@@ -67,6 +68,101 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
   it('探针报告缺该用例 / 基线缺该用例都红（不是静默跳过）', () => {
     expect(evaluateProbeCase('probe-X', undefined, baselineCase).pass).toBe(false);
     expect(evaluateProbeCase('probe-X', probeRow(), undefined).pass).toBe(false);
+  });
+});
+
+describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能对评分零影响）', () => {
+  const baselineCase = { dims: { ...ZERO_DIMS } };
+  const auditCheckOf = (verdict: ReturnType<typeof evaluateProbeCase>) =>
+    verdict.checks.find((check) => check.name === 'audited·申报失败');
+
+  it('申报失败数 > 0 ⇒ 该检查红（计数是 findings 全量，不枚举失败种类）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 3 }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, expected: '≤0', actual: '3' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('申报失败数 = 0 ⇒ 该检查绿，整例通过（变异口径：actual <= limit 改成 < ⇒ 此断言红）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 0 }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: true, expected: '≤0', actual: '0' });
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('基线放宽上限时 = limit 也过（只增才算劣化）', () => {
+    const verdict = evaluateProbeCase(
+      'probe-X', probeRow({ auditFailures: 2 }), { ...baselineCase, auditFailures: 2 }, undefined, undefined, true,
+    );
+    expect(auditCheckOf(verdict)!.pass).toBe(true);
+  });
+
+  it('黑盒模式 ⇒ 无此检查（即使报告行带了计数也不门）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 9 }), baselineCase);
+    expect(auditCheckOf(verdict)).toBeUndefined();
+    expect(verdict.pass).toBe(true);
+  });
+
+  it('audited 行缺计数 ⇒ fail-closed（缺列不是 0："没跑交叉核"不能冒充"查过且全过"）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow(), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, actual: '缺计数（未跑申报交叉核）' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('显式不适用（整例没有可核轮）⇒ 检查照出且判失败——"没得核"不是"查过且全过"（2026-11-10 评审 2 high）', () => {
+    // 旧语义 pass=true：「整例没有一个可核轮」被当成通过，等于"无证据 = 通过"——与本分支
+    // 既有口径（evidence.ts mechanicallyPassed：零证据 ⇒ false）相悖。选失败而非三态"待定"
+    // 的理由见 auditFailuresCheckOf 注释；actual 与真实计数失败可区分（可审计性不丢）。
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'not-applicable' }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, expected: '≤0', actual: '不适用（整例没有可核轮）' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('审计源不可读（有轮次但证据缺席）⇒ 判失败，不因"还有干净轮次"放行（2026-11-10 评审 high）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'unverifiable' }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, actual: '不可核（审计源不可读）' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('报告格式守卫：接受非负整数与两个显式状态，拒收缺列/负数/小数（零轮占位不让整份报告 exit 2）', () => {
+    // 探针报告行 → score.ts 的格式守卫（main() 里用它筛 staleAudit）。判据导出后单测
+    // 直接钉：N/A 若被拒收，--quick --audit 里有零轮占位/崩溃用例就会整份报告 exit 2，
+    // 连带申报全对的其余用例都打不了分；缺列仍必须 fail-closed。
+    expect(validAuditFailuresValue(0)).toBe(true);
+    expect(validAuditFailuresValue(2)).toBe(true);
+    expect(validAuditFailuresValue('not-applicable')).toBe(true);
+    expect(validAuditFailuresValue('unverifiable')).toBe(true);
+    // -1 是不可知哨兵不是计数：`-1 <= limit` 会让它冒充全过（2026-11-10 评审 low）。
+    expect(validAuditFailuresValue(-1)).toBe(false);
+    expect(validAuditFailuresValue(1.5)).toBe(false);
+    expect(validAuditFailuresValue(Number.NaN)).toBe(false);
+    expect(validAuditFailuresValue(undefined)).toBe(false);
+    expect(validAuditFailuresValue(null)).toBe(false);
+  });
+});
+
+describe('判定集/跳过集同源：占位条目即使被误标 inBaseline 也不评估', () => {
+  // 2026-11-10 评审 low：统一报告侧先判 placeholder，score.ts 主循环旧写法只看
+  // inBaseline——占位条目一旦被误标 inBaseline:true，两侧判定就分叉（报告 skip、
+  // score 评估）。主循环的过滤已收敛到 partitionCorpusForScoring，这里直接钉该函数：
+  // 只测报告侧（unifiedCasePassedOf）时，删掉 score 侧占位分支仍然全绿。
+  it('placeholder:true 且 inBaseline:true ⇒ 进跳过集，不进判定集（判别点：抹掉占位标记后进判定集）', () => {
+    const q5b = loadCorpus().find((entry) => entry.case === 'Q5b')!;
+    expect(q5b.placeholder).toBe(true);
+    const promoted = { ...q5b, inBaseline: true };
+    const { judged, skipped } = partitionCorpusForScoring([promoted]);
+    expect(judged).toEqual([]);
+    expect(skipped.map((entry) => entry.id)).toEqual([promoted.id]);
+    // 判别点：同一输入抹掉占位标记 ⇒ 进判定集。证明上面的 skip 不是 inBaseline 单独造成的。
+    const asNonPlaceholder = { ...promoted, placeholder: undefined };
+    expect(partitionCorpusForScoring([asNonPlaceholder]).judged.map((entry) => entry.id))
+      .toEqual([asNonPlaceholder.id]);
+    expect(partitionCorpusForScoring([asNonPlaceholder]).skipped).toEqual([]);
+  });
+
+  it('普通未进基线条目仍按 skipped（占位判据没有吞掉既有口径）', () => {
+    const nonBaseline = loadCorpus().find((entry) => !entry.inBaseline && entry.placeholder !== true)!;
+    const { judged, skipped } = partitionCorpusForScoring([nonBaseline]);
+    expect(judged).toEqual([]);
+    expect(skipped.map((entry) => entry.id)).toEqual([nonBaseline.id]);
   });
 });
 

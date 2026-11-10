@@ -1289,6 +1289,7 @@ cases:
       - 第 1 轮 not_found 结论 + 零非零金额
       - 第 2 轮两候选全名 + 问句 + 零非零金额
       - 第 3 轮不得把 payable 当口径答数（期望值层新增：口径绑定断言）
+      - 第 3 轮点名实体的金额必须属于该实体（期望值层新增：实体键归属断言——beta 明细佐证合法，挂给 alpha-item-1 或夹具外名字均红）
     messages:
       - text: check gamma-collection 这个 collection W2 的 record value
         tasks: [F]
@@ -1310,8 +1311,12 @@ cases:
             collections: [contoso-trade, contoso-logistics]
             question: true
             forbidValues: [1200, 800, 500, 300, 200, 700, 900, 1500, 600, 450, 880, 1320]
+          # entityAttribution：本轮点名实体的值集 ⊆ 该实体真实值集（夹具记录归属，模型之外可对）。
+          # 只禁合计 1000（口径断言）；500/300/200 是合法佐证，但挂错实体（beta 的 500 说成
+          # alpha-item-1 的）或挂给夹具外名字（foo-item-1）同样红——申报块引用行洗不掉。
           - index: 2
             missingCaliber: payable
+            entityAttribution: true
             forbidCaliberValues: [1000]
       invariants:
         notFoundZeroAmounts: 0

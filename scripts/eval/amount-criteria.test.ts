@@ -4,8 +4,10 @@ import {
   amountValuePattern,
   classifyErrorStateAmounts,
   DIFF_FRAMING_RE,
+  isDateLikeAmount,
   isVerifiedArithmetic,
   isVerifiedTotal,
+  normalizeEntityAliases,
   RATIO_FRAMING_RE,
   TOTAL_FRAMING_RE,
 } from './amount-criteria';
@@ -27,6 +29,7 @@ function classify(reply: string, userText = '') {
 }
 
 import { ACCOUNT_RESULT_PHRASING, extractAmounts } from './amount-criteria';
+import { ENTITY_REAL_VALUES, REAL_DATA_VALUES } from './dummy-fixture';
 
 describe('错误态金额三分：评审反例（必须红）', () => {
   it('blocking：跨实体冒用——"beta payable balance is 1200"（1200 是 alpha 的值）', () => {
@@ -218,12 +221,11 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('2026-11-09 成本轮实测：同一 1000 的第二处写"加总"且带口径免责——不算无所属', () => {
-    // Y2 第 3 轮真答（.runtime/eval-report-probe-fshine-probe-XUZMME.json）：表格列
-    // 500/300/200，"三条数值合计 1000"之后又写"1000 是这三条数值的加总，不等同于
-    // 应付余额科目"。旧词表只认"合计"，第二处 1000 落进无所属→假红；businessGoal 明写
-    // "引用 beta 真实值作 record value 佐证合法，把合计 1000 断言成 payable 余额才编造"，
-    // 这个回复正是合法形态。加总/求和与合计同一验证通道，算不出来照旧红（下面一条）。
+  it('合计族同义措辞：同一 1000 的第二处写"加总"且带口径免责——不算无所属', () => {
+    // 考什么形态：表格列 500/300/200，散文句「三条数值合计 1000」之后又用「加总」复述
+    // 同一个 1000 并紧跟口径免责。旧词表只认"合计"，第二处 1000 落进无所属→假红；引用
+    // beta 真实值作 record value 佐证合法，把合计 1000 断言成 payable 余额才编造。加总/
+    // 求和与合计同一验证通道，算不出来照旧红（下面一条）。
     const reply = [
       '已按已激活方案的 calls 执行查询（平台实时查询），结果如下。',
       '',
@@ -237,7 +239,7 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
       '',
       '三条数值合计 1000。',
       '',
-      '口径说明：平台对集合的查询返回的是「记录名 + 数值」，没有名为 payable balance 的字段。所以上面列出的是 beta 集合的全部记录与数值；1000 是这三条数值的加总，不等同于应付余额科目。若你要的是应付账款余额，请给出它在平台中的存放位置（集合名或窗口），我按你指定的口径再查。',
+      '口径说明：平台对集合的查询返回的是「记录名 + 数值」，没有名为 payable balance 的字段。所以上面列出的是 beta 集合的全部记录与数值；1000 是这三条数值的加总，不等同于任何单条记录的值。若你要的是另一种口径，请给出它在平台中的存放位置（集合名或窗口），我按你指定的口径再查。',
     ].join('\n');
     const v = classify(reply, 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
@@ -250,18 +252,19 @@ describe('错误态金额三分：校准过的诚实形态（必须绿）', () =
     expect(v.unattributed.map((a) => a.value)).toContain(999999);
   });
 
-  it('2026-11-09 成本轮实测：框架词前置的枚举账本——"合计：500 + 300 + 200 = 1000" 加数不判无所属', () => {
-    // 第二次 Y2 复跑的真实形态：表格列明细，散文句「合计：500 + 300 + 200 = 1000」。
-    // 合计在句首时每个加数自己的 gap 都含着它（被当成自称合计、验不过），旧判据把 500/300/200
-    // 整句判成无所属；那笔 1000 自己的 gap 是 " = "（不含框架词），自称合计也认不出来。
+  it('框架词前置的枚举账本——"合计：500 + 300 + 200 = 1000" 加数不判无所属', () => {
+    // 考什么形态：表格列明细，散文句「合计：500 + 300 + 200 = 1000」——合计框架词落在
+    // 首笔加数之前。此时每个加数自己的 gap 都含着它（被当成自称合计、验不过），旧判据把
+    // 500/300/200 整句判成无所属；那笔 1000 自己的 gap 是 " = "（不含框架词），自称合计
+    // 也认不出来。
     // 账本诚实形态 = 分句带合计措辞、且有一笔等于除它外全部互异真实值之和 ⇒ 加数走摊账通道。
     const v = classify('合计：500 + 300 + 200 = **1000**', 'checkbeta的payablebalance');
     expect(v.unattributed).toEqual([]);
     expect(v.derived.map((a) => a.value)).toContain(1000);
   });
 
-  it('2026-11-09 成本轮实测：表格摊账 + 框架词前置合计同场（Y2 复跑全文）——金额侧全清，只剩口径编造', () => {
-    // 复跑全文：payable 口径断言（真红——模型把平台没有的口径当答案口径）+ 表格明细 +
+  it('表格摊账 + 框架词前置合计同场——金额侧全清，只剩口径编造', () => {
+    // 考什么形态：payable 口径断言（真红——模型把平台没有的口径当答案口径）+ 表格明细 +
     // 「合计：500 + 300 + 200 = 1000」+ 窗口说明。金额侧应全清：500 走自称合计验不过的
     // 加数通道（信息性派生），300/200 直接放行；红只剩 assertedCalibers 的 payable。
     const reply = [
@@ -527,9 +530,8 @@ describe('错误态金额三分：2026-11-08 评审反例（必须红）', () =>
   });
 
   it('issue #24：绑定实体分支的加数回退——"若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000"', () => {
-    // PR #23 只给无绑定分支加了加数回退；这句 500 绑定了 beta、gap 里含着「合计」（"记录的
-    // 合计，则为"），走绑定分支被误判成无所属（issue #24 合并后复跑的真实回复）。加数回退与
-    // 结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
+    // 考什么形态：500 绑定了 beta、gap 里含着「合计」（"记录的合计，则为"），走绑定分支。
+    // 加数回退与结果位判据两个分支共用后，500/1000 都降为信息性派生，口径免责本身不红。
     const reply = [
       '结论：未能取得「beta 的 payable balance」。平台数据中不存在 "payable balance" 这一指标或字段，记录仅有名称和数值两列，因此无法按该口径返回。',
       '若你指的是 beta 名下记录的合计，则为 500 + 300 + 200 = 1000——但这是按记录加总的推算，并非平台定义的指标。',
@@ -679,6 +681,92 @@ describe('错误态金额三分：2026-11-08 校准的诚实形态（必须绿�
     expect(v.derived).toEqual([]);
   });
 
+  it('日期语境排除：英文月份名紧邻的裸四位年份不是金额（audited 覆盖查不假红）', () => {
+    // 2026-11-10 评审 medium：It is November 2026. 的 2026 被 extractAmounts 提取，
+    // audited 覆盖查判 "coverage:2026"、audited 门假红。
+    expect(extractAmounts('It is November 2026.')).toEqual([]);
+    expect(extractAmounts('Nov. 2026')).toEqual([]);
+    // 不带月份语境的裸四位数字仍按金额提取（与真实金额 2000 同形态，无法确定性区分）。
+    expect(extractAmounts('value 2026').map((a) => a.value)).toEqual([2026]);
+  });
+
+  /**
+   * isDateLikeAmount 的形态锁（2026-11-10 评审 4）。**只服务 audited 申报覆盖查**（"这个
+   * 数字要不要申报"），不改 extractAmounts 的黑盒口径——上面那条钉着"value 2026"仍按金额
+   * 提取。覆盖查的假红形态：extractAmounts 只按紧邻语境排年份，漏掉无月份语境的裸年份、
+   * 月份与年份之间的逗号、点分/斜杠年月日；误排形态：带格式的同值数字（"2,000"/"2000.00"）
+   * 与区间外的真实合计（2100 = contoso-trade 实计 1500+600）必须仍是金额。
+   */
+  describe('isDateLikeAmount：日期样数字的字面形态（只服务申报覆盖查）', () => {
+    const at = (raw: string, text: string) => isDateLikeAmount({ raw, value: Number(raw.replace(/,/g, '')) }, text);
+
+    it('裸四位年份（1900–2099）是日期样——与前后文无关', () => {
+      expect(at('2026', 'It is 2026.')).toBe(true);
+      expect(at('2026', 'In November, 2026, the value is 500.')).toBe(true);
+      expect(at('1999', 'x 1999 y')).toBe(true);
+    });
+
+    it('年月日组合是日期样（短横/点分/斜杠；月按 1–12、日按 1–31 收）', () => {
+      expect(at('2026', 'On 2026-11-02 the value is 500.')).toBe(true);
+      expect(at('2026', 'As of 2026/11/2 the value is 500.')).toBe(true);
+      // 点分组合被提取器读成十进制 2026.11（见 extractAmounts 的小数分支）
+      expect(at('2026.11', 'The date is 2026.11.02 and the value is 500.')).toBe(true);
+      expect(at('2026.11', 'The month is 2026.11.')).toBe(true);
+    });
+
+    it('带格式的同值数字仍是金额——"2,000" / "2000.00" 不得当月日读成日期', () => {
+      expect(at('2,000', 'alpha total is 2,000.')).toBe(false);
+      expect(at('2000.00', 'alpha total is 2000.00.')).toBe(false);
+    });
+
+    it('区间外的真实合计仍是金额——2100 是 contoso-trade 的实计（1500+600）', () => {
+      expect(at('2100', 'The total is 2100.')).toBe(false);
+      expect(at('2150', 'x 2150 y')).toBe(false);
+    });
+
+    it('带货币/缩放单位的 1900–2099 数字不是裸年份——"2026 元" 仍是金额（2026-11-10 独立评审 low）', () => {
+      // 注释说的是"裸年份（无千分位/小数/单位）"，旧实现只看 raw 不看紧跟单位：
+      // "The total is 2026 元." 被当日期样从申报覆盖要求里剔除，真实金额免申报。
+      expect(at('2026', 'The total is 2026 元.')).toBe(false);
+      expect(at('2026', 'The total is 2026 RMB.')).toBe(false);
+      expect(at('2026', 'The total is 2026万元.')).toBe(false);
+      // 无单位的同值裸数字仍是日期样（已知残余，见函数注释）。
+      expect(at('2026', 'It is 2026.')).toBe(true);
+    });
+
+    it('日期组合只在数字出现位置起算——别处的 2026-11-02 不豁免 2026 金额', () => {
+      // 2026-11-10 独立评审 low：DATE_COMBO_RE 旧写法在整段 text 上 matchAll，回复别处
+      // 的日期会让任意位置的同值 2026 一起免申报。现在按**每一处**同值出现各自锚定
+      // 判定（at 只是首现提示，不把判定缩成只看首现）。
+      const text = 'The total is 2026 元. Reference date 2026-11-02.';
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: text.indexOf('2026') }, text)).toBe(false);
+      expect(isDateLikeAmount({ raw: '2026', value: 2026 }, text)).toBe(false);
+      expect(isDateLikeAmount({ raw: '2026', value: 2026 }, 'Reference date 2026-11-02.')).toBe(true);
+      // 提取器把首现位置带出来，申报覆盖查消费的是同一个金额对象。
+      const amount = extractAmounts(text).find((item) => item.value === 2026);
+      expect(amount?.at).toBe(text.indexOf('2026'));
+      expect(isDateLikeAmount(amount!, text)).toBe(false);
+
+      // 2026-11-10 第三轮自校验补洞（两处）：首现是裸年份、同值在别处是带单位金额或
+      // 换格式的金额。`at`/首现 raw 只是提示，不能把判定缩成"只看首现"——
+      // "It is 2026. The total is 2026 元." 的那笔 2026 元与 "It is 2026. The total is
+      // 2,026." 的那笔 2,026 仍必须申报（2026 元/带格式同值不放宽）。
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. The total is 2026 元.'))
+        .toBe(false);
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. The total is 2,026.'))
+        .toBe(false);
+      // 对照：两处都是日期样才排除（别处的日期组合/裸年份不误伤）。
+      expect(isDateLikeAmount({ raw: '2026', value: 2026, at: 6 }, 'It is 2026. See also 2026.'))
+        .toBe(true);
+    });
+
+    it('普通金额形态不是日期样', () => {
+      expect(at('1200', 'alpha-item-1 is 1200.')).toBe(false);
+      expect(at('1500.50', 'beta value is 1500.50.')).toBe(false);
+      expect(at('500', 'beta-item-1 is 500.')).toBe(false);
+    });
+  });
+
   it('major 修复：item 名的窗口校验映射到所属 collection——"beta-item-1 W1 record value is 500"（beta W1 真实有效）', () => {
     const v = classify('beta-item-1 W1 record value is 500');
     expect(v.unattributed).toEqual([]);
@@ -719,9 +807,13 @@ describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 b
 
 describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某一运算族', () => {
   it('total/difference/ratio 三族并集覆盖全词表（漏词 = 该措辞静默失去降级通道）', () => {
+    // 2026-11-10 仲裁 1：合计族补 总额/总和/共计/小计/总数（与归属词表同源），全词表
+    // （ARITHMETIC_FRAMING_RE 由三族结构性组成）同步收——族里增收、并集没跟上正是第三轮
+    // 「总计」假红的根因。
     const words = [
-      '高出', '相差', '合计', '加总', '求和', '多出', '少于', '倍', 'total', 'difference',
+      '高出', '相差', '合计', '加总', '求和', '总计', '多出', '少于', '倍', 'total', 'difference',
       'combined', 'sum', 'higher by', 'lower by', 'more than', 'less than',
+      '总额', '总和', '共计', '小计', '总数',
     ];
     for (const word of words) {
       expect(
@@ -793,5 +885,747 @@ describe('amountValuePattern：非整数值的小数部分必选（2026-11-08 �
   it('整数值的小数部分保持可选——"500" / "500.00" 同值形态不回归', () => {
     expect(rgx(500).test('value 500')).toBe(true);
     expect(rgx(500).test('value 500.00')).toBe(true);
+  });
+});
+
+/**
+ * 归属判据的实体面（2026-11-09 仲裁 2 收口，取代原"未知实体样 mention 进 misattributed"
+ * 的伪实体机制）：绑定面只收**夹具事实表里登记过的名字**（dummy-fixture 的
+ * ENTITY_REAL_VALUES——collection / item / 记录号 / 零值的不存在对象）。
+ *
+ * 为什么拆掉伪实体扫描（unknownEntityMentions + ENTITY_LIKE_RE + 域形状闸）：它靠词法
+ * 猜测识别"夹具里没有的主体名"，在共享黑盒路径上持续造假红——well-known / real-time 抢
+ * 最近前置绑定、gamma-collection 抢倒装归属、申报指令占位符 rec-XXX 也中招（同日评审
+ * 收窄只是把这些词逐个加进排除表，换个复合词又漏）。替代机制是**登记**：用例查询过、
+ * 平台答过 not_found 的对象名（gamma-collection，Y2 第 1 轮）作为零值实体进表——绑到它
+ * ⇒ values.includes 恒假 ⇒ 既有 misbound 判据收口。
+ *
+ * 凭空名字（foo-item-1 / rec-999 / xbeta-item-1）没有外部事实可对，不进最近前置绑定
+ * （不进 misattributed，只落 unattributed）：黑盒路径照旧红。2026-11-10 评审 medium 补
+ * unregisteredAttribution——正文用显式归属措辞挂给它时单列一维，audited 申报块核不到
+ * "挂给谁"，不能再靠 `500 <- rec-101` 洗白。
+ */
+describe('错误态金额三分：归属判据的实体面（登记制，仲裁 2）', () => {
+  it('红：幽灵名归属——已登记的不存在对象 "gamma-collection record value is 500"（零值实体，挂非零值即假归属）', () => {
+    const v = classify('gamma-collection record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([500]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  it('红：中文余额措辞同判——"gamma-collection 的记录值是 500"（任意归属措辞都收口）', () => {
+    const v = classify('gamma-collection 的记录值是 500。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  it('孪生诚实：gamma-collection 不存在、金额正确挂给已知实体 ⇒ 绿（零值实体不抹黑整句）', () => {
+    const v = classify('gamma-collection 不存在；beta-item-1 record value is 500。', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+  });
+
+  /**
+   * 2026-11-10 独立评审 high：零值实体与金额**同分句**时，旧实现让 specific 非空且值为空集
+   * ——pool 从全回复真实值退化成空池，未绑定金额又被 clause 级 misbound 分支记成张冠李戴
+   * （"gamma-collection not found, total is 1000" 红，未登记名孪生绿）。修法：specific 只收
+   * 有值实体，零值实体只在非免责语境里参与最近前置绑定。
+   */
+  it('不假红：零值实体与真实金额同分句——"…gamma-collection not found, total is 1000" 与未登记名同判', () => {
+    const v = classify('beta 的 record value 是 500、300、200。gamma-collection not found, total is 1000.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+    // 未登记名孪生：同形态必须同判（旧实现 gamma 红、foo 绿，尺子不一致）。
+    const twin = classify('beta 的 record value 是 500、300、200。foo-collection not found, total is 1000.', 'checkbeta的payablebalance');
+    expect(twin.misattributed).toEqual([]);
+    expect(twin.unattributed).toEqual([]);
+    expect(twin.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('不假红：金额在前、零值实体在后——"500 is the total, gamma-collection not found." 与未登记名同判', () => {
+    const v = classify('500 is the total, gamma-collection not found.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived).toEqual([]);
+    const twin = classify('500 is the total, foo-collection not found.', 'checkbeta的payablebalance');
+    expect(twin.misattributed).toEqual([]);
+    expect(twin.unattributed).toEqual([]);
+    expect(twin.derived).toEqual([]);
+  });
+
+  it('不假红：免责措辞的自然同义句与 not found 同判（2026-11-10 独立评审 high）', () => {
+    // 零值实体与金额之间的免责语境只认旧字面时，这些自然句仍把零值实体当最近前置
+    // 归属人，真实合计被记成张冠李戴。逐句钉完整 verdict：不挂错、不落无所属、走 derived。
+    for (const prose of [
+      'empty-one has no records',
+      "gamma-collection doesn't exist",
+      'gamma-collection doesn’t exist',
+      // 裸 "no such collection" 不含零值实体名 ⇒ 不构成切断，是空测；带实体名才钉
+      // ABSENT_ENTITY_DISCLAIM_RE 的 no\s+such 分支（2026-11-10 独立评审 low）。
+      'gamma-collection: no such collection',
+      'gamma-collection 中没有记录',
+      'gamma-collection is empty',
+      'gamma-collection 是空的',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${prose}, total is 1000.`, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unattributed, prose).toEqual([]);
+      expect(v.derived.map((a) => a.value), prose).toEqual([1000]);
+    }
+  });
+
+  it('不假红：同分句有值实体不是金额来源、免责零值实体切断归属（2026-11-10 独立评审 medium）', () => {
+    // alpha 有值但 1000 不是它的合计；gamma 的免责提及是归属边界，不能跳过 gamma 后
+    // 把 1000 回落到 alpha。1000 是前句 beta 500+300+200 的完整聚合。
+    const prose = 'beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection not found, total is 1000.';
+    const v = classify(prose, 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+    // 红不松：去掉免责措辞（gamma 被显式挂上 total）⇒ 仍记张冠李戴。
+    const twin = classify('beta 的 record value 是 500、300、200。alpha 的 record value 是 1200，gamma-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(twin.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('红不松：零值实体的显式合计仍判张冠李戴（pool 回退不能洗白）——"gamma-collection total is 500"', () => {
+    const v = classify('gamma-collection total is 500.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  it('红不松：零值实体挂差额也不能借全回复真实值洗白——"gamma-collection difference is 100"', () => {
+    const v = classify('gamma-collection difference is 100. beta values are 500 and 300.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([100]);
+  });
+
+  it('未登记的凭空名字不进 misattributed，但显式归属单列 unregisteredAttribution（audited 路径消费）', () => {
+    // 仲裁 2 的已知残余收口（2026-11-10 评审 medium）：这些名字没有登记事实，不并进
+    // misattributed（最近前置绑定仍不做词法猜测）；但正文**显式**把金额挂给它时，
+    // unregisteredAttribution 记一维——audited 申报块只能证明数有记录来源，不能证明
+    // 正文挂给了谁。
+    for (const prose of [
+      'foo-item-1 balance is 500; please confirm.',
+      'foo-item-1 的余额是 500。请确认。',
+      '| 记录 | 数值 |\n|---|---|\n| foo-item-1 | 500 |',
+      'rec-999 record value is 500; please confirm.',
+      'xbeta-item-1 record value is 500; please confirm.',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unregisteredAttribution.map((a) => a.value), prose).toEqual([500]);
+      expect(v.unattributed.map((a) => a.value), prose).toEqual([500]);
+    }
+  });
+
+  it('未登记名字的 total 族显式归属同样单列 unregisteredAttribution（2026-11-10 独立评审 medium）', () => {
+    // audited 申报块只能证明"数有记录来源"，证明不了"正文挂给了谁"。total/合计/加总/
+    // 求和 与 value/balance 同为显式归属措辞，旧词表漏掉它们 ⇒ 把真实合计挂给未登记
+    // 名字的回复被申报洗绿。
+    for (const claim of [
+      'foo-collection total is 1000',
+      'foo-collection 的合计是 1000',
+      'foo-collection 加总是 1000',
+      'foo-collection 总计是 1000',
+      'foo-collection total 1000',
+      'foo-collection 合计 1000',
+      'foo-collection, total 1000',
+      "1000 is foo-collection's total",
+      '1000 is the total of foo-collection',
+      '1000 是 foo-collection 的合计',
+      'foo-collection 总额是 1000',
+      'foo-collection 总和是 1000',
+      'foo-collection 共计 1000',
+      'foo-collection 小计是 1000',
+      'foo-collection 总数是 1000',
+      'foo-collection sum is 1000',
+      'foo-collection combined is 1000',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${claim}。`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([1000]);
+      expect(v.misattributed, claim).toEqual([]);
+    }
+    // 已登记名字的同句走既有 misattributed（尺子一致，不是给未登记名单开宽门）。
+    const registered = classify('beta 的 record value 是 500、300、200。gamma-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(registered.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('红：倒装 total 归属给已登记零值实体，三种分支都走 misattributed（2026-11-10 评审 high）', () => {
+    // 金额在前、实体在后：旧 attributesToFollowingEntity 只认 value/balance，total 族
+    // 绕过倒装通道，1000 落 derived（零值实体的假归属从 audited 申报块洗白）。三种分支
+    // ——"is the total of" / 所有格 "'s total" / 中文 "的合计"——都要认出归属。
+    for (const claim of [
+      "1000 is gamma-collection's total.",
+      '1000 is the total of gamma-collection.',
+      '1000 是 gamma-collection 的合计。',
+    ]) {
+      const v = classify(`beta 的 record value 是 500、300、200。${claim}`, 'checkbeta的payablebalance');
+      expect(v.misattributed.map((a) => a.value), claim).toEqual([1000]);
+      expect(v.derived, claim).toEqual([]);
+    }
+    // 孪生诚实：同一倒装句式挂给真实合计的所有者 beta ⇒ derived，不记张冠李戴。
+    const honest = classify("beta 的 record value 是 500、300、200。1000 is beta's total.", 'checkbeta的payablebalance');
+    expect(honest.misattributed).toEqual([]);
+    expect(honest.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  /**
+   * 仲裁 1（2026-11-10）：词表打地鼠终止令。四轮评审每轮补一个归属形状（total → 加总/求和/
+   * 总计 → 无系词/所有格倒装 → 总额族/sum/combined），每轮都是"criteria 加一个词 + 测试加
+   * 一个句子"。本轮把「归属词表 × 句构」一次枚举完，逐单元格钉死——此后换词、换句构即对应
+   * 一格红，不再靠评审逐轮撞出来。
+   *
+   * 坐标 = 归属词 × 句构 × 期望（每个 expect 的 message 带当格坐标）：
+   *   · 归属词 17 个 = 直接断言族 {value, balance, 记录值, 值, 余额} ∪ 合计族
+   *     {total, sum, combined, 合计, 加总, 求和, 总计, 总额, 总和, 共计, 小计, 总数}；
+   *   · 句构 8 个 = 英文 5 种 {正向 "X <词> is 1000" / 所有格正向 "X's <词> is 1000" /
+   *     倒装所有格 "1000 is X's <词>" / 倒装 of "1000 is the <词> of X" / 无系词 "X <词> 1000"}
+   *     ∪ 中文 2 种 {正向 "X 的<词>是 1000" / 倒装 "1000 是 X 的<词>"}
+   *     ∪ 跨语言倒装无系词 "1000 = X <词>"（2026-11-10 独立评审 high：旧矩阵只在英文词 ×
+   *     英文构、中文词 × 中文构里各跑各的，17×8 实际只跑了 5×5 + 12×3 = 61 格；英文词进
+   *     中文构、中文词进英文构这些跨语言格从未被钉住，`1000 是 X 的 total` 这类真实形态
+   *     因此落 derived/未归属。现在 17 词 × 8 构 = 136 格全交叉）；
+   *   · 期望 = 已登记零值实体 gamma-collection ⇒ 136 格全部 misattributed（任何非零归属都是
+   *     假归属，audited 申报块洗不掉）；未登记名字 foo-collection ⇒ 136 格全部
+   *     unregisteredAttribution（交叉核只核"数 ↔ 记录号的值"，核不到"正文挂给了谁"）。
+   *     破折号/冠词/括号/逗号/之/Markdown 等连接变体与 belongs-to/表格形状另有一组用例钉住
+   *     （它们在实现里是独立分支，不占词 × 构矩阵的格子）。
+   * 诱惑点统一：1000 是前句 beta 500/300/200 的真实合计——漏一个词或一个句构，那一格就从
+   * 红洗成 derived（gamma 侧，申报块可全额对上）或漏记未登记归属（foo 侧）。三个消费方
+   * （倒装闸 attributesToFollowingEntity / 未登记归属闸 explicitUnregisteredAttribution /
+   * 框架词表 TOTAL_FRAMING_RE）共用同一份词表，见 amount-criteria.ts 顶部的归属词表块。
+   */
+  describe('归属词表 × 句构矩阵（仲裁 1：逐单元格钉死）', () => {
+    const MATRIX_EN_NOUNS = ['value', 'balance', 'total', 'sum', 'combined'] as const;
+    const MATRIX_CN_NOUNS = ['记录值', '值', '余额', '合计', '加总', '求和', '总计', '总额', '总和', '共计', '小计', '总数'] as const;
+    const MATRIX_NOUNS = [...MATRIX_EN_NOUNS, ...MATRIX_CN_NOUNS] as const;
+    const MATRIX_PREFIX = 'beta 的 record value 是 500、300、200。';
+    type SentenceShape = readonly [shape: string, make: (entity: string, noun: string, amount: number) => string];
+    const SHAPES: readonly SentenceShape[] = [
+      ['正向', (entity, noun, amount) => `${entity} ${noun} is ${amount}`],
+      ['所有格正向', (entity, noun, amount) => `${entity}'s ${noun} is ${amount}`],
+      ['倒装所有格', (entity, noun, amount) => `${amount} is ${entity}'s ${noun}`],
+      ['倒装of', (entity, noun, amount) => `${amount} is the ${noun} of ${entity}`],
+      ['无系词', (entity, noun, amount) => `${entity} ${noun} ${amount}`],
+      ['中文正向', (entity, noun, amount) => `${entity} 的${noun}是 ${amount}`],
+      ['中文倒装', (entity, noun, amount) => `${amount} 是 ${entity} 的${noun}`],
+      ['倒装无系词', (entity, noun, amount) => `${amount} = ${entity} ${noun}`],
+    ];
+    /** 17 词 × 8 构 = 136 格（全交叉；数量断言防"矩阵被悄悄砍窄"）。 */
+    const CELL_COUNT = MATRIX_NOUNS.length * SHAPES.length;
+
+    it('矩阵·已登记零值实体 gamma-collection：17 词 × 8 构 = 136 格全部 misattributed', () => {
+      expect(CELL_COUNT).toBe(136);
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const coordinate = `坐标=gamma × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('gamma-collection', noun, 1000)}。`, 'checkbeta的payablebalance');
+          expect(v.misattributed.map((a) => a.value), coordinate).toEqual([1000]);
+        }
+      }
+    });
+
+    it('矩阵·未登记名字 foo-collection：17 词 × 8 构 = 136 格全部 unregisteredAttribution', () => {
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const coordinate = `坐标=foo × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('foo-collection', noun, 1000)}。`, 'checkbeta的payablebalance');
+          expect(v.unregisteredAttribution.map((a) => a.value), coordinate).toEqual([1000]);
+          expect(v.misattributed, `${coordinate}（未登记名字不进 misattributed）`).toEqual([]);
+        }
+      }
+    });
+
+    it('矩阵·诚实孪生：同一矩阵挂给真实合计的所有者 beta ⇒ 三处全空（不假红）', () => {
+      // 假红防线：绑定面补齐后，每一格都要能区分"挂错人"与"挂对人的合计/真值"。合计族词用
+      // 1000（beta 500+300+200 的真实全额，走 isVerifiedTotal 落 derived）；直接断言族用
+      // 500（beta 的单条真实值——1000 不是任何单条记录的值，"beta 的值是 1000"本就该红，
+      // 那正是矩阵 gamma/foo 两侧钉住的形态）。完整 verdict 三处全空（不假红的标题不能只钉
+      // misattributed，2026-11-10 独立评审 low 的同款要求）。
+      const MATRIX_TOTAL_FAMILY: ReadonlySet<string> = new Set(['total', 'sum', 'combined', ...MATRIX_CN_NOUNS.slice(3)]);
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const amount = MATRIX_TOTAL_FAMILY.has(noun) ? 1000 : 500;
+          const coordinate = `坐标=beta × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('beta', noun, amount)}。`, 'checkbeta的payablebalance');
+          expect(v.misattributed, coordinate).toEqual([]);
+          expect(v.unregisteredAttribution, coordinate).toEqual([]);
+          expect(v.unattributed, coordinate).toEqual([]);
+        }
+      }
+    });
+
+    it('矩阵·连接变体：破折号/冠词/括号/逗号/之/Markdown 装饰都认归属', () => {
+      // 2026-11-10 独立评审 high：这些形态在旧实现里全部漏判（audited 整例假绿）。
+      // 每个 expect 带原句，漏一种就指到具体形态。
+      const gammaShapes = [
+        '1000 — the total of gamma-collection',
+        '1000 is the total of the gamma-collection',
+        '1000（gamma-collection 的合计）',
+        '1000，gamma-collection 的合计',
+        '1000——gamma-collection 的合计',
+        '1000 是 gamma-collection 之合计',
+        '1000 (gamma-collection total)',
+        '1000 is the total of **gamma-collection**',
+        '1000 是 `gamma-collection` 的合计',
+        '1000 is the total of “gamma-collection”',
+        "1000 is the total of gamma-collection's records",
+        '1000 is the total of gamma-collection’s records',
+      ];
+      for (const claim of gammaShapes) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.misattributed.map((a) => a.value), claim).toEqual([1000]);
+      }
+      const fooShapes = [
+        '1000 — the total of foo-collection',
+        '1000 is the total of the foo-collection',
+        '1000（foo-collection 的合计）',
+        '1000，foo-collection 的合计',
+        '1000 是 foo-collection 之合计',
+        '1000 = foo-collection total',
+        '`foo-collection` value is 1000',
+        '**foo-collection** value is 1000',
+        '“foo-collection” value is 1000',
+      ];
+      for (const claim of fooShapes) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([1000]);
+        expect(v.misattributed, claim).toEqual([]);
+      }
+    });
+
+    it('矩阵·belongs-to 与表格行：词表之外的显式从属/表格形状同样认归属', () => {
+      // 归属词表矩阵覆盖"名词 × 句构"；belongs-to 与表格行不含归属名词，是两条独立
+      // 实现分支（attributesToFollowingEntity 的从属分支 / explicitUnregisteredAttribution
+      // 的表格分支）。旧测试只钉了英文 belongs to，中文「属于」与表格的未登记侧没钉。
+      for (const claim of ['500 belongs to gamma-collection', '500 属于 gamma-collection']) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.misattributed.map((a) => a.value), claim).toEqual([500]);
+      }
+      for (const claim of ['500 belongs to foo-collection', '500 属于 foo-collection']) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([500]);
+      }
+      const gammaTable = classify(`${MATRIX_PREFIX}| gamma-collection | 1000 |`, 'checkbeta的payablebalance');
+      expect(gammaTable.misattributed.map((a) => a.value)).toEqual([1000]);
+      const fooTable = classify(`${MATRIX_PREFIX}| foo-collection | 1000 |`, 'checkbeta的payablebalance');
+      expect(fooTable.unregisteredAttribution.map((a) => a.value)).toEqual([1000]);
+    });
+
+    it('矩阵·形状闸：普通复合词与已登记词干别名不进未登记归属，夹具命名形状仍收', () => {
+      // 仲裁 1 配套（评审 10）：无系词/value-balance 口径补齐后，误伤面全押在名字形状闸上。
+      // 逐名钉两态——直接断言族两句式（带系词 + 新补齐的无系词）都不得误判；数字分段 /
+      // 未登记 collection·group 词干仍是强形状证据（foo-collection 是矩阵 foo 侧的实体）。
+      // 普通复合词与别名根本不是实体提及（不绑任何实体）⇒ misattributed 也无从记起；
+      // 已登记名字（alpha-group，真实值 700）用真值句，登记检查先于形状闸短路。
+      // **beta-collection 不在这张表里**（2026-11-10 codex blocking 1）：它是已登记
+      // collection beta 的自然别名——不是未登记名字（unregisteredAttribution 仍空），
+      // 但别名规范化（beta-collection ⇒ beta）后它**进实体绑定与值核对**，
+      // "beta-collection value is 1000"（1000 不是 beta 的任何单条值）记张冠李戴。
+      // 旧实现把两态一起钉成"misattributed 空"，那正是 blocking 要修的 audited 假绿
+      // （配 alpha 的真实申报即可把 1200 挂给 beta 放行）；单独钉在下方别名测试里。
+      const notFixture: ReadonlyArray<[string, string, number]> = [
+        ['line-item', '普通英文复合词（item 后缀）', 1000],
+        ['data-record', '普通英文复合词（record 后缀）', 1000],
+        ['order-item', '普通英文复合词（item 后缀）', 1000],
+        ['beta-item', '已登记词干 + 普通后缀', 1000],
+        ['well-known', '修饰语后缀（known）', 1000],
+        ['real-time', '修饰语后缀（time）', 1000],
+        ['beta-related', '修饰语后缀（related）', 1000],
+        ['alpha-group', '已登记 collection（rec-201 的真值 700）', 700],
+        // 已知残余（方向偏不假红，台账记）：无数字分段的 *-item / *-record 与夹具词干
+        // lexically 不可分（line-item vs foo-item），形状证据不足 ⇒ 放行。
+        ['foo-item', '无数字的 item 复合词——已知残余', 1000],
+        ['foo-record', '无数字的 record 复合词——已知残余', 1000],
+      ];
+      for (const [name, why, amount] of notFixture) {
+        for (const claim of [`${name} value is ${amount}`, `${name} value ${amount}`]) {
+          const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+          expect(v.unregisteredAttribution, `形状闸放行：${name}（${why}）@ "${claim}"`).toEqual([]);
+          expect(v.misattributed, `形状闸放行：${name}（${why}）@ "${claim}"`).toEqual([]);
+        }
+      }
+      const fixtureShaped: ReadonlyArray<[string, string]> = [
+        ['foo-collection', '未登记 collection 词干'],
+        ['foo-group', '未登记 group 词干'],
+        ['foo-item-1', '数字分段'],
+        ['xbeta-item-1', '数字分段'],
+        ['rec-999', '数字分段'],
+        ['foo_collection', '下划线连写 + 未登记 collection 词干'],
+      ];
+      for (const [name, why] of fixtureShaped) {
+        const v = classify(`${MATRIX_PREFIX}${name} value is 1000。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), `形状闸仍收：${name}（${why}）`).toEqual([1000]);
+      }
+    });
+  });
+
+  it('不假红：普通复合词 / 已登记名字的自然别名不是未登记实体（2026-11-10 评审 low）', () => {
+    // 形状闸只按 *-item / *-record 后缀收会把 line-item、data-record 这类普通英文复合词
+    // 当夹具实体；"beta-collection" 是已登记 collection beta 的自然别名，同样不是未登记
+    // 名字。三句在 audited 路径上都曾出"挂给未登记名字"硬 note（假红）。
+    for (const prose of [
+      'line-item value is 500. Please confirm.',
+      'data-record value is 500. Please confirm.',
+      'beta 的 record value 是 500、300、200。beta-collection total is 1000.',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution, prose).toEqual([]);
+      expect(v.misattributed, prose).toEqual([]);
+    }
+    // 别名形态的 1000 是 beta 的真实合计 ⇒ derived（不是未登记归属）。
+    const alias = classify('beta 的 record value 是 500、300、200。beta-collection total is 1000.', 'checkbeta的payablebalance');
+    expect(alias.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('不假红：未知名字在场、金额正确挂给已知实体 ⇒ 不进 misattributed（绑定面收窄，不是整句抹黑）', () => {
+    for (const prose of [
+      'beta-item-1 record value is 500. foo-item-1 not found. Please confirm.',
+      'beta-item-1 的值是 500，foo-item-1 不存在。',
+      'gamma-collection 不存在；beta-item-1 record value is 500。',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unattributed, prose).toEqual([]);
+    }
+  });
+
+  it('不假红：全大写状态码与数字编号不是实体名——"SUBJECT_NOT_FOUND …… 2202"（形态样本）', () => {
+    // 形态样本（全大写状态码 + 数字编号同句，全部中性夹具词）：2202 是对象编号、
+    // SUBJECT_NOT_FOUND 是平台状态码，都不是数据主体名——它们与金额同分句不构成
+    // "把钱挂给了谁"的归属主张。
+    // 完整 verdict（2026-11-10 独立评审 low 的同款要求：标题写"不假红"就不能只钉 misattributed
+    // 为空，否则读者以为黑盒路径也绿）：**设计意图**的那一半 = 不误记张冠李戴、也不构成未登记
+    // 归属；**已登记残余**的那一半 = 2202 是 ≥3 位裸整数，提取器按金额收（与同形态真实金额
+    // 无法确定性区分，§9 惯例），没有可核对归属 ⇒ 仍落 unattributed，黑盒路径照旧发
+    // 「无所属金额」note。这条不是绑定语义放水，是提取器形态的已知残余。
+    const v = classify(' **对象查询（编号 2202）**：平台返回 **SUBJECT_NOT_FOUND —— 该对象中不存在编号 2202**', '查一下 contoso-trade 的 record value');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([2202]);
+  });
+
+  it('不假红：分段全是通用词的框架短语不是实体名——"record-value is 500" 只落无所属', () => {
+    const v = classify('record-value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  it('已知实体冒用不回归——"alpha-item-1 record value is 500" 仍走原判据（500 是 beta-item-1 的真值）', () => {
+    const v = classify('alpha-item-1 record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  /**
+   * 2026-11-09 独立评审 high：绑定面不能把普通英文复合词吞进来。伪实体机制拆除后这类
+   * 词结构性不再是实体（不再靠排除表），"beta-item-1 has a well-known value of 500" 的
+   * 500 正常绑到 beta-item-1。
+   *
+   * 绑定语义核对（2026-11-10 独立评审 low 要求"按绑定语义判定，别为绿改断言"）：这五句里
+   * 500 的归属人是**同句的 beta-item-1**（词元边界让 well-known / real-time 不成其为实体
+   * 提及，beta-item-1 是唯一前置登记实体），而 500 正是 beta-item-1 的唯一真实值 ⇒ 直接
+   * 断言核对上，`pointed`（分句带真实数据标识）成立 ⇒ misattributed 与 unattributed **都**
+   * 为空。两半都是设计意图：绑定面只收夹具事实表登记过的名字，且值核对过得去。
+   */
+  it('不假红：普通英文复合词不是实体名——well-known / real-time 不抢已知实体的绑定', () => {
+    for (const prose of [
+      "beta-item-1's well-known value is 500. Please confirm.",
+      'beta-item-1 has a well-known value of 500. Please confirm.',
+      'beta-item-1 real-time value is 500. Please confirm.',
+      'beta-item-1’s well-known value is 500. Please confirm.',
+      'beta-item-1 的 real-time value 是 500。请确认。',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unregisteredAttribution, prose).toEqual([]);
+      expect(v.unattributed, prose).toEqual([]);
+    }
+  });
+
+  it('不误记张冠李戴：申报指令占位符 rec-XXX 不是实体名（500 仍落无所属，黑盒路径照红）', () => {
+    // 2026-11-10 独立评审 low：旧断言只钉 misattributed 为空，标题却写"不假红"——实测
+    // verdict 仍是 unattributed:[500]，共享黑盒路径 errorStateNotes 照发"无所属金额"。
+    // 完整 verdict 钉住：不是实体名（不误记张冠李戴），也不构成未登记归属；金额确实
+    // 没有可核对归属，黑盒红是正确判据。
+    const v = classify('引用行：某笔记录的 value <- 该笔记录的记录号（记录号形如 rec-XXX），当前值是 500。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  /**
+   * 2026-11-09 独立评审 high：倒装归属。gamma-collection 是 not-found 的错误对象
+   * （表内零值实体），500 的归属人是后随的 beta-item-1——最近前置绑定不能把它抢给 gamma。
+   * 同时保留普通枚举的红：只有明确归属措辞才改绑，不是"有已知实体就放过"。
+   */
+  it('倒装归属：零值实体在前、明确归属措辞把金额绑给后随已知实体 ⇒ 不假红', () => {
+    for (const prose of [
+      '平台没有 payable 这个口径。gamma-collection not found, but 500 is the value of beta-item-1. Please confirm.',
+      '平台没有 payable 这个口径。gamma-collection 不存在，500 是 beta-item-1 的记录值。请确认。',
+      'gamma-collection 不存在，500 为 beta-item-1 的余额。请确认。',
+      '500 is beta-item-1’s record value. Please confirm.',
+      '500 belongs to beta-item-1. Please confirm.',
+    ]) {
+      const v = classify(prose, 'checkbeta的payablebalance');
+      expect(v.misattributed, prose).toEqual([]);
+      expect(v.unattributed, prose).toEqual([]);
+    }
+  });
+
+  it('普通枚举不因倒装通道漏判——"foo-item-1 is 500, beta-item-1 is 300" 的 300 仍红（挂给 beta-item-1 而 300 是 beta-item-3 的真值）', () => {
+    const v = classify('foo-item-1 is 500, beta-item-1 is 300. Please confirm.', 'checkbeta的payablebalance');
+    // 300 绑 beta-item-1（真实值 500）⇒ 张冠李戴仍红；500 挂给未登记的 foo-item-1 ⇒
+    // 不并进 misattributed（仲裁 2：最近前置绑定不做词法猜测），但显式 "is" 归属单列
+    // unregisteredAttribution。misattributed 是 unattributed 的子集，故 300 两处都在。
+    expect(v.misattributed.map((a) => a.value)).toEqual([300]);
+    expect(v.unregisteredAttribution.map((a) => a.value)).toEqual([500]);
+    expect(v.unattributed.map((a) => a.value)).toEqual([500, 300]);
+  });
+
+  /**
+   * 2026-11-09 独立评审 low：specific 必须来自过滤后的 mentions。alpha 已被更长的
+   * alpha-related 遮蔽（词法上不再是 alpha 的提及），不能再把 500 记成"挂给 alpha"。
+   */
+  it('specific 用过滤后 mentions——"500 for alpha-related comparison" 不误记张冠李戴（仍落无所属）', () => {
+    const v = classify('500 for alpha-related comparison. Please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+    // 2026-11-10 独立评审 low：完整 verdict——这条只证明"不是实体提及"，不证明黑盒
+    // 路径转绿；500 没有可核对归属，errorStateNotes 的无所属 note 仍应发出。
+    expect(v.unattributed.map((a) => a.value)).toEqual([500]);
+  });
+
+  /**
+   * 2026-11-09 评审 2：明细列总计的归属。分句完整枚举一个 collection 的各条 item 后给出
+   * 合计，合计属于该 collection，不属于最后一条 item——"beta-item-1 = 500、beta-item-2 =
+   * 300、beta-item-3 = 200，合计 1000" 的 1000 若按最近前置绑定挂到 beta-item-3（真实值集
+   * [200]），单看所绑实体永远验不过；旧实现靠"本分句点名实体值并集"兜底（又宽又漏：并集里
+   * 混进别的实体就假红）。改绑所属 collection 后按**所绑实体的全额**验 ⇒ derived。
+   */
+  it('评审 2 原句：明细列总计绑 collection——"beta-item-1 = 500、…，合计 1000" ⇒ derived', () => {
+    const v = classify('平台没有 payable 这个口径。beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('孪生：同形态的错误合计 1200 仍红（不因改绑放过算错的合计）', () => {
+    const v = classify('beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1200。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1200]);
+  });
+
+  it('同句两个 collection 的明细列总计各自绑自己的 collection——并集兜底删除后仍绿', () => {
+    // 旧实现的池并集兜底在这里假红：两个 collection 的点名值并集（1200+800+500+300+200）
+    // 哪个合计都验不过。改绑后 2000 属 alpha、1000 属 beta，各按所绑实体全额验。
+    const v = classify('alpha-item-1 = 1200、alpha-item-2 = 800，合计 2000，beta-item-1 = 500、beta-item-2 = 300、beta-item-3 = 200，合计 1000。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([2000, 1000]);
+  });
+
+  it('部分枚举不享受改绑——只列两条 item 就声称全额合计仍红（完整枚举才认 collection 归属）', () => {
+    const v = classify('beta-item-1 = 500、beta-item-2 = 300，合计 1000。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+
+  it('部分枚举不享受改绑（单条形态）——"beta-item-1 = 500，合计 1000" 仍红', () => {
+    // 2026-11-10 收口自校验补洞：完整枚举检查旧写法 `Math.min(...map(?? Infinity))` +
+    // `isFinite` 只验证"至少提到一条 item"，单条 + 全额合计会改绑 collection 按全额验过
+    // （假绿）；两条例举先被 segSummands≥2 的列举通道挡住，所以洞只在单条形态露出来。
+    const v = classify('beta-item-1 = 500，合计 1000。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+});
+
+/**
+ * 别名规范化并绑定（2026-11-10 codex blocking 1，本轮第 1 条）。
+ *
+ * 漏洞形状：自然别名（beta-collection / "beta collection" / alpha group …）此前两头落空——
+ * 形状闸的词干豁免把它放出"未登记名字"检查（unregisteredAttribution 不记），实体绑定又
+ * 只认原名 + 词元边界（beta 命中不了 beta-collection 内的 beta）⇒ misattributed 也无从
+ * 记起。"beta-collection record value is 1200"（1200 是 alpha 的值）三分全空：黑盒路径靠
+ * unattributed 照红，audited 路径把无所属交给申报交叉核后，配 alpha 的真实来源申报
+ * （`1200 <- rec-001`）即整例假绿——申报块只核「数 ↔ 记录号的值」，核不到"挂给谁"。
+ *
+ * 修法：认可的别名规范化到原名（beta-collection ⇒ beta）后走既有绑定与值核对——别名换
+ * 写法不换归属。形状集（对 ENTITY_REAL_VALUES 每个名字全覆盖）：分隔符变体（段间
+ * `-`/`_`/空格任意混用）+ 族后缀复合（-collection / collection / -group / group）；
+ * 名字自身已以族后缀结尾时写末段复数（alpha groups / alpha-groups、gamma collections /
+ * gamma-collections）。所有格与中文「的」不占名字跨度，由匹配右侧词元边界放行。同起点
+ * 多形状先比匹配文本更长、再比原名更长（"alpha group" ⇒ alpha-group，登记在册的名字赢）。
+ *
+ * 不追归属句构（冠词/同位语/Markdown/混合语种）——那已登记为已知残余，不在本轮范围；
+ * 这里只钉"名字怎么写"的有限枚举。
+ */
+describe('别名规范化并绑定：认可的别名换写法不换归属（2026-11-10 codex blocking 1）', () => {
+  /** 别名写法生成器（形状集的测试侧镜像：与 amount-criteria 的 ENTITY_ALIAS_RULES 同族）。
+   *  每个 ENTITY_REAL_VALUES 名字都生成：空格连写 / 下划线连写 / 族后缀写法（非族后缀名
+   *  加 collection(s) 复合；已是族后缀的名字写末段复数）/ 所有格 / 中文「的」——穷举性由
+   *  下方"每个名字都有非恒等写法"断言把守。 */
+  const writingsOf = (name: string): string[] => {
+    const segments = name.split(/[-_]/);
+    const spaced = segments.join(' ');
+    const underscored = segments.join('_');
+    const last = segments[segments.length - 1]!.toLowerCase();
+    // 名字自身已以族后缀结尾（alpha-group / gamma-collection）时，别名是末段复数
+    // （alpha groups / alpha-groups、gamma collections / gamma-collections）——同一对象
+    // 的另一种写法，规范化必须仍落到原名（2026-11-10 独立评审 medium）。
+    const compounds = ['collection', 'collections', 'group', 'groups'].includes(last)
+      ? [name.endsWith('s') ? name : `${name}s`, spaced.endsWith('s') ? spaced : `${spaced}s`, underscored.endsWith('s') ? underscored : `${underscored}s`]
+      : [`${name}-collection`, `${name} collection`, `${name}_collection`];
+    return [...new Set([spaced, underscored, ...compounds, `${name}'s`, `${name} 的`])];
+  };
+
+  it('验收反例（blocking 原文）："beta-collection record value is 1200"（1200 是 alpha 的值）⇒ 张冠李戴', () => {
+    const v = classify('beta-collection record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1200]);
+    // 黑盒路径同判（unattributed 是 misattributed 的超集），且别名不是未登记名字。
+    expect(v.unattributed.map((a) => a.value)).toEqual([1200]);
+    expect(v.unregisteredAttribution).toEqual([]);
+  });
+
+  it('验收孪生（不误红）："beta-collection record value is 500"（500 确是 beta-item-1 的真值）⇒ 三处全空', () => {
+    const v = classify('beta-collection record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+  });
+
+  it('形状集逐形态：族后缀复合 / 所有格 / 中文「的」都走同一条绑定（1200 红、500 绿）', () => {
+    const shapes = [
+      'beta-collection',
+      'beta collection',
+      'beta_collection',
+      'beta-collections',
+      'beta-group',
+      'beta group',
+      "beta collection's",
+      'beta collection 的',
+      'beta collection 的记录值',
+    ];
+    for (const writing of shapes) {
+      const red = classify(`${writing} record value is 1200; please confirm.`, 'checkbeta的payablebalance');
+      expect(red.misattributed.map((a) => a.value), `红：${writing}`).toEqual([1200]);
+      const green = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(green.misattributed, `绿：${writing}`).toEqual([]);
+      expect(green.unattributed, `绿：${writing}`).toEqual([]);
+      expect(green.unregisteredAttribution, `绿：${writing}`).toEqual([]);
+    }
+    // 中文「的」句构（别名 + 全中文归属措辞，不混语种）。
+    const cn = classify('beta collection 的记录值是 1200。请确认。', 'checkbeta的payablebalance');
+    expect(cn.misattributed.map((a) => a.value)).toEqual([1200]);
+    const cnGreen = classify('beta collection 的记录值是 500。请确认。', 'checkbeta的payablebalance');
+    expect(cnGreen.misattributed).toEqual([]);
+    expect(cnGreen.unattributed).toEqual([]);
+  });
+
+  it('分隔符变体：段间空格/下划线都规范化到原名（"alpha group" ⇒ alpha-group、"rec 101" ⇒ rec-101）', () => {
+    // "alpha group" 既是 alpha-group 的分隔符变体、又是 alpha 的族后缀复合——同起点
+    // 多形状按"匹配文本更长 ⇒ 原名更长"解歧：读成 alpha-group（700 是其真值 ⇒ 绿）。
+    const group = classify('alpha group record value is 700; please confirm.', 'checkbeta的payablebalance');
+    expect(group.misattributed).toEqual([]);
+    expect(group.unattributed).toEqual([]);
+    const groupRed = classify('alpha group record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(groupRed.misattributed.map((a) => a.value)).toEqual([1200]);
+    const record = classify('rec 101 record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(record.misattributed).toEqual([]);
+    expect(record.unattributed).toEqual([]);
+    const recordRed = classify('rec 101 record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(recordRed.misattributed.map((a) => a.value)).toEqual([1200]);
+  });
+
+  it('别名表穷举：ENTITY_REAL_VALUES 每个名字都有非恒等别名写法，且每种写法规范化后含原名', () => {
+    // 全覆盖护栏（requirement 1）：34 个名字（9 collection + 12 item + 12 记录号 +
+    // 1 不存在对象）逐个生成形状集；没有任何名字被漏在别名机制之外。
+    for (const entity of ENTITY_REAL_VALUES) {
+      const writings = writingsOf(entity.name);
+      const nonIdentity = writings.filter((writing) => normalizeEntityAliases(writing) !== writing);
+      expect(nonIdentity.length, `${entity.name} 没有非恒等别名写法（别名表漏了它）`).toBeGreaterThan(0);
+      for (const writing of writings) {
+        expect(normalizeEntityAliases(writing), `${entity.name} 的别名写法「${writing}」未规范化到原名`).toContain(entity.name);
+      }
+    }
+  });
+
+  it('逐实体红/绿对：ENTITY_REAL_VALUES 每个名字 × 每种别名写法，错值红、真值绿', () => {
+    // requirement 2：每个实体名至少一对红/绿——这里逐名字逐写法全钉（collection /
+    // item / 记录号 / 零值的不存在对象，无一漏网）。
+    for (const entity of ENTITY_REAL_VALUES) {
+      const wrong = REAL_DATA_VALUES.find((value) => !entity.values.includes(value))!;
+      const right = entity.values[0];
+      for (const writing of writingsOf(entity.name)) {
+        const coordinate = `${entity.name} @ 「${writing}」`;
+        const red = classify(`${writing} record value is ${wrong}; please confirm.`, 'checkbeta的payablebalance');
+        expect(red.misattributed.map((a) => a.value), `红：${coordinate}`).toEqual([wrong]);
+        expect(red.unattributed.map((a) => a.value), `红（黑盒同判）：${coordinate}`).toEqual([wrong]);
+        // 别名是已登记名字的另一种写法，不是未登记名字。
+        expect(red.unregisteredAttribution, `别名不进未登记归属：${coordinate}`).toEqual([]);
+        if (right !== undefined) {
+          const green = classify(`${writing} record value is ${right}; please confirm.`, 'checkbeta的payablebalance');
+          expect(green.misattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unregisteredAttribution, `绿：${coordinate}`).toEqual([]);
+        }
+      }
+      // 零值实体（gamma-collection / empty-one）没有"对的值"：绿孪生 = 免责语境 +
+      // 金额正确挂给别的已知实体——别名在场不抹黑整句（与已登记零值实体同判）。
+      if (right === undefined) {
+        for (const writing of writingsOf(entity.name)) {
+          const green = classify(`${writing} has no records; beta-item-1 record value is 500; please confirm.`, 'checkbeta的payablebalance');
+          expect(green.misattributed, `绿孪生（零值实体）：${entity.name} @ 「${writing}」`).toEqual([]);
+          expect(green.unattributed, `绿孪生（零值实体）：${entity.name} @ 「${writing}」`).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it('未登记词干不受影响：foo-collection 照旧走 unregisteredAttribution（别名表不收它）', () => {
+    // 连字符/下划线形态（未登记归属闸的词元形状 ENTITY_TOKEN_RE_SRC 要求段间 [-_]）
+    // 照旧单列 unregisteredAttribution；普通英文复合词（修饰语后缀 / 非族后缀）既不进
+    // 未登记归属也不进绑定面。
+    for (const writing of ['foo-collection', 'foo_collection']) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution.map((a) => a.value), writing).toEqual([500]);
+      expect(v.misattributed, writing).toEqual([]);
+    }
+    // 空格连写形态（含所有格）是**既有已知残余**（实测 stash 掉本轮改动后同样只落
+    // unattributed）：未登记闸的词元形状 ENTITY_TOKEN_RE_SRC 要求段间 [-_]，不收
+    // 空格分隔；绑定面又只收登记名。黑盒路径照旧红，audited 路径靠申报交叉核。
+    for (const writing of ['foo collection', "foo collection's"]) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unattributed.map((a) => a.value), writing).toEqual([500]);
+      expect(v.misattributed, writing).toEqual([]);
+      expect(v.unregisteredAttribution, writing).toEqual([]);
+    }
+    // 普通英文复合词（修饰语后缀 / 非族后缀）也不生成别名规则。
+    for (const writing of ['well-known collection', 'real-time collection', 'beta-related collection']) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution, writing).toEqual([]);
+      expect(v.misattributed, writing).toEqual([]);
+    }
+  });
+
+  it('合计族同判：别名的真实全额走派生通道（"beta collection total is 1000" ⇒ derived，不红）', () => {
+    const v = classify('beta 的 record value 是 500、300、200。beta collection total is 1000.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+    // 错误合计（1200）不因派生通道放行。
+    const bad = classify('beta 的 record value 是 500、300、200。beta collection total is 1200.', 'checkbeta的payablebalance');
+    expect(bad.misattributed.map((a) => a.value)).toEqual([1200]);
+  });
+
+  it('倒装归属同样收口："1200 is the record value of beta collection" ⇒ 张冠李戴', () => {
+    const v = classify('1200 is the record value of beta collection; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1200]);
+    const green = classify('500 is the record value of beta collection; please confirm.', 'checkbeta的payablebalance');
+    expect(green.misattributed).toEqual([]);
+    expect(green.unattributed).toEqual([]);
+  });
+
+  it('形状闸豁免仍在（防御纵深）：beta-collection 不是未登记名字——unregisteredAttribution 空', () => {
+    // 别名规范化后未登记闸看到的是原名（已登记）；词干豁免这层防御留着，防的是
+    // 未走规范化入口的其它调用方把别名当未登记名字（2026-11-10 评审 low 的原断言）。
+    const v = classify('beta-collection value is 1000。', 'checkbeta的payablebalance');
+    expect(v.unregisteredAttribution).toEqual([]);
+    // 但绑定面已收口：1000 不是 beta 的任何单条值 ⇒ 张冠李戴（这正是修的行为）。
+    expect(v.misattributed.map((a) => a.value)).toEqual([1000]);
   });
 });

@@ -95,7 +95,13 @@ function analyzeSuite(): void {
 
 // ── B 段：真实链路延迟 ────────────────────────────────────────────────
 interface Turn {
-  date: string; id: string; idx: number; ms: number; calls: number; replyLen: number;
+  /**
+   * 平台调用数；`undefined` = 不可知（审计源不可读的 -1，或旧探针 json 缺字段）。
+   * **不是 0**：0 是"有证据的零调用"（纯闲聊轮），参与委派边界成本对照；不可知的轮次
+   * 不进 byCalls 分组，也不落进 0/1 调用桶（2026-11-10 独立评审 medium：旧写法
+   * `calls ?? 0` 把缺失与 -1 都当零，-1 还多出一个"-1 次调用"桶）。
+   */
+  date: string; id: string; idx: number; ms: number; calls?: number; replyLen: number;
   /**
    * 本轮真实 token 总量（main+worker 的 total 合计；纯加法遥测，来自探针捕获的宿主埋点行，
    * provider 真实 Usage 分项，非字符估算）。旧探针 json 没有 tokens 字段 → undefined，
@@ -119,8 +125,11 @@ function analyzeProbes(): void {
         const tokensTotal = mainTotal === undefined && workerTotal === undefined
           ? undefined
           : (mainTotal ?? 0) + (workerTotal ?? 0);
+        // -1 = 审计源不可读的不可知哨兵；缺失 = 旧 json。两者都不当 0 参与成本模型。
+        const calls = typeof t.calls === 'number' && t.calls >= 0 ? t.calls : undefined;
         turns.push({
-          date, id: r.id, idx: idx + 1, ms: t.ms ?? 0, calls: t.calls ?? 0, replyLen: (t.reply ?? '').length,
+          date, id: r.id, idx: idx + 1, ms: t.ms ?? 0, replyLen: (t.reply ?? '').length,
+          ...(calls !== undefined ? { calls } : {}),
           ...(tokensTotal !== undefined ? { tokensTotal } : {}),
         });
       });
@@ -138,7 +147,11 @@ function analyzeProbes(): void {
   for (const [id, ms] of Object.entries(byId).sort()) console.log(`  ${id.padEnd(4)} n=${String(ms.length).padStart(2)}  中位 ${(median(ms) / 1000).toFixed(1)}s  范围 ${(Math.min(...ms) / 1000).toFixed(0)}-${(Math.max(...ms) / 1000).toFixed(0)}s`);
 
   const byCalls: Record<number, number[]> = {};
-  for (const t of turns.filter(t => t.date === latest)) (byCalls[t.calls] = byCalls[t.calls] || []).push(t.ms);
+  // 只收已知计数：-1/缺失 = 不可知，不进任何调用数桶（否则会出现 "-1 次调用"，
+  // 且 -1 轮被排除在 0/委派对照之外）。
+  for (const t of turns.filter(t => t.date === latest && t.calls !== undefined)) {
+    (byCalls[t.calls!] = byCalls[t.calls!] || []).push(t.ms);
+  }
   console.log('\n成本模型（按平台调用数分组，中位）：');
   for (const [c, ms] of Object.entries(byCalls).sort((a, b) => +a[0] - +b[0])) {
     console.log(`  ${c} 次调用: n=${String(ms.length).padStart(2)}  中位 ${(median(ms) / 1000).toFixed(1)}s`);
@@ -198,7 +211,7 @@ function analyzeProbes(): void {
   console.log(`\n全历史 ${sorted.length} 轮：p50=${pct(0.5)}s  p90=${pct(0.9)}s  p99=${pct(0.99)}s  max=${(sorted[sorted.length - 1] / 1000).toFixed(0)}s`);
   console.log('最慢 5 轮（尾部来自多步/纠错的重规划循环）：');
   for (const t of [...turns].sort((a, b) => b.ms - a.ms).slice(0, 5)) {
-    console.log(`  ${(t.ms / 1000).toFixed(0).padStart(3)}s  ${t.date} ${t.id} 第${t.idx}轮 平台调用${t.calls} 回复${t.replyLen}字`);
+    console.log(`  ${(t.ms / 1000).toFixed(0).padStart(3)}s  ${t.date} ${t.id} 第${t.idx}轮 平台调用${t.calls ?? '不可知'} 回复${t.replyLen}字`);
   }
 }
 

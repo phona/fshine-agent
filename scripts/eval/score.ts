@@ -54,6 +54,11 @@ export interface BaselineCase {
    * 不存在 "必须为 false" 的模式——那是要求缺点必须出现，惩罚改进（首轮实测踩过）。
    */
   okMode?: 'strict' | 'free';
+  /**
+   * audited 申报模式的申报失败数上限（缺省 0）。只增才算劣化，与 dims 同口径。
+   * 只在 audited 报告上出检查；黑盒报告没有交叉核判定，不拿 0 冒充「查过且全过」。
+   */
+  auditFailures?: number;
   note?: string;
 }
 
@@ -73,11 +78,46 @@ export interface Baseline {
   writeChain: Record<string, BaselineWriteChainGroup>;
 }
 
+/**
+ * 报告行的申报失败计数：数字 = 在该轮平台证据上跑过交叉核；`'not-applicable'` =
+ * **整例没有一个可核轮**（零轮占位、纯闲聊轮、崩溃无已完成轮）——显式不适用，不是 0
+ * （0 会被读成「查过且全过」，与「没查过」混为一谈），也**不是通过**（见
+ * auditFailuresCheckOf：「没有可核轮」≠「查过且全过」）；`'unverifiable'` = 有轮次但
+ * 审计源不可读（`auditMissing`），交叉核缺证据——**不是不适用，是核不了**，门必须判失败
+ * 而不是因为"还有别的干净轮次"放行（2026-11-10 独立评审 high）。字段缺席（undefined）=
+ * 旧报告/黑盒报告没有这一列，仍按 fail-closed 处理。
+ */
+export type AuditFailuresValue = number | 'not-applicable' | 'unverifiable';
+
+/**
+ * audited 报告格式守卫的字段判据（**导出**供单测钉）：非负整数计数、显式
+ * `'not-applicable'`、或显式 `'unverifiable'` 都是可评分的值；字段缺席（旧报告/黑盒
+ * 报告）不是。负数不是计数（-1 是不可知哨兵，`<= limit` 会让它冒充全过），小数也不是
+ * 计数（2026-11-10 独立评审 low）。
+ * 守卫必须接受两个显式状态——零轮占位/纯闲聊轮用 `'not-applicable'` 表达「没有可核
+ * 证据」，审计源不可读用 `'unverifiable'` 表达「证据缺席、核不了」；拒收会让整份
+ * audited 报告 exit 2，连带其余可评分的用例都打不了分。
+ */
+export function validAuditFailuresValue(value: unknown): value is AuditFailuresValue {
+  return value === 'not-applicable'
+    || value === 'unverifiable'
+    || (typeof value === 'number' && Number.isInteger(value) && value >= 0);
+}
+
 export interface ProbeResultRow {
   id: string;
   ok: boolean;
+  /** runner 抛错中止（caseCrashOf 产物）：与 okMode 无关，任何模式都判失败。 */
+  crashed?: boolean;
   dims: DimCounts;
   unclassifiedNotes: number;
+  /**
+   * audited 申报模式的申报失败条数（对**有可核内容**的轮次累计 findings：有平台证据的轮 +
+   * 回复里有金额/申报块的轮——后者无据可核、判红不跳过；整例没有可核轮时记
+   * `'not-applicable'`，检查照出但**不判过**；审计源不可读记 `'unverifiable'`，门判失败）。
+   * 黑盒报告**不带该字段**（旧报告同理）。
+   */
+  auditFailures?: AuditFailuresValue;
   notes: string[];
   turns: Array<{
     text: string;
@@ -92,7 +132,7 @@ export interface ProbeResultRow {
   }>;
 }
 
-export interface ProbeReport { at: string; results: ProbeResultRow[] }
+export interface ProbeReport { at: string; results: ProbeResultRow[]; /** 探针跑在 audited 申报模式（--audit）；旧报告无此字段 = 黑盒。 */ audited?: boolean }
 
 export interface Check { name: string; pass: boolean; expected: string; actual: string }
 export interface CaseVerdict {
@@ -121,6 +161,24 @@ export function loadBaseline(baselinePath: string = BASELINE_PATH): Baseline {
   return baseline;
 }
 
+/**
+ * 判定集 / 跳过集（**单一来源**，导出供单测钉主循环判据）。
+ *
+ * 判定集 = 进基线且非占位；跳过集 = 未进基线或占位。占位条目**即使被误标
+ * `inBaseline:true`** 也不评估——统一报告侧 `unifiedCasePassedOf` 先判 `placeholder`，
+ * score.ts 若只看 `inBaseline` 就会评估它，两侧判定不同源（2026-11-10 独立评审 low）。
+ * 主循环、语料-基线锁与输入面判定都消费本函数，避免过滤条件在两处各写一份后漂移。
+ */
+export function partitionCorpusForScoring(corpus: readonly CorpusEntry[]): {
+  judged: CorpusEntry[];
+  skipped: CorpusEntry[];
+} {
+  return {
+    judged: corpus.filter((entry) => entry.inBaseline && entry.placeholder !== true),
+    skipped: corpus.filter((entry) => !entry.inBaseline || entry.placeholder === true),
+  };
+}
+
 export function corpusVersion(casesPath: string = CASES_PATH): string {
   return createHash('sha256').update(readFileSync(casesPath, 'utf8')).digest('hex').slice(0, 8);
 }
@@ -139,6 +197,36 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
 // ── 逐例判定（纯函数，单测面） ──
 
 /**
+ * audited 申报失败检查（**导出**：探针统一报告的通过率与打分器共用同一实现）。
+ *
+ * 判定只有一处，全部 fail-closed：
+ *   · 缺计数（undefined）= 没跑交叉核的 0 是「不知道」，不是「查过且全过」⇒ 判失败；
+ *   · 数字 ⇒ 对照基线上限（只增才算劣化）；
+ *   · `'unverifiable'`（审计源不可读——有轮次但证据缺席）⇒ 判失败：交叉核缺证据不是
+ *     「不适用」，不能因为同例还有别的干净轮次就把不可核的那一轮放行（2026-11-10 独立评审
+ *     high）；
+ *   · `'not-applicable'`（整例没有一个可核轮——零轮占位/纯闲聊/崩溃无完成轮）⇒ **同样判
+ *     失败**（2026-11-10 评审 2 high）。理由：「没有可核轮」意味着申报交叉核既没跑也没
+ *     过，让它判过就等于"无证据 = 通过"——与本分支既有口径（evidence.ts 的
+ *     mechanicallyPassed：零证据 ⇒ false）相悖。选**失败**而不是第三种"待定"态：Check 只有
+ *     pass 布尔、score/report/统一报告都按它门，引入三态要改整条评分链；actual 写清
+ *     「不适用（整例没有可核轮）」与真实计数失败可区分（可审计性不丢——报告里看得出是
+ *     "没得核"而不是"核出 3 条"）。占位条目（Q5b/Q13b）在判定集外（partitionCorpusForScoring
+ *     跳过、unifiedCasePassedOf 先判 placeholder），不会因此进失败分母。
+ */
+export function auditFailuresCheckOf(auditFailures: AuditFailuresValue | undefined, limit = 0): Check {
+  if (auditFailures === 'not-applicable') {
+    return { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '不适用（整例没有可核轮）' };
+  }
+  if (auditFailures === 'unverifiable') {
+    return { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '不可核（审计源不可读）' };
+  }
+  return typeof auditFailures === 'number'
+    ? { name: 'audited·申报失败', pass: auditFailures <= limit, expected: `≤${limit}`, actual: String(auditFailures) }
+    : { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '缺计数（未跑申报交叉核）' };
+}
+
+/**
  * 探针逐例判定：四层并列，**不替换任何一层**。
  *   ① 四维违例上限（基线 cap，只增才算劣化）
  *   ② 探针自身 ok（strict/free）
@@ -148,6 +236,10 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
  *      B1 的 2000、Y2 的 payable=1000、A2 的 alpha 渗入都是「各自有据所以 cap 放过」的
  *      形态，只有它能变成硬失败。
  * spec 缺 expectations（未审计占位条目）时第四层不出检查——不猜期望值。
+ *
+ * audited=true（探针 --audit 报告）时另加一道并列的「audited·申报失败」门：申报交叉核的
+ * findings 全量 ≤ 基线上限（缺省 0）。它不并入四维（申报失败不是可信度维度），但必须
+ * 有门——否则申报判定只落 unclassified note，对评分零影响（PR #26 评审 blocking）。
  */
 export function evaluateProbeCase(
   corpusId: string,
@@ -155,6 +247,7 @@ export function evaluateProbeCase(
   baselineCase: BaselineCase | undefined,
   judge?: JudgeResult,
   spec?: CaseSpec,
+  audited = false,
 ): CaseVerdict {
   const id = row?.id ?? corpusId;
   if (!row) {
@@ -168,6 +261,19 @@ export function evaluateProbeCase(
     const limit = baselineCase.dims?.[dim] ?? 0;
     const actual = row.dims[dim] ?? 0;
     checks.push({ name: `${DIM_LABELS_ZH[dim]}违例`, pass: actual <= limit, expected: `≤${limit}`, actual: String(actual) });
+  }
+  // audited 申报门（D-206/D-207）：交叉核失败的 note 归不进四维（落 unclassified），只门
+  // 四维会让申报模式的判定输出对评分零影响——错误数据照过。计数是 findings 全量，不枚举
+  // 种类：新增判据自动计入。只对 audited 报告出检查：黑盒没有交叉核判定，不拿 0 冒充
+  // 「查过且全过」。缺计数同样不是 0——没跑交叉核的 0 是「不知道」，按 fail-closed 判红
+  // （2026-11-09 独立评审：此前 ?? 0 让缺列在单行评分面静默变绿）。判定实现在
+  // auditFailuresCheckOf（探针统一报告也吃这一份，不另写）。
+  if (audited) checks.push(auditFailuresCheckOf(row.auditFailures, baselineCase.auditFailures ?? 0));
+  // 崩溃是硬事实，不是 okMode='free' 要容忍的模型方差（2026-11-10 独立评审 medium）：
+  // 旧写法 free 基线不查 ok，崩溃若发生在所有期望轮次之后，四维/期望值层全过 ⇒ 整例
+  // 判 pass。crashed 标记与 ok 分开，free 用例同样判失败。
+  if (row.crashed) {
+    checks.push({ name: '探针未崩溃', pass: false, expected: 'runner 正常完成', actual: 'runner 崩溃（用例未完成）' });
   }
   const okMode = baselineCase.okMode ?? 'strict';
   if (okMode === 'strict') {
@@ -187,15 +293,19 @@ export function evaluateProbeCase(
     }
   }
   // ④ 期望值层（issue 切片 C）：与上面三层并列。期望值只活在判定层，不进任何 prompt。
-  if (spec) checks.push(...expectationChecksOf(spec, row));
+  if (spec) checks.push(...expectationChecksOf(spec, row, audited));
   return { corpusId, id, kind: 'probe', pass: checks.every((check) => check.pass), checks, judge };
 }
 
 /**
  * 探针报告行 → 期望值层检查（**导出**：统一报告的通过率也要吃这一层，2026-11-09 十三审
  * major）。导出而不是在探针里重写一份——判据只能有一个实现，两份必然漂移。
+ *
+ * `audited` = 该报告跑在 audited 申报模式（探针 --audit）：置位时逐轮 reply 含模型追加的
+ * `[audit]…[/audit]` 申报块，期望值层先剥成答案正文再判（见 evaluateCaseExpectations 的
+ * 归一化）。缺省 false = 黑盒报告，逐字进场。
  */
-export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[] {
+export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow, audited = false): Check[] {
   return evaluateCaseExpectations(spec, (row.turns ?? []).map((turn) => ({
     text: turn.text,
     reply: turn.reply,
@@ -203,6 +313,7 @@ export function expectationChecksOf(spec: CaseSpec, row: ProbeResultRow): Check[
     calls: turn.calls,
     refusedCalls: turn.refusedCalls,
     execution: turn.execution ?? [],
+    audited,
   }))).checks;
 }
 
@@ -301,6 +412,11 @@ async function main(): Promise<void> {
   const baseline = loadBaseline(baselinePath);
   const corpusVer = corpusVersion(CASES_PATH);
   const promptVer = judgePromptVersion();
+  // 判定集与跳过集**同源**（2026-11-10 独立评审 low）：占位条目即使被误标 inBaseline:true
+  // 也不评估——`unifiedCasePassedOf` 先判 spec.placeholder，score.ts 若只看 inBaseline 就会
+  // 评估它，两侧判定不同源。占位条目的基线项失配也随之不拦（它本来就不该有基线项）。
+  // 判定集的唯一实现是 partitionCorpusForScoring（单测直接钉主循环判据）。
+  const { judged: judgedEntries, skipped: skippedEntries } = partitionCorpusForScoring(corpus);
 
   // 语料 ⊆ 基线锁：进基线的语料必须有基线项（反向多余项只提示不拦——删语料时基线项随 --write-baseline 清理）。
   // 2026-11-08 修（PR #21 二审 blocking 的过程中发现）：`--write-baseline` 时**不锁**。原写法
@@ -308,8 +424,8 @@ async function main(): Promise<void> {
   // 被删后恢复进 cases.yaml（inBaseline: true），却没有任何 sanctioned 路径能把它的基线项
   // 写进去，只能手改文件（违反"基线只走 --write-baseline"）。锁的用途是防止**拿着陈旧基线
   // 打分**，不是阻止基线自身演进；写基线正是消解失配的那个动作，逻辑上该放行。
-  const missingBaseline = corpus.filter((entry) => entry.inBaseline
-    && (entry.kind === 'probe' ? !(entry.id in baseline.cases) : !(entry.conversation! in baseline.writeChain)));
+  const missingBaseline = judgedEntries.filter((entry) =>
+    entry.kind === 'probe' ? !(entry.id in baseline.cases) : !(entry.conversation! in baseline.writeChain));
   if (missingBaseline.length && !args.writeBaseline) {
     console.error(`语料-基线失配（exit 2）：${missingBaseline.map((entry) => entry.id).join('、')} 进基线但 baseline.json 无对应项`);
     console.error('  （--write-baseline 可消解此失配：把本轮实值写进去；不写基线则先跑 npm run eval:probe）');
@@ -322,9 +438,8 @@ async function main(): Promise<void> {
   const probePath = args.probeReport ?? latestReport(path.join(repoRoot, '.runtime'), 'probe-', '.json');
   const acceptancePath = args.acceptanceReport
     ?? latestReport(path.join(repoRoot, 'data'), 'acceptance-report-', '.json');
-  const inBaseline = corpus.filter((entry) => entry.inBaseline);
-  const needsProbe = inBaseline.some((entry) => entry.kind === 'probe');
-  const needsAcceptance = inBaseline.some((entry) => entry.kind === 'acceptance');
+  const needsProbe = judgedEntries.some((entry) => entry.kind === 'probe');
+  const needsAcceptance = judgedEntries.some((entry) => entry.kind === 'acceptance');
   const missing: string[] = [];
   if (needsProbe && (!probePath || !existsSync(probePath))) missing.push('探针报告（.runtime/probe-*.json；先跑 npm run eval:probe）');
   if (needsAcceptance && (!acceptancePath || !existsSync(acceptancePath))) missing.push('验收报告（data/acceptance-report-*.json；先跑 npm run eval:acceptance）');
@@ -333,6 +448,10 @@ async function main(): Promise<void> {
     process.exit(2);
   }
   const probeReport = JSON.parse(readFileSync(probePath!, 'utf8')) as ProbeReport;
+  // audited 申报模式（探针 --audit）：报告记着自己跑在哪个模式。置位时逐轮 reply 含模型
+  // 追加的申报块，期望值层按答案正文判（D-207 未决一：申报块是机器 annex 不是答案）。
+  // 缺省 false = 黑盒报告（旧报告没有这个字段），逐字进场——模式未知时不猜。
+  const probeAudited = probeReport.audited === true;
   // 格式守卫：L7 之前生成的探针报告没有 dims 字段，静默按零违例通过会制造假绿。
   const staleProbe = probeReport.results.find((result) => !result.dims);
   if (staleProbe) {
@@ -345,6 +464,18 @@ async function main(): Promise<void> {
   );
   if (staleExecution) {
     console.error(`探针报告格式过旧，请重跑：npm run eval:probe（${path.basename(probePath!)} 的 ${staleExecution.id} 缺 execution/calls 列）（exit 2）`);
+    process.exit(2);
+  }
+  // 格式守卫：audited 报告必须逐行带申报失败计数或用显式不适用状态（本门落地前的
+  // audited 报告没有这一列）。缺列按 0 过门会把「没跑交叉核」读成「查过且全过」——正是
+  // 申报失败门要堵的假绿；但零轮占位 / 崩溃 / 纯闲聊轮不该被写成 0（评审修复），
+  // 用 `'not-applicable'` 显式表达，守卫接受该状态（判据在 validAuditFailuresValue，
+  // 单测直接钉它，不靠跑 main 才能验证）。
+  const staleAudit = probeReport.audited === true
+    ? probeReport.results.find((result) => !validAuditFailuresValue(result.auditFailures))
+    : undefined;
+  if (staleAudit) {
+    console.error(`audited 报告缺申报失败计数，请重跑：npm run eval:probe -- --audit（${path.basename(probePath!)} 的 ${staleAudit.id} 无 auditFailures 列）（exit 2）`);
     process.exit(2);
   }
   const acceptanceJson = JSON.parse(readFileSync(acceptancePath!, 'utf8')) as {
@@ -365,7 +496,7 @@ async function main(): Promise<void> {
     cases.find((item) => (item.kind === 'probe' ? item.id === entry.case : item.id === entry.id));
 
   const verdicts: CaseVerdict[] = [];
-  for (const entry of inBaseline) {
+  for (const entry of judgedEntries) {
     if (entry.kind === 'probe') {
       const row = probeReport.results.find((result) => result.id === entry.case);
       let judgeResult: JudgeResult | undefined;
@@ -376,15 +507,14 @@ async function main(): Promise<void> {
           turns: row.turns.map((turn) => ({ user: turn.text, reply: turn.reply, notices: turn.notices })),
         });
       }
-      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry)));
+      verdicts.push(evaluateProbeCase(entry.id, row, baseline.cases[entry.id], judgeResult, specOf(entry), probeAudited));
     } else {
       const facts = acceptanceJson.writeChain.find((item) => item.conversationId === entry.conversation);
       verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!], specOf(entry), acceptanceJson.records));
     }
   }
-  const skipped = corpus.filter((entry) => !entry.inBaseline);
-  for (const entry of skipped) {
-    verdicts.push({ corpusId: entry.id, id: entry.id, kind: entry.kind, pass: true, checks: [], note: '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
+  for (const entry of skippedEntries) {
+    verdicts.push({ corpusId: entry.id, id: entry.id, kind: entry.kind, pass: true, checks: [], note: entry.placeholder === true ? '未审计占位（不猜判定）' : '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
   }
 
   for (const verdict of verdicts) {
@@ -395,7 +525,7 @@ async function main(): Promise<void> {
   }
   const judged = verdicts.filter((verdict) => verdict.pass && !verdict.note);
   const failed = verdicts.filter((verdict) => !verdict.pass);
-  console.log(`\n汇总：${judged.length}/${inBaseline.length} 通过${failed.length ? `；回归：${failed.map((verdict) => verdict.id).join('、')}` : ''}`);
+  console.log(`\n汇总：${judged.length}/${judgedEntries.length} 通过${failed.length ? `；回归：${failed.map((verdict) => verdict.id).join('、')}` : ''}`);
 
   // 记分台：每轮追加一行（含评委证据）。回归也落账——台账引用的是这里的轨迹。
   appendFileSync(SCORES_PATH, JSON.stringify({
@@ -454,9 +584,17 @@ function writeBaselineFrom(
       const judgeScores = verdict.judge
         ? Object.fromEntries(NOTE_DIMS.map((dim) => [dim, verdict.judge!.scores[dim]])) as BaselineCase['judge']
         : previous?.judge ?? null;
+      // audited 申报失败上限随本轮实值重定（与 dims 同口径：只增才算劣化）。黑盒轮不出这个
+      // 检查——缺席不能被写成 0（那会把「没查过」烤成「查过且全过」），保留前值；显式
+      // 不适用（actual=不适用）同样保留前值，不把 "not-applicable" 烤成数字。
+      const auditCheck = verdict.checks.find((check) => check.name === 'audited·申报失败');
+      const auditFailures = auditCheck && /^\d+$/.test(auditCheck.actual)
+        ? Number(auditCheck.actual)
+        : previous?.auditFailures;
       next.cases[verdict.corpusId] = {
         dims,
         ...(judgeScores ? { judge: judgeScores } : {}),
+        ...(auditFailures !== undefined ? { auditFailures } : {}),
         ...(previousOkMode === 'free' ? { okMode: 'free' as const } : {}),
         ...(previous?.note ? { note: previous.note } : {}),
       };

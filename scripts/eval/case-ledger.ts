@@ -55,10 +55,24 @@ interface CaseStats {
   source: CaseSource;
   runs: number;
   platformCalls: number;
+  /**
+   * 平台调用数不可知的跑次（`platformCalls:-1` = 审计源不可读）。-1 是不可知哨兵，
+   * 不是计数：旧写法直接加进 platformCalls 会让合计倒扣（2026-11-10 独立评审 medium）；
+   * 跳过又会让"不可知"看起来像"零"——单列一列，与 tokenSkipped 同一纪律。
+   */
+  callSkipped: number;
   tokenSum: number;
   tokenSkipped: number;
   notes: Set<string>;
   nonOk: number;
+}
+
+/**
+ * 平台调用数的已知值：`-1`（审计源不可读）与缺失/非数字都是 `undefined`——不可知哨兵
+ * 不是计数。导出供单测钉住（2026-11-10 独立评审 medium：旧写法把 -1 直接加进合计）。
+ */
+export function knownPlatformCalls(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function sumTokens(r: ProbeResult): number | undefined {
@@ -130,11 +144,15 @@ function aggregateProbes(files: ProbeFile[]): Map<CaseKey, CaseStats> {
       const key = r.id;
       let stats = map.get(key);
       if (!stats) {
-        stats = { source: 'probe', runs: 0, platformCalls: 0, tokenSum: 0, tokenSkipped: 0, notes: new Set(), nonOk: 0 };
+        stats = { source: 'probe', runs: 0, platformCalls: 0, callSkipped: 0, tokenSum: 0, tokenSkipped: 0, notes: new Set(), nonOk: 0 };
         map.set(key, stats);
       }
       stats.runs += 1;
-      stats.platformCalls += typeof r.platformCalls === 'number' ? r.platformCalls : 0;
+      // -1 / 缺失 = 调用数不可知：不计入合计（旧写法把 -1 加进去会让合计倒扣），
+      // 单列 callSkipped 与 tokenSkipped 同口径。
+      const calls = knownPlatformCalls(r.platformCalls);
+      if (calls === undefined) stats.callSkipped += 1;
+      else stats.platformCalls += calls;
       const tokens = sumTokens(r);
       if (tokens === undefined) {
         stats.tokenSkipped += 1;
@@ -158,7 +176,7 @@ function aggregateAcceptance(entries: AcceptanceEntry[]): Map<CaseKey, CaseStats
     const key = dot > 0 ? entry.id.slice(0, dot) : entry.id;
     let stats = map.get(key);
     if (!stats) {
-      stats = { source: 'acceptance', runs: 0, platformCalls: 0, tokenSum: 0, tokenSkipped: 0, notes: new Set(), nonOk: 0 };
+      stats = { source: 'acceptance', runs: 0, platformCalls: 0, callSkipped: 0, tokenSum: 0, tokenSkipped: 0, notes: new Set(), nonOk: 0 };
       map.set(key, stats);
     }
     stats.runs += 1;
@@ -181,17 +199,17 @@ function renderMarkdown(probeMap: Map<CaseKey, CaseStats>, accMap: Map<CaseKey, 
   lines.push('');
   lines.push('## Probe 用例聚合');
   lines.push('');
-  lines.push('| 用例 | 跑次数 | 平台调用合计 | token 合计 | token 跳过跑次 | 不同 note 数 | 非 ok 次数 |');
-  lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: |');
+  lines.push('| 用例 | 跑次数 | 平台调用合计 | 调用数不可知跑次 | token 合计 | token 跳过跑次 | 不同 note 数 | 非 ok 次数 |');
+  lines.push('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |');
   const probeKeys = Array.from(probeMap.keys()).sort((a, b) => a.localeCompare(b));
   for (const key of probeKeys) {
     const s = probeMap.get(key)!;
     lines.push(
-      `| ${key} | ${s.runs} | ${s.platformCalls} | ${s.tokenSum} | ${s.tokenSkipped} | ${s.notes.size} | ${s.nonOk} |`
+      `| ${key} | ${s.runs} | ${s.platformCalls} | ${s.callSkipped} | ${s.tokenSum} | ${s.tokenSkipped} | ${s.notes.size} | ${s.nonOk} |`
     );
   }
   if (probeKeys.length === 0) {
-    lines.push('| （无数据） | | | | | | |');
+    lines.push('| （无数据） | | | | | | | |');
   }
   lines.push('');
   lines.push('## Acceptance Report 聚合');
@@ -214,6 +232,7 @@ function renderMarkdown(probeMap: Map<CaseKey, CaseStats>, accMap: Map<CaseKey, 
   lines.push('说明：');
   lines.push('- Probe 数据来自 `.runtime/probe-*.json`，按 `results[].id` 聚合。');
   lines.push('- Acceptance 数据来自 `data/acceptance-report-*.json`，按 `id` 前缀聚合（如 `5.1` → `5`）。');
+  lines.push('- 平台调用合计只统计已知计数（`platformCalls >= 0`）；`-1`/缺失 = 审计源不可读，计入"调用数不可知跑次"，不当 0 也不倒扣合计。');
   lines.push('- token 合计仅统计 `tokens.main.total + tokens.worker.total`，缺失该字段的跑次计入"token 跳过跑次"。');
   lines.push('- 非 ok 次数 = `ok !== true` 的跑次。');
   return lines.join('\n');

@@ -136,11 +136,27 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          # 仅为拉取历史评审提供令牌（私有仓库匿名读会 401，降级分支会让历史恒空）。
+          # codex 启动前的 unset 隔离不动——审查代理本身永远拿不到 GitHub 凭证。
+          GH_TOKEN: ${{ github.token }}
+          THIS_REPO: ${{ github.repository }}
           CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           CODEX_EFFORT: ${{ vars.CODEX_EFFORT }}
         run: |
           set -euo pipefail
-          node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
+          # 本 PR 历次审查 findings（打地鼠检查的历史依据）：没有它，审查者无法识别"同一族
+          # 问题的第 N 个实例"。拉取失败不阻塞审查——降级为无历史，提示词段自然缺席。
+          # --slurp：--paginate 的多页合并成单个 JSON 数组（build-prompt 侧 flat 展开）——
+          # 固定一页会只拿到最旧的评审，最近修复轮次被漏掉（codex 2026-11-10 minor）。
+          if ! gh api --paginate --slurp "repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" > "$RUNNER_TEMP/prior-reviews.json" 2>"$RUNNER_TEMP/prior-reviews.err"; then
+            {
+              echo "### 历史评审拉取失败"
+              echo
+              echo "审查降级为无历史（打地鼠检查失去历史依据，其余判据不受影响）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '[]' > "$RUNNER_TEMP/prior-reviews.json"
+          fi
+          PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
           cmd=(
             codex
             -a never

@@ -1,14 +1,17 @@
 /**
  * dummy 夹具事实表（探针与金额判据共用的**单一转录点**）。
  *
- * 这里只放"夹具种子是什么"的事实：collection 目录、items、值、window 结构。全部逐条
- * 抄自 scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的 seedState()（collections[*]
- * 的 items/windows/locked），不臆造；改动任何数字前先重读夹具种子。判据语义（怎么用
- * 这些事实判）归 amount-criteria.ts 与探针各 helper，本模块不做判定。
+ * 这里只放"夹具种子是什么"的事实：collection 目录、items、值、window 结构。除
+ * MOCK_ABSENT_COLLECTIONS（用例查询过、平台答过 not_found 的对象名——case 级事实，见
+ * 那里）外，全部逐条抄自 scripts/eval/fixtures/dummy-platform/bin/dummy.cjs 的
+ * seedState()（collections[*] 的 items/windows/locked），不臆造；改动任何数字前先重读
+ * 夹具种子。判据语义（怎么用这些事实判）归 amount-criteria.ts 与探针各 helper，本模块
+ * 不做判定。
  *
  * 抽成独立模块的原因（2026-11-07 评审 blocking：错误态实体绑定要有变异测试）：探针
- * scripts/probe-real-agent.ts 顶层就跑 main()（真实 LLM 装配），测试无法 import；把
- * 事实表与纯判据抽到这里后，amount-criteria.test.ts 才能把评审的反例形态钉成表征锁。
+ * scripts/probe-real-agent.ts 已有入口守卫（import 不跑 main()），但它仍会拖入真实装配
+ * 链；把事实表与纯判据抽到这里后，amount-criteria.test.ts 只 import 判定本身，就能把
+ * 评审的反例形态钉成表征锁。
  */
 
 /** mock collection目录（seedState 全部 9 个 collection，empty-one 曾漏收——2026-11-08 评审）：
@@ -124,10 +127,29 @@ export const MOCK_ITEM_VALUES: Readonly<Record<string, number>> = {
 export const REAL_DATA_VALUES: readonly number[] = [...new Set(Object.values(MOCK_ITEM_VALUES))];
 
 /**
+ * 用例查询过的**不存在对象名**（2026-11-09 仲裁 2 收口：case 级已知事实，不是词法猜测）：
+ * Y2 第 1 轮（cases.yaml 的 A4 / Y2 T0）只查目录找一个平台上没有的 collection——
+ * gamma-collection。夹具对它的确定性答案是 not_found（candidates 为空，见 dummy.cjs
+ * resolveCollection 的 COLLECTION_NOT_FOUND 分支），因此"gamma-collection 有任何非零值"
+ * 在任何 window 下都是假的。
+ *
+ * 为什么登记成表而不是靠词法猜：把金额挂给一个**平台已答不存在**的名字，与挂给 empty-one
+ * （存在但零值）同属假归属，都应被既有绑定判据收口（values.includes 恒假 ⇒ misbound）。
+ * 但"哪个名字不存在"只有用例查询历史知道——模型回复里任意一个陌生 token 没有外部事实
+ * 可对，词法猜测（连字符/下划线形状）会把 well-known、rec-XXX 这种普通复合词与申报
+ * 指令占位符一起吞进来，在共享黑盒路径上造假红。故只登记**用例真的查过、平台真的答了
+ * not_found** 的名字；凭空名字（foo-item-1 之类）不登记、不进最近前置绑定（正文用显式
+ * 归属措辞挂给它时，amount-criteria 的 unregisteredAttribution 单列一维）。
+ */
+export const MOCK_ABSENT_COLLECTIONS: readonly string[] = ['gamma-collection'];
+
+/**
  * 实体绑定表（2026-11-07 评审 blocking：错误态金额不能只对全局数值集核对）：collection →
  * 该 collection 各 item 的真实值；item 名 → 单值；**记录号 → 该记录的真实值**（第三维，
- * MOCK_ITEM_ID_BINDINGS——见那里的 blocking ③ 记录）。empty-one 空数组——点名 empty-one 的
- * 任何非零金额都无据。分句点名了表中实体时，金额必须属于**该实体**——
+ * MOCK_ITEM_ID_BINDINGS——见那里的 blocking ③）；**不存在对象名 → 空值集**（第四维，
+ * MOCK_ABSENT_COLLECTIONS——见那里的仲裁 2 记录）。empty-one 与 gamma-collection 都是
+ * 空值集：点名它们的任何非零金额都无据（一个是存在但零命中，一个是平台答过不存在）。
+ * 分句点名了表中实体时，金额必须属于**该实体**——
  * "beta payable balance is 1200"（1200 是 alpha 的真实值，beta 真实 500/300/200）按全局
  * 核对会放行，按实体绑定照红。这就是评审要的"按实际查询证据核对实体与数值"：夹具种子
  * 即平台真实数据面，回复里的数与点名实体的种子值对不上，就是没有查询证据支撑。
@@ -140,6 +162,9 @@ export const ENTITY_REAL_VALUES: ReadonlyArray<{ name: string; values: readonly 
   ...Object.entries(MOCK_ITEM_VALUES).map(([item, value]) => ({ name: item, values: [value] })),
   // 记录号维度：点名 rec-101 = 点名 beta 的那条 500 记录（blocking ③）。
   ...Object.entries(MOCK_ITEM_ID_BINDINGS).map(([id, binding]) => ({ name: id, values: [binding.value] })),
+  // 不存在对象维度：用例查过、平台答过 not_found 的名字登记为零值实体（仲裁 2）——
+  // 挂任何非零金额都是假归属，与 empty-one 同走"点名实体而金额不属于它"的判据。
+  ...MOCK_ABSENT_COLLECTIONS.map((name) => ({ name, values: [] as readonly number[] })),
 ];
 
 /**

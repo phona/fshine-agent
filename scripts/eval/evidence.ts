@@ -65,6 +65,38 @@ export interface ExecutionAuditRow {
   callId?: string;
   /** 起止两行中的哪一行：`start` = 调用已发出、结果未知；`result` = 最终结果。 */
   phase?: 'start' | 'result';
+  /**
+   * query 类调用实际返回的响应载荷（2026-11-09 audited 申报模式交叉核的事实基准）。
+   * 夹具在 query 的 completed / not_found / needs_input 三种确定性答案上都把**该次**结果
+   * 状态写进 `result.status`，completed 另带该次返回的 items/count/fields（fields = 平台原始
+   * 字段名，nocaliber 命题的事实源），使"回复里的数平台
+   * 确实拉回过"与"平台确实说过 not_found"可以独立核对，不再只靠模型自述传递（空数组 +
+   * count 0 也是真答案：平台拉回过、只是没有数据）。被拒/失败（行内无 queryResult）的行
+   * 不带这个字段——那些调用没有可申报的结果。字段缺席 = 没写过，不是假；旧日志没有
+   * status 时，带 items 的行按 completed 读。
+   * stock 夹具的域字段是 sku/qty，落账时按同一契约投影成 name/value；平台原始字段名
+   * （投影前）单列在 `fields`，供 nocaliber 命题核对——只看投影后的 items 会把
+   * `nocaliber(north, sku)` 假过（sku 正是被投影掉的原始字段）。
+   *
+   * **该次查询的对象规范名**（2026-11-10 codex blocking 二）：执行层把这次查询是关于哪个
+   * 对象写进 result 的**一个字符串字段**，字段名是执行层自己的词汇（dummy/ballot 的
+   * `collection`、stock 的 `shelf`），completed 落解析后的规范名、not_found/needs_input 落
+   * 该次检索的名字。交叉核（audit-declaration 的 queryRowsForCollection）按它关联命题的
+   * collection，**不扫 args**：args 是调用参数、一次调用可以带多个值，result 才是平台
+   * 落账的真相。索引签名让新执行层无需改本契约即可带上自己的对象名字段；交叉核不认键名，
+   * 只认"这个 result 自己声明它关于哪个对象"。契约键（status/items/count/fields）不参与
+   * 身份关联。
+   */
+  result?: {
+    /** 查询结果状态：completed / not_found / needs_input（旧日志可能缺席）。 */
+    status?: 'completed' | 'not_found' | 'needs_input';
+    items?: Array<{ id?: string; name?: string; value?: number }>;
+    count?: number;
+    /** 平台原始 items 的字段名（completed 时由夹具落账；旧日志/空结果可能缺席）。 */
+    fields?: string[];
+    /** 执行层自己的对象规范名字段（dummy/ballot=collection、stock=shelf；键名不参与判定）。 */
+    [identity: string]: unknown;
+  };
 }
 
 /**
@@ -406,6 +438,7 @@ export function messageLadderRung(entries: readonly CallLadderEntry[]): LadderRu
 
 /** issue 验收的最小聚合指标：通过率、干预次数、门拒绝次数、安全违规、耗时 / Token。 */
 export interface AggregateMetrics {
+  /** 评分分母内的用例数（pass 缺席的跳过用例不计）；遥测字段覆盖全部在册用例（含跳过）。 */
   cases: number;
   passed: number;
   /** passed / cases（cases=0 时 0，不造 100%）。 */
@@ -432,7 +465,12 @@ export interface AggregateMetrics {
 /** 聚合输入：每用例一行（通过与否、阶梯、干预停点、耗时、token）。 */
 export interface MetricCaseInput {
   caseId: string;
-  pass: boolean;
+  /**
+   * 是否通过评分；`undefined` = 未进评分分母（跳过：占位条目 / 未进基线）——**遥测照常
+   * 计入**。2026-11-10 codex major：曾用"跳过即整个用例出聚合"实现，只跑非基线用例时
+   * 汇总耗时/token/门拒绝全为零，把跑过的事实丢掉；分母与遥测必须分流。
+   */
+  pass?: boolean;
   /** 该用例的证据链（可空：用例整体没跑起来时也要进聚合）。 */
   evidence?: MessageEvidenceChain;
   ladder: ReadonlyArray<CallLadderEntry>;
@@ -449,12 +487,19 @@ export interface MetricCaseInput {
 
 export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
   let passed = 0;
+  let scored = 0;
   let interventions = 0;
   let gateRefusals = 0;
   let durationMs = 0;
   let tokens: number | undefined;
   for (const item of cases) {
-    if (item.pass) passed += 1;
+    // 评分分母与全量遥测分流（2026-11-10 codex major）：pass 缺席 = 跳过（占位/未进
+    // 基线），不进 cases/passed/passRate；耗时/token/干预/门拒绝照计——"没进基线"
+    // 不代表"没跑"，把跑过的遥测丢掉会让只跑非基线用例的汇总呈零。
+    if (item.pass !== undefined) {
+      scored += 1;
+      if (item.pass) passed += 1;
+    }
     interventions += item.interventionPoints;
     durationMs += item.durationMs;
     if (item.tokens !== undefined) tokens = (tokens ?? 0) + item.tokens;
@@ -470,9 +515,9 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     gateRefusals += hostGateErrors;
   }
   return {
-    cases: cases.length,
+    cases: scored,
     passed,
-    passRate: cases.length === 0 ? 0 : passed / cases.length,
+    passRate: scored === 0 ? 0 : passed / scored,
     interventions,
     gateRefusals,
     // 无证据源 ⇒ null（未测），不是 0。报告侧渲染成"未测"而非"0 违规"——

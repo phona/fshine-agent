@@ -9,8 +9,8 @@
  * 判据（机械部分可复算，语义部分尽力而为）：
  *   - delegate 轮：该轮 turns[i].calls >= 1。平台调用只发生在 worker 会话里，calls>=1
  *     即本轮发生过委派（与 analyze.ts 的"委派边界边际 = 1调用−0调用"同一口径）。
- *     calls 字段缺失的轮次（2026-09-25 旧批次，25 个文件）机械上不可判定，跳过并单独
- *     报数——宁少报不多报。
+ *     calls 字段缺失（2026-09-25 旧批次，25 个文件）或 -1（审计源不可读）的轮次机械上
+ *     不可判定，跳过并单独报数（不混进"轮可判定"分母）——宁少报不多报。
  *   - 可合并对（机械）：同一探针 result 内，相邻两轮 i、i+1 都是 delegate 轮。一段连续
  *     delegate 轮的首轮是合法边界，其后每一轮都是"非首连续段"——为同任务重复开了边界。
  *   - 语义分层（尽力而为，只影响细分类别、不影响机械对数）：看 i+1 轮的用户消息——
@@ -90,7 +90,7 @@ interface Scan {
   results: number;
   judgedTurns: number;
   delegateTurns: number;
-  unjudgedTurns: number; // calls 字段缺失（旧批次），机械不可判定
+  unjudgedTurns: number; // calls 字段缺失（旧批次）或 -1（审计源不可读），机械不可判定
   pairs: Pair[];
 }
 
@@ -110,14 +110,19 @@ function scan(): Scan {
       const earlierTexts: string[] = [];
       let prevDelegateIdx: number | null = null; // 连续段里的上一 delegate 轮（0 起）；非 delegate 轮断开连续段
       turns.forEach((t, idx) => {
-        out.judgedTurns++;
-        const isDelegate = (t.calls ?? 0) >= 1;
-        if (t.calls === undefined) {
-          // calls 缺失 = 旧批次没记平台调用数：不可判定，且打断连续段（宁少报不多报）
+        // calls 缺失（旧批次）或 -1（审计源不可读）= 不可判定，不当 0（旧写法
+        // `(t.calls ?? 0) >= 1` 把 -1 记成确定的非委派轮，2026-11-10 独立评审 medium）。
+        // 不可判定轮只进 unjudgedTurns，不进"轮可判定"分母（2026-11-10 独立评审 low：
+        // 旧写法在分支前自增 judgedTurns，报告会出现"可判定 + 不可判定 > 实际轮数"）。
+        // 不可判定轮打断连续段（宁少报不多报）。
+        const calls = typeof t.calls === 'number' && t.calls >= 0 ? t.calls : undefined;
+        if (calls === undefined) {
           out.unjudgedTurns++;
           prevDelegateIdx = null;
           return;
         }
+        out.judgedTurns++;
+        const isDelegate = calls >= 1;
         if (isDelegate) {
           out.delegateTurns++;
           if (prevDelegateIdx !== null) {
@@ -142,7 +147,7 @@ function report(s: Scan): void {
   if (!s.files) { console.log('── 委派边界：.runtime 下没有探针 json，跳过（先跑 eval:probe）──'); return; }
   console.log('── 委派边界量化（同任务追加查询：扩当前计划 vs 新开委派）──');
   console.log(`数据：${s.files} 个探针文件 / ${s.results} 个 result / ${s.judgedTurns} 轮可判定`
-    + (s.unjudgedTurns ? `（另有 ${s.unjudgedTurns} 轮无 calls 字段，2026-09-25 旧批次，跳过）` : ''));
+    + (s.unjudgedTurns ? `（另有 ${s.unjudgedTurns} 轮调用数不可知——calls 缺失或 -1，跳过）` : ''));
 
   console.log(`\n总边界数（delegate 轮，每次开 worker 会话 ≈ +${BOUNDARY_COST_S}s）：${s.delegateTurns}`);
   console.log(`可合并对数（机械判据：同一 result 内相邻 delegate-delegate，"非首连续段"）：${s.pairs.length}`);

@@ -213,22 +213,38 @@ function findShelf(state, keyword) {
   if (matches.length > 1) return { ambiguous: matches };
   return { none: true };
 }
+// 返回 { code, result }（2026-11-09 audited 申报模式）：result 在 completed / needs_input /
+// not_found 三种确定性答案上都带**该次 query 的实际结果状态**（result.status），completed
+// 另带该次返回的 items/count/fields，由调用方写进审计行的 result 字段——audited 申报模式交叉核的
+// 事实基准（"回复里的数平台确实拉回过"与"平台确实说过 not_found"都要能独立核对，不能只靠
+// 模型自述传递）。failed/被拒没有可申报的结果，返回的 code 不带 result，审计行因此也不会
+// 出现载荷。
+// 三种状态都带**该次查询的对象规范名**（result.shelf：2026-11-10 codex blocking 二，dummy
+// 的同款字段叫 collection）：args 是调用参数、一次调用可以带多个值，交叉核若扫 args 会把
+// 这次查询的字段证据当成另一个对象的证据。对象名由平台自己落账——completed 落解析后的
+// 规范名（found.name，子串检索也落 canonical 名），not_found / needs_input 落该次检索的
+// 名字。不落对象名的 result 匹配不上任何命题 ⇒ 交叉核 fail-closed。
+// stock 域字段是 sku/qty，按交叉核的同一契约投影成 { id, name, value }：不投影的话，按
+// value 找数的核对对 stock 行永远空手（响应里明明是 qty，审计行却查不到值）。
 function doQuery(opName, args) {
-  if (breakerOpen()) { emit(opName, 'failed', null, { code: 'BREAKER_OPEN', message: 'Breaker is open; reset it before querying' }); return 1; }
+  if (breakerOpen()) { emit(opName, 'failed', null, { code: 'BREAKER_OPEN', message: 'Breaker is open; reset it before querying' }); return { code: 1 }; }
   const { flags } = parseFlags(args);
   const state = loadState();
-  if (!flags.shelf || typeof flags.shelf !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --shelf')); return 1; }
+  if (!flags.shelf || typeof flags.shelf !== 'string') { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --shelf')); return { code: 1 }; }
   const found = findShelf(state, flags.shelf);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return 0; }
-  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches "${flags.shelf}"`)); return 0; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: flags.shelf, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('SHELF_AMBIGUOUS', `More than one shelf matches "${flags.shelf}"`)); return { code: 0, result: { status: 'needs_input', shelf: flags.shelf } }; }
+  if (found.none) { emit(opName, 'not_found', { query: flags.shelf, candidates: [] }, errObj('SHELF_NOT_FOUND', `No shelf matches that keyword. Check the exact shelf name and retry.`)); return { code: 0, result: { status: 'not_found', shelf: flags.shelf } }; }
   const col = found.exact;
   if (flags.batch && !col.batches.includes(flags.batch)) {
     emit(opName, 'not_found', { query: flags.shelf, batch: flags.batch, availableBatches: col.batches }, errObj('BATCH_NO_DATA', `Batch ${flags.batch} has no data for shelf ${found.name}`));
-    return 0;
+    return { code: 0, result: { status: 'not_found', shelf: found.name } };
   }
   // Zero is a real answer: empty-shelf returns completed with count 0, never not_found.
-  emit(opName, 'completed', { shelf: found.name, batch: flags.batch ?? null, items: col.items, count: col.items.length }, null);
-  return 0;
+  const items = col.items;
+  emit(opName, 'completed', { shelf: found.name, batch: flags.batch ?? null, items, count: items.length }, null);
+  // fields = 平台原始 items 的字段名（id/sku/qty）——items 按 value 核对契约投影成
+  // { id, name, value }，若字段名也只看投影，nocaliber(north, sku) 会假过。
+  return { code: 0, result: { status: 'completed', shelf: found.name, items: items.map((it) => ({ id: it.id, name: it.sku, value: it.qty })), count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);
@@ -618,7 +634,8 @@ async function main() {
     const requirePlan = env2('STOCK_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
-    if (op.name === 'stock.query') code = doQuery(op.name, rest);
+    let queryResult;
+    if (op.name === 'stock.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
     else if (op.name === 'stock.scratch') code = doScratch(op.name, rest);
     else if (op.name === 'stock.prepare') code = doPrepare(op.name, rest);
     else if (op.name === 'stock.commit') {
@@ -639,7 +656,10 @@ async function main() {
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
-    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined });
+    // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
+    // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
+    // 行没有 queryResult，不带 result。
+    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {

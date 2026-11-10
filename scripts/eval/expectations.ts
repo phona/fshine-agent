@@ -7,6 +7,7 @@ import {
   extractAmounts,
   isVerifiedArithmetic,
 } from './amount-criteria';
+import { classifyAuditDeclaration, stripAuditDeclaration } from './audit-declaration';
 import type {
   CaseExpectations,
   CaseSpec,
@@ -24,8 +25,9 @@ import type { ExecutionAuditRow } from './evidence';
  *   ② 溯源性 + 算术（amountNote / amount-criteria）—— 数字有没有来源、算不算得出来
  *   ③ 审计行为核对（calls / refused / 风暴）   —— 有没有真委派
  *   ④ 本层（期望值）                          —— **应该报什么**：该报的值集合、条数、
- *      collection、逐线程真值、跨线程隔离、总结收敛，加三个过程不变量（门禁时序 /
- *      无风暴 / 大额行归属）
+ *      collection、逐线程真值、跨线程隔离、总结收敛，加实体键归属（吃 amount-criteria 的
+ *      misattributed 硬失败归属信号——派生合计不算、window 无效算；不是值集子集的字面
+ *      检查）与三个过程不变量（门禁时序 / 无风暴 / 大额行归属）
  *
  * 为什么需要第四层：前三层判「数字有没有来源」，不判「来源对不对得上这个用例的期望」。
  * 已发生的三个缺陷全是从这个缝里过去的——B1 五轮里两轮多报一个 2000（每轮各自都有据，
@@ -80,6 +82,24 @@ export interface ExpectationTurn {
   ms?: number;
   /** 该轮审计窗口内的执行层审计行（过程不变量的取数面）。 */
   execution?: ExecutionAuditRow[];
+  /**
+   * 本轮跑在 audited 申报模式（探针 --audit）。置位时 `reply` 含模型追加的
+   * `[audit]…[/audit]` 申报块，判定前先剥成答案正文（见 evaluateCaseExpectations 的归一化）。
+   * 缺省/ false = 黑盒模式：`reply` 逐字就是答案，一个字符都不动。
+   */
+  audited?: boolean;
+}
+
+/**
+ * 归一化后的判定输入（内部形状）：`reply` 已是**答案正文**（audited 轮次剥掉申报块），
+ * `declared` 记申报块里**引用行**（`值 <- 记录号`）申报过的值——"无所属"判定的豁免面：
+ * 申报块正是为补归属而注入的，引用行申报过的值不再算无所属（与探针 errorStateNotes 的
+ * audit 分支同口径）。`:=` 行**不进来**：audit-declaration 的交叉核负责验算 `:=`（
+ * operationMismatch），期望值层不重复验算；申报只证明加数有出处，不证明这个结果值该报
+ * （2026-11-09 PR #26 评审 major）。
+ */
+interface JudgedTurn extends ExpectationTurn {
+  declared?: ReadonlySet<number>;
 }
 
 // ── 形状正则（第四层自持的一套，见文件头「刻意的冗余」）──
@@ -121,7 +141,8 @@ function linesWith(reply: string, value: number): string[] {
     && new RegExp(`(?<![\\d.,%％])${amountValuePattern(value)}(?!\\d)`).test(line));
 }
 
-function turnOf(turns: readonly (ExpectationTurn | undefined)[], index: number): ExpectationTurn | undefined {
+/** 按下标取轮（泛型保住调用方的窄类型：归一化后的 JudgedTurn 带 declared，别在这丢）。 */
+function turnOf<T extends ExpectationTurn>(turns: readonly (T | undefined)[], index: number): T | undefined {
   return turns[index];
 }
 
@@ -134,14 +155,46 @@ function turnOf(turns: readonly (ExpectationTurn | undefined)[], index: number):
  * `pass=false`，而 acceptance 取数面从来就不载 calls，这条红永远不可能被修好。
  * 判据纪律因此是：无证据**不出判定**（不造零，也不造成功），与 score.ts 对
  * execution 依赖型过程不变量的同一惯例（`evaluateWriteChainCase` 头注释）。
+ *
+ * 负数是探针的**不可知哨兵**（`auditMissing` 时 calls/refusedCalls 记 -1，见
+ * probe-real-agent 的 Turn 注释）：它同样不是证据——旧写法把 -1 原样返回，
+ * minExecutedCalls 会拿 -1 与阈值比较报"已执行调用不足"（假红），requeryPerTurn /
+ * chitchatZeroCalls 则因 -1 既不是 0 也不大于 0 而静默放过（假绿）。两种方向都错，
+ * 这里统一收口成 undefined（2026-11-10 独立评审 medium）。
  */
 function callsEvidenceOf(turn: ExpectationTurn | undefined): number | undefined {
-  return turn?.calls;
+  const calls = turn?.calls;
+  return calls === undefined || calls < 0 ? undefined : calls;
 }
 
 // ── ① 短用例期望值 ──
 
-function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
+/**
+ * 申报豁免（窄，2026-11-09 PR #26 评审 major）：一个"无所属"值只有在
+ *   ① 由**引用行**（`值 <- 记录号`）申报过（`declared` 只收引用行，见归一化），且
+ *   ② 不属于 `verdict.misattributed`（正文把它挂给了不属于它的实体/window），也不属于
+ *      `verdict.unregisteredAttribution`（正文用显式措辞挂给未登记名字）
+ * 两个条件同时成立时，才从 `forbidCaliberValues` 豁免。
+ *
+ * 这与探针 errorStateNotes 的 audit 分支同口径：交叉核只核「数 ↔ 记录号在 result.items
+ * 里的 value」，补的是"完全没有归属"；"挂给谁"（张冠李戴）留在原判据上。PR #26 原实现
+ * 把所有已申报值一律豁免，于是正文把 beta 的 500 挂给 alpha-item-1、再如实申报
+ * `500 <- rec-101` 就能把张冠李戴一起洗白——这里把豁免面收窄回交叉核真正覆盖的那一半，
+ * 并在 shortCaseChecks 里把 misattributed 单列成硬失败（它不能被 forbidCaliberValues
+ * 的声明范围限制：Y2 只禁 1000，500 的张冠李戴同样必须红）。
+ *
+ * `:=` 行申报的值不豁免：audit-declaration 的交叉核验算 `:=`（operationMismatch），
+ * 期望值层不重复验算；申报只证明加数有出处，不证明这个结果值该报。
+ *
+ * **轮次适当性不在本豁免面**：not_found / 禁值轮的 `forbidValues` 与
+ * `notFoundZeroAmounts` 不看 `declared`——申报证明"数有出处"，不证明"这轮该说"。
+ * 真实值出现在不该给数的轮次，即使申报属实也照红（2026-11-09 PR #26 评审 major）。
+ */
+function declaredExempt(value: number, turn: JudgedTurn, attributionBad: ReadonlySet<number>): boolean {
+  return (turn.declared?.has(value) ?? false) && !attributionBad.has(value);
+}
+
+function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined)[]): ExpectationViolation[] {
   const out: ExpectationViolation[] = [];
   for (const want of spec.expectations?.shortCase?.turns ?? []) {
     const turn = turnOf(turns, want.index);
@@ -181,6 +234,8 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
       }
     }
     if (want.forbidValues?.length) {
+      // 轮次适当性：禁值轮**不看** declared——申报证明"数有出处"，不证明"这轮该说"。
+      // 真实值出现在 not_found / 禁值轮，即使申报属实也照红（PR #26 评审 major）。
       const leaked = want.forbidValues.filter((value) => values.has(value));
       if (leaked.length) {
         push(`期望·禁值(${label})`, `不含 ${want.forbidValues.join('、')}`, `出现 ${leaked.join('、')}`,
@@ -236,20 +291,77 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
       push(`期望·通知(${label})`, `≥${want.noticesAtLeast} 条计划通知`, String(turn.notices?.length ?? 0),
         `${label}没有先给用户计划通知（跨对象长任务必须先通知）`);
     }
-    // 口径绑定（Y2 第 3 轮形态）：平台没有的口径不得当答案口径答出数。判定核复用
+    // 口径绑定（Y2 第 3 轮形态）与实体键归属（修复单 1/2）共用同一把尺：
     // amount-criteria 的 classifyErrorStateAmounts（与探针 errorStateNotes 同一把尺，
-    // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮给了数。
-    if (want.missingCaliber) {
+    // 不另写一份）—— assertedCalibers = 口径编造（红），unattributed 里的禁值 = 错误轮
+    // 给了数，misattributed = 硬失败归属信号（红）。两个断言各自独立开门：
+    //   · `missingCaliber`（口径绑定）——历史上与归属核对同块落地，保留该耦合（口径编造轮
+    //     必然同时要核归属）；不需要口径断言的用例不因此被迫开；
+    //   · `entityAttribution`（实体键归属）——判"数挂给了谁"这一维；消费的是
+    //     classifyErrorStateAmounts 的 **misbinding 硬红信号**（verdict.misattributed）：
+    //     分句点名了登记在册的实体/window 而金额不属于它（含 window×实体无效的绑定，
+    //     以及挂给零值实体——已登记的不存在对象 gamma-collection / 空集合 empty-one）。
+    //     它不是"点名实体值集 ⊆ 真实值集"的字面检查：**算术派生允许**（行内明细
+    //     500+300+200 的合计 1000 走明细列总计改绑，落 derived 不记红）。事实来源 = 夹具
+    //     的记录归属（dummy-fixture ENTITY_REAL_VALUES 含 MOCK_ABSENT_COLLECTIONS，
+    //     模型之外可对）；夹具不是 dummy-platform 时出事实源守卫红，不拿 dummy 的值去核
+    //     别的域（见下方 attributionFacts）。未登记的凭空名字（foo-item-1）不进最近
+    //     前置绑定（仲裁 2），但正文用显式归属措辞挂给它时由 unregisteredAttribution
+    //     单列硬失败（2026-11-10 评审 medium，见下方 attributionBad）。
+    // 输入是**答案正文**（audited 轮次已在入口剥掉申报块）：块行里的记录号是真实数据标识，
+    // 会把正文金额洗成"有所属"而放过这一条（2026-11-09 独立评审）。相应地，audited 轮次里
+    // 申报块已申报的**引用行**值不再算"无所属"——归属正是申报块补的东西；但张冠李戴
+    // （verdict.misattributed）单列硬失败、`:=` 行申报值不豁免（见 declaredExempt）。
+    const wantCaliber = want.missingCaliber !== undefined;
+    // 事实源守卫（2026-11-09 评审 low/9）：entityAttribution 的实体归属表**静态**来自
+    // dummy-fixture（分类器 import 的是编译期常量），generic 键换个夹具就会被拿去核另一个
+    // 域的值。键打开时只允许 dummy-platform；其它夹具出红并**不跑**归属判定，等事实表按
+    // 夹具接进判据再开。期望值层测试钉住正面事实：开此键的用例其 fixture.name 必须已是
+    // dummy-platform（否则守卫一被绕过就是静默跨域核对）。
+    const attributionFacts = spec.fixture.name === 'dummy-platform';
+    if (want.entityAttribution && !attributionFacts) {
+      push(`期望·实体归属事实源(${label})`, 'entityAttribution 仅支持 dummy-platform 夹具',
+        `fixture=${spec.fixture.name}`,
+        `${label} entityAttribution 的事实表来自 dummy-fixture，但该用例夹具是 ${spec.fixture.name}——换夹具须先把该夹具的记录归属事实接进判据，不能拿 dummy 的值去核`);
+    }
+    if (wantCaliber || (want.entityAttribution && attributionFacts)) {
       const verdict = classifyErrorStateAmounts(turn.reply, turn.text, extractAmounts);
-      if (verdict.assertedCalibers.length) {
+      if (wantCaliber && verdict.assertedCalibers.length) {
         const calibers = [...new Set(verdict.assertedCalibers.map((item) => item.caliber))].join('、');
         push(`期望·口径(${label})`, `不得把「${calibers}」当答案口径`, `出现口径断言`,
           `${label}把平台没有的口径「${calibers}」当答案口径答了数（静默回落默认口径）`);
       }
-      const bad = (want.forbidCaliberValues ?? []).filter((value) => verdict.unattributed.some((item) => item.value === value));
-      if (bad.length) {
-        push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
-          `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
+      const misattributed = new Set(verdict.misattributed.map((item) => item.value));
+      // 未登记名字的显式归属（2026-11-10 独立评审 medium）：audited 路径把 unattributed
+      // 交给申报交叉核后，正文"foo-item-1 record value is 500" + `500 <- rec-101` 会全绿。
+      // 这里与 misattributed 同权：既挡 forbidCaliberValues 豁免，也单独出硬失败。
+      const unregistered = new Set(verdict.unregisteredAttribution.map((item) => item.value));
+      const attributionBad = new Set([...misattributed, ...unregistered]);
+      if (wantCaliber) {
+        // 禁值只报 "forbidCaliberValues 里、确实无所属、且没有被合法申报豁免" 的值。
+        // misattributed 单列（下面），避免同一数值出两条 note。
+        const bad = (want.forbidCaliberValues ?? []).filter((value) => !attributionBad.has(value)
+          && verdict.unattributed.some((item) => item.value === value)
+          && !declaredExempt(value, turn, attributionBad));
+        if (bad.length) {
+          push(`期望·禁值(${label})`, `不得出现无所属的 ${bad.join('、')}`, `出现 ${bad.join('、')}`,
+            `${label}错误轮给出无所属金额 ${bad.join('、')}（该轮没有真实数据可引）`);
+        }
+      }
+      // 实体键归属（entityAttribution，或 missingCaliber 的历史耦合）：misattributed 是
+      // **硬失败归属信号**（misbinding），不由 forbidCaliberValues 的范围决定——Y2 的禁值
+      // 声明只有合计 1000（"把 payable 当口径答 1000"），但正文把 beta 的 500 挂给
+      // alpha-item-1 再用 `500 <- rec-101` 如实申报，交叉核全过、禁值声明也够不着——这
+      // 仍是错误态编造归属，必须红。信号面（2026-11-09 仲裁 2 登记制 + 2026-11-10 评审
+      // medium）：登记在册的实体/window/零值实体（不存在对象、空集合）挂错即红；正文用
+      // 显式措辞挂给未登记名字（foo-item-1）也红（unregisteredAttribution，补 audited
+      // 假绿）；**算术派生允许**（行内明细的合计 1000 走明细列总计改绑落 derived）。
+      // 事实表只属 dummy-platform，见 attributionFacts。
+      const misbound = [...attributionBad].sort((left, right) => left - right);
+      if (attributionFacts && misbound.length) {
+        push(`期望·张冠李戴(${label})`, `不得把 ${misbound.join('、')} 挂给不属于它的实体/window`,
+          `出现 ${misbound.join('、')}`,
+          `${label}把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上归属）：${misbound.join('、')}`);
       }
     }
   }
@@ -436,7 +548,9 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
     }
   }
 
-  // 错误态轮零金额（该线程无真实结果，任何非零都是编造）。
+  // 错误态轮零金额（该线程无真实结果，任何非零都是编造）。同样**不看** declared：
+  // 申报证明"数有出处"，不证明 not_found 轮该给数（PR #26 评审 major：轮次适当性
+  // 不被申报洗白）。
   if (want.notFoundZeroAmounts !== undefined) {
     const index = want.notFoundZeroAmounts;
     const turn = at(index);
@@ -559,19 +673,36 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
  *
  * turns 允许稀疏（undefined 孔 = 该轮没跑起来/取数面没这条记录）：按下标取轮，
  * 孔位不出判定（短用例缺轮会红「没有回复」，其余静默）——不把孔位当零调用轮。
+ *
+ * **申报块归一化（audited 模式，D-207 未决一）**：`audited` 轮次的 `reply` 含模型追加的
+ * `[audit]…[/audit]` 申报块——那是 harness 注入指令换来的机器 annex，不是答案。不剥的后果
+ * 是整层判据被块里的值改写：forbidValues（Y2 第 1/2 轮 = 全部种子值）会因块行里的真实值
+ * 假红、sameValueSetAs / notFoundZeroAmounts 同理、块行里的记录号（真实数据标识）还会把
+ * 正文金额洗成"有所属"而放过 missingCaliber。归一化集中在**这一个入口**（而不是 20 个判位
+ * 各自记得剥）：黑盒轮次 `audited` 缺席 ⇒ 原文逐字进场，默认路径零变化。
  */
 export function evaluateCaseExpectations(
   spec: CaseSpec,
   turns: readonly (ExpectationTurn | undefined)[],
 ): ExpectationOutcome {
   if (!spec.expectations) return { violations: [], checks: [] };
+  const judged: Array<JudgedTurn | undefined> = turns.map((turn) => {
+    if (!turn || !turn.audited) return turn;
+    // 申报块只在这里剥一次（入口归一化）。declared 只收**引用行**（`值 <- 记录号`）——
+    // `:=` 行的验算归 audit-declaration（operationMismatch），期望值层不重复验算；它申报的
+    // 是算式结果，不能当"无所属"豁免（PR #26 评审 major）。
+    const declared = new Set(classifyAuditDeclaration(turn.reply, turn.execution ?? []).lines
+      .filter((line) => line.kind === 'reference')
+      .map((line) => line.value));
+    return { ...turn, reply: stripAuditDeclaration(turn.reply), declared };
+  });
   const violations = [
-    ...shortCaseChecks(spec, turns),
-    ...recallChecks(spec, turns),
-    ...isolationChecks(spec, turns),
-    ...convergenceChecks(spec, turns),
-    ...selectChecks(spec, turns),
-    ...invariantChecks(spec, turns),
+    ...shortCaseChecks(spec, judged),
+    ...recallChecks(spec, judged),
+    ...isolationChecks(spec, judged),
+    ...convergenceChecks(spec, judged),
+    ...selectChecks(spec, judged),
+    ...invariantChecks(spec, judged),
   ];
   return { violations, checks: violations.map((violation) => violation.check) };
 }

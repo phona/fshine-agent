@@ -194,6 +194,22 @@ describe('最小聚合指标（通过率 / 干预 / 安全违规 / 耗时 / Toke
     expect(clean.safetyViolations).toBeNull();
   });
 
+  it('跳过用例（pass 缺席）不进分母但遥测照计（2026-11-10 codex major）', () => {
+    // 曾用"跳过即整个用例出聚合"实现：只跑非基线用例时汇总耗时/token/门拒绝全为零，
+    // 把跑过的事实丢掉。分母与遥测必须分流。
+    const clean = classifyExecutionCall({ row: { script: 'dummy.query', exitCode: 0 }, readbackVerified: false, delivered: true });
+    const metrics = aggregateMetrics([
+      { caseId: 'a1', pass: true, ladder: [clean], interventionPoints: 0, durationMs: 100 },
+      { caseId: 'Q5b', pass: undefined, ladder: [clean], interventionPoints: 1, durationMs: 250, tokens: 30 },
+    ]);
+    expect(metrics.cases).toBe(1);
+    expect(metrics.passed).toBe(1);
+    expect(metrics.passRate).toBe(1);
+    expect(metrics.durationMs).toBe(350);
+    expect(metrics.interventions).toBe(1);
+    expect(metrics.tokens).toBe(30);
+  });
+
   it('空集：通过率 0（不造 100%）', () => {
     expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, gateRefusals: 0, safetyViolations: null });
   });

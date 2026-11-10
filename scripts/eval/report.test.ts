@@ -6,7 +6,8 @@
  *   ② 阶梯摘要计数修括号（旧写法 `?? 0 + 1` 让同档计数永不递增）。
  */
 import { describe, expect, it } from 'vitest';
-import { buildCaseReport, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
+import { aggregateMetrics } from './evidence';
+import { buildCaseReport, buildUnifiedReport, metricInputs, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
 
 function caseInput(overrides: Partial<ReportCaseInput> = {}): ReportCaseInput {
   return {
@@ -38,6 +39,35 @@ describe('buildCaseReport：读回证据逐条调用关联（四审 blocking）'
       intents: [{ intentId: 'i1', proposalId: 'p1', status: 'committed', hasReadback: true }],
     }));
     expect(line.ladder.map((c) => c.rung)).toEqual(['delivered']);
+  });
+
+  it('auditMissing 轮：调用数不可知 ⇒ 省略 executedCalls/refusedCalls，不写 0（2026-11-10 评审 low）', () => {
+    // 旧实现从 execution:[] 派生 0/0，与 calls=-1 的"不可知不写 0"纪律矛盾；只有
+    // ladderRung=INCONCLUSIVE 暗示证据缺口。现在报告行显式带 calls:-1 + auditMissing:true，
+    // 计数列整体缺席。
+    const line = buildCaseReport(caseInput({
+      turns: [{
+        messageId: 'm1',
+        text: '查一下',
+        reply: 'r',
+        notices: [],
+        ms: 10,
+        execution: [],
+        calls: -1,
+        auditMissing: true,
+      }],
+    }));
+    const turn = line.turns[0]!;
+    expect(turn.auditMissing).toBe(true);
+    expect(turn.calls).toBe(-1);
+    expect('executedCalls' in turn).toBe(false);
+    expect('refusedCalls' in turn).toBe(false);
+    // 孪生：有证据的零调用轮照常写 0（缺席与零可区分）。
+    const clean = buildCaseReport(caseInput({
+      turns: [{ messageId: 'm2', text: '查一下', reply: 'r', notices: [], ms: 10, execution: [], calls: 0 }],
+    })).turns[0]!;
+    expect(clean).toMatchObject({ executedCalls: 0, refusedCalls: 0, calls: 0 });
+    expect('auditMissing' in clean).toBe(false);
   });
 
   it('用例级 some() 的旧形态：另一 proposalId 的未验证写不被历史成功背书', () => {
@@ -136,5 +166,49 @@ describe('干预停点：提案确认后提交成功仍计入（八审 major）'
       intents: [{ intentId: 'i1', proposalId: 'p1', status: 'committed', hasReadback: true }],
     }));
     expect(line.interventionPoints).toBe(0);
+  });
+});
+
+describe('metricInputs：跳过用例不进通过率分母（占位/未跑）', () => {
+  it('passOf 返回 undefined ⇒ 不进分母但遥测在册，cases 与 passRate 分母同步', () => {
+    // 2026-11-10 独立评审 medium：Q5b/Q13b 占位条目从未跑过，不能计入通过率。
+    // 2026-11-10 codex major：但遥测不能随分母一起消失——跳过不是没跑。
+    const ran = buildCaseReport(caseInput({ caseId: 'a1' }));
+    const placeholder = buildCaseReport(caseInput({ caseId: 'Q5b' }));
+    const inputs = metricInputs([ran, placeholder], (item) => (item.caseId === 'Q5b' ? undefined : true));
+    expect(inputs.map((item) => item.caseId)).toEqual(['a1', 'Q5b']);
+    expect(inputs.map((item) => item.pass)).toEqual([true, undefined]);
+    const metrics = aggregateMetrics(inputs);
+    expect(metrics.cases).toBe(1);
+    expect(metrics.passRate).toBe(1);
+    expect(metrics.durationMs).toBe(ran.durationMs + placeholder.durationMs);
+  });
+});
+
+describe('buildUnifiedReport：跳过用例在 cases[] 里显式标 verdict', () => {
+  it('passOf undefined ⇒ verdict=skip（ok 原值保留但不冒充通过），metrics 分母同步', () => {
+    // 2026-11-10 独立评审 medium：旧报告 cases[] 只有 ok:true，跳过用例（未进基线）
+    // 只看 cases 的消费者会误读为通过。verdict 与 metricInputs 同源（passOf）。
+    const report = buildUnifiedReport({
+      at: 'now',
+      evalRunId: 'r',
+      cases: [caseInput({ caseId: 'a1' }), caseInput({ caseId: 'D1' })],
+      passOf: (line) => (line.caseId === 'D1' ? undefined : true),
+    });
+    expect(report.cases.map((line) => [line.caseId, line.verdict, line.ok]))
+      .toEqual([['a1', 'pass', true], ['D1', 'skip', true]]);
+    expect(report.metrics.cases).toBe(1);
+    expect(report.metrics.passed).toBe(1);
+  });
+
+  it('没有 passOf 时 verdict 退回 ok（旧调用方不伪造跳过）', () => {
+    const report = buildUnifiedReport({
+      at: 'now',
+      evalRunId: 'r',
+      cases: [caseInput({ caseId: 'a1' }), caseInput({ caseId: 'a2', ok: false })],
+    });
+    expect(report.cases.map((line) => line.verdict)).toEqual(['pass', 'fail']);
+    expect(report.metrics.cases).toBe(2);
+    expect(report.metrics.passed).toBe(1);
   });
 });

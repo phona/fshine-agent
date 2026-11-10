@@ -49,7 +49,8 @@ export interface ReportCallLine {
   basis: string[];
   /** 该轮整体阶梯（链上最低档；无执行层证据 = INCONCLUSIVE）。 */
   turnRung: LadderRung | 'INCONCLUSIVE';
-  latencyMs: number;
+  /** 该轮时延；崩溃窗口的墙钟证据缺席时整个字段省略（缺席不编零）。 */
+  latencyMs?: number;
 }
 
 /** 一轮的报告行（用户可见交付 + 该轮调用阶梯 + 时延 + usage）。 */
@@ -61,12 +62,21 @@ export interface ReportTurnLine {
   reply: string | null;
   notices: string[];
   delivered: boolean;
-  latencyMs: number;
+  /** 该轮时延；证据缺席时整个字段省略（缺席不编零）。 */
+  latencyMs?: number;
   ladderRung: LadderRung | 'INCONCLUSIVE';
   ladder: CallLadderEntry[];
-  /** 该轮已执行 / 被拒的调用数（执行层审计口径）。 */
-  executedCalls: number;
-  refusedCalls: number;
+  /**
+   * 该轮已执行 / 被拒的调用数（执行层审计口径）。**审计源不可读时整个字段省略**——
+   * unknown ≠ 0（2026-11-10 独立评审 low：旧报告行对 `auditMissing` 轮写
+   * executedCalls:0/refusedCalls:0，与 calls=-1 同一条"不可知不写 0"纪律矛盾）。
+   */
+  executedCalls?: number;
+  refusedCalls?: number;
+  /** 该轮探针的 calls 原值（-1 = 审计源不可读；缺席 = 旧报告/调用方没提供）。 */
+  calls?: number;
+  /** 该轮审计源不可读（证据缺席，调用数不可知）。 */
+  auditMissing?: boolean;
   /** 真实 provider usage 分项（无证据时整个字段缺席，不编零）。 */
   tokens?: { main?: number; worker?: number };
 }
@@ -77,6 +87,13 @@ export interface ReportCaseLine {
   group?: string;
   intent?: string;
   ok: boolean;
+  /**
+   * 用例判定（与 score.ts 的 judged/skipped 同口径）：`pass`/`fail` 是完整判定结果，
+   * `skip` = 未进基线 / 占位条目，**不进通过率分母也不冒充通过**（2026-11-10 独立评审
+   * medium：旧报告只有 ok，跳过用例的 ok 仍是 true，只看 cases 的消费者会误读成通过）。
+   * 给了 passOf 时以它为准；没给时按 ok。
+   */
+  verdict: 'pass' | 'fail' | 'skip';
   notes: string[];
   turns: ReportTurnLine[];
   /** 用例内全部调用的阶梯（跨轮拼起来；门禁时序/风暴的聚合面）。 */
@@ -116,8 +133,13 @@ export interface ReportCaseInput {
     text: string;
     reply: string | null;
     notices: string[];
-    ms: number;
+    /** 时延；崩溃窗口的墙钟证据缺席时字段省略（不写 0）。 */
+    ms?: number;
     execution: ExecutionAuditRow[];
+    /** 探针 calls 原值（-1 = 审计源不可读）；旧调用方不提供 = 从 execution 计数。 */
+    calls?: number;
+    /** 审计源不可读（调用数不可知）：报告行省略 executedCalls/refusedCalls，不写 0。 */
+    auditMissing?: boolean;
     tokens?: { main?: number; worker?: number };
   }>;
   intents: HostIntentFacts[];
@@ -168,6 +190,9 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
     ladder.push(...turnLadder);
     const main = turn.tokens?.main;
     const worker = turn.tokens?.worker;
+    // 审计源不可读 = 调用数不可知：executedCalls/refusedCalls 整个省略，不拿 auditMissing
+    // 轮的 execution:[] 写 0（2026-11-10 独立评审 low）。calls<0 是同一哨兵的旧字段。
+    const auditMissing = turn.auditMissing === true || (turn.calls !== undefined && turn.calls < 0);
     return {
       turnIndex: index,
       messageId: turn.messageId,
@@ -175,17 +200,22 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
       reply: turn.reply,
       notices: turn.notices,
       delivered,
-      latencyMs: turn.ms,
+      ...(turn.ms !== undefined ? { latencyMs: turn.ms } : {}),
       ladderRung: messageLadderRung(turnLadder),
       ladder: turnLadder,
-      executedCalls: turn.execution.filter((row) => !row.refused).length,
-      refusedCalls: turn.execution.filter((row) => row.refused).length,
+      ...(auditMissing ? {} : {
+        executedCalls: turn.execution.filter((row) => !row.refused).length,
+        refusedCalls: turn.execution.filter((row) => row.refused).length,
+      }),
+      ...(turn.calls !== undefined ? { calls: turn.calls } : {}),
+      ...(auditMissing ? { auditMissing: true } : {}),
       ...((main !== undefined || worker !== undefined)
         ? { tokens: { ...(main !== undefined ? { main } : {}), ...(worker !== undefined ? { worker } : {}) } }
         : {}),
     };
   });
-  const durationMs = turns.reduce((sum, turn) => sum + turn.latencyMs, 0);
+  // 缺席的时延（崩溃窗口无墙钟证据）不参与求和，不拿 0 冒充；durationMs 是有证据部分的下限。
+  const durationMs = turns.reduce((sum, turn) => sum + (turn.latencyMs ?? 0), 0);
   const mainTotal = input.turns.reduce((sum, turn) => sum + (turn.tokens?.main ?? 0), 0);
   const workerTotal = input.turns.reduce((sum, turn) => sum + (turn.tokens?.worker ?? 0), 0);
   const hasTokens = input.turns.some((turn) => turn.tokens?.main !== undefined || turn.tokens?.worker !== undefined);
@@ -194,6 +224,7 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
     ...(input.group ? { group: input.group } : {}),
     ...(input.intent ? { intent: input.intent } : {}),
     ok: input.ok,
+    verdict: input.ok ? 'pass' : 'fail',
     notes: input.notes,
     turns,
     ladder,
@@ -242,18 +273,25 @@ export function buildCallLines(report: Omit<UnifiedReport, 'calls' | 'metrics'>)
  */
 export function metricInputs(
   cases: readonly ReportCaseLine[],
-  passOf?: (item: ReportCaseLine) => boolean,
+  passOf?: (item: ReportCaseLine) => boolean | undefined,
 ): MetricCaseInput[] {
-  return cases.map((item) => ({
-    caseId: item.caseId,
-    pass: passOf ? passOf(item) : item.ok,
-    ladder: item.ladder,
-    interventionPoints: item.interventionPoints,
-    durationMs: item.durationMs,
-    ...(item.tokens !== undefined ? { tokens: item.tokens } : {}),
-    // 门裁决 error 行 = 安全违规的第二来源（与 evidence.aggregateMetrics 同口径）。
-    ...(item.gateRows.length ? { gateErrors: item.gateRows.filter((row) => row.status === 'error').length } : {}),
-  }));
+  return cases.flatMap((item) => {
+    const pass = passOf ? passOf(item) : item.verdict === 'skip' ? undefined : item.verdict === 'pass';
+    // undefined = 跳过（未跑起来的占位条目 / 未进基线的用例）：与 score.ts 的 skipped
+    // 口径一致——不进通过率分母，也不冒充通过。用例行本身仍留在报告 cases 里可审计。
+    // **跳过不是没跑**：2026-11-10 codex major——遥测（耗时/token/干预/门拒绝）照常进
+    // 聚合，早先"整个用例出聚合"的写法让只跑非基线用例的汇总耗时为零。
+    return [{
+      caseId: item.caseId,
+      pass,
+      ladder: item.ladder,
+      interventionPoints: item.interventionPoints,
+      durationMs: item.durationMs,
+      ...(item.tokens !== undefined ? { tokens: item.tokens } : {}),
+      // 门裁决 error 行 = 安全违规的第二来源（与 evidence.aggregateMetrics 同口径）。
+      ...(item.gateRows.length ? { gateErrors: item.gateRows.filter((row) => row.status === 'error').length } : {}),
+    }];
+  });
 }
 
 /** 组一份统一报告（JSON 面的对象）。 */
@@ -264,12 +302,18 @@ export function buildUnifiedReport(args: {
   /**
    * 逐用例的完整判定（旧三层 + 期望值层）。给了它，报告通过率就与 score.ts 的最终打分
    * 同源；不给则退回探针自身 ok（会在"旧三层过、期望值层失败"的用例上虚高）。
+   * 返回 `undefined` = 该用例跳过（占位条目 / 未进基线），不进通过率分母（见 metricInputs）。
    */
-  passOf?: (item: ReportCaseLine) => boolean;
+  passOf?: (item: ReportCaseLine) => boolean | undefined;
 }): UnifiedReport {
-  const caseLines = args.cases.map(buildCaseReport);
+  const caseLines = args.cases.map((input) => {
+    const line = buildCaseReport(input);
+    if (!args.passOf) return line;
+    const pass = args.passOf(line);
+    return { ...line, verdict: pass === undefined ? 'skip' as const : pass ? 'pass' as const : 'fail' as const };
+  });
   const head = { at: args.at, evalRunId: args.evalRunId, kind: 'eval-report' as const, basis: [...REPORT_BASIS], cases: caseLines };
-  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines, args.passOf)) };
+  return { ...head, calls: buildCallLines(head), metrics: aggregateMetrics(metricInputs(caseLines)) };
 }
 
 /** 落盘两份面：.runtime/eval-report-<evalRunId>.json 与同名 .jsonl。 */

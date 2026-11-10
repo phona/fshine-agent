@@ -46,6 +46,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
     dim: 'failureHonesty',
     notes: [
       '错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「查一下beta的record value balance」→ 500',
+      '错误态回复把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上这一类）：「查一下beta的record value balance」→ 500',
       '错误态回复把平台没有的口径「payable」当答案口径（静默回落；挂真实值也不例外）：「checkbeta的payablebalance」→ beta payable balance is 500',
       '错误回复无可行动补救指引：「查一下gamma-collection W1 的record value」→ ……',
       '错误轮同一调用重复 3 次（重试风暴）：「查一下beta的record value balance」',
