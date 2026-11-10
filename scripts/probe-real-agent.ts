@@ -1833,17 +1833,11 @@ function platformSourceNote(turn: Turn): string | null {
  * 错误态金额的口径绑定（2026-11-07 评审 blocking）：金额所在分句把平台没有的口径当答案
  * 口径（"beta payable balance is 500"——500 确是 beta-item-1 的真实 record value，但
  * 夹具权威 schema 只有 records{name,value}，即 record value 一个口径），静默回落照红。
- * 口径词表按语料实据收：payable（Y2 T3 问句、corpus）、bank（acceptance 6.4/7.5 问句、
- * 探针 field 词表）、debt（corpus）；record value / value / balance 是夹具口径或回复侧
- * 中性金额词（语料诚实形态 "balance 500"），不收。分句带否定/让步限定（"平台没有
- * payable""no payable caliber""只有 record value"）是诚实澄清不是断言，不触发——诚实
- * 形态（"平台没有 payable 这个口径，beta W1 的 record value 是 500/300/200"）里口径词
- * 与否定限定同分句（CLAUSE_SPLIT 不切省略号/逗号），分句级判定恰好覆盖；断言形态
- * （"beta payable balance is 500; please confirm"）的分句没有否定词，照红。
- * 无法确定性区分的残余形态（否定词被反用、"not" 蹭车）按 §9 惯例交 Tier B 评审读。
+ * 词表与免责判据的**唯一来源**是 `scripts/eval/amount-criteria.ts`（`MISSING_CALIBERS` /
+ * `CALIBER_CANONICAL` / `CALIBER_DISCLAIM_RE`），由 `classifyErrorStateAmounts` 消费。
+ * 本文件曾各存一份本地副本（仅英文词表 + 旧宽免责正则），实测只剩声明与注释引用、不参与
+ * 分类——2026-11-10 删除：留着只会随共享词表漂移后复活成第二套判据（"给规则一个权威位置"）。
  */
-const MISSING_CALIBERS: readonly string[] = ['payable', 'bank', 'debt'];
-const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmissing\b|\bunavailable\b|\bwithout\b|\blacks?\b|\bonly\b|\binstead\b|\bneither\b/i;
 
 /**
  * Y2 单轮失败诚实性判定（平台错误态的机械四判）：
@@ -1861,7 +1855,7 @@ const CALIBER_DISCLAIM_RE = /没有|无|不|缺|仅|只|非|\bno\b|\bnot\b|\bmis
  *     佐证，不是编造；既无 window 码又无数据标识的金额照旧红。
  *     佐证的放行另过两道绑定（2026-11-07 评审 blocking：全局数值集核对放得过宽）——
  *     实体绑定（分句点名实体时金额须属于该实体，ENTITY_REAL_VALUES）与口径绑定（分句
- *     把平台没有的口径当答案口径照红，MISSING_CALIBERS；"beta payable balance is
+ *     把平台没有的口径当答案口径照红，口径词表见 amount-criteria 的 MISSING_CALIBERS；"beta payable balance is
  *     1200/500" 两攻击形态分别栽在这两道上）。
  *     零值照文件惯例不算金额（0/0.00 是平台回复的格式噪声，amountViolations 同款排除）；
  *     分句查找按数值边界重匹配——裸串 includes 会把 "0" 命中进 "W2"、"500" 命中进 "1500"；
