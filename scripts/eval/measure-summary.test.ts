@@ -365,18 +365,18 @@ describe('区分度逐轮评分完整性（codex major 第三轮）', () => {
   it('一轮 judge 失败、一轮成功（均值四维齐全）⇒ 该用例 missing，不形成假比较', () => {
     const strong = {
       rounds: 2,
-      summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 2, judge_mean: FOUR(6) } },
+      summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 2, judge_mean: FOUR(2) } },
       results: [
-        { id: 'G-A1', round: 1, judge_scores: FOUR(6) },
+        { id: 'G-A1', round: 1, judge_scores: FOUR(2) },
         { id: 'G-A1', round: 2, judge_scores: null },
       ],
     };
     const weak = {
       rounds: 2,
-      summary: { 'G-A1': { mechanical_pass_count: 0, rounds: 2, judge_mean: FOUR(4) } },
+      summary: { 'G-A1': { mechanical_pass_count: 0, rounds: 2, judge_mean: FOUR(1) } },
       results: [
-        { id: 'G-A1', round: 1, judge_scores: FOUR(4) },
-        { id: 'G-A1', round: 2, judge_scores: FOUR(4) },
+        { id: 'G-A1', round: 1, judge_scores: FOUR(1) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(1) },
       ],
     };
     const out = evaluateDiscrimination(strong, weak, 1, { cases: ['G-A1'], rounds: 2 });
@@ -397,7 +397,7 @@ describe('区分度逐轮评分完整性（codex major 第三轮）', () => {
         { id: 'G-A1', round: 2, judge_scores: FOUR(mean) },
       ],
     });
-    const out = evaluateDiscrimination(doc(7, 2), doc(5, 1), 1, { cases: ['G-A1'], rounds: 2 });
+    const out = evaluateDiscrimination(doc(2, 2), doc(1, 1), 1, { cases: ['G-A1'], rounds: 2 });
     expect(out.rows[0].missing).toBe(false);
     expect(out.validComparisons).toBe(1);
     expect(out.verdict).toContain('强模型明显更优');
@@ -420,7 +420,7 @@ describe('区分度阶段独立声明轮数（codex blocking：真实调用形�
   });
 
   it('稳定性 5 轮声明 + 区分度 2 轮完整产物 ⇒ 有效比较 1，不误判缺轮', () => {
-    const out = evaluateDiscrimination(strongWeak(7, 2), strongWeak(5, 1), 1,
+    const out = evaluateDiscrimination(strongWeak(2, 2), strongWeak(1, 1), 1,
       { cases: ['G-A1'], rounds: 2 });
     expect(out.rows[0].missing).toBe(false);
     expect(out.validComparisons).toBe(1);
@@ -433,8 +433,8 @@ describe('区分度阶段独立声明轮数（codex blocking：真实调用形�
       stabilityComplete: true,
       stabilityExpected: { cases: ['G-A1'], rounds: 5 },
       discriminationExpected: { cases: ['G-A1'], rounds: 2 },
-      strongDoc: strongWeak(7, 2),
-      weakDoc: strongWeak(5, 1),
+      strongDoc: strongWeak(2, 2),
+      weakDoc: strongWeak(1, 1),
       discriminationRequested: true,
     });
     expect(out.markdown).not.toContain('轮次 2/5');
@@ -459,5 +459,68 @@ describe('区分度阶段独立声明轮数（codex blocking：真实调用形�
     }
     expect(code).toBe(2);
     expect(writes.join('')).toContain('--expect-disc-rounds');
+  });
+});
+
+/**
+ * 合法零分 vs 缺评分（2026-11-10 codex 复审 blocking）：`!judgeSum(...)` 把四维全 0（合计 0，
+ * falsy）误判成缺评分——弱模型全零分是合法数据。唯一谓词 = completeJudgeScores（四维齐全 +
+ * 每维 0-2 整数）。
+ */
+describe('合法零分不是缺评分（codex blocking：falsy-zero）', () => {
+  it('completeJudgeScores：四维全 0 合法；越界/非整数/缺维不合法', async () => {
+    // @ts-expect-error -- 无类型声明的 .mjs
+    const { completeJudgeScores, judgeSum } = await import('./measure-summary.mjs');
+    expect(completeJudgeScores(FOUR(0))).toBe(true);
+    expect(judgeSum(FOUR(0))).toBe(0); // 合法分的合计是 0（falsy），不是 null
+    expect(completeJudgeScores({ ...FOUR(2), groundedness: 3 })).toBe(false);
+    expect(completeJudgeScores({ ...FOUR(1), entityFidelity: 1.5 })).toBe(false);
+    expect(completeJudgeScores({ groundedness: 1 })).toBe(false);
+    expect(completeJudgeScores(null)).toBe(false);
+  });
+
+  it('弱模型四维全 0（双方两轮完整）⇒ 有效比较 1，不是 missing', () => {
+    const strong = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 2, rounds: 2, judge_mean: FOUR(2) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(2) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(2) },
+      ],
+    };
+    const weak = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 0, rounds: 2, judge_mean: FOUR(0) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(0) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(0) },
+      ],
+    };
+    const out = evaluateDiscrimination(strong, weak, 1, { cases: ['G-A1'], rounds: 2 });
+    expect(out.rows[0].missing).toBe(false);
+    expect(out.validComparisons).toBe(1);
+    expect(out.verdict).toContain('强模型明显更优');
+  });
+
+  it('越界评分（3 分）⇒ 该轮不完整 ⇒ missing（合法边界之外不是有效数据）', () => {
+    const strong = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 2, rounds: 2, judge_mean: FOUR(2) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(2) },
+        { id: 'G-A1', round: 2, judge_scores: { ...FOUR(2), groundedness: 3 } },
+      ],
+    };
+    const weak = {
+      rounds: 2,
+      summary: { 'G-A1': { mechanical_pass_count: 0, rounds: 2, judge_mean: FOUR(1) } },
+      results: [
+        { id: 'G-A1', round: 1, judge_scores: FOUR(1) },
+        { id: 'G-A1', round: 2, judge_scores: FOUR(1) },
+      ],
+    };
+    const out = evaluateDiscrimination(strong, weak, 1, { cases: ['G-A1'], rounds: 2 });
+    expect(out.rows[0].missing).toBe(true);
+    expect(out.validComparisons).toBe(0);
   });
 });

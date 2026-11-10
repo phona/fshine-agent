@@ -58,6 +58,9 @@ function isFiniteNumber(v) {
 /**
  * 四维合计。**只有声明维度全部是有限数值时才返回和**；部分维度缺失返回 null，
  * 让调用方把整例记为缺失，而不是把已有维度加起来冒充完整分。
+ * 注意：合法全零分的合计是 **0**（falsy）——调用方判“有没有分”必须用 `=== null`，
+ * 不能用 `!judgeSum(...)`（2026-11-10 codex 复审 blocking：弱模型四维全 0 是合法数据，
+ * 被 `!0` 误判成缺评分丢弃）。
  */
 export function judgeSum(mean) {
   if (!mean || typeof mean !== 'object') return null;
@@ -68,6 +71,19 @@ export function judgeSum(mean) {
     sum += v;
   }
   return sum;
+}
+
+/**
+ * **完整且合法的四维评分**（2026-11-10 codex 复审 blocking 收口）：四维齐全、每维都是
+ * 0-2 的整数（评委量程）。这是“这一轮有没有有效 judge 数据”的**唯一谓词**——均值面与
+ * 逐轮面都用它，不再有第二份判据。合法全零分返回 true（0 是有效分数，不是缺失）。
+ */
+export function completeJudgeScores(scores) {
+  if (!scores || typeof scores !== 'object') return false;
+  return DIMENSIONS.every((dim) => {
+    const v = scores[dim];
+    return Number.isInteger(v) && v >= 0 && v <= 2;
+  });
 }
 
 /** 稳定性 summary 的一条是否可用：轮次为正、通过数在 [0, rounds] 内。 */
@@ -261,7 +277,7 @@ export function evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons =
     const results = Array.isArray(doc.results) ? doc.results.filter((r) => r && r.id === id) : [];
     const gaps = [];
     if (results.length < expectedRounds) gaps.push(`轮次 ${results.length}/${expectedRounds}`);
-    const incompleteRounds = results.filter((r) => !judgeSum(r.judge_scores)).length;
+    const incompleteRounds = results.filter((r) => !completeJudgeScores(r.judge_scores)).length;
     if (incompleteRounds > 0) gaps.push(`${incompleteRounds} 轮缺四维评分`);
     return gaps;
   };
