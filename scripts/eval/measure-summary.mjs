@@ -342,6 +342,7 @@ export function buildReport({
   stabilityDocs = [],
   stabilityComplete = true,
   stabilityExpected = null,
+  discriminationExpected = null,
   stabilityRequested = stabilityDocs.length > 0,
   strongDoc = null,
   weakDoc = null,
@@ -467,7 +468,12 @@ export function buildReport({
   let discriminationResult = null;
   if (discriminationRequested) {
     lines.push('### 2. 区分度（强模型 vs 弱模型，judge 均分）', '');
-    const comparison = evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons, stabilityExpected);
+    // 区分度阶段的期望结构**独立声明**（codex 复审 blocking：工作流稳定性 5 轮、强弱档固定
+    // 2 轮，把稳定性的轮数原样传给区分度会把完整产物全判成缺轮）。cases 沿用同一份，
+    // 轮数用区分度阶段的声明；没给 discriminationExpected 时退化为不核轮数（宁少报不多猜）。
+    const discExpected = discriminationExpected
+      ?? (stabilityExpected ? { cases: stabilityExpected.cases, rounds: null } : null);
+    const comparison = evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons, discExpected);
     discriminationResult = comparison;
     lines.push(markdownTableRow(['用例', '强模型 judge 合计', '弱模型 judge 合计', '差', '强机械', '弱机械', '区分度判定']));
     lines.push(markdownTableRow(['---', '---', '---', '---', '---', '---', '---']));
@@ -508,6 +514,7 @@ const FLAG_TO_KEY = new Map([
   ['--min-valid', 'minValidComparisons'],
   ['--expect-cases', 'expectCases'],
   ['--expect-rounds', 'expectRounds'],
+  ['--expect-disc-rounds', 'expectDiscRounds'],
 ]);
 
 const USAGE = 'usage: node scripts/eval/measure-summary.mjs <stability.json...> '
@@ -559,6 +566,17 @@ export function parseArgs(argv) {
     const rounds = Number(out.expectRounds);
     if (!Number.isInteger(rounds) || rounds < 1) throw new UsageError('--expect-rounds 必须是正整数');
     out.stabilityExpected = { cases, rounds };
+    // 区分度阶段的轮数独立声明（工作流强弱档固定 2 轮，与稳定性轮数不同）——给了区分度
+    // 输入就必须声明，不声明不核轮数（discriminationExpected 缺轮数字段 = 不核）。
+    const hasDisc = out.expectDiscRounds !== undefined;
+    if (hasDisc !== Boolean(out.strongPath || out.weakPath)) {
+      throw new UsageError('--expect-disc-rounds 与区分度输入（强/弱 JSON）必须成对出现');
+    }
+    if (hasDisc) {
+      const discRounds = Number(out.expectDiscRounds);
+      if (!Number.isInteger(discRounds) || discRounds < 1) throw new UsageError('--expect-disc-rounds 必须是正整数');
+      out.discriminationExpected = { cases, rounds: discRounds };
+    }
   }
   return out;
 }
@@ -608,6 +626,7 @@ export function main(argv) {
     stabilityDocs: stabilityLoads.map((l) => (l.ok ? l.data : null)),
     stabilityComplete: stabilityLoads.every((l) => l.ok),
     stabilityExpected: opts.stabilityExpected ?? null,
+    discriminationExpected: opts.discriminationExpected ?? null,
     stabilityRequested: stabilityLoads.length > 0,
     strongDoc: strongLoad?.ok ? strongLoad.data : null,
     weakDoc: weakLoad?.ok ? weakLoad.data : null,

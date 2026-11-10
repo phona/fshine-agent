@@ -155,7 +155,7 @@ jobs:
           # 汇总脚本的退出码是测量结论（0=有结论，2=数据不足），不是工作流错误。
           set +e
           node scripts/eval/measure-summary.mjs \
-            --expect-cases "$CASES" --expect-rounds "$ROUNDS" \
+            --expect-cases "$CASES" --expect-rounds "$ROUNDS" --expect-disc-rounds 2 \
             .runtime/measure-stability.json -- \
             .runtime/measure-strong.json .runtime/measure-weak.json \
             > .runtime/measure-summary.md 2>&1

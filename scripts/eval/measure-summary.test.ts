@@ -403,3 +403,61 @@ describe('区分度逐轮评分完整性（codex major 第三轮）', () => {
     expect(out.verdict).toContain('强模型明显更优');
   });
 });
+
+/**
+ * 区分度阶段的期望结构**独立声明**（2026-11-10 codex 复审 blocking）：工作流稳定性跑 N 轮、
+ * 强弱档固定 2 轮——把稳定性的轮数原样传给区分度校验，会把完整产物全判成“轮次 2/N”。
+ * 下面两条用**工作流的真实调用形状**（稳定性 5 轮 + 区分度 2 轮）钉住，而不是合成同轮数。
+ */
+describe('区分度阶段独立声明轮数（codex blocking：真实调用形状）', () => {
+  const strongWeak = (mean: number, passes: number) => ({
+    rounds: 2,
+    summary: { 'G-A1': { mechanical_pass_count: passes, rounds: 2, judge_mean: FOUR(mean) } },
+    results: [
+      { id: 'G-A1', round: 1, judge_scores: FOUR(mean) },
+      { id: 'G-A1', round: 2, judge_scores: FOUR(mean) },
+    ],
+  });
+
+  it('稳定性 5 轮声明 + 区分度 2 轮完整产物 ⇒ 有效比较 1，不误判缺轮', () => {
+    const out = evaluateDiscrimination(strongWeak(7, 2), strongWeak(5, 1), 1,
+      { cases: ['G-A1'], rounds: 2 });
+    expect(out.rows[0].missing).toBe(false);
+    expect(out.validComparisons).toBe(1);
+    expect(out.verdict).toContain('强模型明显更优');
+  });
+
+  it('buildReport：工作流真实形状（稳定性声明 5 轮 + discriminationExpected 2 轮）⇒ 不出假缺失', () => {
+    const out = buildReport({
+      stabilityDocs: [{ rounds: 5, summary: { 'G-A1': { mechanical_pass_count: 5, rounds: 5 } } }],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['G-A1'], rounds: 5 },
+      discriminationExpected: { cases: ['G-A1'], rounds: 2 },
+      strongDoc: strongWeak(7, 2),
+      weakDoc: strongWeak(5, 1),
+      discriminationRequested: true,
+    });
+    expect(out.markdown).not.toContain('轮次 2/5');
+    expect(out.markdown).toContain('强模型明显更优');
+  });
+
+  it('区分度输入给了但不声明轮数 ⇒ CLI 用法错误（不成对）', () => {
+    const dir = tempDir();
+    const stabilityPath = writeJson(dir, 'stab.json', {
+      rounds: 5,
+      summary: { 'G-A1': { mechanical_pass_count: 5, rounds: 5 } },
+    });
+    const strongPath = writeJson(dir, 'strong.json', strongWeak(7, 2));
+    const weakPath = writeJson(dir, 'weak.json', strongWeak(5, 1));
+    const writes: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => { writes.push(String(m)); });
+    let code: number;
+    try {
+      code = main(['--expect-cases', 'G-A1', '--expect-rounds', '5', stabilityPath, '--', strongPath, weakPath]);
+    } finally {
+      errSpy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(writes.join('')).toContain('--expect-disc-rounds');
+  });
+});

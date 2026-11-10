@@ -78,7 +78,7 @@ LLM_MODEL=step-3.5-flash python3 scripts/eval/generic-model-eval.py \
 # --expect-cases / --expect-rounds 必填：期望结构（分母的声明值）只有调用方知道，
 # 不声明就不许合并下结论——否则缺轮/缺用例会静默缩小分母（codex 复审 major）。
 node scripts/eval/measure-summary.mjs \
-  --expect-cases "$CASES" --expect-rounds 5 \
+  --expect-cases "$CASES" --expect-rounds 5 --expect-disc-rounds 2 \
   .runtime/measure-stability.json -- \
   .runtime/measure-strong.json .runtime/measure-weak.json
 ```
@@ -114,7 +114,7 @@ node scripts/eval/measure-summary.mjs \
 
 ```bash
 node scripts/eval/measure-summary.mjs \
-  --expect-cases "$CASES" --expect-rounds 5 \
+  --expect-cases "$CASES" --expect-rounds 5 --expect-disc-rounds 2 \
   --eval-real-baseline .runtime/eval-real-baseline.json \
   --eval-real-latest .runtime/eval-real-latest.json \
   --regressions .runtime/unresolved-regressions.json \
