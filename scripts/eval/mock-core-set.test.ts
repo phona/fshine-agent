@@ -31,18 +31,28 @@
  * 断言红例的那条测试因此转红；还原判据后复绿。逐条变异证据留在 PR 的 mutationProof 里；
  * 测试本身不写"变异模式"开关——判据只有一份，改坏就红。
  */
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 import {
-  anyExecutedCall, caseCrashOf, executedCallsTotal, firstTurnPlanCallsNote, fiveTurnCallsNote,
+  anyExecutedCall, auditFailureCount, auditFailuresOf, caseCrashOf, executedCallsTotal,
+  firstTurnPlanCallsNote, fiveTurnCallsNote,
   planResumeState, realAmounts, recallMissed, unifiedCasePassedOf, type Turn,
 } from '../probe-real-agent';
 import { classifyErrorStateAmounts, extractAmounts } from './amount-criteria';
 import { classifyAuditDeclaration } from './audit-declaration';
 import { AUDIT_INSTRUCTION } from './audit-instruction';
+import { knownPlatformCalls } from './case-ledger';
 import { loadCases, type CaseExpectations, type CaseSpec } from './cases';
+import { ENTITY_REAL_VALUES, REAL_DATA_VALUES } from './dummy-fixture';
 import type { ExecutionAuditRow } from './evidence';
-import { buildUnifiedReport } from './report';
-import { evaluateProbeCase, expectationChecksOf, type ProbeResultRow } from './score';
+import { buildCaseReport, buildUnifiedReport, type ReportCaseInput } from './report';
+import {
+  auditFailuresCheckOf, evaluateProbeCase, expectationChecksOf, loadCorpus,
+  partitionCorpusForScoring, validAuditFailuresValue, type ProbeResultRow,
+} from './score';
 
 // ── 脚本化事实面（与 dummy 夹具种子同值，见文件头）──
 
@@ -53,7 +63,9 @@ const BETA_ITEMS = [
 ];
 
 function queryRow(collection: string, result: NonNullable<ExecutionAuditRow['result']>): ExecutionAuditRow {
-  return { mode: 'query', script: 'dummy.query', args: ['--collection', collection], exitCode: 0, result };
+  // result 自己带对象规范名（与 dummy 夹具同款落账）：命题按它关联，不扫 args
+  // （2026-11-10 codex blocking 二，见 audit-declaration 的 queryRowsForCollection）。
+  return { mode: 'query', script: 'dummy.query', args: ['--collection', collection], exitCode: 0, result: { ...result, collection } };
 }
 
 const BETA_ROWS: ExecutionAuditRow[] = [
@@ -1199,6 +1211,27 @@ describe('mock 核心集 · 封闭命题', () => {
     expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
     expect(verdict.findings[0]!.note).toContain('没有字段证据');
   });
+
+  it('红（codex blocking 二）：一次调用带两个对象名——beta 的字段证据不成立（beta 从未被查）', () => {
+    // 反例：args 同时含 alpha 与 beta、平台实际查的是 alpha。旧实现扫 args 会把 alpha 的
+    // 字段证据当成 beta 的——nocaliber(beta, payable) 七查全绿而 beta 从未被查。按 result
+    // 自己声明的对象规范名关联 ⇒ beta 在这批审计行里没有事实域，无据可核 fail-closed。
+    const rows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha', '--topic', 'beta'], exitCode: 0,
+      result: { status: 'completed', collection: 'alpha', items: BETA_ITEMS, count: BETA_ITEMS.length, fields: ['id', 'name', 'value'] },
+    }];
+    const verdict = classifyAuditDeclaration(
+      `平台没有 payable 这个字段。\n${block('nocaliber(beta, payable)')}`,
+      rows,
+    );
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
+    expect(verdict.findings[0]!.note).toContain('无据可核');
+    // 孪生诚实：同一行对**真正查过的** alpha 成立（证据没错，错的是旧实现的关联源）。
+    expect(classifyAuditDeclaration(
+      `平台没有 payable 这个字段。\n${block('nocaliber(alpha, payable)')}`,
+      rows,
+    ).findings).toEqual([]);
+  });
 });
 
 // ── ⑥ 幻影源（红）──
@@ -1469,13 +1502,35 @@ describe('mock 核心集 · 占位用例 N/A', () => {
     expect(skipped.metrics.cases, '跳过用例不能进通过率分母').toBe(0);
     // 孪生：同一行、同一判定函数，进基线且给基线项 ⇒ 真判定为 pass 且计入分母
     // （证明上面不是恒跳；spec 必须 inBaseline:true，否则按语料 skipped 先返回 undefined）。
+    // 行带显式 0 计数而不是 N/A：2026-11-10 评审 2 high 起「整例没有可核轮」不得判过，
+    // 孪生要证明"判过的路径真的可达"，就得给一行**跑过交叉核且全过**的形状。
     const counted = buildUnifiedReport({
       at: 'now', evalRunId: 'mock', cases: [input],
-      passOf: () => unifiedCasePassedOf(emptyRow('mock-core'), { ...spec, inBaseline: true }, { dims: { ...ZERO_DIMS } }, true),
+      passOf: () => unifiedCasePassedOf(
+        { ...emptyRow('mock-core'), auditFailures: 0 },
+        { ...spec, inBaseline: true }, { dims: { ...ZERO_DIMS } }, true,
+      ),
     });
     expect(counted.cases.map((line) => line.verdict)).toEqual(['pass']);
     expect(counted.metrics.cases).toBe(1);
     expect(counted.metrics.passed).toBe(1);
+  });
+
+  it('红：占位即使被误标 inBaseline:true 也不进 score 侧判定集；孪生：抹掉占位标记就进判定集', () => {
+    // 诱惑点：Q5b 一旦被误标 inBaseline:true，它在**报告侧**仍是 N/A（placeholder 先判），
+    // 但 score.ts 主循环旧写法只看 inBaseline ⇒ 同一份报告两侧判定分叉：报告 skip、
+    // 打分器评估。判别点 = 判定集/跳过集共用的 partitionCorpusForScoring 先判 placeholder。
+    const q5b = loadCorpus().find((entry) => entry.case === 'Q5b')!;
+    expect(q5b.placeholder, 'Q5b 必须是占位用例').toBe(true);
+    const promoted = { ...q5b, inBaseline: true };
+    const { judged, skipped } = partitionCorpusForScoring([promoted]);
+    expect(judged).toEqual([]);
+    expect(skipped.map((entry) => entry.id)).toEqual([promoted.id]);
+    // 孪生：抹掉占位标记后同一输入进判定集（证明上面的 skip 不是 inBaseline 单独造成的）。
+    const asNonPlaceholder = { ...promoted, placeholder: undefined };
+    expect(partitionCorpusForScoring([asNonPlaceholder]).judged.map((entry) => entry.id))
+      .toEqual([asNonPlaceholder.id]);
+    expect(partitionCorpusForScoring([asNonPlaceholder]).skipped).toEqual([]);
   });
 });
 
@@ -1566,6 +1621,25 @@ describe('mock 核心集 · 崩溃真实窗口', () => {
     expect(report.calls.map((line) => line.script)).toEqual(['dummy.proposal-create']);
   });
 
+  it('孪生：不同 callId 是不同调用——已覆盖的 c1 扣除、新的 c2 留在崩溃窗口（去重不吞调用）', () => {
+    // 诱惑点：只钉"同 callId 不重复"时，一个恒真/恒假的去重（把所有 callId 行都丢掉，
+    // 或根本不按 callId 扣）也能过。孪生要求：c1 被已完成轮覆盖 ⇒ 扣除；c2 只出现在崩溃
+    // 窗口 ⇒ 必须保留并在统一报告里可见。
+    const c1 = { callId: 'c1', phase: 'start' as const, mode: 'prepare' as const, script: 'dummy.proposal-create' };
+    const c1Result = { callId: 'c1', phase: 'result' as const, mode: 'prepare' as const, script: 'dummy.proposal-create', exitCode: 0 };
+    const c2 = { callId: 'c2', phase: 'start' as const, mode: 'prepare' as const, script: 'dummy.proposal-create' };
+    const completedWithC1: Turn = { ...completed, execution: [c1] };
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [c1, c1Result, c2], turns: [completedWithC1],
+    });
+    expect(crash.input.turns.map((turn) => turn.messageId))
+      .toEqual(['m1', expect.stringContaining('crash-window')]);
+    expect(crash.input.turns[1]!.execution.map((row) => row.callId)).toEqual(['c2']);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+    expect(report.calls.map((line) => line.messageId)).toEqual(['m1', expect.stringContaining('crash-window')]);
+  });
+
   it('红：崩溃在所有已完成轮次之后、无新审计行 ⇒ 崩溃窗口时延仍计入 duration', () => {
     // 2026-11-10 独立评审 low：旧实现只在 tailRows 非空时挂 partialTurn——没有新审计行的
     // 崩溃窗口把 elapsedMs−completedMs 的墙钟证据丢掉，duration 只剩已完成轮次之和。
@@ -1592,6 +1666,16 @@ describe('mock 核心集 · 崩溃真实窗口', () => {
     expect(report.cases[0]!.durationMs).toBe(10);
   });
 
+  it('孪生（空 tailRows 的边界）：窗口时延为 0 ⇒ 不单列空崩溃行——只有正时延才挂', () => {
+    // 诱惑点：把"空 tailRows 也挂 ms"写成"无脑总是挂一条 partialTurn"，会让每次正常
+    // 结束都多出一条无调用、无时延的崩溃行。判别点 = 正时延（而不是 partialTurn 形状）。
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [executed], turns: [completed], elapsedMs: 10,
+    });
+    expect(crash.input.turns.map((turn) => turn.messageId)).toEqual(['m1']);
+    expect(crash.input.turns[0]!.ms).toBe(10);
+  });
+
   it('孪生：同一完成轮次不崩溃 ⇒ 正常行判过（崩溃是唯一判别点）', () => {
     const row = rowOf('查 alpha', '查完了。', [executed], {
       id: 'A1',
@@ -1599,5 +1683,369 @@ describe('mock 核心集 · 崩溃真实窗口', () => {
       auditFailures: 0,
     });
     expect(evaluateProbeCase('probe-A1', row, { dims: { ...ZERO_DIMS } }, undefined, undefined, true).pass).toBe(true);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 本轮 10 条有限修复：每组一条判别性红例 + 孪生（2026-11-10 第七轮终局轮）
+//
+// 分组与 D-207『已做 ⑭』的 10 条一一对应；每组红例保留诱惑点——数本身真实 / 申报诚实 /
+// 名字只是换了写法 / 证据"看起来"是同一个对象 / N/A 看起来像通过…… 孪生只改一个判别点。
+// **不含**句构矩阵补全（冠词/同位语/Markdown/引号/混合语种）：那是无限项，已正式登记为
+// 已知残余（D-207『无限项残余』），不在这里造测试、也不作为"漏测"处理。
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── ⑬ 别名规范化并绑定（第 1 条；codex blocking 1）──
+
+describe('mock 核心集 · 别名规范化并绑定', () => {
+  // 诱惑点：beta-collection 看起来"不是登记在册的实体名"（形状闸把它豁免出未登记检查），
+  // 申报块又完全诚实（1200 确是 rec-001 的 value）。旧实现两头落空 ⇒ audited 路径整例
+  // 假绿。判据：别名换写法不换归属——规范化到原名后照常绑定与值核对。
+  const classify = (reply: string): ReturnType<typeof classifyErrorStateAmounts> =>
+    classifyErrorStateAmounts(reply, 'checkbeta的payablebalance', extractAmounts);
+
+  /** 形状集的测试侧镜像（与 amount-criteria 的 ENTITY_ALIAS_RULES 同族）：段间分隔符变体
+   *  + 族后缀写法 + 所有格 + 中文「的」。名字自身已以族后缀结尾时写末段复数（alpha groups /
+   *  gamma-collections），非族后缀名写 collection(s) 复合。 */
+  const aliasWritingsOf = (name: string): string[] => {
+    const segments = name.split(/[-_]/);
+    const spaced = segments.join(' ');
+    const underscored = segments.join('_');
+    const last = segments[segments.length - 1]!.toLowerCase();
+    const compounds = ['collection', 'collections', 'group', 'groups'].includes(last)
+      ? [name.endsWith('s') ? name : `${name}s`, spaced.endsWith('s') ? spaced : `${spaced}s`, underscored.endsWith('s') ? underscored : `${underscored}s`]
+      : [`${name}-collection`, `${name} collection`, `${name}_collection`];
+    return [...new Set([spaced, underscored, ...compounds, `${name}'s`, `${name} 的`])];
+  };
+
+  it('红/孪生逐实体：ENTITY_REAL_VALUES 每个名字的别名写法——错值张冠李戴、真值三处全空', () => {
+    // requirement：**每个实体名至少一对红/绿**。这里逐名字逐写法全钉（collection / item /
+    // 记录号 / 零值的不存在对象与空集合，无一漏网）——别名表的覆盖面由这张表穷举守住。
+    for (const entity of ENTITY_REAL_VALUES) {
+      const wrong = REAL_DATA_VALUES.find((value) => !entity.values.includes(value))!;
+      const right = entity.values[0];
+      for (const writing of aliasWritingsOf(entity.name)) {
+        const coordinate = `${entity.name} @ 「${writing}」`;
+        const red = classify(`${writing} record value is ${wrong}; please confirm.`);
+        expect(red.misattributed.map((item) => item.value), `红：${coordinate}`).toEqual([wrong]);
+        expect(red.unattributed.map((item) => item.value), `红（黑盒同判）：${coordinate}`).toEqual([wrong]);
+        // 别名是已登记名字的另一种写法，不是未登记名字（形状闸豁免只是防御纵深）。
+        expect(red.unregisteredAttribution, `别名不进未登记归属：${coordinate}`).toEqual([]);
+        if (right !== undefined) {
+          const green = classify(`${writing} record value is ${right}; please confirm.`);
+          expect(green.misattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unregisteredAttribution, `绿：${coordinate}`).toEqual([]);
+        } else {
+          // 零值实体没有"对的值"：绿孪生 = 免责语境 + 金额正确挂给别的已知实体——别名
+          // 在场不抹黑整句（与已登记零值实体的免责口径同判）。
+          const green = classify(`${writing} has no records; beta-item-1 record value is 500; please confirm.`);
+          expect(green.misattributed, `绿孪生（零值实体）：${coordinate}`).toEqual([]);
+          expect(green.unattributed, `绿孪生（零值实体）：${coordinate}`).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it('红：audited 端到端——别名把 alpha 的 1200 挂给 beta + 如实申报 ⇒ 期望·张冠李戴（申报块核不到"挂给谁"）', () => {
+    // 诱惑点：交叉核全过（1200 确在 rec-001 的 result.items 里），旧 audited 路径把无所属
+    // 交给申报块后整例假绿。判别点 = 别名规范化后的正文归属（期望值层直接消费 misattributed）。
+    const alphaRows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', result: {
+        status: 'completed', collection: 'alpha',
+        items: [{ id: 'rec-001', name: 'alpha-item-1', value: 1200 }], count: 1,
+      },
+    }];
+    const redReply = '平台没有 payable 这个口径。beta-collection record value is 1200。\n[audit]\n1200 <- rec-001\n[/audit]';
+    // 申报块逐字对事实——骗过交叉核的是"数 ↔ 记录号"，不是归属。
+    expect(classifyAuditDeclaration(redReply, alphaRows).findings).toEqual([]);
+    const spec = mockSpec({ shortCase: { turns: [{ index: 0, entityAttribution: true }] } });
+    expect(failingExpectationNames(spec, rowOf('checkbeta的payablebalance', redReply, alphaRows)))
+      .toEqual(['期望·张冠李戴(第1轮)']);
+    // 孪生诚实：500 确是 beta-item-1 的真值 + 如实申报 ⇒ 两层都绿。
+    const betaRows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', result: {
+        status: 'completed', collection: 'beta',
+        items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1,
+      },
+    }];
+    const greenReply = '平台没有 payable 这个口径。beta-collection record value is 500。\n[audit]\n500 <- rec-101\n[/audit]';
+    expect(classifyAuditDeclaration(greenReply, betaRows).findings).toEqual([]);
+    expect(failingExpectationNames(spec, rowOf('checkbeta的payablebalance', greenReply, betaRows))).toEqual([]);
+  });
+});
+
+// ── ⑭ 查询身份（第 2 条；codex blocking 2）──
+
+describe('mock 核心集 · 查询身份按 result 声明（--topic 混淆）', () => {
+  // 诱惑点：一次调用 `--collection alpha --topic beta` 里 beta 字面存在（旧实现扫 args 会
+  // 把 alpha 的字段证据当成 beta 的），result 又确实 completed、fields 齐全——"证据看起来
+  // 是 beta 的"。判别点 = 只有 result 自己声明了该对象的行才算事实域；没有就无据可核。
+  const twoNameRows: ExecutionAuditRow[] = [{
+    mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha', '--topic', 'beta'], exitCode: 0,
+    result: { status: 'completed', collection: 'alpha', items: BETA_ITEMS, count: BETA_ITEMS.length, fields: ['id', 'name', 'value'] },
+  }];
+
+  it('红：notfound(beta) 借不到同一次调用（平台实际查的是 alpha）——无据可核', () => {
+    const notFoundRows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha', '--topic', 'beta'], exitCode: 0,
+      result: { status: 'not_found', collection: 'alpha' },
+    }];
+    const verdict = classifyAuditDeclaration('beta 没找到。\n[audit]\nnotfound(beta)\n[/audit]', notFoundRows);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
+    expect(verdict.findings[0]!.note).toContain('无据可核');
+    // 孪生诚实：真正查过且 not_found 的 alpha 成立。
+    expect(classifyAuditDeclaration('alpha 没找到。\n[audit]\nnotfound(alpha)\n[/audit]', notFoundRows).findings).toEqual([]);
+  });
+
+  it('红：result 不带对象规范名（旧日志/载荷丢失）⇒ 不拿 args 兜底，fail-closed', () => {
+    // 诱惑点：args 里明明白白写着 --collection beta，拿它兜底"看起来"完全合理——但那就
+    // 等于认回"扫任意参数值"，--topic 混淆洞会原样复活。
+    const legacyRows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0,
+      result: { status: 'completed', items: BETA_ITEMS, count: BETA_ITEMS.length, fields: ['id', 'name', 'value'] },
+    }];
+    const verdict = classifyAuditDeclaration('平台没有 payable 这个字段。\n[audit]\nnocaliber(beta, payable)\n[/audit]', legacyRows);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['proposition']);
+    expect(verdict.findings[0]!.note).toContain('无据可核');
+    // 孪生：同一调用带上 result 身份后命题成立（缺的只是身份，不是事实）。
+    const withIdentity: ExecutionAuditRow[] = [{ ...legacyRows[0]!, result: { ...legacyRows[0]!.result!, collection: 'beta' } }];
+    expect(classifyAuditDeclaration('平台没有 payable 这个字段。\n[audit]\nnocaliber(beta, payable)\n[/audit]', withIdentity).findings)
+      .toEqual([]);
+    // 既有 nocaliber --topic 混淆红例见上方『封闭命题』组（同一判据的另一条判据入口）。
+    expect(twoNameRows[0]!.result?.collection).toBe('alpha');
+  });
+});
+
+// ── ⑮ 零证据门（第 3 条；评审 2 high）──
+
+describe('mock 核心集 · 零证据门（无证据 ≠ 通过）', () => {
+  // 诱惑点：该轮 execution:[] 看起来"干净"（没有调用、没有可核内容），旧实现整轮跳过；
+  // 模型没查平台就报出一个金额，也能让该例不计失败、照过。判别点 = 回复里有可申报金额
+  // 就照核（空事实基准下"有数字无块"是格式红），N/A 只在整例无可核轮时出现且不判过。
+  const turnOf = (reply: string, execution: ExecutionAuditRow[], extra: Partial<Turn> = {}): Turn => ({
+    text: 'q', reply, ms: 1, notices: [], messageId: 'm1',
+    calls: 1, refusedCalls: 0, taskIds: [], execution,
+    gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+    ...extra,
+  });
+  const cleanReply = 'The total is 1000.\n[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]';
+
+  it('红：空 execution 的轮次回复里有金额 ⇒ 照核判红，不整轮跳过', () => {
+    const unevidenced = turnOf('The total is 1000.', []);
+    expect(auditFailureCount([unevidenced])).toBeGreaterThan(0);
+    const failures = auditFailuresOf(true, [unevidenced]).auditFailures;
+    expect(typeof failures).toBe('number');
+    expect(failures as number).toBeGreaterThan(0);
+    expect(auditFailuresCheckOf(failures as number, 0).pass).toBe(false);
+  });
+
+  it('孪生：同一句话在有平台证据的轮次且申报完备 ⇒ 0 且门判过（不恒红）', () => {
+    const evidenced = turnOf(cleanReply, BETA_ROWS);
+    expect(auditFailuresOf(true, [evidenced])).toEqual({ auditFailures: 0 });
+    expect(auditFailuresCheckOf(0, 0).pass).toBe(true);
+  });
+
+  it('红：整例没有可核轮 ⇒ 显式 N/A，但 N/A 不得判过；纯日期闲聊轮仍是 N/A（不逼出申报块）', () => {
+    // 诱惑点：N/A 长得像"不适用 = 不用管"，旧实现直接 pass。可核轮为零意味着交叉核
+    // 既没跑也没过——"没得核"不是"查过且全过"。
+    expect(auditFailuresOf(true, [])).toEqual({ auditFailures: 'not-applicable' });
+    expect(auditFailuresCheckOf('not-applicable', 0)).toMatchObject({ pass: false, actual: '不适用（整例没有可核轮）' });
+    // 孪生（不假红）：纯闲聊/日期轮没有可核内容，照旧 N/A——不能把"没数字"也逼成申报。
+    expect(auditFailuresOf(true, [turnOf('It is November 2026.', [])])).toEqual({ auditFailures: 'not-applicable' });
+  });
+
+  it('红：审计源不可读 ⇒ unverifiable 且门判失败（不因同例另有干净轮次放行）', () => {
+    const missing = turnOf('500', [], { auditMissing: true });
+    const clean = turnOf(cleanReply, BETA_ROWS);
+    expect(auditFailuresOf(true, [clean, missing])).toEqual({ auditFailures: 'unverifiable' });
+    expect(auditFailuresCheckOf('unverifiable', 0).pass).toBe(false);
+  });
+});
+
+// ── ⑯ -1 各消费点（第 5 条；评审 4/9）──
+
+/** 在临时根里跑一个 perf 只读脚本：脚本按 `import.meta.url` 上三级定位仓库根，所以把
+ *  脚本与 `.runtime/probe-*.json` 一起复制进临时根即可喂合成探针数据（不碰真实 .runtime）。 */
+function runPerfScriptOnProbe(script: 'analyze' | 'delegation-boundaries', probe: unknown): string {
+  const root = mkdtempSync(path.join(tmpdir(), 'mock-perf-'));
+  try {
+    mkdirSync(path.join(root, 'scripts', 'perf'), { recursive: true });
+    mkdirSync(path.join(root, '.runtime'), { recursive: true });
+    const source = path.join(process.cwd(), 'scripts', 'perf', `${script}.ts`);
+    writeFileSync(path.join(root, 'scripts', 'perf', `${script}.ts`), readFileSync(source, 'utf8'));
+    writeFileSync(path.join(root, '.runtime', 'probe-fshine-probe-mock.json'), JSON.stringify(probe));
+    const run = spawnSync(process.execPath, ['--import', 'tsx', path.join(root, 'scripts', 'perf', `${script}.ts`)], {
+      cwd: process.cwd(), encoding: 'utf8',
+    });
+    expect(run.status, run.stderr).toBe(0);
+    return `${run.stdout}\n${run.stderr}`;
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+describe('mock 核心集 · -1 各消费点（不可知不写 0）', () => {
+  // 诱惑点：-1 字面"小于 1/小于 0"——当计数会倒扣合计、当 0 会让"不可知"混进"有证据的
+  // 零调用"桶、当确定非 delegate 会把不可判定轮算进分母。消费点由评审员列举过（有限集）：
+  // case-ledger / perf analyze / perf delegation-boundaries / report（⑲ 单列）/ 探针 note 面。
+  const PERF_PROBE = {
+    at: '2026-11-10T00:00:00Z',
+    results: [
+      { id: 'A1', turns: [
+        { ms: 1000, calls: -1, reply: 'x' },
+        { ms: 1000, calls: 0, reply: 'y' },
+        { ms: 1000, calls: 2, reply: 'z' },
+      ] },
+      { id: 'B1', turns: [{ ms: 1000, calls: -1, reply: 'x' }, { ms: 1000, calls: 1, reply: 'y' }] },
+    ],
+  };
+
+  it('红：case-ledger 的合计不把 -1 当计数（旧写法 -1 直接加进合计 ⇒ 倒扣）', () => {
+    expect(knownPlatformCalls(-1)).toBeUndefined();
+    expect(knownPlatformCalls(undefined)).toBeUndefined();
+    // 孪生：有证据的 0 与正整数照常是计数。
+    expect(knownPlatformCalls(0)).toBe(0);
+    expect(knownPlatformCalls(3)).toBe(3);
+  });
+
+  it('红：perf analyze 不出 "-1 次调用" 桶，-1 轮显式"平台调用不可知"', () => {
+    const out = runPerfScriptOnProbe('analyze', PERF_PROBE);
+    expect(out).not.toContain('-1 次调用');
+    expect(out.match(/平台调用不可知/g) ?? []).toHaveLength(2);
+    // 孪生：有证据的 0/1/2 各自成桶，没被 -1 污染。
+    expect(out).toContain('0 次调用: n= 1');
+    expect(out).toContain('1 次调用: n= 1');
+    expect(out).toContain('2 次调用: n= 1');
+  });
+
+  it('红：delegation-boundaries 不把 -1 算确定非 delegate（计为不可判定并单列）', () => {
+    const out = runPerfScriptOnProbe('delegation-boundaries', PERF_PROBE);
+    // 有证据的 3 轮可判定（calls 0/2/1）+ 2 轮 -1 不可判定；两数相加 = 实际 5 轮，
+    // 不可判定轮不进"可判定"分母（2026-11-10 独立评审 low：旧写法在分支前自增，报 5+2）。
+    // delegate 仍是 1/2/2 这三轮里的 2 轮。
+    expect(out).toContain('2 个 result / 3 轮可判定');
+    expect(out).toContain('另有 2 轮调用数不可知');
+    expect(out).toContain(`总边界数（delegate 轮，每次开 worker 会话 ≈ +31s）：2`);
+  });
+
+  it('红：探针调用数消费者同样不把 -1 当 0（不可知不出判定、已知调用照报）', () => {
+    expect(executedCallsTotal([{ calls: 2 }, { calls: -1 }])).toBeUndefined();
+    expect(anyExecutedCall([{ calls: 1 }, { calls: -1 }])).toBe(true);
+    expect(anyExecutedCall([{ calls: -1 }])).toBe(false);
+    expect(anyExecutedCall([{ calls: 0 }, { calls: 0 }])).toBe(false);
+  });
+});
+
+// ── ⑰ 指令豁免与数值语法（第 6 条；评审 5）──
+
+describe('mock 核心集 · 指令豁免与数值语法', () => {
+  // 诱惑点：判据对日期样数字/零值免申报、数值语法不收千分位，而旧指令说"每个数字都要
+  // 申报"——**照指令写反而红**。二选一选指令侧收口：指令写明豁免与语法，解析器不放宽。
+  // 红例 = 旧文案教出的形态（把年份申报 / 块内写千分位）确实红；孪生 = 照指令写就绿。
+  const dateReply = (declareYear: boolean): string => [
+    'It is November 2026; beta-item-1 是 500。',
+    block(...(declareYear ? ['2026 <- rec-101'] : []), '500 <- rec-101'),
+  ].join('\n');
+
+  it('红：把年份也申报 `2026 <- rec-101` ⇒ 值不符（指令已明说日期样数字不需要申报）', () => {
+    const verdict = classifyAuditDeclaration(dateReply(true), BETA_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['valueMismatch']);
+    // subject 是记录号（值不符按"申报值 ↔ 该记录真值"报）；2026 与 rec-101 的真值 500 对不上。
+    expect(verdict.findings[0]!.subject).toBe('rec-101');
+    expect(verdict.findings[0]!.note).toContain('2026');
+  });
+
+  it('孪生：同回复按指令不申报年份、只申报真实 500 ⇒ 绿；指令字面含两条义务', () => {
+    expect(classifyAuditDeclaration(dateReply(false), BETA_ROWS).findings).toEqual([]);
+    expect(AUDIT_INSTRUCTION).toContain('日期样数字（如年份）和零值不是金额，不需要申报');
+    expect(AUDIT_INSTRUCTION).toContain('不要使用千分位分隔符、货币符号或单位后缀');
+  });
+
+  it('红：块内写千分位/单位（指令明令禁止的形态）⇒ 格式红；孪生：普通十进制 ⇒ 绿', () => {
+    // 正文不写独立的 1000，避免"运算行不可解析 ⇒ LHS 未申报"的覆盖缺口掺进来；只让
+    // "块内行不可解析"这一条判别点发红。
+    const withThousands = ['账目如下。', block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1,000 := 500 + 300 + 200')].join('\n');
+    const thousands = classifyAuditDeclaration(withThousands, BETA_ROWS);
+    expect(thousands.findings.map((finding) => finding.check)).toEqual(['format']);
+    expect(thousands.findings[0]!.note).toContain('1,000 := 500 + 300 + 200');
+    const plain = ['账目如下。', block('500 <- rec-101', '300 <- rec-102', '200 <- rec-103', '1000 := 500 + 300 + 200')].join('\n');
+    expect(classifyAuditDeclaration(plain, BETA_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑱ 非负整数守卫（第 8 条；评审 7）──
+
+describe('mock 核心集 · 非负整数守卫', () => {
+  // 诱惑点：报告格式守卫只要求"是数字"时，-1（不可知哨兵）与 1.5（半条失败）都能过——
+  // 前者会被读成"负的失败数"，后者是坏数据。判别点 = 只收非负整数或两种显式状态。
+  it('红：-1 不得过格式守卫；孪生：0/正整数与 not-applicable/unverifiable 照过', () => {
+    expect(validAuditFailuresValue(-1)).toBe(false);
+    expect(validAuditFailuresValue(-0.5)).toBe(false);
+    expect(validAuditFailuresValue(1.5)).toBe(false);
+    expect(validAuditFailuresValue('3')).toBe(false);
+    expect(validAuditFailuresValue(0)).toBe(true);
+    expect(validAuditFailuresValue(3)).toBe(true);
+    expect(validAuditFailuresValue('not-applicable')).toBe(true);
+    expect(validAuditFailuresValue('unverifiable')).toBe(true);
+  });
+});
+
+// ── ⑲ 报告行 unknown（第 10 条；评审 9）──
+
+describe('mock 核心集 · 报告行 unknown（auditMissing 不写 0）', () => {
+  // 诱惑点：auditMissing 轮的 execution 只能是 []，按空数组派生 executedCalls/refusedCalls
+  // 会写出 0/0——"不可知"被读成"零调用"，与同一行 calls:-1 自相矛盾。判别点 = 整个字段
+  // 省略并标 auditMissing；有证据的零调用才写 0。
+  const reportInputOf = (turn: ReportCaseInput['turns'][number]): ReportCaseInput => ({
+    caseId: 'A1', ok: true, notes: [], turns: [turn], intents: [], gateRows: [], delegations: [],
+  });
+
+  it('红：calls:-1 的轮次写 auditMissing、executedCalls/refusedCalls 整个省略', () => {
+    const line = buildCaseReport(reportInputOf({
+      messageId: 'm1', text: 'q', reply: 'r', notices: [], execution: [], calls: -1,
+    })).turns[0]!;
+    expect(line.auditMissing).toBe(true);
+    expect(line.calls).toBe(-1);
+    expect('executedCalls' in line).toBe(false);
+    expect('refusedCalls' in line).toBe(false);
+  });
+
+  it('孪生：calls:0（有证据的零调用）照写 executedCalls 0 / refusedCalls 0，不标 auditMissing', () => {
+    const line = buildCaseReport(reportInputOf({
+      messageId: 'm1', text: 'q', reply: 'r', notices: [], execution: [], calls: 0,
+    })).turns[0]!;
+    expect(line.executedCalls).toBe(0);
+    expect(line.refusedCalls).toBe(0);
+    expect('auditMissing' in line).toBe(false);
+  });
+
+  it('红：崩溃窗口合成行（auditRows=null，空 tailRows）也带 calls:-1/auditMissing，报告不写 0', () => {
+    // 诱惑点：崩溃在所有已完成轮次之后、没有新审计行时，partialTurn 的 execution 只能是
+    // []；报告按空数组派生 0/0 就把"审计源不可读"写成"零调用"（2026-11-10 评审 low）。
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', true, { auditRows: null, elapsedMs: 2500 });
+    const line = buildCaseReport(crash.input).turns[0]!;
+    expect(line).toMatchObject({ auditMissing: true, calls: -1, latencyMs: 2500 });
+    expect('executedCalls' in line).toBe(false);
+    expect('refusedCalls' in line).toBe(false);
+  });
+
+  it('孪生：审计源可读的崩溃窗口按真实 tailRows 计数（省略只在不可知时发生）', () => {
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const covered: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const tail: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0 };
+    const completed: Turn = {
+      text: '查 alpha', reply: '查完了。', ms: 10, notices: [], messageId: 'm1',
+      calls: 1, refusedCalls: 0, taskIds: [], execution: [covered],
+      gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+    };
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', true, {
+      auditRows: [covered, tail], turns: [completed], elapsedMs: 30,
+    });
+    const line = buildCaseReport(crash.input).turns[1]!;
+    expect(line.executedCalls).toBe(1);
+    expect(line.refusedCalls).toBe(0);
+    expect('auditMissing' in line).toBe(false);
   });
 });

@@ -77,6 +77,15 @@ export interface ExecutionAuditRow {
    * stock 夹具的域字段是 sku/qty，落账时按同一契约投影成 name/value；平台原始字段名
    * （投影前）单列在 `fields`，供 nocaliber 命题核对——只看投影后的 items 会把
    * `nocaliber(north, sku)` 假过（sku 正是被投影掉的原始字段）。
+   *
+   * **该次查询的对象规范名**（2026-11-10 codex blocking 二）：执行层把这次查询是关于哪个
+   * 对象写进 result 的**一个字符串字段**，字段名是执行层自己的词汇（dummy/ballot 的
+   * `collection`、stock 的 `shelf`），completed 落解析后的规范名、not_found/needs_input 落
+   * 该次检索的名字。交叉核（audit-declaration 的 queryRowsForCollection）按它关联命题的
+   * collection，**不扫 args**：args 是调用参数、一次调用可以带多个值，result 才是平台
+   * 落账的真相。索引签名让新执行层无需改本契约即可带上自己的对象名字段；交叉核不认键名，
+   * 只认"这个 result 自己声明它关于哪个对象"。契约键（status/items/count/fields）不参与
+   * 身份关联。
    */
   result?: {
     /** 查询结果状态：completed / not_found / needs_input（旧日志可能缺席）。 */
@@ -85,6 +94,8 @@ export interface ExecutionAuditRow {
     count?: number;
     /** 平台原始 items 的字段名（completed 时由夹具落账；旧日志/空结果可能缺席）。 */
     fields?: string[];
+    /** 执行层自己的对象规范名字段（dummy/ballot=collection、stock=shelf；键名不参与判定）。 */
+    [identity: string]: unknown;
   };
 }
 

@@ -13,19 +13,21 @@ import type { ExecutionAuditRow } from './evidence';
  *      命题只认 nocaliber/notfound 两种（参数不闭合 ⇒ malformed）、解析器只认封闭语法
  *      （括号/乘除/运算词/空右值 malformed）、回复无数字则不要求有块、空回复全绿。
  *
- * 事实基准用审计行 result.status / result.items / result.fields 的契约定死形状（evidence.ts 的
- * ExecutionAuditRow.result）：夹具侧由 audit-result.test.ts 与 fixtures/*.cjs 落地，
- * 本锁只消费形状，不等夹具完工。
+ * 事实基准用审计行 result.status / result.items / result.fields / 对象规范名的契约定死形状
+ * （evidence.ts 的 ExecutionAuditRow.result）：夹具侧由 audit-result.test.ts 与
+ * fixtures/*.cjs 落地，本锁只消费形状，不等夹具完工。
  */
 
 /**
  * 审计行夹具：一次 query 的 result（契约形状：completed 带 items/count/fields，三种状态都带
- * status）。`fields` 与真实夹具同源落账——平台原始 items 的字段名（dummy.cjs:310：
+ * status）。`fields` 与真实夹具同源落账——平台原始 items 的字段名（dummy.cjs:316：
  * `fields: [...new Set(items.flatMap((item) => Object.keys(item)))]`），nocaliber 命题的
  * 口径清单事实源；不声明 fields 的行 = 旧日志/载荷丢失，命题对该 collection fail-closed。
+ * `collection` = 该次查询的对象规范名（dummy.cjs:316 同款落账）：命题按它关联，不扫 args
+ * （2026-11-10 codex blocking 二，见 queryRowsForCollection）。
  */
 function queryRow(collection: string, result: ExecutionAuditRow['result']): ExecutionAuditRow {
-  return { mode: 'query', script: 'dummy.query', args: ['--collection', collection], exitCode: 0, result };
+  return { mode: 'query', script: 'dummy.query', args: ['--collection', collection], exitCode: 0, result: { ...result, collection } };
 }
 
 function auditRows(items: Array<{ id: string; name?: string; value?: number }>): ExecutionAuditRow[] {
@@ -654,16 +656,57 @@ describe('audited 封闭命题：nocaliber / notfound 必须与审计行事实�
     expect(classify('没有 payable 口径。\n[audit]\nnocaliber(north, payable)\n[/audit]', rows).findings).toEqual([]);
   });
 
-  it('结构化调用参数（Record）同样参与 collection 核对：notfound 取最近一次查询', () => {
+  it('红（codex blocking 二）：一次调用带两个对象名——字段证据不服务没查过的对象', () => {
+    // 反例：`args=['--collection','alpha','--topic','beta']` 实际查 alpha（dummy 的
+    // `flags.collection || flags.topic`），旧实现扫 args 会把 alpha 的字段证据当成 beta 的
+    // ——nocaliber(beta, payable) 七查全绿而 beta 从未被查。按 result 声明的对象规范名
+    // 关联后，beta 在这批审计行里没有事实域 ⇒ 无据可核 fail-closed。
+    const rows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha', '--topic', 'beta'], exitCode: 0,
+      result: { status: 'completed', collection: 'alpha', items: [{ id: 'rec-201', name: 'alpha-group-item-1', value: 700 }], count: 1, fields: ['id', 'name', 'value'] },
+    }];
+    const v = classify('平台没有 payable 这个口径。\n[audit]\nnocaliber(beta, payable)\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
+    expect(v.findings[0]!.note).toContain('无据可核');
+    // 孪生诚实：同一行对**真正查过的** alpha 成立（证据没错，错的是旧实现的关联源）。
+    expect(classify('平台没有 payable 这个口径。\n[audit]\nnocaliber(alpha, payable)\n[/audit]', rows).findings).toEqual([]);
+  });
+
+  it('红（codex blocking 二）：notfound 同规则——没查过的对象借不到同一次调用的 not_found', () => {
+    const rows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha', '--topic', 'beta'], exitCode: 0,
+      result: { status: 'not_found', collection: 'alpha' },
+    }];
+    const v = classify('beta 没找到。\n[audit]\nnotfound(beta)\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
+    expect(v.findings[0]!.note).toContain('无据可核');
+    // 孪生诚实：真正查过且 not_found 的 alpha 成立。
+    expect(classify('alpha 没找到。\n[audit]\nnotfound(alpha)\n[/audit]', rows).findings).toEqual([]);
+  });
+
+  it('红：result 不带对象规范名（旧日志/载荷丢失）⇒ 无据可核 fail-closed，不猜', () => {
+    // 不拿 args 兜底：认了 args 就等于认回"扫任意参数值"（codex blocking 二的漏洞）。
+    const rows: ExecutionAuditRow[] = [{
+      mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0,
+      result: { status: 'completed', items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }], count: 1, fields: ['id', 'name', 'value'] },
+    }];
+    const v = classify('平台没有 payable 这个口径。\n[audit]\nnocaliber(beta, payable)\n[/audit]', rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['proposition']);
+    expect(v.findings[0]!.note).toContain('无据可核');
+  });
+
+  it('结构化调用参数（Record 载体）同样按 result 身份核对：notfound 取最近一次查询', () => {
+    // 载体（bash 数组 / structured Record）不参与判定——关联只看 result 自己声明的对象名；
+    // 混排两种载体时，"最近一次"按落账序看得到后来的那次查询。
     const rows: ExecutionAuditRow[] = [
-      { mode: 'query', script: 'dummy.query', args: { '--collection': 'gamma' }, exitCode: 0, result: { status: 'completed', items: [{ id: 'rec-1', value: 1 }], count: 1 } },
-      { mode: 'query', script: 'dummy.query', args: { '--collection': 'gamma' }, exitCode: 0, result: { status: 'not_found' } },
+      { mode: 'query', script: 'dummy.query', args: { '--collection': 'gamma' }, exitCode: 0, result: { status: 'completed', collection: 'gamma', items: [{ id: 'rec-1', value: 1 }], count: 1 } },
+      { mode: 'query', script: 'dummy.query', args: { '--collection': 'gamma' }, exitCode: 0, result: { status: 'not_found', collection: 'gamma' } },
     ];
     expect(classify('gamma 没找到。\n[audit]\nnotfound(gamma)\n[/audit]', rows).findings).toEqual([]);
-    // 旧数组行 + 新结构化行混排时，"最近一次"按落账顺序看得到结构化查询。
+    // 旧数组行 + 新结构化行混排：最近一次是 completed ⇒ notfound 不成立。
     const mixed: ExecutionAuditRow[] = [
-      { mode: 'query', script: 'dummy.query', args: ['--collection', 'delta'], exitCode: 0, result: { status: 'not_found' } },
-      { mode: 'query', script: 'dummy.query', args: { '--collection': 'delta' }, exitCode: 0, result: { status: 'completed', items: [{ id: 'rec-2', value: 2 }], count: 1 } },
+      { mode: 'query', script: 'dummy.query', args: ['--collection', 'delta'], exitCode: 0, result: { status: 'not_found', collection: 'delta' } },
+      { mode: 'query', script: 'dummy.query', args: { '--collection': 'delta' }, exitCode: 0, result: { status: 'completed', collection: 'delta', items: [{ id: 'rec-2', value: 2 }], count: 1 } },
     ];
     expect(classify('delta 没找到。\n[audit]\nnotfound(delta)\n[/audit]', mixed).findings.map((f) => f.check)).toEqual(['proposition']);
   });
@@ -947,6 +990,41 @@ describe('audited 申报契约边界：日期样数字不进覆盖要求', () =>
     // 日期不**要求**申报，但模型若把年份当金额申报，引用行仍按事实核（rec-101 是 500）。
     const v = classify('It is 2026. The record value is 500.\n[audit]\n500 <- rec-101\n2026 <- rec-101\n[/audit]');
     expect(v.findings.map((f) => f.check)).toEqual(['valueMismatch']);
+  });
+});
+
+/**
+ * 指令与检查器对齐（2026-11-10 评审 5）：二选一里选的是**指令侧收口**——audit-instruction.ts
+ * 写明两条豁免/语法义务（「日期样数字（如年份）和零值不是金额，不需要申报」「value 写具体
+ * 数字，按普通十进制写，不要使用千分位分隔符、货币符号或单位后缀」），解析器的封闭语法
+ * （NUMBER_SOURCE）不放宽。双向钉：
+ *   · 指令**禁止**的形态（千分位/单位进申报块）解析器确实不收 ⇒ malformed 格式红——照指令
+ *     写的合作模型不会踩到，不照指令写的形态有确定判据；
+ *   · 指令**指路**的形态（正文可以写 "1,000"，块内按普通十进制申报 1000）照过——带千分位
+ *     的正文数字仍是金额形态（extractAmounts 收），用普通十进制申报即满足覆盖。
+ * 指令自身示例能过解析器的既有锁在 probe-real-agent.test.ts 与 mock-core-set.test.ts 的
+ * 指令往返测试（本文件只钉检查器侧）。
+ */
+describe('audited 申报契约边界：数值语法——千分位/单位只出现在正文，块内必须普通十进制', () => {
+  it('红：块内写千分位/单位（指令明令禁止的形态）⇒ 不可解析，格式红', () => {
+    for (const line of [
+      '1,000 := 500 + 300 + 200',   // 千分位进运算行
+      '1,000 <- rec-101',           // 千分位进引用行
+      '500元 <- rec-101',           // 单位后缀进引用行
+      '1,000 元 <- rec-101',        // 千分位 + 单位
+    ]) {
+      const v = classify(`合计 1000。\n[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n${line}\n[/audit]`);
+      expect(v.checks.format, line).toBe(false);
+      expect(v.findings.some((f) => f.check === 'format' && f.note.includes(line)), line).toBe(true);
+    }
+  });
+
+  it('孪生诚实：正文写 "1,000"、块内按普通十进制申报 1000 ⇒ 绿（指令指路的形态）', () => {
+    // 带千分位的正文数字仍是金额形态（isDateLikeAmount 只收裸四位年份），要求申报；
+    // 按指令用普通十进制写块内行即满足覆盖/闭合/验算。
+    const v = classify('The total is 1,000.\n[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]');
+    expect(v.findings).toEqual([]);
+    expect(v.ok).toBe(true);
   });
 });
 

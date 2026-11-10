@@ -40,6 +40,9 @@
  *   封闭命题 —— `nocaliber(collection, caliber)`（caliber 不是该 collection 的平台原始
  *              字段）与 `notfound(collection)`（该 collection 最近一次查询结果状态是
  *              not_found）两种命题必须与审计行事实一致；只有这两种，不发明第三种。
+ *              命题的 collection 事实域 = **result 自己声明了该对象的**查询审计行（按平台
+ *              落账的对象规范名关联，不扫 args——codex blocking 二，见
+ *              queryRowsForCollection）。
  *              nocaliber 的口径清单事实源**只有 `result.fields`**（执行层夹具随 completed
  *              查询落账的平台原始字段名，契约见 evidence.ts）；投影后的 items 键**不是**
  *              数据模型（stock 的 sku/qty 投影成 name/value 后，只看 items 键会把
@@ -767,41 +770,38 @@ function expandedAddendCounts(
 }
 
 /**
- * 命题的 collection 事实域：带 result 的审计行里，args 出现过该 collection 字面量的那些行。
- * args 是执行层自己的调用参数（dummy 的 `--collection`、stock 的 `--shelf`、ballot 的
- * `--topic`），本模块不解析具体 flag 名——**任何 flag 的值**等于命题里的 collection 就算
- * 该行查的是它（独立元素或 `--flag=value` 形态）。不硬编码 flag 名是层级纪律：换一个执行层
- * 后这条机制仍成立。带 result 的行 = query 类调用（completed / not_found / needs_input
- * 都落 result，见 evidence.ts 的 result 契约）。
+ * 命题的 collection 事实域：**result 自己声明"这次查询是关于哪个对象"**的审计行。
+ *
+ * 2026-11-10 codex blocking 二：旧实现扫 args 的任意字符串——`args=['--collection','alpha',
+ * '--topic','beta']` 实际查 alpha，其字段证据却被当成 beta 的证据，nocaliber(beta,
+ * payable) 七查全绿而 beta 从未被查。args 是调用参数、一次调用可以带多个值，只有**平台
+ * 落账的 result** 能回答"这次查询是关于谁"：执行层把该次查询的对象规范名写进 result 的
+ * 一个字符串字段（dummy/ballot 的 `collection`、stock 的 `shelf`，契约见 evidence.ts 的
+ * ExecutionAuditRow.result），completed 落解析后的规范名、not_found / needs_input 落该次
+ * 检索的名字。带 result 的行 = query 类调用（completed / not_found / needs_input 都落
+ * result，见 evidence.ts 的 result 契约）。
+ *
+ * 字段名是执行层自己的词汇，本模块不认键名也不解析 flag 名（层级纪律：换一个执行层后这
+ * 条机制仍成立）——任何**非契约键**的顶层字符串值都算该行声明的对象规范名（契约键
+ * status/items/count/fields 不参与：status 是状态枚举、其余不是字符串）。不带对象名的
+ * result（旧日志/载荷丢失）匹配不上任何命题 ⇒ 无据可核 fail-closed，不猜；notfound 的
+ * "最近一次查询"同规则——只数声明了该对象的行，按落账序取最后一次。
  */
 function queryRowsForCollection(rows: readonly ExecutionAuditRow[], collection: string): ExecutionAuditRow[] {
-  return rows.filter((row) => {
-    if (!row.result || typeof row.result !== 'object') return false;
-    return argumentStrings(row.args).some((arg) => {
-      if (arg === collection) return true;
-      const eq = arg.indexOf('=');
-      return eq > 0 && arg.startsWith('--') && arg.slice(eq + 1) === collection;
-    });
-  });
+  return rows.filter((row) => resultIdentities(row.result).includes(collection));
 }
 
-/**
- * 从审计行的调用参数里取全部字符串。`args` 的契约是 `unknown`：bash 路径落字符串数组
- * （`['--collection', 'beta']`），结构化路径可能落对象（`{'--collection': 'beta'}`，或
- * 嵌套数组）。只认数组会让另一种载体的命题全部变成"无据可核"假红，也会让 notfound 的
- * "最近一次"看不到新的结构化查询——这里只摊平字符串，不解析具体 flag 名（层级纪律：
- * 换一个执行层后这条机制仍成立）。
- */
-function argumentStrings(args: unknown): string[] {
+/** result 的契约键（不参与对象身份关联：状态枚举与非字符串载荷，见 queryRowsForCollection）。 */
+const RESULT_CONTRACT_KEYS: ReadonlySet<string> = new Set(['status', 'items', 'count', 'fields']);
+
+/** result 自己声明的对象规范名（非契约键的顶层字符串值；键名是执行层词汇，见 queryRowsForCollection）。 */
+function resultIdentities(result: ExecutionAuditRow['result']): string[] {
+  if (!result || typeof result !== 'object') return [];
   const out: string[] = [];
-  const visit = (value: unknown): void => {
-    if (typeof value === 'string') { out.push(value); return; }
-    if (Array.isArray(value)) { for (const item of value) visit(item); return; }
-    if (value && typeof value === 'object') {
-      for (const item of Object.values(value as Record<string, unknown>)) visit(item);
-    }
-  };
-  visit(args);
+  for (const [key, value] of Object.entries(result)) {
+    if (RESULT_CONTRACT_KEYS.has(key)) continue;
+    if (typeof value === 'string' && value.length > 0) out.push(value);
+  }
   return out;
 }
 
@@ -880,7 +880,9 @@ export function classifyAuditDeclaration(
   // 的 isDateLikeAmount——金额形态学的权威位置（区间为何取 2099 而非 2100 见那里的决策
   // 记录）；黑盒提取器口径不变（那边按 §9 把无语境裸年份当金额）。真实金额（500/300/200/
   // 1000，带千分位或小数的同值数字）照旧要求申报。
-  const declarable = extracted.filter((amount) => !isDateLikeAmount(amount, scan.prose));
+  // 与探针零证据门（hasAuditableContent）同源：一份"哪些数字可申报"的口径，两边不许各写
+  // 一份——两份形态学不同会让"该判红的轮"在门侧看不见（2026-11-10 评审 2 high）。
+  const declarable = declarableAmountsOf(reply);
   const entries = collectRecordEntries(auditRows);
   const facts = collectRecordValues(entries);
   const findings: AuditDeclarationFinding[] = [];
@@ -894,11 +896,11 @@ export function classifyAuditDeclaration(
       parsed.lines.flatMap((line) => (line.kind === 'proposition' ? [] : [line.value])),
     );
     for (const amount of declarable) {
-      if (declared.has(amount.value)) continue;
+      if (declared.has(amount)) continue;
       findings.push({
         check: 'coverage',
-        subject: String(amount.value),
-        note: `申报覆盖缺口：回复里的数字 ${amount.value} 没有对应申报行（引用或运算）：「${snippet(reply)}」`,
+        subject: String(amount),
+        note: `申报覆盖缺口：回复里的数字 ${amount} 没有对应申报行（引用或运算）：「${snippet(reply)}」`,
       });
     }
   }
@@ -1009,13 +1011,15 @@ export function classifyAuditDeclaration(
   }
 
   // ── 封闭命题：nocaliber / notfound 必须与审计行事实一致 ──
-  // 事实域 = args 里出现该 collection 的 query 审计行（见 queryRowsForCollection）。
+  // 事实域 = result 自己声明了该 collection 的 query 审计行（按平台落账的对象规范名关联，
+  // 见 queryRowsForCollection——扫 args 会让一次调用的字段证据服务多个对象）。
   //   · notfound 按**最近一次**匹配行的 result.status 判（审计行按落账顺序；同轮先
   //     not_found 后重查 completed 时，过时的 not_found 命题不再成立）；
   //   · nocaliber 取匹配行 result.fields 的并集（completed 的平台原始字段名；投影后的
   //     items 键不是事实源，见 collectionFieldNames）；
-  //   · 无匹配审计行、或没有 completed 行声明 fields = 命题无事实可核，按 fail-closed
-  //     判红（"平台说没有"不能只靠模型自述，也不能从空结果推出来）。
+  //   · 无匹配审计行（该对象从未被查过，或 result 没声明对象名）、或没有 completed 行声明
+  //     fields = 命题无事实可核，按 fail-closed 判红（"平台说没有"不能只靠模型自述，也不能
+  //     从空结果推出来）。
   for (const line of parsed.lines) {
     if (line.kind !== 'proposition') continue;
     const collection = line.args[0]!;
@@ -1124,4 +1128,39 @@ export function stripAuditDeclaration(reply: string): string {
 export function hasAuditDeclarationBlock(reply: string): boolean {
   const scan = scanAuditBlock(reply);
   return scan.content !== null || scan.blockFault !== null;
+}
+
+/**
+ * 回复正文里**可申报的金额值**（覆盖查与探针零证据门共用同一口径，顺带去重）：
+ *   · 提取 = 生产提取器 extractAmounts（金额形态的数字，标识符尾段/年份/window 码已排除；
+ *     带千分位或小数的同值数字照收——"1,000"是金额形态）；
+ *   · 排除零值（文件惯例：0/0.00 是平台回复的格式噪声，不是金额——amount-criteria 错误态
+ *     路径与 expectations 的 valuesIn 同款过滤）；
+ *   · 排除日期样数字（isDateLikeAmount 字面形态判据：裸年份 1900-2099、年月日组合——
+ *     没有可申报的记录来源，要求申报就是假红）；
+ *   · 块内数字不算（scanAuditBlock 的 prose 已剥掉申报块）。
+ * 两份调用方（classifyAuditDeclaration 的覆盖/格式查、探针 auditFailureCount 的零证据门）
+ * 必须同源：形态学各写一份会让"该判红的轮"在门侧看不见（2026-11-10 评审 2 high）。
+ */
+export function declarableAmountsOf(reply: string): number[] {
+  const { prose } = scanAuditBlock(reply);
+  return [...new Set(
+    extractAmounts(prose)
+      .filter((amount) => amount.value !== 0 && !isDateLikeAmount(amount, prose))
+      .map((amount) => amount.value),
+  )];
+}
+
+/**
+ * 这一轮回复有没有**可核内容**（探针申报计数决定"空证据轮要不要判红"）：申报块尝试
+ * （hasAuditDeclarationBlock）或正文里有可申报的金额（declarableAmountsOf）。
+ *
+ * 两者都没有 = 纯闲聊/日期轮（"It is November 2026."），没有可核内容，不逼出申报块；
+ * 有金额或申报块却没有平台证据 = 内容无据可核——**判红而不是整轮跳过**
+ * （2026-11-10 评审 2 high：「无证据 ≠ 通过」是本分支既有口径，audited 门也要遵守：
+ * 旧 auditFailureCount 对"execution 为空且没有申报块"的轮次整轮跳过，模型没查平台就
+ * 报出一个金额也能让该轮不计失败）。
+ */
+export function hasAuditableContent(reply: string): boolean {
+  return hasAuditDeclarationBlock(reply) || declarableAmountsOf(reply).length > 0;
 }

@@ -15,7 +15,10 @@
  *      nocaliber(north, sku) 会因投影后没有 sku 键而假过）；
  *   ③ completed / not_found / needs_input 三种状态都带 result.status（notfound 命题的
  *      事实基准）；只有 completed 带 items/fields——没有拉回过 items 的调用，审计行不许
- *      出现"看起来拉回过"的载荷。被拒 / 失败行仍然没有 result。
+ *      出现"看起来拉回过"的载荷。被拒 / 失败行仍然没有 result；
+ *   ④ 三种状态都带**该次查询的对象规范名**（dummy=collection、stock=shelf，2026-11-10
+ *      codex blocking 二）：命题按它关联、不扫 args——一次调用带两个对象名时，字段证据
+ *      只服务真正查过的那个。端到端复现与孪生见本锁末尾。
  */
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -69,17 +72,23 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
       ]);
       // 平台原始字段名单独落账（nocaliber 命题的事实基准）。
       expect(bashRow?.result?.fields).toEqual(['id', 'name', 'value']);
+      // 该次查询的对象规范名（2026-11-10 codex blocking 二）：命题按它关联，不扫 args。
+      expect(bashRow?.result?.collection).toBe('alpha');
       const structuredRow = dummyRows.find((r) => r.via === 'structured');
       expect(structuredRow?.result?.status).toBe('completed');
       expect(structuredRow?.result?.count).toBe(3);
       expect(structuredRow?.result?.items?.map((i) => i.name)).toEqual(['beta-item-1', 'beta-item-2', 'beta-item-3']);
       expect(structuredRow?.result?.items?.map((i) => i.value)).toEqual([500, 300, 200]);
+      expect(structuredRow?.result?.collection).toBe('beta');
       const notFoundRow = dummyRows.find((r) => Array.isArray(r.args) && r.args.includes('nope'));
       expect(notFoundRow?.result?.status).toBe('not_found');
       expect(notFoundRow?.result?.items).toBeUndefined();
+      // not_found / needs_input 同样带对象规范名（该次检索的名字）——notfound 命题按它核。
+      expect(notFoundRow?.result?.collection).toBe('nope');
       const needsInputRow = dummyRows.find((r) => Array.isArray(r.args) && r.args.includes('contoso'));
       expect(needsInputRow?.result?.status).toBe('needs_input');
       expect(needsInputRow?.result?.items).toBeUndefined();
+      expect(needsInputRow?.result?.collection).toBe('contoso');
       const refusedRow = dummyRows.find((r) => r.script === 'dummy.commit');
       expect(refusedRow?.refused).toBeTruthy();
       expect(refusedRow?.result).toBeUndefined();
@@ -112,12 +121,17 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
       // stock 的原始字段是 id/sku/qty；items 投影成 name/value 后，fields 仍保留原始模型，
       // 否则 nocaliber(north, sku) 会因"投影后没有 sku 键"假过。
       expect(stockRow?.result?.fields).toEqual(['id', 'sku', 'qty']);
+      // 对象规范名的字段名是执行层词汇（stock=shelf）：交叉核不认键名，只认"result 自己
+      // 声明它关于哪个对象"。
+      expect(stockRow?.result?.shelf).toBe('north');
       const stockNotFound = stockRows.find((r) => Array.isArray(r.args) && r.args.includes('nope'));
       expect(stockNotFound?.result?.status).toBe('not_found');
       expect(stockNotFound?.result?.items).toBeUndefined();
+      expect(stockNotFound?.result?.shelf).toBe('nope');
       const stockNeedsInput = stockRows.find((r) => Array.isArray(r.args) && r.args.includes('shelf'));
       expect(stockNeedsInput?.result?.status).toBe('needs_input');
       expect(stockNeedsInput?.result?.items).toBeUndefined();
+      expect(stockNeedsInput?.result?.shelf).toBe('shelf');
 
       // 端到端核对（notfound 命题的事实基准就是这里落账的 status）：把夹具读回的行直接
       // 喂给交叉核——同一条 nope 审计行让 notfound(nope) 成立；beta 是 completed，不成立。
@@ -130,6 +144,18 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
       // payable 不是原始字段，成立。
       expect(classifyAuditDeclaration('没有 sku 口径。\n[audit]\nnocaliber(north, sku)\n[/audit]', stockRows).findings.map((f) => f.check)).toEqual(['proposition']);
       expect(classifyAuditDeclaration('没有 payable 口径。\n[audit]\nnocaliber(north, payable)\n[/audit]', stockRows).findings).toEqual([]);
+
+      // codex blocking 二（端到端复现 + 孪生）：一次调用带两个对象名（--collection alpha
+      // --topic beta），平台实际查 alpha（dummy 取 collection || topic）。若按 args 关联，
+      // 这次调用的字段证据会被当成 beta 的——nocaliber(beta, payable) 全绿而 beta 从未被查。
+      // 按 result 声明的对象规范名关联 ⇒ beta 无据可核，真正查过的 alpha 照常成立。
+      spawnSync(dummyBin, ['query', 'dummy.query', '--collection', 'alpha', '--topic', 'beta'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      // 审计行是追加落账：重新读盘才能看到刚跑的那一行（dummyRows 是之前的快照）。
+      const twoNameRow = readExecutionAuditLog(dummyAudit)!
+        .find((r) => Array.isArray(r.args) && r.args.includes('alpha') && r.args.includes('beta'));
+      expect(twoNameRow?.result?.collection).toBe('alpha');
+      expect(classifyAuditDeclaration('平台没有 payable 这个口径。\n[audit]\nnocaliber(beta, payable)\n[/audit]', [twoNameRow!]).findings.map((f) => f.check)).toEqual(['proposition']);
+      expect(classifyAuditDeclaration('平台没有 payable 这个口径。\n[audit]\nnocaliber(alpha, payable)\n[/audit]', [twoNameRow!]).findings).toEqual([]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

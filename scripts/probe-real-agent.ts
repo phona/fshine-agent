@@ -122,7 +122,7 @@ import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './e
 // audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
-import { auditDeclarationNotes, classifyAuditDeclaration, hasAuditDeclarationBlock, stripAuditDeclaration } from './eval/audit-declaration';
+import { auditDeclarationNotes, classifyAuditDeclaration, hasAuditableContent, stripAuditDeclaration } from './eval/audit-declaration';
 // 申报指令是纯文本常量，抽到叶子模块（scripts/eval/audit-instruction.ts）：mock 核心集要
 // import 它做往返测试，而本文件即使有入口守卫也会拖入完整装配链——叶子模块让纯文本
 // 消费方不必 import 探针。探针侧只 import + re-export，现有导入面不变。
@@ -522,19 +522,27 @@ export function auditOutgoingText(text: string, roundIndex: number, audit: boole
  * 计数。`findings` 是判定的全量违例清单，新增判据自动计入。
  * 事实基准与 errorStateNotes 的 audited 分支同源：本轮审计窗口行 turn.execution。
  *
- * 只核**有平台证据**的轮次（2026-11-09 评审 medium），但模型**主动写了申报块**的轮次
- * 例外（2026-11-10 独立评审 high：旧写法整轮跳过，phantom 申报永远不被核）：
+ * 只跳过**该轮没有任何可核内容**的轮次（2026-11-10 评审 2 high 收口）：
  *   · `auditMissing` = 审计源不可读，证据缺席 ≠ 零申报——拿 `[]` 去核会把证据缺失判成
  *     phantomSource，红在"没证据"而不是"假申报"；这类轮次不在这里编造计数，由
  *     `auditFailuresOf` 记显式 `'unverifiable'`（门判失败）；
- *   · execution 为空且**没有**申报块 = 该轮没有平台调用（纯闲聊/日期轮、模型没查就答）
- *     ——普通正文数字不该逼出申报（覆盖查会把聊天里的数字判红）；但若回复里有 `[audit]`
- *     块，块里的申报仍要核：空事实基准下引用行是幻影源、命题无据可核，不能整轮跳过。
+ *   · execution 为空且**没有可核内容**（hasAuditableContent：没有可申报的金额、也没有
+ *     申报块）= 纯闲聊/日期轮——普通正文数字（聊天里的年份）不该逼出申报；
+ *   · execution 为空但**回复里有金额或申报块** ⇒ 照核（2026-11-10 评审 2 high：旧写法对
+ *     "空 execution + 无块"整轮跳过，模型没查平台就报出一个金额也能让该轮不计失败——
+ *     「无证据 ≠ 通过」是本分支既有口径，audited 门也要遵守）。空事实基准下引用行是
+ *     幻影源、命题无据可核、有数字无块是格式红，都不该因为"没有平台调用"被跳过。
+ *
+ * 逐轮事实域是**有意**的（2026-11-10 独立评审 low 消歧）：零调用轮复述此前查询得到的
+ * 金额在 audited 门下不可表达（无块 ⇒ 格式红；补 `500 <- rec-101` ⇒ 幻影源红，因为
+ * 上一轮的记录不在本轮事实域）。本模式的语义是"每个带金额的轮次必须本轮重查"，已写进
+ * 申报指令（"申报只以本轮回复前的平台查询为据；需要复述就先在本轮重新查询"）与
+ * debt-ledger D-207 未决二⑪——不放宽七查去接住跨轮召回。
  */
 export function auditFailureCount(turns: readonly Turn[]): number {
   return turns.reduce((sum, turn) => {
     if (turn.auditMissing) return sum;
-    if (turn.execution.length === 0 && !hasAuditDeclarationBlock(turn.reply)) return sum;
+    if (turn.execution.length === 0 && !hasAuditableContent(turn.reply)) return sum;
     return sum + classifyAuditDeclaration(turn.reply, turn.execution).findings.length;
   }, 0);
 }
@@ -564,17 +572,21 @@ export function auditFailuresFieldOf(audit: boolean, failures: number | undefine
  * 轮的 phantom 申报永远不被核，整例照过）：
  *   · 任一轮 `auditMissing` ⇒ 显式 `'unverifiable'`（证据缺席、核不了）——门判失败，
  *     不能因为同例还有干净轮次就把不可核的那一轮放行；
- *   · 零轮（Q5b/Q13b 占位、runner 崩溃无已完成轮）或全部轮次无平台证据且无申报块 ⇒
- *     显式 `'not-applicable'`——写 0 会被读成「查过且全过」，写缺列会让 score.ts 对整份
- *     报告 exit 2；不适用状态让检查照出但不冒充 0；
- *   · 其余 ⇒ `auditFailureCount` 的 findings 全量（无平台证据但写了申报块的轮次也计入）。
+ *   · 零轮（Q5b/Q13b 占位、runner 崩溃无已完成轮）或所有轮次都无可核内容（纯闲聊/日期轮）
+ *     ⇒ 显式 `'not-applicable'`——写 0 会被读成「查过且全过」，写缺列会让 score.ts 对整份
+ *     报告 exit 2；不适用状态让检查照出但不冒充 0，且**不得判过**（score.ts 的
+ *     auditFailuresCheckOf：「整例没有可核轮」不是「查过且全过」）；
+ *   · 其余 ⇒ `auditFailureCount` 的 findings 全量（无平台证据但回复里有金额/申报块的轮次
+ *     也计入——那些内容无据可核，见 auditFailureCount）。
  */
 export function auditFailuresOf(audit: boolean, turns: readonly Turn[]): { auditFailures?: AuditFailuresValue } {
   if (!audit) return {};
   if (turns.some((turn) => turn.auditMissing)) return { auditFailures: 'unverifiable' };
-  const auditable = turns.some((turn) => turn.execution.length > 0);
-  const declaredWithoutEvidence = turns.some((turn) => turn.execution.length === 0 && hasAuditDeclarationBlock(turn.reply));
-  if (turns.length === 0 || (!auditable && !declaredWithoutEvidence)) return { auditFailures: 'not-applicable' };
+  // 可核轮 = 有平台证据的轮 + 回复里有可核内容的轮（金额/申报块——后者在空证据轮上判红，
+  // 不跳过）。整例一个可核轮都没有才记 N/A（2026-11-10 评审 2 high：旧判据只看
+  // execution，"回复里有金额但没有平台调用"的轮次既不计失败也不让该例可核）。
+  const auditable = turns.some((turn) => turn.execution.length > 0 || hasAuditableContent(turn.reply));
+  if (turns.length === 0 || !auditable) return { auditFailures: 'not-applicable' };
   return { auditFailures: auditFailureCount(turns) };
 }
 
@@ -3020,6 +3032,9 @@ export function caseCrashOf(
   // partialTurn——runner 在所有已完成轮次之后抛错（没有新审计行）时，elapsedMs 减已完成
   // 轮次的那段墙钟无人承载，报告 duration 只剩已完成轮次之和。有正时延就单列一条无调用的
   // 崩溃窗口行（tailRows 为空也不编调用）。
+  // 审计源不可读时，这条合成行同样要带 -1/auditMissing 的显式 unknown：它的 execution
+  // 只能是 []，报告若按空数组派生 executedCalls:0，就会把"不可知"写成"零调用"
+  // （2026-11-10 评审 low：与 calls=-1 同一纪律）。
   const partialTurn: ReportCaseInput['turns'][number] | undefined =
     tailRows.length > 0 || (crashWindowMs !== undefined && crashWindowMs > 0)
     ? {
@@ -3029,6 +3044,7 @@ export function caseCrashOf(
       notices: [],
       ...(crashWindowMs !== undefined ? { ms: crashWindowMs } : {}),
       execution: tailRows,
+      ...(evidence.auditRows === null ? { calls: -1, auditMissing: true } : {}),
     }
     : undefined;
   const input = caseReportInputOf(item, turns, { ok: false, notes });
@@ -3055,6 +3071,23 @@ export function caseCrashOf(
       ...input,
       turns: [...input.turns, ...(partialTurn ? [partialTurn] : [])],
     },
+  };
+}
+
+/**
+ * 正常（非崩溃）路径的用例级调用数（2026-11-10 独立评审 low）：审计源不可读时记 -1
+ * （不可知），与逐轮 `calls:-1` 及 `caseCrashOf` 同一条纪律——旧写法用空 `caseRows`
+ * 派生 `0/0`，`case-ledger` 的 `knownPlatformCalls(0)` 会把"读不到"当成"有证据的零调用"
+ * 计入合计（不进「调用数不可知跑次」）。可读时照常按审计窗口计数（被拒行也数）。
+ */
+export function caseCallCountsOf(
+  auditRowsAfter: readonly ExecutionAuditRow[] | null,
+  caseRows: readonly ExecutionAuditRow[],
+): { platformCalls: number; refusedCalls: number } {
+  if (auditRowsAfter === null) return { platformCalls: -1, refusedCalls: -1 };
+  return {
+    platformCalls: caseRows.length,
+    refusedCalls: caseRows.filter((row) => row.refused).length,
   };
 }
 
@@ -3126,16 +3159,18 @@ async function main(): Promise<void> {
       const auditField = auditFailuresOf(auditMode, turns);
       const auditRowsAfter = executionAuditRows();
       // 用例级行也先合并起止（十二审 major）：否则报告里的 platformCalls 会把一次成功提案
-      // 计成两次。与逐轮的 calls/refusedCalls 同源。
+      // 计成两次。与逐轮的 calls/refusedCalls 同源。审计源不可读时调用数记 -1（不可知），
+      // 不拿空 caseRows 派生 0/0（2026-11-10 独立评审 low，见 caseCallCountsOf）。
       const caseRows: ExecutionAuditRow[] = mergeCallPhases(auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore));
+      const callCounts = caseCallCountsOf(auditRowsAfter, caseRows);
       // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
       const ok = notes.every((note) => note.startsWith('（信息性）'));
       const counted = countDims(notes);
       const tokens = caseTokensOf(turns, caseMark);
       results.push({
         id: item.id, group: item.group, intent: item.intent, turns,
-        platformCalls: caseRows.length,
-        refusedCalls: caseRows.filter((row) => row.refused).length,
+        platformCalls: callCounts.platformCalls,
+        refusedCalls: callCounts.refusedCalls,
         chain: {
           evalRunId,
           caseId: item.id,
@@ -3158,8 +3193,7 @@ async function main(): Promise<void> {
         console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);
         if (turn.notices.length) console.log(`         通知: ${turn.notices.join(' | ')}`);
       }
-      const refused = caseRows.filter((row) => row.refused).length;
-      console.log(`  平台调用: ${caseRows.length}${refused ? `（其中被拒 ${refused}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
+      console.log(`  平台调用: ${callCounts.platformCalls < 0 ? '不可知（审计源不可读）' : callCounts.platformCalls}${callCounts.refusedCalls > 0 ? `（其中被拒 ${callCounts.refusedCalls}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
     } catch (error) {
       // 崩溃用例同时进探针报告与统一报告（2026-11-10 独立评审 medium，纯函数见
       // caseCrashOf）：旧写法只 push results ⇒ 该用例从统一报告里静默消失，用例计数
@@ -3259,7 +3293,9 @@ async function main(): Promise<void> {
       const tokenTotal = (result.tokens?.main?.total ?? 0) + (result.tokens?.worker?.total ?? 0);
       const tokenNote = tokenTotal > 0 ? ` tokens ${tokenTotal}` : '';
       const refusedNote = result.refusedCalls > 0 ? `（被拒 ${result.refusedCalls}）` : '';
-      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${result.platformCalls}${refusedNote}${tokenNote} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
+      // -1 = 审计源不可读的不可知哨兵（不渲染成"-1 次调用"，也不冒充 0）。
+      const callsNote = result.platformCalls < 0 ? '不可知（审计源不可读）' : String(result.platformCalls);
+      console.log(`  ${result.ok ? '✓' : '⚠'} ${result.id} ${(total / 1000).toFixed(1)}s 平台调用 ${callsNote}${refusedNote}${tokenNote} ${dimsSummary(result.dims)}${result.notes.length ? '— ' + result.notes.join('; ') : ''}`);
     }
   }
   const bad = results.filter((result) => !result.ok);

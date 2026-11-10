@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, validAuditFailuresValue,
+  evaluateProbeCase, evaluateWriteChainCase, loadBaseline, loadCorpus, partitionCorpusForScoring,
+  validAuditFailuresValue,
   type Baseline, type ProbeResultRow,
 } from './score';
 import type { ConversationWriteChainFacts } from './write-chain';
@@ -106,10 +107,13 @@ describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能�
     expect(verdict.pass).toBe(false);
   });
 
-  it('显式不适用（无平台证据轮次）⇒ 检查照出、pass=true、actual=不适用（不冒充 0）', () => {
+  it('显式不适用（整例没有可核轮）⇒ 检查照出且判失败——"没得核"不是"查过且全过"（2026-11-10 评审 2 high）', () => {
+    // 旧语义 pass=true：「整例没有一个可核轮」被当成通过，等于"无证据 = 通过"——与本分支
+    // 既有口径（evidence.ts mechanicallyPassed：零证据 ⇒ false）相悖。选失败而非三态"待定"
+    // 的理由见 auditFailuresCheckOf 注释；actual 与真实计数失败可区分（可审计性不丢）。
     const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'not-applicable' }), baselineCase, undefined, undefined, true);
-    expect(auditCheckOf(verdict)).toMatchObject({ pass: true, actual: '不适用' });
-    expect(verdict.pass).toBe(true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, expected: '≤0', actual: '不适用（整例没有可核轮）' });
+    expect(verdict.pass).toBe(false);
   });
 
   it('审计源不可读（有轮次但证据缺席）⇒ 判失败，不因"还有干净轮次"放行（2026-11-10 评审 high）', () => {
@@ -132,6 +136,33 @@ describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能�
     expect(validAuditFailuresValue(Number.NaN)).toBe(false);
     expect(validAuditFailuresValue(undefined)).toBe(false);
     expect(validAuditFailuresValue(null)).toBe(false);
+  });
+});
+
+describe('判定集/跳过集同源：占位条目即使被误标 inBaseline 也不评估', () => {
+  // 2026-11-10 评审 low：统一报告侧先判 placeholder，score.ts 主循环旧写法只看
+  // inBaseline——占位条目一旦被误标 inBaseline:true，两侧判定就分叉（报告 skip、
+  // score 评估）。主循环的过滤已收敛到 partitionCorpusForScoring，这里直接钉该函数：
+  // 只测报告侧（unifiedCasePassedOf）时，删掉 score 侧占位分支仍然全绿。
+  it('placeholder:true 且 inBaseline:true ⇒ 进跳过集，不进判定集（判别点：抹掉占位标记后进判定集）', () => {
+    const q5b = loadCorpus().find((entry) => entry.case === 'Q5b')!;
+    expect(q5b.placeholder).toBe(true);
+    const promoted = { ...q5b, inBaseline: true };
+    const { judged, skipped } = partitionCorpusForScoring([promoted]);
+    expect(judged).toEqual([]);
+    expect(skipped.map((entry) => entry.id)).toEqual([promoted.id]);
+    // 判别点：同一输入抹掉占位标记 ⇒ 进判定集。证明上面的 skip 不是 inBaseline 单独造成的。
+    const asNonPlaceholder = { ...promoted, placeholder: undefined };
+    expect(partitionCorpusForScoring([asNonPlaceholder]).judged.map((entry) => entry.id))
+      .toEqual([asNonPlaceholder.id]);
+    expect(partitionCorpusForScoring([asNonPlaceholder]).skipped).toEqual([]);
+  });
+
+  it('普通未进基线条目仍按 skipped（占位判据没有吞掉既有口径）', () => {
+    const nonBaseline = loadCorpus().find((entry) => !entry.inBaseline && entry.placeholder !== true)!;
+    const { judged, skipped } = partitionCorpusForScoring([nonBaseline]);
+    expect(judged).toEqual([]);
+    expect(skipped.map((entry) => entry.id)).toEqual([nonBaseline.id]);
   });
 });
 

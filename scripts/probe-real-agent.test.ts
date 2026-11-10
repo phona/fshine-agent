@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
-  auditOutgoingText, caseCrashOf, caseReportInputOf, errorStateNotes, loadBaselineForProbe,
+  auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, errorStateNotes, loadBaselineForProbe,
   realAmounts, recallMissed, unifiedCasePassedOf,
   type ScriptLine, type Turn,
 } from './probe-real-agent';
@@ -229,6 +229,11 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
     // 吃假红。两条豁免/格式义务必须教给模型。
     expect(AUDIT_INSTRUCTION).toContain('日期样数字（如年份）和零值不是金额，不需要申报');
     expect(AUDIT_INSTRUCTION).toContain('不要使用千分位分隔符、货币符号或单位后缀');
+    // 逐轮事实域消歧（2026-11-10 独立评审 low）：召回轮零调用复述此前查询得到的金额在
+    // audited 门下不可表达（无块 ⇒ 格式红；补引用行 ⇒ 本轮事实域无该记录 ⇒ 幻影源红），
+    // 指令必须把"每个带金额的轮次本轮重查"教给模型，而不是让照召回语义写的回复吃假红。
+    expect(AUDIT_INSTRUCTION).toContain('申报只以本轮回复前的平台查询为据');
+    expect(AUDIT_INSTRUCTION).toContain('需要复述就先在本轮重新查询');
     // 中性：不带业务口径、不提 eval/测试/harness 字样。
     expect(AUDIT_INSTRUCTION).not.toMatch(/eval|test|测试|probe|harness|payable|bank|debt|collection|window/i);
   });
@@ -487,7 +492,9 @@ describe('auditFailures 公共收集入口：默认子集每个 runner 都产列
   it('零轮占位用例记显式不适用（不是 0）：检查照出但不冒充"查过且全过"', () => {
     // 2026-11-09 评审 medium：旧断言 `auditFailures: 0` 把零轮占位写成"查过且全过"。
     expect(auditFailuresOf(true, [])).toEqual({ auditFailures: 'not-applicable' });
-    expect(auditFailuresCheckOf('not-applicable', 0)).toMatchObject({ pass: true, actual: '不适用' });
+    // 2026-11-10 评审 2 high：N/A **不得判过**——"整例没有可核轮"意味着交叉核既没跑也没
+    // 过；actual 与真实计数失败可区分（不适用 vs 计数）。
+    expect(auditFailuresCheckOf('not-applicable', 0)).toMatchObject({ pass: false, actual: '不适用（整例没有可核轮）' });
   });
 
   it('auditMissing 轮不可核 ⇒ 显式 unverifiable，门判失败（不因同例另有干净轮次放行）', () => {
@@ -522,6 +529,34 @@ describe('auditFailures 公共收集入口：默认子集每个 runner 都产列
     expect(auditFailuresCheckOf(field.auditFailures, 0).pass).toBe(false);
   });
 
+  it('零证据轮回复里有金额 ⇒ 判红不跳过——"无证据 ≠ 通过"（2026-11-10 评审 2 high）', () => {
+    // 反例：该轮没有任何平台调用，回复却给出金额（没查就答 ⇒ 无据可核）。旧实现对
+    // "execution 为空 + 没有申报块"整轮跳过，该轮不计失败、整例照过；现在按
+    // hasAuditableContent 照核——空事实基准下"有数字没有块"就是格式红。
+    const unevidenced = auditTurn('The total is 1000.', '现在几月了？', []);
+    const field = auditFailuresOf(true, [unevidenced]);
+    expect(typeof field.auditFailures).toBe('number');
+    expect(field.auditFailures as number).toBeGreaterThan(0);
+    expect(auditFailuresCheckOf(field.auditFailures, 0).pass).toBe(false);
+    // 孪生诚实：同一句话在有平台证据的轮次且申报完备 ⇒ 0（判据核的是"无据可核"，
+    // 不是这句话本身——不恒红）。
+    const evidenced: ExecutionAuditRow[] = [
+      { callId: 'c1', phase: 'result', mode: 'query', script: 'dummy.query', result: {
+        status: 'completed', items: [
+          { id: 'rec-101', name: 'beta-item-1', value: 500 },
+          { id: 'rec-102', name: 'beta-item-2', value: 300 },
+          { id: 'rec-103', name: 'beta-item-3', value: 200 },
+        ], count: 3,
+      } },
+    ];
+    const clean = auditTurn(
+      'The total is 1000.\n[audit]\n500 <- rec-101\n300 <- rec-102\n200 <- rec-103\n1000 := 500 + 300 + 200\n[/audit]',
+      'check beta record value', evidenced,
+    );
+    expect(auditFailuresOf(true, [clean])).toEqual({ auditFailures: 0 });
+    expect(auditFailuresCheckOf(0, 0).pass).toBe(true);
+  });
+
   it('黑盒不产列（缺席 ≠ 0，旧行为不变）', () => {
     expect(auditFailuresOf(false, turns())).toEqual({});
     expect('auditFailures' in auditFailuresOf(false, turns())).toBe(false);
@@ -552,8 +587,8 @@ describe('统一报告与 score.ts 同源判定（unifiedCasePassedOf）', () =>
     expect(unifiedCasePassedOf(probeRow(), undefined, baselineCase, true)).toBe(false);
   });
 
-  it('显式不适用 ⇒ passed=true（零轮/无证据不是失败，也不是 0）', () => {
-    expect(unifiedCasePassedOf(probeRow({ auditFailures: 'not-applicable' }), undefined, baselineCase, true)).toBe(true);
+  it('显式不适用 ⇒ passed=false（"整例没有可核轮"不是"查过且全过"——2026-11-10 评审 2 high）', () => {
+    expect(unifiedCasePassedOf(probeRow({ auditFailures: 'not-applicable' }), undefined, baselineCase, true)).toBe(false);
   });
 
   it('黑盒不消费申报计数（旧行为不变）', () => {
@@ -717,6 +752,31 @@ describe('runner 抛错：崩溃用例进统一报告，不被静默漏掉', () 
     expect(crash.result.refusedCalls).toBe(-1);
     expect(crash.result.ladder).toEqual([]);
     expect(crash.input.turns).toEqual([]);
+  });
+
+  it('正常路径：审计源不可读 ⇒ 用例级调用数同样记 -1（不冒充有证据的零调用）', () => {
+    // 2026-11-10 独立评审 low：正常（非崩溃）路径旧写法用空 caseRows 派生 0/0，
+    // case-ledger 的 knownPlatformCalls(0) 会把"读不到"当成"有证据的零调用"计入合计。
+    expect(caseCallCountsOf(null, [])).toEqual({ platformCalls: -1, refusedCalls: -1 });
+    // 孪生：审计源可读时照常计数（被拒行也数）。
+    expect(caseCallCountsOf([], [])).toEqual({ platformCalls: 0, refusedCalls: 0 });
+    const rows: ExecutionAuditRow[] = [
+      { mode: 'query', script: 'dummy.query', exitCode: 0 },
+      { mode: 'query', script: 'dummy.query', refused: 'serve_gate:token' },
+    ];
+    expect(caseCallCountsOf([], rows)).toEqual({ platformCalls: 2, refusedCalls: 1 });
+  });
+
+  it('审计源不可读但有时延证据：崩溃窗口行带 -1/auditMissing，报告不写 executedCalls 0', () => {
+    // 合成崩溃窗口行的 execution 只能是 []（证据不可读）。不显式带 -1/auditMissing 时，
+    // buildCaseReport 会按空数组派生 0/0——与结果级 platformCalls:-1 自相矛盾。
+    const a1 = loadCases().find((spec) => spec.id === 'A1')!;
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', true, { auditRows: null, elapsedMs: 2500 });
+    expect(crash.input.turns).toHaveLength(1);
+    const line = buildCaseReport(crash.input).turns[0]!;
+    expect(line).toMatchObject({ auditMissing: true, calls: -1, latencyMs: 2500 });
+    expect('executedCalls' in line).toBe(false);
+    expect('refusedCalls' in line).toBe(false);
   });
 
   it('中途中止：已完成轮次保住（申报计数不再一律 N/A），正在跑的轮次单列、JSONL 不重复', () => {

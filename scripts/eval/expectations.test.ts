@@ -762,6 +762,47 @@ describe('期望值层：实体键归属（entityAttribution——点名实体�
   });
 
   /**
+   * 2026-11-10 codex blocking 1（本轮第 1 条：别名规范化并绑定）的 audited 端到端锁。
+   * 自然别名（beta-collection）此前两头落空：形状闸把它豁免出未登记检查、实体绑定又
+   * 只认原名 ⇒ "beta-collection record value is 1200"（1200 是 alpha 的值）配 alpha 的
+   * 如实申报（`1200 <- rec-001`，交叉核全过）在 audited 路径整例假绿——申报块只核
+   * 「数 ↔ 记录号的值」，核不到"正文挂给了谁"。别名规范化（beta-collection ⇒ beta）后
+   * 走既有绑定与值核对，张冠李戴照红；孪生绿：500 确是 beta 的真值。
+   */
+  it('blocking 1 端到端：别名把 alpha 的值挂给 beta + 如实申报 ⇒ 张冠李戴（audited 不再假绿）', () => {
+    const alphaFacts = [
+      { id: 'rec-001', name: 'alpha-item-1', value: 1200 },
+      { id: 'rec-002', name: 'alpha-item-2', value: 800 },
+    ];
+    const audited = (prose: string, block: string): ExpectationTurn => ({
+      text: TEXTS[2]!,
+      reply: `${prose}\n${block}`,
+      notices: [],
+      calls: 1,
+      execution: [{ script: 'dummy.query', args: ['--collection', 'a0'], exitCode: 0,
+        result: { items: alphaFacts, count: alphaFacts.length } }] satisfies ExecutionAuditRow[],
+      audited: true,
+    });
+    // 申报行逐字对事实（1200 确是 rec-001 的值）——挂错人仍必须红。
+    expect(failing(shell(audited('平台没有 payable 这个口径。beta-collection record value is 1200。', '[audit]\n1200 <- rec-001\n[/audit]'))))
+      .toEqual(['期望·张冠李戴(第3轮)']);
+    // 孪生绿：500 确是 beta-item-1 的真值 + 如实申报 ⇒ 不误红。
+    const betaFacts = [
+      { id: 'rec-101', name: 'beta-item-1', value: 500 },
+    ];
+    const green: ExpectationTurn = {
+      text: TEXTS[2]!,
+      reply: '平台没有 payable 这个口径。beta-collection record value is 500。\n[audit]\n500 <- rec-101\n[/audit]',
+      notices: [],
+      calls: 1,
+      execution: [{ script: 'dummy.query', args: ['--collection', 'a1'], exitCode: 0,
+        result: { items: betaFacts, count: betaFacts.length } }] satisfies ExecutionAuditRow[],
+      audited: true,
+    };
+    expect(failing(shell(green))).toEqual([]);
+  });
+
+  /**
    * 2026-11-09 评审 2：行内明细 + 合计是常见诚实形态。合计挂在最后一条 item 上时不能因为
    * "所绑实体单值不含合计"就记张冠李戴——明细列总计改绑所属 collection（totalOwnerCollection），
    * 1000 按 beta 的全额（500+300+200）验，落 derived。

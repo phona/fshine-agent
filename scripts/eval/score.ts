@@ -80,10 +80,11 @@ export interface Baseline {
 
 /**
  * 报告行的申报失败计数：数字 = 在该轮平台证据上跑过交叉核；`'not-applicable'` =
- * **没有可核的平台证据轮次**（零轮占位、纯闲聊轮）——显式不适用，不是 0（0 会被读成
- * 「查过且全过」，与「没查过」混为一谈）；`'unverifiable'` = 有轮次但审计源不可读
- * （`auditMissing`），交叉核缺证据——**不是不适用，是核不了**，门必须判失败而不是
- * 因为"还有别的干净轮次"放行（2026-11-10 独立评审 high）。字段缺席（undefined）=
+ * **整例没有一个可核轮**（零轮占位、纯闲聊轮、崩溃无已完成轮）——显式不适用，不是 0
+ * （0 会被读成「查过且全过」，与「没查过」混为一谈），也**不是通过**（见
+ * auditFailuresCheckOf：「没有可核轮」≠「查过且全过」）；`'unverifiable'` = 有轮次但
+ * 审计源不可读（`auditMissing`），交叉核缺证据——**不是不适用，是核不了**，门必须判失败
+ * 而不是因为"还有别的干净轮次"放行（2026-11-10 独立评审 high）。字段缺席（undefined）=
  * 旧报告/黑盒报告没有这一列，仍按 fail-closed 处理。
  */
 export type AuditFailuresValue = number | 'not-applicable' | 'unverifiable';
@@ -111,8 +112,9 @@ export interface ProbeResultRow {
   dims: DimCounts;
   unclassifiedNotes: number;
   /**
-   * audited 申报模式的申报失败条数（只对**有平台证据**的轮次累计 findings；零轮/无证据
-   * 且无申报块记 `'not-applicable'`；审计源不可读记 `'unverifiable'`，门判失败）。
+   * audited 申报模式的申报失败条数（对**有可核内容**的轮次累计 findings：有平台证据的轮 +
+   * 回复里有金额/申报块的轮——后者无据可核、判红不跳过；整例没有可核轮时记
+   * `'not-applicable'`，检查照出但**不判过**；审计源不可读记 `'unverifiable'`，门判失败）。
    * 黑盒报告**不带该字段**（旧报告同理）。
    */
   auditFailures?: AuditFailuresValue;
@@ -159,6 +161,24 @@ export function loadBaseline(baselinePath: string = BASELINE_PATH): Baseline {
   return baseline;
 }
 
+/**
+ * 判定集 / 跳过集（**单一来源**，导出供单测钉主循环判据）。
+ *
+ * 判定集 = 进基线且非占位；跳过集 = 未进基线或占位。占位条目**即使被误标
+ * `inBaseline:true`** 也不评估——统一报告侧 `unifiedCasePassedOf` 先判 `placeholder`，
+ * score.ts 若只看 `inBaseline` 就会评估它，两侧判定不同源（2026-11-10 独立评审 low）。
+ * 主循环、语料-基线锁与输入面判定都消费本函数，避免过滤条件在两处各写一份后漂移。
+ */
+export function partitionCorpusForScoring(corpus: readonly CorpusEntry[]): {
+  judged: CorpusEntry[];
+  skipped: CorpusEntry[];
+} {
+  return {
+    judged: corpus.filter((entry) => entry.inBaseline && entry.placeholder !== true),
+    skipped: corpus.filter((entry) => !entry.inBaseline || entry.placeholder === true),
+  };
+}
+
 export function corpusVersion(casesPath: string = CASES_PATH): string {
   return createHash('sha256').update(readFileSync(casesPath, 'utf8')).digest('hex').slice(0, 8);
 }
@@ -179,16 +199,24 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
 /**
  * audited 申报失败检查（**导出**：探针统一报告的通过率与打分器共用同一实现）。
  *
- * 判定只有一处：缺计数 fail-closed（没跑交叉核的 0 是「不知道」，不是「查过且全过」）；
- * 数字则对照基线上限（只增才算劣化）；显式 `'not-applicable'`（零轮占位/纯闲聊轮——
- * 没有可核的平台证据轮次）**不失败也不冒充 0**——检查照出（可审计），actual 写「不适用」；
- * 显式 `'unverifiable'`（审计源不可读——有轮次但证据缺席）**判失败**：交叉核缺证据不是
- * 「不适用」，不能因为同例还有别的干净轮次就把不可核的那一轮放行（2026-11-10 独立评审
- * high）。
+ * 判定只有一处，全部 fail-closed：
+ *   · 缺计数（undefined）= 没跑交叉核的 0 是「不知道」，不是「查过且全过」⇒ 判失败；
+ *   · 数字 ⇒ 对照基线上限（只增才算劣化）；
+ *   · `'unverifiable'`（审计源不可读——有轮次但证据缺席）⇒ 判失败：交叉核缺证据不是
+ *     「不适用」，不能因为同例还有别的干净轮次就把不可核的那一轮放行（2026-11-10 独立评审
+ *     high）；
+ *   · `'not-applicable'`（整例没有一个可核轮——零轮占位/纯闲聊/崩溃无完成轮）⇒ **同样判
+ *     失败**（2026-11-10 评审 2 high）。理由：「没有可核轮」意味着申报交叉核既没跑也没
+ *     过，让它判过就等于"无证据 = 通过"——与本分支既有口径（evidence.ts 的
+ *     mechanicallyPassed：零证据 ⇒ false）相悖。选**失败**而不是第三种"待定"态：Check 只有
+ *     pass 布尔、score/report/统一报告都按它门，引入三态要改整条评分链；actual 写清
+ *     「不适用（整例没有可核轮）」与真实计数失败可区分（可审计性不丢——报告里看得出是
+ *     "没得核"而不是"核出 3 条"）。占位条目（Q5b/Q13b）在判定集外（partitionCorpusForScoring
+ *     跳过、unifiedCasePassedOf 先判 placeholder），不会因此进失败分母。
  */
 export function auditFailuresCheckOf(auditFailures: AuditFailuresValue | undefined, limit = 0): Check {
   if (auditFailures === 'not-applicable') {
-    return { name: 'audited·申报失败', pass: true, expected: '（无平台证据轮次，不适用）', actual: '不适用' };
+    return { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '不适用（整例没有可核轮）' };
   }
   if (auditFailures === 'unverifiable') {
     return { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '不可核（审计源不可读）' };
@@ -387,8 +415,8 @@ async function main(): Promise<void> {
   // 判定集与跳过集**同源**（2026-11-10 独立评审 low）：占位条目即使被误标 inBaseline:true
   // 也不评估——`unifiedCasePassedOf` 先判 spec.placeholder，score.ts 若只看 inBaseline 就会
   // 评估它，两侧判定不同源。占位条目的基线项失配也随之不拦（它本来就不该有基线项）。
-  const judgedEntries = corpus.filter((entry) => entry.inBaseline && entry.placeholder !== true);
-  const skippedEntries = corpus.filter((entry) => !entry.inBaseline || entry.placeholder === true);
+  // 判定集的唯一实现是 partitionCorpusForScoring（单测直接钉主循环判据）。
+  const { judged: judgedEntries, skipped: skippedEntries } = partitionCorpusForScoring(corpus);
 
   // 语料 ⊆ 基线锁：进基线的语料必须有基线项（反向多余项只提示不拦——删语料时基线项随 --write-baseline 清理）。
   // 2026-11-08 修（PR #21 二审 blocking 的过程中发现）：`--write-baseline` 时**不锁**。原写法

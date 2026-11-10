@@ -289,25 +289,31 @@ function findCollection(state, keyword) {
 // 事实基准（"回复里的数平台确实拉回过"与"平台确实说过 not_found"都要能独立核对，不能只靠
 // 模型自述传递）。failed/被拒没有可申报的结果，返回的 code 不带 result，审计行因此也不会
 // 出现载荷。
+// 三种状态都带**该次查询的对象规范名**（result.collection：2026-11-10 codex blocking 二）：
+// args 是调用参数、一次调用可以带多个值（`--collection alpha --topic beta` 实际查 alpha），
+// 交叉核若扫 args 会把这次查询的字段证据当成另一个对象的证据。对象名由平台自己落账——
+// completed 落解析后的规范名（found.name，子串检索也落 canonical 名），not_found /
+// needs_input 落该次检索的名字（没有可解析的规范名）。不落对象名的 result 匹配不上任何
+// 命题 ⇒ 交叉核 fail-closed，不会把证据挂到错的对象上。
 function doQuery(opName, args) {
   const { flags } = parseFlags(args);
   const state = loadState();
   if (!flags.collection && !flags.topic) { emit(opName, 'failed', null, errObj('QUERY_REQUIRED', 'Missing --collection or --topic')); return { code: 1 }; }
   const collection = flags.collection || flags.topic;
   const found = findCollection(state, collection);
-  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0, result: { status: 'needs_input' } }; }
-  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches "${collection}"`)); return { code: 0, result: { status: 'not_found' } }; }
+  if (found.ambiguous) { emit(opName, 'needs_input', { query: collection, candidates: found.ambiguous.map((name) => ({ name })) }, errObj('COLLECTION_AMBIGUOUS', `More than one collection matches "${collection}"`)); return { code: 0, result: { status: 'needs_input', collection } }; }
+  if (found.none) { emit(opName, 'not_found', { query: collection, candidates: [] }, errObj('COLLECTION_NOT_FOUND', `No collection matches that keyword. Check the exact collection name and retry.`)); return { code: 0, result: { status: 'not_found', collection } }; }
   const col = found.exact;
   const window = flags.window || flags.round;
   if (window && !col.windows.includes(window)) {
     emit(opName, 'not_found', { query: collection, window, availableWindows: col.windows }, errObj('WINDOW_NO_DATA', `Window ${window} has no data for collection ${found.name}`));
-    return { code: 0, result: { status: 'not_found' } };
+    return { code: 0, result: { status: 'not_found', collection: found.name } };
   }
   const items = col.items;
   emit(opName, 'completed', { collection: found.name, window: window ?? null, items, count: items.length }, null);
   // fields = 平台原始 items 的字段名（nocaliber 命题的事实基准）：items 本身按 value 核对
   // 契约落账，字段名单独保留，避免"投影后的形状"冒充平台原始数据模型。
-  return { code: 0, result: { status: 'completed', items, count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
+  return { code: 0, result: { status: 'completed', collection: found.name, items, count: items.length, fields: [...new Set(items.flatMap((item) => Object.keys(item)))] } };
 }
 function doScratch(opName, args) {
   const { flags } = parseFlags(args);

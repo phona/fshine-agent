@@ -760,12 +760,129 @@ function looksLikeFixtureEntity(token: string): boolean {
   // 已登记实体的自然别名（beta-collection / alpha-group）不是"未登记名字"：数字形状
   // 之外的复合词只有在词干本身是登记名时才算已知别名的变体。foo-collection 的词干
   // foo 不在册 ⇒ 仍是未登记名字（方向正确）。
+  // 2026-11-10 codex blocking 1 起这层只是**防御纵深**：别名在 classifyErrorStateAmounts
+  // 入口已规范化到原名（normalizeEntityAliases），未登记闸看到的是已登记原名；词干豁免
+  // 留着防不走该入口的调用方把别名当未登记名字（原 2026-11-10 评审 low 的断言）。
   const stem = segments.slice(0, -1).join('-').toLowerCase();
   return !REGISTERED_ENTITY_NAMES.has(stem);
 }
 
 function isUnregisteredEntityName(token: string): boolean {
   return !REGISTERED_ENTITY_NAMES.has(token.toLowerCase()) && looksLikeFixtureEntity(token);
+}
+
+/**
+ * 实体别名的形状集与规范化（2026-11-10 codex blocking 1，本轮第 1 条：别名规范化并绑定）。
+ *
+ * 漏洞形状：自然别名（beta-collection / "beta collection" / alpha group …）此前**两头落空**——
+ *   · 形状闸（looksLikeFixtureEntity 的词干豁免）把它放出"未登记名字"检查：beta-collection
+ *     的词干 beta 已登记 ⇒ explicitUnregisteredAttribution 不记；
+ *   · 实体绑定只认 ENTITY_REAL_VALUES 原名 + 词元边界（boundaryPositions 禁止 beta 命中
+ *     beta-collection 内的 beta）⇒ mentions 为空、specific 为空、misattributed 无从记起。
+ * 于是 "beta-collection record value is 1200"（1200 是 alpha 的值）三分全空：黑盒路径靠
+ * unattributed 照红，audited 路径把无所属交给申报交叉核后，配 alpha 的真实来源申报
+ * （`1200 <- rec-001`）即整例假绿——申报块只核「数 ↔ 记录号的值」，核不到"正文挂给了谁"。
+ *
+ * 修法：**认可的别名规范化到原名（beta-collection ⇒ beta）后走既有绑定与值核对**——别名
+ * 换写法不换归属。规范化在 classifyErrorStateAmounts 入口对整条回复做一次，金额提取、
+ * 分句、实体绑定、倒装归属、合计改绑全部同源（都建立在规范化后的文本上）。
+ *
+ * 形状集（对 ENTITY_REAL_VALUES **每个名字**全覆盖——collection / item 名 / 记录号 /
+ * 零值的不存在对象，不按名字族区别对待）：
+ *   · **分隔符变体**：名字各段之间允许 `-` / `_` / 空格任意混用（alpha group / alpha_group /
+ *     beta item 1 / rec 101）——同一个名字的不同写法；
+ *   · **族后缀复合**：名字 + 分隔符 + collection(s) / group(s)（beta-collection /
+ *     "beta collection" / beta-group / beta collections…）——指称同一个对象的自然别名。
+ *     名字自身已以族后缀结尾时，末段也允许复数（alpha groups / alpha-groups /
+ *     gamma collections / gamma-collections）：仍是同一对象的写法；
+ *   · **所有格**（'s / ’s / s'）与**中文「的 / 之」**不占名字跨度：它们紧跟名字之后，
+ *     由匹配右侧的词元边界 `(?![A-Za-z0-9_-])` 天然放行（"beta collection's" /
+ *     "beta collection 的"都命中同一条复合规则）。把并它们进替换跨度会删掉所有格/「的」
+ *     标记，反倒弄坏倒装归属闸（INVERTED_POSSESSIVE_AFTER_RE 等）——故只做边界兼容。
+ *
+ * 同一起点的多形状优先序（"alpha group" / "alpha groups" 既是 alpha-group 的分隔符/
+ * 复数变体、又是 alpha 的族后缀复合）：先比**匹配文本更长**（beta-item-1 collection
+ * 优先于 beta-item-1），再比**原名更长**（"alpha group" 读成 alpha-group——登记在册
+ * 的名字比更短名字的复合别名更具体，更具体的归属赢）。未登记词干（foo-collection）
+ * 不生成任何规则，照旧走 unregisteredAttribution；普通英文复合词（well-known /
+ * real-time / beta-related）不在族后缀表内，也不生成规则。
+ */
+/** 族后缀源（指称同一对象的自然别名尾段）：与形状闸 ENTITY_FAMILY_SUFFIXES 同族同源。 */
+const ALIAS_FAMILY_SUFFIX_SRC = '(?:collections?|groups?)';
+/** 名字自身已以族后缀结尾（alpha-group / gamma-collection）：末段可再写复数。 */
+const ALIAS_FAMILY_SUFFIX_RE = /^(?:collections?|groups?)$/;
+/** 名字段之间的分隔符：连字符 / 下划线 / 空格任意混用（同一个名字的不同写法）。 */
+const ALIAS_SEPARATOR_SRC = '[-_ ]+';
+
+function escapeRegExpLiteral(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface EntityAliasRule {
+  /** 粘性（sticky）匹配：规范化按位置推进；右侧词元边界放行所有格/「的」/标点。 */
+  readonly pattern: RegExp;
+  readonly canonical: string;
+}
+
+const ENTITY_ALIAS_RULES: readonly EntityAliasRule[] = ENTITY_REAL_VALUES.map((entity) => {
+  const segments = entity.name.split(/[-_]/);
+  const stem = segments.map(escapeRegExpLiteral).join(ALIAS_SEPARATOR_SRC);
+  // 族后缀复合排在分隔符变体**之前**：正则交替是有序的而非取最长，"beta collection"
+  // 必须先被复合 Alternative 整体吃掉，再退回落单段名（否则 beta 先匹配、collection
+  // 留在原处，别名等于没规范化）。跨规则的取长在 normalizeEntityAliases 里做。
+  const last = segments[segments.length - 1]!.toLowerCase();
+  // 名字自身已以族后缀结尾时，末段也允许复数（alpha groups / alpha-groups、
+  // gamma collections / gamma-collections）：别名换写法不换归属。复数只加 `s?`，
+  // 原名已含 s 的（collections）不叠写。
+  const pluralStem = (() => {
+    const head = segments.slice(0, -1).map(escapeRegExpLiteral).join(ALIAS_SEPARATOR_SRC);
+    const lastSrc = escapeRegExpLiteral(segments[segments.length - 1]!).replace(/s$/i, '');
+    return `${head}${head ? ALIAS_SEPARATOR_SRC : ''}${lastSrc}s?`;
+  })();
+  const compound = ALIAS_FAMILY_SUFFIX_RE.test(last)
+    ? pluralStem
+    : `${stem}${ALIAS_SEPARATOR_SRC}${ALIAS_FAMILY_SUFFIX_SRC}|${stem}`;
+  return {
+    // 粘性（y）：exec 只在 lastIndex 处匹配，规范化才谈得上"逐位置取最长"——少了 y，
+    // g 标志会让 exec 从 cursor 之后任意位置开匹配，替换长度随即错位、文本被吞
+    // （实测："beta-item-1 = 500、beta-item-2 = 300" 被拼成 "beta-item-1beta-item-2-item-2"）。
+    pattern: new RegExp(`(?<![A-Za-z0-9_-])(?:${compound})(?![A-Za-z0-9_-])`, 'giy'),
+    canonical: entity.name,
+  };
+});
+
+/**
+ * 把认可的别名写法规范化到原名（2026-11-10 codex blocking 1）。逐位置取所有规则里的
+ * 最长匹配（并列时原名更具体的赢，见上）；未命中处原样拷贝。只换写法、不换归属：
+ * 调用方（classifyErrorStateAmounts）在入口对整条回复规范化一次，随后既有实体绑定与
+ * 值核对照旧执行——"beta-collection record value is 1200" 与 "beta record value is
+ * 1200" 同判（1200 ∉ beta 的 500/300/200 ⇒ 张冠李戴），"…is 500" 同判（绿）。
+ */
+export function normalizeEntityAliases(text: string): string {
+  let out = '';
+  let cursor = 0;
+  while (cursor < text.length) {
+    let best: { end: number; canonical: string } | undefined;
+    for (const rule of ENTITY_ALIAS_RULES) {
+      rule.pattern.lastIndex = cursor;
+      const match = rule.pattern.exec(text);
+      // 粘性正则只在 cursor 处匹配；null = 该规则在此处不成立。
+      if (match === null) continue;
+      const end = cursor + match[0].length;
+      if (best === undefined || end > best.end
+        || (end === best.end && rule.canonical.length > best.canonical.length)) {
+        best = { end, canonical: rule.canonical };
+      }
+    }
+    if (best === undefined) {
+      out += text[cursor]!;
+      cursor += 1;
+      continue;
+    }
+    out += best.canonical;
+    cursor = best.end;
+  }
+  return out;
 }
 
 /**
@@ -895,6 +1012,12 @@ export function classifyErrorStateAmounts(
   userText: string,
   extractAmounts: (text: string) => AmountLike[],
 ): ErrorStateAmountVerdict {
+  // 别名规范化（2026-11-10 codex blocking 1）：整条回复先换写法再判定——金额提取、
+  // 分句、实体绑定、倒装归属、合计改绑全部同源。自然别名（beta-collection /
+  // "beta collection" / alpha group…）此前两头落空（形状闸豁免出未登记检查 + 绑定面
+  // 只认原名），audited 路径配真实申报即可把 alpha 的值挂给 beta 放行；规范化后别名
+  // 走既有绑定与值核对，换写法不换归属。未登记词干（foo-collection）不受影响。
+  const text = normalizeEntityAliases(reply);
   const asked = askedWindows(userText);
   const unattributed = new Map<number, AmountLike>();
   const misattributed = new Map<number, AmountLike>();
@@ -903,9 +1026,9 @@ export function classifyErrorStateAmounts(
   const asserted = new Map<string, string>();
   // 全回复范围的真实值池（表格摊账形态的加数）：isVerifiedArithmetic 的两级闭包会从
   // 500/300/200 推出 1000；凭空数即便带"合计"措辞也推不出来，照旧红。
-  const replyRealValues = [...new Set(extractAmounts(reply).map((a) => a.value).filter((v) => REAL_DATA_VALUES.includes(v)))];
-  const parts = reply.split(CLAUSE_SPLIT);
-  for (const amount of extractAmounts(reply)) {
+  const replyRealValues = [...new Set(extractAmounts(text).map((a) => a.value).filter((v) => REAL_DATA_VALUES.includes(v)))];
+  const parts = text.split(CLAUSE_SPLIT);
+  for (const amount of extractAmounts(text)) {
     if (amount.value === 0) continue;
     // 金额边界（2026-11-07 评审 blocking：紧跟英文逗号的金额静默漏判）——后向禁止集区分
     // 千分位逗号与句法逗号：`,<数字>` 是千分位延续（不许把 "1,500" 里的 500 当独立金额），

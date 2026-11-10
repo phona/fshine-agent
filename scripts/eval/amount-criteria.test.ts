@@ -7,6 +7,7 @@ import {
   isDateLikeAmount,
   isVerifiedArithmetic,
   isVerifiedTotal,
+  normalizeEntityAliases,
   RATIO_FRAMING_RE,
   TOTAL_FRAMING_RE,
 } from './amount-criteria';
@@ -28,6 +29,7 @@ function classify(reply: string, userText = '') {
 }
 
 import { ACCOUNT_RESULT_PHRASING, extractAmounts } from './amount-criteria';
+import { ENTITY_REAL_VALUES, REAL_DATA_VALUES } from './dummy-fixture';
 
 describe('错误态金额三分：评审反例（必须红）', () => {
   it('blocking：跨实体冒用——"beta payable balance is 1200"（1200 是 alpha 的值）', () => {
@@ -1213,12 +1215,17 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
       // 未登记 collection·group 词干仍是强形状证据（foo-collection 是矩阵 foo 侧的实体）。
       // 普通复合词与别名根本不是实体提及（不绑任何实体）⇒ misattributed 也无从记起；
       // 已登记名字（alpha-group，真实值 700）用真值句，登记检查先于形状闸短路。
+      // **beta-collection 不在这张表里**（2026-11-10 codex blocking 1）：它是已登记
+      // collection beta 的自然别名——不是未登记名字（unregisteredAttribution 仍空），
+      // 但别名规范化（beta-collection ⇒ beta）后它**进实体绑定与值核对**，
+      // "beta-collection value is 1000"（1000 不是 beta 的任何单条值）记张冠李戴。
+      // 旧实现把两态一起钉成"misattributed 空"，那正是 blocking 要修的 audited 假绿
+      // （配 alpha 的真实申报即可把 1200 挂给 beta 放行）；单独钉在下方别名测试里。
       const notFixture: ReadonlyArray<[string, string, number]> = [
         ['line-item', '普通英文复合词（item 后缀）', 1000],
         ['data-record', '普通英文复合词（record 后缀）', 1000],
         ['order-item', '普通英文复合词（item 后缀）', 1000],
         ['beta-item', '已登记词干 + 普通后缀', 1000],
-        ['beta-collection', '已登记词干的自然别名', 1000],
         ['well-known', '修饰语后缀（known）', 1000],
         ['real-time', '修饰语后缀（time）', 1000],
         ['beta-related', '修饰语后缀（related）', 1000],
@@ -1422,6 +1429,203 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     // `isFinite` 只验证"至少提到一条 item"，单条 + 全额合计会改绑 collection 按全额验过
     // （假绿）；两条例举先被 segSummands≥2 的列举通道挡住，所以洞只在单条形态露出来。
     const v = classify('beta-item-1 = 500，合计 1000。请确认。', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1000]);
+  });
+});
+
+/**
+ * 别名规范化并绑定（2026-11-10 codex blocking 1，本轮第 1 条）。
+ *
+ * 漏洞形状：自然别名（beta-collection / "beta collection" / alpha group …）此前两头落空——
+ * 形状闸的词干豁免把它放出"未登记名字"检查（unregisteredAttribution 不记），实体绑定又
+ * 只认原名 + 词元边界（beta 命中不了 beta-collection 内的 beta）⇒ misattributed 也无从
+ * 记起。"beta-collection record value is 1200"（1200 是 alpha 的值）三分全空：黑盒路径靠
+ * unattributed 照红，audited 路径把无所属交给申报交叉核后，配 alpha 的真实来源申报
+ * （`1200 <- rec-001`）即整例假绿——申报块只核「数 ↔ 记录号的值」，核不到"挂给谁"。
+ *
+ * 修法：认可的别名规范化到原名（beta-collection ⇒ beta）后走既有绑定与值核对——别名换
+ * 写法不换归属。形状集（对 ENTITY_REAL_VALUES 每个名字全覆盖）：分隔符变体（段间
+ * `-`/`_`/空格任意混用）+ 族后缀复合（-collection / collection / -group / group）；
+ * 名字自身已以族后缀结尾时写末段复数（alpha groups / alpha-groups、gamma collections /
+ * gamma-collections）。所有格与中文「的」不占名字跨度，由匹配右侧词元边界放行。同起点
+ * 多形状先比匹配文本更长、再比原名更长（"alpha group" ⇒ alpha-group，登记在册的名字赢）。
+ *
+ * 不追归属句构（冠词/同位语/Markdown/混合语种）——那已登记为已知残余，不在本轮范围；
+ * 这里只钉"名字怎么写"的有限枚举。
+ */
+describe('别名规范化并绑定：认可的别名换写法不换归属（2026-11-10 codex blocking 1）', () => {
+  /** 别名写法生成器（形状集的测试侧镜像：与 amount-criteria 的 ENTITY_ALIAS_RULES 同族）。
+   *  每个 ENTITY_REAL_VALUES 名字都生成：空格连写 / 下划线连写 / 族后缀写法（非族后缀名
+   *  加 collection(s) 复合；已是族后缀的名字写末段复数）/ 所有格 / 中文「的」——穷举性由
+   *  下方"每个名字都有非恒等写法"断言把守。 */
+  const writingsOf = (name: string): string[] => {
+    const segments = name.split(/[-_]/);
+    const spaced = segments.join(' ');
+    const underscored = segments.join('_');
+    const last = segments[segments.length - 1]!.toLowerCase();
+    // 名字自身已以族后缀结尾（alpha-group / gamma-collection）时，别名是末段复数
+    // （alpha groups / alpha-groups、gamma collections / gamma-collections）——同一对象
+    // 的另一种写法，规范化必须仍落到原名（2026-11-10 独立评审 medium）。
+    const compounds = ['collection', 'collections', 'group', 'groups'].includes(last)
+      ? [name.endsWith('s') ? name : `${name}s`, spaced.endsWith('s') ? spaced : `${spaced}s`, underscored.endsWith('s') ? underscored : `${underscored}s`]
+      : [`${name}-collection`, `${name} collection`, `${name}_collection`];
+    return [...new Set([spaced, underscored, ...compounds, `${name}'s`, `${name} 的`])];
+  };
+
+  it('验收反例（blocking 原文）："beta-collection record value is 1200"（1200 是 alpha 的值）⇒ 张冠李戴', () => {
+    const v = classify('beta-collection record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1200]);
+    // 黑盒路径同判（unattributed 是 misattributed 的超集），且别名不是未登记名字。
+    expect(v.unattributed.map((a) => a.value)).toEqual([1200]);
+    expect(v.unregisteredAttribution).toEqual([]);
+  });
+
+  it('验收孪生（不误红）："beta-collection record value is 500"（500 确是 beta-item-1 的真值）⇒ 三处全空', () => {
+    const v = classify('beta-collection record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+  });
+
+  it('形状集逐形态：族后缀复合 / 所有格 / 中文「的」都走同一条绑定（1200 红、500 绿）', () => {
+    const shapes = [
+      'beta-collection',
+      'beta collection',
+      'beta_collection',
+      'beta-collections',
+      'beta-group',
+      'beta group',
+      "beta collection's",
+      'beta collection 的',
+      'beta collection 的记录值',
+    ];
+    for (const writing of shapes) {
+      const red = classify(`${writing} record value is 1200; please confirm.`, 'checkbeta的payablebalance');
+      expect(red.misattributed.map((a) => a.value), `红：${writing}`).toEqual([1200]);
+      const green = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(green.misattributed, `绿：${writing}`).toEqual([]);
+      expect(green.unattributed, `绿：${writing}`).toEqual([]);
+      expect(green.unregisteredAttribution, `绿：${writing}`).toEqual([]);
+    }
+    // 中文「的」句构（别名 + 全中文归属措辞，不混语种）。
+    const cn = classify('beta collection 的记录值是 1200。请确认。', 'checkbeta的payablebalance');
+    expect(cn.misattributed.map((a) => a.value)).toEqual([1200]);
+    const cnGreen = classify('beta collection 的记录值是 500。请确认。', 'checkbeta的payablebalance');
+    expect(cnGreen.misattributed).toEqual([]);
+    expect(cnGreen.unattributed).toEqual([]);
+  });
+
+  it('分隔符变体：段间空格/下划线都规范化到原名（"alpha group" ⇒ alpha-group、"rec 101" ⇒ rec-101）', () => {
+    // "alpha group" 既是 alpha-group 的分隔符变体、又是 alpha 的族后缀复合——同起点
+    // 多形状按"匹配文本更长 ⇒ 原名更长"解歧：读成 alpha-group（700 是其真值 ⇒ 绿）。
+    const group = classify('alpha group record value is 700; please confirm.', 'checkbeta的payablebalance');
+    expect(group.misattributed).toEqual([]);
+    expect(group.unattributed).toEqual([]);
+    const groupRed = classify('alpha group record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(groupRed.misattributed.map((a) => a.value)).toEqual([1200]);
+    const record = classify('rec 101 record value is 500; please confirm.', 'checkbeta的payablebalance');
+    expect(record.misattributed).toEqual([]);
+    expect(record.unattributed).toEqual([]);
+    const recordRed = classify('rec 101 record value is 1200; please confirm.', 'checkbeta的payablebalance');
+    expect(recordRed.misattributed.map((a) => a.value)).toEqual([1200]);
+  });
+
+  it('别名表穷举：ENTITY_REAL_VALUES 每个名字都有非恒等别名写法，且每种写法规范化后含原名', () => {
+    // 全覆盖护栏（requirement 1）：34 个名字（9 collection + 12 item + 12 记录号 +
+    // 1 不存在对象）逐个生成形状集；没有任何名字被漏在别名机制之外。
+    for (const entity of ENTITY_REAL_VALUES) {
+      const writings = writingsOf(entity.name);
+      const nonIdentity = writings.filter((writing) => normalizeEntityAliases(writing) !== writing);
+      expect(nonIdentity.length, `${entity.name} 没有非恒等别名写法（别名表漏了它）`).toBeGreaterThan(0);
+      for (const writing of writings) {
+        expect(normalizeEntityAliases(writing), `${entity.name} 的别名写法「${writing}」未规范化到原名`).toContain(entity.name);
+      }
+    }
+  });
+
+  it('逐实体红/绿对：ENTITY_REAL_VALUES 每个名字 × 每种别名写法，错值红、真值绿', () => {
+    // requirement 2：每个实体名至少一对红/绿——这里逐名字逐写法全钉（collection /
+    // item / 记录号 / 零值的不存在对象，无一漏网）。
+    for (const entity of ENTITY_REAL_VALUES) {
+      const wrong = REAL_DATA_VALUES.find((value) => !entity.values.includes(value))!;
+      const right = entity.values[0];
+      for (const writing of writingsOf(entity.name)) {
+        const coordinate = `${entity.name} @ 「${writing}」`;
+        const red = classify(`${writing} record value is ${wrong}; please confirm.`, 'checkbeta的payablebalance');
+        expect(red.misattributed.map((a) => a.value), `红：${coordinate}`).toEqual([wrong]);
+        expect(red.unattributed.map((a) => a.value), `红（黑盒同判）：${coordinate}`).toEqual([wrong]);
+        // 别名是已登记名字的另一种写法，不是未登记名字。
+        expect(red.unregisteredAttribution, `别名不进未登记归属：${coordinate}`).toEqual([]);
+        if (right !== undefined) {
+          const green = classify(`${writing} record value is ${right}; please confirm.`, 'checkbeta的payablebalance');
+          expect(green.misattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unattributed, `绿：${coordinate}`).toEqual([]);
+          expect(green.unregisteredAttribution, `绿：${coordinate}`).toEqual([]);
+        }
+      }
+      // 零值实体（gamma-collection / empty-one）没有"对的值"：绿孪生 = 免责语境 +
+      // 金额正确挂给别的已知实体——别名在场不抹黑整句（与已登记零值实体同判）。
+      if (right === undefined) {
+        for (const writing of writingsOf(entity.name)) {
+          const green = classify(`${writing} has no records; beta-item-1 record value is 500; please confirm.`, 'checkbeta的payablebalance');
+          expect(green.misattributed, `绿孪生（零值实体）：${entity.name} @ 「${writing}」`).toEqual([]);
+          expect(green.unattributed, `绿孪生（零值实体）：${entity.name} @ 「${writing}」`).toEqual([]);
+        }
+      }
+    }
+  });
+
+  it('未登记词干不受影响：foo-collection 照旧走 unregisteredAttribution（别名表不收它）', () => {
+    // 连字符/下划线形态（未登记归属闸的词元形状 ENTITY_TOKEN_RE_SRC 要求段间 [-_]）
+    // 照旧单列 unregisteredAttribution；普通英文复合词（修饰语后缀 / 非族后缀）既不进
+    // 未登记归属也不进绑定面。
+    for (const writing of ['foo-collection', 'foo_collection']) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution.map((a) => a.value), writing).toEqual([500]);
+      expect(v.misattributed, writing).toEqual([]);
+    }
+    // 空格连写形态（含所有格）是**既有已知残余**（实测 stash 掉本轮改动后同样只落
+    // unattributed）：未登记闸的词元形状 ENTITY_TOKEN_RE_SRC 要求段间 [-_]，不收
+    // 空格分隔；绑定面又只收登记名。黑盒路径照旧红，audited 路径靠申报交叉核。
+    for (const writing of ['foo collection', "foo collection's"]) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unattributed.map((a) => a.value), writing).toEqual([500]);
+      expect(v.misattributed, writing).toEqual([]);
+      expect(v.unregisteredAttribution, writing).toEqual([]);
+    }
+    // 普通英文复合词（修饰语后缀 / 非族后缀）也不生成别名规则。
+    for (const writing of ['well-known collection', 'real-time collection', 'beta-related collection']) {
+      const v = classify(`${writing} record value is 500; please confirm.`, 'checkbeta的payablebalance');
+      expect(v.unregisteredAttribution, writing).toEqual([]);
+      expect(v.misattributed, writing).toEqual([]);
+    }
+  });
+
+  it('合计族同判：别名的真实全额走派生通道（"beta collection total is 1000" ⇒ derived，不红）', () => {
+    const v = classify('beta 的 record value 是 500、300、200。beta collection total is 1000.', 'checkbeta的payablebalance');
+    expect(v.misattributed).toEqual([]);
+    expect(v.unattributed).toEqual([]);
+    expect(v.unregisteredAttribution).toEqual([]);
+    expect(v.derived.map((a) => a.value)).toEqual([1000]);
+    // 错误合计（1200）不因派生通道放行。
+    const bad = classify('beta 的 record value 是 500、300、200。beta collection total is 1200.', 'checkbeta的payablebalance');
+    expect(bad.misattributed.map((a) => a.value)).toEqual([1200]);
+  });
+
+  it('倒装归属同样收口："1200 is the record value of beta collection" ⇒ 张冠李戴', () => {
+    const v = classify('1200 is the record value of beta collection; please confirm.', 'checkbeta的payablebalance');
+    expect(v.misattributed.map((a) => a.value)).toEqual([1200]);
+    const green = classify('500 is the record value of beta collection; please confirm.', 'checkbeta的payablebalance');
+    expect(green.misattributed).toEqual([]);
+    expect(green.unattributed).toEqual([]);
+  });
+
+  it('形状闸豁免仍在（防御纵深）：beta-collection 不是未登记名字——unregisteredAttribution 空', () => {
+    // 别名规范化后未登记闸看到的是原名（已登记）；词干豁免这层防御留着，防的是
+    // 未走规范化入口的其它调用方把别名当未登记名字（2026-11-10 评审 low 的原断言）。
+    const v = classify('beta-collection value is 1000。', 'checkbeta的payablebalance');
+    expect(v.unregisteredAttribution).toEqual([]);
+    // 但绑定面已收口：1000 不是 beta 的任何单条值 ⇒ 张冠李戴（这正是修的行为）。
     expect(v.misattributed.map((a) => a.value)).toEqual([1000]);
   });
 });
