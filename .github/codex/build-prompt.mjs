@@ -49,16 +49,19 @@ export function formatPriorReviews(reviews) {
   // 六条各 4K 的评审截断后只剩最早一条，最新的全丢）。
   const kept = []
   let budget = MAX_PRIOR_REVIEWS
+  let hardCut = false
   for (let i = blocks.length - 1; i >= 0; i -= 1) {
     const cost = blocks[i].length + (kept.length > 0 ? 2 : 0)
     if (cost > budget && kept.length > 0) break
-    if (cost > budget) { kept.push(blocks[i].slice(0, Math.max(0, budget))); budget = 0; break }
+    if (cost > budget) { kept.push(blocks[i].slice(0, Math.max(0, budget))); hardCut = true; break }
     kept.push(blocks[i])
     budget -= cost
   }
   kept.reverse()
   const text = kept.join('\n\n')
-  return { text, count: kept.length, truncated: kept.length < blocks.length || budget < MAX_PRIOR_REVIEWS }
+  // truncated 只在**真的丢过评审或裁过文本**时为真——"装进任何内容都会花掉预算"不是
+  // 截断（codex 2026-11-10 minor：完整短历史被误标已截断，误导审查者对证据完整性的判断）。
+  return { text, count: kept.length, truncated: hardCut || kept.length < blocks.length }
 }
 
 export function buildPrompt({ instructions, nameOnly, stat, diff, pr, priorReviews }) {

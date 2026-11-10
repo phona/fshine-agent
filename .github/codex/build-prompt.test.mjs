@@ -99,6 +99,13 @@ test('prior reviews are capped at six and truncated by size', () => {
   assert.match(huge, /prior reviews are truncated to 16000 characters/)
 })
 
+test('a short complete history is not marked truncated', () => {
+  // codex 2026-11-10 minor：预算花掉 ≠ 截断——完整短历史不能宣称被截断。
+  const text = prompt({ priorReviews: [{ state: 'COMMENTED', submittedAt: '2026-11-10T00:00:00Z', body: 'short and complete' }] })
+  assert.match(text, /short and complete/)
+  assert.doesNotMatch(text, /prior reviews are truncated/)
+})
+
 test('missing or empty prior reviews add no section', () => {
   assert.doesNotMatch(prompt({ priorReviews: [] }), /Prior review findings/)
   assert.doesNotMatch(prompt({ priorReviews: undefined }), /Prior review findings/)
