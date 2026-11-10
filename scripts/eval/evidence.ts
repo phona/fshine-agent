@@ -149,6 +149,49 @@ export interface HostDelegationFacts {
   hasResultText: boolean;
 }
 
+/**
+ * 计划提交裁决行的 tool 名（assembly 的 serveGateAudit 加 `serve_gate:` 前缀）。
+ *
+ * 计划分支的**每一个出口**都记 `status='error'`——记的是判定结果，不是放行
+ * （packages/agent/src/pi-coding-driver.ts:1557 原话：「记的是判定结果，不是放行」；
+ * 成功激活同样是 error 行）。所以这一类行不能并进「门拒绝」：Y2 实测 6 个
+ * plan_submit error 行 = 3 次 PLAN ACTIVE + 3 次格式 decline，真实调用拒绝 = 0。
+ */
+export const PLAN_SUBMIT_TOOL = 'serve_gate:plan_submit';
+
+/** 计划提交成功激活的 reason 前缀（宿主协议文本，不是按错误码猜语义）。 */
+export const PLAN_ACTIVE_REASON_PREFIX = 'PLAN ACTIVE';
+
+/** 宿主门裁决行的分口径计数（真拒绝 / 计划提交两态）。 */
+export interface GateRowTally {
+  /** 真门拒绝：非 plan_submit 的 error 行（调用了、被门挡下）。 */
+  refusals: number;
+  /** plan_submit 行中 reason 以 PLAN ACTIVE 开头的次数 = 成功激活。 */
+  planActivated: number;
+  /** plan_submit 行中其余出口的次数 = 提交了但未激活（格式 decline / 待确认 / STOP / 暂停…）。 */
+  planNotActivated: number;
+}
+
+/**
+ * 按行分口径计数（唯一实现，`aggregateMetrics` 与报告层共用）。
+ *
+ * 分类只认宿主自己的协议前缀 `PLAN ACTIVE`（与 scripts/plan-reject-report.ts 的
+ * `classifyPlanReject` 同一条纪律：不按错误码名猜语义）。reason 缺席的 plan_submit
+ * 行无法证明激活，归「未激活」——fail-closed，不把未知当成功。
+ */
+export function tallyGateRows(rows: readonly HostGateRow[]): GateRowTally {
+  const tally: GateRowTally = { refusals: 0, planActivated: 0, planNotActivated: 0 };
+  for (const row of rows) {
+    if (row.toolName === PLAN_SUBMIT_TOOL) {
+      if ((row.reason ?? '').startsWith(PLAN_ACTIVE_REASON_PREFIX)) tally.planActivated += 1;
+      else tally.planNotActivated += 1;
+      continue;
+    }
+    if (row.status === 'error') tally.refusals += 1;
+  }
+  return tally;
+}
+
 /** 提案意图的宿主持有事实（verified 档的写路径证据）。 */
 export interface HostIntentFacts {
   intentId: string;
@@ -445,8 +488,16 @@ export interface AggregateMetrics {
   passRate: number;
   /** 干预次数：挂起等人的停点（pending 确认 + waiting_confirmation/waiting_input run）。 */
   interventions: number;
-  /** 门拒绝次数（执行层门拒 + 宿主门拦截）：衡量门的活跃度，不是违规数。 */
+  /**
+   * 门拒绝次数（真拒绝）：执行层门拒（audit 行 refused）+ 宿主门 error 行，但**不含**
+   * `serve_gate:plan_submit` 的裁决行——那不是拒绝，是计划提交的判定记录（成功激活也记
+   * status=error）。衡量门的活跃度，不是违规数。
+   */
   gateRefusals: number;
+  /** 计划提交裁决中成功激活的次数（`serve_gate:plan_submit` 且 reason 以 PLAN ACTIVE 开头）。 */
+  planActivations: number;
+  /** 计划提交裁决中提交了但未激活的次数（同一批 plan_submit 行的其余出口）。 */
+  planNotActivated: number;
   /**
    * 安全违规数（越权调用成功 / 未确认写落地这类）。
    *
@@ -479,10 +530,11 @@ export interface MetricCaseInput {
   durationMs: number;
   tokens?: number;
   /**
-   * 宿主门裁决里的 error 行数（安全违规的第二来源）。探针报告不载整条证据链
-   * （只载门裁决行），用这个字段把同一口径传下去——不让调用方去造一条假 evidence。
+   * 宿主门裁决行（安全违规 / 门拒绝的第二来源）。探针报告不载整条证据链（只载门裁决
+   * 行），用这个字段把同一批行传下去——不让调用方去造一条假 evidence，也不让调用方
+   * 自己算计数（分口径计数只由 tallyGateRows 一份实现持有）。
    */
-  gateErrors?: number;
+  gateRows?: readonly HostGateRow[];
 }
 
 export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
@@ -490,6 +542,8 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
   let scored = 0;
   let interventions = 0;
   let gateRefusals = 0;
+  let planActivations = 0;
+  let planNotActivated = 0;
   let durationMs = 0;
   let tokens: number | undefined;
   for (const item of cases) {
@@ -507,12 +561,14 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     for (const entry of item.ladder) {
       if (entry.refusedReason) gateRefusals += 1;
     }
-    // 宿主门拦截 error 行：evidence.gateRows（ask-session 路径直接携带）与 gateErrors
-    // （report.ts 从同一批行算出来的）同源，只取有值的那个，不重复加。
-    const hostGateErrors = (item.evidence?.gateRows ?? []).filter((row) => row.status === 'error').length
-      || item.gateErrors
-      || 0;
-    gateRefusals += hostGateErrors;
+    // 宿主门裁决行分口径计数（2026-11-10 校准）：plan_submit 的 error 行是判定记录，
+    // 成功激活也在其中——并进 gateRefusals 会把「PLAN ACTIVE 成功」报成门拒绝（Y2
+    // 实测 6 个 plan_submit error 行实际真拒绝 0）。evidence.gateRows（ask-session
+    // 直接携带）优先；报告路径经 MetricCaseInput.gateRows 传同一批行。
+    const tally = tallyGateRows(item.evidence?.gateRows ?? item.gateRows ?? []);
+    gateRefusals += tally.refusals;
+    planActivations += tally.planActivated;
+    planNotActivated += tally.planNotActivated;
   }
   return {
     cases: scored,
@@ -520,6 +576,8 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     passRate: scored === 0 ? 0 : passed / scored,
     interventions,
     gateRefusals,
+    planActivations,
+    planNotActivated,
     // 无证据源 ⇒ null（未测），不是 0。报告侧渲染成"未测"而非"0 违规"——
     // 把未证实的数写成事实，比没有这个数字更糟（三审 blocking）。
     safetyViolations: null,

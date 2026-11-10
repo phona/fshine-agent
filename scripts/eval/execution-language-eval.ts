@@ -55,12 +55,37 @@ const OPERATION_NAME_EVAL = new RegExp([
     .join('|'),
 ].join('|'));
 
+/**
+ * 小写蛇形臂的失败语义词根（2026-11-10 评测判据校准）。
+ *
+ * 旧写法 `[a-z]+(?:_[a-z]+)+` 把所有小写 snake token 都当错误码，Y2 实测回复里正常解释
+ * 对象名的 `gamma_collection`（与 `gamma-collection` / `gamma collection` 并列的同义写法）
+ * 被报成「错误码」——假红。错误码是有语义的：它说的是失败/缺失/形状不对，普通 snake
+ * 标识符（`gamma_collection`、`alpha_group`）没有这个语义，不该命中。
+ *
+ * 词根按**整段**匹配（前后是 token 边界或下划线），大小写不敏感（`not_found` /
+ * `NOT_FOUND` / `Not_Found` 同判）；全大写蛇形臂另有一条、保持原样不动——宿主那边
+ * `UPPER_SNAKE` 本身就是错误码形态，收紧它会改变既有判定。
+ */
+const FAILURE_ROOT_WORDS = 'NOT_FOUND|FAILED|ERROR|INVALID|DECLINED|MISSING|DENIED|AMBIGUOUS|NO_DATA|PARSE|SHAPE';
+
+/**
+ * 小写/混合蛇形错误码臂：token 至少含一个下划线，且含一个失败语义词根。
+ *
+ * 构造说明：
+ *   · `(?<![a-z0-9_])` / `(?![a-z0-9_])` = token 边界（外层 `(?i:…)` 让大小写都算）；
+ *   · `(?=[a-z0-9_]*_)` = 这个 token 里必须真有下划线（裸 `error` / `shape` 不是码形）；
+ *   · 词根前后由 `_` 或 token 边界界定，`gamma_collection` 不含词根 → 不命中；
+ *     `collection_not_found` / `parse_error` / `no_data` → 命中。
+ */
+const LOWER_SNAKE_ERROR_CODE = String.raw`(?i:(?<![a-z0-9_])(?=[a-z0-9_]*_)(?:[a-z0-9]+_)*(?:${FAILURE_ROOT_WORDS})(?:_[a-z0-9]+)*(?![a-z0-9_]))`;
+
 /** 五类指纹。标签即对外措辞，与宿主对齐；pattern 写法刻意与宿主不同。 */
 export const EVAL_EXECUTION_LANGUAGE_FINGERPRINTS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: '脚本路径', pattern: /src\/[^\s，,；;）)]*\.js/ },
   // 错误码：大写形写成「首字母 + 一段或多段 _段」结构（宿主是星号量词的等价集合，
-  // 集合相同、构造式不同）；小写 snake 照收。
-  { label: '错误码', pattern: /\b[A-Z](?:[A-Z0-9]*_[A-Z0-9]+)+\b|\b[a-z]+(?:_[a-z]+)+\b/ },
+  // 集合相同、构造式不同）；小写形带失败语义词根要求（见 LOWER_SNAKE_ERROR_CODE）。
+  { label: '错误码', pattern: new RegExp(String.raw`\b[A-Z](?:[A-Z0-9]*_[A-Z0-9]+)+\b|${LOWER_SNAKE_ERROR_CODE}`) },
   { label: 'JSON 片段', pattern: /\bcandidates\s*:|\{|\}/ },
   { label: 'operation 名', pattern: OPERATION_NAME_EVAL },
   { label: '内部控制词', pattern: /额度|配额|熔断|计划门|拒绝上限|重试上限/ },

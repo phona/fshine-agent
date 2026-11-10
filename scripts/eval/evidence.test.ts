@@ -25,6 +25,9 @@ import {
   mergeCallPhases,
   readExecutionAuditLog,
   sessionKeyOfChannel,
+  tallyGateRows,
+  PLAN_SUBMIT_TOOL,
+  type HostGateRow,
   type HostIntentFacts,
 } from './evidence';
 import { assessEvalIsolation, EvalIsolationRefused, assertEvalIsolation, EVAL_FIXTURE_ROOT, REPO_ROOT } from './safety-gate';
@@ -211,7 +214,87 @@ describe('最小聚合指标（通过率 / 干预 / 安全违规 / 耗时 / Toke
   });
 
   it('空集：通过率 0（不造 100%）', () => {
-    expect(aggregateMetrics([])).toMatchObject({ cases: 0, passRate: 0, gateRefusals: 0, safetyViolations: null });
+    expect(aggregateMetrics([])).toMatchObject({
+      cases: 0,
+      passRate: 0,
+      gateRefusals: 0,
+      planActivations: 0,
+      planNotActivated: 0,
+      safetyViolations: null,
+    });
+  });
+
+  /**
+   * 门拒绝口径校准（2026-11-10）：`serve_gate:plan_submit` 行按设计每个出口都记
+   * status=error（pi-coding-driver.ts:1557「记的是判定结果，不是放行」）——成功激活
+   * 也在其中。旧 gateRefusals 把 gateRows 里所有 error 行都计进去，Y2 实测 6 个
+   * plan_submit error 行（3 次 PLAN ACTIVE + 3 次格式 decline）被报成"门拒绝 6 次"，
+   * 真实调用拒绝 = 0。校准后 plan_submit 另计激活/未激活，真拒绝只数其余 error 行。
+   */
+  describe('门裁决分口径：plan_submit 的 error 行不是门拒绝', () => {
+    const gateRow = (toolName: string, status: string, reason?: string): HostGateRow => ({
+      requestId: 'req-1',
+      toolName,
+      status,
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    const planRows: HostGateRow[] = [
+      gateRow(PLAN_SUBMIT_TOOL, 'error', 'PLAN ACTIVE（plan_1 v1）：按已提交 calls 执行'),
+      gateRow(PLAN_SUBMIT_TOOL, 'error', 'PLAN DECLINED：PLAN_JSON_PARSE: …'),
+      gateRow(PLAN_SUBMIT_TOOL, 'error', 'PLAN ACTIVE（plan_2 v1）：按已提交 calls 执行'),
+      gateRow(PLAN_SUBMIT_TOOL, 'error', 'PLAN SHAPE_PREFIX 之类其余出口'),
+    ];
+
+    it('tallyGateRows：PLAN ACTIVE 前缀计激活，其余（含 reason 缺席）计未激活', () => {
+      expect(tallyGateRows(planRows)).toEqual({ refusals: 0, planActivated: 2, planNotActivated: 2 });
+      // reason 缺席无法证明激活 ⇒ fail-closed 归未激活，不把未知当成功。
+      expect(tallyGateRows([gateRow(PLAN_SUBMIT_TOOL, 'error')]))
+        .toEqual({ refusals: 0, planActivated: 0, planNotActivated: 1 });
+    });
+
+    it('tallyGateRows：非 plan_submit 的 error 行才是真拒绝；ok 行不计', () => {
+      expect(tallyGateRows([
+        gateRow('serve_gate:bash', 'error', 'SERVE_BLOCK'),
+        gateRow('platform_executor_bypassed', 'error', 'BYPASS'),
+        gateRow('serve_gate:read', 'ok'),
+      ])).toEqual({ refusals: 2, planActivated: 0, planNotActivated: 0 });
+    });
+
+    it('aggregateMetrics.gateRefusals 只含真拒绝；plan_submit 两态单列', () => {
+      const metrics = aggregateMetrics([
+        {
+          caseId: 'Y2',
+          pass: false,
+          ladder: [],
+          interventionPoints: 0,
+          durationMs: 100,
+          gateRows: [...planRows, gateRow('serve_gate:bash', 'error', 'SERVE_BLOCK')],
+        },
+      ]);
+      expect(metrics.gateRefusals).toBe(1);
+      expect(metrics.planActivations).toBe(2);
+      expect(metrics.planNotActivated).toBe(2);
+    });
+
+    it('evidence.gateRows（ask-session 路径）与 gateRows 字段同口径，不重复计', () => {
+      const evidence = {
+        evalRunId: 'run',
+        caseId: 'Y2',
+        messageId: 'm1',
+        requestId: 'req-1',
+        delegations: [],
+        intents: [],
+        gateRows: planRows,
+        executionRows: [],
+        finalReply: 'r',
+      };
+      const metrics = aggregateMetrics([
+        { caseId: 'Y2', pass: true, evidence, ladder: [], interventionPoints: 0, durationMs: 10, gateRows: planRows },
+      ]);
+      expect(metrics.gateRefusals).toBe(0);
+      expect(metrics.planActivations).toBe(2);
+      expect(metrics.planNotActivated).toBe(2);
+    });
   });
 });
 

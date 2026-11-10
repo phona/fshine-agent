@@ -64,6 +64,9 @@ import Database from 'better-sqlite3';
 // 判据自持（issue #10 切片 D 收尾）：评测侧持一份同义尺（scripts/eval/execution-language-eval.ts），
 // 刻意不 import 宿主的 @fshine/agent——宿主检测器有假阴性时评测继承同一个假阴性，永远发现不了。
 import { executionLanguageFingerprints } from './eval/execution-language-eval';
+// 澄清问句判据（2026-11-10 校准）：与期望值层共用同一份词表/helper，不再各存一份副本
+// （两份逐字相同的正则不是独立确认，是同一把尺量两次，漏词时两层一起假红）。
+import { hasClarificationQuestion } from './eval/clarification-shape';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
@@ -1442,17 +1445,6 @@ function execLanguageLeakNotes(turn: Turn): string[] {
 }
 
 /**
- * 澄清问句的双语识别（clarificationShapeNotes 的"问句"判据）。三族：
- *   ① 真问号（中英）；
- *   ② 中文无疑号问句/请求确认："告诉 / 请回复 / 需要你 / 请提供 / 请确认 / 确认哪 / 哪一个 / 哪一 / 请问"；
- *   ③ 英文无疑号问句/请求确认："which one / which / please confirm / confirm which / let me know /
- *      could you / would you / do you / please provide / please specify / tell me"。
- * 反向不含："没有找到"类结论句（那是 not_found 分支的事）——但含"哪"的中文问句与 not_found
- * 结论不互斥（"没有找到 X，你要查的是哪个？"两者皆真），由 candidates 分支分流，无冲突。
- */
-const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|请确认|确认哪|哪个|哪些|哪一[家个条些]|哪一个|请问|which one|which\b|please confirm|confirm which|let me know|could you|would you|do you\b|please provide|please specify|tell me/i;
-
-/**
  * 澄清轮的形状判定（歧义 / not_found 两种收尾，宿主机械组装的模板必然两者俱全）：
  *   · 歧义：候选清单（回复里出现 ≥2 个平台候选名）+ 问句——少一样用户就没法回答"选哪个"；
  *   · not_found：明确的"没有找到"结论——那是模板的第一句，也是用户唯一需要的信息
@@ -1460,6 +1452,10 @@ const CLARIFICATION_QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|�
  *     find / does not exist / no results / nothing found / no data / no records / none——
  *     A2 t1、C2 t20、Y2 t0/t2 的回复全英文，中文-only 版本恒判"未给结论"）。
  * 模型自己翻译时常常二缺一（只列候选不问、或只问不列），所以两件事都查。
+ *
+ * 问句判据 = scripts/eval/clarification-shape.ts 的 hasClarificationQuestion（与期望值层
+ * 同一份实现）：不是只认问号——"需要你确认查哪一个" / "请补充以下信息之一" 这类无疑号
+ * 请求句式也算。候选 ≥2 全列 + 请求用户选择的动作（"请选择其中一个"）同样算问句。
  */
 function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): string[] {
   const notes: string[] = [];
@@ -1470,8 +1466,9 @@ function clarificationShapeNotes(turn: Turn, candidates: readonly string[]): str
     // "需要你确认查哪一个" / "需要你提供：确切的 collection 名称" / "please confirm which one" /
     // "let me know which"。2026-11-07 实证：A3 的 contoso 轮模型两候选全列、拒绝猜、
     // 请用户确认，只因全篇没有一个 '?' 被误判"没有问句"。判据要的是"用户收到能回答选哪个"，
-    // 不是标点形态。
-    if (!CLARIFICATION_QUESTION_RE.test(turn.reply)) notes.push(`澄清回复没有问句：「${turn.text}」`);
+    // 不是标点形态。2026-11-10 校准：判据与期望值层合并为同一份（clarification-shape.ts），
+    // 词表补「请补充 / 或者说明是否」等请求式——Y2 实测第 2 轮因此不再假红。
+    if (!hasClarificationQuestion(turn.reply, candidates)) notes.push(`澄清回复没有问句：「${turn.text}」`);
   } else if (!/没有|未找到|查不到|不存在|无匹配|not found|no match|no collections? match|nothing matches|does not match|doesn'?t match|no matching|couldn'?t find|does not exist|no results|nothing found|no data|no records|\bnone\b/i.test(turn.reply)) {
     notes.push(`not_found 回复未给出"没有找到"的结论：「${turn.text}」`);
   }
@@ -1709,7 +1706,7 @@ function windowMentioned(text: string, period: string): boolean {
  */
 function isClarificationTurn(turn: Turn, candidates: readonly string[]): boolean {
   return candidates.filter((name) => turn.reply.includes(name)).length >= 2
-    && CLARIFICATION_QUESTION_RE.test(turn.reply);
+    && hasClarificationQuestion(turn.reply, candidates);
 }
 
 /**
@@ -1886,8 +1883,18 @@ function platformSourceNote(turn: Turn): string | null {
  * 黑盒模式（audit=false）三条都不变（输入是原文、misattributed ⊂ unattributed）。
  * 事实基准取 turn.execution（本轮审计窗口行）——**D-205**：审计行按时间窗切片归因，
  * 无请求级关联 id；评测路径串行所以今天够用，不顺手"修"，登记即可。
+ *
+ * `caseRecords`（可选）= 整个用例的审计行（跨轮）。风暴判据因此能同时给出**两个口径**
+ * （2026-11-10 校准）：硬尺只数本轮内同参重复；整例跨轮聚合 ≥3 只写进信息性 note。
+ * 旧版探针只说单轮数、期望值层按整例平铺判红，同一份审计行两个口径、报告不解释。
  */
-export function errorStateNotes(turn: Turn, candidates: readonly string[], records: readonly AuditRecord[], audit = false): string[] {
+export function errorStateNotes(
+  turn: Turn,
+  candidates: readonly string[],
+  records: readonly AuditRecord[],
+  audit = false,
+  caseRecords: readonly AuditRecord[] = records,
+): string[] {
   const notes: string[] = [];
   // 错误态金额三分（判定核在 amount-criteria.classifyErrorStateAmounts，反例变异测试在
   // amount-criteria.test.ts——2026-11-07 评审 blocking 点名）：有所属（放行，须过实体绑定
@@ -1927,18 +1934,28 @@ export function errorStateNotes(turn: Turn, candidates: readonly string[], recor
     const key = `${scriptBase(record)}|${JSON.stringify(record.args ?? [])}`;
     repeats.set(key, (repeats.get(key) ?? 0) + 1);
   }
+  // 整例口径（跨轮）：同一 (script,args) 在整个用例的已执行调用里累计几次。硬尺不读它
+  // （硬尺只认本轮的 worst），只用于信息性披露——两个口径必须写在同一行 note 里，
+  // 不允许报告里出现"探针说没风暴、期望值层说风暴"两个数却不解释。
+  const caseRepeats = new Map<string, number>();
+  for (const record of caseRecords) {
+    if (record.refused) continue;
+    const key = `${scriptBase(record)}|${JSON.stringify(record.args ?? [])}`;
+    caseRepeats.set(key, (caseRepeats.get(key) ?? 0) + 1);
+  }
   const byScript = new Map<string, number>();
   for (const record of executed) {
     const base = scriptBase(record);
     byScript.set(base, (byScript.get(base) ?? 0) + 1);
   }
   const worst = Math.max(0, ...repeats.values());
+  const caseWorst = Math.max(0, ...caseRepeats.values());
   if (worst >= 3) {
     notes.push(`错误轮同一调用重复 ${worst} 次（重试风暴）：「${turn.text}」`);
   }
-  if (turn.calls > 2) {
+  if (turn.calls > 2 || (caseWorst >= 3 && worst < 3)) {
     const breakdown = [...byScript].map(([base, count]) => `${base}×${count}`).join('、') || '无审计记录';
-    notes.push(`（信息性）错误轮平台调用数：${turn.calls} 次（${breakdown}；同一调用最多重复 ${worst} 次，重复 ≥3 才判风暴）`);
+    notes.push(`（信息性）错误轮平台调用数：${turn.calls} 次（${breakdown}；单轮同一调用最多重复 ${worst} 次 / 整例 ${caseWorst} 次，同一轮内重复 ≥3 才判风暴）`);
   }
   notes.push(...clarificationShapeNotes(turn, candidates));
   return notes;
@@ -2691,7 +2708,7 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
       // 执行语言指纹（含internal control term quota|quota|circuit break|计划门|reject limit|retry limit，runtime.ts 同源）
       // + 失败诚实性四判（金额所属/可行动/同参重复判风暴/澄清形状；审计切片供风暴分组）。
       // audited 模式（--audit）：金额所属那条换成申报交叉核 note（口径编造/derived 不变）。
-      notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!, auditMode));
+      notes.push(...execLanguageLeakNotes(turns[i]!), ...errorStateNotes(turns[i]!, candidates[i]!, audits[i]!, auditMode, audits.flat()));
     }
     // audited 申报计数的产出点在 main() 的公共收集入口（auditFailuresOf）：这里只负责
     // 判定 note，不各自返回计数——逐个 runner 记得返回正是缺列（score.ts exit 2）的来源。
@@ -3294,7 +3311,7 @@ async function main(): Promise<void> {
   }
   const bad = results.filter((result) => !result.ok);
   const scope = only ? `--only ${[...only].join(',')}` : quick ? '--quick' : '全量';
-  console.log(`\n[${scope}] ${results.length - bad.length}/${results.length} 无异常；明细 ${report}`);
+  console.log(`\n[${scope}] ${results.length - bad.length}/${results.length} 无异常（探针层判定；期望值层/judge 未含，终判以 eval:score 三层合取为准）；明细 ${report}`);
   // 状态阶梯与聚合指标（独立于 Agent 自述的判定面）。
   console.log(`状态阶梯 · ${summarizeReport(unified)}`);
   console.log(`统一报告 ${path.basename(written.json)} / ${path.basename(written.jsonl)}`);

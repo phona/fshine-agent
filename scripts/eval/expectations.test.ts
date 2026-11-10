@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyErrorStateAmounts, extractAmounts } from './amount-criteria';
 import { loadCases } from './cases';
+import { hasClarificationQuestion } from './clarification-shape';
 import { evaluateCaseExpectations, expectationSelfCheck, type ExpectationTurn } from './expectations';
 import type { ExecutionAuditRow } from './evidence';
 import { countDims } from './dims';
@@ -125,6 +126,30 @@ const Y2_T1 = `平台检索 "contoso" 命中两个名字相近的 collection，�
 2. contoso-logistics
 
 你要查哪个？告诉我名称或序号即可。`;
+
+/**
+ * Y2 第 2 轮**实测原文**（2026-11-10 校准的假红样本，逐字转录自
+ * `.runtime/probe-fshine-probe-IhdXQv.json` 的 Y2 turns[1].reply）。
+ *
+ * 旧问句判据（探针与期望值层各存一份逐字相同的正则）不含「请补充 / 或者说明是否」，
+ * 于是「候选两行全列 + 请用户补充确切名称、或说明是否调整 window」被判"没有问句"——
+ * 按判据自己的标准（用户收到能回答选哪个）这是假红。新判据 = clarification-shape.ts
+ * 的 hasClarificationQuestion，两层消费同一份。
+ */
+const Y2_T1_ACTUAL = `未完成：无法唯一确定要查询的 collection。
+
+平台实时查询返回：关键词 "contoso" 匹配到两个 collection——
+
+- contoso-trade
+- contoso-logistics
+
+平台要求确认确切的 collection 名称后重查，在名称唯一确定前不会返回任何 record value（不做猜测）。
+
+请补充以下信息之一：
+1. 确切的 collection 全名（contoso-trade 或 contoso-logistics，或你实际想查的其它名称）；
+2. 或者说明是否连同 window 一起调整（当前请求带的是 W2）。
+
+拿到确切名称后，我会立即重新查询并给出该 collection 在 W2 下的 record value。`;
 
 /** dummy-fixture.ts:152 留档的真实片段 + 同处说明句。 */
 const Y2_T2 = `查询结果：**beta 的 payable balance：1000**
@@ -452,7 +477,7 @@ describe('期望值层：四类断言与三个过程不变量各自可判', () =
     expect(evaluateCaseExpectations(spec, turns).violations.some((violation) => violation.kind === 'gateOrder')).toBe(true);
   });
 
-  it('无风暴：同参调用重复 ≥3 即红', () => {
+  it('无风暴：同参调用重复 ≥3 即红（单轮口径）', () => {
     const spec = specOf('Y2');
     const turns: ExpectationTurn[] = [turn('x', 'ok', 0, 0), turn('y', 'ok', 0, 1), turn('z', 'ok', 0, 2)];
     const rows = [0, 1, 2].map(() => ({ script: 'dummy.query', args: ['--collection', 'gamma-collection'], exitCode: 0 }));
@@ -460,6 +485,86 @@ describe('期望值层：四类断言与三个过程不变量各自可判', () =
     expect(evaluateCaseExpectations(spec, turns).violations.some((violation) => violation.kind === 'noStorm')).toBe(true);
     turns[0] = { ...turns[0]!, calls: 2, execution: rows.slice(0, 2) };
     expect(evaluateCaseExpectations(spec, turns).violations.filter((violation) => violation.kind === 'noStorm')).toEqual([]);
+  });
+
+  /**
+   * 风暴口径校准（2026-11-10）：旧 noStorm 把整个用例的审计行**平铺**成一张
+   * (script,args) 表，同一调用跨轮累计 ≥3 就判违例——而探针的信息性 note 一直按
+   * 单轮数（同轮最多 ×2、无风暴）。同一份审计行两套口径，报告把两个数并排摆出来
+   * 却不解释。校准后：单轮内同参重复 ≥ 阈值才出违例；整例跨轮累计 ≥ 阈值只出
+   * 信息性 note（不进违例），并把两个口径写在同一句里。
+   */
+  it('无风暴：跨轮累计 3 次但单轮最多 2 次 → 不违例，一条信息性 note 写明两个口径', () => {
+    const spec = specOf('Y2');
+    const rows = [0, 1, 2].map(() => ({ script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0 }));
+    const turns: ExpectationTurn[] = [
+      turn('x', 'ok', 2, 0),
+      turn('y', 'ok', 1, 1),
+      turn('z', 'ok', 0, 2),
+    ];
+    turns[0] = { ...turns[0]!, execution: rows.slice(0, 2) };
+    turns[1] = { ...turns[1]!, execution: rows.slice(2) };
+    const outcome = evaluateCaseExpectations(spec, turns);
+    expect(outcome.violations.filter((violation) => violation.kind === 'noStorm')).toEqual([]);
+    expect(outcome.checks.filter((check) => check.name === '期望·无风暴')).toEqual([]);
+    expect(outcome.notes).toHaveLength(1);
+    // 两个口径必须同时可见：单轮最多 2 次 / 整例 3 次；整例聚合只披露、不记违例。
+    expect(outcome.notes[0]).toContain('整例');
+    expect(outcome.notes[0]).toContain('beta');
+    expect(outcome.notes[0]).toContain('单轮内最多 2 次');
+    expect(outcome.notes[0]).toContain('整例 3 次');
+    expect(outcome.notes[0]).toContain('不记违例');
+  });
+
+  /**
+   * 问句判据校准（2026-11-10）：旧两层各持一份相同的正则，都不含「请补充 /
+   * 或者说明是否」。Y2 实测第 2 轮候选全列、请用户补充确切名称或说明是否调整
+   * window，两层同时假红。新判据 = scripts/eval/clarification-shape.ts，
+   * 两层 import 同一份；这条钉期望值层消费的是它。
+   */
+  it('问句判据：Y2 实测第 2 轮「请补充以下信息之一…」判有问句（期望值层）', () => {
+    const turns: ExpectationTurn[] = [
+      turn('check gamma-collection 这个 collection W2 的 record value', Y2_T0, 1, 0),
+      turn('check contoso collection record value', Y2_T1_ACTUAL, 1, 1),
+    ];
+    const checks = evaluateCaseExpectations(specOf('Y2'), turns).checks;
+    expect(checks.filter((check) => check.name === '期望·问句(第2轮)')).toEqual([]);
+  });
+
+  it('问句判据 helper：候选 ≥2 全列 + 请求用户选择的动作也算问句', () => {
+    // 无问号、无疑问代词的纯请求句：旧正则漏判，helper 第二路负责。
+    expect(hasClarificationQuestion(
+      'contoso-trade 与 contoso-logistics 都在目录里，请选择其中一个。',
+      ['contoso-trade', 'contoso-logistics'],
+    )).toBe(true);
+    // 只列一个候选 ⇒ 用户没法回答"选哪个"，不算问句。
+    expect(hasClarificationQuestion(
+      'contoso-trade 与 contoso-logistics 都在目录里，请选择其中一个。',
+      ['contoso-trade', 'other'],
+    )).toBe(false);
+    // 候选全列但没有请求动作（只是罗列）⇒ 不算问句。
+    expect(hasClarificationQuestion(
+      'contoso-trade 与 contoso-logistics 都在目录里。',
+      ['contoso-trade', 'contoso-logistics'],
+    )).toBe(false);
+  });
+
+  /**
+   * 问句判据第二路在**期望值层**可达（2026-11-10 codex 复审 major 收口）：helper 单测过了，
+   * 但期望值层调用处没传候选，第二路在本层恒不可达——探针层放行、eval:score 照旧假红。
+   * 这条钉经过 evaluateCaseExpectations 的集成路径：无问号、无疑问代词的纯请求句，靠
+   * 「候选全列 + 请求选择」过关；孪生（拿掉请求动作）必须照旧红——第二路不是放水。
+   */
+  it('问句判据：候选全列 + 请求选择在期望值层可达（集成回归）', () => {
+    const turns: ExpectationTurn[] = [
+      turn('check gamma-collection 这个 collection W2 的 record value', Y2_T0, 1, 0),
+      turn('check contoso collection record value', 'contoso-trade 与 contoso-logistics 都在目录里，请选择其中一个。', 1, 1),
+    ];
+    expect(evaluateCaseExpectations(specOf('Y2'), turns).checks
+      .filter((check) => check.name === '期望·问句(第2轮)')).toEqual([]);
+    turns[1] = turn('check contoso collection record value', 'contoso-trade 与 contoso-logistics。', 1, 1);
+    expect(evaluateCaseExpectations(specOf('Y2'), turns).checks
+      .filter((check) => check.name === '期望·问句(第2轮)').length).toBe(1);
   });
 
   it('大额行归属：1500 所在行不含 contoso-trade 即红', () => {
@@ -891,7 +996,7 @@ describe('期望值层：数据面自检', () => {
   it('未审计占位条目没有 expectations——不猜期望值，也不因此多报', () => {
     for (const spec of cases.filter((item) => item.placeholder)) {
       expect(spec.expectations, `${spec.id} 是占位条目，不应有期望值`).toBeNull();
-      expect(evaluateCaseExpectations(spec, [])).toEqual({ violations: [], checks: [] });
+      expect(evaluateCaseExpectations(spec, [])).toEqual({ violations: [], checks: [], notes: [] });
     }
   });
 
