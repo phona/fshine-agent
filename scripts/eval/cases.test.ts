@@ -1,8 +1,17 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import os, { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { CASES_PATH, TURN_MARKS, loadCases, toCorpusEntries } from './cases';
+import { afterAll, describe, expect, it } from 'vitest';
+import {
+  CASES_PATH,
+  PLAN_POLICY_ENV_KEYS,
+  PLAN_POLICY_LINES,
+  PLAN_POLICY_TIERS,
+  TURN_MARKS,
+  fixtureEnvOf,
+  loadCases,
+  toCorpusEntries,
+} from './cases';
 import { loadBaseline } from './score';
 
 /**
@@ -17,6 +26,45 @@ import { loadBaseline } from './score';
 
 const cases = loadCases();
 const baseline = loadBaseline();
+
+const tempDirs: string[] = [];
+afterAll(() => {
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+});
+
+/** 写一份最小 cases.yaml（fixture 块由参数决定），返回路径。 */
+function casesFileWithFixture(fixtureYaml: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'cases-plan-policy-'));
+  tempDirs.push(dir);
+  const file = path.join(dir, 'cases.yaml');
+  writeFileSync(file, `version: 1
+cases:
+  - id: T1
+    group: test
+    kind: probe
+    inBaseline: false
+    incidents: [test]
+    intent: test
+    businessGoal: test
+    fixture:
+${fixtureYaml}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+    messages:
+      - text: hi
+    expectations: null
+    expect: test
+`);
+  return file;
+}
+
+function stockFixture(extra = ''): string {
+  return `      name: stock-platform
+      isolation: per-case-state-dir
+      env: {}
+${extra}`;
+}
 
 describe('cases.yaml 结构', () => {
   it('可解析、id 唯一、probe 与 acceptance 两类都在', () => {
@@ -228,5 +276,87 @@ ${answerTypes}
 
   it('answerTypes 不是数组 fail-fast（不静默当没有分类表）', () => {
     expect(() => loadYaml('        answerTypes: nope')).toThrow(/answerTypes 不是数组/);
+  });
+});
+
+describe('fixture.planPolicy 四档预算表（stock 夹具的按用例旋钮）', () => {
+  it('全表拍平为 12 个 STOCK_PLAN_* 键；confirm.weight 落在 BUDGET 真名', () => {
+    const file = casesFileWithFixture(stockFixture(`      planPolicy:
+        auto: { calls: 2, seconds: 60, weight: 6 }
+        notify: { calls: 10, seconds: 180, weight: 18 }
+        confirm: { calls: 20, seconds: 600, weight: 60 }
+        hard: { calls: 1, seconds: 1800, weight: 180 }
+`));
+    const spec = loadCases(file)[0]!;
+    const env = fixtureEnvOf(spec.fixture);
+    expect(Object.keys(env).sort()).toEqual(
+      PLAN_POLICY_TIERS.flatMap((tier) => PLAN_POLICY_LINES.map((line) => PLAN_POLICY_ENV_KEYS[tier][line])).sort(),
+    );
+    expect(env['STOCK_PLAN_HARD_CALLS']).toBe('1');
+    expect(env['STOCK_PLAN_BUDGET_WEIGHT']).toBe('60');
+    expect(env['STOCK_PLAN_CONFIRM_WEIGHT']).toBeUndefined();
+  });
+
+  it('缺档/缺线不注入（夹具缺省是唯一缺省来源）', () => {
+    const file = casesFileWithFixture(stockFixture(`      planPolicy:
+        hard:
+          calls: 1
+`));
+    const spec = loadCases(file)[0]!;
+    expect(fixtureEnvOf(spec.fixture)).toEqual({ STOCK_PLAN_HARD_CALLS: '1' });
+  });
+
+  it('拒绝零 / 负数 / 小数 / 字符串阈值', () => {
+    for (const value of ['0', '-1', '1.5', "'2'", 'true']) {
+      const file = casesFileWithFixture(stockFixture(`      planPolicy:
+        hard:
+          calls: ${value}
+`));
+      expect(() => loadCases(file), `calls: ${value} 应被拒`).toThrow(/正整数/);
+    }
+  });
+
+  it('拒绝未知档位与未知线名', () => {
+    for (const policy of [
+      `        urgent: { calls: 1 }`,
+      `        hard: { cost: 1 }`,
+    ]) {
+      const file = casesFileWithFixture(stockFixture(`      planPolicy:
+${policy}
+`));
+      expect(() => loadCases(file), policy).toThrow(/不是四档之一|不是三线之一/);
+    }
+  });
+
+  it('拒绝空表 / 空档 / 非映射', () => {
+    for (const policy of [`      planPolicy: {}`, `      planPolicy:\n        hard: {}`, `      planPolicy: 3`]) {
+      const file = casesFileWithFixture(stockFixture(`${policy}\n`));
+      expect(() => loadCases(file), policy).toThrow(/至少声明一条档位阈值|空档|不是映射/);
+    }
+  });
+
+  it('只接受 stock 夹具：dummy 声明四档表即失败', () => {
+    const file = casesFileWithFixture(`      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+      planPolicy:
+        hard: { calls: 1 }
+`);
+    expect(() => loadCases(file)).toThrow(/只适用于 stock-platform/);
+  });
+
+  it('fixture.env 与 planPolicy 重复声明同一阈值即失败', () => {
+    const file = casesFileWithFixture(`      name: stock-platform
+      isolation: per-case-state-dir
+      env:
+        STOCK_PLAN_HARD_CALLS: '5'
+      planPolicy:
+        hard: { calls: 1 }
+`);
+    expect(() => loadCases(file)).toThrow(/重复声明 STOCK_PLAN_HARD_CALLS/);
+  });
+
+  it('真实 cases.yaml 目前没有 stock 四档表（机制就绪但未改任何现有 case）', () => {
+    expect(cases.filter((spec) => spec.fixture.planPolicy !== undefined)).toEqual([]);
   });
 });

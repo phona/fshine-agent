@@ -67,7 +67,8 @@ function parseEnvelope(stdout: string): Envelope | null {
 class Ctx {
   dir: string;
   env: NodeJS.ProcessEnv;
-  constructor() {
+  /** `extraEnv` = 该用例声明的 C 类旋钮（如 DUMMY_READBACK_SHORT）；ambient 同名键本切片未清场，见 docs §9。 */
+  constructor(extraEnv: NodeJS.ProcessEnv = {}) {
     this.dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-'));
     this.env = {
       ...process.env,
@@ -77,6 +78,7 @@ class Ctx {
       DUMMY_AUDIT_PATH: path.join(this.dir, 'audit.jsonl'),
       DUMMY_PLAN_ACTIVATION_SECRET: 'generic-mock-plan-secret',
       DUMMY_GATE_SECRET: 'generic-mock-gate-secret',
+      ...extraEnv,
     };
   }
   run(args: string[], input?: string): RunResult {
@@ -117,7 +119,7 @@ function readAuditRows(ctx: Ctx): Array<{ mode?: string; script?: string; via?: 
   });
 }
 
-const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseResult> }> = [
+const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => CaseResult | Promise<CaseResult> }> = [
   { id: 'smoke-query', run: (ctx) => {
     const r = ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']);
     const e = parseEnvelope(r.stdout);
@@ -263,7 +265,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     checks.push(check('protocol roles present', protocols['dummy.proposal'] === 'proposal.create' && protocols['dummy.proposal-commit'] === 'proposal.commit', 'proposal.create / proposal.commit', JSON.stringify(protocols)));
     return { id: 'g-serve-matrix', pass: checks.every((c) => c.pass), checks };
   } },
-  { id: 'g-readback-short', run: (ctx) => {
+  { id: 'g-readback-short', env: { DUMMY_READBACK_SHORT: '1' }, run: (ctx) => {
     const checks: Check[] = [];
     const before = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1']).stdout);
     const beforeCount = before?.data?.count as number;
@@ -273,7 +275,7 @@ const cases: Array<{ id: string; run: (ctx: Ctx) => CaseResult | Promise<CaseRes
     const token = proposalToken(proposalId, (env!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
     const saved = ctx.env;
     // Test-only env for this one commit call (never a payload field).
-    ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: token, DUMMY_READBACK_SHORT: '1' };
+    ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: token };
     const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = saved;
     const commitEnv = parseEnvelope(commit.stdout);
@@ -573,7 +575,7 @@ function main(): number {
   const selected = cases.filter((c) => !only || only.has(c.id));
   const results: CaseResult[] = [];
   for (const c of selected) {
-    const ctx = new Ctx();
+    const ctx = new Ctx(c.env);
     try {
       const r = c.run(ctx);
       const res = r instanceof Promise ? null : r;

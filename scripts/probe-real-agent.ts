@@ -122,7 +122,7 @@ import {
 } from './eval/amount-criteria';
 // 用例语料（issue 切片 C）：消息序列 / 轮次标记 / 夹具与隔离 / 期望值全在 yaml，
 // 本文件只留判定体（CASE_RUNNERS）。
-import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './eval/cases';
+import { fixtureEnvOf, loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './eval/cases';
 // audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
@@ -2805,8 +2805,9 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
  * 用例清单 = cases.yaml 数据 × 上表判定体。
  *
  * 双向核对（任一不符即抛错，不静默跳过也不留死代码）：yaml 有 id 而本表没有 = 用例没实现；
- * 本表有 id 而 yaml 没有 = 判定体已成死代码。fixture.env 由这里的包装器在用例前后设置与
- * 还原（D2 的 DUMMY_PLAN_CONFIRM_CALLS 曾在用例体里手动还原，泄漏过到后续用例）。
+ * 本表有 id 而 yaml 没有 = 判定体已成死代码。fixture.env（平铺键）与 fixture.planPolicy
+ * （stock 四档表，拍平为 STOCK_PLAN_*）由这里的包装器在用例前后设置与还原
+ * （D2 的 DUMMY_PLAN_CONFIRM_CALLS 曾在用例体里手动还原，泄漏过到后续用例）。
  */
 /**
  * 逐用例的报告输入（**纯函数**，导出供单测）。
@@ -2856,8 +2857,11 @@ function loadProbeCases(): Case[] {
       group: spec.group,
       intent: spec.intent,
       run: async () => {
-        const saved = Object.fromEntries(Object.keys(spec.fixture.env).map((key) => [key, process.env[key]]));
-        Object.assign(process.env, spec.fixture.env);
+        // fixture.env 平铺键 + fixture.planPolicy 四档表拍平键（stock 专用），
+        // 由 cases.ts 的 fixtureEnvOf 合并；解析层已拒绝两处重复声明。
+        const injectedEnv = fixtureEnvOf(spec.fixture);
+        const saved = Object.fromEntries(Object.keys(injectedEnv).map((key) => [key, process.env[key]]));
+        Object.assign(process.env, injectedEnv);
         try {
           return await run(spec);
         } finally {
