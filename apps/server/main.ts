@@ -76,7 +76,7 @@ async function main(): Promise<void> {
   await assembly.channel.start(assembly.replyHandler);
   console.log(JSON.stringify({
     event: 'server_started',
-    db: process.env['DB_PATH'] ?? path.join(repoRoot, 'data/agent.db'),
+    db: assembly.dbPath,
     // C5：打 active profile 的实际键（派生自 contextProfiles），不再硬编码实例名。
     contextProfiles: assembly.activeProfileId !== undefined ? [assembly.activeProfileId] : [],
   }));

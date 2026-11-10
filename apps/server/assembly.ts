@@ -167,6 +167,11 @@ export interface ServerAssembly {
    * 这类装配外读取点，避免它们再去读 process.env 而漏掉 yaml 源。
    */
   effectiveEnv: NodeJS.ProcessEnv;
+  /**
+   * 实际使用的 SQLite 库路径（overrides.dbPath > 非空 DB_PATH > 仓库根 data/agent.db）。
+   * main.ts 的启动日志用它，不再自己直读 process.env.DB_PATH。
+   */
+  dbPath: string;
   close(): Promise<void>;
 }
 
@@ -186,7 +191,13 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const platformRoot = activeProfile?.root;
   // 接口完整性硬门：lint 红就抛错、拒绝启动（不建存储、不接渠道），判据与输出见上方函数注释。
   if (platformRoot) assertPlatformOperationsHealthy(platformRoot);
-  const dbPath = overrides.dbPath ?? path.join(repoRoot, 'data/agent.db');
+  // 宿主库路径链（2026-11-10 仲裁修订令）：overrides.dbPath（测试 / e2e harness 的注入）
+  // > effectiveEnv.DB_PATH（yaml `store.dbPath` 派生值，非空 env 覆盖，合并规则唯一实现
+  // 在 effectiveDeploymentEnv）> 仓库根 data/agent.db。空串按未配置处理（--env-file 的
+  // `DB_PATH=` 形态不该把库指到空路径）。
+  const configuredDbPath = (effectiveEnv['DB_PATH'] ?? '').trim();
+  const dbPath = overrides.dbPath
+    ?? (configuredDbPath === '' ? path.join(repoRoot, 'data/agent.db') : configuredDbPath);
   const store = createSqliteStore(dbPath);
   // W2 产物库字节根：与库同处（布局 data/sessions/<sessionId>/artifacts/）。随
   // dbPath 覆盖走——测试把库指到临时位置时，产物字节也落在那里，不污染真实 data/。
@@ -496,6 +507,7 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     planActivationSecret,
     workerDispatchMode,
     effectiveEnv,
+    dbPath,
     close: async () => {
       await backgroundTasks.shutdown();
       unsubscribeTaskEvents();

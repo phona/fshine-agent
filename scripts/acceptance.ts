@@ -2,8 +2,10 @@
  * 验收注入脚本(docs/manual-test-wecom.md §8):
  * 复用与企微相同的 handler 链路(store → runtime → handler),不起企微连接,
  * 使用独立的验收数据库,不触碰生产数据/生产连接。
- * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault]
+ * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault] [--keep-mock-state]
  * --fault:使用指向不存在目录的临时配置,验收 2.5 的失败降级。
+ * --keep-mock-state:mock 运行后保留 EXECUTION_MOCK_STATE 状态文件（脚本私有旋钮，
+ * 走命令行，不设环境变量）；缺省每次启动重置该状态文件保证用例可重复。
  * mock 联调:.env 设 EXECUTION_MOCK_STATE=<路径> 后,写链路用例(5.x)走
  * 提案→确认码→dry-run→commit→读回全链,且每次启动重置该状态文件保证用例可重复
  * (未显式设 EXECUTION_MOCK_STATE 时执行层平台用自己的缺省状态文件,宿主不碰)。
@@ -29,6 +31,8 @@ import { resolveConfigPath, explicitConfigFrom } from './resolve-config-path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const faultMode = process.argv.includes('--fault');
+// --keep-mock-state：保留 mock 状态文件（脚本私有旋钮，走命令行，不设环境变量）。
+const keepMockState = process.argv.includes('--keep-mock-state');
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 const dataDir = path.join(repoRoot, 'data');
 mkdirSync(dataDir, { recursive: true });
@@ -431,7 +435,7 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   // 那是宿主侧的环境读取，写/跑什么模式归执行层与部署配置）。未显式设时平台侧用自己的
   // 缺省状态文件，本脚本不碰。
   const mockStatePath = process.env['EXECUTION_MOCK_STATE'];
-  if (mockStatePath && existsSync(mockStatePath) && !process.env['EXECUTION_MOCK_STATE_KEEP']) {
+  if (mockStatePath && existsSync(mockStatePath) && !keepMockState) {
     rmSync(mockStatePath);
     console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
   }

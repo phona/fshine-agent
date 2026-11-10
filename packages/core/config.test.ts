@@ -440,6 +440,31 @@ businessSkillPath: docs/other-business-skill.md
     expect(blank.channel.port).toBe(3100);
   });
 
+  it('store.dbPath:yaml 是源，非空 DB_PATH 覆盖、空串不覆盖，并派生到 deploymentEnvOf', () => {
+    const yaml = `${VALID_YAML}store:\n  dbPath: /srv/agent.db\n`;
+    const fromYaml = loadConfig({ yamlPath: writeFixture(yaml), env: {} });
+    expect(fromYaml.store).toEqual({ dbPath: '/srv/agent.db' });
+    expect(deploymentEnvOf(fromYaml)['DB_PATH']).toBe('/srv/agent.db');
+
+    const overridden = loadConfig({ yamlPath: writeFixture(yaml), env: { DB_PATH: '/srv/env-agent.db' } });
+    expect(overridden.store).toEqual({ dbPath: '/srv/env-agent.db' });
+    expect(deploymentEnvOf(overridden)['DB_PATH']).toBe('/srv/env-agent.db');
+
+    // node --env-file 的 `DB_PATH=` 形态：空串按未配置，yaml 值仍生效。
+    const blank = loadConfig({ yamlPath: writeFixture(yaml), env: { DB_PATH: '' } });
+    expect(blank.store).toEqual({ dbPath: '/srv/agent.db' });
+    expect(deploymentEnvOf(blank)['DB_PATH']).toBe('/srv/agent.db');
+  });
+
+  it('store 缺段 / 空段 = 未配置（不拒启、不伪造默认值）', () => {
+    const absent = loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} });
+    expect(absent.store).toBeUndefined();
+    expect(deploymentEnvOf(absent)['DB_PATH']).toBeUndefined();
+
+    const emptySection = loadConfig({ yamlPath: writeFixture(`${VALID_YAML}store:\n# 只有注释 → null\n`), env: {} });
+    expect(emptySection.store).toBeUndefined();
+  });
+
   it('缺段 / 空段 / 缺键 = 未配置（不拒启），不给 AppConfig 造空段', () => {
     const config = loadConfig({
       yamlPath: writeFixture([

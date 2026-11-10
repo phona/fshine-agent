@@ -4,7 +4,9 @@
  * 定时任务调用后接告警。
  *
  * 用法: node --import tsx scripts/daily-summary.ts [YYYY-MM-DD] [--db <path>]
- * 库默认取 DB_PATH 环境变量，缺省 data/agent.db。
+ * 库路径优先级:--db > DB_PATH 环境变量(部署配置 store.dbPath 的同名非空覆盖口) > data/agent.db。
+ * 本脚本按纯 node 直跑,不加载 config/agent.yaml(配置加载在 @fshine/core,服务装配才用);
+ * yaml 里的 store.dbPath 是服务的库路径源,本脚本要连同一个库时用 --db 或导出 DB_PATH。
  */
 import Database from 'better-sqlite3';
 import path from 'node:path';

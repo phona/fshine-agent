@@ -19,6 +19,7 @@ import type {
   LlmConfig,
   PrincipalCapability,
   PrincipalConfig,
+  StoreConfig,
   WecomConfig,
   WorkerDispatchMode,
 } from '@fshine/contracts';
@@ -167,6 +168,12 @@ function parseHost(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): HostCo
 function parseExecution(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): ExecutionConfig | undefined {
   const planActivationSecret = pickString(env, 'EXECUTION_PLAN_ACTIVATION_SECRET', raw['planActivationSecret']);
   return planActivationSecret === undefined ? undefined : { planActivationSecret };
+}
+
+/** 宿主存储（yaml `store` 段）：dbPath 走同一覆盖判据——非空 DB_PATH > yaml > 未配置。 */
+function parseStore(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): StoreConfig | undefined {
+  const dbPath = pickString(env, 'DB_PATH', raw['dbPath']);
+  return dbPath === undefined ? undefined : { dbPath };
 }
 
 const CAPABILITIES: readonly PrincipalCapability[] = ['read', 'validate', 'write'];
@@ -339,11 +346,13 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   // 部署配置（issue #20 切片 C+D）：yaml 是源，非空 env 覆盖。缺段 / 缺键 = 未配置，
   // loadConfig 不拒启——各消费点按既有缺省处理。注意服务启动仍会校验必填项：Main 驱动
   // 在装配时即校验 LLM_API_BASE_URL / LLM_API_KEY / LLM_MODEL（pi-driver.ts），渠道凭据
-  // 在 channel.start 校验（channel-wecom/adapter.ts）；与切片前一致。
+  // 在 channel.start 校验（channel-wecom/adapter.ts）；与切片前一致。store.dbPath 的
+  // 缺省落点（data/agent.db）由装配点兜底，不在加载层复制。
   const llm = parseLlm(optionalSection(root, 'llm'), env);
   const wecom = parseWecom(optionalSection(root, 'wecom'), env);
   const host = parseHost(optionalSection(root, 'host'), env);
   const execution = parseExecution(optionalSection(root, 'execution'), env);
+  const store = parseStore(optionalSection(root, 'store'), env);
   const businessSkillPath = pickString(env, 'BUSINESS_SKILL_PATH', root['businessSkillPath']);
 
   return {
@@ -355,6 +364,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     ...(wecom ? { wecom } : {}),
     ...(host ? { host } : {}),
     ...(execution ? { execution } : {}),
+    ...(store ? { store } : {}),
     ...(businessSkillPath === undefined ? {} : { businessSkillPath }),
   };
 }
@@ -393,6 +403,7 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('FSHINE_INBOUND_DEBOUNCE_MS', config.host?.inboundDebounceMs);
   put('FSHINE_ATTACHMENT_DIR', config.host?.attachmentDir);
   put('FSHINE_PI_AGENT_DIR', config.host?.piAgentDir);
+  put('DB_PATH', config.store?.dbPath);
   put('BUSINESS_SKILL_PATH', config.businessSkillPath);
   put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
   return env;
