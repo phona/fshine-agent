@@ -115,6 +115,7 @@ node scripts/eval/measure-summary.mjs \
 ```bash
 node scripts/eval/measure-summary.mjs \
   --expect-cases "$CASES" --expect-rounds 5 --expect-disc-rounds 2 \
+  .runtime/measure-stability.json \
   --eval-real-baseline .runtime/eval-real-baseline.json \
   --eval-real-latest .runtime/eval-real-latest.json \
   --regressions .runtime/unresolved-regressions.json \
