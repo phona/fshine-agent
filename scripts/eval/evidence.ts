@@ -438,6 +438,7 @@ export function messageLadderRung(entries: readonly CallLadderEntry[]): LadderRu
 
 /** issue 验收的最小聚合指标：通过率、干预次数、门拒绝次数、安全违规、耗时 / Token。 */
 export interface AggregateMetrics {
+  /** 评分分母内的用例数（pass 缺席的跳过用例不计）；遥测字段覆盖全部在册用例（含跳过）。 */
   cases: number;
   passed: number;
   /** passed / cases（cases=0 时 0，不造 100%）。 */
@@ -464,7 +465,12 @@ export interface AggregateMetrics {
 /** 聚合输入：每用例一行（通过与否、阶梯、干预停点、耗时、token）。 */
 export interface MetricCaseInput {
   caseId: string;
-  pass: boolean;
+  /**
+   * 是否通过评分；`undefined` = 未进评分分母（跳过：占位条目 / 未进基线）——**遥测照常
+   * 计入**。2026-11-10 codex major：曾用"跳过即整个用例出聚合"实现，只跑非基线用例时
+   * 汇总耗时/token/门拒绝全为零，把跑过的事实丢掉；分母与遥测必须分流。
+   */
+  pass?: boolean;
   /** 该用例的证据链（可空：用例整体没跑起来时也要进聚合）。 */
   evidence?: MessageEvidenceChain;
   ladder: ReadonlyArray<CallLadderEntry>;
@@ -481,12 +487,19 @@ export interface MetricCaseInput {
 
 export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMetrics {
   let passed = 0;
+  let scored = 0;
   let interventions = 0;
   let gateRefusals = 0;
   let durationMs = 0;
   let tokens: number | undefined;
   for (const item of cases) {
-    if (item.pass) passed += 1;
+    // 评分分母与全量遥测分流（2026-11-10 codex major）：pass 缺席 = 跳过（占位/未进
+    // 基线），不进 cases/passed/passRate；耗时/token/干预/门拒绝照计——"没进基线"
+    // 不代表"没跑"，把跑过的遥测丢掉会让只跑非基线用例的汇总呈零。
+    if (item.pass !== undefined) {
+      scored += 1;
+      if (item.pass) passed += 1;
+    }
     interventions += item.interventionPoints;
     durationMs += item.durationMs;
     if (item.tokens !== undefined) tokens = (tokens ?? 0) + item.tokens;
@@ -502,9 +515,9 @@ export function aggregateMetrics(cases: readonly MetricCaseInput[]): AggregateMe
     gateRefusals += hostGateErrors;
   }
   return {
-    cases: cases.length,
+    cases: scored,
     passed,
-    passRate: cases.length === 0 ? 0 : passed / cases.length,
+    passRate: scored === 0 ? 0 : passed / scored,
     interventions,
     gateRefusals,
     // 无证据源 ⇒ null（未测），不是 0。报告侧渲染成"未测"而非"0 违规"——

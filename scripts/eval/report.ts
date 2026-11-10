@@ -279,7 +279,8 @@ export function metricInputs(
     const pass = passOf ? passOf(item) : item.verdict === 'skip' ? undefined : item.verdict === 'pass';
     // undefined = 跳过（未跑起来的占位条目 / 未进基线的用例）：与 score.ts 的 skipped
     // 口径一致——不进通过率分母，也不冒充通过。用例行本身仍留在报告 cases 里可审计。
-    if (pass === undefined) return [];
+    // **跳过不是没跑**：2026-11-10 codex major——遥测（耗时/token/干预/门拒绝）照常进
+    // 聚合，早先"整个用例出聚合"的写法让只跑非基线用例的汇总耗时为零。
     return [{
       caseId: item.caseId,
       pass,
