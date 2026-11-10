@@ -39,13 +39,26 @@ export function formatPriorReviews(reviews) {
   const usable = list.filter((r) => r && typeof r.body === 'string' && r.body.trim() !== '')
   if (usable.length === 0) return { text: '', count: 0, truncated: false }
   const recent = usable.slice(-MAX_PRIOR_REVIEW_COUNT)
-  const rendered = recent.map((r, i) => {
+  const blocks = recent.map((r, i) => {
     const state = typeof r.state === 'string' && r.state ? r.state : 'unknown state'
     const when = typeof r.submittedAt === 'string' && r.submittedAt ? r.submittedAt : 'unknown time'
     return `--- review ${i + 1} of ${recent.length} (${state} at ${when}) ---\n${r.body.trim()}`
-  }).join('\n\n')
-  const capped = cap(rendered, MAX_PRIOR_REVIEWS)
-  return { text: capped.text, count: recent.length, truncated: capped.truncated }
+  })
+  // 从**最新**往回装配、预算耗尽即止，再反转回旧→新呈现。整体 join 后 cap 会把末尾
+  // （最新轮次）整段删掉——那正是审查者最需要的最近修复依据（codex 2026-11-10 minor：
+  // 六条各 4K 的评审截断后只剩最早一条，最新的全丢）。
+  const kept = []
+  let budget = MAX_PRIOR_REVIEWS
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const cost = blocks[i].length + (kept.length > 0 ? 2 : 0)
+    if (cost > budget && kept.length > 0) break
+    if (cost > budget) { kept.push(blocks[i].slice(0, Math.max(0, budget))); budget = 0; break }
+    kept.push(blocks[i])
+    budget -= cost
+  }
+  kept.reverse()
+  const text = kept.join('\n\n')
+  return { text, count: kept.length, truncated: kept.length < blocks.length || budget < MAX_PRIOR_REVIEWS }
 }
 
 export function buildPrompt({ instructions, nameOnly, stat, diff, pr, priorReviews }) {
