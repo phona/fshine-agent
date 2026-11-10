@@ -30,7 +30,7 @@ const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(evalDir, '..', '..');
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
 const stockBin = path.join(fixtureRoot, 'bin', 'stock');
-const baseline = process.argv[2] ?? '17aafe3';
+const baseline = process.argv[2] ?? '0a76921cbfe6cbc9092b467f861a14e37f72bd21';
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-run-'));
 // 状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，非消费协议）：四个 STATE
