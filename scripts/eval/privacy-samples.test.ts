@@ -9,7 +9,9 @@
  * 形态"还是在"抄哪次真实回复"，而那份真实回复带着旧域科目口径。中立化后的样本只允许
  * 两样东西：
  *   ① 夹具词表内的词（collection / window / record / item / rec-* / 记录号 / 数值，
- *      以及夹具刻意登记的缺失口径词 payable / bank / debt）；
+ *      以及夹具刻意登记的缺失口径词 payable / bank / debt **及其中文形**——2026-11-10
+ *      Y2 t2 修复把「应付余额」这类写法收进 MISSING_CALIBERS，作为同一缺失口径的别名；
+ *      它因此是夹具口径词的写法，不是旧域报告片段）；
  *   ② 自造句式（状态码 SUBJECT_NOT_FOUND 与句式是**形态**，不是数据，保留）。
  *
  * 为什么用机械守卫而不是靠注释自律：注释会被下一次改动覆盖，禁词表不会。命中即红，且
@@ -48,11 +50,17 @@ const SCAN_TARGETS: readonly string[] = [
 /**
  * 旧域报告片段与非夹具业务词。收词纪律与 exposure-lint 同族：**只增不减**——发现新的
  * 旧域词往表里加，不从表里删；删一条等于给那一类 reopen 一个无人看守的门。
+ *
+ * 例外（2026-11-10 Y2 t2 修复，有据可查）：`应付余额` 从本表移出。它已是 dummy 夹具
+ * 缺失口径 payable 的**中文别名**（`MISSING_CALIBERS` / `CALIBER_CANONICAL`），判据与
+ * 表征锁必须原样保留该写法（真模型实测回复原文的标题与合计行都用它）；它不是旧域报告
+ * 片段，看守它的职责归 amount-criteria 的口径词表（`MISSING_CALIBERS` 的增删有
+ * amount-criteria.test.ts 的双语词表用例钉住）。旧域口径的其余片段（应付账款 / 科目余额 /
+ * 账套…）仍在表，扫描面不变。
  */
 const OLD_DOMAIN_FRAGMENTS: readonly string[] = [
   '科目余额',
   '应付账款',
-  '应付余额',
   '账套',
   '科目表',
   '应收',
