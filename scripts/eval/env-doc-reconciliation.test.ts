@@ -1,5 +1,5 @@
 /**
- * 文档条目 ↔ 夹具读取点对账守卫（issue #20 验收 4，切片 E 落地）。
+ * 文档条目 ↔ 夹具读取点对账守卫（issue #20 验收 4，切片 E 落地；2026-11-10 续篇重写）。
  *
  * 验收原文：「`docs/environment-variables.md` 条目数 = 代码真实读取点数（机械对账，
  * 纳入 docs-reality 或新增守卫）」。仓内此前没有解析该文档的守卫（`docs-reality.test.ts`
@@ -12,7 +12,11 @@
  *      §9.2/§9.3 的并集）；
  *   ④ §9.1 / §9.2 的条目（含 `AUTO/NOTIFY/CONFIRM/HARD_CALLS` 这类斜杠缩写，展开后）
  *      与夹具实际读取的按用例旋钮双向相等——两侧任一增减都红；
- *   ⑤ §4 / §4b 的条目数钉住 7 / 10（文档自己的计数声明）。
+ *   ⑤ §4 / §4b 的条目数钉住 3 / 6（2026-11-10 续篇：四个状态路径退役后，§4 只剩三个
+ *      令牌面；§4b 只剩三个辅助组 + 三个令牌面）；
+ *   ⑥ 四个状态路径（PLAN / PROPOSAL / MOCK / AUDIT）在夹具源码里 **零 env 读取**（含
+ *      调试回退），文档只在 §4a「仅真平台契约」表登记它们；夹具状态根只认测试专用
+ *      `--state-dir` flag（dummy 测试面，非消费协议）。
  *
  * 这不是业务词扫描（L1 的 `scripts/` 排除口径不适用于本文件）：夹具源码在这里是
  * 被对账的数据源，不是被扫描的编排层代码。
@@ -73,7 +77,7 @@ function pairRows(text: string): PairRow[] {
   return rows;
 }
 
-/** 「变量 | 缺省 / 行为 | 声明处」单名表（§9.1 / §9.2 / §9.3）。 */
+/** 「变量 | 缺省 / 行为 | 声明处」单名表（§9.1 / §9.2 / §9.3 / §4a 契约表）。 */
 function singleNameRows(text: string): string[] {
   const names: string[] = [];
   for (const cells of tableRows(text)) {
@@ -122,11 +126,23 @@ function fixtureReads(source: string): FixtureReads {
 
 const PLAN_BINDING_DEBUG = new Set(['DUMMY_PLAN_ID', 'DUMMY_REQUIRE_PLAN', 'STOCK_PLAN_ID', 'STOCK_REQUIRE_PLAN']);
 
+/** 2026-11-10 续篇退役的四个状态路径（规范名与两套调试专名）。 */
+const RETIRED_STATE_CANONICAL = [
+  'EXECUTION_MOCK_STATE', 'EXECUTION_PLAN_STATE', 'EXECUTION_PROPOSAL_STATE', 'EXECUTION_AUDIT_PATH',
+] as const;
+const RETIRED_STATE_DEBUG = [
+  'DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH',
+  'STOCK_STATE', 'STOCK_PLAN_STATE', 'STOCK_PROPOSAL_STATE', 'STOCK_AUDIT_PATH',
+] as const;
+
 const section4 = pairRows(section('## 4. 通用夹具', '### 4b.'));
 const section4b = pairRows(section('### 4b.', '## 5.'));
 const knobs91 = singleNameRows(section('### 9.1', '### 9.2')).flatMap(expandSlashName);
 const knobs92 = singleNameRows(section('### 9.2', '### 9.3')).flatMap(expandSlashName);
 const hostInjected = singleNameRows(sectionToEnd('### 9.3'));
+/** §4a「仅真平台契约」表里登记的四个状态路径（过滤掉派生文件行）。 */
+const retiredStateRows = singleNameRows(section('### 4a.', '### 4b.'))
+  .filter((name) => (RETIRED_STATE_CANONICAL as readonly string[]).includes(name));
 
 const dummyReads = fixtureReads(dummySource);
 const stockReads = fixtureReads(stockSource);
@@ -137,14 +153,14 @@ function pairKeys(rows: Array<{ canonical: string; debug: string }>): string[] {
 }
 
 describe('environment-variables.md 条目 ↔ 夹具读取点机械对账', () => {
-  it('§4 的 7 条 == dummy 夹具的 env2 配对（计划绑定两键归 §9.1/§9.3）', () => {
-    expect(section4.length, '§4 条目数应为 7（四个状态路径 + 三个令牌面）').toBe(7);
+  it('§4 的 3 条 == dummy 夹具的 env2 配对（四个状态路径已退役；计划绑定两键归 §9.1/§9.3）', () => {
+    expect(section4.length, '§4 条目数应为 3（三个令牌面；四个状态路径已移 §4a）').toBe(3);
     const isolation = dummyReads.pairs.filter((pair) => !PLAN_BINDING_DEBUG.has(pair.debug));
     expect(pairKeys(isolation), '§4 与 dummy.cjs 的 env2 配对不一致：改一侧必须同批改另一侧').toEqual(pairKeys(section4));
   });
 
-  it('§4b 的 10 条 == stock 夹具的 env2 配对（计划绑定两键归 §9.2/§9.3）', () => {
-    expect(section4b.length, '§4b 条目数应为 10（七个状态路径 + 三个令牌面）').toBe(10);
+  it('§4b 的 6 条 == stock 夹具的 env2 配对（四个状态路径已退役；三个辅助组 + 三个令牌面）', () => {
+    expect(section4b.length, '§4b 条目数应为 6（三个辅助组 + 三个令牌面；四个状态路径已移 §4a）').toBe(6);
     const isolation = stockReads.pairs.filter((pair) => !PLAN_BINDING_DEBUG.has(pair.debug));
     expect(pairKeys(isolation), '§4b 与 stock.cjs 的 env2 配对不一致：改一侧必须同批改另一侧').toEqual(pairKeys(section4b));
   });
@@ -192,6 +208,26 @@ describe('environment-variables.md 条目 ↔ 夹具读取点机械对账', () =
     for (const pair of [...dummyReads.pairs, ...stockReads.pairs]) {
       if (!PLAN_BINDING_DEBUG.has(pair.debug)) continue;
       expect(hostInjected, `${pair.canonical} 是计划绑定规范名，应在 §9.3 在册`).toContain(pair.canonical);
+    }
+  });
+
+  it('四个状态路径：夹具零 env 读取（含调试回退），文档只在 §4a 保留真平台契约行', () => {
+    const readNames = new Set<string>([
+      ...[...dummyReads.pairs, ...stockReads.pairs].flatMap((pair) => [pair.canonical, pair.debug]),
+      ...dummyReads.singles,
+      ...stockReads.singles,
+    ]);
+    for (const name of [...RETIRED_STATE_CANONICAL, ...RETIRED_STATE_DEBUG]) {
+      expect(readNames.has(name), `${name} 仍在夹具的 env/env2 读取点里——四个状态路径必须只认 --state-dir`).toBe(false);
+    }
+    expect([...retiredStateRows].sort(), '§4a 应登记四个状态路径的真平台契约行').toEqual([...RETIRED_STATE_CANONICAL].sort());
+  });
+
+  it('夹具状态根只认测试专用 --state-dir flag（dummy 测试面，非消费协议）', () => {
+    for (const [label, source] of [['dummy.cjs', dummySource], ['stock.cjs', stockSource]] as const) {
+      expect(source, `${label} 缺少 --state-dir flag 解析`).toContain("arg === '--state-dir'");
+      expect(source, `${label} 的审计文件应从状态根派生`).toContain("path.join(dir, 'audit.jsonl')");
+      expect(source, `${label} 的默认状态文件应仍在夹具 .runtime 下`).toContain("path.join(FIXTURE_ROOT, '.runtime')");
     }
   });
 });

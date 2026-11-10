@@ -55,7 +55,7 @@
  * operation 名（"数据来源：…finance.query-receivables"）与internal control term（"查询plan quota"）两类，尺子随 runtime.ts 同扩）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
-import { mkdtempSync, rmSync, appendFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, appendFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -90,6 +90,8 @@ import {
 } from './eval/evidence';
 // 统一报告（JSON + JSONL 两份面）与最小聚合指标。
 import { buildUnifiedReport, summarizeReport, writeUnifiedReport, type ReportCaseInput } from './eval/report';
+// 夹具辅助组 ambient 名（规范族 + STOCK_* 调试专名）：与令牌专名同待遇，隔离时从进程内删除。
+import { FIXTURE_AUX_STATE_ENV_KEYS } from './eval/fixture-aux-state';
 import {
   auditFailuresCheckOf, evaluateProbeCase, expectationChecksOf, loadBaseline,
   type AuditFailuresValue, type Baseline, type BaselineCase, type ProbeResultRow,
@@ -357,19 +359,39 @@ function openReadonlyDb(dbPath: string): Database.Database {
  */
 const PROBE_REPLY_WAIT_MS = 300_000;
 
-const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
 /**
- * 夹具的 ambient 调试专名（issue #20 切片 E 后它们不再是第一顺位）。夹具按
- * `env2(EXECUTION_*, DUMMY_*)` 查找状态文件与令牌——规范名优先；专名只是手工调试
- * 入口，评测进程内必须不可见（docs/env-naming-ruling-20261110.md）。故这些键与规范名
- * 一起备份、一起删除、一起恢复（backup/restore 对称）：规范名若缺失，夹具回落到夹具
- * 缺省，不会静默取到 shell 里的专名。
+ * 宿主按例隔离的非状态 env 面：只剩限流状态（仓内两夹具零读取，真平台仍读）。
+ * 2026-11-10 消费端边界裁定后，四个状态路径（PLAN/MOCK/PROPOSAL/AUDIT）不再经 env
+ * 注入——状态位置归执行层自己，探针只把 per-case 状态根交给仓内夹具的测试专用 flag
+ * （见 FIXTURE_STATE_DIR_KEY）。
+ */
+const PLATFORM_STATE_KEYS = ['EXECUTION_RATE_LIMIT_STATE'] as const;
+/**
+ * 测试专用状态根桥（docs/environment-variables.md §4a）：fshine 评测基础设施私有，
+ * 不是两仓契约。宿主生产路径零读取；仓内夹具的 shell 入口把它翻成 `--state-dir`。
+ * 放进 ISOLATED_STATE_KEYS 与四个原状态键同待遇：per-case 覆盖、backup/restore 对称。
+ */
+const FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
+/**
+ * 夹具令牌面的 ambient 调试专名。夹具按 `env2(EXECUTION_*, DUMMY_*)` 查找令牌——
+ * 规范名优先；专名只是手工调试入口，评测进程内必须不可见（docs/env-naming-ruling-20261110.md）。
+ * 2026-11-10 起四个状态路径专名（DUMMY_*_STATE / DUMMY_AUDIT_PATH）不再需要清场：
+ * 夹具已不读任何状态路径 env（状态根只认 --state-dir 测试 flag）。
  */
 const FIXTURE_AMBIENT_DEBUG_KEYS = [
-  'DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH',
   'DUMMY_GATE_SECRET', 'DUMMY_COMMIT_TOKEN', 'DUMMY_PLAN_ACTIVATION_SECRET',
 ] as const;
-const ISOLATED_STATE_KEYS = [...PLATFORM_STATE_KEYS, ...FIXTURE_AMBIENT_DEBUG_KEYS] as const;
+/**
+ * 夹具辅助组（memory / breaker / cache）的 ambient 名：规范族优先，STOCK_* 是调试专名
+ * （stock.cjs 的 auxPaths() 用 env2 顺序查找；dummy.cjs 不实现辅助组，零读取，故无
+ * DUMMY_* 对应名）。这些名字必须与令牌专名同待遇：评测进程内不可见，否则 ambient 里
+ * 一个打开中的熔断账本会让 stock.query 得 BREAKER_OPEN、memory/cache 可跨用例共享或
+ * 写到状态根外——per-case 状态根只保住缺省值，保不住 env2 的 ambient 优先。
+ */
+const FIXTURE_AUX_STATE_KEYS = FIXTURE_AUX_STATE_ENV_KEYS;
+const ISOLATED_STATE_KEYS = [
+  ...PLATFORM_STATE_KEYS, FIXTURE_STATE_DIR_KEY, ...FIXTURE_AMBIENT_DEBUG_KEYS, ...FIXTURE_AUX_STATE_KEYS,
+] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
@@ -474,28 +496,44 @@ function breakdownSince(mark: number, eventName: string): UsageBreakdown | null 
   return total;
 }
 
-export function isolatePlatformState(dir: string = stateDir): void {
+export function isolatePlatformState(dir: string = stateDir): string {
   platformStateBackup = Object.fromEntries(ISOLATED_STATE_KEYS.map((key) => [key, process.env[key]]));
   counter += 1;
+  // 每个用例一份独立状态根：夹具从 --state-dir 派生全部状态/审计文件（docs §4a）。
+  const caseDir = path.join(dir, `case-${counter}`);
+  mkdirSync(caseDir, { recursive: true });
   Object.assign(process.env, {
-    EXECUTION_PLAN_STATE: path.join(dir, `plans-${counter}.json`),
-    EXECUTION_MOCK_STATE: path.join(dir, `mock-${counter}.json`),
-    EXECUTION_AUDIT_PATH: path.join(dir, `audit-${counter}.jsonl`),
-    EXECUTION_PROPOSAL_STATE: path.join(dir, `proposals-${counter}.json`),
-    // 限流状态不再按例注入（2026-11-10，issue #20）：实测仓内两夹具（dummy / stock）对
-    // EXECUTION_RATE_LIMIT_STATE 零读取，只有真平台读它；探针只跑
-    // 仓内夹具，注入是空转。真平台仍读该键，缺省契约不变。失效条件：harness 指回带限流的
-    // 后端（真平台或实现限流的夹具）时，把注入加回 PLATFORM_STATE_KEYS 与下方对象。
     // 网关限流有 example-gateway 专项测试；真实平台保持生产限流（"别让下游平台有感知"）：
-    // 探针节奏天然低于限额，被限就是信号。
-    // 2026-11-08 删除宿主侧的 mock 判据（isPlatformMock / EXECUTION_EXECUTOR）：原来只在
-    // mock 下注入的 EXECUTION_RATE_LIMIT 放宽旋钮随之删除——它是一处宿主替执行层调限流
-    // 参数的行为，且当前仓内夹具根本不读该 env（限流配置归平台自己的 DZ_* 命名，见
-    // debt-ledger D-163 的 env 家族对齐）。要放宽就改执行层自己的限流配置，不在编排层开关。
+    // 探针节奏天然低于限额，被限就是信号。2026-11-08 删除宿主侧的 mock 判据
+    // （isPlatformMock / EXECUTION_EXECUTOR）：mock 下才注入的 EXECUTION_RATE_LIMIT 放宽
+    // 旋钮随之删除——宿主替执行层调限流参数是越权，且仓内夹具不读该 env。要放宽就改
+    // 执行层自己的限流配置，不在编排层开关。
+    EXECUTION_RATE_LIMIT_STATE: path.join(dir, `rate-${counter}.json`),
+    // 测试专用桥：探针无 argv 通道（宿主 spawn 固定 argv），由夹具 shell 入口把该值
+    // 翻成 --state-dir。它是 fshine 评测基础设施私有变量，不是两仓契约（§4a）。
+    [FIXTURE_STATE_DIR_KEY]: caseDir,
   });
-  // 专名是第二顺位调试入口：规范名已按用例注入，但专名必须在评测进程内不可见——
-  // 否则规范名一旦漏注入，夹具会静默回落到 shell 的专名值（per-case 隔离击穿）。
-  for (const key of FIXTURE_AMBIENT_DEBUG_KEYS) delete process.env[key];
+  // 令牌专名是第二顺位调试入口：规范名已按用例注入，但专名必须在评测进程内不可见——
+  // 否则规范名一旦漏注入，夹具会静默回落到 shell 的专名值。辅助组 ambient 名（规范族 +
+  // STOCK_* 调试专名）同理：夹具 auxPaths() 的 env2 优先读 ambient，继承值会盖过 per-case
+  // 状态根，故一并删除（backup/restore 由 ISOLATED_STATE_KEYS 对称覆盖）。
+  // 状态路径专名已无读取点，不再清场。
+  for (const key of [...FIXTURE_AMBIENT_DEBUG_KEYS, ...FIXTURE_AUX_STATE_KEYS]) delete process.env[key];
+  return caseDir;
+}
+
+/** 夹具被要求使用的 per-case 状态根（测试专用桥的值；未隔离时为空串）。 */
+export function probeCaseStateDir(): string {
+  return process.env[FIXTURE_STATE_DIR_KEY] ?? '';
+}
+
+/**
+ * 审计文件路径 = 状态根 + 夹具同一文件名规则（docs §4a）。probe 与 safety-gate
+ * 都从这里取值，保证「闸验的路径」和「夹具实际写的路径」同根同规则（单测钉住）。
+ */
+export function probeAuditPath(): string | null {
+  const dir = probeCaseStateDir();
+  return dir === '' ? null : path.join(dir, 'audit.jsonl');
 }
 
 export function restorePlatformState(): void {
@@ -507,14 +545,14 @@ export function restorePlatformState(): void {
 }
 
 /**
- * 执行层审计日志行（issue #10 切片 D 的执行证据唯一采集口）。不再读 EXECUTION_PLAN_STATE
- * 的 actual.calls 账本——那是宿主不可观测的内部状态文件，评测改数执行层自己落的审计行
- * （EXECUTION_AUDIT_PATH：mode/script/args/serve/refused/exitCode）。同一捕获窗口内被拒
+ * 执行层审计日志行（issue #10 切片 D 的执行证据唯一采集口）。不再读计划账本
+ * 的 actual.calls——那是宿主不可观测的内部状态文件，评测改数执行层自己落的审计行
+ * （状态根派生的 audit.jsonl：mode/script/args/serve/refused/exitCode）。同一捕获窗口内被拒
  * 的行也数：它信息更多，能分「调用了」和「被拒+原因」。
- * 返回 null = 审计路径未设/读失败：证据缺席（判定往 INCONCLUSIVE 方向收），不得当零调用。
+ * 返回 null = 状态根未隔离/读失败：证据缺席（判定往 INCONCLUSIVE 方向收），不得当零调用。
  */
 function executionAuditRows(): ExecutionAuditRow[] | null {
-  return readExecutionAuditLog(process.env['EXECUTION_AUDIT_PATH']);
+  return readExecutionAuditLog(probeAuditPath() ?? undefined);
 }
 
 /**
@@ -1530,7 +1568,7 @@ const C2_CLARIFY: ReadonlyArray<{ index: number; candidates: readonly string[] }
 // ─── X/Y 用例（复杂任务会话 / 纠错与错误态）的 mock 事实源与判定 helper ───
 //
 // mock 事实（2026-09-29 从 /home/fictional-user/fictional-projects/fictional-execution-layer/.runtime/mock-state.json 读出；
-// 探针每用例的 EXECUTION_MOCK_STATE 指向临时空文件，mock 应答器自动从同仓 fixtures 的种子状态播种，
+// 探针每用例的状态根指向一个临时空目录（夹具经 --state-dir 派生全部状态文件），mock 应答器自动从同仓 fixtures 的种子状态播种，
 // 两份balance事实一致——此处以种子为准，改动任何数字前先重读状态文件）：
 //   · collection目录 4 个：alpha / alpha-group / beta / locked-one。匹配语义是
 //     「精确键优先，其后平台名 includes 查询词」——"alpha"是精确键、直接命中不歧义；
@@ -1601,17 +1639,15 @@ interface AuditRecord {
   exitCode?: number;
 }
 
-/** 读审计日志（EXECUTION_AUDIT_PATH 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
+/** 读审计日志（状态根派生的 audit.jsonl 按用例隔离；文件缺失/坏行跳过——判定降级不炸）。 */
 /** 执行层自己持有的待确认提案（D2「停在确认门」判据的第二信号）。
- *  2026-11-08 换源：原 recordsHasPendingPlan 读宿主 EXECUTION_PLAN_STATE——那是编排层
+ *  2026-11-08 换源：原 recordsHasPendingPlan 读宿主计划账本——那是编排层
  *  内部的计划账本，不在可观测面内。同一个「有未执行的待确认提案」信息改从执行层自己的
- *  proposals.json 取（规范名 EXECUTION_PROPOSAL_STATE 由 isolatePlatformState 按用例注入；
- *  DUMMY_PROPOSAL_STATE 只是夹具调试专名，评测进程已 delete；两者都没有时回落夹具缺省：
- *  EXECUTION_MOCK_STATE 同目录）。执行层状态是可观测面，宿主计划账本不是。 */
+ *  proposals.json 取（2026-11-10 起从 per-case 状态根派生，夹具按同一根写；执行层状态是
+ *  可观测面，宿主计划账本不是）。 */
 function executionHasPendingProposal(): boolean {
-  const stateFile = process.env['EXECUTION_MOCK_STATE'];
-  const explicit = process.env['EXECUTION_PROPOSAL_STATE'] ?? process.env['DUMMY_PROPOSAL_STATE'];
-  const file = explicit ?? (stateFile ? path.join(path.dirname(stateFile), 'proposals.json') : '');
+  const dir = probeCaseStateDir();
+  const file = dir === '' ? '' : path.join(dir, 'proposals.json');
   if (!file || !existsSync(file)) return false;
   try {
     const doc = JSON.parse(readFileSync(file, 'utf8')) as { proposals?: Record<string, { status?: string }> };
@@ -1620,7 +1656,7 @@ function executionHasPendingProposal(): boolean {
 }
 
 function auditRecords(): AuditRecord[] {
-  const file = process.env['EXECUTION_AUDIT_PATH'];
+  const file = probeAuditPath();
   if (!file || !existsSync(file)) return [];
   try {
     return readFileSync(file, 'utf8').split('\n').filter(Boolean)
@@ -3166,7 +3202,9 @@ async function main(): Promise<void> {
     const gateConfig = loadConfig({ env: process.env, yamlPath });
     const gateProfile = gateConfig.contextProfiles[resolveActiveProfileId(gateConfig.contextProfiles) ?? ''];
     assertEvalIsolation(assessEvalIsolation({
-      env: process.env,
+      // safety-gate 是纯函数入参：审计路径 = 状态根派生（probeAuditPath），与夹具实际写入
+      // 同根同规则；不写回 process.env（状态位置不再经 env 传给夹具，docs §4a）。
+      env: { ...process.env, ...(probeAuditPath() === null ? {} : { EXECUTION_AUDIT_PATH: probeAuditPath()! }) },
       ...(gateProfile?.root ? { platformRoot: gateProfile.root } : {}),
       ...(gateProfile?.gateway ? { gateway: gateProfile.gateway } : {}),
     }), `真实模型探针（evalRunId=${evalRunId}）`);
@@ -3219,7 +3257,7 @@ async function main(): Promise<void> {
           messageIds: turns.map((turn) => turn.messageId),
           requestIds: [...new Set(turns.map((turn) => turn.requestId).filter((v): v is string => typeof v === 'string'))],
           taskIds: [...new Set(turns.flatMap((turn) => turn.taskIds))],
-          ...(process.env['EXECUTION_AUDIT_PATH'] ? { auditLog: path.basename(process.env['EXECUTION_AUDIT_PATH']!) } : {}),
+          ...(probeAuditPath() ? { auditLog: path.relative(stateDir, probeAuditPath()!) } : {}),
         },
         notes,
         dims: counted.dims, unclassifiedNotes: counted.unclassified,

@@ -59,8 +59,9 @@ cases:
   return file;
 }
 
-function evaluatePlan(env: NodeJS.ProcessEnv, taskId: string, calls: number) {
-  const r = spawnSync(stockBin, ['plan', 'evaluate', '--task-id', taskId, '--stdin'], {
+function evaluatePlan(env: NodeJS.ProcessEnv, stateDir: string, taskId: string, calls: number) {
+  // 状态根走测试专用 --state-dir（docs §4a）；夹具不再读状态路径 env。
+  const r = spawnSync(stockBin, ['--state-dir', stateDir, 'plan', 'evaluate', '--task-id', taskId, '--stdin'], {
     encoding: 'utf8',
     cwd: fixtureRoot,
     env,
@@ -80,21 +81,15 @@ describe('cases.yaml 的四档预算表真的驱动 stock 夹具（无模型）'
       expect(Object.keys(declared).sort()).toEqual([...STOCK_PLAN_KEYS].sort());
       expect(declared['STOCK_PLAN_HARD_CALLS']).toBe('1');
 
-      const baseEnv: NodeJS.ProcessEnv = {
-        ...process.env,
-        EXECUTION_MOCK_STATE: path.join(dir, 'state.json'),
-        EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
-        EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
-        EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
-      };
+      const baseEnv: NodeJS.ProcessEnv = { ...process.env };
       // 对照组不能带 ambient 阈值：四档表是唯一旋钮来源。
       for (const key of STOCK_PLAN_KEYS) delete baseEnv[key];
 
-      const control = evaluatePlan(baseEnv, 'control', 2);
+      const control = evaluatePlan(baseEnv, dir, 'control', 2);
       expect(control.status).toBe(0);
       expect(JSON.parse(control.stdout)).toMatchObject({ decision: 'execute', status: 'active' });
 
-      const stopped = evaluatePlan({ ...baseEnv, ...declared }, 'declared', 2);
+      const stopped = evaluatePlan({ ...baseEnv, ...declared }, dir, 'declared', 2);
       expect(stopped.status).toBe(0);
       expect(JSON.parse(stopped.stdout)).toMatchObject({
         decision: 'stop',

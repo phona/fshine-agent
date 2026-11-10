@@ -20,7 +20,8 @@
 # 机制：探针在用例前后注入/还原（probe-real-agent.ts 的 loadProbeCases 包装器）。
 # 部署面不应出现这些键；夹具自己的缺省是唯一缺省来源（未声明的档/线不注入）。
 # 本切片只做声明注入，不清理 ambient 同名键：评测进程不得 export 这些变量；
-# 未声明的键仍从 process.env 继承（夹具 env2 的 EXECUTION_* 回退也仍在）。
+# 未声明的 C 类键仍从 process.env 继承（夹具 env2 的令牌面回退仍在；四个状态路径的
+# env 读取已退役，状态根走测试专用 --state-dir，见 docs/environment-variables.md §4a）。
 #
 # fixture.env 平铺标量（dummy 夹具）：
 #   DUMMY_PLAN_ID / DUMMY_REQUIRE_PLAN
@@ -41,17 +42,18 @@
 version: 1
 
 # ── 夹具与隔离（所有 probe 用例共用；差异逐条目覆写）──
-# 隔离面 = 探针每用例 mkdtemp 一个 stateDir，把 EXECUTION_PLAN_STATE /
-# EXECUTION_MOCK_STATE / EXECUTION_AUDIT_PATH / EXECUTION_PROPOSAL_STATE 四键指进去
-# （probe-real-agent.ts 的 isolatePlatformState / restorePlatformState；限流状态不再按例
-# 注入——仓内夹具不读、真平台仍读）。注意：eval 侧的
-# 环境变量（如 D2 显式降的 DUMMY_PLAN_CONFIRM_CALLS）不在这四键里，逐用例显式声明 + 还原。
+# 隔离面 = 探针每用例一个状态根：隔离时 mkdir <stateDir>/case-<n>，经测试专用桥
+# FSHINE_EVAL_FIXTURE_STATE_DIR 交给夹具 shell 入口（翻成 --state-dir），夹具从该根派生
+# 状态/计划/提案/审计文件（docs/environment-variables.md §4a）。限流状态仍按例注入
+# EXECUTION_RATE_LIMIT_STATE；四个 STATE 路径不再经 env 注入（probe-real-agent.ts 的
+# isolatePlatformState / restorePlatformState）。注意：eval 侧的 C 类环境变量
+# （如 D2 显式降的 DUMMY_PLAN_CONFIRM_CALLS）不受此机制影响，逐用例显式声明 + 还原。
 fixtures:
   dummy-platform:
     root: scripts/eval/fixtures/dummy-platform
     gateway: bin/generic
     isolation: per-case-state-dir
-    audit: EXECUTION_AUDIT_PATH
+    audit: state-dir/audit.jsonl
     # 夹具种子事实的权威位置（改任何期望值前先重读这里）
     seed: scripts/eval/fixtures/dummy-platform/bin/dummy.cjs#seedState
     transcription: scripts/eval/dummy-fixture.ts

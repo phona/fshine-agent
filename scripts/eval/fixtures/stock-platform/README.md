@@ -19,13 +19,15 @@ protocol as any fshine execution layer (see
   `memory set|get|list`, `breaker status|trip|reset`
   (open breaker rejects queries with `BREAKER_OPEN`),
   `cache put|get|clear` (hit/miss, clear resets).
-- State files (per case, delete = reset): canonical family `EXECUTION_MOCK_STATE`,
-  `EXECUTION_PLAN_STATE`, `EXECUTION_PROPOSAL_STATE`, `EXECUTION_AUDIT_PATH`,
-  `EXECUTION_MEMORY_STATE`, `EXECUTION_BREAKER_STATE`, `EXECUTION_CACHE_STATE`;
-  `STOCK_STATE` / `STOCK_PLAN_STATE` / `STOCK_PROPOSAL_STATE` / `STOCK_AUDIT_PATH` /
-  `STOCK_MEMORY_STATE` / `STOCK_BREAKER_STATE` / `STOCK_CACHE_STATE` remain as
-  debug entries (read second, for manual runs). Canonical-first lookup is
-  `env2(EXECUTION_*, STOCK_*, default)`; see `docs/env-naming-ruling-20261110.md`.
+- State root (per case, delete = reset): the test-only `--state-dir <path>` flag
+  (dummy test surface, NOT a consumption protocol). The fixture derives
+  `stock-state.json` / `plans.json` / `proposals.json` / `audit.jsonl` (and the
+  auxiliary `memory.json` / `breaker.json` / `cache.json`) from that root.
+  The four state-path env names (`EXECUTION_MOCK_STATE`, `EXECUTION_PLAN_STATE`,
+  `EXECUTION_PROPOSAL_STATE`, `EXECUTION_AUDIT_PATH`) and their `STOCK_*` debug
+  fallbacks are retired from this fixture (ambient state paths cannot redirect
+  it). Auxiliary/token env2 entries remain as manual debug overrides; see
+  `docs/environment-variables.md` §4a.
 - Skill routing examples: `skills-serve/stock-routing-examples/SKILL.md`
   (routing only, never a gate).
 - Assembly health gate: `scripts/lint-operations.js` must exit 0 with
