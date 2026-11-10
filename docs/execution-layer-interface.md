@@ -248,7 +248,8 @@
 > 本文档是接口定义，不是实现报告。实现是否符合本文，以
 > `docs/execution-layer-interface.md` 为准绳逐项核对，见收尾报告。
 > 环境变量的完整清单（生产者 / 消费者 / 默认值 / 缺失行为、删除清单）见
-> 附录 `docs/environment-variables.md`。
+> 附录 `docs/environment-variables.md`。执行层自有的机器本地 / 凭据 /
+> 浏览器路径面变量归执行层仓文档，附录只留一行指向。
 
 ## 11. 生产装配接线（第 2 包，2026-11-04）
 

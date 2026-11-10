@@ -7,12 +7,16 @@
  * committed，那个"用户必须确认"的停点就从干预指标里消失，完整写链被报成零次干预。
  */
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
-  auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, errorStateNotes, loadBaselineForProbe,
-  realAmounts, recallMissed, unifiedCasePassedOf,
+  auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, errorStateNotes,
+  isolatePlatformState, loadBaselineForProbe, realAmounts, recallMissed, restorePlatformState,
+  unifiedCasePassedOf,
   type ScriptLine, type Turn,
 } from './probe-real-agent';
 import { AUDIT_INSTRUCTION } from './eval/audit-instruction';
@@ -949,5 +953,83 @@ describe('loadBaselineForProbe：黑盒缺失放宽、audited 仍 fail-closed', 
   });
   it('audited：基线不可读 ⇒ 原样抛出（申报失败门的上限不能猜）', () => {
     expect(() => loadBaselineForProbe(true, missing)).toThrow(/ENOENT|no such file/i);
+  });
+});
+
+/**
+ * ambient 击穿回归锁（issue #20 owner 评论「立刻能做」）：dummy 夹具按
+ * `env2(DUMMY_*, EXECUTION_*)` 查找状态文件，专名优先。评测进程若从 shell 继承
+ * 任一 DUMMY_*，它就会盖过 isolatePlatformState 注入的 per-case 路径——22 条用例
+ * 静默共用同一个状态/审计文件。本组断言预置四个 ambient 专名后：
+ *   ① 隔离后专名被删除，夹具的 env2 只能落到本用例的 EXECUTION_* 路径；
+ *   ② restorePlatformState 把 ambient 原值原样恢复（备份/恢复对称）；
+ *   ③ 再隔离一次拿到另一份路径（per-case 隔离不是共用文件）。
+ */
+describe('isolatePlatformState：ambient DUMMY_* 不击穿 per-case 隔离', () => {
+  const AMBIENT = {
+    DUMMY_STATE: '/tmp/ambient-state.json',
+    DUMMY_PLAN_STATE: '/tmp/ambient-plans.json',
+    DUMMY_PROPOSAL_STATE: '/tmp/ambient-proposals.json',
+    DUMMY_AUDIT_PATH: '/tmp/ambient-audit.jsonl',
+  } as const;
+  const EXECUTION_FALLBACK = {
+    DUMMY_STATE: 'EXECUTION_MOCK_STATE',
+    DUMMY_PLAN_STATE: 'EXECUTION_PLAN_STATE',
+    DUMMY_PROPOSAL_STATE: undefined,
+    DUMMY_AUDIT_PATH: 'EXECUTION_AUDIT_PATH',
+  } as const;
+  const EXECUTION_KEYS = [
+    'EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH',
+  ] as const;
+
+  const savedOf = (keys: readonly string[]): Record<string, string | undefined> =>
+    Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+
+  const restoreSaved = (saved: Record<string, string | undefined>): void => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  };
+
+  it('预置 ambient 专名后仍解析到 per-case 路径，restore 原样恢复', () => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), 'probe-isolate-'));
+    const savedAmbient = savedOf(Object.keys(AMBIENT));
+    const savedExecution = savedOf(EXECUTION_KEYS);
+    // 夹具查找语义（dummy.cjs 的 env / env2 同款：空串按未设处理）。
+    const env = (name: string): string | undefined => {
+      const value = process.env[name];
+      return value === undefined || value === '' ? undefined : value;
+    };
+    try {
+      Object.assign(process.env, AMBIENT);
+      isolatePlatformState(stateDir);
+
+      for (const [specific, fallback] of Object.entries(EXECUTION_FALLBACK)) {
+        expect(process.env[specific], `${specific} 仍在 ambient：夹具 env2 会优先取它，per-case 隔离被击穿`).toBeUndefined();
+        if (fallback === undefined) {
+          // DUMMY_PROPOSAL_STATE 没有 EXECUTION_* 回退：缺省落在 EXECUTION_MOCK_STATE 同目录。
+          expect(path.dirname(process.env['EXECUTION_MOCK_STATE']!)).toBe(stateDir);
+        } else {
+          expect(env(specific) ?? env(fallback)).toBe(process.env[fallback]);
+          expect(process.env[fallback]!.startsWith(stateDir)).toBe(true);
+        }
+      }
+      const firstAudit = process.env['EXECUTION_AUDIT_PATH'];
+
+      // restore 对称：被删的 ambient 专名原值回来，通用名回到隔离前的值。
+      restorePlatformState();
+      for (const [key, value] of Object.entries(AMBIENT)) expect(process.env[key]).toBe(value);
+      for (const key of EXECUTION_KEYS) expect(process.env[key]).toBe(savedExecution[key]);
+
+      // 再隔一次 = 另一份 per-case 文件（不是 22 例共用一个）。
+      isolatePlatformState(stateDir);
+      expect(process.env['EXECUTION_AUDIT_PATH']).not.toBe(firstAudit);
+    } finally {
+      restorePlatformState();
+      restoreSaved(savedAmbient);
+      restoreSaved(savedExecution);
+      rmSync(stateDir, { recursive: true, force: true });
+    }
   });
 });
