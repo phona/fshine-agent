@@ -37,6 +37,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withoutFixtureAuxState } from './fixture-aux-state';
 // Host pure modules, imported by relative path (this script runs under tsx,
 // not vitest, so the @fshine/agent alias is not available here).
 import { DEFAULT_WORKER_STEP_CAP, parseStepCap, stepCapDecision } from '../../packages/agent/src/worker-step-cap';
@@ -70,12 +71,14 @@ class Ctx {
   /**
    * `extraEnv` = 该用例声明的 C 类旋钮（如 DUMMY_READBACK_SHORT）；C 类 ambient 同名键
    * 本切片未清场，见 docs §9。状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，
-   * 非消费协议）：四个 STATE 路径不再经 env 注入，夹具也不再读它们。
+   * 非消费协议）：四个 STATE 路径不再经 env 注入，夹具也不再读它们。辅助组的 ambient 名
+   * 从子进程 env 删除（fixture-aux-state）：dummy 当前零读取，但同一 harness 族会跑 stock，
+   * 不能让 shell 里的辅助组键改道缺省派生路径。
    */
   constructor(extraEnv: NodeJS.ProcessEnv = {}) {
     this.dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-'));
     this.env = {
-      ...process.env,
+      ...withoutFixtureAuxState(process.env),
       EXECUTION_PLAN_ACTIVATION_SECRET: 'generic-mock-plan-secret',
       EXECUTION_GATE_SECRET: 'generic-mock-gate-secret',
       ...extraEnv,

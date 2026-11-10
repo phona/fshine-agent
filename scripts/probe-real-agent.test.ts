@@ -965,10 +965,13 @@ describe('loadBaselineForProbe：黑盒缺失放宽、audited 仍 fail-closed', 
  * argv 通道（宿主 spawn 固定 argv），故经 `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥把
  * per-case 根交给夹具 shell 入口，入口翻成 flag。本组断言预置：
  *   · 四个状态的 ambient 专名与规范名（证明夹具忽略它们，不会被 ambient 改道）；
+ *   · 辅助组（memory / breaker / cache）的 ambient 名（规范族 + STOCK_* 专名）：证明探针
+ *     清场它们——stock auxPaths 的 env2 优先读 ambient（2026-11-10 Codex major 修复）；
  *   · ambient 桥键（证明探针的 per-case 覆盖赢——桥值必须指向 case 目录）；
  *   · 三个令牌面专名（证明探针仍然清场它们）。
  * 然后：
  *   ① 隔离后桥键 == case 目录；四个状态规范名保持 ambient 原值（探针不再注入/清场它们）；
+ *      辅助组 ambient 名全部不可见（清场）；
  *   ② 用隔离后的 process.env 真跑一次夹具：状态/审计文件只落在 case 目录，ambient 根为空
  *      （抽掉桥覆盖 → 夹具会落到 ambient 根，本断言必红）；
  *   ③ probeAuditPath() == caseDir/audit.jsonl（探针传给 safety-gate 的路径与夹具派生
@@ -985,6 +988,12 @@ describe('isolatePlatformState：状态根只走测试桥 + 专名清场', () =>
   ] as const;
   const TOKEN_KEYS = [
     'DUMMY_GATE_SECRET', 'DUMMY_COMMIT_TOKEN', 'DUMMY_PLAN_ACTIVATION_SECRET',
+  ] as const;
+  // 辅助组（memory / breaker / cache）ambient 名：规范族 + STOCK_* 调试专名。stock.cjs 的
+  // auxPaths() 用 env2 优先读它们，探针必须在评测进程内清场（2026-11-10 Codex major 修复）。
+  const AUX_KEYS = [
+    'EXECUTION_MEMORY_STATE', 'EXECUTION_BREAKER_STATE', 'EXECUTION_CACHE_STATE',
+    'STOCK_MEMORY_STATE', 'STOCK_BREAKER_STATE', 'STOCK_CACHE_STATE',
   ] as const;
   const STATE_DEBUG_KEYS = [
     'DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH',
@@ -1019,6 +1028,13 @@ describe('isolatePlatformState：状态根只走测试桥 + 专名清场', () =>
       DUMMY_GATE_SECRET: path.join(ambientRoot, 'gate-secret'),
       DUMMY_COMMIT_TOKEN: path.join(ambientRoot, 'commit-token'),
       DUMMY_PLAN_ACTIVATION_SECRET: path.join(ambientRoot, 'plan-secret'),
+      // 辅助组 ambient 名：探针必须与令牌专名同待遇清场（stock auxPaths 的 env2 优先读）
+      EXECUTION_MEMORY_STATE: path.join(ambientRoot, 'memory.json'),
+      EXECUTION_BREAKER_STATE: path.join(ambientRoot, 'breaker.json'),
+      EXECUTION_CACHE_STATE: path.join(ambientRoot, 'cache.json'),
+      STOCK_MEMORY_STATE: path.join(ambientRoot, 'stock-memory.json'),
+      STOCK_BREAKER_STATE: path.join(ambientRoot, 'stock-breaker.json'),
+      STOCK_CACHE_STATE: path.join(ambientRoot, 'stock-cache.json'),
     };
     const savedAmbient = savedOf(Object.keys(ambient));
     const savedRate = savedOf([RATE_LIMIT_KEY]);
@@ -1038,6 +1054,9 @@ describe('isolatePlatformState：状态根只走测试桥 + 专名清场', () =>
       for (const key of STATE_DEBUG_KEYS) expect(process.env[key]).toBe(ambient[key]);
       // 令牌面专名被清场（规范名由 harness 注入，专名不得可见）。
       for (const key of TOKEN_KEYS) expect(process.env[key], `${key} 仍在 ambient：夹具会从第二顺位专名取令牌面`).toBeUndefined();
+      // 辅助组 ambient 名同样被清场：否则 stock auxPaths 的 env2 会盖过 per-case 状态根
+      // （打开态熔断 → BREAKER_OPEN；memory/cache 跨用例共享或写外部文件）。
+      for (const key of AUX_KEYS) expect(process.env[key], `${key} 仍在 ambient：夹具 auxPaths 会优先读它`).toBeUndefined();
 
       // 真跑一次夹具（commit 会落主状态；query 只读不写）：状态/审计只落 case 目录
       // （--state-dir 由桥传导）。

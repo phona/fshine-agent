@@ -152,7 +152,13 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
 （`second-layer.ts` / `second-layer.test.ts` / `plan-policy.test.ts` /
 `generic-model-eval.py`）读取，`packages/` 与 `apps/` 生产代码对 `STOCK_*` 零读取。
 空串按缺失处理（夹具 `env()` 把 `''` 当作未设）。命名族按 §4 的裁定：
-`EXECUTION_*` 规范名优先，`STOCK_*` 是调试入口；评测进程只注入规范名。
+`EXECUTION_*` 规范名优先，`STOCK_*` 是调试入口。**辅助组的六个 ambient 名
+（`EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_CACHE_STATE` +
+`STOCK_*` 调试专名）由直接运行的评测 harness 从子进程 env 删除**（`fixture-aux-state.ts`；
+generic-mock / second-layer / generic-model-eval.py 同批；探针在
+`ISOLATED_STATE_KEYS` 里同待遇 backup/restore）：`auxPaths()` 的 `env2` 优先读 ambient，
+`--state-dir` 只保证缺省路径——继承 shell 值会让打开态熔断账本拒掉 query、memory/cache
+跨用例共享或写到状态根外。dummy 不实现辅助组（零读取），故无 `DUMMY_*` 对应专名。
 **状态根同 §4a**：四个状态路径（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` /
 `EXECUTION_PROPOSAL_STATE` / `EXECUTION_AUDIT_PATH`）的夹具读取已退役（含 `STOCK_*` 调试
 回退），状态文件从测试专用 `--state-dir` 根派生。计数说明：按 `env()` / `env2()` 实际

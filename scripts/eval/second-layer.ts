@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withoutFixtureAuxState } from './fixture-aux-state';
 
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(evalDir, '..', '..');
@@ -28,12 +29,12 @@ const baseline = process.argv[2] ?? '17aafe3';
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-run-'));
 // 状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，非消费协议）：四个 STATE
-// 路径不再经 env 注入，夹具也不再读它们；memory/breaker/cache 从同一状态根派生（这里的
-// 规范名与状态根同目录，属辅助组注入面的收口范围，不在本片删除）。令牌面只注入规范族
-// EXECUTION_*（docs/env-naming-ruling-20261110.md）。
-const env = { ...process.env,
-  EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'), EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
-  EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'), EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
+// 路径不再经 env 注入，夹具也不再读它们；memory/breaker/cache 从同一状态根派生。辅助组
+// 六个 ambient 名（EXECUTION_* / STOCK_*）必须先清场：stock.cjs 的 auxPaths() 用 env2
+// 优先读 ambient，否则 shell 里的打开态熔断账本会盖过 per-case 派生（fixture-aux-state）。
+// 令牌面只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）。
+const env: NodeJS.ProcessEnv = { ...withoutFixtureAuxState(process.env),
+  EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
   EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret' };
 function run(args: string[], input?: string) {
   const r = spawnSync(stockBin, ['--state-dir', dir, ...args], { encoding: 'utf8', cwd: fixtureRoot, env, input });

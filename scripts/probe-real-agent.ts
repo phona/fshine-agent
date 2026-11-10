@@ -90,6 +90,8 @@ import {
 } from './eval/evidence';
 // 统一报告（JSON + JSONL 两份面）与最小聚合指标。
 import { buildUnifiedReport, summarizeReport, writeUnifiedReport, type ReportCaseInput } from './eval/report';
+// 夹具辅助组 ambient 名（规范族 + STOCK_* 调试专名）：与令牌专名同待遇，隔离时从进程内删除。
+import { FIXTURE_AUX_STATE_ENV_KEYS } from './eval/fixture-aux-state';
 import {
   auditFailuresCheckOf, evaluateProbeCase, expectationChecksOf, loadBaseline,
   type AuditFailuresValue, type Baseline, type BaselineCase, type ProbeResultRow,
@@ -379,7 +381,17 @@ const FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
 const FIXTURE_AMBIENT_DEBUG_KEYS = [
   'DUMMY_GATE_SECRET', 'DUMMY_COMMIT_TOKEN', 'DUMMY_PLAN_ACTIVATION_SECRET',
 ] as const;
-const ISOLATED_STATE_KEYS = [...PLATFORM_STATE_KEYS, FIXTURE_STATE_DIR_KEY, ...FIXTURE_AMBIENT_DEBUG_KEYS] as const;
+/**
+ * 夹具辅助组（memory / breaker / cache）的 ambient 名：规范族优先，STOCK_* 是调试专名
+ * （stock.cjs 的 auxPaths() 用 env2 顺序查找；dummy.cjs 不实现辅助组，零读取，故无
+ * DUMMY_* 对应名）。这些名字必须与令牌专名同待遇：评测进程内不可见，否则 ambient 里
+ * 一个打开中的熔断账本会让 stock.query 得 BREAKER_OPEN、memory/cache 可跨用例共享或
+ * 写到状态根外——per-case 状态根只保住缺省值，保不住 env2 的 ambient 优先。
+ */
+const FIXTURE_AUX_STATE_KEYS = FIXTURE_AUX_STATE_ENV_KEYS;
+const ISOLATED_STATE_KEYS = [
+  ...PLATFORM_STATE_KEYS, FIXTURE_STATE_DIR_KEY, ...FIXTURE_AMBIENT_DEBUG_KEYS, ...FIXTURE_AUX_STATE_KEYS,
+] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
@@ -502,8 +514,11 @@ export function isolatePlatformState(dir: string = stateDir): string {
     [FIXTURE_STATE_DIR_KEY]: caseDir,
   });
   // 令牌专名是第二顺位调试入口：规范名已按用例注入，但专名必须在评测进程内不可见——
-  // 否则规范名一旦漏注入，夹具会静默回落到 shell 的专名值。状态路径专名已无读取点，不再清场。
-  for (const key of FIXTURE_AMBIENT_DEBUG_KEYS) delete process.env[key];
+  // 否则规范名一旦漏注入，夹具会静默回落到 shell 的专名值。辅助组 ambient 名（规范族 +
+  // STOCK_* 调试专名）同理：夹具 auxPaths() 的 env2 优先读 ambient，继承值会盖过 per-case
+  // 状态根，故一并删除（backup/restore 由 ISOLATED_STATE_KEYS 对称覆盖）。
+  // 状态路径专名已无读取点，不再清场。
+  for (const key of [...FIXTURE_AMBIENT_DEBUG_KEYS, ...FIXTURE_AUX_STATE_KEYS]) delete process.env[key];
   return caseDir;
 }
 

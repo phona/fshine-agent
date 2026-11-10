@@ -30,9 +30,10 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // 步数帽（自由 worker 的放行次数帽，缺省 50）同理：运行者 shell 里 export 了它，
   // 没显式传 stepCap 的 driver 测试基线就被悄悄改小（第 N 次放行就 wind-down）。
   'FSHINE_WORKER_STEP_CAP',
-  // stock 夹具的 B 类辅助组隔离路径（规范名 + 调试专名）：辅助组不再按 run 注入后，
-  // ambient 值会经夹具 env2 盖过 auxPaths() 从主状态文件目录的 per-run 派生
-  // （docs/env-naming-ruling-20261110.md §5 判据 4：ambient 规范名击穿隔离 → 修注入侧）。
+  // stock 夹具辅助组（memory / breaker / cache）的 ambient 名（规范族 + STOCK_* 调试专名）：
+  // stock.cjs 的 auxPaths() 用 env2 优先读 ambient，继承 shell 值会盖过 --state-dir 的
+  // per-case 派生（打开态熔断账本 → BREAKER_OPEN；memory/cache 写到状态根外）。
+  // 直接运行的 harness 侧清场见 scripts/eval/fixture-aux-state.ts。
   'EXECUTION_MEMORY_STATE',
   'EXECUTION_BREAKER_STATE',
   'EXECUTION_CACHE_STATE',

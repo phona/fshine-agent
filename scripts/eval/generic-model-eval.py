@@ -55,6 +55,16 @@ USE_DIRECT = bool(DIRECT_BASE_URL and DIRECT_API_KEY)
 # 换更省的模型时可经 EVAL_MAX_TOKENS 调低；**别**为迁就预算把这个值压回 1024。
 MAX_TOKENS = int(os.environ.get("EVAL_MAX_TOKENS", "8192"))
 
+# Aux-group ambient names (canonical + stock debug names). stock.cjs auxPaths() looks up
+# EXECUTION_* first and STOCK_* second, before the state-root default; an inherited value
+# would override the per-case root passed via --state-dir (an open breaker would reject
+# stock.query with BREAKER_OPEN, memory/cache could be shared or written outside the case).
+# dummy.cjs does not implement memory/breaker/cache, so there are no DUMMY_* aux names.
+AUX_STATE_ENV_KEYS = (
+    "EXECUTION_MEMORY_STATE", "EXECUTION_BREAKER_STATE", "EXECUTION_CACHE_STATE",
+    "STOCK_MEMORY_STATE", "STOCK_BREAKER_STATE", "STOCK_CACHE_STATE",
+)
+
 SYSTEM = """You are a stock assistant. You help the user with shelf stock only.
 You have exactly two output forms, and nothing else:
 1. To query stock, output exactly one line: CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>"]} or, when the user gave a batch, CALL: {"operation": "stock.query", "args": ["--shelf", "<shelf>", "--batch", "<batch>"]}. The batch argument is optional; omit it when the user gave no batch.
@@ -182,8 +192,12 @@ def envelope(stdout):
 def run_case(case, tmpdir):
     # State root is the test-only --state-dir flag (docs §4a); plans/proposals/audit/
     # memory/breaker/cache all derive from it. The four former state env names are retired
-    # from the fixture, and STOCK_* debug names are never set by the eval process.
+    # from the fixture. Aux-group ambient values must be invisible to the fixture: its
+    # env2 lookup prefers EXECUTION_*/STOCK_* over the state-root default, so drop them
+    # from the child env (a shell-level open breaker would otherwise reject every query).
     env = {**os.environ}
+    for _key in AUX_STATE_ENV_KEYS:
+        env.pop(_key, None)
     transcript = []
     calls = 0
     finals = []

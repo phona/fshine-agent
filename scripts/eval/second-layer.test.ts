@@ -39,6 +39,7 @@ import {
   writeHandoverFile,
   isCommittedUnverified,
 } from '@fshine/agent';
+import { withoutFixtureAuxState } from './fixture-aux-state';
 
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
@@ -46,15 +47,13 @@ const stockBin = path.join(fixtureRoot, 'bin', 'stock');
 
 function makeCtx(extraEnv: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-'));
-  const env = {
-    ...process.env,
+  const env: NodeJS.ProcessEnv = {
+    ...withoutFixtureAuxState(process.env),
     // 状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，非消费协议）：四个
-    // STATE 路径不再经 env 注入，夹具也不再读它们。辅助组的规范名与状态根同目录（辅助组
-    // 注入面的收口不在本片）。令牌面只注入规范族 EXECUTION_*
-    // （docs/env-naming-ruling-20261110.md）。
-    EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'),
-    EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
-    EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'),
+    // STATE 路径不再经 env 注入，夹具也不再读它们。辅助组的六个 ambient 名先清场：
+    // stock.cjs 的 auxPaths() 用 env2 优先读 ambient，继承 shell 值会盖过 per-case 派生；
+    // 清场后 memory/breaker/cache 缺省从同一状态根派生（fixture-aux-state）。
+    // 令牌面只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）。
     EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
     EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
     // 用例声明的 C 类旋钮（如 STOCK_READBACK_SHORT）；不在用例体里逐调用改 env。
