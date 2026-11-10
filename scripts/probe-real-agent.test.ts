@@ -211,7 +211,7 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
     expect(AUDIT_INSTRUCTION).toContain('notfound(');
     // := 的 RHS 语义必须写明"实算等于左侧"，否则模型不知道算式会被验算。
     expect(AUDIT_INSTRUCTION).toContain('实算必须等于左侧');
-    expect(AUDIT_INSTRUCTION).toContain('回复里没有数字时不需要块');
+    expect(AUDIT_INSTRUCTION).toContain('回复里没有金额数字时不需要块');
     // 无数字轮也可以只写命题行——否则 notfound/nocaliber 恰好在最需要它的错误态轮
     // 被"没有数字不需要块"劝退。
     expect(AUDIT_INSTRUCTION).toContain('只写对应的命题行');
@@ -221,9 +221,14 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
     expect(AUDIT_INSTRUCTION).toContain('独占一行');
     expect(AUDIT_INSTRUCTION).toContain('行首');
     expect(AUDIT_INSTRUCTION).toContain('行尾');
-    expect(AUDIT_INSTRUCTION).toContain('每个数字都必须有一条引用行或运算行申报');
+    expect(AUDIT_INSTRUCTION).toContain('每个金额数字都必须有一条引用行或运算行申报');
     expect(AUDIT_INSTRUCTION).toContain('每个加数也必须有申报行可依');
     expect(AUDIT_INSTRUCTION).toContain('逐层递归到引用行');
+    // 指令不得比交叉核更严（2026-11-10 独立评审 medium）：判据对日期样数字与零值免申报、
+    // 封闭数字语法不收千分位/单位；照字面执行指令的合作模型会因申报日期或写 `1,000`
+    // 吃假红。两条豁免/格式义务必须教给模型。
+    expect(AUDIT_INSTRUCTION).toContain('日期样数字（如年份）和零值不是金额，不需要申报');
+    expect(AUDIT_INSTRUCTION).toContain('不要使用千分位分隔符、货币符号或单位后缀');
     // 中性：不带业务口径、不提 eval/测试/harness 字样。
     expect(AUDIT_INSTRUCTION).not.toMatch(/eval|test|测试|probe|harness|payable|bank|debt|collection|window/i);
   });
@@ -238,7 +243,7 @@ describe('AUDIT_INSTRUCTION 词表纪律（防回归钉子：词表清空/被真
     // 机器会核的三条义务必须在指令里（删义务段 ⇒ 本测试先红）。
     for (const clause of [
       '两个标记各独占一行',
-      '正文里出现的每个数字都必须有一条引用行或运算行申报',
+      '正文里出现的每个金额数字都必须有一条引用行或运算行申报',
       '运算行右侧的每个加数也必须有申报行可依',
     ]) {
       expect(AUDIT_INSTRUCTION, `指令缺机器义务「${clause}」`).toContain(clause);
@@ -485,16 +490,36 @@ describe('auditFailures 公共收集入口：默认子集每个 runner 都产列
     expect(auditFailuresCheckOf('not-applicable', 0)).toMatchObject({ pass: true, actual: '不适用' });
   });
 
-  it('没有平台证据的轮次不核：auditMissing / execution 为空都不算申报失败', () => {
-    // auditMissing = 审计源不可读，证据缺席 ≠ 零申报；execution 为空 = 该轮没有平台调用
-    // （纯闲聊/日期轮的英文年份会被 extractAmounts 当金额，旧实现因此假红 format）。
+  it('auditMissing 轮不可核 ⇒ 显式 unverifiable，门判失败（不因同例另有干净轮次放行）', () => {
+    // 2026-11-10 独立评审 high：旧写法跳过 auditMissing 轮，只要另一轮可核就回数字——
+    // phantom 申报（rec-ghost）永远不被核，整例照过。证据缺席 = 核不了，不是不适用。
     const missing = { ...auditTurn(cleanReply, 'check beta record value', rows), auditMissing: true, execution: [] };
-    expect(auditFailuresOf(true, [missing])).toEqual({ auditFailures: 'not-applicable' });
+    expect(auditFailuresOf(true, [missing])).toEqual({ auditFailures: 'unverifiable' });
+    expect(auditFailuresCheckOf('unverifiable', 0)).toMatchObject({ pass: false, actual: '不可核（审计源不可读）' });
+    // 混合：干净轮次不能给缺失证据的那一轮背书。
+    const mixed = auditFailuresOf(true, [auditTurn(cleanReply, 'check beta record value', rows), missing]);
+    expect(mixed).toEqual({ auditFailures: 'unverifiable' });
+    expect(auditFailuresCheckOf(mixed.auditFailures, 0).pass).toBe(false);
+  });
+
+  it('没有平台证据且没写申报块的轮次不核（纯闲聊/日期轮）', () => {
+    // execution 为空 = 该轮没有平台调用（纯闲聊/日期轮的英文年份会被 extractAmounts
+    // 当金额，旧实现因此假红 format）；没有申报块就没有可核的申报。
     const chat = auditTurn('It is November 2026.', '现在几月了？', []);
     expect(auditFailuresOf(true, [chat])).toEqual({ auditFailures: 'not-applicable' });
     // 混合：只计有平台证据的那一轮。
     expect(auditFailuresOf(true, [chat, auditTurn(twoFindingReply, 'check beta record value', rows)]))
       .toEqual({ auditFailures: 2 });
+  });
+
+  it('没有平台证据但写了申报块 ⇒ 照核（phantom 申报不被整轮跳过）', () => {
+    // 2026-11-10 独立评审 high 的复现形态：回复带 `[audit]` 块、该轮 execution 为空。
+    // 空事实基准下引用行必是幻影源、加数无申报行，不能因为"没有平台调用"就跳过整轮。
+    const phantom = auditTurn('小计 800。\n[audit]\n500 <- rec-ghost\n800 := 500 + 300\n[/audit]', 'check beta record value', []);
+    const field = auditFailuresOf(true, [phantom]);
+    expect(typeof field.auditFailures).toBe('number');
+    expect(field.auditFailures as number).toBeGreaterThan(0);
+    expect(auditFailuresCheckOf(field.auditFailures, 0).pass).toBe(false);
   });
 
   it('黑盒不产列（缺席 ≠ 0，旧行为不变）', () => {

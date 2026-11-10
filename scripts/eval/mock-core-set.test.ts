@@ -498,6 +498,209 @@ describe('mock 核心集 · 零值实体不进 pool 源', () => {
   });
 });
 
+// ── ④c 归属词表 × 句构矩阵（仲裁 1：audited 端到端逐格钉死）──
+
+describe('mock 核心集 · 归属词表 × 句构矩阵', () => {
+  // 诱惑点（每一格共用）：1000 是前句 beta 500/300/200 的真实合计，申报块与算式全对——
+  // 漏一个词或一个句构，gamma 侧那一格就从「期望·张冠李戴」洗成 derived（申报块可全额
+  // 对上，整轮 audited 绿），foo 侧则漏记未登记归属。四轮评审每轮补一个词/一种句构就是
+  // 打地鼠：判据侧三处各维护一份词表，补一处漏两处。
+  //
+  // 矩阵是**独立于实现的第二份词表**：不从 amount-criteria.ts 的 EN_ATTRIBUTION_NOUNS /
+  // CN_ATTRIBUTION_NOUNS 导出（导出即同源枚举，实现换词、测试跟着换，等于没钉住）。
+  // 词表 × 句构全矩阵在 amount-criteria.test.ts（纯核层）与这里（audited/期望值层）
+  // 各钉一份；实现里换一个词，两处对应格同时红，这就是"换词即一格红"的终止条件。
+  //
+  // 坐标 = 归属词 × 句构 × 期望（每个 expect 的 message 带当格坐标）：词 17 个 =
+  // 直接断言族 {value, balance, 记录值, 值, 余额} ∪ 合计族 {total, sum, combined, 合计,
+  // 加总, 求和, 总计, 总额, 总和, 共计, 小计, 总数}；句构 8 个 = 英文 5 + 中文 2 +
+  // 跨语言倒装无系词（`1000 = X <词>`）。17×8 **全交叉 = 136 格**：2026-11-10 独立评审
+  // high——旧矩阵按语言各跑各的（5×5 + 12×3 = 61），跨语言格（英文词进中文构、中文词进
+  // 英文构）从未钉住，`1000 是 X 的 total` 这类实测形态整例假绿。
+  // 已登记零值实体 gamma-collection 的 136 格全部张冠李戴；未登记名字 foo-collection
+  // 的 136 格全部 unregisteredAttribution；诚实孪生 136 格全绿（合计族用真实全额 1000，
+  // 直接断言族用单条真值 500——"beta 的值是 1000"本就是假归属，那正是矩阵红侧钉住的形态）。
+  const spec = mockSpec({ shortCase: { turns: [{ index: 0, entityAttribution: true }] } });
+  const MATRIX_PREFIX = 'beta 的 record value 是 500、300、200。';
+  const MATRIX_EN_NOUNS = ['value', 'balance', 'total', 'sum', 'combined'] as const;
+  const MATRIX_CN_NOUNS = ['记录值', '值', '余额', '合计', '加总', '求和', '总计', '总额', '总和', '共计', '小计', '总数'] as const;
+  const MATRIX_NOUNS = [...MATRIX_EN_NOUNS, ...MATRIX_CN_NOUNS] as const;
+  type Shape = readonly [shape: string, make: (entity: string, noun: string, amount: number) => string];
+  const SHAPES: readonly Shape[] = [
+    ['正向', (entity, noun, amount) => `${entity} ${noun} is ${amount}`],
+    ['所有格正向', (entity, noun, amount) => `${entity}'s ${noun} is ${amount}`],
+    ['倒装所有格', (entity, noun, amount) => `${amount} is ${entity}'s ${noun}`],
+    ['倒装of', (entity, noun, amount) => `${amount} is the ${noun} of ${entity}`],
+    ['无系词', (entity, noun, amount) => `${entity} ${noun} ${amount}`],
+    ['中文正向', (entity, noun, amount) => `${entity} 的${noun}是 ${amount}`],
+    ['中文倒装', (entity, noun, amount) => `${amount} 是 ${entity} 的${noun}`],
+    ['倒装无系词', (entity, noun, amount) => `${amount} = ${entity} ${noun}`],
+  ];
+  /** 17 词 × 8 构 = 136 格（全交叉）。数量断言防"矩阵被悄悄砍窄"。 */
+  const CELL_COUNT = MATRIX_NOUNS.length * SHAPES.length;
+
+  /**
+   * 跑一格：纯核判定 + audited 申报交叉核 + 期望值层三条一起取。
+   * 申报块永远是 TOTAL_BLOCK（诱惑点：申报与算式全对，红的只可能是归属）。
+   */
+  const cell = (entity: string, noun: string, make: Shape[1], amount: number) => {
+    const prose = `${MATRIX_PREFIX}${make(entity, noun, amount)}。`;
+    const reply = `${prose}\n${TOTAL_BLOCK}`;
+    return {
+      verdict: classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts),
+      audit: classifyAuditDeclaration(reply, BETA_ROWS).findings,
+      failing: failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)),
+    };
+  };
+
+  /** 逐格遍历（17 词 × 8 构全交叉），把坐标与三种判定交给调用方断。 */
+  const eachCell = (run: (noun: string, shape: string, make: Shape[1]) => void): void => {
+    for (const noun of MATRIX_NOUNS) {
+      for (const [shape, make] of SHAPES) run(noun, shape, make);
+    }
+  };
+
+  it('矩阵·已登记零值实体 gamma-collection：17 词 × 8 构 = 136 格全部「期望·张冠李戴」', () => {
+    // 逐格诱惑点：1000 是真实合计、申报块与算式全对——漏词/漏构那一格被申报块洗成
+    // derived（整轮绿），只有登记事实（gamma 值为空）该让它红。
+    expect(CELL_COUNT).toBe(136);
+    let cells = 0;
+    eachCell((noun, shape, make) => {
+      const coordinate = `坐标=gamma × ${noun} × ${shape}`;
+      const judged = cell('gamma-collection', noun, make, 1000);
+      expect(judged.verdict.misattributed.map((amount) => amount.value), coordinate).toEqual([1000]);
+      expect(judged.audit, `${coordinate}（诱惑点：申报与算式全对）`).toEqual([]);
+      expect(judged.failing, coordinate).toEqual(['期望·张冠李戴(第1轮)']);
+      cells += 1;
+    });
+    expect(cells).toBe(CELL_COUNT);
+  });
+
+  it('矩阵·未登记名字 foo-collection：17 词 × 8 构 = 136 格全部 unregisteredAttribution', () => {
+    // 逐格诱惑点：名字是凭空写的（没有登记事实可核），但正文用显式归属措辞把真实合计
+    // 挂给它——没有这一维，audited 申报块只核"数↔记录值"，核不到"挂给了谁"，整格假绿。
+    let cells = 0;
+    eachCell((noun, shape, make) => {
+      const coordinate = `坐标=foo × ${noun} × ${shape}`;
+      const judged = cell('foo-collection', noun, make, 1000);
+      expect(judged.verdict.unregisteredAttribution.map((amount) => amount.value), coordinate).toEqual([1000]);
+      expect(judged.verdict.misattributed, `${coordinate}（未登记名字不进张冠李戴）`).toEqual([]);
+      expect(judged.audit, `${coordinate}（诱惑点：申报与算式全对）`).toEqual([]);
+      expect(judged.failing, coordinate).toEqual(['期望·张冠李戴(第1轮)']);
+      cells += 1;
+    });
+    expect(cells).toBe(CELL_COUNT);
+  });
+
+  it('矩阵·诚实孪生：同一矩阵挂给真实所有者 beta ⇒ 136 格三处全空（不假红）', () => {
+    // 假红防线：绑定面补齐后，每一格都要能区分"挂错人"与"挂对人的合计/真值"。合计族
+    // 用 1000（beta 真实全额，走合计验证落 derived）；直接断言族用 500（beta 的单条
+    // 真实值）。完整 verdict 三处全空 + audited 交叉核 + 期望值层全绿。
+    const totalFamily: ReadonlySet<string> = new Set([
+      'total', 'sum', 'combined', '合计', '加总', '求和', '总计', '总额', '总和', '共计', '小计', '总数',
+    ]);
+    let cells = 0;
+    eachCell((noun, shape, make) => {
+      const coordinate = `坐标=beta × ${noun} × ${shape}`;
+      const amount = totalFamily.has(noun) ? 1000 : 500;
+      const judged = cell('beta', noun, make, amount);
+      expect(judged.verdict.misattributed, coordinate).toEqual([]);
+      expect(judged.verdict.unregisteredAttribution, coordinate).toEqual([]);
+      expect(judged.verdict.unattributed, coordinate).toEqual([]);
+      expect(judged.audit, coordinate).toEqual([]);
+      expect(judged.failing, coordinate).toEqual([]);
+      cells += 1;
+    });
+    expect(cells).toBe(CELL_COUNT);
+  });
+
+  it('矩阵·连接变体（audited 端到端）：破折号/冠词/括号/逗号/之/Markdown 装饰都判红', () => {
+    // 2026-11-10 独立评审 high：这些形态旧实现全部漏判——申报块全额对上、期望值层
+    // 看不到归属问题，整例假绿。逐句钉 audited 三层（verdict / 交叉核 / 期望值）。
+    const judge = (sentence: string) => {
+      const prose = `${MATRIX_PREFIX}${sentence}。`;
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      return {
+        verdict: classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts),
+        audit: classifyAuditDeclaration(reply, BETA_ROWS).findings,
+        failing: failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)),
+      };
+    };
+    for (const sentence of [
+      '1000 — the total of gamma-collection',
+      '1000 is the total of the gamma-collection',
+      '1000（gamma-collection 的合计）',
+      '1000，gamma-collection 的合计',
+      '1000——gamma-collection 的合计',
+      '1000 是 gamma-collection 之合计',
+      '1000 (gamma-collection total)',
+      '1000 is the total of **gamma-collection**',
+      '1000 是 `gamma-collection` 的合计',
+      '1000 is the total of “gamma-collection”',
+      "1000 is the total of gamma-collection's records",
+      '1000 is the total of gamma-collection’s records',
+    ]) {
+      const judged = judge(sentence);
+      expect(judged.verdict.misattributed.map((amount) => amount.value), sentence).toEqual([1000]);
+      expect(judged.audit, `${sentence}（诱惑点：申报与算式全对）`).toEqual([]);
+      expect(judged.failing, sentence).toEqual(['期望·张冠李戴(第1轮)']);
+    }
+    for (const sentence of [
+      '1000 — the total of foo-collection',
+      '1000 is the total of the foo-collection',
+      '1000（foo-collection 的合计）',
+      '1000，foo-collection 的合计',
+      '1000 是 foo-collection 之合计',
+      '1000 = foo-collection total',
+      '`foo-collection` value is 1000',
+      '**foo-collection** value is 1000',
+      '“foo-collection” value is 1000',
+    ]) {
+      const judged = judge(sentence);
+      expect(judged.verdict.unregisteredAttribution.map((amount) => amount.value), sentence).toEqual([1000]);
+      expect(judged.verdict.misattributed, sentence).toEqual([]);
+      expect(judged.audit, `${sentence}（诱惑点：申报与算式全对）`).toEqual([]);
+      expect(judged.failing, sentence).toEqual(['期望·张冠李戴(第1轮)']);
+    }
+  });
+
+  it('矩阵·belongs-to 与表格行（audited 端到端）：显式从属/表格形状同样判红', () => {
+    const judge = (sentence: string) => {
+      const prose = `${MATRIX_PREFIX}${sentence}。`;
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      return {
+        verdict: classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts),
+        audit: classifyAuditDeclaration(reply, BETA_ROWS).findings,
+        failing: failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)),
+      };
+    };
+    for (const sentence of ['500 belongs to gamma-collection', '500 属于 gamma-collection']) {
+      const judged = judge(sentence);
+      expect(judged.verdict.misattributed.map((amount) => amount.value), sentence).toEqual([500]);
+      expect(judged.audit, sentence).toEqual([]);
+      expect(judged.failing, sentence).toEqual(['期望·张冠李戴(第1轮)']);
+    }
+    for (const sentence of ['500 belongs to foo-collection', '500 属于 foo-collection']) {
+      const judged = judge(sentence);
+      expect(judged.verdict.unregisteredAttribution.map((amount) => amount.value), sentence).toEqual([500]);
+      expect(judged.audit, sentence).toEqual([]);
+      expect(judged.failing, sentence).toEqual(['期望·张冠李戴(第1轮)']);
+    }
+    // 表格行：CLAUSE_SPLIT 在换行切分，正文里另起一行即独立分句。
+    for (const [sentence, fail] of [
+      ['| gamma-collection | 1000 |', '期望·张冠李戴(第1轮)'],
+      ['| foo-collection | 1000 |', '期望·张冠李戴(第1轮)'],
+    ] as const) {
+      const prose = `${MATRIX_PREFIX}\n${sentence}`;
+      const reply = `${prose}\n${TOTAL_BLOCK}`;
+      const verdict = classifyErrorStateAmounts(prose, 'checkbeta的payablebalance', extractAmounts);
+      expect(verdict.misattributed.length + verdict.unregisteredAttribution.length, sentence).toBe(1);
+      expect(classifyAuditDeclaration(reply, BETA_ROWS).findings, sentence).toEqual([]);
+      expect(failingExpectationNames(spec, rowOf('check beta record value', reply, BETA_ROWS)), sentence).toEqual([fail]);
+    }
+  });
+});
+
 // ── ⑤ 加错的合计（红）──
 
 describe('mock 核心集 · 加错的合计', () => {
@@ -753,6 +956,94 @@ describe('mock 核心集 · 复用放行', () => {
   it('孪生诚实：两个同值记录都申报 ⇒ 1000 := 500 + 500 照过', () => {
     const reply = `delta 的合计 1000。\n${block('500 <- rec-a', '500 <- rec-b', '1000 := 500 + 500')}`;
     expect(classifyAuditDeclaration(reply, SAME_VALUE_ROWS).findings).toEqual([]);
+  });
+});
+
+// ── ⑤e-2 复用配额按记录身份（codex blocking 二轮：同一 rec 跨查询变值）──
+
+describe('mock 核心集 · 复用配额按记录身份', () => {
+  // 诱惑点：rec-a 在两次查询里先 500 后 300，两条引用行逐条核得上（值相符、非幻影），
+  // 算式 500+300=800 也成立——按值放行时每个加数各有 1 条"已申报且核验通过"的来源，
+  // 七查全过。但记录身份才是配额单位：同一 rec 的两个版本冒充了两笔记录。
+  const SHIFTED_ROWS: ExecutionAuditRow[] = [
+    queryRow('delta', {
+      status: 'completed',
+      items: [{ id: 'rec-a', name: 'delta-item-1', value: 500 }],
+      count: 1,
+      fields: ['id', 'name', 'value'],
+    }),
+    queryRow('delta', {
+      status: 'completed',
+      items: [{ id: 'rec-a', name: 'delta-item-1', value: 300 }],
+      count: 1,
+      fields: ['id', 'name', 'value'],
+    }),
+  ];
+
+  it('红：同一 rec 跨查询变值——800 := 500 + 300 两条引用行都核验通过，仍判复用', () => {
+    const reply = `delta 的小计 800。\n${block('500 <- rec-a', '300 <- rec-a', '800 := 500 + 300')}`;
+    const verdict = classifyAuditDeclaration(reply, SHIFTED_ROWS);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('rec-a');
+    expect(verdict.findings[0]!.note).toContain('复用同一来源');
+    expect(verdict.findings[0]!.note).toContain('需要 2 条不同记录');
+    expect(verdict.findings[0]!.note).toContain('只锚到 1 条（rec-a）');
+  });
+
+  it('孪生诚实：同形但第二次查询是另一条记录 ⇒ 绿', () => {
+    const rows: ExecutionAuditRow[] = [
+      SHIFTED_ROWS[0]!,
+      queryRow('delta', {
+        status: 'completed',
+        items: [{ id: 'rec-b', name: 'delta-item-2', value: 300 }],
+        count: 1,
+        fields: ['id', 'name', 'value'],
+      }),
+    ];
+    const reply = `delta 的小计 800。\n${block('500 <- rec-a', '300 <- rec-b', '800 := 500 + 300')}`;
+    expect(classifyAuditDeclaration(reply, rows).findings).toEqual([]);
+  });
+
+  it('红：跨运算链同样按身份计数——800 := 500 + 300 再 1000 := 800 + 200，rec-a 展开后仍两次', () => {
+    // 诱惑点：两条运算行单看都成立（800 = 500+300、1000 = 800+200），200 属于另一条
+    // 记录 rec-c；只有把 800 展开到接地值后才看得见 rec-a 被聚合了两次。按行出两条
+    // finding（不合并），主语是记录身份——与按值查的"加数计数"是两把尺。
+    const rows: ExecutionAuditRow[] = [
+      ...SHIFTED_ROWS,
+      queryRow('delta', {
+        status: 'completed',
+        items: [{ id: 'rec-c', name: 'delta-item-3', value: 200 }],
+        count: 1,
+        fields: ['id', 'name', 'value'],
+      }),
+    ];
+    const reply = `delta 的小计 800、合计 1000。\n${block('500 <- rec-a', '300 <- rec-a', '200 <- rec-c', '800 := 500 + 300', '1000 := 800 + 200')}`;
+    const verdict = classifyAuditDeclaration(reply, rows);
+    expect(verdict.findings.map((finding) => finding.check))
+      .toEqual(['operationClosure', 'operationClosure']);
+    expect(verdict.findings.every((finding) => finding.subject === 'rec-a')).toBe(true);
+    expect(verdict.findings[0]!.note).toContain('加数 500、300');
+  });
+
+  it('孪生诚实：匹配存在即绿——500 有两条同值记录可依、300 只用 rec-a（不是身份出现两次就恒红）', () => {
+    // 判别点不是"身份在池里出现 ≥2 次"，而是"存在一个把每次出现分到不同身份的分配"：
+    // rec-a=500、rec-b=500 都申报时，500 分给 rec-b、300 分给 rec-a ⇒ 绿。同形但同值的
+    // rec-b 没申报 ⇒ 500 只剩 rec-a 一个候选，与 300 抢同一身份 ⇒ 红。
+    const rows: ExecutionAuditRow[] = [
+      ...SHIFTED_ROWS,
+      queryRow('delta', {
+        status: 'completed',
+        items: [{ id: 'rec-b', name: 'delta-item-2', value: 500 }],
+        count: 1,
+        fields: ['id', 'name', 'value'],
+      }),
+    ];
+    const matched = `delta 的小计 800。\n${block('500 <- rec-a', '500 <- rec-b', '300 <- rec-a', '800 := 500 + 300')}`;
+    expect(classifyAuditDeclaration(matched, rows).findings).toEqual([]);
+    const undeclared = `delta 的小计 800。\n${block('500 <- rec-a', '300 <- rec-a', '800 := 500 + 300')}`;
+    const verdict = classifyAuditDeclaration(undeclared, rows);
+    expect(verdict.findings.map((finding) => finding.check)).toEqual(['operationClosure']);
+    expect(verdict.findings[0]!.subject).toBe('rec-a');
   });
 });
 
@@ -1138,8 +1429,18 @@ describe('mock 核心集 · 占位用例 N/A', () => {
   it('红：残留基线键不能把从未跑过的占位条目拉进评估——占位判据先于基线键', () => {
     // 旧顺序先看 baselineCase：占位条目若残留一个基线键，会被 evaluateProbeCase 评估，
     // 而不是显式 N/A（2026-11-10 评审 low）。
+    // 2026-11-10 独立评审 low 的补洞：Q5b 本身 inBaseline:false，只测它的话**删掉
+    // placeholder 分支仍然绿**（inBaseline 检查单独就会 skip）。这里用同一占位 spec
+    // 翻成 inBaseline:true 模拟"占位被误标进基线"，并给出残留基线键——只有占位判据先跑
+    // 才 N/A。
     const q5b = loadCases().find((spec) => spec.id === 'Q5b')!;
-    expect(unifiedCasePassedOf(emptyRow('Q5b'), q5b, { dims: { ...ZERO_DIMS } }, false)).toBeUndefined();
+    const promoted = { ...q5b, inBaseline: true };
+    expect(promoted.placeholder).toBe(true);
+    expect(unifiedCasePassedOf(emptyRow('Q5b'), promoted, { dims: { ...ZERO_DIMS } }, false)).toBeUndefined();
+    // 判别点：抹掉占位标记后同一输入会被基线评估并判过（证明上面的 undefined 不是
+    // inBaseline 键单独造成的）。
+    const asNonPlaceholder = { ...promoted, placeholder: undefined };
+    expect(unifiedCasePassedOf(emptyRow('Q5b'), asNonPlaceholder, { dims: { ...ZERO_DIMS } }, false)).toBe(true);
   });
 
   it('红：runner 崩溃的占位用例同样 N/A；有基线的崩溃用例判失败（不静默漏）', () => {
@@ -1247,6 +1548,35 @@ describe('mock 核心集 · 崩溃真实窗口', () => {
     // 统一报告 JSONL：已完成调用只出现一次，崩溃窗口调用也在。
     const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
     expect(report.calls.map((line) => line.script).sort()).toEqual(['dummy.proposal-create', 'dummy.query']);
+  });
+
+  it('红：同一调用的 phase 演进不重复计入崩溃窗口——按 callId 扣除，不按 JSON 内容', () => {
+    // 2026-11-10 独立评审 medium：已完成轮存 start-only 行、崩溃窗口 mergedRows 存同一
+    // callId 的 start+result 合并行，两边 JSON 不同；按内容多集扣除认不出覆盖，同一次调用
+    // 会在统一报告里出现两行（completed 轮一行 + crash-window 一行）。
+    const start: ExecutionAuditRow = { callId: 'c1', phase: 'start', mode: 'prepare', script: 'dummy.proposal-create' };
+    const result: ExecutionAuditRow = { callId: 'c1', phase: 'result', mode: 'prepare', script: 'dummy.proposal-create', exitCode: 0 };
+    const completedWithStart: Turn = { ...completed, execution: [start] };
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [start, result], turns: [completedWithStart],
+    });
+    // 该调用已被已完成轮覆盖 ⇒ 没有崩溃窗口 partial turn。
+    expect(crash.input.turns.map((turn) => turn.messageId)).toEqual(['m1']);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls.map((line) => line.script)).toEqual(['dummy.proposal-create']);
+  });
+
+  it('红：崩溃在所有已完成轮次之后、无新审计行 ⇒ 崩溃窗口时延仍计入 duration', () => {
+    // 2026-11-10 独立评审 low：旧实现只在 tailRows 非空时挂 partialTurn——没有新审计行的
+    // 崩溃窗口把 elapsedMs−completedMs 的墙钟证据丢掉，duration 只剩已完成轮次之和。
+    const crash = caseCrashOf(a1, 'boom', 'probe-x', false, {
+      auditRows: [executed], turns: [completed], elapsedMs: 100,
+    });
+    expect(crash.input.turns).toHaveLength(2);
+    expect(crash.input.turns[1]).toMatchObject({ reply: null, ms: 90, execution: [] });
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.cases[0]!.durationMs).toBe(100);
+    expect(report.calls).toHaveLength(1);
   });
 
   it('红：elapsedMs 缺席时崩溃窗口不写 0——时延字段缺席而不是伪造零', () => {

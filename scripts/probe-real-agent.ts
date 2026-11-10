@@ -122,7 +122,7 @@ import { loadCases, toCorpusEntries, type CaseMessage, type CaseSpec } from './e
 // audited 申报模式的交叉核（D-206 闭环判据第一块，2026-11-09 落地）：逐轮 note 与
 // 结构化判定同源；探针只做接线——指令注入（见 AUDIT_INSTRUCTION）与 note 替换
 // （见 errorStateNotes 的 audit 分支）。
-import { auditDeclarationNotes, classifyAuditDeclaration, stripAuditDeclaration } from './eval/audit-declaration';
+import { auditDeclarationNotes, classifyAuditDeclaration, hasAuditDeclarationBlock, stripAuditDeclaration } from './eval/audit-declaration';
 // 申报指令是纯文本常量，抽到叶子模块（scripts/eval/audit-instruction.ts）：mock 核心集要
 // import 它做往返测试，而本文件即使有入口守卫也会拖入完整装配链——叶子模块让纯文本
 // 消费方不必 import 探针。探针侧只 import + re-export，现有导入面不变。
@@ -257,9 +257,10 @@ interface CaseResult {
   /** 归不进四维的 note 数（任务行为类：计划恢复/空转/成本等，continue驱动 ok，不冒充可信度分数）。 */
   unclassifiedNotes: number;
   /**
-   * audited 申报模式的申报失败条数（只对有平台证据的轮次累计 findings；零轮占位/崩溃/
-   * 纯闲聊轮记 `'not-applicable'`）。**黑盒模式整字段缺席**——没跑交叉核就没有
-   * 「失败数=0」这回事；打分侧只对 audited 报告出「audited·申报失败」门（score.ts）。
+   * audited 申报模式的申报失败条数（只对有平台证据的轮次累计 findings；零轮占位/纯闲聊
+   * 轮记 `'not-applicable'`；审计源不可读的轮次记 `'unverifiable'`，门判失败——证据缺席
+   * 不是不适用）。**黑盒模式整字段缺席**——没跑交叉核就没有「失败数=0」这回事；打分侧
+   * 只对 audited 报告出「audited·申报失败」门（score.ts）。
    */
   auditFailures?: AuditFailuresValue;
   /**
@@ -521,15 +522,19 @@ export function auditOutgoingText(text: string, roundIndex: number, audit: boole
  * 计数。`findings` 是判定的全量违例清单，新增判据自动计入。
  * 事实基准与 errorStateNotes 的 audited 分支同源：本轮审计窗口行 turn.execution。
  *
- * 只核**有平台证据**的轮次（2026-11-09 评审 medium）：
+ * 只核**有平台证据**的轮次（2026-11-09 评审 medium），但模型**主动写了申报块**的轮次
+ * 例外（2026-11-10 独立评审 high：旧写法整轮跳过，phantom 申报永远不被核）：
  *   · `auditMissing` = 审计源不可读，证据缺席 ≠ 零申报——拿 `[]` 去核会把证据缺失判成
- *     phantomSource，红在"没证据"而不是"假申报"；
- *   · execution 为空 = 该轮没有平台调用（纯闲聊/日期轮、模型没查就答）——申报块没有
- *     可核的事实基准，覆盖/幻影源只会假红。黑盒 errorStateNotes 仍按原判据管正文金额。
+ *     phantomSource，红在"没证据"而不是"假申报"；这类轮次不在这里编造计数，由
+ *     `auditFailuresOf` 记显式 `'unverifiable'`（门判失败）；
+ *   · execution 为空且**没有**申报块 = 该轮没有平台调用（纯闲聊/日期轮、模型没查就答）
+ *     ——普通正文数字不该逼出申报（覆盖查会把聊天里的数字判红）；但若回复里有 `[audit]`
+ *     块，块里的申报仍要核：空事实基准下引用行是幻影源、命题无据可核，不能整轮跳过。
  */
 export function auditFailureCount(turns: readonly Turn[]): number {
   return turns.reduce((sum, turn) => {
-    if (turn.auditMissing || turn.execution.length === 0) return sum;
+    if (turn.auditMissing) return sum;
+    if (turn.execution.length === 0 && !hasAuditDeclarationBlock(turn.reply)) return sum;
     return sum + classifyAuditDeclaration(turn.reply, turn.execution).findings.length;
   }, 0);
 }
@@ -555,14 +560,22 @@ export function auditFailuresFieldOf(audit: boolean, failures: number | undefine
  * 缺列会在 score.ts 的格式守卫处 exit 2（哪怕申报全对也打不了分），所以计数必须由
  * 收集口统一产出，而不是靠每个判定体自觉。黑盒返回空对象（没跑交叉核，0 不成立）。
  *
- * 没有一个可核轮次时返回显式 `'not-applicable'`（评审修复）：零轮占位 Q5b/Q13b、
- * runner 崩溃、纯闲聊轮都没有可核的申报——写 0 会被读成「查过且全过」，写缺列会让
- * score.ts 对整份报告 exit 2；不适用状态让检查照出但不冒充 0。
+ * 状态三分（2026-11-10 独立评审 high：旧写法只要**任一**轮可核就回数字，`auditMissing`
+ * 轮的 phantom 申报永远不被核，整例照过）：
+ *   · 任一轮 `auditMissing` ⇒ 显式 `'unverifiable'`（证据缺席、核不了）——门判失败，
+ *     不能因为同例还有干净轮次就把不可核的那一轮放行；
+ *   · 零轮（Q5b/Q13b 占位、runner 崩溃无已完成轮）或全部轮次无平台证据且无申报块 ⇒
+ *     显式 `'not-applicable'`——写 0 会被读成「查过且全过」，写缺列会让 score.ts 对整份
+ *     报告 exit 2；不适用状态让检查照出但不冒充 0；
+ *   · 其余 ⇒ `auditFailureCount` 的 findings 全量（无平台证据但写了申报块的轮次也计入）。
  */
 export function auditFailuresOf(audit: boolean, turns: readonly Turn[]): { auditFailures?: AuditFailuresValue } {
   if (!audit) return {};
-  const auditable = turns.some((turn) => !turn.auditMissing && turn.execution.length > 0);
-  return { auditFailures: auditable ? auditFailureCount(turns) : 'not-applicable' };
+  if (turns.some((turn) => turn.auditMissing)) return { auditFailures: 'unverifiable' };
+  const auditable = turns.some((turn) => turn.execution.length > 0);
+  const declaredWithoutEvidence = turns.some((turn) => turn.execution.length === 0 && hasAuditDeclarationBlock(turn.reply));
+  if (turns.length === 0 || (!auditable && !declaredWithoutEvidence)) return { auditFailures: 'not-applicable' };
+  return { auditFailures: auditFailureCount(turns) };
 }
 
 /**
@@ -2782,6 +2795,8 @@ export function caseReportInputOf(
       notices: turn.notices,
       ms: turn.ms,
       execution: turn.execution,
+      calls: turn.calls,
+      ...(turn.auditMissing ? { auditMissing: true } : {}),
       ...(turn.tokens ? { tokens: { ...(turn.tokens.main ? { main: turn.tokens.main.total } : {}), ...(turn.tokens.worker ? { worker: turn.tokens.worker.total } : {}) } } : {}),
     })),
     intents: turns.flatMap((turn) => turn.intents),
@@ -2964,19 +2979,31 @@ export function caseCrashOf(
   // 轮次，保证统一报告 JSONL 里每个真实调用都有行。messageId 标记为崩溃窗口，
   // reply=null（没有用户可见交付）。
   //
-  // 已完成轮次覆盖的行按**多集**扣除，不能按数量 slice（2026-11-10 独立评审 medium）：
-  // mergeCallPhases 的输出顺序是 results → starts → passthrough，不是时间顺序；已完成
-  // 轮有 passthrough 行、崩溃窗口有 callId 行时（已完成的 query 轮 + 崩溃的 proposal
-  // 轮），merged 把崩溃行排前面，slice 取到的是已完成轮的 passthrough 行——部分轮重复
-  // 已完成调用，崩溃窗口的真实调用从统一报告 JSONL 消失。按行内容计数扣除与顺序无关。
+  // 已完成轮次覆盖的行按 **callId 优先 + 内容多集兜底** 扣除，不能按数量 slice
+  // （2026-11-10 独立评审 medium）：
+  //   · 不能 slice：mergeCallPhases 的输出顺序是 results → starts → passthrough，不是时间
+  //     顺序；已完成轮有 passthrough 行、崩溃窗口有 callId 行时（已完成的 query 轮 + 崩溃
+  //     的 proposal 轮），merged 把崩溃行排前面，slice 取到的是已完成轮的 passthrough 行
+  //     ——部分轮重复已完成调用，崩溃窗口的真实调用从统一报告 JSONL 消失；
+  //   · 不能只按 JSON 内容多集：同一调用的 phase 会演进——已完成轮存的是 start-only 行，
+  //     崩溃窗口的 mergedRows 存的是同 callId 的 start+result 合并行，两边 JSON 不同 ⇒
+  //     同一次调用同时进已完成轮与崩溃窗口，JSONL 出两行（2026-11-10 独立评审 medium）。
+  // callId 是调用的身份，先按它整组扣除；没有 callId 的 bash 单行调用仍按内容多集扣除
+  // （与顺序无关）。
+  const coveredCallIds = new Set<string>();
   const covered = new Map<string, number>();
   for (const turn of turns) {
     for (const row of turn.execution) {
+      if (row.callId !== undefined) {
+        coveredCallIds.add(row.callId);
+        continue;
+      }
       const key = JSON.stringify(row);
       covered.set(key, (covered.get(key) ?? 0) + 1);
     }
   }
   const tailRows = mergedRows.filter((row) => {
+    if (row.callId !== undefined) return !coveredCallIds.has(row.callId);
     const key = JSON.stringify(row);
     const remaining = covered.get(key) ?? 0;
     if (remaining === 0) return true;
@@ -2989,7 +3016,12 @@ export function caseCrashOf(
   const crashWindowMs = evidence.elapsedMs === undefined
     ? undefined
     : Math.max(0, evidence.elapsedMs - completedMs);
-  const partialTurn: ReportCaseInput['turns'][number] | undefined = tailRows.length > 0
+  // 崩溃窗口的时延证据不能丢（2026-11-10 独立评审 low）：旧写法只在 tailRows 非空时挂
+  // partialTurn——runner 在所有已完成轮次之后抛错（没有新审计行）时，elapsedMs 减已完成
+  // 轮次的那段墙钟无人承载，报告 duration 只剩已完成轮次之和。有正时延就单列一条无调用的
+  // 崩溃窗口行（tailRows 为空也不编调用）。
+  const partialTurn: ReportCaseInput['turns'][number] | undefined =
+    tailRows.length > 0 || (crashWindowMs !== undefined && crashWindowMs > 0)
     ? {
       messageId: `${evalRunId}:${item.id}:crash-window`,
       text: '(runner 崩溃：该轮未形成完整轮次)',
@@ -3013,8 +3045,9 @@ export function caseCrashOf(
       },
       notes,
       dims: emptyDimCounts(), unclassifiedNotes: 0,
-      // 有已完成轮次时申报计数照常算；零轮/无平台证据轮才是显式不适用（不写缺列，
-      // 也不写 0——没跑交叉核不等于全过）。
+      // 有已完成轮次时申报计数照常算；零轮/无平台证据轮是显式不适用；审计源不可读的
+      // 已完成轮记 unverifiable（不写缺列，也不写 0——没跑交叉核不等于全过，证据缺席
+      // 也不等于不适用）。
       ...auditFailuresOf(audited, turns),
       ladder, ok: false, crashed: true,
     },

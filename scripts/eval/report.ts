@@ -66,9 +66,17 @@ export interface ReportTurnLine {
   latencyMs?: number;
   ladderRung: LadderRung | 'INCONCLUSIVE';
   ladder: CallLadderEntry[];
-  /** 该轮已执行 / 被拒的调用数（执行层审计口径）。 */
-  executedCalls: number;
-  refusedCalls: number;
+  /**
+   * 该轮已执行 / 被拒的调用数（执行层审计口径）。**审计源不可读时整个字段省略**——
+   * unknown ≠ 0（2026-11-10 独立评审 low：旧报告行对 `auditMissing` 轮写
+   * executedCalls:0/refusedCalls:0，与 calls=-1 同一条"不可知不写 0"纪律矛盾）。
+   */
+  executedCalls?: number;
+  refusedCalls?: number;
+  /** 该轮探针的 calls 原值（-1 = 审计源不可读；缺席 = 旧报告/调用方没提供）。 */
+  calls?: number;
+  /** 该轮审计源不可读（证据缺席，调用数不可知）。 */
+  auditMissing?: boolean;
   /** 真实 provider usage 分项（无证据时整个字段缺席，不编零）。 */
   tokens?: { main?: number; worker?: number };
 }
@@ -128,6 +136,10 @@ export interface ReportCaseInput {
     /** 时延；崩溃窗口的墙钟证据缺席时字段省略（不写 0）。 */
     ms?: number;
     execution: ExecutionAuditRow[];
+    /** 探针 calls 原值（-1 = 审计源不可读）；旧调用方不提供 = 从 execution 计数。 */
+    calls?: number;
+    /** 审计源不可读（调用数不可知）：报告行省略 executedCalls/refusedCalls，不写 0。 */
+    auditMissing?: boolean;
     tokens?: { main?: number; worker?: number };
   }>;
   intents: HostIntentFacts[];
@@ -178,6 +190,9 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
     ladder.push(...turnLadder);
     const main = turn.tokens?.main;
     const worker = turn.tokens?.worker;
+    // 审计源不可读 = 调用数不可知：executedCalls/refusedCalls 整个省略，不拿 auditMissing
+    // 轮的 execution:[] 写 0（2026-11-10 独立评审 low）。calls<0 是同一哨兵的旧字段。
+    const auditMissing = turn.auditMissing === true || (turn.calls !== undefined && turn.calls < 0);
     return {
       turnIndex: index,
       messageId: turn.messageId,
@@ -188,8 +203,12 @@ export function buildCaseReport(input: ReportCaseInput): ReportCaseLine {
       ...(turn.ms !== undefined ? { latencyMs: turn.ms } : {}),
       ladderRung: messageLadderRung(turnLadder),
       ladder: turnLadder,
-      executedCalls: turn.execution.filter((row) => !row.refused).length,
-      refusedCalls: turn.execution.filter((row) => row.refused).length,
+      ...(auditMissing ? {} : {
+        executedCalls: turn.execution.filter((row) => !row.refused).length,
+        refusedCalls: turn.execution.filter((row) => row.refused).length,
+      }),
+      ...(turn.calls !== undefined ? { calls: turn.calls } : {}),
+      ...(auditMissing ? { auditMissing: true } : {}),
       ...((main !== undefined || worker !== undefined)
         ? { tokens: { ...(main !== undefined ? { main } : {}), ...(worker !== undefined ? { worker } : {}) } }
         : {}),

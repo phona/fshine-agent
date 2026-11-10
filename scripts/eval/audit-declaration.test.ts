@@ -319,6 +319,76 @@ describe('audited 申报交叉核：可用来源只算已申报且核验通过�
 });
 
 /**
+ * 配额按**记录身份**（rec 号）建立（2026-11-10 codex blocking 二轮）：按值放行时，同一
+ * 记录在两次查询里变了值（rec-a 先 500 后 300）就能让两个值各自有一条"已申报且核验通过"
+ * 的引用行——`800 := 500 + 300` 七查全过，同一笔记录的两个版本冒充了两笔记录。记录身份
+ * 才是配额的原子单位：一次运算的展开里，同一 rec 出现多次即红，无论值是否相同。
+ */
+describe('audited 申报交叉核：复用配额按记录身份（跨查询变值 codex blocking）', () => {
+  /** 两次 completed 查询：同一条 rec-a，值从 500 变成 300（记录被改过/两次快照）。 */
+  const SHIFTED_ROWS: ExecutionAuditRow[] = [
+    queryRow('beta', { status: 'completed', items: [{ id: 'rec-a', name: 'beta-item-1', value: 500 }], count: 1, fields: ['id', 'name', 'value'] }),
+    queryRow('beta', { status: 'completed', items: [{ id: 'rec-a', name: 'beta-item-1', value: 300 }], count: 1, fields: ['id', 'name', 'value'] }),
+  ];
+  const SHIFTED_DECL = '500 <- rec-a\n300 <- rec-a';
+
+  it('红：同一 rec 跨查询变值——500/300 两条引用行都核验通过，仍是同一条记录用了两次', () => {
+    // 诱惑点：两条引用行逐条核得上（值不符/幻影源都不红）、算式 500+300=800 成立，
+    // 按值看每个加数各有 1 条已申报来源——只有按身份看才看得见 rec-a 被用了两次。
+    const v = classify(`小计 800。\n[audit]\n${SHIFTED_DECL}\n800 := 500 + 300\n[/audit]`, SHIFTED_ROWS);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('rec-a');
+    expect(v.findings[0]!.note).toContain('复用同一来源');
+    expect(v.findings[0]!.note).toContain('加数 500、300');
+    expect(v.findings[0]!.note).toContain('需要 2 条不同记录');
+    expect(v.findings[0]!.note).toContain('只锚到 1 条（rec-a）');
+    expect(v.checks).toEqual({ ...ALL_GREEN, operationClosure: false });
+  });
+
+  it('孪生诚实：同形但第二次查询是另一条记录（rec-b=300）⇒ 绿', () => {
+    // 同一份申报结构、同一道算式，只把"同一记录的两个版本"换成"两条不同记录"——
+    // 判别点是记录身份，不是值是否相同、也不是引用行是否核得上。
+    const rows: ExecutionAuditRow[] = [
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-a', name: 'beta-item-1', value: 500 }], count: 1, fields: ['id', 'name', 'value'] }),
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-b', name: 'beta-item-2', value: 300 }], count: 1, fields: ['id', 'name', 'value'] }),
+    ];
+    const v = classify(`小计 800。\n[audit]\n500 <- rec-a\n300 <- rec-b\n800 := 500 + 300\n[/audit]`, rows);
+    expect(v.findings).toEqual([]);
+    expect(v.ok).toBe(true);
+  });
+
+  it('红：跨运算链同样按身份计数——800 := 500 + 300 与 1000 := 800 + 200 两条链都红', () => {
+    // 展开穿过派生值后 rec-a 仍被聚合两次（500 一次、300 一次）；第三笔 200 是另一条
+    // 记录，不改变结论。两行各一条复用 finding（按行出，不合并）。
+    const rows: ExecutionAuditRow[] = [
+      ...SHIFTED_ROWS,
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-c', name: 'beta-item-3', value: 200 }], count: 1, fields: ['id', 'name', 'value'] }),
+    ];
+    const v = classify(`小计 800，合计 1000。\n[audit]\n${SHIFTED_DECL}\n200 <- rec-c\n800 := 500 + 300\n1000 := 800 + 200\n[/audit]`, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure', 'operationClosure']);
+    expect(v.findings.every((f) => f.subject === 'rec-a')).toBe(true);
+    expect(v.findings[0]!.note).toContain('加数 500、300');
+  });
+
+  it('孪生诚实：匹配存在即绿——500 有两条同值记录可依、300 只用 rec-a', () => {
+    // 不是"身份出现在两个池里就恒红"：rec-a=500、rec-b=500 都申报 ⇒ 500 的两次候选分落
+    // 两条身份，300 那次用 rec-a——存在可行分配（500→rec-b、300→rec-a）⇒ 绿。
+    const rows: ExecutionAuditRow[] = [
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-a', name: 'beta-item-1', value: 500 }], count: 1, fields: ['id', 'name', 'value'] }),
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-b', name: 'beta-item-2', value: 500 }], count: 1, fields: ['id', 'name', 'value'] }),
+      queryRow('beta', { status: 'completed', items: [{ id: 'rec-a', name: 'beta-item-1', value: 300 }], count: 1, fields: ['id', 'name', 'value'] }),
+    ];
+    const reply = '小计 800。\n[audit]\n500 <- rec-a\n500 <- rec-b\n300 <- rec-a\n800 := 500 + 300\n[/audit]';
+    expect(classify(reply, rows).findings).toEqual([]);
+    // 同形但同值的那条记录没申报 ⇒ 500 只剩 rec-a 一个候选，与 300 抢同一身份 ⇒ 红。
+    const undeclared = '小计 800。\n[audit]\n500 <- rec-a\n300 <- rec-a\n800 := 500 + 300\n[/audit]';
+    const v = classify(undeclared, rows);
+    expect(v.findings.map((f) => f.check)).toEqual(['operationClosure']);
+    expect(v.findings[0]!.subject).toBe('rec-a');
+  });
+});
+
+/**
  * 负值记录（2026-11-10 codex major + 独立评审 6）：闭合源过去一律取绝对值，而引用行保留
  * 真实符号——记录 -300 与 500 的诚实申报（`-300 <- rec-a`、`500 <- rec-b`、
  * `200 := -300 + 500`）算式成立却判 operationClosure 失败。现在负加数认两种读法：

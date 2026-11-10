@@ -29,7 +29,9 @@
  *   · 本守卫文件自身不是扫描目标（禁词字面就住在表里）。防假绿的不是自我豁免，而是下方
  *     的**范围自校验**（目标清单非空、逐个存在、逐个非空、数量与登记数一致——把扫描面
  *     砍空 / 砍窄都会红）与**合成红例**（把片段放进被扫描形状的内容，走与文件扫描同一条
- *     `scanContents` 路径——扫描器恒空会红，红例不是只构造 Hit）。
+ *     `scanContents` 路径——扫描器恒空会红，红例不是只构造 Hit）。合成红例的断言接收方
+ *     只能是 `projectHits` 的投影（位置 + 禁词编号）：原始 Hit 只查键名——投影一旦漏词，
+ *     Vitest 的 diff 就会把片段字面抄进日志，而那正是最需要不抄词的时候（评审 9）。
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -106,6 +108,16 @@ function scan(): Hit[] {
   return scanContents(SCAN_TARGETS.map((rel) => ({ rel, text: readTarget(rel) })));
 }
 
+/**
+ * 命中对象的**唯一可输出投影**：只留位置与禁词编号。所有断言、失败消息与 Vitest diff
+ * 都只许序列化这个投影——`Hit` 将来若带上命中文本（最容易的"调试时加一列"），原始对象
+ * 一进 `toEqual` / `toMatchObject` / 快照就会把片段抄进 CI 日志，而那正是最需要不抄词的
+ * 时刻（2026-11-10 评审 9）。原始 `Hit` 只查键名，不查值。
+ */
+function projectHits(hits: ReadonlyArray<Hit>): Array<{ rel: string; line: number; fragment: number }> {
+  return hits.map((hit) => ({ rel: hit.rel, line: hit.line, fragment: hit.fragment }));
+}
+
 function failureMessage(hits: Hit[]): string {
   const perFragment = new Map<number, number>();
   for (const hit of hits) perFragment.set(hit.fragment, (perFragment.get(hit.fragment) ?? 0) + 1);
@@ -123,9 +135,11 @@ function failureMessage(hits: Hit[]): string {
 describe('隐私样本守卫：金额判据面的旧域报告片段零命中', () => {
   it('样本与注释里没有旧域报告片段 / 非夹具业务词', () => {
     const hits = scan();
-    // 断言的是 Hit 的投影（位置 + 禁词编号）：Hit 里没有命中文本，Vitest 的 toEqual diff
-    // 也不会把禁词抄进 CI 日志（2026-11-10 独立评审 medium）。
-    expect(hits, failureMessage(hits)).toEqual([]);
+    // 断言的是 Hit 的投影（位置 + 禁词编号），且只比**长度**这个标量：Hit 里没有命中
+    // 文本，Vitest 的 diff 也不会把禁词抄进 CI 日志（2026-11-10 评审 9）。命中详情由
+    // failureMessage 给（rel:line [#编号]），它同样不序列化命中文本。
+    const projected = projectHits(hits);
+    expect(projected.length, failureMessage(hits)).toBe(0);
   });
 
   it('失败信息与命中投影都不含命中文本（只报位置与编号）', () => {
@@ -136,8 +150,9 @@ describe('隐私样本守卫：金额判据面的旧域报告片段零命中', (
     expect(message).toContain('scripts/eval/amount-criteria.ts:1  [#2]');
     for (const fragment of OLD_DOMAIN_FRAGMENTS) {
       // 布尔断言而不是 `.not.toContain(fragment)`：后者失败时 Vitest 的 diff 会把片段
-      // 字面抄进日志（投影漏词的瞬间正好是最需要不抄词的时候，2026-11-10 独立评审 low）。
+      // 字面抄进日志（投影漏词的瞬间正好是最需要不抄词的时候，2026-11-10 评审 low）。
       expect(message.includes(fragment), '失败信息不得包含禁词文本').toBe(false);
+      expect(JSON.stringify(projectHits([fake])).includes(fragment), 'toEqual diff 不得包含禁词文本').toBe(false);
     }
     expect(Object.keys(fake).sort()).toEqual(['fragment', 'line', 'rel']);
     expect(typeof fake.fragment).toBe('number');
@@ -146,20 +161,30 @@ describe('隐私样本守卫：金额判据面的旧域报告片段零命中', (
   it('红：真实 scan 路径检出合成违规，且失败信息 / toEqual 投影都不抄禁词', () => {
     // 2026-11-10 第三轮收口：上一条只构造 Hit，绕过 scan()——扫描器恒空也能过。
     // 这里把一条旧域片段放进被扫描形状的合成内容：守卫必须报 hit（把 scan 改坏成
-    // 恒空 ⇒ 违规"转绿"，本测试红），同时失败消息与 JSON 投影不得出现片段字面
-    // （把命中文本塞进 Hit ⇒ toEqual diff 会把片段抄进 CI 日志，本测试红）。
+    // 恒空 ⇒ 违规"转绿"，本测试红），同时失败消息与投影序列化不得出现片段字面
+    // （把命中文本塞进 Hit ⇒ 序列化会把片段抄进 CI 日志，本测试红）。
     const planted = `beta 的 record value 是 500。\n${OLD_DOMAIN_FRAGMENTS[1]}\n`;
     const hits = scanContents([{ rel: 'synthetic/planted.ts', text: planted }]);
-    expect(hits).toHaveLength(1);
-    expect(hits[0]).toMatchObject({ rel: 'synthetic/planted.ts', line: 2, fragment: 2 });
-    expect(Object.keys(hits[0]!).sort()).toEqual(['fragment', 'line', 'rel']);
+    // 断言接收方一律是投影，且逐字段比**标量**：`toEqual(projected[0], {…})` 在投影
+    // 万一带上命中文本时会把 text 字段打进 diff（评审 9 的原形态）；标量断言只打印
+    // 字符串/数字，漏词与否都抄不出片段。原始 Hit 只查键名。
+    const projected = projectHits(hits);
+    expect(projected.length).toBe(1);
+    expect(projected[0]!.rel).toBe('synthetic/planted.ts');
+    expect(projected[0]!.line).toBe(2);
+    expect(projected[0]!.fragment).toBe(2);
     const message = failureMessage(hits);
     expect(message).toContain('synthetic/planted.ts:2  [#2]');
+    // 投影的**序列化**不含片段：这条才是"投影漏词"的判据（不是只比字段形状）。
+    const serialized = JSON.stringify(projected);
     for (const fragment of OLD_DOMAIN_FRAGMENTS) {
       // 布尔断言：投影真的漏词时，失败输出只报 "expected true to be false"，不打印片段本身。
       expect(message.includes(fragment), '失败信息不得包含禁词文本').toBe(false);
-      expect(JSON.stringify(hits).includes(fragment), 'toEqual diff 不得包含禁词文本').toBe(false);
+      expect(serialized.includes(fragment), 'toEqual diff 不得包含禁词文本').toBe(false);
     }
+    // 投影的形状也只查**键名**（失败只打印键名，不打印值）：投影只许有这三列。
+    expect(Object.keys(projected[0]!).sort()).toEqual(['fragment', 'line', 'rel']);
+    expect(Object.keys(hits[0]!).sort()).toEqual(['fragment', 'line', 'rel']);
     // 孪生：同一扫描器对干净内容零命中（证明红例不是扫描器恒命中）。
     expect(scanContents([{ rel: 'synthetic/clean.ts', text: 'beta 的 record value 是 500。\n' }])).toEqual([]);
   });

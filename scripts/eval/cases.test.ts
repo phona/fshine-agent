@@ -75,6 +75,21 @@ describe('审计过的用例（四元组完整）与未审计占位（不猜）'
     }
   });
 
+  it('占位条目不得进基线：score 与统一报告两侧同源的前提（2026-11-10 评审 low）', () => {
+    // 占位条目 inBaseline:true 时，报告侧先判 placeholder ⇒ skip，score 侧若只看
+    // inBaseline 就会评估它——两侧判定不同源。score.ts 已补 placeholder 跳过做防御，
+    // 数据层再钉死"占位不进基线"，不让这种条目出现在默认判定集里。
+    for (const spec of cases.filter((item) => item.placeholder)) {
+      expect(spec.inBaseline, `${spec.id} 是占位条目却 inBaseline:true`).toBe(false);
+    }
+    // 判定集与跳过集同源：CorpusEntry 必须携带占位标记，score.ts 才看得见。
+    const entries = toCorpusEntries(cases);
+    for (const spec of cases.filter((item) => item.placeholder)) {
+      const entry = entries.find((item) => item.case === spec.id);
+      expect(entry?.placeholder, `${spec.id} 的 CorpusEntry 丢了 placeholder 标记`).toBe(true);
+    }
+  });
+
   it('占位不等于没审计：prose 层（businessGoal/checks）可以齐全', () => {
     // Q5b/Q13b 按 9ba6d0f 原文恢复：判据 prose 层完整，只差机械层（需真平台数据）。
     // 防止有人把"占位"当成"可以只写一句话"的借口——那正是静默丢覆盖的形态。

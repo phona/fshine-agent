@@ -513,6 +513,12 @@ export interface CorpusEntry {
   id: string;
   kind: 'probe' | 'acceptance';
   inBaseline: boolean;
+  /**
+   * 未审计占位条目（与 CaseSpec.placeholder 同义）：score.ts 与统一报告都必须显式跳过。
+   * 2026-11-10 独立评审 low：占位标记原先只活在 CaseSpec，score.ts 只见 CorpusEntry——
+   * 占位条目一旦被误标 inBaseline:true，score.ts 会评估它而统一报告跳过，两侧判定不同源。
+   */
+  placeholder?: boolean;
   case?: string;
   conversation?: string;
   cases?: string[];
@@ -525,6 +531,7 @@ export function toCorpusEntries(cases: readonly CaseSpec[]): CorpusEntry[] {
     id: item.kind === 'probe' ? `probe-${item.id}` : item.id,
     kind: item.kind,
     inBaseline: item.inBaseline,
+    ...(item.placeholder === true ? { placeholder: true } : {}),
     ...(item.kind === 'probe' ? { case: item.id } : {}),
     ...(item.conversation ? { conversation: item.conversation } : {}),
     ...(item.kind === 'acceptance' ? { cases: item.messages.map((message) => message.id).filter((id): id is string => typeof id === 'string') } : {}),

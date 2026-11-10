@@ -40,6 +40,35 @@ describe('buildCaseReport：读回证据逐条调用关联（四审 blocking）'
     expect(line.ladder.map((c) => c.rung)).toEqual(['delivered']);
   });
 
+  it('auditMissing 轮：调用数不可知 ⇒ 省略 executedCalls/refusedCalls，不写 0（2026-11-10 评审 low）', () => {
+    // 旧实现从 execution:[] 派生 0/0，与 calls=-1 的"不可知不写 0"纪律矛盾；只有
+    // ladderRung=INCONCLUSIVE 暗示证据缺口。现在报告行显式带 calls:-1 + auditMissing:true，
+    // 计数列整体缺席。
+    const line = buildCaseReport(caseInput({
+      turns: [{
+        messageId: 'm1',
+        text: '查一下',
+        reply: 'r',
+        notices: [],
+        ms: 10,
+        execution: [],
+        calls: -1,
+        auditMissing: true,
+      }],
+    }));
+    const turn = line.turns[0]!;
+    expect(turn.auditMissing).toBe(true);
+    expect(turn.calls).toBe(-1);
+    expect('executedCalls' in turn).toBe(false);
+    expect('refusedCalls' in turn).toBe(false);
+    // 孪生：有证据的零调用轮照常写 0（缺席与零可区分）。
+    const clean = buildCaseReport(caseInput({
+      turns: [{ messageId: 'm2', text: '查一下', reply: 'r', notices: [], ms: 10, execution: [], calls: 0 }],
+    })).turns[0]!;
+    expect(clean).toMatchObject({ executedCalls: 0, refusedCalls: 0, calls: 0 });
+    expect('auditMissing' in clean).toBe(false);
+  });
+
   it('用例级 some() 的旧形态：另一 proposalId 的未验证写不被历史成功背书', () => {
     // 复现缺陷：本用例成功提交过 p1，随后另一笔 p2 没有读回证据。旧写法
     // `intents.some(...)` 会判 readbackVerified=true，把 p2 也标成 verified/delivered。

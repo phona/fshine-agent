@@ -80,20 +80,27 @@ export interface Baseline {
 
 /**
  * 报告行的申报失败计数：数字 = 在该轮平台证据上跑过交叉核；`'not-applicable'` =
- * **没有可核的平台证据轮次**（零轮占位、runner 崩溃、纯闲聊轮）——显式不适用，不是 0
- * （0 会被读成「查过且全过」，与「没查过」混为一谈）。字段缺席（undefined）= 旧报告/
- * 黑盒报告没有这一列，仍按 fail-closed 处理。
+ * **没有可核的平台证据轮次**（零轮占位、纯闲聊轮）——显式不适用，不是 0（0 会被读成
+ * 「查过且全过」，与「没查过」混为一谈）；`'unverifiable'` = 有轮次但审计源不可读
+ * （`auditMissing`），交叉核缺证据——**不是不适用，是核不了**，门必须判失败而不是
+ * 因为"还有别的干净轮次"放行（2026-11-10 独立评审 high）。字段缺席（undefined）=
+ * 旧报告/黑盒报告没有这一列，仍按 fail-closed 处理。
  */
-export type AuditFailuresValue = number | 'not-applicable';
+export type AuditFailuresValue = number | 'not-applicable' | 'unverifiable';
 
 /**
- * audited 报告格式守卫的字段判据（**导出**供单测钉）：数字或显式 `'not-applicable'` 都是
- * 可评分的值，字段缺席（旧报告/黑盒报告）不是。
- * 守卫必须接受 `'not-applicable'`——零轮占位/runner 崩溃/纯闲聊轮用它表达「没有可核
- * 证据」，拒收会让整份 audited 报告 exit 2，连带申报全对的其余用例都打不了分。
+ * audited 报告格式守卫的字段判据（**导出**供单测钉）：非负整数计数、显式
+ * `'not-applicable'`、或显式 `'unverifiable'` 都是可评分的值；字段缺席（旧报告/黑盒
+ * 报告）不是。负数不是计数（-1 是不可知哨兵，`<= limit` 会让它冒充全过），小数也不是
+ * 计数（2026-11-10 独立评审 low）。
+ * 守卫必须接受两个显式状态——零轮占位/纯闲聊轮用 `'not-applicable'` 表达「没有可核
+ * 证据」，审计源不可读用 `'unverifiable'` 表达「证据缺席、核不了」；拒收会让整份
+ * audited 报告 exit 2，连带其余可评分的用例都打不了分。
  */
 export function validAuditFailuresValue(value: unknown): value is AuditFailuresValue {
-  return typeof value === 'number' || value === 'not-applicable';
+  return value === 'not-applicable'
+    || value === 'unverifiable'
+    || (typeof value === 'number' && Number.isInteger(value) && value >= 0);
 }
 
 export interface ProbeResultRow {
@@ -104,8 +111,9 @@ export interface ProbeResultRow {
   dims: DimCounts;
   unclassifiedNotes: number;
   /**
-   * audited 申报模式的申报失败条数（只对**有平台证据**的轮次累计 findings；零轮/崩溃/
-   * 纯闲聊轮记 `'not-applicable'`）。黑盒报告**不带该字段**（旧报告同理）。
+   * audited 申报模式的申报失败条数（只对**有平台证据**的轮次累计 findings；零轮/无证据
+   * 且无申报块记 `'not-applicable'`；审计源不可读记 `'unverifiable'`，门判失败）。
+   * 黑盒报告**不带该字段**（旧报告同理）。
    */
   auditFailures?: AuditFailuresValue;
   notes: string[];
@@ -172,12 +180,18 @@ export function latestReport(dir: string, prefix: string, suffix: string): strin
  * audited 申报失败检查（**导出**：探针统一报告的通过率与打分器共用同一实现）。
  *
  * 判定只有一处：缺计数 fail-closed（没跑交叉核的 0 是「不知道」，不是「查过且全过」）；
- * 数字则对照基线上限（只增才算劣化）；显式 `'not-applicable'`（没有可核的平台证据轮次）
- * **不失败也不冒充 0**——检查照出（可审计），actual 写「不适用」。
+ * 数字则对照基线上限（只增才算劣化）；显式 `'not-applicable'`（零轮占位/纯闲聊轮——
+ * 没有可核的平台证据轮次）**不失败也不冒充 0**——检查照出（可审计），actual 写「不适用」；
+ * 显式 `'unverifiable'`（审计源不可读——有轮次但证据缺席）**判失败**：交叉核缺证据不是
+ * 「不适用」，不能因为同例还有别的干净轮次就把不可核的那一轮放行（2026-11-10 独立评审
+ * high）。
  */
 export function auditFailuresCheckOf(auditFailures: AuditFailuresValue | undefined, limit = 0): Check {
   if (auditFailures === 'not-applicable') {
     return { name: 'audited·申报失败', pass: true, expected: '（无平台证据轮次，不适用）', actual: '不适用' };
+  }
+  if (auditFailures === 'unverifiable') {
+    return { name: 'audited·申报失败', pass: false, expected: `≤${limit}`, actual: '不可核（审计源不可读）' };
   }
   return typeof auditFailures === 'number'
     ? { name: 'audited·申报失败', pass: auditFailures <= limit, expected: `≤${limit}`, actual: String(auditFailures) }
@@ -370,6 +384,11 @@ async function main(): Promise<void> {
   const baseline = loadBaseline(baselinePath);
   const corpusVer = corpusVersion(CASES_PATH);
   const promptVer = judgePromptVersion();
+  // 判定集与跳过集**同源**（2026-11-10 独立评审 low）：占位条目即使被误标 inBaseline:true
+  // 也不评估——`unifiedCasePassedOf` 先判 spec.placeholder，score.ts 若只看 inBaseline 就会
+  // 评估它，两侧判定不同源。占位条目的基线项失配也随之不拦（它本来就不该有基线项）。
+  const judgedEntries = corpus.filter((entry) => entry.inBaseline && entry.placeholder !== true);
+  const skippedEntries = corpus.filter((entry) => !entry.inBaseline || entry.placeholder === true);
 
   // 语料 ⊆ 基线锁：进基线的语料必须有基线项（反向多余项只提示不拦——删语料时基线项随 --write-baseline 清理）。
   // 2026-11-08 修（PR #21 二审 blocking 的过程中发现）：`--write-baseline` 时**不锁**。原写法
@@ -377,8 +396,8 @@ async function main(): Promise<void> {
   // 被删后恢复进 cases.yaml（inBaseline: true），却没有任何 sanctioned 路径能把它的基线项
   // 写进去，只能手改文件（违反"基线只走 --write-baseline"）。锁的用途是防止**拿着陈旧基线
   // 打分**，不是阻止基线自身演进；写基线正是消解失配的那个动作，逻辑上该放行。
-  const missingBaseline = corpus.filter((entry) => entry.inBaseline
-    && (entry.kind === 'probe' ? !(entry.id in baseline.cases) : !(entry.conversation! in baseline.writeChain)));
+  const missingBaseline = judgedEntries.filter((entry) =>
+    entry.kind === 'probe' ? !(entry.id in baseline.cases) : !(entry.conversation! in baseline.writeChain));
   if (missingBaseline.length && !args.writeBaseline) {
     console.error(`语料-基线失配（exit 2）：${missingBaseline.map((entry) => entry.id).join('、')} 进基线但 baseline.json 无对应项`);
     console.error('  （--write-baseline 可消解此失配：把本轮实值写进去；不写基线则先跑 npm run eval:probe）');
@@ -391,9 +410,8 @@ async function main(): Promise<void> {
   const probePath = args.probeReport ?? latestReport(path.join(repoRoot, '.runtime'), 'probe-', '.json');
   const acceptancePath = args.acceptanceReport
     ?? latestReport(path.join(repoRoot, 'data'), 'acceptance-report-', '.json');
-  const inBaseline = corpus.filter((entry) => entry.inBaseline);
-  const needsProbe = inBaseline.some((entry) => entry.kind === 'probe');
-  const needsAcceptance = inBaseline.some((entry) => entry.kind === 'acceptance');
+  const needsProbe = judgedEntries.some((entry) => entry.kind === 'probe');
+  const needsAcceptance = judgedEntries.some((entry) => entry.kind === 'acceptance');
   const missing: string[] = [];
   if (needsProbe && (!probePath || !existsSync(probePath))) missing.push('探针报告（.runtime/probe-*.json；先跑 npm run eval:probe）');
   if (needsAcceptance && (!acceptancePath || !existsSync(acceptancePath))) missing.push('验收报告（data/acceptance-report-*.json；先跑 npm run eval:acceptance）');
@@ -450,7 +468,7 @@ async function main(): Promise<void> {
     cases.find((item) => (item.kind === 'probe' ? item.id === entry.case : item.id === entry.id));
 
   const verdicts: CaseVerdict[] = [];
-  for (const entry of inBaseline) {
+  for (const entry of judgedEntries) {
     if (entry.kind === 'probe') {
       const row = probeReport.results.find((result) => result.id === entry.case);
       let judgeResult: JudgeResult | undefined;
@@ -467,9 +485,8 @@ async function main(): Promise<void> {
       verdicts.push(evaluateWriteChainCase(entry, facts, baseline.writeChain[entry.conversation!], specOf(entry), acceptanceJson.records));
     }
   }
-  const skipped = corpus.filter((entry) => !entry.inBaseline);
-  for (const entry of skipped) {
-    verdicts.push({ corpusId: entry.id, id: entry.id, kind: entry.kind, pass: true, checks: [], note: '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
+  for (const entry of skippedEntries) {
+    verdicts.push({ corpusId: entry.id, id: entry.id, kind: entry.kind, pass: true, checks: [], note: entry.placeholder === true ? '未审计占位（不猜判定）' : '未进默认基线（--only 跑后用 --include 评分，或临时移入基线）' });
   }
 
   for (const verdict of verdicts) {
@@ -480,7 +497,7 @@ async function main(): Promise<void> {
   }
   const judged = verdicts.filter((verdict) => verdict.pass && !verdict.note);
   const failed = verdicts.filter((verdict) => !verdict.pass);
-  console.log(`\n汇总：${judged.length}/${inBaseline.length} 通过${failed.length ? `；回归：${failed.map((verdict) => verdict.id).join('、')}` : ''}`);
+  console.log(`\n汇总：${judged.length}/${judgedEntries.length} 通过${failed.length ? `；回归：${failed.map((verdict) => verdict.id).join('、')}` : ''}`);
 
   // 记分台：每轮追加一行（含评委证据）。回归也落账——台账引用的是这里的轨迹。
   appendFileSync(SCORES_PATH, JSON.stringify({

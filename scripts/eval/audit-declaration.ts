@@ -410,8 +410,8 @@ interface RecordEntry {
  * 全部审计行（"任何审计行"，与幻影源查同域）；同一行里同一个号只收一次。
  *
  * 收**条目**（身份 + 值）而不是裸数值：同一个号可能对应多条记录（同名不同 id），
- * 值核对要看到该号的全部可核数值（collectRecordValues），放行查要按**身份**数不同
- * 记录（declaredRecordCountsByValue）——一张扫描供两查，避免两份事实表漂移。
+ * 值核对要看到该号的全部可核数值（collectRecordValues），放行查要按**身份**取可用记录
+ * 池（declaredRecordPoolsByValue）——一张扫描供两查，避免两份事实表漂移。
  */
 function collectRecordEntries(rows: readonly ExecutionAuditRow[]): Map<string, RecordEntry[]> {
   const entries = new Map<string, RecordEntry[]>();
@@ -463,9 +463,9 @@ function collectRecordValues(entries: ReadonlyMap<string, readonly RecordEntry[]
  * 自引用环因此不闭合——"1000 := 1000 + 500" 的 1000 只有自己这一行可依，不动点永远推不到
  * 它（与旧实现的 used 集合同结论：递归到不了引用行）。不动点按值判定，只回答"这个值有没有
  * 申报行可依"；**同一记录不得复用两次**（含跨运算链：派生加数沿运算行展开到引用行后统一
- * 计数，见 expandedAddendCounts）由 declaredRecordCountsByValue 按**已申报且核验通过**的
- * 引用行放行（"1000 := 500 + 500" 配一条 `500 <- rec-101` 虽然闭合，但只申报了一条 500
- * 记录 ⇒ 红）。
+ * 计数，见 expandedAddendCounts）由 declaredRecordPoolsByValue 的**已申报且核验通过**记录
+ * 身份池按身份匹配放行（"1000 := 500 + 500" 配一条 `500 <- rec-101` 虽然闭合，但只申报了
+ * 一条 500 记录 ⇒ 红；rec-a 跨查询变值成 500/300 两条引用行，仍是同一条记录用了两次 ⇒ 红）。
  */
 function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
   const closed = new Set<number>();
@@ -487,9 +487,10 @@ function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
 }
 
 /**
- * 放行表：每个**申报值**有几条不同记录可作来源（运算闭合的复用查照它放行）。
+ * 放行池：每个**申报值**有哪些已申报且核验通过的记录身份可作来源（运算闭合的复用查照它
+ * 放行）。
  *
- * 只数**已申报且核验通过**的引用行所锚到的记录身份（2026-11-10 codex blocking 反例）：
+ * 只收**已申报且核验通过**的引用行所锚到的记录身份（2026-11-10 codex blocking 反例）：
  * 审计行有 rec-a=500、rec-b=500，模型只申报 `500 <- rec-a` 却写 `1000 := 500 + 500`——
  * 旧实现按"审计事实里有几条 500"放行（2 条）⇒ 全绿，等于借了未申报的 rec-b 的配额。
  * 申报即承诺"这个数出自这条记录"，**没申报的记录不进可用来源**；两个同值记录都申报时
@@ -500,12 +501,18 @@ function closingValues(lines: readonly AuditDeclarationLine[]): Set<number> {
  * （id 或 name 命中均可，与幻影源查同域），按身份去重——同一个号写两遍不放大配额；同一
  * 号若同时命中多条同值记录（同名不同 id），该行锚到的是这几条身份的并集（声明本身有歧义，
  * 按"它可能指的就是这些"计，不挑一条——挑哪条都是任意的；夹具种子号互异，此形态不出现）。
+ *
+ * 收**池**（身份集合）而不是计数（2026-11-10 codex blocking 二轮）：配额过去按**值**的
+ * 条数放行——同轮两次查询 rec-a=500、rec-a=300 时，500 与 300 各自有一条已申报且核验
+ * 通过的引用行 ⇒ `800 := 500 + 300` 七查全过，同一笔记录的两个版本冒充了两笔记录。
+ * 记录身份才是配额的原子单位：一次运算的展开里每个接地值的每次出现都要落到一条**不同**
+ * 的身份上（见 addendRecordViolation），所以这里必须保留"哪些身份"而不是"几条"。
  */
-function declaredRecordCountsByValue(
+function declaredRecordPoolsByValue(
   lines: readonly AuditDeclarationLine[],
   entries: ReadonlyMap<string, readonly RecordEntry[]>,
-): Map<number, number> {
-  const identities = new Map<number, Set<string>>();
+): Map<number, Set<string>> {
+  const pools = new Map<number, Set<string>>();
   for (const line of lines) {
     if (line.kind !== 'reference') continue;
     const list = entries.get(line.ref);
@@ -513,12 +520,138 @@ function declaredRecordCountsByValue(
     const matched = list.filter((entry) => entry.value === line.value);
     if (matched.length === 0) continue;
     for (const entry of matched) {
-      const bucket = identities.get(line.value) ?? new Set<string>();
+      const bucket = pools.get(line.value) ?? new Set<string>();
       bucket.add(entry.identity);
-      identities.set(line.value, bucket);
+      pools.set(line.value, bucket);
     }
   }
-  return new Map([...identities].map(([value, records]) => [value, records.size]));
+  return pools;
+}
+
+/** 一次运算展开的复用违例（Hall 违例）：这些加数合起来要的记录超过它们池的并集。 */
+interface AddendRecordViolation {
+  /** 违例涉及的接地值（最小割可达值集）。 */
+  values: number[];
+  /** 这些值的展开出现次数之和。 */
+  demand: number;
+  /** 已申报且核验通过的引用行在这些值上锚到的记录身份（并集）。 */
+  identities: string[];
+}
+
+/**
+ * 一次运算的展开能否由**不同记录**满足（2026-11-10 codex blocking：复用查按**记录身份**
+ * 跨整条运算链核对，不按值）——按值查的第二步（调用方先按值查过：每个接地值的出现次数
+ * 不超过它自己池的大小，单值超配已在那边判红）。
+ *
+ * 这一步回答按值查回答不了的问题：每个值各自够用，也可能同一 rec 跨值被用两次。每个
+ * 接地值在展开里出现 count(v) 次，每次出现都要落到一条**不同**的记录身份上——一个 rec
+ * 号就是一条记录，在同一 operation 的展开里出现多次（无论值是否相同）即红：
+ *   · 跨查询变值：rec-a 在两次查询里一个是 500 一个是 300，`800 := 500 + 300` 配两条
+ *     引用行——按值看各有 1 条来源，按身份看 rec-a 被用了两次 ⇒ 红；
+ *   · 同值双记录孪生：rec-a=500、rec-b=500 都申报，`1000 := 500 + 500` 的两次出现分落
+ *     两条身份 ⇒ 绿（匹配存在，不是恒红）。
+ * 没有已申报记录可依的值（池空）只给一个**匿名派生槽**：按值查已保证它至多出现一次
+ * （`max(池大小, 1)`），这里保留槽位只为图完备。
+ *
+ * 判定 = 小图最大流（源→值[容量=出现次数]→身份[容量 1]→汇；池空的值→匿名槽→汇）。
+ * 流不满 ⇒ 从残量图取**最小割可达值集**作 Hall 违例：这些值合起来要的记录超过它们池的
+ * 并集。图规模 ≤ 2·值数+身份数、增广次数 ≤ 身份数，病态块（k=40 倍增链的出现次数是
+ * 2^39）也不会把探针的同步 note 计算拖住。
+ */
+function addendRecordViolation(
+  counts: ReadonlyMap<number, number>,
+  pools: ReadonlyMap<number, ReadonlySet<string>>,
+): AddendRecordViolation | undefined {
+  const values = [...counts.keys()];
+  if (values.length === 0) return undefined;
+  // 节点编号：0=源；1..n=值；随后=身份；随后=匿名槽；末=汇。边按 (i, i^1) 成对存残量。
+  const identities = [...new Set(values.flatMap((value) => [...(pools.get(value) ?? [])]))];
+  const anonymous = values.filter((value) => (pools.get(value)?.size ?? 0) === 0);
+  const nodeCount = 1 + values.length + identities.length + anonymous.length + 1;
+  const source = 0;
+  const sink = nodeCount - 1;
+  const valueNode = new Map(values.map((value, index) => [value, 1 + index]));
+  const identityNode = new Map(identities.map((identity, index) => [identity, 1 + values.length + index]));
+  const anonymousNode = new Map(anonymous.map((value, index) => [value, 1 + values.length + identities.length + index]));
+  const graph: number[][] = Array.from({ length: nodeCount }, () => []);
+  const edgeTo: number[] = [];
+  const edgeCap: number[] = [];
+  const addEdge = (from: number, to: number, capacity: number): void => {
+    graph[from]!.push(edgeTo.length);
+    edgeTo.push(to);
+    edgeCap.push(capacity);
+    graph[to]!.push(edgeTo.length);
+    edgeTo.push(from);
+    edgeCap.push(0);
+  };
+  for (const value of values) {
+    addEdge(source, valueNode.get(value)!, counts.get(value)!);
+    const pool = pools.get(value);
+    if (pool && pool.size > 0) {
+      for (const identity of pool) addEdge(valueNode.get(value)!, identityNode.get(identity)!, Infinity);
+    } else {
+      addEdge(valueNode.get(value)!, anonymousNode.get(value)!, Infinity);
+    }
+  }
+  for (const identity of identities) addEdge(identityNode.get(identity)!, sink, 1);
+  for (const value of anonymous) addEdge(anonymousNode.get(value)!, sink, 1);
+  // Edmonds-Karp：BFS 找增广路，沿父边回退扣残量。每次增广至少饱和一条入汇边。
+  const demand = values.reduce((sum, value) => sum + counts.get(value)!, 0);
+  let flow = 0;
+  for (;;) {
+    const parentEdge = new Array<number>(nodeCount).fill(-1);
+    const seen = new Array<boolean>(nodeCount).fill(false);
+    seen[source] = true;
+    const queue = [source];
+    let reached = false;
+    for (let head = 0; head < queue.length && !reached; head += 1) {
+      const node = queue[head]!;
+      for (const edge of graph[node]!) {
+        if (edgeCap[edge]! <= 0) continue;
+        const next = edgeTo[edge]!;
+        if (seen[next]) continue;
+        seen[next] = true;
+        parentEdge[next] = edge;
+        if (next === sink) { reached = true; break; }
+        queue.push(next);
+      }
+    }
+    if (!reached) break;
+    let bottleneck = Infinity;
+    for (let at = sink; at !== source; ) {
+      const edge = parentEdge[at]!;
+      bottleneck = Math.min(bottleneck, edgeCap[edge]!);
+      at = edgeTo[edge ^ 1]!;
+    }
+    for (let at = sink; at !== source; ) {
+      const edge = parentEdge[at]!;
+      edgeCap[edge]! -= bottleneck;
+      edgeCap[edge ^ 1]! += bottleneck;
+      at = edgeTo[edge ^ 1]!;
+    }
+    flow += bottleneck;
+  }
+  if (flow >= demand) return undefined;
+  // 残量图从源可达的值节点 = 最小割源侧 = Hall 违例（需求超过池并集 + 匿名槽）。
+  const reachable = new Array<boolean>(nodeCount).fill(false);
+  reachable[source] = true;
+  const stack = [source];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    for (const edge of graph[node]!) {
+      if (edgeCap[edge]! <= 0) continue;
+      const next = edgeTo[edge]!;
+      if (reachable[next]) continue;
+      reachable[next] = true;
+      stack.push(next);
+    }
+  }
+  const violating = values.filter((value) => reachable[valueNode.get(value)!]);
+  return {
+    values: violating,
+    demand: violating.reduce((sum, value) => sum + counts.get(value)!, 0),
+    identities: [...new Set(violating.flatMap((value) => [...(pools.get(value) ?? [])]))],
+  };
 }
 
 /**
@@ -558,7 +691,7 @@ function groundValueOf(source: AuditAddendSource, closed: ReadonlySet<number>): 
  *
  * 展开规则：
  *   · 有引用行的值是**接地值**，一次出现计一次（引用行条数不放大计数——同值多条引用行
- *     意味着可能申报了多条同值记录，放行尺度由 declaredRecordCountsByValue 按**已申报
+ *     意味着可能申报了多条同值记录，放行尺度由 declaredRecordPoolsByValue 按**已申报
  *     且核验通过**的引用行给）；
  *   · 没有引用行的派生值沿**全部**同值运算行展开（同值多行是病态形态，向红偏）；
  *   · 不闭合的加数不展开（闭合查已就同一根因判红，不摊成复用第二条）；
@@ -614,6 +747,8 @@ function addendExpander(
 /**
  * 一条运算行的加数**展开计数**（复用查的事实）：每个加数经展开器落到接地值，数每个接地
  * 值在这条运算的展开里被用了几次（跨运算链的复用因此看得见，见 addendExpander 的反例）。
+ * 计数只回答"这个值被用了几次"；"这几次是不是同一条记录"由 addendRecordViolation 按
+ * 记录身份匹配判定（同值两条记录 ⇒ 各有其身份，跨查询变值 ⇒ 同一身份）。
  */
 function expandedAddendCounts(
   line: AuditOperationLine,
@@ -798,9 +933,9 @@ export function classifyAuditDeclaration(
   // groundValueOf 永假——既不要求申报，也不展开计数）。
   if (parsed.lines.some((line) => line.kind === 'operation')) {
     const closed = closingValues(parsed.lines);
-    // 可用来源只算**已申报且核验通过**的引用行（declaredRecordCountsByValue）：审计事实里
+    // 可用来源只算**已申报且核验通过**的引用行（declaredRecordPoolsByValue）：审计事实里
     // 有两条同值记录但只申报一条时，另一条的配额借不得（2026-11-10 codex blocking）。
-    const available = declaredRecordCountsByValue(parsed.lines, entries);
+    const pools = declaredRecordPoolsByValue(parsed.lines, entries);
     // 展开器跨运算行共享记忆化（按值的纯函数，见 addendExpander）。
     const expand = addendExpander(parsed.lines, closed);
     for (const line of parsed.lines) {
@@ -817,21 +952,46 @@ export function classifyAuditDeclaration(
             + `：「${line.raw}」`,
         });
       }
-      // 复用查按**展开后**的计数（expandedAddendCounts）：派生加数沿运算行递归展开到
-      // 接地值，跨运算链复用同一记录因此看得见（`800 := 500 + 300` + `1300 := 800 + 500`
-      // 配一条 `500 <- rec-a`——单看 1300 那行 500 只出现一次，展开后被聚合两次）。
-      // 展开只含闭合的接地值：不闭合的加数已由上一段判红，不把同一根因摊成复用第二条。
-      // available 为 0 时（加数由另一条运算行闭合、没有已申报的同值记录），至多允许出现
-      // 一次；出现两次就是同一份派生账被复用。
-      for (const [addend, count] of expandedAddendCounts(line, closed, expand)) {
-        if (count <= Math.max(available.get(addend) ?? 0, 1)) continue;
+      // 复用查按**记录身份**（rec 号）跨整条运算链核对（2026-11-10 codex blocking 二轮
+      // 收窄），与按值查两级：
+      //   ① 按值（旧口径）：一个接地值在展开里出现 count 次，已申报且核验通过的引用行只
+      //      锚到 |池| 条同值记录；池空（加数由另一条运算行闭合、没有已申报的同值记录）
+      //      时至多允许出现一次——出现两次就是同一份派生账被复用。派生加数沿运算行递归
+      //      展开到接地值，跨运算链复用因此看得见（`800 := 500 + 300` + `1300 := 800 + 500`
+      //      配一条 `500 <- rec-a`——单看 1300 那行 500 只出现一次，展开后被聚合两次）。
+      //   ② 按身份（本轮新增）：每个值各自够用，也可能同一 rec 跨值被用两次——同轮两次
+      //      查询 rec-a=500、rec-a=300 时，500 与 300 各有 1 条已申报来源，按值全放行，
+      //      按身份 rec-a 在展开里出现两次 ⇒ 红（见 addendRecordViolation）。
+      // 展开只含闭合的接地值：不闭合的加数已由上一段判红，不把同一根因摊成复用第二条；
+      // ① 已红过的行不再进 ②（同一行的同一根因不摊成两条 note）。
+      const expanded = expandedAddendCounts(line, closed, expand);
+      let reusedByValue = false;
+      for (const [addend, count] of expanded) {
+        const pool = pools.get(addend);
+        if (count <= Math.max(pool?.size ?? 0, 1)) continue;
+        reusedByValue = true;
         findings.push({
           check: 'operationClosure',
           subject: String(addend),
           note: `申报运算复用同一来源：${line.value} := … 的加数 ${addend} 展开后出现 ${count} 次，`
-            + `已申报且核验通过的引用行只锚到 ${available.get(addend) ?? 0} 条记录值为 ${addend} 的记录`
+            + `已申报且核验通过的引用行只锚到 ${pool?.size ?? 0} 条记录值为 ${addend} 的记录`
             + `——同一记录不得在一次运算里复用两次：「${line.raw}」`,
         });
+      }
+      if (!reusedByValue) {
+        const violation = addendRecordViolation(expanded, pools);
+        if (violation && violation.values.length > 0) {
+          findings.push({
+            check: 'operationClosure',
+            // 跨值共用同一记录：主语换成记录身份（rec 号），文案说清哪些加数合起来要几条
+            // 不同记录（Hall 违例，见 addendRecordViolation）。
+            subject: violation.identities.join('、'),
+            note: `申报运算复用同一来源：${line.value} := … 的加数 ${violation.values.join('、')} 展开后合起来需要 `
+              + `${violation.demand} 条不同记录，已申报且核验通过的引用行只锚到 `
+              + `${violation.identities.length} 条（${violation.identities.join('、')}）`
+              + `——同一记录不得在一次运算里复用两次：「${line.raw}」`,
+          });
+        }
       }
     }
   }
@@ -951,4 +1111,17 @@ export function auditDeclarationNotes(
  */
 export function stripAuditDeclaration(reply: string): string {
   return scanAuditBlock(reply).prose;
+}
+
+/**
+ * 这一轮回复是否**尝试**了申报（有可解析块，或有块级格式故障）。返回 boolean 而不是
+ * 解析结果，供探针的申报计数决定"无平台证据的轮次要核吗"：没有平台调用的轮次，普通正文
+ * 数字（聊天里的年份/条数）不该逼出申报；但只要模型写了 `[audit]` 块，块里的每个申报都
+ * 要有事实可核——空事实基准下引用行必然是幻影源、命题无据可核，不能因为该轮 `execution`
+ * 为空就整轮跳过（2026-11-10 独立评审 high：phantom 申报在 auditMissing/空证据轮里被
+ * `auditFailureCount` 跳过，audited 门照过）。
+ */
+export function hasAuditDeclarationBlock(reply: string): boolean {
+  const scan = scanAuditBlock(reply);
+  return scan.content !== null || scan.blockFault !== null;
 }

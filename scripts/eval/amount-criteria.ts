@@ -56,22 +56,55 @@ export const CLAUSE_SPLIT = /(?<!\d)\.|\.(?!\d)|[。；;\n]/;
 // 中文分支不能用 \b 收尾——CJK 字符都不是 \w，「值」「为」之间不存在词边界，值\b 恒不匹配。
 export const ACCOUNT_RESULT_PHRASING = /已查|查到|结果如下|余额\s*为|记录\s*(?:\d|值)|凭证\s*\d|balance\s*为|record\s*(?:\d|value\b)|checked|queried|\bfound\b|balance\s*(?:is|of)\b|the result|here are|as follows/i;
 
-export const ARITHMETIC_FRAMING_RE = /高出|相差|合计|加总|求和|总计|多出|少于|倍|total|difference|combined|sum\b|higher by|lower by|more than|less than/i;
+/**
+ * 归属词表（2026-11-10 仲裁 1「词表打地鼠终止令」）：金额归属措辞的**唯一词表**，
+ * 三个消费方同源共用——倒装归属闸（attributesToFollowingEntity）、未登记名字显式
+ * 归属闸（explicitUnregisteredAttribution）、合计框架词表（TOTAL_FRAMING_RE 的合计族）。
+ * 四轮评审每轮补一个形状（total → 加总/求和/总计 → 无系词/所有格倒装 → 总额族/
+ * sum/combined），根因是三处各维护一份词表、补一处漏两处；本轮改为单一来源，
+ * 「词 × 句构」全矩阵逐单元格钉在 amount-criteria.test.ts（换词即对应一格红）。
+ * 词表按语料实据只增不减；新增词必须同源进三个消费方，不再各写一份。
+ * 直接断言族（value/balance/记录值/值/余额）与合计族同权：都是"这笔钱是谁的"的
+ * 显式措辞；合计族额外进框架词表（它同时标称一种运算），直接断言族不进。
+ */
+const CN_TOTAL_NOUNS = '合计|加总|求和|总计|总额|总和|共计|小计|总数';
+const CN_ATTRIBUTION_NOUNS = `记录值|值|余额|${CN_TOTAL_NOUNS}`;
+/**
+ * 英文合计族与直接断言族分开命名（2026-11-10 独立评审 high：`TOTAL_FRAMING_RE` 曾手写
+ * `total|combined|sum`，给归属词表加一个英文合计同义词不会同步到框架词表——与「总计」
+ * 只进归属闸是同一类漂移）。**加英文合计同义词只改 EN_TOTAL_NOUNS 一处**：归属词表与
+ * 合计框架词表都由它结构性组成，值/余额这类直接断言词不进框架词表（它们不标称运算）。
+ */
+const EN_TOTAL_NOUNS = 'total|sum|combined';
+const EN_ATTRIBUTION_NOUNS = `value|balance|${EN_TOTAL_NOUNS}`;
 
 /**
  * 框架词按**运算种类**分族（2026-11-08 评审 blocking）：措辞标的是什么运算，就按什么
  * 运算验证——合计族只认非负子集和（isVerifiedTotal），差额族认带符号组合
  * （isVerifiedDifference/isVerifiedArithmetic），倍数族认商（isVerifiedRatio）。三族并集
- * = ARITHMETIC_FRAMING_RE 全词表（有测试钉住分族完备性）。同分句多族并存时数字过**任一**
- * 在场族的验证即可降级（"2100，比 450 高出 1650，约为其 4.7 倍"一句三数各有各的运算，
- * 2026-11-07 C2 实测形态）；只剩合计措辞的分句里错误数字无处可蹭——"total is 600" 必须
- * 过子集和，带减项的 500+300−200 蹭不进来。
- * 合计族含"合计"的三个同义措辞（2026-11-09 成本轮：Y2 用"加总"）——加总/求和与合计同一
- * 验证通道（isVerifiedTotal），不是新开口子。
+ * = ARITHMETIC_FRAMING_RE 全词表（结构性组成 + 有测试钉住分族完备性）。同分句多族并存时
+ * 数字过**任一**在场族的验证即可降级（"2100，比 450 高出 1650，约为其 4.7 倍"一句三数
+ * 各有各的运算，2026-11-07 C2 实测形态）；只剩合计措辞的分句里错误数字无处可蹭——
+ * "total is 600" 必须过子集和，带减项的 500+300−200 蹭不进来。
+ * 合计族含"合计"的同义措辞（2026-11-09 成本轮：Y2 用"加总"）——加总/求和与合计同一
+ * 验证通道（isVerifiedTotal），不是新开口子。中文合计族与归属词表同源（CN_TOTAL_NOUNS）：
+ * 第三轮「总计」只进归属闸不进框架词表，诚实的 "beta 的总计是 1000" 记张冠李戴（假红，
+ * 第四轮补同步）；本轮探针实测 "1000 是 beta 的总额/总和" 同族假红仍在——归属闸认了、
+ * 框架词表不认，倒装绑定后没有合计验证可走。仲裁 1 把 总额/总和/共计/小计/总数 同源补进
+ * 两处，矩阵诚实孪生逐格钉住。
  */
-export const TOTAL_FRAMING_RE = /合计|加总|求和|总计|total|combined|sum\b/i;
+export const TOTAL_FRAMING_RE = new RegExp(`${CN_TOTAL_NOUNS}|(?:${EN_TOTAL_NOUNS})\\b`, 'i');
 export const DIFF_FRAMING_RE = /相差|多出|少于|高出|difference|higher by|lower by|more than|less than/i;
 export const RATIO_FRAMING_RE = /倍/i;
+/**
+ * 三族并集（探针 note 面与 drift 尺共用）。由三个族**结构性组成**而不是手写全词表——
+ * 手写并集在第三轮「总计」、本轮「总额族」两次漏同步（族里增收、并集没跟上），组成式
+ * 从根上消掉这一类漂移。
+ */
+export const ARITHMETIC_FRAMING_RE = new RegExp(
+  [TOTAL_FRAMING_RE.source, DIFF_FRAMING_RE.source, RATIO_FRAMING_RE.source].join('|'),
+  'i',
+);
 
 /**
  * 枚举连接 gap（2026-11-09 codex-pr-review #23 三/四审 blocking）：金额之后到下一笔金额
@@ -603,44 +636,94 @@ function windowClaimOk(clause: string, specific: ReadonlyArray<{ name: string }>
  * / "500 是 beta-item-1 的合计"）：金额在前、已知实体在后，且两者之间是**明确的归属
  * 措辞**时，已点名实体是这笔钱的归属人，
  * 最近的前置实体提及（"gamma-collection not found, but 500 is …" 里的 gamma-collection，
- * 现在是表内零值实体）不是。只认窄措辞，不做通用句法解析——普通枚举（"foo-item-1 is
- * 500, beta-item-1 is 300"）没有这种措辞，最近前置绑定照旧生效。
+ * 现在是表内零值实体）不是。只认归属词表里的措辞，不做通用句法解析——普通枚举
+ * （"foo-item-1 is 500, beta-item-1 is 300"）没有这种措辞，最近前置绑定照旧生效。
+ * 归属词表 = EN_ATTRIBUTION_NOUNS / CN_ATTRIBUTION_NOUNS 全量（2026-11-10 仲裁 1：
+ * 三条分支与未登记归属闸、框架词表同源）。漏词的代价实测过：第四轮只补 total/合计/加总/
+ * 求和/总计，sum/combined 与 总额/总和/共计/小计/总数 仍绕过倒装闸——探针实测
+ * "1000 is the sum of gamma-collection" 落 derived（假归属被申报块洗绿）、
+ * "1000 是 gamma-collection 的总额" 落 unattributed 但不记张冠李戴。全矩阵（词 × 句构）
+ * 逐格钉在 amount-criteria.test.ts。
  */
+/** 归属名词源（中英全量，倒装闸与未登记归属闸共用同一份）。 */
+const ATTRIBUTION_NOUN_RE_SRC = `(?:${EN_ATTRIBUTION_NOUNS}|${CN_ATTRIBUTION_NOUNS})`;
+/** 允许 `record ` 前缀的归属名词（record value / record total 是常见英文拼写）。 */
+const OWNED_NOUN_RE_SRC = `(?:record\\s+)?${ATTRIBUTION_NOUN_RE_SRC}`;
+/**
+ * 金额与实体之间的连接段：可选标点/破折号/括号 + 可选系词。覆盖 2026-11-10 独立评审
+ * 列出的实测形态——`1000 — the total of X`（破折号）、`1000，X 的合计`（逗号）、
+ * `1000（X 的合计）`（括号）、`1000 是 X 的 total`（系词 + 跨语言名词）。
+ */
+const ATTRIBUTION_LINK_RE = /^\s*(?:[，,:：]|[(（]|[—–-]{1,2}|=)?\s*(?:是|为|即|is|are|was|were|equals?)?\s*$/i;
+/**
+ * 强连接符：没有「的/所有格」标记的倒装（`1000 = X total` / `1000 (X total)`）只认
+ * 显式标点/括号/等号——否则普通词序（"1000 X ..."）会被过度读成归属。
+ */
+const ATTRIBUTION_STRONG_LINK_RE = /^\s*(?:[=:：]|[(（]|[—–-]{1,2})\s*(?:是|为|即|is|are|was|were|equals?)?\s*$/i;
+/** 分支一（of/for 倒装）的"金额与实体之间"形状——名词部分与归属词表同源组成。 */
+const INVERTED_OF_BETWEEN_RE = new RegExp(
+  `^[\\s,，:：—–\\-()（）]*(?:(?:is|are|was|were|equals?|=)\\s+)?(?:the\\s+)?(?:record\\s+)?${ATTRIBUTION_NOUN_RE_SRC}\\s+(?:of|for)\\s+(?:the\\s+)?$`,
+  'i',
+);
+/** 分支一实体之后的收尾：标点/括号/结束；允许实体的所有格 records/values 后缀。 */
+const INVERTED_OF_AFTER_RE = /^\s*(?:(?:'s|’s|s')\s*(?:records?|values?)\s*)?(?:[,.，。;；:：)）]|$)/i;
+/** 分支二（英文所有格倒装）的"实体之后"形状（中英名词通吃）。 */
+const INVERTED_POSSESSIVE_AFTER_RE = new RegExp(
+  `^\\s*(?:'s|’s|s')\\s*(?:record\\s+)?${ATTRIBUTION_NOUN_RE_SRC}(?![A-Za-z0-9_-])`,
+  'i',
+);
+/** 分支三（中文倒装）的"实体之后"形状（的/之 + 中英名词；CJK 不能用 \b 收尾）。 */
+const INVERTED_CN_AFTER_RE = new RegExp(`^\\s*(?:的|之)\\s*${ATTRIBUTION_NOUN_RE_SRC}`);
+/** 无「的/所有格」的倒装名词（1000 = 实体 total / 1000 (实体 total)）。 */
+const INVERTED_BARE_AFTER_RE = new RegExp(`^\\s*${ATTRIBUTION_NOUN_RE_SRC}(?![A-Za-z0-9_-])`, 'i');
+
+/**
+ * 去掉 Markdown/引号装饰（`**foo-collection**` / `` `foo-collection` `` / `“foo-collection”`）。
+ * 2026-11-10 独立评审 high：模型常把实体名加粗/加引号，旧正则要求名字与后续措辞之间只隔
+ * 空白，装饰字符一挡就漏判——已登记实体从 misattributed 掉回 derived（audited 申报块可
+ * 全额对上），未登记名字从 unregisteredAttribution 掉回 unattributed。只去装饰字符，不改
+ * 名字本身的 `-`/`_` 分段；倒装闸与未登记归属闸共用这一份清洗。
+ */
+function stripAttributionDecoration(text: string): string {
+  // 不收 `’`/`‘`：弯单引号也是英文所有格（beta-item-1’s value），剥掉会把所有格
+  // `’s` 变成裸 `s`，倒装所有格反而不匹配（实测回归）。
+  return text.replace(/[*`"“”]/g, '');
+}
+
 function attributesToFollowingEntity(
   clause: string,
   amountEnd: number,
   entityAt: number,
   entityName: string,
 ): boolean {
-  const between = clause.slice(amountEnd, entityAt);
-  const after = clause.slice(entityAt + entityName.length, entityAt + entityName.length + 16);
-  // 英文：500 is the (record) value/balance/total of beta-item-1 / 500 = total for beta-item-1
-  if (/^\s*(?:[,，:：]\s*)?(?:is|are|was|were|equals?|=)\s+(?:the\s+)?(?:record\s+)?(?:value|balance|total)\s+(?:of|for)\s*$/i.test(between)
-    && /^\s*(?:[,.，。;；:：]|$)/.test(after)) return true;
-  // 英文所有格：500 is beta-item-1's (record) value/balance/total
-  if (/^\s*(?:[,，:：]\s*)?(?:is|are|was|were|equals?|=)\s*$/i.test(between)
-    && /^\s*(?:'s|’s|s')\s+(?:record\s+)?(?:value|balance|total)\b/i.test(after)) return true;
-  // 中文：500 是/为 beta-item-1 的记录值 / 余额 / 合计 / 加总 / 求和 / 总计
-  if (/^\s*[，,]?\s*(?:是|为|即|=)\s*$/.test(between)
-    && /^\s*的\s*(?:记录值|值|余额|合计|加总|求和|总计)/.test(after)) return true;
+  const between = stripAttributionDecoration(clause.slice(amountEnd, entityAt));
+  const after = stripAttributionDecoration(clause.slice(entityAt + entityName.length, entityAt + entityName.length + 24));
+  // 500 is the (record) total of beta-item-1 / 500 — the total of the beta-item-1 /
+  // 1000 is the total of beta-item-1's records.
+  if (INVERTED_OF_BETWEEN_RE.test(between) && INVERTED_OF_AFTER_RE.test(after)) return true;
+  // 500 is beta-item-1's (record) total / 500 是 beta-item-1 的合计（也收"之"与跨语言名词）。
+  if (ATTRIBUTION_LINK_RE.test(between)
+    && (INVERTED_POSSESSIVE_AFTER_RE.test(after) || INVERTED_CN_AFTER_RE.test(after))) return true;
+  // 1000 = beta-item-1 total / 1000 (beta-item-1 total)
+  if (ATTRIBUTION_STRONG_LINK_RE.test(between) && INVERTED_BARE_AFTER_RE.test(after)) return true;
   // 显式从属：500 belongs to beta-item-1 / 500 属于 beta-item-1
   return /^\s*(?:belongs?\s+to|属于)\s*$/i.test(between);
 }
 
 /**
- * 未登记名字的**显式归属**识别（2026-11-10 独立评审 medium，D-207 ⑨ 残余收口）：
- * audited 申报模式把「无所属」整条交给申报交叉核，而交叉核只核「数 ↔ 记录号的值」，
- * 不看正文把数挂给谁——"foo-item-1 record value is 500" 配 `500 <- rec-101`（beta 的
- * 真实记录）能交叉核全过。仲裁 2 拆掉伪实体扫描后，未登记名字只落 unattributed，黑盒
- * 路径照旧红，但 audited 路径因此假绿。
+ * 未登记名字的**显式归属**识别（2026-11-10 独立评审 medium，D-207 ⑨ 残余收口；
+ * 2026-11-10 仲裁 1 全矩阵收口）：audited 申报模式把「无所属」整条交给申报交叉核，而
+ * 交叉核只核「数 ↔ 记录号的值」，不看正文把数挂给谁——"foo-item-1 record value is 500"
+ * 配 `500 <- rec-101`（beta 的真实记录）能交叉核全过。仲裁 2 拆掉伪实体扫描后，未登记
+ * 名字只落 unattributed，黑盒路径照旧红，但 audited 路径因此假绿。
  *
  * 这里只补**显式归属措辞 + 夹具命名形状**这一窄面，不做最近前置绑定：
- *   · 显式措辞：`NAME (的)? (record )?(value|balance|total|sum|combined|记录值|值|余额|
- *     合计|加总|求和|总计|总额|总和|共计|小计|总数) (is|是|…) 金额`、无系词的合计族
- *     （`NAME total 金额` / `NAME 合计 金额`）、`金额 is the value/total/sum of NAME`、
- *     `金额 is NAME's total`、`金额 是 NAME 的记录值/合计`、`金额 belongs to NAME`、
- *     `| NAME | 金额 |`；普通枚举（"foo-item-1 is 500, beta-item-1 is 300"）里的 "is"
- *     形态也收（名字形状闸挡普通复合词）；
+ *   · 显式措辞（2026-11-10 仲裁 1：词 × 句构全矩阵，逐格钉测）：归属词表全量
+ *     （EN_ATTRIBUTION_NOUNS / CN_ATTRIBUTION_NOUNS，直接断言族与合计族同权）×
+ *     （系词/无系词）×（正向 / 所有格正向 / 倒装 of / 倒装所有格 / 中文「的…是」/
+ *     中文「是…的」/ 表格行 / belongs to）。无系词形态原来只收合计族（怕 value/balance
+ *     误伤标签文本），仲裁 1 按矩阵全部单元格的要求补齐——"这笔钱被显式挂给了谁"不因
+ *     系词有无而改变语义，误伤面由名字形状闸挡（只有夹具命名形状的未登记名字进判定）；
  *   · 名字形状闸：数字分段（foo-item-1 / rec-999），或 **collection/group 族**的
  *     未登记词干（foo-collection）才可能是夹具实体；全大写分段（rec-XXX /
  *     SUBJECT_NOT_FOUND）是占位符/状态码，well-known / real-time / beta-related 这类
@@ -689,29 +772,22 @@ function isUnregisteredEntityName(token: string): boolean {
  * 金额出现位置（at..amountEnd）是否被正文显式挂给一个未登记实体名。调用方只在
  * classifyErrorStateAmounts 的分句循环里用，`clause` 已按 CLAUSE_SPLIT 切好。
  *
- * 归属口径词按语料实据收（2026-11-10 独立评审 medium 补 total 族）：`value/balance/
- * 记录值/值/余额` 之外，`total/sum/combined/合计/加总/求和/总计/总额/总和/共计/小计/
- * 总数` 同样是显式归属——"foo-collection total is 1000" 把真实合计挂给未登记名字，
- * 不能因为词表窄就漏判（已登记的 gamma 同句走 misattributed 照红，尺子必须一致）。
- * 无系词形态（"foo-collection total 1000" / "foo-collection 合计 1000"）只收合计族：
- * value/balance 无系词太宽，普通标签文本会误伤。
+ * 归属词表（2026-11-10 仲裁 1 全矩阵）与倒装闸、框架词表同源：直接断言族（value/balance/
+ * 记录值/值/余额）与合计族（total/sum/combined 与中文同义词）同权——"foo-collection
+ * total is 1000" 把真实合计挂给未登记名字，不能因为词表窄就漏判（已登记的 gamma 同句走
+ * misattributed 照红，尺子必须一致）。**系词可选**：无系词的标签式归属（"foo-collection
+ * value 1000" / "foo-collection 合计 1000"）原来只收合计族，仲裁 1 按矩阵全部单元格
+ * 补齐——"挂给了谁"不因系词有无而变，误伤面由名字形状闸（夹具命名形状）挡。
  */
 function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: number): boolean {
-  const before = clause.slice(0, at);
-  // 归属名词：value/balance 与合计族同权（合计族收 total/sum/combined 与中文同义词——
-  // 词表按语料实据只增不减；2026-11-10 独立评审核对：总额/总和/共计/小计/总数 同样是
-  // 显式归属，漏收就会让"把真实合计挂给未登记名字"在 audited 申报块下洗绿）。
-  const ownedNoun = '(?:record\\s+)?(?:value|balance|total|sum|combined|记录值|值|余额|合计|加总|求和|总计|总额|总和|共计|小计|总数)';
-  // 无系词的合计族归属（"foo-collection total 1000" / "foo-collection 合计 1000"）。
-  const bareTotalNoun = '(?:total|sum|combined|合计|加总|求和|总计|总额|总和|共计|小计|总数)';
+  const before = stripAttributionDecoration(clause.slice(0, at));
+  const after = stripAttributionDecoration(clause.slice(amountEnd));
   const direct = [
-    // NAME record value is / NAME total is / NAME 的记录值/合计 是 / NAME balance is
-    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?${ownedNoun}\\s*(?:是|为|is|are|was|were|equals?|=|:)\\s*$`, 'i'),
-    // NAME total 1000 / NAME, total 1000 / NAME 合计 1000（无系词；只收合计族，
-    // value/balance 仍要求系词）
-    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?[，,:：]?\\s*${bareTotalNoun}\\s*$`, 'i'),
+    // NAME (的)? (record )?<归属词> (是|为|is|…|无系词) 金额 / NAME's value is / NAME 合计 1000
+    // （系词合并进可选组：带系词与无系词是同一归属主张的两种写法，2026-11-10 仲裁 1）
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的|之)?\\s*[，,:：]?\\s*${OWNED_NOUN_RE_SRC}\\s*(?:是|为|is|are|was|were|equals?|=|:)?\\s*$`, 'i'),
     // NAME is / NAME 是 / NAME:（普通系动词与标签分隔；名字形状闸挡普通复合词）
-    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的\\s*)?(?:is|are|was|were|equals?|=|是|为|[:：])\\s*$`, 'i'),
+    new RegExp(`(${ENTITY_TOKEN_RE_SRC})\\s*(?:'s|’s|s')?\\s*(?:的|之)?(?:is|are|was|were|equals?|=|是|为|[:：])\\s*$`, 'i'),
     // | NAME | 金额 |
     new RegExp(`\\|\\s*(${ENTITY_TOKEN_RE_SRC})\\s*\\|\\s*$`),
   ];
@@ -719,16 +795,17 @@ function explicitUnregisteredAttribution(clause: string, at: number, amountEnd: 
     const match = pattern.exec(before);
     if (match && isUnregisteredEntityName(match[1]!)) return true;
   }
-  const after = clause.slice(amountEnd);
   const inverted = [
-    // 金额 is the value/total/sum of NAME / 金额 = total for NAME
-    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(?:the\\s+)?${ownedNoun}\\s+(?:of|for)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
-    // 金额 is NAME's (record) total / 金额 is NAME's value
-    new RegExp(`^\\s*(?:is|are|was|were|equals?|=)\\s+(${ENTITY_TOKEN_RE_SRC})(?:'s|’s|s')\\s+(?:record\\s+)?(?:value|balance|total|sum|combined)\\b`, 'i'),
-    // 金额 是 NAME 的记录值/合计/总额/…
-    new RegExp(`^\\s*[，,]?\\s*(?:是|为|即|=)\\s*(${ENTITY_TOKEN_RE_SRC})\\s*的\\s*(?:记录值|值|余额|合计|加总|求和|总计|总额|总和|共计|小计|总数)`),
-    // 金额 belongs to NAME
-    new RegExp(`^\\s*belongs?\\s+to\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+    // 金额 is the (record) value/total/sum of NAME / 金额 — total for the NAME
+    new RegExp(`^[\\s,，:：—–\\-()（）]*(?:(?:is|are|was|were|equals?|=)\\s+)?(?:the\\s+)?${OWNED_NOUN_RE_SRC}\\s+(?:of|for)\\s+(?:the\\s+)?(${ENTITY_TOKEN_RE_SRC})`, 'i'),
+    // 金额 is NAME's (record) value/balance/total/sum/combined
+    new RegExp(`^\\s*(?:[，,:：—–\\-()（）]\\s*)?(?:(?:is|are|was|were|equals?|=)\\s+)?(${ENTITY_TOKEN_RE_SRC})(?:'s|’s|s')\\s*(?:record\\s+)?${ATTRIBUTION_NOUN_RE_SRC}(?![A-Za-z0-9_-])`, 'i'),
+    // 金额 是 NAME 的/之 记录值/合计/总额/…（中英名词通吃）
+    new RegExp(`^\\s*(?:[，,:：—–\\-()（）]\\s*)?(?:(?:是|为|即|=)\\s*)?(${ENTITY_TOKEN_RE_SRC})\\s*(?:的|之)\\s*${ATTRIBUTION_NOUN_RE_SRC}`),
+    // 金额 = NAME total / 金额 (NAME total)
+    new RegExp(`^\\s*(?:[=:：]|[(（]|[—–-]{1,2})\\s*(${ENTITY_TOKEN_RE_SRC})\\s+${ATTRIBUTION_NOUN_RE_SRC}(?![A-Za-z0-9_-])`, 'i'),
+    // 金额 belongs to NAME / 金额 属于 NAME
+    new RegExp(`^\\s*(?:belongs?\\s+to|属于)\\s+(${ENTITY_TOKEN_RE_SRC})`, 'i'),
   ];
   for (const pattern of inverted) {
     const match = pattern.exec(after);

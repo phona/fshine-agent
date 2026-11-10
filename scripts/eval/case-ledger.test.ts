@@ -8,7 +8,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { collectAcceptanceFiles } from './case-ledger';
+import { collectAcceptanceFiles, knownPlatformCalls } from './case-ledger';
 
 const roots: string[] = [];
 afterEach(() => { for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }); });
@@ -50,5 +50,18 @@ describe('collectAcceptanceFiles：两种报告根形状都收（十审 minor）
     const d = dir();
     writeFileSync(path.join(d, 'acceptance-report-weird.json'), JSON.stringify({ writeChain: [] }));
     expect(await collectAcceptanceFiles(d)).toEqual([]);
+  });
+});
+
+describe('平台调用数的不可知哨兵（2026-11-10 独立评审 medium）', () => {
+  it('-1 / 缺失 / 非数字都不是计数；0 与正整数照常', () => {
+    // 旧写法 `stats.platformCalls += typeof r.platformCalls === 'number' ? r.platformCalls : 0`
+    // 把崩溃报告的 platformCalls:-1 直接加进合计，台账总数倒扣。
+    expect(knownPlatformCalls(-1)).toBeUndefined();
+    expect(knownPlatformCalls(undefined)).toBeUndefined();
+    expect(knownPlatformCalls(null)).toBeUndefined();
+    expect(knownPlatformCalls(Number.NaN)).toBeUndefined();
+    expect(knownPlatformCalls(0)).toBe(0);
+    expect(knownPlatformCalls(3)).toBe(3);
   });
 });

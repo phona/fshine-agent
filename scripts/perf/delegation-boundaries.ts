@@ -111,13 +111,16 @@ function scan(): Scan {
       let prevDelegateIdx: number | null = null; // 连续段里的上一 delegate 轮（0 起）；非 delegate 轮断开连续段
       turns.forEach((t, idx) => {
         out.judgedTurns++;
-        const isDelegate = (t.calls ?? 0) >= 1;
-        if (t.calls === undefined) {
-          // calls 缺失 = 旧批次没记平台调用数：不可判定，且打断连续段（宁少报不多报）
+        // calls 缺失（旧批次）或 -1（审计源不可读）= 不可判定，不当 0（旧写法
+        // `(t.calls ?? 0) >= 1` 把 -1 记成确定的非委派轮，2026-11-10 独立评审 medium）。
+        // 不可判定轮打断连续段（宁少报不多报）。
+        const calls = typeof t.calls === 'number' && t.calls >= 0 ? t.calls : undefined;
+        if (calls === undefined) {
           out.unjudgedTurns++;
           prevDelegateIdx = null;
           return;
         }
+        const isDelegate = calls >= 1;
         if (isDelegate) {
           out.delegateTurns++;
           if (prevDelegateIdx !== null) {

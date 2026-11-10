@@ -805,9 +805,13 @@ describe('isVerifiedTotal：合计语义的非负子集和（2026-11-08 评审 b
 
 describe('框架词分族完备性：ARITHMETIC_FRAMING_RE 每个词都落进某一运算族', () => {
   it('total/difference/ratio 三族并集覆盖全词表（漏词 = 该措辞静默失去降级通道）', () => {
+    // 2026-11-10 仲裁 1：合计族补 总额/总和/共计/小计/总数（与归属词表同源），全词表
+    // （ARITHMETIC_FRAMING_RE 由三族结构性组成）同步收——族里增收、并集没跟上正是第三轮
+    // 「总计」假红的根因。
     const words = [
       '高出', '相差', '合计', '加总', '求和', '总计', '多出', '少于', '倍', 'total', 'difference',
       'combined', 'sum', 'higher by', 'lower by', 'more than', 'less than',
+      '总额', '总和', '共计', '小计', '总数',
     ];
     for (const word of words) {
       expect(
@@ -1058,6 +1062,192 @@ describe('错误态金额三分：归属判据的实体面（登记制，仲裁 
     const honest = classify("beta 的 record value 是 500、300、200。1000 is beta's total.", 'checkbeta的payablebalance');
     expect(honest.misattributed).toEqual([]);
     expect(honest.derived.map((a) => a.value)).toEqual([1000]);
+  });
+
+  /**
+   * 仲裁 1（2026-11-10）：词表打地鼠终止令。四轮评审每轮补一个归属形状（total → 加总/求和/
+   * 总计 → 无系词/所有格倒装 → 总额族/sum/combined），每轮都是"criteria 加一个词 + 测试加
+   * 一个句子"。本轮把「归属词表 × 句构」一次枚举完，逐单元格钉死——此后换词、换句构即对应
+   * 一格红，不再靠评审逐轮撞出来。
+   *
+   * 坐标 = 归属词 × 句构 × 期望（每个 expect 的 message 带当格坐标）：
+   *   · 归属词 17 个 = 直接断言族 {value, balance, 记录值, 值, 余额} ∪ 合计族
+   *     {total, sum, combined, 合计, 加总, 求和, 总计, 总额, 总和, 共计, 小计, 总数}；
+   *   · 句构 8 个 = 英文 5 种 {正向 "X <词> is 1000" / 所有格正向 "X's <词> is 1000" /
+   *     倒装所有格 "1000 is X's <词>" / 倒装 of "1000 is the <词> of X" / 无系词 "X <词> 1000"}
+   *     ∪ 中文 2 种 {正向 "X 的<词>是 1000" / 倒装 "1000 是 X 的<词>"}
+   *     ∪ 跨语言倒装无系词 "1000 = X <词>"（2026-11-10 独立评审 high：旧矩阵只在英文词 ×
+   *     英文构、中文词 × 中文构里各跑各的，17×8 实际只跑了 5×5 + 12×3 = 61 格；英文词进
+   *     中文构、中文词进英文构这些跨语言格从未被钉住，`1000 是 X 的 total` 这类真实形态
+   *     因此落 derived/未归属。现在 17 词 × 8 构 = 136 格全交叉）；
+   *   · 期望 = 已登记零值实体 gamma-collection ⇒ 136 格全部 misattributed（任何非零归属都是
+   *     假归属，audited 申报块洗不掉）；未登记名字 foo-collection ⇒ 136 格全部
+   *     unregisteredAttribution（交叉核只核"数 ↔ 记录号的值"，核不到"正文挂给了谁"）。
+   *     破折号/冠词/括号/逗号/之/Markdown 等连接变体与 belongs-to/表格形状另有一组用例钉住
+   *     （它们在实现里是独立分支，不占词 × 构矩阵的格子）。
+   * 诱惑点统一：1000 是前句 beta 500/300/200 的真实合计——漏一个词或一个句构，那一格就从
+   * 红洗成 derived（gamma 侧，申报块可全额对上）或漏记未登记归属（foo 侧）。三个消费方
+   * （倒装闸 attributesToFollowingEntity / 未登记归属闸 explicitUnregisteredAttribution /
+   * 框架词表 TOTAL_FRAMING_RE）共用同一份词表，见 amount-criteria.ts 顶部的归属词表块。
+   */
+  describe('归属词表 × 句构矩阵（仲裁 1：逐单元格钉死）', () => {
+    const MATRIX_EN_NOUNS = ['value', 'balance', 'total', 'sum', 'combined'] as const;
+    const MATRIX_CN_NOUNS = ['记录值', '值', '余额', '合计', '加总', '求和', '总计', '总额', '总和', '共计', '小计', '总数'] as const;
+    const MATRIX_NOUNS = [...MATRIX_EN_NOUNS, ...MATRIX_CN_NOUNS] as const;
+    const MATRIX_PREFIX = 'beta 的 record value 是 500、300、200。';
+    type SentenceShape = readonly [shape: string, make: (entity: string, noun: string, amount: number) => string];
+    const SHAPES: readonly SentenceShape[] = [
+      ['正向', (entity, noun, amount) => `${entity} ${noun} is ${amount}`],
+      ['所有格正向', (entity, noun, amount) => `${entity}'s ${noun} is ${amount}`],
+      ['倒装所有格', (entity, noun, amount) => `${amount} is ${entity}'s ${noun}`],
+      ['倒装of', (entity, noun, amount) => `${amount} is the ${noun} of ${entity}`],
+      ['无系词', (entity, noun, amount) => `${entity} ${noun} ${amount}`],
+      ['中文正向', (entity, noun, amount) => `${entity} 的${noun}是 ${amount}`],
+      ['中文倒装', (entity, noun, amount) => `${amount} 是 ${entity} 的${noun}`],
+      ['倒装无系词', (entity, noun, amount) => `${amount} = ${entity} ${noun}`],
+    ];
+    /** 17 词 × 8 构 = 136 格（全交叉；数量断言防"矩阵被悄悄砍窄"）。 */
+    const CELL_COUNT = MATRIX_NOUNS.length * SHAPES.length;
+
+    it('矩阵·已登记零值实体 gamma-collection：17 词 × 8 构 = 136 格全部 misattributed', () => {
+      expect(CELL_COUNT).toBe(136);
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const coordinate = `坐标=gamma × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('gamma-collection', noun, 1000)}。`, 'checkbeta的payablebalance');
+          expect(v.misattributed.map((a) => a.value), coordinate).toEqual([1000]);
+        }
+      }
+    });
+
+    it('矩阵·未登记名字 foo-collection：17 词 × 8 构 = 136 格全部 unregisteredAttribution', () => {
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const coordinate = `坐标=foo × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('foo-collection', noun, 1000)}。`, 'checkbeta的payablebalance');
+          expect(v.unregisteredAttribution.map((a) => a.value), coordinate).toEqual([1000]);
+          expect(v.misattributed, `${coordinate}（未登记名字不进 misattributed）`).toEqual([]);
+        }
+      }
+    });
+
+    it('矩阵·诚实孪生：同一矩阵挂给真实合计的所有者 beta ⇒ 三处全空（不假红）', () => {
+      // 假红防线：绑定面补齐后，每一格都要能区分"挂错人"与"挂对人的合计/真值"。合计族词用
+      // 1000（beta 500+300+200 的真实全额，走 isVerifiedTotal 落 derived）；直接断言族用
+      // 500（beta 的单条真实值——1000 不是任何单条记录的值，"beta 的值是 1000"本就该红，
+      // 那正是矩阵 gamma/foo 两侧钉住的形态）。完整 verdict 三处全空（不假红的标题不能只钉
+      // misattributed，2026-11-10 独立评审 low 的同款要求）。
+      const MATRIX_TOTAL_FAMILY: ReadonlySet<string> = new Set(['total', 'sum', 'combined', ...MATRIX_CN_NOUNS.slice(3)]);
+      for (const noun of MATRIX_NOUNS) {
+        for (const [shape, make] of SHAPES) {
+          const amount = MATRIX_TOTAL_FAMILY.has(noun) ? 1000 : 500;
+          const coordinate = `坐标=beta × ${noun} × ${shape}`;
+          const v = classify(`${MATRIX_PREFIX}${make('beta', noun, amount)}。`, 'checkbeta的payablebalance');
+          expect(v.misattributed, coordinate).toEqual([]);
+          expect(v.unregisteredAttribution, coordinate).toEqual([]);
+          expect(v.unattributed, coordinate).toEqual([]);
+        }
+      }
+    });
+
+    it('矩阵·连接变体：破折号/冠词/括号/逗号/之/Markdown 装饰都认归属', () => {
+      // 2026-11-10 独立评审 high：这些形态在旧实现里全部漏判（audited 整例假绿）。
+      // 每个 expect 带原句，漏一种就指到具体形态。
+      const gammaShapes = [
+        '1000 — the total of gamma-collection',
+        '1000 is the total of the gamma-collection',
+        '1000（gamma-collection 的合计）',
+        '1000，gamma-collection 的合计',
+        '1000——gamma-collection 的合计',
+        '1000 是 gamma-collection 之合计',
+        '1000 (gamma-collection total)',
+        '1000 is the total of **gamma-collection**',
+        '1000 是 `gamma-collection` 的合计',
+        '1000 is the total of “gamma-collection”',
+        "1000 is the total of gamma-collection's records",
+        '1000 is the total of gamma-collection’s records',
+      ];
+      for (const claim of gammaShapes) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.misattributed.map((a) => a.value), claim).toEqual([1000]);
+      }
+      const fooShapes = [
+        '1000 — the total of foo-collection',
+        '1000 is the total of the foo-collection',
+        '1000（foo-collection 的合计）',
+        '1000，foo-collection 的合计',
+        '1000 是 foo-collection 之合计',
+        '1000 = foo-collection total',
+        '`foo-collection` value is 1000',
+        '**foo-collection** value is 1000',
+        '“foo-collection” value is 1000',
+      ];
+      for (const claim of fooShapes) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([1000]);
+        expect(v.misattributed, claim).toEqual([]);
+      }
+    });
+
+    it('矩阵·belongs-to 与表格行：词表之外的显式从属/表格形状同样认归属', () => {
+      // 归属词表矩阵覆盖"名词 × 句构"；belongs-to 与表格行不含归属名词，是两条独立
+      // 实现分支（attributesToFollowingEntity 的从属分支 / explicitUnregisteredAttribution
+      // 的表格分支）。旧测试只钉了英文 belongs to，中文「属于」与表格的未登记侧没钉。
+      for (const claim of ['500 belongs to gamma-collection', '500 属于 gamma-collection']) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.misattributed.map((a) => a.value), claim).toEqual([500]);
+      }
+      for (const claim of ['500 belongs to foo-collection', '500 属于 foo-collection']) {
+        const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), claim).toEqual([500]);
+      }
+      const gammaTable = classify(`${MATRIX_PREFIX}| gamma-collection | 1000 |`, 'checkbeta的payablebalance');
+      expect(gammaTable.misattributed.map((a) => a.value)).toEqual([1000]);
+      const fooTable = classify(`${MATRIX_PREFIX}| foo-collection | 1000 |`, 'checkbeta的payablebalance');
+      expect(fooTable.unregisteredAttribution.map((a) => a.value)).toEqual([1000]);
+    });
+
+    it('矩阵·形状闸：普通复合词与已登记词干别名不进未登记归属，夹具命名形状仍收', () => {
+      // 仲裁 1 配套（评审 10）：无系词/value-balance 口径补齐后，误伤面全押在名字形状闸上。
+      // 逐名钉两态——直接断言族两句式（带系词 + 新补齐的无系词）都不得误判；数字分段 /
+      // 未登记 collection·group 词干仍是强形状证据（foo-collection 是矩阵 foo 侧的实体）。
+      // 普通复合词与别名根本不是实体提及（不绑任何实体）⇒ misattributed 也无从记起；
+      // 已登记名字（alpha-group，真实值 700）用真值句，登记检查先于形状闸短路。
+      const notFixture: ReadonlyArray<[string, string, number]> = [
+        ['line-item', '普通英文复合词（item 后缀）', 1000],
+        ['data-record', '普通英文复合词（record 后缀）', 1000],
+        ['order-item', '普通英文复合词（item 后缀）', 1000],
+        ['beta-item', '已登记词干 + 普通后缀', 1000],
+        ['beta-collection', '已登记词干的自然别名', 1000],
+        ['well-known', '修饰语后缀（known）', 1000],
+        ['real-time', '修饰语后缀（time）', 1000],
+        ['beta-related', '修饰语后缀（related）', 1000],
+        ['alpha-group', '已登记 collection（rec-201 的真值 700）', 700],
+        // 已知残余（方向偏不假红，台账记）：无数字分段的 *-item / *-record 与夹具词干
+        // lexically 不可分（line-item vs foo-item），形状证据不足 ⇒ 放行。
+        ['foo-item', '无数字的 item 复合词——已知残余', 1000],
+        ['foo-record', '无数字的 record 复合词——已知残余', 1000],
+      ];
+      for (const [name, why, amount] of notFixture) {
+        for (const claim of [`${name} value is ${amount}`, `${name} value ${amount}`]) {
+          const v = classify(`${MATRIX_PREFIX}${claim}。`, 'checkbeta的payablebalance');
+          expect(v.unregisteredAttribution, `形状闸放行：${name}（${why}）@ "${claim}"`).toEqual([]);
+          expect(v.misattributed, `形状闸放行：${name}（${why}）@ "${claim}"`).toEqual([]);
+        }
+      }
+      const fixtureShaped: ReadonlyArray<[string, string]> = [
+        ['foo-collection', '未登记 collection 词干'],
+        ['foo-group', '未登记 group 词干'],
+        ['foo-item-1', '数字分段'],
+        ['xbeta-item-1', '数字分段'],
+        ['rec-999', '数字分段'],
+        ['foo_collection', '下划线连写 + 未登记 collection 词干'],
+      ];
+      for (const [name, why] of fixtureShaped) {
+        const v = classify(`${MATRIX_PREFIX}${name} value is 1000。`, 'checkbeta的payablebalance');
+        expect(v.unregisteredAttribution.map((a) => a.value), `形状闸仍收：${name}（${why}）`).toEqual([1000]);
+      }
+    });
   });
 
   it('不假红：普通复合词 / 已登记名字的自然别名不是未登记实体（2026-11-10 评审 low）', () => {

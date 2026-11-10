@@ -112,13 +112,24 @@ describe('audited 申报失败门（PR #26 评审 blocking：申报判定不能�
     expect(verdict.pass).toBe(true);
   });
 
-  it('报告格式守卫：接受数字与显式不适用，拒收缺列（零轮占位不让整份报告 exit 2）', () => {
+  it('审计源不可读（有轮次但证据缺席）⇒ 判失败，不因"还有干净轮次"放行（2026-11-10 评审 high）', () => {
+    const verdict = evaluateProbeCase('probe-X', probeRow({ auditFailures: 'unverifiable' }), baselineCase, undefined, undefined, true);
+    expect(auditCheckOf(verdict)).toMatchObject({ pass: false, actual: '不可核（审计源不可读）' });
+    expect(verdict.pass).toBe(false);
+  });
+
+  it('报告格式守卫：接受非负整数与两个显式状态，拒收缺列/负数/小数（零轮占位不让整份报告 exit 2）', () => {
     // 探针报告行 → score.ts 的格式守卫（main() 里用它筛 staleAudit）。判据导出后单测
     // 直接钉：N/A 若被拒收，--quick --audit 里有零轮占位/崩溃用例就会整份报告 exit 2，
     // 连带申报全对的其余用例都打不了分；缺列仍必须 fail-closed。
     expect(validAuditFailuresValue(0)).toBe(true);
     expect(validAuditFailuresValue(2)).toBe(true);
     expect(validAuditFailuresValue('not-applicable')).toBe(true);
+    expect(validAuditFailuresValue('unverifiable')).toBe(true);
+    // -1 是不可知哨兵不是计数：`-1 <= limit` 会让它冒充全过（2026-11-10 评审 low）。
+    expect(validAuditFailuresValue(-1)).toBe(false);
+    expect(validAuditFailuresValue(1.5)).toBe(false);
+    expect(validAuditFailuresValue(Number.NaN)).toBe(false);
     expect(validAuditFailuresValue(undefined)).toBe(false);
     expect(validAuditFailuresValue(null)).toBe(false);
   });
