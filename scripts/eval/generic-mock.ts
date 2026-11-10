@@ -69,24 +69,24 @@ class Ctx {
   env: NodeJS.ProcessEnv;
   /**
    * `extraEnv` = 该用例声明的 C 类旋钮（如 DUMMY_READBACK_SHORT）；C 类 ambient 同名键
-   * 本切片未清场，见 docs §9。B 类隔离路径与令牌面只注入规范族 `EXECUTION_*`
-   * （docs/env-naming-ruling-20261110.md）：夹具仍认 DUMMY_* 专名，但评测进程不设它。
+   * 本切片未清场，见 docs §9。状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，
+   * 非消费协议）：四个 STATE 路径不再经 env 注入，夹具也不再读它们。
    */
   constructor(extraEnv: NodeJS.ProcessEnv = {}) {
     this.dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-'));
     this.env = {
       ...process.env,
-      EXECUTION_MOCK_STATE: path.join(this.dir, 'state.json'),
-      EXECUTION_PLAN_STATE: path.join(this.dir, 'plans.json'),
-      EXECUTION_PROPOSAL_STATE: path.join(this.dir, 'proposals.json'),
-      EXECUTION_AUDIT_PATH: path.join(this.dir, 'audit.jsonl'),
       EXECUTION_PLAN_ACTIVATION_SECRET: 'generic-mock-plan-secret',
       EXECUTION_GATE_SECRET: 'generic-mock-gate-secret',
       ...extraEnv,
     };
   }
+  /** 夹具从状态根派生的审计文件（同一根 / 同一文件名规则，docs §4a）。 */
+  get auditPath(): string { return path.join(this.dir, 'audit.jsonl'); }
+  /** 夹具从状态根派生的提案状态库（g-proposal-expired 直接改过期时间用）。 */
+  get proposalPath(): string { return path.join(this.dir, 'proposals.json'); }
   run(args: string[], input?: string): RunResult {
-    const r = spawnSync(dummyBin, args, { encoding: 'utf8', cwd: fixtureRoot, env: this.env, input });
+    const r = spawnSync(dummyBin, ['--state-dir', this.dir, ...args], { encoding: 'utf8', cwd: fixtureRoot, env: this.env, input });
     return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   }
   cleanup() { try { rmSync(this.dir, { recursive: true, force: true }); } catch { /* best-effort */ } }
@@ -116,7 +116,7 @@ function createProposal(ctx: Ctx, payload: Record<string, unknown>): { env: Enve
 
 /** 读本用例夹具落的审计行（mode/script/via 判据的取数面；坏行跳过）。 */
 function readAuditRows(ctx: Ctx): Array<{ mode?: string; script?: string; via?: string; exitCode?: number }> {
-  const file = ctx.env.EXECUTION_AUDIT_PATH;
+  const file = ctx.auditPath;
   if (!file || !existsSync(file)) return [];
   return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line) as { mode?: string; script?: string; via?: string; exitCode?: number }]; } catch { return []; }
@@ -206,7 +206,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
   } },
   { id: 'g-a5-idle-zero-calls', run: (ctx) => {
     // Idle analogue: with a fresh state dir and no dummy invocation, no audit line exists.
-    const auditFile = ctx.env.EXECUTION_AUDIT_PATH!;
+    const auditFile = ctx.auditPath;
     const exists = existsSync(auditFile);
     return { id: 'g-a5-idle-zero-calls', pass: !exists, checks: [check('idle produces no audit line', !exists, 'no audit file', exists ? 'audit file exists' : 'no audit file')] };
   } },
@@ -298,7 +298,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'exp-1', value: 100 }] });
     const proposalId = env?.data?.proposalId as string;
     // Test-only state manipulation: move expiresAt into the past (documented in notes).
-    const proposalFile = ctx.env.EXECUTION_PROPOSAL_STATE!;
+    const proposalFile = ctx.proposalPath;
     const state = JSON.parse(readFileSync(proposalFile, 'utf8'));
     state.proposals[proposalId].expiresAt = new Date(Date.now() - 60_000).toISOString();
     writeFileSync(proposalFile, JSON.stringify(state, null, 2));

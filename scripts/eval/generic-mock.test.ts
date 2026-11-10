@@ -27,8 +27,9 @@ const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(evalDir, 'fixtures', 'dummy-platform');
 const dummyBin = path.join(fixtureRoot, 'bin', 'dummy');
 
-function runDummy(args: string[], env: NodeJS.ProcessEnv) {
-  const r = spawnSync(dummyBin, args, { encoding: 'utf8', cwd: fixtureRoot, env });
+function runDummy(args: string[], env: NodeJS.ProcessEnv, stateDir: string) {
+  // 状态根走测试专用 --state-dir（docs §4a）；夹具不再读状态路径 env。
+  const r = spawnSync(dummyBin, ['--state-dir', stateDir, ...args], { encoding: 'utf8', cwd: fixtureRoot, env });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
@@ -36,8 +37,8 @@ describe('generic mock execution layer', () => {
   it('operation list is machine-readable and covers read/scratch/write + protocol roles', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-test-'));
     try {
-      const env = { ...process.env, EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'), EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
-      const r = runDummy(['operation', 'list', '--json'], env);
+      const env = { ...process.env };
+      const r = runDummy(['operation', 'list', '--json'], env, dir);
       expect(r.code).toBe(0);
       const parsed = JSON.parse(r.stdout) as { operations: Array<Record<string, unknown>>; accessSemantics: Record<string, Record<string, boolean>> };
       expect(parsed.operations.map((o) => o.name)).toEqual(expect.arrayContaining(['dummy.query', 'dummy.scratch', 'dummy.prepare', 'dummy.commit', 'dummy.proposal', 'dummy.proposal-commit', 'ballot.query', 'ballot.scratch', 'ballot.prepare', 'ballot.commit', 'ballot.proposal', 'ballot.proposal-commit']));
@@ -75,14 +76,14 @@ describe('generic mock execution layer', () => {
   it('query / not-found / zero are distinct deterministic answers', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-test-'));
     try {
-      const env = { ...process.env, EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'), EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json') };
-      const ok = runDummy(['query', 'dummy.query', '--collection', 'alpha'], env);
+      const env = { ...process.env };
+      const ok = runDummy(['query', 'dummy.query', '--collection', 'alpha'], env, dir);
       expect(ok.code).toBe(0);
       expect(ok.stdout).toContain('"status":"completed"');
-      const nf = runDummy(['query', 'dummy.query', '--collection', 'nope'], env);
+      const nf = runDummy(['query', 'dummy.query', '--collection', 'nope'], env, dir);
       expect(nf.code).toBe(0);
       expect(nf.stdout).toContain('"status":"not_found"');
-      const zero = runDummy(['query', 'dummy.query', '--collection', 'empty-one'], env);
+      const zero = runDummy(['query', 'dummy.query', '--collection', 'empty-one'], env, dir);
       expect(zero.code).toBe(0);
       expect(zero.stdout).toContain('"status":"completed"');
       expect(zero.stdout).toContain('"count":0');

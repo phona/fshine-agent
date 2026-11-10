@@ -16,17 +16,23 @@
  *   2 = usage / schema failure (unknown command, unknown field, locked collection)
  *   3 = gateway / proposal refusal (unregistered, serve matrix, token, expired,
  *       corrupt state, plan not active when a plan is required)
- * State: per-case files, reset = delete the file. Next call re-seeds.
- *   EXECUTION_MOCK_STATE     (collections + records; default <fixture>/.runtime/dummy-state.json)
- *   EXECUTION_PLAN_STATE     (plans; default <state-dir>/plans.json)
- *   EXECUTION_PROPOSAL_STATE (proposals; default <state-dir>/proposals.json)
- *   EXECUTION_AUDIT_PATH     (JSONL audit, refusals included)
- * Naming family (docs/env-naming-ruling-20261110.md): EXECUTION_* is the only
- * canonical family for state paths and tokens; DUMMY_* are debug-only entries,
- * read second. The eval process injects EXECUTION_* names for those paths and
- * does not set the DUMMY_* debug names (C-class per-case knobs such as
- * DUMMY_READBACK_SHORT keep their fixture names, see docs §9); the probe also
- * deletes ambient DUMMY_* names before each case.
+ * State: per-case root, reset = delete the directory / add a fresh one. Next call
+ * re-seeds. The root comes ONLY from the test-only flag `--state-dir <path>`
+ * (dummy test surface, NOT a consumption protocol): the host's production path
+ * injects no state location at all, and the four former env names
+ * (EXECUTION_MOCK_STATE / EXECUTION_PLAN_STATE / EXECUTION_PROPOSAL_STATE /
+ * EXECUTION_AUDIT_PATH, plus the DUMMY_* debug fallbacks) are retired from this
+ * fixture — ambient state paths cannot redirect it.
+ *   <state-dir>/dummy-state.json   (collections + records)
+ *   <state-dir>/plans.json         (plans)
+ *   <state-dir>/proposals.json     (proposals)
+ *   <state-dir>/audit.jsonl        (JSONL audit, refusals included; only when
+ *                                   --state-dir is given, null otherwise)
+ * Default root (no flag) = <fixture>/.runtime (manual debug runs).
+ * Naming family (docs/env-naming-ruling-20261110.md + the 2026-11-10 consumer
+ * boundary addendum): EXECUTION_* remains the canonical family for the token
+ * surface; DUMMY_* are debug-only entries read second. C-class per-case knobs
+ * such as DUMMY_READBACK_SHORT keep their fixture names (see docs §9).
  * Serve compatibility: when used as bin/generic inside this fixture, fshine sets
  * EXECUTION_SERVE=1 / EXECUTION_INVOCATION / EXECUTION_PLAN_ID / EXECUTION_COMMIT_TOKEN / EXECUTION_GATE_SECRET /
  * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture reads those canonical names
@@ -182,17 +188,47 @@ const CORRECT_FORM = {
   PLAN_NOT_PENDING: 'Plan is not pending activation.',
 };
 function env(name, fallback) { const v = process.env[name]; return v === undefined || v === '' ? fallback : v; }
-/** Canonical-first lookup: EXECUTION_* (docs/env-naming-ruling-20261110.md) wins,
- *  the fixture-specific name is a debug entry (manual runs), then the default. */
+/** Canonical-first lookup for the remaining env surface (tokens + C-class knobs):
+ *  EXECUTION_* wins, the fixture-specific name is a debug entry (manual runs),
+ *  then the default. State paths do NOT go through env (see statePaths). */
 function env2(canonical, debug, fallback) { return env(canonical, env(debug, fallback)); }
+/** Test-only state root (dummy test surface, not a consumption protocol). */
+let stateDirOverride = null;
+/**
+ * Consume `--state-dir <path>` / `--state-dir=<path>` from argv at any position
+ * and strip it before command parsing. Missing value is a usage error (fail
+ * loudly, never silently fall back to the default root).
+ */
+function takeStateDirFlag(argv) {
+  const rest = [];
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--state-dir') {
+      const value = argv[i + 1];
+      if (value === undefined || value === '' || value.startsWith('--')) return { rest, error: '--state-dir requires a path' };
+      stateDirOverride = path.resolve(value);
+      i += 1;
+      continue;
+    }
+    if (arg.startsWith('--state-dir=')) {
+      const value = arg.slice('--state-dir='.length);
+      if (value === '') return { rest, error: '--state-dir requires a path' };
+      stateDirOverride = path.resolve(value);
+      continue;
+    }
+    rest.push(arg);
+  }
+  return { rest, error: null };
+}
 function statePaths() {
-  const stateFile = env2('EXECUTION_MOCK_STATE', 'DUMMY_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
-  const dir = path.dirname(stateFile);
+  const dir = stateDirOverride ?? path.join(FIXTURE_ROOT, '.runtime');
   return {
-    stateFile,
-    planFile: env2('EXECUTION_PLAN_STATE', 'DUMMY_PLAN_STATE', path.join(dir, 'plans.json')),
-    proposalFile: env2('EXECUTION_PROPOSAL_STATE', 'DUMMY_PROPOSAL_STATE', path.join(dir, 'proposals.json')),
-    auditFile: env2('EXECUTION_AUDIT_PATH', 'DUMMY_AUDIT_PATH', null),
+    stateFile: path.join(dir, 'dummy-state.json'),
+    planFile: path.join(dir, 'plans.json'),
+    proposalFile: path.join(dir, 'proposals.json'),
+    // Audit is evidence for the eval harness: only written when the caller asked
+    // for a per-case root. A bare manual run keeps the historical "no audit" default.
+    auditFile: stateDirOverride === null ? null : path.join(dir, 'audit.jsonl'),
   };
 }
 function seedState() {
@@ -233,7 +269,7 @@ function loadPlans() { const s = loadJson(statePaths().planFile, null); return (
 function savePlans(s) { saveJson(statePaths().planFile, s); }
 function loadProposals() { const s = loadJson(statePaths().proposalFile, null); return (s && s.proposals) ? s : { proposals: {} }; }
 function saveProposals(s) { saveJson(statePaths().proposalFile, s); }
-// 审计写失败要响（2026-11-08）：audit 是执行层证据的唯一来源（评测按 EXECUTION_AUDIT_PATH
+// 审计写失败要响（2026-11-08）：audit 是执行层证据的唯一来源（评测数 <state-dir>/audit.jsonl
 // 的行数与 refused 判定），写失败还静默继续 = 调用无痕，评测只能得出 INCONCLUSIVE 甚至
 // 假绿。改为失败即抛——外层 main().catch 会把栈打到 stderr 并以非零码退出，这次调用
 // 因此整体失败（fail-closed），绝不出现"执行了但没留痕"的成功。
@@ -582,7 +618,8 @@ async function planActivate(argv) {
 }
 function usage() {
   return [
-    'Usage: dummy [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
+    'Usage: dummy [--state-dir <path>] [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
+    '  --state-dir <path>  test-only state root (dummy test surface, not a consumption protocol); default <fixture>/.runtime',
     'Examples:',
     '  dummy plan evaluate --task-id task-1 --stdin',
     '  dummy plan current --task-id task-1',
@@ -598,6 +635,9 @@ function usage() {
 }
 async function main() {
   let argv = [...process.argv.slice(2)];
+  const stateDirFlag = takeStateDirFlag(argv);
+  if (stateDirFlag.error) { process.stderr.write(`${stateDirFlag.error}\n`); return 2; }
+  argv = stateDirFlag.rest;
   let mode = 'build';
   if (argv[0] === '--mode') { mode = argv[1]; argv = argv.slice(2); if (!['build', 'serve'].includes(mode)) { process.stderr.write(`Unknown CLI mode: ${mode}\n`); return 2; } }
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(usage()); return argv.length ? 0 : 2; }

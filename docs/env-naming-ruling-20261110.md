@@ -1,5 +1,13 @@
 # 隔离环境变量命名族裁定（2026-11-10，issue #20 切片 E）
 
+> **2026-11-10 续篇（消费端边界收敛）**：本裁定第 2 条「B 类保留在 env」对**四个状态
+> 路径**（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` / `EXECUTION_PROPOSAL_STATE` /
+> `EXECUTION_AUDIT_PATH`）**已被后续仲裁推翻**：状态位置归执行层自己（生产本就零注入），
+> 仓内夹具的状态根改由测试专用 `--state-dir` flag 传入（探针经
+> `FSHINE_EVAL_FIXTURE_STATE_DIR` 桥），夹具对这些名字的 `env2` 读取（含调试回退）已删。
+> 本文其余部分（令牌面命名族、专名降级、C 类旋钮归属）仍生效；现行对账见
+> `docs/environment-variables.md` §4/§4a/§4b。
+
 状态：**生效**。本裁定推翻 `docs/environment-variables.md` §4 于 2026-11-05 写下的
 「夹具专名不是重复别名，保留双名，不作合并」裁定。§4/§4b 已按本文重写；历史文本
 留在这条 git 历史里，不回改（执行纪律 4：文档主张与代码现实对账）。

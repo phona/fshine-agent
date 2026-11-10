@@ -43,36 +43,25 @@ import {
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
 const stockBin = path.join(fixtureRoot, 'bin', 'stock');
-/**
- * 辅助组的 B 类隔离键（规范名 + 调试专名）。辅助组不再按 run 注入后，ambient 值会经
- * 夹具的 env2 查找盖过 auxPaths() 的 per-run 派生，必须在子进程 env 里清场。
- */
-const AUX_GROUP_ENV_KEYS = [
-  'EXECUTION_MEMORY_STATE', 'EXECUTION_BREAKER_STATE', 'EXECUTION_CACHE_STATE',
-  'STOCK_MEMORY_STATE', 'STOCK_BREAKER_STATE', 'STOCK_CACHE_STATE',
-] as const;
 
 function makeCtx(extraEnv: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-'));
-  const env: NodeJS.ProcessEnv = {
+  const env = {
     ...process.env,
-    // 只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）；STOCK_* 是夹具的
-    // 调试专名，评测进程不设它。规范名优先只挡得住“两者都设”的情形；ambient 里只设
-    // 调试名（或规范名）仍会改道 per-case 隔离，故辅助组键先清场。
-    // 辅助组（memory / breaker / cache）不按 run 注入：stock.cjs 的 auxPaths() 从
-    // statePaths().stateFile 的目录派生，状态路径按 run 隔离后辅助文件自动落进同一目录。
-    EXECUTION_MOCK_STATE: path.join(dir, 'state.json'),
-    EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
-    EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
-    EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
+    // 状态根走测试专用 `--state-dir` flag（docs §4a，dummy 测试面，非消费协议）：四个
+    // STATE 路径不再经 env 注入，夹具也不再读它们。辅助组的规范名与状态根同目录（辅助组
+    // 注入面的收口不在本片）。令牌面只注入规范族 EXECUTION_*
+    // （docs/env-naming-ruling-20261110.md）。
+    EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'),
+    EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
+    EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'),
     EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
     EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
     // 用例声明的 C 类旋钮（如 STOCK_READBACK_SHORT）；不在用例体里逐调用改 env。
     ...extraEnv,
   };
-  for (const key of AUX_GROUP_ENV_KEYS) delete env[key];
   return { dir, env, run: (args: string[], input?: string) => {
-    const r = spawnSync(stockBin, args, { encoding: 'utf8', cwd: fixtureRoot, env, input });
+    const r = spawnSync(stockBin, ['--state-dir', dir, ...args], { encoding: 'utf8', cwd: fixtureRoot, env, input });
     return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
   }, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
@@ -168,7 +157,7 @@ describe('second execution layer: stock', () => {
       expect(status.stdout).toContain('"status":"pending"');
       const saved = ctx.env;
       const env2 = { ...saved, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
-      const commitRun = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
+      const commitRun = spawnSync(stockBin, ['--state-dir', ctx.dir, 'commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       const commitEnv = envelope(commitRun.stdout ?? '');
       expect(commitRun.status).toBe(0); expect((commitEnv?.data as Record<string, unknown>)?.verified).toBe(true);
       const after = envelope(ctx.run(['query', 'stock.query', '--shelf', 'north', '--batch', 'B1']).stdout);
@@ -186,7 +175,7 @@ describe('second execution layer: stock', () => {
       const ce = envelope(ctx.run(['prepare', 'stock.proposal', payloadFile]).stdout);
       const proposalId = ce?.data?.proposalId as string;
       const env2 = { ...ctx.env, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
-      const commitRun = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
+      const commitRun = spawnSync(stockBin, ['--state-dir', ctx.dir, 'commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       const commitEnv = envelope(commitRun.stdout ?? '');
       expect(commitEnv?.status).toBe('failed'); expect((commitEnv?.data as Record<string, unknown>)?.verified).toBe(false);
       expect(isCommittedUnverified({ ok: false, verified: false, errorCode: 'PROPOSAL_VERIFY_SHORT' })).toBe(true);
@@ -240,7 +229,7 @@ describe('second execution layer: stock', () => {
       const ce = envelope(a.run(['prepare', 'stock.proposal', payloadFile]).stdout);
       const proposalId = ce?.data?.proposalId as string;
       const env2 = { ...a.env, EXECUTION_COMMIT_TOKEN: proposalToken(proposalId, (ce!.data as Record<string, unknown>).expiresAt as string, 'second-layer-gate-secret') };
-      spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
+      spawnSync(stockBin, ['--state-dir', a.dir, 'commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: env2 });
       expect(envelope(a.run(['query', 'stock.query', '--shelf', 'south']).stdout)?.data?.count).toBe(4);
       expect(envelope(b.run(['query', 'stock.query', '--shelf', 'south']).stdout)?.data?.count).toBe(3);
     } finally { a.cleanup(); b.cleanup(); }

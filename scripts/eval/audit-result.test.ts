@@ -21,7 +21,7 @@
  *      只服务真正查过的那个。端到端复现与孪生见本锁末尾。
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,28 +37,27 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
   it('跑一次 query 后审计行读回该次返回的状态与 items；被拒/失败行不带 result', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'audit-result-'));
     try {
-      const dummyAudit = path.join(dir, 'dummy-audit.jsonl');
-      const dummyEnv = {
-        ...process.env,
-        DUMMY_STATE: path.join(dir, 'dummy-state.json'),
-        DUMMY_PLAN_STATE: path.join(dir, 'dummy-plans.json'),
-        DUMMY_PROPOSAL_STATE: path.join(dir, 'dummy-proposals.json'),
-        EXECUTION_AUDIT_PATH: dummyAudit,
-      };
+      // 状态根走测试专用 --state-dir（docs/environment-variables.md §4a）：夹具不再读
+      // 状态路径 env；审计从同一状态根派生（audit.jsonl）。
+      const dummyStateDir = path.join(dir, 'dummy-state');
+      mkdirSync(dummyStateDir, { recursive: true });
+      const dummyAudit = path.join(dummyStateDir, 'audit.jsonl');
+      const dummyEnv = { ...process.env };
       const dummyBin = path.join(dummyRoot, 'bin', 'dummy');
+      const dummyRun = (args: string[]) => spawnSync(dummyBin, ['--state-dir', dummyStateDir, ...args], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
       // bash 路径：completed
-      const bashOk = spawnSync(dummyBin, ['query', 'dummy.query', '--collection', 'alpha'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      const bashOk = dummyRun(['query', 'dummy.query', '--collection', 'alpha']);
       expect(bashOk.status).toBe(0);
       // bash 路径：无数据（not_found，exitCode 仍是 0，没有 items 可给）
-      spawnSync(dummyBin, ['query', 'dummy.query', '--collection', 'nope'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      dummyRun(['query', 'dummy.query', '--collection', 'nope']);
       // bash 路径：歧义（needs_input，没有 items 可给）
-      spawnSync(dummyBin, ['query', 'dummy.query', '--collection', 'contoso'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      dummyRun(['query', 'dummy.query', '--collection', 'contoso']);
       // bash 路径：门拒（query 模式不开 commit）
-      spawnSync(dummyBin, ['query', 'dummy.commit', '--collection', 'alpha'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      dummyRun(['query', 'dummy.commit', '--collection', 'alpha']);
       // structured 路径：completed（arg 键带 --，与 generic-mock.ts 的 structured 用例同形）
       const callFile = path.join(dir, 'call.json');
       writeFileSync(callFile, JSON.stringify({ operation: 'dummy.query', args: { '--collection': 'beta' } }));
-      const structured = spawnSync(dummyBin, ['call', '--file', callFile], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      const structured = dummyRun(['call', '--file', callFile]);
       expect(structured.status).toBe(0);
 
       const dummyRows = readExecutionAuditLog(dummyAudit)!;
@@ -93,21 +92,18 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
       expect(refusedRow?.refused).toBeTruthy();
       expect(refusedRow?.result).toBeUndefined();
 
-      // stock：同一契约（域字段 sku/qty 投影成 name/value）
-      const stockAudit = path.join(dir, 'stock-audit.jsonl');
-      const stockEnv = {
-        ...process.env,
-        STOCK_STATE: path.join(dir, 'stock-state.json'),
-        STOCK_PLAN_STATE: path.join(dir, 'stock-plans.json'),
-        STOCK_PROPOSAL_STATE: path.join(dir, 'stock-proposals.json'),
-        EXECUTION_AUDIT_PATH: stockAudit,
-      };
+      // stock：同一契约（域字段 sku/qty 投影成 name/value），同样走 --state-dir 状态根。
+      const stockStateDir = path.join(dir, 'stock-state');
+      mkdirSync(stockStateDir, { recursive: true });
+      const stockAudit = path.join(stockStateDir, 'audit.jsonl');
+      const stockEnv = { ...process.env };
       const stockBin = path.join(stockRoot, 'bin', 'stock');
-      const stockOk = spawnSync(stockBin, ['query', 'stock.query', '--shelf', 'north', '--batch', 'B1'], { encoding: 'utf8', cwd: stockRoot, env: stockEnv });
+      const stockRun = (args: string[]) => spawnSync(stockBin, ['--state-dir', stockStateDir, ...args], { encoding: 'utf8', cwd: stockRoot, env: stockEnv });
+      const stockOk = stockRun(['query', 'stock.query', '--shelf', 'north', '--batch', 'B1']);
       expect(stockOk.status).toBe(0);
-      spawnSync(stockBin, ['query', 'stock.query', '--shelf', 'nope'], { encoding: 'utf8', cwd: stockRoot, env: stockEnv });
+      stockRun(['query', 'stock.query', '--shelf', 'nope']);
       // "shelf" 子串同时命中 locked-shelf / empty-shelf ⇒ needs_input
-      spawnSync(stockBin, ['query', 'stock.query', '--shelf', 'shelf'], { encoding: 'utf8', cwd: stockRoot, env: stockEnv });
+      stockRun(['query', 'stock.query', '--shelf', 'shelf']);
 
       const stockRows = readExecutionAuditLog(stockAudit)!;
       const stockRow = stockRows.find((r) => Array.isArray(r.args) && r.args.includes('north'));
@@ -149,7 +145,7 @@ describe('query 响应载荷进审计行（result.status / items / count）', ()
       // --topic beta），平台实际查 alpha（dummy 取 collection || topic）。若按 args 关联，
       // 这次调用的字段证据会被当成 beta 的——nocaliber(beta, payable) 全绿而 beta 从未被查。
       // 按 result 声明的对象规范名关联 ⇒ beta 无据可核，真正查过的 alpha 照常成立。
-      spawnSync(dummyBin, ['query', 'dummy.query', '--collection', 'alpha', '--topic', 'beta'], { encoding: 'utf8', cwd: dummyRoot, env: dummyEnv });
+      dummyRun(['query', 'dummy.query', '--collection', 'alpha', '--topic', 'beta']);
       // 审计行是追加落账：重新读盘才能看到刚跑的那一行（dummyRows 是之前的快照）。
       const twoNameRow = readExecutionAuditLog(dummyAudit)!
         .find((r) => Array.isArray(r.args) && r.args.includes('alpha') && r.args.includes('beta'));

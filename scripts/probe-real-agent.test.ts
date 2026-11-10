@@ -7,7 +7,7 @@
  * committed，那个"用户必须确认"的停点就从干预指标里消失，完整写链被报成零次干预。
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +15,8 @@ import { describe, expect, it } from 'vitest';
 import {
   QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
   auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, errorStateNotes,
-  isolatePlatformState, loadBaselineForProbe, realAmounts, recallMissed, restorePlatformState,
+  isolatePlatformState, loadBaselineForProbe, probeAuditPath, probeCaseStateDir,
+  realAmounts, recallMissed, restorePlatformState,
   unifiedCasePassedOf,
   type ScriptLine, type Turn,
 } from './probe-real-agent';
@@ -957,36 +958,36 @@ describe('loadBaselineForProbe：黑盒缺失放宽、audited 仍 fail-closed', 
 });
 
 /**
- * ambient 击穿回归锁（issue #20 切片 A 建立，切片 E 随命名族裁定更新）：dummy 夹具按
- * `env2(EXECUTION_*, DUMMY_*)` 查找状态文件与令牌面——规范名优先，专名是手工调试入口。
- * 评测进程若从 shell 继承任一 DUMMY_*，它不该改变任何 per-case 路径；而规范名一旦漏注入，
- * 它也不该静默回落到 shell 值。本组断言预置四个状态路径专名 + 三个令牌面专名后：
- *   ① 隔离后七个专名全部被删除，且四个规范名（含 EXECUTION_PROPOSAL_STATE）都落在本用例目录；
- *   ② restorePlatformState 把 ambient 原值原样恢复（备份/恢复对称）；
- *   ③ 再隔离一次拿到另一份路径（per-case 隔离不是共用文件）。
+ * ambient 击穿回归锁（issue #20 切片 A 建立，2026-11-10 续篇改状态根传导）。
+ *
+ * 2026-11-10 消费端边界裁定后：夹具对四个状态路径（MOCK / PLAN / PROPOSAL / AUDIT）的
+ * env2 读取（含调试回退）全部退役——状态根只认测试专用 `--state-dir` flag。探针没有
+ * argv 通道（宿主 spawn 固定 argv），故经 `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥把
+ * per-case 根交给夹具 shell 入口，入口翻成 flag。本组断言预置：
+ *   · 四个状态的 ambient 专名与规范名（证明夹具忽略它们，不会被 ambient 改道）；
+ *   · ambient 桥键（证明探针的 per-case 覆盖赢——桥值必须指向 case 目录）；
+ *   · 三个令牌面专名（证明探针仍然清场它们）。
+ * 然后：
+ *   ① 隔离后桥键 == case 目录；四个状态规范名保持 ambient 原值（探针不再注入/清场它们）；
+ *   ② 用隔离后的 process.env 真跑一次夹具：状态/审计文件只落在 case 目录，ambient 根为空
+ *      （抽掉桥覆盖 → 夹具会落到 ambient 根，本断言必红）；
+ *   ③ probeAuditPath() == caseDir/audit.jsonl（探针传给 safety-gate 的路径与夹具派生
+ *      同根同规则）；restorePlatformState 把 ambient 原值原样恢复（备份/恢复对称）；
+ *   ④ 再隔离一次拿到另一份 case 目录（per-case 隔离不是共用文件）。
  */
-describe('isolatePlatformState：ambient DUMMY_* 不击穿 per-case 隔离', () => {
-  const AMBIENT_STATE = {
-    DUMMY_STATE: '/tmp/ambient-state.json',
-    DUMMY_PLAN_STATE: '/tmp/ambient-plans.json',
-    DUMMY_PROPOSAL_STATE: '/tmp/ambient-proposals.json',
-    DUMMY_AUDIT_PATH: '/tmp/ambient-audit.jsonl',
-  } as const;
-  const AMBIENT_TOKENS = {
-    DUMMY_GATE_SECRET: '/tmp/ambient-gate-secret',
-    DUMMY_COMMIT_TOKEN: '/tmp/ambient-commit-token',
-    DUMMY_PLAN_ACTIVATION_SECRET: '/tmp/ambient-plan-secret',
-  } as const;
-  const AMBIENT = { ...AMBIENT_STATE, ...AMBIENT_TOKENS } as const;
-  const EXECUTION_FALLBACK = {
-    DUMMY_STATE: 'EXECUTION_MOCK_STATE',
-    DUMMY_PLAN_STATE: 'EXECUTION_PLAN_STATE',
-    DUMMY_PROPOSAL_STATE: 'EXECUTION_PROPOSAL_STATE',
-    DUMMY_AUDIT_PATH: 'EXECUTION_AUDIT_PATH',
-  } as const;
-  const EXECUTION_KEYS = [
-    'EXECUTION_PLAN_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH',
-    'EXECUTION_PROPOSAL_STATE',
+describe('isolatePlatformState：状态根只走测试桥 + 专名清场', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const fixtureRoot = path.join(repoRoot, 'scripts', 'eval', 'fixtures', 'dummy-platform');
+  const genericBin = path.join(fixtureRoot, 'bin', 'generic');
+  const RATE_LIMIT_KEY = 'EXECUTION_RATE_LIMIT_STATE';
+  const STATE_KEYS = [
+    'EXECUTION_MOCK_STATE', 'EXECUTION_PLAN_STATE', 'EXECUTION_PROPOSAL_STATE', 'EXECUTION_AUDIT_PATH',
+  ] as const;
+  const TOKEN_KEYS = [
+    'DUMMY_GATE_SECRET', 'DUMMY_COMMIT_TOKEN', 'DUMMY_PLAN_ACTIVATION_SECRET',
+  ] as const;
+  const STATE_DEBUG_KEYS = [
+    'DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH',
   ] as const;
 
   const savedOf = (keys: readonly string[]): Record<string, string | undefined> =>
@@ -999,42 +1000,91 @@ describe('isolatePlatformState：ambient DUMMY_* 不击穿 per-case 隔离', () 
     }
   };
 
-  it('预置 ambient 专名后仍解析到 per-case 路径，restore 原样恢复', () => {
+  it('预置 ambient 状态名/桥键后，夹具仍只用 case 目录；restore 原样恢复', () => {
     const stateDir = mkdtempSync(path.join(os.tmpdir(), 'probe-isolate-'));
-    const savedAmbient = savedOf(Object.keys(AMBIENT));
-    const savedExecution = savedOf(EXECUTION_KEYS);
-    // 夹具查找语义（dummy.cjs 的 env / env2 同款：空串按未设处理）。
-    const env = (name: string): string | undefined => {
-      const value = process.env[name];
-      return value === undefined || value === '' ? undefined : value;
+    const ambientRoot = mkdtempSync(path.join(os.tmpdir(), 'probe-ambient-'));
+    const ambient: Record<string, string> = {
+      // 四个状态路径的 ambient 名（夹具已不读；保留预置证明它们不再能改道）
+      DUMMY_STATE: path.join(ambientRoot, 'dummy-state.json'),
+      DUMMY_PLAN_STATE: path.join(ambientRoot, 'dummy-plans.json'),
+      DUMMY_PROPOSAL_STATE: path.join(ambientRoot, 'dummy-proposals.json'),
+      DUMMY_AUDIT_PATH: path.join(ambientRoot, 'dummy-audit.jsonl'),
+      EXECUTION_MOCK_STATE: path.join(ambientRoot, 'mock.json'),
+      EXECUTION_PLAN_STATE: path.join(ambientRoot, 'plans.json'),
+      EXECUTION_PROPOSAL_STATE: path.join(ambientRoot, 'proposals.json'),
+      EXECUTION_AUDIT_PATH: path.join(ambientRoot, 'audit.jsonl'),
+      // ambient 桥键：探针必须覆盖它，否则夹具会写到 ambient 根
+      FSHINE_EVAL_FIXTURE_STATE_DIR: ambientRoot,
+      // 令牌面专名：探针必须清场
+      DUMMY_GATE_SECRET: path.join(ambientRoot, 'gate-secret'),
+      DUMMY_COMMIT_TOKEN: path.join(ambientRoot, 'commit-token'),
+      DUMMY_PLAN_ACTIVATION_SECRET: path.join(ambientRoot, 'plan-secret'),
     };
+    const savedAmbient = savedOf(Object.keys(ambient));
+    const savedRate = savedOf([RATE_LIMIT_KEY]);
+    const savedGate = savedOf(['EXECUTION_GATE_SECRET', 'EXECUTION_COMMIT_TOKEN']);
     try {
-      Object.assign(process.env, AMBIENT);
-      isolatePlatformState(stateDir);
+      Object.assign(process.env, ambient);
+      // 直提 commit 走「有 secret 才验」的遗留契约；本断言不考令牌门，剥掉 ambient secret。
+      delete process.env['EXECUTION_GATE_SECRET'];
+      delete process.env['EXECUTION_COMMIT_TOKEN'];
+      const firstCaseDir = isolatePlatformState(stateDir);
+      expect(firstCaseDir.startsWith(stateDir)).toBe(true);
+      expect(probeCaseStateDir()).toBe(firstCaseDir);
+      // 桥覆盖赢：探针的 per-case 根压过 ambient 值。
+      expect(process.env['FSHINE_EVAL_FIXTURE_STATE_DIR']).toBe(firstCaseDir);
+      // 探针不再注入/清场四个状态路径：ambient 原值保持不动（夹具忽略它们）。
+      for (const key of STATE_KEYS) expect(process.env[key]).toBe(ambient[key]);
+      for (const key of STATE_DEBUG_KEYS) expect(process.env[key]).toBe(ambient[key]);
+      // 令牌面专名被清场（规范名由 harness 注入，专名不得可见）。
+      for (const key of TOKEN_KEYS) expect(process.env[key], `${key} 仍在 ambient：夹具会从第二顺位专名取令牌面`).toBeUndefined();
 
-      for (const [specific, fallback] of Object.entries(EXECUTION_FALLBACK)) {
-        expect(process.env[specific], `${specific} 仍在 ambient：夹具 env2 会从第二顺位专名取它，per-case 隔离失去唯一性`).toBeUndefined();
-        expect(env(specific) ?? env(fallback)).toBe(process.env[fallback]);
-        expect(process.env[fallback]!.startsWith(stateDir)).toBe(true);
-      }
-      // 令牌面的专名同样必须不可见（夹具 env2 的第二顺位是它们）。
-      for (const key of Object.keys(AMBIENT_TOKENS)) {
-        expect(process.env[key], `${key} 仍在 ambient：夹具会从第二顺位专名取令牌面`).toBeUndefined();
-      }
-      const firstAudit = process.env['EXECUTION_AUDIT_PATH'];
+      // 真跑一次夹具（commit 会落主状态；query 只读不写）：状态/审计只落 case 目录
+      // （--state-dir 由桥传导）。
+      const run = spawnSync(genericBin, ['commit', 'dummy.commit', '--collection', 'alpha', '--count', '1'], {
+        encoding: 'utf8', cwd: fixtureRoot, env: process.env,
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect(run.stdout).toContain('"status":"completed"');
+      expect(existsSync(path.join(firstCaseDir, 'dummy-state.json')), '夹具主状态必须落在 case 目录').toBe(true);
+      expect(existsSync(path.join(firstCaseDir, 'audit.jsonl')), '夹具审计必须从同一状态根派生').toBe(true);
+      // 探针传给 safety-gate 的审计路径 == 夹具实际写入的路径（同根同规则）。
+      expect(probeAuditPath()).toBe(path.join(firstCaseDir, 'audit.jsonl'));
+      // ambient 根没有被写：抽掉桥覆盖 / 恢复 env 读取，这条必红。
+      expect(readdirSync(ambientRoot), 'ambient 状态根被写入 = 隔离被击穿').toEqual([]);
 
-      // restore 对称：被删的 ambient 专名原值回来，通用名回到隔离前的值。
+      // restore 对称：ambient 原值回来（桥键 + 状态名 + 令牌专名）。
       restorePlatformState();
-      for (const [key, value] of Object.entries(AMBIENT)) expect(process.env[key]).toBe(value);
-      for (const key of EXECUTION_KEYS) expect(process.env[key]).toBe(savedExecution[key]);
+      for (const [key, value] of Object.entries(ambient)) expect(process.env[key]).toBe(value);
 
-      // 再隔一次 = 另一份 per-case 文件（不是 22 例共用一个）。
-      isolatePlatformState(stateDir);
-      expect(process.env['EXECUTION_AUDIT_PATH']).not.toBe(firstAudit);
+      // 再隔一次 = 另一份 case 目录（不是所有用例共用一个）。
+      const secondCaseDir = isolatePlatformState(stateDir);
+      expect(secondCaseDir).not.toBe(firstCaseDir);
+      expect(probeCaseStateDir()).toBe(secondCaseDir);
     } finally {
       restorePlatformState();
       restoreSaved(savedAmbient);
-      restoreSaved(savedExecution);
+      restoreSaved(savedRate);
+      restoreSaved(savedGate);
+      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(ambientRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('缺限流键以外的规范名不注入：四个状态规范名在隔离后仍是 ambient 值（生产零注入语义）', () => {
+    const stateDir = mkdtempSync(path.join(os.tmpdir(), 'probe-isolate-'));
+    const savedRate = savedOf([RATE_LIMIT_KEY]);
+    // 运行者环境可能自带 EXECUTION_* 状态路径（文档允许的 mock 联调方式）；本用例的判据是
+    // “探针不注入也不改写它们”，不是“它们必然缺席”——与隔离前逐键比较（2026-11-10 评审修）。
+    const ambientState = savedOf(STATE_KEYS);
+    try {
+      delete process.env[RATE_LIMIT_KEY];
+      isolatePlatformState(stateDir);
+      expect(process.env[RATE_LIMIT_KEY]!.startsWith(stateDir), '限流状态仍按例隔离').toBe(true);
+      for (const key of STATE_KEYS) expect(process.env[key], `${key} 不应被探针注入或改写`).toBe(ambientState[key]);
+    } finally {
+      restorePlatformState();
+      restoreSaved(savedRate);
       rmSync(stateDir, { recursive: true, force: true });
     }
   });

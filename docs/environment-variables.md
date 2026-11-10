@@ -59,19 +59,19 @@
 | `EXECUTION_INVOCATION` | 网关铸造 / serve 门校验 | 缺失 / 非法 = serve 调用一律拒绝 |
 | `EXECUTION_ALLOW_REAL` | 部署 / 执行层 实执行门 | 仅字面量 `1` 授权；缺失 = 触平台执行被拒 `REAL_EXECUTION_NOT_ALLOWED`，纯本地计算不受影响 |
 | `EXECUTION_EXECUTOR` | 部署 / **执行层自己的**执行器切换（宿主不读） | `mock` = 替身应答器；未设 = 意图真平台，但仍须过 `EXECUTION_ALLOW_REAL` 门。2026-11-08 起宿主侧读取已删（`platform-mock.ts` 整模块退役）：编排层不判"这个部署允不允许写" |
-| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。宿主脚本只重置显式声明过的这一个 |
+| `EXECUTION_MOCK_STATE` | 部署 / 执行层 mock 状态文件 | 缺失时由**执行层平台**用自己的缺省（编排层不再兜底路径）；mock 下缺失文件即 `MOCK_STATE_MISSING`（exit 3）。**宿主不再注入**（2026-11-10 消费端边界裁定）；仓内夹具不读该键（状态根走测试专用 `--state-dir`，§4a）。真平台契约行保留——生产本就零注入 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | 部署 / 计划激活令牌（yaml `execution.planActivationSecret` 是源；本变量为非空覆盖口） | 缺省 = 装配进程内生成，重启失效 |
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
-| `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
-| `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
-| `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json`；宿主不再按例注入（仓内夹具不读；真平台仍读，缺省不变） |
+| `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`。**宿主不再按例注入**（探针/夹具改测试专用 `--state-dir`，§4a）；真平台契约行保留——生产本就零注入 |
+| `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径。**宿主不再按例注入**（探针从状态根派生审计文件，§4a）；真平台契约行保留——生产本就零注入 |
+| `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json` |
 
 ## 3. 执行层治理（执行层 读，宿主只继承 / 按用例隔离）
 
 | 变量族 | 作用 / 默认值 / 缺失行为 |
 | --- | --- |
 | `EXECUTION_RATE_LIMIT` | 限流 JSON 部分覆盖默认桶；`off` 整体旁路（仅排障）；缺省 = 执行层默认桶 |
-| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位 |
+| `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位。2026-11-10 起**宿主不再注入提案状态路径**（夹具从测试专用 `--state-dir` 根派生，§4a）；memory/breaker 规范名仍可作手工/调试覆盖口，生产零注入 |
 | `EXECUTION_PROPOSAL_TTL_SECONDS` | 提案 TTL；缺省 30 分钟 |
 | `EXECUTION_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`（8 个）+ `EXECUTION_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT`（4 个） | 计划档位阈值；缺省 calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180；注意权重线第三档真名是 `BUDGET`（`EXECUTION_PLAN_BUDGET_WEIGHT`），不是 `CONFIRM`——`CONFIRM` 只用于 calls/seconds 线，设 `EXECUTION_PLAN_CONFIRM_WEIGHT` 会静默无效 |
 | `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提 / 重通知上限；**执行层策略参数，宿主不设**（值源在执行层配置层；2026-11 env 治理 v2 起 env 不再是通道）；缺省 30 / 3 / 8 / 3；契约行保留（真平台仍读这些参数），e2e 不再按用例覆盖 |
@@ -86,24 +86,53 @@
 
 ## 4. 通用夹具（fshine generic-mock，隔离语义）
 
-**命名族裁定（2026-11-10，issue #20 切片 E；全文 `docs/env-naming-ruling-20261110.md`）**：
-`EXECUTION_*` 是**唯一规范族**，`DUMMY_*` 降级为**调试入口**（手工跑夹具时可用）。
-夹具按 `env2(EXECUTION_*, DUMMY_*, 缺省)` 查找——规范名优先、专名第二顺位。
-评测进程只注入规范名（`generic-mock.ts` 的 `Ctx`），探针启动时 delete ambient 专名
-（切片 A 建立，切片 E 扩到令牌面）。2026-11-05「保留双名」的旧裁定已推翻：隔离的真实机制是 per-case 目录，
-不是名字不同；专名优先会让任何 ambient 专名（含漏列的新键）静默改道 per-case 隔离。
+**命名族裁定（2026-11-10 续篇，issue #20 消费端边界收敛）**：`EXECUTION_*` 仍是跨层
+令牌面与真平台状态契约的唯一规范族，`DUMMY_*` 降级为**调试入口**（手工跑夹具时可用）。
+但**四个状态路径**（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` /
+`EXECUTION_PROPOSAL_STATE` / `EXECUTION_AUDIT_PATH`）已从夹具读取面**退役**：夹具不再读
+任何 ambient 状态路径（含 `DUMMY_*` 调试回退），状态位置归执行层自己（生产本就零注入）。
+per-run 隔离是 fshine 测试基础设施对自己 dummy 夹具的事务，走**测试专用**
+`--state-dir <path>` flag（**dummy 测试面，非消费协议**，见 §4a），不经宿主消费协议。
 
 | 规范名（唯一注入面） | 调试专名（手工跑） | 作用 / 缺省 |
 | --- | --- | --- |
-| `EXECUTION_MOCK_STATE` | `DUMMY_STATE` | 隔离路径：夹具集合与记录状态文件；缺省 `<夹具>/.runtime/dummy-state.json`；其所在目录即其余状态文件的缺省目录 |
-| `EXECUTION_PLAN_STATE` | `DUMMY_PLAN_STATE` | 计划账本；缺省 `<主状态文件所在目录>/plans.json` |
-| `EXECUTION_PROPOSAL_STATE` | `DUMMY_PROPOSAL_STATE` | 提案状态库；缺省 `<主状态文件所在目录>/proposals.json` |
-| `EXECUTION_AUDIT_PATH` | `DUMMY_AUDIT_PATH` | 审计 JSONL（含拒绝）；缺省 null（不写审计文件） |
 | `EXECUTION_GATE_SECRET` | `DUMMY_GATE_SECRET` | 提案提交令牌验签密钥；缺省空串 = 提案提交一律拒绝（fail-closed）；`dummy.commit` 直提路径仍是「有 secret 才验」的遗留契约（debt-ledger D-204 待统一） |
 | `EXECUTION_COMMIT_TOKEN` | `DUMMY_COMMIT_TOKEN` | 提案提交令牌；缺省空串 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | `DUMMY_PLAN_ACTIVATION_SECRET` | 计划激活令牌密钥；缺省空串 |
 
-夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的隔离路径与令牌面
+### 4a. 状态根（测试专用 flag，非消费协议）
+
+`--state-dir <path>` 只属于仓内 dummy/stock 夹具的测试面：宿主生产路径与跨层消费协议
+都不携带它。夹具从该根派生全部状态文件（`dummy.cjs` / `stock.cjs` 的 `statePaths()` /
+`auxPaths()`）：
+
+| 派生文件 | 作用 |
+| --- | --- |
+| `<state-dir>/dummy-state.json`（stock：`stock-state.json`） | 主状态（集合/记录，或货架/物品） |
+| `<state-dir>/plans.json` | 计划账本 |
+| `<state-dir>/proposals.json` | 提案状态库 |
+| `<state-dir>/audit.jsonl` | 调用审计 JSONL（含拒绝）；只在显式传该 flag 时写 |
+| stock 另有 `<state-dir>/memory.json` / `breaker.json` / `cache.json` | 辅助组，缺省从同一根派生 |
+
+未传 flag 时主状态缺省 `<夹具>/.runtime/<夹具>-state.json`，审计不写（null）——那是手工
+调试形态，不是评测隔离机制。
+
+| 变量（仅真平台契约，宿主不注入、夹具不读） | 说明 |
+| --- | --- |
+| `EXECUTION_MOCK_STATE` | 真平台部署契约行保留（§2）；夹具读取已退役 |
+| `EXECUTION_PLAN_STATE` | 真平台部署契约行保留（§2）；夹具读取已退役 |
+| `EXECUTION_PROPOSAL_STATE` | 真平台部署契约行保留（§3）；夹具读取已退役 |
+| `EXECUTION_AUDIT_PATH` | 真平台部署契约行保留（§2）；夹具读取已退役 |
+
+> 探针的传导桥：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
+> `isolatePlatformState` 无法直接把 flag 传进夹具；它改为把 per-case 根写进
+> `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy` / `bin/generic` /
+> `bin/stock`）翻译成 `--state-dir`。该变量是 fshine 评测基础设施私有（`platform-leak-lint`
+> 在册的「测试专用变量，非两仓契约」），宿主生产路径与真平台零读取；generic-mock /
+> second-layer / plan-policy / generic-model-eval 直接传 flag，不经 env。
+> 退役条件：a2a 信封携带 per-run 参数时，本桥与四个 `EXECUTION_*` 状态注入一并退役。
+
+夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的令牌面
 由评测代码注入**规范名**（`generic-mock.ts` / `second-layer.ts` / `second-layer.test.ts` /
 `plan-policy.test.ts` / `generic-model-eval.py`），不进 `config/agent.yaml`；
 `DUMMY_*` / `STOCK_*` 是夹具调试专名，评测进程不设。`EXECUTION_GATE_SECRET` /
@@ -124,25 +153,21 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
 `generic-model-eval.py`）读取，`packages/` 与 `apps/` 生产代码对 `STOCK_*` 零读取。
 空串按缺失处理（夹具 `env()` 把 `''` 当作未设）。命名族按 §4 的裁定：
 `EXECUTION_*` 规范名优先，`STOCK_*` 是调试入口；评测进程只注入规范名。
-计数说明：按 `env()` / `env2()` 实际读取点逐个核实为 **26 个**；本节只列
-**10 个隔离路径与令牌面**（7 个状态路径 + 3 个令牌），**10 条全部有规范名**
-（其中 5 条此前已有回退，5 条按本裁定补齐）。其余 16 个按用例旋钮
-（`STOCK_PLAN_ID` / `STOCK_REQUIRE_PLAN` / `STOCK_READBACK_SHORT` /
-`STOCK_PROPOSAL_TTL_SECONDS` / `STOCK_PLAN_*` 12）见 §9.2，**不受**命名族裁定影响
-（C 类仍是夹具专名）。若按字面 token 扫夹具目录会多出 `STOCK_*` 前缀提法与
-`generic-model-eval.py` 的 `STOCK_BIN`（Python 本地路径变量，不是环境变量），
-两者均不计入。夹具 README 此前称「各状态文件均接受 `EXECUTION_*` 别名」并不准确；
-本裁定后该说法成立且升级为「规范名优先」，README 已同步。
+**状态根同 §4a**：四个状态路径（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` /
+`EXECUTION_PROPOSAL_STATE` / `EXECUTION_AUDIT_PATH`）的夹具读取已退役（含 `STOCK_*` 调试
+回退），状态文件从测试专用 `--state-dir` 根派生。计数说明：按 `env()` / `env2()` 实际
+读取点逐个核实为 **22 个**（四个状态路径退役后由 26 减 4）；本节只列**6 个 env2 配对**
+（三个辅助组 + 三个令牌面），其余 16 个按用例旋钮（`STOCK_PLAN_ID` / `STOCK_REQUIRE_PLAN` /
+`STOCK_READBACK_SHORT` / `STOCK_PROPOSAL_TTL_SECONDS` / `STOCK_PLAN_*` 12）见 §9.2，
+**不受**命名族裁定影响（C 类仍是夹具专名）。四个状态路径的真平台契约行见 §4a。
+若按字面 token 扫夹具目录会多出 `STOCK_*` 前缀提法与 `generic-model-eval.py` 的
+`STOCK_BIN`（Python 本地路径变量，不是环境变量），两者均不计入。
 
 | 规范名（唯一注入面） | 调试专名（手工跑） | 作用 / 缺省 |
 | --- | --- | --- |
-| `EXECUTION_MOCK_STATE` | `STOCK_STATE` | 货架与物品状态文件；缺省 `<夹具>/.runtime/stock-state.json`；其所在目录即其余状态文件的缺省目录 |
-| `EXECUTION_PLAN_STATE` | `STOCK_PLAN_STATE` | 计划账本；缺省 `<主状态文件所在目录>/plans.json` |
-| `EXECUTION_PROPOSAL_STATE` | `STOCK_PROPOSAL_STATE` | 提案状态库；缺省 `<主状态文件所在目录>/proposals.json` |
-| `EXECUTION_AUDIT_PATH` | `STOCK_AUDIT_PATH` | 审计 JSONL（含拒绝）；缺省 null（不写审计文件） |
-| `EXECUTION_MEMORY_STATE` | `STOCK_MEMORY_STATE` | 记忆辅助组状态；缺省 `<主状态文件所在目录>/memory.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`） |
-| `EXECUTION_BREAKER_STATE` | `STOCK_BREAKER_STATE` | 熔断辅助组状态；缺省 `<主状态文件所在目录>/breaker.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`） |
-| `EXECUTION_CACHE_STATE` | `STOCK_CACHE_STATE` | 缓存辅助组状态；缺省 `<主状态文件所在目录>/cache.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`）。`EXECUTION_CACHE_STATE` 是夹具侧规范名；执行层的缓存目录 / TTL 是 §3 的 `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS`，不是同一事物 |
+| `EXECUTION_MEMORY_STATE` | `STOCK_MEMORY_STATE` | 记忆辅助组状态；缺省 `<状态根>/memory.json`。**宿主不再注入**；辅助组缺省从状态根派生（`auxPaths()`） |
+| `EXECUTION_BREAKER_STATE` | `STOCK_BREAKER_STATE` | 熔断辅助组状态；缺省 `<状态根>/breaker.json`。**宿主不再注入**；辅助组缺省从状态根派生（`auxPaths()`） |
+| `EXECUTION_CACHE_STATE` | `STOCK_CACHE_STATE` | 缓存辅助组状态；缺省 `<状态根>/cache.json`。**宿主不再注入**；辅助组缺省从状态根派生（`auxPaths()`）。`EXECUTION_CACHE_STATE` 是夹具侧规范名；执行层的缓存目录 / TTL 是 §3 的 `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS`，不是同一事物 |
 | `EXECUTION_GATE_SECRET` | `STOCK_GATE_SECRET` | 提案提交令牌验签密钥；缺省空串（空则不验令牌） |
 | `EXECUTION_COMMIT_TOKEN` | `STOCK_COMMIT_TOKEN` | 提案提交令牌；缺省空串 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | `STOCK_PLAN_ACTIVATION_SECRET` | 计划激活令牌密钥；缺省空串 |
@@ -225,14 +250,14 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
 §9.1 / §9.2 收的是**按用例调参**的夹具旋钮，不进部署配置；§9.3 收宿主按计划 /
 法域逐次注入的执行契约键。承载机制（issue #20 切片 B）只做**声明注入**：
 
-- 夹具仍从 `process.env` 读取。B 类隔离路径与令牌面按 §4/§4b 的规范名优先查找
-  （`env2(EXECUTION_*, 专名, 缺省)`，2026-11-10 命名族裁定）；本节的 C 类旋钮仍是
-  夹具专名，查找顺序不变。本切片**不清理 ambient C 类同名键**：未在 `fixture.env` /
-  `fixture.planPolicy` 声明的键，评测进程仍会继承 shell 里的值。探针的 ambient 清场
-  覆盖 §4 的七个夹具调试专名（四个状态路径 + 三个令牌面），并按用例注入四个规范名
-  （含 `EXECUTION_PROPOSAL_STATE`），但不覆盖本节 C 类旋钮。因此评测进程**不得 export**
-  本节变量（实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock` 会让
-  smoke-prepare-commit / g-state-isolation / g-ballot-second-domain 三例红；
+- B 类令牌面按 §4/§4b 的规范名优先查找（`env2(EXECUTION_*, 专名, 缺省)`，2026-11-10
+  命名族裁定）；四个状态路径的 env 读取已于 2026-11-10 续篇退役（夹具走测试专用
+  `--state-dir`，§4a）。本节的 C 类旋钮仍是夹具专名，查找顺序不变。本切片**不清理
+  ambient C 类同名键**：未在 `fixture.env` / `fixture.planPolicy` 声明的键，评测进程仍会
+  继承 shell 里的值。探针的 ambient 清场只覆盖 §4 的三个令牌面调试专名；状态根由
+  `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥按用例覆盖（§4a），四个状态路径的规范名不再注入。
+  因此评测进程**不得 export** 本节变量（实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock`
+  会让 smoke-prepare-commit / g-state-isolation / g-ballot-second-domain 三例红；
   `STOCK_PLAN_HARD_CALLS=1` 会让 second-layer 计划门用例从 confirm 变 stop）。
 - `scripts/eval/cases.yaml` 的 `fixture.env`：逐用例平铺标量，`loadProbeCases`
   包装器在用例前后注入/还原（`scripts/probe-real-agent.ts`）。

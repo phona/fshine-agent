@@ -4,11 +4,11 @@
  * 使用独立的验收数据库,不触碰生产数据/生产连接。
  * 用法:node --env-file=.env --import tsx scripts/acceptance.ts [--fault] [--keep-mock-state]
  * --fault:使用指向不存在目录的临时配置,验收 2.5 的失败降级。
- * --keep-mock-state:mock 运行后保留 EXECUTION_MOCK_STATE 状态文件（脚本私有旋钮，
- * 走命令行，不设环境变量）；缺省每次启动重置该状态文件保证用例可重复。
- * mock 联调:.env 设 EXECUTION_MOCK_STATE=<路径> 后,写链路用例(5.x)走
- * 提案→确认码→dry-run→commit→读回全链,且每次启动重置该状态文件保证用例可重复
- * (未显式设 EXECUTION_MOCK_STATE 时执行层平台用自己的缺省状态文件,宿主不碰)。
+ * --keep-mock-state:mock 运行后保留状态（脚本私有旋钮，走命令行，不设环境变量）；
+ * 缺省每次启动重置状态根 / mock 状态文件保证用例可重复。
+ * mock 联调:dummy 夹具只认测试专用 `--state-dir`（docs §4a,非消费协议）;验收把
+ * FSHINE_EVAL_FIXTURE_STATE_DIR 指到 per-run 根,状态/审计文件从它派生,每次启动重置
+ * 该根保证用例可重复(--keep-mock-state 时保留)。
  * 出口保真:progress 与 notice 都按生产 adapter 的三个参数交给 handler
  * (channel-wecom/src/adapter.ts 的 dispatchMessage)。notice 原文收进报告与
  * records JSON——少了它,plan-runtime 的 fail-closed 守卫会把任何走计划门的
@@ -365,14 +365,6 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
 async function main(): Promise<void> {
   // 与生产一致：验收跑在 serve 法域内（平台 bin/example-gateway 网关与守卫真实生效）。
   process.env.EXECUTION_SERVE = '1'; // 平台 serve 法域
-  // 执行审计（2026-11-08 修）：夹具 auditFile 缺省 null（dummy.cjs statePaths 的 env2
-  // fallback），不设 EXECUTION_AUDIT_PATH 时写链整条跑下来没有任何执行层审计痕迹，
-  // 提案失败原因（拒绝行/退出码只落在审计文件里）不可诊。参考 probe-real-agent.ts
-  // isolatePlatformState 的 per-case 隔离做法；验收是单次运行，一个路径即可。runId
-  // 精度是分钟，同分钟重跑会撞同一路径——先清掉，保证该文件只含本次运行的证据。
-  const auditPath = path.join(dataDir, `acceptance-audit-${runId}.jsonl`);
-  rmSync(auditPath, { force: true });
-  process.env.EXECUTION_AUDIT_PATH = auditPath;
   // 统一配置路径：与探针脚本同源（resolve-config-path.ts）。显式入口保留原契约：
   // --config=<path> 命令行 > AGENT_CONFIG_PATH 环境变量 > config/agent.yaml（存在才用）
   // > scripts/eval/eval.agent.yaml（回退时物化成绝对路径副本）。
@@ -429,16 +421,36 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
   }
   const platformRoot = config.contextProfiles[profileId ?? '']?.root;
 
-  // mock 联调：重置 mock 状态，用例的"第 N 张"预期才可重复。判据只剩一个脚本自己显式
-  // 设的 EXECUTION_MOCK_STATE——宿主不再读 EXECUTION_EXECUTOR 判"是不是 mock"，也不再
-  // 替执行层发明默认状态路径（2026-11-08 删除 platform-mock.ts 的 ensureMockStatePath：
-  // 那是宿主侧的环境读取，写/跑什么模式归执行层与部署配置）。未显式设时平台侧用自己的
-  // 缺省状态文件，本脚本不碰。
-  const mockStatePath = process.env['EXECUTION_MOCK_STATE'];
-  if (mockStatePath && existsSync(mockStatePath) && !keepMockState) {
-    rmSync(mockStatePath);
-    console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
+  // 执行审计 / 状态根（2026-11-10 消费端边界裁定）：两条路——
+  // ① 仓内 dummy 夹具：只认测试专用 `--state-dir`（docs §4a），四个状态路径不再经 env
+  //    注入，夹具也不再读它们。验收把测试桥指向 per-run 根，全部状态/审计文件从它派生；
+  //    runId 精度是分钟，同分钟重跑会撞同一根——先清掉，保证证据只含本次运行。
+  // ② 真平台（config/agent.yaml 指向仓外）：走 env 回退模式（裁定失效条件）——真平台按
+  //    契约读 EXECUTION_AUDIT_PATH / EXECUTION_MOCK_STATE，测试桥对它零意义。
+  const fixtureRoot = path.join(repoRoot, 'scripts', 'eval', 'fixtures');
+  const platformRootAbs = platformRoot ? path.resolve(platformRoot) : '';
+  const fixtureRelative = platformRootAbs === '' ? '' : path.relative(fixtureRoot, platformRootAbs);
+  const isRepoFixture = fixtureRelative !== '' && !fixtureRelative.startsWith('..');
+  let auditPath: string;
+  if (isRepoFixture) {
+    const stateRoot = path.join(dataDir, `acceptance-state-${runId}`);
+    if (!keepMockState) rmSync(stateRoot, { recursive: true, force: true });
+    process.env['FSHINE_EVAL_FIXTURE_STATE_DIR'] = stateRoot;
+    auditPath = path.join(stateRoot, 'audit.jsonl');
+  } else {
+    auditPath = path.join(dataDir, `acceptance-audit-${runId}.jsonl`);
+    rmSync(auditPath, { force: true });
+    process.env.EXECUTION_AUDIT_PATH = auditPath;
+    // mock 联调（真平台 mock 应答器）：重置 mock 状态，用例的"第 N 张"预期才可重复。
+    const mockStatePath = process.env['EXECUTION_MOCK_STATE'];
+    if (mockStatePath && existsSync(mockStatePath) && !keepMockState) {
+      rmSync(mockStatePath);
+      console.log(JSON.stringify({ event: 'mock_state_reset', state: mockStatePath }));
+    }
   }
+
+  // 夹具模式下状态根本身 per-run；--keep-mock-state 让同分钟重跑保留已有状态，
+  // 便于复现。真平台模式沿用旧契约（审计文件 + mock 状态文件按 runId 清理）。
 
   // 与生产共用同一份装配：避免验收脚本和生产各写一遍、悄悄漂移。
   const dbPath = path.join(dataDir, `acceptance-${runId}.db`);
@@ -601,7 +613,7 @@ const sessionKeyOf = (spec: { conv: string }): string => `wecom:${spec.conv}`;
       '',
     ]),
     // 写链指标节（L7）：有信号的会话 + 写意图会话（判据见上方 writeChainReported）。
-    // 节首带本次运行的执行层审计文件路径（EXECUTION_AUDIT_PATH）：提案提交失败的原因
+    // 节首带本次运行的执行层审计文件路径（状态根派生的 audit.jsonl）：提案提交失败的原因
     // 只落在那个 JSONL 里（拒绝行含 refused 原因与退出码），报告指标对不上时按它核对。
     ...(writeChainReported.length ? ['## 写链指标', '', `- 执行审计:${auditPath}`, ...writeChainReported.map(renderWriteChainLine), ''] : []),
   ].join('\n'));
