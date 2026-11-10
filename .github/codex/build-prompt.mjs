@@ -137,8 +137,10 @@ if (isMain()) {
   if (priorFile) {
     try {
       const raw = JSON.parse(fs.readFileSync(priorFile, 'utf8'))
-      if (Array.isArray(raw)) {
-        priorReviews = raw
+      // --paginate --slurp 给出的是"页数组的数组"；单页/普通数组 flat 后同形（幂等）。
+      const rows = Array.isArray(raw) ? raw.flat() : []
+      if (Array.isArray(rows)) {
+        priorReviews = rows
           .filter((r) => r && typeof r.body === 'string')
           .map((r) => ({
             submittedAt: String(r.submitted_at ?? r.submittedAt ?? ''),
