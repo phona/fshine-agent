@@ -248,3 +248,84 @@ describe('main：文件输入路径的退出码与结论一致', () => {
     expect(writes.join('')).not.toContain('区分度充分');
   });
 });
+
+/**
+ * 稳定性输入的**结构校验**（2026-11-10 codex 复审 major 的表征锁）。
+ *
+ * 旧形状：mergeStability 只遍历实际存在的 summary 项，分母缺用例/缺轮时静默缩小——
+ * 合成输入「A=1/1 的文件 + 一个空 summary 文件」曾输出「100%、可做 required」并 exit 0。
+ * 新判据：调用方声明期望结构（--expect-cases / --expect-rounds，工作流把喂给探针的同一份值
+ * 传进来），结构不符 ⇒ 不出任何通过率结论，exit 2。
+ */
+describe('稳定性结构校验：分母不完整不得下结论（codex major）', () => {
+  it('stabilityStructureGaps：缺用例 / 轮数不符 / 非期望用例都报出来', async () => {
+    // @ts-expect-error -- 无类型声明的 .mjs
+    const { stabilityStructureGaps } = await import('./measure-summary.mjs');
+    const entries: Array<[string, { rounds: number }]> = [['G-A1', { rounds: 2 }], ['G-Z9', { rounds: 2 }]];
+    expect(stabilityStructureGaps(entries, { cases: ['G-A1', 'G-B1'], rounds: 2 }))
+      .toEqual(['缺用例 G-B1', '非期望用例 G-Z9']);
+    expect(stabilityStructureGaps([['G-A1', { rounds: 1 }]], { cases: ['G-A1'], rounds: 2 }))
+      .toEqual(['G-A1 轮数 1 ≠ 期望 2']);
+    expect(stabilityStructureGaps([['G-A1', { rounds: 2 }]], { cases: ['G-A1'], rounds: 2 })).toEqual([]);
+    expect(stabilityStructureGaps([['G-A1', { rounds: 2 }]], null)).toEqual([]);
+  });
+
+  it('buildReport：A=1/1 + 空 summary 文件（期望 2 轮 2 例）⇒ 无法判定、exit 2、无「可做 required」', () => {
+    const doc = { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } };
+    const empty = { summary: {} };
+    const out = buildReport({
+      stabilityDocs: [doc, empty],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['G-A1', 'G-B1'], rounds: 2 },
+      evalRealBaselineDoc: { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } },
+      evalRealLatestDoc: { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } },
+    });
+    expect(out.exitCode).toBe(2);
+    expect(out.markdown).toContain('无法判定');
+    expect(out.markdown).toContain('缺用例 G-B1');
+    expect(out.markdown).toContain('G-A1 轮数 1 ≠ 期望 2');
+    // 原始通过率可以展示（数据透明），但每一行的判定都必须是「无法判定」。
+    expect(out.markdown).not.toContain('可做 required');
+    expect(out.markdown).not.toContain('可评估 required 化');
+    for (const line of (out.markdown as string).split('\n').filter((l: string) => l.startsWith('| G-'))) {
+      expect(line).toContain('无法判定');
+    }
+  });
+
+  it('结构完整 + 证据齐全 ⇒ 正常下结论（不把结构校验变成永久无法判定）', () => {
+    const round = (passes: number) => ({
+      summary: {
+        'G-A1': { mechanical_pass_count: passes, rounds: 1 },
+        'G-B1': { mechanical_pass_count: passes, rounds: 1 },
+      },
+    });
+    const out = buildReport({
+      stabilityDocs: [round(1), round(1)],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['G-A1', 'G-B1'], rounds: 2 },
+      evalRealBaselineDoc: { results: [{ id: 'G-A1', round: 1, mechanical_pass: true }] },
+      evalRealLatestDoc: { results: [{ id: 'G-A1', round: 1, mechanical_pass: true }] },
+      regressionDoc: { unresolved: [] },
+    });
+    expect(out.exitCode).toBe(0);
+    expect(out.markdown).toContain('可评估 required 化');
+  });
+
+  it('main：--expect-cases/--expect-rounds 成对校验 + 走与真实调用相同的读文件路径', () => {
+    const dir = tempDir();
+    const stabilityPath = writeJson(dir, 'stab.json', {
+      summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } },
+    });
+    const writes: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((m?: unknown) => { writes.push(String(m)); });
+    let code: number;
+    try {
+      code = main(['--expect-cases', 'G-A1,G-B1', '--expect-rounds', '2', stabilityPath]);
+    } finally {
+      logSpy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(writes.join('')).toContain('缺用例 G-B1');
+    expect(main(['--expect-cases', 'G-A1', stabilityPath])).toBe(2);
+  });
+});

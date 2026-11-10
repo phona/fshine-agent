@@ -83,6 +83,34 @@ function pct(n, d) {
   return d === 0 ? 'n/a' : `${Math.round((n / d) * 100)}%`;
 }
 
+/**
+ * 稳定性输入的**结构校验**（2026-11-10 codex 复审 major）：期望结构（用例集 + 轮数）由调用方
+ * 显式声明（CLI --expect-cases / --expect-rounds，工作流把喂给探针的同一份值传进来）。
+ * 缺用例、缺轮、冒出非期望用例，都会让合并后的分母**静默缩小**——分母不完整时，任何通过率
+ * 都只对“实际拿到的部分”成立，不能写成对期望用例集的结论（与此前“缺失 judge 评分算成强模型
+ * 赢”同族：把不完整的证据写成结论）。返回空数组 = 结构完整。
+ */
+export function stabilityStructureGaps(entries, expected) {
+  if (!expected || !Array.isArray(expected.cases) || expected.cases.length === 0) return [];
+  const rounds = expected.rounds;
+  const gaps = [];
+  const actual = new Map(entries);
+  for (const id of expected.cases) {
+    if (!actual.has(id)) {
+      gaps.push(`缺用例 ${id}`);
+      continue;
+    }
+    if (Number.isInteger(rounds) && rounds > 0) {
+      const got = actual.get(id)?.rounds;
+      if (got !== rounds) gaps.push(`${id} 轮数 ${got ?? '缺失'} ≠ 期望 ${rounds}`);
+    }
+  }
+  for (const [id] of entries) {
+    if (!expected.cases.includes(id)) gaps.push(`非期望用例 ${id}`);
+  }
+  return gaps;
+}
+
 /** 多轮文件合并：按用例累计通过轮数与总轮数（null/不可解析的文件由调用方剔除）。 */
 export function mergeStability(docs) {
   const usable = (docs ?? []).filter((d) => d && typeof d === 'object');
@@ -294,6 +322,7 @@ function markdownTableRow(cells) {
 export function buildReport({
   stabilityDocs = [],
   stabilityComplete = true,
+  stabilityExpected = null,
   stabilityRequested = stabilityDocs.length > 0,
   strongDoc = null,
   weakDoc = null,
@@ -329,6 +358,12 @@ export function buildReport({
     lines.push('### 1. 稳定性（同模型 N 轮）', '');
     const merged = mergeStability(stabilityDocs);
     const entries = merged ? Object.entries(merged.summary) : [];
+    // 结构校验：分母不完整（缺用例/缺轮/非期望用例）时，本节不出任何通过率结论。
+    const structuralGaps = stabilityStructureGaps(entries, stabilityExpected);
+    const effectiveComplete = stabilityComplete && structuralGaps.length === 0;
+    const incompleteReason = structuralGaps.length > 0
+      ? `输入结构与声明不符：${structuralGaps.join('；')}`
+      : '部分稳定性文件无法解析，合并后的轮次分母不完整';
     const usable = [];
     const missingIds = [];
     for (const [id, s] of entries) {
@@ -344,7 +379,7 @@ export function buildReport({
     let eligibleCount = 0;
     const flaky = [];
     for (const [id, m] of usable) {
-      if (!stabilityComplete) {
+      if (!effectiveComplete) {
         lines.push(markdownTableRow([id, `${m.passes}/${m.rounds}`, pct(m.passes, m.rounds), '无法判定（输入不完整）']));
         continue;
       }
@@ -363,10 +398,10 @@ export function buildReport({
     }
     lines.push('');
 
-    if (!stabilityComplete) {
-      lines.push('> **判定**：无法判定（输入不足：部分稳定性文件无法解析，合并后的轮次分母不完整）。', '');
+    if (!effectiveComplete) {
+      lines.push(`> **判定**：无法判定（${incompleteReason}）。`, '');
       exitCode = Math.max(exitCode, 2);
-      stabilityResult = { usable: usable.length, missing: missingIds.length, flaky, verdict: '无法判定（输入不足）' };
+      stabilityResult = { usable: usable.length, missing: missingIds.length + structuralGaps.filter((g) => g.startsWith('缺用例')).length, flaky, verdict: `无法判定（${incompleteReason}）` };
     } else if (usable.length === 0) {
       lines.push(`> **判定**：无法判定（数据不足：无可用稳定性数据${missingIds.length > 0 ? `，缺失 ${missingIds.length} 例` : ''}）。`, '');
       exitCode = Math.max(exitCode, 2);
@@ -450,6 +485,8 @@ const FLAG_TO_KEY = new Map([
   ['--eval-real-latest', 'evalRealLatestPath'],
   ['--regressions', 'regressionsPath'],
   ['--min-valid', 'minValidComparisons'],
+  ['--expect-cases', 'expectCases'],
+  ['--expect-rounds', 'expectRounds'],
 ]);
 
 const USAGE = 'usage: node scripts/eval/measure-summary.mjs <stability.json...> '
@@ -486,6 +523,22 @@ export function parseArgs(argv) {
   const minValid = Number(out.minValidComparisons);
   if (!Number.isInteger(minValid) || minValid < 1) throw new UsageError('--min-valid 必须是正整数');
   out.minValidComparisons = minValid;
+  // 期望结构（--expect-cases / --expect-rounds）：必须成对出现，且格式合法——它是分母的
+  // 声明值，喂错就等于把结构校验关掉（codex 复审 major 的修法）。
+  const hasCases = out.expectCases !== undefined;
+  const hasRounds = out.expectRounds !== undefined;
+  if (hasCases !== hasRounds) {
+    throw new UsageError('--expect-cases 与 --expect-rounds 必须成对给出');
+  }
+  if (hasCases) {
+    const cases = String(out.expectCases).split(',').map((s) => s.trim()).filter(Boolean);
+    if (cases.length === 0 || !cases.every((id) => /^[A-Za-z0-9-]+$/.test(id))) {
+      throw new UsageError('--expect-cases 必须是逗号分隔的用例 id（^[A-Za-z0-9,-]+$，且无空段）')
+    }
+    const rounds = Number(out.expectRounds);
+    if (!Number.isInteger(rounds) || rounds < 1) throw new UsageError('--expect-rounds 必须是正整数');
+    out.stabilityExpected = { cases, rounds };
+  }
   return out;
 }
 
@@ -525,6 +578,7 @@ export function main(argv) {
   const report = buildReport({
     stabilityDocs: stabilityLoads.map((l) => (l.ok ? l.data : null)),
     stabilityComplete: stabilityLoads.every((l) => l.ok),
+    stabilityExpected: opts.stabilityExpected ?? null,
     stabilityRequested: stabilityLoads.length > 0,
     strongDoc: strongLoad?.ok ? strongLoad.data : null,
     weakDoc: weakLoad?.ok ? weakLoad.data : null,

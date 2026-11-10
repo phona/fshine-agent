@@ -111,26 +111,27 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 逐阶段状态：完成（N/M 轮）/ 失败（退出码 X）。缺状态文件 = 该步骤没跑。
+          # 逐阶段状态：先核验产物完整性，再分别报「测量完成」与「机械失败」——探针测完了
+          # 但有机械失败时同样返回 1（codex 复审 minor），那不是阶段未完成，失败率就是测量结果。
           stage_status() {
             local name="$1" status_file="$2" json="$3" expected="$4"
             if [ ! -f "$status_file" ]; then
-              echo "- ${name}: 失败（缺状态文件，阶段未运行）"
+              echo "- ${name}: 阶段未运行（缺状态文件）"
               return
             fi
             local status
             status="$(cat "$status_file")"
-            if [ "$status" != "0" ]; then
-              echo "- ${name}: 失败（退出码 ${status}）"
-              return
-            fi
             if [ ! -s "$json" ]; then
-              echo "- ${name}: 失败（退出码 0，但无结果 JSON）"
+              if [ "$status" = "0" ]; then
+                echo "- ${name}: 失败（退出码 0，但无结果 JSON）"
+              else
+                echo "- ${name}: 阶段未完成（退出码 ${status}，无结果 JSON）"
+              fi
               return
             fi
             node -e '
               const fs = require("node:fs");
-              const [file, cases, expectedRaw, name] = process.argv.slice(1);
+              const [file, cases, expectedRaw, name, status] = process.argv.slice(1);
               const caseCount = cases.split(",").filter(Boolean).length;
               const expected = Number(expectedRaw);
               let done = 0;
@@ -138,20 +139,23 @@ jobs:
                 const data = JSON.parse(fs.readFileSync(file, "utf8"));
                 done = Math.floor((Array.isArray(data.results) ? data.results.length : 0) / Math.max(caseCount, 1));
               } catch (err) {
-                console.log(`- ${name}: 失败（结果 JSON 无法解析：${err.message}）`);
+                console.log(`- ${name}: 阶段未完成（结果 JSON 无法解析：${err.message}）`);
                 process.exit(0);
               }
               if (done < expected) {
-                console.log(`- ${name}: 失败（退出码 0，仅完成 ${done}/${expected} 轮）`);
+                console.log(`- ${name}: 阶段未完成（仅 ${done}/${expected} 轮${status === "0" ? "" : `，退出码 ${status}`}）`);
+              } else if (status !== "0") {
+                console.log(`- ${name}: 测量完成（${done}/${expected} 轮，含机械失败：退出码 ${status}——失败率即测量结果，不是阶段故障）`);
               } else {
                 console.log(`- ${name}: 完成（${done}/${expected} 轮）`);
               }
-            ' "$json" "$CASES" "$expected" "$name"
+            ' "$json" "$CASES" "$expected" "$name" "$status"
           }
 
           # 汇总脚本的退出码是测量结论（0=有结论，2=数据不足），不是工作流错误。
           set +e
           node scripts/eval/measure-summary.mjs \
+            --expect-cases "$CASES" --expect-rounds "$ROUNDS" \
             .runtime/measure-stability.json -- \
             .runtime/measure-strong.json .runtime/measure-weak.json \
             > .runtime/measure-summary.md 2>&1
