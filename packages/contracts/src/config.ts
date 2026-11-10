@@ -134,6 +134,18 @@ export interface HostConfig {
 }
 
 /**
+ * 宿主存储配置（2026-11-10 仲裁修订令：DB_PATH 从 env 升为部署配置）。
+ *
+ * 源 = config/agent.yaml 的 `store` 段；同名 `DB_PATH` 环境变量只作非空值覆盖口
+ * （与 llm / wecom / host / execution 同一判据）。缺键 = 未配置，由装配点按既有
+ * 缺省（`data/agent.db`）兜底——加载层不复制缺省值。
+ */
+export interface StoreConfig {
+  /** SQLite 审计 / 任务库路径；相对路径按进程 cwd 解析。 */
+  dbPath?: string;
+}
+
+/**
  * 执行层交接的宿主持有配置（issue #20 切片 D）。
  *
  * 目前只有计划激活令牌密钥：宿主读入后随 worker 环境逐次注入执行层，不在宿主内解释
@@ -160,6 +172,8 @@ export interface AppConfig {
   wecom?: WecomConfig;
   /** 宿主运行参数（yaml `host` 段；env 非空值覆盖）。 */
   host?: HostConfig;
+  /** 宿主存储配置（yaml `store` 段；env 非空值覆盖）。 */
+  store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
   execution?: ExecutionConfig;
   /** 编排层业务 skill 的文件路径（相对仓库根或绝对路径；env 非空值覆盖）。 */

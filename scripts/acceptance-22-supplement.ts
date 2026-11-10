@@ -1,6 +1,10 @@
 /**
  * 补充验收 2.2:2.1 主流程中子代理自选了「幻海升」,未产生编号候选。
  * 本脚本在同一会话(acc-multi)中追问切换账套,验证多轮继续与重新委派。
+ *
+ * 用法: node --import tsx scripts/acceptance-22-supplement.ts [--db <path> | --db=<path>]
+ * 库默认沿用主流程验收库 data/acceptance-202609181621.db;--db 指向同一份库时才是
+ * 真正的多轮继续。库路径是脚本私有旋钮,走命令行,不设环境变量。
  */
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -23,6 +27,16 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const runId = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 12);
 const CONV = 'acc-multi';
 
+/**
+ * 库路径覆盖（脚本私有旋钮，不占 env；2026-11-10 仲裁修订令）。
+ * 支持 `--db <path>` 与 `--db=<path>` 两种 argv 形态；空串按未提供处理。
+ */
+const dbArgIdx = process.argv.indexOf('--db');
+const dbArgFromEquals = process.argv
+  .find((arg) => arg.startsWith('--db='))
+  ?.slice('--db='.length);
+const dbPathOverride = (dbArgFromEquals ?? (dbArgIdx > 0 ? process.argv[dbArgIdx + 1] : undefined))?.trim() || undefined;
+
 function replyText(reply: ChannelReply): string {
   return typeof reply === 'string' ? reply : (reply.text ?? '(图片回复)');
 }
@@ -42,7 +56,8 @@ async function main(): Promise<void> {
   const dataDir = path.join(repoRoot, 'data');
   mkdirSync(dataDir, { recursive: true });
   // 复用主流程验收库,保证 acc-multi 会话里 2.1/2.3 的历史在场,才是真正的多轮继续。
-  const dbPath = process.env['ACCEPTANCE_DB_PATH']
+  // --db 可显式指向同一份库（脚本私有旋钮,不读环境变量）。
+  const dbPath = dbPathOverride
     ?? path.join(dataDir, 'acceptance-202609181621.db');
   const store = createSqliteStore(dbPath);
   for (const record of principalScopeRecords(config)) await store.principalScopes.upsert(record);

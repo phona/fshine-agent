@@ -55,6 +55,12 @@ contextProfiles:
 # ---- 会话状态 TTL(可选,ms):闲置超过该时长后,旧转录压缩成「摘要+最近尾巴」种子续会话(软着陆,不清零失忆) ----
 # sessionTtlMs: 86400000  # 默认 24 小时
 
+# ---- 宿主存储(可选):SQLite 审计/任务库路径 ----
+# 缺省 = 仓库根 data/agent.db;相对路径按进程 cwd 解析(产物库字节与库同目录)。
+# 兼容旧部署:同名 DB_PATH 环境变量仍可覆盖(非空值)。
+# store:
+#   dbPath: data/agent.db
+
 # ---- LLM(OpenAI 兼容接口;契约/单元测试不需要,真实对话需要) ----
 # 秘密只写 config/agent.yaml(本文件复制后的那份,gitignored),不要提交。
 # 兼容旧部署:同名 LLM_* 环境变量仍可覆盖(非空值)。

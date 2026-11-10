@@ -226,4 +226,39 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(workerCall().env['FSHINE_PLATFORM_QUEUE_CAPACITY']).toBe('7');
     expect(gateCall()).toEqual({ maxQueue: 7 });
   });
+
+  it('store.dbPath 是宿主库路径源；非空 DB_PATH 覆盖；overrides.dbPath 仍最高优先', async () => {
+    const root = mkdtempSync(path.join(tmpdir(), 'deployment-config-db-'));
+    roots.push(root);
+    const fromYamlDb = path.join(root, 'yaml-agent.db');
+    const fromEnvDb = path.join(root, 'env-agent.db');
+    const fromOverrideDb = path.join(root, 'override-agent.db');
+    const configPath = path.join(root, 'agent.yaml');
+    writeFileSync(configPath, [
+      ...MINIMAL_PRINCIPALS,
+      'store:',
+      `  dbPath: ${fromYamlDb}`,
+      '',
+    ].join('\n'));
+
+    // yaml 源：未设 DB_PATH 时装配用 store.dbPath。
+    const fromYaml = await createServerAssembly({ env: { AGENT_CONFIG_PATH: configPath, ...BASE_ENV } });
+    expect(fromYaml.dbPath).toBe(fromYamlDb);
+    await fromYaml.close();
+
+    // 非空 env 覆盖 yaml。
+    const fromEnv = await createServerAssembly({
+      env: { AGENT_CONFIG_PATH: configPath, ...BASE_ENV, DB_PATH: fromEnvDb },
+    });
+    expect(fromEnv.dbPath).toBe(fromEnvDb);
+    await fromEnv.close();
+
+    // 测试 / e2e harness 的显式注入（overrides.dbPath）仍高于配置链。
+    const fromOverride = await createServerAssembly({
+      env: { AGENT_CONFIG_PATH: configPath, ...BASE_ENV, DB_PATH: fromEnvDb },
+      dbPath: fromOverrideDb,
+    });
+    expect(fromOverride.dbPath).toBe(fromOverrideDb);
+    await fromOverride.close();
+  });
 });
