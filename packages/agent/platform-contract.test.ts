@@ -3,7 +3,8 @@
  *
  * 这里是 fshine 仓库中唯一允许出现平台实现细节的模块，平台不可用族的判定也因此收口在
  * 这里：**码是数据，消息文案不是**——平台改文案不影响分类，新增平台侧不可用失败
- * 模式 = 往码集合里加一行（登录失效与页面响应超时同族：冷却行为相同）。
+ * 模式 = 往码集合里加一行（登录失效与页面响应超时同族：同一类失败事实；退避策略归
+ * 执行层自己的限流/熔断，宿主只上交事实）。
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -33,14 +34,14 @@ describe('平台不可用族错误码集合（唯一适配层）', () => {
     ]);
   });
 
-  it('PLATFORM_TIMEOUT 与登录失效同族：都是平台侧不可用，冷却行为相同', () => {
-    // 超时不是登录问题，但对宿主是同一件事：平台这趟没给出可用答数且调用方改不好，
-    // 可采取的动作也相同（暂停逐轮重试 + 宿主合成消息）。故进同一集合、同一套冷却。
+  it('PLATFORM_TIMEOUT 与登录失效同族：都是平台侧不可用事实（退避归执行层）', () => {
+    // 超时不是登录问题，但对宿主是同一件事：平台这趟没给出可用答数且调用方改不好。
+    // 故进同一集合、同一类失败事实；宿主只上交该事实，不在编排层做冷却/重试判断。
     expect(isPlatformAuthError(Object.assign(new Error('x'), { code: 'PLATFORM_TIMEOUT' }))).toBe(true);
     expect(isPlatformAuthError(new Error('PLATFORM_TIMEOUT: 期望 平台页面在 N 秒内渲染出结果/空态；实际 …'))).toBe(true);
     expect(platformAuthFailureOf(parseEnvelope('RESULT {"v":1,"op":"finance.search-account-sets","status":"failed","data":null,"error":{"code":"PLATFORM_TIMEOUT","message":"…"}}')))
       .toEqual({ code: 'PLATFORM_TIMEOUT' });
-    // 边界：输入类 / 数据三态 / 兜底码不进本族（重试有意义或平台答得确定，不该被冷却挡住）
+    // 边界：输入类 / 数据三态 / 兜底码不进本族（重试有意义或平台答得确定，不属于平台不可用事实）
     expect(isPlatformAuthError(Object.assign(new Error('x'), { code: 'INTERNAL' }))).toBe(false);
     expect(isPlatformAuthError(Object.assign(new Error('x'), { code: 'ACCOUNT_SET_NOT_FOUND' }))).toBe(false);
   });

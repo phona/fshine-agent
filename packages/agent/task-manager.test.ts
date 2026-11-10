@@ -81,6 +81,8 @@ function mockRunner(args: {
   timeoutMs?: number;
   execute?: (input: { prepared: PreparedContextTaskRun; options: Parameters<PreparedContextTaskRun['execute']>[0] }) => Promise<SubagentTaskResult>;
   snapshots?: Array<Array<{ path: string; relativePath: string; size: number; sha256: string }>>;
+  /** 覆盖 before/after 快照（可按 taskId 卡住，用于把"提交"与"执行开始"分开）。 */
+  snapshotWorkspace?: (taskId: string) => Promise<Array<{ path: string; relativePath: string; size: number; sha256: string }>>;
 } = {}): RunnerHarness {
   let taskSeq = 0;
   const executions: RunnerHarness['executions'] = [];
@@ -97,7 +99,10 @@ function mockRunner(args: {
         request: requestArgs.request,
         timeoutMs: args.timeoutMs ?? 100,
         workspaceDir: `tmp/${taskId}`,
-        snapshotWorkspace: async () => args.snapshots?.[Math.min(snapshotIndex++, (args.snapshots?.length ?? 1) - 1)] ?? [],
+        snapshotWorkspace: async () => {
+          if (args.snapshotWorkspace) return args.snapshotWorkspace(taskId);
+          return args.snapshots?.[Math.min(snapshotIndex++, (args.snapshots?.length ?? 1) - 1)] ?? [];
+        },
         execute: async (options) => {
           executions.push({ taskId, deadline: options.deadline, ...(options.signal ? { signal: options.signal } : {}) });
           if (args.execute) return args.execute({ prepared, options });
@@ -123,7 +128,7 @@ function input(dispatchKey: string, overrides: Partial<Parameters<ReturnType<typ
 describe('BackgroundTaskManager', () => {
   it('persists real IDs before returning, deduplicates dispatch keys, and emits only after terminal persistence', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const completion = deferred<SubagentTaskResult>();
     const harness = mockRunner({ execute: () => completion.promise });
     const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: gate, newId: (() => { let i = 0; return () => `run-${++i}`; })() });
@@ -163,9 +168,9 @@ describe('BackgroundTaskManager', () => {
     await manager.shutdown({ drainMs: 100 });
   });
 
-  it('cancels a queued task so it cannot start after the active task releases the slot', async () => {
+  it('cancels a task before its Worker starts so the platform operation never runs', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const first = deferred<SubagentTaskResult>();
     const executions: string[] = [];
     const harness = mockRunner({ execute: async ({ prepared }) => { executions.push(prepared.taskId); return prepared.taskId === 'task-1' ? first.promise : { taskId: prepared.taskId, text: 'second' }; } });
@@ -175,6 +180,8 @@ describe('BackgroundTaskManager', () => {
     const secondReceipt = await manager.submit(input('second'));
     expect((await repo.get(secondReceipt.runId))?.state).toBe('queued');
 
+    // 准入闸不再排队等待（并发容忍归执行层），第二件作业已获准但 Worker 尚未启动；
+    // 在这个窗口里取消，执行阶段必须看到终态而直接收束、不产生平台调用。
     const cancelled = await manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, secondReceipt.taskId);
     expect(cancelled).toMatchObject({ found: true, state: 'cancelled', requested: false });
     first.resolve({ taskId: firstReceipt.taskId, text: 'first done' });
@@ -185,29 +192,51 @@ describe('BackgroundTaskManager', () => {
     await manager.shutdown({ drainMs: 100 });
   });
 
-  it('starts the Worker deadline after queue wait and freezes run output and ACKed notices', async () => {
+  it('starts the Worker deadline at execution start (no queue wait) and freezes run output and ACKed notices', async () => {
     const repo = new MemoryTaskRuns();
     let now = 100;
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4, now: () => now });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const first = deferred<SubagentTaskResult>();
+    const secondSnapshotStarted = deferred<void>();
+    const releaseSecondSnapshot = deferred<void>();
+    let secondSnapshotCalls = 0;
     const snapshots = [
       [{ path: '/platform/tmp/task-2/old.xlsx', relativePath: 'old.xlsx', size: 1, sha256: 'old' }],
       [{ path: '/platform/tmp/task-2/old.xlsx', relativePath: 'old.xlsx', size: 2, sha256: 'changed' }, { path: '/platform/tmp/task-2/new.xlsx', relativePath: 'new.xlsx', size: 3, sha256: 'new' }],
     ];
-    const harness = mockRunner({ timeoutMs: 500, snapshots, execute: async ({ prepared, options }) => {
-      if (prepared.taskId === 'task-1') return first.promise;
-      await options.onNotice?.('计划通知：确认扩大范围');
-      return { taskId: prepared.taskId, text: 'done', pendingPlan: { taskId: prepared.taskId } as never };
-    } });
+    const harness = mockRunner({
+      timeoutMs: 500,
+      snapshots,
+      // 卡住 task-2 的 before 快照：提交已经完成，但执行还没走到 startedAt=now()。
+      // 只有在这之后推进时钟，deadline 断言才能区分"提交时算"与"执行开始时算"。
+      snapshotWorkspace: async (taskId) => {
+        if (taskId !== 'task-2') return snapshots[0]!;
+        const index = secondSnapshotCalls++;
+        if (index === 0) {
+          secondSnapshotStarted.resolve();
+          await releaseSecondSnapshot.promise;
+        }
+        return snapshots[Math.min(index, snapshots.length - 1)]!;
+      },
+      execute: async ({ prepared, options }) => {
+        if (prepared.taskId === 'task-1') return first.promise;
+        await options.onNotice?.('计划通知：确认扩大范围');
+        return { taskId: prepared.taskId, text: 'done', pendingPlan: { taskId: prepared.taskId } as never };
+      },
+    });
     const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: gate, now: () => now });
     const noticeAck = vi.fn(async () => {});
     const firstReceipt = await manager.submit(input('first'));
     await waitFor(() => harness.executions.length === 1);
     const secondReceipt = await manager.submit(input('second', { trusted: trusted({ onBackgroundNotice: noticeAck }) }));
+    await secondSnapshotStarted.promise;
+    // 提交已完成（时钟 100），执行开始被快照卡住；推进到 5000 再放行。
     now = 5_000;
-    first.resolve({ taskId: firstReceipt.taskId, text: 'first done' });
+    releaseSecondSnapshot.resolve();
     await waitFor(() => harness.executions.length === 2);
     const started = harness.executions.find((item) => item.taskId === secondReceipt.taskId)!;
+    // 2026-11-10 仲裁后没有宿主等待队列：deadline 从执行开始起算（5000 + 500），
+    // 不是在 submit 时（100 + 500）预先算好。
     expect(started.deadline).toBe(5_500);
     await waitFor(async () => (await repo.get(secondReceipt.runId))?.state === 'waiting_confirmation');
     const record = await repo.get(secondReceipt.runId);
@@ -220,12 +249,14 @@ describe('BackgroundTaskManager', () => {
       ],
       noticeDeliveries: [{ noticeId: `${secondReceipt.runId}:notice:1`, text: '计划通知：确认扩大范围', status: 'sent' }],
     });
+    first.resolve({ taskId: firstReceipt.taskId, text: 'first done' });
+    await waitFor(async () => (await repo.get(firstReceipt.runId))?.state === 'completed');
     await manager.shutdown({ drainMs: 100 });
   });
 
   it('keeps the slot through running cancellation cleanup and lets an already-completed result win the race', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 });
+    const gate = createPlatformExecutionGate({ maxQueue: 2 });
     const completion = deferred<SubagentTaskResult>();
     const harness = mockRunner({ execute: () => completion.promise });
     const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: gate });
@@ -253,7 +284,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner({ execute: async () => { throw new Error('controlled failure'); } }).runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
     });
     let observed = false;
     manager.subscribe(async (event) => {
@@ -270,7 +301,7 @@ describe('BackgroundTaskManager', () => {
 
   it('submits a prepared host confirmation through the same gate without exposing its confirmation code', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 });
+    const gate = createPlatformExecutionGate({ maxQueue: 1 });
     const materializeInputs = vi.fn(async () => [{ sourcePath: '/upload/source.xlsx', path: '/platform/tmp/task-host/.inputs/run-host/1_source.xlsx', filename: 'source.xlsx', size: 4, sha256: 'hash' }]);
     const prepared: PreparedContextTaskRun = {
       taskId: 'task-host',
@@ -309,7 +340,7 @@ describe('BackgroundTaskManager', () => {
 
   it('blocks a queued host confirmation while cancellation invalidates its pending authorization', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 });
+    const gate = createPlatformExecutionGate({ maxQueue: 2 });
     const blockerResult = deferred<SubagentTaskResult>();
     const blockerStarted = deferred<void>();
     const invalidationStarted = deferred<void>();
@@ -374,7 +405,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner().runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
       onCancelPending,
       newId: () => 'run-final-read-race',
     });
@@ -420,7 +451,7 @@ describe('BackgroundTaskManager', () => {
 
   it('does not claim queued host confirmation cancellation without an invalidator', async () => {
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 });
+    const gate = createPlatformExecutionGate({ maxQueue: 2 });
     const blockerResult = deferred<SubagentTaskResult>();
     const blockerStarted = deferred<void>();
     const hostStarted = deferred<void>();
@@ -462,7 +493,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner({ execute: () => { blockerStarted.resolve(); return blockerResult.promise; } }).runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 2 }),
       onCancelPending,
     });
     const blocker = await manager.submit(input('shutdown-host-blocker'));
@@ -492,7 +523,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner().runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 2 }),
       now: () => 1_000,
       newId: () => ids.shift()!,
     });
@@ -523,7 +554,7 @@ describe('BackgroundTaskManager', () => {
       await delay(10);
       return listNow(principalId, sessionId);
     };
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const runner: ContextTaskRunner = {
       tool: { name: 'run_task', description: 'test', inputSchema: {} },
       run: async () => { throw new Error('manager must execute the prepared handle'); },
@@ -570,7 +601,7 @@ describe('BackgroundTaskManager', () => {
         proposalCreated: { proposalId: 'opaque-ref' },
       }) }).runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
       onCancelPending,
     });
     const eventIds: string[] = [];
@@ -593,7 +624,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner({ execute: async ({ prepared }) => ({ taskId: prepared.taskId, text: '', needs: { missing: ['range'], reason: 'missing range' } }) }).runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
       onCancelPending,
     });
     const events: BackgroundTaskEvent[] = [];
@@ -619,7 +650,7 @@ describe('BackgroundTaskManager', () => {
       });
     }
     const harness = mockRunner();
-    const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 }) });
+    const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: createPlatformExecutionGate({ maxQueue: 4 }) });
     expect(await manager.recoverInterrupted(now)).toBe(3);
     expect([...repo.records.values()].map((item) => item.state)).toEqual(['interrupted', 'interrupted', 'interrupted']);
     expect(harness.executions).toHaveLength(0);
@@ -637,7 +668,7 @@ describe('BackgroundTaskManager', () => {
     const manager = createBackgroundTaskManager({
       runner: mockRunner().runner,
       repo,
-      executionGate: createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 }),
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
     });
     manager.subscribe(async () => {
       listenerEntered.resolve();
@@ -660,7 +691,7 @@ describe('BackgroundTaskManager', () => {
     // 多个 await——停机在 await 里置位时，提交带着"已排队"回执照常落库并调度，重启后
     // 变成 interrupted 死任务。复现：prepare 内卡住，入口检查已过、shutdown 置位后再放行。
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const prepareEntered = deferred<void>();
     const releasePrepare = deferred<void>();
     const executions: string[] = [];
@@ -707,7 +738,7 @@ describe('BackgroundTaskManager', () => {
     // 这个 await 上时，run 在 shutdown 的 activeRuns 遍历之后才登记并调度，没有谁会来
     // 取消它。复现：落库 await 上卡住、shutdown（遍历时 activeRuns 为空）后再放行。
     const repo = new MemoryTaskRuns();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const harness = mockRunner();
     const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: gate });
     const createEntered = deferred<void>();

@@ -272,7 +272,7 @@ describe('decideTurnExit：② 协议复读门（D-020 / F4：有执行也拦）
 });
 
 describe('decideTurnExit：两段门都不动作的形状', () => {
-  it('delegationFailed（消歧问题/熔断汇总/写关闭/冷却拦截）：两段门都放行', () => {
+  it('delegationFailed（消歧问题/熔断汇总/写关闭/队列已满等前置拦截）：两段门都放行', () => {
     for (const overrides of [
       { resultText: PROTOCOL_REPLAY, protocolReplay: true },
       { needsLoop: true, needsRounds: 2, lastNeeds: NEEDS },

@@ -737,14 +737,13 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(setup.taskUpserts).toHaveLength(0);
   });
 
-  it('共享闸被长任务占槽：确认等待有上界 → confirm_held 且提案保持 pending；槽释放后重发确认成功', async () => {
-    // 修复 2（本波引入的回归）：inline 确认在共享 executionGate 上无界等待——gate 并发 1，
-    // 别会话的 inline worker 最长占槽 DEFAULT_WORKER_TIMEOUT_MS（600s），确认回执被堵在
-    // handler 会话队列队头，渠道流式窗口（企微约 10 分钟）外终帧被拒：用户看不到回执但
-    // gate 放行后 commit 照样执行。等待上界到期走 confirm_held（提案不被作废），可重试。
+  it('宿主待办已满：确认按 confirm_held 返回且提案保持 pending；槽释放后重发确认成功', async () => {
+    // 2026-11-10 仲裁后闸不再限制平台并发，也不再排队等待：别会话的长 worker 不会把确认
+    // 回执堵在闸外。唯一还能拦下确认的是宿主待办深度已满（maxQueue）——那是宿主自己的
+    // 背压阈值，不是平台并发策略。被拒时走 confirm_held（提案不被作废），可重试。
     const intents = fakeIntents();
     const tasks = fakeTasks();
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+    const gate = createPlatformExecutionGate({ maxQueue: 1 });
     const commitCalls: ProposalCommitRequest[] = [];
     const taskRunner = createContextTaskRunner({
       profiles: { 'example-gateway': { root: '/tmp', skillRoots: [] } },
@@ -757,7 +756,6 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
       },
       generateCode: () => CONFIRM_CODE,
       executionGate: gate,
-      confirmGateWaitMs: 20,
     });
     await intents.repo.create({
       intentId: INTENT_ID,
@@ -772,7 +770,7 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     });
     const ctx: TrustedContext = { requestId: 'req_confirm_gate', principalId: 'wecom:u1', sessionId: 'wecom:u1:c1' };
 
-    // 占槽：模拟另一会话的长 worker（不放回槽）
+    // 占满宿主待办深度：另一件作业持有唯一槽位
     const holder = gate.enqueue({ requestId: 'other-session-worker' });
     const holderLease = await holder.acquired;
     holderLease.start();
@@ -786,7 +784,7 @@ describe('网关提案路径 · 确认落账（matchConfirmation 的 proposalId 
     expect(commitCalls).toHaveLength(0);
     expect(tasks.upserts).toHaveLength(0);
 
-    // 槽释放后重发同一确认码：照常落账（上界只放弃"这一次等待"，不作废提案）
+    // 槽释放后重发同一确认码：照常落账（队列已满只放弃"这一次"，不作废提案）
     holderLease.release();
     const executed = await taskRunner.matchConfirmation!(ctx, `确认 ${CONFIRM_CODE}`);
 

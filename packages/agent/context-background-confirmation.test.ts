@@ -62,7 +62,7 @@ function context(): TrustedContext {
 
 function createRunner(args: { gate?: ReturnType<typeof createPlatformExecutionGate>; commit?: () => Promise<void> } = {}) {
   const intents = new MemoryIntents();
-  const gate = args.gate ?? createPlatformExecutionGate({ concurrency: 1, maxQueue: 4 });
+  const gate = args.gate ?? createPlatformExecutionGate({ maxQueue: 4 });
   const commit = vi.fn(async () => {
     await args.commit?.();
     return { ok: true, verified: true, summaryText: '平台提交已完成。', output: 'mock commit output' };
@@ -117,22 +117,21 @@ describe('background host confirmation preparation', () => {
     expect(setup.commit).not.toHaveBeenCalled();
   });
 
-  it('inline confirmation shares the Worker gate and waits for the exclusive slot', async () => {
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 2 });
+  it('inline confirmation no longer waits behind a running Worker (concurrency belongs to the execution layer)', async () => {
+    const gate = createPlatformExecutionGate({ maxQueue: 4 });
     const setup = createRunner({ gate });
     const workerTicket = gate.enqueue({ requestId: 'active-worker' });
     const workerLease = await workerTicket.acquired;
     workerLease.start();
 
-    const inlineConfirm = setup.runner.matchConfirmation!(context(), `确认 ${CODE}`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(setup.commit).not.toHaveBeenCalled();
-    expect(gate.snapshot()).toEqual({ active: 1, queued: 1 });
-
-    workerLease.release();
-    const reply = await inlineConfirm;
+    // 2026-11-10 仲裁：宿主准入闸不再串行化平台作业。确认回合立即拿到自己的槽位并落账，
+    // 不需要等别的会话 worker 释放——平台并发容忍由执行层自己的限流/熔断裁决。
+    const reply = await setup.runner.matchConfirmation!(context(), `确认 ${CODE}`);
     expect(reply?.outcome).toBe('confirm_executed');
     expect(setup.commit).toHaveBeenCalledTimes(1);
+    expect(gate.snapshot()).toEqual({ active: 1, queued: 0 });
+
+    workerLease.release();
     expect(gate.snapshot()).toEqual({ active: 0, queued: 0 });
   });
 });

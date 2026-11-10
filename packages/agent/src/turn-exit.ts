@@ -41,7 +41,7 @@ const ACTIVATED_PLAN_NOT_EXECUTED = messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED'
  * 判据仍然只有一处定义。
  */
 export interface TurnExitInput {
-  /** 委派是否已失败并给出安全话术（消歧问题/熔断汇总/写关闭/冷却拦截）——两段门都放行。 */
+  /** 委派是否已失败并给出安全话术（消歧问题/熔断汇总/写关闭/队列已满等前置拦截）——两段门都放行。 */
   delegationFailed: boolean;
   /** 本回合是否有平台执行痕迹（turn.execution 的真值）。 */
   execution: boolean;

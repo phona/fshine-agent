@@ -261,16 +261,6 @@ export {
   type ReplyExitResult,
 } from './reply-exit';
 export {
-  DEFAULT_PLATFORM_AUTH_FAILURE_THRESHOLD,
-  DEFAULT_PLATFORM_COOLDOWN_MS,
-  createPlatformHealthTracker,
-  isAuthDelegationFailure,
-  type PlatformHealthClock,
-  type PlatformHealthSnapshot,
-  type PlatformHealthTracker,
-  type PlatformHealthTrackerOptions,
-} from './platform-health';
-export {
   UNKNOWN_ERROR_CODE,
   clarificationTextFor,
   errorFor,

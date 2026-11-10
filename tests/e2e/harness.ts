@@ -840,10 +840,10 @@ async function boot(options: BootOptions): Promise<Boot> {
   const attachmentDir = path.join(PLATFORM_ROOT, 'tmp', 'attachments', `e2e-${counter}-${randomUUID().slice(0, 8)}`);
   bootEnv['FSHINE_ATTACHMENT_DIR'] = attachmentDir;
   const assembly = await createServerAssembly({
-    // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（平台冷却、限流窗口）的时序
-    // 整体后移。本批用例用 2s 冷却夹具，2s 防抖就足以让冷却过期、该拦截的轮次放行
-    // （2026-10-08 实测：invocations 从 6 变 7）。生产上冷却 10 分钟、防抖 2 秒可忽略，
-    // 但离线夹具必须把旋钮归零才能验时序本身。防抖自身的行为由 handler 单测覆盖。
+    // 入站防抖显式关掉：它是延迟旋钮，会把基于时间的控制（限流窗口等）的时序整体后移。
+    // 本批用例按调用计数与真实平台账本判时序，防抖开着会让"该发生的调用"晚一拍出现
+    // （2026-10-08 实测：invocations 计数错位）。生产上防抖 2 秒可忽略，但离线夹具必须
+    // 把旋钮归零才能验时序本身。防抖自身的行为由 handler 单测覆盖。
     env: bootEnv,
     dbPath: path.join(stateDir, `agent-${counter}.db`),
     driver: options.main as never,

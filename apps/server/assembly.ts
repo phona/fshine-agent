@@ -204,16 +204,13 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const dataRoot = path.dirname(dbPath);
   if (!store.taskRuns) throw new Error('SQLite task run store 未启用');
 
-  // One host-owned FIFO gate is shared by inline Workers, background Workers, resumes, and
-  // proposal commits executed by a prepared host-confirmation run.
+  // One host-owned admission gate is shared by inline Workers, background Workers, resumes, and
+  // proposal commits executed by a prepared host-confirmation run. It only applies host backlog
+  // backpressure (maxQueue); platform concurrency tolerance belongs to the execution layer
+  // (2026-11-10 ruling — no host-side concurrency knob).
   const platformQueueRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_QUEUE_CAPACITY'] ?? '', 10);
-  // 并发闸的读取点在 createPlatformExecutionGate（缺省 process.env.FSHINE_PLATFORM_CONCURRENCY）。
-  // yaml 派生值只活在 effectiveEnv 里，故显式传入；未配置时不传，保持与旧装配相同的
-  // options 形状（门自己读 process.env / 回退 1）。
-  const platformConcurrencyRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_CONCURRENCY'] ?? '', 10);
   const platformExecutionGate: PlatformExecutionGate = createPlatformExecutionGate({
     maxQueue: Number.isFinite(platformQueueRaw) && platformQueueRaw >= 0 ? platformQueueRaw : 100,
-    ...(Number.isFinite(platformConcurrencyRaw) && platformConcurrencyRaw > 0 ? { concurrency: platformConcurrencyRaw } : {}),
   });
 
   for (const record of principalScopeRecords(config)) {
@@ -236,11 +233,6 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
   const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
-  // 平台健康冷却时长（Lane 2 治标补法）：连续 AUTH 类平台失败达阈值后，会话在此时长内
-  // 不再发起平台调用（宿主前置拦截 + 合成终稿）。部署侧可用 FSHINE_PLATFORM_COOLDOWN_MS
-  // 覆盖；非法/缺省值忽略并用默认 10 分钟（platform-health.ts 的唯一定义）。
-  const cooldownRaw = Number.parseInt(effectiveEnv['FSHINE_PLATFORM_COOLDOWN_MS'] ?? '', 10);
-  const platformCooldownMs = Number.isFinite(cooldownRaw) && cooldownRaw > 0 ? cooldownRaw : undefined;
   // 业务 skill（架构 §5）：读文件失败/文件缺失都只记日志，不影响启动。
   const businessSkill = await loadBusinessSkill(effectiveEnv);
   console.log(JSON.stringify(businessSkill.text
@@ -445,9 +437,6 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 系统
     // 提示词；未声明 = 宿主中性缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
     ...(activeProfile?.executorLabel ? { executorLabel: activeProfile.executorLabel } : {}),
-    // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后会话进入冷却，冷却期内不再
-    // 发起平台调用。时长经 env 覆盖（见上），阈值固定 2（platform-health.ts 缺省）。
-    ...(platformCooldownMs ? { platformCooldownMs } : {}),
   });
 
   // platformRoot 必须传给渠道：附件要落在平台工作区内，否则 worker 的路径守卫会把每个

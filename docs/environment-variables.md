@@ -28,9 +28,7 @@
 
 | 变量（env 覆盖口） | yaml 键（源） | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_PLATFORM_QUEUE_CAPACITY` | `host.platformQueueCapacity` | 缺省 / 非法 = 100 |
-| `FSHINE_PLATFORM_CONCURRENCY` | `host.platformConcurrency` | 缺省 = 1（全局串行） |
-| `FSHINE_PLATFORM_COOLDOWN_MS` | `host.platformCooldownMs` | 缺省 = 600000（10 分钟） |
+| `FSHINE_PLATFORM_QUEUE_CAPACITY` | `host.platformQueueCapacity` | 缺省 / 非法 = 100；宿主同时在办的平台作业上限（宿主待办深度，不限制平台并发；0 按 1 处理） |
 | `FSHINE_WORKER_DISPATCH_MODE` | `host.workerDispatchMode` | 缺省 `inline`；`background` 才启用后台委派 |
 | `FSHINE_SHUTDOWN_DRAIN_MS` | `host.shutdownDrainMs` | 缺省 / 非法 = 30000 |
 | `FSHINE_INBOUND_DEBOUNCE_MS` | `host.inboundDebounceMs` | 缺省 = 2000（0 = 关闭） |

@@ -131,7 +131,7 @@ function scriptedWorker(steps: Array<'timeout' | { complete: string }>, partialT
   };
 }
 
-/** 捕获宿主审计事件（JSON 行的 event 字段），与 turn-loop-platform-health 同手法。 */
+/** 捕获宿主审计事件（JSON 行的 event 字段），与 runtime.test.ts 同手法。 */
 function captureEvents(): { events: Array<Record<string, unknown>>; restore: () => void } {
   const events: Array<Record<string, unknown>> = [];
   const original = console.info;

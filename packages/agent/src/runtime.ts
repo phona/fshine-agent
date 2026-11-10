@@ -50,12 +50,6 @@ import {
 import { stripFootprint } from './text-hygiene';
 import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { messageTextFor } from './error-codes';
-import {
-  createPlatformHealthTracker,
-  isAuthDelegationFailure,
-  type PlatformHealthClock,
-  type PlatformHealthTracker,
-} from './platform-health';
 import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, DEFAULT_EXECUTOR_LABEL, buildSystemPrompt } from './system-prompt';
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
@@ -120,16 +114,6 @@ export interface TaxAgentRuntimeDeps {
   businessSkill?: string;
   /** 执行层称谓（C2）：部署层按 profile 声明注入进系统提示词；缺省 = 宿主中性值。 */
   executorLabel?: string;
-  /**
-   * 平台健康信号的时钟注入（Lane 2）：冷却判定只认 now()，测试推时钟即可验证
-   * "冷却中 / 已到期"，不需要真等 10 分钟。缺省 Date.now()（与 context-model 的
-   * clock 注入同族）。
-   */
-  clock?: PlatformHealthClock;
-  /** 连续 AUTH 类平台失败达此数 → 会话进入冷却（缺省 2，特例/测试经此覆盖）。 */
-  platformAuthFailureThreshold?: number;
-  /** 平台健康冷却时长（缺省 10 分钟；部署侧经 assembly 的 FSHINE_PLATFORM_COOLDOWN_MS 覆盖）。 */
-  platformCooldownMs?: number;
 }
 
 export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshine/contracts').AgentRuntime {
@@ -150,14 +134,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   // deps.executorLabel 注入（C2，缺省中性），工厂内只构造一次，恢复路径复用。
   const baseSystemPrompt = buildSystemPrompt(deps.executorLabel ?? DEFAULT_EXECUTOR_LABEL);
   const systemPrompt = `${businessSkill ? `${baseSystemPrompt}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : baseSystemPrompt}\n\n${DATE_SUFFIX}`;
-  // 平台健康信号（Lane 2 治标补法）：会话级连续 AUTH 类平台失败记账 + 冷却。判据与
-  // 边界见 platform-health.ts——治"平台根本不可用时的逐轮重试式重查"，与回合内的
-  // MAX_* 熔断、平台侧限流、并发闸正交。时钟可注入（测试可推），阈值/时长可配置。
-  const platformHealth: PlatformHealthTracker = createPlatformHealthTracker({
-    ...(deps.platformAuthFailureThreshold !== undefined ? { threshold: deps.platformAuthFailureThreshold } : {}),
-    ...(deps.platformCooldownMs !== undefined ? { cooldownMs: deps.platformCooldownMs } : {}),
-    ...(deps.clock ? { clock: deps.clock } : {}),
-  });
   // 计划步骤事实的写入器：工厂只在 runtime 装配时建一次，factId 的序号计数器因此是
   // **每 runtime 实例**递增（不是每回合）——同一计划同一步同一状态在两个回合各追加一次
   // 也必须拿到不同 factId，否则撞存储 UNIQUE（append 失败只记日志不阻塞回合，步骤事实
@@ -171,9 +147,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 而不是被模型理解」。未命中则按正常回合进入模型。
       const turnStart = Date.now();
       const logExitEvents = (entries: readonly TurnExitEvent[]): void => entries.forEach(({ level, event, detail }) => (level === 'warn' ? console.warn : console.info)(JSON.stringify({ event, requestId: ctx.requestId, ...detail })));
-      // 平台健康信号的会话键（Lane 2）：与 Context State 同一把复合键——同一用户在同一
-      // 会话里的连续失败才累计；换会话（新对话）从零开始，不把别的会话的健康状态带过来。
-      const platformHealthKey = `${ctx.principalId}\0${ctx.sessionId}`;
       const { messages: persistedLoaded, expired } = await loadTranscript(deps.sessions, ctx.sessionId, sessionTtlMs);
       const loaded = taskEventContext ? taskEventContext.promptMessages : persistedLoaded;
       let backgroundTaskRoster = '';
@@ -235,19 +208,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         }
       }
       if (!taskEventContext && ctx.resumeTaskId) {
-        // 平台健康冷却（Lane 2）：冷却期内不发起平台调用——恢复路径同样是真实委派
-        // （一次浏览器自动化 + 限流 token），结论早已确定，重试只是浪费。终稿由宿主
-        // 合成（PLATFORM_UNAVAILABLE，error-codes.ts 唯一措辞来源），用户等待为零。
-        if (platformHealth.isCoolingDown(platformHealthKey)) {
-          console.info(JSON.stringify({
-            event: 'platform_cooldown_blocked',
-            requestId: ctx.requestId,
-            sessionId: ctx.sessionId,
-            stage: 'resume',
-            cooldownRemainingMs: platformHealth.cooldownRemainingMs(platformHealthKey),
-          }));
-          return await finishDirectReply(platformHealth.cooldownReply(platformHealthKey), 'platform_cooldown_blocked', undefined, undefined, false);
-        }
         const backgroundResume = await maybeSubmitBackgroundResume({
           runner: deps.platformTask, manager: deps.backgroundTasks, trusted: ctx, taskId: ctx.resumeTaskId,
           log: (event, error) => console.warn(JSON.stringify({ event, requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' })),
@@ -277,20 +237,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               taskId: ctx.resumeTaskId,
               ...(typeof code === 'string' ? { code } : {}),
             }));
-            // 平台健康信号（Lane 2）：auth 类失败进会话级记账（码级判据，见
-            // platform-health 的 isAuthDelegationFailure）；达阈值即进入冷却，后续
-            // 回合不再逐轮重试式重查。
-            if (isAuthDelegationFailure(error)) {
-              const snapshot = platformHealth.recordAuthFailure(platformHealthKey);
-              console.info(JSON.stringify({
-                event: 'platform_auth_failure',
-                requestId: ctx.requestId,
-                sessionId: ctx.sessionId,
-                stage: 'resume',
-                consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-                cooldownEntered: snapshot.coolingDown,
-              }));
-            }
             // 资源耗尽终稿（"失败必达"路径 1，恢复路径同一义务）：确认后重跑撞超时，
             // 同样以执行事实合成的终稿替代"请稍后重试"（taskId 精确在手上，断点更真）。
             if (error.message === DELEGATION_TIMEOUT_FAILURE) {
@@ -307,22 +253,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             return await finishDirectReply(error.message, 'confirmed_plan_resume_failed');
           }
           throw error;
-        }
-        // 平台健康信号（Lane 2）：重跑成功且有平台执行痕迹 = 平台健康已恢复，计数清零
-        // （"成功则清零"）；AUTH 收尾的重跑同样计数。零执行/其他形状不猜，计数原样。
-        if (resumed.authFailure) {
-          const snapshot = platformHealth.recordAuthFailure(platformHealthKey);
-          console.info(JSON.stringify({
-            event: 'platform_auth_failure',
-            requestId: ctx.requestId,
-            sessionId: ctx.sessionId,
-            stage: 'resume',
-            code: resumed.authFailure.code,
-            consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-            cooldownEntered: snapshot.coolingDown,
-          }));
-        } else if (resumed.execution) {
-          platformHealth.recordResolved(platformHealthKey);
         }
         // 恢复路径的执行痕迹判据与正常 delegate 路径同一把尺（F8）：用户确认码 →
         // 计划激活 → worker 重跑之后仍是零平台调用时，不得无条件放行。needs /
@@ -724,17 +654,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 抛出的是宿主已组装好的澄清问题：它经驱动的 terminate 语义成为本轮文本，
               // 再由收口处的优先分支落成最终回复（模型那一轮的翻译体由此不上屏）。
               if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
-              // 平台健康冷却（Lane 2）：连续 AUTH 类平台失败达阈值后，冷却期内不再发起
-              // 任何平台调用（宿主前置拦截）——省一次注定失败的浏览器自动化足迹与限流
-              // token，也省用户 10-60s 的等待。终稿由宿主合成（PLATFORM_UNAVAILABLE，
-              // error-codes.ts 唯一措辞来源）：只说平台侧异常与恢复动作，不说内部控制
-              // 机制，也不编造原因。抛出点在 platformTask.run 之前：零委派、零足迹。
-              const cooldown = platformHealth.cooldownBlock(platformHealthKey);
-              if (cooldown) {
-                turn.delegationFailed = true;
-                console.info(JSON.stringify({ event: 'platform_cooldown_blocked', requestId: ctx.requestId, sessionId: ctx.sessionId, ...cooldown.event }));
-                throw new ToolUserError(cooldown.reply);
-              }
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
               // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把四个来源交给
@@ -836,20 +755,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 // 委派失败：安全话术就是本回合回复，出口校验不得再覆盖它。
                 turn.delegationFailed = true;
                 if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '委派未完成' });
-                // 平台健康信号（Lane 2）：auth 类失败进会话级记账。上面冷却拦截抛出的
-                // 合成话术不经过这里（它在 platformTask.run 之前就抛了）——计数只记
-                // 真实发起过的委派，冷却拦截本身不是新的失败证据。
-                if (isAuthDelegationFailure(error)) {
-                  const snapshot = platformHealth.recordAuthFailure(platformHealthKey);
-                  console.info(JSON.stringify({
-                    event: 'platform_auth_failure',
-                    requestId: ctx.requestId,
-                    sessionId: ctx.sessionId,
-                    ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                    consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-                    cooldownEntered: snapshot.coolingDown,
-                  }));
-                }
                 if (error instanceof ToolUserError) {
                   error.delegationCompleted = true;
                   // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
@@ -879,26 +784,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 }
                 console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
                 throw new ToolUserError(FALLBACK_FAILURE, { delegationCompleted: true });
-              }
-              // 平台健康信号（Lane 2）：本回合平台交互的结局进会话级记账。判据两条
-              // （都是码级）：① 驱动从平台错误信封派生的 authFailure（exit 非零 + 错误
-              // 信封属登录/凭据族，platform-contract 的判据）；② 委派层失败分类挂码的
-              // ToolUserError（isAuthDelegationFailure，context.ts 的 failureClass）。
-              // 有执行痕迹的非 AUTH 回合 = 平台健康已恢复 → 清零；零执行/其他失败不猜，
-              // 计数原样（没有证据表明平台坏了，也没有证据表明它好了）。
-              if (delegated.authFailure) {
-                const snapshot = platformHealth.recordAuthFailure(platformHealthKey);
-                console.info(JSON.stringify({
-                  event: 'platform_auth_failure',
-                  requestId: ctx.requestId,
-                  sessionId: ctx.sessionId,
-                  code: delegated.authFailure.code,
-                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                  consecutiveAuthFailures: snapshot.consecutiveAuthFailures,
-                  cooldownEntered: snapshot.coolingDown,
-                }));
-              } else if (delegated.execution) {
-                platformHealth.recordResolved(platformHealthKey);
               }
               // 计划模式跨步累积执行痕迹 / 计划步计数 / 澄清与激活计划事实：规则住
               // turn-state.ts（accumulateDelegation）。

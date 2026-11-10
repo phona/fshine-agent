@@ -34,7 +34,7 @@ const MODULE_RULES: Array<[RegExp, string]> = [
   [/plan-gate|plan-runtime|plan-mode|plan-binding|plan-facts|plan-steps|plan-confirmation|task-plan|plan-shape-fuzz|plan-teaching|plan-awareness|confirmation|plan-replay|plan-reject|concurrent|pingpong|interleaved|disambiguation|needs|activated-plan|resume|local-fake/, '计划门·预算·长任务'],
   [/write|proposal|commit/, '写链路（提案→确认→落账）'],
   [/security|serve-gate|leak-lint|executor-bypass|docs-reality|architecture-shape|platform-entities/, '安全与越权防线'],
-  [/delegation-failure|platform-health|worker-timeout|platform-contract|platform-mock/, '失败降级与健康'],
+  [/delegation-failure|worker-timeout|platform-contract|platform-mock/, '失败降级与健康'],
   [/long-session-invariants/, '长会话不变量'],
   [/dims|judge|score|eval/, '评测基建（L7）'],
   [/store\.test|config\.test|memory-records/, '存储与配置'],

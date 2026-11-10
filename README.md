@@ -47,7 +47,7 @@ npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非
 ## 引用消息与后台任务
 
 企微原生引用会与本次正文一起交给 Planner，正文确认与引用内容分别处理。
-`FSHINE_WORKER_DISPATCH_MODE` 默认 `inline`；设为 `background` 后，Worker 执行期间用户可以继续提问、查询或取消任务，结果和文件独立主动推送。同一会话的 Planner 回合仍串行，平台并发默认仍为 1。
+`FSHINE_WORKER_DISPATCH_MODE` 默认 `inline`；设为 `background` 后，Worker 执行期间用户可以继续提问、查询或取消任务，结果和文件独立主动推送。同一会话的 Planner 回合仍串行；**平台并发不由宿主限制**——并发容忍与健康/退避归执行层自己的限流与熔断（宿主准入闸只做 `maxQueue` 待办深度背压，见 [执行层准入清单](docs/execution-layer-admission.md)）。
 
 首版尚未生产验收；不支持运行中 steer、暂停恢复或重启后自动重跑。配置和回滚见 [会话交互方案](docs/interactive-session-plan.md#9-首版实现对账2026-10-24)。
 

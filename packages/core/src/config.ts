@@ -132,9 +132,7 @@ function parseWecom(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): Wecom
 }
 
 type NumericHostKey =
-  | 'platformConcurrency'
   | 'platformQueueCapacity'
-  | 'platformCooldownMs'
   | 'shutdownDrainMs'
   | 'workerStepCap'
   | 'inboundDebounceMs';
@@ -142,9 +140,7 @@ type NumericHostKey =
 function parseHost(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): HostConfig | undefined {
   const config: HostConfig = {};
   const integers: ReadonlyArray<[NumericHostKey, string, number]> = [
-    ['platformConcurrency', 'FSHINE_PLATFORM_CONCURRENCY', 1],
     ['platformQueueCapacity', 'FSHINE_PLATFORM_QUEUE_CAPACITY', 0],
-    ['platformCooldownMs', 'FSHINE_PLATFORM_COOLDOWN_MS', 1],
     ['shutdownDrainMs', 'FSHINE_SHUTDOWN_DRAIN_MS', 0],
     ['workerStepCap', 'FSHINE_WORKER_STEP_CAP', 1],
     ['inboundDebounceMs', 'FSHINE_INBOUND_DEBOUNCE_MS', 0],
@@ -394,9 +390,7 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('LLM_MAIN_THINKING_LEVEL', config.llm?.mainThinkingLevel);
   put('WECOM_BOT_ID', config.wecom?.botId);
   put('WECOM_BOT_SECRET', config.wecom?.botSecret);
-  put('FSHINE_PLATFORM_CONCURRENCY', config.host?.platformConcurrency);
   put('FSHINE_PLATFORM_QUEUE_CAPACITY', config.host?.platformQueueCapacity);
-  put('FSHINE_PLATFORM_COOLDOWN_MS', config.host?.platformCooldownMs);
   put('FSHINE_SHUTDOWN_DRAIN_MS', config.host?.shutdownDrainMs);
   put('FSHINE_WORKER_DISPATCH_MODE', config.host?.workerDispatchMode);
   put('FSHINE_WORKER_STEP_CAP', config.host?.workerStepCap);
