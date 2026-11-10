@@ -10,8 +10,13 @@
  * 文件两查全红，探测力不变（变异自验见 PR 正文）。
  *
  * Usage: node --import tsx scripts/eval/second-layer.ts [baselineCommit]
- * Baseline default is the Package-3 head (17aafe3) — the commit before
- * Package 4 started. Exit 0 only if every check passes.
+ * Baseline default is the commit that last re-anchored this proof.
+ * Anchor rule (2026-11-10): when production code is changed on purpose,
+ * the anchor moves forward to that commit, but only if the six protocol
+ * checks pass again on the new code. The diff checks themselves are
+ * unchanged: they still fail on any unexpected production drift after
+ * the anchor. Moving the anchor is not a way to silence the guard.
+ * Exit 0 only if every check passes.
  */
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';

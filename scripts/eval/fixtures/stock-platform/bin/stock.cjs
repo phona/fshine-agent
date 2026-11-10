@@ -35,11 +35,13 @@
  * boundary addendum): EXECUTION_* remains the canonical family for the token and
  * auxiliary surfaces; STOCK_* are debug-only entries read second. C-class knobs
  * such as STOCK_READBACK_SHORT keep their fixture names (see docs §9).
- * Serve compatibility: when used as bin/stock inside this fixture, fshine sets
- * EXECUTION_SERVE=1 / EXECUTION_INVOCATION / EXECUTION_PLAN_ID / EXECUTION_COMMIT_TOKEN / EXECUTION_GATE_SECRET /
- * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture reads those canonical names
- * directly (STOCK_* only as a debug fallback), so fshine code needs no change.
- * It does NOT read LLM keys, WeCom secrets or any other host secret.
+ * Call shape: this fixture does not take a domain declaration (no domain env,
+ * no domain flag). Whether a call was orchestration-driven is inferred from
+ * materials on the call — a plan id (EXECUTION_PLAN_ID) or a signed commit
+ * token (EXECUTION_COMMIT_TOKEN). It also reads EXECUTION_GATE_SECRET /
+ * EXECUTION_REQUIRE_PLAN / EXECUTION_PLAN_ACTIVATION_SECRET and the auxiliary
+ * state names directly (STOCK_* only as a debug fallback). It does NOT read
+ * LLM keys, WeCom secrets or any other host secret.
  *
  * Auxiliary groups implemented minimally and deterministically in this fixture
  * (admission A11-A12): memory set/get, breaker status/trip/reset,
@@ -151,6 +153,11 @@ function env(name, fallback) { const v = process.env[name]; return v === undefin
  *  C-class knobs): EXECUTION_* wins, the fixture-specific name is a debug entry
  *  (manual runs), then the default. State paths do NOT go through env (see statePaths). */
 function env2(canonical, debug, fallback) { return env(canonical, env(debug, fallback)); }
+/** 编排驱动不由调用方声明。计划绑定或签名令牌在这次调用上 = 被编排驱动。 */
+function orchestrated() {
+  return env2('EXECUTION_PLAN_ID', 'STOCK_PLAN_ID', '') !== ''
+    || env2('EXECUTION_COMMIT_TOKEN', 'STOCK_COMMIT_TOKEN', '') !== '';
+}
 /** Test-only state root (dummy test surface, not a consumption protocol). */
 let stateDirOverride = null;
 /**
@@ -602,7 +609,7 @@ function doCache(sub, argv) {
 }
 function usage() {
   return [
-    'Usage: stock [--state-dir <path>] [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local> [args...]',
+    'Usage: stock [--state-dir <path>] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local> [args...]',
     '  --state-dir <path>  test-only state root (dummy test surface, not a consumption protocol); default <fixture>/.runtime',
     'Examples:',
     '  stock plan evaluate --task-id task-1 --stdin',
@@ -624,8 +631,6 @@ async function main() {
   const stateDirFlag = takeStateDirFlag(argv);
   if (stateDirFlag.error) { process.stderr.write(`${stateDirFlag.error}\n`); return 2; }
   argv = stateDirFlag.rest;
-  let mode = 'build';
-  if (argv[0] === '--mode') { mode = argv[1]; argv = argv.slice(2); if (!['build', 'serve'].includes(mode)) { process.stderr.write(`Unknown CLI mode: ${mode}\n`); return 2; } }
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(usage()); return argv.length ? 0 : 2; }
   const [cmd, sub] = argv;
   if (cmd === 'operation' && sub === 'list') {
@@ -661,31 +666,31 @@ async function main() {
       if (!target) { process.stderr.write('usage: stock local <script> [args...]\n'); return 2; }
       const abs = path.resolve(target);
       const tmpRoot = path.join(FIXTURE_ROOT, 'tmp') + path.sep;
-      if (!abs.startsWith(tmpRoot) || !fs.existsSync(abs)) { process.stderr.write(`GATE_REFUSE local mode only allows scripts under ${tmpRoot}\n`); audit({ mode: 'local', script: target, args: rest, serve: mode === 'serve', refused: 'local-out-of-tmp' }); return 3; }
+      if (!abs.startsWith(tmpRoot) || !fs.existsSync(abs)) { process.stderr.write(`GATE_REFUSE local mode only allows scripts under ${tmpRoot}\n`); audit({ mode: 'local', script: target, args: rest, serve: orchestrated(), refused: 'local-out-of-tmp' }); return 3; }
       const r = spawnSync(process.execPath, [abs, ...rest], { stdio: 'inherit', cwd: FIXTURE_ROOT, env: { PATH: process.env.PATH, HOME: process.env.HOME } });
-      audit({ mode: 'local', script: path.relative(FIXTURE_ROOT, abs), args: rest, serve: mode === 'serve', exitCode: r.status });
+      audit({ mode: 'local', script: path.relative(FIXTURE_ROOT, abs), args: rest, serve: orchestrated(), exitCode: r.status });
       return r.status == null ? 1 : r.status;
     }
     if (!target) { process.stderr.write(`usage: stock ${cmd} <operation-or-script> [args...]\n`); return 2; }
     const op = resolveOperation(target);
-    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
+      audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol });
       return doProposalCreate(op.name, rest);
     }
     if (op.protocol === 'proposal.commit' && cmd === 'commit') {
       const { flags } = parseFlags(rest);
       if (!flags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
-      audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
+      audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: flags['proposal-id'] });
       return doProposalCommit(op.name, rest);
     }
     const verdict = decide(cmd, op, rest);
-    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }
+    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: verdict.reason }); return 3; }
     // Plan binding (only when the caller opts in, mirroring EXECUTION_REQUIRE_PLAN).
     const planId = env2('EXECUTION_PLAN_ID', 'STOCK_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'STOCK_REQUIRE_PLAN', '') === '1';
-    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
+    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     let queryResult;
     if (op.name === 'stock.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
@@ -705,14 +710,14 @@ async function main() {
           const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
           ok = expect.length === got.length && crypto.timingSafeEqual(expect, got) && p.script === op.name && new Date(p.expiresAt).getTime() > Date.now();
         } catch { ok = false; }
-        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'commit-token' }); return 3; }
+        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
     // 行没有 queryResult，不带 result。
-    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
+    audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {

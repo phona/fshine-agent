@@ -33,11 +33,13 @@
  * boundary addendum): EXECUTION_* remains the canonical family for the token
  * surface; DUMMY_* are debug-only entries read second. C-class per-case knobs
  * such as DUMMY_READBACK_SHORT keep their fixture names (see docs §9).
- * Serve compatibility: when used as bin/generic inside this fixture, fshine sets
- * EXECUTION_SERVE=1 / EXECUTION_INVOCATION / EXECUTION_PLAN_ID / EXECUTION_COMMIT_TOKEN / EXECUTION_GATE_SECRET /
- * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture reads those canonical names
- * directly (DUMMY_* only as a debug fallback), so fshine code needs no change.
- * It does NOT read LLM keys, WeCom secrets or any other host secret.
+ * Call shape: this fixture does not take a domain declaration (no domain env,
+ * no domain flag). Whether a call was orchestration-driven is inferred from
+ * materials on the call — a plan id (EXECUTION_PLAN_ID) or a signed commit
+ * token (EXECUTION_COMMIT_TOKEN). It also reads EXECUTION_GATE_SECRET /
+ * EXECUTION_REQUIRE_PLAN / EXECUTION_PLAN_ACTIVATION_SECRET directly
+ * (DUMMY_* only as a debug fallback). It does NOT read LLM keys, WeCom
+ * secrets or any other host secret.
  *
  * Deliberately NOT implemented in v1 (see GENERIC_MOCK_NOTES.md):
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
@@ -192,6 +194,11 @@ function env(name, fallback) { const v = process.env[name]; return v === undefin
  *  EXECUTION_* wins, the fixture-specific name is a debug entry (manual runs),
  *  then the default. State paths do NOT go through env (see statePaths). */
 function env2(canonical, debug, fallback) { return env(canonical, env(debug, fallback)); }
+/** 编排驱动不由调用方声明。计划绑定或签名令牌在这次调用上 = 被编排驱动。 */
+function orchestrated() {
+  return env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '') !== ''
+    || env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '') !== '';
+}
 /** Test-only state root (dummy test surface, not a consumption protocol). */
 let stateDirOverride = null;
 /**
@@ -618,7 +625,7 @@ async function planActivate(argv) {
 }
 function usage() {
   return [
-    'Usage: dummy [--state-dir <path>] [--mode build|serve] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
+    'Usage: dummy [--state-dir <path>] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
     '  --state-dir <path>  test-only state root (dummy test surface, not a consumption protocol); default <fixture>/.runtime',
     'Examples:',
     '  dummy plan evaluate --task-id task-1 --stdin',
@@ -638,8 +645,6 @@ async function main() {
   const stateDirFlag = takeStateDirFlag(argv);
   if (stateDirFlag.error) { process.stderr.write(`${stateDirFlag.error}\n`); return 2; }
   argv = stateDirFlag.rest;
-  let mode = 'build';
-  if (argv[0] === '--mode') { mode = argv[1]; argv = argv.slice(2); if (!['build', 'serve'].includes(mode)) { process.stderr.write(`Unknown CLI mode: ${mode}\n`); return 2; } }
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(usage()); return argv.length ? 0 : 2; }
   const [cmd, sub] = argv;
   if (cmd === 'operation' && sub === 'list') {
@@ -677,7 +682,7 @@ async function main() {
       // structured-call protocol path: args is Record<string, unknown>.
       // Validate against operation declaration and convert to flat flag array.
       const op = resolveOperation(call.operation);
-      if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+      if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
       const allowed = new Set();
       for (const f of (op.args?.flags || [])) allowed.add(f.flag);
       for (const p of (op.args?.positional || [])) allowed.add(p.name);
@@ -697,7 +702,7 @@ async function main() {
       process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
     }
     const op = resolveOperation(call.operation);
-    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
     // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
@@ -709,27 +714,27 @@ async function main() {
     // 进程在调用中途崩溃时只有它，那是"这次调用发出过但没有结果"的唯一证据。
     if (op.protocol === 'proposal.create') {
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol });
+      audit({ callId, phase: 'start', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol });
       const code = doProposalCreate(op.name, call.args);
-      audit({ callId, phase: 'result', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: 'prepare', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     if (op.protocol === 'proposal.commit') {
       const { flags: innerFlags } = parseFlags(call.args);
       if (!innerFlags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
+      audit({ callId, phase: 'start', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: innerFlags['proposal-id'] });
       const code = doProposalCommit(op.name, call.args);
-      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: 'commit', via: 'structured', script: op.name, args: call.args, serve: orchestrated(), protocol: op.protocol, proposalId: innerFlags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     // Determine mode from operation access.
     const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
     const verdict = decide(accessMode, op, call.args);
-    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: verdict.reason }); return 3; }
+    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: verdict.reason }); return 3; }
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
-    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
+    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     let queryResult;
     if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, call.args); code = q.code; queryResult = q.result; }
@@ -747,7 +752,7 @@ async function main() {
           const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
           ok = expect.length === got.length && crypto.timingSafeEqual(expect, got) && p.script === op.name && new Date(p.expiresAt).getTime() > Date.now();
         } catch { ok = false; }
-        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'commit-token' }); return 3; }
+        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
       code = doCommit(op.name, call.args);
     } else { process.stderr.write('GATE_REFUSE no handler for ' + op.name + '\n'); return 3; }
@@ -759,7 +764,7 @@ async function main() {
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
     // 行没有 queryResult，不带 result。
-    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
+    audit({ mode: accessMode, via: 'structured', script: op.name, args: call.args, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {
         const plans = loadPlans();
@@ -777,40 +782,40 @@ async function main() {
       if (!target) { process.stderr.write('usage: dummy local <script> [args...]\n'); return 2; }
       const abs = path.resolve(target);
       const tmpRoot = path.join(FIXTURE_ROOT, 'tmp') + path.sep;
-      if (!abs.startsWith(tmpRoot) || !fs.existsSync(abs)) { process.stderr.write(`GATE_REFUSE local mode only allows scripts under ${tmpRoot}\n`); audit({ mode: 'local', script: target, args: rest, serve: mode === 'serve', refused: 'local-out-of-tmp' }); return 3; }
+      if (!abs.startsWith(tmpRoot) || !fs.existsSync(abs)) { process.stderr.write(`GATE_REFUSE local mode only allows scripts under ${tmpRoot}\n`); audit({ mode: 'local', script: target, args: rest, serve: orchestrated(), refused: 'local-out-of-tmp' }); return 3; }
       const r = spawnSync(process.execPath, [abs, ...rest], { stdio: 'inherit', cwd: FIXTURE_ROOT, env: { PATH: process.env.PATH, HOME: process.env.HOME } });
-      audit({ mode: 'local', script: path.relative(FIXTURE_ROOT, abs), args: rest, serve: mode === 'serve', exitCode: r.status });
+      audit({ mode: 'local', script: path.relative(FIXTURE_ROOT, abs), args: rest, serve: orchestrated(), exitCode: r.status });
       return r.status == null ? 1 : r.status;
     }
     if (!target) { process.stderr.write(`usage: dummy ${cmd} <operation-or-script> [args...]\n`); return 2; }
     const op = resolveOperation(target);
-    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: mode === 'serve', refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
     // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
     // 提交也永远停在 invoked，mechanicallyPassed 判失败、令牌拒绝也没有 refused 证据。
     if (op.protocol === 'proposal.create' && cmd === 'prepare') {
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol });
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol });
       const code = doProposalCreate(op.name, rest);
-      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     if (op.protocol === 'proposal.commit' && cmd === 'commit') {
       const { flags } = parseFlags(rest);
       if (!flags['proposal-id']) { process.stderr.write('PROPOSAL_REFUSE missing --proposal-id\n'); return 3; }
       const callId = `call_${crypto.randomUUID().slice(0, 8)}`;
-      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'] });
+      audit({ callId, phase: 'start', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: flags['proposal-id'] });
       const code = doProposalCommit(op.name, rest);
-      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: mode === 'serve', protocol: op.protocol, proposalId: flags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
+      audit({ callId, phase: 'result', mode: cmd, script: op.name, args: rest, serve: orchestrated(), protocol: op.protocol, proposalId: flags['proposal-id'], exitCode: code, ...(code !== 0 ? { refused: 'proposal' } : {}) });
       return code;
     }
     const verdict = decide(cmd, op, rest);
-    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }
+    if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: verdict.reason }); return 3; }
     // Plan binding (only when the caller opts in, mirroring EXECUTION_REQUIRE_PLAN).
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
-    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
+    if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     let queryResult;
     if (op.name === 'dummy.query' || op.name === 'ballot.query') { const q = doQuery(op.name, rest); code = q.code; queryResult = q.result; }
@@ -830,14 +835,14 @@ async function main() {
           const p = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
           ok = expect.length === got.length && crypto.timingSafeEqual(expect, got) && p.script === op.name && new Date(p.expiresAt).getTime() > Date.now();
         } catch { ok = false; }
-        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'commit-token' }); return 3; }
+        if (!ok) { process.stderr.write('GATE_REFUSE commit token verification failed\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'commit-token' }); return 3; }
       }
       code = doCommit(op.name, rest);
     } else { process.stderr.write(`GATE_REFUSE no handler for ${op.name}\n`); return 3; }
     // query 的 completed/needs_input/not_found 行把该次实际结果状态写进审计行 result
     // （audited 申报模式交叉核的事实基准：结果状态与 items 都可供独立核对）；被拒/失败的
     // 行没有 queryResult，不带 result。
-    audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
+    audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), exitCode: code, planId: planId || undefined, ...(queryResult ? { result: queryResult } : {}) });
     // Plan accounting: a successful plannable call under a plan id counts toward it.
     if (planId && code === 0 && (op.access === 'read' || op.access === 'scratch')) {
       try {

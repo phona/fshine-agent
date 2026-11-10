@@ -17,7 +17,18 @@ describe('isServeCliInvocation（首词规则）', () => {
     expect(isServeCliInvocation('/usr/bin/env bash bin/example-gateway query x', 'bin/example-gateway')).toBe(false); // /usr/bin/env 前缀不放行
   });
 
-  it('拒绝 env 前缀注入（法域声明不可剥离）', () => {
+  it('拒绝 env 前缀注入（首 token 不是网关）；宿主不设 EXECUTION_SERVE，命令不带 --mode', () => {
+    expect(process.env.EXECUTION_SERVE).toBeUndefined();
+    const hostShaped = [
+      'bin/example-gateway query src/voucher/scripts/query-saved.js 幻晟 202609',
+      'bin/example-gateway commit src/voucher/scripts/fill.js --save',
+    ];
+    for (const command of hostShaped) {
+      expect(command.includes('--mode'), command).toBe(false);
+      expect(command.includes('EXECUTION_SERVE'), command).toBe(false);
+      expect(isServeCliInvocation(command, 'bin/example-gateway'), command).toBe(true);
+    }
+    // 首 token 守卫不放宽：env 前缀不是网关调用（样例字符串不是宿主产出）。
     expect(isServeCliInvocation('EXECUTION_SERVE=0 bin/example-gateway commit src/voucher/scripts/fill.js --save', 'bin/example-gateway')).toBe(false);
     expect(isServeCliInvocation('env -u EXECUTION_SERVE bin/example-gateway query x', 'bin/example-gateway')).toBe(false);
   });
@@ -208,8 +219,11 @@ describe('createServeGate（通用执行安全门）', () => {
     }
     const metacharEvents = events.filter((e) => e.detail?.includes('软放行'));
     expect(metacharEvents.length).toBe(2);
-    // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘
+    // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘。
+    // 前一条是 env 前缀样例，不是宿主产出：宿主不设 EXECUTION_SERVE，命令也不带 --mode。
+    expect(process.env.EXECUTION_SERVE).toBeUndefined();
     for (const command of ['EXECUTION_SERVE=0 bin/example-gateway query x', 'node script.js']) {
+      expect(command.includes('--mode'), command).toBe(false);
       expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
     }
   });

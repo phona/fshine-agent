@@ -511,12 +511,15 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
 };
 
 /**
- * 宿主直调平台网关的环境（serve 法域）：**显式剥 `EXECUTION_REQUIRE_PLAN`**、显式声明 `EXECUTION_SERVE`。
+ * 宿主直调平台网关的环境：**显式剥 `EXECUTION_REQUIRE_PLAN`**。不声明执行法域。
  *
  * 修 D-081：那个 mandate 是给 worker 的 bash 子进程的（每个 worker 命令都带它，见
  * createPlanScopedWorkerEnv），服务进程自己并不带。宿主直调是"服务端替 worker 办一件事"，
  * 不该被 worker 的计划门拦——否则同一份部署里服务端调得动、worker 调不动，或反过来，
  * 取决于进程 env 恰好有什么。剥显式表达"这里不过计划门"，不靠继承来的 env 碰巧为空。
+ *
+ * 2026-11-10：宿主声明面归零。法域判定归执行层；编排驱动的信号是随调用走的协议材料
+ * （计划绑定与签名令牌），不在这份 env 里加域标记，也不改命令模板。
  *
  * 导出共认一份：宿主直调平台的两处（提案创建、提案落账，B 波 B3/B4）用同一把尺——
  *  env 纪律在两处各写一遍，就是给"某一处忘了剥"留门。
@@ -524,7 +527,6 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
 export function hostGatewayEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   delete env.EXECUTION_REQUIRE_PLAN;
-  env.EXECUTION_SERVE = '1';
   return env;
 }
 

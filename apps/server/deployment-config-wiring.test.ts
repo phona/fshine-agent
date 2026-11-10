@@ -116,10 +116,11 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     const assembly = await boot(configPath, BASE_ENV);
     await assembly.close();
 
-    // Main 驱动：不新增任何参数，env 内容 = 注入 env + 装配自设的 EXECUTION_SERVE。
+    // Main 驱动：不新增任何参数，env 内容 = 注入 env。宿主不声明法域。
     const mainOptions = mainCall();
     expect(Object.keys(mainOptions)).toEqual(['env']);
-    expect(mainOptions.env).toEqual({ AGENT_CONFIG_PATH: configPath, ...BASE_ENV, EXECUTION_SERVE: '1' });
+    expect(mainOptions.env).toEqual({ AGENT_CONFIG_PATH: configPath, ...BASE_ENV });
+    expect(mainOptions.env['EXECUTION_SERVE']).toBeUndefined();
     // yaml 未配置的 FSHINE_* 键没有被伪造出来。
     expect(mainOptions.env['FSHINE_PLATFORM_QUEUE_CAPACITY']).toBeUndefined();
     expect(mainOptions.env['FSHINE_PI_AGENT_DIR']).toBeUndefined();

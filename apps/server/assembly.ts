@@ -217,13 +217,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     await store.principalScopes.upsert(record);
   }
 
-  // fshine 全进程树声明为 serve 法域：worker 的 bash 子进程、以及服务端直调的
-  // 提案落账都受平台网关与 serve-policy 守卫的矩阵裁决。
-  // 注入 env 的测试里旧代码改的就是那个注入对象（不是真实进程 env），这里保持同一
-  // 取舍；生产 / 脚本传入的 env 就是 process.env，而服务端直调的 plan CLI 等 spawn
-  // 点以 {...process.env} 为基境——这层进程级声明必须留在原地，否则法域被削弱。
-  if (env === process.env) process.env.EXECUTION_SERVE = '1';
-  effectiveEnv.EXECUTION_SERVE = '1';
+  // 2026-11-10 边界裁定：宿主对执行层的法域声明面归零。法域判定归执行层，
+  // 编排驱动的信号是随调用走的协议材料（计划绑定与签名令牌），不是宿主写进
+  // 进程 env 的域标记，也不是命令上的法域 flag。命令模板不动。
   // HMAC 密钥进程内生成：重启使未决 commit 自然失效。EXECUTION_GATE_SECRET 故意不进 env——
   // 进程级注入会让模型经 read/工具面拿到密钥自行铸令牌。
   const gateSecret = newGateSecret();

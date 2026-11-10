@@ -184,7 +184,6 @@ beforeAll(() => {
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-turn-loop-'));
   savedEnv = { ...process.env };
   Object.assign(process.env, {
-    EXECUTION_SERVE: '1',
     EXECUTION_EXECUTOR: 'mock',
     DZ_ALLOW_REAL: 'mock',
     DZ_EXECUTOR: 'mock',
