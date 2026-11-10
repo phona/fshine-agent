@@ -204,8 +204,9 @@ beforeAll(() => {
     EXECUTION_PLAN_NOTIFY_CALLS: '10',
     EXECUTION_PLAN_CONFIRM_CALLS: '20',
     EXECUTION_PLAN_HARD_CALLS: '50',
-    EXECUTION_PLAN_MAX_NOTIFY: '2',
-    EXECUTION_PLAN_MAX_REPLANS: '6',
+    // EXECUTION_PLAN_GRIND_GAP / MAX_NOTIFY / MAX_REPLANS / MAX_VARIANTS 是执行层自己的
+    // 策略参数（值源在执行层配置层，2026-11 env 治理 v2 起 env 不再是通道），宿主 e2e
+    // 一律不注入（docs/environment-variables.md §3）。
     // 网关限流有执行层侧专项测试；这里放宽 burst，避免查询被限流挡住，
     // 从而测不到"通知先于执行"这条主线。
     EXECUTION_RATE_LIMIT: JSON.stringify({ read: { burst: 60, perMs: 0 }, global: { burst: 120, perMs: 0 } }),

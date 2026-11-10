@@ -76,7 +76,7 @@
 | `EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_PROPOSAL_STATE` | 领域记忆 / 熔断账本 / 提案状态库文件路径；缺省各为 `.runtime/` 下默认文件；提案状态损坏 fail-closed，不静默复位 |
 | `EXECUTION_PROPOSAL_TTL_SECONDS` | 提案 TTL；缺省 30 分钟 |
 | `EXECUTION_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS`、`_SECONDS`（8 个）+ `EXECUTION_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT`（4 个） | 计划档位阈值；缺省 calls 2/10/20/50、seconds 60/180/600/1800、weight 6/18/60/180；注意权重线第三档真名是 `BUDGET`（`EXECUTION_PLAN_BUDGET_WEIGHT`），不是 `CONFIRM`——`CONFIRM` 只用于 calls/seconds 线，设 `EXECUTION_PLAN_CONFIRM_WEIGHT` 会静默无效 |
-| `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提 / 重通知上限；执行层从 `process.env` 读作可配默认；缺省 30 / 3 / 8 / 3；e2e 计划 harness 会按用例覆盖 `EXECUTION_PLAN_MAX_NOTIFY`（2 / 6） |
+| `EXECUTION_PLAN_GRIND_GAP` / `EXECUTION_PLAN_MAX_NOTIFY` / `EXECUTION_PLAN_MAX_REPLANS` / `EXECUTION_PLAN_MAX_VARIANTS` | 计划研磨间隔与重提 / 重通知上限；**执行层策略参数，宿主不设**（值源在执行层配置层；2026-11 env 治理 v2 起 env 不再是通道）；缺省 30 / 3 / 8 / 3；契约行保留（真平台仍读这些参数），e2e 不再按用例覆盖 |
 | `EXECUTION_DAILY_SOFT_CAP` / `EXECUTION_DAILY_HARD_CAP` / `EXECUTION_API_CALL_SOFT_CAP` / `EXECUTION_API_CALL_HARD_CAP` | 日调用与日 API 调用软硬上限；缺省 120 / 400 / 150 / 300 |
 | `EXECUTION_BREAKER_FAIL_STREAK` / `EXECUTION_BREAKER_COOLDOWN_MS` / `EXECUTION_BREAKER_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_WINDOW_MS` / `EXECUTION_SOFT_SIGNAL_CRASH_WARN` | 熔断与软信号阈值；缺省 5 / 30 分钟 / 默认窗口 / 1 小时 / 2 |
 | `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS` | 缓存目录 / TTL；缺省为 `.runtime/` 下默认目录与默认 TTL |
@@ -142,9 +142,9 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
 | `EXECUTION_PLAN_STATE` | `STOCK_PLAN_STATE` | 计划账本；缺省 `<主状态文件所在目录>/plans.json` |
 | `EXECUTION_PROPOSAL_STATE` | `STOCK_PROPOSAL_STATE` | 提案状态库；缺省 `<主状态文件所在目录>/proposals.json` |
 | `EXECUTION_AUDIT_PATH` | `STOCK_AUDIT_PATH` | 审计 JSONL（含拒绝）；缺省 null（不写审计文件） |
-| `EXECUTION_MEMORY_STATE` | `STOCK_MEMORY_STATE` | 记忆辅助组状态；缺省 `<主状态文件所在目录>/memory.json` |
-| `EXECUTION_BREAKER_STATE` | `STOCK_BREAKER_STATE` | 熔断辅助组状态；缺省 `<主状态文件所在目录>/breaker.json` |
-| `EXECUTION_CACHE_STATE` | `STOCK_CACHE_STATE` | 缓存辅助组状态；缺省 `<主状态文件所在目录>/cache.json`。`EXECUTION_CACHE_STATE` 是夹具侧规范名；执行层的缓存目录 / TTL 是 §3 的 `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS`，不是同一事物 |
+| `EXECUTION_MEMORY_STATE` | `STOCK_MEMORY_STATE` | 记忆辅助组状态；缺省 `<主状态文件所在目录>/memory.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`） |
+| `EXECUTION_BREAKER_STATE` | `STOCK_BREAKER_STATE` | 熔断辅助组状态；缺省 `<主状态文件所在目录>/breaker.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`） |
+| `EXECUTION_CACHE_STATE` | `STOCK_CACHE_STATE` | 缓存辅助组状态；缺省 `<主状态文件所在目录>/cache.json`。**宿主不再注入**；辅助组缺省从状态目录派生（`auxPaths()`）。`EXECUTION_CACHE_STATE` 是夹具侧规范名；执行层的缓存目录 / TTL 是 §3 的 `EXECUTION_CACHE_DIR` / `EXECUTION_CACHE_TTL_HOURS`，不是同一事物 |
 | `EXECUTION_GATE_SECRET` | `STOCK_GATE_SECRET` | 提案提交令牌验签密钥；缺省空串（空则不验令牌） |
 | `EXECUTION_COMMIT_TOKEN` | `STOCK_COMMIT_TOKEN` | 提案提交令牌；缺省空串 |
 | `EXECUTION_PLAN_ACTIVATION_SECRET` | `STOCK_PLAN_ACTIVATION_SECRET` | 计划激活令牌密钥；缺省空串 |
@@ -274,6 +274,10 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
 | `STOCK_PLAN_AUTO/NOTIFY/CONFIRM/HARD_CALLS` | 仅有限正数有效；缺省 2 / 10 / 20 / 50 | `fixture.planPolicy` 的 `calls` 线；目前无 case 声明 |
 | `STOCK_PLAN_AUTO/NOTIFY/CONFIRM/HARD_SECONDS` | 仅有限正数有效；缺省 60 / 180 / 600 / 1800 | `fixture.planPolicy` 的 `seconds` 线；目前无 case 声明 |
 | `STOCK_PLAN_AUTO/NOTIFY/BUDGET/HARD_WEIGHT` | 仅有限正数有效；缺省 6 / 18 / 60 / 180 | `fixture.planPolicy` 的 `weight` 线；目前无 case 声明 |
+
+> 辅助组状态路径（`EXECUTION_MEMORY_STATE` / `EXECUTION_BREAKER_STATE` / `EXECUTION_CACHE_STATE`）
+> 不在本表：它们不是按用例旋钮，宿主/评测不再按 run 注入；缺省从主状态文件所在目录派生
+> （`auxPaths()`，见 §4b）。
 
 四档表在 YAML 里的档位键固定为 `auto` / `notify` / `confirm` / `hard`，每档下面是
 `calls` / `seconds` / `weight` 三条线；只声明需要的档/线，其余走夹具缺省。

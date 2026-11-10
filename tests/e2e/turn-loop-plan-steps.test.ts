@@ -15,7 +15,7 @@
  * 收口，后续步骤根本派不出去。计划步骤的失败面由 6.2（needs）、7.3（平台没找到→宿主澄清）
  * 与 turn-loop-clarification 的 C2 覆盖，不靠 6.1 顺带覆盖。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import type { PlanCall } from '@fshine/agent';
 import {
   LAST_TASK_ID_TOKEN,
@@ -28,12 +28,11 @@ import {
 } from './harness';
 
 /**
- * 三步拆解会让累计调用数一直越过高 weight 自动档：每一步重提计划都是 notify。
- * 这里把同一任务的 notify 上限放宽（平台侧默认 2），否则第 3 步会被升级成"必须等用户
- * 确认"——那是单步试探收口的规则，不是长任务拆解该有的形状。
+ * 计划重通知上限（EXECUTION_PLAN_MAX_NOTIFY）是执行层自己的策略参数：值源在执行层
+ * 配置层（2026-11 env 治理 v2 起 env 不再是通道），宿主 e2e 不设。本用例的计划都
+ * 申报即执行、无「磨大」差额（声明重量 − 已执行重量不越 grindGap），不会触发
+ * NOTIFY_REPEAT_LIMIT，按执行层缺省即可。
  */
-beforeAll(() => { process.env['EXECUTION_PLAN_MAX_NOTIFY'] = '6'; });
-afterAll(() => { delete process.env['EXECUTION_PLAN_MAX_NOTIFY']; });
 
 /** 三个期间的查询计划：3 次调用，越过 harness 的 EXECUTION_PLAN_AUTO_CALLS=2 触发通知。 */
 function threePeriodPlan(account: string): PlanCall[] {

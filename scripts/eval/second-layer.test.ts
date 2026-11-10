@@ -43,25 +43,34 @@ import {
 const evalDir = path.dirname(fileURLToPath(import.meta.url));
 const fixtureRoot = path.join(evalDir, 'fixtures', 'stock-platform');
 const stockBin = path.join(fixtureRoot, 'bin', 'stock');
+/**
+ * 辅助组的 B 类隔离键（规范名 + 调试专名）。辅助组不再按 run 注入后，ambient 值会经
+ * 夹具的 env2 查找盖过 auxPaths() 的 per-run 派生，必须在子进程 env 里清场。
+ */
+const AUX_GROUP_ENV_KEYS = [
+  'EXECUTION_MEMORY_STATE', 'EXECUTION_BREAKER_STATE', 'EXECUTION_CACHE_STATE',
+  'STOCK_MEMORY_STATE', 'STOCK_BREAKER_STATE', 'STOCK_CACHE_STATE',
+] as const;
 
 function makeCtx(extraEnv: NodeJS.ProcessEnv = {}) {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-'));
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     // 只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）；STOCK_* 是夹具的
-    // 调试专名，评测进程不设它，规范名优先保证 ambient 专名无法改道 per-case 隔离。
+    // 调试专名，评测进程不设它。规范名优先只挡得住“两者都设”的情形；ambient 里只设
+    // 调试名（或规范名）仍会改道 per-case 隔离，故辅助组键先清场。
+    // 辅助组（memory / breaker / cache）不按 run 注入：stock.cjs 的 auxPaths() 从
+    // statePaths().stateFile 的目录派生，状态路径按 run 隔离后辅助文件自动落进同一目录。
     EXECUTION_MOCK_STATE: path.join(dir, 'state.json'),
     EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
     EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
     EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
-    EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'),
-    EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
-    EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'),
     EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret',
     EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
     // 用例声明的 C 类旋钮（如 STOCK_READBACK_SHORT）；不在用例体里逐调用改 env。
     ...extraEnv,
   };
+  for (const key of AUX_GROUP_ENV_KEYS) delete env[key];
   return { dir, env, run: (args: string[], input?: string) => {
     const r = spawnSync(stockBin, args, { encoding: 'utf8', cwd: fixtureRoot, env, input });
     return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
