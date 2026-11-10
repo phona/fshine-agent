@@ -423,6 +423,88 @@ describe('errorStateNotes 的 audited 接线（无所属 → 申报交叉核；�
 });
 
 /**
+ * 澄清问句判据（2026-11-10 校准）：探针与期望值层曾各存一份逐字相同的正则——两层
+ * "一致"不是独立确认，是同一把尺量了两次。Y2 实测第 2 轮「请补充以下信息之一 …
+ * 或者说明是否连同 window 一起调整」两层同时判"没有问句"（假红）。现在两层都
+ * import scripts/eval/clarification-shape.ts；这里钉探针消费点（clarificationShapeNotes
+ * 经 errorStateNotes 的 note 文案不变）。
+ */
+describe('澄清问句判据：探针层消费同一份 shared 判据', () => {
+  const CANDIDATES = ['contoso-trade', 'contoso-logistics'] as const;
+  /** Y2 第 2 轮实测原文（逐字转录自 .runtime/probe-fshine-probe-IhdXQv.json）。 */
+  const Y2_T1_ACTUAL = `未完成：无法唯一确定要查询的 collection。
+
+平台实时查询返回：关键词 "contoso" 匹配到两个 collection——
+
+- contoso-trade
+- contoso-logistics
+
+平台要求确认确切的 collection 名称后重查，在名称唯一确定前不会返回任何 record value（不做猜测）。
+
+请补充以下信息之一：
+1. 确切的 collection 全名（contoso-trade 或 contoso-logistics，或你实际想查的其它名称）；
+2. 或者说明是否连同 window 一起调整（当前请求带的是 W2）。
+
+拿到确切名称后，我会立即重新查询并给出该 collection 在 W2 下的 record value。`;
+
+  it('Y2 实测第 2 轮判有问句（旧词表漏「请补充 / 或者说明是否」）', () => {
+    const notes = errorStateNotes(
+      auditTurn(Y2_T1_ACTUAL, 'check contoso collection record value'),
+      CANDIDATES,
+      [],
+    );
+    expect(notes.filter((note) => note.startsWith('澄清回复没有问句'))).toEqual([]);
+  });
+
+  it('负向对照：候选全列但只是罗列、无请求动作 ⇒ 仍判没有问句（判据不是恒真）', () => {
+    const notes = errorStateNotes(
+      auditTurn('contoso-trade 与 contoso-logistics 都在目录里。', 'check contoso collection record value'),
+      CANDIDATES,
+      [],
+    );
+    expect(notes.filter((note) => note.startsWith('澄清回复没有问句'))).toHaveLength(1);
+  });
+});
+
+/**
+ * 风暴两口径披露（2026-11-10 校准）：硬尺只数**本轮**同参重复；整例跨轮聚合只写进
+ * 信息性 note，且必须同时写明「单轮 X 次 / 整例 Y 次」——旧版探针只说单轮数，
+ * 期望值层旧版按整例平铺判红，同一份审计行两个口径、报告不解释。
+ */
+describe('错误轮风暴：信息性 note 同时写明单轮与整例两个口径', () => {
+  const row = () => ({ script: 'dummy.query', args: ['--collection', 'beta'], exitCode: 0 });
+
+  it('单轮 ×2 + 另一轮 ×1：无硬风暴 note，信息性 note 同时披露 2 次 / 3 次', () => {
+    const thisTurn = [row(), row()];
+    const caseRows = [...thisTurn, row()];
+    const notes = errorStateNotes(
+      { ...auditTurn('beta W1 没有数据，请换一个名称。', 'check beta record value'), calls: 2 },
+      [],
+      thisTurn,
+      false,
+      caseRows,
+    );
+    expect(notes.filter((note) => note.startsWith('错误轮同一调用重复'))).toEqual([]);
+    const info = notes.filter((note) => note.startsWith('（信息性）错误轮平台调用数'));
+    expect(info).toHaveLength(1);
+    expect(info[0]).toContain('单轮同一调用最多重复 2 次');
+    expect(info[0]).toContain('整例 3 次');
+  });
+
+  it('单轮 ×3：硬风暴 note 照旧（单轮口径判违例），不被信息性文案替代', () => {
+    const rows = [row(), row(), row()];
+    const notes = errorStateNotes(
+      { ...auditTurn('beta W1 没有数据，请换一个名称。', 'check beta record value'), calls: 3 },
+      [],
+      rows,
+      false,
+      rows,
+    );
+    expect(notes.some((note) => note.startsWith('错误轮同一调用重复 3 次'))).toBe(true);
+  });
+});
+
+/**
  * 报告行的 audited 申报失败计数（PR #26 评审 blocking）：交叉核失败的 note 归不进四维、
  * 落 unclassified，评分器不门 unclassified —— 判定输出因此必须另有一列进报告行。
  */

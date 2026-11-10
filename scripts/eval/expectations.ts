@@ -8,6 +8,7 @@ import {
   isVerifiedArithmetic,
 } from './amount-criteria';
 import { classifyAuditDeclaration, stripAuditDeclaration } from './audit-declaration';
+import { hasClarificationQuestion } from './clarification-shape';
 import type {
   CaseExpectations,
   CaseSpec,
@@ -40,8 +41,12 @@ import type { ExecutionAuditRow } from './evidence';
  * IncomingChannelMessage.text。判定独立于 Agent 自述：输入只有回复文本、轮次文本、执行层
  * 审计行。
  *
- * 与既有正则的关系：本层自带一套形状正则（问句 / not_found / 无数据 / 框定语）。这是
- * **刻意的冗余**——第四层要能在任一既有层漂移时独立抓住同一形态；两套都抓不到才是洞。
+ * 与既有正则的关系：本层自带一套形状正则（not_found / 无数据 / 框定语）。这是**刻意的
+ * 冗余**——第四层要能在任一既有层漂移时独立抓住同一形态；两套都抓不到才是洞。
+ * **例外：澄清问句判据不是冗余，而是与探针共用同一份实现**（clarification-shape.ts）——
+ * 两层曾各存一份逐字相同的正则，那不是独立确认，是同一把尺量了两次：词表漏的词两层
+ * 一起漏（Y2 实测「请补充…」假红），补词也要改两处。问句形状由同一判据消费，回归只在
+ * 该模块钉一次；其余形状判据维持独立。
  *
  * 无证据不出判定：调用数族断言（minExecutedCalls / requeryPerTurn / chitchatZeroCalls）
  * 在取数面不载 calls 时（acceptance 的 records、旧格式探针报告）不产 check——把缺席当零
@@ -68,6 +73,12 @@ export interface ExpectationViolation {
 export interface ExpectationOutcome {
   violations: ExpectationViolation[];
   checks: ExpectationCheck[];
+  /**
+   * 信息性披露（不进违例、不进 checks、不影响评分）。当前用于**风暴口径差异**：
+   * 单轮内同参重复 ≥ 阈值才判违例；整例跨轮聚合 ≥ 阈值只在这里如实写明，不再让
+   * 两层（探针按单轮数、期望值层旧版按整例平铺）静默给出两个数。
+   */
+  notes: string[];
 }
 
 /** 一层判定的最小输入（探针报告的逐轮行；acceptance 记录同形）。 */
@@ -104,8 +115,9 @@ interface JudgedTurn extends ExpectationTurn {
 
 // ── 形状正则（第四层自持的一套，见文件头「刻意的冗余」）──
 
-/** 澄清问句（真问号 + 中英无疑号问句/请求确认）。与探针 CLARIFICATION_QUESTION_RE 同族。 */
-const QUESTION_RE = /[?？]|告诉|请回复|需要你|请提供|请确认|确认哪|哪个|哪些|哪一[家个条些]|哪一个|请问|which one|which\b|please confirm|confirm which|let me know|could you|would you|do you\b|please provide|please specify|tell me/i;
+// 澄清问句判据由 scripts/eval/clarification-shape.ts 统一持有：探针与期望值层消费
+// 同一份词表。旧版两层各存一份逐字相同的正则，等于同一把尺量两次——词表漏的词两层
+// 一起漏（Y2 实测「请补充…」假红），补词也要改两处。
 
 /** not_found 结论（中英文表）。 */
 const NOT_FOUND_RE = /没有|未找到|查不到|不存在|无匹配|not found|no match|no collections? match|nothing matches|does not match|doesn'?t match|no matching|couldn'?t find|does not exist|no results|nothing found|no data|no records|\bnone\b/i;
@@ -249,9 +261,16 @@ function shortCaseChecks(spec: CaseSpec, turns: readonly (JudgedTurn | undefined
           `${label}未报出应有的记录条数 ${want.count}`);
       }
     }
-    if (want.question && !QUESTION_RE.test(turn.reply)) {
-      push(`期望·问句(${label})`, '澄清问句', '无疑号/无疑问词形',
-        `${label}回复不是用户可回答的澄清问句`);
+    if (want.question) {
+      // 问句判据第二路（候选 ≥2 全列 + 请求用户选择）需要候选清单：来源 = 该轮消息的
+      // clarify（夹具/平台给出的候选），缺席时退回 want.collections（Y2 两处相同）。
+      // 不传候选 = 第二路在本层恒不可达（2026-11-10 codex 复审 major：helper 单测过了、
+      // 但调用处没接线，探针层放行、eval:score 照旧假红）。
+      const candidates = spec.messages[want.index]?.clarify ?? want.collections ?? [];
+      if (!hasClarificationQuestion(turn.reply, candidates)) {
+        push(`期望·问句(${label})`, '澄清问句', '无疑号/无疑问词形',
+          `${label}回复不是用户可回答的澄清问句`);
+      }
     }
     if (want.notFound && !NOT_FOUND_RE.test(turn.reply)) {
       push(`期望·not_found(${label})`, '"没有找到"类结论', '未给结论',
@@ -502,10 +521,14 @@ function selectChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefin
 
 // ── 过程不变量 ──
 
-function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | undefined)[]): ExpectationViolation[] {
+function invariantChecks(
+  spec: CaseSpec,
+  turns: readonly (ExpectationTurn | undefined)[],
+): { violations: ExpectationViolation[]; notes: string[] } {
   const out: ExpectationViolation[] = [];
+  const notes: string[] = [];
   const want: InvariantExpectation | undefined = spec.expectations?.invariants;
-  if (!want) return out;
+  if (!want) return { violations: out, notes };
   const at = (index: number): ExpectationTurn | undefined => turnOf(turns, index);
 
   // 每轮真查（重查轮机械面）：该轮零已执行调用即违例。取数面不载 calls 时不出判定。
@@ -616,28 +639,50 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
     }
   }
 
-  // 无风暴：同参调用重复 ≥ 阈值（与探针 Y2/Z1 同族判据，这里与用例声明联动）。
+  // 无风暴（2026-11-10 口径校准）：**单轮内**同参已执行调用重复 ≥ 阈值 = 违例。
+  // 旧写法把整个用例的各轮审计行平铺成一张 (script,args) 表，同一调用跨轮累计 ≥3 就
+  // 判违例——而探针的信息性 note 一直按单轮数（同轮最多 ×2、无风暴）。同一份审计行
+  // 两套口径，报告把两个数并排摆出来却不解释：Y2 的 beta 裸查跨 3 轮被判风暴红，探针
+  // 侧却说没风暴。校准后：跨轮累计只作信息性 note，写明单轮最多几次 / 整例几次；
+  // 只有同一轮里真的同参重复打平台才判违例。阈值仍由用例声明（noStorm.threshold）。
   if (want.noStorm) {
-    const groups = new Map<string, number>();
-    for (const turn of turns) {
+    const threshold = want.noStorm.threshold;
+    const caseGroups = new Map<string, number>();
+    const turnStorms: Array<{ index: number; key: string; count: number }> = [];
+    let turnMax = 0;
+    for (const [index, turn] of turns.entries()) {
+      const perTurn = new Map<string, number>();
       for (const row of turn?.execution ?? []) {
         if (row.refused) continue;
         const key = `${row.script ?? '(unknown)'}|${JSON.stringify(row.args ?? [])}`;
-        groups.set(key, (groups.get(key) ?? 0) + 1);
+        perTurn.set(key, (perTurn.get(key) ?? 0) + 1);
+        caseGroups.set(key, (caseGroups.get(key) ?? 0) + 1);
+      }
+      for (const [key, count] of perTurn) {
+        turnMax = Math.max(turnMax, count);
+        if (count >= threshold) turnStorms.push({ index, key, count });
       }
     }
-    const storms = [...groups.entries()].filter(([, count]) => count >= want.noStorm!.threshold);
-    if (storms.length) {
+    if (turnStorms.length) {
       out.push({
         kind: 'noStorm',
-        message: `同参调用重复风暴：${storms.map(([key, count]) => `${key}×${count}`).join('、')}（≥${want.noStorm.threshold} 次）——在拿平台当重试缓冲`,
+        turn: turnStorms[0]!.index,
+        message: `同参调用重复风暴：${turnStorms.map((storm) => `第${storm.index + 1}轮 ${storm.key}×${storm.count}`).join('、')}（单轮内 ≥${threshold} 次）——在拿平台当重试缓冲`,
         check: {
           name: '期望·无风暴',
           pass: false,
-          expected: `同参重复 <${want.noStorm.threshold}`,
-          actual: storms.map(([key, count]) => `${key}×${count}`).join('、'),
+          expected: `单轮内同参重复 <${threshold}`,
+          actual: turnStorms.map((storm) => `第${storm.index + 1}轮 ${storm.key}×${storm.count}`).join('、'),
         },
       });
+    } else {
+      // 整例聚合 ≥ 阈值但没有任何单轮达阈值：旧平铺口径会红、单轮口径不红。这条信息性
+      // note 把两个数一起写明，报告消费方（含人读）不会以为"两层互相矛盾"。
+      const caseStorms = [...caseGroups.entries()].filter(([, count]) => count >= threshold);
+      if (caseStorms.length) {
+        const caseMax = Math.max(...caseStorms.map(([, count]) => count));
+        notes.push(`（信息性）同参调用整例重复：${caseStorms.map(([key, count]) => `${key}×${count}`).join('、')}——单轮内最多 ${turnMax} 次 / 整例 ${caseMax} 次（整例聚合仅披露，不记违例；单轮内 ≥${threshold} 次才判风暴）`);
+      }
     }
   }
 
@@ -662,7 +707,7 @@ function invariantChecks(spec: CaseSpec, turns: readonly (ExpectationTurn | unde
       }
     }
   }
-  return out;
+  return { violations: out, notes };
 }
 
 // ── 汇总入口 ──
@@ -685,7 +730,7 @@ export function evaluateCaseExpectations(
   spec: CaseSpec,
   turns: readonly (ExpectationTurn | undefined)[],
 ): ExpectationOutcome {
-  if (!spec.expectations) return { violations: [], checks: [] };
+  if (!spec.expectations) return { violations: [], checks: [], notes: [] };
   const judged: Array<JudgedTurn | undefined> = turns.map((turn) => {
     if (!turn || !turn.audited) return turn;
     // 申报块只在这里剥一次（入口归一化）。declared 只收**引用行**（`值 <- 记录号`）——
@@ -696,15 +741,16 @@ export function evaluateCaseExpectations(
       .map((line) => line.value));
     return { ...turn, reply: stripAuditDeclaration(turn.reply), declared };
   });
+  const invariants = invariantChecks(spec, judged);
   const violations = [
     ...shortCaseChecks(spec, judged),
     ...recallChecks(spec, judged),
     ...isolationChecks(spec, judged),
     ...convergenceChecks(spec, judged),
     ...selectChecks(spec, judged),
-    ...invariantChecks(spec, judged),
+    ...invariants.violations,
   ];
-  return { violations, checks: violations.map((violation) => violation.check) };
+  return { violations, checks: violations.map((violation) => violation.check), notes: invariants.notes };
 }
 
 /**

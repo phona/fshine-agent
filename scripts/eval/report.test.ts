@@ -6,7 +6,7 @@
  *   ② 阶梯摘要计数修括号（旧写法 `?? 0 + 1` 让同档计数永不递增）。
  */
 import { describe, expect, it } from 'vitest';
-import { aggregateMetrics } from './evidence';
+import { aggregateMetrics, type HostGateRow } from './evidence';
 import { buildCaseReport, buildUnifiedReport, metricInputs, summarizeReport, type ReportCaseInput, type UnifiedReport } from './report';
 
 function caseInput(overrides: Partial<ReportCaseInput> = {}): ReportCaseInput {
@@ -129,7 +129,7 @@ describe('summarizeReport：阶梯计数修括号（四审 minor）', () => {
         basis: entry.basis,
         ...(entry.refusedReason ? { refusedReason: entry.refusedReason } : {}),
       })),
-      metrics: { cases: 1, passed: 1, passRate: 1, interventions: 0, gateRefusals: 0, safetyViolations: null, durationMs: 40 },
+      metrics: { cases: 1, passed: 1, passRate: 1, interventions: 0, gateRefusals: 0, planActivations: 0, planNotActivated: 0, safetyViolations: null, durationMs: 40 },
     };
     const summary = summarizeReport(report);
     // 旧写法 `rungCounts.get(rung) ?? 0 + 1` 解析成 `?? 1`：键已存在时原样返回，四次调用
@@ -210,5 +210,63 @@ describe('buildUnifiedReport：跳过用例在 cases[] 里显式标 verdict', ()
     expect(report.cases.map((line) => line.verdict)).toEqual(['pass', 'fail']);
     expect(report.metrics.cases).toBe(2);
     expect(report.metrics.passed).toBe(1);
+  });
+});
+
+/**
+ * 门拒绝口径校准（2026-11-10）：`serve_gate:plan_submit` 的每一行按设计都记
+ * status=error（记的是判定结果，不是放行），成功激活也在其中。把这类行并进
+ * gateRefusals 会把「PLAN ACTIVE 成功激活」报成门拒绝——Y2 实测 6 个 plan_submit
+ * error 行 = 3 次激活 + 3 次格式 decline，真实调用拒绝 0，旧报告写"门拒绝 6 次"。
+ */
+describe('门拒绝与计划提交分口径：控制台「门拒绝 N 次」= 真拒绝数', () => {
+  const planSubmit = (reason: string): HostGateRow => ({
+    requestId: 'req-1',
+    toolName: 'serve_gate:plan_submit',
+    status: 'error',
+    errorCode: 'GATE_BLOCKED',
+    reason,
+  });
+  const planRows: HostGateRow[] = [
+    planSubmit('PLAN ACTIVE（plan_1 v1）：按已提交 calls 执行；平台会逐次校验本计划。'),
+    planSubmit('PLAN DECLINED：PLAN_JSON_PARSE: 期望 方案是合法 JSON；实际 …'),
+    planSubmit('PLAN ACTIVE（plan_2 v1）：按已提交 calls 执行；平台会逐次校验本计划。'),
+    planSubmit('PLAN DECLINED：PLAN_SHAPE_PREFIX: 期望 bin/dummy plan 之前只允许 …'),
+    planSubmit('PLAN ACTIVE（plan_3 v1）：按已提交 calls 执行；平台会逐次校验本计划。'),
+    planSubmit('PLAN NEEDS_USER_CONFIRM：计划里含需用户确认的写操作'),
+  ];
+  const trueRefusal: HostGateRow = { requestId: 'req-1', toolName: 'serve_gate:bash', status: 'error', reason: 'SERVE_BLOCK: 未激活计划' };
+
+  it('Y2 形态：6 个 plan_submit error 行 = 3 激活 + 3 未激活，门拒绝 0', () => {
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'r', cases: [caseInput({ gateRows: planRows })] });
+    expect(report.metrics.gateRefusals).toBe(0);
+    expect(report.metrics.planActivations).toBe(3);
+    expect(report.metrics.planNotActivated).toBe(3);
+    const summary = summarizeReport(report);
+    // 硬要求：控制台「门拒绝 N 次」必须等于真拒绝数，不能把激活算进去。
+    expect(summary).toContain('门拒绝 0 次');
+    expect(summary).toContain('计划提交 6 次（激活 3 / 未激活 3）');
+  });
+
+  it('真拒绝与计划提交并排：门拒绝只数非 plan_submit 的 error 行', () => {
+    const report = buildUnifiedReport({
+      at: 'now',
+      evalRunId: 'r',
+      cases: [caseInput({ gateRows: [...planRows, trueRefusal] })],
+    });
+    expect(report.metrics.gateRefusals).toBe(1);
+    expect(summarizeReport(report)).toContain('门拒绝 1 次');
+    // 报告 JSON 的 metrics 同时带两个计划口径，读 JSON 的消费者不必再自己分派。
+    expect(report.metrics).toMatchObject({ planActivations: 3, planNotActivated: 3 });
+  });
+
+  it('metricInputs 原样传门裁决行（不在报告层另算一份计数）', () => {
+    const line = buildCaseReport(caseInput({ gateRows: planRows }));
+    const inputs = metricInputs([line]);
+    expect(inputs[0]!.gateRows).toEqual(planRows);
+    const metrics = aggregateMetrics(inputs);
+    expect(metrics.gateRefusals).toBe(0);
+    expect(metrics.planActivations).toBe(3);
+    expect(metrics.planNotActivated).toBe(3);
   });
 });

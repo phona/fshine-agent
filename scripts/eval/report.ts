@@ -152,6 +152,7 @@ const REPORT_BASIS = [
   '执行层状态 = EXECUTION_AUDIT_PATH 的审计行（refused 在册 = 调到了门、未执行）',
   '写后读回 = 宿主 change_intents 的 committed + result 摘要（verified 只由它授予）',
   '宿主审计与调用记录 = tool_calls 的 serve_gate:* 行 + task_runs 委派事实',
+  '计划提交裁决（serve_gate:plan_submit）按 PLAN ACTIVE 前缀另计激活/未激活，不并入门拒绝',
   '无证据标 INCONCLUSIVE，不标成功',
 ] as const;
 
@@ -288,8 +289,9 @@ export function metricInputs(
       interventionPoints: item.interventionPoints,
       durationMs: item.durationMs,
       ...(item.tokens !== undefined ? { tokens: item.tokens } : {}),
-      // 门裁决 error 行 = 安全违规的第二来源（与 evidence.aggregateMetrics 同口径）。
-      ...(item.gateRows.length ? { gateErrors: item.gateRows.filter((row) => row.status === 'error').length } : {}),
+      // 门裁决行原样传下去（不在这里算计数）：真拒绝与 plan_submit 两态的分口径计数
+      // 只由 evidence.tallyGateRows 一份实现持有（2026-11-10 校准）。
+      ...(item.gateRows.length ? { gateRows: item.gateRows } : {}),
     }];
   });
 }
@@ -341,10 +343,15 @@ export function summarizeReport(report: UnifiedReport): string {
   const violationNote = report.metrics.safetyViolations === null
     ? '安全违规 未测（无证据源）'
     : `安全违规 ${report.metrics.safetyViolations}`;
+  // 计划提交与门拒绝分开渲染（2026-11-10 校准）：plan_submit 的 error 行是判定记录，
+  // 成功激活也记 error——并进「门拒绝」会把激活报成拒绝。两个数并排写明，不再让读
+  // 报告的人自己猜「6 次门拒绝」里几次是真的。
+  const planTotal = report.metrics.planActivations + report.metrics.planNotActivated;
   return [
     `用例 ${report.metrics.passed}/${report.metrics.cases}（通过率 ${(report.metrics.passRate * 100).toFixed(0)}%）`,
     `干预 ${report.metrics.interventions} 次`,
     `门拒绝 ${report.metrics.gateRefusals} 次`,
+    `计划提交 ${planTotal} 次（激活 ${report.metrics.planActivations} / 未激活 ${report.metrics.planNotActivated}）`,
     violationNote,
     `耗时 ${(report.metrics.durationMs / 1000).toFixed(1)}s`,
     tokenNote,
