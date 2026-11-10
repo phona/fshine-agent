@@ -42,8 +42,9 @@ version: 1
 
 # ── 夹具与隔离（所有 probe 用例共用；差异逐条目覆写）──
 # 隔离面 = 探针每用例 mkdtemp 一个 stateDir，把 EXECUTION_PLAN_STATE /
-# EXECUTION_RATE_LIMIT_STATE / EXECUTION_MOCK_STATE / EXECUTION_AUDIT_PATH 四键指进去
-# （probe-real-agent.ts 的 isolatePlatformState / restorePlatformState）。注意：eval 侧的
+# EXECUTION_MOCK_STATE / EXECUTION_AUDIT_PATH / EXECUTION_PROPOSAL_STATE 四键指进去
+# （probe-real-agent.ts 的 isolatePlatformState / restorePlatformState；限流状态不再按例
+# 注入——仓内夹具不读、真平台仍读）。注意：eval 侧的
 # 环境变量（如 D2 显式降的 DUMMY_PLAN_CONFIRM_CALLS）不在这四键里，逐用例显式声明 + 还原。
 fixtures:
   dummy-platform:

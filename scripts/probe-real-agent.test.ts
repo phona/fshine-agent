@@ -961,7 +961,7 @@ describe('loadBaselineForProbe：黑盒缺失放宽、audited 仍 fail-closed', 
  * `env2(EXECUTION_*, DUMMY_*)` 查找状态文件与令牌面——规范名优先，专名是手工调试入口。
  * 评测进程若从 shell 继承任一 DUMMY_*，它不该改变任何 per-case 路径；而规范名一旦漏注入，
  * 它也不该静默回落到 shell 值。本组断言预置四个状态路径专名 + 三个令牌面专名后：
- *   ① 隔离后七个专名全部被删除，且五个规范名（含 EXECUTION_PROPOSAL_STATE）都落在本用例目录；
+ *   ① 隔离后七个专名全部被删除，且四个规范名（含 EXECUTION_PROPOSAL_STATE）都落在本用例目录；
  *   ② restorePlatformState 把 ambient 原值原样恢复（备份/恢复对称）；
  *   ③ 再隔离一次拿到另一份路径（per-case 隔离不是共用文件）。
  */
@@ -985,7 +985,7 @@ describe('isolatePlatformState：ambient DUMMY_* 不击穿 per-case 隔离', () 
     DUMMY_AUDIT_PATH: 'EXECUTION_AUDIT_PATH',
   } as const;
   const EXECUTION_KEYS = [
-    'EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH',
+    'EXECUTION_PLAN_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH',
     'EXECUTION_PROPOSAL_STATE',
   ] as const;
 

@@ -357,7 +357,7 @@ function openReadonlyDb(dbPath: string): Database.Database {
  */
 const PROBE_REPLY_WAIT_MS = 300_000;
 
-const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
+const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
 /**
  * 夹具的 ambient 调试专名（issue #20 切片 E 后它们不再是第一顺位）。夹具按
  * `env2(EXECUTION_*, DUMMY_*)` 查找状态文件与令牌——规范名优先；专名只是手工调试
@@ -479,10 +479,13 @@ export function isolatePlatformState(dir: string = stateDir): void {
   counter += 1;
   Object.assign(process.env, {
     EXECUTION_PLAN_STATE: path.join(dir, `plans-${counter}.json`),
-    EXECUTION_RATE_LIMIT_STATE: path.join(dir, `rate-${counter}.json`),
     EXECUTION_MOCK_STATE: path.join(dir, `mock-${counter}.json`),
     EXECUTION_AUDIT_PATH: path.join(dir, `audit-${counter}.jsonl`),
     EXECUTION_PROPOSAL_STATE: path.join(dir, `proposals-${counter}.json`),
+    // 限流状态不再按例注入（2026-11-10，issue #20）：实测仓内两夹具（dummy / stock）对
+    // EXECUTION_RATE_LIMIT_STATE 零读取，只有真平台读它；探针只跑
+    // 仓内夹具，注入是空转。真平台仍读该键，缺省契约不变。失效条件：harness 指回带限流的
+    // 后端（真平台或实现限流的夹具）时，把注入加回 PLATFORM_STATE_KEYS 与下方对象。
     // 网关限流有 example-gateway 专项测试；真实平台保持生产限流（"别让下游平台有感知"）：
     // 探针节奏天然低于限额，被限就是信号。
     // 2026-11-08 删除宿主侧的 mock 判据（isPlatformMock / EXECUTION_EXECUTOR）：原来只在

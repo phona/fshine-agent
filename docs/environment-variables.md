@@ -64,7 +64,7 @@
 | `EXECUTION_GATE_SECRET` / `EXECUTION_COMMIT_TOKEN` | 装配进程内生成 / 提案提交令牌 | 不进进程 env，只经单次子进程 env 传递；缺失 = 提交拒绝 |
 | `EXECUTION_PLAN_STATE` | 部署 / 执行层 计划账本 | 缺省 = `<平台根>/.runtime/plans.json`（探针 / 冒烟脚本按用例隔离覆盖） |
 | `EXECUTION_AUDIT_PATH` | 部署 / 调用审计 JSONL | 缺省 = 平台默认审计路径；探针按用例隔离覆盖 |
-| `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json` |
+| `EXECUTION_RATE_LIMIT_STATE` | 部署 / 限流令牌桶状态 | 缺省 = `<平台根>/.runtime/rate-limit.json`；宿主不再按例注入（仓内夹具不读；真平台仍读，缺省不变） |
 
 ## 3. 执行层治理（执行层 读，宿主只继承 / 按用例隔离）
 
@@ -229,7 +229,7 @@ stock 夹具与 dummy 同族：只被 `scripts/eval/` 的第二执行层证明
   （`env2(EXECUTION_*, 专名, 缺省)`，2026-11-10 命名族裁定）；本节的 C 类旋钮仍是
   夹具专名，查找顺序不变。本切片**不清理 ambient C 类同名键**：未在 `fixture.env` /
   `fixture.planPolicy` 声明的键，评测进程仍会继承 shell 里的值。探针的 ambient 清场
-  覆盖 §4 的七个夹具调试专名（四个状态路径 + 三个令牌面），并按用例注入五个规范名
+  覆盖 §4 的七个夹具调试专名（四个状态路径 + 三个令牌面），并按用例注入四个规范名
   （含 `EXECUTION_PROPOSAL_STATE`），但不覆盖本节 C 类旋钮。因此评测进程**不得 export**
   本节变量（实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock` 会让
   smoke-prepare-commit / g-state-isolation / g-ballot-second-domain 三例红；
