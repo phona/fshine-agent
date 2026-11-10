@@ -136,11 +136,22 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          THIS_REPO: ${{ github.repository }}
           CODEX_MODEL: ${{ vars.CODEX_MODEL }}
           CODEX_EFFORT: ${{ vars.CODEX_EFFORT }}
         run: |
           set -euo pipefail
-          node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
+          # 本 PR 历次审查 findings（打地鼠检查的历史依据）：没有它，审查者无法识别"同一族
+          # 问题的第 N 个实例"。拉取失败不阻塞审查——降级为无历史，提示词段自然缺席。
+          if ! gh api "repos/${THIS_REPO}/pulls/${PR_NUMBER}/reviews?per_page=30" > "$RUNNER_TEMP/prior-reviews.json" 2>"$RUNNER_TEMP/prior-reviews.err"; then
+            {
+              echo "### 历史评审拉取失败"
+              echo
+              echo "审查降级为无历史（打地鼠检查失去历史依据，其余判据不受影响）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            printf '[]' > "$RUNNER_TEMP/prior-reviews.json"
+          fi
+          PRIOR_REVIEWS_FILE="$RUNNER_TEMP/prior-reviews.json" node .github/codex/build-prompt.mjs "$RUNNER_TEMP/codex-prompt.md"
           cmd=(
             codex
             -a never
