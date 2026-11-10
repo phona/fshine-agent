@@ -1267,6 +1267,8 @@ describe('降级：没有 label 就零进度帧，审计字段一字不少', () 
       keyArgs: undefined,
       // 形态族（A1 披露判据的输入）：既有消费者读的字段一字未动，只多这一个
       invocation: 'executor',
+      // 控制面档位（读类探测帽吃它，不吃被截断的 detail）：语义表缺省时照实是 unknown
+      operationTier: 'unknown',
       requestId: 'req_progress',
     });
   });

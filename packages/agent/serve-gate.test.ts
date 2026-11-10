@@ -443,6 +443,27 @@ describe('createServeGate（通用执行安全门）', () => {
       expect(emptyTable(bash('bin/example-gateway commit dummy.commit --collection alpha'))?.block).toBeUndefined();
     });
 
+    it('事件带门已解析的 operationTier（不截断）：长引用下 detail 仍按 200 字截断', () => {
+      // 2026-11-10 复审 major：审计展示与计划门裁决原先只共用一个字段（detail 已按
+      // AUDIT_DETAIL_MAX_CHARS 截断）。长绝对脚本路径让控制面看到残缺引用、查不到语义表。
+      // 现在门把裁决时解析出的档位单独带在事件上；detail 仍是展示面、仍截断。
+      const longScript = `/srv/fictional-workspace/${Array.from({ length: 12 }, (_, index) => `layer-${index}-segment`).join('/')}/src/dummy/scripts/query.js`;
+      expect(longScript.length).toBeGreaterThan(AUDIT_DETAIL_MAX_CHARS);
+      const events: ServeGateEvent[] = [];
+      const gate = withPlan(
+        [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }],
+        { onEvent: (event) => events.push(event) },
+      );
+
+      expect(gate(bash(`bin/example-gateway query ${longScript} --collection alpha`))?.block).toBeUndefined();
+
+      expect(events[0]?.allowed).toBe(true);
+      expect(events[0]?.operationTier).toBe('read');
+      // 展示行为不变：detail 仍是命令原文截到 AUDIT_DETAIL_MAX_CHARS（长路径尾部被截掉）。
+      expect(events[0]?.detail?.length).toBe(AUDIT_DETAIL_MAX_CHARS);
+      expect(events[0]?.detail).not.toContain('query.js');
+    });
+
     // ── 结构化调用（structured_call）与 bash 共用同一份覆盖判据 ──────────────────────
     // 2026-11-09 四审 blocking：structured_call 分支原先只查 requiresPlan 的存在性，于是一份
     // 纯读计划激活后，清单里已登记的写 operation 仍能经结构化通道进网关——bash 侧新加的覆盖
@@ -855,7 +876,10 @@ describe('createServeGate（平台调用的人类可读投影）', () => {
       expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway query smoke.js A 202609' } })?.block).toBeUndefined();
       expect(events.at(-1)?.label).toBeUndefined();
       expect(events.at(-1)?.keyArgs).toBeUndefined();
-      expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'invocation', 'reason', 'tool']);
+      // operationTier 是控制面字段（门裁决时解析的档位），与 label/keyArgs 这组投影无关；
+      // 语义表缺省时照实是 unknown。
+      expect(events.at(-1)?.operationTier).toBe('unknown');
+      expect(Object.keys(events.at(-1) ?? {}).sort()).toEqual(['allowed', 'detail', 'invocation', 'operationTier', 'reason', 'tool']);
     }
   });
 

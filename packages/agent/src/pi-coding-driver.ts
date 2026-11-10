@@ -33,7 +33,7 @@ import Type from 'typebox';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
-import { createServeGate, describePlanCalls, isInsideScratch, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { createServeGate, describePlanCalls, isInsideScratch, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
@@ -101,6 +101,20 @@ export const WORKER_WIND_DOWN_NUDGE = '【宿主收尾指令】处理时间预�
 
 /** 收尾窗口占预算的比例：最后 10% 留给 worker 自行收尾（90% 处发信号）。 */
 export const WIND_DOWN_FRACTION = 0.9;
+
+/**
+ * 读类网关调用单轮预算帽（2026-11-10 真模型探针 Y2）：模型把平台当猜测缓冲——
+ * 一轮里七个调用是同一名称的拼写变体、十四个调用换着词试同一条口径，
+ * 每次都在等平台的 not_found 教它下一个写法。帽值达到时经既有 steer 收尾通道注入
+ * READ_PROBE_WIND_DOWN_NUDGE：停手，把已确认事实与待用户决定的问题交出去。
+ *
+ * 只提示、不拦截：计数不参与任何裁决，回合结果（execution / footprint / text）不变。
+ * 缺省 5 次；与步数帽同族可配（option `readProbeCap`）。
+ */
+export const DEFAULT_READ_PROBE_CAP = 5;
+
+/** 读类探测收尾信号（与墙钟/步数帽共用 session.agent.steer 通道，措辞针对换写法重试）。 */
+export const READ_PROBE_WIND_DOWN_NUDGE = '停止变换写法重试；把已确认的事实和需要用户决定的问题交出去。';
 
 /**
  * 模型瞬时失败的有界重试档位（波次C，2026-11-01）：数组长度 = 重试次数上限，
@@ -195,6 +209,41 @@ export function recordAllowedBashCall(
   };
 }
 
+/**
+ * 读类 operation 判据（读类探测帽用，不是门）：平台 access 语义表声明 read 档——
+ * 与 serve-gate 的 read 档**同一份数据、同一把查表梯子、同一个分级函数**：
+ *   · 查表 = planSemanticsEntryForReference（域感知：脚本路径先按所属域解析到注册名，
+ *     再退裸名归一；`src/<域>/scripts/<命令>-<描述>.js` 也在域内唯一匹配）；
+ *   · 分级 = tierOfEntry（confirm:true 优先写，plan:false 为 scratch，其余 read）。
+ * 宿主不解释 effects 词表、不按命令词猜"读/写"，也不在驱动侧另写一份查表或合取——
+ * 任何一处另写都会像 2026-11-10 复审抓到的那样与计划门漂移。
+ *
+ * 语义表缺表 / 查不到该 operation → false（宁缺勿猜）：帽只做一次收尾提示，
+ * 分类不成立时宁可少发，也不把写类调用误当成"换写法试探"。
+ */
+export function isDeclaredReadOperation(reference: string | null | undefined, semantics: OperationSemantics | undefined): boolean {
+  if (!reference) return false;
+  return tierOfEntry(planSemanticsEntryForReference(reference, semantics)).tier === 'read';
+}
+
+/**
+ * 被放行的 bash 调用是否属于读类网关探测：先由门自己的形态族（executor）确认这是
+ * 经计划门放行的平台执行调用，再看门**已解析的档位**是不是 read。
+ * 非网关命令、local、元数据（auxiliary）一律不计——探测帽只数真正触达平台读接口的调用。
+ *
+ * 档位必须来自事件上的 operationTier（门裁决时解析的那一份），**不能**从 event.detail
+ * 反解析：detail 是审计展示面，落事件前已截到 AUDIT_DETAIL_MAX_CHARS，长绝对脚本路径
+ * 会让计数看到残缺引用（2026-11-10 复审 major：计划门放行、计数漏计，持续读取不触发
+ * 收尾提示）。解析只此一次，计数与门裁决不可能分叉。
+ */
+export function isReadClassGatewayCall(
+  kind: GateInvocationKind | null | undefined,
+  tier: PlanGateTier | undefined,
+): boolean {
+  if (kind !== 'executor') return false;
+  return tier === 'read';
+}
+
 /** 绕开平台执行器的告警事件（宿主侧结构化留痕，只披露、不改回合结果）。 */
 export interface PlatformExecutorBypassedEvent {
   requestId: string;
@@ -252,11 +301,15 @@ export function createServeGateAuditSink(sink: {
    * "整轮有没有真调平台执行器"这条披露判据分流——绕开平台执行器要可观测，缺它就只有总数，
    * 而总数里本地执行与平台执行完全同形（A1 实测：足迹写着 1 次网关调用，平台审计里
    * validate/transform 一次没经网关）。
+   *
+   * 第二参带整条事件（其中 operationTier = 门裁决时解析出的档位）：读类探测帽要在族名
+   * 之外再看 operation 的平台语义——读的是这个已解析档位，不是给审计展示的 detail
+   * （detail 已按 AUDIT_DETAIL_MAX_CHARS 截断，长引用会残缺）。
    */
-  onAllowedBash?: (kind: GateInvocationKind) => void;
+  onAllowedBash?: (kind: GateInvocationKind, event: ServeGateEvent) => void;
 }): (event: ServeGateEvent) => void {
   return (event) => {
-    if (event.tool === 'bash' && event.allowed && event.invocation) sink.onAllowedBash?.(event.invocation);
+    if (event.tool === 'bash' && event.allowed && event.invocation) sink.onAllowedBash?.(event.invocation, event);
     const step = serveGateStepText(event);
     if (step) sink.onStep(step);
     sink.audit?.({ ...event, requestId: sink.requestId });
@@ -377,6 +430,17 @@ export interface PiCodingTurnDriverOptions {
    * gateCalls; this option only changes the threshold, never the counter.
    */
   stepCap?: number;
+  /**
+   * 读类网关调用单轮预算帽：本轮为回答用户而发的读类平台调用达到该值（缺省 5）时，
+   * 经既有 steer 收尾通道注入一次 READ_PROBE_WIND_DOWN_NUDGE（不阻断、不重复）。
+   * 只改阈值，不另立计数器。测试替身注入点。
+   */
+  readProbeCap?: number;
+  /**
+   * 能力清单注入点（与 operationLabels / operationSemantics 同族）：缺省由会话按平台 CLI
+   * 派生。结构化调用通道的声明来源；测试要驱动 structured_call 时不必造一份平台 CLI。
+   */
+  capabilityManifest?: CapabilityManifest;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -415,6 +479,12 @@ export interface PiCodingWorkerSessionOptions {
    * calls 是宿主自己解析的命令参数，不是 worker 文本；最后一次提交即本回合实际执行的范围。
    */
   onPlanSubmitted?: (calls: readonly PlanCall[]) => void;
+  /**
+   * 一次**被放行**的读类平台调用发生时的回调（读类探测帽的计数源，行为见
+   * isDeclaredReadOperation）。只在平台语义表声明 plan:true / confirm:false 时触发；
+   * 回调不参与裁决，由驱动侧决定何时发收尾提示。
+   */
+  onReadProbe?: () => void;
   /**
    * 本回合 worker 的工作区（宿主注入，TurnDriverInput.scratchDir 的透传，如
    * `tmp/task_<taskId>`）：write/edit 门、提案 payload 边界与计划产物路径豁免共用的
@@ -597,6 +667,22 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 宿主合成终稿兜底，步数帽没有同款兜底，故不能只记 warn 就丢信号。
       let stepCapWindDownPending = false;
       const fireStepCapWindDown = createStepCapWindDown(stepCap, () => stepCapSteer?.(WORKER_WIND_DOWN_NUDGE));
+      // 读类探测单轮预算帽（2026-11-10 Y2）：与步数帽共用同一条 steer 收尾通道，但计数
+      // 对象是**被放行的读类平台调用**——bash 的 executor 族里语义表声明 read 的调用，
+      // 加上 structured_call 通道里同一判据的调用。达到帽值（缺省 5）只送一次，之后不再
+      // 重复；计数不参与任何裁决，回合结果不变。steer 持有者同样在会话建成后赋值。
+      const readProbeCap = parseStepCap(options.readProbeCap, DEFAULT_READ_PROBE_CAP);
+      let readProbeCalls = 0;
+      let readProbeWindDownSent = false;
+      let readProbeSteer: ((content: string) => void) | null = null;
+      const noteReadProbe = (): void => {
+        if (readProbeWindDownSent) return;
+        readProbeCalls += 1;
+        if (readProbeCalls < readProbeCap) return;
+        readProbeWindDownSent = true;
+        // 持有者在会话建成后立即赋值；此前不可能有工具调用，故不会走到空持有者。
+        readProbeSteer?.(READ_PROBE_WIND_DOWN_NUDGE);
+      };
       let bashRuns = 0;
       // A1 形态族计数与产物清单（绕开平台执行器的披露判据，见 platformExecutorBypassed）：
       // gateCalls 仍是"所有被放行的 bash"（execution/footprint 的语义一字未动，回合结果
@@ -679,8 +765,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         }
         : undefined;
       const argSpecs = await operationArgSpecsFor(input.cwd);
+      // access 语义表提到 create 调用之前：会话创建与 onAllowedBash 的读类探测计数
+      // 要读同一份表（同一个来源，不是第二份派生）。
+      const operationSemantics = await operationSemanticsFor(input.cwd);
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
+        onReadProbe: noteReadProbe,
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
@@ -697,7 +787,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         ...(argSpecs && argSpecs.size > 0 ? { operationArgSpecs: argSpecs } : {}),
         // access 语义表（计划门拒绝分流的平台数据面）与能力声明（宿主持有）一起进会话：
         // beforeToolCall 里对提交的计划做"该不该进计划"的判读。
-        operationSemantics: await operationSemanticsFor(input.cwd),
+        operationSemantics,
+        // 能力清单（驱动侧注入优先，缺省由会话派生）：structured_call 的声明来源。
+        ...(options.capabilityManifest ? { capabilityManifest: options.capabilityManifest } : {}),
         // gateway（C7b fail-closed）：run 输入显式指定优先，工厂声明兜底——两处都来自
         // profile.gateway（runtime 按任务注入 / 装配按工厂注入）；都未声明时 session 内
         // servePatterns 即抛，宿主不回退任何遗留网关名。
@@ -722,7 +814,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
             if (event.allowed && event.tool === 'bash') bashRuns += 1;
             options.serveGateAudit?.(event);
           },
-          onAllowedBash: (kind) => {
+          onAllowedBash: (kind, event) => {
             // 分项计数无条件先行：每一次放行恰好计入一个族，分项和恒等于
             // gateCalls。步数帽 wind-down 只当副作用触发一次（第 cap+1 次
             // 送一次 90% 预算点同款 wind-down，后续放行不再重复打断，模型
@@ -749,6 +841,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
               pendingSteer(WORKER_WIND_DOWN_NUDGE);
             }
             fireStepCapWindDown(gateCalls);
+            // 读类探测帽：看的是门自己的族名 + 门裁决时已解析的档位（operationTier），
+            // 不从 detail 反解析——detail 是截断后的审计展示文本。写类/本地/元数据不计；
+            // 被拦下的调用也到不了这里。
+            if (isReadClassGatewayCall(kind, event.operationTier)) noteReadProbe();
             // latch 计划身份：只记第一个放行调用的那份。G1 门对 bash 的放行分支以
             // planActive() 为真为前提（serve-gate.ts：无活跃计划即 block），所以"门刚放过
             // 一个 bash"就保证当时有活跃计划，这里 currentPlan() 正常必非空。万一为空
@@ -787,6 +883,21 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           stepCapWindDownPending = true;
           console.warn(JSON.stringify({
             event: 'worker_step_cap_wind_down_failed',
+            requestId: input.requestId,
+            taskId: input.sessionId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+        }
+      };
+      // 读类探测帽的 steer 持有者：同一会话通道、同一条 try/catch 纪律。失败只记日志
+      // （帽是一次提示，不是硬预算；不设 pending 补发，避免与步数帽的补发互相穿插）。
+      readProbeSteer = (content: string) => {
+        try {
+          session.agent.steer({ role: 'user', content, timestamp: Date.now() } as unknown as DriverMessage);
+          console.info(JSON.stringify({ event: 'worker_read_probe_cap_wind_down_signaled', requestId: input.requestId, taskId: input.sessionId }));
+        } catch (error) {
+          console.warn(JSON.stringify({
+            event: 'worker_read_probe_cap_wind_down_failed',
             requestId: input.requestId,
             taskId: input.sessionId,
             errorType: error instanceof Error ? error.name : 'UnknownError',
@@ -1618,6 +1729,11 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     }
     // effects / serve 矩阵在此只做存在性投影，不解释业务含义（执行层自有词汇）。
     // 宿主不另立枚举、不硬编码白名单——平台加同族取值不静默改写判定。
+    //
+    // 读类探测计数：结构化调用已通过全部放行判据（与 bash 的 onAllowedBash 同一时机——
+    // 只有真被放行的调用才计数）。判据与 bash 侧同一把尺子（isDeclaredReadOperation），
+    // 不用 manifest 的 effects 词表猜读/写。
+    if (options.onReadProbe && isDeclaredReadOperation(operation, operationSemantics)) options.onReadProbe();
     return undefined;
   }
 
