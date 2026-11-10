@@ -209,7 +209,7 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
 }
 
 /**
- * 平台健康判据（Lane 2 治标补法）：本回合的平台交互是否以**平台侧不可用**收尾。
+ * 平台登录/凭据类失败判据（结构化事实）：本回合的平台交互是否以**平台侧不可用**收尾。
  *
  * 机械判据（不猜、不嗅探文案）：平台错误信封的 `error.code ∈ PLATFORM_AUTH_ERROR_CODES`。
  * 这一个判据同时覆盖两句话——
@@ -221,10 +221,12 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
  *      （runner.js：信封非 ok 即 code 1）——码在信封里，"exit 非零"是同一事实的另一面，
  *      所以信封码判定即覆盖该分句，不需要在宿主侧重判退出码。
  * 码集合本身收口在 platform-contract（唯一适配层）：平台演进只改集合，不改编排层。
+ * 宿主只把该事实原样上交，不在编排层做冷却/前置拦截/逐轮重试判断——并发容忍与健康
+ * 退避归执行层自己的限流与熔断。
  *
  * 只看**收尾那一条**信封（与 selectionClarificationFromResponses 同一边界）：早先的
- * 平台抖动若随后成功（completed），平台健康已恢复，旧失败不得计入本轮——否则一次
- * runWithAuth 自动重登录自愈会把会话误判成"平台异常"，冷却也就失去了事实依据。
+ * 平台抖动若随后成功（completed），旧失败不得计入本轮——否则一次 runWithAuth 自动
+ * 重登录自愈会被误报成本回合的失败事实。
  */
 export interface PlatformAuthFailure {
   /** 平台错误码（数据判据）：PLATFORM_AUTH_ERROR_CODES 集合（平台不可用族）内八码之一。 */
@@ -241,7 +243,7 @@ export function platformAuthFailureOf(envelope: PlatformEnvelope | null): Platfo
 /**
  * tool_result 正文 → 平台侧不可用事实：**本回合最后一条带信封的平台响应**决定收尾
  * 状态（与 selectionClarificationFromResponses 同一把尺、同一边界）。收尾信封是 completed
- * （数据答案）或其他错误码 → undefined：那类回合平台健康没有坏到要冷却。
+ * （数据答案）或其他错误码 → undefined：那类回合不构成平台不可用事实。
  */
 export function platformAuthFailureFromResponses(
   messages: readonly TranscriptMessageLike[],
@@ -311,21 +313,21 @@ export function selectionClarificationFromResponses(
  *   · PLATFORM_TIMEOUT：平台页面在 N 秒内没渲染出结果/空态（平台对 playwright
  *     Timeout Error 的码级映射，见 query-receivables 的 errorCodeOf）。
  *
- * 为什么超时与登录失效同族（进同一个集合、触发同一套冷却）：两者都是**平台侧不可用**
+ * 为什么超时与登录失效同族（进同一个集合、同一类失败事实）：两者都是**平台侧不可用**
  * ——平台这一趟没给出可用答数，且原因在执行层之外（会话失效 / 页面不响应），调用方改
- * 自己的输入改不好。宿主可采取的动作也完全相同：暂停逐轮重试（每次重试都真发起一次
- * 浏览器自动化 + 一个限流令牌 + 用户 10-60s 等待，而结论早已确定），冷却期内由宿主合成
- * PLATFORM_UNAVAILABLE 消息（零内部控制词、零错误码），不把技术码漏给用户。
+ * 自己的输入改不好。宿主不再在编排层据此做冷却/前置拦截（退避与恢复策略归执行层自己
+ * 的限流/熔断）；集合的意义仍是把"调用方改不动、平台这趟没给出可用答数"的收尾形态
+ * 归为一族，供宿主与执行层共用同一码级判据。
  * 2026-09-29 真实模式实测正是这条缺口：一次空等 25s 超时被包成 INTERNAL 兜底码，本族
  * 不认它 → 模型继续跑计划里的下一步 → 又超时一次 → 用户干等 3 分钟拿到一句归错因的
- * "平台侧环境问题"。纳入本族后，同类超时第二次即进冷却，回合级拦截。
+ * "平台侧环境问题"。纳入本族后，同类超时按平台不可用事实归因，不再被包成 INTERNAL。
  *
  * 与**不**进本族的码的边界（判据是"谁改得动"，不是消息长短）：
  *   · 输入类（INVALID_PERIOD / QUERY_REQUIRED / INVALID_FLAG…）：调用方改对参数就能成，
- *     重试有意义，冷却只会挡住本该成功的调用；
+ *     重试有意义，不属于平台不可用事实；
  *   · 数据三态（ACCOUNT_SET_NOT_FOUND / ACCOUNT_SET_AMBIGUOUS / SUBJECT_NOT_FOUND…）：
  *     平台答得又准又确定，是成功收尾不是故障；
- *   · 兜底码（INTERNAL 等）：无平台侧语义，既不该冷却也不该冒充平台不可用。
+ *   · 兜底码（INTERNAL 等）：无平台侧语义，既不算平台不可用，也不该冒充。
  */
 export const PLATFORM_AUTH_ERROR_CODES: ReadonlySet<string> = new Set([
   'AUTH_EXPIRED',

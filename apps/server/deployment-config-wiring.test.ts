@@ -85,10 +85,10 @@ function workerCall(): { env: Record<string, string | undefined>; agentDir?: str
   return call[0]! as { env: Record<string, string | undefined>; agentDir?: string };
 }
 
-function gateCall(): { maxQueue: number; concurrency?: number } {
+function gateCall(): { maxQueue: number } {
   const call = vi.mocked(createPlatformExecutionGate).mock.calls.at(-1);
   if (!call) throw new Error('createPlatformExecutionGate 未被装配调用');
-  return call[0]! as { maxQueue: number; concurrency?: number };
+  return call[0]! as { maxQueue: number };
 }
 
 /** 行为级核对：pi 驱动闭包捕获的 modelId 写进合成消息。 */
@@ -122,7 +122,6 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(mainOptions.env).toEqual({ AGENT_CONFIG_PATH: configPath, ...BASE_ENV, EXECUTION_SERVE: '1' });
     // yaml 未配置的 FSHINE_* 键没有被伪造出来。
     expect(mainOptions.env['FSHINE_PLATFORM_QUEUE_CAPACITY']).toBeUndefined();
-    expect(mainOptions.env['FSHINE_PLATFORM_CONCURRENCY']).toBeUndefined();
     expect(mainOptions.env['FSHINE_PI_AGENT_DIR']).toBeUndefined();
 
     // worker：不传 agentDir（保持驱动的 process.env → <cwd>/data/pi-agent 回落链），
@@ -149,9 +148,7 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
       '  botId: yaml-bot-id',
       '  botSecret: yaml-bot-secret',
       'host:',
-      '  platformConcurrency: 2',
       '  platformQueueCapacity: 7',
-      '  platformCooldownMs: 60000',
       '  shutdownDrainMs: 1234',
       '  workerDispatchMode: inline',
       '  workerStepCap: 12',
@@ -178,12 +175,10 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(workerOptions.agentDir).toBe('/tmp/cfg-pi-agent');
     expect(workerOptions.env['FSHINE_WORKER_STEP_CAP']).toBe('12');
     expect(workerOptions.env['FSHINE_PLATFORM_QUEUE_CAPACITY']).toBe('7');
-    expect(workerOptions.env['FSHINE_PLATFORM_CONCURRENCY']).toBe('2');
-    expect(workerOptions.env['FSHINE_PLATFORM_COOLDOWN_MS']).toBe('60000');
     expect(workerOptions.env['FSHINE_INBOUND_DEBOUNCE_MS']).toBe('0');
 
     // 平台闸 options 显式带上 yaml 派生值（门的读取点默认是 process.env）。
-    expect(gateCall()).toEqual({ maxQueue: 7, concurrency: 2 });
+    expect(gateCall()).toEqual({ maxQueue: 7 });
 
     // 渠道：adapter 的读取面是 env，装配必须把 effectiveEnv 传下去。
     const channelEnv = (assembly.channel as unknown as { env: NodeJS.ProcessEnv }).env;

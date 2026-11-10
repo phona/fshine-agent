@@ -23,8 +23,8 @@
  *       不在终稿闸上，runtime.ts 的 replyText 直发）——本组用例如实钉当前行为，
  *       每条注明"已守/缺口"；伪造确认码的机械保证（不触发 intent 状态变化）
  *       是真实断言；
- *   D5  平台不可用冷却的注入变体（叙述文本提 AUTH 码 ≠ 信封码，不进冷却记账）
- *       + FSHINE_PLATFORM_COOLDOWN_MS 覆盖冷却时长后恢复放行；
+ *   D5  AUTH 码叙述的终稿卫生（叙述文本提 AUTH 码 ≠ 平台失败事实；平台健康退避
+ *       已下放执行层，宿主不再做逐轮冷却记账）；
  *   D5b 泄漏基线：每条用例的最终回复跑基线扫描（taskId 形态 / 内部路径 / 信封
  *       残片 / JSON 残片 / 确认码哈希形态），全部通过——D4  corpus 的缺口项除外
  *       （那些用例钉的就是基线被破坏的当前事实）。
@@ -32,8 +32,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { messageFor, messageTextFor, platformUnavailableTextFor } from '../../packages/agent/src/error-codes';
-import { platformAuthFailureFromResponses } from '../../packages/agent/src/platform-contract';
+import { messageFor, messageTextFor } from '../../packages/agent/src/error-codes';
 import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
 import { validatePlanEntities } from '../../packages/agent/src/turn-contract';
 import {
@@ -480,59 +479,8 @@ describe('[L4 集成] 离线全链 e2e：D4 污染塑形（corpus）', () => {
   });
 });
 
-describe('[L4 集成] 离线全链 e2e：D5 平台不可用冷却（注入变体 + 时长覆盖）', () => {
-  /** 平台登录/凭据类失败信封（与 turn-loop-platform-health 的 authFailingWorker 同形）。 */
-  function authEnvelope(code: string): string {
-    return `RESULT ${JSON.stringify({
-      v: 1, op: 'finance.query-receivables', status: 'failed', data: null,
-      error: { code, message: `${code}: 平台登录态校验未通过` },
-    })}`;
-  }
-
-  /** 每次委派真调一次平台并拿到登录族失败信封（生产派生函数同一条判据）。 */
-  function authFailingWorker(codes: readonly string[]) {
-    let index = 0;
-    const invocations = { count: 0 };
-    return {
-      invocations,
-      run: async (input: { messages: unknown[] }) => {
-        invocations.count += 1;
-        const code = codes[Math.min(index, codes.length - 1)] ?? 'NEEDS_LOGIN';
-        index += 1;
-        const envelope = authEnvelope(code);
-        const authFailure = platformAuthFailureFromResponses([
-          { role: 'toolResult', content: [{ type: 'text', text: envelope }] },
-        ]);
-        const text = '平台登录态校验未通过，本轮没有取到任何数据，也不会给出任何估算。';
-        return {
-          text,
-          messages: [
-            ...input.messages,
-            { role: 'toolResult', toolCallId: 'call_platform', toolName: 'bash', content: [{ type: 'text', text: envelope }], timestamp: Date.now() },
-            { role: 'assistant', content: text, timestamp: Date.now() },
-          ],
-          execution: { planId: 'plan_auth_failure', version: 1, calls: 1 },
-          ...(authFailure ? { authFailure } : {}),
-        };
-      },
-    };
-  }
-
-  /** 捕获宿主审计事件（console.info 的 JSON 行），与 turn-loop-platform-health 同手法。 */
-  function captureEvents(): { events: Array<Record<string, unknown>>; restore: () => void } {
-    const events: Array<Record<string, unknown>> = [];
-    const original = console.info;
-    console.info = (line: string) => {
-      try {
-        const parsed = JSON.parse(line) as Record<string, unknown>;
-        if (typeof parsed['event'] === 'string') events.push(parsed);
-      } catch { /* 非 JSON 行 */ }
-    };
-    return { events, restore: () => { console.info = original; } };
-  }
-
-  it('注入变体：worker 叙述文本提到 AUTH 码而信封成功 → 不进冷却记账，下轮照常执行', async () => {
-    const audit = captureEvents();
+describe('[L4 集成] 离线全链 e2e：平台 AUTH 码叙述与终稿卫生（冷却机制已下放执行层）', () => {
+  it('worker 叙述文本提到 AUTH 码而信封成功 → 码不上屏，下轮照常执行', async () => {
     let booted: Boot | null = null;
     try {
       const inner = gatedWorker([
@@ -560,56 +508,15 @@ describe('[L4 集成] 离线全链 e2e：D5 平台不可用冷却（注入变体
       const first = await booted.send('查一下幻辰财税 202606 的应收账款');
       const second = await booted.send('再查一次');
 
-      // 冷却判据只看信封错误码（platform-contract 的码集合）：叙述文本里的 AUTH_EXPIRED
-      // 已被出口删除支剥掉（D-136 收口——码不上屏，叙述其余部分保留），也不构成失败证据
+      // 叙述文本里的 AUTH_EXPIRED 已被出口删除支剥掉（D-136 收口——码不上屏，叙述其余部分
+      // 保留），也不构成任何失败证据：2026-11-10 仲裁后宿主不再做平台健康冷却记账，
+      // 每一轮都照常发起委派。
       expect(first).not.toContain('AUTH_EXPIRED');
       expect(first).toContain('自动重登录后查询成功');
       expect(first).toContain('61000');
       expect(second).toContain('61000');
       expect(invocations).toBe(2);
-      expect(audit.events.filter((event) => event['event'] === 'platform_auth_failure')).toEqual([]);
-      expect(audit.events.filter((event) => event['event'] === 'platform_cooldown_blocked')).toEqual([]);
     } finally {
-      audit.restore();
-      await booted?.assembly.close();
-    }
-  });
-
-  it('FSHINE_PLATFORM_COOLDOWN_MS 缩短冷却：冷却中前置拦截，到期后恢复放行', async () => {
-    const savedCooldown = process.env['FSHINE_PLATFORM_COOLDOWN_MS'];
-    process.env['FSHINE_PLATFORM_COOLDOWN_MS'] = '800';
-    const audit = captureEvents();
-    let booted: Boot | null = null;
-    try {
-      const worker = authFailingWorker(['NEEDS_LOGIN', 'AUTH_EXPIRED']);
-      booted = await boot({
-        main: mainDriver([
-          { kind: 'delegate', request: '查询幻辰财税的应收账款' },
-          { kind: 'delegate', request: '查询幻辰财税的应收账款' },
-          { kind: 'delegate', request: '查询幻辰财税的应收账款' },
-          { kind: 'delegate', request: '查询幻辰财税的应收账款' },
-        ]),
-        worker: worker as never,
-      });
-
-      await booted.send('查一下幻辰财税的应收账款');
-      await booted.send('再查一次');
-      // 连续 2 次 AUTH 失败 → 进入冷却；第三回合宿主前置拦截（零委派）
-      const blocked = await booted.send('还是查一下');
-      expect(worker.invocations.count).toBe(2);
-      expect(blocked).toBe(platformUnavailableTextFor(1));
-      expect(executionLanguageFingerprints(blocked)).toEqual([]);
-      expect(audit.events.filter((event) => event['event'] === 'platform_cooldown_blocked')).toHaveLength(1);
-
-      // 冷却 800ms 到期：第四回合恢复真实委派（探测性调用重新打到平台）
-      await new Promise((resolve) => setTimeout(resolve, 1_200));
-      const recovered = await booted.send('现在再查一次');
-      expect(worker.invocations.count).toBe(3);
-      expect(recovered).toBe('平台登录态校验未通过，本轮没有取到任何数据，也不会给出任何估算。');
-    } finally {
-      audit.restore();
-      if (savedCooldown === undefined) delete process.env['FSHINE_PLATFORM_COOLDOWN_MS'];
-      else process.env['FSHINE_PLATFORM_COOLDOWN_MS'] = savedCooldown;
       await booted?.assembly.close();
     }
   });

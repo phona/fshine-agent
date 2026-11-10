@@ -122,9 +122,7 @@ export type WorkerDispatchMode = 'inline' | 'background';
  * 数值项缺省 / 非法 = 不收进本结构，由各消费点的既有缺省兜底（不在这里复制缺省值）。
  */
 export interface HostConfig {
-  platformConcurrency?: number;
   platformQueueCapacity?: number;
-  platformCooldownMs?: number;
   shutdownDrainMs?: number;
   workerDispatchMode?: WorkerDispatchMode;
   workerStepCap?: number;

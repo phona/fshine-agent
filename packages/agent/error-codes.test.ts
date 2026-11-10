@@ -120,7 +120,7 @@ describe('fshine 错误码表（错误即数据）', () => {
     for (const code of ['PLAN_SHAPE_PREFIX', 'PLAN_SHAPE_GATE_TEACHING', 'ENTITY_OUT_OF_SCOPE', 'DECLINED_PLAN_LIMIT', 'TASK_NOT_FOUND', 'RESUMED_PLAN_NOT_EXECUTED', 'PLAN_PENDING_PERSIST_MISSING', 'PROPOSAL_FLOW_NOT_CONFIGURED', 'PLAN_NOT_PLANNABLE']) {
       expect(messageFor(code, undefined, undefined, 'bin/example-gateway'), code).not.toMatch(business);
     }
-    // 平台健康冷却话术（Lane 2）：占位符用分钟数填充后同样零业务词
+    // 平台不可用话术模板：占位符用分钟数填充后同样零业务词
     expect(platformUnavailableTextFor(10)).not.toMatch(business);
   });
   it('ENTITY_OUT_OF_SCOPE 的 correctForm 带正路径：名称检索指引 + 会话既有实体有效（任务 1/2）', () => {
@@ -218,14 +218,15 @@ describe('选择类澄清消息模板（宿主机械组装，模型不翻译）'
   });
 });
 
-// ── 平台健康冷却话术（PLATFORM_UNAVAILABLE，Lane 2 治标补法）────────────────
+// ── 平台不可用话术模板（PLATFORM_UNAVAILABLE；宿主当前不在编排层合成）────────
 //
-// 连续 AUTH 类平台失败达阈值后，宿主在冷却期内合成这段确定性话术终结回合。与
-// DELEGATION_AUTH_FAILURE 的分工：那句说"这一轮失败了、要重新登录"（一次性、可行动），
-// 这段说"已暂停自动重试、约 N 分钟后恢复"（连续失败后的状态）。措辞纪律：只说平台侧
-// 异常与下一步动作，零内部控制词、零业务词、零执行语言指纹，也不编造原因。
+// 2026-11-10 仲裁后宿主不再做平台健康记账/冷却/前置拦截（退避归执行层），runtime 也
+// 不再合成这段终稿；模板与渲染出口保留在唯一消息表内，避免调用点现场拼写。与
+// DELEGATION_AUTH_FAILURE 的分工不变：那句说"这一轮失败了、要重新登录"（一次性、可
+// 行动），本模板说"已暂停自动重试、约 N 分钟后恢复"（连续失败后的状态）。措辞纪律：
+// 只说平台侧异常与下一步动作，零内部控制词、零业务词、零执行语言指纹，也不编造原因。
 
-describe('平台健康冷却话术（PLATFORM_UNAVAILABLE，宿主合成）', () => {
+describe('平台不可用话术模板（PLATFORM_UNAVAILABLE，宿主当前不合成）', () => {
   it('模板带 {minutes} 占位符，渲染出口用宿主时钟数据填充（与澄清模板同族）', () => {
     // 表内文本是模板：占位符只经专用出口填充（动态部分是数据不是措辞）
     expect(messageTextFor('PLATFORM_UNAVAILABLE')).toContain('{minutes}');

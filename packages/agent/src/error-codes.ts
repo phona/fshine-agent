@@ -18,9 +18,9 @@
  *   · 消息模板类 `{text}`：用户可见的"状态话术"（如 ACTIVATED_PLAN_NOT_EXECUTED）。
  *     它们**不是错误**，是宿主对真实状态的确定性陈述——码 → 文本一一对应，
  *     语义照旧，只是不再有第二份手抄本。个别条目带占位符（选择类澄清的
- *     `{query}`/`{n}`/`{list}` 由 `clarificationTextFor` 用平台信封数据填充，平台健康
- *     冷却的 `{minutes}` 由 `platformUnavailableTextFor` 用宿主时钟数据填充）——动态
- *     部分是数据不是措辞，模板本身仍然零业务词。
+ *     `{query}`/`{n}`/`{list}` 由 `clarificationTextFor` 用平台信封数据填充，
+ *     `PLATFORM_UNAVAILABLE` 的 `{minutes}` 由 `platformUnavailableTextFor` 用宿主时钟
+ *     数据填充）——动态部分是数据不是措辞，模板本身仍然零业务词。
  *
  * 第三种形态（serve 门拒绝理由收口后新增）：**声明了 `params` 的参数化消息模板**
  * （`SERVE_*` 一族）。门的拒绝理由曾是十几处 inline 字符串散在 serve-gate.ts 各出事点，
@@ -325,12 +325,14 @@ const TABLE: Record<string, CodeEntry> = {
     params: ['query'],
   },
 
-  // ── 平台健康类：连续登录/环境异常后的冷却期话术（Lane 2 治标补法）──────────
+  // ── 平台不可用状态话术（保留模板；宿主当前不在编排层合成）──────────────────
   // 与 DELEGATION_AUTH_FAILURE 的分工：那句说"这一轮失败了、要重新登录"（一次性、
-  // 可行动）；这句说"宿主已暂停自动重试、约 N 分钟后自动恢复"（连续失败后的状态）。
-  // {minutes} 占位符由 platformUnavailableTextFor 用宿主时钟数据填充（与选择类澄清的
-  // {query}/{n}/{list} 同族：动态部分是数据不是措辞，因此不经 messageFor 的 actual
-  // 通道——消息模板给它传 actual 会 fail-loud，纪律不变）。
+  // 可行动）；本模板说"已暂停自动重试、约 N 分钟后自动恢复"（连续失败后的状态）。
+  // 2026-11-10 仲裁后宿主不再做平台健康记账/冷却/前置拦截（退避归执行层），runtime
+  // 因此不再合成这段终稿；模板仍留在唯一消息表内，避免调用点现场拼写，供执行层或
+  // 后续恢复路径复用时语义不变。{minutes} 占位符由 platformUnavailableTextFor 用宿主
+  // 时钟数据填充（与选择类澄清的 {query}/{n}/{list} 同族：动态部分是数据不是措辞，
+  // 因此不经 messageFor 的 actual 通道——消息模板给它传 actual 会 fail-loud，纪律不变）。
   // 措辞纪律：只陈述平台侧异常与下一步动作——不出现任何内部控制词（额度/配额/熔断/
   // 计划门/拒绝上限/重试上限是宿主机制，用户不需要知道），也不编造原因（登录页改版、
   // 凭据过期这类归因平台登录层都判不准，宿主更不该猜；"与你的查询内容无关"是唯一
@@ -596,7 +598,7 @@ const PLACEHOLDER_RE = /\{(\w+)\}/g;
 /**
  * 参数化消息模板渲染（serve 门拒绝理由一族）：表内模板 + 调用方数据机械组装。
  *
- * 与选择类澄清（clarificationTextFor）/平台健康（platformUnavailableTextFor）同族——动态
+ * 与选择类澄清（clarificationTextFor）/平台不可用话术（platformUnavailableTextFor）同族——动态
  * 部分是**数据**不是措辞，因此不经 messageFor 的 actual 通道（消息模板传 actual 会 fail-loud）。
  * 差别只在通用性：那两条各有专用出口（信封数据 / 宿主时钟），这一条给门用，占位符名单
  * 声明在条目里，一个出口覆盖全部 SERVE_* 码——不为每个路径拼一条消息。
@@ -756,9 +758,12 @@ export function terminalFailureTextFor(code: string, data: TerminalFailureTextDa
 }
 
 /**
- * 平台健康冷却话术（Lane 2）：表内模板 + 剩余分钟数机械组装。
+ * 平台不可用话术渲染：表内模板 + 剩余分钟数机械组装。
  *
- * 分钟数是**宿主时钟数据**（冷却剩余量），与澄清模板的信封数据同族——动态部分是数据
+ * 2026-11-10 仲裁后宿主不再做平台健康冷却，runtime 也不再合成这段终稿；本出口保留为
+ * 消息表的唯一渲染点（供执行层或后续恢复路径复用），不在调用点现场拼写。
+ *
+ * 分钟数是**宿主时钟数据**（剩余量），与澄清模板的信封数据同族——动态部分是数据
  * 不是措辞，因此不经 messageFor 的 actual 通道（消息模板传 actual 会 fail-loud，纪律
  * 不变）。取整规则：向上取整且至少 1（"约 0 分钟"不是人话）；非有限值按 1 兜底——
  * 宿主自己算的数不值得为此失败一个回合，但 NaN 也绝不能渲染给用户。
@@ -767,11 +772,11 @@ export function platformUnavailableTextFor(minutes: number): string {
   const entry = entryOf('PLATFORM_UNAVAILABLE');
   if (!('text' in entry)) {
     throw Object.assign(
-      new Error(`${UNKNOWN_ERROR_CODE}: 平台健康话术只接受消息模板类码（它没有三要素）: PLATFORM_UNAVAILABLE`),
+      new Error(`${UNKNOWN_ERROR_CODE}: 平台不可用话术只接受消息模板类码（它没有三要素）: PLATFORM_UNAVAILABLE`),
       { code: UNKNOWN_ERROR_CODE, unknownCode: 'PLATFORM_UNAVAILABLE' },
     );
   }
-  if (typeof entry.text === 'function') throw new Error('平台健康话术不支持惰性网关名');
+  if (typeof entry.text === 'function') throw new Error('平台不可用话术不支持惰性网关名');
   const shown = Number.isFinite(minutes) ? Math.max(1, Math.ceil(minutes)) : 1;
   // 函数式 replacement：分钟数是数字，没有 $& 之类的替换pattern 歧义（与澄清模板同一写法）
   return entry.text.replace('{minutes}', () => String(shown));

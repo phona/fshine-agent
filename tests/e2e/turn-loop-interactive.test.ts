@@ -206,41 +206,34 @@ describe('[L4 集成] interactive session production wiring', () => {
     }
   });
 
-  it('a queued task can be cancelled through the Planner without starting after the active task', async () => {
+  it('background tasks run concurrently: the host admission gate no longer queues one behind another', async () => {
+    // 2026-11-10 仲裁：平台并发容忍归执行层，宿主准入闸只做待办深度背压（默认 100），
+    // 不再把第二个后台任务排在第一个后面。两件任务同时进入 Worker 是被钉住的新语义。
     const release = deferred();
-    const started = deferred();
     let calls = 0;
-    const cancelArgs = { action: 'cancel', taskId: '' };
     const main = ScriptedTurnDriver([
       { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '生成第一份汇总' } }] },
       { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '生成第二份汇总' } }] },
-      { toolCalls: [
-        { tool: 'route_current_turn', args: { kind: 'conversation' } },
-        { tool: 'task_control', args: cancelArgs },
-      ], text: '已请求取消第二项任务。' },
     ]);
     const b = await boot({
       workerDispatchMode: 'background', main,
       worker: { run: async (input: { messages: unknown[] }) => {
         calls += 1;
-        started.resolve();
         await release.promise;
-        return { messages: input.messages, text: '第一项任务完成。', execution: { planId: 'mock-active', version: 1, calls: 1 } };
+        return { messages: input.messages, text: `第 ${calls} 项任务完成。`, execution: { planId: `mock-${calls}`, version: 1, calls: 1 } };
       } },
     });
     try {
       expect(await b.send('生成第一份汇总')).toMatch(/受理|排队|开始|提交/);
       await until(() => calls === 1);
-      expect(await b.send('生成第二份汇总')).toContain('排队');
+      expect(await b.send('生成第二份汇总')).toMatch(/受理|排队|开始|提交/);
+      // 第一件还阻塞着，第二件已经真实进入 Worker（没有被宿主串行化）。
+      await until(() => calls === 2);
       const rows = await b.assembly.store.taskRuns!.listBySession('wecom:e2e_user', 'wecom:e2e_user');
-      const queued = rows.find((row) => row.originMessage.includes('生成第二份汇总'));
-      expect(queued?.state).toBe('queued');
-      cancelArgs.taskId = queued!.taskId;
-      expect(await b.send('取消第二项任务')).toContain('取消');
-      await until(async () => (await b.assembly.store.taskRuns!.get(queued!.runId))?.state === 'cancelled');
+      const second = rows.find((row) => row.originMessage.includes('生成第二份汇总'));
+      expect(second?.state).toBe('running');
       release.resolve();
-      await until(() => b.sdk.sentMessages.some((message) => message.content.includes('第一项任务完成')));
-      expect(calls).toBe(1);
+      await until(() => b.sdk.sentMessages.filter((message) => message.content.includes('项任务完成')).length >= 2);
     } finally { release.resolve(); }
   });
 

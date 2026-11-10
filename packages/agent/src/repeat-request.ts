@@ -97,7 +97,7 @@ function isStructuredDelegationReceipt(text: string): boolean {
  * 这一轮是否真的走过 delegate：优先使用宿主持有的转录标记，旧转录才回退到文本形状。
  *
  * 正常单步委派以 ToolUserError 纯文本终结；新转录上的纯文本必须有 delegate 标记，避免
- * 把计划消歧、冷却、熔断等前置拦截的用户话术误当成历史委派。没有 details 的旧转录保留
+ * 把计划消歧、熔断、队列已满等前置拦截的用户话术误当成历史委派。没有 details 的旧转录保留
  * 纯文本兼容路径，结构化 JSON 仍只认 recorded=delegate。
  */
 function isDelegationReceipt(message: AgentMessage): boolean {

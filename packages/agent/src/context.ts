@@ -49,7 +49,6 @@ import {
   createPlatformExecutionGate,
   PlatformExecutionAbortedError,
   PlatformExecutionQueueFullError,
-  PlatformExecutionWaitTimeoutError,
   type PlatformExecutionGate,
   type PlatformExecutionLease,
 } from './platform-execution-gate';
@@ -176,9 +175,10 @@ export interface SubagentTaskResult {
    */
   terminalFailure?: TerminalFastPathFailure;
   /**
-   * 平台健康信号（Lane 2，驱动侧 authFailure 的透传）：本回合平台交互以登录/凭据类
-   * 失败收尾（驱动从平台错误信封机械派生，判据在 platform-contract）。宿主据此做
-   * 会话级连续失败记账与冷却；与 execution 不互斥——失败的那次调用真发生过。
+   * 平台登录/凭据类失败事实（驱动侧 authFailure 的透传）：本回合平台交互以登录/凭据类
+   * 失败收尾（驱动从平台错误信封机械派生，判据在 platform-contract）。宿主当前不在
+   * 编排层据此做冷却/退避判断（并发容忍与健康退避归执行层）；话术仍经既有失败链路
+   * 如实上行。与 execution 不互斥——失败的那次调用真发生过。
    */
   authFailure?: PlatformAuthFailure;
   /**
@@ -383,10 +383,6 @@ export interface ContextTaskRunnerOptions {
    */
   planCommandForm?: string;
   /**
-   * 确认码命中后等待共享执行闸的上界（修复 2）。缺省 DEFAULT_CONFIRM_GATE_WAIT_MS。
-   */
-  confirmGateWaitMs?: number;
-  /**
    * 写路径隔离复核回合（第 2 包已接线）：在提案创建成功、宿主发确认码
    * 之前运行。输入给平台下发的提案 schema（接口文档 §5，真实下发值，
    * 不再是 null）+ 域 dry-run 信封 + 平台渲染的 summaryText；输出只给
@@ -513,18 +509,6 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
   not_pending: '该确认码对应的提案已终结，无需重复确认；本次未写入任何数据。',
   unreadable: '该确认码对应的提案当前不可用（平台侧读不到有效状态），本次未写入任何数据；请重新发起录入。',
 };
-
-/**
- * 确认码直执行等待共享执行闸的缺省上界（修复 2，自选值与理由）：
- *
- * 共享闸默认并发 1，别会话的 inline worker 最长占槽 DEFAULT_WORKER_TIMEOUT_MS
- * （600s，contracts/src/config.ts）。确认回执必须在渠道流式回复窗口（企微约 10 分钟，
- * errcode 846608）内回到用户，且确认回合阻塞在 handler 会话队列**队头**会卡住整个
- * 会话——等待上界必须远小于 worker 超时。取 10s：兄弟落账（宿主直调网关 30s 硬超时、
- * 常态秒级）大多能在上界内排空，而 10s 的卡顿仍在"可感知但可解释"的范围；超时走
- * confirm_held（提案保持 pending、不作废），用户稍后重发同一确认码即可续办。
- */
-const DEFAULT_CONFIRM_GATE_WAIT_MS = 10_000;
 
 /**
  * 宿主直调平台网关的环境（serve 法域）：**显式剥 `EXECUTION_REQUIRE_PLAN`**、显式声明 `EXECUTION_SERVE`。
@@ -1015,15 +999,13 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
   ): Promise<ConfirmationReply> {
     const ci = options.changeIntents!;
     if (!execution.leaseHeld) {
-      // 等待上界（修复 2）：闸被长 worker 占槽时，确认回执不能无界挂在闸上——渠道流式
-      // 窗口外终帧会被拒，用户看不到回执而 gate 放行后 commit 照样执行。上界由闸原生
-      // 支持（waitTimeoutMs），不在外面裸轮询；超时与队满同为 confirm_held 语义。
-      const waitMs = options.confirmGateWaitMs ?? DEFAULT_CONFIRM_GATE_WAIT_MS;
+      // 准入背压（2026-11-10 仲裁）：闸不再限制平台并发，也不再排队等待——确认回执不会被
+      // 别会话的长 worker 挡在闸外。唯一还能拦下确认的是宿主待办深度已满（maxQueue），
+      // 那按 confirm_held 返回：提案保持 pending，用户稍后重发同一确认码即可续办。
       try {
         return await executionGate.run(
           {
             requestId: rec.taskId ?? rec.intentId,
-            ...(Number.isFinite(waitMs) && waitMs > 0 ? { waitTimeoutMs: waitMs } : {}),
             ...(execution.signal ? { signal: execution.signal } : {}),
           },
           () => confirmProposalViaGateway(rec, proposalId, { leaseHeld: true, ...(execution.signal ? { signal: execution.signal } : {}) }),
@@ -1032,16 +1014,13 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         if (error instanceof PlatformExecutionQueueFullError) {
           return { text: '平台执行队列已满，请稍后重试；提案仍待确认。', outcome: 'confirm_held' };
         }
-        if (error instanceof PlatformExecutionWaitTimeoutError) {
-          return { text: '平台当前繁忙，确认暂未执行；提案仍待确认，请稍后重新回复确认。', outcome: 'confirm_held' };
-        }
         if (execution.signal?.aborted || error instanceof PlatformExecutionAbortedError) {
           return { text: '确认已收到，但平台提交已取消；提案仍待确认。', outcome: 'confirm_held' };
         }
         throw error;
       }
     }
-    // Recheck the exact host confirmation after any queue wait. A stale/superseded/expired
+    // Recheck the exact host confirmation after admission. A stale/superseded/expired
     // confirmation must never reach the platform commit runner.
     const stillPending = await ci.findPendingByConfirm(rec.principalId, rec.sessionId, rec.confirmCodeHash, new Date());
     if (!stillPending || stillPending.intentId !== rec.intentId || stillPending.proposalId !== proposalId) {
@@ -1370,9 +1349,6 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         }
         lease.start();
         const startedAt = Date.now();
-        if (lease.waitedMs > 0) {
-          console.info(JSON.stringify({ event: 'platform_delegation_queued', requestId: ctx.trusted.requestId, waitedMs: lease.waitedMs }));
-        }
         try {
           return await prepared.execute({ lease, startedAt, deadline: startedAt + prepared.timeoutMs, ...(signal ? { signal } : {}) });
         } finally {
@@ -1577,7 +1553,8 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         const final: SubagentTaskResult = {
           taskId,
           ...(result.execution ? { execution: result.execution } : {}),
-          // 平台健康信号（Lane 2）：登录/凭据类失败的事实原样上交——宿主据此记账与冷却。
+          // 平台登录/凭据类失败事实：原样上交结构化事实；宿主不在编排层做冷却/退避记账
+          // （并发容忍与健康退避归执行层），话术仍经既有失败链路如实上行。
           // 与 execution 不互斥（失败的那次调用真发生过），所以两条并列挂载。
           ...(result.authFailure ? { authFailure: result.authFailure } : {}),
           // 收尾兜底（P1）：批准了但零执行，原样上交——宿主需要这个事实才能说对状态

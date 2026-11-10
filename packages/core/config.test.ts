@@ -355,9 +355,7 @@ wecom:
   botId: yaml-bot-id
   botSecret: yaml-bot-secret
 host:
-  platformConcurrency: 2
   platformQueueCapacity: 7
-  platformCooldownMs: 60000
   shutdownDrainMs: 0
   workerDispatchMode: background
   workerStepCap: 12
@@ -382,9 +380,7 @@ businessSkillPath: docs/other-business-skill.md
     });
     expect(config.wecom).toEqual({ botId: 'yaml-bot-id', botSecret: 'yaml-bot-secret' });
     expect(config.host).toEqual({
-      platformConcurrency: 2,
       platformQueueCapacity: 7,
-      platformCooldownMs: 60000,
       shutdownDrainMs: 0,
       workerDispatchMode: 'background',
       workerStepCap: 12,
@@ -402,7 +398,6 @@ businessSkillPath: docs/other-business-skill.md
       env: {
         LLM_MODEL: 'env-model',
         WECOM_BOT_ID: 'env-bot-id',
-        FSHINE_PLATFORM_CONCURRENCY: '5',
         FSHINE_PLATFORM_QUEUE_CAPACITY: '9',
         BUSINESS_SKILL_PATH: '/srv/env-skill.md',
         EXECUTION_PLAN_ACTIVATION_SECRET: 'env-plan-secret',
@@ -412,7 +407,6 @@ businessSkillPath: docs/other-business-skill.md
     expect(overridden.llm?.model).toBe('env-model');
     expect(overridden.llm?.apiKey).toBe('yaml-key');
     expect(overridden.wecom?.botId).toBe('env-bot-id');
-    expect(overridden.host?.platformConcurrency).toBe(5);
     expect(overridden.host?.platformQueueCapacity).toBe(9);
     expect(overridden.businessSkillPath).toBe('/srv/env-skill.md');
     expect(overridden.execution?.planActivationSecret).toBe('env-plan-secret');
@@ -423,7 +417,6 @@ businessSkillPath: docs/other-business-skill.md
       env: {
         LLM_MODEL: '',
         WECOM_BOT_ID: '',
-        FSHINE_PLATFORM_CONCURRENCY: '',
         FSHINE_PLATFORM_QUEUE_CAPACITY: '   ',
         BUSINESS_SKILL_PATH: '',
         EXECUTION_PLAN_ACTIVATION_SECRET: '',
@@ -432,7 +425,6 @@ businessSkillPath: docs/other-business-skill.md
     });
     expect(blank.llm?.model).toBe('yaml-model');
     expect(blank.wecom?.botId).toBe('yaml-bot-id');
-    expect(blank.host?.platformConcurrency).toBe(2);
     expect(blank.host?.platformQueueCapacity).toBe(7);
     expect(blank.businessSkillPath).toBe('docs/other-business-skill.md');
     expect(blank.execution?.planActivationSecret).toBe('yaml-plan-secret');
@@ -469,7 +461,6 @@ businessSkillPath: docs/other-business-skill.md
 host:
   platformQueueCapacity: -1
   workerStepCap: nope
-  platformCooldownMs: 0
   inboundDebounceMs: -5
 `;
     const config = loadConfig({ yamlPath: writeFixture(invalidNumbers), env: {} });
@@ -489,7 +480,7 @@ host:
   it('deploymentEnvOf：只映射已配置值，env 覆盖后的生效值进入映射', () => {
     const config = loadConfig({
       yamlPath: writeFixture(DEPLOYMENT_YAML),
-      env: { LLM_MODEL: 'env-model', FSHINE_PLATFORM_CONCURRENCY: '5' },
+      env: { LLM_MODEL: 'env-model' },
     });
     expect(deploymentEnvOf(config)).toEqual({
       LLM_API_BASE_URL: 'https://llm.example/v1',
@@ -500,9 +491,7 @@ host:
       LLM_MAIN_THINKING_LEVEL: 'low',
       WECOM_BOT_ID: 'yaml-bot-id',
       WECOM_BOT_SECRET: 'yaml-bot-secret',
-      FSHINE_PLATFORM_CONCURRENCY: '5',
       FSHINE_PLATFORM_QUEUE_CAPACITY: '7',
-      FSHINE_PLATFORM_COOLDOWN_MS: '60000',
       FSHINE_SHUTDOWN_DRAIN_MS: '0',
       FSHINE_WORKER_DISPATCH_MODE: 'background',
       FSHINE_WORKER_STEP_CAP: '12',

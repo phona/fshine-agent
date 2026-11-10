@@ -255,12 +255,10 @@ const DEFENSIVE_EXCLUSION_KEYS: readonly string[] = [
 const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }> = new Map([
   ['FSHINE_REAL_COMMIT', { tag: '遗留待清', reason: '真平台落账授权总闸（已退役，2026-11-08 架构裁定）：宿主侧的 isCommitEnabled 派生与整个 platform-mock.ts 判据源已删除，写能不能真落地归执行层；代码树里仅剩解释其退役原因的注释引用，清空后删除本登记项' }],
   ['FSHINE_PI_AGENT_DIR', { tag: '警职执法', reason: 'Pi SDK 会话目录环境变量（pi-coding-driver.ts）：宿主运行参数，无跨仓契约方；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
-  ['FSHINE_PLATFORM_CONCURRENCY', { tag: '警职执法', reason: '委派并发闸（context.ts，默认 1）：宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
   ['FSHINE_INBOUND_DEBOUNCE_MS', { tag: '警职执法', reason: '入站防抖窗口（apps/server/handler.ts，默认 2000ms）：企微模型里文件与文字是独立消息，文字回合启动前等一拍，让同一burst里晚到的附件先落盘。宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
-  ['FSHINE_PLATFORM_COOLDOWN_MS', { tag: '警职执法', reason: '平台健康冷却时长（assembly.ts → runtime.ts，默认 10 分钟，Lane 2 治标补法）：宿主运行参数，无跨仓契约方；.env.example 已文档化；按新命名规则保留 FSHINE_*，不改 EXECUTION_*' }],
   ['FSHINE_ATTACHMENT_DIR', { tag: '警职执法', reason: '企微附件落盘目录（channel-wecom/adapter.ts，缺省 <cwd>/data/attachments）：宿主运行参数，无跨仓契约方——example-gateway 只通过 operation 的位置参数拿到路径，不关心文件落在哪。它不该改 EXECUTION_*（那是执行层命名空间，会把"宿主把用户文件存哪"误记成执行层协议）；.env.example 已文档化；按新命名规则保留 FSHINE_*' }],
   ['FSHINE_WORKER_DISPATCH_MODE', { tag: '警职执法', reason: 'fshine 部署选择新委派 inline/background 的宿主交互模式开关（默认 inline）：这是通用 runtime 调度策略，不是 example-gateway 执行层协议，保留 fshine 命名空间，不改 EXECUTION_*' }],
-  ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主排队容量上限：这是通用平台资源保护参数，不是 example-gateway 业务规则或执行层协议，保留 fshine 命名空间，不改 EXECUTION_*' }],
+  ['FSHINE_PLATFORM_QUEUE_CAPACITY', { tag: '警职执法', reason: '共享 PlatformExecutionGate 的宿主待办深度上限（同时在办的平台作业数，达到即拒绝新提交）：这是通用宿主资源保护参数，不是 example-gateway 业务规则或执行层协议，也不限制平台并发（并发容忍归执行层），保留 fshine 命名空间，不改 EXECUTION_*' }],
   ['FSHINE_WORKER_STEP_CAP', { tag: '警职执法', reason: '自由 worker 每回合放行调用步数上限（Phase 2，pi-coding-driver.ts，缺省 50）：这是通用 worker 生命周期调度参数，不是执行层协议也不是业务规则，保留 fshine 命名空间，不改 EXECUTION_*' }],
   ['FSHINE_SHUTDOWN_DRAIN_MS', { tag: '警职执法', reason: '宿主停机排干上限（apps/server：main.ts 经 shutdownDrainMsOf 读入并传给 backgroundTasks.shutdown({drainMs})，缺省/非法回退 30000ms）：宿主停机参数，非执行层协议——排干的是 fshine 自己的后台任务与终态事件投递，与 example-gateway 无关，保留 fshine 命名空间，不改 EXECUTION_*' }],
   // 方案 1 · B 波曾登记的两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）

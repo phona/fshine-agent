@@ -91,7 +91,7 @@ describe('example-gateway Pi subagent adapter', () => {
     await writeFile(sourcePath, Buffer.from('fixed attachment bytes'));
     const tasks = new MemoryTasks();
     let observed: TurnDriverInput | undefined;
-    const gate = createPlatformExecutionGate({ concurrency: 1, maxQueue: 1 });
+    const gate = createPlatformExecutionGate({ maxQueue: 1 });
     const subagent = createContextTaskRunner({
       profiles: { 'example-gateway': { root, skillRoots: ['.agents/skills'] } },
       tasks,
@@ -926,8 +926,8 @@ describe('example-gateway Pi subagent adapter', () => {
   });
 });
 
-describe('下游平台保护：委派并发闸', () => {
-  /** 记录并发进出：driver 执行期间 Active 数 > 1 即说明闸门失效。 */
+describe('并发容忍归执行层：宿主准入闸不再串行化委派', () => {
+  /** 记录并发进出：两个委派都进了 driver 才说明宿主没有自己加并发上限。 */
   function concurrencyProbe(delayMs: number) {
     let active = 0;
     let maxActive = 0;
@@ -943,7 +943,7 @@ describe('下游平台保护：委派并发闸', () => {
     return { driver, peak: () => maxActive };
   }
 
-  it('默认全局串行：两个委派不会同时进入下游平台', async () => {
+  it('两个委派同时进入下游平台（2026-11-10 仲裁：并发容忍是执行层内政）', async () => {
     const root = await profileRoot();
     const probe = concurrencyProbe(80);
     const task = runner(root, new MemoryTasks(), probe.driver);
@@ -953,25 +953,7 @@ describe('下游平台保护：委派并发闸', () => {
     ]);
     expect(a.text).toBe('查完了');
     expect(b.text).toBe('查完了');
-    expect(probe.peak()).toBe(1);
-  });
-
-  it('FSHINE_PLATFORM_CONCURRENCY=2 时允许两个并行', async () => {
-    const previous = process.env.FSHINE_PLATFORM_CONCURRENCY;
-    process.env.FSHINE_PLATFORM_CONCURRENCY = '2';
-    try {
-      const root = await profileRoot();
-      const probe = concurrencyProbe(80);
-      const task = runner(root, new MemoryTasks(), probe.driver);
-      await Promise.all([
-        task.run({ request: '查A' }, { trusted: trusted() }),
-        task.run({ request: '查B' }, { trusted: trusted() }),
-      ]);
-      expect(probe.peak()).toBe(2);
-    } finally {
-      if (previous === undefined) delete process.env.FSHINE_PLATFORM_CONCURRENCY;
-      else process.env.FSHINE_PLATFORM_CONCURRENCY = previous;
-    }
+    expect(probe.peak()).toBe(2);
   });
 
   it('worker 抛错也释放闸门：后续委派不被卡死', async () => {

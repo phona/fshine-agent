@@ -1002,11 +1002,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 行为零变化。needs 的闸门保持不变（它产的是"缺什么"，不是"选哪个"）。
       const clarification = (): SelectionClarification | undefined =>
         selectionClarificationFromResponses(session.agent.state.messages.slice(initialMessageCount));
-      // 平台健康信号（Lane 2）：本回合平台交互是否以登录/凭据类失败收尾。判据只有平台
+      // 平台登录/凭据类失败事实：本回合平台交互是否以登录/凭据类失败收尾。判据只有平台
       // 错误信封的码（platform-contract 唯一适配层，exit 非零 + 登录族信封码），与
       // clarification 同一边界（只看本回合新增消息）——上一回合遗留的失败信封不会越权
       // 替这一回合报警。真实形态：网关调用 exit 1 + NEEDS_LOGIN/AUTH_* 信封，worker
-      // 诚实报告"登录凭据已过期"；宿主据此记账，连续失败即冷却，不再逐轮重试式重查。
+      // 诚实报告"登录凭据已过期"；宿主把该事实原样上交，不在编排层做冷却记账/逐轮拦截
+      // （并发容忍与健康退避归执行层自己的限流/熔断）。
       const authFailureResult = (): { authFailure: PlatformAuthFailure } | Record<string, never> => {
         const failure = platformAuthFailureFromResponses(session.agent.state.messages.slice(initialMessageCount));
         return failure ? { authFailure: failure } : {};
@@ -1266,7 +1267,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
           ...(pendingPlan ? { pendingPlan } : {}),
           ...(clue ? { needs: clue } : {}),
           ...(choice ? { clarification: choice } : {}),
-          // 平台健康信号（Lane 2）：登录/凭据类失败的回合照样可能有执行痕迹（那次失败
+          // 平台登录/凭据类失败事实：登录/凭据类失败的回合照样可能有执行痕迹（那次失败
           // 的网关调用真发生过），所以本字段与 execution 并列挂载，不互相替代。
           ...authFailureResult(),
         };

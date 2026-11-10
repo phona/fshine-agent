@@ -76,10 +76,10 @@ CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
 兄弟仓 CLI 不存在时**跳过而不是失败**——跳过不是绿证据，跑它必须先确认
 CLI 在场。
 
-## 统计（按文件首行 `it(` 计数，测试文件共 38 个、用例共 145 个）
+## 统计（按文件首行 `it(` 计数，测试文件共 37 个、用例共 143 个）
 
 - 通用：1 个文件、3 个用例（`local-fake.test.ts`）。
-- L4 集成：37 个文件、142 个用例。
+- L4 集成：36 个文件、140 个用例。
 - 辅助文件（不计用例）：`harness.ts`（L4 集成基础设施）、
   `invariant-checker.ts`（L4 集成判据层，读平台账本/审计/mock 状态）。
 
@@ -114,14 +114,13 @@ CLI 在场。
 | `turn-loop-plan-gate.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 计划门（通知与确认） |
 | `turn-loop-plan-replay.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 计划模式复读的外发兜底 |
 | `turn-loop-plan-steps.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 长任务拆解（计划模式） |
-| `turn-loop-platform-health.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 平台健康信号（Lane 2 冷却） |
 | `turn-loop-progress-frames.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 委派回合的进度帧 |
 | `turn-loop-recall-facts.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 召回事实注入、结构化召回条目 |
 | `turn-loop-resend.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | W4 重发路由 |
 | `turn-loop-resource-exhausted.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 资源耗尽终稿 |
 | `turn-loop-resume.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 计划恢复路径 |
 | `turn-loop-routing.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 申报路由与安全边界 |
-| `turn-loop-security.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 实体越权 × 注入、写开放声明、污染塑形、平台不可用冷却 |
+| `turn-loop-security.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 实体越权 × 注入、写开放声明、污染塑形、AUTH 码叙述卫生 |
 | `turn-loop-session-entities.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 会话实体（实体门禁第四来源） |
 | `turn-loop-worker-timeout.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | worker 执行超时 |
 | `turn-loop-write-chain.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 + 提案/落账读回 | 网关提案路径：提案创建、完整落账链、确认码攻击面 |

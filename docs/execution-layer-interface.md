@@ -184,7 +184,11 @@
   令牌、过期、状态损坏等）。宿主判据是码与信封，不嗅探消息文本。
 - **错误码家族**（宿主只判族，不判文案）：
   - 平台不可用族：`AUTH_*`、登录态、`NEEDS_LOGIN`、
-    `PLATFORM_TIMEOUT` 等 → 冷却，不重试；
+    `PLATFORM_TIMEOUT` 等 → 宿主不在编排层做冷却/前置拦截，也不合成
+    PLATFORM_UNAVAILABLE 终稿；失败按既有失败链路如实上行。并发容忍与
+    健康/退避由**执行层自己**的限流与熔断实现（见
+    `docs/execution-layer-admission.md` A12），宿主准入闸只保留
+    `maxQueue` 待办深度背压；
   - 选择类：`ACCOUNT_SET_AMBIGUOUS` / `ACCOUNT_SET_NOT_FOUND`
     等 → 宿主机械组装澄清问题，模型不为状态转换发音；
   - 终局快路径：`PERIOD_NO_DATA`、`ASSISTANT_NOT_FOUND` /

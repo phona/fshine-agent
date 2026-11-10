@@ -352,7 +352,7 @@ waiting_input/waiting_confirmation 与已完成结果仍可查询，并按原有
 
 A 完成后：企微原生引用内容可进入 Planner，并随历史可检索；本次正文仍保持独立语义。
 
-B 完成后：用户可以在任务运行中继续对话、查询或取消任务；结果和文件主动交付并能被后续 Planner 读取；同一会话 Planner 串行，Worker 后台运行，平台执行并发维持既有配置。
+B 完成后：用户可以在任务运行中继续对话、查询或取消任务；结果和文件主动交付并能被后续 Planner 读取；同一会话 Planner 串行，Worker 后台运行；平台执行并发不由宿主限制（2026-11-10 仲裁后归执行层自己的限流/熔断）。
 
 设计提交阶段只完成代码路径核对；后续实现与验证记录见下节。尚未部署、重启服务或发送真实企微消息。
 
@@ -363,7 +363,7 @@ B 完成后：用户可以在任务运行中继续对话、查询或取消任务
 | 原生引用 | `channel-wecom/src/quote.ts` 归一化；文本与 mixed 文字按 UTF-8 上限 16,384 字节截断；媒体只保留类型，不伪造旧 msgid |
 | 输入与历史 | 正文和引用分离；确认只读正文；引用单独存储、可检索，参与重复请求 fingerprint，实体来源为 `quotedEvidence` |
 | 后台开关 | `FSHINE_WORKER_DISPATCH_MODE=background`；缺省或 `inline` 保留同步委派。引用没有单独部署开关 |
-| 调度与输入 | `task-manager.ts` 管理进程内 run；SQLite 记录状态与 revision CAS；共享平台 gate 默认并发 1、等待容量 100；受理时冻结附件字节与 SHA-256 |
+| 调度与输入 | `task-manager.ts` 管理进程内 run；SQLite 记录状态与 revision CAS；共享平台准入闸不限制并发、不设等待队列，`FSHINE_PLATFORM_QUEUE_CAPACITY`（默认 100）只作宿主待办深度背压（2026-11-10 仲裁后并发容忍/退避归执行层）；受理时冻结附件字节与 SHA-256 |
 | 交互与控制 | 受理后终结原入站流；同会话 Planner 与完成事件串行；`task_control` 支持 list/status/cancel，身份与会话由宿主注入 |
 | 确认与续步 | 预算确认和宿主提案确认沿用现有门禁；后台任务续跑绑定原 task/plan/request/quote，独立于最新无关提问 |
 | 结果与文件 | 独立主动推送文字及文件；按 run 输出 manifest 收集，产物关联 `sourceRunId`；逐项保存 ACK/失败/未知，不因交付失败重跑 Worker |

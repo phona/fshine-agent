@@ -161,11 +161,11 @@ export interface TurnDriverResult {
    */
   terminalFailure?: TerminalFastPathFailure;
   /**
-   * 平台健康信号（Lane 2）：本回合的平台交互以登录/凭据类失败收尾——驱动从平台错误
+   * 平台登录/凭据类失败事实：本回合的平台交互以登录/凭据类失败收尾——驱动从平台错误
    * 信封**机械派生**（error.code ∈ PLATFORM_AUTH_ERROR_CODES，判据在 platform-contract，
    * 绝不嗅探 worker 文本）。与 execution 不互斥：失败的那次网关调用真发生过
-   * （gateCalls > 0），"调用发生过"与"调用失败了"是两个事实。宿主据此做会话级连续
-   * 失败记账与冷却（platform-health.ts）。
+   * （gateCalls > 0），"调用发生过"与"调用失败了"是两个事实。宿主当前不在编排层据此
+   * 做冷却/退避判断（并发容忍与健康退避归执行层），字段保留为结构化执行事实。
    */
   authFailure?: PlatformAuthFailure;
   /**
@@ -328,7 +328,7 @@ export class ToolUserError extends Error {
   delegationCompleted = false;
   /** Host receipt kind persisted into the tool result; background acceptance is not execution proof. */
   readonly routeReceipt?: 'delegate' | 'precondition' | 'background';
-  /** 错误码（挂码修复：runtime.isAuthDelegationFailure 等码级判据依赖此字段）。 */
+  /** 错误码（挂码修复：委派失败分类等码级判据依赖此字段）。 */
   code?: string;
 
   constructor(message: string, options?: {
