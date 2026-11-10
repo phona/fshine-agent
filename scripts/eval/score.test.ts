@@ -4,6 +4,7 @@ import {
   validAuditFailuresValue,
   type Baseline, type ProbeResultRow,
 } from './score';
+import type { CaseSpec } from './cases';
 import type { ConversationWriteChainFacts } from './write-chain';
 
 /** 打分器锁：纯判定函数 + 语料/基线真实文件的一致性。变异验证口径见各 it 注释。 */
@@ -68,6 +69,26 @@ describe('evaluateProbeCase（机械+评委判定）', () => {
   it('探针报告缺该用例 / 基线缺该用例都红（不是静默跳过）', () => {
     expect(evaluateProbeCase('probe-X', undefined, baselineCase).pass).toBe(false);
     expect(evaluateProbeCase('probe-X', probeRow(), undefined).pass).toBe(false);
+  });
+
+  it('口径答案分类门：需要答案分类的轮次在没跑 --judge 时显式红——不把“没判”读成“没问题”', () => {
+    // 三层断言模型②：口径编造判定归 judge 的 answerTypes，机械层不再判；但默认路径
+    // （无 --judge）该轴无人判定——与申报门同一纪律 fail-closed，不静默计通过。
+    const spec = {
+      messages: [{ text: 'check payable', answerTypes: [{ id: 'A', verdict: 'pass', shape: '声明缺失只给记录值' }] }],
+    } as CaseSpec;
+    const noJudge = evaluateProbeCase('probe-X', probeRow(), baselineCase, undefined, spec);
+    expect(noJudge.checks.find((check) => check.name === '期望·口径答案分类'))
+      .toMatchObject({ pass: false, expected: 'judge 按 answerTypes 定型（--judge）' });
+    expect(noJudge.pass).toBe(false);
+    // 跑了评委 ⇒ 不出该门（该轴由评委分承载：回复落 fail 形态 ⇒ groundedness 0 ⇒ 评委分检查红）。
+    const judge = { scores: { groundedness: 2, entityFidelity: 0, failureHonesty: 0, presentationHygiene: 0 }, evidence: [], model: 'm' };
+    expect(evaluateProbeCase('probe-X', probeRow(), baselineCase, judge as never, spec)
+      .checks.some((check) => check.name === '期望·口径答案分类')).toBe(false);
+    // 没有答案分类的用例不出该门、不因该门红。
+    const plain = evaluateProbeCase('probe-X', probeRow(), baselineCase, undefined, { messages: [{ text: 'x' }] } as CaseSpec);
+    expect(plain.checks.some((check) => check.name === '期望·口径答案分类')).toBe(false);
+    expect(plain.pass).toBe(true);
   });
 });
 

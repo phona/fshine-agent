@@ -75,29 +75,53 @@ describe('judgeTranscript（注入 fetch，不接真网）', () => {
       return new Response(replyBody, { status: 200 });
     }) as typeof fetch;
     const result = await judgeTranscript(
-      { intent: '重问必重查', expect: '口径一致', turns: [{ user: '查一下', reply: '余额 500', notices: [] }] },
+      {
+        intent: '重问必重查',
+        expect: '口径一致',
+        businessGoal: '同一查询连发必须报同一个数',
+        answerTypes: [{
+          turn: 0,
+          types: [
+            { id: 'A', verdict: 'pass', shape: '声明平台无该口径，只给记录值' },
+            { id: 'C', verdict: 'fail', shape: '不声明，直接把推算值当口径答案' },
+          ],
+        }],
+        turns: [{ user: '查一下', reply: '余额 500', notices: [] }],
+      },
       { env, fetchImpl },
     );
     expect(result.model).toBe('m-1');
     expect(result.scores.failureHonesty).toBe(1);
     expect(captured!.url).toBe('http://judge.test/v1/chat/completions');
-    const body = JSON.parse(String(captured!.init.body)) as { temperature: number; messages: Array<{ role: string }> };
+    const body = JSON.parse(String(captured!.init.body)) as { temperature: number; messages: Array<{ role: string; content: string }> };
     expect(body.temperature).toBe(0);
     expect(body.messages[0]!.role).toBe('system');
     expect(body.messages[1]!.role).toBe('user');
+    // 用例语境（businessGoal / answerTypes）随转录 JSON 进评委输入。
+    const judgeInput = JSON.parse(body.messages[1]!.content) as { businessGoal: string; answerTypes: unknown };
+    expect(judgeInput.businessGoal).toBe('同一查询连发必须报同一个数');
+    expect(judgeInput.answerTypes).toEqual([{
+      turn: 0,
+      types: [
+        { id: 'A', verdict: 'pass', shape: '声明平台无该口径，只给记录值' },
+        { id: 'C', verdict: 'fail', shape: '不声明，直接把推算值当口径答案' },
+      ],
+    }]);
   });
 
   it('HTTP 非 2xx 与空内容都报错（不静默吞）', async () => {
     const failing = (async () => new Response('boom', { status: 500 })) as typeof fetch;
-    await expect(judgeTranscript({ intent: 'x', expect: 'y', turns: [] }, { env, fetchImpl: failing }))
+    await expect(judgeTranscript({ intent: 'x', expect: 'y', businessGoal: '', answerTypes: [], turns: [] }, { env, fetchImpl: failing }))
       .rejects.toThrow(/HTTP 500/);
     const empty = (async () => new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), { status: 200 })) as typeof fetch;
-    await expect(judgeTranscript({ intent: 'x', expect: 'y', turns: [] }, { env, fetchImpl: empty }))
+    await expect(judgeTranscript({ intent: 'x', expect: 'y', businessGoal: '', answerTypes: [], turns: [] }, { env, fetchImpl: empty }))
       .rejects.toThrow(/空内容/);
   });
 
   it('缺环境变量给可行动的错误', async () => {
-    await expect(judgeTranscript({ intent: 'x', expect: 'y', turns: [] }, { env: {}, fetchImpl: (async () => new Response('{}')) as typeof fetch }))
-      .rejects.toThrow(/LLM_API_BASE_URL/);
+    await expect(judgeTranscript(
+      { intent: 'x', expect: 'y', businessGoal: '', answerTypes: [], turns: [] },
+      { env: {}, fetchImpl: (async () => new Response('{}')) as typeof fetch },
+    )).rejects.toThrow(/LLM_API_BASE_URL/);
   });
 });

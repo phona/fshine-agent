@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CASES_PATH, TURN_MARKS, loadCases, toCorpusEntries } from './cases';
 import { loadBaseline } from './score';
@@ -143,5 +146,87 @@ describe('语料 ↔ 基线 ↔ 用例', () => {
       const root = path.resolve(CASES_PATH, '..', 'fixtures', spec.fixture.name);
       expect(existsSync(root), `${spec.id} 的夹具 ${spec.fixture.name} 不存在`).toBe(true);
     }
+  });
+});
+
+/**
+ * message 级 answerTypes（2026-11-10 owner 裁定）：用例作者对本轮问题的封闭答案分类，
+ * judge 定型用。解析必须校验 verdict 枚举与 id/shape 非空——分类表写错不能被静默丢弃
+ * （那会让 judge 退回四维通用定义，语义判定静默失守）。
+ */
+describe('message 级 answerTypes', () => {
+  const y2 = cases.find((item) => item.id === 'Y2')!;
+
+  it('Y2 第 3 条消息挂了 A/B/C/D 分类表（pass/pass/fail/fail，shape 非空）', () => {
+    const types = y2.messages[2]?.answerTypes ?? [];
+    expect(types.map((type) => [type.id, type.verdict])).toEqual([
+      ['A', 'pass'],
+      ['B', 'pass'],
+      ['C', 'fail'],
+      ['D', 'fail'],
+    ]);
+    for (const type of types) {
+      expect(type.shape.trim().length, `${type.id} 缺 shape`).toBeGreaterThan(0);
+    }
+  });
+
+  const caseYaml = (answerTypes: string): string => `cases:
+  - id: T
+    group: g
+    kind: probe
+    inBaseline: false
+    incidents: [x]
+    intent: i
+    businessGoal: b
+    fixture:
+      name: dummy-platform
+      isolation: tmp
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+    checks: []
+    messages:
+      - text: hi
+${answerTypes}
+    expectations: null
+    expect: e
+`;
+
+  const loadYaml = (answerTypes: string) => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'fshine-cases-'));
+    const file = path.join(dir, 'cases.yaml');
+    writeFileSync(file, caseYaml(answerTypes));
+    try {
+      return loadCases(file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  const valid = `        answerTypes:
+          - id: A
+            verdict: pass
+            shape: ok`;
+
+  it('合法分类表可解析（正例：解析器不是恒拒）', () => {
+    const parsed = loadYaml(valid);
+    expect(parsed[0]?.messages[0]?.answerTypes).toEqual([{ id: 'A', verdict: 'pass', shape: 'ok' }]);
+  });
+
+  it('verdict 只收 pass/fail：未知值 fail-fast', () => {
+    expect(() => loadYaml(valid.replace('verdict: pass', 'verdict: maybe'))).toThrow(/verdict 不是 pass\/fail/);
+  });
+
+  it('id 必须非空：空字符串 fail-fast', () => {
+    expect(() => loadYaml(valid.replace('id: A', "id: ''"))).toThrow(/id 不是非空字符串/);
+  });
+
+  it('shape 必须非空：空字符串 fail-fast', () => {
+    expect(() => loadYaml(valid.replace('shape: ok', "shape: ''"))).toThrow(/shape 不是非空字符串/);
+  });
+
+  it('answerTypes 不是数组 fail-fast（不静默当没有分类表）', () => {
+    expect(() => loadYaml('        answerTypes: nope')).toThrow(/answerTypes 不是数组/);
   });
 });

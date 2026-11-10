@@ -24,6 +24,17 @@ export interface JudgeInput {
   /** 用例意图（探针 case.intent / 语料 expect），评委据此知道该考什么。 */
   intent: string;
   expect: string;
+  /** 用例的业务目标（cases.yaml 的 businessGoal）：评委的用例语境。 */
+  businessGoal: string;
+  /**
+   * 用例作者对本轮问题的封闭答案分类（cases.yaml 消息级 answerTypes，turn = 0-based
+   * 消息下标）。judge 拿它给回复定型：fail 类 ⇒ groundedness 记 0；pass 类 ⇒ 该轴不扣分；
+   * 没有分类表的轮次按四维通用定义判。机械层不消费这份表。
+   */
+  answerTypes: Array<{
+    turn: number;
+    types: Array<{ id: string; verdict: string; shape: string }>;
+  }>;
   turns: JudgeTurn[];
 }
 

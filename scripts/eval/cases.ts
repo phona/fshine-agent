@@ -19,6 +19,19 @@ import YAML from 'yaml';
 export type TaskId = 'A' | 'B' | 'C' | 'D' | 'E' | 'F';
 export type TurnMark = 'past' | 'recall' | 'requery' | 'landing' | 'reasoning' | 'summary';
 
+/**
+ * 答案分类表的一项（2026-11-10 owner 裁定）：用例作者对**本轮问题**的封闭答案分类。
+ * judge 拿它给回复定型——`verdict: 'fail'` 类 ⇒ groundedness 记 0；`'pass'` 类 ⇒ 该轴
+ * 不扣分。机械层不消费它（口径编造的语义判定归 judge，机械层只出表面事实）。
+ */
+export interface AnswerType {
+  /** 分类项 id（用例内唯一，供报告/评审引用）。 */
+  id: string;
+  verdict: 'pass' | 'fail';
+  /** 该类答案形态的自然语言描述（给 judge 读，不参与机械匹配）。 */
+  shape: string;
+}
+
 /** 一条用户消息（含轮次行为标记与澄清/选择等结构性标注）。 */
 export interface CaseMessage {
   /** acceptance 用例 id（5.1 等）；probe 条目无此字段。 */
@@ -48,8 +61,13 @@ export interface CaseMessage {
   writeProposal?: boolean;
   offTopic?: boolean;
   readback?: boolean;
-  /** 平台缺失的口径（Y2 第 3 轮 payable）。 */
+  /**
+   * 该轮问题涉及的平台缺失口径（声明事实：供 judge 前提与探针信息性 note 取数）。
+   * **不是**机械判定开关——"算不算把该口径当答案断言"归 judge 的 answerTypes。
+   */
   missingCaliber?: string;
+  /** 本轮答案分类表（judge 定型用；机械层不消费）。 */
+  answerTypes?: AnswerType[];
 }
 
 export interface AllowedWrite {
@@ -123,9 +141,11 @@ export interface ShortCaseTurnExpectation {
   framing?: boolean;
   /** 必须给出 6 位确认码。 */
   confirmCode?: boolean;
-  /** 不得把该口径当答案口径答出数。 */
+  /**
+   * 该轮问题涉及的平台缺失口径（声明事实）：供 judge 前提与探针信息性 note 取数。
+   * 不是判定开关——口径编造的语义判定归 judge（cases.yaml 消息级 answerTypes）。
+   */
   missingCaliber?: string;
-  forbidCaliberValues?: number[];
   /**
    * 实体键归属（2026-11-09 修复单 1/2；仲裁 2 改登记制）：判定消费 amount-criteria 的
    * `classifyErrorStateAmounts` 产物 `verdict.misattributed`（不重造绑定逻辑），非空即红。
@@ -146,8 +166,8 @@ export interface ShortCaseTurnExpectation {
    * MOCK_ITEM_ID_BINDINGS / MOCK_ABSENT_COLLECTIONS，逐条抄自夹具种子或用例查询事实）
    * ——模型之外的事实，可对。事实表只属于 dummy-platform：expectedCheck 在 fixture.name
    * 不是 dummy-platform 时出红（不能拿 dummy 的值去核另一个夹具的回复）。
-   * 与 `missingCaliber` 正交：口径绑定判"编了哪个口径"，本条判"数挂给了谁"；错误态轮
-   * 两样都该核（Y2 第 3 轮同开两个键）。申报块的引用行洗不掉它（见 declaredExempt）。
+   * 与 `missingCaliber` 正交：口径编造的语义判定归 judge（消息级 answerTypes），本条只判
+   * "数挂给了谁"；错误态轮两样都该核（Y2 第 3 轮同开两个键）。申报块的引用行洗不掉它。
    */
   entityAttribution?: boolean;
   noticesAtLeast?: number;
@@ -230,6 +250,25 @@ function asStringArray(value: unknown, where: string): string[] {
   });
 }
 
+/**
+ * 消息级 answerTypes 的解析与校验（2026-11-10 owner 裁定）：verdict 只收 pass/fail，
+ * id/shape 必须非空。分类表是用例作者显式声明的封闭答案分类，不给默认值——缺字段就是
+ * 没有分类表（judge 按四维通用定义判），写错字段则 fail-fast（不静默丢分类）。
+ */
+function parseAnswerTypes(value: unknown, where: string): AnswerType[] {
+  if (!Array.isArray(value)) fail(`${where} 不是数组`);
+  return value.map((item, index) => {
+    const record = asRecord(item, `${where}[${index}]`);
+    const id = record['id'];
+    const verdict = record['verdict'];
+    const shape = record['shape'];
+    if (typeof id !== 'string' || id.trim().length === 0) fail(`${where}[${index}].id 不是非空字符串`);
+    if (verdict !== 'pass' && verdict !== 'fail') fail(`${where}[${index}].verdict 不是 pass/fail`);
+    if (typeof shape !== 'string' || shape.trim().length === 0) fail(`${where}[${index}].shape 不是非空字符串`);
+    return { id, verdict, shape };
+  });
+}
+
 function parseMessage(raw: unknown, where: string, kind: 'probe' | 'acceptance'): CaseMessage {
   const record = asRecord(raw, where);
   const text = record['text'];
@@ -264,6 +303,9 @@ function parseMessage(raw: unknown, where: string, kind: 'probe' | 'acceptance')
     ...(record['offTopic'] === true ? { offTopic: true } : {}),
     ...(record['readback'] === true ? { readback: true } : {}),
     ...(typeof record['missingCaliber'] === 'string' ? { missingCaliber: record['missingCaliber'] } : {}),
+    ...(record['answerTypes'] === undefined
+      ? {}
+      : { answerTypes: parseAnswerTypes(record['answerTypes'], `${where}.answerTypes`) }),
   };
 }
 
@@ -301,7 +343,6 @@ function parseExpectations(raw: unknown, where: string): CaseExpectations | null
           ...(item['framing'] === true ? { framing: true } : {}),
           ...(item['confirmCode'] === true ? { confirmCode: true } : {}),
           ...(typeof item['missingCaliber'] === 'string' ? { missingCaliber: item['missingCaliber'] } : {}),
-          ...(numbers('forbidCaliberValues') ? { forbidCaliberValues: numbers('forbidCaliberValues') } : {}),
           ...(item['entityAttribution'] === true ? { entityAttribution: true } : {}),
           ...(typeof item['noticesAtLeast'] === 'number' ? { noticesAtLeast: item['noticesAtLeast'] } : {}),
           ...(typeof item['minExecutedCalls'] === 'number' ? { minExecutedCalls: item['minExecutedCalls'] } : {}),

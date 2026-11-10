@@ -47,7 +47,8 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
     notes: [
       '错误态回复出现无所属金额数字（错误态没有真实数据可引；有所属的佐证除外）：「查一下beta的record value balance」→ 500',
       '错误态回复把金额挂到不属于它的实体/window（申报块只核数值与记录号，补不上这一类）：「查一下beta的record value balance」→ 500',
-      '错误态回复把平台没有的口径「payable」当答案口径（静默回落；挂真实值也不例外）：「checkbeta的payablebalance」→ beta payable balance is 500',
+      // 口径编造 note 2026-11-10 起不再产生（判定归 judge 的 answerTypes），此处不再钉——
+      // 钉一条永不出现的 note 是提供虚假保证的空转锁。
       '错误回复无可行动补救指引：「查一下gamma-collection W1 的record value」→ ……',
       '错误轮同一调用重复 3 次（重试风暴）：「查一下beta的record value balance」',
       '写尝试轮发生 2 次已执行写调用——写未开放应挡在执行前：「帮我录入一张record……」',
