@@ -67,17 +67,21 @@ function parseEnvelope(stdout: string): Envelope | null {
 class Ctx {
   dir: string;
   env: NodeJS.ProcessEnv;
-  /** `extraEnv` = 该用例声明的 C 类旋钮（如 DUMMY_READBACK_SHORT）；ambient 同名键本切片未清场，见 docs §9。 */
+  /**
+   * `extraEnv` = 该用例声明的 C 类旋钮（如 DUMMY_READBACK_SHORT）；C 类 ambient 同名键
+   * 本切片未清场，见 docs §9。B 类隔离路径与令牌面只注入规范族 `EXECUTION_*`
+   * （docs/env-naming-ruling-20261110.md）：夹具仍认 DUMMY_* 专名，但评测进程不设它。
+   */
   constructor(extraEnv: NodeJS.ProcessEnv = {}) {
     this.dir = mkdtempSync(path.join(os.tmpdir(), 'generic-mock-'));
     this.env = {
       ...process.env,
-      DUMMY_STATE: path.join(this.dir, 'state.json'),
-      DUMMY_PLAN_STATE: path.join(this.dir, 'plans.json'),
-      DUMMY_PROPOSAL_STATE: path.join(this.dir, 'proposals.json'),
-      DUMMY_AUDIT_PATH: path.join(this.dir, 'audit.jsonl'),
-      DUMMY_PLAN_ACTIVATION_SECRET: 'generic-mock-plan-secret',
-      DUMMY_GATE_SECRET: 'generic-mock-gate-secret',
+      EXECUTION_MOCK_STATE: path.join(this.dir, 'state.json'),
+      EXECUTION_PLAN_STATE: path.join(this.dir, 'plans.json'),
+      EXECUTION_PROPOSAL_STATE: path.join(this.dir, 'proposals.json'),
+      EXECUTION_AUDIT_PATH: path.join(this.dir, 'audit.jsonl'),
+      EXECUTION_PLAN_ACTIVATION_SECRET: 'generic-mock-plan-secret',
+      EXECUTION_GATE_SECRET: 'generic-mock-gate-secret',
       ...extraEnv,
     };
   }
@@ -112,7 +116,7 @@ function createProposal(ctx: Ctx, payload: Record<string, unknown>): { env: Enve
 
 /** 读本用例夹具落的审计行（mode/script/via 判据的取数面；坏行跳过）。 */
 function readAuditRows(ctx: Ctx): Array<{ mode?: string; script?: string; via?: string; exitCode?: number }> {
-  const file = ctx.env.DUMMY_AUDIT_PATH;
+  const file = ctx.env.EXECUTION_AUDIT_PATH;
   if (!file || !existsSync(file)) return [];
   return readFileSync(file, 'utf8').split('\n').filter(Boolean).flatMap((line) => {
     try { return [JSON.parse(line) as { mode?: string; script?: string; via?: string; exitCode?: number }]; } catch { return []; }
@@ -143,7 +147,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const token = proposalToken(proposalId, (env!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
     // Commit token travels via env, not argv.
     const savedEnv = ctx.env;
-    ctx.env = { ...savedEnv, DUMMY_COMMIT_TOKEN: token };
+    ctx.env = { ...savedEnv, EXECUTION_COMMIT_TOKEN: token };
     const commit2 = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = savedEnv;
     const commitEnv = parseEnvelope(commit2.stdout);
@@ -202,7 +206,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
   } },
   { id: 'g-a5-idle-zero-calls', run: (ctx) => {
     // Idle analogue: with a fresh state dir and no dummy invocation, no audit line exists.
-    const auditFile = ctx.env.DUMMY_AUDIT_PATH!;
+    const auditFile = ctx.env.EXECUTION_AUDIT_PATH!;
     const exists = existsSync(auditFile);
     return { id: 'g-a5-idle-zero-calls', pass: !exists, checks: [check('idle produces no audit line', !exists, 'no audit file', exists ? 'audit file exists' : 'no audit file')] };
   } },
@@ -275,7 +279,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const token = proposalToken(proposalId, (env!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
     const saved = ctx.env;
     // Test-only env for this one commit call (never a payload field).
-    ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: token };
+    ctx.env = { ...saved, EXECUTION_COMMIT_TOKEN: token };
     const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = saved;
     const commitEnv = parseEnvelope(commit.stdout);
@@ -294,13 +298,13 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'exp-1', value: 100 }] });
     const proposalId = env?.data?.proposalId as string;
     // Test-only state manipulation: move expiresAt into the past (documented in notes).
-    const proposalFile = ctx.env.DUMMY_PROPOSAL_STATE!;
+    const proposalFile = ctx.env.EXECUTION_PROPOSAL_STATE!;
     const state = JSON.parse(readFileSync(proposalFile, 'utf8'));
     state.proposals[proposalId].expiresAt = new Date(Date.now() - 60_000).toISOString();
     writeFileSync(proposalFile, JSON.stringify(state, null, 2));
     const token = proposalToken(proposalId, (env!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
     const saved = ctx.env;
-    ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: token };
+    ctx.env = { ...saved, EXECUTION_COMMIT_TOKEN: token };
     const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = saved;
     const commitEnv = parseEnvelope(commit.stdout);
@@ -313,7 +317,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'tok-1', value: 100 }] });
     const proposalId = env?.data?.proposalId as string;
     const saved = ctx.env;
-    ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: 'bad.token' };
+    ctx.env = { ...saved, EXECUTION_COMMIT_TOKEN: 'bad.token' };
     const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = saved;
     const commitEnv = parseEnvelope(commit.stdout);
@@ -331,11 +335,16 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     const beforeCount = before?.data?.count as number;
     const { env } = createProposal(ctx, { collection: 'alpha', window: 'W1', records: [{ name: 'notok-1', value: 100 }] });
     const proposalId = env?.data?.proposalId as string;
-    // 复刻直调形态：从进程 env 里剥掉 secret 与 token 两个键（Ctx 缺省带 secret）。
+    // 复刻直调形态：从进程 env 里剥掉 secret 与 token（规范名 + 调试专名都剥，
+    // 否则夹具的 env2 会从第二顺位专名取到 ambient 值）。Ctx 缺省带 secret。
     const bareEnv: NodeJS.ProcessEnv = { ...ctx.env };
+    delete bareEnv.EXECUTION_GATE_SECRET;
+    delete bareEnv.EXECUTION_COMMIT_TOKEN;
     delete bareEnv.DUMMY_GATE_SECRET;
     delete bareEnv.DUMMY_COMMIT_TOKEN;
-    checks.push(check('bare env has neither secret nor token', !bareEnv.DUMMY_GATE_SECRET && !bareEnv.DUMMY_COMMIT_TOKEN, 'both absent', `${Boolean(bareEnv.DUMMY_GATE_SECRET)}/${Boolean(bareEnv.DUMMY_COMMIT_TOKEN)}`));
+    checks.push(check('bare env has neither secret nor token',
+      !bareEnv.EXECUTION_GATE_SECRET && !bareEnv.EXECUTION_COMMIT_TOKEN && !bareEnv.DUMMY_GATE_SECRET && !bareEnv.DUMMY_COMMIT_TOKEN,
+      'both absent', `${Boolean(bareEnv.EXECUTION_GATE_SECRET)}/${Boolean(bareEnv.EXECUTION_COMMIT_TOKEN)}`));
     const saved = ctx.env;
     ctx.env = bareEnv;
     const commit = ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', proposalId]);
@@ -356,7 +365,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
       const p1 = createProposal(ctx, { collection: 'beta', window: 'W1', records: [{ name: 'iso-1', value: 10 }] });
       const id1 = p1.env?.data?.proposalId as string;
       const tok1 = proposalToken(id1, (p1.env!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
-      const saved = ctx.env; ctx.env = { ...saved, DUMMY_COMMIT_TOKEN: tok1 };
+      const saved = ctx.env; ctx.env = { ...saved, EXECUTION_COMMIT_TOKEN: tok1 };
       ctx.run(['commit', 'dummy.proposal-commit', '--proposal-id', id1]); ctx.env = saved;
       const betaA = parseEnvelope(ctx.run(['query', 'dummy.query', '--collection', 'beta']).stdout);
       const betaB = parseEnvelope(ctx2.run(['query', 'dummy.query', '--collection', 'beta']).stdout);
@@ -500,7 +509,7 @@ const cases: Array<{ id: string; env?: NodeJS.ProcessEnv; run: (ctx: Ctx) => Cas
     checks.push(check('ballot proposal created pending', propRun.code === 0 && propEnv?.status === 'completed' && typeof proposalId === 'string' && (propEnv.data as Record<string, unknown>)?.status === 'pending', 'completed pending + proposalId', `${propRun.code} ${propEnv?.status}`));
     const token = proposalToken(proposalId, (propEnv!.data as Record<string, unknown>).expiresAt as string, 'generic-mock-gate-secret');
     const savedEnv = ctx.env;
-    ctx.env = { ...savedEnv, DUMMY_COMMIT_TOKEN: token };
+    ctx.env = { ...savedEnv, EXECUTION_COMMIT_TOKEN: token };
     const commit2 = ctx.run(['commit', 'ballot.proposal-commit', '--proposal-id', proposalId]);
     ctx.env = savedEnv;
     const commitEnv = parseEnvelope(commit2.stdout);

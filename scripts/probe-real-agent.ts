@@ -357,15 +357,19 @@ function openReadonlyDb(dbPath: string): Database.Database {
  */
 const PROBE_REPLY_WAIT_MS = 300_000;
 
-const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH'] as const;
+const PLATFORM_STATE_KEYS = ['EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE'] as const;
 /**
- * dummy 夹具的 ambient 专名（per-case 隔离的击穿面）。夹具按 `env2(DUMMY_*, EXECUTION_*)`
- * 查找状态文件，专名优先；评测进程若从 shell 继承任一 DUMMY_*，它就会盖过本用例注入的
- * EXECUTION_* 路径，22 条用例静默共用同一个状态/审计文件。故这四个键与上面四个通用名
- * 一起备份、一起删除、一起恢复（backup/restore 对称）。
+ * 夹具的 ambient 调试专名（issue #20 切片 E 后它们不再是第一顺位）。夹具按
+ * `env2(EXECUTION_*, DUMMY_*)` 查找状态文件与令牌——规范名优先；专名只是手工调试
+ * 入口，评测进程内必须不可见（docs/env-naming-ruling-20261110.md）。故这些键与规范名
+ * 一起备份、一起删除、一起恢复（backup/restore 对称）：规范名若缺失，夹具回落到夹具
+ * 缺省，不会静默取到 shell 里的专名。
  */
-const FIXTURE_AMBIENT_STATE_KEYS = ['DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH'] as const;
-const ISOLATED_STATE_KEYS = [...PLATFORM_STATE_KEYS, ...FIXTURE_AMBIENT_STATE_KEYS] as const;
+const FIXTURE_AMBIENT_DEBUG_KEYS = [
+  'DUMMY_STATE', 'DUMMY_PLAN_STATE', 'DUMMY_PROPOSAL_STATE', 'DUMMY_AUDIT_PATH',
+  'DUMMY_GATE_SECRET', 'DUMMY_COMMIT_TOKEN', 'DUMMY_PLAN_ACTIVATION_SECRET',
+] as const;
+const ISOLATED_STATE_KEYS = [...PLATFORM_STATE_KEYS, ...FIXTURE_AMBIENT_DEBUG_KEYS] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
 
 // ── 埋点捕获（纯加法）：探针原本没有 console 事件捕获机制，这里加最小的一个 ──
@@ -478,6 +482,7 @@ export function isolatePlatformState(dir: string = stateDir): void {
     EXECUTION_RATE_LIMIT_STATE: path.join(dir, `rate-${counter}.json`),
     EXECUTION_MOCK_STATE: path.join(dir, `mock-${counter}.json`),
     EXECUTION_AUDIT_PATH: path.join(dir, `audit-${counter}.jsonl`),
+    EXECUTION_PROPOSAL_STATE: path.join(dir, `proposals-${counter}.json`),
     // 网关限流有 example-gateway 专项测试；真实平台保持生产限流（"别让下游平台有感知"）：
     // 探针节奏天然低于限额，被限就是信号。
     // 2026-11-08 删除宿主侧的 mock 判据（isPlatformMock / EXECUTION_EXECUTOR）：原来只在
@@ -485,8 +490,9 @@ export function isolatePlatformState(dir: string = stateDir): void {
     // 参数的行为，且当前仓内夹具根本不读该 env（限流配置归平台自己的 DZ_* 命名，见
     // debt-ledger D-163 的 env 家族对齐）。要放宽就改执行层自己的限流配置，不在编排层开关。
   });
-  // 专名必须在通用名之外单独删除：夹具 env2 的专名支路优先于通用名（issue #20 owner 评论）。
-  for (const key of FIXTURE_AMBIENT_STATE_KEYS) delete process.env[key];
+  // 专名是第二顺位调试入口：规范名已按用例注入，但专名必须在评测进程内不可见——
+  // 否则规范名一旦漏注入，夹具会静默回落到 shell 的专名值（per-case 隔离击穿）。
+  for (const key of FIXTURE_AMBIENT_DEBUG_KEYS) delete process.env[key];
 }
 
 export function restorePlatformState(): void {
@@ -1596,11 +1602,12 @@ interface AuditRecord {
 /** 执行层自己持有的待确认提案（D2「停在确认门」判据的第二信号）。
  *  2026-11-08 换源：原 recordsHasPendingPlan 读宿主 EXECUTION_PLAN_STATE——那是编排层
  *  内部的计划账本，不在可观测面内。同一个「有未执行的待确认提案」信息改从执行层自己的
- *  proposals.json 取（夹具缺省落在 EXECUTION_MOCK_STATE 同目录，或 DUMMY_PROPOSAL_STATE
- *  显式指定）。执行层状态是可观测面，宿主计划账本不是。 */
+ *  proposals.json 取（规范名 EXECUTION_PROPOSAL_STATE 由 isolatePlatformState 按用例注入；
+ *  DUMMY_PROPOSAL_STATE 只是夹具调试专名，评测进程已 delete；两者都没有时回落夹具缺省：
+ *  EXECUTION_MOCK_STATE 同目录）。执行层状态是可观测面，宿主计划账本不是。 */
 function executionHasPendingProposal(): boolean {
   const stateFile = process.env['EXECUTION_MOCK_STATE'];
-  const explicit = process.env['DUMMY_PROPOSAL_STATE'];
+  const explicit = process.env['EXECUTION_PROPOSAL_STATE'] ?? process.env['DUMMY_PROPOSAL_STATE'];
   const file = explicit ?? (stateFile ? path.join(path.dirname(stateFile), 'proposals.json') : '');
   if (!file || !existsSync(file)) return false;
   try {

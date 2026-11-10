@@ -22,12 +22,14 @@ const stockBin = path.join(fixtureRoot, 'bin', 'stock');
 const baseline = process.argv[2] ?? '17aafe3';
 
 const dir = mkdtempSync(path.join(os.tmpdir(), 'second-layer-run-'));
+// 只注入规范族 EXECUTION_*（docs/env-naming-ruling-20261110.md）：夹具仍认 STOCK_*
+// 调试专名，但评测进程不设它；规范名优先保证 ambient 专名无法改道 per-case 隔离。
 const env = { ...process.env,
-  STOCK_STATE: path.join(dir, 'state.json'), STOCK_PLAN_STATE: path.join(dir, 'plans.json'),
-  STOCK_PROPOSAL_STATE: path.join(dir, 'proposals.json'), STOCK_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
-  STOCK_MEMORY_STATE: path.join(dir, 'memory.json'), STOCK_BREAKER_STATE: path.join(dir, 'breaker.json'),
-  STOCK_CACHE_STATE: path.join(dir, 'cache.json'), STOCK_GATE_SECRET: 'second-layer-gate-secret',
-  STOCK_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret' };
+  EXECUTION_MOCK_STATE: path.join(dir, 'state.json'), EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
+  EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'), EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
+  EXECUTION_MEMORY_STATE: path.join(dir, 'memory.json'), EXECUTION_BREAKER_STATE: path.join(dir, 'breaker.json'),
+  EXECUTION_CACHE_STATE: path.join(dir, 'cache.json'), EXECUTION_GATE_SECRET: 'second-layer-gate-secret',
+  EXECUTION_PLAN_ACTIVATION_SECRET: 'second-layer-plan-secret' };
 function run(args: string[], input?: string) {
   const r = spawnSync(stockBin, args, { encoding: 'utf8', cwd: fixtureRoot, env, input });
   return { code: r.status ?? 1, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
@@ -50,7 +52,7 @@ try {
   ok = check('proposal pending', created?.data?.status === 'pending' && typeof proposalId === 'string', String(created?.data?.status)) && ok;
   const body = Buffer.from(JSON.stringify({ proposalId, expiresAt: created?.data?.expiresAt })).toString('base64url');
   const token = `${body}.${Buffer.from(createHmac('sha256', 'second-layer-gate-secret').update(body).digest()).toString('base64url')}`;
-  const commit = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: { ...env, STOCK_COMMIT_TOKEN: token } });
+  const commit = spawnSync(stockBin, ['commit', 'stock.proposal-commit', '--proposal-id', proposalId], { encoding: 'utf8', cwd: fixtureRoot, env: { ...env, EXECUTION_COMMIT_TOKEN: token } });
   const ce = envOf(commit.stdout ?? '');
   ok = check('commit verified readback', commit.status === 0 && (ce?.data as Record<string, unknown>)?.verified === true, `${commit.status} ${JSON.stringify(ce?.data)}`) && ok;
   const mem = envOf(run(['memory', 'set', '--key', 'k', '--value', 'v']).stdout);

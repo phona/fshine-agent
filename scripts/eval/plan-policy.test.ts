@@ -82,10 +82,10 @@ describe('cases.yaml 的四档预算表真的驱动 stock 夹具（无模型）'
 
       const baseEnv: NodeJS.ProcessEnv = {
         ...process.env,
-        STOCK_STATE: path.join(dir, 'state.json'),
-        STOCK_PLAN_STATE: path.join(dir, 'plans.json'),
-        STOCK_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
-        STOCK_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
+        EXECUTION_MOCK_STATE: path.join(dir, 'state.json'),
+        EXECUTION_PLAN_STATE: path.join(dir, 'plans.json'),
+        EXECUTION_PROPOSAL_STATE: path.join(dir, 'proposals.json'),
+        EXECUTION_AUDIT_PATH: path.join(dir, 'audit.jsonl'),
       };
       // 对照组不能带 ambient 阈值：四档表是唯一旋钮来源。
       for (const key of STOCK_PLAN_KEYS) delete baseEnv[key];

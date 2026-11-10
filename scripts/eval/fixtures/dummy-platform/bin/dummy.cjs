@@ -17,15 +17,21 @@
  *   3 = gateway / proposal refusal (unregistered, serve matrix, token, expired,
  *       corrupt state, plan not active when a plan is required)
  * State: per-case files, reset = delete the file. Next call re-seeds.
- *   DUMMY_STATE           (collections + records; default <fixture>/.runtime/dummy-state.json)
- *   DUMMY_PLAN_STATE      (plans; default <state-dir>/plans.json)
- *   DUMMY_PROPOSAL_STATE  (proposals; default <state-dir>/proposals.json)
- *   DUMMY_AUDIT_PATH / EXECUTION_AUDIT_PATH (JSONL audit, refusals included)
+ *   EXECUTION_MOCK_STATE     (collections + records; default <fixture>/.runtime/dummy-state.json)
+ *   EXECUTION_PLAN_STATE     (plans; default <state-dir>/plans.json)
+ *   EXECUTION_PROPOSAL_STATE (proposals; default <state-dir>/proposals.json)
+ *   EXECUTION_AUDIT_PATH     (JSONL audit, refusals included)
+ * Naming family (docs/env-naming-ruling-20261110.md): EXECUTION_* is the only
+ * canonical family for state paths and tokens; DUMMY_* are debug-only entries,
+ * read second. The eval process injects EXECUTION_* names for those paths and
+ * does not set the DUMMY_* debug names (C-class per-case knobs such as
+ * DUMMY_READBACK_SHORT keep their fixture names, see docs §9); the probe also
+ * deletes ambient DUMMY_* names before each case.
  * Serve compatibility: when used as bin/generic inside this fixture, fshine sets
  * EXECUTION_SERVE=1 / EXECUTION_INVOCATION / EXECUTION_PLAN_ID / EXECUTION_COMMIT_TOKEN / EXECUTION_GATE_SECRET /
- * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture accepts those names as aliases for
- * its own DUMMY_* names, so fshine code needs no change. It does NOT read
- * LLM keys, WeCom secrets or any other host secret.
+ * EXECUTION_PLAN_ACTIVATION_SECRET. This fixture reads those canonical names
+ * directly (DUMMY_* only as a debug fallback), so fshine code needs no change.
+ * It does NOT read LLM keys, WeCom secrets or any other host secret.
  *
  * Deliberately NOT implemented in v1 (see GENERIC_MOCK_NOTES.md):
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
@@ -176,15 +182,17 @@ const CORRECT_FORM = {
   PLAN_NOT_PENDING: 'Plan is not pending activation.',
 };
 function env(name, fallback) { const v = process.env[name]; return v === undefined || v === '' ? fallback : v; }
-function env2(a, b, fallback) { return env(a, env(b, fallback)); }
+/** Canonical-first lookup: EXECUTION_* (docs/env-naming-ruling-20261110.md) wins,
+ *  the fixture-specific name is a debug entry (manual runs), then the default. */
+function env2(canonical, debug, fallback) { return env(canonical, env(debug, fallback)); }
 function statePaths() {
-  const stateFile = env2('DUMMY_STATE', 'EXECUTION_MOCK_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
+  const stateFile = env2('EXECUTION_MOCK_STATE', 'DUMMY_STATE', path.join(FIXTURE_ROOT, '.runtime', 'dummy-state.json'));
   const dir = path.dirname(stateFile);
   return {
     stateFile,
-    planFile: env2('DUMMY_PLAN_STATE', 'EXECUTION_PLAN_STATE', path.join(dir, 'plans.json')),
-    proposalFile: env('DUMMY_PROPOSAL_STATE', path.join(dir, 'proposals.json')),
-    auditFile: env2('DUMMY_AUDIT_PATH', 'EXECUTION_AUDIT_PATH', null),
+    planFile: env2('EXECUTION_PLAN_STATE', 'DUMMY_PLAN_STATE', path.join(dir, 'plans.json')),
+    proposalFile: env2('EXECUTION_PROPOSAL_STATE', 'DUMMY_PROPOSAL_STATE', path.join(dir, 'proposals.json')),
+    auditFile: env2('EXECUTION_AUDIT_PATH', 'DUMMY_AUDIT_PATH', null),
   };
 }
 function seedState() {
@@ -413,8 +421,8 @@ function doProposalCommit(opName, args) {
   }
   if (rec.status !== 'pending') { process.stderr.write(`PROPOSAL_REFUSE proposal not pending: status=${rec.status}\n`); emit(opName, 'failed', null, errObj('PROPOSAL_NOT_PENDING', `status=${rec.status}`)); return 3; }
   if (new Date(rec.expiresAt).getTime() < Date.now()) { process.stderr.write('PROPOSAL_REFUSE proposal expired\n'); emit(opName, 'failed', null, errObj('PROPOSAL_EXPIRED', rec.expiresAt)); return 3; }
-  const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
-  const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
+  const secret = env2('EXECUTION_GATE_SECRET', 'DUMMY_GATE_SECRET', '');
+  const token = env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '');
   // Fail-closed（2026-11-08 修）：secret 缺失不再跳过整道门。宿主只把 gate secret 程序化
   // 注入给自己的 commit runner（从不进 process.env），worker bash 直调时恰好没有 secret——
   // 旧写法 `secret && !verify(...)` 恰好在那条路上把门整个跳过，无令牌也能提交。现在
@@ -548,7 +556,7 @@ async function planActivate(argv) {
   let input;
   try { input = JSON.parse(inputText); } catch { process.stderr.write('PLAN_REFUSE activation input is not JSON\n'); return 2; }
   const { planId, evidence, token } = input;
-  const secret = env2('DUMMY_PLAN_ACTIVATION_SECRET', 'EXECUTION_PLAN_ACTIVATION_SECRET', '');
+  const secret = env2('EXECUTION_PLAN_ACTIVATION_SECRET', 'DUMMY_PLAN_ACTIVATION_SECRET', '');
   let ok = false;
   try {
     if (secret && token) {
@@ -679,8 +687,8 @@ async function main() {
     const accessMode = op.access === 'read' || op.access === 'scratch' ? 'query' : 'prepare';
     const verdict = decide(accessMode, op, call.args);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: verdict.reason }); return 3; }
-    const planId = env2('DUMMY_PLAN_ID', 'EXECUTION_PLAN_ID', '');
-    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
+    const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
+    const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     let queryResult;
@@ -688,8 +696,8 @@ async function main() {
     else if (op.name === 'dummy.scratch' || op.name === 'ballot.scratch') code = doScratch(op.name, call.args);
     else if (op.name === 'dummy.prepare' || op.name === 'ballot.prepare') code = doPrepare(op.name, call.args);
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
-      const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
-      const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
+      const secret = env2('EXECUTION_GATE_SECRET', 'DUMMY_GATE_SECRET', '');
+      const token = env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '');
       if (secret) {
         let ok = false;
         try {
@@ -760,8 +768,8 @@ async function main() {
     const verdict = decide(cmd, op, rest);
     if (!verdict.allowed) { process.stderr.write(`GATE_REFUSE ${verdict.reason}\n`); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: verdict.reason }); return 3; }
     // Plan binding (only when the caller opts in, mirroring EXECUTION_REQUIRE_PLAN).
-    const planId = env2('DUMMY_PLAN_ID', 'EXECUTION_PLAN_ID', '');
-    const requirePlan = env2('DUMMY_REQUIRE_PLAN', 'EXECUTION_REQUIRE_PLAN', '') === '1';
+    const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
+    const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: mode === 'serve', refused: 'PLAN_REQUIRED' }); return 3; }
     let code;
     let queryResult;
@@ -771,8 +779,8 @@ async function main() {
     else if (op.name === 'dummy.commit' || op.name === 'ballot.commit') {
       // Direct (non-proposal) commit requires a commit token when a gate secret is set,
       // mirroring gateway commit-token binding (operation name preferred).
-      const secret = env2('DUMMY_GATE_SECRET', 'EXECUTION_GATE_SECRET', '');
-      const token = env2('DUMMY_COMMIT_TOKEN', 'EXECUTION_COMMIT_TOKEN', '');
+      const secret = env2('EXECUTION_GATE_SECRET', 'DUMMY_GATE_SECRET', '');
+      const token = env2('EXECUTION_COMMIT_TOKEN', 'DUMMY_COMMIT_TOKEN', '');
       if (secret) {
         let ok = false;
         try {
