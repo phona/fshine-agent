@@ -4,6 +4,8 @@
 
 架构目标见 [`v0-architecture.md`](v0-architecture.md)，律法见 [`architecture-laws.md`](architecture-laws.md)，债务状态见 [`debt-ledger.md`](debt-ledger.md)。冲突时以 architecture-laws 的闭环判据为准，并回头修 v0-architecture。
 
+**术语**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本文的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1。
+
 ---
 
 ## 0. 模式铁律：只跑 mock，不碰真实平台
@@ -71,7 +73,7 @@
 
 | 机制 | 类别 | 状态（依据） |
 |---|---|---|
-| T5 执行范围对账 | 机制 B 类 | **待实施**（裁定形态 = 有界扩张门）。PR #53 现有提交是严格拒收——`execution-scope.ts` 注释「不设扩张额度（T5 字面判据）」，据 `docs/decision-log.md` §四 是修 review 缺陷的临时收法，不是裁定形态；不得引用它证明「有界门已落地」 |
+| T5 执行范围对账 | 机制 B 类 | **待实施**（字面判据：执行集合 ⊆ 已确认计划；裁定形态 = 有界扩张门）。PR #53 现有提交是严格拒收——`execution-scope.ts` 注释「不设扩张额度（T5 字面判据）」，据 `docs/decision-log.md` §四 是修 review 缺陷的临时收法，不是裁定形态；不得引用它证明「有界门已落地」 |
 | T6 确认门兜底 | 机制 B 类 | 在 PR #53（draft，未合） |
 | T8 执行语言删除扩面 | 机制 A 类（穿工程外衣） | 在 PR #53（draft，未合） |
 | T7 无空回复（窗口贴边） | 机制 A 类（穿工程外衣） | 在 PR #54（draft，未合入 main）：`pi-driver.ts` 的 `shouldNudgeFinalReply` / `FINAL_REPLY_NUDGE`、`pi-driver-nudge.test.ts` 与 `pi-driver-model-errors.test.ts` 的 T7 用例 |
