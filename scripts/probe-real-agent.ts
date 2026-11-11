@@ -29,6 +29,11 @@
  * 交叉核 note（缺失口径表面事实/derived 照旧）。关（默认）= 黑盒：出站文本逐字等于 yaml
  * 文本，note 集合不变。指令词表纪律与回归钉子见 AUDIT_INSTRUCTION 注释。
  *
+ * 每用例一个子进程（进程内隐藏模式，不是用户开关）：case spec → 隔离门 → boot →
+ * send → 结果收集都在子进程里。父进程只串行 fork、收 JSON、聚合成现有报告，不为任何
+ * 用例改 process.env。fork 而不是 worker_threads——全新进程才有全 env 隔离、无共享
+ * 模块态。结构上已可并发，串行是刻意的（限流即信号；并发是独立语义决定，不在这里做）。
+ *
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及declaration/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
  * C2/E/F/G/H/X/Y 是重场景（30 轮超长会话、多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only C2 / --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
@@ -55,10 +60,11 @@
  * operation 名（"数据来源：…finance.query-receivables"）与internal control term（"查询plan quota"）两类，尺子随 runtime.ts 同扩）。
  * 结果写 .runtime/probe-<runId>.json，同时在终端打可读摘要。
  */
-import { mkdtempSync, mkdirSync, rmSync, appendFileSync } from 'node:fs';
+import { fork } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, appendFileSync, writeSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import Database from 'better-sqlite3';
 // 判据自持（issue #10 切片 D 收尾）：评测侧持一份同义尺（scripts/eval/execution-language-eval.ts），
@@ -367,8 +373,9 @@ const PROBE_REPLY_WAIT_MS = 300_000;
  */
 const PLATFORM_STATE_KEYS = ['EXECUTION_RATE_LIMIT_STATE'] as const;
 /**
- * 测试专用状态根桥（docs/environment-variables.md §4a）：fshine 评测基础设施私有，
+ * 测试专用状态根桥（docs/environment-variables.md §4a，债 D-209）：fshine 评测基础设施私有，
  * 不是两仓契约。宿主生产路径零读取；仓内夹具的 shell 入口把它翻成 `--state-dir`。
+ * 探针只在 per-case 子进程里写它（父进程不碰 process.env）；acceptance 在自己的进程里写。
  * 放进 ISOLATED_STATE_KEYS 与四个原状态键同待遇：per-case 覆盖、backup/restore 对称。
  */
 const FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
@@ -404,10 +411,11 @@ let platformStateBackup: Record<string, string | undefined> = {};
 type TelemetryEvent = Record<string, unknown>;
 const telemetryEvents: TelemetryEvent[] = [];
 /**
- * 当前用例已完成的轮次（崩溃证据，2026-11-10 独立评审 medium）：runner 的 turns 是
- * 函数局部变量，抛错时整批丢失——中途中止的用例因此拿不到已跑完轮次的回复/审计窗口，
- * 申报计数只能记 not-applicable、报告也缺这些轮次的行。send 每返回一轮就追加到这里，
- * main 在用例开始时清空、catch 里交给 caseCrashOf（仅作崩溃证据，不影响正常路径）。
+ * 子进程内的崩溃证据（2026-11-10 独立评审 medium，子进程化后仍只在本进程有效）：
+ * runner 的 turns 是函数局部变量，抛错时整批丢失——send 每返回一轮就追加到这里，
+ * collectCase 在用例开始时清空、catch 里交给 caseCrashOf，再随 CaseResult 回传。
+ * 进程本身非零退出时父进程拿不到这个数组：那种失败只留退出码与 stderr 摘要，
+ * 比同进程补救更硬，是刻意的（不再靠清这个缓冲续跑）。
  */
 const turnsInFlight: Turn[] = [];
 const TELEMETRY_EVENT_NAMES = new Set(['turn_span', 'delegation_span', 'aux_model_usage']);
@@ -3021,6 +3029,31 @@ export interface CrashEvidence {
   turns?: readonly Turn[];
   /** 用例开始到崩溃的墙钟毫秒（崩溃窗口唯一的时延证据；缺席不编零）。 */
   elapsedMs?: number;
+  /**
+   * 子进程在 payload 里声明的用例级总数。与 `auditRows` 分开传：行是已观测到的证据，
+   * 声明是子进程对自己观测总数的权威（2026-11-11 仲裁）。
+   * -1 = 子进程明确说总数不可知；非负整数 = 用这个数，不按行数重算；缺席 = 调用方没带来声明。
+   */
+  declaredCalls?: number;
+  /** 与 `declaredCalls` 同一条纪律的被拒计数。 */
+  declaredRefused?: number;
+}
+
+/**
+ * 崩溃用例的一个计数字段。声明 -1 压过行数（已看到 N 行 ≠ 一共 N 行）；
+ * auditRows === null 仍是 -1，确定数不能把它盖成 0；auditRows 缺省是旧形状 0；
+ * 声明为非负整数时用声明；声明缺席且给了行则按行数。
+ */
+function crashCountOf(
+  declared: number | undefined,
+  auditRows: CrashEvidence['auditRows'],
+  fromRows: number,
+): number {
+  if (declared === -1) return -1;
+  if (auditRows === null) return -1;
+  if (auditRows === undefined) return 0;
+  if (typeof declared === 'number' && Number.isInteger(declared) && declared >= 0) return declared;
+  return fromRows;
 }
 
 /**
@@ -3034,6 +3067,11 @@ export interface CrashEvidence {
  * "无证据 ≠ 0"的口径。给了 `evidence.auditRows` 时按审计窗口重建真实调用（可能为 -1 =
  * 不可知）、阶梯与报告行；`evidence.turns`（send 逐轮追加的 turnsInFlight）保住已完成
  * 轮次的回复与申报计数。两者都没有时才回到旧形状——没证据与"零"仍然可区分。
+ *
+ * 总数与观测行分开（2026-11-11 仲裁）：子进程声明 -1 时，结果的 platformCalls /
+ * refusedCalls 保持 -1，不许按已看到的行数收成「正好 N」；那些行仍进阶梯、统一报告
+ * JSONL 和「崩溃前审计窗口保留 N 次」note。声明是确定的非负整数时用声明数（子进程
+ * 对自己观测总数的权威）。声明缺席时维持按行计数的现行语义。
  */
 export function caseCrashOf(
   item: { id: string; group: string; intent: string },
@@ -3050,12 +3088,11 @@ export function caseCrashOf(
     : evidence.auditRows.slice(evidence.auditBefore ?? 0);
   const mergedRows = mergeCallPhases(windowRows);
   const refusedCalls = mergedRows.filter((row) => row.refused).length;
-  const platformCalls = evidence.auditRows === undefined
-    ? 0
-    : evidence.auditRows === null ? -1 : mergedRows.length;
-  const refusedCount = evidence.auditRows === undefined
-    ? 0
-    : evidence.auditRows === null ? -1 : refusedCalls;
+  // 声明 -1 压过行数：已看到 N 行只证明「至少有这些」，不是「一共就这些」。
+  // auditRows === null 仍是无行的不可知（含声明缺席、auditMissing 叠在 0/0 上），
+  // 确定数不能把这条盖成 0。声明缺席且给了行：按窗口行数，旧调用点行为不变。
+  const platformCalls = crashCountOf(evidence.declaredCalls, evidence.auditRows, mergedRows.length);
+  const refusedCount = crashCountOf(evidence.declaredRefused, evidence.auditRows, refusedCalls);
   const ladder = mergedRows.map((row) => classifyExecutionCall({
     row,
     // 崩溃用例没有已验证的读回与用户可见交付：不授予 verified/delivered。
@@ -3113,6 +3150,11 @@ export function caseCrashOf(
   // 审计源不可读时，这条合成行同样要带 -1/auditMissing 的显式 unknown：它的 execution
   // 只能是 []，报告若按空数组派生 executedCalls:0，就会把"不可知"写成"零调用"
   // （2026-11-10 评审 low：与 calls=-1 同一纪律）。
+  // 声明 -1 与审计源 null 同一条哨兵：崩溃窗口行可以带着已观测的 execution（JSONL
+  // 仍有这些调用），但不得再派生一个确定的 executedCalls，把「不可知」写成「正好 N」。
+  const countsUnknown = evidence.auditRows === null
+    || evidence.declaredCalls === -1
+    || evidence.declaredRefused === -1;
   const partialTurn: ReportCaseInput['turns'][number] | undefined =
     tailRows.length > 0 || (crashWindowMs !== undefined && crashWindowMs > 0)
     ? {
@@ -3122,7 +3164,7 @@ export function caseCrashOf(
       notices: [],
       ...(crashWindowMs !== undefined ? { ms: crashWindowMs } : {}),
       execution: tailRows,
-      ...(evidence.auditRows === null ? { calls: -1, auditMissing: true } : {}),
+      ...(countsUnknown ? { calls: -1, auditMissing: true } : {}),
     }
     : undefined;
   const input = caseReportInputOf(item, turns, { ok: false, notes });
@@ -3169,7 +3211,433 @@ export function caseCallCountsOf(
   };
 }
 
-async function main(): Promise<void> {
+/**
+ * 子进程回传通道（约定通道，不占 stdout）：父进程 fork 时把 stdio fd 3 接成管道，
+ * 子进程在用例结束时写一行哨兵 + 一行 JSON。stdout/stderr 的宿主埋点仍按原样出现在
+ * 终端（stdout 继承，stderr 由父进程转发），汇总文案仍由父进程在收齐结果后打印。
+ *
+ * fork 而不是 worker_threads：fork 起的是全新 Node 进程，process.env 与模块级状态
+ * （telemetryEvents 下标、turnsInFlight、console 钩子）都是该进程私有的一份。
+ * worker_threads 共享内存，env 默认也从父线程看见——正是本重构要拆掉的两堵墙
+ * （进程级状态根桥会被并发用例互盖；遥测归因靠缓冲区下标切片，并发同样错位）。
+ */
+const CASE_CHILD_RESULT_FD = 3;
+export const CASE_RESULT_SENTINEL = '<<<PROBE_CASE_RESULT>>>';
+/**
+ * fork 的 stdio。stdout 继承（宿主埋点仍打在终端），stderr 进管道（失败时摘尾部），
+ * fd 3 是 CaseResult 回传管道。末位 `ipc` 不传结果：Node 的 fork 在自定 stdio 时
+ * 没有这一槽会直接抛 ERR_CHILD_PROCESS_IPC_REQUIRED，进程起不来。
+ */
+export const CASE_CHILD_STDIO = ['ignore', 'inherit', 'pipe', 'pipe', 'ipc'] as const;
+
+function argvValue(flag: string, argv: string[] = process.argv): string | undefined {
+  const index = argv.indexOf(flag);
+  if (index < 0) return undefined;
+  const value = argv[index + 1];
+  if (value === undefined || value.startsWith('--')) return undefined;
+  return value;
+}
+
+/** 子进程非零退出的证据（退出码或信号 + stderr 尾部）。不从共享缓冲补轮次。 */
+export function childFailureNote(exitCode: number | null, signal: NodeJS.Signals | null, stderr: string): string {
+  const how = signal ? `signal ${signal}` : `exit ${exitCode ?? 'null'}`;
+  const tail = stderr.trim().split('\n').map((line) => line.trim()).filter(Boolean).slice(-6).join(' | ').slice(-500);
+  return tail ? `子进程失败（${how}）：${tail}` : `子进程失败（${how}）`;
+}
+
+interface CaseChildPayload {
+  result: CaseResult;
+  input: ReportCaseInput;
+}
+
+/** 从 fd 3（或手动运行时的 stdout）抽出子进程回传。哨兵之前的噪声忽略；形状不对返回 null。 */
+export function parseChildCasePayload(raw: string): CaseChildPayload | null {
+  const marker = raw.lastIndexOf(CASE_RESULT_SENTINEL);
+  if (marker < 0) return null;
+  const json = raw.slice(marker + CASE_RESULT_SENTINEL.length).trim();
+  try {
+    const value = JSON.parse(json) as Partial<CaseChildPayload>;
+    if (!value?.result || typeof value.result.id !== 'string' || !Array.isArray(value.result.turns)) return null;
+    if (!value.input || value.input.caseId !== value.result.id) return null;
+    return { result: value.result, input: value.input };
+  } catch {
+    return null;
+  }
+}
+
+function writeChildCasePayload(payload: CaseChildPayload): void {
+  const body = `${CASE_RESULT_SENTINEL}\n${JSON.stringify(payload)}\n`;
+  try {
+    writeSync(CASE_CHILD_RESULT_FD, body);
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: unknown }).code) : '';
+    // 手动 --case 没接 fd 3。父进程始终提供管道，不会走这里。
+    if (code === 'EBADF' || code === 'EINVAL') {
+      process.stdout.write(body);
+      return;
+    }
+    throw error;
+  }
+}
+
+function probeIsolationInput(env: NodeJS.ProcessEnv, yamlPath: string, auditPath: string | null) {
+  const gateConfig = loadConfig({ env, yamlPath });
+  const gateProfile = gateConfig.contextProfiles[resolveActiveProfileId(gateConfig.contextProfiles) ?? ''];
+  return {
+    // safety-gate 是纯函数入参：审计路径不写回 process.env（状态位置不再经 env 传给夹具）。
+    env: { ...env, ...(auditPath ? { EXECUTION_AUDIT_PATH: auditPath } : {}) },
+    ...(gateProfile?.root ? { platformRoot: gateProfile.root } : {}),
+    ...(gateProfile?.gateway ? { gateway: gateProfile.gateway } : {}),
+  };
+}
+
+/**
+ * 用例级收集（原 main 循环体，现只在子进程里跑）。
+ * 成功与 runner 抛错都返回完整的报告两份面；进程崩溃走不到这里。
+ */
+async function collectCase(item: Case, evalRunId: string): Promise<CaseChildPayload> {
+  const auditBefore = executionAuditRows()?.length ?? 0;
+  // 用例级 aux 捕获窗口（caseTokensOf）：本进程的缓冲区从空开始，下标不再跨用例。
+  const caseMark = telemetryEvents.length;
+  const caseStartedAt = Date.now();
+  turnsInFlight.length = 0;
+  try {
+    const { turns, notes = [] } = await item.run();
+    // 审计源不可读时调用数记 -1（不可知）。零调用类 note 只在有证据的 0 上触发，
+    // 但"没有判定"不能完全静默——这里出一条信息性 note 显式呈现证据缺口（不算异常）。
+    const unknownCallTurns = turns.flatMap((turn, index) => (turn.auditMissing ? [index + 1] : []));
+    if (unknownCallTurns.length) {
+      notes.push(`（信息性）审计源不可读：第${unknownCallTurns.join('、')}轮调用数不可知，零调用类判定按无证据跳过`);
+    }
+    // 公共收集入口（不依赖 runner 自报）：audited 下每个用例都跑逐轮交叉核计数。
+    const auditField = auditFailuresOf(auditMode, turns);
+    const auditRowsAfter = executionAuditRows();
+    // 用例级行也先合并起止（十二审 major）：否则报告里的 platformCalls 会把一次成功提案
+    // 计成两次。与逐轮的 calls/refusedCalls 同源。审计源不可读时调用数记 -1（不可知），
+    // 不拿空 caseRows 派生 0/0（2026-11-10 独立评审 low，见 caseCallCountsOf）。
+    const caseRows: ExecutionAuditRow[] = mergeCallPhases(auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore));
+    const callCounts = caseCallCountsOf(auditRowsAfter, caseRows);
+    // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
+    const ok = notes.every((note) => note.startsWith('（信息性）'));
+    const counted = countDims(notes);
+    const tokens = caseTokensOf(turns, caseMark);
+    const result: CaseResult = {
+      id: item.id, group: item.group, intent: item.intent, turns,
+      platformCalls: callCounts.platformCalls,
+      refusedCalls: callCounts.refusedCalls,
+      chain: {
+        evalRunId,
+        caseId: item.id,
+        messageIds: turns.map((turn) => turn.messageId),
+        requestIds: [...new Set(turns.map((turn) => turn.requestId).filter((v): v is string => typeof v === 'string'))],
+        taskIds: [...new Set(turns.flatMap((turn) => turn.taskIds))],
+        ...(probeAuditPath() ? { auditLog: path.relative(stateDir, probeAuditPath()!) } : {}),
+      },
+      notes,
+      dims: counted.dims, unclassifiedNotes: counted.unclassified,
+      ...auditField,
+      ladder: turns.flatMap((turn) => turn.ladder),
+      ...(tokens ? { tokens } : {}),
+      ok,
+    };
+    return { result, input: caseReportInputOf(item, turns, { ok, notes }) };
+  } catch (error) {
+    // runner 抛错仍在本进程内收成 crashed CaseResult（轮次证据还在）。这与「进程非零
+    // 退出只留退出码 + stderr」是两条路：前者进程还活着，后者已经没了。
+    // auditRows 传 executionAuditRows() 的原值：读失败是 null（调用数 -1），不是省略
+    // （省略会被 caseCrashOf 当成有证据的 0）。父进程那条路读不到这份审计文件，见
+    // crashEvidenceFromChildPayload。
+    return caseCrashOf(item, error, evalRunId, auditMode, {
+      auditBefore,
+      auditRows: executionAuditRows(),
+      turns: [...turnsInFlight],
+      elapsedMs: Date.now() - caseStartedAt,
+    });
+  }
+}
+
+function asReadable(value: unknown): NodeJS.ReadableStream | null {
+  if (value && typeof value === 'object' && 'setEncoding' in value && 'on' in value) {
+    return value as NodeJS.ReadableStream;
+  }
+  return null;
+}
+
+interface CaseChildOutcome extends CaseChildPayload {
+  /** 子进程非零退出或回传解析失败。打印走 ✗ 行，不走成功的逐轮摘要。 */
+  processFailed: boolean;
+}
+
+/**
+ * 父进程证明不了「子进程没调用平台」时的崩溃证据（fd 3 是唯一来源；审计文件在子进程
+ * 的状态根里，父进程读不到）。省略 evidence 会让 caseCrashOf 把 platformCalls /
+ * refusedCalls 写成 0——证据缺席 ≠ 零申报，与 Turn.calls 的 -1 同一条纪律。
+ *
+ *   · 哨兵后是本用例的完整 payload：保留 turns，加上 result.turns 没覆盖的 input
+ *     轮次（崩溃窗口）上的审计行。行与声明分开传（2026-11-11 仲裁）——有行时不再把
+ *     子进程声明的 -1 丢掉再按行数收成确定总数。声明 -1 = 总数不可知，行仍留下；
+ *     声明是确定的非负整数 = 交给 caseCrashOf 采用；声明缺席 = 不带声明字段，按行计数。
+ *     没有行且不是 knownZero：auditRows 仍是 null（→ -1），声明字段照样带上。
+ *     knownZero（两个计数都明确写成 0、且没有一轮 auditMissing）→ 空数组，结果为 0。
+ *   · JSON 不完整（信号截断、解析失败）：用例级调用数不可知。截断点之前若已经有
+ *     闭合的 turns 数组，留下这些轮次——执行行还在轮上，但不把截断窗口的行数当成
+ *     已经数完的总数。截断 JSON 没有可靠声明，不传声明字段。
+ */
+export function crashEvidenceFromChildPayload(raw: string, caseId: string): CrashEvidence {
+  const parsed = parseChildCasePayload(raw);
+  if (parsed && parsed.result.id === caseId) {
+    // 只把形状完整的轮次交给 caseCrashOf（缺 taskIds/intents 会在汇总时抛，父进程整批中断）。
+    const turns = parsed.result.turns.filter(isCrashTurn);
+    const rows = executionRowsFromChildPayload(parsed);
+    const declared = parsed.result.platformCalls;
+    const declaredRefused = parsed.result.refusedCalls;
+    const declaredFields: Pick<CrashEvidence, 'declaredCalls' | 'declaredRefused'> = {
+      ...(typeof declared === 'number' ? { declaredCalls: declared } : {}),
+      ...(typeof declaredRefused === 'number' ? { declaredRefused: declaredRefused } : {}),
+    };
+    // 有证据的零必须是子进程两个计数都明确写成 0，且没有任何一轮自报审计不可读。
+    // 字段缺席、-1、或 auditMissing 都不能借空数组变成 0。
+    const knownZero = declared === 0 && declaredRefused === 0
+      && !turns.some((turn) => turn.auditMissing === true);
+    if (rows.length === 0 && !knownZero) return { auditRows: null, turns, ...declaredFields };
+    return { auditBefore: 0, auditRows: rows, turns, ...declaredFields };
+  }
+  const turns = salvageTurnsFromPartialPayload(raw, caseId);
+  return turns.length > 0 ? { auditRows: null, turns } : { auditRows: null };
+}
+
+function isAuditRow(value: unknown): value is ExecutionAuditRow {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function executionRowsFromChildPayload(parsed: CaseChildPayload): ExecutionAuditRow[] {
+  const covered = new Set<string>();
+  const rows: ExecutionAuditRow[] = [];
+  for (const turn of parsed.result.turns) {
+    if (!turn || typeof turn !== 'object') continue;
+    if (typeof turn.messageId === 'string') covered.add(turn.messageId);
+    if (Array.isArray(turn.execution)) rows.push(...turn.execution.filter(isAuditRow));
+  }
+  for (const turn of parsed.input.turns ?? []) {
+    if (!turn || covered.has(turn.messageId)) continue;
+    if (Array.isArray(turn.execution)) rows.push(...turn.execution.filter(isAuditRow));
+  }
+  return rows;
+}
+
+function isCrashTurn(value: unknown): value is Turn {
+  if (!value || typeof value !== 'object') return false;
+  const turn = value as Record<string, unknown>;
+  return typeof turn.messageId === 'string'
+    && typeof turn.text === 'string'
+    && typeof turn.reply === 'string'
+    && typeof turn.ms === 'number'
+    && Array.isArray(turn.notices)
+    && Array.isArray(turn.taskIds)
+    && Array.isArray(turn.execution)
+    && Array.isArray(turn.intents)
+    && Array.isArray(turn.gateRows)
+    && Array.isArray(turn.delegations)
+    && typeof turn.calls === 'number'
+    && typeof turn.refusedCalls === 'number';
+}
+
+/** 从哨兵后未闭合的 JSON 里取出已经写完的 turns 数组；对不上 caseId 或数组没闭合则放弃。 */
+function salvageTurnsFromPartialPayload(raw: string, caseId: string): Turn[] {
+  const marker = raw.lastIndexOf(CASE_RESULT_SENTINEL);
+  if (marker < 0) return [];
+  const json = raw.slice(marker + CASE_RESULT_SENTINEL.length);
+  const idMatch = json.match(/"id"\s*:\s*"([^"]*)"/);
+  if (!idMatch || idMatch[1] !== caseId) return [];
+  const keyAt = json.indexOf('"turns":');
+  if (keyAt < 0) return [];
+  const arrayAt = json.indexOf('[', keyAt);
+  if (arrayAt < 0) return [];
+  const arrayText = matchJsonContainer(json, arrayAt);
+  if (!arrayText) return [];
+  try {
+    const value = JSON.parse(arrayText) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.filter(isCrashTurn);
+  } catch {
+    return [];
+  }
+}
+
+function matchJsonContainer(text: string, openIndex: number): string | null {
+  const open = text[openIndex];
+  const close = open === '[' ? ']' : open === '{' ? '}' : '';
+  if (!close) return null;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let index = openIndex; index < text.length; index += 1) {
+    const ch = text[index]!;
+    if (inString) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === '[' || ch === '{') depth += 1;
+    else if (ch === ']' || ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(openIndex, index + 1);
+    }
+  }
+  return null;
+}
+
+/**
+ * 串行 fork 一个用例。调用方用 for-await，不要换成 Promise.all。
+ * 结构上每个用例已是独立进程，并发只差并行等待——刻意不开、也不留开关。
+ * 探针的观测语义是「被限流就是信号」；并行会把限流和用例行为搅在一起。
+ * 那是独立的语义决定，要单独裁。
+ * `spawn` 默认就是 fork；测试替身只用来走失败分支，不改变生产的起进程方式。
+ */
+export function runCaseChildProcess(
+  item: Case,
+  evalRunId: string,
+  audited: boolean,
+  caseSeq: number,
+  parentEnv: NodeJS.ProcessEnv,
+  spawn: typeof fork = fork,
+): Promise<CaseChildOutcome> {
+  const args = ['--case', item.id, '--eval-run-id', evalRunId, '--case-seq', String(caseSeq)];
+  if (audited) args.push('--audit');
+  const configArg = process.argv.find((arg) => arg.startsWith('--config='));
+  if (configArg) args.push(configArg);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (outcome: CaseChildOutcome) => {
+      if (settled) return;
+      settled = true;
+      resolve(outcome);
+    };
+    let stderr = '';
+    const fail = (exitCode: number | null, signal: NodeJS.Signals | null, extra = '') => {
+      // 不传 evidence 时 caseCrashOf 缺省记 0。子进程可能已经调过平台（信号终止，或
+      // 回传 JSON 没能解析）；父进程没看见审计文件，只能记不可知，或留下 fd 3 里已经
+      // 写完的那部分执行证据。
+      const crash = caseCrashOf(
+        item,
+        new Error(childFailureNote(exitCode, signal, extra ? `${stderr}\n${extra}` : stderr)),
+        evalRunId,
+        audited,
+        crashEvidenceFromChildPayload(payloadRaw, item.id),
+      );
+      finish({ ...crash, processFailed: true });
+    };
+    // env 是父进程入口快照的副本。不往里面写桥变量——子进程自己 isolate。
+    // Node 的 fork 在自定 stdio 时必须带一个 'ipc' 槽（否则 ERR_CHILD_PROCESS_IPC_REQUIRED）。
+    // 回传不走 IPC：fd 3 是结果管道，ipc 只是 fork 的起进程要求，父进程不 send/on('message')。
+    const child = spawn(fileURLToPath(import.meta.url), args, {
+      env: parentEnv,
+      stdio: [...CASE_CHILD_STDIO],
+    });
+    const stderrStream = asReadable(child.stderr);
+    if (stderrStream) {
+      stderrStream.setEncoding('utf8');
+      stderrStream.on('data', (chunk: string) => {
+        stderr += chunk;
+        process.stderr.write(chunk);
+      });
+    }
+    let payloadRaw = '';
+    const resultPipe = asReadable(child.stdio[CASE_CHILD_RESULT_FD]);
+    const pipeDone = new Promise<void>((resolvePipe) => {
+      if (!resultPipe) { resolvePipe(); return; }
+      resultPipe.setEncoding('utf8');
+      resultPipe.on('data', (chunk: string) => { payloadRaw += chunk; });
+      resultPipe.on('end', () => resolvePipe());
+      resultPipe.on('error', () => resolvePipe());
+    });
+    child.on('error', (error) => fail(null, null, error.message));
+    child.on('exit', (code, signal) => {
+      const timer = setTimeout(() => {
+        fail(code, signal, '回传管道在子进程退出后没有关闭');
+      }, 2000);
+      timer.unref?.();
+      void pipeDone.then(() => {
+        clearTimeout(timer);
+        if (settled) return;
+        if (code === 0 && !signal) {
+          const parsed = parseChildCasePayload(payloadRaw);
+          if (!parsed || parsed.result.id !== item.id) {
+            fail(code, signal, '子进程退出码 0 但回传 JSON 不可解析');
+            return;
+          }
+          finish({ ...parsed, processFailed: false });
+          return;
+        }
+        fail(code, signal);
+      });
+    });
+  });
+}
+
+/** 历史 auditLog 序号：全批共享计数器时 gate 占 case-1，第 i 例（0 起）的 boot 落到 case-(i+2)。 */
+function applyCaseSeq(): void {
+  const raw = argvValue('--case-seq');
+  if (raw === undefined) return;
+  const seq = Number(raw);
+  if (!Number.isInteger(seq) || seq < 0) {
+    console.error(`探针子进程 --case-seq 不是非负整数：${raw}`);
+    process.exit(2);
+  }
+  counter = seq;
+}
+
+async function runChildCase(): Promise<void> {
+  const caseId = argvValue('--case');
+  const evalRunId = argvValue('--eval-run-id');
+  if (!caseId || !evalRunId) {
+    console.error('探针子进程需要 --case <id> 与 --eval-run-id <id>');
+    process.exit(2);
+  }
+  auditMode = process.argv.includes('--audit');
+  const cases = loadProbeCases();
+  const item = cases.find((candidate) => candidate.id === caseId);
+  if (!item) {
+    console.error(`探针子进程没有用例 ${caseId}`);
+    process.exit(2);
+  }
+  applyCaseSeq();
+  stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-probe-case-'));
+  savedEnv = { ...process.env };
+  const yamlPath = resolveConfigPath(explicitConfigFrom());
+  // assembly 读 AGENT_CONFIG_PATH。这是子进程自己的 env，父进程不设。
+  process.env.AGENT_CONFIG_PATH = yamlPath;
+  // 隔离门在 boot 之前，fail-closed：不通过就不装配、不把消息打到执行层。
+  isolatePlatformState();
+  let exitCode = 0;
+  try {
+    try {
+      assertEvalIsolation(
+        assessEvalIsolation(probeIsolationInput(process.env, yamlPath, probeAuditPath())),
+        `真实模型探针子进程（evalRunId=${evalRunId} case=${caseId}）`,
+      );
+    } catch (error) {
+      console.error(error instanceof Error ? error.message : String(error));
+      exitCode = 2;
+    }
+    // 不要在 try 里 return：finally 之后的 process.exit 必须执行，否则门拒绝会变成退出码 0。
+    if (exitCode === 0) {
+      const collected = await collectCase(item, evalRunId);
+      writeChildCasePayload(collected);
+    }
+  } finally {
+    for (const db of openIntentDbs.splice(0)) db.close();
+    restorePlatformState();
+    process.env = savedEnv;
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+  // 装配留下的句柄不能把子进程挂住——父进程在等退出。回传已 writeSync 进管道。
+  process.exit(exitCode);
+}
+
+async function runParent(): Promise<void> {
   const only = process.argv.includes('--only')
     ? new Set(process.argv[process.argv.indexOf('--only') + 1]!.split(','))
     : null;
@@ -3177,119 +3645,56 @@ async function main(): Promise<void> {
   if (only && quick) throw new Error('--only 与 --quick 互斥：--quick 本身就是固定子集');
   // audited 申报模式（D-206/D-207）：与 --only/--quick 正交（模式修饰，不是子集选择）。
   // 开 = 首轮消息带申报指令前缀 + 错误态金额所属判定换成申报交叉核；关（默认）=
-  // 黑盒，出站文本与 note 集合逐字不变。
+  // 黑盒，出站文本与 note 集合逐字不变。父进程只把开关传给子进程，自己不发消息。
   auditMode = process.argv.includes('--audit');
   console.log(auditMode ? 'audited 申报模式：首轮注入申报指令，错误轮金额所属改判申报交叉核' : '黑盒模式');
   const cases = loadProbeCases();
   const selected = only ? cases.filter((c) => only.has(c.id))
     : quick ? cases.filter((c) => QUICK_CASE_IDS.has(c.id))
     : cases;
+  // 父进程的临时目录只用于 run id / 报告文件名 / 开跑前的安全门探针。
+  // 用例的 stateDir、数据库、夹具状态根都在子进程里，用完即删。
   stateDir = mkdtempSync(path.join(os.tmpdir(), 'fshine-probe-'));
-  savedEnv = { ...process.env };
-  // 关联链的 run id（报告文件名同源，台账/基线引用可对上）。
+  // 入口快照。此后父进程不准改 process.env（见函数末尾的自检）。
+  const parentEnv: NodeJS.ProcessEnv = { ...process.env };
   const evalRunId = `probe-${path.basename(stateDir)}`;
 
-  // ── 评测安全门（issue #10 验收标准，fail-closed）：先隔离执行层状态面，再验
-  // 夹具与审计通道。未指定隔离 mock / 缺 fixture / 执行层状态无法验证 = 拒跑（exit 2），
-  // 不静默落真实平台。宿主不再持写门不改变这一条：宿主管生产写（执行层的事），
-  // 评测管住自己别打到真平台。
+  // 跑批级安全门（issue #10，fail-closed，exit 2）：用 env 副本验夹具与审计通道，
+  // 不写回 process.env。未通过就不 fork——不静默落真实平台。每个子进程在 boot 前
+  // 再查一次自己的状态根；这里只是让整批配置错误一次退出，而不是 N 次用例失败。
   const yamlPath = resolveConfigPath(explicitConfigFrom());
-  // assembly 的 loadConfig 读 AGENT_CONFIG_PATH 环境变量；设为同一路径后，探针派生的
-  // principalUser 与 assembly 看到的配置完全同源（boot 内的同一段解析自此读到同一份）。
-  process.env.AGENT_CONFIG_PATH = yamlPath;
-  isolatePlatformState();
+  const gateDir = path.join(stateDir, 'gate');
+  mkdirSync(gateDir, { recursive: true });
   try {
-    const gateConfig = loadConfig({ env: process.env, yamlPath });
-    const gateProfile = gateConfig.contextProfiles[resolveActiveProfileId(gateConfig.contextProfiles) ?? ''];
-    assertEvalIsolation(assessEvalIsolation({
-      // safety-gate 是纯函数入参：审计路径 = 状态根派生（probeAuditPath），与夹具实际写入
-      // 同根同规则；不写回 process.env（状态位置不再经 env 传给夹具，docs §4a）。
-      env: { ...process.env, ...(probeAuditPath() === null ? {} : { EXECUTION_AUDIT_PATH: probeAuditPath()! }) },
-      ...(gateProfile?.root ? { platformRoot: gateProfile.root } : {}),
-      ...(gateProfile?.gateway ? { gateway: gateProfile.gateway } : {}),
-    }), `真实模型探针（evalRunId=${evalRunId}）`);
+    assertEvalIsolation(
+      assessEvalIsolation(probeIsolationInput(parentEnv, yamlPath, path.join(gateDir, 'audit.jsonl'))),
+      `真实模型探针（evalRunId=${evalRunId}）`,
+    );
   } catch (error) {
-    restorePlatformState();
-    process.env = savedEnv;
     rmSync(stateDir, { recursive: true, force: true });
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(2);
   }
 
   const results: CaseResult[] = [];
-  // 统一报告（issue 切片 D）的逐用例输入：三源证据 + 时延 + usage，判定独立于 Agent 自述。
   const reportInputs: ReportCaseInput[] = [];
-  for (const item of selected) {
+  // 串行。见 runCaseChildProcess：结构上可并发，观测语义要求一次只跑一个用例。
+  for (let index = 0; index < selected.length; index += 1) {
+    const item = selected[index]!;
     console.log(`\n=== ${item.id} ${item.intent} ===`);
-    const auditBefore = executionAuditRows()?.length ?? 0;
-    // 用例级 aux 捕获窗口（caseTokensOf）：从用例开始前的缓冲区下标切到用例结束。
-    const caseMark = telemetryEvents.length;
-    const caseStartedAt = Date.now();
-    // 崩溃证据：清空上一用例的已完成轮次（send 每轮追加，见 turnsInFlight）。
-    turnsInFlight.length = 0;
-    try {
-      const { turns, notes = [] } = await item.run();
-      // 审计源不可读时调用数记 -1（不可知）。零调用类 note 只在有证据的 0 上触发，
-      // 但"没有判定"不能完全静默——这里出一条信息性 note 显式呈现证据缺口（不算异常）。
-      const unknownCallTurns = turns.flatMap((turn, index) => (turn.auditMissing ? [index + 1] : []));
-      if (unknownCallTurns.length) {
-        notes.push(`（信息性）审计源不可读：第${unknownCallTurns.join('、')}轮调用数不可知，零调用类判定按无证据跳过`);
-      }
-      // 公共收集入口（不依赖 runner 自报）：audited 下每个用例都跑逐轮交叉核计数。
-      const auditField = auditFailuresOf(auditMode, turns);
-      const auditRowsAfter = executionAuditRows();
-      // 用例级行也先合并起止（十二审 major）：否则报告里的 platformCalls 会把一次成功提案
-      // 计成两次。与逐轮的 calls/refusedCalls 同源。审计源不可读时调用数记 -1（不可知），
-      // 不拿空 caseRows 派生 0/0（2026-11-10 独立评审 low，见 caseCallCountsOf）。
-      const caseRows: ExecutionAuditRow[] = mergeCallPhases(auditRowsAfter === null ? [] : auditRowsAfter.slice(auditBefore));
-      const callCounts = caseCallCountsOf(auditRowsAfter, caseRows);
-      // （信息性）前缀的 note 只陈述事实（如"模型一口气跑完，恢复路径未触发"），不算异常
-      const ok = notes.every((note) => note.startsWith('（信息性）'));
-      const counted = countDims(notes);
-      const tokens = caseTokensOf(turns, caseMark);
-      results.push({
-        id: item.id, group: item.group, intent: item.intent, turns,
-        platformCalls: callCounts.platformCalls,
-        refusedCalls: callCounts.refusedCalls,
-        chain: {
-          evalRunId,
-          caseId: item.id,
-          messageIds: turns.map((turn) => turn.messageId),
-          requestIds: [...new Set(turns.map((turn) => turn.requestId).filter((v): v is string => typeof v === 'string'))],
-          taskIds: [...new Set(turns.flatMap((turn) => turn.taskIds))],
-          ...(probeAuditPath() ? { auditLog: path.relative(stateDir, probeAuditPath()!) } : {}),
-        },
-        notes,
-        dims: counted.dims, unclassifiedNotes: counted.unclassified,
-        ...auditField,
-        ladder: turns.flatMap((turn) => turn.ladder),
-        ...(tokens ? { tokens } : {}),
-        ok,
-      });
-      // 报告输入：逐轮回复（用户可见交付）+ 执行层审计行 + 宿主门裁决/委派/意图事实。
-      reportInputs.push(caseReportInputOf(item, turns, { ok, notes }));
-      for (const turn of turns) {
-        console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
-        console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);
-        if (turn.notices.length) console.log(`         通知: ${turn.notices.join(' | ')}`);
-      }
-      console.log(`  平台调用: ${callCounts.platformCalls < 0 ? '不可知（审计源不可读）' : callCounts.platformCalls}${callCounts.refusedCalls > 0 ? `（其中被拒 ${callCounts.refusedCalls}）` : ''}${ok ? '' : `  ⚠ ${notes.join('; ')}`}`);
-    } catch (error) {
-      // 崩溃用例同时进探针报告与统一报告（2026-11-10 独立评审 medium，纯函数见
-      // caseCrashOf）：旧写法只 push results ⇒ 该用例从统一报告里静默消失，用例计数
-      // 与通过率被缩小。崩溃前已发生的平台调用按审计窗口保留（auditBefore/行源在这里，
-      // 不写 0）；审计源不可读时记 -1（不可知），同样不冒充零调用。
-      const crash = caseCrashOf(item, error, evalRunId, auditMode, {
-        auditBefore,
-        auditRows: executionAuditRows(),
-        turns: [...turnsInFlight],
-        elapsedMs: Date.now() - caseStartedAt,
-      });
-      results.push(crash.result);
-      reportInputs.push(crash.input);
-      console.log(`  ✗ ${error instanceof Error ? error.message : String(error)}`);
+    const outcome = await runCaseChildProcess(item, evalRunId, auditMode, index, parentEnv);
+    results.push(outcome.result);
+    reportInputs.push(outcome.input);
+    if (outcome.processFailed || outcome.result.crashed) {
+      console.log(`  ✗ ${outcome.result.notes[0] ?? '用例失败'}`);
+      continue;
     }
-    restorePlatformState();
+    for (const turn of outcome.result.turns) {
+      console.log(`  [${(turn.ms / 1000).toFixed(1)}s] 用户: ${turn.text}`);
+      console.log(`         回复: ${turn.reply.replace(/\n/g, '\n              ')}`);
+      if (turn.notices.length) console.log(`         通知: ${turn.notices.join(' | ')}`);
+    }
+    console.log(`  平台调用: ${outcome.result.platformCalls < 0 ? '不可知（审计源不可读）' : outcome.result.platformCalls}${outcome.result.refusedCalls > 0 ? `（其中被拒 ${outcome.result.refusedCalls}）` : ''}${outcome.result.ok ? '' : `  ⚠ ${outcome.result.notes.join('; ')}`}`);
   }
 
   const report = path.join(process.cwd(), '.runtime', `probe-${path.basename(stateDir)}.json`);
@@ -3396,8 +3801,22 @@ async function main(): Promise<void> {
     results: results.map(({ id, ok, dims, unclassifiedNotes }) => ({ id, ok, dims, unclassifiedNotes })),
   }) + '\n');
 
-  process.env = savedEnv;
+  if ((process.env[FIXTURE_STATE_DIR_KEY] ?? '') !== (parentEnv[FIXTURE_STATE_DIR_KEY] ?? '')) {
+    throw new Error('父进程改写了测试桥槽：per-case 隔离退回了进程级全局');
+  }
+  if ((process.env.AGENT_CONFIG_PATH ?? '') !== (parentEnv.AGENT_CONFIG_PATH ?? '')) {
+    throw new Error('父进程改写了 AGENT_CONFIG_PATH');
+  }
   rmSync(stateDir, { recursive: true, force: true });
+}
+
+async function main(): Promise<void> {
+  // --case 在场就是子进程，哪怕值缺失也不许掉进父进程把整批跑起来。
+  if (process.argv.includes('--case')) {
+    await runChildCase();
+    return;
+  }
+  await runParent();
 }
 
 // 入口守卫（2026-11-10 独立评审 high）：本文件顶层导出大量纯函数供单测 import；

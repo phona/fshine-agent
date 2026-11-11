@@ -42,8 +42,9 @@
 version: 1
 
 # ── 夹具与隔离（所有 probe 用例共用；差异逐条目覆写）──
-# 隔离面 = 探针每用例一个状态根：隔离时 mkdir <stateDir>/case-<n>，经测试专用桥
-# FSHINE_EVAL_FIXTURE_STATE_DIR 交给夹具 shell 入口（翻成 --state-dir），夹具从该根派生
+# 隔离面 = 探针每用例一个状态根（每例一个子进程，桥槽不跨例）：隔离时 mkdir
+# <stateDir>/case-<n>，经测试专用桥 FSHINE_EVAL_FIXTURE_STATE_DIR 交给夹具 shell
+# 入口（翻成 --state-dir），夹具从该根派生
 # 状态/计划/提案/审计文件（docs/environment-variables.md §4a）。限流状态仍按例注入
 # EXECUTION_RATE_LIMIT_STATE；四个 STATE 路径不再经 env 注入（probe-real-agent.ts 的
 # isolatePlatformState / restorePlatformState）。注意：eval 侧的 C 类环境变量

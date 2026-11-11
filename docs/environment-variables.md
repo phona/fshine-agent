@@ -128,10 +128,13 @@ per-run 隔离是 fshine 测试基础设施对自己 dummy 夹具的事务，走
 > 探针的传导桥：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
 > `isolatePlatformState` 无法直接把 flag 传进夹具；它改为把 per-case 根写进
 > `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy` / `bin/generic` /
-> `bin/stock`）翻译成 `--state-dir`。该变量是 fshine 评测基础设施私有（`platform-leak-lint`
-> 在册的「测试专用变量，非两仓契约」），宿主生产路径与真平台零读取；generic-mock /
-> second-layer / plan-policy / generic-model-eval 直接传 flag，不经 env。
-> 退役条件：a2a 信封携带 per-run 参数时，本桥与四个 `EXECUTION_*` 状态注入一并退役。
+> `bin/stock`）翻译成 `--state-dir`。2026-11-10 起该写入只发生在探针的 per-case
+> 子进程里（父进程不改 `process.env`）；通道只剩子进程 → 夹具 shell 入口。
+> acceptance 仍在自己的进程里设置同一变量，与探针的槽无关。该变量是 fshine 评测
+> 基础设施私有（`platform-leak-lint` 在册的「测试专用变量，非两仓契约」），宿主生产
+> 路径与真平台零读取；generic-mock / second-layer / plan-policy / generic-model-eval
+> 直接传 flag，不经 env。
+> 退役条件与时间锚点见 debt-ledger D-209：a2a 信封携带 per-run 参数（跨仓）时本桥退役；2027-02-10 必须复核，不许无限期续期。
 
 夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的令牌面
 由评测代码注入**规范名**（`generic-mock.ts` / `second-layer.ts` / `second-layer.test.ts` /
