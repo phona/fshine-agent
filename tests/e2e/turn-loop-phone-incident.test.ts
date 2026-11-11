@@ -1,9 +1,9 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：手机事故对话回归——连续性 + 呈现卫生，一个用例钉两族修复。
- * 共享替身见 ./harness.ts（真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真 SQLite、真配置派生的网关计划门、mock 执行器）。
  *
  * 2026-09-27/28 一次真实企微通话暴露了两族问题，本文件把那次通话固化为回归：
  *   ① 连续性（机制细节见 turn-loop-session-entities.test.ts）：澄清 → 裸编号"1" →

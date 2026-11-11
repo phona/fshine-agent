@@ -11,8 +11,9 @@
 - **L4 集成**：必须 fshine + 执行层 一起才能跑。只要满足任一条件即判 L4 集成，
   不论该用例的断言本身是不是通用机制：
   - import `tests/e2e/harness.ts`（该模块在加载时就派生兄弟仓的 operation 表、
-    并在 beforeAll 要求 `bin/example-gateway` 存在）；
-  - 或直接 spawn 兄弟仓 `bin/example-gateway`（如 `plan-awareness`）；
+    并在 beforeAll 要求配置派生的网关 CLI 在场）；
+  - 或直接 spawn 配置派生的网关（如 `plan-awareness`；路径只走
+    `gatewayExecPath(platformRoot, profile.gateway)`，e2e 不写死实例名）；
   - 或断言面涉及财税语义、财税 mock 状态、平台账本、平台审计。
 - L4 集成的证据不得冒充通用证据：通用闭环（CI）只认 typecheck + unit +
   generic-mock，L4 集成全绿只能证明“fshine + 执行层 这一对实例能跑”，
@@ -91,10 +92,10 @@ CLI 在场。
 | `harness-fidelity.test.ts` | L4 集成 | 经 harness：兄弟仓派生表 + 真 spawn 一次平台 CLI（mock） | harness 保真度绊线 HF-1/HF-2/HF-3 |
 | `input-shape-variants.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 输入形状变体不改变确定性判定 |
 | `local-fake.test.ts` | 通用 | 无：本仓 cwd 作 profile root，`docs/` 作 skillRoots 占位，脚本化驱动 | 本地 runner：委派透传、transcript 恢复、profile 越权拒绝。注：文件内 profile 键名 `<profileId>` 是遗留键名，不是兄弟仓依赖，改名是后续清理项，不改变本判据 |
-| `plan-awareness.test.ts` | L4 集成 | 直接 spawn 兄弟仓 `bin/example-gateway`（mock executor），自有计划状态文件；CLI 缺失时跳过 | fshine ↔ 执行层 计划边界：通知/确认门、累计重量、账套存在性专用搜索 |
+| `plan-awareness.test.ts` | L4 集成 | 直接 spawn 配置派生的网关（mock executor），自有计划状态文件；CLI 缺失时跳过 | fshine ↔ 执行层 计划边界：通知/确认门、累计重量、账套存在性专用搜索 |
 | `turn-loop-activated-plan.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 批准了但没执行的收尾 |
 | `turn-loop-attachments.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 附件/文件消息的真实渠道路径 |
-| `turn-loop-ballot.test.ts` | L4 集成（永久跳过） | 经 harness：兄弟仓 + 财税 mock + 配置 | ballot 第二写域结构性不可跑（harness 硬编码 bin/example-gateway 且 ballot.* 仅存在于 dummy.cjs），describe.skip |
+| `turn-loop-ballot.test.ts` | L4 集成（永久跳过） | 经 harness：兄弟仓 + 财税 mock + 配置 | ballot 第二写域结构性不可跑（ballot.* 仅存在于 dummy.cjs，不在配置派生的网关上），describe.skip |
 | `turn-loop-clarification.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 结构化歧义 → 宿主机械组装澄清 |
 | `turn-loop-concurrent.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 并发会话里的多步计划中断/恢复/跳过/确认门 |
 | `turn-loop-confirmation.test.ts` | L4 集成 | 经 harness：兄弟仓 + 财税 mock + 配置 | 跨轮确认语义 |
@@ -129,7 +130,7 @@ CLI 在场。
 ## 网关与环境名归属
 
 - 通用测试与通用 eval 走通用网关 `bin/generic`（`scripts/eval/fixtures/dummy-platform`）。
-- L4 集成测试走财税实例网关 `bin/example-gateway`（兄弟仓），该名只属于该实例 profile，
+- L4 集成测试走活跃 profile 声明的网关（配置派生，e2e 不写死实例名）。网关名只属于该实例 profile，
   不属于通用层。
 - 环境名一律 `EXECUTION_*`（执行层治理）/`FSHINE_*`（宿主自有）；
   工作树 grep 旧前缀保持 0（历史提交里的旧名不重写，度量以工作树为准）。

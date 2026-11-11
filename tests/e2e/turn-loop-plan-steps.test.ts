@@ -1,11 +1,11 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：长任务拆解（roadmap Phase 6，架构 §3 规划者/执行者分工）。共享替身见 ./harness.ts。
  *
  * Main Agent 拆解 → 逐步派单 → 汇总；任一步失败不阻塞其他步骤；用户通知带「第 N/M 步」。
- * 三步续跑同一个 example-gateway 子任务（continueTaskId），平台累计账本因此跨步累积——闸口看到的是
+ * 三步续跑同一个配置派生网关的子任务（continueTaskId），平台累计账本因此跨步累积——闸口看到的是
  * 全局重量，这是"闸口能做全局预算"的落地。
  *
  * 夹具口径（Wave 1 收尾）：账套名一律用 mock 种子状态里**真实存在**的规范名
