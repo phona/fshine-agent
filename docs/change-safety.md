@@ -1527,7 +1527,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 四项裁定（owner 2026-11-06；前两项解设计门 Q1/Q2/Q3，Q4 解跨仓排期）
 
-1. **Q1 调用载体**：网关 CLI 结构化子命令 `<gateway> call --file <json>`。worker 侧 typed 调用工具经 driver 的 beforeToolCall 拦截后走同一出口；参数 schema 由执行层自有声明派生，宿主不解析不校验业务参数。
+1. **Q1 调用载体**：网关 CLI 结构化子命令 `<gateway> call --file <json>`。worker 侧 typed 调用工具经 driver 的 beforeToolCall 拦截后走同一出口；参数 schema 由执行层自有声明派生，宿主不解析不校验业务参数。**2026-11-10 改判**：该 CLI 是执行层的适配器绑定，不是协议要求——协议不关心实现，执行层可用任何传输（CLI/网络），协议只要求能力语义。
 2. **Q2/Q3 三道门与 mock 选择器归属**：三道门（serve 令牌 / 实执行授权 / 真写授权）与 mock 选择器**整体归执行层**——成为执行层部署配置里的普通声明参数，fail-closed 逐门保留；编排层只持通用确认事实（谁确认、绑哪个计划版本、有效期）；`EXECUTION_*` / `FSHINE_REAL_COMMIT` 等 env 级开关从宿主退役（退役前各执法点拒绝形态与错误码逐字不变）。**2026-11-08 已执行**：宿主侧读 `EXECUTION_EXECUTOR` / `FSHINE_REAL_COMMIT` 的模块（`platform-mock.ts`）、启动模式报告（`runtime-mode.ts`）、以及由它们派生的写执法位（`writeEnabled` / `proposalCommitEnabled`）与写关闭合成话术全部删除；serve 令牌门与实执行门的执法点不变（那两门的 env 由执行层自己读）。
 3. **Q4 跨仓形态**：17dz-platform 同批实现，走 PR 给 owner。17dz 侧改动列表（P1–P6）见下；fshine 侧用 mock 接缝证明宿主行为，真实配对用 17dz 集成写 e2e 证明（前置 = 兄弟仓检出，标注「具备前置后跑」）。
 
@@ -1536,7 +1536,7 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 | # | 主题 | 要点 | 状态（2026-11-06 本波第 1 棒实测） |
 |---|---|---|---|
 | C1 | 表征 golden 先行 | `packages/agent/a2a-cutover-golden.test.ts`：现行 env 级接线、委派块、失败分类、spawn 面逐条钉住；翻转点注明 C5/C7 | 本波第 2 commit |
-| C2 | 契约词汇补全（零行为变化） | `packages/contracts/src/a2a-protocol.ts` 增 OperationDeclaration / CapabilityManifest / StructuredCall；清单只作 `<gateway> operation list --json` 的消费投影（不缓存、不复制、不另立名单，L2）；词汇纯度断言落 `packages/agent/a2a-vocabulary.test.ts` | 本波第 3 commit |
+| C2 | 契约词汇补全（零行为变化） | `packages/contracts/src/a2a-protocol.ts` 增 OperationDeclaration / CapabilityManifest / StructuredCall；清单是能力语义的宿主侧投影（不缓存、不复制、不另立名单，L2）。`<gateway> operation list --json` 是适配器绑定，不是协议要求（2026-11-10 改判：执行层可用任何传输，协议只要求能力语义）。词汇纯度断言落 `packages/agent/a2a-vocabulary.test.ts` | 本波第 3 commit |
 | C3 | 五路链抽纯函数 | `classifyDelegationFailure` 逐字搬移 context.ts 失败链，结构化判据入参（不是 reason 串）；行为零变化，golden 第⑤项保持绿 | 已完成：`delegation-failure.ts` 落地 + context.ts 接线 + golden ⑤绿 |
 | C4 | 失败分类收口 + 全覆盖矩阵 | 五类（NEEDS_INPUT / CAPABILITY_UNAVAILABLE / PLATFORM_ERROR / RESOURCE_EXHAUSTED / HARD_REJECTED）宿主送达义务对齐 + `failure-delivery.test.ts` 全矩阵；措辞仍取 error-codes.ts / resource-exhausted.ts 单一来源 | 已完成：`failure-delivery.ts` 覆盖五类 + error-codes.ts 补 CAPABILITY_UNAVAILABLE/HARD_REJECTED 条目 + context.ts 内联话术接线 deliverFailure |
 | C5 | 委派块按 DelegationBlock 落地 | entities/inputs 进载荷（数据源已存在：entitySources + materializeInputs，不改 ContextTaskRunArgs 签名）；golden 第④项显式翻转（翻转点一）；三处依赖【委派】载荷的 e2e 断言同 commit 更新 | 已完成：`context.ts` 委派块结构化 + golden ④翻转 + turn-loop-routing/clarification/worker-timeout e2e 断言随翻 |
@@ -1550,9 +1550,9 @@ Z1 扇出探针与 F6 重场景批暴露的出口卫生两项同批收口。根�
 
 ### 17dz-platform 侧改动列表（P1–P6，owner 2026-11-06 改动列表评审；与 fshine 侧同批，走 PR 给 owner）
 
-- **P1** `bin/17dz` + 网关分发：新增 `call --file <json>` 结构化子命令（Q1 裁定的载体在执行侧的落地），参数 schema 由执行层自有声明，宿主不解析不校验业务参数。配对 C6。
+- **P1** `bin/17dz` + 网关分发：新增 `call --file <json>` 结构化子命令（当时 Q1 裁定的载体在执行侧的落地；**2026-11-10 改判**：此 CLI 是适配器绑定，不是协议要求）。参数 schema 由执行层自有声明，宿主不解析不校验业务参数。配对 C6。
 - **P2** `src/lib/envelope.js`：五类失败分类词汇（cancelled/timeout/model_transient/auth/executor_error → 协议五类）进信封 emit 出口统一收口，与 fshine C4 的映射表逐条对齐。配对 C5。
-- **P3** 各域 `operations.json` 与 `operation list --json` 输出：补 a2a 词汇投影字段——est_seconds/weight/effects/access 已有，补协议版本与失败类声明；CapabilityManifest 在宿主只作它的消费投影（L2：不缓存、不复制、不另立名单）。配对 C5。
+- **P3** 各域 `operations.json` 与 `operation list --json` 输出：补 a2a 词汇投影字段——est_seconds/weight/effects/access 已有，补协议版本与失败类声明；CapabilityManifest 在宿主是能力语义的消费投影（L2：不缓存、不复制、不另立名单）。`operation list --json` 是适配器绑定，不是协议要求（2026-11-10）。配对 C5。
 - **P4** `src/lib/real-execution.js` + 执行层部署配置：**三门成为执行层自己的普通参数**——real-execution 授权、commit 授权、executor 模式（mock/real）全部落成执行层配置里的声明参数；fail-closed 逐门保留，标定三问（硬/软、标定依据、误拦什么 + 自愈路径）在执行侧重新回答并留档。配对 C8（宿主侧三个 env 读取点同批退役）。
 - **P5** `scripts/cross-repo/`：通用预算协议 parity 校验器——已在 17dz 本地分支 `w4-budget-protocol`（commit 4f0e2ec，含 rename-immune 解析 + 七态夹具 + 真实解析路径测试），**尚未 push、尚未合入 origin/main**；下一步 = push 该分支 + 开 PR 给 owner，这是同批协作的第一块砖（跨仓改动需 owner 认可的在途形态）。
 - **P6** `test/`：call 子命令的契约测试 + 失败分类映射的双向对账测试（fshine C4 映射表 ↔ 17dz P2 实现）+ 七态夹具扩展。

@@ -81,6 +81,8 @@ worker 报告结果/产物/证据，或按五类失败分类上报（见下表�
 
 网关名与 plan 命令解析按仓库 AGENTS.md 属**迁移期适配**，圈定在执行层适配边界（`packages/agent/src/platform-contract.ts`，泄漏 lint 白名单唯一入口）；本协议的语义定义不依赖它们——协议词汇只认 operation、委派块、裁决状态与失败分类这些通用概念。
 
+协议不关心实现（owner 2026-11-10）：CLI 出口（`operation list --json` / `call --file`）是执行层的**适配器绑定**，不是协议要求。执行层可用任何传输实现（CLI/网络），协议只要求能力语义。
+
 ---
 
 本协议已落地（W5 尾程），迁移期边界见仓库 AGENTS.md。
