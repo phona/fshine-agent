@@ -77,6 +77,45 @@ worker 报告结果/产物/证据，或按五类失败分类上报（见下表�
 
 计划要求是 **operation 的属性**（能力清单逐项声明），不是任务的属性；宿主不分类任务。宿主面对的永远是"这个 operation 需不需要计划/确认"的声明事实，而不是"这是个什么任务"的业务判断——换一个执行层，宿主的执法逻辑不变。
 
+## 标识词汇：scopeId / callId（缺口登记，未落地）
+
+状态：**词汇缺口，未落地**。协议契约 `packages/contracts/src/a2a-protocol.ts` 当前不含这两个字段；本节是最小定义与接入约束，不是已实现语义。缺口来源：issue #50 用例 1 的约束写明「范围声明复用现有计划门（执行集合对已确认计划），不新建 scope 机制；a2a 的 scopeId 词汇缺口另案登记」。`callId` 在评测审计行已有事实使用（崩溃窗口按 `callId` 去重，见 `docs/debt-ledger.md` 相关条目），但协议未定义其生成方、生命周期与复用规则。
+
+| 词 | 最小定义 | 生成方 / 生命周期 | 用途 |
+|---|---|---|---|
+| `scopeId` | 一次委派所允许的执行范围的**不透明标识** | 宿主在委派时生成，随委派块下行；范围变化重提完整 calls 时换新 ID | 让"这次调用属于哪个已获准范围"可机械对账。不新建 scope 机制，只给现有计划门一个锚点 |
+| `callId` | 单次调用（工具/业务操作）的**稳定标识** | 宿主在受理调用时生成，随调用进入审计与结果回传；同一逻辑调用的重试/续跑复用同一 ID | 崩溃恢复时区分"已执行 / 未执行 / 执行一半"；审计 start/result 行合并；不替代任务级 `dispatchKey` |
+
+**与既有标识的层级（不得混用）**：
+
+- `TaskRunRecord.dispatchKey` 是**源派发事件**的宿主幂等键（`packages/contracts/src/store.ts:144`，注释原话 "Host-generated idempotency key for the source dispatch event/tool call"），任务级。
+- `scopeId` 是**已获准执行范围**的锚点，计划级。
+- `callId` 是**单次调用**的锚点，调用级。它是 exactly-once 三要素里"业务操作 ID"的候选载体，不等于网关幂等键，也不等于回读对账。
+- provider 的 `toolCallId` 只是传输层关联，不进入协议词汇；worker 不得自造 `callId` 冒充宿主受理。
+
+**未落地部分（待实施）**：契约字段、委派块投影、审计行落账、重试/续跑复用规则均未实现；在契约加入前，任何文档或代码不得把这两个词当既有语义引用。落地时至少需要：① 同一 `callId` 的重复提交返回原结果而非再执行；② `scopeId` 不匹配的 calls 在受理处拒绝；③ 崩溃后未返回结果的 `callId` 标记为 `interrupted`，不盲目重跑（与下节 replay 判据同源）。
+
+## Pi Durable 约束（候选底座，未采纳）
+
+状态：**候选底座，未采纳；2026-11-11 裁定现在不采纳、也不做 PoC**。本节记录采纳前必须满足的约束与引入判据，不是已实现设计，也不改变上文协议。
+
+### 候选事实
+
+- registry 上有 `@earendil-works/pi-durable` **1.5.2**，但本仓**没装**。当前安装的基座是 `@earendil-works/pi-agent-core` **0.85.1** + `pi-coding-agent` + `pi-ai` + `chord` + `pi-telemetry`（`package.json:39-41` 声明前三项；`node_modules/@earendil-works/` 实测含五项）。
+- 已知 issue `earendil-works/pi#10386`（OPEN）：Durable 与 `pi-coding-agent` 扩展系统不完全兼容——`beforeCompact` 只支持 decline/summary，`afterResponse` / `afterTools` 无对应，工具注册缺 exposure tier / `prepareLoadout`，`AgentSession` 的同步 `SessionManager` 与 Durable 的异步提交 transcript 不同源。本仓正用 `pi-coding-agent`，采用即正撞该缺口。
+- **两个同时活动的 Harness 共用一个数据库不受支持**（2026-11-11 裁定；官方模型是一个驱动进程写、另一个进程以 `readOnly: true` 观察）。多实例部署的所有权与调度要自己设计。
+- 它**不解决外部业务操作的 exactly-once**：工具意图在 `execute()` 前提交，但"工具写入成功 → 回执未持久化 → 崩溃"的窗口无法判定是否生效；官方文档明说 replay-safe 的外部副作用仍需自己的幂等。这一层只能 fshine 做（业务操作 ID / 网关幂等键 / 回读对账三要素；`dispatchKey` 只是第一样）。网关返回成功只代表任务被接受，不代表业务已处理完。
+
+### 唯一值得抄的判据
+
+按工具声明 **replay 安全性**：声明 `replay: "safe"` 的调用崩后可重跑；未声明或不安全者返回 `interrupted`，不盲目再执行。fshine 的调用契约应采用同一判据（与上节 `callId` 的崩溃语义同源），而不是把"重跑整任务"当默认恢复策略。
+
+### 与 fshine 现状的距离
+
+- **已有**：`TaskRunRecord` 的 `dispatchKey` 幂等键、`state` 状态机、`planId` / `stepIndex` / `totalSteps` / `lastProgress` 进度、`deadline`、`originMessage` 锚点（`packages/contracts/src/store.ts:140` 起）；confirm 档返回 pending 而非阻塞进程（`packages/agent/src/plan-runtime.ts:210-215`）。
+- **缺口**：恢复粒度是**任务级**，不是**工具执行级**——崩溃后无法判定某个外部调用是否已生效。Pi Durable 有工具级 replay/checkpoint，但对上述外部副作用仍要求业务幂等，所以它也不自动堵这条缝。
+- **引入判据**：T10 的崩溃恢复用例（PR #55，**未合入**）是判据。若任务级恢复覆盖不了实测崩溃形态，再评估引入；否则不引入、不做 PoC。
+
 ## 迁移期边界
 
 网关名与 plan 命令解析按仓库 AGENTS.md 属**迁移期适配**，圈定在执行层适配边界（`packages/agent/src/platform-contract.ts`，泄漏 lint 白名单唯一入口）；本协议的语义定义不依赖它们——协议词汇只认 operation、委派块、裁决状态与失败分类这些通用概念。
