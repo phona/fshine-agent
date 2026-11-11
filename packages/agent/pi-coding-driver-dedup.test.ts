@@ -97,7 +97,7 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 // 提交即激活的方案（execute 档，不走通知/确认门）——用于帧去重用例。
-const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]}]}';
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"probe.query","args":["--query","某公司","--period","202609"]},{"operation":"probe.query","args":["--query","某公司","--period","202610"]}]}';
 // 真实平台查询（计划已激活 → G1 放行，按 label 表出帧）。
 const QUERY_COMMAND = 'bin/example-gateway query probe-query.js --query 某公司 --period 202609';
 // 参数不同的同类查询：帧文本不同，用来在两条相同帧之间"插一件事"。

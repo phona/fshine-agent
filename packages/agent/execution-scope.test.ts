@@ -1,18 +1,14 @@
 /**
- * T5：有界扩张门 + 审计 ↔ 计划声明对账（2026-11-11）。
+ * T5：执行集合 ⊆ 已确认计划（审计 ↔ 计划声明对账，2026-11-11）。
  *
- * 断言：审计里被实际执行的调用必须能被已确认计划声明覆盖；超出的部分只能是有界的
- * 探索，且超出额度后必须伴随一次新的用户确认记录（重计划 → 确认门）。
+ * 断言：审计里被实际执行的调用必须逐条落在已确认计划声明的范围内；任何超出都必须
+ * 伴随一次新的用户确认记录（重计划 → 确认门），否则判红。**不设扩张额度**：今天
+ * A2/C1 的败状就是"警告/额度"式的软约束被静默穿透。
  *
- * 为什么是"有界"而不是"超出即拒"：serve-gate.test.ts 的既有断言「② 激活计划只有读 →
- * 另一个读（不同 collection）放行：探索性查询不锁死」把"正当探索"钉成产品行为
- * （worker 查了 alpha 发现还要 beta，不能当场锁死）。今天 A2/C1 的伤害是**无界**扩张
- * 造成的，所以判据是给探索划界：额度 = 既有的读类探测帽缺省值（DEFAULT_READ_PROBE_CAP，
- * 5），不新造数字；超出即拒并留拒收记录，要求重新计划——重计划因累积重量进确认档，
- * 由平台确认门停下，于是留下用户确认记录（T5 判据的后半句）。
+ * 执行前的拒收由驱动层同判据把关（plan-scope-expansion.test.ts）：对不上声明的调用
+ * 第一跳即拒，并在审计里留拒收记录；本文件守的是审计侧的机械对账（逐条对参数）。
  */
 import { describe, expect, it } from 'vitest';
-import { DEFAULT_READ_PROBE_CAP } from './src/pi-coding-driver';
 import { reconcileAuditAgainstDeclarations, scopeReconciliationVerdict, type ScopeAuditRow } from './src/execution-scope';
 
 const DECLARED = [{ planId: 'plan_a', calls: [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }] }];
@@ -34,7 +30,7 @@ describe('T5 审计 ↔ 计划声明对账', () => {
     });
     expect(result.declaredCalls).toBe(3);
     expect(result.excess).toEqual([]);
-    expect(scopeReconciliationVerdict(result, { allowance: DEFAULT_READ_PROBE_CAP })).toBe('clean');
+    expect(scopeReconciliationVerdict(result)).toBe('clean');
   });
 
   it('被拒的行（refused）不算执行集合：从未执行，不参与对账', () => {
@@ -61,29 +57,50 @@ describe('T5 审计 ↔ 计划声明对账', () => {
     expect(result.excess.every((entry) => entry.confirmationAt === undefined)).toBe(true);
   });
 
-  it('额度内的扩张：有界探索，不判红（与既有"探索性查询不锁死"同一条线）', () => {
-    const rows = Array.from({ length: DEFAULT_READ_PROBE_CAP }, (_, index) =>
+  it('第一次未声明调用就判红：没有"探索额度"这种软约束（A2/C1 的败状形状）', () => {
+    const result = reconcileAuditAgainstDeclarations({
+      rows: [row({ args: ['query', '--collection', 'beta'] })],
+      declarations: DECLARED,
+    });
+    expect(result.excess).toHaveLength(1);
+    expect(scopeReconciliationVerdict(result)).toBe('excess_unconfirmed');
+  });
+
+  it('多次未声明调用、其后没有任何用户确认记录 → 判红（今天 D2/A2 的败状形状）', () => {
+    const rows = Array.from({ length: 3 }, (_, index) =>
       row({ ts: `2026-11-11T10:00:0${index}.000Z`, args: ['query', '--collection', `c${index}`] }));
     const result = reconcileAuditAgainstDeclarations({ rows, declarations: DECLARED });
-    expect(scopeReconciliationVerdict(result, { allowance: DEFAULT_READ_PROBE_CAP })).toBe('excess_within_allowance');
+    expect(scopeReconciliationVerdict(result)).toBe('excess_unconfirmed');
   });
 
-  it('超出额度且其后没有用户确认记录 → 判红（今天 D2/A2 的败状形状）', () => {
-    const rows = Array.from({ length: DEFAULT_READ_PROBE_CAP + 1 }, (_, index) =>
-      row({ ts: `2026-11-11T10:00:${String(index).padStart(2, '0')}.000Z`, args: ['query', '--collection', `c${index}`] }));
-    const result = reconcileAuditAgainstDeclarations({ rows, declarations: DECLARED });
-    expect(scopeReconciliationVerdict(result, { allowance: DEFAULT_READ_PROBE_CAP })).toBe('excess_unconfirmed');
-  });
-
-  it('超出额度但有一条在其后的用户确认记录（重计划走了确认门）→ 不再判红', () => {
-    const rows = Array.from({ length: DEFAULT_READ_PROBE_CAP + 1 }, (_, index) =>
-      row({ ts: `2026-11-11T10:00:${String(index).padStart(2, '0')}.000Z`, args: ['query', '--collection', `c${index}`] }));
+  it('未声明调用之前有同一计划的用户确认记录（重计划 → 确认门）→ 不再判红', () => {
     const result = reconcileAuditAgainstDeclarations({
-      rows,
+      rows: [row({ ts: '2026-11-11T10:00:05.000Z', planId: 'plan_b', args: ['query', '--collection', 'beta'] })],
       declarations: DECLARED,
-      confirmations: [{ at: '2026-11-11T10:00:06.000Z', planId: 'plan_b' }],
+      confirmations: [{ at: '2026-11-11T10:00:04.000Z', planId: 'plan_b' }],
     });
-    expect(scopeReconciliationVerdict(result, { allowance: DEFAULT_READ_PROBE_CAP })).toBe('excess_confirmed');
+    // plan_b 是新计划：声明未随审计提供，但同一计划在调用之前已获用户确认 → 记为已确认扩张。
+    expect(result.excess).toHaveLength(1);
+    expect(result.excess[0]?.confirmationAt).toBe('2026-11-11T10:00:04.000Z');
+    expect(scopeReconciliationVerdict(result)).toBe('excess_confirmed');
+  });
+
+  it('确认记录在未声明调用之后 → 判红（确认前零执行；后补的确认不能倒签）', () => {
+    const result = reconcileAuditAgainstDeclarations({
+      rows: [row({ ts: '2026-11-11T10:00:05.000Z', args: ['query', '--collection', 'beta'] })],
+      declarations: DECLARED,
+      confirmations: [{ at: '2026-11-11T10:00:06.000Z', planId: 'plan_a' }],
+    });
+    expect(scopeReconciliationVerdict(result)).toBe('excess_unconfirmed');
+  });
+
+  it('确认记录属于另一张计划 → 不能给这条未声明调用背书', () => {
+    const result = reconcileAuditAgainstDeclarations({
+      rows: [row({ ts: '2026-11-11T10:00:05.000Z', planId: 'plan_a', args: ['query', '--collection', 'beta'] })],
+      declarations: DECLARED,
+      confirmations: [{ at: '2026-11-11T10:00:04.000Z', planId: 'plan_other' }],
+    });
+    expect(scopeReconciliationVerdict(result)).toBe('excess_unconfirmed');
   });
 
   it('拿不到声明的调用（无 planId）不当作零超出：计入 unreconciled，结论 INCONCLUSIVE', () => {
@@ -93,7 +110,7 @@ describe('T5 审计 ↔ 计划声明对账', () => {
     });
     expect(result.unreconciledCalls).toBe(1);
     expect(result.declaredCalls).toBe(0);
-    expect(scopeReconciliationVerdict(result, { allowance: DEFAULT_READ_PROBE_CAP })).toBe('inconclusive');
+    expect(scopeReconciliationVerdict(result)).toBe('inconclusive');
   });
 
   it('脚本路径写法与注册名同源（同一个 operation 的两种合法引用）', () => {

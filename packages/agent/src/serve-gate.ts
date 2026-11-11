@@ -847,10 +847,22 @@ function operationDomain(reference: string): string | undefined {
 /** 计划步骤的 operation 与命令引用是否指向同一个 operation（域名都对得上才认）。 */
 function sameOperation(planOperation: string, reference: string): boolean {
   if (planOperation === reference) return true;
-  if (operationReferenceKey(planOperation) !== operationReferenceKey(reference)) return false;
+  const wantedKey = operationReferenceKey(planOperation);
+  const gotKey = operationReferenceKey(reference);
   const wanted = operationDomain(planOperation);
   const got = operationDomain(reference);
-  return !wanted || !got || wanted === got;
+  if (wantedKey === gotKey) return !wanted || !got || wanted === got;
+  // 域前缀文件名形态：`probe.query` ↔ `probe-query.js`（脚本名 = 域-命令）。裸引用拿不到
+  // 域（`operationDomain` 只认 `域.命令` 与 `src/<域>/scripts/...`），所以用计划步骤的域
+  // 还原出文件基名再比；反方向同理。域名必须对得上，不是无域前缀的宽松匹配。
+  if (wanted && gotKey === `${wanted}-${wantedKey}`) return !got || got === wanted;
+  if (got && wantedKey === `${got}-${gotKey}`) return !wanted || wanted === got;
+  // 描述后缀文件名形态：`dummy.query` ↔ `query-detail.js`（脚本名比 command 多一段描述
+  // 后缀，平台语义表 planSemanticsEntryForReference 的 extended 匹配同一条口径）。域名
+  // 拿得到时必须一致；裸引用没有域可比，仍按同域命令名唯一匹配的既有语义处理。
+  if (wanted && gotKey.startsWith(`${wantedKey}-`)) return !got || got === wanted;
+  if (got && wantedKey.startsWith(`${gotKey}-`)) return !wanted || wanted === got;
+  return false;
 }
 
 /**
@@ -1093,17 +1105,17 @@ function planCoverageVerdict(
 }
 
 /**
- * 一次网关调用相对**已声明计划**的分类（T5 有界扩张门，2026-11-11）。
+ * 一次网关调用相对**已声明计划**的分类（T5 执行前对账，2026-11-11）。
  *
  * 与计划覆盖判据**同一份实现**（coversPlanStep）——只回答分类，不做裁决：
- *   · `not_plan_gated`——不是网关调用形态（本地/元数据/非网关命令）：别的门管，这里不数；
+ *   · `not_plan_gated`——不是网关调用形态（本地/元数据/非网关命令）：别的门管，这里不看；
  *   · `covered`——被某条已声明计划步覆盖（operation 同名 + 计划步声明过的参数同值）；
- *   · `expansion`——对不上任何一步（计划没声明的对象/operation）：由调用方按额度裁决。
+ *   · `expansion`——对不上任何一步（计划没声明的对象/operation）：驱动层**第一跳即拒**。
  *
- * 为什么按分类而不在门里直接拒：read 档的放行线是既有断言钉住的产品行为
+ * 为什么裁决在驱动层而不是门里：read 档的档位线是既有断言钉住的产品行为
  * （serve-gate.test.ts「② 激活计划只有读 → 另一个读（不同 collection）放行：探索性查询
- * 不锁死」；实现即下方 planCoverageVerdict 的 `tier !== 'write'` 早退）。给探索划界的
- * 额度帽归驱动层（与读类探测帽同一个数），这里只把"对不上声明"这件事机械判出来。
+ * 不锁死」；实现即下方 planCoverageVerdict 的 `tier !== 'write'` 早退）。计划门本身
+ * 一字不动；驱动层在门放行之后加一道与声明逐条对账的硬门，只拒"对不上声明"的调用。
  */
 export function planDeclarationCovers(
   command: string,
@@ -1119,7 +1131,22 @@ export function planDeclarationCovers(
   const gotKeyArgs = keyArgsOf(tokens, flagStyles);
   const gotPositionals = positionalsOf(tokens.slice(headLength), flagStyles);
   const positionalNames = positionalNamesFor(reference, specs);
-  const covered = calls.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames, flagStyles));
+  const covered = calls.some((step) => {
+    if (coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames, flagStyles)) return true;
+    // args 规格没下发时 `coversPlanStep` 对"计划步带位置参数"一律判不覆盖（写类 fail-closed
+    // 的正确方向）。T5 的对账不能因此把**逐项同值**的读调用全判成扩张（测试与旧版平台
+    // 都可能没有规格）：仅在规格缺失时，按原 token 逐项比较计划步与调用的位置参数；
+    // 一旦拿到规格，仍走 `coversPlanStep` 的同一判据，不另开放松路径。
+    if (positionalNames !== undefined) return false;
+    if (!sameOperation(step.operation, reference)) return false;
+    const stepTokens = step.args.map((value) => (typeof value === 'string' ? value : String(value)));
+    const wantedFlags = keyArgsOf(stepTokens, flagStyles);
+    for (const [flag, value] of wantedFlags) if (gotKeyArgs.get(flag) !== value) return false;
+    const wantedPositionals = positionalsOf(stepTokens, flagStyles);
+    return wantedPositionals.length > 0
+      && wantedPositionals.length === gotPositionals.length
+      && wantedPositionals.every((value, index) => gotPositionals[index] === value);
+  });
   return covered ? 'covered' : 'expansion';
 }
 
@@ -1130,26 +1157,26 @@ export function planDeclarationCovers(
  * 直接进 planCoverageVerdict，不合成命令串再解析（合成串会让两条路的措辞/边界慢慢分叉）。
  * 提案创建仍走宿主既有拦截路由，不经过这里。
  */
-export function structuredPlanGateVerdict(
+/**
+ * 结构化 args → 覆盖判据的输入（bash 的 keyArgsOf/positionalsOf 的结构化等价物）。
+ * 与计划覆盖判据共用 `coversPlanStep`，本函数只做形状归一，不做裁决。
+ */
+function structuredCallKeyArgs(
   operation: string,
   args: Record<string, unknown>,
-  ctx: {
-    planActive?: () => boolean;
-    operationSemantics?: OperationSemantics;
-    activePlanCalls?: () => readonly PlanCall[] | null;
-    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
-    operationArgsSpecs?: OperationArgsSpecs;
-  },
-): ServeGateVerdict | undefined {
-  const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
-  // 语义表里没有这个 operation（未登记/空表）→ 按既有防线当 unknown：只要求有激活计划。
-  const { tier } = tierOfEntry(entry);
+  specs: OperationArgsSpecs | undefined,
+): {
+  gotKeyArgs: Map<string, string>;
+  positionals: Array<string | undefined>;
+  positionalNames: readonly string[];
+  flagStyles: ReadonlyMap<string, KeyArgStyle> | undefined;
+} {
   // args 对象 → flag 表。键名归一成 `--flag`：清单 argsSchema 用的是带横杠形（`--account`），
   // 但也有的部署声明不带横杠，两种都按"剥掉再补一个 --"归一，否则同一件事两种写法会判成
   // 不同参数（那是放松方向的漏洞）。布尔值当无取值开关，其余 String()——与 keyArgsOf 对
   // `--flag 值` / `--flag` 的判定同形；数组/对象不猜（结构化 args 已被清单校验只能是标量）。
   const got = new Map<string, string>();
-  const names = positionalNamesFor(operation, ctx.operationArgsSpecs) ?? [];
+  const names = positionalNamesFor(operation, specs) ?? [];
   // 位置参数**按声明顺序**逐项取值（2026-11-09 六审 blocking）：旧写法按
   // Object.entries(args) 的插入顺序 push，于是调用方换个 JSON 键序就能让
   // `{period:'alpha', account:'W1'}` 与计划 `['alpha','W1']` 对上——参数名与目标实际已经
@@ -1176,7 +1203,69 @@ export function structuredPlanGateVerdict(
     if (declaredNames.has(name)) continue;
     got.set(name.startsWith('--') ? name : `--${name}`, typeof value === 'boolean' ? '' : String(value));
   }
-  return planCoverageVerdict(tier, entry?.key, operation, got, positionals, names.length > 0 ? names : undefined, ctx);
+  return {
+    gotKeyArgs: got,
+    positionals,
+    positionalNames: names,
+    flagStyles: specs ? flagStylesFor(operation, specs) : undefined,
+  };
+}
+
+export function structuredPlanGateVerdict(
+  operation: string,
+  args: Record<string, unknown>,
+  ctx: {
+    planActive?: () => boolean;
+    operationSemantics?: OperationSemantics;
+    activePlanCalls?: () => readonly PlanCall[] | null;
+    /** operation → args 规格（位置参数声明，覆盖判据用）。 */
+    operationArgsSpecs?: OperationArgsSpecs;
+  },
+): ServeGateVerdict | undefined {
+  const entry = planSemanticsEntryForReference(operation, ctx.operationSemantics);
+  // 语义表里没有这个 operation（未登记/空表）→ 按既有防线当 unknown：只要求有激活计划。
+  const { tier } = tierOfEntry(entry);
+  const { gotKeyArgs, positionals, positionalNames } = structuredCallKeyArgs(operation, args, ctx.operationArgsSpecs);
+  return planCoverageVerdict(
+    tier,
+    entry?.key,
+    operation,
+    gotKeyArgs,
+    positionals,
+    positionalNames.length > 0 ? positionalNames : undefined,
+    ctx,
+  );
+}
+
+/**
+ * 结构化调用相对**已声明计划**的分类（T5 执行前对账，2026-11-11）。
+ *
+ * 与 bash 的 `planDeclarationCovers` 同一份覆盖实现（`coversPlanStep`），只回答分类：
+ *   · `not_plan_gated`——scratch（平台声明 plan=false）：别的门管，这里不看；
+ *   · `covered`——被某条已声明计划步覆盖（operation 同名 + 计划步声明过的参数同值）；
+ *   · `expansion`——对不上任何一步：驱动层**第一跳即拒**。
+ *
+ * 为什么结构化通道也要这一道：bash 与 structured_call 是两条执行入口，只堵 bash 等于
+ * 给"纯读计划 + structured_call 查另一个对象"留后门（2026-11-09 四审 blocking 同一形状）。
+ */
+export function planDeclarationCoversStructured(
+  operation: string,
+  args: Record<string, unknown>,
+  calls: readonly PlanCall[],
+  options: { operationArgsSpecs?: OperationArgsSpecs; operationSemantics?: OperationSemantics } = {},
+): 'covered' | 'expansion' | 'not_plan_gated' {
+  const entry = planSemanticsEntryForReference(operation, options.operationSemantics);
+  if (tierOfEntry(entry).tier === 'scratch') return 'not_plan_gated';
+  const { gotKeyArgs, positionals, positionalNames, flagStyles } = structuredCallKeyArgs(operation, args, options.operationArgsSpecs);
+  const covered = calls.some((step) => coversPlanStep(
+    step,
+    operation,
+    gotKeyArgs,
+    positionals,
+    positionalNames.length > 0 ? positionalNames : undefined,
+    flagStyles,
+  ));
+  return covered ? 'covered' : 'expansion';
 }
 
 export function createServeGate(options: ServeGateOptions = {}) {

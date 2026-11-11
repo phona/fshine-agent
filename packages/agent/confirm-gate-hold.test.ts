@@ -176,8 +176,10 @@ describe('T6 驱动层 · 任务级累计进 confirm 档 → 停在确认门', (
       expect(verdict?.block).toBe(true);
       expect(verdict?.reason).toContain('PLAN ACTIVE');
     }
-    // 计划内的一次真实执行（读档，计划激活即放行）。
-    noteExecution(await bash(worker, 'bin/example-gateway query dummy.query --collection slice1-c0', 'call_exec_1'), timeline);
+    // 当前激活计划（第 2 张切片）内的一次真实执行（读档，计划激活即放行）。
+    // 用 slice2-c0 而不是 slice1-c0：T5 执行前对账只认**当前**激活计划的声明，
+    // 上一张切片的范围不随新计划继续有效（旧 collection 被带进下一轮正是 A2 的败状）。
+    noteExecution(await bash(worker, 'bin/example-gateway query dummy.query --collection slice2-c0', 'call_exec_1'), timeline);
     expect(timeline.executions).toHaveLength(1);
 
     // 第 3 张：单张仍是 notify，但累计 24 call / 66 weight 越过宿主确认线 → 停在确认门。

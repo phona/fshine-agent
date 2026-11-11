@@ -210,8 +210,8 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   // 2026-11-11 T5/T6（可靠性三件）：宿主自己的对账/确认门机器里的"记录"一律指宿主协议状态，
   // 与 background-runtime 的 task_event 同族——拒收记录是审计行（tool_calls），用户确认记录是
   // 宿主持有的 pending 确认（激活要宿主签发的 token），都不是平台业务记录。
-  ['packages/agent/src/execution-scope.ts: 记录', { tag: '警职执法', reason: 'T5 审计↔计划声明对账：excess 行标注"其后有没有用户确认记录"、串讲"拒收记录/用户确认记录"——对账器描述的是宿主审计与确认协议状态，不是平台业务记录' }],
-  ['packages/agent/src/pi-coding-driver.ts: 记录', { tag: '警职执法', reason: 'T5 有界扩张门与读类探测帽的注释：额度用尽即拒并"留一条拒收记录"（serveGateAudit 的 tool_calls 行）、"用户确认记录"指重计划经平台确认门后留下的宿主确认；都是门自己的留痕，不是平台业务记录' }],
+  ['packages/agent/src/execution-scope.ts: 记录', { tag: '警职执法', reason: 'T5 审计↔计划声明对账：excess 行标注"调用前有没有用户确认记录"、串讲"拒收记录/用户确认记录"——对账器描述的是宿主审计与确认协议状态，不是平台业务记录' }],
+  ['packages/agent/src/pi-coding-driver.ts: 记录', { tag: '警职执法', reason: 'T5 执行前对账与读类探测帽的注释：未声明调用第一跳即拒并"留一条拒收记录"（serveGateAudit 的 tool_calls 行）、"用户确认记录"指重计划经平台确认门后留下的宿主确认；都是门自己的留痕，不是平台业务记录' }],
   ['packages/agent/src/task-budget.ts: 记录', { tag: '警职执法', reason: 'T6 确认门顺序判据：输入就是"执行痕迹（审计里被放行的调用）+ 用户确认记录（宿主持有）"，本模块即判据本身（confirmGateOrdering）——识别越门先行的校验器，不是平台业务记录' }],
   ['apps/server/background-delivery.ts: 记录', { tag: '防御排除', reason: '后台交付回执要持久化每部分 ACK 状态；删掉记录会把未确认或失败的发送误报为已送达' }],
   // ── 遗留待清：已知该走还没走，挂账限期 ──

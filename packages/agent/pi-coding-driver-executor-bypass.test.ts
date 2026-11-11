@@ -165,7 +165,9 @@ const WRAPPER_BASH = 'bin/example-gateway local tmp/req_bypass/run_transform.py'
 const WRAPPER_WRITE = { path: 'tmp/req_bypass/run_transform.py', content: 'subprocess.run([".venv/bin/python","src/payroll/scripts/transform.py"])' };
 /** 经计划门放行的平台执行调用（prepare 模式：渲染入口）。 */
 const PREPARE_BASH = 'bin/example-gateway prepare src/payroll/scripts/transform.py';
-const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":[]}]}';
+// 计划同时声明平台执行入口与读类 query：读类探测帽的用例要放行 dummy.query，
+// T5 执行前对账只认当前计划声明（未声明的读调用第一跳即拒）。
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"payroll.transform","args":[]},{"operation":"dummy.query","args":[]}]}';
 
 describe('绕开平台执行器的披露判据（纯函数：三条件同时成立）', () => {
   it('有本地执行 + 零平台执行 + 有产物 → 告警', () => {
@@ -467,8 +469,9 @@ describe('读类探测单轮预算帽（真 driver）：达帽注入一次收尾
   ]);
   // 写类调用必须被激活计划覆盖才放行（被拦的调用到不了 onAllowedBash）；计划里声明同一
   // operation 即可按 operation 名覆盖（args 留空，避免把测试数据当成待校验的领域实体）。
-  // 读类按 read 档只要求计划已激活。
-  const CROSS_DOMAIN_PLAN = 'bin/example-gateway plan {"calls":[{"operation":"ballot.query","args":[]}]}';
+  // 读类在 T5 执行前对账下也要被当前计划声明覆盖：计划同时声明 ballot.query（写类覆盖）
+  // 与 dummy.query（读类用例）。
+  const CROSS_DOMAIN_PLAN = 'bin/example-gateway plan {"calls":[{"operation":"ballot.query","args":[]},{"operation":"dummy.query","args":[]}]}';
   const CROSS_READ = 'bin/example-gateway query src/dummy/scripts/query.js --collection alpha';
   const CROSS_WRITE = 'bin/example-gateway query src/ballot/scripts/query.js --collection alpha';
   const SUFFIX_READ = 'bin/example-gateway query src/dummy/scripts/query-detail.js --collection alpha';
@@ -532,8 +535,11 @@ describe('读类探测单轮预算帽（真 driver）：达帽注入一次收尾
   it('structured_call 读类同样计数：达帽注入一次，未达不注入', async () => {
     // 同一回合先放一次 local（gateCalls > 0）：避免撞上"计划已激活却零执行"的补刀
     // ——那一路会重放最后一轮，把计数变成两倍（与本测试无关的既有收尾路径）。
+    // 计划声明 dummy.query（operation 级、无参数）：T5 执行前对账要求结构化读调用落在
+    // 当前计划声明内；本用例量的是读类计数，不该让范围门先把调用拦掉。
+    const structuredReadPlan = 'bin/example-gateway plan {"calls":[{"operation":"dummy.query","args":[]}]}';
     const turn = (count: number): FakeTurn => ({
-      bash: [PLAN_COMMAND, WRAPPER_BASH],
+      bash: [structuredReadPlan, WRAPPER_BASH],
       structured: Array.from({ length: count }, (_, index) => ({ operation: 'dummy.query', args: { '--collection': `c${index}` } })),
       text: '查询完成。',
     });

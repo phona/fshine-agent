@@ -43,7 +43,7 @@ describe('执行语言删除 · 对抗形态（同义改写 / 拆分跨行 / 编
   });
 
   it('小写/混合大小写错误码：按失败语义词根收（同义改写），普通 snake 标识符不误删', () => {
-    for (const variant of ['not_found', 'collection_not_found', 'Invalid_Shape', 'parse_error', 'no_data']) {
+    for (const variant of ['not_found', 'collection_not_found', 'Invalid_Shape', 'parse_error', 'no_data', 'needs_input']) {
       const result = scrub(`平台返回 ${variant}；${READABLE}`);
       expect(executionLanguageFingerprints(result.text), variant).toEqual([]);
       expect(result.text, variant).toContain('本期没有找到对应的记录');

@@ -77,11 +77,12 @@ export const EXECUTION_LANGUAGE_SCRUB_PATTERNS: ReadonlyArray<{
     // 码上屏是既有产品行为（用户可引用码报告问题）；删除只针对平台/worker 侧码。
     whitelist: HOST_ERROR_CODE_NAMES,
   },
-  // 小写/混合蛇形码（同义改写面）：必须带失败语义词根，词根表与评测尺独立持有但同义
-  // （两份尺子刻意不同源：谁先收紧，另一边的差异会在评测输出里显形）。
+  // 小写/混合蛇形码（同义改写面）：必须带失败语义词根（或信封状态码 needs_input，宿主
+  // 指纹表把它判成错误码），词根表与评测尺独立持有但同义（两份尺子刻意不同源：谁先
+  // 收紧，另一边的差异会在评测输出里显形）。
   {
     label: '错误码',
-    pattern: /(?<![a-z0-9_])(?=[a-z0-9_]*_)(?:[a-z0-9]+_)*(?:not_found|failed|error|invalid|declined|missing|denied|ambiguous|no_data|parse|shape)(?:_[a-z0-9]+)*(?![a-z0-9_])/gi,
+    pattern: /(?<![a-z0-9_])(?=[a-z0-9_]*_)(?:[a-z0-9]+_)*(?:not_found|failed|error|invalid|declined|missing|denied|ambiguous|no_data|parse|shape|needs_input)(?:_[a-z0-9]+)*(?![a-z0-9_])/gi,
     shadow: 'folded',
   },
   { label: 'JSON 片段', pattern: /candidates\s*:/g, shadow: 'plain' },

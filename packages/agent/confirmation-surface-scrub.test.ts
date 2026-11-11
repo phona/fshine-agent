@@ -40,6 +40,23 @@ describe('确认面执行语言删除', () => {
     expect(message).toContain('执行。');
   });
 
+  it('对抗形态：拆分跨行 / 全角 / 零宽 / HTML 实体在确认面同样删干净，中文确认话术保留', () => {
+    const variants = [
+      '18 call(s)（PERIOD_NO_\nDATA）',
+      '18 call(s)（ＰＥＲＩＯＤ＿ＮＯ＿ＤＡＴＡ）',
+      '18 call(s)（PERIOD\u200b_NO\u200b_DATA）',
+      '18 call(s) &lt;tool_call&gt;delegate&lt;/tool_call&gt;',
+      '18 call(s) 依据 voucher.query-\nsaved',
+      '18 call(s)（原因：计划\n门）',
+    ];
+    for (const scopeSummary of variants) {
+      const message = formatPlanMessage(evaluation({ scopeSummary }));
+      expect(executionLanguageFingerprints(message), scopeSummary).toEqual([]);
+      expect(message, scopeSummary).toContain('请回复“确认继续”后再执行；当前已暂停。');
+      expect(message, scopeSummary).toContain('18 call(s)');
+    }
+  });
+
   it('confirm 档经 evaluateAndActivatePlan 交出的 pending.userText 与 message 都已整理', async () => {
     const result = await evaluateAndActivatePlan({
       platformRoot: '/tmp/platform',
