@@ -28,6 +28,8 @@ import {
   subtractRetainedRequestCounts,
 } from './compaction-context';
 import { buildRequestKey, collectDelegatedRequestCounts } from './repeat-request';
+import { isSpikeGenericModeEnabled } from './spike-generic-mode';
+import { spikeContextWindow } from './spike-long-window';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
@@ -155,7 +157,9 @@ export function createPiModelRuntime(
     thinkingLevelMap: KIMI_THINKING_LEVEL_MAP,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
+    // SPIKE-ONLY（spike-long-window.ts）：压缩阈值旋钮。未设置
+    // FSHINE_SPIKE_CONTEXT_WINDOW 时返回 128_000，与接线前逐字节一致。
+    contextWindow: spikeContextWindow(env),
     maxTokens: 32_000,
   };
   const provider = createProvider({
@@ -177,6 +181,9 @@ export function createPiModelRuntime(
 
 /** 从 env 构建 kimi 兼容的 pi 驱动;env 缺失在创建时即抛中文错误。 */
 export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
+  // SPIKE-ONLY（spike-generic-mode.ts）：通用臂的压缩不挂宿主 sidecar。开关在工厂
+  // 建立时定值——与部署 env 同生命周期，回合中途改环境变量不改变已装配的驱动。
+  const spikeGenericMode = isSpikeGenericModeEnabled(options.env);
   const modelId = options.modelId ?? options.env.LLM_MODEL ?? '';
   const { models, model } = createPiModelRuntime(options.env, modelId);
 
@@ -283,6 +290,15 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         keptTokens += estimateTokens(messages[i]!);
       }
       console.log(JSON.stringify({ event: 'context_compacted', tokensBefore: est.tokens, keptMessages: kept.length }));
+      // SPIKE-ONLY（spike-generic-mode.ts）：通用臂只跑 pi 原生摘要 + 保留尾巴，不调
+      // buildCompactionContextSidecar / compactedTranscriptWithContext；下面的既有对照
+      // 臂分支一行未动。摘要文案与对照臂那行逐字一致（改一处要同步另一处）。
+      if (spikeGenericMode) {
+        return [
+          { role: 'user', content: `【此前会话摘要】\n${summary.value}\n(以上为此前对话的压缩摘要;具体数据请以重新调用工具的结果为准)`, timestamp: Date.now() } as unknown as AgentMessage,
+          ...kept,
+        ];
+      }
       const allDispatches = collectDelegatedRequestCounts(messages);
       const keptDispatches = collectDelegatedRequestCounts(kept);
       const summarizedDispatches = subtractRetainedRequestCounts(allDispatches, keptDispatches);

@@ -6,6 +6,8 @@ import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields
 import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
 import type { ContextState } from './context-state';
 import { createHistoryTools } from './history-tools';
+import { isSpikeGenericModeEnabled } from './spike-generic-mode';
+import { isSpikeTranscriptModeEnabled, spikeSessionTtlMs } from './spike-long-window';
 import type { CandidateExtractor } from './memory-consolidator';
 import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, REPEATED_REQUEST_RETRY, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectReferenceEvidence, looksLikeReferenceCue, type ReferenceEvidence } from './reference-evidence';
@@ -117,7 +119,28 @@ export interface TaxAgentRuntimeDeps {
 }
 
 export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshine/contracts').AgentRuntime {
-  const sessionTtlMs = deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
+  // SPIKE-ONLY（spike-generic-mode.ts）：通用臂不持有宿主的召回底账 / 上下文状态 /
+  // 长期记忆三类来源。投影在这里做一次，下面所有消费者（execution-facts、
+  // context-state 读取、long-memory 投影）看到的都是「未提供」——这些调用点本来就在
+  // 缺依赖时静默跳过。关闭时不做任何赋值：deps 仍是调用方传入的同一个对象，引用、
+  // 字段与读取顺序与接线前一致。
+  const spikeGenericMode = isSpikeGenericModeEnabled();
+  if (spikeGenericMode) {
+    deps = { ...deps, platformTasks: undefined, contextStates: undefined, memoryRecords: undefined };
+  }
+  // SPIKE-ONLY（spike-long-window.ts）：第三种装配 = transcript 全文 + pi 原生压缩。
+  // 投影掉 contextStates 后，ensureHistoryBackfill 返回 false，runtime 走
+  // effectiveContextMode = 'transcript'；context-state 的取数/抽取/落库三条路径都因缺
+  // 依赖而关闭。conversationLog / platformTasks / memoryRecords 保持在场，所以
+  // execution-facts 台账、reference-evidence 指代证据、search_history/get_messages
+  // 仍然活着。关闭时不做任何赋值：deps 仍是调用方传入的同一个对象。
+  const spikeTranscriptMode = isSpikeTranscriptModeEnabled();
+  if (spikeTranscriptMode) {
+    deps = { ...deps, contextStates: undefined };
+  }
+  // SPIKE-ONLY（spike-long-window.ts）：TTL 旋钮。未设置时保持接线前的回落顺序
+  // （deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS）。
+  const sessionTtlMs = spikeSessionTtlMs() ?? deps.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
   const turnBudgetMs = deps.turnBudgetMs ?? DEFAULT_TURN_BUDGET_MS;
   const contextMode = deps.contextMode ?? 'state_recent';
   const recentTurns = deps.recentTurns ?? 2;
@@ -494,6 +517,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       const historyTools = !taskEventContext && deps.conversationLog
         ? createHistoryTools(deps.conversationLog, { principalId: ctx.principalId, sessionId: ctx.sessionId })
         : [];
+      // SPIKE-ONLY（spike-generic-mode.ts）：通用臂撤掉 search_history / get_messages
+      // 两个工具。就地清空数组而不是改三元条件：关闭时这一行不执行，构造参数与工具
+      // 定义仍与接线前逐字节一致；打开时工具定义与执行同名查找同时消失。
+      if (spikeGenericMode) historyTools.length = 0;
       const tools = [
         ROUTE_CURRENT_TURN_TOOL,
         ...(!taskEventContext && deps.backgroundTasks ? [TASK_CONTROL_TOOL] : []),

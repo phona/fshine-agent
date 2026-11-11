@@ -34,6 +34,43 @@ const REFERENCE_CUE_RE = /这个|那个|它|刚才|上次|之前(?:说|讲|提)�
 /** replace 专用副本：非全局正则只替换第一个命中，会把"刚才/那个"漏成半个。 */
 const REFERENCE_CUE_RE_GLOBAL = new RegExp(REFERENCE_CUE_RE.source, 'gu');
 
+/**
+ * 第二把尺：中文同义改写 + 英文线索（2026-11-11 语言盲区修复）。
+ *
+ * 原尺只有中文直陈形态，实测全语料中文开门 4 轮、补英文后 34 轮——九个零中文线索的
+ * 用例正好全是长会话用例，台账/指代证据在那些轮次根本没机会注入。这里单独加一把
+ * OR 尺而不是改原正则：原尺与它的 replace 副本保持逐字不变（关闭臂先验最简单），
+ * 新词只扩大开门面；真命中的注入内容仍由两个消费者各自的上限与铁律约束，不扩大
+ * 本轮实体范围。
+ *
+ * 英文只收"在要一份历史清单/做指代消解"的形状：what about / how about / that one /
+ * previous / earlier / last time / the same / recap / summarize / review / remind me /
+ * what did we 等。不收裸 it/this/that/"before"——它们在普通新查询里太常见，会把开门面
+ * 摊到几乎每轮。英文词用 `\b` 边界，大小写不敏感。
+ */
+const REFERENCE_CUE_EXTRA_RE = /刚刚|上回|那次|那一次|先前|早先|上述|前文|前面(?:说|提|讲|那)|之前(?:说|讲|提|查|问|看|做)过|\bwhat about\b|\bhow about\b|\bthat one\b|\bthis one\b|\bthe one\b|\b(?:from|as|said|mentioned|noted) before\b|\blast (?:time|query|result|one|batch)\b|\bprevious(?:ly)?\b|\bearlier\b|\baforementioned\b|\babove-mentioned\b|\bthe above\b|\brecap\b|\bsummari[sz](?:e|ed|ing)\b|\bsummary\b|\bgo over\b|\breview\b|\bremind me\b|\bthe same\b|\bjust now\b|\bwhat (?:did|have) we\b|\bback to the\b|\brefer(?:red)? to\b|\bmentioned (?:earlier|before|above)\b/iu;
+
+/**
+ * 否定式提及不是召回线索：「不是刚才那个」在否定一个对象，不是在要历史清单。
+ * 先把"否定词 + 线索词"整段剥掉再判——不剥的话"刚才"/"那个"照样命中原尺。
+ * 只剥紧邻的否定（不是/不要/并非… + 线索词），不碰"我刚才不是说过吗"这类
+ * 否定词在线索词之后的真回溯（反问仍然开门）。
+ */
+const NEGATED_REFERENCE_CUE_RE = /(?<!难道)(?<!岂)(?:不是|不要(?:用|再)?|不用|别用|并非|而不是)\s*(?:(?:刚才|刚刚|上次|上回)(?:那个|那次)?|那个|它|之前(?:说|讲|提|查|问|看|做)过|前述|上述)|\b(?:not|isn't|wasn't)\s+(?:the\s+)?(?:one\s+)?(?:from\s+)?(?:before|earlier)\b|\bnot (?:that|this) one\b/giu;
+
+/**
+ * 英文关键词停用词：英文轮次开门后 keywordsFrom 会把整句按空白切开，what/about/this
+ * 这类词检索价值为零，只会挤占三个关键词位。只过滤英文功能词，中文片段不受影响。
+ */
+const KEYWORD_STOPWORDS = new Set([
+  'about', 'above', 'after', 'again', 'all', 'also', 'and', 'any', 'are', 'before',
+  'did', 'for', 'from', 'had', 'has', 'have', 'how', 'into', 'its', 'just', 'last',
+  'mention', 'mentioned', 'more', 'not', 'now', 'one', 'over', 'previous', 'recap',
+  'review', 'same', 'she', 'should', 'summary', 'summarize', 'that', 'the', 'their',
+  'them', 'then', 'there', 'these', 'they', 'this', 'those', 'time', 'was', 'we',
+  'were', 'what', 'when', 'which', 'who', 'why', 'with', 'you',
+]);
+
 /** 最近 tool_result 证据条数上限。 */
 export const MAX_TOOL_RESULT_EVIDENCE = 5;
 /** 关键词命中证据条数上限。 */
@@ -52,6 +89,14 @@ export interface ReferenceEvidence {
 
 /** 当前消息是否在使用指代/回溯/总结，需要宿主主动检索证据。 */
 export function looksLikeReferenceCue(userMessage: string): boolean {
+  // 否定式提及先剥再判：剥完一条线索都不剩 = 用户只是否掉一个对象，不开门；
+  // 剥完还剩下别的真线索（「不是刚才那个，上回汇总的呢」）= 照常开门。
+  const withoutNegatedCues = userMessage.replace(NEGATED_REFERENCE_CUE_RE, ' ');
+  if (withoutNegatedCues !== userMessage
+    && !REFERENCE_CUE_RE.test(withoutNegatedCues)
+    && !REFERENCE_CUE_EXTRA_RE.test(withoutNegatedCues)) return false;
+  // 第二把尺（同义改写 / 英文）先判；未命中再走原尺（原表达式一行未动）。
+  if (REFERENCE_CUE_EXTRA_RE.test(withoutNegatedCues)) return true;
   return REFERENCE_CUE_RE.test(userMessage);
 }
 
@@ -66,6 +111,7 @@ export function keywordsFrom(message: string): string[] {
   for (const token of stripped.split(/[\s,，。？?！!、；;：:"'"'"''()（）]+/u)) {
     const word = token.trim();
     if (word.length < 2 || seen.has(word)) continue;
+    if (KEYWORD_STOPWORDS.has(word.toLowerCase())) continue;
     seen.add(word);
     keywords.push(word);
   }
