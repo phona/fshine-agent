@@ -34,9 +34,21 @@
 import { createHash } from 'node:crypto';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { TurnInputContext } from '@fshine/contracts';
-import { readCompactionContext, type CompactedRequestCount } from './compaction-context';
 import { extractCurrentMessageBody, hostContextMetadataOf, normalizeMessageReference } from './message-reference';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
+
+/**
+ * 一次委派的记账（请求键 → 次数）。
+ *
+ * 判据来源只有一处：**仍在转录里的具体轮次**（collectDelegatedRequestCounts）。
+ * 曾经还有第二条来源——压缩 sidecar（宿主塞进压缩产物的"已压缩派发计数"）：它随宿主
+ * 影子状态一起删除（相位 1 的 T3），压缩后的重复请求复核退回"只看仍在场的轮次"，
+ * 不再有第二份账。
+ */
+export interface DelegatedRequestCount {
+  requestKey: string;
+  count: number;
+}
 
 /**
  * 宿主追加在用户消息尾部的附件路径后缀起始标记。
@@ -189,11 +201,6 @@ export function findRepeatedDelegatedRequest(
   if (!request) return null;
 
   const priorCounts = new Map<string, number>();
-  for (const message of transcript) {
-    const sidecar = readCompactionContext(message);
-    if (!sidecar) continue;
-    addRequestCounts(priorCounts, sidecar.delegatedRequests);
-  }
   addRequestCounts(priorCounts, collectDelegatedRequestCounts(transcript));
 
   const currentRequestKey = buildRequestKey(currentMessage, inputContext);
@@ -202,7 +209,7 @@ export function findRepeatedDelegatedRequest(
 }
 
 /** Collect completed/accepted dispatches represented by concrete, still-present Pi turns only. */
-export function collectDelegatedRequestCounts(transcript: readonly AgentMessage[]): CompactedRequestCount[] {
+export function collectDelegatedRequestCounts(transcript: readonly AgentMessage[]): DelegatedRequestCount[] {
   const delegatedRequestCounts = new Map<string, number>();
   let turnRequest = '';
   let turnRequestKey = '';
@@ -242,7 +249,7 @@ export function collectDelegatedRequestCounts(transcript: readonly AgentMessage[
   return [...delegatedRequestCounts.entries()].map(([requestKey, count]) => ({ requestKey, count }));
 }
 
-function addRequestCounts(target: Map<string, number>, counts: readonly CompactedRequestCount[]): void {
+function addRequestCounts(target: Map<string, number>, counts: readonly DelegatedRequestCount[]): void {
   for (const item of counts) {
     if (!item.requestKey || !Number.isSafeInteger(item.count) || item.count <= 0) continue;
     target.set(item.requestKey, (target.get(item.requestKey) ?? 0) + item.count);

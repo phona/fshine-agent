@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest';
 import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool, plannerMessagesToLlm } from './src/pi-driver';
 import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError, type TurnDriverInput } from './src/driver';
-import { createCompactionContextMessage } from './src/compaction-context';
 
 describe('Pi driver safety helpers', () => {
   it('把宿主任務事件和任务清单转换给真实模型，同时保留原生转录中的 custom 来源', () => {
@@ -15,33 +14,6 @@ describe('Pi driver safety helpers', () => {
     expect(JSON.stringify(converted)).toContain('正在运行的任务A');
     expect(event.role).toBe('custom');
     expect(converted[2]).toBe(user);
-  });
-
-  it('把历史引用 sidecar 作为明确的非直接陈述上下文投给模型，计数-only sidecar 不增用户内容', () => {
-    const quoteSidecar = createCompactionContextMessage({
-      version: 1,
-      delegatedRequests: [{ requestKey: `request-v1:${'a'.repeat(64)}`, count: 2 }],
-      quotedTurns: [{
-        requestKey: `request-v1:${'a'.repeat(64)}`,
-        bodyPreview: '这段是什么意思？',
-        messageReference: { kind: 'text', text: '历史引用片段' },
-      }],
-      omittedQuotedTurns: 0,
-    });
-    const requestCountsOnly = createCompactionContextMessage({
-      version: 1,
-      delegatedRequests: [{ requestKey: `request-v1:${'b'.repeat(64)}`, count: 1 }],
-      quotedTurns: [],
-      omittedQuotedTurns: 0,
-    });
-    const converted = plannerMessagesToLlm([quoteSidecar, requestCountsOnly]);
-
-    expect(converted).toHaveLength(1);
-    expect(converted[0]?.role).toBe('user');
-    expect(JSON.stringify(converted[0])).toContain('宿主压缩引用索引');
-    expect(JSON.stringify(converted[0])).toContain('历史引用片段');
-    expect(JSON.stringify(converted[0])).toContain('不是用户直接陈述');
-    expect(JSON.stringify(converted[0])).not.toContain('request-v1:');
   });
 
   it('does not opt into unsupported Kimi extended thinking levels', () => {
@@ -170,7 +142,8 @@ describe('Pi driver 进度帧接线', () => {
   }
 
   it('宿主内部工具调用不发进度帧（默认帧与模型短语都不发）', async () => {
-    for (const name of ['route_current_turn', 'search_history', 'get_messages']) {
+    // 相位 1：历史检索工具已删除，内部工具只剩回合契约申报入口。
+    for (const name of ['route_current_turn']) {
       const { steps, input } = stepRecorder();
       const agentTool = toAgentTool(toolFor(name), input, name);
       // 模型照样可能自填 progress——内部工具对帧整体静默

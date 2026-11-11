@@ -19,8 +19,6 @@ import {
   createContextTaskRunner,
   createBackgroundTaskManager,
   createPlatformExecutionGate,
-  createLongMemoryCandidateExtractor,
-  createMemoryCandidateModel,
   createPiCodingTurnDriver,
   createPiTurnDriver,
   createTaxAgentRuntime,
@@ -28,9 +26,9 @@ import {
   loadProposalSchema,
   reviewProposalWithDriver,
   newGateSecret,
+  parseContextWindow,
   parsePiThinkingLevel,
   planDraftExample,
-  type CandidateExtractor,
   type ContextTaskRunner,
   type BackgroundTaskManager,
   type PlatformExecutionGate,
@@ -103,9 +101,6 @@ export interface ServerAssemblyOverrides {
   driver?: TurnDriver;
   /** Execution-layer subagent driver. Defaults to the pi coding agent driver. */
   workerDriver?: TurnDriver;
-  /** Isolated tool-free driver for Context State extraction. Defaults to `driver`. */
-  contextModelDriver?: TurnDriver;
-  memoryCandidateExtractor?: CandidateExtractor;
   /** Inject the WeCom SDK client (offline harness); defaults to the real WSClient. */
   channelClientFactory?: () => SdkClientLike;
   /** Inject the whole channel (offline harness):装配硬前提（D-126/D-134）的失败形态注入用。 */
@@ -247,18 +242,16 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const mainThinkingLevel = mainThinkingRaw
     ? parsePiThinkingLevel(mainThinkingRaw, 'LLM_MAIN_THINKING_LEVEL')
     : undefined;
+  // 模型能力（上下文窗口）：装配层持有部署声明、驱动只收参数（T4 接缝 / T7 窗口治理）。
+  // 未配置 = 不传，驱动沿用 128k 缺省（options 键集与接线前一致）；显式值非法即抛，
+  // 不静默回落——窗口错了压缩阈值就错了，那是贴边空回复的源头。
+  const mainContextWindow = parseContextWindow(effectiveEnv['LLM_CONTEXT_WINDOW'], 'LLM_CONTEXT_WINDOW');
   const driver = overrides.driver ?? createPiTurnDriver({
     env: effectiveEnv,
     ...(mainModelOverride ? { modelId: mainModelOverride } : {}),
     ...(mainThinkingLevel ? { thinkingLevel: mainThinkingLevel } : {}),
+    ...(mainContextWindow !== undefined ? { contextWindow: mainContextWindow } : {}),
   });
-  // Context 抽取缺省跟随 Main（`?? driver` 排在 Main 覆盖解析之后，结构上保证跟随）：
-  // 抽取与主回合同量级（无工具、单轮、短输出），Main 换小模型时抽取跟着换——同一供应商
-  // 配额下的同量级任务，没有理由让它单独留在强模型上；也不逼部署为它再配一套变量。
-  // 确要隔离（如抽取质量劣化）时仍可显式注入 overrides.contextModelDriver，语义不变。
-  const contextModelDriver = overrides.contextModelDriver ?? driver;
-  const memoryCandidateExtractor = overrides.memoryCandidateExtractor
-    ?? createLongMemoryCandidateExtractor(createMemoryCandidateModel(contextModelDriver, { timeoutMs: 15_000 }));
   const workerDriver = overrides.workerDriver ?? createPiCodingTurnDriver({
     env: effectiveEnv,
     // Pi 会话存放位置（FSHINE_PI_AGENT_DIR）：驱动读的是 process.env 直连而非 options.env
@@ -332,9 +325,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     profileId: activeProfileId,
     // 写路径隔离复核（第 2 包生产接线）：装配必须注入真实复核驱动，
     // 未注入时提案创建路径直接失败（不再记 skipped 就继续）。
-    // 驱动 = contextModelDriver（隔离回合、无工具，与上下文抽取同一驱动面），
-    // 不是 Main 驱动，也不是一个独立评委模型（那是仍待定的另一步）。
-    proposalReviewTurn: (input) => reviewProposalWithDriver(contextModelDriver, input),
+    // 驱动 = Main 驱动（隔离回合、无工具）：相位 1 起"上下文抽取专用驱动"整条删除，
+    // 复核沿用 Main 的模型面（与删除前同一实例——原先的缺省就是 `?? driver`）。
+    proposalReviewTurn: (input) => reviewProposalWithDriver(driver, input),
     // 提案 schema 取问（接口文档 §5）：按 profile 的 root 与 gateway spawn
     // operation list --json，取 proposal.create 行的 proposalSchema。
     proposalSchemaLoader: (args) => loadProposalSchema(args.platformRoot, args.gateway),
@@ -408,13 +401,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const operationArgSpecs = platformRoot ? await loadOperationArgSpecs(platformRoot, activeProfile?.gateway) : undefined;
   const runtime = createTaxAgentRuntime({
     driver,
-    // Context State extraction is a separate tool-free background turn using the same provider/model.
-    contextModelDriver,
     sessions: store.sessions,
     conversationLog: store.conversationLog,
-    contextStates: store.contextStates,
-    memoryRecords: store.memoryRecords,
-    memoryCandidateExtractor,
     sessionTtlMs: config.sessionTtlMs,
     // Leave time for the Main Agent to interpret the subagent's final text
     // after the delegated turn reaches its own deadline.
@@ -422,7 +410,8 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     platformTask,
     backgroundTasks,
     workerDispatchMode,
-    // 召回事实台账的结构化事实源（D-065）：存储未启用时不注入（静默降级）。
+    // 平台任务条目的结构化事实源：超时恢复的资源耗尽终稿与实体来源从这里取数；
+    // 存储未启用时不注入（静默降级）。执行台账注入已随相位 1 的 T9 删除。
     ...(store.platformTasks ? { platformTasks: store.platformTasks } : {}),
     // 会话实体提取的规格查表依据（任务 1）：空表/未配平台根时不注入（安全缺省）。
     ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgSpecs } : {}),

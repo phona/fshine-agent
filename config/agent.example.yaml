@@ -76,6 +76,10 @@ llm:
   # 分层模型接缝(可选):Main Agent 单独配更快的模型;缺省回落 model / thinkingLevel。
   # mainModel:
   # mainThinkingLevel:
+  # 上下文窗口(token,可选):Main 模型的真实能力声明;缺省 = 驱动内 128k 缺省。
+  # 压缩阈值 = contextWindow − 摘要预留:声明小了只会让压缩更早触发;声明大了要等
+  # 窗口爆了才压缩。配错即启动失败,不会静默回落缺省。旧部署可用同名环境变量覆盖。
+  # contextWindow: 128000
 
 # ---- 企微智能机器人凭据(管理台:智能机器人 → 你的机器人 → 长连接 API) ----
 # 注意:机器人创建者需为企业超级管理员,收到的 from.userid 才是明文 userid
