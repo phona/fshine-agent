@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 // @ts-expect-error -- measure-summary.mjs 是无类型声明的纯 ESM 脚本，运行时由 vitest 解析
-import { buildReport, evaluateDiscrimination, evaluateRequiredReadiness, findEvalRealRegressions, judgeSum, main } from './measure-summary.mjs';
+import { buildReport, evaluateDiscrimination, evaluateRequiredReadiness, findEvalRealRegressions, judgeSum, main, stageProgress } from './measure-summary.mjs';
 
 const DIMS = ['groundedness', 'entityFidelity', 'failureHonesty', 'presentationHygiene'] as const;
 const NULL_DIMS = Object.fromEntries(DIMS.map((d) => [d, null]));
@@ -305,8 +305,19 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
       stabilityDocs: [round(1), round(1)],
       stabilityComplete: true,
       stabilityExpected: { cases: ['G-A1', 'G-B1'], rounds: 2 },
-      evalRealBaselineDoc: { results: [{ id: 'G-A1', round: 1, mechanical_pass: true }] },
-      evalRealLatestDoc: { results: [{ id: 'G-A1', round: 1, mechanical_pass: true }] },
+      // 声明了两例，eval-real 两份对照必须都覆盖；只放 G-A1 时 B 的缺失会被写成已验证。
+      evalRealBaselineDoc: {
+        results: [
+          { id: 'G-A1', round: 1, mechanical_pass: true },
+          { id: 'G-B1', round: 1, mechanical_pass: true },
+        ],
+      },
+      evalRealLatestDoc: {
+        results: [
+          { id: 'G-A1', round: 1, mechanical_pass: true },
+          { id: 'G-B1', round: 1, mechanical_pass: true },
+        ],
+      },
       regressionDoc: { unresolved: [] },
     });
     expect(out.exitCode).toBe(0);
@@ -571,5 +582,256 @@ describe('声明要求覆盖所有入口（codex major：需求面闭合）', ()
     }
     expect(code).toBe(2);
     expect(errs.join('')).toContain('--expect-rounds');
+  });
+});
+
+function mechRounds(id: string, passes: number, total: number) {
+  return Array.from({ length: total }, (_, i) => ({
+    id,
+    round: i + 1,
+    mechanical_pass: i < passes,
+  }));
+}
+
+/**
+ * 声明用例未被 eval-real 覆盖仍被写成 required 证据（2026-11-11，blocking）。
+ * 旧形状：findEvalRealRegressions 只遍历 baseline。稳定性声明 A、B 且均 5/5，
+ * baseline/latest 只有 A → compared=true、regressions=[]，下游把这当成 A、B 的共同证据。
+ */
+describe('声明用例必须被两份 eval-real 对照覆盖', () => {
+  it('声明 A、B 而对照只有 A ⇒ compared=false，reason 列明 B，不得满足 required', () => {
+    const onlyA = findEvalRealRegressions(
+      { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+      { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+      ['A', 'B'],
+    );
+    expect(onlyA.compared).toBe(false);
+    expect(onlyA.regressions).toEqual([]);
+    expect(onlyA.reason).toContain('B');
+    expect(onlyA.reason).toContain('baseline');
+    expect(onlyA.reason).toContain('latest');
+
+    // 只缺 baseline 的一侧也不得写成无回归（旧实现不遍历声明集，latest 多出来的 B 看不见）。
+    const baselineMissesB = findEvalRealRegressions(
+      { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+      {
+        results: [
+          { id: 'A', round: 1, mechanical_pass: true },
+          { id: 'B', round: 1, mechanical_pass: true },
+        ],
+      },
+      ['A', 'B'],
+    );
+    expect(baselineMissesB.compared).toBe(false);
+    expect(baselineMissesB.reason).toContain('B');
+    expect(baselineMissesB.reason).toContain('baseline');
+
+    const covered = findEvalRealRegressions(
+      {
+        results: [
+          { id: 'A', round: 1, mechanical_pass: true },
+          { id: 'B', round: 1, mechanical_pass: true },
+        ],
+      },
+      {
+        results: [
+          { id: 'A', round: 1, mechanical_pass: true },
+          { id: 'B', round: 1, mechanical_pass: true },
+        ],
+      },
+      ['A', 'B'],
+    );
+    expect(covered.compared).toBe(true);
+    expect(covered.regressions).toEqual([]);
+
+    const report = buildReport({
+      stabilityDocs: [{
+        summary: {
+          A: { mechanical_pass_count: 5, rounds: 5 },
+          B: { mechanical_pass_count: 5, rounds: 5 },
+        },
+      }],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A', 'B'], rounds: 5 },
+      evalRealBaselineDoc: { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+      evalRealLatestDoc: { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+      regressionDoc: { unresolved: [] },
+    });
+    expect(report.requiredEvidence.evalRealCompared).toBe(false);
+    expect(report.requiredEvidence.evalRealRegressions).toEqual([]);
+    expect(report.markdown).toContain('声明用例未被 eval-real 对照覆盖');
+    expect(report.markdown).toContain('B');
+    expect(report.markdown).toContain('稳定性达标但需先消回归');
+    expect(report.markdown).not.toContain('可评估 required 化');
+    expect(report.markdown).not.toContain('| B | 5/5 | 100% | 可做 required |');
+  });
+});
+
+/**
+ * 回归比较漏掉「基线未全通过 + 继续下降」（2026-11-11，major）。
+ * 旧形状：只在 baseline 全通过且 latest 出现失败时登记。4/5 → 3/5 返回
+ * compared=true、regressions=[]，后续证据据此宣称无机械回归。
+ * 降幅判据 = 机械通过率严格下降（交叉相乘，不经浮点）。
+ */
+describe('机械回归比较通过率，不只盯全通过基线', () => {
+  it('4/5 → 3/5 是回归；持平与上升不是', () => {
+    const declined = findEvalRealRegressions(
+      { results: mechRounds('A', 4, 5) },
+      { results: mechRounds('A', 3, 5) },
+    );
+    expect(declined.compared).toBe(true);
+    expect(declined.regressions).toEqual(['A']);
+
+    // 轮数不同但通过率相同（4/5 → 8/10）不是下降。
+    const flat = findEvalRealRegressions(
+      { results: mechRounds('A', 4, 5) },
+      { results: mechRounds('A', 8, 10) },
+    );
+    expect(flat.compared).toBe(true);
+    expect(flat.regressions).toEqual([]);
+
+    // 通过数上升、通过率下降（1/2 → 2/5）仍是回归——比的是率，不是通过次数。
+    const rateDown = findEvalRealRegressions(
+      { results: mechRounds('A', 1, 2) },
+      { results: mechRounds('A', 2, 5) },
+    );
+    expect(rateDown.compared).toBe(true);
+    expect(rateDown.regressions).toEqual(['A']);
+
+    const rateUp = findEvalRealRegressions(
+      { results: mechRounds('A', 1, 2) },
+      { results: mechRounds('A', 3, 5) },
+    );
+    expect(rateUp.compared).toBe(true);
+    expect(rateUp.regressions).toEqual([]);
+  });
+
+  it('4/5 → 3/5 不得被汇总写成无机械回归或可做 required', () => {
+    const report = buildReport({
+      stabilityDocs: [{ summary: { A: { mechanical_pass_count: 5, rounds: 5 } } }],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A'], rounds: 5 },
+      evalRealBaselineDoc: { results: mechRounds('A', 4, 5) },
+      evalRealLatestDoc: { results: mechRounds('A', 3, 5) },
+      regressionDoc: { unresolved: [] },
+    });
+    expect(report.requiredEvidence.evalRealCompared).toBe(true);
+    expect(report.requiredEvidence.evalRealRegressions).toEqual(['A']);
+    expect(report.markdown).toContain('稳定性达标但需先消回归');
+    expect(report.markdown).toContain('通过率下降');
+    expect(report.markdown).toContain('A');
+    expect(report.markdown).not.toContain('可评估 required 化');
+    expect(report.markdown).not.toContain('| A | 5/5 | 100% | 可做 required |');
+  });
+});
+
+/**
+ * 重复用例 id 改变区分度结论，并让 workflow 阶段轮数用错分母（2026-11-11，major）。
+ * 同一份证据：声明 A,B 得「无显著差异」；声明 A,A,B 旧实现得「强模型明显更优（2/3）」。
+ * 探针 --only 是集合。口径：重复 id 直接拒绝，不静默去重，也不加权。
+ */
+describe('重复用例 id 拒绝加权（声明集是集合）', () => {
+  const strong = {
+    summary: {
+      A: caseSummary(FOUR(2)),
+      B: caseSummary(FOUR(2)),
+    },
+  };
+  const weak = {
+    summary: {
+      A: caseSummary(FOUR(1)),
+      B: caseSummary(FOUR(2)),
+    },
+  };
+
+  it('声明 A,B 为无显著差异；声明 A,A,B 不得变成强模型明显更优（2/3）', () => {
+    const ab = evaluateDiscrimination(strong, weak, 1, { cases: ['A', 'B'], rounds: null });
+    expect(ab.verdict).toContain('无显著差异');
+    expect(ab.verdict).not.toContain('强模型明显更优');
+    expect(ab.validComparisons).toBe(2);
+
+    const aab = evaluateDiscrimination(strong, weak, 1, { cases: ['A', 'A', 'B'], rounds: null });
+    expect(aab.insufficient).toBe(true);
+    expect(aab.verdict).toContain('重复');
+    expect(aab.verdict).toContain('A');
+    expect(aab.verdict).not.toContain('强模型明显更优');
+    expect(aab.verdict).not.toContain('2/3');
+    expect(aab.validComparisons).toBe(0);
+  });
+
+  it('main：--expect-cases A,A,B 用法错误，stdout 不得出现加权后的相反结论', () => {
+    const dir = tempDir();
+    const strongPath = writeJson(dir, 'strong.json', strong);
+    const weakPath = writeJson(dir, 'weak.json', weak);
+    const errs: string[] = [];
+    const logs: string[] = [];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation((m?: unknown) => { errs.push(String(m)); });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((m?: unknown) => { logs.push(String(m)); });
+    let code: number;
+    try {
+      code = main(['--expect-cases', 'A,A,B', '--expect-disc-rounds', '2', '--', strongPath, weakPath]);
+    } finally {
+      errSpy.mockRestore();
+      logSpy.mockRestore();
+    }
+    expect(code).toBe(2);
+    expect(errs.join('')).toContain('重复');
+    expect(errs.join('')).toContain('A');
+    const combined = `${logs.join('')}\n${errs.join('')}`;
+    expect(combined).not.toContain('强模型明显更优');
+    expect(combined).not.toContain('2/3');
+  });
+
+  it('buildReport：重复声明不得下稳定性或区分度的正面结论', () => {
+    const out = buildReport({
+      stabilityDocs: [{
+        summary: {
+          A: { mechanical_pass_count: 5, rounds: 5 },
+          B: { mechanical_pass_count: 5, rounds: 5 },
+        },
+      }],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A', 'A', 'B'], rounds: 5 },
+      discriminationExpected: { cases: ['A', 'A', 'B'], rounds: null },
+      strongDoc: strong,
+      weakDoc: weak,
+      discriminationRequested: true,
+      evalRealBaselineDoc: {
+        results: [
+          { id: 'A', round: 1, mechanical_pass: true },
+          { id: 'B', round: 1, mechanical_pass: true },
+        ],
+      },
+      evalRealLatestDoc: {
+        results: [
+          { id: 'A', round: 1, mechanical_pass: true },
+          { id: 'B', round: 1, mechanical_pass: true },
+        ],
+      },
+      regressionDoc: { unresolved: [] },
+    });
+    expect(out.exitCode).toBe(2);
+    expect(out.markdown).toContain('重复');
+    expect(out.markdown).not.toContain('强模型明显更优');
+    expect(out.markdown).not.toContain('可评估 required 化');
+    expect(out.markdown).not.toContain('可做 required');
+  });
+
+  it('阶段轮数：A,A,B × 10 条结果不得报成 3/5（旧公式 floor(10/3)=3）', () => {
+    // 探针 --only 是集合：A,A,B 实际只跑 A、B。5 轮 × 2 例 = 10 条。
+    const duped = stageProgress('A,A,B', 10, 5);
+    expect(duped.ok).toBe(false);
+    expect(duped.done).not.toBe(3);
+    expect(duped.reason).toContain('重复');
+    expect(duped.reason).toContain('A');
+
+    const clean = stageProgress('A,B', 10, 5);
+    expect(clean.ok).toBe(true);
+    expect(clean.caseCount).toBe(2);
+    expect(clean.done).toBe(5);
+
+    const fromArray = stageProgress(['A', 'B'], 10, 5);
+    expect(fromArray.ok).toBe(true);
+    expect(fromArray.done).toBe(5);
   });
 });

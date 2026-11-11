@@ -15,15 +15,17 @@
  *   稳定性 stability.json  —— 同模型 N 轮：每用例通过率。<80% 的用例不能做 per-push
  *                             required 门（要么多数决，要么拿证据改判据）。**80% 只是
  *                             建议线，不是充分条件**：通过率达标后还必须确认最近一次
- *                             eval-real 无机械 pass→fail、且没有未消假红，才可能
- *                             「可做 required」；缺证据按 fail-closed 处理为
- *                             「稳定性达标但需先消回归」。
+ *                             eval-real 无机械通过率下降（含基线全通过后的 pass→fail，
+ *                             以及基线未全通过后的继续下降）、两份对照覆盖声明用例集、
+ *                             且没有未消假红，才可能「可做 required」；缺证据按
+ *                             fail-closed 处理为「稳定性达标但需先消回归」。
  *   区分度 strong/weak     —— 双档 judge 均分对比。只有**双方该用例四维都有数值**才
  *                             计入有效比较；任一侧缺维度即整例作废（不得把已出现的
  *                             维度合计成假分差）。有效比较数为 0 或低于 --min-valid
  *                             （默认 1）时结论只能是「无法判定（数据不足）」，退出码
  *                             非零。缺失项不计入「强模型更优 / 弱模型更优 / 无显著
- *                             差异」任何一类。
+ *                             差异」任何一类。声明用例集是集合（与探针 --only 一致）：
+ *                             重复 id 直接拒绝，不得在逐项比较里给同一份证据加权。
  *   失败形态               —— 从 results 里提取每轮的 calls / mechanical_pass / final，
  *                             供人工归因（机制违 vs 结果错）。
  *
@@ -50,6 +52,63 @@ export const DISCRIMINATION_MIN_GAP = 0.5; // 强模型均分 - 弱模型均分�
 export const DEFAULT_MIN_VALID_COMPARISONS = 1;
 
 export class UsageError extends Error {}
+
+/**
+ * 声明用例集里的重复 id（保序、每个重复 id 只报一次）。
+ * 探针 `--only` 是集合，每例每轮只跑一次；声明数组里的重复不构成第二份证据。
+ */
+export function duplicateCaseIds(ids) {
+  const seen = new Set();
+  const dups = [];
+  for (const id of ids ?? []) {
+    if (seen.has(id)) {
+      if (!dups.includes(id)) dups.push(id);
+    } else {
+      seen.add(id);
+    }
+  }
+  return dups;
+}
+
+/** 声明用例集按集合去重（保序）。覆盖检查用集合语义；加权与轮数计数不走这里悄悄改分母。 */
+export function uniqueCaseIds(ids) {
+  const seen = new Set();
+  const out = [];
+  for (const id of ids ?? []) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(id);
+  }
+  return out;
+}
+
+/**
+ * 阶段完成轮数（workflow 汇总步骤与本地同一口径，2026-11-11）。
+ * 探针 `--only` 把用例当集合，结果条数 = 去重后的用例数 × 轮数。声明里的重复 id
+ * 不增加结果条数：用未去重的个数当除数会把完成轮数算小（声明 A,A,B、实际 2 例 × 5 轮
+ * = 10 条，÷3 得 3，误报「仅 3/5 轮」）。与 parseCases / 区分度逐项比较同一口径：
+ * 重复 id 直接拒绝，不静默改分母，也不把同一份证据加权。
+ * caseIds 接受逗号分隔字符串或 id 数组。
+ */
+export function stageProgress(caseIds, resultsLength, expectedRounds) {
+  const ids = (Array.isArray(caseIds) ? caseIds : String(caseIds ?? '').split(','))
+    .map((id) => String(id).trim())
+    .filter(Boolean);
+  const dups = duplicateCaseIds(ids);
+  if (dups.length > 0) {
+    return {
+      ok: false,
+      reason: `声明用例集有重复 id：${dups.join('、')}（探针 --only 是集合，重复 id 不能当额外用例或额外轮次）`,
+      done: null,
+      expected: expectedRounds,
+      caseCount: null,
+    };
+  }
+  const caseCount = ids.length;
+  const length = isFiniteNumber(resultsLength) ? resultsLength : Number(resultsLength);
+  const done = Math.floor((Number.isFinite(length) ? length : 0) / Math.max(caseCount, 1));
+  return { ok: true, reason: '', done, expected: expectedRounds, caseCount };
+}
 
 function isFiniteNumber(v) {
   return typeof v === 'number' && Number.isFinite(v);
@@ -95,6 +154,22 @@ export function mechanicalRate(entry) {
   return { rounds, passes, rate: passes / rounds };
 }
 
+/**
+ * 同一用例的机械通过率是否严格下降（2026-11-11）。
+ * 交叉相乘：`latest.passes * baseline.rounds < baseline.passes * latest.rounds`，不经浮点。
+ * 覆盖两种形态，不只盯全通过基线：
+ *   1) 基线全通过（rate=1）且 latest 出现失败（rate<1）——即原来的 pass→fail；
+ *   2) 基线未全通过但继续下降（如 4/5 → 3/5，或通过数上升但通过率下降的 1/2 → 2/5）。
+ * 持平（含轮数不同但比率相同的 4/5 → 8/10）与上升都不是下降。
+ */
+export function mechanicalRateDeclined(baseline, latest) {
+  if (!baseline || !latest) return false;
+  if (!isFiniteNumber(baseline.rounds) || !isFiniteNumber(latest.rounds)) return false;
+  if (!isFiniteNumber(baseline.passes) || !isFiniteNumber(latest.passes)) return false;
+  if (baseline.rounds <= 0 || latest.rounds <= 0) return false;
+  return latest.passes * baseline.rounds < baseline.passes * latest.rounds;
+}
+
 function pct(n, d) {
   return d === 0 ? 'n/a' : `${Math.round((n / d) * 100)}%`;
 }
@@ -110,8 +185,13 @@ export function stabilityStructureGaps(entries, expected) {
   if (!expected || !Array.isArray(expected.cases) || expected.cases.length === 0) return [];
   const rounds = expected.rounds;
   const gaps = [];
+  // 重复 id 与「缺用例」同级：声明数组不是证据权重。先报重复，再按集合核覆盖，
+  // 避免同一个缺号被重复声明报两次。
+  const dups = duplicateCaseIds(expected.cases);
+  if (dups.length > 0) gaps.push(`声明用例集有重复 id：${dups.join('、')}`);
+  const declared = uniqueCaseIds(expected.cases);
   const actual = new Map(entries);
-  for (const id of expected.cases) {
+  for (const id of declared) {
     if (!actual.has(id)) {
       gaps.push(`缺用例 ${id}`);
       continue;
@@ -122,7 +202,7 @@ export function stabilityStructureGaps(entries, expected) {
     }
   }
   for (const [id] of entries) {
-    if (!expected.cases.includes(id)) gaps.push(`非期望用例 ${id}`);
+    if (!declared.includes(id)) gaps.push(`非期望用例 ${id}`);
   }
   return gaps;
 }
@@ -170,15 +250,35 @@ export function probeStats(doc) {
 }
 
 /**
- * 「最近一次 eval-real 无机械 pass→fail」的判据：baseline 全通过的用例在 latest
- * 出现失败即一条回归。任一侧无数据、或 latest 没覆盖 baseline 的某个用例，都无法
- * 证明「无 pass→fail」——返回 compared=false，由调用方按条件未满足处理。
+ * 「最近一次 eval-real 无机械回归」的判据（2026-11-11 收口两条把未证实写成清白的洞）。
+ *
+ * 机械回归 = 同一用例 latest 的机械通过率严格低于 baseline（见 mechanicalRateDeclined）。
+ * 不只登记「基线全通过且 latest 出现失败」：基线 4/5、latest 3/5 同样是回归。
+ *
+ * 覆盖（任一即 compared=false，reason 列明缺失，不得满足 required）：
+ *   - 任一侧无机械结果；
+ *   - latest 没覆盖 baseline 的某个用例；
+ *   - 传入了声明用例集时，声明集里有用例不在 baseline 或 latest 中。
+ *     只遍历 baseline 会把「声明了 B、两份对照都只有 A」写成 compared=true、无回归，
+ *     下游再把它当成 A、B 两例的共同证据。
  */
-export function findEvalRealRegressions(baselineDoc, latestDoc) {
+export function findEvalRealRegressions(baselineDoc, latestDoc, expectedCases = null) {
   const base = probeStats(baselineDoc);
   const latest = probeStats(latestDoc);
   if (!base || !latest) {
     return { compared: false, reason: '缺 eval-real baseline 或 latest 的机械结果', regressions: [], unverified: [] };
+  }
+  const expected = Array.isArray(expectedCases) && expectedCases.length > 0
+    ? uniqueCaseIds(expectedCases)
+    : null;
+  const declaredMissing = [];
+  if (expected) {
+    for (const id of expected) {
+      const holes = [];
+      if (!base.has(id)) holes.push('baseline');
+      if (!latest.has(id)) holes.push('latest');
+      if (holes.length > 0) declaredMissing.push({ id, holes });
+    }
   }
   const regressions = [];
   const unverified = [];
@@ -188,17 +288,19 @@ export function findEvalRealRegressions(baselineDoc, latestDoc) {
       unverified.push(id);
       continue;
     }
-    const baselinePassedAll = b.rounds > 0 && b.passes === b.rounds;
-    const latestFailed = l.rounds > l.passes;
-    if (baselinePassedAll && latestFailed) regressions.push(id);
+    if (mechanicalRateDeclined(b, l)) regressions.push(id);
   }
-  if (unverified.length > 0) {
-    return {
-      compared: false,
-      reason: `latest eval-real 未覆盖 baseline 用例：${unverified.join('、')}`,
-      regressions,
-      unverified,
-    };
+  const reasonParts = [];
+  if (declaredMissing.length > 0) {
+    reasonParts.push(`声明用例未被 eval-real 对照覆盖：${declaredMissing.map((m) => `${m.id}（${m.holes.join('、')}缺）`).join('、')}`);
+  }
+  const declaredMissingIds = new Set(declaredMissing.map((m) => m.id));
+  const unverifiedExtra = unverified.filter((id) => !declaredMissingIds.has(id));
+  if (unverifiedExtra.length > 0) {
+    reasonParts.push(`latest eval-real 未覆盖 baseline 用例：${unverifiedExtra.join('、')}`);
+  }
+  if (reasonParts.length > 0) {
+    return { compared: false, reason: reasonParts.join('；'), regressions, unverified };
   }
   return { compared: true, reason: '', regressions, unverified: [] };
 }
@@ -223,7 +325,8 @@ export function normalizeRegressionList(doc) {
 
 /**
  * 「可做 required」的额外条件。通过率达标只是必要项：
- *   1) 最近一次 eval-real 无机械 pass→fail（需要 baseline + latest 且用例集合覆盖）；
+ *   1) 最近一次 eval-real 无机械通过率下降（含 pass→fail 与未全通过基线的继续下降），
+ *      且 baseline + latest 覆盖声明用例集（缺号 = 未对照，不是无回归）；
  *   2) 无未消假红（需要 --regressions 清单，空数组才算清白）。
  * 证据缺失不得当成清白——一律返回「稳定性达标但需先消回归」。
  */
@@ -239,7 +342,7 @@ export function evaluateRequiredReadiness(rate, evidence = {}) {
   if (!evidence.evalRealCompared) {
     reasons.push(evidence.evalRealReason || '缺最近一次 eval-real 机械对照（--eval-real-baseline + --eval-real-latest）');
   } else if ((evidence.evalRealRegressions ?? []).length > 0) {
-    reasons.push(`eval-real 机械 pass→fail：${(evidence.evalRealRegressions ?? []).join('、')}`);
+    reasons.push(`eval-real 机械通过率下降（含 pass→fail）：${(evidence.evalRealRegressions ?? []).join('、')}`);
   }
   if (!evidence.regressionsChecked) {
     reasons.push('缺未消假红清单（--regressions）');
@@ -265,6 +368,24 @@ export function evaluateDiscrimination(strongDoc, weakDoc, minValidComparisons =
   const strongSummary = strongDoc && typeof strongDoc === 'object' ? (strongDoc.summary ?? {}) : {};
   const weakSummary = weakDoc && typeof weakDoc === 'object' ? (weakDoc.summary ?? {}) : {};
   const declaredIds = expected && Array.isArray(expected.cases) && expected.cases.length > 0 ? expected.cases : null;
+  // 重复 id 会把同一份证据加权：声明 A,B 可以是「无显著差异」，声明 A,A,B 变成
+  // 「强模型明显更优（2/3）」。拒绝整段比较，不静默去重后照样下结论。
+  if (declaredIds) {
+    const dups = duplicateCaseIds(declaredIds);
+    if (dups.length > 0) {
+      const verdict = `无法判定（声明用例集有重复 id：${dups.join('、')}；重复 id 不构成额外证据，已拒绝加权）`;
+      return {
+        rows: [],
+        validComparisons: 0,
+        missing: 0,
+        strongBetter: 0,
+        weakBetter: 0,
+        noDifference: 0,
+        verdict,
+        insufficient: true,
+      };
+    }
+  }
   const ids = declaredIds ?? [...new Set([...Object.keys(strongSummary), ...Object.keys(weakSummary)])];
   const expectedRounds = expected && Number.isInteger(expected.rounds) && expected.rounds > 0 ? expected.rounds : null;
   const rows = [];
@@ -378,7 +499,14 @@ export function buildReport({
     exitCode = 2;
   }
 
-  const evalReal = findEvalRealRegressions(evalRealBaselineDoc, evalRealLatestDoc);
+  // 声明用例集（稳定性优先，否则区分度）是 eval-real 对照必须盖住的分母。
+  // 不传入时维持「只核对 baseline 与 latest 互覆盖」——没有声明就没有可核对的期望集。
+  const declaredCases = (stabilityExpected && Array.isArray(stabilityExpected.cases) && stabilityExpected.cases.length > 0)
+    ? stabilityExpected.cases
+    : (discriminationExpected && Array.isArray(discriminationExpected.cases) && discriminationExpected.cases.length > 0)
+      ? discriminationExpected.cases
+      : null;
+  const evalReal = findEvalRealRegressions(evalRealBaselineDoc, evalRealLatestDoc, declaredCases);
   const unresolvedFalseReds = normalizeRegressionList(regressionDoc);
   const evidence = {
     evalRealCompared: evalReal.compared,
@@ -456,8 +584,8 @@ export function buildReport({
       }
       if (stableCount > 0) {
         parts.push(eligibleCount === stableCount
-          ? `其余 ${stableCount} 例通过率 ≥ ${Math.round(STABILITY_THRESHOLD * 100)}%，且最近 eval-real 无机械 pass→fail、无未消假红，可评估 required 化。`
-          : `其余 ${stableCount} 例通过率 ≥ ${Math.round(STABILITY_THRESHOLD * 100)}%，但 ${stableCount - eligibleCount} 例尚未满足 required 的回归条件（最近一次 eval-real 无机械 pass→fail + 无未消假红）——「稳定性达标但需先消回归」。`);
+          ? `其余 ${stableCount} 例通过率 ≥ ${Math.round(STABILITY_THRESHOLD * 100)}%，且最近 eval-real 无机械通过率下降（含 pass→fail）、声明用例均被对照覆盖、无未消假红，可评估 required 化。`
+          : `其余 ${stableCount} 例通过率 ≥ ${Math.round(STABILITY_THRESHOLD * 100)}%，但 ${stableCount - eligibleCount} 例尚未满足 required 的回归条件（最近一次 eval-real 无机械通过率下降（含 pass→fail）、声明用例均被对照覆盖 + 无未消假红）——「稳定性达标但需先消回归」。`);
       }
       // 通过率只是建议线：稳定但证据不足时原因要写出来，别让读者以为 80% 就够。
       if (blockedReasons.size > 0) {
@@ -580,6 +708,12 @@ export function parseArgs(argv) {
     const cases = String(raw).split(',').map((x) => x.trim()).filter(Boolean);
     if (cases.length === 0 || !cases.every((id) => /^[A-Za-z0-9-]+$/.test(id))) {
       throw new UsageError('--expect-cases 必须是逗号分隔的用例 id（^[A-Za-z0-9,-]+$，且无空段）');
+    }
+    // 与探针 --only 的集合语义、区分度逐项比较、workflow 阶段轮数同一口径：
+    // 重复 id 直接拒绝。静默去重会把用户声明的分母悄悄缩小；留着则会给同一份证据加权。
+    const dups = duplicateCaseIds(cases);
+    if (dups.length > 0) {
+      throw new UsageError(`--expect-cases 含重复用例 id：${dups.join('、')}（声明集是集合，与探针 --only 一致；重复 id 会给同一份证据加权，已拒绝）`);
     }
     return cases;
   };
