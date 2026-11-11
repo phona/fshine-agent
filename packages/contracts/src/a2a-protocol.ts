@@ -8,6 +8,9 @@
  *
  * 边界：这里不含任何网关名、脚本路径或执行层业务字段。那些属于执行层适配边界
  * （迁移期收口在 packages/agent/src/platform-contract.ts），协议语义本身不依赖它们。
+ * 协议不关心实现（owner 2026-11-10）：下文若点名 CLI 出口（operation list / call --file），
+ * 只说明它们是执行层的适配器绑定，不是协议要求——执行层可用任何传输实现（CLI/网络），
+ * 协议只要求能力语义。
  */
 
 /** 协议版本；随委派块下行，执行层据此识别契约，不认识的版本按协议拒绝。 */
@@ -111,8 +114,9 @@ export interface DelegationBlock {
 /**
  * 单个 operation 的声明（能力清单的一行；执行层持有，宿主只消费）。
  *
- * 逐字段对应 docs/a2a-protocol.md 参与方表「执行层持有」那一行，也是
- * `<gateway> operation list --json` 输出在宿主侧的投影形状。纪律与宿主既有消费面
+ * 逐字段对应 docs/a2a-protocol.md 参与方表「执行层持有」那一行。协议只要求这些
+ * 能力语义，不规定出口形态：`<gateway> operation list --json` 是执行层的适配器绑定，
+ * 不是协议要求——执行层可用任何传输实现（CLI/网络）。纪律与宿主既有消费面
  * （packages/agent/src/operation-labels.ts 的 AccessSemantics）一致：
  *   · requiresPlan 是协议语义（「需不需要计划」的声明事实，宿主据此机械复核）；
  *   · effects / serveMatrix 是**开放词表**——词汇由执行层自己持有，宿主原样投影、
@@ -131,16 +135,17 @@ export interface OperationDeclaration {
   readonly label: string | null;
   /** serve 矩阵开放词表（该 operation 的许可/法域声明）；宿主原样投影。 */
   readonly serveMatrix: readonly string[];
-  /** 声明式 args schema：平台 `operation list --json` 的 args 规格派生的参数名清单（flag 含 `--` 前缀）；宿主只做 fail-closed 复核，不解析业务值。 */
+  /** 声明式 args schema：由执行层能力声明派生的参数名清单。协议只要求这份参数名语义；平台 `operation list --json` 的 args 规格是适配器绑定（走 CLI 时 flag 可含 `--` 前缀），不是协议要求——执行层可用任何传输实现（CLI/网络）。宿主只做 fail-closed 复核，不解析业务值。 */
   readonly argsSchema?: readonly string[];
 }
 
 /**
  * 能力清单：执行层对宿主声明「我有哪些 operation、各自要什么」。
  *
- * **只作 `<gateway> operation list --json` 的消费投影**（生命周期第②阶段「发现」）：
- * 权威是执行器的实时输出，宿主不缓存、不复制、不另立名单（L2 单一来源）——本类型
- * 不引入任何文件读取路径，清单没有的能力视为不存在。
+ * 协议只要求这份能力语义（生命周期第②阶段「发现」），不规定传输：
+ * `<gateway> operation list --json` 是适配器绑定，不是协议要求——执行层可用任何
+ * 传输实现（CLI/网络）。权威是执行层当次声明的实时结果，宿主不缓存、不复制、
+ * 不另立名单（L2 单一来源）——本类型不引入任何文件读取路径，清单没有的能力视为不存在。
  */
 export interface CapabilityManifest {
   /** 清单对应的协议版本，取值为 A2A_PROTOCOL_VERSION。 */
@@ -153,8 +158,9 @@ export interface CapabilityManifest {
  * 结构化调用：worker → 宿主 → 执行层的调用载体（operation + 结构化参数）。
  *
  * 取代裸命令行 JSON 传参：args 的 schema 由执行层能力清单声明派生，宿主按声明做
- * 机械复核（requiresPlan / effects / serve 矩阵），**不解析不校验业务参数**；
- * 网关侧出口是 `<gateway> call --file <json>`。
+ * 机械复核（requiresPlan / effects / serve 矩阵），**不解析不校验业务参数**。
+ * 协议只要求上述能力语义，不规定出口：`<gateway> call --file <json>` 是适配器绑定，
+ * 不是协议要求——执行层可用任何传输实现（CLI/网络）。
  */
 export interface StructuredCall {
   /** 目标 operation 注册名（必须在能力清单内；清单没有的视为不存在）。 */
