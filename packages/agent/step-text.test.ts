@@ -18,10 +18,10 @@ import {
 
 describe('进度帧渲染：内部工具与短语钳制', () => {
   it('宿主内部工具不发默认进度帧（工具名本身就是内部机制字样）', () => {
-    for (const tool of ['route_current_turn', 'search_history', 'get_messages']) {
+    for (const tool of ['route_current_turn']) {
       expect(defaultStepText(tool)).toBeNull();
       // 模型自填短语同样不发：这些工具描述的是宿主编排机制，没有用户可见动作
-      expect(renderToolStepText(tool, '正在检索历史对话')).toBeNull();
+      expect(renderToolStepText(tool, '正在申报本轮动作')).toBeNull();
       expect(renderToolStepText(tool, '')).toBeNull();
     }
   });
@@ -89,6 +89,6 @@ describe('进度帧渲染：内部工具与短语钳制', () => {
     // 非内部工具 + 可用短语 → 短语优先
     expect(renderToolStepText('run_task', '查询往来记录')).toBe('查询往来记录');
     // 内部工具 + 泄漏短语 → null（driver 侧必须因此跳过 onStep）
-    expect(renderToolStepText('search_history', 'task_1 续跑')).toBeNull();
+    expect(renderToolStepText('route_current_turn', 'task_1 续跑')).toBeNull();
   });
 });

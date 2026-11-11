@@ -7,7 +7,7 @@
  * 幻觉过对象名），错的是出处范围：本会话用户**亲自操作过**的实体同样是合法出处。
  *
  * 来源 A（本文件）：`platform_tasks` 里**执行过**的任务的 calls 快照，按平台 args 规格
- * （`operation list --json`）机械提取实体承载参数的取值。与执行台账（execution-facts）
+ * （`operation list --json`）机械提取实体承载参数的取值。与已删除的宿主执行台账
  * 同源同纪律：只认宿主持有的结构化底账，**绝不从结果原文/worker 文本解析**——转录里
  * "提过"不等于"执行过"；规格拿不到时降级为空数组（安全缺省，与 label/argStyles 派生
  * 一致：没有规格就不提取，绝不用宿主硬编码参数名顶替）。
@@ -134,7 +134,7 @@ export function mergeSessionEntities(...groups: ReadonlyArray<readonly string[]>
 }
 
 /**
- * 读底账取来源 A（异步包装：存储抛错由调用方兜底降级，与执行台账/主动回溯同一套路径）。
+ * 读底账取来源 A（异步包装：存储抛错由调用方兜底降级，与其它宿主事实取数同一套路径）。
  */
 export async function collectSessionEntities(options: {
   platformTasks: Pick<PlatformTaskRepo, 'listBySession'>;
@@ -148,7 +148,7 @@ export async function collectSessionEntities(options: {
 
 /**
  * 上面那个的安全包装（runtime 每回合调一次）。存储未注入 / 抛错 → 空数组 + 一条 error
- * 日志：实体门退回另外三个来源，不失败回合——与执行台账、主动回溯不可用时同一族降级。
+ * 日志：实体门退回另外三个来源，不失败回合——与其它宿主事实不可用时同一族降级。
  *
  * 为什么降级住在这一层而不是 `collectSessionEntities` 里：判据本体保持"抛错向上传播"
  * （session-entities.test.ts 钉住了这一点），要不要吞掉是**调用策略**——runtime 每回合都

@@ -321,7 +321,7 @@ function cleanArgValue(value: unknown): string | undefined {
  * 全部是**宿主可见的机械事实**：calls 是宿主自己从 worker 提交的计划命令解析出来的，
  * 取值按平台 args 规格的声明名逐位对应（位置参数按序、flag 按 kebab→camel 声明名），
  * label 是平台清单第 5 列。**绝不从 worker 文本解析**——转录里"提过"不等于"执行过"，
- * 模糊匹配正是 execution-facts 要替代的东西。规格缺失 / 声明名对不上 → 该字段不出项
+ * 模糊匹配正是已删除的宿主执行台账要替代的东西。规格缺失 / 声明名对不上 → 该字段不出项
  * （宁缺勿猜），调用方据此降级渲染。
  */
 export function planCallFacts(

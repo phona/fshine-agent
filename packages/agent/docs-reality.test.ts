@@ -94,13 +94,12 @@ describe('docs-reality：文档主张与代码现实对账', () => {
     expect(countAcross('renderBarChartPng'), 'renderBarChartPng 复现：演示彩蛋回到生产入口——D-051 闭环失效').toBe(0);
   });
 
-  it('L1 防御排除不得失踪：五条财务正则与 hasFinancialFigure', () => {
-    // 这五条正则让记忆提取器对财务事实保持敏感，hasFinancialFigure 守出口校验——
-    // 删任何一条 = 防线变聋（leak-lint 会同步红，这里双保险钉存在性）。
-    const extractor = read('packages/agent/src/memory-candidate-extractor.ts');
-    for (const name of ['PERIOD_RE', 'ACCOUNT_SET_RE', 'BALANCE_RE', 'CURRENCY_AMOUNT_RE', 'FINANCIAL_RESULT_RE']) {
-      expect(extractor.includes(name), `防御排除失踪：memory-candidate-extractor 的 ${name} 被删——防线变聋`).toBe(true);
-    }
+  it('L1 防御排除不得失踪：出口校验 hasFinancialFigure', () => {
+    // 相位 1（T2）删除了长期记忆提取器（memory-candidate-extractor.ts）及其五条财务
+    // 识别正则（PERIOD_RE / ACCOUNT_SET_RE / BALANCE_RE / CURRENCY_AMOUNT_RE /
+    // FINANCIAL_RESULT_RE）——"拦临时财务事实存进长期记忆"的防御对象已随路径删除。
+    // 仍在岗的同族防线是出口校验 hasFinancialFigure（澄清/终稿"无执行不给数"）：
+    // 删掉 = 出口校验变聋，此处翻红。
     expect(read('packages/agent/src/runtime-quality.ts').includes('function hasFinancialFigure'), '防御排除失踪：hasFinancialFigure 被删——出口校验变聋').toBe(true);
   });
 
