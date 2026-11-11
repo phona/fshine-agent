@@ -58,7 +58,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 | 机制 | 类 | 判据 |
 |---|---|---|
-| T5 执行范围对账 | B | **执行集合 ⊆ 已确认计划**（裁定形态 = 有界扩张门；裁定与实现史见 decision-log 四）。换任何模型都必须在 |
+| T5 执行范围对账 | B | **执行集合 ⊆ 已确认计划**（裁定形态 = **有界扩张门**，帽 = 既有读类探测帽缺省值 5——`pi-coding-driver.ts` 的 `DEFAULT_READ_PROBE_CAP`，帽取既有常数不立新数；「第一跳即拒、不设探索额度」会违反 `serve-gate.test.ts`「探索性查询不锁死」用例钉死的设计决定。裁定与实现史见 decision-log 四）。换任何模型都必须在 |
 | T6 任务级确认门兜底 | B | 授权不依赖模型配合 |
 | T10 任务生命周期四段（结果对账 / 停滞冻结 / 冻结续跑 / 挂死留痕） | B | 结果对账 = **声明 N 与独立读回 N 的对账**；任务状态机 + 恢复 + 结果验证 |
 | T7 无空回复 | A（穿工程外衣） | 测模型话术退化；模型变强即消失 |
@@ -66,7 +66,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **T5/T10 判据不得对调**：T5 = 执行集合对已确认计划的范围对账；T10 = 任务生命周期四段，其中的结果对账才是「声明 N vs 独立读回 N」。两者都是 B 类，但对象不同。
 
-**五项状态（2026-11-11 实测）**：T5 = 裁定形态**待实施**（PR #53 现有提交是「第一跳即拒」的临时修法，不是裁定的有界扩张门）；T6 = **在 PR #53 未合**；T8 = **在 PR #53 未合**；T7 = **在 PR #54 未合**（窗口贴边压缩 + thinking-only 收尾催问，PR #54 正文 T7 段与 `pi-driver-nudge.test.ts` / `compaction-window.test.ts` 实测；decision-log 3.8 记 T7「无实现」，该记录与实测不一致，以实测为准并回写 decision-log）；T10 = **在 PR #55 未合**（四段）。其中 **T10 的崩溃恢复用例尚不存在**：截至 2026-11-11 `tests/e2e` 对 `崩溃|crash` 零命中，PR #55 的 diff 与正文均无崩溃恢复；Pi Durable 的引入判据因此还没有对应用例。
+**五项状态（2026-11-11 实测）**：T5 = 裁定形态**待实施**（PR #53 现有提交 = **临时形态**：「第一跳即拒、不设探索额度」，与裁定的有界扩张门（帽 5）不一致——读 PR #53 按临时形态理解）；T6 = **在 PR #53 未合**；T8 = **在 PR #53 未合**；T7 = **在 PR #54 未合**（窗口贴边压缩 + thinking-only 收尾催问，PR #54 正文 T7 段与 `pi-driver-nudge.test.ts` / `compaction-window.test.ts` 实测；decision-log 3.8 记 T7「无实现」，该记录与实测不一致，以实测为准并回写 decision-log）；T10 = **在 PR #55 未合**（四段）。其中 **T10 的崩溃恢复用例尚不存在**：截至 2026-11-11 `tests/e2e` 对 `崩溃|crash` 零命中，PR #55 的 diff 与正文均无崩溃恢复；Pi Durable 的引入判据因此还没有对应用例。
 
 **保留的 B 类（2026-11-11 复核，模型强十倍还在）**：
 
@@ -130,13 +130,13 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 **当前违例**：
 
 - **真违例（3 处，扩词后即被守卫抓到）——均已清（2026-10-16 对账核实，守卫 = `packages/agent/docs-reality.test.ts`）**：
-  - ~~`packages/agent/src/runtime.ts:1539` — `'你是企业财务助手和面向用户的主 Agent。'`（**财务**）~~ **已清**：persona 现为「面向用户的主 Agent」（runtime.ts 的 `SYSTEM_PROMPT`），「财务助手」宿主 src 零命中。行号 1539 是拆分前旧文件的引用（现文件 1221 行）——行号引用禁令见执行纪律 4。D-001 已关。
-  - ~~`packages/agent/src/error-codes.ts:158` — `text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。'`（**税号**；直角引号 `“”` 为原文）。Lane C 本波清。~~ **已关**（2026-09-27 Wave 2 Lane D）：模板退化为纯结构 `没有找到匹配“{query}”的对象。{hint}我再查。`，`{hint}` 由平台信封 `error.correctForm` 作为**平台下发**数据填充；宿主只存"信封没带时的兜底"（挂"遗留待清"）。见 debt-ledger D-002。
-  - ~~`packages/agent/src/context.ts:360` — `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**），同时是 L4 违例~~ **已清**（2026-10-14 D 波 `3e5a36c` 写路径收敛为唯一形态）：legacy 摘要渲染与 `ChangeIntentRecord` 业务字段整体删除，全仓非测试零命中。D-003/D-030 已关。
+  - ~~`packages/agent/src/runtime.ts` 的主 Agent persona 文案—— `'你是企业财务助手和面向用户的主 Agent。'`（**财务**）~~ **已清**：persona 现为「面向用户的主 Agent」（`system-prompt.ts` 的 `SYSTEM_PROMPT`，`buildSystemPrompt` 生成），「财务助手」宿主 src 零命中。原记录用行号定位，runtime 拆分后行号指向了拆分前的旧文件——事故原文按行号留档于 debt-ledger D-104，本文件一律改符号名（执行纪律 4）。D-001 已关。
+  - ~~`packages/agent/src/error-codes.ts` 的 `NOT_FOUND_SELECTION` 文案（`text` 模板）— `text: '没有找到匹配“{query}”的对象。请确认准确名称（或编号/税号）后我再查。'`（**税号**；直角引号 `“”` 为原文）。Lane C 本波清。~~ **已关**（2026-09-27 Wave 2 Lane D）：模板退化为纯结构 `没有找到匹配“{query}”的对象。{hint}我再查。`，`{hint}` 由平台信封 `error.correctForm` 作为**平台下发**数据填充；宿主只存"信封没带时的兜底"（挂"遗留待清"）。见 debt-ledger D-002。
+  - ~~`packages/agent/src/context.ts` 的 legacy 提案摘要渲染（`proposal_created` 摘要行）— `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**），同时是 L4 违例~~ **已清**（2026-10-14 D 波 `3e5a36c` 写路径收敛为唯一形态）：legacy 摘要渲染与 `ChangeIntentRecord` 业务字段整体删除，全仓非测试零命中。D-003/D-030 已关。
 - **防御排除（不得删、须挂标签）**：
-  - ~~`memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE`（第 21 行）、`ACCOUNT_SET_RE`（22）、`BALANCE_RE`（23）、`CURRENCY_AMOUNT_RE`（24）、`FINANCIAL_RESULT_RE`（25）。删任何一条 = 记忆提取器对财务事实变聋。~~ **随 v0-architecture §12 ② 删除**（2026-11-11 裁定，**在 PR #54 未合**）：文件整体删除，本条防御排除项一并退役。合入前 `docs-reality.test.ts` 仍逐条钉这五条正则在场；合入后该守卫条目须同步退役，否则红。合入后不得再把"记忆提取器对财务事实变聋"写成现存风险——提取器已不存在。**注意**：这不是"拆防线"——删除对象是 v0-architecture §12 裁定删除的机制，不属于 B 类判据里的授权 / 幂等 / 审计 / 结果验证。
-  - `hasFinancialFigure`（runtime.ts 定义，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。
-  - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts:72`，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
+  - ~~`memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE` / `ACCOUNT_SET_RE` / `BALANCE_RE` / `CURRENCY_AMOUNT_RE` / `FINANCIAL_RESULT_RE`。删任何一条 = 记忆提取器对财务事实变聋。~~ **随 v0-architecture §12 ② 删除**（2026-11-11 裁定，**在 PR #54 未合**）：文件整体删除，本条防御排除项一并退役。合入前 `docs-reality.test.ts` 仍逐条钉这五条正则在场；合入后该守卫条目须同步退役，否则红。合入后不得再把"记忆提取器对财务事实变聋"写成现存风险——提取器已不存在。**注意**：这不是"拆防线"——删除对象是 v0-architecture §12 裁定删除的机制，不属于 B 类判据里的授权 / 幂等 / 审计 / 结果验证。
+  - `hasFinancialFigure`（`runtime-quality.ts` 定义、`runtime.ts` re-export，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。
+  - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts` 常量，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
 - ~~**遗留待清（2026-11-05 脱敏波登记，D-155）**：`config/agent.example.yaml` 的 5 处执行层实例名词（含 `contextProfiles` 的结构键）无守卫覆盖——`config/` 不在 platform-leak-lint 与 docs-reality 任何扫描范围内。**归属**：W1 / 波次 4；**闭环判据**：gate① 对账时该文件零实例名词且结构键完成参数化；**限期**：波次 4。不得因"exposure-lint 扫 `git ls-files` 全量、已覆盖该模板的暴露三类"就当它已清——缺口在名词类，两类判据不相通。~~ **已关**（2026-11-06 波次 5 对账核实：`config/agent.example.yaml` 现行树零实例名词，结构键已参数化为 `<profileId>` 中性占位；闭环判据机械满足）。
 
 **闭环判据**：**非防御命中 = 0；防御项 100% 挂"防御排除"标签**（`hasFinancialFigure` 必须在场；五条正则 **随 v0-architecture §12 ② 删除，在 PR #54 未合**——合入前仍须逐条在册，合入后不再要求在场）。
@@ -156,8 +156,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 - **网关名 `bin/example-gateway`：代码字面量已归零（2026-11-05 W1 C7b，L2 断点达成）**——`GATEWAY_INVOCATION` 常量已删除：文本识别与诊断渲染 fail-closed（`resolveGatewayText` 未声明有效 gateway 即抛中性错），spawn 路径 `gatewayExecPathForProfile` 同判据，渲染面先行经 C7a 穿线（`plan-runtime` 14 处 errorFor、`pi-coding-driver` 6 处 messageFor/errorFor、`error-codes.ts` 惰性模板全部按注入 gateway 求值）。实例网关名唯一来源 = 部署的 `contextProfiles.<id>.gateway` 声明。历史口径（C7b 前）：代码字面量收敛至 1（该常量），注释/示例字面量除外；历史窗口内（C7b 前基线）曾 20→35 增长（+15，+75%），增长源=错误码表与提示词的消息文本——已由配置派生修复，现为终态归零。src 注释里的 `bin/example-gateway` 字面量由 W1 C8 的身份面守卫接管（排除与签机制见该守卫）。
 - **plan 草案形状的教学副本 6 处且自相矛盾（D-011）**——**已关**（2026-09-27 Wave 2 Lane D）。6 处收敛为 1 处：`error-codes.ts` 的 `planDraftExample()` 是唯一教学源（内容与平台 plan-schema.json 声明一致），表内 5 处与 `context.ts` worker 提示词 1 处全部由它派生；机械锁 = `plan-teaching.test.ts`（跨仓读平台 schema 断言形态合法 + 宿主解析器认同一形状 + 源文件零第二种形状字面量）。原闭环判据 `grep 'plan {"goal"'` → 0 已作废：Lane B 把 goal 收编为 schema 声明过的可选元数据，教学示例合法地含 goal。历史形状（D0 审计快照，保留备查）：fshine `error-codes.ts` 计划门错误表 5 处（`CORRECT_PLAN_SHAPE`/`PLAN_SUBCOMMAND_RESERVED`/`PLAN_JSON_NOT_OBJECT`/`PLAN_CALLS_NOT_ARRAY`/`PLAN_SHAPE_GATE_TEACHING`，其中 4 处教带 goal 形、1 处教无 goal 形）+ `context.ts` worker 系统提示词 1 处；example-skill 那 1 处已由 Lane B④ 删除。矛盾要害即"同一张表两种形状 = 模型静默选一份信"。
 - **错误码表镜像**：~~`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。~~ **已退化为渲染层**（2026-09-27 Wave 2 Lane D）：`NOT_FOUND_SELECTION` 只拼结构，措辞槽位优先取信封 `error.correctForm`；宿主表仅存"信封没带时的兜底"并挂"遗留待清"（D-002）。`AMBIGUOUS_SELECTION` 的用户可见事实已全部来自信封数据，平台给它的 correctForm 是解析方规则、不上屏。**镜像层已退役**（2026-11-05 W2）：文件头框架去镜像（宿主只持渲染纪律与结构教学，平台错误码表与 schema 是权威、消费不抄写）；`correctForm` 教学只留结构（`ENTITY_OUT_OF_SCOPE` 清零平台 operation 名、`PLAN_CALL_ARGS_NOT_ARRAY` 清零业务命令语法示例）；信封数据优先（`{hint}` 槽位）+ 宿主兜底只留结构（`hintFallback` / `ASSISTANT_NOT_FOUND_SELECTION` 句尾，挂遗留待清，D-002 追记补限期与第二处兜底）；机械锁 = `error-codes.test.ts` 三把全表锁（零 operation 名 / args 教学零旗标示例 / 全表零业务词，哑值填充）+ `plan-teaching.test.ts` 形状锁。
-- **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts:72`。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
-- **ask.ts 复刻装配层**：~~`scripts/ask.ts`（第 104–137 行）把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。~~ **已消除**（2026-09-27 Wave 2 Lane D）：`apps/server/plan-confirmation-route.ts` 导出工厂 `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`，assembly 与 ask.ts 共用；TTL 收敛为 `PLAN_CONFIRMATION_TTL_MS`（D-013）。
+- **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts` 的 `KEY_ARG_FLAGS` 常量。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
+- **ask.ts 复刻装配层**：~~`scripts/ask.ts` 的装配复刻段把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。~~ **已消除**（2026-09-27 Wave 2 Lane D）：`apps/server/plan-confirmation-route.ts` 导出工厂 `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`，assembly 与 ask.ts 共用；TTL 收敛为 `PLAN_CONFIRMATION_TTL_MS`（D-013）。
 - **遗留待清（2026-11-05 脱敏波登记，D-154）**：e2e/探针/验收/smoke:commit:mock 对兄弟仓 mock seed 目录的硬耦合——`tests/e2e/harness.ts` 真 spawn 兄弟仓 CLI、`respond.js` 把 seed 拷为 mock 状态；脱敏波只改了 fshine 一侧夹具名，seed 未同批改名，经 mock 目录的 Tier B 链转红。**归属**：W5 前；**闭环判据**：两仓夹具按同一张映射表同步机械改名后，执行层检出就位前提下 `npx vitest run tests/e2e` 全绿；**限期**：W5 前。同步前 Tier B 红是已知状态，任何报告不得写成绿。**2026-11-07 附注（非销账）**：harness 改统一配置解析后实测 e2e 失败集合不增（改前改后逐文件比较）——这只是无回归证据，seed 改名失配未修，本条维持遗留待清。
 
 **闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 执行层 `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，见 `plan-runtime.ts`）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；代码网关名 ≤1（配置派生；注释/示例字面量除外，grep 总量另记，不计入本判据）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
@@ -191,7 +191,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 **当前违例**：**编排层侧已清**（2026-10-14 D 波 `3e5a36c`「写路径收敛为唯一形态」：`FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 退役，`finalizeProposal` / `ChangeIntentRecord` 业务字段 / 借贷合计渲染整体删除；2026-10-16 对账核实全仓非测试零命中）：
 
 - ~~`ChangeIntentRecord`（`packages/contracts/src/store.ts`）持 `voucher.batch` / `accountSet` / `period` / `summary` 业务字段~~ 已删。
-- ~~`context.ts` 渲染借贷合计（第 360 行）~~ 已删（同 L1 / L3）。
+- ~~`context.ts` 的借贷合计渲染（同 L1 的 legacy 提案摘要渲染分支）~~ 已删（同 L1 / L3）。
 
 **L4 整体保持开放**：闭环判据的 §17 写路径 latent 七项（D-031，执行层侧执行器的数据正确性债）仍未闭环——编排层侧不再有违例，不等于写路径可以开放。
 
@@ -224,7 +224,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 **当前违例**：
 
 - ~~`packages/mcp-fake`、`packages/mcp-host`：`src/` 空、全仓零引用。~~ **已清**（目录整体删除；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-050 已关。
-- ~~`apps/server/reply.ts` 假数据彩蛋（第 9–16 行）：命中 `/发图|测试图片|图片/` 即返回硬编码 `renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200])` + "幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)"。~~ **已清**（文件整体删除，`renderBarChartPng`/"模拟数据" 全仓非测试零命中；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-051 已关。
+- ~~`apps/server/reply.ts` 假数据彩蛋分支：命中 `/发图|测试图片|图片/` 即返回硬编码 `renderBarChartPng([1200, 1850, 990, 2400, 1750, 3000, 1500, 2200])` + "幻晟 202607 凭证金额分布(模拟数据 · 图片通道演示)"。~~ **已清**（文件整体删除，`renderBarChartPng`/"模拟数据" 全仓非测试零命中；2026-10-16 对账核实，守卫 = `docs-reality.test.ts`）。D-051 已关。
 - `step-text.ts` 6 个退役工具名死分支：`search_account_sets`/`get_current_accounting_period`/`list_vouchers`/`inspect_account_set`/`search_references`/`get_login_status`（现挂在 leak-lint 的字面量 if 白名单，属"遗留待清"）。
 - 执行层仓根 465KB 会话日志：`codex-session-01a0bd75-38f6-79f3-91ed-617ba8fe5ce9.md`（465137 字节，**已被 git 跟踪**）。
 - `.env.real` 残留（fshine 仓根，1635 字节，已被 `.gitignore`——本地沉积、非主干，但有泄露面；**D-054：接受不修，仓库侧已关**——与台账同步，见 debt-ledger 2026-11-04 补充记录）。
@@ -311,4 +311,4 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 执行层 `execution-env` 过渡期双读。证伪项：初核曾把 执行层 `docs/architecture.md` 「已知短板」节的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
 2. **判据若写得比机制真相更干净，执行者会把防御机制当违例删掉。** 所以标签制度先于清单、验收时逐条核对标签——一条命中该挂"防御排除"还是"警职执法"，删了它会不会让某道防线变聋 / 变瞎，是唯一裁决问题。
 3. **每波只 revert 该波 commit，宪章与台账保留。** 债务状态是快照不是负担；宪章跨波有效，不随单波回退消失。
-4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零，本次对账实证四起（工具面头注释两度未跟、`runtime.ts:1539` 指向拆分前文件、`runtime.ts:1260` 实为 1169、`context.ts:360` 指向已删违例）。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理另登记台账 D-104。
+4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零——2026-10-16 对账实证四起（工具面头注释两度未跟工具面实况；行号引用三起，分别指向拆分前旧文件、拆分后错位文件、已删违例），逐起原文按行号留档于 debt-ledger D-104，本文件一律符号名引用。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理登记台账 D-104（laws 侧 2026-11-12 已清，ledger 侧未做）。
