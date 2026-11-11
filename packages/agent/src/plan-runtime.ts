@@ -1,7 +1,9 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { decideBudgetTier } from './budget-policy';
+import { decideBudgetTier, stricterTier } from './budget-policy';
 import { errorFor } from './error-codes';
+import { scrubExecutionLanguageText } from './execution-language';
+import { isConfirmGateTier, taskBudgetDecision, ZERO_TASK_BUDGET, type TaskBudgetUsage } from './task-budget';
 import { operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayExecPathForProfile, gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 
@@ -85,6 +87,14 @@ export interface EvaluateAndActivatePlanOptions {
   activationSecret?: string;
   /** Profile 声明的网关调用形式，透传给默认 runner（注入 runner 时由 runner 自行决定）。 */
   gateway?: string;
+  /**
+   * T6（2026-11-11）：本任务**已经授权花掉**的预算（宿主账本，按已激活计划累计 estimate）。
+   * 缺省 = 空账本（单张叠加档行为与从前一字不差）。给定后，宿主在单张叠加档之上再叠一层
+   * 任务累计档：只有累计数才能把「切成多张都在确认线以下的小计划」逐张提交的任务推进
+   * confirm 档（今天 D2 两臂的败状）。账本由调用方持有——本函数保持无状态（同一次调用不
+   * 拥有任务生命周期），跨回合的账本延续由调用方决定。
+   */
+  taskBudgetUsage?: TaskBudgetUsage;
 }
 
 export async function loadCurrentActivePlan(options: {
@@ -190,6 +200,21 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
     throw new Error('plan evaluate 未下发合法 weight：宿主预算叠加无法裁档，已拒绝激活（接口文档 §4）。');
   }
   const host = decideBudgetTier({ calls: rawEvaluation.estimate.calls, seconds: rawEvaluation.estimate.seconds, weight });
+  // T6 任务级确认门兜底（2026-11-11）：单张叠加档之上再叠一层**任务累计**档。今天 D2 两臂
+  // 的败状是切片——3 call / 6 call 两张计划各自都只到 notify，任务总重量却一路放行，确认门
+  // 一次也没到。账本由宿主持有（options.taskBudgetUsage，按已激活计划累计 estimate）：
+  // 累计进 confirm/stop 档时按更严一档裁决（stop 不会被 confirm 顶掉：stricterTier 比严度）。
+  // 只兜 confirm / stop 两档——notify 档的通知与激活语义维持逐张计划不变，本波补的是确认
+  // 门，不动通知面（否则每个任务的第一张之后每张都多一条通知）。
+  const taskUsage = options.taskBudgetUsage ?? ZERO_TASK_BUDGET;
+  const cumulative = taskBudgetDecision({
+    calls: taskUsage.calls + rawEvaluation.estimate.calls,
+    seconds: taskUsage.seconds + rawEvaluation.estimate.seconds,
+    weight: taskUsage.weight + weight,
+  });
+  const cumulativeHost = isConfirmGateTier(cumulative.tier) && stricterTier(cumulative.tier, host.tier) === cumulative.tier
+    ? cumulative
+    : null;
   // fail-closed（接口文档 §4）：未知档位绝不按最宽档（execute，rank 0）静默
   // 激活。旧代码 `RANK[tier] ?? 0` 把任何非法 decision 映射成 execute，又因
   // 后续 stop/confirm/notify 分支都不命中而落进 active 返回——即“未知档位按
@@ -197,9 +222,10 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
   // runPlanEvaluation 的 exit 0 分支亦在解析后先验 decision，两道同判据。
   // planDecisionRank 导出供测试直测：它是第二道防线，公开路径上通常先被
   // exit 0 预验拦住，故只测公开路径无法单独证明它——直测才能钉住它。
+  const hostDecision = cumulativeHost ?? host;
   const rankOf = planDecisionRank;
-  const evaluation = rankOf(host.tier) > rankOf(rawEvaluation.decision)
-    ? { ...rawEvaluation, decision: host.tier, reasonCode: host.reasonCode }
+  const evaluation = rankOf(hostDecision.tier) > rankOf(rawEvaluation.decision)
+    ? { ...rawEvaluation, decision: hostDecision.tier, reasonCode: hostDecision.reasonCode }
     : rawEvaluation;
 
   if (evaluation.decision === 'stop') {
@@ -289,7 +315,11 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {  const m
     : `本次需新增 ${addedCalls} 次查询，预计约 ${minutes} 分钟。`;
   const confirm = evaluation.decision === 'confirm' ? '请回复“确认继续”后再执行；当前已暂停。' : '通知送达后将继续执行。';
   // 前缀让用户在企微里能把"系统通知"和普通进度区分开，也让宿主/测试能稳定识别这条帧。
-  return `${PLAN_NOTICE_PREFIX}${scope}${confirm}`;
+  // 确认面同样过执行语言删除（T8，2026-11-11）：平台下发的 scopeSummary/noticeText 是
+  // 平台内部语言（脚本路径/码/operation 名/控词），"请你确认"这条帧与回复面同一把尺——
+  // 用户看得懂的中文照留，用户没法用的那一截删掉。通知文本的单一出处就在这里，所以尺也
+  // 装在这里（调用方漏挂一次就是一次泄漏上屏）。
+  return scrubExecutionLanguageText(`${PLAN_NOTICE_PREFIX}${scope}${confirm}`).text;
 }
 
 /**

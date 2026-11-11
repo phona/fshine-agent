@@ -33,7 +33,7 @@ import Type from 'typebox';
 import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCreationOutcome, type SubagentNeeds, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
-import { createServeGate, describePlanCalls, isInsideScratch, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
+import { createServeGate, describePlanCalls, isInsideScratch, planDeclarationCovers, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
 import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
@@ -43,6 +43,7 @@ import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
 import { createStepCapWindDown, parseStepCap } from './worker-step-cap';
+import { emptyTaskBudgetLedger, ledgerUsage, withActivatedPlan } from './task-budget';
 
 /**
  * 同一子任务内计划被拒的收敛上限（Phase 6 验收补丁）。计划被拒是确定性信号
@@ -486,6 +487,13 @@ export interface PiCodingWorkerSessionOptions {
    */
   onReadProbe?: () => void;
   /**
+   * T5 有界扩张门（2026-11-11）的额度：本会话里**超出已确认计划声明**的读类网关调用最多
+   * 放行几次，之后即拒并留拒收记录。缺省 = 读类探测帽的缺省值（DEFAULT_READ_PROBE_CAP，5）
+   * ——同一个数、同一个 option（readProbeCap），不新造第二个数字：两个帽量的都是"同一轮/
+   * 同一任务里为回答用户而发的探查调用"，只是后者只提示、前者在无界时拒收。
+   */
+  readProbeCap?: number;
+  /**
    * 本回合 worker 的工作区（宿主注入，TurnDriverInput.scratchDir 的透传，如
    * `tmp/task_<taskId>`）：write/edit 门、提案 payload 边界与计划产物路径豁免共用的
    * 判据输入。缺省（未注入，测试替身 / 老路径）= 三支边界整支不出现，判定与从前一字不差。
@@ -771,6 +779,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
         onReadProbe: noteReadProbe,
+        // T5 有界扩张门与读类探测帽共用同一个额度与 option：两个帽量的都是"同一任务里为
+        // 回答用户而发的探查调用"，只是后者只提示、前者在无界时拒收（见会话侧注释）。
+        ...(options.readProbeCap === undefined ? {} : { readProbeCap: options.readProbeCap }),
         cwd: input.cwd,
         skillRoots: input.skillRoots ?? [],
         systemPrompt: input.systemPrompt,
@@ -1418,6 +1429,23 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     }
   }
   const activePlanId = (): string | null => activePlan?.planId ?? null;
+  /**
+   * T5 有界扩张门的计数与额度（本会话 = 本任务的一次委派；与读类探测帽同族、同数）。
+   * 只数"对不上已确认计划声明"的读类网关调用；计划内的调用不计数，所以重新计划一次即可
+   * 把范围重新纳入声明（这正是要引导的路径）。
+   */
+  const scopeExpansionCap = parseStepCap(options.readProbeCap, DEFAULT_READ_PROBE_CAP);
+  let scopeExpansionCalls = 0;
+  /**
+   * T6 任务级预算账本（2026-11-11）：本会话（= 本任务的一次委派）里已被激活计划的 estimate
+   * 累计，进 confirm / stop 档时在提交处兜住确认门（plan-runtime 的 taskBudgetUsage）。
+   *
+   * 为什么在会话里累计而不是另存一份跨回合账本：任务的跨回合累计账本是平台的（AGENTS.md：
+   * 累计账本仍在执行层，迁移通用策略前不得先删平台门），宿主再造第二份就是第二份真相。
+   * 本账本只覆盖"一次委派内被切片绕过"这一形态——今天 D2 两臂正是如此（3 call / 6 call
+   * 两张计划各自都在确认线以下，任务总重量 18 call 却一路放行，确认门一次没到）。
+   */
+  let taskBudgetLedger = emptyTaskBudgetLedger();
   // label 表（平台清单第 5 列）：驱动侧已缓存则直接传入，否则本会话派生一次。
   // 派生失败/平台还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
   // gateway 穿线（C7b 收口补漏）：loader 对未声明 gateway 一律降级空表，声明来自
@@ -1810,7 +1838,52 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     if (ctx.toolCall.name === 'structured_call') {
       return validateStructuredCall(args, capabilityManifest, activePlanId, () => activePlan?.calls ?? null);
     }
-    return gate({ name: ctx.toolCall.name, arguments: args });
+    const gateVerdict = gate({ name: ctx.toolCall.name, arguments: args });
+    if (gateVerdict?.block || ctx.toolCall.name !== 'bash') return gateVerdict;
+    // T5 有界扩张门（2026-11-11）：门放行的网关调用还要过一道**与已确认计划声明对账**的
+    // 额度帽。位置在门之后：档位线（read 只要有计划）一字未动——正当探索仍放行，只给
+    // 无界扩张划界（见 scopeExpansionVerdict）。
+    return scopeExpansionVerdict(String(args?.['command'] ?? '')) ?? gateVerdict;
+  }
+
+  /**
+   * T5 有界扩张门（2026-11-11）：这次网关调用对不上**已确认计划声明**时，按额度裁决。
+   *
+   * 为什么需要（今天败状）：激活的计划只声明了 alpha，worker 转头把 9 个 collection 全查
+   * 一遍（A2 范围渗入、C1 张冠李戴、D2 十八调大扇出）——读档的档位线只问"有没有激活计划"，
+   * 执行前没有任何一道对账，用户没确认过的对象照样被查。
+   *
+   * 为什么是**额度**而不是"超出即拒"：既有断言把"探索性查询不锁死"钉成产品行为
+   * （serve-gate.test.ts ②：worker 查了 alpha 发现还要 beta，不能当场锁死），所以判据是给
+   * 探索划界：额度 = 读类探测帽缺省值（DEFAULT_READ_PROBE_CAP，5；同一个 option readProbeCap、
+   * 同一个数，不新造第二份阈值）。额度用尽即拒，并留一条拒收记录（tool_calls 一行：
+   * tool=plan_scope_expansion、allowed=false、detail=命令原文）——拒收必须可复盘。拒收理由
+   * 指向正路：把对象补进计划重新提交（重计划因累积重量进确认档，由平台确认门停下并留下
+   * 用户确认记录，即 T5 判据后半句"任何超出必须伴随一次新的用户确认记录"）。
+   *
+   * 拿不到声明（恢复的会话只有 planId/version）→ 无法对账：不计数、不拒（如实留给对账层，
+   * 见 execution-scope.ts 的 unreconciledCalls，不把"没有证据"当成"零超出"）。
+   */
+  function scopeExpansionVerdict(command: string): ServeGateVerdict | undefined {
+    if (!command) return undefined;
+    const declarations = activePlan?.calls ?? null;
+    if (!declarations || declarations.length === 0) return undefined;
+    const classification = planDeclarationCovers(command, declarations, {
+      // 与 serve-gate 计划覆盖判据同一份 args 规格表（本会话派生的那张）：位置参数声明
+      // 缺了会让"以位置参数定目标"的调用被误判成扩张（fail-closed 方向相反，多拒）。
+      ...(operationArgSpecs.size > 0 ? { operationArgsSpecs: operationArgSpecs } : {}),
+    });
+    if (classification !== 'expansion') return undefined;
+    scopeExpansionCalls += 1;
+    if (scopeExpansionCalls <= scopeExpansionCap) return undefined;
+    const reason = `PLAN SCOPE：${messageTextFor('SERVE_PLAN_SCOPE_EXPANSION_LIMIT', undefined, options.gateway)}`;
+    options.serveGateAudit?.({
+      tool: 'plan_scope_expansion',
+      allowed: false,
+      reason,
+      detail: command.slice(0, AUDIT_DETAIL_MAX_CHARS),
+    });
+    return { block: true, reason };
   }
 
   session.agent.beforeToolCall = async (ctx) => {
@@ -2067,6 +2140,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         userConfirmed: parsed.userConfirmed,
         runCli: options.planCliRunner,
         activationSecret: options.planActivationSecret,
+        // T6 任务级确认门兜底：把本会话已授权花掉的预算交给叠加档，累计进 confirm 档即停。
+        taskBudgetUsage: ledgerUsage(taskBudgetLedger),
         // gateway 穿线（C7b 漏穿补课）：EvaluateAndActivatePlanOptions.gateway 文档写明
         // "透传给默认 runner"，但调用点从未传——默认 runner 拿不到网关名，spawn 前
         // fail-closed 抛错，每次计划提交都以 PLAN DECLINED（网关未声明）收场，平台一次
@@ -2082,6 +2157,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // `delta.calls` 同源（同一份 JSON 原样转发），而平台只在 evaluate 响应里回一份
         // 摘要。写类调用的覆盖判据读这里（serve-gate 的 activePlanCalls）。
         activePlan = { planId: plan.planId, version: plan.version, calls: parsed.calls };
+        // T6：计划真的激活了才进账（按 planId 去重，重放/重新激活不重复计数）。
+        taskBudgetLedger = withActivatedPlan(taskBudgetLedger, plan.planId, {
+          calls: plan.evaluation.estimate.calls,
+          seconds: plan.evaluation.estimate.seconds,
+          weight: plan.evaluation.estimate.weight ?? 0,
+        });
         return { block: true, reason: `PLAN ACTIVE（${plan.planId} v${plan.version}）：按已提交 calls 执行；平台会逐次校验本计划。` };
       }
       if (plan.status === 'confirm') {

@@ -1093,6 +1093,37 @@ function planCoverageVerdict(
 }
 
 /**
+ * 一次网关调用相对**已声明计划**的分类（T5 有界扩张门，2026-11-11）。
+ *
+ * 与计划覆盖判据**同一份实现**（coversPlanStep）——只回答分类，不做裁决：
+ *   · `not_plan_gated`——不是网关调用形态（本地/元数据/非网关命令）：别的门管，这里不数；
+ *   · `covered`——被某条已声明计划步覆盖（operation 同名 + 计划步声明过的参数同值）；
+ *   · `expansion`——对不上任何一步（计划没声明的对象/operation）：由调用方按额度裁决。
+ *
+ * 为什么按分类而不在门里直接拒：read 档的放行线是既有断言钉住的产品行为
+ * （serve-gate.test.ts「② 激活计划只有读 → 另一个读（不同 collection）放行：探索性查询
+ * 不锁死」；实现即下方 planCoverageVerdict 的 `tier !== 'write'` 早退）。给探索划界的
+ * 额度帽归驱动层（与读类探测帽同一个数），这里只把"对不上声明"这件事机械判出来。
+ */
+export function planDeclarationCovers(
+  command: string,
+  calls: readonly PlanCall[],
+  options: { operationArgsSpecs?: OperationArgsSpecs } = {},
+): 'covered' | 'expansion' | 'not_plan_gated' {
+  const reference = extractGateScript(command);
+  if (reference === null) return 'not_plan_gated';
+  const specs = options.operationArgsSpecs;
+  const tokens = splitCommandTokens(command);
+  const headLength = tokens.indexOf(reference) + 1;
+  const flagStyles = flagStylesFor(reference, specs);
+  const gotKeyArgs = keyArgsOf(tokens, flagStyles);
+  const gotPositionals = positionalsOf(tokens.slice(headLength), flagStyles);
+  const positionalNames = positionalNamesFor(reference, specs);
+  const covered = calls.some((step) => coversPlanStep(step, reference, gotKeyArgs, gotPositionals, positionalNames, flagStyles));
+  return covered ? 'covered' : 'expansion';
+}
+
+/**
  * 结构化调用（structured_call）的计划前置判据——与 bash 同一份实现。
  *
  * 入参就是结构化调用自己的形状：operation 注册名 + args 对象。args 规范化成 flag 表后
