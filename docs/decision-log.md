@@ -1,7 +1,7 @@
 # 决策日志（decision-log）
 
-> 本文件记录 fshine-agent 2026-11-11 **删除与保留的决定及其理由、证据与状态变更史**：每条决定写清对象、理由、证据与状态。它不是代码现状或执行约束的最终权威——**删除/保留的当前状态以 `AGENTS.md`「已删及理由」的标注为准**；main 代码与开放 PR 是现状事实源；定位与审核判据以 `AGENTS.md` 为准；与 `docs/v0-architecture.md` 冲突的可执行判据以 `docs/architecture-laws.md` 为准。状态字段不一致时，先按本条目的证据复核 main/PR，再同步回填，不得各写一套。
-> 相关文档：`AGENTS.md`（定位 / 审核判据 / 已删及理由摘要与状态标注）、`docs/architecture-laws.md`（可执行判据 / 删除纪律）、`docs/v0-architecture.md`（目标架构叙述）。
+> 本文件是 fshine-agent **删除/保留决定及其状态的权威记录**（2026-11-11 复审裁定，2026-11-12 落实）：每条决定写清对象、理由、证据与状态。`AGENTS.md` 的「已删及理由」只是面向改动的摘要与指向本文件的指针，不另维护一份状态；可执行判据与删除纪律以 `docs/architecture-laws.md` 为准；main 代码与开放 PR 是现状事实源——它们回答「现在是什么」，本文件回答「决定了什么、处于什么状态」。
+> 状态字段不一致时，以本文件的五态为准，并先按本条目的证据复核 main/PR，再同步回填，不得各写一套。三份文档互链：`AGENTS.md`（改动归属判据 / 已删及理由摘要 + 指针）、`docs/architecture-laws.md`（可执行判据 / 删除纪律）、`docs/v0-architecture.md`（目标架构叙述）。
 > 记录日期：2026-11-11。新增决定一律追加条目；状态变化只改状态字段并注明日期与依据；不删除旧条目。
 
 ## 读法
@@ -40,6 +40,16 @@
 - fshine = **Pi Agent + Task Runtime + Execution Gateway + Channel Adapter**。
 - 不再自称 Agent Harness，不追 OpenClaw / Claude Code / Codex 的通用功能。
 
+**定位第三版（2026-11-11 复审裁定，2026-11-12 全文记于此；其他文档引用定位时以本节为完整出处，`AGENTS.md` 定位节为面向改动的摘要 + 指针）**：
+
+- 目标：让不懂技术的业务人员，**愿意**把日常工作交给 AI，并在使用中逐渐建立信任。关键词是「愿意」不是「能」。
+- 落地为四件事：交办简单 / 真正省事 / 行为可预期 / 随时能接管。
+- 产品原则：不追求 Agent 自治程度最大化，而追求业务人员**净收益**最大化（净收益 = 省下的操作与思考时间 − 沟通/等待/审核/返工/风险成本）。
+- 工程原则：允许 Agent 自由决定执行方法，但不允许它自行扩大任务授权。
+- 停止线：每增加一个机制，问「它是否能让业务人员更容易、更放心、更省时间地完成工作？」不能明确证明就不优先做。
+
+上列收紧三条与 0.2 的三层分工、0.3 的 A/B 分类是第三版的结构化落法；工程原则在本日志的实例就是四（T5 有界扩张门）：允许探索，不允许自行扩大授权。
+
 ### 0.2 三层分工
 
 | 层 | 内容 | 证据 / 现状 |
@@ -50,12 +60,12 @@
 
 > 命名口径：本文「fshine」指整体（Pi + Task Runtime + Execution Gateway + Channel Adapter）；「胶水层」与「宿主」指其中 fshine 自有的编排部分；「执行层」指当前接入实例。三者不混用。
 
-**原生压缩激活链（今天在 PR #54 激活；main 上尚未激活）**：
+**原生压缩激活链（激活改动只在 PR #54 分支；main 上尚未激活，不要读成已实现）**：
 
 - `packages/agent/src/turn-persistence.ts:310-311`：`ensureHistoryBackfill` 在没有 `conversationLog` 时返回 `true`，在没有 `contextStates` 时返回 `false`。
 - `packages/agent/src/runtime.ts:163`：backfill 返回 false → `effectiveContextMode = 'transcript'`。
 - `packages/agent/src/runtime.ts:483-488`：只有 `effectiveContextMode === 'transcript'` 才执行过期会话强制压缩（`session_resume_seeding`）与每回合 `compactSafe`。
-- 因此，摘掉 `contextStates` 接线后，每回合压缩与会话过期恢复同时激活。状态：**在 PR #54**（`arch/phase1-compaction`，draft，未合）。
+- 因此，摘掉 `contextStates` 接线后，每回合压缩与会话过期恢复才会同时激活（这是 PR #54 分支上的行为）。状态：**在 PR #54**（`arch/phase1-compaction`，draft，未合）。
 
 **contextWindow**：
 
@@ -159,7 +169,7 @@
 | 2.2 ② | long-memory / memory-consolidator / memory-candidate-extractor / memory-model | 在 PR #54（draft） |
 | 2.3 ③ | compaction-context sidecar | 在 PR #54（draft） |
 | 2.4 ④ | context-state / context-extractor / context-model | 在 PR #54（draft） |
-| 2.5 ⑤ | reference-evidence | 在 PR #54（draft）；同对象另有 #51 的「修复而非删除」草案 |
+| 2.5 ⑤ | reference-evidence | 在 PR #54（draft）；同对象另有 #51 的「修复而非删除」竞争草案（两案未合并，权威裁定是删除） |
 | 2.6 ⑥ | execution-facts | 在 PR #54（draft） |
 | 2.7 ⑦ | route_current_turn 申报层 1+2 | 待实施 |
 | 2.8 ⑧ | protocol-material | 待实施 |
@@ -212,7 +222,7 @@
 - **对象**：`packages/agent/src/reference-evidence.ts`；注入点 `packages/agent/src/runtime.ts:415`（`collectReferenceEvidence` 分支）。
 - **理由**：线索词尺只认中文，九个英文长会话用例上静默全关，单测全绿而机制一次不跑。
 - **证据**：`reference-evidence.ts:33` 的 `REFERENCE_CUE_RE` 只含中文线索词；`reference-evidence.ts:104` 无命中即返回 `null`。`spike/generic-agent`（PR #51）分支的修复注释实测记录：「原尺只有中文直陈形态，实测全语料中文开门 4 轮、补英文后 34 轮——九个零中文线索的用例正好全是长会话用例，台账/指代证据在那些轮次根本没机会注入」。PR #54 正文 T9 把两个注入分支一并删除。
-- **状态**：**在 PR #54**（draft，未合）。main 上文件与注入分支仍在。**同对象的另一种处置在 PR #51**（draft，未合）：该草案保留机制并补英文线索尺；两案未合并，当前权威裁定是删除。
+- **状态**：**在 PR #54**（draft，未合）。main 上文件与注入分支仍在。**同对象的竞争草案在 PR #51**（draft，未合）：保留机制并补英文线索尺的「修复而非删除」方案；两案未合并，当前权威裁定是删除（本条）。
 - **加回来的判据**：只有当召回/归因在非中文或长会话上出现红；形态必须**语言无关**（中文 + 英文线索表），并把那 **9 个零中文线索的长会话用例**作为必过正控；验收必须证明「机制开过门」（注入事件计数 > 0），单测全绿不算。若 #51 先合入，以它的英文尺为起点，但仍需补上述正控。
 
 ### 2.6 ⑥ execution-facts
@@ -349,18 +359,18 @@
 
 | 项 | 类别 | 对象 | 状态 |
 | --- | --- | --- | --- |
-| T5 执行范围对账 | B | `execution-scope.ts`、`planDeclarationCovers` | **已裁定未实现**：裁定形态 = 有界扩张门，尚未实现；PR #53 现有代码是严格拒收的临时修法，不是裁定形态（见四） |
+| T5 执行范围对账 | B | `execution-scope.ts`、`planDeclarationCovers` | **已裁定未实现**：裁定形态 = 有界扩张门（帽 5，与既有读类探测帽同源，见四），尚未实现；PR #53 为临时严格拒收，不是裁定形态（见四） |
 | T6 确认门兜底 | B | `task-budget.ts`、`confirm-gate-hold.test.ts` | **在 PR #53**（draft，未合） |
 | T10 四段（结果对账 / 停滞冻结 / 冻结续跑 / 挂死留痕） | B | `result-contract.ts`、`task-stall.ts`、`tests/e2e/turn-loop-task-liveness.test.ts` | **在 PR #55**（draft，未合） |
 | T8 执行语言不外泄 | A（穿工程外衣） | `execution-language.ts`、`reply-exit.ts` | **在 PR #53**（draft，未合） |
-| T7 无空回复 | A（穿工程外衣） | `pi-driver.ts`（`pi_driver_empty_reply`、`shouldNudgeFinalReply`）、`assembly.ts` 的 `parseContextWindow` 接线 | **在 PR #54**（窗口贴边治理；实现已提交，未合入 main） |
+| T7 无空回复 | A（穿工程外衣） | `pi-driver.ts`（`pi_driver_empty_reply`、`shouldNudgeFinalReply`）、`assembly.ts` 的 `parseContextWindow` 接线 | **在 PR #54**（窗口贴边治理；修复已提交 4ef557b——即该 PR 现头，未合入 main；成色待用例 3 判定） |
 
 - T5/T6/T10 判为 B 类的理由：范围对账、确认门顺序、结果验证与任务生命周期都是「换模型也必须在」的确定性责任。
 - T8 判为 A 类的理由：它补的是模型把错误码/脚本路径/operation 名/控制词写进用户可见文本的倾向；确定性删除层是工程外衣，去留应由消融/模型 Eval 决定。
 - T7 判为 A 类的理由：空回复是模型在窗口贴边时的产出失败；能否用更强模型/压缩策略消掉，需消融验证，不能直接当可靠性基础设施建。
 - **状态更正（2026-11-11 复审，注明依据）**：
   - T5 原写「待实施」，与本文件状态定义冲突（PR #53 已有代码）。更正为「已裁定未实现」——裁定是有界扩张门，PR #53 的现有提交是严格拒收的临时修法（见四）。
-  - T7 原写「无实现、无分支/PR」不成立。依据：PR #54 正文含「T7 窗口贴边空回复」节；分支 `arch/phase1-compaction` 有 `shouldNudgeFinalReply`（`packages/agent/src/pi-driver.ts`）与 `LLM_CONTEXT_WINDOW` 接线（`apps/server/assembly.ts` 的 `parseContextWindow`）及相关单测。更正为「在 PR #54」。
+  - T7 原写「无实现、无分支/PR」不成立。依据：PR #54 正文含「T7 窗口贴边空回复」节；分支 `arch/phase1-compaction` 有 `shouldNudgeFinalReply`（`packages/agent/src/pi-driver.ts`）与 `LLM_CONTEXT_WINDOW` 接线（`apps/server/assembly.ts` 的 `parseContextWindow`）及相关单测。更正为「在 PR #54」。修复已提交（4ef557b，2026-11-11，现为该 PR 现头，`gh pr view 54 --json headRefOid` 可复核）；成色待用例 3 判定——判定前不得把 PR 正文那轮 20/20 单次绿当成已收口（见 5.2）。
 
 ---
 
