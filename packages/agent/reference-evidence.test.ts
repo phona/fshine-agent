@@ -118,4 +118,50 @@ describe('主动回溯：宿主申报前注入指代证据', () => {
     // 线索词被剥掉后不占关键词位：总结轮的检索词是消息里剩下的实词
     expect(keywordsFrom('总结一下我们今天查了些什么')).toEqual(['一下我们今天查了些什么']);
   });
+
+  it('英文线索开门：what about / previous / earlier / same as before 等（语言盲区修复）', () => {
+    // 验收原句：英文长会话里最常见的指代形态，修复前一律不开门。
+    expect(looksLikeReferenceCue('what about this collection W2?')).toBe(true);
+    expect(looksLikeReferenceCue('How about the previous batch?')).toBe(true);
+    expect(looksLikeReferenceCue('same as before')).toBe(true);
+    expect(looksLikeReferenceCue('summarize what we did earlier')).toBe(true);
+    expect(looksLikeReferenceCue('remind me of the last query')).toBe(true);
+    expect(looksLikeReferenceCue('review the earlier result')).toBe(true);
+    expect(looksLikeReferenceCue('back to the shelf we discussed')).toBe(true);
+    // 反例：全新查询不因为含英文就开门（不把 this/that/before 这类裸词当线索）。
+    expect(looksLikeReferenceCue('check collection W3')).toBe(false);
+    expect(looksLikeReferenceCue('query shelf north in batch B1')).toBe(false);
+  });
+
+  it('中文同义改写开门：刚刚 / 上回 / 那次 / 前面提到 / 之前查过 等', () => {
+    expect(looksLikeReferenceCue('上回查的那个批次呢？')).toBe(true);
+    expect(looksLikeReferenceCue('刚刚查的 W2 还有多少？')).toBe(true);
+    expect(looksLikeReferenceCue('那次查询的结果呢？')).toBe(true);
+    expect(looksLikeReferenceCue('前面提到的那个货架')).toBe(true);
+    expect(looksLikeReferenceCue('之前查过的货架再给我看看')).toBe(true);
+    expect(looksLikeReferenceCue('上述查询里哪个批次最大？')).toBe(true);
+    expect(looksLikeReferenceCue('前文说的那一条')).toBe(true);
+  });
+
+  it('否定句不开门：只否掉一个对象不是要历史清单', () => {
+    expect(looksLikeReferenceCue('不是刚才那个')).toBe(false);
+    expect(looksLikeReferenceCue('不要用刚才那个，重新查 W2')).toBe(false);
+    expect(looksLikeReferenceCue('不是那个，是新的')).toBe(false);
+    // 否定只剥紧邻的那一段：同句里另有真线索（上回/汇总）仍然开门。
+    expect(looksLikeReferenceCue('不是刚才那个，那上回汇总的呢？')).toBe(true);
+  });
+
+  it('反问句仍开门：反问是在确认历史指代，不是否定', () => {
+    expect(looksLikeReferenceCue('我刚才不是已经说过了吗？')).toBe(true);
+    expect(looksLikeReferenceCue('这难道不是刚才那个吗？')).toBe(true);
+  });
+
+  it('中英混排：中文线索 + 英文实体 / 英文线索 + 中文实体都开门', () => {
+    expect(looksLikeReferenceCue('刚才那个 collection W2 呢？')).toBe(true);
+    expect(looksLikeReferenceCue('what about 刚才那个批次？')).toBe(true);
+    expect(looksLikeReferenceCue('the previous 货架 还有多少？')).toBe(true);
+    // 英文句子剥掉线索与功能词后，检索关键词只留实体。
+    expect(keywordsFrom('what about this collection W2?')).toEqual(['collection', 'W2']);
+    expect(keywordsFrom('刚才那个 collection W2 呢？')).toEqual(['collection', 'W2']);
+  });
 });
