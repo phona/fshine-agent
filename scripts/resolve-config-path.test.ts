@@ -175,4 +175,25 @@ describe('resolveConfigPath 仓库默认入口', () => {
     const loaded = loadConfig({ env: {}, yamlPath: resolved });
     expect(Object.keys(loaded.contextProfiles).length).toBeGreaterThan(0);
   });
+
+  it('显式传入仓内 eval 配置时也物化——不认路径怎么拼', () => {
+    // 回归钉：resolveConfigPath 原来用 `resolved === EVAL_CONFIG` 原始字符串比较，
+    // 而 EVAL_CONFIG 是绝对路径。用相对路径显式指向同一条 eval 配置时不物化，
+    // root 留在相对路径，下游 harness 的 spawn(cli, { cwd: platformRoot }) 把相对
+    // 路径再解析一次 → ENOENT，报出来却是误导人的 "operation list child error"。
+    // 本机 e2e 因此全红过（35 个文件收集阶段即挂）。
+    const spellings = [
+      path.join('scripts', 'eval', 'eval.agent.yaml'),
+      path.join(REPO_ROOT, 'scripts', 'eval', 'eval.agent.yaml'),
+      `./${path.join('scripts', 'eval', 'eval.agent.yaml')}`,
+    ];
+    for (const spelling of spellings) {
+      const resolved = resolveConfigPath(spelling);
+      expect(resolved, `拼法 ${spelling} 未物化`).toContain('.runtime');
+      const loaded = loadConfig({ env: {}, yamlPath: resolved });
+      for (const profile of Object.values(loaded.contextProfiles)) {
+        expect(path.isAbsolute(profile.root), `拼法 ${spelling} 的 root 不是绝对路径`).toBe(true);
+      }
+    }
+  });
 });

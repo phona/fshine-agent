@@ -88,5 +88,8 @@ export function materializeEvalConfig(
 /** 仓库默认入口：标准路径解析 + eval 回退时物化绝对路径副本。 */
 export function resolveConfigPath(explicit?: string): string {
   const resolved = resolveConfigPathInternal(explicit, ROOT_CONFIG, EVAL_CONFIG);
-  return resolved === EVAL_CONFIG ? materializeEvalConfig(resolved) : resolved;
+  // 判据是「解析后指向的不是别处，正是仓内那条 eval 配置」，不是字符串相等——EVAL_CONFIG
+  // 是绝对路径，调用方用相对路径（./scripts/eval/eval.agent.yaml）显式指向同一条配置时，
+  // 原始字符串比较会漏判而不物化，root 留在相对路径，下游 spawn({ cwd }) 二次解析即 ENOENT。
+  return path.resolve(resolved) === EVAL_CONFIG ? materializeEvalConfig(resolved) : resolved;
 }
