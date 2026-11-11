@@ -230,7 +230,31 @@ export {
   type PreparedContextTaskRunExecution,
   type RunWorkspaceFile,
   type HandoverRecovery,
+  type TaskStagnationOptions,
 } from './context';
+export {
+  reconcileResultContract,
+  renderResultContractReply,
+  type ResultContractDeclaration,
+  type ResultContractReason,
+  type ResultContractReconciliation,
+  type ResultContractVerdict,
+  type ResultDeclaration,
+  type ResultObservation,
+  type ResultShortfall,
+  type TaskResultPort,
+  type TaskResultScope,
+} from './result-contract';
+export {
+  evaluateStagnation,
+  renderStalledReply,
+  startStallMonitor,
+  type StallMonitorHandle,
+  type StallMonitorOptions,
+  type StallReason,
+  type StallSample,
+  type StallVerdict,
+} from './task-stall';
 export {
   createTaxAgentRuntime,
   FALLBACK_TIMEOUT,

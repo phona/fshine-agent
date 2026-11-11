@@ -30,6 +30,8 @@ import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHa
 import { loadProposalSchema } from './operation-labels';
 import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
+import { reconcileResultContract, renderResultContractReply, type ResultContractDeclaration, type ResultContractReconciliation, type ResultObservation, type TaskResultPort, type TaskResultScope } from './result-contract';
+import { renderStalledReply, startStallMonitor, type StallVerdict } from './task-stall';
 import type { ProposalCreateCall } from './proposal-runtime';
 import { materializeTaskInputs, requestWithFrozenInputs, type FrozenTaskInput } from './freeze-task-inputs';
 import { classifyDelegationFailure } from './delegation-failure';
@@ -349,6 +351,16 @@ export interface ContextTaskRunnerOptions {
   profiles: Record<string, ContextProfileConfig>;
   tasks: PlatformTaskRepo;
   workerDriver: TurnDriver;
+  /**
+   * T10 结果对账（段1）：执行层声明 + 宿主独立读。缺省 = 不接线，本机制不启用
+   * （现有行为零变化）；接线后只对"计划声称写/上传"的步骤生效。
+   */
+  taskResults?: TaskResultPort;
+  /**
+   * T10 停滞检测（段2）：只在 taskResults 同时接线时启用（判定输入必须是宿主独立读的
+   * 执行层结果指标，缺端口就没有判据）。缺省 = 关闭。
+   */
+  stagnation?: TaskStagnationOptions;
   /** Shared with TaskManager and host-side platform commits; omitted test/legacy callers get a local gate. */
   executionGate?: PlatformExecutionGate;
   profileId?: string;
@@ -403,6 +415,18 @@ export interface ContextTaskRunnerOptions {
 
 export interface ContextTaskExecutionContext {
   trusted: TrustedContext;
+}
+
+/**
+ * T10 停滞检测的部署参数（毫秒）。生产取值由装配注入；测试用毫秒级替身。
+ * 只描述"多久采样、指标连续不变多久判假死"，不携带任何业务指标选择——指标名由
+ * 执行层声明（TaskResultPort），宿主不猜。
+ */
+export interface TaskStagnationOptions {
+  sampleIntervalMs: number;
+  unchangedForMs: number;
+  /** 观测哪个指标；缺省 = 执行层每次返回的第一项。 */
+  metric?: string;
 }
 
 export interface ContextTaskRunner {
@@ -1368,6 +1392,42 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
       const delegationStart = execution?.startedAt ?? Date.now();
       const deadline = execution?.deadline ?? delegationStart + (profile.workerTimeoutMs ?? DEFAULT_WORKER_TIMEOUT_MS);
       if (runSignal?.aborted) throw new ToolUserError(DELEGATION_CANCELLED, { code: 'DELEGATION_CANCELLED' });
+      // T10 结果面作用域（声明与独立读共用同一份任务身份；stepLabel 让执行层能定位到
+      // 计划步骤）。声明由执行层计划状态给出，不从 worker 文本推导。
+      const resultScope: TaskResultScope = {
+        taskId,
+        request: args.request,
+        ...(stepLabel ? { stepLabel } : {}),
+      };
+      // T10 段2：停滞监视器。只采宿主独立读的结果指标；只读步（计划未声称写）不采样
+      // ——没有结果指标可看的步骤不参与假死判定，避免把合法的长查询误判成停滞。
+      const stallMonitor = options.stagnation && options.taskResults
+        ? startStallMonitor({
+            observe: async () => {
+              const declaration = await options.taskResults!.declare(resultScope);
+              if (!declaration?.claimsWrite) return null;
+              return options.taskResults!.observe(resultScope);
+            },
+            ...(options.stagnation.metric ? { metric: options.stagnation.metric } : {}),
+            sampleIntervalMs: options.stagnation.sampleIntervalMs,
+            unchangedForMs: options.stagnation.unchangedForMs,
+            deadline,
+            ...(runSignal ? { signal: runSignal } : {}),
+            onStall: (verdict) => {
+              // 留痕不是失败记账：熔断器数失败、假死不产生失败，两条路互不冒充。
+              console.info(JSON.stringify({
+                event: 'task_stalled',
+                requestId: ctx.trusted.requestId,
+                taskId,
+                metric: verdict.metric,
+                lastValue: verdict.lastValue,
+                unchangedForMs: Math.round(verdict.unchangedForMs),
+                samples: verdict.samples,
+                ...(stepLabel ? { step: stepLabel } : {}),
+              }));
+            },
+          })
+        : null;
       // 人工介入的唯一入口：交接损坏且转录也无法重建。此时不调 worker、
       // 不写新交接、不发确认码、不重复提交，只把缺什么交还 Main（needs），
       // 由 Main 决定是人工核对后重发、还是放弃本任务。任务条目原样不动，
@@ -1405,8 +1465,10 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
           : trustedNotice
         : undefined;
       let result: TurnDriverResult | undefined;
+      let stallVerdict: StallVerdict | null = null;
       try {
-        result = await options.workerDriver.run({
+        try {
+          result = await options.workerDriver.run({
             // 纯静态系统提示词（变更项 ②）：只含协议义务与机械边界，逐任务的范围随委派块
             // 走 user message，网关命令形态经 planCommandForm 注入（无平台能力时不渲染许可段）。
             systemPrompt: workerSystemPrompt(profile.root, scratchDir, options.planCommandForm),
@@ -1442,6 +1504,35 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
               onCreateProposal: (call) => createProposalViaGateway(call, ctx, taskId, profile.root, profile.gateway),
             } : {}),
           });
+        } finally {
+          // 监视器必须在 worker 返回时收口（无论成功/抛错）：到截止或已流式推进的
+          // 判定不许泄漏到下一个任务。stop 幂等，返回最终判定。
+          if (stallMonitor) stallVerdict = await stallMonitor.stop();
+        }
+        // T10 段2：假死冻结。worker 照常跑完（不杀进程、不重跑），但它的自述不再作为
+        // 本轮成功结果——已发生的工作痕迹留下，任务保持可续（needs），后续步骤由
+        // runtime 冻结（planFrozen）。停滞后不进入下面的成功分支。
+        if (stallVerdict?.stalled) {
+          await options.tasks.upsert({
+            ...withExecutionFacts(running, result ?? { text: '', messages: [] }, 'needs'),
+            ...(result?.messages?.length ? { workerMessages: result.messages as unknown[] } : {}),
+            updatedAt: new Date().toISOString(),
+          });
+          console.info(JSON.stringify({
+            event: 'delegation_span',
+            requestId: ctx.trusted.requestId,
+            taskId,
+            durationMs: Date.now() - delegationStart,
+            outcome: 'stalled',
+            metric: stallVerdict.metric,
+            lastValue: stallVerdict.lastValue,
+            unchangedForMs: Math.round(stallVerdict.unchangedForMs),
+            ...(result ? usageFieldsOf(result.messages) : {}),
+          }));
+          const stalledError = new ToolUserError(renderStalledReply(stallVerdict), { code: 'TASK_STALLED' });
+          Object.assign(stalledError, { taskStalled: true });
+          throw stalledError;
+        }
         // worker 侧真实 token 消耗（纯加法遥测）：对 worker 转录里 assistant 消息的
         // provider Usage 分项求和（口径见 driver.ts 的 sumUsage），挂到下方每个
         // delegation_span 结局与 SubagentTaskResult 透传。网关不回传 usage 时埋点字段
@@ -1551,6 +1642,61 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
             ...(result.execution ? { execution: result.execution } : {}),
             ...(workerTokens ? { usage: workerTokens } : {}),
           };
+        }
+        // T10 段1：结果对账——声明 N（执行层计划状态）vs 宿主独立读回的实际数
+        // （执行层状态）。这不是请求校验：门已经验过请求，这里验结果。只读步与没有
+        // 声明的步骤不参与；声称写的步骤读不出指标按计划形状缺陷处置（fail-closed，
+        // 绝不用 worker 文本凑一个"完成"）。
+        if (options.taskResults) {
+          let declaration: ResultContractDeclaration | null = null;
+          let observations: readonly ResultObservation[] | null = null;
+          let probeFailed = false;
+          try {
+            declaration = await options.taskResults.declare(resultScope);
+            if (declaration?.claimsWrite) observations = await options.taskResults.observe(resultScope);
+          } catch (error) {
+            probeFailed = true;
+            console.warn(JSON.stringify({
+              event: 'result_contract_probe_failed',
+              requestId: ctx.trusted.requestId,
+              taskId,
+              errorType: error instanceof Error ? error.name : 'UnknownError',
+              error: (error instanceof Error ? error.message : String(error)).slice(0, 160),
+            }));
+          }
+          const reconciliation: ResultContractReconciliation = probeFailed
+            ? { verdict: 'inconclusive', reason: 'probe_unavailable', claimsWrite: true, declarations: [], observations: [], shortfalls: [], unreadable: [] }
+            : reconcileResultContract({ declaration, observations });
+          if (reconciliation.verdict !== 'verified') {
+            await options.tasks.upsert({
+              ...withExecutionFacts(running, result, 'failed'),
+              workerMessages: result.messages as unknown[],
+              updatedAt: new Date().toISOString(),
+            });
+            console.info(JSON.stringify({
+              event: 'result_contract_shortfall',
+              requestId: ctx.trusted.requestId,
+              taskId,
+              verdict: reconciliation.verdict,
+              reason: reconciliation.reason,
+              claimsWrite: reconciliation.claimsWrite,
+              declarations: reconciliation.declarations,
+              observations: reconciliation.observations,
+              shortfalls: reconciliation.shortfalls,
+              ...(reconciliation.unreadable.length > 0 ? { unreadable: reconciliation.unreadable } : {}),
+              ...(stepLabel ? { step: stepLabel } : {}),
+            }));
+            console.info(JSON.stringify({
+              event: 'delegation_span',
+              requestId: ctx.trusted.requestId,
+              taskId,
+              durationMs: Date.now() - delegationStart,
+              outcome: 'result_shortfall',
+              verdict: reconciliation.verdict,
+              ...workerUsage,
+            }));
+            throw new ToolUserError(renderResultContractReply(reconciliation), { code: 'RESULT_CONTRACT_UNVERIFIED' });
+          }
         }
         const final: SubagentTaskResult = {
           taskId,

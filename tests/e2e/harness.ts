@@ -35,6 +35,8 @@ import { validatePlanEntities, type PlanEntitySources } from '../../packages/age
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure, validateGatewayInvocation, gatewayExecPath } from '../../packages/agent/src/platform-contract';
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
+import type { TaskResultPort } from '../../packages/agent/src/result-contract';
+import type { TaskStagnationOptions } from '../../packages/agent/src/context';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
 
 const RESOLVED_CONFIG: string | undefined = (() => {
@@ -802,6 +804,10 @@ interface BootOptions {
    * 打上补丁写进 stateDir，经 AGENT_CONFIG_PATH 只对本 boot 生效。不动仓库里的真配置。
    */
   patchProfile?: { workerTimeoutMs?: number; root?: string; profileId?: string };
+  /** T10 结果对账端口（执行层结果面）；缺省不接线。 */
+  taskResults?: TaskResultPort;
+  /** T10 停滞检测参数；只在 taskResults 同时给出时生效。 */
+  stagnation?: TaskStagnationOptions;
 }
 
 async function boot(options: BootOptions): Promise<Boot> {
@@ -855,6 +861,8 @@ async function boot(options: BootOptions): Promise<Boot> {
     contextModelDriver: options.contextModelDriver
       ?? { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) },
     memoryCandidateExtractor: options.memoryCandidateExtractor ?? (async () => []),
+    ...(options.taskResults ? { taskResults: options.taskResults } : {}),
+    ...(options.stagnation ? { stagnation: options.stagnation } : {}),
   });
   // 与生产一致：principal 由可信的企微用户 ID 解析，先开通查询权限
   await assembly.store.principalScopes.upsert({

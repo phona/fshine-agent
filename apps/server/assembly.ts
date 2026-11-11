@@ -34,6 +34,8 @@ import {
   type ContextTaskRunner,
   type BackgroundTaskManager,
   type PlatformExecutionGate,
+  type TaskResultPort,
+  type TaskStagnationOptions,
   type TurnDriver,
 } from '@fshine/agent';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
@@ -112,6 +114,13 @@ export interface ServerAssemblyOverrides {
   channel?: WecomBotChannel;
   /** Host-only dispatch mode override; default comes from FSHINE_WORKER_DISPATCH_MODE. */
   workerDispatchMode?: WorkerDispatchMode;
+  /**
+   * T10 结果对账端口（执行层结果面）：声明 + 宿主独立读。缺省 = 不启用（现有行为
+   * 零变化）；生产实现归执行层适配边界，经装配注入。
+   */
+  taskResults?: TaskResultPort;
+  /** T10 停滞检测参数（只在 taskResults 同时注入时生效）。缺省 = 关闭。 */
+  stagnation?: TaskStagnationOptions;
 }
 
 /**
@@ -330,6 +339,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     executionGate: platformExecutionGate,
     // C5：active profile 派生（单 profile → 其键；零/多 → undefined，消费方 fail-closed）。
     profileId: activeProfileId,
+    // T10 结果对账与停滞检测（执行层结果面）。缺省不注入 = 机制不启用，既有行为零变化。
+    ...(overrides.taskResults ? { taskResults: overrides.taskResults } : {}),
+    ...(overrides.stagnation ? { stagnation: overrides.stagnation } : {}),
     // 写路径隔离复核（第 2 包生产接线）：装配必须注入真实复核驱动，
     // 未注入时提案创建路径直接失败（不再记 skipped 就继续）。
     // 驱动 = contextModelDriver（隔离回合、无工具，与上下文抽取同一驱动面），
