@@ -6,17 +6,19 @@
  * countInterventionPoints 只数 status=pending——提案等用户确认后提交成功时最终态是
  * committed，那个"用户必须确认"的停点就从干预指标里消失，完整写链被报成零次干预。
  */
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { fork, spawnSync } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
-  QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
-  auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, errorStateNotes,
-  isolatePlatformState, loadBaselineForProbe, probeAuditPath, probeCaseStateDir,
-  realAmounts, recallMissed, restorePlatformState,
+  CASE_CHILD_STDIO, CASE_RESULT_SENTINEL, QUICK_CASE_IDS, auditFailureCount, auditFailuresFieldOf, auditFailuresOf,
+  auditOutgoingText, caseCallCountsOf, caseCrashOf, caseReportInputOf, childFailureNote, crashEvidenceFromChildPayload, errorStateNotes,
+  isolatePlatformState, loadBaselineForProbe, parseChildCasePayload, probeAuditPath, probeCaseStateDir,
+  realAmounts, recallMissed, restorePlatformState, runCaseChildProcess,
   unifiedCasePassedOf,
   type ScriptLine, type Turn,
 } from './probe-real-agent';
@@ -1107,4 +1109,393 @@ describe('isolatePlatformState：状态根只走测试桥 + 专名清场', () =>
       rmSync(stateDir, { recursive: true, force: true });
     }
   });
+});
+
+describe('子进程回传：哨兵 JSON 与非零退出证据', () => {
+  const payload = {
+    result: { id: 'A1', turns: [], ok: true },
+    input: { caseId: 'A1' },
+  };
+
+  it('哨兵之后的 JSON 可解析；哨兵之前的噪声不影响', () => {
+    const raw = `噪声行\n${CASE_RESULT_SENTINEL}\n${JSON.stringify(payload)}\n`;
+    const parsed = parseChildCasePayload(raw);
+    expect(parsed?.result.id).toBe('A1');
+    expect(parsed?.input.caseId).toBe('A1');
+  });
+
+  it('没有哨兵、JSON 坏、或 caseId 对不上 → null', () => {
+    expect(parseChildCasePayload('黑盒模式')).toBeNull();
+    expect(parseChildCasePayload(`${CASE_RESULT_SENTINEL}\n{`)).toBeNull();
+    expect(parseChildCasePayload(`${CASE_RESULT_SENTINEL}\n${JSON.stringify({
+      result: { id: 'A1', turns: [] },
+      input: { caseId: 'B1' },
+    })}`)).toBeNull();
+  });
+
+  it('非零退出的证据是退出码/信号 + stderr 尾部，不编轮次', () => {
+    expect(childFailureNote(2, null, '忽略\n评测安全门拒绝跑危险用例')).toBe(
+      '子进程失败（exit 2）：忽略 | 评测安全门拒绝跑危险用例',
+    );
+    expect(childFailureNote(null, 'SIGKILL', '')).toBe('子进程失败（signal SIGKILL）');
+  });
+});
+
+/**
+ * 父进程 fail 分支（2026-11-11 Codex blocking）：子进程可能已经执行过平台调用，然后被
+ * 信号杀掉，或回传 JSON 解析失败。父进程读不到子进程审计文件，省略 evidence 会让
+ * caseCrashOf 把 platformCalls/refusedCalls 写成 0。这两条走的就是 runCaseChildProcess
+ * 的 fail()——把证据参数抽掉，断言必须红。
+ */
+describe('子进程失败：证据缺席记 -1，有效回传保留执行证据', () => {
+  const item = {
+    id: 'A1',
+    group: 'g',
+    intent: 'i',
+    run: async () => ({ turns: [] as Turn[] }),
+  };
+  const executedTurn = (messageId: string, execution: ExecutionAuditRow[]): Turn => ({
+    text: 'q', reply: 'alpha 查完了。', ms: 10, notices: [], messageId,
+    calls: execution.filter((row) => !row.refused).length,
+    refusedCalls: execution.filter((row) => row.refused).length,
+    taskIds: [], execution,
+    gateRows: [], intents: [], delegations: [], ladder: [], ladderRung: 'INCONCLUSIVE',
+  });
+  /** 不真的 fork：把脚本化的 fd 3 / 退出码喂给父进程的同一条 fail 路径。 */
+  function scriptedFork(script: {
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    payload: string;
+    stderr?: string;
+  }): typeof fork {
+    return (() => {
+      const child = new EventEmitter();
+      const stderr = new PassThrough();
+      const result = new PassThrough();
+      setImmediate(() => {
+        if (script.stderr) stderr.write(script.stderr);
+        stderr.end();
+        if (script.payload) result.write(script.payload);
+        result.end();
+        child.emit('exit', script.code, script.signal);
+      });
+      return Object.assign(child, {
+        stderr,
+        stdio: [null, null, stderr, result, null],
+        kill() { return true; },
+      });
+    }) as unknown as typeof fork;
+  }
+
+  it('执行平台调用后非零退出：没有回传记 -1；fd 3 有有效 payload 则保留调用，都不记 0', async () => {
+    const killed = await runCaseChildProcess(item, 'probe-x', false, 0, process.env, scriptedFork({
+      code: null, signal: 'SIGKILL', payload: '',
+    }));
+    expect(killed.processFailed).toBe(true);
+    expect(killed.result.crashed).toBe(true);
+    expect(killed.result.platformCalls).toBe(-1);
+    expect(killed.result.refusedCalls).toBe(-1);
+    expect(killed.result.platformCalls).not.toBe(0);
+    expect(killed.result.refusedCalls).not.toBe(0);
+
+    const done: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const refused: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], refused: 'serve_gate:token' };
+    const tail: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'gamma'], exitCode: 0 };
+    const turn = executedTurn('m1', [done, refused]);
+    const raw = `${CASE_RESULT_SENTINEL}\n${JSON.stringify({
+      result: {
+        id: 'A1', turns: [turn], ok: true,
+        // 申报数是子进程对自己观测总数的权威（2026-11-11 仲裁）：故意少于崩溃窗口里的行。
+        // 结果用 2/0，不按行重算成 3/1；行本身仍进阶梯与 JSONL，不许丢，也不许记成没证据的 0。
+        platformCalls: 2, refusedCalls: 0,
+      },
+      input: {
+        caseId: 'A1', ok: true, notes: [],
+        intents: [], gateRows: [], delegations: [],
+        turns: [
+          { messageId: 'm1', text: 'q', reply: 'alpha 查完了。', notices: [], execution: [done, refused] },
+          {
+            messageId: 'probe-x:A1:crash-window', text: '(runner 崩溃：该轮未形成完整轮次)', reply: null,
+            notices: [], execution: [tail],
+          },
+        ],
+      },
+    })}\n`;
+    const exited = await runCaseChildProcess(item, 'probe-x', false, 0, process.env, scriptedFork({
+      code: 1, signal: null, payload: raw,
+    }));
+    expect(exited.processFailed).toBe(true);
+    expect(exited.result.crashed).toBe(true);
+    expect(exited.result.platformCalls).toBe(2);
+    expect(exited.result.refusedCalls).toBe(0);
+    expect(exited.result.platformCalls).not.toBe(0);
+    expect(exited.result.ladder).toHaveLength(3);
+    expect(exited.result.notes.some((note) => note.includes('保留 3 次平台调用'))).toBe(true);
+    expect(exited.result.turns).toEqual([turn]);
+    expect(exited.input.turns.some((line) => line.execution.some((row) => Array.isArray(row.args) && row.args[1] === 'gamma'))).toBe(true);
+    const kept = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [exited.input] });
+    expect(kept.calls).toHaveLength(3);
+  });
+
+  it('执行后回传 JSON 解析失败：总数记 -1；已闭合的 turns 留下，不记 0', async () => {
+    const row: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const turn = executedTurn('m1', [row]);
+    // 哨兵后的 JSON 在 turns 数组闭合之后被截断，整体解析失败。
+    const truncated = `${CASE_RESULT_SENTINEL}\n{"result":{"id":"A1","group":"g","intent":"i","turns":${JSON.stringify([turn])},"platformCalls":1`;
+    const parsed = await runCaseChildProcess(item, 'probe-x', false, 0, process.env, scriptedFork({
+      code: 0, signal: null, payload: truncated,
+    }));
+    expect(parsed.processFailed).toBe(true);
+    expect(parsed.result.notes[0]).toContain('回传 JSON 不可解析');
+    expect(parsed.result.platformCalls).toBe(-1);
+    expect(parsed.result.refusedCalls).toBe(-1);
+    expect(parsed.result.platformCalls).not.toBe(0);
+    expect(parsed.result.refusedCalls).not.toBe(0);
+    expect(parsed.result.turns).toEqual([turn]);
+    expect(parsed.input.turns[0]?.execution).toEqual([row]);
+
+    const garbage = await runCaseChildProcess(item, 'probe-x', false, 0, process.env, scriptedFork({
+      code: 0, signal: null, payload: `${CASE_RESULT_SENTINEL}\n{`,
+    }));
+    expect(garbage.result.platformCalls).toBe(-1);
+    expect(garbage.result.refusedCalls).toBe(-1);
+    expect(garbage.result.turns).toEqual([]);
+    expect(garbage.result.platformCalls).not.toBe(0);
+  });
+
+  function childPayload(result: Record<string, unknown>, inputTurns: unknown[]): string {
+    return `${CASE_RESULT_SENTINEL}\n${JSON.stringify({
+      result: { id: 'A1', ok: false, ...result },
+      input: { caseId: 'A1', ok: false, notes: [], intents: [], gateRows: [], delegations: [], turns: inputTurns },
+    })}\n`;
+  }
+
+  it('子进程声明 -1 且有行：总数保持不可知，观测行仍进阶梯与 JSONL', () => {
+    // 2026-11-11 仲裁：有行时旧写法丢掉 payload 里的 -1，按行数收成「正好 N」。
+    // 已看到的调用是真证据，但「至少 N」不是「一共 N」。
+    const alpha: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const beta: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], refused: 'serve_gate:token' };
+    const turn = executedTurn('m1', [alpha]);
+    const raw = childPayload(
+      { turns: [turn], platformCalls: -1, refusedCalls: -1 },
+      [
+        { messageId: 'm1', text: 'q', reply: 'alpha 查完了。', notices: [], execution: [alpha] },
+        {
+          messageId: 'probe-x:A1:crash-window', text: '(runner 崩溃：该轮未形成完整轮次)', reply: null,
+          notices: [], execution: [beta],
+        },
+      ],
+    );
+    const evidence = crashEvidenceFromChildPayload(raw, 'A1');
+    expect(evidence.declaredCalls).toBe(-1);
+    expect(evidence.declaredRefused).toBe(-1);
+    expect(evidence.auditRows).toEqual([alpha, beta]);
+    const crash = caseCrashOf(item, new Error('killed'), 'probe-x', false, evidence);
+    expect(crash.result.platformCalls).toBe(-1);
+    expect(crash.result.refusedCalls).toBe(-1);
+    expect(crash.result.ladder).toHaveLength(2);
+    expect(crash.result.notes.some((note) => note.includes('保留 2 次平台调用'))).toBe(true);
+    expect(crash.input.turns.some((line) => line.execution.some((row) => Array.isArray(row.args) && row.args[1] === 'alpha'))).toBe(true);
+    expect(crash.input.turns.some((line) => line.execution.some((row) => Array.isArray(row.args) && row.args[1] === 'beta'))).toBe(true);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+    expect(report.calls.every((line) => line.script === 'dummy.query')).toBe(true);
+  });
+
+  it('子进程声明确定数且有行：用声明数，不按行数重算', () => {
+    const alpha: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const beta: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'beta'], refused: 'serve_gate:token' };
+    const turn = executedTurn('m1', [alpha, beta]);
+    const raw = childPayload(
+      { turns: [turn], platformCalls: 5, refusedCalls: 0 },
+      [{ messageId: 'm1', text: 'q', reply: 'alpha 查完了。', notices: [], execution: [alpha, beta] }],
+    );
+    const evidence = crashEvidenceFromChildPayload(raw, 'A1');
+    expect(evidence.declaredCalls).toBe(5);
+    expect(evidence.declaredRefused).toBe(0);
+    const crash = caseCrashOf(item, new Error('killed'), 'probe-x', false, evidence);
+    // 按行重算会得到 2/1。声明才是总数。
+    expect(crash.result.platformCalls).toBe(5);
+    expect(crash.result.refusedCalls).toBe(0);
+    expect(crash.result.ladder).toHaveLength(2);
+    expect(crash.result.notes.some((note) => note.includes('保留 2 次平台调用'))).toBe(true);
+    const report = buildUnifiedReport({ at: 'now', evalRunId: 'probe-x', cases: [crash.input] });
+    expect(report.calls).toHaveLength(2);
+  });
+
+  it('无行不可知仍是 -1，knownZero 仍是 0；声明缺席时有行仍按行计数', () => {
+    const unknown = crashEvidenceFromChildPayload(
+      childPayload({ turns: [], platformCalls: -1, refusedCalls: -1 }, []),
+      'A1',
+    );
+    expect(unknown.auditRows).toBeNull();
+    expect(unknown.declaredCalls).toBe(-1);
+    const unknownCrash = caseCrashOf(item, 'boom', 'probe-x', false, unknown);
+    expect(unknownCrash.result.platformCalls).toBe(-1);
+    expect(unknownCrash.result.refusedCalls).toBe(-1);
+
+    const absent = crashEvidenceFromChildPayload(childPayload({ turns: [] }, []), 'A1');
+    expect(absent.auditRows).toBeNull();
+    expect(absent.declaredCalls).toBeUndefined();
+    expect(absent.declaredRefused).toBeUndefined();
+    const absentCrash = caseCrashOf(item, 'boom', 'probe-x', false, absent);
+    expect(absentCrash.result.platformCalls).toBe(-1);
+    expect(absentCrash.result.refusedCalls).toBe(-1);
+
+    const zero = crashEvidenceFromChildPayload(
+      childPayload({ turns: [], platformCalls: 0, refusedCalls: 0 }, []),
+      'A1',
+    );
+    expect(zero.auditRows).toEqual([]);
+    expect(zero.declaredCalls).toBe(0);
+    const zeroCrash = caseCrashOf(item, 'boom', 'probe-x', false, zero);
+    expect(zeroCrash.result.platformCalls).toBe(0);
+    expect(zeroCrash.result.refusedCalls).toBe(0);
+
+    const unreadable = executedTurn('m1', []);
+    unreadable.calls = -1;
+    unreadable.refusedCalls = -1;
+    unreadable.auditMissing = true;
+    const masked = crashEvidenceFromChildPayload(
+      childPayload({ turns: [unreadable], platformCalls: 0, refusedCalls: 0 }, []),
+      'A1',
+    );
+    expect(masked.auditRows).toBeNull();
+    const maskedCrash = caseCrashOf(item, 'boom', 'probe-x', false, masked);
+    expect(maskedCrash.result.platformCalls).toBe(-1);
+    expect(maskedCrash.result.refusedCalls).toBe(-1);
+
+    const row: ExecutionAuditRow = { mode: 'query', script: 'dummy.query', args: ['--collection', 'alpha'], exitCode: 0 };
+    const counted = executedTurn('m1', [row]);
+    const legacy = crashEvidenceFromChildPayload(
+      childPayload(
+        { turns: [counted] },
+        [{ messageId: 'm1', text: 'q', reply: 'alpha 查完了。', notices: [], execution: [row] }],
+      ),
+      'A1',
+    );
+    expect(legacy.declaredCalls).toBeUndefined();
+    expect(legacy.auditRows).toEqual([row]);
+    const legacyCrash = caseCrashOf(item, 'boom', 'probe-x', false, legacy);
+    expect(legacyCrash.result.platformCalls).toBe(1);
+    expect(legacyCrash.result.refusedCalls).toBe(0);
+  });
+});
+
+/**
+ * 债 D-209：FSHINE_EVAL_FIXTURE_STATE_DIR 只许出现在已知站点。
+ * 扫描面 = packages / apps / scripts 下的可执行文本（ts/js/cjs/mjs/py/sh，以及 bin 下无扩展名脚本）。
+ * 文档与 yaml 注释不在扫描面——它们解释桥，不是运行时引用。
+ *
+ * 允许名单比裁定括号多两处，都是重构前就存在的引用，本片不改它们的行为：
+ *   · scripts/probe-real-agent.test.ts —— 探针自己的表征测试（含本守卫）
+ *   · scripts/acceptance.ts —— leak-lint 登记理由已写明它是设置方
+ * 生产代码（packages / apps 的非测试源）零命中；往名单外加一处引用即红。
+ */
+describe('D-209：状态根桥只被已知站点引用，前缀与形状不变', () => {
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const BRIDGE = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
+  const ALLOWLIST = [
+    'packages/agent/platform-leak-lint.test.ts',
+    'scripts/acceptance.ts',
+    'scripts/eval/fixtures/dummy-platform/bin/dummy',
+    'scripts/eval/fixtures/stock-platform/bin/stock',
+    'scripts/probe-real-agent.test.ts',
+    'scripts/probe-real-agent.ts',
+  ];
+  const CODE_EXT = new Set(['.ts', '.tsx', '.js', '.cjs', '.mjs', '.py', '.sh']);
+
+  function bridgeCodeHits(extra: { rel: string; text: string }[] = []): string[] {
+    const hits = new Set<string>();
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === 'node_modules' || entry.name === 'dist' || entry.name === '.runtime' || entry.name === 'coverage') continue;
+        const abs = path.join(dir, entry.name);
+        if (entry.isSymbolicLink()) continue;
+        if (entry.isDirectory()) { walk(abs); continue; }
+        const ext = path.extname(entry.name);
+        const rel = path.relative(repoRoot, abs);
+        const fixtureBin = rel.includes(`${path.sep}bin${path.sep}`) && ext === '';
+        if (!CODE_EXT.has(ext) && !fixtureBin) continue;
+        if (readFileSync(abs, 'utf8').includes(BRIDGE)) hits.add(rel.split(path.sep).join('/'));
+      }
+    };
+    for (const top of ['packages', 'apps', 'scripts']) {
+      const abs = path.join(repoRoot, top);
+      if (existsSync(abs)) walk(abs);
+    }
+    for (const item of extra) {
+      if (item.text.includes(BRIDGE)) hits.add(item.rel);
+    }
+    return [...hits].sort();
+  }
+
+  it('可执行引用闭集 = 探针 + 表征测试 + acceptance + 两个 shell 入口 + leak-lint 登记', () => {
+    expect(bridgeCodeHits()).toEqual(ALLOWLIST);
+  });
+
+  it('前缀是 FSHINE_EVAL_，shell 入口仍把桥翻成 --state-dir', () => {
+    const probe = readFileSync(path.join(repoRoot, 'scripts/probe-real-agent.ts'), 'utf8');
+    expect(probe).toContain("const FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR'");
+    expect(BRIDGE.startsWith('FSHINE_EVAL_')).toBe(true);
+    expect(BRIDGE).toBe('FSHINE_EVAL_FIXTURE_STATE_DIR');
+    for (const [rel, impl] of [
+      ['scripts/eval/fixtures/dummy-platform/bin/dummy', 'dummy.cjs'],
+      ['scripts/eval/fixtures/stock-platform/bin/stock', 'stock.cjs'],
+    ] as const) {
+      const src = readFileSync(path.join(repoRoot, rel), 'utf8');
+      expect(src).toContain('if [ -n "${FSHINE_EVAL_FIXTURE_STATE_DIR:-}" ]; then');
+      expect(src).toContain(`exec node "$(dirname "$0")/${impl}" --state-dir "$FSHINE_EVAL_FIXTURE_STATE_DIR" "$@"`);
+    }
+  });
+
+  it('失效化：生产代码多一处引用即红（名单外的 runtime.ts）', () => {
+    const hits = bridgeCodeHits([{
+      rel: 'packages/agent/src/runtime.ts',
+      text: 'const leak = process.env.FSHINE_EVAL_FIXTURE_STATE_DIR;',
+    }]);
+    const outside = hits.filter((rel) => !ALLOWLIST.includes(rel));
+    expect(outside).toEqual(['packages/agent/src/runtime.ts']);
+  });
+
+  it('隐藏 --case 未知 id 不掉进父进程跑批', () => {
+    const child = spawnSync(process.execPath, [
+      '--import', 'tsx',
+      path.join(repoRoot, 'scripts/probe-real-agent.ts'),
+      '--case', '__missing__',
+      '--eval-run-id', 'probe-test',
+    ], { encoding: 'utf8', cwd: repoRoot, timeout: 20000 });
+    expect(child.status, child.stderr).not.toBe(0);
+    expect(child.stdout).not.toContain('黑盒模式');
+    expect(child.stderr).toContain('没有用例');
+  }, 30000);
+
+  it('父进程同一套 stdio fork 能拉起子进程（缺 ipc 槽会在父进程抛，用例根本不起）', () => {
+    const child = fork(path.join(repoRoot, 'scripts/probe-real-agent.ts'), [
+      '--case', '__missing__', '--eval-run-id', 'probe-test',
+    ], {
+      execArgv: ['--import', 'tsx'],
+      stdio: [...CASE_CHILD_STDIO],
+    });
+    let stderr = '';
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => { stderr += chunk; });
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        reject(new Error('fork 超时'));
+      }, 20000);
+      child.on('error', (error) => { clearTimeout(timer); reject(error); });
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        try {
+          expect(code, stderr).not.toBe(0);
+          expect(stderr).toContain('没有用例');
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+  }, 30000);
 });
