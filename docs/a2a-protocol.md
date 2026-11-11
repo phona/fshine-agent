@@ -2,7 +2,7 @@
 
 状态：**已落地（W5 尾程）**。本协议定义 fshine（宿主）与执行层 agent 之间的私有薄协议：宿主定约与执法，执行层声明与实现，worker 上下文是"协议义务 + 任务实例"的投影。类型定义在 `packages/contracts/src/a2a-protocol.ts`（词汇的唯一权威位置），本文是其叙述。本协议约定目标行为，不声称系统已全部按此实现。**本版新增的两节——「标识词汇：scopeId / callId」与「Pi Durable 约束」——是缺口登记（未落地 / 未采纳），不属于已落地的协议语义；读到它们时按各节状态行理解，不要当既有实现引用。**
 
-**术语层级**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本协议里的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1。删除与保留决定的台账见 `docs/decision-log.md`。
+**术语层级**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本协议里的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1；定位（2026-11-12 第三版）的完整出处见 `docs/decision-log.md` §0.1，`AGENTS.md` 定位节为面向改动的摘要 + 指针。删除与保留决定的台账见 `docs/decision-log.md`。
 
 ---
 
