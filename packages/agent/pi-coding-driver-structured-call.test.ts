@@ -8,8 +8,10 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createPiCodingWorkerSession } from './src/pi-coding-driver';
-import { createPlanScopedWorkerEnv } from './src/plan-runtime';
+import { createPlanScopedWorkerEnv, type PlanCliRunner } from './src/plan-runtime';
 import type { PiCodingWorkerSessionOptions } from './src/pi-coding-driver';
+import type { ServeGateEvent } from './src/serve-gate';
+import type { AccessSemantics, OperationSemantics } from './src/operation-labels';
 import type { AgentToolResult, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -232,6 +234,77 @@ describe('C6 structured_call 通道回归', () => {
     const callEnv = spawnCalls[0]!.env;
     expect(callEnv.EXECUTION_REQUIRE_PLAN).toBe('1');
     // EXECUTION_PLAN_ID 仅在活跃计划存在时设置（createPlanScopedWorkerEnv 行为）；此处无 activePlan，故不断言该键。
+  });
+
+  it('T5：structured_call 超出当前已确认计划声明 → 第一跳即拒并留拒收记录', async () => {
+    const events: ServeGateEvent[] = [];
+    const semantics: OperationSemantics = new Map<string, AccessSemantics>([
+      ['finance.query-receivables', { plan: true, confirm: false }],
+    ]);
+    const planCliRunner: PlanCliRunner = async ({ args }) => {
+      if (args[1] === 'current') {
+        return { code: 0, stdout: JSON.stringify({ taskId: 'task_struct', planId: null, version: null, status: 'none' }), stderr: '' };
+      }
+      return {
+        code: 0,
+        stdout: JSON.stringify({
+          planId: 'plan_struct',
+          version: 1,
+          decision: 'execute',
+          estimate: { calls: 1, seconds: 10, weight: 2 },
+          delta: { addedCalls: 1 },
+          cumulative: {},
+          reasonCode: 'WITHIN_AUTO_THRESHOLD',
+          status: 'active',
+        }),
+        stderr: '',
+      };
+    };
+    await createPiCodingWorkerSession(baseOptions({
+      capabilityManifest: {
+        version: '1.0',
+        operations: [{
+          operation: 'finance.query-receivables',
+          requiresPlan: true,
+          effects: [],
+          estSeconds: 10,
+          label: 'Query',
+          serveMatrix: [],
+          argsSchema: ['--account', '--from', '--to'],
+        }],
+      },
+      operationSemantics: semantics,
+      planCliRunner,
+      serveGateAudit: (event) => { events.push(event); },
+    }));
+    type Verdict = { block?: boolean; reason?: string } | undefined;
+    const session = mockMakeSession.state.capturedAgent as {
+      beforeToolCall: (ctx: {
+        toolCall: { id: string; type: string; name: string; arguments: Record<string, unknown> };
+        args: Record<string, unknown>;
+      }) => Promise<Verdict>;
+    };
+    // 激活一份只声明 alpha 的纯读计划。
+    const planArgs = {
+      command: 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--account","alpha","--from","202601","--to","202601"]}]}',
+    };
+    const activated = await session.beforeToolCall({ toolCall: { id: 'call_plan', type: 'toolCall', name: 'bash', arguments: planArgs }, args: planArgs });
+    expect(activated?.reason).toContain('PLAN ACTIVE');
+
+    const call = (id: string, account: string) => {
+      const args = { operation: 'finance.query-receivables', args: { '--account': account, '--from': '202601', '--to': '202601' } };
+      return session.beforeToolCall({ toolCall: { id, type: 'toolCall', name: 'structured_call', arguments: args }, args });
+    };
+    // 计划内的对象：放行。
+    expect((await call('call_covered', 'alpha'))?.block).toBeUndefined();
+    // 计划没声明的对象：第一跳即拒，并留一条拒收记录。
+    const refused = await call('call_expansion', 'beta');
+    expect(refused?.block).toBe(true);
+    expect(refused?.reason).toContain('超出');
+    const record = events.filter((event) => event.allowed === false && event.tool === 'plan_scope_expansion');
+    expect(record).toHaveLength(1);
+    expect(record[0]?.reason).toBe(refused?.reason);
+    expect(record[0]?.detail).toContain('beta');
   });
 
   it('C9 fallback：structured_call 含旧路径回退与 a2a-cutover 审计日志', () => {

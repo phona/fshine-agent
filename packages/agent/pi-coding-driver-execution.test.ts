@@ -115,7 +115,9 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
 // 首条 bash：提交 JSON calls 方案，实体"对象甲/202609"都在 currentMessage 里 → 宿主放行并激活。
-const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":["--query","对象甲","--period","202609"]}]}';
+// 计划按 operation 级声明（args 留空）：本用例量的是执行足迹，两个不同 period 的查询
+// 都要被 T5 执行前对账视为"当前计划内"；声明具体 period 会把第二个查询判成范围扩张。
+const PLAN_COMMAND = 'bin/example-gateway plan {"calls":[{"operation":"finance.query-receivables","args":[]}]}';
 // 真实平台查询：计划已激活 → G1 放行（gateCalls++，latch 计划身份）。
 const QUERY_COMMAND = 'bin/example-gateway query query-receivables.js --query 对象甲 --period 202609';
 // 第二次真实查询（A4 的 query-receivables ×2 形态）。

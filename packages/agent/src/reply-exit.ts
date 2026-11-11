@@ -17,7 +17,7 @@
  * 给（手里有真实执行产物时用它），整段协议删完无内容时沿用格式异常兜底。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { EXECUTION_LANGUAGE_SCRUB_PATTERNS } from './execution-language';
+import { scrubExecutionLanguageText } from './execution-language';
 import { isWholeReplyRouteDeclaration } from './protocol-material';
 import { stripServerPaths } from './server-paths';
 import type { TurnExitEvent } from './turn-exit';
@@ -163,36 +163,29 @@ export function sanitizeDirectExitReply(input: ServerPathExitInput): ReplyExitRe
 }
 
 /**
- * 执行语言删除（D-136/D-138）：判据在 execution-language.ts 的 SCRUB_PATTERNS（只收
- * 零争议形态）。删标记留其余——与删路径同纪律，该丢的只是用户没法用的那一截；删完
- * 剩不下可读内容时（整段都是协议）替换为兜底话术，不给用户一个空气泡。
+ * 执行语言删除（D-136/D-138/D-144；T8 2026-11-11 扩面）：判据与归一影子在
+ * `execution-language.ts` 的 `scrubExecutionLanguageText`（五类指纹各一条删除臂 +
+ * 工具调用协议标记，跨行/全角/零宽/实体等对抗形态在归一影子上统一处理）。本函数只
+ * 负责把它接进出口链：删完剩不下可读内容时（整段都是协议）替换为兜底话术，不给用户
+ * 一个空气泡。
  */
 function scrubExecutionLanguageReply(text: string): ReplyExitResult {
-  let tokens = 0;
-  const labels: string[] = [];
-  let scrubbed = text;
-  for (const { label, pattern, whitelist } of EXECUTION_LANGUAGE_SCRUB_PATTERNS) {
-    scrubbed = scrubbed.replace(pattern, (matched) => {
-      if (whitelist?.has(matched)) return matched;
-      tokens += 1;
-      if (!labels.includes(label)) labels.push(label);
-      return '';
-    });
-  }
-  if (tokens === 0) return { text, events: [] };
+  const scrubbed = scrubExecutionLanguageText(text);
+  if (scrubbed.removed === 0) return { text, events: [] };
+  const detail = { labels: scrubbed.labels, tokens: scrubbed.removed };
   // 整段协议的判定：标签删完后还有参数值残渣（"delegate" 之类 ASCII 标识符），
   // 但那不是给用户读的——以剩余的**非 ASCII 字符数**（中文等自然语言内容）< 4
   // 判"没有可读内容"，替换为兜底话术，不给用户一个只有残渣的气泡。
-  const readableChars = [...scrubbed].filter((ch) => ch.codePointAt(0)! > 0x7f).length;
+  const readableChars = [...scrubbed.text].filter((ch) => ch.codePointAt(0)! > 0x7f).length;
   if (readableChars < 4) {
     return {
       text: FORMAT_ANOMALY_FALLBACK,
-      events: [{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels, tokens } }],
+      events: [{ level: 'warn', event: 'execution_language_scrubbed', detail }],
     };
   }
   return {
-    text: scrubbed,
-    events: [{ level: 'warn', event: 'execution_language_scrubbed', detail: { labels, tokens } }],
+    text: scrubbed.text,
+    events: [{ level: 'warn', event: 'execution_language_scrubbed', detail }],
   };
 }
 
