@@ -614,8 +614,14 @@ function measureAxisOne(
       }
     }
     scopeExpansionCount = plans.filter((plan) => plan.reasonCode === 'SCOPE_EXPANSION').length;
-    confirmActivated = plans.filter((plan) => plan.decision === 'confirm' && plan.activatedEvidence === 'user-confirmed').length;
-    plansConfirmedByUser = plans.filter((plan) => plan.activatedEvidence === 'user-confirmed').length;
+    // activatedEvidence 缺席 = 旧账本没写这个字段（不可知），不是「零次确认」。
+    const hasActivatedEvidence = plans.some((plan) => plan.activatedEvidence !== undefined);
+    confirmActivated = hasActivatedEvidence
+      ? plans.filter((plan) => plan.decision === 'confirm' && plan.activatedEvidence === 'user-confirmed').length
+      : null;
+    plansConfirmedByUser = hasActivatedEvidence
+      ? plans.filter((plan) => plan.activatedEvidence === 'user-confirmed').length
+      : null;
 
     // SCOPE_EXPANSION 上下文：同一 task 的第二张及以后、且落在 auto 阈值带的计划。
     // 判据用执行层账本自己的 reasonCode，不重算阈值（阈值可能被用例覆盖，账本有最终答案）。
