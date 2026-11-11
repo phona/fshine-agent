@@ -104,6 +104,12 @@ export interface LlmConfig {
   mainModel?: string;
   thinkingLevel?: string;
   mainThinkingLevel?: string;
+  /**
+   * Main 模型的上下文窗口（token，部署层能力声明）。
+   * 压缩阈值 = contextWindow − 摘要预留：窗口声明错了，压缩要么永远不触发、要么过早触发；
+   * 缺省（未声明）= 驱动内的 128k 缺省，行为与接线前一致。
+   */
+  contextWindow?: number;
 }
 
 /** 企微智能机器人凭据（部署配置；同名环境变量 WECOM_* 只作非空值覆盖口）。 */

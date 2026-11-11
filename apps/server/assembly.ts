@@ -26,6 +26,7 @@ import {
   loadProposalSchema,
   reviewProposalWithDriver,
   newGateSecret,
+  parseContextWindow,
   parsePiThinkingLevel,
   planDraftExample,
   type ContextTaskRunner,
@@ -241,10 +242,15 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const mainThinkingLevel = mainThinkingRaw
     ? parsePiThinkingLevel(mainThinkingRaw, 'LLM_MAIN_THINKING_LEVEL')
     : undefined;
+  // 模型能力（上下文窗口）：装配层持有部署声明、驱动只收参数（T4 接缝 / T7 窗口治理）。
+  // 未配置 = 不传，驱动沿用 128k 缺省（options 键集与接线前一致）；显式值非法即抛，
+  // 不静默回落——窗口错了压缩阈值就错了，那是贴边空回复的源头。
+  const mainContextWindow = parseContextWindow(effectiveEnv['LLM_CONTEXT_WINDOW'], 'LLM_CONTEXT_WINDOW');
   const driver = overrides.driver ?? createPiTurnDriver({
     env: effectiveEnv,
     ...(mainModelOverride ? { modelId: mainModelOverride } : {}),
     ...(mainThinkingLevel ? { thinkingLevel: mainThinkingLevel } : {}),
+    ...(mainContextWindow !== undefined ? { contextWindow: mainContextWindow } : {}),
   });
   const workerDriver = overrides.workerDriver ?? createPiCodingTurnDriver({
     env: effectiveEnv,

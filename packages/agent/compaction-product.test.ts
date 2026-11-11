@@ -71,7 +71,9 @@ function longTranscript(): AgentMessage[] {
 describe('T3 压缩产物只有原生摘要与保留尾段', () => {
   it('压缩产物不含 sidecar 标记串，且不含宿主自定义消息', async () => {
     const transcript = longTranscript();
-    const compacted = await compactTranscriptWithPi(transcript, { force: true }, fakeRuntime(1_000));
+    // 窗口必须装得下一次「摘要输出 + 模板余量」；1000 token 的声明在物理上无法压缩，
+    // T7 起按失败降解处理（不是本用例要测的产物形状）。60k 足够容纳默认保留尾段与摘要。
+    const compacted = await compactTranscriptWithPi(transcript, { force: true }, fakeRuntime(60_000));
 
     const serialized = JSON.stringify(compacted);
     expect(serialized, '压缩产物里仍有 sidecar 声明块：宿主影子状态随压缩复利').not.toContain('compacted_request_context');

@@ -10,9 +10,11 @@ export type {
 } from './driver';
 export {
   compactTranscriptWithPi,
+  compactionSettingsFor,
   createPiTurnDriver,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
+  parseContextWindow,
   parsePiThinkingLevel,
   PI_THINKING_LEVELS,
   type PiModelCapabilities,
