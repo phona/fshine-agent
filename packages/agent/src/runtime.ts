@@ -46,7 +46,7 @@ import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, DEFAULT_EXECUTOR_LABEL, buildSyste
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
-import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, PLAN_FROZEN_REFUSAL, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
 export { EXECUTION_LANGUAGE_FINGERPRINTS, executionLanguageFingerprints } from './execution-language';
 export { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 export { looksLikeProtocolMaterial } from './protocol-material';
@@ -578,6 +578,16 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               // 抛出的是宿主已组装好的澄清问题：它经驱动的 terminate 语义成为本轮文本，
               // 再由收口处的优先分支落成最终回复（模型那一轮的翻译体由此不上屏）。
               if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
+              // T10 段2 冻结计划：本回合已有一笔委派被判假死（结果指标长期无进展）。
+              // 不再派发任何后续步骤，也不新开任务或盲目重跑——把冻结事实交还模型，
+              // 由它收口；续跑只能由用户下一回合显式发起（同一 taskId 从断点）。
+              if (turn.planFrozen) {
+                console.info(JSON.stringify({
+                  event: 'task_plan_frozen_refused',
+                  requestId: ctx.requestId,
+                }));
+                return { error: PLAN_FROZEN_REFUSAL };
+              }
               // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
               let delegated: SubagentTaskResult;
               // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把四个来源交给
@@ -680,6 +690,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '委派未完成' });
                 if (error instanceof ToolUserError) {
                   error.delegationCompleted = true;
+                  // T10 段2：假死冻结信号（context.ts 的 TASK_STALLED 标记）——计划冻结，
+                  // 本回合后续委派由上方守卫拒绝派发。worker 进程没有被终止（检测侧不
+                  // abort），任务条目留 needs 供下一回合从断点续跑。
+                  if ((error as { taskStalled?: unknown }).taskStalled === true) turn.planFrozen = true;
                   // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
                   // 'timeout'）以 DELEGATION_TIMEOUT_FAILURE 话术上抛（error-codes 表唯一
                   // 来源，恒等比对、不模糊匹配）。宿主按协议把该失败分类为
