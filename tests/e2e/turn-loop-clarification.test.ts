@@ -3,7 +3,7 @@
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
  * 离线全链 e2e：结构化歧义/未找到 → 宿主机械组装澄清（2026-09-27 Stage 3 事故根治包）。
- * 共享替身见 ./harness.ts（真 SQLite、真 bin/example-gateway 计划门、mock 执行器）。
+ * 共享替身见 ./harness.ts（真 SQLite、真配置派生的网关计划门、mock 执行器）。
  *
  * 事故形状：worker 真调了平台（目录/余额查询返回 ACCOUNT_SET_AMBIGUOUS，exit 0，调用被
  * 计入 execution），却把信封翻译成技术报告——脚本路径、原始错误码、candidates: [] 全上屏。

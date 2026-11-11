@@ -1,8 +1,8 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
- * Cross-repository acceptance against the real example-gateway CLI in mock mode.
+ * Cross-repository acceptance against the config-derived gateway CLI in mock mode.
  * Run explicitly with:
  * --config=/path/to/config/agent.yaml npx vitest run packages/agent/plan-cross-repo.acceptance.test.ts
  *
@@ -17,10 +17,12 @@ import path from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { afterAll, beforeAll, describe, it } from 'vitest';
 import { evaluateAndActivatePlan, type PlanCliRequest, type PlanCliRunner, type PlanEvaluation } from '../../packages/agent/src/plan-runtime';
+import { gatewayExecPath } from '../../packages/agent/src/platform-contract';
 import { resolveConfigPath, explicitConfigFrom } from '../../scripts/resolve-config-path';
 import { resolveActiveProfileId, type ContextProfileConfig } from '../../packages/contracts/src/config';
 
-function resolvePlatformRoot(): string {
+/** 活跃 profile 的 root + gatewayExecPath。未声明或 CLI 不在场 → 空路径，整组跳过（不是绿）。 */
+function resolvePlatformCli(): { root: string; cliPath: string } {
   try {
     const configPath = resolveConfigPath(explicitConfigFrom());
     const config = parseYaml(readFileSync(configPath, 'utf8')) as Record<string, unknown>;
@@ -29,18 +31,18 @@ function resolvePlatformRoot(): string {
     if (profileId) {
       const profile = profiles![profileId] as Record<string, unknown> | undefined;
       const root = String(profile?.root ?? '');
-      if (root) return root;
+      const gateway = String(profile?.gateway ?? '');
+      if (root && gateway) return { root, cliPath: gatewayExecPath(root, gateway) };
     }
   } catch {
-    // 无配置或 active profile 未定 → 走回退
+    // 无配置、active profile 未定、或 gateway 声明非法 → 跳过，不拼一份实例名
   }
-  return path.resolve(__dirname, '..', '..', '..', 'fictional-execution-layer');
+  return { root: '', cliPath: '' };
 }
 
-const platformRoot = resolvePlatformRoot();
-const cliPath = path.join(platformRoot, 'bin', 'example-gateway');
+const { root: platformRoot, cliPath } = resolvePlatformCli();
 // Never silently skip: a missing CLI is an explicit failure, not a green run.
-const integration = describe.skipIf(!existsSync(cliPath))('[L4 集成] fshine ↔ example-gateway 计划边界（真实 CLI / mock executor）', () => {
+const integration = describe.skipIf(!cliPath || !existsSync(cliPath))('[L4 集成] fshine ↔ 配置派生的网关 计划边界（真实 CLI / mock executor）', () => {
   let stateDir: string;
   let env: NodeJS.ProcessEnv;
   let subprocessSequence = 0;

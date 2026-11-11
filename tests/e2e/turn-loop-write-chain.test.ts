@@ -1,4 +1,4 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 // **fallback 覆盖**：本文件头部显式标注 fallback 覆盖用例——结构化调用通道（call --file）
@@ -8,7 +8,7 @@
  * 离线全链 e2e：凭证写链路（两步确认完整闭环，B 组）。共享替身见 ./harness.ts。
  *
  * **C 波（删旧文本写路径）后只剩网关提案路径**：worker 不把提案 JSON 贴进终稿，而是 write
- * 进本轮 `tmp/<requestId>/proposal.json` 再发 `bin/example-gateway prepare <proposal.create 角色的
+ * 进本轮 `tmp/<requestId>/proposal.json` 再发 `配置派生的网关 prepare <proposal.create 角色的
  * operation> <文件>`；宿主在 beforeToolCall 拦下这条命令，自己办调平台 create（mock
  * executor），拿回**平台渲染的摘要** + 一个取物单 proposalId。宿主持有的只剩 proposalId
  * + 确认码：零业务字段、零 payload（W8 的 L4 机械守卫）。

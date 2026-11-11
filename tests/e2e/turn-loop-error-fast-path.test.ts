@@ -1,4 +1,4 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -165,7 +165,7 @@ describe('[L4 集成] 离线全链 e2e：错误态快路径 v2', () => {
     const before = totalActualCalls();
     // terminalEmptyText 档：替身刻意复现第一版失败形状——早停返回 text: '' + 挂
     // terminalFailure。宿主侧空文本豁免 + 终局分支必须独立接住：用户拿到的仍是
-    // 完整话术，而不是"example-gateway 子任务执行失败，请稍后再试。"的 executor 兜底。
+    // 完整话术，而不是"执行层子任务执行失败，请稍后再试。"的 executor 兜底。
     const worker = countingWorker([
       { plan: balanceCalls('幻辰财税', '202609') },
     ], { terminalEmptyText: true });

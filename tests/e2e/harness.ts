@@ -44,7 +44,7 @@ const RESOLVED_CONFIG: string | undefined = (() => {
       return resolveConfigPath(explicit);
     }
     // 无显式配置时，只找本地 config/agent.yaml，不 fallback 到 eval.agent.yaml
-    // （eval 配置是 stock 夹具，不是 example-gateway 的平台配置）
+    // （eval 配置是 stock 夹具，不是活跃 profile 的平台配置）
     const rootConfig = path.resolve(__dirname, '..', '..', 'config', 'agent.yaml');
     if (existsSync(rootConfig)) {
       return rootConfig;
@@ -81,13 +81,15 @@ const GATEWAY: string = (() => {
   if (!PROFILE_CACHE) return '';
   return String(PROFILE_CACHE.profile?.gateway ?? '');
 })();
-/** 平台 CLI 路径（延迟求值：PLATFORM_ROOT 为 null 时不抛，用到时才组装）。 */
-function getCli(): string {
+/**
+ * 配置派生的网关绝对路径。拼装只走 platform-contract.gatewayExecPath
+ * （platformRoot + 活跃 profile.gateway），e2e 不另写一份路径。
+ * 延迟求值：模块加载时不抛，调用时 PLATFORM_ROOT / GATEWAY 未配才抛。
+ */
+export function gatewayCliPath(): string {
   if (!PLATFORM_ROOT || !GATEWAY) throw new Error('PLATFORM_ROOT / GATEWAY 未配（config/agent.yaml 缺失或未配置 active profile）');
   return gatewayExecPath(PLATFORM_ROOT, GATEWAY);
 }
-// 暴露给 gatedWorker 等运行时函数的延迟求值 CLI
-const CLI = /* #__PURE__*/ getCli;
 
 let stateDir: string;
 let savedEnv: NodeJS.ProcessEnv;
@@ -222,7 +224,7 @@ beforeAll(() => {
 
   let cliPath: string;
   try {
-    cliPath = getCli();
+    cliPath = gatewayCliPath();
   } catch {
     // config/agent.yaml 缺失或平台未 checkout：不阻断 import，平台相关测试需显式跳过
     return;
@@ -586,7 +588,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           for (const call of current.execute) {
             const script = operationScripts.get(call.operation);
             if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
-            const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
+            const out = spawnSync(gatewayCliPath(), ['query', script, ...call.args.map(String)], {
               cwd: PLATFORM_ROOT,
               encoding: 'utf8', timeout: 30_000,
               env: { ...process.env, EXECUTION_PLAN_ID: active.planId, EXECUTION_REQUIRE_PLAN: '1' },
@@ -658,7 +660,7 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           // serve 法域的 EXECUTION_INVOCATION 由网关铸造，直调 operation run 会被拒。
           const script = operationScripts.get(call.operation);
           if (!script) throw new Error(`未知 operation 脚本: ${call.operation}`);
-          const out = spawnSync(getCli(), ['query', script, ...call.args.map(String)], {
+          const out = spawnSync(gatewayCliPath(), ['query', script, ...call.args.map(String)], {
             cwd: PLATFORM_ROOT,
             encoding: 'utf8', timeout: 30_000,
             env: { ...process.env, EXECUTION_PLAN_ID: plan.planId, EXECUTION_REQUIRE_PLAN: '1' },

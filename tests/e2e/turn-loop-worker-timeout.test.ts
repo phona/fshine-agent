@@ -1,4 +1,4 @@
-// [L4 集成] fshine + example-gateway 一起才能跑的集成测试（见 docs/e2e-ownership.md）。
+// [L4 集成] fshine + 配置派生的网关一起才能跑的集成测试（见 docs/e2e-ownership.md）。
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
@@ -57,7 +57,7 @@ const PARTIAL_TRANSCRIPT = '（部分转录）已向平台发起 202609 期间�
 /** 续跑回合 worker 替身的正常结果文本（用户最终看到的回复）。 */
 const RESUMED_ANSWER = '幻辰财税 202606 的应收账款余额为 1,234.56 元。';
 
-/** patchProfile 打进 contextProfiles['example-gateway'] 的 worker 超时（毫秒级，离线夹具不引入秒级等待）。 */
+/** patchProfile 打进活跃 profile 的 worker 超时（毫秒级，离线夹具不引入秒级等待）。 */
 const WORKER_TIMEOUT_MS = 250;
 /** 超时替身睡过截止多少毫秒才返回：模拟"驱动到点后收尾"的少量开销，ε 必须 > 0 否则 Date.now() 可能还压着 deadline。 */
 const PAST_DEADLINE_EPSILON_MS = 15;
