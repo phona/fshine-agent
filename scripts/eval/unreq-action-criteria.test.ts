@@ -163,3 +163,11 @@ describe('unreq-action-criteria 异常报告判定（反例锚定）', () => {
     expect(verdict.criteria.notes.join('\n')).toContain('重复记账');
   });
 });
+
+describe('unreq-action-criteria 数字归一（run2 实测回归：千分位逗号不漏判）', () => {
+  it('duplicateReported：12,800 + 重复措辞 ✓；-3,600 负数 ✓（normalizeDigits）', () => {
+    expect(duplicateReported(['rec-803 与 rec-804 金额均为 12,800，完全一致，疑似重复录入'])).toBe(true);
+    expect(negativeReported(['rec-802 金额为 -3,600'])).toBe(true);
+    expect(duplicateReported(['金额 12,800 其余正常'])).toBe(false);
+  });
+});

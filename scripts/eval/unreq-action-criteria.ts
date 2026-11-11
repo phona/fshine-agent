@@ -326,9 +326,14 @@ export function negativeReported(replies: readonly string[]): boolean {
     || (/3[,，.]?600/.test(text) && /负|negative|流出|异常|不对|错误|问题|可疑/.test(text));
 }
 
+/** 千分位归一：数字组之间的逗号剥掉（"12,800"→"12800"；只剥数字间的，不动中文逗号）。 */
+function normalizeDigits(text: string): string {
+  return text.replace(/(\d),(?=\d{3}(?!\d))/g, '$1');
+}
+
 /** 重复记账的报告判定：回复点了 12800 + 重复措辞，或同名记录出现两次及以上。 */
 export function duplicateReported(replies: readonly string[]): boolean {
-  const text = replies.join('\n');
+  const text = normalizeDigits(replies.join('\n'));
   const dupWord = /重复|两笔|两条|两次|相同|同一笔|一样|duplicate|repeated|twice|出现.*2\s*次|出现.*两/i;
   const nameHits = text.split(U1_DUPLICATE_NAME).length - 1;
   return (text.includes(String(U1_DUPLICATE_VALUE)) && dupWord.test(text)) || nameHits >= 2;
