@@ -387,7 +387,7 @@ export interface ContextTaskRunnerOptions {
    * 之前运行。输入给平台下发的提案 schema（接口文档 §5，真实下发值，
    * 不再是 null）+ 域 dry-run 信封 + 平台渲染的 summaryText；输出只给
    * 一致/不一致 + 字段。不一致时不发确认码。生产装配必须注入
-   * （`reviewProposalWithDriver(contextModelDriver)`）；未注入时
+   * （`reviewProposalWithDriver(driver)`）；未注入时
    * fail-closed，直接失败并记 `proposal_review_required`，绝不记
    * skipped 日志就继续——`proposal_review_skipped` 事件已删除。
    */

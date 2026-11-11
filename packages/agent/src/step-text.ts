@@ -3,15 +3,13 @@ import { hasServerPath } from './server-paths';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
 
 /**
- * 宿主内部工具（回合契约 + 历史检索）：它们描述的是宿主自己的编排机制，不是
- * "用户即将看到什么"。进度帧对它们没有任何信息量，而工具名本身就是系统提示词
- * 明令不许出现的字样（"不许出现 route_current_turn…"）——所以一律不发帧，
- * 既不发默认帧，也不发模型自填短语：整条链路对内部工具静默。
+ * 宿主内部工具（回合契约）：它描述的是宿主自己的编排机制，不是"用户即将看到什么"。
+ * 进度帧对它没有任何信息量，而工具名本身就是系统提示词明令不许出现的字样（"不许出现
+ * route_current_turn…"）——所以一律不发帧，既不发默认帧，也不发模型自填短语：整条链路
+ * 对内部工具静默。
  */
 const INTERNAL_TOOLS: ReadonlySet<string> = new Set([
   ROUTE_CURRENT_TURN_TOOL_NAME,
-  'search_history',
-  'get_messages',
 ]);
 
 /** 模型自填进度短语的长度上限：进度帧是流式通道的一条短消息，超长即截断。 */
@@ -52,8 +50,8 @@ export function clampProgressPhrase(phrase: string): string {
 }
 
 /**
- * 默认进度帧（L6 沉积清理后）：主 Agent 工具面早已只剩宿主内部工具
- * （route_current_turn / search_history / get_messages）与委派工具（缺省 run_task，实例名经 profile.toolName 声明）——
+ * 默认进度帧（L6 沉积清理后）：主 Agent 工具面只剩宿主内部工具
+ * （route_current_turn）与委派工具（缺省 run_task，实例名经 profile.toolName 声明）——
  * 直接平台工具（search_account_sets 等）已退役，其具名帧与 accountSetId→名称
  * 查找（rememberAccountSets）随之删除。剩余工具一律回退到通用工具名模板；
  * 宿主内部工具仍静默（null）。帧文本仍由 renderToolStepText 一处合成。

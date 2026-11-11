@@ -9,9 +9,16 @@ export type {
   ProposalCreationOutcome,
 } from './driver';
 export {
+  compactTranscriptWithPi,
+  compactionSettingsFor,
   createPiTurnDriver,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_TOKENS,
+  parseContextWindow,
   parsePiThinkingLevel,
   PI_THINKING_LEVELS,
+  type PiModelCapabilities,
+  type PiModelRuntime,
   type PiThinkingLevel,
   type PiTurnDriverOptions,
 } from './pi-driver';
@@ -133,11 +140,6 @@ export {
   type SkillRegistry,
 } from './skills';
 export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
-export { reduceContextState, CONTEXT_REDUCER_VERSION, type ContextState, type ContextEvidence } from './context-state';
-export { createHistoryTools, type HistoryTool } from './history-tools';
-export { createMemoryCandidateModel, type MemoryModelOptions } from './memory-model';
-export { createLongMemoryCandidateExtractor, type MemoryCandidateModel, type MemoryCandidateModelRequest } from './memory-candidate-extractor';
-export type { CandidateExtractor } from './memory-consolidator';
 export {
   activatePendingPlan,
   createActivationToken,

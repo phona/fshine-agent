@@ -7,7 +7,7 @@ import {
   normalizeUserRequest,
 } from './src/repeat-request';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
-import { createCompactionContextMessage } from './src/compaction-context';
+import { RECENT_TURN_HISTORY_NOTE } from './src/turn-context';
 
 /** 转录形状替身：与生产落库一致（user 是字符串，assistant/toolResult 是块数组）。 */
 function user(text: string, hostContext?: unknown): AgentMessage {
@@ -142,41 +142,6 @@ describe('findRepeatedDelegatedRequest', () => {
     );
   });
 
-  it('压缩 sidecar 保留已压缩派发计数并按完整请求键匹配', () => {
-    const quoteA = { kind: 'text', text: '引用 A' } as const;
-    const quoteB = { kind: 'text', text: '引用 B' } as const;
-    const key = buildRequestKey(REQUEST, { messageReference: quoteA });
-    const sidecar = createCompactionContextMessage({
-      version: 1,
-      delegatedRequests: [{ requestKey: key, count: 2 }],
-      quotedTurns: [{ requestKey: key, bodyPreview: REQUEST, messageReference: quoteA }],
-      omittedQuotedTurns: 0,
-    });
-
-    expect(findRepeatedDelegatedRequest([sidecar], REQUEST, { messageReference: quoteA }))
-      .toEqual({ request: REQUEST, priorDelegations: 2 });
-    expect(findRepeatedDelegatedRequest([sidecar], REQUEST, { messageReference: quoteB })).toBeNull();
-  });
-
-  it('sidecar 计数与保留尾部的具体委派相加一次，不重复计入摘要覆盖部分', () => {
-    const quote = { kind: 'text', text: '引用 A' } as const;
-    const key = buildRequestKey(REQUEST, { messageReference: quote });
-    const compressed = createCompactionContextMessage({
-      version: 1,
-      delegatedRequests: [{ requestKey: key, count: 2 }],
-      quotedTurns: [{ requestKey: key, bodyPreview: REQUEST, messageReference: quote }],
-      omittedQuotedTurns: 0,
-    });
-    const retainedTurn = [
-      user(REQUEST, { messageReference: quote, requestKey: key }),
-      routeCall(),
-      receipt('本轮结果'),
-    ];
-
-    expect(findRepeatedDelegatedRequest([compressed, ...retainedTurn], REQUEST, { messageReference: quote }))
-      .toEqual({ request: REQUEST, priorDelegations: 3 });
-  });
-
   it('不命中：同文请求早前那一轮停在对话枝（没有委派痕迹）', () => {
     // 判据的反面：早前那次是自己聊完的，不是执行过的——重复一遍也不该被当成重复任务。
     const transcript = [
@@ -250,14 +215,14 @@ describe('findRepeatedDelegatedRequest', () => {
   });
 
   it('宿主注入的上下文资料消息不参与判定', () => {
-    // 转录第一条是宿主注入的短期会话状态（user 角色），没有申报回执，不算执行过。
+    // 转录第一条是宿主注入的历史资料注令（user 角色），没有申报回执，不算执行过。
     const transcript = [
-      user('【历史上下文资料：以下是带来源的短期会话状态】 {"entities":["幻骥达"]}'),
+      user(RECENT_TURN_HISTORY_NOTE),
       user(REQUEST),
       routeCall(),
       receipt('子 Agent 完成。'),
     ];
-    expect(findRepeatedDelegatedRequest(transcript, '【历史上下文资料：以下是带来源的短期会话状态】 {"entities":["幻骥达"]}')).toBeNull();
+    expect(findRepeatedDelegatedRequest(transcript, RECENT_TURN_HISTORY_NOTE)).toBeNull();
     expect(findRepeatedDelegatedRequest(transcript, REQUEST)?.priorDelegations).toBe(1);
   });
 });

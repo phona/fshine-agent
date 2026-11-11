@@ -12,9 +12,6 @@ import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, Truste
 import { addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, DriverMessage, ScriptedTurnDriver, type TurnDriver, type TurnDriverInput } from './src/driver';
 import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, createContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
-import { extractContextWithTurnDriver } from './src/context-model';
-import { createLongMemoryCandidateExtractor, type MemoryCandidateModel } from './src/memory-candidate-extractor';
-import type { ConversationEventRecord } from '@fshine/contracts';
 import { FakeSessionRepo } from './test-helpers';
 
 /** provider 真实 Usage 形状的 assistant 消息（pi-ai 盖在每条 assistant 消息上的形状）。 */
@@ -255,69 +252,6 @@ describe('Main 侧 token 采集（turn_span）', () => {
   });
 });
 
-// ── 辅助模型采集：aux_model_usage（kind: context | memory）────────────────
-
-const auxEvent = (eventId: string, content: string, kind: ConversationEventRecord['kind']): ConversationEventRecord => ({
-  eventId, principalId: 'p1', sessionId: 's1', kind, content, createdAt: '2026-10-16T00:00:00.000Z',
-});
-
-describe('辅助模型 token 采集（aux_model_usage）', () => {
-  it('context 抽取：独立埋点 kind=context，带分项；不混进 Main 的 turn_span', async () => {
-    const usage = { input: 10, output: 4, cacheRead: 0, cacheWrite: 0, reasoning: 2, totalTokens: 14, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-    const driver: TurnDriver = {
-      run: async (input: TurnDriverInput) => ({ text: '{"recentTopic":null,"userDecisions":[],"agentAssumptions":[],"unresolvedQuestions":[]}', messages: [...input.messages, assistant(usage)] }),
-    };
-    const capture = captureEvents();
-    try {
-      const result = await extractContextWithTurnDriver({
-        driver,
-        principalId: 'p1',
-        sessionId: 's1',
-        incoming: [auxEvent('e1', '这个可以，继续刚才那个', 'user_message')],
-      });
-      expect(result.ok).toBe(true);
-    } finally {
-      capture.restore();
-    }
-    const aux = capture.events.find((event) => event['event'] === 'aux_model_usage');
-    expect(aux).toBeDefined();
-    expect(aux?.['kind']).toBe('context');
-    expect(aux?.['tokensIn']).toBe(10);
-    expect(aux?.['tokensOut']).toBe(4);
-    expect(aux?.['reasoning']).toBe(2);
-    expect(aux?.['tokens']).toBe(14);
-    expect(capture.events.some((event) => event['event'] === 'turn_span')).toBe(false);
-  });
-
-  it('memory 抽取：独立埋点 kind=memory，带分项；适配器不回传 usage 时字段缺席', async () => {
-    const usage = { input: 30, output: 6, cacheRead: 0, cacheWrite: 0, totalTokens: 36, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-    const withUsage: MemoryCandidateModel = {
-      generateStructured: async () => ({ candidates: [{ key: 'style', type: 'preference', content: '用中文简洁回答', sourceEventIds: ['e1'], action: 'assert' }] }),
-      lastUsage: () => ({ input: 30, output: 6, cacheRead: 0, cacheWrite: 0 }),
-    };
-    const withoutUsage: MemoryCandidateModel = {
-      generateStructured: async () => ({ candidates: [{ key: 'style', type: 'preference', content: '用中文简洁回答', sourceEventIds: ['e1'], action: 'assert' }] }),
-    };
-    const extractor = createLongMemoryCandidateExtractor(withUsage);
-    const fallbackExtractor = createLongMemoryCandidateExtractor(withoutUsage);
-    const events = [auxEvent('e1', '以后请用中文简洁回答', 'user_message')];
-
-    const capture = captureEvents();
-    try {
-      await extractor(events);
-      await fallbackExtractor(events);
-    } finally {
-      capture.restore();
-    }
-    const auxEvents = capture.events.filter((event) => event['event'] === 'aux_model_usage' && event['kind'] === 'memory');
-    expect(auxEvents).toHaveLength(2);
-    expect(auxEvents[0]?.['tokensIn']).toBe(30);
-    expect(auxEvents[0]?.['tokens']).toBe(36);
-    expect(auxEvents[0]?.['durationMs']).toBeTypeOf('number');
-    // 适配器没实现 lastUsage（测试替身/旧适配器）：token 字段缺席，不报错
-    expect(auxEvents[1]?.['tokensIn']).toBeUndefined();
-    expect(auxEvents[1]?.['tokens']).toBeUndefined();
-    // usage 形状里没带的东西不进埋点（totalTokens/cost 不是账目口径）
-    expect(usage.totalTokens).toBe(36);
-  });
-});
+// 辅助模型采集（aux_model_usage，kind: context | memory）随相位 1 删除：两条辅助路径
+// （Context State 语义抽取 / 长期记忆候选抽取）本身已删除，不再有 aux_model_usage 生产者
+// ——测已不存在的埋点等于给删除集留假覆盖。

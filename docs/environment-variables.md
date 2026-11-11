@@ -191,11 +191,15 @@ generic-mock / second-layer / generic-model-eval.py 同批；探针在
 ## 5. 外部服务商凭据（只盘点，不删、不改）
 
 `LLM_API_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_MAIN_MODEL` /
-`LLM_THINKING_LEVEL` / `LLM_MAIN_THINKING_LEVEL` / `LLM_JUDGE_MODEL`（模型侧）、
+`LLM_THINKING_LEVEL` / `LLM_MAIN_THINKING_LEVEL` / `LLM_CONTEXT_WINDOW` /
+`LLM_JUDGE_MODEL`（模型侧）、
 `WECOM_BOT_ID` / `WECOM_BOT_SECRET`（渠道侧）。缺失时：模型侧无 LLM 即无法跑
 真模型评价与生产对话（确定性测试不受影响）；渠道侧缺失即渠道拒绝启动。
+`LLM_CONTEXT_WINDOW` 是 Main 模型的上下文窗口（token）能力声明：压缩阈值 =
+contextWindow − 摘要预留，未声明时沿用驱动缺省 128k；显式值非法即启动失败
+（窗口声明错误会让压缩在真实窗口之外才触发，是 T7 贴边空回复的源头）。
 
-承载（issue #20 切片 C+D）：模型侧前 6 个键与渠道侧 2 个键的**源**是
+承载（issue #20 切片 C+D）：模型侧前 7 个键与渠道侧 2 个键的**源**是
 `config/agent.yaml` 的 `llm.*` / `wecom.*`（gitignored；模板只留键名与获取方式，
 不填真值）；同名环境变量只作非空值覆盖口。`LLM_JUDGE_MODEL` 例外：它只被 eval
 评分脚本（`scripts/eval/score.ts --judge` 的 judge 链路）直读，不经过装配，属

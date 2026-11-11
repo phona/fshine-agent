@@ -107,7 +107,8 @@ function parseWorkerDispatchMode(
 
 function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConfig | undefined {
   const config: LlmConfig = {};
-  const fields: ReadonlyArray<[keyof LlmConfig, string]> = [
+  type StringLlmKey = Exclude<keyof LlmConfig, 'contextWindow'>;
+  const fields: ReadonlyArray<[StringLlmKey, string]> = [
     ['apiBaseUrl', 'LLM_API_BASE_URL'],
     ['apiKey', 'LLM_API_KEY'],
     ['model', 'LLM_MODEL'],
@@ -118,6 +119,18 @@ function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConf
   for (const [key, envName] of fields) {
     const value = pickString(env, envName, raw[key]);
     if (value !== undefined) config[key] = value;
+  }
+  // 窗口是数值能力声明（token）：显式写错即 fail-fast，不按「非法 = 未配置」回落。
+  // 理由：窗口决定压缩阈值，静默回落 128k 会让压缩在真实窗口之外才触发（T7 的原形）；
+  // 这与数值项的一般口径（host.* 非法按未配置）刻意不同，报错点名 llm.contextWindow。
+  // env 覆盖口（LLM_CONTEXT_WINDOW）由装配点 parseContextWindow 校验，报错点名环境变量。
+  const rawContextWindow = raw['contextWindow'];
+  if (rawContextWindow !== undefined && rawContextWindow !== null && String(rawContextWindow).trim() !== '') {
+    const parsed = Number(rawContextWindow);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      throw new Error(`配置项 llm.contextWindow 必须是正整数（当前: ${String(rawContextWindow)}）`);
+    }
+    config.contextWindow = parsed;
   }
   return Object.keys(config).length === 0 ? undefined : config;
 }
@@ -388,6 +401,7 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('LLM_MAIN_MODEL', config.llm?.mainModel);
   put('LLM_THINKING_LEVEL', config.llm?.thinkingLevel);
   put('LLM_MAIN_THINKING_LEVEL', config.llm?.mainThinkingLevel);
+  put('LLM_CONTEXT_WINDOW', config.llm?.contextWindow);
   put('WECOM_BOT_ID', config.wecom?.botId);
   put('WECOM_BOT_SECRET', config.wecom?.botSecret);
   put('FSHINE_PLATFORM_QUEUE_CAPACITY', config.host?.platformQueueCapacity);

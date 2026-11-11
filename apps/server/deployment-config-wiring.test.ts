@@ -73,10 +73,10 @@ async function boot(configPath: string, env: Record<string, string> = {}): Promi
   return createServerAssembly({ env: { AGENT_CONFIG_PATH: configPath, ...env }, dbPath });
 }
 
-function mainCall(): { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string } {
+function mainCall(): { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string; contextWindow?: number } {
   const call = vi.mocked(createPiTurnDriver).mock.calls.at(-1);
   if (!call) throw new Error('createPiTurnDriver 未被装配调用');
-  return call[0]! as { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string };
+  return call[0]! as { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string; contextWindow?: number };
 }
 
 function workerCall(): { env: Record<string, string | undefined>; agentDir?: string } {
@@ -145,6 +145,7 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
       '  mainModel: yaml-main-model',
       '  thinkingLevel: high',
       '  mainThinkingLevel: low',
+      '  contextWindow: 40000',
       'wecom:',
       '  botId: yaml-bot-id',
       '  botSecret: yaml-bot-secret',
@@ -168,6 +169,9 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(mainOptions.env['LLM_API_KEY']).toBe('yaml-key');
     expect(mainOptions.modelId).toBe('yaml-main-model');
     expect(mainOptions.thinkingLevel).toBe('low');
+    // T7：窗口能力声明（yaml → effectiveEnv → 驱动参数）。
+    expect(mainOptions.contextWindow).toBe(40_000);
+    expect(mainOptions.env['LLM_CONTEXT_WINDOW']).toBe('40000');
     expect(capturedModelId(mainDriver())).toBe('yaml-main-model');
 
     // worker：仍走 LLM_MODEL；Pi 会话目录以显式 option 下传（驱动不自读 yaml）。
@@ -221,6 +225,18 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(workerCall().env['LLM_API_KEY']).toBe('yaml-key');
     expect(workerCall().env['FSHINE_PLATFORM_QUEUE_CAPACITY']).toBe('7');
     expect(gateCall()).toEqual({ maxQueue: 7 });
+  });
+
+  it('llm.contextWindow 非法：加载期 fail-fast 点名配置项（窗口声明错误 = 压缩阈值错误）', async () => {
+    const configPath = configFile([
+      'llm:',
+      '  contextWindow: 40k',
+      '',
+    ].join('\n'));
+    await expect(createServerAssembly({
+      env: { AGENT_CONFIG_PATH: configPath, ...BASE_ENV },
+      dbPath: path.join(path.dirname(configPath), 'invalid-window.db'),
+    })).rejects.toThrow(/llm\.contextWindow/);
   });
 
   it('store.dbPath 是宿主库路径源；非空 DB_PATH 覆盖；overrides.dbPath 仍最高优先', async () => {

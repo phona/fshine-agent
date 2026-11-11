@@ -88,11 +88,9 @@ export interface AskSessionOptions {
   channel?: ServerAssemblyOverrides['channel'];
   /** 离线 harness 注入企微 SDK 替身；缺省真 WSClient。 */
   channelClientFactory?: ServerAssemblyOverrides['channelClientFactory'];
-  /** 离线 harness 注入 Main/worker/Context 替身驱动（createServerAssembly 的既定覆写位）；CLI 不传。 */
+  /** 离线 harness 注入 Main/worker 替身驱动（createServerAssembly 的既定覆写位）；CLI 不传。 */
   driver?: ServerAssemblyOverrides['driver'];
   workerDriver?: ServerAssemblyOverrides['workerDriver'];
-  contextModelDriver?: ServerAssemblyOverrides['contextModelDriver'];
-  memoryCandidateExtractor?: ServerAssemblyOverrides['memoryCandidateExtractor'];
 }
 
 export interface AskSession {
@@ -214,8 +212,6 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     ...(options.channelClientFactory ? { channelClientFactory: options.channelClientFactory } : {}),
     ...(options.driver ? { driver: options.driver } : {}),
     ...(options.workerDriver ? { workerDriver: options.workerDriver } : {}),
-    ...(options.contextModelDriver ? { contextModelDriver: options.contextModelDriver } : {}),
-    ...(options.memoryCandidateExtractor ? { memoryCandidateExtractor: options.memoryCandidateExtractor } : {}),
   });
   // 只读旁路连接：change_intents 的完整清单查询（AuditStore 契约只暴露 pending 查询，
   // 与 scripts/eval/write-chain.ts 同一条 SQL、同一张表）。库打不开 = 意图档降级为空。

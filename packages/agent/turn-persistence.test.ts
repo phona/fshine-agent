@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { ContextStateRecord, ConversationEventRecord, MemoryRecordRecord, TrustedContext } from '@fshine/contracts';
+import type { ConversationEventRecord, TrustedContext } from '@fshine/contracts';
 import type { TurnInputContext } from '@fshine/contracts';
-import type { TurnDriver } from './src/driver';
 import { RUN_EXECUTION_TASK_TOOL } from './src/context';
 import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
 import { createCurrentUserMessage } from './src/message-reference';
@@ -13,12 +12,9 @@ import {
   appendUserEvent,
   ensureHistoryBackfill,
   extractDelegationToolResultEvents,
-  isContextState,
-  loadMemoryProjection,
   persistAssistantAndContext,
   redactInternalIds,
   redactSensitiveText,
-  scheduleMemoryConsolidation,
   type TurnPersistenceDeps,
 } from './src/turn-persistence';
 
@@ -30,7 +26,10 @@ import {
  * （要跑完整个回合才碰到一次落账）；抽出来后直测：
  *   · 事件落账形状（eventId 组成 / kind / 脱敏 / 截断 / createdAt 取数）；
  *   · 失败降级（存储抛错不阻塞回合，只记日志）；
- *   · Context State 的增量更新与历史转录回填。
+ *   · 历史转录一次性回填。
+ *
+ * 相位 1（T2）：Context State 增量更新、长期记忆投影与归并队列的用例随各自路径删除
+ * （模块只留"会话历史本身的落账与一次性回填"）。
  */
 
 function ctx(overrides: Partial<TrustedContext> = {}): TrustedContext {
@@ -65,29 +64,6 @@ class FakeLog {
   }
 }
 
-/** 内存假 ContextStateRepo：记录 upsert 轨迹，可注入抛错。 */
-class FakeContextStates {
-  stored: ContextStateRecord | null = null;
-  readonly upserted: ContextStateRecord[] = [];
-  failGet = false;
-  failUpsert = false;
-
-  async get(principalId: string, sessionId: string): Promise<ContextStateRecord | null> {
-    if (this.failGet) throw new Error('context state unavailable');
-    return this.stored && this.stored.principalId === principalId && this.stored.sessionId === sessionId ? this.stored : null;
-  }
-
-  async upsert(record: ContextStateRecord): Promise<void> {
-    this.upserted.push(record);
-    if (this.failUpsert) throw new Error('context state unavailable');
-    this.stored = record;
-  }
-
-  get repo(): NonNullable<TurnPersistenceDeps['contextStates']> {
-    return { get: (p, s) => this.get(p, s), upsert: (record) => this.upsert(record) };
-  }
-}
-
 /** 复刻生产驱动形状的工具结果消息（role=toolResult + content 段数组 + 数字 timestamp）。 */
 function toolResult(toolName: string, toolCallId: string | undefined, text: unknown, timestamp = 10): AgentMessage {
   return {
@@ -101,24 +77,6 @@ function toolResult(toolName: string, toolCallId: string | undefined, text: unkn
 
 function transcriptMessage(role: string, content: string, timestamp: number): AgentMessage {
   return { role, content, timestamp } as unknown as AgentMessage;
-}
-
-function validState(overrides: Partial<ContextStateRecord['state']> = {}): ContextStateRecord {
-  return {
-    principalId: 'wecom:user_a',
-    sessionId: 'sess_tp',
-    updatedAt: '2026-10-12T00:00:00.000Z',
-    throughEventId: 'e_old',
-    reducerVersion: 1,
-    state: {
-      reducerVersion: 1,
-      userDecisions: [],
-      agentAssumptions: [],
-      unresolvedQuestions: [],
-      recentEvents: [],
-      ...overrides,
-    },
-  };
 }
 
 function event(eventId: string, kind: ConversationEventRecord['kind'], content: string): ConversationEventRecord {
@@ -274,12 +232,12 @@ describe('extractDelegationToolResultEvents：脱敏、截断与 id 组成', () 
     expect(events).toEqual([]);
   });
 
-  it('宿主内部工具（history tools）与普通 assistant/user 消息都不落 tool_result', () => {
+  it('非委派/非申报工具的结果与普通 assistant/user 消息都不落 tool_result', () => {
     const { events } = extractDelegationToolResultEvents([
       { role: 'user', content: '用户消息', timestamp: 1 } as unknown as AgentMessage,
       { role: 'assistant', content: '助手消息', timestamp: 2 } as unknown as AgentMessage,
-      toolResult('search_history', 'call_h', '历史检索结果'),
-      toolResult('get_messages', 'call_m', '消息读取结果'),
+      toolResult('some_other_tool', 'call_h', '其他工具结果'),
+      toolResult('read', 'call_m', '文件内容'),
     ], ctx(), RUN_EXECUTION_TASK_TOOL);
 
     expect(events).toEqual([]);
@@ -309,11 +267,10 @@ describe('redactSensitiveText', () => {
 // ── ensureHistoryBackfill：历史转录一次性导入 + 失败降级 ────────────────────
 
 describe('ensureHistoryBackfill', () => {
-  it('首次会话：把 Pi 转录逐条导入 Conversation Log 并归约出 Context State', async () => {
+  it('首次会话：把 Pi 转录逐条导入 Conversation Log（不再派生任何状态）', async () => {
     const log = new FakeLog();
-    const states = new FakeContextStates();
 
-    const ok = await ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [
+    const ok = await ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [
       transcriptMessage('user', '第一轮提问', 1_700_000_000_000),
       transcriptMessage('assistant', '第一轮回答', 1_700_000_001_000),
       transcriptMessage('system', '不是消息角色的条目被跳过', 1_700_000_002_000),
@@ -325,14 +282,10 @@ describe('ensureHistoryBackfill', () => {
     // eventId 是内容摘要（sha256 前 24 位），不带 requestId——迁移事件不属于任何回合
     expect(log.appended[0]?.eventId).toMatch(/^migrate:sess_tp:[0-9a-f]{24}$/);
     expect(log.appended[0]?.requestId).toBeUndefined();
-    expect(states.upserted).toHaveLength(1);
-    expect(states.upserted[0]?.reducerVersion).toBe(1);
-    expect(states.upserted[0]?.throughEventId).toBe(log.appended[1]?.eventId);
   });
 
   it('backfill unwraps a host quote envelope and stores quote metadata separately', async () => {
     const log = new FakeLog();
-    const states = new FakeContextStates();
     const reference = { kind: 'text' as const, text: '引用里说以后都这样做' };
     const currentUser = createCurrentUserMessage(
       '这是什么意思？',
@@ -340,77 +293,56 @@ describe('ensureHistoryBackfill', () => {
       buildRequestKey('这是什么意思？', { messageReference: reference }),
     );
 
-    await ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [currentUser]);
+    await ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [currentUser]);
 
     expect(log.appended[0]).toMatchObject({
       kind: 'user_message',
       content: '这是什么意思？',
       messageReference: reference,
     });
-    expect(states.upserted[0]?.state).toMatchObject({ recentTopic: { text: '这是什么意思？' } });
-    expect(JSON.stringify(states.upserted[0]?.state)).not.toContain('引用里说以后都这样做');
+    expect(log.appended[0]?.content).not.toContain('引用里说以后都这样做');
   });
 
-  it('已有合法 Context State：直接放行，不重复导入', async () => {
-    const log = new FakeLog();
-    const states = new FakeContextStates();
-    states.stored = validState();
-
-    const ok = await ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [
-      transcriptMessage('user', '旧转录', 1),
-    ]);
-
-    expect(ok).toBe(true);
-    expect(log.appended).toEqual([]);
-    expect(states.upserted).toEqual([]);
-  });
-
-  it('Log 里已有事件：不导入转录，直接按既有事件归约', async () => {
+  it('Log 里已有事件：不导入转录', async () => {
     const log = new FakeLog();
     log.events.push(event('e_existing', 'user_message', '已经落过账的用户消息'));
-    const states = new FakeContextStates();
 
-    const ok = await ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [
+    const ok = await ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [
       transcriptMessage('user', '这段转录不该被导入', 1),
     ]);
 
     expect(ok).toBe(true);
     expect(log.appended).toEqual([]);
-    expect(states.upserted).toHaveLength(1);
-    expect(states.upserted[0]?.throughEventId).toBe('e_existing');
   });
 
-  it('没有 contextStates：返回 false（调用方因此退回 transcript 模式）', async () => {
+  it('没有 contextStates：照常导入并返回 true（相位 1 起 transcript 是唯一模式）', async () => {
     const log = new FakeLog();
-    const ok = await ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), []);
-    expect(ok).toBe(false);
-    expect(log.appended).toEqual([]);
+    const ok = await ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [
+      transcriptMessage('user', '第一轮提问', 1),
+    ]);
+    expect(ok).toBe(true);
+    expect(log.appended.map((entry) => entry.kind)).toEqual(['user_message']);
   });
 
   it('没有 conversationLog：返回 true（不需要回填）', async () => {
-    const states = new FakeContextStates();
-    const ok = await ensureHistoryBackfill({ contextStates: states.repo }, ctx(), []);
+    const ok = await ensureHistoryBackfill({}, ctx(), []);
     expect(ok).toBe(true);
-    expect(states.upserted).toEqual([]);
   });
 
   it('存储抛错：降级返回 false，不向上抛', async () => {
     const log = new FakeLog();
     log.failAppend = true;
-    const states = new FakeContextStates();
 
-    await expect(ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [
+    await expect(ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [
       transcriptMessage('user', '导入即失败', 1),
     ])).resolves.toBe(false);
-    expect(states.upserted).toEqual([]);
   });
 
   it('list 抛错：同样降级返回 false', async () => {
     const log = new FakeLog();
     log.failList = true;
-    const states = new FakeContextStates();
 
-    await expect(ensureHistoryBackfill({ conversationLog: log.repo, contextStates: states.repo }, ctx(), [])).resolves.toBe(false);
+    await expect(ensureHistoryBackfill({ conversationLog: log.repo }, ctx(), [])).resolves.toBe(false);
   });
 });
 
@@ -421,7 +353,7 @@ describe('persistAssistantAndContext', () => {
     const log = new FakeLog();
     const toolResults = [event('req_tp:tool:call_1', 'tool_result', '工具结果')];
 
-    await persistAssistantAndContext({ conversationLog: log.repo }, ctx(), '本轮回复', new Map(), toolResults);
+    await persistAssistantAndContext({ conversationLog: log.repo }, ctx(), '本轮回复', toolResults);
 
     expect(log.appended.map((entry) => entry.kind)).toEqual(['tool_result', 'assistant_message']);
     expect(log.appended[1]?.eventId).toBe('req_tp:assistant');
@@ -430,12 +362,12 @@ describe('persistAssistantAndContext', () => {
   });
 
   it('没有 conversationLog：整体空操作（不抛）', async () => {
-    await expect(persistAssistantAndContext({}, ctx(), '回复', new Map())).resolves.toBeUndefined();
+    await expect(persistAssistantAndContext({}, ctx(), '回复')).resolves.toBeUndefined();
   });
 
   it('assistant 文本同样脱敏后才落库', async () => {
     const log = new FakeLog();
-    await persistAssistantAndContext({ conversationLog: log.repo }, ctx(), 'Bearer sk-live-zzz', new Map());
+    await persistAssistantAndContext({ conversationLog: log.repo }, ctx(), 'Bearer sk-live-zzz');
     expect(log.appended[0]?.content).toBe('Bearer [REDACTED]');
   });
 
@@ -443,71 +375,7 @@ describe('persistAssistantAndContext', () => {
     const log = new FakeLog();
     log.failAppend = true;
 
-    await expect(persistAssistantAndContext({ conversationLog: log.repo }, ctx(), '回复', new Map())).resolves.toBeUndefined();
-  });
-
-  it('contextStates 缺省时不排 Context State 更新', async () => {
-    const log = new FakeLog();
-    const queues = new Map<string, Promise<void>>();
-
-    await persistAssistantAndContext({ conversationLog: log.repo }, ctx(), '回复', queues);
-
-    expect(queues.size).toBe(0);
-  });
-
-  it('contextStates 在场时排一次异步更新，跑完后队列自动清理', async () => {
-    const log = new FakeLog();
-    const states = new FakeContextStates();
-    const queues = new Map<string, Promise<void>>();
-
-    await persistAssistantAndContext({ conversationLog: log.repo, contextStates: states.repo }, ctx(), '回复', queues);
-    expect(queues.size).toBe(1);
-
-    await queues.get('wecom:user_a\0sess_tp');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(states.upserted).toHaveLength(1);
-    expect(queues.size).toBe(0);
-  });
-
-  it('Context State 的语义抽取只收到正文，不收到引用 metadata', async () => {
-    const log = new FakeLog();
-    log.events.push({
-      ...event('req_tp:user', 'user_message', '这个呢？'),
-      messageReference: { kind: 'text', text: '以后默认采用这个规则' },
-    });
-    const states = new FakeContextStates();
-    let observedPrompt = '';
-    const contextModelDriver: TurnDriver = {
-      run: async (input) => {
-        observedPrompt = String((input.messages[0] as { content?: unknown } | undefined)?.content ?? '');
-        return { text: '{}', messages: input.messages };
-      },
-    };
-    const queues = new Map<string, Promise<void>>();
-
-    await persistAssistantAndContext({
-      conversationLog: log.repo,
-      contextStates: states.repo,
-      contextModelDriver,
-    }, ctx(), '已看到。', queues);
-    await queues.get('wecom:user_a\0sess_tp');
-
-    expect(observedPrompt).toContain('这个呢？');
-    expect(observedPrompt).not.toContain('以后默认采用这个规则');
-  });
-
-  it('Context State 更新自身失败也不影响已落库的事件', async () => {
-    const log = new FakeLog();
-    const states = new FakeContextStates();
-    states.failUpsert = true;
-    const queues = new Map<string, Promise<void>>();
-
-    await persistAssistantAndContext({ conversationLog: log.repo, contextStates: states.repo }, ctx(), '回复', queues);
-    await (queues.get('wecom:user_a\0sess_tp') ?? Promise.resolve()).catch(() => undefined);
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    expect(log.appended.map((entry) => entry.kind)).toEqual(['assistant_message']);
-    expect(queues.size).toBe(0);
+    await expect(persistAssistantAndContext({ conversationLog: log.repo }, ctx(), '回复')).resolves.toBeUndefined();
   });
 });
 
@@ -596,192 +464,5 @@ describe('澄清事件落账', () => {
     log.failAppend = true;
     await expect(appendClarificationIssued({ conversationLog: log.repo }, ctx(), { code: 'C', query: 'q', candidates: ['a'] })).resolves.toBeUndefined();
     await expect(appendClarificationResolved({ conversationLog: log.repo }, ctx(), { selected: 'a', requestId: 'req_tp' })).resolves.toBeUndefined();
-  });
-});
-
-// ── 长期记忆：投影取数 + 归并排队 ──────────────────────────────────────────
-
-/** 只关心 listByPrincipal 的假 memory repo（其余两个入口给无害缺省）。 */
-function memoryRepo(records: readonly MemoryRecordRecord[]): NonNullable<TurnPersistenceDeps['memoryRecords']> {
-  return {
-    listByPrincipal: async () => [...records],
-    getCursor: async () => null,
-    commit: async () => true,
-  };
-}
-
-function memoryRepoThrows(): NonNullable<TurnPersistenceDeps['memoryRecords']> {
-  return {
-    listByPrincipal: async () => { throw new Error('memory down'); },
-    getCursor: async () => null,
-    commit: async () => true,
-  };
-}
-
-describe('loadMemoryProjection', () => {
-  it('没有 memoryRecords：空串（不注入）', async () => {
-    await expect(loadMemoryProjection({}, 'wecom:user_a')).resolves.toBe('');
-  });
-
-  it('active 记录渲染成投影，并带上"仅用于个性化"的注令', async () => {
-    const records: MemoryRecordRecord[] = [
-      { memoryId: 'm1', principalId: 'wecom:user_a', key: '称呼', type: 'preference', content: '叫老板', status: 'active', sourceEventIds: ['e1'], version: 1, createdAt: 'x', updatedAt: 'x' },
-      { memoryId: 'm2', principalId: 'wecom:user_a', key: '旧事实', type: 'fact', content: '已删除', status: 'deleted', sourceEventIds: ['e2'], version: 1, createdAt: 'x', updatedAt: 'x' },
-    ];
-
-    const text = await loadMemoryProjection({ memoryRecords: memoryRepo(records) }, 'wecom:user_a');
-
-    expect(text).toContain('【长期记忆资料');
-    expect(text).toContain('叫老板');
-    expect(text).not.toContain('已删除');
-    expect(text).toContain('不得把历史对象、范围或执行许可当作当前授权');
-  });
-
-  it('没有 active 记录：空串', async () => {
-    const text = await loadMemoryProjection({ memoryRecords: memoryRepo([]) }, 'wecom:user_a');
-    expect(text).toBe('');
-  });
-
-  it('存储抛错：降级为空串', async () => {
-    const text = await loadMemoryProjection({
-      memoryRecords: memoryRepoThrows(),
-    }, 'wecom:user_a');
-    expect(text).toBe('');
-  });
-});
-
-describe('scheduleMemoryConsolidation', () => {
-  const cue = '请记住我喜欢简洁的回复';
-
-  it('缺 extractor / conversationLog：直接返回，不排任务', () => {
-    const queues = new Map<string, Promise<void>>();
-    scheduleMemoryConsolidation({ memoryRecords: { listByPrincipal: async () => [], getCursor: async () => null, commit: async () => true } }, ctx(), cue, queues);
-    expect(queues.size).toBe(0);
-  });
-
-  it('未达批阈值且无显式记忆线索：不归并', async () => {
-    const committed: unknown[] = [];
-    const queues = new Map<string, Promise<void>>();
-    const log = new FakeLog();
-    log.events.push(event('e_u1', 'user_message', '普通提问'));
-
-    scheduleMemoryConsolidation({
-      conversationLog: log.repo,
-      memoryRecords: {
-        listByPrincipal: async () => [],
-        getCursor: async () => null,
-        commit: async (...args) => { committed.push(args); return true; },
-      },
-      memoryCandidateExtractor: () => [],
-      memoryBatchSize: 8,
-    }, ctx(), '普通提问', queues);
-    await queues.get('wecom:user_a');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    expect(committed).toEqual([]);
-  });
-
-  it('显式记忆线索（"请记住"）即刻归并并推进 cursor', async () => {
-    const committed: Array<{ expected: string | null; next: string | null }> = [];
-    const queues = new Map<string, Promise<void>>();
-    const log = new FakeLog();
-    log.events.push(event('e_u1', 'user_message', cue));
-
-    scheduleMemoryConsolidation({
-      conversationLog: log.repo,
-      memoryRecords: {
-        listByPrincipal: async () => [],
-        getCursor: async () => null,
-        commit: async (_p, expected, next) => { committed.push({ expected, next }); return true; },
-      },
-      memoryCandidateExtractor: () => [{
-        candidateId: 'mem_style',
-        principalId: 'wecom:user_a',
-        key: '回复风格',
-        type: 'preference',
-        content: '简洁',
-        sourceEventIds: ['e_u1'],
-        action: 'assert',
-      }],
-    }, ctx(), cue, queues);
-    await queues.get('wecom:user_a');
-    await new Promise((resolve) => setTimeout(resolve, 5));
-
-    expect(committed).toEqual([{ expected: null, next: 'e_u1' }]);
-    expect(queues.size).toBe(0);
-  });
-
-  it('长期记忆提取器只收到用户正文，不收到引用 metadata', async () => {
-    const queues = new Map<string, Promise<void>>();
-    const log = new FakeLog();
-    log.events.push({
-      ...event('e_quoted', 'user_message', '这个选项是什么意思？'),
-      messageReference: { kind: 'text', text: '以后都默认接受' },
-    });
-    let observedEvents: readonly ConversationEventRecord[] = [];
-
-    scheduleMemoryConsolidation({
-      conversationLog: log.repo,
-      memoryRecords: memoryRepo([]),
-      memoryCandidateExtractor: async (events) => { observedEvents = events; return []; },
-      memoryBatchSize: 1,
-    }, ctx(), '这个选项是什么意思？', queues);
-    await queues.get('wecom:user_a');
-
-    expect(observedEvents[0]?.content).toBe('这个选项是什么意思？');
-    expect(observedEvents[0]).not.toHaveProperty('messageReference');
-  });
-
-  it('cursor 冲突（commit 返回 false）只记警告，不抛', async () => {
-    const queues = new Map<string, Promise<void>>();
-    const log = new FakeLog();
-    log.events.push(event('e_u1', 'user_message', cue));
-
-    scheduleMemoryConsolidation({
-      conversationLog: log.repo,
-      memoryRecords: {
-        listByPrincipal: async () => [],
-        getCursor: async () => null,
-        commit: async () => false,
-      },
-      memoryCandidateExtractor: () => [],
-    }, ctx(), cue, queues);
-
-    await expect(queues.get('wecom:user_a')).resolves.toBeUndefined();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(queues.size).toBe(0);
-  });
-
-  it('存储抛错被 catch 住：队列标记删除，异常不外溢', async () => {
-    const queues = new Map<string, Promise<void>>();
-    const log = new FakeLog();
-    log.events.push(event('e_u1', 'user_message', cue));
-
-    scheduleMemoryConsolidation({
-      conversationLog: log.repo,
-      memoryRecords: {
-        listByPrincipal: async () => [],
-        getCursor: async () => { throw new Error('cursor down'); },
-        commit: async () => true,
-      },
-      memoryCandidateExtractor: () => [],
-    }, ctx(), cue, queues);
-
-    await expect(queues.get('wecom:user_a')).resolves.toBeUndefined();
-    await new Promise((resolve) => setTimeout(resolve, 5));
-    expect(queues.size).toBe(0);
-  });
-});
-
-describe('isContextState', () => {
-  it('合法状态（reducerVersion 1 + 四个数组）为真', () => {
-    expect(isContextState({ reducerVersion: 1, userDecisions: [], agentAssumptions: [], unresolvedQuestions: [], recentEvents: [] })).toBe(true);
-  });
-
-  it('版本不符 / 缺数组 / 非对象为假', () => {
-    expect(isContextState({ reducerVersion: 2, userDecisions: [], agentAssumptions: [], unresolvedQuestions: [], recentEvents: [] })).toBe(false);
-    expect(isContextState({ reducerVersion: 1, userDecisions: [] })).toBe(false);
-    expect(isContextState(null)).toBe(false);
-    expect(isContextState('state')).toBe(false);
   });
 });

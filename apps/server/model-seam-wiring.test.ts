@@ -84,10 +84,10 @@ function capturedModelId(driver: TurnDriver): string {
   return message.model ?? '';
 }
 
-function mainCall(): { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string } {
+function mainCall(): { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string; contextWindow?: number } {
   const call = vi.mocked(createPiTurnDriver).mock.calls.at(-1);
   if (!call) throw new Error('createPiTurnDriver 未被装配调用');
-  return call[0]! as { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string };
+  return call[0]! as { env: Record<string, string | undefined>; modelId?: string; thinkingLevel?: string; contextWindow?: number };
 }
 
 function workerCall(): { env: Record<string, string | undefined> } {
@@ -159,5 +159,17 @@ describe('分层模型接缝装配（LLM_MAIN_MODEL → Main 驱动；worker 恒
     const env = seamEnv({ LLM_MAIN_THINKING_LEVEL: 'yolo' });
     const dbPath = path.join(path.dirname(env['AGENT_CONFIG_PATH']!), 'agent.db');
     await expect(createServerAssembly({ env, dbPath })).rejects.toThrow(/LLM_MAIN_THINKING_LEVEL/);
+  });
+
+  // T7：窗口能力必须能从部署配置声明到驱动；不声明时保持 128k 缺省（options 不新增字段）。
+  it('LLM_CONTEXT_WINDOW 有值：Main 驱动收到模型能力（窗口），缺省时不新增字段', async () => {
+    await bootSeam(seamEnv({ LLM_CONTEXT_WINDOW: '40000' }));
+    expect(mainCall().contextWindow).toBe(40_000);
+  });
+
+  it('LLM_CONTEXT_WINDOW 非法：装配 fail-fast，报错点名该变量（窗口声明错误会让压缩阈值失真）', async () => {
+    const env = seamEnv({ LLM_CONTEXT_WINDOW: '40k' });
+    const dbPath = path.join(path.dirname(env['AGENT_CONFIG_PATH']!), 'agent.db');
+    await expect(createServerAssembly({ env, dbPath })).rejects.toThrow(/LLM_CONTEXT_WINDOW/);
   });
 });

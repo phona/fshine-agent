@@ -162,6 +162,9 @@ function entityMentioned(reply: string, name: string): boolean {
   return new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?!-)`).test(reply);
 }
 import { MOCK_ACCOUNTS, MOCK_COLLECTION_WINDOWS, MOCK_ITEMS } from './eval/dummy-fixture';
+// T9 归因不串判据（相位 1）：回复里的实体/期间 vs 审计里真实调用记录，逐条对。
+// 判据本体与反例锁在 scripts/eval/attribution.ts / attribution.test.ts（纯函数，可直测）。
+import { attributionViolations } from './eval/attribution';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -2851,6 +2854,18 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     if (alienAmounts.length) notes.push(`汇总出现无来源金额：${alienAmounts.join('、')}——既非种子明细值、也非各 collection 全额聚合或其子集和`);
     const covered = [...legit].filter((v) => String(v).length >= 3 && flat.includes(String(v))).length;
     notes.push(`（信息性）合法值（明细+聚合+子集和 ${legit.size} 个）覆盖 ${covered} 个；回复长度 ${reply.length} 字符`);
+    return { turns, notes };
+  },
+  // T9 归因不串（相位 1）：两个不同对象/期间的查询（alpha W1 → contoso-trade W2）之后
+  // 问「刚才查的是哪个」。机械判据 = scripts/eval/attribution.ts：回复里的实体/期间 vs
+  // 审计里真实调用记录逐条对。消息文本逐字来自 cases.yaml，判定层不向 prompt 注入任何
+  // 期望（issue 切片 C 纪律）。
+  T9: async (spec) => {
+    const { send, assembly } = await boot();
+    const turns: Turn[] = [];
+    for (const message of spec.messages) turns.push(await send(message.text!));
+    await assembly.close();
+    const notes: string[] = attributionViolations({ turns, knownEntities: MOCK_ACCOUNTS });
     return { turns, notes };
   },
 };

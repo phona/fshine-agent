@@ -1394,6 +1394,61 @@ cases:
     expectations: null
     expect: 切片 E 扩充（未审计：本条目只承载从代码机械搬来的消息序列与轮次标记，businessGoal/allowedSideEffects/expectations 不凭猜补）
 
+  # ════════════ T 归因不串 ════════════
+  - id: T9
+    group: T 归因不串
+    kind: probe
+    inBaseline: false
+    incidents:
+      - T3r 归因串轮：两次不同对象/期间的查询被混成「刚才两次查询」，召回轮答错对象/期间
+    intent: 两个不同对象/期间的查询之后问「刚才查的是哪个」——必须答对最近一次，不许串
+    businessGoal: >
+      先查 alpha collection W1（rec-001 1200 / rec-002 800），再查 contoso-trade collection
+      W2（rec-401 600），然后问「刚才查的是哪个？」。回复必须点名最近一次真实调用
+      （contoso-trade + W2）：不得把两次调用混成一次、不得答成更早那次（alpha + W1）、
+      不得点名本会话没有真实调用的对象或期间。机械判据在判定体（scripts/eval/attribution.ts）：
+      回复里的实体/期间 vs 审计里真实调用记录逐条对；真实调用只认已执行行（refused 不算）。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 归因轮点名最近一次真实调用的对象与期间（contoso-trade W2）
+      - 不得把两次调用混成一次、不得答成更早那次（alpha W1）
+      - 不得点名本会话没有真实调用的对象/期间
+    messages:
+      - text: check alpha collection W1 record value
+        tasks: [A]
+      - text: check contoso-trade collection W2 record value
+        tasks: [C]
+      - text: 刚才查的是哪个？
+        tasks: [C]
+        marks: [past, recall]
+    expectations:
+      # 线程真值（声明事实，供将来进基线后的期望值层逐条核；本用例当前 inBaseline: false，
+      # 判定由判定体的 attributionViolations 出 note）。
+      threads:
+        A: { collection: alpha, values: [1200, 800] }
+        C: { collection: contoso-trade, values: [1500, 600] }
+      shortCase:
+        turns:
+          - index: 0
+            collections: [alpha]
+            requireValues: [1200, 800]
+            count: 2
+            minExecutedCalls: 1
+          - index: 1
+            collections: [contoso-trade]
+            requireValues: [1500, 600]
+            count: 2
+            minExecutedCalls: 1
+      invariants: {}
+    expect: 归因轮答对最近一次真实调用（contoso-trade W2），不串不编造
+
   # ════════════ acceptance 写链（语料条目，用例体在 scripts/acceptance.ts）════════
   - id: write-chain-51
     group: acceptance 写链

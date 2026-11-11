@@ -88,8 +88,6 @@ async function bootSession(root: string, env: NodeJS.ProcessEnv, replyText: stri
     requireIsolatedFixture: true,
     channel: stubChannel(),
     driver: silentDriver(replyText) as never,
-    contextModelDriver: { run: async (input: { messages: unknown[] }) => ({ text: '{}', messages: input.messages }) } as never,
-    memoryCandidateExtractor: async () => [],
   });
 }
 
