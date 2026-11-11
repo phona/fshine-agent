@@ -73,6 +73,16 @@ jobs:
             || fail "rounds 必须是正整数，实际为：$ROUNDS"
           [[ -n "$CASES" && "$CASES" =~ ^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$ ]] \
             || fail "cases 必须是逗号分隔的用例 id（^[A-Za-z0-9,-]+$，且无空段），实际为：$CASES"
+          # 声明集是集合，与探针 --only、measure-summary 的 parseCases 同一口径。
+          # 重复 id 不在这里静默去重：探针每例只跑一次，汇总若按数组加权、轮数若按未去重个数做除数，会误报。
+          dups="$(node --input-type=module -e '
+            import { duplicateCaseIds } from "./scripts/eval/measure-summary.mjs";
+            const ids = (process.env.CASES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+            process.stdout.write(duplicateCaseIds(ids).join("、"));
+          ')" || fail "重复用例 id 检查未能运行"
+          if [[ -n "$dups" ]]; then
+            fail "cases 含重复用例 id：$dups（声明集是集合，与探针 --only 一致；重复 id 会让区分度加权、阶段轮数误报）"
+          fi
           [[ "$WEAK_MODEL" =~ ^[A-Za-z0-9._-]+$ ]] \
             || fail "weak_model 必须匹配模型 id 形状 ^[A-Za-z0-9._-]+$，实际为：$WEAK_MODEL"
           # 每次测量从干净产物开始，避免上一轮残留 JSON 被当成这一轮的结果。
@@ -129,19 +139,25 @@ jobs:
               fi
               return
             fi
-            node -e '
-              const fs = require("node:fs");
+            node --input-type=module -e '
+              import { readFileSync } from "node:fs";
+              import { stageProgress } from "./scripts/eval/measure-summary.mjs";
               const [file, cases, expectedRaw, name, status] = process.argv.slice(1);
-              const caseCount = cases.split(",").filter(Boolean).length;
               const expected = Number(expectedRaw);
-              let done = 0;
+              let resultsLength = 0;
               try {
-                const data = JSON.parse(fs.readFileSync(file, "utf8"));
-                done = Math.floor((Array.isArray(data.results) ? data.results.length : 0) / Math.max(caseCount, 1));
+                const data = JSON.parse(readFileSync(file, "utf8"));
+                resultsLength = Array.isArray(data.results) ? data.results.length : 0;
               } catch (err) {
                 console.log(`- ${name}: 阶段未完成（结果 JSON 无法解析：${err.message}）`);
                 process.exit(0);
               }
+              const progress = stageProgress(cases, resultsLength, expected);
+              if (!progress.ok) {
+                console.log(`- ${name}: 阶段未完成（${progress.reason}）`);
+                process.exit(0);
+              }
+              const done = progress.done;
               if (done < expected) {
                 console.log(`- ${name}: 阶段未完成（仅 ${done}/${expected} 轮${status === "0" ? "" : `，退出码 ${status}`}）`);
               } else if (status !== "0") {

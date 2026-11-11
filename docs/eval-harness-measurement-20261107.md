@@ -29,12 +29,17 @@ gh workflow run 'Eval harness measurement' \
 | 输入 | 含义 | 校验 |
 |---|---|---|
 | `rounds` | 稳定性测量的轮数（强模型，`--no-judge`） | 正整数；不合法 `exit 2`，不进 python |
-| `cases` | 本轮用例集，逗号分隔 | `^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$`（等价要求 `^[A-Za-z0-9,-]+$` 且无空段） |
+| `cases` | 本轮用例集，逗号分隔的**集合**（重复 id 拒绝，不静默去重） | `^[A-Za-z0-9-]+(,[A-Za-z0-9-]+)*$`（等价要求 `^[A-Za-z0-9,-]+$` 且无空段）；另拒重复 id |
 | `weak_model` | 区分度对照的弱档模型 | 模型 id 形状 `^[A-Za-z0-9._-]+$` |
 
 输入只通过步骤 `env` 传入 shell（`$ROUNDS` / `$CASES` / `$WEAK_MODEL`），不拼进
 `run` 脚本体；格式校验在任何模型调用之前完成。默认值以 workflow 的 input 声明为准，
 本文不复制第二份。
+
+`cases` 与汇总脚本的 `--expect-cases` 是**集合**，口径与探针 `--only` 一致（每例每轮
+只跑一次）。重复 id 在 workflow 入口和 `scripts/eval/measure-summary.mjs` 都直接拒绝
+（退出码 2），不静默去重：留在声明数组里会让区分度逐项比较给同一份证据加权（A,B 与
+A,A,B 得出相反结论），阶段轮数若用未去重的个数当除数则会把完成轮数报小。
 
 ### 1.2 工作流内部阶段
 
@@ -105,10 +110,12 @@ node scripts/eval/measure-summary.mjs \
 - 通过率 = 机械通过轮数 / 总轮数。**80% 只是建议线，不是充分条件**。
 - 低于建议线：该用例不能按 per-push required 门设计（多数决或判据修订需另拿证据）。
 - 达到建议线也只是候选：还必须满足
-  1. 最近一次 eval-real **无机械 pass→fail**；
+  1. 最近一次 eval-real **无机械通过率下降**（含基线全通过后的 pass→fail，以及
+     基线未全通过后的继续下降），且两份对照覆盖 `--expect-cases` 声明的全部用例；
   2. **无未消假红**。
   两项证据任一缺失或不为空，判定文案是「**稳定性达标但需先消回归**」，不是
-  「可做 required」。缺证据按 fail-closed 处理，不默认清白。
+  「可做 required」。缺证据按 fail-closed 处理，不默认清白。声明了却没被对照盖住的
+  用例同样按缺失处理，不得写成已验证。
 
 给汇总脚本补这两项证据：
 
@@ -124,9 +131,13 @@ node scripts/eval/measure-summary.mjs \
 ```
 
 - `--eval-real-baseline` / `--eval-real-latest`：两份 `generic-model-eval.py` 探针
-  JSON（至少含 `results[].id` 与 `results[].mechanical_pass`）。baseline 全通过、
-  latest 出现失败 = 一条机械 pass→fail；latest 未覆盖 baseline 的用例时无法证明
-  「无回归」，按条件未满足处理。
+  JSON（至少含 `results[].id` 与 `results[].mechanical_pass`）。同一用例 latest 的
+  机械通过率严格低于 baseline
+  （`latestPasses * baselineRounds < baselinePasses * latestRounds`，不经浮点）
+  即一条机械回归：既包括基线全通过、latest 出现失败，也包括基线未全通过后的继续下降
+  （如 4/5 → 3/5）。通过率持平或上升不是回归。latest 未覆盖 baseline 的用例，或两份
+  对照没有覆盖 `--expect-cases` 声明的某个用例时，无法证明「无回归」，按条件未满足
+  处理，reason 列明缺号。
 - `--regressions`：未消假红清单，接受 `{"unresolved":[]}`（空数组 = 清白）或
   `{"items":[]}` 或字符串数组。文件缺失/无法解析 = 未核验，不得当作清白。
 
@@ -163,9 +174,10 @@ node scripts/eval/measure-summary.mjs \
 
 1. **80% 是建议线，不是充分条件**。通过率达到线不等于可以进 per-push required；
    还要过 3.1 的两项回归证据。证据缺失时宁可写「稳定性达标但需先消回归」。
-2. **机械 pass→fail 永远 blocking**。不能用「结果对、机制违」「假红」「方差」之类
-   解释把它降级成非阻断；要么修 harness/判据并拿证据，要么保持 blocking。把机械
-   下降写成假红本身违反仓库规定。
+2. **机械通过率下降永远 blocking**（含基线全通过后的 pass→fail，以及未全通过基线的
+   继续下降）。不能用「结果对、机制违」「假红」「方差」之类解释把它降级成非阻断；
+   要么修 harness/判据并拿证据，要么保持 blocking。把机械下降写成假红、或把未覆盖的
+   声明用例写成无回归，本身违反仓库规定。
 3. **judge 缺失不是区分度证据**。缺维度、跳过评委、双方全 `null` 都只能得到
    「无法判定」；既不能证明有区分度，也不能证明没有。
 4. **小样本只给点估计**：N 轮通过率是点估计，不是置信区间；不要把一次通过率当成
