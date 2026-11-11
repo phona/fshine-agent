@@ -34,6 +34,12 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // 默认臂会被悄悄切到实验臂（历史工具消失、召回依赖被投影掉）。测试要实验臂时
   // 在自己的用例里显式设置；缺省一律从未设置起步。
   'FSHINE_SPIKE_GENERIC_AGENT',
+  // SPIKE 长窗三旋钮（spike-long-window.ts）：运行者 shell 里 export 了它们，测试基线
+  // 会被悄悄切换（contextWindow 变小 / TTL 变短 / 装配走 transcript）。测试要实验臂时
+  // 在自己的用例里显式设置；缺省一律从未设置起步。
+  'FSHINE_SPIKE_CONTEXT_WINDOW',
+  'FSHINE_SPIKE_SESSION_TTL_MS',
+  'FSHINE_SPIKE_TRANSCRIPT_MODE',
   // stock 夹具辅助组（memory / breaker / cache）的 ambient 名（规范族 + STOCK_* 调试专名）：
   // stock.cjs 的 auxPaths() 用 env2 优先读 ambient，继承 shell 值会盖过 --state-dir 的
   // per-case 派生（打开态熔断账本 → BREAKER_OPEN；memory/cache 写到状态根外）。

@@ -29,6 +29,7 @@ import {
 } from './compaction-context';
 import { buildRequestKey, collectDelegatedRequestCounts } from './repeat-request';
 import { isSpikeGenericModeEnabled } from './spike-generic-mode';
+import { spikeContextWindow } from './spike-long-window';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
@@ -156,7 +157,9 @@ export function createPiModelRuntime(
     thinkingLevelMap: KIMI_THINKING_LEVEL_MAP,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128_000,
+    // SPIKE-ONLY（spike-long-window.ts）：压缩阈值旋钮。未设置
+    // FSHINE_SPIKE_CONTEXT_WINDOW 时返回 128_000，与接线前逐字节一致。
+    contextWindow: spikeContextWindow(env),
     maxTokens: 32_000,
   };
   const provider = createProvider({

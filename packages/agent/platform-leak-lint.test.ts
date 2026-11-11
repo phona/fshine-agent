@@ -263,6 +263,9 @@ const FSHINE_NAME_REGISTRY: ReadonlyMap<string, { tag: LeakTag; reason: string }
   ['FSHINE_SHUTDOWN_DRAIN_MS', { tag: '警职执法', reason: '宿主停机排干上限（apps/server：main.ts 经 shutdownDrainMsOf 读入并传给 backgroundTasks.shutdown({drainMs})，缺省/非法回退 30000ms）：宿主停机参数，非执行层协议——排干的是 fshine 自己的后台任务与终态事件投递，与 example-gateway 无关，保留 fshine 命名空间，不改 EXECUTION_*' }],
   ['FSHINE_EVAL_FIXTURE_STATE_DIR', { tag: '警职执法', reason: '测试专用变量，非两仓契约（2026-11-10 消费端边界裁定；D-209 钉锚）：探针只在 per-case 子进程里设置，acceptance 在自己的进程里设置；只有仓内 dummy/stock 夹具的 shell 入口读取并翻成测试专用 --state-dir flag；宿主生产路径与真平台零读取。退役条件 = a2a 信封携带 per-run 参数（跨仓）。时间锚点 2027-02-10 复核，不许无限期续期' }],
   ['FSHINE_SPIKE_GENERIC_AGENT', { tag: '遗留待清', reason: 'SPIKE 实验臂开关（packages/agent/src/spike-generic-mode.ts）：只在 spike/generic-agent 分支的 A/B 对照里使用，关闭时行为与接线前一致；不是产品开关、不进 yaml。退役条件 = 对照报告合并后随开关、三处接线与测试一起删除，最长保留到 2026-12-31' }],
+  ['FSHINE_SPIKE_CONTEXT_WINDOW', { tag: '遗留待清', reason: 'SPIKE 长窗旋钮①（packages/agent/src/spike-long-window.ts）：pi 模型 contextWindow，缺省 128_000 与接线前逐字节一致；只在 spike/generic-agent 分支的长窗实验里设小以压出重复压缩。不是产品开关、不进 yaml。退役条件 = 对照报告合并后随旋钮与接线一起删除，最长保留到 2026-12-31' }],
+  ['FSHINE_SPIKE_SESSION_TTL_MS', { tag: '遗留待清', reason: 'SPIKE 长窗旋钮②（packages/agent/src/spike-long-window.ts）：覆盖 sessionTtlMs，缺省不覆盖（保持 config/DEFAULT 回落）；只在 spike 分支设几十秒以压出会话过期恢复。不是产品开关、不进 yaml。退役条件同旋钮①' }],
+  ['FSHINE_SPIKE_TRANSCRIPT_MODE', { tag: '遗留待清', reason: 'SPIKE 长窗旋钮③（packages/agent/src/spike-long-window.ts）：投影掉 contextStates 以走 transcript 全文 + pi 原生压缩的第三种装配；缺省关闭、关闭时不做任何赋值。只在 spike 分支使用，不是产品开关、不进 yaml。退役条件同旋钮①' }],
   // 方案 1 · B 波曾登记的两个写流程开关（一个管提案创建走不走网关、一个管落账后端接不接）
   // 已随 C 波后只剩一种行为而退役，登记项一并删除——本表只减不增；那两个名字若在
   // packages/apps/scripts 里复活（含注释），下面"未登记即红"会当场抓住。
