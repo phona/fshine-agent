@@ -49,6 +49,7 @@ describe('createTurnState', () => {
       pendingPlan: null,
       activatedPlan: null,
       delegationFailed: false,
+      planFrozen: false,
       resourceExhausted: false,
       needsRounds: 0,
       lastNeeds: null,

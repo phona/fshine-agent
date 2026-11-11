@@ -34,6 +34,11 @@ export interface TurnState {
   /** 委派是否已失败并给出安全话术——那种回复不该被出口校验覆盖。 */
   delegationFailed: boolean;
   /**
+   * T10 段2：本回合的计划已因任务假死（结果指标长期无进展）被冻结。冻结 = 不再派发
+   * 后续计划步骤；不杀进程、不盲目重跑。续跑由下一回合显式发起（同一 taskId 从断点）。
+   */
+  planFrozen: boolean;
+  /**
    * 本回合以资源耗尽（RESOURCE_EXHAUSTED，协议失败分类）收尾：委派层超时分类的失败。
    * 终稿由宿主从执行事实合成（resource-exhausted.ts），turn_span 按它记 resource_exhausted
    * 供审计与续跑识别——delegation_span 的 failed/timeout 分类由 context.ts 原样落，不互斥。
@@ -85,6 +90,7 @@ export function createTurnState(planChoice?: { planId: string } | null): TurnSta
     pendingPlan: null,
     activatedPlan: null,
     delegationFailed: false,
+    planFrozen: false,
     resourceExhausted: false,
     needsRounds: 0,
     lastNeeds: null,
