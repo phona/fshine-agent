@@ -36,6 +36,7 @@ import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure, validateGatewayInvocation, gatewayExecPath } from '../../packages/agent/src/platform-contract';
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
 import { RESEND_ARTIFACT_TOOL_NAME } from '../../packages/agent/src/resend-tool';
+import { TASK_CONTROL_TOOL_NAME } from '../../packages/agent/src/task-control';
 import type { TaskResultPort } from '../../packages/agent/src/result-contract';
 import type { TaskStagnationOptions } from '../../packages/agent/src/context';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -130,12 +131,20 @@ if (PLATFORM_ROOT && operationSemantics.size === 0) {
 const PLATFORM_STATE_KEYS = [
   'EXECUTION_PLAN_STATE', 'EXECUTION_RATE_LIMIT_STATE', 'EXECUTION_MOCK_STATE', 'EXECUTION_AUDIT_PATH', 'EXECUTION_PROPOSAL_STATE',
   'DZ_PLAN_STATE', 'DZ_RATE_LIMIT_STATE', 'DZ_MOCK_STATE', 'DZ_AUDIT_PATH', 'DZ_PROPOSAL_STATE',
+  // 仓内 dummy/stock 夹具的状态根（测试专用桥，见 probe-real-agent 的 FIXTURE_STATE_DIR_KEY）：
+  // 夹具只认 spawn 时环境里的这个键 + `--state-dir` flag，**忽略** EXECUTION_* 状态路径。
+  // 不设它 → 夹具回落到 <fixture>/.runtime 并在整轮测试间累计。每用例独一份 = 跑前重置
+  // 夹具状态的结构化版本（脚本外不需要手工 rm -rf）。EXECUTION_* 平台读的仍是上面几行。
+  'FSHINE_EVAL_FIXTURE_STATE_DIR',
 ] as const;
 let platformStateBackup: Record<string, string | undefined> = {};
+/** 本用例的夹具状态根（dummy/stock 夹具通过 FSHINE_EVAL_FIXTURE_STATE_DIR 使用它）。 */
+let fixtureStateRootForCase = '';
 
 beforeEach(() => {
   platformStateBackup = Object.fromEntries(PLATFORM_STATE_KEYS.map((key) => [key, process.env[key]]));
   counter += 1;
+  fixtureStateRootForCase = path.join(stateDir, `fixture-${counter}`);
   Object.assign(process.env, {
     EXECUTION_PLAN_STATE: path.join(stateDir, `plans-${counter}.json`),
     EXECUTION_RATE_LIMIT_STATE: path.join(stateDir, `rate-${counter}.json`),
@@ -149,6 +158,7 @@ beforeEach(() => {
     DZ_MOCK_STATE: path.join(stateDir, `mock-${counter}.json`),
     DZ_AUDIT_PATH: path.join(stateDir, `audit-${counter}.jsonl`),
     DZ_PROPOSAL_STATE: path.join(stateDir, `proposals-${counter}.json`),
+    FSHINE_EVAL_FIXTURE_STATE_DIR: fixtureStateRootForCase,
   });
 });
 
@@ -334,9 +344,12 @@ interface ScriptedTool {
  * 解析本轮 Main 工具面里的委派工具名：**从 input.tools 动态解析，不写死 run_task**
  * （实例可经 profile.toolName 改名）。判据（审计 C 的 P0 迁移口径）：非宿主内部工具
  * （read_skill / task_control / resend_artifact）且 schema 里有 request 属性。
+ *
+ * 自建 driver 的迁移点：旧申报工具 route_current_turn 已不在工具面，任何手写 driver
+ * 都应经本函数取名字再调，不要硬编码（装配可改名，profile.toolName）。
  */
-function delegateToolNameOf(tools: readonly ScriptedTool[]): string {
-  const internal = new Set(['read_skill', 'task_control', RESEND_ARTIFACT_TOOL_NAME]);
+export function resolveDelegateToolName(tools: readonly { name: string; inputSchema?: { properties?: Record<string, unknown> } }[]): string {
+  const internal = new Set(['read_skill', TASK_CONTROL_TOOL_NAME, RESEND_ARTIFACT_TOOL_NAME]);
   const candidates = tools.filter((tool) => !internal.has(tool.name));
   const withRequest = candidates.find((tool) => {
     const properties = tool.inputSchema?.properties;
@@ -346,28 +359,49 @@ function delegateToolNameOf(tools: readonly ScriptedTool[]): string {
 }
 
 /** 解析重发工具名（注册与装配的产物库开关一致；不在场时返回 undefined）。 */
-function resendToolNameOf(tools: readonly ScriptedTool[]): string | undefined {
+export function resolveResendToolName(tools: readonly { name: string }[]): string | undefined {
   return tools.find((tool) => tool.name === RESEND_ARTIFACT_TOOL_NAME)?.name;
 }
 
+/** 解析任务控制工具名（后台模式下注册；不在场时返回 undefined）。 */
+export function resolveTaskControlToolName(tools: readonly { name: string }[]): string | undefined {
+  return tools.find((tool) => tool.name === TASK_CONTROL_TOOL_NAME)?.name;
+}
+
 /**
- * Main Agent：按脚本"申报"本轮动作——直连工具面形态（2026-11-12 harness 迁移）。
+ * Main Agent：按脚本回放本轮动作——直连工具面形态（2026-11-12 harness 迁移）。
  *
- * 脚本词汇保留（`kind: conversation | delegate | resend`），映射到直连工具面：
- *   · conversation → **不调用任何工具**，`text` 即本轮回复（直连语义：普通回合文本回复）；
+ * 场景词汇（`kind`）区分"模型直接说话"与"模型调工具"，四类各自独立：
+ *   · conversation → **不调用任何工具**，`text` 即本轮回复（普通回合：模型直接说话）；
  *   · delegate → 调用工具面解析出的委派工具（profile 可改名，缺省 run_task），
- *     参数 `{request, taskId}`（脚本里的 `continueTaskId` 兼容映射到 taskId）；
- *     结果 terminate 时用户看到的是子 Agent 文本；未被 terminate 时（纠错环、计划模式
- *     每一步、后台受理）继续同一回合并消费下一条声明，与生产语义一致；
+ *     参数 `{request, taskId}`（脚本里的 `continueTaskId` 兼容映射到 taskId）。
+ *     同一 kind 覆盖 inline 与后台两种宿主派发模式——是不是后台由 boot 的
+ *     workerDispatchMode 决定，模型侧看到的工具调用形状相同（后台受理时 exec 返回
+ *     受理回执，未被 terminate 的回合继续消费下一条声明）；
+ *   · task_control → 调用 task_control（后台模式下注册；action list/status/cancel，
+ *     taskId 写 `LAST_TASK_ID_TOKEN` 时用上一条委派回执里的 taskId 代填）；
  *   · resend → 调用 resend_artifact，refs 取 `refs` 数组或单个 `artifactRef`。
  *
  * 脚本条目可带可选 `text`：工具调用之后返回的回复文本（直连 conversation 条目缺省为
- * '主 Agent 自由文本：不应外发'）。`continueTaskId` 写 `LAST_TASK_ID_TOKEN` 时由替身用
- * 上一条工具结果里的 taskId 代填（计划模式步骤 2..M 的编号要等上一步真跑完才知道）。
+ * '主 Agent 自由文本：不应外发'）。
+ *
+ * 工具面缺注册（如非后台模式调 task_control、缺产物库调 resend）→ **夹具层响亮失败**，
+ * 返回可读错误文本而不是静默降级成"模型说了句话"；判据：只有拼装错误会这样，生产
+ * 模型看不到未注册的工具。
  */
 export const LAST_TASK_ID_TOKEN = '@lastTaskId';
 
-function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (input: { messages: unknown[] }) => void) {
+/**
+ * `taskIdProvider`：替身学不到编号时的宿主侧代填钩子。单步委派的 terminate 抛出里
+ * **没有 taskId**（只有用户可见文本），后台受理回执同样只有文本——"编号从哪来"在真实
+ * 链路里是任务清单/平台回执，替身侧最真的来源是宿主持有的 platform_tasks 底账。用例在
+ * 两回合之间读底账，provider 每次消费脚本条目前刷新 lastTaskId（TL3-1/WT-2 的背填模式）。
+ */
+function mainDriver(
+  declarations: Array<Record<string, unknown>>,
+  observe?: (input: { messages: unknown[] }) => void,
+  options?: { taskIdProvider?: () => string },
+) {
   let cursor = 0;
   let lastTaskId = '';
   return {
@@ -382,14 +416,17 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
       const tools = input.tools as ScriptedTool[];
-      const delegateTool = delegateToolNameOf(tools);
-      const resendTool = resendToolNameOf(tools);
+      const delegateTool = resolveDelegateToolName(tools);
+      const resendTool = resolveResendToolName(tools);
+      const taskControlTool = resolveTaskControlToolName(tools);
       // 与生产驱动一致：工具调用是原生形态，转录里留下 assistant(toolCall) + toolResult
       // （ToolResultMessage 的原生形状：toolCallId + toolName + content 分段）。
       // delegate 轮次经 ToolUserError terminate、needs 回路轮次经工具结果继续——两者都因此
       // 成为"被 toolResult 终结的完整轮次"，下一轮仍留在最近轮次窗口里（C19）。
       const transcript: unknown[] = [...input.messages];
       for (;;) {
+        const providedTaskId = options?.taskIdProvider?.();
+        if (typeof providedTaskId === 'string' && providedTaskId !== '') lastTaskId = providedTaskId;
         const entry = declarations[Math.min(cursor, declarations.length - 1)]!;
         const exhausted = cursor >= declarations.length;
         const { text, ...declaration } = entry;
@@ -401,6 +438,44 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         // ── conversation：普通回合——不调用任何工具，模型文本即本轮回复（D4）──
         if (kind === undefined || kind === 'conversation') {
           if (typeof text === 'string') return { text, messages: transcript };
+          continue;
+        }
+        // ── task_control：宿主控制工具（后台任务查询/取消；非后台模式不注册）──
+        if (kind === 'task_control') {
+          if (!taskControlTool) {
+            return { text: `E2E 夹具错误：${TASK_CONTROL_TOOL_NAME} 不在工具面（非后台模式或后台服务未装配？）`, messages: transcript };
+          }
+          const action = typeof declaration['action'] === 'string' ? declaration['action'] : 'list';
+          const rawTaskId = declaration['taskId'];
+          const taskId = rawTaskId === LAST_TASK_ID_TOKEN ? lastTaskId : rawTaskId;
+          const callArgs: Record<string, unknown> = { action };
+          if (typeof taskId === 'string' && taskId !== '') callArgs['taskId'] = taskId;
+          const callId = `call_${cursor}`;
+          transcript.push({
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: callId, name: taskControlTool, arguments: callArgs }],
+            timestamp: Date.now(),
+          } as never);
+          try {
+            const outcome = await input.exec(taskControlTool, callArgs);
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: taskControlTool,
+              content: [{ type: 'text', text: JSON.stringify(outcome) }],
+              timestamp: Date.now(),
+            } as never);
+            if (typeof text === 'string') return { text, messages: transcript };
+          } catch (error) {
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: taskControlTool,
+              content: [{ type: 'text', text: (error as Error).message }],
+              timestamp: Date.now(),
+            } as never);
+            return { text: (error as Error).message, messages: transcript };
+          }
           continue;
         }
         // ── resend：重发工具（缺产物库的装配不注册它——夹具层响亮失败，不静默降级）──
@@ -1068,6 +1143,41 @@ function totalActualCalls(): number {
   return Object.values(ledger().tasks ?? {}).reduce((sum, task) => sum + (task.actual?.calls ?? 0), 0);
 }
 
+/** 本用例的仓内夹具状态根（dummy/stock 夹具经 FSHINE_EVAL_FIXTURE_STATE_DIR 使用的目录）。 */
+export function fixtureStateRoot(): string {
+  const dir = process.env['FSHINE_EVAL_FIXTURE_STATE_DIR'];
+  if (!dir) throw new Error('FSHINE_EVAL_FIXTURE_STATE_DIR 未设（harness beforeEach 应已设置；用例在 beforeEach 之外调用？）');
+  return dir;
+}
+
+interface FixturePlans {
+  plans?: Record<string, { id: string; taskId: string; version: number; status: string; actual?: { calls?: number } }>;
+  tasks?: Record<string, { actual?: { calls?: number; seconds?: number }; latestPlanId?: string | null; grantLevel?: number }>;
+}
+
+/**
+ * 读仓内夹具的平台计划账本（dummy/stock 的 plans.json）。
+ *
+ * 与上方 ledger() 的分工：ledger() 读的是财税平台经 EXECUTION_PLAN_STATE 落的状态文件；
+ * 仓内夹具**忽略** EXECUTION_* 状态路径，只认 --state-dir / FSHINE_EVAL_FIXTURE_STATE_DIR，
+ * 所以夹具下要证明"平台侧真的执行/续跑"必须走这一个。tasks 按 taskId 键控——同一 taskId
+ * 续跑与"新建任务碰巧成功"在这张表上形状不同（前者同键累计、后者多出一条新键）。
+ */
+export function fixturePlans(): FixturePlans {
+  const file = path.join(fixtureStateRoot(), 'plans.json');
+  if (!existsSync(file)) return {};
+  try { return JSON.parse(readFileSync(file, 'utf8')) as FixturePlans; } catch { return {}; }
+}
+
+/** 夹具平台审计行数（--state-dir 模式下才写；每次 query/proposal/refusal 一行）。 */
+export function fixtureAuditRows(): Array<Record<string, unknown>> {
+  const file = path.join(fixtureStateRoot(), 'audit.jsonl');
+  if (!existsSync(file)) return [];
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch { return []; }
+}
+
 function balanceCalls(account: string, period: string): PlanCall[] {
   return [{ operation: 'finance.query-receivables', args: ['--query', account, '--period', period] }];
 }
@@ -1177,6 +1287,23 @@ function nineMonthPlan(): PlanCall[] {
   }));
 }
 
+/**
+ * 仓内夹具（dummy-platform）的读调用：collection + window 是夹具 operation `dummy.query`
+ * 声明的参数名（与真实执行层同协议形状，只是域中性）。AGENT_CONFIG_PATH 指向
+ * scripts/eval/eval.agent.yaml 时用它替代财税域调用。
+ */
+function dummyCalls(collection: string, window = 'W1'): PlanCall[] {
+  return [{ operation: 'dummy.query', args: ['--collection', collection, '--window', window] }];
+}
+
+/** 21 次仓内夹具读调用：越过夹具计划门 confirm 次数线（DUMMY_PLAN_CONFIRM_CALLS=20）。 */
+function dummyHeavyPlan(): PlanCall[] {
+  return Array.from({ length: 21 }, (_, i) => ({
+    operation: 'dummy.query',
+    args: ['--collection', 'alpha', '--window', `W${(i % 2) + 1}`],
+  }));
+}
+
 /** 超过 confirm 门槛的高重量计划。 */
 function heavyPlan(): PlanCall[] {
   return Array.from({ length: 21 }, (_, i) => ({
@@ -1214,13 +1341,15 @@ export {
   ledger,
   totalActualCalls,
   balanceCalls,
+  dummyCalls,
+  dummyHeavyPlan,
   CURRENT_PERIOD,
   nineMonthPlan,
   heavyPlan,
   growingPlan,
   withoutPlatformEnvelope,
 };
-export type { Boot, BootOptions, Turn };
+export type { Boot, BootOptions, Turn, FixturePlans };
 /**
  * T4 假绿护栏用：harness 注入的 access 语义替身表。护栏用例拿它对照
  * loadOperationSemantics(PLATFORM_ROOT) 的派生结果——平台下发真表的那天，

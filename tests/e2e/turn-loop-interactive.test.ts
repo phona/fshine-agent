@@ -5,8 +5,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ScriptedTurnDriver } from '../../packages/agent/src/driver';
-import { boot, gatedWorker, heavyPlan, mainDriver } from './harness';
+import { boot, dummyHeavyPlan, gatedWorker, mainDriver } from './harness';
 
 function deferred() {
   let resolve!: () => void;
@@ -115,10 +114,10 @@ describe('[L4 集成] interactive session production wiring', () => {
   it('background budget confirmation resumes the same task in a new run without replacing its origin scope', async () => {
     const releaseResume = deferred();
     const resumeWorkerStarted = deferred();
-    const initialRequest = '查幻辰财税账套全年的应收账款';
+    const initialRequest = '查询 alpha 组全部窗口的数据';
     const scriptedWorker = gatedWorker([
-      { plan: heavyPlan(), stopAtConfirm: true },
-      { execute: heavyPlan() },
+      { plan: dummyHeavyPlan(), stopAtConfirm: true },
+      { execute: dummyHeavyPlan() },
     ]);
     const runScriptedWorker = scriptedWorker.run.bind(scriptedWorker);
     let workerRuns = 0;
@@ -211,9 +210,10 @@ describe('[L4 集成] interactive session production wiring', () => {
     // 不再把第二个后台任务排在第一个后面。两件任务同时进入 Worker 是被钉住的新语义。
     const release = deferred();
     let calls = 0;
-    const main = ScriptedTurnDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '生成第一份汇总' } }] },
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '生成第二份汇总' } }] },
+    // 与 harness 同一套直连语义：两回合各委派一件事（工具名由替身从 input.tools 解析）
+    const main = mainDriver([
+      { kind: 'delegate', request: '生成第一份汇总' },
+      { kind: 'delegate', request: '生成第二份汇总' },
     ]);
     const b = await boot({
       workerDispatchMode: 'background', main,

@@ -13,7 +13,7 @@
  * 工具结果 JSON.stringify 之后当回复文本。
  */
 import { describe, expect, it } from 'vitest';
-import { boot, gatedWorker, totalActualCalls, type WorkerStep } from './harness';
+import { boot, gatedWorker, resolveDelegateToolName, totalActualCalls, type WorkerStep } from './harness';
 
 /** 记录 worker 实际收到的委派请求（宿主透传剥掉协议前缀的 request）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -43,24 +43,26 @@ function replayMainDriver(requests: readonly string[]) {
       messages: unknown[];
       exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
     }) => {
+      // 直连工具面：委派工具从 input.tools 动态解析（缺省 run_task，实例可改名）
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const transcript: unknown[] = [...input.messages];
       for (;;) {
         const request = requests[Math.min(cursor, requests.length - 1)]!;
         cursor += 1;
         const callId = `call_${cursor}`;
-        const declaration: Record<string, unknown> = { kind: 'delegate', request };
-        if (cursor > 1 && lastTaskId) declaration['continueTaskId'] = lastTaskId;
+        const callArgs: Record<string, unknown> = { request };
+        if (cursor > 1 && lastTaskId) callArgs['taskId'] = lastTaskId;
         transcript.push({
           role: 'assistant',
-          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+          content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
           timestamp: Date.now(),
         } as never);
         let outcome: unknown;
         try {
-          outcome = await input.exec('route_current_turn', declaration);
+          outcome = await input.exec(delegateTool, callArgs);
         } catch (error) {
           transcript.push({
-            role: 'toolResult', toolCallId: callId, toolName: 'route_current_turn',
+            role: 'toolResult', toolCallId: callId, toolName: delegateTool,
             content: [{ type: 'text', text: (error as Error).message }], timestamp: Date.now(),
           } as never);
           return { text: (error as Error).message, messages: transcript };
@@ -69,7 +71,7 @@ function replayMainDriver(requests: readonly string[]) {
         if (typeof observedTaskId === 'string') lastTaskId = observedTaskId;
         const serialized = JSON.stringify(outcome);
         transcript.push({
-          role: 'toolResult', toolCallId: callId, toolName: 'route_current_turn',
+          role: 'toolResult', toolCallId: callId, toolName: delegateTool,
           content: [{ type: 'text', text: serialized }], timestamp: Date.now(),
         } as never);
         // 脚本耗尽：把最后一条工具结果原样当回复（复读）
@@ -98,7 +100,7 @@ describe('[L4 集成] 离线全链 e2e：计划模式复读的外发兜底', () 
 
     const reply = await send('逐个核对这两个账套的应收余额');
 
-    // 两步都派了（第 2 步续跑同一个子任务），两步都零执行
+    // 两步都派了（第 2 步带 taskId 续跑同一个子任务），两步都零执行
     expect(worker.requests).toHaveLength(2);
     expect(worker.requests[0]).not.toContain('第1/2步');
     // 回复只说步骤事实与下一步：内部协议材料一个字都不外发

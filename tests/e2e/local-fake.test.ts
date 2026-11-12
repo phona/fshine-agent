@@ -12,6 +12,7 @@ import {
   type TurnDriverInput,
 } from '@fshine/agent';
 import { createMessageHandler } from '../../apps/server/handler';
+import { resolveDelegateToolName } from './harness';
 
 const stores: ReturnType<typeof createSqliteStore>[] = [];
 afterEach(() => { for (const store of stores.splice(0)) closeStore(store); });
@@ -66,9 +67,11 @@ describe('本地 E2E × cwd 固定的 example-execution-layer 子 Agent', () => 
     const platform = runner(store, workerDriver([workerText], workerInputs));
     const mainDriver: TurnDriver = {
       run: async (input) => {
-        expect(input.tools.map((tool) => tool.name)).toEqual(['route_current_turn']);
+        // 直连工具面：委派工具从 input.tools 动态解析（profile 可改名，缺省 run_task）
+        const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
+        expect(input.tools.map((tool) => tool.name)).toEqual([delegateTool]);
         try {
-          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻辰的应收账款余额' });
+          await input.exec(delegateTool, { request: '查幻辰的应收账款余额' });
         } catch (error) {
           if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
           throw error;
@@ -117,8 +120,9 @@ describe('本地 E2E × cwd 固定的 example-execution-layer 子 Agent', () => 
     const platform = runner(store, workerDriver(['完成。'], workerInputs));
     const mainDriver: TurnDriver = {
       run: async (input) => {
+        const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
         try {
-          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻辰的应收账款' });
+          await input.exec(delegateTool, { request: '查幻辰的应收账款' });
         } catch (error) {
           if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
           throw error;

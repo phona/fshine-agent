@@ -27,7 +27,7 @@ import {
   type TaskResultPort,
   type TaskResultScope,
 } from '../../packages/agent/src/result-contract';
-import { boot, mainDriver, type Boot } from './harness';
+import { boot, mainDriver, resolveDelegateToolName, type Boot } from './harness';
 
 const PRINCIPAL = 'wecom:e2e_user';
 const SESSION = 'wecom:e2e_user';
@@ -170,22 +170,24 @@ function resumeAfterFreezeMainDriver(taskIdBox: { value: string }) {
     }) => {
       turn += 1;
       if (input.tools.length === 0) return { text: '已整理完成。', messages: input.messages };
+      // 直连工具面：委派工具从 input.tools 动态解析；续跑编号走 taskId 参数
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const transcript: unknown[] = [...input.messages];
       const callId = `call_resume_${turn}`;
-      const declaration: Record<string, unknown> = turn === 1
-        ? { kind: 'delegate', request: WRITE_ASK }
-        : { kind: 'delegate', request: `${WRITE_ASK}（续跑）`, continueTaskId: taskIdBox.value };
+      const callArgs: Record<string, unknown> = turn === 1
+        ? { request: WRITE_ASK }
+        : { request: `${WRITE_ASK}（续跑）`, taskId: taskIdBox.value };
       transcript.push({
         role: 'assistant',
-        content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+        content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
         timestamp: Date.now(),
       } as never);
       try {
-        const outcome = await input.exec('route_current_turn', declaration);
+        const outcome = await input.exec(delegateTool, callArgs);
         transcript.push({
           role: 'toolResult',
           toolCallId: callId,
-          toolName: 'route_current_turn',
+          toolName: delegateTool,
           content: [{ type: 'text', text: JSON.stringify(outcome) }],
           timestamp: Date.now(),
         } as never);
@@ -194,7 +196,7 @@ function resumeAfterFreezeMainDriver(taskIdBox: { value: string }) {
         transcript.push({
           role: 'toolResult',
           toolCallId: callId,
-          toolName: 'route_current_turn',
+          toolName: delegateTool,
           content: [{ type: 'text', text: (error as Error).message }],
           timestamp: Date.now(),
         } as never);
@@ -217,23 +219,24 @@ function twoStepAfterFreezeMainDriver() {
       exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
     }) => {
       if (input.tools.length === 0) return { text: '已整理完成。', messages: input.messages };
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const transcript: unknown[] = [...input.messages];
       let lastError = '';
       for (let step = 1; step <= 2; step += 1) {
-        const declaration = { kind: 'delegate', request: `第${step}/2步：录入幻辰财税` };
+        const callArgs = { request: `第${step}/2步：录入幻辰财税` };
         const callId = `call_step_${cursor}`;
         cursor += 1;
         transcript.push({
           role: 'assistant',
-          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+          content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
           timestamp: Date.now(),
         } as never);
         try {
-          const outcome = await input.exec('route_current_turn', declaration);
+          const outcome = await input.exec(delegateTool, callArgs);
           transcript.push({
             role: 'toolResult',
             toolCallId: callId,
-            toolName: 'route_current_turn',
+            toolName: delegateTool,
             content: [{ type: 'text', text: JSON.stringify(outcome) }],
             timestamp: Date.now(),
           } as never);
@@ -242,7 +245,7 @@ function twoStepAfterFreezeMainDriver() {
           transcript.push({
             role: 'toolResult',
             toolCallId: callId,
-            toolName: 'route_current_turn',
+            toolName: delegateTool,
             content: [{ type: 'text', text: lastError }],
             timestamp: Date.now(),
           } as never);

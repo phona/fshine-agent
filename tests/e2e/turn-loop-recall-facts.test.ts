@@ -19,7 +19,7 @@
  * 变成红（不是"换个说法还能过"）。
  */
 import { describe, expect, it } from 'vitest';
-import { balanceCalls, boot, gatedWorker, totalActualCalls } from './harness';
+import { balanceCalls, boot, gatedWorker, resolveDelegateToolName, totalActualCalls } from './harness';
 
 const FACTS_MARKER = '【宿主执行事实：';
 
@@ -44,9 +44,10 @@ function firstSentence(entry: string): string {
 }
 
 /**
- * 召回归因替身：按脚本申报；conversation 申报且脚本没给文本时，回复由 `answer` 从宿主
- * 注入的执行台账生成。delegate 申报走 terminate 语义（ToolUserError），用户看到的是
- * 子 Agent 的文本——与 harness 的 mainDriver 同一套生产语义。
+ * 召回归因替身：按脚本回放；conversation 条目**不调用任何工具**（模型直接说话，直连语义），
+ * 脚本没给文本时由 `answer` 从宿主注入的执行台账生成。delegate 条目调用工具面解析出的
+ * 委派工具（缺省 run_task）；委派 terminate 时用户看到的是子 Agent 文本——与 harness 的
+ * mainDriver 同一套生产语义。
  */
 function recallDriver(
   declarations: Array<Record<string, unknown>>,
@@ -65,45 +66,49 @@ function recallDriver(
       if (input.tools.length === 0) {
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const transcript: unknown[] = [...input.messages];
       for (;;) {
         const entry = declarations[Math.min(cursor, declarations.length - 1)]!;
         const exhausted = cursor >= declarations.length;
         cursor += 1;
-        const callId = `call_${cursor}`;
-        transcript.push({
-          role: 'assistant',
-          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: entry }],
-          timestamp: Date.now(),
-        } as never);
-        try {
-          const outcome = await input.exec('route_current_turn', entry);
-          transcript.push({
-            role: 'toolResult',
-            toolCallId: callId,
-            toolName: 'route_current_turn',
-            content: [{ type: 'text', text: JSON.stringify(outcome) }],
-            timestamp: Date.now(),
-          } as never);
-        } catch (error) {
-          transcript.push({
-            role: 'toolResult',
-            toolCallId: callId,
-            toolName: 'route_current_turn',
-            content: [{ type: 'text', text: (error as Error).message }],
-            timestamp: Date.now(),
-          } as never);
-          return { text: (error as Error).message, messages: transcript };
-        }
-        if (entry['kind'] === 'conversation') {
-          // 脚本给了文本就照念（纠错环转达等）；否则从宿主台账生成召回答案
+        const kind = entry['kind'] ?? 'conversation';
+        // conversation：模型直接说话——不产生工具调用（新架构里普通回合就是纯文本回复）
+        if (kind === 'conversation') {
           if (typeof entry['text'] === 'string') return { text: entry['text'], messages: transcript };
           const facts = injectedFacts(input.messages);
           const text = facts ? answer(facts) : '没有可依据的执行记录，我不能凭印象编。';
           transcript.push({ role: 'assistant', content: text, timestamp: Date.now() } as never);
           return { text, messages: transcript };
         }
-        if (typeof entry['text'] === 'string') return { text: entry['text'], messages: transcript };
+        // delegate：直连委派工具（terminate 时错误文本即用户可见回复）
+        const callArgs: Record<string, unknown> = { request: String(entry['request'] ?? '') };
+        const callId = `call_${cursor}`;
+        transcript.push({
+          role: 'assistant',
+          content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
+          timestamp: Date.now(),
+        } as never);
+        try {
+          const outcome = await input.exec(delegateTool, callArgs);
+          transcript.push({
+            role: 'toolResult',
+            toolCallId: callId,
+            toolName: delegateTool,
+            content: [{ type: 'text', text: JSON.stringify(outcome) }],
+            timestamp: Date.now(),
+          } as never);
+          if (typeof entry['text'] === 'string') return { text: entry['text'], messages: transcript };
+        } catch (error) {
+          transcript.push({
+            role: 'toolResult',
+            toolCallId: callId,
+            toolName: delegateTool,
+            content: [{ type: 'text', text: (error as Error).message }],
+            timestamp: Date.now(),
+          } as never);
+          return { text: (error as Error).message, messages: transcript };
+        }
         if (exhausted) return { text: '主 Agent 自由文本：不应外发', messages: transcript };
       }
     },

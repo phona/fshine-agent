@@ -22,10 +22,20 @@
  * 夹带的叙述）。故本篇对追问轮断言"事故原声的具体泄漏形态缺席"（脚本路径/错误码/
  * 内部控制词），澄清轮（宿主机械组装，无 fixture 叙述体混入）断言完整指纹零命中。
  * 信封整段复读的外发缺口由 PHONE-2 钉住（同文件下方）。
+ *
+ * 域适配（2026-11-12 e2e 迁移）：PHONE-2（D-069 复读守卫）改用仓内 eval 夹具的中性
+ * 读调用；PHONE-1（澄清绑定）保持财税域——宿主的选择类澄清码集合只登记执行层声明的
+ * 码，夹具的中性码不在集合内，澄清链在夹具下结构性不可达（跑法：config/agent.yaml
+ * 指向兄弟执行层仓库）。
  */
 import { describe, expect, it } from 'vitest';
 import { executionLanguageFingerprints } from '@fshine/agent';
-import { balanceCalls, boot, gatedWorker, mainDriver, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
+import { balanceCalls, boot, dummyCalls, fixtureAuditRows, gatedWorker, mainDriver, resolveDelegateToolName, totalActualCalls, withoutPlatformEnvelope, type WorkerStep } from './harness';
+
+/** 仓内夹具上成功执行的读调用数（PHONE-2 的"查询真跑过"判据）。 */
+function successfulQueryCalls(): number {
+  return fixtureAuditRows().filter((row) => row['script'] === 'dummy.query' && row['exitCode'] === 0).length;
+}
 
 /**
  * 信封复读型 Main Agent（D-069 的形状）：按脚本申报计划步骤，脚本派完后不组织终稿，
@@ -43,30 +53,32 @@ function envelopeReplayMainDriver(requests: readonly string[]) {
       messages: unknown[];
       exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
     }) => {
+      // 直连工具面：委派工具从 input.tools 动态解析（缺省 run_task）
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const transcript: unknown[] = [...input.messages];
       for (;;) {
         const request = requests[Math.min(cursor, requests.length - 1)]!;
         cursor += 1;
         const callId = `call_${cursor}`;
-        const declaration = { kind: 'delegate', request };
+        const callArgs: Record<string, unknown> = { request };
         transcript.push({
           role: 'assistant',
-          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+          content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
           timestamp: Date.now(),
         } as never);
         let outcome: { text?: unknown } | null;
         try {
-          outcome = (await input.exec('route_current_turn', declaration)) as { text?: unknown } | null;
+          outcome = (await input.exec(delegateTool, callArgs)) as { text?: unknown } | null;
         } catch (error) {
           transcript.push({
-            role: 'toolResult', toolCallId: callId, toolName: 'route_current_turn',
+            role: 'toolResult', toolCallId: callId, toolName: delegateTool,
             content: [{ type: 'text', text: (error as Error).message }], timestamp: Date.now(),
           } as never);
           return { text: (error as Error).message, messages: transcript };
         }
         const serialized = JSON.stringify(outcome);
         transcript.push({
-          role: 'toolResult', toolCallId: callId, toolName: 'route_current_turn',
+          role: 'toolResult', toolCallId: callId, toolName: delegateTool,
           content: [{ type: 'text', text: serialized }], timestamp: Date.now(),
         } as never);
         // 脚本耗尽：把工具结果 worker 文本里的 RESULT 信封原样当回复（复读，不翻译）。
@@ -145,30 +157,30 @@ describe('[L4 集成] 离线全链 e2e：手机事故对话回归（连续 + 呈
   });
 
   it('PHONE-2 主模型把平台 RESULT 信封当回复：守卫收尾替换，信封不外发（D-069）', async () => {
-    const before = totalActualCalls();
+    const before = successfulQueryCalls();
     const worker = gatedWorker([
       // 计划步骤真跑过一次查询：回合有执行痕迹，worker 文本里夹带着真实平台信封。
-      // 查 202606（有余额键）：错误态快路径 v2 后，单调用计划撞无数据终局的本跳文本
-      // 是宿主话术、不再夹带信封——本用例的意图是 D-069 复读守卫，需要信封在场。
-      { plan: balanceCalls('幻辰财税', '202606') },
-      { text: '幻辰财税本期应收余额为 86,000 元（借方）。' },
+      // 域适配（2026-11-12）：改用仓内夹具的读调用（alpha/W1 必有数据）——本用例的
+      // 意图是 D-069 复读守卫，需要信封在场，与财税域无关。
+      { plan: dummyCalls('alpha', 'W1') },
+      { text: 'alpha 组 W1 有 2 条记录。' },
       { end: true },
     ] as WorkerStep[]);
     const { send, assembly } = await boot({
-      main: envelopeReplayMainDriver(['第1/1步：查询幻辰财税账套 202609 的应收账款余额']),
+      main: envelopeReplayMainDriver(['第1/1步：查询 alpha 组 W1 的数据']),
       worker,
     });
 
-    const reply = await send('查一下幻辰财税 202609 的应收账款');
+    const reply = await send('查一下 alpha 组 W1 的数据');
 
     // 查询真跑过：被复读的信封来自真实平台调用（mock 执行器），不是手抄的 fixture
-    expect(totalActualCalls()).toBe(before + 1);
+    expect(successfulQueryCalls()).toBe(before + 1);
     // 宿主收尾替换：计划步骤事实汇总顶上（planFallback 家族），信封一个字不外发
     expect(reply).toContain('本轮拆解的进度如下');
     expect(reply).toContain('已执行成功的步骤：第 1/1 步');
     expect(reply).not.toContain('"v":1');
     expect(reply).not.toContain('"op"');
-    expect(reply).not.toContain('finance.query-receivables');
+    expect(reply).not.toContain('dummy.query');
     // 收尾文本本身也是干净的：执行语言指纹零命中
     expect(executionLanguageFingerprints(reply)).toEqual([]);
     await assembly.close();

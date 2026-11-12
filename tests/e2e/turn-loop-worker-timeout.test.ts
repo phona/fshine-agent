@@ -39,7 +39,7 @@ import { describe, expect, it } from 'vitest';
 import { A2A_PROTOCOL_VERSION } from '../../packages/contracts/src/a2a-protocol';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { renderResourceExhaustedReply } from '../../packages/agent/src/resource-exhausted';
-import { LAST_TASK_ID_TOKEN, boot, mainDriver, type Boot } from './harness';
+import { LAST_TASK_ID_TOKEN, boot, mainDriver, resolveDelegateToolName, type Boot } from './harness';
 
 /** 企微单聊：principal 由 userid 解析，conversationId = chatid ?? userid（与 write-chain 同口径）。 */
 const PRINCIPAL = 'wecom:e2e_user';
@@ -144,20 +144,20 @@ function captureEvents(): { events: Array<Record<string, unknown>>; restore: () 
   return { events, restore: () => { console.info = original; } };
 }
 
-/** 与 harness mainDriver 同形状的一条申报转录：assistant(toolCall) + toolResult。 */
-function toolCallMessages(transcript: unknown[], callId: string, declaration: Record<string, unknown>): void {
+/** 与 harness mainDriver 同形状的一次工具调用转录：assistant(toolCall) + toolResult。 */
+function toolCallMessages(transcript: unknown[], callId: string, toolName: string, args: Record<string, unknown>): void {
   transcript.push({
     role: 'assistant',
-    content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
+    content: [{ type: 'toolCall', id: callId, name: toolName, arguments: args }],
     timestamp: Date.now(),
   } as never);
 }
 
-function toolResultMessages(transcript: unknown[], callId: string, text: string): void {
+function toolResultMessages(transcript: unknown[], callId: string, toolName: string, text: string): void {
   transcript.push({
     role: 'toolResult',
     toolCallId: callId,
-    toolName: 'route_current_turn',
+    toolName,
     content: [{ type: 'text', text }],
     timestamp: Date.now(),
   } as never);
@@ -177,20 +177,23 @@ function resumeMainDriver(
   return {
     run: async (input: MainRunInput) => {
       turn += 1;
+      // 直连工具面：委派工具从 input.tools 动态解析；续跑编号走 taskId 参数
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
       const source = turn === 1 ? first : second;
-      const declaration: Record<string, unknown> = { ...source };
-      if (declaration['continueTaskId'] === LAST_TASK_ID_TOKEN) declaration['continueTaskId'] = taskIdBox.value;
+      const callArgs: Record<string, unknown> = { request: source['request'] };
+      const token = source['continueTaskId'];
+      if (token === LAST_TASK_ID_TOKEN) callArgs['taskId'] = taskIdBox.value;
       const transcript: unknown[] = [...input.messages];
       const callId = `call_t${turn}`;
-      toolCallMessages(transcript, callId, declaration);
+      toolCallMessages(transcript, callId, delegateTool, callArgs);
       try {
-        const outcome = await input.exec('route_current_turn', declaration);
-        toolResultMessages(transcript, callId, JSON.stringify(outcome));
+        const outcome = await input.exec(delegateTool, callArgs);
+        toolResultMessages(transcript, callId, delegateTool, JSON.stringify(outcome));
         return { text: '主 Agent 自由文本：不应外发', messages: transcript };
       } catch (error) {
         // 与 harness mainDriver 同一兜底：委派以安全话术终止时，那段文本就是模型这轮的
         // 回复（真实驱动里是 terminate 语义，模型不再说话）。
-        toolResultMessages(transcript, callId, (error as Error).message);
+        toolResultMessages(transcript, callId, delegateTool, (error as Error).message);
         return { text: (error as Error).message, messages: transcript };
       }
     },
@@ -208,15 +211,17 @@ function abortingMainDriver(declaration: Record<string, unknown>, abortAfterMs: 
     run: async (input: MainRunInput) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), abortAfterMs);
+      const delegateTool = resolveDelegateToolName(input.tools as Array<{ name: string }>);
+      const callArgs: Record<string, unknown> = { request: declaration['request'] };
       const transcript: unknown[] = [...input.messages];
       const callId = 'call_abort';
-      toolCallMessages(transcript, callId, declaration);
+      toolCallMessages(transcript, callId, delegateTool, callArgs);
       try {
-        const outcome = await input.exec('route_current_turn', declaration, controller.signal);
-        toolResultMessages(transcript, callId, JSON.stringify(outcome));
+        const outcome = await input.exec(delegateTool, callArgs, controller.signal);
+        toolResultMessages(transcript, callId, delegateTool, JSON.stringify(outcome));
         return { text: '主 Agent 自由文本：不应外发', messages: transcript };
       } catch (error) {
-        toolResultMessages(transcript, callId, (error as Error).message);
+        toolResultMessages(transcript, callId, delegateTool, (error as Error).message);
         return { text: (error as Error).message, messages: transcript };
       } finally {
         clearTimeout(timer);

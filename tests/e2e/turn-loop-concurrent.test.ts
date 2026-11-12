@@ -467,7 +467,7 @@ describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/�
       const plan = await assembly.store.taskPlans.project(PRINCIPAL_ID, SESSION_ID, planIdOf('1/3'));
       expect(plan?.totalSteps).toBe(3);
       // ── characterization：确认门的恢复路径不写步骤终态 ──
-      // 第 2/3 步都是用户确认后由宿主 resumeTaskId 续跑的，那条路径不经 route_current_turn，
+      // 第 2/3 步都是用户确认后由宿主 resumeTaskId 续跑的，那条路径不经 Main 的委派工具，
       // 因此投影里它们保持 started——第 3 步打点后 maxStep 接满 totalSteps，计划关闭
       // （latestOpenPlan 不再返回它；待确认的步骤由 pendingPlan/确认码机制继续兜）。
       expect(plan?.steps.map((entry) => [entry.stepIndex, entry.status])).toEqual([[1, 'done'], [2, 'started'], [3, 'started']]);

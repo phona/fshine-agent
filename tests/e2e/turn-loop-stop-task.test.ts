@@ -18,14 +18,17 @@
  *
  * 替身边界（与其它 e2e 同哲学）：只假模型与执行器（脚本化 Main/worker 替身）；runtime 回合
  * 契约、BackgroundTaskManager、SQLite 底账、handler 的会话串行队列、计划确认路由全是生产代码。
+ *
+ * 域适配（2026-11-12 e2e 迁移）：计划改用仓内 eval 夹具的中性读调用（21 次越过夹具
+ * confirm 次数线），不再依赖财税域 operation——被测的是停机路径，与域无关。
  */
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { boot, gatedWorker, heavyPlan } from './harness';
+import { boot, dummyHeavyPlan, gatedWorker, resolveDelegateToolName, resolveTaskControlToolName } from './harness';
 
 const PRINCIPAL = 'wecom:e2e_user';
 const SESSION = 'wecom:e2e_user';
-const ASK = '查幻辰财税全年的应收账款';
+const ASK = '查询 alpha 组的数据';
 
 /** 说停回合的回复地平线：生产里这轮是秒级（一次工具调用 + 一段终稿），给足 5 秒仍没回复即判没回复。 */
 const STOP_REPLY_BUDGET_MS = 5_000;
@@ -48,10 +51,10 @@ interface DriverInput {
 }
 
 /**
- * 两回合脚本化 Main 替身：① 申报委派并学回 taskId；② 用 task_control 取消那个 taskId。
- * 与 harness.mainDriver 同构（转录里留 assistant(toolCall) + toolResult），只是第二回合换工具
- * ——`task_control` 是宿主的控制工具，真实模型从任务清单（renderTaskRoster）拿到 taskId，
- * 这里从第①回合的委派回执里学（同一个值，来源不同不改变被测契约）。
+ * 两回合脚本化 Main 替身：① 直连委派工具发起后台任务；② 用 task_control 取消那个 taskId。
+ * 与 harness.mainDriver 同构（转录里留 assistant(toolCall) + toolResult），工具名从 input.tools
+ * 动态解析——`task_control` 是宿主的控制工具，真实模型从任务清单（renderTaskRoster）拿到
+ * taskId，这里从第①回合的委派回执/宿主底账学（同一个值，来源不同不改变被测契约）。
  */
 function stopMainDriver(taskIdBox: { value: string }) {
   let turn = 0;
@@ -61,9 +64,12 @@ function stopMainDriver(taskIdBox: { value: string }) {
       // 宿主续跑路径不带工具（只整理已有结果）：与本文件两回合无关，照 harness 惯例返回终稿。
       if (input.tools.length === 0) return { text: '已按你确认的范围整理完成。', messages: input.messages };
       const transcript: unknown[] = [...input.messages];
-      const tool = turn === 1 ? 'route_current_turn' : 'task_control';
+      const tool = turn === 1
+        ? resolveDelegateToolName(input.tools as Array<{ name: string }>)
+        : resolveTaskControlToolName(input.tools as Array<{ name: string }>);
+      if (!tool) return { text: 'E2E 夹具错误：task_control 不在工具面（后台模式未装配？）', messages: transcript };
       const args: Record<string, unknown> = turn === 1
-        ? { kind: 'delegate', request: ASK }
+        ? { request: ASK }
         : { action: 'cancel', taskId: taskIdBox.value };
       const callId = `call_stop_${turn}`;
       transcript.push({
@@ -98,7 +104,7 @@ async function parkAtConfirmGate() {
     workerDispatchMode: 'background',
     main: stopMainDriver(taskIdBox),
     // 第一步：重计划停在确认门（interactive 用例同款旋钮）；第二步留给确认后的续跑，本文件不用。
-    worker: gatedWorker([{ plan: heavyPlan(), stopAtConfirm: true }, { execute: heavyPlan() }]),
+    worker: gatedWorker([{ plan: dummyHeavyPlan(), stopAtConfirm: true }, { execute: dummyHeavyPlan() }]),
   });
   const accepted = await b.send(ASK);
   const runs = () => b.assembly.store.taskRuns!.listBySession(PRINCIPAL, SESSION);

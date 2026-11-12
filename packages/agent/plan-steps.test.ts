@@ -41,15 +41,17 @@ describe('计划模式协议：第N/M步 前缀解析', () => {
     expect(PLAN_STEP_PREFIX_PATTERN.test('第1/3步：x')).toBe(true);
   });
 
-  it('下一步提示：非最后一步指向下一步，最后一步指向 conversation 汇总', () => {
+  it('下一步提示：非最后一步指向下一步（taskId 续跑），最后一步指向直接汇总', () => {
     const middle = planStepNextHint({ stepIndex: 1, totalSteps: 3, label: '第 1/3 步', request: 'x' }, 'task_a');
     expect(middle).toContain('第2/3步：');
     expect(middle).toContain('task_a');
-    expect(middle).toContain('continueTaskId');
+    // 直连形态：续跑编号参数名是 taskId（旧申报参数 continueTaskId 已退役）
+    expect(middle).toContain('taskId');
+    expect(middle).not.toContain('continueTaskId');
     expect(middle).toContain('不阻塞');
 
     const last = planStepNextHint({ stepIndex: 3, totalSteps: 3, label: '第 3/3 步', request: 'x' }, 'task_a');
-    expect(last).toContain('conversation');
+    expect(last).toContain('直接输出汇总');
     expect(last).toContain('如实报告');
     expect(last).not.toContain('第4/3步');
   });

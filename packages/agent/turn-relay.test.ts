@@ -35,7 +35,7 @@ describe('renderClarificationToolResult', () => {
   it('内部协议材料：码 + 候选数 + 任务编号 + 不要复述', () => {
     expect(renderClarificationToolResult(AMBIGUOUS, 'task_42')).toBe([
       '平台返回选择类状态 ACCOUNT_SET_AMBIGUOUS（候选 2 个），宿主已把澄清问题直接发给用户。',
-      '继续该子任务时使用这个编号：task_42（不要转述给用户）。用户回答后重新申报 delegate，把该编号填进 continueTaskId，request 写用户选定的对象。',
+      '继续该子任务时使用这个编号：task_42（不要转述给用户）。用户回答后重新调用本工具，把该编号填进 taskId，request 写用户选定的对象。',
       '本轮不要再委派、不要自己复述澄清问题。',
     ].join('\n'));
   });
@@ -51,8 +51,8 @@ describe('renderNeedsToolResult', () => {
       '子 Agent 本轮没有执行平台查询，还缺少信息：查询范围。',
       '原因：平台要求必须指定范围',
       '建议用户提供：请补充具体月份',
-      '继续该子任务时使用这个编号：task_7（不要转述给用户）。用户补充信息后，重新申报 delegate，把该编号填进 continueTaskId，request 写补充后的完整请求。',
-      '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐再申报 conversation 把问题转达给用户。',
+      '继续该子任务时使用这个编号：task_7（不要转述给用户）。用户补充信息后，重新调用本工具，把该编号填进 taskId，request 写补充后的完整请求。',
+      '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐就直接把问题转达给用户。',
       '子 Agent 的说明：子 Agent 的说明文本',
     ].join('\n'));
   });
@@ -61,8 +61,8 @@ describe('renderNeedsToolResult', () => {
     expect(renderNeedsToolResult({ missing: [], reason: '缺少必要信息' }, 'task_7', '')).toBe([
       '子 Agent 本轮没有执行平台查询，还缺少信息：（未指明）。',
       '原因：缺少必要信息',
-      '继续该子任务时使用这个编号：task_7（不要转述给用户）。用户补充信息后，重新申报 delegate，把该编号填进 continueTaskId，request 写补充后的完整请求。',
-      '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐再申报 conversation 把问题转达给用户。',
+      '继续该子任务时使用这个编号：task_7（不要转述给用户）。用户补充信息后，重新调用本工具，把该编号填进 taskId，request 写补充后的完整请求。',
+      '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐就直接把问题转达给用户。',
     ].join('\n'));
   });
 });
@@ -105,7 +105,7 @@ describe('renderPlanStepToolResult', () => {
       executed: true,
       text: '平台查完了。',
       outcome: 'ok',
-      next: '继续申报下一步：request 以「第3/3步：」开头，continueTaskId 填 task_9（不要转述给用户）。任一步失败都不阻塞后续步骤。',
+      next: '继续调用本工具派下一步：request 以「第3/3步：」开头，taskId 填 task_9（不要转述给用户）。任一步失败都不阻塞后续步骤。',
     });
   });
 
@@ -137,6 +137,6 @@ describe('renderPlanStepToolResult', () => {
 
   it('最后一步的 next 让模型输出汇总', () => {
     const rendered = renderPlanStepToolResult(step({ stepIndex: 3, totalSteps: 3, label: '第 3/3 步' }), result());
-    expect(rendered.next).toBe('全部 3 步已派发完毕：申报 conversation 输出汇总。汇总必须覆盖每一步的结果；失败或缺信息的步骤如实报告，不要掩盖，也不要用估计值填充。');
+    expect(rendered.next).toBe('全部 3 步已派发完毕：直接输出汇总。汇总必须覆盖每一步的结果；失败或缺信息的步骤如实报告，不要掩盖，也不要用估计值填充。');
   });
 });
