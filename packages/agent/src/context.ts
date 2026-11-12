@@ -605,7 +605,7 @@ function defaultHashCode(code: string): string {
 }
 
 /**
- * 把驱动上报的结构化事实（D-065）合并进任务条目：calls/accountSet/period/label 取本次
+ * 把驱动上报的结构化事实（D-065）合并进任务条目：calls/scopeValues/label 取本次
  * 委派的快照（替换式——任务的最新范围），resultText 追加（同一任务多次委派的结果 trail，
  * 上限见 RESULT_TEXT_MAX_CHARS），outcome 由委派结局定。全部字段可选——缺一个就不写一个，
  * 消费方据此降级，不猜不补。
@@ -673,8 +673,7 @@ function withExecutionFacts(
     outcome,
     ...(facts ? {
       calls: facts.calls.map((call) => ({ operation: call.operation, args: call.args })),
-      ...(facts.accountSet ? { accountSet: facts.accountSet } : {}),
-      ...(facts.period ? { period: facts.period } : {}),
+      ...(facts.scopeValues && facts.scopeValues.length > 0 ? { scopeValues: [...facts.scopeValues] } : {}),
       ...(facts.label ? { label: facts.label } : {}),
     } : {}),
     ...(resultText ? { resultText } : {}),

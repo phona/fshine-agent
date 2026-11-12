@@ -190,8 +190,9 @@ CREATE TABLE IF NOT EXISTS platform_tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   -- P2 结构化执行事实（D-065）：委派时的确定性信息回填，不从 worker 文本解析。
-  account_set TEXT,
-  period TEXT,
+  -- 形状是通用的：范围取值（JSON 数组）按执行层声明逐位查表得到——本表不焊任何
+  -- 执行层的参数名（谁的对象/窗口由执行层声明面定，见 platform-contract）。
+  scope_values TEXT,
   calls TEXT,
   label TEXT,
   outcome TEXT,
@@ -412,8 +413,7 @@ interface PlatformTaskRow {
   worker_messages: string;
   created_at: string;
   updated_at: string;
-  account_set: string | null;
-  period: string | null;
+  scope_values: string | null;
   calls: string | null;
   label: string | null;
   outcome: string | null;
@@ -685,8 +685,7 @@ function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     // 结构化字段：旧库/缺列时一律不出现在记录里（消费方据此降级，不猜不补）。
-    ...(row.account_set ? { accountSet: row.account_set } : {}),
-    ...(row.period ? { period: row.period } : {}),
+    ...(row.scope_values ? { scopeValues: JSON.parse(row.scope_values) as string[] } : {}),
     ...(row.calls ? { calls: JSON.parse(row.calls) as PlatformTaskRecord['calls'] } : {}),
     ...(row.label ? { label: row.label } : {}),
     ...(row.outcome === 'done' || row.outcome === 'needs' || row.outcome === 'failed' ? { outcome: row.outcome } : {}),
@@ -696,18 +695,20 @@ function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
 
 /** 结构化事实列 ↔ 记录字段（upsert 的写入面与 get/list 的读回面共用同一份映射）。 */
 const PLATFORM_TASK_FACT_COLUMNS: ReadonlyArray<{ field: keyof PlatformTaskRecord; column: string }> = [
-  { field: 'accountSet', column: 'account_set' },
-  { field: 'period', column: 'period' },
+  { field: 'scopeValues', column: 'scope_values' },
   { field: 'calls', column: 'calls' },
   { field: 'label', column: 'label' },
   { field: 'outcome', column: 'outcome' },
   { field: 'resultText', column: 'result_text' },
 ];
 
-/** 结构化事实的 SQL 值（calls 序列化为 JSON；undefined → NULL，即"这个任务没有这个事实"）。 */
+/** 以 JSON 文本落库的结构化事实字段（数组形状；其余按字符串落）。 */
+const PLATFORM_TASK_JSON_FIELDS: ReadonlySet<keyof PlatformTaskRecord> = new Set(['calls', 'scopeValues']);
+
+/** 结构化事实的 SQL 值（JSON 字段序列化；undefined → NULL，即"这个任务没有这个事实"）。 */
 function platformTaskFactValue(field: keyof PlatformTaskRecord, value: unknown): string | null {
   if (value === undefined || value === null) return null;
-  if (field === 'calls') return JSON.stringify(value);
+  if (PLATFORM_TASK_JSON_FIELDS.has(field)) return JSON.stringify(value);
   return String(value);
 }
 
@@ -741,11 +742,13 @@ export function createSqliteStore(dbPath: string): AuditStore {
   }
 
   // Forward-compatible migration for databases created before the P2 structured
-  // execution facts (D-065): platform_tasks gained account_set/period/calls/label/
+  // execution facts (D-065): platform_tasks gained scope_values/calls/label/
   // outcome/result_text. Older rows simply read back as records without those
-  // fields (consumers degrade to the raw text instead of guessing).
+  // fields (consumers degrade to the raw text instead of guessing). 首版 D-065 的
+  // 两个执行层专属列只作为历史留在旧库里：不再读、不再写（范围取值改由通用列
+  // scope_values 承载；迁移不复制旧值——消费方降级，不猜不补）。
   const taskColumns = db.prepare('PRAGMA table_info(platform_tasks)').all() as Array<{ name: string }>;
-  for (const column of ['account_set', 'period', 'calls', 'label', 'outcome', 'result_text']) {
+  for (const column of ['scope_values', 'calls', 'label', 'outcome', 'result_text']) {
     if (!taskColumns.some((existing) => existing.name === column)) {
       db.exec(`ALTER TABLE platform_tasks ADD COLUMN ${column} TEXT`);
     }

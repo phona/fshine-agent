@@ -5,7 +5,7 @@ import { errorFor } from './error-codes';
 import { scrubExecutionLanguageText } from './execution-language';
 import { isConfirmGateTier, taskBudgetDecision, ZERO_TASK_BUDGET, type TaskBudgetUsage } from './task-budget';
 import { operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
-import { gatewayExecPathForProfile, gatewayTextPatterns, resolveGatewayText } from './platform-contract';
+import { gatewayExecPathForProfile, gatewayTextPatterns, RECALL_SCOPE_ARG_NAMES, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
   operation: string;
@@ -323,15 +323,9 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {  const m
 }
 
 /**
- * 平台 args 规格里我们机械提取的两个声明名（D-065）：accountSet/period。
- *
- * 为什么是这两个：召回事实要回答"本会话迄今对哪个对象、哪个时间窗执行过什么"——这两个
- * 是平台自己在 args 规格里声明的参数名（voucher.query-saved 的位置参数、finance 的
- * --period），取它们是查表不是猜。flag 的声明名按平台自己的 kebab→camel 归一推导
- * （--period → period；平台 flag-guard 同一套归一），--query 推导出的 query **不是**
- * accountSet（那是检索关键词，不一定等于规范名）——宁缺勿猜。
+ * 结构化事实的取值口径（D-065）：哪些声明名算范围取值、按什么序进结果，由**执行层声明面**
+ * （platform-contract.ts 的 RECALL_SCOPE_ARG_NAMES）定——本模块只逐位查表，不焊名。
  */
-const STRUCTURED_ARG_NAMES: ReadonlySet<string> = new Set(['accountSet', 'period']);
 
 /** flag → 声明名（平台 kebab→camel 归一：--subject-code → subjectCode）。 */
 function flagArgName(flag: string): string {
@@ -346,20 +340,21 @@ function cleanArgValue(value: unknown): string | undefined {
 }
 
 /**
- * 从计划调用机械提取结构化事实（D-065）：accountSet / period / 首个 operation 的中文标签。
+ * 从计划调用机械提取结构化事实（D-065）：范围取值 / 首个 operation 的中文标签。
  *
  * 全部是**宿主可见的机械事实**：calls 是宿主自己从 worker 提交的计划命令解析出来的，
- * 取值按平台 args 规格的声明名逐位对应（位置参数按序、flag 按 kebab→camel 声明名），
- * label 是平台清单第 5 列。**绝不从 worker 文本解析**——转录里"提过"不等于"执行过"，
- * 模糊匹配正是已删除的宿主执行台账要替代的东西。规格缺失 / 声明名对不上 → 该字段不出项
- * （宁缺勿猜），调用方据此降级渲染。
+ * 范围取值按执行层声明面逐位对应（位置参数按序对应规格的 positionalNames、flag 按
+ * kebab→camel 声明名；声明序即结果序，不按遇序），label 是平台清单第 5 列。**绝不从
+ * worker 文本解析**——转录里"提过"不等于"执行过"，模糊匹配正是已删除的宿主执行台账
+ * 要替代的东西。规格缺失 / 声明名对不上 → 该位不取值（宁缺勿猜），调用方据此降级渲染。
  */
 export function planCallFacts(
   calls: readonly PlanCall[],
   specs: OperationArgsSpecs | undefined,
   labels: OperationLabels | undefined,
-): { accountSet?: string; period?: string; label?: string } {
-  const facts: { accountSet?: string; period?: string; label?: string } = {};
+): { scopeValues?: string[]; label?: string } {
+  // 每个声明名取首个命中值（跨调用不合并）；声明面之外的名字一律不取。
+  const byName = new Map<string, string>();
   for (const call of calls) {
     const spec = specs?.get(call.operation);
     const args = call.args.map((value) => (typeof value === 'string' ? value : String(value)));
@@ -381,13 +376,16 @@ export function planCallFacts(
       positionalIndex += 1;
     }
     for (const { name, value } of declared) {
-      if (!STRUCTURED_ARG_NAMES.has(name)) continue;
+      if (byName.has(name) || !RECALL_SCOPE_ARG_NAMES.includes(name)) continue;
       const cleaned = cleanArgValue(value);
-      if (!cleaned) continue;
-      if (name === 'accountSet' && !facts.accountSet) facts.accountSet = cleaned;
-      if (name === 'period' && !facts.period) facts.period = cleaned;
+      if (cleaned) byName.set(name, cleaned);
     }
   }
+  const facts: { scopeValues?: string[]; label?: string } = {};
+  const scopeValues = RECALL_SCOPE_ARG_NAMES
+    .map((name) => byName.get(name))
+    .filter((value): value is string => value !== undefined);
+  if (scopeValues.length > 0) facts.scopeValues = scopeValues;
   const label = operationLabel(labels, calls[0]?.operation);
   if (label) facts.label = label;
   return facts;

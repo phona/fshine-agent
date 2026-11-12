@@ -89,12 +89,11 @@ describe('loadTimedOutRecord', () => {
 });
 
 describe('renderResourceExhaustedReply', () => {
-  it('底账带结构化事实：已完成部分逐行落（已执行操作含 label 与账套/期间）', () => {
+  it('底账带结构化事实：已完成部分逐行落（已执行操作含 label 与执行层声明的范围取值）', () => {
     const text = renderResourceExhaustedReply({
       record: record({
         label: '工资表计算',
-        accountSet: '幻辰财税',
-        period: '202609',
+        scopeValues: ['幻辰财税', '202609'],
         calls: [{ operation: 'payroll.compute', args: [] }],
       }),
       doneSteps: [],
@@ -104,6 +103,14 @@ describe('renderResourceExhaustedReply', () => {
     expect(text).toContain('已执行操作：工资表计算（幻辰财税 202609）');
     expect(text).toContain('未完成部分');
     expect(text).toContain('回复“继续”可从断点续跑');
+  });
+
+  it('范围取值缺席（旧任务 / 执行层没声明）：只落 label，不补空格不猜——拿不到就降级', () => {
+    const text = renderResourceExhaustedReply({
+      record: record({ label: '工资表计算', calls: [{ operation: 'payroll.compute', args: [] }] }),
+      doneSteps: [],
+    });
+    expect(text.split('\n')).toContain('· 已执行操作：工资表计算');
   });
 
   it('本回合已完成计划步骤逐行列出', () => {

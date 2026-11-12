@@ -387,10 +387,9 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
     });
 
     // ── P2 结构化执行事实（D-065）──────────────────────────────────────────
-    it('结构化事实原样往返：accountSet/period/calls/label/outcome/resultText', async () => {
+    it('结构化事实原样往返：scopeValues/calls/label/outcome/resultText', async () => {
       const record = makePlatformTask({
-        accountSet: '幻州市幻晟财务代理有限公司',
-        period: '202609',
+        scopeValues: ['幻州市幻晟财务代理有限公司', '202609'],
         calls: [{ operation: 'voucher.query-saved', args: ['幻州市幻晟财务代理有限公司', '202609'] }],
         label: '查凭证列表',
         outcome: 'done',
@@ -407,8 +406,7 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
 
       const loaded = (await store.platformTasks!.get(record.taskId))!;
       expect(loaded).toEqual(record);
-      expect('accountSet' in loaded).toBe(false);
-      expect('period' in loaded).toBe(false);
+      expect('scopeValues' in loaded).toBe(false);
       expect('calls' in loaded).toBe(false);
       expect('outcome' in loaded).toBe(false);
       expect('resultText' in loaded).toBe(false);
@@ -417,14 +415,14 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
     it('同 taskId upsert 替换结构化事实（不含"保留旧值"的隐式合并）', async () => {
       const taskId = newId('task');
       await store.platformTasks!.upsert(makePlatformTask({
-        taskId, accountSet: '甲', period: '202601', outcome: 'done', resultText: '第一次',
+        taskId, scopeValues: ['甲', '202601'], outcome: 'done', resultText: '第一次',
       }));
       await store.platformTasks!.upsert(makePlatformTask({
-        taskId, accountSet: '乙', period: '202602', outcome: 'needs',
+        taskId, scopeValues: ['乙', '202602'], outcome: 'needs',
       }));
 
       const loaded = (await store.platformTasks!.get(taskId))!;
-      expect(loaded).toMatchObject({ accountSet: '乙', period: '202602', outcome: 'needs' });
+      expect(loaded).toMatchObject({ scopeValues: ['乙', '202602'], outcome: 'needs' });
       // resultText 由调用方（context.ts 的 withExecutionFacts）决定累不累加，存储不替它保留
       expect('resultText' in loaded).toBe(false);
     });
@@ -877,18 +875,94 @@ describe('platform_tasks 结构化事实列的前向迁移', () => {
       const legacyRow = (await store.platformTasks!.get('task_legacy'))!;
       expect(legacyRow.taskId).toBe('task_legacy');
       // 旧行没有结构化字段：读回时一个都不出现（消费方据此降级，不猜不补）
-      expect('accountSet' in legacyRow).toBe(false);
+      expect('scopeValues' in legacyRow).toBe(false);
       expect('resultText' in legacyRow).toBe(false);
       expect(await store.platformTasks!.listBySession('wecom:user_a', 'wecom:user_a:conv_1')).toHaveLength(1);
 
       // 新写入照常往返（补列后的同一张表）
       await store.platformTasks!.upsert(makePlatformTask({
-        taskId: 'task_new', accountSet: '甲', period: '202601', outcome: 'done', resultText: '新行',
+        taskId: 'task_new', scopeValues: ['甲', '202601'], outcome: 'done', resultText: '新行',
       }));
       const fresh = (await store.platformTasks!.get('task_new'))!;
-      expect(fresh).toMatchObject({ accountSet: '甲', period: '202601', outcome: 'done', resultText: '新行' });
+      expect(fresh).toMatchObject({ scopeValues: ['甲', '202601'], outcome: 'done', resultText: '新行' });
     } finally {
       closeStore(store);
+    }
+  });
+
+  it('新库建表即通用形状：结构化事实只有通用列（scope_values 等），零平台参数名列', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fshine-core-fresh-schema-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'fresh.db');
+    const store = createSqliteStore(dbPath);
+    try {
+      await store.platformTasks!.upsert(makePlatformTask({ taskId: 'task_fresh', scopeValues: ['甲', '202601'] }));
+    } finally {
+      closeStore(store);
+    }
+    const db = new Database(dbPath);
+    try {
+      const columns = (db.prepare('PRAGMA table_info(platform_tasks)').all() as Array<{ name: string }>).map((row) => row.name);
+      expect(columns).toContain('scope_values');
+      // 通用层 schema 不焊某个执行层的参数名（D 轨 2026-11-12）：焊了换执行层就一个事实都拿不到
+      expect(columns).not.toContain('account_set');
+      expect(columns).not.toContain('period');
+    } finally {
+      db.close();
+    }
+  });
+
+  it('D-065 旧库（带 account_set/period 历史列）打开：旧行降级为无 scopeValues，新写入只碰通用列', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'fshine-core-legacy-facts-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'd065.db');
+    // 迁移前（D-065 首版）的形状：结构化事实列是执行层参数名 account_set / period
+    const legacy = new Database(dbPath);
+    legacy.exec(`
+      CREATE TABLE IF NOT EXISTS platform_tasks (
+        task_id TEXT PRIMARY KEY,
+        plugin_id TEXT NOT NULL,
+        parent_session_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        worker_messages TEXT NOT NULL,
+        current_step TEXT,
+        pending_questions TEXT,
+        last_result TEXT,
+        evidence TEXT,
+        skill_version TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        account_set TEXT,
+        period TEXT,
+        calls TEXT,
+        label TEXT,
+        outcome TEXT,
+        result_text TEXT
+      );
+      INSERT INTO platform_tasks (task_id, plugin_id, parent_session_id, principal_id, status, worker_messages, created_at, updated_at, account_set, period)
+      VALUES ('task_old', '', 'wecom:user_a:conv_1', 'wecom:user_a', 'active', '[]', '2026-09-15T08:00:00.000Z', '2026-09-15T08:05:00.000Z', '幻辰财税', '202609');
+    `);
+    legacy.close();
+
+    const store = createSqliteStore(dbPath);
+    try {
+      // 旧行的范围取值留在历史列里，新代码不再读它——该行降级为"无范围取值"，不猜不补
+      const oldRow = (await store.platformTasks!.get('task_old'))!;
+      expect('scopeValues' in oldRow).toBe(false);
+      await store.platformTasks!.upsert(makePlatformTask({ taskId: 'task_new', scopeValues: ['甲', '202601'] }));
+      expect((await store.platformTasks!.get('task_new'))!).toMatchObject({ scopeValues: ['甲', '202601'] });
+    } finally {
+      closeStore(store);
+    }
+    const raw = new Database(dbPath);
+    try {
+      // 历史列不删表、也不再被写：新行走 NULL（旧行原值照旧留在库里做历史）
+      const rows = raw.prepare('SELECT task_id, account_set, period FROM platform_tasks ORDER BY task_id').all() as Array<{ task_id: string; account_set: string | null; period: string | null }>;
+      expect(rows.find((row) => row.task_id === 'task_new')).toMatchObject({ account_set: null, period: null });
+      expect(rows.find((row) => row.task_id === 'task_old')).toMatchObject({ account_set: '幻辰财税', period: '202609' });
+    } finally {
+      raw.close();
     }
   });
 });
