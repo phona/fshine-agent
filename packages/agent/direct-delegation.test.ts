@@ -11,7 +11,8 @@
  *   D3 计划模式：带「第N/M步：」前缀的直连调用写计划事实并把结果交还模型；
  *   D4 普通回合：不调用任何工具时，模型文本即本轮回复（不再强制申报、不再重试）；
  *   D5 出口执行痕迹门：直连委派零执行时数据结论仍不外发；
- *   D6 background 部署：直连委派走后台派发（受理回执），不 inline 执行。
+ *   D6 background 部署：直连委派走后台派发（受理回执），不 inline 执行；
+ *   D7 T10 冻结守卫：首步判假死后，同回合再次直连委派在 run_task 入口被拒绝。
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskPlanStepFact, TrustedContext } from '@fshine/contracts';
@@ -218,5 +219,41 @@ describe('直连委派：Main 直接调用 run_task', () => {
     });
     expect(inlineRun).not.toHaveBeenCalled();
     expect(reply.text).toMatch(/受理|排队/);
+  });
+
+  it('D7 T10 冻结守卫：首步判假死后，同回合再次直连委派在 run_task 入口被拒绝', async () => {
+    const toolResults: unknown[] = [];
+    const driver: TurnDriver = {
+      run: async (input) => {
+        const messages = [...input.messages];
+        // 第一次委派：worker 被判假死（taskStalled）——宿主冻结计划、错误照旧上抛；
+        // 这个替身驱动按"继续同一回合"消费下一步（生产里的续跑由下一回合显式发起）。
+        try {
+          await input.exec('run_task', { request: '第1/2步：查对象甲' });
+          throw new Error('假死错误必须上抛');
+        } catch (error) {
+          if (!(error instanceof ToolUserError)) throw error;
+          messages.push({ role: 'toolResult', toolName: 'run_task', toolCallId: 'call_1', content: [{ type: 'text', text: error.message }], timestamp: 1 } as never);
+        }
+        // 第二次：计划已冻结 → 守卫拒绝派发，把冻结事实交还模型（返回 error 而非抛出）。
+        const outcome = await input.exec('run_task', { request: '第2/2步：查对象乙' });
+        toolResults.push(outcome);
+        return { text: '任务已暂停，回复“继续”可从断点续跑。', messages };
+      },
+    };
+    const runtime = createTaxAgentRuntime({
+      driver,
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(async () => {
+        const stalled = new ToolUserError('平台回应停滞。', { delegationCompleted: true });
+        (stalled as { taskStalled?: boolean }).taskStalled = true;
+        throw stalled;
+      }),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_frozen' }), '核对对象甲和对象乙');
+
+    expect(JSON.stringify(toolResults[0])).toContain('计划已冻结');
+    expect(reply.text).toBe('任务已暂停，回复“继续”可从断点续跑。');
   });
 });
