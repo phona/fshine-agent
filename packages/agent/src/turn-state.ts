@@ -76,6 +76,14 @@ export interface TurnState {
    * 有效性（存在/淘汰/字节在否）由 handler 确定性回答，runtime 不碰产物库。
    */
   resendRefs: string[];
+  /**
+   * 本回合 route_current_turn 申报被拒的次数（有界收敛的记账，见
+   * `MAX_DECLARATION_REJECTIONS`）：每退回模型一次 +1，超界那一次同样 +1（它就是
+   * "超界"这个事实本身），因此 `> MAX` 即"已收敛、不再退回"。
+   */
+  declarationRejections: number;
+  /** 被拒申报的形状指纹 → 次数（诊断用：同一形状被反复交回是死循环的指纹）。 */
+  declarationShapes: Record<string, number>;
 }
 
 /**
@@ -108,6 +116,8 @@ export function createTurnState(planChoice?: { planId: string } | null): TurnSta
     backgroundTaskState: null,
     backgroundReceiptText: null,
     resendRefs: [],
+    declarationRejections: 0,
+    declarationShapes: {},
   };
 }
 
@@ -126,6 +136,56 @@ export const MAX_NEEDS_ROUNDS = 3;
  * 误伤合法拆解；中间任何一步有执行或交还就重置计数（见 noteZeroExecStep）。
  */
 export const MAX_PLAN_ZERO_EXEC_STEPS = 3;
+
+/**
+ * 同一回合内申报被拒的收敛上限：**允许退回 2 次，第 3 次判超界**（2026-11-12 轨道 C ②）。
+ *
+ * 取值依据（**政策线，不是自然常数**）：同题的既有政策 = 申报契约判据的容差，它来自实测
+ * 分布——健康样例（模型在同一回合内自纠成功）的单回合退回上限正好是 2，≥3 判红。
+ * 2026-11-12 分层调整后**本常量是唯一出处**：判据侧 `scripts/eval/declaration-criteria.ts`
+ * 的 `INVALID_DECLARATION_TOLERANCE` 由它派生（eval → 生产，方向不反；生产代码与生产测试
+ * 不得依赖 scripts/eval）。
+ * 取 2 因此是唯一"健康行为一字不改、判据红线不可达"的值：
+ *   · 取 1 会截断实测里健康样例的自纠（r02/r06/arch-a 都是 2 次退回内自纠成功）；
+ *   · 取 ≥3 会让那条容差形同虚设（3 > 2 当场红），也就没堵住 arch-d C2 那种 226 次的形状。
+ *
+ * 界记在**回合总次数**上，而不是"每个形状各给 2 次"：按形状分别计数并不能让回合有界
+ * ——模型换着形状交就能绕开（本文件测试第二条钉的就是这个），而"回合总数有界"天然
+ * 蕴含"同一形状有界"（形状次数 ≤ 回合总数）。形状仍逐次记账（declarationShapes），
+ * 供审计看"是不是同一份坏申报被反复交回"。
+ */
+export const MAX_DECLARATION_REJECTIONS = 2;
+
+/** 申报被拒的记账结果（纯数据，调用方据此决定控制流）。 */
+export interface DeclarationRejection {
+  /** 本回合累计被拒次数（含本次）。 */
+  count: number;
+  /** 本回合该形状累计被拒次数（含本次）。 */
+  shapeCount: number;
+  /** 是否已超界：true = 调用方不再退回模型，改用确定性话术收尾。 */
+  exceeded: boolean;
+}
+
+/**
+ * 申报被拒记账（每退回模型一次记一次；超界那一次也记——它就是"超界"这个事实）。
+ *
+ * 记在 `turn` 上（handleTurn 的回合状态）而不是模块级：界是"同一回合内"的界，跨回合
+ * 必须归零，否则一个长期会话会越用越早收敛。
+ */
+export function noteDeclarationRejection(state: TurnState, shape: string): DeclarationRejection {
+  state.declarationRejections += 1;
+  state.declarationShapes[shape] = (state.declarationShapes[shape] ?? 0) + 1;
+  return {
+    count: state.declarationRejections,
+    shapeCount: state.declarationShapes[shape]!,
+    exceeded: state.declarationRejections > MAX_DECLARATION_REJECTIONS,
+  };
+}
+
+/** 本回合的申报拒收是否已超界（超界 = 已收敛、不再退回模型）。 */
+export function declarationRejectionsExhausted(state: TurnState): boolean {
+  return state.declarationRejections > MAX_DECLARATION_REJECTIONS;
+}
 
 /**
  * needs 回路记账：发生了一轮"子 Agent 回报缺信息"。
