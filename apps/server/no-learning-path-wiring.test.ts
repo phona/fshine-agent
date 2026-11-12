@@ -5,8 +5,9 @@
  *   ① 生产装配传给 createTaxAgentRuntime 的 deps **不含**任何"从会话历史学习用户行为→
  *      影响执行"的接线（contextStates / memoryRecords / memoryCandidateExtractor /
  *      contextModelDriver）——今天的装配四样全接；
- *   ② 编排层生产代码（packages/agent/src + apps）里这些字段与路径**一个都不存在**：
- *      扫描命中即红。留着一处接线就是留一条"历史 → 影响执行"的通路。
+ *   ② 生产代码（packages/agent/src + apps + packages/core/src + packages/contracts/src）
+ *      里这些字段与路径**一个都不存在**：扫描命中即红。留着一处接线或一处存储层残留，
+ *      就是留一条"历史 → 影响执行"的通路，也是让机制看起来还活着的坟。
  *
  * 为什么两条都要：① 钉装配（行为面，能抓"偷偷接回来"），② 钉字段与路径的存在性
  * （结构面，能抓同名复现）。两者都不看实现内部，只看装配产物与代码树。
@@ -91,8 +92,20 @@ const LEARNING_PATH_IDENTIFIERS: readonly string[] = [
   'contextModelDriver',
 ];
 
-/** 编排层生产代码扫描面（测试文件豁免：它们本就在描述被删的形状）。 */
-const SCAN_DIRS = ['packages/agent/src', 'apps'] as const;
+/**
+ * 生产代码扫描面（测试文件豁免：它们本就在描述被删的形状）。
+ *
+ * `packages/core/src` 与 `packages/contracts/src` 是 2026-11-12 补的：原扫描面只盯
+ * 编排层，存储层（长期记忆表/Context State 表与两个 repo、契约类型、桶导出）成了盲区
+ * ——机制已裁定删除，残留却仍在，`memory-records.ts` 还带着自己的测试 suite，让
+ * 「机制健在」的错觉可复现。扫描面只加不减。
+ */
+const SCAN_DIRS = [
+  'packages/agent/src',
+  'apps',
+  'packages/core/src',
+  'packages/contracts/src',
+] as const;
 
 function walk(dir: string): string[] {
   const found: string[] = [];
@@ -116,7 +129,7 @@ describe('T2 装配与生产代码里不存在学习路径', () => {
     }
   });
 
-  it('编排层生产代码里学习路径字段与路径零命中', () => {
+  it('生产代码（编排层 + 存储层）里学习路径字段与路径零命中', () => {
     const hits: string[] = [];
     for (const dir of SCAN_DIRS) {
       for (const file of walk(path.join(REPO_ROOT, dir))) {
@@ -127,7 +140,7 @@ describe('T2 装配与生产代码里不存在学习路径', () => {
       }
     }
     expect(hits, [
-      '编排层生产代码仍存在"会话历史 → 用户行为 → 影响执行"的字段或路径：',
+      '生产代码仍存在"会话历史 → 用户行为 → 影响执行"的字段或路径：',
       ...hits,
       '真需要这类能力时先立判据与登记，不要静默接回一条无倾向学习通路。',
     ].join('\n')).toEqual([]);

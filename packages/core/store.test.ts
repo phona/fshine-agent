@@ -3,7 +3,7 @@ import Database from 'better-sqlite3';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { AgentRequestRecord, AuditStore, ConversationEventRecord, ConversationSessionRecord, MemoryRecordRecord, PlatformTaskRecord, PrincipalScopeRecord, SessionArtifactRecord, TaskRunRecord, ToolCallRecord } from '@fshine/contracts';
+import type { AgentRequestRecord, AuditStore, ConversationEventRecord, ConversationSessionRecord, PlatformTaskRecord, PrincipalScopeRecord, SessionArtifactRecord, TaskRunRecord, ToolCallRecord } from '@fshine/contracts';
 import { TaskRunActiveConflictError } from '@fshine/contracts';
 import { closeStore, createSqliteStore, newId } from './src/index';
 
@@ -64,15 +64,6 @@ function makePlatformTask(overrides: Partial<PlatformTaskRecord> = {}): Platform
     workerMessages: [{ role: 'user', content: '查账' }],
     createdAt: '2026-09-15T08:00:00.000Z',
     updatedAt: '2026-09-15T08:05:00.000Z',
-    ...overrides,
-  };
-}
-
-function makeMemoryRecord(overrides: Partial<MemoryRecordRecord> = {}): MemoryRecordRecord {
-  return {
-    memoryId: 'mem_style', principalId: 'wecom:user_a', key: 'response_style', type: 'preference',
-    content: '用中文简洁回答', status: 'active', sourceEventIds: ['evt_1'], version: 1,
-    createdAt: '2026-09-15T08:00:00.000Z', updatedAt: '2026-09-15T08:00:00.000Z',
     ...overrides,
   };
 }
@@ -751,48 +742,6 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       }
 
       expect(await store.taskRuns!.listPinnedTaskIds()).toEqual([...pinned, noDeliveryState].map((run) => run.taskId).sort());
-    });
-  });
-
-  describe('contextStates', () => {
-    it('按 principal/session 持久化 reducer 状态和追赶游标', async () => {
-      const record = {
-        principalId: 'wecom:user_a', sessionId: 'sess_a', updatedAt: '2026-09-15T08:01:00.000Z',
-        throughEventId: 'evt_9', reducerVersion: 1,
-        state: { recentTopic: '三月凭证', unresolvedQuestions: [] },
-      };
-      await store.contextStates.upsert(record);
-      expect(await store.contextStates.get('wecom:user_a', 'sess_a')).toEqual(record);
-      expect(await store.contextStates.get('wecom:user_b', 'sess_a')).toBeNull();
-    });
-  });
-
-  describe('memoryRecords', () => {
-    it('原子保存带版本记忆记录与 principal cursor，并能读回', async () => {
-      const record = makeMemoryRecord();
-      expect(await store.memoryRecords?.getCursor(record.principalId)).toBeNull();
-      expect(await store.memoryRecords?.listByPrincipal(record.principalId)).toEqual([]);
-      expect(await store.memoryRecords?.commit(record.principalId, null, 'evt_1', [record])).toBe(true);
-      expect(await store.memoryRecords?.getCursor(record.principalId)).toBe('evt_1');
-      expect(await store.memoryRecords?.listByPrincipal(record.principalId)).toEqual([record]);
-    });
-
-    it('过期 cursor 或低版本写入返回 false，且记录与 cursor 均不变', async () => {
-      const record = makeMemoryRecord();
-      expect(await store.memoryRecords?.commit(record.principalId, null, 'evt_1', [record])).toBe(true);
-      const updated = makeMemoryRecord({ content: '回答尽量详细', status: 'superseded', sourceEventIds: ['evt_1', 'evt_2'], version: 2, updatedAt: '2026-09-15T08:01:00.000Z' });
-      expect(await store.memoryRecords?.commit(record.principalId, 'wrong-cursor', 'evt_2', [updated])).toBe(false);
-      expect(await store.memoryRecords?.commit(record.principalId, 'evt_1', 'evt_2', [updated])).toBe(true);
-      expect(await store.memoryRecords?.commit(record.principalId, 'evt_1', 'evt_3', [record])).toBe(false);
-      expect(await store.memoryRecords?.getCursor(record.principalId)).toBe('evt_2');
-      expect(await store.memoryRecords?.listByPrincipal(record.principalId)).toEqual([updated]);
-    });
-
-    it('拒绝跨 principal 写入且其他 principal 无法读取该记录', async () => {
-      const foreign = makeMemoryRecord({ principalId: 'wecom:user_b', memoryId: 'mem_other' });
-      await expect(store.memoryRecords?.commit('wecom:user_a', null, 'evt_1', [foreign])).rejects.toThrow(/principal/i);
-      expect(await store.memoryRecords?.listByPrincipal('wecom:user_b')).toEqual([]);
-      expect(await store.memoryRecords?.getCursor('wecom:user_a')).toBeNull();
     });
   });
 });

@@ -13,8 +13,6 @@ import type {
   ConversationSessionRepo,
   ConversationEventRecord,
   ConversationLogRepo,
-  ContextStateRecord,
-  ContextStateRepo,
   PrincipalScopeRecord,
   PrincipalScopeRepo,
   RequestOutcome,
@@ -26,8 +24,6 @@ import type {
   PlatformTaskRepo,
   ChangeIntentRecord,
   ChangeIntentRepo,
-  MemoryRecordRecord,
-  MemoryRecordRepo,
   TaskPlanProjection,
   TaskPlanRepo,
   TaskPlanStepFact,
@@ -126,16 +122,6 @@ CREATE TABLE IF NOT EXISTS session_artifacts (
 CREATE INDEX IF NOT EXISTS idx_session_artifacts_session_time
   ON session_artifacts (session_id, created_at);
 
-CREATE TABLE IF NOT EXISTS conversation_context_states (
-  principal_id TEXT NOT NULL,
-  session_id TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  through_event_id TEXT NOT NULL,
-  reducer_version INTEGER NOT NULL,
-  state TEXT NOT NULL,
-  PRIMARY KEY (principal_id, session_id)
-);
-
 CREATE TABLE IF NOT EXISTS task_plan_steps (
   fact_seq INTEGER PRIMARY KEY AUTOINCREMENT,
   fact_id TEXT NOT NULL UNIQUE,
@@ -154,26 +140,6 @@ CREATE INDEX IF NOT EXISTS idx_task_plan_steps_scope_time
   ON task_plan_steps (principal_id, session_id, plan_id, created_at, fact_id);
 CREATE INDEX IF NOT EXISTS idx_task_plan_steps_session_time
   ON task_plan_steps (principal_id, session_id, created_at, fact_id);
-
-CREATE TABLE IF NOT EXISTS long_memory_records (
-  memory_id TEXT PRIMARY KEY,
-  principal_id TEXT NOT NULL,
-  memory_key TEXT NOT NULL,
-  memory_type TEXT NOT NULL,
-  content TEXT NOT NULL,
-  status TEXT NOT NULL,
-  source_event_ids TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_long_memory_principal_key
-  ON long_memory_records (principal_id, memory_key, memory_id);
-
-CREATE TABLE IF NOT EXISTS long_memory_cursors (
-  principal_id TEXT PRIMARY KEY,
-  cursor_event_id TEXT
-);
 
 CREATE TABLE IF NOT EXISTS platform_tasks (
   task_id TEXT PRIMARY KEY,
@@ -369,15 +335,6 @@ interface TaskRunRow {
   revision: number;
 }
 
-interface ContextStateRow {
-  principal_id: string;
-  session_id: string;
-  updated_at: string;
-  through_event_id: string;
-  reducer_version: number;
-  state: string;
-}
-
 interface TaskPlanStepRow {
   fact_id: string;
   principal_id: string;
@@ -390,19 +347,6 @@ interface TaskPlanStepRow {
   status: string;
   summary: string | null;
   created_at: string;
-}
-
-interface MemoryRecordRow {
-  memory_id: string;
-  principal_id: string;
-  memory_key: string;
-  memory_type: string;
-  content: string;
-  status: string;
-  source_event_ids: string;
-  version: number;
-  created_at: string;
-  updated_at: string;
 }
 
 interface PlatformTaskRow {
@@ -577,17 +521,6 @@ function rowToTaskRun(row: TaskRunRow): TaskRunRecord {
   };
 }
 
-function rowToContextState(row: ContextStateRow): ContextStateRecord {
-  return {
-    principalId: row.principal_id,
-    sessionId: row.session_id,
-    updatedAt: row.updated_at,
-    throughEventId: row.through_event_id,
-    reducerVersion: row.reducer_version,
-    state: JSON.parse(row.state) as unknown,
-  };
-}
-
 function rowToTaskPlanStepFact(row: TaskPlanStepRow): TaskPlanStepFact {
   return {
     factId: row.fact_id,
@@ -616,28 +549,6 @@ function sameTaskPlanStepFact(a: TaskPlanStepFact, b: TaskPlanStepFact): boolean
     && a.status === b.status
     && a.summary === b.summary
     && a.createdAt === b.createdAt;
-}
-
-function rowToMemoryRecord(row: MemoryRecordRow): MemoryRecordRecord {
-  return {
-    memoryId: row.memory_id,
-    principalId: row.principal_id,
-    key: row.memory_key,
-    type: row.memory_type as MemoryRecordRecord['type'],
-    content: row.content,
-    status: row.status as MemoryRecordRecord['status'],
-    sourceEventIds: JSON.parse(row.source_event_ids) as string[],
-    version: row.version,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function sameMemoryRecord(a: MemoryRecordRecord, b: MemoryRecordRecord): boolean {
-  return a.memoryId === b.memoryId && a.principalId === b.principalId && a.key === b.key
-    && a.type === b.type && a.content === b.content && a.status === b.status
-    && JSON.stringify(a.sourceEventIds) === JSON.stringify(b.sourceEventIds)
-    && a.version === b.version && a.createdAt === b.createdAt && a.updatedAt === b.updatedAt;
 }
 
 function normalizedMessageReference(reference: ConversationEventRecord['messageReference']): string | null {
@@ -1035,21 +946,6 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const contextStates: ContextStateRepo = {
-    async get(principalId, sessionId) {
-      const row = db.prepare(
-        'SELECT * FROM conversation_context_states WHERE principal_id = ? AND session_id = ?',
-      ).get(principalId, sessionId) as ContextStateRow | undefined;
-      return row ? rowToContextState(row) : null;
-    },
-    async upsert(record) {
-      db.prepare(
-        'INSERT INTO conversation_context_states (principal_id, session_id, updated_at, through_event_id, reducer_version, state) VALUES (?, ?, ?, ?, ?, ?) '
-        + 'ON CONFLICT (principal_id, session_id) DO UPDATE SET updated_at = excluded.updated_at, through_event_id = excluded.through_event_id, reducer_version = excluded.reducer_version, state = excluded.state',
-      ).run(record.principalId, record.sessionId, record.updatedAt, record.throughEventId, record.reducerVersion, JSON.stringify(record.state));
-    },
-  };
-
   const taskPlans: TaskPlanRepo = {
     async append(fact) {
       const existing = db.prepare('SELECT * FROM task_plan_steps WHERE fact_id = ?')
@@ -1076,7 +972,7 @@ export function createSqliteStore(dbPath: string): AuditStore {
       );
     },
     async project(principalId, sessionId, planId) {
-      // 全量重建：不裁剪、不分页（与 Context State 重建同语义）。单 plan 步数有界。
+      // 全量重建：不裁剪、不分页。单 plan 步数有界。
       const rows = db.prepare(
         'SELECT fact_id, principal_id, session_id, plan_id, step_index, total_steps, task_id, request, status, summary, created_at '
         + 'FROM task_plan_steps WHERE principal_id = ? AND session_id = ? AND plan_id = ? ORDER BY fact_seq',
@@ -1169,71 +1065,6 @@ export function createSqliteStore(dbPath: string): AuditStore {
         'SELECT plan_id FROM task_plan_steps WHERE principal_id = ? AND session_id = ? AND task_id = ? ORDER BY fact_seq DESC LIMIT 1',
       ).get(principalId, sessionId, taskId) as { plan_id: string } | undefined;
       return row?.plan_id ?? null;
-    },
-  };
-
-  const memoryRecords: MemoryRecordRepo = {
-    async listByPrincipal(principalId) {
-      const rows = db.prepare(
-        'SELECT * FROM long_memory_records WHERE principal_id = ? ORDER BY memory_key, memory_id',
-      ).all(principalId) as MemoryRecordRow[];
-      return rows.map(rowToMemoryRecord);
-    },
-    async getCursor(principalId) {
-      const row = db.prepare('SELECT cursor_event_id FROM long_memory_cursors WHERE principal_id = ?')
-        .get(principalId) as { cursor_event_id: string | null } | undefined;
-      return row?.cursor_event_id ?? null;
-    },
-    async commit(principalId, expectedCursor, nextCursor, records) {
-      if (!principalId.trim()) throw new Error('principalId is required');
-      const ids = new Set<string>();
-      for (const record of records) {
-        if (record.principalId !== principalId) throw new Error('memory record principal does not match commit principal');
-        if (!record.memoryId.trim() || !record.key.trim() || !record.content.trim()) throw new Error('memory record id, key, and content are required');
-        if (!['preference', 'fact'].includes(record.type) || !['active', 'conflicted', 'superseded', 'deleted'].includes(record.status)) throw new Error(`memory record ${record.memoryId} has an invalid type or status`);
-        if (!Number.isInteger(record.version) || record.version < 1 || !record.sourceEventIds.length || record.sourceEventIds.some((id) => !id.trim())) throw new Error(`memory record ${record.memoryId} has invalid version or source event ids`);
-        if (!Number.isFinite(Date.parse(record.createdAt)) || !Number.isFinite(Date.parse(record.updatedAt))) throw new Error(`memory record ${record.memoryId} has invalid timestamps`);
-        if (ids.has(record.memoryId)) throw new Error(`duplicate memory id ${record.memoryId}`);
-        ids.add(record.memoryId);
-      }
-
-      const transaction = db.transaction(() => {
-        const cursorRow = db.prepare('SELECT cursor_event_id FROM long_memory_cursors WHERE principal_id = ?')
-          .get(principalId) as { cursor_event_id: string | null } | undefined;
-        const currentCursor = cursorRow?.cursor_event_id ?? null;
-        if (currentCursor !== expectedCursor) return false;
-
-        const existingRows = db.prepare('SELECT * FROM long_memory_records WHERE principal_id = ?').all(principalId) as MemoryRecordRow[];
-        const existingById = new Map(existingRows.map((row) => [row.memory_id, rowToMemoryRecord(row)]));
-        // Keep all old rows: deletions and corrections are represented by tombstones/status changes.
-        if ([...existingById.keys()].some((memoryId) => !ids.has(memoryId))) return false;
-        for (const record of records) {
-          const existing = existingById.get(record.memoryId);
-          if (!existing) {
-            const owner = db.prepare('SELECT principal_id FROM long_memory_records WHERE memory_id = ?').get(record.memoryId) as { principal_id: string } | undefined;
-            if (owner) throw new Error(`memory id ${record.memoryId} belongs to another principal`);
-            if (record.version !== 1) return false;
-          } else if (record.version < existing.version || (record.version === existing.version && !sameMemoryRecord(record, existing))) {
-            return false;
-          }
-        }
-
-        const upsert = db.prepare(
-          'INSERT INTO long_memory_records (memory_id, principal_id, memory_key, memory_type, content, status, source_event_ids, version, created_at, updated_at) '
-          + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
-          + 'ON CONFLICT (memory_id) DO UPDATE SET memory_key = excluded.memory_key, memory_type = excluded.memory_type, content = excluded.content, status = excluded.status, source_event_ids = excluded.source_event_ids, version = excluded.version, created_at = excluded.created_at, updated_at = excluded.updated_at '
-          + 'WHERE long_memory_records.principal_id = excluded.principal_id AND excluded.version > long_memory_records.version',
-        );
-        for (const record of records) {
-          upsert.run(record.memoryId, record.principalId, record.key, record.type, record.content, record.status, JSON.stringify(record.sourceEventIds), record.version, record.createdAt, record.updatedAt);
-        }
-        db.prepare(
-          'INSERT INTO long_memory_cursors (principal_id, cursor_event_id) VALUES (?, ?) '
-          + 'ON CONFLICT (principal_id) DO UPDATE SET cursor_event_id = excluded.cursor_event_id',
-        ).run(principalId, nextCursor);
-        return true;
-      });
-      return transaction();
     },
   };
 
@@ -1494,7 +1325,7 @@ export function createSqliteStore(dbPath: string): AuditStore {
     },
   };
 
-  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, contextStates, taskPlans, memoryRecords, platformTasks, changeIntents, sessionArtifacts, taskRuns };
+  const store: AuditStore = { principalScopes, requests, toolCalls, sessions, conversationLog, taskPlans, platformTasks, changeIntents, sessionArtifacts, taskRuns };
   handles.set(store, db);
   return store;
 }
