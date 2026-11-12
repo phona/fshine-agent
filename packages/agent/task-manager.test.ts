@@ -618,6 +618,57 @@ describe('BackgroundTaskManager', () => {
     await manager.shutdown({ drainMs: 100 });
   });
 
+  it('取消等待确认的 run 不等投递链：终态投递排在调用方回合之后也要返回（P0 停机死等）', async () => {
+    // 事故形状（2026-11-12 探针 run3：停机整轮 300s 零回复、后续消息全堵）：
+    //   用户回合占着会话串行队列 → 回合内 task_control(cancel) → manager.cancel
+    //   → 终态事件交给订阅者投递，而生产订阅者（assembly 的 handler.enqueueTaskEvent）
+    //   把事件挂在**同一条**会话队列的队尾 → 就地 await 就是「自己等自己」：
+    //   调用方等投递、投递等调用方所在的回合，那一回合永不返回。
+    // 本用例用同构替身复现该等待环：订阅者把投递排在「当前回合」之后，而当前回合
+    // 要等 cancel 返回才 resolve。cancel 返回 = 取消状态已持久化；投递随后照常送达。
+    const repo = new MemoryTaskRuns();
+    const onCancelPending = vi.fn(async () => true);
+    const manager = createBackgroundTaskManager({
+      runner: mockRunner({ execute: async ({ prepared }) => ({
+        taskId: prepared.taskId,
+        text: '等待确认。',
+        proposalCreated: { proposalId: 'opaque-ref' },
+      }) }).runner,
+      repo,
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
+      onCancelPending,
+    });
+    const turn = deferred<void>();
+    const delivered: string[] = [];
+    let queueTail: Promise<void> = turn.promise;
+    manager.subscribe(async (event) => {
+      const prev = queueTail;
+      const queued = prev.then(() => { delivered.push(event.eventId); });
+      queueTail = queued;
+      await queued;
+    });
+    const receipt = await manager.submit(input('stop-deadlock'));
+    await waitFor(async () => (await repo.get(receipt.runId))?.state === 'waiting_confirmation');
+
+    const outcome = await Promise.race([
+      manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId)
+        .then((control) => ({ kind: 'returned' as const, control })),
+      new Promise<{ kind: 'deadlock' }>((resolve) => setTimeout(() => resolve({ kind: 'deadlock' }), 500)),
+    ]);
+    expect(outcome.kind).toBe('returned');
+    if (outcome.kind === 'returned') {
+      expect(outcome.control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    }
+    // 取消状态的持久化独立于投递：cancel 返回时库里已是 cancelled（状态面不等投递）。
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    // 投递没有被丢掉：回合让出会话队列后，终态事件照常送达（失败恢复由库里
+    // deliveryState=pending + 启动期清扫兜底，本用例只锁"不就地等待"这件事）。
+    expect(delivered).toEqual([]);
+    turn.resolve();
+    await waitFor(() => delivered.includes(`${receipt.runId}:cancelled`));
+    await manager.shutdown({ drainMs: 100 });
+  });
+
   it('closes waiting-input runs without invoking the confirmation invalidator', async () => {
     const repo = new MemoryTaskRuns();
     const onCancelPending = vi.fn(async () => true);
@@ -637,6 +688,199 @@ describe('BackgroundTaskManager', () => {
     expect(onCancelPending).not.toHaveBeenCalled();
     expect(events).toHaveLength(2);
     expect(events[1]?.run.state).toBe('cancelled');
+    await manager.shutdown({ drainMs: 100 });
+  });
+
+  it('取消等待输入的 run：投递链被在飞事件占住时 cancel 仍立即返回；两个终态事件各恰投递一次', async () => {
+    // 并发关系：取消发起时，该 run 的 waiting_input 终态事件可能**正在**被订阅者投递。
+    // 投递链不因取消让路，取消也不得等它。终态事件共两条（等待输入 → 已取消），每条恰好
+    // 一次：解耦不丢投递，也不重复投递。
+    const repo = new MemoryTaskRuns();
+    const manager = createBackgroundTaskManager({
+      runner: mockRunner({ execute: async ({ prepared }) => ({ taskId: prepared.taskId, text: '', needs: { missing: ['range'], reason: 'missing range' } }) }).runner,
+      repo,
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
+    });
+    const delivered: string[] = [];
+    const releaseInflight = deferred<void>();
+    let queueTail: Promise<void> = Promise.resolve();
+    manager.subscribe(async (event) => {
+      const queued = queueTail.then(() => releaseInflight.promise).then(() => { delivered.push(event.eventId); });
+      queueTail = queued;
+      await queued;
+    });
+    const receipt = await manager.submit(input('stop-waiting-input'));
+    await waitFor(async () => (await repo.get(receipt.runId))?.state === 'waiting_input');
+    await new Promise((resolve) => setImmediate(resolve)); // 监听器已进入第一跳投递
+
+    const outcome = await Promise.race([
+      manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId)
+        .then((control) => ({ kind: 'returned' as const, control })),
+      new Promise<{ kind: 'deadlock' }>((resolve) => setTimeout(() => resolve({ kind: 'deadlock' }), 500)),
+    ]);
+    expect(outcome.kind).toBe('returned');
+    if (outcome.kind === 'returned') {
+      expect(outcome.control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    }
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    expect(delivered).toEqual([]); // cancel 返回时在飞投递尚未完成——没有等它
+
+    releaseInflight.resolve();
+    await waitFor(() => delivered.includes(`${receipt.runId}:cancelled`));
+    expect(delivered).toEqual([`task-run:${receipt.runId}`, `${receipt.runId}:cancelled`]);
+    await manager.shutdown({ drainMs: 100 });
+  });
+
+  it('取消等待确认的 run：取消发生在监听器投递进行中，cancel 不等在飞投递；迟到终态事件恰一次', async () => {
+    // 与上一条同构，但走 waiting_confirmation 分支（取消前需宿主作废待确认授权）。
+    // 用户点名要的并发面：取消 → 不等待正在进行的投递 → 迟到的终态事件仍恰好投递一次。
+    const repo = new MemoryTaskRuns();
+    const onCancelPending = vi.fn(async () => true);
+    const manager = createBackgroundTaskManager({
+      runner: mockRunner({ execute: async ({ prepared }) => ({
+        taskId: prepared.taskId,
+        text: '等待确认。',
+        proposalCreated: { proposalId: 'opaque-ref' },
+      }) }).runner,
+      repo,
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
+      onCancelPending,
+    });
+    const delivered: string[] = [];
+    const releaseInflight = deferred<void>();
+    let queueTail: Promise<void> = Promise.resolve();
+    manager.subscribe(async (event) => {
+      const queued = queueTail.then(() => releaseInflight.promise).then(() => { delivered.push(event.eventId); });
+      queueTail = queued;
+      await queued;
+    });
+    const receipt = await manager.submit(input('stop-inflight'));
+    await waitFor(async () => (await repo.get(receipt.runId))?.state === 'waiting_confirmation');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const outcome = await Promise.race([
+      manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId)
+        .then((control) => ({ kind: 'returned' as const, control })),
+      new Promise<{ kind: 'deadlock' }>((resolve) => setTimeout(() => resolve({ kind: 'deadlock' }), 500)),
+    ]);
+    expect(outcome.kind).toBe('returned');
+    if (outcome.kind === 'returned') {
+      expect(outcome.control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    }
+    expect(onCancelPending).toHaveBeenCalledTimes(1);
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    expect(delivered).toEqual([]);
+
+    releaseInflight.resolve();
+    await waitFor(() => delivered.includes(`${receipt.runId}:cancelled`));
+    expect(delivered).toEqual([`task-run:${receipt.runId}`, `${receipt.runId}:cancelled`]);
+    await manager.shutdown({ drainMs: 100 });
+  });
+
+  it('取消已排期未启动的 queued run：cancel 立即返回落 cancelled，迟到的启动路径不起 Worker；同消息重投不重启', async () => {
+    const repo = new MemoryTaskRuns();
+    const snapshotEntered = deferred<void>();
+    const releaseSnapshot = deferred<void>();
+    let snapshotCalls = 0;
+    const harness = mockRunner({
+      snapshotWorkspace: async () => {
+        snapshotCalls += 1;
+        if (snapshotCalls === 1) {
+          snapshotEntered.resolve();
+          await releaseSnapshot.promise;
+        }
+        return [];
+      },
+    });
+    const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: createPlatformExecutionGate({ maxQueue: 1 }) });
+    const delivered: string[] = [];
+    manager.subscribe(async (event) => { delivered.push(event.eventId); });
+    const receipt = await manager.submit(input('stop-queued'));
+    await snapshotEntered.promise;
+    expect((await repo.get(receipt.runId))?.state).toBe('queued'); // Worker 已排期但尚未启动
+
+    const control = await manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId);
+    expect(control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    expect(delivered).toEqual([]); // 终态投递由迟到的启动路径收尾，取消不等它
+
+    releaseSnapshot.resolve();
+    await waitFor(() => delivered.includes(`task-run:${receipt.runId}`));
+    expect(harness.executions).toHaveLength(0); // 放行后启动路径看到终态，没有起 Worker
+    expect(delivered).toEqual([`task-run:${receipt.runId}`]); // 恰好一次
+
+    // 同一条消息（同 dispatchKey）重投：返回既有 cancelled 回执，不重启 Worker。
+    const replay = await manager.submit(input('stop-queued'));
+    expect(replay).toMatchObject({ runId: receipt.runId, state: 'cancelled' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.preparedCount).toBe(1);
+    expect(harness.executions).toHaveLength(0);
+    await manager.shutdown({ drainMs: 100 });
+  });
+
+  it('取消运行中的 run：先返回 cancelling（正在停止≠已停），随后真实落 cancelled；终态事件恰一次', async () => {
+    const repo = new MemoryTaskRuns();
+    const harness = mockRunner({
+      execute: async ({ options }) => new Promise<SubagentTaskResult>((_resolve, reject) => {
+        if (options.signal?.aborted) { reject(new Error('worker aborted')); return; }
+        options.signal?.addEventListener('abort', () => reject(new Error('worker aborted')), { once: true });
+      }),
+    });
+    const manager = createBackgroundTaskManager({ runner: harness.runner, repo, executionGate: createPlatformExecutionGate({ maxQueue: 1 }) });
+    const events: BackgroundTaskEvent[] = [];
+    manager.subscribe(async (event) => { events.push(event); });
+    const receipt = await manager.submit(input('stop-running'));
+    await waitFor(() => harness.executions.length === 1);
+
+    const control = await manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId);
+    // 受理 ≠ 已停：requested:true 只表示取消请求已发给活动 Worker；此刻状态是 cancelling。
+    expect(control).toMatchObject({ found: true, state: 'cancelling', requested: true });
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelling');
+    expect(events).toHaveLength(0);
+
+    // 执行续篇收尾：真实落 cancelled，终态事件恰好一次。
+    await waitFor(async () => (await repo.get(receipt.runId))?.state === 'cancelled');
+    await waitFor(() => events.length === 1);
+    expect(events[0]?.run.state).toBe('cancelled');
+    expect(events.filter((event) => event.run.state === 'cancelled')).toHaveLength(1);
+    await manager.shutdown({ drainMs: 100 });
+  });
+
+  it('持久库里进程内无 ActiveRun 的 queued 行取消不等投递链：cancel 返回时投递尚未发生，终态恰一次', async () => {
+    // 取消的四条分支中，queued 且无 ActiveRun 的这一支也要在库内落 cancelled 后由
+    // dispatchTerminal 派发终态——与有 ActiveRun 的 queued（由执行续篇收尾）区分开。
+    const repo = new MemoryTaskRuns();
+    const now = new Date().toISOString();
+    const runId = 'run-seed-queued';
+    repo.records.set(runId, {
+      runId, taskId: 'task-seed', dispatchKey: 'seed-queued', principalId: 'wecom:user-1', sessionId: 'session-1',
+      originRequestId: 'old', originUserEventId: 'old:user', request: 'frozen', originMessage: 'original',
+      createdAt: now, updatedAt: now, state: 'queued', resultEventId: `task-run:${runId}`,
+    });
+    const manager = createBackgroundTaskManager({
+      runner: mockRunner().runner,
+      repo,
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
+    });
+    const delivered: string[] = [];
+    const releaseInflight = deferred<void>();
+    manager.subscribe(async (event) => { await releaseInflight.promise; delivered.push(event.eventId); });
+
+    const outcome = await Promise.race([
+      manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, 'task-seed')
+        .then((control) => ({ kind: 'returned' as const, control })),
+      new Promise<{ kind: 'deadlock' }>((resolve) => setTimeout(() => resolve({ kind: 'deadlock' }), 500)),
+    ]);
+    expect(outcome.kind).toBe('returned');
+    if (outcome.kind === 'returned') {
+      expect(outcome.control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    }
+    expect((await repo.get(runId))?.state).toBe('cancelled');
+    expect(delivered).toEqual([]); // 返回时没有等待投递
+
+    releaseInflight.resolve();
+    await waitFor(() => delivered.length === 1);
+    expect(delivered).toEqual([`task-run:${runId}`]);
     await manager.shutdown({ drainMs: 100 });
   });
 
