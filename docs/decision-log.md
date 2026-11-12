@@ -436,6 +436,19 @@
 
 ---
 
+## 六、门语义政策修订：未登记形态 / 命令链 fail-closed（2026-11-12）
+
+- **决定**：`AGENTS.md`「授信期门语义」里「未登记形态放行仅审计」修订为 **fail-closed**——门答不出"这是哪个 operation"的网关调用（未登记/未知形态、裸网关命令、后缀污染）一律进计划门；命令链里夹带网关调用（`cd … && 网关调用`、`;` / `&&` / `||` / 管道之后的网关调用）同样 fail-closed。网关在**首位**的元字符软放行**不变**；修订方向只有收紧、没有放宽。
+- **日期**：2026-11-12。**对象**：分支 `arch/gate-unregistered-failclosed`（轨道 B），文件 `packages/agent/src/serve-gate.ts` 等。
+- **理由**：旧政策与该门代码注释（「宁拦勿猜」）自相矛盾；且「未登记形态放行」这条有实证绕过——B3 最小复现里 `bin/<gateway> call --file …` 经夹具真的执行了**未声明对象**的查询（控制组 3 绿 / 被测线 2 红），gate 行 `serve_gate:bash ok`、驱动层 T5 对账因 `extractGateScript` 取不到引用而 `not_plan_gated`：放行等于没有任何一步证明它不在执行面内。
+- **证据**：`scripts/eval/shell-bypass-gate.test.ts`（B3 复现转绿是本条客观验收信号）；`packages/agent/serve-gate.test.ts` 的 E1 / 「猜的形状」/ 「命令链」三组用例（本次修订逐条改期望，旧行为与新行为都写在测试注释里）；`packages/agent/pi-coding-driver-executor-bypass.test.ts` 的 `call --file` 用例。
+- **状态**：在分支 `arch/gate-unregistered-failclosed`（未合入 main；并入集成分支后随集成验证）。
+- **回退判据**：若实测证明 fail-closed 误伤真实业务路径（平台新增合法形态而宿主不认识 → 正常查询被拒），先把该形态登记进"认得出的形态"，**不得整体回退为放行**——整体回退等于把已实证的绕过洞重新打开。
+- **残余边界（登记，不在本轮范围）**：worker 工具面仍含 `bash` / `write` / `edit`，SaaS 凭据未与脚本环境隔离。「命令文本检查」证明不了脚本内部的越权副作用；真正的隔离要么让 SaaS 操作走受控执行入口、要么让写凭据不暴露给普通脚本环境——属**进程/权限/凭据层**，本轮的字符串形态收口不是它的替代品，**不得声称安全边界已闭环**。
+- **同批修：平台清单键名漂移**。17dz 平台自 `f963930` 起把 `operation list --json` 每行的 `serve` 改名为 `modes`；宿主原只读 `serve`，新平台上该矩阵读成空集——门里"读平台矩阵、不另立名单"那一支**静默失效**（不报错、什么都不做，最难发现的一种）。修法：`parseCapabilityManifest` 双键读取（`serve` 优先，两键并存且内容不同属平台异常，不静默合并），用例见 `packages/agent/operation-labels.test.ts` 的「平台清单键名漂移」组。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
