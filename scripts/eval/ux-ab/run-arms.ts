@@ -100,8 +100,9 @@ function profileWithSkillBody(): string {
   return `${profile}\n\n# 参考：协作方法（task-collaboration 正文，评测注入）\n${raw.trim()}\n`;
 }
 
-function overridesFor(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2'): Partial<ServerAssemblyOverrides> {
-  if (arm === 'b0') return { skillsMode: 'off' };
+function overridesFor(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2' | 'b3'): Partial<ServerAssemblyOverrides> {
+  // b3：吸收常驻交互原则后的 agent.md + 技能关（与 b0 同构，仅 profile 文本不同——用于对照 b2 的正文注入）
+  if (arm === 'b0' || arm === 'b3') return { skillsMode: 'off' };
   if (arm === 'b2') return { roleInstructionsOverride: profileWithSkillBody(), skillsMode: 'off' };
   if (arm === 'b1' || arm === 'profile') return {}; // 生产口径：agent.md + 技能面 on（缺省）
   return { roleInstructionsOverride: controlRoleInstructions(), skillsMode: 'off' };
@@ -166,7 +167,7 @@ function metricsFor(events: Array<Record<string, unknown>>): TurnMetrics {
   };
 }
 
-async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2', cases: UxCase[], outPath: string): Promise<void> {
+async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2' | 'b3', cases: UxCase[], outPath: string): Promise<void> {
   const configPath = resolveConfigPath(process.env['AGENT_CONFIG_PATH']);
   const assembly = await createServerAssembly({
     env: { ...process.env, AGENT_CONFIG_PATH: configPath },
@@ -226,8 +227,8 @@ async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2', cases: Ux
 
 async function main(): Promise<void> {
   const arm = argValue('arm');
-  if (arm !== 'control' && arm !== 'profile' && arm !== 'b0' && arm !== 'b1' && arm !== 'b2') {
-    console.error('用法：--arm=control|profile|b0|b1|b2 --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
+  if (arm !== 'control' && arm !== 'profile' && arm !== 'b0' && arm !== 'b1' && arm !== 'b2' && arm !== 'b3') {
+    console.error('用法：--arm=control|profile|b0|b1|b2|b3 --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
     process.exitCode = 2;
     return;
   }
