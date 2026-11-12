@@ -23,8 +23,9 @@
  * 默认连跑 3 次（`--trials=<n>` 可调）；失败样本同样落盘、不重跑掩盖。
  *
  * 状态目录依据（按实际代码，不沿用过时变量）：
- *   · 夹具 `bin/dummy` 只认 `--state-dir`；它把测试桥变量
- *     `FSHINE_EVAL_FIXTURE_STATE_DIR` 翻译成该 flag（bin/dummy 的 shell 分支）。
+ *   · 夹具 `bin/dummy` 只认 `--state-dir`；它把测试桥变量（键名以 @fshine/agent 导出的
+ *     WORKER_FIXTURE_STATE_DIR_KEY 常量为唯一来源，本脚本不写字面量——D-209 引用闭集守卫）
+ *     翻译成该 flag（bin/dummy 的 shell 分支）。
  *   · worker 的 bash 工具基境来自 `getShellEnv()`（即宿主进程 process.env，见
  *     pi-coding-agent 的 resolveSpawnContext），宿主侧计划评估子进程同样以
  *     process.env 为基境——因此这里直接写 process.env，再整份传给装配。
@@ -39,6 +40,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import type { AuditStore, PlatformTaskRecord } from '@fshine/contracts';
+import { WORKER_FIXTURE_STATE_DIR_KEY } from '@fshine/agent';
 import { createAskSession, type MessageTurn } from './ask-session';
 import { materializeEvalConfig } from './resolve-config-path';
 
@@ -213,7 +215,7 @@ async function runTrial(trial: number, conversationId: string): Promise<TrialRep
   // process.env 为准（见文件头「状态目录依据」），只传 env 对象会漏穿。
   for (const key of EXECUTION_GOVERNANCE_VARS) delete process.env[key];
   process.env['AGENT_CONFIG_PATH'] = CONFIG_COPY;
-  process.env['FSHINE_EVAL_FIXTURE_STATE_DIR'] = stateDir;
+  process.env[WORKER_FIXTURE_STATE_DIR_KEY] = stateDir;
   process.env['EXECUTION_AUDIT_PATH'] = auditPath;
   process.env['FSHINE_INBOUND_DEBOUNCE_MS'] = '0';
   process.env['FSHINE_PI_AGENT_DIR'] = piAgentDir;
