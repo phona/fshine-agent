@@ -25,6 +25,8 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServerAssembly, type ServerAssemblyOverrides } from '../../../apps/server/assembly';
+// 仅评测用：把 agent.md 原文（含称谓占位替换）作为覆盖臂的底本——生产路径只经 loadAgentProfile。
+import { applyExecutorLabel, DEFAULT_AGENT_PROFILE_PATH } from '../../../packages/agent/src/agent-profile';
 // 与探针/验收同一条配置解析：相对拼法的 eval 配置要物化成绝对路径副本再交给 assembly
 // （否则 contextProfiles.<id>.root 的仓内相对路径会在 loadConfig 处直接报"必须是绝对路径"）。
 import { resolveConfigPath } from '../../resolve-config-path';
@@ -86,8 +88,21 @@ function loadCases(file: string): UxCase[] {
  *   · b0 / b1 —— 第二轮配对实验：**同一份 agent.md**，只切技能装载（b0 off / b1 on）。
  *     除技能曝光与读取能力外其余全同（同模型、同语料、同 mock、同执行配置）。
  */
-function overridesFor(arm: 'control' | 'profile' | 'b0' | 'b1'): Partial<ServerAssemblyOverrides> {
+/**
+ * 仅评测用正向对照：把 task-collaboration 的**正文**直接拼进角色指令（模拟"模型已经读过这份 Skill"），
+ * 用来区分「模型不会主动读取」与「读取后也没有帮助」两种情况。
+ * **不进生产 Runtime**：生产路径只经 loadAgentProfile + 技能元数据 + read_skill。
+ */
+function profileWithSkillBody(): string {
+  const profile = applyExecutorLabel(readFileSync(DEFAULT_AGENT_PROFILE_PATH, 'utf8'));
+  const raw = readFileSync(path.join(REPO_ROOT, '.agents', 'skills', 'task-collaboration', 'SKILL.md'), 'utf8')
+    .replace(/^---[\s\S]*?---\n/, '');
+  return `${profile}\n\n# 参考：协作方法（task-collaboration 正文，评测注入）\n${raw.trim()}\n`;
+}
+
+function overridesFor(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2'): Partial<ServerAssemblyOverrides> {
   if (arm === 'b0') return { skillsMode: 'off' };
+  if (arm === 'b2') return { roleInstructionsOverride: profileWithSkillBody(), skillsMode: 'off' };
   if (arm === 'b1' || arm === 'profile') return {}; // 生产口径：agent.md + 技能面 on（缺省）
   return { roleInstructionsOverride: controlRoleInstructions(), skillsMode: 'off' };
 }
@@ -123,6 +138,8 @@ interface TurnMetrics {
   skillsRead: string[];
   /** 技能读取失败/发现失败事件（可观测性，不吞）。 */
   skillErrors: Array<Record<string, unknown>>;
+  /** 本轮宿主事件计数（事件名 → 条数；turn_span 除外）。 */
+  eventCounts: Record<string, number>;
 }
 
 function metricsFor(events: Array<Record<string, unknown>>): TurnMetrics {
@@ -131,16 +148,25 @@ function metricsFor(events: Array<Record<string, unknown>>): TurnMetrics {
   for (const [key, value] of Object.entries(span ?? {})) {
     if (typeof value === 'number' && key !== 'durationMs') usage[key] = value;
   }
+  // 事件计数（排除 turn_span 自身）：模型每轮发起多少次工具往返/计划提交/门裁决，
+  // 是 Token 差异归因的硬证据——只记事件名与条数，不记内容。
+  const eventCounts: Record<string, number> = {};
+  for (const entry of events) {
+    const name = entry['event'];
+    if (typeof name !== 'string' || name === 'turn_span') continue;
+    eventCounts[name] = (eventCounts[name] ?? 0) + 1;
+  }
   return {
     ...(Object.keys(usage).length > 0 ? { usage } : {}),
     ...(typeof span?.['durationMs'] === 'number' ? { durationMs: span['durationMs'] as number } : {}),
     ...(span ? { outcome: span['outcome'] } : {}),
+    eventCounts,
     skillsRead: events.filter((entry) => entry['event'] === 'main_skill_read').map((entry) => String(entry['name'])),
     skillErrors: events.filter((entry) => entry['event'] === 'skill_read_failed' || entry['event'] === 'skill_discovery_failed'),
   };
 }
 
-async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1', cases: UxCase[], outPath: string): Promise<void> {
+async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1' | 'b2', cases: UxCase[], outPath: string): Promise<void> {
   const configPath = resolveConfigPath(process.env['AGENT_CONFIG_PATH']);
   const assembly = await createServerAssembly({
     env: { ...process.env, AGENT_CONFIG_PATH: configPath },
@@ -200,8 +226,8 @@ async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1', cases: UxCase[],
 
 async function main(): Promise<void> {
   const arm = argValue('arm');
-  if (arm !== 'control' && arm !== 'profile' && arm !== 'b0' && arm !== 'b1') {
-    console.error('用法：--arm=control|profile|b0|b1 --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
+  if (arm !== 'control' && arm !== 'profile' && arm !== 'b0' && arm !== 'b1' && arm !== 'b2') {
+    console.error('用法：--arm=control|profile|b0|b1|b2 --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
     process.exitCode = 2;
     return;
   }
