@@ -62,6 +62,32 @@ EXECUTION_EXECUTOR=mock npm run acceptance  # mock 模式（真执行层变量�
 
 本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。
 
+## V0 本地试用（本地测试平台）
+
+在干净 checkout 上复制一条完整的本地试用路径：**真实 Main + 真实 Worker + 仓内 dummy 测试平台**（不触网、不接真实 SaaS），跑四轮冻结业务对话（核对本月单据 → 上月对比 → 指代复核 → 交付），全过程留痕。默认连跑 **3 次独立试用**（各自从干净的库与夹具状态起跑，同一份语料），全部结果都保留、不挑成功的展示。
+
+```bash
+npm install
+# LLM：复制 .env.example 为 .env 并填 LLM_API_KEY（接口地址与模型名缺省取 config/agent.demo.yaml）
+npm run demo
+# 只跑 1 次：npm run demo -- --trials=1
+```
+
+每次运行重置 `.runtime/demo/`，产物（每次试用一套）：
+
+| 文件 | 内容 |
+|---|---|
+| `.runtime/demo/trials/trial-N/transcript.md` | 四轮原文（用户语料 / 计划通知 / 回复）+ 机械证据（requestId / taskId / 平台调用 / dummy 审计行） |
+| `.runtime/demo/trials/trial-N/turns.jsonl` | 逐轮结构化记录（委派事件、taskId、平台调用、审计行、阶梯、耗时） |
+| `.runtime/demo/trials/trial-N/state/audit.jsonl` | 执行层（dummy 夹具）原始审计行——每次调用的执行事实 |
+| `.runtime/demo/trials/trial-N/demo.db` | 该次试用的会话库（与其它试用互不影响） |
+
+说明：
+
+- 本路径的执行层是仓内 dummy 夹具（`scripts/eval/fixtures/dummy-platform`），每次平台调用都是**真实子进程**（`bin/dummy`）；跑的是本地测试数据，**真实 SaaS / 真实业务平台未接入**。
+- 本路径不设置也不依赖任何 mock executor / `EXECUTION_EXECUTOR` 变量；执行层由 `config/agent.demo.yaml` 的 profile（root + gateway）选择，并有 fail-closed 隔离门兜底。
+- `npm start`（企微长连接服务）需要真实企微凭据（BotID / Secret）与真实执行层；本次未验证。
+
 ## 上线前必填
 
 | 位置 | 内容 |

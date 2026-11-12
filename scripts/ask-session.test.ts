@@ -151,6 +151,36 @@ describe('ask-session 适配器（唯一装配 + 同进程多轮 + 证据链）'
     }
   });
 
+  it('计划门回调接线：ask → handler → runtime.handleTurn 的 trusted 上 onNotice/onPlanPending 都在', async () => {
+    // 计划门 notify/confirm 两档都先 await onNotice（通知送达是激活授权的一半），confirm
+    // 档还要把待确认计划经 onPlanPending 落库；两者缺失时 plan-runtime.ts 的
+    // 「trusted.onNotice 未配置；已暂停执行」与 context.ts 的 PLAN_PENDING_PERSIST_MISSING
+    // 会 fail-closed 抛错并把部署内部措辞带进用户回复。ask 是生产装配黑盒入口：它不自己
+    // 拼 driver/runtime，只按渠道同形（message, progress, notice）调 handler，两个回调
+    // 由 handler 内部接线（apps/server/handler.ts:740-758 包 notice、:832 挂
+    // planConfirmation.savePending）。本测试钉住这条真实路径的接线形状——handleTurn 收到
+    // 的 trusted 上两个回调都必须是函数，任何一环掉线即红。
+    const root = tempRoot();
+    const session = await bootSession(root, fixtureEnv(root, true), '直接回答：收到。');
+    try {
+      const seen: Array<{ onNotice?: unknown; onPlanPending?: unknown }> = [];
+      const runtime = session.assembly.runtime as unknown as {
+        handleTurn: (ctx: Record<string, unknown>, message: string, inputContext?: unknown) => Promise<unknown>;
+      };
+      const original = runtime.handleTurn.bind(runtime);
+      runtime.handleTurn = async (ctx, message, inputContext) => {
+        seen.push({ onNotice: ctx['onNotice'], onPlanPending: ctx['onPlanPending'] });
+        return original(ctx, message, inputContext);
+      };
+      await session.sendMessage('查一下 alpha collection 的记录');
+      expect(seen).toHaveLength(1);
+      expect(seen[0]!.onNotice).toBeTypeOf('function');
+      expect(seen[0]!.onPlanPending).toBeTypeOf('function');
+    } finally {
+      await session.close();
+    }
+  });
+
   it('metrics() 重复读取一致（去重不写回会话，六审 minor）', async () => {
     // 旧写法把 counted* 集合做成语义级可变状态并在遍历时写入：第一次 metrics() 后停点已进
     // 集合，再读一次同一会话的指标就全计 0；继续发消息后累计干预数不升反降。
