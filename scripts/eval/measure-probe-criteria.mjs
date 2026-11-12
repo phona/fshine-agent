@@ -16,6 +16,9 @@
  *   T8 = worktree 的 scripts/eval/execution-language-eval.ts 的 executionLanguageFingerprints
  *
  * 用法：node --import tsx scripts/eval/measure-probe-criteria.mjs --root <worktree> --out <run outdir>
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   0 = 被请求用例全部通过（或按基线跳过）｜2 = 判据红（有 redGreen.pass=false）
+ *   ｜3 = 证据缺/不可判（用例 missing、用法错误）——不把「没跑」当「通过」。
  * 输出：stdout 人读摘要 + <out>/criteria.json（结构化）
  */
 import { existsSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -25,6 +28,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const Database = require('better-sqlite3');
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -38,7 +44,7 @@ const root = argValue('--root');
 const out = argValue('--out');
 if (!root || !out) {
   console.error('用法: node --import tsx scripts/eval/measure-probe-criteria.mjs --root <worktree> --out <run outdir>');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 const criteriaRoot = argValue('--criteria-root')
   ?? (existsSync(path.join(root, 'packages/agent/src/execution-scope.ts')) ? root : undefined);
@@ -46,7 +52,7 @@ if (!criteriaRoot) {
   // 被测 root 没有 execution-scope.ts（= 该分支不含 T5 实现）。判据要用哪一份实现当量具，
   // 由调用方显式指定——不内置任何工作树地址（跟踪文件禁本机绝对路径），也不静默换一份。
   console.error('用法追加：--criteria-root <含 packages/agent/src/execution-scope.ts 的 worktree>（被测 root 无该模块时必填）');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 
 const importTs = (rel) => import(pathToFileURL(path.join(root, rel)).href);
@@ -87,11 +93,27 @@ const scored = probeReports.map((name) => {
   return { name, file, score, parsed };
 });
 scored.sort((a, b) => b.score - a.score || require('node:fs').statSync(b.file).mtimeMs - require('node:fs').statSync(a.file).mtimeMs);
-const report = argValue('--report') ? JSON.parse(readFileSync(argValue('--report'), 'utf8')) : scored[0]?.parsed;
-const reportFile = argValue('--report') ?? scored[0]?.file;
+const explicitReport = argValue('--report');
+let report = null;
+if (explicitReport) {
+  try {
+    report = JSON.parse(readFileSync(explicitReport, 'utf8'));
+  } catch (error) {
+    console.error(`探针报告读不了（${explicitReport}）：${error instanceof Error ? error.message : String(error)}`);
+    process.exit(exitCodeFor('inconclusive')); // 证据不可读：无法得出有效判定
+  }
+} else {
+  report = scored[0]?.parsed;
+}
+if (!report) {
+  console.error(`没有可读的探针报告（找的是 <root>/.runtime/probe-*.json，root=${root}）——先跑 run-probe-step37.mjs，别把"没跑"当"通过"`);
+  process.exit(exitCodeFor('inconclusive'));
+}
+const reportFile = explicitReport ?? scored[0]?.file;
 console.log(`[measure] probe report: ${reportFile}（messageId 交集 ${scored[0]?.score ?? 0}）`);
 console.log(`[measure] audited=${report.audited === true}`);
-const byId = new Map(report.results.map((row) => [row.id, row]));
+const reportRows = Array.isArray(report.results) ? report.results : [];
+const byId = new Map(reportRows.map((row) => [row.id, row]));
 const wanted = (argValue('--cases') ?? 'C1,C2,A2,D2').split(',');
 const specs = new Map(loadCases().map((spec) => [spec.id, spec]));
 let baseline = null;
@@ -276,3 +298,19 @@ const jsonPath = path.join(out, 'criteria.json');
 writeFileSync(jsonPath, JSON.stringify(criteria, null, 2) + '\n');
 console.log(JSON.stringify(criteria, null, 2));
 console.log(`[measure] written: ${jsonPath}`);
+
+// ── 退出码（用户裁定 2026-11-12；映射唯一出处 exit-codes.ts）──
+// 逐例 redGreen 是现有判定，不新增语义：有 missing（证据缺）→ 3；有 pass=false → 2；
+// 全部通过（或按基线跳过）→ 0。
+const caseEntries = wanted.map((caseId) => [caseId, criteria.cases[caseId]]).filter(([, entry]) => Boolean(entry));
+const missingCases = caseEntries.filter(([, entry]) => entry.missing !== undefined).map(([caseId]) => caseId);
+if (missingCases.length > 0) {
+  console.error(`[measure] 证据缺 ${missingCases.length} 例（${missingCases.join(',')}）→ inconclusive`);
+  process.exit(exitCodeFor('inconclusive'));
+}
+const redCases = caseEntries.filter(([, entry]) => entry.redGreen?.pass === false).map(([caseId]) => caseId);
+if (redCases.length > 0) {
+  console.error(`[measure] 判据红 ${redCases.length} 例（${redCases.join(',')}）→ 退出码 2`);
+  process.exit(exitCodeFor('fail'));
+}
+process.exit(exitCodeFor('pass'));

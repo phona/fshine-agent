@@ -76,6 +76,7 @@ import { executionLanguageFingerprints } from './eval/execution-language-eval';
 // 澄清问句判据（2026-11-10 校准）：与期望值层共用同一份词表/helper，不再各存一份副本
 // （两份逐字相同的正则不是独立确认，是同一把尺量两次，漏词时两层一起假红）。
 import { hasClarificationQuestion } from './eval/clarification-shape';
+import { exitCodeFor } from './eval/exit-codes';
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import { firstEnabledPrincipalId, loadConfig } from '@fshine/core';
 import { createServerAssembly, type ServerAssembly } from '../apps/server/assembly';
@@ -4085,9 +4086,10 @@ async function runParent(): Promise<void> {
   const parentEnv: NodeJS.ProcessEnv = { ...process.env };
   const evalRunId = `probe-${path.basename(stateDir)}`;
 
-  // 跑批级安全门（issue #10，fail-closed，exit 2）：用 env 副本验夹具与审计通道，
-  // 不写回 process.env。未通过就不 fork——不静默落真实平台。每个子进程在 boot 前
-  // 再查一次自己的状态根；这里只是让整批配置错误一次退出，而不是 N 次用例失败。
+  // 跑批级安全门（fail-closed，退出码 3：环境/工具异常，无法得出有效判定）：用 env
+  // 副本验夹具与审计通道，不写回 process.env。未通过就不 fork——不静默落真实平台。
+  // 每个子进程在 boot 前再查一次自己的状态根；这里只是让整批配置错误一次退出，
+  // 而不是 N 次用例失败。
   const yamlPath = resolveConfigPath(explicitConfigFrom());
   const gateDir = path.join(stateDir, 'gate');
   mkdirSync(gateDir, { recursive: true });
@@ -4099,7 +4101,7 @@ async function runParent(): Promise<void> {
   } catch (error) {
     rmSync(stateDir, { recursive: true, force: true });
     console.error(error instanceof Error ? error.message : String(error));
-    process.exit(2);
+    process.exit(exitCodeFor('inconclusive'));
   }
 
   const results: CaseResult[] = [];
@@ -4212,6 +4214,11 @@ async function runParent(): Promise<void> {
   const bad = results.filter((result) => !result.ok);
   const scope = only ? `--only ${[...only].join(',')}` : quick ? '--quick' : '全量';
   console.log(`\n[${scope}] ${results.length - bad.length}/${results.length} 无异常（探针层判定；期望值层/judge 未含，终判以 eval:score 三层合取为准）；明细 ${report}`);
+  // 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：红轮
+  // （有用例 ok=false）→ 2；全部正常 → 0。红绿读报告 JSON 的 ok 字段（仲裁报告 bug 2：
+  // 退出码此前恒 0、不可作红绿信号——这里反过来把已判定的红绿接进退出码，不替代报告）；
+  // 探针自身异常走 main().catch / 跑批安全门 → 3，不在此处。
+  process.exitCode = exitCodeFor(bad.length > 0 ? 'fail' : 'pass');
   // 状态阶梯与聚合指标（独立于 Agent 自述的判定面）。
   console.log(`状态阶梯 · ${summarizeReport(unified)}`);
   console.log(`统一报告 ${path.basename(written.json)} / ${path.basename(written.jsonl)}`);
@@ -4255,6 +4262,7 @@ const invokedAsEntrypoint = process.argv[1] !== undefined
 if (invokedAsEntrypoint) {
   main().catch((error) => {
     console.error('探针失败:', error);
-    process.exit(1);
+    // 探针自身异常 = 无法得出有效判定（用户裁定 2026-11-12 的第 3 类）。
+    process.exit(exitCodeFor('inconclusive'));
   });
 }

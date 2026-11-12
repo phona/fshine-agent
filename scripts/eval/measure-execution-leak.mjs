@@ -15,11 +15,15 @@
  *   缺省挑 `.runtime/probe-*.json` 里最新的那一份；`--report <path>` 可显式指定。
  *
  * 输出：stdout 人读摘要 + `<out>/execution-leak-criteria.json`（逐面逐条证据）。
- * 退出码：有 hard 命中 = 1（可当门用）；无 = 0；没报告可读 = 2（不把"没跑"当"通过"）。
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   有 hard 命中（判据红）= 2（可当门用）；无 = 0；没报告可读/用法错误 = 3（不把"没跑"当"通过"）。
  */
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -32,7 +36,7 @@ const root = argValue('--root');
 const out = argValue('--out');
 if (!root || !out) {
   console.error('用法: node --import tsx scripts/eval/measure-execution-leak.mjs --root <worktree> --out <run outdir> [--only A2,U1] [--report .runtime/probe-xxx.json]');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 const only = (argValue('--only') ?? '').split(',').map((id) => id.trim()).filter(Boolean);
 
@@ -59,20 +63,20 @@ function pickReport() {
 const reportPath = pickReport();
 if (!reportPath) {
   console.error(`没有可读的探针报告（找的是 <root>/.runtime/probe-*.json，root=${root}）——先跑 run-probe-step37.mjs，别把"没跑"当"通过"`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 let report;
 try {
   report = JSON.parse(readFileSync(reportPath, 'utf8'));
 } catch (error) {
   console.error(`探针报告读不了（${reportPath}）：${error instanceof Error ? error.message : String(error)}`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const results = (Array.isArray(report.results) ? report.results : []).filter((row) => only.length === 0 || only.includes(row.id));
 if (results.length === 0) {
   console.error(`报告 ${path.basename(reportPath)} 里没有可判定的用例行（--only=${only.join(',') || '(未设)'}）—` +
     '探针可能没跑到该用例，判据不把缺席当干净。');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 
 // ── 组装用户面（回复面 + 通知面） ────────────────────────────────────────────
@@ -121,4 +125,4 @@ const payload = {
 };
 writeFileSync(path.join(outDir, 'execution-leak-criteria.json'), `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
 console.log(`[S4 测量] 写出 ${path.join(outDir, 'execution-leak-criteria.json')}`);
-process.exit(verdict.passed ? 0 : 1);
+process.exit(exitCodeFor(verdict.passed ? 'pass' : 'fail'));
