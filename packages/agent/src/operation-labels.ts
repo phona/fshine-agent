@@ -539,9 +539,14 @@ export function parseProposalSchema(stdout: string): unknown | null {
  */
 export function loadProposalSchema(platformRoot?: string, gateway?: string): Promise<unknown | null> {
   if (!platformRoot) return Promise.resolve(null);
-  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
-  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
-  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级 **null**（与 platformRoot 未配同判据，
+  // 也与同族 loader 的失败语义一致），绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  //
+  // 2026-11-12 修：旧写法返回 `new Map()`——一个非 null 的普通对象，恰好从调用方的形状门
+  // （`!schema || typeof schema !== 'object' || Array.isArray(schema)`，context.ts 的
+  // createProposalViaGateway）三项全过，于是宿主把空表当作"平台已下发提案 schema"继续
+  // 隔离复核并在复核一致后发确认码。fail-closed 的分支写对了，返回值让它漏了。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(null);
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -700,6 +705,27 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
     version: A2A_PROTOCOL_VERSION,
     operations: declarations,
   };
+}
+
+/**
+ * 能力清单 → **执行模式词汇**（每行 serve 矩阵里值为 true 的键的并集）。
+ *
+ * 为什么由平台数据派生：宿主不得另立第二份 mode 名单（L2）。serve-gate 的形态识别与
+ * 驱动层 T5 对账都拿这份词汇判"`<网关> <mode> <脚本>` 属不属于执行形态"——平台加/改
+ * 自己的 mode（serve 矩阵）时宿主自动看得见，不需要改门里的字面量。
+ *
+ * 清单缺失 / 没声明任何 serve 键 → 空集 = 判据不成立：调用方按缺省处理（serve-gate
+ * 退回契约兜底词汇），绝不在宿主侧枚举平台模式。词汇外的形态一律 fail-closed
+ * （serve-gate 的 SERVE_INVOCATION_FORM_UNKNOWN），所以兜底不构成放行面。
+ */
+export function serveModesOf(manifest: CapabilityManifest | null | undefined): ReadonlySet<string> {
+  const modes = new Set<string>();
+  for (const declaration of manifest?.operations ?? []) {
+    for (const mode of declaration.serveMatrix ?? []) {
+      if (mode) modes.add(mode);
+    }
+  }
+  return modes;
 }
 
 /**

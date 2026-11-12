@@ -2,7 +2,8 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationSemantics, operationLabel, parseAccessSemantics, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels, parseOperationSemantics } from './src/operation-labels';
+import type { CapabilityManifest } from '@fshine/contracts';
+import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationSemantics, operationLabel, parseAccessSemantics, parseOperationArgSpecs, parseOperationArgStyles, parseOperationLabels, parseOperationSemantics, serveModesOf } from './src/operation-labels';
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
@@ -382,5 +383,29 @@ describe('isWriteAccess（平台 access 语义：confirm 列是唯一判据）',
     // 表在但该 operation 未登记 / access 取值不在语义表里
     expect(isWriteAccess(parseOperationSemantics(SEMANTICS_WITH_UNKNOWN_ACCESS).get('voucher.batch'))).toBe(false);
     expect(isWriteAccess(parseOperationSemantics('{"operations":[],"accessSemantics":{}}').get('x'))).toBe(false);
+  });
+});
+
+describe('serveModesOf（执行模式词汇从平台 serve 矩阵派生，宿主不另立名单）', () => {
+  const declaration = (operation: string, serveMatrix: readonly string[]): CapabilityManifest['operations'][number] => ({
+    operation, requiresPlan: true, effects: [], estSeconds: null, label: null, serveMatrix,
+  });
+
+  it('取每行 serve 矩阵的并集：平台新声明的 mode 自动进词汇，无需宿主改名单', () => {
+    const manifest: CapabilityManifest = {
+      version: '1.0',
+      operations: [
+        declaration('dummy.query', ['query', 'prepare', 'commit']),
+        declaration('dummy.scratch', ['query', 'prepare']),
+        declaration('dummy.fetch', ['fetch']),
+      ],
+    };
+    expect([...serveModesOf(manifest)]).toEqual(['query', 'prepare', 'commit', 'fetch']);
+  });
+
+  it('清单缺失 / 没声明任何 serve 键 → 空集 = 判据不成立（调用方退回契约兜底词汇）', () => {
+    expect(serveModesOf(null).size).toBe(0);
+    expect(serveModesOf(undefined).size).toBe(0);
+    expect(serveModesOf({ version: '1.0', operations: [declaration('dummy.query', [])] }).size).toBe(0);
   });
 });

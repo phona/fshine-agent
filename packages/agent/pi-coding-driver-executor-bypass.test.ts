@@ -25,6 +25,7 @@ import type { TrustedContext } from '@fshine/contracts';
 import { createPiCodingTurnDriver, DEFAULT_READ_PROBE_CAP, platformExecutorBypassed, READ_PROBE_WIND_DOWN_NUDGE, WORKER_WIND_DOWN_NUDGE, type PlatformExecutorBypassedEvent, type PiCodingTurnDriverOptions } from './src/pi-coding-driver';
 import type { DriverMessage, TurnDriver, TurnDriverInput, TurnDriverResult } from './src/driver';
 import { AUDIT_DETAIL_MAX_CHARS, type ServeGateEvent } from './src/serve-gate';
+import { messageTextFor } from './src/error-codes';
 import type { OperationSemantics } from './src/operation-labels';
 import type { PlanCliRunner } from './src/plan-runtime';
 
@@ -284,6 +285,44 @@ describe('绕开平台执行器：告警事件出现/不出现（真 driver）',
 
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toMatchObject({ localCalls: 1, planGateCalls: 0, auxiliaryCalls: 1 });
+  });
+});
+
+describe('执行模式词汇读平台 serve 矩阵（driver 注入，门里不再维护第二份 mode 名单）', () => {
+  it('清单声明的 mode（fetch）经门与 T5 放行；同一引用经清单没声明的 mode（query）→ 形态 fail-closed', async () => {
+    const { cwd } = await makeDriver();
+    const before = fake.records.length;
+    const driver = createPiCodingTurnDriver({
+      gateway: 'bin/example-gateway',
+      env: { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'test-key', LLM_MODEL: 'worker-test' },
+      agentDir: path.join(cwd, '.fshine-agent'),
+      operationLabels: new Map(),
+      planCliRunner: activatingPlanRunner,
+      // 平台清单（形态词表的唯一权威）只声明一个执行 mode：fetch。门据此认识 `fetch`，
+      // 不再认识历史字面量 `query`——词汇由平台数据决定，不注入时才有契约兜底。
+      capabilityManifest: {
+        version: '1.0',
+        operations: [
+          { operation: 'dummy.query', requiresPlan: true, effects: ['read'], estSeconds: 10, label: null, serveMatrix: ['fetch'] },
+        ],
+      },
+    });
+    fake.setScript([
+      { bash: [PLAN_COMMAND, 'bin/example-gateway fetch src/dummy/scripts/query.js', 'bin/example-gateway query src/dummy/scripts/query.js'], text: '完成。' },
+    ]);
+
+    const result = await driver.run(runInput(cwd));
+
+    // 同一脚本引用、同一条计划：fetch（清单声明）经门与驱动层 T5 对账放行；query
+    // （清单没声明）在门处形态认不出 → fail-closed，唯一一条拒绝理由指路平台清单
+    // （计划提交那一跳的 PLAN ACTIVE 也是 isError，按前缀排除）。
+    const record = fake.records[before];
+    const errors = (record?.messages ?? [])
+      .filter((message) => (message as { isError?: boolean }).isError)
+      .map((message) => String((message as { content?: Array<{ text?: string }> }).content?.[0]?.text ?? ''));
+    expect(errors.filter((text) => !text.startsWith('PLAN ACTIVE'))).toEqual([messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN')]);
+    // 放行的 fetch 照常构成执行痕迹（计划提交不计入 calls）。
+    expect(result.execution).toEqual({ planId: 'plan_bypassed', version: 3, calls: 1 });
   });
 });
 

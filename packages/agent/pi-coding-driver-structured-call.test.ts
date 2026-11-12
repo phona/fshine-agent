@@ -75,8 +75,13 @@ vi.mock('node:child_process', async () => {
   };
 });
 
-vi.mock('./src/operation-labels', () => {
+vi.mock('./src/operation-labels', async () => {
+  // 平台 I/O 的 loader 全部以替身短路（本文件不 spawn 平台 CLI）；纯数据投影
+  // serveModesOf 给真实现——2026-11-12（②）起 driver 消费它把清单的 serve 矩阵
+  // 派生成执行模式词汇，假实现会把"词汇从平台数据来"这件事测没。
+  const actual = await vi.importActual<typeof import('./src/operation-labels')>('./src/operation-labels');
   return {
+    serveModesOf: actual.serveModesOf,
     isWriteAccess: vi.fn(),
     loadCapabilityManifest: vi.fn(async () => ({
       version: '1.0',
