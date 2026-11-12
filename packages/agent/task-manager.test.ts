@@ -618,6 +618,57 @@ describe('BackgroundTaskManager', () => {
     await manager.shutdown({ drainMs: 100 });
   });
 
+  it('取消等待确认的 run 不等投递链：终态投递排在调用方回合之后也要返回（P0 停机死等）', async () => {
+    // 事故形状（2026-11-12 探针 run3：停机整轮 300s 零回复、后续消息全堵）：
+    //   用户回合占着会话串行队列 → 回合内 task_control(cancel) → manager.cancel
+    //   → 终态事件交给订阅者投递，而生产订阅者（assembly 的 handler.enqueueTaskEvent）
+    //   把事件挂在**同一条**会话队列的队尾 → 就地 await 就是「自己等自己」：
+    //   调用方等投递、投递等调用方所在的回合，那一回合永不返回。
+    // 本用例用同构替身复现该等待环：订阅者把投递排在「当前回合」之后，而当前回合
+    // 要等 cancel 返回才 resolve。cancel 返回 = 取消状态已持久化；投递随后照常送达。
+    const repo = new MemoryTaskRuns();
+    const onCancelPending = vi.fn(async () => true);
+    const manager = createBackgroundTaskManager({
+      runner: mockRunner({ execute: async ({ prepared }) => ({
+        taskId: prepared.taskId,
+        text: '等待确认。',
+        proposalCreated: { proposalId: 'opaque-ref' },
+      }) }).runner,
+      repo,
+      executionGate: createPlatformExecutionGate({ maxQueue: 1 }),
+      onCancelPending,
+    });
+    const turn = deferred<void>();
+    const delivered: string[] = [];
+    let queueTail: Promise<void> = turn.promise;
+    manager.subscribe(async (event) => {
+      const prev = queueTail;
+      const queued = prev.then(() => { delivered.push(event.eventId); });
+      queueTail = queued;
+      await queued;
+    });
+    const receipt = await manager.submit(input('stop-deadlock'));
+    await waitFor(async () => (await repo.get(receipt.runId))?.state === 'waiting_confirmation');
+
+    const outcome = await Promise.race([
+      manager.cancel({ principalId: 'wecom:user-1', sessionId: 'session-1' }, receipt.taskId)
+        .then((control) => ({ kind: 'returned' as const, control })),
+      new Promise<{ kind: 'deadlock' }>((resolve) => setTimeout(() => resolve({ kind: 'deadlock' }), 500)),
+    ]);
+    expect(outcome.kind).toBe('returned');
+    if (outcome.kind === 'returned') {
+      expect(outcome.control).toMatchObject({ found: true, state: 'cancelled', requested: false });
+    }
+    // 取消状态的持久化独立于投递：cancel 返回时库里已是 cancelled（状态面不等投递）。
+    expect((await repo.get(receipt.runId))?.state).toBe('cancelled');
+    // 投递没有被丢掉：回合让出会话队列后，终态事件照常送达（失败恢复由库里
+    // deliveryState=pending + 启动期清扫兜底，本用例只锁"不就地等待"这件事）。
+    expect(delivered).toEqual([]);
+    turn.resolve();
+    await waitFor(() => delivered.includes(`${receipt.runId}:cancelled`));
+    await manager.shutdown({ drainMs: 100 });
+  });
+
   it('closes waiting-input runs without invoking the confirmation invalidator', async () => {
     const repo = new MemoryTaskRuns();
     const onCancelPending = vi.fn(async () => true);

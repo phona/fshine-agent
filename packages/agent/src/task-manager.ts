@@ -238,11 +238,31 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
     }
   };
 
+  /**
+   * 不阻塞调用方的终态派发：promise 只记入 pendingDispatches（shutdown 排干），调用方不等它。
+   *
+   * 取消路径为什么必须这样派发（P0 停机死等，2026-11-12）：取消是从回合内发起的
+   * （runtime 的 task_control 分支 → executeTaskControl → cancel），而那个回合正占着
+   * handler 的会话串行队列；终态事件的生产订阅者（assembly 的 handler.enqueueTaskEvent）
+   * 把投递排在**同一条**队列的队尾。就地 await 就是「自己等自己」：会话队列等这一回合、
+   * 这一回合等投递，于是那一回合永不返回，同会话后续消息全堵在它后面（停机回合 180s
+   * 零回复、后续「继续」60s 零回复）。
+   *
+   * 取消状态的持久化与终态消息的投递因此解耦：cancel 返回 = 状态已定（transition 已落库），
+   * 投递随后在队列上按序排到。投递失败的恢复不受影响——run 行仍是终态且
+   * deliveryState=pending，启动期 sweepUndeliveredTaskRuns 照旧兜底重投；进程内则由
+   * pendingDispatches 在 shutdown 排干（与 ActiveRun 路径的 scheduleDispatch 同一机制）。
+   */
+  const dispatchTerminal = (record: TaskRunRecord, result?: SubagentTaskResult, error?: string): void => {
+    if (!record.resultEventId) return;
+    const dispatch = emitTerminal(record, result, error).finally(() => pendingDispatches.delete(dispatch));
+    pendingDispatches.add(dispatch);
+  };
+
   const scheduleDispatch = (active: ActiveRun, record: TaskRunRecord, result?: SubagentTaskResult, error?: string): void => {
     if (active.eventDispatched) return;
     active.eventDispatched = true;
-    const dispatch = emitTerminal(record, result, error).finally(() => pendingDispatches.delete(dispatch));
-    pendingDispatches.add(dispatch);
+    dispatchTerminal(record, result, error);
   };
 
   const scheduleTask = (active: ActiveRun): void => {
@@ -799,7 +819,7 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
         const latest = updated ?? await options.repo.get(current.runId);
         if (latest?.state === 'cancelled') {
           if (active) scheduleDispatch(active, latest, cancellationResult);
-          else await emitTerminal(latest, cancellationResult);
+          else dispatchTerminal(latest, cancellationResult);
         }
         return { found: true, taskId, runId: current.runId, state: latest?.state ?? current.state, requested: false };
       }
@@ -813,7 +833,7 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
         });
         active?.controller.abort();
         active?.ticket.cancel();
-        if (updated && isTerminal(updated.state) && !active) await emitTerminal(updated, undefined, updated.error);
+        if (updated && isTerminal(updated.state) && !active) dispatchTerminal(updated, undefined, updated.error);
         return { found: true, taskId, runId: current.runId, state: updated?.state ?? current.state, requested: false };
       }
       if (current.state === 'running') {
@@ -835,7 +855,7 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
           resultText: cancellationResult.text,
           error: undefined,
         });
-        if (updated?.state === 'cancelled') await emitTerminal(updated, cancellationResult);
+        if (updated?.state === 'cancelled') dispatchTerminal(updated, cancellationResult);
         return { found: true, taskId, runId: current.runId, state: updated?.state ?? current.state, requested: false };
       }
       if (current.state === 'waiting_confirmation') {
@@ -860,7 +880,7 @@ export function createBackgroundTaskManager(options: BackgroundTaskManagerOption
           resultText: cancellationResult.text,
           error: undefined,
         });
-        if (updated?.state === 'cancelled') await emitTerminal(updated, cancellationResult);
+        if (updated?.state === 'cancelled') dispatchTerminal(updated, cancellationResult);
         return { found: true, taskId, runId: current.runId, state: updated?.state ?? current.state, requested: false };
       }
       return { found: true, taskId, runId: current.runId, state: current.state, requested: false };
