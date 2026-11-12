@@ -95,7 +95,7 @@ function loadCases(file: string): UxCase[] {
  */
 function profileWithSkillBody(): string {
   const profile = applyExecutorLabel(readFileSync(DEFAULT_AGENT_PROFILE_PATH, 'utf8'));
-  const raw = readFileSync(path.join(REPO_ROOT, '.agents', 'skills', 'task-collaboration', 'SKILL.md'), 'utf8')
+  const raw = readFileSync(path.join(REPO_ROOT, 'docs', 'interaction-skills', 'task-collaboration.md'), 'utf8')
     .replace(/^---[\s\S]*?---\n/, '');
   return `${profile}\n\n# 参考：协作方法（task-collaboration 正文，评测注入）\n${raw.trim()}\n`;
 }
