@@ -35,6 +35,7 @@ import { validatePlanEntities, type PlanEntitySources } from '../../packages/age
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
 import { selectionClarificationFromResponses, parseEnvelope, terminalFastPathOf, type SelectionClarification, type TerminalFastPathFailure, validateGatewayInvocation, gatewayExecPath } from '../../packages/agent/src/platform-contract';
 import { renderTerminalFailureReply } from '../../packages/agent/src/turn-relay';
+import { RESEND_ARTIFACT_TOOL_NAME } from '../../packages/agent/src/resend-tool';
 import type { TaskResultPort } from '../../packages/agent/src/result-contract';
 import type { TaskStagnationOptions } from '../../packages/agent/src/context';
 import { createServerAssembly, type ServerAssembly } from '../../apps/server/assembly';
@@ -323,20 +324,46 @@ class RecordingSdkClient implements SdkClientLike {
 
 // ── 模型替身 ────────────────────────────────────────────────────────────
 
+/** Main 工具面的最小投影（判定委派工具名用；生产里是 DiscoveredTool）。 */
+interface ScriptedTool {
+  name: string;
+  inputSchema?: { properties?: Record<string, unknown> };
+}
+
 /**
- * Main Agent：按脚本申报本轮动作（申报契约：kind / request / continueTaskId）。
+ * 解析本轮 Main 工具面里的委派工具名：**从 input.tools 动态解析，不写死 run_task**
+ * （实例可经 profile.toolName 改名）。判据（审计 C 的 P0 迁移口径）：非宿主内部工具
+ * （read_skill / task_control / resend_artifact）且 schema 里有 request 属性。
+ */
+function delegateToolNameOf(tools: readonly ScriptedTool[]): string {
+  const internal = new Set(['read_skill', 'task_control', RESEND_ARTIFACT_TOOL_NAME]);
+  const candidates = tools.filter((tool) => !internal.has(tool.name));
+  const withRequest = candidates.find((tool) => {
+    const properties = tool.inputSchema?.properties;
+    return Boolean(properties && typeof properties === 'object' && 'request' in properties);
+  });
+  return withRequest?.name ?? candidates[0]?.name ?? 'run_task';
+}
+
+/** 解析重发工具名（注册与装配的产物库开关一致；不在场时返回 undefined）。 */
+function resendToolNameOf(tools: readonly ScriptedTool[]): string | undefined {
+  return tools.find((tool) => tool.name === RESEND_ARTIFACT_TOOL_NAME)?.name;
+}
+
+/**
+ * Main Agent：按脚本"申报"本轮动作——直连工具面形态（2026-11-12 harness 迁移）。
  *
- * 声明条目可带可选 `text`：申报之后返回的回复文本（缺省为'主 Agent 自由文本：不应外发'）。
- * conversation 申报后返回的文本就是用户可见回复——模型文本即回复，无需宿主转述；
- * delegate 申报走 terminate 语义，用户看到的是子 Agent 的文本，这里的 text 不参与外发
- * （只在申报被宿主退回时用于兜底，见 catch 分支）。
+ * 脚本词汇保留（`kind: conversation | delegate | resend`），映射到直连工具面：
+ *   · conversation → **不调用任何工具**，`text` 即本轮回复（直连语义：普通回合文本回复）；
+ *   · delegate → 调用工具面解析出的委派工具（profile 可改名，缺省 run_task），
+ *     参数 `{request, taskId}`（脚本里的 `continueTaskId` 兼容映射到 taskId）；
+ *     结果 terminate 时用户看到的是子 Agent 文本；未被 terminate 时（纠错环、计划模式
+ *     每一步、后台受理）继续同一回合并消费下一条声明，与生产语义一致；
+ *   · resend → 调用 resend_artifact，refs 取 `refs` 数组或单个 `artifactRef`。
  *
- * 多声明对话：申报被宿主接受且没有 terminate 时（纠错环、计划模式的每一步——宿主把
- * 步骤结果作为工具结果交还模型），模型继续同一回合并消费下一条声明；脚本耗尽仍未给出
- * text → 停嘴。
- *
- * `continueTaskId` 写 `LAST_TASK_ID_TOKEN` 时，由替身用上一条申报的工具结果里的 taskId
- * 代填：计划模式的步骤 2..M 要带上一步的子任务编号，而编号要等上一步真跑完才知道。
+ * 脚本条目可带可选 `text`：工具调用之后返回的回复文本（直连 conversation 条目缺省为
+ * '主 Agent 自由文本：不应外发'）。`continueTaskId` 写 `LAST_TASK_ID_TOKEN` 时由替身用
+ * 上一条工具结果里的 taskId 代填（计划模式步骤 2..M 的编号要等上一步真跑完才知道）。
  */
 export const LAST_TASK_ID_TOKEN = '@lastTaskId';
 
@@ -354,7 +381,10 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
       if (input.tools.length === 0) {
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
-      // 与生产驱动一致：申报是原生工具调用，转录里留下 assistant(toolCall) + toolResult
+      const tools = input.tools as ScriptedTool[];
+      const delegateTool = delegateToolNameOf(tools);
+      const resendTool = resendToolNameOf(tools);
+      // 与生产驱动一致：工具调用是原生形态，转录里留下 assistant(toolCall) + toolResult
       // （ToolResultMessage 的原生形状：toolCallId + toolName + content 分段）。
       // delegate 轮次经 ToolUserError terminate、needs 回路轮次经工具结果继续——两者都因此
       // 成为"被 toolResult 终结的完整轮次"，下一轮仍留在最近轮次窗口里（C19）。
@@ -363,39 +393,93 @@ function mainDriver(declarations: Array<Record<string, unknown>>, observe?: (inp
         const entry = declarations[Math.min(cursor, declarations.length - 1)]!;
         const exhausted = cursor >= declarations.length;
         const { text, ...declaration } = entry;
-        if (declaration['continueTaskId'] === LAST_TASK_ID_TOKEN) declaration['continueTaskId'] = lastTaskId;
         if (exhausted && typeof text !== 'string') {
           return { text: '主 Agent 自由文本：不应外发', messages: transcript };
         }
         cursor += 1;
-        const callId = `call_${cursor}`;
-        transcript.push({
-          role: 'assistant',
-          content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }],
-          timestamp: Date.now(),
-        } as never);
-        try {
-          const outcome = await input.exec('route_current_turn', declaration);
-          const observedTaskId = (outcome as { taskId?: unknown } | null)?.taskId;
-          if (typeof observedTaskId === 'string') lastTaskId = observedTaskId;
-          transcript.push({
-            role: 'toolResult',
-            toolCallId: callId,
-            toolName: 'route_current_turn',
-            content: [{ type: 'text', text: JSON.stringify(outcome) }],
-            timestamp: Date.now(),
-          } as never);
+        const kind = declaration['kind'];
+        // ── conversation：普通回合——不调用任何工具，模型文本即本轮回复（D4）──
+        if (kind === undefined || kind === 'conversation') {
           if (typeof text === 'string') return { text, messages: transcript };
-        } catch (error) {
+          continue;
+        }
+        // ── resend：重发工具（缺产物库的装配不注册它——夹具层响亮失败，不静默降级）──
+        if (kind === 'resend') {
+          if (!resendTool) {
+            return { text: `E2E 夹具错误：${RESEND_ARTIFACT_TOOL_NAME} 不在工具面（产物库未装配？）`, messages: transcript };
+          }
+          const refs = Array.isArray(declaration['refs'])
+            ? declaration['refs']
+            : typeof declaration['artifactRef'] === 'string' ? [declaration['artifactRef']] : [];
+          const callId = `call_${cursor}`;
           transcript.push({
-            role: 'toolResult',
-            toolCallId: callId,
-            toolName: 'route_current_turn',
-            content: [{ type: 'text', text: (error as Error).message }],
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: callId, name: resendTool, arguments: { refs } }],
             timestamp: Date.now(),
           } as never);
-          return { text: (error as Error).message, messages: transcript };
+          try {
+            const outcome = await input.exec(resendTool, { refs });
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: resendTool,
+              content: [{ type: 'text', text: JSON.stringify(outcome) }],
+              timestamp: Date.now(),
+            } as never);
+            // 形状非法 → exec 返回可恢复错误（不 throw）：继续消费下一条声明；给了 text 才收尾。
+            if (typeof text === 'string') return { text, messages: transcript };
+          } catch (error) {
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: resendTool,
+              content: [{ type: 'text', text: (error as Error).message }],
+              timestamp: Date.now(),
+            } as never);
+            return { text: (error as Error).message, messages: transcript };
+          }
+          continue;
         }
+        // ── delegate：直连委派工具（terminate 时错误文本即用户可见回复）──
+        if (kind === 'delegate') {
+          const request = typeof declaration['request'] === 'string' ? declaration['request'] : '';
+          // 兼容脚本词汇：continueTaskId（旧申报字段）优先，其次直连的 taskId。
+          const rawTaskId = declaration['continueTaskId'] !== undefined ? declaration['continueTaskId'] : declaration['taskId'];
+          const resolvedTaskId = rawTaskId === LAST_TASK_ID_TOKEN ? lastTaskId : rawTaskId;
+          const callArgs: Record<string, unknown> = { request };
+          if (resolvedTaskId !== undefined) callArgs['taskId'] = resolvedTaskId;
+          const callId = `call_${cursor}`;
+          transcript.push({
+            role: 'assistant',
+            content: [{ type: 'toolCall', id: callId, name: delegateTool, arguments: callArgs }],
+            timestamp: Date.now(),
+          } as never);
+          try {
+            const outcome = await input.exec(delegateTool, callArgs);
+            const observedTaskId = (outcome as { taskId?: unknown } | null)?.taskId;
+            if (typeof observedTaskId === 'string') lastTaskId = observedTaskId;
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: delegateTool,
+              content: [{ type: 'text', text: JSON.stringify(outcome) }],
+              timestamp: Date.now(),
+            } as never);
+            if (typeof text === 'string') return { text, messages: transcript };
+          } catch (error) {
+            transcript.push({
+              role: 'toolResult',
+              toolCallId: callId,
+              toolName: delegateTool,
+              content: [{ type: 'text', text: (error as Error).message }],
+              timestamp: Date.now(),
+            } as never);
+            return { text: (error as Error).message, messages: transcript };
+          }
+          continue;
+        }
+        // 未知脚本条目：响亮失败，绝不静默当作普通回合（否则夹具错误会被当成模型行为）。
+        return { text: `E2E 夹具错误：未知脚本条目 kind=${String(kind)}`, messages: transcript };
       }
     },
   };
