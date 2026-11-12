@@ -313,7 +313,12 @@ export function formatPlanMessage(evaluation: PlanEvaluation): string {  const m
   const scope = platformSummary
     ? `${sanitizeSummary(platformSummary)} `
     : `本次需新增 ${addedCalls} 次查询，预计约 ${minutes} 分钟。`;
-  const confirm = evaluation.decision === 'confirm' ? '请回复“确认继续”后再执行；当前已暂停。' : '通知送达后将继续执行。';
+  // T4 失败交还（2026-11-12）：确认档补两要素——"为什么需要用户协助"（这批操作要用户
+  // 确认后才会执行）与"尚未完成什么"（当前尚未开始）。既有确认句逐字保留（T8 确认面
+  // 纪律：确认门要用户看懂并回复"确认继续"，不动一字）；notify/stop 分支措辞同样不动。
+  const confirm = evaluation.decision === 'confirm'
+    ? '这批操作需要你确认后才会执行，尚未开始。请回复“确认继续”后再执行；当前已暂停。'
+    : '通知送达后将继续执行。';
   // 前缀让用户在企微里能把"系统通知"和普通进度区分开，也让宿主/测试能稳定识别这条帧。
   // 确认面同样过执行语言删除（T8，2026-11-11）：平台下发的 scopeSummary/noticeText 是
   // 平台内部语言（脚本路径/码/operation 名/控词），"请你确认"这条帧与回复面同一把尺——

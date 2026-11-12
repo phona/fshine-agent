@@ -19,8 +19,10 @@ export interface ReadBackCounts {
 
 export const COMMITTED_UNVERIFIED_LINE =
   '已落账、读回不足、需人工核对：平台侧提案已标记为已提交（不可重复提交），但落账后读回的数量未达到提案要求，实际落账数与提案数之间的差额尚未核实。';
+// T4 失败交还（2026-11-12）：对账句补"为什么落到人工"（系统无法自动完成差额核实）与
+// "能否回原 SaaS"（核对与后续处理可在平台里完成，本对话无需等待）。仍然绝不报完成。
 export const COMMITTED_UNVERIFIED_RECONCILIATION_LINE =
-  '人工核对入口：请核对平台实际落账数与提案要求数，确认差额与缺失项后再处理；不要重复确认或重新发起同一提案，以免重复落账。';
+  '人工核对入口：请核对平台实际落账数与提案要求数，确认差额与缺失项后再处理；不要重复确认或重新发起同一提案，以免重复落账。系统无法自动完成差额核实；核对与后续处理可在平台里完成，本对话无需等待。';
 
 export function renderCommittedUnverifiedReply(readBack?: ReadBackCounts): string {
   const lines = [COMMITTED_UNVERIFIED_LINE, COMMITTED_UNVERIFIED_RECONCILIATION_LINE];
