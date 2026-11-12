@@ -95,6 +95,9 @@ export const REPEATED_REQUEST_RETRY =
   + '历史答复不是当前授权：重复的请求是新请求，必须申报 delegate 才能真正执行。'
   + '要在同一个子任务里续跑就填 continueTaskId；不要用历史答复组织本轮回复。';
 
+/** delegate 声称要委派却不给请求：形状错误的**唯一**一种，两处入口共用同一句话。 */
+const DELEGATE_REQUEST_MISSING = 'delegate 必须给出非空的 request：把用户请求加工成自包含的一句话（做什么、对谁、什么范围）。';
+
 /**
  * A declaration that contradicts itself is a form-filling mistake, not missing user input:
  * the model claimed it would delegate yet filed no request. The host should send it back for
@@ -102,8 +105,92 @@ export const REPEATED_REQUEST_RETRY =
  */
 export function isSelfContradictoryDeclaration(intent: TurnDeclaration): string | null {
   if (intent.kind !== 'delegate') return null;
-  if (!intent.request.trim()) return 'delegate 必须给出 request：把用户请求加工成自包含的一句话。';
+  if (!intent.request.trim()) return DELEGATE_REQUEST_MISSING;
   return null;
+}
+
+/** 申报退回：合法申报取 `intent`，形状不符取 `error`（给模型的重填依据）。 */
+export type TurnDeclarationReview = { intent: TurnDeclaration } | { error: string };
+
+/** 脏输入的显示形态（诊断用：字符串加引号，其余 JSON 化，缺失标出来）。 */
+function showDeclarationValue(value: unknown): string {
+  if (value === undefined) return '（未给）';
+  if (typeof value === 'string') return `「${value}」`;
+  try { return `「${JSON.stringify(value)}」`; } catch { return `「${String(value)}」`; }
+}
+
+/**
+ * 申报形状体检（**唯一的形状判据实现**）：合法 → `{intent}`；形状不符 → `{error}`。
+ *
+ * 为什么退回理由必须点名具体字段（2026-11-12 轨道 C ①，审计里撞出来的最大单一失败源）：
+ * 宿主此前统一回一句零信息的「申报不是合法的结构化意图。请按 schema 重新调用
+ * route_current_turn。」——它**说不出多带的是哪个字段**，于是模型只能照同一形状再交一次：
+ * T9 r01 同一回合 33 次 `route_declaration_invalid` 后弃权、arch-d C2 单回合 226 次被
+ * 300s 看门狗收掉（0 轮 0 调用）；集成分支的 P1 实跑同形（单回合 4 次 + 探针等待超时）。
+ * 理由点名之后模型改得动，重填循环才有出口（退回本身仍不消耗用户的澄清轮次）。
+ *
+ * 判定与 `parseTurnDeclaration` 共用同一份实现（后者是前者的薄包装）：形状规则只有一处，
+ * 先有"为什么拒"，再把原因投影成 `error`——两份手抄必然漂移。
+ *
+ * 纪律：各枝的**收/拒判定与从前逐字一致**（conversation 只认 kind 一个字段；resend 只认
+ * kind + artifactRef 两字段；delegate 的未知字段照旧归一后丢弃）。本次只改退回话术，
+ * 不动任何一条判据，也不动 schema 的 additionalProperties:false。
+ */
+export function inspectTurnDeclaration(value: string): TurnDeclarationReview {
+  const text = value.trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '');
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch {
+    return { error: '申报不是合法 JSON：route_current_turn 的入参要是一个 JSON 对象。' };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { error: `申报顶层必须是一个对象（如 {"kind":"conversation"}）；本次收到 ${showDeclarationValue(parsed)}。` };
+  }
+  const item = parsed as Record<string, unknown>;
+  const kind = item['kind'];
+  if (kind === 'conversation') {
+    const extra = Object.keys(item).filter((key) => key !== 'kind');
+    if (extra.length > 0) {
+      return { error: `conversation 只接受 kind 一个字段；本次多带了 ${extra.join('、')}。要执行就申报 delegate 并把完整请求写进 request，只聊天就只填 kind。` };
+    }
+    return { intent: { kind: 'conversation' } };
+  }
+  if (kind === 'resend') {
+    const extra = Object.keys(item).filter((key) => key !== 'kind' && key !== 'artifactRef');
+    if (extra.length > 0) {
+      return { error: `resend 只接受 kind 与 artifactRef 两个字段；本次多带了 ${extra.join('、')}。` };
+    }
+    if (typeof item['artifactRef'] !== 'string' || !item['artifactRef'].trim()) {
+      return { error: 'resend 必须给出非空的 artifactRef：本轮输入【本会话已保存的产物】清单里对应条目的 #编号。' };
+    }
+    return { intent: { kind: 'resend', artifactRef: item['artifactRef'].trim() } };
+  }
+  if (kind !== 'delegate') {
+    return { error: `kind 必须是 conversation / delegate / resend 之一；本次收到 ${showDeclarationValue(kind)}。` };
+  }
+  if (typeof item['request'] !== 'string' || !item['request'].trim()) {
+    return { error: DELEGATE_REQUEST_MISSING };
+  }
+  if (item['continueTaskId'] !== undefined && (typeof item['continueTaskId'] !== 'string' || !item['continueTaskId'].trim())) {
+    return { error: `continueTaskId 给了就必须是非空字符串，本次收到 ${showDeclarationValue(item['continueTaskId'])}；续跑同一子任务才填它，新任务不填。` };
+  }
+  return {
+    intent: {
+      kind: 'delegate',
+      request: item['request'].trim(),
+      ...(typeof item['continueTaskId'] === 'string' ? { continueTaskId: item['continueTaskId'].trim() } : {}),
+    },
+  };
+}
+
+/**
+ * 被拒申报的形状指纹（诊断与有界收敛的记账用）：`kind` 自报值 + 本次实际带的字段名。
+ *
+ * 用它而不是只记 reason：同一形状被反复交回是死循环的指纹（T9 r01 的 33 次全是
+ * `kind=conversation keys=[kind,request]`），而 reason 里的自然语言会随措辞改动漂移。
+ */
+export function declarationShapeOf(args: Record<string, unknown>): string {
+  const kind = typeof args['kind'] === 'string' ? args['kind'] : '（未给）';
+  return `kind=${kind} keys=[${Object.keys(args).sort().join(',')}]`;
 }
 
 /**
@@ -115,16 +202,12 @@ export function isSelfContradictoryDeclaration(intent: TurnDeclaration): string 
  * those two apart. No evidence checking here: scope is guarded one layer down by
  * `validatePlanEntities`.
  */
-export function reviewRouteDeclaration(
-  args: Record<string, unknown>,
-): { intent: TurnDeclaration } | { error: string } {
-  const parsed = parseTurnDeclaration(JSON.stringify(args));
-  if (!parsed) {
-    return { error: '申报不是合法的结构化意图。请按 schema 重新调用 route_current_turn。' };
-  }
-  const contradiction = isSelfContradictoryDeclaration(parsed);
+export function reviewRouteDeclaration(args: Record<string, unknown>): TurnDeclarationReview {
+  const reviewed = inspectTurnDeclaration(JSON.stringify(args));
+  if ('error' in reviewed) return reviewed;
+  const contradiction = isSelfContradictoryDeclaration(reviewed.intent);
   if (contradiction) return { error: contradiction };
-  return { intent: parsed };
+  return { intent: reviewed.intent };
 }
 
 /**
@@ -297,27 +380,11 @@ function isOwnArtifactPath(token: string, boundary: PlanArtifactBoundary | undef
  *   模型编不出事实，宿主也不会替它圆。
  *
  * `clarify` 已取消：需要澄清时申报 conversation，模型文本即回复。
+ *
+ * 形状判据实现只有一处（`inspectTurnDeclaration`）——本函数是它的薄包装，只回答"合不合法"；
+ * 想知道为什么不合法（退回话术要点名多带的字段）用 `inspectTurnDeclaration`。
  */
 export function parseTurnDeclaration(value: string): TurnDeclaration | null {
-  const text = value.trim().replace(/^```(?:json)?\s*/iu, '').replace(/\s*```$/u, '');
-  let parsed: unknown;
-  try { parsed = JSON.parse(text); } catch { return null; }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const item = parsed as Record<string, unknown>;
-  if (item.kind === 'conversation') {
-    return Object.keys(item).length === 1 ? { kind: 'conversation' } : null;
-  }
-  if (item.kind === 'resend') {
-    if (Object.keys(item).length !== 2) return null;
-    if (typeof item.artifactRef !== 'string' || !item.artifactRef.trim()) return null;
-    return { kind: 'resend', artifactRef: item.artifactRef.trim() };
-  }
-  if (item.kind !== 'delegate') return null;
-  if (typeof item.request !== 'string' || !item.request.trim()) return null;
-  if (item.continueTaskId !== undefined && (typeof item.continueTaskId !== 'string' || !item.continueTaskId.trim())) return null;
-  return {
-    kind: 'delegate',
-    request: item.request.trim(),
-    ...(typeof item.continueTaskId === 'string' ? { continueTaskId: item.continueTaskId.trim() } : {}),
-  };
+  const reviewed = inspectTurnDeclaration(value);
+  return 'intent' in reviewed ? reviewed.intent : null;
 }

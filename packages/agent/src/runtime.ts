@@ -4,7 +4,7 @@ import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, Conversation
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, REPEATED_REQUEST_RETRY, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
+import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, REPEATED_REQUEST_RETRY, declarationShapeOf, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
 import { collectSessionEntitiesSafely, mergeSessionEntities } from './session-entities';
 import { matchClarificationBinding } from './clarification-events';
 import type { OperationArgsSpecs } from './operation-labels';
@@ -27,7 +27,7 @@ import {
 } from './background-runtime';
 import type { BackgroundTaskManager } from './task-manager';
 import { sanitizeDirectExitReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
-import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
+import { accumulateDelegation, createTurnState, declarationRejectionsExhausted, noteDeclarationRejection, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
 import {
   appendClarificationIssued,
@@ -521,9 +521,31 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           }
           if (tool === ROUTE_CURRENT_TURN_TOOL_NAME) {
             const reviewed = reviewRouteDeclaration(args);
-            // 自相矛盾的申报退回给模型重填，不消耗用户的澄清轮次
+            // 形状不对的申报退回给模型重填，不消耗用户的澄清轮次；退回话术点名具体字段
+            // （turn-contract 的 inspectTurnDeclaration），退回次数**有界**（②，2026-11-12）：
+            // 同一回合的拒收超过 MAX_DECLARATION_REJECTIONS 就退出重填循环——T9 r01 是
+            // 同一份坏申报被退回 33 次后模型弃权、arch-d C2 226 次后被 300s 看门狗收掉
+            // （0 轮 0 调用），根因是零信息话术 + 宿主没有界。超界不再交还模型：转成下方
+            // 的 route_declaration_missing 出口，用裁定认可的 NO_EXECUTION_CLARIFICATION
+            // 收尾（可行动话术，不是零信息兜底）。
             if ('error' in reviewed) {
-              console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys: Object.keys(args).sort(), kind: typeof args['kind'] === 'string' ? args['kind'] : undefined }));
+              const shape = declarationShapeOf(args);
+              const rejection = noteDeclarationRejection(turn, shape);
+              const keys = Object.keys(args).sort();
+              const kind = typeof args['kind'] === 'string' ? args['kind'] : undefined;
+              if (rejection.exceeded) {
+                console.warn(JSON.stringify({
+                  event: 'route_declaration_bounded_stop',
+                  requestId: ctx.requestId,
+                  reason: reviewed.error,
+                  keys,
+                  kind,
+                  rejections: rejection.count,
+                  shapeRejections: rejection.shapeCount,
+                }));
+                throw new ToolUserError(NO_EXECUTION_CLARIFICATION);
+              }
+              console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys, kind, rejections: rejection.count }));
               return { error: `申报无效：${reviewed.error}` };
             }
             if (taskEventContext && reviewed.intent.kind === 'delegate') {
@@ -891,6 +913,20 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // extractDelegationToolResultEvents 的 initialMessageCount 同法）。
       let mainUsage = sumUsage(result.messages.slice(initialMessageCount));
       if (!turn.declared) {
+        // 超界收敛（②）：模型在申报循环里已被退回上限次，宿主不再喂一次重试指令——
+        // 那只会让不收敛的模型再撞一次墙。直接走 route_declaration_missing 的既有出口
+        // （可行动的澄清话术 + 回合闭合的 turn_span），与下面"催一次仍不申报"同一结局，
+        // 区别只在 reason：这里是"退回到界"而不是"模型第二次仍不申报"。
+        if (declarationRejectionsExhausted(turn)) {
+          console.warn(JSON.stringify({
+            event: 'route_declaration_missing',
+            requestId: ctx.requestId,
+            reason: 'declaration_rejections_exhausted',
+            rejections: turn.declarationRejections,
+            shapes: turn.declarationShapes,
+          }));
+          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage, false);
+        }
         // 跳过申报：丢弃自由文本，追一条明确指令重试一次。
         const firstRunLen = result.messages.length;
         const retried = await runMainAgent([
