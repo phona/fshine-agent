@@ -105,8 +105,16 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 换成 run_task 直连处理：实体来源、计划绑定、后台派发、失败分类与结果交还等确定性
  * 守卫从申报分支原样搬进 exec，净 −92。常数按真实行数收紧；协议文件、协议类型与
  * 死代码的正式删除归下一批（见任务回报的删除 run 清单）。
+ *
+ * 1130 → 1201（2026-11-12，补齐波：重发工具直连 + taskId 形状 fail-closed + RR1 重复
+ * 提问门）。三件都是**功能新增非抽取**，判定本体已尽量外置：ref 形状复检在
+ * resend-tool.ts（runtime 只做"记账 + terminate"接线）、重复提问门判定在 turn-exit.ts
+ * 的新支（runtime 只提供宿主事实：在册任务数惰性查询 + task_control 使用标记）。
+ * 逐项：import 3 + 工具面注册 4 + resend 分支 22 + taskId 守卫 9 + task_control 记账 1
+ * + 在册任务计数/RR1 事实 26 + decideTurnExit 透传 3 + 注释与措辞同步 3 ≈ +71。
+ * 下一批抽取时照旧只减不增。
  */
-const RUNTIME_LINE_BUDGET = 1130;
+const RUNTIME_LINE_BUDGET = 1201;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

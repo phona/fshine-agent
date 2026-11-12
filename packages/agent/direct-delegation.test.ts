@@ -256,4 +256,30 @@ describe('直连委派：Main 直接调用 run_task', () => {
     expect(JSON.stringify(toolResults[0])).toContain('计划已冻结');
     expect(reply.text).toBe('任务已暂停，回复“继续”可从断点续跑。');
   });
+
+  it('D8 taskId 在场但非法：fail-closed 抛 TASK_ID_INVALID，零派发（不静默按新任务）', async () => {
+    for (const invalid of ['', '   ', 123 as unknown as string]) {
+      const delegated: unknown[] = [];
+      const { driver } = recordingDriver([
+        { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东的应收账款余额', taskId: invalid } }] },
+        { text: '不应到达' },
+      ]);
+      const runtime = createTaxAgentRuntime({
+        driver,
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(async (args) => {
+          delegated.push(args);
+          return { taskId: 'task_1', text: '幻东 202609 应收余额为 51 元。' };
+        }),
+      });
+
+      const reply = await runtime.handleTurn(makeCtx(), '继续查幻东的余额');
+
+      // 申报版对 continueTaskId 的形状拒绝（turn-contract）在直连入口由同族守卫承接：
+      // 不静默按新任务放行，也不打发任何委派。
+      expect(reply.text).toContain('TASK_ID_INVALID');
+      expect(reply.text).toContain('taskId 为空或不是字符串');
+      expect(delegated).toHaveLength(0);
+    }
+  });
 });

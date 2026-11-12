@@ -55,6 +55,8 @@ function input(overrides: Partial<TurnExitInput> = {}): TurnExitInput {
     lastNeeds: null,
     activatedPlan: null,
     protocolReplay: false,
+    sessionTaskCount: 0,
+    taskControlUsed: false,
     resultText: '',
     hasFinancialFigure,
     usefulWorkerNote,
@@ -298,5 +300,40 @@ describe('decideTurnExit：两段门都不动作的形状', () => {
 
   it('没有申报（intentKind = null）：① 不动作', () => {
     expect(decideTurnExit(input({ intentKind: null, resultText: '你好，我在。' }))).toEqual({ kind: 'ok' });
+  });
+});
+
+describe('decideTurnExit：①b 重复提问门（RR1，历史答复不得冒充实时）', () => {
+  const REPEAT_TEXT = messageTextFor('REPEAT_WITHOUT_EXECUTION');
+
+  it('有在册任务 + 零委派零执行 + 数字结论：确定性话术顶上，事件带任务数', () => {
+    const decision = decideTurnExit(input({
+      intentKind: null,
+      sessionTaskCount: 2,
+      resultText: '上次查到的应收余额是 61000 元。',
+    }));
+    expect(decision).toEqual({
+      kind: 'direct',
+      text: REPEAT_TEXT,
+      outcome: 'repeat_without_execution',
+      events: [{ level: 'warn', event: 'repeat_without_execution', detail: { tasksInSession: 2 } }],
+    });
+  });
+
+  it('三要素缺一不拦：无任务 / 无数字 / 本轮真执行 / task_control 状态查询 / 协议复读走 ②', () => {
+    const figure = '上次查到的应收余额是 61000 元。';
+    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 0, resultText: figure }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, resultText: '任务已完成，我也整理过。' }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, execution: true, resultText: figure }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, taskControlUsed: true, resultText: figure }))).toEqual({ kind: 'ok' });
+    // 协议复读仍归 ②：替换文本是协议材料的宿主转述，而不是重复提问话术。
+    const replay = decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
+    expect(replay.kind).toBe('relay');
+  });
+
+  it('有委派事实（intentKind = delegate）时走 ① 而不是 ①b：两条门的收尾文本各归其位', () => {
+    const decision = decideTurnExit(input({ intentKind: 'delegate', sessionTaskCount: 2, resultText: '幻辰 202609 应收余额为 51 元。' }));
+    expect(decision.kind).toBe('direct');
+    expect(decision.kind === 'direct' ? decision.outcome : '').toBe('delegate_without_execution');
   });
 });

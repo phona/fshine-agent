@@ -94,6 +94,18 @@ describe('执行语言删除 · 对抗形态（同义改写 / 拆分跨行 / 编
     expect(result.text).toContain('TASK_FORBIDDEN');
   });
 
+  it('宿主码表词整族保留：带失败词根的码不被小写臂误删（TASK_NOT_FOUND / TASK_ID_INVALID）', () => {
+    // 小写蛇形臂带 i 旗标，全大写的 TASK_NOT_FOUND / TASK_ID_INVALID 也会命中它——
+    // 没有同一份白名单时，宿主自己的拒绝话术会被删成「: 期望 …」（实测复现）。
+    for (const code of ['TASK_NOT_FOUND', 'TASK_ID_INVALID', 'TASK_FORBIDDEN']) {
+      const result = scrub(`未能完成本轮操作（${code}）。`);
+      expect(result.text, code).toContain(code);
+    }
+    // 平台侧小写码仍然删（白名单是宿主码表精确匹配，不豁免平台码）。
+    const platform = scrub('本期没有找到对应的记录（period_no_data）。');
+    expect(platform.text).not.toContain('period_no_data');
+  });
+
   it('整段都是执行语言时不给用户空气泡（可读内容 < 4 判无内容，由出口替换兜底）', () => {
     const result = scrub('PERIOD_NO_DATA src/dummy/scripts/query.js');
     expect([...result.text].filter((ch) => ch.codePointAt(0)! > 0x7f).length).toBeLessThan(4);

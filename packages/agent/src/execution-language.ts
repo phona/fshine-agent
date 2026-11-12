@@ -80,10 +80,17 @@ export const EXECUTION_LANGUAGE_SCRUB_PATTERNS: ReadonlyArray<{
   // 小写/混合蛇形码（同义改写面）：必须带失败语义词根（或信封状态码 needs_input，宿主
   // 指纹表把它判成错误码），词根表与评测尺独立持有但同义（两份尺子刻意不同源：谁先
   // 收紧，另一边的差异会在评测输出里显形）。
+  //
+  // 白名单同挂（2026-11-12 修）：本臂带 `i` 旗标，宿主码表里以失败词根结尾的码
+  // （TASK_NOT_FOUND / TASK_ID_INVALID）在全大写形态下也会被它命中——不挂白名单时，
+  // 全大写臂保留的码会在本臂被删掉，"TASK_FORBIDDEN 族保留"的文档语义对同族码不成立
+  // （实测：`TASK_NOT_FOUND: 期望 …` 过出口后只剩 `: 期望 …`）。小写形态的平台码不受
+  // 影响：白名单是精确匹配，平台码不在宿主码表里。
   {
     label: '错误码',
     pattern: /(?<![a-z0-9_])(?=[a-z0-9_]*_)(?:[a-z0-9]+_)*(?:not_found|failed|error|invalid|declined|missing|denied|ambiguous|no_data|parse|shape|needs_input)(?:_[a-z0-9]+)*(?![a-z0-9_])/gi,
     shadow: 'folded',
+    whitelist: HOST_ERROR_CODE_NAMES,
   },
   { label: 'JSON 片段', pattern: /candidates\s*:/g, shadow: 'plain' },
   { label: 'operation 名', pattern: new RegExp([String.raw`\b(?=(?:[a-z0-9-]*\.)+[a-z0-9-]*-)[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)+\b`, REGISTERED_OPERATION_ALTERNATION].join('|'), 'g'), shadow: 'tight', whitelist: OPERATION_NAME_WHITELIST },

@@ -153,6 +153,13 @@ export {
   type SkillSummary,
 } from './skills';
 export { createReadSkillTool, readSkillToolDescriptor, type ReadSkillToolOptions } from './skill-tool';
+export {
+  MAX_RESEND_REFS,
+  RESEND_ARTIFACT_DESCRIPTION,
+  RESEND_ARTIFACT_SCHEMA,
+  RESEND_ARTIFACT_TOOL,
+  RESEND_ARTIFACT_TOOL_NAME,
+} from './resend-tool';
 export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
 export {
   activatePendingPlan,

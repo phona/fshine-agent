@@ -1,6 +1,6 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the execution-layer subagent. */
 import type { AgentMessage, AgentTool } from '@earendil-works/pi-agent-core';
-import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, ConversationSessionRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
+import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, ConversationSessionRepo, DiscoveredTool, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
@@ -42,8 +42,10 @@ import {
 import { stripFootprint } from './text-hygiene';
 import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { applyExecutorLabel, loadAgentProfile } from './agent-profile';
+import { messageTextFor } from './error-codes';
 import { renderSkillCatalog, type SkillSummary } from './skills';
 import { readSkillToolDescriptor } from './skill-tool';
+import { parseResendRefs } from './resend-tool';
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
@@ -114,6 +116,12 @@ export interface TaxAgentRuntimeDeps {
    * 缺省 = 不注册（没有技能面的部署与测试替身拿到的工具面与接线前一致）。
    */
   readSkillTool?: AgentTool;
+  /**
+   * `resend_artifact` 重发工具（W4 直连形态）：注入即注册到 Main 工具面，refs 记账后由
+   * handler 依会话产物库解析成文件。开关条件 = 部署有会话产物库（`store.sessionArtifacts`
+   * 存在）——缺库时注册它等于给模型一个"调了永远答没有交付过"的假工具。
+   */
+  resendArtifactTool?: DiscoveredTool;
   /** 执行层称谓（C2）：profile 声明经装配注入，替换角色文本里的 {{executorLabel}}；缺省 = 宿主中性值。 */
   executorLabel?: string;
 }
@@ -388,7 +396,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       // 多任务消歧（多任务回溯）的编号回复：上一条 assistant 事件是宿主的消歧问题且
       // 本条是纯编号，才算用户选定了任务。宿主只解决"哪个任务"（机械），继续做什么
-      // 仍由模型在本回合申报；计划绑定在本回合由宿主强制（preferredPlanId）。
+      // 仍由模型在本回合决定（调用委派工具并在 request 里说明）；计划绑定在本回合由
+      // 宿主强制（preferredPlanId）。
       const planChoice = taskEventContext ? null : await matchPlanDisambiguationReply(deps, ctx, userMessage);
       if (planChoice) {
         console.info(JSON.stringify({ event: 'plan_disambiguation_matched', requestId: ctx.requestId, planId: planChoice.planId }));
@@ -456,6 +465,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 回答依据只能是保留的转录与本轮平台获取。
       const tools = [
         deps.platformTask.tool,
+        // 重发工具紧随委派工具：两者都是模型可主动选择的"这一轮要办的事"，注册由装配按
+        // 会话产物库是否在场决定（缺库不注册）。
+        ...(deps.resendArtifactTool ? [deps.resendArtifactTool] : []),
         ...(deps.readSkillTool ? [readSkillToolDescriptor(deps.readSkillTool)] : []),
         ...(!taskEventContext && deps.backgroundTasks ? [TASK_CONTROL_TOOL] : []),
       ];
@@ -470,6 +482,28 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         turn.planStepOutcomes = [...taskEventContext.planStepOutcomes];
         turn.execution = taskResultFromEvent(taskEventContext.event)?.execution ?? null;
       }
+      // RR1 门（2026-11-12 补齐）的宿主持有事实：本回合是否用过 task_control（显式状态
+      // 查询——它的答复本就来自宿主状态面，不需要重新执行）。
+      let taskControlUsed = false;
+      // 在册任务数（惰性查询 + 每回合缓存）：只在出口门确有可能成立时才查，避免每回合
+      // 一次存储读取。存储不可用 = 没有可依据的事实 → 记 0（门不开，不猜、不阻塞回合）。
+      let registeredTaskCount: number | undefined;
+      const countRegisteredTasks = async (): Promise<number> => {
+        if (registeredTaskCount !== undefined) return registeredTaskCount;
+        try {
+          registeredTaskCount = deps.platformTasks
+            ? (await deps.platformTasks.listBySession(ctx.principalId, ctx.sessionId)).length
+            : 0;
+        } catch (error) {
+          console.warn(JSON.stringify({
+            event: 'session_task_count_failed',
+            requestId: ctx.requestId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+          registeredTaskCount = 0;
+        }
+        return registeredTaskCount;
+      };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -552,13 +586,21 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         exec: async (tool, args, signal) => {
           if (tool === TASK_CONTROL_TOOL_NAME) {
             if (!deps.backgroundTasks) return { error: '后台任务控制当前不可用。' };
+            taskControlUsed = true;
             return executeTaskControl(deps.backgroundTasks, ctx, args);
           }
           if (tool === deps.platformTask.tool.name) {
             // 直连委派（移除申报层）：模型直接调用执行层工具，宿主在这里承接原来申报分支
             // 的全部确定性守卫——实体来源、计划绑定、后台派发、失败分类与结果交还。
             const request = String(args['request'] ?? '');
-            const continueTaskId = typeof args['taskId'] === 'string' && args['taskId'].trim() ? args['taskId'] : undefined;
+            // taskId 形状校验（E1，fail-closed；2026-11-12 补齐）：键在场但值非法（空串/
+            // 空白/非字符串）时不静默按新任务处理——那会让"续跑"悄悄换子任务，且让
+            // context.ts 的 TASK_ID_INVALID 在直连入口不可达。错误话术与 context.ts 入口
+            // 同一码表来源（TASK_ID_INVALID），发生在任何派发之前（零平台调用）。
+            if (args['taskId'] !== undefined && (typeof args['taskId'] !== 'string' || args['taskId'].trim() === '')) {
+              throw new ToolUserError(messageTextFor('TASK_ID_INVALID'), { code: 'TASK_ID_INVALID' });
+            }
+            const continueTaskId = typeof args['taskId'] === 'string' ? args['taskId'] : undefined;
             // 宿主持有的委派事实：出口的执行痕迹门（delegate_without_execution）与调用审计
             // 都以"本回合真的调用过委派工具"为准，不再依赖模型申报。
             turn.intent = { kind: 'delegate', request, ...(continueTaskId ? { continueTaskId } : {}) };
@@ -874,6 +916,27 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
           }
 
+          if (deps.resendArtifactTool && tool === deps.resendArtifactTool.name) {
+            // 重发路由（W4 直连形态）：模型只提交"重发哪几个产物"，引用形状在这里复检
+            // （不信任 schema）——合法则记账后终止本回合，非法则把可行动话术作为**可恢复
+            // 工具错误**交还模型（不终结、不消耗用户澄清轮次、零平台调用、零文件）。
+            // 存在性/淘汰/字节/摘要一律不在这里判：那是 handler 依会话产物库的确定性回答
+            // （runtime 不 import 产物库，保持 turn-state.ts 的既有边界）。
+            const parsed = parseResendRefs(args);
+            if (!parsed.ok) return { error: parsed.error };
+            for (const ref of parsed.refs) turn.resendRefs.push(ref);
+            // 只记编号，无路径；会话归属与 ref 有效性由 handler 用 trusted sessionId 解析。
+            console.info(JSON.stringify({
+              event: 'turn_resend_declared',
+              requestId: ctx.requestId,
+              sessionId: ctx.sessionId,
+              refs: parsed.refs,
+            }));
+            // terminate 保证重发回合零委派（R1 的零平台调用由此保证）；占位文本由 handler
+            // 依产物记录合成正式回复（带生成时间与文件回挂），这里非空即可。
+            throw new ToolUserError(`重发产物 #${parsed.refs.join('、#')}。`);
+          }
+
           if (deps.readSkillTool && tool === deps.readSkillTool.name) {
             // 技能按需读取（C 轨桥）：未知名 / 文件不可读 / 发现失败都是**可恢复**的模型侧
             // 输入——可行动话术（含可用清单）交还模型继续本轮，不终结回合（ToolUserError
@@ -936,6 +999,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 而 Stage 3 实测事故的形状恰恰是 execution 为真（检索类调用真的发生过、gateCalls>0）
       // 而模型把内部协议材料原样当回复。判据只有形状（协议 JSON 的字段名），不嗅探内容。
       const protocolReplay = looksLikeProtocolMaterial(result.text);
+      // RR1 门的会话事实（惰性）：只有上面所有其他闸门都可能成立（本回合零委派零执行、
+      // 回复带数字结论）时才查一次"本会话在册任务数"。taskEventContext（后台事件回合）
+      // 不是用户实时提问，不适用本门。
+      const repeatGateCandidate = !taskEventContext && !turn.delegationFailed && !turn.intent
+        && !turn.execution && !turn.pendingPlan && !result.pendingPlan && !turn.backgroundStarted
+        && !taskControlUsed && !protocolReplay && hasFinancialFigure(result.text);
+      const sessionTaskCount = repeatGateCandidate ? await countRegisteredTasks() : 0;
       // 出口校验的两段门（执行痕迹门 + 协议复读门）判定住 turn-exit.ts：纯函数，只回答
       // "这一回合外发什么、记什么事件"。副作用留在调用点——日志按决策带回的级别打，
       // needsRelay 只拿决策选中的文本，确定性话术经 finishDirectReply 提前返回。
@@ -958,6 +1028,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         lastNeeds: turn.lastNeeds,
         activatedPlan: turn.activatedPlan,
         protocolReplay,
+        sessionTaskCount,
+        taskControlUsed,
         resultText: result.text,
         hasFinancialFigure,
         usefulWorkerNote,

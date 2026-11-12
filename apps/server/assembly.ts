@@ -27,6 +27,7 @@ import {
   loadAgentProfile,
   loadOperationArgSpecs,
   loadProposalSchema,
+  RESEND_ARTIFACT_TOOL,
   reviewProposalWithDriver,
   newGateSecret,
   parseContextWindow,
@@ -475,6 +476,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // Main 协作技能面（Track D）：元数据（名称+描述）随装配注入，正文留给 read_skill 按需读。
     ...(skillCatalog.length > 0 ? { skillCatalog } : {}),
     ...(readSkillTool ? { readSkillTool } : {}),
+    // 重发工具（W4 直连形态）：能力开关 = 会话产物库在场（与每回合注入产物清单同一条件，
+    // 见 handler 的 loadArtifactManifest）。缺库的部署不注册——注册了也没有可解析的引用。
+    ...(store.sessionArtifacts ? { resendArtifactTool: RESEND_ARTIFACT_TOOL } : {}),
     // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 角色文本
     // 的 {{executorLabel}} 占位；未声明 = 宿主中性缺省，不静默取实例名。
     ...(activeProfile?.executorLabel ? { executorLabel: activeProfile.executorLabel } : {}),

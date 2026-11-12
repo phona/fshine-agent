@@ -66,11 +66,13 @@ export function assembleTurnContext(input: TurnContextInput): AgentMessage[] {
   if (input.historyNote) {
     context.unshift({ role: 'user', content: input.historyNote, timestamp: Date.now() } as unknown as AgentMessage);
   }
-  // 消歧结果同样落在最头部：用户刚选定的任务，是本轮申报的直接依据。
+  // 消歧结果同样落在最头部：用户刚选定的任务，是本轮委派的直接依据。文案随直连改造
+  // 同步（2026-11-12）：教"直接调用委派工具 + request/taskId 怎么填"，不再出现申报层
+  // 术语（delegate 申报）；绑定仍归宿主（preferredPlanId），措辞不得放松"不要改绑"。
   if (input.planChoice) {
     context.unshift({
       role: 'user',
-      content: `【宿主消歧结果】用户从多个未完成任务中选择了：${input.planChoice.label}。要继续该任务就申报对应步骤的 delegate；宿主会把计划绑定到它。不要改绑其他未完成任务。`,
+      content: `【宿主消歧结果】用户从多个未完成任务中选择了：${input.planChoice.label}。要继续该任务就直接调用委派工具（request 写该任务的下一步，taskId 填该任务此前返回的编号）；宿主会把计划绑定到它。不要改绑其他未完成任务。`,
       timestamp: Date.now(),
     } as unknown as AgentMessage);
   }
