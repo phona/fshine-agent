@@ -1,5 +1,5 @@
 /** Main Pi Agent runtime with one narrow delegation tool for the execution-layer subagent. */
-import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import type { AgentMessage, AgentTool } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, ConversationSessionRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
@@ -42,7 +42,9 @@ import {
 import { stripFootprint } from './text-hygiene';
 import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
 import { messageTextFor } from './error-codes';
-import { BUSINESS_SKILL_HEADING, DATE_SUFFIX, DEFAULT_EXECUTOR_LABEL, buildSystemPrompt } from './system-prompt';
+import { applyExecutorLabel, loadAgentProfile } from './agent-profile';
+import { renderSkillCatalog, type SkillSummary } from './skills';
+import { readSkillToolDescriptor } from './skill-tool';
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
@@ -98,11 +100,25 @@ export interface TaxAgentRuntimeDeps {
    */
   taskPlans?: TaskPlanRepo;
   /**
-   * 编排层业务 skill 的静态程序性知识（架构 §5）：由部署层启动时读文件注入，
-   * 每回合追加进系统提示词（与日期行同性质）。缺省 = 不注入，不影响其他能力。
+   * Main Agent 常驻角色指令（唯一事实来源 = `.agents/agents/fshine-main/agent.md`）。
+   *
+   * createServerAssembly 在启动时读取一次（失败 = 启动失败，带路径与原因）经此注入三条
+   * 装配路径。直连本工厂的调用方（测试 / CLI 脚本）不给时，在首次装配提示词时读取**同一份**
+   * 缺省 Profile——同一事实源，绝不回退任何旧提示词。A/B 对照实验臂经装配层注入替身文本
+   * （程序化 seam，不是配置项也不是环境变量）。
    */
-  businessSkill?: string;
-  /** 执行层称谓（C2）：部署层按 profile 声明注入进系统提示词；缺省 = 宿主中性值。 */
+  roleInstructions?: string;
+  /**
+   * Main 协作技能清单（名称+描述，宿主装配期发现；**正文不注入**，留给 read_skill 按需
+   * 读取）。缺省 = 不曝光技能面。
+   */
+  skillCatalog?: readonly SkillSummary[];
+  /**
+   * `read_skill` 工具桥（C 轨）：注入即注册到 Main 工具面，执行回本 runtime 的 exec 分发。
+   * 缺省 = 不注册（没有技能面的部署与测试替身拿到的工具面与接线前一致）。
+   */
+  readSkillTool?: AgentTool;
+  /** 执行层称谓（C2）：profile 声明经装配注入，替换角色文本里的 {{executorLabel}}；缺省 = 宿主中性值。 */
   executorLabel?: string;
 }
 
@@ -118,13 +134,33 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   const taskEventInFlight = new Map<string, Promise<AgentReply | null>>();
   const taskEventContexts = new WeakMap<TrustedContext, RuntimeTaskEventContext>();
   const taskEventContinuationAccepted = new WeakSet<TrustedContext>();
-  // 业务 skill（架构 §5）：静态程序性知识，每回合进系统提示词；与日期行同性质，
-  // 缺文件/缺配置时为空，其余能力不受影响。
-  const businessSkill = typeof deps.businessSkill === 'string' ? deps.businessSkill.trim() : '';
-  // 日期尾注拼最尾部（跨天只有尾注一行未命中）。baseSystemPrompt 的称谓经
-  // deps.executorLabel 注入（C2，缺省中性），工厂内只构造一次，恢复路径复用。
-  const baseSystemPrompt = buildSystemPrompt(deps.executorLabel ?? DEFAULT_EXECUTOR_LABEL);
-  const systemPrompt = `${businessSkill ? `${baseSystemPrompt}\n\n${BUSINESS_SKILL_HEADING}\n${businessSkill}` : baseSystemPrompt}\n\n${DATE_SUFFIX}`;
+  // Main 常驻角色指令（唯一来源 = agent.md，Track D 换源）：装配期注入优先；未注入（直连
+  // runtime 的测试 / 脚本）就在首次装配提示词时读同一份缺省 Profile，读一次缓存。读取失败
+  // 向上抛（可定位错误），绝不静默回退任何旧提示词。A/B 对照的 roleInstructions 走 d.ts
+  // 的注入缝（程序化 seam），不是第二份配置入口。
+  let roleInstructionsPromise: Promise<string> | undefined;
+  const loadRoleInstructions = (): Promise<string> => {
+    roleInstructionsPromise ??= deps.roleInstructions !== undefined
+      ? Promise.resolve(deps.roleInstructions)
+      : loadAgentProfile().then((profile) => profile.instructions);
+    return roleInstructionsPromise;
+  };
+  // 静态角色文本 + 装配期占位替换（{{executorLabel}} → 生效称谓，缺省中性）：只装配一次。
+  let baseSystemPromptPromise: Promise<string> | undefined;
+  const baseSystemPrompt = (): Promise<string> => {
+    baseSystemPromptPromise ??= loadRoleInstructions().then((instructions) => applyExecutorLabel(instructions, deps.executorLabel));
+    return baseSystemPromptPromise;
+  };
+  // 日期尾注（动态）：与原实现同频（runtime 装配时求值一次），拼在组装文本最尾部
+  // （prompt cache 按前缀命中：动态内容后置只炸尾行）。
+  const dateSuffix = `今天是 ${new Date().toISOString().slice(0, 10)}（北京时间 ${new Date(Date.now() + 8 * 3600_000).toISOString().slice(0, 16).replace('T', ' ')}）。回答与时间相关的问题时以这个日期为准，不要凭印象编月份。`;
+  // 技能元数据块（名称+描述，无正文）：在角色文本之后、日期之前拼进正常回合的系统提示词。
+  const skillCatalogBlock = renderSkillCatalog(deps.skillCatalog ?? []);
+  let mainSystemPromptPromise: Promise<string> | undefined;
+  const mainSystemPrompt = (): Promise<string> => {
+    mainSystemPromptPromise ??= baseSystemPrompt().then((base) => [base, ...(skillCatalogBlock ? [skillCatalogBlock] : []), dateSuffix].join('\n\n'));
+    return mainSystemPromptPromise;
+  };
   // 计划步骤事实的写入器：工厂只在 runtime 装配时建一次，factId 的序号计数器因此是
   // **每 runtime 实例**递增（不是每回合）——同一计划同一步同一状态在两个回合各追加一次
   // 也必须拿到不同 factId，否则撞存储 UNIQUE（append 失败只记日志不阻塞回合，步骤事实
@@ -261,9 +297,9 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         ];
         const deadline = Date.now() + Math.min(turnBudgetMs, 60_000);
         const answer = await deps.driver.run({
-          systemPrompt: `${baseSystemPrompt}\n\n${resumedBlocked
+          systemPrompt: `${await baseSystemPrompt()}\n\n${resumedBlocked
             ? '本轮子任务按用户确认重跑后没有产生任何平台执行。'
-            : '本轮子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。\n\n${DATE_SUFFIX}`,
+            : '本轮子任务已由宿主根据用户确认的计划执行完毕。'}只能依据附带的宿主执行结果回答，不得请求新工具或扩大查询范围。\n\n${dateSuffix}`,
           tools: [],
           messages,
           onStep: ctx.onStep ?? (() => {}),
@@ -421,6 +457,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 召回轮没有"模型自己翻旧账"这条路径，回答依据只能是保留的转录与本轮平台获取。
       const tools = [
         ROUTE_CURRENT_TURN_TOOL,
+        ...(deps.readSkillTool ? [readSkillToolDescriptor(deps.readSkillTool)] : []),
         ...(!taskEventContext && deps.backgroundTasks ? [TASK_CONTROL_TOOL] : []),
       ];
       // 回合契约：Main Agent 必须显式申报本轮动作，宿主留存并校验证据。
@@ -509,8 +546,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
        * 不可用时的降级同族）。降级与留痕住 session-entities.ts，这里只调用。
        */
       const turnDeadline = Date.now() + turnBudgetMs;
-      const runMainAgent = (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
-        systemPrompt,
+      const runMainAgent = async (messages: AgentMessage[]): Promise<TurnDriverResult> => deps.driver.run({
+        systemPrompt: await mainSystemPrompt(),
         tools,
         messages,
         onStep: taskEventContext ? (() => {}) : ctx.onStep ?? (() => {}),
@@ -897,6 +934,22 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               request: String(args['request'] ?? ''),
               ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
             }, { trusted: ctx }, signal);
+          }
+          if (deps.readSkillTool && tool === deps.readSkillTool.name) {
+            // 技能按需读取（C 轨桥）：未知名 / 文件不可读 / 发现失败都是**可恢复**的模型侧
+            // 输入——可行动话术（含可用清单）交还模型继续本轮，不终结回合（ToolUserError
+            // 在驱动侧语义是"这段文本成为终稿"，这里必须转成普通工具结果）。
+            try {
+              const result = await deps.readSkillTool.execute('main_read_skill', args as { name: string }, signal);
+              const text = (result.content ?? [])
+                .filter((part): part is { type: 'text'; text: string } => part.type === 'text')
+                .map((part) => part.text)
+                .join('\n')
+                .trim();
+              return text || `技能「${String(args['name'] ?? '')}」正文为空。`;
+            } catch (error) {
+              return { error: error instanceof Error ? error.message : '技能读取失败。' };
+            }
           }
           throw new ToolUserError('当前主 Agent 未授权该工具。');
         },

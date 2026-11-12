@@ -5,7 +5,8 @@
  * 本 commit 拥有的 describe 块，红了能归因到具体常量（F4），不整树查。
  *
  * 覆盖（按 W1 方案 C1 清单）：
- *   · C2 块：执行层称谓 DEFAULT_EXECUTOR_LABEL / SYSTEM_PROMPT（system-prompt.ts）
+ *   · C2 块：执行层称谓 DEFAULT_EXECUTOR_LABEL / agent.md 的 {{executorLabel}} 占位
+ *     （Track D 换源后住 agent-profile.ts；旧 system-prompt.ts 已删除）
  *   · C3 块：委派工具名 RUN_EXECUTION_TASK_TOOL（context.ts:54）
  *   · C4 块：委派工具描述与 schema 两条 description（context.ts:81 / :467-468）
  *   · C5 块：profileId 缺省 'example-gateway'（context.ts:752）
@@ -17,9 +18,9 @@
  * 归属纪律（F4）：每个块的头部注释写明翻转它的 commit。改生产代码时只翻自己那块，
  * 其余断言一条不动；翻转清单写进各 commit message。
  *
- * SYSTEM_PROMPT 的**全文**逐字节冻结不在本文件复制第二份（L2 单一来源）：权威在
- * system-prompt.test.ts 的 D-122 frozen base64，本块只钉称谓常量与"称谓在提示词里
- * 恰好出现一次"的结构事实。
+ * 旧 SYSTEM_PROMPT 全文冻结（D-122 golden）随 system-prompt.ts 删除退役（Track D）：角色
+ * 文本的唯一事实源是 `.agents/agents/fshine-main/agent.md`（装配验收住 system-prompt.test.ts），
+ * 本块只钉称谓常量与占位替换的结构事实。
  *
  * 取值口径：全部为 C1 落地时（波次 2 之后 HEAD，merge 7ba775d）的实测当前值。注意
  * 波次 1 脱敏已把部分 "example-gateway 平台" 字样换成 "幻账平台"（如 RUN_EXECUTION_TASK_DESCRIPTION
@@ -45,7 +46,7 @@ import {
 import { messageFor, planDraftExample, planFileExample } from './src/error-codes';
 import { resolveActiveProfileId } from '@fshine/contracts';
 import { resolveGatewayText } from './src/platform-contract';
-import { DEFAULT_EXECUTOR_LABEL, SYSTEM_PROMPT, buildSystemPrompt } from './src/system-prompt';
+import { applyExecutorLabel, DEFAULT_EXECUTOR_LABEL, EXECUTOR_LABEL_PLACEHOLDER } from './src/agent-profile';
 import { evaluateAndActivatePlan, type PlanCliRunner } from './src/plan-runtime';
 import { ToolUserError, type TurnDriver, type TurnDriverInput } from './src/driver';
 
@@ -82,25 +83,24 @@ function readSrc(rel: string): string {
 }
 
 describe('W1 执行层身份面 golden（C1 冻结）', () => {
-  // ── C2 归属块：称谓参数化（DEFAULT_EXECUTOR_LABEL 中性缺省 + profile.executorLabel）──
-  describe('C2 块：执行层称谓（system-prompt.ts）', () => {
+  // ── C2 归属块：称谓参数化（Track D 后：DEFAULT_EXECUTOR_LABEL + agent.md 占位）──
+  describe('C2 块：执行层称谓（agent-profile.ts + agent.md 占位）', () => {
     it('DEFAULT_EXECUTOR_LABEL 当前值（C2 起中性缺省）', () => {
       expect(DEFAULT_EXECUTOR_LABEL).toBe('执行层子 Agent');
       expect(DEFAULT_EXECUTOR_LABEL).not.toContain('example-gateway');
     });
 
-    it('SYSTEM_PROMPT = buildSystemPrompt(缺省称谓)，且称谓恰好出现一次', () => {
-      expect(SYSTEM_PROMPT).toBe(buildSystemPrompt(DEFAULT_EXECUTOR_LABEL));
-      expect(SYSTEM_PROMPT.split(DEFAULT_EXECUTOR_LABEL)).toHaveLength(2);
-      expect(SYSTEM_PROMPT).toContain(`申报 delegate 后由宿主把加工后的请求委派 ${DEFAULT_EXECUTOR_LABEL} 执行。`);
+    it('agent.md 用显式占位参数化称谓：注入实例称谓生效、缺省中性、文件本体无实例名', () => {
+      const content = readSrc('.agents/agents/fshine-main/agent.md');
+      expect(content).toContain(EXECUTOR_LABEL_PLACEHOLDER);
+      // 实例名 needle 拆段拼回（与 public-surface-lint 同规）：守卫自身不落字面量。
+      expect(content).not.toContain('1' + '7dz');
+      expect(applyExecutorLabel(content, '示例称谓')).toContain('示例称谓');
+      expect(applyExecutorLabel(content, '示例称谓')).not.toContain(EXECUTOR_LABEL_PLACEHOLDER);
+      expect(applyExecutorLabel(content)).toContain(DEFAULT_EXECUTOR_LABEL);
     });
 
-    it('注入实例称谓时委派句随参数替换（财税部署经 profile.executorLabel 声明）', () => {
-      expect(buildSystemPrompt('执行层子 Agent')).toContain('委派 执行层子 Agent 执行');
-    });
-
-    // 恢复回合整理提示词与 :149 同一模板块（runtime.ts）：C2 同commit翻转，避免 F4
-    // 归因撕裂——两条 example-gateway 字面量随该块一起去实例名。
+    // 恢复回合整理提示词与主路径同一模板块（runtime.ts）：恢复约束话术照旧在 runtime 装配。
     it('恢复回合整理提示词两条话术已去实例名（runtime.ts，源码逐字）', () => {
       const src = readSrc('packages/agent/src/runtime.ts');
       expect(src).toContain('本轮子任务按用户确认重跑后没有产生任何平台执行。');

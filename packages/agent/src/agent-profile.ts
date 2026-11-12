@@ -38,6 +38,27 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..
 /** 缺省 Profile 位置：仓库根 `.agents/agents/fshine-main/agent.md`。 */
 export const DEFAULT_AGENT_PROFILE_PATH = path.join(REPO_ROOT, '.agents', 'agents', 'fshine-main', 'agent.md');
 
+/**
+ * Main 角色文本里的执行层称谓**显式占位**：装配期替换为生效称谓（profile 声明；缺省中性）。
+ * 占位而不是写死——agent.md 本体不许携带任何部署实例名（system-prompt.test.ts 守卫）。
+ */
+export const EXECUTOR_LABEL_PLACEHOLDER = '{{executorLabel}}';
+
+/**
+ * 执行层称谓的宿主中性缺省（原 `system-prompt.ts` 的 DEFAULT_EXECUTOR_LABEL，Track D 随
+ * 角色文本一并迁移到此：占位符与它的缺省值同处一个事实源）。不取任何实例名。
+ */
+export const DEFAULT_EXECUTOR_LABEL = '执行层子 Agent';
+
+/**
+ * 装配期替换：显式占位 → 生效称谓（缺省中性）。没有占位的正文原样返回（行为中性，
+ * 不因为"忘了放占位"而报错或注入任何称谓）。
+ */
+export function applyExecutorLabel(instructions: string, executorLabel?: string): string {
+  const label = (executorLabel ?? '').trim() || DEFAULT_EXECUTOR_LABEL;
+  return instructions.split(EXECUTOR_LABEL_PLACEHOLDER).join(label);
+}
+
 export async function loadAgentProfile(options: LoadAgentProfileOptions = {}): Promise<AgentProfile> {
   const sourcePath = path.resolve(options.path ?? DEFAULT_AGENT_PROFILE_PATH);
   let raw: string;

@@ -1834,6 +1834,10 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       }
       if (submission) {
         const resolved = submission;
+        // T3 后果段接线：本回合模型叙述 = 请求这次提交的 assistant 文本块原文（拿不到就
+        // 不写、不编造——渲染面明说没有后果说明）。它只进确认/通知面的「后果」段，不是
+        // 新的授权来源：授权仍归宿主确认门与计划激活，叙述不参与任何判定。
+        const consequenceNarrative = textFromContent(ctx.assistantMessage?.content).trim();
         // ── 计划提交审计（补 tool_calls 缺口）────────────────────────────────────
         // 为什么必须在这里上报：整条计划分支**提前 return，不经 gate()**，serve-gate 的
         // onEvent 一次都不触发——于是"worker 提交了什么方案"在 tool_calls 里查不到，
@@ -1845,7 +1849,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         // 变成结构事实——新增一条裁决出口时不需要记得再补一次上报，漏不掉。
         let reason = '';
         try {
-          const planVerdict = await decidePlanSubmission(resolved);
+          const planVerdict = await decidePlanSubmission(resolved, consequenceNarrative || undefined);
           reason = planVerdict.reason ?? '';
           return planVerdict;
         } finally {
@@ -2099,7 +2103,7 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    * onEvent 不会触发，审计必须在返回前由宿主自己上报（见 beforeToolCall 的调用处）。
    * 裁决逻辑与顺序一字未动——函数化不改变任何判定，只让"上报一次"有地方挂。
    */
-  async function decidePlanSubmission(parsed: { calls: PlanCall[]; userConfirmed?: boolean }): Promise<ServeGateVerdict> {
+  async function decidePlanSubmission(parsed: { calls: PlanCall[]; userConfirmed?: boolean }, consequenceNarrative?: string): Promise<ServeGateVerdict> {
     // 结构化事实（D-065）：calls 是宿主自己解析的不是 worker 文本——上报给驱动侧
     // latch，结果时刻随 TurnDriverResult.planFacts 上交（规格声明名机械提取取值）。
     options.onPlanSubmitted?.(parsed.calls);
@@ -2182,6 +2186,8 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         calls: parsed.calls,
         onNotice: options.onNotice,
         userConfirmed: parsed.userConfirmed,
+        // T3：本回合模型叙述原样进「后果」段（拿不到就不传，渲染面明说没有、不补写）。
+        ...(consequenceNarrative ? { consequenceNarrative } : {}),
         runCli: options.planCliRunner,
         activationSecret: options.planActivationSecret,
         // T6 任务级确认门兜底：把本会话已授权花掉的预算交给叠加档，累计进 confirm 档即停。

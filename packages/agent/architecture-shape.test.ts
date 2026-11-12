@@ -90,8 +90,17 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 声明经 createTaxAgentRuntime deps 注入 buildSystemPrompt（D-122 收口——宿主缺省改
  * 中性，实例称谓由部署层按 profile 声明）。deps 一字段 + 工厂内一次构造（恢复路径复用
  * 同一份，无第二构造点）。+3，后续抽取时照旧只减不增。
+ * （以上历史条目里的 SYSTEM_PROMPT / buildSystemPrompt / DATE_SUFFIX 符号随
+ * system-prompt.ts 在 2026-11-12 Track D 删除而退役；条目按史实保留。）
+ *
+ * 1337 → 1222（2026-11-12，Track D：Main 角色指令换源 + A/B 注入缝 + read_skill 接线）。
+ * 本批净 +53 行（+70/−17）：角色文本改从 `.agents/agents/fshine-main/agent.md` 装配
+ * （装配期占位替换、缺省读同一份文件、失败即抛，不再有静态长文副本）、技能元数据块
+ * 与 read_skill 分发各一处接线。这不是抽取：常数按本批后的真实行数从 1337 收紧到
+ * 1222——runtime 在此前波次里缩过水而常数未同步下调，差额是既有余量；余量等于没压，
+ * 这里按"只减不增"纪律把常数落到当前真实值。
  */
-const RUNTIME_LINE_BUDGET = 1337;
+const RUNTIME_LINE_BUDGET = 1222;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

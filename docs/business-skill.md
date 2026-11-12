@@ -5,12 +5,12 @@
 >
 > 也**不含任何执行默认值**："未指定时间范围查哪个范围""未指定对象默认哪个对象""名称怎么解析"
 > 归执行层（能力清单 / 域 SOP / SKILL），这里一条都不写——写了就成第二份真相。
-> `apps/server/business-skill.test.ts` 的执行默认词表守卫机械盯着这件事。
 >
-> 加载：`config/agent.yaml` 的可选项 `businessSkillPath` 指向本文件（默认
-> `docs/business-skill.md`），服务启动时读入并注入主 Agent 的系统提示词；文件缺失 =
-> 跳过，不影响其他能力。这份 skill 只有路由与编排纪律，**没有任何一条"怎么做是对的"**——
-> 它是一张地图，不是执行手册的副本。
+> **迁移状态（2026-11-12，Track D）**：本文件**不再被运行时加载注入**——旧的
+> `businessSkillPath` / `BUSINESS_SKILL_PATH` 注入链已删除；主 Agent 的常驻角色定义归
+> `.agents/agents/fshine-main/agent.md`，跨步骤编排知识按需经 `.agents/skills` 的技能暴露。
+> 本文件保留作迁移历史参考，以及 UX A/B 控制臂的冻结副本来源
+> （`scripts/eval/ux-ab/control/legacy-business-skill.md`）。内容修订不改变任何生产行为。
 
 ## 用途
 

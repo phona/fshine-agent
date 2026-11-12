@@ -116,9 +116,9 @@ wecom:
 # execution:
 #   planActivationSecret:
 
-# ---- 编排层业务 skill(可选,架构 §5):只含程序性知识(任务类别与拆解表/每类必需信息/拆解原则),
-#      用于长任务拆解与信息补齐;不含任何执行口径(那归执行层 SKILL)。
-#      相对仓库根路径或绝对路径;文件缺失 = 跳过,不影响启动。范文见 docs/business-skill.md。
-# businessSkillPath: docs/business-skill.md
+# 说明:主 Agent 的常驻角色定义在 .agents/agents/fshine-main/agent.md(装配期读取;
+# 文件缺失/不可读 = 启动失败)。协作技能按需读取:.agents/skills/<名称>/SKILL.md
+# (只曝光名称+描述,正文经 read_skill 按需读取;目录不存在 = 技能面为空)。
+# 旧的 businessSkillPath / BUSINESS_SKILL_PATH 注入链已删除,不要再配置它。
 
 # ---- 执行层治理变量的权威名以该执行层声明为准，见 .env.example 头部说明 ----

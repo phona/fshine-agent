@@ -41,7 +41,7 @@ import type { PlanCliRunner } from './src/plan-runtime';
 import { FakeSessionRepo } from './test-helpers';
 
 /** 假 agent 的单个模型回合：要发起哪些 bash、收尾文本、出错与挂起（超时用）。 */
-type FakeTurn = { bash?: string[]; text?: string; errorMessage?: string; hangMs?: number; throws?: string };
+type FakeTurn = { bash?: string[]; text?: string; narrative?: string; errorMessage?: string; hangMs?: number; throws?: string };
 
 /** 放行的平台调用回给 worker 的应答：合法的 RESULT 信封，不带任何"输入不足"错误码。 */
 const OK_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"completed","data":{"ok":true},"error":null}';
@@ -76,7 +76,10 @@ const fake = vi.hoisted(() => {
             index += 1;
             const callId = `call_${record.rounds}_${index}`;
             const ctx = {
-              assistantMessage: {},
+              // 本回合模型叙述（T3）：beforeToolCall 从 assistantMessage 文本块取后果叙述。
+              assistantMessage: turn.narrative
+                ? { role: 'assistant', content: [{ type: 'text', text: turn.narrative }] }
+                : {},
               toolCall: { id: callId, type: 'toolCall', name: 'bash', arguments: { command } },
               args: { command },
               context: {},
@@ -229,6 +232,63 @@ describe('执行足迹：真实调用发生过就不误判空（A3/A4 回归）'
     expect(result.execution).toBeUndefined();
     expect(result.activatedPlan).toBeUndefined();
     expect(result.needs).toBeUndefined();
+  });
+});
+
+// ── T3 遗留接线：本回合模型叙述进确认帧「后果」段（不成为授权来源）────────────
+
+/** 计划 CLI 替身：确认档（停在用户确认门），记录每次 CLI 调用供"确认前零执行"对账。 */
+function confirmingPlanRunner(cliCalls: string[]): PlanCliRunner {
+  return async ({ args }) => {
+    cliCalls.push(args.join(' '));
+    if (args[1] === 'current') return { code: 0, stdout: JSON.stringify({ taskId: 't', planId: null, version: null, status: 'none' }), stderr: '' };
+    if (args[1] === 'evaluate') return {
+      code: 0,
+      stdout: JSON.stringify({
+        planId: 'plan_confirm_narrative', version: 2, decision: 'confirm',
+        estimate: { calls: 30, seconds: 600, weight: 2 }, delta: { addedCalls: 30 }, cumulative: { calls: 30, seconds: 600 },
+        reasonCode: 'CONFIRM_THRESHOLD', status: 'confirming', noticeText: '第 1 批查询',
+      }),
+      stderr: '',
+    };
+    throw new Error(`unexpected CLI call: ${args.join(' ')}`);
+  };
+}
+
+describe('T3 确认帧「后果」段：模型叙述只进后果段，确认前零执行', () => {
+  it('本回合模型叙述进确认帧后果段；范围段不吃模型措辞；零执行前没有任何 activate', async () => {
+    const cliCalls: string[] = [];
+    const notices: string[] = [];
+    const { driver, cwd } = await makeDriver(confirmingPlanRunner(cliCalls));
+    const narrative = '这会读取对象甲 202609 的全部应收单据，只做核对，不改动任何数据。';
+    fake.setScript([{ bash: [PLAN_COMMAND], narrative, text: '已停在确认门。' }]);
+
+    const result = await driver.run({ ...runInput(cwd), onNotice: async (text) => { notices.push(text); } });
+
+    expect(result.pendingPlan?.decision).toBe('confirm');
+    expect(notices).toHaveLength(1);
+    const frame = notices[0]!;
+    expect(frame).toContain(`后果：${narrative}`);
+    // 叙述只进后果段，不冒充范围机械事实
+    const scopeLine = frame.split('\n').find((line) => line.includes('范围：')) ?? '';
+    expect(scopeLine).not.toContain(narrative);
+    // 说法与真实执行状态一致：确认前零执行（没有 execution 足迹）
+    expect(result.execution).toBeUndefined();
+    expect(frame).toContain('本次计划尚未执行任何调用');
+    expect(frame).toContain('这批操作需要你确认后才会执行，尚未开始。');
+    // 叙述不构成授权：平台只收到 evaluate，没有任何 activate
+    expect(cliCalls.some((call) => call.includes(' activate '))).toBe(false);
+  });
+
+  it('拿不到模型叙述就不写、不编造：确认帧后果段明说没有后果说明', async () => {
+    const notices: string[] = [];
+    const { driver, cwd } = await makeDriver(confirmingPlanRunner([]));
+    fake.setScript([{ bash: [PLAN_COMMAND], text: '已停在确认门。' }]);
+
+    const result = await driver.run({ ...runInput(cwd), onNotice: async (text) => { notices.push(text); } });
+
+    expect(result.pendingPlan?.decision).toBe('confirm');
+    expect(notices[0]).toContain('后果：本回合没有给出执行后果说明（不补写）。');
   });
 });
 
