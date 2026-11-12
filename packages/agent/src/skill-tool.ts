@@ -33,7 +33,7 @@ export function createReadSkillTool(options: ReadSkillToolOptions = {}): AgentTo
   return {
     name: READ_SKILL_TOOL,
     label: READ_SKILL_TOOL,
-    description: '按名称读取一份可用技能的完整正文。只接受已发现技能清单中的名称；路径或其他定位形式一律拒绝。',
+    description: '当你需要更具体的协作方法时（口语交办、指代或纠错、追加要求、中途停止、结果解释、失败交还），按名称读取对应技能的完整正文。只接受已发现技能清单中的名称；路径或其他定位形式一律拒绝。普通问答与简单办理不必读取。',
     parameters: skillParameters,
     execute: async (_toolCallId, params) => {
       const name = typeof params.name === 'string' ? params.name.trim() : '';

@@ -79,8 +79,16 @@ function loadCases(file: string): UxCase[] {
   });
 }
 
-function overridesFor(arm: 'control' | 'profile'): Partial<ServerAssemblyOverrides> {
-  if (arm === 'profile') return {}; // 生产口径：agent.md + 技能面 on（缺省）
+/**
+ * 四臂：
+ *   · control —— 历史基线：1555df6 冻结的旧提示词 + 旧静态编排文档，技能装载 off。
+ *   · profile —— 第一轮用的实验臂（agent.md + 技能面 on）。
+ *   · b0 / b1 —— 第二轮配对实验：**同一份 agent.md**，只切技能装载（b0 off / b1 on）。
+ *     除技能曝光与读取能力外其余全同（同模型、同语料、同 mock、同执行配置）。
+ */
+function overridesFor(arm: 'control' | 'profile' | 'b0' | 'b1'): Partial<ServerAssemblyOverrides> {
+  if (arm === 'b0') return { skillsMode: 'off' };
+  if (arm === 'b1' || arm === 'profile') return {}; // 生产口径：agent.md + 技能面 on（缺省）
   return { roleInstructionsOverride: controlRoleInstructions(), skillsMode: 'off' };
 }
 
@@ -132,7 +140,7 @@ function metricsFor(events: Array<Record<string, unknown>>): TurnMetrics {
   };
 }
 
-async function runArm(arm: 'control' | 'profile', cases: UxCase[], outPath: string): Promise<void> {
+async function runArm(arm: 'control' | 'profile' | 'b0' | 'b1', cases: UxCase[], outPath: string): Promise<void> {
   const configPath = resolveConfigPath(process.env['AGENT_CONFIG_PATH']);
   const assembly = await createServerAssembly({
     env: { ...process.env, AGENT_CONFIG_PATH: configPath },
@@ -192,8 +200,8 @@ async function runArm(arm: 'control' | 'profile', cases: UxCase[], outPath: stri
 
 async function main(): Promise<void> {
   const arm = argValue('arm');
-  if (arm !== 'control' && arm !== 'profile') {
-    console.error('用法：--arm=control|profile --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
+  if (arm !== 'control' && arm !== 'profile' && arm !== 'b0' && arm !== 'b1') {
+    console.error('用法：--arm=control|profile|b0|b1 --cases=<ux-cases.jsonl> [--out=.runtime/ux-ab] [--principal=wecom:<id>]');
     process.exitCode = 2;
     return;
   }

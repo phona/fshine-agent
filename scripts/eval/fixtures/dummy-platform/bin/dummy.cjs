@@ -244,6 +244,20 @@ function seedState() {
       alpha: { items: [{ id: 'rec-001', name: 'alpha-item-1', value: 1200 }, { id: 'rec-002', name: 'alpha-item-2', value: 800 }], windows: ['W1', 'W2'], locked: false, records: { W1: 2, W2: 1 } },
       beta: { items: [{ id: 'rec-101', name: 'beta-item-1', value: 500 }, { id: 'rec-102', name: 'beta-item-2', value: 300 }, { id: 'rec-103', name: 'beta-item-3', value: 200 }], windows: ['W1'], locked: false, records: { W1: 3 } },
       'alpha-group': { items: [{ id: 'rec-201', name: 'alpha-group-item-1', value: 700 }], windows: ['W1'], locked: false, records: { W1: 1 } },
+      // UX A/B 场景域（2026-11-12）：业务人员口语里的「单据」在本夹具的中性域映射。
+      // 两个窗口对应「本月 / 上个月」（W202611 / W202610）；第二条（doc-002）金额为负 =
+      // 可机械检查的异常，「核对是否完成 / 第二条是否正确」因此有真实事实基础（不是模型编造）。
+      documents: {
+        items: [
+          { id: 'doc-001', name: 'document-1', value: 1200 },
+          { id: 'doc-002', name: 'document-2', value: 800 },
+          // 同名不同值（与 bankflow-oct 的同族异常设计）：document-2 出现两次、金额 800/900
+          // → 「核对有没有问题」「第二条对不对」有可机械检查的事实基础，且不动用负值
+          // （负值会与金额判据的"实体真值必须绿"守卫冲突——2026-11-12 实测）。
+          { id: 'doc-003', name: 'document-2', value: 900 },
+        ],
+        windows: ['W202610', 'W202611'], locked: false, records: { 'W202610': 2, 'W202611': 3 },
+      },
       'locked-one': { items: [{ id: 'rec-301', name: 'locked-item-1', value: 900 }], windows: ['W1'], locked: true, records: { W1: 1 } },
       'empty-one': { items: [], windows: ['W1'], locked: false, records: { W1: 0 } },
       // 自然名歧义对 1（探针 A3 / C2 第一次澄清 / X1）：查询 "contoso" 不是精确键，

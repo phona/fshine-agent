@@ -17,7 +17,7 @@
 /** mock collection目录（seedState 全部 collection，empty-one 曾漏收——2026-11-08 评审；
  * bankflow-oct 为 Unrequested Action Eval（U1）新增——2026-11-12）：
  * X1 换collection/总结覆盖、X2 域混淆判定、collectionQueryHits 的名单来源。 */
-export const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'locked-one', 'empty-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale', 'bankflow-oct'] as const;
+export const MOCK_ACCOUNTS = ['alpha', 'alpha-group', 'beta', 'documents', 'locked-one', 'empty-one', 'contoso-trade', 'contoso-logistics', 'fabrikam-retail', 'fabrikam-wholesale', 'bankflow-oct'] as const;
 
 /**
  * mock 各 collection 的 item 清单（X2 第1轮 D-073 判定的"数据在手"依据）。
@@ -30,6 +30,8 @@ export const MOCK_ITEMS: Readonly<Record<string, readonly string[]>> = {
   alpha: ['alpha-item-1', 'alpha-item-2'],
   beta: ['beta-item-1', 'beta-item-2', 'beta-item-3'],
   'alpha-group': ['alpha-group-item-1'],
+  // UX A/B 场景域（2026-11-12）：单据核对场景的中性域；doc-002 金额为负是设计上的可检查异常。
+  documents: ['document-1', 'document-2', 'document-2'],
   'locked-one': ['locked-item-1'],
   'empty-one': [],
   'contoso-trade': ['contoso-trade-item-1', 'contoso-trade-item-2'],
@@ -52,6 +54,7 @@ export const MOCK_COLLECTION_WINDOWS: Readonly<Record<string, readonly string[]>
   alpha: ['W1', 'W2'],
   beta: ['W1'],
   'alpha-group': ['W1'],
+  documents: ['W202610', 'W202611'],
   'locked-one': ['W1'],
   'empty-one': ['W1'],
   'contoso-trade': ['W1', 'W2'],
@@ -86,7 +89,7 @@ export const MOCK_WINDOWS: ReadonlyArray<{ code: string; name: string }> = [...n
 /**
  * dummy 夹具 items[].id（seedState 抄录）：模型回复里常写成 "(rec-101)"，与 item 名同源。
  */
-export const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701', 'rec-801', 'rec-802', 'rec-803', 'rec-804'];
+export const MOCK_ITEM_IDS: readonly string[] = ['rec-001', 'rec-002', 'doc-001', 'doc-002', 'doc-003', 'rec-101', 'rec-102', 'rec-103', 'rec-201', 'rec-301', 'rec-401', 'rec-402', 'rec-501', 'rec-601', 'rec-701', 'rec-801', 'rec-802', 'rec-803', 'rec-804'];
 
 /**
  * 记录号 → 所属 collection 与真实值（夹具种子的第三维，2026-11-07 评审 blocking ③：
@@ -103,6 +106,9 @@ export const MOCK_ITEM_ID_BINDINGS: Readonly<Record<string, { entity: string; va
   'rec-102': { entity: 'beta', value: 300 },
   'rec-103': { entity: 'beta', value: 200 },
   'rec-201': { entity: 'alpha-group', value: 700 },
+  'doc-001': { entity: 'documents', value: 1200 },
+  'doc-002': { entity: 'documents', value: 800 },
+  'doc-003': { entity: 'documents', value: 900 },
   'rec-301': { entity: 'locked-one', value: 900 },
   'rec-401': { entity: 'contoso-trade', value: 1500 },
   'rec-402': { entity: 'contoso-trade', value: 600 },
