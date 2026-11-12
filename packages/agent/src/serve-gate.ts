@@ -2,8 +2,8 @@
  * G1：serve worker 原生工具门（fshine 侧，挂在 SDK Agent 的 beforeToolCall）。
  *
  * 四层治理里本门负责 worker 的通用原生工具安全：
- *   - bash 仅允许网关调用（首词规则 + shell 元字符白名单：env 前缀、命令拼接、
- *     命令替换、重定向均被拒；法域声明无法剥离）
+ *   - bash 仅允许网关调用（首词规则 + 命令链 fail-closed + 保守包含式阻断：网关令牌出现在
+ *     已识别形态之外——解释器包装 / 包装命令 / env 前缀 / 命令替换——一律拒；法域声明无法剥离）
  *   - 平台计划命令只允许 host 管理；活跃计划由平台执行入口逐次校验，且计划前置按平台
  *     语义表**三级判据**执行（scratch 免计划、read 要激活计划、write 要被激活计划的
  *     某一步覆盖，见 planGateTier）
@@ -584,12 +584,18 @@ export function gateInvocationKind(command: string, gateway?: string, serveModes
  * 命令**位**上的网关令牌（`cd X && bin/<gateway> …` 里的 `bin/<gateway>`）；没有返回 null。
  *
  * 命令位 = 第一个 token，以及每个命令分隔符（`;` `&` `|`）之后的 token。分隔符既可
- * 独立成 token（`&& bin/<gateway>`），也可粘在两侧任一个 token 上（`X; bin/<gateway>`、
- * `X&&bin/<gateway>`）——三种写法都是同一条命令链，判据必须一视同仁。
+ * 独立成 token（`&& bin/<gateway>`），也可粘在前一个 token 尾部（`x; bin/<gateway>`）——
+ * 两种写法都是同一条命令链，判据必须一视同仁。
+ *
+ * **整词匹配**（2026-11-12 收紧）：token 必须整词就是网关形式（可带路径前缀），不再把
+ * 一个 token 内部按分隔符切开逐段比对——旧写法把引号里的字面分隔符也当命令分隔符，
+ * `echo "x;bin/<gateway>"` 这种"字符串里提到网关"被误判成命令链（Owner 批准的误拒修复）。
+ * 引号内的 token 经过分词器已是一个词，词内分隔符是字面量、不是新的命令位。
  *
  * 为什么必须限"命令位"而不是"命令里出现过"：`ls -la bin/<gateway>`、`cat bin/<gateway>`
- * 只是引用文件名，不是调用；把它们判成"借道命令链调网关"是假拒——判据一旦会假红，
- * 人就学会忽略它。env 前缀（`FOO=1 bin/<gateway> …`）同样不是命令位（既有首词规则口径）。
+ * 只是引用文件名，不是"借道命令链"。命令链判据只回答"网关是否出现在**命令位**"；
+ * 其余位置的网关令牌由保守包含式判据（hasWrappedGatewayCall）接管——那条宁可误拒不放行，
+ * 这条保持精确、避免把两种不同的问题混成一个理由。
  */
 function gatewayCommandPosition(command: string, gateway?: string): string | null {
   const tokens = splitCommandTokens(command);
@@ -598,18 +604,96 @@ function gatewayCommandPosition(command: string, gateway?: string): string | nul
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!;
     const previous = tokens[index - 1];
-    let atCommandPosition = index === 0
+    const atCommandPosition = index === 0
       || (previous !== undefined && SEPARATOR_RE.test(previous))
       || (previous !== undefined && /[;&|]$/.test(previous));
-    // 分隔符可粘在 token 内部（`X&&bin/<gateway>`、`bin/<gateway>;rm`）：逐段判定，
-    // 分隔符之后的每一段都是新的命令位——与加空格的写法同判。
-    for (const segment of token.split(/[;&|]+/)) {
-      if (!segment) continue;
-      if (atCommandPosition && pattern.test(segment)) return segment;
-      atCommandPosition = true;
-    }
+    if (atCommandPosition && pattern.test(token)) return token;
   }
   return null;
+}
+
+/**
+ * 网关令牌的词尾边界（保守包含式判据的一半）：出现处之后是行尾或一个"词到此为止"的字符。
+ * 字符类只收确定切断 token 的字符；`/`、`.`、字母数字等视为同一个更长的词/路径（不算调用位）。
+ * （用字符类正则而非逐字符 `===` 分支：与 SHELL_METACHAR_RE 同一形状——语法分类，不是值嗅探。）
+ */
+const GATEWAY_WORD_END_RE = /[\s'"`();&|<>$]/;
+
+/**
+ * 词首边界字符类（引号内/外共用）：空白、路径分隔符 `/`（`./bin/<gw>`、`/opt/x/bin/<gw>`）、
+ * 替换引入符（`$(` / `` ` `` / `$` / `(`）与引号（`'bin/<gw> …'` 的引号紧贴）。
+ */
+const GATEWAY_WORD_START_RE = /[\s/()`$'"]/;
+
+/**
+ * 网关令牌的词首边界：前一个字符在词首字符类里即算。
+ *
+ * `quoted=true`（引号内）时命令分隔符 `;` `&` `|` **不算**词首——引号内它们是字面量，
+ * 不是命令位（Owner 批准的误拒修复：`echo "x;bin/<gw>"` 是字符串内容）。引号外
+ * 它们是真正的分隔符：链判据先手，这里是兜底。
+ */
+function isGatewayWordStart(command: string, index: number, quoted: boolean): boolean {
+  if (index === 0) return true;
+  const prev = command[index - 1]!;
+  if (GATEWAY_WORD_START_RE.test(prev)) return true;
+  return !quoted && (prev === ';' || prev === '&' || prev === '|');
+}
+
+/** 网关令牌的词尾边界：行尾或词尾字符类。 */
+function isGatewayWordEnd(command: string, index: number): boolean {
+  if (index >= command.length) return true;
+  return GATEWAY_WORD_END_RE.test(command[index]!);
+}
+
+/**
+ * 命令串里有没有"被包装的网关调用位"（**保守包含式**判据，2026-11-12，发布阻断 #1）。
+ *
+ * 为什么需要它（B3 实证）：首词规则只看第一个 token，命令链判据只看命令位——于是
+ * 解释器包装（`bash -c '…'`）、包装命令（`sudo` / `xargs` / `command`）、环境变量前缀
+ * （`FOO=1 …` / `env FOO=1 …`）、命令替换（`$(…)` / 反引号）全部漏网：命令串里明明出现了
+ * 网关令牌，却没有一步能证明它不在执行面内——夹具实跑里 `bash -c '…query …'` 真的执行了
+ * 未声明对象的查询，而门行只有一行 status=ok。本判据把口径反过来：**只要网关令牌出现在
+ * 任何"已识别的干净形态"之外就拒**——宁误拒、不放行。
+ *
+ * "干净形态"由调用方的分支顺序保证（元数据 / local / 计划提交教学 / 首词=网关的既有形态
+ * 都在本判据之前返回）；本函数只回答"命令串里有没有一个可疑的网关出现"，不识别形态
+ * （第二份形态名单即分叉）。判据是保守的字符串扫描，不是通用 shell 解析器：
+ *   · 扫描跟踪引号与转义；网关令牌 = 声明的网关形式（含 `(^|/)` 路径前缀）+ 词边界；
+ *   · 引号紧贴网关（`sh -c 'bin/<gw> …'`）= 引号内容的词首，算调用位；
+ *   · 引号内的词首（前一字符是空白/`/`/替换引入符/引号）算；引号内的字面分隔符
+ *     （`echo "x;bin/<gw>"`）不算——那是字符串内容，Owner 批准的误拒修复。
+ */
+function hasWrappedGatewayCall(command: string, gateway?: string): boolean {
+  const name = resolveGatewayText(gateway);
+  const hit = (index: number, quoted: boolean): boolean =>
+    command.startsWith(name, index)
+    && isGatewayWordEnd(command, index + name.length)
+    && isGatewayWordStart(command, index, quoted);
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < command.length; index += 1) {
+    const ch = command[index]!;
+    if (quote === "'") {
+      // 单引号内无转义：只有引号本身结束引号区。
+      if (ch === "'") { quote = null; continue; }
+      if (hit(index, true)) return true;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '\\') { index += 1; continue; }
+      if (ch === '"') { quote = null; continue; }
+      if (hit(index, true)) return true;
+      continue;
+    }
+    if (ch === '\\') { index += 1; continue; }   // 引号外的转义：下一个字符是字面量
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      // 引号紧贴网关：`'bin/<gw> …'` —— 引号内容以网关开头的词首。
+      if (command.startsWith(name, index + 1) && isGatewayWordEnd(command, index + 1 + name.length)) return true;
+      continue;
+    }
+    if (hit(index, false)) return true;
+  }
+  return false;
 }
 
 /**
@@ -1425,6 +1509,17 @@ export function createServeGate(options: ServeGateOptions = {}) {
         // 第二 token）——放行等于没有任何一步证明它不在执行面内（B3 第二条被测线，同一
         // 次跑里经夹具执行了越范围查询）。fail-closed，理由指向"平台调用必须单独成一条命令"。
         verdict = { block: true, reason: messageTextFor('SERVE_BASH_CHAINED_GATEWAY') };
+      } else if (!isGateway && hasWrappedGatewayCall(command, gateway)) {
+        // 解释器包装族（2026-11-12，发布阻断 #1）：网关令牌出现在"已识别的干净形态"之外——
+        // `bash -c '…'` / `sudo …` / `xargs …` / `FOO=1 …` / `env FOO=1 …` / `$(…)` /
+        // 反引号 / `command …`。首词不是网关，形态分类、计划前置与 T5 对账（取不到引用）
+        // 一条都不适用；放行等于没有任何一步证明它不在执行面内（B3 实证：`bash -c '…query…'`
+        // 经夹具真的执行了未声明对象的查询，门行 status=ok）。判据是保守包含式（上面
+        // hasWrappedGatewayCall 的注释）：只要命令串里出现可疑的网关令牌就拒——宁误拒、
+        // 不放行；"已识别的干净形态"由本函数的分支顺序保证（元数据 / local / 计划提交教学 /
+        // 首词=网关的既有形态都在这里之前返回）。`!isGateway` 是前提：首词=网关的调用
+        // （含 local 打到放行根之外的形态）归上一支与形态分支，不归这里。
+        verdict = { block: true, reason: messageTextFor('SERVE_BASH_GATEWAY_WRAPPED') };
       } else {
         // local（区内直调；区外由执行层网关自校验根）与非网关命令 → 放行，审计照记
       }

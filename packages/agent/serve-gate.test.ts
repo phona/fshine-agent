@@ -224,12 +224,17 @@ describe('createServeGate（通用执行安全门）', () => {
     const metacharEvents = events.filter((e) => e.detail?.includes('软放行'));
     expect(metacharEvents.length).toBe(2);
     // 非网关命令放行（首词规则降级为分类判据），审计 events 里可复盘。
-    // 前一条是 env 前缀样例，不是宿主产出：宿主不设 EXECUTION_SERVE，命令也不带 --mode。
+    // 示例字符串不是宿主产出：宿主不设 EXECUTION_SERVE，命令也不带 --mode。
     expect(process.env.EXECUTION_SERVE).toBeUndefined();
-    for (const command of ['EXECUTION_SERVE=0 bin/example-gateway query x', 'node script.js']) {
-      expect(command.includes('--mode'), command).toBe(false);
-      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
-    }
+    expect(gate({ name: 'bash', arguments: { command: 'node script.js' } })?.block).toBeUndefined();
+    // 2026-11-12（发布阻断 #1）**有意收紧**：env 前缀里的网关调用不再放行——旧口径把它
+    // 当"首词不是网关的普通命令"，而它在执行面上就是一次被包装的网关调用（B3 实证族）。
+    // 现在由保守包含式判据拒（SERVE_BASH_GATEWAY_WRAPPED），理由指向"单独成一条命令"。
+    const envPrefix = 'EXECUTION_SERVE=0 bin/example-gateway query x';
+    expect(envPrefix.includes('--mode')).toBe(false);
+    const envPrefixVerdict = gate({ name: 'bash', arguments: { command: envPrefix } });
+    expect(envPrefixVerdict?.block).toBe(true);
+    expect(envPrefixVerdict?.reason).toBe(messageTextFor('SERVE_BASH_GATEWAY_WRAPPED'));
   });
 
   // ── 计划前置读平台语义表的 plan 列（同一处病根的第四处，也是最后一处）────────────
@@ -680,7 +685,8 @@ describe('createServeGate（通用执行安全门）', () => {
 //   ① 猜的形状拿不到放行（计划已激活也拒）——堵住"猜一个形状让平台去拒"的空转；
 //   ② 理由不含网关名字面量（唯一真相在平台契约常量与技能文档，刚花了一轮才清出去）；
 //   ③ 理由不复述完整调用形状（第二份真相会随平台演进漂移）；
-//   ④ 理由指出数据源：每个 operation 的脚本路径与开放 mode 见清单机器可读面的 script / serve。
+//   ④ 理由指出数据源：每个 operation 的脚本路径与开放 mode 见清单机器可读面的清单字段
+//      （不点名具体键——平台把 `serve` 改名 `modes` 后，写死键名就是第二份真相）。
 describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 任务一）', () => {
   /** A1 实测形态：worker 猜出来的调用（缺 mode、缺脚本路径）。 */
   const GUESSED = [
@@ -764,7 +770,12 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
 //
 // 判据只堵"网关出现在非首位命令位"这一种：网关在首位的元字符软放行（2026-10-18 政策）
 // 一字不动；`cat bin/<gateway>`（列文件名）与 env 前缀（`FOO=1 bin/<gateway> …`，
-// 既有首词规则口径）不是命令位调用，不误拒——判据一旦会假红，人就会学会忽略它。
+// 既有首词规则口径）不是命令位调用，本判据不把它们当"借道命令链"。
+//
+// 2026-11-12（发布阻断 #1）**有意收紧**：上述三种"非命令位"样例（`cat` / `ls -la` / env
+// 前缀）改由保守包含式判据拒（SERVE_BASH_GATEWAY_WRAPPED）——它们确实不是命令链，但都在
+// 执行面上把一个网关令牌放在了已识别形态之外，放行等于没有任何一步证明它不在执行面内；
+// 宁误拒不放行（Owner 裁决）。命令链判据本身一字不动，它继续只认"命令位"。
 describe('命令链（首词非网关、链中含网关调用）：拿不到放行', () => {
   it('`cd … && 网关调用` / `X; 网关调用` / 管道后网关调用 一律拒，理由指向"单独一条命令"', () => {
     const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
@@ -781,16 +792,21 @@ describe('命令链（首词非网关、链中含网关调用）：拿不到放�
     }
   });
 
-  it('对照：非命令位出现网关 / env 前缀 / 首位网关调用照旧（不因本支变成一律判拒）', () => {
+  it('对照：纯本地命令照旧；字面提及/包装形态按新包含式判据拒（有意收紧，逐条说明）', () => {
     const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    // **有意收紧三例**（原"非命令位 → 放行"）：网关令牌出现在已识别形态之外，拒。
+    // 不是命令链，所以理由是新码（SERVE_BASH_GATEWAY_WRAPPED），不是链判据。
     for (const command of [
-      'cat bin/example-gateway',                                        // 列文件名，不是调用
-      'ls -la bin/example-gateway',                                     // 同上
-      'EXECUTION_SERVE=0 bin/example-gateway query q.js A 202609',      // env 前缀：首词规则既有口径
-      'node src/payroll/scripts/transform.py a b',                      // 纯本地命令
+      'cat bin/example-gateway',                                        // 旧：列文件名 → 放行；现：拒
+      'ls -la bin/example-gateway',                                     // 旧：同上；现：拒
+      'EXECUTION_SERVE=0 bin/example-gateway query q.js A 202609',      // 旧：env 前缀 → 放行；现：拒
     ]) {
-      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+      const verdict = gate({ name: 'bash', arguments: { command } });
+      expect(verdict?.block, command).toBe(true);
+      expect(verdict?.reason, command).toBe(messageTextFor('SERVE_BASH_GATEWAY_WRAPPED'));
     }
+    // 纯本地命令（命令串里没有网关令牌）照旧放行。
+    expect(gate({ name: 'bash', arguments: { command: 'node src/payroll/scripts/transform.py a b' } })?.block).toBeUndefined();
     // 元字符软放行在"网关在首位"的调用上不变：本支只堵"网关不在首位"。
     for (const command of [
       'bin/example-gateway query q.js A 202609; cat .env',
