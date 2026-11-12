@@ -51,7 +51,9 @@ npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非
 
 首版尚未生产验收；不支持运行中 steer、暂停恢复或重启后自动重跑。配置和回滚见 [会话交互方案](docs/interactive-session-plan.md#9-首版实现对账2026-10-24)。
 
-## mock 联调（执行层侧 fake 保护）
+## mock 联调（历史存档：执行层已删除 mock executor）
+
+> 2026-11-13 裁定：`EXECUTION_EXECUTOR=mock` 已随执行层删除——不再使用、不恢复、不替代。本节只作历史存档，不是当前可用路径；V0 本地试用见下一节 `npm run demo`（仓内 dummy 平台）。
 
 `.env` 设 `EXECUTION_EXECUTOR=mock`（默认已设；**执行层治理变量权威名以该执行层声明为准**，现行平台已改回 `EXECUTION_*` 前缀，旧 `DZ_*` 别名已移除）后，执行层网关把执行器替换为 mock 应答器：不开浏览器、不触网，gate 矩阵 / commit 令牌 / 审计照真生效，落账写进 mock 状态文件（默认 `<profile.root>/.runtime/mock-state.json`，删文件即重置）。该开关由**执行层自己读取**：编排层不读它，也不据此判"这个部署允不允许写"——写能不能真落地（含真平台落账的授权 / dryrun 提示）由执行层自己的门裁决并给出拒绝或 warning，宿主只如实转述。
 

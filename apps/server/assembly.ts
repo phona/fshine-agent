@@ -23,6 +23,7 @@ import {
   createPiTurnDriver,
   createReadSkillTool,
   createTaxAgentRuntime,
+  hostDirectChildEnv,
   listSkills,
   loadAgentProfile,
   loadOperationArgSpecs,
@@ -69,7 +70,9 @@ export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)
 function assertPlatformOperationsHealthy(platformRoot: string): void {
   const script = path.join(platformRoot, 'scripts', 'lint-operations.js');
   try {
-    const stdout = execFileSync(process.execPath, [script], { cwd: platformRoot, encoding: 'utf8' });
+    // 第 4 个宿主→执行层 spawn 面（2026-11-13 复核发现后收口）：lint 子进程同尺——
+    // 宿主机密族（LLM_*/WECOM_*）与宿主内部指针不进执行层脚本的环境。
+    const stdout = execFileSync(process.execPath, [script], { cwd: platformRoot, encoding: 'utf8', env: hostDirectChildEnv() });
     const detail = typeof stdout === 'string' ? stdout.trim() : '';
     if (detail) console.log(JSON.stringify({ event: 'platform_operations_lint_passed', detail }));
   } catch (error) {

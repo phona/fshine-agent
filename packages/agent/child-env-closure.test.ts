@@ -379,6 +379,10 @@ describe('V0 安全收口：子进程 env 不含宿主敏感凭据族', () => {
     // operation-labels 七处宿主直调（operation list 派生）同尺。
     const labelsSrc = srcOf('packages', 'agent', 'src', 'operation-labels.ts');
     expect(labelsSrc.split('hostDirectChildEnv()').length - 1).toBe(7);
+    // assembly 启动前的平台 lint 子进程（第 4 个宿主→执行层 spawn 面）同尺
+    // （2026-11-13 复核发现：此前无 env 选项、全量继承 process.env）。
+    const assemblySrc = srcOf('apps', 'server', 'assembly.ts');
+    expect(assemblySrc).toContain('hostDirectChildEnv()');
 
     // 精确键成员判定（无前缀语义）：代表性未登记键一律 false。
     expect(isWorkerEnvKeyAllowed('PATH')).toBe(true);
