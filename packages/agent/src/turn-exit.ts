@@ -78,7 +78,7 @@ export interface TurnExitInput {
   activatedPlan: { planId: string; version: number } | null;
   /** 模型文本是不是内部协议材料的复读（判据本体 looksLikeProtocolMaterial 在 runtime.ts）。 */
   protocolReplay: boolean;
-  /** 本会话在册的平台任务数（宿主事实；0 = 没有任务记录，RR1 门不开）。 */
+  /** 本会话在册的平台任务数（宿主事实；0 = 没有在册任务，RR1 门不开）。 */
   sessionTaskCount: number;
   /** 本回合是否调用过 task_control（显式状态查询：其答复本就来自宿主状态面，RR1 门豁免）。 */
   taskControlUsed: boolean;

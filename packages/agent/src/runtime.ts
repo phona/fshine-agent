@@ -933,7 +933,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               refs: parsed.refs,
             }));
             // terminate 保证重发回合零委派（R1 的零平台调用由此保证）；占位文本由 handler
-            // 依产物记录合成正式回复（带生成时间与文件回挂），这里非空即可。
+            // 依产物库合成正式回复（带生成时间与文件回挂），这里非空即可。
             throw new ToolUserError(`重发产物 #${parsed.refs.join('、#')}。`);
           }
 
