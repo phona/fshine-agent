@@ -222,4 +222,26 @@ describe('resend_artifact：runtime 工具面与回合语义', () => {
     expect(outcomes[0]).toEqual({ error: RESEND_REF_SHAPE_ERROR });
     expect(reply.artifactRefs).toBeUndefined();
   });
+
+  it('R5 会话已有在册任务时重发仍可用：RR1 重复提问门不吞 artifactRefs', async () => {
+    const platformTasks = {
+      listBySession: async () => [{
+        taskId: 'task_existing', parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+        workerMessages: [], createdAt: '2026-11-12T00:00:00.000Z', updatedAt: '2026-11-12T00:00:00.000Z',
+      }],
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ toolCalls: [{ tool: RESEND_ARTIFACT_TOOL_NAME, args: { refs: ['1'] } }] }]),
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      platformTasks: platformTasks as never,
+      resendArtifactTool: RESEND_ARTIFACT_TOOL,
+    });
+
+    const reply = await runtime.handleTurn(makeCtx(), '把刚才那个表再发一次');
+
+    // 重发终止文本不含数字结论：重复提问门不命中，refs 照常交回 handler。
+    expect(reply.text).toBe('重发产物 #1。');
+    expect(reply.artifactRefs).toEqual(['1']);
+  });
 });
