@@ -110,15 +110,14 @@ interface Script {
 }
 
 /**
- * 脚本化驱动替身：run 只做申报 + 追加脚本消息；compact 转发生产压缩实现。
- * 压缩是否发生、产物是什么，全部由生产代码决定。
+ * 脚本化驱动替身：run 追加脚本消息；compact 转发生产压缩实现。
+ * 压缩是否发生、产物是什么，全部由生产代码决定（直连后普通回合不再需要任何前置工具调用）。
  */
 function scriptedDriver(runtime: PiModelRuntime, scripts: Script[]) {
   const inputs: TurnDriverInput[] = [];
   const driver: TurnDriver = {
     async run(input) {
       inputs.push(input);
-      await input.exec('route_current_turn', { kind: 'conversation' });
       const script = scripts.shift() ?? { text: '好的。' };
       const text = typeof script.text === 'function' ? script.text(input) : script.text;
       return { text, messages: [...input.messages, ...(script.extra ?? [])] };

@@ -42,23 +42,18 @@ const AMBIGUOUS: SelectionClarification = {
   candidates: ['幻辰财税', '幻辰科技'],
 };
 
-/** A turn where the Main Agent declares an ordinary conversation before answering. */
-function declareConversation(steps: ScriptedTurnStep[]): ScriptedTurnStep[] {
-  return [{ toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] }, ...steps];
-}
-
 /**
  * Mirrors the production driver contract: exec may terminate the turn by throwing
  * ToolUserError, in which case its message becomes the final reply and the model
  * never gets to rewrite it.
  */
-async function declareAndTerminate(
+async function runTaskAndTerminate(
   input: TurnDriverInput,
   args: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<TurnDriverResult | null> {
   try {
-    await input.exec('route_current_turn', args, signal);
+    await input.exec('run_task', args, signal);
   } catch (error) {
     if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
     throw error;
@@ -95,7 +90,7 @@ describe('createTaxAgentRuntime', () => {
     });
     const delegated: Array<{ request: string }> = [];
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套里猫一杯的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税账套里猫一杯的应收账款余额' } }] },
       { text: '旧结果：幻辰 202609 应收余额为 42 元。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -118,7 +113,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('R2 声明实时查询但本轮零平台执行时，不外发模型文本', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套里猫一杯的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税账套里猫一杯的应收账款余额' } }] },
       { text: '幻辰 202609 应收余额大概是 42 元。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -141,7 +136,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('P1.1 方案已批准但零执行时，说清真实状态而不是让用户补充查询范围', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东账套的应收账款' } }] },
       { text: '幻东 202608 应收余额大概是 42 元。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -160,7 +155,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('P1.2 worker 说明了具体阻碍时，说明附在状态文案后面', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东账套的应收账款' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -176,7 +171,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('P1.3 执行面注脚不外发：附上的说明剥掉〔本轮执行面〕', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东账套的应收账款' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -193,7 +188,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('P1.4 worker 只复述通用兜底时不附注：那句话对用户没有信息量', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东账套的应收账款' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -209,7 +204,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('P1.5 补刀生效（有 execution）时走正常路径，不再说"批准了没执行"', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东账套的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东账套的应收账款' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -224,62 +219,13 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toBe('幻东 202608 应收余额为 51 元。');
   });
 
-  it('R3 Main Agent 跳过 route_current_turn 时重试一次，再跳过则失败关闭', async () => {
-    let attempts = 0;
-    const driver: TurnDriver = {
-      run: async (input) => {
-        attempts += 1;
-        return { text: '直接回答：应收余额 42 元。', messages: [...input.messages, { role: 'assistant', content: '直接回答：应收余额 42 元。', timestamp: attempts } as never] };
-      },
-    };
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
-
-    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_skip_declaration' }), '查幻辰财税账套的应收');
-
-    expect(attempts).toBe(2);
-    expect(reply.text).not.toContain('42 元');
-    expect(reply.text).toContain('没有产生任何平台查询');
-  });
-
-  it('申报自相矛盾时退回模型重填，不消耗用户的澄清轮次', async () => {
-    const delegated: unknown[] = [];
-    let toolFeedback = '';
-    const { driver } = recordingDriver([
-      // 第一次：申报 delegate 却不给 request
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate' } }] },
-      // 第二次：补齐加工后的请求后放行
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询新兴建材账套 202607 的应收账款余额' } }] },
-      { text: '不应到达' },
-    ]);
-    // 记录宿主退回的工具反馈
-    const wrapped = {
-      run: async (input: Parameters<typeof driver.run>[0]) => {
-        const originalExec = input.exec;
-        const proxied = { ...input, exec: async (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => {
-          const out = await originalExec(tool, args, signal);
-          if (tool === 'route_current_turn' && out && typeof out === 'object' && 'error' in (out as object)) toolFeedback = String((out as { error: unknown }).error);
-          return out;
-        } };
-        return driver.run(proxied as Parameters<typeof driver.run>[0]);
-      },
-    };
-    const runtime = createTaxAgentRuntime({
-      driver: wrapped as never,
-      sessions: new FakeSessionRepo(),
-      platformTask: subagent(async (args) => { delegated.push(args); return { taskId: 'task_1', text: '新兴建材 202607 应收余额为 0 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } }; }),
-    });
-
-    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_contradiction' }), '查一下新兴建材账套 202607 的应收账款余额');
-
-    // 结构错误被宿主退回（消息措辞由契约层给，这里只断言"确实退回且带原因"）
-    expect(toolFeedback).toMatch(/request|结构化/);
-    expect(delegated).toHaveLength(1);
-    expect(reply.text).toBe('新兴建材 202607 应收余额为 0 元。');
-  });
+  // 旧 R3（跳过申报重试一次、再跳过失败关闭）与「申报自相矛盾退回重填」随申报层 1+2
+  // 退役：直连后普通回合直接回复，不再有强制申报与退回重填（新行为见
+  // direct-delegation.test.ts 的 D4；正式删除与用例归档归删除 run）。
 
   it('子 Agent 文本尾部的执行面注脚不外发给用户', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套本期的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税账套本期的应收账款余额' } }] },
       { text: '不应到达' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -301,7 +247,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('零执行但子 Agent 诚实汇报能力边界时，标注来源转发而非整段丢弃', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '把新兴五金的凭证也列一下' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '把新兴五金的凭证也列一下' } }] },
       { text: '不应到达' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -317,13 +263,13 @@ describe('createTaxAgentRuntime', () => {
     expect(reply.text).toContain('本轮没有真正查到平台数据');
   });
 
-  it('R4 申报层实体证据校验已取消：delegate 申报即委派，实体范围守卫在计划层', async () => {
-    // Phase 4 起宿主不再拿申报字段与当前消息做逐字比对（原 C1/C2 整体取消）：
+  it('R4 宿主不据请求字段做实体比对：直连委派即委派，实体范围守卫在计划层', async () => {
+    // Phase 4 起宿主不再拿请求文本与当前消息做逐字比对（原 C1/C2 整体取消）：
     // 请求里提到本轮消息没有的实体也照样委派，越权实体由计划层 validatePlanEntities 挡下
     // （见 turn-contract.test.ts 与 pi-coding-driver.test.ts 的计划实体来源校验用例）。
     const delegated: Array<{ request: string }> = [];
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东的应收账款余额' } }] },
       { text: '不应到达' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -353,15 +299,15 @@ describe('createTaxAgentRuntime', () => {
     const driver: TurnDriver = {
       run: async (input) => {
         discovered = input.tools.map((tool) => tool.name);
-        await input.exec('route_current_turn', { kind: 'conversation' });
         return { text: '之前你选了三月。', messages: [...input.messages, { role: 'assistant', content: '之前你选了三月。', timestamp: 123 } as never] };
       },
     };
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent(), conversationLog: repo });
     await runtime.handleTurn(makeCtx({ requestId: 'req_raw' }), '之前我选了三月');
 
-    // 相位 1（T1）：工具面只剩申报入口；历史检索工具（search_history / get_messages）已删除。
-    expect(discovered).toContain('route_current_turn');
+    // 相位 1（T1）：工具面只剩委派入口（直连后 = run_task）；历史检索工具
+    // （search_history / get_messages）已删除。
+    expect(discovered).toContain('run_task');
     expect(discovered).not.toContain('search_history');
     expect(discovered).not.toContain('get_messages');
     // 原始 user/assistant 文本照旧落 Conversation Log（宿主存档与指代检索的来源）。
@@ -376,13 +322,12 @@ describe('createTaxAgentRuntime', () => {
     const runtime = createTaxAgentRuntime({
       driver: {
         run: async (input) => {
-          await input.exec('route_current_turn', { kind: 'conversation' });
           return {
             text: '幻辰本期应收为 42 元。',
           messages: [
               ...input.messages,
-              { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'route_current_turn', arguments: { kind: 'delegate' } }], timestamp: 9 } as never,
-              { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元，文件在 tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/"}' }], timestamp: 10 } as never,
+              { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'run_task', arguments: { kind: 'delegate' } }], timestamp: 9 } as never,
+              { role: 'toolResult', toolName: 'run_task', toolCallId: 'call_1', content: [{ type: 'text', text: '{"taskId":"task_01234567-89ab-cdef-0123-456789abcdef","text":"幻辰应收为 42 元，文件在 tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/"}' }], timestamp: 10 } as never,
               { role: 'assistant', content: '幻辰本期应收为 42 元。', timestamp: 11 } as never,
             ],
           };
@@ -870,7 +815,7 @@ describe('createTaxAgentRuntime', () => {
     await sessions.upsert({ sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(), state: transcript });
     let observed: Array<{ role?: string; content?: unknown }> = [];
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { observed = input.messages; await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '答复', messages: input.messages }; } },
+      driver: { run: async (input) => { observed = input.messages; return { text: '答复', messages: input.messages }; } },
       sessions, platformTask: subagent(), recentTurns: 1,
       // 相位 1 起 transcript 是缺省；最近回合窗口保留为显式可选模式（本用例钉它的选取语义）。
       contextMode: 'state_recent',
@@ -896,7 +841,6 @@ describe('createTaxAgentRuntime', () => {
       driver: {
         run: async (input) => {
           observed = JSON.stringify(input.messages);
-          await input.exec('route_current_turn', { kind: 'conversation' });
           return { text: '好的', messages: input.messages };
         },
       },
@@ -936,7 +880,7 @@ describe('createTaxAgentRuntime', () => {
     await sessions.upsert({ sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1', updatedAt: new Date().toISOString(), state: transcript });
     let observed: Array<{ role?: string; content?: unknown }> = [];
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { observed = input.messages; await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '答复', messages: input.messages }; } },
+      driver: { run: async (input) => { observed = input.messages; return { text: '答复', messages: input.messages }; } },
       sessions, platformTask: subagent(), contextMode: 'transcript',
     });
     await runtime.handleTurn(makeCtx(), '继续');
@@ -946,7 +890,7 @@ describe('createTaxAgentRuntime', () => {
   it('继续作答并保留原始日志', async () => {
     const events: unknown[] = [];
     const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver(declareConversation([{ text: '我会继续处理。' }])),
+      driver: ScriptedTurnDriver([{ text: '我会继续处理。' }]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
       conversationLog: {
@@ -960,7 +904,7 @@ describe('createTaxAgentRuntime', () => {
     expect(events).toHaveLength(2);
   });
 
-  it('主 Agent 只暴露 route_current_turn，宿主据申报直接委派并采用子 Agent 自然语言结果', async () => {
+  it('主 Agent 只暴露委派工具（run_task），宿主承接直连调用并采用子 Agent 自然语言结果', async () => {
     const calls: Array<{ request: string; taskId?: string; turnDeclaration?: unknown; entitySources?: unknown }> = [];
     let exposed: string[] = [];
     const platformTask = subagent(async (args) => {
@@ -970,18 +914,18 @@ describe('createTaxAgentRuntime', () => {
     const driver: TurnDriver = {
       run: async (input) => {
         exposed = input.tools.map((tool) => tool.name);
-        return (await declareAndTerminate(input, { kind: 'delegate', request: '查询幻东的应收账款余额' }))
+        return (await runTaskAndTerminate(input, { request: '查询幻东的应收账款余额' }))
           ?? { text: '这条文本不应外发', messages: input.messages };
       },
     };
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
     const reply = await runtime.handleTurn(makeCtx(), '查询幻东余额');
 
-    expect(exposed).toEqual(['route_current_turn']);
+    expect(exposed).toEqual(['run_task']);
     expect(calls).toHaveLength(1);
-    // 委派参数用申报里加工后的 request
+    // 委派参数用请求里加工后的 request
     expect(calls[0]).toMatchObject({ request: '查询幻东的应收账款余额' });
-    expect(calls[0]?.turnDeclaration).toMatchObject({ kind: 'delegate', request: '查询幻东的应收账款余额' });
+    expect(calls[0]?.turnDeclaration).toMatchObject({ request: '查询幻东的应收账款余额' });
     // 领域无关的实体来源：当前消息必给（原始 userMessage），无指代线索时不给检索证据
     expect(calls[0]?.entitySources).toEqual({ currentMessage: '查询幻东余额' });
     expect(reply.text).toBe('请向用户确认客户名称。');
@@ -997,9 +941,9 @@ describe('createTaxAgentRuntime', () => {
     const controller = new AbortController();
     const sessions = new FakeSessionRepo();
     const driver: TurnDriver = {
-      run: async (input) => (await declareAndTerminate(
+      run: async (input) => (await runTaskAndTerminate(
         input,
-        { kind: 'delegate', request: 'A 公司', continueTaskId: 'task_1' },
+        { request: 'A 公司', taskId: 'task_1' },
         controller.signal,
       )) ?? { text: '最终答复', messages: input.messages },
     };
@@ -1008,7 +952,7 @@ describe('createTaxAgentRuntime', () => {
     expect(observedSignal).toBe(controller.signal);
   });
 
-  it('上一轮是平台查询轮时，本轮 delegate 申报照样委派（查询轮不被踢出最近窗口）', async () => {
+  it('上一轮是平台查询轮时，本轮直连委派照样执行（查询轮不被踢出最近窗口）', async () => {
     // 复刻 pi 驱动形状：delegate 轮次以 assistant(toolCall) + toolResult 终结，
     // 没有"带文本的最终 assistant 消息"。selectRecentTurns 曾因此把整个查询轮踢出
     // 最近轮次窗口——模型看不到上一轮查过什么，指代消解就没有依据（C1 指代失败的机械根因）。
@@ -1026,18 +970,18 @@ describe('createTaxAgentRuntime', () => {
         turn += 1;
         observed.push(input);
         // 第一轮显式给出实体；第二轮是指代——加工后的 request 里已含解析出的实体
-        const declaration = turn === 1
-          ? { kind: 'delegate', request: '查询幻东账套的应收账款' }
-          : { kind: 'delegate', request: '查询幻东账套 202608 的应收账款' };
+        const request = turn === 1
+          ? '查询幻东账套的应收账款'
+          : '查询幻东账套 202608 的应收账款';
         try {
-          await input.exec('route_current_turn', declaration);
+          await input.exec('run_task', { request });
         } catch (error) {
           if (!(error instanceof ToolUserError)) throw error;
           return {
             text: error.message,
             messages: [
               ...input.messages,
-              { role: 'assistant', content: [{ type: 'toolCall', id: `call_${turn}`, name: 'route_current_turn', arguments: declaration }], timestamp: turn } as never,
+              { role: 'assistant', content: [{ type: 'toolCall', id: `call_${turn}`, name: 'run_task', arguments: { request } }], timestamp: turn } as never,
               { role: 'toolResult', toolCallId: `call_${turn}`, content: error.message, timestamp: turn } as never,
             ],
           };
@@ -1062,25 +1006,28 @@ describe('createTaxAgentRuntime', () => {
 
   // ── 纠错环（架构 §3 / roadmap Phase 5）─────────────────────────────
   // 子 Agent 执行不了就回报"缺什么"，宿主不 terminate 整轮：Main Agent 能补齐的补齐后
-  // 带 continueTaskId 重派，不能补齐的转告用户。出口校验只认"本轮有没有执行"。
+  // 带 taskId 重派，不能补齐的直接把问题转告用户。出口校验只认"本轮有没有执行"。
 
-  /** 多声明对话驱动：申报被宿主接受且未 terminate 时，模型继续同一回合。 */
-  function needsLoopDriver(declarations: Array<Record<string, unknown> & { text?: string }>, observed: unknown[] = []) {
+  /** 多步驱动：委派被宿主接受且未 terminate 时，模型继续同一回合。 */
+  function needsLoopDriver(steps: Array<{ request?: string; taskId?: string; text?: string }>, observed: unknown[] = []) {
     return {
       run: async (input: TurnDriverInput) => {
-        // 与生产驱动一致：申报是原生工具调用，转录里留下 assistant(toolCall) + toolResult
+        // 与生产驱动一致：委派是原生工具调用，转录里留下 assistant(toolCall) + toolResult
         const messages = [...input.messages];
-        for (const [index, { text, ...declaration }] of declarations.entries()) {
-          const callId = `call_${index + 1}`;
-          messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'route_current_turn', arguments: declaration }], timestamp: index } as never);
-          try {
-            const outcome = await input.exec('route_current_turn', declaration);
-            observed.push(outcome);
-            messages.push({ role: 'toolResult', toolName: 'route_current_turn', toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
-          } catch (error) {
-            if (!(error instanceof ToolUserError)) throw error;
-            messages.push({ role: 'toolResult', toolName: 'route_current_turn', toolCallId: callId, content: [{ type: 'text', text: error.message }], timestamp: index } as never);
-            return { text: error.message, messages };
+        for (const [index, { text, request, taskId }] of steps.entries()) {
+          if (request !== undefined) {
+            const callId = `call_${index + 1}`;
+            const args = { request, ...(taskId ? { taskId } : {}) };
+            messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'run_task', arguments: args }], timestamp: index } as never);
+            try {
+              const outcome = await input.exec('run_task', args);
+              observed.push(outcome);
+              messages.push({ role: 'toolResult', toolName: 'run_task', toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
+            } catch (error) {
+              if (!(error instanceof ToolUserError)) throw error;
+              messages.push({ role: 'toolResult', toolName: 'run_task', toolCallId: callId, content: [{ type: 'text', text: error.message }], timestamp: index } as never);
+              return { text: error.message, messages };
+            }
           }
           if (text !== undefined) {
             messages.push({ role: 'assistant', content: text, timestamp: index } as never);
@@ -1096,8 +1043,8 @@ describe('createTaxAgentRuntime', () => {
     const delegated: Array<{ request: string; taskId?: string }> = [];
     const toolResults: unknown[] = [];
     const driver = needsLoopDriver([
-      { kind: 'delegate', request: '查询幻东账套的应收账款' },
-      { kind: 'delegate', request: '查询幻东账套 202608 的应收账款', continueTaskId: 'task_needs' },
+      { request: '查询幻东账套的应收账款' },
+      { request: '查询幻东账套 202608 的应收账款', taskId: 'task_needs' },
     ], toolResults);
     const runtime = createTaxAgentRuntime({
       driver,
@@ -1120,17 +1067,18 @@ describe('createTaxAgentRuntime', () => {
     expect(relay).toContain('平台要求必须显式给出期间');
     expect(relay).toContain('请给出要查的期间');
     expect(relay).toContain('task_needs');
-    expect(relay).toContain('continueTaskId');
-    // 第二轮是同一个子任务：带 continueTaskId + 补齐后的完整请求
+    expect(relay).toContain('taskId');
+    expect(relay).not.toContain('continueTaskId');
+    // 第二轮是同一个子任务：带 taskId + 补齐后的完整请求
     expect(delegated).toHaveLength(2);
     expect(delegated[1]).toMatchObject({ request: '查询幻东账套 202608 的应收账款', taskId: 'task_needs' });
     expect(reply.text).toBe('幻东 202608 应收余额为 51 元。');
   });
 
-  it('P5.2 补不齐时 Main Agent 申报 conversation 转达用户，该文本即本轮回复', async () => {
+  it('P5.2 补不齐时 Main Agent 直接转达用户，该文本即本轮回复', async () => {
     const driver = needsLoopDriver([
-      { kind: 'delegate', request: '查询幻东账套的应收账款' },
-      { kind: 'conversation', text: '这次查询需要你补充要查的期间，告诉我是哪个月我就接着查。' },
+      { request: '查询幻东账套的应收账款' },
+      { text: '这次查询需要你补充要查的期间，告诉我是哪个月我就接着查。' },
     ]);
     const runtime = createTaxAgentRuntime({
       driver,
@@ -1148,8 +1096,8 @@ describe('createTaxAgentRuntime', () => {
 
   it('P5.3 纠错回路本身不是执行凭证：拿数字结论充数仍被出口校验挡住', async () => {
     const driver = needsLoopDriver([
-      { kind: 'delegate', request: '查询幻东账套的应收账款' },
-      { kind: 'conversation', text: '幻东 202608 应收余额大概是 42 元。' },
+      { request: '查询幻东账套的应收账款' },
+      { text: '幻东 202608 应收余额大概是 42 元。' },
     ]);
     const runtime = createTaxAgentRuntime({
       driver,
@@ -1169,7 +1117,7 @@ describe('createTaxAgentRuntime', () => {
       run: async (input) => {
         for (;;) {
           try {
-            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+            await input.exec('run_task', { request: '查询幻东账套的应收账款' });
           } catch (error) {
             if (!(error instanceof ToolUserError)) throw error;
             return { text: error.message, messages: input.messages };
@@ -1202,7 +1150,7 @@ describe('createTaxAgentRuntime', () => {
       run: async (input) => {
         for (;;) {
           try {
-            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+            await input.exec('run_task', { request: '查询幻东账套的应收账款' });
           } catch (error) {
             if (!(error instanceof ToolUserError)) throw error;
             return { text: error.message, messages: input.messages };
@@ -1242,7 +1190,7 @@ describe('createTaxAgentRuntime', () => {
       run: async (input) => {
         for (;;) {
           try {
-            await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+            await input.exec('run_task', { request: '查询幻东账套的应收账款' });
           } catch (error) {
             if (!(error instanceof ToolUserError)) throw error;
             return { text: error.message, messages: input.messages };
@@ -1270,8 +1218,8 @@ describe('createTaxAgentRuntime', () => {
   it('P5.5 needs 回路把"缺什么"留进 Conversation Log，任务编号脱敏', async () => {
     const events: ConversationEventRecord[] = [];
     const driver = needsLoopDriver([
-      { kind: 'delegate', request: '查询幻东账套的应收账款' },
-      { kind: 'conversation', text: '请补充要查的期间。' },
+      { request: '查询幻东账套的应收账款' },
+      { text: '请补充要查的期间。' },
     ]);
     const runtime = createTaxAgentRuntime({
       driver,
@@ -1300,7 +1248,7 @@ describe('createTaxAgentRuntime', () => {
   it('P5.6 模型停在工具结果上没说话时，不外发工具结果的 JSON', async () => {
     const driver: TurnDriver = {
       run: async (input) => {
-        const outcome = await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻东账套的应收账款' });
+        const outcome = await input.exec('run_task', { request: '查询幻东账套的应收账款' });
         const payload = JSON.stringify(outcome);
         // 生产驱动在"模型不再说话"时会把最后的 toolResult 正文当作 text 交还——
         // 那是内部协议材料（任务编号、continueTaskId 字样），绝不能落到用户眼前。
@@ -1308,8 +1256,8 @@ describe('createTaxAgentRuntime', () => {
           text: payload,
           messages: [
             ...input.messages,
-            { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'route_current_turn', arguments: { kind: 'delegate' } }], timestamp: 1 } as never,
-            { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_1', content: [{ type: 'text', text: payload }], timestamp: 2 } as never,
+            { role: 'assistant', content: [{ type: 'toolCall', id: 'call_1', name: 'run_task', arguments: { kind: 'delegate' } }], timestamp: 1 } as never,
+            { role: 'toolResult', toolName: 'run_task', toolCallId: 'call_1', content: [{ type: 'text', text: payload }], timestamp: 2 } as never,
           ],
         };
       },
@@ -1339,7 +1287,6 @@ describe('createTaxAgentRuntime', () => {
     console.warn = (line: string) => { try { warnings.push(JSON.parse(line)); } catch { /* 非 JSON 告警忽略 */ } };
     try {
       const driver = ScriptedTurnDriver([
-        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
         { text: '查过了：新兴五金 2025-12 共有 4 笔、金额 40,000.00 元。' },
       ]);
       const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
@@ -1359,8 +1306,7 @@ describe('createTaxAgentRuntime', () => {
     try {
       // 第一轮真查询拿到 51 元，第三轮对话复述它——数值在转录里，不告警
       const driver = ScriptedTurnDriver([
-        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻东 202609 的应收' } }] },
-        { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+        { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东 202609 的应收' } }] },
         { text: '刚才查到：幻东 202609 应收余额为 51,000.00 元。' },
       ]);
       const platformTask = subagent(async () => ({ taskId: 'task_1', text: '幻东 202609 应收余额为 51,000.00 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } }));
@@ -1376,7 +1322,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('保存主 Agent 转录并在下一轮完整恢复', async () => {
     const sessions = new FakeSessionRepo();
-    const { driver, inputs } = recordingDriver(declareConversation([{ text: '第一轮回复' }, { text: '第二轮回复' }]));
+    const { driver, inputs } = recordingDriver([{ text: '第一轮回复' }, { text: '第二轮回复' }]);
     const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
     await runtime.handleTurn(makeCtx(), '第一句话');
     await runtime.handleTurn(makeCtx(), '第二句话');
@@ -1389,7 +1335,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('TTL 过期时通过 driver.compact 软着陆', async () => {
     const sessions = new FakeSessionRepo();
-    const base = ScriptedTurnDriver(declareConversation([{ text: '第一轮' }, { text: '恢复后' }]));
+    const base = ScriptedTurnDriver([{ text: '第一轮' }, { text: '恢复后' }]);
     const forced: boolean[] = [];
     const inputs: TurnDriverInput[] = [];
     const driver: TurnDriver = {
@@ -1413,7 +1359,7 @@ describe('createTaxAgentRuntime', () => {
   it('空回复使用失败兜底并保存当前转录', async () => {
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '', messages: input.messages }; } },
+      driver: { run: async (input) => { return { text: '', messages: input.messages }; } },
       sessions,
       platformTask: subagent(),
     });
@@ -1424,7 +1370,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('截止时间已过且无回复时使用超时兜底', async () => {
     const runtime = createTaxAgentRuntime({
-      driver: { run: async (input) => { await input.exec('route_current_turn', { kind: 'conversation' }); return { text: '', messages: input.messages }; } },
+      driver: { run: async (input) => { return { text: '', messages: input.messages }; } },
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
       turnBudgetMs: -1,
@@ -1443,7 +1389,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('S1 结构化歧义 → 宿主机械组装澄清问题；技术报告（模型文本）不上屏', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1470,7 +1416,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('S2 not_found 同样走宿主组装：给出"没有找到"与请用户确认准确名称', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查账套目录里有没有胜利' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查账套目录里有没有胜利' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1492,7 +1438,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('S3 worker 留下干净说明时才附后；带执行语言指纹的"说明"是协议材料，不附', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1513,7 +1459,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('S4 没有 clarification 时行为零变化：数据答案照常上屏', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税账套的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税账套的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1534,9 +1480,9 @@ describe('createTaxAgentRuntime', () => {
   it('S5 计划模式某步带 clarification → 停止后续步骤，澄清问题成为本轮回复', async () => {
     const dispatched: string[] = [];
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第1/2步：查询幻辰的应收账款' } }] },
       // 第二步本会被派出去；澄清终止回合后它不该发生
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第2/2步：查询新兴五金的应收账款' } }] },
       { text: '汇总：两步都查完了。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1601,7 +1547,7 @@ describe('createTaxAgentRuntime', () => {
   it('SE1 来源 A：本会话执行过的任务的 calls 快照进 sessionEntities（本轮只有范围编码也放行）', async () => {
     let entitySources: PlanEntitySources | undefined;
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税 202609 的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税 202609 的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1640,7 +1586,7 @@ describe('createTaxAgentRuntime', () => {
     ];
     let entitySources: PlanEntitySources | undefined;
     const { driver, inputs } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税本期的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税本期的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1684,7 +1630,7 @@ describe('createTaxAgentRuntime', () => {
     ];
     let entitySources: PlanEntitySources | undefined;
     const { driver, inputs } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税 202609 的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税 202609 的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1713,7 +1659,7 @@ describe('createTaxAgentRuntime', () => {
   it('SE4 宿主发出澄清时落 issued 事件（两个收口路径同一模式）', async () => {
     const events: ConversationEventRecord[] = [];
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1744,7 +1690,7 @@ describe('createTaxAgentRuntime', () => {
   it('SE5 规格缺失/底账不可用 → 不挂 sessionEntities（安全缺省，判定回退三个来源）', async () => {
     let entitySources: PlanEntitySources | undefined;
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询幻辰财税的应收账款余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询幻辰财税的应收账款余额' } }] },
       { text: '不应外发' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1797,7 +1743,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('F4.2 计划模式有执行 + 模型复读步骤工具结果：不外发，宿主步骤事实汇总顶上', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第1/2步：查询幻辰的应收账款' } }] },
       // 模型停在工具结果上没再说话：把内部协议材料（recorded/step/next 字段齐全）原样当回复
       { text: '{"recorded":"delegate","step":"第 1/2 步","stepIndex":1,"totalSteps":2,"taskId":"task_step","executed":true,"text":"…","outcome":"ok","next":"继续申报下一步：…（不要转述给用户）"}' },
     ]);
@@ -1825,7 +1771,7 @@ describe('createTaxAgentRuntime', () => {
 
   it('F4.3 零执行 needs 回路复读：行为不变，needs 线索转达（回归）', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询某个对象的余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询某个对象的余额' } }] },
       { text: '{"recorded":"delegate","text":"…","taskId":"task_needs","needs":{"missing":["查询对象"],"reason":"用户没有给出要查的对象"}}' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -1847,7 +1793,6 @@ describe('createTaxAgentRuntime', () => {
 
   it('F4.4 零执行 + 复读申报回执：同样不外发协议 JSON（兜底 NO_EXECUTION_CLARIFICATION）', async () => {
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
       { text: '{"recorded":"conversation"}' },
     ]);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
@@ -2003,173 +1948,10 @@ describe('createTaxAgentRuntime', () => {
     return { seen, restore: () => spy.mockRestore() };
   }
 
-  /** 一段"这条请求已经委派执行过"的历史转录（形状与生产落库一致）。 */
-  async function seedDelegatedTurn(request: string, resultText: string): Promise<FakeSessionRepo> {
-    const sessions = new FakeSessionRepo();
-    await sessions.upsert({
-      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1',
-      updatedAt: new Date().toISOString(),
-      state: [
-        { role: 'user', content: request, timestamp: 1 },
-        { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'delegate' } }], timestamp: 2 } as never,
-        { role: 'toolResult', content: [{ type: 'text', text: resultText }], timestamp: 3 } as never,
-      ] as never,
-    });
-    return sessions;
-  }
-
-  it('RR1 同文请求本会话已委派过：申报 conversation 被退回重填，最终真的委派', async () => {
-    const request = '帮我做一下幻骥达的工资表给我';
-    const delegated: Array<{ request: string }> = [];
-    const events = captureEvents('repeat_request_declaration_bounced');
-    const { driver } = recordingDriver([
-      // 第一次申报 conversation——正是实测里模型选的那一枝
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      // 拿到宿主持有的那个事实后改申报 delegate
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '重新生成幻骥达 2026 年 8 月工资表与个税申报表' } }] },
-      { text: '本轮重新执行：两个文件已重新生成。' },
-    ]);
-    const runtime = createTaxAgentRuntime({
-      driver,
-      sessions: await seedDelegatedTurn(request, '上一轮：12 人汇总完毕，文件已落盘。'),
-      platformTask: subagent(async (args) => {
-        delegated.push({ request: args.request });
-        return { taskId: 'task_live', text: '本轮实时执行：两个文件已重新生成。', execution: { planId: 'plan_live', version: 1, calls: 1 } };
-      }),
-    });
-
-    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_repeat_bounce' }), request);
-
-    expect(events.seen).toHaveLength(1);
-    expect(events.seen[0]?.['priorDelegations']).toBe(1);
-    expect(delegated).toHaveLength(1);
-    expect(reply.text).toBe('本轮实时执行：两个文件已重新生成。');
-    // 关键：用户看到的不是历史结论的重新排版
-    expect(reply.text).not.toContain('上一轮');
-    events.restore();
-  });
-
-  it('RR2 重复请求只退一次：第二次仍申报 conversation 就放行（这道尺是增强不是门）', async () => {
-    // 拦住不放，用户连历史结论都看不到——比给一段可能过期的答复更糟。模型已经拿到
-    // 事实仍坚持对话枝时，宿主没有领域语义可以替它判断，只能放行 + 留痕。
-    const request = '帮我做一下幻骥达的工资表给我';
-    const events = captureEvents('repeat_request_declaration_bounced');
-    const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      { text: '工资表已整理完成，12 人零差异。' },
-    ]);
-    const runtime = createTaxAgentRuntime({
-      driver,
-      sessions: await seedDelegatedTurn(request, '上一轮：12 人汇总完毕。'),
-      platformTask: subagent(),
-    });
-
-    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_repeat_once' }), request);
-
-    expect(events.seen).toHaveLength(1);
-    expect(reply.text).toBe('工资表已整理完成，12 人零差异。');
-    events.restore();
-  });
-
-  it('RR3 早前那一轮停在对话枝时不退：闲聊重复不会被逼去执行', async () => {
-    const request = '在吗';
-    const sessions = new FakeSessionRepo();
-    await sessions.upsert({
-      sessionId: 'sess_1', principalId: 'wecom:user_a', channelConversationId: 'sess_1',
-      updatedAt: new Date().toISOString(),
-      state: [
-        { role: 'user', content: request, timestamp: 1 },
-        { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'conversation' } }], timestamp: 2 } as never,
-        { role: 'toolResult', content: [{ type: 'text', text: '{"recorded":"conversation"}' }], timestamp: 3 } as never,
-      ] as never,
-    });
-    const events = captureEvents('repeat_request_declaration_bounced');
-    const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      { text: '在的，说吧。' },
-    ]);
-    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask: subagent() });
-
-    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_chitchat' }), request);
-
-    expect(events.seen).toHaveLength(0);
-    expect(reply.text).toBe('在的，说吧。');
-    events.restore();
-  });
-
-  it('RR4 后台受理回执落转录：同文重发被重复请求复核识别，不再起第二个后台任务（B1/F6 形态）', async () => {
-    // 修复 5：background 模式申报 delegate 后回执以 ToolUserError(routeReceipt:'background')
-    // 终结，direct 出口只落 [loaded, user, 合成回执]——带 routeReceipt 的 route toolResult
-    // 整体被丢弃，repeat-request 认不出"同文请求已后台派发"，用户重发同文会再起一个
-    // 后台任务。修法 = 后台 direct 出口把驱动产出的 route toolCall/toolResult 续进转录。
-    const request = '帮我查一下幻辰财税的应收账款';
-    const taskManager = {
-      submit: vi.fn(async () => ({ taskId: 'task_bg_receipt', runId: 'run_bg_receipt', state: 'running' })),
-      list: vi.fn(async () => []),
-      get: vi.fn(async () => null),
-      cancel: vi.fn(async () => null),
-    };
-    const sessions = new FakeSessionRepo();
-    // 第一回合的驱动镜像生产 pi-driver 的 terminate 形状（route toolCall + toolResult
-    // 带 details.routeReceipt='background'）——ScriptedTurnDriver 的简化形状不带这对消息。
-    const firstDriver: TurnDriver = {
-      run: async (input) => {
-        try {
-          await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻辰财税的应收账款' }, undefined);
-        } catch (error) {
-          if (!(error instanceof ToolUserError)) throw error;
-          return {
-            text: error.message,
-            messages: [
-              ...input.messages,
-              { role: 'assistant', content: [{ type: 'toolCall', name: 'route_current_turn', input: { kind: 'delegate' } }], timestamp: 1 } as never,
-              { role: 'toolResult', content: [{ type: 'text', text: error.message }], details: { routeReceipt: error.routeReceipt }, timestamp: 2 } as never,
-            ],
-          };
-        }
-        throw new Error('后台受理应终结第一回合');
-      },
-    };
-    const firstRuntime = createTaxAgentRuntime({
-      driver: firstDriver,
-      sessions,
-      platformTask: subagent(),
-      backgroundTasks: taskManager,
-      workerDispatchMode: 'background',
-    } as never);
-    const firstReply = await firstRuntime.handleTurn(makeCtx({ requestId: 'req_bg_receipt_1' }), request);
-    expect(firstReply.text).toMatch(/受理|排队/);
-    expect(taskManager.submit).toHaveBeenCalledTimes(1);
-    // 转录里确实有带 routeReceipt='background' 的 route toolResult（受理事实，非执行凭证）
-    const saved = sessions.peek('sess_1')?.state as Array<{ role?: string; details?: { routeReceipt?: string } }>;
-    expect(saved.some((message) => message.role === 'toolResult' && message.details?.routeReceipt === 'background')).toBe(true);
-
-    // 同文重发：模型申报 conversation（实测错枝）→ 宿主把"已后台派发"事实递给申报处退回
-    // 重填一次（与 RR1/RR2 同一形状：第二次申报被放行）
-    const events = captureEvents('repeat_request_declaration_bounced');
-    const secondDriver = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
-      { text: '任务仍在后台执行中，完成后会单独反馈。' },
-    ]);
-    const secondRuntime = createTaxAgentRuntime({
-      driver: secondDriver.driver,
-      sessions,
-      platformTask: subagent(),
-      backgroundTasks: taskManager,
-      workerDispatchMode: 'background',
-    } as never);
-    const reply = await secondRuntime.handleTurn(makeCtx({ requestId: 'req_bg_receipt_2' }), request);
-
-    expect(events.seen).toHaveLength(1);
-    expect(events.seen[0]?.['priorDelegations']).toBe(1);
-    // 退回重填一次后放行（增强不是门）；本回合没有第二次后台提交
-    expect(taskManager.submit).toHaveBeenCalledTimes(1);
-    expect(reply.text).toBe('任务仍在后台执行中，完成后会单独反馈。');
-    events.restore();
-  });
-
+  // 2026-10-20 波的 RR1–RR4（重复请求复核退回）随申报分支停用：退回只在模型申报
+  // conversation 时触发，直连后没有可拦时刻、也认不到委派回执（判据与取舍见
+  // repeat-request.ts 文件头）。模块本体与 repeat-request.test.ts 保留，待删除 run
+  // 按 decision-log 2.7 的加回判据（宿主持有指代解析/独立确定性分支）处置。
   it('SP1 终稿里的服务器路径不外发：删掉路径、保留内容、留一条告警', async () => {
     const leaked = [
       '**已产出文件**（均在 `tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/`）：',
@@ -2178,7 +1960,6 @@ describe('createTaxAgentRuntime', () => {
     ].join('\n');
     const events = captureEvents('server_path_leak', 'warn');
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
       { text: leaked },
     ]);
     const sessions = new FakeSessionRepo();
@@ -2210,7 +1991,7 @@ describe('createTaxAgentRuntime', () => {
     const leaked = '文件已整理好，位置：tmp/task_d42fffce-ce9a-4ff7-b648-b26e9131d9b1/。';
     const events = captureEvents('server_path_leak', 'warn');
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '整理幻骥达工资表' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '整理幻骥达工资表' } }] },
     ]);
     const sessions = new FakeSessionRepo();
     const runtime = createTaxAgentRuntime({
@@ -2238,7 +2019,7 @@ describe('createTaxAgentRuntime', () => {
   it('SP2 委派回合的终稿同样过这道尺（执行痕迹不外泄路径）', async () => {
     const events = captureEvents('server_path_leak', 'warn');
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '整理幻骥达 2026 年 8 月工资表' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '整理幻骥达 2026 年 8 月工资表' } }] },
       { text: '本轮实时执行：两个文件已重新生成。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -2276,9 +2057,9 @@ describe('createTaxAgentRuntime', () => {
       execution: { planId: 'plan_a', version: 1, calls: 1 },
     }));
     const { driver, inputs } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第1/2步：查询幻辰的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第1/2步：查询幻辰的应收账款' } }] },
       // 此步骤不能在同一 Planner 回合里被派发：第 1 步只是受理，不是执行完成。
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第2/2步：查询新兴五金的应收账款' } }] },
       { text: '两步都查完了。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -2316,21 +2097,18 @@ describe('createTaxAgentRuntime', () => {
     const { driver, inputs } = recordingDriver([
       {
         toolCalls: [
-          { tool: 'route_current_turn', args: { kind: 'conversation' } },
           { tool: 'task_control', args: { action: 'list', principalId: 'wecom:other', sessionId: 'other' } },
         ],
         text: '当前任务已列出。',
       },
       {
         toolCalls: [
-          { tool: 'route_current_turn', args: { kind: 'conversation' } },
           { tool: 'task_control', args: { action: 'status', taskId: 'task_a', principalId: 'wecom:other', sessionId: 'other' } },
         ],
         text: '任务仍在执行。',
       },
       {
         toolCalls: [
-          { tool: 'route_current_turn', args: { kind: 'conversation' } },
           { tool: 'task_control', args: { action: 'cancel', taskId: 'task_a', principalId: 'wecom:other', sessionId: 'other' } },
         ],
         text: '已请求取消。',
@@ -2372,7 +2150,7 @@ describe('createTaxAgentRuntime', () => {
         return message === '确认 A1B2C3' ? { text: '确认已处理。', outcome: 'confirmed' } as never : null;
       },
     };
-    const { driver, inputs } = recordingDriver(declareConversation([{ text: '我会结合引用内容回答。' }]));
+    const { driver, inputs } = recordingDriver([{ text: '我会结合引用内容回答。' }]);
     const runtime = createTaxAgentRuntime({
       driver,
       sessions,
@@ -2431,7 +2209,7 @@ describe('createTaxAgentRuntime', () => {
       ] as never,
     });
     const { driver, inputs } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第2/2步：查询新兴五金的应收账款' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第2/2步：查询新兴五金的应收账款' } }] },
     ]);
     const appended: ConversationEventRecord[] = [];
     const runtime = createTaxAgentRuntime({
@@ -2543,7 +2321,7 @@ describe('createTaxAgentRuntime', () => {
       { stepIndex: 2, status: 'failed' },
     ], 4, 'plan_zero_exec');
     const { driver } = recordingDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '第4/4步：查询最后一项' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '第4/4步：查询最后一项' } }] },
     ]);
     const runtime = createTaxAgentRuntime({
       driver,

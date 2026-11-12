@@ -62,20 +62,10 @@ function snapshotDriver(script: (input: TurnDriverInput) => Promise<TurnDriverRe
   return { driver, inputs };
 }
 
-async function declareAndAnswer(input: TurnDriverInput, args: Record<string, unknown>, answer: string): Promise<TurnDriverResult> {
-  try {
-    await input.exec('route_current_turn', args);
-  } catch (error) {
-    if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
-    throw error;
-  }
-  return { text: answer, messages: input.messages };
-}
-
 describe('T1 召回轮的工具面与作答依据', () => {
   it('历史检索工具不在工具面上：召回没有"自己翻旧账"这条路径', async () => {
     const log = conversationLog();
-    const { driver, inputs } = snapshotDriver((input) => declareAndAnswer(input, { kind: 'conversation' }, '好的。'));
+    const { driver, inputs } = snapshotDriver((input) => Promise.resolve({ text: '好的。', messages: input.messages }));
     const runtime = createTaxAgentRuntime({
       driver,
       sessions: new FakeSessionRepo(),
@@ -88,8 +78,8 @@ describe('T1 召回轮的工具面与作答依据', () => {
     const tools = inputs[0]!.tools.map((tool) => tool.name);
     expect(tools, '历史检索工具仍在工具面上：召回会走历史检索而不是平台获取').not.toContain('search_history');
     expect(tools, '历史检索工具仍在工具面上：召回会走历史检索而不是平台获取').not.toContain('get_messages');
-    // 正向半边：申报入口仍在（召回轮要新数据时经 delegate → 平台获取）。
-    expect(tools).toContain('route_current_turn');
+    // 正向半边：委派入口仍在（召回轮要新数据时经它 → 平台获取）。
+    expect(tools).toContain('run_task');
   });
 
   it('召回轮要新数据时，作答前宿主发起平台获取，且执行痕迹落审计（tool_result）', async () => {
@@ -103,15 +93,15 @@ describe('T1 召回轮的工具面与作答依据', () => {
       run: async (input) => {
         inputs.push(input);
         try {
-          await input.exec('route_current_turn', { kind: 'delegate', request: '查询幻辰财税 202609 应收账款余额' });
-          throw new Error('delegate 应以 ToolUserError 终结本轮');
+          await input.exec('run_task', { request: '查询幻辰财税 202609 应收账款余额' });
+          throw new Error('委派应以 ToolUserError 终结本轮');
         } catch (error) {
           if (!(error instanceof ToolUserError)) throw error;
           return {
             text: error.message,
             messages: [
               ...input.messages,
-              { role: 'toolResult', toolName: 'route_current_turn', toolCallId: 'call_live', content: [{ type: 'text', text: error.message }], timestamp: Date.now() } as never,
+              { role: 'toolResult', toolName: 'run_task', toolCallId: 'call_live', content: [{ type: 'text', text: error.message }], timestamp: Date.now() } as never,
             ],
           };
         }
@@ -130,7 +120,7 @@ describe('T1 召回轮的工具面与作答依据', () => {
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_recall_live' }), RECALL_QUESTION);
 
     expect(delegated, '召回轮无法发起平台获取').toHaveLength(1);
-    expect(inputs[0]!.tools.map((tool) => tool.name)).toContain('route_current_turn');
+    expect(inputs[0]!.tools.map((tool) => tool.name)).toContain('run_task');
     expect(reply.text).toContain(FIXTURE_NUMBER);
     // 审计可查：这次平台获取作为 tool_result 事件落进 Conversation Log。
     const toolResults = log.events.filter((event) => event.kind === 'tool_result');

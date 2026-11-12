@@ -181,13 +181,12 @@ function makeCtx(): TrustedContext {
 }
 
 /**
- * 申报 conversation 后给出文本的脚本驱动，最后一条 assistant 消息盖 provider usage。
+ * 普通回合给出文本的脚本驱动，最后一条 assistant 消息盖 provider usage。
  * ScriptedTurnDriver 产出的是简化形状（无 usage），这里只给最后一条补上——模拟
  * pi-driver 的真实转录（assistant 消息带 message.usage）。
  */
 function scriptedMainDriver(usage: Record<string, unknown> | undefined, text: string): TurnDriver {
   const base = ScriptedTurnDriver([
-    { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
     { text },
   ]);
   return {

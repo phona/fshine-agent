@@ -35,7 +35,6 @@ import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo, TaskPl
 import { createPiCodingTurnDriver } from './src/pi-coding-driver';
 import { createContextTaskRunner } from './src/context';
 import { createTaxAgentRuntime } from './src/runtime';
-import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
 import { ToolUserError, type DriverMessage, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import type { PlanCliRunner } from './src/plan-runtime';
 import { FakeSessionRepo } from './test-helpers';
@@ -317,22 +316,25 @@ class FakePlatformTaskRepo implements PlatformTaskRepo {
 }
 
 /**
- * 多声明对话驱动（与 plan-mode 测试同构）：申报被宿主接受且没有 terminate 时，模型继续同一回合
- * 并消费下一条声明——计划模式的每一步都走这条路。
+ * 多步驱动（与 plan-mode 测试同构）：委派被宿主接受且没有 terminate 时，模型继续同一回合
+ * 并消费下一步——计划模式的每一步都走这条路。
  */
-function planDriver(declarations: Array<Record<string, unknown> & { text?: string }>): TurnDriver {
+function planDriver(steps: Array<{ request?: string; taskId?: string; text?: string }>): TurnDriver {
   return {
     run: async (input: TurnDriverInput): Promise<TurnDriverResult> => {
       const messages = [...input.messages] as unknown[];
-      for (const [index, { text, ...declaration }] of declarations.entries()) {
-        const callId = `call_${index + 1}`;
-        messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: ROUTE_CURRENT_TURN_TOOL_NAME, arguments: declaration }], timestamp: index } as never);
-        try {
-          const outcome = await input.exec(ROUTE_CURRENT_TURN_TOOL_NAME, declaration);
-          messages.push({ role: 'toolResult', toolName: ROUTE_CURRENT_TURN_TOOL_NAME, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
-        } catch (error) {
-          if (!(error instanceof ToolUserError)) throw error;
-          return { text: error.message, messages: messages as never };
+      for (const [index, { text, request, taskId }] of steps.entries()) {
+        if (request !== undefined) {
+          const callId = `call_${index + 1}`;
+          const args = { request, ...(taskId ? { taskId } : {}) };
+          messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'run_task', arguments: args }], timestamp: index } as never);
+          try {
+            const outcome = await input.exec('run_task', args);
+            messages.push({ role: 'toolResult', toolName: 'run_task', toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            return { text: error.message, messages: messages as never };
+          }
         }
         if (text !== undefined) {
           messages.push({ role: 'assistant', content: text, timestamp: index } as never);
@@ -357,8 +359,8 @@ describe('C26 投影：真实执行过的步骤记 done，不被足迹误判污�
     const platformTask = createContextTaskRunner({ profiles, tasks: new FakePlatformTaskRepo(), workerDriver: driver });
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/2步：查对象甲' },
-        { kind: 'conversation', text: '汇总：对象甲 202609 应收已查到。' },
+        { request: '第1/2步：查对象甲' },
+        { text: '汇总：对象甲 202609 应收已查到。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask,

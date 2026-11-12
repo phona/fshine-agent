@@ -890,7 +890,7 @@ describe('example-gateway Pi subagent adapter', () => {
       .rejects.toThrow('子任务执行失败，请稍后再试。');
   });
 
-  it('Main Agent 只申报本轮动作，宿主据申报委派并采用子 Agent 自然语言结果', async () => {
+  it('Main Agent 只暴露委派工具（run_task），宿主承接直连调用并采用子 Agent 自然语言结果', async () => {
     const root = await profileRoot();
     const tasks = new MemoryTasks();
     const scripted = runner(root, tasks, ScriptedTurnDriver([{ text: '找到两个客户，请让用户选择。' }]));
@@ -907,7 +907,7 @@ describe('example-gateway Pi subagent adapter', () => {
       run: async (input) => {
         exposed = input.tools.map((tool) => tool.name);
         try {
-          await input.exec('route_current_turn', { kind: 'delegate', request: '查幻东的应收账款余额' });
+          await input.exec('run_task', { request: '查幻东的应收账款余额' });
         } catch (error) {
           if (error instanceof ToolUserError) return { text: error.message, messages: input.messages };
           throw error;
@@ -921,7 +921,7 @@ describe('example-gateway Pi subagent adapter', () => {
     const runtime = createTaxAgentRuntime({ driver: mainDriver, sessions: new MemorySessions(), platformTask: subagent });
     const reply = await runtime.handleTurn(trusted(), '查幻东余额');
 
-    expect(exposed).toEqual(['route_current_turn']);
+    expect(exposed).toEqual(['run_task']);
     expect(reply.text).toBe('找到两个客户，请让用户选择。');
   });
 });

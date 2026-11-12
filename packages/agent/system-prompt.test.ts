@@ -62,8 +62,7 @@ function captureDriver(steps: Parameters<typeof ScriptedTurnDriver>[0]) {
   return { driver, inputs };
 }
 
-const declareConversation = [
-  { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'conversation' } }] },
+const conversationSteps = [
   { text: '你好。' },
 ];
 
@@ -88,7 +87,7 @@ function scanProductionTs(dir: string, visit: (file: string, content: string) =>
 describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
   it('① 正常回合：系统提示词以 agent.md 正文开头，日期尾注动态拼在尾部', async () => {
     const profile = await loadAgentProfile();
-    const { driver, inputs } = captureDriver(declareConversation);
+    const { driver, inputs } = captureDriver(conversationSteps);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
 
     await runtime.handleTurn(makeCtx({ requestId: 'req_profile_normal' }), '你好');
@@ -118,7 +117,7 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
   });
 
   it('② executorLabel 占位：自定义称谓生效；缺省中性；无占位文本不被改动', async () => {
-    const custom = captureDriver(declareConversation);
+    const custom = captureDriver(conversationSteps);
     const customRuntime = createTaxAgentRuntime({
       driver: custom.driver, sessions: new FakeSessionRepo(), platformTask: subagent(),
       executorLabel: 'X 子 Agent',
@@ -128,7 +127,7 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
     expect(customPrompt).toContain('交给 X 子 Agent 执行');
     expect(customPrompt).not.toContain(EXECUTOR_LABEL_PLACEHOLDER);
 
-    const neutral = captureDriver(declareConversation);
+    const neutral = captureDriver(conversationSteps);
     const neutralRuntime = createTaxAgentRuntime({ driver: neutral.driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
     await neutralRuntime.handleTurn(makeCtx({ requestId: 'req_profile_neutral' }), '你好');
     expect(neutral.inputs[0]?.systemPrompt).toContain(`交给 ${DEFAULT_EXECUTOR_LABEL} 执行`);
@@ -182,7 +181,7 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
       writeFileSync(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: ${description}\n---\n\n${body}\n`);
     }
     const catalog = await listSkills(root);
-    const { driver, inputs } = captureDriver(declareConversation);
+    const { driver, inputs } = captureDriver(conversationSteps);
     const runtime = createTaxAgentRuntime({
       driver, sessions: new FakeSessionRepo(), platformTask: subagent(),
       skillCatalog: catalog,
@@ -207,17 +206,17 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
   });
 
   it('③ 不注入技能面时上下文不出现技能清单段（缺省 = 不曝光）', async () => {
-    const { driver, inputs } = captureDriver(declareConversation);
+    const { driver, inputs } = captureDriver(conversationSteps);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
     await runtime.handleTurn(makeCtx({ requestId: 'req_profile_no_skills' }), '你好');
     expect(inputs[0]?.systemPrompt).not.toContain('可用技能');
     expect(inputs[0]?.tools.map((tool) => tool.name)).not.toContain('read_skill');
   });
 
-  it('④ 正常委派在换源后照常工作（申报 → 执行 → 汇总）', async () => {
+  it('④ 正常直连委派在换源后照常工作（委派 → 执行 → 结果）', async () => {
     const delegated: string[] = [];
     const { driver } = captureDriver([
-      { toolCalls: [{ tool: 'route_current_turn', args: { kind: 'delegate', request: '查询对象甲的应收余额' } }] },
+      { toolCalls: [{ tool: 'run_task', args: { request: '查询对象甲的应收余额' } }] },
       { text: '对象甲 202608 应收余额为 51 元。' },
     ]);
     const runtime = createTaxAgentRuntime({
@@ -234,11 +233,12 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
     expect(reply.text).toContain('51 元');
   });
 
-  it('⑤ 安全不变量不回归：未申报的回合零外发（身份/授权纪律与换源无关）', async () => {
-    const { driver } = captureDriver([{ text: '我直接回答，不申报。' }]);
+  it('⑤ 普通回合直接回复、终稿清洗不回归（身份/授权纪律与换源无关）', async () => {
+    const { driver } = captureDriver([{ text: '文件在 tmp/task_x/ 里，先这样回答。' }]);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: subagent() });
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_profile_nodeclare' }), '你好');
-    expect(reply.text).not.toContain('不申报');
-    expect(reply.text).toContain('请告诉我要查询的对象和范围');
+    // 直连后普通回合的模型文本就是回复；确定性清洗（服务器路径不外发）仍照旧生效。
+    expect(reply.text).toContain('先这样回答');
+    expect(reply.text).not.toContain('tmp/');
   });
 });

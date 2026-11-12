@@ -97,7 +97,6 @@ describe('T9 宿主注入整条删除', () => {
     const driver: TurnDriver = {
       run: async (input) => {
         inputs.push(input);
-        await input.exec('route_current_turn', { kind: 'conversation' });
         return { text: '好的。', messages: input.messages };
       },
     };

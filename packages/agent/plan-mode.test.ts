@@ -4,7 +4,6 @@ import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTIO
 import { ToolUserError, type ScriptedTurnStep, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { ScriptedTurnDriver } from './src/driver';
 import { createTaxAgentRuntime } from './src/runtime';
-import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
 import { FakeSessionRepo } from './test-helpers';
 
 /**
@@ -111,23 +110,26 @@ class FakeTaskPlanRepo implements TaskPlanRepo {
 }
 
 /**
- * 多声明对话驱动（与 e2e 的 mainDriver 同构）：申报被宿主接受且没有 terminate 时，
- * 模型继续同一回合并消费下一条声明——计划模式的每一步都走这条路。
+ * 多步驱动（与 e2e 的 mainDriver 同构）：委派被宿主接受且没有 terminate 时，
+ * 模型继续同一回合并消费下一步——计划模式的每一步都走这条路。
  */
-function planDriver(declarations: Array<Record<string, unknown> & { text?: string }>, observed: unknown[] = []) {
+function planDriver(steps: Array<{ request?: string; taskId?: string; text?: string }>, observed: unknown[] = []) {
   return {
     run: async (input: TurnDriverInput): Promise<TurnDriverResult> => {
       const messages = [...input.messages] as unknown[];
-      for (const [index, { text, ...declaration }] of declarations.entries()) {
-        const callId = `call_${index + 1}`;
-        messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: ROUTE_CURRENT_TURN_TOOL_NAME, arguments: declaration }], timestamp: index } as never);
-        try {
-          const outcome = await input.exec(ROUTE_CURRENT_TURN_TOOL_NAME, declaration);
-          observed.push(outcome);
-          messages.push({ role: 'toolResult', toolName: ROUTE_CURRENT_TURN_TOOL_NAME, toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
-        } catch (error) {
-          if (!(error instanceof ToolUserError)) throw error;
-          return { text: error.message, messages: messages as never };
+      for (const [index, { text, request, taskId }] of steps.entries()) {
+        if (request !== undefined) {
+          const callId = `call_${index + 1}`;
+          const args = { request, ...(taskId ? { taskId } : {}) };
+          messages.push({ role: 'assistant', content: [{ type: 'toolCall', id: callId, name: 'run_task', arguments: args }], timestamp: index } as never);
+          try {
+            const outcome = await input.exec('run_task', args);
+            observed.push(outcome);
+            messages.push({ role: 'toolResult', toolName: 'run_task', toolCallId: callId, content: [{ type: 'text', text: JSON.stringify(outcome) }], timestamp: index } as never);
+          } catch (error) {
+            if (!(error instanceof ToolUserError)) throw error;
+            return { text: error.message, messages: messages as never };
+          }
         }
         if (text !== undefined) {
           messages.push({ role: 'assistant', content: text, timestamp: index } as never);
@@ -168,7 +170,7 @@ function capturePlanLog() {
 }
 
 describe('长任务拆解：计划模式与任务计划状态', () => {
-  it('P6.1 三步拆解全链：每步单独委派、后两步续跑同一子任务、汇总由 conversation 产出', async () => {
+  it('P6.1 三步拆解全链：每步单独委派、后两步续跑同一子任务、汇总由模型直接输出', async () => {
     const toolResults: unknown[] = [];
     const task = subagent([
       (args) => DONE('task_multi', '第一步结果：对象甲 202609 数值 11。'),
@@ -176,10 +178,10 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
       () => DONE('task_multi', '第三步结果：对象丙 202609 数值 33。'),
     ]);
     const { driver } = { driver: planDriver([
-      { kind: 'delegate', request: '第1/3步：查对象甲 202609' },
-      { kind: 'delegate', request: '第2/3步：查对象乙 202609', continueTaskId: 'task_multi' },
-      { kind: 'delegate', request: '第3/3步：查对象丙 202609', continueTaskId: 'task_multi' },
-      { kind: 'conversation', text: '汇总：对象甲 11，对象乙 22，对象丙 33。' },
+      { request: '第1/3步：查对象甲 202609' },
+      { request: '第2/3步：查对象乙 202609', taskId: 'task_multi' },
+      { request: '第3/3步：查对象丙 202609', taskId: 'task_multi' },
+      { text: '汇总：对象甲 11，对象乙 22，对象丙 33。' },
     ], toolResults) };
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: task });
 
@@ -196,14 +198,14 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     expect(JSON.stringify(toolResults[0])).toContain('第 1/3 步');
     expect(JSON.stringify(toolResults[1])).toContain('第 2/3 步');
     expect(JSON.stringify(toolResults[2])).toContain('第 3/3 步');
-    expect(JSON.stringify(toolResults[2])).toContain('conversation');
+    expect(JSON.stringify(toolResults[2])).toContain('直接输出汇总');
     expect(reply.text).toBe('汇总：对象甲 11，对象乙 22，对象丙 33。');
   });
 
-  it('P6.2 无前缀 delegate 仍是单步：结果直接作为本轮回复，不落任何计划状态', async () => {
+  it('P6.2 无前缀调用仍是单步：结果直接作为本轮回复，不落任何计划状态', async () => {
     const taskPlans = new FakeTaskPlanRepo();
     const task = subagent([() => DONE('task_single', '单步结果：对象甲 202609 数值 11。')]);
-    const { driver } = recordingDriver([{ toolCalls: [{ tool: ROUTE_CURRENT_TURN_TOOL_NAME, args: { kind: 'delegate', request: '查对象甲 202609' } }] }, { text: '不应外发' }]);
+    const { driver } = recordingDriver([{ toolCalls: [{ tool: 'run_task', args: { request: '查对象甲 202609' } }] }, { text: '不应外发' }]);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: task, taskPlans });
 
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_single' }), '查对象甲 202609');
@@ -216,7 +218,7 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
 
   it('P6.3 非法前缀按单步：协议解析失败不退化成失败，只是这一轮按单步收尾', async () => {
     const task = subagent([() => DONE('task_bad', '单步结果：对象甲 202609 数值 11。')]);
-    const { driver } = recordingDriver([{ toolCalls: [{ tool: ROUTE_CURRENT_TURN_TOOL_NAME, args: { kind: 'delegate', request: '第4/3步：查对象甲 202609' } }] }, { text: '不应外发' }]);
+    const { driver } = recordingDriver([{ toolCalls: [{ tool: 'run_task', args: { request: '第4/3步：查对象甲 202609' } }] }, { text: '不应外发' }]);
     const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: task });
 
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_bad_prefix' }), '查对象甲 202609');
@@ -235,10 +237,10 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     ]);
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/3步：查对象甲' },
-        { kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_facts' },
-        { kind: 'delegate', request: '第3/3步：查对象丙', continueTaskId: 'task_facts' },
-        { kind: 'conversation', text: '汇总：对象甲查到了，对象乙缺期间，对象丙没有执行。' },
+        { request: '第1/3步：查对象甲' },
+        { request: '第2/3步：查对象乙', taskId: 'task_facts' },
+        { request: '第3/3步：查对象丙', taskId: 'task_facts' },
+        { text: '汇总：对象甲查到了，对象乙缺期间，对象丙没有执行。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: task,
@@ -273,10 +275,10 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const toolResults: unknown[] = [];
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/3步：查对象甲' },
-        { kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_same' },
-        { kind: 'delegate', request: '第3/3步：查对象丙', continueTaskId: 'task_same' },
-        { kind: 'conversation', text: '汇总：甲查到了，乙缺期间没查，丙查到了。' },
+        { request: '第1/3步：查对象甲' },
+        { request: '第2/3步：查对象乙', taskId: 'task_same' },
+        { request: '第3/3步：查对象丙', taskId: 'task_same' },
+        { text: '汇总：甲查到了，乙缺期间没查，丙查到了。' },
       ], toolResults),
       sessions: new FakeSessionRepo(),
       platformTask: task,
@@ -303,8 +305,8 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     ]);
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/3步：查对象甲' },
-        { kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_resume' },
+        { request: '第1/3步：查对象甲' },
+        { request: '第2/3步：查对象乙', taskId: 'task_resume' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: task,
@@ -318,8 +320,8 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     // 下一回合继续拆解：第 3 步接得上同一个计划（总步数一致、步号递增）
     const second = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第3/3步：查对象丙', continueTaskId: 'task_resume' },
-        { kind: 'conversation', text: '汇总：三步都处理完了。' },
+        { request: '第3/3步：查对象丙', taskId: 'task_resume' },
+        { text: '汇总：三步都处理完了。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent([() => DONE('task_resume', '第三步成功。')]),
@@ -335,9 +337,9 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const taskPlans = new FakeTaskPlanRepo();
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/3步：查对象甲' },
-        { kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_x' },
-        { kind: 'conversation', text: '第一批汇总。' },
+        { request: '第1/3步：查对象甲' },
+        { request: '第2/3步：查对象乙', taskId: 'task_x' },
+        { text: '第一批汇总。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent([() => DONE('task_x', '成功。')]),
@@ -347,8 +349,8 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
 
     const second = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/3步：查对象丁' },
-        { kind: 'conversation', text: '第二批汇总。' },
+        { request: '第1/3步：查对象丁' },
+        { text: '第二批汇总。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent([() => DONE('task_y', '成功。')]),
@@ -368,9 +370,9 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     ]);
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/2步：查对象甲' },
-        { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_label' },
-        { kind: 'conversation', text: '汇总。' },
+        { request: '第1/2步：查对象甲' },
+        { request: '第2/2步：查对象乙', taskId: 'task_label' },
+        { text: '汇总。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: task,
@@ -381,7 +383,7 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
 
     const single = subagent([() => DONE('task_s', '单步成功。')]);
     const singleRuntime = createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '查对象甲' }]),
+      driver: planDriver([{ request: '查对象甲' }]),
       sessions: new FakeSessionRepo(),
       platformTask: single,
     });
@@ -392,9 +394,9 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
   it('P6.9 汇总出口：全部步骤零执行时数字结论仍被挡下，如实汇总放行', async () => {
     const runtime = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/2步：查对象甲' },
-        { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_zero' },
-        { kind: 'conversation', text: '汇总：对象甲 42 元，对象乙 43 元。' },
+        { request: '第1/2步：查对象甲' },
+        { request: '第2/2步：查对象乙', taskId: 'task_zero' },
+        { text: '汇总：对象甲 42 元，对象乙 43 元。' },
       ]),
       sessions: new FakeSessionRepo(),
       // 两步都没有任何平台执行，汇总却抛出数字结论
@@ -406,9 +408,9 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
 
     const honest = createTaxAgentRuntime({
       driver: planDriver([
-        { kind: 'delegate', request: '第1/2步：查对象甲' },
-        { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_zero2' },
-        { kind: 'conversation', text: '汇总：两步都没能执行，我需要你补充查询范围。' },
+        { request: '第1/2步：查对象甲' },
+        { request: '第2/2步：查对象乙', taskId: 'task_zero2' },
+        { text: '汇总：两步都没能执行，我需要你补充查询范围。' },
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent([() => ({ taskId: 'task_zero2', text: '执行不了。' })]),
@@ -428,19 +430,19 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
     // 第一回合：计划 A 的第 1 步（1/3，done，计划保持打开）
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p611_a' }), '逐个核对甲乙丙');
     // 第二回合：计划 B 的第 1 步（同样 1/3）
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p611_b' }), '再核对丁戊己');
 
     // 第三回合：第 2/3 步与两个计划都接得上 → 消歧问题，不委派
     const task2 = subagent([() => DONE('task_x', '不应被调用。')]);
     const reply = await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      driver: planDriver([{ request: '第2/3步：继续核对' }]),
       sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p611_ask' }), '继续');
 
@@ -457,24 +459,24 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const taskPlans = new FakeTaskPlanRepo();
     const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p612_a' }), '逐个核对甲乙丙');
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p612_b' }), '再核对丁戊己');
 
     // 消歧问题（同 P6.11），然后用户回复「2」（= 较旧的对象甲计划）
     const asked = await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      driver: planDriver([{ request: '第2/3步：继续核对' }]),
       sessions: new FakeSessionRepo(), platformTask: subagent([() => DONE('task_x', '不应被调用。')]), taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p612_ask' }), '继续');
     expect(asked.text).toContain('【任务消歧】');
 
     const task3 = subagent([() => DONE('task_a2', '对象甲第二步成功。')]);
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象甲' }]),
+      driver: planDriver([{ request: '第2/3步：查对象甲' }]),
       sessions: new FakeSessionRepo(), platformTask: task3, taskPlans,
       conversationLog: fakeConversationLog([
         { kind: 'assistant_message', content: asked.text },
@@ -495,18 +497,18 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     const taskPlans = new FakeTaskPlanRepo();
     const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p613_a' }), '逐个核对甲乙丙');
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p613_b' }), '再核对丁戊己');
 
     // 上一条 assistant 不是消歧问题（中间插过回合/问题已过期）：编号"1"不产生绑定
     const task2 = subagent([() => DONE('task_x', '不应被调用。')]);
     const stale = await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：继续核对' }]),
+      driver: planDriver([{ request: '第2/3步：继续核对' }]),
       sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
       conversationLog: fakeConversationLog([
         { kind: 'assistant_message', content: '别的回复文本。' },
@@ -520,22 +522,22 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     expect(taskPlans.facts).toHaveLength(4);
   });
 
-  it('P6.14 显式 continueTaskId 反查计划：续跑旧任务绑旧计划，不被最近的计划抢走', async () => {
+  it('P6.14 显式 taskId 反查计划：续跑旧任务绑旧计划，不被最近的计划抢走', async () => {
     const taskPlans = new FakeTaskPlanRepo();
     const task = subagent([() => DONE('task_a', '甲第一步成功。'), () => DONE('task_b', '丁第一步成功。')]);
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p614_a' }), '逐个核对甲乙丙');
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象丁', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p614_b' }), '再核对丁戊己');
 
     // 模型显式续跑对象甲的子任务：计划归属按 taskId 反查（对象甲），即便对象丁的计划更"近"
     const task2 = subagent([() => DONE('task_a', '甲第二步成功。')]);
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象乙', continueTaskId: 'task_a' }]),
+      driver: planDriver([{ request: '第2/3步：查对象乙', taskId: 'task_a' }]),
       sessions: new FakeSessionRepo(), platformTask: task2, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p614_pick' }), '继续核对甲乙丙');
 
@@ -553,17 +555,17 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     ]);
     // 计划 A：3 步只完成 1 步；计划 B：2 步只完成 1 步（更近）
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
+      driver: planDriver([{ request: '第1/3步：查对象甲', text: '第 1 步完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p615_a' }), '逐个核对甲乙丙');
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第1/2步：查对象丁', text: '完成。' }]),
+      driver: planDriver([{ request: '第1/2步：查对象丁', text: '完成。' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p615_b' }), '核对丁戊');
 
     // 第 2/3 步只与计划 A 接得上（B 总步数不同）→ 自动续跑 A，不打扰用户
     await createTaxAgentRuntime({
-      driver: planDriver([{ kind: 'delegate', request: '第2/3步：查对象乙' }]),
+      driver: planDriver([{ request: '第2/3步：查对象乙' }]),
       sessions: new FakeSessionRepo(), platformTask: task, taskPlans,
     }).handleTurn(makeCtx({ requestId: 'req_p615_pick' }), '继续核对甲乙丙');
 
@@ -580,11 +582,11 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
       const task = subagent([() => ({ taskId: 'task_break', text: '这一步没有产生任何平台执行。' })]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/4步：查对象甲' },
-          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_break' },
-          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_break' },
-          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_break' },
-          { kind: 'conversation', text: '主 Agent 汇总：不应外发。' },
+          { request: '第1/4步：查对象甲' },
+          { request: '第2/4步：查对象乙', taskId: 'task_break' },
+          { request: '第3/4步：查对象丙', taskId: 'task_break' },
+          { request: '第4/4步：查对象丁', taskId: 'task_break' },
+          { text: '主 Agent 汇总：不应外发。' },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -628,11 +630,11 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
       ]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/4步：查对象甲' },
-          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_part' },
-          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_part' },
-          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_part' },
-          { kind: 'conversation', text: '主 Agent 汇总：不应外发。' },
+          { request: '第1/4步：查对象甲' },
+          { request: '第2/4步：查对象乙', taskId: 'task_part' },
+          { request: '第3/4步：查对象丙', taskId: 'task_part' },
+          { request: '第4/4步：查对象丁', taskId: 'task_part' },
+          { text: '主 Agent 汇总：不应外发。' },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -660,11 +662,11 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
       ]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/4步：查对象甲' },
-          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_reset' },
-          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_reset' },
-          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_reset' },
-          { kind: 'conversation', text: '汇总：第二步查到了，其余步骤未执行。' },
+          { request: '第1/4步：查对象甲' },
+          { request: '第2/4步：查对象乙', taskId: 'task_reset' },
+          { request: '第3/4步：查对象丙', taskId: 'task_reset' },
+          { request: '第4/4步：查对象丁', taskId: 'task_reset' },
+          { text: '汇总：第二步查到了，其余步骤未执行。' },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -693,11 +695,11 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
       ]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/4步：查对象甲' },
-          { kind: 'delegate', request: '第2/4步：查对象乙', continueTaskId: 'task_needs' },
-          { kind: 'delegate', request: '第3/4步：查对象丙', continueTaskId: 'task_needs' },
-          { kind: 'delegate', request: '第4/4步：查对象丁', continueTaskId: 'task_needs' },
-          { kind: 'conversation', text: '汇总：第二步缺范围，其余步骤未执行。' },
+          { request: '第1/4步：查对象甲' },
+          { request: '第2/4步：查对象乙', taskId: 'task_needs' },
+          { request: '第3/4步：查对象丙', taskId: 'task_needs' },
+          { request: '第4/4步：查对象丁', taskId: 'task_needs' },
+          { text: '汇总：第二步缺范围，其余步骤未执行。' },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -735,7 +737,7 @@ function captureHostEvents(names: readonly string[]) {
  * 当文本打印；模型最后把上一步的工具结果原样当回复。那段 JSON 是宿主与模型之间的内部
  * 协议材料（任务编号、「不要转述给用户」的 next 提示），绝不能外发。
  */
-const SERIALIZED_STEP_TOOL_RESULT = '{"recorded":"delegate","step":"第 1/2 步","stepIndex":1,"totalSteps":2,"taskId":"task_replay","executed":false,"text":"这一步没有发起任何平台调用。","outcome":"no_execution","next":"继续申报下一步：request 以「第2/2步：」开头，continueTaskId 填 task_replay（不要转述给用户）。任一步失败都不阻塞后续步骤。"}';
+const SERIALIZED_STEP_TOOL_RESULT = '{"recorded":"delegate","step":"第 1/2 步","stepIndex":1,"totalSteps":2,"taskId":"task_replay","executed":false,"text":"这一步没有发起任何平台调用。","outcome":"no_execution","next":"继续调用本工具派下一步：request 以「第2/2步：」开头，taskId 填 task_replay（不要转述给用户）。任一步失败都不阻塞后续步骤。"}';
 
 describe('计划模式：模型复读工具结果时的外发兜底', () => {
   it('P6.20 复读协议 JSON 不外发：宿主用步骤事实汇总顶上，并记守夜事件', async () => {
@@ -744,10 +746,10 @@ describe('计划模式：模型复读工具结果时的外发兜底', () => {
       const task = subagent([() => ({ taskId: 'task_replay', text: '这一步没有发起任何平台调用。' })]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/2步：查对象甲' },
-          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_replay' },
+          { request: '第1/2步：查对象甲' },
+          { request: '第2/2步：查对象乙', taskId: 'task_replay' },
           // 模型停在工具结果上没再说话：把协议 JSON 原样当回复
-          { kind: 'conversation', text: SERIALIZED_STEP_TOOL_RESULT },
+          { text: SERIALIZED_STEP_TOOL_RESULT },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -764,7 +766,7 @@ describe('计划模式：模型复读工具结果时的外发兜底', () => {
       expect(reply.text).toContain('可以回复“继续”重跑未完成的步骤');
       expect(reply.text).not.toContain('recorded');
       expect(reply.text).not.toContain('task_replay');
-      expect(reply.text).not.toContain('continueTaskId');
+      expect(reply.text).not.toContain('taskId');
       expect(reply.text).not.toContain('不要转述给用户');
       expect(reply.text).not.toContain('"step"');
       // 守夜事件：复读被兜底截住（不是普通的计划汇总放行）
@@ -789,9 +791,9 @@ describe('计划模式：模型复读工具结果时的外发兜底', () => {
       ]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/2步：查对象甲' },
-          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_replay_needs' },
-          { kind: 'conversation', text: SERIALIZED_STEP_TOOL_RESULT },
+          { request: '第1/2步：查对象甲' },
+          { request: '第2/2步：查对象乙', taskId: 'task_replay_needs' },
+          { text: SERIALIZED_STEP_TOOL_RESULT },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
@@ -815,9 +817,9 @@ describe('计划模式：模型复读工具结果时的外发兜底', () => {
       const task = subagent([() => ({ taskId: 'task_honest', text: '这一步没有发起任何平台调用。' })]);
       const runtime = createTaxAgentRuntime({
         driver: planDriver([
-          { kind: 'delegate', request: '第1/2步：查对象甲' },
-          { kind: 'delegate', request: '第2/2步：查对象乙', continueTaskId: 'task_honest' },
-          { kind: 'conversation', text: '两步都没能执行，请补充查询范围后我重跑。' },
+          { request: '第1/2步：查对象甲' },
+          { request: '第2/2步：查对象乙', taskId: 'task_honest' },
+          { text: '两步都没能执行，请补充查询范围后我重跑。' },
         ]),
         sessions: new FakeSessionRepo(),
         platformTask: task,
