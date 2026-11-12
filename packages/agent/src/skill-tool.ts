@@ -43,6 +43,9 @@ export function createReadSkillTool(options: ReadSkillToolOptions = {}): AgentTo
         throw new ToolUserError(unknownSkillMessage(name, available));
       }
       const loaded = await readForTool(registry, name);
+      // 成功读取的观测行（2026-11-12，A/B Eval 的命中采集用）：只记名与字节数，不记正文。
+      // 没有这一行时"读了哪份技能"只能靠猜——命中/未命中的四种情形无法归因。
+      console.info(JSON.stringify({ event: 'main_skill_read', name: loaded.name, bytes: Buffer.byteLength(loaded.content, 'utf8') }));
       return {
         content: [{ type: 'text', text: loaded.content }],
         details: { name: loaded.name },

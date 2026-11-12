@@ -25,6 +25,9 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServerAssembly, type ServerAssemblyOverrides } from '../../../apps/server/assembly';
+// 与探针/验收同一条配置解析：相对拼法的 eval 配置要物化成绝对路径副本再交给 assembly
+// （否则 contextProfiles.<id>.root 的仓内相对路径会在 loadConfig 处直接报"必须是绝对路径"）。
+import { resolveConfigPath } from '../../resolve-config-path';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..');
@@ -81,22 +84,106 @@ function overridesFor(arm: 'control' | 'profile'): Partial<ServerAssemblyOverrid
   return { roleInstructionsOverride: controlRoleInstructions(), skillsMode: 'off' };
 }
 
+/** 捕获宿主埋点 JSON 行（与 tests/e2e 的 captureHostEvents 同形；只在评测进程内生效）。 */
+function captureHostEvents() {
+  const lines: Array<Record<string, unknown>> = [];
+  const sink = (line: unknown): void => {
+    if (typeof line !== 'string') return;
+    try { lines.push(JSON.parse(line) as Record<string, unknown>); } catch { /* 非 JSON 忽略 */ }
+  };
+  const originals = { info: console.info, warn: console.warn, error: console.error };
+  console.info = sink;
+  console.warn = sink;
+  console.error = sink;
+  return {
+    lines,
+    of: (event: string): Array<Record<string, unknown>> => lines.filter((entry) => entry['event'] === event),
+    forRequest: (requestId: string): Array<Record<string, unknown>> => lines.filter((entry) => entry['requestId'] === requestId),
+    restore: (): void => { console.info = originals.info; console.warn = originals.warn; console.error = originals.error; },
+  };
+}
+
+/** 一轮的机械指标：耗时/结局/用量（turn_span 已带 usage 字段，见 runtime.ts:1133）。 */
+interface TurnMetrics {
+  /** 本轮模型的 token 用量（turn_span 的 usageSpanFields；缺失即"没采到"，不补零）。 */
+  usage?: Record<string, number>;
+  /** 轮次耗时（turn_span.durationMs）。 */
+  durationMs?: number;
+  /** 轮次结局（turn_span.outcome）。 */
+  outcome?: unknown;
+  /** 本轮读过的技能名（main_skill_read）。 */
+  skillsRead: string[];
+  /** 技能读取失败/发现失败事件（可观测性，不吞）。 */
+  skillErrors: Array<Record<string, unknown>>;
+}
+
+function metricsFor(events: Array<Record<string, unknown>>): TurnMetrics {
+  const span = events.find((entry) => entry['event'] === 'turn_span');
+  const usage: Record<string, number> = {};
+  for (const [key, value] of Object.entries(span ?? {})) {
+    if (typeof value === 'number' && key !== 'durationMs') usage[key] = value;
+  }
+  return {
+    ...(Object.keys(usage).length > 0 ? { usage } : {}),
+    ...(typeof span?.['durationMs'] === 'number' ? { durationMs: span['durationMs'] as number } : {}),
+    ...(span ? { outcome: span['outcome'] } : {}),
+    skillsRead: events.filter((entry) => entry['event'] === 'main_skill_read').map((entry) => String(entry['name'])),
+    skillErrors: events.filter((entry) => entry['event'] === 'skill_read_failed' || entry['event'] === 'skill_discovery_failed'),
+  };
+}
+
 async function runArm(arm: 'control' | 'profile', cases: UxCase[], outPath: string): Promise<void> {
-  const assembly = await createServerAssembly({ env: process.env, ...overridesFor(arm) });
+  const configPath = resolveConfigPath(process.env['AGENT_CONFIG_PATH']);
+  const assembly = await createServerAssembly({
+    env: { ...process.env, AGENT_CONFIG_PATH: configPath },
+    ...overridesFor(arm),
+  });
   try {
     for (const testCase of cases) {
       const sessionId = `ux-ab-${arm}-${testCase.id}`;
-      const replies: string[] = [];
+      const turns: Array<{ text: string; reply: string; notices: string[]; pendingPlans: string[]; metrics: TurnMetrics }> = [];
       for (const [index, message] of testCase.turns.entries()) {
-        const reply = await assembly.runtime.handleTurn({
-          requestId: `${sessionId}-t${index + 1}`,
-          principalId: argValue('principal') ?? 'wecom:ux-ab',
-          sessionId,
-        }, message);
-        replies.push(reply.text);
+        const requestId = `${sessionId}-t${index + 1}`;
+        const capture = captureHostEvents();
+        const notices: string[] = [];
+        const pendingPlans: string[] = [];
+        const started = Date.now();
+        let reply;
+        try {
+          reply = await assembly.runtime.handleTurn({
+            requestId,
+            principalId: argValue('principal') ?? 'wecom:ux-ab',
+            sessionId,
+            // 计划门的两个宿主出口：生产由 handler 注入（onNotice = channel 通知；
+            // onPlanPending = planConfirmation.savePending）。直连 runtime 不传时 confirm/notify
+            // 档会抛「未配置…」并把部署内部措辞带进用户回复（2026-11-12 两轮实测：这是构造
+            // 缺陷，不是被测行为）。评测里只记录：通知原文进产物；pending 记一条 id 供核对。
+            onNotice: async (text: string) => { notices.push(text); },
+            onPlanPending: async (pending) => { pendingPlans.push(String((pending as { planId?: unknown }).planId ?? 'unknown')); },
+          }, message);
+        } finally {
+          capture.restore();
+        }
+        const metrics = metricsFor(capture.forRequest(requestId));
+        turns.push({
+          text: message,
+          reply: reply.text,
+          notices,
+          pendingPlans,
+          metrics: { ...metrics, durationMs: metrics.durationMs ?? Date.now() - started },
+        });
       }
-      appendFileSync(outPath, `${JSON.stringify({ arm, id: testCase.id, turns: testCase.turns, replies })}\n`);
-      console.log(`[${arm}] ${testCase.id}：${testCase.turns.length} 轮完成`);
+      const totals = turns.reduce<{ durationMs: number; skillsRead: string[]; usage: Record<string, number> }>(
+        (acc, turn) => {
+          acc.durationMs += turn.metrics.durationMs ?? 0;
+          acc.skillsRead.push(...turn.metrics.skillsRead);
+          for (const [key, value] of Object.entries(turn.metrics.usage ?? {})) acc.usage[key] = (acc.usage[key] ?? 0) + value;
+          return acc;
+        },
+        { durationMs: 0, skillsRead: [], usage: {} },
+      );
+      appendFileSync(outPath, `${JSON.stringify({ arm, id: testCase.id, turns, totals })}\n`);
+      console.log(`[${arm}] ${testCase.id}：${testCase.turns.length} 轮完成，技能读取 ${totals.skillsRead.length} 次`);
     }
   } finally {
     await assembly.close();
