@@ -168,7 +168,7 @@ jobs:
             ' "$json" "$CASES" "$expected" "$name" "$status"
           }
 
-          # 汇总脚本的退出码是测量结论（0=有结论，2=数据不足），不是工作流错误。
+          # 汇总脚本的退出码是测量结论（0=通过，2=判据红，3=数据不足/用法错误），不是工作流错误。
           set +e
           node scripts/eval/measure-summary.mjs \
             --expect-cases "$CASES" --expect-rounds "$ROUNDS" --expect-disc-rounds 2 \
@@ -199,7 +199,11 @@ jobs:
             fi
             if [ "$summary_status" != "0" ]; then
               echo ""
-              echo "> 汇总脚本退出码 ${summary_status}：数据不足/输入不完整，结论只能是「无法判定」。这是测量结论，不是工作流故障。"
+              if [ "$summary_status" = "2" ]; then
+                echo "> 汇总脚本退出码 2：判据红（有实证的判据违例，如稳定性通过率低于建议线）。这是测量结论，不是工作流故障。"
+              else
+                echo "> 汇总脚本退出码 ${summary_status}：数据不足/用法错误，结论只能是「无法判定」。这是测量结论，不是工作流故障。"
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 

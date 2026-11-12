@@ -29,10 +29,15 @@
  *   失败形态               —— 从 results 里提取每轮的 calls / mechanical_pass / final，
  *                             供人工归因（机制违 vs 结果错）。
  *
- * 退出码（诚实反映结论，不是门禁）：
- *   0 = 所有被请求的测量都有可用数据，结论已给出
- *   2 = 数据不足/输入不完整（结论只能是「无法判定」），或命令行用法错误
- * 工作流不得把 2 当成工作流故障——被测失败率与数据不足都是测量结果。
+ * 退出码（诚实反映结论，不是门禁；语义与映射唯一出处见 scripts/eval/exit-codes.ts，
+ * 2026-11-12 Owner 批准对齐——本脚本不另写一份映射，只把自己的判定折成
+ * pass / fail / inconclusive 后调 exitCodeFor）：
+ *   0 = 通过：所有被请求的测量都有可用数据，且判据通过（结论已给出）
+ *   2 = 判据红：有实证的判据违例（稳定性某用例通过率低于建议线）
+ *   3 = 数据不足/用法错误：输入不完整、期望结构缺失/不符、重复声明、证据不可读——
+ *       无法得出有效判定
+ * 工作流不得把非零当成工作流故障——被测失败率与数据不足都是测量结果。
+ * 判据红优先于灰：有实证违例时不再自称"无法判定"（与 measure-* 同族取码次序）。
  *
  * 输出 markdown 到 stdout（CI 里重定向进 $GITHUB_STEP_SUMMARY）。不打印 transcript
  * 全文——只取 final 前 80 字符做形态提示。
@@ -40,6 +45,11 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随被测根走。
+// Node 24 默认剥离 .ts 类型（engines >= 24），CI 的 `node scripts/eval/...` 与本地
+// `node --import tsx` 都不需要额外参数。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 export const DIMENSIONS = Object.freeze([
   'groundedness',
@@ -491,12 +501,15 @@ export function buildReport({
   evidenceErrors = [],
 } = {}) {
   const lines = [];
-  let exitCode = 0;
+  // 判定桶：任何"无法得出有效判定"的输入问题 → inconclusive（3）；有实证判据红 →
+  // fail（2）；都没有 → pass（0）。退出码在函数结尾经 exitCodeFor 折算（唯一映射出处）。
+  let inconclusive = false;
+  let criteriaFailed = false;
 
   lines.push('## Eval harness 测量汇总', '');
   if (evidenceErrors.length > 0) {
     lines.push(`> **输入错误**：${evidenceErrors.join('；')}——相关证据按缺失处理，不得写成清白。`, '');
-    exitCode = 2;
+    inconclusive = true;
   }
 
   // 声明用例集（稳定性优先，否则区分度）是 eval-real 对照必须盖住的分母。
@@ -566,20 +579,23 @@ export function buildReport({
 
     if (!effectiveComplete) {
       lines.push(`> **判定**：无法判定（${incompleteReason}）。`, '');
-      exitCode = Math.max(exitCode, 2);
+      inconclusive = true;
       stabilityResult = { usable: usable.length, missing: missingIds.length + structuralGaps.filter((g) => g.startsWith('缺用例')).length, flaky, verdict: `无法判定（${incompleteReason}）` };
     } else if (usable.length === 0) {
       lines.push(`> **判定**：无法判定（数据不足：无可用稳定性数据${missingIds.length > 0 ? `，缺失 ${missingIds.length} 例` : ''}）。`, '');
-      exitCode = Math.max(exitCode, 2);
+      inconclusive = true;
       stabilityResult = { usable: 0, missing: missingIds.length, flaky: [], verdict: '无法判定（数据不足）' };
     } else if (missingIds.length > 0) {
       // 用例集不完整时，已有用例的通过率只对它们自己成立，不能拿来给整个用例集下结论。
       lines.push(`> **判定**：无法判定（数据不足：${missingIds.join('、')} 无有效轮次；已有 ${usable.length} 例数据只按单例解读，不写成整体结论）。`, '');
-      exitCode = Math.max(exitCode, 2);
+      inconclusive = true;
       stabilityResult = { usable: usable.length, missing: missingIds.length, flaky: [], verdict: '无法判定（数据不足）' };
     } else {
       const parts = [];
       if (flaky.length > 0) {
+        // 判据红（有实证）：建议线以下的用例不能按 per-push required 门设计——这是
+        // "评测正常完成且判据未通过"，退出码走 fail（2），不是"数据不足"的灰。
+        criteriaFailed = true;
         parts.push(`${flaky.join('、')} 通过率低于 ${Math.round(STABILITY_THRESHOLD * 100)}%——这些用例不能按 per-push required 门设计（多数决或判据修订需另拿证据）。`);
       }
       if (stableCount > 0) {
@@ -635,13 +651,16 @@ export function buildReport({
     lines.push('');
     lines.push(`> 有效比较：${comparison.validComparisons} 例；缺失：${comparison.missing} 例。缺失项不计入「强模型更优 / 弱模型更优 / 无显著差异」任何一类，也不能当作区分度证据。`, '');
     lines.push(`> **判定**：${comparison.verdict}`, '');
-    if (comparison.insufficient) exitCode = Math.max(exitCode, 2);
+    if (comparison.insufficient) inconclusive = true;
   }
 
   if (!stabilityRequested && !discriminationRequested) {
     lines.push('_（无输入）_', '');
   }
 
+  // 取码次序：判据红（有实证违例）优先于灰（无法判定）——有实证红时不得自称"无法判定"；
+  // 两者都不许折成 0。映射本体在 exit-codes.ts（唯一出处）。
+  const exitCode = exitCodeFor(criteriaFailed ? 'fail' : inconclusive ? 'inconclusive' : 'pass');
   return {
     markdown: lines.join('\n'),
     exitCode,
@@ -760,7 +779,7 @@ export function main(argv) {
     opts = parseArgs(argv);
   } catch (err) {
     console.error(`${err.message}\n${USAGE}`);
-    return 2;
+    return exitCodeFor('inconclusive');   // 用法错误：无法得出有效判定（3），不是判据红
   }
 
   const stabilityLoads = opts.stabilityPaths.map(readJson);
