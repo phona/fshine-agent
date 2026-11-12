@@ -1,12 +1,12 @@
 /**
  * 计划模式协议（roadmap Phase 6，架构 §3 规划者/执行者分工）。
  *
- * **机械、领域无关**：宿主只认 delegate request 的「第N/M步：」前缀，不匹配任何业务内容。
+ * **机械、领域无关**：宿主只认委派 request 的「第N/M步：」前缀，不匹配任何业务内容。
  *
  * ```text
- * 无前缀的 delegate = 单步模式：行为与 Phase 5 之前完全一样（结果 terminate 成本轮回复）
- * 有前缀的 delegate = 计划模式：该步结果不 terminate，作为工具结果交还 Main Agent，
- *                       由它继续申报下一步（delegate）或申报 conversation 输出汇总
+ * 无前缀的调用 = 单步模式：结果 terminate 成本轮回复
+ * 有前缀的调用 = 计划模式：该步结果不 terminate，作为工具结果交还 Main Agent，
+ *                       由它继续派下一步或直接输出汇总
  * ```
  *
  * 前缀非法（N/M 不是正整数、N>M、只有前缀没有正文）一律按单步处理：协议解析失败不该
@@ -58,7 +58,7 @@ export interface PlanStepToolResult {
   step: string;
   stepIndex: number;
   totalSteps: number;
-  /** 该步的子任务编号（续跑后续步骤时填进 continueTaskId）。 */
+  /** 该步的子任务编号（续跑后续步骤时填进 taskId）。 */
   taskId: string;
   /** 本步是否真的产生了平台执行（出口校验与汇总的事实依据）。 */
   executed: boolean;
@@ -75,7 +75,7 @@ export interface PlanStepToolResult {
 /** 计划模式步骤交还模型时的"下一步"指引（纯协议，零业务词）。 */
 export function planStepNextHint(step: PlanStepLabel, taskId: string): string {
   if (step.stepIndex < step.totalSteps) {
-    return `继续申报下一步：request 以「第${step.stepIndex + 1}/${step.totalSteps}步：」开头，continueTaskId 填 ${taskId}（不要转述给用户）。任一步失败都不阻塞后续步骤。`;
+    return `继续调用本工具派下一步：request 以「第${step.stepIndex + 1}/${step.totalSteps}步：」开头，taskId 填 ${taskId}（不要转述给用户）。任一步失败都不阻塞后续步骤。`;
   }
-  return `全部 ${step.totalSteps} 步已派发完毕：申报 conversation 输出汇总。汇总必须覆盖每一步的结果；失败或缺信息的步骤如实报告，不要掩盖，也不要用估计值填充。`;
+  return `全部 ${step.totalSteps} 步已派发完毕：直接输出汇总。汇总必须覆盖每一步的结果；失败或缺信息的步骤如实报告，不要掩盖，也不要用估计值填充。`;
 }

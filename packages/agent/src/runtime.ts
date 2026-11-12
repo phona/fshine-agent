@@ -2,9 +2,9 @@
 import type { AgentMessage, AgentTool } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, ConversationSessionRepo, PlatformTaskRepo, TaskPlanRepo, TaskPlanSummary, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { loadTranscript, saveTranscript } from './session';
-import { ToolUserError, addUsageTotals, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
+import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
-import { ROUTE_CURRENT_TURN_TOOL, ROUTE_CURRENT_TURN_TOOL_NAME, REPEATED_REQUEST_RETRY, declarationShapeOf, reviewRouteDeclaration, type PlanEntitySources, type TurnDeclaration } from './turn-contract';
+import type { PlanEntitySources } from './turn-contract';
 import { collectSessionEntitiesSafely, mergeSessionEntities } from './session-entities';
 import { matchClarificationBinding } from './clarification-events';
 import type { OperationArgsSpecs } from './operation-labels';
@@ -13,7 +13,7 @@ import { createPlanFactWriter, planStepSummary, renderPlanCircuitBreak, renderPl
 import { matchPlanDisambiguationReply, renderDisambiguationQuestion, resolvePlanBinding } from './plan-binding';
 import { renderClarificationToolResult, renderNeedsToolResult, renderNeedsUserText, renderPlanStepToolResult } from './turn-relay';
 import { decideTurnExit, type TurnExitEvent } from './turn-exit';
-import { buildRequestKey, findRepeatedDelegatedRequest } from './repeat-request';
+import { buildRequestKey } from './repeat-request';
 import { createCurrentUserMessage, getQuotedEvidence } from './message-reference';
 import { executeTaskControl, renderTaskRoster, TASK_CONTROL_TOOL, TASK_CONTROL_TOOL_NAME } from './task-control';
 import {
@@ -27,7 +27,7 @@ import {
 } from './background-runtime';
 import type { BackgroundTaskManager } from './task-manager';
 import { sanitizeDirectExitReply, sanitizeTranscriptMessages, sanitizeUserVisibleReply } from './reply-exit';
-import { accumulateDelegation, createTurnState, declarationRejectionsExhausted, noteDeclarationRejection, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
+import { accumulateDelegation, createTurnState, noteNeedsRound, notePlanStepOutcome, noteZeroExecStep, stepOutcomeOf } from './turn-state';
 import { assembleTurnContext, assistantContentText, RECENT_TURN_HISTORY_NOTE, selectRecentTurns, stripHistoryNotes } from './turn-context';
 import {
   appendClarificationIssued,
@@ -41,7 +41,6 @@ import {
 } from './turn-persistence';
 import { stripFootprint } from './text-hygiene';
 import { loadTimedOutRecord, renderResourceExhaustedReply, RESOURCE_EXHAUSTED_CLASS } from './resource-exhausted';
-import { messageTextFor } from './error-codes';
 import { applyExecutorLabel, loadAgentProfile } from './agent-profile';
 import { renderSkillCatalog, type SkillSummary } from './skills';
 import { readSkillToolDescriptor } from './skill-tool';
@@ -56,9 +55,6 @@ export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXE
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
-
-/** Appended when the Main Agent answers without declaring the turn's intent. */
-const ROUTE_RETRY_NUDGE = messageTextFor('ROUTE_RETRY_NUDGE');
 
 /**
  * 纠错环单回合上限（架构 §3）与计划模式熔断阈值随 TurnState 的记账规则一起住在
@@ -453,16 +449,20 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       }
       if (!taskEventContext) context.push(currentUserMessage);
 
-      // 工具面：申报契约 +（后台模式下）任务控制。历史检索工具已删除（相位 1 的 T1）：
-      // 召回轮没有"模型自己翻旧账"这条路径，回答依据只能是保留的转录与本轮平台获取。
+      // 工具面：执行层委派工具（宿主装配注入的 deps.platformTask.tool，缺省 run_task）+
+      // （可选）技能读取 +（后台模式下）任务控制。直连委派取代了旧的回合申报工具：
+      // 模型不再申报 conversation/delegate——普通回合直接文本回复，要执行就调用委派工具。
+      // 历史检索工具已删除（相位 1 的 T1）：召回轮没有"模型自己翻旧账"这条路径，
+      // 回答依据只能是保留的转录与本轮平台获取。
       const tools = [
-        ROUTE_CURRENT_TURN_TOOL,
+        deps.platformTask.tool,
         ...(deps.readSkillTool ? [readSkillToolDescriptor(deps.readSkillTool)] : []),
         ...(!taskEventContext && deps.backgroundTasks ? [TASK_CONTROL_TOOL] : []),
       ];
-      // 回合契约：Main Agent 必须显式申报本轮动作，宿主留存并校验证据。
-      // 状态形状与记账规则住 turn-state.ts（计数器在那里可用纯数据直接验证）；
-      // 这里只按消歧回合的选定计划建状态，控制流仍在本函数。
+      // 回合状态：状态形状与记账规则住 turn-state.ts（计数器在那里可用纯数据直接验证）；
+      // 这里只按消歧回合的选定计划建状态，控制流仍在本函数。直连后不再有"申报"对象
+      // ——turn.intent 用作**宿主持有的委派事实**（本回合发生过委派工具调用），出口的
+      // 执行痕迹门据此判定。
       const turn = createTurnState(taskEventContext?.event.run.planId ? { planId: taskEventContext.event.run.planId } : planChoice);
       if (taskEventContext) {
         turn.planId = taskEventContext.event.run.planId ?? null;
@@ -470,8 +470,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         turn.planStepOutcomes = [...taskEventContext.planStepOutcomes];
         turn.execution = taskResultFromEvent(taskEventContext.event)?.execution ?? null;
       }
-      // 重复请求复核的重试计数：同一个回合只退一次（判据见 route_current_turn 调用处）。
-      let repeatRequestNudged = false;
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
       // planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；
@@ -503,12 +501,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
        * ① 同回合已定（本回合早前步骤绑定的计划）是**调用点的短路**，不是判定的一支：
        * 同一拆解的所有步共享一个 planId，宿主强制，后续步骤不再判定也不重复记账。
        */
-      async function resolvePlanId(step: PlanStepLabel, intent: TurnDeclaration & { kind: 'delegate' }): Promise<string> {
+      async function resolvePlanId(step: PlanStepLabel, continueTaskId: string | undefined): Promise<string> {
         if (turn.planId) return turn.planId;
         const binding = await resolvePlanBinding({
           openPlans: await loadOpenPlans(),
           preferredPlanId: turn.preferredPlanId,
-          taskId: intent.continueTaskId,
+          taskId: continueTaskId,
           planIdForTask: async (taskId: string): Promise<string | null> => {
             if (!deps.taskPlans) return null;
             try {
@@ -556,385 +554,326 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             if (!deps.backgroundTasks) return { error: '后台任务控制当前不可用。' };
             return executeTaskControl(deps.backgroundTasks, ctx, args);
           }
-          if (tool === ROUTE_CURRENT_TURN_TOOL_NAME) {
-            const reviewed = reviewRouteDeclaration(args);
-            // 形状不对的申报退回给模型重填，不消耗用户的澄清轮次；退回话术点名具体字段
-            // （turn-contract 的 inspectTurnDeclaration），退回次数**有界**（②，2026-11-12）：
-            // 同一回合的拒收超过 MAX_DECLARATION_REJECTIONS 就退出重填循环——T9 r01 是
-            // 同一份坏申报被退回 33 次后模型弃权、arch-d C2 226 次后被 300s 看门狗收掉
-            // （0 轮 0 调用），根因是零信息话术 + 宿主没有界。超界不再交还模型：转成下方
-            // 的 route_declaration_missing 出口，用裁定认可的 NO_EXECUTION_CLARIFICATION
-            // 收尾（可行动话术，不是零信息兜底）。
-            if ('error' in reviewed) {
-              const shape = declarationShapeOf(args);
-              const rejection = noteDeclarationRejection(turn, shape);
-              const keys = Object.keys(args).sort();
-              const kind = typeof args['kind'] === 'string' ? args['kind'] : undefined;
-              if (rejection.exceeded) {
-                console.warn(JSON.stringify({
-                  event: 'route_declaration_bounded_stop',
-                  requestId: ctx.requestId,
-                  reason: reviewed.error,
-                  keys,
-                  kind,
-                  rejections: rejection.count,
-                  shapeRejections: rejection.shapeCount,
-                }));
-                throw new ToolUserError(NO_EXECUTION_CLARIFICATION);
-              }
-              console.warn(JSON.stringify({ event: 'route_declaration_invalid', requestId: ctx.requestId, reason: reviewed.error, keys, kind, rejections: rejection.count }));
-              return { error: `申报无效：${reviewed.error}` };
+          if (tool === deps.platformTask.tool.name) {
+            // 直连委派（移除申报层）：模型直接调用执行层工具，宿主在这里承接原来申报分支
+            // 的全部确定性守卫——实体来源、计划绑定、后台派发、失败分类与结果交还。
+            const request = String(args['request'] ?? '');
+            const continueTaskId = typeof args['taskId'] === 'string' && args['taskId'].trim() ? args['taskId'] : undefined;
+            // 宿主持有的委派事实：出口的执行痕迹门（delegate_without_execution）与调用审计
+            // 都以"本回合真的调用过委派工具"为准，不再依赖模型申报。
+            turn.intent = { kind: 'delegate', request, ...(continueTaskId ? { continueTaskId } : {}) };
+            // 只记元数据：全文落在转录与 Conversation Log 里，日志重复一份只会放大泄漏面。
+            console.info(JSON.stringify({
+              event: 'turn_delegation',
+              requestId: ctx.requestId,
+              hasTaskId: Boolean(continueTaskId),
+              requestLength: request.length,
+            }));
+            // 澄清收口（任务 1）：本回合已经进入"平台请用户选一个"的收口，任何再次委派都在
+            // 此拦住——计划模式的后续步骤、单步模式的重新派单都不该发生（用户要先回答）。
+            // 抛出的是宿主已组装好的澄清问题：它经驱动的 terminate 语义成为本轮文本，
+            // 再由收口处的优先分支落成最终回复（模型那一轮的翻译体由此不上屏）。
+            if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
+            // T10 段2 冻结计划：本回合已有一笔委派被判假死（结果指标长期无进展）。
+            // 不再派发任何后续步骤，也不新开任务或盲目重跑——把冻结事实交还模型，
+            // 由它收口；续跑只能由用户下一回合显式发起（同一 taskId 从断点）。
+            if (turn.planFrozen) {
+              console.info(JSON.stringify({
+                event: 'task_plan_frozen_refused',
+                requestId: ctx.requestId,
+              }));
+              return { error: PLAN_FROZEN_REFUSAL };
             }
-            if (taskEventContext && reviewed.intent.kind === 'delegate') {
+            // 后台计划事件续跑：只许继续原计划的下一步（步号必须接得上、总步数一致），
+            // 否则把事实交还模型汇总原计划——不盲目重跑也不新开任务。
+            if (taskEventContext) {
               const completedStep = taskEventContext.event.run.stepIndex;
               const totalSteps = taskEventContext.event.run.totalSteps;
-              const nextStep = parsePlanStep(reviewed.intent.request);
+              const nextStep = parsePlanStep(request);
               if (completedStep === undefined || totalSteps === undefined || completedStep >= totalSteps
                 || !nextStep || nextStep.stepIndex !== completedStep + 1 || nextStep.totalSteps !== totalSteps) {
                 return { error: '后台计划事件只能继续原计划的下一步；若没有下一步，请汇总原计划结果。' };
               }
             }
-            // 重复请求复核（2026-10-19 实测）：同文请求本会话已经委派执行过，模型却申报
-            // conversation——那是拿历史答复收尾，本回合零执行、零产物。判据与"只退一次"
-            // 的取舍见 repeat-request.ts；这里递一个宿主持有的确定性事实让它重填，与上面
-            // 那句退回同一族（不消耗用户轮次）。
-            if (reviewed.intent.kind === 'conversation' && !repeatRequestNudged) {
-              const repeated = findRepeatedDelegatedRequest(loaded, userMessage, inputContext);
-              if (repeated) {
-                repeatRequestNudged = true;
-                console.info(JSON.stringify({
-                  event: 'repeat_request_declaration_bounced',
-                  requestId: ctx.requestId,
-                  priorDelegations: repeated.priorDelegations,
-                }));
-                return { error: REPEATED_REQUEST_RETRY };
-              }
+            // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把来源交给
+            // 执行侧做逐字包含判定。来源全部由宿主持有，不从请求字段推导——
+            // 请求只描述"这一轮要做什么"，不承载任何实体。
+            //
+            // 第四来源（sessionEntities，任务 1 标定修复）：连续会话里用户亲自确立过
+            // 的实体。来源 A = 本会话执行过的任务的 calls 快照（平台 args 规格机械
+            // 提取，只取执行过的不取搜索结果候选）；来源 B = 本轮澄清绑定选定的候选。
+            // 两个来源都为空时不挂字段——老路径的判定一字不变。
+            const sessionEntities = taskEventContext ? [] : mergeSessionEntities(
+              clarificationSelected ? [clarificationSelected] : [],
+              await collectSessionEntitiesSafely({
+                platformTasks: deps.platformTasks,
+                operationArgSpecs: deps.operationArgSpecs,
+                principalId: ctx.principalId,
+                sessionId: ctx.sessionId,
+                requestId: ctx.requestId,
+              }),
+            );
+            const quotedEvidence = getQuotedEvidence(inputContext?.messageReference);
+            const entitySources: PlanEntitySources = taskEventContext?.entitySources ?? {
+              currentMessage: taskEventContext?.event.run.originMessage ?? userMessage,
+              ...(quotedEvidence ? { quotedEvidence } : {}),
+              ...(!taskEventContext && sessionEntities.length > 0 ? { sessionEntities } : {}),
+            };
+            // 计划模式（Phase 6，架构 §3 规划者/执行者）：request 带「第N/M步：」前缀
+            // 就是多步拆解的一步。无前缀 = 单步，行为与从前完全一样（结果 terminate
+            // 成本轮回复）；有前缀 = 该步结果不 terminate，交还 Main Agent 继续拆解。
+            const step = parsePlanStep(request);
+            let planId: string | null = null;
+            if (step) {
+              planId = await resolvePlanId(step, continueTaskId);
+              await appendPlanFact(ctx, step, planId, 'started');
+              console.info(JSON.stringify({
+                event: 'task_plan_step',
+                requestId: ctx.requestId,
+                planId,
+                step: `${step.stepIndex}/${step.totalSteps}`,
+                status: 'started',
+              }));
             }
-            turn.declared = true;
-            turn.intent = reviewed.intent;
-            const intent = reviewed.intent;
-            // 只记元数据：全文落在转录与 Conversation Log 里，日志重复一份只会放大泄漏面。
-            console.info(JSON.stringify({
-              event: 'turn_declaration',
-              requestId: ctx.requestId,
-              kind: intent.kind,
-              ...(intent.kind === 'delegate' ? {
-                hasContinueTaskId: Boolean(intent.continueTaskId),
-                requestLength: intent.request.length,
-              } : {}),
-            }));
-            if (intent.kind === 'resend') {
-              // W4 重发路由：申报 resend → 零委派、零平台调用。ref 的有效性由 handler
-              // 依会话产物库确定性回答（存在/淘汰/字节在否），runtime 只记账把 ref 带去
-              // 出口。文本非空：空文本会触发下方的空回复兜底。
-              turn.resendRefs.push(intent.artifactRef);
-              console.info(JSON.stringify({ event: 'turn_resend_declared', requestId: ctx.requestId, sessionId: ctx.sessionId, artifactRef: intent.artifactRef }));
-              throw new ToolUserError(`重发产物 #${intent.artifactRef}。`);
-            }
-            if (intent.kind === 'delegate') {
-              // 澄清收口（任务 1）：本回合已经进入"平台请用户选一个"的收口，任何再次委派都在
-              // 此拦住——计划模式的后续步骤、单步模式的重新派单都不该发生（用户要先回答）。
-              // 抛出的是宿主已组装好的澄清问题：它经驱动的 terminate 语义成为本轮文本，
-              // 再由收口处的优先分支落成最终回复（模型那一轮的翻译体由此不上屏）。
-              if (turn.clarificationReply) throw new ToolUserError(turn.clarificationReply);
-              // T10 段2 冻结计划：本回合已有一笔委派被判假死（结果指标长期无进展）。
-              // 不再派发任何后续步骤，也不新开任务或盲目重跑——把冻结事实交还模型，
-              // 由它收口；续跑只能由用户下一回合显式发起（同一 taskId 从断点）。
-              if (turn.planFrozen) {
-                console.info(JSON.stringify({
-                  event: 'task_plan_frozen_refused',
-                  requestId: ctx.requestId,
-                }));
-                return { error: PLAN_FROZEN_REFUSAL };
+            const workerRequest = step ? step.request : request;
+            // 宿主内部委派管道（不进模型 schema，也不进工具描述）：冻结附件与逐任务
+            // 委派块的现有载体；正式删除随申报层清理，本批保持同一效果。
+            const turnDeclaration = { kind: 'delegate' as const, request: workerRequest, ...(continueTaskId ? { continueTaskId } : {}) };
+            const backgroundDispatch = deps.workerDispatchMode === 'background' || Boolean(taskEventContext);
+            if (backgroundDispatch) {
+              if (!deps.backgroundTasks) {
+                turn.delegationFailed = true;
+                if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '后台任务服务不可用' });
+                throw new ToolUserError('后台任务服务当前不可用，任务没有提交。');
               }
-              // 宿主直接委派：实时查询必须产生本轮执行结果，不能拿旧答复收尾。
-              let delegated: SubagentTaskResult;
-              // 领域无关的实体来源（架构 §2 第 9 条）：宿主不懂业务，只把四个来源交给
-              // 执行侧做逐字包含判定。来源全部由宿主持有，不从申报契约字段推导——
-              // 契约只描述"这一轮要做什么"，不承载任何实体。
-              //
-              // 第四来源（sessionEntities，任务 1 标定修复）：连续会话里用户亲自确立过
-              // 的实体。来源 A = 本会话执行过的任务的 calls 快照（平台 args 规格机械
-              // 提取，只取执行过的不取搜索结果候选）；来源 B = 本轮澄清绑定选定的候选。
-              // 两个来源都为空时不挂字段——老路径的判定一字不变。
-              const sessionEntities = taskEventContext ? [] : mergeSessionEntities(
-                clarificationSelected ? [clarificationSelected] : [],
-                await collectSessionEntitiesSafely({
-                  platformTasks: deps.platformTasks,
-                  operationArgSpecs: deps.operationArgSpecs,
-                  principalId: ctx.principalId,
-                  sessionId: ctx.sessionId,
-                  requestId: ctx.requestId,
-                }),
-              );
-              const quotedEvidence = getQuotedEvidence(inputContext?.messageReference);
-              const entitySources: PlanEntitySources = taskEventContext?.entitySources ?? {
-                currentMessage: taskEventContext?.event.run.originMessage ?? userMessage,
-                ...(quotedEvidence ? { quotedEvidence } : {}),
-                ...(!taskEventContext && sessionEntities.length > 0 ? { sessionEntities } : {}),
+              const workerArgs = {
+                request: workerRequest,
+                turnDeclaration,
+                entitySources,
+                ...(continueTaskId ? { taskId: continueTaskId } : {}),
+                ...(step ? { stepLabel: step.label } : {}),
               };
-              // 计划模式（Phase 6，架构 §3 规划者/执行者）：request 带「第N/M步：」前缀
-              // 就是多步拆解的一步。无前缀 = 单步，行为与从前完全一样（结果 terminate
-              // 成本轮回复）；有前缀 = 该步结果不 terminate，交还 Main Agent 继续拆解。
-              const step = parsePlanStep(intent.request);
-              let planId: string | null = null;
-              if (step) {
-                planId = await resolvePlanId(step, intent);
-                await appendPlanFact(ctx, step, planId, 'started');
-                console.info(JSON.stringify({
-                  event: 'task_plan_step',
-                  requestId: ctx.requestId,
-                  planId,
-                  step: `${step.stepIndex}/${step.totalSteps}`,
-                  status: 'started',
-                }));
-              }
-              const request = step ? step.request : intent.request;
-              const backgroundDispatch = deps.workerDispatchMode === 'background' || Boolean(taskEventContext);
-              if (backgroundDispatch) {
-                if (!deps.backgroundTasks) {
-                  turn.delegationFailed = true;
-                  if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '后台任务服务不可用' });
-                  throw new ToolUserError('后台任务服务当前不可用，任务没有提交。');
-                }
-                const workerArgs = {
-                  request,
-                  turnDeclaration: step
-                    ? { ...intent, request }
-                    : intent,
-                  entitySources,
-                  ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
-                  ...(step ? { stepLabel: step.label } : {}),
-                };
-                await dispatchBackgroundTask({
-                  manager: deps.backgroundTasks,
-                  trusted: ctx,
-                  args: workerArgs,
-                  originMessage: userMessage,
-                  ...(inputContext ? { inputContext } : {}),
-                  ...(planId ? { planId } : {}),
-                  ...(step ? { step: { stepIndex: step.stepIndex, totalSteps: step.totalSteps } } : {}),
-                  ...(taskEventContext ? { taskEvent: taskEventContext.event } : {}),
-                  fallbackFailure: FALLBACK_FAILURE,
-                  renderReceipt: renderBackgroundTaskReceipt,
-                  onAccepted: (receipt, text) => {
-                    turn.backgroundStarted = true;
-                    turn.backgroundTaskId = receipt.taskId;
-                    turn.backgroundRunId = receipt.runId;
-                    turn.backgroundTaskState = receipt.state;
-                    turn.backgroundReceiptText = text;
-                  },
-                  onFailure: async (error) => {
+              await dispatchBackgroundTask({
+                manager: deps.backgroundTasks,
+                trusted: ctx,
+                args: workerArgs,
+                originMessage: userMessage,
+                ...(inputContext ? { inputContext } : {}),
+                ...(planId ? { planId } : {}),
+                ...(step ? { step: { stepIndex: step.stepIndex, totalSteps: step.totalSteps } } : {}),
+                ...(taskEventContext ? { taskEvent: taskEventContext.event } : {}),
+                fallbackFailure: FALLBACK_FAILURE,
+                renderReceipt: renderBackgroundTaskReceipt,
+                onAccepted: (receipt, text) => {
+                  turn.backgroundStarted = true;
+                  turn.backgroundTaskId = receipt.taskId;
+                  turn.backgroundRunId = receipt.runId;
+                  turn.backgroundTaskState = receipt.state;
+                  turn.backgroundReceiptText = text;
+                },
+                onFailure: async (error) => {
                   turn.delegationFailed = true;
                   if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '后台任务登记未完成' });
                   if (!(error instanceof ToolUserError)) console.error(JSON.stringify({ event: 'background_task_submit_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
-                  },
-                });
-              }
-              try {
-                // request 是宿主委托执行的加工后请求（指代已解析成实体），
-                // 与 entitySources.currentMessage 里的原始用户消息刻意分开。
-                // 计划模式下 worker 看到剥掉协议前缀的请求——协议只存在于宿主与
-                // Main Agent 之间；stepLabel 一路透传到计划门的用户通知上。
-                delegated = await deps.platformTask.run({
-                  request,
-                  turnDeclaration: step ? { ...intent, request } : intent,
-                  entitySources,
-                  ...(intent.continueTaskId ? { taskId: intent.continueTaskId } : {}),
-                  ...(step ? { stepLabel: step.label } : {}),
-                }, { trusted: ctx }, signal);
-              } catch (error) {
-                // 委派失败：安全话术就是本回合回复，出口校验不得再覆盖它。
-                turn.delegationFailed = true;
-                if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '委派未完成' });
-                if (error instanceof ToolUserError) {
-                  error.delegationCompleted = true;
-                  // T10 段2：假死冻结信号（context.ts 的 TASK_STALLED 标记）——计划冻结，
-                  // 本回合后续委派由上方守卫拒绝派发。worker 进程没有被终止（检测侧不
-                  // abort），任务条目留 needs 供下一回合从断点续跑。
-                  if ((error as { taskStalled?: unknown }).taskStalled === true) turn.planFrozen = true;
-                  // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
-                  // 'timeout'）以 DELEGATION_TIMEOUT_FAILURE 话术上抛（error-codes 表唯一
-                  // 来源，恒等比对、不模糊匹配）。宿主按协议把该失败分类为
-                  // RESOURCE_EXHAUSTED，并从执行事实合成终稿（已完成部分/未完成部分/续跑
-                  // 入口，判据与渲染住 resource-exhausted.ts）——替代干巴巴的"请稍后重试"。
-                  // 只 enrich 用户话术：delegation_span 的 failed/timeout 与 platform_tasks
-                  // 的 failed 终态由 context.ts 原样落，不被这里改写；分类经审计事件与
-                  // turn_span 的 resource_exhausted 留痕。
-                  if (error.message === DELEGATION_TIMEOUT_FAILURE) {
-                    turn.resourceExhausted = true;
-                    const timedOut = await loadTimedOutRecord(deps.platformTasks, ctx.principalId, ctx.sessionId, intent.continueTaskId, ctx.requestId);
-                    console.info(JSON.stringify({
-                      event: 'resource_exhausted_reply',
-                      requestId: ctx.requestId,
-                      failureClass: RESOURCE_EXHAUSTED_CLASS,
-                      ...(timedOut ? { taskId: timedOut.taskId } : {}),
-                      ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                    }));
-                    throw new ToolUserError(renderResourceExhaustedReply({
-                      record: timedOut,
-                      doneSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label),
-                    }), { delegationCompleted: true });
-                  }
-                  throw error;
+                },
+              });
+            }
+            let delegated: SubagentTaskResult;
+            try {
+              // request 是宿主委托执行的加工后请求（指代已解析成实体），
+              // 与 entitySources.currentMessage 里的原始用户消息刻意分开。
+              // 计划模式下 worker 看到剥掉协议前缀的请求——协议只存在于宿主与
+              // Main Agent 之间；stepLabel 一路透传到计划门的用户通知上。
+              delegated = await deps.platformTask.run({
+                request: workerRequest,
+                turnDeclaration,
+                entitySources,
+                ...(continueTaskId ? { taskId: continueTaskId } : {}),
+                ...(step ? { stepLabel: step.label } : {}),
+              }, { trusted: ctx }, signal);
+            } catch (error) {
+              // 委派失败：安全话术就是本回合回复，出口校验不得再覆盖它。
+              turn.delegationFailed = true;
+              if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '委派未完成' });
+              if (error instanceof ToolUserError) {
+                error.delegationCompleted = true;
+                // T10 段2：假死冻结信号（context.ts 的 TASK_STALLED 标记）——计划冻结，
+                // 本回合后续委派由上方守卫拒绝派发。worker 进程没有被终止（检测侧不
+                // abort），任务条目留 needs 供下一回合从断点续跑。
+                if ((error as { taskStalled?: unknown }).taskStalled === true) turn.planFrozen = true;
+                // 资源耗尽终稿（"失败必达"路径 1）：context.ts 的超时分类（failureClass
+                // 'timeout'）以 DELEGATION_TIMEOUT_FAILURE 话术上抛（error-codes 表唯一
+                // 来源，恒等比对、不模糊匹配）。宿主按协议把该失败分类为
+                // RESOURCE_EXHAUSTED，并从执行事实合成终稿（已完成部分/未完成部分/续跑
+                // 入口，判据与渲染住 resource-exhausted.ts）——替代干巴巴的"请稍后重试"。
+                // 只 enrich 用户话术：delegation_span 的 failed/timeout 与 platform_tasks
+                // 的 failed 终态由 context.ts 原样落，不被这里改写；分类经审计事件与
+                // turn_span 的 resource_exhausted 留痕。
+                if (error.message === DELEGATION_TIMEOUT_FAILURE) {
+                  turn.resourceExhausted = true;
+                  const timedOut = await loadTimedOutRecord(deps.platformTasks, ctx.principalId, ctx.sessionId, continueTaskId, ctx.requestId);
+                  console.info(JSON.stringify({
+                    event: 'resource_exhausted_reply',
+                    requestId: ctx.requestId,
+                    failureClass: RESOURCE_EXHAUSTED_CLASS,
+                    ...(timedOut ? { taskId: timedOut.taskId } : {}),
+                    ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+                  }));
+                  throw new ToolUserError(renderResourceExhaustedReply({
+                    record: timedOut,
+                    doneSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label),
+                  }), { delegationCompleted: true });
                 }
-                console.error(JSON.stringify({ event: 'platform_task_route_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
-                throw new ToolUserError(FALLBACK_FAILURE, { delegationCompleted: true });
+                throw error;
               }
-              // 计划模式跨步累积执行痕迹 / 计划步计数 / 澄清与激活计划事实：规则住
-              // turn-state.ts（accumulateDelegation）。
-              accumulateDelegation(turn, step, delegated);
-              // 步骤事实的结局：taskId 写进该步的最后一条事实（spec：事后回填）。
-              // 停在用户确认门的步骤不写结局——它还没完，投影里保持 started，跨回合可续。
-              // 选择类澄清记 'needs'：这一步缺的是"用户选哪个"，与缺参数同族（都不是失败）。
-              if (step && planId && !delegated.pendingPlan) {
-                const status = delegated.needs || delegated.clarification ? 'needs' : delegated.execution ? 'done' : 'failed';
-                await appendPlanFact(ctx, step, planId, status, { taskId: delegated.taskId, summary: planStepSummary(delegated) });
+              console.error(JSON.stringify({ event: 'platform_task_delegation_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
+              throw new ToolUserError(FALLBACK_FAILURE, { delegationCompleted: true });
+            }
+            // 计划模式跨步累积执行痕迹 / 计划步计数 / 澄清与激活计划事实：规则住
+            // turn-state.ts（accumulateDelegation）。
+            accumulateDelegation(turn, step, delegated);
+            // 步骤事实的结局：taskId 写进该步的最后一条事实（spec：事后回填）。
+            // 停在用户确认门的步骤不写结局——它还没完，投影里保持 started，跨回合可续。
+            // 选择类澄清记 'needs'：这一步缺的是"用户选哪个"，与缺参数同族（都不是失败）。
+            if (step && planId && !delegated.pendingPlan) {
+              const status = delegated.needs || delegated.clarification ? 'needs' : delegated.execution ? 'done' : 'failed';
+              await appendPlanFact(ctx, step, planId, status, { taskId: delegated.taskId, summary: planStepSummary(delegated) });
+              console.info(JSON.stringify({
+                event: 'task_plan_step',
+                requestId: ctx.requestId,
+                planId,
+                step: `${step.stepIndex}/${step.totalSteps}`,
+                status,
+              }));
+            }
+            // 计划模式熔断记账：零执行 = 既无 execution 也无 needs 交还（worker 空转的
+            // 形状：提计划被拒/把方案当文本打印）。有执行或交还即重置——合法步骤必然
+            // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
+            // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
+            // 提案已登记步骤不计入熔断：它的零执行是"提案在平台侧建好、等用户确认"的
+            // 终局事实，用户要的是确认码；被熔断汇总顶上，确认码就永远到不了用户。
+            // 计数与判据住 turn-state.ts（notePlanStepOutcome / noteZeroExecStep）。
+            if (step && planId && !delegated.pendingPlan) {
+              const outcome = stepOutcomeOf(delegated);
+              notePlanStepOutcome(turn, step.label, outcome);
+              if (noteZeroExecStep(turn, { failed: outcome === 'failed', proposalCreated: Boolean(delegated.proposalCreated), pendingPlan: Boolean(delegated.pendingPlan) })) {
+                // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
+                // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
+                // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
+                turn.delegationFailed = true;
                 console.info(JSON.stringify({
-                  event: 'task_plan_step',
+                  event: 'plan_steps_circuit_break',
                   requestId: ctx.requestId,
                   planId,
-                  step: `${step.stepIndex}/${step.totalSteps}`,
-                  status,
+                  consecutiveZeroExecSteps: turn.planZeroExecSteps,
+                  completedSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').length,
+                  totalSteps: step.totalSteps,
+                  stoppedAt: `${step.stepIndex}/${step.totalSteps}`,
                 }));
+                throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps), { delegationCompleted: true });
               }
-              // 计划模式熔断记账：零执行 = 既无 execution 也无 needs 交还（worker 空转的
-              // 形状：提计划被拒/把方案当文本打印）。有执行或交还即重置——合法步骤必然
-              // 两者之一，所以只熔"连续"零执行；停在用户确认门的步骤不计数（回合在此暂停，
-              // 没有"后续步骤"可省）。汇总用的步骤结局与上面刚写下的计划事实同源。
-              // 提案已登记步骤不计入熔断：它的零执行是"提案在平台侧建好、等用户确认"的
-              // 终局事实，用户要的是确认码；被熔断汇总顶上，确认码就永远到不了用户。
-              // 计数与判据住 turn-state.ts（notePlanStepOutcome / noteZeroExecStep）。
-              if (step && planId && !delegated.pendingPlan) {
-                const outcome = stepOutcomeOf(delegated);
-                notePlanStepOutcome(turn, step.label, outcome);
-                if (noteZeroExecStep(turn, { failed: outcome === 'failed', proposalCreated: Boolean(delegated.proposalCreated), pendingPlan: Boolean(delegated.pendingPlan) })) {
-                  // 连续 N 步空转：停止派发后续步骤，用计划事实机械汇总成本轮回复
-                  // （ToolUserError 语义 = 这段文本成为本轮最终回复，与消歧问题同一路径；
-                  // 汇总只陈述步号与结局，不含财务数字，出口校验不会覆盖它）。
-                  turn.delegationFailed = true;
-                  console.info(JSON.stringify({
-                    event: 'plan_steps_circuit_break',
-                    requestId: ctx.requestId,
-                    planId,
-                    consecutiveZeroExecSteps: turn.planZeroExecSteps,
-                    completedSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').length,
-                    totalSteps: step.totalSteps,
-                    stoppedAt: `${step.stepIndex}/${step.totalSteps}`,
-                  }));
-                  throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps), { delegationCompleted: true });
-                }
+            }
+            // 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"。**不 terminate**——
+            // 作为工具结果交还 Main Agent（与 needs 同一机制），本轮回复由收口处的优先分支
+            // 用宿主机械组装的澄清问题整体替换：模型这一轮的翻译体（脚本路径/错误码/门的
+            // 规则）存在但不被使用。计划模式的后续步骤由委派入口的守卫拦住——用户要先回答
+            // "查哪个"，继续拆解只会空转。
+            if (delegated.clarification) {
+              turn.clarification = delegated.clarification;
+              turn.clarificationReply = composeClarificationReply(delegated.clarification, delegated.text);
+              // 澄清事件（任务 1 来源 B）：宿主发出"选一个"的澄清时落 issued（与 resume
+              // 路径同一落点）。下一回合的裸编号/候选名答复经 matchClarificationBinding
+              // 机械绑定，selected 进本轮实体来源。
+              await appendClarificationIssued(deps, ctx, delegated.clarification);
+              // 出口校验不得覆盖宿主的澄清问题（与消歧问题/熔断汇总同一处理）
+              turn.delegationFailed = true;
+              console.info(JSON.stringify({
+                event: 'delegation_clarification',
+                requestId: ctx.requestId,
+                taskId: delegated.taskId,
+                code: delegated.clarification.code,
+                candidates: delegated.clarification.candidates.length,
+                ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+              }));
+              const relay = renderClarificationToolResult(delegated.clarification, delegated.taskId);
+              if (step) {
+                return {
+                  ...renderPlanStepToolResult(step, delegated),
+                  outcome: 'needs',
+                  text: relay,
+                  next: '不要继续派发后续步骤——停止拆解，等用户回答（用户看到的是宿主组装的澄清问题，不要自己复述）。',
+                };
               }
-              // 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"。**不 terminate**——
-              // 作为工具结果交还 Main Agent（与 needs 同一机制），本轮回复由收口处的优先分支
-              // 用宿主机械组装的澄清问题整体替换：模型这一轮的翻译体（脚本路径/错误码/门的
-              // 规则）存在但不被使用。计划模式的后续步骤由委派入口的守卫拦住——用户要先回答
-              // "查哪个"，继续拆解只会空转。
-              if (delegated.clarification) {
-                turn.clarification = delegated.clarification;
-                turn.clarificationReply = composeClarificationReply(delegated.clarification, delegated.text);
-                // 澄清事件（任务 1 来源 B）：宿主发出"选一个"的澄清时落 issued（与 resume
-                // 路径同一落点）。下一回合的裸编号/候选名答复经 matchClarificationBinding
-                // 机械绑定，selected 进本轮实体来源。
-                await appendClarificationIssued(deps, ctx, delegated.clarification);
-                // 出口校验不得覆盖宿主的澄清问题（与消歧问题/熔断汇总同一处理）
-                turn.delegationFailed = true;
-                console.info(JSON.stringify({
-                  event: 'delegation_clarification',
-                  requestId: ctx.requestId,
-                  taskId: delegated.taskId,
-                  code: delegated.clarification.code,
-                  candidates: delegated.clarification.candidates.length,
-                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                }));
-                const relay = renderClarificationToolResult(delegated.clarification, delegated.taskId);
+              return { recorded: 'delegate', text: relay, taskId: delegated.taskId };
+            }
+            // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
+            // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
+            // 检索证据 / 本轮平台响应取实体）就重新调用本工具（带 taskId 与补齐后的
+            // request），不能补齐就直接把问题转达给用户。
+            // 整轮失败、"本轮没有产生任何平台查询"那种把原因丢给用户的兜底由此不再出现。
+            if (delegated.needs) {
+              // 回路上限的计数规则住 turn-state.ts（noteNeedsRound）：单步模式按全局计、
+              // 计划模式按步计（换一步重新计数，任一步失败不阻塞其他步）。
+              const needsExhausted = noteNeedsRound(turn, step ? step.stepIndex : null);
+              turn.lastNeeds = delegated.needs;
+              console.info(JSON.stringify({
+                event: 'delegation_needs',
+                requestId: ctx.requestId,
+                taskId: delegated.taskId,
+                round: turn.needsRounds,
+                missing: delegated.needs.missing.length,
+                ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+              }));
+              if (needsExhausted) {
                 if (step) {
+                  // 同一步反复缺信息：停止重派这一步，但不终止整轮——让模型跳过它继续
+                  // 后续步骤（或直接汇总），失败由汇总如实报告。
                   return {
                     ...renderPlanStepToolResult(step, delegated),
-                    outcome: 'needs',
-                    text: relay,
-                    next: '不要继续申报后续步骤——停止拆解，等用户回答（用户看到的是宿主组装的澄清问题，不要自己复述）。',
+                    next: `这一步已重试 ${turn.needsRounds} 次仍缺信息，不要再重派它。继续后续步骤；若已是最后一步就直接汇总，并如实报告这一步缺什么。`,
                   };
                 }
-                return { recorded: 'delegate', text: relay, taskId: delegated.taskId };
+                // 回路兜底：连续几轮仍缺信息，停止重派，把线索作为本轮回复交给用户
+                // （这是转达，不是失败）。数字结论仍须本轮有执行痕迹。
+                // ③-5：旧实现把 worker 文本拼进转达，一旦其中带财务数字就整段换成
+                // NO_EXECUTION_CLARIFICATION——"还缺少什么"的唯一线索被连坐丢掉。
+                // 现在只丢 workerText（零执行轮次它不可信），needs 的 missing/reason/
+                // suggestion 是宿主与平台信封的结构化事实，照常转达（先例：
+                // renderNeedsUserText(needs, '')）。
+                const needsOnly = renderNeedsUserText(delegated.needs, '');
+                throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly, { delegationCompleted: true });
               }
-              // 纠错环（架构 §3）：子 Agent 执行不了就回报"缺什么"。此时**不 terminate 整轮**
-              // ——把线索作为工具结果交还 Main Agent，它自己继续本回合：能补齐（从 Log /
-              // 检索证据 / 本轮平台响应取实体）就重新申报 delegate（带 continueTaskId 与
-              // 补齐后的 request），不能补齐就申报 conversation 把问题转达给用户。
-              // 整轮失败、"本轮没有产生任何平台查询"那种把原因丢给用户的兜底由此不再出现。
-              if (delegated.needs) {
-                // 回路上限的计数规则住 turn-state.ts（noteNeedsRound）：单步模式按全局计、
-                // 计划模式按步计（换一步重新计数，任一步失败不阻塞其他步）。
-                const needsExhausted = noteNeedsRound(turn, step ? step.stepIndex : null);
-                turn.lastNeeds = delegated.needs;
-                console.info(JSON.stringify({
-                  event: 'delegation_needs',
-                  requestId: ctx.requestId,
-                  taskId: delegated.taskId,
-                  round: turn.needsRounds,
-                  missing: delegated.needs.missing.length,
-                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                }));
-                if (needsExhausted) {
-                  if (step) {
-                    // 同一步反复缺信息：停止重派这一步，但不终止整轮——让模型跳过它继续
-                    // 后续步骤（或直接汇总），失败由汇总如实报告。
-                    return {
-                      ...renderPlanStepToolResult(step, delegated),
-                      next: `这一步已重试 ${turn.needsRounds} 次仍缺信息，不要再重派它。继续后续步骤；若已是最后一步就申报 conversation 汇总，并如实报告这一步缺什么。`,
-                    };
-                  }
-                  // 回路兜底：连续几轮仍缺信息，停止重派，把线索作为本轮回复交给用户
-                  // （这是转达，不是失败）。数字结论仍须本轮有执行痕迹。
-                  // ③-5：旧实现把 worker 文本拼进转达，一旦其中带财务数字就整段换成
-                  // NO_EXECUTION_CLARIFICATION——"还缺少什么"的唯一线索被连坐丢掉。
-                  // 现在只丢 workerText（零执行轮次它不可信），needs 的 missing/reason/
-                  // suggestion 是宿主与平台信封的结构化事实，照常转达（先例：
-                  // renderNeedsUserText(needs, '')）。
-                  const needsOnly = renderNeedsUserText(delegated.needs, '');
-                  throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly, { delegationCompleted: true });
-                }
-                if (step) return renderPlanStepToolResult(step, delegated);
-                const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
-                return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
-              }
-              // 提案已登记（B 波 B3 网关提案路径）：delegated.text 是**宿主持有的确定性文本**
-              // 终结。为什么必须走这条而不是通用的 terminate 分支：提案这一步可能零网关执行
-              // （拦截发生在 gate 之前，那一条 bash 没被放行），出口校验的零执行门会把它整段
-              // 换成 NO_EXECUTION_CLARIFICATION——确认码随之消失，用户永远拿不到码。
-              // delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
-              // 与 needs/clarification 不互斥但优先：提案登记是既成事实，交还模型只会稀释它。
-              if (delegated.proposalCreated) {
-                turn.delegationFailed = true;
-                console.info(JSON.stringify({
-                  event: 'proposal_created',
-                  requestId: ctx.requestId,
-                  taskId: delegated.taskId,
-                  proposalId: delegated.proposalCreated.proposalId,
-                  ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
-                }));
-                throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
-              }
-              // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
-              // 由它继续申报下一步或申报 conversation 汇总——不 terminate 整轮。
-              // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
-              // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
-              if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
-              // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
-              // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
+              if (step) return renderPlanStepToolResult(step, delegated);
+              const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
+              return { recorded: 'delegate', text: relay, taskId: delegated.taskId, needs: delegated.needs };
+            }
+            // 提案已登记（B 波 B3 网关提案路径）：delegated.text 是**宿主持有的确定性文本**
+            // 终结。为什么必须走这条而不是通用的 terminate 分支：提案这一步可能零网关执行
+            // （拦截发生在 gate 之前，那一条 bash 没被放行），出口校验的零执行门会把它整段
+            // 换成 NO_EXECUTION_CLARIFICATION——确认码随之消失，用户永远拿不到码。
+            // delegationFailed 让出口校验整体放行（与消歧问题/熔断汇总同一路径）。
+            // 与 needs/clarification 不互斥但优先：提案登记是既成事实，交还模型只会稀释它。
+            if (delegated.proposalCreated) {
+              turn.delegationFailed = true;
+              console.info(JSON.stringify({
+                event: 'proposal_created',
+                requestId: ctx.requestId,
+                taskId: delegated.taskId,
+                proposalId: delegated.proposalCreated.proposalId,
+                ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
+              }));
               throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
             }
-            // conversation：不触发任何执行，模型紧接着给出的文本即本轮回复
-            // （需要澄清、说明能力边界时同样走这条路径）。
-            return { recorded: 'conversation' };
+            // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
+            // 由它继续下一步或直接汇总——不 terminate 整轮。
+            // 例外是停在用户确认门的步骤：那一步还没做完，整轮在此暂停等真实确认
+            // （与单步模式同一语义），计划投影里它保持 started，跨回合可续。
+            if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
+            // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
+            // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
+            throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
           }
-          if (tool === deps.platformTask.tool.name) {
-            return deps.platformTask.run({
-              request: String(args['request'] ?? ''),
-              ...(typeof args['taskId'] === 'string' ? { taskId: args['taskId'] } : {}),
-            }, { trusted: ctx }, signal);
-          }
+
           if (deps.readSkillTool && tool === deps.readSkillTool.name) {
             // 技能按需读取（C 轨桥）：未知名 / 文件不可读 / 发现失败都是**可恢复**的模型侧
             // 输入——可行动话术（含可用清单）交还模型继续本轮，不终结回合（ToolUserError
@@ -957,47 +896,16 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       });
 
       const initialMessageCount = context.length;
-      let result = await runMainAgent(context);
+      const result = await runMainAgent(context);
       // Main 编排模型本回合的真实 token 消耗（纯加法遥测）：对 Main 驱动本回合新增的
       // assistant 消息分项求和（口径 Main=编排模型本体）。网关不回传 usage
       // 时保持 undefined → turn_span 字段缺席（不是全零，两类事实必须可区分）。
-      // 跳过申报的重试段也是本回合的 Main 消耗：第二段输入 = 第一段转录 + 重试指令，
-      // 从 firstRunLen+1 起切只拿第二段新增的 assistant 消息（切片判据与下方
-      // extractDelegationToolResultEvents 的 initialMessageCount 同法）。
-      let mainUsage = sumUsage(result.messages.slice(initialMessageCount));
-      if (!turn.declared) {
-        // 超界收敛（②）：模型在申报循环里已被退回上限次，宿主不再喂一次重试指令——
-        // 那只会让不收敛的模型再撞一次墙。直接走 route_declaration_missing 的既有出口
-        // （可行动的澄清话术 + 回合闭合的 turn_span），与下面"催一次仍不申报"同一结局，
-        // 区别只在 reason：这里是"退回到界"而不是"模型第二次仍不申报"。
-        if (declarationRejectionsExhausted(turn)) {
-          console.warn(JSON.stringify({
-            event: 'route_declaration_missing',
-            requestId: ctx.requestId,
-            reason: 'declaration_rejections_exhausted',
-            rejections: turn.declarationRejections,
-            shapes: turn.declarationShapes,
-          }));
-          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage, false);
-        }
-        // 跳过申报：丢弃自由文本，追一条明确指令重试一次。
-        const firstRunLen = result.messages.length;
-        const retried = await runMainAgent([
-          ...result.messages,
-          { role: 'user', content: ROUTE_RETRY_NUDGE, timestamp: Date.now() } as unknown as AgentMessage,
-        ]);
-        mainUsage = addUsageTotals(mainUsage, sumUsage(retried.messages.slice(firstRunLen + 1)));
-        if (!turn.declared) {
-          // 仍跳过：失败关闭，绝不外发未申报的文本。
-          console.warn(JSON.stringify({ event: 'route_declaration_missing', requestId: ctx.requestId }));
-          return await finishDirectReply(NO_EXECUTION_CLARIFICATION, 'route_declaration_missing', undefined, mainUsage, false);
-        }
-        result = retried;
-      }
+      // 直连后不再有"跳过申报"的重试段：模型不调用委派工具就是普通回合，文本即回复。
+      const mainUsage = sumUsage(result.messages.slice(initialMessageCount));
       // 选择类澄清兜底（任务 1）：宿主机械组装的澄清问题**优先于模型文本**。委派分支把
       // "平台请用户选一个"作为工具结果交还模型（与 needs 同一机制），模型这一轮无论说什么
       // 都是对协议材料的翻译；这里用模板+信封数据组装的那一份整体替换——翻译体不上屏也不进
-      // 转录，后续回合与 Context State 读到的才是真实状态。模型真的又申报委派时，委派入口
+      // 转录，后续回合与 Context State 读到的才是真实状态。模型真的又委派时，委派入口
       // 的守卫会先抛出同一段文本终止回合（计划模式的后续步骤由此停止），最终仍落到这里。
       if (turn.clarification && turn.clarificationReply) {
         console.info(JSON.stringify({
@@ -1071,12 +979,11 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return { text: '' };
         }
         if (turn.backgroundStarted) {
-          // 后台受理回执必须连同 route toolCall/toolResult（details.routeReceipt='background'，
+          // 后台受理回执必须连同委派 toolCall/toolResult（details.routeReceipt='background'，
           // 由驱动的 terminate 语义写入 result.messages）一起落转录（修复 5）：direct 出口只落
-          // [loaded, user, 合成回执] 时这对消息整体被丢弃，repeat-request 的
-          // findRepeatedDelegatedRequest 认不出"同文请求已后台派发"——用户重发同文会再起
-          // 一个后台任务（2026-10-19 防线要防的 B1/F6 形态）。受理只是登记与排队状态，
-          // 不是执行成功的证明：routeReceipt='background' 本就不算执行，matcher 语义不变。
+          // [loaded, user, 合成回执] 时这对消息整体被丢弃，转录里看不到"同文请求已后台派发"
+          // 的事实（2026-10-19 防线要防的 B1/F6 形态）。受理只是登记与排队状态，
+          // 不是执行成功的证明：routeReceipt='background' 本就不算执行，语义不变。
           const continuationMessages = sanitizeTranscriptMessages(stripHistoryNotes(result.messages.slice(initialMessageCount)));
           return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage, Boolean(turn.execution), continuationMessages);
         }

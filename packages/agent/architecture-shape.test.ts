@@ -99,8 +99,14 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 与 read_skill 分发各一处接线。这不是抽取：常数按本批后的真实行数从 1337 收紧到
  * 1222——runtime 在此前波次里缩过水而常数未同步下调，差额是既有余量；余量等于没压，
  * 这里按"只减不增"纪律把常数落到当前真实值。
+ *
+ * 1222 → 1130（2026-11-12，移除申报层：Main 直连调用执行层委派工具）。申报分支
+ * （route_current_turn 的形态复核/退回重填/会话枝/resend 枝与强制申报重试段）整体
+ * 换成 run_task 直连处理：实体来源、计划绑定、后台派发、失败分类与结果交还等确定性
+ * 守卫从申报分支原样搬进 exec，净 −92。常数按真实行数收紧；协议文件、协议类型与
+ * 死代码的正式删除归下一批（见任务回报的删除 run 清单）。
  */
-const RUNTIME_LINE_BUDGET = 1222;
+const RUNTIME_LINE_BUDGET = 1130;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

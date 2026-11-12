@@ -21,7 +21,7 @@ import { stripFootprint } from './text-hygiene';
 export function renderClarificationToolResult(clarification: SelectionClarification, taskId: string): string {
   return [
     `平台返回选择类状态 ${clarification.code}（候选 ${clarification.candidates.length} 个），宿主已把澄清问题直接发给用户。`,
-    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户回答后重新申报 delegate，把该编号填进 continueTaskId，request 写用户选定的对象。`,
+    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户回答后重新调用本工具，把该编号填进 taskId，request 写用户选定的对象。`,
     '本轮不要再委派、不要自己复述澄清问题。',
   ].join('\n');
 }
@@ -36,8 +36,8 @@ export function renderNeedsToolResult(needs: SubagentNeeds, taskId: string, work
     `子 Agent 本轮没有执行平台查询，还缺少信息：${needs.missing.join('、') || '（未指明）'}。`,
     `原因：${needs.reason}`,
     ...(needs.suggestion ? [`建议用户提供：${needs.suggestion}`] : []),
-    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户补充信息后，重新申报 delegate，把该编号填进 continueTaskId，request 写补充后的完整请求。`,
-    '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐再申报 conversation 把问题转达给用户。',
+    `继续该子任务时使用这个编号：${taskId}（不要转述给用户）。用户补充信息后，重新调用本工具，把该编号填进 taskId，request 写补充后的完整请求。`,
+    '能自己补齐就直接补齐后重派（实体只能从当前消息、宿主注入的检索证据或本轮平台响应里取），补不齐就直接把问题转达给用户。',
     ...(workerText ? [`子 Agent 的说明：${workerText}`] : []),
   ].join('\n');
 }
