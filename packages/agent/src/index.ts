@@ -162,6 +162,18 @@ export {
 } from './resend-tool';
 export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
 export {
+  HOST_INTERNAL_ENV_KEYS,
+  HOST_SENSITIVE_ENV_PREFIXES,
+  WORKER_ENV_ALLOWED_KEYS,
+  WORKER_ENV_INJECTED_KEYS,
+  WORKER_FIXTURE_STATE_DIR_KEY,
+  hostDirectChildEnv,
+  isHostDirectStrippedKey,
+  isHostSensitiveEnvKey,
+  isWorkerEnvKeyAllowed,
+  stripHostSensitiveEnv,
+} from './child-env';
+export {
   activatePendingPlan,
   createActivationToken,
   createPlanScopedWorkerEnv,

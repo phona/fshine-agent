@@ -15,6 +15,7 @@ import { createReadStream } from 'node:fs';
 import { promises as fs } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
+import { hostDirectChildEnv, stripHostSensitiveEnv } from './child-env';
 import type { DriverMessage, TurnDriver } from './driver';
 import type { PendingPlanConfirmation } from './plan-runtime';
 import type { PlanCliRunner } from './plan-runtime';
@@ -549,7 +550,11 @@ const PROPOSAL_UNAVAILABLE_TEXT: Record<ProposalUnavailableKind, string> = {
  *  env 纪律在两处各写一遍，就是给"某一处忘了剥"留门。
  */
 export function hostGatewayEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env };
+  // V0 安全收口（2026-11-12 建，2026-11-13 复核）：剥宿主敏感凭据族（LLM_*/WECOM_*）
+  // 与宿主内部指针（AGENT_CONFIG_PATH/DB_PATH）——这两类没有执行层消费者。剥除同时
+  // 落在 spawn 合并之后的那把尺（hostDirectChildEnv）上，这里返回剥好的副本，让
+  // "宿主直调 env"这个出口自身一致（导出消费方不产生第二份语义）。
+  const env = stripHostSensitiveEnv(process.env);
   delete env.EXECUTION_REQUIRE_PLAN;
   return env;
 }
@@ -579,7 +584,10 @@ const defaultProposalGatewayRunner: PlanCliRunner = ({ platformRoot, args, env, 
   // 任何遗留网关名（与 plan-runtime 的 defaultCliRunner 同法）。
   const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
-    env: { ...process.env, ...env },
+    // V0 安全收口（2026-11-12 建，2026-11-13 复核）：合并后剥宿主敏感族与宿主内部
+    // 指针；旧写法把剥过的 env 再叠回 process.env 基底，被剥的键会回流（见 child-env.ts
+    // 的 hostDirectChildEnv）。
+    env: hostDirectChildEnv(env),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdout: Buffer[] = [];

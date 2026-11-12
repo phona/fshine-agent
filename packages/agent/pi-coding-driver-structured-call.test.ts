@@ -208,10 +208,14 @@ describe('C6 structured_call 通道回归', () => {
   });
 
   it('createPlanScopedWorkerEnv 钉住 EXECUTION_REQUIRE_PLAN=1', () => {
-    const env = createPlanScopedWorkerEnv({ FOO: 'bar' }, 'plan_123');
+    // 2026-11-12 V0 安全收口（**安全边界收紧而非功能退化**）：旧行为 `FOO: 'bar'` 原样继承
+    // （全量宿主 env 直接进 worker）；现行为白名单重建——白名单键（PATH 等）保留、未登记键
+    // （FOO 及 LLM_*/WECOM_* 敏感族）不进。红先证见 child-env-closure.test.ts。
+    const env = createPlanScopedWorkerEnv({ PATH: '/usr/bin', FOO: 'bar' }, 'plan_123');
     expect(env.EXECUTION_REQUIRE_PLAN).toBe('1');
     expect(env.EXECUTION_PLAN_ID).toBe('plan_123');
-    expect(env.FOO).toBe('bar');
+    expect(env.PATH).toBe('/usr/bin');
+    expect(env.FOO).toBeUndefined();
   });
 
   it('structured_call execute 路径：spawn env 含 EXECUTION_REQUIRE_PLAN=1', async () => {

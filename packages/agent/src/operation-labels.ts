@@ -30,6 +30,7 @@
  * 测试因此可以直接塞替身表，不需要真平台。
  */
 import { spawn } from 'node:child_process';
+import { hostDirectChildEnv } from './child-env';
 import { gatewayExecPath, validateGatewayInvocation } from './platform-contract';
 
 /** script → label 查找表。script 与操作名两种写法都收录（命令里两种都合法）。 */
@@ -97,7 +98,10 @@ export function loadOperationLabels(platformRoot?: string, gateway?: string): Pr
     try {
       child = spawn(cli, ['operation', 'list'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        // V0 安全收口（2026-11-13）：本文件七处宿主直调 `operation list` 派生统一用
+        // hostDirectChildEnv（见 child-env.ts）——宿主敏感凭据族与宿主内部指针进不了
+        // 执行层子进程。
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -232,7 +236,7 @@ export function loadOperationArgStyles(platformRoot?: string, gateway?: string):
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -277,7 +281,7 @@ export function loadOperationArgSpecs(platformRoot?: string, gateway?: string): 
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -396,7 +400,7 @@ export function loadOperationSemantics(platformRoot?: string, gateway?: string):
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -483,7 +487,7 @@ export function loadOperationProtocols(platformRoot?: string, gateway?: string):
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -559,7 +563,7 @@ export function loadProposalSchema(platformRoot?: string, gateway?: string): Pro
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {
@@ -755,7 +759,7 @@ export function loadCapabilityManifest(platformRoot?: string, gateway?: string):
     try {
       child = spawn(cli, ['operation', 'list', '--json'], {
         cwd: platformRoot,
-        env: { ...process.env },
+        env: hostDirectChildEnv(),
         stdio: ['ignore', 'pipe', 'ignore'],
       });
     } catch {

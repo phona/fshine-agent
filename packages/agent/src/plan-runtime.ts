@@ -1,6 +1,7 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { decideBudgetTier, stricterTier } from './budget-policy';
+import { hostDirectChildEnv, isWorkerEnvKeyAllowed } from './child-env';
 import { errorFor } from './error-codes';
 import { scrubExecutionLanguageText } from './execution-language';
 import { isConfirmGateTier, taskBudgetDecision, ZERO_TASK_BUDGET, type TaskBudgetUsage } from './task-budget';
@@ -146,7 +147,10 @@ const defaultCliRunner: PlanCliRunner = ({ platformRoot, args, input, env, gatew
   // evaluateAndActivatePlan 的调用方见 EvaluateAndActivatePlanOptions.gateway。
   const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
-    env: { ...process.env, ...env },
+    // V0 安全收口（2026-11-12 建，2026-11-13 复核）：合并后剥宿主敏感族与宿主内部
+    // 指针——旧写法 `{ ...process.env, ...env }` 里"调用方剥掉的键"会被合并基底重新
+    // 带回来（回流），剥必须在合并之后。
+    env: hostDirectChildEnv(env),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const stdout: Buffer[] = [];
@@ -485,9 +489,23 @@ export function validateCalls(calls: readonly PlanCall[], gateway?: string): voi
  * （2026-11-08 架构裁定：写能不能真落地归执行层，编排层只管描述与如实转述）。
  */
 
-/** Build the per-command environment for a worker bash subprocess. */
+/**
+ * Build the per-command environment for a worker bash subprocess.
+ *
+ * V0 安全收口（2026-11-12 建，2026-11-13 复核修订）：**精确键白名单重建**，不再继承
+ * 任意宿主键。旧形态 `{ ...inherited }` 只删两个 EXECUTION_* 键——`LLM_*` / `WECOM_*`
+ * 等宿主敏感凭据随 worker bash 子进程扩散（sentinel `printenv` 红先证）。白名单的
+ * 逐键依据与「缺了会坏」实跑验证见 child-env.ts 的 WORKER_ENV_ALLOWED_KEYS 注释与
+ * child-env-closure.test.ts；执行面逐次注入键（REQUIRE_PLAN / PLAN_ID）在过滤后写入。
+ * 主机密激活密钥/伪造计划号照旧剥掉（既有剥离语义，不变；白名单本就不含它们，
+ * 这里保留显式 delete 防白名单未来变动时静默回流）。
+ */
 export function createPlanScopedWorkerEnv(inherited: NodeJS.ProcessEnv, activePlanId: string | null): NodeJS.ProcessEnv {
-  const env = { ...inherited };
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (value === undefined || !isWorkerEnvKeyAllowed(key)) continue;
+    env[key] = value;
+  }
   delete env.EXECUTION_PLAN_ACTIVATION_SECRET;
   delete env.EXECUTION_PLAN_ID;
   env.EXECUTION_REQUIRE_PLAN = '1';

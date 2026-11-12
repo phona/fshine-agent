@@ -25,6 +25,7 @@
 import { createHmac } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import {
+  hostDirectChildEnv,
   hostGatewayEnv,
   isCommittedUnverified,
   loadOperationProtocols,
@@ -59,7 +60,9 @@ export interface ProposalCommitRunnerOptions {
 const defaultRunCli: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Promise((resolve, reject) => {
   const child = spawn(gatewayExecPathForProfile(platformRoot, { gateway }), args, {
     cwd: platformRoot,
-    env: { ...process.env, ...env },
+    // V0 安全收口（2026-11-12 建，2026-11-13 复核）：合并后剥宿主敏感族
+    // （LLM_*/WECOM_*）与宿主内部指针（AGENT_CONFIG_PATH/DB_PATH），见 child-env.ts。
+    env: hostDirectChildEnv(env),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdout: Buffer[] = [];

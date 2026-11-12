@@ -1390,13 +1390,18 @@ describe('子进程失败：证据缺席记 -1，有效回传保留执行证据'
  * 允许名单比裁定括号多两处，都是重构前就存在的引用，本片不改它们的行为：
  *   · scripts/probe-real-agent.test.ts —— 探针自己的表征测试（含本守卫）
  *   · scripts/acceptance.ts —— leak-lint 登记理由已写明它是设置方
- * 生产代码（packages / apps 的非测试源）零命中；往名单外加一处引用即红。
+ *   · packages/agent/src/child-env.ts —— 2026-11-13 V0 安全收口新增：worker 子进程 env
+ *     白名单必须逐键放行这个桥，否则 worker 发起的仓内夹具调用会丢 per-case 状态根、
+ *     回落到夹具自身 .runtime。这是该桥唯一的**生产**引用点，且只做键名放行、不读值；
+ *     对应测试 packages/agent/child-env-closure.test.ts 经导出常量引用键名，不写字面量。
+ * 生产代码（packages / apps 的非测试源）其余零命中；往名单外加一处引用即红。
  */
 describe('D-209：状态根桥只被已知站点引用，前缀与形状不变', () => {
   const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
   const BRIDGE = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
   const ALLOWLIST = [
     'packages/agent/platform-leak-lint.test.ts',
+    'packages/agent/src/child-env.ts',
     'scripts/acceptance.ts',
     'scripts/eval/fixtures/dummy-platform/bin/dummy',
     'scripts/eval/fixtures/stock-platform/bin/stock',
@@ -1430,7 +1435,7 @@ describe('D-209：状态根桥只被已知站点引用，前缀与形状不变',
     return [...hits].sort();
   }
 
-  it('可执行引用闭集 = 探针 + 表征测试 + acceptance + 两个 shell 入口 + leak-lint 登记', () => {
+  it('可执行引用闭集 = 探针 + 表征测试 + acceptance + 两个 shell 入口 + leak-lint 登记 + worker env 白名单', () => {
     expect(bridgeCodeHits()).toEqual(ALLOWLIST);
   });
 
