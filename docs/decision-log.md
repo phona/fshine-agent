@@ -481,6 +481,20 @@
   前缀），不再按四例枚举；`pi-coding-driver-executor-bypass.test.ts:316` 实为「清单未声明的 mode」
   用例（同一 `invocation===null` 分支），`call --file` 的实覆盖在 `serve-gate.test.ts:830-831` 与
   `scripts/eval/shell-bypass-gate.test.ts:144-145`；`shell-bypass-gate.test.ts:141` 是注释、断言在 `:144-145`。
+- **2026-11-12 状态更新（GATE 轨并入后）**：上面「包装族本次未修」一句由本更新取代。**九个实证包装形态已由放行改为拒**——
+  `bash -c` / `sh -c` / `sudo` / `xargs` / `FOO=1` / `env FOO=1` / `$(…)` / 反引号 / `command`，新码 `SERVE_BASH_GATEWAY_WRAPPED`
+  （保守包含式判据：网关令牌在词首词尾边界且整条命令不属任何已识别干净形态 → 拒；未写通用 shell 解析器，新增 2 条字符类正则 + 1 个分支）。
+  红先证见 `packages/agent/serve-gate-containment.test.ts`（3 红 → 8 绿）；夹具实跑证明 `bash -c '…query --collection beta…'` 与
+  `bin/<gw> call --file` 均被拒且各留 `allowed=false` 审计行。
+  **发布阻断收窄但未解除**，残余两类：
+  (a) **词法不可分类**：`bash -c 'true;<gw> …'`（分隔符与网关之间无空格——与批准放行的字面量 `echo "x;<gw>"` 在字符层同形）
+  与 `B=<gw>; $B query`（变量间接）；封死需要识别解释器/包装语义或进程隔离，不在字符串层继续加特例。
+  (b) **凭据可达性未处理**（独立裁定项）：worker bash 子进程 env 仍继承 `WECOM_BOT_SECRET` / `LLM_API_KEY`
+  （sentinel `sh -c printenv` 实证；`createPlanScopedWorkerEnv` 只删两个 `EXECUTION_*` 键），且门放行 bash 的 `cat .env`
+  （相对与任意绝对路径）而 `read .env` 被拦——worker 持有与业务执行无关的宿主敏感凭据。最小修复方向：worker spawn env 白名单
+  （只留 PATH/HOME/LANG/TERM + 执行面必需键）+ `.env` 移出 worker 可达路径；长期走受控执行入口与凭据/权限隔离。
+  (c) 附注：`./bin/<gw> …` 被识别为网关调用（非绕过）；`cat <gw>` / `ls -la <gw>` / env 前缀三条既有「应放行」用例已被有意收紧为拒，
+  测试内逐条注明（旧：放行；现：拒）。
 
 ---
 
