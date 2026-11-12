@@ -39,6 +39,9 @@ import {
   RESUMED_PLAN_NOT_EXECUTED,
   executionLanguageFingerprints,
 } from './src/runtime';
+import { renderCommittedUnverifiedReply } from './src/committed-unverified';
+import { renderResourceExhaustedReply } from './src/resource-exhausted';
+import { formatPlanMessage, type PlanEvaluation } from './src/plan-runtime';
 describe('fshine 错误码表（错误即数据）', () => {
   it('错误类码渲染三要素：码 + 期望/实际/正确形态，动态 actual 由拒绝点填', () => {
     expect(messageFor('PLAN_SHAPE_PREFIX', '```json', undefined, 'bin/example-gateway')).toBe('PLAN_SHAPE_PREFIX: 期望 bin/example-gateway plan 之前只允许 bash/sh 与路径前缀（围栏、外层引号、客套话都算多出来的内容）；实际 ```json；正确形态 方案是单行原始命令：bin/example-gateway plan {"goal":"…","calls":[{"operation":"…","args":[…]}]}，JSON 原样放在这一行命令里——不要加外层引号、不要跟 2>&1 等后缀、不要拆成多行；或把同一份 JSON 写进本轮工作区文件后以 bin/example-gateway plan --file <本轮工作区内的计划文件路径> 提交');
@@ -49,11 +52,14 @@ describe('fshine 错误码表（错误即数据）', () => {
   });
 
   it('消息模板类码逐字返回表内文本：收尾/兜底话术与既有文本一致', () => {
-    expect(messageTextFor('NO_EXECUTION_CLARIFICATION')).toBe('我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围，我重新查一次。');
+    // T4 失败交还（2026-11-12）翻转锚点：澄清/兜底出口补五要素后，新文逐字钉住；
+    // 旧文（'…请告诉我要查询的对象和范围，我重新查一次。' / '查询超时,请稍后再试' /
+    // '查询失败,请稍后再试或联系管理员'）见 git 历史。翻转理由与红先证据见文末 T4 describe。
+    expect(messageTextFor('NO_EXECUTION_CLARIFICATION')).toBe('我需要实际查询平台才能回答这个问题，但本轮没有产生任何平台查询。请告诉我要查询的对象和范围（我不会替你猜），我重新查一次；也可以直接到平台里查询。');
     expect(messageTextFor('ACTIVATED_PLAN_NOT_EXECUTED')).toBe('执行方案已获批准（通知已送达），但查询没有执行。请回复“继续”，我按已批准的计划重新执行；如想改查询范围，直接告诉我。');
     expect(messageTextFor('RESUMED_PLAN_NOT_EXECUTED')).toBe('按您刚才确认的操作没有产生任何平台执行。请回复“继续”重跑，或直接告诉我要调整的范围。');
-    expect(messageTextFor('FALLBACK_TIMEOUT')).toBe('查询超时,请稍后再试');
-    expect(messageTextFor('FALLBACK_FAILURE')).toBe('查询失败,请稍后再试或联系管理员');
+    expect(messageTextFor('FALLBACK_TIMEOUT')).toBe('本轮查询超时，没有拿到可用结果。请稍后再试。');
+    expect(messageTextFor('FALLBACK_FAILURE')).toBe('本轮没有拿到可用结果，具体原因暂时无法确定。请稍后再试；如持续出现请联系管理员。');
     expect(messageTextFor('DELEGATION_AUTH_FAILURE')).toBe('平台登录态过期，需要重新登录后才能继续查询。');
     expect(messageTextFor('DELEGATION_TIMEOUT_FAILURE')).toBe('平台响应超时，请稍后重试。');
     expect(messageTextFor('DELEGATION_EXECUTOR_FAILURE')).toBe('子任务执行失败，请稍后再试。');
@@ -370,5 +376,106 @@ describe('宿主教学三把全表锁（结构-only，哑值填充）', () => {
     for (const code of HOST_ERROR_CODE_NAMES) {
       expect(renderedTextOf(code), code).not.toMatch(BUSINESS_WORDS);
     }
+  });
+});
+
+// ── T4 失败交还：失败/阻塞/等待用户输入时，用户看得懂（2026-11-12）─────────────
+//
+// 判据（本轨验收）：失败路径的出口话术按场景给出五要素——做到哪一步 / 已经完成什么 /
+// 尚未完成什么 / 为什么需要用户协助 / 用户下一步做什么 / 能否回原平台继续处理
+// （不适用的场景不给，绝不编造业务金额、执行结果或完成状态）。本 describe 是这组
+// 出口话术的机械锁：每条失败路径至少一条断言，断言它缺的那一个要素在场。
+//
+// 覆盖五条失败路径与它们的出口话术单一来源：
+//   · committed_unverified（committed-unverified.ts）——已落账、读回不足，绝不报完成，
+//     要说清"为什么落到人工"与"可在平台处理"（回原 SaaS）；
+//   · 资源耗尽/超时终稿（resource-exhausted.ts 的模板）——说清"为什么需要你协助"
+//     （是否续跑由用户决定）与"可回平台继续处理"；
+//   · 平台拒绝（error-codes 表的 DELEGATION_HARD_REJECTED）与需要用户确认
+//     （plan-runtime 的确认门通知）——说清平台未执行、不会自动重试、确认前尚未开始；
+//   · 权限/归属拒绝（TASK_FORBIDDEN / TASK_NOT_FOUND）——说清"本次没有继续该任务，
+//     也没有执行任何查询"；
+//   · 需要用户补信息（NO_EXECUTION_CLARIFICATION）与无法确定（FALLBACK_* 兜底出口）——
+//     说清不替用户猜、请用户明确，以及"没有拿到可用结果、原因暂时无法确定"。
+//
+// 话术纪律与全表一致：零业务词、零执行层细节——新增句全部过执行语言指纹
+// （executionLanguageFingerprints，S4 同一把尺；宿主码表词如 TASK_* 前缀按既有产品
+// 行为上屏，指纹函数对码本身报警但删除臂有白名单，见"权限/归属拒绝"用例注释）。
+describe('失败交还五要素（T4：失败路径出口话术）', () => {
+  /** 话术卫生（S4 尺子）：出口话术不许含执行层细节指纹。 */
+  const expectNoExecutionLeak = (text: string): void => {
+    expect(executionLanguageFingerprints(text)).toEqual([]);
+  };
+
+  it('committed_unverified：说清系统无法自动完成核对（为什么需要人）与可在平台处理（回 SaaS）', () => {
+    const text = renderCommittedUnverifiedReply({ before: 1, after: 2, delta: 1, required: 2 });
+    // 既有纪律（phase2.test.ts 同款）：绝不报完成——新话术不许引入"已完成"。
+    expect(text).not.toContain('已完成');
+    expect(text).toContain('系统无法自动完成差额核实');
+    expect(text).toContain('可在平台里完成');
+    expectNoExecutionLeak(text);
+  });
+
+  it('资源耗尽/超时终稿：说清为什么需要用户协助（由你决定）与可回平台继续处理', () => {
+    const text = renderResourceExhaustedReply({ record: null, doneSteps: [] });
+    // 五要素之"为什么需要用户协助"：任务是自己停下来的、是否续跑由用户决定。
+    expect(text).toContain('需要你协助');
+    expect(text).toContain('由你决定');
+    // 五要素之"能否回原 SaaS"：也可以直接回平台处理，进度不丢。
+    expect(text).toContain('也可以直接到平台里继续处理');
+    expectNoExecutionLeak(text);
+  });
+
+  it('平台拒绝（硬拒绝）：说清平台未执行、不会自动重试与下一步（含平台兜底）', () => {
+    const text = messageTextFor('DELEGATION_HARD_REJECTED');
+    expect(text).toContain('平台未执行该操作');
+    expect(text).toContain('不会自动重试');
+    expect(text).toContain('或直接到平台里处理该操作');
+    expectNoExecutionLeak(text);
+  });
+
+  it('需要用户确认（计划确认门）：说清确认后才执行、当前尚未开始', () => {
+    const evaluation: PlanEvaluation = {
+      planId: 'plan_confirm',
+      version: 1,
+      decision: 'confirm',
+      estimate: { calls: 1, seconds: 60, weight: 1 },
+      delta: { addedCalls: 1 },
+      cumulative: {},
+      reasonCode: 'CONFIRM_THRESHOLD',
+      status: 'pending',
+    };
+    const message = formatPlanMessage(evaluation);
+    // "尚未完成什么"：这批操作确认前不会开始，用户不必担心已经动过。
+    expect(message).toContain('尚未开始');
+    // 既有确认话术逐字保留（T8 确认面纪律：确认门要用户看懂并回复）。
+    expect(message).toContain('请回复“确认继续”后再执行；当前已暂停。');
+    expectNoExecutionLeak(message);
+  });
+
+  it('权限/归属拒绝：说清没有继续该任务、也没有执行任何查询', () => {
+    for (const code of ['TASK_FORBIDDEN', 'TASK_NOT_FOUND']) {
+      const text = messageFor(code);
+      expect(text, code).toContain('本次没有继续该任务，也没有执行任何查询');
+      // 这两条话术的码前缀（TASK_*）是宿主码表词、上屏是既有产品行为（用户可引用码报
+      // 告问题）：删除臂有宿主码白名单（execution-language.ts 的 HOST_ERROR_CODE_NAMES），
+      // 指纹函数没有白名单、会对码本身报警。这里不拿指纹函数锁码前缀；新补的句子是
+      // 纯中文，指纹风险由全表锁（文末）与三把全表锁的泄漏预算守。
+    }
+  });
+
+  it('需要用户补信息（澄清）：说清不替用户猜、请用户明确，并给出平台兜底', () => {
+    const text = messageTextFor('NO_EXECUTION_CLARIFICATION');
+    expect(text).toContain('我不会替你猜');
+    expect(text).toContain('也可以直接到平台里查询');
+    expectNoExecutionLeak(text);
+  });
+
+  it('无法确定（兜底出口）：说清没有拿到可用结果与原因暂时无法确定', () => {
+    expect(messageTextFor('FALLBACK_FAILURE')).toContain('没有拿到可用结果');
+    expect(messageTextFor('FALLBACK_FAILURE')).toContain('具体原因暂时无法确定');
+    expect(messageTextFor('FALLBACK_TIMEOUT')).toContain('没有拿到可用结果');
+    expectNoExecutionLeak(messageTextFor('FALLBACK_FAILURE'));
+    expectNoExecutionLeak(messageTextFor('FALLBACK_TIMEOUT'));
   });
 });

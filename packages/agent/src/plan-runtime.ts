@@ -357,8 +357,11 @@ export function formatPlanMessage(evaluation: PlanEvaluation, options: PlanNotic
   if (factsPresent) lines.push(`（平台口径：${summary}）`);
   if (evaluation.decision === 'confirm') {
     // 可选项两条路都给：继续与取消的答复词形与宿主 classifyAnswer 接受的词表一致。
-    // 末行明说"还没执行"——用户知道自己此刻没有付出任何执行，不是在确认一件已发生的事。
+    // 末两行各自原样保留（T3×T4 合并，2026-11-12）：T4 的"为什么需要用户协助 /
+    // 尚未完成什么"句与 T3 的"用户此刻没有付出任何执行"尾句——两侧的既有断言都**逐字**
+    // 钉住各自那一句，重写合并会破坏任一侧的逐字锁（本合并的第一版就是这么红的）。
     lines.push('可选项：回复“确认继续”执行；回复“取消”放弃本次计划。');
+    lines.push('这批操作需要你确认后才会执行，尚未开始。');
     lines.push('本次计划尚未执行任何调用；请回复“确认继续”后再执行；当前已暂停。');
   } else {
     lines.push('通知送达后将继续执行。');
