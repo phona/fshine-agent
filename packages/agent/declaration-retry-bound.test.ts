@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TrustedContext } from '@fshine/contracts';
-import { INVALID_DECLARATION_TOLERANCE, judgeDeclarationContract } from '../../scripts/eval/declaration-criteria';
 import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './src/driver';
 import { createTaxAgentRuntime } from './src/runtime';
@@ -29,6 +28,11 @@ import { FakeSessionRepo } from './test-helpers';
  *
  * 纪律：这里的模型替身只交**坏申报**（不含任何平台动作）——测试不起真实执行面，
  * 全部走内存替身（与 tests/e2e 的 mock 纪律一致）。
+ *
+ * 分层（2026-11-12）：本文件不 import scripts/eval。原先把宿主埋点喂给探针判据的
+ * 「判据侧同锁」已移到 eval 侧（scripts/eval/declaration-host-events.test.ts），
+ * 只允许 eval → 生产的依赖方向；容差的唯一出处是 src/turn-state.ts 的
+ * `MAX_DECLARATION_REJECTIONS`，判据侧的 `INVALID_DECLARATION_TOLERANCE` 由它派生。
  */
 
 function makeCtx(overrides: Partial<TrustedContext> = {}): TrustedContext {
@@ -271,29 +275,6 @@ describe('申报拒收有界：超界收敛到 route_declaration_missing（②�
       // 被退回过，但退回原文点名了多带的字段（①的运行时面）
       expect(String(events.of('route_declaration_invalid')[0]?.['reason'])).toContain('request');
       expect(String(events.of('route_declaration_invalid')[1]?.['reason'])).toContain('request');
-    } finally {
-      events.restore();
-    }
-  });
-
-  it('判据侧同锁：把风暴形状的埋点喂进**未改动**的申报判据，verdict 必须是绿', async () => {
-    // 探针侧的红判据（scripts/eval/declaration-criteria.ts，本文件不复制它）吃的是宿主埋点
-    // 原文。这条用例把"连续交同一份坏申报"的回合埋点原样喂给它——判据认的证据与探针日志
-    // 一致，"界生效"因此不只活在本文件的断言里：抽掉界，宿主会退回 8+ 次，判据当场红。
-    const events = captureHostEvents();
-    const { driver } = stubbornInvalidDriver({ kind: 'conversation', request: '查 alpha collection W1 的记录' }, 8);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: unusedSubagent() });
-    try {
-      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_declaration_judge' }), '刚才查的是哪个？');
-      const verdict = judgeDeclarationContract({
-        logText: ['=== P1 申报契约：拒收必须收敛 ===', ...events.lines].join('\n'),
-        turns: [{ reply: reply.text, requestId: 'req_declaration_judge' }],
-        expectedTurns: 1,
-        caseId: 'P1',
-      });
-      expect(verdict.violations).toEqual([]);
-      expect(verdict.ok).toBe(true);
-      expect(verdict.evidence.maxInvalidPerTurn).toBeLessThanOrEqual(INVALID_DECLARATION_TOLERANCE);
     } finally {
       events.restore();
     }

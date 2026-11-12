@@ -140,9 +140,11 @@ export const MAX_PLAN_ZERO_EXEC_STEPS = 3;
 /**
  * 同一回合内申报被拒的收敛上限：**允许退回 2 次，第 3 次判超界**（2026-11-12 轨道 C ②）。
  *
- * 取值依据（**政策线，不是自然常数**）：同题的既有政策 = 申报契约判据的容差
- * `INVALID_DECLARATION_TOLERANCE = 2`（scripts/eval/declaration-criteria.ts），它来自实测
+ * 取值依据（**政策线，不是自然常数**）：同题的既有政策 = 申报契约判据的容差，它来自实测
  * 分布——健康样例（模型在同一回合内自纠成功）的单回合退回上限正好是 2，≥3 判红。
+ * 2026-11-12 分层调整后**本常量是唯一出处**：判据侧 `scripts/eval/declaration-criteria.ts`
+ * 的 `INVALID_DECLARATION_TOLERANCE` 由它派生（eval → 生产，方向不反；生产代码与生产测试
+ * 不得依赖 scripts/eval）。
  * 取 2 因此是唯一"健康行为一字不改、判据红线不可达"的值：
  *   · 取 1 会截断实测里健康样例的自纠（r02/r06/arch-a 都是 2 次退回内自纠成功）；
  *   · 取 ≥3 会让那条容差形同虚设（3 > 2 当场红），也就没堵住 arch-d C2 那种 226 次的形状。
