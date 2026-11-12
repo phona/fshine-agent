@@ -177,12 +177,12 @@ import {
  * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
  * 2026-11-08 评审 major：双语化曾把原中文「已按要求先申报」替换成「已按要求先
  * declaration」，中文系统提示下的既有回归检测因此失效。保留中文原形（申报/主 Agent/
- * 宿主）+ 英文形态（route_current_turn / main agent / host / PLAN 三态）。
- * 「已按要求先申报/declaration」是有中文框架的复合措辞，**不**放宽成裸 declaration——
- * 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红），其协议形状已由
- * route_current_turn 一支覆盖。
+ * 宿主）+ 英文形态（main agent / host / PLAN 三态）。
+ * 2026-11-12 申报层正式删除：route_current_turn 词条随之移除——工具与提示词均已不存在，
+ * 词条失去对象；申报专属判据（declaration-criteria / measure-declaration / P1 用例）
+ * 同批退役，事故证据归档在 docs/decision-log.md。
  */
-const PROTOCOL_LEAK_RE = /主 Agent|route_current_turn|已按要求先申报|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i;
+const PROTOCOL_LEAK_RE = /主 Agent|已按要求先申报|已按要求先declaration|宿主|PLAN (ACTIVE|DECLINED|NEEDS)|main agent|\bhost\b/i;
 
 /**
  * 实体是否被**完整提及**（2026-11-08 评审 major）：名称后不连字符——"alpha-group"、
@@ -197,12 +197,6 @@ import { MOCK_ACCOUNTS, MOCK_COLLECTION_WINDOWS, MOCK_ITEMS } from './eval/dummy
 // T9 归因不串判据（相位 1）：回复里的实体/期间 vs 审计里真实调用记录，逐条对。
 // 判据本体与反例锁在 scripts/eval/attribution.ts / attribution.test.ts（纯函数，可直测）。
 import { attributionViolations } from './eval/attribution';
-// 申报契约判据（workflow 用例 C1 / 仓内 id P1）：回复面那把尺（replyFaceViolation）与判定体
-// 共用同一个函数——探针 note 与 measure-declaration.mjs 的红绿不会出现两套口径。
-// 计数面（route_declaration_invalid 次数）做不进本报告：该事件只在宿主 stdout 埋点
-// （tool_calls 表里没有 route_current_turn 行，已核 agent-*.db），权威源是探针日志，
-// 由 measure-declaration.mjs 读——两处口径的分工写在 cases.yaml 的 P1 条目里。
-import { replyFaceViolation } from './eval/declaration-criteria';
 
 /**
  * 真实 token 消耗的分项（纯加法遥测，性能测试与成本分析用，不算钱不计费）。
@@ -2281,12 +2275,12 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     const notes: string[] = [];
     const slow = turns.filter((turn) => turn.ms > 120_000);
     if (slow.length) notes.push(`${slow.length} 轮超过 2 分钟：${slow.map((t) => `${t.ms}ms`).join(', ')}`);
-    // 内部协议泄漏：用户不该看到宿主/declaration/主 Agent 这类字样
-    // 双语化：中文侧原样保留；英文侧补 main agent / host（route_current_turn 与
-    // PLAN (ACTIVE|DECLINED|NEEDS) 本就是英文可见形态，无需补）。
+    // 内部协议泄漏：用户不该看到宿主/主 Agent 这类字样
+    // 双语化：中文侧原样保留；英文侧补 main agent / host（PLAN (ACTIVE|DECLINED|NEEDS)
+    // 本就是英文可见形态，无需补）。
     // 「已按要求先declaration」是有中文框架的复合措辞，**不**放宽成裸 declaration——
-    // 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红），其协议形状已由
-    // route_current_turn 一支覆盖。
+    // 裸英文词会把正常叙述里的 declaration 一词判成泄漏（假红）。
+    // （2026-11-12 申报层删除：route_current_turn 词条与对应说明已移除。）
     const leaked = turns.filter((turn) => PROTOCOL_LEAK_RE.test(turn.reply));
     if (leaked.length) notes.push(`${leaked.length} 轮回复泄漏内部协议：${leaked.map((t) => t.text).join(' / ')}`);
     // 只在"回复把某个collection当成本轮已查结果"时才算漂移；在澄清问句里点名collection是正确行为
@@ -3232,27 +3226,10 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
     for (const turn of turns) notes.push(...execLanguageLeakNotes(turn));
     return { turns, notes };
   },
-  // P1 申报契约遵循（workflow 用例 C1）：模型有动机往申报里多带 request 的短会话
-  // （能力问句 / 两次真查询 / 闲聊 / T9 原形归因轮 / engineered bait 轮，逐字来自
-  // cases.yaml 的 P1）。探针只把消息序列原样跑完，不注入期望、不替模型改口径——
-  // **申报契约判据本体在 scripts/eval/declaration-criteria.ts**（纯函数），权威判定由
-  // measure-declaration.mjs 读探针日志（route_declaration_invalid 计数，唯一来源）
-  // + 逐轮回复出绿/红/灰。这里只收**回复面**note：同一把尺（replyFaceViolation）
-  // 的前两段（空回复 / 零信息空洞话术），与其它用例同一族的执行语言泄漏 note。
-  // 计数面故意不在这里重复实现——两套口径同源才算数（见 cases.yaml 的 P1 checks ⑤）。
-  P1: async (spec) => {
-    const { send, assembly } = await boot();
-    const turns: Turn[] = [];
-    for (const message of spec.messages) turns.push(await send(message.text!));
-    await assembly.close();
-    const notes: string[] = [];
-    for (const turn of turns) {
-      notes.push(...execLanguageLeakNotes(turn));
-      const hollow = replyFaceViolation(turn.reply);
-      if (hollow) notes.push(`P1 出口话术不达标：「${turn.text.slice(0, 40)}」→ ${hollow}`);
-    }
-    return { turns, notes };
-  },
+  // P1 申报契约遵循（declaration-criteria / measure-declaration）已随申报层正式删除
+  // （2026-11-12）：申报工具、解析器与退回链都不存在，判定体失去对象；事故证据
+  // （T9 r01 33 次弃权 / arch-d C2 226 次 + 300s 看门狗）归档在 docs/decision-log.md 2.7。
+  // cases.yaml 的 P1 条目与判定表登记同批退役，不再有第二把无对象的尺。
 };
 
 /**

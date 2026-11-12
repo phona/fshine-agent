@@ -391,6 +391,29 @@ describe.each(DB_MODES)('createSqliteStore(dbPath=%s)', (mode) => {
       expect(await store.platformTasks!.get(record.taskId)).toEqual(record);
     });
 
+    // ── G3/RR1 恢复与身份事实（2026-11-12）────────────────────────────────
+    it('恢复/身份事实原样往返：entitySources 快照与 requestKey', async () => {
+      const record = makePlatformTask({
+        entitySources: { currentMessage: '查幻辰和新兴五金的应收', sessionEntities: ['幻辰财税'] },
+        requestKey: 'request-v1:abc123',
+      });
+      await store.platformTasks!.upsert(record);
+
+      expect(await store.platformTasks!.get(record.taskId)).toEqual(record);
+      // listBySession 与 get 同一映射：RR1 的读取面不出现第二套口径
+      const listed = await store.platformTasks!.listBySession(record.principalId, record.parentSessionId);
+      expect(listed.find((item) => item.taskId === record.taskId)).toEqual(record);
+    });
+
+    it('恢复/身份事实缺失时不猜不补（旧条目读回时字段不出现）', async () => {
+      const record = makePlatformTask();
+      await store.platformTasks!.upsert(record);
+
+      const loaded = (await store.platformTasks!.get(record.taskId))!;
+      expect('entitySources' in loaded).toBe(false);
+      expect('requestKey' in loaded).toBe(false);
+    });
+
     it('结构化字段缺失时不猜不补：记录里没有的字段读回时也不出现', async () => {
       const record = makePlatformTask();
       await store.platformTasks!.upsert(record);

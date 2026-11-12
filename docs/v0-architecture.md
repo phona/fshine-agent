@@ -53,7 +53,7 @@
 
 > **执行层实例名不在本文复述**：当前实例由 AGENTS.md 与部署 profile 声明承载。`packages/agent/public-surface-lint.test.ts` 把 docs 中的实例名命中判为表外新命中即红——本文复述实例名会当场破门，所以三层图与全表只用「执行层（当前实例）」。这不是"没有实例"，是"实例名只许住部署声明、AGENTS.md 与改造史台账（debt-ledger / change-safety，该守卫显式排除）"。
 
-**方向不变**：结构化调用协议（[a2a-protocol.md](a2a-protocol.md)）仍是外部调用的目标形态——意图 → 结构化操作 → 网关调用，六阶段、失败分类与声明原则照旧。本文删除的是 `route_current_turn` 的申报层 1+2（§12 ⑦），不是协议方向。
+**方向不变**：结构化调用协议（[a2a-protocol.md](a2a-protocol.md)）仍是外部调用的目标形态——意图 → 结构化操作 → 网关调用，六阶段、失败分类与声明原则照旧。本文删除的是 `route_current_turn` 的申报层 1+2（§12 ⑦），不是协议方向。**状态更新（2026-11-12）**：申报层已随直连工具面在 `arch/direct-tool-final` 正式删除（工具/解析/退回/申报状态字段与提示词全删；`resend_artifact` 已成直连工具），待开 PR；现行协议 = Main Agent 直接调用执行层委派工具（缺省 `run_task`），普通回合直接文本回复。
 
 **基座的两条实测现状（2026-11-11）**：
 
@@ -148,7 +148,7 @@ Task Runtime 回答三个问题：**任务现在到哪了**（Task）、**发生
 | 1 | 渠道、身份、会话 | 企微接入；principal 由可信用户 ID 解析 |
 | 2 | 上下文装配 | Conversation Log（会话事实）；Context State 与主动回溯**已删**（§12 ④⑤，**在 PR #54 未合**） |
 | 3 | 指代消解 | 只用**机械来源**：当前消息、Log 里的实体、平台自己返回的响应；历史检索通道**已删**（§12 ①，**在 PR #54 未合**） |
-| 4 | 回合分类 | `conversation` / `delegate`；强制申报形态本身是 A 类（§12 ⑦，**待实施**） |
+| 4 | 回合分类 | `conversation` / `delegate`；强制申报形态本身是 A 类（§12 ⑦，**已实施：`arch/direct-tool-final`，待开 PR**） |
 | 5 | 长任务拆解与派单 | **拆解决策归模型**（凭业务 skill 的**程序性**知识）；宿主只维护拆解结果的计划状态、派单与续跑机制，**不复制拆解器** |
 | 6 | 任务计划状态维护 | 第几步、每步结果、失败重试 |
 | 7 | 长期记忆 | **已删**（§12 ②，**在 PR #54 未合**）：不再维护跨任务长期记忆；会话事实归 Conversation Log |
@@ -192,9 +192,11 @@ Main Agent 依然不能产出财务结论——它只能编排。出口校验（
 
 ## 4. 委派契约
 
-> **状态（2026-11-11 裁定）**：`route_current_turn` 的**申报层 1+2 已判删**——强制申报回合类型是 A 类纪律（它存在是因为模型现在做不到，判据见 [architecture-laws.md](architecture-laws.md)「机制分类」）。**保留 resend 分支与实体范围校验（第 3 层）**。删除**待实施**（未开 PR）。本节描述删除前的实现；仍有效的是"意图 → 结构化请求"的加工与第 3 层的范围校验。
+> **状态（2026-11-12 更新）**：`route_current_turn` 的**申报层 1+2 已正式删除**——强制申报回合类型是 A 类纪律（它存在是因为模型现在做不到，判据见 [architecture-laws.md](architecture-laws.md)「机制分类」）；删除已在 `arch/direct-tool-final` 实施（待开 PR；工具/解析/退回重填/申报状态字段/提示词全删，`resend_artifact` 与实体范围校验保留，见 §12 ⑦–⑨ 与 decision-log 2.7–2.9）。**现行协议**：Main Agent 直接调用执行层委派工具（缺省 `run_task`），普通回合直接文本回复；「意图 → 结构化请求」的加工归模型，第 3 层的范围校验（`validatePlanEntities`）与来源组装仍是宿主的确定性责任。
 >
-> **层号定义（首次出现处）**：**第 1 层** = 强制模型每回合申报回合类型；**第 2 层** = 申报结构校验与不合规退回重填；**第 3 层** = resend 分支（会话产物清单引用）+ 实体范围校验（`validatePlanEntities`）。删的是 1+2，保留的是第 3 层。
+> **层号定义（首次出现处）**：**第 1 层** = 强制模型每回合申报回合类型；**第 2 层** = 申报结构校验与不合规退回重填；**第 3 层** = resend 分支（会话产物清单引用，现为直连工具 `resend_artifact`）+ 实体范围校验（`validatePlanEntities`）。删的是 1+2，保留的是第 3 层。
+>
+> **以下为删除前形态（史实，供理解 §4 的判据与变更史）**：
 
 Main Agent 每回合先申报一次：
 
@@ -339,7 +341,7 @@ Main Agent 申报 delegate
 | 项 | 现状 | 目标 |
 |---|---|---|
 | 写路径 | 已落地（C 波收口，2026-10-13）：提案载荷全程不住编排层——`ChangeIntentRecord` 只剩取物单 `proposalId` + 通用确认字段；宿主不解析 payload、不渲染业务摘要（用户文本 = 平台 `summaryText` 原样 + 宿主通用状态行）。旧文本路径（worker 贴提案 JSON → `extractChangeProposal` → 服务端 dry-run 预检 → 按文件路径落账）与 `apps/server/commit.ts` 已整文件删除；B 波那两个灰度开关（管提案创建、管落账接线）已随 D 波退役（2026-10-14）——宿主恒定拦截提案命令、落账后端恒接；D 波之后 `proposalCommitEnabled` 曾由 `isCommitEnabled` 单独派生，**该派生位亦随 2026-11-08 架构裁定删除**（写能不能真落地归执行层，宿主不再持"允不允许落账"的布尔，执行层的拒绝/warning 由平台信封给出并上行转述，见 debt-ledger 的 D-075/D-197 重登记节）。残留：① SQLite 里的五列历史列只为旧库 NOT NULL 兼容保留（W5 fail-closed：不带 `proposalId` 的旧行业一律按过期处理） | 同左；结构化调用协议已落地（C6/C9），env 级接线退役中（C8 部分落地，serve 令牌门与真写门执法点未动） |
-| 申报契约 | 已瘦身为四字段（kind/request/continueTaskId/artifactRef——resend 枝 2026-10-20 产物库波新增，指向宿主注入的会话产物清单 #编号），零业务知识；申报层只剩结构校验（turn-contract.test.ts 钉 schema 恰 4 属性），范围守卫靠计划层包含校验（§2 第 9 条） | 四字段结构保留；**申报层 1+2 已判删**（A 类，§12 ⑦），**待实施**；保留 resend 分支与实体范围校验（第 3 层，层号定义见 §4）。目标形态 = 意图 → 结构化操作，不靠模型每回合自报回合类型 |
+| 申报契约 | **已删除（2026-11-12，`arch/direct-tool-final`，待开 PR）**：申报工具、解析/复核/退回（1+2 层）与申报状态字段全删；`TurnDeclaration` 收窄为宿主内部委派管道（不进模型 schema）。现行协议 = 直连委派工具（缺省 `run_task`，schema 只有 request / taskId 两参数），普通回合直接文本回复；范围守卫靠计划层包含校验（§2 第 9 条） | 保持直连形态；目标形态 = 意图 → 结构化操作，不靠模型每回合自报回合类型；`resend_artifact` 与实体范围校验（第 3 层）保留 |
 | 领域判别 | `validatePlanEntities` 已做通用来源校验。**2026-10-14 标定复审后**：覆盖 = 本任务迄今全部平台响应（转录 ∪ 宿主账本双通道，治 SDK 自动压缩）、单条保尾、宿主拒绝理由按身份排除、信封 `data` 叶值作附加来源；包含判据仍是逐字包含，防幻觉功能不变。剩余差距：名称重新检索规则仍在 fshine worker 提示词（context.ts 输出纪律条），与执行层 serve skill 重复——业务 skill 已明写名称解析归执行层（2026-10-11/2026-11-04 两波收口） | 通用宿主只校验来源与授权；执行选择和业务参数规则由执行层拥有 |
 | 业务 skill | 已清执行口径（2026-10-11）：必需信息表整表删除，默认应收/默认当前期间/名称检索/范围替代四条执行口径已删或迁执行层 SKILL；剩余内容只有路由与编排纪律，执行默认词表有机械守卫（apps/server/business-skill.test.ts）。2026-11-04 纯编排波再收口：执行默认值与业务路由例子中性化移出（业务示例归执行层 `.agents/skills-serve/`，执行默认词表守卫实测零命中）。文件内容本身仍由部署方持有，除词表守卫外无内容级校验 | 只保留跨步骤拆解、依赖与信息补齐；执行默认值和范围解释归执行层 |
 | 执行凭证 | 当前 `gateCalls > 0` 主要证明网关调用获准；普通 conversation 的无来源金额主要告警。**执行四态（§1.3）尚无统一契约**：①意图 / ②已受理 / ③已返回 / ④已验证生效在代码里分散在 plan evaluate、ToolCall 审计、RESULT 信封、readback 与 `confirm_committed_unverified` | 四态区分落地为统一契约；数据回复关联可核对的执行结果；T10 结果对账（声明 N / 读回 N，**在 PR #55 未合**）与任务生命周期四段（**在 PR #55 未合**） |
@@ -356,7 +358,7 @@ Main Agent 申报 delegate
 
 **公开迁移暴露面现状（2026-11-05 脱敏波，change-safety §25）**：现行树的四类敏感物——真实企微 UserID、内部绝对路径、真实客户名/主体名、真实财务读数——已机械替换为虚构值，并由 `packages/agent/exposure-lint.test.ts`（扫 `git ls-files` 全量、四类零命中断言 + 假绿自校验）常驻看守；CI 三门 + 三把守卫全绿，Tier B 未跑。**尚未处理的三面**：① git 历史里的同批串（归波次 2 历史重写，替换表由波次 1 产出）；② 产品面执行层实例名词（归 W1 / 波次 4，含 `config/agent.example.yaml` 的 `contextProfiles` 结构键，D-155）；③ Tier B 对兄弟仓 mock seed 目录的耦合（D-154）。各债的归属、闭环判据与限期见 debt-ledger 脱敏波新账（D-153–D-156）。
 
-**改造顺序的原则**：先删"代码已保证"的提示词冗余；主动回溯**已删**（§12 ⑤，在 PR #54 未合），不再作为后续波次；申报契约的申报层 1+2 已判删（§12 ⑦，待实施）。任何删除按 [architecture-laws.md](architecture-laws.md)「删除纪律」执行：带回归用例，红写进 PR 正文。分阶段计划、每步验收与验证协议见 [`roadmap.md`](roadmap.md)。
+**改造顺序的原则**：先删"代码已保证"的提示词冗余；主动回溯**已删**（§12 ⑤，在 PR #54 未合），不再作为后续波次；申报契约的申报层 1+2 **已删除**（§12 ⑦，`arch/direct-tool-final`，待开 PR）。任何删除按 [architecture-laws.md](architecture-laws.md)「删除纪律」执行：带回归用例，红写进 PR 正文。分阶段计划、每步验收与验证协议见 [`roadmap.md`](roadmap.md)。
 
 ---
 
@@ -368,7 +370,7 @@ MCP server/host、通用多 Agent registry、跨域结果聚合、调度与浏�
 
 ## 12. 已删机制（2026-11-11 裁定）
 
-**本节九项均已裁定删除（2026-11-11），但表内 ①–⑥ 在 PR #54 未合，main 上仍在**——列的是裁定，不等于 main 上已物理删除。状态只取三种基态：**已合入**（main 上已删）/ **在 PR 未合**（删除改动在 draft PR，**main 上文件仍在**）/ **待实施**（有裁定、无删除改动）；局部完成的写成可判组合：**在 PR 未合（局部）** 或 **待实施（局部在 PR 未合）**，并写清哪一部分在哪个 PR。**读法**：①–⑥ 按现状读代码，不要按已删除写新代码；⑦–⑨ 待实施（⑨ 局部在 #54）。裁定记录以 [decision-log.md](decision-log.md) 为准；删除纪律（带回归用例、红写进 PR 正文）见 [architecture-laws.md](architecture-laws.md)。
+**本节九项均已裁定删除（2026-11-11），但表内 ①–⑥ 在 PR #54 未合，main 上仍在**——列的是裁定，不等于 main 上已物理删除。状态只取三种基态：**已合入**（main 上已删）/ **在 PR 未合**（删除改动在 draft PR，**main 上文件仍在**）/ **待实施**（有裁定、无删除改动）；局部完成的写成可判组合：**在 PR 未合（局部）** 或 **待实施（局部在 PR 未合）**，并写清哪一部分在哪个 PR；**已实施但未开 PR** 的批次写「已实施（`arch/direct-tool-final`，待开 PR）」——实施已落地、审查入口尚缺，不许读成已合并。**读法**：①–⑥ 按现状读代码，不要按已删除写新代码；⑦–⑨ 已在本分支实施（⑦⑧⑨，见各行状态），本分支上不要再按申报层写新代码。裁定记录以 [decision-log.md](decision-log.md) 为准；删除纪律（带回归用例、红写进 PR 正文）见 [architecture-laws.md](architecture-laws.md)。
 
 | # | 机制 | 删除理由（一句） | 状态 |
 |---|---|---|---|
@@ -378,10 +380,10 @@ MCP server/host、通用多 Agent registry、跨域结果聚合、调度与浏�
 | ④ | `context-state.ts` / `context-extractor.ts` / `context-model.ts` | 语义投影；C2 一次跑出现 8 次 `context_semantic_extract_failed`，失败即落正则兜底 | **在 PR #54 未合** |
 | ⑤ | `reference-evidence.ts` | 线索词尺只认中文，九个英文长会话用例上静默全关，单测全绿而机制一次不跑 | **在 PR #54 未合**；同对象另有 #51 的「保留 + 补英文线索尺」修复草案，两案未合并，**当前权威裁定是删除**（decision-log 2.5） |
 | ⑥ | `execution-facts.ts` | 台账注入。T9 的红有混淆：main 上 `contextMode` 默认 `state_recent`、`recentTurns` 默认 2，模型本来就没全文；**main 上注入也不是无条件**——`runtime.ts` 的 `looksLikeReferenceCue` 开门，只有带召回线索的回合才注入，无条件版本只存在于中间提交 `ab9c1c9`；无条件注入的确定成本 = 每回合改上下文头部、破坏前缀稳定、cache 命中率下降 | **在 PR #54 未合** |
-| ⑦ | `route_current_turn` 申报层 1+2 | A 类纪律（强制申报回合类型是模型能力补丁）；保留 resend 分支与实体范围校验（第 3 层） | **待实施** |
-| ⑧ | `protocol-material.ts` | 处理「模型把申报 XML 写成正文」，纯模型失败补丁 | **待实施** |
-| ⑨ | `step-text.ts` 的 `INTERNAL_TOOLS` 抑制 | 内部工具删了就没对象 | **待实施（局部在 PR #54 未合）**：`search_history` / `get_messages` 两项已从集合删除；最后一项 `route_current_turn` 随 ⑦ 消失 |
+| ⑦ | `route_current_turn` 申报层 1+2 | A 类纪律（强制申报回合类型是模型能力补丁）；保留 resend 分支与实体范围校验（第 3 层） | **已实施（`arch/direct-tool-final`，待开 PR）**：工具/解析/退回/申报状态字段/提示词全删；`resend_artifact` 直连工具与 `validatePlanEntities` 保留 |
+| ⑧ | `protocol-material.ts` | 处理「模型把申报 XML 写成正文」，纯模型失败补丁 | **已实施（`arch/direct-tool-final`，待开 PR）**：只删申报专属整段替换支；Worker 协议材料防泄漏（`looksLikeProtocolMaterial`）保留 |
+| ⑨ | `step-text.ts` 的 `INTERNAL_TOOLS` 抑制 | 内部工具删了就没对象 | **已实施（`arch/direct-tool-final`，待开 PR）**：集合、两处检查与 `route_current_turn` 词条整体删除；通用进度卫生保留 |
 
-**没有随波删除的保留项（复核结论见 [architecture-laws.md](architecture-laws.md)「机制分类」）**：`session-entities.ts`、`clarification-events.ts`、`committed-unverified.ts`、`freeze-task-inputs.ts`、`repeat-request.ts`、`TaskRunRecord.dispatchKey`、WT-1 / WT-2。它们不是"漏删"。其中 `repeat-request.ts` 是 **B 目的、A 实现**（目的 = 重复的同一句话是新授权、不是缓存命中，按 B 类写确定性违约测试；实现依赖模型申报与转录形状，按 A 类做消融；两套测试都要，不能互相顶替），其余是换任何模型都必须在的确定性责任。
+**没有随波删除的保留项（复核结论见 [architecture-laws.md](architecture-laws.md)「机制分类」）**：`session-entities.ts`、`clarification-events.ts`、`committed-unverified.ts`、`freeze-task-inputs.ts`、`TaskRunRecord.dispatchKey`、WT-1 / WT-2，以及 `repeat-request.ts` 的**B 目的**（重复的同一句话是新授权、不是缓存命中——2026-11-12 收窄后由 RR1 窄门承接：requestKey 精确身份 + 出口替换决策，见 decision-log 3.5）。它们不是"漏删"，其余是换任何模型都必须在的确定性责任。**申报层删除的三项收口同批落地**（2026-11-12，`arch/direct-tool-final`）：G3 恢复路径实体来源 fail-closed（inline 缺快照 = 拒绝恢复；后台缺快照 = `originMessage` 窄重建）、RR1 收窄（改写问句不拦；存储读不到记 inconclusive 不阻断）、resend 与委派同回合互斥（先发生的动作赢）。
 
 **禁止的读法**：不要把本表当成"曾经有过、随时可以加回来"的清单。加回来的判据是删除时留下的那条红（写在该删除的 PR 正文里）——先让红变绿，再解释为什么现在需要它。

@@ -55,7 +55,7 @@ function input(overrides: Partial<TurnExitInput> = {}): TurnExitInput {
     lastNeeds: null,
     activatedPlan: null,
     protocolReplay: false,
-    sessionTaskCount: 0,
+    repeatIdentity: 'none',
     taskControlUsed: false,
     resultText: '',
     hasFinancialFigure,
@@ -134,7 +134,7 @@ describe('decideTurnExit：① 执行痕迹门（零执行 + 无 needs/计划模
     const byNeeds = decideTurnExit(input({ needsLoop: true, needsRounds: 2, lastNeeds: NEEDS, resultText: '本次查到的余额是 1000 元。' }));
     if (byNeeds.kind !== 'direct') throw new Error('expected direct');
     expectEvent(byNeeds, 0, 'warn', 'delegate_without_execution', { needsRounds: 2 });
-    const byPlan = decideTurnExit(input({ intentKind: 'conversation', planModeTurn: true, planSteps: 3, planStepOutcomes: STEP_OUTCOMES, resultText: '查到的金额合计见明细。' }));
+    const byPlan = decideTurnExit(input({ intentKind: null, planModeTurn: true, planSteps: 3, planStepOutcomes: STEP_OUTCOMES, resultText: '查到的金额合计见明细。' }));
     if (byPlan.kind !== 'direct') throw new Error('expected direct');
     expectEvent(byPlan, 0, 'warn', 'delegate_without_execution', { planSteps: 3 });
     // 两者都不成立（delegate 单步零执行）：detail 为空
@@ -160,7 +160,7 @@ describe('decideTurnExit：① 执行痕迹门的 needs / 计划模式转达支'
   });
 
   it('planModeTurn 全部步骤零执行的如实汇总：模型文本照常外发，记 plan_steps_relayed', () => {
-    const decision = decideTurnExit(input({ intentKind: 'conversation', planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, resultText: '两步都没能执行，请补充查询范围后我重跑。' }));
+    const decision = decideTurnExit(input({ intentKind: null, planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, resultText: '两步都没能执行，请补充查询范围后我重跑。' }));
     expect(decision.kind).toBe('relay');
     if (decision.kind !== 'relay') return;
     expect(decision.text).toBe('两步都没能执行，请补充查询范围后我重跑。');
@@ -168,7 +168,7 @@ describe('decideTurnExit：① 执行痕迹门的 needs / 计划模式转达支'
   });
 
   it('planModeTurn + 复读 + 无 needs：宿主持有的步骤事实汇总顶上', () => {
-    const decision = decideTurnExit(input({ intentKind: 'conversation', planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
+    const decision = decideTurnExit(input({ intentKind: null, planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
     expect(decision.kind).toBe('relay');
     if (decision.kind !== 'relay') return;
     expect(decision.text).toBe(STEP_FALLBACK);
@@ -176,7 +176,7 @@ describe('decideTurnExit：① 执行痕迹门的 needs / 计划模式转达支'
   });
 
   it('planModeTurn + 复读 + 有 needs：needs 线索优先于步骤事实汇总', () => {
-    const decision = decideTurnExit(input({ intentKind: 'conversation', planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, needsLoop: true, needsRounds: 1, lastNeeds: NEEDS, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
+    const decision = decideTurnExit(input({ intentKind: null, planModeTurn: true, planSteps: 2, planStepOutcomes: STEP_OUTCOMES, needsLoop: true, needsRounds: 1, lastNeeds: NEEDS, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
     expect(decision.kind).toBe('relay');
     if (decision.kind !== 'relay') return;
     expect(decision.text).toBe(NEEDS_USER_TEXT);
@@ -265,7 +265,7 @@ describe('decideTurnExit：② 协议复读门（D-020 / F4：有执行也拦）
   });
 
   it('conversation 申报 + 复读申报回执：② 仍然截住（F4.4 的形状）', () => {
-    const decision = decideTurnExit(input({ intentKind: 'conversation', protocolReplay: true, resultText: '{"recorded":"conversation"}' }));
+    const decision = decideTurnExit(input({ intentKind: null, protocolReplay: true, resultText: '{"recorded":"conversation"}' }));
     expect(decision.kind).toBe('relay');
     if (decision.kind !== 'relay') return;
     expect(decision.text).toBe(NO_EXECUTION_CLARIFICATION);
@@ -294,45 +294,47 @@ describe('decideTurnExit：两段门都不动作的形状', () => {
     expect(decideTurnExit(input({ execution: true, resultText: '幻辰财税 202609 应收余额为 51 元。' }))).toEqual({ kind: 'ok' });
   });
 
-  it('conversation 申报 + 干净文本：① 不动作（没有 delegate/needs/计划模式），② 也不动作', () => {
-    expect(decideTurnExit(input({ intentKind: 'conversation', resultText: '你好，我在。' }))).toEqual({ kind: 'ok' });
+  it('无委派（intentKind = null）+ 干净文本：① 不动作（没有 delegate/needs/计划模式），② 也不动作', () => {
+    expect(decideTurnExit(input({ intentKind: null, resultText: '你好，我在。' }))).toEqual({ kind: 'ok' });
   });
 
-  it('没有申报（intentKind = null）：① 不动作', () => {
+  it('没有委派（intentKind = null）：① 不动作', () => {
     expect(decideTurnExit(input({ intentKind: null, resultText: '你好，我在。' }))).toEqual({ kind: 'ok' });
   });
 });
 
-describe('decideTurnExit：①b 重复提问门（RR1，历史答复不得冒充实时）', () => {
+describe('decideTurnExit：①b 重复提问门（RR1 窄门，2026-11-12 收窄）', () => {
   const REPEAT_TEXT = messageTextFor('REPEAT_WITHOUT_EXECUTION');
 
-  it('有在册任务 + 零委派零执行 + 数字结论：确定性话术顶上，事件带任务数', () => {
+  it('精确身份命中 + 零委派零执行 + 数字结论：确定性话术顶上，事件只陈述身份判据', () => {
     const decision = decideTurnExit(input({
       intentKind: null,
-      sessionTaskCount: 2,
+      repeatIdentity: 'match',
       resultText: '上次查到的应收余额是 61000 元。',
     }));
     expect(decision).toEqual({
       kind: 'direct',
       text: REPEAT_TEXT,
       outcome: 'repeat_without_execution',
-      events: [{ level: 'warn', event: 'repeat_without_execution', detail: { tasksInSession: 2 } }],
+      events: [{ level: 'warn', event: 'repeat_without_execution', detail: { identity: 'request_key' } }],
     });
   });
 
-  it('三要素缺一不拦：无任务 / 无数字 / 本轮真执行 / task_control 状态查询 / 协议复读走 ②', () => {
+  it('缺一不拦：身份未命中 / inconclusive / 无数字 / 本轮真执行 / task_control / 协议复读走 ②', () => {
     const figure = '上次查到的应收余额是 61000 元。';
-    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 0, resultText: figure }))).toEqual({ kind: 'ok' });
-    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, resultText: '任务已完成，我也整理过。' }))).toEqual({ kind: 'ok' });
-    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, execution: true, resultText: figure }))).toEqual({ kind: 'ok' });
-    expect(decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, taskControlUsed: true, resultText: figure }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, repeatIdentity: 'none', resultText: figure }))).toEqual({ kind: 'ok' });
+    // inconclusive（辅助存储读不到）不拦也不判绿：普通聊天不被阻断（runtime 侧已留痕）
+    expect(decideTurnExit(input({ intentKind: null, repeatIdentity: 'inconclusive', resultText: figure }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, repeatIdentity: 'match', resultText: '任务已完成，我也整理过。' }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, repeatIdentity: 'match', execution: true, resultText: figure }))).toEqual({ kind: 'ok' });
+    expect(decideTurnExit(input({ intentKind: null, repeatIdentity: 'match', taskControlUsed: true, resultText: figure }))).toEqual({ kind: 'ok' });
     // 协议复读仍归 ②：替换文本是协议材料的宿主转述，而不是重复提问话术。
-    const replay = decideTurnExit(input({ intentKind: null, sessionTaskCount: 2, protocolReplay: true, resultText: PROTOCOL_REPLAY }));
+    const replay = decideTurnExit(input({ intentKind: null, repeatIdentity: 'match', protocolReplay: true, resultText: PROTOCOL_REPLAY }));
     expect(replay.kind).toBe('relay');
   });
 
   it('有委派事实（intentKind = delegate）时走 ① 而不是 ①b：两条门的收尾文本各归其位', () => {
-    const decision = decideTurnExit(input({ intentKind: 'delegate', sessionTaskCount: 2, resultText: '幻辰 202609 应收余额为 51 元。' }));
+    const decision = decideTurnExit(input({ intentKind: 'delegate', repeatIdentity: 'match', resultText: '幻辰 202609 应收余额为 51 元。' }));
     expect(decision.kind).toBe('direct');
     expect(decision.kind === 'direct' ? decision.outcome : '').toBe('delegate_without_execution');
   });

@@ -418,8 +418,8 @@ const LITERAL_IF_PROTOCOL_TOKENS: ReadonlySet<string> = new Set([
   'user', 'assistant', 'toolResult', 'toolCall', 'text',
   // Conversation Log 事件类型（contracts 定义）
   'user_message', 'assistant_message', 'tool_result', 'plan_event',
-  // 回合契约 kind（turn-contract.ts 两枝枚举）
-  'conversation', 'delegate',
+  // 回合契约 kind（turn-contract.ts 只剩 delegate 一枝；conversation 随申报层删除）
+  'delegate',
   // 计划门 / 确认流状态（plan-runtime 决策、plan-confirmation 结局）
   'active', 'pending', 'confirmed', 'activated', 'cancelled', 'superseded', 'ambiguous', 'expired', 'ignored',
   // 平台 RESULT 信封 status / 写流程提案信封 type（platform-contract.ts 唯一适配层）
@@ -433,8 +433,9 @@ const LITERAL_IF_PROTOCOL_TOKENS: ReadonlySet<string> = new Set([
   'bash', 'sh', 'read', 'ls', 'write', 'mock',
   // Background TaskRunState enum values from @fshine/contracts; status protocol constants, not model intent sniffing.
   'queued', 'running', 'cancelling', 'waiting_input', 'waiting_confirmation', 'interrupted',
-  // 宿主内部工具名（step-text.ts 静默帧名单）
-  'search_history', 'get_messages', 'route_current_turn',
+  // 宿主内部工具名（历史检索工具与申报工具均已从生产代码删除——词条失去对象，
+  // 白名单只减不增：留着反而会在同名回潮时放行）
+  // （search_history / get_messages / route_current_turn 登记项已随各自机制删除）
   // 协议失败分类（FailureClass / DelegationFailureClass，contracts + failure-delivery 判定用）
   'NEEDS_INPUT', 'CAPABILITY_UNAVAILABLE', 'PLATFORM_ERROR', 'RESOURCE_EXHAUSTED', 'HARD_REJECTED',
   'cancelled', 'model_transient', 'executor_error',

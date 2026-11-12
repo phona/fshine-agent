@@ -23,7 +23,6 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createHash } from 'node:crypto';
 import type { ConversationEventRecord, ConversationLogRepo, TrustedContext, TurnInputContext } from '@fshine/contracts';
 import { clarificationIssuedRecord, clarificationResolvedRecord, type ClarificationBinding } from './clarification-events';
-import { ROUTE_CURRENT_TURN_TOOL_NAME } from './turn-contract';
 import { extractCurrentMessageBody, hostContextMetadataOf, normalizeMessageReference } from './message-reference';
 
 /**
@@ -126,15 +125,13 @@ export function extractDelegationToolResultEvents(
   for (const [index, message] of messages.entries()) {
     const item = message as { role?: string; toolName?: string; toolCallId?: unknown; content?: unknown; timestamp?: unknown };
     if (item.role !== 'toolResult') continue;
-    if (item.toolName !== taskToolName && item.toolName !== ROUTE_CURRENT_TURN_TOOL_NAME) continue;
+    if (item.toolName !== taskToolName) continue;
     let content = messageText(item.content);
     // The tool result is usually a JSON envelope. Keep only its user-facing text field.
     let taskId: string | undefined;
     try {
       const parsed = JSON.parse(content) as { text?: unknown; recorded?: unknown; taskId?: unknown };
       if (typeof parsed?.text === 'string') content = parsed.text;
-      // A plain conversation declaration carries no result worth recalling later.
-      else if (parsed?.recorded === 'conversation') continue;
       if (typeof parsed?.taskId === 'string' && parsed.taskId) taskId = parsed.taskId;
     } catch { /* A plain natural-language result is already safe to reduce below. */ }
     content = redactInternalIds(redactSensitiveText(content)).slice(0, 20_000);

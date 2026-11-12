@@ -91,7 +91,9 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 中性，实例称谓由部署层按 profile 声明）。deps 一字段 + 工厂内一次构造（恢复路径复用
  * 同一份，无第二构造点）。+3，后续抽取时照旧只减不增。
  * （以上历史条目里的 SYSTEM_PROMPT / buildSystemPrompt / DATE_SUFFIX 符号随
- * system-prompt.ts 在 2026-11-12 Track D 删除而退役；条目按史实保留。）
+ * system-prompt.ts 在 2026-11-12 Track D 删除而退役；条目按史实保留。
+ * 2026-11-12 申报层正式删除：本条提到的 routeReceipt 标记、repeat-request 复核判据
+ * 与 RESUMED_DECLARATION_FALLBACK 回退均已退役；条目按史实保留。）
  *
  * 1337 → 1222（2026-11-12，Track D：Main 角色指令换源 + A/B 注入缝 + read_skill 接线）。
  * 本批净 +53 行（+70/−17）：角色文本改从 `.agents/agents/fshine-main/agent.md` 装配
@@ -113,8 +115,19 @@ const RUNTIME_PATH = join(SRC_DIR, 'runtime.ts');
  * 逐项：import 3 + 工具面注册 4 + resend 分支 22 + taskId 守卫 9 + task_control 记账 1
  * + 在册任务计数/RR1 事实 26 + decideTurnExit 透传 3 + 注释与措辞同步 3 ≈ +71。
  * 下一批抽取时照旧只减不增。
+ *
+ * 1201 → 1256（2026-11-12，申报层正式删除 + 用户裁定三项收口）。净 +55：
+ *   · 删除（−）：D-144 整段申报替换接线（declarationFallback 链）、申报再导出与
+ *     相关注释更新 ≈ −10；
+ *   · 收口（+，三件均为**功能新增非抽取**、判定本体外置）：G3 恢复路径实体来源
+ *     fail-closed（inline 快照读回 + 无快照拒绝 + 后台窄重建的注入点）≈ +30；
+ *     RR1 窄门（requestKey 精确身份读取 + inconclusive 留痕）≈ +28；resend 同回合
+ *     互斥守卫 ≈ +7。判据本体分别在 turn-contract.ts（asPlanEntitySources）、
+ *     background-runtime.ts（窄重建）、turn-exit.ts（替换决策）、runtime-messages.ts
+ *     （互斥话术）——runtime 只做接线与事实读取。
+ * 常数按本批后的真实行数落到 1256（此前余量已在上一波清零，本批是真实净增）。
  */
-const RUNTIME_LINE_BUDGET = 1201;
+const RUNTIME_LINE_BUDGET = 1256;
 
 /**
  * import / export 语句：`(import|export) [type] <子句> from './xxx'`。

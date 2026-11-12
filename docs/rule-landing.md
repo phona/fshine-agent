@@ -10,15 +10,17 @@
 > **维护规则**：新增任何规则前先在这里登记落点；提示词里不允许出现本表之外的新规则。
 > 落点失效（代码重构、SKILL 改写）时同步改本表，不要只改一侧。
 
+> **状态总注（2026-11-12，申报层正式删除）**：申报工具 `route_current_turn` 与其解析/复核/退回层已在 `arch/direct-tool-final` 整体删除（工具/解析/退回/申报状态字段/提示词全删，待开 PR；见 decision-log 2.7–2.9）。本文中所有「申报」「route_current_turn」「申报契约 N 字段」的规则、Phase 记录与事故复盘自此均为**史实**：它们描述删除前的机制与当时的落点；①–⑥ 相关落点（长期记忆 / 历史检索 / 语义投影 / 台账注入，含 `reference-evidence.ts`、`context-state.ts`、`execution-facts.ts`）也已在更早的删除批落地，同样按史实读。**现行协议** = Main Agent 直接调用执行层委派工具（缺省 `run_task`），普通回合直接文本回复。仍在服役的规则只有：实体范围守卫（C6/C20，`validatePlanEntities`）、出口执行痕迹与协议材料门（C4 及 F4 族）、resend 直连工具、任务记录/授权/幂等/结果校验。新代码不要再按本文的申报层落点写。
+
 ## 1. 代码保证（确定性断言）
 
 | # | 规则 | 落点 |
 |---|---|---|
 | C1 | （Phase 4 起删除）申报层实体证据校验随契约瘦身取消——实体范围守卫完全后移到计划层 C20；申报层只剩结构校验（C3） | 历史落点 `validateTurnDeclarationEvidence` 已删除；现由 C20 全权负责 |
 | C2 | （Phase 4 起删除）referenced 分支随 8 字段契约取消。指代消解改为：宿主申报前注入证据（C18）→ 模型把实体加工进 request → 计划层 C20 逐字校验实体来源 | 现由 C18+C20 组合保证 |
-| C3 | 自相矛盾申报退回模型重填，不消耗用户澄清轮次。Phase 4 后唯一检查：delegate 的 request 必须非空（把用户请求加工成自包含的一句话） | `turn-contract.ts` `isSelfContradictoryDeclaration` + `runtime.ts` 路由处 |
-| C4 | 申报 platform_query 但零执行（无激活计划、无平台调用、无待确认计划）→ 不外发财务结论 | `packages/agent/src/runtime.ts` 出口校验（`delegate_without_execution`） |
-| C5 | Main Agent 跳过申报 → 重试一次，仍跳过则失败关闭，丢弃自由文本 | `runtime.ts`（`route_declaration_missing`） |
+| C3 | （**已删除**，2026-11-12）自相矛盾申报退回模型重填——申报层删除后无对象；直连委派只有 request / taskId 两个参数，空 request 由宿主入口拒绝 | 历史落点 `turn-contract.ts` `isSelfContradictoryDeclaration` 已删除；当前守卫是 `context.ts` 的 `TASK_REQUEST_EMPTY`（直连入口） |
+| C4 | 委派零执行（无激活计划、无平台调用、无待确认计划）→ 不外发数据结论（原「申报 platform_query 但零执行」的申报枝已删除；门读 `turn.intent` 的委派事实） | `packages/agent/src/runtime.ts` 出口校验（`delegate_without_execution`） |
+| C5 | （**已删除**，2026-11-12）「Main Agent 跳过申报 → 重试一次 → 失败关闭」——直连下不存在「跳过申报」这个动作：不调工具就是普通回合，模型文本即回复 | 历史落点 `runtime.ts` 的 `route_declaration_missing` 重试段已删除；回归锚点 `direct-delegation.test.ts` D4 |
 | C6 | ~~账套存在性查询的计划必须且只能是一次 `finance.search-account-sets`，关键词在申报范围内~~ → 计划实体来源校验：每个 call 的 args 里所有字符串（`-` 开头的 flag 除外）必须能在「当前消息 / 检索证据 / 本轮平台响应 / 本会话已确立实体」里逐字找到 | `packages/agent/src/turn-contract.ts` `validatePlanEntities`（宿主不再判别操作与任务类型的匹配，该项归 执行层 `src/execution/plan.js` `PLAN_CALL_MISMATCH` + 执行层查询 SKILL.md） |
 | C7 | ~~余额计划只能调 `finance.query-receivables`；不得夹带凭证查询~~ → 同上（操作匹配归执行层；实体越权仍由 C20 挡下） | 同 C6 |
 | C8 | ~~余额计划不得越权（账套/客户/期间逐次包含判定）；未申报期间时禁止带 `--period`~~ → 同上（"不得带未申报期间"归执行层 SKILL 与平台参数校验） | 同 C6 |
@@ -38,7 +40,7 @@
 | C21a | 同任务内计划被拒的收敛保护：连续被拒超过 5 次即 terminal block（PLAN STOP，让 worker 停止重提、向用户说明缺什么）。计划被拒是确定性信号，反复重提只空转预算——实测 D1 类请求（派生期间）曾空转 5 分钟后 executor 崩溃 | `pi-coding-driver.ts` `MAX_DECLINED_PLANS_PER_TASK` |
 | C22 | 委派结果带 `needs` 时宿主**不 terminate 整轮**：把线索（缺什么 / 为什么 / 建议用户提供什么 + taskId + continueTaskId 重派提示）作为工具结果交还 Main Agent，由其继续本回合——能自己补（实体只从当前消息 / 检索证据 / 本轮平台响应取）就重新申报 delegate（带 continueTaskId 与补齐后的 request），不能补就申报 conversation 转达用户；任务记录保持可续（worker 转录落库，taskId 已知会宿主侧）；单回合回路有上限，超限把线索转达用户而非失败 | `runtime.ts` delegate 分支：`delegation_needs` 埋点；转达文本 `turn-relay.ts` `renderNeedsToolResult` / `renderNeedsUserText`；回路上限 `turn-state.ts` `MAX_NEEDS_ROUNDS` + `noteNeedsRound`；转达用户用 `renderNeedsUserText`（零内部机制字样） |
 | C23 | 出口校验（C4 的 Phase 5 修订）：`delegate` + 无执行 + 无 pending + **无 needs 回路进行中** → 才走 `delegate_without_execution` 兜底；needs 回路进行中时，Main Agent 转达用户的文本即本轮回复（不叠加"本轮没有真正查到平台数据"注脚），但**含数字结论仍须本轮有执行痕迹**——回路本身不是执行痕迹 | `runtime.ts` 出口校验（needs 轮次计数规则住 `turn-state.ts` `noteNeedsRound`；转达文本住 `turn-relay.ts`）：`needsLoop` / `needsRelay` / `needs_loop_relayed` 埋点 |
-| C24 | 计划模式协议（roadmap Phase 6）：delegate 的 request 以「第N/M步：」开头 = 多步拆解的第 N 步（共 M 步）；**无前缀 = 单步模式，行为与 Phase 5 之前完全一样**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent 继续下一步或申报 conversation 汇总。前缀由宿主用正则**机械**解析（`plan-steps.ts`），不做任何业务匹配；非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀没有正文）按单步处理——协议层 fail-open，fail-closed 仍在出口校验 | `plan-steps.ts` `PLAN_STEP_PREFIX_PATTERN` / `parsePlanStep` + `runtime.ts` delegate 分支；协议教学在 `ROUTE_CURRENT_TURN_TOOL.description`（**契约仍 3 字段，一个都没加**） |
+| C24 | 计划模式协议（roadmap Phase 6）：delegate 的 request 以「第N/M步：」开头 = 多步拆解的第 N 步（共 M 步）；**无前缀 = 单步模式，行为与 Phase 5 之前完全一样**（结果 terminate 成本轮回复）；有前缀 = 该步结果不 terminate，作为工具结果交还 Main Agent 继续下一步或汇总。前缀由宿主用正则**机械**解析（`plan-steps.ts`），不做任何业务匹配；非法前缀（第 0 步 / 共 0 步 / N>M / 只有前缀没有正文）按单步处理——协议层 fail-open，fail-closed 仍在出口校验 | `plan-steps.ts` `PLAN_STEP_PREFIX_PATTERN` / `parsePlanStep` + `runtime.ts` delegate 分支；协议教学随申报层删除（原在 `ROUTE_CURRENT_TURN_TOOL.description`），现由委派工具描述与编排 skill 承载，前缀解析一字未动 |
 | C25 | 计划模式的步骤 2..M 经 `continueTaskId` 在上一步返回的同一个 执行层子任务内续跑（宿主透传为 taskId）：平台累计账本因此跨步累积，闸口看到的是全局重量（架构 §8"重计划不重置累计用量"的落地）。宿主不强制该字段——与 request 加工同属模型侧，协议在工具描述里教 | `runtime.ts` 委派参数透传 + `turn-contract.ts` continueTaskId 说明；e2e `turn-loop-plan-steps.test.ts` 6.1/6.2 断言三步 taskId 相同、账本调用数跨步累积 |
 | C26 | 任务计划状态（架构 §2 第 6 条）：计划模式每步委派前 append `started` 事实（含 request/stepIndex/totalSteps），委派结果回来后按步补 `done`/`failed`/`needs` 终态事实，**taskId 写进该步的最后一条事实**（事前不知、事后回填）；停在用户确认门的步骤不写终态（投影保持 started，计划"打开"可跨回合续跑）。planId 由宿主在计划模式第一步生成（`plan_${requestId}`），同一拆解的所有步共享；跨回合续跑的计划绑定按 C31 的优先级机械判定（`openPlans` 候选召回，`latestOpenPlan` 是其便捷形式）。状态只取宿主持机械可验证的信号：needs→needs、有执行痕迹→done、两者皆无→failed——**"这一步业务上成没成"由 Main Agent 汇总如实呈现，宿主不猜**。存储不可用/未注入 = 不落计划状态，功能降级但不报错 | `plan-binding.ts` `resolvePlanBinding`（① 同回合已定的短路仍在 `runtime.ts` 调用点）+ `plan-facts.ts` `createPlanFactWriter` / `planStepSummary` + deps `taskPlans?: TaskPlanRepo`；事实与投影契约在 `packages/contracts/src/store.ts`（并行 stream），SQLite 实现在 `packages/core/src/store.ts` |
 | C27 | 计划模式通知前缀：该步委派过程中平台计划门产出的 notify 文本，交付用户时加「第 N/M 步」前缀，让用户看到拆解的全局进度。前缀插在固定标记「计划通知：」**之后**——渠道适配器与 e2e 替身都按该标记识别通知帧；步骤标签由 runtime 从协议前缀解析，经委派参数 `stepLabel` 透传，宿主不进 Main Agent 工具 schema、不进 worker 提示词 | `runtime.ts` 委派参数 + `context.ts` `withStepLabel`（包装 `ctx.trusted.onNotice`）+ `plan-runtime.ts` `PLAN_NOTICE_PREFIX`；e2e 6.1 断言 `sdk.noticeTexts()` 含"第 1/3 步" |
@@ -77,9 +79,9 @@
 |---|---|---|
 | 1 | 当前日期注入（2026-10-17 起移至系统提示词**尾部**：prompt cache 按前缀逐字节命中，动态内容前置会跨天炸掉全部稳定前缀） | 定义 `system-prompt.ts` `DATE_SUFFIX`，尾部拼装 `runtime.ts`（主/恢复两条路径）；行为不变 |
 | 2 | 身份：面向用户的主 Agent（D-001 关账，2026-10-16 docs-reality 对账守卫核实） | 提示词（框架，`system-prompt.ts`） |
-| 3 | 每回合先申报 `route_current_turn`（conversation / delegate / resend），字段口径以工具说明为准 | 提示词（协议）；细则在工具描述（四字段契约 kind/request/continueTaskId/artifactRef，resend 枝 2026-10-20 产物库波新增；Phase 6 起含计划模式协议，见 C24） |
-| 4 | delegate 委派机制 + request 加工要求（指代解析成实体、实体只从当前消息或宿主注入的检索证据取）+ 不得凭历史或常识编造实体 / 不得重放旧答复 + 子 Agent 执行不了时退回"缺什么"线索：能补齐就带 continueTaskId 重派，补不齐转告用户 | 提示词（原则）；执行由 C4/C23 保证；实体越权由 C20 挡下；回路控制流由 C21/C22 保证 |
-| 5 | 内部机制不外泄（route_current_turn/宿主/委派/PLAN/taskId 等字样） | 提示词（原则）；注脚泄漏另由 C16 兜底 |
+| 3 | （**已删除**，2026-11-12）原「每回合先申报 `route_current_turn`（conversation / delegate / resend）」——直连后无申报层：Main Agent 直接调用执行层委派工具（缺省 `run_task`，schema 只有 request / taskId），普通回合直接文本回复 | 提示词（协议）；委派工具 schema 是唯一契约面；不再有申报工具与申报字段 |
+| 4 | delegate 委派机制 + request 加工要求（指代解析成实体、实体只从当前消息或宿主注入的检索证据取）+ 不得凭历史或常识编造实体 / 不得重放旧答复 + 子 Agent 执行不了时退回"缺什么"线索：能补齐就带 taskId 重派，补不齐转告用户 | 提示词（原则）；执行由 C4/C23 保证；实体越权由 C20 挡下；回路控制流由 C21/C22 保证 |
+| 5 | 内部机制不外泄（宿主/委派/PLAN/taskId 等字样） | 提示词（原则）；注脚泄漏另由 C16 兜底 |
 | 6 | 能力边界：查询/核对/分析 + 经确认的录入类写；修改或删除已保存数据、不可逆高危写一律拒绝 | 提示词（产品能力，Phase 3 改为领域无关表述，能力边界本身不变） |
 | 7 | 待确认变更提案转达协议（对象/范围/条目数/金额合计/确认码 + 确认取消话术，不代替执行） | 提示词（协议）；执行由 C13 保证 |
 | 8 | 口径必须可履行，不可履行选 conversation 回复并说明能力边界（clarify 种类已随契约取消） | 提示词（原则） |

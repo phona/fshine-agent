@@ -157,6 +157,14 @@ describe('Main 角色指令装配（Profile 为唯一事实源）', () => {
         text: '对象甲 202608 应收余额 42 元。',
         execution: { planId: 'plan_1', version: 1, calls: 1 },
       })),
+      // G3：inline 恢复必须携带任务条目的来源快照（缺快照 = 拒绝恢复）
+      platformTasks: {
+        listBySession: async () => [{
+          taskId: 'task_r', parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+          workerMessages: [], createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+          entitySources: { currentMessage: '继续原计划' },
+        }],
+      },
     });
 
     const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_profile_resume', resumeTaskId: 'task_r' }), '确认继续');

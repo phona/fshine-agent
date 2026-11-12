@@ -317,29 +317,15 @@ export function usageFieldsOf(messages: readonly DriverMessage[]): Record<string
 
 /** 工具失败的确定性终结错误:message 是面向用户的安全话术,直接作为最终回复(driver 不得再喂给模型) */
 export class ToolUserError extends Error {
-  /**
-   * route_current_turn 的终结是否发生在委派已经开始之后。
-   *
-   * 这是宿主内部的转录元数据，驱动会把它放进 toolResult.details；不进入用户可见文本。
-   * 未标记的 ToolUserError 表示前置拦截或其他宿主错误。
-   */
-  delegationCompleted = false;
-  /** Host receipt kind persisted into the tool result; background acceptance is not execution proof. */
-  readonly routeReceipt?: 'delegate' | 'precondition' | 'background';
   /** 错误码（挂码修复：委派失败分类等码级判据依赖此字段）。 */
   code?: string;
 
   constructor(message: string, options?: {
-    delegationCompleted?: boolean;
-    routeReceipt?: 'delegate' | 'precondition' | 'background';
     code?: string;
   }) {
     super(message);
     this.name = 'ToolUserError';
     this.code = options?.code;
-    this.routeReceipt = options?.routeReceipt
-      ?? (options?.delegationCompleted === true ? 'delegate' : undefined);
-    this.delegationCompleted = this.routeReceipt === 'delegate' || options?.delegationCompleted === true;
   }
 }
 

@@ -12,10 +12,10 @@
  *      用户确认门时，模型的自由文本不能直接外发。门内再分两支：needs/计划模式转达
  *      （relayed || needs 线索 || 步骤事实汇总）与确定性话术收尾（activatedPlan → 干净
  *      说明附注 → NO_EXECUTION_CLARIFICATION，今天它们是提前返回）。
- *   ①b 重复提问门（RR1，2026-11-12 补齐）：模型没调委派工具、直接凭历史作答时 ① 没有
- *      信号；本会话有在册任务 + 本回合零委派零执行 + 回复带数字结论 → 历史答复不得冒充
- *      实时（确定性话术替换）。判据是宿主事实，不是文本异同；task_control 显式状态查询
- *      豁免。
+ *   ①b 重复提问门（RR1，2026-11-12 收窄）：模型没调委派工具、直接凭历史作答时 ① 没有
+ *      信号；只有"本轮请求与此前**已执行过的请求完全同身份**"（requestKey 逐字相等）+
+ *      本回合零委派零执行 + 回复带数字结论时才替换（确定性话术）。判据是宿主事实，不是
+ *      措辞相似；task_control 显式状态查询豁免；读不到身份（inconclusive）不拦也不判绿。
  *   ② 协议复读门（D-020 / F4 残留）：模型把内部协议材料原样当回复。判据**不依赖
  *      execution**——真有过执行的回合同样要拦，所以它是独立于 ① 的第二段；顶上的文本与
  *      ① 同一家族（步骤事实汇总 / needs 线索 / NO_EXECUTION_CLARIFICATION）。
@@ -54,8 +54,8 @@ export interface TurnExitInput {
   pendingPlan: boolean;
   /** 模型这一轮的结果是否停在用户确认门（result.pendingPlan 的真值）。 */
   resultPendingPlan: boolean;
-  /** 本回合申报的动作（null = 没有申报）。 */
-  intentKind: 'conversation' | 'delegate' | 'resend' | null;
+  /** 本回合的委派事实（null = 模型没有调用过委派工具）。 */
+  intentKind: 'delegate' | null;
   /** Host-registered background dispatch. Acceptance must not be mistaken for execution. */
   backgroundStarted: boolean;
   backgroundTaskId: string | null;
@@ -78,8 +78,14 @@ export interface TurnExitInput {
   activatedPlan: { planId: string; version: number } | null;
   /** 模型文本是不是内部协议材料的复读（判据本体 looksLikeProtocolMaterial 在 runtime.ts）。 */
   protocolReplay: boolean;
-  /** 本会话在册的平台任务数（宿主事实；0 = 没有在册任务，RR1 门不开）。 */
-  sessionTaskCount: number;
+  /**
+   * RR1 精确身份事实（宿主从平台任务底账读出，runtime.ts 提供）：
+   *   · 'match' = 本会话已执行过的请求里有一条与本轮**完全相同**（requestKey 逐字相等）；
+   *   · 'none' = 没有（不能据此拦）；
+   *   · 'inconclusive' = 读不到（辅助存储失败/未注入）——既不当作已验证通过、也不据此
+   *     阻断普通聊天（runtime 侧已记 inconclusive 事件，可观测）。
+   */
+  repeatIdentity: 'match' | 'none' | 'inconclusive';
   /** 本回合是否调用过 task_control（显式状态查询：其答复本就来自宿主状态面，RR1 门豁免）。 */
   taskControlUsed: boolean;
   /** 模型这一轮的回复文本（result.text）。 */
@@ -222,21 +228,22 @@ export function decideTurnExit(input: TurnExitInput): TurnExitDecision {
     }
   }
 
-  // ①b 历史答复不等于当前授权（RR1，2026-11-12 补齐）：模型**没有调用委派工具**、直接
-  // 凭历史作答时，上面 ① 的执行痕迹门没有信号——但本会话有在册任务、本回合零委派零执行
-  // （intentKind === null 且无 execution/pendingPlan），回复却带数字结论，这正是"拿历史
-  // 结果冒充实时结果"的形状。判据三条全是宿主事实（在册任务数、本轮执行痕迹、本轮委派
-  // 事实），不以文本异同为依据；同文但本轮真执行（execution 或 intentKind 在场）必然到
-  // 不了这里。显式状态查询（task_control）豁免：用户问"任务到哪了"时答复来自宿主状态面，
-  // 不需要重新执行。审计（RR1/RR3）与配置见 commit message。
+  // ①b 历史答复不等于当前授权（RR1，2026-11-12 收窄）：模型**没有调用委派工具**、直接
+  // 凭历史作答时，上面 ① 的执行痕迹门没有信号。只有"本轮请求与此前某次**已执行过的请求
+  // 完全相同**"（requestKey 逐字相等，宿主从任务底账读出 → repeatIdentity='match'）、
+  // 本回合零委派零执行、回复又带数字结论时，才判定为"把历史结果冒充本轮结果"并替换。
+  // 改写过的问句 = 不同身份，不拦（普通聊天不被阻断；不新增业务语义分类器）。
+  // task_control 显式状态查询豁免：用户问"任务到哪了"时答复来自宿主状态面，不需要重新执行。
+  // repeatIdentity 的 'none'/'inconclusive' 都不触发本支——读不到不是"已验证通过"（调用点
+  // 记 inconclusive 事件），更不是拦人的依据（用户裁定：不据此阻断普通聊天）。
   if (!input.delegationFailed && !input.execution && !input.pendingPlan && !input.resultPendingPlan
     && input.intentKind === null && !input.needsLoop && !input.planModeTurn && !input.backgroundStarted
     && !input.taskControlUsed && !input.protocolReplay
-    && input.sessionTaskCount > 0 && input.hasFinancialFigure(explained)) {
+    && input.repeatIdentity === 'match' && input.hasFinancialFigure(explained)) {
     events.push({
       level: 'warn',
       event: 'repeat_without_execution',
-      detail: { tasksInSession: input.sessionTaskCount },
+      detail: { identity: 'request_key' },
     });
     return { kind: 'direct', text: REPEAT_WITHOUT_EXECUTION, outcome: 'repeat_without_execution', events };
   }

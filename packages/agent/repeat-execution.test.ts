@@ -1,24 +1,27 @@
 /**
- * 重复提问 / 历史答复不得冒充实时（RR1–RR4 的验收锚点，2026-11-12 补齐）。
+ * 重复提问 / 历史答复不得冒充实时（RR1 窄门，2026-11-12 收窄后的验收锚点）。
  *
- * 背景：直连改造删掉了强制申报，模型不调用委派工具、直接凭历史作答时，出口的执行痕迹门
- * （delegate_without_execution）没有信号——类 3 的确定性缺口。本文件钉住补齐后的判据：
- *   RR1 本会话有在册任务 + 本回合零委派零执行 + 回复带数字结论 → 确定性话术拦下；
- *       判据是"本回合有没有执行"，不是文本异同；同文但真执行 → 放行（RR2 一并覆盖）；
- *   RR2 去重只认 messageId / dispatchKey，不认文本：两个独立请求 = 两次真执行，
- *       第二次回复来自第二次执行（宿主层不复用旧 run）；
- *   RR3 误伤边界：无任务记录的会话、不含数字结论的回复、task_control 显式状态查询
- *       都不触发任何改写；
- *   RR4 三层幂等的既有回归锁：消息级 messageId（tests/e2e/turn-loop-interactive.test.ts）、
- *       任务级 dispatchKey（packages/agent/task-manager.test.ts）、同任务活跃期拒绝
- *       （同上）——本文件不重复实现，只做运行时侧的"新请求必然新执行"锚点。
+ * 收窄裁定（用户裁定 1）：
+ *   · 旧判据（宽，已删除）：本会话有在册任务 + 本回合零委派零执行 + 回复带数字结论 →
+ *     一律替换。它不区分"用户把同一请求再发一遍"与"用户换了个说法问同一个话题"。
+ *   · 新判据（窄）：只有**当前请求与此前已执行过的请求完全同身份**（requestKey 逐字相等，
+ *     requestKey = 归一化正文 + 引用指纹的稳定哈希）、且本回合零委派零执行、回复带数字
+ *     结论时，才把历史答复替换掉——不允许把历史结果冒充本轮结果。
+ *   · 改写过的问句 = 不同身份 → 不拦（那是普通聊天，由模型如实作答；不新增业务语义分类器）。
+ *   · 同文但本轮真执行（execution / 委派工具调用在场）→ 必然放行。
+ *   · 辅助存储（platformTasks.listBySession）读取失败或未注入 → 记录 inconclusive 事件，
+ *     既不当作已验证通过、也不据此阻断普通聊天。
+ *   · messageId 去重与 dispatchKey 幂等是既有机制，不因本门改变（RR2 锚点）。
+ *
+ * RR3 误伤边界：无记录 / 无数字结论 / task_control 显式状态查询 / 协议复读都不触发改写。
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { PlatformTaskRecord, TrustedContext } from '@fshine/contracts';
 import { messageTextFor } from './src/error-codes';
 import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
-import { ScriptedTurnDriver, ToolUserError, type TurnDriver } from './src/driver';
+import { ScriptedTurnDriver, type TurnDriver } from './src/driver';
 import { createTaxAgentRuntime } from './src/runtime';
+import { buildRequestKey } from './src/repeat-request';
 import { FakeSessionRepo } from './test-helpers';
 
 const REPEAT_TEXT = messageTextFor('REPEAT_WITHOUT_EXECUTION');
@@ -34,17 +37,21 @@ function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
   };
 }
 
-/** 本会话在册任务的事实源（RR1 门的唯一会话语义输入）。 */
-function platformTasksWith(count: number) {
-  const records: PlatformTaskRecord[] = Array.from({ length: count }, (_, index) => ({
+/**
+ * 实体范围来源快照的记录替身：requestKey 是"此前已执行请求"的精确身份。
+ * 契约层 PlatformTaskRecord 的 requestKey 字段随本批新增（老记录缺省 = 不可精确匹配）。
+ */
+function platformTasksWith(records: ReadonlyArray<{ requestKey?: string }>): { listBySession: ReturnType<typeof vi.fn> } {
+  const list = records.map((record, index) => ({
     taskId: `task_existing_${index + 1}`,
     parentSessionId: 'sess_1',
     principalId: 'wecom:user_a',
     workerMessages: [],
     createdAt: '2026-11-12T00:00:00.000Z',
     updatedAt: '2026-11-12T00:00:00.000Z',
-  }));
-  const listBySession = vi.fn(async (): Promise<PlatformTaskRecord[]> => records);
+    ...(record.requestKey ? { requestKey: record.requestKey } : {}),
+  })) as unknown as PlatformTaskRecord[];
+  const listBySession = vi.fn(async (): Promise<PlatformTaskRecord[]> => list);
   return { listBySession };
 }
 
@@ -61,8 +68,9 @@ function captureWarnEvents(eventName: string): { events: Array<Record<string, un
   return { events, restore: () => spy.mockRestore() };
 }
 
-describe('RR1 历史答复不得冒充实时（宿主事实判据，不看文本异同）', () => {
-  it('有在册任务 + 零委派零执行 + 回复带数字 → 确定性话术拦下，零平台调用', async () => {
+describe('RR1 窄门：只有与已执行请求完全同身份才做事实保护（不看措辞相似）', () => {
+  it('同身份 + 零委派零执行 + 数字结论 → 确定性话术拦下，零平台调用', async () => {
+    const question = '把上次的应收余额再告诉我一遍';
     const run = vi.fn(async (): Promise<SubagentTaskResult> => ({ taskId: 'task_never', text: '不应被调用' }));
     const audit = captureWarnEvents('repeat_without_execution');
     try {
@@ -70,45 +78,107 @@ describe('RR1 历史答复不得冒充实时（宿主事实判据，不看文本
         driver: ScriptedTurnDriver([{ text: '上次查到的应收余额是 61000 元。' }]),
         sessions: new FakeSessionRepo(),
         platformTask: subagent(run),
-        platformTasks: platformTasksWith(1),
+        platformTasks: platformTasksWith([{ requestKey: buildRequestKey(question) }]),
       });
 
-      const reply = await runtime.handleTurn(makeCtx(), '把上次的应收余额再告诉我一遍');
+      const reply = await runtime.handleTurn(makeCtx(), question);
 
       expect(reply.text).toBe(REPEAT_TEXT);
       expect(reply.text).not.toContain('61000');
       expect(run).not.toHaveBeenCalled();
       expect(audit.events).toHaveLength(1);
-      expect(audit.events[0]).toMatchObject({ requestId: 'req_repeat', tasksInSession: 1 });
+      expect(audit.events[0]).toMatchObject({ requestId: 'req_repeat' });
+      // 事件只陈述"命中精确身份"，不把任务数当判据（旧 detail 的 tasksInSession 已退役）
+      expect(audit.events[0]).not.toHaveProperty('tasksInSession');
     } finally {
       audit.restore();
     }
   });
 
-  it('改写过的问句同样触发（判据不是文本相同；同一事实对任何措辞都成立）', async () => {
-    for (const question of ['刚才那个数是多少来着？', '应收账款现在什么情况？']) {
-      const runtime = createTaxAgentRuntime({
-        driver: ScriptedTurnDriver([{ text: '应收余额 61000 元。' }]),
-        sessions: new FakeSessionRepo(),
-        platformTask: subagent(),
-        platformTasks: platformTasksWith(2),
-      });
-      const reply = await runtime.handleTurn(makeCtx({ requestId: `req_${question.length}` }), question);
-      expect(reply.text, question).toBe(REPEAT_TEXT);
-    }
+  it('改写过的问句（不同身份）不拦：会话有在册任务也照常放行', async () => {
+    // 收窄的核心：旧宽判据在这里会替换（本会话有任务 + 零委派 + 数字），
+    // 新窄判据要求 requestKey 逐字相等——改写 = 不同身份。
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: '应收余额 61000 元。' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey('查一下幻东的应收账款余额') }]),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx(), '刚才那个数是多少来着？');
+
+    expect(reply.text).toBe('应收余额 61000 元。');
+  });
+
+  it('同文但引用指纹不同 → 不同身份，不拦（requestKey 含引用身份）', async () => {
+    const question = '查一下幻东的应收账款余额';
+    const priorQuote = { kind: 'text' as const, text: '幻东账套' };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: '应收回款 61000 元。' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey(question, { messageReference: priorQuote }) }]),
+    });
+
+    const reply = await runtime.handleTurn(makeCtx(), question);
+
+    expect(reply.text).toBe('应收回款 61000 元。');
   });
 
   it('同文但本轮真执行（run_task + 执行痕迹）→ 放行', async () => {
+    const question = '把上次的应收余额再告诉我一遍';
     const runtime = createTaxAgentRuntime({
       driver: ScriptedTurnDriver([{ toolCalls: [{ tool: 'run_task', args: { request: '查询幻东的应收账款余额' } }] }]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(async () => ({ taskId: 'task_fresh', text: '幻东 202609 应收余额为 61000 元。', execution: { planId: 'plan_1', version: 1, calls: 1 } })),
-      platformTasks: platformTasksWith(1),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey(question) }]),
     });
 
-    const reply = await runtime.handleTurn(makeCtx(), '把上次的应收余额再告诉我一遍');
+    const reply = await runtime.handleTurn(makeCtx(), question);
 
     expect(reply.text).toContain('61000');
+  });
+
+  it('辅助存储读取失败：不替换、不阻断，只记 inconclusive 事件（可观测）', async () => {
+    const question = '把上次的应收余额再告诉我一遍';
+    const audit = captureWarnEvents('rr1_identity_inconclusive');
+    try {
+      const runtime = createTaxAgentRuntime({
+        driver: ScriptedTurnDriver([{ text: '上次查到的应收余额是 61000 元。' }]),
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(),
+        platformTasks: {
+          listBySession: vi.fn(async () => { throw new Error('storage down'); }),
+        } as never,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx(), question);
+
+      // 不能把"读不到"当成"没有重复"（不判绿），也不能据此阻断普通聊天（不替换）
+      expect(reply.text).toBe('上次查到的应收余额是 61000 元。');
+      expect(audit.events).toHaveLength(1);
+    } finally {
+      audit.restore();
+    }
+  });
+
+  it('辅助存储未注入：同样记 inconclusive、不替换', async () => {
+    const audit = captureWarnEvents('rr1_identity_inconclusive');
+    try {
+      const runtime = createTaxAgentRuntime({
+        driver: ScriptedTurnDriver([{ text: '余额大概是 500 元。' }]),
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(),
+        // 无 platformTasks 注入 = 无法建立精确身份 → 不猜
+      });
+
+      const reply = await runtime.handleTurn(makeCtx(), '余额多少？');
+
+      expect(reply.text).toBe('余额大概是 500 元。');
+      expect(audit.events).toHaveLength(1);
+    } finally {
+      audit.restore();
+    }
   });
 });
 
@@ -126,7 +196,7 @@ describe('RR2 去重不阻塞新的真实执行（新请求 = 新执行，不复
       ]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(run),
-      platformTasks: platformTasksWith(1),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey('查一下幻东的应收余额') }]),
     });
 
     const first = await runtime.handleTurn(makeCtx({ requestId: 'req_1' }), '查一下幻东的应收余额');
@@ -139,13 +209,13 @@ describe('RR2 去重不阻塞新的真实执行（新请求 = 新执行，不复
   });
 });
 
-describe('RR3 误伤边界（三要素缺一不拦）', () => {
+describe('RR3 误伤边界（缺一不拦）', () => {
   it('无任务记录的会话：带数字的闲聊原样通过', async () => {
     const runtime = createTaxAgentRuntime({
       driver: ScriptedTurnDriver([{ text: '如果按 50 元一份算，10 份就是 500 元。' }]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      platformTasks: platformTasksWith(0),
+      platformTasks: platformTasksWith([]),
     });
 
     const reply = await runtime.handleTurn(makeCtx(), '50 元一份，10 份多少钱？');
@@ -154,14 +224,15 @@ describe('RR3 误伤边界（三要素缺一不拦）', () => {
   });
 
   it('有任务记录但回复不含数字结论：原样通过（状态陈述不需要重新执行）', async () => {
+    const question = '之前那个任务怎么样了？';
     const runtime = createTaxAgentRuntime({
       driver: ScriptedTurnDriver([{ text: '之前那个任务已经完成，结果我也整理过。' }]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      platformTasks: platformTasksWith(3),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey(question) }]),
     });
 
-    const reply = await runtime.handleTurn(makeCtx(), '之前那个任务怎么样了？');
+    const reply = await runtime.handleTurn(makeCtx(), question);
 
     expect(reply.text).toBe('之前那个任务已经完成，结果我也整理过。');
   });
@@ -182,7 +253,7 @@ describe('RR3 误伤边界（三要素缺一不拦）', () => {
       driver,
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      platformTasks: platformTasksWith(2),
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey('我的任务到哪一步了？') }]),
       backgroundTasks: backgroundTasks as never,
     });
 
@@ -191,16 +262,17 @@ describe('RR3 误伤边界（三要素缺一不拦）', () => {
     expect(reply.text).toBe('后台任务清单里 2 个任务，最近一个已完成。');
   });
 
-  it('委派工具在场但模型选择不调用：任务数为 0 时不拦（没有可依据的会话事实）', async () => {
+  it('协议复读走 ② 协议复读门：不归重复提问门', async () => {
+    const question = '你好';
     const runtime = createTaxAgentRuntime({
-      driver: ScriptedTurnDriver([{ text: '余额大概是 500 元。' }]),
+      driver: ScriptedTurnDriver([{ text: '{"recorded":"conversation"}' }]),
       sessions: new FakeSessionRepo(),
       platformTask: subagent(),
-      // 无 platformTasks 注入 = 查不到在册任务 → 门不开（宁缺勿猜）
+      platformTasks: platformTasksWith([{ requestKey: buildRequestKey(question) }]),
     });
 
-    const reply = await runtime.handleTurn(makeCtx(), '余额多少？');
+    const reply = await runtime.handleTurn(makeCtx(), question);
 
-    expect(reply.text).toBe('余额大概是 500 元。');
+    expect(reply.text).not.toContain('recorded');
   });
 });

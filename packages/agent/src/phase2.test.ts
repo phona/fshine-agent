@@ -182,7 +182,7 @@ describe('tool-definition guard', () => {
       lastNeeds: null,
       activatedPlan: null,
       protocolReplay: false,
-      sessionTaskCount: 0,
+      repeatIdentity: 'none',
       taskControlUsed: false,
       resultText: '已完成：共 2 条记录，合计 61000。',
       hasFinancialFigure: (text) => /\d/.test(text),

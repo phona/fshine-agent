@@ -135,12 +135,21 @@ export interface ContextTaskRunArgs {
    */
   stepLabel?: string;
   /** Host-only semantic intent; this is never part of the Main Agent tool schema. */
-  turnDeclaration?: Extract<TurnDeclaration, { kind: 'delegate' }>;
+  turnDeclaration?: TurnDeclaration;
   /**
    * 领域无关的实体来源（宿主注入）：计划里的每个实体必须能在「当前消息 / 检索证据 /
    * 本轮平台响应 / 本会话已确立实体」里逐字找到。同样不进入 Main Agent 工具 schema。
+   *
+   * 委派时写入任务条目快照（PlatformTaskRecord.entitySources）——inline 确认后恢复的
+   * 来源由此读回；恢复调用也传它（快照原样回注），老任务无快照则拒绝恢复（G3）。
    */
   entitySources?: PlanEntitySources;
+  /**
+   * 本次委派对应的当前用户请求身份键（host-computed requestKey；见 repeat-request.ts）。
+   * 只在新委派时由 runtime 传入、写进任务条目，供 RR1 窄门做"与此前已执行请求完全
+   * 相同"的精确身份比对；续跑/恢复调用不传（保留原任务的身份，不被确认消息覆盖）。
+   */
+  requestKey?: string;
 }
 
 export interface SubagentTaskResult {
@@ -1450,6 +1459,17 @@ export function createContextTaskRunner(options: ContextTaskRunnerOptions): Cont
         workerMessages: existing?.workerMessages ?? [],
         createdAt: existing?.createdAt ?? new Date().toISOString(),
         updatedAt: new Date().toISOString(),
+        // G3：委派时的实体来源快照写进既有任务条目（单写入者 = 委派点）。恢复调用
+        // （args 带快照回注）覆盖为同一份；续跑调用不带 entitySources 时保留 existing。
+        ...(args.entitySources
+          ? { entitySources: structuredClone(args.entitySources) }
+          : existing?.entitySources
+            ? { entitySources: existing.entitySources }
+            : {}),
+        // RR1 精确身份：新委派写 requestKey；续跑/恢复不传 → 保留原任务身份。
+        ...(args.requestKey ?? existing?.requestKey
+          ? { requestKey: args.requestKey ?? existing?.requestKey }
+          : {}),
       };
       await options.tasks.upsert(running);
       const onStep = execution?.background

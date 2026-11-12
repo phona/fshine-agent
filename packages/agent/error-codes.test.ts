@@ -66,7 +66,9 @@ describe('fshine 错误码表（错误即数据）', () => {
     expect(messageTextFor('DELEGATION_CANCELLED')).toBe('子任务已取消。');
     // 模型瞬时失败档（波次C，2026-11-01）：与 executor 故障分开，如实说已自动重试。
     expect(messageTextFor('DELEGATION_MODEL_TRANSIENT_FAILURE')).toBe('模型服务瞬时中断，已自动重试仍未成功，请稍后再试。');
-    expect(messageTextFor('ROUTE_RETRY_NUDGE')).toContain('route_current_turn');
+    // G3（2026-11-12）：inline 恢复缺实体来源快照时的 fail-closed 话术（可行动）
+    expect(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING')).toContain('范围快照');
+    expect(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING')).toContain('重新');
     expect(messageTextFor('PLAN_PENDING_PERSIST_MISSING')).toBe('平台计划待确认，但宿主未配置安全持久化回调，请联系管理员。');
     // 写流程未接线的宿主配置故障话术（2026-11-08 起不再有"写未开放"合成话术：那句归因
     // 正是 D-096 记的假归因，写能不能真落地已归执行层）

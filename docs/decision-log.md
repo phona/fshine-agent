@@ -81,7 +81,7 @@
 ### 0.3 机制分类：A 类 / B 类（本次新增的核心审核纪律）
 
 - **A 类 = 模型能力补丁**。判据：它存在是因为模型**现在做不到**。
-  举例（含已删对象，状态见对应条目）：识别用户在引用历史（已删，2.5）、注入执行摘要提醒模型（已删，2.6）、强制申报回合类型（待实施，2.7）、检查回答是否遵循固定推理流程（仓内未见实现）。
+  举例（含已删对象，状态见对应条目）：识别用户在引用历史（已删，2.5）、注入执行摘要提醒模型（已删，2.6）、强制申报回合类型（已删，2.7）、检查回答是否遵循固定推理流程（仓内未见实现）。
 - **B 类 = 确定性责任**。判据：换任何模型、模型强十倍，它都必须在。
   举例：授权、幂等、任务状态机、审计、结果验证、身份隔离。
 - **审核问句**：「如果明天模型的推理和工具使用能力提高十倍，这个模块还需要存在吗？」
@@ -179,9 +179,9 @@
 | 2.4 ④ | context-state / context-extractor / context-model | 在 PR #54（draft） |
 | 2.5 ⑤ | reference-evidence | 在 PR #54（draft）；同对象另有 #51 的「修复而非删除」竞争草案（两案未合并，权威裁定是删除） |
 | 2.6 ⑥ | execution-facts | 在 PR #54（draft） |
-| 2.7 ⑦ | route_current_turn 申报层 1+2 | 待实施 |
-| 2.8 ⑧ | protocol-material | 待实施 |
-| 2.9 ⑨ | step-text 的 INTERNAL_TOOLS 抑制 | 在 PR #54（部分：两个名字已移出）；完整删除待实施（前置 ⑦） |
+| 2.7 ⑦ | route_current_turn 申报层 1+2 | **已实施（arch/direct-tool-final，待开 PR）** |
+| 2.8 ⑧ | protocol-material | **已实施（arch/direct-tool-final，待开 PR；只删申报专属支）** |
+| 2.9 ⑨ | step-text 的 INTERNAL_TOOLS 抑制 | **已实施（arch/direct-tool-final，待开 PR）** |
 
 ### 2.1 ① history-tools（search_history / get_messages）
 
@@ -257,7 +257,8 @@
 - **理由**：A 类纪律——强制模型申报回合类型，属于「模型现在做不到/不可靠」的补丁。
 - **证据**：`turn-contract.ts` 文件头自述本文件做两件事——结构校验（`reviewRouteDeclaration`）与范围守卫（`validatePlanEntities`）；`runtime.ts` 主 Agent 工具面只注册申报工具（加后台控制 / 历史检索）；申报不合法即退回重填。
 - **保留的第 3 层**：resend 分支（`ROUTE_CURRENT_TURN_TOOL` schema 的 `artifactRef`；文件头说明产物存在性由宿主回答）与实体范围校验 `validatePlanEntities`（`turn-contract.ts`）。
-- **状态**：**待实施**。截至写入，没有任何分支或 PR 删除这两层（本地与 `origin` 分支遍历：所有分支的 `runtime.ts` 仍含 `ROUTE_CURRENT_TURN_TOOL`）。
+- **状态**：**已实施（arch/direct-tool-final，待开 PR）**（2026-11-12/13 正式删除批，按实际调用关系逐项核销）。删除对象：`turn-contract.ts` 的 `ROUTE_CURRENT_TURN_TOOL` / `ROUTE_CURRENT_TURN_TOOL_NAME` / `parseTurnDeclaration` / `inspectTurnDeclaration` / `reviewRouteDeclaration` / `isSelfContradictoryDeclaration` / `declarationShapeOf` / `REPEATED_REQUEST_RETRY`；runtime 的强制申报工具面、退回重填与申报专属重试段；`error-codes.ts` 的 `ROUTE_RETRY_NUDGE`；`turn-state.ts` 的 `declared` / `declarationRejections` / `declarationShapes` / `MAX_DECLARATION_REJECTIONS` / `noteDeclarationRejection` / `declarationRejectionsExhausted`；`TurnDeclaration` 类型收窄为 delegate 一枝（宿主内部委派管道，不进模型 schema）。保留的第 3 层：`resend_artifact` 已成直连工具（同回合互斥由 turn 状态守卫，见 §3 回归锁）、`validatePlanEntities` 与来源组装原样保留。
+- **事故证据归档（唯一权威，2026-11-12 封存）**：T9 r01 单回合 33 次 `route_declaration_invalid` 后弃权；arch-d C2 单回合 226 次 + 300s 看门狗收掉（0 轮 0 调用）；eval14 确认续跑轮整理模型把申报原文写成正文。三起事故都源于申报层自身（强制申报 + 有界退回的设计），随机制删除失去对象；对应评测面（`scripts/eval/declaration-criteria.ts`、`measure-declaration.mjs`、`declaration-host-events.test.ts`、`cases.yaml` 的 P1 条目与探针判定体）同批退役；退回收敛的实现记账（`MAX_DECLARATION_REJECTIONS = 2`）一并删除。**处置 = 封存**：不迁移实现、不保留无对象的判据；只有满足下面「加回来的判据」才重开。
 - **加回来的判据**：**不是把申报表加回来**。若删除后回归红，该加的是**宿主持有指代解析**——宿主从当前消息 + 会话事实解析指代词/实体，把已解析的请求注入委派；resend 保留为独立确定性分支。只有在「宿主无法解析、且必须由模型决定意图」时，才有理由重新要求模型产出结构化意图，且需附消融证据证明去掉申报会红、加上会绿。
 
 ### 2.8 ⑧ protocol-material
@@ -267,7 +268,8 @@
 - **对象**：`packages/agent/src/protocol-material.ts`（`isWholeReplyRouteDeclaration`、`looksLikeProtocolMaterial`）；消费者 `packages/agent/src/reply-exit.ts:21`、`:127`。
 - **理由**：纯模型失败补丁——根因是模型把申报协议当正文输出，补丁只在出口做形状识别与整段替换。
 - **证据**：`protocol-material.ts:12-25` 记录 D-144 事故（2026-10-31 确认续跑轮的整理模型把 `<function=route_current_turn>` 申报原文写成正文）；`:49-55` 为纯形状判定。
-- **状态**：**待实施**。main 上文件仍在，PR #54 未删除它（PR #54 的 diff 不含 `protocol-material.ts`）。
+- **状态**：**已实施（arch/direct-tool-final，待开 PR）**（2026-11-12 正式删除批；按实际调用关系拆分为两支）。删除的申报专属支：`protocol-material.ts` 的 `isWholeReplyRouteDeclaration` 与申报 XML/JSON 正则；`reply-exit.ts` 的 `replaceDeclarationReply`（`route_declaration_reply_replaced` 事件）与 `ReplyExitInput.declarationFallback`；`error-codes.ts` 的 `RESUMED_DECLARATION_FALLBACK`。**保留**：`looksLikeProtocolMaterial` 的 Worker 协议材料防泄漏臂（recorded/step/next、v/op 前缀——消费方 `runtime.ts` / `turn-exit.ts` 的协议复读门仍在服役，属「必须保留」清单）。删除后旧形态（整段申报、中文参数）只剩 `reply-exit` 的通用删除臂，中文参数值可能残留——按下面「加回来的判据」接受，不保留无对象的判据冒充防线。
+- **状态补充（消融边界）**：本次删除**不是**对 Worker 协议材料防泄漏的消融——那一支有独立违约测试与真实消费方；删除的只是「整段=申报」的模型失败补丁，其对象（申报工具与提示词）已随 2.7 消失。
 - **加回来的判据**：只有当出口再次出现**确定性的整段申报泄漏**；形态必须是窄形状判定（整段 XML/JSON、标签外一无所有），不做内容嗅探；先用提示词/输出格式修根因；回归用例必须是真实泄漏原文，不得用合成样例代替。
 
 ### 2.9 ⑨ step-text 的 INTERNAL_TOOLS 抑制
@@ -277,7 +279,7 @@
 - **对象**：`packages/agent/src/step-text.ts` 的 `INTERNAL_TOOLS` 集合（main 上含 `ROUTE_CURRENT_TURN_TOOL_NAME`、`search_history`、`get_messages`）。
 - **理由**：内部工具删了就没对象。
 - **证据**：`step-text.ts` 的 `INTERNAL_TOOLS` 定义；PR #54 的 `step-text.ts` diff 把名单收窄为只剩 `ROUTE_CURRENT_TURN_TOOL_NAME`，并删掉 `search_history` / `get_messages` 两个名字（`gh pr diff 54` 的 `step-text.ts` 段可复核）。
-- **状态**：**在 PR #54（部分）**——两个已删工具的名字被移出名单；**完整删除待实施**，前置是 ⑦：`route_current_turn` 今天仍是内部工具，抑制表仍有对象。main 上三名字俱在。
+- **状态**：**已实施（arch/direct-tool-final，待开 PR）**（2026-11-12 正式删除批）。`step-text.ts` 的 `INTERNAL_TOOLS` 集合、`defaultStepText` / `renderToolStepText` 里的成员检查、对 `ROUTE_CURRENT_TURN_TOOL_NAME` 的 import、`PROGRESS_LEAK_MARKERS` 的 `route_current_turn` 词条整体删除；`renderToolStepText` 不再有 `null` 分支（工具面只剩用户可见动作类工具，恒出帧）。**保留**：通用进度卫生（短语长度上限、协议特征丢弃、服务器路径丢弃）与 `pi-driver.ts` 的 onStep 接线。`platform-leak-lint` 白名单里的三个内部工具名（`search_history` / `get_messages` / `route_current_turn`）同批移除（白名单只减不增）。
 - **加回来的判据**：不是「加回抑制表」，而是：任何**新内部工具**进入主工具面时，必须同时登记到抑制表并附「工具名零上屏」断言（含模型自填短语路径）；若主工具面只剩模型工具，则整表与 `null` 分支一起删除，不保留空壳。
 
 ---
@@ -332,13 +334,14 @@
 
 ### 3.5 repeat-request
 
-- **决定**：保留「重复的同一句话是新授权、不是缓存命中」的机械复核。
-- **日期**：2026-11-11（机制源自 2026-10-19 真机实测）。
-- **对象**：`packages/agent/src/repeat-request.ts`；接线 `runtime.ts:616-625`。
-- **理由**：用户把同一句话连发三次，模型明确认出是重复请求，仍选对话枝，拿历史结论重新排版输出——零执行、零产物，用户拿到的是服务器路径而不是文件。宿主必须把「这条消息本会话已经委派执行过」这个确定性事实递到申报处。
-- **证据**：`repeat-request.ts:1-30` 记录事故与判据（逐轮配对 user 消息 ↔ `route_current_turn` 调用 ↔ 回执；不读 worker 文本、不做语义判断）；命中后退回重填一次，之后放行（增强不是门）。
-- **状态**：**已合入**（保留，main 在位）。
-- **性质备注（B 目的 A 实现）**：目的是 B 类——「历史答复不是当前授权」是确定性责任；实现是 A 类手法——用转录形状补模型的误判。两类证据都要：**目的**按 B 类写确定性违约路径测试（同一句话重复出现时，不得以「缓存命中」为由跳过执行）；**实现**（退回一次这一增强）按 A 类管，用消融 / 模型 Eval 决定去留，并观察误伤与漏判（与 `architecture-laws.md` 机制分类节、`change-safety.md` §1.1 同口径）。若将来模型稳定判对，只能用**消融**决定「退回一次」是否还需要，不能放宽「历史不是当前授权」本身。
+- **决定**：保留 B 目的——「重复的同一句话是新授权、不是缓存命中；历史答复不得冒充本轮实时结果」。实现已换代（2026-11-12 收窄）：申报层删除后，原转录分析（`findRepeatedDelegatedRequest` / `collectDelegatedRequestCounts` 等，读者只有申报退回）随申报层退役；同一目的由 **RR1 窄门**承接。
+- **日期**：2026-11-11（机制源自 2026-10-19 真机实测）；2026-11-12 收窄并换实现（用户裁定 1）。
+- **对象**：`packages/agent/src/repeat-request.ts`（现只留 `buildRequestKey` / `normalizeUserRequest` / `ATTACHMENT_PATHS_MARKER`）；运行时读取 `runtime.ts` 的 `exactRepeatIdentity`（平台任务底账按 `requestKey` 精确匹配）；替换决策 `turn-exit.ts` 的 ①b；身份快照 `PlatformTaskRecord.requestKey`（委派点单写入者）。
+- **理由**：用户把同一句话连发三次，模型明确认出是重复请求，仍选对话枝，拿历史结论重新排版输出——零执行、零产物，用户拿到的是服务器路径而不是文件。宿主必须把「这条消息与此前已执行过的请求**完全相同**」这个确定性事实用于出口保护。
+- **收窄口径（2026-11-12，用户裁定 1）**：旧宽判据「会话存在在册任务 + 本轮零委派 + 回复含数字结论」**删除**（它会把「刚才那个数是多少来着」这类改写问句也替换掉——不是同一请求）；新窄判据三条同时成立才替换：① 本轮请求与此前某次**已执行过的请求完全同身份**（requestKey 逐字相等；身份 = 归一化正文 + 引用指纹的稳定哈希，委派时快照进任务底账）；② 本轮零委派零执行；③ 回复带数字结论。同文但本轮真执行必然放行；改写问句放行（不新增业务语义分类器）。辅助存储（`platformTasks.listBySession`）读取失败或未注入 → 记 `rr1_identity_inconclusive` 事件，**既不当作已验证通过、也不据此阻断普通聊天**。`messageId` 去重（handler 的 `findByWecomMessageId`）与 `dispatchKey` 幂等（§3.6）是既有机制，不因本门改变。
+- **证据**：`repeat-request.ts` 文件头（身份键定义与用途）；`runtime.ts` 的 `exactRepeatIdentity`（三态 match/none/inconclusive + 事件）；`turn-exit.ts` ①b（`repeatIdentity === 'match'` 才替换，detail 只陈述身份判据）；任务底账列 `platform_tasks.request_key`（`packages/core/src/store.ts` 的迁移与映射，store.test.ts 往返锁）。回归锁：`packages/agent/repeat-execution.test.ts`（同身份拦下 / 改写与不同引用放行 / 存储失败 inconclusive / 真执行放行）、`turn-exit.test.ts` ①b、e2e `turn-loop-repeat-execution.test.ts`（装配级 requestKey 往返）。
+- **状态**：**已实施（arch/direct-tool-final，待开 PR）**。
+- **性质备注（B 目的，确定性实现）**：目的是 B 类——「历史答复不是当前授权」是确定性责任；收窄后的实现也不再依赖模型申报（读宿主任务底账的精确身份），原「A 实现」备注随之退役。目的按 B 类写违约路径测试：同身份 + 零执行 + 数字结论必须被替换；真执行与不同身份必须放行；读不到必须留痕且不阻断。
 - **删除判据**：只有「重复请求 = 新授权」的判据整体迁到执行层/协议，且仍有确定性阻断与留痕。
 
 ### 3.6 TaskRunRecord.dispatchKey

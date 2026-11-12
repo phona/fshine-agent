@@ -367,11 +367,11 @@ const TABLE: Record<string, CodeEntry> = {
   RESUMED_PLAN_NOT_EXECUTED: {
     text: '按您刚才确认的操作没有产生任何平台执行。请回复“继续”重跑，或直接告诉我要调整的范围。',
   },
-  // 终稿=申报被整段替换时的 resume 兜底（D-144）：确认续跑轮整理模型把 route 申报原文
-  // 写成正文、且 worker 整理文本也为空时的确定性话术。能走到该出口说明重跑有执行痕迹
-  // （零执行另有专用话术），如实说"本步已完成"，下一步由用户推进——不编造具体进度。
-  RESUMED_DECLARATION_FALLBACK: {
-    text: '本步已完成。回复『继续』推进下一步，或告诉我下一步要做什么。',
+  // 恢复路径（resumeTaskId）的 fail-closed 话术（2026-11-12，G3）：inline 恢复必须携带
+  // 原任务冻结的实体来源快照（无快照 = 无法复核范围 = 拒绝恢复，不静默跳过实体门）。
+  // 说清两件确定性事实：为什么恢复不了（缺范围快照）、下一步做什么（重新发起/写明范围）。
+  RESUME_SCOPE_SNAPSHOT_MISSING: {
+    text: '无法安全恢复这个待确认任务：缺少该任务的实体范围快照，我不能在无法复核范围的情况下继续执行。请重新发起这条请求；需要继续查询时，请在消息里重新写明对象与范围。',
   },
   // T4 失败交还（2026-11-12）：两个兜底出口补"尚未完成什么"（没有拿到可用结果）与
   // "无法确定"场景的如实陈述（原因暂时无法确定）——只陈述确定性事实，不编造原因归因，
@@ -430,11 +430,6 @@ const TABLE: Record<string, CodeEntry> = {
   PLAN_NOT_PLANNABLE_OPERATIONS: {
     text: `${PLAN_NOT_PLANNABLE_REASON}。不该放进计划的是：{operations}。请把上述 operation 从计划的 calls 中移除，改为直接调用，然后重新提交剩余的 calls。`,
     params: ['operations'],
-  },
-
-  // ── 路由类：申报缺失时的重试指令（给模型，不上屏）──
-  ROUTE_RETRY_NUDGE: {
-    text: '你必须先调用 route_current_turn 申报本轮动作（conversation / delegate），再回答。',
   },
 
   // ── 门/计划类：serve-gate 的计划提交教学（唯一合法形式 + 三种常见错误包装）──

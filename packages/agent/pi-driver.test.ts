@@ -73,39 +73,21 @@ describe('Pi driver safety helpers', () => {
     expect(calls).toEqual([{ tool: 'workflow.start', args: { accountSetId: 'as_003' } }]);
   });
 
-  it('ToolUserError 的委派标记只进 details，用户可见文本保持原样', async () => {
+  it('ToolUserError 终结语义：用户可见文本原样、terminate=true，不进任何宿主标记', async () => {
     const input = {
       exec: async () => {
-        throw new ToolUserError('平台返回的用户可见话术', { delegationCompleted: true });
+        throw new ToolUserError('平台返回的用户可见话术');
       },
       onStep: () => undefined,
     } as unknown as TurnDriverInput;
     const result = await toAgentTool({
-      name: 'route_current_turn',
-      description: 'route',
+      name: 'run_task',
+      description: 'delegate',
       inputSchema: { type: 'object', properties: {} },
-    }, input, 'route_current_turn').execute('call_1', {});
-
-    expect(result.content).toEqual([{ type: 'text', text: '平台返回的用户可见话术' }]);
-    expect(result.details).toEqual({ routeReceipt: 'delegate' });
-  });
-
-  it('后台任务受理独立记账，不伪装成执行结果或前置失败', async () => {
-    const input = {
-      exec: async () => {
-        throw Object.assign(new ToolUserError('任务已排队'), { routeReceipt: 'background' });
-      },
-      onStep: () => undefined,
-    } as unknown as TurnDriverInput;
-    const result = await toAgentTool({
-      name: 'route_current_turn',
-      description: 'route',
-      inputSchema: { type: 'object' },
-    }, input).execute('background_1', {});
+    }, input, 'run_task').execute('call_1', {});
 
     expect(result.terminate).toBe(true);
-    expect(result.content).toEqual([{ type: 'text', text: '任务已排队' }]);
-    expect(result.details).toEqual({ routeReceipt: 'background' });
+    expect(result.content).toEqual([{ type: 'text', text: '平台返回的用户可见话术' }]);
   });
 
   it('keeps long and non-ASCII domain tool names within provider limits', () => {
@@ -124,8 +106,8 @@ describe('Pi driver safety helpers', () => {
 
 /**
  * 进度帧的生产接线（F6）：toAgentTool 是 driver 构造原生工具并调用 onStep 的
- * 唯一位置。这里用生产函数驱动替身执行，钉住"内部工具不出帧"与"短语钳制"——
- * 空串进度帧会在渠道上投出一条空消息，所以 driver 侧必须整体跳过 onStep。
+ * 唯一位置。这里用生产函数驱动替身执行，钉住"协议材料短语整条丢弃"与"短语钳制"——
+ * 空串进度帧会在渠道上投出一条空消息，所以判据必须由 renderToolStepText 一处给出。
  */
 describe('Pi driver 进度帧接线', () => {
   function stepRecorder() {
@@ -140,17 +122,6 @@ describe('Pi driver 进度帧接线', () => {
   function toolFor(name: string): DiscoveredTool {
     return { name, description: name, inputSchema: { type: 'object', properties: {} } };
   }
-
-  it('宿主内部工具调用不发进度帧（默认帧与模型短语都不发）', async () => {
-    // 相位 1：历史检索工具已删除，内部工具只剩回合契约申报入口。
-    for (const name of ['route_current_turn']) {
-      const { steps, input } = stepRecorder();
-      const agentTool = toAgentTool(toolFor(name), input, name);
-      // 模型照样可能自填 progress——内部工具对帧整体静默
-      await agentTool.execute('call_1', { progress: '申报本轮动作' });
-      expect(steps, name).toEqual([]);
-    }
-  });
 
   it('平台工具调用仍出帧：模型短语优先，泄漏/超长短语被钳制后回落默认帧', async () => {
     const clean = stepRecorder();

@@ -1,13 +1,13 @@
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AgentReply, BackgroundTaskEvent, ConversationEventRecord, ConversationLogRepo, TaskPlanProjection, TaskPlanRepo, TrustedContext } from '@fshine/contracts';
 import type { ContextTaskRunner, PreparedContextTaskRun, SubagentTaskResult } from './context';
-import type { PlanEntitySources } from './turn-contract';
+import { asPlanEntitySources, type PlanEntitySources } from './turn-contract';
 import type { PlanStepLabel } from './plan-steps';
 import type { ContextTaskRunArgs } from './context';
 import type { BackgroundTaskManager, TaskReceipt } from './task-manager';
 import type { TaskRunRecord, TurnInputContext } from '@fshine/contracts';
 import { ToolUserError } from './driver';
-import { normalizeMessageReference } from './message-reference';
+import { getQuotedEvidence, normalizeMessageReference } from './message-reference';
 import { renderPlanCircuitBreak } from './plan-facts';
 import { redactInternalIds, redactSensitiveText } from './turn-persistence';
 import { sanitizeServerPathReply } from './reply-exit';
@@ -98,7 +98,7 @@ export async function dispatchBackgroundTask(input: {
   }
   const text = input.renderReceipt(receipt);
   input.onAccepted(receipt, text);
-  throw new ToolUserError(text, { routeReceipt: 'background' });
+  throw new ToolUserError(text);
 }
 
 export async function submitBackgroundHostConfirmation(input: {
@@ -209,10 +209,16 @@ export async function maybeSubmitBackgroundResume(input: {
   const request = '宿主已收到用户对待确认计划的真实确认。请继续执行已激活计划中的剩余查询，不要扩大计划范围。';
   const metadata = priorRun?.metadata;
   const source = metadata && typeof metadata === 'object' ? metadata['entitySources'] : undefined;
-  const entitySources = source && typeof source === 'object' && !Array.isArray(source)
-    && typeof (source as Record<string, unknown>)['currentMessage'] === 'string'
-    ? source as ContextTaskRunArgs['entitySources']
-    : undefined;
+  // G3（2026-11-12）：恢复路径必须始终携带实体来源——缺 entitySources 会让驱动的实体
+  // 范围校验整支跳过（缺省 fail-open）。metadata 有快照 → 精确复用；没有（老记录 /
+  // host_confirmation 记录 / 链式恢复）→ 用 priorRun.originMessage（+ 引用）做**严格
+  // 更窄**的重建，与 task_event 续跑的兜底同形（runtime.ts 的 entitySourcesOf）。
+  // 不用恢复回合的会话/消息可变池重算——那只会比原任务冻结面更宽。
+  const quotedEvidence = getQuotedEvidence(priorRun.inputContext?.messageReference);
+  const entitySources: PlanEntitySources = asPlanEntitySources(source) ?? {
+    currentMessage: priorRun.originMessage,
+    ...(quotedEvidence ? { quotedEvidence } : {}),
+  };
   const stepLabel = metadata && typeof metadata === 'object' && typeof metadata['stepLabel'] === 'string'
     ? metadata['stepLabel'] as string
     : undefined;
@@ -221,7 +227,7 @@ export async function maybeSubmitBackgroundResume(input: {
     prepared = await input.runner.prepare({
       request,
       taskId: input.taskId,
-      ...(entitySources ? { entitySources } : {}),
+      entitySources,
       ...(stepLabel ? { stepLabel } : {}),
     }, { trusted: input.trusted });
   } catch (error) {
@@ -245,7 +251,8 @@ export async function maybeSubmitBackgroundResume(input: {
       } : {}),
       metadata: {
         kind: 'plan_resume',
-        ...(entitySources ? { entitySources } : {}),
+        // 写回不丢来源：下一次恢复（链式）还能精确复用同一份冻结面
+        entitySources,
         ...(stepLabel ? { stepLabel } : {}),
       },
     });

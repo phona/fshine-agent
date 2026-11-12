@@ -560,16 +560,6 @@ function mainDriver(
   };
 }
 
-/** 完全不申报的 Main Agent，用来验证跳过重试与失败关闭。 */
-function silentDriver() {
-  return {
-    run: async (input: { messages: unknown[] }) => ({
-      text: '直接回答：应收余额 42 元。',
-      messages: [...input.messages, { role: 'assistant', content: '直接回答：应收余额 42 元。', timestamp: Date.now() }],
-    }),
-  };
-}
-
 export type WorkerStep =
   | { plan: PlanCall[]; stopAtConfirm?: boolean; stopAfterActivate?: boolean }
   | { execute: PlanCall[] }
@@ -1334,7 +1324,6 @@ export function platformCorrectForm(code: string): string {
 export {
   RecordingSdkClient,
   mainDriver,
-  silentDriver,
   gatewayProposalWorker,
   gatedWorker,
   boot,

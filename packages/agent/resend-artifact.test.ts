@@ -19,6 +19,7 @@ import type { TrustedContext } from '@fshine/contracts';
 import { RUN_EXECUTION_TASK_DESCRIPTION, RUN_EXECUTION_TASK_SCHEMA, RUN_EXECUTION_TASK_TOOL, type ContextTaskRunner, type SubagentTaskResult } from './src/context';
 import { ScriptedTurnDriver, ToolUserError, type TurnDriver } from './src/driver';
 import { createTaxAgentRuntime } from './src/runtime';
+import { RESEND_DELEGATION_EXCLUSIVE } from './src/runtime-messages';
 import {
   MAX_RESEND_REFS,
   RESEND_ARTIFACT_TOOL,
@@ -243,5 +244,72 @@ describe('resend_artifact：runtime 工具面与回合语义', () => {
     // 重发终止文本不含数字结论：重复提问门不命中，refs 照常交回 handler。
     expect(reply.text).toBe('重发产物 #1。');
     expect(reply.artifactRefs).toEqual(['1']);
+  });
+
+  // ── R4 同回合互斥（2026-11-12 用户裁定 4）：两种顺序都不许出现"已委派却报告成零委派" ──
+  // 机制只用现有回合状态：turn.intent（宿主持有的委派事实）= 本回合已发生委派的瞬时标记。
+  // 不新增状态存储、不假装执行可撤销；副作用（worker 调用、审计事件）如实保留。
+
+  it('R4a resend_artifact → run_task：重发终止本回合，委派不可能执行（零平台调用）', async () => {
+    const run = vi.fn(async (): Promise<SubagentTaskResult> => ({ taskId: 'task_never', text: '不应被调用' }));
+    const runtime = createTaxAgentRuntime({
+      // 模型脚本：先重发、再想委派——生产驱动在重发的 ToolUserError 上终止回合，
+      // 第二步根本不会被执行。任何一步真到达 worker 都说明互斥被破坏。
+      driver: ScriptedTurnDriver([
+        { toolCalls: [{ tool: RESEND_ARTIFACT_TOOL_NAME, args: { refs: ['1'] } }] },
+        { toolCalls: [{ tool: 'run_task', args: { request: '查询幻东的应收账款余额' } }] },
+      ]),
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(run),
+      resendArtifactTool: RESEND_ARTIFACT_TOOL,
+    });
+
+    const reply = await runtime.handleTurn(makeCtx(), '把那个表再发一次，顺便也查一下幻东');
+
+    expect(run).not.toHaveBeenCalled();
+    expect(reply.text).toBe('重发产物 #1。');
+    expect(reply.artifactRefs).toEqual(['1']);
+  });
+
+  it('R4b run_task → resend_artifact：重发被拒、refs 不记账，委派副作用如实保留', async () => {
+    const run = vi.fn(async (): Promise<SubagentTaskResult> => ({
+      taskId: 'task_delegated',
+      text: '还缺少查询范围。',
+      needs: { missing: ['查询范围'], reason: '请求里没有给出范围' },
+    }));
+    const resendAudit = captureInfoEvents('turn_resend_declared');
+    const delegationAudit = captureInfoEvents('turn_delegation');
+    const outcomes: unknown[] = [];
+    try {
+      const driver: TurnDriver = {
+        run: async (input) => {
+          // 第一步委派（needs 交还，回合继续）；第二步模型尝试重发。
+          outcomes.push(await input.exec('run_task', { request: '查询幻东的应收账款' }));
+          outcomes.push(await input.exec(RESEND_ARTIFACT_TOOL_NAME, { refs: ['1'] }));
+          return { text: '先补范围；要重发就下一轮单独说。', messages: input.messages };
+        },
+      };
+      const runtime = createTaxAgentRuntime({
+        driver,
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(run),
+        resendArtifactTool: RESEND_ARTIFACT_TOOL,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx(), '查一下幻东的应收，并把上次的表再发一次');
+
+      // 委派真实发生（副作用与审计如实保留，不假装可撤销）
+      expect(run).toHaveBeenCalledTimes(1);
+      expect(delegationAudit.events).toHaveLength(1);
+      // 重发被拒（可恢复工具错误）：不记账、不终止、不复述占用整轮
+      expect(outcomes[1]).toEqual({ error: RESEND_DELEGATION_EXCLUSIVE });
+      expect(resendAudit.events).toHaveLength(0);
+      // 已发生委派的回合不得报告成零委派：不返回 artifactRefs（那会走纯重发回执路径）
+      expect(reply.artifactRefs).toBeUndefined();
+      expect(reply.text).toBe('先补范围；要重发就下一轮单独说。');
+    } finally {
+      resendAudit.restore();
+      delegationAudit.restore();
+    }
   });
 });

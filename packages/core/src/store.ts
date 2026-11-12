@@ -162,7 +162,11 @@ CREATE TABLE IF NOT EXISTS platform_tasks (
   calls TEXT,
   label TEXT,
   outcome TEXT,
-  result_text TEXT
+  result_text TEXT,
+  -- 恢复路径与重复请求门（2026-11-12，G3/RR1）的确定性事实：委派时冻结的实体来源
+  -- 快照（JSON）与该次请求的身份键。缺失（旧条目）= 恢复拒绝 / 身份不命中，不猜不补。
+  entity_sources TEXT,
+  request_key TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_platform_tasks_parent_session_id
   ON platform_tasks (parent_session_id);
@@ -362,6 +366,8 @@ interface PlatformTaskRow {
   label: string | null;
   outcome: string | null;
   result_text: string | null;
+  entity_sources: string | null;
+  request_key: string | null;
 }
 
 /**
@@ -601,6 +607,9 @@ function rowToPlatformTask(row: PlatformTaskRow): PlatformTaskRecord {
     ...(row.label ? { label: row.label } : {}),
     ...(row.outcome === 'done' || row.outcome === 'needs' || row.outcome === 'failed' ? { outcome: row.outcome } : {}),
     ...(row.result_text ? { resultText: row.result_text } : {}),
+    // 恢复来源快照与请求身份（G3/RR1）：缺失即不在记录里——恢复拒绝 / 身份不命中。
+    ...(row.entity_sources ? { entitySources: JSON.parse(row.entity_sources) as unknown } : {}),
+    ...(row.request_key ? { requestKey: row.request_key } : {}),
   };
 }
 
@@ -611,10 +620,12 @@ const PLATFORM_TASK_FACT_COLUMNS: ReadonlyArray<{ field: keyof PlatformTaskRecor
   { field: 'label', column: 'label' },
   { field: 'outcome', column: 'outcome' },
   { field: 'resultText', column: 'result_text' },
+  { field: 'entitySources', column: 'entity_sources' },
+  { field: 'requestKey', column: 'request_key' },
 ];
 
-/** 以 JSON 文本落库的结构化事实字段（数组形状；其余按字符串落）。 */
-const PLATFORM_TASK_JSON_FIELDS: ReadonlySet<keyof PlatformTaskRecord> = new Set(['calls', 'scopeValues']);
+/** 以 JSON 文本落库的结构化事实字段（数组/对象形状；其余按字符串落）。 */
+const PLATFORM_TASK_JSON_FIELDS: ReadonlySet<keyof PlatformTaskRecord> = new Set(['calls', 'scopeValues', 'entitySources']);
 
 /** 结构化事实的 SQL 值（JSON 字段序列化；undefined → NULL，即"这个任务没有这个事实"）。 */
 function platformTaskFactValue(field: keyof PlatformTaskRecord, value: unknown): string | null {
@@ -654,12 +665,13 @@ export function createSqliteStore(dbPath: string): AuditStore {
 
   // Forward-compatible migration for databases created before the P2 structured
   // execution facts (D-065): platform_tasks gained scope_values/calls/label/
-  // outcome/result_text. Older rows simply read back as records without those
-  // fields (consumers degrade to the raw text instead of guessing). 首版 D-065 的
+  // outcome/result_text — and later entity_sources/request_key (G3/RR1, 2026-11-12).
+  // Older rows simply read back as records without those fields (consumers degrade:
+  // 恢复拒绝 / 身份不命中，而不是猜)。首版 D-065 的
   // 两个执行层专属列只作为历史留在旧库里：不再读、不再写（范围取值改由通用列
   // scope_values 承载；迁移不复制旧值——消费方降级，不猜不补）。
   const taskColumns = db.prepare('PRAGMA table_info(platform_tasks)').all() as Array<{ name: string }>;
-  for (const column of ['scope_values', 'calls', 'label', 'outcome', 'result_text']) {
+  for (const column of ['scope_values', 'calls', 'label', 'outcome', 'result_text', 'entity_sources', 'request_key']) {
     if (!taskColumns.some((existing) => existing.name === column)) {
       db.exec(`ALTER TABLE platform_tasks ADD COLUMN ${column} TEXT`);
     }

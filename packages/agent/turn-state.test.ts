@@ -5,11 +5,8 @@ import type { SelectionClarification } from './src/platform-contract';
 import {
   accumulateDelegation,
   createTurnState,
-  declarationRejectionsExhausted,
-  MAX_DECLARATION_REJECTIONS,
   MAX_NEEDS_ROUNDS,
   MAX_PLAN_ZERO_EXEC_STEPS,
-  noteDeclarationRejection,
   noteNeedsRound,
   notePlanStepOutcome,
   noteZeroExecStep,
@@ -46,7 +43,6 @@ describe('createTurnState', () => {
   it('初值：所有计数器归零、所有事实为 null、preferredPlanId 由消歧选定给出', () => {
     const state = createTurnState({ planId: 'plan_chosen' });
     expect(state).toEqual({
-      declared: false,
       intent: null,
       execution: null,
       pendingPlan: null,
@@ -70,9 +66,6 @@ describe('createTurnState', () => {
       backgroundTaskState: null,
       backgroundReceiptText: null,
       resendRefs: [],
-      // 申报拒收记账（轨道 C ②，2026-11-12）：初值归零，跨回合不继承
-      declarationRejections: 0,
-      declarationShapes: {},
     });
   });
 
@@ -169,47 +162,6 @@ describe('noteZeroExecStep', () => {
 
     expect(noteZeroExecStep(state, { failed: true, pendingPlan: true })).toBe(false);
     expect(state.planZeroExecSteps).toBe(2);
-  });
-});
-
-describe('noteDeclarationRejection', () => {
-  it('允许退回 2 次，第 3 次判超界（界 = 判据容差 2，见常量处的取值依据）', () => {
-    const state = createTurnState();
-
-    expect(noteDeclarationRejection(state, 'kind=conversation keys=[kind,request]'))
-      .toMatchObject({ count: 1, shapeCount: 1, exceeded: false });
-    expect(noteDeclarationRejection(state, 'kind=conversation keys=[kind,request]'))
-      .toMatchObject({ count: 2, shapeCount: 2, exceeded: false });
-    // 第 3 次：已超界 —— 调用方不再退回模型，改用确定性话术收尾
-    expect(noteDeclarationRejection(state, 'kind=conversation keys=[kind,request]'))
-      .toMatchObject({ count: 3, shapeCount: 3, exceeded: true });
-    expect(state.declarationRejections).toBe(MAX_DECLARATION_REJECTIONS + 1);
-  });
-
-  it('界在回合总次数上：换形状交也绕不开（按形状各给一份界并不能让回合有界）', () => {
-    const state = createTurnState();
-
-    expect(noteDeclarationRejection(state, 'kind=conversation keys=[kind,request]').exceeded).toBe(false);
-    expect(noteDeclarationRejection(state, 'kind=resend keys=[artifactRef,kind,request]').exceeded).toBe(false);
-    const third = noteDeclarationRejection(state, 'kind=typo keys=[kind]');
-    expect(third.exceeded).toBe(true);
-    // 形状各自的计数留在账上（诊断用：同一份坏申报被反复交回是死循环的指纹）
-    expect(state.declarationShapes).toEqual({
-      'kind=conversation keys=[kind,request]': 1,
-      'kind=resend keys=[artifactRef,kind,request]': 1,
-      'kind=typo keys=[kind]': 1,
-    });
-  });
-
-  it('declarationRejectionsExhausted：未超界为 false，超界后可查（跨回合不继承）', () => {
-    const state = createTurnState();
-    noteDeclarationRejection(state, 'kind=conversation keys=[kind]');
-    noteDeclarationRejection(state, 'kind=conversation keys=[kind]');
-    expect(declarationRejectionsExhausted(state)).toBe(false);
-    noteDeclarationRejection(state, 'kind=conversation keys=[kind]');
-    expect(declarationRejectionsExhausted(state)).toBe(true);
-    // 下一个回合是新的 state（界是"同一回合内"的界，不跨回合累积）
-    expect(declarationRejectionsExhausted(createTurnState())).toBe(false);
   });
 });
 

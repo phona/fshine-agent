@@ -329,6 +329,19 @@ export interface PlatformTaskRecord {
   outcome?: 'done' | 'needs' | 'failed';
   /** 用户可见的结果原文（与 Conversation Log 的 tool_result 同文，召回渲染的兜底源）。 */
   resultText?: string;
+  /**
+   * 委派时冻结的实体范围来源快照（PlanEntitySources 形状，agent 侧定义；契约边界保持
+   * 不透明，与 workerMessages 同——恢复路径读回后经 asPlanEntitySources 做形状校验）。
+   * 单写入者 = 委派点（context.ts 的 running upsert）；inline 确认后恢复读它，缺失
+   * （旧任务）→ 拒绝恢复（fail-closed），不静默省略实体范围校验。
+   */
+  entitySources?: unknown;
+  /**
+   * 该任务委派时的当前用户请求身份键（host-computed requestKey，见 repeat-request.ts）：
+   * 供 RR1 窄门做"与此前已执行请求完全相同"的精确身份比对。续跑/恢复不覆盖（保留原
+   * 任务身份）；缺失 = 旧任务，RR1 不据此命中（不猜）。
+   */
+  requestKey?: string;
 }
 
 export interface PlatformTaskRepo {

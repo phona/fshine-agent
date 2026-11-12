@@ -35,6 +35,21 @@ function subagent(run?: ContextTaskRunner['run']): ContextTaskRunner {
   };
 }
 
+/**
+ * inline 恢复（resumeTaskId）用例的来源快照替身（G3）：恢复必须携带任务条目里冻结的
+ * entitySources——缺失即拒绝恢复（fail-closed）。这些用例的被测面不是来源本身，
+ * 给一份中性的快照即可；快照注入/缺失自身的用例在文末 G3 describe 里。
+ */
+function resumeSnapshotTasks(taskId: string): { listBySession: ReturnType<typeof vi.fn> } {
+  return {
+    listBySession: vi.fn(async () => [{
+      taskId, parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+      workerMessages: [], createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+      entitySources: { currentMessage: '继续原计划' },
+    }]),
+  };
+}
+
 /** 选择类澄清信封替身（结构化歧义：同名/近名多个候选，等用户选一个）。 */
 const AMBIGUOUS: SelectionClarification = {
   code: 'ACCOUNT_SET_AMBIGUOUS',
@@ -358,7 +373,7 @@ describe('createTaxAgentRuntime', () => {
     });
     const { driver, inputs } = recordingDriver([{ text: '202609 应收余额为 42 元。' }]);
     const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, platformTasks: resumeSnapshotTasks('task_confirmed') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_confirmed', resumeTaskId: 'task_confirmed' }),
@@ -376,8 +391,8 @@ describe('createTaxAgentRuntime', () => {
   });
 
   // ── 计划恢复路径（resumeTaskId）：注脚剥离 + 执行痕迹判据 ─────────────────
-  // 这条路径绕过 route_current_turn：用户确认码 → 宿主激活计划 → worker 重跑 →
-  // 整理模型转述。正常 delegate 路径的出口校验它一条都没继承，两个缺口都在这里补：
+  // 这条路径不经模型直接激活计划：用户确认码 → 宿主激活计划 → worker 重跑 →
+  // 整理模型转述。正常委派路径的出口校验它一条都没继承，两个缺口都在这里补：
   // F5 回落不过滤执行面注脚；F8 确认后零执行被整理模型总结成"已完成"直接外发。
 
   /** 恢复路径的 durable log 替身：收回 tool_result 事件供断言。 */
@@ -403,7 +418,7 @@ describe('createTaxAgentRuntime', () => {
     const { driver } = recordingDriver([{ text: '' }]);
     const sessions = new FakeSessionRepo();
     const log = resumeLog();
-    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, conversationLog: log.repo });
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, conversationLog: log.repo, platformTasks: resumeSnapshotTasks('task_resumed') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_footprint', resumeTaskId: 'task_resumed' }),
@@ -434,7 +449,7 @@ describe('createTaxAgentRuntime', () => {
     }));
     const { driver, inputs } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
     const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, platformTasks: resumeSnapshotTasks('task_zero') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_zero', resumeTaskId: 'task_zero' }),
@@ -468,7 +483,7 @@ describe('createTaxAgentRuntime', () => {
       activatedPlan: { planId: 'plan_active', version: 3 },
     }));
     const { driver } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask, platformTasks: resumeSnapshotTasks('task_activated') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_activated', resumeTaskId: 'task_activated' }),
@@ -486,7 +501,7 @@ describe('createTaxAgentRuntime', () => {
       text: '大概是 42 元。',
     }));
     const { driver } = recordingDriver([{ text: '已按你确认的范围整理完成。' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask, platformTasks: resumeSnapshotTasks('task_number') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_number', resumeTaskId: 'task_number' }),
@@ -505,7 +520,7 @@ describe('createTaxAgentRuntime', () => {
       execution: { planId: 'plan_ok', version: 1, calls: 3 },
     }));
     const { driver } = recordingDriver([{ text: '汇总：42 元。' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: speaking });
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask: speaking, platformTasks: resumeSnapshotTasks('task_ok') });
 
     const summarized = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_ok', resumeTaskId: 'task_ok' }),
@@ -519,7 +534,7 @@ describe('createTaxAgentRuntime', () => {
       execution: { planId: 'plan_ok', version: 1, calls: 3 },
     }));
     const silent = recordingDriver([{ text: '' }]);
-    const silentRuntime = createTaxAgentRuntime({ driver: silent.driver, sessions: new FakeSessionRepo(), platformTask: silentPlatformTask });
+    const silentRuntime = createTaxAgentRuntime({ driver: silent.driver, sessions: new FakeSessionRepo(), platformTask: silentPlatformTask, platformTasks: resumeSnapshotTasks('task_ok') });
     const fallback = await silentRuntime.handleTurn(
       makeCtx({ requestId: 'req_resume_silent', resumeTaskId: 'task_ok' }),
       '确认继续',
@@ -527,102 +542,15 @@ describe('createTaxAgentRuntime', () => {
     expect(fallback.text).toBe('worker 原文：幻辰 202609 应收余额为 42 元。');
   });
 
-  // ── D-144（eval14-misc 实测 2026-10-31）：续跑轮整理模型把申报原文当终稿 ──────
-  // 事故链：resume 分支 tools:[] 的整理轮里模型把 <function=route_current_turn> 申报写成
-  // 正文，answer.text 直接成为终稿——该分支在 return { text } 处提前收尾，出口两把尺
-  // （decideTurnExit / sanitizeUserVisibleReply）全被绕过。第三形态判据=整段申报且参数
-  // 携带自然语言（中文参数让「剩余非 ASCII<4」判据失明）→ 整段替换为 stripFootprint
-  // (worker 文本)，为空则确定性话术；替换留 route_declaration_reply_replaced 痕。
-
-  /** eval14 实测泄漏原文（conversation_sessions.state msg7 整段）。 */
-  const LEAKED_ROUTE_DECLARATION = [
-    '<tool_call>',
-    '<function=route_current_turn>',
-    '<parameter=continueTaskId>',
-    'task_812c1535-2a5f-4b18-9995-9e3a883f84fc',
-    '</parameter>',
-    '<parameter=kind>',
-    'delegate',
-    '</parameter>',
-    '<parameter=progress>',
-    '幻州幻仁汽车技术有限公司的做账进度',
-    '</parameter>',
-    '<parameter=request>',
-    '第3/10步：查询幻州幻仁汽车技术有限公司的做账进度，当前处理到哪个月、凭证是否已录完',
-    '</parameter>',
-    '</function>',
-    '</tool_call>',
-  ].join('\n');
-
-  it('D-144 整理模型输出=申报原文：整段替换为 worker 文本，不上屏不进转录，留 warn 事件', async () => {
-    const warnings: Array<Record<string, unknown>> = [];
-    const original = console.warn;
-    console.warn = (line: string) => { try { warnings.push(JSON.parse(line)); } catch { /* 非 JSON 告警忽略 */ } };
-    try {
-      const workerText = '幻州幻仁：做账已处理到 2026 年 8 月，凭证已录完。';
-      const platformTask = subagent(async (args) => ({
-        taskId: args.taskId ?? 'task_812c1535-2a5f-4b18-9995-9e3a883f84fc',
-        text: workerText,
-        execution: { planId: 'plan_812c', version: 2, calls: 3 },
-      }));
-      const { driver } = recordingDriver([{ text: LEAKED_ROUTE_DECLARATION }]);
-      const sessions = new FakeSessionRepo();
-      const log = resumeLog();
-      const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, conversationLog: log.repo });
-
-      const reply = await runtime.handleTurn(
-        makeCtx({ requestId: 'req_resume_decl', resumeTaskId: 'task_812c1535-2a5f-4b18-9995-9e3a883f84fc' }),
-        '确认继续',
-      );
-
-      // 终稿=worker 整理文本（fallback 优先真实执行产物），申报原文零残留
-      expect(reply.text).toBe(workerText);
-      expect(reply.text).not.toContain('route_current_turn');
-      expect(reply.text).not.toContain('tool_call');
-      expect(reply.text).not.toContain('task_812c');
-      // 替换不静默：结构化 warn 带 requestId 与被替换文本长度
-      expect(warnings.some((w) => w['event'] === 'route_declaration_reply_replaced'
-        && w['requestId'] === 'req_resume_decl'
-        && w['replacedLength'] === LEAKED_ROUTE_DECLARATION.length)).toBe(true);
-      // 转录干净：申报原文不落库（被替换的整理轮整体丢弃，synthesized 只落用户收到的那版）
-      const transcript = sessions.peek('sess_1')?.state as Array<{ role?: string; content?: unknown }>;
-      const assistantText = transcript
-        .filter((message) => message.role === 'assistant')
-        .map((message) => String(message.content ?? ''))
-        .join('\n');
-      expect(assistantText).not.toContain('route_current_turn');
-      expect(assistantText).not.toContain('tool_call');
-      expect(assistantText).not.toContain('task_812c');
-      expect(assistantText).toContain(workerText);
-      // durable log 的 tool_result 本就是 worker 文本，不带申报
-      const toolResult = log.events.find((event) => event.kind === 'tool_result');
-      expect(toolResult?.content).toBe(workerText);
-    } finally {
-      console.warn = original;
-    }
-  });
-
-  it('D-144 worker 文本也为空：整段替换为确定性话术（不编造进度）', async () => {
-    const platformTask = subagent(async (args) => ({
-      taskId: args.taskId ?? 'task_blank',
-      text: '',
-      execution: { planId: 'plan_blank', version: 1, calls: 1 },
-    }));
-    const { driver } = recordingDriver([{ text: '{"kind":"delegate","continueTaskId":"task_blank","request":"第3/10步：继续查询"}' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
-
-    const reply = await runtime.handleTurn(
-      makeCtx({ requestId: 'req_resume_blank', resumeTaskId: 'task_blank' }),
-      '确认继续',
-    );
-
-    expect(reply.text).toBe(messageTextFor('RESUMED_DECLARATION_FALLBACK'));
-    expect(reply.text).not.toContain('kind');
-    expect(reply.text).not.toContain('task_blank');
-  });
+  // ── D-144（eval14-misc 实测 2026-10-31）的申报整段替换支已随申报层正式删除 ──────
+  // 原用例（整理模型把 <function=route_current_turn> 申报原文写成正文 → 整段替换为
+  // worker 文本/确定性话术）钉的是 isWholeReplyRouteDeclaration + replaceDeclarationReply。
+  // 申报工具与提示词已不存在，专用替换支整体删除（protocol-material.ts / reply-exit.ts）；
+  // 旧形态若再现只剩通用删除臂（标签可删、中文参数值可能残留），按 decision-log 2.8
+  // 「再次出现确定性泄漏才加回」接受。对应用例随机制删除，不保留假绿。
 
   // ── ③-1：恢复路径的 ToolUserError 穿透修复 ───────────────────────────────
-  // resumeTaskId 路径绕过 route_current_turn：确认码 → 计划激活 → worker 重跑全部
+  // resumeTaskId 路径绕过模型直接激活计划：确认码 → 计划激活 → worker 重跑全部
   // 在宿主内完成。此前 platformTask.run 抛出的 ToolUserError（如 DELEGATION_AUTH_FAILURE）
   // 会一路穿透到 handler.ts 顶层 catch，被换成"处理失败，请稍后再试"——对 auth 类
   // 是错指令（重试多少次都没用）。现在按 delegate 路径同样收尾：ToolUserError 经
@@ -638,7 +566,7 @@ describe('createTaxAgentRuntime', () => {
       run: async (input) => { organizeCalls += 1; return { text: '整理完成', messages: input.messages }; },
     };
     const sessions = new FakeSessionRepo();
-    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions, platformTask, platformTasks: resumeSnapshotTasks('task_resumed') });
 
     const reply = await runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_auth', resumeTaskId: 'task_resumed' }),
@@ -663,7 +591,7 @@ describe('createTaxAgentRuntime', () => {
   it('③-1 补：非 ToolUserError 维持既有兜底（继续上抛给 handler 顶层）', async () => {
     const platformTask = subagent(async () => { throw new Error('worker 进程崩溃'); });
     const { driver } = recordingDriver([{ text: '整理完成' }]);
-    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask });
+    const runtime = createTaxAgentRuntime({ driver, sessions: new FakeSessionRepo(), platformTask, platformTasks: resumeSnapshotTasks('task_resumed') });
 
     await expect(runtime.handleTurn(
       makeCtx({ requestId: 'req_resume_crash', resumeTaskId: 'task_resumed' }),
@@ -1716,7 +1644,7 @@ describe('createTaxAgentRuntime', () => {
   // 的模型文本一路直发。下面三例钉住"复读检测不依赖 execution"。
 
   it('F4.1 looksLikeProtocolMaterial：只认协议 JSON 的形状，不嗅探内容', () => {
-    // 宿主与模型之间的内部协议材料：纠错环交还 / 计划步骤交还 / 回合申报回执
+    // 宿主与模型之间的内部协议材料：纠错环交还 / 计划步骤交还
     expect(looksLikeProtocolMaterial('{"recorded":"delegate","text":"…","taskId":"task_1","needs":{}}')).toBe(true);
     expect(looksLikeProtocolMaterial('  \n {"recorded":"conversation"}')).toBe(true);
     expect(looksLikeProtocolMaterial('{"step":"第 1/2 步","recorded":"delegate","next":"不要转述给用户"}')).toBe(true);
@@ -1732,12 +1660,10 @@ describe('createTaxAgentRuntime', () => {
     expect(looksLikeProtocolMaterial('结果：{"balance":51000} 元。')).toBe(false);
     expect(looksLikeProtocolMaterial('平台返回 ACCOUNT_SET_AMBIGUOUS，请用户选择。')).toBe(false);
     expect(looksLikeProtocolMaterial('')).toBe(false);
-    // D-144（eval14 实测）：route 申报的 XML/JSON 整段形态——正常路径的协议复读门
-    // 此前只认 JSON 信封，整段 XML 申报（中文参数）直发。补形态后整段=申报即命中；
-    // 标签混在自然语言里的不命中（那由 reply-exit 的删除支管，不整段拦）。
-    expect(looksLikeProtocolMaterial('<tool_call>\n<function=route_current_turn>\n<parameter=kind>delegate</parameter>\n</function>\n</tool_call>')).toBe(true);
-    expect(looksLikeProtocolMaterial('{"kind":"delegate","continueTaskId":"task_1","request":"第3/10步：继续查询"}')).toBe(true);
-    expect(looksLikeProtocolMaterial('查询进行中。<tool_call><function=route_current_turn><parameter=kind>delegate</parameter></function></tool_call>稍后汇总。')).toBe(false);
+    // 申报整段形态的专用判据（D-144 的 isWholeReplyRouteDeclaration）随申报层删除：
+    // XML/JSON 的 route 申报形状不再命中本门，由 reply-exit 的通用删除臂兜底
+    // （decision-log 2.8 的加回判据）。下面两条负例（混在自然语言里）保持一字不变。
+    expect(looksLikeProtocolMaterial('查询进行中。<tool_call><function=example_tool><parameter=kind>delegate</parameter></function></tool_call>稍后汇总。')).toBe(false);
     expect(looksLikeProtocolMaterial('接口偶发返回 {"kind":"delegate"} 标记，已忽略。')).toBe(false);
   });
 
@@ -2509,19 +2435,30 @@ describe('createTaxAgentRuntime', () => {
     expect(inlineRun).not.toHaveBeenCalled();
   });
 
-  it('当前切到后台模式也保留没有后台 run 的旧任务 inline 恢复路径', async () => {
-    const inlineRun = vi.fn(async (): Promise<SubagentTaskResult> => ({
-      taskId: 'task_legacy_inline', text: 'legacy run completed',
-      execution: { planId: 'plan_legacy', version: 1, calls: 1 },
-    }));
+  it('切到后台模式且无后台 run：旧任务仍走 inline 恢复（强制携带任务记录里的来源快照）', async () => {
+    const calls: Array<Record<string, unknown>> = [];
+    const inlineRun = vi.fn(async (args: Record<string, unknown>): Promise<SubagentTaskResult> => {
+      calls.push(args);
+      return {
+        taskId: 'task_legacy_inline', text: 'legacy run completed',
+        execution: { planId: 'plan_legacy', version: 1, calls: 1 },
+      };
+    });
     const taskManager = {
       submit: vi.fn(), submitPrepared: vi.fn(),
       list: vi.fn(async () => []), get: vi.fn(async () => null), cancel: vi.fn(),
     };
-    const platformTask = subagent(inlineRun);
+    const platformTask = subagent(inlineRun as never);
     const runtime = createTaxAgentRuntime({
       driver: ScriptedTurnDriver([{ text: 'legacy result' }]),
       sessions: new FakeSessionRepo(), platformTask, backgroundTasks: taskManager, workerDispatchMode: 'background',
+      platformTasks: {
+        listBySession: vi.fn(async () => [{
+          taskId: 'task_legacy_inline', parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+          workerMessages: [], createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+          entitySources: { currentMessage: '查幻辰财税 202608 的应收' },
+        }]),
+      },
     } as never);
 
     await runtime.handleTurn(makeCtx({ requestId: 'req_legacy_resume', resumeTaskId: 'task_legacy_inline' }), '确认继续');
@@ -2529,5 +2466,191 @@ describe('createTaxAgentRuntime', () => {
     expect(taskManager.get).toHaveBeenCalledWith({ principalId: 'wecom:user_a', sessionId: 'sess_1' }, 'task_legacy_inline');
     expect(inlineRun).toHaveBeenCalledTimes(1);
     expect(taskManager.submitPrepared).not.toHaveBeenCalled();
+    // G3：inline 恢复不再裸调 worker——原任务的来源快照进 entitySources
+    expect(calls[0]?.entitySources).toEqual({ currentMessage: '查幻辰财税 202608 的应收' });
+  });
+});
+
+/**
+ * G3/E3 恢复路径实体来源 fail-closed（2026-11-12 用户裁定 2）：
+ * 缺 entitySources 会让实体范围校验整支跳过（pi-coding-driver 的 `if (options.entitySources)`），
+ * 所以两条"确认后恢复"入口必须始终携带来源：inline 用任务记录里的快照（无快照 = 拒绝恢复，
+ * 不静默省略）；后台优先 metadata 快照、缺失时用 originMessage 做严格更窄的重建。
+ * 不新建第二套范围状态存储：快照只进既有任务记录（PlatformTaskRecord.entitySources）。
+ */
+describe('G3 恢复路径实体来源 fail-closed', () => {
+  function platformTasksWithSnapshot(taskId: string, entitySources: unknown): { listBySession: ReturnType<typeof vi.fn> } {
+    return {
+      listBySession: vi.fn(async () => [{
+        taskId, parentSessionId: 'sess_1', principalId: 'wecom:user_a',
+        workerMessages: [], createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+        ...(entitySources === undefined ? {} : { entitySources }),
+      }]),
+    };
+  }
+
+  function captureWarnEvents(eventName: string): { events: Array<Record<string, unknown>>; restore: () => void } {
+    const events: Array<Record<string, unknown>> = [];
+    const spy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      const line = args[0];
+      if (typeof line !== 'string') return;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (parsed['event'] === eventName) events.push(parsed);
+      } catch { /* 非 JSON 行忽略 */ }
+    });
+    return { events, restore: () => spy.mockRestore() };
+  }
+
+  it('inline 恢复：任务记录无来源快照（老任务）→ 拒绝恢复、零 worker 调用、可行动话术', async () => {
+    const run = vi.fn(async (): Promise<SubagentTaskResult> => ({ taskId: 'task_resume_old', text: '不应被调用' }));
+    const audit = captureWarnEvents('confirmed_plan_resume_refused');
+    try {
+      const runtime = createTaxAgentRuntime({
+        driver: ScriptedTurnDriver([{ text: '不应到达整理模型' }]),
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(run),
+        platformTasks: platformTasksWithSnapshot('task_resume_old', undefined) as never,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_resume_old', resumeTaskId: 'task_resume_old' }), '确认继续');
+
+      expect(run).not.toHaveBeenCalled();
+      expect(reply.text).toBe(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING'));
+      expect(reply.text).not.toContain('稍后再试');
+      expect(audit.events).toHaveLength(1);
+      expect(audit.events[0]).toMatchObject({ requestId: 'req_resume_old', taskId: 'task_resume_old' });
+    } finally {
+      audit.restore();
+    }
+  });
+
+  it('inline 恢复：快照读取失败 → 同样拒绝（读不到 ≠ 可以省略范围检查）', async () => {
+    const run = vi.fn(async (): Promise<SubagentTaskResult> => ({ taskId: 'task_resume_fail', text: '不应被调用' }));
+    const audit = captureWarnEvents('confirmed_plan_resume_refused');
+    try {
+      const runtime = createTaxAgentRuntime({
+        driver: ScriptedTurnDriver([{ text: '不应到达' }]),
+        sessions: new FakeSessionRepo(),
+        platformTask: subagent(run),
+        platformTasks: { listBySession: vi.fn(async () => { throw new Error('storage down'); }) } as never,
+      });
+
+      const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_resume_fail', resumeTaskId: 'task_resume_fail' }), '确认继续');
+
+      expect(run).not.toHaveBeenCalled();
+      expect(reply.text).toBe(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING'));
+      expect(audit.events).toHaveLength(1);
+    } finally {
+      audit.restore();
+    }
+  });
+
+  it('inline 恢复：快照形状非法（currentMessage 不是字符串）→ 拒绝，不注入坏来源', async () => {
+    const run = vi.fn(async (): Promise<SubagentTaskResult> => ({ taskId: 'task_resume_bad', text: '不应被调用' }));
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: '不应到达' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask: subagent(run),
+      platformTasks: platformTasksWithSnapshot('task_resume_bad', { sessionEntities: ['幻辰财税'] }) as never,
+    });
+
+    const reply = await runtime.handleTurn(makeCtx({ requestId: 'req_resume_bad', resumeTaskId: 'task_resume_bad' }), '确认继续');
+
+    expect(run).not.toHaveBeenCalled();
+    expect(reply.text).toBe(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING'));
+  });
+
+  it('后台恢复：metadata 无来源快照 → 以 originMessage 做窄重建，不省略实体门', async () => {
+    const originalRun = {
+      runId: 'run_resume_nometa', taskId: 'task_resume_b', dispatchKey: 'dispatch_nometa',
+      principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_plan_b',
+      originUserEventId: 'req_plan_b:user', request: '查询新兴五金的应收账款',
+      originMessage: '查幻辰和新兴五金', createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+      state: 'waiting_confirmation' as const, planId: 'plan_b', stepIndex: 2, totalSteps: 3,
+      metadata: { label: '任务 1 · 查幻辰和新兴五金' },
+    };
+    const prepared = {
+      taskId: 'task_resume_b', request: '宿主已收到真实确认，继续原计划。', timeoutMs: 1000,
+      workspaceDir: 'tmp/task_resume_b', snapshotWorkspace: async () => [],
+      execute: vi.fn(async () => ({ taskId: 'task_resume_b', text: 'worker should stay in the manager' })),
+    };
+    const submitted: Array<Record<string, unknown>> = [];
+    const taskManager = {
+      submit: vi.fn(),
+      submitPrepared: vi.fn(async (input: Record<string, unknown>) => {
+        submitted.push(input);
+        return { taskId: 'task_resume_b', runId: 'run_resume_after_b', dispatchKey: 'req_resume_b:resume:task_resume_b', state: 'queued' };
+      }),
+      list: vi.fn(async () => [originalRun]),
+      get: vi.fn(async (_scope: unknown, taskId: string) => taskId === 'task_resume_b' ? originalRun : null),
+      cancel: vi.fn(),
+    };
+    const platformTask = {
+      ...subagent(),
+      prepare: vi.fn(async (args: Record<string, unknown>) => {
+        return prepared;
+      }),
+    };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: 'confirmation should not reach planner' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask,
+      backgroundTasks: taskManager,
+      workerDispatchMode: 'inline',
+    } as never);
+
+    const reply = await runtime.handleTurn(
+      makeCtx({ requestId: 'req_resume_b', resumeTaskId: 'task_resume_b' }),
+      '确认继续',
+    );
+
+    expect(reply.text).toContain('排队');
+    // prepare 收到的是窄重建的来源（不是空、也不是会话/消息可变池）
+    expect(platformTask.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ entitySources: { currentMessage: '查幻辰和新兴五金' } }),
+      expect.anything(),
+    );
+    // 写回不丢：下一次恢复还能读到同一份来源
+    expect(submitted[0]).toMatchObject({
+      metadata: { kind: 'plan_resume', entitySources: { currentMessage: '查幻辰和新兴五金' } },
+    });
+  });
+
+  it('后台恢复：metadata 有快照 → 精确复用（不变宽、不变窄）', async () => {
+    const snapshot = { currentMessage: '查幻辰和新兴五金', sessionEntities: ['幻辰财税'] };
+    const originalRun = {
+      runId: 'run_resume_snap', taskId: 'task_resume_c', dispatchKey: 'dispatch_snap',
+      principalId: 'wecom:user_a', sessionId: 'sess_1', originRequestId: 'req_plan_c',
+      originUserEventId: 'req_plan_c:user', request: '查询新兴五金的应收账款',
+      originMessage: '查幻辰和新兴五金', createdAt: new Date(1).toISOString(), updatedAt: new Date(2).toISOString(),
+      state: 'waiting_confirmation' as const, planId: 'plan_c', stepIndex: 2, totalSteps: 3,
+      metadata: { entitySources: snapshot, label: '任务 1' },
+    };
+    const prepared = {
+      taskId: 'task_resume_c', request: '宿主已收到真实确认，继续原计划。', timeoutMs: 1000,
+      workspaceDir: 'tmp/task_resume_c', snapshotWorkspace: async () => [],
+      execute: vi.fn(async () => ({ taskId: 'task_resume_c', text: 'stay' })),
+    };
+    const taskManager = {
+      submit: vi.fn(),
+      submitPrepared: vi.fn(async () => ({ taskId: 'task_resume_c', runId: 'run_c2', dispatchKey: 'x', state: 'queued' })),
+      list: vi.fn(async () => [originalRun]),
+      get: vi.fn(async () => originalRun),
+      cancel: vi.fn(),
+    };
+    const platformTask = { ...subagent(), prepare: vi.fn(async () => prepared) };
+    const runtime = createTaxAgentRuntime({
+      driver: ScriptedTurnDriver([{ text: 'no planner' }]),
+      sessions: new FakeSessionRepo(),
+      platformTask, backgroundTasks: taskManager, workerDispatchMode: 'inline',
+    } as never);
+
+    await runtime.handleTurn(makeCtx({ requestId: 'req_resume_c', resumeTaskId: 'task_resume_c' }), '确认继续');
+
+    expect(platformTask.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ entitySources: snapshot }),
+      expect.anything(),
+    );
   });
 });

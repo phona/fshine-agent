@@ -291,9 +291,6 @@ export {
 } from './runtime';
 export {
   ATTACHMENT_PATHS_MARKER,
-  findRepeatedDelegatedRequest,
-  normalizeUserRequest,
-  type RepeatedRequest,
 } from './repeat-request';
 export {
   SERVER_PATH_PATTERN,
@@ -319,11 +316,7 @@ export {
   toolUserErrorFor,
 } from './error-codes';
 export {
-  ROUTE_CURRENT_TURN_TOOL,
-  ROUTE_CURRENT_TURN_TOOL_NAME,
-  reviewRouteDeclaration,
-  isSelfContradictoryDeclaration,
-  parseTurnDeclaration,
+  asPlanEntitySources,
   validatePlanEntities,
   type PlanArtifactBoundary,
   type PlanEntitySources,

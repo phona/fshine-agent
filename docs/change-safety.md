@@ -6,6 +6,8 @@
 
 **术语**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本文的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1。
 
+> **状态总注（2026-11-12，机制已删）**：本文是**带日期的波次执行记录**。其中 §11（重复请求波）、§16（会话级产物库与引用迁移波）、§23（出口收敛波 / D-144）描述的机制里，属于申报层的部分（`route_current_turn` 分析/退回、整段申报替换、`RESUMED_DECLARATION_FALLBACK`）已随申报层正式删除退役（decision-log 2.7–2.9）；保留的防线（服务器路径出口、产物回挂、执行痕迹门、Worker 协议材料防泄漏）仍有效。历史波次记录原文保留，读时按史实理解；新增回归的门槛仍以本文件 §1 与 architecture-laws 为准。
+
 ---
 
 ## 0. 模式铁律：只跑 mock，不碰真实平台

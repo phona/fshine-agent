@@ -2,14 +2,14 @@
 // 前置：兄弟仓 + config/agent.yaml + 财税 mock，脚本化驱动，不碰真平台。
 // 本用例的证据不得冒充通用证据；通用闭环只认 typecheck + unit + generic-mock。
 /**
- * 离线全链 e2e：申报路由与安全边界。共享替身见 ./harness.ts。
+ * 离线全链 e2e：委派路由与安全边界。共享替身见 ./harness.ts。
  *
- * 覆盖：缺账套先追问（申报 conversation，模型文本即回复）、申报夹带历史账套时
- * 按 delegate 申报委派并透传加工后的请求、未授权用户、群聊 @ 剥离、跳过申报时失败关闭。
+ * 覆盖：缺账套先追问（conversation 回合，模型文本即回复）、delegate 委派并透传加工后的
+ * 请求、未授权用户、群聊 @ 剥离。（"跳过申报时失败关闭"用例随申报层删除退役。）
  */
 import { describe, expect, it } from 'vitest';
 import { A2A_PROTOCOL_VERSION } from '../../packages/contracts/src/a2a-protocol';
-import { boot, gatedWorker, mainDriver, silentDriver, totalActualCalls } from './harness';
+import { boot, gatedWorker, mainDriver, totalActualCalls } from './harness';
 
 /** 记录 worker 实际收到的委派请求（宿主透传 intent.request，不做二次加工）。 */
 function recordingWorker(script: Parameters<typeof gatedWorker>[0]) {
@@ -93,11 +93,7 @@ describe('[L4 集成] 离线全链 e2e：申报路由与安全边界', () => {
     await assembly.close();
   });
 
-  it('宿主保证 Main Agent 跳过申报时失败关闭，不外发其文本（无对手工用例）', async () => {
-    const { send, assembly } = await boot({ main: silentDriver(), worker: gatedWorker([{ text: '不应执行' }]) });
-    const reply = await send('查一下幻辰财税的应收账款');
-    expect(reply).toContain('没有产生任何平台查询');
-    expect(reply).not.toContain('42 元');
-    await assembly.close();
-  });
+  // 2026-11-12 申报层正式删除：「宿主保证 Main Agent 跳过申报时失败关闭」用例的前提
+  // （存在"跳过申报"这个待失败关闭的动作）在直连下不复存在——普通回合不调工具时模型
+  // 文本即本轮回复（direct-delegation.test.ts 的 D4 已钉），这里不再保留失去对象的断言。
 });

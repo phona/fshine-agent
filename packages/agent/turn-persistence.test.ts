@@ -3,7 +3,6 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { ConversationEventRecord, TrustedContext } from '@fshine/contracts';
 import type { TurnInputContext } from '@fshine/contracts';
 import { RUN_EXECUTION_TASK_TOOL } from './src/context';
-import { ROUTE_CURRENT_TURN_TOOL_NAME } from './src/turn-contract';
 import { createCurrentUserMessage } from './src/message-reference';
 import { buildRequestKey } from './src/repeat-request';
 import {
@@ -83,9 +82,9 @@ function event(eventId: string, kind: ConversationEventRecord['kind'], content: 
   return { eventId, principalId: 'wecom:user_a', sessionId: 'sess_tp', kind, content, createdAt: '2026-10-12T00:00:00.000Z', requestId: 'req_tp' };
 }
 
-// ── extractDelegationToolResultEvents：三种工具结果路径 + 脱敏 + 截断 ──────────────
+// ── extractDelegationToolResultEvents：委派工具结果的信封/纯文本两条路径 + 脱敏 + 截断 ──
 
-describe('extractDelegationToolResultEvents：三种工具结果路径', () => {
+describe('extractDelegationToolResultEvents：委派工具结果路径', () => {
   it('terminate 路径（委派工具信封）：取 text 字段并收回 taskId', () => {
     const { events, taskResults } = extractDelegationToolResultEvents([
       toolResult(RUN_EXECUTION_TASK_TOOL, 'call_1', JSON.stringify({ taskId: 'task_a1', text: '余额 42 元' })),
@@ -101,7 +100,7 @@ describe('extractDelegationToolResultEvents：三种工具结果路径', () => {
 
   it('needs 路径（纠错环交还）：recorded=delegate 的信封同样只留 text', () => {
     const { events, taskResults } = extractDelegationToolResultEvents([
-      toolResult(ROUTE_CURRENT_TURN_TOOL_NAME, 'call_2', JSON.stringify({
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_2', JSON.stringify({
         recorded: 'delegate',
         text: '子 Agent 本轮没有执行平台查询，还缺少信息：账套。',
         taskId: 'task_b2',
@@ -116,7 +115,7 @@ describe('extractDelegationToolResultEvents：三种工具结果路径', () => {
 
   it('计划步路径（第N/M步交还）：信封里的 step/outcome 等协议字段不落库，只留 text', () => {
     const { events, taskResults } = extractDelegationToolResultEvents([
-      toolResult(ROUTE_CURRENT_TURN_TOOL_NAME, 'call_3', JSON.stringify({
+      toolResult(RUN_EXECUTION_TASK_TOOL, 'call_3', JSON.stringify({
         recorded: 'delegate',
         step: '第 1/2 步',
         stepIndex: 1,
@@ -133,15 +132,6 @@ describe('extractDelegationToolResultEvents：三种工具结果路径', () => {
     expect(events[0]?.content).toBe('第一步查完了');
     expect(events[0]?.content).not.toContain('step');
     expect(taskResults).toEqual([{ taskId: 'task_c3', resultText: '第一步查完了' }]);
-  });
-
-  it('conversation 申报没有可召回的结果：直接跳过，不落事件', () => {
-    const { events, taskResults } = extractDelegationToolResultEvents([
-      toolResult(ROUTE_CURRENT_TURN_TOOL_NAME, 'call_4', JSON.stringify({ recorded: 'conversation' })),
-    ], ctx(), RUN_EXECUTION_TASK_TOOL);
-
-    expect(events).toEqual([]);
-    expect(taskResults).toEqual([]);
   });
 
   it('非 JSON 的自然语言结果照常落库（不需要信封）', () => {

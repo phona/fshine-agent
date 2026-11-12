@@ -4,7 +4,7 @@ import type { AgentReply, BackgroundTaskEvent, ConversationLogRepo, Conversation
 import { loadTranscript, saveTranscript } from './session';
 import { ToolUserError, sumUsage, usageFieldsOf, usageSpanFields, type TurnDriver, type TurnDriverResult, type UsageTotals } from './driver';
 import { DELEGATION_TIMEOUT_FAILURE, type ContextTaskRunner, type SubagentTaskResult } from './context';
-import type { PlanEntitySources } from './turn-contract';
+import { asPlanEntitySources, type PlanEntitySources } from './turn-contract';
 import { collectSessionEntitiesSafely, mergeSessionEntities } from './session-entities';
 import { matchClarificationBinding } from './clarification-events';
 import type { OperationArgsSpecs } from './operation-labels';
@@ -49,11 +49,11 @@ import { parseResendRefs } from './resend-tool';
 import { executionLanguageFingerprints } from './execution-language';
 import { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 import { looksLikeProtocolMaterial } from './protocol-material';
-import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, PLAN_FROZEN_REFUSAL, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+import { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, PLAN_FROZEN_REFUSAL, RESUMED_PLAN_NOT_EXECUTED, RESEND_DELEGATION_EXCLUSIVE } from './runtime-messages';
 export { EXECUTION_LANGUAGE_FINGERPRINTS, executionLanguageFingerprints } from './execution-language';
 export { composeClarificationReply, hasFinancialFigure, usefulWorkerNote } from './runtime-quality';
 export { looksLikeProtocolMaterial } from './protocol-material';
-export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_DECLARATION_FALLBACK, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
+export { ACTIVATED_PLAN_NOT_EXECUTED, FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION, RESUMED_PLAN_NOT_EXECUTED } from './runtime-messages';
 
 const DEFAULT_SESSION_TTL_MS = 86_400_000;
 const DEFAULT_TURN_BUDGET_MS = 150_000;
@@ -172,7 +172,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
   const appendPlanFact = createPlanFactWriter({ taskPlans: deps.taskPlans });
   return {
     async handleTurn(ctx: TrustedContext, userMessage: string, inputContext?: TurnInputContext): Promise<AgentReply> {
-      const currentUserMessage = createCurrentUserMessage(userMessage, inputContext, buildRequestKey(userMessage, inputContext));
+      // 请求身份键（RR1 窄门的精确身份）：归一化正文 + 引用指纹的稳定哈希。落进 user
+      // message 的 hostContext；新委派时随任务条目快照（PlatformTaskRecord.requestKey）。
+      const requestKey = buildRequestKey(userMessage, inputContext);
+      const currentUserMessage = createCurrentUserMessage(userMessage, inputContext, requestKey);
       const taskEventContext = taskEventContexts.get(ctx);
       // 确认码/取消码由服务端直接匹配并执行（绕过模型）——「确认必须被代码匹配，
       // 而不是被模型理解」。未命中则按正常回合进入模型。
@@ -237,12 +240,49 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return { ...direct, text: directText };
         }
       }
+      /**
+       * inline 恢复的来源快照读取（G3）：任务条目里委派点写入的 entitySources。
+       * 读失败 / 条目缺失 / 归属不符 / 形状非法一律 null——调用方 fail-closed
+       * （拒绝恢复），绝不静默省略实体范围校验。
+       */
+      const loadInlineResumeEntitySources = async (taskId: string): Promise<PlanEntitySources | null> => {
+        if (!deps.platformTasks) return null;
+        try {
+          const records = await deps.platformTasks.listBySession(ctx.principalId, ctx.sessionId);
+          const record = records.find((item) => item.taskId === taskId);
+          if (!record || record.principalId !== ctx.principalId || record.parentSessionId !== ctx.sessionId) return null;
+          return asPlanEntitySources(record.entitySources);
+        } catch (error) {
+          console.warn(JSON.stringify({
+            event: 'confirmed_plan_resume_snapshot_read_failed',
+            requestId: ctx.requestId,
+            taskId,
+            errorType: error instanceof Error ? error.name : 'UnknownError',
+          }));
+          return null;
+        }
+      };
       if (!taskEventContext && ctx.resumeTaskId) {
         const backgroundResume = await maybeSubmitBackgroundResume({
           runner: deps.platformTask, manager: deps.backgroundTasks, trusted: ctx, taskId: ctx.resumeTaskId,
           log: (event, error) => console.warn(JSON.stringify({ event, requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' })),
         });
         if (backgroundResume.kind !== 'not_background') return await finishDirectReply(backgroundResume.text, backgroundResume.kind === 'accepted' ? 'background_task_accepted' : 'background_confirmation_unavailable');
+        // G3（2026-11-12）：inline 恢复必须携带原任务冻结的实体来源快照——缺 entitySources
+        // 会让驱动把实体范围校验整支跳过（缺省 fail-open），恢复回合的 worker 若提交计划，
+        // 越权实体将不被拦截。快照只存在于既有任务条目（委派点写入，不新建第二套存储）；
+        // 无快照的旧任务**拒绝恢复**并给可行动话术——不静默省略、不拿恢复时的会话/消息
+        // 可变池重算（那比原任务冻结面更宽）。
+        const resumeSources = await loadInlineResumeEntitySources(ctx.resumeTaskId);
+        if (!resumeSources) {
+          console.warn(JSON.stringify({
+            event: 'confirmed_plan_resume_refused',
+            requestId: ctx.requestId,
+            taskId: ctx.resumeTaskId,
+            reason: 'entity_sources_snapshot_missing',
+          }));
+          return await finishDirectReply(messageTextFor('RESUME_SCOPE_SNAPSHOT_MISSING'), 'confirmed_plan_resume_refused');
+        }
         // ③-1：恢复路径与 delegate 路径同样收尾。此前 platformTask.run 抛出的
         // ToolUserError（如 DELEGATION_AUTH_FAILURE"平台登录态过期，需要重新登录后
         // 才能继续查询"）会一路穿透到 handler.ts 顶层 catch，被换成"处理失败，请稍后
@@ -255,6 +295,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           resumed = await deps.platformTask.run({
             request: '宿主已收到用户对待确认计划的真实确认。请继续执行已激活计划中的剩余查询，不要扩大计划范围。',
             taskId: ctx.resumeTaskId,
+            entitySources: resumeSources,
           }, { trusted: ctx });
         } catch (error) {
           if (error instanceof ToolUserError) {
@@ -335,16 +376,14 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           // 是给模型的系统元数据，回落不过滤就会直接上屏并进转录（F5）。
           : (answer.text.trim() || stripFootprint(resumed.text)));
         // D-144 出口收敛：恢复分支此前在下方 return { text } 处提前收尾，出口两把尺
-        // （decideTurnExit / sanitizeUserVisibleReply）全被绕过——eval14 实测里整理模型
-        // 把 route 申报原文写成正文，直接成为终稿并落转录。这里接正常路径同一把尺；
-        // 整段=申报被替换时 fallback 优先 worker 整理文本（真实执行产物），为空则
-        // 确定性话术（不编造进度）。数值溯源的证据集 = worker 报告本身。
+        // （decideTurnExit / sanitizeUserVisibleReply）全被绕过。这里接正常路径同一把尺
+        // （路径 + 执行语言删除；整段=申报的专用替换支随申报层删除，见 protocol-material.ts
+        // 与 decision-log 2.8 的加回判据）。数值溯源的证据集 = worker 报告本身。
         const resumeExit = sanitizeUserVisibleReply({
           text,
           executed: Boolean(resumed.execution),
           needsRounds: 0,
           evidence: () => resumed.text,
-          declarationFallback: stripFootprint(resumed.text) || RESUMED_DECLARATION_FALLBACK,
         });
         logExitEvents(resumeExit.events);
         const safeText = resumeExit.text;
@@ -356,8 +395,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         // 零执行时整理模型的文本既不上屏也不进转录：它最常见的形状正是把零执行
         // 总结成"已完成"，留在转录里会污染后续回合。用宿主收尾文案整体替换。
         // 澄清回合同理：整理模型那一轮是对协议材料的翻译，整体替换掉。
-        // 终稿被出口整理改写时（D-144，含整段申报替换）同理——转录只留用户真正
-        // 收到的那一版，申报原文不落库。
+        // 终稿被出口整理改写时同理——转录只留用户真正收到的那一版。
         const savedMessages = clarificationReply || resumedBlocked || safeText !== text
           ? [...messages, synthesized]
           : latestText === safeText
@@ -482,27 +520,34 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         turn.planStepOutcomes = [...taskEventContext.planStepOutcomes];
         turn.execution = taskResultFromEvent(taskEventContext.event)?.execution ?? null;
       }
-      // RR1 门（2026-11-12 补齐）的宿主持有事实：本回合是否用过 task_control（显式状态
+      // RR1 窄门（2026-11-12 收窄）的宿主持有事实：本回合是否用过 task_control（显式状态
       // 查询——它的答复本就来自宿主状态面，不需要重新执行）。
       let taskControlUsed = false;
-      // 在册任务数（惰性查询 + 每回合缓存）：只在出口门确有可能成立时才查，避免每回合
-      // 一次存储读取。存储不可用 = 没有可依据的事实 → 记 0（门不开，不猜、不阻塞回合）。
-      let registeredTaskCount: number | undefined;
-      const countRegisteredTasks = async (): Promise<number> => {
-        if (registeredTaskCount !== undefined) return registeredTaskCount;
+      // RR1 精确身份（惰性查询 + 每回合缓存）：只在出口门确有可能成立时才查平台任务底账，
+      // 找"与本轮 requestKey 逐字相等"的已执行请求。三态：
+      //   · 'match' = 有此前执行过的完全相同请求；
+      //   · 'none' = 查到了、没有匹配；
+      //   · 'inconclusive' = 底账读不到（失败/未注入）——记可观测事件，既不当作已验证
+      //     通过、也不据此阻断普通聊天（用户裁定 1）。
+      let repeatIdentityCache: 'match' | 'none' | 'inconclusive' | undefined;
+      const exactRepeatIdentity = async (): Promise<'match' | 'none' | 'inconclusive'> => {
+        if (repeatIdentityCache !== undefined) return repeatIdentityCache;
         try {
-          registeredTaskCount = deps.platformTasks
-            ? (await deps.platformTasks.listBySession(ctx.principalId, ctx.sessionId)).length
-            : 0;
+          if (!deps.platformTasks) throw new Error('platform task ledger not injected');
+          const records = await deps.platformTasks.listBySession(ctx.principalId, ctx.sessionId);
+          repeatIdentityCache = records.some((record) => typeof record.requestKey === 'string' && record.requestKey === requestKey)
+            ? 'match'
+            : 'none';
         } catch (error) {
           console.warn(JSON.stringify({
-            event: 'session_task_count_failed',
+            event: 'rr1_identity_inconclusive',
             requestId: ctx.requestId,
+            reason: 'platform_task_ledger_unavailable',
             errorType: error instanceof Error ? error.name : 'UnknownError',
           }));
-          registeredTaskCount = 0;
+          repeatIdentityCache = 'inconclusive';
         }
-        return registeredTaskCount;
+        return repeatIdentityCache;
       };
 
       // ── 计划模式（Phase 6）宿主侧记账 ──────────────────────────────────
@@ -679,7 +724,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             }
             const workerRequest = step ? step.request : request;
             // 宿主内部委派管道（不进模型 schema，也不进工具描述）：冻结附件与逐任务
-            // 委派块的现有载体；正式删除随申报层清理，本批保持同一效果。
+            // 委派块的现有载体。
             const turnDeclaration = { kind: 'delegate' as const, request: workerRequest, ...(continueTaskId ? { continueTaskId } : {}) };
             const backgroundDispatch = deps.workerDispatchMode === 'background' || Boolean(taskEventContext);
             if (backgroundDispatch) {
@@ -692,6 +737,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 request: workerRequest,
                 turnDeclaration,
                 entitySources,
+                // 新委派的请求身份（RR1 精确身份的来源；续跑/恢复不覆盖既有身份）
+                requestKey,
                 ...(continueTaskId ? { taskId: continueTaskId } : {}),
                 ...(step ? { stepLabel: step.label } : {}),
               };
@@ -730,6 +777,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 request: workerRequest,
                 turnDeclaration,
                 entitySources,
+                // 新委派的请求身份（RR1 精确身份的来源）：写进任务条目快照
+                requestKey,
                 ...(continueTaskId ? { taskId: continueTaskId } : {}),
                 ...(step ? { stepLabel: step.label } : {}),
               }, { trusted: ctx }, signal);
@@ -738,7 +787,6 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
               turn.delegationFailed = true;
               if (step && planId) await appendPlanFact(ctx, step, planId, 'failed', { summary: '委派未完成' });
               if (error instanceof ToolUserError) {
-                error.delegationCompleted = true;
                 // T10 段2：假死冻结信号（context.ts 的 TASK_STALLED 标记）——计划冻结，
                 // 本回合后续委派由上方守卫拒绝派发。worker 进程没有被终止（检测侧不
                 // abort），任务条目留 needs 供下一回合从断点续跑。
@@ -764,12 +812,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   throw new ToolUserError(renderResourceExhaustedReply({
                     record: timedOut,
                     doneSteps: turn.planStepOutcomes.filter((entry) => entry.outcome === 'done').map((entry) => entry.label),
-                  }), { delegationCompleted: true });
+                  }));
                 }
                 throw error;
               }
               console.error(JSON.stringify({ event: 'platform_task_delegation_failed', requestId: ctx.requestId, errorType: error instanceof Error ? error.name : 'UnknownError' }));
-              throw new ToolUserError(FALLBACK_FAILURE, { delegationCompleted: true });
+              throw new ToolUserError(FALLBACK_FAILURE);
             }
             // 计划模式跨步累积执行痕迹 / 计划步计数 / 澄清与激活计划事实：规则住
             // turn-state.ts（accumulateDelegation）。
@@ -812,7 +860,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                   totalSteps: step.totalSteps,
                   stoppedAt: `${step.stepIndex}/${step.totalSteps}`,
                 }));
-                throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps), { delegationCompleted: true });
+                throw new ToolUserError(renderPlanCircuitBreak(turn.planStepOutcomes, turn.planZeroExecSteps, step.totalSteps));
               }
             }
             // 结构化歧义/未找到（Stage 3 事故根治包）：平台请用户"选一个"。**不 terminate**——
@@ -883,7 +931,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 // suggestion 是宿主与平台信封的结构化事实，照常转达（先例：
                 // renderNeedsUserText(needs, '')）。
                 const needsOnly = renderNeedsUserText(delegated.needs, '');
-                throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly, { delegationCompleted: true });
+                throw new ToolUserError(hasFinancialFigure(needsOnly) ? NO_EXECUTION_CLARIFICATION : needsOnly);
               }
               if (step) return renderPlanStepToolResult(step, delegated);
               const relay = renderNeedsToolResult(delegated.needs, delegated.taskId, stripFootprint(delegated.text));
@@ -904,7 +952,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
                 proposalId: delegated.proposalCreated.proposalId,
                 ...(step ? { step: `${step.stepIndex}/${step.totalSteps}` } : {}),
               }));
-              throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
+              throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
             }
             // 计划模式：这一步的结果交还 Main Agent（复用 Phase 5 的"交还"机制），
             // 由它继续下一步或直接汇总——不 terminate 整轮。
@@ -913,7 +961,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             if (step && !delegated.pendingPlan) return renderPlanStepToolResult(step, delegated);
             // terminate 语义：这段文本成为本轮最终回复，不再喂回模型。
             // 宿主是最后一道关：执行面注脚是给模型的元数据，绝不能出现在用户眼前。
-            throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE, { delegationCompleted: true });
+            throw new ToolUserError(stripFootprint(delegated.text) || FALLBACK_FAILURE);
           }
 
           if (deps.resendArtifactTool && tool === deps.resendArtifactTool.name) {
@@ -922,6 +970,12 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
             // 工具错误**交还模型（不终结、不消耗用户澄清轮次、零平台调用、零文件）。
             // 存在性/淘汰/字节/摘要一律不在这里判：那是 handler 依会话产物库的确定性回答
             // （runtime 不 import 产物库，保持 turn-state.ts 的既有边界）。
+            //
+            // 同回合互斥（2026-11-12 用户裁定 4）：本回合已经调用过委派工具（turn.intent
+            // 在场）时不重发——重发回合的语义是"零委派、零平台调用"，两者同回合会把已经
+            // 发生的执行报告成纯重发（副作用与审计已真实发生，不假装可撤销）。判据只用
+            // 现有回合状态；被拒的重发不记账、不终止，模型继续本轮的委派结果收尾。
+            if (turn.intent) return { error: RESEND_DELEGATION_EXCLUSIVE };
             const parsed = parseResendRefs(args);
             if (!parsed.ok) return { error: parsed.error };
             for (const ref of parsed.refs) turn.resendRefs.push(ref);
@@ -999,13 +1053,13 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       // 而 Stage 3 实测事故的形状恰恰是 execution 为真（检索类调用真的发生过、gateCalls>0）
       // 而模型把内部协议材料原样当回复。判据只有形状（协议 JSON 的字段名），不嗅探内容。
       const protocolReplay = looksLikeProtocolMaterial(result.text);
-      // RR1 门的会话事实（惰性）：只有上面所有其他闸门都可能成立（本回合零委派零执行、
-      // 回复带数字结论）时才查一次"本会话在册任务数"。taskEventContext（后台事件回合）
-      // 不是用户实时提问，不适用本门。
+      // RR1 窄门的会话事实（惰性）：只有上面所有其他闸门都可能成立（本回合零委派零执行、
+      // 回复带数字结论）时才查一次平台任务底账，找"与本轮完全相同且已执行过"的请求。
+      // taskEventContext（后台事件回合）不是用户实时提问，不适用本门。
       const repeatGateCandidate = !taskEventContext && !turn.delegationFailed && !turn.intent
         && !turn.execution && !turn.pendingPlan && !result.pendingPlan && !turn.backgroundStarted
         && !taskControlUsed && !protocolReplay && hasFinancialFigure(result.text);
-      const sessionTaskCount = repeatGateCandidate ? await countRegisteredTasks() : 0;
+      const repeatIdentity = repeatGateCandidate ? await exactRepeatIdentity() : 'none';
       // 出口校验的两段门（执行痕迹门 + 协议复读门）判定住 turn-exit.ts：纯函数，只回答
       // "这一回合外发什么、记什么事件"。副作用留在调用点——日志按决策带回的级别打，
       // needsRelay 只拿决策选中的文本，确定性话术经 finishDirectReply 提前返回。
@@ -1028,7 +1082,7 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         lastNeeds: turn.lastNeeds,
         activatedPlan: turn.activatedPlan,
         protocolReplay,
-        sessionTaskCount,
+        repeatIdentity,
         taskControlUsed,
         resultText: result.text,
         hasFinancialFigure,
@@ -1051,11 +1105,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
           return { text: '' };
         }
         if (turn.backgroundStarted) {
-          // 后台受理回执必须连同委派 toolCall/toolResult（details.routeReceipt='background'，
-          // 由驱动的 terminate 语义写入 result.messages）一起落转录（修复 5）：direct 出口只落
+          // 后台受理回执必须连同委派 toolCall/toolResult 一起落转录（修复 5）：direct 出口只落
           // [loaded, user, 合成回执] 时这对消息整体被丢弃，转录里看不到"同文请求已后台派发"
           // 的事实（2026-10-19 防线要防的 B1/F6 形态）。受理只是登记与排队状态，
-          // 不是执行成功的证明：routeReceipt='background' 本就不算执行，语义不变。
+          // 不是执行成功的证明，语义不变。
           const continuationMessages = sanitizeTranscriptMessages(stripHistoryNotes(result.messages.slice(initialMessageCount)));
           return await finishDirectReply(exitDecision.text, exitDecision.outcome, undefined, mainUsage, Boolean(turn.execution), continuationMessages);
         }
@@ -1113,8 +1166,8 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
       return { text: replyText, ...(turn.resendRefs.length > 0 ? { artifactRefs: turn.resendRefs } : {}) };
       async function finishDirectReply(text: string, outcome: string, toolResult?: string, usage?: UsageTotals, executed?: boolean, middleMessages?: AgentMessage[]): Promise<AgentReply> {
         const now = Date.now();
-        // Direct exits run the same final-text ruler (D-144 出口收敛): paths + whole-reply
-        // declaration replacement + execution-language scrub. 数值溯源仍只在正常路径做——
+        // Direct exits run the same final-text ruler (D-144 出口收敛): paths +
+        // execution-language scrub. 数值溯源仍只在正常路径做——
         // direct 文本是宿主/适配器/平台确定性给出的，不是本轮模型自由产出。
         const replyExit = sanitizeDirectExitReply({ text, ...(executed === undefined ? {} : { executed }) });
         logExitEvents(replyExit.events);
@@ -1150,8 +1203,10 @@ export function createTaxAgentRuntime(deps: TaxAgentRuntimeDeps): import('@fshin
         entitySourcesOf: (taskEvent) => {
           const metadata = taskEvent.run.metadata;
           const sources = metadata && typeof metadata === 'object' ? (metadata as Record<string, unknown>)['entitySources'] : undefined;
-          if (sources && typeof sources === 'object' && !Array.isArray(sources)
-            && typeof (sources as Record<string, unknown>)['currentMessage'] === 'string') return sources as PlanEntitySources;
+          const snapshot = asPlanEntitySources(sources);
+          if (snapshot) return snapshot;
+          // 快照缺失/形状非法（老条目）→ 用原任务请求做**严格更窄**的重建（与后台恢复同形）；
+          // 绝不省略来源——缺省会让实体范围校验整支跳过。
           const quotedEvidence = getQuotedEvidence(taskEvent.run.inputContext?.messageReference);
           return { currentMessage: taskEvent.run.originMessage, ...(quotedEvidence ? { quotedEvidence } : {}) };
         },

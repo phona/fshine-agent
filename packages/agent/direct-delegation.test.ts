@@ -245,7 +245,7 @@ describe('直连委派：Main 直接调用 run_task', () => {
       driver,
       sessions: new FakeSessionRepo(),
       platformTask: subagent(async () => {
-        const stalled = new ToolUserError('平台回应停滞。', { delegationCompleted: true });
+        const stalled = new ToolUserError('平台回应停滞。');
         (stalled as { taskStalled?: boolean }).taskStalled = true;
         throw stalled;
       }),
