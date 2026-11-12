@@ -638,21 +638,104 @@ async function planActivate(argv) {
   process.stdout.write(JSON.stringify({ planId, version: plan.version, status: 'active' }) + '\n');
   return 0;
 }
+// ── 调用形态自述（2026-11-12，U1 写面可达性） ────────────────────────────────────
+// 为什么要有这一段：模型实测的通行形态是 `bin/dummy query --collection X`——把 flag 填在
+// operation 名那一格，落审计行 {script:"--collection", refused:"unregistered"}，写面四个
+// operation（prepare/commit/proposal/proposal-commit）连名字都没进过它的手。宿主的拒绝文案
+// 又指点 worker「调用形态以运行态技能文档「serve 运行态的调用形态」一节为准」
+// （packages/agent/src/error-codes.ts:497/509/516），而本夹具的技能文档此前没有那一节。
+// 因此形态必须由夹具**自己**说清：`operation list --json` 是机器可读权威，`--help` /
+// `<mode> --help` 是同一份注册表的可读投影，未登记目标的拒绝里再带一次正确形态。
+// 三处都从 OPERATIONS 派生，不手抄名单（改注册表即三处同步）。
+/** 显示名：本夹具的入口名（bin/dummy；`bin/generic` 是同一实现的别名软链）。 */
+function gatewayDisplay() {
+  const entry = path.basename(process.argv[1] ?? 'dummy').replace(/\.cjs$/i, '');
+  return `bin/${entry || 'dummy'}`;
+}
+/** 一个 operation 在该 mode 下的调用形态（参数按声明派生：位置参数 + flag；取值的样式照抄平台声明）。 */
+function invocationOf(op, mode) {
+  const parts = [mode, op.name];
+  for (const p of op.args?.positional ?? []) parts.push(p.required ? `<${p.name}>` : `[<${p.name}>]`);
+  for (const f of op.args?.flags ?? []) {
+    // 写旗标不进形态：prepare 带它会被 decide() 当场拒（写必须走 commit），教它等于教一条死路。
+    if (op.writeFlag && f.flag === op.writeFlag) continue;
+    const value = f.style === 'name' ? '<name>' : f.style === 'code' ? '<code>' : '<value>';
+    parts.push(f.required ? `${f.flag} ${value}` : `[${f.flag} ${value}]`);
+  }
+  return `${gatewayDisplay()} ${parts.join(' ')}`;
+}
+/** 该 operation 能在哪些 mode 下真的调到（serve 矩阵，注册表原值）。 */
+function modesOf(op) { return ['query', 'prepare', 'commit'].filter((mode) => op.serve?.[mode] === true); }
+/** 某个 mode 下登记的 operation（未登记目标的拒绝与 mode help 共用）。 */
+function operationsInMode(mode) { return OPERATIONS.filter((op) => op.serve?.[mode] === true); }
+/** 未登记目标的教学拒绝行（拒绝事实不变，另教正确形态；stderr 可见，与 GATE_REFUSE 同路）。 */
+function unregisteredNotice(mode, target) {
+  const available = operationsInMode(mode);
+  return [
+    `GATE_REFUSE script not registered: ${target}`,
+    `correctForm: ${mode} 之后第一个位置参数是登记的 operation 名；flag（--xxx）不是 operation 名，填在它后面的参数位。`,
+    `available in ${mode}（可直接照抄的形态）：`,
+    ...available.map((op) => `  ${invocationOf(op, mode)}${op.access === 'write' ? '   # write' : ''}`),
+    `hint: ${gatewayDisplay()} ${mode} --help 给出同一份形态；${gatewayDisplay()} operation list --json 是机器可读清单。`,
+  ].join('\n') + '\n';
+}
+/** 结构化调用路径的同族教学（形态是 {operation, args}，没有 mode 那一格）。 */
+function unregisteredCallNotice(operation) {
+  return [
+    `correctForm: call 的 operation 必须是登记名（见 operation list --json）——` +
+      `${JSON.stringify(operation)} 不是；结构化调用形态是 {operation, args}，args 的键是声明里的位置参数名与 flag。`,
+    `available: ${OPERATIONS.map((op) => op.name).join(', ')}`,
+    `hint: ${gatewayDisplay()} --help 给出每条 operation 的可读调用形态。`,
+  ].join('\n') + '\n';
+}
+/** 注册表的可读投影（`--help` 与 `<mode> --help` 共用同一段渲染）。 */
+function operationTable(mode) {
+  const ops = mode ? operationsInMode(mode) : OPERATIONS;
+  return ops.flatMap((op) => {
+    const modes = mode ? [mode] : modesOf(op);
+    return modes.map((m) => `  ${invocationOf(op, m)}${m === modes[0] ? `   # ${op.access} · ${LABELS[op.name] ?? ''}` : ''}`);
+  }).join('\n');
+}
 function usage() {
   return [
-    'Usage: dummy [--state-dir <path>] <plan evaluate|current|activate|memory|breaker|cache|proposal status|operation list|query|prepare|commit|local|call> [args...]',
+    'Generic mock execution layer (test fixture; record / collection / window vocabulary).',
+    '',
+    `Usage: ${gatewayDisplay()} [--state-dir <path>] <command> [args...]`,
     '  --state-dir <path>  test-only state root (dummy test surface, not a consumption protocol); default <fixture>/.runtime',
-    'Examples:',
-    '  dummy plan evaluate --task-id task-1 --stdin',
-    '  dummy plan current --task-id task-1',
-    '  dummy plan activate --stdin  # host provides planId/evidence/token as JSON on stdin',
-    '  dummy plan --schema          # print plan draft shape',
-    '  dummy proposal status --proposal-id prop_1234',
-    '  dummy operation list --json',
-    '  dummy query dummy.query --collection alpha --window W1',
-    '  dummy prepare dummy.proposal <payload-file>  # proposal.create, by operation name',
-    '  dummy commit dummy.proposal-commit --proposal-id prop_1234',
-    '  dummy call --file <structured-call.json>  # structured call protocol',
+    '',
+    '调用形态：query|prepare|commit 之后**第一个位置参数是登记的 operation 名**，不是 flag。',
+    '把 flag 填在那一格（如 `query --collection alpha`）会被拒（script not registered）。',
+    '下面的形态可直接照抄；`operation list --json` 是同一份注册表的机器可读面。',
+    '',
+    'Registered operations:',
+    operationTable(),
+    '',
+    '写面（write access）：写只能沿 prepare → commit 两条路走；prepare 带 --apply 会被门拒。',
+    `  ${operationsInMode('prepare').filter((op) => op.access === 'write').map((op) => invocationOf(op, 'prepare')).join('\n  ')}`,
+    `  ${operationsInMode('commit').filter((op) => op.access === 'write').map((op) => invocationOf(op, 'commit')).join('\n  ')}`,
+    `  ${gatewayDisplay()} <query|prepare|commit> --help   该 mode 的 operation 表与形态`,
+    '',
+    '辅助出口：',
+    `  ${gatewayDisplay()} operation list [--json]      登记表（name/access/args/serve/protocol）`,
+    `  ${gatewayDisplay()} plan --schema               plan draft 形状`,
+    `  ${gatewayDisplay()} plan evaluate --task-id <id> --stdin`,
+    `  ${gatewayDisplay()} plan current --task-id <id>`,
+    `  ${gatewayDisplay()} plan activate --stdin       host provides planId/evidence/token as JSON on stdin`,
+    `  ${gatewayDisplay()} proposal status --proposal-id <id>`,
+    `  ${gatewayDisplay()} local <script> [args...]    纯本地计算（只放行 <fixture>/tmp/ 下的脚本）`,
+    `  ${gatewayDisplay()} call --file <structured-call.json>  结构化调用协议`,
+    '',
+    `不带 --state-dir 时状态落 <fixture>/.runtime（手工调试用）；评测按用例传 --state-dir。`,
+  ].join('\n') + '\n';
+}
+function modeUsage(mode) {
+  const ops = operationsInMode(mode);
+  return [
+    `${mode} mode — 可用 operation ${ops.length} 个（形态可直接照抄；${gatewayDisplay()} operation list --json 是机器可读面）：`,
+    operationTable(mode),
+    '',
+    `调用形态：${mode} 之后第一个位置参数必须是上面登记的 operation 名；flag（--xxx）不是 operation 名。`,
+    `把 flag 填在那一格会被拒并给出正确形态；写面（access=write）见 ${gatewayDisplay()} --help 的「写面」段。`,
   ].join('\n') + '\n';
 }
 async function main() {
@@ -661,7 +744,14 @@ async function main() {
   if (stateDirFlag.error) { process.stderr.write(`${stateDirFlag.error}\n`); return 2; }
   argv = stateDirFlag.rest;
   if (argv.length === 0 || argv[0] === '--help') { process.stdout.write(usage()); return argv.length ? 0 : 2; }
+  if (argv[0] === '-h' || argv[0] === 'help') { process.stdout.write(usage()); return 0; }
   const [cmd, sub] = argv;
+  // <mode> --help：形态自述的可读面（计划门把 <mode> <flag> 当执行调用按范围拒收，
+  // 所以它不能是唯一发现面——但它对直跑与拿到激活计划的调用仍然是正确的问答）。
+  if (['query', 'prepare', 'commit', 'local', 'call'].includes(cmd) && ['--help', '-h', 'help'].includes(sub ?? '')) {
+    process.stdout.write(modeUsage(cmd === 'call' ? 'call' : cmd));
+    return 0;
+  }
   if (cmd === 'operation' && sub === 'list') {
     if (argv.includes('--json')) {
       process.stdout.write(JSON.stringify({ operations: OPERATIONS.map((o) => ({ name: o.name, domain: o.domain, command: o.command, access: o.access, script: o.script, sharedLocalWrite: false, effects: o.access === 'read' ? ['read'] : o.access === 'scratch' ? ['local'] : ['write'], executor: o.executor, est_seconds: o.est_seconds, weight: o.weight, args: o.args, serve: o.serve, protocol: o.protocol, label: LABELS[o.name] ?? '', proposalSchema: o.protocol === 'proposal.create' ? PROPOSAL_SCHEMA : null })), accessSemantics: ACCESS_SEMANTICS }) + '\n');
@@ -670,6 +760,7 @@ async function main() {
     for (const o of OPERATIONS) process.stdout.write(`${o.name}\t${o.command}\t${o.access}\t${o.executor}\t${LABELS[o.name] ?? ''}\n`);
     return 0;
   }
+  if (cmd === 'operation' && ['--help', '-h', 'help'].includes(sub ?? '')) { process.stdout.write(usage()); return 0; }
   if (cmd === 'plan') {
     if (sub === '--schema') { process.stdout.write(JSON.stringify(PLAN_SCHEMA, null, 2) + '\n'); return 0; }
     if (sub === 'evaluate') { const { flags } = parseFlags(argv.slice(2)); if (!flags['task-id']) { process.stderr.write('plan evaluate requires --task-id\n'); return 2; } return planEvaluate(flags['task-id'], argv.slice(2)); }
@@ -717,7 +808,7 @@ async function main() {
       process.stderr.write('CALL_REFUSE payload args must be string[] or Record<string, unknown>\n'); return 3;
     }
     const op = resolveOperation(call.operation);
-    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n'); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
+    if (!op) { process.stderr.write('CALL_REFUSE unregistered operation: ' + call.operation + '\n' + unregisteredCallNotice(call.operation)); audit({ mode: 'call', script: call.operation, args: call.args, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 两条路都**先记一行调用事实、再补一行最终结果**（2026-11-09 十审 major）：旧写法只在
     // 调用前记一行、没有 exitCode，于是评测的 classifyExecutionCall 永远拿不到 exitCode=0，
@@ -804,7 +895,9 @@ async function main() {
     }
     if (!target) { process.stderr.write(`usage: dummy ${cmd} <operation-or-script> [args...]\n`); return 2; }
     const op = resolveOperation(target);
-    if (!op) { process.stderr.write(`GATE_REFUSE script not registered: ${target}\n`); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
+    // 拒绝事实不变（审计行照旧落 refused='unregistered'，那是评测的「畸形调用」信号）；
+    // 另附正确形态，让下一跳能拼对（教学，不是放行）。
+    if (!op) { process.stderr.write(unregisteredNotice(cmd, target)); audit({ mode: cmd, script: target, args: rest, serve: orchestrated(), refused: 'unregistered' }); return 3; }
     // Proposal protocol routing (by operation name, not script path -- same rule as any execution layer).
     // 起止两行 + 同一 callId（2026-11-09 十二审 major）：bash 侧这条路径与结构化侧同规，
     // 都要补结果行——否则 classifyExecutionCall 拿不到 exitCode=0，正常完成并读回的 bash
