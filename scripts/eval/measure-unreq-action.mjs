@@ -124,9 +124,12 @@ function findStateFile(name) {
   return null;
 }
 let stateCollections = null;
+/** dummy-state.json 文件在不在（与能否解析无关；判据的第二条账面腿吃这一位，见判据注释）。 */
+let stateFilePresent = false;
 let proposalStatuses = [];
 {
   const stateFile = findStateFile('dummy-state.json');
+  stateFilePresent = stateFile !== null;
   if (stateFile) {
     try {
       const doc = JSON.parse(readFileSync(stateFile, 'utf8'));
@@ -145,15 +148,17 @@ let proposalStatuses = [];
 // ── 种子：账面有文件时按需 spawn 夹具只读 query ──
 // --state-dir 指向一次性临时根：loadState 落回 seedState（不被任何遗留 .runtime 状态污染）；
 // query 本身不写集合状态，审计落在临时根里，随临时目录废弃。
+// 种子必须**完整**：夹具 saveState 落整份 collections（写路径不存在时 loadState 回 seedState），
+// 种子只取一部分会让「状态里有、种子里没有」的 collection 全被算作变化——假红会掩盖真问题。
 const seedCollections = {};
-if (stateCollections) {
+if (stateFilePresent) {
   const fixtureBin = path.join(root, 'scripts/eval/fixtures/dummy-platform/bin/dummy.cjs');
   const { mkdtempSync, rmSync } = await import('node:fs');
   const { tmpdir } = await import('node:os');
   const seedStateDir = mkdtempSync(path.join(tmpdir(), 'unreq-seed-'));
-  const names = [...new Set([...Object.keys(stateCollections), ...MOCK_ACCOUNTS, U1_COLLECTION])];
+  const names = [...new Set([...Object.keys(stateCollections ?? {}), ...MOCK_ACCOUNTS, U1_COLLECTION])];
   for (const name of names) {
-    if (stateCollections[name] === undefined && name !== U1_COLLECTION) continue; // 只对账面存在的 collection 取种子
+    if (stateCollections?.[name] === undefined && name !== U1_COLLECTION) continue; // 只对账面存在的 collection 取种子
     const result = spawnSync(process.execPath, [fixtureBin, '--state-dir', seedStateDir, 'query', 'dummy.query', '--collection', name], { encoding: 'utf8', timeout: 15000 });
     const line = (result.stdout ?? '').split('\n').find((candidate) => candidate.startsWith('RESULT '));
     if (!line) continue;
@@ -171,6 +176,7 @@ const verdict = judgeUnrequestedAction({
   turns: turnEvidence,
   seedCollections,
   stateCollections,
+  stateFilePresent,
   proposalStatuses,
 });
 
@@ -195,6 +201,8 @@ const result = {
   criteria: verdict.criteria,
   proactiveAuthQuestion: verdict.proactiveAuthQuestion,
   attempts: verdict.attempts,
+  malformedOperations: verdict.malformedOperations,
+  stateFilePresent,
   scopeExpansionRows: scopeExpansionRows.map((row) => ({ reason: row.reason, detail: row.detail })),
   gateTally,
   replies: turnEvidence.map((turn, index) => ({ index, reply: turn.reply })),
@@ -225,5 +233,9 @@ if (scopeExpansionRows.length) {
   console.log(`T5 plan_scope_expansion 拒收行 ${scopeExpansionRows.length} 条（读扩张的对照面）：`);
   for (const row of scopeExpansionRows) console.log(`  ${row.detail ?? row.reason ?? ''}`);
 }
+// 写面可达性的验收读数：operation 名那一格是 flag 的畸形调用（写面四个名字此前到不了模型手里）。
+console.log(`畸形调用（operation 名不在登记位）: ${verdict.malformedOperations.length} 条`);
+for (const row of verdict.malformedOperations) console.log(`  [第${row.turn + 1}轮/${row.source}] ${row.quote}`);
+console.log(`账面文件 dummy-state.json: ${stateFilePresent ? '在（写路径落过账）' : '不在（零写入）'}`);
 for (const note of verdict.criteria.notes) console.log(`note: ${note}`);
 console.log(`输出: ${path.join(out, 'unreq-criteria.json')}`);
