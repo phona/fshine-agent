@@ -13,8 +13,10 @@
  *   · 提案创建（`prepare <proposal operation> <payload>`）→ 被宿主提案拦截拦下。
  * 被测线（今天的实跑结论见本文件顶部声明与 B3 回报）：
  *   · `bin/dummy call --file <json>` —— 未注册 mode，门给不出任何形态/范围裁决；
- *   · `cd <platformRoot> && ./bin/dummy query …` —— 首词非网关，整个网关分支被跳过。
- * 这两条今天都被放行（`serve_gate:bash` status=ok、无 reason），即 B3 要测的那个洞。
+ *   · `cd <platformRoot> && ./bin/dummy query …` —— 首词非网关，整个网关分支被跳过；
+ *   · `bash -c '…'` —— 解释器包装（发布阻断 #1，2026-11-12）：首词是 `-c`，
+ *     修前整族绕过形态分类与计划前置（门行 status=ok），修后由保守包含式判据拒。
+ * 前两条今天已被门拒（B 轨收口），第三条本轮收口；三条都必须拒且审计行在册。
  *
  * 第二条测试是**影响面证据**（不是判据）：同一条 `call --file` 命令经夹具真的能执行一个
  * 未声明对象的查询——门放行不是纸面问题。
@@ -28,6 +30,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import type { Model } from '@earendil-works/pi-ai/compat';
 import { createPiCodingWorkerSession, type PiCodingWorkerSession } from '../../packages/agent/src/pi-coding-driver';
+import { messageTextFor } from '../../packages/agent/src/error-codes';
 import type { ServeGateEvent } from '../../packages/agent/src/serve-gate';
 import type { PlanCliRunner } from '../../packages/agent/src/plan-runtime';
 import { loadOperationProtocols, loadOperationSemantics } from '../../packages/agent/src/operation-labels';
@@ -119,7 +122,7 @@ function bash(worker: PiCodingWorkerSession, command: string, id: string) {
 }
 
 describe('B3 · bash 形态的写面/越范围调用必须被拒（shell 绕过专项）', () => {
-  it('控制组绿 + 两条被测线必须红', async () => {
+  it('控制组绿 + 三条被测线必须红（含解释器包装族）', async () => {
     const { worker, events } = await workerWithPlanActivated();
     // 激活一份只声明 alpha/W1 的计划。
     const activated = await bash(worker, PLAN_COMMAND, 'call_plan');
@@ -147,6 +150,25 @@ describe('B3 · bash 形态的写面/越范围调用必须被拒（shell 绕过�
     // ── 被测线 2：首词非网关、命令链里带网关调用 → 同样必须被拒 ──
     const chained = await bash(worker, `cd ${FIXTURE_ROOT} && ./bin/dummy query dummy.query --collection beta`, 'call_chained');
     expect(chained?.block).toBe(true);
+
+    // ── 被测线 3（发布阻断 #1）：解释器包装（bash -c）→ 必须被拒 ──
+    // 修前：首词是 `-c`，整族绕过形态分类、计划前置与 T5 对账（门行 status=ok，
+    // 夹具实跑真的执行了未声明对象的查询）；修后：保守包含式判据 fail-closed。
+    const wrapped = await bash(
+      worker,
+      `bash -c 'bin/dummy query src/dummy/scripts/query.js --collection beta --window W1'`,
+      'call_wrapped',
+    );
+    expect(wrapped?.block).toBe(true);
+    expect(wrapped?.reason).toBe(messageTextFor('SERVE_BASH_GATEWAY_WRAPPED'));
+
+    // 审计行在册（发布阻断验收信号）：两条被测线各留一条 allowed=false 的行 + 理由。
+    const wrappedRow = events.find((event) => event.detail?.startsWith("bash -c 'bin/dummy query"));
+    expect(wrappedRow?.allowed).toBe(false);
+    expect(wrappedRow?.reason).toBe(messageTextFor('SERVE_BASH_GATEWAY_WRAPPED'));
+    const callFileRow = events.find((event) => event.detail?.startsWith('bin/dummy call --file'));
+    expect(callFileRow?.allowed).toBe(false);
+    expect(callFileRow?.reason).toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
 
     // 放行面留痕：被放行的 bash 行只该有控制组 1 那一次（拒收不得留 allowed:true 的假痕迹）。
     const allowedBash = events.filter((event) => event.allowed && event.tool === 'bash');

@@ -3,7 +3,7 @@
  *
  * 钉住的都是「缺数据被写成结论」的旧形状：
  *   1) 双方 judge 四维全 null ⇒ 不得输出「区分度充分」，必须是「无法判定（数据不足）」
- *      且退出码非零；
+ *      且退出码=3（数据不足，2026-11-12 语义对齐：灰是 3、判据红是 2）；
  *   2) 一方缺维度 ⇒ 整例不得合计（旧实现把剩余维度加起来冒充完整分差）；
  *   3) 稳定性 4/5（80%）+ 有未消回归 ⇒ 建议文案不得是「可做 required」；
  *   4) 回归证据缺失同样不得默认清白（fail-closed）。
@@ -63,7 +63,8 @@ describe('区分度：有效比较与缺失分别统计（finding 3）', () => {
 
     expect(report.discrimination.validComparisons).toBe(0);
     expect(report.discrimination.missing).toBe(1);
-    expect(report.exitCode).toBe(2);
+    // 数据不足 → 3（2026-11-12 Owner 批准对齐 exit-codes.ts：灰/用法错误=3，判据红=2）。
+    expect(report.exitCode).toBe(3);
     expect(report.markdown).toContain('无法判定（数据不足：缺失 1 例');
     expect(report.markdown).not.toContain('区分度充分');
     expect(report.markdown).not.toContain('强模型明显更优（1/1');
@@ -226,7 +227,7 @@ describe('「可做 required」的额外条件（finding 6）', () => {
 });
 
 describe('main：文件输入路径的退出码与结论一致', () => {
-  it('双方四维全 null 的合成输入 ⇒ exit 2 且 stdout 无「区分度充分」', () => {
+  it('双方四维全 null 的合成输入 ⇒ exit 3 且 stdout 无「区分度充分」', () => {
     const dir = tempDir();
     const strongPath = writeJson(dir, 'strong.json', { summary: { 'G-A1': caseSummary(NULL_DIMS) } });
     const weakPath = writeJson(dir, 'weak.json', { summary: { 'G-A1': caseSummary(NULL_DIMS) } });
@@ -245,7 +246,8 @@ describe('main：文件输入路径的退出码与结论一致', () => {
       logSpy.mockRestore();
     }
 
-    expect(code).toBe(2);
+    // 数据不足（双方四维全 null ⇒ 无法判定）→ 3。
+    expect(code).toBe(3);
     expect(writes.join('')).toContain('无法判定（数据不足');
     expect(writes.join('')).not.toContain('区分度充分');
   });
@@ -257,7 +259,7 @@ describe('main：文件输入路径的退出码与结论一致', () => {
  * 旧形状：mergeStability 只遍历实际存在的 summary 项，分母缺用例/缺轮时静默缩小——
  * 合成输入「A=1/1 的文件 + 一个空 summary 文件」曾输出「100%、可做 required」并 exit 0。
  * 新判据：调用方声明期望结构（--expect-cases / --expect-rounds，工作流把喂给探针的同一份值
- * 传进来），结构不符 ⇒ 不出任何通过率结论，exit 2。
+ * 传进来），结构不符 ⇒ 不出任何通过率结论，exit 3（数据不足/输入不完整）。
  */
 describe('稳定性结构校验：分母不完整不得下结论（codex major）', () => {
   it('stabilityStructureGaps：缺用例 / 轮数不符 / 非期望用例都报出来', async () => {
@@ -272,7 +274,7 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
     expect(stabilityStructureGaps([['G-A1', { rounds: 2 }]], null)).toEqual([]);
   });
 
-  it('buildReport：A=1/1 + 空 summary 文件（期望 2 轮 2 例）⇒ 无法判定、exit 2、无「可做 required」', () => {
+  it('buildReport：A=1/1 + 空 summary 文件（期望 2 轮 2 例）⇒ 无法判定、exit 3、无「可做 required」', () => {
     const doc = { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } };
     const empty = { summary: {} };
     const out = buildReport({
@@ -282,7 +284,8 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
       evalRealBaselineDoc: { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } },
       evalRealLatestDoc: { summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } },
     });
-    expect(out.exitCode).toBe(2);
+    // 结构不完整（缺用例/轮数不符）→ 3。
+    expect(out.exitCode).toBe(3);
     expect(out.markdown).toContain('无法判定');
     expect(out.markdown).toContain('缺用例 G-B1');
     expect(out.markdown).toContain('G-A1 轮数 1 ≠ 期望 2');
@@ -337,9 +340,11 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
     } finally {
       logSpy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 结构不符（缺用例）→ 3。
+    expect(code).toBe(3);
     expect(writes.join('')).toContain('缺用例 G-B1');
-    expect(main(['--expect-cases', 'G-A1', stabilityPath])).toBe(2);
+    // 用法错误（稳定性输入缺 --expect-rounds）→ 3。
+    expect(main(['--expect-cases', 'G-A1', stabilityPath])).toBe(3);
   });
 });
 
@@ -350,7 +355,7 @@ describe('稳定性结构校验：分母不完整不得下结论（codex major�
  *   ② 期望结构必填：给了稳定性输入就必须声明用例集与轮数。
  */
 describe('默认入口收口：期望结构必填（codex major 第三轮）', () => {
-  it('main：给了稳定性输入但不声明期望结构 ⇒ exit 2 并说明必填', () => {
+  it('main：给了稳定性输入但不声明期望结构 ⇒ exit 3 并说明必填', () => {
     const dir = tempDir();
     const stabilityPath = writeJson(dir, 'stab.json', {
       rounds: 2,
@@ -364,7 +369,8 @@ describe('默认入口收口：期望结构必填（codex major 第三轮）', (
     } finally {
       errSpy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 用法错误（给稳定性输入但不声明期望结构）→ 3。
+    expect(code).toBe(3);
     expect(writes.join('')).toContain('--expect-cases');
   });
 });
@@ -470,7 +476,8 @@ describe('区分度阶段独立声明轮数（codex blocking：真实调用形�
     } finally {
       errSpy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 用法错误（区分度输入不成对声明轮数）→ 3。
+    expect(code).toBe(3);
     expect(writes.join('')).toContain('--expect-disc-rounds');
   });
 });
@@ -553,7 +560,7 @@ describe('声明要求覆盖所有入口（codex major：需求面闭合）', ()
     ],
   });
 
-  it('区分度-only 调用（无稳定性文件）不给声明 ⇒ 用法错误 exit 2', () => {
+  it('区分度-only 调用（无稳定性文件）不给声明 ⇒ 用法错误 exit 3', () => {
     const dir = tempDir();
     const strongPath = writeJson(dir, 'strong.json', doc(2));
     const weakPath = writeJson(dir, 'weak.json', doc(1));
@@ -565,11 +572,12 @@ describe('声明要求覆盖所有入口（codex major：需求面闭合）', ()
     } finally {
       spy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 用法错误（区分度-only 不给声明）→ 3。
+    expect(code).toBe(3);
     expect(errs.join('')).toContain('--expect-cases');
   });
 
-  it('稳定性-only 调用不给轮数声明 ⇒ 用法错误 exit 2', () => {
+  it('稳定性-only 调用不给轮数声明 ⇒ 用法错误 exit 3', () => {
     const dir = tempDir();
     const stabilityPath = writeJson(dir, 'stab.json', { rounds: 2, summary: { 'G-A1': { mechanical_pass_count: 1, rounds: 1 } } });
     const errs: string[] = [];
@@ -580,7 +588,8 @@ describe('声明要求覆盖所有入口（codex major：需求面闭合）', ()
     } finally {
       spy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 用法错误（稳定性-only 不给轮数声明）→ 3。
+    expect(code).toBe(3);
     expect(errs.join('')).toContain('--expect-rounds');
   });
 });
@@ -774,7 +783,8 @@ describe('重复用例 id 拒绝加权（声明集是集合）', () => {
       errSpy.mockRestore();
       logSpy.mockRestore();
     }
-    expect(code).toBe(2);
+    // 用法错误（--expect-cases 含重复 id）→ 3。
+    expect(code).toBe(3);
     expect(errs.join('')).toContain('重复');
     expect(errs.join('')).toContain('A');
     const combined = `${logs.join('')}\n${errs.join('')}`;
@@ -810,7 +820,8 @@ describe('重复用例 id 拒绝加权（声明集是集合）', () => {
       },
       regressionDoc: { unresolved: [] },
     });
-    expect(out.exitCode).toBe(2);
+    // 结构输入不可用（重复声明 ⇒ 无法判定）→ 3，不是判据红。
+    expect(out.exitCode).toBe(3);
     expect(out.markdown).toContain('重复');
     expect(out.markdown).not.toContain('强模型明显更优');
     expect(out.markdown).not.toContain('可评估 required 化');
@@ -833,5 +844,59 @@ describe('重复用例 id 拒绝加权（声明集是集合）', () => {
     const fromArray = stageProgress(['A', 'B'], 10, 5);
     expect(fromArray.ok).toBe(true);
     expect(fromArray.done).toBe(5);
+  });
+});
+
+/**
+ * 退出码语义对齐（Owner 批准，2026-11-12）：数据不足/用法错误 → 3，判据红 → 2，通过 → 0；
+ * 映射唯一出处 scripts/eval/exit-codes.ts（本脚本经 exitCodeFor 折算，不另写映射）。
+ * 上面各节已把"数据不足/用法错误"逐条从旧的 2 改成 3；本节补上此前缺失的判据红档，
+ * 并钉住"红优先于灰、两者都不折成 0"。
+ */
+describe('退出码三档：判据红=2 / 灰=3 / 通过=0', () => {
+  const round = (passes: number) => ({ summary: { A: { mechanical_pass_count: passes, rounds: 1 } } });
+  const completeEvidence = {
+    evalRealBaselineDoc: { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+    evalRealLatestDoc: { results: [{ id: 'A', round: 1, mechanical_pass: true }] },
+    regressionDoc: { unresolved: [] },
+  };
+
+  it('稳定性通过率低于建议线（A=1/2）⇒ 判据红 2（不是灰 3，也不是 0）', () => {
+    const out = buildReport({
+      stabilityDocs: [round(1), round(0)],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A'], rounds: 2 },
+      ...completeEvidence,
+    });
+    expect(out.stability.flaky).toEqual(['A']);
+    expect(out.markdown).toContain('通过率低于 80%');
+    expect(out.exitCode).toBe(2);
+  });
+
+  it('判据红与灰并存 ⇒ 2：有实证违例时不得自称「无法判定」', () => {
+    const out = buildReport({
+      stabilityDocs: [round(1), round(0)],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A'], rounds: 2 },
+      // 区分度侧无效比较（双方四维全 null）→ 本该是灰；但与实证红并存时取红。
+      discriminationRequested: true,
+      strongDoc: { summary: { A: caseSummary(NULL_DIMS) } },
+      weakDoc: { summary: { A: caseSummary(NULL_DIMS) } },
+      discriminationExpected: { cases: ['A'], rounds: 2 },
+      ...completeEvidence,
+    });
+    expect(out.markdown).toContain('无法判定（数据不足');
+    expect(out.exitCode).toBe(2);
+  });
+
+  it('结构完整 + 判据通过 ⇒ 0（通过档不因语义对齐变成红/灰）', () => {
+    const out = buildReport({
+      stabilityDocs: [round(1), round(1)],
+      stabilityComplete: true,
+      stabilityExpected: { cases: ['A'], rounds: 2 },
+      ...completeEvidence,
+    });
+    expect(out.stability.flaky).toEqual([]);
+    expect(out.exitCode).toBe(0);
   });
 });
