@@ -2,6 +2,9 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
+// 事实新取（S3）判据的声明类型：判据本体在 freshness-criteria.ts（纯函数），本解析层只做
+// 定型与校验——类型放那边是为了让判据模块零依赖、可被单测/测量脚本直接 import。
+import type { FreshFactFetchExpectation } from './freshness-criteria';
 
 /**
  * 评测用例语料加载器（issue 切片 C）：scripts/eval/cases.yaml 是**唯一**用例数据源。
@@ -269,6 +272,14 @@ export interface InvariantExpectation {
   noStorm?: { threshold: number };
   /** 大额行归属：出现该数值的行必须点名正确的 collection（张冠李戴硬尺）。 */
   largeAmountAttribution?: Array<{ value: number; collection: string }>;
+  /**
+   * 事实问题必须新取（S3 / issue #50 用例 3）：重问轮（requeryTurn）**作答前**必须存在
+   * 一次对该事实（fact = collection）的已执行获取（结构化调用 / 实时查询）。只断言路径，
+   * 不断言数值对错。gapTurns = requeryTurn − askTurn − 1（解析层校验公式，轮下标不得
+   * 超出消息序列）——N 的取值与理由写在 S3 条目的 businessGoal/checks 里。
+   * 判定本体在 freshness-criteria.ts（probe 判定体与期望值层共用同一份实现）。
+   */
+  freshFactFetch?: FreshFactFetchExpectation;
 }
 
 export interface CaseExpectations {
@@ -473,6 +484,24 @@ function parseExpectations(raw: unknown, where: string): CaseExpectations | null
       : asRecord(item['noStorm'], `${where}.invariants.noStorm`);
     const numberAt = (source: Record<string, unknown>, key: string, at: string): number =>
       typeof source[key] === 'number' ? source[key] as number : fail(`${at}.${key} 不是数字`);
+    const freshRaw = item['freshFactFetch'];
+    let fresh: FreshFactFetchExpectation | undefined;
+    if (freshRaw !== undefined && freshRaw !== null) {
+      const at = `${where}.invariants.freshFactFetch`;
+      const record = asRecord(freshRaw, at);
+      const fact = typeof record['fact'] === 'string' && record['fact'].trim().length > 0
+        ? record['fact']
+        : fail(`${at}.fact 不是非空字符串`);
+      const askTurn = numberAt(record, 'askTurn', at);
+      const requeryTurn = numberAt(record, 'requeryTurn', at);
+      const gapTurns = numberAt(record, 'gapTurns', at);
+      if (requeryTurn <= askTurn) fail(`${at}.requeryTurn（${requeryTurn}）必须在 askTurn（${askTurn}）之后`);
+      const expectedGap = requeryTurn - askTurn - 1;
+      if (gapTurns !== expectedGap) {
+        fail(`${at}.gapTurns=${gapTurns} 与轮下标不一致（requeryTurn − askTurn − 1 = ${expectedGap}）——N 只有一个事实源`);
+      }
+      fresh = { fact, askTurn, requeryTurn, gapTurns };
+    }
     const largeRaw = item['largeAmountAttribution'];
     const large = largeRaw === undefined || largeRaw === null
       ? undefined
@@ -502,6 +531,7 @@ function parseExpectations(raw: unknown, where: string): CaseExpectations | null
         : {}),
       ...(storm ? { noStorm: { threshold: numberAt(storm, 'threshold', `${where}.invariants.noStorm`) } } : {}),
       ...(large ? { largeAmountAttribution: large } : {}),
+      ...(fresh ? { freshFactFetch: fresh } : {}),
     };
   }
   return {
@@ -597,6 +627,17 @@ function parseCase(raw: unknown, index: number): CaseSpec {
       };
     })
     : [];
+  const expectations = parseExpectations(record['expectations'], `${where}.expectations`);
+  // 事实新取（S3）的轮下标必须落在消息序列内：yaml 消息序列与判据声明的重问轮漂移时
+  // fail-fast（否则判据会对一个不存在的轮次静默判 inconclusive）。
+  const fresh = expectations?.invariants?.freshFactFetch;
+  if (fresh) {
+    for (const [name, index] of [['askTurn', fresh.askTurn], ['requeryTurn', fresh.requeryTurn]] as const) {
+      if (index >= messages.length) {
+        fail(`${where}（${id}）freshFactFetch.${name}=${index} 超出消息序列（${messages.length} 条消息）——判据轮不存在`);
+      }
+    }
+  }
   return {
     id,
     group: typeof record['group'] === 'string' ? record['group'] : fail(`${where}.group 不是字符串`),
@@ -628,7 +669,7 @@ function parseCase(raw: unknown, index: number): CaseSpec {
     checks: asStringArray(record['checks'] ?? [], `${where}.checks`),
     messages,
     ...(followUps ? { followUps } : {}),
-    expectations: parseExpectations(record['expectations'], `${where}.expectations`),
+    expectations,
     expect: typeof record['expect'] === 'string' ? record['expect'] : fail(`${where}.expect 不是字符串`),
   };
 }

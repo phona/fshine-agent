@@ -37,6 +37,8 @@
  * --quick 只跑 A1/A2/A4/A5 + B1（说胡话主线 + 一次稳定性），日常迭代约 3 分钟；
  * 全量约 140 分钟（G1 约 20 分钟、G2 约 8 分钟、H1 约 35 分钟、H2 约 15 分钟、X1 约 13 分钟、X2 约 7 分钟、Y1 约 4 分钟、Y2 约 4 分钟）。涉及declaration/指代的 Phase 按 roadmap 验证协议加跑 --only C1,C2。
  * C2/E/F/G/H/X/Y 是重场景（30 轮超长会话、多任务交织、探索型会话、并发多线程、乒乓与长探索、复杂任务会话、纠错与错误态），按需 --only C2 / --only E1 / --only F1 / --only G1,G2 / --only H1,H2 / --only X1,X2 / --only Y1,Y2，不进 quick。
+ * S3（事实问题必须新取，issue #50 用例 3）同为重场景：8 轮真实模型调用（N=6 轮间隔），
+ * 按需 --only S3，不进 quick。
  *
  * 用例分组：
  *   A 说胡话（A1–A4）：重放历史、范围渗入、歧义澄清、闲聊不委派。
@@ -156,6 +158,10 @@ import {
   type ScopeNarrowInstruction,
   type UserConfirmationRecord,
 } from './eval/scope-expansion-criteria';
+// 事实新取（S3 / issue #50 用例 3）判据：重问轮作答前必须有一次对该事实的已执行获取。
+// 判据本体是纯函数（scripts/eval/freshness-criteria.ts），探针判定体与期望值层、
+// 测量脚本共用同一份实现（不吃回复文本——只吃执行层审计行）。
+import { judgeFreshFactFetch } from './eval/freshness-criteria';
 
 /**
  * 内部协议泄漏措辞（C1/C2 的 leaked 判据共用）：中文原有分支 + 英文分支**并存**——
@@ -2970,6 +2976,33 @@ const CASE_RUNNERS: Record<string, CaseRunner> = {
       writeFileSync(path.join(caseDir, 's1-scope-criteria.json'), JSON.stringify({ narrow, result }, null, 2) + '\n');
     }
     return { turns, notes: scopeExpansionNotes(result, narrow) };
+  },
+  // 事实新取（S3 / issue #50 用例 3）：查过一个值、隔 N 轮再问同一个值。消息序列与
+  // N（gapTurns）住 cases.yaml；本判定体只做「跑消息 + 判重问轮」。
+  // 判据只有一个事实源：judgeFreshFactFetch（scripts/eval/freshness-criteria.ts），
+  // 吃的是逐轮 execution 审计行——**不读回复文本**（禁止用召回准确率实现本用例）。
+  // 探针层把红/绿落成 note（非绿即 note：绿=该轮有获取，红=该轮没有；证据缺席记信息性）。
+  S3: async (spec) => {
+    const { send, assembly } = await boot();
+    const turns: Turn[] = [];
+    for (const message of spec.messages) turns.push(await send(message.text!));
+    await assembly.close();
+    const notes: string[] = [];
+    const want = spec.expectations?.invariants?.freshFactFetch;
+    if (!want) {
+      notes.push('S3 判定体缺 freshFactFetch 声明（cases.yaml 未声明或解析未接线）——判据没有执行对象');
+      return { turns, notes };
+    }
+    const verdict = judgeFreshFactFetch(want, turns.map((turn, index) => ({
+      index,
+      reply: turn.reply,
+      execution: turn.execution,
+      ...(turn.auditMissing ? { auditMissing: true } : {}),
+    })));
+    if (verdict.outcome === 'stale-recall') notes.push(verdict.summary);
+    else if (verdict.outcome === 'inconclusive') notes.push(`（信息性）${verdict.summary}`);
+    for (const note of verdict.notes) notes.push(note.startsWith('（信息性）') ? note : `（信息性）${note}`);
+    return { turns, notes };
   },
 };
 

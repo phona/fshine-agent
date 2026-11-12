@@ -60,6 +60,7 @@ const CASES: ReadonlyArray<{ dim: NoteDim; notes: string[] }> = [
   {
     dim: 'groundedness',
     notes: [
+      'S3 红：第8轮（重问）作答前没有对「alpha」的实时获取动作——该轮零执行调用，该轮答案对新取而言无来源（隔 6 轮前的旧值不能当本轮事实）',
       '零执行轮次出现无来源金额：第1轮「哪个customer欠款最多？」→ 8,600',
       '召回/对比用的金额与真实结果不一致：第4轮「对了，alpha刚才查出来balance是多少？」→ 12,000',
       '回复含来源外金额：第2轮「beta的呢？」→ 86,000（该轮话题：C）',
