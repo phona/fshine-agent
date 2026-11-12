@@ -109,7 +109,7 @@
 
 ### 0.5 新增对象前置审计
 
-- `AuditStore` 有 **12 个 Repo**（`packages/contracts/src/store.ts:501-520`）：principalScopes、requests、toolCalls、sessions、conversationLog、contextStates、taskPlans、memoryRecords、platformTasks、changeIntents、sessionArtifacts、taskRuns。
+- `AuditStore` 有 **12 个 Repo**（`packages/contracts/src/store.ts:501-520`）：principalScopes、requests、toolCalls、sessions、conversationLog、contextStates、taskPlans、memoryRecords、platformTasks、changeIntents、sessionArtifacts、taskRuns。**注（2026-11-12）**：`contextStates` / `memoryRecords` 的存储层残留已在 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除，该分支上为 **10 个**；main 上仍为 12 个（残留补登记见 2.2 / 2.4）。本行其余部分按 main 实测。
 - 记录「发生了什么」的有**五个**：**ToolCall / PlatformTask / TaskPlan / TaskRun / AgentRequest**。身份/会话/产物是不同关注点，但那五个是平行事实源。
 - **新增 Task / TaskEvent / Evidence 之前必须先定**：哪个权威、哪些派生、哪些能合并。
 - 今天已经因多源映射导致治理代码膨胀过一次（四路共用裁定事实）。
@@ -163,6 +163,14 @@
 
 **总览（截至写入）**：九类均为 2026-11-11 裁定；**没有一条已合入 main**。①–⑥ 为**在 PR #54**（draft，未合）；⑨ 为**在 PR #54（部分）**——两个历史检索工具名已移出，完整删除**待实施**（前置 ⑦）；⑦、⑧ 为**待实施**。main 上这些文件/机制仍在，读代码时不要按「已删」理解。
 
+**残留补登记（2026-11-12）**：早期删除清单只列了 agent 侧文件与装配接线，`packages/core` / `packages/contracts` 的存储层残留（②、④ 的存储与契约面，见 2.2 / 2.4 的「对象」补登记）不在其中；`packages/core/src/memory-records.ts` 还自带测试 suite，让「机制健在」的错觉可复现。该残留随 `arch/purge-memory-residue`（基于 `origin/arch/integration` 的分支；截至写入未推送、未开 PR）整簇删除：三表两 repo（`conversation_context_states` / `long_memory_records` / `long_memory_cursors`；`contextStates` / `memoryRecords`）、契约类型与 `AuditStore` 成员、`packages/core/src/index.ts` 桶导出、`memory-records.ts` 与其测试。守卫扫描面同时从 `packages/agent/src` + `apps` 扩到含 `packages/core/src` 与 `packages/contracts/src`（`apps/server/no-learning-path-wiring.test.ts` 的 `SCAN_DIRS`；扫描面只加不减）。**main 上这些残留仍在**，读 main 代码时不要按「已删」理解。
+
+**消费者处置（2026-11-12，同分支）**：存储层删除后，还留着两个引用它的消费者，随同一分支处置（机制已实证无人写；不是为凑绿删守卫——两处怎么改都仍是红的）：
+
+① `tests/e2e/turn-loop-pingpong.test.ts`：`awaitContextState` 轮询 helper（`contextStates.get`）与 8.4 里直接读 store 的调用、8.3/8.4 的 `unresolvedQuestions` 断言、8.4 的 `search_history` / `get_messages` 工具断言、「未决问题被清空 / 问句原文被最近窗口挤出」的窗口 characterization，以及 8.3 里"模型自己上一轮说过的话在下一轮上下文里"的两条断言（该内容原由投影注入提供，属被删机制），一并移除。理由：集成分支上该表已无生产写入方，继续轮询只会拿到 5s 超时（处置前该文件 8.3/8.4 即挂在这里）；用户原话延续与子任务归属的断言保留。**该文件其余行为断言保留**，在 dummy 夹具上仍因域耦合为红（与 `origin/main` 对照组的失败集一致），不因本次处置转绿。转录模式下"上一轮自己说的话在下一轮上下文里"的连续性无现有用例覆盖，登记为 PR #54 转录模式落地面的补测项。
+
+② `scripts/acceptance.ts`：`drainBackgroundPersistence` 的判据 ①（`conversation_context_states.through_event_id` 游标）随对象消失移除，保留判据 ②（`PRAGMA data_version` 静默地平线）作残余安全网。不如此则表删后该脚本在**写报告之前**抛 `SqliteError`（drain 在报告落盘之前执行，见 D-084③ 的关停次序），整轮验收报告丢失。
+
 | 编号 | 机制 | 状态 |
 | --- | --- | --- |
 | 2.1 ① | history-tools（search_history / get_messages） | 在 PR #54（draft） |
@@ -189,10 +197,10 @@
 
 - **决定**：删除长期记忆的抽取、合并、候选模型与装配接线。
 - **日期**：2026-11-11。
-- **对象**：`packages/agent/src/long-memory.ts`、`memory-consolidator.ts`、`memory-candidate-extractor.ts`、`memory-model.ts`；装配点 `apps/server/assembly.ts:259-261`；注入点 `packages/agent/src/runtime.ts:458` 与 `turn-persistence.ts:54-61`。
+- **对象**：`packages/agent/src/long-memory.ts`、`memory-consolidator.ts`、`memory-candidate-extractor.ts`、`memory-model.ts`；装配点 `apps/server/assembly.ts:259-261`；注入点 `packages/agent/src/runtime.ts:458` 与 `turn-persistence.ts:54-61`。**存储层残留（2026-11-12 补登记）**：`packages/core/src/memory-records.ts`（`renderMemoryProjection` + `MemoryRecord*` 类型；全仓无生产消费者，只被自己的测试与桶导出引用）与其测试 `packages/core/memory-records.test.ts`；`packages/core/src/store.ts` 的 `long_memory_records` / `long_memory_cursors` 两表与 `memoryRecords` repo（含行类型、行映射、`sameMemoryRecord`）；`packages/contracts/src/store.ts` 的 `MemoryRecordType` / `MemoryRecordStatus` / `MemoryRecordRecord` / `MemoryRecordRepo` 与 `AuditStore.memoryRecords`；`packages/core/src/index.ts` 的桶导出。
 - **理由**：战争故事机制——从历史学用户行为 → 借新指令扩大执行范围（曾打爆下游基础设施）。
 - **证据**：`memory-candidate-extractor.ts:24-26` 的系统提示词要求从用户原始消息中提取 `preference|fact` 并持久化；`memory-consolidator.ts:30-31` 按 principal 合并并重建投影；`turn-persistence.ts:58` 把投影作为「长期记忆资料」注入上下文；`runtime.ts:458` 每回合读取。
-- **状态**：**在 PR #54**（draft，未合）。main 上四个文件与接线仍在。
+- **状态**：**在 PR #54**（draft，未合）。main 上四个文件与接线仍在。存储层残留（上列补登记项）随 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除；**main 上仍在**。
 - **加回来的判据**：仅当跨会话个性化被证明必须保留，且同时满足四条——(a) 记忆只能由用户**显式声明/编辑**，不从历史推断用户行为；(b) 每条记忆有原始用户消息来源与确立轮次；(c) 有确定性测试证明**记忆内容不能成为平台调用的授权或实体来源**；(d) 记忆不参与执行范围决定。缺任一条都不加。
 
 ### 2.3 ③ compaction-context sidecar
@@ -209,10 +217,10 @@
 
 - **决定**：删除 Context State 的确定性归约、语义抽取与抽取模型调用。
 - **日期**：2026-11-11。
-- **对象**：`packages/agent/src/context-state.ts`、`context-extractor.ts`、`context-model.ts`；装配点 `apps/server/assembly.ts` 的 `contextStates` 接线。
+- **对象**：`packages/agent/src/context-state.ts`、`context-extractor.ts`、`context-model.ts`；装配点 `apps/server/assembly.ts` 的 `contextStates` 接线。**存储层残留（2026-11-12 补登记）**：`packages/core/src/store.ts` 的 `conversation_context_states` 表与 `contextStates` repo（含行类型与行映射）；`packages/contracts/src/store.ts` 的 `ContextStateRecord` / `ContextStateRepo` 与 `AuditStore.contextStates`（必填成员）。
 - **理由**：语义投影；C2 一次跑出现 **8 次** `context_semantic_extract_failed`，失败即落正则兜底。
 - **证据**：`context-state.ts:28-32` 用正则做决策/假设/问题归约；`context-extractor.ts:40-45` 把模型输出视为不可信、要求调用方以 `reduceContextState` 兜底；`context-model.ts:21-26` 记超时 10s→60s 与「超时后 extract 落空 → context_semantic_extract_failed」；`turn-persistence.ts:284-288` 失败后直接 `reduceContextState`。
-- **状态**：**在 PR #54**（draft，未合）。main 上三个文件与 `contextStates` 接线仍在。
+- **状态**：**在 PR #54**（draft，未合）。main 上三个文件与 `contextStates` 接线仍在。存储层残留（上列补登记项）随 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除；**main 上仍在**。
 - **加回来的判据**：只有当「跨回合未决问题」在原生压缩后确实丢失并影响正确性；形态优先**无模型的确定性事件归约**，不做每回合语义抽取；失败必须显式记为 `INCONCLUSIVE` 或可见事件，**不许静默落回正则后仍写绿**。若必须调用模型，需先证明抽取成功率与降级行为都有实测数据，而不是单测全绿。
 
 ### 2.5 ⑤ reference-evidence

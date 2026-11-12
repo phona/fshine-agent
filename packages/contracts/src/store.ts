@@ -239,20 +239,6 @@ export interface ConversationLogRepo {
   search(query: ConversationLogQuery & { query: string }): Promise<ConversationEventRecord[]>;
 }
 
-export interface ContextStateRecord {
-  principalId: string;
-  sessionId: string;
-  updatedAt: string;
-  throughEventId: string;
-  reducerVersion: number;
-  state: unknown;
-}
-
-export interface ContextStateRepo {
-  get(principalId: string, sessionId: string): Promise<ContextStateRecord | null>;
-  upsert(record: ContextStateRecord): Promise<void>;
-}
-
 /** 任务计划的一步事实（append-only）。一次长任务拆解的所有 step 共享 planId。 */
 export interface TaskPlanStepFact {
   factId: string;              // append-order 唯一 id
@@ -298,7 +284,7 @@ export interface TaskPlanSummary {
 
 export interface TaskPlanRepo {
   append(fact: TaskPlanStepFact): Promise<void>;
-  /** 由 facts 重建投影（同 Context State 的可重建投影语义）；没有事实返回 null。 */
+  /** 由 facts 重建投影（append-only 事实的可重建投影语义）；没有事实返回 null。 */
   project(principalId: string, sessionId: string, planId: string): Promise<TaskPlanProjection | null>;
   /**
    * 全部未完成（已记录步号 < totalSteps）的计划，最近活跃在前；没有返回空数组。
@@ -309,34 +295,6 @@ export interface TaskPlanRepo {
   latestOpenPlan(principalId: string, sessionId: string): Promise<string | null>;
   /** 某执行层子任务所属的计划（taskId 记录在步骤终态事实上）；没有返回 null。 */
   planIdForTask(principalId: string, sessionId: string, taskId: string): Promise<string | null>;
-}
-
-export type MemoryRecordType = 'preference' | 'fact';
-export type MemoryRecordStatus = 'active' | 'conflicted' | 'superseded' | 'deleted';
-
-/** Durable long-memory fact with immutable source-event references and optimistic versioning. */
-export interface MemoryRecordRecord {
-  memoryId: string;
-  principalId: string;
-  key: string;
-  type: MemoryRecordType;
-  content: string;
-  status: MemoryRecordStatus;
-  sourceEventIds: string[];
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface MemoryRecordRepo {
-  listByPrincipal(principalId: string): Promise<MemoryRecordRecord[]>;
-  /** Last successfully consolidated user source event; null means not started. */
-  getCursor(principalId: string): Promise<string | null>;
-  /**
-   * Atomically compare the principal cursor and record versions, write the full principal snapshot,
-   * then move the cursor. Returns false without writes on stale cursor/version data.
-   */
-  commit(principalId: string, expectedCursor: string | null, nextCursor: string | null, records: readonly MemoryRecordRecord[]): Promise<boolean>;
 }
 
 /**
@@ -504,11 +462,8 @@ export interface AuditStore {
   toolCalls: ToolCallRepo;
   sessions: ConversationSessionRepo;
   conversationLog: ConversationLogRepo;
-  contextStates: ContextStateRepo;
   /** 任务计划状态：append-only 步骤事实 + 可重建投影（长任务拆解）。 */
   taskPlans: TaskPlanRepo;
-  /** Optional for older test stores and deployments. */
-  memoryRecords?: MemoryRecordRepo;
   /** Optional for backwards-compatible test stores and deployments. */
   platformTasks?: PlatformTaskRepo;
   /** Optional：缺省时写流程整体禁用（提案按普通回答处理）。 */
