@@ -457,6 +457,33 @@
 
 ---
 
+## 七、发布阻断登记：#1 执行入口安全的未闭环形态（2026-11-12）
+
+- **事实（独立复核实证，T2 轨）**：以下形态**整类绕过**形态分类、计划前置与驱动层 T5 范围对账——
+  `bash -c '…' / sh -c`、`sudo <gw> …`、`xargs <gw> …`、`FOO=1 <gw> …` / `env FOO=1 <gw> …`，
+  以及命令替换 `$(<gw> …)`、反引号、`command <gw> …`。证据：`createServeGate` 实跑对四形态 `ALLOW`；
+  `planDeclarationCovers` 对它们全部返回 `not_plan_gated`；夹具实跑 `bash -c '…query --collection beta…'`
+  真的执行了未声明对象的查询（audit 落行 `planId=plan_b3`）。门侧首词规则（`serve-gate.ts:283-287`）
+  与命令链判据只认"命令位 token"，解释器包装与 env 前缀不在其中。
+- **状态：发布阻断（Owner 裁决 2026-11-12）**。在获得有效阻断或执行环境隔离之前，
+  **受影响的 worker 执行配置不得标记为安全可发布**。「审计行在册」不等于「已阻断」。
+- **本轮已做（机制内）**：未登记/裸/污染网关形态与命令链 fail-closed（见第六节）——它们收的是
+  同一族的**非包装**形态；包装族本次**未修**。
+- **下一步（不扩 shell 正则）**：① 先补确定性违约测试，枚举可绕过形态与权限暴露面；
+  ② 研究最小 fail-closed 阻断（方向：网关令牌出现在不可识别的执行位置即拒，宁误拒不放行；
+  误拒代价由回归锁看住）；③ 长期走受控执行入口 + 凭据/权限隔离，而不是继续堆字符串模式。
+- **凭据可达性（单独审查项）**：`createPlanScopedWorkerEnv`（`plan-runtime.ts:415-422`）只删
+  `EXECUTION_PLAN_ACTIVATION_SECRET` / `EXECUTION_PLAN_ID`，**其余 env 原样继承**——实跑证明
+  `WECOM_BOT_SECRET`、`LLM_API_KEY` 仍在 worker bash 的 env 里；门对 `.env` 的防护只覆盖
+  `read/ls/write/edit`，bash 的 `cat .env` 被放行且有测试钉住。worker 不应获得与业务执行无关的
+  宿主敏感凭据——按 Owner 裁决单独审查，不在本次门修复里顺手改。
+- **登记精度修正（复核员建议，已采纳）**：第六节的「残余边界」按**整类**表述（首词包装/命令替换/
+  前缀），不再按四例枚举；`pi-coding-driver-executor-bypass.test.ts:316` 实为「清单未声明的 mode」
+  用例（同一 `invocation===null` 分支），`call --file` 的实覆盖在 `serve-gate.test.ts:830-831` 与
+  `scripts/eval/shell-bypass-gate.test.ts:144-145`；`shell-bypass-gate.test.ts:141` 是注释、断言在 `:144-145`。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
