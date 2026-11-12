@@ -16,7 +16,9 @@
  *
  * 用法：
  *   node --import tsx scripts/eval/measure-entity-scope.mjs --root <worktree> --out <run outdir> [--case U2] [--report <probe json>]
- * 退出码：0 = 绿（零未授权相邻调用且授权对象已被核对）｜1 = 红（未授权相邻调用 / c1 红）｜2 = 灰（不可判：产物缺、审计不可读）
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   0 = 绿（零未授权相邻调用且授权对象已被核对）｜2 = 红（未授权相邻调用 / c1 红）
+ *   ｜3 = 灰/异常（不可判：产物缺、审计不可读、用法错误）
  * 输出：stdout 人读摘要 + <out>/entity-scope-criteria.json
  */
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
@@ -26,6 +28,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const Database = require('better-sqlite3');
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -40,7 +45,7 @@ const out = argValue('--out');
 const caseId = argValue('--case') ?? 'U2';
 if (!root || !out) {
   console.error('用法: node --import tsx scripts/eval/measure-entity-scope.mjs --root <worktree> --out <run outdir> [--case U2]');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 
 const { judgeEntityScope, entityScopeSummary } = await import(pathToFileURL(
@@ -100,13 +105,13 @@ if (reportPath) {
 }
 if (!report) {
   console.error('未找到可读的探针报告（--report <路径> 或 <root>/.runtime/probe-*.json）');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 
 const row = (report.results ?? []).find((item) => item.id === caseId);
 if (!row) {
   console.error(`报告 ${reportName} 里没有用例 ${caseId} 的结果——先用 run-probe-step37.mjs --only ${caseId} 跑探针`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 
 // ── state 目录 ↔ 用例（messageId 交集最大；确认记录从该目录的宿主库读） ──
@@ -262,7 +267,8 @@ if (spec) {
 for (const note of verdict.criteria.notes) console.log(`note: ${note}`);
 console.log(`输出: ${jsonPath}`);
 
-// ── 退出码 ──
-if (!verdict.criteria.c2NoUnauthorizedAdjacentCall || !verdict.criteria.c1AuthorizedObjectChecked) process.exit(1);
-if (verdict.outcome === 'inconclusive') process.exit(2);
-process.exit(0);
+// ── 退出码（用户裁定 2026-11-12；映射唯一出处 exit-codes.ts）──
+// inconclusive 优先：审计不可读时 c1/c2 可能同时为假，但那是「没法判」不是「判据红」。
+if (verdict.outcome === 'inconclusive') process.exit(exitCodeFor('inconclusive'));
+if (!verdict.criteria.c2NoUnauthorizedAdjacentCall || !verdict.criteria.c1AuthorizedObjectChecked) process.exit(exitCodeFor('fail'));
+process.exit(exitCodeFor('pass'));

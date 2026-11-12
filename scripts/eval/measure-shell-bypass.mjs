@@ -16,6 +16,8 @@
  * （跑过那次探针的 worktree，缺省 = 量具 worktree）。state 永远取自 `<out>/state`。
  *
  * 用法：node --import tsx scripts/eval/measure-shell-bypass.mjs --out <run outdir> [--root <evidence worktree>] [--case B3]
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   0 = 绿｜2 = 红（verdict=red）｜3 = 不可判/证据缺/用法错误（inconclusive 绝不退 0）。
  * 输出：stdout 人读摘要 + <out>/shell-bypass-criteria.json（结构化，含逐行证据）。
  */
 import { existsSync, readFileSync, readdirSync, realpathSync, writeFileSync } from 'node:fs';
@@ -26,6 +28,9 @@ import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
 const Database = require('better-sqlite3');
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -38,7 +43,7 @@ function argValue(flag, argv = process.argv.slice(2)) {
 const out = argValue('--out');
 if (!out) {
   console.error('用法: node --import tsx scripts/eval/measure-shell-bypass.mjs --out <run outdir> [--root <evidence worktree>] [--case B3]');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 const caseId = argValue('--case') ?? 'B3';
 /** 量具根 = 本脚本所在 worktree（判据本体与 production 模块同源，不随被测对象走）。 */
@@ -68,7 +73,7 @@ for (const dir of dirs) {
 }
 if (!existsSync(runtimeDir)) {
   console.error(`找不到探针报告目录：${runtimeDir}（先跑 run-probe-step37.mjs）`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const probeReports = readdirSync(runtimeDir).filter((name) => name.startsWith('probe-') && name.endsWith('.json'));
 const scored = probeReports.map((name) => {
@@ -82,7 +87,7 @@ const scored = probeReports.map((name) => {
 const report = scored.find((entry) => entry.parsed && (entry.parsed.results ?? []).some((row) => row.id === caseId));
 if (!report) {
   console.error(`.runtime 里没有含用例 ${caseId} 的探针报告——先用 run-probe-step37.mjs --only ${caseId} 跑探针`);
-  process.exit(1);
+  process.exit(exitCodeFor('inconclusive')); // 证据缺：不是判据红
 }
 const caseResult = report.parsed.results.find((row) => row.id === caseId);
 const turns = caseResult.turns ?? [];
@@ -107,7 +112,7 @@ const fixtureName = spec?.fixture?.name ?? argValue('--fixture') ?? 'dummy-platf
 const fixtureDecl = casesDoc?.fixtures?.[fixtureName] ?? {};
 if (!fixtureDecl.root || !fixtureDecl.gateway) {
   console.error(`cases.yaml 的 fixtures.${fixtureName} 缺 root/gateway 声明`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const fixtureRoot = path.resolve(worktree, String(fixtureDecl.root));
 const declaredGateway = String(fixtureDecl.gateway);
@@ -193,4 +198,5 @@ writeFileSync(outFile, `${JSON.stringify({
   out: verdict,
 }, null, 2)}\n`);
 console.log(`[B3] wrote ${outFile}`);
-process.exit(verdict.verdict === 'red' ? 1 : 0);
+// 退出码（用户裁定 2026-11-12）：红 = 2；inconclusive（无证据/判不了）绝不退 0 = 3；绿 = 0。
+process.exit(exitCodeFor(verdict.verdict === 'red' ? 'fail' : verdict.verdict === 'inconclusive' ? 'inconclusive' : 'pass'));

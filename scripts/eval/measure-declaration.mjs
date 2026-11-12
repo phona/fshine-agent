@@ -14,12 +14,16 @@
  * 用法：
  *   node --import tsx scripts/eval/measure-declaration.mjs --root <worktree> --out <run outdir>
  *     [--case P1] [--report <probe json>]
- * 退出码：0 = 绿（判据全过）｜1 = 红（有违例）｜2 = 灰（不可判：日志/报告缺、证据解析不出）
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   0 = 绿（判据全过）｜2 = 红（有违例）｜3 = 灰/异常（不可判：日志/报告缺、证据解析不出、用法错误）
  * 输出：stdout 人读摘要 + <out>/declaration-criteria.json
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -34,7 +38,7 @@ const out = argValue('--out');
 const caseId = argValue('--case') ?? 'P1';
 if (!root || !out) {
   console.error('用法: node --import tsx scripts/eval/measure-declaration.mjs --root <worktree> --out <run outdir> [--case P1] [--report <probe json>]');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 
 const { judgeDeclarationContract, declarationCriteriaSummary } = await import(pathToFileURL(
@@ -48,7 +52,7 @@ const { loadCases } = await import(pathToFileURL(
 const logPath = path.join(out, 'probe.log');
 if (!existsSync(logPath)) {
   console.error(`灰：找不到探针日志 ${logPath}——证据缺席，不判绿（先跑 run-probe-step37.mjs）`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const logText = readFileSync(logPath, 'utf8');
 
@@ -56,7 +60,7 @@ const logText = readFileSync(logPath, 'utf8');
 const spec = loadCases().find((item) => item.id === caseId);
 if (!spec) {
   console.error(`灰：cases.yaml 里没有用例 ${caseId}`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const expectedTurns = spec.messages.length;
 
@@ -113,5 +117,5 @@ const artifact = path.join(out, 'declaration-criteria.json');
 writeFileSync(artifact, JSON.stringify({ verdict, logPath, reportPath: reportPath ?? null, at: new Date().toISOString() }, null, 2), 'utf8');
 console.log(`判据产物 ${artifact}`);
 
-if (verdict.outcome === 'inconclusive') process.exit(2);
-process.exit(verdict.ok ? 0 : 1);
+if (verdict.outcome === 'inconclusive') process.exit(exitCodeFor('inconclusive'));
+process.exit(exitCodeFor(verdict.ok ? 'pass' : 'fail'));

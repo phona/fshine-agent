@@ -15,11 +15,15 @@
  *     [--report <probe-*.json>]
  * 缺省取 <root>/.runtime 里最新一份含 S3 结果的探针报告。
  * 输出：stdout 判据原文 + <out>/freshness-criteria.json（结构化，含逐条证据）。
- * 退出码：0 = 绿（重问轮有新取）；1 = 红（stale-recall）；2 = 不可判/用法错误。
+ * 退出码（用户裁定 2026-11-12；映射唯一出处 scripts/eval/exit-codes.ts）：
+ *   0 = 绿（重问轮有新取）；2 = 红（stale-recall）；3 = 不可判/用法错误/证据缺。
  */
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+// 退出码映射唯一出处（用户裁定 2026-11-12）：与本脚本同目录，不随 --root 走。
+const { exitCodeFor } = await import(new URL('./exit-codes.ts', import.meta.url).href);
 
 function argValue(flag, argv = process.argv.slice(2)) {
   const index = argv.indexOf(flag);
@@ -33,7 +37,7 @@ const root = argValue('--root');
 const out = argValue('--out');
 if (!root || !out) {
   console.error('用法: node --import tsx scripts/eval/measure-freshness.mjs --root <worktree> --out <run outdir> [--report <probe-*.json>]');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive')); // 用法/环境错误：无法得出有效判定
 }
 
 const { loadCases } = await import(pathToFileURL(path.join(root, 'scripts/eval/cases.ts')).href);
@@ -68,19 +72,19 @@ function findReport() {
 const reportPath = findReport();
 if (!reportPath) {
   console.error('找不到含 S3 结果的探针报告（.runtime/probe-*.json）——先跑 run-probe-step37.mjs --only S3');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const report = JSON.parse(readFileSync(reportPath, 'utf8'));
 const s3 = (report.results ?? []).find((row) => row.id === 'S3');
 if (!s3) {
   console.error(`报告 ${path.basename(reportPath)} 里没有 S3 结果`);
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 const spec = loadCases().find((item) => item.id === 'S3');
 const want = spec?.expectations?.invariants?.freshFactFetch;
 if (!want) {
   console.error('cases.yaml 的 S3 缺 freshFactFetch 声明——判据没有执行对象');
-  process.exit(2);
+  process.exit(exitCodeFor('inconclusive'));
 }
 
 // ── 逐轮证据（报告的 turns 是完整 Turn 序列化：reply / execution / calls / auditMissing 随行） ──
@@ -147,4 +151,4 @@ for (const row of verdict.otherRows) console.log(`  该轮其它已执行调用:
 for (const note of verdict.notes) console.log(`note: ${note}`);
 console.log(`重问轮回复（仅存证，不参与判定）：${result.requeryReply.slice(0, 120).replace(/\n/g, ' ')}${result.requeryReply.length > 120 ? '…' : ''}`);
 console.log(`输出: ${path.join(out, 'freshness-criteria.json')}`);
-process.exit(verdict.outcome === 'fresh-fetch' ? 0 : verdict.outcome === 'stale-recall' ? 1 : 2);
+process.exit(exitCodeFor(verdict.outcome === 'fresh-fetch' ? 'pass' : verdict.outcome === 'stale-recall' ? 'fail' : 'inconclusive'));

@@ -23,7 +23,11 @@
  * （宿主 tool_calls / plan_confirmation_resolutions），是 T5/T6 机械判据的权威证据源。
  * 钩子只复制不阻止删除，不影响探针行为；只挂在 NODE_OPTIONS=--require 上。
  *
- * 输出：<out>/probe.log（stdout+stderr 原样）、<out>/state/*。退出码 = 探针退出码。
+ * 输出：<out>/probe.log（stdout+stderr 原样）、<out>/state/*。
+ * 退出码：**透传探针退出码**（探针侧 0 = 正常完成且判据通过 / 2 = 判据红 / 3 = 探针自身
+ * 异常）；本 runner 自己的环境错误（用法、key 缺失）与子进程被信号杀掉 = 3——按用户裁定
+ * 2026-11-12 的语义（3 = 工具/环境/证据采集/评测执行异常，无法得出有效判定）。映射唯一
+ * 出处 scripts/eval/exit-codes.ts；本文件是纯 node 脚本（不挂 tsx），故只落字面量不 import。
  */
 import { spawn } from 'node:child_process';
 import { createWriteStream, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -44,7 +48,7 @@ function argValue(flag, argv = process.argv.slice(2)) {
 const root = argValue('--root');
 if (!root) {
   console.error('用法: node scripts/eval/run-probe-step37.mjs --root <worktree> [--only C1,C2,A2,D2] [--out <dir>]');
-  process.exit(2);
+  process.exit(3); // 用法/环境错误：无法得出有效判定（见文件头退出码语义）
 }
 const only = argValue('--only') ?? 'C1,C2,A2,D2';
 // 被测模型缺省写死 step-3.7-flash；--model 只给「强模型归因复跑」用，结果单独报、不并入弱模型结论。
@@ -65,17 +69,17 @@ if (keyFile) {
     apiKey = readFileSync(keyFile, 'utf8').trim();
   } catch (error) {
     console.error(`LLM key 文件读不到（${keyFile}）：${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
+    process.exit(3); // 环境错误：无法得出有效判定（见文件头退出码语义）
   }
   if (!apiKey) {
     console.error('LLM key 文件为空');
-    process.exit(2);
+    process.exit(3); // 环境错误：无法得出有效判定（见文件头退出码语义）
   }
 } else {
   apiKey = process.env.LLM_API_KEY?.trim() ?? '';
   if (!apiKey) {
     console.error('没有 key：传 --key-file <路径>、设 LLM_CI_KEY_FILE，或先在环境里设 LLM_API_KEY');
-    process.exit(2);
+    process.exit(3); // 环境错误：无法得出有效判定（见文件头退出码语义）
   }
 }
 
@@ -153,5 +157,6 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
 child.on('exit', (code, signal) => {
   log.end();
   console.log(`[runner] probe exit code=${code} signal=${signal ?? ''}`);
-  process.exit(code ?? 1);
+  // 透传探针退出码（0/2/3）；子进程被信号杀掉（code 为 null）= 没跑完，按第 3 类落 3。
+  process.exit(code ?? 3);
 });
