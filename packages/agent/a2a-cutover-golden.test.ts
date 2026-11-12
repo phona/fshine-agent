@@ -91,12 +91,21 @@ describe('③ env 两把尺（hostGatewayEnv / createPlanScopedWorkerEnv）', ()
       EXECUTION_PLAN_ID: 'stale-plan',
       EXECUTION_PLAN_ACTIVATION_SECRET: 'secret',
       GOLDEN_SENTINEL_KEY: 'keep-me',
+      NODE_ENV: 'development',
+      PATH: '/usr/bin',
     };
     const scoped = createPlanScopedWorkerEnv(inherited, 'plan_abc');
     expect(scoped.EXECUTION_REQUIRE_PLAN).toBe('1');
     expect(scoped.EXECUTION_PLAN_ID).toBe('plan_abc');
     expect('EXECUTION_PLAN_ACTIVATION_SECRET' in scoped).toBe(false);
-    expect(scoped.GOLDEN_SENTINEL_KEY).toBe('keep-me');
+    // 2026-11-12 V0 安全收口（**安全边界收紧而非功能退化**）：旧行为是"未登记键原样继承"
+    // （GOLDEN_SENTINEL_KEY / NODE_ENV 都在列）；现行为是**精确键白名单重建**——未登记
+    // 宿主键一律不进 worker env（NODE_*/FSHINE_*/LC_* 等族逐键核对后不进），保留的只有
+    // PATH/HOME/TMPDIR + 夹具状态根桥；执行面 REQUIRE_PLAN/PLAN_ID 是逐次注入。
+    // 红先证与逐键清单/验证见 `child-env-closure.test.ts`。
+    expect(scoped.GOLDEN_SENTINEL_KEY).toBeUndefined();
+    expect(scoped.NODE_ENV).toBeUndefined();
+    expect(scoped.PATH).toBe('/usr/bin');
 
     // 无活动计划：REQUIRE_PLAN 仍在，PLAN_ID 缺席（不注入 stale 值）。
     const noPlan = createPlanScopedWorkerEnv(inherited, null);

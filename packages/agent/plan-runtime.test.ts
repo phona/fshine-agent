@@ -94,8 +94,11 @@ describe('platform-backed execution plan runtime', () => {
   });
 
   it('passes an active plan only to the worker subprocess and strips the host activation secret', () => {
+    // 2026-11-12 V0 安全收口（**安全边界收紧而非功能退化**）：旧行为 `OTHER: 'ok'` 原样继承
+    // （worker env = 全量宿主 env 减两个 EXECUTION_* 键）；现行为**精确键白名单**重建，
+    // 未登记宿主键不进 worker env。逐键清单与红先证见 child-env.ts / child-env-closure.test.ts。
     expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret', EXECUTION_PLAN_ID: 'forged', OTHER: 'ok' }, 'plan_host'))
-      .toEqual({ EXECUTION_REQUIRE_PLAN: '1', EXECUTION_PLAN_ID: 'plan_host', OTHER: 'ok' });
+      .toEqual({ EXECUTION_REQUIRE_PLAN: '1', EXECUTION_PLAN_ID: 'plan_host' });
     expect(createPlanScopedWorkerEnv({ EXECUTION_PLAN_ACTIVATION_SECRET: 'secret' }, null))
       .toEqual({ EXECUTION_REQUIRE_PLAN: '1' });
   });

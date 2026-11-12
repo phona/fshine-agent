@@ -132,7 +132,9 @@ per-run 隔离是 fshine 测试基础设施对自己 dummy 夹具的事务，走
 > acceptance 仍在自己的进程里设置同一变量，与探针的槽无关。该变量是 fshine 评测
 > 基础设施私有（`platform-leak-lint` 在册的「测试专用变量，非两仓契约」），宿主生产
 > 路径与真平台零读取；generic-mock / second-layer / plan-policy / generic-model-eval
-> 直接传 flag，不经 env。
+> 直接传 flag，不经 env。2026-11-13 V0 安全收口起：它是 worker 子进程 env 精确键
+> 白名单里唯一保留的测试专用键——只做键名放行、不读值（`packages/agent/src/child-env.ts`），
+> 否则 worker 发起的仓内夹具调用会丢 per-case 状态根、回落到夹具自身 `.runtime`。
 > 退役条件与时间锚点见 debt-ledger D-209：a2a 信封携带 per-run 参数（跨仓）时本桥退役；2027-02-10 必须复核，不许无限期续期。
 
 夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的令牌面

@@ -31,6 +31,7 @@ import { resolveActiveProfileId } from '@fshine/contracts';
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 import {
   gatewayExecPathForProfile,
+  hostDirectChildEnv,
   hostGatewayEnv,
   loadOperationProtocols,
   newGateSecret,
@@ -62,7 +63,9 @@ const runCli: PlanCliRunner = ({ platformRoot, args, env, gateway }) => new Prom
   const cli = gatewayExecPathForProfile(platformRoot, { gateway });
   const child = spawn(cli, args, {
     cwd: platformRoot,
-    env: { ...process.env, ...env },
+    // V0 安全收口（2026-11-12 建，2026-11-13 复核）：合并后剥宿主敏感族与宿主内部
+    // 指针，见 packages/agent/src/child-env.ts。
+    env: hostDirectChildEnv(env),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   const stdout: Buffer[] = [];

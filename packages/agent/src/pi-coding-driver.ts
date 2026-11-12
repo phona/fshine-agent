@@ -1518,6 +1518,12 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     tools: [...WORKER_TOOLS],
     customTools: [
       createBashToolDefinition(options.cwd, {
+        // V0 安全收口（2026-11-13）：worker bash 子进程 env 走精确键白名单
+        // （createPlanScopedWorkerEnv，见 plan-runtime.ts / child-env.ts）——模型凭据
+        // 族与未登记宿主键不进子进程。SDK 默认注入的 PI_* 会话元数据随白名单一起剥离，
+        // 同时关闭 exposeSessionEnvironment，使 SDK 的系统提示词不再宣传 PI_*（环境与
+        // 提示词一致；该选项同时决定 bash 工具 promptGuidelines 是否下发）。
+        exposeSessionEnvironment: false,
         spawnHook: (context) => ({ ...context, env: createPlanScopedWorkerEnv(context.env, activePlanId()) }),
       }) as never,
       {

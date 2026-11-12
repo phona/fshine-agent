@@ -475,11 +475,26 @@
 - **下一步（不扩 shell 正则）**：① 先补确定性违约测试，枚举可绕过形态与权限暴露面；
   ② 研究最小 fail-closed 阻断（方向：网关令牌出现在不可识别的执行位置即拒，宁误拒不放行；
   误拒代价由回归锁看住）；③ 长期走受控执行入口 + 凭据/权限隔离，而不是继续堆字符串模式。
-- **凭据可达性（单独审查项）**：`createPlanScopedWorkerEnv`（`plan-runtime.ts:415-422`）只删
-  `EXECUTION_PLAN_ACTIVATION_SECRET` / `EXECUTION_PLAN_ID`，**其余 env 原样继承**——实跑证明
-  `WECOM_BOT_SECRET`、`LLM_API_KEY` 仍在 worker bash 的 env 里；门对 `.env` 的防护只覆盖
-  `read/ls/write/edit`，bash 的 `cat .env` 被放行且有测试钉住。worker 不应获得与业务执行无关的
-  宿主敏感凭据——按 Owner 裁决单独审查，不在本次门修复里顺手改。
+- **凭据可达性（独立审查项，2026-11-13 状态更新：worker env 侧已收口，文件可达性仍开放）**：收口前
+  `createPlanScopedWorkerEnv`（`plan-runtime.ts`）只删 `EXECUTION_PLAN_ACTIVATION_SECRET` / `EXECUTION_PLAN_ID`，
+  **其余 env 原样继承**——sentinel 红先证实跑证明 `WECOM_BOT_SECRET`、`LLM_API_KEY` 仍在 worker bash 的 env 里
+  （基线上断言失败输出直接含 `LLM_API_KEY=sentinel-…` / `WECOM_BOT_SECRET=sentinel-…`；收口后用例同文件转绿）。
+  现已按**三个面、逐键决策**收口（禁整体前缀放行）：
+  (i) Worker 模型调用凭据由可信驱动内部持有（驱动 options.env → ModelRuntime provider），不进任何子进程 env；
+  (ii) worker shell/工具可见 env = **精确键白名单**（PATH / HOME / TMPDIR / 仓内夹具状态根桥键；逐键消费方依据与
+  「缺了会坏」真子进程对照见 `packages/agent/src/child-env.ts` 与 `packages/agent/child-env-closure.test.ts`；
+  `NODE_*` / 其余 `FSHINE_*` / 其余 `EXECUTION_*` / `LC_*` 逐键核对后除逐次注入的 `EXECUTION_REQUIRE_PLAN` /
+  `EXECUTION_PLAN_ID` 外一律不进）；宿主直调网关 env 剥宿主敏感族（`LLM_*` / `WECOM_*`）与宿主内部指针
+  （`AGENT_CONFIG_PATH` / `DB_PATH`），其余键继承；`EXECUTION_PLAN_ACTIVATION_SECRET` / `EXECUTION_PLAN_ID` 的
+  既有剥离语义不变（测试钉住）。
+  **仍未闭环（文件/权限层）**：worker shell 与宿主同 OS 用户，`.env` 可读——探针以收口后的 worker env 真 spawn
+  `sh`：相对仓根 `wc -c < .env` 成功（1594 字节）、绝对路径同样成功；`config/agent.yaml` 在部署存在时按同一权限
+  可读（本 worktree 只有 example）。env 白名单不解决这一层；最小修复方向是权限/隔离（独立用户、mount 命名空间，
+  或把秘密移出 worker 可达路径），不在 shell 字符串层继续加特例。长期走受控执行入口与凭据/权限隔离。
+- **V0 定位声明（2026-11-13）**：以上完成后 V0 仍只是**受控本地试用版本**（仓内 dummy 夹具、真实子进程调用、
+  不触真实平台与真实 SaaS）。在下列三道边界闭环前，**不得宣称 V0 可安全连接真实生产 SaaS**：
+  ① 词法不可分类形态仍可绕过 serve 门（见 (a)）；② 宿主凭据文件对 worker 可达（见上）；③ worker 与宿主的
+  权限边界未隔离（见下 (c)）。
 - **登记精度修正（复核员建议，已采纳）**：第六节的「残余边界」按**整类**表述（首词包装/命令替换/
   前缀），不再按四例枚举；`pi-coding-driver-executor-bypass.test.ts:316` 实为「清单未声明的 mode」
   用例（同一 `invocation===null` 分支），`call --file` 的实覆盖在 `serve-gate.test.ts:830-831` 与
@@ -492,10 +507,10 @@
   **发布阻断收窄但未解除**，残余两类：
   (a) **词法不可分类**：`bash -c 'true;<gw> …'`（分隔符与网关之间无空格——与批准放行的字面量 `echo "x;<gw>"` 在字符层同形）
   与 `B=<gw>; $B query`（变量间接）；封死需要识别解释器/包装语义或进程隔离，不在字符串层继续加特例。
-  (b) **凭据可达性未处理**（独立裁定项）：worker bash 子进程 env 仍继承 `WECOM_BOT_SECRET` / `LLM_API_KEY`
-  （sentinel `sh -c printenv` 实证；`createPlanScopedWorkerEnv` 只删两个 `EXECUTION_*` 键），且门放行 bash 的 `cat .env`
-  （相对与任意绝对路径）而 `read .env` 被拦——worker 持有与业务执行无关的宿主敏感凭据。最小修复方向：worker spawn env 白名单
-  （只留 PATH/HOME/LANG/TERM + 执行面必需键）+ `.env` 移出 worker 可达路径；长期走受控执行入口与凭据/权限隔离。
+  (b) **凭据可达性**：2026-11-12 时未处理（worker bash 子进程 env 仍继承 `WECOM_BOT_SECRET` / `LLM_API_KEY`，
+  且门放行 bash 的 `cat .env`）。**2026-11-13 状态更新：worker env 侧已收口**（三面逐键，见上方
+  「凭据可达性」条目）；文件/权限层（`.env` / `config` 对 worker 可达）仍未闭环，登记在该条目与 V0 定位
+  声明里。
   (c) 附注：`./bin/<gw> …` 被识别为网关调用（非绕过）；`cat <gw>` / `ls -la <gw>` / env 前缀三条既有「应放行」用例已被有意收紧为拒，
   测试内逐条注明（旧：放行；现：拒）。
 
