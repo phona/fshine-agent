@@ -8,10 +8,10 @@
  * 构造（判据原文：「任意需要用户确认的计划」）：
  *   走仓内 stock-platform 夹具（EXECUTION_EXECUTOR=mock，绝不碰真实平台）的 plan evaluate，
  *   用 STOCK_PLAN_BUDGET_WEIGHT=6 把 3 次 stock.query（3×weight 2 = 6）压到 confirm 档，
- *   再经**生产路径** evaluateAndActivatePlan 拿到宿主交出的那一条确认文本
+ *   再经**生产路径** evaluateAndActivatePlan 拿到宿主交出的确认文本
  *   （onNotice 的通知帧与 pending.userText——两者同一出处，都要判）。
  *   范围判据的输入事实全部是宿主机械事实：平台清单第 5 列名（operation-labels 的只读消费）
- *   与 planCallFacts 抽出的声明值；模型侧只给一条后果叙述，不给范围。
+ *   与 planCallFacts 抽出的声明值；模型侧只给后果叙述（逐条经生产参数进确认面），不给范围。
  *
  * 判据本体在 confirm-surface-criteria.ts（纯函数量具）。本模块只做「构造 + 取证 + 装配」，
  * 不改任何生产模块：生产渲染器原样调用，红就是它现在的样子。
@@ -83,7 +83,7 @@ export const S2_NARRATIVES: readonly string[] = [
 ];
 
 export interface ConfirmSurfaceCaseRun {
-  /** 确认文本（宿主交给用户的那一条；onNotice 通知帧）。 */
+  /** 确认文本（宿主交给用户的那一条；第一条渲染的 onNotice 通知帧）。 */
   noticeText: string;
   /** pending 计划里给用户的那一条文本（与通知帧同出一处，逐字节比对过）。 */
   userText: string;
@@ -91,8 +91,17 @@ export interface ConfirmSurfaceCaseRun {
   facts: ConfirmSurfaceFacts;
   scenario: ConfirmSurfaceScenario;
   verdict: ConfirmSurfaceVerdict;
+  /** 逐条叙述各自经生产路径渲染的这一跑（判据⑤的输入：同计划换叙述，范围段不许变）。 */
+  renderings: ConfirmSurfaceRenderingRun[];
   /** 逐行证据（构造、文本、判据）——runner 原样打印，不加工。 */
   evidence: string[];
+}
+
+export interface ConfirmSurfaceRenderingRun {
+  narrative: string;
+  noticeText: string;
+  userText: string;
+  evaluation: PlanEvaluation;
 }
 
 /** 平台下发的计量口径（scopeSummary/summary/noticeText）是否原样落在确认面上（信息性证据）。 */
@@ -126,73 +135,90 @@ function fixtureCliRunner(stateDir: string, env: NodeJS.ProcessEnv) {
  *
  * 隔离（fail-closed）：先过安全门——root 必须在仓内夹具目录之下、网关文件在界内、
  * 审计通道可写可读（EXECUTION_AUDIT_PATH）；任一条不满足即拒跑，不静默落真实平台。
+ *
+ * 逐条叙述各跑一次生产路径（第一条渲染的配对作为 run.userText/noticeText）：
+ * 模型叙述经 evaluateAndActivatePlan 的 consequenceNarrative 进生产渲染器，范围事实
+ * 由宿主从同一份机械事实（平台清单第 5 列 + planCallFacts）渲染——判据⑤要检验的
+ * 「换叙述、范围段逐字节不变」因此是对生产路径的真实输入，不是装配近似。
  */
 export async function runConfirmSurfaceCase(options: { keepStateDir?: boolean } = {}): Promise<ConfirmSurfaceCaseRun> {
   if (process.env['EXECUTION_EXECUTOR'] && process.env['EXECUTION_EXECUTOR'] !== 'mock') {
     throw new Error(`S2 只跑 mock：EXECUTION_EXECUTOR=${process.env['EXECUTION_EXECUTOR']}，已拒跑`);
   }
-  const stateDir = mkdtempSync(path.join(tmpdir(), 'fshine-s2-confirm-surface-'));
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    ...S2_CONFIRM_TIER_ENV,
-    EXECUTION_AUDIT_PATH: path.join(stateDir, 'audit.jsonl'),
-  };
+  const labels = await loadOperationLabels(S2_FIXTURE_ROOT, S2_GATEWAY);
+  const specs = await loadOperationArgSpecs(S2_FIXTURE_ROOT, S2_GATEWAY);
+  const usedOperations = [...new Set(S2_PLAN_CALLS.map((call) => call.operation))];
+  const usedLabels = usedOperations
+    .map((operation) => operationLabel(labels, operation))
+    .filter((label): label is string => typeof label === 'string' && label.length > 0);
+  const otherLabels = [...new Set([...labels.values()])].filter((label) => !usedLabels.includes(label));
+  const extracted = planCallFacts(S2_PLAN_CALLS, specs, labels);
+  const values = (extracted.scopeValues ?? []).filter((value) => value.length > 0);
+
+  const stateDirs: string[] = [];
+  const keepStateDir = options.keepStateDir === true;
   try {
-    assertEvalIsolation(assessEvalIsolation({ env, platformRoot: S2_FIXTURE_ROOT, gateway: S2_GATEWAY }), 'S2 确认面用例');
-
-    const labels = await loadOperationLabels(S2_FIXTURE_ROOT, S2_GATEWAY);
-    const specs = await loadOperationArgSpecs(S2_FIXTURE_ROOT, S2_GATEWAY);
-    const usedOperations = [...new Set(S2_PLAN_CALLS.map((call) => call.operation))];
-    const usedLabels = usedOperations
-      .map((operation) => operationLabel(labels, operation))
-      .filter((label): label is string => typeof label === 'string' && label.length > 0);
-    const otherLabels = [...new Set([...labels.values()])].filter((label) => !usedLabels.includes(label));
-    const extracted = planCallFacts(S2_PLAN_CALLS, specs, labels);
-    const values = (extracted.scopeValues ?? []).filter((value) => value.length > 0);
-
-    const notices: string[] = [];
-    const result = await evaluateAndActivatePlan({
-      platformRoot: S2_FIXTURE_ROOT,
-      taskId: 'task_s2_confirm_surface',
-      calls: S2_PLAN_CALLS,
-      onNotice: async (text) => { notices.push(text); },
-      runCli: fixtureCliRunner(stateDir, env),
-      env,
-      gateway: S2_GATEWAY,
-    });
-    if (result.status !== 'confirm') {
-      throw new Error(`构造失败：要的是需要用户确认的计划，夹具给的是 ${result.status}（夹具旋钮 ${JSON.stringify(S2_CONFIRM_TIER_ENV)}）`);
+    // 每条叙述一次独立构造：各自一份干净夹具状态（同一份计划换叙述，平台输入逐字节相同），
+    // 叙述经生产参数 consequenceNarrative 进确认面。
+    const renderings: ConfirmSurfaceRenderingRun[] = [];
+    for (const narrative of S2_NARRATIVES) {
+      const stateDir = mkdtempSync(path.join(tmpdir(), 'fshine-s2-confirm-surface-'));
+      stateDirs.push(stateDir);
+      const env: NodeJS.ProcessEnv = {
+        ...process.env,
+        ...S2_CONFIRM_TIER_ENV,
+        EXECUTION_AUDIT_PATH: path.join(stateDir, 'audit.jsonl'),
+      };
+      assertEvalIsolation(assessEvalIsolation({ env, platformRoot: S2_FIXTURE_ROOT, gateway: S2_GATEWAY }), 'S2 确认面用例');
+      const notices: string[] = [];
+      const result = await evaluateAndActivatePlan({
+        platformRoot: S2_FIXTURE_ROOT,
+        taskId: 'task_s2_confirm_surface',
+        calls: S2_PLAN_CALLS,
+        consequenceNarrative: narrative,
+        onNotice: async (text) => { notices.push(text); },
+        runCli: fixtureCliRunner(stateDir, env),
+        env,
+        gateway: S2_GATEWAY,
+      });
+      if (result.status !== 'confirm') {
+        throw new Error(`构造失败：要的是需要用户确认的计划，夹具给的是 ${result.status}（夹具旋钮 ${JSON.stringify(S2_CONFIRM_TIER_ENV)}）`);
+      }
+      const noticeText = notices.join('\n');
+      const userText = result.pending.userText;
+      if (noticeText !== userText) {
+        throw new Error(`构造异常：通知帧与 pending.userText 不是同一条文本\n通知帧：${JSON.stringify(noticeText)}\nuserText：${JSON.stringify(userText)}`);
+      }
+      renderings.push({ narrative, noticeText, userText, evaluation: result.pending.evaluation });
     }
-    const noticeText = notices.join('\n');
-    const userText = result.pending.userText;
-    if (noticeText !== userText) {
-      throw new Error(`构造异常：通知帧与 pending.userText 不是同一条文本\n通知帧：${JSON.stringify(noticeText)}\nuserText：${JSON.stringify(userText)}`);
-    }
+    const first = renderings[0]!;
+    const noticeText = first.noticeText;
+    const userText = first.userText;
 
     const facts: ConfirmSurfaceFacts = { labels: usedLabels, otherLabels, values };
     const scenario: ConfirmSurfaceScenario = {
       facts,
-      // 生产渲染器不接收叙述参数（formatPlanMessage 只吃 PlanEvaluation）——所以同一份计划换
-      // 两条叙述，渲染出来的文本相同。这不是判据的近似，是现状本身：模型措辞进不了确认面。
-      renderings: S2_NARRATIVES.map((narrative) => ({ narrative, text: userText })),
+      // 逐条叙述经生产路径各自渲染的那一条（范围段由宿主渲染，不随叙述改变）。
+      renderings: renderings.map((rendering) => ({ narrative: rendering.narrative, text: rendering.userText })),
     };
     const verdict = judgeConfirmSurface(scenario);
 
     const evidence = [
       `夹具：${path.relative(path.resolve(EVAL_DIR, '..', '..'), S2_FIXTURE_ROOT)}（gateway ${S2_GATEWAY}，EXECUTION_EXECUTOR=mock）`,
-      `档位旋钮：${JSON.stringify(S2_CONFIRM_TIER_ENV)} → decision=${result.pending.evaluation.decision} reasonCode=${result.pending.evaluation.reasonCode}`,
+      `档位旋钮：${JSON.stringify(S2_CONFIRM_TIER_ENV)} → decision=${first.evaluation.decision} reasonCode=${first.evaluation.reasonCode}`,
       `计划调用：${S2_PLAN_CALLS.map((call) => `${call.operation} ${call.args.join(' ')}`).join(' | ')}`,
       `宿主机械事实：平台第 5 列名 ${JSON.stringify(usedLabels)}；声明值 ${JSON.stringify(values)}；同清单其它名字 ${otherLabels.length} 个`,
       `确认文本（用户会看到的那一条）：${JSON.stringify(userText)}`,
-      // 信息性（不入判据）：平台下发的计量口径原样上屏——用户看到的是"3 call(s), 30s, weight 6"
-      // 这类执行侧计量，不是他能评估的业务范围。五类指纹尺刻意不收这一类（判据原文点名的那把尺），
-      // 所以它只能在这里如实记一笔，供下一轮替换范围块时对照。
-      `提示（不入判据）：平台 scopeSummary 原样上屏 = ${evaluationScopeSummaryOnSurface(result.pending.evaluation, userText)}`,
+      // 信息性（不入判据）：平台下发的计量口径仍上屏（次要信息行）——用户看到的是
+      // "3 call(s), 30s, weight 6"这类执行侧计量，不是他能评估的业务范围；业务范围段
+      // 由宿主从机械事实渲染（上面那条 line 5 的证据）。五类指纹尺刻意不收这一类。
+      `提示（不入判据）：平台 scopeSummary 仍上屏（次要信息行）= ${evaluationScopeSummaryOnSurface(first.evaluation, userText)}`,
+      ...renderings.map((rendering, index) => `渲染${index + 1}（叙述 ${JSON.stringify(rendering.narrative)}）：${JSON.stringify(rendering.userText)}`),
       ...verdict.findings.map((line) => `判据：${line}`),
     ];
-    return { noticeText, userText, evaluation: result.pending.evaluation, facts, scenario, verdict, evidence };
+    return { noticeText, userText, evaluation: first.evaluation, facts, scenario, verdict, renderings, evidence };
   } finally {
-    if (!options.keepStateDir) rmSync(stateDir, { recursive: true, force: true });
+    if (!keepStateDir) for (const stateDir of stateDirs) rmSync(stateDir, { recursive: true, force: true });
   }
 }
 

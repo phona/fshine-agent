@@ -4,7 +4,7 @@ import { decideBudgetTier, stricterTier } from './budget-policy';
 import { errorFor } from './error-codes';
 import { scrubExecutionLanguageText } from './execution-language';
 import { isConfirmGateTier, taskBudgetDecision, ZERO_TASK_BUDGET, type TaskBudgetUsage } from './task-budget';
-import { operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
+import { loadOperationArgSpecs, loadOperationLabels, operationLabel, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayExecPathForProfile, gatewayTextPatterns, RECALL_SCOPE_ARG_NAMES, resolveGatewayText } from './platform-contract';
 
 export interface PlanCall {
@@ -95,6 +95,12 @@ export interface EvaluateAndActivatePlanOptions {
    * 拥有任务生命周期），跨回合的账本延续由调用方决定。
    */
   taskBudgetUsage?: TaskBudgetUsage;
+  /**
+   * 本回合模型给出的后果叙述（确认/通知面的「后果」段原文）。宿主只做出口整理，不改写；
+   * 范围段不接受模型措辞——模型叙述只能进后果段。缺席 = 渲染面明说没有后果说明（不补写），
+   * 绝不合成一段"看起来像后果"的宿主文案。
+   */
+  consequenceNarrative?: string;
 }
 
 export async function loadCurrentActivePlan(options: {
@@ -229,10 +235,10 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
     : rawEvaluation;
 
   if (evaluation.decision === 'stop') {
-    return { status: 'stop', evaluation, message: formatPlanMessage(evaluation) };
+    return { status: 'stop', evaluation, message: await formatPlanNotice(evaluation, options) };
   }
   if (evaluation.decision === 'confirm') {
-    const message = formatPlanMessage(evaluation);
+    const message = await formatPlanNotice(evaluation, options);
     if (!options.onNotice) throw new Error('本次计划需要用户确认，但 trusted.onNotice 未配置；已暂停执行。');
     await options.onNotice(message);
     return {
@@ -249,7 +255,7 @@ export async function evaluateAndActivatePlan(options: EvaluateAndActivatePlanOp
     };
   }
   if (evaluation.decision === 'notify') {
-    const message = formatPlanMessage(evaluation);
+    const message = await formatPlanNotice(evaluation, options);
     if (!options.onNotice) throw new Error('本次计划需要通知用户，但 trusted.onNotice 未配置；已暂停执行。');
     // Notification delivery is part of activation authorization: never activate before it resolves.
     await options.onNotice(message);
@@ -307,19 +313,84 @@ export function createActivationToken(
  */
 export const PLAN_NOTICE_PREFIX = '计划通知：';
 
-export function formatPlanMessage(evaluation: PlanEvaluation): string {  const minutes = Math.round((evaluation.estimate.seconds / 60) * 10) / 10;
+/**
+ * 计划通知/确认面的范围段事实（全部是宿主机械事实，D-065 同源）：
+ *   · labels —— 平台清单第 5 列名（operation-labels 的只读消费，按计划调用序去重）；
+ *   · scopeValues —— planCallFacts 从结构化调用里抽出的声明取值（执行层声明面）。
+ * 拿不到（执行层没声明 / 查表失败）时为空气——渲染面明说缺什么，不猜不补。
+ */
+export interface PlanNoticeFacts {
+  labels?: readonly string[];
+  scopeValues?: readonly string[];
+}
+
+export interface PlanNoticeOptions {
+  /** 本回合模型给出的后果叙述；原样进后果段（宿主只过出口整理）。 */
+  consequenceNarrative?: string;
+  /** 范围段的机械事实；缺席 = 没有事实可用，范围段明说缺什么。 */
+  facts?: PlanNoticeFacts;
+}
+
+export function formatPlanMessage(evaluation: PlanEvaluation, options: PlanNoticeOptions = {}): string {
+  const minutes = Math.round((evaluation.estimate.seconds / 60) * 10) / 10;
   const addedCalls = typeof evaluation.delta.addedCalls === 'number' ? evaluation.delta.addedCalls : evaluation.estimate.calls;
   const platformSummary = evaluation.noticeText ?? evaluation.summary ?? evaluation.scopeSummary;
-  const scope = platformSummary
-    ? `${sanitizeSummary(platformSummary)} `
+  const summary = platformSummary
+    ? sanitizeSummary(platformSummary)
     : `本次需新增 ${addedCalls} 次查询，预计约 ${minutes} 分钟。`;
-  const confirm = evaluation.decision === 'confirm' ? '请回复“确认继续”后再执行；当前已暂停。' : '通知送达后将继续执行。';
+  const labels = [...new Set((options.facts?.labels ?? []).filter((label) => label.trim().length > 0))];
+  const values = [...new Set((options.facts?.scopeValues ?? []).filter((value) => value.trim().length > 0))];
+  const factsPresent = labels.length > 0 || values.length > 0;
+  // 业务范围段：只由宿主渲染。有机械事实（平台第 5 列业务名 + 结构化声明值）就用事实；
+  // 拿不到就明说缺什么、不猜不补——平台口径原样留在后面的次要信息行，绝不冒充业务范围。
+  const scope = factsPresent
+    ? `范围：${labels.join('、')}${values.length > 0 ? `（${values.join('、')}）` : ''}`
+    : `范围：${summary}（平台清单未给出本次操作的业务名与范围取值，不猜不补）`;
+  const narrative = (options.consequenceNarrative ?? '').trim();
+  // 业务后果段：模型叙述原样上屏（宿主只过出口整理，不用自己的话顶掉它）。没有叙述就
+  // 明说没有——"引用了但没带说明"与"带了一段宿主合成的后果"在用户面必须可区分。
+  const consequence = narrative.length > 0
+    ? `后果：${narrative}`
+    : '后果：本回合没有给出执行后果说明（不补写）。';
+  const lines = [scope, consequence];
+  // 技术预算细节（平台口径：calls/seconds/weight）作为次要信息行；不得占据确认的主要内容。
+  if (factsPresent) lines.push(`（平台口径：${summary}）`);
+  if (evaluation.decision === 'confirm') {
+    // 可选项两条路都给：继续与取消的答复词形与宿主 classifyAnswer 接受的词表一致。
+    // 末行明说"还没执行"——用户知道自己此刻没有付出任何执行，不是在确认一件已发生的事。
+    lines.push('可选项：回复“确认继续”执行；回复“取消”放弃本次计划。');
+    lines.push('本次计划尚未执行任何调用；请回复“确认继续”后再执行；当前已暂停。');
+  } else {
+    lines.push('通知送达后将继续执行。');
+  }
   // 前缀让用户在企微里能把"系统通知"和普通进度区分开，也让宿主/测试能稳定识别这条帧。
   // 确认面同样过执行语言删除（T8，2026-11-11）：平台下发的 scopeSummary/noticeText 是
   // 平台内部语言（脚本路径/码/operation 名/控词），"请你确认"这条帧与回复面同一把尺——
   // 用户看得懂的中文照留，用户没法用的那一截删掉。通知文本的单一出处就在这里，所以尺也
   // 装在这里（调用方漏挂一次就是一次泄漏上屏）。
-  return scrubExecutionLanguageText(`${PLAN_NOTICE_PREFIX}${scope}${confirm}`).text;
+  return scrubExecutionLanguageText(`${PLAN_NOTICE_PREFIX}${lines.join('\n')}`).text;
+}
+
+/**
+ * 确认/通知面的范围段机械事实：平台清单第 5 列名（按计划调用序去重）与 planCallFacts 的
+ * 声明取值。两份派生都是"增强不是前提"——拿不到 → 空事实 → 渲染面明说缺什么（不猜不补）。
+ */
+async function planNoticeFactsFor(options: EvaluateAndActivatePlanOptions): Promise<PlanNoticeFacts> {
+  const labels = await loadOperationLabels(options.platformRoot, options.gateway);
+  const specs = await loadOperationArgSpecs(options.platformRoot, options.gateway);
+  const labelList = [...new Set(options.calls
+    .map((call) => operationLabel(labels, call.operation))
+    .filter((label): label is string => typeof label === 'string' && label.length > 0))];
+  const scopeValues = planCallFacts(options.calls, specs, labels).scopeValues ?? [];
+  return { labels: labelList, scopeValues };
+}
+
+/** 计划识别帧的渲染入口：机械事实 + 模型后果叙述 → 一条确认/通知文本。 */
+async function formatPlanNotice(evaluation: PlanEvaluation, options: EvaluateAndActivatePlanOptions): Promise<string> {
+  return formatPlanMessage(evaluation, {
+    facts: await planNoticeFactsFor(options),
+    ...(options.consequenceNarrative ? { consequenceNarrative: options.consequenceNarrative } : {}),
+  });
 }
 
 /**
