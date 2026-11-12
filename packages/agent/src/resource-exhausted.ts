@@ -8,7 +8,7 @@
  * 部分与下一步，并附续跑入口"——本模块把那份义务落成终稿。
  *
  * 事实面（全部宿主持有，零 worker 文本嗅探）：
- *   · platform_tasks 底账的刚失败条目：结构化执行事实（label / accountSet / period /
+ *   · platform_tasks 底账的刚失败条目：结构化执行事实（label / 执行层声明的范围取值 /
  *     calls，D-065 口径）与此前回合已取得的结果原文（resultText，续跑任务的断点内容）；
  *     中间转录（workerMessages）已由 context.ts 的超时 catch 持久化，是"进度已保留"
  *     这句话的事实依据；
@@ -78,9 +78,14 @@ export interface ResourceExhaustedInput {
 /** 单条事实行截断：终稿是给用户的摘要，不是底账转储；全文在 Log 与任务条目里可查。 */
 const FACT_LINE_LIMIT = 160;
 
-/** 任务条目的结构化事实 → 一行"已执行操作"描述；没有任何结构化字段时返回空。 */
+/**
+ * 任务条目的结构化事实 → 一行"已执行操作"描述；没有任何结构化字段时返回空。
+ *
+ * 范围取值是执行层声明的**通用形状**（本模块不懂业务语义）：非空就按声明序拼起来原样上屏；
+ * 缺席（旧任务 / 执行层没声明 / 规格缺失）就只落 label 或 operation——不猜、不补、不编。
+ */
 function executedLineOf(record: PlatformTaskRecord): string {
-  const scope = [record.accountSet, record.period].filter(Boolean).join(' ');
+  const scope = (record.scopeValues ?? []).filter(Boolean).join(' ');
   const action = record.label ?? record.calls?.[0]?.operation;
   if (!action && !scope) return '';
   return [action, scope].filter(Boolean).join('（') + (scope && action ? '）' : '');

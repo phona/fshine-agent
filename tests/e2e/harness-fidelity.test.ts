@@ -157,12 +157,12 @@ describe('[L4 集成] harness 保真度绊线', () => {
     );
 
     // 第一重：规格必须非空。harness 的 factsFor 与真实驱动的 planCallFacts 都吃这份表，
-    // 空表 = accountSet/period/label 全部取不到——D-065 结构化事实链静默退化（e2e 零处
+    // 空表 = 执行层声明的范围取值 / label 全部取不到——D-065 结构化事实链静默退化（e2e 零处
     // 断言 planFacts，退化不会让任何用例红，这正是本护栏存在的理由）。
     expect(specs.size, '平台 args 规格为空或派生失败——D-065 结构化事实链（planCallFacts）会静默退化，先和平台对齐').toBeGreaterThan(0);
 
     // 第二重：锚点两头钉在 e2e 假设最多的那条 operation 上。balanceCalls 全族提交的都是
-    // finance.query-receivables + --query/--period；结构化事实的 accountSet/period、
+    // finance.query-receivables + --query/--period；结构化事实的声明取值（对象 + 窗口）、
     // PERIOD_NO_DATA 终局话术里"查的是谁、哪一期"，全靠这两个 flag 在规格里有声明名。
     // 键同时收注册名与 command 裸名（parseOperationArgSpecs 的登记规则，两种都合法）。
     const spec = specs.get('finance.query-receivables') ?? specs.get('query-receivables');

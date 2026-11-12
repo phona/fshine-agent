@@ -113,7 +113,7 @@ describe('T9 宿主注入整条删除', () => {
           listBySession: async () => [{
             taskId: 'task_fixture', parentSessionId: 'sess_1', principalId: 'wecom:user_a',
             workerMessages: [], createdAt: '2026-11-10T02:00:00.000Z', updatedAt: '2026-11-10T02:01:00.000Z',
-            accountSet: '幻辰财税', period: '202609', label: '应收账款余额查询', outcome: 'done',
+            scopeValues: ['幻辰财税', '202609'], label: '应收账款余额查询', outcome: 'done',
             resultText: '幻辰财税 202609 应收账款余额为 7,321.55 元。',
           }],
         },

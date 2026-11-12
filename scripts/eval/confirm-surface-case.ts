@@ -148,7 +148,7 @@ export async function runConfirmSurfaceCase(options: { keepStateDir?: boolean } 
       .filter((label): label is string => typeof label === 'string' && label.length > 0);
     const otherLabels = [...new Set([...labels.values()])].filter((label) => !usedLabels.includes(label));
     const extracted = planCallFacts(S2_PLAN_CALLS, specs, labels);
-    const values = [extracted.accountSet, extracted.period].filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const values = (extracted.scopeValues ?? []).filter((value) => value.length > 0);
 
     const notices: string[] = [];
     const result = await evaluateAndActivatePlan({

@@ -106,6 +106,22 @@ export const PLATFORM_OPERATIONS = {
   financeSearchAccountSets: 'finance.search-account-sets',
 } as const;
 
+/**
+ * 召回范围取值的声明面（执行层声明，D-065 结构化事实的归属位）。
+ *
+ * 声明的是：平台 args 规格里，哪些**声明名**构成本任务"对哪个对象、哪个窗口执行过什么"
+ * 的范围取值，以及拼接顺序。planCallFacts 按这份声明逐位查表（位置参数按序对应规格的
+ * positionalNames，flag 按平台自己的 kebab→camel 归一），取值进任务条目的通用字段
+ * scopeValues——契约与存储因此只承载通用形状，不焊任何执行层的参数名；换一个执行层、
+ * 参数名不同，只改这一处。声明名对不上 / 规格缺失 → 该位不取值（宁缺勿猜），消费方降级。
+ *
+ * 为什么住在本文件：它是宿主仓**唯一**允许出现平台实现细节的契约适配层（泄漏 lint
+ * 白名单）。为什么只声明这两类语义：范围取值要回答"对象 + 窗口"，这两类是平台自己在
+ * args 规格里声明的名字（某类检索关键词刻意不在列——检索词不一定等于平台解析后的规范名，
+ * 宁缺勿猜）。**绝不从 worker 文本解析**：转录里"提过"不等于"执行过"。
+ */
+export const RECALL_SCOPE_ARG_NAMES: readonly string[] = ['accountSet', 'period'];
+
 export interface PlatformEnvelope {
   v: 1;
   op: string;

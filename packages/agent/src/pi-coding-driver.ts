@@ -544,11 +544,10 @@ function planFactsOf(
   labels: OperationLabels,
 ): PlanCallFacts | undefined {
   if (calls.length === 0) return undefined;
-  const { accountSet, period, label } = planCallFacts(calls, specs, labels);
+  const { scopeValues, label } = planCallFacts(calls, specs, labels);
   return {
     calls: calls.map((call) => ({ operation: call.operation, args: call.args })),
-    ...(accountSet ? { accountSet } : {}),
-    ...(period ? { period } : {}),
+    ...(scopeValues && scopeValues.length > 0 ? { scopeValues } : {}),
     ...(label ? { label } : {}),
   };
 }

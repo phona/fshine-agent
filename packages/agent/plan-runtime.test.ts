@@ -314,33 +314,33 @@ const LABELS = new Map([
   ['voucher.query-saved', '查凭证列表'],
 ]);
 
-describe('planCallFacts（平台 args 规格声明名机械提取）', () => {
-  it('位置参数按声明名取：voucher.query-saved 的 accountSet/period', () => {
+describe('planCallFacts（执行层声明名机械提取）', () => {
+  it('位置参数按声明名取：voucher.query-saved 的 accountSet/period 两位，按声明序进 scopeValues', () => {
     expect(planCallFacts(
       [{ operation: 'voucher.query-saved', args: ['幻州市幻晟财务代理有限公司', '202609'] }],
       SPECS, LABELS,
     )).toEqual({
-      accountSet: '幻州市幻晟财务代理有限公司',
-      period: '202609',
+      scopeValues: ['幻州市幻晟财务代理有限公司', '202609'],
       label: '查凭证列表',
     });
   });
 
-  it('flag 按平台 kebab→camel 声明名取：--period 取得到，--query 不当作 accountSet', () => {
+  it('flag 按平台 kebab→camel 声明名取：--period 取得到，--query 不进范围取值', () => {
     const facts = planCallFacts(
       [{ operation: 'finance.query-receivables', args: ['--query', '幻晟', '--period', '202609', '--subject-code', '1122'] }],
       SPECS, LABELS,
     );
-    // 宁缺勿猜：--query 是检索关键词（平台规范名先搜出来），不等于已解析的账套名
-    expect(facts).toEqual({ period: '202609', label: '查应收账款余额' });
+    // 宁缺勿猜：--query 是检索关键词（平台规范名先搜出来），不是范围取值；声明表外的名字一律不取
+    expect(facts).toEqual({ scopeValues: ['202609'], label: '查应收账款余额' });
   });
 
-  it('多个调用时取首个命中的声明名取值（不合并、不猜）', () => {
+  it('多个调用时按声明序取首个命中（不合并、不猜；顺序由声明面定，不由遇序定）', () => {
     const facts = planCallFacts([
       { operation: 'finance.query-receivables', args: ['--query', '甲', '--period', '202601'] },
       { operation: 'voucher.query-saved', args: ['乙', '202602'] },
     ], SPECS, LABELS);
-    expect(facts).toMatchObject({ accountSet: '乙', period: '202601', label: '查应收账款余额' });
+    // period 先在调用 1 命中、accountSet 先在调用 2 命中——声明序仍是 accountSet 在前
+    expect(facts).toMatchObject({ scopeValues: ['乙', '202601'], label: '查应收账款余额' });
   });
 
   it('规格缺失 / 声明名对不上 → 该字段不出现（不猜位置语义）', () => {
