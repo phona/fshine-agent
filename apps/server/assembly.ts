@@ -21,7 +21,10 @@ import {
   createPlatformExecutionGate,
   createPiCodingTurnDriver,
   createPiTurnDriver,
+  createReadSkillTool,
   createTaxAgentRuntime,
+  listSkills,
+  loadAgentProfile,
   loadOperationArgSpecs,
   loadProposalSchema,
   reviewProposalWithDriver,
@@ -32,6 +35,7 @@ import {
   type ContextTaskRunner,
   type BackgroundTaskManager,
   type PlatformExecutionGate,
+  type SkillSummary,
   type TaskResultPort,
   type TaskStagnationOptions,
   type TurnDriver,
@@ -43,7 +47,6 @@ import { createProposalCommitRunner } from './proposal-commit';
 import { createMessageHandler } from './handler';
 import { sweepUndeliveredTaskRuns } from './background-delivery';
 import { createPlanConfirmationWiring } from './plan-confirmation-route';
-import { loadBusinessSkill } from './business-skill';
 import { workerDispatchModeOf, type WorkerDispatchMode } from './dispatch-mode';
 
 export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -116,6 +119,16 @@ export interface ServerAssemblyOverrides {
   taskResults?: TaskResultPort;
   /** T10 停滞检测参数（只在 taskResults 同时注入时生效）。缺省 = 关闭。 */
   stagnation?: TaskStagnationOptions;
+  /**
+   * A/B 对照专用（AB-Eval 规格 §1，**程序化、非配置项**）：替身角色指令。
+   * 生产路径永不传它；缺省 = 只读 `.agents/agents/fshine-main/agent.md`（唯一事实源）。
+   */
+  roleInstructionsOverride?: string;
+  /**
+   * A/B 对照专用（AB-Eval 规格 §1）：Skill 元数据曝光 + read_skill 注册开关。
+   * 缺省 = on（生产口径）；off 只给控制臂用。不是配置项、不是环境变量。
+   */
+  skillsMode?: 'on' | 'off';
 }
 
 /**
@@ -233,11 +246,39 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // 任务计划状态（Phase 6）：AuditStore 的可选成员，存储未实现时缺省（降级不报错）。
   const taskPlans: TaskPlanRepo | undefined = (store as { taskPlans?: TaskPlanRepo }).taskPlans;
-  // 业务 skill（架构 §5）：读文件失败/文件缺失都只记日志，不影响启动。
-  const businessSkill = await loadBusinessSkill(effectiveEnv);
-  console.log(JSON.stringify(businessSkill.text
-    ? { event: 'business_skill_loaded', path: businessSkill.path, chars: businessSkill.text.length }
-    : { event: 'business_skill_skipped', path: businessSkill.path }));
+  // Main 常驻角色指令（Track D 换源）：唯一事实来源 = `.agents/agents/fshine-main/agent.md`，
+  // 装配期读取一次，失败即启动失败（错误带路径与原因），绝不回退任何旧提示词。
+  // roleInstructionsOverride 只给 A/B 对照程序化注入（非配置项、非环境变量）。
+  let roleInstructions: string;
+  let profileSource: string;
+  if (overrides.roleInstructionsOverride !== undefined) {
+    roleInstructions = overrides.roleInstructionsOverride;
+    profileSource = '(override)';
+  } else {
+    const profile = await loadAgentProfile();
+    roleInstructions = profile.instructions;
+    profileSource = profile.sourcePath;
+  }
+  console.log(JSON.stringify({ event: 'main_profile_loaded', source: profileSource, chars: roleInstructions.length }));
+  // Main 协作技能面（Track D 接线）：缺省根 = `.agents/skills`（skills.ts 的缺省，与 Worker
+  // 运行态技能面 `.agents/skills-serve` 不同源，不在这里改）。发现失败 = 响亮日志 + 空清单，
+  // 启动照常、基础任务不受影响（技能面是增强不是前提）；read_skill 仍是按需入口。
+  // skillsMode=off 只给 A/B 控制臂用（程序化；生产永不传）。
+  const skillsEnabled = overrides.skillsMode !== 'off';
+  let skillCatalog: readonly SkillSummary[] = [];
+  if (skillsEnabled) {
+    try {
+      skillCatalog = await listSkills();
+      console.log(JSON.stringify({ event: 'main_skills_discovered', count: skillCatalog.length, names: skillCatalog.map((skill) => skill.name) }));
+    } catch (error) {
+      console.error(JSON.stringify({
+        event: 'main_skills_discovery_failed',
+        error: error instanceof Error ? error.message.slice(0, 300) : String(error),
+      }));
+      skillCatalog = [];
+    }
+  }
+  const readSkillTool = skillsEnabled ? createReadSkillTool() : undefined;
 
   // 分层模型接缝：Main Agent 可单独配更快的模型（LLM_MAIN_MODEL），执行层 worker 仍走
   // LLM_MODEL——worker 驱动的输入原样不动（pi-coding-driver 只认 env.LLM_MODEL）。
@@ -429,10 +470,13 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgSpecs } : {}),
     // 任务计划状态（Phase 6）：存储未启用时缺省，长任务拆解照常、只是没有进度投影。
     ...(taskPlans ? { taskPlans } : {}),
-    // 业务 skill（架构 §5）：启动时读文件，每回合进系统提示词；缺失 = 不注入。
-    ...(businessSkill.text ? { businessSkill: businessSkill.text } : {}),
-    // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 系统
-    // 提示词；未声明 = 宿主中性缺省（DEFAULT_EXECUTOR_LABEL），不静默取实例名。
+    // Main 角色指令（唯一来源 = agent.md，装配期读取一次；A/B 对照经 override 注入替身）。
+    roleInstructions,
+    // Main 协作技能面（Track D）：元数据（名称+描述）随装配注入，正文留给 read_skill 按需读。
+    ...(skillCatalog.length > 0 ? { skillCatalog } : {}),
+    ...(readSkillTool ? { readSkillTool } : {}),
+    // 执行层称谓（C2）：从 active profile 的 executorLabel 声明注入 Main Agent 角色文本
+    // 的 {{executorLabel}} 占位；未声明 = 宿主中性缺省，不静默取实例名。
     ...(activeProfile?.executorLabel ? { executorLabel: activeProfile.executorLabel } : {}),
   });
 

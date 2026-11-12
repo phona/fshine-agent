@@ -362,7 +362,6 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const host = parseHost(optionalSection(root, 'host'), env);
   const execution = parseExecution(optionalSection(root, 'execution'), env);
   const store = parseStore(optionalSection(root, 'store'), env);
-  const businessSkillPath = pickString(env, 'BUSINESS_SKILL_PATH', root['businessSkillPath']);
 
   return {
     principals,
@@ -374,7 +373,6 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     ...(host ? { host } : {}),
     ...(execution ? { execution } : {}),
     ...(store ? { store } : {}),
-    ...(businessSkillPath === undefined ? {} : { businessSkillPath }),
   };
 }
 
@@ -412,7 +410,6 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('FSHINE_ATTACHMENT_DIR', config.host?.attachmentDir);
   put('FSHINE_PI_AGENT_DIR', config.host?.piAgentDir);
   put('DB_PATH', config.store?.dbPath);
-  put('BUSINESS_SKILL_PATH', config.businessSkillPath);
   put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
   return env;
 }

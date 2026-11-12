@@ -4,13 +4,16 @@
  * 稳定性写法沿用 model-seam-wiring.test.ts：真工厂 + 最小真装配（临时 SQLite + 只含
  * principals 的最小 yaml；不配 contextProfiles → 无 platformRoot → 不触平台 lint 与
  * CLI，全程离线），只在 @fshine/agent 的工厂外包一层透传 spy 观察装配产物。
- * business skill 同样是透传 spy（记录装配下传的 env），行为仍走真实现。
  *
  * 红线（恒等 + 覆盖判据）：
  *   · 缺键时装配产物与切片前逐字段一致：Main 驱动 options 键恰为 [env]；worker 不传
  *     agentDir（驱动保持自己的 process.env 回落链）；平台闸 options 恰为 {maxQueue}。
- *   · yaml 值经 effectiveEnv 下传（驱动 / 渠道 / handler / business skill / 平台闸）。
+ *   · yaml 值经 effectiveEnv 下传（驱动 / 渠道 / handler / 平台闸）。
  *   · 非空 env 覆盖 yaml；空串 env（node --env-file 的 `KEY=` 形态）不覆盖 yaml。
+ *
+ * Track D：业务 skill 配置链（businessSkillPath / BUSINESS_SKILL_PATH / loadBusinessSkill）
+ * 已整条删除，本文件不再有 business skill spy；Main 角色来源与技能面的装配断言住
+ * main-profile-wiring.test.ts。
  */
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,7 +25,6 @@ import {
   createPlatformExecutionGate,
   type TurnDriver,
 } from '@fshine/agent';
-import { loadBusinessSkill } from './business-skill';
 
 vi.mock('@fshine/agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@fshine/agent')>();
@@ -33,12 +35,6 @@ vi.mock('@fshine/agent', async (importOriginal) => {
     createPiCodingTurnDriver: vi.fn(actual.createPiCodingTurnDriver),
     createPlatformExecutionGate: vi.fn(actual.createPlatformExecutionGate),
   };
-});
-
-vi.mock('./business-skill', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('./business-skill')>();
-  // 透传 spy：真实文件加载被替换成固定成功值，只用于核对装配下传的 env。
-  return { ...actual, loadBusinessSkill: vi.fn(async () => ({ path: 'stubbed-business-skill.md' })) };
 });
 
 import { createServerAssembly, type ServerAssembly } from './assembly';
@@ -136,7 +132,7 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(gateCall()).toEqual({ maxQueue: 100 });
   });
 
-  it('yaml 值经 effectiveEnv 下传：driver / 渠道 / handler / business skill / 平台闸', async () => {
+  it('yaml 值经 effectiveEnv 下传：driver / 渠道 / 平台闸', async () => {
     const assembly = await boot(configFile([
       'llm:',
       '  apiBaseUrl: http://127.0.0.1:9',
@@ -158,7 +154,6 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
       '  piAgentDir: /tmp/cfg-pi-agent',
       'execution:',
       '  planActivationSecret: yaml-plan-secret',
-      'businessSkillPath: docs/business-skill.md',
       '',
     ].join('\n')));
     await assembly.close();
@@ -190,9 +185,8 @@ describe('部署配置装配（config/agent.yaml → effectiveEnv → 既有 env
     expect(channelEnv['WECOM_BOT_ID']).toBe('yaml-bot-id');
     expect(channelEnv['WECOM_BOT_SECRET']).toBe('yaml-bot-secret');
 
-    // business skill：加载器收到同一份 effectiveEnv（BUSINESS_SKILL_PATH 已派生）。
-    const skillCall = vi.mocked(loadBusinessSkill).mock.calls.at(-1);
-    expect(skillCall?.[0]?.['BUSINESS_SKILL_PATH']).toBe('docs/business-skill.md');
+    // Track D：business skill 配置链已删除（旧断言核对的 BUSINESS_SKILL_PATH 派生不再存在）；
+    // Main 角色来源（agent.md）与技能面装配不读 env，其断言住 main-profile-wiring.test.ts。
 
     // 装配对外状态：委派模式、计划密钥、停机排干都来自 yaml。
     expect(assembly.workerDispatchMode).toBe('inline');

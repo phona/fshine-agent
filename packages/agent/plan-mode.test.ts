@@ -418,33 +418,10 @@ describe('长任务拆解：计划模式与任务计划状态', () => {
     expect(relayed.text).not.toContain('没有产生任何平台查询');
   });
 
-  it('P6.10 业务 skill 每回合进系统提示词，与日期行同性质', async () => {    const capture = (): { seen: () => string; driver: TurnDriver } => {
-      const state = { seen: '' };
-      const base = ScriptedTurnDriver([{ toolCalls: [{ tool: ROUTE_CURRENT_TURN_TOOL_NAME, args: { kind: 'conversation' } }] }, { text: '你好。' }]);
-      return {
-        seen: () => state.seen,
-        driver: { run: async (input) => { state.seen = input.systemPrompt; return base.run(input); } },
-      };
-    };
-    const withSkill = capture();
-    const runtime = createTaxAgentRuntime({
-      driver: withSkill.driver,
-      sessions: new FakeSessionRepo(),
-      platformTask: subagent([() => DONE('task_skill', 'x')]),
-      businessSkill: '跨账套核对：按账套拆 N 步，互不影响，最后汇总。',
-    });
-
-    await runtime.handleTurn(makeCtx({ requestId: 'req_skill' }), '你好');
-
-    expect(withSkill.seen()).toContain('业务编排知识');
-    expect(withSkill.seen()).toContain('跨账套核对：按账套拆 N 步，互不影响，最后汇总。');
-
-    // 没有业务 skill 时提示词里不出现该段
-    const withoutSkill = capture();
-    const plain = createTaxAgentRuntime({ driver: withoutSkill.driver, sessions: new FakeSessionRepo(), platformTask: subagent([() => DONE('t', 'x')]) });
-    await plain.handleTurn(makeCtx({ requestId: 'req_skill_none' }), '你好');
-    expect(withoutSkill.seen()).not.toContain('业务编排知识');
-  });
+  // P6.10（业务 skill 每回合进系统提示词）随业务 skill 注入链整条删除退役（Track D）：
+  // 静态编排知识不再注入提示词，取而代之的是 agent.md 常驻角色 + 技能按需读取
+  // （read_skill 工具桥）。新形态的装配验收住 system-prompt.test.ts 与
+  // apps/server/main-profile-wiring.test.ts。
 
   it('P6.11 两个未完成计划形状撞车：宿主不猜，发编号消歧问题且不委派', async () => {
     const taskPlans = new FakeTaskPlanRepo();

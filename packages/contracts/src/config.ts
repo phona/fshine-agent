@@ -33,7 +33,8 @@ export interface ContextProfileConfig {
   gateway?: string;
   /**
    * Operator-declared display name for this execution layer's subagent,
-   * injected into the host Main Agent system prompt via `buildSystemPrompt`.
+   * injected into the host Main Agent role text by replacing the
+   * `{{executorLabel}}` placeholder in `.agents/agents/fshine-main/agent.md`.
    * Never supplied by the model. Omitted profiles fall back to the neutral
    * host default (`DEFAULT_EXECUTOR_LABEL`) — the host never silently adopts
    * an instance name as its default.
@@ -180,6 +181,4 @@ export interface AppConfig {
   store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */
   execution?: ExecutionConfig;
-  /** 编排层业务 skill 的文件路径（相对仓库根或绝对路径；env 非空值覆盖）。 */
-  businessSkillPath?: string;
 }

@@ -148,6 +148,21 @@ export async function listSkills(rootDir = defaultSkillRoot()): Promise<readonly
   return skills.map(({ name, description }) => ({ name, description }));
 }
 
+/**
+ * Host-rendered catalog block for the Main system prompt: names + descriptions only,
+ * never bodies (the body is fetched on demand via the read_skill tool).
+ *
+ * Empty list → empty string: a deployment without a skill surface must not grow an
+ * empty section in the prompt.
+ */
+export function renderSkillCatalog(skills: readonly SkillSummary[]): string {
+  if (skills.length === 0) return '';
+  return [
+    `【可用技能（需要时用 ${READ_SKILL_TOOL} 按名称读取正文）】`,
+    ...skills.map((skill) => `- ${skill.name}：${skill.description}`),
+  ].join('\n');
+}
+
 /** Convenience API with the same containment checks as the registry. */
 export async function readSkill(name: string, rootDir = defaultSkillRoot()): Promise<LoadedSkill> {
   return new FileSkillRegistry({ rootDir }).read(name);

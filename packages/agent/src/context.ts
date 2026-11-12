@@ -54,7 +54,7 @@ import {
   type PlatformExecutionGate,
   type PlatformExecutionLease,
 } from './platform-execution-gate';
-import { DEFAULT_EXECUTOR_LABEL } from './system-prompt';
+import { DEFAULT_EXECUTOR_LABEL } from './agent-profile';
 
 /**
  * 委派工具名的中性缺省（C3）。工具名是模型可见协议面：实例已发布的协议名由该实例的

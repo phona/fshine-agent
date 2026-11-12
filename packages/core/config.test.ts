@@ -364,10 +364,9 @@ host:
   piAgentDir: /srv/pi-agent
 execution:
   planActivationSecret: yaml-plan-secret
-businessSkillPath: docs/other-business-skill.md
 `;
 
-  it('yaml 段解析：llm / wecom / host / execution / businessSkillPath', () => {
+  it('yaml 段解析：llm / wecom / host / execution', () => {
     const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
 
     expect(config.llm).toEqual({
@@ -389,7 +388,6 @@ businessSkillPath: docs/other-business-skill.md
       piAgentDir: '/srv/pi-agent',
     });
     expect(config.execution).toEqual({ planActivationSecret: 'yaml-plan-secret' });
-    expect(config.businessSkillPath).toBe('docs/other-business-skill.md');
   });
 
   it('非空 env 覆盖 yaml；空串 env 不覆盖（--env-file 的 KEY= 形态）', () => {
@@ -399,7 +397,6 @@ businessSkillPath: docs/other-business-skill.md
         LLM_MODEL: 'env-model',
         WECOM_BOT_ID: 'env-bot-id',
         FSHINE_PLATFORM_QUEUE_CAPACITY: '9',
-        BUSINESS_SKILL_PATH: '/srv/env-skill.md',
         EXECUTION_PLAN_ACTIVATION_SECRET: 'env-plan-secret',
         APP_PORT: '8080',
       },
@@ -408,7 +405,6 @@ businessSkillPath: docs/other-business-skill.md
     expect(overridden.llm?.apiKey).toBe('yaml-key');
     expect(overridden.wecom?.botId).toBe('env-bot-id');
     expect(overridden.host?.platformQueueCapacity).toBe(9);
-    expect(overridden.businessSkillPath).toBe('/srv/env-skill.md');
     expect(overridden.execution?.planActivationSecret).toBe('env-plan-secret');
     expect(overridden.channel.port).toBe(8080);
 
@@ -418,7 +414,6 @@ businessSkillPath: docs/other-business-skill.md
         LLM_MODEL: '',
         WECOM_BOT_ID: '',
         FSHINE_PLATFORM_QUEUE_CAPACITY: '   ',
-        BUSINESS_SKILL_PATH: '',
         EXECUTION_PLAN_ACTIVATION_SECRET: '',
         APP_PORT: '',
       },
@@ -426,7 +421,6 @@ businessSkillPath: docs/other-business-skill.md
     expect(blank.llm?.model).toBe('yaml-model');
     expect(blank.wecom?.botId).toBe('yaml-bot-id');
     expect(blank.host?.platformQueueCapacity).toBe(7);
-    expect(blank.businessSkillPath).toBe('docs/other-business-skill.md');
     expect(blank.execution?.planActivationSecret).toBe('yaml-plan-secret');
     // 空串 APP_PORT 也回落到 yaml 的 channel.port（旧行为会退回默认 3000）。
     expect(blank.channel.port).toBe(3100);
@@ -475,7 +469,6 @@ businessSkillPath: docs/other-business-skill.md
     expect(config.wecom).toBeUndefined();
     expect(config.host).toBeUndefined();
     expect(config.execution).toBeUndefined();
-    expect(config.businessSkillPath).toBeUndefined();
     expect(deploymentEnvOf(config)).toEqual({});
   });
 
@@ -523,7 +516,6 @@ host:
       FSHINE_INBOUND_DEBOUNCE_MS: '0',
       FSHINE_ATTACHMENT_DIR: '/srv/attachments',
       FSHINE_PI_AGENT_DIR: '/srv/pi-agent',
-      BUSINESS_SKILL_PATH: 'docs/other-business-skill.md',
       EXECUTION_PLAN_ACTIVATION_SECRET: 'yaml-plan-secret',
     });
   });

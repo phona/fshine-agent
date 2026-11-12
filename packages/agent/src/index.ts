@@ -128,12 +128,22 @@ export {
   type TaskReceipt,
 } from './task-manager';
 export {
+  applyExecutorLabel,
+  DEFAULT_AGENT_PROFILE_PATH,
+  DEFAULT_EXECUTOR_LABEL,
+  EXECUTOR_LABEL_PLACEHOLDER,
+  loadAgentProfile,
+  type AgentProfile,
+  type LoadAgentProfileOptions,
+} from './agent-profile';
+export {
   FileSkillRegistry,
   createSkillRegistry,
   discoverSkills,
   listSkills,
   parseFrontmatter,
   readSkill,
+  renderSkillCatalog,
   READ_SKILL_TOOL,
   SKILL_CONTENT_LIMIT_BYTES,
   type FileSkillRegistryOptions,
@@ -142,7 +152,7 @@ export {
   type SkillRegistry,
   type SkillSummary,
 } from './skills';
-export { createReadSkillTool, type ReadSkillToolOptions } from './skill-tool';
+export { createReadSkillTool, readSkillToolDescriptor, type ReadSkillToolOptions } from './skill-tool';
 export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
 export {
   activatePendingPlan,

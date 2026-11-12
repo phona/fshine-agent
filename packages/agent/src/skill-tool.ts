@@ -11,6 +11,7 @@
  */
 import type { AgentTool } from '@earendil-works/pi-agent-core';
 import { Type } from 'typebox';
+import type { DiscoveredTool } from '@fshine/contracts';
 import { ToolUserError } from './driver';
 import {
   FileSkillRegistry,
@@ -47,6 +48,20 @@ export function createReadSkillTool(options: ReadSkillToolOptions = {}): AgentTo
         details: { name: loaded.name },
       };
     },
+  };
+}
+
+/**
+ * Descriptor form for the Main tool list (`DiscoveredTool`): the driver builds the
+ * native tool definition from name/description/inputSchema and routes execution back
+ * into the host `exec` callback. The TypeBox object is already a JSON-Schema subset —
+ * no second schema copy is kept here.
+ */
+export function readSkillToolDescriptor(tool: AgentTool): DiscoveredTool {
+  return {
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.parameters as unknown as Record<string, unknown>,
   };
 }
 
