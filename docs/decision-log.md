@@ -562,6 +562,19 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 九、V0 交付记录（2026-11-13）
+
+- **分支/提交**：`arch/integration` @ 3cfbc06（tag `v0-trial-20261113`）。构成：直连工具面（delegate → gaps → e2e 三支）＋ 申报层正式删除（c7ea077）＋ V0 演示链（87fd1a7）＋ 安全收口（aff57fd）＋ 第 4 子进程面收口与 D-209 桥键修复（f9b8ca7 / 3cfbc06）。
+- **验收**（V0 集成验收 run 两轮，第二轮在修复后 HEAD）：
+  - 确定性门：tsc 0；unit 2845 过 / 2 红（`scripts/eval/execution-leak-criteria.test.ts`，两轮同数同例，基线复现）；全量 e2e 179 = 80 过 / 97 红 / 2 跳——97 红与基线 d75de7a 逐条零新增（2 条翻绿），其中 96 条为环境约束（需兄弟仓财政域 mock / gitignored `config/agent.yaml`）、1 条既有陈旧；probe 81/81（D-209 闭集与失效化突变用例在修复后仍有区分力）；L1–L4 4/4、R1–R3 3/3、resend 9/9、child-env-closure 7/7、serve-gate-containment 8/8、generic-mock 26/26。
+  - 干净克隆：clone → `npm install`（直连 exit 0，14–16s）→ typecheck 0 → `npm run demo` 真实模型端到端留痕（dummy 审计逐行落盘）。
+  - **demo 样本方差（据实记录）**：跨夜全部 16 次 trial 中 6 次全程达标；终轮 3 次 trial 0/3——三 trial 均卡在 t1「核对本月单据」未委派（模型改为先追问口径），t2/t3 均委派且审计行非零（5/7/5 行），无查错对象、无误报成功。属模型行为方差，非接线缺陷；全部样本保留在 `.runtime/demo/trials/`。
+  - 一处产物勘误（独立复核登记，保守方向）：对账文档第 9 条（trial-3 t2 归因句）误称「委派请求原文未落盘」；实际 `demo.db platform_tasks.worker_messages` 存有原文，应转「支持」，口径 ≥51 支持 / ≤11 不能证实。
+- **残余边界（不假闭合）**：真实 SaaS 与企微渠道未验证；worker 对 `.env` / config 的文件可达性未闭环（进程 / 文件系统层，见七节 (b)）；发布阻断 #1 词法残余两类；demo 展示层标签误标（`query ballots`，根因 `operation-labels.ts:618-623` × `:63-76`）；`platform_tasks.calls` 计数与 audit 口径不齐（演示读数已统一按 audit）。
+- **定位**：本版本是**受控本地试用版**（执行层为仓内 dummy 夹具）；不得宣称可安全连接真实生产 SaaS。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
