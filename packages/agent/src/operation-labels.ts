@@ -653,7 +653,7 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
     const effects = (op as { effects?: unknown } | null)?.effects;
     const estSeconds = (op as { est_seconds?: unknown } | null)?.est_seconds;
     const label = (op as { label?: unknown } | null)?.label;
-    // serve 矩阵的键名有版本漂移（2026-11-12 跨仓实测）：17dz 平台自 f963930 起把
+    // serve 矩阵的键名有版本漂移（2026-11-12 跨仓实测）：当前接入的执行层自 f963930 起把
     // `operation list --json` 每行的 `serve` 改名为 `modes`。两键都读、`serve` 优先——
     // 旧键在位时不改变既有行为；两键并存且内容不同属平台异常，这里不静默合并
     // （只读一个，另一个不猜；没有对应的平台契约文档前不引入合并语义）。
