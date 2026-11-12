@@ -239,20 +239,6 @@ export interface ConversationLogRepo {
   search(query: ConversationLogQuery & { query: string }): Promise<ConversationEventRecord[]>;
 }
 
-export interface ContextStateRecord {
-  principalId: string;
-  sessionId: string;
-  updatedAt: string;
-  throughEventId: string;
-  reducerVersion: number;
-  state: unknown;
-}
-
-export interface ContextStateRepo {
-  get(principalId: string, sessionId: string): Promise<ContextStateRecord | null>;
-  upsert(record: ContextStateRecord): Promise<void>;
-}
-
 /** 任务计划的一步事实（append-only）。一次长任务拆解的所有 step 共享 planId。 */
 export interface TaskPlanStepFact {
   factId: string;              // append-order 唯一 id
@@ -298,7 +284,7 @@ export interface TaskPlanSummary {
 
 export interface TaskPlanRepo {
   append(fact: TaskPlanStepFact): Promise<void>;
-  /** 由 facts 重建投影（同 Context State 的可重建投影语义）；没有事实返回 null。 */
+  /** 由 facts 重建投影（append-only 事实的可重建投影语义）；没有事实返回 null。 */
   project(principalId: string, sessionId: string, planId: string): Promise<TaskPlanProjection | null>;
   /**
    * 全部未完成（已记录步号 < totalSteps）的计划，最近活跃在前；没有返回空数组。
@@ -309,34 +295,6 @@ export interface TaskPlanRepo {
   latestOpenPlan(principalId: string, sessionId: string): Promise<string | null>;
   /** 某执行层子任务所属的计划（taskId 记录在步骤终态事实上）；没有返回 null。 */
   planIdForTask(principalId: string, sessionId: string, taskId: string): Promise<string | null>;
-}
-
-export type MemoryRecordType = 'preference' | 'fact';
-export type MemoryRecordStatus = 'active' | 'conflicted' | 'superseded' | 'deleted';
-
-/** Durable long-memory fact with immutable source-event references and optimistic versioning. */
-export interface MemoryRecordRecord {
-  memoryId: string;
-  principalId: string;
-  key: string;
-  type: MemoryRecordType;
-  content: string;
-  status: MemoryRecordStatus;
-  sourceEventIds: string[];
-  version: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface MemoryRecordRepo {
-  listByPrincipal(principalId: string): Promise<MemoryRecordRecord[]>;
-  /** Last successfully consolidated user source event; null means not started. */
-  getCursor(principalId: string): Promise<string | null>;
-  /**
-   * Atomically compare the principal cursor and record versions, write the full principal snapshot,
-   * then move the cursor. Returns false without writes on stale cursor/version data.
-   */
-  commit(principalId: string, expectedCursor: string | null, nextCursor: string | null, records: readonly MemoryRecordRecord[]): Promise<boolean>;
 }
 
 /**
@@ -358,12 +316,11 @@ export interface PlatformTaskRecord {
   updatedAt: string;
   // ── P2 结构化执行事实（D-065）───────────────────────────────────────────
   // 全部由委派时的**确定性信息**回填：plan calls 是宿主自己解析的（worker 提交的计划
-  // 命令），取值按平台 args 规格的声明名机械提取——绝不从 worker 文本解析。字段缺失
-  // （旧任务 / 无计划的委派）时消费方降级，不猜、不补。
-  /** 平台 args 规格声明名为 accountSet 的取值（账套规范名/关键词）。 */
-  accountSet?: string;
-  /** 平台 args 规格声明名为 period 的取值（YYYYMM）。 */
-  period?: string;
+  // 命令），取值按执行层声明面的声明名逐位查表机械提取——绝不从 worker 文本解析，通用
+  // 契约也不焊任何执行层的参数名。字段缺失（旧任务 / 无计划的委派）时消费方降级，
+  // 不猜、不补。
+  /** 执行层声明的范围取值（对象 / 窗口等，按声明序）——宿主只存与渲染，不解释其语义。 */
+  scopeValues?: string[];
   /** 本任务迄今提交过的计划调用（宿主解析，机械事实）。 */
   calls?: PlatformTaskCall[];
   /** 首个 operation 的中文标签（平台清单第 5 列，写入时解析一次）。 */
@@ -504,11 +461,8 @@ export interface AuditStore {
   toolCalls: ToolCallRepo;
   sessions: ConversationSessionRepo;
   conversationLog: ConversationLogRepo;
-  contextStates: ContextStateRepo;
   /** 任务计划状态：append-only 步骤事实 + 可重建投影（长任务拆解）。 */
   taskPlans: TaskPlanRepo;
-  /** Optional for older test stores and deployments. */
-  memoryRecords?: MemoryRecordRepo;
   /** Optional for backwards-compatible test stores and deployments. */
   platformTasks?: PlatformTaskRepo;
   /** Optional：缺省时写流程整体禁用（提案按普通回答处理）。 */

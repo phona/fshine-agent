@@ -53,6 +53,10 @@
 // 话术常量取自生产的唯一消息表：判据要认的就是宿主真实会说的那几句。
 // （import 而不抄：宿主改话术时本判据跟着变，不会出现"判据认旧句子、宿主说新句子"的假绿。）
 import { FALLBACK_FAILURE, FALLBACK_TIMEOUT, NO_EXECUTION_CLARIFICATION } from '../../packages/agent/src/runtime-messages';
+// 容差同样取生产的单一出处（2026-11-12 分层调整）：本判据与宿主的收敛界是**同一个数**，
+// 各持一份字面值就会出现"宿主收在 2、判据认 3"的静默分叉。方向是 eval → 生产，
+// 不是生产 → eval（生产代码与生产测试不得依赖 scripts/eval，见 declaration-retry-bound.test.ts 的注）。
+import { MAX_DECLARATION_REJECTIONS } from '../../packages/agent/src/turn-state';
 
 /** 仓内用例 id（cases.yaml）。workflow 里这条叫 C1。 */
 export const DECLARATION_CASE_ID = 'P1';
@@ -60,8 +64,10 @@ export const DECLARATION_CASE_ID = 'P1';
 /**
  * 单回合同形状拒收的容差。违规条件 = 计数 **> 容差**（即 ≥3）。
  * 依据见文件头②的实测分布表：健康样例（同回合内自纠成功）实测上限 = 2。
+ * 值直接派生自生产常量 `MAX_DECLARATION_REJECTIONS`（packages/agent/src/turn-state.ts）——
+ * 那里是唯一权威与取值依据所在，本行只是它在判据侧的别名。
  */
-export const INVALID_DECLARATION_TOLERANCE = 2;
+export const INVALID_DECLARATION_TOLERANCE = MAX_DECLARATION_REJECTIONS;
 
 /** 探针的等待回复上限（probe-real-agent.ts 的 PROBE_REPLY_WAIT_MS = 300_000）在日志里的原文标记。 */
 export const REPLY_WAIT_TIMEOUT_MARKER = '等待回复超时';

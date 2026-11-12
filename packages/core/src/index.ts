@@ -2,8 +2,6 @@
 export { loadConfig, deploymentEnvOf, effectiveDeploymentEnv, principalScopeRecords, firstEnabledPrincipalId } from './config';
 export type { LoadConfigOptions } from './config';
 export { createSqliteStore, closeStore, newId } from './store';
-export { renderMemoryProjection } from './memory-records';
-export type { MemoryRecord, MemoryRecordStatus, MemoryRecordType } from './memory-records';
 export {
   createSqlitePendingPlanConfirmationRepo,
   type SqlitePendingPlanConfirmationRepo,

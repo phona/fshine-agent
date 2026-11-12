@@ -97,7 +97,7 @@ export interface ConfirmSurfaceFacts {
    * 与"业务措辞只能由第 5 列提供"冲突（第 5 列是**这次** operation 的那一行）。
    */
   otherLabels: readonly string[];
-  /** 宿主从结构化事实里抽出的声明值（planCallFacts 的 accountSet/period；没有就是空）。 */
+  /** 宿主从结构化事实里抽出的声明值（planCallFacts 的 scopeValues；没有就是空）。 */
   values: readonly string[];
 }
 

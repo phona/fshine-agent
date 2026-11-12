@@ -71,7 +71,7 @@ export interface TurnDriverInput {
 
 /**
  * 计划调用的结构化事实（D-065，P2）：宿主从 worker 提交的计划命令**机械解析**出的调用
- * 与平台 args 规格声明名对应的取值。
+ * 与执行层声明名逐位查表得到的范围取值。
  *
  * 为什么由驱动产出：只有驱动同时持有这两样确定性材料——worker 提交的计划命令（宿主
  * 自己解析的 calls）与平台 args 规格 / label 表（驱动侧派生）。**绝不从 worker 文本
@@ -81,10 +81,8 @@ export interface TurnDriverInput {
 export interface PlanCallFacts {
   /** 本回合宿主解析出的计划调用（原样，未经任何加工）。 */
   calls: readonly PlanCall[];
-  /** 平台 args 规格声明名为 accountSet 的取值（平台规范名/检索关键词）。 */
-  accountSet?: string;
-  /** 平台 args 规格声明名为 period 的取值（YYYYMM）。 */
-  period?: string;
+  /** 执行层声明的范围取值（对象 / 窗口等，按声明序；执行层声明面见 platform-contract）。 */
+  scopeValues?: string[];
   /** 首个 operation 的中文标签（平台清单第 5 列）。 */
   label?: string;
 }

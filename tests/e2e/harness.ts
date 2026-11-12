@@ -488,11 +488,10 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
       // 规格/label 表）：终局镜像与普通收尾共用这一份，不各写一遍。
       const factsFor = (calls: PlanCall[]) => {
         if (calls.length === 0) return undefined;
-        const { accountSet, period, label } = planCallFacts(calls, argSpecs, operationLabels);
+        const { scopeValues, label } = planCallFacts(calls, argSpecs, operationLabels);
         return {
           calls: calls.map((call) => ({ operation: call.operation, args: call.args })),
-          ...(accountSet ? { accountSet } : {}),
-          ...(period ? { period } : {}),
+          ...(scopeValues && scopeValues.length > 0 ? { scopeValues } : {}),
           ...(label ? { label } : {}),
         };
       };

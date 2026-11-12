@@ -9,6 +9,9 @@
  * **四标签归属制度**登记（警职执法/防御排除/平台下发/遗留待清），断言"非防御命中=0"——
  * 每个命中必须在允许集里且挂标签，未挂标签的命中即红。防御排除项（记忆提取财务正则、
  * hasFinancialFigure 等）删它=防御变聋，100% 挂「防御排除」并注释理由。
+ * 扫描面（D 轨 2026-11-12 扩）：通用层 packages/contracts + packages/core 一并进预算
+ * ——业务词焊进契约与存储 schema 比进编排层更致命（换执行层就一个事实都拿不到），
+ * 而这两包此前对预算隐形；同批新增"结构化执行事实不焊平台参数名"判据（见下方 it）。
  *
  * 词表收词纪律（D-005）：**同义改写抓不到**——进度帧曾用"时间范围/记录/档案/摸底"
  * 一类伪装形绕过了最初的六词表。收词因此按"领域概念"而不是"最显而易见的词"：
@@ -135,6 +138,51 @@ describe('平台泄漏预算 lint', () => {
       '合法协议常量 → 加 LITERAL_IF_WHITELIST 并注释理由；真气味 → 改数据判据（错误码 / 能力声明），不嗅探具体值。',
     ].join('\n')).toEqual([]);
   });
+
+  it('结构化执行事实不焊平台参数名：契约/存储的 schema 面零 accountSet/period', () => {
+    // D 轨机械判据（2026-11-12）：通用层（契约 / 存储）的结构化执行事实面只承载**通用形状**
+    // ——范围取值是"按执行层声明逐位查表"的结果，不是把某个执行层的参数名焊进 schema。
+    // 判据只看三处 schema 定义块（平台参数名一旦焊进去，新执行层参数名不同就一个事实都拿不到；
+    // 且会经渲染进用户终稿——见 resource-exhausted）。块外的历史列（change_intents 的
+    // kind/account_set/period 兼容列、principal_scopes 的授权数据位）是已登记的遗留账，
+    // 不在本判据内、也不许再扩散。
+    const surfaces: Array<{ file: string; from: RegExp; to: RegExp; label: string }> = [
+      {
+        file: 'packages/contracts/src/store.ts',
+        from: /export interface PlatformTaskRecord \{/,
+        to: /^}/m,
+        label: 'PlatformTaskRecord 契约面',
+      },
+      {
+        file: 'packages/core/src/store.ts',
+        from: /CREATE TABLE IF NOT EXISTS platform_tasks \(/,
+        to: /^\);/m,
+        label: 'platform_tasks 表定义',
+      },
+      {
+        file: 'packages/core/src/store.ts',
+        from: /interface PlatformTaskRow \{/,
+        to: /^}/m,
+        label: 'PlatformTaskRow 行形状',
+      },
+    ];
+    const violations: string[] = [];
+    for (const { file, from, to, label } of surfaces) {
+      const text = readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      const start = text.search(from);
+      const rest = start === -1 ? '' : text.slice(start);
+      const end = rest.search(to);
+      const block = end === -1 ? rest : rest.slice(0, end);
+      for (const match of block.matchAll(/\b(accountSet|account_set|period)\b/g)) {
+        violations.push(`${file}（${label}）: 焊入了平台参数名 ${match[0]}`);
+      }
+    }
+    expect(violations, [
+      '通用层 schema 焊进了平台参数名（执行层专属内容不得下沉到通用契约 / 存储）：',
+      ...violations,
+      '改法：字段/列改通用形状（如 scopeValues/scope_values），平台参数名的声明只住执行层声明面（platform-contract.ts 的声明表），通用层逐位查表。',
+    ].join('\n')).toEqual([]);
+  });
 });
 
 /**
@@ -152,13 +200,16 @@ describe('平台泄漏预算 lint', () => {
 export const BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g;
 
 /**
- * 业务词预算的扫描目录（D-004）：与第三条预算（字面量 if）对齐——编排层生产代码 =
- * packages/agent/src + apps/server。scripts/ 的排除必须显式：D-005 附条判其 144 处命中
- * 为"接受不修"（验收夹具与探针替身，领域词是测试数据不是宿主替平台说话），纳入
- * "只减不增"预算会冻结 144 行。**排除是决策不是遗漏**——若 scripts/ 下新增非夹具用途
- * 文件（把验收逻辑提升为生产代码），该文件须并入扫描范围（台账 D-005 附条复核条件）。
+ * 业务词预算的扫描目录（D-004 扩面；D 轨 2026-11-12 再扩）：与第三条预算（字面量 if）对齐
+ * ——编排层生产代码 = packages/agent/src + apps/server，**外加通用层 packages/contracts +
+ * packages/core**。通用层扩面是 D 轨（结构化事实去焊名）的守卫半边：账套/期间一类业务词
+ * 焊进契约与存储 schema，正是"换执行层就一个事实都拿不到"的根；此前这两包对预算隐形。
+ * scripts/ 的排除必须显式：D-005 附条判其 144 处命中为"接受不修"（验收夹具与探针替身，
+ * 领域词是测试数据不是宿主替平台说话），纳入"只减不增"预算会冻结 144 行。**排除是决策
+ * 不是遗漏**——若 scripts/ 下新增非夹具用途文件（把验收逻辑提升为生产代码），该文件须
+ * 并入扫描范围（台账 D-005 附条复核条件）。
  */
-const BUSINESS_WORD_SCAN_DIRS = ['packages/agent/src', 'apps'];
+const BUSINESS_WORD_SCAN_DIRS = ['packages/agent/src', 'apps', 'packages/contracts', 'packages/core'];
 const BUSINESS_WORD_EXCLUDED_DIRS = ['scripts'];
 
 /**
@@ -228,6 +279,19 @@ const BUSINESS_WORD_ALLOWLIST: ReadonlyMap<string, { tag: LeakTag; reason: strin
   ['packages/agent/src/history-tools.ts: 财务', { tag: '遗留待清', reason: '通用历史工具描述误用"财务"限定（search_history/get_messages 领域无关）：待改成"实时数据/历史结果"中性措辞' }],
   // 2026-11-08：原 'packages/agent/src/platform-mock.ts: 目录' 一条随该模块整文件退役而删除
   // （mock 状态路径注释"该目录已 gitignore"）。文件已不存在，留着就是一条指向空气的登记。
+  // ── D 轨 2026-11-12 扩面首现（packages/contracts + packages/core 进业务词预算）──
+  // 通用层此前对预算隐形（只扫 packages/agent/src + apps）：业务词在契约与存储里焊了一整条
+  // 链，正是"换执行层就一个事实都拿不到"的根。扩面后逐条归属；本轮已把结构化事实链的平台
+  // 参数名清出通用层（见上面"结构化执行事实不焊平台参数名"判据，contracts/store.ts 的
+  // 账套命中随之消失——这正是扩面＋修链要抓的形状）。下面七条是剩余命中：路径义、宿主
+  // 协议记录义，以及两个已裁定不动的遗留数据位。
+  ['packages/contracts/src/channel.ts: 目录', { tag: '警职执法', reason: '附件落点契约说明（"adapter 先下载到同一个附件目录"，locality 由 e2e AT-1 钉住）：文件系统目录，不是领域检索动作——与 freeze-task-inputs.ts 的登记同族' }],
+  ['packages/contracts/src/config.ts: 账套', { tag: '遗留待清', reason: 'accountSetScope 遗留数据位（自注：实体授权归执行层，宿主不再读它裁决任何路径）：D 轨 2026-11-12 明示本轮不动、只在报告里点名——登记挂账，待执行层授权接口落地后随数据位一起清' }],
+  ['packages/contracts/src/store.ts: 目录', { tag: '警职执法', reason: '会话产物库的失败场景描述（"worker 拿着编造的路径 ls 失败后满目录 hunt"）：文件系统目录，不是领域检索动作' }],
+  ['packages/contracts/src/store.ts: 记录', { tag: '警职执法', reason: '契约文档里的宿主持久记录（Conversation Log 条目、附件接收记录、已记录步号）：宿主协议状态，不是平台业务记录——与 background-runtime.ts 的登记同族' }],
+  ['packages/core/src/config.ts: 记录', { tag: '警职执法', reason: 'principals 配置文档里的"旧版 wecomUserId 授权记录"：宿主身份/授权簿记，不是平台业务记录' }],
+  ['packages/core/src/config.ts: 账套', { tag: '遗留待清', reason: 'ACCOUNT_SET_SCOPES 遗留数据位的校验消息（"不是有效账套范围"）：实体授权归执行层、宿主不再持名单；D 轨 2026-11-12 明示本轮不动——登记挂账' }],
+  ['packages/core/src/store.ts: 记录', { tag: '警职执法', reason: '存储层文档里的"记录"指宿主持久行/契约记录（platform task 记录形状、旧行读回形状）：宿主协议状态，不是平台业务记录' }],
 ]);
 
 /** 防御排除类命中（L1：必须 100% 挂「防御排除」，删条目/改标签即红，见上方第二条断言）。 */
@@ -378,6 +442,9 @@ const LITERAL_IF_PROTOCOL_TOKENS: ReadonlySet<string> = new Set([
   'wecom_user',
   // typeof 守卫与 contextMode 枚举（结构判定，非输入值）
   'function', 'transcript',
+  // SQLite 内存库 DSN（core 的 createSqliteStore"非 :memory: 才开 WAL"与
+  // plan-confirmation-store 同一判据）：存储引擎协议常量，不是模型可能吐出的输入值。
+  ':memory:',
 ]);
 
 /**
@@ -398,6 +465,10 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
   // L6：step-text.ts 的 6 个已退役直接平台工具名 case（search_account_sets 等）已随
   // 沉积清理删除，对应白名单条目一并移除——主 Agent 工具面早已只剩宿主内部工具与
   // run_task 委派（实例名经 profile.toolName 声明，C3），任何新的具名 case 不在表内，照样红。
+  // D 轨 2026-11-12 扩面首现（core/store.ts 的每任务单活跃索引冲突识别）：SQLite 不报索引名、
+  // 只报"表.列"，message 里的列名只用来区分是哪个唯一键——主判据是错误码
+  // SQLITE_CONSTRAINT_UNIQUE（数据判据），这不是模型输入嗅探，也没有更细的码可换。
+  ['packages/core/src/store.ts:task_runs.task_id', 'SQLite 约束报错文本（列名定位唯一键；主判据是错误码）'],
 ]);
 
 /**
@@ -411,8 +482,8 @@ const LITERAL_IF_WHITELIST: ReadonlyMap<string, string> = new Map([
  */
 const LITERAL_IF_BASELINE: readonly string[] = [];
 
-/** 第三条预算的扫描范围：编排层源码（测试文件豁免——夹具演示被拦形态）。 */
-const LITERAL_IF_SCAN_DIRS = ['packages/agent/src', 'apps'];
+/** 第三条预算的扫描范围：编排层源码 + 通用层（契约/存储），测试文件豁免——夹具演示被拦形态。 */
+const LITERAL_IF_SCAN_DIRS = ['packages/agent/src', 'apps', 'packages/contracts', 'packages/core'];
 
 function literalIfHits(): string[] {
   const hits: string[] = [];

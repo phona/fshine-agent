@@ -14,30 +14,22 @@
  *      拒绝执行，本轮零调用、不外发任何数字，且会话不被卡死（原样再问即可）。
  *   ② 探索线程延续：目标不明的请求先澄清；用户只答一半（有账套没期间）时线程不断——
  *      模型再澄清一轮（仍是零平台调用），补齐后才委派；澄清线程被别的话题打断后回来，
- *      线程开头仍在最近轮次窗口里、落地的是新子任务而不是续跑旧任务（问句原文被窗口
- *      挤出后仍在 Conversation Log，可经宿主提供的历史工具召回——characterization）。
+ *      落地的是新子任务而不是续跑旧任务（"线程没断"由转录与子任务归属断言覆盖，见 8.4 内注）。
  */
 import { describe, expect, it, onTestFinished } from 'vitest';
-import type { ServerAssembly } from '../../apps/server/assembly';
 import { balanceCalls, boot, gatedWorker, ledger, mainDriver, neutralizePlanGateNonCallLines, totalActualCalls, type WorkerStep } from './harness';
 
-/** 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析。 */
-const PRINCIPAL_ID = 'wecom:e2e_user';
-const SESSION_ID = 'wecom:e2e_user';
-
 /**
- * Context State 的落库是回合内 fire-and-forget（runtime.ts 的 enqueueContextStateUpdate）：
- * 断言"下一轮模型还看得见线程"之前先等状态真写进库，不赌时序。
+ * 企微单聊：conversationId 回落为 userid（channel-wecom adapter），principal 由 userid 解析；
+ * 会话身份由 harness 的 fixtures 提供，本文件不再直接引用宿主 store。
+ *
+ * 2026-11-12：这里原有 awaitContextState()——轮询等 Context State
+ * （`conversation_context_states`）落库后再断言线程延续。该机制已随 PR #54 仲裁删除，
+ * 存储层残留随 arch/purge-memory-residue 清除：表在集成分支上已无生产写入方，
+ * 继续轮询只会拿到 5s 超时（本文件此前两例即挂在这里）。线程延续的断言因此回到
+ * 转录本身（各用例对 observed[...] 的断言），不再依赖已删的语义投影（④）与
+ * 历史检索工具（①）。处置登记见 docs/decision-log.md 2.2 / 2.4 的「消费者处置」。
  */
-async function awaitContextState(assembly: ServerAssembly, expected: string): Promise<void> {
-  const deadline = Date.now() + 5000;
-  for (;;) {
-    const record = await assembly.store.contextStates.get(PRINCIPAL_ID, SESSION_ID);
-    if (record && JSON.stringify(record.state).includes(expected)) return;
-    if (Date.now() >= deadline) throw new Error(`等待 Context State 落库超时（未出现：${expected}）`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
 
 /** 记录 worker 每次实际收到的委派请求、taskId 与完整转录（路由对不对要看转录串不串台）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -248,8 +240,6 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
     expect(worker.requests).toHaveLength(0);
     expect(totalActualCalls()).toBe(before);
     expect(sdk.noticeTexts()).toHaveLength(0);
-    // 澄清问句登记进 Context State 的未决问题：线程"开到哪了"有据可查
-    await awaitContextState(assembly, '要查哪个账套、哪个期间的应收欠款');
 
     // 用户只答一半（有账套没期间）：第二轮澄清照旧零执行
     const askedAgain = await send('幻辰财税');
@@ -258,11 +248,10 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
     expect(worker.requests).toHaveLength(0);
     expect(totalActualCalls()).toBe(before);
     expect(sdk.noticeTexts()).toHaveLength(0);
-    // 第二轮看得见第一轮的问句与用户的半截答复：线程在宿主侧延续，没有断
+    // 第二轮看得见第一轮的用户原话：转录里用户消息逐轮累积，没有断
+    // （"模型自己上一轮说过的话也在下一轮上下文里"两条断言原由已删的语义投影注入提供，
+    //   随机制一并移除；转录模式下的这条连续性应有独立用例，属 PR #54 转录模式落地面。）
     expect(observed[1]).toContain('看下我们这个月的应收情况');
-    expect(observed[1]).toContain('unresolvedQuestions');
-    expect(observed[1]).toContain('要查哪个账套、哪个期间的应收欠款');
-    await awaitContextState(assembly, '要查哪个月份（YYYYMM）的应收？');
 
     // 补齐期间：这才委派，一次真实执行
     const done = await send('202606');
@@ -272,11 +261,8 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
     expect(done).toContain('61000 元');
     expect(done).not.toContain('不应外发');
     expect(totalActualCalls()).toBe(before + 1);
-    // 第三轮申报前，模型上下文里同时有：新一轮的未决问题（期间）、用户两轮答复的原文
-    // （账套 + 期间）——线程的三段都在，补齐后的请求才可能同时带上账套与期间
-    expect(observed[2]).toContain('unresolvedQuestions');
-    expect(observed[2]).toContain('要查哪个月份（YYYYMM）的应收？');
-    expect(observed[2]).toContain('期间呢');
+    // 第三轮申报前，用户两轮答复的原文都在上下文里（账套 + 期间）——补齐后的请求
+    // 才可能同时带上账套与期间（模型自己上一轮的问句同样随投影机制移除，见上注）
     expect(observed[2]).toContain('幻辰财税');
     expect(observed[2]).toContain('202606');
     await assembly.close();
@@ -293,7 +279,7 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
       { plan: balanceCalls('幻辰财税', '202606') },
       { text: '幻辰财税 202606 应收账款余额为 61000 元。' },
     ]);
-    const observed: Array<{ messages: string; tools: string[] }> = [];
+    const observed: Array<{ messages: string }> = [];
     const declarations: Array<Record<string, unknown>> = [
       { kind: 'conversation', text: '要查哪个账套、哪个期间的应收欠款？告诉我账套和期间，我就去查。' },
       { kind: 'delegate', request: '查询新兴五金账套 202609 已保存的凭证' },
@@ -302,7 +288,6 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
     const { send, sdk, assembly } = await boot({
       main: mainDriver(declarations, (input) => observed.push({
         messages: JSON.stringify(input.messages),
-        tools: ((input as { tools?: Array<{ name?: string }> }).tools ?? []).map((tool) => String(tool.name)),
       })),
       worker: worker.driver,
     });
@@ -313,26 +298,21 @@ describe('[L4 集成] 离线全链 e2e：多任务乒乓路由与探索线程延
     expect(worker.requests).toHaveLength(0);
     expect(totalActualCalls()).toBe(before);
     expect(sdk.noticeTexts()).toHaveLength(0);
-    await awaitContextState(assembly, '要查哪个账套、哪个期间的应收欠款');
 
     // 用户中途换话题：一次与探索线程无关的委派，另起子任务
     const interrupted = await send('先别管应收，查一下新兴五金 202609 保存的凭证');
     expect(interrupted).toContain('0 条');
     expect(worker.taskIds).toHaveLength(1);
-    // characterization：归约器把"用户开了新话题"当作上一个澄清已回答——未决问题被清空，
-    // 问句原文不在第 3 轮的最近窗口里；线程没有丢，它仍在 Conversation Log，模型可经
-    // 宿主提供的历史检索工具找回（断的是窗口，不是线程）。
-    await awaitContextState(assembly, '先别管应收，查一下新兴五金 202609 保存的凭证');
-    const state = await assembly.store.contextStates.get(PRINCIPAL_ID, SESSION_ID);
-    expect((state?.state as { unresolvedQuestions?: unknown[] } | undefined)?.unresolvedQuestions ?? []).toHaveLength(0);
+    // 2026-11-12 处置：这里原有的 characterization（归约器把"用户开了新话题"当作上一个
+    // 澄清已回答 → Context State 未决问题清空、问句原文被"最近轮次窗口"挤出）与
+    // "历史检索工具可召回"两条断言，钉的是已删的语义投影（④）与其兜底通道（①）；
+    // 同段"问句原文不在窗口里"（not.toContain）也是同一 characterization 的另一半。
+    // 转录模式下窗口不再这样裁切，问句原文就在转录里，无需检索工具——三条断言随机制
+    // 一并移除。线程未断仍由"回到线程后落地的是新子任务、不带旧对象"的断言覆盖。
 
-    // 用户回到探索线程：最近轮次窗口仍留着线程的开头（第 1 轮用户消息原文）
+    // 用户回到探索线程：线程开头的用户消息仍在上下文里
     const back = await send('就查幻辰财税 202606 的应收');
     expect(observed[2].messages).toContain('看下我们这个月的应收情况');
-    expect(observed[2].messages).not.toContain('要查哪个账套、哪个期间的应收欠款');
-    // 宿主同时给出历史检索工具：被窗口挤掉的澄清问句仍可召回
-    expect(observed[2].tools).toContain('search_history');
-    expect(observed[2].tools).toContain('get_messages');
     // 探索落地是新子任务：不续跑刚才那个凭证任务，也不把凭证对象带进请求
     expect(worker.taskIds).toHaveLength(2);
     expect(worker.taskIds[1]).not.toBe(worker.taskIds[0]);

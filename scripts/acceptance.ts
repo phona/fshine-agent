@@ -282,73 +282,52 @@ function createNoticeRecorder(caseId: string, notices: string[]): NoticeFn {
 /** 排干轮询间隔：在飞的写落地通常是毫秒级，250ms 足够，又不至于把时间烧在轮询上。 */
 const DRAIN_POLL_MS = 250;
 /**
- * 排干地平线（Context State 队列）：该队列按会话串行，每条 = 一次 ≤10s 的模型调用
- * （context-model.ts 的 DEFAULT_TIMEOUT_MS）+ 一次 upsert。最长的会话是 7.x 全场景
- * 串联（17 回合），worst case 约 170s；取 5 分钟留余量。到点仍没排干就报
- * acceptance_drain_timeout 并列出会话——排干没完成是事实，报出来，不是把那条
- * "数据库连接已关闭"造成的丢失写吞掉。
+ * 排干总上限（兜底）：原来的对象是 Context State 队列（按会话串行，7.x 全场景 worst
+ * case 约 170s，故取 5 分钟）。2026-11-11 起该队列已随机制删除不存在（见函数注释），
+ * 正常路径是"连续静默 DRAIN_QUIET_MS 即返回"；这个上限只在"存储持续有提交"时兜底，
+ * 到点仍不静默就报 acceptance_drain_timeout，不吞。
  */
 const DRAIN_DEADLINE_MS = 300_000;
 /**
- * 静默地平线（其余后台写）：长期记忆归并的一条 = 一次 ≤15s 的模型调用
- * （assembly.ts 的 createMemoryCandidateModel(timeoutMs: 15_000)）+ 一次 commit。
- * 存储连续静默超过它，就没有条目还在半路。有界等待、不是证明，边界见函数注释。
+ * 静默地平线（残余安全网）：`PRAGMA data_version`（另一条连接的提交计数器，含 UPDATE）
+ * 连续这么久不变，就认为没有已知的在飞写入。有界等待、不是证明，边界见函数注释。
  */
 const DRAIN_QUIET_MS = 16_000;
 
 /**
- * 关停次序：把在飞的后台持久化排干，再让调用方关库。
+ * 关停次序：等后台写安静下来，再让调用方关库。
  *
- * handler 返回只代表"这一回合回复完了"，不代表回合收尾排进后台队列的活也干完：
- * 每回合结束都会 enqueue 两个 fire-and-forget 队列（turn-persistence.ts 的
- * `enqueueContextStateUpdate` / `scheduleMemoryConsolidation`），两者都是"先调一次
- * 模型、再写一次 store"，写的那一下不在回合的 await 链上。脚本原来在最后一个用例
- * 返回后立刻 `assembly.close()` / `auditDb.close()`，那些在飞的写就撞上已关闭的连接
- * ——`conversation_log_update_failed`：该会话的 Context State 整段丢失；同一根因下
- * 记忆归并的 commit 也丢（`long_memory_consolidation_failed`，2026-10-13 八用例
- * 实测两条同时出现）。而报告已落盘、exit 0，丢失于是无声无息。
+ * 历史（D-084③，2026-10-13）：handler 返回只代表"这一回合回复完了"，不代表回合收尾
+ * 排进后台队列的活也干完——每回合结束都会 enqueue 两个 fire-and-forget 队列
+ * （turn-persistence.ts 的 `enqueueContextStateUpdate` / `scheduleMemoryConsolidation`），
+ * 写的那一下不在回合的 await 链上。脚本原来在最后一个用例返回后立刻关库，那些在飞的写
+ * 就撞上已关闭的连接（`conversation_log_update_failed` / `long_memory_consolidation_failed`），
+ * 而报告已落盘、exit 0，丢失于是无声无息。当时的判据是 ① Context State 游标
+ * （`conversation_context_states.through_event_id` 覆盖该会话最后一条事件）+
+ * ② `PRAGMA data_version` 静默地平线。
  *
- * 排干判据取存储自身的可观察终态，不猜时长：
- * ① 每个留下过 Conversation Log 的会话，`conversation_context_states.through_event_id`
- *    必须覆盖该会话最后一条事件——`updateContextState` 的 upsert 正是拿它当游标，
- *    模型成功与降级（`reduceContextState` 兜底）两条路都写同一个值。被拒的回合一条
- *    事件都不留，天然不在等待集合里。
- * ② 之后再等一个静默地平线：`PRAGMA data_version`（另一条连接的提交计数器，含
- *    UPDATE）连续 DRAIN_QUIET_MS 不变。记忆归并那条是"≤15s 模型调用 + 一次 commit"，
- *    静默超过它即没有条目还在半路。这是有界等待不是证明：归并队列在模型持续不可用时会
- *    逐回合堆成一条没有终点的链，堆叠中排后面的条目仍可能落在关库之后——那种失败在原地记
- *    `long_memory_consolidation_failed`（不静音），且等整条链排干会让验收脚本挂死，
- *    故明确不追。
+ * 2026-11-11 仲裁把 Context State 与记忆归并两个机制连同存储层残留一并删除
+ * （docs/decision-log.md 2.2 / 2.4），两个 fire-and-forget 队列在集成分支上已无生产
+ * 写入方——判据 ① 的对象消失，随 `arch/purge-memory-residue` 的残留清理一并移除
+ * （消费者处置）：表删掉后继续查它只会抛 SqliteError。
+ * 保留判据 ② 作为残余安全网：**有界等待、不是证明**——将来若有新的在飞写入，它仍兜住
+ * "关库前先等一个静默窗口"这件事；到点仍不静默就报 `acceptance_drain_timeout` 并列出
+ * 会话，报出来，不是把丢失写吞掉。
  */
 async function drainBackgroundPersistence(auditDb: Database.Database): Promise<void> {
   const sessions = auditDb.prepare(
     'SELECT DISTINCT principal_id AS principalId, session_id AS sessionId FROM conversation_events',
   ).all() as Array<{ principalId: string; sessionId: string }>;
-  // 没有任何会话留下事件 = 没有回合真正跑起来，后台队列无活可排。
+  // 没有任何会话留下事件 = 没有回合真正跑起来，也没有在飞的后台写要等。
   if (!sessions.length) return;
-  const lastEvent = auditDb.prepare(
-    'SELECT event_id AS eventId FROM conversation_events WHERE principal_id = ? AND session_id = ? ORDER BY event_seq DESC LIMIT 1',
-  );
-  const stateCursor = auditDb.prepare(
-    'SELECT through_event_id AS throughEventId FROM conversation_context_states WHERE principal_id = ? AND session_id = ?',
-  );
-  // 已排干 = 游标覆盖该会话最后一条事件；没有事件的会话（理论上不会出现）视为无需等待。
-  const settled = (session: { principalId: string; sessionId: string }): boolean => {
-    const last = lastEvent.get(session.principalId, session.sessionId) as { eventId: string } | undefined;
-    if (!last) return true;
-    const cursor = stateCursor.get(session.principalId, session.sessionId) as { throughEventId: string } | undefined;
-    return cursor?.throughEventId === last.eventId;
-  };
   const storeVersion = (): number => auditDb.pragma('data_version', { simple: true }) as number;
 
   const deadline = Date.now() + DRAIN_DEADLINE_MS;
-  let pending = sessions.filter((session) => !settled(session));
   let lastVersion = storeVersion();
   let quietSince = Date.now();
   while (Date.now() < deadline) {
-    if (pending.length === 0 && Date.now() - quietSince >= DRAIN_QUIET_MS) return;
+    if (Date.now() - quietSince >= DRAIN_QUIET_MS) return;
     await new Promise((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
-    pending = pending.filter((session) => !settled(session));
     const version = storeVersion();
     if (version !== lastVersion) {
       lastVersion = version;
@@ -357,8 +336,8 @@ async function drainBackgroundPersistence(auditDb: Database.Database): Promise<v
   }
   console.error(JSON.stringify({
     event: 'acceptance_drain_timeout',
-    pendingSessions: pending.map((session) => session.sessionId),
-    hint: '在飞的 Context State 更新未在地平线内落地，随后关库可能再丢写入',
+    pendingSessions: sessions.map((session) => session.sessionId),
+    hint: '存储在整个上限内从未静默：没有已知的后台写入方，持续如此应查明是谁在写；随后关库仍可能丢写入',
   }));
 }
 

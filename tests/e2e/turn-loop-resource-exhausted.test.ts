@@ -31,8 +31,7 @@ const DELEGATE_ASK = '制作幻骥达 202609 的工资表';
 /** worker 替身提交的计划事实（超时回合留下的结构化执行事实，D-065 口径）。 */
 const PLAN_FACTS = {
   calls: [{ operation: 'payroll.compute', args: ['contract.json'] }],
-  accountSet: '幻辰财税',
-  period: '202609',
+  scopeValues: ['幻辰财税', '202609'],
   label: '工资表计算',
 };
 
@@ -79,8 +78,8 @@ describe('[L4 集成] 离线全链 e2e：资源耗尽终稿（事实变体）', 
 
       const reply = await booted.send(USER_ASK);
 
-      // ① 终稿三要素 + 事实行：已执行操作的名字来自底账结构化字段（label + 账套/期间），
-      //    不是干巴巴的"请稍后重试"。
+      // ① 终稿三要素 + 事实行：已执行操作的名字来自底账结构化字段（label + 执行层声明的
+      //    范围取值），不是干巴巴的"请稍后重试"。
       expect(reply).toContain('[资源超时]');
       expect(reply).toContain('已完成部分');
       expect(reply).toContain('已执行操作：工资表计算（幻辰财税 202609）');
@@ -108,8 +107,7 @@ describe('[L4 集成] 离线全链 e2e：资源耗尽终稿（事实变体）', 
       expect(failedRecord).toBeDefined();
       expect(failedRecord!.outcome).toBe('failed');
       expect(failedRecord!.label).toBe('工资表计算');
-      expect(failedRecord!.accountSet).toBe('幻辰财税');
-      expect(failedRecord!.period).toBe('202609');
+      expect(failedRecord!.scopeValues).toEqual(['幻辰财税', '202609']);
       expect(JSON.stringify(failedRecord!.workerMessages)).toContain(DELEGATE_ASK);
     } finally {
       audit.restore();

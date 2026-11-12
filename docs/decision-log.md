@@ -109,7 +109,7 @@
 
 ### 0.5 新增对象前置审计
 
-- `AuditStore` 有 **12 个 Repo**（`packages/contracts/src/store.ts:501-520`）：principalScopes、requests、toolCalls、sessions、conversationLog、contextStates、taskPlans、memoryRecords、platformTasks、changeIntents、sessionArtifacts、taskRuns。
+- `AuditStore` 有 **12 个 Repo**（`packages/contracts/src/store.ts:501-520`）：principalScopes、requests、toolCalls、sessions、conversationLog、contextStates、taskPlans、memoryRecords、platformTasks、changeIntents、sessionArtifacts、taskRuns。**注（2026-11-12）**：`contextStates` / `memoryRecords` 的存储层残留已在 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除，该分支上为 **10 个**；main 上仍为 12 个（残留补登记见 2.2 / 2.4）。本行其余部分按 main 实测。
 - 记录「发生了什么」的有**五个**：**ToolCall / PlatformTask / TaskPlan / TaskRun / AgentRequest**。身份/会话/产物是不同关注点，但那五个是平行事实源。
 - **新增 Task / TaskEvent / Evidence 之前必须先定**：哪个权威、哪些派生、哪些能合并。
 - 今天已经因多源映射导致治理代码膨胀过一次（四路共用裁定事实）。
@@ -163,6 +163,14 @@
 
 **总览（截至写入）**：九类均为 2026-11-11 裁定；**没有一条已合入 main**。①–⑥ 为**在 PR #54**（draft，未合）；⑨ 为**在 PR #54（部分）**——两个历史检索工具名已移出，完整删除**待实施**（前置 ⑦）；⑦、⑧ 为**待实施**。main 上这些文件/机制仍在，读代码时不要按「已删」理解。
 
+**残留补登记（2026-11-12）**：早期删除清单只列了 agent 侧文件与装配接线，`packages/core` / `packages/contracts` 的存储层残留（②、④ 的存储与契约面，见 2.2 / 2.4 的「对象」补登记）不在其中；`packages/core/src/memory-records.ts` 还自带测试 suite，让「机制健在」的错觉可复现。该残留随 `arch/purge-memory-residue`（基于 `origin/arch/integration` 的分支；截至写入未推送、未开 PR）整簇删除：三表两 repo（`conversation_context_states` / `long_memory_records` / `long_memory_cursors`；`contextStates` / `memoryRecords`）、契约类型与 `AuditStore` 成员、`packages/core/src/index.ts` 桶导出、`memory-records.ts` 与其测试。守卫扫描面同时从 `packages/agent/src` + `apps` 扩到含 `packages/core/src` 与 `packages/contracts/src`（`apps/server/no-learning-path-wiring.test.ts` 的 `SCAN_DIRS`；扫描面只加不减）。**main 上这些残留仍在**，读 main 代码时不要按「已删」理解。
+
+**消费者处置（2026-11-12，同分支）**：存储层删除后，还留着两个引用它的消费者，随同一分支处置（机制已实证无人写；不是为凑绿删守卫——两处怎么改都仍是红的）：
+
+① `tests/e2e/turn-loop-pingpong.test.ts`：`awaitContextState` 轮询 helper（`contextStates.get`）与 8.4 里直接读 store 的调用、8.3/8.4 的 `unresolvedQuestions` 断言、8.4 的 `search_history` / `get_messages` 工具断言、「未决问题被清空 / 问句原文被最近窗口挤出」的窗口 characterization，以及 8.3 里"模型自己上一轮说过的话在下一轮上下文里"的两条断言（该内容原由投影注入提供，属被删机制），一并移除。理由：集成分支上该表已无生产写入方，继续轮询只会拿到 5s 超时（处置前该文件 8.3/8.4 即挂在这里）；用户原话延续与子任务归属的断言保留。**该文件其余行为断言保留**，在 dummy 夹具上仍因域耦合为红（与 `origin/main` 对照组的失败集一致），不因本次处置转绿。转录模式下"上一轮自己说的话在下一轮上下文里"的连续性无现有用例覆盖，登记为 PR #54 转录模式落地面的补测项。
+
+② `scripts/acceptance.ts`：`drainBackgroundPersistence` 的判据 ①（`conversation_context_states.through_event_id` 游标）随对象消失移除，保留判据 ②（`PRAGMA data_version` 静默地平线）作残余安全网。不如此则表删后该脚本在**写报告之前**抛 `SqliteError`（drain 在报告落盘之前执行，见 D-084③ 的关停次序），整轮验收报告丢失。
+
 | 编号 | 机制 | 状态 |
 | --- | --- | --- |
 | 2.1 ① | history-tools（search_history / get_messages） | 在 PR #54（draft） |
@@ -189,10 +197,10 @@
 
 - **决定**：删除长期记忆的抽取、合并、候选模型与装配接线。
 - **日期**：2026-11-11。
-- **对象**：`packages/agent/src/long-memory.ts`、`memory-consolidator.ts`、`memory-candidate-extractor.ts`、`memory-model.ts`；装配点 `apps/server/assembly.ts:259-261`；注入点 `packages/agent/src/runtime.ts:458` 与 `turn-persistence.ts:54-61`。
+- **对象**：`packages/agent/src/long-memory.ts`、`memory-consolidator.ts`、`memory-candidate-extractor.ts`、`memory-model.ts`；装配点 `apps/server/assembly.ts:259-261`；注入点 `packages/agent/src/runtime.ts:458` 与 `turn-persistence.ts:54-61`。**存储层残留（2026-11-12 补登记）**：`packages/core/src/memory-records.ts`（`renderMemoryProjection` + `MemoryRecord*` 类型；全仓无生产消费者，只被自己的测试与桶导出引用）与其测试 `packages/core/memory-records.test.ts`；`packages/core/src/store.ts` 的 `long_memory_records` / `long_memory_cursors` 两表与 `memoryRecords` repo（含行类型、行映射、`sameMemoryRecord`）；`packages/contracts/src/store.ts` 的 `MemoryRecordType` / `MemoryRecordStatus` / `MemoryRecordRecord` / `MemoryRecordRepo` 与 `AuditStore.memoryRecords`；`packages/core/src/index.ts` 的桶导出。
 - **理由**：战争故事机制——从历史学用户行为 → 借新指令扩大执行范围（曾打爆下游基础设施）。
 - **证据**：`memory-candidate-extractor.ts:24-26` 的系统提示词要求从用户原始消息中提取 `preference|fact` 并持久化；`memory-consolidator.ts:30-31` 按 principal 合并并重建投影；`turn-persistence.ts:58` 把投影作为「长期记忆资料」注入上下文；`runtime.ts:458` 每回合读取。
-- **状态**：**在 PR #54**（draft，未合）。main 上四个文件与接线仍在。
+- **状态**：**在 PR #54**（draft，未合）。main 上四个文件与接线仍在。存储层残留（上列补登记项）随 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除；**main 上仍在**。
 - **加回来的判据**：仅当跨会话个性化被证明必须保留，且同时满足四条——(a) 记忆只能由用户**显式声明/编辑**，不从历史推断用户行为；(b) 每条记忆有原始用户消息来源与确立轮次；(c) 有确定性测试证明**记忆内容不能成为平台调用的授权或实体来源**；(d) 记忆不参与执行范围决定。缺任一条都不加。
 
 ### 2.3 ③ compaction-context sidecar
@@ -209,10 +217,10 @@
 
 - **决定**：删除 Context State 的确定性归约、语义抽取与抽取模型调用。
 - **日期**：2026-11-11。
-- **对象**：`packages/agent/src/context-state.ts`、`context-extractor.ts`、`context-model.ts`；装配点 `apps/server/assembly.ts` 的 `contextStates` 接线。
+- **对象**：`packages/agent/src/context-state.ts`、`context-extractor.ts`、`context-model.ts`；装配点 `apps/server/assembly.ts` 的 `contextStates` 接线。**存储层残留（2026-11-12 补登记）**：`packages/core/src/store.ts` 的 `conversation_context_states` 表与 `contextStates` repo（含行类型与行映射）；`packages/contracts/src/store.ts` 的 `ContextStateRecord` / `ContextStateRepo` 与 `AuditStore.contextStates`（必填成员）。
 - **理由**：语义投影；C2 一次跑出现 **8 次** `context_semantic_extract_failed`，失败即落正则兜底。
 - **证据**：`context-state.ts:28-32` 用正则做决策/假设/问题归约；`context-extractor.ts:40-45` 把模型输出视为不可信、要求调用方以 `reduceContextState` 兜底；`context-model.ts:21-26` 记超时 10s→60s 与「超时后 extract 落空 → context_semantic_extract_failed」；`turn-persistence.ts:284-288` 失败后直接 `reduceContextState`。
-- **状态**：**在 PR #54**（draft，未合）。main 上三个文件与 `contextStates` 接线仍在。
+- **状态**：**在 PR #54**（draft，未合）。main 上三个文件与 `contextStates` 接线仍在。存储层残留（上列补登记项）随 `arch/purge-memory-residue`（分支；截至写入未推送、未开 PR）删除；**main 上仍在**。
 - **加回来的判据**：只有当「跨回合未决问题」在原生压缩后确实丢失并影响正确性；形态优先**无模型的确定性事件归约**，不做每回合语义抽取；失败必须显式记为 `INCONCLUSIVE` 或可见事件，**不许静默落回正则后仍写绿**。若必须调用模型，需先证明抽取成功率与降级行为都有实测数据，而不是单测全绿。
 
 ### 2.5 ⑤ reference-evidence
@@ -433,6 +441,19 @@
 - **冲突原文（doc-1 / doc-3）**：`AGENTS.md` 定位节写「拆解由模型决定，宿主不复制拆解器」，同文件迁移期适配节又写「拆解与续跑仍归 fshine」；`v0-architecture.md` 的「编排层职责（冻结清单）」把「长任务拆解与派单」列为编排层职责，§6 又写编排层「决定怎么拆解」。
 - **未决**：至少先区分「谁决定拆解内容」与「谁持有拆解协议 / 任务状态 / 续跑恢复机制」两层，才能裁定归属；本日志不替 doc-1/doc-3 下结论。
 - **影响**：四份文档一起合入后，读者无法判断拆解器归谁；本文件 0.1 只沿用「模型负责决定如何完成任务」，不展开拆解器归属。
+
+---
+
+## 六、门语义政策修订：未登记形态 / 命令链 fail-closed（2026-11-12）
+
+- **决定**：`AGENTS.md`「授信期门语义」里「未登记形态放行仅审计」修订为 **fail-closed**——门答不出"这是哪个 operation"的网关调用（未登记/未知形态、裸网关命令、后缀污染）一律进计划门；命令链里夹带网关调用（`cd … && 网关调用`、`;` / `&&` / `||` / 管道之后的网关调用）同样 fail-closed。网关在**首位**的元字符软放行**不变**；修订方向只有收紧、没有放宽。
+- **日期**：2026-11-12。**对象**：分支 `arch/gate-unregistered-failclosed`（轨道 B），文件 `packages/agent/src/serve-gate.ts` 等。
+- **理由**：旧政策与该门代码注释（「宁拦勿猜」）自相矛盾；且「未登记形态放行」这条有实证绕过——B3 最小复现里 `bin/<gateway> call --file …` 经夹具真的执行了**未声明对象**的查询（控制组 3 绿 / 被测线 2 红），gate 行 `serve_gate:bash ok`、驱动层 T5 对账因 `extractGateScript` 取不到引用而 `not_plan_gated`：放行等于没有任何一步证明它不在执行面内。
+- **证据**：`scripts/eval/shell-bypass-gate.test.ts`（B3 复现转绿是本条客观验收信号）；`packages/agent/serve-gate.test.ts` 的 E1 / 「猜的形状」/ 「命令链」三组用例（本次修订逐条改期望，旧行为与新行为都写在测试注释里）；`packages/agent/pi-coding-driver-executor-bypass.test.ts` 的 `call --file` 用例。
+- **状态**：在分支 `arch/gate-unregistered-failclosed`（未合入 main；并入集成分支后随集成验证）。
+- **回退判据**：若实测证明 fail-closed 误伤真实业务路径（平台新增合法形态而宿主不认识 → 正常查询被拒），先把该形态登记进"认得出的形态"，**不得整体回退为放行**——整体回退等于把已实证的绕过洞重新打开。
+- **残余边界（登记，不在本轮范围）**：worker 工具面仍含 `bash` / `write` / `edit`，SaaS 凭据未与脚本环境隔离。「命令文本检查」证明不了脚本内部的越权副作用；真正的隔离要么让 SaaS 操作走受控执行入口、要么让写凭据不暴露给普通脚本环境——属**进程/权限/凭据层**，本轮的字符串形态收口不是它的替代品，**不得声称安全边界已闭环**。
+- **同批修：平台清单键名漂移**。当前接入的执行层自 `f963930` 起把 `operation list --json` 每行的 `serve` 改名为 `modes`；宿主原只读 `serve`，新平台上该矩阵读成空集——门里"读平台矩阵、不另立名单"那一支**静默失效**（不报错、什么都不做，最难发现的一种）。修法：`parseCapabilityManifest` 双键读取（`serve` 优先，两键并存且内容不同属平台异常，不静默合并），用例见 `packages/agent/operation-labels.test.ts` 的「平台清单键名漂移」组。
 
 ---
 
