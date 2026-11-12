@@ -539,9 +539,14 @@ export function parseProposalSchema(stdout: string): unknown | null {
  */
 export function loadProposalSchema(platformRoot?: string, gateway?: string): Promise<unknown | null> {
   if (!platformRoot) return Promise.resolve(null);
-  // C7b：gateway 未声明/非法 = 派生增强不可用，降级空表（与 platformRoot 未配同判据），
-  // 绝不回退遗留网关名。声明了 gateway 的部署行为不变。
-  if (!validateGatewayInvocation(gateway)) return Promise.resolve(new Map());
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级 **null**（与 platformRoot 未配同判据，
+  // 也与同族 loader 的失败语义一致），绝不回退遗留网关名。声明了 gateway 的部署行为不变。
+  //
+  // 2026-11-12 修：旧写法返回 `new Map()`——一个非 null 的普通对象，恰好从调用方的形状门
+  // （`!schema || typeof schema !== 'object' || Array.isArray(schema)`，context.ts 的
+  // createProposalViaGateway）三项全过，于是宿主把空表当作"平台已下发提案 schema"继续
+  // 隔离复核并在复核一致后发确认码。fail-closed 的分支写对了，返回值让它漏了。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(null);
   const cli = gatewayExecPath(platformRoot, gateway);
   return new Promise((resolve) => {
     let settled = false;
@@ -630,7 +635,7 @@ export type { CapabilityManifest };
  *   · 解析失败 / 非 JSON / 没有 operations 数组 → 空 manifest；
  *   · 单行缺字段 → 该行不进清单（不猜、不补）；
  *   · requiresPlan 从 accessSemantics 的 plan 列机械推导；
- *   · serveMatrix 从 serve 对象提取值为 true 的键；
+ *   · serveMatrix 从 `serve`（或改版键 `modes`，见下）对象提取值为 true 的键；
  *   · est_seconds 字段不存在时按 null 处理。
  */
 export function parseCapabilityManifest(stdout: string): CapabilityManifest | null {
@@ -648,7 +653,12 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
     const effects = (op as { effects?: unknown } | null)?.effects;
     const estSeconds = (op as { est_seconds?: unknown } | null)?.est_seconds;
     const label = (op as { label?: unknown } | null)?.label;
-    const serve = (op as { serve?: unknown } | null)?.serve;
+    // serve 矩阵的键名有版本漂移（2026-11-12 跨仓实测）：17dz 平台自 f963930 起把
+    // `operation list --json` 每行的 `serve` 改名为 `modes`。两键都读、`serve` 优先——
+    // 旧键在位时不改变既有行为；两键并存且内容不同属平台异常，这里不静默合并
+    // （只读一个，另一个不猜；没有对应的平台契约文档前不引入合并语义）。
+    const serve = (op as { serve?: unknown; modes?: unknown } | null)?.serve
+      ?? (op as { modes?: unknown } | null)?.modes;
     const args = (op as { args?: unknown } | null)?.args as { positional?: unknown; flags?: unknown } | null | undefined;
 
     if (typeof name !== 'string' || !name) continue;
@@ -700,6 +710,27 @@ export function parseCapabilityManifest(stdout: string): CapabilityManifest | nu
     version: A2A_PROTOCOL_VERSION,
     operations: declarations,
   };
+}
+
+/**
+ * 能力清单 → **执行模式词汇**（每行 serve 矩阵里值为 true 的键的并集）。
+ *
+ * 为什么由平台数据派生：宿主不得另立第二份 mode 名单（L2）。serve-gate 的形态识别与
+ * 驱动层 T5 对账都拿这份词汇判"`<网关> <mode> <脚本>` 属不属于执行形态"——平台加/改
+ * 自己的 mode（serve 矩阵）时宿主自动看得见，不需要改门里的字面量。
+ *
+ * 清单缺失 / 没声明任何 serve 键 → 空集 = 判据不成立：调用方按缺省处理（serve-gate
+ * 退回契约兜底词汇），绝不在宿主侧枚举平台模式。词汇外的形态一律 fail-closed
+ * （serve-gate 的 SERVE_INVOCATION_FORM_UNKNOWN），所以兜底不构成放行面。
+ */
+export function serveModesOf(manifest: CapabilityManifest | null | undefined): ReadonlySet<string> {
+  const modes = new Set<string>();
+  for (const declaration of manifest?.operations ?? []) {
+    for (const mode of declaration.serveMatrix ?? []) {
+      if (mode) modes.add(mode);
+    }
+  }
+  return modes;
 }
 
 /**

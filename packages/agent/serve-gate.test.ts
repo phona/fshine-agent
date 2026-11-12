@@ -2,7 +2,7 @@ import { mkdtempSync, mkdirSync, symlinkSync, rmSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, afterAll, beforeAll } from 'vitest';
-import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, serveMetadataCommand, splitCommandTokens, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
+import { createServeGate, describeKeyArgs, describePlanCalls, extractGateScript, gateInvocationKind, hasShellMetachars, isServeCliInvocation, planDeclarationCovers, serveMetadataCommand, splitCommandTokens, structuredPlanGateVerdict, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, KEY_ARG_MAX_CHARS, type ServeGateEvent, type ServeGateOptions } from './src/serve-gate';
 import { messageTextFor } from './src/error-codes';
 import type { AccessSemantics, KeyArgStyles, OperationArgsSpecs, OperationSemantics } from './src/operation-labels';
 import type { PlanCall } from './src/plan-runtime';
@@ -183,7 +183,7 @@ describe('createServeGate（通用执行安全门）', () => {
     ]);
     expect(events.every((e) => e.allowed)).toBe(true);
   });
-  it('E1：已解析的 read/prepare 操作在计划未激活时仍要计划；未知子命令/裸命令放行（形态合法性归执行层）', () => {
+  it('E1：已解析的 read/prepare 操作在计划未激活时仍要计划；形态解析不出的网关调用同样拒', () => {
     const gate = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
     // 已解析出 operation 且 plan 语义非 false → 计划前置照旧（编排层执法执行层声明）
     for (const cmd of [
@@ -194,16 +194,20 @@ describe('createServeGate（通用执行安全门）', () => {
     }
     // 未知子命令带脚本 → fail-closed 也要计划（既有防线：未知 op 可能写平台数据）
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation run payroll.transform x' } })?.block).toBe(true);
-    // 裸 'bin/example-gateway operation'（无脚本 → 非网关调用形态）→ 放行，执行层原生处理
-    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation' } })?.block).toBeUndefined();
+    // 裸 'bin/example-gateway operation'（无子命令 → 形态解析不出）→ fail-closed 拒
+    // （2026-11-12 起：本支不再是"放行，执行层原生处理"——见下方形态 fail-closed 一节）
+    expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation' } })?.reason)
+      .toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
     // 裸 'bin/example-gateway plan' → 计划提交形状教学（宿主协议职责，保留）
     expect(gate({ name: 'bash', arguments: { command: 'bin/example-gateway plan' } })?.block).toBe(true);
   });
-  it('E1：后缀污染的元数据命令放行（形态合法性归执行层，编排层不再拦）', () => {
+  it('E1：后缀污染的元数据命令 fail-closed（形态解析不出 → 拒）', () => {
     const gate = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
-    // 分号后缀使命令不再是干净的元数据形态——编排层放行，bin/example-gateway 原生拒绝未知形态
+    // 分号后缀使命令不再是干净的元数据形态（元数据白名单要求第二个 token 精确等于
+    // `list`）：形态解析不出 → 门答不出这是哪种调用 → 拒（2026-11-12，宁拦勿猜）。
     const v = gate({ name: 'bash', arguments: { command: 'bin/example-gateway operation list; rm -rf /' } });
-    expect(v?.block).toBeUndefined();
+    expect(v?.block).toBe(true);
+    expect(v?.reason).toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
   });
   it('E1：计划已激活后元数据查询照常放行（豁免不改变已激活时的行为）', () => {
     const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
@@ -690,10 +694,17 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
     'bash bin/example-gateway payroll.validate tmp/req_x/contract.json',
   ];
 
-  it('猜的形状放行：形态合法性归执行层网关原生裁决（编排层只对认得出的 operation 执法）', () => {
+  it('猜的形状拿不到放行（计划已激活也拒）：未登记/未知形态 fail-closed', () => {
+    // 2026-11-12 恢复 fail-closed（6025764 授信期退役的四支之一，本轮按注释与 AGENTS.md
+    // 的 fail-closed 那条收回）：门答不出"这是哪个 operation"，就答不出该不该计划、挂哪条
+    // label——驱动层 T5 对账同样不成立（extractGateScript 取不到引用 = not_plan_gated）。
+    // 放行等于没有任何一步证明它不在执行面内（B3 实证：`call --file` 经夹具真的执行了
+    // 未声明对象的查询）。理由只指路：脚本路径与开放 mode 以平台清单为准。
     const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
     for (const command of GUESSED) {
-      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+      const verdict = gate({ name: 'bash', arguments: { command } });
+      expect(verdict?.block, command).toBe(true);
+      expect(verdict?.reason, command).toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
     }
   });
 
@@ -742,6 +753,94 @@ describe('形态解析不出 operation：拒绝只指路，不复述形状（A1 
     }
   });
 
+});
+
+// ── 命令链里夹带网关调用：整条链没有形态/范围裁决 → fail-closed ────────────────
+//
+// 2026-11-12（B3 实证）：`cd <平台根> && ./bin/<gateway> query …` 首词不是网关，
+// 于是整条网关分支被跳过——形态分类、计划前置、驱动层 T5 对账（extractGateScript
+// 取不到引用 = not_plan_gated）一条都不成立，命令照常落到执行面（夹具实跑：未声明
+// 对象的查询挂在该计划名下执行了）。
+//
+// 判据只堵"网关出现在非首位命令位"这一种：网关在首位的元字符软放行（2026-10-18 政策）
+// 一字不动；`cat bin/<gateway>`（列文件名）与 env 前缀（`FOO=1 bin/<gateway> …`，
+// 既有首词规则口径）不是命令位调用，不误拒——判据一旦会假红，人就会学会忽略它。
+describe('命令链（首词非网关、链中含网关调用）：拿不到放行', () => {
+  it('`cd … && 网关调用` / `X; 网关调用` / 管道后网关调用 一律拒，理由指向"单独一条命令"', () => {
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    for (const command of [
+      'cd /fictional/workspace && ./bin/example-gateway query q.js A 202609',
+      'true; bin/example-gateway query q.js A 202609',
+      'echo x | bin/example-gateway query q.js A 202609',
+      'echo x || bin/example-gateway query q.js A 202609',
+      'cd /fictional/workspace && bin/example-gateway operation list --json',
+    ]) {
+      const verdict = gate({ name: 'bash', arguments: { command } });
+      expect(verdict?.block, command).toBe(true);
+      expect(verdict?.reason, command).toBe(messageTextFor('SERVE_BASH_CHAINED_GATEWAY'));
+    }
+  });
+
+  it('对照：非命令位出现网关 / env 前缀 / 首位网关调用照旧（不因本支变成一律判拒）', () => {
+    const gate = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    for (const command of [
+      'cat bin/example-gateway',                                        // 列文件名，不是调用
+      'ls -la bin/example-gateway',                                     // 同上
+      'EXECUTION_SERVE=0 bin/example-gateway query q.js A 202609',      // env 前缀：首词规则既有口径
+      'node src/payroll/scripts/transform.py a b',                      // 纯本地命令
+    ]) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+    }
+    // 元字符软放行在"网关在首位"的调用上不变：本支只堵"网关不在首位"。
+    for (const command of [
+      'bin/example-gateway query q.js A 202609; cat .env',
+      'bin/example-gateway query $(cat .env)',
+    ]) {
+      expect(gate({ name: 'bash', arguments: { command } })?.block, command).toBeUndefined();
+    }
+  });
+});
+
+// ── 执行模式词汇：读平台 serve 矩阵，不另立第二份 mode 名单 ─────────────────────
+//
+// 平台对"哪些 mode 属于执行形态"的权威声明在 `operation list --json` 每行的 serve 矩阵
+// （operation-labels 的 serveModesOf 取并集）。宿主把这份词汇注入门：词汇内的 mode 走
+// 计划门，词汇外的一律按"形态认不出"fail-closed——宿主不猜、也不在门里维护第二份名单。
+// 没注入（旧调用方 / 单测替身）时退回契约兜底词汇（历史三个 mode），它**不是放行面**：
+// 词汇外形态同样 fail-closed，见上一节。
+describe('执行模式词汇（平台 serve 矩阵）：注入后由平台数据决定形态识别', () => {
+  it('词汇内的 mode（含平台新声明）走计划门；词汇外的 mode 一律形态 fail-closed', () => {
+    const noPlan = createServeGate({ planActive: () => false, serveModes: ['fetch'], gateway: 'bin/example-gateway' });
+    // 平台声明的 mode（fetch）：认得出是执行形态 → 进计划门（无激活计划 → 计划前置拒绝）
+    expect(noPlan({ name: 'bash', arguments: { command: 'bin/example-gateway fetch src/dummy/scripts/query.js' } })?.reason)
+      .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+    // 平台没声明的 mode（query 不在注入词汇里）：形态认不出 → fail-closed
+    const unknownMode = noPlan({ name: 'bash', arguments: { command: 'bin/example-gateway query src/dummy/scripts/query.js' } });
+    expect(unknownMode?.block).toBe(true);
+    expect(unknownMode?.reason).toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
+  });
+
+  it('未注入平台词汇（旧调用方）→ 契约兜底词汇只把历史 mode 送进计划门，不构成放行面', () => {
+    const active = createServeGate({ planActive: () => true , gateway: 'bin/example-gateway' });
+    expect(active({ name: 'bash', arguments: { command: 'bin/example-gateway query q.js A 202609' } })?.block).toBeUndefined();
+    const inactive = createServeGate({ planActive: () => false , gateway: 'bin/example-gateway' });
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/example-gateway query q.js A 202609' } })?.reason)
+      .toBe(messageTextFor('SERVE_PLAN_NOT_ACTIVE'));
+    // 兜底词汇外的形态照旧 fail-closed（兜底不是"未登记形态放行"）
+    expect(inactive({ name: 'bash', arguments: { command: 'bin/example-gateway call --file tmp/x.json' } })?.reason)
+      .toBe(messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN'));
+  });
+
+  it('T5 对账读同一份词汇（planDeclarationCovers）：平台新声明的 mode 不落 not_plan_gated', () => {
+    const declarations: readonly PlanCall[] = [{ operation: 'dummy.query', args: ['--collection', 'alpha'] }];
+    const command = 'bin/example-gateway fetch src/dummy/scripts/query.js --collection alpha';
+    // 注入平台词汇：识别为执行调用 → 与声明对账（覆盖 / 扩张都照常裁决）
+    expect(planDeclarationCovers(command, declarations, { serveModes: ['fetch'] })).toBe('covered');
+    expect(planDeclarationCovers('bin/example-gateway fetch src/dummy/scripts/query.js --collection beta', declarations, { serveModes: ['fetch'] }))
+      .toBe('expansion');
+    // 不注入（默认兜底词汇）：新 mode 认不出 → 不参与对账（not_plan_gated）
+    expect(planDeclarationCovers(command, declarations)).toBe('not_plan_gated');
+  });
 });
 
 // ── A1 任务二：形态族分类（绕开平台执行器的披露判据输入）───────────────────────

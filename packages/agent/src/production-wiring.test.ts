@@ -214,6 +214,20 @@ describe('生产接线 · 提案创建复核 fail-closed（§11）', () => {
     expect(host.rows.size).toBe(0);
   });
 
+  it('gateway 未声明（loadProposalSchema 的 invalid-gateway 分支）：返回 null 而不是空 Map，走「平台未下发提案 schema，未发确认码」', async () => {
+    // 本用例不注入 proposalSchemaLoader——context 缺省走真实 loadProposalSchema，
+    // profile 未声明 gateway → invalid-gateway 分支（C7b 的降级判据）。
+    // 旧实现这一步返回 `new Map()`：非 null 的 object、不是数组，形状门三项全过——
+    // 于是宿主把一张空表当作"平台已下发 schema"继续隔离复核，并在复核（对着并不存在
+    // 的 schema）一致后发出确认码。本用例因此红在 status/rows.size 上。
+    const host = setupProposal({ proposalReviewTurn: consistentReview });
+    const outcome = await host.invoke();
+    expect(outcome?.status).toBe('failed');
+    expect(outcome && 'workerText' in outcome ? outcome.workerText : '').toContain('平台未下发提案 schema，未发确认码');
+    expect(host.rows.size).toBe(0);
+    expect(await loadProposalSchema('/tmp', undefined)).toBeNull();
+  });
+
   it('复核不一致：不发确认码、不落意图；复核一致 + 真实 schema：才完成并给用户确认码', async () => {
     const bad = setupProposal({ proposalReviewTurn: inconsistentReview, proposalSchemaLoader: async () => dummySchema });
     const badOutcome = await bad.invoke();

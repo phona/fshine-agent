@@ -34,7 +34,7 @@ import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCre
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, planDeclarationCovers, planDeclarationCoversStructured, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
-import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
+import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, serveModesOf, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
@@ -1454,6 +1454,15 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
   // 派生失败/平台还没下发这张表 → 空表 → structured_call 一律 fail-closed（清单没有的
   // operation 视为不存在），绝不回退到宿主硬编码名单。
   const capabilityManifest = options.capabilityManifest ?? (await loadCapabilityManifest(options.cwd, options.gateway));
+  /**
+   * 执行模式词汇（平台 `operation list --json` 每行 serve 矩阵的并集，operation-labels
+   * 的 serveModesOf 派生）：serve-gate 的 executor 形态识别与驱动层 T5 对账共用同一份
+   * 词汇——宿主不另立第二份 mode 名单（②），平台加/改 mode 时两侧同时看得见。
+   *
+   * 清单拿不到 / 平台没声明任何 serve 键 → 空集 = 判据不成立：不注入，门退回契约兜底
+   * 词汇（历史三个 mode 仍进计划门；词汇外形态一律 fail-closed，兜底不放宽任何调用）。
+   */
+  const serveModes = capabilityManifest ? [...serveModesOf(capabilityManifest)] : [];
   // 纠错环线索：宿主在本任务里确定性拒绝过的计划（实体不在三个来源里）。
   // 原因原文就是事实，交给 Main Agent 决定是向用户澄清还是重新派单；
   // 只在此处留痕，绝不扫描 worker 的自然语言回复。
@@ -1651,6 +1660,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
     operationLabels,
     operationArgStyles,
     operationSemantics,
+    // 执行模式词汇（平台 serve 矩阵派生）：门据此认识 `<网关> <mode> <脚本>` 的形态；
+    // 空集 = 平台没声明 → 不注入，门退回契约兜底词汇（见上一段注释）。
+    ...(serveModes.length > 0 ? { serveModes } : {}),
     ...(operationArgSpecs && operationArgSpecs.size > 0 ? { operationArgsSpecs: operationArgSpecs } : {}),
     knowledgePaths: options.knowledgePaths,
     sensitivePaths: options.sensitivePaths,
@@ -1903,6 +1915,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
       // 与 serve-gate 计划覆盖判据同一份 args 规格表（本会话派生的那张）：位置参数声明
       // 缺了会让"以位置参数定目标"的调用被误判成扩张（fail-closed 方向相反，多拒）。
       ...(operationArgSpecs.size > 0 ? { operationArgsSpecs: operationArgSpecs } : {}),
+      // 与门同一份执行模式词汇（②）：平台声明的 mode 在这条对账路上同样认得出，
+      // 否则"门放行的新 mode 调用"会落 not_plan_gated、绕过范围对账。
+      ...(serveModes.length > 0 ? { serveModes } : {}),
     });
     if (classification !== 'expansion') return undefined;
     const reason = `PLAN SCOPE：${messageTextFor('SERVE_PLAN_SCOPE_EXPANSION', undefined, options.gateway)}`;

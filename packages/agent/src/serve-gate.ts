@@ -144,6 +144,20 @@ export interface ServeGateOptions {
    * 要求计划（宁多拦，不放松）。
    */
   operationSemantics?: OperationSemantics;
+  /**
+   * **执行模式词汇**（平台 `operation list --json` 每行 serve 矩阵的键并集，宿主经
+   * operation-labels 的 `serveModesOf` 派生后注入）。
+   *
+   * 判据：`<网关> <mode> <脚本>` 算不算执行形态，只认这词汇——宿主不维护第二份 mode
+   * 名单（L2），平台加/改 mode 时只改自己的清单，门与 T5 对账同步看得见。缺省 =
+   * 调用方没有平台数据（旧版平台 / CLI 不可用 / 单测替身），退回契约兜底词汇
+   * （SERVE_MODES_FALLBACK）。
+   *
+   * 兜底**不是放行面**：词汇外的网关形态一律 fail-closed（SERVE_INVOCATION_FORM_UNKNOWN，
+   * 见 createServeGate 的 bash 分支），所以兜底最多把历史三个 mode 送进计划门，绝不
+   * 放出任何未登记调用。
+   */
+  serveModes?: readonly string[];
   /** 参数摘要提取器（测试替身注入点）；缺省用内置 describeKeyArgs（查平台 args 规格）。 */
   describeArgs?: (command: string) => string[];
   /**
@@ -460,18 +474,18 @@ function localRoots(scratchDir?: string): readonly string[] {
  * "只有本轮那一个目录行"，堵的就是跨会话执行面）。
  */
 /**
- * local 模式的调用目标（不论是否在放行根内）：`bin/<gateway> local <路径>` → 该路径;
- * 不是 local 模式 / 没有目标 → null。
+ * 网关口词的第二个 token 是不是 `local` —— **模式认得出来，不要求带目标**。
  *
- * 与 isLocalScratchRun 的分工：后者答"放不放行"，前者只答"这是不是一次 local 调用"。
- * 必须有后者之外的这一问，否则 local 打到放行根之外时会落穿到通用网关分支被放行
- * （本地根语义见 isLocalScratchRun；越界的执行面拦截归执行层网关原生执法）。
+ * 为什么单开这一问（等价于原 localModeTarget 的"是不是 local 调用"那一半）：local
+ * 打到放行根之外时命令形状仍是合法网关调用，会在通用网关分支里被当"非 local 网关调用"
+ * 送进计划前置（越界的执行面拦截归执行层网关原生执法）；而 local 模式**免计划前置**
+ * （理由见 isLocalScratchRun 注释）。缺目标由执行层按用法错误拒（平台 CLI 的 local 分支
+ * 没有目标即 exit 2，不执行任何东西），宿主不把认得出来的形态当成"猜形状"拦死。
  */
-function localModeTarget(command: string, gateway?: string): string | null {
+function isLocalMode(command: string, gateway?: string): boolean {
   const tokens = splitCommandTokens(command);
-  if (!tokens[0] || !servePatterns(gateway).invocation.test(tokens[0])) return null;
-  if (tokens[1] !== 'local') return null;
-  return tokens[2] ?? null;
+  if (!tokens[0] || !servePatterns(gateway).invocation.test(tokens[0])) return false;
+  return tokens[1] === 'local';
 }
 
 function isLocalScratchRun(command: string, scratchDir?: string, platformRoot?: string, gateway?: string): boolean {
@@ -510,12 +524,31 @@ export function serveMetadataCommand(command: string, gateway?: string): string 
   return SERVE_METADATA_COMMANDS.has(candidate) ? candidate : null;
 }
 
-/** 从网关调用中提取脚本参数（网关 <mode> <script> …），非查询型返回 null */
-export function extractGateScript(command: string): string | null {
+/**
+ * 执行模式词汇的**契约兜底**（仅在调用方没有注入平台 serve 矩阵时使用）。
+ *
+ * 权威在平台清单的 serve 矩阵（operation-labels 的 serveModesOf）：注入了 serveModes
+ * 时本常量不参与识别。它存在的理由只有一个——旧版平台 / CLI 不可用 / 单测替身拿不到
+ * 平台数据时，门仍要能认出历史形态并**送进计划门**（而不是把一条有据可查的历史 mode
+ * 当成"猜形状"拦死）。它不扩大放行面：词汇外的形态一律 SERVE_INVOCATION_FORM_UNKNOWN
+ * fail-closed，见 createServeGate 的 bash 分支。
+ */
+const SERVE_MODES_FALLBACK: readonly string[] = ['query', 'prepare', 'commit'];
+
+/**
+ * 从网关调用中提取脚本参数（`<网关> <mode> <脚本>`），不是执行形态返回 null。
+ *
+ * mode 词汇来自平台 serve 矩阵（`serveModes` 注入；缺省退回契约兜底词汇，见
+ * SERVE_MODES_FALLBACK 注释）——宿主不在这里维护第二份 mode 名单。`operation run`
+ * 是按注册名寻址的 CLI 出口（平台清单不声明它），单独认。
+ */
+export function extractGateScript(command: string, serveModes?: readonly string[]): string | null {
   const tokens = splitCommandTokens(command);
   if (tokens[1] === 'operation' && tokens[2] === 'run') return tokens[3] ?? null;
-  if (['query', 'prepare', 'commit'].includes(tokens[1] ?? '')) return tokens[2] ?? null;
-  return null;
+  const head = tokens[1];
+  if (head === undefined) return null;
+  if (!(serveModes ?? SERVE_MODES_FALLBACK).includes(head)) return null;
+  return tokens[2] ?? null;
 }
 
 /**
@@ -532,18 +565,50 @@ export function extractGateScript(command: string): string | null {
  * validate / transform 一次没经网关，而足迹只写着 1 次网关调用）。分类因此必须存在，
  * 且只能从命令自己的词法得出。
  *
- * 不引入第二套命令解析：各族由既有的唯一判据判定（serveMetadataCommand / localModeTarget /
+ * 不引入第二套命令解析：各族由既有的唯一判据判定（serveMetadataCommand / isLocalMode /
  * extractGateScript / SERVE_NON_EXECUTOR_GROUPS），这里只把它们的结论汇成一个族名——平台
  * 改了模式面，改那几处即可，不存在"族名表"要同步的第五份名单。
  */
 export type GateInvocationKind = 'executor' | 'local' | 'auxiliary';
 
-export function gateInvocationKind(command: string, gateway?: string): GateInvocationKind | null {
+export function gateInvocationKind(command: string, gateway?: string, serveModes?: readonly string[]): GateInvocationKind | null {
   if (serveMetadataCommand(command, gateway)) return 'auxiliary';
-  if (localModeTarget(command, gateway) !== null) return 'local';
-  if (extractGateScript(command) !== null) return 'executor';
+  if (isLocalMode(command, gateway)) return 'local';
+  if (extractGateScript(command, serveModes) !== null) return 'executor';
   const tokens = splitCommandTokens(command);
   if (tokens[1] && SERVE_NON_EXECUTOR_GROUPS.has(tokens[1])) return 'auxiliary';
+  return null;
+}
+
+/**
+ * 命令**位**上的网关令牌（`cd X && bin/<gateway> …` 里的 `bin/<gateway>`）；没有返回 null。
+ *
+ * 命令位 = 第一个 token，以及每个命令分隔符（`;` `&` `|`）之后的 token。分隔符既可
+ * 独立成 token（`&& bin/<gateway>`），也可粘在两侧任一个 token 上（`X; bin/<gateway>`、
+ * `X&&bin/<gateway>`）——三种写法都是同一条命令链，判据必须一视同仁。
+ *
+ * 为什么必须限"命令位"而不是"命令里出现过"：`ls -la bin/<gateway>`、`cat bin/<gateway>`
+ * 只是引用文件名，不是调用；把它们判成"借道命令链调网关"是假拒——判据一旦会假红，
+ * 人就学会忽略它。env 前缀（`FOO=1 bin/<gateway> …`）同样不是命令位（既有首词规则口径）。
+ */
+function gatewayCommandPosition(command: string, gateway?: string): string | null {
+  const tokens = splitCommandTokens(command);
+  const pattern = servePatterns(gateway).invocation;
+  const SEPARATOR_RE = /^[;&|]+$/;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!;
+    const previous = tokens[index - 1];
+    let atCommandPosition = index === 0
+      || (previous !== undefined && SEPARATOR_RE.test(previous))
+      || (previous !== undefined && /[;&|]$/.test(previous));
+    // 分隔符可粘在 token 内部（`X&&bin/<gateway>`、`bin/<gateway>;rm`）：逐段判定，
+    // 分隔符之后的每一段都是新的命令位——与加空格的写法同判。
+    for (const segment of token.split(/[;&|]+/)) {
+      if (!segment) continue;
+      if (atCommandPosition && pattern.test(segment)) return segment;
+      atCommandPosition = true;
+    }
+  }
   return null;
 }
 
@@ -719,8 +784,9 @@ function scriptPathParts(reference: string): { domain: string; file: string } | 
 function planSemanticsEntryOf(
   command: string,
   semantics: OperationSemantics | undefined,
+  serveModes?: readonly string[],
 ): { key: string; access: AccessSemantics } | undefined {
-  return planSemanticsEntryForReference(extractGateScript(command) ?? '', semantics);
+  return planSemanticsEntryForReference(extractGateScript(command, serveModes) ?? '', semantics);
 }
 
 /**
@@ -824,8 +890,8 @@ export function tierOfEntry(entry: { key: string; access: AccessSemantics } | un
   return { tier: 'read', key: entry.key };
 }
 
-function planGateTier(command: string, semantics: OperationSemantics | undefined): { tier: PlanGateTier; key?: string } {
-  return tierOfEntry(planSemanticsEntryOf(command, semantics));
+function planGateTier(command: string, semantics: OperationSemantics | undefined, serveModes?: readonly string[]): { tier: PlanGateTier; key?: string } {
+  return tierOfEntry(planSemanticsEntryOf(command, semantics, serveModes));
 }
 
 /**
@@ -1045,10 +1111,12 @@ function planGateVerdict(
     activePlanCalls?: () => readonly PlanCall[] | null;
     /** operation → args 规格（位置参数声明，覆盖判据用）。 */
     operationArgsSpecs?: OperationArgsSpecs;
+    /** 执行模式词汇（平台 serve 矩阵；缺省 = 退回契约兜底，见 SERVE_MODES_FALLBACK）。 */
+    serveModes?: readonly string[];
   },
 ): { verdict: ServeGateVerdict | undefined; tier: PlanGateTier } {
-  const { tier, key } = planGateTier(command, ctx.operationSemantics);
-  const reference = extractGateScript(command);
+  const { tier, key } = planGateTier(command, ctx.operationSemantics, ctx.serveModes);
+  const reference = extractGateScript(command, ctx.serveModes);
   const tokens = splitCommandTokens(command);
   // 命令里的位置参数要去掉"网关词 + 子命令 + operation 引用"这三段，剩下的才是目标参数
   // （`bin/<gw> prepare dummy.proposal tmp/task_x/payload.json` → ['tmp/task_x/payload.json']）。
@@ -1120,9 +1188,11 @@ function planCoverageVerdict(
 export function planDeclarationCovers(
   command: string,
   calls: readonly PlanCall[],
-  options: { operationArgsSpecs?: OperationArgsSpecs } = {},
+  options: { operationArgsSpecs?: OperationArgsSpecs; serveModes?: readonly string[] } = {},
 ): 'covered' | 'expansion' | 'not_plan_gated' {
-  const reference = extractGateScript(command);
+  // 与门同一份 mode 词汇（serveModes）：平台声明新 mode 时，门与对账同时看得见；
+  // 缺省退回契约兜底词汇（仍由调用方决定注入平台 serve 矩阵）。
+  const reference = extractGateScript(command, options.serveModes);
   if (reference === null) return 'not_plan_gated';
   const specs = options.operationArgsSpecs;
   const tokens = splitCommandTokens(command);
@@ -1303,7 +1373,7 @@ export function createServeGate(options: ServeGateOptions = {}) {
       // Unicode 空白/回车删掉，之后所有判据都比 Bash 少看见一些字符。
       const command = trimShellWhitespace(String(args['command'] ?? ''));
       detail = command;
-      invocation = gateInvocationKind(command, gateway);
+      invocation = gateInvocationKind(command, gateway, options.serveModes);
       // 元数据查询先行（且必须排在 plan 教学分支之前）：
       // `plan --schema` 字面上含 `plan`，会被那条正则判成"worker 在提交方案"而吃到
       // PLAN_SHAPE_GATE_TEACHING——可它恰恰是平台给宿主的机器可读出口，不是方案提交。
@@ -1326,20 +1396,35 @@ export function createServeGate(options: ServeGateOptions = {}) {
           block: true,
           reason: messageTextFor('PLAN_SHAPE_GATE_TEACHING', undefined, gateway),
         };
-      } else if (isGateway && invocation !== null && localModeTarget(command, gateway) === null) {
+      } else if (isGateway && !isLocalMode(command, gateway)) {
         // 计划前置（宿主保留的执法）：非 local 的网关调用 fail-closed——已登记 operation
         // 按语义表分级（scratch plan=false 直调、read 要激活计划、write 要被激活计划的
-        // 某一步覆盖）；未登记/未知形态也要求先有激活计划（2026-10-09 起的既有防线：
-        // 未知 op 可能写平台数据，宁拦勿猜；正确形态由指路文案引导）。首词非网关的 bash
-        // 自 2026-10-18 起放行（首词拦截退役，非网关命令审计留痕；硬约束随沙箱阶段在
-        // 共享空间边界重建）。
-        const decision = planGateVerdict(command, options);
-        verdict = decision.verdict;
-        operationTier = decision.tier;
-        if (!verdict) {
-          const label = operationLabel(options.operationLabels, extractGateScript(command));
-          if (label) progress = { label, keyArgs: describeArgs(command) };
+        // 某一步覆盖）；**形态解析不出的网关调用直接拒**（2026-11-12，宁拦勿猜）：
+        // 门答不出"这是哪个 operation"就答不出该不该计划、挂哪条 label，驱动层 T5 对账
+        // 同样不成立（extractGateScript 取不到引用 = not_plan_gated）——放行等于没有任何
+        // 一步证明它不在执行面内。B3 实证：`call --file <json>` 经夹具真的执行了未声明
+        // 对象的查询，宿主只留了一行 status=ok、无 reason 的审计。
+        //
+        // 这是 6025764（授信期）退役四支中的"未登记形态"一支的收回：AGENTS.md 现行政策
+        // 写的是"未登记形态放行仅审计"，与本分支的 fail-closed 相反——本轮按注释与
+        // AGENTS.md 的 fail-closed 那条走，矛盾已上报用户裁定（见回报），不在此处自行改政策。
+        if (invocation === null) {
+          verdict = { block: true, reason: messageTextFor('SERVE_INVOCATION_FORM_UNKNOWN') };
+        } else {
+          const decision = planGateVerdict(command, options);
+          verdict = decision.verdict;
+          operationTier = decision.tier;
+          if (!verdict) {
+            const label = operationLabel(options.operationLabels, extractGateScript(command, options.serveModes));
+            if (label) progress = { label, keyArgs: describeArgs(command) };
+          }
         }
+      } else if (!isGateway && gatewayCommandPosition(command, gateway) !== null) {
+        // 命令链里夹带网关调用（`cd X && bin/<gw> …`、`X; bin/<gw> …`）：首词不是网关，
+        // 整条链没有形态分类、没有计划前置、T5 对账也取不到引用（extractGateScript 只看
+        // 第二 token）——放行等于没有任何一步证明它不在执行面内（B3 第二条被测线，同一
+        // 次跑里经夹具执行了越范围查询）。fail-closed，理由指向"平台调用必须单独成一条命令"。
+        verdict = { block: true, reason: messageTextFor('SERVE_BASH_CHAINED_GATEWAY') };
       } else {
         // local（区内直调；区外由执行层网关自校验根）与非网关命令 → 放行，审计照记
       }
