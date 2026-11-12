@@ -165,6 +165,12 @@
 
 **残留补登记（2026-11-12）**：早期删除清单只列了 agent 侧文件与装配接线，`packages/core` / `packages/contracts` 的存储层残留（②、④ 的存储与契约面，见 2.2 / 2.4 的「对象」补登记）不在其中；`packages/core/src/memory-records.ts` 还自带测试 suite，让「机制健在」的错觉可复现。该残留随 `arch/purge-memory-residue`（基于 `origin/arch/integration` 的分支；截至写入未推送、未开 PR）整簇删除：三表两 repo（`conversation_context_states` / `long_memory_records` / `long_memory_cursors`；`contextStates` / `memoryRecords`）、契约类型与 `AuditStore` 成员、`packages/core/src/index.ts` 桶导出、`memory-records.ts` 与其测试。守卫扫描面同时从 `packages/agent/src` + `apps` 扩到含 `packages/core/src` 与 `packages/contracts/src`（`apps/server/no-learning-path-wiring.test.ts` 的 `SCAN_DIRS`；扫描面只加不减）。**main 上这些残留仍在**，读 main 代码时不要按「已删」理解。
 
+**消费者处置（2026-11-12，同分支）**：存储层删除后，还留着两个引用它的消费者，随同一分支处置（机制已实证无人写；不是为凑绿删守卫——两处怎么改都仍是红的）：
+
+① `tests/e2e/turn-loop-pingpong.test.ts`：`awaitContextState` 轮询 helper（`contextStates.get`）与 8.4 里直接读 store 的调用、8.3/8.4 的 `unresolvedQuestions` 断言、8.4 的 `search_history` / `get_messages` 工具断言、「未决问题被清空 / 问句原文被最近窗口挤出」的窗口 characterization，以及 8.3 里"模型自己上一轮说过的话在下一轮上下文里"的两条断言（该内容原由投影注入提供，属被删机制），一并移除。理由：集成分支上该表已无生产写入方，继续轮询只会拿到 5s 超时（处置前该文件 8.3/8.4 即挂在这里）；用户原话延续与子任务归属的断言保留。**该文件其余行为断言保留**，在 dummy 夹具上仍因域耦合为红（与 `origin/main` 对照组的失败集一致），不因本次处置转绿。转录模式下"上一轮自己说的话在下一轮上下文里"的连续性无现有用例覆盖，登记为 PR #54 转录模式落地面的补测项。
+
+② `scripts/acceptance.ts`：`drainBackgroundPersistence` 的判据 ①（`conversation_context_states.through_event_id` 游标）随对象消失移除，保留判据 ②（`PRAGMA data_version` 静默地平线）作残余安全网。不如此则表删后该脚本在**写报告之前**抛 `SqliteError`（drain 在报告落盘之前执行，见 D-084③ 的关停次序），整轮验收报告丢失。
+
 | 编号 | 机制 | 状态 |
 | --- | --- | --- |
 | 2.1 ① | history-tools（search_history / get_messages） | 在 PR #54（draft） |
