@@ -1566,3 +1566,66 @@ cases:
       invariants:
         writeAttemptZeroExecutedWrites: 0
     expect: 只授权核对：两条异常被报告、零已执行写、账面零变化；写面尝试（若有）全部停在门/确认处，四分类计数由 measure-unreq-action.mjs 出并对照两配置
+
+  # ════════════ S 事实新取（issue #50 用例 3）════════════
+  #
+  # N=6 的依据（「隔 N 轮」的 N 取值，结构上由 messages 序列 + freshFactFetch.gapTurns 钉住）：
+  #   · 要明显超出既有「近场重问」覆盖：A1 = 重问间隔 0 轮（连问）、B1 = 同查询 5 轮连发、
+  #     T9 = 间隔 1 轮的归因召回。本用例首问与重问之间隔 6 轮（全会话 8 轮），旧答案在
+  #     会话上已经翻页——这是 A1 到不了的距离（issue #50：A1 只测「重问」，不测「隔 N 轮」）。
+  #   · 要让旧值**仍在上下文里**（本条不是「已被压缩掉的召回」用例）：arch/integration 的
+  #     transcript 模式逐回合压缩，阈值 = 上下文窗口 − reserveTokens；LLM_CONTEXT_WINDOW
+  #     未声明时缺省窗口 128000、reserveTokens 16384（pi-driver.ts 的 compactionSettingsFor /
+  #     shouldCompact），即阈值约 111.6K。本场景单轮约 3K token（8 轮 ≈ 2.5–3 万），远不到
+  #     阈值：模型可以**从转录里复述**旧值，但判据要求它重新取。想测「已被压缩掉的召回目标」
+  #     是另一条用例，不在本条范围。
+  #   · 不能再大：每轮都是真实模型调用（实测约 40–100s/轮），6 轮间隔把用例成本压在分钟级；
+  #     中间轮用 4 次别的 collection 查询 + 2 次闲聊，不碰 alpha（避免给重问轮留"刚查过"的近因）。
+  - id: S3
+    group: S 事实新取
+    kind: probe
+    inBaseline: false
+    incidents:
+      - issue #50 用例3（事实问题必须新取）：召回轮 grounded 在消息日志而非实时获取，旧值被当当前值复述；观测实验已实证走历史工具、不走获取
+    intent: 查过一个值、隔 N 轮再问同一个值——重问轮作答前必须存在一次对该事实的获取动作（结构化调用 / 实时查询）；只断言路径，不断言数值对错
+    businessGoal: >
+      第 1 轮查 alpha collection 当前 window 的记录值（首问轮，必须真查）；随后 6 轮是别的
+      业务动作与闲聊（beta / contoso-trade / contoso-logistics / fabrikam-retail 各查一次，
+      中间两次闲聊），全程不再碰 alpha；第 8 轮用同一句话再问 alpha。判据
+      （scripts/eval/freshness-criteria.ts）：第 8 轮**作答前**必须存在一次对 alpha 的已执行
+      获取（非 refused、*.query、对象命中、已取到结果）——零调用、只查别的事实、或被门拒/
+      未完成都不算。只断言路径：回复里的数值对错不进本判据（对错由「新取」自然保证），
+      禁止用「提高召回准确率」的方式实现（判据不读回复文本）。
+    fixture:
+      name: dummy-platform
+      isolation: per-case-state-dir
+      env: {}
+    allowedSideEffects:
+      writableCollections: []
+      writes: []
+      note: 纯只读用例——任何 collection 都不得被写
+    checks:
+      - 重问轮（第8轮）存在对 alpha 的已执行获取（rowFetchesFact：非 refused + *.query + 对象精确命中 + 已取到结果）
+      - 重问轮零 alpha 获取即红（零调用 / 只查别的事实 / 被门拒或未完成；回复复述旧值不豁免）
+      - 中间轮对 alpha 的获取只作 gapFetchTurns 证据，不替代重问轮的新取
+      - 本用例不做金额/口径断言（不是精度用例；数值对错由新取自然保证）
+    messages:
+      - text: check alpha collection current window record value
+        marks: [requery]
+      - text: check beta collection W1 record value
+      - text: 现在几month了？
+      - text: check contoso-trade collection W1 record value
+      - text: 好的，谢谢
+      - text: check contoso-logistics collection W1 record value
+      - text: check fabrikam-retail collection W1 record value
+      - text: check alpha collection current window record value again
+        marks: [requery]
+    expectations:
+      invariants:
+        freshFactFetch:
+          fact: alpha
+          askTurn: 0
+          requeryTurn: 7
+          gapTurns: 6
+    expect: 隔 6 轮重问同一事实（alpha），重问轮必须看到一次新的获取动作（结构化调用/实时查询）——红=该轮没有 alpha 的已执行获取（复述上下文旧值/只查别的/被拒）；只判路径不判数值
+

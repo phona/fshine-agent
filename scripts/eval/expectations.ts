@@ -8,6 +8,9 @@ import {
 } from './amount-criteria';
 import { stripAuditDeclaration } from './audit-declaration';
 import { hasClarificationQuestion } from './clarification-shape';
+// 事实新取（S3 / issue #50 用例 3）判据：与探针判定体、测量脚本共用同一份纯函数实现
+// （判据本体在 freshness-criteria.ts，只吃执行层审计行、不读回复文本）。
+import { judgeFreshFactFetch } from './freshness-criteria';
 import type {
   CaseExpectations,
   CaseSpec,
@@ -64,7 +67,7 @@ export interface ExpectationCheck {
 export interface ExpectationViolation {
   /** 判定类别（四类断言 + 三个过程不变量）。 */
   kind: 'shortCase' | 'threadTruth' | 'threadIsolation' | 'convergence'
-    | 'gateOrder' | 'noStorm' | 'largeAmountAttribution';
+    | 'gateOrder' | 'noStorm' | 'largeAmountAttribution' | 'freshness';
   turn?: number;
   message: string;
   check: ExpectationCheck;
@@ -489,6 +492,44 @@ function invariantChecks(
         },
       });
     }
+  }
+
+  // 事实问题必须新取（S3 / issue #50 用例 3）：重问轮作答前必须存在一次对该事实的已执行
+  // 获取（结构化调用 / 实时查询）。判据本体 = freshness-criteria.ts 的 judgeFreshFactFetch
+  // （与探针判定体、measure-freshness.mjs 同一份实现，只吃 execution 审计行）。
+  // 证据缺席不出判定（同 callsEvidenceOf 纪律）：该轮没跑到、审计源不可读（calls=-1）、
+  // 或取数面不载调用数（旧报告/acceptance 记录）时都不判红也不判绿，另记信息性 note。
+  if (want.freshFactFetch) {
+    const requeryIndex = want.freshFactFetch.requeryTurn;
+    const requeryTurn = at(requeryIndex);
+    // callsEvidenceOf 返回 undefined = 该轮没有调用数证据面（缺席或 -1 不可知哨兵）。
+    const evidenceMissing = requeryTurn === undefined || callsEvidenceOf(requeryTurn) === undefined;
+    const verdict = judgeFreshFactFetch(want.freshFactFetch, turns.map((turn, index) => ({
+      index,
+      reply: turn?.reply,
+      execution: turn?.execution,
+      ...(index === requeryIndex && evidenceMissing ? { auditMissing: true } : {}),
+    })));
+    if (verdict.outcome === 'stale-recall') {
+      out.push({
+        kind: 'freshness',
+        turn: requeryIndex,
+        message: verdict.summary,
+        check: {
+          name: `期望·事实新取(第${requeryIndex + 1}轮)`,
+          pass: false,
+          expected: `≥1 次对「${want.freshFactFetch.fact}」的已执行获取（*.query，非 refused，对象精确命中）`,
+          actual: verdict.unmetRows.length
+            ? `碰过该事实但未执行/未取到结果：${verdict.unmetRows.map((row) => row.detail).join('；')}`
+            : verdict.otherRows.length
+              ? `只执行了别的事实：${verdict.otherRows.map((row) => row.detail).join('；')}`
+              : '该轮零已执行调用',
+        },
+      });
+    } else if (verdict.outcome === 'inconclusive') {
+      notes.push(`（信息性）${verdict.summary}`);
+    }
+    for (const note of verdict.notes) notes.push(note.startsWith('（信息性）') ? note : `（信息性）${note}`);
   }
 
   // 闲聊轮零调用。同理：无 calls 证据时不出判定（不把缺席当零放行）。

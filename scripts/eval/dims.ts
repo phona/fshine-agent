@@ -74,6 +74,9 @@ export const NOTE_DIM_RULES: readonly NoteDimRule[] = [
   // 是该判据的另一半，归失败诚实（失败/缺数据要如实说明）。
   { dim: 'failureHonesty', pattern: /^第\d+轮未说明 \S+ W\d+ 无数据的事实/, source: 'X1②b window 无数据诚实收边（2026-11-08 评审）' },
   // ── 有据 ──
+  // S3 事实新取（issue #50 用例 3）：重问轮没有对事实的已执行获取 = 该轮答案对新取而言
+  // 无来源。规则显式锚在判据自己的 note 前缀上（先于下面的通用「无来源」规则匹配）。
+  { dim: 'groundedness', pattern: /^S3 红：/, source: 'S3 事实新取（freshness-criteria）' },
   // 「无来源」不带「金额」尾：amountNote 的 label 覆盖有两族——「汇总出现无来源金额」与
   // 「判断轮出现无来源基准数字」（H2 判断轮），收尾不同。
   { dim: 'groundedness', pattern: /无来源|来源外|真实结果不一致/, source: 'amountNote / requeryMismatch' },
