@@ -131,14 +131,18 @@ export {
   FileSkillRegistry,
   createSkillRegistry,
   discoverSkills,
+  listSkills,
   parseFrontmatter,
   readSkill,
   READ_SKILL_TOOL,
+  SKILL_CONTENT_LIMIT_BYTES,
   type FileSkillRegistryOptions,
   type LoadedSkill,
   type SkillMetadata,
   type SkillRegistry,
+  type SkillSummary,
 } from './skills';
+export { createReadSkillTool, type ReadSkillToolOptions } from './skill-tool';
 export { clampProgressPhrase, defaultStepText, PROGRESS_PHRASE_LIMIT, renderToolStepText } from './step-text';
 export {
   activatePendingPlan,
