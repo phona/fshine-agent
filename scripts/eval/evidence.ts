@@ -299,8 +299,9 @@ export function sessionKeyOfChannel(conversationId: string, channel = 'wecom'): 
 
 /**
  * 提案意图事实（verified 档的写路径证据）。AuditStore 的 ChangeIntentRepo 只暴露
- * pending 查询，完整清单走与 scripts/eval/write-chain.ts 同一条只读 SQL——同一张表、
- * 同一个键（change_intents.session_id），口径不另起一份。
+ * pending 查询，完整清单走一条只读 SQL——同一张表、同一个键
+ * （change_intents.session_id），口径不另起一份（旧 write-chain 评测脚本已于 2026-11-13
+ * 随旧域评测脚手架删除，此处 SQL 即唯一出处）。
  */
 export function collectIntentFacts(db: Database.Database, sessionKey: string): HostIntentFacts[] {
   let rows: Array<{ intent_id: string; proposal_id: string | null; task_id: string | null; status: string; result: unknown }>;

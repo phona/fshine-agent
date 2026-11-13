@@ -263,8 +263,9 @@ describe('public-surface-lint：产品面执行层实例痕迹分层守卫', () 
       '新增命令 → 同步 package.json；删除命令 → 同步 README。',
     ].join('\n')).toEqual([]);
 
-    // ①-reverse：读者必需命令（6 个）必须在 README 中出现（双向守卫，防 README 侧删）
-    const essential = new Set(['acceptance', 'ci', 'smoke:commit:mock', 'smoke:wecom', 'test', 'typecheck']);
+    // ①-reverse：读者必需命令（5 个）必须在 README 中出现（双向守卫，防 README 侧删）
+    // acceptance 于 2026-11-13 随旧验收脚手架（Minimal M2 波次 1）删除，不再列入。
+    const essential = new Set(['ci', 'smoke:commit:mock', 'smoke:wecom', 'test', 'typecheck']);
     const missingFromReadme = [...essential].filter(cmd => !mentioned.has(cmd));
     expect(missingFromReadme, [
       'package.json scripts 中的读者必需命令在 README 中未提及（双向守卫）：',

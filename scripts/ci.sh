@@ -11,10 +11,9 @@
 #   3. Judge variance: the judge component is advisory-only and must never
 #      become a per-push blocking gate; the mechanical component is the
 #      exit-code carrier for the real-model job.
-# Full-worker real-model eval (probe-real-agent / acceptance / score.ts) runs on
-# the in-repo dummy fixture via scripts/eval/eval.agent.yaml (no external
-# execution layer since the Wave 6 domain port) and stays Tier B (manual before
-# merge + nightly) because it consumes real LLM quota — not every-push CI.
+# Full-worker real-model eval（旧 probe / acceptance / score.ts 仪器）已随旧域评测脚手架
+# 删除，不再恢复；旧版全 worker 链的仓内 dummy 夹具口径（scripts/eval/eval.agent.yaml）
+# 只保留给 `npm run ask` 的回退配置。
 # The CI real-model face (eval-real.yml) is the minimal tool-loop harness
 # (generic-model-eval.py) on the in-repo stock fixture; fixture-per-surface
 # wording lives in scripts/eval/eval.agent.yaml's 域边界 note.
@@ -34,6 +33,4 @@ echo "== unit tests =="
 npm run test -- --project unit
 echo "== generic-mock eval =="
 npm run eval:generic-mock
-echo "== fallback retirement counter =="
-node --import tsx scripts/eval/count-a2a-fallback.ts --threshold 20
 echo "CI deterministic gates: PASS"

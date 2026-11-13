@@ -5,8 +5,8 @@
 # It deliberately does NOT run:
 # - e2e (tests/e2e needs a sibling execution-layer checkout + a gitignored
 #   config/agent.yaml deployment config, see tests/e2e/harness.ts);
-# - real-model eval (npm run eval needs LLM_API_* secrets and has judge
-#   variance; run it manually before merge, not on every push).
+# - real-model eval (LLM_API_* secrets + judge variance; lives in the separate
+#   eval-real.yml workflow, outside these deterministic gates).
 # No secrets, no deploy, no sibling repo, no .env.
 name: CI
 

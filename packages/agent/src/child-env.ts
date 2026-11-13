@@ -60,7 +60,8 @@ export function hostDirectChildEnv(overrides?: NodeJS.ProcessEnv): NodeJS.Proces
 
 /**
  * 仓内夹具 per-case 状态根桥的键名（测试专用变量，非两仓契约；登记见
- * platform-leak-lint 的 FSHINE_* 登记表与 probe-real-agent.test.ts 的 D-209 白名单）。
+ * platform-leak-lint 的 FSHINE_* 登记表）。原 D-209 引用闭集随旧探针用例于
+ * 2026-11-13（Minimal M2 波次 1）删除。
  *
  * 集中在此一处：worker 白名单需要保留它，否则 worker 发起的仓内夹具调用会丢 per-case
  * 状态根、回落到夹具自己的 `.runtime`（跨用例串状态）。消费方经本常量引用，不各自写

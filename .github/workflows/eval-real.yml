@@ -6,9 +6,9 @@
 #   - Judge conclusions are advisory only and never blocking.
 #   - The mechanical score exit code IS the job exit code (so a future
 #     required-check conversion is a one-line change).
-#   - 全 worker 真实 eval（probe-real-agent / acceptance / score.ts）走仓内 dummy
-#     夹具（scripts/eval/eval.agent.yaml，Wave 6 域端口后不依赖外部执行层），
-#     因需真实 LLM 额度仍留在 Tier B 手动运行。
+#   - 旧全 worker 真实 eval 仪器（probe-real-agent / acceptance / score.ts）已于
+#     2026-11-13 随旧域评测脚手架删除（Minimal M2 波次 1）；本 workflow 只保留下行的
+#     generic-model-eval.py 最小工具环 harness。
 #     CI 的真实模型面 = generic-model-eval.py 最小工具环 harness（不经过全 worker），
 #     走仓内 stock fixture（bin/stock），零平台路径依赖——两套面各自的夹具口径以
 #     scripts/eval/eval.agent.yaml 头注「域边界」段为准。
