@@ -90,3 +90,51 @@ describe('最小任务底账（SQLite，B 类）', () => {
     registry.close();
   });
 });
+
+describe('任务完成判定：只看已记录执行事实（SQLite 底账，M4-B）', () => {
+  const scope = { principalId: 'wecom:u1', sessionId: 'wecom:c1' };
+
+  it('① 已记录 failed → complete(成功汇报) 不得记 completed；failureReason 取执行层 message', () => {
+    const registry = createSqliteTaskRegistry(tempDbPath());
+    registry.begin({ taskId: 'task_failed', ...scope, request: '查询 documents' });
+    registry.noteExecution('task_failed', {
+      requestId: 'req_failed_1',
+      operation: 'dummy.query',
+      status: 'failed',
+      error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
+    });
+    registry.complete('task_failed', '任务圆满完成，共 3 条数据，已确认无误。');
+    const task = registry.get('task_failed', scope);
+    expect(task.status).toBe('failed');
+    expect(task.status).not.toBe('completed');
+    expect(task.resultText).toBe('任务圆满完成，共 3 条数据，已确认无误。');
+    expect(task.failureReason).toContain('执行层调用超时');
+    registry.close();
+  });
+
+  it('② 零执行 → complete 记 unexecuted；汇报原文保留', () => {
+    const registry = createSqliteTaskRegistry(tempDbPath());
+    registry.begin({ taskId: 'task_none', ...scope, request: '查询 documents' });
+    registry.complete('task_none', '查询成功，共 3 条数据。');
+    const task = registry.get('task_none', scope);
+    expect(task.status).toBe('unexecuted');
+    expect(task.status).not.toBe('completed');
+    expect(task.resultText).toBe('查询成功，共 3 条数据。');
+    registry.close();
+  });
+
+  it('③ 混合（completed + failed）→ complete 记 failed', () => {
+    const registry = createSqliteTaskRegistry(tempDbPath());
+    registry.begin({ taskId: 'task_mixed', ...scope, request: '查询 documents' });
+    registry.noteExecution('task_mixed', { requestId: 'req_ok', operation: 'dummy.query', status: 'completed' });
+    registry.noteExecution('task_mixed', {
+      requestId: 'req_bad',
+      operation: 'dummy.query',
+      status: 'failed',
+      error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
+    });
+    registry.complete('task_mixed', '第一次成功，第二次超时。');
+    expect(registry.get('task_mixed', scope).status).toBe('failed');
+    registry.close();
+  });
+});

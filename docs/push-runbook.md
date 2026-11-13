@@ -37,16 +37,17 @@ git push github migration/public-release:main
 
 # 3. 盯盘：确认 Actions 第一轮全绿
 #    https://github.com/<owner>/fshine-agent/actions
-#    预期：typecheck + unit + generic-mock 三门全绿。
-#    注意 checkout 必须 fetch-depth: 0（history-hygiene 四类零命中判据要全量历史，
-#    浅克隆下该守卫显式失败——2026-11-07 首轮 CI 踩中，见 commit 2c40687）。
+#    预期：typecheck + unit 两门全绿（M4 收口后的确定性门；generic-mock 门已退役）。
+#    注：checkout 保留 fetch-depth: 0，但当前确定性门不依赖 git 历史
+#    （原 history-hygiene 全历史守卫已随 M2 波次 1 删除）；depth 去/留为 M4 登记的
+#    待裁定项（decision-log §十三）。
 
 # 4. 切公开
 gh repo edit --visibility public
 
 # 5. 首跑盯盘：公开库 Actions 第一轮
 #    https://github.com/<owner>/fshine-agent/actions
-#    预期：同私有期，三门全绿 + badge 可用。
+#    预期：同私有期，两门全绿 + badge 可用。
 
 # 6. fresh clone 复证（沙箱或另一台机器）
 git clone https://github.com/<owner>/fshine-agent.git /tmp/fshine-public
@@ -104,6 +105,11 @@ npm run ci
 | K4 | `git bundle verify ~/fshine-agent-backup-20261105.bundle` | exit 0 |
 | K5 | `npm run ci` | 退出码 0，末行 `CI deterministic gates: PASS` |
 | K6 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
+
+> **2026-11-13 M4 注**：K2 引用的 `history-hygiene.test.ts` 与 K6 的
+> `migration-gate.test.ts` 已随 `0b97227`（Minimal Reset）删除，两行当前不可执行——
+> 按历史复证记录阅读；替换/恢复属 owner 待裁定。K1/K3/K5 仍可执行，K4 依赖本机历史
+> bundle 文件。
 
 ---
 

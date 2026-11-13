@@ -15,8 +15,8 @@ import { defineConfig } from 'vitest/config';
  *      展开后会装两遍守卫（幂等，但日志会重复）。
  */
 const ALIAS = [
-  // Execution Contract 的子路径入口：作为与 barrel 分开的显式子路径保留（消费方按
-  // `@fshine/contracts/execution-contract` 直接引用）；旧 a2a 契约文件已随 Minimal Reset 删除。
+  // Execution Contract 的子路径入口：barrel（packages/contracts/src/index.ts）不导出
+  // execution-contract 语义面，运行时/适配器按子路径导入，测试解析需单独映射。
   {
     find: '@fshine/contracts/execution-contract',
     replacement: fileURLToPath(new URL('./packages/contracts/src/execution-contract.ts', import.meta.url)),
@@ -96,9 +96,10 @@ export default defineConfig({
         resolve: { alias: ALIAS },
         test: {
           name: 'unit',
-          // `scripts/**` 是 D-087 补的：验收夹具与运维脚本自此进测试覆盖面。此前这里只有
-          // packages/apps，而 leak-lint 反而扫 scripts/——两边覆盖不对称（D-084 残留 b
-          // 的一半；tsconfig 的 include 仍不含 scripts/，那另一半不混在本波里）。
+          // `scripts/**` 纳入：脚本层测试（resolve-config-path 等）与包内测试同一基线跑。
+          // 历史：D-087 为对齐当时 leak-lint 的覆盖面而补（D-084 残留 b）；leak-lint 守卫
+          // 已随 M2 波次 1 删除（当前树无该文件），本 include 独立成立；tsconfig 的
+          // include 仍不含 scripts/，两个覆盖面各管各的。
           include: ['packages/**/*.test.ts', 'apps/**/*.test.ts', 'scripts/**/*.test.ts'],
           ...SHARED,
         },

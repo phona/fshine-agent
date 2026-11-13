@@ -1,9 +1,9 @@
 # 方法论：不确定性治理与经验沉淀（methodology）
 
-状态：**作业纪律与设计判据**。来源：2026-10-18~19 薪酬域全链诊断与 A2A 协议落地的实战复盘（A2A 词汇已随 Minimal Reset 退役）。
-本文管"怎么工作、怎么判断"；机械约束在 architecture-laws.md，执行层对接协议在
-execution-layer-interface.md 与 Execution Contract（`packages/contracts/src/execution-contract.ts`），
-改动防线在 change-safety.md，未清偿事项在 debt-ledger.md——四者引用本文判据编号，不重复正文。
+状态：**作业纪律与设计判据**。来源：2026-10-18~19 薪酬域全链诊断与 A2A 协议落地的实战复盘。
+本文管"怎么工作、怎么判断"；机械约束在 architecture-laws.md，协议历史蓝图在 a2a-protocol.md
+（失效注记见其文件头；现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与
+decision-log），改动防线在 change-safety.md，未清偿事项在 debt-ledger.md——四者引用本文判据编号，不重复正文。
 
 ## 一、诊断纪律（与不确定性 battle 的作业流程）
 
@@ -48,5 +48,6 @@ execution-layer-interface.md 与 Execution Contract（`packages/contracts/src/ex
 ## 四、用法
 
 - 出问题先过「一、诊断纪律」再改代码；每修一个缺陷，回「二、设计判据」找对应的缺口
-- 新域接入按「二、6 双回路」与执行层准入清单（execution-layer-admission.md）对照
-- 本文件与 architecture-laws.md / decision-log 冲突时，以后者为准并回头修本文
+- 新域接入按「二、6 双回路」与 `packages/contracts/src/execution-contract.ts` 的现行契约、
+  decision-log 的现行决定对照（a2a-protocol.md 只作历史蓝图）
+- 本文件与 decision-log 冲突时，以 decision-log 为准并回头修本文

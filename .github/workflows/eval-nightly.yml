@@ -4,7 +4,7 @@
 #   - Nightly only (schedule), not per-push.
 #   - 单一阶段：用户级全量 `npm run eval:user -- --trials 3`（12 用例 × 3 次，全样本保留）。
 #     原二期双档区分度矩阵（强/弱对照 + judge）随旧 harness 退役，不再移植
-#     （任何移植 = 新评测平台代码；登记见 docs/decision-log.md §十三）。
+#     （任何移植 = 新评测平台代码；登记见 docs/decision-log.md §十四）。
 #   - 本 workflow 非 required check；job 状态由入口机械退出码承载。
 #   - 财税域 eval 留在 Tier B 手动运行。
 name: Eval Nightly (user-level)

@@ -13,6 +13,7 @@ import { openTaskStore, type ExecutionRow, type TaskRow, type StoredTask } from 
 import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
+  judgeReportedTask,
   type ExecutionRecord,
   type TaskRecord,
   type TaskRegistry,
@@ -86,7 +87,20 @@ export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
       store.touchTask(taskId, new Date().toISOString());
     },
     complete(taskId, resultText) {
-      if (!store.setTaskOutcome(taskId, { status: 'completed', resultText, updatedAt: new Date().toISOString() })) {
+      const stored = require(taskId);
+      // 终态 = 读回已记录执行事实后的同一判定（与内存版逐项一致；不嗅探汇报文本）。
+      const judgement = judgeReportedTask(stored.executions.map((execution: ExecutionRow) => ({
+        operation: execution.operation,
+        status: execution.status as ExecutionStatus,
+        ...(execution.error === undefined ? {} : { error: execution.error as ExecutionFailure }),
+      })));
+      const outcome = {
+        status: judgement.status,
+        resultText,
+        updatedAt: new Date().toISOString(),
+        ...(judgement.failureReason === undefined ? {} : { failureReason: judgement.failureReason }),
+      };
+      if (!store.setTaskOutcome(taskId, outcome)) {
         throw new TaskOwnershipError();
       }
     },

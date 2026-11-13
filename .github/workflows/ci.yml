@@ -31,7 +31,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: git branch -r -d github/eval-config || true
       - uses: actions/setup-node@v4
         with:
           node-version: 24

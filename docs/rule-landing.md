@@ -12,6 +12,8 @@
 
 > **状态总注（2026-11-12，申报层正式删除）**：申报工具 `route_current_turn` 与其解析/复核/退回层已在 `arch/direct-tool-final` 整体删除（工具/解析/退回/申报状态字段/提示词全删，待开 PR；见 decision-log 2.7–2.9）。本文中所有「申报」「route_current_turn」「申报契约 N 字段」的规则、Phase 记录与事故复盘自此均为**史实**：它们描述删除前的机制与当时的落点；①–⑥ 相关落点（长期记忆 / 历史检索 / 语义投影 / 台账注入，含 `reference-evidence.ts`、`context-state.ts`、`execution-facts.ts`）也已在更早的删除批落地，同样按史实读。**现行协议** = Main Agent 直接调用执行层委派工具（缺省 `run_task`），普通回合直接文本回复。仍在服役的规则只有：实体范围守卫（C6/C20，`validatePlanEntities`）、出口执行痕迹与协议材料门（C4 及 F4 族）、resend 直连工具、任务记录/授权/幂等/结果校验。新代码不要再按本文的申报层落点写。
 
+> **2026-11-13 M4 注**：本文引用的若干守卫与 harness 已随 `0b97227`（Minimal Reset）或 M4 死代码清扫退役——`exposure-lint` / `history-hygiene` / `platform-leak-lint` / `leak-lint` / `docs-reality` / `architecture-shape` 守卫、`generic-mock` 评测簇、stock 夹具、`worker-step-cap.ts` / `proposal-review.ts` / `task-handover.ts` / `committed-unverified.ts` / `tool-definition-guard.ts`、真实模型 eval 工作流。相关行按史实读；现行面以 [`decision-log.md`](decision-log.md) §十三 与 `AGENTS.md` 现状为准。
+
 ## 1. 代码保证（确定性断言）
 
 | # | 规则 | 落点 |

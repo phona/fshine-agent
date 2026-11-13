@@ -8,6 +8,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **裁定记录的权威（2026-11-11 统一）**：删除 / 保留的**裁定、对象与状态**以 [decision-log.md](decision-log.md) 为权威记录；本文与 v0-architecture 是它的可执行判据转写与架构叙述。三者冲突时：**判据**以本文为准，**裁定的有无与状态**以 decision-log 为准，并回头修本文与 v0。AGENTS.md 只承载归属判据与迁移期现状，逐条删除状态的权威是 decision-log.md。本文与 v0 的删除状态已与 2026-11-11 裁定同批修订。
 
+> **2026-11-13 M4 注（守卫引用清点，复核 findings）**：本文是律法与历史判据档案。正文按路径引用的 18 个守卫/模块中 15 个已不在当前树（随 `0b97227` Minimal Reset 或 M4 死代码清扫退役）：`platform-leak-lint.test.ts`、`docs-reality.test.ts`、`runtime.ts`、`error-codes.ts`、`context.ts`、`assembly.ts`、`plan-confirmation-route.ts`、`reply.ts`、`env-doc-reconciliation.test.ts`、`cases.yaml`、`score.ts`、`judge-prompt.md`、旧 e2e `harness.ts` 等；裸名引用同样已删：`runtime-quality.ts`、`exposure-lint`、`worker-step-cap.ts`、`proposal-review.ts`、`task-handover.ts`、`committed-unverified.ts`、`tool-definition-guard.ts`。**凡以现时态写「机械守卫 = <已删文件>」「存在性由 <已删测试> 钉住」的行，一律按历史记录阅读**；现行可执行判据 = 现存守卫测试（`packages/agent/import-boundary.test.ts`、`transition-naming.test.ts`、`worker-env.test.ts`、`server-paths.test.ts`、`dummy-client.test.ts`、`runtime.test.ts`、`task-registry-sqlite.test.ts`、`apps/server/server.test.ts`）+ `decision-log.md` §十三。删除 / 保留的裁定权威仍是 decision-log（见上「裁定记录的权威」）。
+
 ---
 
 ## 归属标签制度（先于一切违例清单存在）
@@ -82,6 +84,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 > **2026-11-13 附注（M2 波次 1）**：上表 WT-1/WT-2 所指 `tests/e2e/turn-loop-worker-timeout.test.ts` 已随旧 e2e 套件整体删除——该行用例证据暂缺，覆盖现状待后续对账；本次删除不动机制本身。
 
+> **2026-11-13 附注（M4 死代码清扫）**：上表 `committed-unverified.ts` 已随 M4 删除（最小读路径零生产消费者，唯一消费者是已退役的 generic-mock；提案/提交-回读切片落地时按独立机制重新引入，加回判据见 decision-log §十三）。同批删除的 `tool-definition-guard.ts` / `worker-step-cap.ts` / `task-handover.ts` / `proposal-review.ts` 同理由（均零生产消费者）。本表其余行涉及的行为仍按各切片决定处理。
+
 **与既有律法的关系**：本节**不削弱** L1–L7 的任何闭环判据。B 类机制仍按原律法的闭环判据验收；A 类在原有判据之外**增加**消融 / Eval 判据。删除仍按下一节执行。
 
 ---
@@ -127,7 +131,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：业务词汇只住执行层 + 夹具 + 文档；宿主 `src` 的**非防御性**出现为零。编排层不懂口径，所以它连说错话的词汇都不该持有。
 
-**机械守卫**：`packages/agent/platform-leak-lint.test.ts` 的业务词预算。词表 15 词——`BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g`（D-004/D-005 扩成；收词按**领域概念**而非最显而易见的词，附同义改写对照表：时间范围→期间、记录/档案→凭证、摸底→域操作——伪装形绕词表正是 D-005 的根因）。扫描范围 = `packages/agent/src` + `apps`（D-004：生产装配与落账执行器也属编排层，曾整目录在守卫之外）；`scripts/` 以显式常量 `BUSINESS_WORD_EXCLUDED_DIRS` 排除（D-005 附条"接受不修"的显式决策——验收夹具的领域词是测试数据，纳入只减不增预算会冻结 144 行；新增非夹具用途文件须并入）。命中项**按四标签分类断言**：非防御命中必须为 0，防御命中必须 100% 挂"防御排除"。
+**机械守卫**：`packages/agent/platform-leak-lint.test.ts` 的业务词预算（**该守卫已随 `0b97227` 删除**，见文首 2026-11-13 M4 注；本行按历史判据阅读）。词表 15 词——`BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g`（D-004/D-005 扩成；收词按**领域概念**而非最显而易见的词，附同义改写对照表：时间范围→期间、记录/档案→凭证、摸底→域操作——伪装形绕词表正是 D-005 的根因）。扫描范围 = `packages/agent/src` + `apps`（D-004：生产装配与落账执行器也属编排层，曾整目录在守卫之外）；`scripts/` 以显式常量 `BUSINESS_WORD_EXCLUDED_DIRS` 排除（D-005 附条"接受不修"的显式决策——验收夹具的领域词是测试数据，纳入只减不增预算会冻结 144 行；新增非夹具用途文件须并入）。命中项**按四标签分类断言**：非防御命中必须为 0，防御命中必须 100% 挂"防御排除"。
 
 **当前违例**：
 
@@ -137,7 +141,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
   - ~~`packages/agent/src/context.ts` 的 legacy 提案摘要渲染（`proposal_created` 摘要行）— `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**），同时是 L4 违例~~ **已清**（2026-10-14 D 波 `3e5a36c` 写路径收敛为唯一形态）：legacy 摘要渲染与 `ChangeIntentRecord` 业务字段整体删除，全仓非测试零命中。D-003/D-030 已关。
 - **防御排除（不得删、须挂标签）**：
   - ~~`memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE` / `ACCOUNT_SET_RE` / `BALANCE_RE` / `CURRENCY_AMOUNT_RE` / `FINANCIAL_RESULT_RE`。删任何一条 = 记忆提取器对财务事实变聋。~~ **随 v0-architecture §12 ② 删除**（2026-11-11 裁定，**在 PR #54 未合**）：文件整体删除，本条防御排除项一并退役。合入前 `docs-reality.test.ts` 仍逐条钉这五条正则在场；合入后该守卫条目须同步退役，否则红。合入后不得再把"记忆提取器对财务事实变聋"写成现存风险——提取器已不存在。**注意**：这不是"拆防线"——删除对象是 v0-architecture §12 裁定删除的机制，不属于 B 类判据里的授权 / 幂等 / 审计 / 结果验证。
-  - `hasFinancialFigure`（`runtime-quality.ts` 定义、`runtime.ts` re-export，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。
+  - `hasFinancialFigure`（`runtime-quality.ts` 定义、`runtime.ts` re-export，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。**2026-11-13 M4 注：`runtime-quality.ts` 与 `docs-reality.test.ts` 均不在当前树（后者随 `0b97227` 删除），本行按历史记录阅读。**
   - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts` 常量，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
 - ~~**遗留待清（2026-11-05 脱敏波登记，D-155）**：`config/agent.example.yaml` 的 5 处执行层实例名词（含 `contextProfiles` 的结构键）无守卫覆盖——`config/` 不在 platform-leak-lint 与 docs-reality 任何扫描范围内。**归属**：W1 / 波次 4；**闭环判据**：gate① 对账时该文件零实例名词且结构键完成参数化；**限期**：波次 4。不得因"exposure-lint 扫 `git ls-files` 全量、已覆盖该模板的暴露三类"就当它已清——缺口在名词类，两类判据不相通。~~ **已关**（2026-11-06 波次 5 对账核实：`config/agent.example.yaml` 现行树零实例名词，结构键已参数化为 `<profileId>` 中性占位；闭环判据机械满足）。
 
@@ -166,6 +170,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **2026-11-10 裁定登记（隔离环境变量命名族单一化，issue #20 切片 E；同日续篇按消费端边界收敛）**：夹具的**令牌面、辅助组与计划绑定**定案 **`EXECUTION_*` 唯一规范族**；`DUMMY_*` / `STOCK_*` 降级为调试入口（手工跑夹具时可用），评测进程不设专名，探针启动时只 delete 三个令牌面 ambient 专名。**四个状态路径（MOCK / PLAN / PROPOSAL / AUDIT）已从夹具读取面退役**：`dummy.cjs` / `stock.cjs` 的 `statePaths()` 只认测试专用 `--state-dir`（dummy 测试面，非消费协议；探针经 `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥传导），四个 `env2` 读取（含调试回退）已删；`env2` 规则此后只覆盖令牌 / 辅助组 / 计划绑定面。全文与失效条件见 `docs/env-naming-ruling-20261110.md`（含续篇注记）；条目表见 `docs/environment-variables.md` §4/§4a/§4b。**闭环判据**：夹具 `env2` 的第一参数恒为 `EXECUTION_*` 且只用于令牌 / 辅助组 / 计划绑定；评测注入点（探针 / `scripts/eval` 的 harness 与 Python 评价脚本）不把 B 类专名作为第一选择写进子进程 env，也不再向夹具注入四个状态路径；文档条目与夹具读取点的机械对账 = `scripts/eval/env-doc-reconciliation.test.ts`（§4/§4b/§9.1/§9.2/§9.3 双向比对 + 四状态路径零 env 读取断言）；`npm run eval:generic-mock` 26 例、stock 第二执行层链（`second-layer.ts` / `second-layer.test.ts`）、`plan-policy.test.ts`、探针 ambient 回归锁全绿。**失效条件**：见裁定文档第 4 节（隔离机制改为同文件命名空间、同进程多夹具、规范名语义被执行层改写、ambient 规范名实证击穿、手工调试必须与评测同进程）；状态路径的退役条件另见 §4a（a2a 信封携带 per-run 参数时桥与四个状态注入一并退役）。
 
+> **2026-11-13 M4 附注（历史记录，非销账）**：本条所引 `npm run eval:generic-mock`、stock 第二执行层链、`scripts/eval/env-doc-reconciliation.test.ts`、`plan-policy.test.ts` 与探针 ambient 回归锁均已随 M2/M4 退役（读者删除）；`tests/vitest.setup.ts` 出向密封同步删除 stock 辅助组六键。本条闭环判据中不可执行的部分以 decision-log §十三为准。
+
 ---
 
 ### L3 状态转换机械组装
@@ -188,7 +194,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：写提案的 schema / 域校验 / 确认摘要 / commit 读回**全归 执行层**；fshine 只持**不透明 payload** + 一套**通用确认状态机**（确认码 / 有效期 / principal / 计划版本绑定）。业务字段一旦住进编排层，加新业务域时这一层就要改——正是分层要消灭的东西。
 
-**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」＋ `docs-reality.test.ts` 的 legacy 痕迹零命中判据（借贷合计 / `voucher.batch` / `finalizeProposal` / 退役开关）。
+**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」＋ `docs-reality.test.ts` 的 legacy 痕迹零命中判据（借贷合计 / `voucher.batch` / `finalizeProposal` / 退役开关）。（**`docs-reality.test.ts` 已随 `0b97227` 删除**，见文首 2026-11-13 M4 注。）
 
 **当前违例**：**编排层侧已清**（2026-10-14 D 波 `3e5a36c`「写路径收敛为唯一形态」：`FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 退役，`finalizeProposal` / `ChangeIntentRecord` 业务字段 / 借贷合计渲染整体删除；2026-10-16 对账核实全仓非测试零命中）：
 
@@ -211,7 +217,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **机械守卫**：B 审计清单（每条失败路径归这两类之一）+ 熔断上限测试。
 
-**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，**自上次计划成功激活以来连续未激活的提交次数**达上限即收敛——D-099 语义修正：原注释与消息都写"连续拒绝"，实现却对每一跳通过形状解析与写关闭检查的提交自增、成功后不归零，数的是提交次数；现在唯一归零点在 `PLAN ACTIVE` 那一支，消息也照实说「连续 N 次提交方案均未激活」。残余代价：从不激活但连提 6 次以上的 worker 仍会被挡，那是熔断器的设计行为）。另有**非熔断的收尾提示**：步数帽 `DEFAULT_WORKER_STEP_CAP = 50`（`worker-step-cap.ts`，第 51 次放行送一次收尾 steer，之后不再重复；超帽不拒单，真正的硬上限仍是 wall-clock 预算与计划权重帽——标定见本节标定表新增行与 debt-ledger D-147）。
+**当前违例**：**无**。今日已闭环，转为**不变量**。既有熔断：`MAX_PLAN_ZERO_EXEC_STEPS = 3`（`turn-state.ts`，连续拆解步既无执行痕迹也无 needs 交还即停；`writeClosed` 与停在确认门的步骤不计入）、`MAX_NEEDS_ROUNDS = 3`（`turn-state.ts`，单步按全局计、计划模式按步计）、`DECLINED_PLAN_LIMIT`（`pi-coding-driver.ts`，**自上次计划成功激活以来连续未激活的提交次数**达上限即收敛——D-099 语义修正：原注释与消息都写"连续拒绝"，实现却对每一跳通过形状解析与写关闭检查的提交自增、成功后不归零，数的是提交次数；现在唯一归零点在 `PLAN ACTIVE` 那一支，消息也照实说「连续 N 次提交方案均未激活」。残余代价：从不激活但连提 6 次以上的 worker 仍会被挡，那是熔断器的设计行为）。另有**非熔断的收尾提示**：步数帽 `DEFAULT_WORKER_STEP_CAP = 50`（`worker-step-cap.ts`，第 51 次放行送一次收尾 steer，之后不再重复；超帽不拒单，真正的硬上限仍是 wall-clock 预算与计划权重帽——标定见本节标定表新增行与 debt-ledger D-147）。**2026-11-13 M4 附注**：`worker-step-cap.ts` 已随死代码清扫删除（零生产消费者）——本句按历史记录阅读；长任务/写切片落地时按需重引入并同步恢复标定。
 
 **闭环判据**：任何新失败路径进审计清单；新增无界回路即红。
 
@@ -273,9 +279,9 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 | **2048 帽**（`MAX_REPLY_BYTES`，channel-wecom `text.ts`） | 硬（无声截断） | **无从考据**——常数是抄来的，平台 SDK README 写明 20480，从未有人核过 | 误拦：超过约 600 汉字的正常回复被**无声**截断，用户拿不到完整答案；自愈路径：无（没有截断标记、没有日志）——这正是它烂掉的原因。已修：20480 + 截断标记 + 守夜事件（D-021/D-022 已关） |
 | **实体门标定**（`validatePlanEntities`，turn-contract.ts） | 硬（fail-closed） | 真事故：flash 模型幻觉过账套名——门禁的逐字溯源正是那次事故的修法，功能必须保留 | 误拦：连续会话里"用户上一轮亲自查过的对象，本轮只补一个范围编码"（消息里没有对象名 → 三个来源全空 → 判死，用户被要求重新报名字）；自愈路径：修复前**没有**（死局）。已修：第四来源 `sessionEntities`（执行过的 calls 快照 + 澄清选定的候选，只收用户亲自操作/确认过的）+ correctForm 正路径（先名称检索让平台响应携带规范名再提交）。**这是标定修复不是放宽**：进 haystack 的每条都有用户来源与确立轮次可审计（D-068 已关） |
 | **账套读授权软限制**（accountSetScope 名单模式，context.ts `workerSystemPrompt`） | **软**（仅提示词一句"不得查询或操作名单外对象"；写路径同场景是硬门——capability + 名单非空即拒） | Stage 1–3 单用户全量授权下"够用"——从未按多用户标定过 | 当前不误拦（软控制的危险方向是**漏拦**）：多用户激活后名单外读操作没有任何代码级拦截。激活条件 = Stage 4 多用户；闭环 = 读路径硬门（D-066 待办） |
-| **步数帽 50**（`worker-step-cap.ts`，第 51 次放行送收尾 steer） | **硬触发、软后果**（触发是代码级确定性；后果只是提示，不拒单、不停轮） | **无事故/数据标定**——50 是可配置的默认值（`stepCap` 选项 / `FSHINE_WORKER_STEP_CAP`，非法值回退 50），复用 90% 预算收尾同款提示；按本节纪律，答不出数据依据的控制应登记为待标定（见 D-147），不得写成经实测标定 | 误拦：合法长任务（>50 次廉价调用）会被提前催收尾，可能交付未完成；自愈路径：提示不拒单，worker 可继续，续跑靠交接文件；操作方可调大 cap。反向缺口：忽略提示的 worker 不会被拦，帽不是硬上限 |
+| **步数帽 50**（`worker-step-cap.ts`，第 51 次放行送收尾 steer） | **硬触发、软后果**（触发是代码级确定性；后果只是提示，不拒单、不停轮） | **无事故/数据标定**——50 是可配置的默认值（`stepCap` 选项 / `FSHINE_WORKER_STEP_CAP`，非法值回退 50），复用 90% 预算收尾同款提示；按本节纪律，答不出数据依据的控制应登记为待标定（见 D-147），不得写成经实测标定 | 误拦：合法长任务（>50 次廉价调用）会被提前催收尾，可能交付未完成；自愈路径：提示不拒单，worker 可继续，续跑靠交接文件；操作方可调大 cap。反向缺口：忽略提示的 worker 不会被拦，帽不是硬上限。**2026-11-13 M4 附注**：`worker-step-cap.ts` 已随死代码清扫删除（零生产消费者），本行按历史控制记录阅读；长任务/写切片落地时按需重引入并重新标定 |
 | **提案复核 fail-closed**（`context.ts` 创建路径，`92f7ed8`） | **硬**（无驱动 / 无 schema / 不一致 → 不发确认码、不落意图，fail-closed） | P2 前状态的洞：`proposal_review_skipped` 分支允许无复核继续（生产装配当时未接线、schema 取问接口缺失）；`92f7ed8` 以装配注入 + schema 取问关掉该洞 | 误拦：平台未下发 schema 或驱动未注入时，合法提案也被拦，且文案只说请重新发起录入（确定性死循环，见 D-149）；自愈路径：**目前缺失**——无同提案重试、无可行动信息；workaround 是运营先核查 `operation list --json` 的 `proposal.create` 行是否带 `proposalSchema`，确认平台已修复后再重发，否则每次重发都会新建一个被遗弃的平台提案 |
-| **夹具专名降级为调试入口**（`env2(EXECUTION_*, 专名, 缺省)`，只覆盖令牌 / 辅助组 / 计划绑定面；评测进程不设专名 + 探针 delete 三个令牌 ambient 专名与六个辅助组 ambient 名；直接运行的 harness 从子进程 env 删除六个辅助组键；2026-11-10 裁定 + 同日续篇 + Codex major 修复） | **硬**（夹具代码级查找顺序；探针代码级清场；四个状态路径代码级只认测试专用 `--state-dir`） | issue #20 实证击穿面：探针 `isolatePlatformState` 只覆盖四个 `EXECUTION_*`，而 `generic-mock.ts` 正在设 `DUMMY_AUDIT_PATH`——任一 ambient 专名会让 22 条用例静默共用状态/审计文件；切片 A 的 delete 是补丁，反转顺序才是收口。**2026-11-10 续篇**：四个状态路径（MOCK / PLAN / PROPOSAL / AUDIT）的 env2 读取已退役——状态位置归执行层自己（生产零注入），dummy 的 per-run 隔离是 fshine 测试基础设施对自己夹具的事务，走 `--state-dir` 测试 flag（探针经 `FSHINE_EVAL_FIXTURE_STATE_DIR` 桥）；ambient 状态专名不再清场也不再能改道，探针清场三个令牌专名。**2026-11-10 Codex major 修复**：stock 的 `auxPaths()` 用 `env2` 优先读 ambient 的 memory/breaker/cache 名（规范族 + `STOCK_*` 专名）；`--state-dir` 只保证缺省路径，保不住 env2 的 ambient 优先——三个直接运行的 harness（generic-mock / second-layer / generic-model-eval.py）从子进程 env 删除六个键，探针把它们并入 `ISOLATED_STATE_KEYS`（backup/restore 对称）。失效条件：a2a 信封携带 per-run 参数时桥与四个状态注入一并退役 | 误拦：手工跑夹具时若同时 export 规范名与专名，令牌专名被忽略；状态路径不再有 env 入口——手工调试改用 `--state-dir`（见 `docs/environment-variables.md` §4a）；辅助组手工调试仍可 export 任一 ambient 名（不经评测 harness）。自愈路径：令牌面手工调试只 export 专名（规范名缺省时专名生效），或按裁定文档失效条件 5 加显式调试开关；评测进程由 `cases.yaml` 的 per-case 声明驱动，不碰专名与辅助组 ambient 名 |
+| **夹具专名降级为调试入口**（`env2(EXECUTION_*, 专名, 缺省)`，只覆盖令牌 / 辅助组 / 计划绑定面；评测进程不设专名 + 探针 delete 三个令牌 ambient 专名与六个辅助组 ambient 名；直接运行的 harness 从子进程 env 删除六个辅助组键；2026-11-10 裁定 + 同日续篇 + Codex major 修复） | **硬**（夹具代码级查找顺序；探针代码级清场；四个状态路径代码级只认测试专用 `--state-dir`） | issue #20 实证击穿面：探针 `isolatePlatformState` 只覆盖四个 `EXECUTION_*`，而 `generic-mock.ts` 正在设 `DUMMY_AUDIT_PATH`——任一 ambient 专名会让 22 条用例静默共用状态/审计文件；切片 A 的 delete 是补丁，反转顺序才是收口。**2026-11-10 续篇**：四个状态路径（MOCK / PLAN / PROPOSAL / AUDIT）的 env2 读取已退役——状态位置归执行层自己（生产零注入），dummy 的 per-run 隔离是 fshine 测试基础设施对自己夹具的事务，走 `--state-dir` 测试 flag（探针经 `FSHINE_EVAL_FIXTURE_STATE_DIR` 桥）；ambient 状态专名不再清场也不再能改道，探针清场三个令牌专名。**2026-11-10 Codex major 修复**：stock 的 `auxPaths()` 用 `env2` 优先读 ambient 的 memory/breaker/cache 名（规范族 + `STOCK_*` 专名）；`--state-dir` 只保证缺省路径，保不住 env2 的 ambient 优先——三个直接运行的 harness（generic-mock / second-layer / generic-model-eval.py）从子进程 env 删除六个键，探针把它们并入 `ISOLATED_STATE_KEYS`（backup/restore 对称）。失效条件：a2a 信封携带 per-run 参数时桥与四个状态注入一并退役 | 误拦：手工跑夹具时若同时 export 规范名与专名，令牌专名被忽略；状态路径不再有 env 入口——手工调试改用 `--state-dir`（见 `docs/environment-variables.md` §4a）；辅助组手工调试仍可 export 任一 ambient 名（不经评测 harness）。自愈路径：令牌面手工调试只 export 专名（规范名缺省时专名生效），或按裁定文档失效条件 5 加显式调试开关；评测进程由 `cases.yaml` 的 per-case 声明驱动，不碰专名与辅助组 ambient 名。**2026-11-13 M4 附注**：stock 夹具、generic-mock 与 `fixture-aux-state.ts` 已退役，六个辅助组 ambient 键的读者与清场代码一并删除（`tests/vitest.setup.ts` 同步删键）；本行按历史控制记录阅读 |
 
 **纪律**：新控制进主干前把三问的答案写进它的注释；老控制每次被事故触及时重答三问——重答发现标定与现状不符的，按"标定修复"处理（收窄或修正出处范围），不拆控制本身（用户已明确否决"拆安全机制"式修法）。
 
@@ -313,4 +319,4 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 执行层 `execution-env` 过渡期双读。证伪项：初核曾把 执行层 `docs/architecture.md` 「已知短板」节的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
 2. **判据若写得比机制真相更干净，执行者会把防御机制当违例删掉。** 所以标签制度先于清单、验收时逐条核对标签——一条命中该挂"防御排除"还是"警职执法"，删了它会不会让某道防线变聋 / 变瞎，是唯一裁决问题。
 3. **每波只 revert 该波 commit，宪章与台账保留。** 债务状态是快照不是负担；宪章跨波有效，不随单波回退消失。
-4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零——2026-10-16 对账实证四起（工具面头注释两度未跟工具面实况；行号引用三起，分别指向拆分前旧文件、拆分后错位文件、已删违例），逐起原文按行号留档于 debt-ledger D-104，本文件一律符号名引用。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理登记台账 D-104（laws 侧 2026-11-12 已清，ledger 侧未做）。
+4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地；该守卫已随 `0b97227` 删除，本纪律文本按历史阅读——现行对账见 decision-log）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零——2026-10-16 对账实证四起（工具面头注释两度未跟工具面实况；行号引用三起，分别指向拆分前旧文件、拆分后错位文件、已删违例），逐起原文按行号留档于 debt-ledger D-104，本文件一律符号名引用。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理登记台账 D-104（laws 侧 2026-11-12 已清，ledger 侧未做）。

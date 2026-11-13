@@ -24,7 +24,7 @@ export interface TaskRow {
   principalId: string;
   sessionId: string;
   request: string;
-  /** 'running' | 'completed' | 'failed'（registry 侧取值）。 */
+  /** 'running' | 'completed' | 'failed' | 'unexecuted'（registry 侧取值）。 */
   status: string;
   resultText?: string;
   failureReason?: string;

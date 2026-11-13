@@ -5,7 +5,7 @@
  * driver-contract / execution-runtime / pi-driver 使用）。旧 runtime 契约的
  * TrustedContext / AgentRuntime / AgentReply / TurnInputContext /
  * PendingPlanConfirmationContext 等全符号零消费，随 2026-11-13 R1 清理删除
- * （登记见 docs/decision-log.md §十四）。
+ * （登记见 docs/decision-log.md §十五）。
  */
 
 /** Model-visible tool definition. */

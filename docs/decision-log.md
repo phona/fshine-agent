@@ -581,7 +581,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 - **旧 e2e + 旧脚手架退役**：`tests/e2e/` 全量（42 文件）与旧评分/判据/用例、旧探针与验收脚本、`scripts/perf/**` 删除；用户级行为由 Minimal demo（`npm run demo:minimal`）与 **M3 用户级评测**承担。此条为已登记退役，后继明确。
 - **execution-leak-criteria 的 2 红 = 已登记退役**：原红见九节（`scripts/eval/execution-leak-criteria.test.ts` 两轮同数同例）。该文件随旧路径退役，红随对象消失；**后继 = M3 用户级评测**。不算修复、不算掩盖——判据不丢，交接有主。
-- **probe D-209 的 2 红 = base 未登记红，以「继任闭集守卫 + 字面量清理」解决**：波次 1 之前，`scripts/probe-real-agent.test.ts` 的 D-209 闭集守卫 2 红（闭集断言 + 失效化突变断言同一根因）：M1 引入的字面量引用（`packages/agent/minimal-worker-env.test.ts`、`packages/agent/src/minimal/worker-env.ts` 注释）不在旧 allowlist 内。波次 1 删除该探针文件后 unit 归零，形似掩盖。本次把守卫换成**继任测试** `packages/agent/bridge-key-closure.test.ts`（只守桥键闭集，不依赖已删探针/harness；allowlist 逐项理由；表外命中与陈旧登记双向红；含变异用例），并把 M1 字面量清到导出常量（测试改引 `WORKER_FIXTURE_STATE_DIR_KEY`；注释用「测试桥键」表述）。**红被取代，不是被删除**。**状态更新（2026-11-13 R1 清理）**：该继任守卫（`packages/agent/bridge-key-closure.test.ts`）及其常量来源 `packages/agent/src/child-env.ts` 已随 Reset（`66e7d23`）删除，无继任闭集守卫；现覆盖 = `worker-env.test.ts` 白名单闭集断言 + 夹具 shell 入口读桥（部分覆盖），闭集扫描缺口登记于 §十四。
+- **probe D-209 的 2 红 = base 未登记红，以「继任闭集守卫 + 字面量清理」解决**：波次 1 之前，`scripts/probe-real-agent.test.ts` 的 D-209 闭集守卫 2 红（闭集断言 + 失效化突变断言同一根因）：M1 引入的字面量引用（`packages/agent/minimal-worker-env.test.ts`、`packages/agent/src/minimal/worker-env.ts` 注释）不在旧 allowlist 内。波次 1 删除该探针文件后 unit 归零，形似掩盖。本次把守卫换成**继任测试** `packages/agent/bridge-key-closure.test.ts`（只守桥键闭集，不依赖已删探针/harness；allowlist 逐项理由；表外命中与陈旧登记双向红；含变异用例），并把 M1 字面量清到导出常量（测试改引 `WORKER_FIXTURE_STATE_DIR_KEY`；注释用「测试桥键」表述）。**红被取代，不是被删除**。**状态更新（2026-11-13 R1 清理）**：该继任守卫（`packages/agent/bridge-key-closure.test.ts`）及其常量来源 `packages/agent/src/child-env.ts` 已随 Reset（`66e7d23`）删除，无继任闭集守卫；现覆盖 = `worker-env.test.ts` 白名单闭集断言 + 夹具 shell 入口读桥（部分覆盖），闭集扫描缺口登记于 §十五。
 - **结论**：桥键现行字面量闭集 = `child-env.ts` 键名定义 + dummy/stock 两个 shell 入口 + leak-lint 登记 + 继任守卫自身；生产面只剩键名定义一处。守卫区分力已验：守卫内两条变异用例 + 本轮实注入（生产文件加一行引用 → 守卫红 → 回滚后复绿）。旧探针/验收不恢复。
 
 ---
@@ -641,7 +641,99 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
-## 十三、Eval 入口收口：真模型工作流改挂用户级入口、measure 机退役（2026-11-13，分支 arch/eval-r1）
+## 十三、M4 死代码清扫、完成状态修复与契约收口（2026-11-13）
+
+**本分支**：`arch/m4-sweep`（基线 `arch/integration` @ `29c13e9`；独立 worktree；未 push、未合并）。**本节是删除/退役、完成判定语义与评测口径的现行口径**；与 §九–§十二 冲突处（如「评测＝`eval:generic-mock`」）以本节为准，旧条目按维护规则保留不改。提交清单：`659cfe3`（完成状态修复）→ `acc1704`（契约收口）→ `4295832`（死代码清扫）→ `32cdbb3`（CI 退役）→ 本节所在 docs 提交。
+
+### 13.1 完成状态修复（缺陷修复；TDD：红→最小修→绿→反向绊线）
+
+- **缺陷**：Worker 以非空汇报结束即记 `completed`——执行层 `failed` / `refused` / 零执行（模型未调用或宿主发起前拒收）三类事实全部被覆盖成「成功」；顶层 status 分不出「实际成功 / 拒绝或失败 / 未发起执行」。
+- **修复落点（全部在既有文件，无新表/无第二账本/无状态机/无计划门；SQLite `status` 列本就是无 CHECK 的 TEXT，零迁移）**：
+  - `packages/agent/src/task-registry.ts`：`TaskStatus` 增加 `unexecuted`；新增纯函数 `judgeReportedTask(executions)`（内存与 SQLite 两实现共用，逐项一致）；`complete()` 恒存 Worker 汇报原文，status/failureReason 按判定写。
+  - `packages/agent/src/task-registry-sqlite.ts`：`complete()` 读回 executions 后用同一判定写入。
+  - `packages/core/src/task-store.ts:27`：status 注释补 `unexecuted`（仅注释）。
+  - `execution-runtime.ts` 写点不动：:249 仍调 `complete`（判定归底账）；:253 `fail()` 保留 worker 层失败（抛错/空汇报）语义。
+- **语义表（Worker 正常结束且文本非空）**：
+
+| execution 组合 | status | resultText | failureReason |
+|---|---|---|---|
+| ≥1 且全 completed | `completed` | Worker 汇报原文 | 无 |
+| ≥1 含 failed / refused | `failed` | Worker 汇报原文 | `执行层未成功：<op> 返回 <status>：<error.message 原样>` |
+| ≥1 含 needs_input | `failed`（明细在 `executions[].status`） | Worker 汇报原文 | 无 error.message 时以 `执行层未成功：<op> 返回 needs_input。` 收尾 |
+| 0 条（模型未调用 / 宿主发起前拒收） | `unexecuted` | Worker 汇报原文 | `未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。` |
+| worker 抛错 / 空汇报（走 `fail()`） | `failed` | 无 | worker 错误原文 |
+| 纯聊天（Main 未委派） | 不产生任务记录 | — | — |
+
+- **先红后绿**：并入 `packages/agent/runtime.test.ts`（9 例，含升级既有 213-230 用例补 status 断言）与 `task-registry-sqlite.test.ts`（3 例）；修复前 `11 failed | 10 passed`，修复后 `21 passed`（两文件），全量 225 通过。②③b 等 8 条按「修复后语义」先红，⑥ 成功孪生与 ④ 纯聊天基线绿、修复后保持绿。
+- **反向绊线（变异核验，逐条实做）**：恢复「无条件 completed」→ 11 红（runtime 8 + SQLite 3）；判定写死 `completed` → ⑤⑤b 等 11 红；判定写死 `failed` → ⑥ 孪生红；改成从汇报文本嗅探「成功|完成」→ ⑤⑤b⑧ 红。变异后源码已还原，tsc 0 / 用例全绿。
+- **影响面**：生产入口零改动（`scripts/ask.ts:164-171` 只读 executions，达标门用 facts.length；`apps/server/server.ts:142-149` 只记录 executions）；现有三处 completed 断言场景均为「全 completed」，判定不变。
+
+### 13.2 退役与删除登记（逐条：行数 / 依据 / 后继 / 加回判据）
+
+整删跟踪文件 19 个共 3,386 行；其余为部分删减（约 190 行）。全部条目均查过实际引用与运行入口（非文件名判断）。
+
+1. **旧 a2a 协议**：`packages/contracts/src/a2a-protocol.ts`（170 行）+ `packages/contracts/src/index.ts` 导出行。依据：全仓消费者 0（唯一命中是 barrel 自身）；旧协议不得经公共导出暴露。后继：现行契约语义面 `packages/contracts/src/execution-contract.ts`；文档加失效注记（AGENTS 指针、docs/index、methodology、a2a-protocol.md 文首）。加回判据：出现真实跨进程/跨框架互操作需求且 Pi 委派能力不足时，按新增机制准入（①–⑤）另案引入；不得以「未来可能」为据经 barrel 恢复旧类型面。
+2. **Phase 2 宿主模块 5 文件**（472 行）：`proposal-review.ts`(134) / `task-handover.ts`(176) / `committed-unverified.ts`(54) / `tool-definition-guard.ts`(38) / `worker-step-cap.ts`(70)。依据：零生产消费者（唯一值消费者是已退役 generic-mock）；`import-boundary.test.ts` 的 FORBIDDEN 墓碑清单保留这批路径防回潮。后继：「提案已提交但回读缺失绝不报完成」的最小面由 13.1 的 `unexecuted`/`failed` 终态承接；其余三项属写/提交-回读/长任务切片未落地机制，删除而非迁移。加回判据：对应切片落地时按新设计（最小可复现失败 + 失败注入测试）重引入，不整文件恢复。
+3. **generic-mock 评测簇**（1,172 行）：`generic-mock.ts`(630) / `GENERIC_MOCK_NOTES.md`(308) / `generic-mock-baseline.json`(203) / `fixture-aux-state.ts`(31)；连带 `package.json` 的 `eval:generic-mock` 入口与 `ci.sh` 该门。依据：Phase 2 五用例（`g-step-cap-50-51` / `g-handover-file` / `g-tool-definition-removed` / `g-tampered-summary-review` / `g-committed-unverified-report`）测的是已删模块；Phase 1 用例测的是生产不可达的夹具写/计划协议（plan 门、proposal、readback、token、serve 矩阵、ballot 第二域）。后继（等价承接）：`dummy-client.test.ts`（契约传输四行为 + env 白名单对照 + stub 失败映射）、`runtime.test.ts`（允许集合拒绝/归属/完成判定）、`task-registry-sqlite.test.ts`（重启连续性）、`apps/server/server.test.ts`（假渠道）。**被删红登记**：夹具写/计划的既有覆盖（plan 门预算分档、提案 pending→commit→读回→双提交拒绝、readback 短、token 门、状态隔离、ballot 第二域等 21 例 + 上述 5 例）**无逐条等价承接**，随对象退役（对象＝夹具模拟行为，非产品链）；产品链对应面（结构化执行/拒绝/失败/零执行/纯聊天）由上述后继覆盖。加回判据：恢复确定性夹具评测须先有可运行、被测试钉住的 harness 与 owner 裁定；恢复时按新 harness 设计，禁止指向已删脚本。
+4. **死夹具与死配置**（913 行）：stock-platform 5 文件 856 行（`bin/stock` 13 / `bin/stock.cjs` 734 / `README.md` 38 / `scripts/lint-operations.js` 39 / `skills-serve/stock-routing-examples/SKILL.md` 32；当前树零代码消费者——`resolve-config-path.test.ts` 当时只用字面量 `stock-platform` 构造临时 YAML，不读目录；该字面量已随 2026-11-13 复核修复轮去对象化）、`scripts/eval/eval.agent.yaml`(57；仅死 fallback 消费)。后继：`config/agent.fixture.yaml`（ask 缺省）+ `explicitConfigFrom`/`materializeEvalConfig`。加回判据：接入第二执行层证明面时按新夹具设计引入，并同步 env 文档与守卫。
+5. **resolve-config-path 死入口**：删 `EVAL_CONFIG`、`resolveConfigPathInternal`、`resolveConfigPath`（连带变为无消费者的 `ROOT_CONFIG`，约 48 行）；`resolve-config-path.test.ts` 删两组（`resolveConfigPath` / `resolveConfigPath 仓库默认入口`，约 110 行 / 8 用例）。依据：0 生产调用，唯一调用者是自身测试。后继：`explicitConfigFrom` 与 `materializeEvalConfig`（`scripts/ask.ts:92-93`、`apps/server/main.ts:22` 实调）。加回判据：某入口出现「仓根 `config/agent.yaml` 存在才用 > eval 回退」的真实需求（写清消费点）时以最小实现重加。
+6. **vitest.setup 死键**：删 `FSHINE_WORKER_STEP_CAP` 与 stock aux 六键（`EXECUTION_*`/`STOCK_*` × MEMORY/BREAKER/CACHE）。依据：读者（worker-step-cap 机制 / `stock.cjs` / `fixture-aux-state.ts`）全部退役，无读者后泄漏值不能改变任何基线。注：审计清单列 step cap + `STOCK_*` 三键，实施同时删三枚 `EXECUTION_*` 规范名（同一读者族、零读取）；如 owner 认为需保留规范名占位，可一行恢复。加回判据：对应机制重新落地并重新出现 env 读取点时同步恢复密封键。
+7. **三个失效 eval workflow**（659 行）：`eval-real.yml`(148) / `eval-nightly.yml`(280) / `eval-measure.yml`(231)。判定（四条件实测于 `29c13e9`）：① `.github/` 内 `generic-model-eval` / `measure-summary` 引用非零；② 两脚本不在 `git ls-files`；③ 无替代 harness 入口与测试证据；④ `arch/eval-r1` == `29c13e9`（修复不在 M4 基线内）→ 按「未修」执行兜底 A（删除纪律，机制已死无后继）。连带 `ci.yml` 头注释、残留步骤 `git branch -r -d github/eval-config` 删除、fetch-depth 注释改真实状态。后继：确定性门 typecheck + unit；用户级评测＝`eval:user`（并行分支交付，合并后生效）。加回判据：恢复真实模型评测面须先有可运行且被测试钉住的 harness 与 owner 裁定；**禁止再指向已删脚本**（`generic-model-eval.py` / `measure-summary.mjs`）。
+8. **契约去面（C 项）**：`cancel` 全链（`CancelResult` + `ExecutionClient.cancel` + dummy-cli-client 实现 + 测试引用；生产调用点 0，唯一调用是测试断言，实现自述只返回 `not_found`）、`completed.artifacts`（零产出零消费）、`confirmation_required`（dummy-cli-client 从不产出，未知状态反而映射 failed）。后继：写/确认切片采用独立 `confirm(requestId, confirmationId, decision)` 时按需恢复（契约头注释已写明方向）。加回判据：写/确认切片落地确需取消或待确认状态时按新接口恢复并附测试；类型删除由 tsc 反锁（任何旧调用点编译即红）。`ExecutionFailure.retryable/details` 与 `MissingInput.name/description` 保留（有产出、属如实透传）。
+9. **文档口径**：AGENTS.md 现状/指针、README、docs/index、methodology、a2a-protocol 失效注记、architecture-laws M4 附注、eval-mechanism-registry 状态、e2e-ownership CI 口径、push-runbook、environment-variables §4/§9 注记、ci.sh/ci.yml 注释、codex 提示词历史口径。**评测口径（以本节为准）**：确定性门＝`npm run typecheck` + `npm run test -- --project unit`（含契约行为测试与安全不变量指定测试）；用户级评测＝`eval:user`（并行分支交付，合并后生效）；真实模型评测面已退役。AGENTS.md:26 与 §十二:621 的「取消/产物」表述为历史文字，按维护规则不改旧条目，由本节登记当前契约面（四态，无 cancel/artifacts）。
+
+### 13.3 契约行为测试补点（C 项；四行为）
+
+- 能力发现：补 `style→type` 投影与位置参数投影断言（`dummy-client.test.ts`）；清单失败三态（非 JSON / exit≠0 / 超时）由 stub 网关补测 fail-closed。
+- 请求：既有覆盖（`dummy-client.test.ts` 结构化执行、`runtime.test.ts:162-211`）。
+- 响应：补 `not_found` 信封→`completed`（确定性答案）、`failed` 信封→`failed`（QUERY_REQUIRED 含 `correctForm` details；COLLECTION_LOCKED）、超时→`EXECUTION_TIMEOUT`、未知状态→`EXECUTION_UNKNOWN_STATUS`、无信封→`EXECUTION_NO_RESULT`、`needs_input` 声明缺参分支（fixture 不可达，stub 补）。
+- 拒绝：既有覆盖（`dummy-client.test.ts` env 白名单对照、`runtime.test.ts` 允许集合拒、`server.test.ts` 未开通 principal）+ 本批补 error 原样落账断言。
+
+### 13.4 保留清单（逐条理由）
+
+1. 生产闭包全部保留：ask/start 入口、execution-runtime、dummy-cli-client、task-registry(+sqlite)、worker-env、worker-skills/skills、pi-driver、step-text、server-paths、agent-profile、core config/task-store、channel-wecom、contracts execution-contract/channel/config/runtime/store、resolve-config-path 的 `explicitConfigFrom`+`materializeEvalConfig`、`scripts/eval/safety-gate.ts` 隔离门（`ask.ts:128` 实调，fail-closed 生产职责）。
+2. `packages/agent/transition-naming.test.ts`：现行防回潮守卫（全量路径/标识符扫描 + 窄豁免双向绊线），本次 2 用例通过。
+3. `packages/agent/import-boundary.test.ts`：import 方向/契约零 import/接线完整性守卫；其 FORBIDDEN 清单本就登记历史治理模块，保留即防回潮（无需改）。
+4. 安全不变量测试与实现：`worker-env.ts`+测试（凭据隔离白名单）；`task-registry(.sqlite)`+归属/重启连续性测试；`server-paths.ts`+测试；`apps/server/server.test.ts`（假渠道 + 未开通 principal 拒绝）；`dummy-client.test.ts`（传输四行为）；`runtime.test.ts`（允许集合拒绝、fail-closed 构造、归属）。
+5. `scripts/eval/fixtures/dummy-platform`（ask 缺省执行层）+ `config/agent.fixture.yaml` + `config/agent.example.yaml`：生产 ask/start 运行面。
+6. `scripts/vitest-orphan-guard.ts`、`tests/vitest.setup.ts`（修剪死键后）、`vitest.config.ts`（别名面保留，注释更新）。
+7. `scripts/ci.sh` 主体（typecheck+unit 两门）与 `ci.yml`（codex-review-scripts job 保留）。
+8. docs 历史档案保留（a2a-protocol / execution-layer-interface / change-safety / debt-ledger / v0-architecture 等），仅对现行指针与现行主张加失效注记。
+
+### 13.5 证据（原始输出摘要）
+
+- 基线：`npx tsc --noEmit` exit 0；`npx vitest run --project unit` → 26 文件 / 213 用例通过。
+- 13.1 红：`11 failed | 10 passed (21)`；绿：`21 passed`（runtime 15 / sqlite 6）；全量 225 通过。
+- 13.3 后全量：229 通过；13.2 后全量：221 通过（净 −8：新增 16、退役 8、其余保持；文件数 26 不变）。
+- 变异四组（13.1）：A 11 红（含 ③b、⑤⑤b；⑥/④ 保持绿）；B 11 红；C 含 ⑥ 红；D `3 failed | 18 passed`（⑤⑤b⑧）。变异源码已还原。
+- 指定门（最终态）：`npx tsc --noEmit` exit 0；全量 `26 files / 221 tests passed`；契约四行为 + 安全不变量指定 6 文件 `50 passed`；`node --test .github/codex/*.test.mjs` → `20 pass / 0 fail`；`sh scripts/ci.sh` → `CI deterministic gates: PASS`。
+- **复核修复轮（2026-11-13，M4 复核 findings）**：悬空引用清零（`config/agent.fixture.yaml` 头注释、`dummy.cjs` GENERIC_MOCK_NOTES 指针、`vitest.config.ts` leak-lint 注释、debt-ledger D-209 指针校正、`environment-variables` §4a child-env 指针、`eval-mechanism-registry` #7、`rule-landing` / `push-runbook` / change-safety / debt-ledger / v0-architecture / execution-layer-interface / execution-layer-admission / env-naming-ruling / eval-baseline-refresh / eval-harness-measurement 的 M4 档案注记）；未动任何测试、断言或代码语义。门与绊线复跑结果附于本节末（见 13.8）。
+
+### 13.6 缺口与待裁定
+
+- `ci.yml` 的 `fetch-depth: 0`：当前确定性门不依赖 git 历史（原 history-hygiene 守卫已删）；去/留待 owner 裁定（本分支保留并改写注释为真实状态）。
+- 「用户级评测＝`eval:user`」在并行分支交付，合并后生效；本分支内不存在该入口，未实测。**并行 `arch/eval-r1` 在 M4 删除后已出现修复提交**（eval-real/eval-nightly 改挂 `eval:user`、删 eval-measure、交付 convergence-r1）；本分支未合并、未处置 delete/modify 冲突面（eval-real.yml / eval-nightly.yml / eval.agent.yaml / ci.sh），合并顺序与冲突处置归 owner。
+- 被删的夹具写/计划覆盖（13.2-3）无逐条等价承接，已按对象退役登记；恢复评测面前该覆盖面为空是已知状态，不得写成绿。
+- `git branch -r -d github/eval-config` 步骤删除：该 ref 清理已无消费者（eval-config 机制相关 harness 已退役），如 owner 知其另有用途可按需恢复。
+- bridge-key 闭集守卫（`packages/agent/bridge-key-closure.test.ts`）与平台泄露守卫（`platform-leak-lint.test.ts`）随 `0b97227` 删除（预分支，非 M4 误删）；当前树可跑的边界断言 = `worker-env.test.ts`「测试桥键不进白名单」（实跑通过）。恢复最小闭集守卫或改 D-209 闭环判据属 owner 待裁定（D-209 已附 2026-11-13 M4 指针校正）。
+- `packages/contracts/src/index.ts`（barrel）仍导出 `store.ts` / `runtime.ts` 等大面积未消费面（预分支遗留，不在 M4 删除清单）；本分支「契约未用面已删」仅指 Execution Contract 面（cancel/artifacts/confirmation_required），不含整个 contracts barrel。
+
+### 13.7 取回点
+
+- 删除前完整代码在 `git log`：基线 `29c13e9` 及各文件删除提交的前一提交（`git show <commit>^:<path>`）。
+- generic-mock 覆盖清单/基线：`29c13e9:scripts/eval/generic-mock.ts`、`GENERIC_MOCK_NOTES.md`、`generic-mock-baseline.json`。
+
+### 13.8 复核修复轮证据（2026-11-13）
+
+- 悬空引用扫描（修复后）：`git grep -n GENERIC_MOCK_NOTES` 仅剩已注记的历史档案/登记处；`git grep -n "eval.agent.yaml"` 仅剩「已退役」说明、§十三 登记、测试自建临时文件名与 `resolve-config-path.ts` 的退役说明；旧五模块仅 `import-boundary.test.ts` 墓碑 5 行。
+- 门复跑（修复后）：`npx tsc --noEmit` exit 0；`npx vitest run --project unit` → 26 files / 221 tests passed；指定 6 文件（契约四行为+安全不变量）→ 50 passed；`node --test .github/codex/*.test.mjs` → 20 pass / 0 fail；`sh scripts/ci.sh` → `CI deterministic gates: PASS`。
+- 绊线复跑：对 `task-registry.ts`（内存实现）与 `task-registry-sqlite.ts` 重放「恢复无条件 completed」变异 → `11 failed | 10 passed`（与先红失败集一致）；备份还原后 `git diff` 两文件 0 差异、两文件 21 passed。
+- 夹具配置可用性：`materializeEvalConfig('config/agent.fixture.yaml', ...)` + `loadConfig` 加载成功（profiles=dummy，root 物化为绝对路径）——头注释修正未影响可加载性。
+- **第二轮（2026-11-13，复验 findings）**：`docs/architecture-laws.md` 新增文首「守卫引用清点」M4 banner（覆盖全文现时态守卫引用）并对被点名的 `:132`/`:142`/`:195`/`:320` 加行内 M4 注；`AGENTS.md:69` 的 architecture-laws 指针改为「律法与历史判据档案」；`scripts/resolve-config-path.test.ts` 测试字面量去对象化（`eval.agent.yaml`→`source-config.yaml`、`stock`→`fixture`、`stock-platform`→`dummy-platform`、`bin/stock`→`bin/dummy`、`/abs/stock-platform`→`/abs/some-platform`；断言语义不变）。全仓 24 名复扫分类见 `.runtime/m4/residual-scan.md`（312 行命中：非文档面零未注记现行时态指针，文档面全部为带注记历史文本或权威登记；`import-boundary` 墓碑与 `.zcode` 客户端工件按规则保留）。
+
+---
+
+## 十四、Eval 入口收口：真模型工作流改挂用户级入口、measure 机退役（2026-11-13，分支 arch/eval-r1）
 
 **背景与失效证据**（基线 `29c13e9` 上实跑复现）：
 
@@ -667,7 +759,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
-## 十四、R1 前置③：生产不可达旧协议与旧治理测试清理（2026-11-13，分支 arch/eval-r1）
+## 十五、R1 前置③：生产不可达旧协议与旧治理测试清理（2026-11-13，分支 arch/eval-r1）
 
 **背景**：R1 审计（四份审计结果与原型验证记录，本轮工作副本）发现 reset 后三类残留：① contracts 旧协议零消费（`a2a-protocol.ts` 全符号 0 命中；`runtime.ts`/`store.ts` 除 `DiscoveredTool`/`PrincipalScopeRecord` 外 0 命中）；② 旧 Phase2 治理模块 5 个 + generic-mock 评测群仅彼此可达（import-boundary 的 FORBIDDEN 自列，生产值闭包不含）；③ workflow/注释引用已删对象（`generic-model-eval.py`、`measure-summary.mjs`、`history-hygiene.test.ts`、`tests/e2e`）。
 
@@ -692,14 +784,14 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 **命令与净删（实跑）**：
 
 - `npx tsc --noEmit` → exit 0；`npx vitest run --project unit` → 26 文件 / 206 用例全绿；`npm run ci` → `CI deterministic gates: PASS`。
-- 真模型面回归：`npm run eval:user -- --trials 1`（12 用例全样本）跑通；结果按当时判定器记 8 PASS / 4 FAIL——其中 E01 的 FAIL 经复核为**判定器假阳性**（markdown 表格行号误判 + 陈述句误判提问，修复与重切见 §十五），重切后复判 9 PASS / 3 FAIL；E04/E05/E08 零执行类判负按冻结判据原样保留——证据在 `.runtime/eval-r1/post-cleanup/`。
+- 真模型面回归：`npm run eval:user -- --trials 1`（12 用例全样本）跑通；结果按当时判定器记 8 PASS / 4 FAIL——其中 E01 的 FAIL 经复核为**判定器假阳性**（markdown 表格行号误判 + 陈述句误判提问，修复与重切见 §十六），重切后复判 9 PASS / 3 FAIL；E04/E05/E08 零执行类判负按冻结判据原样保留——证据在 `.runtime/eval-r1/post-cleanup/`。
 - 净删：两个清理提交合计 **43 文件、+54 / −3538 行**（D4/D5/D7 提交 24 文件 +19/−2534；D1/D2/D2b/D3+注释提交 19 文件 +35/−1004）。
 
 **状态**：已实施（本分支，待开 PR）。
 
 ---
 
-## 十五、convergence-r1 用户级评测交付与判据冻结记录（2026-11-13，分支 arch/eval-r1）
+## 十六、convergence-r1 用户级评测交付与判据冻结记录（2026-11-13，分支 arch/eval-r1）
 
 **交付**：`scripts/eval/convergence-r1/`——12 用例（E01–E12，数据文件一例一个）+ 六维确定性判定器 + 证据 schema（每 case×trial 独立目录：inputs/model/toolcalls/transcripts/audit+index/executions/reply/meta/state/db/judgment）+ runner/judge/selftest/freeze/README；入口 `npm run eval:user`（生产同源装配：createSession + createDummyCliClient + 同一配置与任务底账；唯一插桩 = TurnDriver 记录包装器）；真模型面跑 `eval-real.yml`（1 轮）与 `eval-nightly.yml`（12×3）。
 

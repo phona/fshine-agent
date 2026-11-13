@@ -7,6 +7,11 @@
 > 运营模式：**按需 `workflow_dispatch` 手动触发，不挂每次 push**。
 > 测量对象：通用域 eval（`scripts/eval/generic-model-eval.py`，stock 夹具，mock 执行器）。
 > 汇总：`scripts/eval/measure-summary.mjs`。
+>
+> **2026-11-13 M4 注（已退役 harness）**：本文所述的 `generic-model-eval.py` /
+> `measure-summary.mjs` / stock 夹具与 `eval-measure` 工作流已全部退役
+> （[`decision-log.md`](decision-log.md) §十三）；本方法说明按历史档案阅读，不要按本文
+> 触发已删入口。
 
 ---
 

@@ -6,6 +6,8 @@
 > 读法：每一节都写清**生产者 / 消费者 / 缺失时 / 版本变化**四项。
 > 缺失时只允许两种处置：`fail-closed`（拒绝并留痕，绝不降级猜测）
 > 或节内明文写出的降级；未写明的，一律按 fail-closed 处理。
+>
+> **2026-11-13 M4 注（历史接口蓝图）**：文中引用的部分宿主机制与夹具（`proposal-review.ts`、`task-handover.ts`、generic-mock、stock 夹具等）已随 M4 死代码清扫退役（[`decision-log.md`](decision-log.md) §十三）；现行执行契约语义面见 `packages/contracts/src/execution-contract.ts`。下文按历史蓝图阅读。
 
 ## 0. 分层与命名归属
 

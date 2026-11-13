@@ -3,6 +3,8 @@
 > 本文件是本轮「架构硬约束化」唯一的技术债登记处。**只登记，不修复。**
 > 覆盖范围：fshine-agent 与 17dz-platform 双仓，2026-09-25 17:58 → 2026-09-27 13:35 的全部 commit（圈法见附录 A）。
 > 生成方式：逐条现场核实（跨仓、保留原文标点、可复现命令写在「位置」里）。凡未能核实的断言不进本台账。
+>
+> **2026-11-13 M4 注（历史台账）**：条目中引用的机制/文件按登记时点理解；凡已退役或删除者（含 M4 死代码清扫的旧 a2a 契约、Phase 2 宿主模块、generic-mock 评测簇、stock 夹具、三个 eval workflow 等），现行面以 [`decision-log.md`](decision-log.md) §十三为准（D-209 另附 2026-11-13 M4 指针校正）。
 
 ---
 
@@ -2301,9 +2303,10 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 - **存在理由**：宿主 spawn 网关的 argv 是固定的，探针没有附加参数通道把 per-case 状态根传进夹具；评测又必须让每个用例写到自己的状态根（否则夹具状态/审计跨例串）。壳入口把该值翻成夹具测试 flag `--state-dir`，夹具从该根派生状态与审计文件。
 - **根因（为什么还在）**：正确的退役通道是 a2a 信封携带 per-run 参数，那是跨仓协议，不在探针这一侧单方面删得掉。2026-11-10 之前它写在探针父进程的 `process.env` 上，两个用例并发会互盖指针，在途网关调用落到后写者的状态根；遥测归因还靠模块级缓冲区下标切片，并发同样错位。探针当时串行所以没触发，但是 latent 竞争，也是探针不能并行的根因。进程级全局槽本身不合理。
 - **现状（2026-11-10 子进程化之后；2026-11-13 M2 波次 1 补记）**：探针每个用例 fork 一个子进程，桥只在该子进程里写，父进程不改 `process.env`。探针侧的通道只剩一条：子进程 → 夹具 shell 入口。acceptance 仍在自己的进程里设置同一名字（跑批不与探针共槽）。**旧探针与 acceptance 已随旧评测/验收脚手架删除**；现行写方只剩 demo 与隔离测试（均经 `WORKER_FIXTURE_STATE_DIR_KEY` 常量引用，不写字面量）。串行保留：结构上已可并发，限流即信号，并发不在本条打开。
-- **状态更新（2026-11-13 R1 清理，不删旧文）**：本条「位置」「现状」「闭环判据」诸行所述文件与写方已不在树内——`packages/agent/src/child-env.ts`（键名唯一来源）、`packages/agent/bridge-key-closure.test.ts`（继任闭集守卫）、`packages/agent/platform-leak-lint.test.ts`（登记）、demo 与隔离测试、`scripts/eval/fixtures/stock-platform` 壳入口均随 reset（`66e7d23`）或 R1 清理（`arch/eval-r1`，decision-log §十四）删除；现行唯一壳入口 = `scripts/eval/fixtures/dummy-platform/bin/dummy`（仍把桥值翻成 `--state-dir`，但已无探针消费该桥；R1 用户级 eval 直接以 `--state-dir` 参数传 per-case 状态根）。闭集守卫**无继任**，缺口登记于 decision-log §十四；退役条件所引 `docs/a2a-protocol.md` 亦已删除——未来重议「信封携带 per-run 参数」时以 decision-log 的加回判据为准。
+- **状态更新（2026-11-13 R1 清理，不删旧文）**：本条「位置」「现状」「闭环判据」诸行所述文件与写方已不在树内——`packages/agent/src/child-env.ts`（键名唯一来源）、`packages/agent/bridge-key-closure.test.ts`（继任闭集守卫）、`packages/agent/platform-leak-lint.test.ts`（登记）、demo 与隔离测试、`scripts/eval/fixtures/stock-platform` 壳入口均随 reset（`66e7d23`）或 R1 清理（`arch/eval-r1`，decision-log §十四）删除；现行唯一壳入口 = `scripts/eval/fixtures/dummy-platform/bin/dummy`（仍把桥值翻成 `--state-dir`，但已无探针消费该桥；R1 用户级 eval 直接以 `--state-dir` 参数传 per-case 状态根）。闭集守卫**无继任**，缺口登记于 decision-log §十五；退役条件所引 `docs/a2a-protocol.md` 保留为带失效注记的历史蓝图（现行契约语义面见 `packages/contracts/src/execution-contract.ts`）——未来重议「信封携带 per-run 参数」时以 decision-log 的加回判据为准。
 - **退役条件**：a2a 信封携带 per-run 参数（跨仓，见 `docs/a2a-protocol.md`）落地后，本桥与四个 `EXECUTION_*` 状态注入一并删除；壳入口不再读该变量，leak-lint 登记项删除。（旧探针与 acceptance 不再写它的半句已随 2026-11-13 M2 波次 1 的脚手架删除满足。）
 - **律法归属**：L2（协议名 / 跨层通道的单一真相；本桥是过渡通道，不是第二份契约）+ D-016 的时间锚纪律（移除条件必须可执行，不许「稳定一个周期」这种没有日期的过渡）。
 - **闭环判据**：① 继任闭集守卫 `packages/agent/bridge-key-closure.test.ts`（2026-11-13 M2 波次 1 接替已随 `scripts/probe-real-agent.test.ts` 退役的原守卫）：被跟踪源码（packages/apps/scripts/tests）里桥字面量的引用闭集等于显式 allowlist（键名定义 `child-env.ts`、两个 shell 入口、leak-lint 登记、守卫自身），前缀与 `--state-dir` 翻写形状不变；往生产代码加一处引用 → 断言红（守卫内变异用例 + 实注入各验证过）。② 信封通道落地后，上述闭集清空（名字在 packages/apps/scripts 可执行面零命中），本条改已关。
 - **归属波次 / 限期**：**时间锚点 2027-02-10 复核，到期必须复核，不许无限期续期**。到期时 a2a 信封若仍未携带 per-run 参数，只允许把锚点改到新的具体日期并写明阻塞仍在跨仓，不允许改成「无期限」或删掉日期。本条不阻塞探针子进程化。
 - **状态**：待办（桥保留；竞争面已由 per-case 子进程拆掉。2026-11-10 登记；2026-11-13 M2 波次 1：旧探针/acceptance 桥引用随脚手架退役，闭集守卫换继任 `packages/agent/bridge-key-closure.test.ts`，字面量清理到键名定义 + 两个壳入口 + leak-lint 登记 + 守卫自身）。
+- **2026-11-13 M4 指针校正（改指针不改条目状态；来源：M4 复核 findings）**：本条「位置」与「闭环判据①」所引 `packages/agent/src/child-env.ts`、`packages/agent/bridge-key-closure.test.ts`、`packages/agent/platform-leak-lint.test.ts` 在当前树与 M4 基线（`29c13e9`）均不存在——三文件随 `0b97227`（Minimal Reset）删除，早于 M4 清扫；M4 删除清单不含任何安全不变量测试。当前树该键的字面量引用闭集只剩 2 个文件（`packages/agent/worker-env.test.ts:12` 的常量 + `scripts/eval/fixtures/dummy-platform/bin/dummy` 壳入口的读法），可跑的边界断言 = `worker-env.test.ts`「测试桥键不进白名单」（2026-11-13 实跑通过）。是恢复最小闭集守卫、还是把闭环判据①改为这条既有断言，属 owner 待裁定（M4 复核登记）。

@@ -1,7 +1,7 @@
 # fshine-agent「Eval 收敛 · 第一轮」交付报告（convergence-r1，arch/eval-r1）
 
 > 范围：用户级黑盒评测 convergence-r1 第一轮——固定语料 E01–E12 × 3 trial = **36 次真实模型运行**、逐失败归因、判定器缺陷修复与重切、同例复测。
-> 数据来源：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`（36 样本全量字段）、运行证据 `.runtime/eval-r1/runs/<case>/trial-<n>/`、修复登记 `docs/decision-log.md` §十五、独立复核与终核记录（本轮工作流材料）。证据路径均相对 eval 工作树根。
+> 数据来源：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`（36 样本全量字段）、运行证据 `.runtime/eval-r1/runs/<case>/trial-<n>/`、修复登记 `docs/decision-log.md` §十六、独立复核与终核记录（本轮工作流材料）。证据路径均相对 eval 工作树根。
 > 交付形态（M5）：① 固定语料与可复现运行入口；② 首轮 36 次原始运行索引；③ 逐失败证据与归因（层次分类）；④ 已实施最小修复及复测前后对照；⑤ 尚未达标能力清单（含宿主机制待批项）；⑥ 运行环境与口径限制。
 
 ## 摘要
@@ -221,14 +221,14 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 
 ## 4. 已实施的最小修复及复测前后对照
 
-修复范围仅限允许类「判定器自身缺陷」；**仅改 `judge.ts`**，`criteria.ts` 与 12 个用例文件逐字节未动；每次修复按同流程：修复 → `--judge-selftest` 8/8 + 全样本 `--judge-existing` 复判比对 → 重切冻结 → 同例真实模型复测 → 登记 `docs/decision-log.md` §十五。
+修复范围仅限允许类「判定器自身缺陷」；**仅改 `judge.ts`**，`criteria.ts` 与 12 个用例文件逐字节未动；每次修复按同流程：修复 → `--judge-selftest` 8/8 + 全样本 `--judge-existing` 复判比对 → 重切冻结 → 同例真实模型复测 → 登记 `docs/decision-log.md` §十六。
 
 ### 4.1 E04（提交 6c601d5；第三次冻结 2026-11-13T11:30:50Z，judge.ts=734bd234…）
 
 - 修复：① traceable 增补按名分组计数、分组和、同名组内差与不同名条数（覆盖 trial-1 的 1/2/1700 真值）；② `forbiddenQuestionTopics` 改短语式定位（话题名词须与疑问/请求标记组成短语，如「哪个窗口/请提供窗口」；疑问词条目须后接话题名词，如「哪一个窗口」），裸词「窗口」不再误伤 trial-2/3。语义边界登记：规则指「复问用户已提供的窗口/集合信息」，不含对数据一致性的追问。
 - 修复前对照：(a) 对 36 份批次存证 `npm run eval:user -- --judge-existing .runtime/eval-r1` → 36 份 0 mismatch 全复现（E04 t1/2/3 = FAIL[FAIL_FABRICATED_DATA] / FAIL[FAIL_NEEDLESS_CLARIFICATION] / FAIL[FAIL_NEEDLESS_CLARIFICATION]，与归因吻合）；(b) 真实模型复跑 1 次（`.runtime/eval-r1/e04-repro`）→ FAIL[NEEDLESS_CLARIFICATION, NO_DELEGATION, STATE_INCONSISTENCY, WRONG_OBJECT, ZERO_EXECUTION]（该轮先澄清、零委派，模型方差样本，原样留档）。
 - 修复后：(a) 36 份复判 → mismatch 仅 4 处：**E04 t1/2/3 FAIL→PASS**（新判定 PASS[]、弱告警空）+ E03-3 PASS→PASS（仅去掉一条可溯源弱告警）；其余 32 份逐字节复现；无判负放宽。(b) 同例复测 3 次（`.runtime/eval-r1/e04-after`）→ **3/3 PASS**：每轮 2 回合、每回合 ≥1 条结构化执行、taskIds 非空；回合时长 23.4/24.7s、52.8/24.0s、16.9/25.9s。
-- 回归：`npx tsc --noEmit` exit 0；`npx vitest run --project unit` 26 文件 / 206 用例全绿；`--judge-selftest` 8/8；`npm run eval:generic-mock` 不可跑（入口已随 §十四 D5 清理删除，实跑 exit 1、`npm error Missing script: "eval:generic-mock"`，按实报告、不用替代项冒充）；改动未触及 dummy 夹具或工具声明。
+- 回归：`npx tsc --noEmit` exit 0；`npx vitest run --project unit` 26 文件 / 206 用例全绿；`--judge-selftest` 8/8；`npm run eval:generic-mock` 不可跑（入口已随 §十五 D5 清理删除，实跑 exit 1、`npm error Missing script: "eval:generic-mock"`，按实报告、不用替代项冒充）；改动未触及 dummy 夹具或工具声明。
 
 ### 4.2 E06（提交 629da36；第四次冻结 11:42:22Z，judge.ts=eb7a0c19…）
 
@@ -292,7 +292,7 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 - 不可直核项（已登记为弱/推导）：E04 窗口级真相不可核（夹具两窗口返回同一 items，只核参数转发与无虚构）；E07 `WINDOW_NO_DATA`、E08 `COLLECTION_NOT_FOUND` 错误码由「not_found + 载荷」的夹具冻结语义推导；E05 候选名出现为词面判定（弱）；E06 澄清措辞形态为弱。
 - 离线复判写行为：`--judge-existing` 对「一致」者回写 judgment.json（仅 judgedAt 变），对「不一致」者写 `judgment.recheck.json`、不改原 judgment；复核据此在副本上复判以避免回写（原 36 份 judgment sha256 复核前后不变）。
 - 模型方差：复现轮与批次判负可不同相（E04/E06 复现与批次不同、E06 复现 PASS；E05 同为判负但形态不同；E08 复现 PASS）——均已原样留档，不以单次复现覆盖批次样本。
-- `npm run eval:generic-mock` 入口在本分支已随 §十四 D5 清理删除：实跑 exit 1、`npm error Missing script: "eval:generic-mock"`；该项按实报告，未以替代项冒充（基线分支仍含该脚本，不构成本轮替代绿）。
+- `npm run eval:generic-mock` 入口在本分支已随 §十五 D5 清理删除：实跑 exit 1、`npm error Missing script: "eval:generic-mock"`；该项按实报告，未以替代项冒充（基线分支仍含该脚本，不构成本轮替代绿）。
 - 顶层 `.runtime/eval-r1/manifest.json`/`summary.json`/`report.md` 在首轮期间被最后一次单 case 调用覆盖（E06 trial-3，11:07:32–36Z）；其后已由 `--judge-existing` 重生成 36 样本合并版（runId `judge-existing-eval-r1`）。批次口径以四份 `batch-EvalR1-*.json` 为准。
 - 已查明差异（非违规）：batch-B 自述 44239 bytes vs 实际 44343 bytes（内容与全部证据一致）；`recheck-e01/` 为预跑抽查、不在批次自述内。
 - 首轮判定使用运行前冻结判据（第二次冻结）；其后三次重切只动 judge.ts（criteria/用例逐字节未动）。本报告同时给出「首轮原始判定（26/10）」与「修复后离线复判（31/5）」两个口径，未混用。
@@ -308,5 +308,5 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 - 首轮运行代码点：081b46d（第二次冻结 10:49:28Z；与批次表 head 一致）。
 - 修复提交（fix + 重切 + 冻结）：6c601d5（E04，第三次冻结 734bd234…/11:30:50Z）、629da36（E06，第四次冻结 eb7a0c19…/11:42:22Z）、5398a4c（E07，第五次冻结 a6a5b293…/11:48:26Z，当前 lock）。
 - 复测/登记提交：bd019cb（E04 复测登记）、2834f62（E06）、ae67821（E07）。
-- 关键留档：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`；运行证据 `.runtime/eval-r1/runs/`；修复复测 `.runtime/eval-r1/{e04,e06,e07}-after/`；修复前复现 `.runtime/eval-r1/{e04,e05,e06,e07,e08}-repro/`；判定器自测 `.runtime/eval-r1/judge-selftest/`；修复登记 `docs/decision-log.md` §十五。
+- 关键留档：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`；运行证据 `.runtime/eval-r1/runs/`；修复复测 `.runtime/eval-r1/{e04,e06,e07}-after/`；修复前复现 `.runtime/eval-r1/{e04,e05,e06,e07,e08}-repro/`；判定器自测 `.runtime/eval-r1/judge-selftest/`；修复登记 `docs/decision-log.md` §十六。
 - 本报告：`scripts/eval/convergence-r1/report-round1.md`（随 arch/eval-r1 提交；副本发布至 `.runtime/eval-r1/report-round1.md`，不提交）。

@@ -8,7 +8,7 @@
  *   · 能力快照 = 执行层 `operation list --json` 的投影（一次取回，进程内复用）；
  *   · 结构化请求 = `call --file <json>`（CLI 只认带前缀的参数键：适配器按执行层声明
  *     把裸参数名规范化成声明里的形态，其余原样透传，由执行层校验并拒绝）；
- *   · 结果 = stdout 末行 RESULT 信封 → ExecutionOutcome 五态；
+ *   · 结果 = stdout 末行 RESULT 信封 → ExecutionOutcome 四态；
  *     非零退出且无信封 = 执行层拒绝或失败，按退出码与 stderr 机械分流，不嗅探文案。
  *
  * 读路径切片的作用域不在这里：本适配器按契约忠实执行被请求的 operation；
@@ -25,7 +25,6 @@ import path from 'node:path';
 import {
   EXECUTION_CONTRACT_VERSION,
   type CapabilityManifest,
-  type CancelResult,
   type ExecutionArgDeclaration,
   type ExecutionClient,
   type ExecutionFailure,
@@ -172,10 +171,6 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       } finally {
         rmSync(scratch, { recursive: true, force: true });
       }
-    },
-    async cancel(): Promise<CancelResult> {
-      // 读路径不产生可取消操作：形状面如实返回 not_found（不实现取消面）。
-      return 'not_found';
     },
   };
 }
