@@ -13,11 +13,10 @@
 #   由 config/agent.example.yaml 的 deploy 配置承载，不扩散到这里。
 #
 # root 为什么是仓内相对路径：loadConfig 强制 root 绝对
-# （packages/core/src/config.ts:125），但提交绝对路径会把开发者主目录写进仓库
-# （exposure-lint / history-hygiene 守卫拦）、依赖环境变量又让 CI / fresh clone
-# 加载不了。解法 = 提交相对路径，加载前由 resolve-config-path.ts 的
-# materializeEvalConfig 相对仓根解析成绝对路径、物化到 .runtime/eval-agent-config.yaml
-# （patch 模式与已退役的旧 e2e harness patchProfile 同款）。
+# （packages/core/src/config.ts），但提交绝对路径会把开发者主目录写进仓库、
+# 依赖环境变量又让 CI / fresh clone 加载不了。解法 = 提交相对路径，加载前由
+# resolve-config-path.ts 的 materializeEvalConfig 相对仓根解析成绝对路径、物化到
+# .runtime/eval-agent-config.yaml（patch 模式与已退役的旧 e2e harness patchProfile 同款）。
 #
 # 域边界：dummy 是仓内通用域夹具（collection / window / record 词汇 + ballot.* 第二
 # 写域），仓内评测与试用的语料同域——不依赖任何外部仓（旧 probe / acceptance 语料已随

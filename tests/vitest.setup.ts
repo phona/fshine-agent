@@ -6,7 +6,7 @@
  * EXECUTION_EXECUTOR、FSHINE_REAL_COMMIT（联调用）。裸 npm test（vitest run）不加载 .env，却
  * 继承 shell 环境，于是"测试结果"依赖运行者当时 export 了什么——真实端点可能被意外命中、
  * 真提交开关可能被悄悄打开、mock 执行器可能被切成真执行器。这里在 setupFiles 阶段统一
- * unset，测试若需要这些变量（如 e2e harness）在自己的 beforeAll 里显式设置，覆盖本条。
+ * unset，测试若需要这些变量在自己的 beforeAll 里显式设置，覆盖本条。
  *
  * 时序保证：vitest 的 setupFiles 在每个测试文件之前运行，早于该文件的 beforeAll——
  * 所以这里 unset 的是"环境泄漏"，harness 随后设的值不受影响。

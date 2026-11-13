@@ -15,7 +15,7 @@
  * 要用 aeskey 解密下载，web/小程序客户端大概会把文件放在对象存储里：那时也是 adapter
  * 先下载到同一个附件目录，契约一个字不用改。反过来，谁若让 worker 直接读签名 URL，
  * 裂开的是这条契约（宿主的实体门按"路径在本轮请求文本里"执法，URL 不在那个面上），
- * 而且文件会在签名过期后静默失效。locality 由 e2e AT-1 钉住。
+ * 而且文件会在签名过期后静默失效。locality 由附件落盘契约与渠道回归（假渠道 stub）钉住。
  */
 export interface IncomingAttachment {
   /** 落盘后的文件名（已 basename 化，不含路径分隔符） */

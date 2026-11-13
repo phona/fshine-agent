@@ -8,7 +8,6 @@
 
 - `docs/v0-architecture.md`——架构总览与分层判据
 - `docs/v0-functional-spec.md`——功能规格与能力表
-- `docs/a2a-protocol.md`——结构化调用协议蓝图（参与方、六阶段、失败分类、声明原则）
 
 ## ② 协议与准入
 

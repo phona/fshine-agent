@@ -15,8 +15,8 @@
 # Minimal Reset（0b97227）删除不再恢复；当前真实模型面 = 用户级黑盒入口
 # `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（12×3），
 # 不进这些确定性门。
-# e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
-# CI scope is unchanged by that inventory: no finance e2e is added back here.
+# 旧 e2e ownership 台账（tests/e2e 已随 Minimal Reset 删除）：docs/e2e-ownership.md
+# 只作历史参考；这里不再有 e2e 门。
 # CI runs only the deterministic gates; consistency between this repo's generic
 # budget-protocol defaults and any execution layer's own policy is owned by the
 # execution layer's repository, not by this single-repo CI (the check moved there

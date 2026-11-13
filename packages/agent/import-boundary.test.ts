@@ -34,7 +34,9 @@ const RUNTIME = 'packages/agent/src/execution-runtime.ts';
 const ADAPTER = 'packages/agent/src/dummy-cli-client.ts';
 const ENTRY_SCRIPT = 'scripts/ask.ts';
 
-/** 旧 Runtime 治理模块清单（运行时路径不得以值边触及）。 */
+/** 旧 Runtime 治理模块清单（运行时路径不得以值边触及）。
+ *  注意：名单收录历史模块名（含已随 Minimal Reset 删除的文件）作为退役登记——
+ *  删除后值闭包自然不触及；新增装配不得以值边触及仍在的名目。 */
 const FORBIDDEN = new Set([
   'packages/agent/src/runtime.ts',
   'packages/agent/src/plan-runtime.ts',
@@ -90,7 +92,6 @@ const FORBIDDEN = new Set([
 const ALIASES: Record<string, string> = {
   '@fshine/contracts/execution-contract': 'packages/contracts/src/execution-contract.ts',
   '@fshine/contracts': 'packages/contracts/src/index.ts',
-  '@fshine/agent': 'packages/agent/src/index.ts',
   '@fshine/core': 'packages/core/src/index.ts',
 };
 

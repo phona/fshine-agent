@@ -7,10 +7,9 @@
  * / 脚本硬编码缺省路径」两条路分流的 wart。
  *
  * eval 回退配置的 root 是仓内相对路径——加载前由本 helper patch 成绝对路径并物化到
- * .runtime 副本（loadConfig 强制 root 绝对，packages/core/src/config.ts:125；
- * patch 模式与旧 e2e harness 的 patchProfile 同源，harness 随 M2 波次 1（2026-11-13）删除）。提交进仓的
- * YAML 因此不含开发者主目录（exposure-lint / history-hygiene 守卫拦绝对路径）、
- * 不依赖任何环境变量（CI / fresh clone 零配置可加载）。
+ * .runtime 副本（loadConfig 强制 root 绝对，packages/core/src/config.ts；
+ * patch 模式与已退役的旧 e2e harness patchProfile 同源）。提交进仓的
+ * YAML 因此不含开发者主目录、不依赖任何环境变量（CI / fresh clone 零配置可加载）。
  */
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
