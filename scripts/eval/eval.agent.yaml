@@ -38,8 +38,8 @@ principals:
     accountSetScope: all
     enabled: true
     # 写链路所需权限：parseCapabilities 缺省 ['read']，不显式声明则提案/确认/提交
-    # 用例不可达（packages/core/src/config.ts）。stock 夹具对写操作确定性拒绝
-    # （dry-run 即被 fixture 挡回），授权 write 不触达任何真实执行层。
+    # 用例不可达（packages/core/src/config.ts）。仓内 dummy 夹具不开放写面（只读允许
+    # 集合由装配方从执行层自述派生、发起前拒收），授权 write 不触达任何真实执行层。
     capabilities: ["read", "validate", "write"]
 
 # ---- 通用 Worker 的受信上下文（eval 用 dummy 夹具） ----
@@ -49,8 +49,7 @@ contextProfiles:
     root: scripts/eval/fixtures/dummy-platform
     # 相对 root 的网关调用形式（host spawn 用它，不硬编码全路径）。
     gateway: bin/dummy
-    # 运行态技能面：dummy 夹具的技能面在 .agents/skills-serve 下（与 stock 夹具的
-    # root 下直挂不同——fixture 各自的结构以实际目录为准）。
+    # 运行态技能面：dummy 夹具的技能面在 .agents/skills-serve 下（结构以夹具实际目录为准）。
     skillRoots: [".agents/skills-serve"]
     # Worker 单次任务预算（可选，默认 10 分钟）。调用方以脚本超时为准，
     # 这里留默认值即可；如需调参，在脚本侧通过 --config / AGENT_CONFIG_PATH 指向

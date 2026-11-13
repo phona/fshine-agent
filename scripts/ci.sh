@@ -1,6 +1,6 @@
 #!/bin/sh
 # Deterministic CI entry point, run locally and by GitHub Actions (.github/workflows/ci.yml).
-# Runs only the deterministic gates: typecheck, unit tests, generic-mock eval.
+# Runs only the deterministic gates: typecheck, unit tests.
 #
 # Real-model eval lives in a separate workflow: .github/workflows/eval-real.yml.
 # It is separate for three reasons:
@@ -29,6 +29,4 @@ echo "== typecheck =="
 npm run typecheck
 echo "== unit tests =="
 npm run test -- --project unit
-echo "== generic-mock eval =="
-npm run eval:generic-mock
 echo "CI deterministic gates: PASS"

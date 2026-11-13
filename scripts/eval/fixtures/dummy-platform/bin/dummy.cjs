@@ -41,7 +41,7 @@
  * (DUMMY_* only as a debug fallback). It does NOT read LLM keys, WeCom
  * secrets or any other host secret.
  *
- * Deliberately NOT implemented in v1 (see GENERIC_MOCK_NOTES.md):
+ * Deliberately NOT implemented in v1:
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
  * rate-limit token bucket, browser/platform execution. Those are
  * execution-layer-instance specifics, not protocol. The eval script tests what is implemented and
