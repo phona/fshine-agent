@@ -16,6 +16,12 @@ import { defineConfig } from 'vitest/config';
  *      展开后会装两遍守卫（幂等，但日志会重复）。
  */
 const ALIAS = [
+  // Execution Contract 的子路径入口：与 @fshine/contracts barrel 分开，避免与旧 a2a 契约的
+  // 同名类型（CapabilityManifest）在桶导出处冲突（旧 a2a 文件本体保持不动）。
+  {
+    find: '@fshine/contracts/execution-contract',
+    replacement: fileURLToPath(new URL('./packages/contracts/src/execution-contract.ts', import.meta.url)),
+  },
   {
     find: /^@fshine\/([\w-]+)$/,
     replacement: fileURLToPath(new URL('./packages', import.meta.url)) + '/$1/src/index.ts',
