@@ -26,8 +26,16 @@ export interface SqliteTaskRegistry extends TaskRegistry {
   close(): void;
 }
 
-export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
-  const store = openTaskStore(dbPath);
+/** 打开选项（P1 任务查看）：readOnly 只读打开既有库；写方法调用由 SQLite 拒绝。 */
+export interface SqliteTaskRegistryOptions {
+  readOnly?: boolean;
+}
+
+export function createSqliteTaskRegistry(
+  dbPath: string,
+  options: SqliteTaskRegistryOptions = {},
+): SqliteTaskRegistry {
+  const store = openTaskStore(dbPath, { readOnly: options.readOnly === true });
 
   function toRecord(stored: StoredTask): TaskRecord {
     return {

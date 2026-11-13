@@ -852,6 +852,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **核查结论**：`task.status` 当前**没有用户可见消费面**——`npm run ask` 机械证据只逐条打印 `execution.status`（不打印 task.status）；`apps/server/server.ts` 只记录逐执行状态；M5 判定器（`scripts/eval/convergence-r1/judge.ts`）用执行行（T1 executions 与 `executions.some(failed||refused)`）判「④任务状态一致性」，不读 task.status。
 - **决定**：**本轮不修改语义**（不为无消费者的字段新增宿主行为）。当前口径——首个非 completed 判负（`[failed, completed]` 记 failed）、`needs_input` 并入 failed——以表征测试钉住：`packages/agent/task-status-boundary.test.ts`。
 - **复评触发条件**（出现任一）：ask 打印任务状态 / 状态查询切片 / 后台投递 / 判定器改用 task.status。届时先按用户可见性裁定，再改语义并同步更新该测试与本条。
+- **复评登记（2026-11-14，P1 任务查看切片）**：触发条件之一「状态查询切片」已达成——`npm run tasks` 列表/详情成为 `task.status` 的首个用户可见消费面。**裁定：保持既有语义**（P1 owner 规格：completed/failed/unexecuted 复用 `judgeReportedTask`，不新造状态）。实现口径：查看侧只读消费注册表写入时已判定的终态并把三态映射为中文词（已完成/失败/未执行），**不在读时重算**（fail() 路径零执行与 running 行会被重算错报）；表征测试 `packages/agent/task-status-boundary.test.ts` 断言零改动。
 
 ### 17.3 Execution Contract 残余：CLI flag 名称泄漏
 
