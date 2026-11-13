@@ -1,6 +1,7 @@
 /**
- * 出向密封（测试环境双向密封的一半）：抹掉运行者环境里泄漏进来的 LLM_、EXECUTION_、FSHINE_
- * 前缀变量，让每个测试文件都从同一条干净基线起步——治本，不再依赖运行者手工 env -u。
+ * 出向密封（测试环境双向密封的一半）：抹掉运行者环境里泄漏进来的 LLM_、FSHINE_
+ * 前缀变量（清单逐键登记），让每个测试文件都从同一条干净基线起步——治本，不再依赖
+ * 运行者手工 env -u。
  *
  * 为什么需要：开发机/CI 的 shell 常 export 了真实的 LLM_API_BASE_URL、LLM_API_KEY、
  * EXECUTION_EXECUTOR、FSHINE_REAL_COMMIT（联调用）。裸 npm test（vitest run）不加载 .env，却
@@ -13,7 +14,10 @@
  *
  * 2026-11-08 注：`EXECUTION_EXECUTOR` / `FSHINE_REAL_COMMIT` 已从本清单删除——宿主侧不再
  * 读这两个变量（架构裁定：写能不能真落地归执行层），它们不再能改变任何测试基线。清单仍
- * 保留 `EXECUTION_*` / `FSHINE_*` 里其余确实被宿主/脚本读取的键。
+ * 保留 LLM_* / FSHINE_* 里其余确实被宿主/脚本读取的键。
+ * 2026-11-13 M4：`FSHINE_WORKER_STEP_CAP`（步数帽机制随 Phase 2 模块退役）与 stock 夹具
+ * 辅助组六键（EXECUTION_/STOCK_ 的 MEMORY/BREAKER/CACHE 状态路径；读者 stock.cjs 与
+ * fixture-aux-state.ts 已退役）一并删除——没有读者后，泄漏值不再能改变任何测试基线。
  */
 const LEAKED_ENV_KEYS: readonly string[] = [
   'LLM_API_BASE_URL',
@@ -27,19 +31,6 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // New deployment switches must not change the default inline/queue baseline of mock tests.
   'FSHINE_WORKER_DISPATCH_MODE',
   'FSHINE_PLATFORM_QUEUE_CAPACITY',
-  // 步数帽（自由 worker 的放行次数帽，缺省 50）同理：运行者 shell 里 export 了它，
-  // 没显式传 stepCap 的 driver 测试基线就被悄悄改小（第 N 次放行就 wind-down）。
-  'FSHINE_WORKER_STEP_CAP',
-  // stock 夹具辅助组（memory / breaker / cache）的 ambient 名（规范族 + STOCK_* 调试专名）：
-  // stock.cjs 的 auxPaths() 用 env2 优先读 ambient，继承 shell 值会盖过 --state-dir 的
-  // per-case 派生（打开态熔断账本 → BREAKER_OPEN；memory/cache 写到状态根外）。
-  // 直接运行的 harness 侧清场见 scripts/eval/fixture-aux-state.ts。
-  'EXECUTION_MEMORY_STATE',
-  'EXECUTION_BREAKER_STATE',
-  'EXECUTION_CACHE_STATE',
-  'STOCK_MEMORY_STATE',
-  'STOCK_BREAKER_STATE',
-  'STOCK_CACHE_STATE',
 ];
 
 for (const key of LEAKED_ENV_KEYS) {
