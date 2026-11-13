@@ -399,7 +399,7 @@ describe('[L4 集成] 离线全链 e2e：plan --schema 元数据自救通道（C
       const verdict = await bashCall(worker, 'call_unknown_flag', `${GATEWAY} plan --stdin`);
       expect(verdict?.block).toBe(true);
       // 话术唯一来源 error-codes.ts（C2 起教两种形态：inline 裸 JSON + --file）
-      expect(verdict?.reason).toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING'));
+      expect(verdict?.reason).toBe(messageTextFor('PLAN_SHAPE_GATE_TEACHING', undefined, GATEWAY));
       expect(verdict?.reason).toContain('--file');
     } finally {
       worker.session.dispose();
