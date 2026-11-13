@@ -1,19 +1,22 @@
 /**
- * tasks：本地只读查看任务底账——最近任务列表与单任务详情。
+ * tasks：本地只读查看任务底账——最近任务列表、单任务详情与任务交付件导出。
  *
  * 用法：
  *   npm run tasks                    # 最近任务列表（时间/状态/摘要/id，最多 20 条）
  *   npm run tasks -- <taskId>        # 单任务详情（状态/原因/执行步骤/任务结果）
+ *   npm run tasks -- <taskId> --out <path>   # 导出任务交付件（Markdown；拒绝覆盖既有文件）
  *   （--config=<path> / AGENT_CONFIG_PATH 与 ask 同义；缺省读 <仓根>/.runtime/state.db）
  *
- * 边界（P1 任务查看切片）：
- *   · 只读：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建），命令零磁盘写；
+ * 边界（P1 任务查看 + P2 结果交付切片）：
+ *   · 只读：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建）；导出只把交付件写到
+ *     用户指定的那一个文件，不写库、不建目录；
  *   · 状态与原因不做二次判定——直接消费任务注册表里由 judgeReportedTask 写入的终态
  *     （completed/failed/unexecuted）与 failureReason；本文件只做中文词表映射，
  *     「读时重算」会把 fail() 路径（零执行 + failed）与 running 行错报，故不重算；
+ *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
  *   · 不联网、不加载模型、不 spawn 执行层。
  */
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
@@ -31,27 +34,54 @@ const DEFAULT_DB_PATH = path.join(REPO_ROOT, '.runtime', 'state.db');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
 
-const USAGE = '用法：npm run tasks [-- <taskId>] [--config=<path>]\n'
-  + '  不带参数：最近任务列表；带 taskId：该任务详情。';
+const USAGE = '用法：npm run tasks [-- <taskId>] [--out <path>] [--config=<path>]\n'
+  + '  不带参数：最近任务列表；带 taskId：该任务详情；带 taskId 与 --out：导出任务交付件（Markdown）。';
 
 export const EMPTY_TASKS_MESSAGE = '还没有任务记录。用 npm run ask -- "…" 交办一项任务后，这里会列出最近的任务。';
 
 export interface TaskCliArgs {
   taskId?: string;
+  outPath?: string;
 }
 
-/** 参数：可选且仅一个位置参数（taskId）；--config= 由 explicitConfigFrom 统一解析。 */
+/** 参数：可选且仅一个位置参数（taskId）；--out / --out= 给出导出路径；--config= 由 explicitConfigFrom 统一解析。 */
 export function parseTaskArgs(argv: readonly string[]): TaskCliArgs | { usageError: string } {
   let taskId: string | undefined;
-  for (const arg of argv) {
+  let outPath: string | undefined;
+  for (let index = 0; index < argv.length; index += 1) {
+    const arg = argv[index]!;
     if (arg.startsWith('--config=')) continue;
+    if (arg.startsWith('--out=')) {
+      if (outPath !== undefined) return { usageError: '最多接受一个 --out。' };
+      const value = arg.slice('--out='.length).trim();
+      if (value === '') return { usageError: '--out 缺少文件路径。' };
+      outPath = value;
+      continue;
+    }
+    if (arg === '--out') {
+      if (outPath !== undefined) return { usageError: '最多接受一个 --out。' };
+      const next = argv[index + 1];
+      // 值为空或以 -- 开头视为缺值（路径以 -- 开头请用 --out=<path> 形态）。
+      if (next === undefined || next.trim() === '' || next.startsWith('--')) {
+        return { usageError: '--out 缺少文件路径。' };
+      }
+      outPath = next.trim();
+      index += 1;
+      continue;
+    }
     if (arg.startsWith('--')) return { usageError: `未知参数：${arg}` };
     const value = arg.trim();
     if (value === '') return { usageError: 'taskId 不能为空。' };
     if (taskId !== undefined) return { usageError: '最多接受一个 taskId。' };
     taskId = value;
   }
-  return taskId === undefined ? {} : { taskId };
+  if (outPath !== undefined && taskId === undefined) {
+    return { usageError: '--out 需要与 taskId 一起使用（导出单个任务的交付件）。' };
+  }
+  return {
+    ...(taskId === undefined ? {} : { taskId }),
+    ...(outPath === undefined ? {} : { outPath }),
+  };
 }
 
 /**
@@ -152,17 +182,33 @@ function executionErrorText(error: unknown): string | undefined {
   return typeof message === 'string' && message !== '' ? message : undefined;
 }
 
-export function renderTaskDetail(task: TaskRecord): string {
-  const lines = [
-    `任务 ${task.taskId}`,
-    `状态：${taskStatusWord(task.status)}`,
-    `创建：${formatLocalTime(task.createdAt)}  更新：${formatLocalTime(task.updatedAt)}`,
-    `交办：${task.request}`,
-  ];
-  if (task.failureReason !== undefined) {
-    lines.push('', `${task.status === 'unexecuted' ? '未执行原因' : '失败原因'}：${task.failureReason}`);
-  }
-  lines.push('', '执行步骤：');
+/** —— 字段行构建函数：详情与交付件共用同一来源（唯一渲染口径，不另起第二套）。 —— */
+
+export function taskIdentityLine(task: TaskRecord): string {
+  return `任务 ${task.taskId}`;
+}
+
+export function taskStatusLine(task: TaskRecord): string {
+  return `状态：${taskStatusWord(task.status)}`;
+}
+
+export function taskTimeline(task: TaskRecord): string {
+  return `创建：${formatLocalTime(task.createdAt)}  更新：${formatLocalTime(task.updatedAt)}`;
+}
+
+export function taskRequestLine(task: TaskRecord): string {
+  return `交办：${task.request}`;
+}
+
+/** 失败/未执行原因行（标签按终态选词；无原因返回 undefined）——原样消费底账，不重判。 */
+export function taskReasonLine(task: TaskRecord): string | undefined {
+  if (task.failureReason === undefined) return undefined;
+  return `${task.status === 'unexecuted' ? '未执行原因' : '失败原因'}：${task.failureReason}`;
+}
+
+/** 执行步骤段（含「执行步骤：」标题行；零执行给机械提示）。 */
+export function taskExecutionLines(task: TaskRecord): string[] {
+  const lines = ['执行步骤：'];
   if (task.executions.length === 0) {
     lines.push('  （无：本次任务未向执行层发起任何调用）');
   } else {
@@ -172,9 +218,56 @@ export function renderTaskDetail(task: TaskRecord): string {
         + (message === undefined ? '' : `  ${message}`));
     });
   }
-  lines.push('', '任务结果：');
-  lines.push(task.resultText !== undefined && task.resultText.trim() !== '' ? task.resultText : '（无）');
+  return lines;
+}
+
+/** 任务结果段（含「任务结果：」标题行；缺失/空白文本给「（无）」）。 */
+export function taskResultLines(task: TaskRecord): string[] {
+  return ['任务结果：', task.resultText !== undefined && task.resultText.trim() !== '' ? task.resultText : '（无）'];
+}
+
+/** 单任务详情（P1 输出逐字节不变）：消费上面的同一组字段行。 */
+export function renderTaskDetail(task: TaskRecord): string {
+  const lines = [taskIdentityLine(task), taskStatusLine(task), taskTimeline(task), taskRequestLine(task)];
+  const reason = taskReasonLine(task);
+  if (reason !== undefined) lines.push('', reason);
+  lines.push('', ...taskExecutionLines(task));
+  lines.push('', ...taskResultLines(task));
   return lines.join('\n');
+}
+
+/** 交付件固定限制与说明（如实标注；Main 最终回复当前不落库属 owner 待裁项，登记不实施）。 */
+const DELIVERABLE_LIMITS = [
+  '- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。',
+  '- 「任务结果」是任务底账持久化的执行层汇报原文；Main 的最终回复当前不落库，本交付件不含 Main 最终回复。',
+  '- 状态与失败原因来自任务收尾时的机械判定（judgeReportedTask）；导出只读不重算。',
+  '- 执行步骤无时间戳（底账 schema 冻结）；时间以本机时区显示。',
+];
+
+const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（当前状态「进行中」）：交付件反映导出时的底账状态。';
+
+/**
+ * 任务交付件（Markdown）：标题 + 任务信息/状态/执行步骤/任务结果/限制与说明。
+ * 纯函数、无时钟依赖；段内字段行全部来自上面的共享构建函数——详情每一行都逐字在此出现。
+ * 不含详情末行的运行时底账提示；末尾恰好一个换行；字段行不做 Markdown 转义（保真优先）。
+ */
+export function renderTaskDeliverable(task: TaskRecord): string {
+  const lines = [
+    `# 任务交付件：${task.taskId}（${taskStatusWord(task.status)}）`,
+    '', '## 任务信息', '',
+    taskIdentityLine(task),
+    taskTimeline(task),
+    taskRequestLine(task),
+    '', '## 状态', '',
+    taskStatusLine(task),
+  ];
+  const reason = taskReasonLine(task);
+  if (reason !== undefined) lines.push(reason);
+  lines.push('', '## 执行步骤', '', ...taskExecutionLines(task));
+  lines.push('', '## 任务结果', '', ...taskResultLines(task));
+  lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
+  if (task.status === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
+  return `${lines.join('\n')}\n`;
 }
 
 function displayDbPath(dbPath: string): string {
@@ -185,6 +278,54 @@ function displayDbPath(dbPath: string): string {
 /** 输出末行：读的是哪个库（只读）。 */
 export function renderTaskLedgerLine(dbPath: string): string {
   return `任务底账：${displayDbPath(dbPath)}（只读）`;
+}
+
+/**
+ * --out 路径解析：绝对路径原样；相对路径以「调用点目录」为基准——
+ * npm 生命周期会把敲命令的目录注入 INIT_CWD（此时 process.cwd() 是包根），
+ * 非空则用之；直接 node 调用没有该变量时回落进程 cwd。
+ */
+export function resolveOutPath(outPath: string, input: { env: NodeJS.ProcessEnv; cwd: string }): string {
+  const initCwd = (input.env['INIT_CWD'] ?? '').trim();
+  return path.resolve(initCwd === '' ? input.cwd : initCwd, outPath);
+}
+
+export type DeliverableWriteResult =
+  | { ok: true }
+  | { ok: false; exitCode: 2 | 1; message: string };
+
+/**
+ * 写出交付件：不建目录、不覆盖——
+ *   · 目标已存在（文件/目录/符号链接）→ 拒绝覆盖 exit 2；
+ *   · 父目录缺失 → 拒绝（不自动创建）exit 2；父路径非目录 → exit 2；
+ *   · 实际写出用 flag: 'wx'（原子独占创建）兜底竞态，EEXIST/ENOENT/ENOTDIR 映射同一提示；
+ *   · 其余写出失败（权限/磁盘等）→ exit 1。
+ */
+export function writeDeliverable(input: { filePath: string; text: string }): DeliverableWriteResult {
+  const { filePath, text } = input;
+  if (existsSync(filePath)) {
+    return { ok: false, exitCode: 2, message: `输出文件已存在：${filePath}（拒绝覆盖；请换一个路径，或先移走原文件）。` };
+  }
+  const dir = path.dirname(filePath);
+  if (!existsSync(dir)) {
+    return { ok: false, exitCode: 2, message: `输出目录不存在：${dir}（不会自动创建；请先创建目录或换路径）。` };
+  }
+  try {
+    writeFileSync(filePath, text, { encoding: 'utf8', flag: 'wx' });
+    return { ok: true };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST') {
+      return { ok: false, exitCode: 2, message: `输出文件已存在：${filePath}（拒绝覆盖；请换一个路径，或先移走原文件）。` };
+    }
+    if (code === 'ENOENT') {
+      return { ok: false, exitCode: 2, message: `输出目录不存在：${dir}（不会自动创建；请先创建目录或换路径）。` };
+    }
+    if (code === 'ENOTDIR') {
+      return { ok: false, exitCode: 2, message: `输出路径无效：${dir} 不是目录。` };
+    }
+    return { ok: false, exitCode: 1, message: `无法写入输出文件：${filePath}（${error instanceof Error ? error.message : String(error)}）。` };
+  }
 }
 
 async function main(): Promise<void> {
@@ -229,7 +370,19 @@ async function main(): Promise<void> {
       process.exitCode = 2;
       return;
     }
-    console.log(`${renderTaskDetail(task)}\n${renderTaskLedgerLine(dbPath)}`);
+    if (parsed.outPath === undefined) {
+      console.log(`${renderTaskDetail(task)}\n${renderTaskLedgerLine(dbPath)}`);
+      return;
+    }
+    // 导出：先渲染（纯内存），再独占写出用户指定的那一个文件；底账只读，不写库、不建目录。
+    const filePath = resolveOutPath(parsed.outPath, { env: process.env, cwd: process.cwd() });
+    const written = writeDeliverable({ filePath, text: renderTaskDeliverable(task) });
+    if (!written.ok) {
+      console.error(written.message);
+      process.exitCode = written.exitCode;
+      return;
+    }
+    console.log(`已导出任务交付件：${filePath}\n${renderTaskLedgerLine(dbPath)}`);
   } catch (error) {
     console.error(`任务底账不可读：${displayDbPath(dbPath)}（${error instanceof Error ? error.message : String(error)}）`);
     process.exitCode = 1;
