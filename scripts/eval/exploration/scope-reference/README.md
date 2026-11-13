@@ -47,3 +47,9 @@ fail-closed）。冻结后 cases 不得再改；要改先重切并保留旧 run 
 
 逐条的允许/禁止/预期执行事实与判定面字段见 `cases/M*.ts` 的注释与 `weakNotes`/`judgeNotes`。
 纪律：全样本保留、不筛绿；失败原样登记；k/N 均附 Wilson 95% CI。
+
+## 基线采样（2026-11-13，帧 step-3.7-flash）
+
+63 run（M01–M07 × 9）= 54 PASS / 9 FAIL；M01 命中预注册扩展规则（CI 跨 0.5）一次性扩到
+N=15（+6 run，原 9 保留）→ 5/15；实验门槛未达（唯一 ≥4/9 单元 M01 的失败主因属待裁定口径）。
+详见 `report-b2-baseline.md`（证据在 `.runtime/exploration-b2/`，gitignored）。
