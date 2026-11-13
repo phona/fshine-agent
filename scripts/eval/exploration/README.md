@@ -3,6 +3,8 @@
 本目录承载 **探索套件**：不进入 R1 冻结集（`scripts/eval/convergence-r1/` 的
 criteria / cases / judge / criteria.lock 零改动），只复用其 harness 能力。
 
+批次报告：`report-r3-exploration.md`（覆盖缺口 / 用例全册 / 基线证据 / Golden 候选提议 / 下一批建议）。
+
 ## 是什么 / 不是什么
 
 - **是**：E05 相邻边界的开发用例（purpose=exploration），跑生产同源装配 + 仓内 dummy 夹具 +
