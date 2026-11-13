@@ -24,7 +24,7 @@
 import { randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, TurnDriver } from '../driver';
+import type { DriverMessage, TurnDriver } from '../driver-contract';
 import { createTaskRegistry, type MinimalExecutionRecord, type MinimalTaskRecord } from './task-registry';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；M1 用中性名）。 */

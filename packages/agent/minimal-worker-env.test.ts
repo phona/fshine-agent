@@ -3,8 +3,13 @@
  * 最小白名单（PATH / HOME / TMPDIR）——不机械继承旧 WORKER_ENV_ALLOWED_KEYS。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { WORKER_FIXTURE_STATE_DIR_KEY } from './src/child-env';
 import { MINIMAL_EXECUTION_ENV_KEYS, workerSubprocessEnv } from './src/minimal/worker-env';
+
+/**
+ * 测试桥键名：随旧 child-env.ts（V0 worker env 白名单）删除后内联。
+ * 语义不变——它是宿主夹具使用的 env 键，M1 用显式 --state-dir argv，不靠 env 改道。
+ */
+const WORKER_FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
 
 describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
   it('宿主机密族/内部指针/测试桥键/计划旋钮不进子进程；白名单键保留', () => {
