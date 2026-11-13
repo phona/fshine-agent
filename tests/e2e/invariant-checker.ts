@@ -38,10 +38,11 @@
  */
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
+import path from 'node:path';
 import type { AuditStore, ChangeIntentRecord } from '@fshine/contracts';
 import { executionLanguageFingerprints } from '../../packages/agent/src/runtime';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
-import { withoutPlatformEnvelope } from './harness';
+import { fixtureAuditRows, fixturePlans, fixtureStateRoot, withoutPlatformEnvelope } from './harness';
 
 export type InvariantKlass = 'safety' | 'liveness' | 'efficiency';
 
@@ -82,6 +83,14 @@ export interface InvariantSessionOptions {
    * needs/failed 出现时，用户可见面须含宿主失败族文本或这里给的任一线索片段。
    */
   actionableHints?: readonly string[];
+  /**
+   * 制品来源（2026-11-13，P5；缺省 'env' 行为不变）：
+   *   - 'env'：EXECUTION_PLAN_STATE / EXECUTION_AUDIT_PATH / EXECUTION_MOCK_STATE 三条既有路径；
+   *   - 'dummy'：仓内 dummy 夹具制品（plans.json / audit.jsonl / dummy-state.json）。
+   *     夹具**忽略** EXECUTION_* 状态路径（见 harness 的 PLATFORM_STATE_KEYS 注），不切来源时
+   *     判据只能拿"读不到 → 跳过"的假绿；字段映射差异见各 readDummy* 函数。
+   */
+  artifactSource?: 'env' | 'dummy';
 }
 
 export interface InvariantReportArtifacts {
@@ -111,7 +120,7 @@ interface LedgerCall { operation: string; args: string[]; key: string }
 interface LedgerPlan {
   id: string; taskId: string; version: number; status: string; decision: string;
   calls: LedgerCall[]; used?: number[]; actual: { calls: number; seconds: number };
-  activatedAt?: string; createdAt: string;
+  activatedAt?: string; createdAt?: string;
 }
 interface LedgerTask { actual: { calls: number; seconds: number }; evaluateCount?: number; notifyCount?: number }
 interface LedgerState { version: number; tasks: Record<string, LedgerTask>; plans: Record<string, LedgerPlan> }
@@ -122,7 +131,7 @@ function readLedger(): LedgerState | null {
   try { return JSON.parse(readFileSync(file, 'utf8')) as LedgerState; } catch { return null; }
 }
 
-interface AuditRecord { ts?: string; mode?: string; script?: string; args?: unknown; exitCode?: number; refused?: string }
+interface AuditRecord { ts?: string; mode?: string; script?: string; args?: unknown; exitCode?: number; refused?: string; planId?: string }
 
 function readAudit(): AuditRecord[] | null {
   const file = process.env['EXECUTION_AUDIT_PATH'];
@@ -150,6 +159,103 @@ function mockVoucherCount(mock: MockState, accountSet: string, period: string): 
 /** 凭证日期（YYYY-MM-DD）→ 期间键（YYYYMM），与平台 mock fill 同一规则。 */
 function periodOf(date: unknown): string {
   return String(date ?? '').replace(/-/g, '').slice(0, 6);
+}
+
+// ── dummy 夹具制品读取（artifactSource='dummy'；与上方 EXECUTION_* 路径互不干扰）──────────
+
+/** 夹具状态文件原始文本；状态根未设 / 文件不存在 → null（与 env 路径"读不到"同语义，进 notes）。 */
+function readDummyFixtureFile(name: string): string | null {
+  try {
+    const file = path.join(fixtureStateRoot(), name);
+    return existsSync(file) ? readFileSync(file, 'utf8') : null;
+  } catch {
+    return null;
+  }
+}
+
+interface DummyPlanRow {
+  id?: string; taskId?: string; version?: unknown; status?: string; decision?: string;
+  activatedEvidence?: string;
+  calls?: Array<{ operation?: unknown; args?: unknown; key?: unknown }>;
+  actual?: { calls?: unknown; seconds?: unknown };
+}
+
+/**
+ * dummy 夹具计划账本（plans.json）→ LedgerState 适配：
+ *   - plans[].calls 与 env 账本同形（operation/args/key）；`used` 索引夹具不落，
+ *     执行清单改由 audit.jsonl 反推（见 report 的 executed 分支），守恒判据用计划级 actual；
+ *   - 激活痕迹：夹具在 plan activate 时写 `activatedEvidence`（无 activatedAt 字段）→
+ *     映射成 LedgerPlan.activatedAt；execute 档建计划即激活，由 S1 的 decision 分支放行；
+ *   - 任务级 actual 夹具**不累计**（累计账在计划级，见 dummy.cjs 执行段）→ 以计划级 actual
+ *     按任务求和补齐，两值取大（宁可多判不漏判），否则 E2 恒读 0。
+ */
+function readDummyLedger(): LedgerState | null {
+  if (readDummyFixtureFile('plans.json') === null) return null;
+  let raw: { plans?: Record<string, DummyPlanRow>; tasks?: Record<string, { actual?: { calls?: unknown; seconds?: unknown } }> };
+  try { raw = fixturePlans() as typeof raw; } catch { return null; }
+  const num = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
+  const plans: Record<string, LedgerPlan> = {};
+  for (const [id, plan] of Object.entries(raw.plans ?? {})) {
+    plans[id] = {
+      id,
+      taskId: String(plan.taskId ?? ''),
+      version: num(plan.version),
+      status: String(plan.status ?? ''),
+      decision: String(plan.decision ?? ''),
+      calls: (plan.calls ?? []).map((call) => ({
+        operation: String(call.operation ?? ''),
+        args: Array.isArray(call.args) ? call.args.map((arg) => String(arg)) : [],
+        key: String(call.key ?? ''),
+      })),
+      actual: { calls: num(plan.actual?.calls), seconds: num(plan.actual?.seconds) },
+      ...(typeof plan.activatedEvidence === 'string' ? { activatedAt: plan.activatedEvidence } : {}),
+    };
+  }
+  const tasks: Record<string, LedgerTask> = {};
+  for (const [taskId, task] of Object.entries(raw.tasks ?? {})) {
+    tasks[taskId] = { actual: { calls: num(task.actual?.calls), seconds: num(task.actual?.seconds) } };
+  }
+  const planSums = new Map<string, { calls: number; seconds: number }>();
+  for (const plan of Object.values(plans)) {
+    const sum = planSums.get(plan.taskId) ?? { calls: 0, seconds: 0 };
+    sum.calls += plan.actual.calls;
+    sum.seconds += plan.actual.seconds;
+    planSums.set(plan.taskId, sum);
+  }
+  for (const [taskId, sum] of planSums) {
+    const task = tasks[taskId] ?? (tasks[taskId] = { actual: { calls: 0, seconds: 0 } });
+    task.actual.calls = Math.max(task.actual.calls, sum.calls);
+    task.actual.seconds = Math.max(task.actual.seconds, sum.seconds);
+  }
+  return { version: 1, tasks, plans };
+}
+
+/** dummy 夹具调用审计（audit.jsonl；refusal 行含 refused、成功行含 exitCode/planId）→ AuditRecord[]。 */
+function readDummyAudit(): AuditRecord[] | null {
+  if (readDummyFixtureFile('audit.jsonl') === null) return null;
+  try { return fixtureAuditRows() as AuditRecord[]; } catch { return null; }
+}
+
+/**
+ * dummy 夹具状态（dummy-state.json）的 collections[].records（collection+window → 条数）→
+ * MockState 形状（accountSets[].vouchers[] 数组，长度即条数），使 S2 的 mockVoucherCount
+ * 与 EXECUTION_* 路径共用同一把读取尺（条数是夹具声明的读数，不是从 items 现数）。
+ */
+function readDummyMock(): MockState | null {
+  const text = readDummyFixtureFile('dummy-state.json');
+  if (text === null) return null;
+  let raw: { collections?: Record<string, { records?: Record<string, unknown> }> };
+  try { raw = JSON.parse(text) as typeof raw; } catch { return null; }
+  const accountSets: Record<string, { vouchers: Record<string, unknown[]> }> = {};
+  for (const [name, collection] of Object.entries(raw.collections ?? {})) {
+    const vouchers: Record<string, unknown[]> = {};
+    for (const [window, count] of Object.entries(collection.records ?? {})) {
+      const n = typeof count === 'number' && Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0;
+      vouchers[window] = Array.from({ length: n });
+    }
+    accountSets[name] = { vouchers };
+  }
+  return { accountSets };
 }
 
 // ── S4 实体提取 ────────────────────────────────────────────────────────────
@@ -203,6 +309,7 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
   const maxDelegations = options.maxDelegationsPerTask ?? hardBudget;
   const maxRepeat = options.maxRepeatPerCall ?? 3;
   const actionableHints = options.actionableHints ?? [];
+  const artifactSource = options.artifactSource ?? 'env';
   const turns: RecordedTurn[] = [];
   const delegations = new Map<string, number>();
 
@@ -229,20 +336,41 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
       const liveness: InvariantViolation[] = [];
       const efficiency: InvariantViolation[] = [];
       const notes: string[] = [];
-      const ledger = readLedger();
-      const audit = readAudit();
-      const mock = readMockState();
-      if (!ledger) notes.push('S1/E1/E2：读不到计划账本（EXECUTION_PLAN_STATE），平台调用面不变量跳过');
-      if (!audit) notes.push('S1/S2：读不到平台调用审计（EXECUTION_AUDIT_PATH），审计守恒跳过');
-      if (!mock) notes.push('S2：读不到 mock 状态（EXECUTION_MOCK_STATE），落账增长核对跳过');
+      const ledger = artifactSource === 'dummy' ? readDummyLedger() : readLedger();
+      const audit = artifactSource === 'dummy' ? readDummyAudit() : readAudit();
+      const mock = artifactSource === 'dummy' ? readDummyMock() : readMockState();
+      const ledgerLabel = artifactSource === 'dummy' ? '夹具计划账本（plans.json）' : '计划账本（EXECUTION_PLAN_STATE）';
+      const auditLabel = artifactSource === 'dummy' ? '夹具调用审计（audit.jsonl）' : '平台调用审计（EXECUTION_AUDIT_PATH）';
+      const mockLabel = artifactSource === 'dummy' ? '夹具状态（dummy-state.json）' : 'mock 状态（EXECUTION_MOCK_STATE）';
+      if (!ledger) notes.push(`S1/E1/E2：读不到${ledgerLabel}，平台调用面不变量跳过`);
+      if (!audit) notes.push(`S1/S2：读不到${auditLabel}，审计守恒跳过`);
+      if (!mock) notes.push(`S2：读不到${mockLabel}，落账增长核对跳过`);
 
-      // ── 实际执行清单（账本 used 索引展开）：S1/S4/E1 共用 ──────────────
+      // ── 实际执行清单（env：账本 used 索引展开；dummy：审计成功 query 行反推）：S1/S4/E1 共用 ──
       const executed: Array<{ taskId: string; planId: string; call: LedgerCall }> = [];
       if (ledger) {
-        for (const plan of Object.values(ledger.plans)) {
-          for (const index of plan.used ?? []) {
-            const call = plan.calls[index];
-            if (call) executed.push({ taskId: plan.taskId, planId: plan.id, call });
+        if (artifactSource === 'dummy' && audit) {
+          // dummy 账本不落 used 索引：执行清单由 audit.jsonl 的成功 query 行反推（planId 归属
+          // 计划）。匹配不到计划的调用无法归属，不猜——守恒判据（账本 actual 求和 vs 审计行数）
+          // 会抓住"有调用无账本/有账本无调用"，S4/E1 只对能归属的执行判读。
+          for (const record of audit) {
+            if (record.mode !== 'query' || record.refused !== undefined || record.exitCode !== 0) continue;
+            const planId = typeof record.planId === 'string' ? record.planId : '';
+            const plan = planId ? ledger.plans[planId] : undefined;
+            const args = Array.isArray(record.args) ? record.args.map((arg) => String(arg)) : [];
+            if (!plan) continue;
+            executed.push({
+              taskId: plan.taskId,
+              planId,
+              call: { operation: String(record.script ?? ''), args, key: JSON.stringify([String(record.script ?? ''), args]) },
+            });
+          }
+        } else {
+          for (const plan of Object.values(ledger.plans)) {
+            for (const index of plan.used ?? []) {
+              const call = plan.calls[index];
+              if (call) executed.push({ taskId: plan.taskId, planId: plan.id, call });
+            }
           }
         }
       }
@@ -272,7 +400,11 @@ export function invariantSession(options: InvariantSessionOptions): InvariantSes
           const auditQueries = audit.filter(
             (record) => record.mode === 'query' && record.refused === undefined && !String(record.script ?? '').includes('verify-saved'),
           ).length;
-          const ledgerCalls = executed.length;
+          // dummy 账本不落 used 索引 → 账本侧读数改用计划级 actual 求和（与审计互为独立记录）；
+          // env 路径维持 executed.length 不变。
+          const ledgerCalls = artifactSource === 'dummy'
+            ? Object.values(ledger.plans).reduce((sum, plan) => sum + plan.actual.calls, 0)
+            : executed.length;
           if (auditQueries !== ledgerCalls) {
             push(safety, 'S1', 'safety',
               `审计查询调用数（${auditQueries}）与账本实际执行数（${ledgerCalls}）不守恒——存在未入账本平台调用或账实不符`);
