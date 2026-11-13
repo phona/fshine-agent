@@ -109,12 +109,27 @@ interface ExecutionDbRow {
   error_json: string | null;
 }
 
-export function openTaskStore(dbPath: string): TaskStore {
-  if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
-  const db = new Database(dbPath);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
-  db.exec(SCHEMA);
+/** 打开选项（P1 任务查看）：readOnly 只读打开既有库，不写任何字节。 */
+export interface OpenTaskStoreOptions {
+  /**
+   * true = 只读视图：不建目录、不设 pragma、不执行建表；库文件必须已存在
+   * （fileMustExist）。写方法仍在但由 SQLite 拒绝（SQLITE_READONLY）。
+   */
+  readOnly?: boolean;
+}
+
+export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}): TaskStore {
+  const readOnly = options.readOnly === true;
+  const db = readOnly
+    ? new Database(dbPath, { readonly: true, fileMustExist: true })
+    : (() => {
+        if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
+        const writable = new Database(dbPath);
+        writable.pragma('journal_mode = WAL');
+        writable.pragma('foreign_keys = ON');
+        writable.exec(SCHEMA);
+        return writable;
+      })();
 
   const insertTask = db.prepare(`
     INSERT INTO tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at)

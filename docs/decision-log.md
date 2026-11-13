@@ -852,6 +852,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **核查结论**：`task.status` 当前**没有用户可见消费面**——`npm run ask` 机械证据只逐条打印 `execution.status`（不打印 task.status）；`apps/server/server.ts` 只记录逐执行状态；M5 判定器（`scripts/eval/convergence-r1/judge.ts`）用执行行（T1 executions 与 `executions.some(failed||refused)`）判「④任务状态一致性」，不读 task.status。
 - **决定**：**本轮不修改语义**（不为无消费者的字段新增宿主行为）。当前口径——首个非 completed 判负（`[failed, completed]` 记 failed）、`needs_input` 并入 failed——以表征测试钉住：`packages/agent/task-status-boundary.test.ts`。
 - **复评触发条件**（出现任一）：ask 打印任务状态 / 状态查询切片 / 后台投递 / 判定器改用 task.status。届时先按用户可见性裁定，再改语义并同步更新该测试与本条。
+- **复评登记（2026-11-14，P1 任务查看切片）**：触发条件之一「状态查询切片」已达成——`npm run tasks` 列表/详情成为 `task.status` 的首个用户可见消费面。**裁定：保持既有语义**（P1 owner 规格：completed/failed/unexecuted 复用 `judgeReportedTask`，不新造状态）。实现口径：查看侧只读消费注册表写入时已判定的终态并把三态映射为中文词（已完成/失败/未执行），**不在读时重算**（fail() 路径零执行与 running 行会被重算错报）；表征测试 `packages/agent/task-status-boundary.test.ts` 断言零改动。
 
 ### 17.3 Execution Contract 残余：CLI flag 名称泄漏
 
@@ -867,6 +868,14 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 - 后续评测继续**分别保留**：原始结果（原始 judgment，不因修复改写）、离线复判（`--judge-existing`）、重新运行结果（新样本）；报告中必须注明**样本规模、模型版本、代码点/技能 revision 与可验证范围**。
 - R2 采样记录（step-3.7-flash，原始 judgment 全部保留）：E04 ×12 = **12/12**（正确委派 12/12、逐 trial 2 次执行 W202611+W202610、先追问 0、虚构 0）；E05 ×9 对齐前 = **0/9**、对齐后 ×9 = **5/9**；E06 ×3 = 3/3、E12 ×3 = 3/3（回归探针）；**模型 = `step-3.7-flash`**（`config/agent.fixture.yaml` 的缺省模型；进程 env 显式覆盖 `.env` 的 `step-5-preview`，证据 `model.json` 记录 main=worker=`step-3.7-flash`）。M5 首轮基线（32/36 等）为 `step-5-preview` 帧——**跨模型帧不得混用**，R2 报告对两帧分列。旧 `r2-e04` 混合 revision 采样作废并留档。
+
+---
+
+## 十八、P1 产品切片：任务查看 v1（2026-11-14，分支 arch/p1-taskview）
+
+- **范围**：新增 `npm run tasks`（最近任务列表）与 `npm run tasks -- <taskId>`（状态/失败原因/执行步骤/任务结果）——只读消费既有 SQLite 任务注册表；`openTaskStore`/`createSqliteTaskRegistry` 增 `readOnly` 选项（不写、不锁写、缺库不创建）；状态与失败原因复用 `judgeReportedTask` 语义（查看侧不在读时重算，§17.2 复评登记）。schema、ask/start、R1 冻结集与 exploration 零改动。
+- **证据指针**：`docs/product/p1-task-viewing.md`（六段报告 + 验收逐条勾选）；真实模型三场景（completed/未执行/失败）逐字命令与输出在 `.runtime/product-p1/`；只读哈希不变（`readonly-proof.txt`）；E06 ×3 / E12 ×3 全过（`eval-e06.log`/`eval-e12.log`）；实现提交 `353fd10`（TDD 16 例 + 三组反向绊线）。
+- **状态**：已实施并验收（本分支，未 push/未合并）。
 
 ---
 

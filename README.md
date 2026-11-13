@@ -39,6 +39,8 @@ npm run typecheck                    # tsc --noEmit
 npm run test                         # vitest（unit project）
 
 npm run ask -- "帮我查一下 ..."        # 一条消息 → 回复 + 机械证据（真实模型 + 仓内 dummy 执行层）
+npm run tasks                        # 最近任务列表（只读；缺省读 .runtime/state.db）
+npm run tasks -- <taskId>            # 单任务详情：状态 / 原因 / 执行步骤 / 任务结果
 npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
 npm run eval:user -- --trials 1      # 用户级黑盒评测（12 用例，真实模型 + 仓内 dummy 夹具）
 ```
@@ -59,6 +61,23 @@ npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
 - 输出：回复 + 机械证据（taskId / requestId / operation / status + dummy 执行层审计行）。
 - 任务底账落 SQLite（缺省 `.runtime/state.db`），进程结束后仍在；隔离门 fail-closed，
   profile.root 必须在仓内夹具目录之下。
+
+### `npm run tasks`：查看交办过的任务（只读）
+
+不读日志、不跑模型、不触网：直接从任务底账（SQLite）读最近任务与单任务详情。
+
+```bash
+npm run tasks                 # 最近任务列表：时间 / 状态 / 摘要 / id（最多 20 条）
+npm run tasks -- <taskId>     # 单任务详情：状态 / 失败原因 / 执行步骤 / 任务结果
+```
+
+- 状态与失败原因与底账写入时的 `judgeReportedTask` 同语义（已完成 / 失败 / 未执行；
+  进行中 = 尚未收尾），查看侧不重算、不新造状态。
+- 只读：以 SQLite readonly 打开既有库（不写、不锁写）；库不存在时给空态且不创建文件。
+- 缺省读 `.runtime/state.db`；`--config=<path>` / `AGENT_CONFIG_PATH` 与 `npm run ask` 同源，
+  非空 `DB_PATH` 环境变量同 ask 一样覆盖底账路径。
+- 执行步骤按落账顺序列出（底账未存每步时间戳）；「任务结果」为底账持久化的执行层汇报原文
+  （Main 给用户的最终回复当前不落库）。
 
 ### `npm start`：企微长连接 → 渠道回复
 

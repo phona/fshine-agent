@@ -9,6 +9,7 @@
     "test": "vitest run",
     "start": "node --env-file-if-exists=.env --import tsx apps/server/main.ts",
     "ask": "node --env-file-if-exists=.env --import tsx scripts/ask.ts",
+    "tasks": "node --env-file-if-exists=.env --import tsx scripts/tasks.ts",
     "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
     "ci": "sh scripts/ci.sh"
   },
