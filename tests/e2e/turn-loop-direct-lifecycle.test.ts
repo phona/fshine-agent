@@ -406,3 +406,89 @@ describe('[L4 集成] 直连生命周期 · L4 平台消息重复交付幂等（
     }
   }, 30_000);
 });
+
+describe('[L4 集成] 直连生命周期 · L5 隔两轮续跑（原任务不在最近一轮，按 taskId 找回）', () => {
+  it('两轮无关对话后带同一 taskId 重派：复用原任务断点、本轮有新审计行、答案来自重执行', async () => {
+    const taskIdBox = { value: '' };
+    const inner = gatedWorker([
+      { plan: [dummyQuery('alpha')] },
+      { text: 'alpha 组查询完成：W1 有 2 条记录。' },
+      { end: true },
+      // 隔两轮后的续跑段：真实执行 beta 查询（新计划版本、新审计行都是本段的机械判据）
+      { plan: [dummyQuery('beta')] },
+      { text: 'beta 组也查询完成：W1 有 1 条记录。' },
+      { end: true },
+    ]);
+    const workerRuns: Array<{ sessionId?: string; messages: unknown[] }> = [];
+    const worker = {
+      run: async (input: { sessionId?: string; messages: unknown[] }) => {
+        workerRuns.push({ sessionId: input.sessionId, messages: input.messages });
+        return inner.run(input as never);
+      },
+    };
+    let booted: Boot | null = null;
+    try {
+      booted = await boot({
+        main: mainDriver(
+          [
+            { kind: 'delegate', request: '查询 alpha 组的数据' },
+            // 两轮与任务无关的对话：把原任务推出"最近一轮"，本用例盯的就是之后还能不能找回
+            { kind: 'conversation', text: '好的，收到。' },
+            { kind: 'conversation', text: '嗯，回头接着说。' },
+            { kind: 'delegate', request: '继续查询 beta 组的数据', taskId: LAST_TASK_ID_TOKEN },
+          ],
+          undefined,
+          { taskIdProvider: () => taskIdBox.value },
+        ),
+        worker: worker as never,
+      });
+
+      // 第一回合：普通单步委派，结果 terminate 成本轮回复
+      const first = await booted.send('查一下 alpha 组的数据');
+      expect(first).toContain('alpha 组查询完成');
+      const afterFirst = await platformTasksOf(booted);
+      expect(afterFirst).toHaveLength(1);
+      expect(afterFirst[0]!.outcome).toBe('done');
+      taskIdBox.value = afterFirst[0]!.taskId;
+      expect(taskIdBox.value).toMatch(/^task_/);
+      // 第一回合在夹具审计里留下一笔成功 dummy.query 行
+      const successfulAudit = (): Array<Record<string, unknown>> =>
+        fixtureAuditRows().filter((row) => row['script'] === 'dummy.query' && row['exitCode'] === 0);
+      expect(successfulAudit()).toHaveLength(1);
+
+      // 隔两轮无关对话：原任务不再是最近一轮；期间零平台调用、worker 不再被叫
+      const smalltalk1 = await booted.send('谢谢');
+      expect(smalltalk1.trim()).not.toBe('');
+      const smalltalk2 = await booted.send('好的');
+      expect(smalltalk2.trim()).not.toBe('');
+      expect(workerRuns).toHaveLength(1);
+      expect(successfulAudit()).toHaveLength(1);
+
+      // 隔两轮后回到原任务：带同一 taskId 重派
+      const second = await booted.send('那个 alpha 组先放着，继续查 beta 组');
+      expect(second).toContain('beta 组也查询完成');
+
+      // ① 同一 taskId：宿主底账仍只有一条（新建任务会多一条记录）
+      const records = await platformTasksOf(booted);
+      expect(records).toHaveLength(1);
+      expect(records[0]!.taskId).toBe(taskIdBox.value);
+      expect(records[0]!.outcome).toBe('done');
+      // ② 复用原任务断点：worker 第二跑落在同一子 Agent 会话，且拿到第一回合的转录
+      expect(workerRuns).toHaveLength(2);
+      expect(workerRuns[1]!.sessionId).toBe(taskIdBox.value);
+      expect(JSON.stringify(workerRuns[1]!.messages)).toContain('alpha 组查询完成');
+      // ③ 本轮有真实新审计行：恰好多一笔，且是 beta 那次重执行（不是把旧答复重放）
+      const auditRows = successfulAudit();
+      expect(auditRows).toHaveLength(2);
+      expect(JSON.stringify(auditRows.at(-1)!['args'])).toContain('beta');
+      // ④ 答案来自重执行：同一 taskId 键上计划推进到 version 2
+      const plans = fixturePlans();
+      expect(Object.keys(plans.tasks ?? {})).toEqual([taskIdBox.value]);
+      const latestPlanId = plans.tasks?.[taskIdBox.value]?.latestPlanId ?? '';
+      expect(plans.plans?.[latestPlanId]?.taskId).toBe(taskIdBox.value);
+      expect(plans.plans?.[latestPlanId]?.version).toBe(2);
+    } finally {
+      await booted?.assembly.close();
+    }
+  }, 30_000);
+});
