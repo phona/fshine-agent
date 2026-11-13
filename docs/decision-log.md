@@ -871,6 +871,14 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十八、P1 产品切片：任务查看 v1（2026-11-14，分支 arch/p1-taskview）
+
+- **范围**：新增 `npm run tasks`（最近任务列表）与 `npm run tasks -- <taskId>`（状态/失败原因/执行步骤/任务结果）——只读消费既有 SQLite 任务注册表；`openTaskStore`/`createSqliteTaskRegistry` 增 `readOnly` 选项（不写、不锁写、缺库不创建）；状态与失败原因复用 `judgeReportedTask` 语义（查看侧不在读时重算，§17.2 复评登记）。schema、ask/start、R1 冻结集与 exploration 零改动。
+- **证据指针**：`docs/product/p1-task-viewing.md`（六段报告 + 验收逐条勾选）；真实模型三场景（completed/未执行/失败）逐字命令与输出在 `.runtime/product-p1/`；只读哈希不变（`readonly-proof.txt`）；E06 ×3 / E12 ×3 全过（`eval-e06.log`/`eval-e12.log`）；实现提交 `353fd10`（TDD 16 例 + 三组反向绊线）。
+- **状态**：已实施并验收（本分支，未 push/未合并）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
