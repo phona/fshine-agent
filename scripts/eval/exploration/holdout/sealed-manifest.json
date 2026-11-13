@@ -1,0 +1,48 @@
+{
+  "purpose": "exploration-holdout-seal（E05 相邻 holdout，封存；未运行）",
+  "sealedBy": "独立复核员（verify explore 会话；与实施分离）",
+  "sealedAt": "2026-11-13T14:35:11.131Z",
+  "branch": "arch/r3-explore",
+  "headAtSeal": "2ebf166758a98683e81478eac08928055dce35cd",
+  "notRun": true,
+  "notRunStatement": "本目录用例在封存时未经任何模型运行（未执行 npm run eval:user -- --suite .../holdout）；sealedAt 前仅做静态 typecheck 与 freeze 哈希计算。",
+  "suite": {
+    "id": "e05-holdout",
+    "dir": "scripts/eval/exploration/holdout",
+    "caseIds": [
+      "H01",
+      "H02",
+      "H03",
+      "H04"
+    ],
+    "defaultOutDir": ".runtime/exploration-holdout"
+  },
+  "intendedRunCommand": "npm run eval:user -- --suite scripts/eval/exploration/holdout",
+  "aggregates": {
+    "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
+    "casesSha256": "6e17161412e462b4ccd9b597edff086f72891c7c5737f8b4c1ed63fee543d844"
+  },
+  "filesSha256": {
+    "scripts/eval/exploration/holdout/suite.ts": "8442be430b39f04a0af8f565a4cbdd297daf23c12948befe762e4927b726fe9f",
+    "scripts/eval/exploration/holdout/cases/H01.ts": "7de7c8eb0983f8b747731315ac9af5289e8ad51dd4352c87c0995d637774ffe7",
+    "scripts/eval/exploration/holdout/cases/H02.ts": "267f3abfc42994b10461178fbf1b4e692f3d5377b4e81b40e990b41af345f42a",
+    "scripts/eval/exploration/holdout/cases/H03.ts": "aefa03a9b22cf659a3e41121b479f41dc54c5166ebf6c70caffe34d0e67af7c5",
+    "scripts/eval/exploration/holdout/cases/H04.ts": "53a545f1c25d3deae71a096d7c87cd532fc3d89e77d98c3852e2f377cd2febbf",
+    "scripts/eval/exploration/holdout/criteria.lock": "d917fbb5996679070a2be24e7ba44102d4b8bdfc66f52984f0e61a5071923064"
+  },
+  "frozenSurfaceSha256": {
+    "scripts/eval/exploration/holdout/suite.ts": "8442be430b39f04a0af8f565a4cbdd297daf23c12948befe762e4927b726fe9f",
+    "scripts/eval/exploration/holdout/cases/H01.ts": "7de7c8eb0983f8b747731315ac9af5289e8ad51dd4352c87c0995d637774ffe7",
+    "scripts/eval/exploration/holdout/cases/H02.ts": "267f3abfc42994b10461178fbf1b4e692f3d5377b4e81b40e990b41af345f42a",
+    "scripts/eval/exploration/holdout/cases/H03.ts": "aefa03a9b22cf659a3e41121b479f41dc54c5166ebf6c70caffe34d0e67af7c5",
+    "scripts/eval/exploration/holdout/cases/H04.ts": "53a545f1c25d3deae71a096d7c87cd532fc3d89e77d98c3852e2f377cd2febbf",
+    "scripts/eval/exploration/suite-contract.ts": "a2313092924cb7f4a907f261eb75b64bb5a6efc66a7115b79380928d270cd430",
+    "scripts/eval/convergence-r1/judge.ts": "a6a5b29312df2daefae65f47f13bfa2fa6efe85165aa9460f89206aa16ed79f1",
+    "scripts/eval/convergence-r1/criteria.ts": "f5daa2a2d8377d7250150b6d907126dea26e652dcb8493f32801a5ddf1d68025",
+    "scripts/eval/convergence-r1/cases.ts": "e9bf5c79e07d2b5149eca3eb81741f7f105e5abcec0760fb7a6187c462a69a63",
+    "scripts/eval/convergence-r1/hash.ts": "e03bdcacc362515796cf6d248f2244a2b31b3e19ceddaee32cd7ec6795376637",
+    "scripts/eval/convergence-r1/evidence.ts": "4003a8b78ef15a46649a83232cf0db0506c1d932d497e369e06a8289a6689418",
+    "scripts/eval/safety-gate.ts": "593602225bdd7c1d673a01139506be552065001908fdf509f14cb80c6295a6ca"
+  },
+  "selfExclusion": "sealed-manifest.json 自身不列入 filesSha256（无法自哈希）；其余 holdout 目录文件全部列入。"
+}

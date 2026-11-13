@@ -11,6 +11,8 @@
  * CLI（逐字契约，README 同文）：
  *   npm run eval:user -- [--case C01] [--trial 1] [--trials 1] [--out-dir <dir>] [--judge-existing <run-dir>]
  * 兼容别名：--cases（同 --case）、--out（同 --out-dir）、--judge-selftest、--with-llm-judge。
+ * 外部套件（探索集）：--suite <dir>——加载 scripts/eval/exploration/<suite>/suite.ts 的用例与
+ * 自己的 criteria.lock；不传时一切走 R1 缺省（用例/判据/锁/输出与既有行为逐字一致）。
  *
  * 退出码：0=全部 trial 判定完成且无 FAIL；1=存在 FAIL；2=infra/INCONCLUSIVE（证据缺失、哈希不符、隔离违反）。
  */
@@ -40,6 +42,7 @@ import { judgeTrial, judgmentBodyHash, type Judgment } from './judge';
 import type { AuditIndexTurn, MetaTurn, ToolCallRecord } from './evidence';
 import { sha256Hex, stableStringify } from './hash';
 import { runJudgeSelftest } from './selftest';
+import { genericResolveCaseIds, loadSuite, type EvalSuite } from '../exploration/suite-contract';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
@@ -47,11 +50,12 @@ const DEFAULT_OUT_DIR = path.join(REPO_ROOT, '.runtime', 'eval-r1');
 const CRITERIA_LOCK = path.join(REPO_ROOT, 'scripts', 'eval', 'convergence-r1', 'criteria.lock');
 
 const USAGE = [
-  '用法：npm run eval:user -- [--case C01] [--trial 1] [--trials 1] [--out-dir <dir>] [--judge-existing <run-dir>]',
-  '  --case <id|all>        选择用例（E01–E12，逗号分隔；C01 形态同义；缺省 all）',
+  '用法：npm run eval:user -- [--case C01] [--trial 1] [--trials 1] [--out-dir <dir>] [--judge-existing <run-dir>] [--suite <dir>]',
+  '  --case <id|all>        选择用例（缺省 R1 为 E01–E12；套件为其自身 id 集；逗号分隔；C01 形态同义；缺省 all）',
   '  --trial <n>            只跑第 n 次（1 起）',
   '  --trials <n>           每个用例的轮数（缺省 1）',
-  '  --out-dir <dir>        输出根目录（缺省 .runtime/eval-r1）',
+  '  --out-dir <dir>        输出根目录（缺省 .runtime/eval-r1；套件用自己的缺省）',
+  '  --suite <dir>          外部用例集（scripts/eval/exploration/ 之下、含 suite.ts；缺省不启用，R1 行为不变）',
   '  --judge-existing <dir> 离线复判：只读该 run-dir 的冻结副本与证据，不跑模型',
   '  --judge-selftest       判定器自测：三类反例证据包 + 区分矩阵（不跑模型）',
   '  --with-llm-judge       接受但本轮不消费 LLM_JUDGE_MODEL（判据无 judge 面；assisted 留空）',
@@ -61,13 +65,14 @@ interface CliArgs {
   cases: string[];
   trial?: number;
   trials: number;
-  outDir: string;
+  outDir?: string;
+  suite?: string;
   judgeExisting?: string;
   judgeSelftest: boolean;
 }
 
 function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
-  const args: CliArgs = { cases: [], trials: 1, outDir: DEFAULT_OUT_DIR, judgeSelftest: false };
+  const args: CliArgs = { cases: [], trials: 1, judgeSelftest: false };
   const readValue = (index: number, flag: string): string | { error: string } => {
     const value = argv[index + 1];
     if (value === undefined || value.startsWith('--')) return { error: `${flag} 需要一个值` };
@@ -103,6 +108,12 @@ function parseArgs(argv: readonly string[]): CliArgs | { usageError: string } {
       if (typeof got !== 'string') return { usageError: got.error };
       if (inline === undefined) index += 1;
       args.outDir = path.resolve(got);
+    } else if (flag === '--suite') {
+      const got = value();
+      if (typeof got !== 'string') return { usageError: got.error };
+      if (inline === undefined) index += 1;
+      // 相对路径按仓根解析（与 npm run 的 cwd 无关，保证可复现）。
+      args.suite = path.isAbsolute(got) ? path.resolve(got) : path.resolve(REPO_ROOT, got);
     } else if (flag === '--judge-existing') {
       const got = value();
       if (typeof got !== 'string') return { usageError: got.error };
@@ -148,9 +159,47 @@ interface FrozenRun {
   casesText: string;
 }
 
-function buildFrozenRun(): FrozenRun {
-  const criteriaText = canonicalJson(buildCriteriaDocument());
-  const casesText = canonicalJson(ALL_CASES);
+/**
+ * 运行上下文：R1 缺省 = 原常量；`--suite` = 外部套件的数据面。
+ * 除 cases/lock/out/判据文档/版本标签外，其余全部复用本文件既有实现。
+ */
+interface SuiteContext {
+  id: string;
+  cases: readonly UserCase[];
+  lockPath: string;
+  defaultOutDir: string;
+  resolveCaseIds: (raw: string) => string[];
+  criteriaDocument: () => Record<string, unknown>;
+  criteriaVersion: string;
+}
+
+function r1Context(): SuiteContext {
+  return {
+    id: 'convergence-r1',
+    cases: ALL_CASES,
+    lockPath: CRITERIA_LOCK,
+    defaultOutDir: DEFAULT_OUT_DIR,
+    resolveCaseIds: normalizeCaseId,
+    criteriaDocument: buildCriteriaDocument,
+    criteriaVersion: CRITERIA_VERSION,
+  };
+}
+
+function suiteContext(suite: EvalSuite): SuiteContext {
+  return {
+    id: suite.id,
+    cases: suite.cases,
+    lockPath: suite.lockPath,
+    defaultOutDir: suite.defaultOutDir,
+    resolveCaseIds: suite.resolveCaseIds ?? ((raw: string) => genericResolveCaseIds(suite.cases, raw)),
+    criteriaDocument: suite.criteriaDocument ?? buildCriteriaDocument,
+    criteriaVersion: suite.criteriaVersion ?? CRITERIA_VERSION,
+  };
+}
+
+function buildFrozenRun(ctx: SuiteContext): FrozenRun {
+  const criteriaText = canonicalJson(ctx.criteriaDocument());
+  const casesText = canonicalJson(ctx.cases);
   return {
     criteriaSha256: sha256Hex(criteriaText),
     casesSha256: sha256Hex(casesText),
@@ -159,10 +208,10 @@ function buildFrozenRun(): FrozenRun {
   };
 }
 
-function verifyLock(frozen: FrozenRun): string[] {
-  if (!existsSync(CRITERIA_LOCK)) return ['criteria.lock 不存在（smoke/首轮前允许；冻结后必须存在且一致）'];
+function verifyLock(frozen: FrozenRun, lockPath: string): string[] {
+  if (!existsSync(lockPath)) return ['criteria.lock 不存在（smoke/首轮前允许；冻结后必须存在且一致）'];
   try {
-    const lock = JSON.parse(readFileSync(CRITERIA_LOCK, 'utf8')) as {
+    const lock = JSON.parse(readFileSync(lockPath, 'utf8')) as {
       criteriaSha256?: string;
       casesSha256?: string;
     };
@@ -532,7 +581,7 @@ async function main(): Promise<void> {
     return;
   }
   if (parsed.judgeSelftest) {
-    const code = runJudgeSelftest(parsed.outDir);
+    const code = runJudgeSelftest(parsed.outDir ?? DEFAULT_OUT_DIR);
     process.exitCode = code;
     return;
   }
@@ -541,8 +590,12 @@ async function main(): Promise<void> {
     return;
   }
 
-  const selectedIds = normalizeCaseId(parsed.cases.length > 0 ? parsed.cases.join(',') : 'all');
-  const selected = ALL_CASES.filter((caseDef) => selectedIds.includes(caseDef.id));
+  // ── 套件上下文（缺省 = R1；--suite 时只替换数据面，其余实现全部复用） ─────────
+  const suite = parsed.suite !== undefined ? await loadSuite(parsed.suite) : undefined;
+  const ctx = suite !== undefined ? suiteContext(suite) : r1Context();
+
+  const selectedIds = ctx.resolveCaseIds(parsed.cases.length > 0 ? parsed.cases.join(',') : 'all');
+  const selected = ctx.cases.filter((caseDef) => selectedIds.includes(caseDef.id));
   if (selected.length === 0) {
     console.error(`没有匹配的用例：${parsed.cases.join(',')}`);
     process.exitCode = 2;
@@ -550,8 +603,8 @@ async function main(): Promise<void> {
   }
   const trials = parsed.trial !== undefined ? [parsed.trial] : Array.from({ length: parsed.trials }, (_, index) => index + 1);
 
-  const frozen = buildFrozenRun();
-  const lockProblems = verifyLock(frozen);
+  const frozen = buildFrozenRun(ctx);
+  const lockProblems = verifyLock(frozen, ctx.lockPath);
   for (const problem of lockProblems) console.warn(`[freeze] ${problem}`);
   if (lockProblems.some((problem) => !problem.includes('不存在'))) {
     console.error('判据/用例与 criteria.lock 不一致——冻结后不得修改；拒绝运行（fail-closed）。');
@@ -559,7 +612,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const outDir = parsed.outDir;
+  const outDir = parsed.outDir ?? ctx.defaultOutDir;
   const runId = newRunId();
   mkdirSync(path.join(outDir, 'criteria'), { recursive: true });
   writeFileSync(path.join(outDir, 'criteria', 'criteria.json'), frozen.criteriaText);
@@ -579,12 +632,13 @@ async function main(): Promise<void> {
       keyPresent: (process.env['LLM_API_KEY'] ?? '').trim() !== '',
     },
     judge: { version: JUDGE_VERSION, llmJudgeModel: null as string | null },
-    criteriaVersion: CRITERIA_VERSION,
+    criteriaVersion: ctx.criteriaVersion,
     criteriaSha256: frozen.criteriaSha256,
     casesSha256: frozen.casesSha256,
     runMode: 'run',
     runnerVersion: RUNNER_VERSION,
     isolation: null as unknown,
+    ...(suite !== undefined ? { suite: { id: ctx.id, lockPath: ctx.lockPath, casesCount: ctx.cases.length } } : {}),
   };
   const modelId = process.env['LLM_MODEL'] ?? '';
   manifest.model.id = process.env['LLM_MAIN_MODEL'] ?? modelId;
@@ -631,7 +685,11 @@ async function main(): Promise<void> {
     writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');
   }
 
-  const exitCode = writeSummaryAndReport({ outDir, results, selected, trials, frozen, runId, criteriaVersion: CRITERIA_VERSION });
+  const exitCode = writeSummaryAndReport({
+    outDir, results, selected, trials, frozen, runId,
+    criteriaVersion: ctx.criteriaVersion,
+    ...(suite !== undefined ? { suiteId: ctx.id } : {}),
+  });
   console.log(`[summary] ${path.relative(REPO_ROOT, path.join(outDir, 'summary.json'))} / ${path.relative(REPO_ROOT, path.join(outDir, 'report.md'))}`);
   process.exitCode = exitCode;
 }
@@ -703,6 +761,8 @@ interface SummaryInput {
   frozen: FrozenRun;
   runId: string;
   criteriaVersion: string;
+  /** 仅套件运行时出现（报告标题/汇总里标注套装 id）。 */
+  suiteId?: string;
 }
 
 function writeSummaryAndReport(input: SummaryInput): number {
@@ -736,11 +796,12 @@ function writeSummaryAndReport(input: SummaryInput): number {
     dimensionHistogram,
     trialsPlanned: input.trials,
     samples: results.length,
+    ...(input.suiteId !== undefined ? { suite: { id: input.suiteId, casesCount: input.selected.length } } : {}),
   };
   writeFileSync(path.join(outDir, 'summary.json'), JSON.stringify(summary, null, 2) + '\n');
 
   const lines: string[] = [
-    '# convergence-r1 用户级评测报告（全样本，不筛绿）',
+    `# ${input.suiteId ?? 'convergence-r1'} 用户级评测报告（全样本，不筛绿）`,
     '',
     `- runId：\`${input.runId}\``,
     `- criteriaSha256：\`${input.frozen.criteriaSha256}\`；casesSha256：\`${input.frozen.casesSha256}\``,
@@ -822,7 +883,12 @@ function runJudgeExisting(runDir: string): number {
       return 2;
     }
   }
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as { criteriaSha256?: string; casesSha256?: string };
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as {
+    criteriaSha256?: string;
+    casesSha256?: string;
+    criteriaVersion?: string;
+    suite?: { id?: string };
+  };
   const criteriaText = readFileSync(criteriaCopy, 'utf8');
   const casesText = readFileSync(casesCopy, 'utf8');
   if (sha256Hex(criteriaText) !== manifest.criteriaSha256 || sha256Hex(casesText) !== manifest.casesSha256) {
@@ -870,7 +936,8 @@ function runJudgeExisting(runDir: string): number {
     trials: [...new Set(results.map((result) => result.trial))].sort((a, b) => a - b),
     frozen: { criteriaSha256: manifest.criteriaSha256!, casesSha256: manifest.casesSha256!, criteriaText, casesText },
     runId: `judge-existing-${path.basename(runDir)}`,
-    criteriaVersion: CRITERIA_VERSION,
+    criteriaVersion: manifest.criteriaVersion ?? CRITERIA_VERSION,
+    ...(manifest.suite?.id !== undefined ? { suiteId: manifest.suite.id } : {}),
   });
   return nondeterministic ? 2 : exitCode;
 }
