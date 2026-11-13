@@ -43,6 +43,7 @@ npm run tasks                        # 最近任务列表（只读；缺省读 .
 npm run tasks -- <taskId>            # 单任务详情：状态 / 原因 / 执行步骤 / 任务结果
 npm run tasks -- <taskId> --out <path>  # 导出任务交付件（Markdown；拒绝覆盖既有文件）
 npm run tasks -- <taskId> --redo     # 以该任务存储的交办原文逐字重新交办一个新任务（仅终态）
+npm run ops                          # 生成运营快照（本地只读 HTML；缺省 .runtime/ops/index.html）
 npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
 npm run eval:user -- --trials 1      # 用户级黑盒评测（12 用例，真实模型 + 仓内 dummy 夹具）
 ```

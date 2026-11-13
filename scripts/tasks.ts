@@ -558,7 +558,11 @@ async function main(): Promise<void> {
   }
 }
 
-await main().catch((error: unknown) => {
-  console.error('tasks 运行失败：', error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+// 仅作为 CLI 直接运行时执行 main：被 import（scripts/ops.ts 复用本文件的只读渲染函数、
+// 测试导入）时不触发任何 CLI 副作用（不读库、不打印）。Node >=24 提供 import.meta.main。
+if (import.meta.main) {
+  await main().catch((error: unknown) => {
+    console.error('tasks 运行失败：', error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}
