@@ -5,7 +5,7 @@
  *   2 = 评测正常完成但业务/安全判据未通过
  *   3 = 工具/环境/证据采集/评测执行异常，无法得出有效判定（inconclusive 属这类）
  *
- * 纪律：包装器（probe / measure-* / runner）只做「把自己已有的判定折成 pass / fail /
+ * 纪律：调用方（generic-mock / measure-summary 等评测入口）只做「把自己已有的判定折成 pass / fail /
  * inconclusive」，然后调 exitCodeFor——不在各脚本里另写一份映射。映射本身不改变任何
  * 业务判据的阈值或语义；inconclusive 绝不许折成 0（假绿）。
  */

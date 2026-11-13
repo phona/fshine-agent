@@ -19,7 +19,8 @@ const NEEDLE = '1' + '7dz';
 
 // ── 产品面扫描面 ──────────────────────────────────────────────────────────
 // 「产品面」= 公开仓库访客第一眼看到的文件：README、CI 配置、env 模板、
-// 功能规格、手工测试、e2e harness、package.json。
+// 功能规格、手工测试、package.json（e2e harness 随 M2 波次 1 于 2026-11-13 删除，
+// 故从本清单移除）。
 // docs/** 与 scripts/** 的实例名叙述已由收口波中性化（2026-11-06，D-181/D-182
 // 在册），不归本门；本门按上面这份固定清单扫，表外文件新增不计。
 const PRODUCT_SURFACE_FILES = new Set([
@@ -30,7 +31,6 @@ const PRODUCT_SURFACE_FILES = new Set([
   'config/agent.example.yaml',
   'docs/v0-functional-spec.md',
   'docs/manual-test-wecom.md',
-  'tests/e2e/harness.ts',
 ]);
 
 const SCAN_DIRS: string[] = [];

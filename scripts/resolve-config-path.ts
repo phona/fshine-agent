@@ -2,13 +2,13 @@
  * 统一配置路径解析：显式入口（--config=<path> 命令行 / AGENT_CONFIG_PATH 环境变量）>
  * 仓根 config/agent.yaml（存在才用）> scripts/eval/eval.agent.yaml。
  *
- * 全仓脚本（probe / acceptance）统一走这个 helper，确保 loadConfig 与
+ * 全仓脚本（ask / demo / demo:minimal）统一走这个 helper，确保 loadConfig 与
  * createServerAssembly 读取的是同一份 YAML，消除「assembly 读 AGENT_CONFIG_PATH
- * / 探针硬编码缺省路径」两条路分流的 wart。
+ * / 脚本硬编码缺省路径」两条路分流的 wart。
  *
  * eval 回退配置的 root 是仓内相对路径——加载前由本 helper patch 成绝对路径并物化到
  * .runtime 副本（loadConfig 强制 root 绝对，packages/core/src/config.ts:125；
- * patch 模式与 tests/e2e/harness.ts:830-842 的 patchProfile 同源）。提交进仓的
+ * patch 模式与旧 e2e harness 的 patchProfile 同源，harness 随 M2 波次 1（2026-11-13）删除）。提交进仓的
  * YAML 因此不含开发者主目录（exposure-lint / history-hygiene 守卫拦绝对路径）、
  * 不依赖任何环境变量（CI / fresh clone 零配置可加载）。
  */

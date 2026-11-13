@@ -1,6 +1,6 @@
 /**
  * 消息处理主链路:授权 → 审计 → Agent(runtime + LLM)→ Context Worker → 回复。
- * 被 apps/server/main.ts 与 tests/e2e 共用,保证测的就是跑的。
+ * 被 apps/server/main.ts 与 apps/server 单测共用,保证测的就是跑的。
  */
 import { existsSync } from 'node:fs';
 import path from 'node:path';

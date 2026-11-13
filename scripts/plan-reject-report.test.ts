@@ -13,8 +13,9 @@ import {
 /**
  * 计划门拒绝明细（D-087）：报告要把审计库里已经记着的东西带到人眼前。
  *
- * 行形状按**现有**验收库里真实的行钉（data/acceptance-202610131453.db 的
- * DECLINED_PLAN_LIMIT 一行、…202610131112.db 的 ENTITY_OUT_OF_SCOPE 一行，现场核实过）：
+ * 行形状按验收阶段真实库文件钉过（原 data/acceptance-202610131453.db 的
+ * DECLINED_PLAN_LIMIT 一行、…202610131112.db 的 ENTITY_OUT_OF_SCOPE 一行，现场核实过；
+ * 验收库随旧脚手架于 2026-11-13 M2 波次 1 退役）：
  * 每个计划门出口都落一行，`status='error'`、`error_code='GATE_BLOCKED'`，理由住在
  * `safe_arguments.reason` 的 JSON 里。
  */

@@ -156,7 +156,7 @@ function subagent(script: Array<(args: { request: string; taskId?: string; stepL
 
 const DONE = (taskId: string, text: string): SubagentTaskResult => ({ taskId, text, execution: { planId: 'plan_platform', version: 1, calls: 1 } });
 
-/** 侦测宿主计划模式熔断事件（console.info 上是 JSON 行，写法同 tests/e2e 的 capturePlanLog）。 */
+/** 侦测宿主计划模式熔断事件（console.info 上是 JSON 行）。 */
 function capturePlanLog() {
   const events: Array<Record<string, unknown>> = [];
   const spy = vi.spyOn(console, 'info').mockImplementation((line: unknown) => {

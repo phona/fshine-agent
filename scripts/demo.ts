@@ -24,7 +24,8 @@
  *
  * 状态目录依据（按实际代码，不沿用过时变量）：
  *   · 夹具 `bin/dummy` 只认 `--state-dir`；它把测试桥变量（键名以 @fshine/agent 导出的
- *     WORKER_FIXTURE_STATE_DIR_KEY 常量为唯一来源，本脚本不写字面量——D-209 引用闭集守卫）
+ *     WORKER_FIXTURE_STATE_DIR_KEY 常量为唯一来源，本脚本不写字面量——
+ *     D-209 继任闭集守卫 packages/agent/bridge-key-closure.test.ts 盯字面量闭集）
  *     翻译成该 flag（bin/dummy 的 shell 分支）。
  *   · worker 的 bash 工具基境来自 `getShellEnv()`（即宿主进程 process.env，见
  *     pi-coding-agent 的 resolveSpawnContext），宿主侧计划评估子进程同样以

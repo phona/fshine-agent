@@ -8,7 +8,8 @@
  *   · env 纪律：剥 EXECUTION_REQUIRE_PLAN（D-081），且不声明法域 env、命令不带 --mode；
  *   · 落账前先取问平台状态，把"已过期/已终结/读不到"在办调之前现形。
  *
- * 真网关 + mock 执行器的全链覆盖在 tests/e2e/turn-loop-write-chain.test.ts。
+ * 真网关 + mock 执行器的全链覆盖曾住 tests/e2e/turn-loop-write-chain.test.ts；该套件随
+ * M2 波次 1（2026-11-13）退役，本文件只覆盖注入点以上的落账后端。
  */
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';

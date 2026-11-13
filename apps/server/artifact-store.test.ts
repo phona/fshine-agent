@@ -302,7 +302,7 @@ describe('evictOverCapArtifacts（W5 淘汰：显式 + 最旧优先 + 新批保�
 });
 
 // ── resolveResendRefs 读回校验（对照 loadTaskArtifactFiles 的纪律：损坏的库文件
-// 不当作字节还在的样子发出；tests/e2e/turn-loop-resend 的假 seed 曾因此逍遥）────────
+// 不当作字节还在的样子发出；旧 e2e（tests/e2e/turn-loop-resend，随 M2 波次 1 退役）的假 seed 曾因此逍遥）────────
 describe('resolveResendRefs（重发读回校验）', () => {
   const roots: string[] = [];
   afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });

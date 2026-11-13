@@ -11,7 +11,8 @@
  * **C 波改写**：本脚本原先直驱 apps/server/commit.ts 的 legacy prepare/commit runner
  * （按文件路径落账、宿主自己解提案自己物化契约）。那条路已整文件删除，冒烟随之改指新路径
  * ——W3 把"smoke:commit:mock + acceptance 5.x 写链路 mock 下全绿"定为波次唯一验收，
- * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。
+ * 门本身不能随实现一起退场（那等于悄悄删掉一半验收）。acceptance 5.x 这一半已随旧脚手架
+ * 于 2026-11-13（M2 波次 1）退役；本冒烟门保留。
  *
  * 保险丝（两道，都 fail-closed，见 main() 头一段）：
  *   ① EXECUTION_MOCK_STATE 已声明——本脚本要读它做凭证数断言；

@@ -5,8 +5,9 @@
 # 一个不触网的本地执行层夹具。真实 SaaS / 真实平台凭据一概不在这里，也不经 demo 脚本读写。
 #
 # 与 scripts/eval/eval.agent.yaml 的分工：
-#   · eval.agent.yaml 服务评测与验收（probe / acceptance / e2e / UX A/B），principals 是
-#     评测虚构身份、capabilities 含写；
+#   · eval.agent.yaml 是仓内通用回退配置（入口未显式给 config 时物化使用），principals 是
+#     评测虚构身份、capabilities 含写；旧 probe / acceptance / e2e / UX A/B 仪器已于
+#     2026-11-13 M2 波次 1 随旧脚手架退役；
 #   · agent.demo.yaml 服务「业务人员可复制的本地试用」，只有只读能力，跑一条四轮业务对话。
 #   两者都在仓内、都用仓内相对 root；加载前由入口脚本把 root 物化成绝对路径副本
 #   （scripts/resolve-config-path.ts 的 materializeEvalConfig），提交的文件因此不含

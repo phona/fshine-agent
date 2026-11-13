@@ -83,7 +83,7 @@ async function main(): Promise<void> {
     console.error('用法：npm run ask -- "要问的问题" [--conversation <id>] [--db <path>] [--config=<path>]');
     process.exit(2);
   }
-  // 配置同源（与 probe / acceptance / assembly 同一入口）：显式 --config= > AGENT_CONFIG_PATH
+  // 配置同源（与 assembly 同一入口）：显式 --config= > AGENT_CONFIG_PATH
   // > config/agent.yaml（存在才用）> scripts/eval/eval.agent.yaml（回退时物化绝对路径副本）。
   const yamlPath = resolveConfigPath(args.configPath ?? explicitConfigFrom());
   const env: NodeJS.ProcessEnv = { ...process.env, AGENT_CONFIG_PATH: yamlPath };

@@ -18,7 +18,7 @@ const ctx = {
  * 两步确认的提案/确认流覆盖已随 C 波（删旧文本写路径）迁走：
  *   · 网关提案路径的创建三态 → packages/agent/proposal-flow.test.ts；
  *   · 确认落账四态 + D-080/081/082 → packages/agent/proposal-flow.test.ts；
- *   · mock 下端到端全链 → tests/e2e/turn-loop-write-chain.test.ts。
+ *   · mock 下端到端全链 → 曾住 tests/e2e/turn-loop-write-chain.test.ts（随 M2 波次 1 退役）。
  * 本文件只剩一条与提案无关的执行面回账用例（原"两步确认状态机"describe 的末条），
  * 留在这里而不是搬走：它钉的是普通结果与系统注脚的拼接，与写路径无耦合。
  */
