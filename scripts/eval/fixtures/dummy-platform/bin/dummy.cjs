@@ -99,22 +99,27 @@ const OPERATIONS = [
     ] },
     serve: { query: false, prepare: false, commit: true }, protocol: 'proposal.commit' },
   // ── ballot-platform (second non-finance write domain, C10 L4 closure) ──────────
+  // script 列是执行层内部路径（宿主只作审计引用），但本夹具的调用入口 resolveOperation
+  // 同时收注册名与 basename 映射：两域同名脚本（query.js / commit.js / …）时 basename
+  // 会被映射到 dummy.* 域——ballot.query 会被错当成 dummy.query 执行（2026-11-13 P7
+  // 实跑发现：审计行 script 记的是 dummy.query）。因此 ballot 脚本名统一带域前缀，
+  // basename 唯一；resolveOperation 的 ballot-* 键即对应这一命名（夹具自己的声明）。
   { name: 'ballot.query', domain: 'ballot', command: 'query', access: 'read',
-    script: 'src/ballot/scripts/query.js', executor: 'ballot-script', est_seconds: 10, weight: 2,
+    script: 'src/ballot/scripts/ballot-query.js', executor: 'ballot-script', est_seconds: 10, weight: 2,
     args: { positional: [], flags: [
       { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name or keyword' },
       { flag: '--round', required: false, style: 'code', desc: 'round code, e.g. R1' },
     ] },
     serve: { query: true, prepare: true, commit: true }, protocol: null },
   { name: 'ballot.scratch', domain: 'ballot', command: 'scratch', access: 'scratch',
-    script: 'src/ballot/scripts/scratch.js', executor: 'ballot-script', est_seconds: 5, weight: 1,
+    script: 'src/ballot/scripts/ballot-scratch.js', executor: 'ballot-script', est_seconds: 5, weight: 1,
     args: { positional: [], flags: [
       { flag: '--input', required: true, style: 'name', desc: 'input text file path (local computation only)' },
       { flag: '--output', required: false, style: 'name', desc: 'output file path; defaults to <input>.out' },
     ] },
     serve: { query: true, prepare: true, commit: false }, protocol: null },
   { name: 'ballot.prepare', domain: 'ballot', command: 'prepare', access: 'write', writeFlag: '--apply',
-    script: 'src/ballot/scripts/prepare.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
+    script: 'src/ballot/scripts/ballot-prepare.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
     args: { positional: [], flags: [
       { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
       { flag: '--round', required: false, style: 'code', desc: 'round code' },
@@ -123,7 +128,7 @@ const OPERATIONS = [
     ] },
     serve: { query: false, prepare: true, commit: false }, protocol: null },
   { name: 'ballot.commit', domain: 'ballot', command: 'commit', access: 'write',
-    script: 'src/ballot/scripts/commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
+    script: 'src/ballot/scripts/ballot-commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
     args: { positional: [], flags: [
       { flag: '--topic', required: true, style: 'name', desc: 'ballot topic name (exact)' },
       { flag: '--round', required: false, style: 'code', desc: 'round code' },
@@ -131,13 +136,13 @@ const OPERATIONS = [
     ] },
     serve: { query: false, prepare: false, commit: true }, protocol: null },
   { name: 'ballot.proposal', domain: 'ballot', command: 'proposal', access: 'write',
-    script: 'src/ballot/scripts/proposal.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
+    script: 'src/ballot/scripts/ballot-proposal.js', executor: 'ballot-script', est_seconds: 10, weight: 5,
     args: { positional: [{ name: 'payload', required: true, desc: 'proposal payload file (opaque to the host)' }], flags: [
       { flag: '--batch', required: false, style: 'code', desc: 'create multiple proposals (not used in v1, accepted for shape compatibility)' },
     ] },
     serve: { query: false, prepare: true, commit: false }, protocol: 'proposal.create' },
   { name: 'ballot.proposal-commit', domain: 'ballot', command: 'proposal-commit', access: 'write',
-    script: 'src/ballot/scripts/proposal-commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
+    script: 'src/ballot/scripts/ballot-proposal-commit.js', executor: 'ballot-script', est_seconds: 10, weight: 20,
     args: { positional: [], flags: [
       { flag: '--proposal-id', required: true, style: 'name', desc: 'proposal id returned by proposal.create' },
     ] },

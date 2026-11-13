@@ -130,8 +130,12 @@ describe('[L4 集成] 离线全链 e2e：结构化歧义 → 宿主机械组装�
 
     const reply = await send('只查账套目录，看看有没有胜利这个帐套');
 
-    // 宿主只拼结构（"没有找到匹配X的对象。{平台措辞}我再查。"），领域提示是平台 correctForm 数据
-    expect(reply).toBe(`没有找到匹配“胜利”的对象。${platformCorrectForm('ACCOUNT_SET_NOT_FOUND')}我再查。`);
+    // 宿主只拼结构（"没有找到匹配X的对象。{平台措辞}我再查。"），领域提示是平台 correctForm 数据。
+    // correctForm 经探针读平台信封（P6 缝，2026-11-13）：探针与本回合 worker 的真实调用同形
+    // （同一 operation/args），信封 error.correctForm 是措辞唯一来源。
+    expect(reply).toBe(`没有找到匹配“胜利”的对象。${platformCorrectForm('ACCOUNT_SET_NOT_FOUND', {
+      mode: 'query', operation: 'finance.search-account-sets', args: ['--query', '胜利'],
+    })}我再查。`);
     expect(reply).toContain('没有找到匹配“胜利”的对象');
     // 守卫恢复（D-102 已在平台侧修掉）：这条 correctForm 曾含裸 operation 名
     // search-account-sets，经宿主 L2 原样渲染后就是给终端用户看内部协议文本；执行层

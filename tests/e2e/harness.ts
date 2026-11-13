@@ -28,8 +28,9 @@ import { resolveActiveProfileId, type ContextProfileConfig } from '../../package
 import type { SdkClientLike } from '@fshine/channel-wecom';
 import type { NoticeFn, ProgressFn, ReplyHandler } from '@fshine/contracts';
 import { evaluateAndActivatePlan, loadCurrentActivePlan, planCallFacts, type PlanCall, type PlanCliRunner } from '../../packages/agent/src/plan-runtime';
-import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols, loadOperationSemantics } from '../../packages/agent/src/operation-labels';
-import { parseProposalCommand } from '../../packages/agent/src/proposal-runtime';
+import { loadOperationArgSpecs, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, type OperationProtocols } from '../../packages/agent/src/operation-labels';
+import { parseProposalCommand, PROPOSAL_CREATE_PROTOCOL } from '../../packages/agent/src/proposal-runtime';
+import { hostGatewayEnv } from '../../packages/agent/src/context';
 import { messageTextFor } from '../../packages/agent/src/error-codes';
 import { validatePlanEntities, type PlanEntitySources } from '../../packages/agent/src/turn-contract';
 import type { SubagentNeeds } from '../../packages/agent/src/driver';
@@ -111,6 +112,23 @@ const operationScripts = await loadOperationScripts(PLATFORM_ROOT ?? undefined, 
 // 就等于把"A 波交付物在不在"这件事也 mock 掉，e2e 会在一台没有该列的平台上假绿。
 // 派生失败（平台没这一列）= 空表 = 提案命令不被识别，下面的 proposal 步会响亮失败。
 const operationProtocols = await loadOperationProtocols(PLATFORM_ROOT ?? undefined, GATEWAY ?? undefined);
+/**
+ * proposal.create 角色的注册名（P1 缝，2026-11-13）：{proposal:} 步骤命令里的 operation
+ * 由平台 protocol 列派生，不再硬编码实例名。
+ *
+ * 取法 = 遍历派生表取首个命中。parseOperationProtocols 对每行**先插注册名、再插 command
+ * 裸名**（先插入者胜），故首个命中即注册名——与 apps/server/proposal-commit.ts 的
+ * operationForProtocol 同一判据，不是第二套规则。
+ *
+ * 没有这一行 = 平台没下发该角色（空表/缺列）→ 调用方响亮失败，绝不回退任何硬编码
+ * operation 名（L2 单一来源：提案创建的寻址判据只能来自平台自己的清单）。
+ */
+function proposalCreateRegisteredName(protocols: OperationProtocols): string | undefined {
+  for (const [name, role] of protocols) {
+    if (role === PROPOSAL_CREATE_PROTOCOL) return name;
+  }
+  return undefined;
+}
 // access 语义表（D-075 写关闭判据的平台数据面）：与真实驱动同一把机械尺——calls（宿主
 // 解析）× 语义表（平台 access 声明，confirm 列）。
 // 2026-10-16 起换回**平台派生**（此前是 18 条手注替身：平台侧正在改造、顶层
@@ -369,6 +387,27 @@ export function resolveTaskControlToolName(tools: readonly { name: string }[]): 
 }
 
 /**
+ * 这一轮是不是提案隔离复核回合（P3 缝的机械判据）。
+ *
+ * 判据来自生产调用形态本身（proposal-review.ts 的 reviewProposalWithDriver）：tools 为空 +
+ * 隔离复核 system prompt（REVIEW_SYSTEM_PROMPT 首句）+ 唯一 user 消息以
+ * `Review this proposal:` 开头。三者任一即可识别；tools:[] 由调用方另行判定。
+ * 不认这两样就落回"续跑整理"应答——两条路径都是 tools:[]，只能靠输入形状分开。
+ */
+export function isProposalReviewTurn(input: { systemPrompt?: string; messages: readonly unknown[] }): boolean {
+  if (typeof input.systemPrompt === 'string' && input.systemPrompt.includes('isolated proposal reviewer')) return true;
+  const last = input.messages.at(-1) as { content?: unknown } | undefined;
+  const content = last?.content;
+  if (typeof content === 'string') return content.startsWith('Review this proposal:');
+  if (Array.isArray(content)) {
+    return content.some((part) => part && typeof part === 'object' && 'text' in part
+      && typeof (part as { text?: unknown }).text === 'string'
+      && (part as { text: string }).text.startsWith('Review this proposal:'));
+  }
+  return false;
+}
+
+/**
  * Main Agent：按脚本回放本轮动作——直连工具面形态（2026-11-12 harness 迁移）。
  *
  * 场景词汇（`kind`）区分"模型直接说话"与"模型调工具"，四类各自独立：
@@ -399,20 +438,30 @@ export const LAST_TASK_ID_TOKEN = '@lastTaskId';
  */
 function mainDriver(
   declarations: Array<Record<string, unknown>>,
-  observe?: (input: { messages: unknown[] }) => void,
+  observe?: (input: { messages: unknown[]; systemPrompt?: string; tools?: unknown[] }) => void,
   options?: { taskIdProvider?: () => string },
 ) {
   let cursor = 0;
   let lastTaskId = '';
   return {
     run: async (input: {
+      systemPrompt?: string;
       tools: unknown[];
       messages: unknown[];
       exec: (tool: string, args: Record<string, unknown>) => Promise<unknown>;
     }) => {
       observe?.(input);
-      // 宿主续跑路径不带工具：Main Agent 只整理已完成的执行结果，不再申报
       if (input.tools.length === 0) {
+        // 两条生产路径共用 tools:[] 形态，替身必须分开应答（2026-11-13 P3）：
+        //   · 授信/续跑整理回合（runtime.ts）：宿主只让模型整理已完成的执行结果；
+        //   · 提案隔离复核回合（proposal-review.ts → reviewProposalWithDriver）：输入是
+        //     隔离提示词 + "Review this proposal:" 消息，**必须回严格 JSON**——回任何
+        //     非 JSON 文本都会 parseReviewReply=null → 复核 fail-closed → 不发确认码，
+        //     提案创建整条断在提案登记之后。
+        // 缺这一支时的症状：提案创建回 "提案隔离复核未通过，未发确认码"（实测）。
+        if (isProposalReviewTurn(input)) {
+          return { text: JSON.stringify({ verdict: 'consistent', fields: [] }, null, 0), messages: input.messages };
+        }
         return { text: '已按你确认的范围整理完成。', messages: input.messages };
       }
       const tools = input.tools as ScriptedTool[];
@@ -702,8 +751,17 @@ function gatedWorker(script: WorkerStep[], options?: { enforceEntityScope?: bool
           // 路径（与真实驱动同一函数）：平台哪天不再认这个形态，这里立刻响亮失败，而不是
           // 悄悄走成另一条路。
           const requestId = input.requestId ?? 'req_unknown';
-          const command = `${GATEWAY} prepare voucher.proposal tmp/${requestId}/proposal.json`;
-          const call = parseProposalCommand(command, operationProtocols);
+          // P1 缝（2026-11-13）：operation 名由平台 protocol 列派生（注册名 = 调用唯一依据），
+          // 原实现硬编码 voucher.proposal，换执行层（dummy/ballot）当场失配。
+          const proposalOperation = proposalCreateRegisteredName(operationProtocols);
+          if (!proposalOperation) {
+            throw new Error('平台 protocol 列没有 proposal.create 角色的注册名——{proposal:} 步骤无寻址来源（平台清单缺列/空表？）');
+          }
+          const command = `${GATEWAY} prepare ${proposalOperation} tmp/${requestId}/proposal.json`;
+          // 网关名必须传（生产同参，pi-coding-driver.ts 传 options.gateway）：C7b 起
+          // isServeCliInvocation 对未声明的 gateway fail-closed 抛错——不传的话这一步
+          // 在**任何**执行层都跑不起来（2026-11-13 实测：""未声明有效的 profile.gateway""）。
+          const call = parseProposalCommand(command, operationProtocols, GATEWAY);
           if (!call) throw new Error(`提案创建命令没有被识别层认出（平台 protocol 列没下发？）：${command}`);
           const payloadFile = path.join(PLATFORM_ROOT, call.payloadPath);
           mkdirSync(path.dirname(payloadFile), { recursive: true });
@@ -1168,6 +1226,22 @@ export function fixtureAuditRows(): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
+/**
+ * 夹具平台侧真实调用计数（P2 缝，2026-11-13）：审计行数——夹具对每次
+ * query / prepare / commit / call / local 调用落一行（拒绝也落），是"平台到底被调了几次"
+ * 的夹具侧可数事实。
+ *
+ * 与 totalActualCalls() 的分工（先读那一份的注释）：后者读 EXECUTION_PLAN_STATE 指向的
+ * 平台账本，而仓内夹具**忽略** EXECUTION_* 状态路径（只认 --state-dir /
+ * FSHINE_EVAL_FIXTURE_STATE_DIR），于是夹具下 ledger 恒空、totalActualCalls() 恒 0——
+ * 拿它断言"零平台调用"是空跑（0 === 0 对任何实现都成立）。夹具下要数调用数只能数夹具
+ * 自己的审计，这份计数对真执行会 >0（锁在 harness-seam-locks 的 P2 用例，防再次退化成
+ * 恒零空跑）。
+ */
+export function fixtureCallCount(): number {
+  return fixtureAuditRows().length;
+}
+
 function balanceCalls(account: string, period: string): PlanCall[] {
   return [{ operation: 'finance.query-receivables', args: ['--query', account, '--period', period] }];
 }
@@ -1310,15 +1384,54 @@ function growingPlan(n: number): PlanCall[] {
   }));
 }
 
+/** correctForm 探针：一条确定性的（通常失败的）调用，其 RESULT 信封携带目标码与 correctForm。 */
+export interface CorrectFormProbe {
+  /** 网关 mode（与平台 serve 矩阵同词）。 */
+  mode: 'query' | 'prepare' | 'commit';
+  /** 平台注册名——调用唯一依据（接口文档 §3：script 列只作审计引用）。 */
+  operation: string;
+  args: readonly string[];
+}
+
 /**
- * 平台错误码表的 correctForm（跨仓读平台文件：L2 单一来源在平台侧，e2e 按**数据**核期望，
- * 不在 fshine 仓抄一份期望台词——平台改措辞这边自动跟着变，抄了就成了第二份真相）。
+ * 平台错误码表的 correctForm（P6 缝，2026-11-13）：**从平台 RESULT 信封取数**。
+ *
+ * 原实现跨仓读兄弟仓的 `src/lib/error-codes.js` 源码文件——换执行层（dummy）当场文件
+ * 不存在，且把"平台措辞"复制成第二份真相的风险随文件解析扩散。correctForm 的唯一权威
+ * 出口是平台信封的 `error.correctForm`（platform-contract.ts 的 PlatformEnvelope 注释
+ * 同一事实：emit 出口统一收口），本函数因此改为：跑一条调用方给出的探针 → 读信封。
+ *
+ * 探针由调用方给出（"哪条调用会产出这个码"是场景知识，调用方最懂）；本函数不认识任何
+ * 业务码，只做机械取数。
+ *
+ * 契约（缺一即 throw——与原实现"表里找不到就抛"同语义：缺数响亮失败，绝不静默兜底）：
+ *   ① 探针真跑出 RESULT 信封（无信封：进程没起来/命令形态错——原样带上 exit/stderr 抛）；
+ *   ② 信封 `error.code` 等于请求的 code（跑出别的码 = 探针选错或契约漂移，不将就）；
+ *   ③ `error.correctForm` 非空。
+ * 探针按**宿主直调**语义 spawn（hostGatewayEnv：剥 EXECUTION_REQUIRE_PLAN，与 D-081 的
+ * 提案创建/落账直调同规）——它是宿主的取数调用，不是 worker 的 serve 执行，不该被
+ * worker 的计划门拦。
  */
-export function platformCorrectForm(code: string): string {
-  const table = readFileSync(path.join(PLATFORM_ROOT, 'src', 'lib', 'error-codes.js'), 'utf8');
-  const match = new RegExp(`${code}:\\s*\\{[^}]*correctForm:\\s*'([^']+)'`).exec(table);
-  if (!match) throw new Error(`平台错误码表里找不到 ${code} 的 correctForm（跨仓契约漂移？）`);
-  return match[1]!;
+export function platformCorrectForm(code: string, probe: CorrectFormProbe): string {
+  const out = spawnSync(gatewayCliPath(), [probe.mode, probe.operation, ...probe.args], {
+    cwd: PLATFORM_ROOT,
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: hostGatewayEnv(),
+  });
+  const envelope = parseEnvelope(out.stdout ?? '');
+  if (!envelope) {
+    const detail = ((out.stderr ?? '') || (out.stdout ?? '')).trim().slice(0, 300);
+    throw new Error(`correctForm 探针未返回 RESULT 信封（code=${code}，exit ${out.status ?? 'null'}）：${detail}`);
+  }
+  if (envelope.error?.code !== code) {
+    throw new Error(`correctForm 探针的信封码不符：请求 ${code}，信封 ${envelope.error?.code ?? '(无 error)'}（探针选错或平台契约漂移）`);
+  }
+  const form = envelope.error.correctForm;
+  if (typeof form !== 'string' || !form.trim()) {
+    throw new Error(`平台信封未携带 ${code} 的 correctForm（code 命中但字段缺失——缺数即失败，不兜底）`);
+  }
+  return form;
 }
 
 export {
