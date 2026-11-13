@@ -80,6 +80,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 | `TaskRunRecord.dispatchKey` | host-generated 幂等键（注释原话：idempotency key for the source dispatch event/tool call）；exactly-once 三要素（业务操作 ID / 网关幂等键 / 回读对账）里的第一样 |
 | WT-1 / WT-2（`tests/e2e/turn-loop-worker-timeout.test.ts`） | 超时收掉留部分转录；同一 taskId 从持久化断点续跑、不新开任务、不从零重付 |
 
+> **2026-11-13 附注（M2 波次 1）**：上表 WT-1/WT-2 所指 `tests/e2e/turn-loop-worker-timeout.test.ts` 已随旧 e2e 套件整体删除——该行用例证据暂缺，覆盖现状待后续对账；本次删除不动机制本身。
+
 **与既有律法的关系**：本节**不削弱** L1–L7 的任何闭环判据。B 类机制仍按原律法的闭环判据验收；A 类在原有判据之外**增加**消融 / Eval 判据。删除仍按下一节执行。
 
 ---
@@ -158,7 +160,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 - **错误码表镜像**：~~`error-codes.ts` 复刻平台正确形态文案（`AMBIGUOUS_SELECTION`/`NOT_FOUND_SELECTION` 一族）。~~ **已退化为渲染层**（2026-09-27 Wave 2 Lane D）：`NOT_FOUND_SELECTION` 只拼结构，措辞槽位优先取信封 `error.correctForm`；宿主表仅存"信封没带时的兜底"并挂"遗留待清"（D-002）。`AMBIGUOUS_SELECTION` 的用户可见事实已全部来自信封数据，平台给它的 correctForm 是解析方规则、不上屏。**镜像层已退役**（2026-11-05 W2）：文件头框架去镜像（宿主只持渲染纪律与结构教学，平台错误码表与 schema 是权威、消费不抄写）；`correctForm` 教学只留结构（`ENTITY_OUT_OF_SCOPE` 清零平台 operation 名、`PLAN_CALL_ARGS_NOT_ARRAY` 清零业务命令语法示例）；信封数据优先（`{hint}` 槽位）+ 宿主兜底只留结构（`hintFallback` / `ASSISTANT_NOT_FOUND_SELECTION` 句尾，挂遗留待清，D-002 追记补限期与第二处兜底）；机械锁 = `error-codes.test.ts` 三把全表锁（零 operation 名 / args 教学零旗标示例 / 全表零业务词，哑值填充）+ `plan-teaching.test.ts` 形状锁。
 - **KEY_ARG_FLAGS 镜像**：~~`serve-gate.ts` 的 `KEY_ARG_FLAGS` 常量。~~ **已删**（2026-09-27 Wave 2 Lane D）：参数摘要改查平台 `operation list --json` 的 args 规格，无规格不发摘要（D-012）。
 - **ask.ts 复刻装配层**：~~`scripts/ask.ts` 的装配复刻段把 `apps/server/assembly.ts` 的 `planConfirmation` 装配照抄一遍。~~ **已消除**（2026-09-27 Wave 2 Lane D）：`apps/server/plan-confirmation-route.ts` 导出工厂 `createPlanConfirmationWiring({dbPath, platformRoot, planActivationSecret})`，assembly 与 ask.ts 共用；TTL 收敛为 `PLAN_CONFIRMATION_TTL_MS`（D-013）。
-- **遗留待清（2026-11-05 脱敏波登记，D-154）**：e2e/探针/验收/smoke:commit:mock 对兄弟仓 mock seed 目录的硬耦合——`tests/e2e/harness.ts` 真 spawn 兄弟仓 CLI、`respond.js` 把 seed 拷为 mock 状态；脱敏波只改了 fshine 一侧夹具名，seed 未同批改名，经 mock 目录的 Tier B 链转红。**归属**：W5 前；**闭环判据**：两仓夹具按同一张映射表同步机械改名后，执行层检出就位前提下 `npx vitest run tests/e2e` 全绿；**限期**：W5 前。同步前 Tier B 红是已知状态，任何报告不得写成绿。**2026-11-07 附注（非销账）**：harness 改统一配置解析后实测 e2e 失败集合不增（改前改后逐文件比较）——这只是无回归证据，seed 改名失配未修，本条维持遗留待清。
+- **遗留待清（2026-11-05 脱敏波登记，D-154）**：e2e/探针/验收/smoke:commit:mock 对兄弟仓 mock seed 目录的硬耦合——`tests/e2e/harness.ts` 真 spawn 兄弟仓 CLI、`respond.js` 把 seed 拷为 mock 状态；脱敏波只改了 fshine 一侧夹具名，seed 未同批改名，经 mock 目录的 Tier B 链转红。**归属**：W5 前；**闭环判据**：两仓夹具按同一张映射表同步机械改名后，执行层检出就位前提下 `npx vitest run tests/e2e` 全绿；**限期**：W5 前。同步前 Tier B 红是已知状态，任何报告不得写成绿。**2026-11-07 附注（非销账）**：harness 改统一配置解析后实测 e2e 失败集合不增（改前改后逐文件比较）——这只是无回归证据，seed 改名失配未修，本条维持遗留待清。**2026-11-13 附注**：旧 `tests/e2e` 套件已随 M2 波次 1 整体删除，本条闭环判据中 `npx vitest run tests/e2e` 部分已不可执行——条目状态不变，判据待重新对账。
 
 **闭环判据**：**宿主教学示例与平台声明逐字一致**（plan 草案形状的 6 处收敛为 1 处，从 执行层 `src/execution/plan-schema.json` 派生，宿主只持指针/常量）；**解析器常量（`parsePlanCallsCommand` / 拦截正则，见 `plan-runtime.ts`）归属"警职执法"，挂标签保留**——平台看不到提交前的命令，替不了宿主解析；代码网关名 ≤1（配置派生；注释/示例字面量除外，grep 总量另记，不计入本判据）；错误码表 / KEY_ARG_FLAGS 镜像退化为渲染层（`correctForm` 优先取信封数据，镜像仅在无信封时存在且挂"遗留待清"）。
 
