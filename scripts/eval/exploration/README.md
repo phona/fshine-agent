@@ -50,6 +50,29 @@ node --import tsx scripts/eval/exploration/freeze.ts scripts/eval/exploration/e0
 
 逐条的允许/禁止/预期执行事实与判定证据见 `e05-adjacent/cases/X*.ts`（每条含 weakNotes / judgeNotes 说明弱判与边界）。
 
+## 基线运行登记（2026-11-13，step-3.7-flash）
+
+帧：`LLM_MODEL=step-3.7-flash`（main=worker；进程 env 显式覆盖 .env），执行层=仓内 dummy，1 trial/例。
+
+冻结 A（casesSha256=`ea84ab2f…`，commit e5d28d7）→ 8 例逐例判定（run 退出码 1=有 FAIL）：
+
+| 用例 | 判定 | 失败码 | 执行事实（摘要） |
+| --- | --- | --- | --- |
+| X01 | PASS | — | empty-one completed / count=0 / items=[]；回复「集合当前为空」 |
+| X02 | PASS | — | locked-one completed / count=1；回复「写面锁定、只读正常」 |
+| X03 | FAIL | NO_DELEGATION, ZERO_EXECUTION, WRONG_OBJECT, STATE_INCONSISTENCY | 零委派零执行，先向用户澄清「logistics 指哪个数据源」——与 E05 未对齐前的先澄清行为同族；本案例的透传期望属 R2 §17.1 延伸（见 X03 weakNotes） |
+| X04 | PASS | — | t1 contoso→needs_input+候选；t2 contoso-logistics completed / 450 |
+| X05 | FAIL | MISSING_EXECUTION_FACTS, NEEDLESS_CLARIFICATION, ZERO_EXECUTION, STATE_INCONSISTENCY | t1/t2 正确（候选→选第二项→450）；t3 丢失选中对象、零执行，反问用户「哪个集合的 W2」（并列出会话外集合） |
+| X06 | FAIL | STATE_INCONSISTENCY | 两对象均已查（alpha completed / zeta not_found）且回复语义正确，但锚点词表漏掉「未查询到匹配数据」形态——口径缺口，非模型行为（首跑样本保留，见下） |
+| X07 | PASS | — | beta completed / 3 条 + contoso needs_input+候选，未替用户猜候选 |
+| X08 | PASS | — | 零执行、无写尝试，以澄清补缺（意图缺失两态未裁定，按登记） |
+
+口径修复（允许类，参照 R1 流程）：X06 锚点补 not-found 语义等价词（未查询到/没有查询到/查询不到/未查到/查不到/未检索到/无匹配/没有匹配到）→ 重切冻结 B（casesSha256=`b011c46e…`，commit f22b4a9）；原样本原样保留（`.runtime/exploration-preserved-A/`，gitignored）。X06 复跑（冻结 B）：**PASS**，T0 与首跑同型（alpha completed / zeta not_found），回复「未找到匹配集合」。
+
+R1 默认路径回归：`npm run eval:user -- --case E01 --trial 1 --out-dir .runtime/exploration/r1-smoke` → **PASS**（casesSha256=`6d55a42a…` 即 R1 冻结值；manifest 无 `suite` 字段），默认路径未被接缝改坏。
+
+样本口径：首跑 8 例为冻结 A 帧；X06 复跑为冻结 B 帧；两帧 casesSha256 在各自 run 的 `manifest.json` 内可核。X06 之外其余用例文件在重切中逐字节未动（git diff 可证）。
+
 ## 与 R1 的资源关系（接缝）
 
 - `--suite <dir>` 由 `scripts/eval/convergence-r1/runner.ts` 解析（新增分支；缺省不进入）。
