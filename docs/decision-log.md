@@ -692,8 +692,29 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 **命令与净删（实跑）**：
 
 - `npx tsc --noEmit` → exit 0；`npx vitest run --project unit` → 26 文件 / 206 用例全绿；`npm run ci` → `CI deterministic gates: PASS`。
-- 真模型面回归：`npm run eval:user -- --trials 1`（12 用例全样本）跑通；结果 9 PASS / 3 FAIL（E04/E05/E08 零执行类，按冻结判据判负，原样保留）——证据在 `.runtime/eval-r1/post-cleanup/`。
+- 真模型面回归：`npm run eval:user -- --trials 1`（12 用例全样本）跑通；结果按当时判定器记 8 PASS / 4 FAIL——其中 E01 的 FAIL 经复核为**判定器假阳性**（markdown 表格行号误判 + 陈述句误判提问，修复与重切见 §十五），重切后复判 9 PASS / 3 FAIL；E04/E05/E08 零执行类判负按冻结判据原样保留——证据在 `.runtime/eval-r1/post-cleanup/`。
 - 净删：两个清理提交合计 **43 文件、+54 / −3538 行**（D4/D5/D7 提交 24 文件 +19/−2534；D1/D2/D2b/D3+注释提交 19 文件 +35/−1004）。
+
+**状态**：已实施（本分支，待开 PR）。
+
+---
+
+## 十五、convergence-r1 用户级评测交付与判据冻结记录（2026-11-13，分支 arch/eval-r1）
+
+**交付**：`scripts/eval/convergence-r1/`——12 用例（E01–E12，数据文件一例一个）+ 六维确定性判定器 + 证据 schema（每 case×trial 独立目录：inputs/model/toolcalls/transcripts/audit+index/executions/reply/meta/state/db/judgment）+ runner/judge/selftest/freeze/README；入口 `npm run eval:user`（生产同源装配：createSession + createDummyCliClient + 同一配置与任务底账；唯一插桩 = TurnDriver 记录包装器）；真模型面跑 `eval-real.yml`（1 轮）与 `eval-nightly.yml`（12×3）。
+
+**第一次冻结（`d8faff6`）**：criteriaSha256=`9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4`；casesSha256=`6d55a42ad0ff575cfe11fb4695861c6a7c28d46654c6e94de29170161e4d1a78`；files 18 项（criteria.ts / cases.ts / judge.ts / hash.ts / evidence.ts / selftest.ts + 12 用例文件）。
+
+**冻结前验证（真实模型，不计入 36 次）**：E01–E12 每例至少 1 次实跑（smoke E01 一次 + 预冻结分批）；判定器自测 `--judge-selftest` 8/8；全样本原样保留（含 E05 两次判负样本）。
+
+**重切（判据冻结后的判定器缺陷修复；「判定器自身缺陷」属允许修复类）**：正式 36 次运行开始前，用冻结判据复判存量全样本时发现三处判定器缺陷——① markdown 表格「序号」列的数字被当成与实体同句的不可溯源数值（E01 误判 `FAIL_FABRICATED_DATA`）；② 陈述句里的「分属哪个窗口」按冻结词表被当成提问（E01 误判 `FAIL_NEEDLESS_CLARIFICATION`）；③ T0/T2 同一载荷被重复计入「合计」推导（500+300+200 被算成 2000，1000 报弱告警）。
+
+- **修复范围**：仅 `judge.ts`（子句分隔补表格竖线；判负门槛加「实际提问形态」——句末问号或请求式短语；载荷按值列表去重后做分组合计/组内差值/跨组合计）。**criteria.ts 与 12 用例文件逐字节未动**（两哈希不变）。
+- **验证**：`--judge-selftest` 8/8；复判全部存量样本 27 trial、仅 3 处变化——post-cleanup E01 FAIL→PASS、pre-freeze2 E04 FAIL→PASS（两者均为上述假阳性）、pre-freeze E05 去掉一处被移除的全域状态检查（`FAIL_WRONG_OBJECT` 保留）；全部零执行/虚构类判负不变，无判负被放宽。
+
+**第二次冻结（重切）**：judge.ts sha256=`fdf29e7d98a97e68c0c8b9e34b95a32822f1684786de57352f47c1c19ccbf64b`；criteriaSha256 / casesSha256 不变（判据与用例未改）；`frozenAt=2026-11-13T10:49:28Z`。此后判据、用例与判定器均不得再改。
+
+**加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
 
 **状态**：已实施（本分支，待开 PR）。
 

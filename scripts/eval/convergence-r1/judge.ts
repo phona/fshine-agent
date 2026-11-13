@@ -88,6 +88,18 @@ function splitSentences(text: string): Array<{ text: string; question: boolean }
   }));
 }
 
+/**
+ * 实际提问形态（判定器缺陷修复，2026-11-13 重切）：冻结词表命中只表示"句中出现疑问词"，
+ * 陈述句里的「分属哪个窗口」这类用法不是提问；用于**判负**的门槛必须再加一层形态判断——
+ * 句末问号，或请求式短语（请提供/请确认/请补充/请告诉/需要你/你是指/请问）。
+ * 提问检测本身（question 字段）保持冻结口径不变。
+ */
+function isActualQuestion(sentence: string): boolean {
+  const text = sentence.trim();
+  if (/[？?]/.test(text)) return true;
+  return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => text.includes(word));
+}
+
 const QUESTION_WORDS = ['请问', '请提供', '请确认', '你是指', '哪一个', '哪一', '哪个', '需要你'];
 
 /** 无谓追问短语（冻结口径：把已给信息再问一遍的形态）。 */
@@ -544,7 +556,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     warn('expected_clarification_missing：未检测到澄清提问（词面判定，弱）');
   }
   if (caseDef.clarification === 'forbidden') {
-    if (lastSentences.some((sentence) => sentence.question && NEEDLESS_QUESTION_PHRASES.some((phrase) => sentence.text.includes(phrase)))) {
+    if (lastSentences.some((sentence) => sentence.question && isActualQuestion(sentence.text) && NEEDLESS_QUESTION_PHRASES.some((phrase) => sentence.text.includes(phrase)))) {
       addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], '重复追问已被用户给出的对象/条件（无谓追问）');
     }
   }
@@ -552,7 +564,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     if (!expectation.forbiddenQuestionTopics) continue;
     const sentences = splitSentences(turnReplies.get(expectation.turn) ?? '');
     for (const sentence of sentences) {
-      if (!sentence.question) continue;
+      if (!sentence.question || !isActualQuestion(sentence.text)) continue;
       const topic = expectation.forbiddenQuestionTopics.find((word) => sentence.text.includes(word));
       if (topic) {
         addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], `turn-${expectation.turn} 追问已给信息（话题：${topic}）`);
@@ -580,32 +592,37 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     }
   }
 
-  // 可溯数值集合：载荷 items 值 / count / 合计 / 成对差值 / 候选与窗口个数 / 用户文本数字。
+  // 可溯数值集合：载荷 items 值 / count / 分组合计 / 组内成对差值 / 跨组合计 / 候选与窗口个数 / 用户文本数字。
+  // 载荷分组：T0 行与 T2 outcome 对同一次执行是同一份载荷 → 按值列表去重后再派生，
+  // 避免「合计」被重复计数（曾把 500+300+200 重复成 2000，让 1000 误报为不可溯源）。
   const traceable = new Set<number>();
   for (const text of inputs.turns.map((turn) => turn.text)) {
     for (const token of extractNumberTokens(text)) traceable.add(token.value);
   }
-  const payloadValues: number[] = [];
-  for (const entry of executionRows) {
-    const items = entry.row.result?.items;
-    if (Array.isArray(items)) {
-      for (const item of items) if (typeof item.value === 'number') payloadValues.push(item.value);
-      traceable.add(items.length);
+  const payloadGroups: number[][] = [];
+  const seenGroups = new Set<string>();
+  const addPayloadGroup = (items: unknown): void => {
+    if (!Array.isArray(items)) return;
+    const values: number[] = [];
+    for (const item of items) {
+      const value = item !== null && typeof item === 'object' ? (item as { value?: unknown }).value : undefined;
+      if (typeof value === 'number') values.push(value);
     }
+    traceable.add(items.length);
+    const key = JSON.stringify(values);
+    if (seenGroups.has(key)) return;
+    seenGroups.add(key);
+    payloadGroups.push(values);
+  };
+  for (const entry of executionRows) {
+    addPayloadGroup(entry.row.result?.items);
     if (typeof entry.row.result?.count === 'number') traceable.add(entry.row.result.count);
   }
   for (const call of workerCalls) {
     const outcome = call.result as OutcomeLike | undefined;
     if (outcome && outcome.status === 'completed' && outcome.data && typeof outcome.data === 'object') {
       const data = outcome.data;
-      const items = data['items'];
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          const value = item !== null && typeof item === 'object' ? (item as { value?: unknown }).value : undefined;
-          if (typeof value === 'number') payloadValues.push(value);
-        }
-        traceable.add(items.length);
-      }
+      addPayloadGroup(data['items']);
       if (typeof data['count'] === 'number') traceable.add(data['count']);
       const windows = data['availableWindows'];
       if (Array.isArray(windows)) traceable.add(windows.length);
@@ -613,21 +630,27 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       if (Array.isArray(candidates)) traceable.add(candidates.length);
     }
   }
-  for (const value of payloadValues) traceable.add(value);
-  if (payloadValues.length > 0) {
-    traceable.add(payloadValues.reduce((sum, value) => sum + value, 0));
-    for (let i = 0; i < payloadValues.length; i += 1) {
-      for (let j = i + 1; j < payloadValues.length; j += 1) {
-        traceable.add(Math.abs(payloadValues[i]! - payloadValues[j]!));
+  for (const group of payloadGroups) {
+    for (const value of group) traceable.add(value);
+    if (group.length > 0) {
+      traceable.add(group.reduce((sum, value) => sum + value, 0));
+      for (let i = 0; i < group.length; i += 1) {
+        for (let j = i + 1; j < group.length; j += 1) {
+          traceable.add(Math.abs(group[i]! - group[j]!));
+        }
       }
     }
   }
-  // 注意：payloadValues 允许负数；差值集合不做 0 排除（0 也可能是合法差）。
+  // 跨载荷合计（多集合场景的「总共」），按去重后的分组求和。
+  if (payloadGroups.length > 1) {
+    traceable.add(payloadGroups.reduce((sum, group) => sum + group.reduce((inner, value) => inner + value, 0), 0));
+  }
 
   const expectedCollectionsForReply = caseDef.expected.allowedCollections.filter((name) => name !== '');
   const expectedItemNames = new Set<string>((caseDef.expected.checkpoints ?? []).flatMap((checkpoint) => (checkpoint.items ?? []).map((item) => item.name)));
-  // 实体-数值配对按子句核（不按字符窗——截断会把「200」切出伪 token「2」）。
-  const clauses = lastReply.split(/[、，。；！？!?\n：:]/).map((clause) => clause.trim()).filter(Boolean);
+  // 实体-数值配对按子句核（不按字符窗——截断会把「200」切出伪 token「2」）；
+  // 竖线也是子句分隔（markdown 表格的「序号」列曾被当成与实体同句的不可溯源数值）。
+  const clauses = lastReply.split(/[、，。；！？!?\n：:|｜]/).map((clause) => clause.trim()).filter(Boolean);
   for (const clause of clauses) {
     for (const itemName of expectedItemNames) {
       if (!clause.includes(itemName)) continue;
