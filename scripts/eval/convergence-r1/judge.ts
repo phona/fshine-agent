@@ -179,6 +179,28 @@ function contextualPhraseHit(reply: string, phrases: readonly string[]): string 
   return undefined;
 }
 
+/**
+ * 无数据类锚点的语义等价形态（判定器缺陷修复，2026-11-13 重切#5）：
+ * 锚点列表含「无数据/没有数据/没有记录/无记录」时，逐字子串之外的等价陈述同样算命中——
+ * 「alpha 集合下没有 W9 窗口的数据。」「W9 窗口下没有任何数据。」因插入语无法逐字命中，
+ * 曾致 E07 硬锚点全落空（judgment ①note「全部未命中」）。等价形态限定为
+ * 否定词…数据/记录/条目/内容（插入语 ≤12 字且不跨句）与 数据/记录…不存在/为空。
+ * 只对含上述四个标记的锚点列表生效（当前仅 E07），其余锚点保持逐字口径。
+ */
+const NO_DATA_MARKERS = ['无数据', '没有数据', '没有记录', '无记录'] as const;
+const NO_DATA_PATTERNS: readonly RegExp[] = [
+  /(没有|无|未|不存在|查不到|没查到|找不到|没有查到)[^。；！？]{0,12}(数据|记录|条目|内容)/,
+  /(数据|记录|条目|内容)[^。；！？]{0,6}(不存在|没有|为空)/,
+];
+
+function containsAnyMatched(values: readonly string[], text: string): boolean {
+  if (values.some((value) => text.includes(value))) return true;
+  if (values.some((value) => (NO_DATA_MARKERS as readonly string[]).includes(value))) {
+    return NO_DATA_PATTERNS.some((pattern) => pattern.test(text));
+  }
+  return false;
+}
+
 function isWriteFaceRow(row: AuditRow): boolean {
   const script = typeof row.script === 'string' ? row.script : '';
   if (/(\.prepare|\.commit|\.proposal|\.proposal-commit)$/.test(script)) return true;
@@ -394,8 +416,20 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   const rowTargets = new Map<number, string | undefined>();
   for (const entry of executionRows) {
     const normalized = normalizeArgs(entry.row.args);
-    const target = [normalized['collection'], normalized['topic'], normalized['query']].find((value) => typeof value === 'string') as string | undefined;
-    rowTargets.set(entry.line, target);
+    rowTargets.set(entry.line, [normalized['collection'], normalized['topic'], normalized['query']].find((value) => typeof value === 'string') as string | undefined);
+  }
+  // requireEveryRowArgs 的作用域（判定器缺陷修复，重切#5）：到「期望的 not_found 结果首次出现」
+  // 为止（含）。E07 冻结 weakNote 明确「随后自纠补查 W1/W2 = 允许（记录）」——补查行不得按
+  // 「条件丢失」判负；其他单查用例（E02/E08/E09/E10）无 not_found 检查点、作用域恒为全部行，不受影响。
+  const selfCorrectionAfterLine = (() => {
+    const checkpoint = (caseDef.expected.checkpoints ?? []).find((entry) => entry.status === 'not_found');
+    if (!checkpoint) return undefined;
+    const anchorRow = executionRows.find((candidate) => rowTargets.get(candidate.line) === checkpoint.collection && candidate.row.result?.status === 'not_found');
+    return anchorRow?.line;
+  })();
+  for (const entry of executionRows) {
+    const normalized = normalizeArgs(entry.row.args);
+    const target = rowTargets.get(entry.line);
     if (target === undefined) {
       if (caseDef.expected.allowedCollections.length > 0) {
         addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行行缺少对象参数（对象条件丢失）：line ${entry.line}`);
@@ -405,7 +439,8 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     } else if (!caseDef.expected.allowedCollections.includes(target)) {
       addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行对象 ${target} 不在允许集合 [${caseDef.expected.allowedCollections.join(', ')}]`);
     }
-    if (caseDef.expected.requireEveryRowArgs) {
+    const inSelfCorrectionScope = selfCorrectionAfterLine !== undefined && entry.line > selfCorrectionAfterLine;
+    if (caseDef.expected.requireEveryRowArgs && !inSelfCorrectionScope) {
       for (const [key, value] of Object.entries(caseDef.expected.requireEveryRowArgs)) {
         if (String(normalized[key]) !== value) {
           addCode('FAIL_WRONG_OBJECT', ['③数据正确性'], `执行行条件丢失：line ${entry.line} 的 ${key} 期望 ${value}，实际 ${String(normalized[key])}`);
@@ -579,7 +614,7 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
       return { ok: missingValues.length === 0, detail: `containsAll ${anchor.values.join('/')} 缺：${missingValues.join('/')}` };
     }
     if (anchor.kind === 'containsAny') {
-      return { ok: anchor.values.some((value) => text.includes(value)), detail: `containsAny ${anchor.values.join('/')} 全部未命中` };
+      return { ok: containsAnyMatched(anchor.values, text), detail: `containsAny ${anchor.values.join('/')} 全部未命中` };
     }
     if (anchor.kind === 'numberAny') {
       const hit = extractNumberTokens(text).some((token) => anchor.numbers.includes(token.value));
