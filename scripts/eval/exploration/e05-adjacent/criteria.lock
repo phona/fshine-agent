@@ -1,9 +1,9 @@
 {
   "generatedBy": "node --import tsx scripts/eval/exploration/freeze.ts <suite-dir>",
   "suiteId": "e05-adjacent",
-  "frozenAt": "2026-11-13T14:13:13.243Z",
+  "frozenAt": "2026-11-13T14:18:52.383Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "ea84ab2ff85efc39d7fe5992ce5a33d38dd341b7f7d75d005518c29ae0ac8dea",
+  "casesSha256": "b011c46eb38d8ea5d2d7e26e2ef52332ffcfde7e72bcb485789cb39a7eae9939",
   "files": {
     "scripts/eval/exploration/e05-adjacent/suite.ts": "beae9099f06c85f3a97ec7f57462e2ffbb405738521e9eb23c9a69fdc25425d3",
     "scripts/eval/exploration/e05-adjacent/cases/X01.ts": "d39b8933b9cd01c67b81c37f42a84481c18591b030c9e0d91cca8a593405faba",
@@ -11,7 +11,7 @@
     "scripts/eval/exploration/e05-adjacent/cases/X03.ts": "6a5011f9a1b4af494e7d6aa1ce04cf103447e89cc377c40b33455c1cab327401",
     "scripts/eval/exploration/e05-adjacent/cases/X04.ts": "893284457c0a738852013e2373d8a03bb90f1b7ba9596ed3f27d10f76e5a70b1",
     "scripts/eval/exploration/e05-adjacent/cases/X05.ts": "2aead5d3b510fe125b52c2f84cd40ef5f493374b5bde79c50da0e9b2d760012d",
-    "scripts/eval/exploration/e05-adjacent/cases/X06.ts": "c02815c122af64d9f93f83be73e54236697ab29ea7a98d30cff6864eb72453cf",
+    "scripts/eval/exploration/e05-adjacent/cases/X06.ts": "ac8df90663409d5d3e9d4c84c6ca566760d73d547b862c680d4557d7f629de65",
     "scripts/eval/exploration/e05-adjacent/cases/X07.ts": "9a19d2d25faff2f5119cf67b3371eea78507c6c6b96bbb1b2e3c79273c46fff1",
     "scripts/eval/exploration/e05-adjacent/cases/X08.ts": "05f3a219794b8b520ba89161011aba032db8b0a6643a70f2c8629fc7c3f52434",
     "scripts/eval/exploration/suite-contract.ts": "a2313092924cb7f4a907f261eb75b64bb5a6efc66a7115b79380928d270cd430",
