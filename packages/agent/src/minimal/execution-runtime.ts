@@ -25,7 +25,7 @@ import { randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver } from '../driver-contract';
-import { createTaskRegistry, type MinimalExecutionRecord, type MinimalTaskRecord } from './task-registry';
+import { createTaskRegistry, type MinimalExecutionRecord, type MinimalTaskRecord, type MinimalTaskRegistry } from './task-registry';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；M1 用中性名）。 */
 export const RUN_TASK_TOOL = 'run_task';
@@ -106,6 +106,11 @@ export interface MinimalRuntimeOptions {
   mainSystemPrompt: string;
   /** Worker 需嵌入本轮提示的领域技能正文（可选）。 */
   workerSkills?: readonly MinimalWorkerSkill[];
+  /**
+   * 任务底账（B 类持久化）：装配方可注入 SQLite 实现使归属跨重启成立；
+   * 缺省 = 进程内内存实现（测试与纯内存嵌入用）。
+   */
+  taskRegistry?: MinimalTaskRegistry;
   /** 单回合上限（Main）与单次委派上限（Worker）；缺省值见下。 */
   mainTurnMs?: number;
   workerTurnMs?: number;
@@ -180,7 +185,7 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
     operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
   };
 
-  const registry = createTaskRegistry();
+  const registry = options.taskRegistry ?? createTaskRegistry();
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
 
@@ -205,7 +210,6 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
     const record: MinimalExecutionRecord = {
       requestId,
       operation,
-      args: callArgs,
       status: outcome.status,
       ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
     };
@@ -272,9 +276,8 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
       deadline: currentTurnDeadline,
     });
     mainMessages = [...mainResult.messages];
-    const executions = registry.list()
-      .filter((task) => taskIds.includes(task.taskId))
-      .flatMap((task) => task.executions);
+    const scope = { principalId: options.principalId, sessionId: options.sessionId };
+    const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
     return { reply: mainResult.text, taskIds, executions, progress };
   }
 
@@ -283,7 +286,7 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
     sessionId: options.sessionId,
     transcript: () => [...mainMessages],
     send,
-    tasks: () => registry.list(),
+    tasks: () => registry.list({ principalId: options.principalId, sessionId: options.sessionId }),
     getTask: (taskId) => registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId }),
   };
 }

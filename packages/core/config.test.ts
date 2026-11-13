@@ -546,7 +546,7 @@ host:
     expect(config.contextProfiles['<profileId>']?.root).toBe('/path/to/execution-layer');
     expect(config.contextProfiles['<profileId>']?.gateway).toBe('bin/your-gateway');
     expect(config.contextProfiles['<profileId>']?.skillRoots).toEqual(['.agents/skills-serve']);
-    expect(config.llm?.model).toBe('kimi-for-coding');
+    expect(config.llm?.model).toBe('your-model');
     // 模板不填真值：空 secret 不进入 AppConfig，也不伪造 env。
     expect(config.wecom).toBeUndefined();
     expect(deploymentEnvOf(config)['WECOM_BOT_SECRET']).toBeUndefined();

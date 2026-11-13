@@ -21,7 +21,6 @@ export type MinimalTaskStatus = 'running' | 'completed' | 'failed';
 export interface MinimalExecutionRecord {
   requestId: string;
   operation: string;
-  args: Readonly<Record<string, unknown>>;
   status: ExecutionStatus;
   error?: ExecutionFailure;
 }
@@ -61,7 +60,8 @@ export interface MinimalTaskRegistry {
   fail(taskId: string, reason: string): void;
   /** 按可信 scope 取任务：principalId 与 sessionId 都必须一致，否则 TaskOwnershipError。 */
   get(taskId: string, scope: TaskScope): MinimalTaskRecord;
-  list(): readonly MinimalTaskRecord[];
+  /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
+  list(scope?: TaskScope): readonly MinimalTaskRecord[];
 }
 
 /** 库内可变形状：对外只读视图由 MinimalTaskRecord 承担。 */
@@ -119,8 +119,10 @@ export function createTaskRegistry(): MinimalTaskRegistry {
       }
       return task;
     },
-    list() {
-      return [...tasks.values()];
+    list(scope) {
+      const all = [...tasks.values()];
+      if (scope === undefined) return all;
+      return all.filter((task) => task.principalId === scope.principalId && task.sessionId === scope.sessionId);
     },
   };
 }

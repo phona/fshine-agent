@@ -21,9 +21,13 @@ const ENTRIES = [
   'packages/contracts/src/execution-contract.ts',
   'packages/agent/src/minimal/worker-env.ts',
   'packages/agent/src/minimal/task-registry.ts',
+  'packages/agent/src/minimal/task-registry-sqlite.ts',
   'packages/agent/src/minimal/execution-runtime.ts',
   'packages/agent/src/minimal/dummy-cli-client.ts',
   'scripts/demo-minimal.ts',
+  // U2/U3 入口同受边界约束：新增装配不得以值边触及旧治理模块。
+  'scripts/ask-minimal.ts',
+  'apps/server/minimal-server.ts',
 ] as const;
 
 const CONTRACT = 'packages/contracts/src/execution-contract.ts';

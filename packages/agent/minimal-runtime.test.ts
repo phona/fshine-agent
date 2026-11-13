@@ -10,7 +10,10 @@
  *   ④ 能力快照与允许集合不一致 / 允许集合为空 → 构造即失败（fail-closed）；
  *   ⑤ 任务归属：越权 scope 取任务被拒（TaskOwnershipError）。
  */
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { MutableModels } from '@earendil-works/pi-ai';
 import type {
@@ -22,7 +25,13 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { createPiTurnDriver, type PiModelRuntime } from './src/pi-driver';
 import { createMinimalSession } from './src/minimal/execution-runtime';
-import { TaskOwnershipError, createTaskRegistry } from './src/minimal/task-registry';
+import { TaskOwnershipError, createTaskRegistry, type MinimalTaskRegistry } from './src/minimal/task-registry';
+import { createSqliteTaskRegistry } from './src/minimal/task-registry-sqlite';
+
+const tempDirs: string[] = [];
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
 
 const MANIFEST: CapabilityManifest = {
   contractVersion: 1,
@@ -135,6 +144,7 @@ function sessionFor(client: FakeClient, options: {
   mainResponses: AgentMessage[];
   workerResponses: AgentMessage[];
   allowedOperations?: readonly string[];
+  taskRegistry?: MinimalTaskRegistry;
 }) {
   return createMinimalSession({
     principalId: 'wecom:test-user',
@@ -144,6 +154,7 @@ function sessionFor(client: FakeClient, options: {
     mainDriver: driverFor(options.mainResponses),
     workerDriver: driverFor(options.workerResponses),
     mainSystemPrompt: '你是测试主 Agent。',
+    ...(options.taskRegistry ? { taskRegistry: options.taskRegistry } : {}),
   });
 }
 
@@ -259,5 +270,43 @@ describe('M1 最小链路（假客户端 + 假模型）', () => {
     expect(() => registry.get('task_x', { principalId: 'p1', sessionId: 's2' })).toThrow(TaskOwnershipError);
     expect(() => registry.get('task_absent', { principalId: 'p1', sessionId: 's1' })).toThrow(TaskOwnershipError);
     expect(() => session.getTask('task_absent')).toThrow(TaskOwnershipError);
+  });
+
+  it('注入的 SQLite 底账：关库重开任务仍在；越权取任务仍拒；list 按 scope 隔离', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'minimal-runtime-'));
+    tempDirs.push(dir);
+    const dbPath = path.join(dir, 'state.db');
+    const client = new FakeClient();
+    const registry = createSqliteTaskRegistry(dbPath);
+    const session = await sessionFor(client, {
+      mainResponses: [
+        toolCallAssistant('run_task', { task: '查询 documents' }, 'call_main_1'),
+        textAssistant('documents 共 3 条。'),
+      ],
+      workerResponses: [
+        toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, 'call_worker_1'),
+        textAssistant('已查询 documents。'),
+      ],
+      taskRegistry: registry,
+    });
+    const turn = await session.send('查一下 documents');
+    const taskId = turn.taskIds[0]!;
+    registry.close();
+
+    // 重启连续性：新开同一库，任务与执行记录仍在。
+    const reopened = createSqliteTaskRegistry(dbPath);
+    const task = reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_minimal_1' });
+    expect(task.status).toBe('completed');
+    expect(task.resultText).toContain('documents');
+    expect(task.executions).toHaveLength(1);
+    expect(task.executions[0]!.requestId).toBe(turn.executions[0]!.requestId);
+
+    // 归属校验跨重启仍生效：换 principal / 换 session 一律同一拒绝形态。
+    expect(() => reopened.get(taskId, { principalId: 'wecom:other', sessionId: 'sess_minimal_1' })).toThrow(TaskOwnershipError);
+    expect(() => reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_other' })).toThrow(TaskOwnershipError);
+    // list 按 scope 隔离：另一个会话看不到本任务。
+    expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_other' })).toEqual([]);
+    expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_minimal_1' }).map((item) => item.taskId)).toEqual([taskId]);
+    reopened.close();
   });
 });

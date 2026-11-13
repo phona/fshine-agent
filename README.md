@@ -38,10 +38,11 @@ npm run ci                           # typecheck + unit + generic-mock（单 che
 npm run typecheck
 npm run test
 
-npm start                            # 启动企微长连接服务
-AGENT_CONFIG_PATH=xxx npm start     # 覆盖配置文件路径
-npm run smoke:wecom                  # 企微长连接冒烟测试
-npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非 mock 拒跑）
+npm start                            # 企微长连接最小 server（需 config/agent.yaml + 企微凭据）
+AGENT_CONFIG_PATH=xxx npm start     # 覆盖配置文件路径（同 --config=<path>）
+npm run ask -- "帮我查一下 ..."       # 单轮最小 ask（仓内 dummy 执行层，打印回复与机械证据）
+npm run demo:minimal -- --trials=1  # 最小读链 demo（真实模型 + 仓内 dummy 执行层）
+npm run eval:generic-mock            # 确定性通用 mock 评测（26 用例）
 ```
 
 ## 引用消息与后台任务
@@ -61,37 +62,38 @@ npm run smoke:commit:mock            # mock 保护下两步写链路冒烟（非
 
 本项目不包含 MCP 主链路；本地测试使用脚本化 Pi driver，不代表生产模型调用。
 
-## V0 本地试用（本地测试平台）
+## 本地试用（Minimal：真实模型 + 仓内 dummy 执行层）
 
-在干净 checkout 上复制一条完整的本地试用路径：**真实 Main + 真实 Worker + 仓内 dummy 测试平台**（不触网、不接真实 SaaS），跑四轮冻结业务对话（核对本月单据 → 上月对比 → 指代复核 → 交付），全过程留痕。默认连跑 **3 次独立试用**（各自从干净的库与夹具状态起跑，同一份语料），全部结果都保留、不挑成功的展示。
+在干净 checkout 上复制一条完整的最小链路：**真实 Main + 真实 Worker + 仓内 dummy 测试平台**（不触网、不接真实 SaaS），跑两轮冻结读路径语料（本月单据 → 上月对比），全过程留痕。默认跑 **1 次试用**，结果（含失败）保留、不挑成功的展示。任务底账落 SQLite（`.runtime/minimal/state.db`），跨进程仍在。
 
 ```bash
 npm install
 # LLM：复制 .env.example 为 .env 并填 LLM_API_KEY（接口地址与模型名缺省取 config/agent.demo.yaml）
-npm run demo
-# 只跑 1 次：npm run demo -- --trials=1
+npm run demo:minimal -- --trials=1
+# 单轮问答：npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
 ```
 
-每次运行重置 `.runtime/demo/`，产物（每次试用一套）：
+每次运行重置 `.runtime/minimal/trial-N/` 与 `.runtime/minimal/ask/`，产物（每次试用一套）：
 
 | 文件 | 内容 |
 |---|---|
-| `.runtime/demo/trials/trial-N/transcript.md` | 四轮原文（用户语料 / 计划通知 / 回复）+ 机械证据（requestId / taskId / 平台调用 / dummy 审计行） |
-| `.runtime/demo/trials/trial-N/turns.jsonl` | 逐轮结构化记录（委派事件、taskId、平台调用、审计行、阶梯、耗时） |
-| `.runtime/demo/trials/trial-N/state/audit.jsonl` | 执行层（dummy 夹具）原始审计行——每次调用的执行事实 |
-| `.runtime/demo/trials/trial-N/demo.db` | 该次试用的会话库（与其它试用互不影响） |
+| `.runtime/minimal/trial-N/transcript.md` | 两轮原文 + 机械证据（requestId / taskId / 结构化执行 / dummy 审计行） |
+| `.runtime/minimal/trial-N/turns.jsonl` | 逐轮结构化记录（委派事件、taskId、结构化执行、审计行、耗时） |
+| `.runtime/minimal/trial-N/requests.jsonl` | 每次结构化执行的事实（requestId / operation / status） |
+| `.runtime/minimal/trial-N/state/audit.jsonl` | 执行层（dummy 夹具）原始审计行——每次调用的执行事实 |
+| `.runtime/minimal/state.db` | 任务底账（SQLite：任务归属 + 执行记录；重启后仍可读） |
 
 说明：
 
 - 本路径的执行层是仓内 dummy 夹具（`scripts/eval/fixtures/dummy-platform`），每次平台调用都是**真实子进程**（`bin/dummy`）；跑的是本地测试数据，**真实 SaaS / 真实业务平台未接入**。
-- 本路径不设置也不依赖任何 mock executor / `EXECUTION_EXECUTOR` 变量；执行层由 `config/agent.demo.yaml` 的 profile（root + gateway）选择，并有 fail-closed 隔离门兜底。
-- `npm start`（企微长连接服务）需要真实企微凭据（BotID / Secret）与真实执行层；本次未验证。
+- 本路径不设置也不依赖任何 mock executor / `EXECUTION_EXECUTOR` 变量；执行层由配置的 profile（root + gateway）选择，并有 fail-closed 隔离门兜底。
+- `npm start`（企微长连接最小 server）需要 `config/agent.yaml`（复制 `config/agent.example.yaml` 填写）与真实企微凭据（BotID / Secret）；仓内未连真实企微验证，渠道回归用假渠道（`SdkClientLike` stub）跑。
 
 ## 上线前必填
 
 | 位置 | 内容 |
 |---|---|
-| `config/agent.yaml`（复制 `config/agent.example.yaml`；gitignored） | 企微 principal；`llm.*`（接口地址 / key / model）与 `wecom.*`（BotID / Secret）；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots`；可选 `host.*` 宿主运行参数 |
+| `config/agent.yaml`（复制 `config/agent.example.yaml`；gitignored） | 企微 principal；`llm.*`（接口地址 / key / model）与 `wecom.*`（BotID / Secret）；按接入的执行层声明填写 `contextProfiles.<profileId>.root`、`gateway` 与 `skillRoots`；可选 `store.dbPath`（任务底账，缺省 `.runtime/minimal/state.db`） |
 | `.env`（可选，兼容旧部署） | 同名环境变量非空值覆盖 `config/agent.yaml`；`AGENT_CONFIG_PATH` 与 eval 工具面变量（`LLM_JUDGE_MODEL`）仍只从 env 读 |
 
 `contextProfiles.<profileId>.root` 是受信的执行层工作目录，不由用户输入或模型生成。执行层子 Agent 的会话通过任务 ID 恢复，并绑定到发起它的企微用户和 Main Agent 会话。

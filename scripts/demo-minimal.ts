@@ -9,6 +9,8 @@
  *   handler 等治理模块（import 图由 packages/agent/minimal-import-boundary.test.ts 静态检查）。
  * · 读路径作用域：允许集合从执行层自述的 access=read 派生；集合外 operation 在通用运行时
  *   里于发起执行前被拒（不依赖模型遵守提示词）。
+ * · 任务底账走 SQLite（`.runtime/minimal/state.db`，B 类持久化）：跨进程仍在，归属校验
+ *   跨重启仍成立（实现与表见 packages/core/src/minimal-task-store.ts）。
  * · 产物落 `.runtime/minimal/trial-N/`：turns.jsonl（逐轮事实）/ requests.jsonl（结构化请求）
  *   / transcript.md / state/audit.jsonl（执行层审计）。失败样本同样保留，不重跑掩盖。
  * · V0 的 `npm run demo` 保持原样（回退点）。
@@ -19,9 +21,10 @@ import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
-import { createSkillRegistry } from '../packages/agent/src/skills';
 import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/minimal/dummy-cli-client';
-import { MAIN_PROTOCOL_NOTE, createMinimalSession, type MinimalWorkerSkill } from '../packages/agent/src/minimal/execution-runtime';
+import { MAIN_PROTOCOL_NOTE, createMinimalSession } from '../packages/agent/src/minimal/execution-runtime';
+import { createSqliteTaskRegistry } from '../packages/agent/src/minimal/task-registry-sqlite';
+import { loadWorkerSkills } from '../packages/agent/src/minimal/worker-skills';
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 import { materializeEvalConfig } from './resolve-config-path';
 
@@ -66,7 +69,6 @@ interface ExecutionFact {
   taskId: string;
   requestId: string;
   operation: string;
-  args: Readonly<Record<string, unknown>>;
   status: string;
   error?: unknown;
 }
@@ -114,18 +116,6 @@ function rel(target: string): string {
   return path.relative(REPO_ROOT, target);
 }
 
-async function loadWorkerSkills(root: string, skillRoots: readonly string[]): Promise<MinimalWorkerSkill[]> {
-  const loaded: MinimalWorkerSkill[] = [];
-  for (const relative of skillRoots) {
-    const registry = createSkillRegistry({ rootDir: path.join(root, relative) });
-    for (const metadata of await registry.discover()) {
-      const skill = await registry.read(metadata.name);
-      loaded.push({ name: skill.name, content: skill.content });
-    }
-  }
-  return loaded;
-}
-
 async function runTrial(trial: number, input: TrialInput): Promise<TrialReport> {
   const startedAt = new Date().toISOString();
   const startedMs = Date.now();
@@ -146,6 +136,8 @@ async function runTrial(trial: number, input: TrialInput): Promise<TrialReport> 
 
   const reports: TurnReport[] = [];
   let fatalError: string | null = null;
+  // B 类持久化：任务底账落 SQLite（缺省 .runtime/minimal/state.db）；本轮收尾关库。
+  const taskRegistry = createSqliteTaskRegistry(path.join(MINIMAL_ROOT, 'state.db'));
 
   try {
     // fail-closed 隔离门：活跃 profile 必须在仓内夹具目录、网关可达、审计通道可写读。
@@ -177,6 +169,7 @@ async function runTrial(trial: number, input: TrialInput): Promise<TrialReport> 
       workerDriver: createPiTurnDriver({ env }),
       mainSystemPrompt: `${applyExecutorLabel(profile.instructions, input.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`,
       workerSkills,
+      taskRegistry,
     });
 
     for (const [index, text] of TURNS.entries()) {
@@ -199,7 +192,6 @@ async function runTrial(trial: number, input: TrialInput): Promise<TrialReport> 
         taskId: task.taskId,
         requestId: execution.requestId,
         operation: execution.operation,
-        args: execution.args,
         status: execution.status,
         ...(execution.error !== undefined ? { error: execution.error } : {}),
       })));
@@ -258,6 +250,9 @@ async function runTrial(trial: number, input: TrialInput): Promise<TrialReport> 
   } catch (error) {
     fatalError = error instanceof Error ? error.message : String(error);
     console.error(`[trial-${trial}] 运行失败：${fatalError}`);
+  } finally {
+    // 本轮结束关库：底账数据已落盘，下一轮/下次进程重开同一库仍可读。
+    taskRegistry.close();
   }
 
   const passed = fatalError === null

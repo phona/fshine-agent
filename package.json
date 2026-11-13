@@ -7,6 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "start": "node --env-file-if-exists=.env --import tsx apps/server/main.ts",
+    "ask": "node --env-file-if-exists=.env --import tsx scripts/ask-minimal.ts",
     "demo:minimal": "node --env-file-if-exists=.env --import tsx scripts/demo-minimal.ts",
     "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
     "ci": "sh scripts/ci.sh"
