@@ -843,6 +843,8 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
   5. **判据不变**：本裁定与 v1 冻结判据一致（`allowedCollections=['contoso']`、needs_input checkpoint），**不产生判据 v2**；原冻结用例不改写。若未来裁定变更（如允许候选枚举或澄清优先），必须新增判据版本并保留 v1 可对照（原始 judgment 已存证 + git 快照）。
 - **最小实施（允许类：Skill）**：夹具技能 `scripts/eval/fixtures/dummy-platform/.agents/skills-serve/dummy-routing/SKILL.md` 对齐裁定——歧义前缀先查执行层、候选以执行层返回为准、文档数字不得引用作答（同句覆盖 E07-3 已登记的同类风险）。技能修订 = 评测环境新 revision；E05 复采样另行记录（样本/模型/revision 见报告）。
 
+- **最小实施②（提示词级，A 类；经 Eval 验证才保留；2026-11-13）**：主 Agent 指令 `.agents/agents/fshine-main/agent.md` 补裁定——「对象名/集合名不确定时把原话交给执行层裁决（执行层返回候选或不存在），不自行猜测候选、不引用文档作答；仅缺业务决策信息时才直接澄清」。**根因证据**：E05 ×9（step-3.7-flash，技能已对齐）仍 0/9——模型把 `contoso` 当公司名先向用户澄清，理由与旧 agent.md「必要时先澄清 / 不替执行层摸索」一致；技能仅作用于 Worker，管不到 Main 的决策点。**复采样**：E05 ×9 + 回归探针 E06 ×3 / E12 ×3（同 revision），无改善则回退该句并只保留裁定文字。
+
 ### 17.2 task.status 语义边界（needs_input 与「中间失败后恢复成功」）
 
 - **核查结论**：`task.status` 当前**没有用户可见消费面**——`npm run ask` 机械证据只逐条打印 `execution.status`（不打印 task.status）；`apps/server/server.ts` 只记录逐执行状态；M5 判定器（`scripts/eval/convergence-r1/judge.ts`）用执行行（T1 executions 与 `executions.some(failed||refused)`）判「④任务状态一致性」，不读 task.status。
