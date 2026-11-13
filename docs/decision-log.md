@@ -879,6 +879,14 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十九、P2 产品切片：结果交付 v1（2026-11-14，分支 arch/p2-delivery）
+
+- **范围**：新增 `npm run tasks -- <taskId> --out <path>` 生成任务交付件（Markdown）：标题（id+状态词）/任务信息/状态（含机械失败或未执行原因）/执行步骤/任务结果（底账持久化的执行层汇报原文）/限制与说明（含「Main 的最终回复当前不落库」如实标注）。交付件与详情共用同一组字段渲染函数（`renderTaskDetail` 输出逐字节不变，金样钉住）；`--out` 拒绝覆盖既有目标（`flag:'wx'` 原子独占）、父目录不存在不自动创建、相对路径按调用点目录（`INIT_CWD`，其次进程 cwd）；退出码 0/2/1。沿用 P1 只读打开：导出只写用户指定文件，不写库、不落任何新数据。schema、ask/start、R1 冻结集与 exploration 零改动；无新依赖；「Main 最终回复持久化」仍为 owner 待裁项（登记不实施）。
+- **证据指针**：`docs/product/p2-result-delivery.md`（六段报告 + 验收逐条勾选）；真实模型两场景（completed/failed）逐字命令与交付件在 `.runtime/product-p2/`；与详情逐字核对 `verbatim-proof.txt`（8/9 行 VERBATIM-OK）；只读哈希不变 `readonly-proof.txt`；边界实跑三态（未知 id/已存在/不可写）日志；P1 基线 CLI 对照列表/详情正文逐字一致；E06 ×3 / E12 ×3 全过（`eval-e06.log`/`eval-e12.log`）；实现提交 `bcfd24d`（TDD 14 例 + 两组反向绊线演示）。
+- **状态**：已实施并验收（本分支，未 push/未合并）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
