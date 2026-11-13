@@ -3,6 +3,7 @@
  * 最小白名单（PATH / HOME / TMPDIR）——不机械继承旧 WORKER_ENV_ALLOWED_KEYS。
  */
 import { describe, expect, it, vi } from 'vitest';
+import { WORKER_FIXTURE_STATE_DIR_KEY } from './src/child-env';
 import { MINIMAL_EXECUTION_ENV_KEYS, workerSubprocessEnv } from './src/minimal/worker-env';
 
 describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
@@ -11,7 +12,7 @@ describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
       PATH: '/usr/bin',
       HOME: 'sentinel-home',
       TMPDIR: 'sentinel-tmp',
-      FSHINE_EVAL_FIXTURE_STATE_DIR: '/state/sentinel',
+      [WORKER_FIXTURE_STATE_DIR_KEY]: '/state/sentinel',
       LLM_API_KEY: 'sentinel-key',
       LLM_MODEL: 'sentinel-model',
       LLM_API_BASE_URL: 'https://sentinel.invalid',
@@ -26,7 +27,7 @@ describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
     expect(rebuilt['HOME']).toBe('sentinel-home');
     expect(rebuilt['TMPDIR']).toBe('sentinel-tmp');
     for (const key of [
-      'FSHINE_EVAL_FIXTURE_STATE_DIR', // 测试专用：M1 用显式 --state-dir argv，不进 env
+      WORKER_FIXTURE_STATE_DIR_KEY, // 测试桥键：M1 用显式 --state-dir argv，不进 env
       'LLM_API_KEY', 'LLM_MODEL', 'LLM_API_BASE_URL', 'WECOM_CORP_SECRET',
       'AGENT_CONFIG_PATH', 'DB_PATH', 'NODE_OPTIONS', 'EXECUTION_REQUIRE_PLAN', 'EXECUTION_PLAN_ID',
     ]) {
