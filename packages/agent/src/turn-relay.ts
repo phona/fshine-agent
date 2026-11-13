@@ -88,6 +88,7 @@ export function renderPlanStepToolResult(step: PlanStepLabel, result: SubagentTa
 export function renderTerminalFailureReply(failure: TerminalFastPathFailure): string {
   return terminalFailureTextFor(failure.code, {
     query: failure.query,
+    render: failure.render,
     ...(failure.period ? { period: failure.period } : {}),
     ...(failure.availablePeriods ? { availablePeriods: failure.availablePeriods } : {}),
   });

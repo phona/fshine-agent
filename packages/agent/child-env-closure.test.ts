@@ -86,6 +86,8 @@ vi.mock('./src/operation-labels', async () => {
     loadOperationLabels: vi.fn(async () => new Map()),
     loadOperationProtocols: vi.fn(async () => new Map()),
     loadOperationSemantics: vi.fn(async () => new Map()),
+    // 码级语义（选择类/终局族）：未声明 → 驱动回退默认适配表（本文件不验分类面）。
+    loadErrorCodeSemantics: vi.fn(async () => null),
   };
 });
 
@@ -376,9 +378,9 @@ describe('V0 安全收口：子进程 env 不含宿主敏感凭据族', () => {
     expect(commitSrc).toContain('hostDirectChildEnv(');
     const smokeSrc = srcOf('scripts', 'mock-commit-smoke.ts');
     expect(smokeSrc).toContain('hostDirectChildEnv(');
-    // operation-labels 七处宿主直调（operation list 派生）同尺。
+    // operation-labels 八处宿主直调（operation list 派生；P4 码级语义 loader 同尺）同尺。
     const labelsSrc = srcOf('packages', 'agent', 'src', 'operation-labels.ts');
-    expect(labelsSrc.split('hostDirectChildEnv()').length - 1).toBe(7);
+    expect(labelsSrc.split('hostDirectChildEnv()').length - 1).toBe(8);
     // assembly 启动前的平台 lint 子进程（第 4 个宿主→执行层 spawn 面）同尺
     // （2026-11-13 复核发现：此前无 env 选项、全量继承 process.env）。
     const assemblySrc = srcOf('apps', 'server', 'assembly.ts');

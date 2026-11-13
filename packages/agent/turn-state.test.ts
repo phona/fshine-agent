@@ -37,6 +37,7 @@ const AMBIGUOUS: SelectionClarification = {
   code: 'ACCOUNT_SET_AMBIGUOUS',
   query: '幻辰',
   candidates: ['幻辰财税', '幻辰科技'],
+  render: 'candidates',
 };
 
 describe('createTurnState', () => {

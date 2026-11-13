@@ -34,11 +34,12 @@ import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCre
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, planDeclarationCovers, planDeclarationCoversStructured, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
-import { isWriteAccess, loadCapabilityManifest, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, serveModesOf, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
+import { isWriteAccess, loadCapabilityManifest, loadErrorCodeSemantics, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, serveModesOf, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
+import { DEFAULT_ERROR_CODE_SEMANTICS, type ErrorCodeSemantics } from './platform-contract';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, TERMINAL_FAST_PATH_CODES, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
@@ -402,6 +403,13 @@ export interface PiCodingTurnDriverOptions {
    * operation 名单（L2）。缺省经平台 CLI 派生一次。
    */
   operationSemantics?: OperationSemantics;
+  /**
+   * 码级语义表（`operation list --json` 顶层 `errorSemantics` 的派生投影，测试替身注入点）：
+   * 选择类澄清族与终局快路径族的码、结构句与取值字段名。分类与渲染绑定都以它为准；
+   * 缺省经平台 CLI 派生一次，派生失败/表缺席 → 宿主默认适配表（既有实例现行为逐字节
+   * 不变）。未声明码不分类（宁缺勿猜，走既有重规划 / 自愈路径）。
+   */
+  errorCodeSemantics?: ErrorCodeSemantics;
   /** operation → args 规格（位置参数声明，计划覆盖判据用）。 */
   operationArgsSpecs?: OperationArgsSpecs;
   /**
@@ -628,6 +636,21 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
     semanticsCache.set(root, loading);
     return loading;
   };
+  // 码级语义表（选择类澄清 / 终局快路径两族的码与渲染绑定）：与上表同一手法——按平台
+  // 根路径缓存一次，绝不每条命令 spawn 一次 CLI。表缺席 / 派生失败 → 宿主默认适配表
+  // （未声明执行层的现行为逐字节不变）；声明在场即整体替换（两族都按声明）。
+  const codeSemanticsCache = new Map<string, Promise<ErrorCodeSemantics>>();
+  const errorCodeSemanticsFor = (workerCwd: string): Promise<ErrorCodeSemantics> => {
+    if (options.errorCodeSemantics) return Promise.resolve(options.errorCodeSemantics);
+    const root = options.platformRoot ?? workerCwd;
+    const cached = codeSemanticsCache.get(root);
+    if (cached) return cached;
+    const loading = loadErrorCodeSemantics(root, options.gateway)
+      .then((declared) => declared ?? DEFAULT_ERROR_CODE_SEMANTICS)
+      .catch(() => DEFAULT_ERROR_CODE_SEMANTICS);
+    codeSemanticsCache.set(root, loading);
+    return loading;
+  };
   // 协议角色表（提案创建拦截的机械来源，B 波 B3）：与 label/规格/语义三张表同一手法——按
   // 平台根路径缓存一次，绝不每条命令 spawn 一次 CLI。派生失败/平台还没下发 protocol 列
   // → 空表 → 不拦截（fail-closed 到"这不是提案调用"），门与平台照旧裁决。
@@ -768,6 +791,9 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // access 语义表提到 create 调用之前：会话创建与 onAllowedBash 的读类探测计数
       // 要读同一份表（同一个来源，不是第二份派生）。
       const operationSemantics = await operationSemanticsFor(input.cwd);
+      // 码级语义表（选择类澄清 / 终局快路径）：本回合末的澄清提取与终局早停都读它——
+      // 分类与渲染绑定以执行层声明为准（缺省 = 宿主默认适配表）。
+      const codeSemantics = await errorCodeSemanticsFor(input.cwd);
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
         onReadProbe: noteReadProbe,
@@ -1001,7 +1027,7 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // （数据答案）或其他错误码时一律不挂：那类回合的模型文本是数据答案或既有失败路径，
       // 行为零变化。needs 的闸门保持不变（它产的是"缺什么"，不是"选哪个"）。
       const clarification = (): SelectionClarification | undefined =>
-        selectionClarificationFromResponses(session.agent.state.messages.slice(initialMessageCount));
+        selectionClarificationFromResponses(session.agent.state.messages.slice(initialMessageCount), codeSemantics);
       // 平台登录/凭据类失败事实：本回合平台交互是否以登录/凭据类失败收尾。判据只有平台
       // 错误信封的码（platform-contract 唯一适配层，exit 非零 + 登录族信封码），与
       // clarification 同一边界（只看本回合新增消息）——上一回合遗留的失败信封不会越权
@@ -1035,10 +1061,10 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         if (pendingPlan || proposalOutcome || gateCalls === 0 || plannedCalls.length !== 1) return false;
         const envelope = closingEnvelopeOfToolResults(turn.toolResults);
         if (!envelope) return false;
-        const failure = terminalFastPathOf(envelope);
+        const failure = terminalFastPathOf(envelope, codeSemantics);
         if (!failure) {
           const code = envelope.error?.code ?? '';
-          if (TERMINAL_FAST_PATH_CODES.has(code)) {
+          if (codeSemantics.terminal.has(code)) {
             console.warn(JSON.stringify({ event: 'terminal_fast_path_envelope_incomplete', code, status: envelope.status, requestId: input.requestId, taskId: input.sessionId }));
           }
           return false;

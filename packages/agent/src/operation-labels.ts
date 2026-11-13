@@ -31,7 +31,7 @@
  */
 import { spawn } from 'node:child_process';
 import { hostDirectChildEnv } from './child-env';
-import { gatewayExecPath, validateGatewayInvocation } from './platform-contract';
+import { gatewayExecPath, validateGatewayInvocation, type ErrorCodeSemantics, type SelectionRenderKind, type TerminalCodeSemantics } from './platform-contract';
 
 /** script → label 查找表。script 与操作名两种写法都收录（命令里两种都合法）。 */
 export type OperationLabels = Map<string, string>;
@@ -417,6 +417,135 @@ export function loadOperationSemantics(platformRoot?: string, gateway?: string):
     child.once('close', (code) => {
       clearTimeout(timer);
       settle(code === 0 ? parseOperationSemantics(Buffer.concat(stdout).toString('utf8')) : new Map());
+    });
+  });
+}
+
+// ── 码级语义派生：选择类澄清 / 终局快路径两族（`operation list --json` 顶层 errorSemantics）──
+//
+// 与 accessSemantics 同一文档、同一 family 的执行层声明面：执行层声明"我的哪些错误码
+// 属于选择类澄清族 / 终局快路径族、各用宿主哪条结构句、渲染数据在信封 data 的哪些字段
+// 里"。宿主据此派生两张码表，不再把码名单硬编码在编排层（L2：码是数据，文案不是）。
+//
+//   · 表缺席 / 非法 / 派生失败 → null：调用方回退宿主默认适配表（既有已适配实例的现行为，
+//     逐字节不变；派生是增强不是前提，与同族 loader 的降级纪律一致）；
+//   · 表在场（即使为空对象）→ 该执行层已声明：两族都按声明（空 = 明确声明"无此族码"），
+//     绝不把默认实例的码混进别的执行层；
+//   · 表内单条目：形状名不在宿主词汇表内 / 必填字段名缺失 → 该条目不进表（宁缺勿猜）。
+
+/** 选择类结构句名（宿主封闭词汇表；具名常量，比较处不写字面量——与 PROPOSAL_CREATE_PROTOCOL 同规）。 */
+const SELECTION_RENDER_CANDIDATES = 'candidates' as const;
+const SELECTION_RENDER_CONFIRM_NAME_WITH_HINT = 'confirm-name-with-hint' as const;
+/** 终局结构句名（同上）。 */
+const TERMINAL_RENDER_SCOPE_NO_DATA = 'scope-no-data' as const;
+const TERMINAL_RENDER_CONFIRM_NAME = 'confirm-name' as const;
+
+const SELECTION_RENDER_KINDS: ReadonlySet<string> = new Set<SelectionRenderKind>([
+  SELECTION_RENDER_CANDIDATES,
+  SELECTION_RENDER_CONFIRM_NAME_WITH_HINT,
+]);
+
+/** 选择类结构句名判定（宿主封闭词汇表，声明只引用不扩展）。 */
+function selectionRenderKindOf(value: unknown): SelectionRenderKind | undefined {
+  return typeof value === 'string' && SELECTION_RENDER_KINDS.has(value) ? (value as SelectionRenderKind) : undefined;
+}
+
+/** 声明里的信封字段名：非空字符串才收（空/非字符串 = 该条目不生效，不猜字段）。 */
+function fieldNameOf(value: unknown): string | undefined {
+  const name = typeof value === 'string' ? value.trim() : '';
+  return name.length > 0 ? name : undefined;
+}
+
+/** 终局码声明条目：按 render 形状机械校验所需字段名；缺任一必填字段 = 条目不进表。 */
+function terminalSemanticsOf(entry: unknown): TerminalCodeSemantics | undefined {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+  const row = entry as { render?: unknown; query?: unknown; scope?: unknown; available?: unknown };
+  const render = typeof row.render === 'string' ? row.render : '';
+  const query = fieldNameOf(row.query);
+  if (render === TERMINAL_RENDER_SCOPE_NO_DATA) {
+    const scope = fieldNameOf(row.scope);
+    const available = fieldNameOf(row.available);
+    if (!query || !scope || !available) return undefined;
+    return { render: TERMINAL_RENDER_SCOPE_NO_DATA, query, scope, available };
+  }
+  if (render === TERMINAL_RENDER_CONFIRM_NAME) {
+    if (!query) return undefined;
+    return { render: TERMINAL_RENDER_CONFIRM_NAME, query };
+  }
+  return undefined;
+}
+
+/**
+ * 解析 `operation list --json` 顶层 `errorSemantics`：执行层声明的码级语义（数据不是逻辑）。
+ *
+ * 返回 null = 整张表缺席 / 顶层非法（非 JSON / 非对象 / 裸数组）→ 调用方按"未声明"处理
+ * （回退宿主默认适配表）。返回表 = 执行层已声明；空表 = 声明"两族均无码"。单条目非法
+ * 只丢该条目，不影响整表（宁缺勿猜：该码不分类，走既有路径）。
+ */
+export function parseErrorCodeSemantics(stdout: string): ErrorCodeSemantics | null {
+  let document: unknown;
+  try { document = JSON.parse(stdout); } catch { return null; }
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return null;
+  const raw = (document as { errorSemantics?: unknown }).errorSemantics;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const table = raw as { selection?: unknown; terminal?: unknown };
+  const selection = new Map<string, SelectionRenderKind>();
+  if (table.selection && typeof table.selection === 'object' && !Array.isArray(table.selection)) {
+    for (const [code, entry] of Object.entries(table.selection as Record<string, unknown>)) {
+      const render = selectionRenderKindOf((entry as { render?: unknown } | null)?.render);
+      if (code && render) selection.set(code, render);
+    }
+  }
+  const terminal = new Map<string, TerminalCodeSemantics>();
+  if (table.terminal && typeof table.terminal === 'object' && !Array.isArray(table.terminal)) {
+    for (const [code, entry] of Object.entries(table.terminal as Record<string, unknown>)) {
+      const declared = terminalSemanticsOf(entry);
+      if (code && declared) terminal.set(code, declared);
+    }
+  }
+  return { selection, terminal };
+}
+
+/**
+ * 经公共 CLI 派生码级语义表（cwd=platformRoot，`operation list --json`）。
+ *
+ * 失败语义与同族 loader 一致（platformRoot 未配、gateway 未声明/非法、CLI 不存在/
+ * 不可执行、超时、非零退出、输出非 JSON）→ null：调用方按"未声明"回退宿主默认适配表。
+ * 派生是增强，不是前提；执行层没声明就不分类（宁缺勿猜），绝不猜测码的族别。
+ */
+export function loadErrorCodeSemantics(platformRoot?: string, gateway?: string): Promise<ErrorCodeSemantics | null> {
+  if (!platformRoot) return Promise.resolve(null);
+  // C7b：gateway 未声明/非法 = 派生增强不可用，降级 null（与 platformRoot 未配同判据）。
+  if (!validateGatewayInvocation(gateway)) return Promise.resolve(null);
+  const cli = gatewayExecPath(platformRoot, gateway);
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (semantics: ErrorCodeSemantics | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(semantics);
+    };
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(cli, ['operation', 'list', '--json'], {
+        cwd: platformRoot,
+        env: hostDirectChildEnv(),
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      settle(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      settle(null);
+    }, LABEL_CLI_TIMEOUT_MS);
+    const stdout: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.once('error', () => { clearTimeout(timer); settle(null); });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      settle(code === 0 ? parseErrorCodeSemantics(Buffer.concat(stdout).toString('utf8')) : null);
     });
   });
 }

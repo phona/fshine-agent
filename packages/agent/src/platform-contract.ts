@@ -5,8 +5,11 @@
  * 平台输出契约 = RESULT 单行 JSON 信封（schema v1，E2；行协议已随 E2 退役，解析仅认信封）；
  * 操作调用统一使用平台操作注册名（E1），不引用脚本文件路径。
  *
- * 两类码级判定收口在这里：平台不可用族（PLATFORM_AUTH_ERROR_CODES）与选择类澄清
- * （SELECTION_CLARIFICATION_CODES）——码是数据，消息文案不是，平台演进只改集合不改编排层。
+ * 码级判定收口在这里：平台不可用族（PLATFORM_AUTH_ERROR_CODES）、选择类澄清与终局
+ * 快路径两族——后两族由**执行层声明**派生（`operation list --json` 顶层 `errorSemantics`，
+ * 与 accessSemantics 同族的声明面；表缺席回退宿主默认适配表，声明在场即整体替换）。
+ * 码是数据，消息文案不是：执行层演进只改声明数据，改编排层不再需要——新增选择类/终局
+ * 码也不再往编排层各处加分支。
  */
 import path from 'node:path';
 
@@ -165,6 +168,11 @@ export interface SelectionClarification {
   /** 平台返回的候选名（只取 data.candidates 的 name——列表外的名字由此绝迹）。 */
   candidates: string[];
   /**
+   * 宿主结构句类型（**由执行层声明派生**，见 ErrorCodeSemantics）：渲染层只认这个绑定，
+   * 不按码查宿主私有索引——"码 → 句子名"的映射只住在声明表 / 宿主默认适配表一处。
+   */
+  render: SelectionRenderKind;
+  /**
    * 平台正确形态指引（信封 error.correctForm，**平台下发**数据）：宿主渲染层据此
    * 把"该怎么改"说给用户，自己不持领域措辞（L2/D-002：选择类提示曾是宿主镜像的
    * 平台文案，现退化为"信封带了就渲染信封的，没带才用宿主兜底"）。可选：旧版平台
@@ -174,14 +182,83 @@ export interface SelectionClarification {
 }
 
 /**
- * 选择类澄清码集合（可扩，先这两个）：平台请用户"选一个"的确定性状态。
- * 与 PLATFORM_AUTH_ERROR_CODES 同纪律——**码是数据，消息文案不是**，新增选择类
- * 失败模式往这里加码（收口在唯一适配层），不在编排层各处分身。
+ * 宿主选择类结构句词汇表（封闭集）：执行层声明只能引用这些名字，不能定义新句子——
+ * 渲染保真归宿主（措辞、占位符与数据卫生只有一份来源）。
+ *   · candidates：候选清单 + "你要查哪个"（信封 data.candidates 的 name 进清单）；
+ *   · confirm-name-with-hint：确认名称句，{hint} 槽优先取信封 error.correctForm（平台
+ *     下发数据），没带才用宿主兜底。
  */
-export const SELECTION_CLARIFICATION_CODES: ReadonlySet<string> = new Set([
-  'ACCOUNT_SET_AMBIGUOUS',
-  'ACCOUNT_SET_NOT_FOUND',
-]);
+export type SelectionRenderKind = 'candidates' | 'confirm-name-with-hint';
+
+/**
+ * 宿主终局结构句词汇表（封闭集，同 SelectionRenderKind 纪律）。
+ *   · scope-no-data：取数范围无数据 + 可改查清单（声明给出取值范围与清单的字段名）；
+ *   · confirm-name：确认名称句（无候选、无平台 correctForm 措辞——平台给这类状态的
+ *     correctForm 是给解析方的规则，渲染它是语域事故，D-102）。
+ */
+export type TerminalRenderKind = 'scope-no-data' | 'confirm-name';
+
+/**
+ * 执行层对单个终局码的声明条目（数据不是逻辑）：用哪条宿主结构句 + 信封 data 里
+ * 渲染所需的取值字段名。字段名是执行层数据面的事实（宿主不猜、不扫描、不嗅探）；
+ * 必填字段缺失/非法 = 该条目不进表（宁缺勿猜），绝不补一份宿主猜测的缺省。
+ */
+export type TerminalCodeSemantics =
+  | {
+    render: 'scope-no-data';
+    /** 信封 data 里用户查询词/对象名的字段名。 */
+    query: string;
+    /** 取数范围标签（如某编码）的字段名。 */
+    scope: string;
+    /** 可改查清单的字段名（数组；空清单同样过不了完整性门）。 */
+    available: string;
+  }
+  | {
+    render: 'confirm-name';
+    /** 信封 data 里"没找到/有歧义的那个对象名"的字段名。 */
+    query: string;
+  };
+
+/**
+ * 执行层声明的码级语义（`operation list --json` 顶层 `errorSemantics` 的宿主投影）。
+ *
+ * 两族码表都由声明派生，宿主编排层不再持"码名单"硬编码：
+ *   · selection：码 → 选择类结构句名（澄清管道：宿主机械组装问题，模型不翻译）；
+ *   · terminal：码 → 终局结构句名 + 取值字段（错误态快路径：早停 + 宿主话术终结）。
+ * 未知/未声明码不进表 → 走既有重规划 / 自愈路径（宁缺勿猜）。
+ */
+export interface ErrorCodeSemantics {
+  selection: ReadonlyMap<string, SelectionRenderKind>;
+  terminal: ReadonlyMap<string, TerminalCodeSemantics>;
+}
+
+/**
+ * 宿主**默认适配表**：对未声明码级语义的执行层（既有已适配实例）保持现行为逐字节不变。
+ *
+ * 纪律与 PLATFORM_AUTH_ERROR_CODES 同族——**码是数据，消息文案不是**：执行层在
+ * `operation list --json` 的 `errorSemantics` 表里声明自己两族的码（声明在场即整体替换
+ * 本表，两族都按声明）；表缺席 = 未声明 → 本表兜底。新增执行层不改编排层代码，
+ * 只在执行层声明面加数据；本表的删除判据 = 已适配实例全量迁移到声明面。
+ */
+export const DEFAULT_ERROR_CODE_SEMANTICS: ErrorCodeSemantics = {
+  selection: new Map<string, SelectionRenderKind>([
+    ['ACCOUNT_SET_AMBIGUOUS', 'candidates'],
+    ['ACCOUNT_SET_NOT_FOUND', 'confirm-name-with-hint'],
+  ]),
+  terminal: new Map<string, TerminalCodeSemantics>([
+    ['PERIOD_NO_DATA', { render: 'scope-no-data', query: 'query', scope: 'period', available: 'availablePeriods' }],
+    ['ASSISTANT_NOT_FOUND', { render: 'confirm-name', query: 'customer' }],
+    ['ASSISTANT_AMBIGUOUS', { render: 'confirm-name', query: 'customer' }],
+  ]),
+};
+
+/**
+ * 选择类澄清码集合（派生视图，兼容消费方与测试）：默认适配表的 selection 键集。
+ * 运行期分类请用 ErrorCodeSemantics（声明派生）；本常量不代表"唯一码名单"。
+ */
+export const SELECTION_CLARIFICATION_CODES: ReadonlySet<string> = new Set(
+  DEFAULT_ERROR_CODE_SEMANTICS.selection.keys(),
+);
 
 /**
  * 选择类状态的信封 status：平台把"选一个"作为**非终态**交回（needs_input 多候选 /
@@ -202,11 +279,20 @@ function correctFormOf(envelope: PlatformEnvelope): string | undefined {
 
 /**
  * 信封 → 选择类状态。判据只有码与 status（都是契约数据），候选名只取平台返回的
- * `data.candidates[].name`；码不在集合内 / status 不是选择类 / 没有信封 → undefined。
+ * `data.candidates[].name`；码不在**声明派生表**内 / status 不是选择类 / 没有信封
+ * → undefined（未声明码走既有路径，宁缺勿猜）。
+ *
+ * semantics 缺省 = 宿主默认适配表（未声明执行层的现行为）；执行层声明在场时调用方
+ * 传入派生表，分类与渲染绑定都以声明为准。
  */
-export function selectionClarificationOf(envelope: PlatformEnvelope | null): SelectionClarification | undefined {
+export function selectionClarificationOf(
+  envelope: PlatformEnvelope | null,
+  semantics: ErrorCodeSemantics = DEFAULT_ERROR_CODE_SEMANTICS,
+): SelectionClarification | undefined {
   const code = envelope?.error?.code;
-  if (!envelope || !code || !SELECTION_CLARIFICATION_CODES.has(code)) return undefined;
+  if (!envelope || !code) return undefined;
+  const render = semantics.selection.get(code);
+  if (!render) return undefined;
   if (!SELECTION_STATUSES.has(envelope.status)) return undefined;
   const data = envelope.data as { query?: unknown; candidates?: unknown } | null;
   const query = typeof data?.query === 'string' ? data.query.trim() : '';
@@ -221,7 +307,7 @@ export function selectionClarificationOf(envelope: PlatformEnvelope | null): Sel
       .filter((name): name is string => typeof name === 'string' && name.length > 0)
     : [];
   const correctForm = correctFormOf(envelope);
-  return { code, query, candidates, ...(correctForm ? { correctForm } : {}) };
+  return { code, query, candidates, render, ...(correctForm ? { correctForm } : {}) };
 }
 
 /**
@@ -301,13 +387,14 @@ export interface TranscriptMessageLike {
  */
 export function selectionClarificationFromResponses(
   messages: readonly TranscriptMessageLike[],
+  semantics: ErrorCodeSemantics = DEFAULT_ERROR_CODE_SEMANTICS,
 ): SelectionClarification | undefined {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
     const message = messages[i];
     if (message?.role !== 'toolResult') continue;
     const envelope = parseEnvelope(textFromContent(message.content));
     if (!envelope) continue;
-    return selectionClarificationOf(envelope);
+    return selectionClarificationOf(envelope, semantics);
   }
   return undefined;
 }
@@ -379,45 +466,41 @@ export function isPlatformAuthError(error: unknown): boolean {
 }
 
 /**
- * 错误态快路径的**终局码集合**（错误态快路径 v2，2026-10-16；第一版 2026-10-17 凌晨
- * 因真模型探针回归被整波回退后重做）。
+ * 错误态快路径的**终局码集合**（派生视图，兼容消费方与测试）：默认适配表的 terminal 键集。
  *
- * 语义（已对照平台仓源码核实，两条都不要再质疑）：
- *   · `PERIOD_NO_DATA`（mock `respond.js` receivables()）：仅在所查询的取数键**真缺失**时
- *     发出（"键缺失 ≠ 值为 0"，真零仍是 completed），status=not_found + correctForm
- *     带有数据的取数范围清单，退出码 0。它确实是终局：数据不能凭重试变出来——重试只会
- *     付每轮约 31s 的 worker 重规划循环，结局不变。
- *   · `ASSISTANT_NOT_FOUND` / `ASSISTANT_AMBIGUOUS`：客户辅助核算条目的确定性两态
- *     （0 条 / 多条）。correctForm 是"让调用方先向用户确认规范名再重查"——那是给
- *     **解析方**的规则，渲染它就是语域事故（D-102 同款）；宿主只用结构句终结。
+ * 语义（已对照执行层实例的信封核实，两类都不要再质疑）：
+ *   · 取数范围无数据一码：仅在所查询的取数键**真缺失**时发出（"键缺失 ≠ 值为 0"，
+ *     真零仍是 completed），携带有数据的取数范围清单，退出码 0。它确实是终局：数据
+ *     不能凭重试变出来——重试只会付每轮的 worker 重规划循环，结局不变。
+ *   · 名称两态（0 条 / 多条）：correctForm 是"让调用方先向用户确认规范名再重查"——那是
+ *     给**解析方**的规则，渲染它就是语域事故（D-102 同款）；宿主只用结构句终结。
  *
- * 与 SELECTION_CLARIFICATION_CODES（ACCOUNT_SET_* 两态）的边界：那两个码的澄清
- * 管道（clarification → 宿主组装澄清问题）已在运转，**不走本快路径**；这里的三个码
- * 才由驱动早停、宿主合成话术终结。SUBJECT_NOT_FOUND 等 worker 有自愈路径的码明确
- * **不**转（第一版结论仍有效）：那类码重试/换参有意义，不是终局。
- *
- * 与 PLATFORM_AUTH_ERROR_CODES 同纪律——**码是数据，消息文案不是**，平台演进只改
- * 集合不改编排层。
+ * 边界（声明化后仍是这条纪律）：选择类声明的码（澄清管道）**不走本快路径**；worker 有
+ * 自愈路径的码明确**不**转——那类码重试/换参有意义，不是终局。是否终局由**执行层声明**
+ * （ErrorCodeSemantics.terminal）给出：宿主不再持码名单硬编码，换执行层不改编排层。
+ * 运行期分类请用 ErrorCodeSemantics（声明派生）；本常量不代表"唯一码名单"。
  */
-export const TERMINAL_FAST_PATH_CODES: ReadonlySet<string> = new Set([
-  'PERIOD_NO_DATA',
-  'ASSISTANT_NOT_FOUND',
-  'ASSISTANT_AMBIGUOUS',
-]);
+export const TERMINAL_FAST_PATH_CODES: ReadonlySet<string> = new Set(
+  DEFAULT_ERROR_CODE_SEMANTICS.terminal.keys(),
+);
 
 /**
- * 终局快路径的结构化事实（信封 → 宿主话术的机械取值）。字段由信封 data 原样提取：
- *   · `query`：用户的查询词。PERIOD_NO_DATA 取 `data.query`；ASSISTANT 两态取
- *     `data.customer`（找不到的/有歧义的是**客户名**，回显 data.query 会让用户确认
- *     一个没问过的对象）。
- *   · `period` / `availablePeriods`：仅 PERIOD_NO_DATA。取数范围标签与可改查清单都由
- *     平台下发（清单里的内部键已由平台映射为用户可读标签），宿主只渲染不解释。
+ * 终局快路径的结构化事实（信封 → 宿主话术的机械取值）。取值槽固定，来源字段名由
+ * 声明条目决定：
+ *   · `query`：用户的查询词/对象名。scope-no-data 的默认适配取 `data.query`；
+ *     confirm-name 的默认适配取 `data.customer`（找不到的/有歧义的是那个对象名，
+ *     回显别的对象会让用户确认一个没问过的对象）。
+ *   · `period` / `availablePeriods`：仅 scope-no-data 形状。取数范围标签与可改查清单都由
+ *     执行层下发（清单里的内部键应由执行层映射为用户可读标签），宿主只渲染不解释。
+ *     槽名是渲染层的固定数据槽，不等同于任何实例的字段名——来源字段名在声明里。
+ *   · `render`：宿主结构句类型（**由执行层声明派生**），渲染层只认这个绑定。
  */
 export interface TerminalFastPathFailure {
   code: string;
   query: string;
   period?: string;
   availablePeriods?: readonly string[];
+  render: TerminalRenderKind;
 }
 
 /** 非空字符串卫（完整性门的原子判据：缺/空/非字符串都算缺）。 */
@@ -425,37 +508,55 @@ function nonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
+/** 结构句名的具名常量（比较处不写字面量——与 PROPOSAL_CREATE_PROTOCOL 同规）。 */
+const TERMINAL_RENDER_SCOPE_NO_DATA: 'scope-no-data' = 'scope-no-data';
+
+/** 声明字段取非空字符串（缺/空/非字符串都算缺——与完整性门同一把尺）。 */
+function declaredStringOf(data: Record<string, unknown> | null, field: string): string {
+  const value = data?.[field];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+/** 声明字段取非空字符串清单（缺/非数组/全空都算缺）。 */
+function declaredListOf(data: Record<string, unknown> | null, field: string): string[] {
+  const value = data?.[field];
+  return Array.isArray(value) ? value.filter(nonEmptyString) : [];
+}
+
 /**
  * 信封 → 终局快路径事实。判据三层，缺一层不挂（行为零变化，宁可回到既有重规划循环，
  * 也不给用户一句指代不清或没有下一步的话术）：
- *   ① 码 ∈ TERMINAL_FAST_PATH_CODES（终局族才快转，其余码照旧）；
- *   ② status 不是 completed（completed 是数据答案；码与 status 打架 = 平台契约违约，
- *      不快转）；
- *   ③ **完整性门**：信封必须带齐渲染这句话所需的全部数据——查询词、（PERIOD_NO_DATA）
- *      取数范围标签与**非空**可改查清单、（ASSISTANT_*）客户名。清单为空同样不挂：可改查
- *      清单是这句话的行动部分，空清单 = 契约不完整，快转只会把用户推进死胡同。
+ *   ① 码 ∈ **声明派生**的终局族（缺省 = 宿主默认适配表；未声明码走既有路径，宁缺勿猜）；
+ *   ② status 不是 completed（completed 是数据答案；码与 status 打架 = 契约违约，不快转）；
+ *   ③ **完整性门（声明化后不放松）**：声明条目映射的字段必须带齐且非空——查询词、
+ *      （scope-no-data）取数范围标签与**非空**可改查清单、（confirm-name）对象名。
+ *      清单为空同样不挂：可改查清单是这句话的行动部分，空清单 = 契约不完整，快转只会把
+ *      用户推进死胡同。声明说的是"数据在哪"（字段名），不是"要不要门"（门由宿主判）。
  * 不挂时调用方应留痕告警（见 pi-coding-driver 的 incomplete 告警），让契约漂移可发现。
  */
-export function terminalFastPathOf(envelope: PlatformEnvelope | null): TerminalFastPathFailure | undefined {
+export function terminalFastPathOf(
+  envelope: PlatformEnvelope | null,
+  semantics: ErrorCodeSemantics = DEFAULT_ERROR_CODE_SEMANTICS,
+): TerminalFastPathFailure | undefined {
   const code = envelope?.error?.code;
-  if (!envelope || !code || !TERMINAL_FAST_PATH_CODES.has(code)) return undefined;
+  if (!envelope || !code) return undefined;
+  const declared = semantics.terminal.get(code);
+  if (!declared) return undefined;
   if (envelope.status === 'completed') return undefined;
   const data = envelope.data as Record<string, unknown> | null;
-  if (code === 'PERIOD_NO_DATA') {
-    const query = typeof data?.['query'] === 'string' ? data['query'].trim() : '';
-    const period = typeof data?.['period'] === 'string' ? data['period'].trim() : '';
-    const availablePeriods = Array.isArray(data?.['availablePeriods'])
-      ? (data['availablePeriods'] as unknown[]).filter(nonEmptyString)
-      : [];
+  if (declared.render === TERMINAL_RENDER_SCOPE_NO_DATA) {
+    const query = declaredStringOf(data, declared.query);
+    const scope = declaredStringOf(data, declared.scope);
+    const availablePeriods = declaredListOf(data, declared.available);
     // 完整性门：查询词 + 取数范围 + 非空清单三者缺一不挂（fail-loud 的判据在调用方留痕）。
-    if (!query || !period || availablePeriods.length === 0) return undefined;
-    return { code, query, period, availablePeriods };
+    if (!query || !scope || availablePeriods.length === 0) return undefined;
+    return { code, query, period: scope, availablePeriods, render: declared.render };
   }
-  // ASSISTANT 两态：唯一必需的数据是客户名（correctForm 不渲染——那是给解析方的规则，
+  // confirm-name：唯一必需的数据是对象名（correctForm 不渲染——那是给解析方的规则，
   // 渲染它是语域事故；candidates 也不渲染——宿主的话术请用户确认规范名，不是列候选）。
-  const customer = typeof data?.['customer'] === 'string' ? data['customer'].trim() : '';
-  if (!customer) return undefined;
-  return { code, query: customer };
+  const query = declaredStringOf(data, declared.query);
+  if (!query) return undefined;
+  return { code, query, render: declared.render };
 }
 
 /**

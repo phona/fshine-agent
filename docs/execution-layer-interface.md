@@ -80,11 +80,29 @@
   `effects`、`executor`、`est_seconds`、`weight`、`args`（位置参数与
   flag 的声明名与样式）、`serve`（mode×access 矩阵）、`protocol`
   （如 `proposal.create` / `proposal.commit`，无则 null）、`label`。
+- **顶层声明表（可选的契约扩展面，与 operations 平级）**：
+  - `accessSemantics`：access 取值 → plan / confirm 两列（写类判定）；
+  - `errorSemantics`（P4 泛化，2026-11-13）：码级语义声明，两族——
+    `selection`：选择类澄清码 → 宿主结构句名（`candidates` /
+    `confirm-name-with-hint`）；`terminal`：终局快路径码 → 宿主结构句名
+    （`scope-no-data` / `confirm-name`）+ 信封 `data` 取值字段名
+    （scope-no-data 需要 `query` / `scope` / `available` 三个字段名，
+    confirm-name 需要 `query` 一个）。**宿主渲染保持结构句 + 信封数据**：
+    执行层只声明"哪个码用哪条句子、数据在哪个字段"，句子与完整性门
+    由宿主持有，声明不能新增句子、不能放宽门（必填字段缺一不判终局）。
+  - 单条目非法（结构句名不在宿主词汇表 / 必填字段名缺失）→ 该条目
+    不进表；整表缺席 / 非法 → 宿主回退**默认适配表**（对既有已适配
+    实例的现行为，逐字节不变）；表在场（即使为空对象）→ 该执行层
+    两族都按声明（空 = 声明"无此族码"），绝不把默认实例的码混进来。
+  宿主消费实现：`operation-labels.ts` 的 `parseErrorCodeSemantics` /
+  `loadErrorCodeSemantics`，投影为 `platform-contract.ts` 的
+  `ErrorCodeSemantics`（选择类 / 终局提取与渲染绑定都以它为准）。
 - **缺失时**：清单拿不到 / 某 operation 不在表里 / `plan` 列取不到 →
   fail-closed：一律要求计划、不挂 label、不做参数摘要、不拦截提案，
   执行层门禁照旧兜底。宿主绝不另立 operation 名单。
 - **版本变化**：新增 operation 只加行；改名即新 operation，旧名调用
-  应得 `not_found` 族错误，不得静默别名。
+  应得 `not_found` 族错误，不得静默别名。顶层新增声明表是向后兼容
+  演进（旧宿主耐未知键；新宿主对缺席表走节内缺失语义）。
 
 ## 4. Plan schema 与 plan evaluate（计划门）
 
@@ -189,13 +207,19 @@
     健康/退避由**执行层自己**的限流与熔断实现（见
     `docs/execution-layer-admission.md` A12），宿主准入闸只保留
     `maxQueue` 待办深度背压；
-  - 选择类：`ACCOUNT_SET_AMBIGUOUS` / `ACCOUNT_SET_NOT_FOUND`
-    等 → 宿主机械组装澄清问题，模型不为状态转换发音；
-  - 终局快路径：`PERIOD_NO_DATA`、`ASSISTANT_NOT_FOUND` /
-    `ASSISTANT_AMBIGUOUS` → 早停终结，须带齐渲染数据否则不挂；
+  - 选择类（`errorSemantics.selection` 声明）：宿主机械组装澄清问题，
+    模型不为状态转换发音；提取只认契约数据（码 + status + `data.query` +
+    `data.candidates[].name`），`error.correctForm` 作为数据进问句
+    （信封带了才渲染，未带用宿主兜底）；
+  - 终局快路径（`errorSemantics.terminal` 声明）：驱动早停 + 宿主用
+    声明选定的结构句终结；**完整性门不放松**——声明映射的字段必须带齐
+    且非空（缺字段不判终局，回落既有循环并留痕），status=completed
+    的同码信封同样不判终局；
   - 输入类、数据三态、兜底码各有其族，互不混用。
-  平台新增码时只在唯一适配层（`platform-contract.ts`）加码，
-  不在编排层各处分身。
+  两族码由执行层在 `operation list --json` 的顶层 `errorSemantics` 表声明
+  （§3）；表缺席时宿主回退默认适配表（既有已适配实例的现行为）。未声明码
+  一律走既有路径（宁缺勿猜——不猜族别、不猜字段名）。未声明执行层新增
+  选择类 / 终局码不再需要改编排层代码。
 - **缺失时**：无信封 / 信封非法 → 宿主视为网关失败，fail-closed，
   不把自由文本当数据答案。
 

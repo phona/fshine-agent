@@ -69,7 +69,7 @@ describe('planStepSummary', () => {
 
   it('选择类澄清：只记码与候选数（候选名是数据，事实里不抄）', () => {
     expect(planStepSummary(result({
-      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'] },
+      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'], render: 'candidates' },
     }))).toBe('平台澄清：ACCOUNT_SET_AMBIGUOUS（候选 2 个）');
   });
 
@@ -85,11 +85,11 @@ describe('planStepSummary', () => {
   it('优先级：needs 高于 clarification / execution', () => {
     expect(planStepSummary(result({
       needs: { missing: ['查询范围'], reason: '平台要求必须指定范围' },
-      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'] },
+      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'], render: 'candidates' },
       execution: { planId: 'plan_req_plan', version: 1, calls: 2 },
     }))).toBe('缺：查询范围；平台要求必须指定范围');
     expect(planStepSummary(result({
-      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'] },
+      clarification: { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰科技'], render: 'candidates' },
       execution: { planId: 'plan_req_plan', version: 1, calls: 2 },
     }))).toBe('平台澄清：ACCOUNT_SET_AMBIGUOUS（候选 2 个）');
   });

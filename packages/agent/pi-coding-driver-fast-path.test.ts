@@ -28,6 +28,8 @@ import { createContextTaskRunner } from './src/context';
 import type { ContextProfileConfig, PlatformTaskRecord, PlatformTaskRepo } from '@fshine/contracts';
 import { ToolUserError, type DriverMessage, type TurnDriver, type TurnDriverInput } from './src/driver';
 import type { PlanCliRunner } from './src/plan-runtime';
+import type { ErrorCodeSemantics } from './src/platform-contract';
+import { parseErrorCodeSemantics } from './src/operation-labels';
 
 /** 假 agent 的单个模型回合：要发起哪些 bash（可带各自的信封应答）、收尾文本、模型轮失败。 */
 type FakeTurn = { bash?: Array<{ command: string; envelope: string }>; text?: string; errorMessage?: string };
@@ -130,7 +132,7 @@ const activatingPlanRunner: PlanCliRunner = async ({ args }) => {
   throw new Error(`unexpected CLI call: ${args.join(' ')}`);
 };
 
-async function makeDriver(): Promise<{ driver: TurnDriver; cwd: string }> {
+async function makeDriver(options: { errorCodeSemantics?: ErrorCodeSemantics } = {}): Promise<{ driver: TurnDriver; cwd: string }> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'fshine-pi-fastpath-'));
   roots.push(cwd);
   return {
@@ -141,6 +143,7 @@ async function makeDriver(): Promise<{ driver: TurnDriver; cwd: string }> {
       agentDir: path.join(cwd, '.fshine-agent'),
       operationLabels: new Map(),
       planCliRunner: activatingPlanRunner,
+      ...(options.errorCodeSemantics ? { errorCodeSemantics: options.errorCodeSemantics } : {}),
     }),
   };
 }
@@ -181,6 +184,7 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
       query: '对象甲',
       period: '202609',
       availablePeriods: ['202606'],
+      render: 'scope-no-data',
     });
     // 那一次平台调用真发生过：执行痕迹照常（与终局话术并列，不互相替代）。
     expect(result.execution).toEqual({ planId: 'plan_activated', version: 7, calls: 1 });
@@ -274,6 +278,66 @@ describe('错误态快路径 v2：驱动早停与皮带（非空 text）', () =>
   });
 });
 
+// ── 声明表注入（P4 泛化：码级语义按执行层声明派生）──────────────────────────────
+//
+// 真实驱动路径的注入锁：`errorCodeSemantics`（`operation list --json` 顶层 errorSemantics
+// 的派生投影）进工厂选项后，整条早停链（分类 → 完整性门 → 结构句渲染 → 话术交还）都以
+// 声明为准。默认适配表的码不再参与——声明在场即整体替换（宁缺勿猜），这是"码不是宿主
+// 硬编码"在真实驱动上的行为证据（纯函数锁见 error-code-semantics.test.ts）。
+
+/** X_NO_DATA 信封：声明条目映射自定义字段名（name/window/availableWindows）。 */
+const X_NO_DATA_ENVELOPE = 'RESULT {"v":1,"op":"probe.query","status":"not_found","data":{"name":"对象甲","window":"W2","availableWindows":["W1"]},"error":{"code":"X_NO_DATA","message":"X_NO_DATA: 无数据","correctForm":"声明方给的规则，不渲染"}}';
+
+function declaredSemanticsOf(payload: string): ErrorCodeSemantics {
+  const parsed = parseErrorCodeSemantics(payload);
+  if (!parsed) throw new Error('测试声明必须能被 parseErrorCodeSemantics 解析');
+  return parsed;
+}
+
+describe('声明表注入：声明码走快路径、默认码不再快转（真实驱动链）', () => {
+  it('声明的终局码（自定义字段名）早停 + 声明结构句渲染；默认表缺席（空声明）时最快的默认码不转', async () => {
+    const declared = declaredSemanticsOf(JSON.stringify({
+      operations: [],
+      errorSemantics: {
+        selection: {},
+        terminal: { X_NO_DATA: { render: 'scope-no-data', query: 'name', scope: 'window', available: 'availableWindows' } },
+      },
+    }));
+    const { driver, cwd } = await makeDriver({ errorCodeSemantics: declared });
+    fake.setScript([
+      { bash: [{ command: PLAN_COMMAND, envelope: OK_ENVELOPE }, { command: QUERY_COMMAND, envelope: X_NO_DATA_ENVELOPE }] },
+      { text: '不应该到达：声明码早停后不再有后续模型轮。' },
+    ]);
+
+    const result = await driver.run(runInput(cwd));
+
+    // 皮带：话术来自声明的结构句（宿主模板），数据按声明字段从信封取得（对象甲/W2/W1）。
+    expect(result.text).toBe('没有查到“对象甲”在 W2 的数据。平台上有数据的是：W1。要改查的话，告诉我查哪一项即可。');
+    expect(result.terminalFailure).toEqual({
+      code: 'X_NO_DATA',
+      query: '对象甲',
+      period: 'W2',
+      availablePeriods: ['W1'],
+      render: 'scope-no-data',
+    });
+    expect(fake.records.at(-1)?.rounds).toBe(1);
+    expect(fake.records.at(-1)?.stopped).toBe(true);
+  });
+
+  it('声明在场即整体替换：空声明下默认码 PERIOD_NO_DATA 不早停，回落既有循环（宁缺勿猜）', async () => {
+    const { driver, cwd } = await makeDriver({ errorCodeSemantics: declaredSemanticsOf('{"operations":[],"errorSemantics":{}}') });
+    fake.setScript([
+      { bash: [{ command: PLAN_COMMAND, envelope: OK_ENVELOPE }, { command: QUERY_COMMAND, envelope: PERIOD_NO_DATA_ENVELOPE }], text: '该范围没有数据，改成 202606 再查一次。' },
+    ]);
+
+    const result = await driver.run(runInput(cwd));
+
+    expect(result.terminalFailure).toBeUndefined();
+    expect(result.text).toBe('该范围没有数据，改成 202606 再查一次。');
+    expect(fake.records.at(-1)?.stopped).toBe(false);
+  });
+});
+
 describe('补刀出口的 terminalReply 话术（v1 空 text 死形防护）', () => {
   // 与上组第一条用例同一句宿主合成话术（renderTerminalFailureReply 的唯一来源）。
   const NUDGE_TERMINAL_TEXT = '没有查到“对象甲”在 202609 的数据。平台上有数据的是：202606。要改查的话，告诉我查哪一项即可。';
@@ -282,6 +346,7 @@ describe('补刀出口的 terminalReply 话术（v1 空 text 死形防护）', (
     query: '对象甲',
     period: '202609',
     availablePeriods: ['202606'],
+    render: 'scope-no-data',
   };
 
   it('正常腿：补刀那一跳撞终局早停，terminalReply 先于普通收尾交还话术', async () => {

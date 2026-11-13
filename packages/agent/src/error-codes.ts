@@ -46,7 +46,7 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
-import { resolveGatewayText } from './platform-contract';
+import { DEFAULT_ERROR_CODE_SEMANTICS, resolveGatewayText, type SelectionRenderKind, type TerminalRenderKind } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
 
@@ -306,10 +306,10 @@ const TABLE: Record<string, CodeEntry> = {
   },
 
   // ── 终局快路径（错误态快路径 v2，2026-10-16 重做）────────────────────────────
-  // 平台确定性终局码（TERMINAL_FAST_PATH_CODES，platform-contract 唯一适配层）不再走
+  // 平台确定性终局码（由执行层声明派生，见 platform-contract 的 ErrorCodeSemantics）不再走
   // worker 重规划循环：驱动早停 + 宿主用这里的模板合成诚实话术终结。措辞收口在本表，
-  // 与选择类澄清（SELECTION_CLARIFICATION_TEMPLATES）同一条线：平台码 → 模板码一张
-  // 索引（terminalFailureTextFor 下方），动态部分（查询词/取数范围/可改查清单）是信封
+  // 与选择类澄清同一条线：声明给出结构句名 → 模板码一张索引
+  // （TERMINAL_RENDER_TEMPLATES），动态部分（查询词/取数范围/可改查清单）是信封
   // **数据**经 {name} 占位符机械填充，模板本身零业务词（泄漏 lint 同款预算）。
   //
   // 第一版（2026-10-17 凌晨被整波回退）的措辞经评委验证可用的两条照抄：PERIOD_NO_DATA
@@ -697,13 +697,14 @@ const SELECTION_CANDIDATE_LIMIT = 8;
 const SELECTION_CANDIDATE_NAME_LIMIT = 40;
 
 /**
- * 平台选择类码 → 本表消息模板码。选择类码集合在 platform-contract.ts（唯一信封适配层），
- * 用户可见措辞在本表；这张索引是两者之间唯一的一条线。新增选择类模式时两处各加一行，
- * error-codes.test.ts 机械锁两条线覆盖一致——漏登记任何一侧都会红。
+ * 宿主选择类结构句索引：**结构句名 → 消息模板码**（宿主渲染词汇表，封闭集）。
+ * "码 → 句子名"的映射不在这里——它由执行层声明（`operation list --json` 的
+ * errorSemantics）派生，落在 platform-contract 的 ErrorCodeSemantics；本表只把句子名
+ * 译成本文件的消息模板，两处一一对应，机械锁见 error-code-semantics.test.ts。
  */
-const SELECTION_CLARIFICATION_TEMPLATES: Readonly<Record<string, string>> = {
-  ACCOUNT_SET_AMBIGUOUS: 'AMBIGUOUS_SELECTION',
-  ACCOUNT_SET_NOT_FOUND: 'NOT_FOUND_SELECTION',
+const SELECTION_RENDER_TEMPLATES: Readonly<Record<SelectionRenderKind, string>> = {
+  'candidates': 'AMBIGUOUS_SELECTION',
+  'confirm-name-with-hint': 'NOT_FOUND_SELECTION',
 };
 
 /**
@@ -711,8 +712,10 @@ const SELECTION_CLARIFICATION_TEMPLATES: Readonly<Record<string, string>> = {
  *
  * 与 messageFor 的分流：动态部分是**数据**（用户查询词、平台候选名、平台 correctForm），
  * 不是三要素里的"实际值"——它们要进用户回复，因此不给消息模板传 actual（那会 fail-loud，
- * 见 render）。入参是**平台错误码**（信封里的那个），模板码经 SELECTION_CLARIFICATION_TEMPLATES
- * 解析；未登记的码 fail-loud（与未知码同纪律：绝不静默 fallback 到通用问句）。
+ * 见 render）。入参是**平台错误码**（信封里的那个）+ 声明派生的渲染绑定（data.render，
+ * 见 platform-contract 的 SelectionClarification）；绑定缺席时按宿主默认适配表查码→句子
+ * （直接调用方与既有调用逐字兼容，声明路径永远以绑定为准）。两者都定不出句子 → fail-loud
+ * （与未知码同纪律：绝不静默 fallback 到通用问句）。
  * 占位符替换用函数式 replacement：查询词里的 `$&` 之类序列不会被当成替换pattern。
  *
  * `{hint}` 槽位（L2 渲染层）：优先取信封携带的平台 correctForm（**平台下发**数据，
@@ -720,11 +723,15 @@ const SELECTION_CLARIFICATION_TEMPLATES: Readonly<Record<string, string>> = {
  * 两者都缺（未登记兜底的码，如 AMBIGUOUS_SELECTION）→ 空串，模板其余部分照常成立，
  * 不出现空泛占位符。
  */
-export function clarificationTextFor(code: string, data: { query: string; candidates: readonly string[]; correctForm?: string }): string {
-  const templateCode = SELECTION_CLARIFICATION_TEMPLATES[code];
+export function clarificationTextFor(
+  code: string,
+  data: { query: string; candidates: readonly string[]; correctForm?: string; render?: SelectionRenderKind },
+): string {
+  const kind = data.render ?? DEFAULT_ERROR_CODE_SEMANTICS.selection.get(code);
+  const templateCode = kind ? SELECTION_RENDER_TEMPLATES[kind] : undefined;
   if (!templateCode) {
     throw Object.assign(
-      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的选择类澄清码: ${code}——平台侧新增选择类模式时，往 packages/agent/src/platform-contract.ts 的 SELECTION_CLARIFICATION_CODES 加码，并往本表加对应消息模板`),
+      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的选择类澄清码（无声明派生渲染绑定）: ${code}——码级语义由执行层声明（operation list 的 errorSemantics）派生，宿主默认适配表只覆盖既有实例码；新增选择类模式往执行层声明面加数据，不在渲染层加码`),
       { code: UNKNOWN_ERROR_CODE, unknownCode: code },
     );
   }
@@ -750,14 +757,12 @@ export function clarificationTextFor(code: string, data: { query: string; candid
 }
 
 /**
- * 平台终局码 → 本表消息模板码（错误态快路径 v2 的渲染索引，与 SELECTION_CLARIFICATION_TEMPLATES
- * 同一条纪律：平台码是数据，措辞在本表；新增终局码时 platform-contract 的码集合与本表
- * 各加一行，单测机械锁两条线覆盖一致——漏登记任何一侧都会红）。
+ * 宿主终局结构句索引：**结构句名 → 消息模板码**（与 SELECTION_RENDER_TEMPLATES 同一纪律：
+ * 执行层声明给出句子名，措辞在本表；两处一一对应，机械锁见 error-code-semantics.test.ts）。
  */
-const TERMINAL_FAST_PATH_TEMPLATES: Readonly<Record<string, string>> = {
-  PERIOD_NO_DATA: 'PERIOD_NO_DATA_TERMINAL',
-  ASSISTANT_NOT_FOUND: 'ASSISTANT_NOT_FOUND_SELECTION',
-  ASSISTANT_AMBIGUOUS: 'ASSISTANT_NOT_FOUND_SELECTION',
+const TERMINAL_RENDER_TEMPLATES: Readonly<Record<TerminalRenderKind, string>> = {
+  'scope-no-data': 'PERIOD_NO_DATA_TERMINAL',
+  'confirm-name': 'ASSISTANT_NOT_FOUND_SELECTION',
 };
 
 /** terminalFailureTextFor 的数据形状（platform-contract 的 TerminalFastPathFailure 的取值面）。 */
@@ -765,22 +770,26 @@ export interface TerminalFailureTextData {
   query: string;
   period?: string;
   availablePeriods?: readonly string[];
+  /** 声明派生的渲染绑定（结构的句子名）；缺席时按宿主默认适配表查码→句子。 */
+  render?: TerminalRenderKind;
 }
 
 /**
  * 终局快路径话术：表内模板 + 平台信封数据机械组装（与 clarificationTextFor 同一家族）。
  *
  * 动态部分是**数据**（查询词/取数范围标签/可改查清单），不经 messageFor 的 actual 通道
- * （消息模板传 actual 会 fail-loud，纪律不变）。未登记的码 fail-loud（与未知码同纪律：
- * 绝不静默 fallback 到通用话术）。PERIOD_NO_DATA 的 period 完整性门保证在场（信封判据
- * 不挂就到不了这里）——这里再 fail-loud 一次：直接调用方绕过信封判据时响亮失败，绝不
- * 渲染出"在  的数据"这种空洞句子。
+ * （消息模板传 actual 会 fail-loud，纪律不变）。渲染绑定来自声明（data.render，见
+ * TerminalFastPathFailure）；绑定缺席时按宿主默认适配表查码→句子（直接调用方与既有调用
+ * 逐字兼容）。两者都定不出句子 → fail-loud（与未知码同纪律：绝不静默 fallback 到通用话术）。
+ * scope-no-data 的 period 完整性门保证在场（信封判据不挂就到不了这里）——这里再 fail-loud
+ * 一次：直接调用方绕过信封判据时响亮失败，绝不渲染出"在  的数据"这种空洞句子。
  */
 export function terminalFailureTextFor(code: string, data: TerminalFailureTextData): string {
-  const templateCode = TERMINAL_FAST_PATH_TEMPLATES[code];
+  const kind = data.render ?? DEFAULT_ERROR_CODE_SEMANTICS.terminal.get(code)?.render;
+  const templateCode = kind ? TERMINAL_RENDER_TEMPLATES[kind] : undefined;
   if (!templateCode) {
     throw Object.assign(
-      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的终局快路径码: ${code}——平台侧新增终局模式时，往 packages/agent/src/platform-contract.ts 的 TERMINAL_FAST_PATH_CODES 加码，并往本表加对应消息模板`),
+      new Error(`${UNKNOWN_ERROR_CODE}: 未登记的终局快路径码（无声明派生渲染绑定）: ${code}——码级语义由执行层声明（operation list 的 errorSemantics）派生，宿主默认适配表只覆盖既有实例码；新增终局模式往执行层声明面加数据，不在渲染层加码`),
       { code: UNKNOWN_ERROR_CODE, unknownCode: code },
     );
   }

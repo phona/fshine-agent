@@ -55,6 +55,7 @@ const AMBIGUOUS: SelectionClarification = {
   code: 'ACCOUNT_SET_AMBIGUOUS',
   query: '幻辰',
   candidates: ['幻辰财税', '幻辰科技'],
+  render: 'candidates',
 };
 
 /**
@@ -1313,7 +1314,7 @@ describe('createTaxAgentRuntime', () => {
 
   /** 事故里的技术报告：执行语言指纹齐全，正是绝不允许上屏的那一份。 */
   const AMBIGUOUS_TECH_REPORT = '平台返回 ACCOUNT_SET_AMBIGUOUS，candidates: [幻辰财税, 幻辰实业有限公司]。依据 src/finance/scripts/query-receivables.js 的门的规则，实体参数必须逐字来自…';
-  const QIANLONG_CLARIFICATION = { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] };
+  const QIANLONG_CLARIFICATION = { code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'], render: 'candidates' as const };
 
   it('S1 结构化歧义 → 宿主机械组装澄清问题；技术报告（模型文本）不上屏', async () => {
     const { driver } = recordingDriver([
@@ -1354,7 +1355,7 @@ describe('createTaxAgentRuntime', () => {
         taskId: 'task_not_found',
         text: AMBIGUOUS_TECH_REPORT,
         execution: { planId: 'plan_active', version: 1, calls: 1 },
-        clarification: { code: 'ACCOUNT_SET_NOT_FOUND', query: '胜利', candidates: [] },
+        clarification: { code: 'ACCOUNT_SET_NOT_FOUND', query: '胜利', candidates: [], render: 'confirm-name-with-hint' },
       })),
     });
 
@@ -1849,7 +1850,10 @@ describe('createTaxAgentRuntime', () => {
     });
 
     it('未登记的选择类码 fail-loud（不静默退化成通用问句）', () => {
-      expect(() => composeClarificationReply({ ...AMBIGUOUS, code: 'SOME_NEW_CODE' }, '')).toThrow(/未登记的选择类澄清码/);
+      // P4 声明派生：渲染绑定（render）来自执行层声明 / 默认适配表；两者都没有的码
+      // （无绑定、不在默认表）仍响亮失败——这里模拟"未声明码进入渲染层"的形状。
+      const unbound = { code: 'SOME_NEW_CODE', query: AMBIGUOUS.query, candidates: AMBIGUOUS.candidates } as unknown as SelectionClarification;
+      expect(() => composeClarificationReply(unbound, '')).toThrow(/未登记的选择类澄清码/);
     });
   });
 
