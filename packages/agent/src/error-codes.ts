@@ -46,6 +46,10 @@
  * 上下文的动态部分；静态措辞一律在表里。
  */
 import { ToolUserError } from './driver';
+// 合并口径（cap 快照 × P4 码级语义）：发现子命令的阅读形来自发现接缝的唯一常量
+// （capability-source，换传输形态时引用随接缝一处改动自动跟上）；P4 的码级语义
+// （默认适配表与两族结构句词汇表）仍在 platform-contract——消息文本逐字不变。
+import { CAPABILITY_DISCOVERY_COMMAND, CAPABILITY_DISCOVERY_TEXT } from './capability-source';
 import { DEFAULT_ERROR_CODE_SEMANTICS, resolveGatewayText, type SelectionRenderKind, type TerminalRenderKind } from './platform-contract';
 
 export const UNKNOWN_ERROR_CODE = 'UNKNOWN_ERROR_CODE';
@@ -188,7 +192,7 @@ const TABLE: Record<string, CodeEntry> = {
   },
   PLAN_CALL_OPERATION_EMPTY: {
     expected: 'operation 是非空字符串',
-    correctForm: '平台清单注册名（operation list 可查），不猜名称',
+    correctForm: `平台清单注册名（${CAPABILITY_DISCOVERY_COMMAND} 可查），不猜名称`,
   },
   PLAN_CALL_ARGS_NOT_ARRAY: {
     expected: 'args 是数组',
@@ -578,7 +582,7 @@ const TABLE: Record<string, CodeEntry> = {
   //      看到它，最把这句话当真相，于是照着一个过期形状撞门；
   //   ③ 零业务词、零平台实现细节（脚本名/路径/清单文件一律不进消息）。
   SERVE_INVOCATION_FORM_UNKNOWN: {
-    text: '该调用形态解析不出 operation（缺 mode、缺脚本路径，或用了未注册的形式）。每个 operation 的脚本路径与可用 mode 以平台清单（operation list --json）里该 operation 声明的清单字段为准，据此组装后再调用',
+    text: `该调用形态解析不出 operation（缺 mode、缺脚本路径，或用了未注册的形式）。每个 operation 的脚本路径与可用 mode 以平台清单（${CAPABILITY_DISCOVERY_TEXT}）里该 operation 声明的清单字段为准，据此组装后再调用`,
   },
 };
 

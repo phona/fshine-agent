@@ -23,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createPiCodingTurnDriver, createPiCodingWorkerSession } from './src/pi-coding-driver';
+import { emptyCapabilityManifest, MemoryCapabilitySource } from './src/capability-source';
 import { activatePendingPlan, createPlanScopedWorkerEnv } from './src/plan-runtime';
 import { hostGatewayEnv } from './src/context';
 import {
@@ -75,18 +76,15 @@ vi.mock('@earendil-works/pi-coding-agent', async (importOriginal) => {
 });
 
 vi.mock('./src/operation-labels', async () => {
-  // 平台 I/O 的 loader 全部以替身短路（本文件只验 env 传递面，不派生平台表）。
+  // 平台 I/O 已在发现接缝（capability-source.ts）一侧收口：会话的派生表来源由 baseOptions
+  // 注入 MemoryCapabilitySource（本文件只验 env 传递面，不派生平台表、零 spawn）。
+  // 真实现其余原样（load* 门面不再被驱动调用），只把 isWriteAccess 保持为旧替身；
+  // P4 码级语义 loader 一并替身（未声明 → 驱动回退默认适配表；本文件不验分类面），
+  // 即便被调用也不会 spawn。
   const actual = await vi.importActual<typeof import('./src/operation-labels')>('./src/operation-labels');
   return {
-    serveModesOf: actual.serveModesOf,
+    ...actual,
     isWriteAccess: vi.fn(),
-    loadCapabilityManifest: vi.fn(async () => ({ version: '1.0', operations: [] })),
-    loadOperationArgSpecs: vi.fn(async () => new Map()),
-    loadOperationArgStyles: vi.fn(async () => new Map()),
-    loadOperationLabels: vi.fn(async () => new Map()),
-    loadOperationProtocols: vi.fn(async () => new Map()),
-    loadOperationSemantics: vi.fn(async () => new Map()),
-    // 码级语义（选择类/终局族）：未声明 → 驱动回退默认适配表（本文件不验分类面）。
     loadErrorCodeSemantics: vi.fn(async () => null),
   };
 });
@@ -156,6 +154,8 @@ function baseOptions(overrides?: Partial<PiCodingWorkerSessionOptions>): PiCodin
     skillRoots: [],
     systemPrompt: 'test',
     modelConfig: { runtime: {} as never, model: {} as never },
+    // 发现源替身：本文件不派生平台表、零 spawn（接缝点见 capability-source.ts）。
+    capabilitySource: new MemoryCapabilitySource(emptyCapabilityManifest()),
     ...overrides,
   };
 }
@@ -378,9 +378,13 @@ describe('V0 安全收口：子进程 env 不含宿主敏感凭据族', () => {
     expect(commitSrc).toContain('hostDirectChildEnv(');
     const smokeSrc = srcOf('scripts', 'mock-commit-smoke.ts');
     expect(smokeSrc).toContain('hostDirectChildEnv(');
-    // operation-labels 八处宿主直调（operation list 派生；P4 码级语义 loader 同尺）同尺。
+    // 发现接缝（capability-source.ts）一处宿主直调（唯一发现 spawn）同尺；
+    // operation-labels 已无 spawn（逐表 loader 收敛为接缝门面——P4 码级语义 loader
+    // 也走接缝，hostDirectChildEnv 0 处）。
     const labelsSrc = srcOf('packages', 'agent', 'src', 'operation-labels.ts');
-    expect(labelsSrc.split('hostDirectChildEnv()').length - 1).toBe(8);
+    expect(labelsSrc.split('hostDirectChildEnv()').length - 1).toBe(0);
+    const capabilitySrc = srcOf('packages', 'agent', 'src', 'capability-source.ts');
+    expect(capabilitySrc.split('hostDirectChildEnv()').length - 1).toBe(1);
     // assembly 启动前的平台 lint 子进程（第 4 个宿主→执行层 spawn 面）同尺
     // （2026-11-13 复核发现：此前无 env 选项、全量继承 process.env）。
     const assemblySrc = srcOf('apps', 'server', 'assembly.ts');

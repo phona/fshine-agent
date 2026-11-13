@@ -180,6 +180,9 @@ export async function runConfirmSurfaceCase(options: { keepStateDir?: boolean } 
         runCli: fixtureCliRunner(stateDir, env),
         env,
         gateway: S2_GATEWAY,
+        // 范围段事实用本用例已派生的两份表（同一次发现的产物），不再每次提交各 spawn 一次。
+        operationLabels: labels,
+        operationArgSpecs: specs,
       });
       if (result.status !== 'confirm') {
         throw new Error(`构造失败：要的是需要用户确认的计划，夹具给的是 ${result.status}（夹具旋钮 ${JSON.stringify(S2_CONFIRM_TIER_ENV)}）`);

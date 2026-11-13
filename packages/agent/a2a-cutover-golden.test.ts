@@ -259,7 +259,7 @@ describe('⑥ spawn 面盘点（翻转点：C7 收尾——W1 C7b 已达成 fail
     expect(contractSrc).not.toContain('GATEWAY_INVOCATION');
   });
 
-  it('spawn 消费点盘点：ForProfile 5 处 + gatewayExecPath 8 处 = 13，全部 fail-closed', () => {
+  it('spawn 消费点盘点：ForProfile 5 处 + 发现接缝 gatewayExecPath 1 处，全部 fail-closed', () => {
     // profile 驱动（fail-closed）：宿主办调两处 + 计划 CLI 一处 + 结构化调用一处 + 冒烟脚本一处。
     for (const file of [
       join(SRC_DIR, 'context.ts'),
@@ -270,15 +270,19 @@ describe('⑥ spawn 面盘点（翻转点：C7 收尾——W1 C7b 已达成 fail
     ]) {
       expect(srcOf(file)).toContain('gatewayExecPathForProfile(');
     }
-    // gatewayExecPath（内部同样 fail-closed）：operation-labels 八处（P4 码级语义 loader 同尺）
-    // + 冒烟脚本零处。
+    // gatewayExecPath（内部同样 fail-closed）：发现接缝一处（「关进笼子」后唯一发现 spawn）
+    // + 冒烟脚本零处；operation-labels 已无 spawn（逐表 loader 收敛为接缝门面——P4 码级
+    // 语义 loader 同尺，也走接缝派生）。
     // 'gatewayExecPath(' 作为子串不匹配 'gatewayExecPathForProfile('（其后是 F 不是括号）。
-    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(8);
+    expect(srcOf(SRC_DIR, 'operation-labels.ts').split('gatewayExecPath(').length - 1).toBe(0);
+    expect(srcOf(SRC_DIR, 'capability-source.ts').split('gatewayExecPath(').length - 1).toBe(1);
     expect(srcOf(SCRIPTS_DIR, 'mock-commit-smoke.ts').split('gatewayExecPath(').length - 1).toBe(0);
-    // operation-labels 八处的前置是显式降级（未声明 gateway → 空表/null），不是静默默认。
-    const labelsSrc = srcOf(SRC_DIR, 'operation-labels.ts');
-    expect(labelsSrc).toContain('validateGatewayInvocation(gateway)');
-    expect(labelsSrc).toContain('绝不回退遗留网关名');
+    // 接缝一处的前置是显式降级（未声明 gateway → 空表/null），不是静默默认：
+    // 发现源降级为 failedCapabilityManifest（各派生表空表 / 码级语义 null），
+    // 绝不放行到遗留网关名。
+    const capabilitySrc = srcOf(SRC_DIR, 'capability-source.ts');
+    expect(capabilitySrc).toContain('validateGatewayInvocation(gateway)');
+    expect(capabilitySrc).toContain('绝不回退遗留网关名');
   });
 
   it('mock-commit-smoke.ts 已修复（C7 收尾：gatewayExecPathForProfile + gateway 入参）', () => {

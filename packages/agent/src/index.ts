@@ -108,6 +108,35 @@ export {
   type OperationProtocols,
   type OperationSemantics,
 } from './operation-labels';
+export {
+  // 能力发现接缝（「关进笼子」）：一次发现、一份快照、一个传输点。
+  // 快照类型叫 CapabilityManifest（发现文档的完整投影）；协议投影（contracts 的
+  // CapabilityManifest，能力语义）由 protocolManifestOf 单向派生——两者不同层，
+  // 这里导出的是快照那一层。
+  CliCapabilitySource,
+  MemoryCapabilitySource,
+  loadCapabilityManifestSnapshot,
+  labelsOf,
+  argSpecsOf,
+  argStylesOf,
+  accessSemanticsOf,
+  operationSemanticsOf,
+  errorSemanticsOf,
+  operationProtocolsOf,
+  proposalSchemaOf,
+  protocolManifestOf,
+  emptyCapabilityManifest,
+  failedCapabilityManifest,
+  capabilityManifestOf,
+  type AccessSemanticsInit,
+  type CapabilityCliCall,
+  type CapabilityCliRunner,
+  type CapabilityManifest,
+  type CapabilityOperation,
+  type CapabilityOperationArgs,
+  type CapabilityOperationInit,
+  type CapabilitySource,
+} from './capability-source';
 export * from './scratch-cleanup';
 export {
   createPlatformExecutionGate,

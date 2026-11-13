@@ -16,6 +16,9 @@ import {
   principalScopeRecords,
 } from '@fshine/core';
 import {
+  argSpecsOf,
+  argStylesOf,
+  CliCapabilitySource,
   createContextTaskRunner,
   createBackgroundTaskManager,
   createPlatformExecutionGate,
@@ -23,11 +26,17 @@ import {
   createPiTurnDriver,
   createReadSkillTool,
   createTaxAgentRuntime,
+  DEFAULT_ERROR_CODE_SEMANTICS,
+  errorSemanticsOf,
   hostDirectChildEnv,
+  labelsOf,
   listSkills,
   loadAgentProfile,
-  loadOperationArgSpecs,
-  loadProposalSchema,
+  loadCapabilityManifestSnapshot,
+  operationProtocolsOf,
+  operationSemanticsOf,
+  proposalSchemaOf,
+  protocolManifestOf,
   RESEND_ARTIFACT_TOOL,
   reviewProposalWithDriver,
   newGateSecret,
@@ -212,6 +221,35 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
   const platformRoot = activeProfile?.root;
   // 接口完整性硬门：lint 红就抛错、拒绝启动（不建存储、不接渠道），判据与输出见上方函数注释。
   if (platformRoot) assertPlatformOperationsHealthy(platformRoot);
+  // ── 发现：单一快照（boot 期一次；「关进笼子」，2026-11-13）──────────────────────
+  // 执行层能力清单的唯一发现面 = CapabilitySource（packages/agent/src/capability-source.ts）。
+  // 本装配在此构造一次、加载一次，派生表（label / args 规格 / flag 样式 / access 语义 /
+  // 语义表 / 协议角色 / 提案 schema / 协议清单 / 码级语义 errorSemantics）全部由这一份
+  // 快照纯函数派生后注入各消费点（worker 驱动 / 提案复核 / 落账后端 / runtime）——generic
+  // 代码不再逐表 spawn 发现子命令，也不再有第二处发现实现。快照语义：进程生命周期内不变，
+  // 失效 = 重启；不做刷新机制。平台未配 = 不发现：各消费点按既有安全缺省降级（空表 / null /
+  // fail-closed）。
+  const capabilitySource = platformRoot
+    ? new CliCapabilitySource({
+        platformRoot,
+        ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
+      })
+    : undefined;
+  const capabilitySnapshot = capabilitySource ? await capabilitySource.load() : undefined;
+  const capabilityTables = capabilitySnapshot
+    ? {
+        labels: labelsOf(capabilitySnapshot),
+        argStyles: argStylesOf(capabilitySnapshot),
+        argSpecs: argSpecsOf(capabilitySnapshot),
+        semantics: operationSemanticsOf(capabilitySnapshot),
+        protocols: operationProtocolsOf(capabilitySnapshot),
+        proposalSchema: proposalSchemaOf(capabilitySnapshot),
+        protocolManifest: protocolManifestOf(capabilitySnapshot),
+        // P4 码级语义（选择类澄清 / 终局快路径）：声明缺席 → 宿主默认适配表（未声明执行层
+        // 的现行为逐字节不变）；声明在场即整体替换。与其余派生表同一次发现、零额外 spawn。
+        errorSemantics: errorSemanticsOf(capabilitySnapshot) ?? DEFAULT_ERROR_CODE_SEMANTICS,
+      }
+    : undefined;
   // 宿主库路径链（2026-11-10 仲裁修订令）：overrides.dbPath（测试 / e2e harness 的注入）
   // > effectiveEnv.DB_PATH（yaml `store.dbPath` 派生值，非空 env 覆盖，合并规则唯一实现
   // 在 effectiveDeploymentEnv）> 仓库根 data/agent.db。空串按未配置处理（--env-file 的
@@ -314,13 +352,23 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     ...((effectiveEnv['FSHINE_PI_AGENT_DIR'] ?? '').trim()
       ? { agentDir: (effectiveEnv['FSHINE_PI_AGENT_DIR'] ?? '').trim() }
       : {}),
-    // label 表派生根：平台操作的人类可读名来自平台公共 CLI 的第 5 列
+    // 发现根（供未注入路径兜底）：平台操作的人类可读名来自执行层清单的 label 列
     ...(platformRoot ? { platformRoot } : {}),
-    // 网关调用形式（C7b 收口补漏）：label/规格/语义/协议四张派生表与 serve 门共用同一
-    // profile.gateway 声明——C7b 起 loader 对未声明 gateway 一律降级空表（不回退实例名），
-    // 装配不穿线 = 生产静默零进度帧、零参数摘要、写关闭前置判定失效。未声明 = 不传，
-    // loader 按同一安全缺省降级，与"未配平台根"同判据。
+    // 网关调用形式（C7b 收口补漏）：派生表与 serve 门共用同一 profile.gateway 声明——
+    // 未声明 = 不传，按同一安全缺省降级（不回退实例名）。
     ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
+    // 派生表整体注入（boot 期快照的纯函数派生）：驱动侧不再有自己的发现——六张表 +
+    // 协议清单与门共用同一份平台数据面。未配平台根 = 不注入，驱动按既有安全缺省降级。
+    ...(capabilityTables ? {
+      operationLabels: capabilityTables.labels,
+      operationArgStyles: capabilityTables.argStyles,
+      operationArgSpecs: capabilityTables.argSpecs,
+      operationSemantics: capabilityTables.semantics,
+      operationProtocols: capabilityTables.protocols,
+      capabilityManifest: capabilityTables.protocolManifest,
+      // P4 码级语义：同一份快照派生；声明缺席已解析成默认适配表（注入值即最终消费值）。
+      errorCodeSemantics: capabilityTables.errorSemantics,
+    } : {}),
     planActivationSecret,
     // A1：绕开平台执行器的告警出口（披露是增强不是门——与附件披露、计划通知同族）。
     // 判据在 platformExecutorBypassed：整轮只有本地执行、零计划门放行的平台执行调用、
@@ -385,9 +433,12 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
     // 驱动 = Main 驱动（隔离回合、无工具）：相位 1 起"上下文抽取专用驱动"整条删除，
     // 复核沿用 Main 的模型面（与删除前同一实例——原先的缺省就是 `?? driver`）。
     proposalReviewTurn: (input) => reviewProposalWithDriver(driver, input),
-    // 提案 schema 取问（接口文档 §5）：按 profile 的 root 与 gateway spawn
-    // operation list --json，取 proposal.create 行的 proposalSchema。
-    proposalSchemaLoader: (args) => loadProposalSchema(args.platformRoot, args.gateway),
+    // 提案 schema 取问（接口文档 §5）：boot 快照同根 → 直接取快照派生值（零发现 spawn）；
+    // 不同根（多 profile 演进期的直调路径）→ 经同一接缝一次性发现，不另立实现。
+    proposalSchemaLoader: async (args) => {
+      if (capabilityTables && args.platformRoot === platformRoot) return capabilityTables.proposalSchema;
+      return proposalSchemaOf(await loadCapabilityManifestSnapshot(args.platformRoot, args.gateway));
+    },
 
     ...(platformRoot ? {
       changeIntents: store.changeIntents,
@@ -407,6 +458,9 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
         platformRoot,
         gateSecret,
         ...(activeProfile?.gateway ? { gateway: activeProfile.gateway } : {}),
+        // 协议角色表来自 boot 快照（不再各自 spawn 发现）：找不到 proposal.commit 角色
+        // 仍按原路径拒绝落账（fail-closed 语义不变，见下方长注释的漏传事故）。
+        ...(capabilityTables ? { operationProtocols: capabilityTables.protocols } : {}),
       }),
       // plan 申请的命令形态（变更项 ②）：worker 提示词的许可段只经注入拿到它，通用编排层
       // 不出现网关名。取值单一来源 = planDraftExample(activeProfile?.gateway)（C7b 起
@@ -452,10 +506,10 @@ export async function createServerAssembly(overrides: ServerAssemblyOverrides = 
 
   // 计划确认门接线收敛到 apps/server/plan-confirmation-route.ts 的工厂（D-013）：
   // assembly 与 scripts/ask.ts 共用同一份装配，不再逐字复刻。
-  // 平台 args 规格（任务 1 会话实体的查表依据）：与 worker 驱动同一份平台数据源，一次性
-  // 派生后显式传表（operation-labels 的"纯数据 + 显式传表"纪律——调用方持有 Map 并注入）。
+  // 平台 args 规格（任务 1 会话实体的查表依据）：与 worker 驱动同一份 boot 快照的派生表
+  // （"纯数据 + 显式传表"纪律——调用方持有 Map 并注入），不再第二次 spawn 发现。
   // 派生失败/未配平台根 → 空表 → runtime 不提取得会话实体（安全缺省，判定回退三个来源）。
-  const operationArgSpecs = platformRoot ? await loadOperationArgSpecs(platformRoot, activeProfile?.gateway) : undefined;
+  const operationArgSpecs = capabilityTables?.argSpecs;
   const runtime = createTaxAgentRuntime({
     driver,
     sessions: store.sessions,

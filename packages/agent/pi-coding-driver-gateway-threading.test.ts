@@ -96,10 +96,11 @@ describe('gateway 透传：未注入 planCliRunner 时默认 runner 用配置的
 
     const lines = await gatewayLogLines(logPath);
     // 恢复问话必须在场（漏传 gateway 时默认 runner 在 spawn 前 fail-closed 抛错，本行不存在）。
-    // 同批还有 5 张派生表的 operation list（label/args 规格/语义/协议/能力清单）——C7b 起
-    // 它们与 serve 门共用同一份 profile.gateway，一并走默认 runner，正是这条透传的覆盖证据。
+    // 同批还有发现面的一次派生（单一快照：label/规格/样式/语义/协议/清单全部由这一次发现
+    // 派生）——C7b 起它与 serve 门共用同一份 profile.gateway，一并走默认 runner，正是这条
+    // 透传的覆盖证据。形态断言：发现子命令**恰好一次**（旧实现是七处散装各自 spawn）。
     expect(lines).toContain('plan current --task-id task_gw_resume');
-    expect(lines.filter((line) => line === 'operation list').length).toBeGreaterThanOrEqual(1);
+    expect(lines.filter((line) => line === 'operation list --json').length).toBe(1);
     worker.session.dispose();
   });
 

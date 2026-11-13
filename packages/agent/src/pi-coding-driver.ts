@@ -34,12 +34,12 @@ import { ToolUserError, type DriverMessage, type PlanCallFacts, type ProposalCre
 import { KIMI_THINKING_LEVEL_MAP } from './pi-driver';
 import { hasServerPath } from './server-paths';
 import { createServeGate, describePlanCalls, isInsideScratch, planDeclarationCovers, planDeclarationCoversStructured, planSemanticsEntryForReference, structuredPlanGateVerdict, tierOfEntry, workspaceRelPath, AUDIT_DETAIL_MAX_CHARS, MAX_WRITE_BYTES, type GateInvocationKind, type PlanGateTier, type ServeGateEvent, type ServeGateVerdict } from './serve-gate';
-import { isWriteAccess, loadCapabilityManifest, loadErrorCodeSemantics, loadOperationArgSpecs, loadOperationArgStyles, loadOperationLabels, loadOperationProtocols, loadOperationSemantics, serveModesOf, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
-import { DEFAULT_ERROR_CODE_SEMANTICS, type ErrorCodeSemantics } from './platform-contract';
+import { isWriteAccess, serveModesOf, type AccessSemantics, type CapabilityManifest, type KeyArgStyles, type KeyArgStyle, type OperationArgsSpecs, type OperationLabels, type OperationProtocols, type OperationSemantics } from './operation-labels';
+import { CliCapabilitySource, argSpecsOf, argStylesOf, errorSemanticsOf, labelsOf, operationProtocolsOf, operationSemanticsOf, protocolManifestOf, type CapabilityManifest as CapabilitySnapshot, type CapabilitySource } from './capability-source';
 import { errorFor, messageFor, messageTextFor } from './error-codes';
 import { createPlanScopedWorkerEnv, evaluateAndActivatePlan, loadCurrentActivePlan, parsePlanCallsCommand, parsePlanCallsPayload, planCallFacts, type PlanCall, type PlanCliRunner, type PendingPlanConfirmation, type PlanSubmission } from './plan-runtime';
 import { parseProposalCommand, type ProposalCreateCall } from './proposal-runtime';
-import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, textFromContent, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
+import { parseEnvelope, gatewayExecPathForProfile, resolveGatewayText, platformAuthFailureFromResponses, selectionClarificationFromResponses, terminalFastPathOf, textFromContent, DEFAULT_ERROR_CODE_SEMANTICS, type ErrorCodeSemantics, type PlatformAuthFailure, type PlatformEnvelope, type SelectionClarification, type TerminalFastPathFailure, type TranscriptMessageLike } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { createTaskPlatformRecorder, mergeTaskPlatformSources, transcriptPlatformSources } from './platform-entities';
 import { validatePlanEntities, type PlanArtifactBoundary } from './turn-contract';
@@ -406,8 +406,8 @@ export interface PiCodingTurnDriverOptions {
   /**
    * 码级语义表（`operation list --json` 顶层 `errorSemantics` 的派生投影，测试替身注入点）：
    * 选择类澄清族与终局快路径族的码、结构句与取值字段名。分类与渲染绑定都以它为准；
-   * 缺省经平台 CLI 派生一次，派生失败/表缺席 → 宿主默认适配表（既有实例现行为逐字节
-   * 不变）。未声明码不分类（宁缺勿猜，走既有重规划 / 自愈路径）。
+   * 缺省由同一份发现快照派生（单一接缝，不新增 spawn），派生失败/表缺席 → 宿主默认适配表
+   * （既有实例现行为逐字节不变）。未声明码不分类（宁缺勿猜，走既有重规划 / 自愈路径）。
    */
   errorCodeSemantics?: ErrorCodeSemantics;
   /** operation → args 规格（位置参数声明，计划覆盖判据用）。 */
@@ -446,10 +446,16 @@ export interface PiCodingTurnDriverOptions {
    */
   readProbeCap?: number;
   /**
-   * 能力清单注入点（与 operationLabels / operationSemantics 同族）：缺省由会话按平台 CLI
-   * 派生。结构化调用通道的声明来源；测试要驱动 structured_call 时不必造一份平台 CLI。
+   * 能力清单注入点（与 operationLabels / operationSemantics 同族）：缺省由本工厂按平台根
+   * 发现一次（单一快照）派生。结构化调用通道的声明来源；测试要驱动 structured_call 时不必
+   * 造一份平台 CLI。
    */
   capabilityManifest?: CapabilityManifest;
+  /**
+   * 能力发现源注入点（传输接缝）：缺省 = 本工厂按平台根缓存一个 CLI 源。测试可注入
+   * 计数 / 记忆源（MemoryCapabilitySource）以钉"发现次数"或零 spawn。
+   */
+  capabilitySource?: CapabilitySource;
 }
 
 export interface PiCodingWorkerSessionOptions {
@@ -477,11 +483,17 @@ export interface PiCodingWorkerSessionOptions {
   turnDeclaration?: TurnDriverInput['turnDeclaration'];
   /** 领域无关的实体来源：宿主注入，供计划校验做逐字包含判定（架构 §2 第 9 条）。 */
   entitySources?: TurnDriverInput['entitySources'];
-  /** 能力清单（执行层 `operation list --json` 的投影）；缺省本会话自派生一次。 */
+  /** 能力清单（执行层清单的协议投影）；缺省本会话经发现源自派生一次。 */
   capabilityManifest?: CapabilityManifest;
-  /** script → label 查找表（平台 CLI 派生，驱动侧缓存后传入）；缺省本会话自派生一次。 */
+  /**
+   * 能力发现源（传输接缝，测试替身注入点）：缺省 = 本会话自建 CLI 源。
+   * 未注入的派生表全部由这一次发现（单一快照）纯函数派生；注入 MemoryCapabilitySource
+   * 或计数源即可钉住"发现次数"与零 spawn。
+   */
+  capabilitySource?: CapabilitySource;
+  /** script → label 查找表（驱动侧派生后传入）；缺省本会话经发现源自派生一次。 */
   operationLabels?: OperationLabels;
-  /** flag → 取值样式表（平台 args 规格 CLI 派生）；缺省本会话自派生一次。 */
+  /** flag → 取值样式表（平台 args 规格）；缺省本会话经发现源自派生一次。 */
   operationArgStyles?: KeyArgStyles;
   /**
    * worker 每提交一次（被宿主解析的）计划方案时的回调（D-065 结构化事实源）。
@@ -589,81 +601,62 @@ function countEnvelopesOfToolResults(toolResults: readonly TranscriptMessageLike
 /** Create a headless pi-coding-agent driver for trusted context workers. */
 export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): TurnDriver {
   let modelPromise: Promise<CodingModelConfig> | undefined;
-  // label 表按平台根路径各派生一次并缓存：绝不每条命令 spawn 一次 CLI。
-  const labelCache = new Map<string, Promise<OperationLabels>>();
-  const operationLabelsFor = (workerCwd: string): Promise<OperationLabels> => {
-    if (options.operationLabels) return Promise.resolve(options.operationLabels);
+  // ── 单一发现快照（每平台根一次）──────────────────────────────────────────────
+  // 「关进笼子」：未注入派生表时，本工厂对每个平台根只发现一次（CliCapabilitySource
+  // 一次 spawn），六张表（含 P4 码级语义）与协议清单全部由这一份快照纯函数派生——绝不
+  // 每张表各自 spawn 一遍、绝不每条命令 spawn 一遍。缓存语义：快照在进程生命周期内不变，
+  // 失效 = 重启；不做刷新机制。生产装配已在 boot 期加载快照并整体注入派生表
+  // （apps/server/assembly.ts），本缓存只覆盖测试 / 探针这类未注入路径。
+  const snapshotCache = new Map<string, Promise<CapabilitySnapshot>>();
+  const snapshotFor = (workerCwd: string): Promise<CapabilitySnapshot> => {
     const root = options.platformRoot ?? workerCwd;
-    const cached = labelCache.get(root);
+    const cached = snapshotCache.get(root);
     if (cached) return cached;
-    const loading = loadOperationLabels(root, options.gateway).catch(() => new Map<string, string>());
-    labelCache.set(root, loading);
+    // 注入优先（测试 / 探针的计数源或记忆源）；缺省 = CLI 源（唯一 spawn 点在接缝）。
+    const source = options.capabilitySource ?? new CliCapabilitySource({
+      platformRoot: root,
+      ...(options.gateway ? { gateway: options.gateway } : {}),
+    });
+    const loading = source.load();
+    snapshotCache.set(root, loading);
     return loading;
   };
-  // args 规格（flag → 样式）同样按平台根路径缓存一次：与 label 表分开两次 spawn
-  // 同一子命令（TSV 取 label、--json 取规格——平台刻意把规格只放机器消费面）。
-  const argStyleCache = new Map<string, Promise<KeyArgStyles>>();
-  const operationArgStylesFor = (workerCwd: string): Promise<KeyArgStyles> => {
-    if (options.operationArgStyles) return Promise.resolve(options.operationArgStyles);
-    const root = options.platformRoot ?? workerCwd;
-    const cached = argStyleCache.get(root);
-    if (cached) return cached;
-    const loading = loadOperationArgStyles(root, options.gateway).catch(() => new Map<string, KeyArgStyle>());
-    argStyleCache.set(root, loading);
-    return loading;
+  const operationLabelsFor = async (workerCwd: string): Promise<OperationLabels> =>
+    options.operationLabels ?? labelsOf(await snapshotFor(workerCwd));
+  const operationArgStylesFor = async (workerCwd: string): Promise<KeyArgStyles> =>
+    options.operationArgStyles ?? argStylesOf(await snapshotFor(workerCwd));
+  // 整份规格（位置参数声明名 + flag 样式）：结构化事实（D-065）的取值依据，同一份快照。
+  const operationArgSpecsFor = async (workerCwd: string): Promise<OperationArgsSpecs> =>
+    options.operationArgSpecs ?? argSpecsOf(await snapshotFor(workerCwd));
+  // access 语义表（写关闭前置判定 D-075 与计划门拒绝分流的机械来源）：同一份快照；
+  // 派生失败/平台还没下发 accessSemantics → 空表 → 前置判定不生效（宁缺勿猜，平台门禁兜底）。
+  const operationSemanticsFor = async (workerCwd: string): Promise<OperationSemantics> =>
+    options.operationSemantics ?? operationSemanticsOf(await snapshotFor(workerCwd));
+  // 码级语义表（选择类澄清 / 终局快路径两族的码与渲染绑定；P4）：同一份快照——绝不另开
+  // 一次发现、绝不新增 spawn 点。表缺席 / 派生失败 → 宿主默认适配表（未声明执行层的
+  // 现行为逐字节不变）；声明在场即整体替换（两族都按声明）。
+  const errorCodeSemanticsFor = async (workerCwd: string): Promise<ErrorCodeSemantics> => {
+    if (options.errorCodeSemantics) return options.errorCodeSemantics;
+    try {
+      return errorSemanticsOf(await snapshotFor(workerCwd)) ?? DEFAULT_ERROR_CODE_SEMANTICS;
+    } catch {
+      return DEFAULT_ERROR_CODE_SEMANTICS;
+    }
   };
-  // 整份规格（位置参数声明名 + flag 样式）：结构化事实（D-065）的取值依据，同样按根缓存。
-  const argSpecCache = new Map<string, Promise<OperationArgsSpecs>>();
-  const operationArgSpecsFor = (workerCwd: string): Promise<OperationArgsSpecs> => {
-    if (options.operationArgSpecs) return Promise.resolve(options.operationArgSpecs);
-    const root = options.platformRoot ?? workerCwd;
-    const cached = argSpecCache.get(root);
-    if (cached) return cached;
-    const loading = loadOperationArgSpecs(root, options.gateway).catch(() => new Map<string, never>());
-    argSpecCache.set(root, loading);
-    return loading;
+  // 协议角色表（提案创建拦截的机械来源，B 波 B3）：同一份快照；失败/缺列 → 空表 →
+  // 不拦截（fail-closed 到"这不是提案调用"），门与平台照旧裁决。
+  const operationProtocolsFor = async (workerCwd: string): Promise<OperationProtocols> =>
+    options.operationProtocols ?? operationProtocolsOf(await snapshotFor(workerCwd));
+  // 协议清单（structured_call 的声明来源）：同一份快照的协议投影；发现失败 → null
+  // （structured_call 一律 fail-closed，清单没有的 operation 视为不存在）。
+  const capabilityManifestFor = async (workerCwd: string): Promise<CapabilityManifest | null> => {
+    if (options.capabilityManifest) return options.capabilityManifest;
+    const snapshot = await snapshotFor(workerCwd);
+    return snapshot.discovered ? protocolManifestOf(snapshot) : null;
   };
-  // access 语义表（写关闭前置判定 D-075 与计划门拒绝分流的机械来源）：同样按平台根路径
-  // 缓存一次，绝不每条命令 spawn 一次 CLI。派生失败/平台还没下发 accessSemantics → 空表
-  // → 前置判定不生效（宁缺勿猜，平台门禁兜底）。
-  const semanticsCache = new Map<string, Promise<OperationSemantics>>();
-  const operationSemanticsFor = (workerCwd: string): Promise<OperationSemantics> => {
-    if (options.operationSemantics) return Promise.resolve(options.operationSemantics);
-    const root = options.platformRoot ?? workerCwd;
-    const cached = semanticsCache.get(root);
-    if (cached) return cached;
-    const loading = loadOperationSemantics(root, options.gateway).catch(() => new Map<string, AccessSemantics>());
-    semanticsCache.set(root, loading);
-    return loading;
-  };
-  // 码级语义表（选择类澄清 / 终局快路径两族的码与渲染绑定）：与上表同一手法——按平台
-  // 根路径缓存一次，绝不每条命令 spawn 一次 CLI。表缺席 / 派生失败 → 宿主默认适配表
-  // （未声明执行层的现行为逐字节不变）；声明在场即整体替换（两族都按声明）。
-  const codeSemanticsCache = new Map<string, Promise<ErrorCodeSemantics>>();
-  const errorCodeSemanticsFor = (workerCwd: string): Promise<ErrorCodeSemantics> => {
-    if (options.errorCodeSemantics) return Promise.resolve(options.errorCodeSemantics);
-    const root = options.platformRoot ?? workerCwd;
-    const cached = codeSemanticsCache.get(root);
-    if (cached) return cached;
-    const loading = loadErrorCodeSemantics(root, options.gateway)
-      .then((declared) => declared ?? DEFAULT_ERROR_CODE_SEMANTICS)
-      .catch(() => DEFAULT_ERROR_CODE_SEMANTICS);
-    codeSemanticsCache.set(root, loading);
-    return loading;
-  };
-  // 协议角色表（提案创建拦截的机械来源，B 波 B3）：与 label/规格/语义三张表同一手法——按
-  // 平台根路径缓存一次，绝不每条命令 spawn 一次 CLI。派生失败/平台还没下发 protocol 列
-  // → 空表 → 不拦截（fail-closed 到"这不是提案调用"），门与平台照旧裁决。
-  const protocolCache = new Map<string, Promise<OperationProtocols>>();
-  const operationProtocolsFor = (workerCwd: string): Promise<OperationProtocols> => {
-    if (options.operationProtocols) return Promise.resolve(options.operationProtocols);
-    const root = options.platformRoot ?? workerCwd;
-    const cached = protocolCache.get(root);
-    if (cached) return cached;
-    const loading = loadOperationProtocols(root, options.gateway).catch(() => new Map<string, string>());
-    protocolCache.set(root, loading);
-    return loading;
-  };
+  // 会话侧发现源：把本工厂缓存的那一份快照传下去——会话未收到某张表时的自派生
+  // 因此复用同一份快照，不额外发现（也不额外 spawn）。
+  const capabilitySourceFor = (workerCwd: string): CapabilitySource => ({ load: () => snapshotFor(workerCwd) });
 
   return {
     async run(input: TurnDriverInput): Promise<TurnDriverResult> {
@@ -792,8 +785,12 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
       // 要读同一份表（同一个来源，不是第二份派生）。
       const operationSemantics = await operationSemanticsFor(input.cwd);
       // 码级语义表（选择类澄清 / 终局快路径）：本回合末的澄清提取与终局早停都读它——
-      // 分类与渲染绑定以执行层声明为准（缺省 = 宿主默认适配表）。
+      // 分类与渲染绑定以执行层声明为准（缺省 = 宿主默认适配表）。与上表同一份快照，
+      // 不新增发现、不新增 spawn。
       const codeSemantics = await errorCodeSemanticsFor(input.cwd);
+      // 协议清单（工厂注入优先，缺省由同一份快照投影）。发现失败 = null = structured_call
+      // 一律 fail-closed——与旧缺省（load 失败 → null）同一语义。
+      const capabilityManifest = await capabilityManifestFor(input.cwd);
       const { session, currentPlan, needsClue } = await createPiCodingWorkerSession({
         onPlanSubmitted: (calls) => { plannedCalls = calls; },
         onReadProbe: noteReadProbe,
@@ -808,14 +805,16 @@ export function createPiCodingTurnDriver(options: PiCodingTurnDriverOptions): Tu
         operationLabels: await operationLabelsFor(input.cwd),
         operationArgStyles: await operationArgStylesFor(input.cwd),
         // args 规格（positionalNames）：计划覆盖判据要知道哪些位置参数是目标
-        // （五审 blocking）。与 label/样式/语义/协议四张表同一手法——工厂已注入的直接用，
-        // 没注入才按 cwd 现派生一次。
+        // （五审 blocking）。五张表 + 协议清单同一手法——工厂/装配已注入的直接用，
+        // 没注入的由会话经发现源从同一份快照派生（零额外 spawn）。
         ...(argSpecs && argSpecs.size > 0 ? { operationArgSpecs: argSpecs } : {}),
+        // 发现源：把工厂缓存 / 装配注入的那一份快照传下去（会话自派生复用，不二开发现）。
+        capabilitySource: capabilitySourceFor(input.cwd),
         // access 语义表（计划门拒绝分流的平台数据面）与能力声明（宿主持有）一起进会话：
         // beforeToolCall 里对提交的计划做"该不该进计划"的判读。
         operationSemantics,
-        // 能力清单（驱动侧注入优先，缺省由会话派生）：structured_call 的声明来源。
-        ...(options.capabilityManifest ? { capabilityManifest: options.capabilityManifest } : {}),
+        // 协议清单（同一次发现的协议投影）：structured_call 的声明来源。
+        ...(capabilityManifest ? { capabilityManifest } : {}),
         // gateway（C7b fail-closed）：run 输入显式指定优先，工厂声明兜底——两处都来自
         // profile.gateway（runtime 按任务注入 / 装配按工厂注入）；都未声明时 session 内
         // servePatterns 即抛，宿主不回退任何遗留网关名。
@@ -1454,31 +1453,51 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
    * 两张计划各自都在确认线以下，任务总重量 18 call 却一路放行，确认门一次没到）。
    */
   let taskBudgetLedger = emptyTaskBudgetLedger();
-  // label 表（平台清单第 5 列）：驱动侧已缓存则直接传入，否则本会话派生一次。
-  // 派生失败/平台还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
-  // gateway 穿线（C7b 收口补漏）：loader 对未声明 gateway 一律降级空表，声明来自
-  // profile.gateway 注入，本层不持实例名缺省。
-  const operationLabels = options.operationLabels ?? (await loadOperationLabels(options.cwd, options.gateway));
-  // args 规格（flag → 样式）：放行的平台调用才有人类可读参数摘要，规格同样只在
-  // 放行分支消费。派生失败/旧版平台 → 空表 → 零参数摘要（安全缺省，不外泄、不猜）。
-  const operationArgStyles = options.operationArgStyles ?? (await loadOperationArgStyles(options.cwd, options.gateway));
-  // access 语义表（平台 `operation list --json` 的 access 列 × 顶层 accessSemantics 表）：
-  // 写关闭前置判定（D-075）与计划门拒绝分流的机械来源。派生失败/平台还没下发这张表 →
-  // 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案路径的既有拒绝照旧兜底），
-  // 绝不回退到宿主硬编码 operation 名单或 access 词表。
-  const operationSemantics = options.operationSemantics ?? (await loadOperationSemantics(options.cwd, options.gateway));
+  // ── 派生表：注入优先，未注入才自派生——且只发现**一次**（单一快照）──────────────
+  // 装配在 boot 期把七张表整体注入（apps/server/assembly.ts）；工厂也把按平台根缓存的
+  // 同一份快照传进来（capabilitySource）。两条注入都没有时，本会话经发现源自建 CLI 源
+  // 发现一次，五张表 + 协议清单全部由这一份快照纯函数派生——绝不每张表各自 spawn 一遍。
+  // 缓存语义：快照在进程生命周期内不变，失效 = 重启；不做刷新机制。
+  // 各项失败语义与旧实现逐项一致：空表 / null（安全缺省，平台门禁照旧兜底）。
+  const needsDerivation = options.operationLabels === undefined
+    || options.operationArgStyles === undefined
+    || options.operationArgSpecs === undefined
+    || options.operationSemantics === undefined
+    || options.operationProtocols === undefined
+    || options.capabilityManifest === undefined;
+  let derivedSnapshot: CapabilitySnapshot | null = null;
+  if (needsDerivation) {
+    const source = options.capabilitySource ?? new CliCapabilitySource({
+      platformRoot: options.cwd,
+      ...(options.gateway ? { gateway: options.gateway } : {}),
+    });
+    derivedSnapshot = await source.load();
+  }
+  // label 表：派生失败/执行层还没给这一列 → 空表 → 零进度帧（安全缺省，不外泄脚本名）。
+  const operationLabels: OperationLabels = options.operationLabels
+    ?? (derivedSnapshot ? labelsOf(derivedSnapshot) : new Map());
+  // args 规格（flag → 样式）：放行的调用才有人类可读参数摘要，规格同样只在放行分支消费。
+  const operationArgStyles: KeyArgStyles = options.operationArgStyles
+    ?? (derivedSnapshot ? argStylesOf(derivedSnapshot) : new Map());
+  // access 语义表（access 列 × 顶层语义表）：写关闭前置判定（D-075）与计划门拒绝分流的
+  // 机械来源。派生失败/未下发 → 空表 → 前置判定不生效（宁缺勿猜，平台计划门与提案路径的
+  // 既有拒绝照旧兜底），绝不回退到宿主硬编码 operation 名单或 access 词表。
+  const operationSemantics: OperationSemantics = options.operationSemantics
+    ?? (derivedSnapshot ? operationSemanticsOf(derivedSnapshot) : new Map());
   // args 规格（positionalNames / flagStyles）：计划覆盖判据据此知道哪些位置参数是目标
   // （2026-11-09 五审 blocking：只看 flag 会让以位置参数声明目标的执行层失去写授权范围
-  // 保护）。派生失败/平台没下发 → 空表 → 计划步带位置参数时不判定覆盖（fail-closed）。
-  const operationArgSpecs = options.operationArgSpecs ?? (await loadOperationArgSpecs(options.cwd, options.gateway));
-  // 协议角色表（平台 `operation list --json` 的 protocol 列）：提案创建拦截的机械来源
-  // （B 波 B3）。派生失败/平台还没下发这一列 → 空表 → 不拦截（fail-closed 到"这不是提案
-  // 调用"），worker 的命令落回 serve 门，由门与平台继续裁决。
-  const operationProtocols = options.operationProtocols ?? (await loadOperationProtocols(options.cwd, options.gateway));
-  // 能力清单（执行层 `operation list --json` 的投影）：结构化调用通道的声明来源（C6）。
-  // 派生失败/平台还没下发这张表 → 空表 → structured_call 一律 fail-closed（清单没有的
-  // operation 视为不存在），绝不回退到宿主硬编码名单。
-  const capabilityManifest = options.capabilityManifest ?? (await loadCapabilityManifest(options.cwd, options.gateway));
+  // 保护）。派生失败/未下发 → 空表 → 计划步带位置参数时不判定覆盖（fail-closed）。
+  const operationArgSpecs: OperationArgsSpecs = options.operationArgSpecs
+    ?? (derivedSnapshot ? argSpecsOf(derivedSnapshot) : new Map());
+  // 协议角色表（protocol 列）：提案创建拦截的机械来源（B 波 B3）。派生失败/未下发这一列
+  // → 空表 → 不拦截（fail-closed 到"这不是提案调用"），命令落回 serve 门继续裁决。
+  const operationProtocols: OperationProtocols = options.operationProtocols
+    ?? (derivedSnapshot ? operationProtocolsOf(derivedSnapshot) : new Map());
+  // 协议清单（同一次发现的协议投影）：结构化调用通道的声明来源（C6）。
+  // 发现失败 → null → structured_call 一律 fail-closed（清单没有的 operation 视为不存在），
+  // 绝不回退到宿主硬编码名单。
+  const capabilityManifest: CapabilityManifest | null = options.capabilityManifest
+    ?? (derivedSnapshot && derivedSnapshot.discovered ? protocolManifestOf(derivedSnapshot) : null);
   /**
    * 执行模式词汇（平台 `operation list --json` 每行 serve 矩阵的并集，operation-labels
    * 的 serveModesOf 派生）：serve-gate 的 executor 形态识别与驱动层 T5 对账共用同一份
@@ -2224,6 +2243,9 @@ export async function createPiCodingWorkerSession(options: PiCodingWorkerSession
         activationSecret: options.planActivationSecret,
         // T6 任务级确认门兜底：把本会话已授权花掉的预算交给叠加档，累计进 confirm 档即停。
         taskBudgetUsage: ledgerUsage(taskBudgetLedger),
+        // 范围段机械事实：与本会话其他消费点同一份派生表（不每次提交各 spawn 一次发现）。
+        operationLabels,
+        operationArgSpecs,
         // gateway 穿线（C7b 漏穿补课）：EvaluateAndActivatePlanOptions.gateway 文档写明
         // "透传给默认 runner"，但调用点从未传——默认 runner 拿不到网关名，spawn 前
         // fail-closed 抛错，每次计划提交都以 PLAN DECLINED（网关未声明）收场，平台一次

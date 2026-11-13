@@ -41,6 +41,7 @@
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import { messageTextFor } from './error-codes';
+import { CAPABILITY_DISCOVERY_COMMAND } from './capability-source';
 import { operationLabel, operationReferenceKey, type AccessSemantics, type KeyArgStyle, type KeyArgStyles, type OperationArgsSpecs, type OperationLabels, type OperationSemantics } from './operation-labels';
 import { gatewayTextPatterns, resolveGatewayText } from './platform-contract';
 import { hasServerPath } from './server-paths';
@@ -405,7 +406,9 @@ export function splitCommandTokens(command: string): string[] {
  * 平台新增元数据出口时往这里加一条；加之前先确认它确实不触平台会话。
  */
 const SERVE_METADATA_COMMANDS: ReadonlySet<string> = new Set([
-  'operation list',
+  // 发现子命令的阅读形来自接缝（唯一定义处）——词法族的退役归「受控执行入口」项目，
+  // 本波只把字面量收进接缝，识别行为一字不差。
+  CAPABILITY_DISCOVERY_COMMAND,
   'plan --schema',
   'plan schema',
 ]);

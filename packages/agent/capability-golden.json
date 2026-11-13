@@ -1,0 +1,837 @@
+{
+  "provenance": "生成 = 改动前的 7 个 loader（operation-labels.ts @ 38f3ab4）对 scripts/eval/fixtures/dummy-platform（bin/dummy）的实测输出，冻结为等价性金样",
+  "labels": [
+    [
+      "query",
+      "query ballots"
+    ],
+    [
+      "dummy.query",
+      "query records"
+    ],
+    [
+      "scratch",
+      "ballot scratch"
+    ],
+    [
+      "dummy.scratch",
+      "local computation"
+    ],
+    [
+      "prepare",
+      "prepare ballots"
+    ],
+    [
+      "dummy.prepare",
+      "prepare records"
+    ],
+    [
+      "commit",
+      "commit ballots"
+    ],
+    [
+      "dummy.commit",
+      "commit records"
+    ],
+    [
+      "proposal",
+      "create ballot proposal"
+    ],
+    [
+      "dummy.proposal",
+      "create proposal"
+    ],
+    [
+      "proposal-commit",
+      "commit ballot proposal"
+    ],
+    [
+      "dummy.proposal-commit",
+      "commit proposal"
+    ],
+    [
+      "ballot.query",
+      "query ballots"
+    ],
+    [
+      "ballot.scratch",
+      "ballot scratch"
+    ],
+    [
+      "ballot.prepare",
+      "prepare ballots"
+    ],
+    [
+      "ballot.commit",
+      "commit ballots"
+    ],
+    [
+      "ballot.proposal",
+      "create ballot proposal"
+    ],
+    [
+      "ballot.proposal-commit",
+      "commit ballot proposal"
+    ]
+  ],
+  "argStyles": [
+    [
+      "--collection",
+      "name"
+    ],
+    [
+      "--window",
+      "code"
+    ],
+    [
+      "--input",
+      "name"
+    ],
+    [
+      "--output",
+      "name"
+    ],
+    [
+      "--count",
+      "code"
+    ],
+    [
+      "--apply",
+      "code"
+    ],
+    [
+      "--batch",
+      "code"
+    ],
+    [
+      "--proposal-id",
+      "name"
+    ],
+    [
+      "--topic",
+      "name"
+    ],
+    [
+      "--round",
+      "code"
+    ]
+  ],
+  "argSpecs": [
+    [
+      "dummy.query",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "query",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "dummy.scratch",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--input",
+            "name"
+          ],
+          [
+            "--output",
+            "name"
+          ]
+        ]
+      }
+    ],
+    [
+      "scratch",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--input",
+            "name"
+          ],
+          [
+            "--output",
+            "name"
+          ]
+        ]
+      }
+    ],
+    [
+      "dummy.prepare",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ],
+          [
+            "--apply",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "prepare",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ],
+          [
+            "--apply",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "dummy.commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--collection",
+            "name"
+          ],
+          [
+            "--window",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "dummy.proposal",
+      {
+        "positionalNames": [
+          "payload"
+        ],
+        "flagStyles": [
+          [
+            "--batch",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "proposal",
+      {
+        "positionalNames": [
+          "payload"
+        ],
+        "flagStyles": [
+          [
+            "--batch",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "dummy.proposal-commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--proposal-id",
+            "name"
+          ]
+        ]
+      }
+    ],
+    [
+      "proposal-commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--proposal-id",
+            "name"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.query",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--topic",
+            "name"
+          ],
+          [
+            "--round",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.scratch",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--input",
+            "name"
+          ],
+          [
+            "--output",
+            "name"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.prepare",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--topic",
+            "name"
+          ],
+          [
+            "--round",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ],
+          [
+            "--apply",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--topic",
+            "name"
+          ],
+          [
+            "--round",
+            "code"
+          ],
+          [
+            "--count",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.proposal",
+      {
+        "positionalNames": [
+          "payload"
+        ],
+        "flagStyles": [
+          [
+            "--batch",
+            "code"
+          ]
+        ]
+      }
+    ],
+    [
+      "ballot.proposal-commit",
+      {
+        "positionalNames": [],
+        "flagStyles": [
+          [
+            "--proposal-id",
+            "name"
+          ]
+        ]
+      }
+    ]
+  ],
+  "semantics": [
+    [
+      "dummy.query",
+      {
+        "plan": true,
+        "confirm": false
+      }
+    ],
+    [
+      "query",
+      {
+        "plan": true,
+        "confirm": false
+      }
+    ],
+    [
+      "dummy.scratch",
+      {
+        "plan": false,
+        "confirm": false
+      }
+    ],
+    [
+      "scratch",
+      {
+        "plan": false,
+        "confirm": false
+      }
+    ],
+    [
+      "dummy.prepare",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "prepare",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "dummy.commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "dummy.proposal",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "proposal",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "dummy.proposal-commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "proposal-commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "ballot.query",
+      {
+        "plan": true,
+        "confirm": false
+      }
+    ],
+    [
+      "ballot.scratch",
+      {
+        "plan": false,
+        "confirm": false
+      }
+    ],
+    [
+      "ballot.prepare",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "ballot.commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "ballot.proposal",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ],
+    [
+      "ballot.proposal-commit",
+      {
+        "plan": true,
+        "confirm": true
+      }
+    ]
+  ],
+  "protocols": [
+    [
+      "dummy.proposal",
+      "proposal.create"
+    ],
+    [
+      "proposal",
+      "proposal.create"
+    ],
+    [
+      "dummy.proposal-commit",
+      "proposal.commit"
+    ],
+    [
+      "proposal-commit",
+      "proposal.commit"
+    ],
+    [
+      "ballot.proposal",
+      "proposal.create"
+    ],
+    [
+      "ballot.proposal-commit",
+      "proposal.commit"
+    ]
+  ],
+  "proposalSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "ChangeProposalPayload",
+    "title": "ChangeProposalPayload",
+    "description": "Proposal payload shape (host -> platform bin/dummy prepare dummy.proposal <file>). The host holds only an opaque proposalId; it must not parse, validate or re-render this payload. additionalProperties is false; max 50 records.",
+    "type": "object",
+    "required": [
+      "collection",
+      "window",
+      "records"
+    ],
+    "additionalProperties": false,
+    "properties": {
+      "collection": {
+        "type": "string",
+        "minLength": 1
+      },
+      "window": {
+        "type": "string",
+        "minLength": 1
+      },
+      "records": {
+        "type": "array",
+        "maxItems": 50,
+        "items": {
+          "type": "object",
+          "required": [
+            "name",
+            "value"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "value": {
+              "type": "number"
+            }
+          }
+        }
+      }
+    }
+  },
+  "capabilityManifest": {
+    "version": "1.0",
+    "operations": [
+      {
+        "operation": "dummy.query",
+        "requiresPlan": true,
+        "effects": [
+          "read"
+        ],
+        "estSeconds": 10,
+        "label": "query records",
+        "serveMatrix": [
+          "query",
+          "prepare",
+          "commit"
+        ],
+        "argsSchema": [
+          "--collection",
+          "--window"
+        ]
+      },
+      {
+        "operation": "dummy.scratch",
+        "requiresPlan": false,
+        "effects": [
+          "local"
+        ],
+        "estSeconds": 5,
+        "label": "local computation",
+        "serveMatrix": [
+          "query",
+          "prepare"
+        ],
+        "argsSchema": [
+          "--input",
+          "--output"
+        ]
+      },
+      {
+        "operation": "dummy.prepare",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "prepare records",
+        "serveMatrix": [
+          "prepare"
+        ],
+        "argsSchema": [
+          "--collection",
+          "--window",
+          "--count",
+          "--apply"
+        ]
+      },
+      {
+        "operation": "dummy.commit",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "commit records",
+        "serveMatrix": [
+          "commit"
+        ],
+        "argsSchema": [
+          "--collection",
+          "--window",
+          "--count"
+        ]
+      },
+      {
+        "operation": "dummy.proposal",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "create proposal",
+        "serveMatrix": [
+          "prepare"
+        ],
+        "argsSchema": [
+          "payload",
+          "--batch"
+        ]
+      },
+      {
+        "operation": "dummy.proposal-commit",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "commit proposal",
+        "serveMatrix": [
+          "commit"
+        ],
+        "argsSchema": [
+          "--proposal-id"
+        ]
+      },
+      {
+        "operation": "ballot.query",
+        "requiresPlan": true,
+        "effects": [
+          "read"
+        ],
+        "estSeconds": 10,
+        "label": "query ballots",
+        "serveMatrix": [
+          "query",
+          "prepare",
+          "commit"
+        ],
+        "argsSchema": [
+          "--topic",
+          "--round"
+        ]
+      },
+      {
+        "operation": "ballot.scratch",
+        "requiresPlan": false,
+        "effects": [
+          "local"
+        ],
+        "estSeconds": 5,
+        "label": "ballot scratch",
+        "serveMatrix": [
+          "query",
+          "prepare"
+        ],
+        "argsSchema": [
+          "--input",
+          "--output"
+        ]
+      },
+      {
+        "operation": "ballot.prepare",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "prepare ballots",
+        "serveMatrix": [
+          "prepare"
+        ],
+        "argsSchema": [
+          "--topic",
+          "--round",
+          "--count",
+          "--apply"
+        ]
+      },
+      {
+        "operation": "ballot.commit",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "commit ballots",
+        "serveMatrix": [
+          "commit"
+        ],
+        "argsSchema": [
+          "--topic",
+          "--round",
+          "--count"
+        ]
+      },
+      {
+        "operation": "ballot.proposal",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "create ballot proposal",
+        "serveMatrix": [
+          "prepare"
+        ],
+        "argsSchema": [
+          "payload",
+          "--batch"
+        ]
+      },
+      {
+        "operation": "ballot.proposal-commit",
+        "requiresPlan": true,
+        "effects": [
+          "write"
+        ],
+        "estSeconds": 10,
+        "label": "commit ballot proposal",
+        "serveMatrix": [
+          "commit"
+        ],
+        "argsSchema": [
+          "--proposal-id"
+        ]
+      }
+    ]
+  },
+  "serveModes": [
+    "query",
+    "prepare",
+    "commit"
+  ]
+}
