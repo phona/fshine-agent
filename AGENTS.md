@@ -37,7 +37,7 @@ fshine-agent 的定位（2026-11-12 第三版）：**让不懂技术的业务人
 
 当前接入的 17dz-platform 是一个执行层实例，不是 fshine-agent 的内置业务模型。目标架构及现有违例见 `docs/v0-architecture.md` 和 `docs/architecture-laws.md`；本文规定改动时的归属与审核判据。2026-11-11 删除/保留裁定的完整记录（决定、理由、证据、状态、加回来的判据）在 `docs/decision-log.md`。**权威声明**：九类删除的表在本文（面向改动的摘要）与 decision-log（全表）各有一份，是平行事实源——为防两处漂移，**决定、理由、证据与状态以 `docs/decision-log.md` 为唯一权威**，本文只维护摘要与指针；发现两处不一致时，以 decision-log 为准回改本文，不反向改 decision-log。三份文档分工：decision-log 管决定与状态，本文管改动归属判据与摘要，`docs/architecture-laws.md` 管可执行判据；三份互链。v0-architecture 与 architecture-laws 已在本批文档修订（#59）中同批标注删除状态（v0 §12、laws 的机制分类与 L1 防御排除）；两份文档之间的冲突以 architecture-laws 的判据为准（该文自述）。
 
-**现状（不要读成已完成）**：原生压缩在 main 上尚未激活——`compact()` 的调用点被 `effectiveContextMode === 'transcript'` 挡着，而该模式要求 `contextStates` 缺席（`turn-persistence.ts` 的历史回填闸 → `runtime.ts` 的压缩分支）。摘掉 `contextStates` 接线后，每回合压缩与会话过期恢复同时激活；`contextWindow` 原先硬编码 128_000（`pi-driver.ts`）是假数，C2 实测跑到 241K token 仍一次未触发，修正为从模型能力读取。以上改动在 PR #54（draft，未合）。Task Runtime 已有任务级记录、状态机与幂等键；工具执行级恢复尚缺（见「长期目标」）。
+**现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）**：仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（企微长连接 → 渠道回复）；测试＝`npm run test`（vitest）；评测＝`npm run eval:generic-mock`（确定性通用 mock）。旧 Runtime hub、计划门、旧 demo/试跑脚手架与 `minimal` 过渡命名已删除/收口；写 / 确认 / 取消 / 产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一。
 
 ## 机制分类与审核
 
@@ -99,19 +99,13 @@ fshine-agent 的定位（2026-11-12 第三版）：**让不懂技术的业务人
 4. 保持执行可观察：区分调用获准、实际执行和执行成功；失败要能关联请求、计划、操作及原因，并向用户给出可行动的反馈。新接入不能绕过现有计划、审计和通知链路。
 5. 先过改动防线：在改 `packages` / `apps` 前对照 `docs/change-safety.md`——表征测试先行、基线冻结、变异验证、只跑 mock 不碰真实平台。改造波次的验收条目与回滚开关都在那一份里。
 
-## 迁移期适配现状（2026-10-19 对账，2026-11-11 分段复核）
+## 现状边界（2026-11-13，产品面收口）
 
-**仍有效**：
+本仓当前是 **Minimal Reset 后的最小产品面**：`npm run ask`（命令行单轮）与 `npm start`（企微长连接）两条运行路径；执行面一律由 profile 声明（root + gateway），测试与评测只用仓内 dummy / 假渠道 / 假模型件，不依赖外部平台。
 
-- worker 提示词已纯静态清场——只含协议义务、机械边界与输出纪律，零网关名；但名称检索等执行层指令仍在（`context.ts` 的 `workerSystemPrompt` 输出纪律条），尚未清场（见 `docs/v0-architecture.md` §10「领域判别」/「提示词面积」行）。逐任务范围随委派块走 user message。
-- `docs/business-skill.md` 已中性化（执行默认值与业务路由例子已移出，执行默认词表守卫实测零命中）。
-- `bin/17dz` 计划命令解析与凭证专用写路径也仍在 fshine，这些是迁移期适配与安全守门，允许维护现有防线，但不得扩散为新执行层模板。
-- **授信期门语义（2026-11-12 修订；理由与证据见 `docs/decision-log.md` 六）**：非网关命令、local 越界放行仅审计；**形态解析不出的网关调用**（未登记/未知形态、裸网关命令、后缀污染）**fail-closed 进计划门——宁拦勿猜**；**命令链里夹带网关调用**（`cd … && 网关调用`、`;`/`&&`/`||`/管道之后的网关调用）**同样 fail-closed**；网关在**首位**的元字符软放行维持不变；计划前置对非 local 网关调用保留 fail-closed（判据=执行层语义表）；任何放行 bash 构成执行痕迹。修订方向只有收紧、没有放宽。**残余边界登记在案**：worker 工具面仍含 `bash`/`write`/`edit`，SaaS 凭据未与脚本环境隔离——命令文本检查证明不了脚本内部无越权副作用，属「进程/权限/凭据层」的隔离问题，不因本轮改动视为闭环。
-- 当前预算档位决定及累计账本仍在 17dz，迁移通用策略前不得先删平台门。
+产品面之外的旧机制（旧 Runtime hub、计划门、旧 e2e / 探针 / 验收脚手架、demo 试跑链、`minimal` 过渡命名）已删除或收口，不再作为「仍有效」条目维护；删除决定、理由与后继以 `docs/decision-log.md` §九–§十一为准。
 
-**旧定位中已裁定删除的部分**：旧版「定位」把「上下文、任务拆解和续跑」整体列为宿主职责。上下文/记忆这一支已裁定删除；拆解与续跑不在此列，但两者归属要拆开说——本段与「定位」三层分工处的表述不是矛盾：**拆解决策归模型，拆解与续跑的状态与执行归宿主**。怎么拆是模型的决策（fshine 只提供编排 skill 的程序性知识、机械解析计划协议），拆出了什么、续跑到哪一步、执行是否成功，是宿主的状态与执行记录（Task Runtime）。更准的划分：**Main 拥有 Business Workflow，Worker 拥有 Platform Execution Plan，两类 Plan 不能混**——Main Agent 决定业务工作流怎么拆，Worker 对每个拆解步骤生成并执行平台执行计划；宿主持有两类计划的状态、续跑与恢复，不复制任何一侧的拆解器。宿主不再维护语义投影、长期记忆、历史检索、执行台账注入或压缩声明层；上下文与压缩归 Pi 原生，模型直接读保留下来的会话转录。相关九类删除的逐条理由与状态见「已删及理由」——其中 ①–⑥ 在 PR #54（draft，未合），main 上仍存在；⑦–⑨ 已在本分支实施（arch/direct-tool-final，待开 PR）。worker 提示词与网关凭证专用写路径两段不受影响，仍按上列有效条目执行。
-
-**收敛纪律**：改动时先保持当前行为与待确认任务的兼容，再按 `docs/architecture-laws.md` 的闭环判据收敛。不要把目标状态写成已实现状态。
+**收敛纪律**：改动时按 `docs/architecture-laws.md` 的闭环判据收敛；不要把目标状态写成已实现状态。
 
 ## 长期目标
 
