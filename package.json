@@ -10,6 +10,7 @@
     "start": "node --env-file-if-exists=.env --import tsx apps/server/main.ts",
     "ask": "node --env-file-if-exists=.env --import tsx scripts/ask.ts",
     "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
+    "eval:user": "node --env-file-if-exists=.env --import tsx scripts/eval/convergence-r1/runner.ts",
     "ci": "sh scripts/ci.sh"
   },
   "engines": {
