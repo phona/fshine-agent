@@ -1,6 +1,6 @@
 # fshine-agent 项目约定
 
-> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decision-log.md` 为准（§九 V0 交付、§十 正名与下一阶段、§十一 M2/M3 删除与重建）。
+> 本文件是**每个 Agent 进仓的第一约束**。2026-11-13 起按「Minimal Rewrite」重写：哲学、职责边界、新增机制准入与删除纪律都是硬约束；架构现状与历史台账以 `docs/decision-log.md` 为准（§九 V0 交付、§十 M2 波次 1 退役登记、§十一 产品面收口）。
 
 ## 定位
 
@@ -60,8 +60,10 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 - 评测以用户级任务为准（完成率、无谓追问/人工介入、错误对象/虚假成功、耗时与 token、安全边界）；A 类看消融，B 类看失败注入/拒绝路径；样本全保留，不筛绿。
 - 旧测试中只验证已删机制的用例直接退役；用户级行为与安全不变量保留相应评测；无法比较的范围明确登记，不假称通过。
 
-## 现状（不要读成已完成）
+## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
-2026-11-13 起处于 **Minimal Rewrite**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）正在按可达性删除，应用按用例重建（U1 `demo:minimal` 读链 / U2 最小 `ask` / U3 渠道消息→回复）；写/确认/取消/产物是后续切片。**现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
+**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:generic-mock`（确定性通用 mock）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一。
+
+**现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
 **指针**：`docs/decision-log.md`（权威决定与状态）、`docs/a2a-protocol.md`（宿主 ↔ 执行层对接协议；A2A 为历史别名）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { KIMI_THINKING_LEVEL_MAP, createProviderToolNameMap, toAgentTool, plannerMessagesToLlm } from './src/pi-driver';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriverInput } from './src/driver';
+import { ToolUserError, type TurnDriverInput } from './src/driver-contract';
 
 describe('Pi driver safety helpers', () => {
   it('把宿主任務事件和任务清单转换给真实模型，同时保留原生转录中的 custom 来源', () => {

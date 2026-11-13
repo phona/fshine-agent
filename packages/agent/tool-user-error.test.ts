@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ToolUserError } from './src/driver';
+import { ToolUserError } from './src/driver-contract';
 
 /**
  * ToolUserError 的存活契约（2026-11-12 申报层删除后）：

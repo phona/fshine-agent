@@ -14,7 +14,7 @@
 # Full-worker real-model eval（旧 probe / acceptance / score.ts 仪器）已随旧域评测脚手架
 # 删除，不再恢复；旧版全 worker 链的仓内 dummy 夹具口径（scripts/eval/eval.agent.yaml）
 # 只保留给 `npm run ask` 的回退配置。
-# The CI real-model face (eval-real.yml) is the minimal tool-loop harness
+# The CI real-model face (eval-real.yml) is the tool-loop harness
 # (generic-model-eval.py) on the in-repo stock fixture; fixture-per-surface
 # wording lives in scripts/eval/eval.agent.yaml's 域边界 note.
 # e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.

@@ -586,6 +586,24 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十一、产品面收口：demo 退役与去过渡化（2026-11-13）
+
+**决定**：分支 `arch/minimal-reset` 上删除 demo/试跑脚手架、把仓库命名收敛到产品面、新增过渡命名收敛守卫防回潮。产品面收敛为两条运行路径：`npm run ask`（一条消息 → 回复 + 机械证据）与 `npm start`（渠道消息 → 回复）。
+
+- **对象**：`scripts/demo-minimal.ts` 与 `npm run demo:minimal`；`config/agent.demo.yaml`；`packages/agent/src/minimal/**`；`scripts/ask-minimal.ts`；`apps/server/minimal-server.*`；`packages/core/src/minimal-task-store.ts`；`minimal` 前缀的标识符 / 日志事件名 / SQLite 表名 / 缺省证据与状态路径。
+- **理由**：demo 是试跑脚手架不是产品面；过渡命名（minimal 目录/前缀/表名）让收口后的产品面读起来仍像临时切片，且此前没有守卫防回潮。
+- **证据**（本分支实跑）：
+  - 守卫 TDD（先红后绿）：`packages/agent/transition-naming.test.ts` 在旧命名上红——路径命中 16、标识符命中 114，`Test Files 1 failed / Tests 2 failed`；改名后绿——路径扫描 109 文件命中 0，标识符扫描 77 文件命中 1（唯一窄豁免：`packages/agent/src/pi-driver.ts` 的 Pi 思考档位外部取值 `minimal`，豁免逐条闭合，含陈旧豁免绊线）。
+  - `npx tsc --noEmit` exit 0；`npx vitest run --project unit` 26 文件 / 213 用例全绿；`npm run eval:generic-mock` 26 cases pass, 0 skipped。
+  - `npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据…"`（真实模型 + 仓内 dummy）：exit 0，委派＝是、结构化执行 1 次（完成 1）、dummy 审计 1 行、用时 15.3s；机械证据落 `.runtime/state.db`、`.runtime/ask/state/audit.jsonl`。
+  - 假渠道 server 回归（`apps/server/server.test.ts`）与重启连续性（`packages/agent/task-registry-sqlite.test.ts`、`packages/agent/runtime.test.ts`）在 unit 内实跑：3 文件 / 11 用例全绿。
+  - 生产路径 `grep -rin minimal packages/*/src scripts apps package.json`：除 `pi-driver.ts` 的 Pi 词表 4 行（外部协议取值，非过渡命名，守卫内窄豁免并注明理由）外归零。
+- **状态**：已实施（本分支，待开 PR）。
+- **后继**：用户级行为面由 `ask` / `start` + 确定性评测（`eval:generic-mock`）与后续用户级评测承担；demo 与旧 e2e 的用户级覆盖面并入该评测口径登记。
+- **加回来的判据**：demo 仅在用户级评测确需一条「多轮冻结语料」入口、且 `ask` / `start` 不足以复现该判据时才可恢复；恢复时须写明它服务哪条评测判据。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

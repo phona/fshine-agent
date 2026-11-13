@@ -1,124 +1,57 @@
 # ============================================================
-# V0 部署配置模板(agent.yaml 的同名模板)。复制为 config/agent.yaml 后填写;
-# config/agent.yaml 不进版本库(.gitignore),部署配置与秘密都写在那里。
+# 部署配置模板（agent.yaml 的同名模板）。复制为 config/agent.yaml 后填写；
+# config/agent.yaml 不进版本库（.gitignore），部署配置与秘密都写在那里。
 #
-# 【优先级】同名环境变量非空值(覆盖口) > config/agent.yaml(源) > 代码缺省。
-#   `node --env-file` 会把模板里的 `KEY=` 设成空串;空串不覆盖 yaml 值。
-#   .env / .env.example 只保留为兼容旧部署的覆盖入口,不再是新部署的秘密源。
+# 【优先级】同名环境变量非空值（覆盖口） > config/agent.yaml（源） > 代码缺省。
+#   `node --env-file` 会把模板里的 `KEY=` 设成空串；空串不覆盖 yaml 值。
+#   .env / .env.example 只保留为兼容旧部署的覆盖入口，不再是新部署的秘密源。
 #
-# 结构对应 @fshine/contracts 的 AppConfig。缺段 / 缺键 = loadConfig 层用代码缺省、不拒启;
-# 服务启动仍会校验必填项:Main 驱动在装配时缺 LLM_API_BASE_URL / LLM_API_KEY / LLM_MODEL
-# 即启动失败;企微凭据在渠道 start 时校验。与切片前一致。
+# 本模板只列最小切片消费的字段：principals / contextProfiles（root + gateway + skillRoots）
+# / llm / wecom / store。旧 hub 的 channel、host、execution、sessionTtlMs 等部署面不在此列；
+# 加载层仍兼容旧键（原样解析、最小切片不消费），新部署不要再写它们。
 # ============================================================
 
-# ---- 授权名单:key = wecom:<企微 UserID> ----
-#UserID 来源:企微后台通讯录,或机器人收到的 from.userid(明文)。
-#只有列在这里且 enabled 的用户才能使用机器人。
+# ---- 授权名单:key = <渠道>:<用户ID>；只有 enabled: true 的用户可用 ----
+# UserID 来源:企微后台通讯录,或机器人收到的 from.userid(明文)。
+# 读写范围不由这里裁决:最小切片只开放「执行层自述为 read 的 operation」,
+# 实体授权归执行层(AGENTS.md:宿主不建实体门)。
 principals:
   "wecom:<你的企微UserID>":
-    # 数据范围:all=允许动态搜索全部数据;allowlist=仅允许 accountSetIds(旧配置默认 allowlist)
-    accountSetScope: all
-    # allowlist 模式下填写授权数据 id(以执行层 search_<entity> 返回的 id 为准)
-    # accountSetIds: ["id_001"]
     enabled: true
-    # 能力集(可选,缺省 read):read=只读;validate/write 开启写链路(V1)
+    # 以下两键是旧字段:加载层仍接受,最小切片不读。
+    # accountSetScope: all
     # capabilities: ["read"]
 
-# ---- 通用 Worker 的受信上下文(路径只能由管理员配置,模型不能传入) ----
+# ---- Worker 的受信执行层上下文(路径只能由管理员配置,模型不能传入) ----
 contextProfiles:
   <profileId>:
+    # 执行层工作目录(绝对路径)。最小切片必须恰好一个 profile(多 profile 拒启)。
     root: /path/to/execution-layer
-    # 每个 profile 声明自己的网关调用形式（相对 root，宿主 spawn 用它，不硬编码）。
-    # 换执行层时只改这里：root + gateway + skillRoots 三件套随 profile 走。
-    # 实例自选 id，三件套随 profile 走；把 bin/your-gateway 换成执行层声明的调用名。
+    # 相对 root 的网关调用形式;宿主 spawn 用它,不硬编码全路径。
     gateway: bin/your-gateway
-    # 运行态技能面:只认 .agents/skills-serve(平台仓 skills-lock 同步过来的 SKILL.md)。
-    # 与建造期技能面 .agents/skills 互斥——worker 驱动 noSkills:true 只加载显式
-    # skillRoots,指向建造面会让"技能注入静默失效"(D-055:模板曾写着旧路径)。
+    # 运行态技能面:.agents/skills-serve 下的 SKILL.md(与建造面 .agents/skills 互斥)。
     skillRoots: [".agents/skills-serve"]
-    # 执行层称谓(可选,≤32 字符无控制字符):进 Main Agent 系统提示词的委派句。
-    # 缺省 = 宿主中性缺省「执行层子 Agent」,不静默取任何实例名;实例按自己的
-    # 已发布协议声明实例称谓(如 executorLabel: <实例称谓>)。
+    # 执行层称谓(可选,≤32 字符):进 Main 角色文本的 {{executorLabel}} 占位;
+    # 缺省 = 宿主中性缺省「执行层子 Agent」。
     # executorLabel: <实例称谓>
-    # 委派工具名(可选,≤48 字符,小写字母开头仅小写字母/数字/下划线):模型可见协议面。
-    # 缺省 = 宿主中性缺省 run_task;已发布过实例工具名的部署在此声明保持协议连续。
-    # toolName: <实例工具名>
-    # Worker 单次任务预算(可选，默认 10 分钟)
-    workerTimeoutMs: 600000
 
-# ---- 渠道回调(可选;V0 WebSocket 长连接不需要,留空走默认值) ----
-# channel:
-#   port: 3000
-#   publicUrl: https://your-domain
-#   callbackPath: /wecom/callback
-
-# ---- 会话状态 TTL(可选,ms):闲置超过该时长后,旧转录压缩成「摘要+最近尾巴」种子续会话(软着陆,不清零失忆) ----
-# sessionTtlMs: 86400000  # 默认 24 小时
-
-# ---- 宿主存储(可选):SQLite 审计/任务库路径 ----
-# 缺省 = 仓库根 data/agent.db;相对路径按进程 cwd 解析(产物库字节与库同目录)。
-# 兼容旧部署:同名 DB_PATH 环境变量仍可覆盖(非空值)。
-# store:
-#   dbPath: data/agent.db
-
-# ---- LLM(OpenAI 兼容接口;契约/单元测试不需要,真实对话需要) ----
-# 秘密只写 config/agent.yaml(本文件复制后的那份,gitignored),不要提交。
-# 兼容旧部署:同名 LLM_* 环境变量仍可覆盖(非空值)。
-llm:
-  # Kimi 编程套餐:https://api.kimi.com/coding/v1;Kimi 开放平台:https://api.moonshot.cn/v1
-  # 换其他厂商只改这里的接口地址与 model(如智谱 https://open.bigmodel.cn/api/paas/v4)。
-  apiBaseUrl: https://api.kimi.com/coding/v1
-  # 你的 API key(前缀视厂商而定);留空/缺省 = 服务启动装配 Main 驱动时报错。
-  apiKey:
-  model: kimi-for-coding
-  # 思考深度(可选,off/minimal/low/medium/high/xhigh/max);是否生效取决于模型是否支持思考参数。
-  # thinkingLevel:
-  # 分层模型接缝(可选):Main Agent 单独配更快的模型;缺省回落 model / thinkingLevel。
-  # mainModel:
-  # mainThinkingLevel:
-  # 上下文窗口(token,可选):Main 模型的真实能力声明;缺省 = 驱动内 128k 缺省。
-  # 压缩阈值 = contextWindow − 摘要预留:声明小了只会让压缩更早触发;声明大了要等
-  # 窗口爆了才压缩。配错即启动失败,不会静默回落缺省。旧部署可用同名环境变量覆盖。
-  # contextWindow: 128000
-
-# ---- 企微智能机器人凭据(管理台:智能机器人 → 你的机器人 → 长连接 API) ----
-# 注意:机器人创建者需为企业超级管理员,收到的 from.userid 才是明文 userid
-# (V0 按 wecom:<userid> 做授权映射;否则需额外的自建应用对接转明文,不在 V0 范围)
+# ---- 渠道:企微智能机器人凭据(管理台:智能机器人 → 长连接 API) ----
 wecom:
   botId:
   # 长连接专用 Secret
   botSecret:
 
-# ---- 宿主运行参数(可选;缺省值 = 代码缺省,见 docs/environment-variables.md) ----
-# 兼容旧部署:同名 FSHINE_* / APP_* 环境变量仍可覆盖(非空值)。
-# host:
-#   # 宿主同时在办的平台作业上限(含执行中),默认 100;达到上限的新提交按队列已满拒绝。
-#   # 这是宿主自己的待办深度,不是平台并发策略——平台能容忍多少并发归执行层。
-#   platformQueueCapacity: 100
-#   # 停机排干上限(ms),默认 30000;0 = 不等待。
-#   shutdownDrainMs: 30000
-#   # inline:同步委派(默认);background:后台 Worker,Planner 可继续接待下一问。
-#   # 后台任务完成后主动交付文字和文件;可查询/取消,不支持运行中 steer 或暂停恢复。
-#   workerDispatchMode: inline
-#   # 自由 worker 每回合放行调用步数帽,默认 50;第 51 次放行送 wind-down。
-#   workerStepCap: 50
-#   # 入站防抖窗口(ms),默认 2000(0 = 关闭):企微里文件与文字是独立消息,
-#   # 带正文的回合先等一拍,让同一 burst 里稍晚到达的附件先落盘。
-#   inboundDebounceMs: 2000
-#   # 企微附件落盘位置,缺省 <平台根>/tmp/attachments;必须在平台根下。
-#   # 用户文件会持续累积,按部署的磁盘/备份策略配置清理。
-#   attachmentDir: /path/to/execution-layer/tmp/attachments
-#   # Pi worker 会话存放位置,缺省 <cwd>/data/pi-agent。
-#   piAgentDir: /path/to/pi-agent
+# ---- LLM(OpenAI 兼容接口;真实对话必填) ----
+# 秘密只写在 config/agent.yaml(本文件复制后的那份,gitignored),不要提交。
+llm:
+  apiBaseUrl: https://api.example.com/v1
+  apiKey:
+  model: your-model
 
-# ---- 执行层交接(可选):计划激活令牌密钥 ----
-# 宿主读入后随 worker 环境逐次注入执行层;留空 = 装配进程内生成,重启失效。
-# execution:
-#   planActivationSecret:
+# ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----
+# 缺省 = 仓根 .runtime/state.db(任务 + 执行记录两张最小表;重启后仍在)。
+# store:
+#   dbPath: .runtime/state.db
 
-# 说明:主 Agent 的常驻角色定义在 .agents/agents/fshine-main/agent.md(装配期读取;
-# 文件缺失/不可读 = 启动失败)。协作技能按需读取:.agents/skills/<名称>/SKILL.md
-# (只曝光名称+描述,正文经 read_skill 按需读取;目录不存在 = 技能面为空)。
-# 旧的 businessSkillPath / BUSINESS_SKILL_PATH 注入链已删除,不要再配置它。
-
-# ---- 执行层治理变量的权威名以该执行层声明为准，见 .env.example 头部说明 ----
+# 说明:Main 的常驻角色定义在 .agents/agents/fshine-main/agent.md(启动期读取;
+# 缺失/不可读 = 启动失败)。

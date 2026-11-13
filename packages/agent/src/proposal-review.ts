@@ -29,7 +29,7 @@
  * (a different LLM_JUDGE_MODEL) is a separate, still-open step and must
  * not be claimed from this module alone.
  */
-import type { TurnDriver } from './driver';
+import type { TurnDriver } from './driver-contract';
 
 export interface ProposalReviewInput {
   /** Opaque platform proposal schema (passed through, never parsed here). */

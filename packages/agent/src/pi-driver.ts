@@ -20,7 +20,7 @@ import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completio
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
 import { Type } from 'typebox';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver';
+import { ToolUserError, type TurnDriver, type TurnDriverInput, type TurnDriverResult } from './driver-contract';
 import { renderToolStepText } from './step-text';
 
 const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 reasoning 增量)即重置

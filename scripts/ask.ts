@@ -1,129 +1,197 @@
 /**
- * 单条消息联调入口（issue #10 切片 A）：把一条用户消息灌进生产装配的黑盒入口，打印最终回复。
- * 用法：npm run ask -- "查一下幻辰财税本期的凭证" [--conversation <id>] [--db <path>] [--config=<path>]
+ * ask：命令行一条消息 → 回合运行时 → 回复 + 机械证据。
  *
- * 装配唯一来源 = `apps/server/assembly.ts#createServerAssembly()`：driver/runtime/
- * platformTask/计划确认门/handler 全在装配里接线（含业务 Skill、上下文/长期记忆、
- * 平台执行队列与门审计、operation 规格、提案复核、Main 独立模型配置、profile.gateway
- * → worker 驱动穿线），本文件零接线代码——生产装配有什么门，ask 就过什么门。
- * 独立验收库（--db，缺省 data/ask-<ts>.db），不碰生产数据。
+ * 用法：
+ *   npm run ask -- "帮我查一下 ..." [--principal=wecom:fixture-user] [--session=<id>] [--config=<path>]
+ *   （AGENT_CONFIG_PATH 与 --config 同义；缺省用 config/agent.fixture.yaml 的仓内 dummy 面。）
  *
- * 链路逻辑在 scripts/ask-session.ts 的适配器里（切片 B）；本文件只做参数解析与输出。
+ * 边界（本切片）：
+ *   · 执行面 = profile 声明的仓内 dummy 夹具（scripts/eval/fixtures/dummy-platform，不触网、
+ *     不碰真实平台；隔离门 fail-closed，root 必须在仓内夹具目录之下）；
+ *   · 模型 = 真实 Pi 驱动（密钥只在 .env；缺 LLM_API_KEY 直接拒绝，不假装跑通）；
+ *   · 任务底账 = SQLite（缺省 .runtime/state.db，config store.dbPath 可覆盖）：
+ *     本进程关库后数据仍在，归属校验跨重启仍成立；
+ *   · 只做单轮：不做确认 / 后台派发 / 产物 / 提案（后续切片）。
+ *
+ * 打印：回复 + taskId / requestId / operation / status + dummy 执行层审计行。
  */
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createAskSession, type MessageTurn } from './ask-session';
-import { explicitConfigFrom, resolveConfigPath } from './resolve-config-path';
+import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
+import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
+import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
+import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
+import {
+  MAIN_PROTOCOL_NOTE,
+  createSession,
+} from '../packages/agent/src/execution-runtime';
+import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
+import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 
-export interface AskCliArgs {
-  /** 要问的问题（剩余位置参数按空格拼接，与既有用法一致）。 */
-  question: string;
-  /** --conversation <id>：固定会话 id 供多轮脚本复用同一会话（指代/召回测试）；缺省随机。 */
-  conversationId?: string;
-  /** --db <path>：固定库文件供多轮脚本跨进程复用会话历史；缺省独立时间戳库。 */
-  dbPath?: string;
-  /** --config=<path>：显式配置（与 probe / resolve-config-path 同一入口）。 */
-  configPath?: string;
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
+const RUNTIME_ROOT = path.join(REPO_ROOT, '.runtime');
+const ASK_ROOT = path.join(RUNTIME_ROOT, 'ask');
+const CONFIG_COPY = path.join(ASK_ROOT, 'agent-config.yaml');
+const DEFAULT_DB_PATH = path.join(RUNTIME_ROOT, 'state.db');
+
+interface AskArgs {
+  message: string;
+  principalId?: string;
+  sessionId?: string;
 }
 
-/**
- * CLI 参数解析（导出供回归测试钉住：用法不退化）。语义与旧版逐条一致：
- *   · `--conversation <id>` / `--db <path>` 吃后随一个值，值不进 question；
- *   · `--config=<path>` 等号形式（与 probe 同款）；
- *   · 其余位置参数按空格拼成 question；空 question = 用法错误（exit 2）。
- */
-export function parseAskCliArgs(argv: readonly string[]): { args: AskCliArgs; usageError: boolean } {
-  let conversationId: string | undefined;
-  let dbPath: string | undefined;
-  const configFlag = argv.find((arg) => arg.startsWith('--config='));
-  const configPath = configFlag !== undefined && configFlag.slice('--config='.length).trim() !== ''
-    ? configFlag.slice('--config='.length).trim()
-    : undefined;
-  const questionParts: string[] = [];
-  for (let i = 0; i < argv.length; i += 1) {
-    const arg = argv[i]!;
-    if (arg === '--conversation') {
-      conversationId = argv[i + 1];
-      i += 1;
+const USAGE = '用法：npm run ask -- "消息" [--principal=<id>] [--session=<id>] [--config=<path>]';
+
+function parseArgs(argv: readonly string[]): AskArgs | { usageError: string } {
+  let message = '';
+  let principalId: string | undefined;
+  let sessionId: string | undefined;
+  for (const arg of argv) {
+    if (arg.startsWith('--principal=')) {
+      principalId = arg.slice('--principal='.length).trim() || undefined;
+    } else if (arg.startsWith('--session=')) {
+      sessionId = arg.slice('--session='.length).trim() || undefined;
+    } else if (arg.startsWith('--config=')) {
+      // 归 explicitConfigFrom 统一解析；这里只跳过。
       continue;
+    } else if (arg.startsWith('--')) {
+      return { usageError: `未知参数：${arg}` };
+    } else if (message === '') {
+      message = arg;
+    } else {
+      return { usageError: '只接受一条消息（多段请用引号包成一条）。' };
     }
-    if (arg === '--db') {
-      dbPath = argv[i + 1];
-      i += 1;
-      continue;
-    }
-    if (arg.startsWith('--config=')) continue;
-    questionParts.push(arg);
   }
-  const question = questionParts.join(' ').trim();
-  return {
-    args: {
-      question,
-      ...(conversationId ? { conversationId } : {}),
-      ...(dbPath ? { dbPath } : {}),
-      ...(configPath ? { configPath } : {}),
-    },
-    usageError: question === '',
-  };
+  if (message.trim() === '') return { usageError: '缺少消息。' };
+  return { message, ...(principalId === undefined ? {} : { principalId }), ...(sessionId === undefined ? {} : { sessionId }) };
 }
 
-function printTurn(turn: MessageTurn): void {
-  if (turn.progress.length) {
-    console.log('\n===== 进度 =====\n' + turn.progress.join('\n'));
+function readLines(file: string): string[] {
+  try {
+    return readFileSync(file, 'utf8').split('\n').filter((line) => line.trim() !== '');
+  } catch {
+    return [];
   }
-  for (const notice of turn.notices) {
-    console.log('\n===== 计划通知 =====\n' + notice + '\n');
-  }
-  console.log('\n===== 回复 =====\n' + (turn.error !== null ? `（回合失败：${turn.error}）` : turn.reply));
 }
 
 async function main(): Promise<void> {
-  const { args, usageError } = parseAskCliArgs(process.argv.slice(2));
-  if (usageError) {
-    console.error('用法：npm run ask -- "要问的问题" [--conversation <id>] [--db <path>] [--config=<path>]');
-    process.exit(2);
+  const parsed = parseArgs(process.argv.slice(2));
+  if ('usageError' in parsed) {
+    console.error(`${USAGE}\n${parsed.usageError}`);
+    process.exitCode = 2;
+    return;
   }
-  // 配置同源（与 assembly 同一入口）：显式 --config= > AGENT_CONFIG_PATH
-  // > config/agent.yaml（存在才用）> scripts/eval/eval.agent.yaml（回退时物化绝对路径副本）。
-  const yamlPath = resolveConfigPath(args.configPath ?? explicitConfigFrom());
-  const env: NodeJS.ProcessEnv = { ...process.env, AGENT_CONFIG_PATH: yamlPath };
-  // 独立 SQLite（--db 显式指定优先；缺省独立时间戳库）+ 固定会话 id（--conversation 优先）。
-  const session = await createAskSession({
+
+  // 配置：显式 --config / AGENT_CONFIG_PATH 优先；缺省用仓内 dummy 面配置（物化绝对 root 副本）。
+  rmSync(ASK_ROOT, { recursive: true, force: true });
+  mkdirSync(ASK_ROOT, { recursive: true });
+  const explicit = explicitConfigFrom(process.argv.slice(2));
+  const configPath = explicit ?? materializeEvalConfig(FIXTURE_CONFIG, CONFIG_COPY);
+  const config = loadConfig({ yamlPath: configPath });
+  const env = effectiveDeploymentEnv(config, process.env);
+  if ((env['LLM_API_KEY'] ?? '').trim() === '') {
+    console.error('未检测到 LLM_API_KEY——ask 需要真实模型（密钥只在 .env，或配置 llm.apiKey）。');
+    process.exitCode = 2;
+    return;
+  }
+
+  const profileIds = Object.keys(config.contextProfiles);
+  if (profileIds.length !== 1) {
+    console.error(`ask 需要单一 contextProfile（当前 ${profileIds.length} 个）——最小切片不做多 profile 选择。`);
+    process.exitCode = 2;
+    return;
+  }
+  const profile = config.contextProfiles[profileIds[0]!]!;
+  if (!profile.gateway) {
+    console.error('profile 缺少 gateway——最小切片需要执行层挂载声明。');
+    process.exitCode = 2;
+    return;
+  }
+  const principalId = parsed.principalId
+    ?? Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0];
+  if (principalId === undefined) {
+    console.error('配置里没有 enabled principal——最小切片需要可信身份来源（fail-closed，不回落写死值）。');
+    process.exitCode = 2;
+    return;
+  }
+  const sessionId = parsed.sessionId ?? `ask-${new Date().toISOString().slice(0, 10)}`;
+
+  const stateDir = path.join(ASK_ROOT, 'state');
+  mkdirSync(stateDir, { recursive: true });
+  const auditPath = path.join(stateDir, 'audit.jsonl');
+  env['EXECUTION_AUDIT_PATH'] = auditPath;
+  // fail-closed 隔离门：root 必须在仓内夹具目录、网关可达、审计通道可写读。
+  assertEvalIsolation(assessEvalIsolation({
     env,
-    ...(args.dbPath ? { dbPath: path.resolve(args.dbPath) } : {}),
-    ...(args.conversationId ? { conversationId: args.conversationId } : {}),
-  });
-  const started = Date.now();
-  let turn: MessageTurn;
-  try {
-    // 一次消息、同进程会话；多轮脚本复用同一 --conversation/--db 再起进程即可续上。
-    turn = await session.sendMessage(args.question);
-  } finally {
-    await session.close();
+    platformRoot: profile.root,
+    gateway: profile.gateway,
+  }), 'ask（仓内 dummy 面）');
+
+  const client = createDummyCliClient({ root: profile.root, gateway: profile.gateway, stateDir, env });
+  const operations = await client.listOperations();
+  const allowedOperations = readOnlyOperationNames(operations);
+  if (allowedOperations.length === 0) {
+    console.error('执行层没有声明任何只读 operation——最小切片拒绝以空允许集合运行。');
+    process.exitCode = 2;
+    return;
   }
-  printTurn(turn);
-  const dbPath = session.dbPath;
-  console.log(`\n(${((Date.now() - started) / 1000).toFixed(1)}s · db: ${dbPath})`);
-  // 证据链摘要（切片 D）：关联 id 与阶梯一行，供人读与下游报告对账。
-  console.log(JSON.stringify({
-    event: 'ask_evidence',
-    evalRunId: turn.evidence.evalRunId,
-    caseId: turn.evidence.caseId,
-    messageId: turn.messageId,
-    requestId: turn.evidence.requestId ?? null,
-    taskId: turn.evidence.delegations[0]?.taskId ?? null,
-    platformCalls: turn.evidence.executionRows.length,
-    refused: turn.evidence.executionRows.filter((row) => row.refused).length,
-    ladderRung: turn.ladderRung,
-  }));
+
+  const dbPath = config.store?.dbPath !== undefined ? path.resolve(config.store.dbPath) : DEFAULT_DB_PATH;
+  const taskRegistry = createSqliteTaskRegistry(dbPath);
+  try {
+    const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
+    const profileMd = await loadAgentProfile();
+    const session = await createSession({
+      principalId,
+      sessionId,
+      client,
+      allowedOperations,
+      mainDriver: createPiTurnDriver({ env }),
+      workerDriver: createPiTurnDriver({ env }),
+      mainSystemPrompt: `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`,
+      workerSkills,
+      taskRegistry,
+    });
+
+    const auditBefore = readLines(auditPath).length;
+    const startedMs = Date.now();
+    const turn = await session.send(parsed.message);
+    const auditLines = readLines(auditPath).slice(auditBefore);
+    const tasks = session.tasks().filter((task) => turn.taskIds.includes(task.taskId));
+    const facts = tasks.flatMap((task) => task.executions.map((execution) => ({
+      taskId: task.taskId,
+      requestId: execution.requestId,
+      operation: execution.operation,
+      status: execution.status,
+      ...(execution.error !== undefined ? { error: execution.error } : {}),
+    })));
+
+    console.log(`\n===== 回复 =====\n${turn.reply}`);
+    console.log([
+      '\n===== 机械证据 =====',
+      `principal=${principalId} session=${sessionId} 委派=${turn.taskIds.length > 0 ? '是' : '否'}`,
+      `taskId=${turn.taskIds[0] ?? '（无委派）'} 结构化执行=${facts.length} 次`
+      + `（完成 ${facts.filter((fact) => fact.status === 'completed').length}）`
+      + ` dummy 审计=${auditLines.length} 行 用时=${((Date.now() - startedMs) / 1000).toFixed(1)}s`,
+      `任务底账=${path.relative(REPO_ROOT, dbPath)}`,
+    ].join('\n'));
+    for (const fact of facts) console.log(JSON.stringify({ event: 'execution', ...fact }));
+    for (const line of auditLines) console.log(line);
+
+    if (turn.reply.trim() === '' || turn.taskIds.length === 0 || facts.length === 0) {
+      console.error('未达标：回复为空或本轮无委派/无结构化执行——如实记录，不重试掩盖。');
+      process.exitCode = 1;
+    }
+  } finally {
+    taskRegistry.close();
+  }
 }
 
-// 仅直接执行时运行（tsx 场景 process.argv[1] 即本文件）：vitest 会 import 本模块复用
-// parseAskCliArgs，不加守卫会在加载时跑一轮消息并 process.exit，把测试进程带走。
-const invokedDirectly = process.argv[1] === fileURLToPath(import.meta.url);
-if (invokedDirectly) {
-  main().catch((error) => {
-    console.error('ask 失败:', error instanceof Error ? error.message : String(error));
-    process.exit(1);
-  });
-}
+await main().catch((error: unknown) => {
+  console.error('ask 运行失败：', error instanceof Error ? error.message : String(error));
+  process.exitCode = 1;
+});

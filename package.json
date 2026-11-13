@@ -9,10 +9,6 @@
     "test": "vitest run",
     "start": "node --env-file-if-exists=.env --import tsx apps/server/main.ts",
     "ask": "node --env-file-if-exists=.env --import tsx scripts/ask.ts",
-    "demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
-    "demo:minimal": "node --env-file-if-exists=.env --import tsx scripts/demo-minimal.ts",
-    "smoke:wecom": "node --env-file-if-exists=.env --import tsx scripts/smoke-wecom.ts",
-    "smoke:commit:mock": "node --env-file-if-exists=.env --import tsx scripts/mock-commit-smoke.ts",
     "eval:generic-mock": "node --import tsx scripts/eval/generic-mock.ts",
     "ci": "sh scripts/ci.sh"
   },

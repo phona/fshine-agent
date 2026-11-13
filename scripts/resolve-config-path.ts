@@ -2,7 +2,7 @@
  * 统一配置路径解析：显式入口（--config=<path> 命令行 / AGENT_CONFIG_PATH 环境变量）>
  * 仓根 config/agent.yaml（存在才用）> scripts/eval/eval.agent.yaml。
  *
- * 全仓脚本（ask / demo / demo:minimal）统一走这个 helper，确保 loadConfig 与
+ * 全仓脚本（ask 等）统一走这个 helper，确保 loadConfig 与
  * createServerAssembly 读取的是同一份 YAML，消除「assembly 读 AGENT_CONFIG_PATH
  * / 脚本硬编码缺省路径」两条路分流的 wart。
  *
