@@ -72,7 +72,10 @@ npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
   过渡命名收敛守卫）。
 - 评测入口：`npm run eval:user`（用户级黑盒评测，12 用例；真实模型 + 仓内 dummy 夹具，与
   `npm run ask` 同源装配；逐样本证据与判据见 `scripts/eval/convergence-r1/README.md`）。
-  真实模型面跑在 `eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）。
+  真实模型 workflow 面：`eval-real.yml`（per-push 1 轮，advisory）与 `eval-nightly.yml`（12×3）——
+  **配置就绪 ≠ 持续运行已启用**：两者分别触发于 `main` 的 push/PR 与每日 cron；当前工作线未合入
+  `main`、远端 Secrets（`LLM_API_*`）未经本仓验证，故在合入并留档首次真实运行之前，不构成持续保障
+  （口径见 `docs/decision-log.md` §十七.4）。
 - 测试与评测只依赖仓内 dummy/假件；真实 SaaS / 真实企微渠道未验证，不作前置条件。
 
 ## 上线前必填
