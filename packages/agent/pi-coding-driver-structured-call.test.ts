@@ -8,6 +8,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { createPiCodingWorkerSession } from './src/pi-coding-driver';
+import { emptyCapabilityManifest, MemoryCapabilitySource } from './src/capability-source';
 import { createPlanScopedWorkerEnv, type PlanCliRunner } from './src/plan-runtime';
 import type { PiCodingWorkerSessionOptions } from './src/pi-coding-driver';
 import type { ServeGateEvent } from './src/serve-gate';
@@ -76,24 +77,14 @@ vi.mock('node:child_process', async () => {
 });
 
 vi.mock('./src/operation-labels', async () => {
-  // 平台 I/O 的 loader 全部以替身短路（本文件不 spawn 平台 CLI）；纯数据投影
-  // serveModesOf 给真实现——2026-11-12（②）起 driver 消费它把清单的 serve 矩阵
-  // 派生成执行模式词汇，假实现会把"词汇从平台数据来"这件事测没。
+  // 平台 I/O 已在发现接缝（capability-source.ts）一侧收口——本文件不 spawn 平台 CLI 的
+  // 保证改由 baseOptions 注入 MemoryCapabilitySource 承担（见下）。
+  // 纯数据投影 serveModesOf 给真实现——2026-11-12（②）起 driver 消费它把清单的 serve
+  // 矩阵派生成执行模式词汇，假实现会把"词汇从平台数据来"这件事测没。
   const actual = await vi.importActual<typeof import('./src/operation-labels')>('./src/operation-labels');
   return {
     serveModesOf: actual.serveModesOf,
     isWriteAccess: vi.fn(),
-    loadCapabilityManifest: vi.fn(async () => ({
-      version: '1.0',
-      operations: [
-        { operation: 'finance.query-receivables', requiresPlan: false, effects: [], estSeconds: 10, label: 'Query', serveMatrix: [], argsSchema: ['--account', '--from', '--to'] },
-      ],
-    })),
-    loadOperationArgSpecs: vi.fn(async () => new Map()),
-    loadOperationArgStyles: vi.fn(async () => new Map()),
-    loadOperationLabels: vi.fn(async () => new Map()),
-    loadOperationProtocols: vi.fn(async () => new Map()),
-    loadOperationSemantics: vi.fn(async () => new Map()),
   };
 });
 
@@ -105,6 +96,8 @@ function baseOptions(overrides?: Partial<PiCodingWorkerSessionOptions>): PiCodin
     skillRoots: [],
     systemPrompt: 'test',
     modelConfig: { runtime: {} as never, model: {} as never },
+    // 发现源替身：未注入的派生表从空快照派生（与旧 loader 替身的空表语义一致），零 spawn。
+    capabilitySource: new MemoryCapabilitySource(emptyCapabilityManifest()),
     ...overrides,
   };
 }

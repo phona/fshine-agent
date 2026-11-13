@@ -102,6 +102,13 @@ export interface EvaluateAndActivatePlanOptions {
    * 绝不合成一段"看起来像后果"的宿主文案。
    */
   consequenceNarrative?: string;
+  /**
+   * 确认/通知面的范围段机械事实来源（汇总发现快照的派生表）：调用方已持有派生表时注入。
+   * 生产路径（驱动）与装配注入的快照同源，注入后本次提交零发现 spawn；缺省（脚本 / 测试
+   * 直调）= 门面各派生一次（行为与从前一致）。
+   */
+  operationLabels?: OperationLabels;
+  operationArgSpecs?: OperationArgsSpecs;
 }
 
 export async function loadCurrentActivePlan(options: {
@@ -383,8 +390,9 @@ export function formatPlanMessage(evaluation: PlanEvaluation, options: PlanNotic
  * 声明取值。两份派生都是"增强不是前提"——拿不到 → 空事实 → 渲染面明说缺什么（不猜不补）。
  */
 async function planNoticeFactsFor(options: EvaluateAndActivatePlanOptions): Promise<PlanNoticeFacts> {
-  const labels = await loadOperationLabels(options.platformRoot, options.gateway);
-  const specs = await loadOperationArgSpecs(options.platformRoot, options.gateway);
+  // 注入优先（驱动 / 装配持有的快照派生表）：计划提交是热路径，注入后零发现 spawn。
+  const labels = options.operationLabels ?? await loadOperationLabels(options.platformRoot, options.gateway);
+  const specs = options.operationArgSpecs ?? await loadOperationArgSpecs(options.platformRoot, options.gateway);
   const labelList = [...new Set(options.calls
     .map((call) => operationLabel(labels, call.operation))
     .filter((label): label is string => typeof label === 'string' && label.length > 0))];

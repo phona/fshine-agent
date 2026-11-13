@@ -29,6 +29,7 @@ import { gatewayExecPathForProfile, parseEnvelope } from './platform-contract';
 import { renderTerminalFailureReply } from './turn-relay';
 import { HANDOVER_VERSION, mergeExecutedCalls, readHandoverFileWithCode, writeHandoverFile, type HandoverExecutedCall, type HandoverReadCode, type HandoverReadResult, type TaskHandover } from './task-handover';
 import { loadProposalSchema } from './operation-labels';
+import { CAPABILITY_DISCOVERY_TEXT } from './capability-source';
 import { type ProposalReviewTurn, type ProposalReviewVerdict } from './proposal-review';
 import { renderCommittedUnverifiedReply, type ReadBackCounts } from './committed-unverified';
 import { reconcileResultContract, renderResultContractReply, type ResultContractDeclaration, type ResultContractReconciliation, type ResultObservation, type TaskResultPort, type TaskResultScope } from './result-contract';
@@ -1981,7 +1982,7 @@ export function workerSystemPrompt(
       // 平台调用形状以清单为准（律法 L2）：这里刻意不手抄网关形状与 flag 纪律——手抄那份
       // 随平台演进过期，而模型会照着手抄那份去撞门。也不限定某一种模式：产出该走哪条
       // 路由由清单说明，worker 自己读。
-      '平台调用走统一入口；形状与可用模式以平台清单（operation list --json）为准，不手抄。',
+      `平台调用走统一入口；形状与可用模式以平台清单（${CAPABILITY_DISCOVERY_TEXT}）为准，不手抄。`,
       knowledgeNotice,
       ...(permitNotice ? [permitNotice] : []),
       scopeNotice,

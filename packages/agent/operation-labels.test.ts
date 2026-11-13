@@ -8,26 +8,26 @@ import { isWriteAccess, loadOperationArgSpecs, loadOperationArgStyles, loadOpera
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });
 
-/** 造一个假平台根：bin/example-gateway 把预置 TSV 吐到 stdout（可指定退出码或挂住）。 */
-async function fakePlatformRoot(tsv: string, options: { exitCode?: number; hang?: boolean } = {}): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'op-labels-'));
-  roots.push(root);
-  await mkdir(path.join(root, 'bin'), { recursive: true });
-  await writeFile(path.join(root, 'bin', 'list.tsv'), tsv);
-  const script = options.hang
-    ? '#!/bin/sh\nexec sleep 30\n'
-    : `#!/bin/sh\ncat "$(dirname "$0")/list.tsv"\nexit ${options.exitCode ?? 0}\n`;
-  await writeFile(path.join(root, 'bin', 'example-gateway'), script);
-  await chmod(path.join(root, 'bin', 'example-gateway'), 0o755);
-  return root;
-}
-
 const LIST_TSV = [
   'finance.search-account-sets\tsearch-account-sets\tread\tcompat-script\t检索单位名称',
   'voucher.query-saved\tquery-saved\tread\tcompat-script\t查询已存档记录',
   'voucher.fill\tfill\twrite-flag\tcompat-script\t', // 第 5 列为空 → 不收
   'voucher.smoke\tsmoke\tread\tcompat-script', // 旧版平台：没有第 5 列 → 不收
 ].join('\n');
+
+/**
+ * 同一批 operation 的 JSON 快照（发现面的新载体）：label 与上面 TSV 第 5 列逐行同值。
+ * `loadOperationLabels` 走 JSON 快照派生——本用例因此同时是"JSON label = 旧 TSV 第 5 列"
+ * 的逐字段小样（全量等价证据见 capability-source.test.ts 的冻结金样）。
+ */
+const LIST_LABELS_JSON = JSON.stringify({
+  operations: [
+    { name: 'finance.search-account-sets', command: 'search-account-sets', access: 'read', label: '检索单位名称' },
+    { name: 'voucher.query-saved', command: 'query-saved', access: 'read', label: '查询已存档记录' },
+    { name: 'voucher.fill', command: 'fill', access: 'write-flag', label: '' },
+    { name: 'voucher.smoke', command: 'smoke', access: 'read' },
+  ],
+});
 
 describe('parseOperationLabels（TSV 第 1/2/5 列）', () => {
   it('只收 label 非空的条目，script 与 name 两种写法都入表', () => {
@@ -53,19 +53,19 @@ describe('parseOperationLabels（TSV 第 1/2/5 列）', () => {
   });
 });
 
-describe('loadOperationLabels（经公共 CLI 派生一次）', () => {
+describe('loadOperationLabels（经发现面派生一次）', () => {
   it('platformRoot 缺省 → 空表（静默降级，不 spawn）', async () => {
     expect((await loadOperationLabels()).size).toBe(0);
     expect((await loadOperationLabels('')).size).toBe(0);
   });
 
-  it('CLI 正常 → 解析出 label 表', async () => {
-    const root = await fakePlatformRoot(LIST_TSV);
+  it('CLI 正常 → 从 JSON 快照解析出 label 表（与 TSV 第 5 列逐字段一致）', async () => {
+    const root = await fakePlatformRootWithJson(LIST_LABELS_JSON);
     expect(await loadOperationLabels(root, 'bin/example-gateway')).toEqual(parseOperationLabels(LIST_TSV));
   });
 
   it('CLI 非零退出 → 空表', async () => {
-    const root = await fakePlatformRoot(LIST_TSV, { exitCode: 3 });
+    const root = await fakePlatformRootWithJson(LIST_LABELS_JSON, { exitCode: 3 });
     expect((await loadOperationLabels(root)).size).toBe(0);
   });
 
@@ -76,7 +76,7 @@ describe('loadOperationLabels（经公共 CLI 派生一次）', () => {
   });
 
   it('CLI 挂住 → 3s 超时后空表，绝不拖住 worker', async () => {
-    const root = await fakePlatformRoot('', { hang: true });
+    const root = await fakePlatformRootWithJson('', { hang: true });
     expect((await loadOperationLabels(root)).size).toBe(0);
   }, 15_000);
 });
