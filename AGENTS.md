@@ -62,8 +62,8 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 
 ## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
-**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:generic-mock`（确定性通用 mock）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一。
+**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）。**评测口径（M4 收口，见 decision-log §十三）**：确定性门＝`npm run typecheck` + `npm run test -- --project unit`（含契约行为测试与安全不变量指定测试）；用户级评测＝`eval:user`（并行分支交付，合并后生效）——`eval:generic-mock` 与真实模型 eval 工作流已随 harness 退役。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一/§十三。
 
 **现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
-**指针**：`docs/decision-log.md`（权威决定与状态）、`docs/a2a-protocol.md`（宿主 ↔ 执行层对接协议；A2A 为历史别名）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。
+**指针**：`docs/decision-log.md`（权威决定与状态）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 只作历史参考（A2A 为历史别名；旧 a2a 契约类型已随 M4 死代码清扫退役）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。

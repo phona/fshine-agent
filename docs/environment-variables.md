@@ -85,6 +85,14 @@
 
 ## 4. 通用夹具（fshine generic-mock，隔离语义）
 
+> **2026-11-13 M4 状态（§4–§9 读取面盘点）**：`scripts/eval/generic-mock.ts`、
+> `fixture-aux-state.ts`、`second-layer.ts`、`plan-policy.test.ts`、
+> `generic-model-eval.py` 与 stock 夹具（§4b/§9.2）均已随 M2/M4 退役
+> （decision-log §十三），下文凡以它们为「现用读者」的表述一律按历史盘点阅读。
+> 现行产品面只余 `npm run ask` 的 dummy 夹具：§4 三个令牌面与 §4a `--state-dir`
+> 测试面是仍存活的机制（凭据隔离白名单见 `packages/agent/src/worker-env.ts` +
+> `worker-env.test.ts`；隔离门见 `scripts/eval/safety-gate.ts`）。
+
 **命名族裁定（2026-11-10 续篇，issue #20 消费端边界收敛）**：`EXECUTION_*` 仍是跨层
 令牌面与真平台状态契约的唯一规范族，`DUMMY_*` 降级为**调试入口**（手工跑夹具时可用）。
 但**四个状态路径**（`EXECUTION_MOCK_STATE` / `EXECUTION_PLAN_STATE` /
@@ -270,9 +278,10 @@ contextWindow − 摘要预留，未声明时沿用驱动缺省 128k；显式值
   ambient C 类同名键**：未在 `fixture.env` / `fixture.planPolicy` 声明的键，评测进程仍会
   继承 shell 里的值。探针的 ambient 清场只覆盖 §4 的三个令牌面调试专名；状态根由
   `FSHINE_EVAL_FIXTURE_STATE_DIR` 测试桥按用例覆盖（§4a），四个状态路径的规范名不再注入。
-  因此评测进程**不得 export** 本节变量（实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock`
+  因此评测进程**不得 export** 本节变量（历史实测：`DUMMY_READBACK_SHORT=1 npm run eval:generic-mock`
   会让 smoke-prepare-commit / g-state-isolation / g-ballot-second-domain 三例红；
-  `STOCK_PLAN_HARD_CALLS=1` 会让 second-layer 计划门用例从 confirm 变 stop）。
+  `STOCK_PLAN_HARD_CALLS=1` 会让 second-layer 计划门用例从 confirm 变 stop；两 harness
+  均已退役，禁令按历史记录阅读）。
 - `scripts/eval/cases.yaml` 的 `fixture.env`：逐用例平铺标量，`loadProbeCases`
   包装器在用例前后注入/还原（`scripts/probe-real-agent.ts`）。
 - `scripts/eval/cases.yaml` 的 `fixture.planPolicy`：**仅 `stock-platform` 夹具**，
@@ -281,9 +290,9 @@ contextWindow − 摘要预留，未声明时沿用驱动缺省 128k；显式值
   `PLAN_POLICY_ENV_KEYS` 拍平成 `STOCK_PLAN_*` env 键。未声明的档/线**不注入**，
   由夹具自己的缺省补足（缺省只保留一份，在夹具源码里）；夹具读取点
   `stock.cjs planPolicy()` 不动。
-- 确定性 harness（`scripts/eval/generic-mock.ts`、`scripts/eval/second-layer.test.ts`）
-  把旋钮声明在各自用例的 env 构造里，不在用例体里按单次调用临时塞 env；它们同样
-  先摊开 `process.env`，所以上面的 ambient 禁令同样适用。
+- 确定性 harness（`scripts/eval/generic-mock.ts`、`scripts/eval/second-layer.test.ts`，
+  均已随 M4 退役）把旋钮声明在各自用例的 env 构造里，不在用例体里按单次调用临时塞 env；
+  它们同样先摊开 `process.env`，所以上面的 ambient 禁令同样适用（按历史纪律保留）。
 
 ### 9.1 dummy 夹具（`scripts/eval/fixtures/dummy-platform/bin/dummy.cjs`，16 个）
 

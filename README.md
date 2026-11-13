@@ -34,13 +34,12 @@
 
 ```bash
 npm install
-npm run ci                           # typecheck + unit + eval:generic-mock（单 checkout 自足）
+npm run ci                           # typecheck + unit（单 checkout 自足）
 npm run typecheck                    # tsc --noEmit
 npm run test                         # vitest（unit project）
 
 npm run ask -- "帮我查一下 ..."        # 一条消息 → 回复 + 机械证据（真实模型 + 仓内 dummy 执行层）
 npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
-npm run eval:generic-mock            # 确定性通用 mock 评测（26 用例，不调模型）
 ```
 
 ## 运行（产品面）
@@ -70,7 +69,10 @@ npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
 
 - 测试入口：`npm run test`（vitest，unit project；含渠道假体、运行时拒绝路径、重启连续性、
   过渡命名收敛守卫）。
-- 评测入口：`npm run eval:generic-mock`（确定性通用 mock，不调模型、不触平台）。
+- 评测口径（M4 收口，见 [decision-log §十三](docs/decision-log.md)）：确定性门＝`npm run typecheck` +
+  `npm run test`（含 Execution Contract 行为测试与安全不变量指定测试）；用户级评测＝`eval:user`
+  （并行分支交付，合并后生效）。`eval:generic-mock` 与真实模型 eval 工作流已随 harness 退役，
+  恢复须先有可运行且被测试钉住的 harness。
 - 测试与评测只依赖仓内 dummy/假件；真实 SaaS / 真实企微渠道未验证，不作前置条件。
 
 ## 上线前必填

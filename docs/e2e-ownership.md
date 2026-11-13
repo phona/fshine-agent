@@ -19,23 +19,23 @@
   - 或直接 spawn 配置派生的网关（如 `plan-awareness`；路径只走
     `gatewayExecPath(platformRoot, profile.gateway)`，e2e 不写死实例名）；
   - 或断言面涉及财税语义、财税 mock 状态、平台账本、平台审计。
-- L4 集成的证据不得冒充通用证据：通用闭环（CI）只认 typecheck + unit +
-  generic-mock，L4 集成全绿只能证明“fshine + 执行层 这一对实例能跑”，
+- L4 集成的证据不得冒充通用证据：通用闭环（CI）只认 typecheck + unit，
+  L4 集成全绿只能证明“fshine + 执行层 这一对实例能跑”，
   不能证明“换一个执行层后仍成立”。
 
 ## CI 口径（与 `scripts/ci.sh`、`.github/workflows/ci.yml` 一致）
 
-CI（本地 `npm run ci` 与 GitHub Actions）只跑三条确定性门：
+CI（本地 `npm run ci` 与 GitHub Actions）只跑两条确定性门：
 
 1. `npm run typecheck`
-2. `npm run test -- --project unit`
-3. `npm run eval:generic-mock`（通用网关 `bin/generic`，协议基线 v2）
+2. `npm run test -- --project unit`（含 Execution Contract 行为测试与安全不变量指定测试）
 
-CI **不跑** `tests/e2e`，也不跑真模型 eval（`npm run eval`）：
+CI **不跑** `tests/e2e`，也不跑真实模型 eval：
 
 - e2e 需要兄弟仓 + gitignored 的 `config/agent.yaml`，单 checkout 跑不起来；
-- 真模型 eval 需要 LLM 凭据且评委分数有方差，属于 Tier B（合入前手动跑、
-  或定时跑），不是每次推送的门。
+- 真实模型 eval 需要 LLM 凭据且评委分数有方差，属 Tier B；其 harness 与三个
+  评测工作流（eval-real/eval-nightly/eval-measure）已于 M4 死代码清扫退役
+  （decision-log §十三），恢复须先有可运行且被测试钉住的 harness。
 - 本文件标完后，CI 口径不变：没有任何财税 e2e 被偷偷加回 CI。
 
 ## 前置条件（按归属分）

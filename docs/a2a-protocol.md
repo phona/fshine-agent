@@ -1,6 +1,12 @@
 # A2A 私有协议（宿主 ↔ 执行层 agent）
 
-状态：**已落地（W5 尾程）**。本协议定义 fshine（宿主）与执行层 agent 之间的私有薄协议：宿主定约与执法，执行层声明与实现，worker 上下文是"协议义务 + 任务实例"的投影。类型定义在 `packages/contracts/src/a2a-protocol.ts`（词汇的唯一权威位置），本文是其叙述。本协议约定目标行为，不声称系统已全部按此实现。**本版新增的两节——「标识词汇：scopeId / callId」与「Pi Durable 约束」——是缺口登记（未落地 / 未采纳），不属于已落地的协议语义；读到它们时按各节状态行理解，不要当既有实现引用。**
+> **失效注记（2026-11-13 M4）**：本文为历史蓝图。文件所述宿主侧 a2a 契约类型与策略表
+> （`packages/contracts/src/a2a-protocol.ts` 的版本常量、失败分类策略等）已随 M4 死代码
+> 清扫删除（全仓消费者 0，仅经 barrel 导出；见 decision-log §十三）。现行执行契约语义面为
+> `packages/contracts/src/execution-contract.ts`。下文「类型定义在 …a2a-protocol.ts（词汇的
+> 唯一权威位置）」等表述按历史阅读。
+
+状态：**已落地（W5 尾程）**。本协议定义 fshine（宿主）与执行层 agent 之间的私有薄协议：宿主定约与执法，执行层声明与实现，worker 上下文是"协议义务 + 任务实例"的投影。类型定义在 `packages/contracts/src/a2a-protocol.ts`（词汇的唯一权威位置；已随 M4 删除，见文首失效注记），本文是其叙述。本协议约定目标行为，不声称系统已全部按此实现。**本版新增的两节——「标识词汇：scopeId / callId」与「Pi Durable 约束」——是缺口登记（未落地 / 未采纳），不属于已落地的协议语义；读到它们时按各节状态行理解，不要当既有实现引用。**
 
 **术语层级**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本协议里的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1；定位（2026-11-12 第三版）的完整出处见 `docs/decision-log.md` §0.1，`AGENTS.md` 定位节为面向改动的摘要 + 指针。删除与保留决定的台账见 `docs/decision-log.md`。
 
@@ -65,7 +71,7 @@ worker 报告结果/产物/证据，或按五类失败分类上报（见下表�
 
 ## 失败分类
 
-五类互斥。判定方与双方义务的权威口径在 `packages/contracts/src/a2a-protocol.ts` 的 `FAILURE_CLASS_POLICIES`，与下表同源。
+五类互斥。判定方与双方义务的权威口径原在 `packages/contracts/src/a2a-protocol.ts` 的 `FAILURE_CLASS_POLICIES`（该类型已随 M4 删除，见文首失效注记），与下表同源。
 
 | 分类 | 判定方 | worker 义务 | 宿主送达义务 |
 |---|---|---|---|
@@ -81,7 +87,7 @@ worker 报告结果/产物/证据，或按五类失败分类上报（见下表�
 
 ## 标识词汇：scopeId / callId（缺口登记，未落地）
 
-状态：**词汇缺口，未落地**。协议契约 `packages/contracts/src/a2a-protocol.ts` 当前不含这两个字段；本节是最小定义与接入约束，不是已实现语义。缺口来源：issue #50 用例 1 的约束写明「范围声明复用现有计划门（执行集合对已确认计划），不新建 scope 机制；a2a 的 scopeId 词汇缺口另案登记」。`callId` 在**评测/探针审计行**已有事实使用（崩溃窗口按 `callId` 去重，见 `docs/debt-ledger.md` 相关条目），但协议未定义其生成方、生命周期与复用规则。
+状态：**词汇缺口，未落地**。协议契约（历史文件 `packages/contracts/src/a2a-protocol.ts`，已随 M4 删除，见文首失效注记）当前不含这两个字段；本节是最小定义与接入约束，不是已实现语义。缺口来源：issue #50 用例 1 的约束写明「范围声明复用现有计划门（执行集合对已确认计划），不新建 scope 机制；a2a 的 scopeId 词汇缺口另案登记」。`callId` 在**评测/探针审计行**已有事实使用（崩溃窗口按 `callId` 去重，见 `docs/debt-ledger.md` 相关条目），但协议未定义其生成方、生命周期与复用规则。
 
 | 词 | 最小定义 | 生成方 / 生命周期 | 用途 |
 |---|---|---|---|

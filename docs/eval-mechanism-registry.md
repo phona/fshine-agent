@@ -9,7 +9,13 @@
 > **2026-11-13（Minimal M2 波次 1）状态**：下表 #1–#6、#8 所述的旧全 worker 评测链
 > （`probe-real-agent` / `acceptance` / `score.ts` / `judge` / 各 criteria / `cases.yaml`
 > 与 CI 计数器）已随旧域评测脚手架删除，本表按原样保留为删除前的机制功劳与代价记录。
-> 现存确定性门为 #9（generic-mock）与 `scripts/ci.sh` 的 typecheck + unit + generic-mock。
+>
+> **2026-11-13（M4 死代码清扫）续**：#9 generic-mock（`generic-mock.ts` /
+> baseline.json / GENERIC_MOCK_NOTES.md / `fixture-aux-state.ts`）与其依赖的 Phase 2
+> 宿主模块、stock 夹具、真实模型 eval 三工作流（eval-real/eval-nightly/eval-measure）
+> 已全部退役（decision-log §十三）。**现存确定性门 = `scripts/ci.sh` 的
+> typecheck + unit（含契约行为测试）**；#8/#9 行按「删除前记录」保留，恢复任何
+> 真实模型/夹具评测面须先有可运行且被测试钉住的 harness 与 owner 裁定。
 
 ## 总表
 

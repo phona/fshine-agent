@@ -8,7 +8,6 @@
 
 - `docs/v0-architecture.md`——架构总览与分层判据
 - `docs/v0-functional-spec.md`——功能规格与能力表
-- `docs/a2a-protocol.md`——结构化调用协议蓝图（参与方、六阶段、失败分类、声明原则）
 
 ## ② 协议与准入
 
@@ -23,6 +22,7 @@
 以下文档记录迁移过程中的裁定、债务、风险与波次记录，包含执行层实例叙述。属档案例外，不要求中性化；阅读前提是已了解终局规格。
 
 - `docs/debt-ledger.md`——债务登记台账（D-153 起，每条含归属标签 + 闭环判据 + 限期）
+- `docs/a2a-protocol.md`——结构化调用协议历史蓝图（A2A 为历史别名；文件所述宿主侧契约类型 `packages/contracts/src/a2a-protocol.ts` 已随 M4 死代码清扫删除，现行契约语义面见 `packages/contracts/src/execution-contract.ts` 与 decision-log §十三）
 - `docs/change-safety.md`——波次记录与防线表（§25 起含 F3 变异留档）
 - `docs/env-naming-ruling-20261110.md`——隔离环境变量命名族裁定（2026-11-10，`EXECUTION_*` 唯一规范族；含失效条件与闭环判据）
 - `AGENTS.md`——项目约定与横切纪律（迁移期适配现状、授信期门语义、长期目标）
