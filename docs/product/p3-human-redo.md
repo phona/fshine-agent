@@ -57,6 +57,17 @@
   2) `send` 拼接 `task.resultText` → 哨兵禁注入用例红：`tripwire-sentinel.log`；
   3) 放行 running → running 拒绝用例红（`任务状态无法识别（running）…` vs 期望文案）：`tripwire-running.log`。
 
+### S6 端到端验收（本切片验收轮；证据均在 `.runtime/product-p3/`）
+
+- **逐字边界（全场景）**：各场景 redo 送入会话的都是存储原文，逐字性由单测在 `session.send` 边界钉住（S5）；新任务登记里的委派文本由 Main 照常写出（与 ask 同路径），不承诺与原文同字。
+- **回归评测**：`LLM_MODEL=step-3.7-flash npm run eval:user -- --case E06 --trials 3 --out-dir .runtime/product-p3/eval-e06` → 3/3 PASS；`--case E12 --trials 3` 同法 → 3/3 PASS。证据：`eval-e06.log` / `eval-e12.log`（run 目录 `eval-e06/`、`eval-e12/` 含逐 trial 报告）。
+- **failed 场景**：`npm run ask -- "帮我查一下 faulty-one 集合的数据。"` → `task_b36bee8f-1a9a-4f42-b637-af4e8bc597f8`（失败）→ `npm run tasks -- task_b36bee8f… --redo` → exit 0，输出 `原任务 task_b36bee8f-… → 新任务 task_215657a7-4eb6-45d4-b126-d5e31db1f6b8（状态：失败）`；原任务行（含执行账）快照 before/after 逐字节一致。证据：`acc-ask-failed.log` / `acc-redo-failed.log` / `acc-F2-before.json` / `acc-F2-after.json`。
+- **completed 场景**：ask beta → `task_83686bda-b254-4a5c-8b43-e4f76503b28a`（已完成）→ redo → `task_f683c703-82bc-4cfb-8db1-6a77d4742349`（状态：已完成）；快照一致。证据：`acc-ask-completed.log` / `acc-redo-completed.log` / `acc-C2-before.json` / `acc-C2-after.json`。
+- **unexecuted 场景（受控构造，如实注明）**：以真实注册表写路径构造「已委派零执行」任务 `task_acc_unexecuted`（`seed-task.ts`；未以真实模型造这一类任务——成本/复现性考虑）→ redo → `task_185ff5ab-0f6a-4d87-b23e-064b8364babf`（状态：未执行）；快照一致。证据：`acc-redo-unexecuted.log` / `acc-U-before.json` / `acc-U-after.json`。
+- **running 拒绝（真实并发 + 受控双证）**：后台启动真实 ask，轮询底账捕获运行中的 `task_50ea8c3c-fbb3-45cf-ab69-179d2e8d4bf6`，立即 redo → exit 2 `任务正在进行中，不能重新推进：…`（该 ask 随后正常完成、该 id 零新增 redo 任务）；受控构造 `task_acc_running` 同样 exit 2。证据：`acc-running-refusal-inflight.log` / `accept-running-refusal.log`；另有单测与 CLI e2e 覆盖。
+- **生产同源对照（ask 直发 vs redo 产出，同请求 beta）**：任务行键集、principal/session/status、执行账键集与 operation/status 全部一致；审计行键集与内容（args/result/exitCode）一致；仅 `request`/`result_text` 两处模型措辞字段不同（与两次独立 ask 的差异同源，非装配差异）。证据：`acc-samepath.json`（`taskShapeEqualExcludingModelWording=true`、`auditShapeEqual=true`、`contentVariesFields=[request,result_text]`）。
+- **回归抽样（旧树 ffafcd8 vs 新树，同一 DB 副本）**：`tasks` 列表、详情（unexecuted/failed）、`--out` 交付件逐字节一致；ask 输出（掩 UUID/时间/模型措辞后）结构逐字节一致。证据：`acc-tasks-parity.log` / `acc-ask-parity.log`。
+
 ## 四、验收标准逐条（勾选 + 证据指针）
 
 - [x] 列表可见：终态任务在 `npm run tasks` 中可见（中文状态词 + id）—— S1 / `tasks-list.log`。
@@ -73,6 +84,10 @@
 - [x] 冻结面零改动：`git diff --name-only` 不含 `packages/**`、`apps/**`、`scripts/eval/**`、`config/**`（schema 与写语义未动） —— 见 §六。
 - [x] 真实模型口径：全部真实模型命令带 `LLM_MODEL=step-3.7-flash`，执行层=仓内 dummy。
 - [x] 反向绊线 ≥1（实做 3 条） —— S5。
+- [x] E06 ×3 / E12 ×3（真实模型）全 PASS —— S6 / `eval-e06.log`、`eval-e12.log`。
+- [x] 三场景真实 redo（failed/completed/unexecuted-受控）+ 原任务行含执行账快照一致 + running 真实并发拒绝 —— S6。
+- [x] 生产同源对照（ask 直发 vs redo 产出：注册表/审计同构）—— S6 / `acc-samepath.json`。
+- [x] 回归抽样：tasks 列表/详情/--out 与 ask 输出（归一后）旧新一致 —— S6 / `acc-tasks-parity.log`、`acc-ask-parity.log`。
 
 ## 五、边界与登记（不实施）
 
