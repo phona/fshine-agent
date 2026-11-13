@@ -720,6 +720,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **trial-2/3（话题裸词误伤）**：trial-2「…两个窗口查询里都存在，仍需要你确认哪一笔为准。」、trial-3「…或者先确认下两个窗口数据是否本应相同？」均因裸词 `窗口` 命中 `forbiddenQuestionTopics` 被误判复问。修复：话题复问改**短语式定位**（话题名词须与疑问/请求标记组成短语，如「哪个窗口/请提供窗口」；疑问词条目须后接话题名词，如「哪一个窗口」），裸名词与裸疑问词不再判负；语义边界 = 规则指「复问用户提供窗口/集合信息」，不含对数据一致性的追问。
 - **验证**：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8；对 36 份证据 `--judge-existing` 复判比对：仅 4 处 mismatch——E04 trial-1/2/3 FAIL→PASS（假阳性），E03 trial-3 PASS→PASS（仅去掉一条可溯源弱告警）；其余 32 份逐字节复现。全库存量样本复判无其他判负放宽（post-cleanup E04 仅去掉假阳性 NEEDLESS 子码，零执行类判负保留）。
 - **第三次冻结**：judge.ts sha256=`734bd234eb168d882239832ff397b3af45dc13a3e3bf0562766a22e26b7a9f94`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:30:50Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E04 ×3 全 PASS（trial-1/2/3；每轮各 ≥1 次结构化执行、taskIds 非空、无 failureCodes/弱告警）——证据 `.runtime/eval-r1/e04-after/`。复现轮（修复前）曾得到一例零执行模型行为样本（未委派、FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION），属模型方差、按原样留档。
 
 **加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
 
