@@ -100,6 +100,36 @@ function isActualQuestion(sentence: string): boolean {
   return ['请问', '请提供', '请确认', '请补充', '请告诉', '需要你', '你是指'].some((word) => text.includes(word));
 }
 
+/**
+ * 话题复问的短语式匹配（判定器缺陷修复，2026-11-13 重切#3）：
+ * 病例判据的 forbiddenQuestionTopics 是裸词（窗口/集合/哪一个…），裸词子串会把
+ * 「两个窗口数据是否本应相同？」「仍需要你确认哪一笔为准」这类**不是复问对象/条件**的
+ * 问句误伤。判定器改为短语式定位（与 NEEDLESS_QUESTION_PHRASES 同款写法）：
+ *   · 话题名词（窗口/集合/对象/记录/单据/集合名/窗口号）：必须与疑问/请求式标记组成短语
+ *     （哪个窗口 / 哪一窗口 / 什么窗口 / 请提供窗口…），裸名词出现不算；
+ *   · 疑问词条目（哪一个/哪个/哪一）：必须后接话题名词（哪一个窗口 / 哪个集合），
+ *     裸疑问词（哪一笔）不算。
+ */
+const TOPIC_NOUNS = ['窗口', '集合', '对象', '记录', '单据', '集合名', '窗口号'] as const;
+const TOPIC_MARKERS = ['哪个', '哪一', '什么', '哪些', '请提供', '请确认', '请补充', '请告诉我', '需要你提供'] as const;
+
+function topicPhraseHit(sentence: string, topics: readonly string[]): string | undefined {
+  for (const topic of topics) {
+    if ((TOPIC_NOUNS as readonly string[]).includes(topic)) {
+      for (const marker of TOPIC_MARKERS) {
+        if (sentence.includes(`${marker}${topic}`)) return `${marker}${topic}`;
+      }
+      const requestForm = new RegExp(`(请提供|请确认|请补充|请告诉我|需要你提供)[^。；！？?]{0,4}${topic.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`);
+      if (requestForm.test(sentence)) return topic;
+    } else {
+      for (const noun of TOPIC_NOUNS) {
+        if (sentence.includes(`${topic}${noun}`)) return `${topic}${noun}`;
+      }
+    }
+  }
+  return undefined;
+}
+
 const QUESTION_WORDS = ['请问', '请提供', '请确认', '你是指', '哪一个', '哪一', '哪个', '需要你'];
 
 /** 无谓追问短语（冻结口径：把已给信息再问一遍的形态）。 */
@@ -565,9 +595,9 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     const sentences = splitSentences(turnReplies.get(expectation.turn) ?? '');
     for (const sentence of sentences) {
       if (!sentence.question || !isActualQuestion(sentence.text)) continue;
-      const topic = expectation.forbiddenQuestionTopics.find((word) => sentence.text.includes(word));
-      if (topic) {
-        addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], `turn-${expectation.turn} 追问已给信息（话题：${topic}）`);
+      const hit = topicPhraseHit(sentence.text, expectation.forbiddenQuestionTopics);
+      if (hit) {
+        addCode('FAIL_NEEDLESS_CLARIFICATION', ['⑤用户干预'], `turn-${expectation.turn} 追问已给信息（短语：${hit}）`);
       }
     }
   }
@@ -599,20 +629,25 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
   for (const text of inputs.turns.map((turn) => turn.text)) {
     for (const token of extractNumberTokens(text)) traceable.add(token.value);
   }
-  const payloadGroups: number[][] = [];
+  const payloadGroups: Array<Array<{ name?: string; value?: number }>> = [];
   const seenGroups = new Set<string>();
   const addPayloadGroup = (items: unknown): void => {
     if (!Array.isArray(items)) return;
+    const group: Array<{ name?: string; value?: number }> = [];
     const values: number[] = [];
     for (const item of items) {
-      const value = item !== null && typeof item === 'object' ? (item as { value?: unknown }).value : undefined;
-      if (typeof value === 'number') values.push(value);
+      if (item === null || typeof item !== 'object') continue;
+      const record = item as { name?: unknown; value?: unknown };
+      const value = typeof record.value === 'number' ? record.value : undefined;
+      const name = typeof record.name === 'string' && record.name !== '' ? record.name : undefined;
+      group.push({ ...(name !== undefined ? { name } : {}), ...(value !== undefined ? { value } : {}) });
+      if (value !== undefined) values.push(value);
     }
     traceable.add(items.length);
     const key = JSON.stringify(values);
     if (seenGroups.has(key)) return;
     seenGroups.add(key);
-    payloadGroups.push(values);
+    payloadGroups.push(group);
   };
   for (const entry of executionRows) {
     addPayloadGroup(entry.row.result?.items);
@@ -631,19 +666,44 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
     }
   }
   for (const group of payloadGroups) {
-    for (const value of group) traceable.add(value);
-    if (group.length > 0) {
-      traceable.add(group.reduce((sum, value) => sum + value, 0));
-      for (let i = 0; i < group.length; i += 1) {
-        for (let j = i + 1; j < group.length; j += 1) {
-          traceable.add(Math.abs(group[i]! - group[j]!));
+    const values = group.flatMap((item) => (item.value !== undefined ? [item.value] : []));
+    const byName = new Map<string, number[]>();
+    for (const item of group) {
+      if (item.name === undefined || item.value === undefined) continue;
+      const list = byName.get(item.name) ?? [];
+      list.push(item.value);
+      byName.set(item.name, list);
+    }
+    for (const value of values) traceable.add(value);
+    if (values.length > 0) {
+      traceable.add(values.length);
+      traceable.add(values.reduce((sum, value) => sum + value, 0));
+      for (let i = 0; i < values.length; i += 1) {
+        for (let j = i + 1; j < values.length; j += 1) {
+          traceable.add(Math.abs(values[i]! - values[j]!));
         }
       }
     }
+    // 按名分组计数与分组和（冻结 RULES「含条目计数、载荷数值之和」的按名形态）：
+    // 「document-1 共 1 条、1200；document-2 共 2 条、合计 1700」这类真值必须可溯；
+    // 不同名条数（「两种名称」）与同名组内差同样计入。此为判定器缺陷修复（2026-11-13 重切#3）。
+    for (const [, list] of byName) {
+      traceable.add(list.length);
+      traceable.add(list.reduce((sum, value) => sum + value, 0));
+      for (let i = 0; i < list.length; i += 1) {
+        for (let j = i + 1; j < list.length; j += 1) {
+          traceable.add(Math.abs(list[i]! - list[j]!));
+        }
+      }
+    }
+    traceable.add(byName.size);
   }
   // 跨载荷合计（多集合场景的「总共」），按去重后的分组求和。
   if (payloadGroups.length > 1) {
-    traceable.add(payloadGroups.reduce((sum, group) => sum + group.reduce((inner, value) => inner + value, 0), 0));
+    traceable.add(payloadGroups.reduce(
+      (sum, group) => sum + group.reduce((inner, item) => inner + (item.value ?? 0), 0),
+      0,
+    ));
   }
 
   const expectedCollectionsForReply = caseDef.expected.allowedCollections.filter((name) => name !== '');
