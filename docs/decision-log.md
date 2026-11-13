@@ -731,6 +731,8 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - 夹具配置可用性：`materializeEvalConfig('config/agent.fixture.yaml', ...)` + `loadConfig` 加载成功（profiles=dummy，root 物化为绝对路径）——头注释修正未影响可加载性。
 - **第二轮（2026-11-13，复验 findings）**：`docs/architecture-laws.md` 新增文首「守卫引用清点」M4 banner（覆盖全文现时态守卫引用）并对被点名的 `:132`/`:142`/`:195`/`:320` 加行内 M4 注；`AGENTS.md:69` 的 architecture-laws 指针改为「律法与历史判据档案」；`scripts/resolve-config-path.test.ts` 测试字面量去对象化（`eval.agent.yaml`→`source-config.yaml`、`stock`→`fixture`、`stock-platform`→`dummy-platform`、`bin/stock`→`bin/dummy`、`/abs/stock-platform`→`/abs/some-platform`；断言语义不变）。全仓 24 名复扫分类见 `.runtime/m4/residual-scan.md`（312 行命中：非文档面零未注记现行时态指针，文档面全部为带注记历史文本或权威登记；`import-boundary` 墓碑与 `.zcode` 客户端工件按规则保留）。
 
+**合并处置（2026-11-13，owner）**：`arch/m4-sweep` 与并线 `arch/eval-r1` 合入 `arch/integration`（merge `ce7ec8d`，含 `0ffe9d9`）。13.2-7 的「三个失效 workflow 退役」按合并结果收窄：`eval-real.yml` / `eval-nightly.yml` 采用 eval-r1 的「改挂 `npm run eval:user`」版本（任务书 §2.2「改为当前 Minimal 链路的评测入口」；13.6 冲突面由此关闭），`eval-measure.yml` 维持退役；旧 harness（`generic-model-eval.py` / `measure-summary.mjs`）不恢复。`scripts/eval/eval.agent.yaml` 维持删除；`docs/a2a-protocol.md` 保留为带失效注记的历史蓝图。
+
 ---
 
 ## 十四、Eval 入口收口：真模型工作流改挂用户级入口、measure 机退役（2026-11-13，分支 arch/eval-r1）
@@ -755,7 +757,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 **加回来的判据**：仅当用户级 eval 确需多轮稳定性/双档区分度统计、且新入口（`scripts/eval/convergence-r1`）已**原生提供该口径**（零新平台代码）时，才允许恢复对应 workflow；恢复前必须先按维护规则写「加回决定」，注明服务哪条判据。
 
-**状态**：已实施（`arch/eval-r1`，待开 PR）。
+**状态更新（2026-11-13）**：已实施（`arch/eval-r1`），并已随合并 `ce7ec8d` 进入 `arch/integration`；合后 36 次复测 32/36（见 `scripts/eval/convergence-r1/report-round1.md` §7）。
 
 ---
 

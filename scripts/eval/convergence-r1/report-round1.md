@@ -310,3 +310,11 @@ npm run eval:user -- --case E04 --trial 1 --out-dir .runtime/eval-r1/e04-repro
 - 复测/登记提交：bd019cb（E04 复测登记）、2834f62（E06）、ae67821（E07）。
 - 关键留档：批次台账 `.runtime/eval-r1/reports/batch-EvalR1-{A,B,C,D}.json`；运行证据 `.runtime/eval-r1/runs/`；修复复测 `.runtime/eval-r1/{e04,e06,e07}-after/`；修复前复现 `.runtime/eval-r1/{e04,e05,e06,e07,e08}-repro/`；判定器自测 `.runtime/eval-r1/judge-selftest/`；修复登记 `docs/decision-log.md` §十六。
 - 本报告：`scripts/eval/convergence-r1/report-round1.md`（随 arch/eval-r1 提交；副本发布至 `.runtime/eval-r1/report-round1.md`，不提交）。
+
+## 7. 合后复测（M4 修复并入 arch/integration 后，2026-11-13）
+
+- 代码点：`ce7ec8d`（integration，含 M4 完成状态修复与契约收口）；判据=当前冻结（judge #5，`judge.ts=a6a5b293…`；criteria/cases 两哈希与首轮相同）；入口 `npm run eval:user -- --trials 3 --out-dir .runtime/eval-r1/postmerge`；运行时间 2026-11-13T12:15:45Z 起。
+- 结果：**32 PASS / 4 FAIL / 0 INCONCLUSIVE**。失败明细：E04-3（NO_DELEGATION、STATE_INCONSISTENCY、WRONG_OBJECT、ZERO_EXECUTION——先追问未执行的模型方差样本）；E05-1/2（NO_DELEGATION、WRONG_OBJECT、ZERO_EXECUTION）、E05-3（WRONG_OBJECT）——E05 两轮均为 0/3，稳定弱项。
+- 对比口径（三个口径并列，不混用）：首轮原始 26/36（judge #2，M4 前）→ 首轮修复后离线复判 31/36（judge #5，M4 前）→ 合后复测 32/36（judge #5，含 M4 修复）。
+- 观察：E06/E07/E08 在本轮全部 3/3 PASS（含首轮判负样本的同型重跑）；E09–E12 拒绝/失败/纯聊天路径 12/12 PASS（M4 契约收口与完成状态修复未引入回归）；E04 的 3 次中 1 次模型方差失败，与判据无关。
+- 证据：`.runtime/eval-r1/postmerge/`（36 个 trial 目录，gitignored）。本节目在合后如实登记，不替代首轮原始判定（§2）与修复后复判（§4.4）。
