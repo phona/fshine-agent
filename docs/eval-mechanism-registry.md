@@ -6,6 +6,11 @@
 
 位置一律用符号名 + 文件，不用行号（行号对插行免疫性为零，`docs/architecture-laws.md` §4 纪律）。
 
+> **2026-11-13（Minimal M2 波次 1）状态**：下表 #1–#6、#8 所述的旧全 worker 评测链
+> （`probe-real-agent` / `acceptance` / `score.ts` / `judge` / 各 criteria / `cases.yaml`
+> 与 CI 计数器）已随旧域评测脚手架删除，本表按原样保留为删除前的机制功劳与代价记录。
+> 现存确定性门为 #9（generic-mock）与 `scripts/ci.sh` 的 typecheck + unit + generic-mock。
+
 ## 总表
 
 | # | 机制 | 位置 | 防什么故障形态 | 拆了会怎样（可观测变化） | 成本 |

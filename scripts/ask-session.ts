@@ -214,7 +214,7 @@ export async function createAskSession(options: AskSessionOptions = {}): Promise
     ...(options.workerDriver ? { workerDriver: options.workerDriver } : {}),
   });
   // 只读旁路连接：change_intents 的完整清单查询（AuditStore 契约只暴露 pending 查询，
-  // 与 scripts/eval/write-chain.ts 同一条 SQL、同一张表）。库打不开 = 意图档降级为空。
+  // 同一条 SQL、同一张表；旧 write-chain 评测脚本已删，此处即唯一出处）。库打不开 = 意图档降级为空。
   let intentsDb: Database.Database | null = null;
   try {
     intentsDb = new Database(dbPath, { readonly: true, fileMustExist: true });

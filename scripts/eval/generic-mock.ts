@@ -19,7 +19,8 @@
  *
  * Usage:
  *   node --import tsx scripts/eval/generic-mock.ts [--write-baseline] [--only <id,...>]
- * Exit codes (mirroring scripts/eval/score.ts):
+ * Exit codes (script-local: this harness does not use the shared mapping in
+ * scripts/eval/exit-codes.ts):
  *   0 = all cases pass and match the baseline (where a baseline exists)
  *   1 = a case fails, or a checked value regressed vs the baseline
  *   2 = baseline missing / corpus-baseline mismatch (run with --write-baseline first)

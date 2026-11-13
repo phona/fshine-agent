@@ -36,7 +36,7 @@
 | `FSHINE_PI_AGENT_DIR` | `host.piAgentDir` | 缺省 = `<cwd>/data/pi-agent` |
 | `FSHINE_WORKER_STEP_CAP` | `host.workerStepCap` | 缺省 / 非法 = 50，第 51 次放行送 wind-down |
 | `APP_PORT` / `APP_PUBLIC_URL` / `APP_CALLBACK_PATH` | `channel.port` / `channel.publicUrl` / `channel.callbackPath` | 端口非法即启动失败；URL / 回调路径缺省为空 / 默认回调路径 |
-| `DB_PATH` | `store.dbPath` | 缺省 = 仓库根 `data/agent.db`；相对路径按进程 cwd 解析（daily-summary 同名覆盖口，缺省 `data/agent.db`） |
+| `DB_PATH` | `store.dbPath` | 缺省 = 仓库根 `data/agent.db`；相对路径按进程 cwd 解析 |
 
 下表仍只从 env 读（不是部署配置）：
 
@@ -44,9 +44,8 @@
 | --- | --- | --- |
 | `AGENT_CONFIG_PATH` | 部署 / `loadConfig` | 缺省 = `config/agent.yaml`；自指配置路径，永远不进 yaml |
 
-验收脚本的私有旋钮走命令行，不设环境变量：`scripts/acceptance.ts --keep-mock-state`
-（mock 运行后保留状态文件）、`scripts/acceptance-22-supplement.ts --db <path>`
-（复用主流程验收库时的库路径）。
+旧验收脚本（`scripts/acceptance.ts` / `scripts/acceptance-22-supplement.ts`）及其私有旋钮
+已于 2026-11-13 随旧域评测脚手架删除（Minimal M2 波次 1）；不再有走命令行的验收专属开关。
 
 ## 2. 共享接口（宿主写或继承，执行层读）
 
