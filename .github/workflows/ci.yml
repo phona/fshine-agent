@@ -1,12 +1,13 @@
 # GitHub Actions CI for fshine-agent, self-contained.
 #
 # This workflow runs the deterministic gates (scripts/ci.sh):
-# typecheck + unit tests + generic-mock eval.
+# typecheck + unit tests（含契约行为测试）。
 # It deliberately does NOT run:
 # - e2e (tests/e2e needs a sibling execution-layer checkout + a gitignored
 #   config/agent.yaml deployment config, see tests/e2e/harness.ts);
-# - real-model eval (LLM_API_* secrets + judge variance; lives in the separate
-#   eval-real.yml workflow, outside these deterministic gates).
+# - real-model eval: 三个评测 workflow（eval-real / eval-nightly / eval-measure）已随
+#   harness 于 M4 死代码清扫退役（decision-log §十三）；恢复须先有可运行且被测试钉住的
+#   harness 与 owner 裁定，禁止再指向已删脚本。
 # No secrets, no deploy, no sibling repo, no .env.
 name: CI
 
@@ -26,13 +27,12 @@ jobs:
       contents: read
     runs-on: ubuntu-latest
     steps:
-      # fetch-depth: 0 = 全量历史。packages/agent/history-hygiene.test.ts 的四类敏感物
-      # 零命中判据要 git log --all -p 看全历史；浅克隆（默认 depth=1）下该守卫显式失败
-      # （不拿「扫不到」当「干净」），波次 4 门面重写时漏改，私有仓首轮 CI 踩中后补上。
+      # fetch-depth: 0 = 全量历史。当前确定性门不依赖 git 历史（原 history-hygiene
+      # 全历史扫描守卫已随 M2 波次 1 删除）；保留 depth 0 是 M4 登记的待裁定项
+      # （去/留见 decision-log §十三 gaps），不为已删守卫继续声称理由。
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - run: git branch -r -d github/eval-config || true
       - uses: actions/setup-node@v4
         with:
           node-version: 24
