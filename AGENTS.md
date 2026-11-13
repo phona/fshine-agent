@@ -66,4 +66,4 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 
 **现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
-**指针**：`docs/decision-log.md`（权威决定与状态）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 只作历史参考（A2A 为历史别名；旧 a2a 契约类型已随 M4 死代码清扫退役）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。
+**指针**：`docs/decision-log.md`（权威决定与状态）、`packages/contracts/src/execution-contract.ts`（现行执行契约语义面）、`docs/architecture-laws.md`（律法与历史判据档案；多数守卫引用已随 `0b97227`/M4 退役，见其文首 2026-11-13 M4 注）、`docs/methodology.md`（作业纪律）。`docs/a2a-protocol.md` 与 `docs/execution-layer-interface.md` 只作历史参考（A2A 为历史别名；旧 a2a 契约类型已随 M4 死代码清扫退役）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。

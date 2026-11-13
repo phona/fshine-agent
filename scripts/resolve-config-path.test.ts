@@ -28,17 +28,17 @@ describe('explicitConfigFrom', () => {
 });
 
 describe('materializeEvalConfig', () => {
-  function writeEvalConfig(dir: string): string {
-    const p = path.join(dir, 'eval.agent.yaml');
+  function writeSourceConfig(dir: string): string {
+    const p = path.join(dir, 'source-config.yaml');
     writeFileSync(p, [
       'principals:',
       '  "wecom:eval-fixture-user":',
       '    accountSetScope: all',
       '    enabled: true',
       'contextProfiles:',
-      '  stock:',
-      '    root: scripts/eval/fixtures/stock-platform',
-      '    gateway: bin/stock',
+      '  fixture:',
+      '    root: scripts/eval/fixtures/dummy-platform',
+      '    gateway: bin/dummy',
       '    skillRoots: ["./skills-serve"]',
       '',
     ].join('\n'));
@@ -49,14 +49,14 @@ describe('materializeEvalConfig', () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'materialize-eval-test-'));
     try {
       const out = path.join(tmp, 'out.yaml');
-      const returned = materializeEvalConfig(writeEvalConfig(tmp), out);
+      const returned = materializeEvalConfig(writeSourceConfig(tmp), out);
       expect(returned).toBe(out);
       const text = readFileSync(out, 'utf8');
-      const expectedRoot = path.resolve(REPO_ROOT, 'scripts/eval/fixtures/stock-platform');
+      const expectedRoot = path.resolve(REPO_ROOT, 'scripts/eval/fixtures/dummy-platform');
       expect(text).toContain(`root: ${expectedRoot}`);
       // blocking 判据的实处：物化产物过得了 loadConfig 的绝对路径校验（config.ts:125）。
       const loaded = loadConfig({ env: {}, yamlPath: out });
-      expect(loaded.contextProfiles['stock']?.root).toBe(expectedRoot);
+      expect(loaded.contextProfiles['fixture']?.root).toBe(expectedRoot);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -65,22 +65,22 @@ describe('materializeEvalConfig', () => {
   it('绝对路径 root 原样保留', () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'materialize-eval-test-'));
     try {
-      const src = path.join(tmp, 'eval.agent.yaml');
+      const src = path.join(tmp, 'source-config.yaml');
       writeFileSync(src, [
         'principals:',
         '  "wecom:eval-fixture-user":',
         '    accountSetScope: all',
         '    enabled: true',
         'contextProfiles:',
-        '  stock:',
-        '    root: /abs/stock-platform',
-        '    gateway: bin/stock',
+        '  fixture:',
+        '    root: /abs/some-platform',
+        '    gateway: bin/dummy',
         '    skillRoots: ["./skills-serve"]',
         '',
       ].join('\n'));
       const out = path.join(tmp, 'out.yaml');
       materializeEvalConfig(src, out);
-      expect(readFileSync(out, 'utf8')).toContain('root: /abs/stock-platform');
+      expect(readFileSync(out, 'utf8')).toContain('root: /abs/some-platform');
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

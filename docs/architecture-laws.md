@@ -8,6 +8,8 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **裁定记录的权威（2026-11-11 统一）**：删除 / 保留的**裁定、对象与状态**以 [decision-log.md](decision-log.md) 为权威记录；本文与 v0-architecture 是它的可执行判据转写与架构叙述。三者冲突时：**判据**以本文为准，**裁定的有无与状态**以 decision-log 为准，并回头修本文与 v0。AGENTS.md 只承载归属判据与迁移期现状，逐条删除状态的权威是 decision-log.md。本文与 v0 的删除状态已与 2026-11-11 裁定同批修订。
 
+> **2026-11-13 M4 注（守卫引用清点，复核 findings）**：本文是律法与历史判据档案。正文按路径引用的 18 个守卫/模块中 15 个已不在当前树（随 `0b97227` Minimal Reset 或 M4 死代码清扫退役）：`platform-leak-lint.test.ts`、`docs-reality.test.ts`、`runtime.ts`、`error-codes.ts`、`context.ts`、`assembly.ts`、`plan-confirmation-route.ts`、`reply.ts`、`env-doc-reconciliation.test.ts`、`cases.yaml`、`score.ts`、`judge-prompt.md`、旧 e2e `harness.ts` 等；裸名引用同样已删：`runtime-quality.ts`、`exposure-lint`、`worker-step-cap.ts`、`proposal-review.ts`、`task-handover.ts`、`committed-unverified.ts`、`tool-definition-guard.ts`。**凡以现时态写「机械守卫 = <已删文件>」「存在性由 <已删测试> 钉住」的行，一律按历史记录阅读**；现行可执行判据 = 现存守卫测试（`packages/agent/import-boundary.test.ts`、`transition-naming.test.ts`、`worker-env.test.ts`、`server-paths.test.ts`、`dummy-client.test.ts`、`runtime.test.ts`、`task-registry-sqlite.test.ts`、`apps/server/server.test.ts`）+ `decision-log.md` §十三。删除 / 保留的裁定权威仍是 decision-log（见上「裁定记录的权威」）。
+
 ---
 
 ## 归属标签制度（先于一切违例清单存在）
@@ -129,7 +131,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：业务词汇只住执行层 + 夹具 + 文档；宿主 `src` 的**非防御性**出现为零。编排层不懂口径，所以它连说错话的词汇都不该持有。
 
-**机械守卫**：`packages/agent/platform-leak-lint.test.ts` 的业务词预算。词表 15 词——`BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g`（D-004/D-005 扩成；收词按**领域概念**而非最显而易见的词，附同义改写对照表：时间范围→期间、记录/档案→凭证、摸底→域操作——伪装形绕词表正是 D-005 的根因）。扫描范围 = `packages/agent/src` + `apps`（D-004：生产装配与落账执行器也属编排层，曾整目录在守卫之外）；`scripts/` 以显式常量 `BUSINESS_WORD_EXCLUDED_DIRS` 排除（D-005 附条"接受不修"的显式决策——验收夹具的领域词是测试数据，纳入只减不增预算会冻结 144 行；新增非夹具用途文件须并入）。命中项**按四标签分类断言**：非防御命中必须为 0，防御命中必须 100% 挂"防御排除"。
+**机械守卫**：`packages/agent/platform-leak-lint.test.ts` 的业务词预算（**该守卫已随 `0b97227` 删除**，见文首 2026-11-13 M4 注；本行按历史判据阅读）。词表 15 词——`BUSINESS_WORD_RE = /应收|凭证|科目|账套|期间|目录|税号|财务|借贷|余额|往来|时间范围|记录|档案|摸底/g`（D-004/D-005 扩成；收词按**领域概念**而非最显而易见的词，附同义改写对照表：时间范围→期间、记录/档案→凭证、摸底→域操作——伪装形绕词表正是 D-005 的根因）。扫描范围 = `packages/agent/src` + `apps`（D-004：生产装配与落账执行器也属编排层，曾整目录在守卫之外）；`scripts/` 以显式常量 `BUSINESS_WORD_EXCLUDED_DIRS` 排除（D-005 附条"接受不修"的显式决策——验收夹具的领域词是测试数据，纳入只减不增预算会冻结 144 行；新增非夹具用途文件须并入）。命中项**按四标签分类断言**：非防御命中必须为 0，防御命中必须 100% 挂"防御排除"。
 
 **当前违例**：
 
@@ -139,7 +141,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
   - ~~`packages/agent/src/context.ts` 的 legacy 提案摘要渲染（`proposal_created` 摘要行）— `` `- 条目：${proposal.summary.count} 条，借贷合计各 ${proposal.summary.credit} 元` ``（**借贷**），同时是 L4 违例~~ **已清**（2026-10-14 D 波 `3e5a36c` 写路径收敛为唯一形态）：legacy 摘要渲染与 `ChangeIntentRecord` 业务字段整体删除，全仓非测试零命中。D-003/D-030 已关。
 - **防御排除（不得删、须挂标签）**：
   - ~~`memory-candidate-extractor.ts` 五条财务正则——`PERIOD_RE` / `ACCOUNT_SET_RE` / `BALANCE_RE` / `CURRENCY_AMOUNT_RE` / `FINANCIAL_RESULT_RE`。删任何一条 = 记忆提取器对财务事实变聋。~~ **随 v0-architecture §12 ② 删除**（2026-11-11 裁定，**在 PR #54 未合**）：文件整体删除，本条防御排除项一并退役。合入前 `docs-reality.test.ts` 仍逐条钉这五条正则在场；合入后该守卫条目须同步退役，否则红。合入后不得再把"记忆提取器对财务事实变聋"写成现存风险——提取器已不存在。**注意**：这不是"拆防线"——删除对象是 v0-architecture §12 裁定删除的机制，不属于 B 类判据里的授权 / 幂等 / 审计 / 结果验证。
-  - `hasFinancialFigure`（`runtime-quality.ts` 定义、`runtime.ts` re-export，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。
+  - `hasFinancialFigure`（`runtime-quality.ts` 定义、`runtime.ts` re-export，出口校验用；存在性由 `docs-reality.test.ts` 钉住——行号引用已按执行纪律 4 废止）。**2026-11-13 M4 注：`runtime-quality.ts` 与 `docs-reality.test.ts` 均不在当前树（后者随 `0b97227` 删除），本行按历史记录阅读。**
   - ~~Wave 2 之前的 `KEY_ARG_FLAGS`（`serve-gate.ts` 常量，`['--query', '--period', '--subject-code']`）——读 `operations.json` 的 args 规格后退役，退役前挂"遗留待清"。~~ **已退役**（2026-09-27 Wave 2 Lane D）：`describeKeyArgs` 改查平台 `operation list --json` 的 args 规格（flag→style 是平台数据），宿主零 flag 名单。见 debt-ledger D-012。
 - ~~**遗留待清（2026-11-05 脱敏波登记，D-155）**：`config/agent.example.yaml` 的 5 处执行层实例名词（含 `contextProfiles` 的结构键）无守卫覆盖——`config/` 不在 platform-leak-lint 与 docs-reality 任何扫描范围内。**归属**：W1 / 波次 4；**闭环判据**：gate① 对账时该文件零实例名词且结构键完成参数化；**限期**：波次 4。不得因"exposure-lint 扫 `git ls-files` 全量、已覆盖该模板的暴露三类"就当它已清——缺口在名词类，两类判据不相通。~~ **已关**（2026-11-06 波次 5 对账核实：`config/agent.example.yaml` 现行树零实例名词，结构键已参数化为 `<profileId>` 中性占位；闭环判据机械满足）。
 
@@ -192,7 +194,7 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 
 **陈述**：写提案的 schema / 域校验 / 确认摘要 / commit 读回**全归 执行层**；fshine 只持**不透明 payload** + 一套**通用确认状态机**（确认码 / 有效期 / principal / 计划版本绑定）。业务字段一旦住进编排层，加新业务域时这一层就要改——正是分层要消灭的东西。
 
-**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」＋ `docs-reality.test.ts` 的 legacy 痕迹零命中判据（借贷合计 / `voucher.batch` / `finalizeProposal` / 退役开关）。
+**机械守卫**：走查测试「新增一条 payroll 写路径，fshine 侧改动 = 0」＋ `docs-reality.test.ts` 的 legacy 痕迹零命中判据（借贷合计 / `voucher.batch` / `finalizeProposal` / 退役开关）。（**`docs-reality.test.ts` 已随 `0b97227` 删除**，见文首 2026-11-13 M4 注。）
 
 **当前违例**：**编排层侧已清**（2026-10-14 D 波 `3e5a36c`「写路径收敛为唯一形态」：`FSHINE_PROPOSAL_VIA_GATEWAY` / `FSHINE_PROPOSAL_COMMIT` 退役，`finalizeProposal` / `ChangeIntentRecord` 业务字段 / 借贷合计渲染整体删除；2026-10-16 对账核实全仓非测试零命中）：
 
@@ -317,4 +319,4 @@ v0-architecture.md 是目标架构的叙述；本文是它的可执行子集。�
 1. **违例清单和基线数字来自一次双仓核实（6 真 1 半；证伪撤回经过见 `debt-ledger.md` 首条）。** 半真项：`FSHINE_*` 在 fshine `src` 已被 lint 禁绝，残留是 执行层 `execution-env` 过渡期双读。证伪项：初核曾把 执行层 `docs/architecture.md` 「已知短板」节的「勿用「加抽象」解决」判为编造，跨仓复核已撤回——失误原因二选一或兼具：只 grep 了本仓、检索串丢了直角引号「」（搜 "勿用加抽象" 永远命中不了 "勿用「加抽象」解决"）。**因此：新增违例必须跨仓核实、检索保留原文标点。** L2 的 platform-contract.ts 注记就是本纪律的现场执行。
 2. **判据若写得比机制真相更干净，执行者会把防御机制当违例删掉。** 所以标签制度先于清单、验收时逐条核对标签——一条命中该挂"防御排除"还是"警职执法"，删了它会不会让某道防线变聋 / 变瞎，是唯一裁决问题。
 3. **每波只 revert 该波 commit，宪章与台账保留。** 债务状态是快照不是负担；宪章跨波有效，不随单波回退消失。
-4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零——2026-10-16 对账实证四起（工具面头注释两度未跟工具面实况；行号引用三起，分别指向拆分前旧文件、拆分后错位文件、已删违例），逐起原文按行号留档于 debt-ledger D-104，本文件一律符号名引用。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理登记台账 D-104（laws 侧 2026-11-12 已清，ledger 侧未做）。
+4. **文档主张与代码现实对账（守卫 = `packages/agent/docs-reality.test.ts`，2026-10-16 落地；该守卫已随 `0b97227` 删除，本纪律文本按历史阅读——现行对账见 decision-log）。** 律法与台账里的可判主张只许三种形态：能 grep 的谓词、能被测试钉住的断言、明文标注"软提示不保证"的叙述——此外无第四种。**引用禁用行号、用符号名**：行号对插行免疫性为零——2026-10-16 对账实证四起（工具面头注释两度未跟工具面实况；行号引用三起，分别指向拆分前旧文件、拆分后错位文件、已删违例），逐起原文按行号留档于 debt-ledger D-104，本文件一律符号名引用。**波次关账与律法"当前违例"节同 commit 更新**；守卫双向——当前违例消失而账未关即红（逼关账），已关判据翻红即闭环失效。存量散文引用的清理登记台账 D-104（laws 侧 2026-11-12 已清，ledger 侧未做）。
