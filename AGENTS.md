@@ -62,8 +62,8 @@ fshine-agent 的定位（2026-11-12 第三版，2026-11-13 Minimal 细化）：*
 
 ## 现状（2026-11-13 Minimal Reset 产品面收口；不要读成已完成）
 
-**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:generic-mock`（确定性通用 mock）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一。
+**Minimal Rewrite 已收口**：旧 Runtime hub（runtime/context/pi-coding-driver/serve-gate/plan-runtime/task-manager 及旧 app 接线）与旧 demo/试跑脚手架已按可达性删除，`minimal` 过渡命名已收口。仓库只保留产品面——运行＝`npm run ask`（一条消息 → 回复 + 机械证据，缺省仓内 dummy 执行层）与 `npm start`（渠道消息 → 回复）；测试＝`npm test`（vitest）；评测＝`npm run eval:user`（用户级黑盒入口，真实模型 + 仓内 dummy 夹具，与 `ask` 同源装配；确定性门＝typecheck + unit）。写/确认/取消/产物是后续切片。防回潮守卫见 `packages/agent/transition-naming.test.ts`；收口记录见 `docs/decision-log.md` §十一、§十三、§十四。
 
 **现行协议**：Main 直接委派 Worker，Worker 经 Execution Contract 结构化调用执行层；不经过宿主计划门。
 
-**指针**：`docs/decision-log.md`（权威决定与状态）、`docs/a2a-protocol.md`（宿主 ↔ 执行层对接协议；A2A 为历史别名）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。
+**指针**：`docs/decision-log.md`（权威决定与状态）、`docs/architecture-laws.md`（可执行判据）、`docs/methodology.md`（作业纪律）。宿主 ↔ 执行层对接 = Execution Contract（`packages/contracts/src/execution-contract.ts`）；旧 A2A 协议词汇（`docs/a2a-protocol.md`、`packages/contracts/src/a2a-protocol.ts`）已随 Minimal Reset 删除且不恢复（A2A 为历史别名）。旧文档章节（三层分工、九类删除表、迁移期对账）只作历史参考，与 decision-log 冲突时以 decision-log 为准。

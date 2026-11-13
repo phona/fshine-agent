@@ -1,6 +1,6 @@
 #!/bin/sh
 # Deterministic CI entry point, run locally and by GitHub Actions (.github/workflows/ci.yml).
-# Runs only the deterministic gates: typecheck, unit tests, generic-mock eval.
+# Runs only the deterministic gates: typecheck, unit tests.
 #
 # Real-model eval lives in a separate workflow: .github/workflows/eval-real.yml.
 # It is separate for three reasons:
@@ -11,14 +11,12 @@
 #   3. Judge variance: the judge component is advisory-only and must never
 #      become a per-push blocking gate; the mechanical component is the
 #      exit-code carrier for the real-model job.
-# Full-worker real-model eval（旧 probe / acceptance / score.ts 仪器）已随旧域评测脚手架
-# 删除，不再恢复；旧版全 worker 链的仓内 dummy 夹具口径（scripts/eval/eval.agent.yaml）
-# 只保留给 `npm run ask` 的回退配置。
-# The CI real-model face (eval-real.yml) is the tool-loop harness
-# (generic-model-eval.py) on the in-repo stock fixture; fixture-per-surface
-# wording lives in scripts/eval/eval.agent.yaml's 域边界 note.
-# e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
-# CI scope is unchanged by that inventory: no finance e2e is added back here.
+# 真实模型 eval（旧 probe / acceptance / score.ts / generic-model-eval.py 仪器）已随
+# Minimal Reset（0b97227）删除不再恢复；当前真实模型面 = 用户级黑盒入口
+# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（12×3），
+# 不进这些确定性门。
+# 旧 e2e ownership 台账（tests/e2e 已随 Minimal Reset 删除）：docs/e2e-ownership.md
+# 只作历史参考；这里不再有 e2e 门。
 # CI runs only the deterministic gates; consistency between this repo's generic
 # budget-protocol defaults and any execution layer's own policy is owned by the
 # execution layer's repository, not by this single-repo CI (the check moved there
@@ -31,6 +29,4 @@ echo "== typecheck =="
 npm run typecheck
 echo "== unit tests =="
 npm run test -- --project unit
-echo "== generic-mock eval =="
-npm run eval:generic-mock
 echo "CI deterministic gates: PASS"

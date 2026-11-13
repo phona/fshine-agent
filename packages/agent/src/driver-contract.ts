@@ -9,7 +9,6 @@
  * 消费者（改引本模块的 kept 侧）：
  *   · `pi-driver.ts`            —— TurnDriver 的生产实现（pi 原生循环）；
  *   · `execution-runtime.ts`   —— 按 TurnDriver 抽象驱动 Main/Worker；
- *   · `proposal-review.ts`      —— generic-mock 隔离复核门用它跑无工具回合；
  *   · `pi-driver.test.ts` / `tool-user-error.test.ts` —— 直测驱动接线与错误类契约。
  */
 import type { AgentMessage } from '@earendil-works/pi-agent-core';

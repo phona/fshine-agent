@@ -581,7 +581,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 - **旧 e2e + 旧脚手架退役**：`tests/e2e/` 全量（42 文件）与旧评分/判据/用例、旧探针与验收脚本、`scripts/perf/**` 删除；用户级行为由 Minimal demo（`npm run demo:minimal`）与 **M3 用户级评测**承担。此条为已登记退役，后继明确。
 - **execution-leak-criteria 的 2 红 = 已登记退役**：原红见九节（`scripts/eval/execution-leak-criteria.test.ts` 两轮同数同例）。该文件随旧路径退役，红随对象消失；**后继 = M3 用户级评测**。不算修复、不算掩盖——判据不丢，交接有主。
-- **probe D-209 的 2 红 = base 未登记红，以「继任闭集守卫 + 字面量清理」解决**：波次 1 之前，`scripts/probe-real-agent.test.ts` 的 D-209 闭集守卫 2 红（闭集断言 + 失效化突变断言同一根因）：M1 引入的字面量引用（`packages/agent/minimal-worker-env.test.ts`、`packages/agent/src/minimal/worker-env.ts` 注释）不在旧 allowlist 内。波次 1 删除该探针文件后 unit 归零，形似掩盖。本次把守卫换成**继任测试** `packages/agent/bridge-key-closure.test.ts`（只守桥键闭集，不依赖已删探针/harness；allowlist 逐项理由；表外命中与陈旧登记双向红；含变异用例），并把 M1 字面量清到导出常量（测试改引 `WORKER_FIXTURE_STATE_DIR_KEY`；注释用「测试桥键」表述）。**红被取代，不是被删除**。
+- **probe D-209 的 2 红 = base 未登记红，以「继任闭集守卫 + 字面量清理」解决**：波次 1 之前，`scripts/probe-real-agent.test.ts` 的 D-209 闭集守卫 2 红（闭集断言 + 失效化突变断言同一根因）：M1 引入的字面量引用（`packages/agent/minimal-worker-env.test.ts`、`packages/agent/src/minimal/worker-env.ts` 注释）不在旧 allowlist 内。波次 1 删除该探针文件后 unit 归零，形似掩盖。本次把守卫换成**继任测试** `packages/agent/bridge-key-closure.test.ts`（只守桥键闭集，不依赖已删探针/harness；allowlist 逐项理由；表外命中与陈旧登记双向红；含变异用例），并把 M1 字面量清到导出常量（测试改引 `WORKER_FIXTURE_STATE_DIR_KEY`；注释用「测试桥键」表述）。**红被取代，不是被删除**。**状态更新（2026-11-13 R1 清理）**：该继任守卫（`packages/agent/bridge-key-closure.test.ts`）及其常量来源 `packages/agent/src/child-env.ts` 已随 Reset（`66e7d23`）删除，无继任闭集守卫；现覆盖 = `worker-env.test.ts` 白名单闭集断言 + 夹具 shell 入口读桥（部分覆盖），闭集扫描缺口登记于 §十四。
 - **结论**：桥键现行字面量闭集 = `child-env.ts` 键名定义 + dummy/stock 两个 shell 入口 + leak-lint 登记 + 继任守卫自身；生产面只剩键名定义一处。守卫区分力已验：守卫内两条变异用例 + 本轮实注入（生产文件加一行引用 → 守卫红 → 回滚后复绿）。旧探针/验收不恢复。
 
 ---
@@ -638,6 +638,99 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 - 旧 hub / 旧接线 / 旧 e2e / 旧脚手架的完整代码在 `git log`：M2 波次 1（`592267f` 等）、Reset（`0b97227` 删 191 文件、`cd368c0` 重建）；tag `v0-trial-20261113` 是 V0 全量参照。
 - 恢复任何机制须先按维护规则写「加回决定」，注明触发哪条「加回来的判据」。
+
+---
+
+## 十三、Eval 入口收口：真模型工作流改挂用户级入口、measure 机退役（2026-11-13，分支 arch/eval-r1）
+
+**背景与失效证据**（基线 `29c13e9` 上实跑复现）：
+
+- Minimal Reset（`0b97227`）按可达性删除了旧评测工具环（`scripts/eval/generic-model-eval.py`、`scripts/eval/measure-summary.mjs`、second-layer / 旧 probe 仪器等），但 `.github/workflows/` 的三个真模型 workflow 未同步，per-push / nightly / measure 全部指向不存在的文件：
+  - `python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1` → `can't open file '.../scripts/eval/generic-model-eval.py': [Errno 2] No such file or directory`（ENOENT）。
+  - `node scripts/eval/measure-summary.mjs` → `Error: Cannot find module '.../scripts/eval/measure-summary.mjs'`（MODULE_NOT_FOUND）。
+  - `git log --diff-filter=D` 确认两者删除点均为 `0b97227`。
+  - eval-measure.yml 对已删对象的依赖（基线 `29c13e9`）：L79/L144/L173 → measure-summary.mjs；L99/L110/L114 → generic-model-eval.py——无一处可执行。
+- eval-real.yml 头注当时仍宣称 `CI 的真实模型面 = generic-model-eval.py 最小工具环 harness`（同一基线 L11-14），是已失效的指向。
+
+**决定**：
+
+1. **eval-real.yml（per-push，advisory 非阻断不变）**：改挂用户级黑盒入口 `npm run eval:user -- --trials 1 --out-dir .runtime/eval-user`（与 `npm run ask` 同源装配：createSession + createDummyCliClient + 仓内 dummy 夹具）；删除 `workflow_dispatch` 的 `cases` 输入（旧 7 例集）与 `CASES_INPUT` / `LLM_JUDGE_MODEL` 消费；产物 = `.runtime/eval-user/`（逐样本原始证据 + summary，全样本保留，artifact `user-eval-report`）；PR 评论不再解析任何旧 probe schema。
+2. **eval-nightly.yml（schedule 保留）**：单阶段用户级全量 `npm run eval:user -- --trials 3`（12 用例 × 3 次，全样本保留），产物 `.runtime/eval-user/`（artifact `user-eval-full`）；**二期双档区分度矩阵（eval-discrimination，含旧 probe/judge schema 解析）整体删除**——其报告步骤依赖已删仪器与旧 G-* 例集，任何移植 = 新评测平台代码（本轮禁止）。
+3. **eval-measure.yml 删除**：测量语义（N 轮稳定性通过率矩阵 + 双档区分度）新入口未提供；重建即违反「不新建评测平台/复杂 Eval 平台」。
+4. **scripts/ci.sh 与 scripts/eval/eval.agent.yaml 只改措辞**（指向新入口），确定性门（typecheck / unit / generic-mock）不动。
+
+**取回点**：`git show 29c13e9:.github/workflows/eval-measure.yml`（nightly 二期同 commit `29c13e9`）；旧工具环代码在 `git log`（删除点 `0b97227`）。
+
+**加回来的判据**：仅当用户级 eval 确需多轮稳定性/双档区分度统计、且新入口（`scripts/eval/convergence-r1`）已**原生提供该口径**（零新平台代码）时，才允许恢复对应 workflow；恢复前必须先按维护规则写「加回决定」，注明服务哪条判据。
+
+**状态**：已实施（`arch/eval-r1`，待开 PR）。
+
+---
+
+## 十四、R1 前置③：生产不可达旧协议与旧治理测试清理（2026-11-13，分支 arch/eval-r1）
+
+**背景**：R1 审计（四份审计结果与原型验证记录，本轮工作副本）发现 reset 后三类残留：① contracts 旧协议零消费（`a2a-protocol.ts` 全符号 0 命中；`runtime.ts`/`store.ts` 除 `DiscoveredTool`/`PrincipalScopeRecord` 外 0 命中）；② 旧 Phase2 治理模块 5 个 + generic-mock 评测群仅彼此可达（import-boundary 的 FORBIDDEN 自列，生产值闭包不含）；③ workflow/注释引用已删对象（`generic-model-eval.py`、`measure-summary.mjs`、`history-hygiene.test.ts`、`tests/e2e`）。
+
+**删除（D1–D7；证据见各条行号）**：
+
+- **D5 generic-mock 评测群**：`scripts/eval/{generic-mock.ts(630行), generic-mock-baseline.json(203行), GENERIC_MOCK_NOTES.md(308行), fixture-aux-state.ts(31行)}`；同步 `package.json` 入口、`scripts/ci.sh` 确定性门（现为 typecheck + unit）、README/AGENTS/ci.yml 措辞、`tests/vitest.setup.ts` 的 stock 辅助组 ambient 清场。
+- **D4 旧 Phase2 治理五模块**：`packages/agent/src/{task-handover(176), committed-unverified(54), proposal-review(134), tool-definition-guard(38), worker-step-cap(70)}.ts`——仅被 generic-mock 可达。import-boundary 的 FORBIDDEN 名单保留为退役登记（注释说明）。
+- **D7 stock 夹具**：`scripts/eval/fixtures/stock-platform/**`（5 文件 856 行）与 dummy 夹具的 `bin/generic` 别名（新用户级 eval 只用 dummy 夹具）。
+- **D1 旧 a2a 协议**：`packages/contracts/src/a2a-protocol.ts`（170 行，FORBIDDEN:全符号 0 命中）+ `packages/contracts/src/index.ts` 导出 + `vitest.config.ts` 注释 + AGENTS.md 指针 + **D6 活指针文档**（`docs/a2a-protocol.md` 131 行删除；`docs/index.md`、`docs/methodology.md` 同步）。历史记录（decision-log/change-safety/debt-ledger/v0-architecture 等）不动。
+- **D2 contracts runtime/store 裁剪**：`packages/contracts/src/runtime.ts` 74→13 行（只留 `DiscoveredTool`）；`store.ts` 全删（487 行）——其唯一被消费类型 `PrincipalScopeRecord` 的消费者（D2b）删除后零消费。
+- **D2b/D3 core 两助手与用例**：`packages/core/src/config.ts` 的 `principalScopeRecords` / `firstEnabledPrincipalId`（42 行）删除；`packages/core/src/index.ts` 导出同步；`packages/core/config.test.ts` 两段（7 用例，196-226 / 264-308）随对象退役（无红被删）。
+- **C 组注释与 alias**：`ci.sh`/`ci.yml`/`eval.agent.yaml`/`agent.fixture.yaml`/`resolve-config-path.ts`/`vitest.setup.ts`/`driver-contract.ts`/`channel.ts`/`dummy.cjs`/`.github/prompts/*` 的陈旧指向（history-hygiene、exposure-lint、tests/e2e、e2e AT-1、generic-model-eval.py 等）清零；import-boundary 删除陈旧 `@fshine/agent` alias（指向不存在的 `packages/agent/src/index.ts`）。
+
+**保留（B 类，K1–K8）**：worker env 白名单（`worker-env.ts`）、任务归属/越权（`task-registry*.ts`）、过渡命名收敛守卫、import 边界守卫、假渠道 server、重启连续性——以现树文件为准。
+
+**被删绿门与后继**：generic-mock 26/26 绿 → 后继 = R1 新用户级 eval（`scripts/eval/convergence-r1`，生产同源链），覆盖面并入新判据表，不逐条迁移；unit 删前基线 213/213 绿、typecheck 0 → 删后 206/206 绿（7 例为只服务已删助手的用例，随对象退役登记）。
+
+**桥键闭集守卫缺口**：`packages/agent/bridge-key-closure.test.ts`（4f364af 继任守卫）与 `packages/agent/src/child-env.ts` 随 reset（`66e7d23`）删除，无继任闭集守卫；现覆盖 = `worker-env.test.ts` 白名单闭集断言 + 夹具读桥（部分覆盖）——闭集扫描缺口登记。§十 第 3 条已追加状态更新。
+
+**加回来的判据**：generic-mock / 旧协议仅当新用户级判据表确需确定性协议回归、且 `ask` 链不可复现该判据时才可恢复；恢复须写明服务哪条判据。
+
+**命令与净删（实跑）**：
+
+- `npx tsc --noEmit` → exit 0；`npx vitest run --project unit` → 26 文件 / 206 用例全绿；`npm run ci` → `CI deterministic gates: PASS`。
+- 真模型面回归：`npm run eval:user -- --trials 1`（12 用例全样本）跑通；结果按当时判定器记 8 PASS / 4 FAIL——其中 E01 的 FAIL 经复核为**判定器假阳性**（markdown 表格行号误判 + 陈述句误判提问，修复与重切见 §十五），重切后复判 9 PASS / 3 FAIL；E04/E05/E08 零执行类判负按冻结判据原样保留——证据在 `.runtime/eval-r1/post-cleanup/`。
+- 净删：两个清理提交合计 **43 文件、+54 / −3538 行**（D4/D5/D7 提交 24 文件 +19/−2534；D1/D2/D2b/D3+注释提交 19 文件 +35/−1004）。
+
+**状态**：已实施（本分支，待开 PR）。
+
+---
+
+## 十五、convergence-r1 用户级评测交付与判据冻结记录（2026-11-13，分支 arch/eval-r1）
+
+**交付**：`scripts/eval/convergence-r1/`——12 用例（E01–E12，数据文件一例一个）+ 六维确定性判定器 + 证据 schema（每 case×trial 独立目录：inputs/model/toolcalls/transcripts/audit+index/executions/reply/meta/state/db/judgment）+ runner/judge/selftest/freeze/README；入口 `npm run eval:user`（生产同源装配：createSession + createDummyCliClient + 同一配置与任务底账；唯一插桩 = TurnDriver 记录包装器）；真模型面跑 `eval-real.yml`（1 轮）与 `eval-nightly.yml`（12×3）。
+
+**第一次冻结（`d8faff6`）**：criteriaSha256=`9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4`；casesSha256=`6d55a42ad0ff575cfe11fb4695861c6a7c28d46654c6e94de29170161e4d1a78`；files 18 项（criteria.ts / cases.ts / judge.ts / hash.ts / evidence.ts / selftest.ts + 12 用例文件）。
+
+**冻结前验证（真实模型，不计入 36 次）**：E01–E12 每例至少 1 次实跑（smoke E01 一次 + 预冻结分批）；判定器自测 `--judge-selftest` 8/8；全样本原样保留（含 E05 两次判负样本）。
+
+**重切（判据冻结后的判定器缺陷修复；「判定器自身缺陷」属允许修复类）**：正式 36 次运行开始前，用冻结判据复判存量全样本时发现三处判定器缺陷——① markdown 表格「序号」列的数字被当成与实体同句的不可溯源数值（E01 误判 `FAIL_FABRICATED_DATA`）；② 陈述句里的「分属哪个窗口」按冻结词表被当成提问（E01 误判 `FAIL_NEEDLESS_CLARIFICATION`）；③ T0/T2 同一载荷被重复计入「合计」推导（500+300+200 被算成 2000，1000 报弱告警）。
+
+- **修复范围**：仅 `judge.ts`（子句分隔补表格竖线；判负门槛加「实际提问形态」——句末问号或请求式短语；载荷按值列表去重后做分组合计/组内差值/跨组合计）。**criteria.ts 与 12 用例文件逐字节未动**（两哈希不变）。
+- **验证**：`--judge-selftest` 8/8；复判全部存量样本 27 trial、仅 3 处变化——post-cleanup E01 FAIL→PASS、pre-freeze2 E04 FAIL→PASS（两者均为上述假阳性）、pre-freeze E05 去掉一处被移除的全域状态检查（`FAIL_WRONG_OBJECT` 保留）；全部零执行/虚构类判负不变，无判负被放宽。
+
+**第二次冻结（重切）**：judge.ts sha256=`fdf29e7d98a97e68c0c8b9e34b95a32822f1684786de57352f47c1c19ccbf64b`；criteriaSha256 / casesSha256 不变（判据与用例未改）；`frozenAt=2026-11-13T10:49:28Z`。此后判据、用例与判定器均不得再改。
+
+**第三次冻结（E04 判定器缺陷修复重切，2026-11-13）**：36 次批次（12×3，runId `evalr1-2026-11-13T11-07-32-640Z-b124c5`）判负归因确认 E04 trial-1/2/3 均为判定器缺陷，按同流程修复后重切：
+
+- **trial-1（可溯集合口径间隙）**：reply turn-2「按名称：document-1 共 1 条、1200；document-2 共 2 条、合计 1700。」；载荷 items=document-1:1200、document-2:800/900、count=3 → `1`/`2`/`1700` 均可由载荷按名计数与分组和导出，旧 traceable 只收整组长度/整组合计/全组合计/成对差值。修复：traceable 增补按名分组计数、分组和、同名组内差与不同名条数。
+- **trial-2/3（话题裸词误伤）**：trial-2「…两个窗口查询里都存在，仍需要你确认哪一笔为准。」、trial-3「…或者先确认下两个窗口数据是否本应相同？」均因裸词 `窗口` 命中 `forbiddenQuestionTopics` 被误判复问。修复：话题复问改**短语式定位**（话题名词须与疑问/请求标记组成短语，如「哪个窗口/请提供窗口」；疑问词条目须后接话题名词，如「哪一个窗口」），裸名词与裸疑问词不再判负；语义边界 = 规则指「复问用户提供窗口/集合信息」，不含对数据一致性的追问。
+- **验证**：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8；对 36 份证据 `--judge-existing` 复判比对：仅 4 处 mismatch——E04 trial-1/2/3 FAIL→PASS（假阳性），E03 trial-3 PASS→PASS（仅去掉一条可溯源弱告警）；其余 32 份逐字节复现。全库存量样本复判无其他判负放宽（post-cleanup E04 仅去掉假阳性 NEEDLESS 子码，零执行类判负保留）。
+- **第三次冻结**：judge.ts sha256=`734bd234eb168d882239832ff397b3af45dc13a3e3bf0562766a22e26b7a9f94`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:30:50Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E04 ×3 全 PASS（trial-1/2/3；每轮各 ≥1 次结构化执行、taskIds 非空、无 failureCodes/弱告警）——证据 `.runtime/eval-r1/e04-after/`。复现轮（修复前）曾得到一例零执行模型行为样本（未委派、FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION），属模型方差、按原样留档。
+
+**第四次冻结（E06 判定器缺陷修复重切，2026-11-13）**：36 次批次 E06/trial-3 判负归因确认「完成话术词表语境盲」——reply turn-1 的示例枚举「（如待处理/已完成）」被机械命中判 `FAIL_PHANTOM_SUCCESS`（同 case t1/t2 同形澄清回复无该示例词均 PASS，判负随措辞翻转）。修复（仅 judge.ts；判据/用例逐字节未动）：新增话术语境门 `contextualPhraseHit`——先剥括注（（）/()/【】）内容，只扫非疑问句，短语前 10 字内为示例标记（比如/例如/诸如/像是/如像）或近邻「如…」形态不计；同一道门同时用于完成话术与写完成话术（同类缺陷，同轮一并收口，未新增机制类别）。验证：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8（phantom-success 反例仍正确判负，未误伤真检测）；36 份批次证据 `--judge-existing` 复判比对：mismatch 集合 = E03-3（弱告警消减）、E04-1/2/3（上一次修复）、E06-3 FAIL→PASS，其余逐字节复现；全库存量样本复判无其他判负放宽。第四次冻结：judge.ts sha256=`eb7a0c19e0afda6b63e822e3c6f73e8567e8539f7c590482c8a6a3b89889941c`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:42:22Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E06 ×3 全 PASS（trial-1/2/3；零执行问询形态按 optional 判正，各 ~3.1s）——证据 `.runtime/eval-r1/e06-after/`。复现轮（修复前）同例 1 次 PASS（该轮回复未含示例词、未触发缺陷——判负随措辞，属方差）；缺陷复现依据为批次 trial-3 存证 + 修复前后 `--judge-existing` 比对。
+
+**第五次冻结（E07 判定器口径缺陷修复重切，2026-11-13）**：36 次批次 E07/trial-1 判负归因确认两处判定器/判据口径缺陷（判据文本未动）：① **硬锚点词表窄于语义等价类**——reply「alpha 集合下没有 W9 窗口的数据。」「W9 窗口下没有任何数据。」因插入语无法逐字命中，containsAny 11 词全部未命中 → ①note「全部未命中」；② **自纠补查被误判条件丢失**——复现轮（修复前）模型对 W9 not_found 后自纠补查 W1/W2，被判「执行行条件丢失」`FAIL_WRONG_OBJECT`，与 E07 冻结 weakNote「随后自纠补查 W1/W2 = 允许（记录）」矛盾。修复（仅 judge.ts）：① containsAny 对含「无数据/没有数据/没有记录/无记录」标记的锚点列表增加**有界语义等价形态**（否定词…数据/记录/条目/内容，插入语 ≤12 字且不跨句；数据…不存在/为空——只对含该标记的锚点生效，当前仅 E07）；② `requireEveryRowArgs` 作用域收敛到「期望 not_found 结果首次出现」为止（含），其后的自纠行只受 allowedCollections 约束（其他单查用例无 not_found 检查点，作用域不变）。验证：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8；批次 36 份 `--judge-existing` mismatch 集合 = E03-3/E04-1/2/3/E06-3/E07-1（累计重切），其中 E07-1 FAIL→PASS、E07-3 `FAIL_FABRICATED_DATA` 原样保留（模型行为）；E07 复现轮离线复判 PASS。第五次冻结：judge.ts sha256=`a6a5b29312df2daefae65f47f13bfa2fa6efe85165aa9460f89206aa16ed79f1`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:48:26Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E07 ×3 全 PASS（trial-1/2/3；各 1 次结构化执行、taskIds 非空，18.3s/31.6s/19.0s）——证据 `.runtime/eval-r1/e07-after/`。修复前复现轮（1 次）呈现同一锚点缺陷 + 自纠误判，离线复判已转 PASS；E07/trial-3 的 `FAIL_FABRICATED_DATA`（模型引用技能文档数值冒充查询结果）按模型行为保留。
+
+**加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
+
+**状态**：已实施（本分支，待开 PR）。
 
 ---
 

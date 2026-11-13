@@ -23,7 +23,6 @@ import type {
   WecomConfig,
   WorkerDispatchMode,
 } from '@fshine/contracts';
-import type { PrincipalScopeRecord } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
   yamlPath?: string;
@@ -431,47 +430,6 @@ export function effectiveDeploymentEnv(
     if ((effective[name] ?? '').trim() === '') effective[name] = value;
   }
   return effective;
-}
-
-/**
- * principals(`<channel>:<userid>` 键)→ 旧版 `wecomUserId` 授权记录。
- *
- * 取第一个冒号之后的部分写入 legacy `wecom_user_id` 列；无冒号的旧键整体当 userid。
- * 这只让配置解析接受其他前缀，**不会**形成渠道隔离：`web:abc` 与 `wecom:abc` 仍落到
- * 同一存储键。第二渠道接入前须迁移授权主键并补 handler 会话/附件态隔离（D-112）。
- */
-export function principalScopeRecords(config: AppConfig): PrincipalScopeRecord[] {
-  return Object.entries(config.principals).map(([key, principal]) => {
-    const colon = key.indexOf(':');
-    return {
-      wecomUserId: colon === -1 ? key : key.slice(colon + 1),
-      // 实体授权归执行层：宿主不再持账套名单，列保留不读（写空串形式的历史兼容值）。
-      accountSetIds: [],
-      ...(principal.accountSetScope === 'all' ? { accountSetScope: 'all' as const } : {}),
-      enabled: principal.enabled,
-      capabilities: [...(principal.capabilities ?? ['read'])],
-    };
-  });
-}
-
-/**
- * 首个 enabled principal 的**裸 userid**（`<channel>:<userid>` 键剥掉渠道前缀；
- * 无冒号的旧键整体当 userid，与 principalScopeRecords 同一取舍）。
- *
- * 用途：验收/探针脚本派生"授权用户"。UserID 是身份暴露，不落代码——principal 的
- * 既定家在 config/agent.yaml（gitignore），脚本从这里取。无 enabled principal →
- * 返回 null，调用方必须 fail-closed 报错退出，**不回落任何写死的值**。
- *
- * 只取首个：这些脚本本就只用一个授权用户跑单会话，多 principal 的选取是部署决策，
- * 不是脚本该发明的第二套判据。
- */
-export function firstEnabledPrincipalId(config: AppConfig): string | null {
-  for (const [key, principal] of Object.entries(config.principals)) {
-    if (principal.enabled !== true) continue;
-    const colon = key.indexOf(':');
-    return colon === -1 ? key : key.slice(colon + 1);
-  }
-  return null;
 }
 
 function parseStringArray(value: unknown): string[] | undefined {

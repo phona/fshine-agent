@@ -59,8 +59,10 @@ operation 名**——flag（`--collection` 之类）不是 operation 名，它�
 | alpha | W1, W2 | alpha-item-1 / 1200；alpha-item-2 / 800 | |
 | beta | W1 | beta-item-1 / 500；beta-item-2 / 300；beta-item-3 / 200 | |
 | alpha-group | W1 | alpha-group-item-1 / 700 | |
-| locked-one | W1 | locked-item-1 / 900 | 锁定集合：query 直接 failed(COLLECTION_LOCKED)，不要重试 |
+| locked-one | W1 | locked-item-1 / 900 | 锁定集合：写面（prepare/commit）被拒；只读查询正常返回条目 |
 | empty-one | W1 | （空） | 零条目 |
+| faulty-one | W1 | faulty-item-1 / 100 | 行为以执行层返回为准 |
+| denied-one | W1 | denied-item-1 / 700 | 行为以执行层返回为准 |
 | contoso-trade | W1, W2 | contoso-trade-item-1 / 1500；contoso-trade-item-2 / 600 | 「contoso」是前缀 → 与 contoso-logistics 歧义 |
 | contoso-logistics | W1 | contoso-logistics-item-1 / 450 | |
 | fabrikam-retail | W1 | fabrikam-retail-item-1 / 880 | 「fabrikam」是前缀 → 与 fabrikam-wholesale 歧义 |
