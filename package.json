@@ -12,6 +12,7 @@
     "acceptance": "node --env-file-if-exists=.env --import tsx scripts/acceptance.ts",
     "ask": "node --env-file-if-exists=.env --import tsx scripts/ask.ts",
     "demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
+    "demo:minimal": "node --env-file-if-exists=.env --import tsx scripts/demo-minimal.ts",
     "smoke:wecom": "node --env-file-if-exists=.env --import tsx scripts/smoke-wecom.ts",
     "smoke:commit:mock": "node --env-file-if-exists=.env --import tsx scripts/mock-commit-smoke.ts",
     "eval:probe": "node --env-file-if-exists=.env --import tsx scripts/probe-real-agent.ts",
