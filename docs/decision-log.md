@@ -845,6 +845,8 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 - **最小实施②（提示词级，A 类；经 Eval 验证才保留；2026-11-13）**：主 Agent 指令 `.agents/agents/fshine-main/agent.md` 补裁定——「对象名/集合名不确定时把原话交给执行层裁决（执行层返回候选或不存在），不自行猜测候选、不引用文档作答；仅缺业务决策信息时才直接澄清」。**根因证据**：E05 ×9（step-3.7-flash，技能已对齐）仍 0/9——模型把 `contoso` 当公司名先向用户澄清，理由与旧 agent.md「必要时先澄清 / 不替执行层摸索」一致；技能仅作用于 Worker，管不到 Main 的决策点。**复采样**：E05 ×9 + 回归探针 E06 ×3 / E12 ×3（同 revision），无改善则回退该句并只保留裁定文字。
 
+- **验证结果（2026-11-13，step-3.7-flash）**：E05 ×9「技能已对齐、agent.md 未对齐」= 0/9（9/9 零执行先澄清，把 contoso 当公司名）；agent.md 对齐后 ×9 = **5/9 PASS**（5 次 `query contoso → needs_input → 交还候选`；4 次仍零执行先澄清，模型方差），回归探针 E06 ×3 = 3/3、E12 ×3 = 3/3。判据未变、冻结用例未改写；**保留 agent.md 改动**（Eval 证明有改善且无回归）。E05 的 5/9 是行为频率不是稳定性结论。
+
 ### 17.2 task.status 语义边界（needs_input 与「中间失败后恢复成功」）
 
 - **核查结论**：`task.status` 当前**没有用户可见消费面**——`npm run ask` 机械证据只逐条打印 `execution.status`（不打印 task.status）；`apps/server/server.ts` 只记录逐执行状态；M5 判定器（`scripts/eval/convergence-r1/judge.ts`）用执行行（T1 executions 与 `executions.some(failed||refused)`）判「④任务状态一致性」，不读 task.status。
@@ -864,7 +866,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 ### 17.5 评测数据保留口径（owner 2026-11-13）
 
 - 后续评测继续**分别保留**：原始结果（原始 judgment，不因修复改写）、离线复判（`--judge-existing`）、重新运行结果（新样本）；报告中必须注明**样本规模、模型版本、代码点/技能 revision 与可验证范围**。
-- R2 采样记录：E04 ×12、E05 ×9（技能对齐后新 revision）；**模型 = `step-3.7-flash`**（`config/agent.fixture.yaml` 的缺省模型；进程 env 显式覆盖 `.env` 的 `step-5-preview`，证据 `model.json` 记录 main=worker=`step-3.7-flash`）。M5 首轮基线（32/36 等）为 `step-5-preview` 帧——**跨模型帧不得混用**，R2 报告对两帧分列。旧 `r2-e04` 混合 revision 采样作废并留档。
+- R2 采样记录（step-3.7-flash，原始 judgment 全部保留）：E04 ×12 = **12/12**（正确委派 12/12、逐 trial 2 次执行 W202611+W202610、先追问 0、虚构 0）；E05 ×9 对齐前 = **0/9**、对齐后 ×9 = **5/9**；E06 ×3 = 3/3、E12 ×3 = 3/3（回归探针）；**模型 = `step-3.7-flash`**（`config/agent.fixture.yaml` 的缺省模型；进程 env 显式覆盖 `.env` 的 `step-5-preview`，证据 `model.json` 记录 main=worker=`step-3.7-flash`）。M5 首轮基线（32/36 等）为 `step-5-preview` 帧——**跨模型帧不得混用**，R2 报告对两帧分列。旧 `r2-e04` 混合 revision 采样作废并留档。
 
 ---
 
