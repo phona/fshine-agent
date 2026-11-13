@@ -13,12 +13,12 @@ const SCAN_FILES = [
 ];
 const SCAN_DOCS_EXCLUDE = new Set(['debt-ledger.md', 'change-safety.md']);
 
-// Tier A: wave scope 七文件 + package.json name/description，波次末必须清零
+// Tier A: wave scope 原七文件 + package.json name/description，波次末必须清零
+// （其中 tests/e2e/harness.ts 已随旧 e2e 套件于 2026-11-13 M2 波次 1 删除，故从表移除）
 const TIER_A_FILES = new Set([
   'README.md',
   'docs/v0-functional-spec.md',
   'docs/manual-test-wecom.md',
-  'tests/e2e/harness.ts',
   'config/agent.example.yaml',
   '.env.example',
   '.github/workflows/ci.yml',
@@ -44,7 +44,7 @@ const TIER_A: Entry[] = [
   { needle: NEEDLE, file: 'README.md', tier: 'A' },
   { needle: NEEDLE, file: 'docs/v0-functional-spec.md', tier: 'A' },
   { needle: NEEDLE, file: 'docs/manual-test-wecom.md', tier: 'A' },
-  { needle: NEEDLE, file: 'tests/e2e/harness.ts', tier: 'A' },
+  // tests/e2e/harness.ts 的登记随该文件于 2026-11-13（M2 波次 1）删除一并移除
   { needle: NEEDLE, file: 'config/agent.example.yaml', tier: 'A' },
   { needle: NEEDLE, file: '.env.example', tier: 'A' },
   // .github/workflows/ci.yml 当前 0 命中，不登记
@@ -172,7 +172,8 @@ function scanSurface(): { file: string; needle: string; line: number }[] {
     }
   }
 
-  // 5. tests/e2e/harness.ts
+  // 5. tests/e2e/harness.ts（旧 e2e 套件已于 2026-11-13 M2 波次 1 删除；
+  //    文件若回归则恢复扫描，existsSync 守卫使删除不产生假红）
   const harness = 'tests/e2e/harness.ts';
   if (existsSync(path.join(REPO_ROOT, harness))) {
     scanned.add(harness);
@@ -370,9 +371,13 @@ describe('acceptance ①：波次开跑就绪检查（四项全部满足才开�
   //    （EXECUTION_* 与 DZ_* 并存设 mock），e2e 因此对改名后的执行层仍可验证——DZ_* 提法在 harness 里
   //    是桥接而非漂移。判据从漂移未修时的代理「零提及 DZ_*」改为已解决架构的机械面：
   //    ① harness 桥接在位（两族 mock 设定都在）；② 生产/src 与 .env.example 无 DZ_* 门命中。
-  const harnessContent = readFile('tests/e2e/harness.ts');
+  //    2026-11-13（M2 波次 1）：tests/e2e 旧套件（含 harness）已整体删除，判据①随对象退役；
+  //    文件若回归则恢复桥接断言，判据②（生产面）始终生效。
+  const harnessRel = 'tests/e2e/harness.ts';
   const bridgeKeys = ['EXECUTION_EXECUTOR', 'DZ_EXECUTOR', 'DZ_ALLOW_REAL'];
-  const bridgeMissing = bridgeKeys.filter(k => !harnessContent.includes(k));
+  const bridgeMissing: string[] = existsSync(path.join(REPO_ROOT, harnessRel))
+    ? bridgeKeys.filter(k => !readFile(harnessRel).includes(k))
+    : [];
   // 2026-11-08：platform-mock.ts（宿主读 EXECUTION_EXECUTOR/FSHINE_REAL_COMMIT）与
   // runtime-mode.ts（启动日志汇总 mock/commit 状态）已整模块删除，判据源归执行层，
   // 这里只扫仍然存在的生产/src 面。
