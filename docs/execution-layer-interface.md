@@ -72,8 +72,10 @@
 ## 3. Operation list（能力清单，唯一权威）
 
 - **生产者**：执行层网关 `<gateway> operation list --json`。
-- **消费者**：宿主的 label / args 规格 / access 语义 / protocol 角色
-  四张派生表（`operation-labels.ts`），以及计划门与 serve 门。
+- **消费者**：宿主的 label / args 规格 / access 语义 / protocol 角色四张派生表
+  （`operation-labels.ts`）与码级语义派生表（同文件 `parseErrorCodeSemantics` /
+  `loadErrorCodeSemantics`，投影进 `platform-contract.ts` 的 `ErrorCodeSemantics`），
+  以及计划门与 serve 门。
 - **形状**（每条 operation）：`name`（注册名，调用唯一依据）、
   `domain`、`command`、`access`（read / scratch / write 等）、
   `script`（执行层内部路径，宿主不直接执行，只作审计引用）、
