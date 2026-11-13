@@ -862,7 +862,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 ### 17.5 评测数据保留口径（owner 2026-11-13）
 
 - 后续评测继续**分别保留**：原始结果（原始 judgment，不因修复改写）、离线复判（`--judge-existing`）、重新运行结果（新样本）；报告中必须注明**样本规模、模型版本、代码点/技能 revision 与可验证范围**。
-- R2 采样记录：E04 ×12（`r2-e04`）、E05 ×9（`r2-e05`，技能对齐后新 revision）；结果与归因见 R2 报告。
+- R2 采样记录：E04 ×12、E05 ×9（技能对齐后新 revision）；**模型 = `step-3.7-flash`**（`config/agent.fixture.yaml` 的缺省模型；进程 env 显式覆盖 `.env` 的 `step-5-preview`，证据 `model.json` 记录 main=worker=`step-3.7-flash`）。M5 首轮基线（32/36 等）为 `step-5-preview` 帧——**跨模型帧不得混用**，R2 报告对两帧分列。旧 `r2-e04` 混合 revision 采样作废并留档。
 
 ---
 
