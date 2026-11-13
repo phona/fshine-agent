@@ -17,7 +17,6 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { MutableModels } from '@earendil-works/pi-ai';
 import type {
-  CancelResult,
   CapabilityManifest,
   ExecutionClient,
   ExecutionOutcome,
@@ -67,9 +66,6 @@ class FakeClient implements ExecutionClient {
       data: { collection: 'documents', window: 'W202611', items: ['document-1', 'document-2', 'document-2'], count: 3 },
     };
   }
-  async cancel(): Promise<CancelResult> {
-    return 'not_found';
-  }
 }
 
 /** 按预设序列返回结果的假客户端（零网络）：完成判定测试用。 */
@@ -87,9 +83,6 @@ class ScenarioClient implements ExecutionClient {
     const outcome = this.outcomes.shift();
     if (outcome === undefined) throw new Error('ScenarioClient 没有更多预设结果');
     return outcome;
-  }
-  async cancel(): Promise<CancelResult> {
-    return 'not_found';
   }
 }
 
@@ -351,6 +344,8 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const turn = await session.send('查一下 documents');
     const task = session.getTask(turn.taskIds[0]!);
     expect(task.executions[0]!.status).toBe('failed');
+    // 执行事实落账：error 原样记录（execution-runtime 的 failed/refused 分支）。
+    expect(task.executions[0]!.error).toMatchObject({ code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' });
     expect(task.status).toBe('failed');
     expect(task.status).not.toBe('completed');
     expect(task.resultText).toContain('超时');
@@ -366,6 +361,7 @@ describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
     const turn = await session.send('查一下 documents');
     const task = session.getTask(turn.taskIds[0]!);
     expect(task.executions[0]!.status).toBe('refused');
+    expect(task.executions[0]!.error).toMatchObject({ code: 'POLICY_REFUSED', message: '执行层策略拒绝。' });
     expect(task.status).toBe('failed');
     expect(task.status).not.toBe('completed');
     expect(task.failureReason).toContain('执行层策略拒绝');

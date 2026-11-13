@@ -10,11 +10,11 @@
  *   · ExecutionRequest   —— 结构化执行请求。**requestId 由宿主生成**：调用身份与去重
  *     语义归宿主，模型既不能生成可信身份，也不能携带确认凭据；副作用安全重试由执行层
  *     保证（宿主只承诺 requestId 的稳定与唯一）。
- *   · ExecutionOutcome   —— 执行状态与失败结果。五态互斥：completed / needs_input /
- *     confirmation_required / failed / refused。**refused = 执行层策略拒绝，failed =
+ *   · ExecutionOutcome   —— 执行状态与失败结果。四态互斥：completed / needs_input /
+ *     failed / refused。**refused = 执行层策略拒绝，failed =
  *     执行失败，两者语义不得混用**；needs_input 必须携带「缺什么」的结构化描述
  *     （missing 非空）。
- *   · ExecutionClient    —— 能力快照 / 执行 / 取消三个操作。
+ *   · ExecutionClient    —— 能力快照 / 执行两个操作。
  *
  * 刻意不在这里的东西（后续切片再定，不在这里预造执行面）：
  *   · readback（副作用验证状态）：写切片再定——不得把「执行完成」当「业务生效」；
@@ -62,8 +62,8 @@ export interface ExecutionRequest {
   args: Readonly<Record<string, unknown>>;
 }
 
-/** 执行结果五态（互斥）。 */
-export type ExecutionStatus = 'completed' | 'needs_input' | 'confirmation_required' | 'failed' | 'refused';
+/** 执行结果四态（互斥）。 */
+export type ExecutionStatus = 'completed' | 'needs_input' | 'failed' | 'refused';
 
 /**
  * 「缺什么」的条目：needs_input 必须至少带一条。name 是执行层声明的输入名（若有），
@@ -85,27 +85,19 @@ export interface ExecutionFailure {
 /**
  * 执行结果。
  *   · completed——执行完成（不代表业务副作用已验证生效：readback 归写切片）。
- *     可选 artifacts 是未来契约候选：M1 不产出、不消费。
  *   · needs_input——执行层要求补充输入，missing 非空。
- *   · confirmation_required——执行层冻结了一个待确认操作（M1 类型面保留，确认流程在写切片）。
  *   · failed——执行失败。
  *   · refused——执行层策略拒绝（含门拒、请求形状拒绝）。
  */
 export type ExecutionOutcome =
-  | { status: 'completed'; data?: unknown; artifacts?: readonly unknown[] }
+  | { status: 'completed'; data?: unknown }
   | { status: 'needs_input'; missing: readonly MissingInput[]; data?: unknown; error?: ExecutionFailure }
-  | { status: 'confirmation_required'; data?: unknown }
   | { status: 'failed'; error: ExecutionFailure }
   | { status: 'refused'; error: ExecutionFailure };
-
-/** 取消结局三态。M1 只定义形状：读路径不产生可取消操作，调用侧不实现取消面。 */
-export type CancelResult = 'cancelled' | 'too_late' | 'not_found';
 
 /** 执行层客户端：适配器实现本接口；通用运行时只依赖本接口。 */
 export interface ExecutionClient {
   /** 能力快照：每个会话取一次，供装配使用。 */
   capabilities(): Promise<CapabilityManifest>;
   execute(request: ExecutionRequest): Promise<ExecutionOutcome>;
-  /** 取消（M1 形状面，读路径不调用）：按 requestId 取消，语义见 CancelResult。 */
-  cancel(requestId: string): Promise<CancelResult>;
 }

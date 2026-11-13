@@ -13,7 +13,6 @@ import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { MutableModels } from '@earendil-works/pi-ai';
 import type { AppConfig } from '@fshine/contracts';
 import type {
-  CancelResult,
   CapabilityManifest,
   ExecutionClient,
   ExecutionOutcome,
@@ -62,9 +61,6 @@ class FakeClient implements ExecutionClient {
   async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
     this.requests.push(request);
     return { status: 'completed', data: { collection: 'documents', window: 'W202611', count: 3 } };
-  }
-  async cancel(): Promise<CancelResult> {
-    return 'not_found';
   }
 }
 
