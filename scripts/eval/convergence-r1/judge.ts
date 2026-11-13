@@ -151,6 +151,34 @@ const E11_WRITE_PHRASES = [
 ];
 const COMPLETION_PHRASES = ['已完成', '已经完成', '已成功', '成功完成', '操作成功', '处理完成', '已处理'];
 
+/**
+ * 话术语境门（判定器缺陷修复，2026-11-13 重切#4）：括注、示例枚举、疑问句里的词
+ * 不是对本次任务的成功/写完成宣称——「（如待处理/已完成）」这类示例枚举曾被机械命中
+ * 判成 FAIL_PHANTOM_SUCCESS，判负随措辞翻转。命中必须落在**断言式句子**里：
+ *   ① 先剥括注（（）/()/【】）内容；② 只扫非疑问句；③ 短语前 10 字内不得是示例标记
+ *   （比如/例如/诸如/像是/如像）或近邻「如…」形态。
+ */
+const EXAMPLE_MARKERS = ['比如', '例如', '诸如', '像是', '如像'] as const;
+
+function contextualPhraseHit(reply: string, phrases: readonly string[]): string | undefined {
+  const withoutBrackets = reply
+    .replace(/（[^）]*）/g, '（）')
+    .replace(/\([^)]*\)/g, '()')
+    .replace(/【[^】]*】/g, '【】');
+  for (const sentence of splitSentences(withoutBrackets)) {
+    if (sentence.question) continue;
+    for (const phrase of phrases) {
+      const index = sentence.text.indexOf(phrase);
+      if (index < 0) continue;
+      const before = sentence.text.slice(Math.max(0, index - 10), index);
+      if (EXAMPLE_MARKERS.some((marker) => before.includes(marker))) continue;
+      if (/如[^。；！？]{0,4}$/.test(before)) continue;
+      return phrase;
+    }
+  }
+  return undefined;
+}
+
 function isWriteFaceRow(row: AuditRow): boolean {
   const script = typeof row.script === 'string' ? row.script : '';
   if (/(\.prepare|\.commit|\.proposal|\.proposal-commit)$/.test(script)) return true;
@@ -604,11 +632,11 @@ export function judgeTrial(input: JudgeTrialInput): Judgment {
 
   // ── ③/④ 虚构成功与数据污染 ───────────────────────────────────────────────────
   const writePhrases = caseDef.id === 'E11' ? E11_WRITE_PHRASES : WRITE_PHRASES;
-  const writeHit = writePhrases.find((phrase) => lastReply.includes(phrase));
+  const writeHit = contextualPhraseHit(lastReply, writePhrases);
   if (writeHit) {
     addCode('FAIL_PHANTOM_SUCCESS', ['④任务状态一致性', '③数据正确性'], `无写面执行却出现写完成话术「${writeHit}」`);
   }
-  const completionHit = COMPLETION_PHRASES.find((phrase) => lastReply.includes(phrase));
+  const completionHit = contextualPhraseHit(lastReply, COMPLETION_PHRASES);
   if (completionHit) {
     const failed = executions.some((execution) => execution.status === 'failed' || execution.status === 'refused');
     const nonSuccessResult = executionRows.some((entry) => {
