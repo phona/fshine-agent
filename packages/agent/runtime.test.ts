@@ -72,6 +72,27 @@ class FakeClient implements ExecutionClient {
   }
 }
 
+/** 按预设序列返回结果的假客户端（零网络）：完成判定测试用。 */
+class ScenarioClient implements ExecutionClient {
+  readonly requests: ExecutionRequest[] = [];
+  private readonly outcomes: ExecutionOutcome[];
+  constructor(outcomes: readonly ExecutionOutcome[]) {
+    this.outcomes = [...outcomes];
+  }
+  async capabilities(): Promise<CapabilityManifest> {
+    return MANIFEST;
+  }
+  async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
+    this.requests.push(request);
+    const outcome = this.outcomes.shift();
+    if (outcome === undefined) throw new Error('ScenarioClient 没有更多预设结果');
+    return outcome;
+  }
+  async cancel(): Promise<CancelResult> {
+    return 'not_found';
+  }
+}
+
 function toolCallAssistant(name: string, args: Record<string, unknown>, id: string): AgentMessage {
   return {
     role: 'assistant',
@@ -140,7 +161,7 @@ function driverFor(responses: AgentMessage[]) {
   return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime: fakeRuntime(responses).runtime });
 }
 
-function sessionFor(client: FakeClient, options: {
+function sessionFor(client: ExecutionClient, options: {
   mainResponses: AgentMessage[];
   workerResponses: AgentMessage[];
   allowedOperations?: readonly string[];
@@ -227,6 +248,8 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     expect(turn.reply.trim()).not.toBe('');
     const task = session.tasks()[0]!;
     expect(task.executions).toHaveLength(0);
+    // M4-B：宿主在发起执行前拒收 = 零执行事实 → unexecuted，不得记 completed。
+    expect(task.status).toBe('unexecuted');
   });
 
   it('允许集合不在能力快照里 → 构造即失败（fail-closed）', async () => {
@@ -308,5 +331,141 @@ describe('运行时链路（假客户端 + 假模型）', () => {
     expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_other' })).toEqual([]);
     expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_1' }).map((item) => item.taskId)).toEqual([taskId]);
     reopened.close();
+  });
+});
+
+describe('任务完成判定：只看已记录执行事实（M4-B）', () => {
+  const mainTurn = (reply: string): AgentMessage[] => [
+    toolCallAssistant('run_task', { task: '查询 documents' }, 'call_main_1'),
+    textAssistant(reply),
+  ];
+  const queryCall = (id = 'call_worker_1'): AgentMessage =>
+    toolCallAssistant('execute_operation', { operation: 'dummy.query', args: { '--collection': 'documents' } }, id);
+
+  it('① 执行层 failed：任务记 failed（不是 completed）；汇报原文保留；failureReason 取执行层 message', async () => {
+    const client = new ScenarioClient([{ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' } }]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('查询失败：执行层调用超时。'),
+      workerResponses: [queryCall(), textAssistant('执行层报告本次调用超时，未返回数据。')],
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(task.executions[0]!.status).toBe('failed');
+    expect(task.status).toBe('failed');
+    expect(task.status).not.toBe('completed');
+    expect(task.resultText).toContain('超时');
+    expect(task.failureReason).toContain('执行层调用超时');
+  });
+
+  it('② 执行层 refused：任务记 failed；failureReason 取执行层 message', async () => {
+    const client = new ScenarioClient([{ status: 'refused', error: { code: 'POLICY_REFUSED', message: '执行层策略拒绝。' } }]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('本次调用被执行层拒绝。'),
+      workerResponses: [queryCall(), textAssistant('执行层拒绝了本次调用。')],
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(task.executions[0]!.status).toBe('refused');
+    expect(task.status).toBe('failed');
+    expect(task.status).not.toBe('completed');
+    expect(task.failureReason).toContain('执行层策略拒绝');
+  });
+
+  it('③ 零执行（Worker 未发起任何调用）：任务记 unexecuted；汇报原文保留', async () => {
+    const client = new ScenarioClient([{ status: 'completed', data: {} }]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('本轮没有可执行的查询。'),
+      workerResponses: [textAssistant('本轮能力快照里没有可执行的查询，未发起任何调用。')],
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(client.requests).toHaveLength(0);
+    expect(task.executions).toHaveLength(0);
+    expect(task.status).toBe('unexecuted');
+    expect(task.status).not.toBe('completed');
+    expect(task.resultText).toContain('未发起任何调用');
+  });
+
+  it('⑧ 混合（先 completed 后 failed）：非全 completed 记 failed', async () => {
+    const client = new ScenarioClient([
+      { status: 'completed', data: { count: 1 } },
+      { status: 'failed', error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' } },
+    ]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('第二次调用失败。'),
+      workerResponses: [
+        queryCall('call_worker_1'),
+        queryCall('call_worker_2'),
+        textAssistant('第一次成功，第二次超时。'),
+      ],
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(task.executions.map((execution) => execution.status)).toEqual(['completed', 'failed']);
+    expect(task.status).toBe('failed');
+    expect(task.status).not.toBe('completed');
+  });
+
+  it('⑥ 成功孪生（与①同场景、仅执行结果不同）：全 completed 才记 completed', async () => {
+    const client = new ScenarioClient([{ status: 'completed', data: { count: 3 } }]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('documents 共 3 条。'),
+      workerResponses: [queryCall(), textAssistant('已查询 documents：3 条。')],
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(task.executions[0]!.status).toBe('completed');
+    expect(task.status).toBe('completed');
+  });
+
+  it('⑦ SQLite 底账（生产缺省实现）同一 failed 场景：任务记 failed', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-judge-'));
+    tempDirs.push(dir);
+    const registry = createSqliteTaskRegistry(path.join(dir, 'state.db'));
+    const client = new ScenarioClient([{ status: 'failed', error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' } }]);
+    const session = await sessionFor(client, {
+      mainResponses: mainTurn('查询失败：执行层调用超时。'),
+      workerResponses: [queryCall(), textAssistant('执行层报告本次调用超时，未返回数据。')],
+      taskRegistry: registry,
+    });
+    const turn = await session.send('查一下 documents');
+    const task = session.getTask(turn.taskIds[0]!);
+    expect(task.status).toBe('failed');
+    expect(task.status).not.toBe('completed');
+    registry.close();
+  });
+
+  it('④ 纯聊天（零委派）：回合正常完成，不产生任务记录（判定不改变纯聊天语义）', async () => {
+    const client = new ScenarioClient([{ status: 'completed', data: {} }]);
+    const session = await sessionFor(client, {
+      mainResponses: [textAssistant('你好，我可以帮你查平台数据。')],
+      workerResponses: [],
+    });
+    const turn = await session.send('你好');
+    expect(turn.reply).toContain('你好');
+    expect(turn.taskIds).toHaveLength(0);
+    expect(session.tasks()).toHaveLength(0);
+  });
+
+  it('⑤ 反向绊线：failed 执行事实 + 声称成功的汇报文本 → 仍记 failed（不嗅探文本）', () => {
+    const registry = createTaskRegistry();
+    const scope = { principalId: 'wecom:test-user', sessionId: 'sess_1' };
+    registry.begin({ taskId: 'task_forged', ...scope, request: '查询 documents' });
+    registry.noteExecution('task_forged', {
+      requestId: 'req_failed_1',
+      operation: 'dummy.query',
+      status: 'failed',
+      error: { code: 'EXECUTION_TIMEOUT', message: '执行层调用超时。' },
+    });
+    registry.complete('task_forged', '任务圆满完成，共 3 条数据，已确认无误。');
+    expect(registry.get('task_forged', scope).status).toBe('failed');
+  });
+
+  it('⑤b 反向绊线：零执行 + 声称成功的汇报文本 → 仍记 unexecuted（不嗅探文本）', () => {
+    const registry = createTaskRegistry();
+    const scope = { principalId: 'wecom:test-user', sessionId: 'sess_1' };
+    registry.begin({ taskId: 'task_forged_2', ...scope, request: '查询 documents' });
+    registry.complete('task_forged_2', '查询成功，共 3 条数据。');
+    expect(registry.get('task_forged_2', scope).status).toBe('unexecuted');
   });
 });
