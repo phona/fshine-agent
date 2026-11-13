@@ -828,6 +828,44 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十七、R2：E05 边界裁定、判定语义核查与持续评测口径（2026-11-13）
+
+**背景**：M4/M5 收官后 owner 确认架构冻结，R2 只做「在固定最小架构上提升真实任务完成质量」。本条登记 R2 首批五项处置；不改写 §十三–§十六 的旧条目。
+
+### 17.1 E05 授权边界裁定（owner 2026-11-13；判据不变）
+
+- **问题**：E05（歧义）两轮 0/3——模型按夹具技能「候选作为一次澄清交给用户」直接澄清、零执行；现行冻结判据要求先向执行层查询歧义句柄（`contoso` → `needs_input` + 候选）。技能与判据对「何时先探索、何时先澄清」表述不一致。
+- **裁定**：
+  1. **授权面**：候选查询与具体对象读取同属只读调用，逐次由 Executor 按可信身份与 scope 裁决；宿主与模型不预审实体，也不得凭技能文档/记忆充当对象事实。
+  2. **探索优先（当可执行）**：用户给出的标识存在歧义、且该标识本身可交给执行层裁决时（如 `contoso` 前缀），**先探索**——向执行层查询该歧义标识，由执行层返回候选清单（`needs_input` + candidates）。候选事实的权威是执行层。
+  3. **澄清**：探索结果存在多解时，把**执行层返回的候选清单**交还用户选择（一次澄清）；标识缺失或执行层不可裁决时直接澄清（E06 场景）。
+  4. **禁用面**：用户确认前，不得以猜测的具体候选集合名（`contoso-trade` / `contoso-logistics`）发起查询，更不得把候选数据当作用户所问对象的答案（v1 判据的 WRONG_OBJECT / FABRICATED 面保持不变）。
+  5. **判据不变**：本裁定与 v1 冻结判据一致（`allowedCollections=['contoso']`、needs_input checkpoint），**不产生判据 v2**；原冻结用例不改写。若未来裁定变更（如允许候选枚举或澄清优先），必须新增判据版本并保留 v1 可对照（原始 judgment 已存证 + git 快照）。
+- **最小实施（允许类：Skill）**：夹具技能 `scripts/eval/fixtures/dummy-platform/.agents/skills-serve/dummy-routing/SKILL.md` 对齐裁定——歧义前缀先查执行层、候选以执行层返回为准、文档数字不得引用作答（同句覆盖 E07-3 已登记的同类风险）。技能修订 = 评测环境新 revision；E05 复采样另行记录（样本/模型/revision 见报告）。
+
+### 17.2 task.status 语义边界（needs_input 与「中间失败后恢复成功」）
+
+- **核查结论**：`task.status` 当前**没有用户可见消费面**——`npm run ask` 机械证据只逐条打印 `execution.status`（不打印 task.status）；`apps/server/server.ts` 只记录逐执行状态；M5 判定器（`scripts/eval/convergence-r1/judge.ts`）用执行行（T1 executions 与 `executions.some(failed||refused)`）判「④任务状态一致性」，不读 task.status。
+- **决定**：**本轮不修改语义**（不为无消费者的字段新增宿主行为）。当前口径——首个非 completed 判负（`[failed, completed]` 记 failed）、`needs_input` 并入 failed——以表征测试钉住：`packages/agent/task-status-boundary.test.ts`。
+- **复评触发条件**（出现任一）：ask 打印任务状态 / 状态查询切片 / 后台投递 / 判定器改用 task.status。届时先按用户可见性裁定，再改语义并同步更新该测试与本条。
+
+### 17.3 Execution Contract 残余：CLI flag 名称泄漏
+
+- **残余**：operation 参数名以 CLI flag 形态直传（`operation list --json` 的 `args.flags[].flag` = `--collection` / `--window`；`CapabilityManifest.operations[].args[].name` 同名）。影响：替换为非 CLI 传输的 Executor 时需在适配器内做参数名映射；模型看到的参数声明是 flag 名。
+- **决定**：当前不实施修正（仓内唯一 Executor 为 CLI 网关，生产链正确性不受影响）。**触发最小修正的条件**：① 接入非 CLI 传输并出现映射成本或行为差异；② 模型行为 Eval 显示 flag 命名造成误用。修正方向：契约参数名中性化 + 适配器内映射（不扩张协议语义）。
+
+### 17.4 持续评测口径：配置就绪 ≠ 默认分支已启用
+
+- **事实**：`eval-real.yml` 触发面 = push/PR 到 `main`；`eval-nightly.yml` = 每日 cron + 手动。当前工作线为 `arch/integration`（未合 main），且本仓未验证远端 Secrets（`LLM_API_*`）可用性。
+- **口径**：**「工作流配置就绪」不等于「默认分支上的持续 Eval 已启用」**。持续保障成立需同时满足：① 分支合入 main（owner 决定）② 首次真实 nightly 运行留档 ③ 失败面有人处理。在此之前，任何报告不得宣称 Nightly 提供持续保障。
+
+### 17.5 评测数据保留口径（owner 2026-11-13）
+
+- 后续评测继续**分别保留**：原始结果（原始 judgment，不因修复改写）、离线复判（`--judge-existing`）、重新运行结果（新样本）；报告中必须注明**样本规模、模型版本、代码点/技能 revision 与可验证范围**。
+- R2 采样记录：E04 ×12（`r2-e04`）、E05 ×9（`r2-e05`，技能对齐后新 revision）；结果与归因见 R2 报告。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
