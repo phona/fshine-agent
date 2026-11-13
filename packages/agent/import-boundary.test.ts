@@ -1,7 +1,7 @@
 /**
- * 最小切片静态 import 图检查（依赖方向 + 无旧治理模块）。
+ * 静态 import 图检查（依赖方向 + 无旧治理模块）。
  *
- * 用 TS 编译器 API 解析六个入口文件的 import/export 边，按值边（运行期保留）做
+ * 用 TS 编译器 API 解析各入口文件的 import/export 边，按值边（运行期保留）做
  * 传递闭包，type-only 边只登记不遍历（编译期擦除）。断言：
  *   ① 值闭包不触及旧 Runtime 治理模块清单里的任何文件；
  *   ② 执行契约模块零 import（无传输实现）；
@@ -19,22 +19,22 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..');
 
 const ENTRIES = [
   'packages/contracts/src/execution-contract.ts',
-  'packages/agent/src/minimal/worker-env.ts',
-  'packages/agent/src/minimal/task-registry.ts',
-  'packages/agent/src/minimal/task-registry-sqlite.ts',
-  'packages/agent/src/minimal/execution-runtime.ts',
-  'packages/agent/src/minimal/dummy-cli-client.ts',
-  // U2/U3 入口同受边界约束：新增装配不得以值边触及旧治理模块。
-  'scripts/ask-minimal.ts',
-  'apps/server/minimal-server.ts',
+  'packages/agent/src/worker-env.ts',
+  'packages/agent/src/task-registry.ts',
+  'packages/agent/src/task-registry-sqlite.ts',
+  'packages/agent/src/execution-runtime.ts',
+  'packages/agent/src/dummy-cli-client.ts',
+  // ask/server 入口同受边界约束：新增装配不得以值边触及旧治理模块。
+  'scripts/ask.ts',
+  'apps/server/server.ts',
 ] as const;
 
 const CONTRACT = 'packages/contracts/src/execution-contract.ts';
-const RUNTIME = 'packages/agent/src/minimal/execution-runtime.ts';
-const ADAPTER = 'packages/agent/src/minimal/dummy-cli-client.ts';
-const ENTRY_SCRIPT = 'scripts/ask-minimal.ts';
+const RUNTIME = 'packages/agent/src/execution-runtime.ts';
+const ADAPTER = 'packages/agent/src/dummy-cli-client.ts';
+const ENTRY_SCRIPT = 'scripts/ask.ts';
 
-/** 旧 Runtime 治理模块清单（M1 最小路径不得以值边触及）。 */
+/** 旧 Runtime 治理模块清单（运行时路径不得以值边触及）。 */
 const FORBIDDEN = new Set([
   'packages/agent/src/runtime.ts',
   'packages/agent/src/plan-runtime.ts',
@@ -132,7 +132,7 @@ function resolveSpecifier(specifier: string, fromFile: string): string | undefin
     for (const candidate of [base, `${base}.ts`, path.join(base, 'index.ts')]) {
       if (existsSync(candidate) && statSync(candidate).isFile()) return candidate;
     }
-    throw new Error(`最小路径 import 图无法解析：${specifier}（from ${rel(fromFile)}）`);
+    throw new Error(`import 图无法解析：${specifier}（from ${rel(fromFile)}）`);
   }
   const mapped = ALIASES[specifier];
   return mapped === undefined ? undefined : path.join(REPO_ROOT, mapped);
@@ -169,13 +169,13 @@ function valueClosure(entryRels: readonly string[]): { files: Set<string>; edges
   return { files, edges };
 }
 
-describe('最小切片 import 图', () => {
+describe('import 图边界', () => {
   it('值闭包不触及旧治理模块；适配器单向依赖契约；契约零 import', () => {
     const { files, edges } = valueClosure(ENTRIES);
-    console.log(JSON.stringify({ event: 'minimal_value_closure', files: [...files].sort() }));
+    console.log(JSON.stringify({ event: 'value_closure', files: [...files].sort() }));
 
     const forbiddenHits = [...files].filter((file) => FORBIDDEN.has(file));
-    expect(forbiddenHits, `最小路径值边触及旧治理模块：${forbiddenHits.join(', ')}`).toEqual([]);
+    expect(forbiddenHits, `import 图值边触及旧治理模块：${forbiddenHits.join(', ')}`).toEqual([]);
 
     // ② 执行契约零 import（无传输实现；也不含 node: 内建导入）。
     const contractText = readFileSync(path.join(REPO_ROOT, CONTRACT), 'utf8');
@@ -194,6 +194,6 @@ describe('最小切片 import 图', () => {
 
     // type-only 边全部落在标注列表内（打印供评审，不断言具体成员）。
     const typeOnlyTargets = [...new Set(edges.filter((edge) => edge.typeOnly).map((edge) => edge.to ?? edge.specifier))].sort();
-    console.log(JSON.stringify({ event: 'minimal_type_only_edges', targets: typeOnlyTargets }));
+    console.log(JSON.stringify({ event: 'type_only_edges', targets: typeOnlyTargets }));
   });
 });

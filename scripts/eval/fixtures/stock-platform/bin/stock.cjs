@@ -43,7 +43,7 @@
  * state names directly (STOCK_* only as a debug fallback). It does NOT read
  * LLM keys, WeCom secrets or any other host secret.
  *
- * Auxiliary groups implemented minimally and deterministically in this fixture
+ * Auxiliary groups implemented narrowly and deterministically in this fixture
  * (admission A11-A12): memory set/get, breaker status/trip/reset,
  * cache put/get/clear, each with its own state file under the case state
  * directory. They are execution-layer specifics, not protocol; the host
@@ -548,7 +548,7 @@ async function planActivate(argv) {
   process.stdout.write(JSON.stringify({ planId, version: plan.version, status: 'active' }) + '\n');
   return 0;
 }
-// ---- auxiliary groups: memory / breaker / cache (admission A11-A12, minimal deterministic) ----
+// ---- auxiliary groups: memory / breaker / cache (admission A11-A12, deterministic) ----
 /** Aux files derive from the same state root by default (per-run isolation follows
  *  --state-dir); the env2 entries stay as manual/debug overrides, not as the eval
  *  injection surface (the four retired STATE paths are the ones the arbitration covers). */

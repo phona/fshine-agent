@@ -1,13 +1,13 @@
 /**
- * B 类凭据隔离回归锁（M1 最小形状）：执行层子进程 env 只保留**按真实消费收敛**的
- * 最小白名单（PATH / HOME / TMPDIR）——不机械继承旧 WORKER_ENV_ALLOWED_KEYS。
+ * B 类凭据隔离回归锁（最小形状）：执行层子进程 env 只保留**按真实消费收敛**的
+ * 最小白名单（PATH / HOME / TMPDIR）——逐键登记，不做前缀放行。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { MINIMAL_EXECUTION_ENV_KEYS, workerSubprocessEnv } from './src/minimal/worker-env';
+import { EXECUTION_ENV_KEYS, workerSubprocessEnv } from './src/worker-env';
 
 /**
- * 测试桥键名：随旧 child-env.ts（V0 worker env 白名单）删除后内联。
- * 语义不变——它是宿主夹具使用的 env 键，M1 用显式 --state-dir argv，不靠 env 改道。
+ * 测试桥键名：宿主夹具使用的 env 键；适配器用显式 --state-dir argv，不靠 env 改道，
+ * 因此该键不进白名单。
  */
 const WORKER_FIXTURE_STATE_DIR_KEY = 'FSHINE_EVAL_FIXTURE_STATE_DIR';
 
@@ -38,8 +38,8 @@ describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
     ]) {
       expect(rebuilt[key], `${key} 不应进执行层子进程`).toBeUndefined();
     }
-    expect(Object.keys(rebuilt).sort()).toEqual([...MINIMAL_EXECUTION_ENV_KEYS].sort());
-    expect(MINIMAL_EXECUTION_ENV_KEYS).toEqual(['PATH', 'HOME', 'TMPDIR']);
+    expect(Object.keys(rebuilt).sort()).toEqual([...EXECUTION_ENV_KEYS].sort());
+    expect(EXECUTION_ENV_KEYS).toEqual(['PATH', 'HOME', 'TMPDIR']);
   });
 
   it('白名单是精确键（未登记键即使无害也不进）', () => {

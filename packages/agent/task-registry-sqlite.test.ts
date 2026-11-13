@@ -14,13 +14,13 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { TaskOwnershipError } from './src/minimal/task-registry';
-import { createSqliteTaskRegistry } from './src/minimal/task-registry-sqlite';
+import { TaskOwnershipError } from './src/task-registry';
+import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 
 const dirs: string[] = [];
 
 function tempDbPath(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'minimal-registry-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'task-registry-'));
   dirs.push(dir);
   return path.join(dir, 'state.db');
 }

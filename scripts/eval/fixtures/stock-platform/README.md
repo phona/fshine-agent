@@ -1,6 +1,6 @@
 # Stock platform fixture (second execution-layer proof, Package 4)
 
-A minimal, deterministic, non-finance execution layer that speaks the same
+A compact, deterministic, non-finance execution layer that speaks the same
 protocol as any fshine execution layer (see
 `docs/execution-layer-interface.md` and `docs/execution-layer-admission.md`).
 
@@ -15,7 +15,7 @@ protocol as any fshine execution layer (see
   `--batch` (B1/B2, must exist for the shelf).
 - Proposal payload: `{ shelf, batch, items: [{ sku, qty }] }`,
   max 50 items, `additionalProperties: false`, TTL 30 minutes (default).
-- Auxiliary groups (admission A11–A12, minimal deterministic):
+- Auxiliary groups (admission A11–A12, deterministic):
   `memory set|get|list`, `breaker status|trip|reset`
   (open breaker rejects queries with `BREAKER_OPEN`),
   `cache put|get|clear` (hit/miss, clear resets).

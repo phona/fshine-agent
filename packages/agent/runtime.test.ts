@@ -1,5 +1,5 @@
 /**
- * M1 最小链路的契约测试（零网络）：
+ * 运行时链路的契约测试（零网络）：
  *   · 以假客户端（Fake ExecutionClient）替换真实客户端，Main/Worker 通用代码零修改跑通；
  *   · 模型侧同样用注入的假模型运行时（既有 pi-driver 测试同款手法），不起真实请求。
  *
@@ -24,9 +24,9 @@ import type {
   ExecutionRequest,
 } from '@fshine/contracts/execution-contract';
 import { createPiTurnDriver, type PiModelRuntime } from './src/pi-driver';
-import { createMinimalSession } from './src/minimal/execution-runtime';
-import { TaskOwnershipError, createTaskRegistry, type MinimalTaskRegistry } from './src/minimal/task-registry';
-import { createSqliteTaskRegistry } from './src/minimal/task-registry-sqlite';
+import { createSession } from './src/execution-runtime';
+import { TaskOwnershipError, createTaskRegistry, type TaskRegistry } from './src/task-registry';
+import { createSqliteTaskRegistry } from './src/task-registry-sqlite';
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -144,11 +144,11 @@ function sessionFor(client: FakeClient, options: {
   mainResponses: AgentMessage[];
   workerResponses: AgentMessage[];
   allowedOperations?: readonly string[];
-  taskRegistry?: MinimalTaskRegistry;
+  taskRegistry?: TaskRegistry;
 }) {
-  return createMinimalSession({
+  return createSession({
     principalId: 'wecom:test-user',
-    sessionId: 'sess_minimal_1',
+    sessionId: 'sess_1',
     client,
     allowedOperations: options.allowedOperations ?? ['dummy.query'],
     mainDriver: driverFor(options.mainResponses),
@@ -158,7 +158,7 @@ function sessionFor(client: FakeClient, options: {
   });
 }
 
-describe('M1 最小链路（假客户端 + 假模型）', () => {
+describe('运行时链路（假客户端 + 假模型）', () => {
   it('Main→Worker→结构化请求→结果回到 Main；requestId 宿主生成；快照只取一次', async () => {
     const client = new FakeClient();
     const session = await sessionFor(client, {
@@ -200,7 +200,7 @@ describe('M1 最小链路（假客户端 + 假模型）', () => {
     expect(tasks).toHaveLength(2);
     for (const task of tasks) {
       expect(task.principalId).toBe('wecom:test-user');
-      expect(task.sessionId).toBe('sess_minimal_1');
+      expect(task.sessionId).toBe('sess_1');
       expect(task.status).toBe('completed');
       expect(task.executions).toHaveLength(1);
       expect(task.executions[0]!.status).toBe('completed');
@@ -273,7 +273,7 @@ describe('M1 最小链路（假客户端 + 假模型）', () => {
   });
 
   it('注入的 SQLite 底账：关库重开任务仍在；越权取任务仍拒；list 按 scope 隔离', async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'minimal-runtime-'));
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'runtime-'));
     tempDirs.push(dir);
     const dbPath = path.join(dir, 'state.db');
     const client = new FakeClient();
@@ -295,18 +295,18 @@ describe('M1 最小链路（假客户端 + 假模型）', () => {
 
     // 重启连续性：新开同一库，任务与执行记录仍在。
     const reopened = createSqliteTaskRegistry(dbPath);
-    const task = reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_minimal_1' });
+    const task = reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_1' });
     expect(task.status).toBe('completed');
     expect(task.resultText).toContain('documents');
     expect(task.executions).toHaveLength(1);
     expect(task.executions[0]!.requestId).toBe(turn.executions[0]!.requestId);
 
     // 归属校验跨重启仍生效：换 principal / 换 session 一律同一拒绝形态。
-    expect(() => reopened.get(taskId, { principalId: 'wecom:other', sessionId: 'sess_minimal_1' })).toThrow(TaskOwnershipError);
+    expect(() => reopened.get(taskId, { principalId: 'wecom:other', sessionId: 'sess_1' })).toThrow(TaskOwnershipError);
     expect(() => reopened.get(taskId, { principalId: 'wecom:test-user', sessionId: 'sess_other' })).toThrow(TaskOwnershipError);
     // list 按 scope 隔离：另一个会话看不到本任务。
     expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_other' })).toEqual([]);
-    expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_minimal_1' }).map((item) => item.taskId)).toEqual([taskId]);
+    expect(reopened.list({ principalId: 'wecom:test-user', sessionId: 'sess_1' }).map((item) => item.taskId)).toEqual([taskId]);
     reopened.close();
   });
 });

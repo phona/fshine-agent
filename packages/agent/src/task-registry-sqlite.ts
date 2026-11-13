@@ -3,41 +3,41 @@
  *
  * 语义与内存版（task-registry.ts 的 createTaskRegistry）逐项一致：begin / noteExecution /
  * complete / fail / get(scope) / list(scope)，越权与不存在同一 TaskOwnershipError。
- * 差别只在写入落 packages/core 的最小 SQLite 引擎（两张表，见 minimal-task-store.ts），
+ * 差别只在写入落 packages/core 的最小 SQLite 引擎（两张表，见 task-store.ts），
  * 进程重启后底账仍在——归属校验因此也是跨重启的不变量。
  *
  * 表内不含计划字段（planId / stepIndex / totalSteps / lastProgress / deadline /
  * originMessage 一概没有）：最小切片没有计划门，也不迁移旧 TaskRunRecord。
  */
-import { openMinimalTaskStore, type MinimalExecutionRow, type MinimalTaskRow, type StoredMinimalTask } from '@fshine/core';
+import { openTaskStore, type ExecutionRow, type TaskRow, type StoredTask } from '@fshine/core';
 import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
-  type MinimalExecutionRecord,
-  type MinimalTaskRecord,
-  type MinimalTaskRegistry,
-  type MinimalTaskStatus,
+  type ExecutionRecord,
+  type TaskRecord,
+  type TaskRegistry,
+  type TaskStatus,
   type TaskScope,
 } from './task-registry';
 
-/** 带关闭口的底账：进程/入口负责关库（demo、ask、server 的收尾路径）。 */
-export interface SqliteTaskRegistry extends MinimalTaskRegistry {
+/** 带关闭口的底账：进程/入口负责关库（ask、server 的收尾路径）。 */
+export interface SqliteTaskRegistry extends TaskRegistry {
   close(): void;
 }
 
 export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
-  const store = openMinimalTaskStore(dbPath);
+  const store = openTaskStore(dbPath);
 
-  function toRecord(stored: StoredMinimalTask): MinimalTaskRecord {
+  function toRecord(stored: StoredTask): TaskRecord {
     return {
       taskId: stored.task.taskId,
       principalId: stored.task.principalId,
       sessionId: stored.task.sessionId,
       request: stored.task.request,
-      status: stored.task.status as MinimalTaskStatus,
+      status: stored.task.status as TaskStatus,
       ...(stored.task.resultText === undefined ? {} : { resultText: stored.task.resultText }),
       ...(stored.task.failureReason === undefined ? {} : { failureReason: stored.task.failureReason }),
-      executions: stored.executions.map((execution: MinimalExecutionRow) => ({
+      executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
         status: execution.status as ExecutionStatus,
@@ -48,7 +48,7 @@ export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
     };
   }
 
-  function require(taskId: string, scope?: TaskScope): StoredMinimalTask {
+  function require(taskId: string, scope?: TaskScope): StoredTask {
     const stored = store.getTask(taskId);
     if (
       stored === undefined
@@ -62,7 +62,7 @@ export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
   return {
     begin(input) {
       const now = new Date().toISOString();
-      const row: MinimalTaskRow = {
+      const row: TaskRow = {
         taskId: input.taskId,
         principalId: input.principalId,
         sessionId: input.sessionId,
@@ -74,7 +74,7 @@ export function createSqliteTaskRegistry(dbPath: string): SqliteTaskRegistry {
       store.insertTask(row);
       return toRecord(require(input.taskId));
     },
-    noteExecution(taskId, record: MinimalExecutionRecord) {
+    noteExecution(taskId, record: ExecutionRecord) {
       const inserted = store.insertExecution({
         requestId: record.requestId,
         taskId,

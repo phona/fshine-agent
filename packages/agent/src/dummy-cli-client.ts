@@ -1,7 +1,7 @@
 /**
  * 仓内 dummy 执行层适配器：把 ExecutionClient 语义翻译成 dummy 网关 CLI 调用。
  *
- * 位置与依赖方向：这是**传输适配器**，只被 M1 装配入口（scripts/demo-minimal.ts）使用；
+ * 位置与依赖方向：这是**传输适配器**，只被装配入口（scripts/ask.ts、apps/server/server.ts）使用；
  * 通用运行时（execution-runtime.ts）不 import 它。适配器单向依赖执行契约。
  *
  * 职责只有翻译，没有裁决：
@@ -64,7 +64,7 @@ export interface DummyCliClient extends ExecutionClient {
   listOperations(): Promise<readonly RawGatewayOperation[]>;
 }
 
-/** 从执行层自述的 access 声明派生只读 operation 集合（M1 作用域；不是契约语义）。 */
+/** 从执行层自述的 access 声明派生只读 operation 集合（读路径作用域；不是契约语义）。 */
 export function readOnlyOperationNames(operations: readonly RawGatewayOperation[]): string[] {
   return operations.filter((operation) => operation.access === 'read').map((operation) => operation.name);
 }
@@ -160,7 +160,7 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
     async execute(request: ExecutionRequest): Promise<ExecutionOutcome> {
       const operations = await listOperations();
       const operation = operations.find((entry) => entry.name === request.operation);
-      const scratch = mkdtempSync(path.join(os.tmpdir(), 'minimal-exec-'));
+      const scratch = mkdtempSync(path.join(os.tmpdir(), 'dummy-exec-'));
       try {
         const callFile = path.join(scratch, 'call.json');
         writeFileSync(callFile, JSON.stringify({
@@ -174,7 +174,7 @@ export function createDummyCliClient(options: DummyCliClientOptions): DummyCliCl
       }
     },
     async cancel(): Promise<CancelResult> {
-      // M1 读路径不产生可取消操作：形状面如实返回 not_found（不实现取消面）。
+      // 读路径不产生可取消操作：形状面如实返回 not_found（不实现取消面）。
       return 'not_found';
     },
   };

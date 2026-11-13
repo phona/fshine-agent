@@ -1,5 +1,5 @@
 /**
- * M1 最小任务归属底账（B 类：任务归属，最小形状）。
+ * 任务归属底账（B 类：任务归属，最小形状）。
  *
  * 为什么需要它：委派任务必须绑定发起它的可信身份与会话，事后按业务查询时，
  * 越权（换一个 principal/session）必须被确定性拒绝。可信身份来自装配层的
@@ -10,15 +10,15 @@
  *     （无渠道、无后台重投），接入渠道与重投的切片按最小形状补；
  *   · 取消 / 确认 / 恢复状态机：写与确认切片再定；本切片任务只有 running/completed/failed。
  *
- * 拒绝路径（回归锁，见 minimal-runtime.test.ts）：换 principal 或换 session 取任务
+ * 拒绝路径（回归锁，见 runtime.test.ts）：换 principal 或换 session 取任务
  * 一律 TaskOwnershipError；取不存在的任务与越权同一错误（不泄漏任务是否存在）。
  */
 import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
 
-export type MinimalTaskStatus = 'running' | 'completed' | 'failed';
+export type TaskStatus = 'running' | 'completed' | 'failed';
 
 /** 一次已发起的执行调用（requestId 由宿主持有，模型不可见）。 */
-export interface MinimalExecutionRecord {
+export interface ExecutionRecord {
   requestId: string;
   operation: string;
   status: ExecutionStatus;
@@ -26,16 +26,16 @@ export interface MinimalExecutionRecord {
 }
 
 /** 一条最小任务底账：归属 + 状态 + 结果文本 + 执行调用清单。 */
-export interface MinimalTaskRecord {
+export interface TaskRecord {
   taskId: string;
   principalId: string;
   sessionId: string;
   /** 委派原文（任务请求；审计与结果解释用）。 */
   request: string;
-  status: MinimalTaskStatus;
+  status: TaskStatus;
   resultText?: string;
   failureReason?: string;
-  executions: readonly MinimalExecutionRecord[];
+  executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
 }
@@ -53,23 +53,23 @@ export interface TaskScope {
   sessionId: string;
 }
 
-export interface MinimalTaskRegistry {
-  begin(input: { taskId: string; principalId: string; sessionId: string; request: string }): MinimalTaskRecord;
-  noteExecution(taskId: string, record: MinimalExecutionRecord): void;
+export interface TaskRegistry {
+  begin(input: { taskId: string; principalId: string; sessionId: string; request: string }): TaskRecord;
+  noteExecution(taskId: string, record: ExecutionRecord): void;
   complete(taskId: string, resultText: string): void;
   fail(taskId: string, reason: string): void;
   /** 按可信 scope 取任务：principalId 与 sessionId 都必须一致，否则 TaskOwnershipError。 */
-  get(taskId: string, scope: TaskScope): MinimalTaskRecord;
+  get(taskId: string, scope: TaskScope): TaskRecord;
   /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
-  list(scope?: TaskScope): readonly MinimalTaskRecord[];
+  list(scope?: TaskScope): readonly TaskRecord[];
 }
 
-/** 库内可变形状：对外只读视图由 MinimalTaskRecord 承担。 */
-interface MutableTaskRecord extends Omit<MinimalTaskRecord, 'executions'> {
-  executions: MinimalExecutionRecord[];
+/** 库内可变形状：对外只读视图由 TaskRecord 承担。 */
+interface MutableTaskRecord extends Omit<TaskRecord, 'executions'> {
+  executions: ExecutionRecord[];
 }
 
-export function createTaskRegistry(): MinimalTaskRegistry {
+export function createTaskRegistry(): TaskRegistry {
   const tasks = new Map<string, MutableTaskRecord>();
   const require = (taskId: string): MutableTaskRecord => {
     const task = tasks.get(taskId);

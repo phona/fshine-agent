@@ -1,7 +1,7 @@
 /**
- * U3 最小 server 的假渠道回归（零网络、零真实企微、零真实平台）：
+ * server 的假渠道回归（零网络、零真实企微、零真实平台）：
  *   · 假渠道（SdkClientLike stub）+ 假执行客户端 + 假模型驱动：
- *     消息进（message.text）→ 可信身份取自渠道事实 → Minimal runtime → 回复出（终帧）；
+ *     消息进（message.text）→ 可信身份取自渠道事实 → 回合运行时 → 回复出（终帧）；
  *   · 未开通 principal 被确定性拒绝，且不建会话、不调模型、不发起执行；
  *   · 身份映射：principalId = <channel>:<userid>，sessionId = <channel>:<conversationId>。
  */
@@ -21,7 +21,7 @@ import type {
 } from '@fshine/contracts/execution-contract';
 import { WecomBotChannel, type SdkClientLike } from '@fshine/channel-wecom';
 import { createPiTurnDriver, type PiModelRuntime } from '../../packages/agent/src/pi-driver';
-import { createMinimalServer } from './minimal-server';
+import { createServer } from './server';
 
 const FIXTURE_ROOT = path.resolve(__dirname, '..', '..', 'scripts', 'eval', 'fixtures', 'dummy-platform');
 
@@ -31,7 +31,7 @@ afterEach(() => {
 });
 
 function tempDir(): string {
-  const dir = mkdtempSync(path.join(os.tmpdir(), 'minimal-server-'));
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'server-'));
   tempDirs.push(dir);
   return dir;
 }
@@ -185,13 +185,13 @@ function textMessageFrame(userid: string, text: string, messageId: string, reqId
   };
 }
 
-describe('U3 最小 server（假渠道 + 假执行客户端 + 假模型）', () => {
+describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
   it('消息进 → 回复出；身份取自渠道事实；执行经结构化请求', async () => {
     const dir = tempDir();
     const logs: Array<Record<string, unknown>> = [];
     const client = new FakeClient();
     const frames: Array<{ streamId: string; content: string; finish: boolean }> = [];
-    const server = await createMinimalServer({
+    const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
       config: testConfig(),
       dbPath: path.join(dir, 'state.db'),
@@ -235,7 +235,7 @@ describe('U3 最小 server（假渠道 + 假执行客户端 + 假模型）', () 
     expect(client.requests[0]!.requestId).toMatch(/^req_[0-9a-f-]{36}$/);
 
     // 身份取自渠道事实；回复完成事件带 taskId。
-    const done = logs.find((line) => line['event'] === 'minimal_message_done');
+    const done = logs.find((line) => line['event'] === 'message_done');
     expect(done).toBeDefined();
     expect(done!['principalId']).toBe('wecom:test-user');
     expect(done!['sessionId']).toBe('wecom:test-user');
@@ -251,7 +251,7 @@ describe('U3 最小 server（假渠道 + 假执行客户端 + 假模型）', () 
     const client = new FakeClient();
     const frames: Array<{ streamId: string; content: string; finish: boolean }> = [];
     let driverCreations = 0;
-    const server = await createMinimalServer({
+    const server = await createServer({
       env: { LLM_MODEL: 'test-model' },
       config: testConfig(),
       dbPath: path.join(dir, 'state.db'),
@@ -278,7 +278,7 @@ describe('U3 最小 server（假渠道 + 假执行客户端 + 假模型）', () 
     expect(frames.filter((frame) => frame.finish)[0]!.content).toContain('未开通使用权限');
     expect(driverCreations).toBe(0);
     expect(client.requests).toHaveLength(0);
-    const refused = logs.find((line) => line['event'] === 'minimal_message_refused');
+    const refused = logs.find((line) => line['event'] === 'message_refused');
     expect(refused!['principalId']).toBe('wecom:stranger');
 
     await channel.stop();

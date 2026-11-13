@@ -1,5 +1,5 @@
 # ============================================================
-# Minimal 部署配置模板（agent.yaml 的同名模板）。复制为 config/agent.yaml 后填写；
+# 部署配置模板（agent.yaml 的同名模板）。复制为 config/agent.yaml 后填写；
 # config/agent.yaml 不进版本库（.gitignore），部署配置与秘密都写在那里。
 #
 # 【优先级】同名环境变量非空值（覆盖口） > config/agent.yaml（源） > 代码缺省。
@@ -49,9 +49,9 @@ llm:
   model: your-model
 
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----
-# 缺省 = 仓根 .runtime/minimal/state.db(任务 + 执行记录两张最小表;重启后仍在)。
+# 缺省 = 仓根 .runtime/state.db(任务 + 执行记录两张最小表;重启后仍在)。
 # store:
-#   dbPath: .runtime/minimal/state.db
+#   dbPath: .runtime/state.db
 
 # 说明:Main 的常驻角色定义在 .agents/agents/fshine-main/agent.md(启动期读取;
 # 缺失/不可读 = 启动失败)。

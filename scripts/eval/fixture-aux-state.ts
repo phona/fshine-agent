@@ -16,7 +16,7 @@
  * 因此直接运行（不经 vitest setup）的评测 harness 必须在构造子进程 env 后删除这六个
  * 键，让缺省回落到 `--state-dir` 状态根（per-case 隔离恢复）。现存 harness 为
  * generic-mock.ts / second-layer.ts / generic-model-eval.py（旧探针侧同款处理已随
- * 2026-11-13 Minimal M2 波次 1 删除）。
+ * 旧脚手架于 2026-11-13 删除）。
  */
 export const FIXTURE_AUX_STATE_ENV_KEYS = [
   'EXECUTION_MEMORY_STATE', 'EXECUTION_BREAKER_STATE', 'EXECUTION_CACHE_STATE',

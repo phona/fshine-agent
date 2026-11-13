@@ -1,15 +1,15 @@
 /**
- * Minimal Rewrite U2 最小 ask：命令行一条消息 → Minimal runtime → 回复 + 机械证据。
+ * ask：命令行一条消息 → 回合运行时 → 回复 + 机械证据。
  *
  * 用法：
- *   npm run ask -- "帮我查一下 ..." [--principal=wecom:demo-user] [--session=<id>] [--config=<path>]
+ *   npm run ask -- "帮我查一下 ..." [--principal=wecom:fixture-user] [--session=<id>] [--config=<path>]
  *   （AGENT_CONFIG_PATH 与 --config 同义；缺省用 config/agent.fixture.yaml 的仓内 dummy 面。）
  *
  * 边界（本切片）：
  *   · 执行面 = profile 声明的仓内 dummy 夹具（scripts/eval/fixtures/dummy-platform，不触网、
  *     不碰真实平台；隔离门 fail-closed，root 必须在仓内夹具目录之下）；
  *   · 模型 = 真实 Pi 驱动（密钥只在 .env；缺 LLM_API_KEY 直接拒绝，不假装跑通）；
- *   · 任务底账 = SQLite（缺省 .runtime/minimal/state.db，config store.dbPath 可覆盖）：
+ *   · 任务底账 = SQLite（缺省 .runtime/state.db，config store.dbPath 可覆盖）：
  *     本进程关库后数据仍在，归属校验跨重启仍成立；
  *   · 只做单轮：不做确认 / 后台派发 / 产物 / 提案（后续切片）。
  *
@@ -21,22 +21,22 @@ import { fileURLToPath } from 'node:url';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
-import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/minimal/dummy-cli-client';
+import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
 import {
   MAIN_PROTOCOL_NOTE,
-  createMinimalSession,
-} from '../packages/agent/src/minimal/execution-runtime';
-import { createSqliteTaskRegistry } from '../packages/agent/src/minimal/task-registry-sqlite';
-import { loadWorkerSkills } from '../packages/agent/src/minimal/worker-skills';
+  createSession,
+} from '../packages/agent/src/execution-runtime';
+import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
-const MINIMAL_ROOT = path.join(REPO_ROOT, '.runtime', 'minimal');
-const ASK_ROOT = path.join(MINIMAL_ROOT, 'ask');
+const RUNTIME_ROOT = path.join(REPO_ROOT, '.runtime');
+const ASK_ROOT = path.join(RUNTIME_ROOT, 'ask');
 const CONFIG_COPY = path.join(ASK_ROOT, 'agent-config.yaml');
-const DEFAULT_DB_PATH = path.join(MINIMAL_ROOT, 'state.db');
+const DEFAULT_DB_PATH = path.join(RUNTIME_ROOT, 'state.db');
 
 interface AskArgs {
   message: string;
@@ -118,7 +118,7 @@ async function main(): Promise<void> {
     process.exitCode = 2;
     return;
   }
-  const sessionId = parsed.sessionId ?? `ask-minimal-${new Date().toISOString().slice(0, 10)}`;
+  const sessionId = parsed.sessionId ?? `ask-${new Date().toISOString().slice(0, 10)}`;
 
   const stateDir = path.join(ASK_ROOT, 'state');
   mkdirSync(stateDir, { recursive: true });
@@ -129,7 +129,7 @@ async function main(): Promise<void> {
     env,
     platformRoot: profile.root,
     gateway: profile.gateway,
-  }), 'ask-minimal（最小 ask）');
+  }), 'ask（仓内 dummy 面）');
 
   const client = createDummyCliClient({ root: profile.root, gateway: profile.gateway, stateDir, env });
   const operations = await client.listOperations();
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   try {
     const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
     const profileMd = await loadAgentProfile();
-    const session = await createMinimalSession({
+    const session = await createSession({
       principalId,
       sessionId,
       client,
@@ -179,7 +179,7 @@ async function main(): Promise<void> {
       + ` dummy 审计=${auditLines.length} 行 用时=${((Date.now() - startedMs) / 1000).toFixed(1)}s`,
       `任务底账=${path.relative(REPO_ROOT, dbPath)}`,
     ].join('\n'));
-    for (const fact of facts) console.log(JSON.stringify({ event: 'minimal_execution', ...fact }));
+    for (const fact of facts) console.log(JSON.stringify({ event: 'execution', ...fact }));
     for (const line of auditLines) console.log(line);
 
     if (turn.reply.trim() === '' || turn.taskIds.length === 0 || facts.length === 0) {

@@ -1,9 +1,9 @@
 /**
- * M1 最小切片运行时：Main Pi Agent →（必要时）Worker Pi Agent → Execution Contract → 执行层。
+ * 回合运行时：Main Pi Agent →（必要时）Worker Pi Agent → Execution Contract → 执行层。
  *
  * 边界（依赖方向）：本模块只依赖 TurnDriver 抽象、执行契约与最小任务底账；
  * 不 import 任何 CLI 适配器、不 import 旧 Runtime 治理模块（import 图由
- * minimal-import-boundary.test.ts 静态检查）。执行层客户端由装配方注入。
+ * import-boundary.test.ts 静态检查）。执行层客户端由装配方注入。
  *
  * 每回合链路：
  *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 只有 run_task 一个工具；
@@ -24,10 +24,10 @@
 import { randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, TurnDriver } from '../driver-contract';
-import { createTaskRegistry, type MinimalExecutionRecord, type MinimalTaskRecord, type MinimalTaskRegistry } from './task-registry';
+import type { DriverMessage, TurnDriver } from './driver-contract';
+import { createTaskRegistry, type ExecutionRecord, type TaskRecord, type TaskRegistry } from './task-registry';
 
-/** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；M1 用中性名）。 */
+/** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const RUN_TASK_TOOL = 'run_task';
 export const RUN_TASK_TOOL_DESCRIPTION =
   '把一项平台任务交给执行层 Worker 执行：在 task 里写清要办什么（对象、范围、口径）。'
@@ -83,12 +83,12 @@ export const WORKER_SYSTEM_PROMPT = [
 ].join('\n');
 
 /** 装配方加载好的技能正文（Skill 优先：领域程序性知识放技能，不进宿主提示词补丁）。 */
-export interface MinimalWorkerSkill {
+export interface WorkerSkill {
   name: string;
   content: string;
 }
 
-export interface MinimalRuntimeOptions {
+export interface RuntimeOptions {
   /** 可信身份：来自装配/渠道事实，绝不来自模型输入。 */
   principalId: string;
   sessionId: string;
@@ -105,34 +105,34 @@ export interface MinimalRuntimeOptions {
   /** Main 系统提示（角色文本 + MAIN_PROTOCOL_NOTE，由装配方组装）。 */
   mainSystemPrompt: string;
   /** Worker 需嵌入本轮提示的领域技能正文（可选）。 */
-  workerSkills?: readonly MinimalWorkerSkill[];
+  workerSkills?: readonly WorkerSkill[];
   /**
    * 任务底账（B 类持久化）：装配方可注入 SQLite 实现使归属跨重启成立；
    * 缺省 = 进程内内存实现（测试与纯内存嵌入用）。
    */
-  taskRegistry?: MinimalTaskRegistry;
+  taskRegistry?: TaskRegistry;
   /** 单回合上限（Main）与单次委派上限（Worker）；缺省值见下。 */
   mainTurnMs?: number;
   workerTurnMs?: number;
 }
 
-export interface MinimalTurnResult {
+export interface TurnResult {
   reply: string;
   taskIds: readonly string[];
-  executions: readonly MinimalExecutionRecord[];
-  /** 进度帧（本回合 onStep 产出；M1 只收集，不在此投递渠道）。 */
+  executions: readonly ExecutionRecord[];
+  /** 进度帧（本回合 onStep 产出；当前只收集，不在此投递渠道）。 */
   progress: readonly string[];
 }
 
-export interface MinimalSession {
+export interface Session {
   readonly principalId: string;
   readonly sessionId: string;
-  /** 本回合后 Main 转录快照（Pi 原生转录即状态；M1 只存内存）。 */
+  /** 本回合后 Main 转录快照（Pi 原生转录即状态；当前只存内存）。 */
   transcript(): readonly DriverMessage[];
-  send(text: string): Promise<MinimalTurnResult>;
-  tasks(): readonly MinimalTaskRecord[];
+  send(text: string): Promise<TurnResult>;
+  tasks(): readonly TaskRecord[];
   /** 按本会话 scope 取任务；越权抛 TaskOwnershipError。 */
-  getTask(taskId: string): MinimalTaskRecord;
+  getTask(taskId: string): TaskRecord;
 }
 
 const DEFAULT_MAIN_TURN_MS = 300_000;
@@ -148,7 +148,7 @@ function userMessage(text: string): DriverMessage {
 export function renderWorkerDelegation(input: {
   task: string;
   manifest: CapabilityManifest;
-  skills?: readonly MinimalWorkerSkill[];
+  skills?: readonly WorkerSkill[];
 }): string {
   const parts = [
     '## 本次任务（宿主委派）',
@@ -165,7 +165,7 @@ export function renderWorkerDelegation(input: {
   return parts.join('\n');
 }
 
-export async function createMinimalSession(options: MinimalRuntimeOptions): Promise<MinimalSession> {
+export async function createSession(options: RuntimeOptions): Promise<Session> {
   if (options.principalId.trim() === '' || options.sessionId.trim() === '') {
     throw new Error('最小切片需要非空 principalId 与 sessionId（可信身份来自装配层）。');
   }
@@ -207,7 +207,7 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
     // requestId 由宿主生成：模型不能提供调用身份。
     const requestId = `req_${randomUUID()}`;
     const outcome = await options.client.execute({ requestId, operation, args: callArgs });
-    const record: MinimalExecutionRecord = {
+    const record: ExecutionRecord = {
       requestId,
       operation,
       status: outcome.status,
@@ -255,7 +255,7 @@ export async function createMinimalSession(options: MinimalRuntimeOptions): Prom
     }
   }
 
-  async function send(text: string): Promise<MinimalTurnResult> {
+  async function send(text: string): Promise<TurnResult> {
     const progress: string[] = [];
     const taskIds: string[] = [];
     currentTurnDeadline = Date.now() + mainTurnMs;

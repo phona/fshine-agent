@@ -1,5 +1,5 @@
 /**
- * 最小回合驱动契约（Minimal Reset 抽出的共享小件）。
+ * 回合驱动契约（重建时抽出的共享小件）。
  *
  * 来源：旧 `driver.ts`（已随旧 hub 删除）里被最小路径真正消费的类型与错误类。
  * 旧 driver.ts 的其余内容——计划确认（plan-runtime）、提案创建（proposal-runtime）、
@@ -8,7 +8,7 @@
  *
  * 消费者（改引本模块的 kept 侧）：
  *   · `pi-driver.ts`            —— TurnDriver 的生产实现（pi 原生循环）；
- *   · `minimal/execution-runtime.ts` —— 按 TurnDriver 抽象驱动 Main/Worker；
+ *   · `execution-runtime.ts`   —— 按 TurnDriver 抽象驱动 Main/Worker；
  *   · `proposal-review.ts`      —— generic-mock 隔离复核门用它跑无工具回合；
  *   · `pi-driver.test.ts` / `tool-user-error.test.ts` —— 直测驱动接线与错误类契约。
  */

@@ -14,7 +14,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EXECUTION_CONTRACT_VERSION } from '@fshine/contracts/execution-contract';
-import { createDummyCliClient, readOnlyOperationNames } from './src/minimal/dummy-cli-client';
+import { createDummyCliClient, readOnlyOperationNames } from './src/dummy-cli-client';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..');
 const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-platform');
@@ -22,7 +22,7 @@ const FIXTURE_ROOT = path.join(REPO_ROOT, 'scripts', 'eval', 'fixtures', 'dummy-
 let stateDir: string;
 
 beforeEach(() => {
-  stateDir = mkdtempSync(path.join(os.tmpdir(), 'minimal-client-'));
+  stateDir = mkdtempSync(path.join(os.tmpdir(), 'dummy-client-'));
 });
 
 afterEach(() => {
@@ -125,8 +125,8 @@ describe('dummy 执行层适配器（Execution Contract 传输面）', () => {
     expect(outcome.status).toBe('completed');
 
     // 对照组：同一份继承 env 不经白名单直接 spawn → dummy 计划门拒绝（PLAN_REQUIRED）。
-    const controlDir = mkdtempSync(path.join(os.tmpdir(), 'minimal-control-'));
-    const controlState = mkdtempSync(path.join(os.tmpdir(), 'minimal-control-state-'));
+    const controlDir = mkdtempSync(path.join(os.tmpdir(), 'dummy-control-'));
+    const controlState = mkdtempSync(path.join(os.tmpdir(), 'dummy-control-state-'));
     try {
       const callFile = path.join(controlDir, 'call.json');
       writeFileSync(callFile, JSON.stringify({ operation: 'dummy.query', args: { '--collection': 'alpha' } }));

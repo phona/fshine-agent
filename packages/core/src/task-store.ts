@@ -2,9 +2,9 @@
  * 最小任务底账的 SQLite 引擎（B 类：任务归属持久化，最小形状）。
  *
  * 只建两张表，字段按最小切片清单收口：
- *   · minimal_tasks：task_id / principal_id / session_id / request / status /
+ *   · tasks：task_id / principal_id / session_id / request / status /
  *     result_text / failure_reason / created_at / updated_at；
- *   · minimal_executions：request_id / task_id / operation / status / error_json。
+ *   · executions：request_id / task_id / operation / status / error_json。
  *
  * 为什么不恢复旧 store.ts（2026-11-13 删除）而是新写最小引擎：旧 store 承载
  * TaskPlan / ChangeIntent / TaskRun / PlatformTask 等多套旧 hub 对象与状态机，
@@ -19,7 +19,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 
 /** 一条最小任务底账行（存储形状；领域收口在 task-registry-sqlite）。 */
-export interface MinimalTaskRow {
+export interface TaskRow {
   taskId: string;
   principalId: string;
   sessionId: string;
@@ -33,7 +33,7 @@ export interface MinimalTaskRow {
 }
 
 /** 一条执行记录行（存储形状）。 */
-export interface MinimalExecutionRow {
+export interface ExecutionRow {
   requestId: string;
   taskId: string;
   operation: string;
@@ -44,13 +44,13 @@ export interface MinimalExecutionRow {
 }
 
 /** 任务 + 其执行记录（读取单位）。 */
-export interface StoredMinimalTask {
-  task: MinimalTaskRow;
-  executions: MinimalExecutionRow[];
+export interface StoredTask {
+  task: TaskRow;
+  executions: ExecutionRow[];
 }
 
-export interface MinimalTaskStore {
-  insertTask(row: MinimalTaskRow): void;
+export interface TaskStore {
+  insertTask(row: TaskRow): void;
   /** 触碰 updatedAt；任务不存在返回 false（调用方按拒绝路径处理）。 */
   touchTask(taskId: string, updatedAt: string): boolean;
   /** 写入终态结果；任务不存在返回 false。 */
@@ -59,15 +59,15 @@ export interface MinimalTaskStore {
     outcome: { status: string; resultText?: string; failureReason?: string; updatedAt: string },
   ): boolean;
   /** 追加一条执行记录；任务不存在返回 false（不写孤儿行）。 */
-  insertExecution(row: MinimalExecutionRow): boolean;
-  getTask(taskId: string): StoredMinimalTask | undefined;
+  insertExecution(row: ExecutionRow): boolean;
+  getTask(taskId: string): StoredTask | undefined;
   /** scope 缺省 = 全部任务；给出时按 principal + session 过滤。 */
-  listTasks(scope?: { principalId: string; sessionId: string }): StoredMinimalTask[];
+  listTasks(scope?: { principalId: string; sessionId: string }): StoredTask[];
   close(): void;
 }
 
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS minimal_tasks (
+CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
   session_id TEXT NOT NULL,
@@ -78,15 +78,15 @@ CREATE TABLE IF NOT EXISTS minimal_tasks (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_minimal_tasks_scope ON minimal_tasks (principal_id, session_id);
-CREATE TABLE IF NOT EXISTS minimal_executions (
+CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks (principal_id, session_id);
+CREATE TABLE IF NOT EXISTS executions (
   request_id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES minimal_tasks(task_id),
+  task_id TEXT NOT NULL REFERENCES tasks(task_id),
   operation TEXT NOT NULL,
   status TEXT NOT NULL,
   error_json TEXT
 );
-CREATE INDEX IF NOT EXISTS idx_minimal_executions_task ON minimal_executions (task_id);
+CREATE INDEX IF NOT EXISTS idx_executions_task ON executions (task_id);
 `;
 
 interface TaskDbRow {
@@ -109,7 +109,7 @@ interface ExecutionDbRow {
   error_json: string | null;
 }
 
-export function openMinimalTaskStore(dbPath: string): MinimalTaskStore {
+export function openTaskStore(dbPath: string): TaskStore {
   if (dbPath !== ':memory:') mkdirSync(path.dirname(dbPath), { recursive: true });
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
@@ -117,28 +117,28 @@ export function openMinimalTaskStore(dbPath: string): MinimalTaskStore {
   db.exec(SCHEMA);
 
   const insertTask = db.prepare(`
-    INSERT INTO minimal_tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at)
+    INSERT INTO tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at)
     VALUES (@taskId, @principalId, @sessionId, @request, @status, @resultText, @failureReason, @createdAt, @updatedAt)
   `);
-  const taskExists = db.prepare('SELECT 1 FROM minimal_tasks WHERE task_id = ?');
-  const touch = db.prepare('UPDATE minimal_tasks SET updated_at = ? WHERE task_id = ?');
+  const taskExists = db.prepare('SELECT 1 FROM tasks WHERE task_id = ?');
+  const touch = db.prepare('UPDATE tasks SET updated_at = ? WHERE task_id = ?');
   const setOutcome = db.prepare(`
-    UPDATE minimal_tasks
+    UPDATE tasks
     SET status = @status, result_text = @resultText, failure_reason = @failureReason, updated_at = @updatedAt
     WHERE task_id = @taskId
   `);
   const insertExecution = db.prepare(`
-    INSERT INTO minimal_executions (request_id, task_id, operation, status, error_json)
+    INSERT INTO executions (request_id, task_id, operation, status, error_json)
     VALUES (@requestId, @taskId, @operation, @status, @errorJson)
   `);
-  const selectTask = db.prepare('SELECT * FROM minimal_tasks WHERE task_id = ?');
-  const selectExecutions = db.prepare('SELECT * FROM minimal_executions WHERE task_id = ? ORDER BY rowid');
-  const selectTasks = db.prepare('SELECT * FROM minimal_tasks ORDER BY created_at, task_id');
+  const selectTask = db.prepare('SELECT * FROM tasks WHERE task_id = ?');
+  const selectExecutions = db.prepare('SELECT * FROM executions WHERE task_id = ? ORDER BY rowid');
+  const selectTasks = db.prepare('SELECT * FROM tasks ORDER BY created_at, task_id');
   const selectTasksScoped = db.prepare(
-    'SELECT * FROM minimal_tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
+    'SELECT * FROM tasks WHERE principal_id = ? AND session_id = ? ORDER BY created_at, task_id',
   );
 
-  const toTask = (row: TaskDbRow): MinimalTaskRow => ({
+  const toTask = (row: TaskDbRow): TaskRow => ({
     taskId: row.task_id,
     principalId: row.principal_id,
     sessionId: row.session_id,
@@ -150,7 +150,7 @@ export function openMinimalTaskStore(dbPath: string): MinimalTaskStore {
     updatedAt: row.updated_at,
   });
 
-  const toExecution = (row: ExecutionDbRow): MinimalExecutionRow => ({
+  const toExecution = (row: ExecutionDbRow): ExecutionRow => ({
     requestId: row.request_id,
     taskId: row.task_id,
     operation: row.operation,
@@ -159,7 +159,7 @@ export function openMinimalTaskStore(dbPath: string): MinimalTaskStore {
     ...(row.error_json === null ? {} : { error: JSON.parse(row.error_json) as unknown }),
   });
 
-  const storedTask = (row: TaskDbRow): StoredMinimalTask => ({
+  const storedTask = (row: TaskDbRow): StoredTask => ({
     task: toTask(row),
     executions: (selectExecutions.all(row.task_id) as ExecutionDbRow[]).map(toExecution),
   });
