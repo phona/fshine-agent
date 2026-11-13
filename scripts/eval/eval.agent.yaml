@@ -24,11 +24,12 @@
 # M2 波次 1 退役）。
 # 本配置保证的是「fresh clone 零配置可加载 + 委派真正 spawn 到夹具 + 端到端接线跑通」。
 #
-# 夹具口径注记（2026-11-08 评审，与 .github/workflows/eval-real.yml 头注对齐）：仓内
-# 另有一套**最小工具环**真实模型面（scripts/eval/generic-model-eval.py、second-layer.ts、
-# fixtures/generic-model-baseline.json）按设计仍走 stock fixture——它不经过本配置与全
-# worker。本配置的 dummy 只服务全 worker 面（现为命令行回退配置；旧 probe / acceptance /
-# score 仪器随 M2 波次 1 退役），两套面的「真实模型面用哪个夹具」以此段为准。
+# 夹具口径注记（2026-11-13 R1 更新，与 .github/workflows/eval-real.yml 头注对齐）：旧
+# 「最小工具环」真实模型面（scripts/eval/generic-model-eval.py、second-layer.ts、
+# fixtures/generic-model-baseline.json）已随 Minimal Reset（0b97227）删除且不恢复；
+# 当前真实模型面 = 用户级黑盒 eval 入口（`npm run eval:user`，与 `npm run ask` 同源装配
+# + 仓内 dummy 夹具），其夹具口径以该入口与其配置为准；本文件继续作为配置解析的统一
+# 回退项（resolve-config-path.ts）。
 # ============================================================
 
 # ---- 授权名单：eval 专用虚构 UserID，不泄漏真实身份 ----

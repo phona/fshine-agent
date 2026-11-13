@@ -2,7 +2,7 @@
 
 编码代理在为 Codex 审查改代码之前先读完本文件。审查端提示词是 `.github/prompts/pr-review.md`。审查 workflow 是 `.github/workflows/codex-pr-review.yml`。本文件只约束修复端。
 
-Codex 继续跑。有 `blocking` 时它发 `REQUEST_CHANGES` 并把检查标红；没有 `blocking` 时它发 `COMMENT`，不自动 `APPROVE`。不要关闭、跳过、放软这个 job，也不要改 `render-review.mjs` 的 `decideEvent`。eval 相关：先读 PR 上最新 eval-real 评论再审；机械分下降 = blocking；judge advisory 结论只作 context 不作判据。
+Codex 继续跑。有 `blocking` 时它发 `REQUEST_CHANGES` 并把检查标红；没有 `blocking` 时它发 `COMMENT`，不自动 `APPROVE`。不要关闭、跳过、放软这个 job，也不要改 `render-review.mjs` 的 `decideEvent`。eval 相关：先读 PR 上最新 eval-real 评论再审；用例 pass→fail 或通过数下降 = 机械回归 = blocking；LLM judge 不在入口内消费，无 advisory 分数面可引。
 
 ## 开工前
 

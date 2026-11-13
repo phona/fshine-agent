@@ -11,12 +11,10 @@
 #   3. Judge variance: the judge component is advisory-only and must never
 #      become a per-push blocking gate; the mechanical component is the
 #      exit-code carrier for the real-model job.
-# Full-worker real-model eval（旧 probe / acceptance / score.ts 仪器）已随旧域评测脚手架
-# 删除，不再恢复；旧版全 worker 链的仓内 dummy 夹具口径（scripts/eval/eval.agent.yaml）
-# 只保留给 `npm run ask` 的回退配置。
-# The CI real-model face (eval-real.yml) is the tool-loop harness
-# (generic-model-eval.py) on the in-repo stock fixture; fixture-per-surface
-# wording lives in scripts/eval/eval.agent.yaml's 域边界 note.
+# 真实模型 eval（旧 probe / acceptance / score.ts / generic-model-eval.py 仪器）已随
+# Minimal Reset（0b97227）删除不再恢复；当前真实模型面 = 用户级黑盒入口
+# `npm run eval:user`，跑在 eval-real.yml（per-push 1 轮）与 eval-nightly.yml（12×3），
+# 不进这些确定性门。
 # e2e ownership (generic vs L4 integration, per-file): docs/e2e-ownership.md.
 # CI scope is unchanged by that inventory: no finance e2e is added back here.
 # CI runs only the deterministic gates; consistency between this repo's generic

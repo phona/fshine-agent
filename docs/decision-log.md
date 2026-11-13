@@ -641,6 +641,32 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十三、Eval 入口收口：真模型工作流改挂用户级入口、measure 机退役（2026-11-13，分支 arch/eval-r1）
+
+**背景与失效证据**（基线 `29c13e9` 上实跑复现）：
+
+- Minimal Reset（`0b97227`）按可达性删除了旧评测工具环（`scripts/eval/generic-model-eval.py`、`scripts/eval/measure-summary.mjs`、second-layer / 旧 probe 仪器等），但 `.github/workflows/` 的三个真模型 workflow 未同步，per-push / nightly / measure 全部指向不存在的文件：
+  - `python3 scripts/eval/generic-model-eval.py --no-judge --rounds 1` → `can't open file '.../scripts/eval/generic-model-eval.py': [Errno 2] No such file or directory`（ENOENT）。
+  - `node scripts/eval/measure-summary.mjs` → `Error: Cannot find module '.../scripts/eval/measure-summary.mjs'`（MODULE_NOT_FOUND）。
+  - `git log --diff-filter=D` 确认两者删除点均为 `0b97227`。
+  - eval-measure.yml 对已删对象的依赖（基线 `29c13e9`）：L79/L144/L173 → measure-summary.mjs；L99/L110/L114 → generic-model-eval.py——无一处可执行。
+- eval-real.yml 头注当时仍宣称 `CI 的真实模型面 = generic-model-eval.py 最小工具环 harness`（同一基线 L11-14），是已失效的指向。
+
+**决定**：
+
+1. **eval-real.yml（per-push，advisory 非阻断不变）**：改挂用户级黑盒入口 `npm run eval:user -- --trials 1 --out-dir .runtime/eval-user`（与 `npm run ask` 同源装配：createSession + createDummyCliClient + 仓内 dummy 夹具）；删除 `workflow_dispatch` 的 `cases` 输入（旧 7 例集）与 `CASES_INPUT` / `LLM_JUDGE_MODEL` 消费；产物 = `.runtime/eval-user/`（逐样本原始证据 + summary，全样本保留，artifact `user-eval-report`）；PR 评论不再解析任何旧 probe schema。
+2. **eval-nightly.yml（schedule 保留）**：单阶段用户级全量 `npm run eval:user -- --trials 3`（12 用例 × 3 次，全样本保留），产物 `.runtime/eval-user/`（artifact `user-eval-full`）；**二期双档区分度矩阵（eval-discrimination，含旧 probe/judge schema 解析）整体删除**——其报告步骤依赖已删仪器与旧 G-* 例集，任何移植 = 新评测平台代码（本轮禁止）。
+3. **eval-measure.yml 删除**：测量语义（N 轮稳定性通过率矩阵 + 双档区分度）新入口未提供；重建即违反「不新建评测平台/复杂 Eval 平台」。
+4. **scripts/ci.sh 与 scripts/eval/eval.agent.yaml 只改措辞**（指向新入口），确定性门（typecheck / unit / generic-mock）不动。
+
+**取回点**：`git show 29c13e9:.github/workflows/eval-measure.yml`（nightly 二期同 commit `29c13e9`）；旧工具环代码在 `git log`（删除点 `0b97227`）。
+
+**加回来的判据**：仅当用户级 eval 确需多轮稳定性/双档区分度统计、且新入口（`scripts/eval/convergence-r1`）已**原生提供该口径**（零新平台代码）时，才允许恢复对应 workflow；恢复前必须先按维护规则写「加回决定」，注明服务哪条判据。
+
+**状态**：已实施（`arch/eval-r1`，待开 PR）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
