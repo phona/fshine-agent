@@ -897,6 +897,15 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十一、P4 产品切片：运营后台 v1（只读静态快照 / `npm run ops`）（2026-11-14，分支 arch/p4-ops）
+
+- **范围**：新增 `npm run ops -- [--out <dir>] [--config=<path>]`——只读消费任务底账，生成自包含 HTML 运营快照（缺省 `.runtime/ops/index.html`）：生成时间、统计（任务总数 + 已完成/失败/未执行/进行中，未知状态入「其他」）、最近任务（任务 ID/创建时间/状态/摘要；最新在前；上限 20）、失败与未执行清单（机械原因原文；上限 50）、限制与指针（Main 最终回复不落库等沿用 P1/P2/P3 登记口径；质量与覆盖报告文本指针）。纯字符串模板 + inline CSS，无脚本/外链/网络，可离线打开；产物恒为且仅为 `<out>/index.html`（缺目录创建、同名普通文件幂等覆盖、目录/符号链接含悬空拒绝、其它文件不动）；HTML 动态文本一律经统一 `escapeHtml` 实体转义（安全不变式：恶意文本全字段用例 + 反向绊线）。展示语义全部复用 `scripts/tasks.ts` 既有导出（不复制分叉）；为此在 tasks.ts 末尾加 `import.meta.main` 守卫（唯一偏离点名改动面：被 import 零 CLI 副作用，直接运行行为零变化，由既有 tasks/tasks-redo 用例 + tasks 抽样逐字节一致 + import 探针钉住）。
+- **证据指针**：`docs/product/p4-ops-console.md`（六段报告 + 验收逐条勾选）；真实模型三态任务与页面逐项核对在 `.runtime/product-p4/`（`ask-completed.log` / `ask-failed.log` / `ask-unexecuted.log`（含一次未中 attempt1）、`registry-scenario1.json`、`ops-scenario*.log`、`verify-scenario*.out`）；恶意文本转义 `seed-xss.log`、`ops-page-scenario2.html`、`page-selfcontained-greps.txt`；只读哈希 `readonly-proof.txt`；E06 ×3 / E12 ×3 全 PASS（`eval-e06.log` / `eval-e12.log`、summary PASS 3 / FAIL 0）；tasks 旧新抽样逐字节一致（`parity-*.log`、交付件 sha256 `2e19f822…`）；确定性门 `checks-tsc.log` / `checks-unit.log`（33 文件 / 305 例）；TDD 红→绿与 2 组反向绊线（`tdd-red-1.log` / `tripwire-escape-red.log` / `tripwire-order-red.log`）；实现提交 `8bec07098a9f19227882970fc2a643bb751f8053`（TDD 24 例）。
+- **登记（不实施）**：缺省输出目录的 CLI e2e 受 cwd/tsx 限制（实跑冒烟 + 单测默认值）；大库性能未压测（N+1 读路径复用既有无改动，展示条数封顶）；失败清单含「未执行」（口径裁定）；未知状态 fail-open；页面静态无刷新（刷新=重跑命令）。
+- **状态**：已实施并验收（本分支，未 push/未合并）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
