@@ -726,6 +726,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **修复后同例复测（真实模型，同一冻结判据）**：E06 ×3 全 PASS（trial-1/2/3；零执行问询形态按 optional 判正，各 ~3.1s）——证据 `.runtime/eval-r1/e06-after/`。复现轮（修复前）同例 1 次 PASS（该轮回复未含示例词、未触发缺陷——判负随措辞，属方差）；缺陷复现依据为批次 trial-3 存证 + 修复前后 `--judge-existing` 比对。
 
 **第五次冻结（E07 判定器口径缺陷修复重切，2026-11-13）**：36 次批次 E07/trial-1 判负归因确认两处判定器/判据口径缺陷（判据文本未动）：① **硬锚点词表窄于语义等价类**——reply「alpha 集合下没有 W9 窗口的数据。」「W9 窗口下没有任何数据。」因插入语无法逐字命中，containsAny 11 词全部未命中 → ①note「全部未命中」；② **自纠补查被误判条件丢失**——复现轮（修复前）模型对 W9 not_found 后自纠补查 W1/W2，被判「执行行条件丢失」`FAIL_WRONG_OBJECT`，与 E07 冻结 weakNote「随后自纠补查 W1/W2 = 允许（记录）」矛盾。修复（仅 judge.ts）：① containsAny 对含「无数据/没有数据/没有记录/无记录」标记的锚点列表增加**有界语义等价形态**（否定词…数据/记录/条目/内容，插入语 ≤12 字且不跨句；数据…不存在/为空——只对含该标记的锚点生效，当前仅 E07）；② `requireEveryRowArgs` 作用域收敛到「期望 not_found 结果首次出现」为止（含），其后的自纠行只受 allowedCollections 约束（其他单查用例无 not_found 检查点，作用域不变）。验证：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8；批次 36 份 `--judge-existing` mismatch 集合 = E03-3/E04-1/2/3/E06-3/E07-1（累计重切），其中 E07-1 FAIL→PASS、E07-3 `FAIL_FABRICATED_DATA` 原样保留（模型行为）；E07 复现轮离线复判 PASS。第五次冻结：judge.ts sha256=`a6a5b29312df2daefae65f47f13bfa2fa6efe85165aa9460f89206aa16ed79f1`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:48:26Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E07 ×3 全 PASS（trial-1/2/3；各 1 次结构化执行、taskIds 非空，18.3s/31.6s/19.0s）——证据 `.runtime/eval-r1/e07-after/`。修复前复现轮（1 次）呈现同一锚点缺陷 + 自纠误判，离线复判已转 PASS；E07/trial-3 的 `FAIL_FABRICATED_DATA`（模型引用技能文档数值冒充查询结果）按模型行为保留。
 
 **加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
 
