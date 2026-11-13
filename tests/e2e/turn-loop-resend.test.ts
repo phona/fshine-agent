@@ -18,6 +18,11 @@
  *   ④ 非法引用（文件名/路径/空数组/超上限）被宿主复检拒绝：可恢复工具错误、零委派、
  *      零文件；模型换合法编号后仍可重发（同一条工具面）；
  *   ⑤ 群共享窗口的会话归属（B 指代 A 的产物）与未授权用户照常拒绝。
+ *
+ * 平台调用计数走 fixtureCallCount()（夹具审计行数）。2026-11-13 P2 修正前这里用
+ * totalActualCalls()——它读 EXECUTION_PLAN_STATE 平台账本，而仓内 dummy 夹具忽略
+ * EXECUTION_* 状态路径（只认 FSHINE_EVAL_FIXTURE_STATE_DIR），夹具下恒 0：
+ * "零平台调用"断言是 0===0 的空跑，真发生调用也拦不住。
  */
 import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -25,7 +30,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import type { ServerAssembly } from '../../apps/server/assembly';
-import { boot, gatedWorker, mainDriver, totalActualCalls } from './harness';
+import { boot, fixtureCallCount, gatedWorker, mainDriver } from './harness';
 
 /** 单聊会话：conversationId 回落为 userid（W1 后 sessionId = channel:conversationId）。 */
 const SESSION_ID = 'wecom:e2e_user';
@@ -70,7 +75,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
   }
 
   it('R1 直连 resend：零平台调用，宿主从库里取文件并合成带出处的回复', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '1' }]),
       worker: gatedWorker([]),
@@ -78,7 +83,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '1');
 
     const reply = await send('发一下 工资表.xlsx');
-    expect(totalActualCalls()).toBe(before);                        // 零委派：平台一次没调
+    expect(fixtureCallCount()).toBe(before);                        // 零委派：平台一次没调
     expect(reply).toContain('重发：#1 工资表.xlsx');
     expect(reply).toContain('2026-10-20 15:03 UTC+8');              // 出处：生成时间（显式时区）
     expect(reply).toContain('本轮回传：工资表.xlsx');
@@ -87,20 +92,20 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
   });
 
   it('R2 不存在的 ref：确定性回答，零平台调用', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '9' }]),
       worker: gatedWorker([]),
     });
 
     const reply = await send('发一下 不存在的表');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('本会话没有交付过产物 #9');
     expect(reply).not.toContain('本轮回传');                        // 零文件：没有点名行
   });
 
   it('R3 群聊共享窗口：A 交付的产物，B（另一个用户）在同群指代重发成功', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '1' }]),
       worker: gatedWorker([]),
@@ -114,7 +119,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '1', { sessionId: 'wecom:grp_e2e' });
 
     const reply = await send('发一下 工资表.xlsx', { userid: 'e2e_user_b', group: true });
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('重发：#1 工资表.xlsx');
     expect(reply).toContain('本轮回传：工资表.xlsx');
     // 记录确实在群会话键下：窗口内全员可见、可指代（群语义的产品决策）
@@ -123,7 +128,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
   });
 
   it('R4 非法引用形状：可恢复工具错误（模型换合法编号仍可重发），零委派、零文件', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([
         // ① 文件名 ② 路径 ③ 空数组 ④ 超上限（元素合法但给多了）：全部应被宿主复检拒绝，
@@ -139,7 +144,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '1');
 
     const reply = await send('把工资表再发一次');
-    expect(totalActualCalls()).toBe(before);                        // 零委派
+    expect(fixtureCallCount()).toBe(before);                        // 零委派
     // 最后一条合法（#1 与 1 等价、去重后只发一次）：宿主合成正式回复
     expect(reply).toContain('重发：#1 工资表.xlsx');
     expect(reply).toContain('本轮回传：工资表.xlsx');
@@ -148,7 +153,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
   });
 
   it('R5 混合合法+非法 ref：note 与 failure 并存，合法文件照挂', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', refs: ['1', '9'] }]),
       worker: gatedWorker([]),
@@ -156,14 +161,14 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '1');
 
     const reply = await send('把 1 号和工作表都发来');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('重发：#1 工资表.xlsx');
     expect(reply).toContain('本会话没有交付过产物 #9');
     expect(reply).toContain('本轮回传：工资表.xlsx');
   });
 
   it('R6 已淘汰的产物：确定回答"已淘汰，需要重新计算"，零文件', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '2' }]),
       worker: gatedWorker([]),
@@ -171,13 +176,13 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '2', { status: 'evicted' });
 
     const reply = await send('发一下之前那个表');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('产物 #2 已淘汰，需要重新计算');
     expect(reply).not.toContain('本轮回传');
   });
 
   it('R7 字节不在：确定回答"文件已不在，需要重新计算"，零文件', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '3' }]),
       worker: gatedWorker([]),
@@ -187,13 +192,13 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '3', { path: path.join(root, 'gone.xlsx') });   // 记录在、字节被删
 
     const reply = await send('发一下那个表');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('产物 #3 的文件已不在，需要重新计算');
     expect(reply).not.toContain('本轮回传');
   });
 
   it('R8 字节被篡改（摘要不符）：确定回答"文件已损坏，需要重新计算"，零文件', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '4' }]),
       worker: gatedWorker([]),
@@ -202,13 +207,13 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     await seedArtifact(assembly, '4', { bytes: 'TAMPERED-BYTES', sha256: createHash('sha256').update('XLSX-BYTES').digest('hex') });
 
     const reply = await send('发一下那个表');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).toContain('产物 #4 的文件已损坏，需要重新计算');
     expect(reply).not.toContain('本轮回传');
   });
 
   it('R9 未授权用户重发：授权照查（重发不委派 ≠ 豁免身份），零平台调用、零文件', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'resend', artifactRef: '1' }]),
       worker: gatedWorker([]),
@@ -218,7 +223,7 @@ describe('[L4 集成] 离线全链 e2e：W4 重发路由（直连 resend_artifac
     // e2e_unknown 没有开通 scope；handler 的授权检查先于 runtime，重发回合不豁免。
     const reply = await send('发一下那个表', { userid: 'e2e_unknown' });
     expect(reply).toContain('未开通查询权限');
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     expect(reply).not.toContain('本轮回传');
   });
 });

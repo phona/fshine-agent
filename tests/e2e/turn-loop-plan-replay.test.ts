@@ -11,9 +11,13 @@
  *
  * 这里的 Main Agent 替身因此不复刻"聪明模型"，只复刻那个坏习惯：脚本派完后把最后一条
  * 工具结果 JSON.stringify 之后当回复文本。
+ *
+ * 平台调用计数走 fixtureCallCount()（夹具审计行数；2026-11-13 P2 修正）。原用
+ * totalActualCalls() 读 EXECUTION_PLAN_STATE，夹具忽略 EXECUTION_* 状态路径 → 恒 0，
+ * "平台侧一次调用都没发生"是空跑断言。
  */
 import { describe, expect, it } from 'vitest';
-import { boot, gatedWorker, resolveDelegateToolName, totalActualCalls, type WorkerStep } from './harness';
+import { boot, fixtureCallCount, gatedWorker, resolveDelegateToolName, type WorkerStep } from './harness';
 
 /** 记录 worker 实际收到的委派请求（宿主透传剥掉协议前缀的 request）。 */
 function recordingWorker(script: WorkerStep[]) {
@@ -83,7 +87,7 @@ function replayMainDriver(requests: readonly string[]) {
 
 describe('[L4 集成] 离线全链 e2e：计划模式复读的外发兜底', () => {
   it('F4 两步零执行后模型复读工具结果：协议 JSON 不外发，用户收到步骤事实汇总', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const worker = recordingWorker([
       // 两步都只打印文本：无计划提交、无平台调用、无 needs（真实平台实测的空转形状）
       { text: '这一步没有发起任何平台调用。' }, { end: true },
@@ -114,7 +118,7 @@ describe('[L4 集成] 离线全链 e2e：计划模式复读的外发兜底', () 
     expect(reply).not.toContain('不要转述给用户');
     expect(reply).not.toContain('"step"');
     // 平台侧一次调用都没发生：汇总陈述的是事实，不是查到的数据
-    expect(totalActualCalls()).toBe(before);
+    expect(fixtureCallCount()).toBe(before);
     await assembly.close();
   });
 });

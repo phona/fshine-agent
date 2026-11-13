@@ -69,7 +69,11 @@ describe('[L4 集成] 离线全链 e2e：执行凭证与查询范围', () => {
     // 旧实现让模型把信封翻译成技术报告（脚本路径/错误码/candidates: [] 全上屏），
     // 那句话本身还是错的（"没有目录搜索能力"）——行为全对、呈现全错，正是要根治的形状。
     expect(reply).toContain('没有找到匹配“胜利”的对象');
-    expect(reply).toContain(platformCorrectForm('ACCOUNT_SET_NOT_FOUND'));
+    // correctForm 经探针读平台信封（P6 缝，2026-11-13）：探针与本回合 worker 的真实调用
+    // 同形（同一 operation/args），信封 error.correctForm 是措辞唯一来源。
+    expect(reply).toContain(platformCorrectForm('ACCOUNT_SET_NOT_FOUND', {
+      mode: 'query', operation: 'finance.search-account-sets', args: ['--query', '胜利'],
+    }));
     expect(reply).toContain('我再查');
     // 平台账本里这个任务只登记了目录搜索，没有余额/凭证调用
     const tasks = Object.values(ledger().tasks ?? {});

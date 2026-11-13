@@ -13,10 +13,14 @@
  *   R3 无在册任务的会话 → 原样通过。
  * 在册任务由 store 直接 seed（不经委派，不需要平台 operation），requestKey 由生产
  * 同一个 buildRequestKey 计算——两处不会出现两套身份口径。
+ *
+ * 平台调用计数走 fixtureCallCount()（夹具审计行数；2026-11-13 P2 修正）。原用
+ * totalActualCalls() 读 EXECUTION_PLAN_STATE，夹具忽略 EXECUTION_* 状态路径 → 恒 0，
+ * "零平台调用"是空跑断言。
  */
 import { describe, expect, it } from 'vitest';
 import { buildRequestKey } from '../../packages/agent/src/repeat-request';
-import { boot, gatedWorker, mainDriver, totalActualCalls } from './harness';
+import { boot, fixtureCallCount, gatedWorker, mainDriver } from './harness';
 
 /** 单聊会话：conversationId 回落为userid（W1 后 sessionId = channel:conversationId）。 */
 const SESSION_ID = 'wecom:e2e_user';
@@ -25,7 +29,7 @@ const REPEATED_MESSAGE = '把上次的应收余额再告诉我一遍';
 
 describe('[L4 集成] 离线全链 e2e：重复提问门（RR1 窄门）', () => {
   it('R1 存在与本轮完全同身份的已执行请求 + 零工具调用 + 回复带数字 → 拦下，零平台调用', async () => {
-    const before = totalActualCalls();
+    const before = fixtureCallCount();
     const { send, assembly } = await boot({
       main: mainDriver([{ kind: 'conversation', text: '上次查到的应收余额是 61000 元。' }]),
       worker: gatedWorker([]),
@@ -47,7 +51,7 @@ describe('[L4 集成] 离线全链 e2e：重复提问门（RR1 窄门）', () =>
 
     expect(reply).toContain('本会话此前执行过查询');
     expect(reply).not.toContain('61000');                           // 历史数字不外发
-    expect(totalActualCalls()).toBe(before);                        // 零平台调用（没有重新执行）
+    expect(fixtureCallCount()).toBe(before);                        // 零平台调用（没有重新执行）
   });
 
   it('R2 改写过的问句（身份不同）→ 原样通过（收窄后普通聊天不被阻断）', async () => {

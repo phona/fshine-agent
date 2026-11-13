@@ -328,11 +328,16 @@ describe('[L4 集成] 离线全链 e2e：并发会话里的多步计划中断/�
       const first = await send('逐个核对这三个账套的应收余额：幻辰财税、幻东建材、新兴建材');
       // 用户看到的是宿主持信封数据机械组装的那一份：零候选 + 平台 correctForm 数据
       // （Wave 2 L2：宿主只拼结构，"该怎么改"由平台信封携带，宿主兜底仅在信封没带时用）
+      // correctForm 经探针读平台信封（P6 缝，2026-11-13）：探针与本回合第 2 步 worker 的
+      // 真实调用同形（同一 operation/args），信封 error.correctForm 是措辞唯一来源。
+      const correctForm = platformCorrectForm('ACCOUNT_SET_NOT_FOUND', {
+        mode: 'query', operation: 'finance.query-receivables', args: ['--query', '幻东建材', '--period', '202609'],
+      });
       expect(first).toBe(clarificationTextFor('ACCOUNT_SET_NOT_FOUND', {
-        query: '幻东建材', candidates: [], correctForm: platformCorrectForm('ACCOUNT_SET_NOT_FOUND'),
+        query: '幻东建材', candidates: [], correctForm,
       }));
       expect(first).toContain('没有找到匹配“幻东建材”的对象');
-      expect(first).toContain(platformCorrectForm('ACCOUNT_SET_NOT_FOUND'));
+      expect(first).toContain(correctForm);
       expect(first).toContain('我再查');
       // 反向断言：worker 那条捏造文本（连原始错误码一起）与后续步骤的数字一个都不上屏
       expect(first).not.toContain('ACCOUNT_SET_NOT_FOUND');
