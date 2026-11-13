@@ -906,6 +906,18 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十二、R3 收官回归认证：集成帧全量冒烟（arch/r3-arc）（2026-11-14，分支 arch/r3-arc）
+
+- **范围**：`arch/integration` @ `862fc0b608394a0d8a3fb545363ad0a0d801f470`（P1–P4 并入后）集成帧上的**只读回归认证**——R1 默认路径 E01–E12、X 套件（e05-adjacent）X01–X08、M 套件（scope-reference）M01–M07 各 N=1/例冒烟；确定性门（`npx tsc --noEmit` + `npx vitest run --project unit`）；CLI 冒烟（`npm run tasks` / `npm run ops`，无模型）；冻结面零改动核验。认证不改判据、不重切、不改产品代码，全样本保留。
+- **读数（帧 step-3.7-flash，N=1/例；27 例运行 = 21 PASS / 6 FAIL / 0 INCONCLUSIVE）**：R1 **10 PASS / 2 FAIL**（E01 `FAIL_FABRICATED_DATA`；E03 `FAIL_STATE_INCONSISTENCY`/`FAIL_WRONG_OBJECT`/`FAIL_ZERO_EXECUTION`）；X **6/8**（X05 三码；X07 `FAIL_STATE_INCONSISTENCY`）；M **5/7**（M01 `FAIL_ZERO_EXECUTION`；M06 `FAIL_STATE_INCONSISTENCY`）。逐例判定/失败码/耗时与观察见报告。
+- **门与冒烟**：`npx tsc --noEmit` exit 0（无输出）；`npx vitest run --project unit` 33 文件 / 305 例全过（exit 0）；`npm run tasks` exit 0（空态如实：无任务记录；底账只读、本工作树未创建）；`npm run ops` exit 0（`.runtime/ops/index.html`，3767 bytes，统计 0 条）。
+- **冻结面与隔离**：`git diff --name-status 862fc0b..HEAD -- scripts/eval/convergence-r1 scripts/eval/exploration` 全空（提交前 HEAD=862fc0b；同名路径工作树 status 亦空）。三次运行 manifest 聚合哈希与各自 `criteria.lock` 一致（criteria `9d4b0824…`；cases：R1 `6d55a42a…` / X `b011c46e…`（冻结 B）/ M `29ef794e…`）；`safetyGate=pass`，profileRoot=仓内 fixtures，执行层=仓内 dummy。
+- **跨帧口径**：M5 帧（step-5-preview，N=3/例，登记 32/36）仅跨帧参照、不混算；X 与冻结 B 的 N=1 基线（期望 6/8 上下）同帧同 N 可直比——本帧同为 6/8，构成 X03 PASS↔X07 FAIL 一处互换；M 与 N=9 基线（54/63）仅 sanity，N=1 不作稳定性结论。
+- **登记（不实施）**：E01 判负锚点为有序列表序号形态（T3 数值与 T0 逐值一致；判据形态敏感观察，冻结判据不改，留复核）；E03 零委派先反问；X07/M06「回复缺数值」硬锚点失败形态；M01 收窄轮零新执行（与 N=9 基线主失败形态同族）。本认证不新增/不修改任何机制。
+- **状态**：认证完成（本分支，未 push/未合并；报告 `docs/product/r3-arc-regression.md`，证据根 `.runtime/arc/`，gitignored）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
