@@ -1,53 +1,64 @@
 /**
- * tasks：本地只读查看任务底账——最近任务列表、单任务详情与任务交付件导出。
+ * tasks：本地任务底账入口——查看（列表/详情）、交付件导出与终态任务重新推进。
  *
  * 用法：
  *   npm run tasks                    # 最近任务列表（时间/状态/摘要/id，最多 20 条）
  *   npm run tasks -- <taskId>        # 单任务详情（状态/原因/执行步骤/任务结果）
  *   npm run tasks -- <taskId> --out <path>   # 导出任务交付件（Markdown；拒绝覆盖既有文件）
+ *   npm run tasks -- <taskId> --redo         # 以存储的交办原文逐字重新交办一个新任务（仅终态）
  *   （--config=<path> / AGENT_CONFIG_PATH 与 ask 同义；缺省读 <仓根>/.runtime/state.db）
  *
- * 边界（P1 任务查看 + P2 结果交付切片）：
- *   · 只读：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建）；导出只把交付件写到
- *     用户指定的那一个文件，不写库、不建目录；
+ * 边界（P1 任务查看 + P2 结果交付 + P3 人工接管切片）：
+ *   · 只读（列表/详情/--out）：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建）；
+ *     导出只把交付件写到用户指定的那一个文件，不写库、不建目录；
  *   · 状态与原因不做二次判定——直接消费任务注册表里由 judgeReportedTask 写入的终态
  *     （completed/failed/unexecuted）与 failureReason；本文件只做中文词表映射，
  *     「读时重算」会把 fail() 路径（零执行 + failed）与 running 行错报，故不重算；
  *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
- *   · 不联网、不加载模型、不 spawn 执行层。
+ *   · --redo（唯一写路径）：只对终态任务生效；输入=存储的委派原文逐字（不拼接原任务的
+ *     回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配重新交办为新任务；
+ *     原任务记录零改动；关联只由 CLI 输出打印（schema 冻结，无关联列/表）；
+ *   · 列表/详情/--out 不联网、不加载模型、不 spawn 执行层（--redo 按需动态加载装配）。
  */
 import { existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
 import { loadConfig } from '@fshine/core';
+import type { Session } from '../packages/agent/src/execution-runtime';
 import {
   judgeReportedTask,
   type TaskRecord,
   type TaskStatus,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import type { AskRuntimeInput } from './ask-runtime';
 import { explicitConfigFrom } from './resolve-config-path';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_DB_PATH = path.join(REPO_ROOT, '.runtime', 'state.db');
+const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
 
-const USAGE = '用法：npm run tasks [-- <taskId>] [--out <path>] [--config=<path>]\n'
-  + '  不带参数：最近任务列表；带 taskId：该任务详情；带 taskId 与 --out：导出任务交付件（Markdown）。';
+const USAGE = '用法：npm run tasks [-- <taskId>] [--out <path>] [--redo] [--config=<path>]\n'
+  + '  不带参数：最近任务列表；带 taskId：该任务详情；带 taskId 与 --out：导出任务交付件（Markdown）；\n'
+  + '  带 taskId 与 --redo：以该任务存储的交办原文逐字重新交办一个新任务（仅终态任务）。';
 
 export const EMPTY_TASKS_MESSAGE = '还没有任务记录。用 npm run ask -- "…" 交办一项任务后，这里会列出最近的任务。';
 
 export interface TaskCliArgs {
   taskId?: string;
   outPath?: string;
+  /** --redo：仅终态任务可重新推进（redo 输入=存储的交办原文逐字）。 */
+  redo?: boolean;
 }
 
-/** 参数：可选且仅一个位置参数（taskId）；--out / --out= 给出导出路径；--config= 由 explicitConfigFrom 统一解析。 */
+/** 参数：可选且仅一个位置参数（taskId）；--out / --out= 给出导出路径；--redo 开关；--config= 由 explicitConfigFrom 统一解析。 */
 export function parseTaskArgs(argv: readonly string[]): TaskCliArgs | { usageError: string } {
   let taskId: string | undefined;
   let outPath: string | undefined;
+  let redo = false;
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]!;
     if (arg.startsWith('--config=')) continue;
@@ -69,18 +80,30 @@ export function parseTaskArgs(argv: readonly string[]): TaskCliArgs | { usageErr
       index += 1;
       continue;
     }
+    if (arg === '--redo') {
+      if (redo) return { usageError: '最多接受一个 --redo。' };
+      redo = true;
+      continue;
+    }
     if (arg.startsWith('--')) return { usageError: `未知参数：${arg}` };
     const value = arg.trim();
     if (value === '') return { usageError: 'taskId 不能为空。' };
     if (taskId !== undefined) return { usageError: '最多接受一个 taskId。' };
     taskId = value;
   }
+  if (redo && outPath !== undefined) {
+    return { usageError: '--redo 与 --out 不能同时使用。' };
+  }
   if (outPath !== undefined && taskId === undefined) {
     return { usageError: '--out 需要与 taskId 一起使用（导出单个任务的交付件）。' };
+  }
+  if (redo && taskId === undefined) {
+    return { usageError: '--redo 需要与 taskId 一起使用（重新推进一个任务）。' };
   }
   return {
     ...(taskId === undefined ? {} : { taskId }),
     ...(outPath === undefined ? {} : { outPath }),
+    ...(redo ? { redo: true } : {}),
   };
 }
 
@@ -328,6 +351,140 @@ export function writeDeliverable(input: { filePath: string; text: string }): Del
   }
 }
 
+/** —— P3 人工接管：`--redo` 以存储的交办原文逐字重新交办（与 ask 同源装配，不复制第二套）。 —— */
+
+/** redo 的装配结果面：redo 只需要会话与收尾口（assembleAskRuntime 的返回结构满足它）。 */
+export interface RedoAssembly {
+  session: Session;
+  close(): void;
+}
+
+/** 装配函数：生产缺省 = 动态导入 ./ask-runtime 的 assembleAskRuntime（同一函数，不复制）。 */
+export type RedoAssembler = (input: AskRuntimeInput) => Promise<RedoAssembly>;
+
+export interface RedoDeps {
+  /** 测试注入：缺省动态导入 scripts/ask-runtime（保持只读路径不加载模型栈）。 */
+  assemble?: RedoAssembler;
+  /** 前置拒绝判定；缺省动态导入 scripts/ask-runtime 的 isAssemblyRefusal。 */
+  isAssemblyRefusal?: (error: unknown) => boolean;
+}
+
+export interface RedoOutcome {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+
+/** 可重新推进的存储终态：只有这三态（running/未知态 fail-closed 拒绝；不读时重算）。 */
+const REDOABLE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['completed', 'failed', 'unexecuted']);
+
+/** 配对行（输出逐字形状）：`原任务 <old> → 新任务 <new>（状态：<词>）`。 */
+export function renderRedoPairLine(oldTaskId: string, newTaskId: string, status: TaskStatus): string {
+  return `原任务 ${oldTaskId} → 新任务 ${newTaskId}（状态：${taskStatusWord(status)}）`;
+}
+
+async function defaultRedoAssembler(input: AskRuntimeInput): Promise<RedoAssembly> {
+  const { assembleAskRuntime } = await import('./ask-runtime');
+  return assembleAskRuntime(input);
+}
+
+async function defaultIsAssemblyRefusal(error: unknown): Promise<boolean> {
+  const { isAssemblyRefusal } = await import('./ask-runtime');
+  return isAssemblyRefusal(error);
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function capture<T>(run: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; error: unknown }> {
+  try {
+    return { ok: true, value: await run() };
+  } catch (error) {
+    return { ok: false, error };
+  }
+}
+
+/**
+ * 重新推进一个终态任务：输入=task.request 逐字（唯一消息源，不拼接任何回复/台账/摘要），
+ * 经生产同源装配（与 ask 同一函数）重新交办为新任务；原任务记录零改动（只写新 taskId）。
+ * 纯函数式返回 outcome（stdout/stderr/exitCode），由 main 统一打印——测试可直测。
+ */
+export async function runRedo(
+  input: {
+    task: TaskRecord;
+    dbPath: string;
+    argv: readonly string[];
+    env: NodeJS.ProcessEnv;
+    runtimeDir: string;
+  },
+  deps: RedoDeps = {},
+): Promise<RedoOutcome> {
+  const { task } = input;
+  const refuse = (message: string): RedoOutcome => ({ exitCode: 2, stdout: '', stderr: `${message}\n` });
+
+  // 终态判定：直接消费存储值（与 P1 状态呈现同一口径，不读时重算）。
+  if (task.status === 'running') {
+    return refuse(`任务正在进行中，不能重新推进：${task.taskId}（仅已完成、失败或未执行的任务可以重新推进）。`);
+  }
+  if (!REDOABLE_TASK_STATUSES.has(task.status)) {
+    return refuse(`任务状态无法识别（${String(task.status)}），拒绝重新推进：${task.taskId}。`);
+  }
+  if (task.request.trim() === '') {
+    return refuse(`任务缺少交办原文，无法重新推进：${task.taskId}。`);
+  }
+
+  // 生产同源装配：与 ask 同一函数、同一配置链；身份取存储事实（原任务创建时已由配置/渠道事实写入）。
+  const assemblyInput: AskRuntimeInput = {
+    purpose: '重新推进',
+    argv: input.argv,
+    env: input.env,
+    runtimeDir: input.runtimeDir,
+    sessionId: task.sessionId,
+    principalId: task.principalId,
+    dbPath: input.dbPath,
+  };
+  const assembled = await capture(() => (deps.assemble ?? defaultRedoAssembler)(assemblyInput));
+  if (!assembled.ok) {
+    const refused = deps.isAssemblyRefusal !== undefined
+      ? deps.isAssemblyRefusal(assembled.error)
+      : await defaultIsAssemblyRefusal(assembled.error);
+    return refused
+      ? refuse(errorText(assembled.error))
+      : { exitCode: 1, stdout: '', stderr: `重新推进未完成：${errorText(assembled.error)}\n` };
+  }
+  const runtime = assembled.value;
+
+  try {
+    const before = new Set(runtime.session.tasks().map((record) => record.taskId));
+    const sent = await capture(() => runtime.session.send(task.request));
+    if (!sent.ok) {
+      // 如实交付：send 失败前可能已创建新任务（半成品），尽力报告其 id 与状态。
+      const created = runtime.session.tasks()
+        .filter((record) => !before.has(record.taskId) && record.taskId !== task.taskId);
+      const stdout = created.length === 0
+        ? ''
+        : `${created.map((record) => renderRedoPairLine(task.taskId, record.taskId, record.status)).join('\n')}\n`;
+      return { exitCode: 1, stdout, stderr: `重新推进未完成：${errorText(sent.error)}\n` };
+    }
+    const turn = sent.value;
+    if (turn.taskIds.length === 0) {
+      return {
+        exitCode: 1,
+        stdout: turn.reply.trim() === '' ? '' : `${turn.reply}\n`,
+        stderr: '未达标：本轮没有产生新任务（重新推进未生效）。\n',
+      };
+    }
+    const newTasks = turn.taskIds.map((taskId) => runtime.session.getTask(taskId));
+    const head = turn.reply.trim() === '' ? '' : `${turn.reply}\n\n`;
+    const stdout = `${head}${newTasks.map((record) => renderRedoPairLine(task.taskId, record.taskId, record.status)).join('\n')}\n`
+      + `任务底账：${displayDbPath(input.dbPath)}（新任务已写入）\n`;
+    return { exitCode: 0, stdout, stderr: '' };
+  } finally {
+    runtime.close();
+  }
+}
+
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const parsed = parseTaskArgs(argv);
@@ -368,6 +525,16 @@ async function main(): Promise<void> {
     if (task === undefined) {
       console.error(`找不到任务：${parsed.taskId}（任务底账中没有这条记录）。`);
       process.exitCode = 2;
+      return;
+    }
+    if (parsed.redo === true) {
+      // redo 要写新任务：先关只读连接，再用 ask 同源装配读同一库重新交办（原任务零改动）。
+      registry.close();
+      registry = undefined;
+      const outcome = await runRedo({ task, dbPath, argv, env: process.env, runtimeDir: REDO_ROOT });
+      if (outcome.stdout !== '') process.stdout.write(outcome.stdout);
+      if (outcome.stderr !== '') process.stderr.write(outcome.stderr);
+      process.exitCode = outcome.exitCode;
       return;
     }
     if (parsed.outPath === undefined) {
