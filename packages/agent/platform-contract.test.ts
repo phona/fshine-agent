@@ -94,6 +94,8 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
       code: 'ACCOUNT_SET_AMBIGUOUS',
       query: '幻辰',
       candidates: ['幻辰财税', '幻辰实业有限公司'],
+      // 声明派生的渲染绑定（宿主默认适配表：ACCOUNT_SET_AMBIGUOUS → 候选清单句）。
+      render: 'candidates',
     });
   });
 
@@ -102,6 +104,7 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
       code: 'ACCOUNT_SET_NOT_FOUND',
       query: '胜利',
       candidates: [],
+      render: 'confirm-name-with-hint',
     });
   });
 
@@ -111,6 +114,7 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
       code: 'ACCOUNT_SET_NOT_FOUND',
       query: '胜利',
       candidates: [],
+      render: 'confirm-name-with-hint',
       correctForm: '先用 search-account-sets 搜出平台规范名再查，不猜简称',
     });
     // 卫生：控制字符剥掉、空白折叠、超长截断；空串/非字符串 → 不挂这个键
@@ -125,7 +129,7 @@ describe('选择类澄清提取（唯一信封适配层）', () => {
   it('从 tool_result 提取：本回合最后一条带信封的平台响应决定收尾状态', () => {
     expect(selectionClarificationFromResponses([
       toolResult('stdout noise\n' + AMBIGUOUS_ENVELOPE),
-    ])).toEqual({ code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'] });
+    ])).toEqual({ code: 'ACCOUNT_SET_AMBIGUOUS', query: '幻辰', candidates: ['幻辰财税', '幻辰实业有限公司'], render: 'candidates' });
     // 早先歧义之后重查成功（completed）：收尾状态是数据答案，不能被旧信封劫持成澄清问句
     expect(selectionClarificationFromResponses([
       toolResult(AMBIGUOUS_ENVELOPE),
@@ -189,6 +193,7 @@ describe('终局快路径信封判据（terminalFastPathOf）', () => {
       query: '幻辰财税',
       period: '202609',
       availablePeriods: ['202606', '平台当前期间'],
+      render: 'scope-no-data',
     });
   });
 
@@ -196,10 +201,10 @@ describe('终局快路径信封判据（terminalFastPathOf）', () => {
     // NOT_FOUND（mock/真脚本信封都带 customer）：回显的是"找不到的客户名"，
     // 回显 data.query（账套搜索词）会让用户去确认一个没问过的对象
     expect(terminalFastPathOf(terminalEnvelope('not_found', { query: '幻辰财税', customer: '猫一杯' }, 'ASSISTANT_NOT_FOUND')))
-      .toEqual({ code: 'ASSISTANT_NOT_FOUND', query: '猫一杯' });
+      .toEqual({ code: 'ASSISTANT_NOT_FOUND', query: '猫一杯', render: 'confirm-name' });
     // AMBIGUOUS（真脚本信封带 customer）：同一条提取规则
     expect(terminalFastPathOf(terminalEnvelope('needs_input', { query: '幻辰财税', customer: '机电', candidates: [{ name: '幻电设备有限公司' }, { name: '机电贸易有限公司' }] }, 'ASSISTANT_AMBIGUOUS')))
-      .toEqual({ code: 'ASSISTANT_AMBIGUOUS', query: '机电' });
+      .toEqual({ code: 'ASSISTANT_AMBIGUOUS', query: '机电', render: 'confirm-name' });
   });
 
   it('完整性门：查询词/期间/非空清单/客户名缺一不挂（fail-loud 留痕由调用方负责）', () => {
