@@ -575,6 +575,17 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 十、M2 波次 1 退役登记与继任（2026-11-13）
+
+**背景**：`arch/m2-merged` @ 592267f（波次 1 干净并集）删除旧 e2e 套件（8a216f9）与旧域评测/验收脚手架（4a38198）。复核对两处红要求明确后继；本行修复轮（分支 `arch/m2-fix`）登记如下，结论以本节点为准。
+
+- **旧 e2e + 旧脚手架退役**：`tests/e2e/` 全量（42 文件）与旧评分/判据/用例、旧探针与验收脚本、`scripts/perf/**` 删除；用户级行为由 Minimal demo（`npm run demo:minimal`）与 **M3 用户级评测**承担。此条为已登记退役，后继明确。
+- **execution-leak-criteria 的 2 红 = 已登记退役**：原红见九节（`scripts/eval/execution-leak-criteria.test.ts` 两轮同数同例）。该文件随旧路径退役，红随对象消失；**后继 = M3 用户级评测**。不算修复、不算掩盖——判据不丢，交接有主。
+- **probe D-209 的 2 红 = base 未登记红，以「继任闭集守卫 + 字面量清理」解决**：波次 1 之前，`scripts/probe-real-agent.test.ts` 的 D-209 闭集守卫 2 红（闭集断言 + 失效化突变断言同一根因）：M1 引入的字面量引用（`packages/agent/minimal-worker-env.test.ts`、`packages/agent/src/minimal/worker-env.ts` 注释）不在旧 allowlist 内。波次 1 删除该探针文件后 unit 归零，形似掩盖。本次把守卫换成**继任测试** `packages/agent/bridge-key-closure.test.ts`（只守桥键闭集，不依赖已删探针/harness；allowlist 逐项理由；表外命中与陈旧登记双向红；含变异用例），并把 M1 字面量清到导出常量（测试改引 `WORKER_FIXTURE_STATE_DIR_KEY`；注释用「测试桥键」表述）。**红被取代，不是被删除**。
+- **结论**：桥键现行字面量闭集 = `child-env.ts` 键名定义 + dummy/stock 两个 shell 入口 + leak-lint 登记 + 继任守卫自身；生产面只剩键名定义一处。守卫区分力已验：守卫内两条变异用例 + 本轮实注入（生产文件加一行引用 → 守卫红 → 回滚后复绿）。旧探针/验收不恢复。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

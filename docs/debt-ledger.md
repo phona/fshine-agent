@@ -2296,13 +2296,13 @@ ask 称「产品面零 17dz 引用、src+apps 非测试 4 文件/82 行」；本
 
 ### D-209 · 评测状态根桥 `FSHINE_EVAL_FIXTURE_STATE_DIR`：进程级槽，退役等 a2a 信封（钉锚，学 D-016）
 
-- **位置**：`scripts/probe-real-agent.ts` 的 `FIXTURE_STATE_DIR_KEY`（只在 per-case 子进程里写入）；夹具 shell 入口 `scripts/eval/fixtures/dummy-platform/bin/dummy` 与 `scripts/eval/fixtures/stock-platform/bin/stock`（读到后翻成 `--state-dir`；`bin/generic` 是 dummy 的符号链接）；`scripts/acceptance.ts`（验收脚本在自己的进程里设置，与探针槽无关）；登记 `packages/agent/platform-leak-lint.test.ts` 的 `FSHINE_NAME_REGISTRY`。机制说明 `docs/environment-variables.md` §4a。
+- **位置（2026-11-13 M2 波次 1 复核后）**：键名唯一来源 = `packages/agent/src/child-env.ts` 的 `WORKER_FIXTURE_STATE_DIR_KEY`（worker env 白名单经它放行，只放行键名、不读值）；夹具 shell 入口 `scripts/eval/fixtures/dummy-platform/bin/dummy` 与 `scripts/eval/fixtures/stock-platform/bin/stock`（读到后翻成 `--state-dir`；`bin/generic` 是 dummy 的符号链接）；登记 `packages/agent/platform-leak-lint.test.ts` 的 `FSHINE_NAME_REGISTRY`。**已随旧路径退役**：探针 `scripts/probe-real-agent.ts`（`FIXTURE_STATE_DIR_KEY` 旧宿主）与 `scripts/acceptance.ts`（在自有进程里设置）于 2026-11-13 M2 波次 1 随旧评测/验收脚手架删除，桥引用一并退役。机制说明 `docs/environment-variables.md` §4a。
 - **身份**：桥变量名 = `FSHINE_EVAL_FIXTURE_STATE_DIR`，前缀 `FSHINE_EVAL_`。它不是两仓契约，是 fshine 评测基础设施的测试专用槽。宿主生产路径与真平台零读取。
 - **存在理由**：宿主 spawn 网关的 argv 是固定的，探针没有附加参数通道把 per-case 状态根传进夹具；评测又必须让每个用例写到自己的状态根（否则夹具状态/审计跨例串）。壳入口把该值翻成夹具测试 flag `--state-dir`，夹具从该根派生状态与审计文件。
 - **根因（为什么还在）**：正确的退役通道是 a2a 信封携带 per-run 参数，那是跨仓协议，不在探针这一侧单方面删得掉。2026-11-10 之前它写在探针父进程的 `process.env` 上，两个用例并发会互盖指针，在途网关调用落到后写者的状态根；遥测归因还靠模块级缓冲区下标切片，并发同样错位。探针当时串行所以没触发，但是 latent 竞争，也是探针不能并行的根因。进程级全局槽本身不合理。
-- **现状（2026-11-10 子进程化之后）**：探针每个用例 fork 一个子进程，桥只在该子进程里写，父进程不改 `process.env`。探针侧的通道只剩一条：子进程 → 夹具 shell 入口。acceptance 仍在自己的进程里设置同一名字（跑批不与探针共槽）。串行保留：结构上已可并发，限流即信号，并发不在本条打开。
-- **退役条件**：a2a 信封携带 per-run 参数（跨仓，见 `docs/a2a-protocol.md`）落地后，本桥与四个 `EXECUTION_*` 状态注入一并删除；壳入口不再读该变量，探针与 acceptance 不再写它，leak-lint 登记项删除。
+- **现状（2026-11-10 子进程化之后；2026-11-13 M2 波次 1 补记）**：探针每个用例 fork 一个子进程，桥只在该子进程里写，父进程不改 `process.env`。探针侧的通道只剩一条：子进程 → 夹具 shell 入口。acceptance 仍在自己的进程里设置同一名字（跑批不与探针共槽）。**旧探针与 acceptance 已随旧评测/验收脚手架删除**；现行写方只剩 demo 与隔离测试（均经 `WORKER_FIXTURE_STATE_DIR_KEY` 常量引用，不写字面量）。串行保留：结构上已可并发，限流即信号，并发不在本条打开。
+- **退役条件**：a2a 信封携带 per-run 参数（跨仓，见 `docs/a2a-protocol.md`）落地后，本桥与四个 `EXECUTION_*` 状态注入一并删除；壳入口不再读该变量，leak-lint 登记项删除。（旧探针与 acceptance 不再写它的半句已随 2026-11-13 M2 波次 1 的脚手架删除满足。）
 - **律法归属**：L2（协议名 / 跨层通道的单一真相；本桥是过渡通道，不是第二份契约）+ D-016 的时间锚纪律（移除条件必须可执行，不许「稳定一个周期」这种没有日期的过渡）。
-- **闭环判据**：① `scripts/probe-real-agent.test.ts` 的 D-209 守卫：可执行引用闭集等于已知站点（探针、探针表征测试、acceptance、两个 shell 入口、leak-lint 登记），前缀与 `--state-dir` 翻写形状不变；往生产代码加一处引用 → 该断言红。② 信封通道落地后，上述闭集清空（名字在 packages/apps/scripts 可执行面零命中），本条改已关。
+- **闭环判据**：① 继任闭集守卫 `packages/agent/bridge-key-closure.test.ts`（2026-11-13 M2 波次 1 接替已随 `scripts/probe-real-agent.test.ts` 退役的原守卫）：被跟踪源码（packages/apps/scripts/tests）里桥字面量的引用闭集等于显式 allowlist（键名定义 `child-env.ts`、两个 shell 入口、leak-lint 登记、守卫自身），前缀与 `--state-dir` 翻写形状不变；往生产代码加一处引用 → 断言红（守卫内变异用例 + 实注入各验证过）。② 信封通道落地后，上述闭集清空（名字在 packages/apps/scripts 可执行面零命中），本条改已关。
 - **归属波次 / 限期**：**时间锚点 2027-02-10 复核，到期必须复核，不许无限期续期**。到期时 a2a 信封若仍未携带 per-run 参数，只允许把锚点改到新的具体日期并写明阻塞仍在跨仓，不允许改成「无期限」或删掉日期。本条不阻塞探针子进程化。
-- **状态**：待办（桥保留；竞争面已由 per-case 子进程拆掉。2026-11-10 登记）。
+- **状态**：待办（桥保留；竞争面已由 per-case 子进程拆掉。2026-11-10 登记；2026-11-13 M2 波次 1：旧探针/acceptance 桥引用随脚手架退役，闭集守卫换继任 `packages/agent/bridge-key-closure.test.ts`，字面量清理到键名定义 + 两个壳入口 + leak-lint 登记 + 守卫自身）。
