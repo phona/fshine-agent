@@ -1,13 +1,15 @@
 /**
- * tasks 任务查看 CLI（P1）：
- *   · 用户视角：最近任务列表（时间/状态中文词/摘要/id）与单任务详情（状态/原因/执行步骤/任务结果）；
+ * tasks 任务查看 CLI（P1 查看 + P2 结果交付）：
+ *   · 用户视角：最近任务列表（时间/状态中文词/摘要/id）、单任务详情（状态/原因/执行步骤/任务结果）
+ *     与交付件导出（`--out`，Markdown）；
  *   · 状态与失败原因必须与 judgeReportedTask 同语义（词表键绑定其返回类型，测试逐组比对）；
+ *   · 交付件与详情逐行一致（同一组字段渲染函数）；导出拒绝覆盖、缺目录不自动创建、只读不写库；
  *   · 只读：库文件哈希不变、缺库不创建；缺库空态、未知 id 错误态；
  *   · e2e 用真实子进程跑 `scripts/tasks.ts`（仓内 dummy 面，不触网、不碰真实平台）。
  */
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,11 +26,14 @@ import {
   JUDGED_STATUS_WORDS,
   formatLocalTime,
   parseTaskArgs,
+  renderTaskDeliverable,
   renderTaskDetail,
   renderTaskList,
+  resolveOutPath,
   resolveTaskDbPath,
   summarizeRequest,
   taskStatusWord,
+  writeDeliverable,
 } from './tasks';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -84,6 +89,19 @@ describe('tasks：参数与库路径解析', () => {
     expect(parseTaskArgs(['--config=/tmp/x.yaml', 'task_x'])).toEqual({ taskId: 'task_x' });
     expect(parseTaskArgs(['--bogus'])).toMatchObject({ usageError: expect.stringContaining('--bogus') });
     expect(parseTaskArgs(['a', 'b'])).toMatchObject({ usageError: expect.any(String) });
+  });
+
+  it('--out：两种形态、位置无关；缺值/空值/重复/无 taskId 是用法错误（P2）', () => {
+    expect(parseTaskArgs(['task_x', '--out', 'a.md'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
+    expect(parseTaskArgs(['--out=a.md', 'task_x'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
+    expect(parseTaskArgs(['--out', 'a.md', 'task_x'])).toEqual({ taskId: 'task_x', outPath: 'a.md' });
+    expect(parseTaskArgs(['task_x', '--out'])).toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
+    expect(parseTaskArgs(['task_x', '--out='])).toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
+    expect(parseTaskArgs(['task_x', '--out', '--config=/tmp/x.yaml']))
+      .toMatchObject({ usageError: expect.stringContaining('--out 缺少文件路径') });
+    expect(parseTaskArgs(['task_x', '--out', 'a.md', '--out', 'b.md']))
+      .toMatchObject({ usageError: expect.stringContaining('最多接受一个 --out') });
+    expect(parseTaskArgs(['--out', 'a.md'])).toMatchObject({ usageError: expect.stringContaining('taskId') });
   });
 
   it('库路径解析与 ask 链同解（fixture 无 store 段 + DB_PATH / --config 变体）', () => {
@@ -244,6 +262,147 @@ describe('tasks：列表与详情渲染', () => {
   });
 });
 
+describe('tasks：任务交付件渲染与写出（P2）', () => {
+  const completed = record({
+    taskId: 'task_ok',
+    status: 'completed',
+    resultText: '已查询 beta：3 条。',
+    executions: [execution('completed')],
+  });
+  const failed = record({
+    taskId: 'task_bad',
+    status: 'failed',
+    failureReason: '执行层未成功：dummy.query 返回 failed：读取故障。',
+    resultText: '执行层报告读取故障。',
+    executions: [execution('failed', '读取故障。')],
+  });
+  const unexecuted = record({
+    taskId: 'task_none',
+    status: 'unexecuted',
+    failureReason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。',
+    resultText: '本轮未发起调用。',
+    executions: [],
+  });
+  const workerFailed = record({
+    taskId: 'task_worker',
+    status: 'failed',
+    failureReason: '执行层 Worker 未产出有效汇报，本次任务未完成。',
+    executions: [],
+  });
+  const running = record({ taskId: 'task_running', status: 'running' });
+
+  it('结构：标题/任务信息/状态/执行步骤/任务结果/限制与说明逐段齐全；完成态无原因行', () => {
+    const text = renderTaskDeliverable(completed);
+    const time = formatLocalTime(completed.createdAt);
+    expect(text.startsWith('# 任务交付件：task_ok（已完成）\n')).toBe(true);
+    expect(text).toContain('## 任务信息\n\n任务 task_ok');
+    expect(text).toContain(`创建：${time}  更新：${formatLocalTime(completed.updatedAt)}\n交办：${completed.request}`);
+    expect(text).toContain('## 状态\n\n状态：已完成');
+    expect(text).toContain('## 执行步骤\n\n执行步骤：\n  1. dummy.query  完成');
+    expect(text).toContain('## 任务结果\n\n任务结果：\n已查询 beta：3 条。');
+    expect(text).toContain('## 限制与说明');
+    expect(text).toContain('- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。');
+    expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；Main 的最终回复当前不落库，本交付件不含 Main 最终回复。');
+    expect(text).toContain('- 状态与失败原因来自任务收尾时的机械判定（judgeReportedTask）；导出只读不重算。');
+    expect(text).toContain('- 执行步骤无时间戳（底账 schema 冻结）；时间以本机时区显示。');
+    expect(text).not.toContain('失败原因：');
+    expect(text).not.toContain('未执行原因：');
+    expect(text).not.toContain('尚未收尾');
+  });
+
+  it('失败/未执行/worker 失败：原因行标签与详情同规则，步骤与结果原样', () => {
+    const bad = renderTaskDeliverable(failed);
+    expect(bad).toContain('## 状态\n\n状态：失败\n失败原因：执行层未成功：dummy.query 返回 failed：读取故障。');
+    expect(bad).toContain('1. dummy.query  失败  读取故障。');
+    expect(bad).toContain('任务结果：\n执行层报告读取故障。');
+
+    const none = renderTaskDeliverable(unexecuted);
+    expect(none).toContain('状态：未执行\n未执行原因：未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。');
+    expect(none).toContain('执行步骤：\n  （无：本次任务未向执行层发起任何调用）');
+
+    const worker = renderTaskDeliverable(workerFailed);
+    expect(worker).toContain('失败原因：执行层 Worker 未产出有效汇报，本次任务未完成。');
+    expect(worker).toContain('任务结果：\n（无）');
+  });
+
+  it('进行中：无原因行，限制段追加未收尾提示', () => {
+    const text = renderTaskDeliverable(running);
+    expect(text.startsWith('# 任务交付件：task_running（进行中）\n')).toBe(true);
+    expect(text).toContain('## 状态\n\n状态：进行中');
+    expect(text).not.toContain('失败原因：');
+    expect(text).toContain('- 该任务尚未收尾（当前状态「进行中」）：交付件反映导出时的底账状态。');
+  });
+
+  it('格式：LF、末尾恰一个换行；同输入两次渲染逐字节一致（无生成时间）', () => {
+    const first = renderTaskDeliverable(failed);
+    const second = renderTaskDeliverable(failed);
+    expect(first).toBe(second);
+    expect(first.includes('\r')).toBe(false);
+    expect(first.endsWith('\n')).toBe(true);
+    expect(first.endsWith('\n\n')).toBe(false);
+  });
+
+  it('一致性：详情正文每个非空行逐字出现在交付件（同一组渲染函数）', () => {
+    for (const task of [completed, failed, unexecuted, workerFailed, running]) {
+      const detailLines = renderTaskDetail(task).split('\n').filter((line) => line.trim() !== '');
+      const deliverableLines = renderTaskDeliverable(task).split('\n');
+      for (const line of detailLines) expect(deliverableLines).toContain(line);
+    }
+  });
+
+  it('金样：renderTaskDetail 输出逐字节稳定（P2 重构不得漂移）', () => {
+    const text = renderTaskDetail(record({
+      taskId: 'task_golden',
+      status: 'failed',
+      failureReason: '执行层未成功：dummy.query 返回 failed：读取故障。',
+      resultText: '执行层报告读取故障。',
+      executions: [execution('failed', '读取故障。')],
+    }));
+    const time = formatLocalTime('2026-11-13T16:00:00.000Z');
+    expect(text).toBe([
+      '任务 task_golden',
+      '状态：失败',
+      `创建：${time}  更新：${time}`,
+      '交办：帮我查一下 beta 集合、窗口 W1 的数据',
+      '',
+      '失败原因：执行层未成功：dummy.query 返回 failed：读取故障。',
+      '',
+      '执行步骤：',
+      '  1. dummy.query  失败  读取故障。',
+      '',
+      '任务结果：',
+      '执行层报告读取故障。',
+    ].join('\n'));
+  });
+
+  it('--out 路径：绝对原样；相对以 INIT_CWD 为调用点，其次 cwd', () => {
+    expect(resolveOutPath('/abs/x.md', { env: {}, cwd: '/cwd' })).toBe('/abs/x.md');
+    expect(resolveOutPath('x.md', { env: { INIT_CWD: '/from-npm' }, cwd: '/cwd' })).toBe(path.join('/from-npm', 'x.md'));
+    expect(resolveOutPath('sub/x.md', { env: { INIT_CWD: '/from-npm' }, cwd: '/cwd' }))
+      .toBe(path.join('/from-npm', 'sub', 'x.md'));
+    expect(resolveOutPath('x.md', { env: {}, cwd: '/cwd' })).toBe(path.join('/cwd', 'x.md'));
+    expect(resolveOutPath('x.md', { env: { INIT_CWD: '  ' }, cwd: '/cwd' })).toBe(path.join('/cwd', 'x.md'));
+  });
+
+  it('写出：独占创建；目标已存在拒绝且原文件不动；父目录缺失拒绝且不创建', () => {
+    const dir = tempDir();
+    const target = path.join(dir, 'deliverable.md');
+    expect(writeDeliverable({ filePath: target, text: 'A\n' })).toEqual({ ok: true });
+    expect(readFileSync(target, 'utf8')).toBe('A\n');
+
+    const second = writeDeliverable({ filePath: target, text: 'B\n' });
+    expect(second).toMatchObject({ ok: false, exitCode: 2 });
+    if (!second.ok) expect(second.message).toContain('已存在');
+    expect(readFileSync(target, 'utf8')).toBe('A\n');
+
+    const nested = path.join(dir, 'nested', 'deliverable.md');
+    const missing = writeDeliverable({ filePath: nested, text: 'B\n' });
+    expect(missing).toMatchObject({ ok: false, exitCode: 2 });
+    if (!missing.ok) expect(missing.message).toContain('输出目录不存在');
+    expect(existsSync(path.join(dir, 'nested'))).toBe(false);
+  });
+});
+
 /** e2e：真实子进程跑 CLI（与 `npm run tasks` 同 flag 形态）。 */
 function runTasks(args: string[], env: Record<string, string | undefined> = {}): {
   status: number | null;
@@ -252,6 +411,8 @@ function runTasks(args: string[], env: Record<string, string | undefined> = {}):
 } {
   const childEnv: NodeJS.ProcessEnv = { ...process.env, AGENT_CONFIG_PATH: '' };
   delete childEnv['DB_PATH'];
+  // 清掉 npm 注入的调用点目录：相对 --out 的解析基准测试必须可控（需要时用例显式给值）。
+  delete childEnv['INIT_CWD'];
   for (const [key, value] of Object.entries(env)) {
     if (value === undefined) delete childEnv[key];
     else childEnv[key] = value;
@@ -389,5 +550,118 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     const usage = runTasks(['a', 'b'], {});
     expect(usage.status).toBe(2);
     expect(usage.stderr).toContain('用法');
+  });
+
+  it('导出用法：--out 无值 / 无 taskId → exit 2 明确用法提示，不产生文件（P2）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+
+    const noValue = runTasks(['task_completed', '--out'], { DB_PATH: dbPath });
+    expect(noValue.status).toBe(2);
+    expect(noValue.stderr).toContain('--out 缺少文件路径');
+
+    const orphan = runTasks(['--out', path.join(dir, 'orphan.md')], { DB_PATH: dbPath });
+    expect(orphan.status).toBe(2);
+    expect(orphan.stderr).toContain('taskId');
+    expect(existsSync(path.join(dir, 'orphan.md'))).toBe(false);
+  });
+
+  it('导出：生成交付件；详情正文逐行在场；重复导出逐字节一致；主库哈希不变（P2）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const before = sha256(dbPath);
+    const out1 = path.join(dir, 'deliverable-1.md');
+    const out2 = path.join(dir, 'deliverable-2.md');
+
+    const detail = runTasks(['task_failed'], { DB_PATH: dbPath });
+    expect(detail.status).toBe(0);
+
+    const run = runTasks(['task_failed', '--out', out1], { DB_PATH: dbPath });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`已导出任务交付件：${out1}`);
+    expect(run.stdout).toContain('任务底账：');
+
+    const text = readFileSync(out1, 'utf8');
+    expect(text.startsWith('# 任务交付件：task_failed（失败）\n')).toBe(true);
+    expect(text).toContain('失败原因：执行层未成功：dummy.query 返回 failed：Collection faulty-one cannot be read in its current state');
+    const detailLines = detail.stdout.split('\n').filter((line) => line.trim() !== '' && !line.startsWith('任务底账：'));
+    const textLines = text.split('\n');
+    for (const line of detailLines) expect(textLines).toContain(line);
+
+    const again = runTasks(['task_failed', '--out', out2], { DB_PATH: dbPath });
+    expect(again.status).toBe(0);
+    expect(readFileSync(out2, 'utf8')).toBe(text);
+
+    expect(sha256(dbPath)).toBe(before);
+  });
+
+  it('导出边界：未知 id / 缺库 / 目标已存在（文件与目录）/ 父目录缺失 → exit 2 且不产生或不动文件（P2）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+
+    const unknownOut = path.join(dir, 'unknown.md');
+    const unknown = runTasks(['task_absent', '--out', unknownOut], { DB_PATH: dbPath });
+    expect(unknown.status).toBe(2);
+    expect(unknown.stderr).toContain('找不到任务：task_absent');
+    expect(existsSync(unknownOut)).toBe(false);
+
+    const missingDb = path.join(dir, 'nope', 'state.db');
+    const missingOut = path.join(dir, 'missing-db.md');
+    const missing = runTasks(['task_x', '--out', missingOut], { DB_PATH: missingDb });
+    expect(missing.status).toBe(2);
+    expect(missing.stderr).toContain('找不到任务');
+    expect(existsSync(missingOut)).toBe(false);
+    expect(existsSync(path.dirname(missingDb))).toBe(false);
+
+    const existing = path.join(dir, 'existing.md');
+    writeFileSync(existing, '原有内容\n');
+    const existsRun = runTasks(['task_completed', '--out', existing], { DB_PATH: dbPath });
+    expect(existsRun.status).toBe(2);
+    expect(existsRun.stderr).toContain('输出文件已存在');
+    expect(readFileSync(existing, 'utf8')).toBe('原有内容\n');
+
+    const dirTarget = path.join(dir, 'dir-target');
+    mkdirSync(dirTarget);
+    const dirRun = runTasks(['task_completed', '--out', dirTarget], { DB_PATH: dbPath });
+    expect(dirRun.status).toBe(2);
+    expect(dirRun.stderr).toContain('输出文件已存在');
+    expect(existsSync(dirTarget)).toBe(true);
+
+    const nested = path.join(dir, 'nested', 'out.md');
+    const noDir = runTasks(['task_completed', '--out', nested], { DB_PATH: dbPath });
+    expect(noDir.status).toBe(2);
+    expect(noDir.stderr).toContain('输出目录不存在');
+    expect(existsSync(path.join(dir, 'nested'))).toBe(false);
+  });
+
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+
+  it.skipIf(isRoot)('导出边界：目录不可写 → exit 1，无半成品文件（P2）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const locked = path.join(dir, 'locked');
+    mkdirSync(locked);
+    chmodSync(locked, 0o500);
+    try {
+      const out = path.join(locked, 'out.md');
+      const run = runTasks(['task_completed', '--out', out], { DB_PATH: dbPath });
+      expect(run.status).toBe(1);
+      expect(run.stderr).toContain('无法写入输出文件');
+      expect(existsSync(out)).toBe(false);
+    } finally {
+      chmodSync(locked, 0o700);
+    }
+  });
+
+  it('导出：相对路径以 INIT_CWD（调用点目录）为基准，不落在进程 cwd（P2）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+    const invocation = path.join(dir, 'invocation');
+    mkdirSync(invocation);
+
+    const run = runTasks(['task_completed', '--out', 'rel.md'], { DB_PATH: dbPath, INIT_CWD: invocation });
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain(`已导出任务交付件：${path.join(invocation, 'rel.md')}`);
+    expect(readFileSync(path.join(invocation, 'rel.md'), 'utf8')).toContain('任务 task_completed');
   });
 });
