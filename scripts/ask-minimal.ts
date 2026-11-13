@@ -3,7 +3,7 @@
  *
  * 用法：
  *   npm run ask -- "帮我查一下 ..." [--principal=wecom:demo-user] [--session=<id>] [--config=<path>]
- *   （AGENT_CONFIG_PATH 与 --config 同义；缺省用 config/agent.demo.yaml 的仓内 dummy 面。）
+ *   （AGENT_CONFIG_PATH 与 --config 同义；缺省用 config/agent.fixture.yaml 的仓内 dummy 面。）
  *
  * 边界（本切片）：
  *   · 执行面 = profile 声明的仓内 dummy 夹具（scripts/eval/fixtures/dummy-platform，不触网、
@@ -32,7 +32,7 @@ import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path
 import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEMO_CONFIG = path.join(REPO_ROOT, 'config', 'agent.demo.yaml');
+const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
 const MINIMAL_ROOT = path.join(REPO_ROOT, '.runtime', 'minimal');
 const ASK_ROOT = path.join(MINIMAL_ROOT, 'ask');
 const CONFIG_COPY = path.join(ASK_ROOT, 'agent-config.yaml');
@@ -86,11 +86,11 @@ async function main(): Promise<void> {
     return;
   }
 
-  // 配置：显式 --config / AGENT_CONFIG_PATH 优先；缺省用仓内 demo 配置（物化绝对 root 副本）。
+  // 配置：显式 --config / AGENT_CONFIG_PATH 优先；缺省用仓内 dummy 面配置（物化绝对 root 副本）。
   rmSync(ASK_ROOT, { recursive: true, force: true });
   mkdirSync(ASK_ROOT, { recursive: true });
   const explicit = explicitConfigFrom(process.argv.slice(2));
-  const configPath = explicit ?? materializeEvalConfig(DEMO_CONFIG, CONFIG_COPY);
+  const configPath = explicit ?? materializeEvalConfig(FIXTURE_CONFIG, CONFIG_COPY);
   const config = loadConfig({ yamlPath: configPath });
   const env = effectiveDeploymentEnv(config, process.env);
   if ((env['LLM_API_KEY'] ?? '').trim() === '') {

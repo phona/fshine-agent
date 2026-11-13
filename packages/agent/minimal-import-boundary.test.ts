@@ -24,7 +24,6 @@ const ENTRIES = [
   'packages/agent/src/minimal/task-registry-sqlite.ts',
   'packages/agent/src/minimal/execution-runtime.ts',
   'packages/agent/src/minimal/dummy-cli-client.ts',
-  'scripts/demo-minimal.ts',
   // U2/U3 入口同受边界约束：新增装配不得以值边触及旧治理模块。
   'scripts/ask-minimal.ts',
   'apps/server/minimal-server.ts',
@@ -33,7 +32,7 @@ const ENTRIES = [
 const CONTRACT = 'packages/contracts/src/execution-contract.ts';
 const RUNTIME = 'packages/agent/src/minimal/execution-runtime.ts';
 const ADAPTER = 'packages/agent/src/minimal/dummy-cli-client.ts';
-const ENTRY_SCRIPT = 'scripts/demo-minimal.ts';
+const ENTRY_SCRIPT = 'scripts/ask-minimal.ts';
 
 /** 旧 Runtime 治理模块清单（M1 最小路径不得以值边触及）。 */
 const FORBIDDEN = new Set([
