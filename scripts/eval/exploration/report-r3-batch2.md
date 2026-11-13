@@ -38,7 +38,7 @@
   - 对照演示：`… stats.ts compare --a .runtime/r3-b2/smoke --b .runtime/r3-b2/smoke`（冒烟）；合成夹具另证 IMPROVED/NO_CHANGE 路径
   - 门：`npx tsc --noEmit`（exit 0）；`npx vitest run --project unit`（28 files / 237 tests，含 stats 单测 15 与三条反向绊线演示）
 - 证据路径：baseline `runs/<M>/trial-1..9/`（judgment/audit/reply/meta 全量）；extension `runs/M01/trial-10..15/`；组合视图 `combined/`。
-- 复核结论：本批**独立复核未执行**（本会话为实施员，实施/复核分离未发生）；证据具备离线复判条件（冻结判据 + stats.ts 只读）；
+- 复核结论（2026-11-13 仲裁修正；原文由实施员于独立复核完成前书写）：本批独立复核**已由复核员·B2（实施/复核分离）完成并通过**——自写脚本独立重算 k/N 与 Wilson 95% CI 对账、三命令复现（freeze/compare/report）、R1 与产品面 diff=0、holdout 未运行未引用、无 integrity 违例；复核证据：`.runtime/review-b2/`（E01 与 E09–E11 复跑、smoke）与复核会话工作目录（compare 对照、重生成质量报告 fr-combined.md、离线复判日志）；
   judgment 为确定性输出，同输入可复判比对（judgeVersion=convergence-r1.judge.1）。
 - 版本与修订：模型 step-3.7-flash；baseline head=e741fc8、dirty=false；Skill sha256（agent.md=a5bba051…、dummy-routing SKILL.md=c5aea97a…）。
 
@@ -99,12 +99,13 @@
 | 矩阵驱动扩张 | 具备（跑通一次） | 审计→矩阵（维度→7 单元，见附录 E）→套件→冻结→采样→统计 全链路已执行并可重跑 | 扩张仅演示一次；矩阵此前仅在批内回报，摘要已录入附录 E |
 | 按矩阵重复采样 | 具备 | 每单元 N=9；M01 唯一命中预注册扩展（+6 ≤24）；无加样、无筛绿 | 单帧（step-3.7-flash）单批次；无跨模型复现 |
 | 统计对照（CI+三态） | 具备 | stats.ts wilson95/classify/三态 + 15 单测 + 三条反向绊线；compare/report 实跑演示 | IMPROVED 路径仅合成夹具演示（真实实验 NOT_RUN）；空臂 Δ 显示待美化 |
-| 独立复核 | **未具备** | 本会话为实施员；无复核员对 Batch 2 的独立结论 | 待指派复核员独立复核（证据只读可复判）；holdout 未用 |
+| 独立复核 | **具备**（2026-11-13 仲裁修正；原文写于复核前） | 复核员·B2 独立完成：自写脚本重算 k/N+Wilson 对账、三命令复现、R1/产品零改动、holdout 未触、无 integrity 违例 | 复核证据 `.runtime/review-b2/`（gitignored）与复核会话工作目录；本批为单帧单批次复核 |
 | 停止结论 | 具备 | 实验门槛 met=false → 正常收官（预注册停止规则执行） | M01 口径未裁定 → 结论带条件（触发器已登记） |
 | 三命令 | 具备 | 跑域 eval（smoke）/ compare / report 均实跑并贴摘录；freeze 为配套 | 未加 npm alias（保持「只扩现有脚本」精神）；如需可后续补 |
 
-**结论**：6 项中 5 项具备、1 项（独立复核）待补 → **未完全达标**：先补最小缺口（复核员独立复核本批证据），
-随后建议下一批**转产品切片**（任务查看/结果交付/人工接管/运营后台，先 Dummy）。
+**结论**（2026-11-13 仲裁修正）：6 项全部具备（独立复核已由复核员·B2 于本 run 独立完成并通过）→ **Harness 达标**：
+按 owner 口径，Harness 转按需维护，下一批建议**转产品切片**（任务查看/结果交付/人工接管/运营后台，先 Dummy）；
+本域剩余项（M01 口径裁定、holdout 运行时机、候选池）作为并行小项待 owner 裁定。
 
 ## 附录 E：矩阵溯源（审计→单元；摘要）
 
