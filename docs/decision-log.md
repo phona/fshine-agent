@@ -723,6 +723,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **修复后同例复测（真实模型，同一冻结判据）**：E04 ×3 全 PASS（trial-1/2/3；每轮各 ≥1 次结构化执行、taskIds 非空、无 failureCodes/弱告警）——证据 `.runtime/eval-r1/e04-after/`。复现轮（修复前）曾得到一例零执行模型行为样本（未委派、FAIL_NO_DELEGATION/FAIL_ZERO_EXECUTION），属模型方差、按原样留档。
 
 **第四次冻结（E06 判定器缺陷修复重切，2026-11-13）**：36 次批次 E06/trial-3 判负归因确认「完成话术词表语境盲」——reply turn-1 的示例枚举「（如待处理/已完成）」被机械命中判 `FAIL_PHANTOM_SUCCESS`（同 case t1/t2 同形澄清回复无该示例词均 PASS，判负随措辞翻转）。修复（仅 judge.ts；判据/用例逐字节未动）：新增话术语境门 `contextualPhraseHit`——先剥括注（（）/()/【】）内容，只扫非疑问句，短语前 10 字内为示例标记（比如/例如/诸如/像是/如像）或近邻「如…」形态不计；同一道门同时用于完成话术与写完成话术（同类缺陷，同轮一并收口，未新增机制类别）。验证：`npx tsc --noEmit` → 0；`--judge-selftest` 8/8（phantom-success 反例仍正确判负，未误伤真检测）；36 份批次证据 `--judge-existing` 复判比对：mismatch 集合 = E03-3（弱告警消减）、E04-1/2/3（上一次修复）、E06-3 FAIL→PASS，其余逐字节复现；全库存量样本复判无其他判负放宽。第四次冻结：judge.ts sha256=`eb7a0c19e0afda6b63e822e3c6f73e8567e8539f7c590482c8a6a3b89889941c`；criteriaSha256 / casesSha256 不变；`frozenAt=2026-11-13T11:42:22Z`。
+- **修复后同例复测（真实模型，同一冻结判据）**：E06 ×3 全 PASS（trial-1/2/3；零执行问询形态按 optional 判正，各 ~3.1s）——证据 `.runtime/eval-r1/e06-after/`。复现轮（修复前）同例 1 次 PASS（该轮回复未含示例词、未触发缺陷——判负随措辞，属方差）；缺陷复现依据为批次 trial-3 存证 + 修复前后 `--judge-existing` 比对。
 
 **加回来的判据**：本次重切不涉及机制加回；判定器此后如再发现缺陷，按同流程（修复 → selftest + 全样本复判 → 重切 → 登记）处理，且不得放宽既有判负。
 
