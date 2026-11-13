@@ -42,6 +42,7 @@ npm run ask -- "帮我查一下 ..."        # 一条消息 → 回复 + 机械�
 npm run tasks                        # 最近任务列表（只读；缺省读 .runtime/state.db）
 npm run tasks -- <taskId>            # 单任务详情：状态 / 原因 / 执行步骤 / 任务结果
 npm run tasks -- <taskId> --out <path>  # 导出任务交付件（Markdown；拒绝覆盖既有文件）
+npm run tasks -- <taskId> --redo     # 以该任务存储的交办原文逐字重新交办一个新任务（仅终态）
 npm start                            # 企微长连接 server（需 config/agent.yaml + 企微凭据）
 npm run eval:user -- --trials 1      # 用户级黑盒评测（12 用例，真实模型 + 仓内 dummy 夹具）
 ```
@@ -63,23 +64,31 @@ npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"
 - 任务底账落 SQLite（缺省 `.runtime/state.db`），进程结束后仍在；隔离门 fail-closed，
   profile.root 必须在仓内夹具目录之下。
 
-### `npm run tasks`：查看交办过的任务（只读）
+### `npm run tasks`：查看交办过的任务与重新推进
 
-不读日志、不跑模型、不触网：直接从任务底账（SQLite）读最近任务与单任务详情。
+列表 / 详情 / 导出不读日志、不跑模型、不触网：直接从任务底账（SQLite）读最近任务与单任务详情；
+`--redo` 重新推进终态任务时按需经与 `npm run ask` 同源的装配重新交办（真实模型 + 仓内 dummy 执行层）。
 
 ```bash
 npm run tasks                 # 最近任务列表：时间 / 状态 / 摘要 / id（最多 20 条）
 npm run tasks -- <taskId>     # 单任务详情：状态 / 失败原因 / 执行步骤 / 任务结果
 npm run tasks -- <taskId> --out <path>   # 导出任务交付件（Markdown；可保存/转发）
+npm run tasks -- <taskId> --redo         # 以该任务存储的交办原文逐字重新交办一个新任务
 ```
 
 - 状态与失败原因与底账写入时的 `judgeReportedTask` 同语义（已完成 / 失败 / 未执行；
   进行中 = 尚未收尾），查看侧不重算、不新造状态。
-- 只读：以 SQLite readonly 打开既有库（不写、不锁写）；库不存在时给空态且不创建文件；
-  导出只写用户指定的那一个文件（不写库、不建目录）。
+- 只读（列表 / 详情 / 导出）：以 SQLite readonly 打开既有库（不写、不锁写）；库不存在时给空态
+  且不创建文件；导出只写用户指定的那一个文件（不写库、不建目录）。
 - 导出（P2）：交付件与详情同源逐行一致（任务信息 / 状态 / 执行步骤 / 任务结果 / 限制说明）；
   目标已存在拒绝覆盖（原文件不动）、父目录不存在不自动创建；相对路径按敲命令的目录解析
   （npm 的 INIT_CWD）。退出码：0 成功 / 2 用法与前置错误 / 1 环境与 IO 失败。
+- 重新推进（P3，`--redo`，唯一写路径）：仅终态任务（已完成 / 失败 / 未执行）可重推，`进行中`
+  拒绝；输入=该任务存储的**委派原文逐字**（不拼接原任务的回复 / 执行台账 / 摘要——等价于用户
+  重新输入），经与 `npm run ask` 同源的装配重新交办为一个**新任务**并打印
+  `原任务 <oldId> → 新任务 <newId>（状态：…）`；原任务记录零改动，新旧关联只由这条输出表达
+  （schema 冻结，无关联列）。若原失败由请求文本本身引起，逐字重推会复现同一失败——这是
+  「逐字」语义的预期，非缺陷。
 - 缺省读 `.runtime/state.db`；`--config=<path>` / `AGENT_CONFIG_PATH` 与 `npm run ask` 同源，
   非空 `DB_PATH` 环境变量同 ask 一样覆盖底账路径。
 - 执行步骤按落账顺序列出（底账未存每步时间戳）；「任务结果」为底账持久化的执行层汇报原文

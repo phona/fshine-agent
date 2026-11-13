@@ -13,30 +13,18 @@
  *     本进程关库后数据仍在，归属校验跨重启仍成立；
  *   · 只做单轮：不做确认 / 后台派发 / 产物 / 提案（后续切片）。
  *
+ * 装配（配置物化/环境派生/前置门/执行层/底账/会话）与 `npm run tasks -- <id> --redo`
+ * 共用 scripts/ask-runtime.ts 的同一函数；本入口只负责参数、运行时目录与输出。
+ *
  * 打印：回复 + taskId / requestId / operation / status + dummy 执行层审计行。
  */
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
-import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
-import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
-import {
-  MAIN_PROTOCOL_NOTE,
-  createSession,
-} from '../packages/agent/src/execution-runtime';
-import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
-import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
-import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
-import { assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
+import { AssemblyRefusedError, assembleAskRuntime, type AskRuntime } from './ask-runtime';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
-const RUNTIME_ROOT = path.join(REPO_ROOT, '.runtime');
-const ASK_ROOT = path.join(RUNTIME_ROOT, 'ask');
-const CONFIG_COPY = path.join(ASK_ROOT, 'agent-config.yaml');
-const DEFAULT_DB_PATH = path.join(RUNTIME_ROOT, 'state.db');
+const ASK_ROOT = path.join(REPO_ROOT, '.runtime', 'ask');
 
 interface AskArgs {
   message: string;
@@ -89,74 +77,29 @@ async function main(): Promise<void> {
   // 配置：显式 --config / AGENT_CONFIG_PATH 优先；缺省用仓内 dummy 面配置（物化绝对 root 副本）。
   rmSync(ASK_ROOT, { recursive: true, force: true });
   mkdirSync(ASK_ROOT, { recursive: true });
-  const explicit = explicitConfigFrom(process.argv.slice(2));
-  const configPath = explicit ?? materializeEvalConfig(FIXTURE_CONFIG, CONFIG_COPY);
-  const config = loadConfig({ yamlPath: configPath });
-  const env = effectiveDeploymentEnv(config, process.env);
-  if ((env['LLM_API_KEY'] ?? '').trim() === '') {
-    console.error('未检测到 LLM_API_KEY——ask 需要真实模型（密钥只在 .env，或配置 llm.apiKey）。');
-    process.exitCode = 2;
-    return;
-  }
 
-  const profileIds = Object.keys(config.contextProfiles);
-  if (profileIds.length !== 1) {
-    console.error(`ask 需要单一 contextProfile（当前 ${profileIds.length} 个）——最小切片不做多 profile 选择。`);
-    process.exitCode = 2;
-    return;
-  }
-  const profile = config.contextProfiles[profileIds[0]!]!;
-  if (!profile.gateway) {
-    console.error('profile 缺少 gateway——最小切片需要执行层挂载声明。');
-    process.exitCode = 2;
-    return;
-  }
-  const principalId = parsed.principalId
-    ?? Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0];
-  if (principalId === undefined) {
-    console.error('配置里没有 enabled principal——最小切片需要可信身份来源（fail-closed，不回落写死值）。');
-    process.exitCode = 2;
-    return;
-  }
-  const sessionId = parsed.sessionId ?? `ask-${new Date().toISOString().slice(0, 10)}`;
-
-  const stateDir = path.join(ASK_ROOT, 'state');
-  mkdirSync(stateDir, { recursive: true });
-  const auditPath = path.join(stateDir, 'audit.jsonl');
-  env['EXECUTION_AUDIT_PATH'] = auditPath;
-  // fail-closed 隔离门：root 必须在仓内夹具目录、网关可达、审计通道可写读。
-  assertEvalIsolation(assessEvalIsolation({
-    env,
-    platformRoot: profile.root,
-    gateway: profile.gateway,
-  }), 'ask（仓内 dummy 面）');
-
-  const client = createDummyCliClient({ root: profile.root, gateway: profile.gateway, stateDir, env });
-  const operations = await client.listOperations();
-  const allowedOperations = readOnlyOperationNames(operations);
-  if (allowedOperations.length === 0) {
-    console.error('执行层没有声明任何只读 operation——最小切片拒绝以空允许集合运行。');
-    process.exitCode = 2;
-    return;
-  }
-
-  const dbPath = config.store?.dbPath !== undefined ? path.resolve(config.store.dbPath) : DEFAULT_DB_PATH;
-  const taskRegistry = createSqliteTaskRegistry(dbPath);
+  let runtime: AskRuntime;
   try {
-    const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
-    const profileMd = await loadAgentProfile();
-    const session = await createSession({
-      principalId,
-      sessionId,
-      client,
-      allowedOperations,
-      mainDriver: createPiTurnDriver({ env }),
-      workerDriver: createPiTurnDriver({ env }),
-      mainSystemPrompt: `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`,
-      workerSkills,
-      taskRegistry,
+    runtime = await assembleAskRuntime({
+      purpose: 'ask',
+      argv: process.argv.slice(2),
+      env: process.env,
+      runtimeDir: ASK_ROOT,
+      sessionId: parsed.sessionId ?? `ask-${new Date().toISOString().slice(0, 10)}`,
+      ...(parsed.principalId === undefined ? {} : { principalId: parsed.principalId }),
     });
+  } catch (error) {
+    if (error instanceof AssemblyRefusedError) {
+      // 抽取前这几处门就是「原样打印 + exit 2」——逐字保持。
+      console.error(error.message);
+      process.exitCode = 2;
+      return;
+    }
+    throw error;
+  }
 
+  try {
+    const { session, principalId, sessionId, auditPath, dbPath } = runtime;
     const auditBefore = readLines(auditPath).length;
     const startedMs = Date.now();
     const turn = await session.send(parsed.message);
@@ -187,7 +130,7 @@ async function main(): Promise<void> {
       process.exitCode = 1;
     }
   } finally {
-    taskRegistry.close();
+    runtime.close();
   }
 }
 
