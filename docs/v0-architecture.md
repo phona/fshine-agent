@@ -1,6 +1,6 @@
 # fshine-agent 架构
 
-状态：**目标架构**。当前实现与它的差距见 §10；未完成项在那里列明，不在正文里假装已存在。**2026-11-11 定位收紧**：fshine 的组成 = Pi Agent + Task Runtime + Execution Gateway + Channel Adapter；已删机制单列在 §12，正文只在仍然有效的部分引用它们，且带状态。**本版已与 2026-11-11 删除裁定同批修订**：§12 九类、§2 相关行与 laws 的 L1 防御排除均已标状态；裁定记录以 decision-log.md 为准。**2026-11-12 修订**：§1 定位换第三版（业务人员视角：愿意 / 净收益 / 停止线）；§2 第 5 条与 §3 补拆解计划所有权仲裁（Main 拥有 Business Workflow，Worker 拥有 Platform Execution Plan）。
+状态：**目标架构**。当前实现与它的差距见 §10；未完成项在那里列明，不在正文里假装已存在。**2026-11-11 定位收紧**：fshine 的组成 = Pi Agent + Task Runtime + Execution Gateway + Channel Adapter；已删机制单列在 §12，正文只在仍然有效的部分引用它们，且带状态。**本版已与 2026-11-11 删除裁定同批修订**：§12 九类、§2 相关行与 laws 的 L1 防御排除均已标状态；裁定记录以 decision-log.md 为准。**2026-11-12 修订**：§1 定位换第三版（业务人员视角：愿意 / 净收益 / 停止线）；§2 第 5 条与 §3 补拆解计划所有权仲裁（Main 拥有 Business Workflow，Worker 拥有 Platform Execution Plan）。**2026-11-13 M4 注**：正文引用的 `committed-unverified.ts` 与其它 Phase 2 宿主模块已随 M4 死代码清扫退役（decision-log §十三）；相关叙述按历史档案阅读。
 
 ---
 

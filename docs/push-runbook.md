@@ -106,6 +106,11 @@ npm run ci
 | K5 | `npm run ci` | 退出码 0，末行 `CI deterministic gates: PASS` |
 | K6 | `npx vitest run packages/agent/migration-gate.test.ts` | 3/3 全绿 |
 
+> **2026-11-13 M4 注**：K2 引用的 `history-hygiene.test.ts` 与 K6 的
+> `migration-gate.test.ts` 已随 `0b97227`（Minimal Reset）删除，两行当前不可执行——
+> 按历史复证记录阅读；替换/恢复属 owner 待裁定。K1/K3/K5 仍可执行，K4 依赖本机历史
+> bundle 文件。
+
 ---
 
 ## 已知限制

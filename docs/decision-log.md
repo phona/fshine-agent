@@ -707,18 +707,28 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - 13.3 后全量：229 通过；13.2 后全量：221 通过（净 −8：新增 16、退役 8、其余保持；文件数 26 不变）。
 - 变异四组（13.1）：A 11 红（含 ③b、⑤⑤b；⑥/④ 保持绿）；B 11 红；C 含 ⑥ 红；D `3 failed | 18 passed`（⑤⑤b⑧）。变异源码已还原。
 - 指定门（最终态）：`npx tsc --noEmit` exit 0；全量 `26 files / 221 tests passed`；契约四行为 + 安全不变量指定 6 文件 `50 passed`；`node --test .github/codex/*.test.mjs` → `20 pass / 0 fail`；`sh scripts/ci.sh` → `CI deterministic gates: PASS`。
+- **复核修复轮（2026-11-13，M4 复核 findings）**：悬空引用清零（`config/agent.fixture.yaml` 头注释、`dummy.cjs` GENERIC_MOCK_NOTES 指针、`vitest.config.ts` leak-lint 注释、debt-ledger D-209 指针校正、`environment-variables` §4a child-env 指针、`eval-mechanism-registry` #7、`rule-landing` / `push-runbook` / change-safety / debt-ledger / v0-architecture / execution-layer-interface / execution-layer-admission / env-naming-ruling / eval-baseline-refresh / eval-harness-measurement 的 M4 档案注记）；未动任何测试、断言或代码语义。门与绊线复跑结果附于本节末（见 13.8）。
 
 ### 13.6 缺口与待裁定
 
 - `ci.yml` 的 `fetch-depth: 0`：当前确定性门不依赖 git 历史（原 history-hygiene 守卫已删）；去/留待 owner 裁定（本分支保留并改写注释为真实状态）。
-- 「用户级评测＝`eval:user`」在并行分支交付，合并后生效；本分支内不存在该入口，未实测。
+- 「用户级评测＝`eval:user`」在并行分支交付，合并后生效；本分支内不存在该入口，未实测。**并行 `arch/eval-r1` 在 M4 删除后已出现修复提交**（eval-real/eval-nightly 改挂 `eval:user`、删 eval-measure、交付 convergence-r1）；本分支未合并、未处置 delete/modify 冲突面（eval-real.yml / eval-nightly.yml / eval.agent.yaml / ci.sh），合并顺序与冲突处置归 owner。
 - 被删的夹具写/计划覆盖（13.2-3）无逐条等价承接，已按对象退役登记；恢复评测面前该覆盖面为空是已知状态，不得写成绿。
 - `git branch -r -d github/eval-config` 步骤删除：该 ref 清理已无消费者（eval-config 机制相关 harness 已退役），如 owner 知其另有用途可按需恢复。
+- bridge-key 闭集守卫（`packages/agent/bridge-key-closure.test.ts`）与平台泄露守卫（`platform-leak-lint.test.ts`）随 `0b97227` 删除（预分支，非 M4 误删）；当前树可跑的边界断言 = `worker-env.test.ts`「测试桥键不进白名单」（实跑通过）。恢复最小闭集守卫或改 D-209 闭环判据属 owner 待裁定（D-209 已附 2026-11-13 M4 指针校正）。
+- `packages/contracts/src/index.ts`（barrel）仍导出 `store.ts` / `runtime.ts` 等大面积未消费面（预分支遗留，不在 M4 删除清单）；本分支「契约未用面已删」仅指 Execution Contract 面（cancel/artifacts/confirmation_required），不含整个 contracts barrel。
 
 ### 13.7 取回点
 
 - 删除前完整代码在 `git log`：基线 `29c13e9` 及各文件删除提交的前一提交（`git show <commit>^:<path>`）。
 - generic-mock 覆盖清单/基线：`29c13e9:scripts/eval/generic-mock.ts`、`GENERIC_MOCK_NOTES.md`、`generic-mock-baseline.json`。
+
+### 13.8 复核修复轮证据（2026-11-13）
+
+- 悬空引用扫描（修复后）：`git grep -n GENERIC_MOCK_NOTES` 仅剩已注记的历史档案/登记处；`git grep -n "eval.agent.yaml"` 仅剩「已退役」说明、§十三 登记、测试自建临时文件名与 `resolve-config-path.ts` 的退役说明；旧五模块仅 `import-boundary.test.ts` 墓碑 5 行。
+- 门复跑（修复后）：`npx tsc --noEmit` exit 0；`npx vitest run --project unit` → 26 files / 221 tests passed；指定 6 文件（契约四行为+安全不变量）→ 50 passed；`node --test .github/codex/*.test.mjs` → 20 pass / 0 fail；`sh scripts/ci.sh` → `CI deterministic gates: PASS`。
+- 绊线复跑：对 `task-registry.ts`（内存实现）与 `task-registry-sqlite.ts` 重放「恢复无条件 completed」变异 → `11 failed | 10 passed`（与先红失败集一致）；备份还原后 `git diff` 两文件 0 差异、两文件 21 passed。
+- 夹具配置可用性：`materializeEvalConfig('config/agent.fixture.yaml', ...)` + `loadConfig` 加载成功（profiles=dummy，root 物化为绝对路径）——头注释修正未影响可加载性。
 
 ---
 

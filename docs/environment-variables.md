@@ -131,18 +131,21 @@ per-run 隔离是 fshine 测试基础设施对自己 dummy 夹具的事务，走
 | `EXECUTION_PROPOSAL_STATE` | 真平台部署契约行保留（§3）；夹具读取已退役 |
 | `EXECUTION_AUDIT_PATH` | 真平台部署契约行保留（§2）；夹具读取已退役 |
 
-> 探针的传导桥：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
+> 探针的传导桥（历史记录）：宿主 spawn 网关是固定 argv（没有附加参数通道），探针
 > `isolatePlatformState` 无法直接把 flag 传进夹具；它改为把 per-case 根写进
-> `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy` / `bin/generic` /
-> `bin/stock`）翻译成 `--state-dir`。2026-11-10 起该写入只发生在探针的 per-case
-> 子进程里（父进程不改 `process.env`）；通道只剩子进程 → 夹具 shell 入口。
-> acceptance 仍在自己的进程里设置同一变量，与探针的槽无关。该变量是 fshine 评测
-> 基础设施私有（`platform-leak-lint` 在册的「测试专用变量，非两仓契约」），宿主生产
-> 路径与真平台零读取；generic-mock / second-layer / plan-policy / generic-model-eval
-> 直接传 flag，不经 env。2026-11-13 V0 安全收口起：它是 worker 子进程 env 精确键
-> 白名单里唯一保留的测试专用键——只做键名放行、不读值（`packages/agent/src/child-env.ts`），
-> 否则 worker 发起的仓内夹具调用会丢 per-case 状态根、回落到夹具自身 `.runtime`。
-> 退役条件与时间锚点见 debt-ledger D-209：a2a 信封携带 per-run 参数（跨仓）时本桥退役；2027-02-10 必须复核，不许无限期续期。
+> `FSHINE_EVAL_FIXTURE_STATE_DIR`，由夹具的 shell 入口（`bin/dummy`）翻译成
+> `--state-dir`。2026-11-10 起该写入只发生在探针的 per-case 子进程里（父进程不改
+> `process.env`）。该变量是 fshine 评测基础设施私有；宿主生产路径与真平台零读取。
+>
+> **2026-11-13 M4 指针校正（复核 findings；只改指针不改口径）**：上文所引探针
+> `isolatePlatformState` / `acceptance` / `platform-leak-lint` 登记 /
+> `packages/agent/src/child-env.ts`（键名放行白名单）/ 旧 `bin/stock` / `bin/generic`
+> 入口 / `generic-model-eval` 在当前树均不存在（随 `0b97227` 或 M4 清扫退役）。现行实现
+> 的边界断言 = `packages/agent/src/worker-env.ts` 的 worker env 精确键白名单
+> （`PATH`/`HOME`/`TMPDIR`）+ `worker-env.test.ts`「测试桥键不进白名单」（2026-11-13
+> 实跑通过）——桥键**不在**该白名单，worker 发起的夹具调用不经它传导（ask 路径经
+> `--state-dir` argv，见 `packages/agent/src/dummy-cli-client.ts`）。桥的退役条件与时间
+> 锚点见 debt-ledger D-209（含 2026-11-13 M4 指针校正与 owner 待裁定项）。
 
 夹具令牌是**测试夹具值**，不是生产配置：dummy / stock 两族的令牌面
 由评测代码注入**规范名**（`generic-mock.ts` / `second-layer.ts` / `second-layer.test.ts` /

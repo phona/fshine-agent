@@ -2,6 +2,8 @@
 
 状态：**执行中**。本文是三波改造（写路径保险箱 / runtime 拆分 / 业务 skill 清口径）的**防回归底座**：每一波验收前先过本文的防线，判据是机械的，不是"我会小心"。
 
+> **2026-11-13 M4 注（历史档案）**：本文是波次记录；其中引用的若干机制与夹具（`worker-step-cap.ts`、`generic-mock.ts` / `GENERIC_MOCK_NOTES.md`、stock 夹具、Phase 2 宿主模块、真实模型 eval 工作流等）已随 M2/M4 退役。下文按写作时点记录阅读；现行删除/保留口径以 [`decision-log.md`](decision-log.md) §十三为准。
+
 架构目标见 [`v0-architecture.md`](v0-architecture.md)，律法见 [`architecture-laws.md`](architecture-laws.md)，债务状态见 [`debt-ledger.md`](debt-ledger.md)。定位（2026-11-12 第三版）的完整出处见 [`decision-log.md`](decision-log.md) §0.1，`AGENTS.md` 定位节为面向改动的摘要 + 指针。冲突时以 architecture-laws 的闭环判据为准，并回头修 v0-architecture。
 
 **术语**：`fshine` 指整体（Pi Agent + Task Runtime + Execution Gateway + Channel Adapter）；本文的**宿主**指其中的**胶水层**（Task Runtime + Execution Gateway + Channel Adapter），不含 Pi 基座；**执行层**指当前接入实例及其后续同类实例。三层分工见 `docs/v0-architecture.md` §1.1。
