@@ -178,6 +178,13 @@ export interface RuntimeConfig {
   taskBudget?: TaskBudgetConfig;
   /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
   waitUserTimeoutMs?: number;
+  /**
+   * 派发模式（R4 P6 接线；缺省 = 'inline' = 现行为）。
+   *   · 'inline'：委派同步执行、Main 等待 Worker 回合（现行路径，逐字不变）；
+   *   · 'background'：受理即底账 queued，执行交 TaskRunner 后台推进；Main 快速受理并
+   *     回「已受理 #编号 名称」。仅 server 渠道面支持 background；ask/redo 入口显式拒绝。
+   */
+  dispatchMode?: 'inline' | 'background';
 }
 
 /**

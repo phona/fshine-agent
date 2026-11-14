@@ -39,9 +39,9 @@
  *   · queueCapacity=0 的「拒绝」落点：受理不咨询 policy（受理即 queued）；acquire 在认领前没有
  *     任务身份，拒绝只能表现为「暂不派发」；任务级 resource_limited 映射建议由 P5/集成在受理
  *     或排队超时点处理（runner 不做计时器，queued/waiting_user 超时由 P5 边界触发底账 timeout）；
- *   · 后台任务结果文本（resultText）：v1 底账没有后台写入口径（inline 的 complete 会经
- *     task 级 judge，误伤等待接续），runner 不落 resultText；后台结果交付/落库由集成切片定
- *     （P6-E01 结果可取回 blocked 于此）。
+ *   · 后台任务结果文本（resultText）：集成裁定落点=settle 确认 `completed` 终态后经端口
+ *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
+ *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
  *
  * 移植性：本文件零仓内 import（端口为对接冻结契约的最小结构类型，非新协议层）；集成时由
  * 装配方把 P2 registry / P5 policy / 执行回合接到端口上（结构兼容，签名实现自定）。
@@ -127,6 +127,12 @@ export interface TaskRegistryPort {
   markResultUnknown(taskId: string, options?: MutationOptions): TaskRecordView;
   /** 已确认失败（无执行事实可判定时的机械失败；原因文本原样落底账）。 */
   fail(taskId: string, reason: string): void;
+  /**
+   * 后台成功结果的逐字存档（可选；集成接线后的底账实现提供）。
+   * 语义 = P2 的 `archiveReply`：settle 确认落 `completed` 终态后调用，逐字写任务行
+   * resultText（结果可找回；不经 inline `complete()`/judgeReportedTask）。
+   */
+  archiveReply?(taskIds: readonly string[], replyText: string): void;
   /** 原子认领最老 queued（queued→running + lease）；无则 undefined。队列唯一入口。 */
   claimNextQueued(input: { owner: string; leaseMs: number }): TaskRecordView | undefined;
   /** 过期 running 租约 → result_unknown（返回受影响任务；不自动重放）。 */
@@ -415,11 +421,18 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       return;
     }
     switch (outcome.kind) {
-      case 'completed':
+      case 'completed': {
         // 后台终态 = 执行端确认的回合结局（P2 契约：后台不经 inline judgeReportedTask——
         // 其「首个非 completed 判负」会把等待接续的历史行误判为 failed）。
         registry.transition(taskId, 'completed');
+        // 结果逐字存档（集成裁定，P6 报告 §七.3）：确认终态后经 P2 archiveReply 写 resultText；
+        // 空白结果不落（缺省=无存档，显示层不以汇报冒充）。
+        const resultText = outcome.resultText.trim();
+        if (resultText !== '' && registry.archiveReply !== undefined) {
+          registry.archiveReply([taskId], outcome.resultText);
+        }
         return;
+      }
       case 'failed':
         registry.fail(taskId, outcome.reason);
         return;

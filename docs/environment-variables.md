@@ -40,6 +40,9 @@
 > fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
 > 补齐；登记见 `docs/decision-log.md` §三十二，静态守卫见
 > `packages/agent/resource-policy-single-source.test.ts`。
+> `runtime` 段另含 `dispatchMode: inline | background`（R4 集成接线，2026-11-14；缺省
+> `inline` = 现行为：委派同步执行；`background` = 受理即回执、后台 TaskRunner 执行——
+> 仅 server 渠道面承接，ask/redo 入口对 background 显式拒绝；模板见 `config/agent.example.yaml`）。
 
 下表仍只从 env 读（不是部署配置）：
 

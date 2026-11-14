@@ -27,6 +27,7 @@ const CONTRACTS_CONFIG = 'packages/contracts/src/config.ts';
 const CORE_CONFIG = 'packages/core/src/config.ts';
 const RESOURCE_POLICY = 'packages/agent/src/resource-policy.ts';
 const EXECUTION_RUNTIME = 'packages/agent/src/execution-runtime.ts';
+const ASK_RUNTIME = 'scripts/ask-runtime.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -54,14 +55,17 @@ const DELETED_ENV_KEYS = [
  *  - core/src/config.ts：YAML `runtime` 段的解析与 fail-fast 校验；
  *  - agent/src/resource-policy.ts：缺省值、并发/队列/预算/深度的解释与消费；
  *  - agent/src/execution-runtime.ts：回合时限的**执行侧入参**（现行缺省 300s/180s 与
- *    P5 缺省一致；集成接线时改由策略解析值注入，不得在此重读 `runtime` 配置）。
+ *    P5 缺省一致；集成接线时改由策略解析值注入，不得在此重读 `runtime` 配置）；
+ *  - scripts/ask-runtime.ts（R4 集成登记，2026-11-14）：**装配点的解析值透传**——把
+ *    `resolveRuntimeConfig` 的 mainTurnMs/workerTurnMs 注入执行侧消费点与后台 runner
+ *    leaseMs；不自行解释旋钮、不读原始 `config.runtime.*`（单一配置源不破坏）。
  */
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
-  workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME],
+  mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
+  workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   taskBudget: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
   waitUserTimeoutMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],

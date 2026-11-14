@@ -145,6 +145,7 @@ const RUNTIME_KEYS = [
   'maxDelegationDepth',
   'taskBudget',
   'waitUserTimeoutMs',
+  'dispatchMode',
 ] as const;
 
 /** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
@@ -171,7 +172,7 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     }
   }
   const config: RuntimeConfig = {};
-  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget'>;
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget' | 'dispatchMode'>;
   const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
     ['mainConcurrency', 1],
     ['backgroundConcurrency', 0],
@@ -199,6 +200,13 @@ function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
     if (calls === undefined) throw new Error('配置项 runtime.taskBudget.calls 必填（taskBudget 必须同时声明 ms 与 calls）');
     const tokens = runtimeInteger(budget['tokens'], 'taskBudget.tokens', 1);
     config.taskBudget = { ms, calls, ...(tokens === undefined ? {} : { tokens }) };
+  }
+  const dispatchMode = raw['dispatchMode'];
+  if (dispatchMode !== undefined && dispatchMode !== null && dispatchMode !== '') {
+    if (dispatchMode !== 'inline' && dispatchMode !== 'background') {
+      throw new Error(`配置项 runtime.dispatchMode 必须是 inline 或 background（当前: ${String(dispatchMode)}）`);
+    }
+    config.dispatchMode = dispatchMode;
   }
   return Object.keys(config).length === 0 ? undefined : config;
 }

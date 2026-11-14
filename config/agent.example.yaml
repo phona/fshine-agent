@@ -48,6 +48,23 @@ llm:
   apiKey:
   model: your-model
 
+# ---- 资源强制与派发模式(可选;P5 单一入口,yaml 键、无 env 覆盖口) ----
+# 缺省(不写 runtime 段) = 现行为:前台单并发、无等待队列、无任务级预算、
+# 回合时限 300s/180s、委派深度 1、派发模式 inline。
+# 非法值 fail-fast、未知键拒绝;详解见 docs/environment-variables.md。
+# runtime:
+#   # 派发模式:inline(缺省,委派同步执行) | background(受理即回执,后台 TaskRunner 执行)。
+#   # background 仅 server 渠道面支持(ask/redo 入口对 background 显式拒绝)。
+#   dispatchMode: inline
+#   mainConcurrency: 1        # 前台并发准入上限
+#   backgroundConcurrency: 1  # 后台并发上限(0=关闭后台准入)
+#   queueCapacity: 0          # 前台/后台各自等待队列容量(0=满即确定性拒绝)
+#   mainTurnMs: 300000        # Main 回合墙钟上限
+#   workerTurnMs: 180000      # Worker 回合墙钟上限
+#   maxDelegationDepth: 1     # 委派深度上限(0=禁止委派)
+#   waitUserTimeoutMs: 86400000  # waiting_user 等待上限(24h)
+#   # taskBudget: { ms: 600000, calls: 50 }  # 任务级共享预算(ms/calls 必填;tokens 可选)
+
 # ---- 任务底账(可选):SQLite 路径;相对路径按进程 cwd 解析 ----
 # 缺省 = 仓根 .runtime/state.db(任务 + 执行记录两张最小表;重启后仍在)。
 # store:

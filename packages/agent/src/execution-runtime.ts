@@ -22,12 +22,27 @@
  *
  * 本切片不做（不预造接口）：写 / 确认 / 取消 / 产物回收；计划门与预算梯子归执行层；
  * 上下文与压缩归 Pi 原生（mainDriver 自带）；这里不另建记忆、检索或投影。
+ *
+ * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、inline 委派派生后台许可（共享父预算、
+ * 深度 +1、不占并发槽）；`dispatchMode='background'` 时委派改为提交注入的 TaskRunner
+ * （受理即 queued，执行/恢复/取消归 runner）；缺省 'inline' = 上文现行为逐字不变。
  */
 import { randomUUID } from 'node:crypto';
 import type { DiscoveredTool } from '@fshine/contracts';
-import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
-import type { DriverMessage, TurnDriver } from './driver-contract';
-import { createTaskRegistry, type ExecutionRecord, type TaskRecord, type TaskRegistry } from './task-registry';
+import type {
+  CapabilityManifest,
+  ExecutionClient,
+  ExecutionOutcome,
+} from '@fshine/contracts/execution-contract';
+import type { DriverMessage, TurnDriver, TurnDriverResult } from './driver-contract';
+import { createTaskRegistry, deriveTaskName, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry } from './task-registry';
+import {
+  taskFailureReasonFor,
+  type Permit,
+  type RejectionReason,
+  type ResourcePolicy,
+} from './resource-policy';
+import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor, TaskRunner } from './task-runner';
 
 /** Main 委派工具名（实例名可经部署声明替换的演进留在后续切片；当前用中性名）。 */
 export const RUN_TASK_TOOL = 'run_task';
@@ -116,6 +131,29 @@ export interface RuntimeOptions {
   /** 单回合上限（Main）与单次委派上限（Worker）；缺省值见下。 */
   mainTurnMs?: number;
   workerTurnMs?: number;
+  /**
+   * P5：资源策略（装配方注入；缺省 = 不强制——直接 `createSession` 的测试/嵌入现行为）。
+   * 注入后：`send` 回合持前台许可、委派派生后台许可（共享父预算、深度 +1、不占槽）。
+   */
+  policy?: ResourcePolicy;
+  /**
+   * P6：派发模式（缺省 'inline' = 现行为：委派同步执行、Main 等待）。
+   * 'background' 需要同时注入 `taskRunner`（装配方构造，进程级共享）。
+   */
+  dispatchMode?: 'inline' | 'background';
+  /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
+  taskRunner?: TaskRunner;
+}
+
+/** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
+export class ForegroundRejectionError extends Error {
+  readonly reason: RejectionReason;
+
+  constructor(reason: RejectionReason, detail: string) {
+    super(`前台回合被资源策略拒绝（${reason}）：${detail}`);
+    this.name = 'ForegroundRejectionError';
+    this.reason = reason;
+  }
 }
 
 export interface TurnResult {
@@ -190,10 +228,41 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const registry = options.taskRegistry ?? createTaskRegistry();
   const mainTurnMs = options.mainTurnMs ?? DEFAULT_MAIN_TURN_MS;
   const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
+  const policy = options.policy;
+  const dispatchMode: 'inline' | 'background' = options.dispatchMode ?? 'inline';
+  const taskRunner = options.taskRunner;
+  if (dispatchMode === 'background' && taskRunner === undefined) {
+    throw new Error('background 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
+  }
 
   let mainMessages: DriverMessage[] = [];
   /** 本回合 Main 的截止时刻：委派算出的 Worker 截止不能越过它（再留收尾余量）。 */
   let currentTurnDeadline = 0;
+
+  /**
+   * 前台回合许可（P5）：策略存在时回合开始 acquire、结束 release。
+   *   · 拒绝 → 确定性 ForegroundRejectionError（错误面由入口归类；server 走既有 fallback）；
+   *   · 排队（queueCapacity>0）→ 受控等待晋升（release 触发 FIFO），等待不空转（10ms 让出）。
+   */
+  async function acquireForegroundPermit(): Promise<Permit | undefined> {
+    if (policy === undefined) return undefined;
+    const acquired = policy.acquire('foreground', { taskId: `session:${options.principalId}:${options.sessionId}` });
+    if (acquired.ok === false) {
+      throw new ForegroundRejectionError(acquired.reason, acquired.message);
+    }
+    while (acquired.state === 'queued') {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    if (acquired.state !== 'active') {
+      throw new ForegroundRejectionError('queue_full', '前台许可在等待晋升中被取消');
+    }
+    return acquired;
+  }
+
+  function releaseForegroundPermit(permit: Permit | undefined): void {
+    if (permit === undefined || policy === undefined) return;
+    policy.release(permit);
+  }
 
   async function executeOperation(taskId: string, args: Record<string, unknown>): Promise<ExecutionOutcome> {
     const operation = typeof args.operation === 'string' ? args.operation : '';
@@ -226,11 +295,45 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
-  async function delegate(taskText: string): Promise<unknown> {
+  async function delegate(taskText: string, foregroundPermit: Permit | undefined): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('run_task 缺少 task：请写清要办什么。');
     const taskId = `task_${randomUUID()}`;
+
+    // P6 background：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
+    if (dispatchMode === 'background') {
+      const accepted = taskRunner!.submit({
+        taskId,
+        principalId: options.principalId,
+        sessionId: options.sessionId,
+        request,
+      });
+      taskRunner!.pump();
+      const taskNo = accepted.taskNo ?? 0;
+      const name = accepted.name ?? deriveTaskName(request);
+      return {
+        taskId,
+        taskNo,
+        name,
+        status: 'queued',
+        accepted: true,
+        notice: `已受理 #${taskNo} ${name}，将在后台执行。`,
+      };
+    }
+
     registry.begin({ taskId, principalId: options.principalId, sessionId: options.sessionId, request });
+    // P5：前台回合内的委派 = 派生后台许可（共享父预算、深度 +1、不占并发槽）；
+    // 拒绝确定性落任务原因 resource_limited（§5），并向 Main 抛出（不进入执行）。
+    let delegationPermit: Permit | undefined;
+    if (policy !== undefined && foregroundPermit !== undefined) {
+      const acquired = policy.acquire('background', { taskId, parentPermit: foregroundPermit });
+      if (acquired.ok === false) {
+        const reason = taskFailureReasonFor(acquired);
+        registry.transition(taskId, 'failed', { reason });
+        throw new Error(`委派被资源策略拒绝（${reason}）：${acquired.message}`);
+      }
+      delegationPermit = acquired;
+    }
     const workerDeadline = Math.min(Date.now() + workerTurnMs, currentTurnDeadline - WORKER_DEADLINE_MARGIN_MS);
     try {
       const workerResult = await options.workerDriver.run({
@@ -254,38 +357,49 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     } catch (error) {
       registry.fail(taskId, error instanceof Error ? error.message : String(error));
       throw error;
+    } finally {
+      if (delegationPermit !== undefined && policy !== undefined) {
+        policy.release(delegationPermit);
+      }
     }
   }
 
   async function send(text: string): Promise<TurnResult> {
-    const progress: string[] = [];
-    const taskIds: string[] = [];
-    currentTurnDeadline = Date.now() + mainTurnMs;
-    mainMessages = [...mainMessages, userMessage(text)];
-    const mainResult = await options.mainDriver.run({
-      systemPrompt: options.mainSystemPrompt,
-      tools: [runTaskTool()],
-      messages: mainMessages,
-      onStep: (step) => progress.push(step),
-      exec: async (tool, args) => {
-        if (tool !== RUN_TASK_TOOL) throw new Error(`Main 工具面之外的调用：${tool}`);
-        const task = typeof args.task === 'string' ? args.task : '';
-        const answer = await delegate(task);
-        const taskId = (answer as { taskId?: unknown }).taskId;
-        if (typeof taskId === 'string') taskIds.push(taskId);
-        return answer;
-      },
-      deadline: currentTurnDeadline,
-    });
-    mainMessages = [...mainResult.messages];
-    // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
-    // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
-    if (taskIds.length > 0 && mainResult.text.trim() !== '') {
-      registry.archiveReply(taskIds, mainResult.text);
+    const foregroundPermit = await acquireForegroundPermit();
+    try {
+      const progress: string[] = [];
+      const taskIds: string[] = [];
+      currentTurnDeadline = Date.now() + mainTurnMs;
+      mainMessages = [...mainMessages, userMessage(text)];
+      const mainResult = await options.mainDriver.run({
+        systemPrompt: options.mainSystemPrompt,
+        tools: [runTaskTool()],
+        messages: mainMessages,
+        onStep: (step) => progress.push(step),
+        exec: async (tool, args) => {
+          if (tool !== RUN_TASK_TOOL) throw new Error(`Main 工具面之外的调用：${tool}`);
+          const task = typeof args.task === 'string' ? args.task : '';
+          const answer = await delegate(task, foregroundPermit);
+          const taskId = (answer as { taskId?: unknown }).taskId;
+          if (typeof taskId === 'string') taskIds.push(taskId);
+          return answer;
+        },
+        deadline: currentTurnDeadline,
+      });
+      mainMessages = [...mainResult.messages];
+      // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
+      // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
+      // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
+      // 逐字存档，避免受理话术覆盖结果）。
+      if (dispatchMode !== 'background' && taskIds.length > 0 && mainResult.text.trim() !== '') {
+        registry.archiveReply(taskIds, mainResult.text);
+      }
+      const scope = { principalId: options.principalId, sessionId: options.sessionId };
+      const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
+      return { reply: mainResult.text, taskIds, executions, progress };
+    } finally {
+      releaseForegroundPermit(foregroundPermit);
     }
-    const scope = { principalId: options.principalId, sessionId: options.sessionId };
-    const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
-    return { reply: mainResult.text, taskIds, executions, progress };
   }
 
   return {
@@ -311,5 +425,148 @@ function executeOperationTool(): DiscoveredTool {
     name: EXECUTE_OPERATION_TOOL,
     description: EXECUTE_OPERATION_TOOL_DESCRIPTION,
     inputSchema: EXECUTE_OPERATION_TOOL_SCHEMA,
+  };
+}
+
+export interface TaskExecutorOptions {
+  /** 执行层客户端（后台执行面的专属实例；能力快照在本工厂内取一次）。 */
+  client: ExecutionClient;
+  /** 允许集合（必须全部出现在能力快照里；fail-closed）。 */
+  allowedOperations: readonly string[];
+  workerDriver: TurnDriver;
+  workerSkills?: readonly WorkerSkill[];
+  /** 执行事实的记录底账（noteExecution 单一写点）。 */
+  registry: TaskRegistry;
+  /** 单次后台回合上限（缺省 180s，与执行侧现行缺省一致）。 */
+  workerTurnMs?: number;
+  /** 注入时钟（测试确定性）；缺省系统时钟。 */
+  now?: () => number;
+}
+
+function isAbortErrorLike(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error
+    && (error as { name?: unknown }).name === 'AbortError';
+}
+
+/** needs_input 的机械问题形状（missing 原文转述；不编造、不改写）。 */
+function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs_input' }>): PendingQuestion | undefined {
+  const missing = outcome.missing
+    .map((item) => {
+      const description = typeof item.description === 'string' ? item.description.trim() : '';
+      if (description !== '') return description;
+      return typeof item.name === 'string' ? item.name.trim() : '';
+    })
+    .filter((item) => item !== '');
+  return missing.length === 0 ? undefined : { missing };
+}
+
+/**
+ * 后台单回合执行器（P6 TaskExecutor 的生产实现；每次派发新建 Worker 回合）：
+ *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 mainMessages；
+ *   · 执行经 `execute_operation` 唯一工具 + 宿主生成 requestId，事实写 taskRegistry.noteExecution；
+ *   · 逐回合机械判定（不替执行端做 task 级二次判定）：
+ *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；
+ *       执行层 needs_input → needs_input（missing 原样转述）；
+ *       零执行 → failed（不得报 completed）；任一非 completed → failed（原因机械合成）；
+ *       全部 completed → completed{resultText}（结果存档由 runner settle 经 archiveReply 承接）。
+ */
+export async function createTaskExecutor(options: TaskExecutorOptions): Promise<TaskExecutor> {
+  const manifest = await options.client.capabilities();
+  const available = new Set(manifest.operations.map((operation) => operation.name));
+  const missingAllowed = options.allowedOperations.filter((name) => !available.has(name));
+  if (missingAllowed.length > 0) {
+    throw new Error(`允许集合不在能力快照里（fail-closed）：${missingAllowed.join('、')}`);
+  }
+  const allowed = new Set(options.allowedOperations);
+  const workerManifest: CapabilityManifest = {
+    contractVersion: manifest.contractVersion,
+    operations: manifest.operations.filter((operation) => allowed.has(operation.name)),
+  };
+  const workerTurnMs = options.workerTurnMs ?? DEFAULT_WORKER_TURN_MS;
+  const now = options.now ?? Date.now;
+
+  return {
+    async execute(task, context): Promise<TaskExecutionOutcome> {
+      const recorded: Array<{ operation: string; outcome: ExecutionOutcome }> = [];
+      const exec = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+        if (tool !== EXECUTE_OPERATION_TOOL) throw new Error(`Worker 工具面之外的调用：${tool}`);
+        const operation = typeof args.operation === 'string' ? args.operation : '';
+        if (operation === '') throw new Error('execute_operation 缺少 operation。');
+        if (!allowed.has(operation)) {
+          throw new Error(`本轮只开放只读操作：「${operation}」不在允许集合内，未发起执行。`);
+        }
+        const rawArgs = args.args;
+        const callArgs = rawArgs !== null && typeof rawArgs === 'object' && !Array.isArray(rawArgs)
+          ? (rawArgs as Record<string, unknown>)
+          : {};
+        // requestId 由宿主生成：模型不能提供可信身份。
+        const requestId = `req_${randomUUID()}`;
+        const outcome = await options.client.execute({ requestId, operation, args: callArgs });
+        options.registry.noteExecution(task.taskId, {
+          requestId,
+          operation,
+          status: outcome.status,
+          ...(outcome.status === 'failed' || outcome.status === 'refused' ? { error: outcome.error } : {}),
+        });
+        recorded.push({ operation, outcome });
+        return outcome;
+      };
+
+      const deadline = now() + workerTurnMs;
+      let workerResult: TurnDriverResult;
+      try {
+        workerResult = await options.workerDriver.run({
+          systemPrompt: WORKER_SYSTEM_PROMPT,
+          tools: [executeOperationTool()],
+          messages: [userMessage(renderWorkerDelegation({
+            task: task.request,
+            manifest: workerManifest,
+            ...(options.workerSkills === undefined ? {} : { skills: options.workerSkills }),
+          }))],
+          onStep: () => {},
+          exec,
+          deadline,
+          signal: context.signal,
+        });
+      } catch (error) {
+        if (context.signal.aborted) return { kind: 'cancelled' };
+        if (isAbortErrorLike(error) && now() >= deadline) return { kind: 'timed_out' };
+        return { kind: 'failed', reason: error instanceof Error ? error.message : String(error) };
+      }
+      if (context.signal.aborted) return { kind: 'cancelled' };
+      if (workerResult.text.trim() === '') {
+        return now() >= deadline
+          ? { kind: 'timed_out' }
+          : { kind: 'failed', reason: '执行层 Worker 未产出有效汇报，本次任务未完成。' };
+      }
+      const needsInput = recorded.find(
+        (entry): entry is { operation: string; outcome: Extract<ExecutionOutcome, { status: 'needs_input' }> } =>
+          entry.outcome.status === 'needs_input',
+      );
+      if (needsInput !== undefined) {
+        const question = pendingQuestionFrom(needsInput.outcome);
+        return question === undefined
+          ? { kind: 'failed', reason: '执行层要求补充输入但未说明缺什么（missing 为空）。' }
+          : { kind: 'needs_input', question };
+      }
+      if (recorded.length === 0) {
+        return { kind: 'failed', reason: '未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。' };
+      }
+      const unsuccessful = recorded.find((entry) => entry.outcome.status !== 'completed');
+      if (unsuccessful !== undefined) {
+        const { operation, outcome } = unsuccessful;
+        if (outcome.status === 'failed' || outcome.status === 'refused') {
+          const message = outcome.error.message ?? '';
+          return {
+            kind: 'failed',
+            reason: message === ''
+              ? `执行层未成功：${operation} 返回 ${outcome.status}。`
+              : `执行层未成功：${operation} 返回 ${outcome.status}：${message}`,
+          };
+        }
+        return { kind: 'failed', reason: `执行层未成功：${operation} 返回 ${outcome.status}。` };
+      }
+      return { kind: 'completed', resultText: workerResult.text };
+    },
   };
 }
