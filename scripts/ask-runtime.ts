@@ -29,7 +29,7 @@
  * 本文件不做（边界同 ask）：不落盘会话（Pi 原生转录由调用方内存持有）、不建记忆/检索/
  * 投影、不写任务底账以外的状态。
  */
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ContextProfileConfig } from '@fshine/contracts';
@@ -294,4 +294,26 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     stateDir,
     close: assembled.close,
   };
+}
+
+/** CLI 入口装配仪式（单轮 ask 与交互式 ask 共用）：清空并重建 runtimeDir → 同一五门装配。 */
+export interface AskRuntimeCliInput {
+  argv: readonly string[];
+  env: NodeJS.ProcessEnv;
+  runtimeDir: string;
+  sessionId: string;
+  principalId?: string;
+}
+
+export async function assembleAskRuntimeCli(input: AskRuntimeCliInput): Promise<AskRuntime> {
+  rmSync(input.runtimeDir, { recursive: true, force: true });
+  mkdirSync(input.runtimeDir, { recursive: true });
+  return await assembleAskRuntime({
+    purpose: 'ask',
+    argv: input.argv,
+    env: input.env,
+    runtimeDir: input.runtimeDir,
+    sessionId: input.sessionId,
+    ...(input.principalId === undefined ? {} : { principalId: input.principalId }),
+  });
 }
