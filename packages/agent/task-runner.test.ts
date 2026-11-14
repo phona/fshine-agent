@@ -519,6 +519,18 @@ describe('排队 → 启动 → 收尾', () => {
     expect(h.registry.reasonOf('t1')).toBe('failed_confirmed');
     expect(h.registry.failureReasonOf('t1')).toContain('策略拒绝');
   });
+
+  it('执行端确认执行超时：running→timed_out + reason=timeout（P5 边界内的执行端判定）', async () => {
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    h.executor.settle(0, { kind: 'timed_out' });
+    await h.runner.whenIdle();
+
+    expect(h.registry.statusOf('t1')).toBe('timed_out');
+    expect(h.registry.reasonOf('t1')).toBe('timeout');
+    expect(h.policy.backgroundInUse).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
