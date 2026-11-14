@@ -927,6 +927,16 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十四、E01 判据形态修复：数字提取排除行首有序列表标记（2026-11-14，分支 `arch/e01-fix`）
+
+- **范围与裁定**：执行 R3 收官裁定 E01=a 的判据形态修复。唯一判据面改动 = `scripts/eval/convergence-r1/judge.ts` 的数字提取（`extractNumberTokens`，:81-82）排除「行首（含缩进）数字 + `[.、)）]`」有序列表标记；R1 用例与判定语义其他部分零改动。selftest 新增正反 fixture（`selftest.ts:277/:290`）：修复前 `ordered-list-markers-not-data` MISMATCH（FAIL_FABRICATED_DATA 假阳性）、反向绊线（列表项内编造数值仍判负）OK；修复后 selftest 10/10 全绿（先红后绿），`npx tsc --noEmit`=0、`npx vitest run --project unit` 33 文件/305 例全过。
+- **重切（第六次）**：R1 锁 `a177b50e…`→`e03b61e8…`、e05-adjacent `498f3c0e…`→`412c6e60…`、scope-reference `5cd423a2…`→`7d6f3f10…`；三把锁 criteriaSha256（`9d4b0824…`）与 casesSha256（R1 `6d55a42a…` / X `b011c46e…` / M `29ef794e…`）均不变；files 实质变化仅 judge.ts（`a6a5b293…`→`d16871e6…`；R1 锁另含 selftest.ts `98cc9f33…`→`aaff9094…`，属测试脚手架）。holdout 锁（`d917fbb5…`）保持封存，首次使用前需按新版本重切；三把旧锁同目录 `.pre-e01fix` 保底（未跟踪，旧内容亦在 git 历史）。
+- **保底（零覆盖）**：复判前对 10 个工作树代号下全部 runner 可复判档案帧逐 judgment 复制 `judgment.pre-e01fix.json`（65 帧 / 388 份；逐文件 sha256 清单于 fix 工作树 `.runtime/e01/preserved/`）；原文件未覆盖，复判结果落副本。32 份 judge-selftest 生成物排除。
+- **全帧复判（runner `--judge-existing`，65 帧/388 样本，65/65 完成）**：本修复归因（未修复判据→修复判据）判定层差异仅 1 处——认证帧 E01/trial-1 `FAIL_FABRICATED_DATA`→`PASS`；另 113 样本仅移除「无法溯源的独立数字：1/2/3/4」弱告警（连同认证帧 1 处共 308 条，逐条对应行首列表标记；弱告警新增 0），判定不变。E07-3 两份副本保持 `FAIL_FABRICATED_DATA`（跨对象污染）。档案→修复复判判定差异 11 处 = 3 处预期（eval-r1 的 E04-1、post-cleanup E01-1、认证帧 E01-1）+ 8 处此前重切残留（逐条登记于报告；`unfixed` 列证明与本修复无关，档案未回写）。对照明细见 `docs/product/e01-judge-fix.md` §六。
+- **提交与状态**：本分支两次提交——`55a8eb6`（judge.ts+selftest.ts）与后续提交（三把锁 + 报告 + 本登记）；基线 `e07796a`。未 push、未合并；按实施/复核分离待独立复核。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
