@@ -1,9 +1,10 @@
 /**
- * tasks 任务查看 CLI（P1 查看 + P2 结果交付）：
- *   · 用户视角：最近任务列表（时间/状态中文词/摘要/id）、单任务详情（状态/原因/执行步骤/任务结果）
- *     与交付件导出（`--out`，Markdown）；
+ * tasks 任务查看 CLI（P1 查看 + P2 结果交付 + P1 底账演化：数字编号/业务名称/最终回复）：
+ *   · 用户视角：最近任务列表（时间/状态中文词/#编号+业务名称）、单任务详情（状态/原因/执行步骤/
+ *     任务结果/最终回复）、交付件导出（`--out`，Markdown）与 `#编号` 引用解析；
  *   · 状态与失败原因必须与 judgeReportedTask 同语义（词表键绑定其返回类型，测试逐组比对）；
  *   · 交付件与详情逐行一致（同一组字段渲染函数）；导出拒绝覆盖、缺目录不自动创建、只读不写库；
+ *   · 最终回复：有存档逐字呈现；无存档（历史行）标注「该任务无最终回复存档」，不用汇报冒充；
  *   · 只读：库文件哈希不变、缺库不创建；缺库空态、未知 id 错误态；
  *   · e2e 用真实子进程跑 `scripts/tasks.ts`（仓内 dummy 面，不触网、不碰真实平台）。
  */
@@ -24,6 +25,7 @@ import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sq
 import { materializeEvalConfig } from './resolve-config-path';
 import {
   JUDGED_STATUS_WORDS,
+  findTaskRef,
   formatLocalTime,
   parseTaskArgs,
   renderTaskDeliverable,
@@ -32,6 +34,8 @@ import {
   resolveOutPath,
   resolveTaskDbPath,
   summarizeRequest,
+  taskLabel,
+  taskNoLabel,
   taskStatusWord,
   writeDeliverable,
 } from './tasks';
@@ -75,6 +79,7 @@ function record(overrides: Partial<TaskRecord> & { taskId: string }): TaskRecord
     sessionId: 'ask-2026-11-14',
     request: '帮我查一下 beta 集合、窗口 W1 的数据',
     status: 'completed',
+    taskNo: 1,
     createdAt: '2026-11-13T16:00:00.000Z',
     updatedAt: '2026-11-13T16:00:00.000Z',
     executions: [],
@@ -185,36 +190,42 @@ describe('tasks：状态词表与 judgeReportedTask 一致', () => {
 });
 
 describe('tasks：列表与详情渲染', () => {
-  it('列表：最新在前；超过 20 条只显示最近 20 条并提示总数', () => {
+  it('列表：最新在前；超过 20 条只显示最近 20 条并提示总数；业务展示位只有 #编号+名称', () => {
     const records = Array.from({ length: 25 }, (_, index) => record({
       taskId: `task_${String(index).padStart(2, '0')}`,
+      taskNo: index + 1,
       request: `任务 ${index}`,
       createdAt: `2026-11-13T16:${String(index).padStart(2, '0')}:00.000Z`,
     }));
     const text = renderTaskList(records);
     expect(text).toContain('最近任务（共 25 条，仅显示最近 20 条）');
-    expect(text.match(/^ {2}id: /gm)?.length).toBe(20);
     const rows = text.split('\n').filter((line) => line.startsWith('2026-'));
     expect(rows).toHaveLength(20);
-    expect(rows[0]).toContain('任务 24');
-    expect(rows[19]).toContain('任务 5');
+    expect(rows[0]).toContain('#25 任务 24');
+    expect(rows[19]).toContain('#6 任务 5');
     expect(text).not.toMatch(/任务 4\n/);
     expect(text).toContain('已完成');
+    // UUID（task_*）不出现在业务展示位；旧的 id: 行已移除。
+    expect(text).not.toContain('task_');
+    expect(text).not.toMatch(/^ {2}id: /m);
   });
 
-  it('详情：完成/失败/未执行/worker 失败四形态字段齐全', () => {
+  it('详情：完成/失败/未执行/worker 失败四形态字段齐全；无存档回复给机械标注', () => {
     const okText = renderTaskDetail(record({
       taskId: 'task_ok',
+      taskNo: 12,
       status: 'completed',
       resultText: '已查询 beta：3 条。',
       executions: [execution('completed')],
     }));
-    expect(okText).toContain('任务 task_ok');
+    expect(okText).toContain('任务 #12 帮我查一下 beta 集合、窗口 W1 的数据');
     expect(okText).toContain('状态：已完成');
     expect(okText).toContain('交办：帮我查一下 beta 集合、窗口 W1 的数据');
     expect(okText).toContain('1. dummy.query  完成');
     expect(okText).toContain('任务结果：\n已查询 beta：3 条。');
+    expect(okText).toContain('最终回复：\n该任务无最终回复存档（历史任务，Main 最终回复未持久化；不以执行层汇报冒充）。');
     expect(okText).not.toContain('失败原因：');
+    expect(okText).not.toContain('task_ok');
 
     const badText = renderTaskDetail(record({
       taskId: 'task_bad',
@@ -248,6 +259,29 @@ describe('tasks：列表与详情渲染', () => {
     expect(workerText).toContain('任务结果：\n（无）');
   });
 
+  it('最终回复：有存档逐字呈现；缺存档标注「该任务无最终回复存档」，不用任务结果冒充', () => {
+    const withReply = record({
+      taskId: 'task_reply',
+      taskNo: 7,
+      status: 'completed',
+      resultText: '执行层汇报原文：查到 beta 3 条。',
+      replyText: '已查到 beta 集合 3 条记录，这是给你的最终回复。',
+    });
+    const detail = renderTaskDetail(withReply);
+    expect(detail).toContain('最终回复：\n已查到 beta 集合 3 条记录，这是给你的最终回复。');
+    expect(detail).toContain('任务结果：\n执行层汇报原文：查到 beta 3 条。');
+
+    const noReply = record({
+      taskId: 'task_noreply',
+      taskNo: 8,
+      status: 'completed',
+      resultText: '执行层汇报原文：查到 beta 3 条。',
+    });
+    const second = renderTaskDetail(noReply);
+    expect(second).toContain('最终回复：\n该任务无最终回复存档（历史任务，Main 最终回复未持久化；不以执行层汇报冒充）。');
+    expect(second).not.toContain('最终回复：\n执行层汇报原文');
+  });
+
   it('摘要单行化并截断；时间按本机时区格式化', () => {
     expect(summarizeRequest('帮'.repeat(80))).toBe(`${'帮'.repeat(60)}…`);
     expect(summarizeRequest('第一行\n第二行')).toBe('第一行 第二行');
@@ -259,6 +293,30 @@ describe('tasks：列表与详情渲染', () => {
       + ` ${pad(local.getHours())}:${pad(local.getMinutes())}`;
     expect(formatLocalTime(iso)).toBe(expected);
     expect(formatLocalTime('not-a-date')).toBe('not-a-date');
+  });
+});
+
+describe('tasks：#编号引用解析（数字 ID 稳定简短）', () => {
+  const tasks = [
+    record({ taskId: 'task_one', taskNo: 1, request: '查 alpha' }),
+    record({ taskId: 'task_two', taskNo: 2, request: '查 beta' }),
+  ];
+
+  it('接受 taskId 原样（兼容）与 #编号/纯数字两种业务引用', () => {
+    expect(findTaskRef(tasks, 'task_two')?.taskId).toBe('task_two');
+    expect(findTaskRef(tasks, '#2')?.taskId).toBe('task_two');
+    expect(findTaskRef(tasks, '2')?.taskId).toBe('task_two');
+    expect(findTaskRef(tasks, '#99')).toBeUndefined();
+    expect(findTaskRef(tasks, 'task_absent')).toBeUndefined();
+    expect(findTaskRef(tasks, '#x')).toBeUndefined();
+  });
+
+  it('taskLabel/taskNoLabel：编号+名称（名称优先存储值，缺失机械回落原文首段）；缺编号不崩溃', () => {
+    expect(taskLabel(tasks[1]!)).toBe('#2 查 beta');
+    expect(taskNoLabel(tasks[1]!)).toBe('#2');
+    expect(taskLabel({ taskNo: 3, name: '业务名称', request: '原文' })).toBe('#3 业务名称');
+    expect(taskLabel({ taskNo: undefined, name: undefined, request: '历史原文' })).toBe('（无编号） 历史原文');
+    expect(taskNoLabel({ taskNo: undefined })).toBe('（无编号）');
   });
 });
 
@@ -291,23 +349,39 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
   });
   const running = record({ taskId: 'task_running', status: 'running' });
 
-  it('结构：标题/任务信息/状态/执行步骤/任务结果/限制与说明逐段齐全；完成态无原因行', () => {
+  it('结构：标题/任务信息/状态/执行步骤/任务结果/最终回复/限制与说明逐段齐全；完成态无原因行', () => {
     const text = renderTaskDeliverable(completed);
     const time = formatLocalTime(completed.createdAt);
-    expect(text.startsWith('# 任务交付件：task_ok（已完成）\n')).toBe(true);
-    expect(text).toContain('## 任务信息\n\n任务 task_ok');
+    expect(text.startsWith('# 任务交付件：#1 帮我查一下 beta 集合、窗口 W1 的数据（已完成）\n')).toBe(true);
+    expect(text).toContain('## 任务信息\n\n任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
     expect(text).toContain(`创建：${time}  更新：${formatLocalTime(completed.updatedAt)}\n交办：${completed.request}`);
     expect(text).toContain('## 状态\n\n状态：已完成');
     expect(text).toContain('## 执行步骤\n\n执行步骤：\n  1. dummy.query  完成');
     expect(text).toContain('## 任务结果\n\n任务结果：\n已查询 beta：3 条。');
+    expect(text).toContain('## 最终回复\n\n最终回复：\n该任务无最终回复存档');
     expect(text).toContain('## 限制与说明');
     expect(text).toContain('- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。');
-    expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；Main 的最终回复当前不落库，本交付件不含 Main 最终回复。');
+    expect(text).toContain('- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。');
+    expect(text).toContain('- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。');
     expect(text).toContain('- 状态与失败原因来自任务收尾时的机械判定（judgeReportedTask）；导出只读不重算。');
-    expect(text).toContain('- 执行步骤无时间戳（底账 schema 冻结）；时间以本机时区显示。');
+    expect(text).toContain('- 时间以本机时区显示；执行步骤无时间戳。');
     expect(text).not.toContain('失败原因：');
     expect(text).not.toContain('未执行原因：');
     expect(text).not.toContain('尚未收尾');
+    expect(text).not.toContain('task_ok');
+  });
+
+  it('最终回复存档在场：交付件含逐字回复全文与任务结果分列', () => {
+    const text = renderTaskDeliverable(record({
+      taskId: 'task_reply',
+      taskNo: 9,
+      status: 'completed',
+      resultText: '执行层汇报原文：查到 beta 3 条。',
+      replyText: '已查到 beta 集合 3 条记录，这是给你的最终回复。',
+    }));
+    expect(text).toContain('## 最终回复\n\n最终回复：\n已查到 beta 集合 3 条记录，这是给你的最终回复。\n');
+    expect(text).toContain('## 任务结果\n\n任务结果：\n执行层汇报原文：查到 beta 3 条。');
+    expect(text).not.toContain('该任务无最终回复存档');
   });
 
   it('失败/未执行/worker 失败：原因行标签与详情同规则，步骤与结果原样', () => {
@@ -327,7 +401,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
 
   it('进行中：无原因行，限制段追加未收尾提示', () => {
     const text = renderTaskDeliverable(running);
-    expect(text.startsWith('# 任务交付件：task_running（进行中）\n')).toBe(true);
+    expect(text.startsWith('# 任务交付件：#1 帮我查一下 beta 集合、窗口 W1 的数据（进行中）\n')).toBe(true);
     expect(text).toContain('## 状态\n\n状态：进行中');
     expect(text).not.toContain('失败原因：');
     expect(text).toContain('- 该任务尚未收尾（当前状态「进行中」）：交付件反映导出时的底账状态。');
@@ -350,9 +424,10 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     }
   });
 
-  it('金样：renderTaskDetail 输出逐字节稳定（P2 重构不得漂移）', () => {
+  it('金样：renderTaskDetail 输出逐字节稳定（含 #编号/名称与最终回复段）', () => {
     const text = renderTaskDetail(record({
       taskId: 'task_golden',
+      taskNo: 1,
       status: 'failed',
       failureReason: '执行层未成功：dummy.query 返回 failed：读取故障。',
       resultText: '执行层报告读取故障。',
@@ -360,7 +435,7 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
     }));
     const time = formatLocalTime('2026-11-13T16:00:00.000Z');
     expect(text).toBe([
-      '任务 task_golden',
+      '任务 #1 帮我查一下 beta 集合、窗口 W1 的数据',
       '状态：失败',
       `创建：${time}  更新：${time}`,
       '交办：帮我查一下 beta 集合、窗口 W1 的数据',
@@ -372,6 +447,9 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       '',
       '任务结果：',
       '执行层报告读取故障。',
+      '',
+      '最终回复：',
+      '该任务无最终回复存档（历史任务，Main 最终回复未持久化；不以执行层汇报冒充）。',
     ].join('\n'));
   });
 
@@ -425,7 +503,7 @@ function runTasks(args: string[], env: Record<string, string | undefined> = {}):
   return { status: result.status, stdout: result.stdout, stderr: result.stderr };
 }
 
-/** 造 4 条覆盖三态（含 fail 路径）的任务，走真实 SQLite 注册表。 */
+/** 造 4 条覆盖三态（含 fail 路径）的任务，走真实 SQLite 注册表；完成态带 Main 回复存档。 */
 function seedDb(dir: string): string {
   const dbPath = path.join(dir, 'state.db');
   const scope = { principalId: 'wecom:fixture-user', sessionId: 'ask-2026-11-14' };
@@ -433,6 +511,7 @@ function seedDb(dir: string): string {
   registry.begin({ taskId: 'task_completed', ...scope, request: '帮我查一下 beta 集合、窗口 W1 的数据' });
   registry.noteExecution('task_completed', { requestId: 'req_ok', operation: 'dummy.query', status: 'completed' });
   registry.complete('task_completed', '已查询 beta 集合（窗口 W1）：3 条记录。');
+  registry.archiveReply(['task_completed'], '已查到 beta 集合（窗口 W1）共 3 条记录，需要明细我再继续。');
 
   registry.begin({ taskId: 'task_failed', ...scope, request: '帮我查一下 faulty-one 集合的数据' });
   registry.noteExecution('task_failed', {
@@ -453,7 +532,7 @@ function seedDb(dir: string): string {
 }
 
 describe('tasks：CLI 端到端（真实子进程）', () => {
-  it('列表：三类状态以中文呈现，含摘要与 id', () => {
+  it('列表：三类状态以中文呈现，含 #编号与业务名称（不出现内部 taskId）', () => {
     const dir = tempDir();
     const dbPath = seedDb(dir);
     const run = runTasks([], { DB_PATH: dbPath });
@@ -462,9 +541,31 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     expect(run.stdout).toContain('已完成');
     expect(run.stdout).toContain('失败');
     expect(run.stdout).toContain('未执行');
-    expect(run.stdout).toContain('帮我查一下 beta 集合、窗口 W1 的数据');
-    expect(run.stdout).toContain('id: task_completed');
+    expect(run.stdout).toContain('#1 帮我查一下 beta 集合、窗口 W1 的数据');
+    expect(run.stdout).toContain('#2 帮我查一下 faulty-one 集合的数据');
+    expect(run.stdout).not.toContain('task_completed');
     expect(run.stdout).toContain('任务底账：');
+  });
+
+  it('#编号引用：详情/导出可用 #编号 与纯数字（兼容 taskId 原样）', () => {
+    const dir = tempDir();
+    const dbPath = seedDb(dir);
+
+    const byHash = runTasks(['#1'], { DB_PATH: dbPath });
+    expect(byHash.status).toBe(0);
+    expect(byHash.stdout).toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
+
+    const byNumber = runTasks(['3'], { DB_PATH: dbPath });
+    expect(byNumber.status).toBe(0);
+    expect(byNumber.stdout).toContain('任务 #3 帮我看看那边的情况');
+
+    const byInternalId = runTasks(['task_completed'], { DB_PATH: dbPath });
+    expect(byInternalId.status).toBe(0);
+    expect(byInternalId.stdout).toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
+
+    const absent = runTasks(['#99'], { DB_PATH: dbPath });
+    expect(absent.status).toBe(2);
+    expect(absent.stderr).toContain('找不到任务：#99');
   });
 
   it('详情：失败原因与 judgeReportedTask 同文本；未执行有零执行提示；完成无失败原因', () => {
@@ -476,6 +577,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     expect(ok.stdout).toContain('状态：已完成');
     expect(ok.stdout).toContain('1. dummy.query  完成');
     expect(ok.stdout).toContain('任务结果：\n已查询 beta 集合（窗口 W1）：3 条记录。');
+    expect(ok.stdout).toContain('最终回复：\n已查到 beta 集合（窗口 W1）共 3 条记录，需要明细我再继续。');
     expect(ok.stdout).not.toContain('失败原因：');
 
     const bad = runTasks(['task_failed'], { DB_PATH: dbPath });
@@ -496,6 +598,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     expect(none.stdout).toContain('状态：未执行');
     expect(none.stdout).toContain('未执行原因：未发起执行：Worker 已汇报，但本次委派没有向执行层发起任何调用。');
     expect(none.stdout).toContain('（无：本次任务未向执行层发起任何调用）');
+    expect(none.stdout).toContain('该任务无最终回复存档');
 
     const worker = runTasks(['task_worker_failed'], { DB_PATH: dbPath });
     expect(worker.stdout).toContain('状态：失败');
@@ -545,7 +648,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     writeFileSync(configPath, `principals: {}\ncontextProfiles: {}\nstore:\n  dbPath: ${dbPath}\n`);
     const run = runTasks([`--config=${configPath}`], {});
     expect(run.status).toBe(0);
-    expect(run.stdout).toContain('id: task_completed');
+    expect(run.stdout).toContain('#1 帮我查一下 beta 集合、窗口 W1 的数据');
 
     const usage = runTasks(['a', 'b'], {});
     expect(usage.status).toBe(2);
@@ -582,7 +685,7 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     expect(run.stdout).toContain('任务底账：');
 
     const text = readFileSync(out1, 'utf8');
-    expect(text.startsWith('# 任务交付件：task_failed（失败）\n')).toBe(true);
+    expect(text.startsWith('# 任务交付件：#2 帮我查一下 faulty-one 集合的数据（失败）\n')).toBe(true);
     expect(text).toContain('失败原因：执行层未成功：dummy.query 返回 failed：Collection faulty-one cannot be read in its current state');
     const detailLines = detail.stdout.split('\n').filter((line) => line.trim() !== '' && !line.startsWith('任务底账：'));
     const textLines = text.split('\n');
@@ -662,6 +765,8 @@ describe('tasks：CLI 端到端（真实子进程）', () => {
     const run = runTasks(['task_completed', '--out', 'rel.md'], { DB_PATH: dbPath, INIT_CWD: invocation });
     expect(run.status).toBe(0);
     expect(run.stdout).toContain(`已导出任务交付件：${path.join(invocation, 'rel.md')}`);
-    expect(readFileSync(path.join(invocation, 'rel.md'), 'utf8')).toContain('任务 task_completed');
+    const exported = readFileSync(path.join(invocation, 'rel.md'), 'utf8');
+    expect(exported).toContain('任务 #1 帮我查一下 beta 集合、窗口 W1 的数据');
+    expect(exported).toContain('最终回复：\n已查到 beta 集合（窗口 W1）共 3 条记录，需要明细我再继续。');
   });
 });
