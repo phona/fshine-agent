@@ -933,7 +933,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **交付物**：`docs/product/real-read-readiness.md`——接入设计（ExecutionClient 接缝/能力快照绑定/结构化请求/四态失败映射/只读白名单与越权拒绝路径/证据与审计）、凭据与鉴权边界（凭据归执行层、宿主不落密钥、worker env 白名单、最小权限与轮换要求）、只读保障、逐项安全评审清单（最小权限/无生产写/凭据托管/限流与预算/审计留存/回滚与熔断/日志脱敏/拒绝路径测试）、接入步骤草案（干跑假适配器→影子只读→有限真实只读）、未知项与待补清单、硬声明（准备材料≠已授权接入）。
 - **宿主侧事实基线（文档引用）**：契约 `packages/contracts/src/execution-contract.ts:99-103`；运行时 fail-closed 允许集合 `packages/agent/src/execution-runtime.ts:172-181、196-202`；适配器四态映射 `packages/agent/src/dummy-cli-client.ts:268-326`；凭据隔离 `packages/agent/src/worker-env.ts:25-35`；证据底账 `packages/core/src/task-store.ts:69-90`；评测隔离门 `scripts/eval/safety-gate.ts:88-159`。
 - **登记（不实施）**：网络传输无实现（§十二）；CLI flag 名残余（§17.3）；文件层凭据可达缺口（§七）为真实凭据上主机前置；server 装配无评测隔离门——真实接入的生产防线（凭据边界+允许集合+执行层自门）需在设计评审中显式确认。
-- **状态**：准备档已落盘（本分支，未 push/未合并）；按「实施/复核分离」待独立复核（复核重点=无越权承诺、清单覆盖硬边界、未知项如实标注）。
+- **状态**：准备档已落盘并经独立复核通过（两轮 verdict 均 passed=true、无 integrity 违例；本分支）；仲裁核验：diff 仅 docs/**、无平台/凭据接触、无越权承诺。
 
 ---
 
