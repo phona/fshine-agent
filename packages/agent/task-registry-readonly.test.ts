@@ -64,7 +64,9 @@ describe('任务底账只读打开（P1 任务查看）', () => {
     const dbPath = path.join(tempDir(), 'state.db');
     const writer = createSqliteTaskRegistry(dbPath);
     writer.begin({ taskId: 'task_a', ...scope, request: '查 beta' });
-    writer.complete('task_a', '已查询。');
+    writer.noteExecution('task_a', { requestId: 'req_1', operation: 'dummy.query', status: 'completed' });
+    // P2a 状态机起效后终态不可再写（非法转换在存储前确定性拒绝），故这里保留 running
+    // 让 complete/fail 走合法边、由 SQLite 只读连接拒绝——本用例的判据仍是「写路径被拒 + 哈希不变」。
     writer.close();
 
     const before = sha256(dbPath);

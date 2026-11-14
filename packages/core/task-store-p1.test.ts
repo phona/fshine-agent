@@ -5,9 +5,10 @@
  *   · 旧版 schema 库（含历史任务与执行记录）首次以新版本打开 → 一次版本化迁移：
  *     加列 task_no/name/reply_text；历史行按 (created_at, task_id) 升序回填 task_no（唯一、
  *     连续）；reply_text/name 保持 NULL（历史无存档，不伪造）；旧字段逐字节不变；
- *     迁移前自动备份副本 <db>.backup-v2（内容=迁移前字节）；user_version 记录 schema 版本；
+ *     迁移前自动备份副本 <db>.backup-v3（备份名=迁移目标 schema 版本；内容=迁移前字节）；
+ *     user_version 记录 schema 版本（P2a 后为 3）；
  *   · 迁移幂等：第二次打开零差异、不新增备份、不重写历史；
- *   · 新库：直接建 v2 schema，无备份，首行编号从 1 起；
+ *   · 新库：直接建当前版本 schema（v2 起，P2a 后为 v3），无备份，首行编号从 1 起；
  *   · 分配：同进程多连接交错插入 → 编号唯一、连续、按分配序；失败（重复 taskId）不占号；
  *     编号一经分配不回退（complete/fail/回复存档后不变）；迁移历史库后新任务从历史最大值接续；
  *   · 向前兼容：旧版库只读打开可读、不迁移、不建备份、主库哈希不变；新列读出为缺省（不崩溃）。
@@ -188,7 +189,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
 
     // 迁移前自动备份副本：内容=迁移前字节；不覆盖、不删除。
-    const backupPath = `${dbPath}.backup-v2`;
+    const backupPath = `${dbPath}.backup-v3`;
     expect(existsSync(backupPath)).toBe(true);
     expect(sha256(backupPath)).toBe(preMigrationSha);
     store.close();
@@ -203,8 +204,8 @@ describe('P1-T01 迁移幂等与回填', () => {
       { task_no: 3, name: null, reply_text: null },
     ]);
     second.close();
-    expect(backupFiles(dir)).toEqual(['state.db.backup-v2']);
-    expect(sha256(`${dbPath}.backup-v2`)).toBe(preMigrationSha);
+    expect(backupFiles(dir)).toEqual(['state.db.backup-v3']);
+    expect(sha256(`${dbPath}.backup-v3`)).toBe(preMigrationSha);
   });
 
   it('新库：直接建新 schema（无备份），首行编号从 1 起；user_version 记录版本', () => {
@@ -217,7 +218,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     expect(second.taskNo).toBe(2);
     store.close();
 
-    expect(existsSync(`${dbPath}.backup-v2`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v3`)).toBe(false);
     expect(backupFiles(dir)).toEqual([]);
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining(['task_no', 'name', 'reply_text']));
@@ -251,8 +252,13 @@ describe('P1-T02 并发分配与不复用', () => {
     const store = openTaskStore(dbPath);
     store.insertTask(row({ taskId: 'task_1', createdAt: '2026-11-14T09:00:00.000Z' }));
     store.insertTask(row({ taskId: 'task_2', createdAt: '2026-11-14T09:00:01.000Z' }));
-    store.setTaskOutcome('task_1', { status: 'completed', resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z' });
-    store.setTaskOutcome('task_2', { status: 'failed', failureReason: '故障。', updatedAt: '2026-11-14T09:00:03.000Z' });
+    // complete/fail 在 store 层经唯一状态写入语句（applyTaskState）落终态。
+    store.applyTaskState('task_1', {
+      expectedStatus: 'running', status: 'completed', resultText: '汇报。', updatedAt: '2026-11-14T09:00:02.000Z',
+    });
+    store.applyTaskState('task_2', {
+      expectedStatus: 'running', status: 'failed', failureReason: '故障。', updatedAt: '2026-11-14T09:00:03.000Z',
+    });
     store.setReplyForTasks(['task_1', 'task_2'], '本回合最终回复。', '2026-11-14T09:00:04.000Z');
 
     expect(store.getTask('task_1')!.task.taskNo).toBe(1);
@@ -344,7 +350,7 @@ describe('P1-T05 只读路径哈希不变（向前兼容）', () => {
 
     expect(sha256(dbPath)).toBe(before);
     expect(columnNames(dbPath)).not.toContain('task_no');
-    expect(existsSync(`${dbPath}.backup-v2`)).toBe(false);
+    expect(existsSync(`${dbPath}.backup-v3`)).toBe(false);
   });
 
   it('迁移后只读打开：新字段可读、主库哈希不变', () => {

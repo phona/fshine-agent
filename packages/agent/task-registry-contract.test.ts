@@ -264,9 +264,9 @@ for (const impl of IMPLS) {
         operation: 'dummy.query',
         status: 'completed',
       });
-      registry.complete('wait_task', '补充时间范围后查到 2 条。');
-
-      const done = registry.get('wait_task', SCOPE);
+      // 后台路径由 runner 按执行层确认的结果落终态（不经过 inline judgeReportedTask：
+      // 其「首个非 completed 判负」语义被表征测试冻结，waiting_user 仅后台任务使用）。
+      const done = registry.transition('wait_task', 'completed');
       expect(done.status).toBe('completed');
       expect(done.taskNo).toBe(taskNoBefore);
       expect(done.createdAt).toBe(createdAtBefore);
@@ -486,7 +486,7 @@ describe('Task Registry 契约核心（SQLite 持久化）', () => {
 
     second.answerResumes('persist_wait');
     second.noteExecution('persist_wait', { requestId: 'req_persist_2', operation: 'dummy.query', status: 'completed' });
-    second.complete('persist_wait', '补充后完成。');
+    second.transition('persist_wait', 'completed');
     const done = second.get('persist_wait', SCOPE);
     expect(done.status).toBe('completed');
     expect(done.taskNo).toBe(taskNo);

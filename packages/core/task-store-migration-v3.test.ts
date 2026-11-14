@@ -173,12 +173,16 @@ function seedV1Db(dbPath: string): void {
   db.close();
 }
 
-/** 旧字段快照（迁移不得改写旧列与执行记录；user_version 除外——迁移正是要推进它）。 */
-function legacySnapshot(dbPath: string, columns: readonly string[]): unknown {
+/**
+ * 旧字段快照（迁移不得改写旧列与执行记录；user_version 除外——迁移正是要推进它）。
+ * taskIds 给出时只快照这些行的旧列（用于新增任务后对历史行逐一核账）。
+ */
+function priorColumnsSnapshot(dbPath: string, columns: readonly string[], taskIds?: readonly string[]): unknown {
   const db = new Database(dbPath, { readonly: true });
   try {
+    const filter = taskIds === undefined ? '' : `WHERE task_id IN (${taskIds.map(() => '?').join(', ')})`;
     return {
-      tasks: db.prepare(`SELECT ${columns.join(', ')} FROM tasks ORDER BY task_id`).all(),
+      tasks: db.prepare(`SELECT ${columns.join(', ')} FROM tasks ${filter} ORDER BY task_id`).all(...(taskIds ?? [])),
       executions: db.prepare('SELECT request_id, task_id, operation, status, error_json FROM executions ORDER BY request_id').all(),
     };
   } finally {
@@ -208,12 +212,12 @@ function backupFiles(dir: string): string[] {
   return readdirSync(dir).filter((name) => name.includes('.backup-'));
 }
 
-const V2_LEGACY_COLUMNS = [
+const V2_SCHEMA_COLUMNS = [
   'task_id', 'principal_id', 'session_id', 'request', 'status', 'result_text', 'failure_reason',
   'created_at', 'updated_at', 'task_no', 'name', 'reply_text',
 ] as const;
 
-const V1_LEGACY_COLUMNS = [
+const V1_SCHEMA_COLUMNS = [
   'task_id', 'principal_id', 'session_id', 'request', 'status', 'result_text', 'failure_reason',
   'created_at', 'updated_at',
 ] as const;
@@ -226,14 +230,14 @@ describe('P2a v3 迁移（v2 → v3）', () => {
     const dbPath = path.join(dir, 'state.db');
     seedV2Db(dbPath);
     const preMigrationSha = sha256(dbPath);
-    const before = legacySnapshot(dbPath, V2_LEGACY_COLUMNS);
+    const before = priorColumnsSnapshot(dbPath, V2_SCHEMA_COLUMNS);
 
     const store = openTaskStore(dbPath);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining([...V3_COLUMNS]));
     expect(userVersion(dbPath)).toBe(TASK_STORE_SCHEMA_VERSION);
     expect(TASK_STORE_SCHEMA_VERSION).toBe(3);
     // 历史行（含 task_no/name/reply_text 与执行记录）逐字节不变。
-    expect(legacySnapshot(dbPath, V2_LEGACY_COLUMNS)).toEqual(before);
+    expect(priorColumnsSnapshot(dbPath, V2_SCHEMA_COLUMNS)).toEqual(before);
     // 迁移前自动备份：内容 = 迁移前字节；命名跟随迁移目标版本。
     const backupPath = `${dbPath}.backup-v3`;
     expect(existsSync(backupPath)).toBe(true);
@@ -252,12 +256,12 @@ describe('P2a v3 迁移（v2 → v3）', () => {
     expect(inserted.taskNo).toBe(3);
     store.close();
 
-    // 幂等：第二次打开零差异、不新增备份、不重复迁移。
+    // 幂等：第二次打开零差异、不新增备份、不重复迁移（新任务行合法新增，历史行逐列不变）。
     const second = openTaskStore(dbPath);
     expect(second.listTasks().map((stored) => [stored.task.taskId, stored.task.taskNo]))
       .toEqual([['task_a', 1], ['task_b', 2], ['task_new', 3]]);
     second.close();
-    expect(legacySnapshot(dbPath, V2_LEGACY_COLUMNS)).toEqual(before);
+    expect(priorColumnsSnapshot(dbPath, V2_SCHEMA_COLUMNS, ['task_a', 'task_b'])).toEqual(before);
     expect(backupFiles(dir)).toEqual(['state.db.backup-v3']);
     expect(sha256(backupPath)).toBe(preMigrationSha);
   });
@@ -283,7 +287,7 @@ describe('P2a v3 迁移（v1 → v3 一次补齐）', () => {
     const dbPath = path.join(dir, 'state.db');
     seedV1Db(dbPath);
     const preMigrationSha = sha256(dbPath);
-    const before = legacySnapshot(dbPath, V1_LEGACY_COLUMNS);
+    const before = priorColumnsSnapshot(dbPath, V1_SCHEMA_COLUMNS);
 
     const store = openTaskStore(dbPath);
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining([...V3_COLUMNS, 'task_no', 'name', 'reply_text']));
@@ -296,7 +300,7 @@ describe('P2a v3 迁移（v1 → v3 一次补齐）', () => {
     expect(tasks.map((stored) => stored.task.name)).toEqual([undefined, undefined, undefined]);
     expect(tasks.map((stored) => stored.task.reason)).toEqual([undefined, undefined, undefined]);
 
-    expect(legacySnapshot(dbPath, V1_LEGACY_COLUMNS)).toEqual(before);
+    expect(priorColumnsSnapshot(dbPath, V1_SCHEMA_COLUMNS)).toEqual(before);
     expect(backupFiles(dir)).toEqual(['state.db.backup-v3']);
     expect(sha256(`${dbPath}.backup-v3`)).toBe(preMigrationSha);
     store.close();

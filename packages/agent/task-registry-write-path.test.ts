@@ -56,11 +56,12 @@ describe('任务状态单写路径守卫（源码级）', () => {
 
   it('task-store 内「UPDATE tasks … SET … status」恰一条（单一语句写状态）', () => {
     const text = stripComments(read(WRITER_FILE));
-    const statements = [...text.matchAll(/UPDATE\s+tasks\b([\s\S]{0,400})/gi)];
-    const statusWriters = statements.filter((match) => /status\s*=/i.test(match[1] ?? ''));
+    // 语句体 = 关键字到 SQL 字面量结尾（反引号/单引号）；避免窗口式匹配吞掉后续语句。
+    const bodies = [...text.matchAll(/UPDATE\s+tasks\b([^`']*)/gi)].map((match) => match[1] ?? '');
+    const statusWriters = bodies.filter((body) => /status\s*=/i.test(body));
     console.log(JSON.stringify({
       event: 'task_write_path_statements',
-      total: statements.length,
+      total: bodies.length,
       statusWriters: statusWriters.length,
     }));
     expect(statusWriters).toHaveLength(1);
