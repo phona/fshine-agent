@@ -29,7 +29,7 @@ import type {
   TaskExecutionOutcome,
   TaskExecutor,
 } from '../packages/agent/src/task-runner';
-import { assembleSessionCore } from './ask-runtime';
+import { assembleAskRuntime, assembleSessionCore } from './ask-runtime';
 import { renderTaskDetail } from './tasks';
 
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -535,6 +535,32 @@ describe('R4 联合：配置面（runtime.dispatchMode）', () => {
       .toThrowError(/runtime\.dispatchMode/);
     expect(() => loadConfig({ yamlPath: writeConfig(path.join(dir, 'd.yaml'), ['  dispatchModee: inline']) }))
       .toThrowError(/不是已知字段/);
+  });
+});
+
+describe('R4 联合：ask 入口对 background 的登记边界', () => {
+  it('⑬ assembleAskRuntime 对 runtime.dispatchMode=background 显式拒绝（不静默忽略/不半程丢任务）', async () => {
+    const dir = tempDir();
+    const configPath = path.join(dir, 'ask-background.yaml');
+    writeFileSync(configPath, [
+      'principals:',
+      '  "test:user":',
+      '    enabled: true',
+      'contextProfiles:',
+      '  t:',
+      `    root: ${FIXTURE_ROOT}`,
+      '    gateway: bin/dummy',
+      '    skillRoots: [".agents/skills-serve"]',
+      'runtime:',
+      '  dispatchMode: background',
+    ].join('\n') + '\n');
+    await expect(assembleAskRuntime({
+      purpose: 'ask',
+      argv: [`--config=${configPath}`],
+      env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'], LLM_API_KEY: 'test-key' },
+      runtimeDir: dir,
+      sessionId: 'ask-bg',
+    })).rejects.toThrowError(/入口不支持 runtime\.dispatchMode=background/);
   });
 });
 
