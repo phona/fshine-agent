@@ -319,6 +319,12 @@ function makeRun(runDir: string, cases: ReadonlyArray<{ caseId: string; pass: nu
   return { runDir, manifest: null, trials };
 }
 
+function rowOf(text: string, caseId: string): string {
+  const row = text.split('\n').find((line) => line.startsWith(`| ${caseId} `));
+  if (row === undefined) throw new Error(`未找到用例行：${caseId}`);
+  return row;
+}
+
 describe('renderCompare：口径版本标注（缺省 v1 三态；提供 --bound 时 v2 四态）', () => {
   const runA = makeRun('run-a', [
     { caseId: 'c-overlap', pass: 7, total: 9 },
@@ -335,10 +341,10 @@ describe('renderCompare：口径版本标注（缺省 v1 三态；提供 --bound
     const text = renderCompare(runA, runB);
     expect(text).toContain('口径版本：v1');
     expect(text).toContain('| 用例 | A k/N（Wilson 95% CI） | B k/N（Wilson 95% CI） | Δ（pp） | 三态 |');
-    expect(text).toContain('c-overlap');
+    expect(rowOf(text, 'c-overlap')).toContain('NO_MEANINGFUL_CHANGE');
+    expect(rowOf(text, 'c-improved')).toContain('IMPROVED');
+    expect(rowOf(text, 'c-small')).toContain('INSUFFICIENT_SAMPLES');
     expect(text).toContain('NO_MEANINGFUL_CHANGE');
-    expect(text).toContain('IMPROVED');
-    expect(text).toContain('INSUFFICIENT_SAMPLES');
     expect(text).not.toContain('NO_SUBSTANTIAL_CHANGE_VERIFIED');
   });
 
@@ -347,9 +353,10 @@ describe('renderCompare：口径版本标注（缺省 v1 三态；提供 --bound
     expect(text).toContain('口径版本：v2');
     expect(text).toContain('δ=0.1');
     expect(text).toContain('Newcombe');
-    expect(text).toContain('c-overlap');
-    expect(text).toContain('INSUFFICIENT_EVIDENCE');
-    expect(text).toContain('IMPROVED');
+    expect(rowOf(text, 'c-overlap')).toContain('INSUFFICIENT_EVIDENCE');
+    expect(rowOf(text, 'c-improved')).toContain('IMPROVED');
+    expect(rowOf(text, 'c-improved')).not.toContain('REGRESSED');
+    expect(rowOf(text, 'c-small')).toContain('INSUFFICIENT_EVIDENCE');
     expect(text).not.toContain('NO_MEANINGFUL_CHANGE');
     expect(text).not.toContain('INSUFFICIENT_SAMPLES');
   });
@@ -358,7 +365,7 @@ describe('renderCompare：口径版本标注（缺省 v1 三态；提供 --bound
     const runC = makeRun('run-c', [{ caseId: 'c-equiv', pass: 90, total: 100 }]);
     const runD = makeRun('run-d', [{ caseId: 'c-equiv', pass: 91, total: 100 }]);
     const text = renderCompare(runC, runD, { bound: BOUND });
-    expect(text).toContain('NO_SUBSTANTIAL_CHANGE_VERIFIED');
+    expect(rowOf(text, 'c-equiv')).toContain('NO_SUBSTANTIAL_CHANGE_VERIFIED');
   });
 
   it('非法界 fail-closed：renderCompare 抛错（无样本亦然）', () => {
