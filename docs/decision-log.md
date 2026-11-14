@@ -1071,6 +1071,18 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十七、集成接线：实施与合入（2026-11-14，分支 `arch/r4-integ`）
+
+- **授权与基线**：owner §四/§八（共享热点文件唯一负责人）；基线 `3b41945`；提交链：`198587c`（联合测试 RED）→ `deeb57b`（ask 入口 background 拒绝用例）→ `8eaa7de`（接线）→ `1153d1f`（`dispatchMode` 登记）→ `6e894c4`/`8b325c2`（⑮⑯⑰ pin）→ `5819b4e`（报告）。
+- **接线面（文件级）**：`contracts/core config`——`runtime.dispatchMode: 'inline'|'background'`（缺省 inline、非法 fail-fast）；`execution-runtime`——前台 acquire/release（拒绝=确定性 `ForegroundRejectionError`）、inline 委派派生后台许可（共享父预算/深度+1）、background 委派=`runner.submit→pump`、`createTaskExecutor`（单回合后台执行器：needs_input/零执行/超时/取消/完成机械判定）；`task-runner`——可选 `archiveReply` 端口（settle 确认 completed 后逐字存档 resultText）；`ask-runtime`——policy/runner/executor/sink 注入、`createBackgroundDispatch`、`attachNotificationOutbox`（唯一事实→outbox 接线点）、ask/redo 对 background 显式拒绝；`server`——同会话 promise 链串行化（P5-T02）、进程级 runner 首次 `pump()`=重启恢复、outbox `deliverOnRecord`、`deliverPending`；`tasks`——详情只读「通知投递」段（历史行零变化）。
+- **读数**：联合 7 焦点 15 例（+⑯⑰ pin=17）；反向绊线 **9 类两轮**（串行化直通/不挂 outbox/不调 archiveReply/前台直返/委派不派生许可/投递失败写 tasks 行/取消直接 confirm/unknown 重放/直写 `UPDATE tasks`）均红后逐字节复原，全仓 TRIPWIRE 残留 0；tsc 0；全量 unit **54 文件/584 例**（只增不减；inline 金样逐字全绿）；真实 Pi smoke N=1（E06/E12 PASS；后台 E2E：交办→#1 受理→running→completed→通知经假 sink 全部送达→tasks CLI 找回回复与投递状态）——一律 **INSUFFICIENT_EVIDENCE**，不作稳定性结论；措辞观察（受理回复未逐字含「已受理」、业务名未完整复述）如实登记，留 P7b 预注册批次判定。
+- **独立复核**：passed=true、integrity=false（复核员在独立临时 worktree @`5819b4e` 复跑联合用例与绊线）。
+- **合入**：`98bf7ab`（--no-ff）入 `arch/integration`；文件范围 13 文件 +1821/−59；合入后 typecheck=0、unit 54 文件/584 例全绿。
+- **blocked 审计**：本 Run 解除 P5/P6/P4/P2 的接线类 blocked；**仍 blocked→P7b**：各 E01 黑盒（预注册 N）、P7-T06 故障注入、真实渠道投递、`taskBudget` 运行时 consume、P6 §七 遗留（cancelling 孤儿恢复/waiting 续租/超时触发/`queueCapacity=0` 拒绝落点）、ops 通知清单、多进程/多实例。
+- **回退**：配置级 `dispatchMode: inline` 即回现行路径（runner/outbox 不创建）；提交级 revert 本片提交；无 schema 迁移。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
