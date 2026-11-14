@@ -277,18 +277,24 @@ wecom:
   botId: yaml-bot-id
   botSecret: yaml-bot-secret
 host:
-  platformQueueCapacity: 7
-  shutdownDrainMs: 0
-  workerDispatchMode: background
-  workerStepCap: 12
-  inboundDebounceMs: 0
   attachmentDir: /srv/attachments
-  piAgentDir: /srv/pi-agent
 execution:
   planActivationSecret: yaml-plan-secret
+runtime:
+  mainConcurrency: 2
+  backgroundConcurrency: 1
+  queueCapacity: 4
+  mainTurnMs: 300000
+  workerTurnMs: 180000
+  maxDelegationDepth: 1
+  waitUserTimeoutMs: 86400000
+  taskBudget:
+    ms: 60000
+    calls: 5
+    tokens: 2000
 `;
 
-  it('yaml 段解析：llm / wecom / host / execution', () => {
+  it('yaml 段解析：llm / wecom / host / execution / runtime', () => {
     const config = loadConfig({ yamlPath: writeFixture(DEPLOYMENT_YAML), env: {} });
 
     expect(config.llm).toEqual({
@@ -300,16 +306,18 @@ execution:
       mainThinkingLevel: 'low',
     });
     expect(config.wecom).toEqual({ botId: 'yaml-bot-id', botSecret: 'yaml-bot-secret' });
-    expect(config.host).toEqual({
-      platformQueueCapacity: 7,
-      shutdownDrainMs: 0,
-      workerDispatchMode: 'background',
-      workerStepCap: 12,
-      inboundDebounceMs: 0,
-      attachmentDir: '/srv/attachments',
-      piAgentDir: '/srv/pi-agent',
-    });
+    expect(config.host).toEqual({ attachmentDir: '/srv/attachments' });
     expect(config.execution).toEqual({ planActivationSecret: 'yaml-plan-secret' });
+    expect(config.runtime).toEqual({
+      mainConcurrency: 2,
+      backgroundConcurrency: 1,
+      queueCapacity: 4,
+      mainTurnMs: 300000,
+      workerTurnMs: 180000,
+      maxDelegationDepth: 1,
+      waitUserTimeoutMs: 86400000,
+      taskBudget: { ms: 60000, calls: 5, tokens: 2000 },
+    });
   });
 
   it('非空 env 覆盖 yaml；空串 env 不覆盖（--env-file 的 KEY= 形态）', () => {
@@ -318,7 +326,7 @@ execution:
       env: {
         LLM_MODEL: 'env-model',
         WECOM_BOT_ID: 'env-bot-id',
-        FSHINE_PLATFORM_QUEUE_CAPACITY: '9',
+        FSHINE_ATTACHMENT_DIR: '/srv/env-attachments',
         EXECUTION_PLAN_ACTIVATION_SECRET: 'env-plan-secret',
         APP_PORT: '8080',
       },
@@ -326,7 +334,7 @@ execution:
     expect(overridden.llm?.model).toBe('env-model');
     expect(overridden.llm?.apiKey).toBe('yaml-key');
     expect(overridden.wecom?.botId).toBe('env-bot-id');
-    expect(overridden.host?.platformQueueCapacity).toBe(9);
+    expect(overridden.host?.attachmentDir).toBe('/srv/env-attachments');
     expect(overridden.execution?.planActivationSecret).toBe('env-plan-secret');
     expect(overridden.channel.port).toBe(8080);
 
@@ -335,14 +343,14 @@ execution:
       env: {
         LLM_MODEL: '',
         WECOM_BOT_ID: '',
-        FSHINE_PLATFORM_QUEUE_CAPACITY: '   ',
+        FSHINE_ATTACHMENT_DIR: '   ',
         EXECUTION_PLAN_ACTIVATION_SECRET: '',
         APP_PORT: '',
       },
     });
     expect(blank.llm?.model).toBe('yaml-model');
     expect(blank.wecom?.botId).toBe('yaml-bot-id');
-    expect(blank.host?.platformQueueCapacity).toBe(7);
+    expect(blank.host?.attachmentDir).toBe('/srv/attachments');
     expect(blank.execution?.planActivationSecret).toBe('yaml-plan-secret');
     // 空串 APP_PORT 也回落到 yaml 的 channel.port（旧行为会退回默认 3000）。
     expect(blank.channel.port).toBe(3100);
@@ -384,6 +392,7 @@ execution:
         'wecom:',
         'host:',
         'execution:',
+        'runtime:',
       ].join('\n')),
       env: {},
     });
@@ -391,30 +400,80 @@ execution:
     expect(config.wecom).toBeUndefined();
     expect(config.host).toBeUndefined();
     expect(config.execution).toBeUndefined();
+    expect(config.runtime).toBeUndefined();
     expect(deploymentEnvOf(config)).toEqual({});
   });
 
-  it('非法数值 / 非法派发模式：数值按未配置回缺省，派发模式 fail-fast 点名键', () => {
-    const invalidNumbers = `principals:
+  it('已删 host.* 死键（分诊 #6）：旧 YAML 残留被忽略，不再进 AppConfig、不再派生覆盖口', () => {
+    const staleHostYaml = `principals:
   "wecom:user_a":
     enabled: true
 host:
-  platformQueueCapacity: -1
-  workerStepCap: nope
-  inboundDebounceMs: -5
+  platformQueueCapacity: 7
+  shutdownDrainMs: 0
+  workerDispatchMode: background
+  workerStepCap: 12
+  inboundDebounceMs: 0
+  piAgentDir: /srv/pi-agent
 `;
-    const config = loadConfig({ yamlPath: writeFixture(invalidNumbers), env: {} });
-    // 非法值不落进 AppConfig（缺省住各消费点，加载层不复制第二份）。
+    const config = loadConfig({ yamlPath: writeFixture(staleHostYaml), env: {} });
+    // 旧 YAML 照常加载（不拒启），但未消费键不再进 AppConfig——不再有「写着不生效」的假配置。
     expect(config.host).toBeUndefined();
+    for (const env of [
+      'FSHINE_PLATFORM_QUEUE_CAPACITY',
+      'FSHINE_SHUTDOWN_DRAIN_MS',
+      'FSHINE_WORKER_DISPATCH_MODE',
+      'FSHINE_WORKER_STEP_CAP',
+      'FSHINE_INBOUND_DEBOUNCE_MS',
+      'FSHINE_PI_AGENT_DIR',
+    ]) {
+      expect(deploymentEnvOf(config)[env], `${env} 不应再派生`).toBeUndefined();
+    }
+  });
 
-    expect(() => loadConfig({
-      yamlPath: writeFixture(DEPLOYMENT_YAML.replace('workerDispatchMode: background', 'workerDispatchMode: yolo')),
-      env: {},
-    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
-    expect(() => loadConfig({
-      yamlPath: writeFixture(DEPLOYMENT_YAML),
-      env: { FSHINE_WORKER_DISPATCH_MODE: 'yolo' },
-    })).toThrowError(/FSHINE_WORKER_DISPATCH_MODE/);
+  it('runtime 段：缺段 / 空段 = 未配置（缺省住策略模块，加载层不复制）；非映射拒启', () => {
+    expect(loadConfig({ yamlPath: writeFixture(VALID_YAML), env: {} }).runtime).toBeUndefined();
+    expect(loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime:\n# 只有注释 → null\n`), env: {} }).runtime).toBeUndefined();
+    expect(() => loadConfig({ yamlPath: writeFixture(`${VALID_YAML}runtime: 3\n`), env: {} })).toThrowError(/runtime/);
+  });
+
+  it('runtime 段：非法值 fail-fast 点名 runtime.<key>（资源限额静默回落 = 限额失效，必须拒绝）', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['mainConcurrency: 0', /runtime\.mainConcurrency/],
+      ['mainConcurrency: -2', /runtime\.mainConcurrency/],
+      ['mainConcurrency: 1.5', /runtime\.mainConcurrency/],
+      ['backgroundConcurrency: -1', /runtime\.backgroundConcurrency/],
+      ['queueCapacity: -1', /runtime\.queueCapacity/],
+      ['mainTurnMs: 0', /runtime\.mainTurnMs/],
+      ['workerTurnMs: 0', /runtime\.workerTurnMs/],
+      ['maxDelegationDepth: -1', /runtime\.maxDelegationDepth/],
+      ['waitUserTimeoutMs: 0', /runtime\.waitUserTimeoutMs/],
+      ['mainTurnMs: nope', /runtime\.mainTurnMs/],
+    ];
+    for (const [line, expected] of cases) {
+      const yaml = `${VALID_YAML}runtime:\n  ${line}\n`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), line).toThrowError(expected);
+    }
+  });
+
+  it('runtime 段：未知键拒绝（拼错的旋钮不得被缺省静默吞掉）', () => {
+    const yaml = `${VALID_YAML}runtime:\n  mainConcurency: 2\n`;
+    expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} })).toThrowError(/runtime\.mainConcurency/);
+  });
+
+  it('runtime.taskBudget 子键：ms/calls 必填、非法值点名、未知子键拒绝', () => {
+    const cases: ReadonlyArray<[string, RegExp]> = [
+      ['taskBudget:\n    ms: 60000\n', /runtime\.taskBudget\.calls/],
+      ['taskBudget:\n    calls: 5\n', /runtime\.taskBudget\.ms/],
+      ['taskBudget:\n    ms: 0\n    calls: 5\n', /runtime\.taskBudget\.ms/],
+      ['taskBudget:\n    ms: 60000\n    calls: 0\n', /runtime\.taskBudget\.calls/],
+      ['taskBudget:\n    ms: 60000\n    calls: 5\n    tokens: -1\n', /runtime\.taskBudget\.tokens/],
+      ['taskBudget:\n    ms: 60000\n    calls: 5\n    tps: 1\n', /runtime\.taskBudget\.tps/],
+    ];
+    for (const [block, expected] of cases) {
+      const yaml = `${VALID_YAML}runtime:\n  ${block}`;
+      expect(() => loadConfig({ yamlPath: writeFixture(yaml), env: {} }), block).toThrowError(expected);
+    }
   });
 
   it('deploymentEnvOf：只映射已配置值，env 覆盖后的生效值进入映射', () => {
@@ -431,13 +490,7 @@ host:
       LLM_MAIN_THINKING_LEVEL: 'low',
       WECOM_BOT_ID: 'yaml-bot-id',
       WECOM_BOT_SECRET: 'yaml-bot-secret',
-      FSHINE_PLATFORM_QUEUE_CAPACITY: '7',
-      FSHINE_SHUTDOWN_DRAIN_MS: '0',
-      FSHINE_WORKER_DISPATCH_MODE: 'background',
-      FSHINE_WORKER_STEP_CAP: '12',
-      FSHINE_INBOUND_DEBOUNCE_MS: '0',
       FSHINE_ATTACHMENT_DIR: '/srv/attachments',
-      FSHINE_PI_AGENT_DIR: '/srv/pi-agent',
       EXECUTION_PLAN_ACTIVATION_SECRET: 'yaml-plan-secret',
     });
   });
