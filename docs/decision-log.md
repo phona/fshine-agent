@@ -1273,7 +1273,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ## 四十九、业务 E2E · 夜跑续批（bizbatch3：**#7 重设计** / **#6 深探** / 重复轮）（2026-11-15，分支 `arch/r4-bizbatch3`）
 
-- **状态**：**待合入**（merge commit 由主会话补齐；三件事均已在真实模型上跑完，读数见报告 §十三；**尚未 push / 未合并 / 未碰 main/tag**）。
+- **状态**：**已合入**（`--no-ff` → `arch/integration` @ `c0a426c`，2026-11-15；合入后 typecheck=0、unit 74 文件/731 例全绿；产品代码零改动）。**备注**：run 内复核判定 `passed=false`，**唯一原因是预注册检定项「#7 压缩确触发」未达成**（README 同款如实登记、非缺陷、非 integrityViolation）；其余三件事读数与证据齐备、复核逐条核过。仲裁者接受合入。
 - **授权**：owner 2026-11-15（彻夜长跑续批）；预注册见 `docs/product/business-e2e-prereg-addendum.md` §六（**先于运行**写死）。
 - **分支/基线**：worktree `~/projects/fshine-agent-r4-bizbatch3`，分支 `arch/r4-bizbatch3`；基线 = `arch/integration` 启动时 HEAD `a88f62328a1336c9242ba64b1e09c5a67138f9fa`（`.runtime/bizbatch3/baseline.txt`，gitignored）。
 - **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
