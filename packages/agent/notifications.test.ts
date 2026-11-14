@@ -210,6 +210,17 @@ describe('P4 payload 仅来自传入事实（P4-T04 确定性字段来源）', (
     outbox.close();
   });
 
+  it('result_unknown 以 failed 意图承载，payload.reason 如实携带（v1.1 澄清口径，不得混淆为 failed_confirmed/success）', () => {
+    const { outbox } = harness(tempDbPath(), new FakeSink());
+    const { notification } = outbox.record(fact({ kind: 'failed', reason: 'result_unknown' }));
+    expect(notification.kind).toBe('failed');
+    expect(notification.payload.reason).toBe('result_unknown');
+    const [row] = outbox.listNotifications();
+    expect(row!.kind).toBe('failed');
+    expect(row!.payload.reason).toBe('result_unknown');
+    outbox.close();
+  });
+
   it('非法 kind / reason / taskNo / 缺 at 被拒，且不落库', () => {
     const { outbox } = harness(tempDbPath(), new FakeSink());
     const forgedKind = { taskId: 'task_1', kind: 'done', at: T0 };
