@@ -1011,6 +1011,22 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十二、P5 资源强制：实施与合入（2026-11-14，分支 `arch/r4-p5`；已合入）
+
+- **授权与范围**：owner 2026-11-14 并行授权「P5 对冻结契约独立开发，不等 P2 落盘」；契约 = `docs/product/r4-joint-interfaces.md` §2（冻结）＋ `r4-slices.md` P5（`runtime` 段/信号量/队列容量/委派深度/共享预算/等待超时；`send` 串行化）＋ `r4-acceptance.md` P5-T01/T03/T04/T05/T06 的确定性面＋分诊 #6/#10/#11。基线 `arch/integration @ 9ae895d`（含联合接口约定 v1）。本轨只做纯逻辑模块与配置段，**不接线** execution-runtime/server/ask-runtime（联合接口约定 §6：强制点归集成 Run）；P5-E01（黑盒顺序不回归）与端到端接线验收 **blocked-by-集成**。
+- **提交链**：`c67af5b`（测试先行 RED：resource-policy 模块缺失、守卫命中 host 死键、config 6 例红）→ `500f1e4`（实现 + 测试基础设施诚实更新）→ `9a3979d`（本节登记）→ `d718e1e`/`501056d`（拒绝映射补记）→ `e96ec5b`/`fcdb76a`（读数与报告）。
+- **`host.*` 未消费键删除（分诊 #6）**：删除 `platformQueueCapacity` / `shutdownDrainMs` / `workerDispatchMode` / `workerStepCap` / `inboundDebounceMs` / `piAgentDir`（contracts 类型 + YAML 解析 + `deploymentEnvOf` 派生 + `FSHINE_*` 覆盖口）。依据（实测于 `9ae895d`）：六键的生产读取点为零；保留 `host.attachmentDir`（真实读取点 `adapter.ts:186`）。旧 YAML 残留键由加载层忽略（不拒启、不再派生 env）。
+- **`runtime` 段（P5 单一配置入口）**：字段 `mainConcurrency / backgroundConcurrency / queueCapacity / mainTurnMs / workerTurnMs / maxDelegationDepth / taskBudget{ms,calls,tokens?} / waitUserTimeoutMs`；yaml 键为唯一源（**无 env 覆盖口**）；非法值 fail-fast、未知键拒绝；缺省＝现行为：单并发 / 无队列 / 无任务级预算 / 300s·180s / 深度 1 / 等待 24h。
+- **ResourcePolicy（§2 冻结面，纯逻辑无 IO，注入时钟确定性可测）**：`acquire/release/cancelQueued/snapshot/budgetFor`；拒绝 reason `queue_full / quota_exceeded / budget_exhausted / depth_exceeded`（集成映射 `resource_limited`）。语义：前后台配额与队列各自独立（后台满载不阻塞前台；满=确定性拒绝，无无限积压）；排队许可 FIFO 晋升、等待不计入回合时限；子许可派生**共享父预算同一对象**、深度 +1、超限拒绝不产生半成品；waiting_user 释放槽位、预算保留（恢复同对象、不重置）；`taskBudget.tokens` 仅在显式声明时 `enforced`，未声明记 `tokens: unavailable`（不伪造硬上限）。
+- **读数与证据**：tsc 0；P5 目标 3 文件 **63 例**全绿；全量 unit **47 文件/465 例**全绿；反向绊线 4 组逐条实做转红后复原（预算复制/释放不晋升/伪造 token 硬上限/死键回流）。证据 `.runtime/p5/`。
+- **测试基础设施同步（诚实更新，不弱化）**：`tests/vitest.setup.ts` 密封清单、`p0-gates-cli.test.ts`/`ask-replay.test.ts` 剔除清单删死键；`worker-env.test.ts` 的 FSHINE_* 负例哨兵改用仍有读取点的 `FSHINE_ATTACHMENT_DIR`（白名单精确键集合断言不变）。
+- **静态守卫**：`resource-policy-single-source.test.ts`（P5-T01）——已删 host 键与 `FSHINE_*` 覆盖口在生产代码零引用；资源旋钮只允许登记所有者解释，所有者表双向闭合。
+- **补记（`d718e1e`/`501056d`）**：§5 拒绝映射落地——`RESOURCE_LIMITED_REASON = 'resource_limited'` + `taskFailureReasonFor(rejection)`（P5 不写任务状态，集成层据此落库原因）。
+- **边界与 blocked**：不新增依赖；不改 execution-runtime/server/ask-runtime / 冻结判据 / 历史证据 / 其他工作树；P5-E01 黑盒与 `send` 串行化接线＝集成 Run；token 强制仅当 Pi `assistant.usage` 可验证时由接线方配置。
+- **合入**：本合并提交（--no-ff）入 `arch/integration`；文件范围 13 文件（resource-policy + 两组测试 + config 类型/解析/测试 + 文档 + 测试基础设施同步）；合入后 typecheck/unit 全绿（见集成回归读数）。
+
+---
+
 ## 三十三、P2a Task Registry 契约冻结：实施与合入（2026-11-14，分支 `arch/r4-p2`）
 
 - **授权与基线**：owner 2026-11-14 并行加速授权 §二（P2 优先冻结契约；P4/P5/P6 以契约为门并行）；基线 `9ae895d`（联合接口约定 v1）；提交链：`a699534`（契约测试先行 RED）→ `d8facf0`（契约核心：状态机/取消/waiting/超时/unknown + v3 迁移 + 单写路径守卫）→ `7c440f3`（TaskFact.stateVersion 补齐 v1.1）→ `498da35`/`b6bcc0f`（契约冻结记录：条款清单/方法族签名/未明示项处置/冻结 SHA）。

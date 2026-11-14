@@ -19,9 +19,9 @@ import type {
   LlmConfig,
   PrincipalCapability,
   PrincipalConfig,
+  RuntimeConfig,
   StoreConfig,
   WecomConfig,
-  WorkerDispatchMode,
 } from '@fshine/contracts';
 
 export interface LoadConfigOptions {
@@ -75,33 +75,11 @@ function pickString(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown): s
   return envValue(env, name) ?? yamlString(yamlValue);
 }
 
-/**
- * 数值项：env 非空值优先，非法 = 未配置（不回退 yaml——覆盖口写错不该被 yaml 静默
- * 掩盖）；yaml 值缺省 / 非法同样按未配置处理。缺省值住各消费点，加载层不复制第二份。
- */
-function pickInteger(env: NodeJS.ProcessEnv, name: string, yamlValue: unknown, min: number): number | undefined {
-  const fromEnv = envValue(env, name);
-  const raw: unknown = fromEnv !== undefined ? fromEnv : yamlValue;
-  if (raw === undefined || raw === null || raw === '') return undefined;
-  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw).trim(), 10);
-  if (!Number.isSafeInteger(parsed) || parsed < min) return undefined;
-  return parsed;
-}
-
 /** 可选映射段：缺段 / 空段（`llm:` 后全是注释 → null）= 空映射，不拒启；非映射 = 配置错误。 */
 function optionalSection(root: Record<string, unknown>, key: string): Record<string, unknown> {
   const raw = root[key];
   if (raw === undefined || raw === null) return {};
   return asRecord(raw, key);
-}
-
-function parseWorkerDispatchMode(
-  value: string | undefined,
-  label: string,
-): WorkerDispatchMode | undefined {
-  if (value === undefined) return undefined;
-  if (value === 'inline' || value === 'background') return value;
-  throw new Error(`配置项 ${label} 必须是 inline 或 background（当前: ${value}）`);
 }
 
 function parseLlm(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): LlmConfig | undefined {
@@ -143,33 +121,85 @@ function parseWecom(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): Wecom
   return Object.keys(config).length === 0 ? undefined : config;
 }
 
-type NumericHostKey =
-  | 'platformQueueCapacity'
-  | 'shutdownDrainMs'
-  | 'workerStepCap'
-  | 'inboundDebounceMs';
-
+/**
+ * 宿主运行参数（yaml `host` 段）。
+ *
+ * 2026-11-14 P5（分诊 #6）：未消费键（platformQueueCapacity / shutdownDrainMs /
+ * workerDispatchMode / workerStepCap / inboundDebounceMs / piAgentDir）删除后，仅
+ * attachmentDir 仍有真实读取点（渠道适配器经 FSHINE_ATTACHMENT_DIR 消费）。旧 YAML
+ * 里的已删键由本函数忽略（不拒启、不再派生 env）。
+ */
 function parseHost(raw: Record<string, unknown>, env: NodeJS.ProcessEnv): HostConfig | undefined {
   const config: HostConfig = {};
-  const integers: ReadonlyArray<[NumericHostKey, string, number]> = [
-    ['platformQueueCapacity', 'FSHINE_PLATFORM_QUEUE_CAPACITY', 0],
-    ['shutdownDrainMs', 'FSHINE_SHUTDOWN_DRAIN_MS', 0],
-    ['workerStepCap', 'FSHINE_WORKER_STEP_CAP', 1],
-    ['inboundDebounceMs', 'FSHINE_INBOUND_DEBOUNCE_MS', 0],
-  ];
-  for (const [key, envName, min] of integers) {
-    const value = pickInteger(env, envName, raw[key], min);
-    if (value !== undefined) config[key] = value;
-  }
-  const dispatchMode = parseWorkerDispatchMode(
-    pickString(env, 'FSHINE_WORKER_DISPATCH_MODE', raw['workerDispatchMode']),
-    'host.workerDispatchMode（环境变量 FSHINE_WORKER_DISPATCH_MODE）',
-  );
-  if (dispatchMode !== undefined) config.workerDispatchMode = dispatchMode;
   const attachmentDir = pickString(env, 'FSHINE_ATTACHMENT_DIR', raw['attachmentDir']);
   if (attachmentDir !== undefined) config.attachmentDir = attachmentDir;
-  const piAgentDir = pickString(env, 'FSHINE_PI_AGENT_DIR', raw['piAgentDir']);
-  if (piAgentDir !== undefined) config.piAgentDir = piAgentDir;
+  return Object.keys(config).length === 0 ? undefined : config;
+}
+
+const RUNTIME_KEYS = [
+  'mainConcurrency',
+  'backgroundConcurrency',
+  'queueCapacity',
+  'mainTurnMs',
+  'workerTurnMs',
+  'maxDelegationDepth',
+  'taskBudget',
+  'waitUserTimeoutMs',
+] as const;
+
+/** runtime 段整数值：显式写错即 fail-fast（与 host.* 的「非法 = 未配置」刻意不同）。 */
+function runtimeInteger(raw: unknown, key: string, min: number): number | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const parsed = typeof raw === 'number' ? raw : Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isSafeInteger(parsed) || parsed < min) {
+    throw new Error(`配置项 runtime.${key} 必须是 ≥${min} 的整数（当前: ${String(raw)}）`);
+  }
+  return parsed;
+}
+
+/**
+ * 资源强制配置（yaml `runtime` 段；P5 单一配置入口，联合接口约定 §2）。
+ *
+ * 判据刻意严于其它部署段：非法值 fail-fast、未知键拒绝——资源限额静默回落等于限额
+ * 失效（P5-T01 的失败判据「静默回落/双源」），拼错的旋钮不允许被默认值吞掉。
+ * 缺省值不住这里：由 `packages/agent/src/resource-policy.ts` 按「缺省 = 现行为」补齐。
+ */
+function parseRuntime(raw: Record<string, unknown>): RuntimeConfig | undefined {
+  for (const key of Object.keys(raw)) {
+    if (!(RUNTIME_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`配置项 runtime.${key} 不是已知字段（可选: ${RUNTIME_KEYS.join(', ')}）`);
+    }
+  }
+  const config: RuntimeConfig = {};
+  type RuntimeIntegerKey = Exclude<keyof RuntimeConfig, 'taskBudget'>;
+  const integers: ReadonlyArray<[RuntimeIntegerKey, number]> = [
+    ['mainConcurrency', 1],
+    ['backgroundConcurrency', 0],
+    ['queueCapacity', 0],
+    ['mainTurnMs', 1],
+    ['workerTurnMs', 1],
+    ['maxDelegationDepth', 0],
+    ['waitUserTimeoutMs', 1],
+  ];
+  for (const [key, min] of integers) {
+    const value = runtimeInteger(raw[key], key, min);
+    if (value !== undefined) config[key] = value;
+  }
+  const taskBudgetRaw = raw['taskBudget'];
+  if (taskBudgetRaw !== undefined && taskBudgetRaw !== null) {
+    const budget = asRecord(taskBudgetRaw, 'runtime.taskBudget');
+    for (const key of Object.keys(budget)) {
+      if (key !== 'ms' && key !== 'calls' && key !== 'tokens') {
+        throw new Error(`配置项 runtime.taskBudget.${key} 不是已知字段（可选: ms, calls, tokens）`);
+      }
+    }
+    const ms = runtimeInteger(budget['ms'], 'taskBudget.ms', 1);
+    if (ms === undefined) throw new Error('配置项 runtime.taskBudget.ms 必填（taskBudget 必须同时声明 ms 与 calls）');
+    const calls = runtimeInteger(budget['calls'], 'taskBudget.calls', 1);
+    if (calls === undefined) throw new Error('配置项 runtime.taskBudget.calls 必填（taskBudget 必须同时声明 ms 与 calls）');
+    const tokens = runtimeInteger(budget['tokens'], 'taskBudget.tokens', 1);
+    config.taskBudget = { ms, calls, ...(tokens === undefined ? {} : { tokens }) };
+  }
   return Object.keys(config).length === 0 ? undefined : config;
 }
 
@@ -361,6 +391,8 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
   const host = parseHost(optionalSection(root, 'host'), env);
   const execution = parseExecution(optionalSection(root, 'execution'), env);
   const store = parseStore(optionalSection(root, 'store'), env);
+  // P5 资源段：唯一入口、无 env 覆盖口；非法值 / 未知键在这里 fail-fast。
+  const runtime = parseRuntime(optionalSection(root, 'runtime'));
 
   return {
     principals,
@@ -370,6 +402,7 @@ export function loadConfig(options: LoadConfigOptions = {}): AppConfig {
     ...(llm ? { llm } : {}),
     ...(wecom ? { wecom } : {}),
     ...(host ? { host } : {}),
+    ...(runtime ? { runtime } : {}),
     ...(execution ? { execution } : {}),
     ...(store ? { store } : {}),
   };
@@ -401,13 +434,9 @@ export function deploymentEnvOf(config: AppConfig): NodeJS.ProcessEnv {
   put('LLM_CONTEXT_WINDOW', config.llm?.contextWindow);
   put('WECOM_BOT_ID', config.wecom?.botId);
   put('WECOM_BOT_SECRET', config.wecom?.botSecret);
-  put('FSHINE_PLATFORM_QUEUE_CAPACITY', config.host?.platformQueueCapacity);
-  put('FSHINE_SHUTDOWN_DRAIN_MS', config.host?.shutdownDrainMs);
-  put('FSHINE_WORKER_DISPATCH_MODE', config.host?.workerDispatchMode);
-  put('FSHINE_WORKER_STEP_CAP', config.host?.workerStepCap);
-  put('FSHINE_INBOUND_DEBOUNCE_MS', config.host?.inboundDebounceMs);
+  // host 段仅剩有真实读取点的 attachmentDir（渠道适配器读 FSHINE_ATTACHMENT_DIR）；
+  // runtime 段无 env 消费方，不进本映射（消费方直接读 AppConfig.runtime）。
   put('FSHINE_ATTACHMENT_DIR', config.host?.attachmentDir);
-  put('FSHINE_PI_AGENT_DIR', config.host?.piAgentDir);
   put('DB_PATH', config.store?.dbPath);
   put('EXECUTION_PLAN_ACTIVATION_SECRET', config.execution?.planActivationSecret);
   return env;

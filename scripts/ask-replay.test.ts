@@ -37,12 +37,13 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-/** 宿主泄漏键：逐键剔除；脚本回放是确定性层，不要求也不消费 LLM 密钥。 */
+/** 宿主泄漏键：逐键剔除；脚本回放是确定性层，不要求也不消费 LLM 密钥。
+ *  P5（分诊 #6）：host 死键删除，FSHINE_WORKER_DISPATCH_MODE / FSHINE_PLATFORM_QUEUE_CAPACITY
+ *  已无读者，从剔除清单同步退役。 */
 const HOST_LEAK_KEYS = [
   'LLM_API_KEY', 'LLM_API_BASE_URL', 'LLM_MODEL', 'LLM_MAIN_MODEL',
   'LLM_THINKING_LEVEL', 'LLM_MAIN_THINKING_LEVEL', 'LLM_CONTEXT_WINDOW',
   'AGENT_CONFIG_PATH', 'DB_PATH', 'INIT_CWD',
-  'FSHINE_WORKER_DISPATCH_MODE', 'FSHINE_PLATFORM_QUEUE_CAPACITY',
 ];
 
 function baseEnv(): NodeJS.ProcessEnv {

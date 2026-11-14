@@ -76,8 +76,9 @@ describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
       EXECUTION_EXECUTOR: 'real',
       EXECUTION_REQUIRE_PLAN: '1',
       EXECUTION_PLAN_ID: 'plan_sentinel',
-      FSHINE_WORKER_DISPATCH_MODE: 'inline',
-      FSHINE_PLATFORM_QUEUE_CAPACITY: '1',
+      // P5：host 死键删除后，FSHINE_* 族以仍有读取点的 attachmentDir 作负例哨兵
+      // （白名单按精确键集合收口，任何未登记键——包括该键——都不得进子进程）。
+      FSHINE_ATTACHMENT_DIR: '/attachments',
       [WORKER_FIXTURE_STATE_DIR_KEY]: '/state/sentinel',
       NODE_OPTIONS: '--sentinels',
     };

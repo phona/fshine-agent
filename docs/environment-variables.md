@@ -28,15 +28,18 @@
 
 | 变量（env 覆盖口） | yaml 键（源） | 默认值 / 缺失行为 |
 | --- | --- | --- |
-| `FSHINE_PLATFORM_QUEUE_CAPACITY` | `host.platformQueueCapacity` | 缺省 / 非法 = 100；宿主同时在办的平台作业上限（宿主待办深度，不限制平台并发；0 按 1 处理） |
-| `FSHINE_WORKER_DISPATCH_MODE` | `host.workerDispatchMode` | 缺省 `inline`；`background` 才启用后台委派 |
-| `FSHINE_SHUTDOWN_DRAIN_MS` | `host.shutdownDrainMs` | 缺省 / 非法 = 30000 |
-| `FSHINE_INBOUND_DEBOUNCE_MS` | `host.inboundDebounceMs` | 缺省 = 2000（0 = 关闭） |
-| `FSHINE_ATTACHMENT_DIR` | `host.attachmentDir` | 缺省 = `<平台根>/tmp/attachments` |
-| `FSHINE_PI_AGENT_DIR` | `host.piAgentDir` | 缺省 = `<cwd>/data/pi-agent` |
-| `FSHINE_WORKER_STEP_CAP` | `host.workerStepCap` | 缺省 / 非法 = 50，第 51 次放行送 wind-down |
+| `FSHINE_ATTACHMENT_DIR` | `host.attachmentDir` | 缺省 = `<平台根>/tmp/attachments`（渠道适配器读取） |
 | `APP_PORT` / `APP_PUBLIC_URL` / `APP_CALLBACK_PATH` | `channel.port` / `channel.publicUrl` / `channel.callbackPath` | 端口非法即启动失败；URL / 回调路径缺省为空 / 默认回调路径 |
 | `DB_PATH` | `store.dbPath` | 缺省 = 仓库根 `data/agent.db`；相对路径按进程 cwd 解析 |
+
+> **2026-11-14 P5（分诊 #6）退役批次**：`host.platformQueueCapacity` /
+> `host.workerDispatchMode` / `host.shutdownDrainMs` / `host.inboundDebounceMs` /
+> `host.piAgentDir` / `host.workerStepCap` 及其同名 `FSHINE_*` 覆盖口（含 M4 已无读者的
+> step cap）**删除**——零生产读取点的「写着不生效」假配置；旧 YAML 里的残留键由加载层
+> 忽略。资源旋钮的唯一入口改为 `runtime` 段（yaml 键、**无 env 覆盖口**）：非法值
+> fail-fast、未知键拒绝，缺省由 `packages/agent/src/resource-policy.ts` 按「缺省=现行为」
+> 补齐；登记见 `docs/decision-log.md` §三十二，静态守卫见
+> `packages/agent/resource-policy-single-source.test.ts`。
 
 下表仍只从 env 读（不是部署配置）：
 
