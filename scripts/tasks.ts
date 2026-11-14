@@ -149,7 +149,13 @@ export const JUDGED_STATUS_WORDS: Record<JudgedStatus, string> = {
 
 /** TaskStatus → 用户词；终态词来自 JUDGED_STATUS_WORDS，未收尾单独给词。 */
 export const TASK_STATUS_WORDS: Record<TaskStatus, string> = {
+  // P2a：新状态的最小中文词（词表金样与原因行留 P2b；此处只保证类型闭合与可读）。
+  queued: '排队中',
   running: '进行中',
+  waiting_user: '等待用户',
+  cancelling: '取消中',
+  cancelled: '已取消',
+  timed_out: '已超时',
   ...JUDGED_STATUS_WORDS,
 };
 
