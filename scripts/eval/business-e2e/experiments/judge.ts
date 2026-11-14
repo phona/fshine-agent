@@ -63,6 +63,12 @@ export interface ExpVerdict {
     duplicateExecutions: number;
     /** 压缩触发次数：转录中出现压缩摘要标记的轮数（记录，不参与通过判定）。 */
     compactionRounds: number;
+    /** 压缩触发的**驱动事件**计数：`context_emergency_compact`（回合内应急压缩）条数（记录，不参与通过判定）。 */
+    compactionTriggerEvents: number;
+    /** 压缩完成的驱动事件计数：`context_compacted`（回合前压缩成功）条数（记录，不参与通过判定）。 */
+    compactionCompleted: number;
+    /** 压缩触发事件所在轮（去重、升序；`context_emergency_compact` / `context_compacted` 的轮）。 */
+    compactionTriggerTurns: number[];
   };
 }
 
@@ -80,6 +86,24 @@ function resultOutcome(call: ToolCallRecord): string | undefined {
 
 function compactionRounds(ev: ExpEvidence): number {
   return ev.compaction.filter((c) => c.compacted).length;
+}
+
+/**
+ * 从驱动事件（`meta.driverEvents`，由执行器经 ALS 捕获）取压缩触发的**机械证据**：
+ * `context_emergency_compact` = 回合内应急压缩触发；`context_compacted` = 回合前压缩成功。
+ * 触发行来自捕获时打的 `turn` 归属；记录、不参与通过判定（判据见预注册 §五/§六）。
+ */
+function compactionEventStats(ev: ExpEvidence): { trigger: number; completed: number; turns: number[] } {
+  const events = ev.meta.driverEvents ?? [];
+  const trigger = events.filter((e) => e['event'] === 'context_emergency_compact').length;
+  const completed = events.filter((e) => e['event'] === 'context_compacted').length;
+  const turns = [...new Set(
+    events
+      .filter((e) => e['event'] === 'context_emergency_compact' || e['event'] === 'context_compacted')
+      .map((e) => e['turn'])
+      .filter((t): t is number => typeof t === 'number'),
+  )].sort((a, b) => a - b);
+  return { trigger, completed, turns };
 }
 
 /** 判定一个实验样本；返回实验专属判定 + 冻结机械面。 */
@@ -165,6 +189,9 @@ export function judgeExp(ev: ExpEvidence): ExpVerdict {
       falseCompletion: mechanical.violations.falseCompletion,
       duplicateExecutions: mechanical.violations.meaninglessDuplicates,
       compactionRounds: compactionRounds(ev),
+      compactionTriggerEvents: compactionEventStats(ev).trigger,
+      compactionCompleted: compactionEventStats(ev).completed,
+      compactionTriggerTurns: compactionEventStats(ev).turns,
     },
   };
 }
@@ -179,7 +206,7 @@ export interface ExpCaseSummary {
   passRateCI: { lower: number; upper: number };
   severe: number;
   /** 计数汇总（只统计）。 */
-  counters: { taskToolCalls: number; skillReads: number; compactionRounds: number; unauthorized: number; falseCompletion: number };
+  counters: { taskToolCalls: number; skillReads: number; compactionRounds: number; compactionTriggerEvents: number; compactionCompleted: number; unauthorized: number; falseCompletion: number };
   /** 臂 A 常驻技能块字节（skill-arm）。 */
   skillBlockBytes: number;
 }

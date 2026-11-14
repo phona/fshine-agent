@@ -120,14 +120,15 @@ export function effectiveTurns(caseDef: ExpCase): string[] {
 }
 
 /**
- * 硬上限登记（bizbatch2；缺一不跑）。
- * 会话上限 90（owner 2026-11-15：本批真实模型会话 ≤90；累计 ≤150，已耗 54，余 96）。
+ * 硬上限登记（bizbatch3；缺一不跑）。
+ * 本批（#7 重设计 + #6 深探 + 重复轮）真实模型会话 ≤45；累计 ≤150（已耗 ≈95）。
  * 并发 4 ≤ `HARD_LIMIT_REGISTRY.evalBatchConcurrency.max=8`。
  * maxTokens 驱动面不可预注册 → 如实标注 unavailable，不编造。
+ * compaction 的调用上限按自然语料长会话（~43 轮 × ~2 调用 × C03/C04 各 3 样本 ≈ 516）留量。
  */
 export const EXP_HARD_LIMITS = {
-  maxSessions: 90,
-  maxModelCallsPerExperiment: { 'task-surface': 72, compaction: 240, 'skill-arm': 108 } as Readonly<Record<ExperimentKind, number>>,
+  maxSessions: 45,
+  maxModelCallsPerExperiment: { 'task-surface': 72, compaction: 600, 'skill-arm': 108 } as Readonly<Record<ExperimentKind, number>>,
   maxTokens: 'unavailable' as const,
   maxWallMsPerSession: 600_000,
   maxWallMsPerExperiment: 1_800_000,

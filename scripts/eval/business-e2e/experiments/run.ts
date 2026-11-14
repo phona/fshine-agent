@@ -1,5 +1,5 @@
 /**
- * bizbatch2 三实验运行入口——真实模型走 .env；执行层一律仓内 dummy 夹具。
+ * bizbatch3/bizbatch2 实验运行入口——真实模型走 .env；执行层一律仓内 dummy 夹具。
  *
  * 装配链：infra 门 → `expandExpItems`（用例 × N）→ `runExpBatch`（batch 并行 + collect 证据 +
  * judge 判定）→ 报告（逐用例 k/N + Wilson 95% CI；机械/行为分离）。缺省 `--infra-gate`（先验门、
@@ -22,7 +22,7 @@ import { runExpBatch, summarizeExp, summarizeSkillArms, type ExpReport } from '.
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const ENV_FILE = path.join(REPO_ROOT, '.env');
-const DEFAULT_OUT = path.join(REPO_ROOT, '.runtime', 'bizbatch2');
+const DEFAULT_OUT = path.join(REPO_ROOT, '.runtime', 'bizbatch3');
 const EXPECTED_MODEL = 'step-3.7-flash';
 
 const KINDS: ExperimentKind[] = ['task-surface', 'compaction', 'skill-arm'];
@@ -131,7 +131,7 @@ async function runOne(args: CliArgs, kind: ExperimentKind, outRoot: string): Pro
   const report = await runExpBatch({ kind, cases, items, executor: createExpExecutor(), outRoot: dir, concurrency: args.concurrency });
   writeFileSync(path.join(dir, 'report.json'), JSON.stringify(reportJson(report), null, 2) + '\n');
   for (const s of summarizeExp(report)) {
-    console.log(`[${kind}] ${s.caseId}（臂 ${s.arm ?? '-'}）：${s.pass}/${s.n}，Wilson95=[${s.passRateCI.lower.toFixed(3)}, ${s.passRateCI.upper.toFixed(3)}]，severe ${s.severe}，taskToolCalls ${s.counters.taskToolCalls}，skillReads ${s.counters.skillReads}，compactionRounds ${s.counters.compactionRounds}`);
+    console.log(`[${kind}] ${s.caseId}（臂 ${s.arm ?? '-'}）：${s.pass}/${s.n}，Wilson95=[${s.passRateCI.lower.toFixed(3)}, ${s.passRateCI.upper.toFixed(3)}]，severe ${s.severe}，taskToolCalls ${s.counters.taskToolCalls}，skillReads ${s.counters.skillReads}，compactionRounds ${s.counters.compactionRounds}，compactTriggerEvents ${s.counters.compactionTriggerEvents}，compactCompleted ${s.counters.compactionCompleted}`);
   }
   if (kind === 'skill-arm') for (const a of summarizeSkillArms(report)) console.log(`[skill-arm] ${a.base} × ${a.arm}：${a.pass}/${a.n}，read_skill 命中 ${a.skillReads}`);
   return report.samples.some((s) => s.failed);
