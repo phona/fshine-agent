@@ -1,5 +1,6 @@
 # P3 切片报告：人工接管 v1（`npm run tasks -- <id> --redo`）
 
+> **名称说明（2026-11-14 加注）**：标题「人工接管 v1」为历史称谓；`--redo` 是**重新交办**（新任务、输入=存储的委派原文逐字），不是人工接管、也不是会话续跑（真续跑 = Pi 原生会话恢复，见 README 边界与 `docs/product/r3-open-decisions.md`）。正文不改。
 > 范围（一句话）：任务失败/未执行后，用户从任务列表**一键重新推进**——`npm run tasks -- <id> --redo` 以该任务**存储的委派原文逐字**、经与 `npm run ask` **同源的生产装配**重新交办为一个**新任务**，打印「原任务 <oldId> → 新任务 <newId>（状态：…）」；原任务记录零改动。
 > 分支/提交：`arch/p3-redo`（基线 `arch/integration` @ `ffafcd8dd06f693f85860177d2900fb4c91a58db`）；实现提交 `fbb113b1a605aca05f3aae8ea0364da6f2c7760b`（未 push、未合并）。
 > 运行面：真实模型 `LLM_MODEL=step-3.7-flash` + 仓内 dummy 执行层（不触网、不碰真实平台）。

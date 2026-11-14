@@ -147,6 +147,7 @@ threshold: deterministic # 全过；黑盒项另列 N/CI（§五）
 ### P0 装配同源（重构，零行为变化）
 
 - **P0-T01 五门话术字节金样**｜确定性｜输入：缺 LLM key / 多 profile / 缺 gateway / 无 enabled principal / 空只读集合 五场景，`npm run ask` 与 `npm run tasks -- <id> --redo` 各一遍｜预期输出：exit 2 且话术与抽取前逐字节一致（`ask-runtime.test.ts` 金样扩展）｜状态转换：无｜执行证据：stdout/stderr 捕获 + 字节比对｜失败判据：任一字节差异或退出码变化。
+  - 口径注记（2026-11-14，R4/P0 实施期，只加注、不改判据/门槛/用例语义）：门 4（无 enabled principal）在 `tasks --redo` 入口**结构性不可达**——redo 身份取存储事实（`task.principalId` 显式传入，见 `scripts/ask-runtime.ts` 的 `input.principalId ?? 配置回落`；`scripts/tasks.ts` 的 `runRedo` 按存储身份下传），有效任务行必有 principal。门 4 的字节金样由 `npm run ask` 入口覆盖；redo 侧以「不误报门 4、继续走到门 5（空只读集合）」的结构事实作等价断言（`scripts/p0-gates-cli.test.ts`）。
 - **P0-T02 runner 默认路径不变**｜确定性｜输入：`npm run eval:user -- --trials 1 --case E01`（或 lock 校验干跑）｜预期输出：criteria.lock 校验通过、manifest 的 criteria/cases 哈希与冻结值一致｜状态转换：无｜执行证据：runner 输出 + manifest｜失败判据：锁校验失败或哈希变化。
 - **P0-T03 单一装配点守卫**｜确定性｜输入：静态检查（import/装配调用图）｜预期输出：ask/server/runner 三入口走同一装配函数（或同一核心装配），无第二份装配链｜状态转换：无｜执行证据：守卫测试输出｜失败判据：出现分叉装配实现。
 - **P0-T04 确定性门**｜确定性｜输入：`npm run typecheck` + `npm run test -- --project unit`｜预期输出：tsc 0；单测全过（基线 33 文件/305 例，实施后只增不减）｜状态转换：无｜执行证据：tsc 输出 + vitest 汇总（文件数/用例数/EXIT）｜失败判据：任一红（不得删测试凑绿）。
