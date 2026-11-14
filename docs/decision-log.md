@@ -1038,6 +1038,28 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十四、P6 后台任务执行：实施与合入（2026-11-14，分支 `arch/r4-p6`）
+
+- **授权与契约**：owner 并行授权 §三；冻结契约 §1/§2/§3（joint-interfaces v1）。基线 `9ae895d`；提交链：`9d4c784`（测试先行 RED）→ `bc92728`（实现）→ `7e2f78d`（测试口径对齐 P2 契约：后台终态按执行端确认 transition/fail）→ `2168ccb`/`bd5e7db`（同步抛错防御/超时落终态 pin）→ `6fe8807`（报告）；合入前 rebase 到 `771be96`。
+- **实现**：`task-runner.ts` 519 行**纯编排、零仓内 import**；端口＝`TaskRegistryPort`/`ResourcePolicyPort`/`TaskExecutor`（冻结契约最小结构面）；`submit` 同步返回 queued（Main 不等待）、`pump` 同步单趟；恢复三态（queued 重认领 / `result_unknown` 不重放 / completed 不重跑）；**取消请求≠取消**（requestCancel→cancelling→确认才 cancelled）；后台满载前台不受阻；无第二套预算/状态机/通知。
+- **读数**：目标 25/25；tsc 0；全量 unit 合入前 **51 文件/527**；反向绊线 4 类（`result_unknown` 自动重放等）红后复原。**登记缺口**：后台 `resultText` v1 不落（inline complete 会误伤 waiting 接续）→ 集成期解决（P7b「结果可找回」前置）。
+- **独立复核**：passed=true、integrity=false（相对基线仅 3 个新增文件；热点/冻结面零改动）。
+- **合入**：`62afbea`（--no-ff）入 `arch/integration`；合入后 typecheck=0、unit 52 文件/557 全绿（含后续 P4 合入帧）。
+- **blocked**：P2/P5 真实接线与 P6-E01 端到端黑盒 ← 集成 Run。
+
+---
+
+## 三十五、P4 通知与交付：实施与合入（2026-11-14，分支 `arch/r4-p4`）
+
+- **授权与契约**：owner 并行授权 §三；冻结契约 §4（joint-interfaces v1 + v1.1）。基线 `9ae895d`；提交链：`82577b4`（测试先行 RED）→ `98f679b`（实现）→ `0f9970e`（v1.1 澄清断言：`result_unknown` 以 failed 意图承载 `payload.reason`）→ `f7b088b`（报告）；合入前 rebase 到 `62afbea`。
+- **实现**：`notifications.ts` 506 行：9 类意图枚举 + `notificationKindForTransition`；outbox 自建表（`CREATE TABLE IF NOT EXISTS`）`UNIQUE(task_id, kind, state_version)`；同进程有界重试（退避+attempts 上限）；`delivered_at`/`last_error`；payload 白名单运行时校验（`NotificationPayloadError`）；`NotificationSink`/`DeliveryReceipt` 渠道无关；只读查询（`listNotifications`/未送达）；**投递失败不改变任务结果**（事实与投递解耦）。
+- **读数**：目标 30/30；tsc 0；全量 unit 合入前 **52 文件/557**；反向绊线（去重破坏/重试无上限/终态静默丢/白名单缺失）红后复原。
+- **独立复核**：passed=true、integrity=false（相对基线仅 3 个新增文件）。
+- **合入**：`87fbd94`（--no-ff）入 `arch/integration`。
+- **blocked**：P4-E01（后台真实通知黑盒）← P6 联合集成；`execution-runtime`/`server`/`tasks`/`ops` 接线 ← 集成 Run。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
