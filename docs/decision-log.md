@@ -947,6 +947,17 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十六、M01 判据重切：交付导向（复用豁免）（2026-11-14，分支 `arch/m01-recut`）
+
+- **范围与裁定**：执行 R3 收官裁定 M01=a（§二十三；登记 `docs/product/r3-open-decisions.md` §A.1）。唯一判据面改动 = `scripts/eval/exploration/scope-reference/cases/M01.ts` 的 t2 期望——移除 `minExecutions:1`（t2 必须新执行）；保留 t2「发生执行只准 beta」（`requireRowArgs`）与无谓澄清禁令；交付锚点 `numberAny[500,300,200]` → `containsAll['500','300','200']`；裁定原文（复用豁免及「明确刷新/数据可能过期/来源不可信不适用」边界）、15 样本证据指针与跨对象污染登记写入 `weakNotes`/`judgeNotes`。R1 冻结集、X 套件与 M02–M07 零改动。
+- **重切（承接 §二十五「第六次」）**：scope-reference casesSha256 `29ef794e…`→`617eb97f…`；criteriaSha256 `9d4b0824…` 不变；锁文件 `7d6f3f10…`→`f8f839f5…`（`files` 仅 M01.ts 项变化 `d6982eff…`→`f8dddde8…`）；旧锁保底同目录 `criteria.lock.pre-m01recut`（未跟踪）。提交 `b14a7b3`（基线 `af745af`）。
+- **旧 15 样本复判（零覆盖）**：只读复制 r3-b2 `.runtime/exploration-b2/{baseline,extension}/runs/M01` 为副本 + runner `--judge-existing`（离线；原档案 230 文件 sha256 mismatch=0；副本内旧判定保底 `judgment.stored.json`）：旧 5 PASS/10 FAIL → **新 14 PASS/1 FAIL（仅 trial-10）**；翻转 9 例全部对应旧 note「turn-2 structured 执行=0」（复用+交付）；trial-10 保持 4 码 FAIL。对照 `.runtime/m01/compare/old-new.md`。
+- **新样本与回归（帧 step-3.7-flash，仓内 dummy）**：新冻结下 M01 N=9 = **8 PASS / 1 FAIL / 0 INCONCLUSIVE**（唯一 FAIL=真实缺陷族「反问+零交付」，同旧 trial-10；弱告警 0）；回归 E06×3 = 3/3、E12×3 = 3/3、E04×3 = 2/3（E04-1 零委派先反问，既有模型行为样本登记）。
+- **登记（不实施）**：跨对象污染（alpha 数值当 beta 交付）现判定面无「不得含」类锚点、不可机械判负（交付锚点+登记口径承载）；「想查什么内容」类反问措辞未被冻结禁问短语命中（⑤ 维 pass；判负由交付/执行码承载）；判定器扩展需另行裁定。
+- **提交与状态**：用例+锁提交 `b14a7b3`；报告 `docs/product/m01-recut.md`、README 注记与本条同批提交。未 push/未合并；待独立复核后按流程仲裁合入。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
