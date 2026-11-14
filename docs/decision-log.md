@@ -1083,6 +1083,19 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十八、P7b 完整验收：实施与合入（2026-11-14，分支 `arch/r4-p7b`）
+
+- **授权与基线**：owner §四/§八（P7b 完整验收）；基线 `56309df`；提交链：`47aa761`（故障套件先在红：3 failed | 7 passed）→ `5188ded`（实现转绿：`server.ts` (principal, session, messageId) 幂等/回执重放/FIFO 1024；受理前按 policy 拒绝落 `failed+resource_limited`；排队许可不直派发——修复 `queueCapacity>0` 绕过并发上限）→ `e296d37`（报告）。
+- **故障场景（确定性，`scripts/p7b-fault-injection.test.ts` 10/10）**：模型超时/Worker 崩溃/通知失败（恒失败/抛异常/恢复重投）/重复消息（后台+inline 幂等）/池满（`backgroundConcurrency=1+queueCapacity=0` 拒绝 + 前台可用）/重启三态（queued 重领、`result_unknown` 零重放、completed 不重跑）；反向绊线 4 类红后逐字节复原，TRIPWIRE 残留 0。
+- **黑盒批次（预注册 N=9，一次采样、不扩展、不重采样、全样本保留；口径 v1）**：E05 **4/9**（Wilson 95% CI [0.189, 0.733]；5 个 FAIL 的 toolcalls=0——Main 自行反问未委派，归因模型面；同装配 4/9 通过）；E06 **9/9**（[0.701, 1.0]，不读作 100%）；后台 E2E **9/9 机械面**（delegated/completed/resultText 经 tasks CLI 找回/通知三态经假 sink 送达）；措辞观察（回执含 `#编号` 4/9、业务名复述 0/9、含「已受理」5/9）如实登记，不作门槛。
+- **§八 12 场景对照**（报告 §四）：1=**failed（黑盒措辞面）**/机械面 passed；2、3、4、7、10、11=passed；5=确定性 passed + 黑盒 failed（E05 4/9）；6=确定性 passed + 黑盒 blocked（交互多轮未跑）；8=追溯面 passed + 语言黑盒 blocked；9=passed；12=部分 passed + ops 通知清单/执行树 blocked。
+- **独立复核**：passed=true、integrity=false（@`e296d37`，6 文件；判据/用例/冻结面零改动；CI 独立重算、无重采样）。
+- **合入**：`0b2a642`（--no-ff）入 `arch/integration`；6 文件 +1004/−21；合入后 typecheck=0、unit 55 文件/594 例全绿。
+- **blocked 审计（不计 passed）**：真实 WeCom sink（渠道适配器切片）、`taskBudget` 运行时 consume、`queueCapacity>0` 账本队列上界（触冻结 §2 接口→owner 批准）、messageId 跨重启/多实例持久幂等、resume 排队许可滞留、P6 §七 遗留（cancelling 孤儿/waiting 无租约/超时触发）、P7-E01 交互 smoke、ops 通知清单/多实例。
+- **限制**：N=9 预注册小样本；E05 CI 跨 0.5 不得据此区分真实水平；未与历史帧对照（无预注册等效界）→ 不产出 IMPROVED/REGRESSED 结论；回退=`git revert 5188ded`（互不依赖，无 schema 迁移）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
