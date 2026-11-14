@@ -97,10 +97,12 @@ stateDir/审计路径(setAuditPath?) → assertIsolation? → 执行面（defaul
 3. **测试侧口径**：工作树无 `.env` 时 `node --env-file-if-exists=.env` 会向 stderr 打固定噪声行，会破坏字节金样；P0 测试 spawn 省略该 flag（与 npm 脚本同一入口文件与参数、env 显式控制），已登记于测试文件头。
 4. **外部边界（沿用）**：真实企微未连、真实 SaaS 未触；`.env` 仅本地存在（gitignored，未提交）；E06/E12 为 N=1 smoke，不作稳定性结论。
 
-## 七、独立复核（待复核占位）
+## 七、独立复核（裁决记录）
 
-- 复核范围建议：① 三入口确实同源且无旁路（跑 P0-T03 守卫 + 抽查 `assembleSessionCore` 调用点）；② 零行为变化证据链（P0-T01/T02 金样、server 假渠道回归、tasks/ask 回归、typecheck+unit）；③ R3 冻结面零改动（`git diff 845bd27..1e42bbb --name-only` 不含 criteria/cases/judge/lock/exploration）；④ 反向绊线真实性（可复跑 tripwire 轮）；⑤ 回退可执行（§八）。
-- 复核人：**待定**；复核日期：**待定**；复核结论：**待填**（本节由独立复核者补写，实施者不代填）。
+- 复核执行：复核员（与实施分离），只读复核；绊线实验在 /tmp 的 HEAD 字节副本上复做（p0 工作树全程未编辑；终态 `git status --porcelain`=0 行）。
+- 核验范围（依其裁决证据）：① 三入口同源、无旁路/影子装配（读码 + grep + P0-T03 守卫独立复跑）；② 零行为变化证据链（金样/假渠道/回归/typecheck+unit）；③ 冻结面零改动（diff 全量核对）；④ 反向绊线复做（破坏→必红→恢复）；⑤ 回退可行（§八）。
+- **裁决：passed=true，integrityViolation=false**（run `dwfrun-397aec89`；完整证据见该 run 记录与 `.runtime/p0/`）。
+- 记录说明（仲裁侧）：复核员未改动本文件；本段为仲裁侧依据复核裁决摘录补记（原「待复核占位」作废），随合入登记。
 
 ## 八、回退方式（整片 revert）
 
