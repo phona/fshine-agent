@@ -1223,7 +1223,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ## 四十七、缺口 3/1/2 实施：压缩窗口接线 + 对话面任务工具 + Main 业务 Skill 投递（2026-11-15，分支 `arch/r4-gapimpl`）
 
-- **状态**：**已合入**（`--no-ff` → `arch/integration`，2026-11-15；合入后 typecheck=0、unit 68 文件/694 例全绿）。
+- **状态**：**已合入**（`--no-ff` → `arch/integration` @ `4a12d8b`，2026-11-15；合入后 typecheck=0、unit 72 文件/711 例全绿）。
 - **授权**：owner 2026-11-14 批准实施三缺口，依已合入设计 `docs/product/gap-compaction-window.md`（缺口 3）、`gap-task-surface.md`（缺口 1）、`gap-main-skill.md`（缺口 2）。
 - **分支/基线**：`arch/r4-gapimpl`（worktree）；基线 = `arch/integration` 启动时 HEAD `5b0967d1c1a7ae1a9228ec3c0c1884ffab68943c`（记录于 `.runtime/gapimpl/baseline.txt`，gitignored）。
 - **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
