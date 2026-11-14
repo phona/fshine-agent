@@ -43,10 +43,12 @@
  *
  * Deliberately NOT implemented in v1:
  * memory / breaker / cache auxiliary groups, grind/variant plan guards,
- * rate-limit token bucket, browser/platform execution. Those are
+ * browser/platform execution. Those are
  * execution-layer-instance specifics, not protocol; no in-repo harness scores them
  * (the retired generic-mock eval did; registration in docs/decision-log.md §十三),
  * and they are not faked.
+ * (A per-state-dir rate-limit window WAS added later — 2026-11-14 business E2E #4 —
+ *  driven by <state-dir>/rate-limit-config.json or DUMMY_RATE_LIMIT_MAX; see below.)
  */
 'use strict';
 const fs = require('node:fs');
@@ -329,18 +331,31 @@ function emit(op, status, data, error) {
   return envelope;
 }
 function errObj(code, message) { return { code, message, correctForm: CORRECT_FORM[code] }; }
-// ── 限流（业务 E2E 阶段 1 增项，2026-11-14）─────────────────────────────────────
-// 每 state-dir 计数窗口：DUMMY_RATE_LIMIT_MAX=N 时，该 state-dir 在一个
-// DUMMY_RATE_LIMIT_WINDOW_SECONDS（缺省 3600s、按 epoch 对齐）窗口内最多 N 次
-// 实际执行的 operation（门拒/计划查询等不计）。超限返回 failed 信封 +
+// ── 限流（业务 E2E 阶段 1 增项，2026-11-14；阶段 2·R2 改为状态根驱动）─────────────
+// 每 state-dir 计数窗口：该 state-dir 在一个窗口内最多 N 次实际执行的 operation
+// （门拒/计划查询等不计）。超限返回 failed 信封 +
 // ExecutionFailure{code:'RATE_LIMITED', message, retryable:true}，经现有 CLI
 // 退出码（1=域失败）与 RESULT 信封表达，不新增协议面。计数落
-// <state-dir>/rate-limit.json；不设 DUMMY_RATE_LIMIT_MAX 时完全关闭（行为不变）。
+// <state-dir>/rate-limit.json；不设旋钮时完全关闭（行为不变）。
+//
+// 旋钮来源（2026-11-14 R2：宿主 worker env 白名单 worker-env.ts 只放行 PATH/HOME/TMPDIR，
+// DUMMY_* 经宿主路径不可达 → 限流从未触发、R1 #4 空洞）：
+//   ① 主入口 = <state-dir>/rate-limit-config.json（经 --state-dir 传入，宿主可复现）：
+//      { "max": <int>, "windowSeconds"?: <int> }。该文件落在 state 根，与 env 无关，
+//      宿主按用例落到 state 根即可驱动，不依赖会被白名单丢弃的环境变量。
+//   ② 兼容入口 = DUMMY_RATE_LIMIT_MAX / DUMMY_RATE_LIMIT_WINDOW_SECONDS（手工调试用，
+//      不再是唯一入口）。文件存在且 max>0 时文件优先；否则回落 env。
+function rateLimitConfigFile() {
+  return path.join(path.dirname(statePaths().stateFile), 'rate-limit-config.json');
+}
 function rateLimitPolicy() {
-  const max = Number(env('DUMMY_RATE_LIMIT_MAX', ''));
-  const windowSeconds = Number(env('DUMMY_RATE_LIMIT_WINDOW_SECONDS', ''));
+  const cfg = loadJson(rateLimitConfigFile(), null);
+  const fileMax = cfg && typeof cfg === 'object' ? Number(cfg.max) : Number.NaN;
+  const fileWindow = cfg && typeof cfg === 'object' ? Number(cfg.windowSeconds) : Number.NaN;
+  const max = Number.isInteger(fileMax) && fileMax > 0 ? fileMax : Number(env('DUMMY_RATE_LIMIT_MAX', ''));
+  const windowRaw = Number.isInteger(fileWindow) && fileWindow > 0 ? fileWindow : Number(env('DUMMY_RATE_LIMIT_WINDOW_SECONDS', ''));
   if (!Number.isInteger(max) || max <= 0) return null;
-  return { max, windowSeconds: Number.isInteger(windowSeconds) && windowSeconds > 0 ? windowSeconds : 3600 };
+  return { max, windowSeconds: Number.isInteger(windowRaw) && windowRaw > 0 ? windowRaw : 3600 };
 }
 /** 取一个执行名额；超限返回策略（不写审计——调用方落带 exitCode 的审计行）。 */
 function rateLimitTake() {

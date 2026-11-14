@@ -24,9 +24,12 @@ import { materializeEvalConfig } from '../../resolve-config-path';
 import { assembleSessionCore } from '../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
+import { notificationKindForTransition } from '../../../packages/agent/src/notifications';
+import type { NotificationReason } from '../../../packages/agent/src/notifications';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
 import type { BizExecutor, BizSampleEvidence } from './assembly';
+import type { NotificationLine, TaskFactLine } from './collect';
 import { buildSampleRecord } from './sample-from-run';
 import type { MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../convergence-r1/evidence';
 
@@ -112,6 +115,22 @@ function materializeConfig(item: BizItem, caseDef: BizCase, configCopy: string, 
 }
 
 /**
+ * 限流旋钮落 state 根（R2 修复 ①）：宿主 worker env 白名单（worker-env.ts 只放行
+ * PATH/HOME/TMPDIR）会丢弃 `DUMMY_RATE_LIMIT_MAX`，经宿主路径不可达 → 限流从未触发。
+ * 改为把用例声明的旋钮写成 `<state-dir>/rate-limit-config.json`（与 --state-dir 同根，
+ * 与 env 无关），夹具据此可复现。用例文本（冻结）不动，只在此翻译 biz.env。
+ */
+export function materializeRateLimitConfig(stateDir: string, env: Readonly<Record<string, string>> | undefined): void {
+  if (env === undefined) return;
+  const max = Number.parseInt(env['DUMMY_RATE_LIMIT_MAX'] ?? '', 10);
+  if (!Number.isSafeInteger(max) || max <= 0) return;
+  const windowSeconds = Number.parseInt(env['DUMMY_RATE_LIMIT_WINDOW_SECONDS'] ?? '', 10);
+  const cfg: Record<string, number> = { max };
+  if (Number.isSafeInteger(windowSeconds) && windowSeconds > 0) cfg['windowSeconds'] = windowSeconds;
+  writeFileSync(path.join(stateDir, 'rate-limit-config.json'), JSON.stringify(cfg, null, 2) + '\n');
+}
+
+/**
  * 驱动器注入覆盖（自测用确定性假 driver/假执行面，零模型；生产不传 = 真实 Pi + 仓内 dummy）。
  * 注入只替换「驱动/执行面」两处接线，装配/证据/判定代码路径逐字不变。
  */
@@ -134,6 +153,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
     const dbDir = path.join(ctx.workDir, 'db');
     const configDir = path.join(ctx.workDir, 'config');
     for (const dir of [stateDir, dbDir, configDir]) mkdirSync(dir, { recursive: true });
+    // 限流旋钮落 state 根（修复 ①）：经 --state-dir 可达，不被 worker env 白名单丢弃。
+    materializeRateLimitConfig(stateDir, caseDef.biz.env);
     const dbPath = path.join(dbDir, 'state.db');
     const configCopy = path.join(configDir, 'agent-config.yaml');
     materializeConfig(item, caseDef, configCopy, dbPath);
@@ -180,6 +201,15 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
     let previousTranscriptLength = 0;
     let tasksSnapshot: TaskRecordJson[] = [];
     const auditPath = assembled.auditPath;
+    // 修复 ②：底账事实钩子 → TaskFact 流 + 通知行（UX「通知条数 / 需用户介入」的证据来源）。
+    // 只采集不判；inline 无 outbox 时这里仍能由状态迁移派生出通知意图行（各状态终态）。
+    const taskFacts: TaskFactLine[] = [];
+    const notifications: NotificationLine[] = [];
+    assembled.taskRegistry.onTaskFact((fact) => {
+      taskFacts.push({ ts: fact.at, taskId: fact.taskId, from: fact.from ?? '', to: fact.to, ...(fact.reason === undefined ? {} : { reason: fact.reason }) });
+      const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
+      if (kind !== undefined) notifications.push({ ts: fact.at, taskId: fact.taskId, kind });
+    });
     try {
       const session = assembled.session;
       for (let index = 0; index < caseDef.turns.length; index += 1) {
@@ -209,7 +239,7 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
 
     const auditLines = existsSync(auditPath) ? readFileSync(auditPath, 'utf8').trimEnd().split('\n').filter((l) => l !== '') : [];
     const meta: MetaFile = { turns: metaTurns, driverEvents: [], notes: [] };
-    const sample = buildSampleRecord({ caseDef, toolCalls: sink.calls, replies, taskCount: tasksSnapshot.length });
+    const sample = buildSampleRecord({ caseDef, toolCalls: sink.calls, replies, taskCount: tasksSnapshot.length, notifications, taskFacts });
     return {
       inputs: {
         caseId: caseDef.id,
@@ -226,6 +256,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
       tasks: tasksSnapshot,
       replies,
       meta,
+      taskFacts,
+      notifications,
       auditLines,
       sample,
     };
