@@ -5,7 +5,7 @@
  *   · 终态判定矩阵：completed/failed/unexecuted 可；running 与未知态拒（exit 2）；
  *   · 输入=存储的交办原文逐字：经**真实 createSession** + 记录驱动断言唯一 user 消息逐字节相等；
  *   · 无历史注入：原任务的回复/失败原因/执行错误哨兵不出现在驱动器可见输入；
- *   · 原任务记录零改动；输出逐字含「原任务 <old> → 新任务 <new>（状态：…）」；
+ *   · 原任务记录零改动；输出逐字含「原任务 #编号 → 新任务 #编号（状态：…）」；
  *   · redo 走生产同源装配：principal/session/dbPath/argv/env 原样传给装配函数；
  *   · 错误码：装配门拒绝 2 / 装配其它错误 1 / send 失败 1（如实报告已创建的新任务）/ 未达标 1。
  * e2e：真实子进程跑 CLI 的确定性拒绝路径（不含模型调用；LLM_API_KEY 显式置空）。
@@ -47,6 +47,7 @@ function syntheticTask(overrides: Partial<TaskRecord> & { taskId: string }): Tas
     sessionId: SCOPE.sessionId,
     request: REQUEST,
     status: 'failed',
+    taskNo: 1,
     executions: [],
     createdAt: '2026-11-14T00:00:00.000Z',
     updatedAt: '2026-11-14T00:00:00.000Z',
@@ -221,7 +222,7 @@ describe('tasks --redo：终态判定与拒绝路径', () => {
       );
       expect(outcome.exitCode).toBe(0);
       expect(outcome.stderr).toBe('');
-      expect(outcome.stdout).toContain(`原任务 task_${status} → 新任务 `);
+      expect(outcome.stdout).toContain('原任务 #1 → 新任务 #2');
       expect(outcome.stdout).toContain('（状态：未执行）');
       expect(outcome.stdout).toContain(`任务底账：${dbPath}（新任务已写入）`);
       // 新任务确实落账；原任务不在 stdout 的详情渲染里被改写（另见零改动用例）。
@@ -324,9 +325,14 @@ describe('tasks --redo：输出与错误码', () => {
     const newId = listTaskIds(dbPath).find((id) => id !== 'task_ok')!;
     expect(outcome.exitCode).toBe(0);
     expect(outcome.stdout).toBe(
-      `已重新交办并收到汇报。\n\n原任务 task_ok → 新任务 ${newId}（状态：未执行）\n`
+      `已重新交办并收到汇报。\n\n原任务 #1 → 新任务 #2（状态：未执行）\n`
       + `任务底账：${dbPath}（新任务已写入）\n`,
     );
+    // 新任务确实落账（编号=2；原任务编号保持 1）。
+    const reopened = createSqliteTaskRegistry(dbPath, { readOnly: true });
+    expect(reopened.get(newId, SCOPE).taskNo).toBe(2);
+    expect(reopened.get('task_ok', SCOPE).taskNo).toBe(1);
+    reopened.close();
   });
 
   it('装配门拒绝 → exit 2（话术原样）；装配其它错误 → exit 1；send 失败 → exit 1 且报告已创建的新任务', async () => {
@@ -346,7 +352,7 @@ describe('tasks --redo：输出与错误码', () => {
     expect(broken.exitCode).toBe(1);
     expect(broken.stderr).toBe('重新推进未完成：装配爆炸\n');
 
-    const created = syntheticTask({ taskId: 'task_new', status: 'running' });
+    const created = syntheticTask({ taskId: 'task_new', taskNo: 2, status: 'running' });
     let taskCalls = 0;
     const session = {
       principalId: SCOPE.principalId,
@@ -363,7 +369,7 @@ describe('tasks --redo：输出与错误码', () => {
       assemble: async () => ({ session, close: () => {} }),
     });
     expect(half.exitCode).toBe(1);
-    expect(half.stdout).toContain('原任务 task_x → 新任务 task_new（状态：进行中）');
+    expect(half.stdout).toContain('原任务 #1 → 新任务 #2（状态：进行中）');
     expect(half.stderr).toBe('重新推进未完成：回合爆炸\n');
 
     const chat = await runRedo(redoInput(base, '/nope.db'), {
@@ -382,7 +388,10 @@ describe('tasks --redo：输出与错误码', () => {
     expect(chat.exitCode).toBe(1);
     expect(chat.stdout).toBe('本轮没有交办。\n');
     expect(chat.stderr).toBe('未达标：本轮没有产生新任务（重新推进未生效）。\n');
-    expect(renderRedoPairLine('task_a', 'task_b', 'completed')).toBe('原任务 task_a → 新任务 task_b（状态：已完成）');
+    expect(renderRedoPairLine(
+      syntheticTask({ taskId: 'task_a', taskNo: 1 }),
+      syntheticTask({ taskId: 'task_b', taskNo: 2, status: 'completed' }),
+    )).toBe('原任务 #1 → 新任务 #2（状态：已完成）');
   });
 });
 

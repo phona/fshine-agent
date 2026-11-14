@@ -988,6 +988,18 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十、P1 底账演化：实施与合入（2026-11-14，分支 `arch/r4-p1-ledger`）
+
+- **授权与范围**：owner 排程（P1 ∥ P7a，P0 验收合入后点火；本片先行）与口径裁定（数字 ID=SQLite 原子分配/业务名称 v1 机械回落/回复存储=同回合各任务行同值/迁移=版本化+幂等+向前兼容+迁移前自动备份）。基线 `arch/integration @ 46f757e`（含 P0 合入）。提交链：`6b21abe`（测试先行：P1-T01–T05 确定性测试 + 跨进程并发夹具；全量红 6 文件 48 例、typecheck 71 错）→ `619fec5`（实现）→ `298aa7f`（口径登记）→ `a201357`（编号计数器语义修正，绊线轮）→ `636342f`（报告）→ `747141d`（复核裁决记录）。
+- **schema 迁移口径（一次版本化，幂等、向前兼容）**：`tasks` 加列 `task_no/name/reply_text` + 部分唯一索引（`task_no IS NOT NULL`）+ `PRAGMA user_version=2`；历史行按 `(created_at, task_id)` 升序单条 SQL（ROW_NUMBER）回填编号、只填 NULL（二次打开零差异）；历史 `reply_text/name` 保持 NULL。**迁移前自动备份**：`wal_checkpoint(FULL)` 后整文件复制为 `<dbPath>.backup-v2`（不覆盖、不自动删除、仅真正迁移时生成；`:memory:` 与库不存在不生成）；权威口径见 `packages/core/src/task-store.ts` 文首注。
+- **数字编号/名称/回复**：编号分配 = 计数器行（`task_sequences.name='task_no'`）在**同一事务**内 `UPDATE … value+1 RETURNING` + INSERT（并发安全；失败随事务回滚=失败不占号；计数器单调不减 → 删除/修剪后不复用、存量编号不重排）。**2026-11-14 绊线轮修正**：初版 `MAX(task_no)+1` 在删除最高编号后会回收该编号（违反「不复用」）；已改为计数器语义并补删除模拟守卫测试。只读打开旧库不迁移（新列读出缺省、主库哈希不变）。名称 v1 = 机械回落 `deriveTaskName(request)`（首段/空白折叠/40 字符截断；零模型；#4-a 模型命名递延，`run_task` 工具 schema 未动）。回复写点唯一 = `execution-runtime.send` 收尾后 `archiveReply`（非空白才落；同回合各任务行同值、单事务；不建 turns 表）。显示面统一 `#编号+名称`（tasks 列表/详情/--out/ops/ask 证据行/redo 配对行），UUID 退出业务展示位，`--out` 含 Main 回复全文。
+- **绿证与绊线**：`npx tsc --noEmit` 退出码 0；目标 6 文件 86/86；全量 `npx vitest run` 40 文件/347 例全过；反向绊线五组 + 绊线轮修正（archiveReply 移除→4 红 / 编号去 +1→唯一与并发 6 红 / 备份次序→1 红 / 空白回复守卫→1 红 / 编号标签破坏→12 红 / 删除后重分配→初版回收编号 1 红→改计数器修复），复原后全绿。证据 `.runtime/p1/`（gitignored）。
+- **独立复核与黑盒**：P1-E01 黑盒（预注册 N=9：合格轮 k=6/6，Wilson 95% CI [0.6097, 1.0000]，不作稳定概率解读）与 E06/E12 smoke 已跑（覆盖边界见 `docs/product/p1-ledger.md`）；**独立复核 passed=true、integrity=false**（复核员只读，破坏性绊线于 /tmp 只读副本复做；裁决记录见报告 §七）。
+- **合入**：本合并提交（--no-ff）入 `arch/integration`；文件范围 17 文件（8 生产 + 7 测试 + 2 文档）；合入后 typecheck=0、unit 40 文件/347 例全绿。
+- **边界**：不新增依赖/机制；R3 判据、eval 锁/cases/judge、历史证据与其他工作树零触碰；回退=代码 revert（加列/加表向前兼容，旧列照常可读；备份保留）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

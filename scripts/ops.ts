@@ -10,13 +10,14 @@
  *   · 纯读：底账以只读打开（沿用 createSqliteTaskRegistry 的 readOnly 路径），不建库、不写库；
  *   · 静态生成：纯字符串模板 + inline CSS，无脚本、无外链、不联网，可离线用浏览器打开；
  *     HTML 动态文本一律经 escapeHtml 实体转义（安全不变式），动态值不进属性上下文；
- *   · 展示语义复用 scripts/tasks.ts 的既有导出（时间格式/摘要/状态词/原因行/底账行），
- *     不复制第二套渲染；最近任务序与 `npm run tasks` 列表口径一致（对账测试钉住）；
+ *   · 展示语义复用 scripts/tasks.ts 的既有导出（时间格式/摘要/状态词/原因行/底账行/
+ *     #编号+名称标签），不复制第二套渲染；最近任务序与 `npm run tasks` 列表口径一致
+ *     （对账测试钉住）；
  *   · 产物恒为且仅为 <out>/index.html：目录缺失时创建，同名普通文件幂等覆盖，
  *     目录/符号链接占位一律拒绝；目录内其它文件不读、不删、不动；
  *   · 不新增依赖、不改 schema 与写语义、不加载模型、不 spawn 执行层。
  *
- * 限制与指针（页面固定文案，如实标注）：Main 最终回复当前不落库；执行步骤无时间戳；
+ * 限制与指针（页面固定文案，如实标注）：历史任务无最终回复存档；执行步骤无时间戳；
  * 列表为全 principal 视图；running 行无自愈；质量与覆盖报告为文本指针
  * （scripts/eval/exploration/quality-report-v1.md；复跑 npm run eval:user）。
  */
@@ -32,6 +33,7 @@ import {
   resolveOutPath,
   resolveTaskDbPath,
   summarizeRequest,
+  taskLabel,
   taskReasonLine,
 } from './tasks';
 
@@ -185,14 +187,16 @@ const CSS_LINES: readonly string[] = [
 /** 限制与指针段（固定文案；含 P1/P2/P3 已登记口径与质量报告文本指针）。 */
 const LIMIT_ITEMS: readonly string[] = [
   '本页为本地只读快照，由 <code>npm run ops</code> 从任务底账机械生成；状态与失败原因不重算（沿用 P1 口径）。',
-  '「摘要」列是交办原文（空白折叠、截断至 60 字符），不是 Main 回复；Main 的最终回复当前不落库（P1/P2/P3 登记，待裁）。',
+  '「任务」列为 #编号 + 业务名称（历史行按交办原文机械回落；内部 taskId 不用于业务展示）；'
+    + '「摘要」列是交办原文（空白折叠、截断至 60 字符），不是 Main 回复。'
+    + 'Main 最终回复已存档：见 <code>npm run tasks -- &lt;#编号&gt;</code> 详情/交付件；历史任务显示「该任务无最终回复存档」。',
   '「未执行」= 已委派但零次向执行层发起调用；纯聊天不产生任务记录。',
   '执行步骤无时间戳（底账 schema 冻结）；时间均为本机时区（YYYY-MM-DD HH:mm）。',
   '本页是库内全 principal 视图（本地运维视角，不按用户过滤）；生成过程不写库。',
   '「进行中」为未收尾行；进程中断可能留下存量行（无自愈机制，如实显示）。',
   '只读打开 WAL 库可能出现 <code>-wal</code>/<code>-shm</code> 旁路文件（SQLite 固有；不删除以免干扰活跃写者）。',
-  '单任务详情 / 交付件导出：<code>npm run tasks -- &lt;taskId&gt;</code>'
-    + '（<code>--out &lt;path&gt;</code> 导出 Markdown）；重新交办：<code>npm run tasks -- &lt;taskId&gt; --redo</code>。',
+  '单任务详情 / 交付件导出：<code>npm run tasks -- &lt;#编号&gt;</code>'
+    + '（也接受内部 taskId；<code>--out &lt;path&gt;</code> 导出 Markdown）；重新交办：<code>npm run tasks -- &lt;#编号&gt; --redo</code>。',
   '失败与未执行清单收录终态非成功任务（失败/未执行），原因为底账持久化的机械判定原文。',
   '质量与覆盖报告（文本指针，非链接）：<code>scripts/eval/exploration/quality-report-v1.md</code>；'
     + '复跑用户级评测：<code>npm run eval:user</code>（缺省输出 <code>.runtime/eval-r1/</code>）。',
@@ -266,11 +270,11 @@ export function renderOpsPage(input: OpsPageInput): string {
     lines.push('<p class="empty">（无任务记录）</p>');
   } else {
     lines.push('<table class="recent">');
-    lines.push('<thead><tr><th>任务 ID</th><th>创建时间</th><th>状态</th><th>摘要</th></tr></thead>');
+    lines.push('<thead><tr><th>任务</th><th>创建时间</th><th>状态</th><th>摘要</th></tr></thead>');
     lines.push('<tbody>');
     for (const task of recent) {
       lines.push(dataRow([
-        escapeHtml(task.taskId),
+        escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
         escapeHtml(statusWord(task.status)),
         escapeHtml(summarizeRequest(task.request)),
@@ -287,11 +291,11 @@ export function renderOpsPage(input: OpsPageInput): string {
     lines.push('<p class="empty">（无）</p>');
   } else {
     lines.push('<table class="failures">');
-    lines.push('<thead><tr><th>任务 ID</th><th>创建时间</th><th>机械原因</th></tr></thead>');
+    lines.push('<thead><tr><th>任务</th><th>创建时间</th><th>机械原因</th></tr></thead>');
     lines.push('<tbody>');
     for (const task of failuresShown) {
       lines.push(dataRow([
-        escapeHtml(task.taskId),
+        escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
         escapeHtml(taskReasonLine(task) ?? '（底账未记录原因）'),
       ]));

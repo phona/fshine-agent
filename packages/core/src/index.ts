@@ -5,7 +5,7 @@
  */
 export { loadConfig, deploymentEnvOf, effectiveDeploymentEnv } from './config';
 export type { LoadConfigOptions } from './config';
-export { openTaskStore } from './task-store';
+export { openTaskStore, TASK_STORE_SCHEMA_VERSION } from './task-store';
 export type {
   TaskRow,
   ExecutionRow,

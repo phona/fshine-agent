@@ -2,18 +2,22 @@
  * tasks：本地任务底账入口——查看（列表/详情）、交付件导出与终态任务重新推进。
  *
  * 用法：
- *   npm run tasks                    # 最近任务列表（时间/状态/摘要/id，最多 20 条）
- *   npm run tasks -- <taskId>        # 单任务详情（状态/原因/执行步骤/任务结果）
- *   npm run tasks -- <taskId> --out <path>   # 导出任务交付件（Markdown；拒绝覆盖既有文件）
- *   npm run tasks -- <taskId> --redo         # 以存储的交办原文逐字重新交办一个新任务（仅终态）
+ *   npm run tasks                    # 最近任务列表（时间/状态/#编号 业务名称，最多 20 条）
+ *   npm run tasks -- <#编号|taskId>  # 单任务详情（状态/原因/执行步骤/任务结果/最终回复）
+ *   npm run tasks -- <#编号|taskId> --out <path>   # 导出任务交付件（Markdown；拒绝覆盖既有文件）
+ *   npm run tasks -- <#编号|taskId> --redo         # 以存储的交办原文逐字重新交办一个新任务（仅终态）
  *   （--config=<path> / AGENT_CONFIG_PATH 与 ask 同义；缺省读 <仓根>/.runtime/state.db）
  *
- * 边界（P1 任务查看 + P2 结果交付 + P3 人工接管切片）：
+ * 边界（P1 任务查看 + P2 结果交付 + P3 人工接管 + P1 底账演化）：
  *   · 只读（列表/详情/--out）：SQLite 以 readonly 打开（不写、不锁写；库不存在不创建）；
  *     导出只把交付件写到用户指定的那一个文件，不写库、不建目录；
+ *   · 任务引用：`#编号` 或纯数字（业务展示位只出 #编号+名称，不出 UUID）；内部 taskId
+ *     原样兼容（审计/脚本既有用法）；解析失败与不存在同一措辞；
  *   · 状态与原因不做二次判定——直接消费任务注册表里由 judgeReportedTask 写入的终态
  *     （completed/failed/unexecuted）与 failureReason；本文件只做中文词表映射，
  *     「读时重算」会把 fail() 路径（零执行 + failed）与 running 行错报，故不重算；
+ *   · 「最终回复」= 底账持久化的 Main 回合回复全文（P1/S1 存档）；历史行无存档时显示
+ *     「该任务无最终回复存档」，不以「任务结果」（执行层汇报）冒充；
  *   · 交付件与详情消费同一组字段行渲染函数（见下方渲染构建函数），不维护第二套渲染；
  *   · --redo（唯一写路径）：只对终态任务生效；输入=存储的委派原文逐字（不拼接原任务的
  *     回复/执行台账/摘要），经 scripts/ask-runtime.ts 与 ask 同源的装配重新交办为新任务；
@@ -27,6 +31,7 @@ import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
 import { loadConfig } from '@fshine/core';
 import type { Session } from '../packages/agent/src/execution-runtime';
 import {
+  deriveTaskName,
   judgeReportedTask,
   type TaskRecord,
   type TaskStatus,
@@ -41,9 +46,9 @@ const REDO_ROOT = path.join(REPO_ROOT, '.runtime', 'redo');
 const TASK_LIST_LIMIT = 20;
 const SUMMARY_MAX = 60;
 
-const USAGE = '用法：npm run tasks [-- <taskId>] [--out <path>] [--redo] [--config=<path>]\n'
-  + '  不带参数：最近任务列表；带 taskId：该任务详情；带 taskId 与 --out：导出任务交付件（Markdown）；\n'
-  + '  带 taskId 与 --redo：以该任务存储的交办原文逐字重新交办一个新任务（仅终态任务）。';
+const USAGE = '用法：npm run tasks [-- <#编号|taskId>] [--out <path>] [--redo] [--config=<path>]\n'
+  + '  不带参数：最近任务列表；带 #编号（或 taskId）：该任务详情；带 --out：导出任务交付件（Markdown）；\n'
+  + '  带 --redo：以该任务存储的交办原文逐字重新交办一个新任务（仅终态任务）。';
 
 export const EMPTY_TASKS_MESSAGE = '还没有任务记录。用 npm run ask -- "…" 交办一项任务后，这里会列出最近的任务。';
 
@@ -176,6 +181,35 @@ export function summarizeRequest(request: string, max: number = SUMMARY_MAX): st
   return single.length > max ? `${single.slice(0, max)}…` : single;
 }
 
+/** 业务编号标签：`#<no>`；缺编号（旧库只读/未迁移）显示「（无编号）」，回退项不冒充。 */
+export function taskNoLabel(task: Pick<TaskRecord, 'taskNo'>): string {
+  return task.taskNo === undefined ? '（无编号）' : `#${task.taskNo}`;
+}
+
+/**
+ * 业务展示标签：`#<no> <name>`。名称优先存储值；缺省（历史行）用同一机械规则
+ * deriveTaskName(request) 回落——零模型、确定性；UUID 不进业务展示位。
+ */
+export function taskLabel(task: Pick<TaskRecord, 'taskNo' | 'name' | 'request'>): string {
+  return `${taskNoLabel(task)} ${task.name ?? deriveTaskName(task.request)}`;
+}
+
+/**
+ * 任务引用解析（详情/导出/redo 同一入口）：
+ *   · taskId 原样（内部/脚本既有用法兼容）；
+ *   · `#编号` 或纯数字（业务引用；用户复制的就是 #编号）。
+ * 解析不到返回 undefined（调用方按「找不到任务」处理，与不存在同一措辞）。
+ */
+export function findTaskRef(records: readonly TaskRecord[], ref: string): TaskRecord | undefined {
+  const trimmed = ref.trim();
+  const direct = records.find((task) => task.taskId === trimmed);
+  if (direct !== undefined) return direct;
+  const match = /^#?(\d+)$/.exec(trimmed);
+  if (match === null) return undefined;
+  const taskNo = Number(match[1]);
+  return records.find((task) => task.taskNo === taskNo);
+}
+
 /** 与底账读序一致：created_at 升序、同刻按 task_id 稳定。 */
 function compareAscending(a: TaskRecord, b: TaskRecord): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
@@ -193,8 +227,8 @@ export function renderTaskList(records: readonly TaskRecord[], options: { limit?
     : `最近任务（共 ${total} 条）`;
   const lines = [header];
   for (const task of shown) {
-    lines.push(`${formatLocalTime(task.createdAt)}  ${taskStatusWord(task.status)}  ${summarizeRequest(task.request)}`);
-    lines.push(`  id: ${task.taskId}`);
+    // 业务展示位只有 #编号+名称（UUID 只在底账/审计证据里，不出现在这里）。
+    lines.push(`${formatLocalTime(task.createdAt)}  ${taskStatusWord(task.status)}  ${taskLabel(task)}`);
   }
   return lines.join('\n');
 }
@@ -208,7 +242,7 @@ function executionErrorText(error: unknown): string | undefined {
 /** —— 字段行构建函数：详情与交付件共用同一来源（唯一渲染口径，不另起第二套）。 —— */
 
 export function taskIdentityLine(task: TaskRecord): string {
-  return `任务 ${task.taskId}`;
+  return `任务 ${taskLabel(task)}`;
 }
 
 export function taskStatusLine(task: TaskRecord): string {
@@ -249,34 +283,47 @@ export function taskResultLines(task: TaskRecord): string[] {
   return ['任务结果：', task.resultText !== undefined && task.resultText.trim() !== '' ? task.resultText : '（无）'];
 }
 
-/** 单任务详情（P1 输出逐字节不变）：消费上面的同一组字段行。 */
+/**
+ * 最终回复段（含「最终回复：」标题行）：P1/S1 存档的 Main 回合并合回复全文；
+ * 缺省（历史行/未产生最终回复）给机械标注，**不用任务结果（执行层汇报）冒充**。
+ */
+export function taskReplyLines(task: TaskRecord): string[] {
+  const reply = task.replyText;
+  return ['最终回复：', reply === undefined || reply.trim() === ''
+    ? '该任务无最终回复存档（历史任务，Main 最终回复未持久化；不以执行层汇报冒充）。'
+    : reply];
+}
+
+/** 单任务详情：消费上面的同一组字段行。 */
 export function renderTaskDetail(task: TaskRecord): string {
   const lines = [taskIdentityLine(task), taskStatusLine(task), taskTimeline(task), taskRequestLine(task)];
   const reason = taskReasonLine(task);
   if (reason !== undefined) lines.push('', reason);
   lines.push('', ...taskExecutionLines(task));
   lines.push('', ...taskResultLines(task));
+  lines.push('', ...taskReplyLines(task));
   return lines.join('\n');
 }
 
-/** 交付件固定限制与说明（如实标注；Main 最终回复当前不落库属 owner 待裁项，登记不实施）。 */
+/** 交付件固定限制与说明（如实标注）。 */
 const DELIVERABLE_LIMITS = [
   '- 本交付件由 `npm run tasks` 的导出模式从本地任务底账机械导出（只读），内容未经模型润色或二次判定。',
-  '- 「任务结果」是任务底账持久化的执行层汇报原文；Main 的最终回复当前不落库，本交付件不含 Main 最终回复。',
+  '- 「任务结果」是任务底账持久化的执行层汇报原文；「最终回复」是 Main 在回合收尾时实际发送给用户的回复全文（逐字存档）。',
+  '- 历史任务没有最终回复存档（显示「该任务无最终回复存档」），交付件不以执行层汇报冒充 Main 回复。',
   '- 状态与失败原因来自任务收尾时的机械判定（judgeReportedTask）；导出只读不重算。',
-  '- 执行步骤无时间戳（底账 schema 冻结）；时间以本机时区显示。',
+  '- 时间以本机时区显示；执行步骤无时间戳。',
 ];
 
 const DELIVERABLE_RUNNING_NOTE = '- 该任务尚未收尾（当前状态「进行中」）：交付件反映导出时的底账状态。';
 
 /**
- * 任务交付件（Markdown）：标题 + 任务信息/状态/执行步骤/任务结果/限制与说明。
+ * 任务交付件（Markdown）：标题 + 任务信息/状态/执行步骤/任务结果/最终回复/限制与说明。
  * 纯函数、无时钟依赖；段内字段行全部来自上面的共享构建函数——详情每一行都逐字在此出现。
  * 不含详情末行的运行时底账提示；末尾恰好一个换行；字段行不做 Markdown 转义（保真优先）。
  */
 export function renderTaskDeliverable(task: TaskRecord): string {
   const lines = [
-    `# 任务交付件：${task.taskId}（${taskStatusWord(task.status)}）`,
+    `# 任务交付件：${taskLabel(task)}（${taskStatusWord(task.status)}）`,
     '', '## 任务信息', '',
     taskIdentityLine(task),
     taskTimeline(task),
@@ -288,6 +335,7 @@ export function renderTaskDeliverable(task: TaskRecord): string {
   if (reason !== undefined) lines.push(reason);
   lines.push('', '## 执行步骤', '', ...taskExecutionLines(task));
   lines.push('', '## 任务结果', '', ...taskResultLines(task));
+  lines.push('', '## 最终回复', '', ...taskReplyLines(task));
   lines.push('', '## 限制与说明', '', ...DELIVERABLE_LIMITS);
   if (task.status === 'running') lines.push(DELIVERABLE_RUNNING_NOTE);
   return `${lines.join('\n')}\n`;
@@ -378,9 +426,9 @@ export interface RedoOutcome {
 /** 可重新推进的存储终态：只有这三态（running/未知态 fail-closed 拒绝；不读时重算）。 */
 const REDOABLE_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set<TaskStatus>(['completed', 'failed', 'unexecuted']);
 
-/** 配对行（输出逐字形状）：`原任务 <old> → 新任务 <new>（状态：<词>）`。 */
-export function renderRedoPairLine(oldTaskId: string, newTaskId: string, status: TaskStatus): string {
-  return `原任务 ${oldTaskId} → 新任务 ${newTaskId}（状态：${taskStatusWord(status)}）`;
+/** 配对行（输出逐字形状）：`原任务 #<no> → 新任务 #<no>（状态：<词>）`（业务编号引用）。 */
+export function renderRedoPairLine(oldTask: TaskRecord, newTask: TaskRecord): string {
+  return `原任务 ${taskNoLabel(oldTask)} → 新任务 ${taskNoLabel(newTask)}（状态：${taskStatusWord(newTask.status)}）`;
 }
 
 async function defaultRedoAssembler(input: AskRuntimeInput): Promise<RedoAssembly> {
@@ -464,7 +512,7 @@ export async function runRedo(
         .filter((record) => !before.has(record.taskId) && record.taskId !== task.taskId);
       const stdout = created.length === 0
         ? ''
-        : `${created.map((record) => renderRedoPairLine(task.taskId, record.taskId, record.status)).join('\n')}\n`;
+        : `${created.map((record) => renderRedoPairLine(task, record)).join('\n')}\n`;
       return { exitCode: 1, stdout, stderr: `重新推进未完成：${errorText(sent.error)}\n` };
     }
     const turn = sent.value;
@@ -477,7 +525,7 @@ export async function runRedo(
     }
     const newTasks = turn.taskIds.map((taskId) => runtime.session.getTask(taskId));
     const head = turn.reply.trim() === '' ? '' : `${turn.reply}\n\n`;
-    const stdout = `${head}${newTasks.map((record) => renderRedoPairLine(task.taskId, record.taskId, record.status)).join('\n')}\n`
+    const stdout = `${head}${newTasks.map((record) => renderRedoPairLine(task, record)).join('\n')}\n`
       + `任务底账：${displayDbPath(input.dbPath)}（新任务已写入）\n`;
     return { exitCode: 0, stdout, stderr: '' };
   } finally {
@@ -521,7 +569,7 @@ async function main(): Promise<void> {
       console.log(`${renderTaskList(tasks)}\n${renderTaskLedgerLine(dbPath)}`);
       return;
     }
-    const task = tasks.find((candidate) => candidate.taskId === parsed.taskId);
+    const task = findTaskRef(tasks, parsed.taskId);
     if (task === undefined) {
       console.error(`找不到任务：${parsed.taskId}（任务底账中没有这条记录）。`);
       process.exitCode = 2;

@@ -5,6 +5,12 @@
  * 越权（换一个 principal/session）必须被确定性拒绝。可信身份来自装配层的
  * principalId/sessionId（配置与渠道事实），**不接受模型输入**。
  *
+ * P1 底账演化（最小增量，豁免零新增机制——数字 ID/名称/回复存档是任务书点名的确定性责任）：
+ *   · taskNo：数字任务编号（由 SQLite 底账单条 SQL 原子分配；内存实现同口径自增）；
+ *   · name：业务名称 v1 = 机械回落 deriveTaskName(request)（零模型；来源=任务交办原文，
+ *     与迁移回填/显示回落同规则；#4-a 模型命名递延，不改 run_task 工具 schema）；
+ *   · replyText：Main 本回合最终回复（send 收尾后 archiveReply 同值写本回合各任务行）。
+ *
  * 这里不做的（登记缺口，不在这里预造）：
  *   · 任务级幂等键（dispatchKey）与"同键重复提交返回原任务"：最小入口没有重投/重放面
  *     （无渠道、无后台重投），接入渠道与重投的切片按最小形状补；
@@ -17,6 +23,21 @@
 import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
 
 export type TaskStatus = 'running' | 'completed' | 'failed' | 'unexecuted';
+
+/** 机械命名默认上限（字符；超长截断加省略号）。 */
+const TASK_NAME_MAX = 40;
+
+/**
+ * 业务名称 v1（机械回落，零模型、确定性）：取任务交办原文首个空行之前的段落，
+ * 空白折叠为单行，超 maxLength 字符截断加「…」；原文无内容给机械占位。
+ * 单一来源（新行写入 / 历史行 NULL 显示回落 / 旧库回填口径都用本函数）。
+ */
+export function deriveTaskName(request: string, maxLength: number = TASK_NAME_MAX): string {
+  const firstParagraph = request.split(/\n[ \t]*\n/)[0] ?? '';
+  const single = firstParagraph.replace(/\s+/g, ' ').trim();
+  if (single === '') return '未命名任务';
+  return single.length > maxLength ? `${single.slice(0, maxLength)}…` : single;
+}
 
 /** 一次已发起的执行调用（requestId 由宿主持有，模型不可见）。 */
 export interface ExecutionRecord {
@@ -68,11 +89,17 @@ export interface TaskRecord {
   taskId: string;
   principalId: string;
   sessionId: string;
-  /** 委派原文（任务请求；审计与结果解释用）。 */
+  /** 委派原文（任务请求；审计与结果解释用；业务名称的机械来源）。 */
   request: string;
   status: TaskStatus;
   resultText?: string;
   failureReason?: string;
+  /** P1：数字任务编号（底账分配，唯一、不复用；旧库只读/未迁移时缺省）。 */
+  taskNo?: number;
+  /** P1：业务名称（新行=机械回落写入；历史行缺省，显示层同规则回落）。 */
+  name?: string;
+  /** P1：本回合 Main 最终回复全文（同回合各任务行同值；缺省=无最终回复存档）。 */
+  replyText?: string;
   executions: readonly ExecutionRecord[];
   createdAt: string;
   updatedAt: string;
@@ -96,6 +123,11 @@ export interface TaskRegistry {
   noteExecution(taskId: string, record: ExecutionRecord): void;
   complete(taskId: string, resultText: string): void;
   fail(taskId: string, reason: string): void;
+  /**
+   * P1：把本回合 Main 最终回复逐字写入各任务行（同回合各任务行同值）。
+   * 调用点唯一：execution-runtime.send 收尾后；不存在的 taskId 不写（调用方保证 id 来自本回合）。
+   */
+  archiveReply(taskIds: readonly string[], replyText: string): void;
   /** 按可信 scope 取任务：principalId 与 sessionId 都必须一致，否则 TaskOwnershipError。 */
   get(taskId: string, scope: TaskScope): TaskRecord;
   /** scope 缺省 = 全部任务；给出时只返回该 principal + session 的任务（不跨会话泄漏）。 */
@@ -109,6 +141,8 @@ interface MutableTaskRecord extends Omit<TaskRecord, 'executions'> {
 
 export function createTaskRegistry(): TaskRegistry {
   const tasks = new Map<string, MutableTaskRecord>();
+  /** 内存实现的编号：与 SQLite 底账同口径（自增、不复用）——测试与纯内存嵌入用。 */
+  let nextTaskNo = 0;
   const require = (taskId: string): MutableTaskRecord => {
     const task = tasks.get(taskId);
     if (!task) throw new TaskOwnershipError();
@@ -120,12 +154,15 @@ export function createTaskRegistry(): TaskRegistry {
   return {
     begin(input) {
       const now = new Date().toISOString();
+      nextTaskNo += 1;
       const task: MutableTaskRecord = {
         taskId: input.taskId,
         principalId: input.principalId,
         sessionId: input.sessionId,
         request: input.request,
         status: 'running',
+        taskNo: nextTaskNo,
+        name: deriveTaskName(input.request),
         executions: [],
         createdAt: now,
         updatedAt: now,
@@ -156,6 +193,14 @@ export function createTaskRegistry(): TaskRegistry {
       task.status = 'failed';
       task.failureReason = reason;
       touch(task);
+    },
+    archiveReply(taskIds, replyText) {
+      for (const taskId of taskIds) {
+        const task = tasks.get(taskId);
+        if (task === undefined) continue;
+        task.replyText = replyText;
+        touch(task);
+      }
     },
     get(taskId, scope) {
       const task = tasks.get(taskId);
