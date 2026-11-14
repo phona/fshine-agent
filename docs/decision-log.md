@@ -978,6 +978,16 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十九、P1 底账演化：实施与迁移口径登记（2026-11-14，分支 `arch/r4-p1-ledger`）
+
+- **授权与范围**：owner 排程（P1 ∥ P7a，P0 验收合入后点火；本片先行）与口径裁定（数字 ID=SQLite 原子分配/业务名称 v1 机械回落/回复存储=同回合各任务行同值/迁移=版本化+幂等+向前兼容+迁移前自动备份）。基线 `arch/integration @ 46f757e3faceaf19f7b6642f0cdc2f1da0caae2b`（含 P0 合入）。提交链：`6b21abe`（测试先行：P1-T01–T05 确定性测试 + 跨进程并发夹具；全量红 6 文件 48 例、typecheck 71 错，其余 34 文件零附带失败）→ `619fec5`（实现：10 文件 +358/−74）。
+- **schema 迁移口径（一次版本化，幂等、向前兼容）**：`tasks` 加列 `task_no/name/reply_text` + 部分唯一索引（`task_no IS NOT NULL`）+ `PRAGMA user_version=2`；历史行按 `(created_at, task_id)` 升序单条 SQL（ROW_NUMBER）回填编号、只填 NULL（二次打开零差异）；历史 `reply_text/name` 保持 NULL。**迁移前自动备份**：`wal_checkpoint(FULL)` 后整文件复制为 `<dbPath>.backup-v2`（不覆盖、不自动删除、仅真正迁移时生成；`:memory:` 与库不存在不生成）；权威口径见 `packages/core/src/task-store.ts` 文首注（本节为登记）。回退断言：加列不破坏旧代码 SELECT（旧列照常可读）；历史行显示「该任务无最终回复存档」，不以执行层汇报冒充。
+- **数字编号/名称/回复**：编号分配 = INSERT 内单条 SQL `(SELECT COALESCE(MAX(task_no),0)+1 FROM tasks)`（并发安全、失败不占号、不复用/不回退）；只读打开旧库不迁移（新列读出缺省、主库哈希不变）。名称 v1 = 机械回落 `deriveTaskName(request)`（首段/空白折叠/40 字符截断；零模型；#4-a 模型命名递延，`run_task` 工具 schema 未动）。回复写点唯一 = `execution-runtime.send` 收尾后 `archiveReply`（非空白才落；同回合各任务行同值、单事务；不建 turns 表）。显示面统一 `#编号+名称`（tasks 列表/详情/--out/ops/ask 证据行/redo 配对行），UUID 退出业务展示位，`--out` 含 Main 回复全文。
+- **绿证与绊线**：`npx tsc --noEmit` 退出码 0；目标 6 文件 86/86；全量 `npx vitest run` 40 文件/346 例全过；反向绊线五组（archiveReply 移除→4 红 / 编号去 +1→唯一与并发 6 红 / 备份次序放到加列后→备份字节断言 1 红 / 空白回复守卫移除→1 红 / 编号标签破坏→tasks+ops 12 红），复原后全绿。证据 `.runtime/p1/`（gitignored）。
+- **边界与待办**：不新增依赖/机制；R3 判据、eval 锁/cases/judge、历史证据与其他工作树零触碰；P1-E01（真实模型黑盒）与独立复核未做，待分派，此处不宣称。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
