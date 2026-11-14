@@ -15,7 +15,7 @@
 ## 1. Task Registry 契约（P2；冻结项）
 
 - **状态集**：`queued | running | waiting_user | cancelling | cancelled | completed | failed | timed_out`；保留 `unexecuted`（已汇报零执行）。`cancelling` 为过渡态——**取消请求 ≠ 已取消**，仅确认中止（abort 观察或执行层确认）后才落 `cancelled`。
-- **合法转换**（其余一律拒绝并留痕）：`queued→running`；`queued→cancelling→cancelled`；`running→{completed | failed | waiting_user | cancelling | timed_out}`；`waiting_user→{running | cancelling}`；`waiting_user` 超时 → 关闭活跃等待（保留历史与原因）；`cancelling→cancelled`；`cancelling→running`（中止未获确认时不得宣称取消，回 running 并留痕）。
+- **合法转换**（其余一律拒绝并留痕）：`queued→running`；`queued→cancelling→cancelled`；`queued→timed_out`（排队等待超时，P2-T04）；`running→{completed | failed | waiting_user | cancelling | timed_out}`；`waiting_user→{running（答复接续）| cancelling | timed_out}`；`waiting_user` 超时 → 关闭活跃等待（保留历史与原因）；`cancelling→cancelled`；`cancelling→running`（中止未获确认时不得宣称取消，回 running 并留痕）。
 - **waiting_user 形状**：任务行持久化 `pending_question`（JSON：`missing[]`、`candidates?[]`、`raw?`）与 `waiting_since`；答复 → **同一 Task** 继续（`task_no` 不变、executions 追加、不得新建任务）；**inline 路径维持现冻结语义**（`judgeReportedTask` 不改；`waiting_user` 仅后台任务使用）。
 - **失败/终止原因（机械分类）**：`cancelled_by_user | timeout | failed_confirmed | result_unknown | resource_limited`。**`result_unknown` ≠ failed ≠ success**：重启后无法确认结果的运行中任务落 `result_unknown`，**禁止自动重放**（尤其可能有副作用者）。
 - **唯一写路径**：所有状态变化经 TaskRegistry 单一方法族（原子持久化 + 事实钩子）；任何模块**禁止**直接 `UPDATE tasks.status`（源码级守卫）。
@@ -58,7 +58,7 @@
 ## 5. 错误 / 取消 / 超时 / 归属传递
 
 - 共享 reason 枚举（§1）；P5 拒绝 reason 映射任务 `resource_limited`（Main 话术由展示层定，不在此约定）。
-- 取消链：`request → cancelling →（确认）cancelled /（未确认）running`；超时链：`running / waiting_user → timed_out`；unknown：重启后不可确认 → `result_unknown`。
+- 取消链：`request → cancelling →（确认）cancelled /（未确认）running`；超时链：`queued / running / waiting_user → timed_out`；unknown：重启后不可确认 → `result_unknown`（状态=failed + reason=result_unknown）。
 - 归属错误：`TaskOwnershipError`（不存在/越权同错），任何轨不得自造错误形态。
 
 ## 6. 共享文件唯一负责人
@@ -82,3 +82,10 @@
 - **`stateVersion` 留白补齐**（依据 P4 计划阶段注记，非冲突）：§1 `TaskFact` 增加可选 `stateVersion?: string | number`；§4 outbox 唯一键 `(task_id, kind, state_version)` 中 `state_version` = `fact.stateVersion ?? fact.at`（同一事实重复触发稳定去重；集成可用注册表计数器显式提供更精确版本）。
 - **`result_unknown` 的通知承载**：§4 九类意图枚举保持冻结；`result_unknown` 以 `failed` 意图承载，并在 `payload.reason=result_unknown` 如实携带（不得映射为 success/failed_confirmed 的可混淆形态）。
 - 以上为**澄清性修订**，不改变任何责任方边界、验收判据与冻结语义；后续变更仍须由集成负责人提案并登记。
+
+## 10. v1.2 修订（2026-11-14，仲裁登记）
+
+- **`queued→timed_out` 边补齐**（对齐冻结验收 P2-T04「排队等待超时」；§1 原列举遗漏）：`timeout(taskId,'queued')` 合法，落 `timed_out` + `reason=timeout`；契约测试矩阵按 P2-T04 锁死。
+- **`waiting_user→timed_out` 明示**：等待超时关闭活跃等待并落 `timed_out`（保留历史与原因）。
+- **`result_unknown` 承载再确认**：状态=`failed` + `reason=result_unknown`（终态；与 `failed_confirmed` 以 reason 区分；不自动重放；P4 侧以 `failed` 意图 + `payload.reason=result_unknown` 承载）。
+- 以上为对冻结验收契约的**对齐性修订**（非产品语义变更）；P2a 冻结记录（`docs/product/p2a-task-contract.md`）须逐条登记这些处置；后续变更仍由集成负责人提案并版本化。
