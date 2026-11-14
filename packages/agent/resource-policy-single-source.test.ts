@@ -28,6 +28,12 @@ const CORE_CONFIG = 'packages/core/src/config.ts';
 const RESOURCE_POLICY = 'packages/agent/src/resource-policy.ts';
 const EXECUTION_RUNTIME = 'packages/agent/src/execution-runtime.ts';
 const ASK_RUNTIME = 'scripts/ask-runtime.ts';
+// R4 稳定性套件的假件 harness（2026-11-14 登记）：只**构造**测试场景的 RuntimeConfig 输入
+// （backgroundConcurrency/queueCapacity 逐场景参数），不解析/解释旋钮、不读原始
+// config.runtime.*；与 *.test.ts 同类（该扫描已排除 *.test.ts，harness 因命名未被排除）。
+const STAB_SOAK = 'scripts/stab/soak-harness.ts';
+const STAB_PRESSURE = 'scripts/stab/pressure-harness.ts';
+const STAB_CHAOS = 'scripts/stab/chaos-harness.ts';
 
 /** 分诊 #6 删除的 host.* 未消费键（生产代码零引用；旧 YAML 里的残留键由加载层忽略）。 */
 const DELETED_HOST_KEYS = [
@@ -62,8 +68,8 @@ const DELETED_ENV_KEYS = [
  */
 const KNOB_OWNERS: Readonly<Record<string, readonly string[]>> = {
   mainConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
-  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
+  backgroundConcurrency: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS],
+  queueCapacity: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, STAB_SOAK, STAB_PRESSURE, STAB_CHAOS],
   mainTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   workerTurnMs: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY, EXECUTION_RUNTIME, ASK_RUNTIME],
   maxDelegationDepth: [CONTRACTS_CONFIG, CORE_CONFIG, RESOURCE_POLICY],
