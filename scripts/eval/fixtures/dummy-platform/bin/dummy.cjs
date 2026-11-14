@@ -324,11 +324,43 @@ function audit(row) {
   fs.appendFileSync(f, JSON.stringify({ ts: new Date().toISOString(), ...row }) + '\n');
 }
 function emit(op, status, data, error) {
-  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}) } : null };
+  const envelope = { v: 1, op, status, data: data ?? null, error: error ? { code: error.code, message: error.message, ...(error.correctForm ? { correctForm: error.correctForm } : {}), ...(error.retryable !== undefined ? { retryable: error.retryable } : {}) } : null };
   process.stdout.write('RESULT ' + JSON.stringify(envelope) + '\n');
   return envelope;
 }
 function errObj(code, message) { return { code, message, correctForm: CORRECT_FORM[code] }; }
+// ── 限流（业务 E2E 阶段 1 增项，2026-11-14）─────────────────────────────────────
+// 每 state-dir 计数窗口：DUMMY_RATE_LIMIT_MAX=N 时，该 state-dir 在一个
+// DUMMY_RATE_LIMIT_WINDOW_SECONDS（缺省 3600s、按 epoch 对齐）窗口内最多 N 次
+// 实际执行的 operation（门拒/计划查询等不计）。超限返回 failed 信封 +
+// ExecutionFailure{code:'RATE_LIMITED', message, retryable:true}，经现有 CLI
+// 退出码（1=域失败）与 RESULT 信封表达，不新增协议面。计数落
+// <state-dir>/rate-limit.json；不设 DUMMY_RATE_LIMIT_MAX 时完全关闭（行为不变）。
+function rateLimitPolicy() {
+  const max = Number(env('DUMMY_RATE_LIMIT_MAX', ''));
+  const windowSeconds = Number(env('DUMMY_RATE_LIMIT_WINDOW_SECONDS', ''));
+  if (!Number.isInteger(max) || max <= 0) return null;
+  return { max, windowSeconds: Number.isInteger(windowSeconds) && windowSeconds > 0 ? windowSeconds : 3600 };
+}
+/** 取一个执行名额；超限返回策略（不写审计——调用方落带 exitCode 的审计行）。 */
+function rateLimitTake() {
+  const p = rateLimitPolicy();
+  if (!p) return null;
+  const file = path.join(path.dirname(statePaths().stateFile), 'rate-limit.json');
+  const window = Math.floor(Date.now() / (p.windowSeconds * 1000));
+  const cur = loadJson(file, null);
+  const count = cur && cur.window === window ? cur.count : 0;
+  if (count >= p.max) return p;
+  saveJson(file, { window, count: count + 1 });
+  return null;
+}
+function rateLimitRefused(opName, mode, via, args) {
+  const p = rateLimitTake();
+  if (!p) return false;
+  emit(opName, 'failed', null, { code: 'RATE_LIMITED', message: `Rate limit reached: max ${p.max} executed operation(s) per ${p.windowSeconds}s window for this state dir; retry after the window`, retryable: true });
+  audit({ mode, ...(via ? { via } : {}), script: opName, args, serve: orchestrated(), exitCode: 1 });
+  return true;
+}
 function parseFlags(argv) {
   const flags = {}; const positional = [];
   for (let i = 0; i < argv.length; i += 1) {
@@ -867,6 +899,7 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: 'call', script: op.name, args: call.args, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    if (rateLimitRefused(op.name, accessMode, 'structured', call.args)) return 1;
     let code;
     let queryResult;
     let queryRefused;
@@ -951,6 +984,7 @@ async function main() {
     const planId = env2('EXECUTION_PLAN_ID', 'DUMMY_PLAN_ID', '');
     const requirePlan = env2('EXECUTION_REQUIRE_PLAN', 'DUMMY_REQUIRE_PLAN', '') === '1';
     if (requirePlan && !planId && (op.access === 'read' || op.access === 'scratch')) { process.stderr.write('GATE_REFUSE serve execution requires a host-injected plan id\n'); audit({ mode: cmd, script: op.name, args: rest, serve: orchestrated(), refused: 'PLAN_REQUIRED' }); return 3; }
+    if (rateLimitRefused(op.name, cmd, null, rest)) return 1;
     let code;
     let queryResult;
     let queryRefused;
