@@ -398,7 +398,7 @@ describe('ask --script：坏脚本 fail-closed（exit 2，不静默降级）', (
 
   it('拒绝：config 指向夹具之外（隔离门 fail-closed）', () => {
     const dir = tempDir();
-    const outsideConfig = path.join(dir, 'outside.yaml');
+    const outsideConfig = path.join(dir, 'outside-config.yaml');
     writeFileSync(outsideConfig, [
       'principals:',
       '  "wecom:fixture-user":',
@@ -412,6 +412,9 @@ describe('ask --script：坏脚本 fail-closed（exit 2，不静默降级）', (
     ].join('\n'));
     const script = writeScript(dir, 'outside.yaml', [
       'scenario: p7a-outside',
+      'session:',
+      '  principal: "wecom:fixture-user"',
+      '  session: "s-outside"',
       `config: ${outsideConfig}`,
       'threshold: deterministic',
       'turns:',

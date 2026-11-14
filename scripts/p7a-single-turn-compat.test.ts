@@ -57,7 +57,7 @@ function runAsk(args: readonly string[]): CliResult {
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
-function minimalScript(dir: string): string {
+function compatScript(dir: string): string {
   const file = path.join(dir, 'compat.yaml');
   writeFileSync(file, [
     'scenario: p7a-compat',
@@ -104,7 +104,7 @@ describe('P7a 参数边界：互斥与缺值一律 fail-closed（exit 2）', () 
     expect(interactive.stderr).toContain('--interactive 不接受消息参数');
 
     const dir = tempDir();
-    const script = minimalScript(dir);
+    const script = compatScript(dir);
     const replay = runAsk(['你好', `--script=${script}`]);
     expect(replay.status).toBe(2);
     expect(replay.stderr).toContain('--script 不接受消息参数');
@@ -131,7 +131,7 @@ describe('P7a 参数边界：互斥与缺值一律 fail-closed（exit 2）', () 
 
   it('--script <file>（空格形态）：确定性层不要求 LLM 密钥，exit 0', () => {
     const dir = tempDir();
-    const script = minimalScript(dir);
+    const script = compatScript(dir);
     const result = runAsk(['--script', script]);
     expect(result.status, `stdout=${result.stdout}\nstderr=${result.stderr}`).toBe(0);
     expect(result.stdout).toContain('[pass]');

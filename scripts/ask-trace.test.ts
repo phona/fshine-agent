@@ -116,11 +116,11 @@ async function loadTraceModule(): Promise<TraceModule> {
   return await import(modulePath) as TraceModule;
 }
 
-/** 一次性回放（带轨迹），供本文件多数用例复用；实现前红时每个用例各自失败。 */
+/** 回放（带轨迹）按需执行；afterEach 会清掉临时目录，缓存失效时重建重跑。 */
 let tracedDir = '';
 
 function ensureTracedRun(): string {
-  if (tracedDir !== '') return tracedDir;
+  if (tracedDir !== '' && existsSync(tracedDir)) return tracedDir;
   const dir = tempDir('p7a-trace-run-');
   const script = path.join(dir, 'script.yaml');
   writeFileSync(script, [
