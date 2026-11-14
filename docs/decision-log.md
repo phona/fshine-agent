@@ -1271,6 +1271,23 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十九、业务 E2E · 夜跑续批（bizbatch3：**#7 重设计** / **#6 深探** / 重复轮）（2026-11-15，分支 `arch/r4-bizbatch3`）
+
+- **状态**：**待合入**（装配与自检完成；真实模型运行待续 ask；**尚未 push / 未合并 / 未碰 main/tag**）。
+- **授权**：owner 2026-11-15（彻夜长跑续批）；预注册见 `docs/product/business-e2e-prereg-addendum.md` §六（**先于运行**写死）。
+- **分支/基线**：worktree `~/projects/fshine-agent-r4-bizbatch3`，分支 `arch/r4-bizbatch3`；基线 = `arch/integration` 启动时 HEAD `a88f62328a1336c9242ba64b1e09c5a67138f9fa`（`.runtime/bizbatch3/baseline.txt`，gitignored）。
+- **本次三件事（只装配与自检，零真实模型）**：
+  1. **#7 会话压缩重设计**（`experiments/natural-corpus.ts` + `cases.ts` 的 C03/C04）：以**真实感多轮对话**（~41 轮、单条数百字符）替代 §四十八的 `bulkFiller`（6 × 8000 字符中性填充）；**两窗口对照**（C03=12k 对标失败批次量级；C04=6k 把阈值降到语料累积量级之下）；两用例 `withTaskRunner:true`（修正 §四十八 C01/C02 缺 runner 致恢复探针工具面不可满足）。**压缩触发以驱动事件 `context_emergency_compact` / `context_compacted` 为机械证据**（执行器经 `AsyncLocalStorage` 归属样本，逐样本记录触发行/次数，不参与通过判定）。
+  2. **#6 对象漂移深探**：沿用冻结用例 B06，`--trials 6`（运行期覆盖、不改套件 → 冻结锁不变）。
+  3. **重复轮**：bizprobe 第 4 轮（6 场景 × N=3 = 18 会话），续攒跨轮方差。
+- **预算（本批 ≤45；累计 ≤150，已耗 ≈95）**：#7 C03 3 + C04 3 + #6 6 + 重复轮 18 = **30**；并发 4 ≤ 8；inline only；模型钉 `step-3.7-flash`（显式覆盖 `.env` 缺省 `step-5-preview`）。
+- **装配自检（零真实模型）**：`tsc --noEmit` = **0**；全量 unit **731/731（74 文件）** ↔ 基线同 commit **726/726（74 文件）**（**只增不减**）；新增/扩展自测覆盖**自然语料体量下界**、**压缩触发机械捕获**（合成 + 真实 `compact()` 日志）、**并发归属（ALS 不串台）**、infra 门两态；infra 门：`experiments --infra-gate`（12k/6k compaction）= exit 0、缺 key = blocking exit 2；`business-e2e --infra-gate`（B06×6 / 6×3）均 exit 0、`verifyLock` 一致。
+- **边界**：`packages/`、`apps/` 产品代码**零改动**；不改冻结面与既有轮次读数（本批只**追加**、不重写 §一–§十二）；`.env` 只读复制、不入证据/不提交；证据 `.runtime/bizbatch3/`（gitignored）。
+- **登记（不修，待 owner 裁定）**：#5 `ref` 契约缺陷（同 §四十八）——本批**排除 #5**、不重跑；#7 小窗口病态（§四十八）——本批改设计重跑，**若仍活锁则如实登记为强产品证据**。
+- **回退**：本批仅测试基建 + 语料/夹具 + 文档 + `package.json` 一行脚本，产品代码零改动，回退安全。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
