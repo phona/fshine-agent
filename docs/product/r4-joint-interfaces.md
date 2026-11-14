@@ -20,7 +20,7 @@
 - **失败/终止原因（机械分类）**：`cancelled_by_user | timeout | failed_confirmed | result_unknown | resource_limited`。**`result_unknown` ≠ failed ≠ success**：重启后无法确认结果的运行中任务落 `result_unknown`，**禁止自动重放**（尤其可能有副作用者）。
 - **唯一写路径**：所有状态变化经 TaskRegistry 单一方法族（原子持久化 + 事实钩子）；任何模块**禁止**直接 `UPDATE tasks.status`（源码级守卫）。
 - **最小方法族**（语义冻结；签名实现自定）：`begin`；`get / list(scope)`；`transition(taskId, to, {reason?})`；`waitForUser(taskId, pendingQuestion)`；`answerResumes(taskId)`；`requestCancel(taskId)`；`confirmCancelled(taskId)`；`timeout(taskId, kind)`；`markResultUnknown(taskId)`；`claimNextQueued({owner, leaseMs})`（queued→running 原子认领，含 lease 字段）；`expireLeases(now)`；`onTaskFact(hook)`。
-- **事实钩子（供 P4/P6，非事件总线）**：单回调注入 `onTaskFact(fact)`；`TaskFact = { taskId, taskNo, name, from, to, reason?, at }`；无订阅体系、无持久化事件流。
+- **事实钩子（供 P4/P6，非事件总线）**：单回调注入 `onTaskFact(fact)`；`TaskFact = { taskId, taskNo, name, from, to, reason?, at, stateVersion? }`（`stateVersion` 缺省以 `at` 作为稳定版本；集成若提供注册表计数器可显式传入）；无订阅体系、无持久化事件流。
 - **归属**：principal+session 绑定；越权与不存在同错（`TaskOwnershipError`）。
 - **契约测试（冻结判据）**：合法/非法转换矩阵；取消语义（请求≠取消、确认才 cancelled、中止失败回 running）；waiting_user 持久化与接续；超时关闭保留历史；unknown 不自动重放；越权同错；单写路径守卫（status 直写零命中）。
 
@@ -76,3 +76,9 @@
 ## 8. 集成顺序（依赖建议，非开发启动序）
 
 **P2（契约先合）→ P5 → P6 → P4（联合通知接线）→ P7b（完整验收）**。各轨合入前须在集成分支最新基线完成兼容性回归。
+
+## 9. v1.1 修订（2026-11-14，仲裁登记）
+
+- **`stateVersion` 留白补齐**（依据 P4 计划阶段注记，非冲突）：§1 `TaskFact` 增加可选 `stateVersion?: string | number`；§4 outbox 唯一键 `(task_id, kind, state_version)` 中 `state_version` = `fact.stateVersion ?? fact.at`（同一事实重复触发稳定去重；集成可用注册表计数器显式提供更精确版本）。
+- **`result_unknown` 的通知承载**：§4 九类意图枚举保持冻结；`result_unknown` 以 `failed` 意图承载，并在 `payload.reason=result_unknown` 如实携带（不得映射为 success/failed_confirmed 的可混淆形态）。
+- 以上为**澄清性修订**，不改变任何责任方边界、验收判据与冻结语义；后续变更仍须由集成负责人提案并登记。
