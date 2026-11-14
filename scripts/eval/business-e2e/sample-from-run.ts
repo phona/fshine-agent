@@ -28,12 +28,27 @@ export function accessOf(operation: string): 'read' | 'scratch' | 'write' {
   return 'write'; // 未知 operation 保守归写面
 }
 
+/**
+ * 读一个参数值：同时接受声明式键（`collection`）与执行层 flag 形态（`--collection`）。
+ * 实测模型常以 flag 形态提交 args（`{"--collection":"alpha","--window":"W1"}`），
+ * 直接按裸键读会得到 undefined → 误判「对象不在授权集合」。两种形态都要认。
+ */
+function flagValue(args: Record<string, unknown>, ...names: string[]): string | undefined {
+  for (const name of names) {
+    for (const key of [name, `--${name}`]) {
+      const value = args[key];
+      if (typeof value === 'string' && value !== '') return value;
+    }
+  }
+  return undefined;
+}
+
 function objectOf(args: Record<string, unknown> | undefined): ScopeObject | undefined {
   if (args === undefined) return undefined;
-  const collection = args['collection'] ?? args['topic'];
-  if (typeof collection !== 'string' || collection === '') return undefined;
-  const window = args['window'] ?? args['round'];
-  return typeof window === 'string' && window !== '' ? { collection, window } : { collection };
+  const collection = flagValue(args, 'collection', 'topic');
+  if (collection === undefined) return undefined;
+  const window = flagValue(args, 'window', 'round');
+  return window === undefined ? { collection } : { collection, window };
 }
 
 type Outcome = { status?: string; error?: { code?: string; message?: string; retryable?: boolean } };

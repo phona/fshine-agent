@@ -159,7 +159,7 @@ async function main(): Promise<void> {
 
   const report = await runBizprobeBatch({ cases, items, executor: createModelExecutor(), outRoot: args.outDir, concurrency: args.concurrency });
   const summary = summarizeBizprobe(report);
-  writeFileSync(path.join(args.outDir, 'report.json'), JSON.stringify({ suite: suite.id, policy: report.policy, hardLimits: report.hardLimits, experiment: report.experiment, summary, samples: report.samples.map((s) => ({ id: s.id, caseId: s.caseId, trial: s.trial, scenario: s.scenario, runDir: s.runDir, failed: s.failed, mechanical: s.mechanical, behavior: s.behavior, ux: s.ux })) }, null, 2) + '\n');
+  writeFileSync(path.join(args.outDir, 'report.json'), JSON.stringify({ suite: suite.id, policy: report.policy, hardLimits: report.hardLimits, experiment: report.experiment, batch: { caseCount: report.batch.caseCount, observedMaxConcurrency: report.batch.observedMaxConcurrency, wallMs: report.batch.wallMs, throughputPerSec: report.batch.throughputPerSec, resources: report.batch.resources }, summary, samples: report.samples.map((s) => ({ id: s.id, caseId: s.caseId, trial: s.trial, scenario: s.scenario, runDir: s.runDir, failed: s.failed, mechanical: s.mechanical, behavior: s.behavior, ux: s.ux, modelCalls: s.modelCalls })) }, null, 2) + '\n');
   for (const s of summary) {
     console.log(`${s.caseId}（场景#${s.scenario}）：${s.pass}/${s.n} 通过，Wilson95=[${s.passRateCI.lower.toFixed(3)}, ${s.passRateCI.upper.toFixed(3)}]，机械判负 ${s.mechanicalFailures}，severe ${s.severe}`);
   }
