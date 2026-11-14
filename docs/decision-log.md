@@ -1132,6 +1132,26 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十二、业务 E2E 能力审计 + 缺口 1/2/3 细化设计（2026-11-14，分支 `arch/r4-gaps`，docs-only）
+
+- **背景**：owner 叫停擅起的多轮批次后，裁决先做只读能力审计（五路）再细化方案。审计结论已被 owner 接受为**当前能力基线**。
+- **能力审计（五路只读，附代码证据；我抽检 7 处关键证据全部属实）**：
+  - Main 工具面仅 `run_task`（`execution-runtime.ts:426-430`）→ 对话里**查状态/取消/接续/找回结果四项皆无入口**（机制在 runner/registry 层已实现，但无生产调用）。
+  - 后台任务完成后 Main 不知道（只拿受理回执，`execution-runtime.ts:356-363`）；通知不注入对话历史（`notifications.ts:15-18`）且生产入口未传 sink（`apps/server/main.ts:37`）→ 整条通知链休眠。
+  - 通知无任何聚合（每状态变化一条；单任务 3 条）；running 期间无进展通知。
+  - Main 侧 Skill 链路未接线（`.agents/skills` 不存在；`renderSkillCatalog` 零生产调用）；Worker 侧正文直嵌可用（`execution-runtime.ts:202-204`）；技能读取不可观测。
+  - 压缩窗口 128k 写死（`pi-driver.ts:78`），`LLM_CONTEXT_WINDOW` 被解析但零消费 → 不改代码调不小；压缩后宿主不补任务事实（设计钉死）。
+  - 资源：前台/并发/队列有效；**预算计量仅 inline**（`consume` 唯一调用点 `execution-runtime.ts:410`），后台任务不参与；深度护栏对后台不生效。
+  - 「一句话建多任务」：机制允许（无次数上限/互斥）；受配置限制（缺省 background 并发 1/队列 0 → 第 2 个起确定性拒绝）。
+  - 历史 Skill「0/39」原因：仅证明该模型在该提示结构下不主动调 `read_skill`，**不能**作为 Skill 能力不足证据（b2 正文直塞正向对照 UX-04 0/2→2/2；旧链路已在 `0b97227` 删除）。
+- **交付三份设计（docs-only，+394，产品/测试代码零改动）**：`gap-task-surface.md`（新增 4 个对话工具 `task_status/task_result/task_cancel/task_resume`；**参数只收任务引用，scope 由宿主服务端注入、编号解析在 scope 内做→越权即「找不到」不泄露存在性**；复用 registry.require/runner.cancel/resume）、`gap-main-skill.md`（两臂：正文直嵌 / 目录+按需读取，含可观测性补法）、`gap-compaction-window.md`（装配层一处把 env 经 `parseContextWindow` 传入，缺省零变化）。
+- **提交链**：`3d46c4b`（三份设计）→ `642500b`（复核修复：去除两处基线已有内容、修正行号）。
+- **独立复核**：passed=true、integrity=false（docs-only、复用优先、身份安全逐条核、新造清单为空或极短）。
+- **合入**：`--no-ff` 入 `arch/integration`；合入后 typecheck=0、unit 60 文件/623 例全绿。
+- **边界**：**仅细化，未实施任何产品改动**；缺口 4（后台预算计量）/5（生产通知）不在本轮。缺口实施待 owner 逐项批准。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
