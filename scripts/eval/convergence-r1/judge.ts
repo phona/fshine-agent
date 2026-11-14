@@ -74,6 +74,12 @@ function extractNumberTokens(text: string): NumberToken[] {
     const after = end < text.length ? text[end]! : '';
     // 标识符内数字（W202611 / doc-002 / rec-901 / req_...）不算独立数值。
     if (/[\w.@_-]/.test(before) || /[\w_@-]/.test(after)) continue;
+    // 行首（含缩进）有序列表标记（「1.」「2)」「2、」「2）」…）不是数据：排除。
+    // 形态 = 行首（行内前提为仅空白缩进）+ 数字 + [.、)）]；行内数字、标记后的正文
+    // 数值与其他提取路径不受影响。判定器缺陷修复（2026-11-14 E01 判据形态）：
+    // 此前列表序号被当作实体不可溯源数值（E01/E04 复判证据）。
+    const lineStart = text.lastIndexOf('\n', start - 1) + 1;
+    if (/^[ \t\u3000]*$/.test(text.slice(lineStart, start)) && /[.、)）]/.test(after)) continue;
     tokens.push({ value: Number(match[0].replace(/,/g, '')), index: start });
   }
   return tokens;
