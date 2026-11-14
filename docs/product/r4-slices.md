@@ -92,7 +92,7 @@
 - 验收：确定性——ask 输出/五门拒绝话术字节金样（`ask-runtime.test.ts` 现有）、runner 默认路径与 `criteria.lock` 逐字不变、305 单测全过、tsc 0；真实模型：非必需（可选 E06/E12 回归）。
 - 回退：整片 revert（无 schema/行为变化）。
 - 预估文件：`scripts/ask-runtime.ts`、`apps/server/server.ts`、`scripts/eval/convergence-r1/runner.ts`（可选）、tests。
-- 验收契约（v1，见 `r4-acceptance.md`）：P0-T01–T05（确定性，门槛=全过）；回退断言=回退后 ask/runner 金样与单测仍全过（零行为变化）；实施先落地对应测试（红）→最小实现→反向绊线。
+- 验收契约（v1，见 `r4-acceptance.md`）：P0-T01–T06（确定性，门槛=全过；含凭据白名单基线不变量 P0-T06）；回退断言=回退后 ask/runner 金样与单测仍全过（零行为变化）；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P1 · 底账演化：数字 ID + 业务名称 + S1 Main 最终回复存档（一次版本化迁移）
 - 范围：`tasks` 表加 `task_no/name/reply_text`（`created_at` 回填；旧行 reply 为 NULL → 「无最终回复存档」）；宿主原子分配数字 ID；`send` 后把该回合最终回复逐字写入本回合各任务行（同值）；ask/tasks/--out/ops 显示 `#<no> <name>`；`--out` 交付件含 Main 回复全文。
