@@ -239,7 +239,9 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       const turns = effectiveTurns(caseDef);
       const replies: ReplyLine[] = [];
       const metaTurns: MetaTurn[] = [];
+      const compactions: Array<{ turn: number; compacted: boolean; before: number; after: number }> = [];
       let previousTranscriptLength = 0;
+      let prevHasSummaryMarker = false;
       const session = assembled.session;
       for (let index = 0; index < turns.length; index += 1) {
         const turn = index + 1;
@@ -250,6 +252,11 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         const durationMs = Date.now() - startedMs;
         const transcript = [...session.transcript()];
         const delta = transcript.slice(previousTranscriptLength);
+        // 压缩触发点（并发安全，不用全局 console）：转录里出现压缩摘要标记
+        // （pi-driver.ts:526 `【此前会话摘要】`）即为压缩发生过；标记一旦出现常驻，故只记首次出现的轮。
+        const hasSummaryMarker = JSON.stringify(transcript).includes('此前会话摘要');
+        compactions.push({ turn, compacted: hasSummaryMarker && !prevHasSummaryMarker, before: previousTranscriptLength, after: transcript.length });
+        prevHasSummaryMarker = hasSummaryMarker;
         previousTranscriptLength = transcript.length;
         const assistantMessages = delta.filter((m) => (m as { role?: unknown }).role === 'assistant');
         const usages = assistantMessages.map((m) => usageOf(m)).filter((u): u is NonNullable<typeof u> => u !== undefined);
@@ -282,7 +289,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         dbPath,
       };
       const meta: MetaFile = { turns: metaTurns, driverEvents: [], notes: [] };
-      return { caseDef, inputs, toolCalls, tasks, replies, meta, perTurnMainTools: sink.perTurnMainTools, skillBlockBytes, seedTaskNos, sample };
+      return { caseDef, inputs, toolCalls, tasks, replies, meta, perTurnMainTools: sink.perTurnMainTools, skillBlockBytes, seedTaskNos, compaction: compactions, sample };
     } finally {
       registry.close();
     }

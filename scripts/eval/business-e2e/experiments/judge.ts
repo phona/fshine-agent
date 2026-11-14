@@ -25,6 +25,8 @@ export interface ExpEvidence {
   perTurnMainTools: readonly (readonly string[])[];
   /** 装配期事实：臂 A 常驻 Main 提示里的技能块字节数（缺省 0）。 */
   skillBlockBytes: number;
+  /** 逐回合压缩触发点（compacted=true 的轮为首次出现压缩摘要标记的轮）。 */
+  compaction: Array<{ turn: number; compacted: boolean; before: number; after: number }>;
   /** 确定性预置任务的 taskNo（越权/挂起探针用；未预置则缺省）。 */
   seedTaskNos: { waiting?: number; foreign?: number };
   sample: SampleRecord;
@@ -59,7 +61,7 @@ export interface ExpVerdict {
     falseCompletion: number;
     /** 重复执行（冻结判定器口径）。 */
     duplicateExecutions: number;
-    /** 压缩触发计数：每回合模型调用数 > 1 的回合数（记录，不参与通过判定）。 */
+    /** 压缩触发次数：转录中出现压缩摘要标记的轮数（记录，不参与通过判定）。 */
     compactionRounds: number;
   };
 }
@@ -76,8 +78,8 @@ function resultOutcome(call: ToolCallRecord): string | undefined {
   return typeof result?.outcome === 'string' ? result.outcome : undefined;
 }
 
-function compactionRounds(meta: MetaFile): number {
-  return (meta.turns ?? []).filter((t) => (t.modelCalls ?? 0) > 1).length;
+function compactionRounds(ev: ExpEvidence): number {
+  return ev.compaction.filter((c) => c.compacted).length;
 }
 
 /** 判定一个实验样本；返回实验专属判定 + 冻结机械面。 */
@@ -162,7 +164,7 @@ export function judgeExp(ev: ExpEvidence): ExpVerdict {
       unauthorized,
       falseCompletion: mechanical.violations.falseCompletion,
       duplicateExecutions: mechanical.violations.meaninglessDuplicates,
-      compactionRounds: compactionRounds(ev.meta),
+      compactionRounds: compactionRounds(ev),
     },
   };
 }

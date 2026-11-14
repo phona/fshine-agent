@@ -111,6 +111,7 @@ function satisfyingEvidence(caseDef: ExpCase, item: ExpItem): ExpEvidence {
     perTurnMainTools: [],
     skillBlockBytes: 0,
     seedTaskNos: {},
+    compaction: [],
     sample: { id: item.id, granted: caseDef.granted, executions: [], reply: { claimsCompletion: false } },
   };
 }
