@@ -22,9 +22,11 @@
  *   · PRAGMA user_version 记录版本（新库直接建 v2）；向前兼容：加列不破坏旧代码 SELECT。
  *
  * 数字编号（P1）：
- *   · 分配 = INSERT 语句内单条 SQL：(SELECT COALESCE(MAX(task_no),0)+1 FROM tasks)，
- *     并发安全（SQLite 写事务串行化；多进程并发实测唯一连续）；失败语句不消耗编号
- *     （失败不占号）；本表无删除路径 → 编号不复用、不回退；
+ *   · 分配 = 计数器行（task_sequences.name='task_no'）在**同一事务**内
+ *     `UPDATE task_sequences SET value = value + 1 … RETURNING value` + INSERT：
+ *     并发安全（SQLite 写事务串行化；多进程并发实测唯一连续）；失败随事务回滚
+ *     （失败不占号）；计数器单调不减（每次打开按 MAX(现值, 历史最大编号) 校正）
+ *     → 删除/修剪后也不复用、存量编号不重排；
  *   · 同回合各任务行写同一最终回复（setReplyForTasks，单事务，同值）。
  *
  * 为什么不恢复旧 store.ts（2026-11-13 删除）而是新写最小引擎：旧 store 承载
@@ -119,6 +121,10 @@ CREATE TABLE IF NOT EXISTS tasks (
   reply_text TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_scope ON tasks (principal_id, session_id);
+CREATE TABLE IF NOT EXISTS task_sequences (
+  name TEXT PRIMARY KEY,
+  value INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS executions (
   request_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -219,6 +225,12 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
             ) WHERE task_no IS NULL
           `).run({ base: (writable.prepare('SELECT COALESCE(MAX(task_no), 0) AS base FROM tasks').get() as { base: number }).base });
         }
+        // 编号计数器：单调不减（MAX(现值, 历史最大编号)）——迁移/重开都不会回收编号。
+        writable.prepare(`
+          INSERT INTO task_sequences (name, value)
+          VALUES ('task_no', (SELECT COALESCE(MAX(task_no), 0) FROM tasks))
+          ON CONFLICT(name) DO UPDATE SET value = MAX(value, excluded.value)
+        `).run();
         writable.exec(SCHEMA_TASK_NO_INDEX);
         const currentVersion = writable.pragma('user_version', { simple: true }) as number;
         if (currentVersion < TASK_STORE_SCHEMA_VERSION) {
@@ -227,10 +239,14 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         return writable;
       })();
 
-  // 语句面：旧库只读（未迁移）时缺 task_no/reply_text 列，含新列的语句不 prepare
-  // （否则 PRAGMA 阶段即报 no such column）；对应写方法给确定性拒绝。
+  // 语句面：旧库只读（未迁移）时缺 task_no/计数器表，含新列的语句不 prepare
+  // （否则 PRAGMA 阶段即报 no such column/table）；对应写方法给确定性拒绝。
   const columns = taskTableColumns(db);
-  const insertTaskStmt = columns.has('task_no')
+  const hasTaskNoColumn = columns.has('task_no');
+  const allocateTaskNo = hasTaskNoColumn
+    ? db.prepare("UPDATE task_sequences SET value = value + 1 WHERE name = 'task_no' RETURNING value")
+    : undefined;
+  const insertTaskStmt = hasTaskNoColumn
     ? db.prepare(`
         INSERT INTO tasks (
           task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at,
@@ -238,10 +254,32 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
         )
         VALUES (
           @taskId, @principalId, @sessionId, @request, @status, @resultText, @failureReason, @createdAt, @updatedAt,
-          (SELECT COALESCE(MAX(task_no), 0) + 1 FROM tasks), @name, @replyText
+          @taskNo, @name, @replyText
         )
       `)
     : undefined;
+  /** 分配 + 插入同一事务：失败（如 taskId 冲突）回滚计数器（失败不占号）。 */
+  const insertTaskTx = (() => {
+    if (allocateTaskNo === undefined || insertTaskStmt === undefined) return undefined;
+    const allocate = allocateTaskNo;
+    const insert = insertTaskStmt;
+    return db.transaction((bound: {
+      taskId: string;
+      principalId: string;
+      sessionId: string;
+      request: string;
+      status: string;
+      resultText: string | null;
+      failureReason: string | null;
+      createdAt: string;
+      updatedAt: string;
+      name: string | null;
+      replyText: string | null;
+    }) => {
+      const allocated = allocate.get() as { value: number };
+      insert.run({ ...bound, taskNo: allocated.value });
+    });
+  })();
   const taskExists = db.prepare('SELECT 1 FROM tasks WHERE task_id = ?');
   const touch = db.prepare('UPDATE tasks SET updated_at = ? WHERE task_id = ?');
   const setOutcome = db.prepare(`
@@ -297,10 +335,10 @@ export function openTaskStore(dbPath: string, options: OpenTaskStoreOptions = {}
 
   return {
     insertTask(row) {
-      if (insertTaskStmt === undefined) {
-        throw new Error('任务底账是旧版 schema（缺 task_no 列）且以只读打开：不能插入任务（请先用可写入口完成迁移）。');
+      if (insertTaskTx === undefined) {
+        throw new Error('任务底账是旧版 schema（缺 task_no/编号计数器）且以只读打开：不能插入任务（请先用可写入口完成迁移）。');
       }
-      insertTaskStmt.run({
+      insertTaskTx({
         taskId: row.taskId,
         principalId: row.principalId,
         sessionId: row.sessionId,

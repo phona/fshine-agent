@@ -273,6 +273,33 @@ describe('P1-T02 并发分配与不复用', () => {
     store.close();
   });
 
+  it('编号不复用（模拟删除后重分配）：删除编号行后新任务继续递增、存量编号不重排', () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const store = openTaskStore(dbPath);
+    store.insertTask(row({ taskId: 'task_1', createdAt: '2026-11-14T09:00:00.000Z' }));
+    store.insertTask(row({ taskId: 'task_2', createdAt: '2026-11-14T09:00:01.000Z' }));
+    store.insertTask(row({ taskId: 'task_3', createdAt: '2026-11-14T09:00:02.000Z' }));
+
+    // 产品无删除路径；直接删库内行以钉住「不复用/不重排」语义
+    // （模拟运维清理/数据修剪后重分配：编号不得回收、存量编号不得改写）。
+    const raw = new Database(dbPath);
+    raw.prepare('DELETE FROM tasks WHERE task_id = ?').run('task_3');
+    raw.prepare('DELETE FROM tasks WHERE task_id = ?').run('task_1');
+    raw.close();
+
+    // 存量行编号保持原值（不重排）。
+    expect(store.listTasks().map((stored) => [stored.task.taskId, stored.task.taskNo]))
+      .toEqual([['task_2', 2]]);
+    // 新任务不回收已用编号（3 已分配过 → 下一条是 4）。
+    expect(store.insertTask(row({ taskId: 'task_4', createdAt: '2026-11-14T09:00:04.000Z' })).taskNo).toBe(4);
+    store.close();
+
+    // 计数器跨重启保持（重开库后继续 5）。
+    const reopened = openTaskStore(dbPath);
+    expect(reopened.insertTask(row({ taskId: 'task_5', createdAt: '2026-11-14T09:00:05.000Z' })).taskNo).toBe(5);
+    reopened.close();
+  });
+
   it('跨进程并发：4 个进程各写 10 条 → 编号唯一且连续 1..40（含跨进程写入）', async () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
