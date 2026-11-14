@@ -49,7 +49,7 @@
 | 检查 | 命令（工作树内） | 结果 | 证据 |
 |---|---|---|---|
 | typecheck | `npx tsc --noEmit` | **exit 0** | `.runtime/p1/green/regression-tsc.log` |
-| 全量 unit（回归） | `npx vitest run` | **exit 0；40 文件 / 347 例全过**（P0 基线 33/305，只增不减；含 P0 守卫与全部冻结面测试） | `.runtime/p1/green/regression-unit.log` |
+| 全量 unit（回归） | `npx vitest run` | **exit 0；40 文件 / 347 例全过**（本片基线 46f757e=37 文件/320 例 → 只增不减；P0 前基线 33/305；含 P0 守卫与全部冻结面测试） | `.runtime/p1/green/regression-unit.log` |
 | ask 单轮金样（真实模型） | `LLM_MODEL=step-3.7-flash DB_PATH=.runtime/p1/ask-single/state.db npm run ask -- "帮我查一下 documents 集合、窗口 W202611 的数据"` | **exit 0**；回复非空；机械证据行 `任务=#1 … 结构化执行=1 次（完成 1）`；**回复 SHA=存档 SHA=375b247dd20c8f32（逐字）**；存档≠执行层汇报；UUID 仅出现在执行证据 JSON | `.runtime/p1/ask-single/{stdout.txt,verify.mjs}` |
 | E06 ×1 smoke | `LLM_MODEL=step-3.7-flash npm run eval:user -- --case E06 --trials 1 --out-dir .runtime/p1/smoke/e06` | **exit 0；[judge] E06 trial-1: PASS** | `.runtime/p1/smoke/e06.log`、`.runtime/p1/smoke/e06/` |
 | E12 ×1 smoke | `LLM_MODEL=step-3.7-flash npm run eval:user -- --case E12 --trials 1 --out-dir .runtime/p1/smoke/e12` | **exit 0；[judge] E12 trial-1: PASS** | `.runtime/p1/smoke/e12.log`、`.runtime/p1/smoke/e12/` |
@@ -72,9 +72,12 @@
 - 冻结面：R3 判据、eval 锁/cases/judge、历史证据、其他工作树零触碰（`git status` 无 scripts/eval 改动）；全量 unit 含 P0 单一装配点守卫（3/3）与 runner 锁校验。
 - P1-E01 覆盖边界见 §二注（unexecuted 任务状态由确定性用例覆盖，黑盒未稳定复现）。
 
-## 七、独立复核（占位）
+## 七、独立复核（裁决记录）
 
-- **未做（待分派）**。建议入口：只读复核 P1 6 个测试文件与 `task-store.ts`/`task-registry(-sqlite).ts`/`execution-runtime.ts` 改动；复跑 `npx tsc --noEmit` + `npx vitest run`；抽验 `.runtime/p1/e01/summary.json` 与 `rounds/*.json`（含逐字 SHA）；绊线可于只读副本复做。裁决记录待独立复核员填写（passed/integrity）。
+- 复核执行：复核员（与实施分离），只读复核；破坏性绊线一律在 /tmp 只读副本（git archive 解包）复做，worktree 全程未编辑。
+- 核验范围（依其裁决证据）：迁移幂等/备份/旧库可读；编号原子分配与不复用（含删除后不重分配）；回复逐字存档与显示金样；只读哈希；范围与冻结面；TDD 与绊线复做；回退可行。
+- **裁决：passed=true，integrityViolation=false**（run `dwfrun-2c317567`；完整证据见该 run 记录与 `.runtime/p1/`）。
+- 记录说明（仲裁侧）：复核员未改动本文件；本段为仲裁侧依据复核裁决摘录补记（原占位作废），随合入登记。
 
 ## 八、回退方式（整片 revert）
 
