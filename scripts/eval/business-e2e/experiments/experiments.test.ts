@@ -352,6 +352,7 @@ describe('⑨ #7 重设计：自然语料与「压缩触发」的机械捕获', 
     const emitOnce: TurnDriver = {
       async run(input) {
         console.warn(JSON.stringify({ event: 'context_emergency_compact', tokens: 9999, contextWindow: 6000, messages: 11 }));
+        console.log(JSON.stringify({ event: 'context_compacted', tokensBefore: 9999, tokensAfter: 4000, contextWindow: 6000 }));
         const reply = '好的。';
         return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
       },
@@ -369,6 +370,8 @@ describe('⑨ #7 重设计：自然语料与「压缩触发」的机械捕获', 
     const verdict = judgeExp(ev);
     expect(verdict.counters.compactionTriggerEvents).toBe(turnCount);
     expect(verdict.counters.compactionTriggerTurns).toEqual(Array.from({ length: turnCount }, (_, i) => i + 1));
+    // console.log 的 context_compacted（回合前压缩成功）也必须被捕获（pi-driver.ts:543）。
+    expect(verdict.counters.compactionCompleted, 'context_compacted（console.log）应被捕获').toBe(turnCount);
   });
 
   it('真实压缩日志可被捕获：驱动内调用生产 compact()（小窗口）→ 证据含 context_* 事件', async () => {

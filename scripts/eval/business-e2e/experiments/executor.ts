@@ -79,12 +79,12 @@ const DRIVER_EVENT_NAMES: ReadonlySet<string> = new Set([
 const driverEventStore = new AsyncLocalStorage<Array<Record<string, unknown>>>();
 
 let consoleCaptureDepth = 0;
-let savedConsole: { warn: typeof console.warn; info: typeof console.info; error: typeof console.error } | undefined;
+let savedConsole: { warn: typeof console.warn; info: typeof console.info; error: typeof console.error; log: typeof console.log } | undefined;
 
 /** 装载 console 捕获（幂等、引用计数）；返回 restore，全部样本结束后还原原 console。 */
 function installConsoleCapture(): () => void {
   if (consoleCaptureDepth === 0) {
-    const saved = { warn: console.warn, info: console.info, error: console.error };
+    const saved = { warn: console.warn, info: console.info, error: console.error, log: console.log };
     savedConsole = saved;
     const wrap = (orig: (...args: unknown[]) => void) => (...args: unknown[]): void => {
       const store = driverEventStore.getStore();
@@ -104,6 +104,9 @@ function installConsoleCapture(): () => void {
     console.warn = wrap(saved.warn.bind(console)) as typeof console.warn;
     console.info = wrap(saved.info.bind(console)) as typeof console.info;
     console.error = wrap(saved.error.bind(console)) as typeof console.error;
+    // `context_compacted`（回合前压缩成功）走 console.log（pi-driver.ts:543）——必须一并捕获，
+    // 否则「回合前压缩」这条机械证据会漏（`context_emergency_compact` 走 warn，:596）。
+    console.log = wrap(saved.log.bind(console)) as typeof console.log;
   }
   consoleCaptureDepth += 1;
   let restored = false;
@@ -115,6 +118,7 @@ function installConsoleCapture(): () => void {
       console.warn = savedConsole.warn;
       console.info = savedConsole.info;
       console.error = savedConsole.error;
+      console.log = savedConsole.log;
       savedConsole = undefined;
     }
   };
