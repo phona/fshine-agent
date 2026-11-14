@@ -41,6 +41,9 @@ import {
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
+/** 渠道重投幂等窗口（有界 FIFO；同 messageId 的回执在此窗口内重放）。 */
+const MESSAGE_REPLY_LIMIT = 1024;
+
 /** 执行面：结构化执行客户端 + 本轮允许集合（从执行层自述的 access=read 派生）。 */
 export type { ExecutionFace };
 
@@ -180,6 +183,20 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     return next;
   }
 
+  /**
+   * P7-T06 渠道重投幂等（重复消息）：同 (principal, session, messageId) 只产生一次回执，
+   * 重投按既有回执幂等重放——查重先于一切副作用（不新起 Main 回合、不新建任务、不重复执行）；
+   * 有界 FIFO（超出淘汰最旧）；处理失败不缓存（渠道可重试，不伪造回执）。
+   */
+  const messageReplies = new Map<string, Promise<string>>();
+  const rememberMessageReply = (key: string, reply: Promise<string>): void => {
+    messageReplies.set(key, reply);
+    if (messageReplies.size > MESSAGE_REPLY_LIMIT) {
+      const oldest = messageReplies.keys().next().value;
+      if (oldest !== undefined && oldest !== key) messageReplies.delete(oldest);
+    }
+  };
+
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';
     // 可信身份取自渠道事实：principal = 发消息的人，session = 聊天窗口（conversationId）。
@@ -195,23 +212,42 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_attachment_only', principalId, sessionId, messageId: message.messageId });
       return '';
     }
-    const turn = await enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
+    // 渠道重投（同 messageId）命中：幂等重放既有回执（无任何新副作用）。
+    const dedupKey = message.messageId.trim() === ''
+      ? undefined
+      : `${principalId}\u0000${sessionId}\u0000${message.messageId}`;
+    const replayed = dedupKey === undefined ? undefined : messageReplies.get(dedupKey);
+    if (replayed !== undefined) {
+      log({ event: 'message_duplicate_replayed', principalId, sessionId, messageId: message.messageId });
+      return await replayed;
+    }
+    const pending = enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
       const session = await sessionFor(principalId, sessionId);
       return await session.send(message.text);
-    });
-    log({
-      event: 'message_done',
-      principalId,
-      sessionId,
-      messageId: message.messageId,
-      taskIds: [...turn.taskIds],
-      executions: turn.executions.map((execution) => ({
-        requestId: execution.requestId,
-        operation: execution.operation,
-        status: execution.status,
-      })),
-    });
-    return turn.reply;
+    }).then(
+      (turn) => {
+        log({
+          event: 'message_done',
+          principalId,
+          sessionId,
+          messageId: message.messageId,
+          taskIds: [...turn.taskIds],
+          executions: turn.executions.map((execution) => ({
+            requestId: execution.requestId,
+            operation: execution.operation,
+            status: execution.status,
+          })),
+        });
+        return turn.reply;
+      },
+      (error: unknown) => {
+        // 处理失败不缓存：渠道重投可重试（回执不伪造）。
+        if (dedupKey !== undefined) messageReplies.delete(dedupKey);
+        throw error;
+      },
+    );
+    if (dedupKey !== undefined) rememberMessageReply(dedupKey, pending);
+    return await pending;
   };
 
   return {
