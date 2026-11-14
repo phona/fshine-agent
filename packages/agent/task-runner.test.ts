@@ -2,8 +2,9 @@
  * TaskRunner 语义测试（P6，先红后绿；来源 docs/product/r4-joint-interfaces.md §1/§2/§3 v1 冻结）。
  *
  * 全部用假端口：
- *   · FakeRegistry —— 镜像 P2 契约核心的**消费面语义**（状态集/合法边/租约/认领/过期/取消/等待），
- *     complete() 复用仓内 judgeReportedTask（执行事实判定），确保断言不依赖 runner 自造口径；
+ *   · FakeRegistry —— 镜像 P2 契约核心的**消费面语义**（状态集/合法边/租约/认领/过期/取消/等待）；
+ *     后台终态按 P2 契约测试同口径由「执行端确认的结局」经 transition/fail 落底账，
+ *     不走 inline judgeReportedTask（其「首个非 completed 判负」会误伤等待接续）；
  *   · FakePolicy —— 前后台独立计数的许可假件（acquire/release/cancelQueued）；
  *   · FakeExecutor —— 手动控制的延迟执行回合（记录并发、输入、abort 信号）。
  *
@@ -17,7 +18,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import type { ExecutionStatus } from '@fshine/contracts/execution-contract';
-import { deriveTaskName, judgeReportedTask, type ExecutionRecord } from './src/task-registry';
+import { deriveTaskName, type ExecutionRecord } from './src/task-registry';
 import {
   createTaskRunner,
   type CancelOutcome,
@@ -32,6 +33,7 @@ import {
   type TaskExecutionOutcome,
   type TaskExecutor,
   type TaskRecordView,
+  type TaskReason,
   type TaskRegistryPort,
   type TaskRunner,
   type TaskScope,
@@ -61,7 +63,7 @@ interface FakeTask {
   sessionId: string;
   request: string;
   status: TaskStatus;
-  reason?: string;
+  reason?: TaskReason;
   resultText?: string;
   failureReason?: string;
   pendingQuestion?: PendingQuestion;
@@ -79,7 +81,7 @@ interface FakeFact {
   taskId: string;
   from?: TaskStatus;
   to: TaskStatus;
-  reason?: string;
+  reason?: TaskReason;
 }
 
 class FakeRegistry implements TaskRegistryPort {
@@ -133,16 +135,12 @@ class FakeRegistry implements TaskRegistryPort {
     return this.require(taskId).status;
   }
 
-  reasonOf(taskId: string): string | undefined {
+  reasonOf(taskId: string): TaskReason | undefined {
     return this.require(taskId).reason;
   }
 
   failureReasonOf(taskId: string): string | undefined {
     return this.require(taskId).failureReason;
-  }
-
-  resultTextOf(taskId: string): string | undefined {
-    return this.require(taskId).resultText;
   }
 
   pendingQuestionOf(taskId: string): PendingQuestion | undefined {
@@ -202,7 +200,7 @@ class FakeRegistry implements TaskRegistryPort {
     return this.require(taskId, scope);
   }
 
-  transition(taskId: string, to: TaskStatus, options?: { reason?: string; scope?: TaskScope }): TaskRecordView {
+  transition(taskId: string, to: TaskStatus, options?: { reason?: TaskReason; scope?: TaskScope }): TaskRecordView {
     const task = this.require(taskId, options?.scope);
     this.commit(task, to, options?.reason === undefined ? {} : { reason: options.reason });
     return task;
@@ -250,16 +248,6 @@ class FakeRegistry implements TaskRegistryPort {
     return task;
   }
 
-  complete(taskId: string, resultText: string): void {
-    const task = this.require(taskId);
-    // 与 P2 同口径：终态由已记录执行事实判定（零执行 = unexecuted，不冒充成功）。
-    const judgement = judgeReportedTask(task.executions);
-    this.commit(task, judgement.status);
-    task.resultText = resultText;
-    task.failureReason = judgement.failureReason;
-    task.updatedAt = this.clock().toISOString();
-  }
-
   fail(taskId: string, reason: string): void {
     const task = this.require(taskId);
     this.commit(task, 'failed');
@@ -302,7 +290,7 @@ class FakeRegistry implements TaskRegistryPort {
     return task;
   }
 
-  private commit(task: FakeTask, to: TaskStatus, options: { reason?: string } = {}): void {
+  private commit(task: FakeTask, to: TaskStatus, options: { reason?: TaskReason } = {}): void {
     const from = task.status;
     if (!LEGAL_EDGES[from].includes(to)) throw new Error(`非法任务状态转换：${from} → ${to}`);
     task.status = to;
@@ -498,34 +486,38 @@ describe('排队 → 启动 → 收尾', () => {
     await h.runner.whenIdle();
 
     expect(h.registry.statusOf('t1')).toBe('completed');
-    expect(h.registry.resultTextOf('t1')).toBe('第一个完成');
     expect(h.registry.statusOf('t2')).toBe('completed');
     expect(h.policy.backgroundInUse).toBe(0);
     expect(h.runner.inFlight()).toEqual([]);
   });
 
-  it('回合「正常收尾」不得掩盖执行层失败事实（终态由底账按执行事实判定）', async () => {
+  it('后台终态 = 执行端确认的回合结局：不做 task 级 judge 二次判定（历史非 completed 执行行不判负）', async () => {
     const h = harness();
     submit(h, 't1');
     h.runner.pump();
 
-    // 执行层失败事实已记录，Worker 回合仍以 completed 收尾：任务必须落 failed。
-    h.executor.noteExecution(0, 'failed', '执行层调用超时。');
-    h.executor.settle(0, { kind: 'completed', resultText: 'Worker 汇报' });
+    // P2 契约同口径：后台路径由 runner 按执行层确认的结果落终态，不经过 inline
+    // judgeReportedTask——否则等待接续的历史 needs_input 行会把已完成的接续误判为 failed。
+    h.executor.noteExecution(0, 'needs_input');
+    h.executor.noteExecution(0, 'completed');
+    h.executor.settle(0, { kind: 'completed', resultText: '完成' });
+    await h.runner.whenIdle();
+
+    expect(h.registry.statusOf('t1')).toBe('completed');
+    expect(h.registry.reasonOf('t1')).toBeUndefined();
+    expect(h.registry.executionsOf('t1')).toHaveLength(2);
+  });
+
+  it('执行端确认失败：failed + 机械原因 failed_confirmed + 原因原文落底账', async () => {
+    const h = harness();
+    submit(h, 't1');
+    h.runner.pump();
+    h.executor.settle(0, { kind: 'failed', reason: '执行层确认失败：策略拒绝。' });
     await h.runner.whenIdle();
 
     expect(h.registry.statusOf('t1')).toBe('failed');
-    expect(h.registry.failureReasonOf('t1')).toContain('执行层调用超时');
-  });
-
-  it('零执行回合收尾为 unexecuted（已汇报零执行，不冒充成功）', async () => {
-    const h = harness();
-    submit(h, 't1');
-    h.runner.pump();
-    h.executor.settle(0, { kind: 'completed', resultText: '汇报' });
-    await h.runner.whenIdle();
-    expect(h.registry.statusOf('t1')).toBe('unexecuted');
-    expect(h.registry.resultTextOf('t1')).toBe('汇报');
+    expect(h.registry.reasonOf('t1')).toBe('failed_confirmed');
+    expect(h.registry.failureReasonOf('t1')).toContain('策略拒绝');
   });
 });
 
@@ -808,7 +800,8 @@ describe('waiting_user：释放执行许可；答复续同一 Task', () => {
 
     h.executor.settle(0, { kind: 'needs_input', question: { missing: ['合同编号'], raw: '平台要求补充' } });
     await until(() => h.registry.statusOf('t1') === 'waiting_user', 't1 进入等待');
-    expect(h.policy.backgroundInUse).toBe(0);
+    // 等待即释放：t1 的许可已被归还（t2 随即可取得而占用，故看归还记录而非当前占用数）。
+    expect(h.policy.released.length).toBeGreaterThanOrEqual(1);
     expect(h.registry.pendingQuestionOf('t1')).toEqual({ missing: ['合同编号'], raw: '平台要求补充' });
     expect(h.registry.waitingSinceOf('t1')).toBeDefined();
 
