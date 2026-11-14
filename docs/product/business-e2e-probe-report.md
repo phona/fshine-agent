@@ -254,3 +254,101 @@
 - `1720e66` R2 基建修复（限流经 state-dir + UX/行为抽取器 + 资源落盘）
 - `3dd9358` #3 场景重设（owner 2026-11-15 口径）+ bizprobe 套件**运行前**重冻结（`criteriaSha256` 不变、仅 `casesSha256` 变）+ 预注册补正 §四 + TDD 用例
 - 边界：`packages/`、`apps/` 产品代码零改动；`convergence-r1/criteria.lock` 与其余 exploration 套件零改动；仅 bizprobe 套件自身锁随 #3 重设重冻结（新版本，历史不覆盖）；`.env` 只读、不入证据 / 不提交；证据在 `.runtime/bizprobe/`（gitignored，`r2-step37` / `r3-step37`），先前 `r2`/`r3` 作 SUPERSEDED 保留未动。
+
+---
+
+## 十二、缺口 1/2/3 落地后的三实验（bizbatch2 · 2026-11-15；模型 `step-3.7-flash`；inline；并发 4）
+
+> **性质**：本批为**新增批次**，**不改写 §一–§十一 既有读数**。缺口 1/2/3 已合入集成（`4a12d8b`）；本批在 worktree `arch/r4-bizbatch2`（基线 `7009ed0`）跑，**产品代码零改动**（`git diff --stat` 仅 `scripts/`、`docs/`、`package.json`）。装配与预告登记见 `business-e2e-prereg-addendum.md` §五；运行入口 `scripts/eval/business-e2e/experiments/run.ts`（npm `eval:bizbatch2`）。预注册：样本 33 会话（≤90）、硬上限 `maxSessions=90 / maxModelCalls{task-surface:72,compaction:240,skill-arm:108} / concurrency=4 / maxWallMs=1.8e6`、模型钉 `step-3.7-flash`。
+
+### 12.1 装配前提与工具面门控（复核，非读数）
+
+- 四工具（`task_status/result/cancel/resume`）与 exec 分派**同源门控** `options.taskRunner`（`packages/agent/src/execution-runtime.ts:580-584`、`:596`）。
+- **缺省 bizprobe/ask 装配路径无 runner → 四工具不注册**：装配核心仅在 `dispatchMode==='background'` 建 runner（`scripts/ask-runtime.ts:411-430`），bizprobe 驱动器不传 → inline。ask 单发与交互式 ask 同源（`assembleSessionCore` 缺省 inline；ask 入口显式拒绝 background，`scripts/ask-runtime.ts:502-504`）→ 亦不注册。
+- 唯一有 runner 的产品路径 = `apps/server` + `runtime.dispatchMode='background'`（`apps/server/server.ts:106,111`）。
+- 据缺口 1 设计 §3.3：实验①以 **inline 直接注入 TaskRunner** 受试（`RuntimeOptions.taskRunner` 与 dispatchMode 独立，`execution-runtime.ts:221`），维持本批 **inline-only**，不启用 background。自测已钉（自测：有 runner 四工具全注册、无 runner 仅 `run_task`）。
+
+### 12.2 实验① #5 对话面任务工具：逐项读数
+
+**运行**：`node --env-file-if-exists=.env --import tsx scripts/eval/business-e2e/experiments/run.ts --run --kind task-surface --out-dir .runtime/bizbatch2/task-surface`（`LLM_MODEL=step-3.7-flash`）→ `report.json` `experiment={sessions:9, modelCallsTotal:61, wallMs:42318}`，`policy.concurrency=4`，RUN_EXIT=1。
+
+| 用例 | k/N | Wilson 95% CI | severe | taskToolCalls |
+|---|---|---|---|---|
+| T01 交办→查→结果→取消 | 2/3 | [0.208, 0.939] | 0 | 10 |
+| T02 挂起→查→接着办 | 2/3 | [0.208, 0.939] | 0 | 16 |
+| T03 越权=找不到 | 3/3 | [0.438, 1.000] | 0 | 4 |
+
+（k/N 一律附 Wilson 95% CI，**不得读作稳定概率**。）
+
+- **机械不变量**：①四工具真实注册并被调用（`task_status`×9 空 ref 列表、`task_result`×5、`task_cancel`×2、`task_resume`×5）；②治理工具调用 30 次 = 成功 16 / 失败 14；③**越权=找不到成立**：9 样本 `unauthorized=0`，T03 3/3（模型如实答「#1 不存在/不能跨会话」）；④**取消如实**：0 条虚假「已取消」；⑤虚假完成=0；⑥重复执行=0。
+- **行为**：错误如实转述（所有工具报错回合原样转述「任务不存在或不属于当前会话」，未编造）；T02/1、T02/3 经列表读出 `taskId` 后用**原文 uuid** 调 `resume` 成功接续；T02/2 两次 resume 失败后**改用 run_task 重新交办**（用户说「接着办」而模型重开新任务 = 行为偏航）。
+- **UX**（启发式，只统计）：9 会话共 11 条征求/追问式回复。
+- **失败归因（2/9）**：均由**同一产品接口缺陷**主导——`ref` 编号格式。工具描述示例写**裸数字**（`TASK_STATUS_TOOL_DESCRIPTION`「#编号（如 \"3\"）」，`execution-runtime.ts:77-84` 等），而 `resolveTaskId` 只接受**字面 `#N`** 或完整 `taskId`（`execution-runtime.ts:329`）；列表输出 `taskNo` 为裸数字、**inline 受理回执根本不含 taskNo**（inline delegate 返回 `{taskId,summary,executions}`，`:559`；仅 background 回 `#N`，`:516`）。实测：14 次定向 ref **全部**用裸 `"1"`、**全部**失败；成功 16 次皆为「空 ref 列表」或「原文 uuid」；模型**一次也没发出过 `"#1"`**（尽管其回复散文里一致用「#1」）。T01#3 = 缺 `task_cancel`（ref 报错后陷「找不到」未再取消）；T02#2 = `outOfScope=1`（resume 失败后重新交办，Worker 查 `contoso-trade` 无 window，被本用例授权集判越界——**判据附注**：种子任务原文未指定 window，无 window 查询语义上在范围内，属用例 granted 过严）。
+- **该不该补 / 怎么优化**：**该补（产品面，已登记不修）**——统一 `ref` 契约：或让 `resolveTaskId` 也接受裸数字、或在 inline 受理回执回填 `#编号` / 列表输出带 `#` 前缀、或改工具描述示例为 `"#3"`。**优化（测试面）**：T02 的 `granted` 放宽为 collection 级以消除噪声（属判据调参，需随版本登记）。
+
+### 12.3 实验② #7 会话压缩：逐项读数
+
+**预注册读数未取得**——两次完整尝试（run2/run3）均**挂死、0 个会话完成、无 k/N**（全样本保留，不筛绿）。
+
+- **机制确认（压缩确实在配置窗口触发）**：修好一个**执行器侧接线缺陷**后，驱动在配置小窗口上真的触发紧急压缩——run2 日志 `{"event":"context_emergency_compact","tokens":13751,"contextWindow":12000,"messages":11}`（另两条 @12000：13607/13680）与 `{"tokens":21043,"contextWindow":20000,...}`；触发点 messages=11、tokens≈13.6–13.8k（12k 窗口）/21k（20k 窗口）。⇒ 缺口 3 的 `LLM_CONTEXT_WINDOW` 接线在生产同源装配下**有效**。
+- **病态（头条）**：同批日志交替出现 `{"event":"pi_driver_empty_reply","role":"assistant","stopReason":"length","contentBlocks":["thinking"],"contextWindow":12000}`——模型近窗口时**只输出 thinking、正文空、因长度停**；随后驱动反复紧急压缩（tokens 在 13.6k→14.2k **不降反升**，未压到阈值下）。run2 在 ~14 分钟、run3 在 ~11 分钟时事件数仍停在 4×emergency_compact + 3×empty_reply、0 verdict、CPU 96% 后转静默 ⇒ **事件循环被阻塞的活锁**（加了 `maxWallMsPerSession=600s` 的 Promise.race 兜底后 run3 仍挂），两次均手工 kill。归因为**产品面小窗口病态**（T7 类），非仅测试面。
+- **无效件（run1，6 会话全跑完，仅供对照）**：首次因执行器总自带 `createDrivers` 而**绕过窗口接线**（驱动按 128k 缺省跑）→ 无压缩事件。C01 0/3（severe 2）、C02 0/3；且 6/6 会话 `taskToolCalls=0`（长会话里模型从不调 `task_status/task_result`；中后段探针被映射为**重新交办**或**从转录追述**）。
+- **该不该补 / 怎么优化**：**该补（产品面，已登记不修）**——「调小窗口」在本批长 CJK 填充会话下**反而引发 thinking-only 空回复 + 活锁不收敛**；需 owner 裁定是否属缺陷、是否需改触发/降级策略。**该补（测试面，部分已做）**——执行器已修窗口接线并加墙钟兜底（对阻塞式活锁无效，登记）；**优化**——#7 改设计重跑（自然语料替代巨量填充 / 更大窗口 / 换触发点），或以上述 `context_emergency_compact` 事件作「压缩触发」的机械证据结案。
+
+### 12.4 实验③ Skill 三臂：逐项读数
+
+**运行**：`... run.ts --run --kind skill-arm --out-dir .runtime/bizbatch2/skill-arm`（并发 4）→ `experiment={sessions:18, modelCallsTotal:39, wallMs:68957}`。
+
+| base | 臂 | k/N | Wilson 95% CI | read_skill 命中 |
+|---|---|---|---|---|
+| S-digest | none | 0/3 | [0.000, 0.562] | 0 |
+| S-digest | inline（A） | 3/3 | [0.438, 1.000] | 0（无该工具） |
+| S-digest | catalog（B） | 3/3 | [0.438, 1.000] | **3** |
+| S-note | none | 0/3 | [0.000, 0.562] | 0 |
+| S-note | inline（A） | 3/3 | [0.438, 1.000] | 0 |
+| S-note | catalog（B） | **0/3** | [0.000, 0.562] | **0** |
+
+- **计量**：完成率见上；**read_skill 命中（臂 B）**：digest 3/3（读 `record-digest`），note 0/3（未读）；**常驻 token 成本（臂 A）**：inline 提示块 = **1312 字节**（≈437 CJK token）/ 臂 B catalog 提示块 = **274 字节**（≈91 token）——臂 A 每回合常驻，臂 B 另按需读正文；**无谓追问**（启发式）：digest none 1 / inline 0 / catalog 1，note none 3 / inline 0 / catalog 3；**口径采纳**：none 两用例均未采纳私有口径，catalog-note 因未读技能同样未采纳。
+- **配对比较（四态）**：none→inline **改善**（0/6→6/6）；none→catalog digest 改善 / note **经验证无实质变化**（0/3→0/3）；inline→catalog digest **经验证无实质变化**（3/3→3/3）/ note **退化**（3/3→0/3）。**结论**：臂 A（正文注入）在本批两用例上稳定达标且 0 次无谓追问；臂 B（目录+按需读取）成败取决于**模型是否主动读技能**（digest 判需读→3/3；note 未判需读→0/3）。CI 均重叠（0.562 ≮ 0.438）⇒ 跨臂差异**方向一致但统计证据不足**（N=3）。
+- **失败归因**：S-note-catalog 与 S-note-none 均因**无口径可用**（前者未读技能、后者无技能）→ 泛答/反问；S-digest-none 的 0/3 是**设计使然**（「核对摘要」为私有知识，臂 0 无从知晓），**不能**单独作为「投递有效」的证据。
+- **该不该补 / 怎么优化**：**补/优化（实验面）**：臂 B 的弱点是「模型判不需读就不读」——可试在 catalog 提示里加强「涉及本域口径的任务先 `read_skill`」的中性提示（属提示词，需过准入）；**该补（判据面）**：口径采纳仅机械标记判定，需人读复核「是否真正符合口径」。**不必补**：臂 A 常驻成本（1312B）量级小，无需优化。
+
+### 12.5 三轴要点更新
+
+- **功能边界**：
+  - #5 对话面任务工具：**由缺失转为「部分支持」**——四工具已注册并可调用（技能面证据：`task_status`×9 等真实发生），但 **inline 受理回执无 `#编号`** + **`ref` 格式缺陷**使「按 `#编号` 定向引用」不可达（仅能空 ref 列表或原文 uuid），故判「部分」。证据：`execution-runtime.ts:559/516/329/77-84` + 上述 14/14 裸数字失败。
+  - #7 会话压缩：**由缺失转为「部分」**——窗口接线已生效（`context_emergency_compact` 按窗口触发，证据见 12.3），但长会话**未收敛**（活锁），端到端「压缩后可靠续跑」**未验证**。
+  - #2 Skill 投递：**由缺失转为「已支持（可切换两实验臂）」**——`mainSkillMode=inline|catalog` 均可达且行为可分（`worker-skills.ts:52`、`ask-runtime.ts:398-405`）。
+- **可靠性（不变量）**：本批**未破**——越权=找不到（`unauthorized=0`，T03 3/3）、取消如实（0 虚假「已取消」）、无虚假完成、无重复执行。**新登记不变量风险**：#7 小窗口下的活锁（见 12.3）。
+- **稳定性**：压缩下表现 = **不收敛/活锁**（#7）；并发读数：三批 `observedMaxConcurrency=4`（`report.json` `batch`，均 ≤ 硬上限 8）；#5 墙钟 42s、#3 墙钟 69s、#7 run1 墙钟 120s（run2/run3 超时 kill）。
+
+### 12.6 预算消耗（累计 / 150）
+
+| 批次 | 会话 | 模型调用 | 说明 |
+|---|---|---|---|
+| 第 1 轮（父） | 18 | 46 | §三–§六 |
+| 第 2–3 轮（父） | 36 | 81 | §十一 |
+| **本批 #5** | 9 | 61 | 有效 |
+| **本批 #7** | run1 6（无效）+ run2/run3 各发起 4（挂死，无计数） ≈ 14 | 94（仅 run1 可得） | 无效/挂死件保留 |
+| **本批 #3** | 18 | 39 | 有效 |
+| **累计** | 18+36+9+14+18 = **95** | — | **95/150**（≤，未超、未扩容） |
+
+硬上限均未超（各实验 `maxModelCalls` / `concurrency=4 ≤ 8` / `maxWallMs=1.8e6`）。
+
+### 12.7 局限、blocked 与逐条建议
+
+- **N=3 仅探索**：CI 极宽且跨臂重叠 → 跨臂/跨用例差异**不得读作稳定概率**。
+- **#5 的 inline 前提**：四工具仅在注入 runner 时上线；缺省 bizprobe/ask 路径不注册（§12.1）。**该补**：owner 裁定「inline 受理回执回填 `#编号`」或「① 改跑 background」。
+- **#7 未取得读数**：预注册设计在 12k/20k 窗口下不收敛（活锁）。**该补/优化**：见 12.3（改设计重跑或事件结案）。
+- **#3 臂 0 是设计性 0/6**：私有口径使然，不可单独证明投递有效。**优化**：跨臂对比以 inline↔catalog 为主。
+- **blocked（同 §11.6 未跑项）**：#4 限流与部分完成（本批未受试）；#7 端到端可靠续跑（本批未验证）；真实 SaaS/企微（未验证）。
+- **模型可比性**：本批与 §十一 轮2/3 同 `step-3.7-flash`、可互比；与轮1（`step-5-preview`）**不可比**。
+
+### 12.8 提交
+
+- `9e4b270` 三实验装配与自检（缺口 1/2/3；零产品代码改动）
+- `f4709ec` 压缩触发点度量修正（转录摘要标记；原 `compactionRounds` 无效）
+- `12a8e39` 执行器缺省驱动施加压缩窗口接线（#7 首跑无效根因）
+- `d8da8ef` 执行器会话墙钟兜底
+- （本报告提交见本条 commit）
+- 边界：`packages/`、`apps/` 产品代码**零改动**；不改冻结面与既有轮次读数；`.env` 只读、不入证据/不提交；证据在 `.runtime/bizbatch2/`（gitignored：`task-surface`、`skill-arm`、`compaction-run1-invalid`/`-run2-hung`/`-run3-hung`）。

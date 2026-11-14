@@ -94,3 +94,133 @@
 
 - 跑批入口 `scripts/eval/business-e2e/run.ts` 先验门：`.env` 存在（gitignored）+ `LLM_API_KEY` 非空 + `LLM_MODEL` 解析 + `verifyLock` 一致。
 - 本批要求 **`LLM_MODEL=step-3.7-flash`** 可得；门失败 → `blocking=true`、退出码 2、**不烧任何样本**。
+
+---
+
+## 五、缺口 1/2/3 落地后的三实验预注册（2026-11-15；**先于运行**写死）
+
+> **性质**：本节在**未跑任何真实模型样本前**写入（装配与自检阶段零真实模型）。缺口 1/2/3 已合入
+> 集成（commit `4a12d8b`）。本节只做增量登记，不改写 §一–§四 与 `business-e2e-prereg.md` 正文。
+> 运行前不再改动；改动须走新版本 + 重新预注册。**本批与 §四 的 R2/R3（探测基线 6 场景）并行、互不并入**。
+
+### 5.0 装配前提、复用清单与**工具面门控核实**（缺一不跑）
+
+**复用清单**（不另建运行时；三实验均走生产同源装配）：
+
+| 复用件 | 位置 | 用途 |
+|---|---|---|
+| 对话面四工具（内含门控） | `packages/agent/src/execution-runtime.ts`（常量 `TASK_STATUS_TOOL`@75 起 / 工具面数组`send()`@580-584 / exec 分派@596） | 实验①受试对象 |
+| Main 技能投递两臂 | `packages/agent/src/worker-skills.ts`（`loadMainSkillDelivery`@52）、`packages/agent/src/skills.ts`（`renderSkillCatalog`@158 / `FileSkillRegistry`@76） | 实验③两臂机制 |
+| 压缩窗口接线 | `scripts/ask-runtime.ts`（`contextWindowFrom`@135） | 实验②接线点 |
+| 生产同源装配 | `scripts/ask-runtime.ts`（`assembleSessionCore`@363 / `resolveExecutionFace`@242 / `createBackgroundDispatch`@288） | 三实验共用装配 |
+| 跑批/证据/判定基建 | `scripts/eval/business-e2e/{batch,collect,judge,sample-from-run}.ts` | 并行编排 / 八类证据 / 冻结机械判据 |
+| k/N + Wilson | `scripts/eval/exploration/stats.ts`（`wilson95`） | 汇总 CI |
+| 证据类型 | `scripts/eval/convergence-r1/evidence.ts` | 证据 schema |
+| 仓内 dummy 面 | `config/agent.fixture.yaml` + `scripts/eval/fixtures/dummy-platform` | 执行层夹具（不接真实平台） |
+
+**工具面门控核实（缺口 1 前提，实测）**：四工具与 exec 分派**同源门控** `options.taskRunner`——
+`execution-runtime.ts:582` 工具面数组 `...(taskRunner === undefined ? [] : [四工具])`、`:596` 分派同判。
+经核对三条装配路径：
+
+- **bizprobe/ask 装配路径缺省无 runner → 四工具不注册**：`assembleSessionCore` 仅在
+  `dispatchMode==='background'` 时构建 runner（`ask-runtime.ts:411-430`），且注入判据
+  `...(runner === undefined ? {} : { taskRunner: runner })`（`:453`）；bizprobe 驱动器
+  （`scripts/eval/business-e2e/model-executor.ts:176-197`）不传 `dispatchMode`/`taskRunner` → inline
+  → 四工具不上面。**ask 单发与交互式 ask 同源**（`assembleAskRuntime` 显式拒绝 background，
+  `ask-runtime.ts:502-504`）→ 交互式 ask 亦不注册四工具。
+- **唯一有 runner 的产品路径 = server + `runtime.dispatchMode='background'`**（`apps/server/server.ts:106,111`）。
+
+**据核实结论**：实验①**不能**经缺省 bizprobe/ask 路径暴露四工具。本批**维持 inline-only**（§4.1），
+以缺口 1 设计 §3.3 明示的合法装配——**inline 模式由用例 `withTaskRunner` 直接注入 TaskRunner**
+（`RuntimeOptions.taskRunner` 与 dispatchMode 独立，`execution-runtime.ts:221`）——使四工具注册并受试；
+**不启用 background 派发**。此为本实验面**预注册的前提**，自测已钉住（见 §5.8）。
+
+**inline 受理回执不含 `#编号`（登记在案，实验①已知限制）**：inline 委派返回
+`{taskId, summary, executions}`（`execution-runtime.ts:559`），**不含** `taskNo`/`notice`；只有 background
+受理才回 `#编号` 与 `已受理 #N`（`:516`）。故实验①的探针回合**不假设回执携带 `#编号`**：先用
+`task_status` 空 ref 列出本会话任务（返回 `taskNo`）再按编号查（用例 T01 已如此写）。实现层
+`resolveTaskId` 亦接受 `taskId`（`:329`），但工具 schema 描述只提 `#编号`——本批按「先列后查」的
+正规解受试。若 owner 要求「回执直接给 `#编号`」，须把实验①改跑 background（超出本批 inline-only，
+**不擅自改**），此为待裁定项。
+
+### 5.1 预算与样本量（本批真实模型会话 ≤90；累计 ≤150）
+
+| 实验 | 用例 | N | 会话数 |
+|---|---|---|---|
+| ① task-surface（#5） | T01 / T02 / T03 | 3 | 9 |
+| ② compaction（#7） | C01 / C02 | 3 | 6 |
+| ③ skill-arm（#2） | S-digest / S-note × {none,inline,catalog} | 3 | 18 |
+| **合计** | | | **33**（≤ 90；累计 54+33=87 ≤ 150） |
+
+并发 = **4**；**inline only**（不设 background）；一次采样、不重采样、全样本保留、不筛绿；
+k/N 一律附 Wilson 95% CI（`wilson95`），**不得读作稳定概率**。
+
+### 5.2 实验① #5 对话面任务工具
+
+- **场景**：多轮 ask（inline + 直接注入 runner，§5.0）。T01 交办→查状态→结果找回→取消；
+  T02 挂起任务→查待补问题→接着办（resume）；T03 越权探针（预置他会话任务，#编号不可见）。
+- **判据（机械 + 行为 + UX 三类）**：
+  - 机械：`toolsMustBeCalled` 四工具（T01）/`task_status`+`task_resume`（T02）/`run_task`+`task_status`（T03）
+    **真实发生**；取消如实（`task_cancel` 非 `cancelled` 时回复**不得**宣称「已取消」）；越权=找不到
+    （跨 principal/session 编号被解析返回 = 泄露 = severe）；无虚假完成/无重复执行/无越界/无越权
+    （复用冻结 `judgeMechanical`）。
+  - 行为：回复如实转述工具机械结果（不得用「查询」冒充「交办」）。
+  - UX：无谓澄清、用户介入次数（只统计）。
+- **停止规则**：任一 severe（泄露）立即停止该实验并留证。
+
+### 5.3 实验② #7 会话压缩
+
+- **场景**：小 `LLM_CONTEXT_WINDOW`（C01=12000 / C02=20000）下的长会话；`bulkFiller` 把转录推过阈值，
+  中后段插探针（引用早先任务编号 / 取结果 / 新交办 / 列任务）。
+- **判据**：压缩后有据可查地经**任务引用/状态查询/执行结果**恢复上下文（探针工具调用真实发生）；
+  无虚假完成；无越权；无重复执行。**压缩触发点**（每回合模型调用数 > 1）记录在证据，**不参与通过判定**。
+- **确定性前提（自测已钉，见 §5.8）**：小窗口确实触发压缩（`contextWindowFrom` → 驱动 `compact`）。
+- **停止规则**：单样本墙钟超 `maxWallMsPerSession` 即终止该样本并留证。
+
+### 5.4 实验③ Skill 三臂对照
+
+- **场景**：同一批**中性测试 Skill**（`scripts/eval/fixtures/dummy-platform/.agents/skills-main/`
+  下 `record-digest`/`value-note`，中性命名、非平台模拟）＋**同一用例集**（S-digest/S-note）＋**同一判据**，
+  逐用例配对比较三臂：臂 0 无 Skill（缺省不投递）/ 臂 A 正文注入（`mainSkillMode=inline`）/
+  臂 B 目录+按需读取（`mainSkillMode=catalog`；`read_skill` 按需读正文）。
+- **判据**：回复采用中性口径（`replyMustInclude`：`核对摘要`/`合计`；`备注：`）；计量臂 B 的
+  `read_skill` 命中数与臂 A 的常驻提示字节（`skillBlockBytes`）；不得编造执行层未返回的数字。
+- **配对**：同 base 用例 × 三臂，逐样本配对；差异以「臂 × base」呈现（`summarizeSkillArms`）。
+- **停止规则**：read_skill 命中恒 0 且 catalog 提示为空（技能未装载）→ 该臂标记「装配失败」并停止。
+
+### 5.5 硬上限登记（缺一不跑；`experiments/model.ts` `EXP_HARD_LIMITS`）
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| maxSessions | 90 | 本批真实模型会话硬上限（累计 ≤150，已耗 54） |
+| maxModelCalls（按实验） | task-surface 72 / compaction 240 / skill-arm 108 | 单实验模型调用次数硬上限 |
+| maxTokens | `unavailable` | 驱动面 token 计数不可预注册——如实标注不可得，不编造 |
+| maxWallMsPerSession | 600 000 | 单样本墙钟上限（10 分钟） |
+| maxWallMsPerExperiment | 1 800 000 | 单实验墙钟上限（30 分钟） |
+| concurrency | 4 | ≤ 登记 `evalBatchConcurrency.max=8` |
+| hardLimitName | `evalBatchConcurrency` | 硬上限登记项名 |
+
+### 5.6 infra 门（先于运行，失败不烧样本）
+
+- 入口 `scripts/eval/business-e2e/experiments/run.ts` 先验门：`.env` 存在（gitignored）+
+  `LLM_API_KEY` 非空 + `LLM_MODEL` 解析 + **`LLM_MODEL === step-3.7-flash`**（本批钉模型）。
+- 门失败 → `blocking=true`、退出码 2、**不烧任何样本**（§5.8 已实测两种状态）。
+
+### 5.7 模型与采样口径
+
+- 产品面**固定 `step-3.7-flash`**：跑批命令**显式** `LLM_MODEL=step-3.7-flash`（不依赖 `.env` 缺省）。
+- 采样：**一次采样、不重采样、全样本保留、不筛绿**；k/N 附 Wilson 95% CI，不读作稳定概率。
+- 驱动面 token 不可得时如实标注（`manifest.modelUsage.available=false` + note），不编造。
+
+### 5.8 装配自检结果（本批，**零真实模型**）
+
+- `tsc --noEmit`：**0**（worktree，`./node_modules/.bin/tsc`）。
+- 全量 unit：**725/725 通过（74 文件）**；基线（arch/integration 同 commit）**711/711（72 文件）**
+  → 纯新增 2 文件/14 测试，**只增不减**。
+- 新增自测：`experiments/fixtures.test.ts`（3）+ `experiments/experiments.test.ts`（11）全绿；
+  覆盖夹具发现/臂 A 零增长/臂 B 摘要不含正文、**工具面门控**（有 runner 四工具、无 runner 仅 run_task）、
+  四工具全流程、越权=找不到、挂起→接续、串并行一致性、**#7 小窗口触发压缩（确定性）**。
+- infra 门：`node --env-file-if-exists=.env --import tsx .../experiments/run.ts --infra-gate`，
+  以 `LLM_MODEL=step-3.7-flash` → **exit 0**（门通过，不烧样本）；缺 `LLM_API_KEY` 时 `blocking=true`。
+- **样本局限声明**：本节只登记装配与确定性自检，**不含任何真实模型读数**；「模型会正确选用四工具 /
+  压缩后能恢复上下文 / 采纳 Skill 口径」均待运行阶段按 §5.2–5.4 判据实测，本预注册不预判胜负。
