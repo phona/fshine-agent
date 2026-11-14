@@ -2,7 +2,7 @@
 
 > 分片依据：`docs/product/r4-slices.md` §三「P7 · ask-first 扩展」与 `docs/product/r4-acceptance.md` §3/§3.1（脚本格式与断言最小集）、P7-T01–T05/E01（v1 预注册基线）。
 > owner 拆分口径（2026-11-14 排程裁定）：**P7a 只做前置能力——交互式 ask、脚本回放、轨迹采集**；资源限制/异步执行/故障场景属 **P7b**（依赖 P5/P6，未授权）。P7-T06（故障注入）与依赖 P4/P5/P6 的断言/注入/证据种类一律 `blocked`（引擎 fail-closed 报 blocked，不静默通过、不跳过宣称完成）。
-> 分支/基线/提交：worktree `fshine-agent-r4-p7a`，分支 `arch/r4-p7a-askfirst`；基线 `arch/integration` 启动时 HEAD `46f757e`（含 P0 合入 `578b351`；R4-P1 `arch/r4-p1-ledger` 未合入，仍指基线）。本片提交：`1e5a398`（测试先行）→ `97c9227`（测试自身缺陷修正）→ `a0d45c0`（最小实现）→ 本 docs 提交。未 push、未合并。
+> 分支/基线/提交：worktree `fshine-agent-r4-p7a`，分支 `arch/r4-p7a-askfirst`；启动基线 `arch/integration` HEAD `46f757e`（含 P0 合入 `578b351`；R4-P1 当时未合入）。P1 合入后（集成 HEAD `54a02c1`）按 owner 排程 rebase，rebase 后提交链：`7764e13`（测试先行）→ `a62a533`（测试自身缺陷修正）→ `8c82313`（最小实现）→ `fdf5da7`（docs 报告）→ 本收口提交（「rebase 收口 ask.ts」，interactive 证据行复用 P1 渲染）。冲突仅在 `scripts/ask.ts`：P1 的 `renderAskEvidenceLines`/`taskLabel`/`import.meta.main` 守卫 vs P7a 的 flag 解析与 dispatch —— 双方语义都保留（单轮走 P1 渲染；interactive/script 走 P7a dispatch 与新模块）。未 push、未合并。
 > 证据根：`.runtime/p7a/`（gitignored）。真实模型 smoke 的密钥来自主工作树 `.env`（gitignored，`node --env-file=` 只读加载，未写入本工作树任何文件）。
 > 声明：**P7a 单独记录完成状态，不冒充完整 P7 验收**——P7b 与 P7-T06 未实施；黑盒层仅有 P7-E01 smoke（N=3，标 INSUFFICIENT_EVIDENCE）。
 
@@ -43,7 +43,7 @@
 | `scripts/ask-assert.ts`（新增 241 行） | 新增 | 断言引擎最小集：`parseAssertionSpec`/`evaluateAssertion`/`SUPPORTED_ASSERTIONS`/`BLOCKED_ASSERTIONS`；`no_fabricated` 取严格可溯源口径（回复数值须在回合用户消息、该回合审计行、任务汇报中溯源；比 R1「弱告警」更严，声明于文件头） |
 | `scripts/ask-trace.ts`（新增 461 行） | 新增 | `createTraceRecorder`：script 模式证据确定性归一（`task@n`/`req@n`、剔 `ts`/`createdAt` 等时钟与耗时、transcript 投影）；interactive 模式原样记录。`validateTraceDir`：schema/11 类覆盖/文件存在可解析/blocked·not_applicable 须带 reason |
 | `scripts/ask-replay.ts`（新增 746 行） | 新增 | §3.1 的 P7a 子集（`scenario`/`session`/`sessions`/`config`/`threshold`/`turns[message+model 计划｜inject]`/`expect`/`evidence`）；共享装配核心 `assembleSessionCore` + 脚本计划假 driver + 记录包装器；退出码 0/1/2/3；`--trace` 落盘（`runtime/` 为运行态） |
-| `scripts/ask-interactive.ts`（新增 185 行） | 新增 | `runInteractiveLoop`（单 Session 循环 send、逐回合回复+机械证据、空行跳过、空回复/send 异常如实 exit 1）；`runInteractiveCli`（经 `assembleAskRuntimeCli` 同一五门；`--trace` 走交互记录器） |
+| `scripts/ask-interactive.ts`（新增 185 行） | 新增 | `runInteractiveLoop`（单 Session 循环 send、逐回合回复+机械证据、空行跳过、空回复/send 异常如实 exit 1）；`runInteractiveCli`（经 `assembleAskRuntimeCli` 同一五门；`--trace` 走交互记录器）；逐回合证据行**复用 ask.ts 的 `renderAskEvidenceLines`**（rebase 收口后，与单轮同一渲染函数：`任务=#编号 名称`） |
 | `scripts/ask-runtime.ts`（+24） | 最小改 | 增 `assembleAskRuntimeCli`：单轮/交互共用的 `rm+mkdir` 仪式 + 同一 `assembleAskRuntime`（五门话术仍在单点，守卫不破） |
 | `scripts/ask.ts`（+127） | 最小 hook | flag 解析扩展（`--interactive`/`--script`/`--trace`，`=` 与空格两形态；与消息参数互斥、`--script` 拒 `--principal/--session` 覆盖、`--trace` 需配引擎、缺值 fail-closed，全部 exit 2）+ script/interactive 两个 dispatch 分支；单轮执行体与五门 catch/输出**逐字未动** |
 
@@ -51,7 +51,15 @@
 
 ## 四、执行证据（本次复跑读数）
 
-**确定性门（回归）**——`.runtime/p7a/regression/p7a-regression.txt`：
+**统一回归（P1 合入 + rebase 收口后；集成 HEAD `54a02c1`）**——`.runtime/p7a/rebase/`：
+
+- `npm run typecheck` → `TSC_EXIT=0`。
+- `npm test`（全量 unit）→ `Test Files 45 passed (45)`；`Tests 425 passed (425)`；`VITEST_EXIT=0`（基线 37 文件/320 例 → 只增不减；P1+P7a 合入后与 owner 预期 45/425 一致）。证据 `rebase/unified-full.txt`。
+- P7a 目标批次（回放确定性/trace schema/守卫/blocked/单轮兼容 + P0 五门）：7 文件 **57 passed**。P1 目标批次（迁移/存档/显示/tasks/ops/redo）：6 文件 **87 passed**。证据 `rebase/unified-targets.txt`。
+- 单轮金样逐字节复核（最终代码）：缺密钥门 stderr 与金样 `diff` 空（`STDERR_BYTE_IDENTICAL`）、exit 2、stdout 0 字节。证据 `rebase/single-turn-golden.txt`。
+- P7-E01 复核（rebase 后最终代码）：同 3 回合真实模型命令 → `E01_EXIT=0`；逐回合证据行已是 P1 渲染（`任务=#编号 名称`）；`validateTraceDir` 对 `rebase/e01-trace` `ok: true`；N=3 仍标 INSUFFICIENT_EVIDENCE。证据 `rebase/e01-interactive-smoke.txt`。
+
+**确定性门（P7a 阶段读数）**——`.runtime/p7a/regression/p7a-regression.txt`：
 
 - `npm run typecheck` → `TSC_EXIT=0`。
 - `npm test`（全量 unit）→ `Test Files 42 passed (42)`；`Tests 369 passed (369)`；`VITEST_EXIT=0`。基线（P7a 前）37 文件/320 例 → **只增不减：+5 文件/+49 例**（全过）。
@@ -91,8 +99,8 @@ CLI-only：整片 revert 本片提交即回到旧 CLI（`ask` 单轮行为不变
 
 ## 七、与 P1 的 ask.ts 接线口径（owner 裁定）
 
-- **唯一负责人制**：合并顺序 P1 先合、P7a rebase 后由 **P7a 实施员统一收口 `ask.ts`** 并做统一回归。本片已按「以新增模块为主 + `ask.ts` 仅加 flag 解析/dispatch hook」接线，预计冲突面集中在 `ask.ts` 的参数解析与 `task_no` 相关展示/断言升级。
-- **依赖登记**：R4-P1（数字 ID/业务名称/回复存档）本片启动时未合入（`arch/r4-p1-ledger` 仍指基线 `46f757e`）。因此 `task_no` 断言当前以**底账标识**承担「非空/互异/跨回合稳定」不变量；P1 合入后同一断言升级为接受 `#<no>` 形态（实现处已留注释与设计说明）。
+- **唯一负责人制（已执行）**：合并顺序 P1 先合、P7a rebase 后由 **P7a 实施员统一收口 `ask.ts`** 并做统一回归。实际冲突面仅在 `ask.ts` 的 import 区（P1 的 `TaskRecord`/`taskLabel`/`renderAskEvidenceLines`/`import.meta.main` 守卫 vs P7a 的 `readline`/`runInteractiveCli`/`runReplayCli`），已两全保留；单轮路径沿用 P1 渲染，interactive/script 走 P7a dispatch，交互逐回合证据行复用同一 `renderAskEvidenceLines`（本收口提交）。
+- **依赖登记**：R4-P1（数字 ID/业务名称/回复存档）已合入集成（`54a02c1`）并完成 rebase；`task_no` 断言当前仍以**底账标识**承担「非空/互异/跨回合稳定」不变量（收口不扩范围），P1 展示面的 `#<no>` 升级留待后续切片按准入办理（实现处已留注释与设计说明）。
 - P4/P5/P6 未合入 → 对应断言/注入/证据/threshold 种类保持 `blocked`，不得为过绿放开。
 
 ## 八、已知边界（登记）

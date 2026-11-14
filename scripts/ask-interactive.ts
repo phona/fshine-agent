@@ -7,12 +7,16 @@
  *
  * 语义：
  *   · 单进程一个 Session：stdin 逐行 send（空行跳过，EOF 结束），跨回合同一底账 scope；
- *   · 逐回合输出「===== 回合 N =====」+ 回复 + 机械证据（委派/结构化执行/审计行/底账）；
+ *   · 逐回合输出「===== 回合 N =====」+ 回复 + 机械证据——证据行复用 ask.ts 的
+ *     `renderAskEvidenceLines`（与单轮同一渲染函数：业务展示位用「#编号 + 业务名称」，
+ *     内部 taskId 只进逐条执行证据 JSON）；与 ask.ts 构成函数级环，安全：函数声明在
+ *     模块实例化期初始化、且 ask.ts 的 CLI 主体有 import.meta.main 守卫（import 无副作用）。
  *   · 空回复或 send 异常 = 该回合失败：如实输出并置 exit 1，不重试掩盖、不静默吞；
  *   · 装配门拒绝（缺密钥等五门）→ exit 2（话术来自共享装配，字节不变）；
  *   · --trace：逐回合记录进 TraceRecorder（mode=interactive；原样记录，未归一）。
  */
 import { readFileSync } from 'node:fs';
+import { renderAskEvidenceLines } from './ask';
 import { AssemblyRefusedError, assembleAskRuntimeCli, type AskRuntime } from './ask-runtime';
 import { createTraceRecorder, type TraceRecorder, type TraceTurnRecord } from './ask-trace';
 import type { Session } from '../packages/agent/src/execution-runtime';
@@ -87,12 +91,19 @@ export async function runInteractiveLoop(input: InteractiveLoopInput): Promise<n
     input.write('===== 回复 =====');
     input.write(reply);
     input.write('===== 机械证据 =====');
-    input.write(`principal=${input.principalId} session=${input.sessionId} 委派=${taskIds.length > 0 ? '是' : '否'}`);
-    const completed = executions.filter((execution) => execution.status === 'completed').length;
-    input.write(
-      `taskId=${taskIds[0] ?? '（无委派）'} 结构化执行=${executions.length} 次（完成 ${completed}）`
-      + ` dummy 审计=${auditLines.length} 行 用时=${((Date.now() - startedMs) / 1000).toFixed(1)}s`,
-    );
+    const firstTaskId = taskIds[0];
+    const firstTask = firstTaskId === undefined ? undefined : input.session.getTask(firstTaskId);
+    for (const line of renderAskEvidenceLines({
+      principalId: input.principalId,
+      sessionId: input.sessionId,
+      ...(firstTask === undefined ? {} : { task: firstTask }),
+      executionCount: executions.length,
+      completedCount: executions.filter((execution) => execution.status === 'completed').length,
+      auditLineCount: auditLines.length,
+      elapsedSeconds: ((Date.now() - startedMs) / 1000).toFixed(1),
+    })) {
+      input.write(line);
+    }
     if (input.dbPath !== undefined) input.write(`任务底账=${input.dbPath}`);
     for (const execution of executions) {
       input.write(JSON.stringify({
