@@ -491,6 +491,43 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
       assembled.close();
     }
   });
+
+  it('⑮ inline 委派派生许可：深度超限确定性拒绝，落 resource_limited 且不进入执行', async () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const records: MainDriverRecord[] = [];
+    const plans = new Map<string, MainPlan>([['任务X', { delegates: ['任务X'], reply: '（不应到达）' }]]);
+    const assembled = await assembleSessionCore({
+      env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'] },
+      profile: PROFILE,
+      principalId: SCOPE_A.principalId,
+      sessionId: SCOPE_A.sessionId,
+      dbPath,
+      stateDir: path.join(path.dirname(dbPath), 'state'),
+      setAuditPath: true,
+      emptyOperationsMessage: '（测试）执行层没有声明任何只读 operation',
+      mainSystemPrompt: '（测试）Main 系统提示',
+      workerSkills: [],
+      createDrivers: () => ({
+        mainDriver: fakeMainDriver(plans, records),
+        workerDriver: unreachableDriver(),
+      }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      runtime: { dispatchMode: 'inline', maxDelegationDepth: 0 },
+    });
+    try {
+      await expect(assembled.session.send('任务X')).rejects.toThrowError(/资源策略拒绝|resource_limited/);
+      // 半成品不留：任务行落 failed + 机械原因 resource_limited；执行端零调用（unreachableDriver 未被触发）
+      const tasks = assembled.taskRegistry.list(SCOPE_A);
+      expect(tasks).toHaveLength(1);
+      expect(tasks[0]!.status).toBe('failed');
+      expect(tasks[0]!.reason).toBe('resource_limited');
+      // 失败路径不泄漏许可
+      expect(assembled.policy.snapshot().foreground.active).toBe(0);
+      expect(assembled.policy.snapshot().background.active).toBe(0);
+    } finally {
+      assembled.close();
+    }
+  });
 });
 
 describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
