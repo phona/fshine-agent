@@ -44,6 +44,17 @@ export interface Rejection {
   readonly message: string;
 }
 
+/**
+ * 联合接口约定 §5：P5 四类拒绝统一映射任务失败原因 `resource_limited`（P2 的机械原因
+ * 词表；取消/超时/结果未知各有自己的原因）。P5 不写任务状态——集成层用
+ * `taskFailureReasonFor` 把拒绝落库为任务原因（Main 话术由展示层定，不在此约定）。
+ */
+export const RESOURCE_LIMITED_REASON = 'resource_limited' as const;
+
+export function taskFailureReasonFor(_rejection: Rejection): typeof RESOURCE_LIMITED_REASON {
+  return RESOURCE_LIMITED_REASON;
+}
+
 export type PermitState = 'queued' | 'active' | 'released' | 'cancelled';
 
 export interface BudgetUsage {
