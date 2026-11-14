@@ -75,7 +75,7 @@ const TASK_CANCEL_SCHEMA = { type: 'object', properties: { ref: { type: 'string'
 ```
 
 - 实现：scope 内解析 → `runner.cancel(taskId, scope)`（`task-runner.ts:275`）。**原样转述** CancelOutcome：`{outcome:'requested'}` 说「已发出取消请求，执行端确认后生效」；确认/未确认语义照 registry 状态，不宣称已取消（复用 cancelling≠cancelled 状态机，`task-runner.ts:407-418` 的回滚边保持不动）。
-- 前置：需要 `send()` 能拿到 runner——RuntimeOptions 已有 runner 装配链（`scripts/ask-runtime.ts` 构造 runner 后注入 background 执行面；send 闭包内补一个 `options.taskRunner` 引用即可，不新建生命周期）。
+- 前置：`send()` 已能拿到 runner——`RuntimeOptions.taskRunner?: TaskRunner` 基线已存在（`execution-runtime.ts:145`，注释「P6：后台任务运行器……执行/恢复/取消由它承担」），且装配方已把构造好的 runner 注入 runtime options（`scripts/ask-runtime.ts:430`、`apps/server/server.ts:154` 的 `...(runner === undefined ? {} : { taskRunner: runner })` 逐字在基线）。治理工具的启用判据就是 `options.taskRunner !== undefined`：background 模式天然有 runner；inline/ask 单发不传则工具不上面（§4、§6.5）。零装配改动。
 
 ### 3.4 `task_resume`（受控写，接续 waiting_user）
 
@@ -124,13 +124,7 @@ const TASK_RESUME_SCHEMA = { type: 'object', properties: { ref: { type: 'string'
 ```
 说明：与 RUN_TASK_TOOL 同处定义（:48-61 先例），零新机制，只是声明。
 
-```diff
-@@ RuntimeOptions（execution-runtime.ts:108 起）
-   mainDriver: TurnDriver;
-+  /** 任务治理入口（cancel/resume）：由装配方注入既有 runner；不传则治理工具不上面。 */
-+  taskRunner?: TaskRunner;
-```
-说明：可选注入，缺省不启用——ask 单发路径（无后台 runner）行为零变化。
+> 复核修正（2026-11-14）：初版 diff 误把基线已有内容当「新增」——`RuntimeOptions.taskRunner?` 在 `execution-runtime.ts:145` 已存在，装配方注入行在 `scripts/ask-runtime.ts:430`、`apps/server/server.ts:154` 已逐字存在。**这两处均无需改动**，真实最小 diff 只剩下列 3 个 hunk（工具声明、send() 工具面与 exec 分派、resolveRef 辅助），全部落在 `packages/agent/src/execution-runtime.ts` 一个文件内，装配层零改动。
 
 ```diff
 @@ send()（execution-runtime.ts:419 起）
@@ -159,19 +153,13 @@ const TASK_RESUME_SCHEMA = { type: 'object', properties: { ref: { type: 'string'
 +function resolveRef(ref: string, scope: TaskScope): string {
 +  const list = registry.list(scope);                       // 只在本会话 scope 内解析 #编号
 +  const hit = list.find((t) => `#${t.taskNo}` === ref.trim() || t.taskId === ref.trim());
-+  if (hit === undefined) throw new TaskOwnershipError(...); // 复用 require 的拒绝语义
++  if (hit === undefined) throw new TaskOwnershipError();    // 构造器无参（task-registry.ts:189-192）
 +  return hit.taskId;
 +}
 ```
-说明：**编号解析在 scope 过滤后的列表上做**——越权编号自然表现为「找不到」，不泄露其他 principal 的任务存在性（列表本身已 scope 化，:460 先例）。
+说明：**编号解析在 scope 过滤后的列表上做**——越权编号自然表现为「找不到」，不泄露其他 principal 的任务存在性（列表本身已 scope 化，:460 先例；取不存在与越权同一 TaskOwnershipError、不泄漏任务是否存在，是 task-registry.ts:37 的既有语义）。
 
-```diff
---- a/scripts/ask-runtime.ts
-@@ runtime 装配（:288 / :385 两处 createPiTurnDriver 附近，runtime options 组装处）
-       mainDriver,
-+      ...(runner === undefined ? {} : { taskRunner: runner }),
-```
-说明：runner 本来就在该作用域构造（ask-runtime.ts:294 起 `createTaskRunner`），只是把引用传进 session options；不新建 runner、不改生命周期。
+> 装配层：**零改动**。runner 注入链基线已在（`scripts/ask-runtime.ts:388-430`：`input.taskRunner`（:169）缺省时 background 模式下 `createTaskRunner`（:298）构造并经 `...(runner === undefined ? {} : { taskRunner: runner })`（:430）传入；server 同款 `apps/server/server.ts:154`）。不新建 runner、不改生命周期；inline 模式需要治理工具的调用方直接传 `input.taskRunner` 即可。
 
 ## 5. 边界安全分析
 

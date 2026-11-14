@@ -11,7 +11,7 @@ Main 的 `agent.md` 保持最小（AGENTS.md「Skills First」），但 Main 侧
 
 前置：profile 声明 `skillRoots: [skills]`，目录 `<profile.root>/skills/<name>/SKILL.md` 放一份业务技能（如「每周例会纪要口径」）。
 
-- 复现 A（Main 拿不到技能）：`npm run ask -- "按例会纪要口径帮我起草"`。装配链 `scripts/ask-runtime.ts:375` `loadWorkerSkills(input.profile.root, input.profile.skillRoots)` 只把技能正文嵌进 **Worker** 委派提示（worker-skills.ts:13-24）；Main 的 mainSystemPrompt = agent.md + MAIN_PROTOCOL_NOTE（ask-runtime.ts:381、apps/server/server.ts:100），不含任何技能。若模型不把它当 run_task 交办，Main 只能凭通用知识作答——业务口径丢失；若交办，Worker 拿到的 task 文本里也没有用户没说出口的口径细节（用户以为「按那个口径」Agent 就知道）。
+- 复现 A（Main 拿不到技能）：`npm run ask -- "按例会纪要口径帮我起草"`。装配链 `scripts/ask-runtime.ts:377` `loadWorkerSkills(input.profile.root, input.profile.skillRoots)` 只把技能正文嵌进 **Worker** 委派提示（worker-skills.ts:13-24）；Main 的 mainSystemPrompt = agent.md + MAIN_PROTOCOL_NOTE（ask-runtime.ts:381、apps/server/server.ts:100），不含任何技能。若模型不把它当 run_task 交办，Main 只能凭通用知识作答——业务口径丢失；若交办，Worker 拿到的 task 文本里也没有用户没说出口的口径细节（用户以为「按那个口径」Agent 就知道）。
 - 复现 B（库代码死置）：`grep -rn 'READ_SKILL_TOOL' packages apps scripts --include='*.ts'` → 只在 `skills.ts:11` 定义与 skills 自身测试出现，Main 工具面（execution-runtime.ts:426）不含它。
 
 ## 2. 代码证据
@@ -20,9 +20,9 @@ Main 的 `agent.md` 保持最小（AGENTS.md「Skills First」），但 Main 侧
 |---|------|------|
 | 1 | Main 工具面仅 run_task | `packages/agent/src/execution-runtime.ts:426-430` |
 | 2 | Main 系统提示组装点（角色+协议，无技能） | `scripts/ask-runtime.ts:381`、`apps/server/server.ts:100` |
-| 3 | Worker 直嵌机制（已验证） | `packages/agent/src/worker-skills.ts:13-24`（loadWorkerSkills：skillRoots→SKILL.md 正文→WorkerSkill[]）；调用 `ask-runtime.ts:375` |
+| 3 | Worker 直嵌机制（已验证） | `packages/agent/src/worker-skills.ts:13-24`（loadWorkerSkills：skillRoots→SKILL.md 正文→WorkerSkill[]；「读取失败向上抛，不静默降级」头注释 :6）；调用 `ask-runtime.ts:377` |
 | 4 | WorkerSkill 注入委派提示 | `execution-runtime.ts:105-108`（WorkerSkill 接口）、TaskExecutorOptions.workerSkills（:494） |
-| 5 | 技能库代码（发现+按需读取） | `packages/agent/src/skills.ts`：READ_SKILL_TOOL:11、DEFAULT_SKILL_ROOT_RELATIVE='.agents/skills':25、SKILL_CONTENT_LIMIT_BYTES=32KiB:36、FileSkillRegistry:76、createSkillRegistry:131、discoverSkills:136 |
+| 5 | 技能库代码（发现+按需读取） | `packages/agent/src/skills.ts`：READ_SKILL_TOOL:11、DEFAULT_SKILL_ROOT_RELATIVE='.agents/skills':25、SKILL_CONTENT_LIMIT_BYTES=32KiB:36、FileSkillRegistry:76、createSkillRegistry:131、discoverSkills:136、listSkills:146、renderSkillCatalog:158（后两者无生产消费者，臂 B 即接线点） |
 | 6 | `.agents/skills` 不存在 | worktree `ls .agents` → 仅 `agents/fshine-main/agent.md` |
 | 7 | 读取失败不静默降级 | worker-skills.ts:10（「技能面坏了不静默降级」）；skills.ts:70-73（重复名 fail、坏文件忽略的既有边界） |
 
@@ -34,7 +34,7 @@ Main 的 `agent.md` 保持最小（AGENTS.md「Skills First」），但 Main 侧
 
 ```diff
 --- a/scripts/ask-runtime.ts
-@@ :375 附近
+@@ :377 附近
 -    const workerSkills = input.workerSkills ?? await loadWorkerSkills(input.profile.root, input.profile.skillRoots);
 +    const workerSkills = input.workerSkills ?? await loadWorkerSkills(input.profile.root, input.profile.skillRoots);
 +    const mainSkills = await loadWorkerSkills(input.profile.root, input.profile.mainSkillRoots ?? []);
@@ -68,10 +68,23 @@ Main 的 `agent.md` 保持最小（AGENTS.md「Skills First」），但 Main 侧
 +            const skill = await options.mainSkillRegistry!.read(String((args as {name?:unknown}).name ?? ''));
 +            return { name: skill.name, content: skill.content }; // 32KiB 上限由 registry.read 既有钳制（skills.ts:36）
 +          }
-@@ 摘要清单注入（mainSystemPrompt 之后，send() 首次使用前或装配期拼一次）
-+  // 装配期：`${MAIN_SKILL_INDEX}\n- name: description`（只含 name/description，skills.ts:50 注明无路径无正文）
+@@ 摘要清单注入——复用 skills.ts 既有渲染（不另写格式）
++  const summaries = await listSkills(path.join(profile.root, rel));   // skills.ts:146，name+description
++  const catalog = renderSkillCatalog(summaries);                      // skills.ts:158：空表→空串（零技能不增长提示）
++  // mainSystemPrompt 追加 `${catalog}`（非空时）；renderSkillCatalog 自带 READ_SKILL_TOOL 提示语
 ```
-说明：`read` 的名字校验、路径逃逸防护（name 只作登记表内查找，非文件系统拼接——FileSkillRegistry.read 按 discovered metadata 匹配）与 32KiB 钳制全部是 skills.ts 既有行为，diff 零新增边界逻辑。装配点同臂 A 两处 + registry 构造 `createSkillRegistry({ rootDir: path.join(profile.root, rel) })`（worker-skills.ts:18 先例）。
+说明：摘要清单**复用既有 `listSkills`（skills.ts:146）+ `renderSkillCatalog`（skills.ts:158）**——后者正是为宿主渲染设计的「names + descriptions only, never bodies」块（含「需要时用 read_skill 按名称读取正文」提示语与空表返回空串的零增长保证），二者当前无生产消费者（仅 skills.test.ts 引用），本臂即其接线点，不自造格式。read 的名字校验、路径逃逸防护（name 只作登记表内查找，非文件系统拼接——FileSkillRegistry.read 按 discovered metadata 匹配）与 32KiB 钳制全部是 skills.ts 既有行为，diff 零新增边界逻辑。装配点同臂 A 两处 + registry 构造 `createSkillRegistry({ rootDir: path.join(profile.root, rel) })`（worker-skills.ts:17 先例）。
+
+`read_skill` 工具的 inputSchema 基线只有常量名（skills.ts:11）无 schema，需随工具声明新增（与 RUN_TASK_TOOL_SCHEMA 同款式）：
+
+```ts
+const READ_SKILL_SCHEMA = {
+  type: 'object',
+  properties: { name: { type: 'string', description: '技能清单里的技能名。' } },
+  required: ['name'],
+  additionalProperties: false,
+};
+```
 
 - 可观测性：`read_skill` 每次调用本就走 Main 回合 onStep（progress 数组，execution-runtime.ts:428），证据=回合机械证据里的工具调用行天然带出读取计数与技能名；另在 ask 证据行加 `skill_reads: <n>`（从 progress 过滤 READ_SKILL_TOOL 计数，纯机械）。
 
