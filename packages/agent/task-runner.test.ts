@@ -899,4 +899,29 @@ describe('安全绊线', () => {
     expect(h.policy.backgroundInUse).toBe(1); // t1 占用中，未泄漏
     expect(h.policy.released).toHaveLength(2); // 两轮 pump 各一次「见无任务→归还」
   });
+
+  it('执行端同步抛错（防御分支）：回合落 failed、原因原文可见、许可不泄漏', async () => {
+    const h = harness();
+    submit(h, 't1');
+    // 真实执行端应为 async；此分支保证坏实现（同步抛错）不把任务卡死在 running、不吞许可。
+    const throwing: TaskExecutor = {
+      execute: () => {
+        throw new Error('同步崩溃');
+      },
+    };
+    const runner = createTaskRunner({
+      registry: h.registry,
+      policy: h.policy,
+      executor: throwing,
+      owner: 'test-runner',
+      leaseMs: 10_000,
+      now: () => h.clock.now,
+    });
+    runner.pump();
+    await runner.whenIdle();
+
+    expect(h.registry.statusOf('t1')).toBe('failed');
+    expect(h.registry.failureReasonOf('t1')).toContain('同步崩溃');
+    expect(h.policy.backgroundInUse).toBe(0);
+  });
 });
