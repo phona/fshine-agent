@@ -1011,6 +1011,20 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十二、P5 资源强制：实施（2026-11-14，分支 `arch/r4-p5`；未合并）
+
+- **授权与范围**：owner 2026-11-14 并行授权「P5 对冻结契约独立开发，不等 P2 落盘」；契约 = `docs/product/r4-joint-interfaces.md` §2（冻结）＋ `r4-slices.md` P5（`runtime` 段/信号量/队列容量/委派深度/共享预算/等待超时；`send` 串行化）＋ `r4-acceptance.md` P5-T01/T03/T04/T05/T06 的确定性面＋分诊 #6/#10/#11。基线 `arch/integration @ 9ae895d`（含联合接口约定 v1）。本轨只做纯逻辑模块与配置段，**不接线** execution-runtime/server/ask-runtime（联合接口约定 §6：强制点归集成 Run）；P5-E01（黑盒顺序不回归）与端到端接线验收 **blocked-by-集成**。
+- **提交链**：`c67af5b`（测试先行 RED：resource-policy 模块缺失、守卫命中 host 死键、config 6 例红）→ `500f1e4`（实现 + 测试基础设施诚实更新）→ 本节所在 docs 提交。
+- **`host.*` 未消费键删除（分诊 #6「删除未消费键；随 P5 建最小 runtime 段（单一读入口）」）**：删除 `platformQueueCapacity` / `shutdownDrainMs` / `workerDispatchMode` / `workerStepCap` / `inboundDebounceMs` / `piAgentDir`（contracts 类型 + YAML 解析 + `deploymentEnvOf` 派生 + `FSHINE_*` 覆盖口）。依据（实测于 `9ae895d`）：六键的生产读取点为零（R4 审计 `r4-audit.md` §6/附注同判；旧读者随 M2/M4 退役），属「解析并派生 env 但不生效」的假配置。保留 `host.attachmentDir`——有真实读取点（`packages/channel-wecom/src/adapter.ts:186` 读 `FSHINE_ATTACHMENT_DIR`，由 `apps/server/main.ts:31→38` 注入）。旧 YAML 残留键由加载层忽略（不拒启、不再派生 env）。加回判据：对应机制重新落地并出现真实读取点时，按分诊 #6 流程重新登记（不得以「未来可能需要」为据）。
+- **`runtime` 段（P5 单一配置入口）**：字段 `mainConcurrency / backgroundConcurrency / queueCapacity / mainTurnMs / workerTurnMs / maxDelegationDepth / taskBudget{ms,calls,tokens?} / waitUserTimeoutMs`；`config/agent.yaml` 的 yaml 键是唯一源（**无 env 覆盖口**）；非法值 fail-fast、未知键拒绝（与其它段「非法=未配置」刻意不同：资源限额静默回落=限额失效，P5-T01 失败判据「静默回落/双源」）。缺省由 `packages/agent/src/resource-policy.ts` 补齐＝现行为：单并发 / 无队列 / 无任务级预算 / 回合时限 300s/180s（与 execution-runtime 现行缺省一致）/ 委派深度 1 / 等待 24h。
+- **ResourcePolicy（§2 冻结面，纯逻辑无 IO，注入时钟确定性可测）**：`acquire/release/cancelQueued/snapshot/budgetFor`；拒绝 reason `queue_full / quota_exceeded / budget_exhausted / depth_exceeded`（集成映射任务 `resource_limited`）。语义：前后台配额与队列**各自独立**（后台满载不阻塞前台；满=确定性拒绝，无无限积压）；排队许可 FIFO 晋升、等待不计入回合时限；子许可派生**共享父预算同一对象**（不复制/不放大）、深度 +1、不占新并发槽，超限拒绝不产生半成品；waiting_user 释放槽位、预算保留（恢复同对象、不重置）、恢复无特权；`taskBudget.tokens` 仅在显式声明时 `enforced`，未声明记 `tokens: unavailable`（不伪造硬上限，分诊 #10）。
+- **读数与证据**：`npx tsc --noEmit` 退出码 0；P5 目标 3 文件 62 例全绿（resource-policy 33 + 守卫 2 + core config 27）；全量 unit **47 文件/464 例**全绿；反向绊线 4 组逐条实做转红后复原（预算复制→1 红；释放不晋升→2 红；伪造 token 硬上限→1 红；死键回流→守卫 1 红）。证据 `.runtime/p5/`（gitignored：RED/GREEN/绊线读数）。
+- **测试基础设施同步（诚实更新，不弱化）**：`tests/vitest.setup.ts` 密封清单、`scripts/p0-gates-cli.test.ts`／`scripts/ask-replay.test.ts` 剔除清单删死键；`packages/agent/worker-env.test.ts` 的 FSHINE_* 负例哨兵改用仍有读取点的 `FSHINE_ATTACHMENT_DIR`（白名单精确键集合断言不变）。
+- **静态守卫**：`packages/agent/resource-policy-single-source.test.ts`（P5-T01）——已删 host 键与 `FSHINE_*` 覆盖口在生产代码零引用；资源旋钮只允许登记所有者（contracts 类型 / core 解析 / resource-policy / execution-runtime 的回合时限入参）解释，所有者表双向闭合（新增读者即红）。
+- **边界与 blocked**：不新增依赖；不改 execution-runtime/server/ask-runtime / 冻结判据 / 历史证据 / 其他工作树；P2（状态/等待语义）与 P6（调度）接线前，本模块不产生产品行为变化。token 强制仅当 Pi `assistant.usage` 可验证时由接线方配置 `taskBudget.tokens`（否则保持 unavailable）；P5-E01 黑盒与 `send` 串行化接线＝集成 Run。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
