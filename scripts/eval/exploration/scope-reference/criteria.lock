@@ -1,12 +1,12 @@
 {
   "generatedBy": "node --import tsx scripts/eval/exploration/freeze.ts <suite-dir>",
   "suiteId": "scope-reference",
-  "frozenAt": "2026-11-14T01:20:38.247Z",
+  "frozenAt": "2026-11-14T01:55:47.273Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "29ef794e82ef05f39bd91b7b7d46fe7f828d3452e8cca287c6ae7ab6e9d2f7c6",
+  "casesSha256": "617eb97f6ae6b81348563b97aae3bf1452096e4260e650b576ac62e5e27a561a",
   "files": {
     "scripts/eval/exploration/scope-reference/suite.ts": "f5acd5a350b8cd0ad733965f2fa773683417419029d9ac46e732997bb61f463b",
-    "scripts/eval/exploration/scope-reference/cases/M01.ts": "d6982eff433daa724f6d1352db5280eb6adfdbdf3d68a974d5e573752650ba39",
+    "scripts/eval/exploration/scope-reference/cases/M01.ts": "f8dddde8fab6047f6448ae9b22e74c81c83f2e16f40e7134106b0911c69639d8",
     "scripts/eval/exploration/scope-reference/cases/M02.ts": "75eeb7176f2f11c4c9946b126718cb785c56ed10b9a84c168f3b507f2a0c33ce",
     "scripts/eval/exploration/scope-reference/cases/M03.ts": "3c1f187bf1110249756105dbdd2220e816c5fd1d1e9f02cf09a19a8a668ab63c",
     "scripts/eval/exploration/scope-reference/cases/M04.ts": "fb3ec27e2a93d75314b06191a569f37fb07b74c72f66698fbc9a308ac148812e",
