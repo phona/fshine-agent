@@ -377,9 +377,13 @@
 | C04 | 6000 | **0/3** | [0.000, 0.562] | 0 | **0** | 0 | 0 |
 
 - **触发（未达成）**：6 样本 **0 次 `context_emergency_compact`、0 次 `context_compacted`、转录无 `【此前会话摘要】` 标记**。C03#1 全请求 prompt 计只从 turn1≈3731 长到 turn43≈8929，未达 12k 窗口阈值；C04#1 封顶≈4884。
+- **检定结论（不成立）**：§6.2 预注册的「至少取得一次压缩后恢复读数」（含 C04=6k 触发兜底）**未达成**——检定项「**#7 压缩确触发**」**不成立**。故**本批复核不能就 #7 判 passed**。此项在报告/决策登记中**如实标注、未掩盖、未筛绿**（故非 integrityViolation，属未达预注册目标）。
 - **恢复断言（无从检验）**：探针（`task_status`/`task_result`）在 6 样本 **0 次**被调用（`taskToolCalls=0`），因探针所在后段回合回复全空。
 - **是否收敛**：**不是** §四十八 那种进程活锁——两 case 均在墙钟内收敛（C03 137s、C04 27s，无手工 kill）；但**内容不收敛于可用**：模型自中段起只输出 thinking、正文空（`pi_driver_empty_reply, stopReason:length, contentBlocks:["thinking"]`）。C03#1 自 turn24 起 20/43 回合全空（out 258→17→190→…→1）；C04#1 **43/43 回合全空**（含 turn1）。
-- **强产品证据（确定性机制）**：小声明窗口下，**输出预算钳制早于压缩阈值触发**。pi-ai 每次请求按 `available = contextWindow − estimateContextTokens(context) − CONTEXT_SAFETY_TOKENS(4096)` 钳 maxTokens（`simple-options.js:3,:5-8`，经 `buildBaseOptions` 应用）；而压缩阈值按转录 `= window − reserveTokens`（`pi-driver.ts:279-296`，W<36384 时 reserve=0.25W）。当 **W<16384**（reserve<4096）：钳零线（W−4096）**先于**压缩阈值（W−reserve）→ 模型回答预算先归零→thinking-only 空回复→转录只能靠用户文本缓慢增长→**永远到不了压缩阈值→压缩永不发生**。W≥16384（reserve≥4096）才先压缩、后钳零。这解释并推广了 §四十八 的 12k/20k 空回复，也是本批自然语料反而更不收敛的原因（无巨量填充把转录直接顶过阈值）。
+- **强产品证据（确定性机制）**：小声明窗口下，**输出预算钳制早于压缩阈值触发**。
+  - **输出钳零线**：pi-ai 每次请求按 `available = contextWindow − estimateContextTokens(context) − CONTEXT_SAFETY_TOKENS(4096)` 钳 maxTokens（`node_modules/@earendil-works/pi-ai/dist/api/simple-options.js:3`：`CONTEXT_SAFETY_TOKENS = 4096`；`:5-8`：`clampMaxTokensToContext`，经 `:13 buildBaseOptions` 应用于每次请求）。
+  - **压缩阈值（转录口径）**：由 `shouldCompact(contextTokens, contextWindow, settings) = contextTokens > contextWindow − settings.reserveTokens` 应用（`node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js:160-164`）；会话回合前在 `agent-session.js:279` / `:1724` 对 `estimateContextTokens(context.messages)`（**仅转录 messages**）求值；驱动侧 `packages/agent/src/pi-driver.ts:490-492` 同款应用，应急路径为 `:594-602`（转录 `< window − 1024` 才压）。**reserve 的取值**由 `pi-driver.ts:279-296` `compactionSettingsFor` 给出（W<36384 时 reserve=0.25W、keepRecent=0.3W）——即 `:279-296` 是**设置缩放**处，**阈值公式本身在 `compaction.js:163`**。
+  - **错序**：阈值按**转录**（不含 system/tools）计，而钳制按**全请求**（含 system/tools）计。当 **W<16384**（reserve=0.25W<4096）：钳零线（W−4096，全请求）**先于**压缩阈值（W−reserve，转录）到达 → 模型回答预算先归零 → thinking-only 空回复 → 转录只能靠用户文本缓慢增长 → **永远到不了压缩阈值 → 压缩永不发生**。W≥16384（reserve≥4096）才先压缩、后钳零。这解释并推广了 §四十八 的 12k/20k 空回复，也是本批自然语料反而更不收敛的原因（无巨量填充把转录直接顶过阈值）。
 - **confound（登记）**：本批语料点名“contoso 那边 / fabrikam 那边”，诱导对象漂移——C03#1 执行 `contoso`、`fabrikam`、`contoso-trade`（无 window）、`contoso-trade@W99`；C03#2 执行 `contoso-logistics`（未授权）→ 2/3 severe。属语料设计引入的噪声，与压缩无关。
 - **该不该补 / 怎么优化**：**该补（产品面，已登记不修）**——输出钳零线与压缩阈值的错序（W<16384）；需 owner 裁定是调 `CONTEXT_SAFETY_TOKENS` / 压缩 reserve / 还是禁用小窗口。**该补（测试面）**——#7 要在 W≥16384 下取压缩读数需**远长于本批**的自然语料（本语料 ≈124 token/轮，达 16k 阈值需 ~100+ 轮）；或按 owner 裁定改触发策略。本批**如实登记为强产品证据、不掩盖**。
 
@@ -419,7 +423,7 @@
 ### 13.4 三轴要点更新（本批）
 
 - **功能边界**：
-  - #7 会话压缩：**由「部分（活锁）」转为「未取得读数（机制确证）」**——重设计用自然语料后**压缩始终未触发**；根因是输出钳零线与压缩阈值错序（W<16384），非活锁。证据：`packages/agent/src/pi-driver.ts:279-296`、`node_modules/@earendil-works/pi-ai/dist/api/simple-options.js:3,:5-8`。
+  - #7 会话压缩：**由「部分（活锁）」转为「未取得读数（机制确证）」**——重设计用自然语料后**压缩始终未触发**；根因是输出钳零线与压缩阈值错序（W<16384），非活锁。证据：`node_modules/@earendil-works/pi-ai/dist/api/simple-options.js:3,:5-8`（钳零线）、`node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js:160-164`（阈值公式）、`packages/agent/src/pi-driver.ts:279-296`（reserve 缩放）、`:490-492`/`:594-602`（驱动力应用）。
   - #6 话题切换/对象泛化：本批 N=6 = 4/6，**未见近似集合名 severe 漂移**；失败类型转为「丢 window 的整集合查询」（2/6）。
   - #1/#2/#3/#4/#8：第 4 轮全 3/3；#3 用重设后新用例（3/3，`clarificationNecessary=3`）；#4 限流真实触发且如实（`partialFailureReportedHonestly=2`）。
 - **可靠性（不变量）**：重复轮 18 样本**机械不变量全 0、severe 0**；#6 深探 severe 0（outOfScope 2、dup 1）；#7 的 2 severe 来自语料诱导的对象漂移（confound），非压缩面。
@@ -439,6 +443,8 @@
 
 硬上限均未超（`experiments`：maxSessions 45 / maxModelCalls compaction 600（实 143+132）/ concurrency 4 / maxWallMs 1.8e6；`bizprobe`：maxSessions 20 / maxModelCalls 150（实 22/40））。
 
+> **账本口径（登记）**：上表「已耗 ≈95」**沿用 §12.6 表**（父批 18+36+≈41 = ≈95），本批**未逐步独立复算**历史各批次账本；即便历史项有出入，累计仍**远低于 150**（本批三项 6+6+18 = 30 为本次实跑计数）。
+
 ### 13.6 局限与 blocked
 
 - **N=3 / N=6 仅探索**：CI 极宽且跨轮重叠（[0.000,0.562]、[0.300,0.903]、[0.438,1.000]），差异**不得读作真实波动或稳定**。
@@ -446,6 +452,7 @@
 - **blocked 未跑**：#5 对话面本体（`ref` 契约缺陷，待 owner 裁定，本批**排除**）；#7 端到端「压缩后可靠续跑」（本批未验证）；真实 SaaS/企微（未验证）。
 - **模型口径**：本批与 §十一 轮2/3、§十二 同 `step-3.7-flash`，可互比；与轮1（`step-5-preview`）不可比。
 - **抽取器边界**：`claimsCompletionHeuristic` 等回复面启发式非确定性（§11.6）；本批未出现该类假阳。
+- **证据完整性（登记）**：6 样本的 collect runDir 证据齐备（`inputs/meta/tool-calls/tasks/replies/task-facts/notifications/audit/verdict/manifest` 均在，`tool-calls.json` 全在）；**唯一例外**：`compaction-c04/compaction/work/C04#1/state/` 为空、无 `state/audit.jsonl`——与其**未发生执行的查询**一致（该样本仅 1 次 `run_task` 且报错，执行层无审计行可写）；C03#1–3 与 C04#2–3 的 work `state/audit.jsonl` 齐备。非缺失，属如实反映。
 
 ### 13.7 逐条「该不该补 / 怎么优化」
 
@@ -461,3 +468,14 @@
 - `e5cbc43` 驱动事件捕获补 `console.log`（`context_compacted` 走 log）+ 自测钉住
 - （本报告续写见本条 commit）
 - 边界：`packages/`、`apps/` 产品代码**零改动**（`git diff --name-only -- packages apps` = 0）；不改冻结面与既有轮次读数（§一–§十二 原样保留，只**追加**本节）；未接真实平台；`.env` 只读复制、不入证据/不提交；证据在 `.runtime/bizbatch3/`（gitignored：`compaction-c03`/`compaction-c04`/`drift-b06`/`repeat-r4`）。
+
+### 13.9 复核修复登记（不重跑、不改产品/判据/读数）
+
+| # | 复核 gap | 处置 |
+|---|---|---|
+| 1 | **#7 未达成预注册目标**（6 样本 0 次 `context_emergency_compact`/`context_compacted`；`taskToolCalls=0`；§6.2 的 C04 触发兜底未达成） | **不改读数**；§13.1 新增**检定结论**：预注册目标未达成、检定项「#7 压缩确触发」**不成立**、本批复核**不能就 #7 判 passed**；如实登记为强产品证据（未掩盖、未筛绿）。 |
+| 2 | **引用精度**：把「阈值 = window − reserveTokens」归到 `pi-driver.ts:279-296` | §13.1/§13.4 改引：阈值公式见 `pi-coding-agent/dist/core/compaction/compaction.js:160-164`（应用点 `agent-session.js:279/:1724`、`pi-driver.ts:490-492/:594-602`）；`pi-driver.ts:279-296` 仅作 **reserve 缩放**（W<36384 → 0.25W）。机制结论不变。 |
+| 3 | **证据完整性**：`work/C04#1/state/audit.jsonl` 缺 | §13.6 登记：runDir 证据 6/6 齐备（`tool-calls.json` 全在），唯一例外 `C04#1` work state 为空——与其**未发生执行的查询**一致（1 次 `run_task` 报错），非缺失。 |
+| 4 | **未独立复算账本**：「已耗 95」依赖 §12.6 表 | §13.5 登记口径：沿用 §12.6（父批 18+36+≈41），**未逐步独立复算**；本批三项 6+6+18=30 为本次实测；即便有出入仍 ≪150。 |
+
+修复**未改产品代码、未改判据、未改读数、未重采样**（重跑须整批新预注册）。
