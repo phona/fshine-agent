@@ -25,8 +25,8 @@ export const HARD_LIMIT_REGISTRY = {
 export type HardLimitName = keyof typeof HARD_LIMIT_REGISTRY;
 
 export interface BatchPolicyInput {
-  /** 本次实验的并发上限（显式；整数 ≥1）。 */
-  concurrency: number;
+  /** 本次实验的并发上限（可配置；整数 ≥1）。**缺省 = 1（串行）**，禁止无上限并行。 */
+  concurrency?: number;
   /** 硬上限登记项名（缺省 evalBatchConcurrency）。 */
   hardLimitName?: HardLimitName;
   /** 每用例独立工作目录的根（缺省不建目录）。 */
@@ -85,9 +85,9 @@ export function resolveBatchPolicy(input: BatchPolicyInput): ResolvedBatchPolicy
   const name = input.hardLimitName ?? 'evalBatchConcurrency';
   const limit = HARD_LIMIT_REGISTRY[name];
   if (!limit) throw new Error(`未知硬上限登记项：${String(name)}`);
-  const { concurrency } = input;
+  const concurrency = input.concurrency ?? 1; // 缺省串行=1（安全缺省，禁止无上限并行）
   if (!Number.isInteger(concurrency) || concurrency < 1) {
-    throw new Error(`并发上限必须是 ≥1 的整数（收到 ${String(concurrency)}）`);
+    throw new Error(`并发上限必须是 ≥1 的整数（收到 ${String(input.concurrency)}）`);
   }
   if (concurrency > limit.max) {
     throw new Error(`并发上限 ${concurrency} 超过硬上限登记 ${name}.max=${limit.max}（禁止无上限并行）`);

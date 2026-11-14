@@ -50,6 +50,23 @@ describe('runBatch 有界并发', () => {
     expect(() => resolveBatchPolicy({ concurrency: HARD_MAX })).not.toThrow();
   });
 
+  it('默认串行=1：不显式配置并发时按串行跑（observedMaxConcurrency=1，安全缺省）', async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const items = Array.from({ length: 4 }, (_, i) => ({ id: `c${i}` }));
+    const report = await runBatch(items, async () => {
+      inFlight += 1;
+      if (inFlight > maxInFlight) maxInFlight = inFlight;
+      await delay(5);
+      inFlight -= 1;
+      return {};
+    }, {});
+    expect(resolveBatchPolicy({}).concurrency).toBe(1);
+    expect(report.policy.concurrency).toBe(1);
+    expect(report.observedMaxConcurrency).toBe(1);
+    expect(maxInFlight).toBe(1);
+  });
+
   it('每用例独立工作目录：workRoot 下按 id 分目录（独立 config/db/state/session 落点）', async () => {
     const root = freshRoot();
     const seen = new Map<string, string | undefined>();
