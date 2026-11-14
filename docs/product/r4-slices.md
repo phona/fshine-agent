@@ -88,6 +88,7 @@
 
 ### P0 · 装配同源（重构，零行为变化）
 - 范围：`assembleAskRuntime` 增加注入 seam；server/runner 复用它（或抽出共享 core assembly）；资源策略读入口收敛到单点。
+  - 实施注记（2026-11-14，P0 实现）：共享装配（`scripts/ask-runtime.ts` 的装配核心）**即唯一配置读入口**（配置加载/生效环境/门后装配链全部经它收口，server/runner 不再各持一份）；`runtime` 资源配额段与单点策略**归 P5 落地**——P0 时点不存在该配置段，不空建（不引入额外抽象/预期外行为）。
 - 依赖：无。
 - 验收：确定性——ask 输出/五门拒绝话术字节金样（`ask-runtime.test.ts` 现有）、runner 默认路径与 `criteria.lock` 逐字不变、305 单测全过、tsc 0；真实模型：非必需（可选 E06/E12 回归）。
 - 回退：整片 revert（无 schema/行为变化）。

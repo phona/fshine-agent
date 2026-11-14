@@ -1,10 +1,10 @@
 /**
  * convergence-r1 用户级黑盒评测入口（真实模型走 .env；执行层一律仓内 dummy 夹具）。
  *
- * 与 scripts/ask.ts 同源装配函数链：
- *   materializeEvalConfig → loadConfig → effectiveDeploymentEnv → safety-gate
- *   → createDummyCliClient → readOnlyOperationNames → createSqliteTaskRegistry(per-case db)
- *   → loadWorkerSkills → loadAgentProfile → createSession(真实 createPiTurnDriver ×2)。
+ * 与 scripts/ask.ts 同源装配（P0 单一装配点）：本文件保留评测入口的门与差异注入
+ *   （materializeEvalConfig → loadConfig → effectiveDeploymentEnv → key/profile/gateway/principal
+ *   门 → safety-gate），门之后走 scripts/ask-runtime.ts 的共享装配核心
+ *   （执行面/底账/技能角色/驱动全部经 assembleSessionCore 构造；per-case 库与记录驱动按输入注入）。
  * 唯一允许插桩 = TurnDriver 记录包装器（透传不改语义，采 T2 工具调用 / Worker 转录 / 驱动日志）；
  * 禁止测试专用分支绕开模型或 Execution Contract。
  *
@@ -24,17 +24,10 @@ import { spawnSync } from 'node:child_process';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import type { AppConfig } from '@fshine/contracts';
-import { applyExecutorLabel, loadAgentProfile } from '../../../packages/agent/src/agent-profile';
 import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
-import { createDummyCliClient, readOnlyOperationNames } from '../../../packages/agent/src/dummy-cli-client';
-import {
-  MAIN_PROTOCOL_NOTE,
-  createSession,
-} from '../../../packages/agent/src/execution-runtime';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
-import { createSqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { loadWorkerSkills } from '../../../packages/agent/src/worker-skills';
 import { materializeEvalConfig } from '../../resolve-config-path';
+import { assembleSessionCore } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
 import { ALL_CASES, normalizeCaseId, type UserCase } from './cases';
 import { buildCriteriaDocument, CRITERIA_VERSION, JUDGE_VERSION, RUNNER_VERSION } from './criteria';
@@ -351,7 +344,6 @@ async function runTrial(options: TrialOptions): Promise<void> {
   const dbDir = path.join(trialDir, 'db');
   const configDir = path.join(trialDir, 'config');
   for (const dir of [stateDir, dbDir, configDir]) mkdirSync(dir, { recursive: true });
-  const auditPath = path.join(stateDir, 'audit.jsonl');
   const dbPath = path.join(dbDir, 'state.db');
   const configCopy = path.join(configDir, 'agent-config.yaml');
 
@@ -373,17 +365,28 @@ async function runTrial(options: TrialOptions): Promise<void> {
   const principalId = Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0];
   if (principalId === undefined) throw new Error('配置里没有 enabled principal（fail-closed）');
   const sessionId = `eval-r1-${caseDef.id}-trial-${trial}-${runId}`;
-  env['EXECUTION_AUDIT_PATH'] = auditPath;
-  const isolation = assessEvalIsolation({ env, platformRoot: profile.root, gateway: profile.gateway });
-  assertEvalIsolation(isolation, `convergence-r1 ${caseDef.id} trial-${trial}`);
-
-  const client = createDummyCliClient({ root: profile.root, gateway: profile.gateway, stateDir, env });
-  const operations = await client.listOperations();
-  const allowedOperations = readOnlyOperationNames(operations);
-  if (allowedOperations.length === 0) throw new Error('执行层没有声明任何只读 operation——拒绝以空允许集合运行');
-
-  const registry = createSqliteTaskRegistry(dbPath);
   const sink: RecordingSink = { currentTurn: 0, calls: [], mainTranscripts: [], workerTranscripts: [] };
+  // 共享装配核心（P0 单一装配点）：per-case 配置/库、记录包装器、隔离门与审计路径按输入注入，
+  // 其余（执行面/底账/技能角色/驱动基线）由核心与 ask/server 同源构造。
+  const assembled = await assembleSessionCore({
+    env,
+    profile,
+    principalId,
+    sessionId,
+    dbPath,
+    stateDir,
+    setAuditPath: true,
+    assertIsolation: () => {
+      const isolation = assessEvalIsolation({ env, platformRoot: profile.root, gateway: profile.gateway });
+      assertEvalIsolation(isolation, `convergence-r1 ${caseDef.id} trial-${trial}`);
+    },
+    emptyOperationsMessage: '执行层没有声明任何只读 operation——拒绝以空允许集合运行',
+    createDrivers: (driverEnv) => ({
+      mainDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'main', sink),
+      workerDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'worker', sink),
+    }),
+  });
+  const auditPath = assembled.auditPath;
   const replies: Array<{ turn: number; text: string; sha256: string }> = [];
   const metaTurns: MetaTurn[] = [];
   const auditIndexTurns: AuditIndexTurn[] = [];
@@ -393,19 +396,7 @@ async function runTrial(options: TrialOptions): Promise<void> {
   let tasksSnapshot: unknown[] = [];
 
   try {
-    const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
-    const profileMd = await loadAgentProfile();
-    const session = await createSession({
-      principalId,
-      sessionId,
-      client,
-      allowedOperations,
-      mainDriver: recordingDriver(createPiTurnDriver({ env }), 'main', sink),
-      workerDriver: recordingDriver(createPiTurnDriver({ env }), 'worker', sink),
-      mainSystemPrompt: `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`,
-      workerSkills,
-      taskRegistry: registry,
-    });
+    const session = assembled.session;
 
     for (let index = 0; index < caseDef.turns.length; index += 1) {
       const turn = index + 1;
@@ -471,9 +462,9 @@ async function runTrial(options: TrialOptions): Promise<void> {
         break;
       }
     }
-    tasksSnapshot = [...registry.list()];
+    tasksSnapshot = [...assembled.taskRegistry.list()];
   } finally {
-    registry.close();
+    assembled.close();
   }
 
   // 证据落盘（全样本保留；audit 为 state/audit.jsonl 的字节副本）。

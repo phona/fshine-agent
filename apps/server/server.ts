@@ -6,28 +6,28 @@
  * 执行面 = profile 声明的网关（缺省仓内 dummy CLI，不触网）；模型 = 真实 Pi 驱动（env）。
  * 任务底账 = SQLite（B 类）：会话共享一个库，list/get 按 principal+session 收口。
  *
+ * P0 装配同源：门（单一 profile / gateway）与启动时装载（底账、角色文本、技能）留在本文件，
+ * 门之后的装配链走 scripts/ask-runtime.ts 的共享核心（执行面/驱动/底账/提示词均可注入）——
+ * 与 ask/redo、eval runner 同一装配点（守卫见 scripts/p0-assembly-single-point.test.ts）。
+ * server 不做评测隔离门、不设 EXECUTION_AUDIT_PATH（部署面现行为，零变化）。
+ *
  * 测试注入点（假渠道回归用，见 server.test.ts）：createDrivers / createExecutionFace；
  * 缺省实现走真实 Pi 驱动与仓内 dummy 客户端——测试替身不触碰任何真实平台。
  */
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import type { AppConfig, ContextProfileConfig, ReplyHandler } from '@fshine/contracts';
-import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
-import { createPiTurnDriver } from '../../packages/agent/src/pi-driver';
-import { createDummyCliClient, readOnlyOperationNames } from '../../packages/agent/src/dummy-cli-client';
-import { MAIN_PROTOCOL_NOTE, createSession, type Session } from '../../packages/agent/src/execution-runtime';
+import { MAIN_PROTOCOL_NOTE, type Session } from '../../packages/agent/src/execution-runtime';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import { loadWorkerSkills } from '../../packages/agent/src/worker-skills';
+import { assembleSessionCore, type ExecutionFace } from '../../scripts/ask-runtime';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 /** 执行面：结构化执行客户端 + 本轮允许集合（从执行层自述的 access=read 派生）。 */
-export interface ExecutionFace {
-  client: ExecutionClient;
-  allowedOperations: readonly string[];
-}
+export type { ExecutionFace };
 
 export interface ServerDeps {
   /** 生效环境（LLM_* / 渠道凭据由入口以 effectiveDeploymentEnv 合入）。 */
@@ -74,21 +74,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const profileMd = await loadAgentProfile();
   const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`;
-
-  const createDrivers = deps.createDrivers ?? ((env: NodeJS.ProcessEnv) => ({
-    mainDriver: createPiTurnDriver({ env }),
-    workerDriver: createPiTurnDriver({ env }),
-  }));
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
-  const createExecutionFace = deps.createExecutionFace ?? (async (target: ContextProfileConfig, env: NodeJS.ProcessEnv) => {
-    const client = createDummyCliClient({ root: target.root, gateway: target.gateway!, stateDir, env });
-    const operations = await client.listOperations();
-    const allowedOperations = readOnlyOperationNames(operations);
-    if (allowedOperations.length === 0) {
-      throw new Error('执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。');
-    }
-    return { client, allowedOperations };
-  });
 
   /** 会话按（principal, session）双键缓存：群聊里不同用户不共享同一个会话对象。 */
   const sessions = new Map<string, Promise<Session>>();
@@ -97,19 +83,23 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     let pending = sessions.get(key);
     if (pending === undefined) {
       pending = (async () => {
-        const face = await createExecutionFace(profile, deps.env);
-        const drivers = createDrivers(deps.env);
-        return createSession({
+        // 共享装配核心：执行面缺省 = 仓内 dummy CLI（按 profile root+gateway spawn），
+        // 驱动缺省 = 真实 Pi 驱动；底账/提示词/技能为启动时装载的同一份（注入不回写）。
+        const assembled = await assembleSessionCore({
+          env: deps.env,
+          profile,
           principalId,
           sessionId,
-          client: face.client,
-          allowedOperations: face.allowedOperations,
-          mainDriver: drivers.mainDriver,
-          workerDriver: drivers.workerDriver,
+          dbPath: deps.dbPath,
+          stateDir,
+          emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
+          taskRegistry,
           mainSystemPrompt,
           workerSkills,
-          taskRegistry,
+          ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
+          ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
         });
+        return assembled.session;
       })();
       sessions.set(key, pending);
       // 建立失败不缓存：fail-closed 的错误不钉死给后续消息。
