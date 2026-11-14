@@ -1021,6 +1021,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **读数与证据**：`npx tsc --noEmit` 退出码 0；P5 目标 3 文件 62 例全绿（resource-policy 33 + 守卫 2 + core config 27）；全量 unit **47 文件/464 例**全绿；反向绊线 4 组逐条实做转红后复原（预算复制→1 红；释放不晋升→2 红；伪造 token 硬上限→1 红；死键回流→守卫 1 红）。证据 `.runtime/p5/`（gitignored：RED/GREEN/绊线读数）。
 - **测试基础设施同步（诚实更新，不弱化）**：`tests/vitest.setup.ts` 密封清单、`scripts/p0-gates-cli.test.ts`／`scripts/ask-replay.test.ts` 剔除清单删死键；`packages/agent/worker-env.test.ts` 的 FSHINE_* 负例哨兵改用仍有读取点的 `FSHINE_ATTACHMENT_DIR`（白名单精确键集合断言不变）。
 - **静态守卫**：`packages/agent/resource-policy-single-source.test.ts`（P5-T01）——已删 host 键与 `FSHINE_*` 覆盖口在生产代码零引用；资源旋钮只允许登记所有者（contracts 类型 / core 解析 / resource-policy / execution-runtime 的回合时限入参）解释，所有者表双向闭合（新增读者即红）。
+- **补记（同分支后续提交 `d718e1e`/`501056d`）**：联合接口约定 §5 的拒绝映射落地——`RESOURCE_LIMITED_REASON = 'resource_limited'` + `taskFailureReasonFor(rejection)`（四类拒绝统一映射；P5 不写任务状态，集成层据此落库原因）。读数更新：P5 目标 3 文件 **63 例**全绿；全量 unit **47 文件/465 例**全绿；`npx tsc --noEmit` 0。
 - **边界与 blocked**：不新增依赖；不改 execution-runtime/server/ask-runtime / 冻结判据 / 历史证据 / 其他工作树；P2（状态/等待语义）与 P6（调度）接线前，本模块不产生产品行为变化。token 强制仅当 Pi `assistant.usage` 可验证时由接线方配置 `taskBudget.tokens`（否则保持 unavailable）；P5-E01 黑盒与 `send` 串行化接线＝集成 Run。
 
 ---
