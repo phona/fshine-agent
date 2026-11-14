@@ -377,6 +377,13 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       delegationPermit = acquired;
     }
     const workerDeadline = Math.min(Date.now() + workerTurnMs, currentTurnDeadline - WORKER_DEADLINE_MARGIN_MS);
+    // P5 运行时计量（owner 授权 3a）：每次 Worker 调用完成后按任务累计调用数与时长。
+    // 调用前检查在许可边界：派生 acquire 查共享预算 exhausted → budget_exhausted →
+    // 任务 reason=resource_limited（见上，未进入 Worker 即拒）；此处 finally 计量
+    // 成功与失败回合（调用已发生、资源已消耗），被拒委派不计。子许可与前台回合许可
+    // 共享同一 budget 对象（不复制/不放大），故每条调用只在此计一次；无 taskBudget
+    // 时 limits=null → exhausted() 恒 null（零行为变化）；token 无可验证 Pi usage，不计量。
+    const workerStartedAt = Date.now();
     try {
       const workerResult = await options.workerDriver.run({
         systemPrompt: WORKER_SYSTEM_PROMPT,
@@ -400,6 +407,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       registry.fail(taskId, error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
+      delegationPermit?.budget.consume({ calls: 1, ms: Date.now() - workerStartedAt });
       if (delegationPermit !== undefined && policy !== undefined) {
         policy.release(delegationPermit);
       }
