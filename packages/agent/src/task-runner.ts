@@ -36,9 +36,10 @@
  * 登记缺口（不在本模块预造，归属集成/后续切片）：
  *   · 重启时停在 cancelling 的孤儿任务（expireLeases 只回收 running；回滚/确认边界由 P2/P5 定）；
  *   · waiting_user 答复接续回合无租约（answerResumes 不写租约），进程中断后的回收未覆盖；
- *   · queueCapacity=0 的「拒绝」落点：受理不咨询 policy（受理即 queued）；acquire 在认领前没有
- *     任务身份，拒绝只能表现为「暂不派发」；任务级 resource_limited 映射建议由 P5/集成在受理
- *     或排队超时点处理（runner 不做计时器，queued/waiting_user 超时由 P5 边界触发底账 timeout）；
+ *   · 满员/队列满的「拒绝」落点（P7b 起）：由集成接线在受理侧落地——execution-runtime 委派前
+ *     按 policy 事实拒绝（任务 failed + resource_limited，不进入执行）；runner 收到排队许可
+ *     （state='queued'）时只停止派发（队列 = 底账 queued 行），不据此直派发（否则绕过并发上限）；
+ *     queued/waiting_user 超时计时仍由 P5 边界触发底账 timeout（runner 不做计时器）；
  *   · 后台任务结果文本（resultText）：集成裁定落点=settle 确认 `completed` 终态后经端口
  *     可选方法 `archiveReply` 逐字存档（P2 的 P1 存档面；不经 inline `complete()`/
  *     task 级 judge，避免误伤等待接续）——P6-E01「结果可取回」由此具备执行口径。
@@ -148,6 +149,11 @@ export type ResourceRejectionReason = 'queue_full' | 'quota_exceeded' | 'budget_
 export interface ResourcePermit {
   kind: 'foreground' | 'background';
   taskId?: string;
+  /**
+   * 许可状态（§2 真实 Permit 的投影）：'queued' = 暂无槽位、等待晋升——后台队列是底账
+   * queued 行，runner 不得据排队许可直派发（释放并停止本轮 pump）。测试替身可缺省。
+   */
+  readonly state?: 'queued' | 'active' | 'released' | 'cancelled';
 }
 
 export interface ResourceRejection {
@@ -337,6 +343,13 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
       const acquired = policy.acquire('background');
       if (isRejection(acquired)) {
         rejection = acquired.reason;
+        break;
+      }
+      // 排队许可（state='queued'）= 暂无槽位；后台队列是底账 queued 行，不是 policy 队列——
+      // 据排队许可直派发会绕过并发上限（队列容量>0 时实测 maxActive > backgroundConcurrency）。
+      // 释放排队许可并停止本轮派发；槽位释放后的 schedulePump 会重新认领。
+      if (acquired.state === 'queued') {
+        policy.release(acquired);
         break;
       }
       const claimed = registry.claimNextQueued({ owner, leaseMs });

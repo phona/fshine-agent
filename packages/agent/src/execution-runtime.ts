@@ -295,6 +295,34 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     };
   }
 
+  /**
+   * 受理侧确定性拒绝（背景满员/队列满）：任务经 P2 合法边落终态 failed + resource_limited
+   * （running→failed，镜像 inline ⑮ 的拒绝形状），不进入执行、不产生 queued 积压；
+   * 回执携带机械事实 accepted:false + reason=resource_limited（用户话术由 Main 层处理）。
+   */
+  function rejectedBackgroundDelegation(taskId: string, request: string, detail: string): Record<string, unknown> {
+    registry.begin({
+      taskId,
+      principalId: options.principalId,
+      sessionId: options.sessionId,
+      request,
+      status: 'running',
+    });
+    registry.transition(taskId, 'failed', { reason: 'resource_limited' });
+    const rejected = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
+    const taskNo = rejected.taskNo ?? 0;
+    const name = rejected.name ?? deriveTaskName(request);
+    return {
+      taskId,
+      taskNo,
+      name,
+      status: 'failed',
+      accepted: false,
+      reason: 'resource_limited',
+      notice: `未受理 #${taskNo} ${name}：${detail}`,
+    };
+  }
+
   async function delegate(taskText: string, foregroundPermit: Permit | undefined): Promise<unknown> {
     const request = taskText.trim();
     if (request === '') throw new Error('run_task 缺少 task：请写清要办什么。');
@@ -302,6 +330,20 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
 
     // P6 background：受理即底账 queued（Main 不等待）；派发/执行/恢复/取消归 TaskRunner。
     if (dispatchMode === 'background') {
+      // P7-T06 池满拒绝落点（P6 §七 登记缺口）：受理前按 policy 事实判定——满员且策略
+      // 拒绝准入（无队列位）→ 确定性拒绝：任务按 P2 状态机落终态 failed + resource_limited
+      // （镜像 inline ⑮ 的拒绝形状），不进入执行；有排队位时受理为 queued（队列 = 底账
+      // queued 行，runner 不据 policy 排队许可直派发）。旋钮解释归 policy（单一配置源）。
+      if (policy !== undefined) {
+        const background = policy.snapshot().background;
+        if (background.active >= background.limit) {
+          const probe = policy.acquire('background', { taskId });
+          if (probe.ok === false) {
+            return rejectedBackgroundDelegation(taskId, request, probe.message);
+          }
+          policy.release(probe);
+        }
+      }
       const accepted = taskRunner!.submit({
         taskId,
         principalId: options.principalId,

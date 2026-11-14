@@ -17,8 +17,8 @@
  *   · 假件：假 Main/Worker driver、假 executor、假 sink、假渠道（server.handler 渠道事实）
  *     + 仓内 dummy 配置；零网络、零真实模型、零真实平台。
  *
- * 已知先在红的两类（本提交即证据）：④ 重复消息（受理无 messageId 幂等）与
- * ⑤ 池满（queueCapacity=0 无「拒绝落点」，任务静默留在 queued）——见 P6 报告 §七 登记缺口。
+ * TDD 轨迹：先红（47aa761，3 failed：④-1/④-2/⑤）→ 本套件在 P7b 实现提交转绿（受理侧
+ * messageId 幂等 + 满员/队列满拒绝落点；runner 不据 policy 排队许可直派发）。
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -59,6 +59,8 @@ const PROFILE = {
   skillRoots: ['.agents/skills-serve'],
 };
 const SCOPE_A: TaskScope = { principalId: 'wecom:user-a', sessionId: 'conv-a' };
+/** server 渠道面 scope：principal/session 由渠道事实加前缀（channel:xxx）。 */
+const SERVER_SCOPE: TaskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
 
 const MANIFEST: CapabilityManifest = {
   contractVersion: 1,
@@ -548,10 +550,10 @@ describe('P7-T06 故障注入 · ④ 重复消息（假渠道同 messageId 重�
       const [first, second] = await Promise.all([server.handler(message), server.handler(message)]);
       expect(second).toBe(first); // 回执幂等重放（重投不得出现新受理号）
       expect(records).toHaveLength(1); // 查重先于 Main 回合：重投不再跑模型
-      expect(registry.list(SCOPE_A)).toHaveLength(1); // 不新增任务
+      expect(registry.list(SERVER_SCOPE)).toHaveLength(1); // 不新增任务
       expect(executor.calls).toHaveLength(1); // 不重复执行
       gate.resolve({ kind: 'completed', resultText: '完成' });
-      await vi.waitFor(() => expect(registry.get(registry.list(SCOPE_A)[0]!.taskId, SCOPE_A).status).toBe('completed'));
+      await vi.waitFor(() => expect(registry.get(registry.list(SERVER_SCOPE)[0]!.taskId, SERVER_SCOPE).status).toBe('completed'));
       expect(executor.calls).toHaveLength(1); // 收尾后仍无第二次执行
     } finally {
       server.close();
@@ -591,7 +593,7 @@ describe('P7-T06 故障注入 · ④ 重复消息（假渠道同 messageId 重�
       const [first, second] = await Promise.all([server.handler(message), server.handler(message)]);
       expect(second).toBe(first);
       expect(records).toHaveLength(1);
-      expect(registry.list(SCOPE_A)).toHaveLength(1);
+      expect(registry.list(SERVER_SCOPE)).toHaveLength(1);
       expect(workerCalls).toBe(1);
       expect(face.executeCalls).toBe(1);
     } finally {
@@ -620,6 +622,7 @@ describe('P7-T06 故障注入 · ⑤ 池满（backgroundConcurrency=1 + queueCap
     const assembled = await assembleBackground({
       dbPath,
       taskExecutor: executor,
+      notificationSink: new FakeSink(),
       mainPlans: plans,
       records,
       backgroundConcurrency: 1,
