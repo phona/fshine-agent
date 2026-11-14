@@ -1271,6 +1271,31 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十九、业务 E2E · 夜跑续批（bizbatch3：**#7 重设计** / **#6 深探** / 重复轮）（2026-11-15，分支 `arch/r4-bizbatch3`）
+
+- **状态**：**待合入**（merge commit 由主会话补齐；三件事均已在真实模型上跑完，读数见报告 §十三；**尚未 push / 未合并 / 未碰 main/tag**）。
+- **授权**：owner 2026-11-15（彻夜长跑续批）；预注册见 `docs/product/business-e2e-prereg-addendum.md` §六（**先于运行**写死）。
+- **分支/基线**：worktree `~/projects/fshine-agent-r4-bizbatch3`，分支 `arch/r4-bizbatch3`；基线 = `arch/integration` 启动时 HEAD `a88f62328a1336c9242ba64b1e09c5a67138f9fa`（`.runtime/bizbatch3/baseline.txt`，gitignored）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
+  1. `00746ca` 三件事装配与自检（`experiments/natural-corpus.ts` + `cases.ts` 的 C03/C04 + 执行器 `AsyncLocalStorage` 驱动事件捕获 + `judge/harness` 压缩计数 + 预注册 §六 + `package.json` 加 `eval:bizbatch3`）——零产品代码改动。
+  2. `e5cbc43` 驱动事件捕获补 `console.log`（`context_compacted` 走 log，`pi-driver.ts:543`）+ 自测钉住。
+  3. `29bf2b7` 报告 §十三（三件事读数 + 三轴更新 + 预算）+ decision-log §四十九。
+  （本条目提交见本条 commit）
+- **实施概述**：三件事均走生产同源装配（`assembleSessionCore`/`resolveExecutionFace`/`createBackgroundDispatch`）与冻结判据（`judgeMechanical`/`judgeExp`）。①#7 以 `experiments/natural-corpus.ts` 的**真实感多轮对话**（41 轮 + 2 探针）替代 §四十八 的 `bulkFiller`；**两窗口对照** C03=12k / C04=6k，`withTaskRunner:true` 修正探针工具面；压缩触发以驱动事件 `context_emergency_compact`/`context_compacted` 为机械证据，执行器经 **AsyncLocalStorage** 归属样本（并发 4 不串台）。②#6 复用冻结用例 B06，`--trials 6`（运行期覆盖、不改套件 → 冻结锁不变）。③重复轮沿用 bizprobe 电池（第 4 轮）。
+- **读数（真实模型 `step-3.7-flash`，显式覆盖 `.env` 缺省 `step-5-preview`；inline；并发 4；一次采样、不重采样、全样本保留、不筛绿；k/N 附 Wilson 95% CI，不读作稳定概率）**：
+  - **①#7 重设计：未取得压缩读数**（**§6.2 预注册目标未达成**；检定项「**#7 压缩确触发**」**不成立**→ 本批**不能就 #7 判 passed**；已在报告/本节**如实登记、未掩盖、未筛绿**，故非 integrityViolation）。C03(12k) **0/3** [0.000,0.562] severe 2（modelCallsTotal 143 / wallMs 137357）；C04(6k) **0/3** [0.000,0.562] severe 0（132 / 27356）。两 case `compactTriggerEvents=0` / `compactionRounds=0` / `taskToolCalls=0`（探针未被调用→恢复断言无从检验）。**非活锁**（均墙钟内收敛，无手工 kill），但回复自中段起全空（`pi_driver_empty_reply, stopReason:length, contentBlocks:["thinking"]`；C03#1 自 turn24 起 20/43 空，C04#1 43/43 空）。**根因（代码）**：输出钳零线早于压缩阈值触发——钳零线按**全请求** `available = contextWindow − context − CONTEXT_SAFETY_TOKENS(4096)`（`pi-ai/dist/api/simple-options.js:3,:5-8`）；压缩阈值按**转录** `contextTokens > contextWindow − reserveTokens`（`pi-coding-agent/dist/core/compaction/compaction.js:160-164`，应用点 `agent-session.js:279/:1724` 与 `pi-driver.ts:490-492/:594-602`；reserve 缩放见 `pi-driver.ts:279-296`，W<36384 时 reserve=0.25W）；当 **W<16384**（reserve<4096）钳零线先到 → 回答预算先归零、压缩永不触发。**登记为强产品证据（不修）**。另有**语料诱导对象漂移 confound**（C03 执行 `contoso`/`fabrikam`/`contoso-logistics`/`contoso-trade@W99` → 2/3 severe），与压缩无关。
+  - **②#6 深探（B06 × N=6）**：**4/6** [0.300,0.903]，机械判负 2、severe 0（modelCallsTotal 22 / wallMs 60205）。**`alpha→alpha-group` 近似集合名 severe 漂移 0/6 复现**；失败为**丢 window 的整集合查询**（B06#5、#6）+ 1 次重复执行（B06#6）。逐轮失败率均 ≈1/3，但失败类型每轮不同。
+  - **③重复轮（第 4 轮 6 场景 × N=3）**：**18/18**（每场景 3/3 [0.438,1.000]）；机械不变量全 0、severe 0；`observedMaxConcurrency=4`、wallMs 44285、throughput 0.406/s。跨轮：轮2 17/18 → 轮3 15/18 → 轮4 18/18（N=3 仅探索，不读作稳定）。
+- **自测与自检（零真实模型，`TMPDIR=/home/tao/.tmp`）**：`./node_modules/.bin/tsc --noEmit` = **0**；全量 `vitest run` = **731/731（74 文件）** ↔ 基线同 commit `a88f623` = **726/726（74 文件）**（纯新增 5 测试，**只增不减**）；新增/扩展自测覆盖**自然语料体量下界**、**压缩触发机械捕获**（合成 + 真实 `compact()` 日志）、**并发归属（ALS 不串台）**、infra 门两态；infra 门实跑：`experiments --infra-gate` = exit 0（缺 key = blocking exit 2）、`business-e2e --infra-gate`（B06×6 / 6×3）= exit 0、`verifyLock` 一致。
+- **独立复核**：经一轮复核（gaps 见下），**不重跑样本**（重跑须整批新预注册、不重采样单点）。复核 4 项 gaps 逐条处置：①**#7 未达预注册目标**（6 样本 0 触发、`taskToolCalls=0`）——已在报告 §13.1/本节如实登记为强产品证据，并在报告 §13.1 明写**检定项不成立、不能判 passed**（不改判据、不改读数）；②**阈值引用精度**——已把阈值公式改引至 `pi-coding-agent/dist/core/compaction/compaction.js:160-164`（应用点 `agent-session.js:279/:1724`、`pi-driver.ts:490-492/:594-602`），`pi-driver.ts:279-296` 仅作 reserve 缩放；③**证据完整性**——`work/C04#1/state/audit.jsonl` 缺失与其「无执行查询」一致（runDir 证据齐备、`tool-calls.json` 全在），已在报告 §13.6 登记；④**账本**——「已耗 ≈95」沿用 §12.6 表、未逐步独立复算，已在报告 §13.5 登记口径。关键结论均以**已落盘证据**（`.runtime/bizbatch3/…`）+ 复跑命令自证（见报告 §十三）。
+- **预算消耗**：本批真实模型会话 = #7 6 + #6 6 + 重复轮 18 = **30**（≤45）；累计 ≈95+30 = **125/150**，未超、未扩容。硬上限均未超（`experiments`：maxSessions 45 / maxModelCalls compaction 600（实 143+132）/ wall 1.8e6 / concurrency 4；`bizprobe`：maxSessions 20 / maxModelCalls 150（实 22/40））。
+- **边界**：`packages/`、`apps/` 产品代码**零改动**（`git diff --name-only -- packages apps` = 0）；不改冻结面与既有轮次读数（报告 §一–§十二 原样保留，只**追加** §十三）；未接真实平台；`.env` 只读复制、不入证据/不提交；证据 `.runtime/bizbatch3/`（gitignored：`compaction-c03`/`compaction-c04`/`drift-b06`/`repeat-r4`）。
+- **登记（不修，待 owner 裁定）**：① 产品面 **#7 输出钳零线 vs 压缩阈值错序（W<16384）**——建议裁定调 `CONTEXT_SAFETY_TOKENS` / 压缩 reserve / 或禁用小窗口；② 产品面 **#5 `ref` 契约缺陷**（同 §四十八）——本批**排除 #5**、不重跑；③ **#6 整集合/重复查询漂移**——先观测（N 再增大）。
+- **待落地裁定**：#7 要在 W≥16384 取压缩读数，需**远长于本批**的自然语料（本语料 ≈124 token/轮，达 16k 阈值需 ~100+ 轮）或换触发策略——**待 owner 裁定**，本批不擅自改。
+- **回退**：本批仅测试基建 + 语料/夹具 + 文档 + `package.json` 一行脚本，产品代码零改动，回退安全。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。

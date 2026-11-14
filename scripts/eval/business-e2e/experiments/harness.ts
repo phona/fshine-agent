@@ -183,6 +183,8 @@ export function summarizeExp(report: ExpReport): ExpCaseSummary[] {
         taskToolCalls: samples.reduce((sum, s) => sum + (s.verdict?.counters.taskToolCalls ?? 0), 0),
         skillReads: samples.reduce((sum, s) => sum + (s.verdict?.counters.skillReads ?? 0), 0),
         compactionRounds: samples.reduce((sum, s) => sum + (s.verdict?.counters.compactionRounds ?? 0), 0),
+        compactionTriggerEvents: samples.reduce((sum, s) => sum + (s.verdict?.counters.compactionTriggerEvents ?? 0), 0),
+        compactionCompleted: samples.reduce((sum, s) => sum + (s.verdict?.counters.compactionCompleted ?? 0), 0),
         unauthorized: samples.reduce((sum, s) => sum + (s.verdict?.counters.unauthorized ?? 0), 0),
         falseCompletion: samples.reduce((sum, s) => sum + (s.verdict?.counters.falseCompletion ?? 0), 0),
       },

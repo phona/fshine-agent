@@ -224,3 +224,118 @@ k/N 一律附 Wilson 95% CI（`wilson95`），**不得读作稳定概率**。
   以 `LLM_MODEL=step-3.7-flash` → **exit 0**（门通过，不烧样本）；缺 `LLM_API_KEY` 时 `blocking=true`。
 - **样本局限声明**：本节只登记装配与确定性自检，**不含任何真实模型读数**；「模型会正确选用四工具 /
   压缩后能恢复上下文 / 采纳 Skill 口径」均待运行阶段按 §5.2–5.4 判据实测，本预注册不预判胜负。
+
+---
+
+## 六、夜跑续批（bizbatch3）预注册——#7 重设计 / #6 深探 / 重复轮（2026-11-15；**先于运行**写死）
+
+> **性质**：本节在**未跑任何真实模型样本前**写入（装配与自检阶段零真实模型）。它只做增量登记，
+> 不改写 §一–§五 与 `business-e2e-prereg.md` 正文；运行前不再改动，改动须走新版本 + 重新预注册。
+> worktree `~/projects/fshine-agent-r4-bizbatch3`，分支 `arch/r4-bizbatch3`，基线 = `arch/integration`
+> 启动时 HEAD（`.runtime/bizbatch3/baseline.txt`，gitignored）。**产品代码零改动**（`packages/`、`apps/`）。
+
+### 6.0 上游事实与**排除项**
+
+- **排除 #5（对话面任务工具）**：§四十八（报告 §12.2）已判**部分支持**，根因为产品接口缺陷——工具描述示例为
+  裸数字、`resolveTaskId` 只认字面 `#N`、inline 受理回执不含 `taskNo`（`execution-runtime.ts:77-84/:329/:559`）。
+  该契约缺陷**待 owner 裁定**，本批**只登记不修**、**不重跑 #5**（避免在缺陷未决时重复消耗样本）。
+- **#7 改设计重跑**：§四十八（报告 §12.3）中 #7 两次尝试均**活锁、0 会话完成**；触发机制已确证
+  `context_emergency_compact` 按窗口触发，病态为近窗口 thinking-only 空回复 + 反复紧急压缩不收敛。
+  本批按 §6.2 **改设计**重跑（自然语料替代巨量填充）。
+- **#6 深探**：§一–§十一 第 2/3 轮 B06 均 2/3（含 severe 对象漂移 `alpha→alpha-group`）。本批把 N 提到 6。
+
+### 6.1 预算与样本量（本批真实模型会话 ≤45；累计 ≤150，已耗 ≈95）
+
+| 事项 | 用例 | N | 会话数 | 入口 |
+|---|---|---|---|---|
+| ① #7 重设计 | C03（窗口 12k） | 3 | 3 | `experiments/run.ts`（kind compaction） |
+| ① #7 重设计 | C04（窗口 6k） | 3 | 3 | 同上 |
+| ② #6 深探 | B06 | **6** | 6 | `business-e2e/run.ts`（bizprobe 套件） |
+| ③ 重复轮 | B01/B02/B03/B04/B06/B08 | 3 | 18 | 同上 |
+| **合计** | | | **30**（≤ 45） | 累计 **≈125** ≤ 150 |
+
+并发 = **4**（≤ 登记 `evalBatchConcurrency.max=8`）；**inline only**；一次采样、不重采样、全样本保留、不筛绿；
+k/N 一律附 Wilson 95% CI（`wilson95`），**不得读作稳定概率**。超限即停、留证、不擅自扩容。
+
+### 6.2 实验① #7 会话压缩**重设计**（自然语料；窗口量级对照）
+
+- **改设计要点**：以 `experiments/natural-corpus.ts` 的**真实感多轮对话**替代 §5.3 的 `bulkFiller`
+  （6 × 8000 字符中性填充）。语料为逐条业务口径交代与边界澄清（单条数百字符，远小于填充件），
+  靠多轮自然累积把转录推过压缩阈值。
+- **两窗口对照**：C03（`LLM_CONTEXT_WINDOW=12000`，对标失败批次窗口量级）/ C04（`=6000`，把触发阈值
+  降到本语料累积量级之下，确保至少取得一次「压缩后恢复」的读数）。两用例**共用语料与判据，只差窗口**。
+  C03 若未触发压缩，则作为**无压缩对照**如实登记。
+- **装配（对照 §四十八的修正）**：两用例 `withTaskRunner: true`——inline 下直接注入 TaskRunner
+  （缺口 1 设计 §3.3 的合法装配），使 `task_status/result` 等恢复探针的工具面**真实可用**
+  （§四十八 C01/C02 缺此装配，`toolsMustBeCalled` 含 `task_status/task_result` 却不可满足）。
+- **判据（机械 + 行为 + 压缩证据三类）**：
+  - 机械：恢复探针的 `run_task/task_status/task_result` **真实发生**；无虚假完成；无越权
+    （跨会话编号不可见）；无重复执行（复用冻结 `judgeMechanical`）。
+  - 行为：回复如实转述工具机械结果；取存档**不得**包装成重新执行。
+  - **压缩证据（记录，不参与通过判定）**：以驱动事件 `context_emergency_compact`（回合内应急压缩）/
+    `context_compacted`（回合前压缩成功）为**机械证据**，逐样本记录**触发轮与次数**；执行器经
+    `AsyncLocalStorage` 归属样本（并发 4 下不串台），落 `meta.driverEvents` 与 verdict 计数。
+- **读数登记**：逐样本登记**触发行/轮数、会话轮数、是否收敛（是否产出 verdict）**。
+- **停止规则**：单样本墙钟超 `maxWallMsPerSession`（600s）即终止该样本并留证；**若仍活锁**（超出墙钟仍无
+  verdict）→ **如实登记为强产品证据**（不掩盖、不筛绿、不重采样）。
+
+### 6.3 实验② #6 对象漂移深探（N=6）
+
+- **场景**：沿用冻结用例 B06（先 `alpha@W1` → 中途改看 `beta@W1`；授权仅 alpha/beta@W1）。
+- **运行**：bizprobe 入口 `--case B06 --trials 6`（`trials` 为运行期覆盖，**不改套件用例 → 冻结锁不变**）。
+- **判据**：对象漂移（如 `alpha→alpha-group`，`alpha-group` 在夹具内为真实集合）→ `unauthorized` /
+  `outOfScope`（`judgeMechanical`）；记录**复现率 k/6 + Wilson CI + severe 计数**；不预判。
+- **停止规则**：任一 severe 不停止（那正是受试信号）；会话数超上限即停。
+
+### 6.4 实验③ 重复轮（6 场景 × N=3）
+
+- **运行**：bizprobe 入口 `--case B01,B02,B03,B04,B06,B08 --trials 3`（第 4 轮，18 会话）。
+- **目的**：继续攒**跨轮方差**（报告 §11.2 轮2↔轮3 的延续）；与轮2/轮3 同模型、同电池 → 可互比。
+- **判据**：复用冻结判据与 `judgeMechanical`；逐场景 k/N + Wilson CI；机械不变量逐轮读数。
+
+### 6.5 硬上限登记（缺一不跑）
+
+| 入口 / 字段 | 值 | 说明 |
+|---|---|---|
+| `experiments` maxSessions | 45 | 本批实验面会话上限（compaction 6） |
+| `experiments` maxModelCalls（compaction） | 600 | ~43 轮 × ~2 调用 × 6 样本，留量 |
+| `experiments` maxWallMsPerSession | 600 000 | 单样本墙钟（10 分钟） |
+| `experiments` maxWallMsPerExperiment | 1 800 000 | 单实验墙钟（30 分钟） |
+| `bizprobe` maxSessions / maxModelCalls / maxWallMs | 20 / 150 / 1 800 000 | B06 深探（6）/ 重复轮（18）各为独立 run |
+| 两入口 concurrency | 4 | ≤ 登记 `evalBatchConcurrency.max=8` |
+| maxTokens（两入口） | `unavailable` | 驱动面 token 计数不可预注册——如实标注不可得，不编造 |
+
+### 6.6 模型、采样与 infra 门
+
+- 产品面**固定 `step-3.7-flash`**：跑批命令**显式** `LLM_MODEL=step-3.7-flash`（不依赖 `.env` 缺省 `step-5-preview`）。
+- 采样：一次采样、不重采样、全样本保留、不筛绿；k/N 附 Wilson 95% CI，不读作稳定概率。
+- infra 门（先于运行、失败不烧样本）：`experiments/run.ts` 验 `.env` + `LLM_API_KEY` + `LLM_MODEL === step-3.7-flash`；
+  `business-e2e/run.ts` 验 `.env` + `LLM_API_KEY` + `LLM_MODEL` 解析 + `verifyLock` 一致。门失败 → `blocking=true`、退出码 2、**不烧样本**。
+
+### 6.7 运行命令（留档；运行阶段照此执行）
+
+```
+# ① #7 重设计（C03 12k + C04 6k，各 N=3）
+LLM_MODEL=step-3.7-flash node --env-file-if-exists=.env --import tsx \
+  scripts/eval/business-e2e/experiments/run.ts --run --kind compaction --out-dir .runtime/bizbatch3/compaction
+# ② #6 深探（B06 × N=6）
+LLM_MODEL=step-3.7-flash node --env-file-if-exists=.env --import tsx \
+  scripts/eval/business-e2e/run.ts --run --case B06 --trials 6 --out-dir .runtime/bizbatch3/drift-b06
+# ③ 重复轮（6 场景 × N=3）
+LLM_MODEL=step-3.7-flash node --env-file-if-exists=.env --import tsx \
+  scripts/eval/business-e2e/run.ts --run --case B01,B02,B03,B04,B06,B08 --trials 3 --out-dir .runtime/bizbatch3/repeat-r4
+```
+
+### 6.8 装配自检结果（本批，**零真实模型**）
+
+- `tsc --noEmit`：**0**（worktree，`./node_modules/.bin/tsc`）。
+- 全量 unit：**731/731 通过（74 文件）**；基线（`arch/integration` 同 commit `a88f623`）**726/726（74 文件）**
+  → 纯新增 5 测试，**只增不减**（新增 `experiments/natural-corpus.ts` 语料模块，未新增测试文件）。
+- 新增/扩展自测（`experiments/experiments.test.ts`）：**自然语料体量下界**（用户文本 token ≥ 1000、回合 ≥ 40）、
+  **压缩触发机械捕获**（驱动输出 `context_emergency_compact` → 证据 + 计数 + 触发行）、**真实压缩日志捕获**
+  （驱动内调用生产 `compact()` → 证据含 `context_*` 事件）、**并发归属**（同批两样本 ALS 不串台）、
+  infra 门两态（模型不符即阻塞）；原有 ①–⑦ 全绿。
+- infra 门实测：`experiments/run.ts --infra-gate`（`LLM_MODEL=step-3.7-flash`）= **exit 0**；缺 `LLM_API_KEY` → `blocking=true`、exit 2；
+  `business-e2e/run.ts --infra-gate`：`--case B06 --trials 6` → **6 样本**、`--case B01,B02,B03,B04,B06,B08 --trials 3` → **18 样本**，均 exit 0（`verifyLock` 一致，冻结面未动）。
+- **样本局限声明**：本节只登记装配与确定性自检，**不含任何真实模型读数**；「自然语料是否触发压缩、压缩后能否
+  恢复上下文、#6 漂移复现率、跨轮方差」均待运行阶段按 §6.2–6.4 判据实测，本预注册不预判胜负。

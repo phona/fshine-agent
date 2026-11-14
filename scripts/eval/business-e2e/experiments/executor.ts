@@ -14,6 +14,7 @@
  * 纪律：源码/装配路径与生产同源（复用 `assembleSessionCore` / `resolveExecutionFace` /
  * `createBackgroundDispatch`），不建影子运行时；证据只读事实，不判（判归 `../judge`）。
  */
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -56,6 +57,72 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 
 /** 执行一个（用例×trial）样本，产出实验证据。真实/假件同签名。 */
 export type ExpExecutor = (item: ExpItem, caseDef: ExpCase, workDir: string) => Promise<ExpEvidence>;
+
+// ── 压缩触发/驱动事件的**机械捕获**（并发安全）────────────────────────────────────
+//
+// pi 驱动以 `console.warn/info/error(JSON.stringify({ event, ... }))` 输出结构化日志——
+// 压缩触发的机械证据即 `pi-driver.ts:596-601` 的 `context_emergency_compact`（回合内应急压缩）、
+// `:543` 的 `context_compacted`（回合前压缩成功）、`:502/:513/:460` 的失败/降级变体；
+// 另有 `:715` 的 `pi_driver_empty_reply`、`:627` 的 `pi_driver_model_error` 等病态/失败形状。
+//
+// 跑批并发 = 4，**不能**用全局 console 打补丁后按「此刻在跑哪个样本」归属（会串台）——
+// 故用 `AsyncLocalStorage` 给每条日志打**样本归属**：只有落在某个样本 async 上下文里的日志
+// 才被该样本收走；未命中样本上下文时原样转发（不改日志语义）。
+// 补丁按**引用计数**装/卸：并发样本重叠时保持装载，全部结束后还原原 `console`。
+const DRIVER_EVENT_NAMES: ReadonlySet<string> = new Set([
+  'context_emergency_compact', 'context_compacted', 'context_compact_failed',
+  'context_compact_no_cut', 'context_compact_degraded', 'context_compact_trimmed',
+  'pi_driver_empty_reply', 'pi_driver_model_error', 'pi_driver_error',
+  'pi_driver_failed_assistant', 'pi_driver_context_overflow_recovered', 'pi_driver_final_text_nudge',
+]);
+
+const driverEventStore = new AsyncLocalStorage<Array<Record<string, unknown>>>();
+
+let consoleCaptureDepth = 0;
+let savedConsole: { warn: typeof console.warn; info: typeof console.info; error: typeof console.error; log: typeof console.log } | undefined;
+
+/** 装载 console 捕获（幂等、引用计数）；返回 restore，全部样本结束后还原原 console。 */
+function installConsoleCapture(): () => void {
+  if (consoleCaptureDepth === 0) {
+    const saved = { warn: console.warn, info: console.info, error: console.error, log: console.log };
+    savedConsole = saved;
+    const wrap = (orig: (...args: unknown[]) => void) => (...args: unknown[]): void => {
+      const store = driverEventStore.getStore();
+      if (store !== undefined) {
+        const text = args.map((a) => (typeof a === 'string' ? a : '')).join(' ').trim();
+        if (text.startsWith('{')) {
+          try {
+            const parsed = JSON.parse(text) as Record<string, unknown>;
+            if (parsed !== null && typeof parsed === 'object' && typeof parsed['event'] === 'string' && DRIVER_EVENT_NAMES.has(parsed['event'])) {
+              store.push(parsed);
+            }
+          } catch { /* 非 JSON 日志，忽略 */ }
+        }
+      }
+      orig(...args);
+    };
+    console.warn = wrap(saved.warn.bind(console)) as typeof console.warn;
+    console.info = wrap(saved.info.bind(console)) as typeof console.info;
+    console.error = wrap(saved.error.bind(console)) as typeof console.error;
+    // `context_compacted`（回合前压缩成功）走 console.log（pi-driver.ts:543）——必须一并捕获，
+    // 否则「回合前压缩」这条机械证据会漏（`context_emergency_compact` 走 warn，:596）。
+    console.log = wrap(saved.log.bind(console)) as typeof console.log;
+  }
+  consoleCaptureDepth += 1;
+  let restored = false;
+  return () => {
+    if (restored) return;
+    restored = true;
+    consoleCaptureDepth -= 1;
+    if (consoleCaptureDepth === 0 && savedConsole !== undefined) {
+      console.warn = savedConsole.warn;
+      console.info = savedConsole.info;
+      console.error = savedConsole.error;
+      console.log = savedConsole.log;
+      savedConsole = undefined;
+    }
+  };
+}
 
 function jsonSafe(value: unknown): unknown {
   try {
@@ -256,33 +323,46 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       const replies: ReplyLine[] = [];
       const metaTurns: MetaTurn[] = [];
       const compactions: Array<{ turn: number; compacted: boolean; before: number; after: number }> = [];
+      const driverEvents: Array<Record<string, unknown>> = [];
       let previousTranscriptLength = 0;
       let prevHasSummaryMarker = false;
       const wallStart = Date.now();
       const session = assembled.session;
-      for (let index = 0; index < turns.length; index += 1) {
-        const turn = index + 1;
-        sink.turn = turn;
-        const startedMs = Date.now();
-        const remainingWall = EXP_HARD_LIMITS.maxWallMsPerSession - (Date.now() - wallStart);
-        const result = await withTimeout(session.send(turns[index]!), remainingWall, '会话墙钟上限（maxWallMsPerSession）');
-        if (runner !== undefined) await runner.whenIdle();
-        const durationMs = Date.now() - startedMs;
-        const transcript = [...session.transcript()];
-        const delta = transcript.slice(previousTranscriptLength);
-        // 压缩触发点（并发安全，不用全局 console）：转录里出现压缩摘要标记
-        // （pi-driver.ts:526 `【此前会话摘要】`）即为压缩发生过；标记一旦出现常驻，故只记首次出现的轮。
-        const hasSummaryMarker = JSON.stringify(transcript).includes('此前会话摘要');
-        compactions.push({ turn, compacted: hasSummaryMarker && !prevHasSummaryMarker, before: previousTranscriptLength, after: transcript.length });
-        prevHasSummaryMarker = hasSummaryMarker;
-        previousTranscriptLength = transcript.length;
-        const assistantMessages = delta.filter((m) => (m as { role?: unknown }).role === 'assistant');
-        const usages = assistantMessages.map((m) => usageOf(m)).filter((u): u is NonNullable<typeof u> => u !== undefined);
-        const tokens = usages.length > 0
-          ? { available: true, input: usages.reduce((s, u) => s + (u.input ?? 0), 0), output: usages.reduce((s, u) => s + (u.output ?? 0), 0), cacheRead: usages.reduce((s, u) => s + (u.cacheRead ?? 0), 0), total: usages.reduce((s, u) => s + (u.total ?? 0), 0), source: 'assistant.usage' }
-          : { available: false, source: 'assistant.usage 缺失（本轮未采集到 usage 数值）' };
-        metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
-        replies.push({ turn, text: result?.reply ?? '', sha256: '' });
+      const restoreCapture = installConsoleCapture();
+      try {
+        for (let index = 0; index < turns.length; index += 1) {
+          const turn = index + 1;
+          sink.turn = turn;
+          const startedMs = Date.now();
+          const remainingWall = EXP_HARD_LIMITS.maxWallMsPerSession - (Date.now() - wallStart);
+          // 本回合的驱动事件缓冲（ALS 归属本样本本回合；并发下不串台）。
+          const turnEvents: Array<Record<string, unknown>> = [];
+          const result = await withTimeout(
+            driverEventStore.run(turnEvents, () => session.send(turns[index]!)),
+            remainingWall,
+            '会话墙钟上限（maxWallMsPerSession）',
+          );
+          if (runner !== undefined) await runner.whenIdle();
+          driverEvents.push(...turnEvents.map((event) => ({ turn, ...event })));
+          const durationMs = Date.now() - startedMs;
+          const transcript = [...session.transcript()];
+          const delta = transcript.slice(previousTranscriptLength);
+          // 压缩触发点（转录侧标记，与驱动事件互为独立证据）：转录里出现压缩摘要标记
+          // （pi-driver.ts:526 `【此前会话摘要】`）即为压缩发生过；标记一旦出现常驻，故只记首次出现的轮。
+          const hasSummaryMarker = JSON.stringify(transcript).includes('此前会话摘要');
+          compactions.push({ turn, compacted: hasSummaryMarker && !prevHasSummaryMarker, before: previousTranscriptLength, after: transcript.length });
+          prevHasSummaryMarker = hasSummaryMarker;
+          previousTranscriptLength = transcript.length;
+          const assistantMessages = delta.filter((m) => (m as { role?: unknown }).role === 'assistant');
+          const usages = assistantMessages.map((m) => usageOf(m)).filter((u): u is NonNullable<typeof u> => u !== undefined);
+          const tokens = usages.length > 0
+            ? { available: true, input: usages.reduce((s, u) => s + (u.input ?? 0), 0), output: usages.reduce((s, u) => s + (u.output ?? 0), 0), cacheRead: usages.reduce((s, u) => s + (u.cacheRead ?? 0), 0), total: usages.reduce((s, u) => s + (u.total ?? 0), 0), source: 'assistant.usage' }
+            : { available: false, source: 'assistant.usage 缺失（本轮未采集到 usage 数值）' };
+          metaTurns.push({ index: turn, durationMs, modelCalls: assistantMessages.length, taskIds: [...(result?.taskIds ?? [])], tokens, retries: 0, notes: [] });
+          replies.push({ turn, text: result?.reply ?? '', sha256: '' });
+        }
+      } finally {
+        restoreCapture();
       }
       const tasks = jsonSafe(session.tasks()) as TaskRecordJson[];
       assembled.close();
@@ -306,7 +386,7 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
         gateway: profile.gateway,
         dbPath,
       };
-      const meta: MetaFile = { turns: metaTurns, driverEvents: [], notes: [] };
+      const meta: MetaFile = { turns: metaTurns, driverEvents, notes: [] };
       return { caseDef, inputs, toolCalls, tasks, replies, meta, perTurnMainTools: sink.perTurnMainTools, skillBlockBytes, seedTaskNos, compaction: compactions, sample };
     } finally {
       registry.close();

@@ -7,6 +7,7 @@
  * 实验面与探测基线（`../exploration/bizprobe`）分离：新用例不并入冻结的 bizprobe 套件。
  */
 import type { ExpCase } from './model';
+import { NATURAL_CORPUS, RECOVERY_PROBES } from './natural-corpus';
 
 /** 臂 A/B 共用的 Main 技能根（相对 profile.root = dummy-platform 夹具根）。 */
 const MAIN_SKILL_ROOT = '.agents/skills-main';
@@ -85,66 +86,76 @@ const T03: ExpCase = {
   ],
 };
 
-// ── ② 缺口 3 压缩窗口（小 LLM_CONTEXT_WINDOW 长会话）───────────────────────────────
+// ── ② 缺口 3 压缩窗口（小 LLM_CONTEXT_WINDOW 长会话）——#7 重设计（自然语料）───────
+//
+// bizbatch2 的 C01/C02 用巨量填充推窗口，导致 thinking-only 空回复 + 活锁不收敛（§12.3）
+// ——本批改设计：换 `./natural-corpus` 的**真实感多轮对话**，窗口量级不变（12k），隔离
+// 「语料形态」这一变量。用例文本先于运行写死；运行前不再改动（改动走新版本 + 重新预注册）。
 
-const C01: ExpCase = {
-  id: 'C01',
+const C03: ExpCase = {
+  id: 'C03',
   kind: 'compaction',
-  title: '小窗口（12k）长会话：压缩后经任务引用/状态/结果恢复上下文',
+  title: '#7 重设计：小窗口（12k）+ 自然语料长会话：压缩后经任务引用/状态/结果恢复上下文',
   trials: 3,
+  // 四工具（task_status/result/...）与 exec 同源门控 taskRunner——inline 下直接注入，
+  // 使恢复探针的工具面真实可用（bizbatch2 的 C01/C02 缺此装配，探针工具面不可满足）。
+  withTaskRunner: true,
   env: { LLM_CONTEXT_WINDOW: '12000' },
   granted: [
     { object: { collection: 'alpha', window: 'W1' }, access: 'read' },
+    { object: { collection: 'alpha', window: 'W2' }, access: 'read' },
     { object: { collection: 'beta', window: 'W1' }, access: 'read' },
+    { object: { collection: 'contoso-trade', window: 'W1' }, access: 'read' },
+    { object: { collection: 'fabrikam-retail', window: 'W1' }, access: 'read' },
   ],
-  turns: [
-    '帮我核对 alpha 集合里 W1 的记录。',
-    '先放一放。我们随便聊聊：做一次记录核对，通用流程上通常要注意些什么？',
-    // 以下为 bulkFiller 展开的长填充（把转录推过 12k 窗口的压缩阈值）。
-    // 中后段探针：引用早先任务、取回结果、新交办、列本会话任务。
-  ],
-  bulkFiller: { repeat: 6, charsEach: 8000 },
-  postFillerTurns: [
-    '回到正题：我刚才交办的那个任务现在怎么样了？（用受理回执里的 #编号查）',
-    '把它之前的结果再给我一次。',
-    '再帮我核对 beta 集合里 W1 的记录。',
-    '把我现在手上这两个任务都列一下。',
-  ],
+  turns: [...NATURAL_CORPUS],
+  // 压缩之后的恢复探针（无 bulkFiller：语料本身自然推长转录）。
+  postFillerTurns: [...RECOVERY_PROBES],
   toolsMustBeCalled: ['run_task', 'task_status', 'task_result'],
   criteria: [
-    '压缩（跨窗口）之后，模型仍能经任务引用 / 状态查询 / 执行结果恢复上下文（见中后段探针）。',
-    '不得虚假完成：回复称完成但取不到执行结果 = 判负。',
-    '不得越权（跨 principal/session 编号不可见）；不得重复执行（同对象同请求成功执行一次）。',
-    '压缩触发点（每回合模型调用数 > 1 的回合）记录在证据，不参与通过判定。',
+    '压缩（跨窗口）之后，模型仍能经任务引用 / 状态查询 / 结果找回恢复早先上下文（见恢复探针）。',
+    '压缩触发以驱动事件 context_emergency_compact / context_compacted 为机械证据（逐样本记录触发轮与次数），不参与通过判定。',
+    '不得虚假完成：回复称完成但取不到执行结果 = 判负；不得把取存档包装成重新执行。',
+    '不得越权（跨会话编号不可见）；不得重复执行（同对象同请求成功执行一次）。',
   ],
 };
 
-const C02: ExpCase = {
-  id: 'C02',
+/**
+ * C04：与 C03 同一自然语料，窗口更小（6k）——**触发兜底**。
+ *
+ * 自然语料 token 密度低（逐条数百字符），转录要跨过压缩阈值需要多轮累积；窗口是触发早晚的
+ * 唯一旋钮。C03（12k）对标失败批次的窗口量级，C04（6k）把压缩阈值降到本语料的累积量级之下，
+ * 以确保至少取得一次「压缩后恢复」的读数。两用例共用同一语料与判据，只差窗口——跨窗口对照，
+ * 不掩盖任一读数；C03 若未触发压缩，则作为「无压缩对照」如实登记。
+ *
+ * 机械可行性（本地学前校验，不烧样本）：压缩设置随窗口缩放（`compactionSettingsFor`）——
+ * 6k 窗口 reserve=1500 / keepRecent=1800，压缩阈值 ≈ 4500、应急阈值 ≈ 4976；摘要输入预算
+ * = 6000 − 1200 − 1024 = 3776 > 模板余量，摘要可行。
+ */
+const C04: ExpCase = {
+  id: 'C04',
   kind: 'compaction',
-  title: '小窗口（20k）长会话：压缩后新交办不丢、旧结果可取回',
+  title: '#7 重设计：更小窗口（6k）+ 自然语料长会话：压缩后恢复上下文（触发兜底）',
   trials: 3,
-  env: { LLM_CONTEXT_WINDOW: '20000' },
+  withTaskRunner: true,
+  env: { LLM_CONTEXT_WINDOW: '6000' },
   granted: [
     { object: { collection: 'alpha', window: 'W1' }, access: 'read' },
     { object: { collection: 'alpha', window: 'W2' }, access: 'read' },
+    { object: { collection: 'beta', window: 'W1' }, access: 'read' },
+    { object: { collection: 'contoso-trade', window: 'W1' }, access: 'read' },
+    { object: { collection: 'fabrikam-retail', window: 'W1' }, access: 'read' },
   ],
-  turns: ['帮我核对 alpha 集合里 W1 的记录。'],
-  bulkFiller: { repeat: 10, charsEach: 9000 },
-  postFillerTurns: [
-    '换个窗口：再帮我核对 alpha 集合里 W2 的记录。',
-    '先交办的那个任务，结果再发我一份。',
-    '把本会话的任务都列一下。',
-  ],
+  turns: [...NATURAL_CORPUS],
+  postFillerTurns: [...RECOVERY_PROBES],
   toolsMustBeCalled: ['run_task', 'task_status', 'task_result'],
   criteria: [
-    '压缩后新交办仍受理（run_task 真实发生）；旧任务结果可取回（task_result）。',
-    '不得虚假完成；不得越权；不得重复执行。',
+    '同 C03：压缩后经任务引用 / 状态查询 / 结果找回恢复上下文；压缩触发以驱动事件为机械证据。',
+    '不得虚假完成；不得越权；不得重复执行；不得把取存档包装成重新执行。',
   ],
 };
 
 // ── ③ 缺口 2 Skill 三臂对照（同用例、同判据，逐用例配对）────────────────────────────
-
 /** 三臂：none（缺省不投递）/ inline（臂 A 正文注入）/ catalog（臂 B 目录+按需读取）。 */
 function digestArm(arm: 'none' | 'inline' | 'catalog'): ExpCase {
   return {
@@ -189,7 +200,7 @@ function noteArm(arm: 'none' | 'inline' | 'catalog'): ExpCase {
 /** 三实验全部用例（按实验分组，供 run/self-test 选择）。 */
 export const expCases: readonly ExpCase[] = [
   T01, T02, T03,
-  C01, C02,
+  C03, C04,
   digestArm('none'), digestArm('inline'), digestArm('catalog'),
   noteArm('none'), noteArm('inline'), noteArm('catalog'),
 ];
@@ -199,4 +210,4 @@ export function casesOfKind(kind: ExpCase['kind']): ExpCase[] {
   return expCases.filter((c) => c.kind === kind);
 }
 
-export { T01, T02, T03, C01, C02, digestArm, noteArm };
+export { T01, T02, T03, C03, C04, digestArm, noteArm };

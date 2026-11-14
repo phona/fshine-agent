@@ -1,5 +1,5 @@
 /**
- * bizbatch2 三实验装配自测——**零真实模型**（确定性假 driver / 假执行面）。
+ * bizbatch3/bizbatch2 实验装配自测——**零真实模型**（确定性假 driver / 假执行面）。
  *
  * 覆盖：
  *   ① 用例展开与硬上限（缺一不跑）；
@@ -10,7 +10,8 @@
  *   ⑤ 跑批装配：逐样本工作目录 + 证据落盘 + 判定汇总；
  *   ⑥ 串并行一致性（确定性假件同集两跑）；
  *   ⑦ 缺口 3 装配接线：小 LLM_CONTEXT_WINDOW 经 contextWindowFrom 触发压缩尝试，缺省不触发；
- *   ⑧ infra 门结构（模型钉 step-3.7-flash）。
+ *   ⑧ infra 门结构（模型钉 step-3.7-flash）+ 两态（可得=不阻塞 / 缺失=blocking）；
+ *   ⑨ **#7 重设计**：自然语料体量下界 + **压缩触发可被机械捕获**（驱动事件经 ALS 归属样本）。
  */
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,9 +21,11 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from '../../../../packages/agent/src/driver-contract';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { estimateContextTokens } from '@earendil-works/pi-agent-core';
 import { createPiTurnDriver } from '../../../../packages/agent/src/pi-driver';
 import { contextWindowFrom } from '../../../ask-runtime';
-import { expCases, T01, T02, T03, C01, digestArm } from './cases';
+import { expCases, T01, T02, T03, C03, C04, digestArm } from './cases';
+import { NATURAL_CORPUS, RECOVERY_PROBES } from './natural-corpus';
 import { assertWithinExpHardLimits, EXP_HARD_LIMITS, effectiveTurns, expandExpItems, type ExpCase, type ExpItem } from './model';
 import { createExpExecutor, type ExpExecutor } from './executor';
 import { judgeExp, type ExpEvidence } from './judge';
@@ -127,12 +130,12 @@ function longTranscript(): AgentMessage[] {
 }
 
 describe('① 用例展开与硬上限（缺一不跑）', () => {
-  it('展开：id 唯一；compaction 用例的 filler 使回合数显著增多', () => {
+  it('展开：id 唯一；compaction 用例的自然语料使回合数显著增多', () => {
     const items = expandExpItems(expCases);
     expect(items.length).toBeGreaterThan(0);
     expect(new Set(items.map((i) => i.id)).size).toBe(items.length);
-    expect(effectiveTurns(C01).length).toBe(C01.turns.length + (C01.bulkFiller?.repeat ?? 0) + (C01.postFillerTurns?.length ?? 0));
-    expect(effectiveTurns(C01).length).toBeGreaterThan(C01.turns.length);
+    expect(effectiveTurns(C03).length).toBe(C03.turns.length + (C03.postFillerTurns?.length ?? 0));
+    expect(effectiveTurns(C03).length).toBeGreaterThan(C03.turns.length);
   });
 
   it('硬上限：会话/并发/调用越界 fail-closed', () => {
@@ -230,7 +233,7 @@ describe('⑤ 跑批装配（batch + collect + judge，假件）', () => {
 describe('⑥ 串并行一致性（确定性假件）', () => {
   it('串行与并行逐样本判定读数一致', async () => {
     const root = freshRoot();
-    const cases = [T01, C01, ...expCases.filter((c) => c.kind === 'skill-arm')];
+    const cases = [T01, C03, ...expCases.filter((c) => c.kind === 'skill-arm')];
     const items = expandExpItems(cases);
     const cmp = await compareExpSerialParallel({ kind: 'task-surface', cases, items, executor: fakeExec, outRoot: path.join(root, 'sp'), concurrency: 4 });
     expect(cmp.consistent).toBe(true);
@@ -314,5 +317,104 @@ describe('⑧ Skill 臂汇总与 infra 门', () => {
     expect(gate.checks.map((c) => c.name)).toEqual(expect.arrayContaining([
       '.env 存在（gitignored）', 'LLM_API_KEY 非空', 'LLM_MODEL 解析', 'LLM_MODEL === step-3.7-flash',
     ]));
+  });
+
+  it('infra 门两态：blocking = 任一检查失败；模型不符即阻塞（不烧样本）', () => {
+    const saved = process.env['LLM_MODEL'];
+    try {
+      process.env['LLM_MODEL'] = 'step-5-preview';
+      const wrong = checkExpInfraGate();
+      expect(wrong.blocking).toBe(true);
+      expect(wrong.checks.find((c) => c.name.includes('LLM_MODEL === step-3.7-flash'))?.ok, '模型不符该检查项必须失败').toBe(false);
+
+      process.env['LLM_MODEL'] = 'step-3.7-flash';
+      const right = checkExpInfraGate();
+      expect(right.checks.find((c) => c.name.includes('LLM_MODEL === step-3.7-flash'))?.ok).toBe(true);
+      // blocking 与「是否所有检查项皆 ok」恒等（.env 缺失时仍可阻塞，故不断言 false）。
+      expect(right.blocking).toBe(right.checks.some((c) => !c.ok));
+    } finally {
+      if (saved === undefined) delete process.env['LLM_MODEL'];
+      else process.env['LLM_MODEL'] = saved;
+    }
+  });
+});
+
+describe('⑨ #7 重设计：自然语料与「压缩触发」的机械捕获', () => {
+  it('自然语料体量下界（仅用户文本 token；助手/工具输出叠加后接近/跨过压缩阈值）', () => {
+    const all = [...NATURAL_CORPUS, ...RECOVERY_PROBES];
+    expect(all.length, '自然语料回合数应充足（长会话）').toBeGreaterThanOrEqual(40);
+    const tokens = estimateContextTokens(all.map((text, i) => ({ role: 'user', content: text, timestamp: i } as unknown as AgentMessage))).tokens;
+    expect(tokens, '用户文本 token 下界（叠加助手/工具输出后推长转录）').toBeGreaterThanOrEqual(1000);
+  });
+
+  it('压缩触发可被机械捕获：驱动输出 context_emergency_compact → 证据/计数/触发行', async () => {
+    const root = freshRoot();
+    const emitOnce: TurnDriver = {
+      async run(input) {
+        console.warn(JSON.stringify({ event: 'context_emergency_compact', tokens: 9999, contextWindow: 6000, messages: 11 }));
+        console.log(JSON.stringify({ event: 'context_compacted', tokensBefore: 9999, tokensAfter: 4000, contextWindow: 6000 }));
+        const reply = '好的。';
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    };
+    const exec = createExpExecutor({
+      createDrivers: () => ({ mainDriver: emitOnce, workerDriver: workerQuerier() }),
+      createExecutionFace: async () => fakeFace(),
+      env: FAKE_ENV,
+    });
+    const ev = await exec(itemFor(T01), T01, path.join(root, 'cap'));
+    const turnCount = effectiveTurns(T01).length;
+    const triggers = ev.meta.driverEvents.filter((e) => e['event'] === 'context_emergency_compact');
+    expect(triggers.length, '每回合一次驱动事件应逐条落证据').toBe(turnCount);
+    expect(triggers.every((e) => typeof e['turn'] === 'number'), '事件带样本回合归属').toBe(true);
+    const verdict = judgeExp(ev);
+    expect(verdict.counters.compactionTriggerEvents).toBe(turnCount);
+    expect(verdict.counters.compactionTriggerTurns).toEqual(Array.from({ length: turnCount }, (_, i) => i + 1));
+    // console.log 的 context_compacted（回合前压缩成功）也必须被捕获（pi-driver.ts:543）。
+    expect(verdict.counters.compactionCompleted, 'context_compacted（console.log）应被捕获').toBe(turnCount);
+  });
+
+  it('真实压缩日志可被捕获：驱动内调用生产 compact()（小窗口）→ 证据含 context_* 事件', async () => {
+    const root = freshRoot();
+    const baseEnv = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'k', LLM_MODEL: 'step-3.7-flash' };
+    const small = createPiTurnDriver({ env: baseEnv, ...contextWindowFrom({ ...baseEnv, LLM_CONTEXT_WINDOW: '12000' }) });
+    const messages = longTranscript();
+    const driver: TurnDriver = {
+      async run(input) {
+        await small.compact!(messages); // 生产压缩代码路径（摘要不可达 → 结构化日志）
+        const reply = '好的。';
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    };
+    const exec = createExpExecutor({
+      createDrivers: () => ({ mainDriver: driver, workerDriver: workerQuerier() }),
+      createExecutionFace: async () => fakeFace(),
+      env: FAKE_ENV,
+    });
+    const ev = await exec(itemFor(T01), T01, path.join(root, 'real'));
+    const ctxEvents = ev.meta.driverEvents.filter((e) => String(e['event']).startsWith('context_'));
+    expect(ctxEvents.length, '生产 compact 的结构化日志应被捕获（非仅合成事件）').toBeGreaterThan(0);
+  });
+
+  it('并发归属：同批两样本各自只收自己的驱动事件（ALS 不串台）', async () => {
+    const root = freshRoot();
+    const mkMain = (): TurnDriver => ({
+      async run(input) {
+        console.warn(JSON.stringify({ event: 'context_emergency_compact', tokens: 1, contextWindow: 6000, messages: 1 }));
+        const reply = '好的。';
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    });
+    const exec = createExpExecutor({
+      createDrivers: () => ({ mainDriver: mkMain(), workerDriver: workerQuerier() }),
+      createExecutionFace: async () => fakeFace(),
+      env: FAKE_ENV,
+    });
+    const items = expandExpItems([{ ...T01, trials: 2 }]);
+    const report = await runExpBatch({ kind: 'task-surface', cases: [T01], items, executor: exec, outRoot: path.join(root, 'conc'), concurrency: 2 });
+    const perSample = effectiveTurns(T01).length;
+    for (const s of report.samples) {
+      expect(s.verdict?.counters.compactionTriggerEvents, '每样本事件数应等于自身回合数（串台会翻倍）').toBe(perSample);
+    }
   });
 });
