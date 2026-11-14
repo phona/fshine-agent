@@ -1000,6 +1000,17 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十一、P7a ask-first 前置能力：实施与合入（2026-11-14，分支 `arch/r4-p7a-askfirst`）
+
+- **授权与拆分**：owner 2026-11-14 排程裁定——P7 拆 **P7a**（前置能力：交互式 ask / 脚本回放 / 轨迹采集；依赖 P0）与 **P7b**（资源限制 / 异步执行 / 故障场景；依赖 P5/P6，未授权）；P7a 单独完成状态、**不冒充完整 P7 验收**；不修改已冻结测试判据。基线 `46f757e`（P0 合入）；P1 先行合入后 rebase 到 `54a02c1` 收口 `ask.ts`（共享接线唯一负责人）。
+- **提交链**：`7764e13`（测试先行）→ `a62a533`（测试自身缺陷修正，判据不变）→ `8c82313`（实现：新增 `ask-replay`/`ask-trace`/`ask-interactive`/`ask-assert` 四模块；`ask.ts` 仅 dispatch hook；`ask-runtime` +24）→ `fdf5da7`（报告）→ rebase 后 `76a83d7`（收口：interactive 证据行复用 P1 的 `renderAskEvidenceLines`）。
+- **验收读数（P7-T01–T05/E01）**：回放确定性（同脚本两跑逐字一致；坏脚本 fail-closed）；trace schema 适用子集 + 缺失类显式声明（不伪产 judgment）；同一 Runtime 守卫（四入口导入图可达、无旁路）；单轮金样逐字不变；blocked 断言恰 4 类（`notification_delivered`→P4、`resource_released`→P5、`not_blocked`/`main_not_blocked`→P5/P6）fail-closed 报 blocked、不假通过；P7-E01 交互 3 回合 smoke（INSUFFICIENT_EVIDENCE 标注）。统一回归：tsc 0；unit **45 文件/425 例**全绿（合入前两侧 376+49）；反向绊线 3 类均转红后恢复。
+- **独立复核**：passed=true、integrity=false（两轮：初版 + rebase 后复验；回放确定性与破坏实验由复核员亲手复跑，均在 /tmp 副本）。
+- **合入**：`ee746c0`（--no-ff）入 `arch/integration`；文件范围 13 文件（4 新模块 + 5 测试 + `ask.ts`/`ask-runtime`/守卫扩展 + 报告）；合入后 typecheck=0、unit 45 文件/425 例全绿。
+- **状态与边界**：**P7a 完成；P7b 未启动（依赖 P5/P6，未授权）**；P7-T06 故障注入 blocked；真实平台/写操作未触；冻结面（criteria.lock/cases/judge/runner/safety-gate）零改动。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
