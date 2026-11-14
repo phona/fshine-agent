@@ -57,7 +57,8 @@ import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from 
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
-import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import { loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
 import { EvalIsolationRefused, assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 
@@ -168,6 +169,8 @@ export interface SessionAssemblyInput {
   taskRegistry?: TaskRegistry;
   /** 预装载 Main 系统提示（server 启动时装载一次）；缺省现装。 */
   mainSystemPrompt?: string;
+  /** 缺口 2 臂 B：预装载 Main 技能登记表；缺省随 Main 提示现装（提示注入时由调用方一并给）。 */
+  mainSkillRegistry?: SkillRegistry;
   /** 预装载 Worker 技能（server 启动时装载一次）；缺省现装。 */
   workerSkills?: readonly WorkerSkill[];
   /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（单并发/无队列/无任务级预算）。 */
@@ -387,9 +390,18 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
   try {
     const workerSkills = input.workerSkills ?? await loadWorkerSkills(input.profile.root, input.profile.skillRoots);
     let mainSystemPrompt = input.mainSystemPrompt;
+    let mainSkillRegistry = input.mainSkillRegistry;
     if (mainSystemPrompt === undefined) {
       const profileMd = await loadAgentProfile();
-      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`;
+      // 缺口 2（实验面，缺省不投递）：Main 专用技能根的投递块拼在角色文本之后、协议之前；
+      // 技能根为空时 promptBlock 为空串 → 提示逐字节不变；臂 B 另交出 read_skill 登记表。
+      const delivery = await loadMainSkillDelivery(
+        input.profile.root,
+        input.profile.mainSkillRoots ?? [],
+        input.profile.mainSkillMode ?? 'inline',
+      );
+      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
+      mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
       ? input.createDrivers(input.env)
@@ -439,6 +451,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       policy,
       dispatchMode,
       ...(runner === undefined ? {} : { taskRunner: runner }),
+      ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
     });

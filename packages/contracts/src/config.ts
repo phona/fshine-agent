@@ -22,6 +22,22 @@ export interface ContextProfileConfig {
   /** Paths relative to root containing Pi-compatible SKILL.md files. */
   skillRoots: string[];
   /**
+   * Main-side business skill roots (relative to root), for the Main Agent's
+   * own prompt/tool surface. This is a SEPARATE fact source from `skillRoots`
+   * (which feeds the Worker delegation prompt) and from the execution layer's
+   * `.agents/skills-serve`; the three must never be merged. Absent/empty = the
+   * Main skill surface is off (default behavior; byte-for-byte unchanged).
+   * Experiment-only: gated behind this key plus `mainSkillMode`.
+   */
+  mainSkillRoots?: string[];
+  /**
+   * Main-side skill delivery arm (缺省 = 不投递). `inline` = splice SKILL.md
+   * bodies into the Main system prompt (arm A); `catalog` = Main system prompt
+   * carries a name+description catalog only and the Main tool surface gains
+   * `read_skill` (arm B). Only meaningful when `mainSkillRoots` is set.
+   */
+  mainSkillMode?: 'inline' | 'catalog';
+  /**
    * Gateway invocation relative to root (e.g. `bin/<name>`), declared by the
    * operator per profile, never supplied by the model. This is the only
    * place a gateway name is configured: spawn paths must be derived from

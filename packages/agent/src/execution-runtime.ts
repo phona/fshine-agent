@@ -7,7 +7,8 @@
  *
  * 每回合链路：
  *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+（注入 runner
- *      时）task_status/task_result/task_cancel/task_resume（查询/取消/接续，缺口 1）；
+ *      时）task_status/task_result/task_cancel/task_resume（查询/取消/接续，缺口 1）+（注入 Main
+ *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）；
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation 一个工具）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
@@ -37,6 +38,7 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver, TurnDriverResult } from './driver-contract';
+import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
 import { createTaskRegistry, deriveTaskName, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   taskFailureReasonFor,
@@ -118,6 +120,20 @@ export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
     answer: { type: 'string', description: '对任务待办问题的答复，用用户原话的意思写清。' },
   },
   required: ['ref', 'answer'],
+  additionalProperties: false,
+};
+
+/**
+ * 缺口 2 臂 B（实验面）：Main 按需读取业务技能正文。工具名复用 skills.ts 的 READ_SKILL_TOOL（不另起名）；
+ * name 只在登记表内匹配，不做文件系统拼接（路径逃逸防护与 32KiB 上限都在 skills.ts 既有实现内）。
+ */
+export const READ_SKILL_TOOL_DESCRIPTION = '按技能清单里的名称读取该技能的完整正文（需要该技能的程序性知识时使用）。';
+export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: '技能清单里的技能名。' },
+  },
+  required: ['name'],
   additionalProperties: false,
 };
 
@@ -203,6 +219,12 @@ export interface RuntimeOptions {
   dispatchMode?: 'inline' | 'background';
   /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
+  /**
+   * 缺口 2 臂 B（实验面）：Main 技能登记表——注入后 Main 工具面多一个 read_skill，按登记表内的
+   * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（现行工具面逐字节不变）。
+   * 摘要在系统提示里由装配层经 renderSkillCatalog 拼入，本选项只管工具面。
+   */
+  mainSkillRegistry?: SkillRegistry;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -555,7 +577,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       mainMessages = [...mainMessages, userMessage(text)];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
-        tools: [runTaskTool(), ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()])],
+        tools: [
+          runTaskTool(),
+          ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
+          ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
+        ],
         messages: mainMessages,
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
@@ -572,6 +598,12 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
             if (tool === TASK_RESULT_TOOL) return taskResult(args);
             if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
             if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
+          }
+          // 缺口 2 臂 B：read_skill 与工具面同源门控（未注入登记表则不受理）。
+          if (tool === READ_SKILL_TOOL && options.mainSkillRegistry !== undefined) {
+            const name = typeof args.name === 'string' ? args.name : '';
+            const skill = await options.mainSkillRegistry.read(name);
+            return { name: skill.name, content: skill.content };
           }
           throw new Error(`Main 工具面之外的调用：${tool}`);
         },
@@ -624,6 +656,10 @@ function taskCancelTool(): DiscoveredTool {
 
 function taskResumeTool(): DiscoveredTool {
   return { name: TASK_RESUME_TOOL, description: TASK_RESUME_TOOL_DESCRIPTION, inputSchema: TASK_RESUME_TOOL_SCHEMA };
+}
+
+function readSkillTool(): DiscoveredTool {
+  return { name: READ_SKILL_TOOL, description: READ_SKILL_TOOL_DESCRIPTION, inputSchema: READ_SKILL_TOOL_SCHEMA };
 }
 
 function executeOperationTool(): DiscoveredTool {

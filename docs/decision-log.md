@@ -1181,6 +1181,23 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十五、「加回决定」：read_skill 仅供缺口 2 评测臂（2026-11-15，分支 `arch/r4-gapimpl`）
+
+- **背景**：`read_skill` 及其宿主侧渲染（`renderSkillCatalog` / `listSkills`）属**历史上被删/从未接生产**的机制（§八 裁决 3「保留 skill 加载机制 catalog + `read_skill`，供未来真正需要按需知识的场景；当前不依赖它」；旧链路已在 `0b97227` 删除）。按本日志维护规则「已删机制重新加回：先新增加回决定」，本条目为加回的**前置依据**。
+- **触发的是哪条判据（加回来的判据）**：AGENTS.md「Skills First」——业务知识与方法优先经 Skills 提供；且 §八 明确 `read_skill` 机制**被保留**（未被判死刑）只是「当前不依赖」。缺口 2 需要把「Main 侧业务 Skill 投递」做成**可评测的两臂**（正文直嵌 vs 目录+按需读取）以产生用户级 Eval 证据，故按 §八 保留条目把它接到 Main 工具面。
+- **历史证据（引用 §八，不改原文）**：
+  - §八 `read_skill` 有效机会 = b1 的 39 轮，**命中 0/39**（两次触发实验均零读取）；只证明「当轮任务不需要技能正文时模型不读」这一**弱命题**，摘要质量/任务-技能相关度是未控变量，不能证明「需要时也不会读」。
+  - §八 正向对照：b2（正文经 roleInstructionsOverride 直塞，无工具）在 UX-04 上 **0/2 → 2/2**、UX-01 上 **2/2**——正文直嵌有「观察到的潜在价值」（样本不足，未作稳定结论）。
+- **采用形态（本次加回的最小形态）**：
+  1. **仅实验臂，不进产品缺省**：两臂都由新配置键启用——`mainSkillRoots?: string[]`（Main 专用技能根，缺省 undefined）+ `mainSkillMode?: 'inline' | 'catalog'`（选臂；缺省 undefined）。**无该配置 = 现行行为逐字节不变**（`loadMainSkillDelivery` 技能根为空即返回空提示块；Main 工具面不加 `read_skill`）。
+  2. 臂 A（inline）：复用 `loadWorkerSkills` 把 SKILL.md 正文拼进 `mainSystemPrompt`。
+  3. 臂 B（catalog）：系统提示只拼 `listSkills`+`renderSkillCatalog` 的 name+description 摘要；Main 工具面按需 `read_skill`（复用 skills.ts 既有 `READ_SKILL_TOOL`，name 只在登记表内匹配、32KiB 上限沿用既有钳制）。
+  4. 事实源隔离：Main `mainSkillRoots` 与 Worker `skillRoots`、执行层 `.agents/skills-serve` 是**不同事实源，不合并**（沿用 skills.ts 头注释约束）。
+- **重测计划**：按 `gap-main-skill.md` §3 实验设计，同一批业务技能、同一 `npm run eval:user` 用户级黑盒集（全样本保留、不筛绿），三臂对照（缺省基线 / 臂 A / 臂 B），判据=完成率、无谓追问、口径错误率、token/耗时；`read_skill` 读取命中与臂 A 常驻 token 成本由实验臂直接计量。**留在产品缺省的门槛**：需用户级 Eval 显示相对基线有明确改善且无安全/口径回归，否则维持缺省不投递（本条目**不**授权进缺省）。
+- **边界**：本条目只授权「评测臂形态」的代码存在；不授权改产品缺省、不授权把 Main 与 Worker 技能源合并、不建立任何 Main 侧记忆/检索/投影。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
