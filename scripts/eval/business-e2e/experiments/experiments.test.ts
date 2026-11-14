@@ -22,7 +22,7 @@ import type { TurnDriver } from '../../../../packages/agent/src/driver-contract'
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import { createPiTurnDriver } from '../../../../packages/agent/src/pi-driver';
 import { contextWindowFrom } from '../../../ask-runtime';
-import { expCases, T01, T02, T03, C01 } from './cases';
+import { expCases, T01, T02, T03, C01, digestArm } from './cases';
 import { assertWithinExpHardLimits, EXP_HARD_LIMITS, effectiveTurns, expandExpItems, type ExpCase, type ExpItem } from './model';
 import { createExpExecutor, type ExpExecutor } from './executor';
 import { judgeExp, type ExpEvidence } from './judge';
@@ -266,6 +266,36 @@ describe('⑦ 缺口 3 装配接线（确定性）', () => {
 });
 
 describe('⑧ Skill 臂汇总与 infra 门', () => {
+  it('Skill 三臂装配：none 无技能块；inline 注入正文；catalog 注入摘要 + 暴露 read_skill', async () => {
+    const root = freshRoot();
+    const prompts: Record<string, string> = {};
+    const toolNames: Record<string, readonly string[]> = {};
+    const captureMain = (label: string): TurnDriver => ({
+      async run(input) {
+        prompts[label] = input.systemPrompt;
+        toolNames[label] = input.tools.map((t) => t.name);
+        return { text: 'ok', messages: [...input.messages, { role: 'assistant', content: 'ok' } as never] };
+      },
+    });
+    for (const arm of ['none', 'inline', 'catalog'] as const) {
+      const caseDef = digestArm(arm);
+      const exec = createExpExecutor({
+        createDrivers: () => ({ mainDriver: captureMain(arm), workerDriver: workerQuerier() }),
+        createExecutionFace: async () => fakeFace(),
+        env: FAKE_ENV,
+      });
+      await exec(itemFor(caseDef), caseDef, path.join(root, arm));
+    }
+    expect(prompts.none).not.toContain('【技能：record-digest】');
+    expect(prompts.inline).toContain('【技能：record-digest】');
+    expect(prompts.inline).toContain('核对摘要');
+    expect(prompts.catalog).toContain('record-digest');
+    expect(prompts.catalog).not.toContain('【技能：record-digest】');
+    expect(toolNames.none).not.toContain('read_skill');
+    expect(toolNames.inline).not.toContain('read_skill');
+    expect(toolNames.catalog).toContain('read_skill');
+  });
+
   it('skill 三臂配对分组 + 逐用例 k/N', async () => {
     const root = freshRoot();
     const arms = expCases.filter((c) => c.kind === 'skill-arm');
