@@ -1198,6 +1198,29 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十六、缺口 3/1/2 实施：压缩窗口接线 + 对话面任务工具 + Main 业务 Skill 投递（2026-11-15，分支 `arch/r4-gapimpl`）
+
+- **状态：待合入**（merge commit 与日期由主会话合入后补齐）。
+- **授权**：owner 2026-11-14 批准实施三缺口，依已合入设计 `docs/product/gap-compaction-window.md`（缺口 3）、`gap-task-surface.md`（缺口 1）、`gap-main-skill.md`（缺口 2）。
+- **分支/基线**：`arch/r4-gapimpl`（worktree）；基线 = `arch/integration` 启动时 HEAD `5b0967d1c1a7ae1a9228ec3c0c1884ffab68943c`（记录于 `.runtime/gapimpl/baseline.txt`，gitignored）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
+  1. `31f4706` 缺口 3 · 压缩窗口装配接线：`scripts/ask-runtime.ts` +17/−3（新增 `contextWindowFrom` 薄封装，复用既有 `parseContextWindow`；三处 `createPiTurnDriver` 展开 `...contextWindowFrom(input.env)`）+ 新测试 `scripts/ask-context-window.test.ts` +122。**最小 diff = 装配层一处函数 + 三处参数展开；`pi-driver.ts` 零改动**；缺省（未设 `LLM_CONTEXT_WINDOW`）逐字节不变。
+  2. `0dadfc0` 缺口 1 · 对话面任务工具：`packages/agent/src/execution-runtime.ts` +169/−13 + 新测试 `packages/agent/task-surface.test.ts` +271。**单文件**：四工具声明（`task_status/task_result/task_cancel/task_resume`，schema `additionalProperties:false`、只收任务引用）+ `createSession` 内 `scope`/`resolveTaskId`/四处理器 + `send()` 工具面与 exec 分派（工具面与分派同源门控 `taskRunner`）。
+  3. `57ac5ee` 缺口 2 · Main 业务 Skill 投递：7 文件 +191/−7（含**§四十五 加回决定**）+ 新测试 `packages/agent/main-skill.test.ts` +179。新增配置键 `mainSkillRoots`/`mainSkillMode`（类型+校验）；`loadMainSkillDelivery` 复用 `loadWorkerSkills`（臂 A）/`listSkills`+`renderSkillCatalog`+`READ_SKILL_TOOL`（臂 B）；两装配点同源；**缺省（无该配置）逐字节不变**。
+- **「新造清单」**：三缺口合计 **0 个新机制**——缺口 3 复用 `parseContextWindow`；缺口 1 复用 `registry.list/get` + `runner.cancel/resume`（仅新增工具声明与处理器，未新建生命周期/权限/治理）；缺口 2 复用 `loadWorkerSkills` / `READ_SKILL_TOOL` / `renderSkillCatalog` / `listSkills`（新增 2 个可选配置键 + 1 个装配期薄封装 + 1 个 ~25 行多根 registry 内部适配）。无 Planner / Router / 规则引擎 / 事件总线 / 通用 Workflow Engine / 新任务状态框架 / 第二套协议 / 沙箱；无新模块文件。
+- **哲学合规结论**：**Pi First**——三缺口均接既有 Pi 原生面（压缩参数、工具面、技能库），未建语义层/记忆/检索；**Skills First**——业务知识经 SKILL.md，`agent.md` 未改；**Runtime Minimal**——缺口 1 未新建治理、缺口 3 单点解析、缺口 2 缺省零变化；**Eval Driven**——三缺口均待用户级 Eval，缺口 2 明确「进缺省需 Eval 改善」门槛；**Zero Trust**——缺口 1 scope 由宿主服务端注入、参数不收 `principalId/sessionId`（越权=找不到，不泄露存在性）；缺口 2 缺省不改。
+- **自测与绊线读数**（命令见各提交 message；均在 worktree `TMPDIR=/home/tao/.tmp` 下运行）：
+  - `node_modules/.bin/tsc --noEmit`：三缺口各自及合并后均 **退出码 0**。
+  - 定向：缺口 3 新守卫 + `pi-model-capability` = 8 passing；缺口 1 `task-surface` = 9 passing，加定向回归共 103 passing；缺口 2 `main-skill` = 6 passing，加定向回归（含 `import-boundary`）= 80 passing。
+  - 全量 `node_modules/.bin/vitest run`：基线 **65 文件/674 例** → gap3 **66/679** → gap1 **67/688** → gap2 **68/694**（只增不减，全绿）。
+  - 反向绊线：每缺口 **≥3 类**，破坏→红→逐字节复原（md5 校验）——缺口 3：删接线 / 助手忽略 env / 缺省注入值；缺口 1：取消谎报 cancelled / resume 绕过 runner / task_status 信任参数身份 / 工具面不随 runner 收窄；缺口 2：缺省注入块 / 清单泄露路径 / `read_skill` 不随 registry 收窄。
+  - **诚实降级登记**：缺口 3、缺口 1 为先红后绿；**缺口 2 为实现先行 + `git stash` 降级复现红**（非纯 TDD 先红），已在提交 message 与本条目如实登记。
+- **read_skill 加回决定**：见 **§四十五**（本分支 `57ac5ee` 新增）——`read_skill` **仅用于评测臂、不进产品缺省**；引用 §八 历史证据（b1 `read_skill` 0/39 只证弱命题；b2 正文直塞 UX-04 0/2→2/2 正向对照）与本次重测计划（`npm run eval:user` 三臂对照、全样本保留）。
+- **独立复核**：**待复核**——本条目由实施者自述，需主会话安排独立复核，结论回填本条目。
+- **边界**：未接真实平台、零真实模型额度；未改冻结面（convergence-r1 的 criteria/cases/judge/runner/safety-gate、criteria.lock、exploration 冻结件）与历史证据。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
