@@ -150,6 +150,7 @@ export function createSqliteTaskRegistry(
       to: next.status,
       ...(next.reason === undefined ? {} : { reason: next.reason }),
       at,
+      stateVersion: at,
     });
     return toRecord(require(taskId));
   }
@@ -177,6 +178,7 @@ export function createSqliteTaskRegistry(
         name: stored.task.name ?? deriveTaskName(stored.task.request),
         to: status,
         at: now,
+        stateVersion: now,
       });
       return toRecord(stored);
     },
@@ -259,6 +261,7 @@ export function createSqliteTaskRegistry(
         from: 'queued',
         to: 'running',
         at,
+        stateVersion: at,
       });
       return toRecord(require(row.taskId));
     },

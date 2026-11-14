@@ -455,6 +455,8 @@ for (const impl of IMPLS) {
         expect(typeof fact.taskNo).toBe('number');
         expect(fact.name).not.toBe('');
         expect(Number.isNaN(Date.parse(fact.at))).toBe(false);
+        // v1.1：稳定去重版本缺省 = at（P4 outbox 唯一键用）。
+        expect(fact.stateVersion).toBe(fact.at);
       }
 
       // 单回调：再次注入替换旧回调（旧回调不再收到事实）。
@@ -462,6 +464,19 @@ for (const impl of IMPLS) {
       registry.begin({ taskId: 'fact_task_2', ...SCOPE, request: '替换后任务' });
       expect(firstFacts).toHaveLength(5);
       expect(secondFacts.map((fact) => fact.taskId)).toEqual(['fact_task_2']);
+    });
+
+    it('TaskFact.stateVersion（v1.1）：每条成功状态变化的事实携带稳定去重版本（缺省=at）', () => {
+      const registry = impl.make();
+      const facts: TaskFact[] = [];
+      registry.onTaskFact((fact) => facts.push(fact));
+      registry.begin({ taskId: 'version_task', ...SCOPE, request: '版本任务', status: 'queued' });
+      registry.claimNextQueued({ owner: 'runner-v', leaseMs: 1_000 });
+      registry.requestCancel('version_task');
+      expect(facts.map((fact) => fact.to)).toEqual(['queued', 'running', 'cancelling']);
+      for (const fact of facts) {
+        expect(fact.stateVersion, `${fact.to} 事实的 stateVersion`).toBe(fact.at);
+      }
     });
   });
 }

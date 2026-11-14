@@ -76,7 +76,8 @@ export interface PendingQuestion {
 
 /**
  * 状态事实（供 P4/P6，非事件总线）：每次成功状态变化一条；begin 创建事实无 from
- * （不是状态转换）。
+ * （不是状态转换）。v1.1：`stateVersion` 为稳定去重版本（P4 outbox 唯一键用），
+ * 缺省 = `at`（集成若提供注册表计数器可显式传入更精确版本）。
  */
 export interface TaskFact {
   taskId: string;
@@ -86,6 +87,7 @@ export interface TaskFact {
   to: TaskStatus;
   reason?: TaskReason;
   at: string;
+  stateVersion?: string | number;
 }
 
 export type TaskFactHook = (fact: TaskFact) => void;
@@ -374,6 +376,8 @@ export interface TaskFactSeed {
   to: TaskStatus;
   reason?: TaskReason;
   at: string;
+  /** v1.1：稳定去重版本；缺省 = at。 */
+  stateVersion?: string | number;
 }
 
 export interface TaskRegistry {
@@ -470,6 +474,8 @@ export function createTaskRegistry(): TaskRegistry {
     to: seed.to,
     ...(seed.reason === undefined ? {} : { reason: seed.reason }),
     at: seed.at,
+    // v1.1：稳定去重版本，缺省 = at（本实现不建计数器；集成可显式传入更精确版本）。
+    stateVersion: seed.stateVersion ?? seed.at,
   });
 
   const emit = (fact: TaskFact): void => {
