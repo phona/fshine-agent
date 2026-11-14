@@ -1,5 +1,7 @@
 # R4 产品切片计划与验收标准（2026-11-14）
 
+> 已被 R4 统一任务书重映射，见 `docs/product/r4-slices.md`（S1–S5 去向与 P0–P8 分片）。
+
 > 依据：R3 收官认可（`arch/integration` @ `d70c8c3`）+ owner 2026-11-14 裁定与补充产品约束。
 > 原则：**先形成切片与验收计划，再逐项授权实施**；不为此重启大型重构；不变更架构冻结面
 > （Runtime Minimal / Pi First / Skills First）；真实平台接入与写开放仍由 owner 分阶段授权。
