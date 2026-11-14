@@ -27,14 +27,14 @@ import { fileURLToPath } from 'node:url';
 import type { TaskRecord } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import {
-  TASK_STATUS_WORDS,
   formatLocalTime,
   renderTaskLedgerLine,
   resolveOutPath,
   resolveTaskDbPath,
   summarizeRequest,
   taskLabel,
-  taskReasonLine,
+  taskOutcomeReasonLine,
+  taskStatusWord,
 } from './tasks';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -99,13 +99,21 @@ export interface OpsStatusCounts {
   failed: number;
   unexecuted: number;
   running: number;
+  /** P2b：新状态各成一词，不再落「其他（未知状态）」。 */
+  queued: number;
+  waitingUser: number;
+  cancelling: number;
+  cancelled: number;
+  timedOut: number;
+  /** 未识别的存储值（fail-open 只呈现，不重判）。 */
   other: number;
 }
 
-/** 统计：总数 + 四态计数；未识别的存储值进 other（只呈现，不重判）。 */
+/** 统计：总数 + 各状态计数；未识别的存储值进 other。 */
 export function countOpsStatuses(records: readonly TaskRecord[]): OpsStatusCounts {
   const counts: OpsStatusCounts = {
-    total: records.length, completed: 0, failed: 0, unexecuted: 0, running: 0, other: 0,
+    total: records.length, completed: 0, failed: 0, unexecuted: 0, running: 0,
+    queued: 0, waitingUser: 0, cancelling: 0, cancelled: 0, timedOut: 0, other: 0,
   };
   for (const task of records) {
     switch (task.status) {
@@ -113,23 +121,29 @@ export function countOpsStatuses(records: readonly TaskRecord[]): OpsStatusCount
       case 'failed': counts.failed += 1; break;
       case 'unexecuted': counts.unexecuted += 1; break;
       case 'running': counts.running += 1; break;
+      case 'queued': counts.queued += 1; break;
+      case 'waiting_user': counts.waitingUser += 1; break;
+      case 'cancelling': counts.cancelling += 1; break;
+      case 'cancelled': counts.cancelled += 1; break;
+      case 'timed_out': counts.timedOut += 1; break;
       default: counts.other += 1; break;
     }
   }
   return counts;
 }
 
-/** stdout 统计行（成功时第二行）。 */
+/** stdout 统计行（成功时第二行）：基础四态 + 非零新状态 + 非零其他。 */
 export function renderOpsCountsLine(counts: OpsStatusCounts): string {
-  const other = counts.other > 0 ? ` / 其他 ${counts.other}` : '';
+  const extra: string[] = [];
+  if (counts.queued > 0) extra.push(`排队中 ${counts.queued}`);
+  if (counts.waitingUser > 0) extra.push(`等待用户 ${counts.waitingUser}`);
+  if (counts.cancelling > 0) extra.push(`取消中 ${counts.cancelling}`);
+  if (counts.cancelled > 0) extra.push(`已取消 ${counts.cancelled}`);
+  if (counts.timedOut > 0) extra.push(`已超时 ${counts.timedOut}`);
+  if (counts.other > 0) extra.push(`其他 ${counts.other}`);
+  const suffix = extra.length > 0 ? ` / ${extra.join(' / ')}` : '';
   return `任务：共 ${counts.total} 条（已完成 ${counts.completed} / 失败 ${counts.failed}`
-    + ` / 未执行 ${counts.unexecuted} / 进行中 ${counts.running}${other}）`;
-}
-
-/** 状态展示词：已知四态复用 tasks 词表；未识别存储值 fail-open 显示「未知状态（原值）」。 */
-function statusWord(status: TaskRecord['status']): string {
-  const known = (TASK_STATUS_WORDS as Record<string, string | undefined>)[status];
-  return known === undefined ? `未知状态（${String(status)}）` : known;
+    + ` / 未执行 ${counts.unexecuted} / 进行中 ${counts.running}${suffix}）`;
 }
 
 /** 最新在前：createdAt 降序、同刻 taskId 降序——与 tasks 列表（升序取末 N 再反序）同口径。 */
@@ -145,8 +159,10 @@ export function displayPath(dbPath: string, repoRoot: string): string {
   return relative !== '' && !relative.startsWith('..') ? relative : dbPath;
 }
 
-const isFailedOrUnexecuted = (task: TaskRecord): boolean =>
-  task.status === 'failed' || task.status === 'unexecuted';
+/** 未成功终态（P2b）：失败/未执行/已取消/已超时——清单收录范围与原因单元格口径见 renderOpsPage。 */
+const isTerminalNonSuccess = (task: TaskRecord): boolean =>
+  task.status === 'failed' || task.status === 'unexecuted'
+  || task.status === 'cancelled' || task.status === 'timed_out';
 
 /** 表格数据行（cells 必须已转义——调用点一律 escapeHtml）。 */
 function dataRow(cells: readonly string[]): string {
@@ -197,7 +213,7 @@ const LIMIT_ITEMS: readonly string[] = [
   '只读打开 WAL 库可能出现 <code>-wal</code>/<code>-shm</code> 旁路文件（SQLite 固有；不删除以免干扰活跃写者）。',
   '单任务详情 / 交付件导出：<code>npm run tasks -- &lt;#编号&gt;</code>'
     + '（也接受内部 taskId；<code>--out &lt;path&gt;</code> 导出 Markdown）；重新交办：<code>npm run tasks -- &lt;#编号&gt; --redo</code>。',
-  '失败与未执行清单收录终态非成功任务（失败/未执行），原因为底账持久化的机械判定原文。',
+  '未成功终态清单收录所有终态非成功任务（失败/未执行/已取消/已超时），原因取底账机械原因（cancelled_by_user/timeout/failed_confirmed/result_unknown/resource_limited）或收尾判定的失败原文，不重判。',
   '质量与覆盖报告（文本指针，非链接）：<code>scripts/eval/exploration/quality-report-v1.md</code>；'
     + '复跑用户级评测：<code>npm run eval:user</code>（缺省输出 <code>.runtime/eval-r1/</code>）。',
   '本页无脚本、无外链、可离线打开；刷新 = 重新运行 <code>npm run ops</code>。',
@@ -213,7 +229,7 @@ export function renderOpsPage(input: OpsPageInput): string {
   const newestFirst = [...input.records].sort(compareNewestFirst);
   const counts = countOpsStatuses(input.records);
   const recent = newestFirst.slice(0, recentLimit);
-  const failures = newestFirst.filter(isFailedOrUnexecuted);
+  const failures = newestFirst.filter(isTerminalNonSuccess);
   const failuresShown = failures.slice(0, failureLimit);
   const ledgerLine = input.dbMissing === true
     ? `任务底账：${displayPath(input.dbPath, REPO_ROOT)}（不存在，未创建）`
@@ -223,8 +239,8 @@ export function renderOpsPage(input: OpsPageInput): string {
     ? `最近任务（共 ${counts.total} 条，仅显示最近 ${recentLimit} 条）`
     : `最近任务（共 ${counts.total} 条）`;
   const failureHeader = failures.length > failureLimit
-    ? `失败与未执行清单（共 ${failures.length} 条，仅显示最近 ${failureLimit} 条）`
-    : `失败与未执行清单（共 ${failures.length} 条）`;
+    ? `未成功终态清单（共 ${failures.length} 条，仅显示最近 ${failureLimit} 条）`
+    : `未成功终态清单（共 ${failures.length} 条）`;
 
   const lines: string[] = [];
   lines.push('<!DOCTYPE html>');
@@ -259,6 +275,12 @@ export function renderOpsPage(input: OpsPageInput): string {
   lines.push(statRow('失败', counts.failed));
   lines.push(statRow('未执行', counts.unexecuted));
   lines.push(statRow('进行中', counts.running));
+  // P2b：新状态词行仅在非零时显示（存量页面不添恒零噪音）；恒等式仍覆盖全部计数。
+  if (counts.queued > 0) lines.push(statRow('排队中', counts.queued));
+  if (counts.waitingUser > 0) lines.push(statRow('等待用户', counts.waitingUser));
+  if (counts.cancelling > 0) lines.push(statRow('取消中', counts.cancelling));
+  if (counts.cancelled > 0) lines.push(statRow('已取消', counts.cancelled));
+  if (counts.timedOut > 0) lines.push(statRow('已超时', counts.timedOut));
   if (counts.other > 0) lines.push(statRow('其他（未知状态）', counts.other));
   lines.push('</tbody>');
   lines.push('</table>');
@@ -276,7 +298,7 @@ export function renderOpsPage(input: OpsPageInput): string {
       lines.push(dataRow([
         escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
-        escapeHtml(statusWord(task.status)),
+        escapeHtml(taskStatusWord(task.status)),
         escapeHtml(summarizeRequest(task.request)),
       ]));
     }
@@ -297,7 +319,7 @@ export function renderOpsPage(input: OpsPageInput): string {
       lines.push(dataRow([
         escapeHtml(taskLabel(task)),
         escapeHtml(formatLocalTime(task.createdAt)),
-        escapeHtml(taskReasonLine(task) ?? '（底账未记录原因）'),
+        escapeHtml(taskOutcomeReasonLine(task) ?? '（底账未记录原因）'),
       ]));
     }
     lines.push('</tbody>');
