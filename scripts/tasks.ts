@@ -38,6 +38,7 @@ import {
   type TaskStatus,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { createNotificationReader, type Notification, type NotificationKind } from '../packages/agent/src/notifications';
 import type { AskRuntimeInput } from './ask-runtime';
 import { explicitConfigFrom } from './resolve-config-path';
 
@@ -184,6 +185,47 @@ export function taskStatusWord(status: TaskStatus): string {
 export function taskReasonWord(reason: TaskReason): string {
   // 未知存储值 fail-open：显示原值（词表演进的向前兼容）。
   return (TASK_REASON_WORDS as Record<string, string | undefined>)[reason] ?? `未知原因（${String(reason)}）`;
+}
+
+/** 通知意图（P4 九类）→ 用户词（展示层唯一词表；web 与 ops 复用）。 */
+export const NOTIFICATION_KIND_WORDS: Record<NotificationKind, string> = {
+  accepted: '已受理',
+  started: '已开始',
+  waiting_user: '等待用户',
+  resumed: '已恢复',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+  timed_out: '已超时',
+  resource_limited: '资源受限',
+};
+
+export function notificationKindWord(kind: NotificationKind): string {
+  // 未知存储值 fail-open：显示原值（词表演进的向前兼容）。
+  return (NOTIFICATION_KIND_WORDS as Record<string, string | undefined>)[kind] ?? `未知通知（${String(kind)}）`;
+}
+
+/**
+ * 通知投递行（只读最小展示；P4 §4 冻结口径——不注入对话历史，只按需读取）：
+ *   · 已送达 → 「已送达」；未送达 → 「未送达（重试 n/max）」；重试上限已停 → 「未送达（已停止重试）」；
+ *   · 无通知行返回空数组（历史行零变化，不显示该段）。
+ */
+export function taskNotificationLines(
+  notifications: readonly Notification[],
+  options: { maxAttempts?: number } = {},
+): string[] {
+  if (notifications.length === 0) return [];
+  const maxAttempts = options.maxAttempts ?? 5;
+  const lines = ['通知投递：'];
+  for (const notification of notifications) {
+    const status = notification.deliveredAt !== undefined
+      ? '已送达'
+      : notification.exhausted
+        ? '未送达（已停止重试）'
+        : `未送达（重试 ${notification.attempts}/${maxAttempts}）`;
+    lines.push(`- ${notificationKindWord(notification.kind)}：${status}`);
+  }
+  return lines;
 }
 
 const pad = (value: number): string => String(value).padStart(2, '0');
@@ -333,7 +375,7 @@ export function taskReplyLines(task: TaskRecord): string[] {
 }
 
 /** 单任务详情：消费上面的同一组字段行（状态 → 机械原因 → 失败/未执行原文 → 执行 → 结果 → 回复）。 */
-export function renderTaskDetail(task: TaskRecord): string {
+export function renderTaskDetail(task: TaskRecord, options: { notifications?: readonly Notification[] } = {}): string {
   const lines = [taskIdentityLine(task), taskStatusLine(task), taskTimeline(task), taskRequestLine(task)];
   const reasonLines = [taskMechanicalReasonLine(task), taskReasonLine(task)]
     .filter((line): line is string => line !== undefined);
@@ -341,6 +383,8 @@ export function renderTaskDetail(task: TaskRecord): string {
   lines.push('', ...taskExecutionLines(task));
   lines.push('', ...taskResultLines(task));
   lines.push('', ...taskReplyLines(task));
+  const notificationLines = taskNotificationLines(options.notifications ?? []);
+  if (notificationLines.length > 0) lines.push('', ...notificationLines);
   return lines.join('\n');
 }
 
@@ -626,7 +670,15 @@ async function main(): Promise<void> {
       return;
     }
     if (parsed.outPath === undefined) {
-      console.log(`${renderTaskDetail(task)}\n${renderTaskLedgerLine(dbPath)}`);
+      // 只读展示通知投递状态（表不存在/无行给空集合，不建表不写字节；历史行零变化）。
+      const notificationReader = createNotificationReader(dbPath);
+      let notifications: readonly Notification[];
+      try {
+        notifications = notificationReader.listNotifications(task.taskId);
+      } finally {
+        notificationReader.close();
+      }
+      console.log(`${renderTaskDetail(task, { notifications })}\n${renderTaskLedgerLine(dbPath)}`);
       return;
     }
     // 导出：先渲染（纯内存），再独占写出用户指定的那一个文件；底账只读，不写库、不建目录。

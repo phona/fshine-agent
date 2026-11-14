@@ -217,11 +217,12 @@ describe('R4 联合：server background 渠道回合（假 executor/sink）', ()
       expect(accepted).toMatchObject({ status: 'queued', accepted: true, taskNo: 1 });
       expect(String(accepted['notice'])).toContain('#1');
       const taskId = String(accepted['taskId']);
+      const taskScope = { principalId: 'wecom:user-a', sessionId: 'wecom:conv-a' };
       // 后台完成 + 结果经 archiveReply 取回
       await vi.waitFor(() => {
-        expect(registry.get(taskId).status).toBe('completed');
+        expect(registry.get(taskId, taskScope).status).toBe('completed');
       });
-      expect(registry.get(taskId).replyText).toBe('W202611：documents 共 3 条。');
+      expect(registry.get(taskId, taskScope).replyText).toBe('W202611：documents 共 3 条。');
       // 通知投递（假 sink）：受理/开始/完成
       await server.deliverPending();
       await vi.waitFor(() => {

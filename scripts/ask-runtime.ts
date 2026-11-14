@@ -32,16 +32,31 @@
 import { mkdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { ContextProfileConfig } from '@fshine/contracts';
+import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
 import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
 import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
-import { MAIN_PROTOCOL_NOTE, createSession, type Session, type WorkerSkill } from '../packages/agent/src/execution-runtime';
+import {
+  MAIN_PROTOCOL_NOTE,
+  createSession,
+  createTaskExecutor,
+  type Session,
+  type WorkerSkill,
+} from '../packages/agent/src/execution-runtime';
+import {
+  createNotificationOutbox,
+  notificationKindForTransition,
+  type NotificationOutbox,
+  type NotificationReason,
+  type NotificationSink,
+} from '../packages/agent/src/notifications';
+import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from '../packages/agent/src/resource-policy';
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
+import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
 import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
 import { EvalIsolationRefused, assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
@@ -144,6 +159,22 @@ export interface SessionAssemblyInput {
   mainSystemPrompt?: string;
   /** 预装载 Worker 技能（server 启动时装载一次）；缺省现装。 */
   workerSkills?: readonly WorkerSkill[];
+  /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（单并发/无队列/无任务级预算）。 */
+  runtime?: RuntimeConfig;
+  /** P5：进程级共享策略（server 跨会话复用）；缺省由本核心按 runtime 建。 */
+  policy?: ResourcePolicy;
+  /** P6：派发模式覆盖；缺省取 `runtime.dispatchMode ?? 'inline'`。 */
+  dispatchMode?: 'inline' | 'background';
+  /** P6：进程级共享 runner（server 预建）；background 且缺省时由本核心按本会话执行面构建。 */
+  taskRunner?: TaskRunner;
+  /** P6：后台执行回合注入（测试/特殊部署）；缺省 = 真实 Worker 回合执行器。 */
+  taskExecutor?: TaskExecutor;
+  /** P4：通知 sink（提供且 background 时建 outbox 并挂 onTaskFact；生产由 server 注入）。 */
+  notificationSink?: NotificationSink;
+  /** P4：outbox attempts 上限（缺省模块缺省 5；reader 需同值对账）。 */
+  notificationMaxAttempts?: number;
+  /** P6：runner 覆盖（测试确定性：leaseMs/时钟/属主）。 */
+  runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
 }
 
 /** 装配核心产出：会话 + 本次使用的面（调用方按需读取/关闭）。 */
@@ -152,7 +183,13 @@ export interface AssembledSession {
   auditPath: string;
   /** 本次使用的底账（注入的原样返回；自建的由 close 关闭）。 */
   taskRegistry: TaskRegistry;
-  /** 关闭自建底账；注入的底账归调用方（不在此关）。 */
+  /** P5：本会话使用的资源策略（注入的原样返回；自建随 close 丢弃）。 */
+  policy: ResourcePolicy;
+  /** P6：background 模式的后台运行器（注入或自建）；inline 模式 undefined。 */
+  runner?: TaskRunner;
+  /** P4：本核心建的通知 outbox（未注入 sink/非 background 时 undefined；close 关闭）。 */
+  notifications?: NotificationOutbox;
+  /** 关闭自建底账/outbox；注入的归调用方（不在此关）。 */
   close(): void;
 }
 
@@ -178,12 +215,142 @@ async function defaultExecutionFace(input: {
   return { client, allowedOperations };
 }
 
+/** 执行面解析（注入优先，缺省仓内 dummy；后台派发与装配核心共用同一链，不另建装配）。 */
+export interface ExecutionFaceResolverInput {
+  profile: ContextProfileConfig;
+  env: NodeJS.ProcessEnv;
+  stateDir: string;
+  emptyOperationsMessage: string;
+  emptyOperationsError?: (message: string) => Error;
+  createExecutionFace?: ExecutionFaceFactory;
+}
+
+export async function resolveExecutionFace(input: ExecutionFaceResolverInput): Promise<ExecutionFace> {
+  if (input.createExecutionFace !== undefined) {
+    return await input.createExecutionFace(input.profile, input.env);
+  }
+  return await defaultExecutionFace({
+    profile: input.profile,
+    env: input.env,
+    stateDir: input.stateDir,
+    emptyOperationsMessage: input.emptyOperationsMessage,
+    emptyOperationsError: input.emptyOperationsError ?? ((message) => new Error(message)),
+  });
+}
+
+/** worker 回合上限之上的租约余量：覆盖最长回合 + 收尾，避免在飞回合被误判 result_unknown。 */
+const LEASE_MARGIN_MS = 60_000;
+
+/**
+ * 后台派发装配（P6）：解析 runtime → 执行面/worker 驱动（可复用或自建）→ 单回合执行器
+ * （可注入假件）→ TaskRunner。runner 为**进程级**对象，由入口（server）或装配核心构建后
+ * 注入会话；本函数不 pump（触发点由调用方掌握：受理后/落定后/启动恢复）。
+ */
+export interface BackgroundDispatchInput {
+  env: NodeJS.ProcessEnv;
+  profile: ContextProfileConfig;
+  stateDir: string;
+  registry: TaskRegistry;
+  policy: ResourcePolicy;
+  workerSkills?: readonly WorkerSkill[];
+  runtime?: RuntimeConfig;
+  emptyOperationsMessage: string;
+  emptyOperationsError?: (message: string) => Error;
+  createDrivers?: DriverFactory;
+  createExecutionFace?: ExecutionFaceFactory;
+  /** 测试注入：假后台执行器（缺省 = 真实 Worker 回合执行器）。 */
+  taskExecutor?: TaskExecutor;
+  /** 预构建执行面/worker 驱动（装配核心复用；已给 taskExecutor 时不需要）。 */
+  face?: ExecutionFace;
+  workerDriver?: TurnDriver;
+  /** runner 覆盖（测试确定性：leaseMs/时钟/属主；缺省 leaseMs=workerTurnMs+60s）。 */
+  runnerOptions?: { leaseMs?: number; owner?: string; now?: () => Date };
+}
+
+export interface BackgroundDispatch {
+  runner: TaskRunner;
+}
+
+export async function createBackgroundDispatch(input: BackgroundDispatchInput): Promise<BackgroundDispatch> {
+  const resolved = resolveRuntimeConfig(input.runtime);
+  let executor = input.taskExecutor;
+  if (executor === undefined) {
+    const face = input.face ?? await resolveExecutionFace({
+      profile: input.profile,
+      env: input.env,
+      stateDir: input.stateDir,
+      emptyOperationsMessage: input.emptyOperationsMessage,
+      ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
+      ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
+    });
+    const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
+      ? input.createDrivers(input.env).workerDriver
+      : createPiTurnDriver({ env: input.env }));
+    executor = await createTaskExecutor({
+      client: face.client,
+      allowedOperations: face.allowedOperations,
+      workerDriver,
+      ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
+      registry: input.registry,
+      workerTurnMs: resolved.workerTurnMs,
+    });
+  }
+  const runner = createTaskRunner({
+    registry: input.registry,
+    policy: input.policy,
+    executor,
+    leaseMs: input.runnerOptions?.leaseMs ?? resolved.workerTurnMs + LEASE_MARGIN_MS,
+    ...(input.runnerOptions?.owner === undefined ? {} : { owner: input.runnerOptions.owner }),
+    ...(input.runnerOptions?.now === undefined ? {} : { now: input.runnerOptions.now }),
+  });
+  return { runner };
+}
+
+export interface NotificationHookOptions {
+  /** true = 每条事实落库后异步触发一次投递（server 进程：终态通知即刻推送）。 */
+  deliverOnRecord?: boolean;
+}
+
+/**
+ * registry 事实 → 通知 outbox（P4 §4 冻结口径的唯一接线点）：
+ *   · `onTaskFact(fact)` 单回调；有通知意图才 record（cancelling/unexecuted 等过渡态不写）；
+ *   · stateVersion 缺省 = fact.at（同一事实重复触发稳定去重）；payload 仅底账白名单字段；
+ *   · 投递失败不影响任务事实（outbox 自身语义）。
+ */
+export function attachNotificationOutbox(
+  registry: TaskRegistry,
+  outbox: NotificationOutbox,
+  options: NotificationHookOptions = {},
+): void {
+  registry.onTaskFact((fact) => {
+    const kind = notificationKindForTransition(fact.from, fact.to, fact.reason as NotificationReason | undefined);
+    if (kind === undefined) return;
+    outbox.record({
+      taskId: fact.taskId,
+      kind,
+      at: fact.at,
+      stateVersion: fact.stateVersion ?? fact.at,
+      taskNo: fact.taskNo,
+      name: fact.name,
+      ...(fact.reason === undefined ? {} : { reason: fact.reason }),
+    });
+    if (options.deliverOnRecord === true) {
+      void outbox.deliverPending().catch(() => {});
+    }
+  });
+}
+
 /**
  * 共享装配核心（生产面唯一装配链）：
- *   stateDir/审计路径 → 隔离断言（可选）→ 执行面 → 底账 → 技能/角色 → 驱动 → createSession。
+ *   stateDir/审计路径 → 隔离断言（可选）→ 执行面 → 底账 → 技能/角色 → 驱动
+ *   →（P5 policy / P6 background runner / P4 outbox）→ createSession。
  * 顺序与抽取前逐入口一致（门内不建库、不落盘：执行面失败时底账尚未创建）。
  */
 export async function assembleSessionCore(input: SessionAssemblyInput): Promise<AssembledSession> {
+  const dispatchMode: 'inline' | 'background' = input.dispatchMode ?? input.runtime?.dispatchMode ?? 'inline';
+  const resolved = resolveRuntimeConfig(input.runtime);
+  const policy = input.policy ?? createResourcePolicy(input.runtime);
+
   const auditPath = path.join(input.stateDir, 'audit.jsonl');
   if (input.setAuditPath === true) {
     mkdirSync(input.stateDir, { recursive: true });
@@ -191,21 +358,21 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
   }
   input.assertIsolation?.();
 
-  const face = input.createExecutionFace !== undefined
-    ? await input.createExecutionFace(input.profile, input.env)
-    : await defaultExecutionFace({
-        profile: input.profile,
-        env: input.env,
-        stateDir: input.stateDir,
-        emptyOperationsMessage: input.emptyOperationsMessage,
-        emptyOperationsError: input.emptyOperationsError ?? ((message) => new Error(message)),
-      });
+  const face = await resolveExecutionFace({
+    profile: input.profile,
+    env: input.env,
+    stateDir: input.stateDir,
+    emptyOperationsMessage: input.emptyOperationsMessage,
+    ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
+    ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
+  });
 
   // 底账：注入的归调用方（不在此关）；自建的由本核心关闭（SQLite 需要 close 收尾）。
   const ownedRegistry: SqliteTaskRegistry | undefined = input.taskRegistry === undefined
     ? createSqliteTaskRegistry(input.dbPath)
     : undefined;
   const taskRegistry: TaskRegistry = input.taskRegistry ?? ownedRegistry!;
+  let notifications: NotificationOutbox | undefined;
   try {
     const workerSkills = input.workerSkills ?? await loadWorkerSkills(input.profile.root, input.profile.skillRoots);
     let mainSystemPrompt = input.mainSystemPrompt;
@@ -216,6 +383,38 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     const drivers = input.createDrivers !== undefined
       ? input.createDrivers(input.env)
       : { mainDriver: createPiTurnDriver({ env: input.env }), workerDriver: createPiTurnDriver({ env: input.env }) };
+
+    // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
+    let runner = input.taskRunner;
+    if (dispatchMode === 'background' && runner === undefined) {
+      runner = (await createBackgroundDispatch({
+        env: input.env,
+        profile: input.profile,
+        stateDir: input.stateDir,
+        registry: taskRegistry,
+        policy,
+        workerSkills,
+        ...(input.runtime === undefined ? {} : { runtime: input.runtime }),
+        emptyOperationsMessage: input.emptyOperationsMessage,
+        ...(input.emptyOperationsError === undefined ? {} : { emptyOperationsError: input.emptyOperationsError }),
+        ...(input.createDrivers === undefined ? {} : { createDrivers: input.createDrivers }),
+        ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
+        ...(input.taskExecutor === undefined ? {} : { taskExecutor: input.taskExecutor }),
+        ...(input.runnerOptions === undefined ? {} : { runnerOptions: input.runnerOptions }),
+        face,
+        workerDriver: drivers.workerDriver,
+      })).runner;
+    }
+    // P4：通知链仅 background 且提供 sink 时启用（inline 默认零新增路径；投递由调用方触发）。
+    if (dispatchMode === 'background' && input.notificationSink !== undefined) {
+      notifications = createNotificationOutbox({
+        dbPath: input.dbPath,
+        sink: input.notificationSink,
+        ...(input.notificationMaxAttempts === undefined ? {} : { maxAttempts: input.notificationMaxAttempts }),
+      });
+      attachNotificationOutbox(taskRegistry, notifications);
+    }
+
     const session = await createSession({
       principalId: input.principalId,
       sessionId: input.sessionId,
@@ -226,14 +425,26 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       mainSystemPrompt,
       workerSkills,
       taskRegistry,
+      policy,
+      dispatchMode,
+      ...(runner === undefined ? {} : { taskRunner: runner }),
+      mainTurnMs: resolved.mainTurnMs,
+      workerTurnMs: resolved.workerTurnMs,
     });
     return {
       session,
       auditPath,
       taskRegistry,
-      close: () => ownedRegistry?.close(),
+      policy,
+      ...(runner === undefined ? {} : { runner }),
+      ...(notifications === undefined ? {} : { notifications }),
+      close: () => {
+        notifications?.close();
+        ownedRegistry?.close();
+      },
     };
   } catch (error) {
+    notifications?.close();
     ownedRegistry?.close();
     throw error;
   }
@@ -261,6 +472,11 @@ export async function assembleAskRuntime(input: AskRuntimeInput): Promise<AskRun
     ?? Object.entries(config.principals).find(([, principal]) => principal.enabled)?.[0];
   if (principalId === undefined) {
     throw new AssemblyRefusedError('配置里没有 enabled principal——最小切片需要可信身份来源（fail-closed，不回落写死值）。');
+  }
+  // R4 登记边界：ask/redo 是进程内单轮入口，不承接后台派发（受理后进程即退出会半程丢任务）。
+  // 显式拒绝而非静默忽略——需要 background 的部署走 server 渠道面。
+  if ((config.runtime?.dispatchMode ?? 'inline') === 'background') {
+    throw new AssemblyRefusedError(`${input.purpose} 入口不支持 runtime.dispatchMode=background——后台派发由 server 渠道面承接（本入口不静默忽略）。`);
   }
 
   const stateDir = path.join(input.runtimeDir, 'state');

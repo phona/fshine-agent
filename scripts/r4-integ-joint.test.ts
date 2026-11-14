@@ -455,6 +455,44 @@ describe('R4 联合：P6 后台受理与执行（background 模式，假 executo
   });
 });
 
+describe('R4 联合：P5 前台许可（inline 模式）', () => {
+  it('⑭ 前台被占满时确定性拒绝；释放后可再入且回合结束已释放（P5 强制点）', async () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const records: MainDriverRecord[] = [];
+    const plans = new Map<string, MainPlan>([['你好', { reply: '你好。' }]]);
+    const assembled = await assembleSessionCore({
+      env: { PATH: process.env['PATH'], HOME: process.env['HOME'], TMPDIR: process.env['TMPDIR'] },
+      profile: PROFILE,
+      principalId: SCOPE_A.principalId,
+      sessionId: SCOPE_A.sessionId,
+      dbPath,
+      stateDir: path.join(path.dirname(dbPath), 'state'),
+      setAuditPath: true,
+      emptyOperationsMessage: '（测试）执行层没有声明任何只读 operation',
+      mainSystemPrompt: '（测试）Main 系统提示',
+      workerSkills: [],
+      createDrivers: () => ({
+        mainDriver: fakeMainDriver(plans, records),
+        workerDriver: unreachableDriver(),
+      }),
+      createExecutionFace: async () => ({ client: new FaceClient(), allowedOperations: ['dummy.query'] }),
+      runtime: { dispatchMode: 'inline' },
+    });
+    try {
+      const held = assembled.policy.acquire('foreground', { taskId: '外部回合' });
+      if (held.ok === false) throw new Error('（测试）前台许可应可准入');
+      await expect(assembled.session.send('你好')).rejects.toThrowError(/前台回合被资源策略拒绝/);
+      assembled.policy.release(held);
+      const turn = await assembled.session.send('你好');
+      expect(turn.reply).toBe('你好。');
+      // 回合结束已释放：账本归零（不泄漏许可）
+      expect(assembled.policy.snapshot().foreground.active).toBe(0);
+    } finally {
+      assembled.close();
+    }
+  });
+});
+
 describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
   it('④ 通知生成/去重/投递 + 只读可查（未送达 → 已送达）', async () => {
     const dbPath = path.join(tempDir(), 'state.db');

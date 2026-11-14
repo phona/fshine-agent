@@ -2,7 +2,10 @@
  * server 装配（宿主接线）：
  *   渠道消息 → 可信身份（principalId/sessionId 取自渠道事实）→ 回合运行时 → 渠道回复。
  *
- * 本切片不做（后续切片）：计划确认 / 后台派发 / 产物回收 / 提案；附件只登记不消费。
+ * 本切片不做（后续切片）：计划确认 / 产物回收 / 提案；附件只登记不消费。
+ * R4（P5/P6/P4）：会话按 promise 链串行化（同会话不并发）；`runtime.dispatchMode='background'`
+ * 时启动建进程级 TaskRunner（含重启恢复 pump）与通知 outbox（注入 sink），受理即回执；
+ * 缺省 'inline' = 上段现行为。
  * 执行面 = profile 声明的网关（缺省仓内 dummy CLI，不触网）；模型 = 真实 Pi 驱动（env）。
  * 任务底账 = SQLite（B 类）：会话共享一个库，list/get 按 principal+session 收口。
  *
@@ -20,9 +23,21 @@ import type { AppConfig, ContextProfileConfig, ReplyHandler } from '@fshine/cont
 import type { TurnDriver } from '../../packages/agent/src/driver-contract';
 import { applyExecutorLabel, loadAgentProfile } from '../../packages/agent/src/agent-profile';
 import { MAIN_PROTOCOL_NOTE, type Session } from '../../packages/agent/src/execution-runtime';
+import {
+  createNotificationOutbox,
+  type NotificationOutbox,
+  type NotificationSink,
+} from '../../packages/agent/src/notifications';
+import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
+import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
 import { loadWorkerSkills } from '../../packages/agent/src/worker-skills';
-import { assembleSessionCore, type ExecutionFace } from '../../scripts/ask-runtime';
+import {
+  assembleSessionCore,
+  attachNotificationOutbox,
+  createBackgroundDispatch,
+  type ExecutionFace,
+} from '../../scripts/ask-runtime';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -41,11 +56,17 @@ export interface ServerDeps {
   createDrivers?: (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
   /** 测试注入：执行面；缺省仓内 dummy CLI（按 profile root+gateway spawn）。 */
   createExecutionFace?: (profile: ContextProfileConfig, env: NodeJS.ProcessEnv) => Promise<ExecutionFace>;
+  /** 测试注入：后台执行回合（dispatchMode=background 时使用）；缺省真实 Worker 回合执行器。 */
+  taskExecutor?: TaskExecutor;
+  /** 测试注入 / 部署注入：通知投递 sink（background 时建 outbox；真实 WeCom 适配面归后续切片）。 */
+  notificationSink?: NotificationSink;
   logger?: (line: Record<string, unknown>) => void;
 }
 
 export interface Server {
   handler: ReplyHandler;
+  /** 显式触发通知投递（同进程有界重试；background 无 outbox 时为空操作）。 */
+  deliverPending(): Promise<void>;
   close(): void;
 }
 
@@ -76,6 +97,35 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
+  // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（单并发/无队列）。
+  const dispatchMode = deps.config.runtime?.dispatchMode ?? 'inline';
+  const policy = createResourcePolicy(deps.config.runtime);
+  // P6/P4：background 才启用新受理/后台/通知路径；缺省 inline 零新增路径。
+  let runner: TaskRunner | undefined;
+  let outbox: NotificationOutbox | undefined;
+  if (dispatchMode === 'background') {
+    runner = (await createBackgroundDispatch({
+      env: deps.env,
+      profile,
+      stateDir,
+      registry: taskRegistry,
+      policy,
+      workerSkills,
+      ...(deps.config.runtime === undefined ? {} : { runtime: deps.config.runtime }),
+      emptyOperationsMessage: '执行层没有声明任何只读 operation——server 拒绝以空允许集合运行。',
+      ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
+      ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
+      ...(deps.taskExecutor !== undefined ? { taskExecutor: deps.taskExecutor } : {}),
+    })).runner;
+    if (deps.notificationSink !== undefined) {
+      outbox = createNotificationOutbox({ dbPath: deps.dbPath, sink: deps.notificationSink });
+      // server 进程：事实落库后异步触发投递（终态通知即刻推送；同进程有界重试）。
+      attachNotificationOutbox(taskRegistry, outbox, { deliverOnRecord: true });
+    }
+    // 重启恢复：新进程第一次 pump（queued 重领 / 过期租约 → result_unknown 不重放 / completed 不重跑）。
+    runner.pump();
+  }
+
   /** 会话按（principal, session）双键缓存：群聊里不同用户不共享同一个会话对象。 */
   const sessions = new Map<string, Promise<Session>>();
   const sessionFor = (principalId: string, sessionId: string): Promise<Session> => {
@@ -96,6 +146,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           taskRegistry,
           mainSystemPrompt,
           workerSkills,
+          policy,
+          dispatchMode,
+          ...(runner === undefined ? {} : { taskRunner: runner }),
           ...(deps.createDrivers !== undefined ? { createDrivers: deps.createDrivers } : {}),
           ...(deps.createExecutionFace !== undefined ? { createExecutionFace: deps.createExecutionFace } : {}),
         });
@@ -107,6 +160,25 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
     }
     return pending;
   };
+
+  /**
+   * P5-T02 同会话串行化：handler 在 `acquire('foreground')` 之前按会话排 promise 链
+   * （前序失败不阻塞后续；链尾用完即清）。两条并发消息都处理、转录不互相覆盖。
+   */
+  const sessionChains = new Map<string, Promise<unknown>>();
+  function enqueueSessionTurn<T>(key: string, run: () => Promise<T>): Promise<T> {
+    const previous = sessionChains.get(key) ?? Promise.resolve();
+    const next = previous.then(run, run);
+    const tail: Promise<void> = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    sessionChains.set(key, tail);
+    void tail.then(() => {
+      if (sessionChains.get(key) === tail) sessionChains.delete(key);
+    });
+    return next;
+  }
 
   const handler: ReplyHandler = async (message) => {
     const channel = (message.channel ?? 'wecom').trim() || 'wecom';
@@ -123,8 +195,10 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
       log({ event: 'message_attachment_only', principalId, sessionId, messageId: message.messageId });
       return '';
     }
-    const session = await sessionFor(principalId, sessionId);
-    const turn = await session.send(message.text);
+    const turn = await enqueueSessionTurn(`${principalId}\u0000${sessionId}`, async () => {
+      const session = await sessionFor(principalId, sessionId);
+      return await session.send(message.text);
+    });
     log({
       event: 'message_done',
       principalId,
@@ -142,8 +216,12 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
 
   return {
     handler,
+    async deliverPending() {
+      if (outbox !== undefined) await outbox.deliverPending();
+    },
     close() {
       sessions.clear();
+      outbox?.close();
       taskRegistry.close();
     },
   };
