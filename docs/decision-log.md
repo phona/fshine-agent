@@ -1169,6 +1169,18 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十四、业务 E2E 阶段 2 · 臂 0 探测批次 + 报告 + 复核修复（2026-11-14，分支 `arch/r4-bizprobe`）
+
+- **授权**：owner 2026-11-14 授权阶段 2 探测基线（inline only；≤20 会话本批；一次采样不重采样；零产品改动；真实模型仅经 .env，只读复制）。
+- **交付**：`ac86e45`（6 场景用例集 `scripts/eval/exploration/bizprobe/` + 跑批装配 `scripts/eval/business-e2e/{scenarios,assembly,sample-from-run,model-executor,run}.ts`）→ `f3e4293`（驱动器注入口 + 确定性装配路径自测）→ `b7ec46a`（修判定投影 + 证据重算 + 报告补 batch 读数）→ `821b4c0`（#5 对话面零额度契约探针）→ `b9e0687`（探测报告）。产品代码零改动（`git diff ca6bef5 -- packages apps` = 0）。
+- **实跑读数（臂 0，真实模型 18 会话 = 6 场景 × N=3，并发=4，墙钟 154044ms，模型调用 46，token total=93871）**：逐场景 k/N（Wilson95 CI，只作探索性）：#1 B01 3/3[0.438,1.000]；#2 B02 3/3；#3 B03 0/3[0.000,0.562]（outOfScope×3）；#4 B04 3/3（**空洞**，限流未触发）；#6 B06 2/3[0.208,0.939]（unauthorized×1 severe）；#8 B08 3/3。机械不变量：outOfScope=3 / unauthorized=1 / writeAttempts=0 / meaninglessDuplicates=0 / falseCompletion=0。
+- **基建缺陷（已登记，只修不扩）**：① 判定投影不认执行层 flag 形态 args（`--collection`）→ 首轮 17/18 误判 severe；已修 `sample-from-run.ts` 并用**同一份原始证据重算**（`rejudge.ts`，零新会话）。② 限流旋钮 `DUMMY_RATE_LIMIT_MAX` 被宿主 worker env 白名单（`packages/agent/src/worker-env.ts:25`）丢弃 → #4 未受试。③ 报告缺 batch 资源读数（已修 `run.ts`，不回溯本批）。④ 首版契约探针引用 `backgroundConcurrency` 触发 P5 单一配置源守卫 → 改用缺省后台并发，未改守卫。
+- **待 owner 裁定（本批新增）**：① 臂 0 的 N——预注册 §三写 N=5、§四写 ≤20，内部不自洽，本批实施期取 N=3；未擅改预注册正文，补 `docs/product/business-e2e-prereg-addendum.md`（post-hoc 修订请求）。② 模型口径——`.env` 实为 `step-5-preview`，与预注册表述 `step-3.7-flash` 不一致。③ #4 限流驱动需夹具改由状态根驱动（超本批范围，需新预算重跑）。
+- **边界**：`#5` 本体（对话面接线）/#7/臂 A/B 仍 blocked；报告见 `docs/product/business-e2e-probe-report.md`；证据 `.runtime/bizprobe/`（gitignored）。`package.json` 增 1 行 `eval:bizprobe`（非产品接线）。
+- **独立复核**：待复核。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
