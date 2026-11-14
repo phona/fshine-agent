@@ -379,9 +379,11 @@ describe('tasks：任务交付件渲染与写出（P2）', () => {
       resultText: '执行层汇报原文：查到 beta 3 条。',
       replyText: '已查到 beta 集合 3 条记录，这是给你的最终回复。',
     }));
-    expect(text).toContain('## 最终回复\n\n最终回复：\n已查到 beta 集合 3 条记录，这是给你的最终回复。\n');
+    // 「最终回复」段本身：逐字在场、无存档标注不出现（限制段文案提该标注属说明，不在此段）。
+    const replySection = text.split('## 最终回复')[1]!.split('## 限制与说明')[0]!;
+    expect(replySection).toContain('最终回复：\n已查到 beta 集合 3 条记录，这是给你的最终回复。\n');
+    expect(replySection).not.toContain('该任务无最终回复存档');
     expect(text).toContain('## 任务结果\n\n任务结果：\n执行层汇报原文：查到 beta 3 条。');
-    expect(text).not.toContain('该任务无最终回复存档');
   });
 
   it('失败/未执行/worker 失败：原因行标签与详情同规则，步骤与结果原样', () => {

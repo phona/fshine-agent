@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 /** 迁移前的旧版 schema（P1 之前的 task-store.ts SCHEMA 原文，测试内固定为历史基线）。 */
-const LEGACY_SCHEMA = `
+const PRIOR_SCHEMA = `
 CREATE TABLE IF NOT EXISTS tasks (
   task_id TEXT PRIMARY KEY,
   principal_id TEXT NOT NULL,
@@ -66,11 +66,11 @@ CREATE INDEX IF NOT EXISTS idx_executions_task ON executions (task_id);
 `;
 
 /** 造旧版库：3 条历史任务（含同一 created_at 的并列项，钉住 task_id 升序稳定回填）+ 1 条执行记录。 */
-function seedLegacyDb(dbPath: string): void {
+function seedPriorSchemaDb(dbPath: string): void {
   const db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
-  db.exec(LEGACY_SCHEMA);
+  db.exec(PRIOR_SCHEMA);
   const insert = db.prepare(`
     INSERT INTO tasks (task_id, principal_id, session_id, request, status, result_text, failure_reason, created_at, updated_at)
     VALUES (@taskId, @principalId, @sessionId, @request, @status, @resultText, @failureReason, @createdAt, @updatedAt)
@@ -84,7 +84,7 @@ function seedLegacyDb(dbPath: string): void {
     insert.run({
       taskId: row.taskId,
       principalId: 'wecom:fixture-user',
-      sessionId: 'ask-legacy',
+      sessionId: 'ask-prior',
       request: row.request,
       status: row.status,
       resultText: row.resultText,
@@ -94,14 +94,14 @@ function seedLegacyDb(dbPath: string): void {
     });
   }
   db.prepare('INSERT INTO executions (request_id, task_id, operation, status, error_json) VALUES (?, ?, ?, ?, ?)')
-    .run('req_legacy_a', 'task_a', 'dummy.query', 'completed', null);
+    .run('req_prior_a', 'task_a', 'dummy.query', 'completed', null);
   db.prepare('INSERT INTO executions (request_id, task_id, operation, status, error_json) VALUES (?, ?, ?, ?, ?)')
-    .run('req_legacy_c', 'task_c', 'dummy.query', 'completed', null);
+    .run('req_prior_c', 'task_c', 'dummy.query', 'completed', null);
   db.close();
 }
 
 /** 只读快照：全部旧字段（迁移不得改写）+ 执行记录（迁移不得改写）。 */
-function legacySnapshot(dbPath: string): unknown {
+function priorSchemaSnapshot(dbPath: string): unknown {
   const db = new Database(dbPath, { readonly: true });
   try {
     return {
@@ -168,9 +168,9 @@ describe('P1-T01 迁移幂等与回填', () => {
   it('旧库首次打开：加列/按 (created_at, task_id) 回填编号/历史回复保持 NULL/旧字段零改动/备份+版本登记', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    seedLegacyDb(dbPath);
+    seedPriorSchemaDb(dbPath);
     const preMigrationSha = sha256(dbPath);
-    const before = legacySnapshot(dbPath);
+    const before = priorSchemaSnapshot(dbPath);
 
     const store = openTaskStore(dbPath);
     const tasks = store.listTasks();
@@ -181,7 +181,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     expect(tasks.map((stored) => stored.task.replyText)).toEqual([undefined, undefined, undefined]);
     expect(tasks.map((stored) => stored.task.name)).toEqual([undefined, undefined, undefined]);
     // 执行记录与旧字段逐字节不变。
-    expect(legacySnapshot(dbPath)).toEqual(before);
+    expect(priorSchemaSnapshot(dbPath)).toEqual(before);
 
     // 列已存在；user_version 记迁移版本。
     expect(columnNames(dbPath)).toEqual(expect.arrayContaining(['task_no', 'name', 'reply_text']));
@@ -196,7 +196,7 @@ describe('P1-T01 迁移幂等与回填', () => {
     // 幂等：第二次打开零差异、不新增备份、不重复回填。
     const second = openTaskStore(dbPath);
     expect(second.listTasks().map((stored) => stored.task.taskNo)).toEqual([1, 2, 3]);
-    expect(legacySnapshot(dbPath)).toEqual(before);
+    expect(priorSchemaSnapshot(dbPath)).toEqual(before);
     expect(rawTaskColumns(dbPath)).toEqual([
       { task_no: 1, name: null, reply_text: null },
       { task_no: 2, name: null, reply_text: null },
@@ -266,7 +266,7 @@ describe('P1-T02 并发分配与不复用', () => {
   it('迁移历史库后新任务接续历史最大编号（不重号、不从 1 重启）', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    seedLegacyDb(dbPath);
+    seedPriorSchemaDb(dbPath);
     const store = openTaskStore(dbPath);
     expect(store.insertTask(row({ taskId: 'task_new_1', createdAt: '2026-11-14T10:00:00.000Z' })).taskNo).toBe(4);
     expect(store.insertTask(row({ taskId: 'task_new_2', createdAt: '2026-11-14T10:00:01.000Z' })).taskNo).toBe(5);
@@ -303,7 +303,7 @@ describe('P1-T05 只读路径哈希不变（向前兼容）', () => {
   it('旧库只读打开：可读、不迁移、不建备份、主库哈希不变；新列读出为缺省', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    seedLegacyDb(dbPath);
+    seedPriorSchemaDb(dbPath);
     const before = sha256(dbPath);
 
     const store = openTaskStore(dbPath, { readOnly: true });
@@ -323,7 +323,7 @@ describe('P1-T05 只读路径哈希不变（向前兼容）', () => {
   it('迁移后只读打开：新字段可读、主库哈希不变', () => {
     const dir = tempDir();
     const dbPath = path.join(dir, 'state.db');
-    seedLegacyDb(dbPath);
+    seedPriorSchemaDb(dbPath);
     openTaskStore(dbPath).close();
     const before = sha256(dbPath);
 

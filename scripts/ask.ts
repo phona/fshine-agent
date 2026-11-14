@@ -16,12 +16,15 @@
  * 装配（配置物化/环境派生/前置门/执行层/底账/会话）与 `npm run tasks -- <id> --redo`
  * 共用 scripts/ask-runtime.ts 的同一函数；本入口只负责参数、运行时目录与输出。
  *
- * 打印：回复 + taskId / requestId / operation / status + dummy 执行层审计行。
+ * 打印：回复 + 机械证据行（#编号 + 业务名称 / requestId / operation / status）+ dummy 执行层审计行。
+ * 本文件可被安全 import（import.meta.main 守卫）：import 不执行 CLI 主体（测试/复用前提）。
  */
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { TaskRecord } from '../packages/agent/src/task-registry';
 import { AssemblyRefusedError, assembleAskRuntime, type AskRuntime } from './ask-runtime';
+import { taskLabel } from './tasks';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ASK_ROOT = path.join(REPO_ROOT, '.runtime', 'ask');
@@ -66,6 +69,29 @@ function readLines(file: string): string[] {
   }
 }
 
+export interface AskEvidenceInput {
+  principalId: string;
+  sessionId: string;
+  /** 本回合首个任务（无委派时缺省）；只读展示口径（#编号/名称/原文）。 */
+  task?: Pick<TaskRecord, 'taskNo' | 'name' | 'request'>;
+  executionCount: number;
+  completedCount: number;
+  auditLineCount: number;
+  elapsedSeconds: string;
+}
+
+/**
+ * 机械证据行（前两行；纯函数，测试与 CLI 同源）：业务展示位用「#编号 + 业务名称」，
+ * 不用内部 taskId（UUID 只出现在逐条执行证据 JSON 与底账/审计里）。
+ */
+export function renderAskEvidenceLines(input: AskEvidenceInput): string[] {
+  return [
+    `principal=${input.principalId} session=${input.sessionId} 委派=${input.task === undefined ? '否' : '是'}`,
+    `任务=${input.task === undefined ? '（无委派）' : taskLabel(input.task)} 结构化执行=${input.executionCount} 次`
+      + `（完成 ${input.completedCount}） dummy 审计=${input.auditLineCount} 行 用时=${input.elapsedSeconds}s`,
+  ];
+}
+
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
   if ('usageError' in parsed) {
@@ -105,6 +131,7 @@ async function main(): Promise<void> {
     const turn = await session.send(parsed.message);
     const auditLines = readLines(auditPath).slice(auditBefore);
     const tasks = session.tasks().filter((task) => turn.taskIds.includes(task.taskId));
+    const firstTask = tasks.find((task) => task.taskId === turn.taskIds[0]) ?? tasks[0];
     const facts = tasks.flatMap((task) => task.executions.map((execution) => ({
       taskId: task.taskId,
       requestId: execution.requestId,
@@ -116,10 +143,15 @@ async function main(): Promise<void> {
     console.log(`\n===== 回复 =====\n${turn.reply}`);
     console.log([
       '\n===== 机械证据 =====',
-      `principal=${principalId} session=${sessionId} 委派=${turn.taskIds.length > 0 ? '是' : '否'}`,
-      `taskId=${turn.taskIds[0] ?? '（无委派）'} 结构化执行=${facts.length} 次`
-      + `（完成 ${facts.filter((fact) => fact.status === 'completed').length}）`
-      + ` dummy 审计=${auditLines.length} 行 用时=${((Date.now() - startedMs) / 1000).toFixed(1)}s`,
+      ...renderAskEvidenceLines({
+        principalId,
+        sessionId,
+        ...(firstTask === undefined ? {} : { task: firstTask }),
+        executionCount: facts.length,
+        completedCount: facts.filter((fact) => fact.status === 'completed').length,
+        auditLineCount: auditLines.length,
+        elapsedSeconds: ((Date.now() - startedMs) / 1000).toFixed(1),
+      }),
       `任务底账=${path.relative(REPO_ROOT, dbPath)}`,
     ].join('\n'));
     for (const fact of facts) console.log(JSON.stringify({ event: 'execution', ...fact }));
@@ -134,7 +166,11 @@ async function main(): Promise<void> {
   }
 }
 
-await main().catch((error: unknown) => {
-  console.error('ask 运行失败：', error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+// 仅作为 CLI 直接运行时执行 main：被 import（测试/复用）时不触发任何 CLI 副作用
+// （与 tasks.ts/ops.ts 同一守卫；Node >=24 提供 import.meta.main）。
+if (import.meta.main) {
+  await main().catch((error: unknown) => {
+    console.error('ask 运行失败：', error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

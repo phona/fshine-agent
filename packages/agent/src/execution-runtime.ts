@@ -10,7 +10,9 @@
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation 一个工具）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
- *   4) Worker 汇报作为工具结果回到 Main，Main 生成给用户的最终回复。
+ *   4) Worker 汇报作为工具结果回到 Main，Main 生成给用户的最终回复；
+ *   5) 宿主把本回合最终回复逐字写入本回合各任务行（P1/S1：同回合同值；空白/回合失败不落，
+ *      缺省=无最终回复存档，显示层不用执行层汇报冒充）。
  *
  * B 类不变量（最小可信边界，拒绝路径见测试）：
  *   · 读路径边界（本切片作用域）：execute_operation 只放行装配方声明的允许集合；
@@ -276,6 +278,11 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       deadline: currentTurnDeadline,
     });
     mainMessages = [...mainResult.messages];
+    // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
+    // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
+    if (taskIds.length > 0 && mainResult.text.trim() !== '') {
+      registry.archiveReply(taskIds, mainResult.text);
+    }
     const scope = { principalId: options.principalId, sessionId: options.sessionId };
     const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
     return { reply: mainResult.text, taskIds, executions, progress };

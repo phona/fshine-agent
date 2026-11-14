@@ -13,6 +13,7 @@ import { openTaskStore, type ExecutionRow, type TaskRow, type StoredTask } from 
 import type { ExecutionFailure, ExecutionStatus } from '@fshine/contracts/execution-contract';
 import {
   TaskOwnershipError,
+  deriveTaskName,
   judgeReportedTask,
   type ExecutionRecord,
   type TaskRecord,
@@ -46,6 +47,10 @@ export function createSqliteTaskRegistry(
       status: stored.task.status as TaskStatus,
       ...(stored.task.resultText === undefined ? {} : { resultText: stored.task.resultText }),
       ...(stored.task.failureReason === undefined ? {} : { failureReason: stored.task.failureReason }),
+      // P1：旧库只读（未迁移）时三列为缺省（undefined），读出缺省不伪造。
+      ...(stored.task.taskNo === undefined ? {} : { taskNo: stored.task.taskNo }),
+      ...(stored.task.name === undefined ? {} : { name: stored.task.name }),
+      ...(stored.task.replyText === undefined ? {} : { replyText: stored.task.replyText }),
       executions: stored.executions.map((execution: ExecutionRow) => ({
         requestId: execution.requestId,
         operation: execution.operation,
@@ -77,6 +82,8 @@ export function createSqliteTaskRegistry(
         sessionId: input.sessionId,
         request: input.request,
         status: 'running',
+        // P1：名称 v1 = 机械回落（与迁移回填/显示回落同规则）；编号由 store 单条 SQL 原子分配。
+        name: deriveTaskName(input.request),
         createdAt: now,
         updatedAt: now,
       };
@@ -116,6 +123,10 @@ export function createSqliteTaskRegistry(
       if (!store.setTaskOutcome(taskId, { status: 'failed', failureReason: reason, updatedAt: new Date().toISOString() })) {
         throw new TaskOwnershipError();
       }
+    },
+    archiveReply(taskIds, replyText) {
+      // 同回合各任务行同值、单事务；不存在的 id 由 store 忽略（调用方保证 id 来自本回合）。
+      store.setReplyForTasks(taskIds, replyText, new Date().toISOString());
     },
     get(taskId, scope) {
       return toRecord(require(taskId, scope));
