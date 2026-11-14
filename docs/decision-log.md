@@ -1011,6 +1011,17 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十三、P2a Task Registry 契约冻结：实施与合入（2026-11-14，分支 `arch/r4-p2`）
+
+- **授权与基线**：owner 2026-11-14 并行加速授权 §二（P2 优先冻结契约；P4/P5/P6 以契约为门并行）；基线 `9ae895d`（联合接口约定 v1）；提交链：`a699534`（契约测试先行 RED）→ `d8facf0`（契约核心：状态机/取消/waiting/超时/unknown + v3 迁移 + 单写路径守卫）→ `7c440f3`（TaskFact.stateVersion 补齐 v1.1）→ `498da35`/`b6bcc0f`（契约冻结记录：条款清单/方法族签名/未明示项处置/冻结 SHA）。
+- **契约冻结要点**：状态集 8 态 + `unexecuted`；合法边含 `queued→timed_out`、`waiting_user→timed_out`（v1.2 对齐 P2-T04）；**取消请求 ≠ 取消**（`cancelling` 过渡、确认才 `cancelled`、未确认回 `running`）；`result_unknown` = `failed` + `reason=result_unknown`（终态、不自动重放）；`waiting_user/pending_question` 持久化与同 Task 接续；归属同错；**唯一写路径 + 源码级守卫**（status 直写零命中）；`onTaskFact` 单回调。
+- **验收读数**：契约测试 37/37；v3 迁移测试（幂等/备份 `backup-v3`/只读不迁移）；全量 unit **48 文件/462 例**；tsc 0；反向绊线 4 类（非法转换被接受/取消请求直接 cancelled/unknown 当成功/直写 status）均红后复原。
+- **独立复核**：passed=true、integrity=false（复核员只读；破坏实验于 /tmp 副本）。
+- **合入**：`ecbf297`（--no-ff）入 `arch/integration`；文件范围 10 文件（`task-registry(-sqlite)`/`task-store`/`tasks.ts` 状态词最小补齐 + 契约测试 3 文件 + 冻结记录）；合入后 typecheck=0、unit 48 文件/462 例全绿。P1 测试两处适配（备份名随 v3 目标版本、只读夹具改走合法边）判据未弱化。
+- **后续**：P2b（展示词表/原因行 + E05/E06 回归；execution-runtime 接线与 E01 黑盒 blocked←集成 Run）；P4 已交付待序（`f7b088b`）；P5/P6 收口中。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
