@@ -19,12 +19,15 @@ import {
   createTaskRegistry,
   judgeReportedTask,
   type ExecutionRecord,
+  type TaskReason,
   type TaskRecord,
+  type TaskStatus,
 } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import { materializeEvalConfig } from './resolve-config-path';
 import {
   JUDGED_STATUS_WORDS,
+  TASK_REASON_WORDS,
   findTaskRef,
   formatLocalTime,
   parseTaskArgs,
@@ -35,7 +38,9 @@ import {
   resolveTaskDbPath,
   summarizeRequest,
   taskLabel,
+  taskMechanicalReasonLine,
   taskNoLabel,
+  taskReasonWord,
   taskStatusWord,
   writeDeliverable,
 } from './tasks';
@@ -186,6 +191,110 @@ describe('tasks：状态词表与 judgeReportedTask 一致', () => {
       .toEqual(['已完成', '未执行', '失败', '失败']);
     // 读存储值（fail 路径零执行不重算成「未执行」）。
     expect(taskStatusWord(registry.get('t_worker', scope).status)).toBe('失败');
+  });
+});
+
+describe('tasks：P2 展示词表（状态词/原因行金样）', () => {
+  /** P2a 状态集 9 态的中文词金样（顺序即固定金样表）。 */
+  const STATUS_WORD_GOLDEN: ReadonlyArray<[TaskStatus, string]> = [
+    ['queued', '排队中'],
+    ['running', '进行中'],
+    ['waiting_user', '等待用户'],
+    ['cancelling', '取消中'],
+    ['cancelled', '已取消'],
+    ['completed', '已完成'],
+    ['failed', '失败'],
+    ['timed_out', '已超时'],
+    ['unexecuted', '未执行'],
+  ];
+
+  it('状态词金样：9 态逐词；未知状态 fail-open 显示原值（不崩不落 undefined）', () => {
+    for (const [status, word] of STATUS_WORD_GOLDEN) {
+      expect(taskStatusWord(status), status).toBe(word);
+    }
+    expect(taskStatusWord('mystery-status' as TaskStatus)).toBe('未知状态（mystery-status）');
+  });
+
+  it('原因词表金样：5 种机械原因逐词；未知原因 fail-open 显示原值', () => {
+    expect(TASK_REASON_WORDS).toEqual({
+      cancelled_by_user: '用户取消',
+      timeout: '超时',
+      failed_confirmed: '执行层失败',
+      result_unknown: '结果未知',
+      resource_limited: '资源受限',
+    });
+    expect(taskReasonWord('mystery-reason' as TaskReason)).toBe('未知原因（mystery-reason）');
+  });
+
+  it('机械原因行：reason →「终止原因：词」；failed_confirmed 有失败原文时不重复；历史行不伪造', () => {
+    expect(taskMechanicalReasonLine(record({ taskId: 't_cancel', status: 'cancelled', reason: 'cancelled_by_user' })))
+      .toBe('终止原因：用户取消');
+    expect(taskMechanicalReasonLine(record({ taskId: 't_timeout', status: 'timed_out', reason: 'timeout' })))
+      .toBe('终止原因：超时');
+    expect(taskMechanicalReasonLine(record({ taskId: 't_unknown', status: 'failed', reason: 'result_unknown' })))
+      .toBe('终止原因：结果未知');
+    expect(taskMechanicalReasonLine(record({ taskId: 't_limited', status: 'failed', reason: 'resource_limited' })))
+      .toBe('终止原因：资源受限');
+    expect(taskMechanicalReasonLine(record({ taskId: 't_confirmed', status: 'failed', reason: 'failed_confirmed' })))
+      .toBe('终止原因：执行层失败');
+    expect(taskMechanicalReasonLine(record({
+      taskId: 't_confirmed_text', status: 'failed', reason: 'failed_confirmed', failureReason: '执行层未成功：dummy.query 返回 failed。',
+    }))).toBeUndefined();
+    // 历史行（无 reason）：不显示机械原因行（不伪造）。
+    expect(taskMechanicalReasonLine(record({ taskId: 't_old', status: 'failed', failureReason: '旧行失败原文。' })))
+      .toBeUndefined();
+  });
+
+  it('详情金样：新状态与原因行逐字（取消/超时/结果未知）；历史行保持原行、无「终止原因」', () => {
+    const cancelled = record({
+      taskId: 't_cancelled', taskNo: 7, status: 'cancelled', reason: 'cancelled_by_user', resultText: '已按用户请求取消。',
+    });
+    const timedOut = record({
+      taskId: 't_timed_out', taskNo: 8, status: 'timed_out', reason: 'timeout',
+      pendingQuestion: { missing: ['时间范围'] }, waitingSince: '2026-11-13T16:05:00.000Z', resultText: '等待用户超时关闭。',
+    });
+    const unknown = record({
+      taskId: 't_unknown', taskNo: 9, status: 'failed', reason: 'result_unknown', resultText: '重启后无法确认执行结果。',
+    });
+    const priorRow = record({ taskId: 't_legacy', taskNo: 10, status: 'failed', failureReason: '旧行失败原文。' });
+
+    // 详情：状态行与原因行同段（中间是创建/更新/交办字段行），逐字核对两行文本。
+    const cancelledDetail = renderTaskDetail(cancelled);
+    expect(cancelledDetail).toContain('状态：已取消');
+    expect(cancelledDetail).toContain('终止原因：用户取消');
+    const timedOutDetail = renderTaskDetail(timedOut);
+    expect(timedOutDetail).toContain('状态：已超时');
+    expect(timedOutDetail).toContain('终止原因：超时');
+    const unknownDetail = renderTaskDetail(unknown);
+    expect(unknownDetail).toContain('状态：失败');
+    expect(unknownDetail).toContain('终止原因：结果未知');
+    // 历史行：旧字段照常显示，不出现机械原因行。
+    expect(renderTaskDetail(priorRow)).toContain('失败原因：旧行失败原文。');
+    expect(renderTaskDetail(priorRow)).not.toContain('终止原因：');
+  });
+
+  it('交付件金样：标题含新状态词，状态段含原因行', () => {
+    const cancelled = record({
+      taskId: 't_cancelled_doc', taskNo: 7, request: '取消示例任务', status: 'cancelled', reason: 'cancelled_by_user', resultText: '已取消。',
+    });
+    const text = renderTaskDeliverable(cancelled);
+    expect(text).toContain('# 任务交付件：#7 取消示例任务（已取消）');
+    expect(text).toContain('## 状态\n\n状态：已取消\n终止原因：用户取消');
+  });
+
+  it('列表金样：9 态逐行显示中文词，不落「未知状态」', () => {
+    const records = STATUS_WORD_GOLDEN.map(([status], index) => record({
+      taskId: `t_list_${status}`,
+      taskNo: index + 1,
+      status,
+      request: `任务 ${status}`,
+      createdAt: `2026-11-13T16:${String(index).padStart(2, '0')}:00.000Z`,
+    }));
+    const text = renderTaskList(records);
+    for (const [status, word] of STATUS_WORD_GOLDEN) {
+      expect(text, status).toContain(`  ${word}  `);
+    }
+    expect(text).not.toContain('未知状态');
   });
 });
 
