@@ -24,6 +24,7 @@ import { bizCases } from '../exploration/bizprobe/cases';
 import type { BizCase } from './scenarios';
 import { assertWithinHardLimits, BIZ_HARD_LIMITS, expandBizprobeItems, hardLimitRegistration } from './scenarios';
 import { runBizprobeBatch, summarizeBizprobe } from './assembly';
+import type { BizprobeReport, BizScenarioSummary } from './assembly';
 import { createModelExecutor } from './model-executor';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
@@ -128,6 +129,45 @@ function selectCases(all: readonly BizCase[], wanted: readonly string[]): BizCas
   });
 }
 
+/**
+ * 落盘报告对象（R2 修复 ③）：把跑批报告投影成 `report.json` 形状。**必须含 batch 资源读数**
+ * （RSS/CPU 粗读数 + observedMaxConcurrency + throughputPerSec）——R1 本批该键缺失（run.ts
+ * 当时只写子集），真实批资源读数因此不可得。抽成纯函数以便确定性自测钉住形状。
+ */
+export function buildRunReportJson(input: {
+  suiteId: string;
+  report: BizprobeReport;
+  summary: readonly BizScenarioSummary[];
+}): Record<string, unknown> {
+  const { report } = input;
+  return {
+    suite: input.suiteId,
+    policy: report.policy,
+    hardLimits: report.hardLimits,
+    experiment: report.experiment,
+    batch: {
+      caseCount: report.batch.caseCount,
+      observedMaxConcurrency: report.batch.observedMaxConcurrency,
+      wallMs: report.batch.wallMs,
+      throughputPerSec: report.batch.throughputPerSec,
+      resources: report.batch.resources,
+    },
+    summary: input.summary,
+    samples: report.samples.map((s) => ({
+      id: s.id,
+      caseId: s.caseId,
+      trial: s.trial,
+      scenario: s.scenario,
+      runDir: s.runDir,
+      failed: s.failed,
+      mechanical: s.mechanical,
+      behavior: s.behavior,
+      ux: s.ux,
+      modelCalls: s.modelCalls,
+    })),
+  };
+}
+
 async function main(): Promise<void> {
   const parsed = parseArgs(process.argv.slice(2));
   if ('error' in parsed) { console.error(parsed.error); process.exitCode = 2; return; }
@@ -159,7 +199,7 @@ async function main(): Promise<void> {
 
   const report = await runBizprobeBatch({ cases, items, executor: createModelExecutor(), outRoot: args.outDir, concurrency: args.concurrency });
   const summary = summarizeBizprobe(report);
-  writeFileSync(path.join(args.outDir, 'report.json'), JSON.stringify({ suite: suite.id, policy: report.policy, hardLimits: report.hardLimits, experiment: report.experiment, batch: { caseCount: report.batch.caseCount, observedMaxConcurrency: report.batch.observedMaxConcurrency, wallMs: report.batch.wallMs, throughputPerSec: report.batch.throughputPerSec, resources: report.batch.resources }, summary, samples: report.samples.map((s) => ({ id: s.id, caseId: s.caseId, trial: s.trial, scenario: s.scenario, runDir: s.runDir, failed: s.failed, mechanical: s.mechanical, behavior: s.behavior, ux: s.ux, modelCalls: s.modelCalls })) }, null, 2) + '\n');
+  writeFileSync(path.join(args.outDir, 'report.json'), JSON.stringify(buildRunReportJson({ suiteId: suite.id, report, summary }), null, 2) + '\n');
   for (const s of summary) {
     console.log(`${s.caseId}（场景#${s.scenario}）：${s.pass}/${s.n} 通过，Wilson95=[${s.passRateCI.lower.toFixed(3)}, ${s.passRateCI.upper.toFixed(3)}]，机械判负 ${s.mechanicalFailures}，severe ${s.severe}`);
   }

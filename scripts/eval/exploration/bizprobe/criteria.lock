@@ -1,14 +1,14 @@
 {
   "generatedBy": "node --import tsx scripts/eval/exploration/freeze.ts <suite-dir>",
   "suiteId": "bizprobe",
-  "frozenAt": "2026-11-14T14:57:59.452Z",
+  "frozenAt": "2026-11-14T16:11:53.102Z",
   "criteriaSha256": "9d4b0824a429658e7f633ff8af928fd3ad94b633f02c95f151866679bb8d6cd4",
-  "casesSha256": "b9695e6a896e74525659b4e733f2ecf854c3e9cc46b9250a9d9f6eb1e58a6f6d",
+  "casesSha256": "e138d5b3690ac9067bb13ead7250ad23a18a75d8961a5c6d3e94b0583ed24bc8",
   "files": {
     "scripts/eval/exploration/bizprobe/suite.ts": "7f3564f3d66774554fce826f84bffd214c11629a4be465070431e845852795aa",
     "scripts/eval/exploration/bizprobe/cases/B01.ts": "9be23dad964914335b109798ea58ee89812da294e3cf05d836afdde93907fc3b",
     "scripts/eval/exploration/bizprobe/cases/B02.ts": "f2d61edb224f90e7e09c8c9c7fbc1d96f22ae50ca4b4de3744fd8aeb86075e90",
-    "scripts/eval/exploration/bizprobe/cases/B03.ts": "d7e63e2d4d9ac93c27637c7f0ce923524fbc9368a5fd2937b828f345a7095804",
+    "scripts/eval/exploration/bizprobe/cases/B03.ts": "6fd435350378213778ef85d5bcc58c9b847a00809b27ba28b2ca1ba70d7489fe",
     "scripts/eval/exploration/bizprobe/cases/B04.ts": "b36f0d1f75d919d972f44f4a68a423fabd4d44d4f2f8b67115ec2e1f3a12cb36",
     "scripts/eval/exploration/bizprobe/cases/B06.ts": "2639e9fe3832dfc983ddda92c5ff4b24030ad76421fec4759f36cc0ef014d1a5",
     "scripts/eval/exploration/bizprobe/cases/B08.ts": "bae8dcefc26b53a949a362947cb6cb9e47d0c69f12929486cb009cc5181cef88",

@@ -3,10 +3,12 @@
  * ① 多集合种子：若干 collection、含历史 window、一个 locked collection（策略拒绝）；
  * ② 限流：每 state-dir 计数窗口，超限返回 failed 且 retryable:true 的结构化错误
  *    （ExecutionFailure{code,message,retryable}，经现有 CLI 退出码/RESULT 信封表达）；
+ *    旋钮主入口 = <state-dir>/rate-limit-config.json（经 --state-dir 可达，宿主可复现），
+ *    env DUMMY_RATE_LIMIT_MAX 保留为兼容入口（不再是唯一入口）；
  * ③ 部分成功可组合：同一 state-dir 内多次 execute，若干命中限流、若干成功。
  */
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
@@ -20,6 +22,11 @@ function freshStateDir(): string {
   return dir;
 }
 afterAll(() => { for (const dir of tmpRoots) rmSync(dir, { recursive: true, force: true }); });
+
+/** 把限流旋钮落到 state 根（主入口）：{ max, windowSeconds? }。 */
+function writeRateLimitConfig(stateDir: string, cfg: Record<string, number>): void {
+  writeFileSync(path.join(stateDir, 'rate-limit-config.json'), JSON.stringify(cfg) + '\n');
+}
 
 /** 运行一次 dummy；返回 { status, envelope, stderr }（envelope 解自最后一行 RESULT）。 */
 function runDummy(args: string[], env: NodeJS.ProcessEnv = {}, stateDir: string) {
@@ -91,6 +98,39 @@ describe('② 限流（每 state-dir 计数窗口）', () => {
     expect(runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], env, dirA).status).toBe(0);
     expect(runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], env, dirA).status).toBe(1);
     expect(runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], env, dirB).status).toBe(0);
+  });
+});
+
+describe('②b 限流经 state-dir 可驱动（主入口 = <state-dir>/rate-limit-config.json）', () => {
+  it('只写 state-dir 配置、不设 env：第 3 次执行返回 RATE_LIMITED（宿主可复现，不依赖被白名单丢弃的 env）', () => {
+    const dir = freshStateDir();
+    writeRateLimitConfig(dir, { max: 2, windowSeconds: 3600 });
+    const first = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], {}, dir);
+    expect(first.status).toBe(0);
+    const second = runDummy(['query', 'dummy.query', '--collection', 'beta', '--window', 'W1'], {}, dir);
+    expect(second.status).toBe(0);
+    const third = runDummy(['query', 'dummy.query', '--collection', 'documents', '--window', 'W202611'], {}, dir);
+    expect(third.status).toBe(1);
+    expect(third.envelope?.status).toBe('failed');
+    expect(third.envelope?.error?.code).toBe('RATE_LIMITED');
+    expect(third.envelope?.error?.retryable).toBe(true);
+  });
+
+  it('state-dir 配置与 env 并存时 state-dir 优先（可覆盖宽松 env）', () => {
+    const dir = freshStateDir();
+    writeRateLimitConfig(dir, { max: 1 });
+    const env = { DUMMY_RATE_LIMIT_MAX: '10' };
+    expect(runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], env, dir).status).toBe(0);
+    const second = runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], env, dir);
+    expect(second.status).toBe(1);
+    expect(second.envelope?.error?.code).toBe('RATE_LIMITED');
+  });
+
+  it('无 state-dir 配置也无 env：不限流（缺省行为不变）', () => {
+    const dir = freshStateDir();
+    for (let i = 0; i < 5; i += 1) {
+      expect(runDummy(['query', 'dummy.query', '--collection', 'alpha', '--window', 'W1'], {}, dir).status).toBe(0);
+    }
   });
 });
 

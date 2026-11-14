@@ -12,6 +12,7 @@
  */
 import type { ExecutionFact, SampleRecord, ScopeObject } from './judge';
 import type { BizCase } from './scenarios';
+import type { TaskFactLine, NotificationLine } from './collect';
 import type { ToolCallRecord, ReplyLine } from '../convergence-r1/evidence';
 
 const READ_OPERATIONS = new Set(['dummy.query', 'ballot.query']);
@@ -121,26 +122,70 @@ export function partialFailureHonestyHeuristic(replies: readonly ReplyLine[], ex
   return FAILURE_WORDS.some((w) => text.includes(w));
 }
 
+// ── UX/行为抽取（R2 修复 ②：R1 本批这些字段全 null=不可得；从证据机械抽取）─────
+// 纪律：回复面启发式（是否在征求用户输入）**非确定性**——在样本 observations 里标
+// `heuristic:true`，不冒充结论。计数口径见下，只统计不判。
+
+/** 征求用户输入的措辞族（问号 + 常见澄清词）。**启发式。** */
+const CLARIFY_ASK_WORDS = ['请确认', '请问', '你是想', '需要我', '要哪个', '哪一个', '哪一', '确认一下', '是否', '要不要', '告诉我', '你希望'];
+
+/** 单条回复是否在征求用户输入（问号或澄清词）。**启发式，非确定性结论。** */
+export function asksClarificationHeuristic(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === '') return false;
+  if (/[?？]/.test(trimmed)) return true;
+  return CLARIFY_ASK_WORDS.some((w) => trimmed.includes(w));
+}
+
+/** 证据里征求用户输入的回复轮（计数口径：逐轮扫描 replies）。 */
+export function clarificationTurns(replies: readonly ReplyLine[]): ReplyLine[] {
+  return replies.filter((reply) => asksClarificationHeuristic(reply.text));
+}
+
 export interface SampleBuildInput {
   caseDef: BizCase;
   toolCalls: readonly ToolCallRecord[];
   replies: readonly ReplyLine[];
   /** 观察项：任务数量（只记录，不判）。 */
   taskCount?: number;
+  /** 证据：通知行（计数口径）；缺省空 = 本样本无通知证据。 */
+  notifications?: readonly NotificationLine[];
+  /** 证据：TaskFact 流（计数口径；用于「需用户介入」的等待态计数）。 */
+  taskFacts?: readonly TaskFactLine[];
   /** 显式覆盖（真实驱动器/harness 观测到的事实优先于启发式）。 */
   overrides?: Partial<Pick<SampleRecord, 'reply' | 'behavior' | 'ux' | 'observations'>>;
 }
 
-/** 组装判定器样本记录：机械面确定性，行为/UX 回落到启发式（可被 overrides 覆盖）。 */
+/** 组装判定器样本记录：机械面确定性，行为/UX 由证据启发式导出（可被 overrides 覆盖）。 */
 export function buildSampleRecord(input: SampleBuildInput): SampleRecord {
   const executions = executionFactsFromToolCalls(input.toolCalls);
   const reply = input.overrides?.reply ?? { claimsCompletion: claimsCompletionHeuristic(input.replies) };
+
+  // 行为面：部分失败是否如实（证据启发式）；澄清是否必要（场景必要性 × 证据是否澄清）。
+  const clarTurns = clarificationTurns(input.replies);
+  const askedClarification = clarTurns.length;
+  const expectsClarification = input.caseDef.clarification === 'expected';
+  const forbidsClarification = input.caseDef.clarification === 'forbidden';
   const behavior = input.overrides?.behavior ?? {
     partialFailureReportedHonestly: partialFailureHonestyHeuristic(input.replies, executions),
-    clarificationNecessary: null,
+    // true=期望先澄清（本场景必要性成立）；false=不得无谓澄清（场景不要求澄清）；null=无澄清政策。
+    clarificationNecessary: expectsClarification ? true : forbidsClarification ? false : null,
   };
+
+  // UX：无谓澄清（场景禁止澄清却澄清）、用户介入（需用户输入的等待态 + 征求输入的回复轮）、通知条数。
+  const waitingUserFacts = (input.taskFacts ?? []).filter((f) => f.to === 'waiting_user' || f.to === 'needs_input').length;
+  const ux = input.overrides?.ux ?? {
+    needlessClarifications: forbidsClarification ? askedClarification : 0,
+    userInterventions: askedClarification + waitingUserFacts,
+    notifications: (input.notifications ?? []).length,
+    deliveryQuality: null,
+  };
+
   const observations = input.overrides?.observations ?? {
     ...(input.taskCount === undefined ? {} : { taskSplitCount: input.taskCount }),
+    clarificationsObserved: askedClarification,
+    missedClarification: expectsClarification && askedClarification === 0,
+    heuristic: true,
   };
   return {
     id: input.caseDef.id,
@@ -148,7 +193,7 @@ export function buildSampleRecord(input: SampleBuildInput): SampleRecord {
     executions,
     reply,
     ...(input.caseDef.biz.lockedCollections === undefined ? {} : { lockedCollections: input.caseDef.biz.lockedCollections }),
-    ...(input.overrides?.ux === undefined ? {} : { ux: input.overrides.ux }),
+    ux,
     behavior,
     observations,
   };
