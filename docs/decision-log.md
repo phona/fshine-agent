@@ -1298,7 +1298,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ## 五十、业务 E2E · 三轴总报告（功能边界 / 可靠性 / 稳定性）（2026-11-15，分支 `arch/r4-bizreport`，docs-only）
 
-- **状态**：**待合入**（merge commit 由主会话补齐）。
+- **状态**：**已合入**（`--no-ff` → `arch/integration` @ `0db70d1`，2026-11-15；合入后 typecheck=0、unit 74 文件/731 例全绿；docs-only）。**仲裁备注**：run 内复核 `passed=false`，根因是**任务书自相矛盾**（RULES 禁改既有报告，复核判据又要求「结论无证据即判负」→ 逼出对源报告 §13.4 的一处**过度声明更正**）；仲裁者已独立核实该更正**属实**（盘上 `observedMaxConcurrency`：drift-b06/repeat-r4=4、compaction-c03/c04=3），属**减少过度声明**而非粉饰，故接受合入。owner 若要求源报告逐字冻结，可 `git revert` 该 12 行。
 - **授权**：owner 定调——用**一份文档定义产品**（功能边界 / 可靠性 / 稳定性），逐行附「该不该补 / 怎么优化」，并设**待 owner 裁定**节；纯整理（docs-only、**零真实模型额度**）。
 - **分支/基线**：worktree `~/projects/fshine-agent-r4-bizreport`，分支 `arch/r4-bizreport`；基线 = `arch/integration` 启动时 HEAD `241b02421f07d6c9207955b37f7c645764b0e0b4`。
 - **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
