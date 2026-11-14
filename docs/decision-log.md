@@ -1060,6 +1060,17 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十六、P2b 展示面收口：实施与合入（2026-11-14，分支 `arch/r4-p2`）
+
+- **授权与范围**：P2 收尾（owner 并行授权 §二「P2 继续执行」）；基线 `19b79c9`（P2a 合入后）；提交链：`1337a27`（实现）→ `31d91e9`（报告）；合入前 rebase 到 `b4abc97`。
+- **实现（仅 `scripts/tasks.ts`/`ops.ts` 与测试）**：9 态状态词金样（单一来源 `TASK_STATUS_WORDS`/`taskStatusWord`，ops 复用不复制）；5 类机械原因行（`cancelled_by_user`/`timeout`/`failed_confirmed`/`result_unknown`/`resource_limited`；`failed_confirmed` 仅有失败原文时只显示失败行）；**未知状态/原因 fail-open**（原值转义展示）；**历史行（无 reason）不伪造原因行**；ops「未成功终态」清单与统计段仅非零出行；`pending_question`/`waiting_since` 展示不在本片（留接线/P8）。
+- **读数**：目标 66/66；tsc 0；全量 unit **52 文件/567 例**；E05/E06 N=1 smoke（判据未动）；P2-E01 黑盒与 T02/T03/T04 接线 **blocked←集成 Run**。
+- **独立复核**：通过（blocked 标注如实）。
+- **合入**：`48caffd`（--no-ff）入 `arch/integration`；合入后 typecheck=0、unit 52 文件/567 例全绿。
+- **后续**：集成 Run（唯一热点负责人：接线 + 后台 `resultText` + 联合测试/全量回归/真实 Pi 黑盒）→ P7b 完整验收。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
