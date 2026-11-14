@@ -35,12 +35,24 @@ import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
 import type { SampleRecord } from '../judge';
 import type { ExpCase, ExpItem } from './model';
-import { effectiveTurns } from './model';
+import { effectiveTurns, EXP_HARD_LIMITS } from './model';
 import type { ExpEvidence } from './judge';
 import type { InputsFile, MetaFile, MetaTurn, ReplyLine, TaskRecordJson, ToolCallRecord } from '../../convergence-r1/evidence';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 const FIXTURE_CONFIG = path.join(REPO_ROOT, 'config', 'agent.fixture.yaml');
+
+/** 会话墙钟兜底：超过 ms 即 reject（底层 send 仍在跑但样本落 failed，防止无限挂起）。 */
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  if (ms <= 0) return Promise.reject(new Error(`${label}：已超出墙钟预算`));
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${label}：超时（${ms}ms）`)), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
 
 /** 执行一个（用例×trial）样本，产出实验证据。真实/假件同签名。 */
 export type ExpExecutor = (item: ExpItem, caseDef: ExpCase, workDir: string) => Promise<ExpEvidence>;
@@ -246,12 +258,14 @@ export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor
       const compactions: Array<{ turn: number; compacted: boolean; before: number; after: number }> = [];
       let previousTranscriptLength = 0;
       let prevHasSummaryMarker = false;
+      const wallStart = Date.now();
       const session = assembled.session;
       for (let index = 0; index < turns.length; index += 1) {
         const turn = index + 1;
         sink.turn = turn;
         const startedMs = Date.now();
-        const result = await session.send(turns[index]!);
+        const remainingWall = EXP_HARD_LIMITS.maxWallMsPerSession - (Date.now() - wallStart);
+        const result = await withTimeout(session.send(turns[index]!), remainingWall, '会话墙钟上限（maxWallMsPerSession）');
         if (runner !== undefined) await runner.whenIdle();
         const durationMs = Date.now() - startedMs;
         const transcript = [...session.transcript()];
