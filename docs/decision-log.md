@@ -1244,6 +1244,33 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 四十八、业务 E2E · 缺口落地后三实验（#5 对话面任务工具 / #7 会话压缩 / #3 Skill 三臂）（2026-11-15，分支 `arch/r4-bizbatch2`）
+
+- **状态**：**待合入**（merge commit 由主会话补齐）。
+- **授权**：owner 2026-11-15（缺口 1/2/3 合入 `4a12d8b` 后的三实验批；彻夜长跑）；预注册见 `docs/product/business-e2e-prereg-addendum.md` §五。
+- **分支/基线**：worktree `~/projects/fshine-agent-r4-bizbatch2`，分支 `arch/r4-bizbatch2`；基线 = `arch/integration` 启动时 HEAD `7009ed04c770ec6ceab95d9df905333c6789a014`（`.runtime/bizbatch2/baseline.txt`，gitignored）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
+  1. `9e4b270` 三实验装配与自检（`scripts/eval/business-e2e/experiments/{model,cases,executor,judge,harness,run}.ts` + 中性测试 Skill 夹具 `scripts/eval/fixtures/dummy-platform/.agents/skills-main/{record-digest,value-note}/SKILL.md` + 预注册 §五 + `package.json` 加 `eval:bizbatch2`）——零产品代码改动。
+  2. `f4709ec` 压缩触发点度量修正（转录摘要标记「此前会话摘要」，`pi-driver.ts:526`；原 `compactionRounds`（每回合 modelCalls>1）无效）。
+  3. `12a8e39` 执行器缺省驱动施加 `contextWindowFrom`（#7 首跑无效的根因：装配核心只在**缺省驱动**分支展开窗口接线 `ask-runtime.ts:406-408`，而执行器总自带 `createDrivers`）。
+  4. `d8da8ef` 执行器加会话墙钟兜底（`maxWallMsPerSession`）。
+  5. `fa06cbb` 三臂装配自测（none/inline/catalog 提示块与 `read_skill` 工具面）。
+  6. `080c756` 探测报告续写 §十二（三实验读数）。
+- **实施概述（三实验）**：复用生产同源装配（`assembleSessionCore`/`resolveExecutionFace`/`createBackgroundDispatch`）+ 既有跑批/证据/冻结判据（`batch`/`collect`/`judge`/`wilson95`）。实验①#5 以 **inline 直接注入 TaskRunner** 受试（缺口 1 设计 §3.3 的合法装配；四工具与分派同源门控 `taskRunner`，`execution-runtime.ts:580-584/:596`；缺省 bizprobe/ask inline 路径**不注册**四工具）；实验②#7 经 `LLM_CONTEXT_WINDOW`（`ask-runtime.ts:135 contextWindowFrom`）；实验③#2 经 `mainSkillRoots`/`mainSkillMode`（`worker-skills.ts:52`）。
+- **读数（真实模型 `step-3.7-flash`，显式覆盖 `.env` 缺省 `step-5-preview`；inline；一次采样、不重采样、全样本保留、不筛绿；k/N 附 Wilson 95% CI，不读作稳定概率）**：
+  - **①#5**：T01 2/3[0.208,0.939]、T02 2/3[0.208,0.939]、T03 3/3[0.438,1.000]（`sessions:9, modelCallsTotal:61, wallMs:42318`）。机械不变量：越权=找不到（`unauthorized=0`，T03 3/3）、取消如实（0 虚假「已取消」）、无虚假完成、无重复执行。失败（2/9）主导根因为**产品接口缺陷——`ref` 编号格式**：工具描述示例为裸数字（`execution-runtime.ts:77-84` 等），`resolveTaskId` 只认字面 `#N`/完整 `taskId`（`:329`），inline 受理回执不含 `taskNo`（`:559`；仅 background 回 `#N`，`:516`）→ 14/14 定向 `ref` 用裸 `"1"` 全部失败、模型从未发出 `"#1"`。**登记产品缺陷（不修）**。
+  - **②#7**：**预注册读数未取得**——两次完整尝试（run2/run3）均活锁、0 会话完成。机制确认：修好执行器接线后 `context_emergency_compact` 按配置窗口触发（run2 日志 `tokens:13751 contextWindow:12000 messages:11` / `21043@20000`）；病态：近窗口长会话出现 thinking-only 空回复（`pi_driver_empty_reply, stopReason:length`）+ 反复紧急压缩不降反升 → 事件循环阻塞式活锁（加墙钟兜底仍挂），手工 kill；run1 因执行器绕过窗口接线而**无效**（保留为 `compaction-run1-invalid`）。
+  - **③#3**：none 0/6、inline 6/6、catalog 3/6（`sessions:18, modelCallsTotal:39, wallMs:68957`）；`read_skill` 命中 digest 3/3、note 0/3；臂 A 常驻提示 1312B vs 臂 B catalog 274B。配对：none→inline 改善；inline→catalog digest 经验证无实质变化、note 退化；none→catalog 依 base 分化。CI 重叠 ⇒ 方向一致但**统计证据不足**（N=3）。
+- **自测与自检（零真实模型，`TMPDIR=/home/tao/.tmp`）**：`node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `vitest run` = **74 文件/725 例全绿**（基线 `arch/integration` 同 commit = 72 文件/711 例 → 纯新增 2 文件/14 测试，只增不减）；新增自测 `experiments/{fixtures,experiments}.test.ts` = 15 例全绿（含工具面门控、四工具全流程、越权=找不到、三臂装配、#7 小窗口确定性触发压缩、串并行一致性）；infra 门 `LLM_MODEL=step-3.7-flash` `--infra-gate` = **exit 0**（缺 `LLM_API_KEY` 时 `blocking=true`，不烧样本）。
+- **独立复核**：未单独发起第三方复核；关键结论均以**已落盘证据**（`.runtime/bizbatch2/…`）+ 复跑命令自证（见报告 §十二）。
+- **预算消耗**：本批真实模型会话 = #5 9 + #7（run1 6 无效 + run2/run3 各发起 4）≈14 + #3 18 ≈ **41**；累计 **95/150**（父 54 + 41），未超、未扩容。硬上限 `maxSessions=90 / maxModelCalls{72,240,108} / concurrency=4 ≤ 8 / maxWallMs=1.8e6` 均未超。
+- **边界**：`packages/`、`apps/` 产品代码**零改动**（`git diff 7009ed0 HEAD --name-only | grep -cE '^(packages|apps)/'` = **0**）；不改冻结面与既有轮次读数（`business-e2e-probe-report.md` §一–§十一 原样保留，只**追加** §十二）；未接真实平台；`.env` 只读、不入证据/不提交；证据 `.runtime/bizbatch2/`（gitignored）。
+- **登记（不修，待 owner 裁定）**：① 产品面 `ref` 编号格式不一致（描述示例 `"3"` vs `resolveTaskId` 要求 `#3`；inline 回执无 `#编号`）——建议统一契约（接受裸数字 / 回执回填 `#` / 列表带 `#` / 改示例）。② 产品面 #7 小窗口下 thinking-only 空回复 + 活锁不收敛（T7 类）——建议裁定是否属缺陷、是否改触发/降级策略。③ 测试面：执行器曾绕过窗口接线（`12a8e39` 已修）、会话墙钟兜底对阻塞式活锁无效（登记）。
+- **待落地裁定**：三实验的判据调参（#5 T02 的 `granted` 放宽为 collection 级以消噪）、#7 改设计重跑（自然语料/更大窗口/换触发点）或以上述 `context_emergency_compact` 事件结案——**待 owner 裁定**，本批不擅自改。
+- **回退**：`git revert 080c756 fa06cbb d8da8ef 12a8e39 f4709ec 9e4b270`（仅测试基建 + 夹具 + 文档 + `package.json` 一行脚本；产品代码零改动，回退安全）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
