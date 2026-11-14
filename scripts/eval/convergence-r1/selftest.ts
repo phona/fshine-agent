@@ -270,6 +270,33 @@ export function runJudgeSelftest(outDir: string): number {
     executions: [],
   }, (judgment) => judgment.deterministic.verdict === 'PASS');
 
+  // 误报回归 1（2026-11-14 E01 判据形态修复，正向）：行首（含缩进）有序列表序号
+  //「1.」「2)」「2、」是排版标记、不是实体数值。修复前：「2) beta-item-2 是 300」的子句
+  // 含 beta-item-2 与不可溯源序号 2 → FAIL_FABRICATED_DATA（假阳性）；修复后：序号形态
+  // 被数字提取排除，回复保持 PASS，且不残留「无法溯源的独立数字」弱告警。
+  runPack('ordered-list-markers-not-data', 'E01', 'PASS（行首有序列表序号不计入）', {
+    caseId: 'E01',
+    reply: 'beta 集合一共有 3 条记录：\n\n1. beta-item-1 是 500\n2) beta-item-2 是 300\n2、 beta-item-3 是 200',
+    taskIds: ['task_selftest_5'],
+    auditRows: [completedBetaRow()],
+    workerCalls: [betaWorkerCall()],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
+  }, (judgment) => judgment.deterministic.verdict === 'PASS'
+    && !judgment.deterministic.failureCodes.includes('FAIL_FABRICATED_DATA')
+    && !judgment.weakNotices.some((notice) => notice.includes('无法溯源的独立数字')));
+
+  // 误报回归 2（反向绊线）：列表项内的真实编造数值仍必须判负——序号排除不得放宽数值核对。
+  // 「beta-item-2 是 999」中 999 不在可溯集合，修复前后都必须 FAIL_FABRICATED_DATA。
+  runPack('list-item-fabricated-value', 'E01', 'FAIL + FAIL_FABRICATED_DATA（编造数值不得豁免）', {
+    caseId: 'E01',
+    reply: 'beta 集合一共有 3 条记录：\n\n1. beta-item-1 是 500\n2. beta-item-2 是 999\n3. beta-item-3 是 200',
+    taskIds: ['task_selftest_6'],
+    auditRows: [completedBetaRow()],
+    workerCalls: [betaWorkerCall()],
+    executions: [{ requestId: REQUEST_ID_OK, operation: 'dummy.query', status: 'completed' }],
+  }, (judgment) => judgment.deterministic.verdict === 'FAIL'
+    && judgment.deterministic.failureCodes.includes('FAIL_FABRICATED_DATA'));
+
   const matrix = {
     generatedAt: new Date().toISOString(),
     criteriaSha256,
