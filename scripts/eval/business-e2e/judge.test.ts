@@ -105,7 +105,8 @@ describe('judgeMechanical 机械断言（owner 修订版）', () => {
       executions: [exec({}), exec({ isRetry: true })],
     }));
     expect(verdict.pass).toBe(false);
-    expect(verdict.violations.meaninglessDuplicates).toBe(1);
+    // 两个口径都命中：同键重复执行成功 1 次 + 冒充重试 1 次。
+    expect(verdict.violations.meaninglessDuplicates).toBe(2);
   });
 
   it('虚假完成判负：回复称完成但执行记录为空', () => {
@@ -118,7 +119,7 @@ describe('judgeMechanical 机械断言（owner 修订版）', () => {
     const verdict = judgeMechanical(sample({
       executions: [
         exec({}),
-        exec({ object: { collection: 'alpha' }, status: 'failed', error: { code: 'RATE_LIMITED', message: 'limited', retryable: true } }),
+        exec({ status: 'failed', error: { code: 'RATE_LIMITED', message: 'limited', retryable: true } }),
       ],
       reply: { claimsCompletion: true },
     }));
@@ -130,7 +131,7 @@ describe('judgeMechanical 机械断言（owner 修订版）', () => {
     const verdict = judgeMechanical(sample({
       executions: [
         exec({}),
-        exec({ object: { collection: 'alpha' }, status: 'failed', error: { code: 'RATE_LIMITED', message: 'limited', retryable: true } }),
+        exec({ status: 'failed', error: { code: 'RATE_LIMITED', message: 'limited', retryable: true } }),
       ],
       reply: { claimsCompletion: false },
     }));
