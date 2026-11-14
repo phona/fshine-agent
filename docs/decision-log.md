@@ -978,6 +978,16 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 二十九、S4 统计四态：实施与合入（2026-11-14，分支 `arch/r4-s4-stats`）
+
+- **授权与基线**：owner 排程裁定「S4 即刻启动、与 P0 并行」；基线 `8fac477`。提交链：`f10ad25`（测试先行 RED：44 例中 24 failed）→ `bd43fc2`（feat：`newcombe95`（Newcombe 1998 方法 10 square-and-add）+ `classifyDifference`/`classifyV2` 四态 + `--bound` 显式等效界 + `compare` 口径版本标注；v1 纯函数面不变）→ `e02c197`（测试加强：断言下沉数据行；绊线暴露「口径标注行可致弱断言误绿」并修复）→ `8011cfc`/`a087d79`（口径文档与回归报告）。
+- **验收读数**：stats 44 例全过（含既有 15 例）；全量 unit 33 文件/334 例；tsc 0；触界/跨界/非法界 fail-closed 均有单测；**δ 无默认值**（代码无默认界痕迹；无界路径结构上不可能产出 `NO_SUBSTANTIAL_CHANGE_VERIFIED`）；反向绊线 4 类（编造默认界/放宽边界/方向反转/Newcombe 退化为朴素 Wald）均转红。
+- **独立复核**：passed=true、integrity=false（复核员只读；破坏验证在 /tmp 隔离副本（git archive 导出）进行，worktree 实施产物哈希全程未变）。
+- **合入**：`76b0176`（--no-ff）入 `arch/integration`；文件范围 3 文件（`stats.ts` +184/−20、`stats.test.ts` +376、口径文档 +140）；合入后 typecheck=0、unit 37 文件/349 例全绿。
+- **纪律**：历史报告不改写；历史证据与冻结面（criteria.lock/cases/judge/runner/safety-gate）零改动；v1 输出保留并加「口径版本」标注；δ 必须使用前预注册、不得事后挑选。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
