@@ -352,3 +352,112 @@
 - `d8da8ef` 执行器会话墙钟兜底
 - （本报告提交见本条 commit）
 - 边界：`packages/`、`apps/` 产品代码**零改动**；不改冻结面与既有轮次读数；`.env` 只读、不入证据/不提交；证据在 `.runtime/bizbatch2/`（gitignored：`task-surface`、`skill-arm`、`compaction-run1-invalid`/`-run2-hung`/`-run3-hung`）。
+
+---
+
+## 十三、夜跑续批（bizbatch3 · 2026-11-15；模型 `step-3.7-flash`；inline；并发 4）
+
+> **性质**：本批为**新增批次**，**不改写 §一–§十二 既有读数**（§四十八 的三实验读数原样保留）。
+> worktree `~/projects/fshine-agent-r4-bizbatch3`（分支 `arch/r4-bizbatch3`，基线 `a88f62329…`）；**产品代码零改动**。
+> 预注册 `business-e2e-prereg-addendum.md` §六（**先于运行**写死）；运行前 infra 门（`experiments/run.ts --infra-gate`、`business-e2e/run.ts --infra-gate`）均 exit 0。
+> 三件事：① #7 会话压缩**重设计重跑**（自然语料）；② #6 对象漂移**深探**（N=6）；③ **重复轮**（第 4 轮 6 场景 × N=3）。
+> k/N 一律附 Wilson 95% CI（`scripts/eval/exploration/stats.ts` `wilson95`），**不得读作稳定概率**；一次采样、不重采样、全样本保留、不筛绿。
+
+### 13.1 实验① #7 会话压缩重设计重跑（自然语料）：**未灌到压缩触发**
+
+**改设计**：以 `experiments/natural-corpus.ts` 的**真实感多轮对话**（41 轮 + 2 恢复探针；单条数百字符）替代 §四十八 的 `bulkFiller`（6 × 8000 字符中性填充）；**两窗口对照** C03=12000（对标失败批次量级）、C04=6000；两用例 `withTaskRunner:true`（修正 §四十八 C01/C02 缺 runner 致恢复探针工具面不可满足）。
+
+**运行**：
+- `… experiments/run.ts --run --kind compaction --case C03 --out-dir .runtime/bizbatch3/compaction-c03` → `report.json` `experiment={sessions:3, modelCallsTotal:143, wallMs:137357}`，RUN_EXIT=1。
+- `… --case C04 --out-dir .runtime/bizbatch3/compaction-c04` → `experiment={sessions:3, modelCallsTotal:132, wallMs:27356}`，RUN_EXIT=1。
+
+| 用例 | 窗口 | k/N | Wilson 95% CI | severe | compactTriggerEvents | compactionRounds | taskToolCalls |
+|---|---|---|---|---|---|---|---|
+| C03 | 12000 | **0/3** | [0.000, 0.562] | 2 | **0** | 0 | 0 |
+| C04 | 6000 | **0/3** | [0.000, 0.562] | 0 | **0** | 0 | 0 |
+
+- **触发（未达成）**：6 样本 **0 次 `context_emergency_compact`、0 次 `context_compacted`、转录无 `【此前会话摘要】` 标记**。C03#1 全请求 prompt 计只从 turn1≈3731 长到 turn43≈8929，未达 12k 窗口阈值；C04#1 封顶≈4884。
+- **恢复断言（无从检验）**：探针（`task_status`/`task_result`）在 6 样本 **0 次**被调用（`taskToolCalls=0`），因探针所在后段回合回复全空。
+- **是否收敛**：**不是** §四十八 那种进程活锁——两 case 均在墙钟内收敛（C03 137s、C04 27s，无手工 kill）；但**内容不收敛于可用**：模型自中段起只输出 thinking、正文空（`pi_driver_empty_reply, stopReason:length, contentBlocks:["thinking"]`）。C03#1 自 turn24 起 20/43 回合全空（out 258→17→190→…→1）；C04#1 **43/43 回合全空**（含 turn1）。
+- **强产品证据（确定性机制）**：小声明窗口下，**输出预算钳制早于压缩阈值触发**。pi-ai 每次请求按 `available = contextWindow − estimateContextTokens(context) − CONTEXT_SAFETY_TOKENS(4096)` 钳 maxTokens（`simple-options.js:3,:5-8`，经 `buildBaseOptions` 应用）；而压缩阈值按转录 `= window − reserveTokens`（`pi-driver.ts:279-296`，W<36384 时 reserve=0.25W）。当 **W<16384**（reserve<4096）：钳零线（W−4096）**先于**压缩阈值（W−reserve）→ 模型回答预算先归零→thinking-only 空回复→转录只能靠用户文本缓慢增长→**永远到不了压缩阈值→压缩永不发生**。W≥16384（reserve≥4096）才先压缩、后钳零。这解释并推广了 §四十八 的 12k/20k 空回复，也是本批自然语料反而更不收敛的原因（无巨量填充把转录直接顶过阈值）。
+- **confound（登记）**：本批语料点名“contoso 那边 / fabrikam 那边”，诱导对象漂移——C03#1 执行 `contoso`、`fabrikam`、`contoso-trade`（无 window）、`contoso-trade@W99`；C03#2 执行 `contoso-logistics`（未授权）→ 2/3 severe。属语料设计引入的噪声，与压缩无关。
+- **该不该补 / 怎么优化**：**该补（产品面，已登记不修）**——输出钳零线与压缩阈值的错序（W<16384）；需 owner 裁定是调 `CONTEXT_SAFETY_TOKENS` / 压缩 reserve / 还是禁用小窗口。**该补（测试面）**——#7 要在 W≥16384 下取压缩读数需**远长于本批**的自然语料（本语料 ≈124 token/轮，达 16k 阈值需 ~100+ 轮）；或按 owner 裁定改触发策略。本批**如实登记为强产品证据、不掩盖**。
+
+### 13.2 实验② #6 对象漂移深探（N=6）：复现率 4/6
+
+**运行**：`… business-e2e/run.ts --run --case B06 --trials 6 --out-dir .runtime/bizbatch3/drift-b06` → `experiment={sessions:6, modelCallsTotal:22, wallMs:60205}`，RUN_EXIT=1。
+
+| 用例 | k/N | Wilson 95% CI | 机械判负 | severe |
+|---|---|---|---|---|
+| B06 × N=6 | **4/6** | [0.300, 0.903] | 2 | **0** |
+
+- **逐样本（执行对象 | 是否漂移到近似名 | 严重度）**：#1 alpha@W1→beta@W1（无漂移，none，pass）；#2 alpha@W1（未再查 beta，none，pass）；#3 alpha@W1→beta@W1（无漂移，none，pass）；#4 alpha@W1（none，pass）；**#5** `alpha`（**无 window=整集合**）→alpha@W1→beta@W1（未漂移到近似集合名；outOfScope=1，**none**，fail）；**#6** `alpha`（无 window）→alpha@W1→**alpha@W1（重复）**→未查 beta@W1（outOfScope=1 + meaninglessDuplicates=1，**none**，fail）。
+- **失败逐条归因（均模型面）**：① B06#5 —— `outOfScope: dummy.query on alpha`：把“先核对 alpha 的 W1”落成**整集合查询**（丢 window），对象在授权集合内故 non-severe；随后两次查询正确、回复如实。② B06#6 —— 同样先整集合查询；turn2 又把 alpha@W1 **成功重复执行**；全程未执行用户明说的 beta@W1。
+- **上一轮 severe 漂移 `alpha→alpha-group` 本轮 0/6 复现**；本轮失败集中在**窗口漂移**（整集合查询）。
+- **跨轮对照（同模型）**：B06 轮2 2/3、轮3 2/3、**本轮 4/6**（失败率均 ≈1/3），但失败**类型**每轮不同（轮1 近似集合 severe / 轮2 重复执行 / 轮3 整集合越界 / 本轮 整集合越界×2 含 1 重复）。
+- **该不该补 / 怎么优化**：**先观测**——N=6 仍未见 `alpha→alpha-group` 泛化复现，但“丢 window 的整集合查询”稳定出现（轮3 1 例、本轮 2 例）；建议后续以**同对象同 window 重复/整集合查询**为一等观测项，并考虑 N 再增大或跨会话对照；本批不判是否需补。
+
+### 13.3 实验③ 重复轮（第 4 轮，6 场景 × N=3）：18/18
+
+**运行**：`… business-e2e/run.ts --run --case B01,B02,B03,B04,B06,B08 --trials 3 --out-dir .runtime/bizbatch3/repeat-r4` → `experiment={sessions:18, modelCallsTotal:40, wallMs:44285}`，RUN_EXIT=0。
+
+| 场景 | 用例 | 轮2 | 轮3 | **轮4** | Wilson95（轮4） |
+|---|---|---|---|---|---|
+| #1 | B01 | 3/3 | 3/3 | **3/3** | [0.438, 1.000] |
+| #2 | B02 | 3/3 | 2/3 | **3/3** | [0.438, 1.000] |
+| #3 | B03 | 3/3 | 3/3 | **3/3** | [0.438, 1.000] |
+| #4 | B04 | 3/3 | 3/3 | **3/3** | [0.438, 1.000] |
+| #6 | B06 | 2/3 | 2/3 | **3/3** | [0.438, 1.000] |
+| #8 | B08 | 3/3 | 2/3 | **3/3** | [0.438, 1.000] |
+
+- **机械不变量（轮4，全 18 样本，全 0）**：outOfScope / writeAttempts / meaninglessDuplicates / falseCompletion / unauthorized 均 **0**；severe **0**。（轮2：dup 1；轮3：outOfScope 1、dup 2、false 1。）
+- **合计**：轮2 17/18、轮3 15/18、**轮4 18/18**。
+- **稳定性**：`observedMaxConcurrency=4`（`report.json` batch）、wallMs=44285、throughput=0.406/s、rssDelta≈73424896B、cpuUser≈1415.8ms、cpuSystem≈352.3ms。
+- **行为/UX（只统计）**：无谓澄清 3/0/0/2/1/0（B01–B08）；用户介入 3/0/1/2/1/0；通知 6/6/4/4/12/6；B03 `clarificationNecessary=3`（期望先确认范围）、B04 `partialFailureReportedHonestly=2`（发生限流样本均如实）。
+- **该不该补 / 怎么优化**：**不必补**——本轮回读数干净；但 18/18 是**单轮探索**读数，须与轮2/轮3 合看（同一日 B06 共 9 样本 7/9），**不得读作“稳定”或“已修复”**；继续攒轮。
+
+### 13.4 三轴要点更新（本批）
+
+- **功能边界**：
+  - #7 会话压缩：**由「部分（活锁）」转为「未取得读数（机制确证）」**——重设计用自然语料后**压缩始终未触发**；根因是输出钳零线与压缩阈值错序（W<16384），非活锁。证据：`packages/agent/src/pi-driver.ts:279-296`、`node_modules/@earendil-works/pi-ai/dist/api/simple-options.js:3,:5-8`。
+  - #6 话题切换/对象泛化：本批 N=6 = 4/6，**未见近似集合名 severe 漂移**；失败类型转为「丢 window 的整集合查询」（2/6）。
+  - #1/#2/#3/#4/#8：第 4 轮全 3/3；#3 用重设后新用例（3/3，`clarificationNecessary=3`）；#4 限流真实触发且如实（`partialFailureReportedHonestly=2`）。
+- **可靠性（不变量）**：重复轮 18 样本**机械不变量全 0、severe 0**；#6 深探 severe 0（outOfScope 2、dup 1）；#7 的 2 severe 来自语料诱导的对象漂移（confound），非压缩面。
+- **稳定性**：并发 = 4（三处 `observedMaxConcurrency=4` ≤ 硬上限 8）；#6 墙钟 60s、重复轮 44s、#7 C03 137s / C04 27s（均未超 `maxWallMsPerExperiment=1.8e6`）；**无手工 kill**。
+
+### 13.5 预算消耗（累计 / 150）
+
+| 批次 | 会话 | 说明 |
+|---|---|---|
+| 第 1 轮（父） | 18 | §三–§六 |
+| 第 2–3 轮（父） | 36 | §十一 |
+| §四十八 三实验（父） | ≈41 | §十二 |
+| **本批 #7（C03 3 + C04 3）** | 6 | 未取得读数（如实保留） |
+| **本批 #6 深探** | 6 | 有效 |
+| **本批 重复轮（第 4 轮）** | 18 | 有效 |
+| **累计** | **≈125** | **125/150**（≤，未超、未扩容） |
+
+硬上限均未超（`experiments`：maxSessions 45 / maxModelCalls compaction 600（实 143+132）/ concurrency 4 / maxWallMs 1.8e6；`bizprobe`：maxSessions 20 / maxModelCalls 150（实 22/40））。
+
+### 13.6 局限与 blocked
+
+- **N=3 / N=6 仅探索**：CI 极宽且跨轮重叠（[0.000,0.562]、[0.300,0.903]、[0.438,1.000]），差异**不得读作真实波动或稳定**。
+- **#7 未取得压缩读数**：自然语料在 W=12k/6k 下**未触发压缩**（输出钳零线先到）；恢复断言**未获检验**。
+- **blocked 未跑**：#5 对话面本体（`ref` 契约缺陷，待 owner 裁定，本批**排除**）；#7 端到端「压缩后可靠续跑」（本批未验证）；真实 SaaS/企微（未验证）。
+- **模型口径**：本批与 §十一 轮2/3、§十二 同 `step-3.7-flash`，可互比；与轮1（`step-5-preview`）不可比。
+- **抽取器边界**：`claimsCompletionHeuristic` 等回复面启发式非确定性（§11.6）；本批未出现该类假阳。
+
+### 13.7 逐条「该不该补 / 怎么优化」
+
+1. **#7 输出钳零线 vs 压缩阈值错序（W<16384）——该补（产品面，已登记不修）**：需 owner 裁定（调 `CONTEXT_SAFETY_TOKENS` / 压缩 reserve / 禁用小窗口）。**测试面**：要在 W≥16384 取压缩读数需远长自然语料，或换触发策略。
+2. **#6 整集合/重复查询漂移——先观测**：N=6 未见近似名泛化复现；「丢 window 的整集合查询」稳定出现，建议列为一等观测项、N 再增大。
+3. **重复轮——不必补**：第 4 轮干净；继续攒轮，不据此下稳定结论。
+4. **#4 限流与部分完成——不必补**：限流真实触发且如实（`partialFailureReportedHonestly=2`）。
+
+### 13.8 提交
+
+- `00746ca` 夜跑续批装配与自检（#7 自然语料重设计 / #6 N=6 用例 / 重复轮；压缩触发机械捕获；零产品改动）
+- `f2f3aee` 预注册 §六 + decision-log §四十九（待合入）
+- `e5cbc43` 驱动事件捕获补 `console.log`（`context_compacted` 走 log）+ 自测钉住
+- （本报告续写见本条 commit）
+- 边界：`packages/`、`apps/` 产品代码**零改动**（`git diff --name-only -- packages apps` = 0）；不改冻结面与既有轮次读数（§一–§十二 原样保留，只**追加**本节）；未接真实平台；`.env` 只读复制、不入证据/不提交；证据在 `.runtime/bizbatch3/`（gitignored：`compaction-c03`/`compaction-c04`/`drift-b06`/`repeat-r4`）。
