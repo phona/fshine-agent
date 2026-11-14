@@ -44,6 +44,48 @@ describe('worker 子进程 env 白名单（B 类：凭据隔离）', () => {
 
   it('白名单是精确键（未登记键即使无害也不进）', () => {
     expect(workerSubprocessEnv({ LANG: 'en_US.UTF-8', PATH: '/bin' })).toEqual({ PATH: '/bin' });
-    expect(workerSubprocessEnv({ PATH: undefined, HOME: '/home/x' })).toEqual({ HOME: '/home/x' });
+    expect(workerSubprocessEnv({ PATH: undefined, HOME: '/sentinel-home-x' })).toEqual({ HOME: '/sentinel-home-x' });
+  });
+
+  /**
+   * P0-T06 扩展：前缀族与内部指针的**负例**断言（白名单外注入必须被剔除）。
+   * 覆盖宿主全部敏感族（LLM_* / WECOM_* / EXECUTION_* / FSHINE_*）、内部指针
+   * （AGENT_CONFIG_PATH / DB_PATH / INIT_CWD / EXECUTION_AUDIT_PATH）与测试桥键；
+   * 结果与白名单逐键精确相等（不是"包含关系"——多一个键即红）。
+   */
+  it('负例：白名单外键（含前缀族/内部指针/测试桥键）注入后一律不出现在子进程 env', () => {
+    const sentinel: NodeJS.ProcessEnv = {
+      PATH: '/usr/bin',
+      HOME: '/sentinel-home',
+      TMPDIR: '/tmp/sentinel',
+      LLM_API_KEY: 'k',
+      LLM_API_BASE_URL: 'u',
+      LLM_MODEL: 'm',
+      LLM_MAIN_MODEL: 'mm',
+      LLM_THINKING_LEVEL: 't',
+      LLM_MAIN_THINKING_LEVEL: 'mt',
+      LLM_CONTEXT_WINDOW: '1',
+      WECOM_BOT_ID: 'b',
+      WECOM_BOT_SECRET: 's',
+      WECOM_CORP_ID: 'i',
+      WECOM_CORP_SECRET: 'c',
+      AGENT_CONFIG_PATH: 'agent.yaml',
+      DB_PATH: 'state.db',
+      INIT_CWD: '/somewhere',
+      EXECUTION_AUDIT_PATH: 'audit.jsonl',
+      EXECUTION_EXECUTOR: 'real',
+      EXECUTION_REQUIRE_PLAN: '1',
+      EXECUTION_PLAN_ID: 'plan_sentinel',
+      FSHINE_WORKER_DISPATCH_MODE: 'inline',
+      FSHINE_PLATFORM_QUEUE_CAPACITY: '1',
+      [WORKER_FIXTURE_STATE_DIR_KEY]: '/state/sentinel',
+      NODE_OPTIONS: '--sentinels',
+    };
+    const rebuilt = workerSubprocessEnv(sentinel);
+    expect(rebuilt).toEqual({ PATH: '/usr/bin', HOME: '/sentinel-home', TMPDIR: '/tmp/sentinel' });
+    for (const key of Object.keys(sentinel)) {
+      if (key === 'PATH' || key === 'HOME' || key === 'TMPDIR') continue;
+      expect(rebuilt[key], `${key} 不应进执行层子进程`).toBeUndefined();
+    }
   });
 });
