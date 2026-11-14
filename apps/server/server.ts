@@ -31,7 +31,7 @@ import {
 import { createResourcePolicy } from '../../packages/agent/src/resource-policy';
 import { createSqliteTaskRegistry } from '../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutor, TaskRunner } from '../../packages/agent/src/task-runner';
-import { loadWorkerSkills } from '../../packages/agent/src/worker-skills';
+import { loadMainSkillDelivery, loadWorkerSkills } from '../../packages/agent/src/worker-skills';
 import {
   assembleSessionCore,
   attachNotificationOutbox,
@@ -97,7 +97,9 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
   // 角色文本与技能面在启动时装载一次：配置坏即启动失败，不静默降级。
   const profileMd = await loadAgentProfile();
   const workerSkills = await loadWorkerSkills(profile.root, profile.skillRoots);
-  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`;
+  // 缺口 2（实验面，缺省不投递）：Main 专用技能根投递；技能根为空时 promptBlock 空串 → 提示逐字节不变。
+  const mainSkills = await loadMainSkillDelivery(profile.root, profile.mainSkillRoots ?? [], profile.mainSkillMode ?? 'inline');
+  const mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, profile.executorLabel)}${mainSkills.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
   const stateDir = deps.stateDir ?? path.join(REPO_ROOT, '.runtime', 'server', 'state');
 
   // P5：资源策略进程级一份（跨会话共享账本）；缺省 runtime 段 = 现行为缺省（单并发/无队列）。
@@ -149,6 +151,7 @@ export async function createServer(deps: ServerDeps): Promise<Server> {
           taskRegistry,
           mainSystemPrompt,
           workerSkills,
+          ...(mainSkills.registry === undefined ? {} : { mainSkillRegistry: mainSkills.registry }),
           policy,
           dispatchMode,
           ...(runner === undefined ? {} : { taskRunner: runner }),

@@ -303,6 +303,26 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     }
     const skillRoots = skillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
     if (skillRoots.length !== skillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.skillRoots 不能包含空值`);
+    // Main 侧业务技能（缺口 2，实验面）：缺省不投递（无该配置 = 现行行为逐字节不变）；
+    // 给出时必须是「非空、无空值的相对根数组」；mainSkillMode 只取 inline/catalog 两个实验臂。
+    const mainSkillRootsRaw = item['mainSkillRoots'];
+    let mainSkillRoots: string[] | undefined;
+    if (mainSkillRootsRaw !== undefined) {
+      if (!Array.isArray(mainSkillRootsRaw) || mainSkillRootsRaw.length === 0) {
+        throw new Error(`配置项 contextProfiles.${name}.mainSkillRoots 必须是非空数组`);
+      }
+      mainSkillRoots = mainSkillRootsRaw.map(String).map((entry) => entry.trim()).filter(Boolean);
+      if (mainSkillRoots.length !== mainSkillRootsRaw.length) throw new Error(`配置项 contextProfiles.${name}.mainSkillRoots 不能包含空值`);
+    }
+    const mainSkillModeRaw = item['mainSkillMode'];
+    let mainSkillMode: 'inline' | 'catalog' | undefined;
+    if (mainSkillModeRaw !== undefined) {
+      const value = String(mainSkillModeRaw).trim();
+      if (value !== 'inline' && value !== 'catalog') {
+        throw new Error(`配置项 contextProfiles.${name}.mainSkillMode 必须是 inline 或 catalog`);
+      }
+      mainSkillMode = value;
+    }
     const workerTimeoutMs = item['workerTimeoutMs'] === undefined ? undefined : Number(item['workerTimeoutMs']);
     if (workerTimeoutMs !== undefined && (!Number.isFinite(workerTimeoutMs) || workerTimeoutMs <= 0)) {
       throw new Error(`配置项 contextProfiles.${name}.workerTimeoutMs 必须大于 0`);
@@ -342,6 +362,8 @@ function parseContextProfiles(raw: unknown): Record<string, ContextProfileConfig
     profiles[name] = {
       root,
       skillRoots,
+      ...(mainSkillRoots === undefined ? {} : { mainSkillRoots }),
+      ...(mainSkillMode === undefined ? {} : { mainSkillMode }),
       ...(workerTimeoutMs === undefined ? {} : { workerTimeoutMs }),
       ...(knowledgePaths ? { knowledgePaths } : {}),
       ...(sensitivePaths ? { sensitivePaths } : {}),

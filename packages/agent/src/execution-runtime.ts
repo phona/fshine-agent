@@ -6,7 +6,9 @@
  * import-boundary.test.ts 静态检查）。执行层客户端由装配方注入。
  *
  * 每回合链路：
- *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 只有 run_task 一个工具；
+ *   1) 用户文本进 Main 转录，mainDriver 跑一个回合；Main 工具面 = run_task（委派）+（注入 runner
+ *      时）task_status/task_result/task_cancel/task_resume（查询/取消/接续，缺口 1）+（注入 Main
+ *      技能登记表时）read_skill（缺口 2 臂 B，按需读业务技能正文）；
  *   2) run_task 触发委派：宿主生成 taskId（绑定 principal/session）→ Worker 回合
  *      （workerDriver + execute_operation 一个工具）；
  *   3) execute_operation：宿主生成 requestId → client.execute(结构化请求) → 结果回给 Worker；
@@ -20,7 +22,8 @@
  *   · requestId 由宿主生成，模型不能提供可信身份；
  *   · 任务归属：任务底账绑定 principal/session，越权读取被拒（task-registry.ts）。
  *
- * 本切片不做（不预造接口）：写 / 确认 / 取消 / 产物回收；计划门与预算梯子归执行层；
+ * 本切片不做（不预造接口）：写 / 确认 / 产物回收；计划门与预算梯子归执行层；
+ * 取消/接续经 task_cancel/task_resume 复用 runner 既有生命周期（不在此新建治理）；
  * 上下文与压缩归 Pi 原生（mainDriver 自带）；这里不另建记忆、检索或投影。
  *
  * R4 集成（P5/P6）：注入 `policy` 时前台回合持许可、inline 委派派生后台许可（共享父预算、
@@ -35,7 +38,8 @@ import type {
   ExecutionOutcome,
 } from '@fshine/contracts/execution-contract';
 import type { DriverMessage, TurnDriver, TurnDriverResult } from './driver-contract';
-import { createTaskRegistry, deriveTaskName, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry } from './task-registry';
+import { READ_SKILL_TOOL, type SkillRegistry } from './skills';
+import { createTaskRegistry, deriveTaskName, TaskOwnershipError, type ExecutionRecord, type PendingQuestion, type TaskRecord, type TaskRegistry, type TaskScope } from './task-registry';
 import {
   taskFailureReasonFor,
   type Permit,
@@ -58,6 +62,78 @@ export const RUN_TASK_TOOL_SCHEMA: Record<string, unknown> = {
     },
   },
   required: ['task'],
+  additionalProperties: false,
+};
+
+/**
+ * 对话面任务工具（缺口 1）：把既有 registry/runner 能力以服务端身份授权接到 Main 工具面。
+ * 统一纪律：**参数量只收任务引用（`#编号` 或 taskId），绝不收 principalId/sessionId**——scope 由宿主
+ * 在 send() 闭包用运行时 principal/session 构造，编号解析在 scope 内做（越权=找不到，不泄露存在性）。
+ * 四个工具都随 `options.taskRunner` 一起上/下（background 模式天然有 runner；inline/ask 单发不上面，
+ * 缺省零变化）；cancel/resume 复用 runner 既有生命周期，不在此新建治理。
+ */
+export const TASK_STATUS_TOOL = 'task_status';
+export const TASK_STATUS_TOOL_DESCRIPTION =
+  '查询本会话已有任务的状态：ref 给受理回执里的 #编号（如 "3"）查单个任务，留空列本会话全部任务。'
+  + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
+export const TASK_STATUS_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "3"）；留空列本会话全部任务。' },
+  },
+  additionalProperties: false,
+};
+
+export const TASK_RESULT_TOOL = 'task_result';
+export const TASK_RESULT_TOOL_DESCRIPTION =
+  '取回本会话某个任务的结果：已完成任务返回其逐字存档结果与执行摘要；未完成任务如实返回当前状态，不编造结果。';
+export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "3"）。' },
+  },
+  required: ['ref'],
+  additionalProperties: false,
+};
+
+export const TASK_CANCEL_TOOL = 'task_cancel';
+export const TASK_CANCEL_TOOL_DESCRIPTION =
+  '请求取消本会话某个任务。返回机械结果：requested=已发出取消请求、待执行端确认；cancelled=已确认取消。'
+  + '确认前不得向用户宣称已取消，如实按返回结果转述。';
+export const TASK_CANCEL_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: '要取消的任务引用：#编号。' },
+    reason: { type: 'string', description: '用户给出的取消原因，一句话（可选，原样回显）。' },
+  },
+  required: ['ref'],
+  additionalProperties: false,
+};
+
+export const TASK_RESUME_TOOL = 'task_resume';
+export const TASK_RESUME_TOOL_DESCRIPTION =
+  '当已有任务在等待用户补齐信息时，用用户的答复把同一任务接续下去（编号不变）。非等待中的任务会被如实拒绝。';
+export const TASK_RESUME_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ref: { type: 'string', description: '等待中的任务引用：#编号。' },
+    answer: { type: 'string', description: '对任务待办问题的答复，用用户原话的意思写清。' },
+  },
+  required: ['ref', 'answer'],
+  additionalProperties: false,
+};
+
+/**
+ * 缺口 2 臂 B（实验面）：Main 按需读取业务技能正文。工具名复用 skills.ts 的 READ_SKILL_TOOL（不另起名）；
+ * name 只在登记表内匹配，不做文件系统拼接（路径逃逸防护与 32KiB 上限都在 skills.ts 既有实现内）。
+ */
+export const READ_SKILL_TOOL_DESCRIPTION = '按技能清单里的名称读取该技能的完整正文（需要该技能的程序性知识时使用）。';
+export const READ_SKILL_TOOL_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    name: { type: 'string', description: '技能清单里的技能名。' },
+  },
+  required: ['name'],
   additionalProperties: false,
 };
 
@@ -143,6 +219,12 @@ export interface RuntimeOptions {
   dispatchMode?: 'inline' | 'background';
   /** P6：后台任务运行器（background 模式必需；submit→pump，执行/恢复/取消由它承担）。 */
   taskRunner?: TaskRunner;
+  /**
+   * 缺口 2 臂 B（实验面）：Main 技能登记表——注入后 Main 工具面多一个 read_skill，按登记表内的
+   * 技能名读正文（32KiB 上限由 registry 既有钳制）。缺省不注入 = 无该工具（现行工具面逐字节不变）。
+   * 摘要在系统提示里由装配层经 renderSkillCatalog 拼入，本选项只管工具面。
+   */
+  mainSkillRegistry?: SkillRegistry;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -233,6 +315,78 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   const taskRunner = options.taskRunner;
   if (dispatchMode === 'background' && taskRunner === undefined) {
     throw new Error('background 派发需要注入 TaskRunner（装配方构造 runner；此处 fail-closed）。');
+  }
+
+  /** 可信 scope：来自装配层渠道事实，绝不来自模型输入（工具参数里也不收身份字段）。 */
+  const scope: TaskScope = { principalId: options.principalId, sessionId: options.sessionId };
+
+  /**
+   * 任务引用解析：只在**本会话 scope 化列表**内把 `#编号`/taskId 解析成 taskId——
+   * 跨会话/跨 principal 的编号自然表现为「找不到」（与不存在同一 TaskOwnershipError，不泄露存在性）。
+   */
+  function resolveTaskId(ref: string): string {
+    const wanted = ref.trim();
+    const hit = registry.list(scope).find((task) => (task.taskNo !== undefined && `#${task.taskNo}` === wanted) || task.taskId === wanted);
+    if (hit === undefined) throw new TaskOwnershipError();
+    return hit.taskId;
+  }
+
+  function refFromArgs(args: Record<string, unknown>): string {
+    const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
+    if (ref === '') throw new Error('缺少任务引用 ref（受理回执里的 #编号）。');
+    return ref;
+  }
+
+  /** 任务行只读投影：白名单字段，不含内部路径/租约/身份字段。 */
+  function statusView(task: TaskRecord): Record<string, unknown> {
+    return {
+      taskId: task.taskId,
+      taskNo: task.taskNo ?? null,
+      name: task.name ?? deriveTaskName(task.request),
+      status: task.status,
+      ...(task.reason === undefined ? {} : { reason: task.reason }),
+      ...(task.pendingQuestion === undefined ? {} : { pendingQuestion: task.pendingQuestion }),
+      requestIds: task.executions.map((execution) => execution.requestId),
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt,
+    };
+  }
+
+  function taskStatus(args: Record<string, unknown>): unknown {
+    const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
+    if (ref === '') return { tasks: registry.list(scope).map(statusView) };
+    return statusView(registry.get(resolveTaskId(ref), scope));
+  }
+
+  function taskResult(args: Record<string, unknown>): unknown {
+    const task = registry.get(resolveTaskId(refFromArgs(args)), scope);
+    return {
+      ...statusView(task),
+      ...(task.failureReason === undefined ? {} : { failureReason: task.failureReason }),
+      // 结果存档：completed 走 complete() 的 resultText；background 终态走 archiveReply 的 replyText。
+      replyText: task.replyText ?? null,
+      resultText: task.resultText ?? null,
+      executions: task.executions.map((execution) => ({
+        operation: execution.operation,
+        status: execution.status,
+        requestId: execution.requestId,
+        ...(execution.error === undefined ? {} : { error: execution.error }),
+      })),
+    };
+  }
+
+  /** 取消：复用 runner.cancel，原样转述 CancelOutcome（requested≠cancelled），不宣称已取消。 */
+  function taskCancel(args: Record<string, unknown>, runner: TaskRunner): unknown {
+    const reason = typeof args.reason === 'string' ? args.reason.trim() : '';
+    const outcome = runner.cancel(resolveTaskId(refFromArgs(args)), scope);
+    return { ...outcome, ...(reason === '' ? {} : { reason }) };
+  }
+
+  /** 接续：复用 runner.resume，原样转述 ResumeOutcome（非 waiting_user 由 registry 状态机拒绝）。 */
+  function taskResume(args: Record<string, unknown>, runner: TaskRunner): unknown {
+    const answer = typeof args.answer === 'string' ? args.answer : '';
+    if (answer.trim() === '') throw new Error('task_resume 缺少 answer：请写清对任务待办问题的答复。');
+    return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
   }
 
   let mainMessages: DriverMessage[] = [];
@@ -423,16 +577,35 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       mainMessages = [...mainMessages, userMessage(text)];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
-        tools: [runTaskTool()],
+        tools: [
+          runTaskTool(),
+          ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
+          ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
+        ],
         messages: mainMessages,
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
-          if (tool !== RUN_TASK_TOOL) throw new Error(`Main 工具面之外的调用：${tool}`);
-          const task = typeof args.task === 'string' ? args.task : '';
-          const answer = await delegate(task, foregroundPermit);
-          const taskId = (answer as { taskId?: unknown }).taskId;
-          if (typeof taskId === 'string') taskIds.push(taskId);
-          return answer;
+          if (tool === RUN_TASK_TOOL) {
+            const task = typeof args.task === 'string' ? args.task : '';
+            const answer = await delegate(task, foregroundPermit);
+            const taskId = (answer as { taskId?: unknown }).taskId;
+            if (typeof taskId === 'string') taskIds.push(taskId);
+            return answer;
+          }
+          // 任务查询/治理工具：与工具面同源门控（无 runner 时不暴露、也不受理），fail-closed。
+          if (taskRunner !== undefined) {
+            if (tool === TASK_STATUS_TOOL) return taskStatus(args);
+            if (tool === TASK_RESULT_TOOL) return taskResult(args);
+            if (tool === TASK_CANCEL_TOOL) return taskCancel(args, taskRunner);
+            if (tool === TASK_RESUME_TOOL) return taskResume(args, taskRunner);
+          }
+          // 缺口 2 臂 B：read_skill 与工具面同源门控（未注入登记表则不受理）。
+          if (tool === READ_SKILL_TOOL && options.mainSkillRegistry !== undefined) {
+            const name = typeof args.name === 'string' ? args.name : '';
+            const skill = await options.mainSkillRegistry.read(name);
+            return { name: skill.name, content: skill.content };
+          }
+          throw new Error(`Main 工具面之外的调用：${tool}`);
         },
         deadline: currentTurnDeadline,
       });
@@ -444,7 +617,6 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       if (dispatchMode !== 'background' && taskIds.length > 0 && mainResult.text.trim() !== '') {
         registry.archiveReply(taskIds, mainResult.text);
       }
-      const scope = { principalId: options.principalId, sessionId: options.sessionId };
       const executions = taskIds.flatMap((taskId) => registry.get(taskId, scope).executions);
       return { reply: mainResult.text, taskIds, executions, progress };
     } finally {
@@ -457,8 +629,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     sessionId: options.sessionId,
     transcript: () => [...mainMessages],
     send,
-    tasks: () => registry.list({ principalId: options.principalId, sessionId: options.sessionId }),
-    getTask: (taskId) => registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId }),
+    tasks: () => registry.list(scope),
+    getTask: (taskId) => registry.get(taskId, scope),
   };
 }
 
@@ -468,6 +640,26 @@ function runTaskTool(): DiscoveredTool {
     description: RUN_TASK_TOOL_DESCRIPTION,
     inputSchema: RUN_TASK_TOOL_SCHEMA,
   };
+}
+
+function taskStatusTool(): DiscoveredTool {
+  return { name: TASK_STATUS_TOOL, description: TASK_STATUS_TOOL_DESCRIPTION, inputSchema: TASK_STATUS_TOOL_SCHEMA };
+}
+
+function taskResultTool(): DiscoveredTool {
+  return { name: TASK_RESULT_TOOL, description: TASK_RESULT_TOOL_DESCRIPTION, inputSchema: TASK_RESULT_TOOL_SCHEMA };
+}
+
+function taskCancelTool(): DiscoveredTool {
+  return { name: TASK_CANCEL_TOOL, description: TASK_CANCEL_TOOL_DESCRIPTION, inputSchema: TASK_CANCEL_TOOL_SCHEMA };
+}
+
+function taskResumeTool(): DiscoveredTool {
+  return { name: TASK_RESUME_TOOL, description: TASK_RESUME_TOOL_DESCRIPTION, inputSchema: TASK_RESUME_TOOL_SCHEMA };
+}
+
+function readSkillTool(): DiscoveredTool {
+  return { name: READ_SKILL_TOOL, description: READ_SKILL_TOOL_DESCRIPTION, inputSchema: READ_SKILL_TOOL_SCHEMA };
 }
 
 function executeOperationTool(): DiscoveredTool {

@@ -1197,11 +1197,50 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **跨轮方差（仅轮2↔轮3 可比；轮1 `step-5-preview` 不并入）**：逐场景 Δ（轮3−轮2）：B01 0 / B02 **−1** / B03 0 / B04 0 / B06 0（均 2/3）/ B08 **−1**；合计 17/18 → 15/18。B06 两轮均 2/3 但**失败样本与违规类型不同**（轮2 B06#3 重复成功执行 `beta@W1`；轮3 B06#1 无 window 整集合 `alpha` 越界）。N=3、CI 极宽，差异**不足以判真实波动**；只作探索性重复性观察，**不得读作稳定/退化**。
 - **逐条失败归因**：轮2 = B06#3（meaninglessDuplicates，模型面）；轮3 = B02#2（同对象成功重复执行×2）、B06#1（整集合越界，对象在授权集合内故 non-severe）、B08#2（`falseCompletion` 实为 `claimsCompletionHeuristic` 对「澄清追问含『完成』」的**假阳**，`sample-from-run.ts:105-115`，只登记不判模型缺陷）。
 - **基建修复自测**：`npx tsc --noEmit` = 0；目标套件 9 文件/68 例全过；全量 unit 69 文件/691 例（基线 687，只增）；infra 门 `LLM_MODEL=step-3.7-flash` 通过（`blocking=false`，18 样本未烧）；#4 端到端 RATE_LIMITED 可复现；串并行确定性对照一致。
-- **独立复核**：**待复核**（本 run 未做独立复核）。
+- **独立复核**：passed=true、integrity=false（run 内独立复核员；fix 阶段未触发=未判负；范围/四件修复/#3 收紧/模型固定/无重采样均核过；主会话已独立跑门 69 文件/691 例）。
 - **预算消耗**：累计 **54 会话**（R1 18 + 轮2 18 + 轮3 18）→ 原预注册 §四初始总上限 **60**（**54/60**）；owner 2026-11-15 已上调至 **150**（`business-e2e-prereg-addendum.md` §4.1）→ 54/150，未超、未扩容。模型调用合计 127（46+41+40，每轮 ≤150）；观测 token total 合计 228164。
 - **边界**：`packages/`、`apps/` 产品代码零改动；**不改第 1 轮（§四十四/报告 §一–§十）读数**与其余冻结面；#3 与 R1 不可比已登记；**#5 本体 / #7 / 臂 A/B 仍 blocked**（缺口 1/3/2）；证据 `.runtime/bizprobe/{r2,r3}-step37`（gitignored；先前 `r2`/`r3` 作 SUPERSEDED 保留未动）。
 - **口径待落地**：R1 §四十四 登记的待裁定项（臂 0 的 N、模型口径、#4 限流驱动）已由 owner 2026-11-15 裁定并在本批执行（见 addendum §4.1–4.3）；**裁定随本分支合入正式落地**（现「待合入」）。#3 口径裁定（用户明说=授权）亦在此列。
 - **回退**：`git revert 84afe7b 3dd9358 1720e66`（仅测试基建 + 文档 + 套件锁重冻结；产品代码零改动，回退安全）。
+---
+
+## 四十六、「加回决定」：read_skill 仅供缺口 2 评测臂（2026-11-15，分支 `arch/r4-gapimpl`）
+
+- **背景**：`read_skill` 及其宿主侧渲染（`renderSkillCatalog` / `listSkills`）属**历史上被删/从未接生产**的机制（§八 裁决 3「保留 skill 加载机制 catalog + `read_skill`，供未来真正需要按需知识的场景；当前不依赖它」；旧链路已在 `0b97227` 删除）。按本日志维护规则「已删机制重新加回：先新增加回决定」，本条目为加回的**前置依据**。
+- **触发的是哪条判据（加回来的判据）**：AGENTS.md「Skills First」——业务知识与方法优先经 Skills 提供；且 §八 明确 `read_skill` 机制**被保留**（未被判死刑）只是「当前不依赖」。缺口 2 需要把「Main 侧业务 Skill 投递」做成**可评测的两臂**（正文直嵌 vs 目录+按需读取）以产生用户级 Eval 证据，故按 §八 保留条目把它接到 Main 工具面。
+- **历史证据（引用 §八，不改原文）**：
+  - §八 `read_skill` 有效机会 = b1 的 39 轮，**命中 0/39**（两次触发实验均零读取）；只证明「当轮任务不需要技能正文时模型不读」这一**弱命题**，摘要质量/任务-技能相关度是未控变量，不能证明「需要时也不会读」。
+  - §八 正向对照：b2（正文经 roleInstructionsOverride 直塞，无工具）在 UX-04 上 **0/2 → 2/2**、UX-01 上 **2/2**——正文直嵌有「观察到的潜在价值」（样本不足，未作稳定结论）。
+- **采用形态（本次加回的最小形态）**：
+  1. **仅实验臂，不进产品缺省**：两臂都由新配置键启用——`mainSkillRoots?: string[]`（Main 专用技能根，缺省 undefined）+ `mainSkillMode?: 'inline' | 'catalog'`（选臂；缺省 undefined）。**无该配置 = 现行行为逐字节不变**（`loadMainSkillDelivery` 技能根为空即返回空提示块；Main 工具面不加 `read_skill`）。
+  2. 臂 A（inline）：复用 `loadWorkerSkills` 把 SKILL.md 正文拼进 `mainSystemPrompt`。
+  3. 臂 B（catalog）：系统提示只拼 `listSkills`+`renderSkillCatalog` 的 name+description 摘要；Main 工具面按需 `read_skill`（复用 skills.ts 既有 `READ_SKILL_TOOL`，name 只在登记表内匹配、32KiB 上限沿用既有钳制）。
+  4. 事实源隔离：Main `mainSkillRoots` 与 Worker `skillRoots`、执行层 `.agents/skills-serve` 是**不同事实源，不合并**（沿用 skills.ts 头注释约束）。
+- **重测计划**：按 `gap-main-skill.md` §3 实验设计，同一批业务技能、同一 `npm run eval:user` 用户级黑盒集（全样本保留、不筛绿），三臂对照（缺省基线 / 臂 A / 臂 B），判据=完成率、无谓追问、口径错误率、token/耗时；`read_skill` 读取命中与臂 A 常驻 token 成本由实验臂直接计量。**留在产品缺省的门槛**：需用户级 Eval 显示相对基线有明确改善且无安全/口径回归，否则维持缺省不投递（本条目**不**授权进缺省）。
+- **边界**：本条目只授权「评测臂形态」的代码存在；不授权改产品缺省、不授权把 Main 与 Worker 技能源合并、不建立任何 Main 侧记忆/检索/投影。
+
+---
+
+## 四十七、缺口 3/1/2 实施：压缩窗口接线 + 对话面任务工具 + Main 业务 Skill 投递（2026-11-15，分支 `arch/r4-gapimpl`）
+
+- **状态**：**已合入**（`--no-ff` → `arch/integration`，2026-11-15；合入后 typecheck=0、unit 68 文件/694 例全绿）。
+- **授权**：owner 2026-11-14 批准实施三缺口，依已合入设计 `docs/product/gap-compaction-window.md`（缺口 3）、`gap-task-surface.md`（缺口 1）、`gap-main-skill.md`（缺口 2）。
+- **分支/基线**：`arch/r4-gapimpl`（worktree）；基线 = `arch/integration` 启动时 HEAD `5b0967d1c1a7ae1a9228ec3c0c1884ffab68943c`（记录于 `.runtime/gapimpl/baseline.txt`，gitignored）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
+  1. `31f4706` 缺口 3 · 压缩窗口装配接线：`scripts/ask-runtime.ts` +17/−3（新增 `contextWindowFrom` 薄封装，复用既有 `parseContextWindow`；三处 `createPiTurnDriver` 展开 `...contextWindowFrom(input.env)`）+ 新测试 `scripts/ask-context-window.test.ts` +122。**最小 diff = 装配层一处函数 + 三处参数展开；`pi-driver.ts` 零改动**；缺省（未设 `LLM_CONTEXT_WINDOW`）逐字节不变。
+  2. `0dadfc0` 缺口 1 · 对话面任务工具：`packages/agent/src/execution-runtime.ts` +169/−13 + 新测试 `packages/agent/task-surface.test.ts` +271。**单文件**：四工具声明（`task_status/task_result/task_cancel/task_resume`，schema `additionalProperties:false`、只收任务引用）+ `createSession` 内 `scope`/`resolveTaskId`/四处理器 + `send()` 工具面与 exec 分派（工具面与分派同源门控 `taskRunner`）。
+  3. `57ac5ee` 缺口 2 · Main 业务 Skill 投递：7 文件 +191/−7（含**§四十五 加回决定**）+ 新测试 `packages/agent/main-skill.test.ts` +179。新增配置键 `mainSkillRoots`/`mainSkillMode`（类型+校验）；`loadMainSkillDelivery` 复用 `loadWorkerSkills`（臂 A）/`listSkills`+`renderSkillCatalog`+`READ_SKILL_TOOL`（臂 B）；两装配点同源；**缺省（无该配置）逐字节不变**。
+- **「新造清单」**：三缺口合计 **0 个新机制**——缺口 3 复用 `parseContextWindow`；缺口 1 复用 `registry.list/get` + `runner.cancel/resume`（仅新增工具声明与处理器，未新建生命周期/权限/治理）；缺口 2 复用 `loadWorkerSkills` / `READ_SKILL_TOOL` / `renderSkillCatalog` / `listSkills`（新增 2 个可选配置键 + 1 个装配期薄封装 + 1 个 ~25 行多根 registry 内部适配）。无 Planner / Router / 规则引擎 / 事件总线 / 通用 Workflow Engine / 新任务状态框架 / 第二套协议 / 沙箱；无新模块文件。
+- **哲学合规结论**：**Pi First**——三缺口均接既有 Pi 原生面（压缩参数、工具面、技能库），未建语义层/记忆/检索；**Skills First**——业务知识经 SKILL.md，`agent.md` 未改；**Runtime Minimal**——缺口 1 未新建治理、缺口 3 单点解析、缺口 2 缺省零变化；**Eval Driven**——三缺口均待用户级 Eval，缺口 2 明确「进缺省需 Eval 改善」门槛；**Zero Trust**——缺口 1 scope 由宿主服务端注入、参数不收 `principalId/sessionId`（越权=找不到，不泄露存在性）；缺口 2 缺省不改。
+- **自测与绊线读数**（命令见各提交 message；均在 worktree `TMPDIR=/home/tao/.tmp` 下运行）：
+  - `node_modules/.bin/tsc --noEmit`：三缺口各自及合并后均 **退出码 0**。
+  - 定向：缺口 3 新守卫 + `pi-model-capability` = 8 passing；缺口 1 `task-surface` = 9 passing，加定向回归共 103 passing；缺口 2 `main-skill` = 6 passing，加定向回归（含 `import-boundary`）= 80 passing。
+  - 全量 `node_modules/.bin/vitest run`：基线 **65 文件/674 例** → gap3 **66/679** → gap1 **67/688** → gap2 **68/694**（只增不减，全绿）。
+  - 反向绊线：每缺口 **≥3 类**，破坏→红→逐字节复原（md5 校验）——缺口 3：删接线 / 助手忽略 env / 缺省注入值；缺口 1：取消谎报 cancelled / resume 绕过 runner / task_status 信任参数身份 / 工具面不随 runner 收窄；缺口 2：缺省注入块 / 清单泄露路径 / `read_skill` 不随 registry 收窄。
+  - **诚实降级登记**：缺口 3、缺口 1 为先红后绿；**缺口 2 为实现先行 + `git stash` 降级复现红**（非纯 TDD 先红），已在提交 message 与本条目如实登记。
+- **read_skill 加回决定**：见 **§四十六**（本分支 `57ac5ee` 新增）——`read_skill` **仅用于评测臂、不进产品缺省**；引用 §八 历史证据（b1 `read_skill` 0/39 只证弱命题；b2 正文直塞 UX-04 0/2→2/2 正向对照）与本次重测计划（`npm run eval:user` 三臂对照、全样本保留）。
+- **独立复核**：passed=true、integrity=false（缺口3/1/2 三处独立复核**均未判负**——对应「复核缺口修复」阶段从未触发；哲学合规终审对照 AGENTS.md 逐条**无违规**：新增行无 classifier/router/planner/event-bus/state-machine/embedding 命中，缺口1 scope 由服务端注入、参数不收 principalId/sessionId，缺口2/3 缺省逐字节不变。主会话已独立抽检 scope 来源 / 工具 schema / 禁止机制扫描 / 缺省门控，均相符）。
+- **边界**：未接真实平台、零真实模型额度；未改冻结面（convergence-r1 的 criteria/cases/judge/runner/safety-gate、criteria.lock、exploration 冻结件）与历史证据。
 
 ---
 

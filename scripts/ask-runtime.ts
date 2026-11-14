@@ -36,7 +36,7 @@ import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
+import { createPiTurnDriver, parseContextWindow } from '../packages/agent/src/pi-driver';
 import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
@@ -57,7 +57,8 @@ import { createResourcePolicy, resolveRuntimeConfig, type ResourcePolicy } from 
 import type { TaskRegistry } from '../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../packages/agent/src/task-registry-sqlite';
 import { createTaskRunner, type TaskExecutor, type TaskRunner } from '../packages/agent/src/task-runner';
-import { loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import { loadMainSkillDelivery, loadWorkerSkills } from '../packages/agent/src/worker-skills';
+import type { SkillRegistry } from '../packages/agent/src/skills';
 import { explicitConfigFrom, materializeEvalConfig } from './resolve-config-path';
 import { EvalIsolationRefused, assessEvalIsolation, assertEvalIsolation } from './eval/safety-gate';
 
@@ -126,6 +127,17 @@ export type ExecutionFaceFactory = (
 export type DriverFactory = (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
 
 /**
+ * 压缩窗口装配接线（缺口 3）：把配置层写进 env 的 `LLM_CONTEXT_WINDOW`（config.ts:442）经既有
+ * `parseContextWindow` 解析成驱动的 `contextWindow` 参数——装配层持有配置、驱动只收参数（pi-driver.ts:145
+ * 的选项契约）。未设置/空串 → 返回 `{}`，驱动 options 不含 contextWindow，走 128k 缺省（逐字节不变）；
+ * 非法值 → parseContextWindow 当场抛中文错误点名变量（不静默回落，理由见 pi-driver.ts:129）。
+ */
+export function contextWindowFrom(env: Record<string, string | undefined>): { contextWindow?: number } {
+  const parsed = parseContextWindow(env.LLM_CONTEXT_WINDOW, 'LLM_CONTEXT_WINDOW');
+  return parsed === undefined ? {} : { contextWindow: parsed };
+}
+
+/**
  * 装配核心输入。各入口在门之后调用：本核心不做任何门判定、不改错误归类；
  * 一切差异（驱动/执行面/底账/技能提示词/审计路径/隔离断言/空集合话术）都从输入注入。
  */
@@ -157,6 +169,8 @@ export interface SessionAssemblyInput {
   taskRegistry?: TaskRegistry;
   /** 预装载 Main 系统提示（server 启动时装载一次）；缺省现装。 */
   mainSystemPrompt?: string;
+  /** 缺口 2 臂 B：预装载 Main 技能登记表；缺省随 Main 提示现装（提示注入时由调用方一并给）。 */
+  mainSkillRegistry?: SkillRegistry;
   /** 预装载 Worker 技能（server 启动时装载一次）；缺省现装。 */
   workerSkills?: readonly WorkerSkill[];
   /** P5：runtime 段（资源强制单一配置入口）；缺省 = 现行为缺省（单并发/无队列/无任务级预算）。 */
@@ -285,7 +299,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     });
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? input.createDrivers(input.env).workerDriver
-      : createPiTurnDriver({ env: input.env }));
+      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }));
     executor = await createTaskExecutor({
       client: face.client,
       allowedOperations: face.allowedOperations,
@@ -376,13 +390,22 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
   try {
     const workerSkills = input.workerSkills ?? await loadWorkerSkills(input.profile.root, input.profile.skillRoots);
     let mainSystemPrompt = input.mainSystemPrompt;
+    let mainSkillRegistry = input.mainSkillRegistry;
     if (mainSystemPrompt === undefined) {
       const profileMd = await loadAgentProfile();
-      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}\n\n${MAIN_PROTOCOL_NOTE}`;
+      // 缺口 2（实验面，缺省不投递）：Main 专用技能根的投递块拼在角色文本之后、协议之前；
+      // 技能根为空时 promptBlock 为空串 → 提示逐字节不变；臂 B 另交出 read_skill 登记表。
+      const delivery = await loadMainSkillDelivery(
+        input.profile.root,
+        input.profile.mainSkillRoots ?? [],
+        input.profile.mainSkillMode ?? 'inline',
+      );
+      mainSystemPrompt = `${applyExecutorLabel(profileMd.instructions, input.profile.executorLabel)}${delivery.promptBlock}\n\n${MAIN_PROTOCOL_NOTE}`;
+      mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
       ? input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env }), workerDriver: createPiTurnDriver({ env: input.env }) };
+      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }) };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;
@@ -428,6 +451,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       policy,
       dispatchMode,
       ...(runner === undefined ? {} : { taskRunner: runner }),
+      ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
     });
