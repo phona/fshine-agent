@@ -29,7 +29,7 @@ import type { TaskScope } from '../../../../packages/agent/src/task-registry';
 import type { TaskRunner } from '../../../../packages/agent/src/task-runner';
 import { loadMainSkillDelivery } from '../../../../packages/agent/src/worker-skills';
 import { materializeEvalConfig } from '../../../resolve-config-path';
-import { assembleSessionCore, createBackgroundDispatch, resolveExecutionFace } from '../../../ask-runtime';
+import { assembleSessionCore, contextWindowFrom, createBackgroundDispatch, resolveExecutionFace } from '../../../ask-runtime';
 import type { DriverFactory, ExecutionFaceFactory } from '../../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../../safety-gate';
 import { claimsCompletionHeuristic, executionFactsFromToolCalls } from '../sample-from-run';
@@ -134,9 +134,13 @@ export interface ExpExecutorOptions {
 
 /** 真实/假件执行器：一个（用例×trial）样本 → 完整实验证据。inline-only；per-样本独立目录。 */
 export function createExpExecutor(options: ExpExecutorOptions = {}): ExpExecutor {
+  // 缺省真实驱动必须显式带上压缩窗口（缺口 3 装配接线）：assembleSessionCore 只在**缺省驱动**分支
+  // 施加 `...contextWindowFrom(input.env)`（ask-runtime.ts:406-408）；本执行器总是提供 createDrivers
+  // （为记录工具调用），故由本执行器自己施加该接线，否则 LLM_CONTEXT_WINDOW 不生效（此前 #7 首跑
+  // 即因此未触发压缩——驱动按 128k 缺省跑）。
   const baseDrivers = options.createDrivers ?? ((driverEnv: NodeJS.ProcessEnv) => ({
-    mainDriver: createPiTurnDriver({ env: driverEnv }),
-    workerDriver: createPiTurnDriver({ env: driverEnv }),
+    mainDriver: createPiTurnDriver({ env: driverEnv, ...contextWindowFrom(driverEnv) }),
+    workerDriver: createPiTurnDriver({ env: driverEnv, ...contextWindowFrom(driverEnv) }),
   }));
   return async (item, caseDef, workDir): Promise<ExpEvidence> => {
     const stateDir = path.join(workDir, 'state');
