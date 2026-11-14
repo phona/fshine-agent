@@ -30,12 +30,18 @@ const SKIP_DIR_NAMES = new Set(['node_modules', '.runtime', '.git', 'fixtures', 
 
 const CHAIN_SYMBOLS = ['createSession', 'createDummyCliClient', 'readOnlyOperationNames'] as const;
 
-/** P0 目标：四个入口同源（ask 单轮、tasks --redo、server、eval runner）。 */
+/**
+ * P0 目标：四个入口同源（ask 单轮、tasks --redo、server、eval runner）。
+ * P7a 扩展（2026-11-14，守卫扩展到 ask-first 新入口）：脚本回放与交互式 ask 也必须
+ * 沿导入图到达同一装配模块——新入口不许旁路自建 Runtime（P7-T05）。
+ */
 const ENTRY_FILES = [
   'scripts/ask.ts',
   'scripts/tasks.ts',
   'apps/server/server.ts',
   'scripts/eval/convergence-r1/runner.ts',
+  'scripts/ask-replay.ts',
+  'scripts/ask-interactive.ts',
 ] as const;
 
 /** ask/redo 五门话术的完整短语（不含 server/runner 自己的方言串）。 */
