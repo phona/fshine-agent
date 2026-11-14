@@ -144,6 +144,15 @@ class FakeSink implements NotificationSink {
   }
 }
 
+/** 恒失败的假 sink（通知投递失败解耦断言用；不触网）。 */
+class FailingSink implements NotificationSink {
+  sends = 0;
+  async send(): Promise<{ delivered: boolean; error: string }> {
+    this.sends += 1;
+    return { delivered: false, error: 'CHANNEL_DOWN' };
+  }
+}
+
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
@@ -528,6 +537,42 @@ describe('R4 联合：P5 前台许可（inline 模式）', () => {
       assembled.close();
     }
   });
+
+  it('⑰ 后台满载不阻塞前台：后台任务挂起（1/1）时前台回合仍即时完成', async () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const gate = deferred<TaskExecutionOutcome>();
+    const executor = new FakeExecutor([async () => await gate.promise]);
+    const records: MainDriverRecord[] = [];
+    const plans = new Map<string, MainPlan>([
+      ['交办一件慢事', { delegates: ['交办一件慢事'], reply: '已受理，稍后给你结果。' }],
+      ['顺便问一句', { reply: '现在后台还有任务在跑。' }],
+    ]);
+    const assembled = await assembleBackground({
+      dbPath,
+      taskExecutor: executor,
+      mainPlans: plans,
+      records,
+      backgroundConcurrency: 1,
+    });
+    try {
+      const first = await assembled.session.send('交办一件慢事');
+      expect(executor.calls).toHaveLength(1);
+      expect(assembled.taskRegistry.get(first.taskIds[0]!, SCOPE_A).status).toBe('running');
+      // 后台配额已满（1/1）：前台许可独立 → 回合立即完成（若被后台阻塞则拒绝/挂起，本断言红）
+      const second = await assembled.session.send('顺便问一句');
+      expect(second.reply).toBe('现在后台还有任务在跑。');
+      expect(second.taskIds).toHaveLength(0);
+      expect(assembled.policy.snapshot().foreground.active).toBe(0);
+      // 放行后台后正常收尾（在飞回合不泄漏）
+      gate.resolve({ kind: 'completed', resultText: '慢事完成' });
+      await assembled.runner!.whenIdle();
+      expect(assembled.policy.snapshot().background.active).toBe(0);
+    } finally {
+      gate.resolve({ kind: 'failed', reason: '（测试清理）' });
+      await settleQuietly(assembled);
+      assembled.close();
+    }
+  });
 });
 
 describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
@@ -578,6 +623,44 @@ describe('R4 联合：P4 通知（假 sink，background 模式）', () => {
       expect(sink.sent.map((notification) => notification.kind)).toEqual(['accepted', 'started', 'completed']);
       expect(reader.undelivered(taskId)).toEqual([]);
       expect(reader.listNotifications(taskId).every((notification) => notification.deliveredAt !== undefined)).toBe(true);
+    } finally {
+      reader.close();
+      assembled.close();
+    }
+  });
+
+  it('⑯ 通知投递失败不改变任务结果：任务仍 completed、结果可取回；未送达可见（attempts/lastError）', async () => {
+    const dbPath = path.join(tempDir(), 'state.db');
+    const sink = new FailingSink();
+    const executor = new FakeExecutor([async () => ({ kind: 'completed', resultText: '结果全文' })]);
+    const records: MainDriverRecord[] = [];
+    const plans = new Map<string, MainPlan>([['任务A', { delegates: ['任务A'] }]]);
+    const assembled = await assembleBackground({
+      dbPath,
+      taskExecutor: executor,
+      mainPlans: plans,
+      records,
+      notificationSink: sink,
+    });
+    const reader = createNotificationReader(dbPath);
+    try {
+      const turn = await assembled.session.send('任务A');
+      const taskId = turn.taskIds[0]!;
+      await assembled.runner!.whenIdle();
+      // 投递连续失败：未送达可见、有 attempts 与 lastError（不静默）
+      await assembled.notifications!.deliverPending();
+      const rows = reader.listNotifications(taskId);
+      expect(rows).toHaveLength(3);
+      expect(rows.every((notification) => notification.deliveredAt === undefined)).toBe(true);
+      expect(rows.every((notification) => notification.attempts >= 1)).toBe(true);
+      expect(rows.every((notification) => notification.lastError === 'CHANNEL_DOWN')).toBe(true);
+      expect(reader.undelivered(taskId)).toHaveLength(3);
+      // 任务结果与投递解耦：completed + 结果可取回，无失败痕迹
+      const task = assembled.taskRegistry.get(taskId, SCOPE_A);
+      expect(task.status).toBe('completed');
+      expect(task.replyText).toBe('结果全文');
+      expect(task.failureReason).toBeUndefined();
+      expect(task.reason).toBeUndefined();
     } finally {
       reader.close();
       assembled.close();
