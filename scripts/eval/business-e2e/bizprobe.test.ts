@@ -27,9 +27,12 @@ import {
 import { compareBizprobeSerialParallel, runBizprobeBatch, summarizeBizprobe, type BizExecutor, type BizSampleEvidence } from './assembly';
 import { HARD_LIMIT_REGISTRY } from './batch';
 import { buildSampleRecord, claimsCompletionHeuristic, executionFactsFromToolCalls } from './sample-from-run';
+import { createModelExecutor } from './model-executor';
 import { verifySuiteLock, checkInfraGate } from './run';
 import type { SampleRecord } from './judge';
 import type { MetaFile, ReplyLine, ToolCallRecord } from '../convergence-r1/evidence';
+import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
+import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 
 let tmpRoots: string[] = [];
 function freshRoot(): string {
@@ -224,5 +227,50 @@ describe('② infra 门（.env / LLM_MODEL / verifyLock）', () => {
     expect(gate.checks.map((c) => c.name)).toEqual(expect.arrayContaining(['.env 存在（gitignored）', 'LLM_API_KEY 非空', 'LLM_MODEL 解析', 'verifyLock 可用且一致']));
     // verifyLock 项必须 ok（套件已冻结）。
     expect(gate.checks.find((c) => c.name === 'verifyLock 可用且一致')?.ok).toBe(true);
+  });
+});
+
+describe('⑧ 真实驱动器装配路径（注入假 driver/假执行面，零模型）', () => {
+  it('经真实 model-executor 全链跑一个样本：独立 config/db/state 目录 + 证据 + 判定读数', async () => {
+    const root = freshRoot();
+    const outRoot = path.join(root, 'out');
+    // 假 Main：委派一个任务；假 Worker：一次结构化只读查询；假执行面：deterministic completed。
+    const mainDriver: TurnDriver = {
+      async run(input) {
+        const tool = input.tools.find((t) => t.name === 'run_task') ?? input.tools[0]!;
+        await input.exec(tool.name, { task: '核对 alpha 的 W1 记录' });
+        const reply = '已核对 alpha 的 W1：共 2 条记录（rec-001/rec-002）。';
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    };
+    const workerDriver: TurnDriver = {
+      async run(input) {
+        const tool = input.tools.find((t) => t.name === 'execute_operation') ?? input.tools[0]!;
+        await input.exec(tool.name, { operation: 'dummy.query', args: { collection: 'alpha', window: 'W1' } });
+        const reply = 'query 完成';
+        return { text: reply, messages: [...input.messages, { role: 'assistant', content: reply } as never] };
+      },
+    };
+    const faceClient: ExecutionClient = {
+      async capabilities(): Promise<CapabilityManifest> { return { contractVersion: 1, operations: [{ name: 'dummy.query', label: 'query', args: [] }] }; },
+      async execute(): Promise<ExecutionOutcome> { return { status: 'completed', data: { collection: 'alpha', window: 'W1', count: 2 } }; },
+    };
+    const executor = createModelExecutor({
+      createDrivers: () => ({ mainDriver, workerDriver }),
+      createExecutionFace: async () => ({ client: faceClient, allowedOperations: ['dummy.query'] }),
+      env: { LLM_API_KEY: 'test-placeholder', LLM_MODEL: 'test-model', LLM_API_BASE_URL: 'http://localhost' },
+    });
+    const items = expandBizprobeItems([bizCases[0]!]);
+    const report = await runBizprobeBatch({ cases: [bizCases[0]!], items, executor, outRoot, concurrency: 1 });
+    expect(report.samples).toHaveLength(3);
+    expect(report.samples.every((s) => !s.error)).toBe(true);
+    const work = path.join(outRoot, 'work', 'B01#1');
+    for (const d of ['config', 'db', 'state']) expect(existsSync(path.join(work, d)), d).toBe(true);
+    expect(existsSync(path.join(work, 'config', 'agent-config.yaml'))).toBe(true);
+    // 机械投影：worker 的 execute_operation → 执行事实（alpha@W1 读，completed）→ 干净样本判过。
+    expect(report.samples[0]!.mechanical.pass).toBe(true);
+    expect(report.samples[0]!.mechanical.violations).toEqual({ outOfScope: 0, writeAttempts: 0, meaninglessDuplicates: 0, falseCompletion: 0, unauthorized: 0 });
+    const verdict = JSON.parse(readFileSync(path.join(outRoot, 'B01', '1', 'verdict.json'), 'utf8'));
+    expect(verdict.mechanical.pass).toBe(true);
   });
 });

@@ -22,6 +22,7 @@ import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
 import type { TurnDriver, TurnDriverInput } from '../../../packages/agent/src/driver-contract';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { assembleSessionCore } from '../../ask-runtime';
+import type { DriverFactory, ExecutionFaceFactory } from '../../ask-runtime';
 import { assessEvalIsolation, assertEvalIsolation } from '../safety-gate';
 import type { CaseContext } from './batch';
 import type { BizCase, BizItem } from './scenarios';
@@ -110,8 +111,23 @@ function materializeConfig(item: BizItem, caseDef: BizCase, configCopy: string, 
   writeFileSync(configCopy, stringifyYaml(doc));
 }
 
+/**
+ * 驱动器注入覆盖（自测用确定性假 driver/假执行面，零模型；生产不传 = 真实 Pi + 仓内 dummy）。
+ * 注入只替换「驱动/执行面」两处接线，装配/证据/判定代码路径逐字不变。
+ */
+export interface ModelExecutorOptions {
+  createDrivers?: DriverFactory;
+  createExecutionFace?: ExecutionFaceFactory;
+  /** 额外进程环境（自测注入 LLM_API_KEY 占位；生产为空，走 .env）。 */
+  env?: NodeJS.ProcessEnv;
+}
+
 /** 真实模型驱动器：一个（用例×trial）样本 → 完整证据。inline only；per-样本独立目录。 */
-export function createModelExecutor(): BizExecutor {
+export function createModelExecutor(options: ModelExecutorOptions = {}): BizExecutor {
+  const drivers = options.createDrivers ?? ((driverEnv: NodeJS.ProcessEnv) => ({
+    mainDriver: createPiTurnDriver({ env: driverEnv }),
+    workerDriver: createPiTurnDriver({ env: driverEnv }),
+  }));
   return async (item: BizItem, caseDef: BizCase, ctx: CaseContext): Promise<BizSampleEvidence> => {
     if (ctx.workDir === undefined) throw new Error('业务 E2E 需要每样本工作目录（batch 的 workRoot）');
     const stateDir = path.join(ctx.workDir, 'state');
@@ -123,7 +139,7 @@ export function createModelExecutor(): BizExecutor {
     materializeConfig(item, caseDef, configCopy, dbPath);
 
     const config: AppConfig = loadConfig({ yamlPath: configCopy });
-    const env = effectiveDeploymentEnv(config, { ...process.env, ...(caseDef.biz.env ?? {}) });
+    const env = effectiveDeploymentEnv(config, { ...process.env, ...(options.env ?? {}), ...(caseDef.biz.env ?? {}) });
     if ((env['LLM_API_KEY'] ?? '').trim() === '') {
       throw new Error('未检测到 LLM_API_KEY——真实模型探测需要密钥只在 .env（不落地、不落跟踪文件）。');
     }
@@ -149,10 +165,14 @@ export function createModelExecutor(): BizExecutor {
         assertEvalIsolation(isolation, `bizprobe ${item.id}`);
       },
       emptyOperationsMessage: '执行层没有声明任何只读 operation——拒绝以空允许集合运行',
-      createDrivers: (driverEnv) => ({
-        mainDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'main', sink),
-        workerDriver: recordingDriver(createPiTurnDriver({ env: driverEnv }), 'worker', sink),
-      }),
+      createDrivers: (driverEnv) => {
+        const base = drivers(driverEnv);
+        return {
+          mainDriver: recordingDriver(base.mainDriver, 'main', sink),
+          workerDriver: recordingDriver(base.workerDriver, 'worker', sink),
+        };
+      },
+      ...(options.createExecutionFace === undefined ? {} : { createExecutionFace: options.createExecutionFace }),
     });
 
     const replies: ReplyLine[] = [];
