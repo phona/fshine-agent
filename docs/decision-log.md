@@ -1096,6 +1096,29 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 三十九、Shadow 演练（Dummy 路线）：实施与合入（2026-11-14，分支 `arch/r4-shadow`）
+
+- **目标**：接真 shadow 的演练前置——双源对照 harness（源 A=`dummy` 生产适配器真 spawn/--state-dir/audit.jsonl；源 B=`fake-real` 进程内四态夹具）+ 接真 runbook；不连接真实平台。
+- **提交链**：`845cba3`（测试先行先红：harness 缺失 collection 失败）→ `35ea254`（实现转绿：四态/只读哈希/fail-closed/回退开关/证据复跑；12 例）→ `1891772`（runbook + dry-run 报告）。
+- **纪律**：绊线 3 类实做（单源冒充双源/只读哈希漂移/fail-closed 破坏→红→逐字节恢复）；红/绿/绊线证据 `.runtime/shadow/`（gitignored）。
+- **独立复核**：passed=true、integrity=false（范围=5 文件全新增 +1425、零产品/冻结面改动；复核复跑双源断言出处全为双源事实；runbook 与 harness 同源）。
+- **合入**：`9a4a269`（--no-ff）入 `arch/integration`；合入后 typecheck=0、unit 56 文件/606 例全绿。
+- **blocked/未验证**（如实）：真实响应形状/权限/延迟/错误码需真实连接或脱敏样本（runbook 列解除条件）；真实渠道连接授权外；接真仅剩「凭据+endpoint+授权」薄层。
+- **回退**：`git revert 35ea254`（实现）与 `git revert 845cba3`（测试）互不依赖，docs 可单独 revert。
+
+---
+
+## 四十、taskBudget 运行时计量接线（3a）：实施与合入（2026-11-14，分支 `arch/r4-budget`）
+
+- **授权**：owner 2026-11-14（稳定性批次 3a）——consume 接线、配置缺省零行为变化、耗尽→`resource_limited`；token 仅在 Pi usage 可验证时计量（当前不可验证→不计量，不造假上限）。
+- **提交链**：`0c509c7`（8 例测试先行先红：consume/耗尽拒绝/子共享不放大/零配置金样/token 诚实）→ `59c09e3`（实现：`execution-runtime.ts` +8 行——调用前耗尽检查沿用既有许可边界（`budget_exhausted`→任务 `failed`+`reason=resource_limited`，未进 Worker 即拒）；调用后 `finally` 计量成功与失败回合，被拒委派不计；子许可共享同一 budget 对象不复制/不放大）→ `1e0e8f7`（报告）。
+- **纪律**：绊线（去 consume→永不耗尽→红）实做不提交；零配置 inline 金样逐字不变。
+- **独立复核**：passed=true、integrity=false（范围=3 文件 +392、唯一产品文件 +8 行；计量/耗尽边界/子共享/零配置金样复核复做）。
+- **合入**：`--no-ff` 入 `arch/integration`（Shadow 之后）；合入后 typecheck=0、unit 57 文件/614 例全绿。
+- **限制与后续**：3b 持久幂等键（schema）、3c `queueCapacity>0` 账本上界（触冻结 §2）均未授权待批；token 计量待 Pi 可验证 usage。回退=`git revert 59c09e3`（测试可单独保留）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
