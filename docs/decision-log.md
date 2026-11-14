@@ -1246,7 +1246,7 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ## 四十八、业务 E2E · 缺口落地后三实验（#5 对话面任务工具 / #7 会话压缩 / #3 Skill 三臂）（2026-11-15，分支 `arch/r4-bizbatch2`）
 
-- **状态**：**待合入**（merge commit 由主会话补齐）。
+- **状态**：**已合入**（`--no-ff` → `arch/integration` @ `f07e87c`，2026-11-15；合入后 typecheck=0、unit 74 文件/726 例全绿；产品代码零改动）。
 - **授权**：owner 2026-11-15（缺口 1/2/3 合入 `4a12d8b` 后的三实验批；彻夜长跑）；预注册见 `docs/product/business-e2e-prereg-addendum.md` §五。
 - **分支/基线**：worktree `~/projects/fshine-agent-r4-bizbatch2`，分支 `arch/r4-bizbatch2`；基线 = `arch/integration` 启动时 HEAD `7009ed04c770ec6ceab95d9df905333c6789a014`（`.runtime/bizbatch2/baseline.txt`，gitignored）。
 - **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；均未 push / 未合并 / 未碰 main/tag）：
