@@ -3,6 +3,7 @@
 > 依据：R4 统一任务书第一阶段；现状与 Pi 能力证据见 `docs/product/r4-audit.md`（本目录）。
 > 基线：`arch/r4-audit` @ `af745af4de6649d844eae613edd3d53820de321a`（启动时 `arch/integration` HEAD；期间 integration 前进到 `cf4abd6`，M01 判据重切合入——R4 不改这些文件）。
 > 边界：不重建通用 Workflow Engine / Planner / 消息总线 / 第二套 Agent 框架；不开发规则式指代消解器；不假定任意执行点恢复；不触碰 eval 锁/cases、产品代码以外的历史证据、其他工作树。**本文件不实施功能**；实施须 owner 批切片后另起 run。
+> 验收契约：每片用例（ID/层级/输入/预期输出/状态转换/执行证据/失败判据）与预注册口径见 `docs/product/r4-acceptance.md`（v1 预注册基线；标准先于实现冻结）。
 
 ## 一、最小架构（每块标注复用/新增）
 
@@ -91,6 +92,7 @@
 - 验收：确定性——ask 输出/五门拒绝话术字节金样（`ask-runtime.test.ts` 现有）、runner 默认路径与 `criteria.lock` 逐字不变、305 单测全过、tsc 0；真实模型：非必需（可选 E06/E12 回归）。
 - 回退：整片 revert（无 schema/行为变化）。
 - 预估文件：`scripts/ask-runtime.ts`、`apps/server/server.ts`、`scripts/eval/convergence-r1/runner.ts`（可选）、tests。
+- 验收契约（v1，见 `r4-acceptance.md`）：P0-T01–T05（确定性，门槛=全过）；回退断言=回退后 ask/runner 金样与单测仍全过（零行为变化）；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P1 · 底账演化：数字 ID + 业务名称 + S1 Main 最终回复存档（一次版本化迁移）
 - 范围：`tasks` 表加 `task_no/name/reply_text`（`created_at` 回填；旧行 reply 为 NULL → 「无最终回复存档」）；宿主原子分配数字 ID；`send` 后把该回合最终回复逐字写入本回合各任务行（同值）；ask/tasks/--out/ops 显示 `#<no> <name>`；`--out` 交付件含 Main 回复全文。
@@ -98,6 +100,7 @@
 - 验收：确定性——迁移幂等/旧库可读/并发插入编号唯一不复用；显示与导出金样；只读哈希不变。真实模型——ask 一轮显示数字 ID；详情/交付件含逐字回复。
 - 回退：迁移为加列/加表（向前兼容），revert 代码后旧列保留无害；历史行不伪造。
 - 预估文件：`task-store.ts`、`task-registry(-sqlite).ts`、`execution-runtime.ts`、`ask.ts`、`tasks.ts`、`ops.ts`。
+- 验收契约（v1）：P1-T01–T05（确定性，全过）+ P1-E01（黑盒，预注册 N）；回退断言=迁移加列/加表向前兼容、回退代码后历史行显示「无最终回复存档」不伪造；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P2 · 任务生命周期状态机（queued/waiting_user/cancelled/timed_out）
 - 范围：状态与转移；等待用户（`needs_input → waiting_user` + `pendingQuestion`；答复续同一 Task）；取消（排队出队 + signal abort）；超时（等待超时/执行超时）；tasks/ops 中文词与原因行。
@@ -105,6 +108,7 @@
 - 验收：确定性——状态转移矩阵（含失败注入：取消/超时/needs_input 零执行）、越权不变、词表金样。真实模型——E05/E06 行为回归（冻结判据/用例零改动，仅跑）。
 - 回退：revert 代码；未知状态在展示层 fail-open（ops 现有口径）。
 - 预估文件：`task-registry.ts`、`task-registry-sqlite.ts`、`task-store.ts`、`execution-runtime.ts`、`tasks.ts`、`ops.ts`、`server.ts`。
+- 验收契约（v1）：P2-T01–T05（确定性，全过）+ P2-E01（黑盒 E05/E06，冻结判据零改动）；回退断言=回退后未知状态 fail-open 显示、inline 既有行为保持（决策问题 2 裁定前不动）；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P3 · S2 任务访问隔离（读路径按可信身份）
 - 范围：tasks 列表/详情按 principal 过滤（身份来源见问题 9）；`--all` 显式运维视图并明示边界；detail 按 id 访问同样校验归属。
@@ -112,6 +116,7 @@
 - 验收：确定性——双 principal 夹具互不可见、`--all` 行为、单 principal 既有行为不变。真实模型——E06/E12 回归。
 - 回退：flag 默认关闭可恢复旧全量视图。
 - 预估文件：`tasks.ts`、`task-store.ts`（scope 查询已有）、`ops.ts`（运维视图标注）。
+- 验收契约（v1）：P3-T01–T03（确定性，安全不变量：归属/越权必过）+ P3-E01（黑盒 E06/E12）；回退断言=flag 关闭恢复旧视图、归属拒绝语义不变；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P4 · 通知 outbox（持久化/重试/去重；渠道推送；Main 可读）
 - 范围：`notifications` 表与写点（完成/失败/等待用户/取消/超时）；同进程投递器（有界重试/退避/dedup）；server 经 `sendToConversation` 推送；tasks/ops 展示；「进入 Main 可读历史」按问题 5 裁定实现。
@@ -119,6 +124,7 @@
 - 验收：确定性——去重唯一键、重试/attempts 上限、失败可见、假渠道推送用例。真实模型——后台任务完成后渠道收到通知（小 N）。
 - 回退：投递开关默认关（仅落库展示），revert 代码。
 - 预估文件：新增 `notifications.ts`、`task-store.ts`、`server.ts`、`tasks.ts`、`ops.ts`。
+- 验收契约（v1）：P4-T01–T05（确定性，全过；T05 依赖决策问题 5 裁定）+ P4-E01（黑盒，预注册 N）；回退断言=投递开关关闭仅落库展示、去重/重试不变；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P5 · 资源强制（单一配置）
 - 范围：`runtime` 配置段；信号量/队列容量/委派深度/共享预算/等待超时/回合超时接线；`send` 串行化（把审计竞态在新配置下钉死）；`host.*` 处置定案。
@@ -126,6 +132,7 @@
 - 验收：确定性——限额执行测试（容量满拒绝、depth 拒绝、预算耗尽、两个同会话消息串行且转录不互相覆盖）、配置优先级。真实模型——顺序行为与现 ask 一致。
 - 回退：配置缺省 = 当前行为（单并发/无限额/无队列），可先接线后开启。
 - 预估文件：`contracts/config.ts`、`core/config.ts`、新增 `resource-policy.ts`、`execution-runtime.ts`、`server.ts`、`ask-runtime.ts`。
+- 验收契约（v1）：P5-T01–T06（确定性，全过；含同会话串行竞态回归）+ P5-E01（黑盒顺序不回归）；回退断言=配置缺省=现行为（单并发/无限额/无队列），可先接线后开启；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P6 · 后台任务执行（Task 不绑 Agent、转录隔离、进程内调度与恢复）
 - 范围：task-runner：受理→queued→running（每次委派新建 Worker 回合）→终态；进程重启恢复 queued（claim/lease，幂等 by taskId）；子任务 `parent_task_id`（如引入深度 >1，见问题 11）。
@@ -133,6 +140,7 @@
 - 验收：确定性——假 driver 调度测试（queued→running→completed/failed/超时/取消）、重启恢复、并发上限、`mainMessages` 零污染。真实模型——一个后台任务端到端（交办→完成→通知）。
 - 回退：dispatch 模式配置回落 inline（现状），revert runner。
 - 预估文件：新增 `task-runner.ts`、`execution-runtime.ts`、`task-store.ts`、`server.ts`、`ask-runtime.ts`。
+- 验收契约（v1）：P6-T01–T05（确定性，全过；含重启不重放/转录隔离）+ P6-E01（黑盒端到端，预注册 N）；回退断言=dispatch 回落 inline、重启恢复关闭；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P7 · ask-first 扩展（交互式/回放/多会话/轨迹）
 - 范围：`ask --interactive/--script/--trace`；共享装配 + 记录包装器；import 守卫（ask/eval/server 同一 Runtime）。
@@ -140,6 +148,7 @@
 - 验收：确定性——脚本回放金样（假模型逐字）、trace schema 校验、守卫测试、互斥参数拒绝。真实模型——交互式 3 回合会话留证。
 - 回退：CLI-only，revert。
 - 预估文件：`ask.ts`（可拆 `ask-interactive.ts`）、`ask-runtime.ts`、复用 runner 证据 schema。
+- 验收契约（v1）：P7-T01–T06（确定性，全过；含回放脚本 fail-closed、轨迹 11 类证据、单轮兼容、同一 Runtime 守卫、故障注入）+ P7-E01（黑盒 3 回合 smoke，N=3 仅证据不作稳定性结论）；回退断言=CLI-only revert、单轮兼容不断言；实施先落地对应测试（红）→最小实现→反向绊线。
 
 ### P8 · ops 扩展（数字 ID→执行树/资源/通知投递）
 - 范围：页面 ID/名称、任务→executions 树（含 parent/children）、资源快照与用量、通知投递清单；保持静态/只读/转义/幂等。
@@ -147,6 +156,7 @@
 - 验收：确定性——渲染金样、恶意文本全字段转义、只读哈希、幂等覆盖。真实模型——用真实 dev 库生成快照核对。
 - 回退：revert 渲染器。
 - 预估文件：`ops.ts`、`tasks.ts`（共享渲染函数）。
+- 验收契约（v1）：P8-T01–T05（确定性，全过；含转义/只读哈希/幂等安全不变量）；回退断言=revert 渲染器、转义/只读不变；实施先落地对应测试（红）→最小实现→反向绊线。
 
 **横切要求（每片）**：TDD 先红后绿 + 反向绊线；验收标准含确定性门（typecheck+unit）与真实模型黑盒（用户级）；实施与独立复核分离；不 push/不合并（归 owner）；不触碰 eval 锁/cases 与历史证据。
 

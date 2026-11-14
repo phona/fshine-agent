@@ -4,7 +4,7 @@
 > 分支/基线：`arch/r4-audit`，基线 = `arch/integration` 启动时 HEAD `af745af4de6649d844eae613edd3d53820de321a`（工作树 `~/projects/fshine-agent-r4-audit`，本阶段创建）。
 > 方法：只读审计 + 零模型最小实验；不修改产品代码、eval 锁/cases、历史证据、其他工作树。
 > 口径标注：**已实现 / 已测试 / 仅设计 / 受外部能力限制** 四态不混用；未知项列决策问题（见 `r4-slices.md` §五）。
-> 本阶段实跑的确定性门：`npm run test -- --project unit` → `Tests 305 passed (305)`，EXIT=0（日志：本工作树 `.runtime/r4audit/unit-tests.log`）。
+> 本阶段实跑的确定性门：`npm run test -- --project unit` → `Tests 305 passed (305)`，EXIT=0（日志：本工作树 `.runtime/r4audit/unit-tests.log`；该日志为 2026-11-14 证据核正轮补落盘，重跑读数与首轮一致）。
 > 本阶段 Pi 实验（零模型，全部实跑通过）：`sh .runtime/r4audit/pi-capability/run-all.sh` → EXIT=0，输出 `run-all.out` 及 `*.log`（见 §四）。
 
 ## 一、现状审计（7 项）
@@ -75,7 +75,7 @@
 
 **stats（已实现，三态）**：Wilson 95% CI + 三态分类（`stats.ts:30`、`:44-70`）；失败直方图（`:72-81`）；只读 run-dir（`:102-120`）。
 
-**305 单测（本阶段实跑）**：`npm run test -- --project unit` → `Tests 305 passed (305)`，33 文件，EXIT=0（日志 `.runtime/r4audit/unit-tests.log`）。与 R4 相关分布：`runtime` 15（允许集合拒/归属/fail-closed 构造）、`task-registry-sqlite` 6 + `task-registry-readonly` 4 + `task-status-boundary` 8、`server` 2（假渠道）、`ask-runtime` 4 + `tasks` 26 + `tasks-redo` 10、`ops` 24、`dummy-client` 8 + `worker-env` 2、`adapter` 47 + `degrade` 4 + `notice` 3 + `text` 12、`compaction-*` 5 + `pi-driver*` 约 39、`stats` 15、`import-boundary` 1、`config` 23、`transition-naming` 2。
+**305 单测（本阶段实跑）**：`npm run test -- --project unit` → `Tests 305 passed (305)`，33 文件，EXIT=0（日志 `.runtime/r4audit/unit-tests.log`，证据核正轮补落盘；重跑读数与首轮一致）。与 R4 相关分布：`runtime` 15（允许集合拒/归属/fail-closed 构造）、`task-registry-sqlite` 6 + `task-registry-readonly` 4 + `task-status-boundary` 8、`server` 2（假渠道）、`ask-runtime` 4 + `tasks` 26 + `tasks-redo` 10、`ops` 24、`dummy-client` 8 + `worker-env` 2、`adapter` 47 + `degrade` 4 + `notice` 3 + `text` 12、`compaction-*` 5 + `pi-driver*` 约 39、`stats` 15、`import-boundary` 1、`config` 23、`transition-naming` 2。
 
 **CI / 工作流（已实现）**：`ci.sh` = typecheck + unit；`eval-real.yml:59` / `eval-nightly.yml:47` 挂 `eval:user`（配置就绪 ≠ 已启用，`docs/decision-log.md` §17.4）。
 
@@ -120,7 +120,7 @@
 | 会话转录保存 | 【已测试】两套原生持久化均可用：pi-coding-agent SessionManager（JSONL 追加树）；pi-agent-core harness JsonlSessionRepo | 源码：`session-manager.d.ts:174`、`:4`、`:317`、`:319/326/332`；`harness/session/jsonl/repo.d.ts:5`、`storage.d.ts:7`、`types.d.ts:36`。实验 E1a/E1b（下）。生产接线=【仅设计】：全仓零 import；`~/.pi/agent/sessions` 不存在（实测） |
 | 恢复粒度 | 【已测试】会话级（文件 + 条目树 + leaf），非执行点级；持久化点 = `message_end`；中断的 assistant 消息不落盘 | `session-manager.d.ts:295/313`（branch/createBranchedSession）；`agent-session.js:387-403`（message_end → appendMessage）；`agent.d.ts:96-104`（只有 abort/waitForIdle/queues，无 checkpoint/resume）；E1a/E1b 新进程复原 |
 | 取消 | 【已测试】`Agent.abort()` 可观察：终态消息 `stopReason='aborted'` + `agent_end` + `errorMessage` + `isStreaming` 归零；空闲 abort 为 no-op。coding-agent 另有 `abort()/abortCompaction()/abortBranchSummary()/abortRetry()/abortBash()`【已实现】 | `agent.js:199/202-204/349-362/403-407`；`agent-session.d.ts:444/519/523/560/593`；pi-ai 供应商把 `signal.aborted` 映射 `stopReason='aborted'`（`pi-ai/dist/api/openai-responses.js:154`）；E2 |
-| 事件流 | 【已测试】`AgentEvent` 全生命周期 + `subscribe()`；实测可见文本增量、工具调用起止、回合与 agent 结束 | `types.d.ts:377+`；`agent.d.ts:70`；E3（13 事件，含 `tool_execution_start:echo`）。coding-agent 更丰富事件（`compaction_*`、`session_compact`、`entry_appended`、`auto_retry_*`）【已实现】`agent-session.js:350-351/1477/1548-1580/1753` |
+| 事件流 | 【已测试】`AgentEvent` 全生命周期 + `subscribe()`；实测可见文本增量、工具调用起止、回合与 agent 结束 | `types.d.ts:377+`；`agent.d.ts:70`；E3（14 事件，含 `tool_execution_start:echo`）。coding-agent 更丰富事件（`compaction_*`、`session_compact`、`entry_appended`、`auto_retry_*`）【已实现】`agent-session.js:350-351/1477/1548-1580/1753` |
 | 压缩触发条件 | 原语/阈值【已测试】：`shouldCompact = tokens > window − reserveTokens`，默认 `{enabled, reserveTokens:16384, keepRecentTokens:20000}`；pi-agent-core Agent 循环**不自动压缩**；完整摘要压缩未跑 | `compaction.d.ts:40/59/74/77`；`compaction.js:144-147`；E5。自动触发在 coding-agent【已实现】：`agent-session.js:271-284`（下一条 assistant 前阈值）、`:1634-1730`（溢出重试/溢出不重试/阈值三案）、调用点 `:805`/`:895` |
 | 并发使用限制 | Agent 守卫【已测试】：同 Agent 同时只允许一个运行（并发 `continue()` 抛「Agent is already processing…」）；同 run 内插话走 `steer/followUp` 队列。会话存储【已实现】：进程内二次 `open` 被拒「Session is already open」；`MutationLine` 串行化单会话读改写。跨进程同文件写【受外部能力限制】：源码未见文件锁，未做实验 | `agent.js:227-228/235-236/327-328`；`agent.d.ts:83-94`；E4；`jsonl/repo.js:86-87/238-239`；`mutation-line.d.ts:2`；`session-manager.js`、`jsonl/storage.js` 对 `lock/flock/exclusive` 零命中（grep） |
 | 上下文隔离 | 【已测试】不同 Agent 实例状态互不共享；`messages` 赋值做顶层拷贝；宿主 custom 消息默认不进 LLM 上下文（需 `convertToLlm` 显式投影）；`transformContext` 压缩视图不写回转录 | `agent.js:3-5/117`；`agent-loop.js:179-184`；`types.d.ts:290-315`；E4/E6；`pi-driver.ts:91-99`（本仓投影实现） |
@@ -128,10 +128,10 @@
 **实验记录**（脚本与日志：本工作树 `.runtime/r4audit/pi-capability/`，gitignored；零模型，未使用 `LLM_API_KEY`，未消耗 `step-3.7-flash`，成本 0）：
 
 - 统一入口：`cd <worktree>/.runtime/r4audit/pi-capability && sh run-all.sh` → **EXIT=0**，9 个 event JSON 全部成功（全量输出 `run-all.out`，215 行）。
-- **E1a**（pi-coding-agent SessionManager，两个独立 node 进程）：write → `{event:"e1a-write", fileExists:true, lines:4, leafId:"b419cf4d"}`；read（`SessionManager.open`）→ `sameSessionId=true`、`entryTypes=["message","message","custom"]`、消息/自定义标记逐字复原。证据：`e1a-write.log` / `e1a-read.log`。
+- **E1a**（pi-coding-agent SessionManager，两个独立 node 进程）：write → `{event:"e1a-write", fileExists:true, lines:4, leafId:"922359e7"}`；read（`SessionManager.open`）→ `sameSessionId=true`、`entryTypes=["message","message","custom"]`、消息/自定义标记逐字复原。证据：`e1a-write.log` / `e1a-read.log`。
 - **E1b**（pi-agent-core `JsonlSessionRepo` + `NodeExecutionEnv`）：write → 会话 JSONL 落盘并 `repo.list` 可见；read（新进程 `repo.list→repo.open→branch('main').findEntries`）→ `sameId=true`、`entryTypes=["custom","message","message"]`、消息复原、`stats.messageCount=2`。证据：`e1b-write.log` / `e1b-read.log`。如实登记：首版 read 脚本从嵌套会话文件路径反推 `sessionsRoot` 失败（`list` 为空），改为 handoff 显式携带 `sessionsRoot` 后通过——属实验脚手架缺陷，非库缺陷。
 - **E2**（abort，假 stream）：`idleAbortError=null`、运行中 `signal=present`、`streamingDuringRun=true`；abort 后 `events=[agent_start,turn_start,message_start,message_update,message_update,message_end:aborted,turn_end,agent_end]`、`lastStopReason="aborted"`、`errorMessage="aborted by r4 experiment"`、`streamingAfter=false`。证据：`e2-abort.log`。
-- **E3**（事件，假 stream：先 toolCall 后文本）：事件序列 13 条（含 `tool_execution_start:echo`/`tool_execution_end`、两回合）；终态 messages=[user, assistant(toolUse,1 toolCall), toolResult("echo:r4-tool-marker"), assistant(stop,"r4-final-marker")]。证据：`e3-events.log`。
+- **E3**（事件，假 stream：先 toolCall 后文本）：事件序列 14 条（含 `tool_execution_start:echo`/`tool_execution_end`、两回合）；终态 messages=[user, assistant(toolUse,1 toolCall), toolResult("echo:r4-tool-marker"), assistant(stop,"r4-final-marker")]。证据：`e3-events.log`。
 - **E4**（并发/隔离）：`concurrentError="Agent is already processing. Wait for completion before continuing."`；两 Agent 回复各自正确、`crossContamination=false`、`copyIsolation=true`。证据：`e4-isolation.log`。
 - **E5**（压缩阈值）：默认设置如上；128k 窗口阈值=111616：`atThreshold=false / justAbove=true / justBelow=false / disabled=false`；40k 缩放例同边界；`estimateContextTokens` 样例 `{tokens:15, usageTokens:15, trailingTokens:0, lastUsageIndex:1}`。证据：`e5-compaction.log`。
 - **E6**（自定义消息投影）：`defaultConvertToLlmRoles=["user"]`（custom 被默认丢弃）；显式 `convertToLlm` 投影后 roles=[user(user), user(custom 投影)]。证据：`e6-custom-message.log`。
