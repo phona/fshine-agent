@@ -119,23 +119,65 @@ export interface WecomConfig {
   botSecret?: string;
 }
 
-/** 委派调度模式：inline = 回合内同步；background = 后台 Worker 主动交付。 */
-export type WorkerDispatchMode = 'inline' | 'background';
-
 /**
  * 宿主运行参数（原 FSHINE_* 部署面，issue #20 切片 C）。
  *
  * 源 = config/agent.yaml 的 `host` 段；同名 FSHINE_* 环境变量只作非空值覆盖口。
- * 数值项缺省 / 非法 = 不收进本结构，由各消费点的既有缺省兜底（不在这里复制缺省值）。
+ *
+ * 2026-11-14 P5（分诊 #6「删除未消费键；随 P5 建最小 runtime 段」）：旧
+ * platformQueueCapacity / shutdownDrainMs / workerDispatchMode / workerStepCap /
+ * inboundDebounceMs / piAgentDir 键**删除**——它们被解析并派生 env 却零生产读取点，
+ * 属「写着不生效」的假配置；资源旋钮的唯一入口改为 `runtime` 段（RuntimeConfig）。
+ * 仅保留有真实读取点的 attachmentDir（渠道适配器经 FSHINE_ATTACHMENT_DIR 消费，
+ * packages/channel-wecom/src/adapter.ts）。旧 YAML 里的已删键由加载层原样忽略。
  */
 export interface HostConfig {
-  platformQueueCapacity?: number;
-  shutdownDrainMs?: number;
-  workerDispatchMode?: WorkerDispatchMode;
-  workerStepCap?: number;
-  inboundDebounceMs?: number;
   attachmentDir?: string;
-  piAgentDir?: string;
+}
+
+/**
+ * 任务级预算（分诊 #10：时长 + 调用数先落地；token 采集为增强项）。
+ * 父任务 → 子 Worker 共享同一份（不复制、不放大）。
+ */
+export interface TaskBudgetConfig {
+  /** 任务总墙钟预算（ms）：跨该任务的全部 Worker 回合与子委派累计。 */
+  ms: number;
+  /** 任务总执行层调用次数预算。 */
+  calls: number;
+  /**
+   * 任务总 token 预算。仅当 Pi `assistant.usage` 可验证时才配置——否则不设硬上限，
+   * 消费方按 `tokens: unavailable` 如实登记，不得伪造限额。
+   */
+  tokens?: number;
+}
+
+/**
+ * 资源强制配置段（P5；联合接口约定 §2 冻结的最小字段；P0 注记承接）。
+ *
+ * 单一配置入口：config/agent.yaml 的 `runtime` 段，**无同名 env 覆盖口**。
+ * 与其它部署段的判据刻意不同：非法值 fail-fast（不按「非法 = 未配置」回落）、
+ * 未知键拒绝——资源限额静默失效比缺省危险，拼错的旋钮不允许被默认值吞掉。
+ * 缺省值不住加载层：由 `packages/agent/src/resource-policy.ts` 的
+ * `resolveRuntimeConfig` 按「缺省 = 现行为」补齐（单并发 / 无队列 / 无任务级预算 /
+ * 回合时限沿用执行侧现缺省）。
+ */
+export interface RuntimeConfig {
+  /** 前台（Main 交互回合）并发准入上限。缺省 1（现行为：单并发）。 */
+  mainConcurrency?: number;
+  /** 后台（委派 Worker / 后台任务）并发准入上限；0 = 关闭后台准入（确定性拒绝）。缺省 1。 */
+  backgroundConcurrency?: number;
+  /** 前台/后台各自的等待队列容量（独立队列）。缺省 0（现行为：无队列，满即拒绝）。 */
+  queueCapacity?: number;
+  /** Main 回合墙钟上限（ms）。缺省 300000（与执行侧现行缺省一致）。 */
+  mainTurnMs?: number;
+  /** Worker 回合墙钟上限（ms）。缺省 180000（与执行侧现行缺省一致）。 */
+  workerTurnMs?: number;
+  /** 委派深度上限；0 = 不允许委派。缺省 1（Main → Worker 一层）。 */
+  maxDelegationDepth?: number;
+  /** 任务级共享预算；缺省未配置 = 无任务级预算（现行为）。 */
+  taskBudget?: TaskBudgetConfig;
+  /** waiting_user 等待答复的上限（ms）。缺省 86400000（24h，与 sessionTtl 同量级）。 */
+  waitUserTimeoutMs?: number;
 }
 
 /**
@@ -177,6 +219,8 @@ export interface AppConfig {
   wecom?: WecomConfig;
   /** 宿主运行参数（yaml `host` 段；env 非空值覆盖）。 */
   host?: HostConfig;
+  /** 资源强制配置（yaml `runtime` 段；单一入口，无 env 覆盖口，非法值 fail-fast）。 */
+  runtime?: RuntimeConfig;
   /** 宿主存储配置（yaml `store` 段；env 非空值覆盖）。 */
   store?: StoreConfig;
   /** 执行层交接配置（yaml `execution` 段；env 非空值覆盖）。 */

@@ -18,6 +18,8 @@
  * 2026-11-13 M4：`FSHINE_WORKER_STEP_CAP`（步数帽机制随 Phase 2 模块退役）与 stock 夹具
  * 辅助组六键（EXECUTION_/STOCK_ 的 MEMORY/BREAKER/CACHE 状态路径；读者 stock.cjs 与
  * fixture-aux-state.ts 已退役）一并删除——没有读者后，泄漏值不再能改变任何测试基线。
+ * 2026-11-14 P5：`FSHINE_WORKER_DISPATCH_MODE` / `FSHINE_PLATFORM_QUEUE_CAPACITY` 删除——
+ * host.* 未消费键随分诊 #6 退役（决策记录 §三十二），无读者后泄漏值同样不再影响基线。
  */
 const LEAKED_ENV_KEYS: readonly string[] = [
   'LLM_API_BASE_URL',
@@ -28,9 +30,6 @@ const LEAKED_ENV_KEYS: readonly string[] = [
   // 产物"的理由纳入密封——测试要钉的"缺省回落 LLM_MODEL"不该依赖运行者没 export 它。
   'LLM_MAIN_MODEL',
   'LLM_MAIN_THINKING_LEVEL',
-  // New deployment switches must not change the default inline/queue baseline of mock tests.
-  'FSHINE_WORKER_DISPATCH_MODE',
-  'FSHINE_PLATFORM_QUEUE_CAPACITY',
 ];
 
 for (const key of LEAKED_ENV_KEYS) {
