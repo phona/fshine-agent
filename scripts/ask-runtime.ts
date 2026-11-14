@@ -36,7 +36,7 @@ import type { ContextProfileConfig, RuntimeConfig } from '@fshine/contracts';
 import type { ExecutionClient } from '@fshine/contracts/execution-contract';
 import { effectiveDeploymentEnv, loadConfig } from '@fshine/core';
 import { applyExecutorLabel, loadAgentProfile } from '../packages/agent/src/agent-profile';
-import { createPiTurnDriver } from '../packages/agent/src/pi-driver';
+import { createPiTurnDriver, parseContextWindow } from '../packages/agent/src/pi-driver';
 import { createDummyCliClient, readOnlyOperationNames } from '../packages/agent/src/dummy-cli-client';
 import type { TurnDriver } from '../packages/agent/src/driver-contract';
 import {
@@ -124,6 +124,17 @@ export type ExecutionFaceFactory = (
 
 /** 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。 */
 export type DriverFactory = (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
+
+/**
+ * 压缩窗口装配接线（缺口 3）：把配置层写进 env 的 `LLM_CONTEXT_WINDOW`（config.ts:442）经既有
+ * `parseContextWindow` 解析成驱动的 `contextWindow` 参数——装配层持有配置、驱动只收参数（pi-driver.ts:145
+ * 的选项契约）。未设置/空串 → 返回 `{}`，驱动 options 不含 contextWindow，走 128k 缺省（逐字节不变）；
+ * 非法值 → parseContextWindow 当场抛中文错误点名变量（不静默回落，理由见 pi-driver.ts:129）。
+ */
+export function contextWindowFrom(env: Record<string, string | undefined>): { contextWindow?: number } {
+  const parsed = parseContextWindow(env.LLM_CONTEXT_WINDOW, 'LLM_CONTEXT_WINDOW');
+  return parsed === undefined ? {} : { contextWindow: parsed };
+}
 
 /**
  * 装配核心输入。各入口在门之后调用：本核心不做任何门判定、不改错误归类；
@@ -285,7 +296,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
     });
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
       ? input.createDrivers(input.env).workerDriver
-      : createPiTurnDriver({ env: input.env }));
+      : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }));
     executor = await createTaskExecutor({
       client: face.client,
       allowedOperations: face.allowedOperations,
@@ -382,7 +393,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
     }
     const drivers = input.createDrivers !== undefined
       ? input.createDrivers(input.env)
-      : { mainDriver: createPiTurnDriver({ env: input.env }), workerDriver: createPiTurnDriver({ env: input.env }) };
+      : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env) }) };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。
     let runner = input.taskRunner;
