@@ -2,23 +2,25 @@
  * 长生命周期 Pi 会话 · 回归（零真实模型、确定性夹具）。
  *
  * 缺陷（阶段四真实证据）：产品装配链 `assembleSessionCore` + `createPiTurnDriver` 的
- * `run()` 每回合新建并关闭 `MemorySessionRepo`/`AgentHarness`，再靠宿主重灌投影转录续
- * 上下文；降窗压缩后下一回合请求超窗 → `pi_driver_empty_reply`
- * （`Assistant request exceeded the context window`），同窗口裸单会话 0 空。
+ * `run()` 每回合新建并关闭会话，再靠宿主重灌投影转录续上下文；降窗压缩后下一回合请求超窗
+ * → `pi_driver_empty_reply`（`Assistant request exceeded the context window`），同窗口裸单会话 0 空。
  *
- * 判据（任务书 §4.1）：同一业务会话跨回合复用同一个 Pi Session/Harness；压缩后的 Pi
+ * 判据（任务书 §4.1）：同一业务会话跨回合复用同一个 Pi Session；压缩后的 Pi
  * 原生状态持久用于后续回合。本文件三条确定性绊线：
  *   ① 机制：reuseConversation 下 N 回合只创建 **1** 个 Session；每回合一次性（缺省）
  *      创建 N 个——若实现回退成「每回合重建」，①必红；
  *   ② 行为：小窗、多次压缩后继续多轮，每回合都有非空回复且 provider 侧请求不超窗；
  *   ③ 工具闭包：复用会话时每回合的 exec/onStep 必须换成本回合的（不钉死首回合）。
+ *
+ * 迁移（1.5.2）：会话创建从 `MemorySessionRepo.create` 换成公开 `SessionManager.create` /
+ * `SessionManager.inMemory`（同一「会话数」事实）；断言等价，不是放宽。
  */
 import { describe, expect, it, vi } from 'vitest';
-import { MemorySessionRepo } from '@earendil-works/pi-agent-core/harness/session';
+import { SessionManager } from '@earendil-works/pi-coding-agent';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { MutableModels } from '@earendil-works/pi-ai';
 import type { DiscoveredTool } from '@fshine/contracts';
-import { createPiTurnDriver, type PiModelRuntime } from './src/pi-driver';
+import { createPiTurnDriver, piCompactionSettings } from './src/pi-driver';
+import { createScriptedModelRuntime } from './testing/scripted-model-runtime';
 import type { TurnDriverInput } from './src/driver-contract';
 
 const WINDOW = 8_192;
@@ -39,65 +41,54 @@ function asst(content: unknown[], stopReason = 'stop', input = 10, output = 10, 
 function textReply(text: string, input = 10): AgentMessage {
   return asst([{ type: 'text', text }], 'stop', input, 20);
 }
+function replyOverThreshold(text: string, contextWindow: number): AgentMessage {
+  const reserve = piCompactionSettings(contextWindow).reserveTokens;
+  return textReply(text, contextWindow - reserve + 1_000);
+}
 function toolCallReply(id: string, name: string, args: Record<string, unknown>): AgentMessage {
   return asst([{ type: 'toolCall', id, name, arguments: args }], 'stop');
 }
-function overflowReply(): AgentMessage {
-  return asst([], 'error', 0, 0, 'maximum context length exceeded: prompt is too long');
-}
-function streamOf(message: AgentMessage) {
-  const stop = (message as { stopReason?: string }).stopReason;
-  return {
-    async *[Symbol.asyncIterator]() {
-      yield { type: 'start', partial: message };
-      if (stop === 'error' || stop === 'aborted') yield { type: 'error', reason: stop, error: message };
-      else yield { type: 'done', reason: stop, message };
-    },
-    result: async () => message,
-  };
-}
-/** 与 a-metrics 夹具同口径：JSON 串长/4 ≈ token；provider 在派发前按窗口执法。 */
 const estTokens = (messages: readonly unknown[]): number => Math.ceil(JSON.stringify(messages).length / 4);
 
-interface RuntimeOptions {
-  contextWindow?: number;
-  /** 依序返回；用尽后按「超窗则溢出，否则默认文本」兜底。 */
-  queue?: AgentMessage[];
-  summary?: AgentMessage;
+function isSummaryRequest(messages: readonly unknown[]): boolean {
+  const body = JSON.stringify(messages);
+  return body.includes('<conversation>') || body.includes('# Conversation');
 }
+
 interface Observed { sends: number; over: number; maxTokens: number; summaries: number; seen: number[]; }
 
-function makeRuntime(opts: RuntimeOptions = {}): { runtime: PiModelRuntime; observed: () => Observed } {
-  const contextWindow = opts.contextWindow ?? WINDOW;
-  const seen: number[] = [];
-  const queue = [...(opts.queue ?? [])];
-  const state: Observed = { sends: 0, over: 0, maxTokens: 0, summaries: 0, seen };
-  const model = {
-    id: 'test-model', name: 'test-model', api: 'openai-completions', provider: 'llm',
-    baseUrl: 'http://127.0.0.1:9', reasoning: false, input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow, maxTokens: 1_024,
-  } as unknown as PiModelRuntime['model'];
-  const models = {
-    getModel: () => model,
-    streamSimple: async (_model: unknown, ctx: { messages: unknown[] }) => {
-      const tokens = estTokens(ctx.messages);
+function makeScripted(options: {
+  contextWindow?: number;
+  /** 依序返回主请求响应；用尽后回落 `fallback`（缺省「好的。」）。 */
+  queue?: AgentMessage[];
+  fallback?: (index: number) => AgentMessage;
+  summary?: AgentMessage;
+} = {}): Promise<{ driver: ReturnType<typeof createPiTurnDriver>; observed: () => Observed; runtime: Awaited<ReturnType<typeof createScriptedModelRuntime>> }> {
+  const contextWindow = options.contextWindow ?? WINDOW;
+  const queue = [...(options.queue ?? [])];
+  const state: Observed = { sends: 0, over: 0, maxTokens: 0, summaries: 0, seen: [] };
+  return createScriptedModelRuntime({
+    contextWindow,
+    maxTokens: 1_024,
+    script: (index, context) => {
+      const tokens = estTokens(context.messages);
+      if (isSummaryRequest(context.messages)) {
+        state.summaries += 1;
+        return options.summary ?? asst([{ type: 'text', text: '摘要：用户连续投喂背景块，仍在查询 W1。' }]);
+      }
       state.sends += 1;
-      seen.push(tokens);
+      state.seen.push(tokens);
       state.maxTokens = Math.max(state.maxTokens, tokens);
       if (tokens > contextWindow) state.over += 1;
       const next = queue.shift();
-      if (next !== undefined) return streamOf(next);
-      if (tokens > contextWindow) return streamOf(overflowReply());
-      return streamOf(textReply('好的。', tokens));
+      if (next !== undefined) return next;
+      return options.fallback?.(index) ?? textReply('好的。');
     },
-    completeSimple: async () => {
-      state.summaries += 1;
-      return opts.summary ?? asst([{ type: 'text', text: '摘要：用户连续投喂背景块，仍在查询 W1。' }]);
-    },
-    cancelDeferred: async () => {},
-  } as unknown as MutableModels;
-  return { runtime: { model, models }, observed: () => ({ ...state, seen: [...seen] }) };
+  }).then((scripted) => ({
+    driver: createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: scripted.runtime, reuseConversation: true }),
+    observed: () => ({ ...state, seen: [...state.seen] }),
+    runtime: scripted,
+  }));
 }
 
 function makeInput(messages: AgentMessage[], opts: Partial<TurnDriverInput> & { tools?: DiscoveredTool[] } = {}): TurnDriverInput {
@@ -115,22 +106,42 @@ function makeInput(messages: AgentMessage[], opts: Partial<TurnDriverInput> & { 
 
 const user = (text: string, ts = 1): AgentMessage => ({ role: 'user', content: text, timestamp: ts } as unknown as AgentMessage);
 
+/** 足够长、可被 Pi 切出尾段的历史。 */
+function seedHistory(contextWindow: number): AgentMessage[] {
+  const keepRecent = piCompactionSettings(contextWindow).keepRecentTokens;
+  const targetChars = Math.ceil(keepRecent * 4 * 2.5);
+  const pairs = 8;
+  const per = Math.ceil(targetChars / (pairs * 2));
+  const filler = '背景'.repeat(Math.ceil(per / 2));
+  const out: AgentMessage[] = [];
+  for (let i = 0; i < pairs; i += 1) {
+    out.push(user(`历史 ${i}：${filler}`, i * 2 + 1));
+    out.push(textReply('此前答复', 100));
+  }
+  return out;
+}
+
 // ─────────────────────────────── ① 机制：同一会话跨回合只创建一次
 describe('① 同一业务会话跨回合复用同一个 Pi Session', () => {
   it('reuseConversation 下 5 回合只创建 1 个 Session；每回合一次性（缺省）创建 5 个', async () => {
-    const createSpy = vi.spyOn(MemorySessionRepo.prototype, 'create');
+    const inMemorySpy = vi.spyOn(SessionManager, 'inMemory');
+    const createSpy = vi.spyOn(SessionManager, 'create');
+    const creations = () => inMemorySpy.mock.calls.length + createSpy.mock.calls.length;
     try {
+      inMemorySpy.mockClear();
       createSpy.mockClear();
-      const reused = createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime: makeRuntime().runtime, reuseConversation: true });
+      const reused = await makeScripted({ contextWindow: 40_000 });
       let messages: AgentMessage[] = [];
       for (let turn = 0; turn < 5; turn += 1) {
-        const result = await reused.run(makeInput([...messages, user(`第 ${turn} 轮问题。`, turn + 1)]));
+        const result = await reused.driver.run(makeInput([...messages, user(`第 ${turn} 轮问题。`, turn + 1)]));
         messages = result.messages;
       }
-      expect(createSpy.mock.calls.length, '同一业务会话跨 5 回合必须只创建一个 Pi Session（不每回合重建）').toBe(1);
+      expect(creations(), '同一业务会话跨 5 回合必须只创建一个 Pi Session（不每回合重建）').toBe(1);
 
+      inMemorySpy.mockClear();
       createSpy.mockClear();
-      const perTurn = createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime: makeRuntime().runtime });
+      const scripted = await createScriptedModelRuntime({ contextWindow: 40_000, script: () => textReply('好的。') });
+      const perTurn = createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: scripted.runtime });
       let perTurnMessages: AgentMessage[] = [];
       for (let turn = 0; turn < 5; turn += 1) {
         const result = await perTurn.run(makeInput([...perTurnMessages, user(`第 ${turn} 轮问题。`, turn + 1)]));
@@ -138,8 +149,9 @@ describe('① 同一业务会话跨回合复用同一个 Pi Session', () => {
       }
       // 反向绊线基线：每回合一次性语义（Worker/直测缺省）仍是 5 个会话——实现若回退成
       // 「产品装配也每回合重建」，上面的 reuse 断言会先红。
-      expect(createSpy.mock.calls.length, '每回合一次性模式应创建 5 个会话（基线）').toBe(5);
+      expect(creations(), '每回合一次性模式应创建 5 个会话（基线）').toBe(5);
     } finally {
+      inMemorySpy.mockRestore();
       createSpy.mockRestore();
     }
   });
@@ -148,10 +160,12 @@ describe('① 同一业务会话跨回合复用同一个 Pi Session', () => {
 // ─────────────────────────────── ② 行为：小窗多次压缩后继续多轮
 describe('② 小窗多次压缩后继续多轮：每回合非空回复且请求不超窗', () => {
   it('W=8192：12 回合（经历多次压缩）每回合有正文、provider 请求不超窗', async () => {
-    const { runtime, observed } = makeRuntime({ contextWindow: WINDOW });
-    const driver = createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime, reuseConversation: true });
+    const { driver, observed } = await makeScripted({
+      contextWindow: WINDOW,
+      fallback: () => replyOverThreshold('好的。', WINDOW),
+    });
     const filler = 'background context block for planning and traceability. '.repeat(100); // ~5.8k chars
-    let messages: AgentMessage[] = [];
+    let messages: AgentMessage[] = seedHistory(WINDOW);
     const empties: number[] = [];
     let summarySeen = false;
 
@@ -175,10 +189,15 @@ describe('② 小窗多次压缩后继续多轮：每回合非空回复且请求
 describe('③ 复用会话时工具闭包按回合更新', () => {
   it('两回合各触发一次工具调用：exec/onStep 分别为本回合闭包', async () => {
     const tool: DiscoveredTool = { name: 'lookup', description: '查询', inputSchema: { type: 'object', properties: {} } };
-    const { runtime } = makeRuntime({
-      queue: [toolCallReply('call_1', 'lookup', { q: 'W1' }), textReply('第一回合完成。'), toolCallReply('call_2', 'lookup', { q: 'W2' }), textReply('第二回合完成。')],
+    const { driver } = await makeScripted({
+      contextWindow: 40_000,
+      queue: [
+        toolCallReply('call_1', 'lookup', { q: 'W1' }),
+        textReply('第一回合完成。'),
+        toolCallReply('call_2', 'lookup', { q: 'W2' }),
+        textReply('第二回合完成。'),
+      ],
     });
-    const driver = createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime, reuseConversation: true });
 
     const calls: string[] = [];
     const steps: string[] = [];
@@ -196,6 +215,6 @@ describe('③ 复用会话时工具闭包按回合更新', () => {
 
     expect(calls, '每回合的工具执行必须走本回合 exec 闭包（不得钉死首回合）').toEqual(['lookup:exec-turn-0', 'lookup:exec-turn-1']);
     expect(steps.some((s) => s.startsWith('step-turn-0:')), '首回合 onStep 生效').toBe(true);
-    expect(steps.some((s) => s.startsWith('step-turn-1:')), '次回合 onStep 生效（每回合重建）').toBe(true);
+    expect(steps.some((s) => s.startsWith('step-turn-1:')), '次回合 onStep 生效（每回合换闭包）').toBe(true);
   });
 });

@@ -124,8 +124,13 @@ export type ExecutionFaceFactory = (
   env: NodeJS.ProcessEnv,
 ) => Promise<ExecutionFace>;
 
-/** 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。 */
-export type DriverFactory = (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
+/**
+ * 回合驱动工厂（runner 记录包装器 / server 测试替身注入用；缺省 = 真实 Pi 驱动 ×2）。
+ * 允许返回 Promise：Pi 1.5.2 的 ModelRuntime 创建是异步的（测试替身按需 await）。
+ */
+export type DriverFactory = (env: NodeJS.ProcessEnv) =>
+  | { mainDriver: TurnDriver; workerDriver: TurnDriver }
+  | Promise<{ mainDriver: TurnDriver; workerDriver: TurnDriver }>;
 
 /**
  * 压缩窗口装配接线（缺口 3）：把配置层写进 env 的 `LLM_CONTEXT_WINDOW`（config.ts:442）经既有
@@ -327,7 +332,7 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       ...(input.createExecutionFace === undefined ? {} : { createExecutionFace: input.createExecutionFace }),
     });
     const workerDriver = input.workerDriver ?? (input.createDrivers !== undefined
-      ? input.createDrivers(input.env).workerDriver
+      ? (await input.createDrivers(input.env)).workerDriver
       : createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }));
     executor = await createTaskExecutor({
       client: face.client,
@@ -497,7 +502,7 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       mainSkillRegistry = delivery.registry;
     }
     const drivers = input.createDrivers !== undefined
-      ? input.createDrivers(input.env)
+      ? await input.createDrivers(input.env)
       : { mainDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env), reuseConversation: true }), workerDriver: createPiTurnDriver({ env: input.env, ...contextWindowFrom(input.env), ...compactionSettingsFrom(input.env) }) };
 
     // P6：background = 受理/后台路径；runner 进程级共享（server 注入），缺省按本会话执行面构建。

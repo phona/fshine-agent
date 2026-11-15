@@ -419,7 +419,15 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     return runner.resume(resolveTaskId(refFromArgs(args)), { answer, scope });
   }
 
-  let mainMessages: DriverMessage[] = [];
+  /**
+   * 上一回合 Main 转录的**只读投影**（Pi 会话 → 宿主可读形状）。
+   * 宿主不持有可变对话历史：当前转录由 `mainTranscript()` 直接向驱动索取
+   * （`TurnDriver.transcript()`）；本变量只在测试替身没有该方法时作回落快照，
+   * 每回合整体覆盖、从不追加改写。
+   */
+  let lastMainProjection: readonly DriverMessage[] = [];
+  const mainTranscript = (): readonly DriverMessage[] =>
+    options.mainDriver.transcript?.() ?? lastMainProjection;
   /** 本回合 Main 的截止时刻：委派算出的 Worker 截止不能越过它（再留收尾余量）。 */
   let currentTurnDeadline = 0;
 
@@ -605,11 +613,9 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       const progress: string[] = [];
       const taskIds: string[] = [];
       currentTurnDeadline = Date.now() + mainTurnMs;
+      // 宿主只交「本轮输入」：最后一条 user = 本轮文本；历史种子仅在驱动尚无会话时使用。
       const factsMessage = options.taskFactProvider?.(options.principalId, options.sessionId);
-      if (factsMessage !== undefined && factsMessage.trim() !== '') {
-        mainMessages = [...mainMessages, userMessage(factsMessage)];
-      }
-      mainMessages = [...mainMessages, userMessage(text)];
+      const turnMessages = [...mainTranscript(), userMessage(text)];
       const mainResult = await options.mainDriver.run({
         systemPrompt: options.mainSystemPrompt,
         tools: [
@@ -617,7 +623,8 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
           ...(taskRunner === undefined ? [] : [taskStatusTool(), taskResultTool(), taskCancelTool(), taskResumeTool()]),
           ...(options.mainSkillRegistry === undefined ? [] : [readSkillTool()]),
         ],
-        messages: mainMessages,
+        messages: turnMessages,
+        ...(factsMessage !== undefined && factsMessage.trim() !== '' ? { injections: [factsMessage] } : {}),
         onStep: (step) => progress.push(step),
         exec: async (tool, args) => {
           if (tool === RUN_TASK_TOOL) {
@@ -644,7 +651,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
         },
         deadline: currentTurnDeadline,
       });
-      mainMessages = [...mainResult.messages];
+      lastMainProjection = mainResult.messages;
       // P1（S1）：本回合最终回复逐字存档——同回合各任务行同值；空白回复/回合失败不落
       // （缺省=无最终回复存档，显示层不用执行层汇报冒充）。
       // background：受理话术不落任务行（结果由 runner 在确认 completed 后经 archiveReply
@@ -662,7 +669,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
   return {
     principalId: options.principalId,
     sessionId: options.sessionId,
-    transcript: () => [...mainMessages],
+    transcript: () => mainTranscript(),
     send,
     tasks: () => registry.list(scope),
     getTask: (taskId) => registry.get(taskId, scope),
@@ -745,7 +752,7 @@ function pendingQuestionFrom(outcome: Extract<ExecutionOutcome, { status: 'needs
 
 /**
  * 后台单回合执行器（P6 TaskExecutor 的生产实现；每次派发新建 Worker 回合）：
- *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 mainMessages；
+ *   · 转录隔离结构性满足：只持有本次任务投影（request/answer），不接触 Main 会话转录；
  *   · 执行经 `execute_operation` 唯一工具 + 宿主生成 requestId，事实写 taskRegistry.noteExecution；
  *   · 逐回合机械判定（不替执行端做 task 级二次判定）：
  *       中止/abort → cancelled；截止未产出 → timed_out；空汇报 → failed；

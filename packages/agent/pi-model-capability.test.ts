@@ -14,12 +14,14 @@ const ENV = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'model-capabi
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 describe('T4 压缩阈值读模型能力', () => {
-  it('不给能力：contextWindow 缺省不变（128_000）', () => {
-    expect(createPiModelRuntime(ENV, 'step-3.7-flash').model.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
+  it('不给能力：contextWindow 缺省不变（128_000）', async () => {
+    const runtime = await createPiModelRuntime(ENV, 'step-3.7-flash');
+    expect(runtime.getModel('llm', 'step-3.7-flash')?.contextWindow).toBe(DEFAULT_CONTEXT_WINDOW);
   });
 
-  it('给能力：模型的 contextWindow 从能力读', () => {
-    expect(createPiModelRuntime(ENV, 'step-3.7-flash', { contextWindow: 40_000 }).model.contextWindow).toBe(40_000);
+  it('给能力：模型的 contextWindow 从能力读', async () => {
+    const runtime = await createPiModelRuntime(ENV, 'step-3.7-flash', { contextWindow: 40_000 });
+    expect(runtime.getModel('llm', 'step-3.7-flash')?.contextWindow).toBe(40_000);
   });
 
   it('大窗口沿用 Pi 缺省压缩设置（纯配置，不发明阈值）', () => {

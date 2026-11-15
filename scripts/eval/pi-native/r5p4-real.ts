@@ -285,10 +285,11 @@ async function main(): Promise<void> {
   const records: ModelCall[] = [];
   const modelId = effective.LLM_MODEL!;
   const caps = { contextWindow: windowSize, maxTokens: maxOut };
-  const mainRt = createPiModelRuntime(effective, modelId, caps);
-  const workerRt = createPiModelRuntime(effective, modelId, caps);
-  const mainDriver = createPiTurnDriver({ env: effective, runtime: { models: wrapModels(mainRt.models, records, 'main'), model: mainRt.model } });
-  const workerDriver = createPiTurnDriver({ env: effective, runtime: { models: wrapModels(workerRt.models, records, 'worker'), model: workerRt.model } });
+  const mainRt = await createPiModelRuntime(effective, modelId, caps);
+  const workerRt = await createPiModelRuntime(effective, modelId, caps);
+  // 记录包装器代理的是公开 ModelRuntime（streamSimple/completeSimple 同面），语义只记录不改。
+  const mainDriver = createPiTurnDriver({ env: effective, modelRuntime: wrapModels(mainRt, records, 'main') });
+  const workerDriver = createPiTurnDriver({ env: effective, modelRuntime: wrapModels(workerRt, records, 'worker') });
 
   const assembled = await assembleSessionCore({
     env: effective,

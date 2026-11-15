@@ -213,7 +213,7 @@ export function createDsExecutor(options: DsExecutorOptions = {}): DsExecutor {
         emptyOperationsMessage: '执行层没有声明任何只读 operation——实验拒绝以空允许集合运行',
         ...(options.createExecutionFace === undefined ? {} : { createExecutionFace: options.createExecutionFace }),
       });
-      const base = baseDrivers(env);
+      const base = await baseDrivers(env);
       const drivers = {
         mainDriver: recordingDriver(base.mainDriver, 'main', sink),
         workerDriver: recordingDriver(base.workerDriver, 'worker', sink),

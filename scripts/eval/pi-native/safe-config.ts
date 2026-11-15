@@ -37,7 +37,7 @@
  *   · reserveTokens ≥ maxTokens：触发时刻（context > W − R）再叠加一次最大输出仍不越窗；
  *   · 模拟压缩后请求 < 触发阈值 W − R：压缩后不会立刻再次触发（无“零收益连环压缩”）。
  */
-import type { CompactionSettings } from '@earendil-works/pi-agent-core';
+import type { CompactionSettings } from '@earendil-works/pi-coding-agent';
 
 /** 一组喂给 Pi 的绝对配置；四个字段都是“传入配置”，不是 fshine 的治理参数。 */
 export interface PiCompactionConfig {
@@ -87,7 +87,12 @@ export const HEADROOM_MARGIN_TOKENS = 2_048;
 /** 摘要预算下限：上轮 4/23 次摘要在 2,048 预算下被 reasoning 吃空。 */
 export const SUMMARY_FLOOR_TOKENS = 4_096;
 
-/** Pi 的摘要输出预算（`compaction.js:380` 的忠实转写）。 */
+/**
+ * 摘要输出预算（**历史推导**，pi 0.85.1 `compaction.js:380` 的转写）。
+ * 1.5.2 已移除该预算：`createSummarizationOptions` 只带 reasoning/signal 等，不再传 maxTokens
+ * （见 `safe-config.test.ts` 的公式守卫）。本函数保留为当时注册的余量推导记录，
+ * 新装配不应据此断言摘要预算仍存在。
+ */
 export function summaryBudgetTokens(config: PiCompactionConfig): number {
   return Math.min(Math.floor(0.8 * config.reserveTokens), config.maxTokens);
 }

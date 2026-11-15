@@ -21,7 +21,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import type { CapabilityManifest, ExecutionClient, ExecutionOutcome } from '@fshine/contracts/execution-contract';
 import type { TurnDriver } from '../../../../packages/agent/src/driver-contract';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import { estimateContextTokens } from '@earendil-works/pi-agent-core';
+import { estimateContextTokens } from '../../token-estimate';
 import { createPiTurnDriver } from '../../../../packages/agent/src/pi-driver';
 import { contextWindowFrom } from '../../../ask-runtime';
 import { expCases, T01, T02, T03, C03, C04, digestArm } from './cases';

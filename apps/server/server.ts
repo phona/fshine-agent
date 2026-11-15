@@ -36,6 +36,7 @@ import {
   assembleSessionCore,
   attachNotificationOutbox,
   createBackgroundDispatch,
+  type DriverFactory,
   type ExecutionFace,
 } from '../../scripts/ask-runtime';
 
@@ -56,7 +57,7 @@ export interface ServerDeps {
   /** dummy 执行层审计落盘目录；缺省 .runtime/server/state。 */
   stateDir?: string;
   /** 测试注入：Pi 回合驱动工厂；缺省真实 Pi 驱动（读 env）。 */
-  createDrivers?: (env: NodeJS.ProcessEnv) => { mainDriver: TurnDriver; workerDriver: TurnDriver };
+  createDrivers?: DriverFactory;
   /** 测试注入：执行面；缺省仓内 dummy CLI（按 profile root+gateway spawn）。 */
   createExecutionFace?: (profile: ContextProfileConfig, env: NodeJS.ProcessEnv) => Promise<ExecutionFace>;
   /** 测试注入：后台执行回合（dispatchMode=background 时使用）；缺省真实 Worker 回合执行器。 */

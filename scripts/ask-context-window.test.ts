@@ -27,21 +27,22 @@ const ENV = { LLM_API_BASE_URL: 'http://127.0.0.1:9', LLM_API_KEY: 'context-wind
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 
 /** 装配层构造驱动的同一方式（两调用点共享）：env + contextWindowFrom(env) 展开后落到模型能力。 */
-function assembledWindow(env: Record<string, string | undefined>): number {
+async function assembledWindow(env: Record<string, string | undefined>): Promise<number | undefined> {
   const { contextWindow } = contextWindowFrom(env);
-  return createPiModelRuntime(env, 'step-3.7-flash', contextWindow !== undefined ? { contextWindow } : {}).model.contextWindow;
+  const runtime = await createPiModelRuntime(env, 'step-3.7-flash', contextWindow !== undefined ? { contextWindow } : {});
+  return runtime.getModel('llm', 'step-3.7-flash')?.contextWindow;
 }
 
 describe('缺口 3 · 压缩窗口装配接线（contextWindowFrom → 驱动 contextWindow）', () => {
-  it('未设置 → 装配产物缺省 128k（缺省逐字节不变）', () => {
+  it('未设置 → 装配产物缺省 128k（缺省逐字节不变）', async () => {
     expect(contextWindowFrom(ENV), '未设置必须回落空对象（驱动不收到 contextWindow）').toEqual({});
-    expect(assembledWindow(ENV)).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(await assembledWindow(ENV)).toBe(DEFAULT_CONTEXT_WINDOW);
   });
 
-  it('LLM_CONTEXT_WINDOW=40000 → 装配产物吃该值（接线生效）', () => {
+  it('LLM_CONTEXT_WINDOW=40000 → 装配产物吃该值（接线生效）', async () => {
     const env = { ...ENV, LLM_CONTEXT_WINDOW: '40000' };
     expect(contextWindowFrom(env)).toEqual({ contextWindow: 40_000 });
-    expect(assembledWindow(env)).toBe(40_000);
+    expect(await assembledWindow(env)).toBe(40_000);
   });
 
   it('空串 = 未设置（parseContextWindow 语义）→ 回落缺省', () => {

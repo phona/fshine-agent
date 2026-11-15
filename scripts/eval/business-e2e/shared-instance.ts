@@ -22,7 +22,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
-import type { MutableModels } from '@earendil-works/pi-ai';
 import type { AppConfig } from '@fshine/contracts';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
 import { contextWindowFrom } from '../../ask-runtime';
@@ -32,7 +31,8 @@ import type {
   ExecutionOutcome,
   ExecutionRequest,
 } from '@fshine/contracts/execution-contract';
-import { createPiTurnDriver, type PiModelRuntime } from '../../../packages/agent/src/pi-driver';
+import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
+import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 import type {
   TaskExecutionInput,
   TaskExecutionContext,
@@ -99,33 +99,16 @@ function streamOf(message: AgentMessage) {
 }
 
 /** 假 Pi 驱动：按调用顺序消费共享响应队列（回合顺序 = 测试编排顺序，确定性）。 */
-function queueDriverFor(queue: AgentMessage[]) {
-  const model = {
-    id: 'test-model',
-    name: 'test-model',
-    api: 'openai-completions',
-    provider: 'llm',
-    baseUrl: 'http://127.0.0.1:9',
-    reasoning: true,
-    input: ['text'],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+async function queueDriverFor(queue: AgentMessage[]): Promise<TurnDriver> {
+  const scripted = await createScriptedModelRuntime({
     contextWindow: 40_000,
-    maxTokens: 32_000,
-  } as unknown as PiModelRuntime['model'];
-  const runtime: PiModelRuntime = {
-    model,
-    models: {
-      getModel: () => model,
-      streamSimple: async () => {
-        const response = queue.shift();
-        if (!response) throw new Error('共享实例夹具：假模型响应队列已空（脚本编排不完整）。');
-        return streamOf(response);
-      },
-      completeSimple: async () => textAssistant('【夹具摘要】'),
-      cancelDeferred: async () => {},
-    } as unknown as MutableModels,
-  };
-  return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, runtime });
+    script: () => {
+      const response = queue.shift();
+      if (response === undefined) throw new Error('共享实例夹具：假模型响应队列已空（脚本编排不完整）。');
+      return response;
+    },
+  });
+  return createPiTurnDriver({ env: { LLM_MODEL: 'test-model' }, modelRuntime: scripted.runtime });
 }
 
 // ---------------------------------------------------------------------------
@@ -431,12 +414,12 @@ export function createSharedInstanceFixture(
 
   const driverEnv = options.env ?? { LLM_MODEL: 'test-model' };
   // 驱动工厂：realDrivers = 真实 Pi 驱动 ×2（外包一层记录器，只记录不改语义）；缺省 = 假队列驱动。
-  const buildDrivers = (env: NodeJS.ProcessEnv) => (options.realDrivers === true
+  const buildDrivers = async (env: NodeJS.ProcessEnv) => (options.realDrivers === true
     ? {
         mainDriver: recordingDriver(createPiTurnDriver({ env, ...contextWindowFrom(env) }), 'main', observations),
         workerDriver: recordingDriver(createPiTurnDriver({ env, ...contextWindowFrom(env) }), 'worker', observations),
       }
-    : { mainDriver: queueDriverFor(queue), workerDriver: queueDriverFor(queue) });
+    : { mainDriver: await queueDriverFor(queue), workerDriver: await queueDriverFor(queue) });
 
   // 唯一 createServer 调用（唯一服务进程）：身份取自渠道事实，多 principal = 消息级区分。
   const buildServer = () =>

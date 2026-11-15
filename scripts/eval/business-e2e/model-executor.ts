@@ -185,8 +185,8 @@ export function createModelExecutor(options: ModelExecutorOptions = {}): BizExec
         assertEvalIsolation(isolation, `bizprobe ${item.id}`);
       },
       emptyOperationsMessage: '执行层没有声明任何只读 operation——拒绝以空允许集合运行',
-      createDrivers: (driverEnv) => {
-        const base = drivers(driverEnv);
+      createDrivers: async (driverEnv) => {
+        const base = await drivers(driverEnv);
         return {
           mainDriver: recordingDriver(base.mainDriver, 'main', sink),
           workerDriver: recordingDriver(base.workerDriver, 'worker', sink),

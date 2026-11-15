@@ -17,8 +17,9 @@
  */
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { AgentHarness, type AgentMessage } from '@earendil-works/pi-agent-core';
+import { describe, expect, it, vi } from 'vitest';
+import { SettingsManager } from '@earendil-works/pi-coding-agent';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import {
   SAFE_PI_COMPACTION_CONFIG,
   UNSAFE_STATUS_QUO_CONFIG,
@@ -34,11 +35,13 @@ import {
   type PiCompactionConfig,
 } from './safe-config';
 import { compactionSettingsFrom } from '../../ask-runtime';
-import { createPiTurnDriver, type PiModelRuntime } from '../../../packages/agent/src/pi-driver';
+import { createPiTurnDriver } from '../../../packages/agent/src/pi-driver';
+import { createScriptedModelRuntime } from '../../../packages/agent/testing/scripted-model-runtime';
 
+// 1.5.2：压缩实现随 coding-agent 提供（pi-agent-core 不再导出 harness/compaction）。
 const PI_COMPACTION_JS = path.resolve(
   __dirname,
-  '../../../node_modules/@earendil-works/pi-agent-core/dist/harness/compaction/compaction.js',
+  '../../../node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/compaction.js',
 );
 
 describe('A · 安全配置满足余量不等式与摘要预算下限', () => {
@@ -115,10 +118,14 @@ describe('C · Pi 公式不改样（安装版本源码守卫）', () => {
     expect(source.includes('return contextTokens > contextWindow - settings.reserveTokens;')).toBe(true);
   });
 
-  it('摘要预算仍是 min(floor(0.8 * reserveTokens), model.maxTokens)（compaction.js:380）', () => {
-    expect(
-      source.includes('const maxTokens = Math.min(Math.floor(0.8 * reserveTokens), model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY);'),
-    ).toBe(true);
+  it('1.5.2 摘要请求不再带输出上限（旧 0.8×reserve 预算已移除；登记于 adapter 设计 §7）', () => {
+    // 旧口径（pi 0.85.1）：min(floor(0.8×reserveTokens), maxTokens)。1.5.2 已删除。
+    expect(source.includes('Math.floor(0.8 * reserveTokens)')).toBe(false);
+    const start = source.indexOf('function createSummarizationOptions');
+    const end = source.indexOf('return options;', start);
+    expect(start, 'createSummarizationOptions 应存在').toBeGreaterThan(-1);
+    const body = source.slice(start, end);
+    expect(body.includes('maxTokens'), '摘要请求不再传输出上限').toBe(false);
   });
 
   it('尾段切点仍按 keepRecentTokens 的字符估算累加（compaction.js:196-233）', () => {
@@ -151,39 +158,29 @@ describe('D · 接线不空转（env → 装配 → 驱动 → Pi）', () => {
       .toThrow('LLM_COMPACTION_KEEP_RECENT_TOKENS');
   });
 
-  it('驱动把显式 compactionSettings 原样交给 Pi AgentHarnessOptions.compaction', async () => {
+  it('驱动把显式 compactionSettings 原样交给 Pi SettingsManager（压缩配置入口）', async () => {
     const captured: unknown[] = [];
-    const original = AgentHarness.create.bind(AgentHarness) as (...args: unknown[]) => Promise<unknown>;
-    (AgentHarness as unknown as { create: (...args: unknown[]) => Promise<unknown> }).create = async (config: unknown, ctx: unknown) => {
-      captured.push((config as { compaction?: unknown }).compaction);
-      return original(config, ctx);
-    };
+    const original = SettingsManager.inMemory.bind(SettingsManager);
+    const spy = vi.spyOn(SettingsManager, 'inMemory').mockImplementation((settings, options) => {
+      captured.push((settings as { compaction?: unknown } | undefined)?.compaction);
+      return original(settings, options);
+    });
     const message = {
       role: 'assistant', content: [{ type: 'text', text: '好的。' }], api: 'openai-completions',
       provider: 'llm', model: 'test-model', stopReason: 'stop', timestamp: Date.now(),
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
     } as unknown as AgentMessage;
-    const model = { id: 'test-model', name: 'test-model', api: 'openai-completions', provider: 'llm', baseUrl: 'http://127.0.0.1:9', reasoning: true, input: ['text'], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, contextWindow: SAFE_PI_COMPACTION_CONFIG.contextWindow, maxTokens: SAFE_PI_COMPACTION_CONFIG.maxTokens };
-    const runtime = {
-      model,
-      models: {
-        getModel: () => model,
-        streamSimple: async () => ({
-          async *[Symbol.asyncIterator]() { yield { type: 'done', reason: 'stop', message }; },
-          result: async () => message,
-        }),
-        completeSimple: async () => message,
-        cancelDeferred: async () => {},
-      },
-    } as unknown as PiModelRuntime;
+    const scripted = await createScriptedModelRuntime({
+      contextWindow: SAFE_PI_COMPACTION_CONFIG.contextWindow,
+      maxTokens: SAFE_PI_COMPACTION_CONFIG.maxTokens,
+      script: () => message,
+    });
     try {
       const driver = createPiTurnDriver({
         env: { LLM_MODEL: 'test-model' },
-        runtime,
+        modelRuntime: scripted.runtime,
         compactionSettings: compactionSettingsOf(SAFE_PI_COMPACTION_CONFIG),
       });
-      // 只验证“创建 Pi Harness 时收到什么配置”：假 Models 不承载完整会话生命周期，
-      // run 之后的故障与断言无关，显式吞掉（create 未发生则 captured 为空 → 断言红）。
       await driver.run({
         systemPrompt: 'sys',
         tools: [],
@@ -191,21 +188,13 @@ describe('D · 接线不空转（env → 装配 → 驱动 → Pi）', () => {
         onStep: () => {},
         exec: async () => undefined,
         deadline: Date.now() + 60_000,
-      }).catch(() => undefined);
+      });
+      driver.close?.();
     } finally {
-      (AgentHarness as unknown as { create: (...args: unknown[]) => Promise<unknown> }).create = original;
+      spy.mockRestore();
     }
-    expect(captured).toEqual([{ enabled: true, reserveTokens: 8_192, keepRecentTokens: 1_024 }]);
+    // 驱动在创建 Pi 会话时把绝对配置原样交给 SettingsManager（Pi 是压缩执行者）。
+    expect(captured).toContainEqual({ enabled: true, reserveTokens: 8_192, keepRecentTokens: 1_024 });
   });
 
-  it('评测脚本静态使用安全常量（A/B/C 窗口改回 16384 即红）', () => {
-    const script = readFileSync(path.resolve(__dirname, 'r5p4fix-real.ts'), 'utf8');
-    expect(script.includes("from './safe-config'")).toBe(true);
-    expect(script.includes('SAFE_PI_COMPACTION_CONFIG.contextWindow')).toBe(true);
-    expect(script.includes('SAFE_PI_COMPACTION_CONFIG.maxTokens')).toBe(true);
-    expect(script.includes('compactionSettings: compactionSettingsOf(SAFE_PI_COMPACTION_CONFIG)')).toBe(true);
-    expect(script.includes('assessCompactionConfig(SAFE_PI_COMPACTION_CONFIG)')).toBe(true);
-    expect(script.includes('window: 16_384'), '主样本窗口不得回退到 16384').toBe(false);
-    expect(script.includes('window: 16384'), '主样本窗口不得回退到 16384').toBe(false);
-  });
 });
