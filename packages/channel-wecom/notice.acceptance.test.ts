@@ -42,7 +42,7 @@ class NoticeSdkClient implements SdkClientLike {
 
 async function start(handler: ReplyHandler) {
   const sdk = new NoticeSdkClient();
-  const channel = new WecomBotChannel({ env: ENV, clientFactory: () => sdk });
+  const channel = new WecomBotChannel({ env: ENV, clientFactory: () => sdk, deliveryMode: 'live' });
   const starting = channel.start(handler);
   sdk.emit('authenticated');
   await starting;

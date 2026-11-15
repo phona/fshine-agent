@@ -44,7 +44,8 @@ async function main(): Promise<void> {
   });
   const channel = new WecomBotChannel({ env, platformRoot: profile.root });
   await channel.start(server.handler);
-  console.log(JSON.stringify({ event: 'server_started', configPath, profileId, dbPath }));
+  // 出站投递模式入启动日志（缺省 silent）：部署侧一眼看出真实投递是否被显式开启。
+  console.log(JSON.stringify({ event: 'server_started', configPath, profileId, dbPath, deliveryMode: channel.deliveryMode }));
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {

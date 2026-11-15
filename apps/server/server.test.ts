@@ -213,6 +213,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
       env: { WECOM_BOT_ID: 'bot-id', WECOM_BOT_SECRET: 'bot-secret' },
       clientFactory: () => stub,
       platformRoot: dir,
+      deliveryMode: 'live',
     });
     await channel.start(server.handler);
 
@@ -264,6 +265,7 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
       env: { WECOM_BOT_ID: 'bot-id', WECOM_BOT_SECRET: 'bot-secret' },
       clientFactory: () => stub,
       platformRoot: dir,
+      deliveryMode: 'live',
     });
     await channel.start(server.handler);
     stub.emit('message.text', textMessageFrame('stranger', '你好', 'msg-2', 'req-2'));
@@ -276,6 +278,47 @@ describe('server（假渠道 + 假执行客户端 + 假模型）', () => {
     expect(client.requests).toHaveLength(0);
     const refused = logs.find((line) => line['event'] === 'message_refused');
     expect(refused!['principalId']).toBe('wecom:stranger');
+
+    await channel.stop();
+    server.close();
+  });
+
+  // B2 端到端：**缺省静默**下，拒绝路径的整条链仍跑通（拒绝文案确实生成），但**实际用户可见
+  // 投递 = 0**，且被抑制的发送留下可观测证据。渠道按缺省构造（不传 deliveryMode）。
+  it('Silent Shadow 端到端：拒绝路径产出文案但零用户可见投递，尝试可观测', async () => {
+    const dir = tempDir();
+    const logs: Array<Record<string, unknown>> = [];
+    const server = await createServer({
+      env: { LLM_MODEL: 'test-model' },
+      config: testConfig(),
+      dbPath: path.join(dir, 'state.db'),
+      createExecutionFace: async () => ({ client: new FakeClient(), allowedOperations: ['dummy.query'] }),
+      logger: (line) => logs.push(line),
+    });
+
+    const frames: Array<{ streamId: string; content: string; finish: boolean }> = [];
+    const stub = sdkStub(frames);
+    const channel = new WecomBotChannel({
+      env: { WECOM_BOT_ID: 'bot-id', WECOM_BOT_SECRET: 'bot-secret' },
+      clientFactory: () => stub,
+      platformRoot: dir,
+      // 不传 deliveryMode：走缺省静默闸门
+    });
+    await channel.start(server.handler);
+    stub.emit('message.text', textMessageFrame('stranger', '你好', 'msg-silent', 'req-silent'));
+
+    // 宿主确实跑了拒绝路径（文案生成、拒绝事件登记）。
+    await vi.waitFor(() => {
+      expect(logs.some((line) => line['event'] === 'message_refused')).toBe(true);
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // 判据：底层的全部出站调用为零（stub 一帧都没收到）——实际用户可见投递 = 0。
+    expect(frames).toHaveLength(0);
+    // 尝试可观测：闸门登记了被抑制的发送（ack + 拒绝终帧）。
+    const evidence = channel.shadowEvidence();
+    expect(evidence.mode).toBe('silent');
+    expect(evidence.userVisibleSuppressed).toBeGreaterThanOrEqual(1);
 
     await channel.stop();
     server.close();
