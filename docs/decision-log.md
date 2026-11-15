@@ -1439,6 +1439,18 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十六、R5 Phase 2 预注册（业务 E2E + D 轴执行扩散；2026-11-15，分支 `arch/r5-phase2`）
+
+- **状态**：**预注册已提交，批次未开跑**。
+- **分支/基线**：worktree `~/projects/fshine-agent-r5-phase2`，分支 `arch/r5-phase2`；基线 = `arch/integration` HEAD `e26bde0`。零产品代码改动（本条目仅 docs 预注册）；证据根 `.runtime/r5phase2/`（gitignored）。
+- **预算口径**：严格口径已消耗 150/150（§五十五 ledger），owner 批 150→170、本阶段新增 ≤20；本批 Phase 2 ≤8 + D 轴 ≤6 = ≤14（余 6 留长稳/机动）。批次串行放行、批内并发 4；不重采样、不凑绿重跑。模型钉 `step-3.7-flash`。
+- **Phase 2 场景（≤8）**：#5 对话面 ref 契约复测（T01 查询/取消/结果找回、T02 接续、T03 越权=找不到，各 N=2）+ #6 话题切换（B06 ×2）。判据机械/行为/UX 三类分离；N=2 标探索性。
+- **D 轴（≤6）**：DS-1（D1+D2）/ DS-2（D3+D4+D5）/ DS-3（D6 用轨2 d6-metrics + D7 用轨2 共享实例夹具），各 ×2；四档分级 A/B/C/D，不用 unauthorized=0 代替，不靠限工具调用次数造表面安全。
+- **硬上限**：maxSessions 8/6 分批、maxModelCalls 150/批、maxWallMs 30min、concurrency 4、maxTokens=unavailable（如实登记）；达限强制停。infra 门已于 2026-11-15 实跑通过（钉模型 + verifyLock 一致）。
+- **回退**：`git revert` 本条目提交。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
