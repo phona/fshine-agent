@@ -1769,6 +1769,37 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 ---
 
 
+## 六十四、R5 垃圾清理执行（2026-11-15，分支 `arch/r5-junkclean`，基线 = arch/integration @c2c8497）状态：**待合入**
+
+### ① 清理范围（依据 `docs/product/r5-junk-audit.md` 台账 #1-6、#8-9，只删台账判定项，未扩大）
+
+- **删零引用导出 3**（连同各自 doc 注释）：`packages/agent/src/skills.ts` `discoverSkills`（原:136）与 `readSkill`（原:167）、`packages/contracts/src/config.ts` `resolveActiveProfileId`（原:102）。删前复核：`grep -rnw --include='*.ts' -E 'discoverSkills|readSkill|resolveActiveProfileId' packages apps scripts` 仅命中 3 个定义行；动态引用排查（`await import`/`import(` 中 skill/profile 关键词）与 `.js/.mjs/.cjs` 脚本面（排除 node_modules）零命中；`execution-runtime.ts` 的 `readSkillTool` 为本地函数，非 `readSkill` 引用。
+- **删未用依赖 3**（`package.json`）：`express`、`@earendil-works/pi-coding-agent`、`@types/express`（随 express 失去意义一并移除）。复核 `from 'express'`/`require('express')` 精确匹配与 `pi-coding-agent` 字符串扫描（.ts/.js/.mjs/.cjs）零命中——未因 `@types/x` 命中而误判。
+- **修陈旧注释 2**（只改文字，零代码行为）：`packages/agent/src/step-text.ts:46-48` 工具面改为现行 `run_task`/`read_skill`/`task_status`/`task_result`/`task_cancel`/`task_resume`（原注释点名的 `task_control`/`resend_artifact` 零实现）；`packages/agent/src/server-paths.ts:105-112` 去除对已删 resend 申报枝机制的现在时引用。
+- **保留不动**：内存版 `packages/agent/src/task-registry.ts`（台账 #7 判保留：非完整重复、有历史裁决与契约同测；生产不可达缺省回退的收紧属附带待裁决项，本节不动）。
+
+### ② lockfile 处置
+
+- `TMPDIR=/home/tao/.tmp npm install --package-lock-only --offline` 离线完成，`package-lock.json` 随依赖删除再生成（净删 2967 行，主要为 pi-coding-agent 传递依赖子树）；未手改 lockfile，无待更新登记。
+
+### ③ 零行为变化依据
+
+- **diff 性质**：全量 diff 只含三类内容——死导出删除（连同 doc 注释）、`package.json` 3 行依赖删除、2 处注释文字修改；无任何可执行逻辑改动（`6780a13` diff：6 files changed, 8 insertions(+), 2998 deletions(-)，其中 +8 全部为注释文字）。
+- **typecheck**：`npx tsc --noEmit` = 0（本节复核实跑，退出码 0）。
+- **unit**：`npm test` 全量 82 文件 / 817 例全绿（本节复核实跑，36.8s）；与基线 c2c8497 例数相同，**例数无减少**——死导出本无任何针对其的测试断言，故无需删测试。
+- 零真实模型调用（纯确定性清理 + 静态复核）。
+
+### ④ 回退
+
+- 清理为单 commit `6780a13`（chore），`git revert 6780a13` 即整体回退；分支 `arch/r5-junkclean` 未 push、未合并、未触碰 main/tag。
+
+### ⑤ 状态
+
+- **待合入**；合入后按维护规则补 merge commit 与日期。台账其余项（#6 历史文档陈述、#9 可选收紧）不随本节推进。
+
+---
+
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
