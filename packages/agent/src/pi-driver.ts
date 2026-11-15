@@ -176,6 +176,13 @@ export interface PiTurnDriverOptions {
   /** 注入的模型运行时（测试/嵌入用）。 */
   runtime?: PiModelRuntime;
   /**
+   * 显式 Pi 压缩配置（绝对 `reserveTokens`/`keepRecentTokens`）。缺省 = 由窗口派生的
+   * `piCompactionSettings(model.contextWindow)`（行为逐字节不变）。装配/评测需要按
+   * 「窗口 − 输出预算 − 余量」给出安全值时，经此参数传入；驱动仍只做透传，
+   * 触发/执行/摘要/尾段全归 Pi（不含任何 fshine 压缩决策）。
+   */
+  compactionSettings?: CompactionSettings;
+  /**
    * 会话生命周期归属（任务书 §4.1）：true = 本驱动实例**首次 run 创建一次** Pi
    * Session/Harness，后续 run 复用它（跨回合保留 Pi 原生转录与压缩状态）；
    * false/缺省 = 每回合一次性会话（Worker/直测沿用，行为逐字节不变）。
@@ -301,8 +308,9 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
   const thinkingLevel = options.thinkingLevel
     ?? parsePiThinkingLevel(options.env.LLM_THINKING_LEVEL, 'LLM_THINKING_LEVEL');
 
-  // Pi 配置适配：把窗口派生的绝对 CompactionSettings 交给 Pi（非压缩机制，见函数注释）。
-  const compaction = piCompactionSettings(model.contextWindow);
+  // Pi 配置适配：把绝对 CompactionSettings 交给 Pi（非压缩机制，见函数注释）。
+  // 装配/评测显式给值时用显式值；缺省仍按窗口派生（行为逐字节不变）。
+  const compaction = options.compactionSettings ?? piCompactionSettings(model.contextWindow);
 
   // 会话生命周期（§4.1）：reuseConversation 时本实例持有唯一 Pi 会话，跨回合连续；
   // 否则每次 run 一次性（既有行为）。
