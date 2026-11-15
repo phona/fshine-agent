@@ -2006,7 +2006,6 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ---
 
-
 ## 七十、R5-B 压缩前无状态预判设计 · 归档登记（2026-11-15，分支 `arch/r5-bdesign`，基线 = arch/integration @`63d935e`）状态：**待合入**
 
 > 编号说明：本 worktree 基线处 decision-log 最大号为 §六十八；arch/integration 此后已落 §六十九（本分支不可见），为避免合入冲突按主仓当前最大号 +1 取 §七十。
@@ -2041,6 +2040,52 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ---
 
+
+## 七十一、R5-C 压缩摘要调用六项计量 · 观测面补齐（2026-11-15，分支 `arch/r5-c`，基线 = `arch/integration` @`63d935e`）状态：**待合入**
+
+> 编号：本 worktree 基线处 decision-log 最大号 = §六十九；`arch/integration` 当前最大号 = §七十，按先例（§六十八/§六十九）取 §七十一。
+> 只新增**观测面**：不改 D1/D2/D3、不新增限流/冷却/门控/状态机、不改用户可见语义。实现提交 `4b64b34`（`packages/agent/src/pi-driver.ts` +203/-15、新增 `packages/agent/compaction-metrics.test.ts`）。
+
+**六项计量**（事件 `context_compaction_metrics` 载荷，逐终态均发：compacted/no_cut/failed/degraded/rejected，`pi-driver.ts:684-775`）
+- ① 摘要模型调用次数 `summaryCalls`：`summarizeWithinWindow` 实际发起的分片数（= 真实摘要请求数），经 `emitMetrics` 落入事件（`pi-driver.ts:654`；赋源 `:726/735/770`，无调用时 `:686/704` 记 0）。
+- ② 摘要调用 token `summaryUsage{input,output,cacheRead,cacheWrite,totalTokens}`：由 `generateSummary` 换用 `generateSummaryWithUsage`（签名一致，仅取回 usage），逐分片累加（`pi-driver.ts:549-557`）。
+- ③ 耗时 `elapsedMs`：每次摘要调用墙钟累加（`pi-driver.ts:548-555`）。
+- ④ 压缩前后长度 `tokensBefore`/`tokensAfter`：`estimateContextTokens` 前后估算（`pi-driver.ts:657`，产物侧 `:770/773`）。
+- ⑤ 触发原因 `trigger ∈ {threshold,invariant,overflow,turn_boundary}`：缺省按 force 解析为 `turn_boundary`/`threshold`（`pi-driver.ts:634`）；四触发点显式传入——回合前 INV 复核 `invariant`（`:830`）、回合内 emergency `overflow`（`:883`）、供应商上下文超限恢复 `overflow`（`:928`）、`TurnDriver.compact()`（`:1060-1065`，不显式传 trigger，按 opts.force 缺省解析）。
+- ⑥ 关联标识 `correlationId`：`newCompactionCorrelationId()`（`pi-driver.ts:494-497`；格式 `cmp_<ts36>_<seq36>`），同一次压缩的计量事件与触发点事件共用同一 id（`context_emergency_compact:875`、`pi_driver_pre_request_compacted:840`、`pi_driver_context_overflow_recovered:937`）。
+
+**缺省不落盘摘要正文的实现方式**
+- 新增开关 `FSHINE_CAPTURE_COMPACTION_SUMMARY`（`COMPACTION_CAPTURE_SUMMARY_ENV`）；`compactionCaptureEnabled()` 对缺省/空串/`0`/`false` 一律返回关闭（`pi-driver.ts:479-489`）。
+- 仅当开关打开时 `summaryText` 才并入事件（`pi-driver.ts:660`：`captureSummaryText && summaryText !== undefined`）；缺省路径事件对象不含该字段。
+- 缺省路径测试断言：计量事件无 `summaryText`，且捕获到的任何日志都不含夹具摘要正文（`compaction-metrics.test.ts:199-207`）。开关只在隔离测试环境（用例显式传 `{captureSummaryText:true}`）打开，生产 env 不设该变量。
+
+**② 摘要调用是否绕过 budget hook：是，确认绕过**（闭合 §六十九 未验证假设 H3）
+- budget hook 面 = `TaskBudget.consume(usage)`，接受 `{ms?,calls?,tokens?}`（`resource-policy.ts:262-269`）。
+- 生产 `consume()` 仅两处，均在**回合级**：`task-runner.ts:420` `policy.budgetFor(taskId).consume({ calls: 1, ms })`（每后台回合 finally 计一次，`:418-420`）；`execution-runtime.ts:595` `delegationPermit?.budget.consume({ calls: 1, ms: Date.now()-workerStartedAt })`（每委派 Worker 回合一次）。
+- 两处**都只传 `calls:1` 与 `ms`，从不传 `tokens`**；摘要调用发生在回合内的 `compactTranscriptWithPi`（`pi-driver.ts:617`）里，从不经任何 `consume()`。故摘要模型调用**不进入 budget 计数、不进入 token 账本**。
+- 机制级解释 §六十九 核账缺口（budget calls 32 < emergency 36）：`consume` 按「回合」记 1，而一回合内可发生多次 emergency 摘要调用（≥1 分片各不相同），故 `budget.calls` 系统性低于实际摘要调用数——**为设计使然，非事件丢失**。
+- 影响面：token 上限在未声明 `taskBudget.tokens` 时本就 `unavailable`（`resource-policy.ts:255`）；即便声明，摘要 token 也从不入账。本条**只登记事实，不提出纳入 budget 的改动**。
+
+**未新增限流/冷却/门控/状态机**
+- 本次改动只在既有路径上新增 `console.log` 结构化事件与（缺省关闭的）正文字段；无 `if` 改变触发/门控、无新状态、无冷却器、不改变用户可见语义。
+
+**未触碰 D1/D2/D3**
+- D1（`run()` 请求前 INV 复核臂）、D2（`pi-driver.ts:658-660` 失实注释）、D3（emergency 线与 INV 线阈值二源合一）**零改动**；A 方案因反向绊线失败已停在原处交回裁决，本次不介入。
+
+**回归读数**（本 worktree `arch/r5-c` @ `4b64b34`；`node_modules` 以符号链接指向主仓工具链）
+- `npx tsc --noEmit` → 退出码 **0**。
+- 全量 `npx vitest run`：**85 文件 / 842 用例全绿**。新增 `compaction-metrics.test.ts` 7 例；基线 835，**例数不减**。首轮曾出现 3 个 vitest worker `onTaskUpdate` 超时（资源竞争，非断言失败），复跑全绿。
+- 反向绊线：手工删除事件中的 `summaryCalls` 字段 → `compaction-metrics.test.ts` 1 failed（`compaction-metrics.test.ts:134`）→ 还原后绿。**已实测红**。
+- 缺省路径无正文：`compaction-metrics.test.ts:199-207` 断言通过。
+
+**DECISION_REQUIRED**（如需；非阻塞）
+- 是否将摘要调用/ token 纳入 `TaskBudget`？本次仅确认现状为「不纳入」，未提改动方案；若 owner 要纳入，须走新增机制准入（含 token 上限启用后的行为 Eval），不得由本次计量静默改变预算语义。
+
+**未实施任何修改（相对本分支基线）· 等合入**
+- 本次只新增观测面；未改 D1/D2/D3、未新增限流/门控、未 `git add` 任何 `.runtime`、未删/弱化既有断言。
+- **状态：待合入。**
+
+---
 
 ## 维护规则
 
