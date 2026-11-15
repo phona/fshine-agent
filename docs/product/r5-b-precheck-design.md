@@ -19,11 +19,13 @@
 
 无需真实模型即可复现触发条件与阈值几何，路径：
 
-- `scripts/eval/p3/compaction-proof.ts`（**零真实模型**，`node --import tsx scripts/eval/p3/compaction-proof.ts`）：用确定性转录夹具 `p3aTranscript(40)` + 真实 sys/tools 量级，打印 W=8192 下 `compactionThreshold = contextWindow − reserveTokens`、`shouldCompact`、`preRequestInvariantBreach`、`invariantLimit`、`reserveTokens`、`keepRecentTokens`。它证明 W=8192 会在该量级转录下真实越线（对照 128k 不触发），并可直接读出 `threshold == invariantLimit == 2512` 的几何。
+- `scripts/eval/p3/compaction-proof.ts`（**零真实模型**，`node --import tsx scripts/eval/p3/compaction-proof.ts`）：用确定性转录夹具 `p3aTranscript(40)` + 真实 sys/tools 量级，打印 W=8192 下 `compactionThreshold = contextWindow − reserveTokens`、`shouldCompact`、`preRequestInvariantBreach`、`invariantLimit`、`reserveTokens`、`keepRecentTokens`。**它能复现的只是「越线事实」**：W=8192 在该量级转录下 `shouldCompact=true`、`preRequestInvariantBreach=true`（对照 128k 两项均 `false`），脚本 `verdict=true`。
+  - **该夹具本身并不产出 2512**（2026-11-15 在本仓实跑复现）：输出为 `contextWindow=8192, transcriptTokens=11320, compactionThreshold=6144, invariantLimit=3002, reserveTokens=2048, keepRecentTokens=2457, fixedOverheadDeltaWorst=4166`。原因是它调用 `compactionSettingsFor(contextWindow)` **未传 Δ**（`fixedOverhead=0 ⇒ invariantReserve=1024 ⇒ reserveTokens = max(1024, min(16384, floor(8192·0.25))) = 2048`，`pi-driver.ts:324-343`），且它自带的 sys/tools 量级给出 `Δ=4166`、**不是真实会话的 Δ=4656**。故软阈值 `6144`、`invariantLimit 3002`、`2512` **三者互不相等**。
+  - 「三线重合 = 2512」**不是本夹具的读数**，而是 §2.3 在 **Δ=4656** 下的独立算术结果（`emergencyHeadroom` 触发线 / 软阈值 / INV limit 三者在 Δ=4656 下同为 2512）。按本节复跑只会得到 6144/3002——**切勿把 §2.3 的 2512 当成本夹具的输出**。
 - `packages/agent/pi-driver-context-invariant.test.ts`：假模型运行时 `invariantRuntime()`（`streamSimple`/`completeSimple` 夹具，`calls()` 计数器），**零网络**，用 `compactTranscriptWithPi(...)` 直测生产压缩实现。可在此构造「当前回合占满窗口、无可摘要前缀」的 `noCutOverLimit` 夹具（文件内 `userMessage(23_600)`）。
 - `packages/agent/compaction-product.test.ts`：假模型运行时 `fakeRuntime()`（返回固定摘要、零网络），`longTranscript()` 造大前缀长转录，直测压缩确实发生。
 
-**结论**：触发链与阈值几何在**确定性夹具内即可复跑**（1.2），真实会话数据（1.1）只作现象引用。压测脚本（`scripts/eval/p3/p3a-session.ts:109`、`p3b-session.ts:131` 显式注入 `LLM_CONTEXT_WINDOW:'8192'`）用于产生 1.1 的读数，本身不进入本次设计回归。
+**结论**：**触发链（越线事实）** 在确定性夹具内可复跑（1.2）；但 **2512 三线重合的阈值几何是 Δ=4656 下的算术结果（§2.3），不是夹具（1.2）的输出**——夹具未传 Δ、自带 Δ=4166，读数为 `threshold=6144 / invariantLimit=3002`。真实会话数据（1.1）只作现象引用。压测脚本（`scripts/eval/p3/p3a-session.ts:109`、`p3b-session.ts:131` 显式注入 `LLM_CONTEXT_WINDOW:'8192'`）用于产生 1.1 的读数，本身不进入本次设计回归。
 
 ---
 
@@ -97,7 +99,7 @@ if (compactionWorthwhile(...) == NOT_WORTH):
 // WORTH：沿用既有 summarizeWithinWindow → trim 路径，行为不变
 ```
 
-**触发线在 W=8192 下三线重合的几何事实**（审计 §3 复核）：`compactionSettingsFor(8192, 4656)` ⇒ `reserveTokens = max(5680, min(16384, 2048)) = 5680`，故 `target = 8192 − 5680 = 2512`；`limit = 8192 − 4656 − 1024 = 2512`；`shouldCompact` 阈值 `W − reserve = 2512`。**三线同为 2512**，因此规则 (2) 中 `estTok ≤ limit` 与「越软触发」在 W=8192 下同义——这正是 S1/S2 无效循环的窗口特征。
+**触发线在 W=8192 下三线重合的几何事实**（审计 §3 复核）：`compactionSettingsFor(8192, 4656)` ⇒ `reserveTokens = max(5680, min(16384, 2048)) = 5680`，故 `target = 8192 − 5680 = 2512`；`limit = 8192 − 4656 − 1024 = 2512`；`shouldCompact` 阈值 `W − reserve = 2512`。**三线同为 2512**，因此规则 (2) 中 `estTok ≤ limit` 与「越软触发」在 W=8192 下同义——这正是 S1/S2 无效循环的窗口特征。（**等式口径**：三线同为 2512 的前提是把真实会话的 **Δ=4656** 传入 `compactionSettingsFor`；§1.2 夹具未传 Δ、自带 Δ=4166，故其读数 `threshold=6144 / limit=3002` 与本节 2512 **不同口径，勿混用**。）
 
 ### 2.4 为什么判定 (2) 是安全的
 
@@ -131,8 +133,9 @@ if (compactionWorthwhile(...) == NOT_WORTH):
   - `tail_at_or_over_target_loop`：`keptTok + summaryFloor ≥ target`——保留尾段自身已达/超目标，压缩结构上不能终止再触发循环。
 - **升级为有界失败的唯一条件**：`estTok > limit`（转录已越硬安全上界、请求不可交付）**且**预判判 NOT_WORTH。此时：
   - **不**调用摘要模型（现状态下它救不回，且会白烧一次调用）；
-  - 走既有 `context_invariant_violated` 有界失败（一次判定、立即拒绝、不发请求、不重试）；
-  - 事件面：`context_compact_precheck_skipped`（worth 决定）+ `context_invariant_violated`（交付失败）两条并列，语义分明。
+  - 走既有有界失败（一次判定、立即拒绝、不发请求、不重试）；
+  - **事件名随失败分支而定（以源码为准）**：预判 NOT_WORTH 发生在 `prefix.length > 0`，`compactTranscriptWithPi` 在发起摘要前原样返回 `messages`；超窗判定随后落到 `run()` 的 pre-request 臂（`pi-driver.ts:662-686`），其 `catch` 发出 **`pi_driver_context_invariant_rejected`**（`:676-678`）。**`context_invariant_violated` 只在 `prefix.length == 0` 的 no_cut 分支发出**（`pi-driver.ts:555-556`）——该分支由边界②③（NO_CANDIDATE）走既有路径触发，**预判自身不发出 `context_invariant_violated`**。§3④ 与本条现已统一为 `pi_driver_context_invariant_rejected`。
+  - 事件面：`context_compact_precheck_skipped`（worth 决定）+ `pi_driver_context_invariant_rejected`（交付失败）两条并列，语义分明。
 - **不算失败的情形**：`estTok ≤ limit` 时判 NOT_WORTH ⇒ 只是跳过，请求照发、正常作答（S1/S2 稳态 tokens 2546–8154 中，凡 ≤ 触发线的轮据此不再空转模型）。
 - **有界性保证**：预判无双状态、无重试计数；NOT_WORTH ⇒ 本次返回原样，下一次判定由**同一纯函数在同一结构**上重算——结构不变则结论不变，因此**不会反复调用模型**；结构改变（产生有效前缀）则自动转 WORTH。这满足「无法安全继续时有界失败、不反复调模型、不无限重试」。
 
@@ -149,7 +152,7 @@ if (compactionWorthwhile(...) == NOT_WORTH):
 5. **边界④ 正常溢出恢复不被挡**：大前缀、小尾段（如 `longTranscript()`）⇒ 预判判 WORTH、**摘要模型被调用（calls()>0）**、产物含【此前会话摘要】且 tokens 下降（沿用 `compaction-product.test.ts` 判据）。
 6. **反向绊线 A（预判误判「无意义」→ 必须红）**：给一个**确实可压缩**的转录（大前缀/小尾段），把 `compactionWorthwhile` 的返回值打桩为 NOT_WORTH；断言此时 `calls()==0` 且 `tokensAfter == tokensBefore`、且**既有 INV/overflow 兜底随后触发**（`pi_driver_context_overflow_recovered` 不出现或 `break`）。该用例在预判真实返回 WORTH 时必须绿、被打桩成误判时必须红——即「预判一旦误判无意义，测试必须变红」。
 7. **反向绊线 B（三线重合恒等断言）**：对 W=8192 与 W=128k 断言 `target == W − reserveTokens`、`limit == W − Δ − MIN_OUTPUT`，并断言 W=8192 下 `target == limit == 2512`（防止缩放公式漂移后再无人发现规则 (2) 的窗口特征变化）。
-8. **回归**：`compactionSettingsFor` 缺省臂与旧行为逐字段一致（`pi-driver-context-invariant.test.ts:31-39` 已在）；`npx vitest run` 全量不得因本设计回归（实施后基线 794 passed 需保持）。
+8. **回归**：`compactionSettingsFor` 缺省臂与旧行为逐字段一致（`pi-driver-context-invariant.test.ts:31-39` 已在）；`npx vitest run` 全量不得因本设计回归（实施后基线 794 passed 需保持）。**口径说明**：`794 passed` 取自 `docs/product/r5-compaction-audit.md:101` 的既有读数，是实施后需保持的**目标**；**本设计 ask 未复跑全量**，仅复跑被点名的两个文件（`pi-driver-context-invariant.test.ts` 8 tests + `compaction-product.test.ts` 1 test = 9 passed，零网络夹具）。
 
 ---
 
