@@ -62,6 +62,11 @@ export interface P3BudgetLedger {
   readonly events: P3BudgetEvent[];
   /** 首次硬停事实（null = 未停）。 */
   stopped: P3BudgetStop | null;
+  /**
+   * 任务级墙钟起点（首个驱动启动时刻；多驱动共享同一 ledger = 同一任务级墙）。
+   * 缺省 Infinity 语义由 startWallMsOf 落定；缺省 0 兼容注入绝对小值时钟的测试。
+   */
+  startWallMs: number;
 }
 
 export interface P3EnforceOptions {
@@ -77,7 +82,14 @@ export function createBudgetLedger(limits: P3BudgetLimits): P3BudgetLedger {
     used: { calls: 0, tokens: 0, tokensObserved: false, ms: 0 },
     events: [],
     stopped: null,
+    startWallMs: Number.NaN,
   };
+}
+
+/** 任务级墙钟起点：首个启动的驱动落定（后续驱动沿用，墙 = 起点 + wallMs）。 */
+function startWallMsOf(ledger: P3BudgetLedger, at: number): number {
+  if (!Number.isFinite(ledger.startWallMs)) ledger.startWallMs = at;
+  return ledger.startWallMs;
 }
 
 function usageOfMessage(message: unknown): number | undefined {
@@ -113,12 +125,14 @@ function newTokensOf(messages: readonly DriverMessage[], seen: WeakSet<object>):
   return { tokens, observed };
 }
 
-function exhaustionOf(ledger: P3BudgetLedger, liveWallMs: number): P3BudgetStopReason | null {
+function exhaustionOf(ledger: P3BudgetLedger, nowMs: number): P3BudgetStopReason | null {
   const { limits, used } = ledger;
   // 判定顺序固定（ms → calls → tokens）：同一次检查只报一个机械原因。
-  // 墙钟用检查时刻的实时值（used.ms 只在回合结束后回填，回合前检查不能吃旧值）。
-  if (limits.wallMs !== undefined && liveWallMs >= limits.wallMs) {
-    ledger.used.ms = liveWallMs;
+  // 墙钟 = 检查时刻相对任务级起点的已耗时（used.ms 只在回合结束后回填，
+  // 回合前检查不能吃旧值；nowMs 是绝对时刻，起点是 ledger.startWallMs）。
+  const elapsedMs = nowMs - startWallMsOf(ledger, nowMs);
+  if (limits.wallMs !== undefined && elapsedMs >= limits.wallMs) {
+    ledger.used.ms = elapsedMs;
     return 'ms';
   }
   if (limits.maxModelCalls !== undefined && used.calls >= limits.maxModelCalls) return 'calls';
@@ -156,7 +170,8 @@ export function createEnforcingDriver(
     const handle = setTimeout(callback, ms);
     return () => clearTimeout(handle);
   });
-  const startedWall = now();
+  startWallMsOf(ledger, now());
+  const startedWall = ledger.startWallMs;
   const seen = new WeakSet<object>();
   let aborted = false;
 
@@ -211,7 +226,7 @@ export function createEnforcingDriver(
           ledger.used.tokens += tokens;
           ledger.used.tokensObserved = true;
         }
-        ledger.used.ms = now() - startedWall;
+        ledger.used.ms = now() - ledger.startWallMs;
         ledger.events.push({
           event: 'p3_budget_call',
           agent,

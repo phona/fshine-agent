@@ -148,4 +148,13 @@ describe('P3 预算硬停（执行器侧机械强制）', () => {
     await expect(enforced.compact!(messages)).resolves.toBe(messages);
     expect(ledger.stopped).toBeNull();
   });
+
+  it('缺省 Date.now 时钟：墙钟按「任务起点起算的已耗时」判定，不会开场即硬停（epoch 回归）', async () => {
+    const { driver, runs } = fakeDriver(() => ({ text: 'ok', messages: [] }));
+    const ledger = createBudgetLedger({ wallMs: 60 * 60 * 1000 });
+    const enforced = createEnforcingDriver(driver, 'main', ledger); // 不注入时钟 → Date.now（epoch 绝对值）
+    await expect(enforced.run(baseInput())).resolves.toBeTruthy(); // 不因 epoch >> wallMs 而开场硬停
+    expect(runs.length).toBe(1);
+    expect(ledger.stopped).toBeNull();
+  });
 });
