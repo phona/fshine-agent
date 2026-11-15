@@ -1350,6 +1350,20 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十三、R5 轨2 · D6 指标抽取 + D7 共享实例夹具（2026-11-15，分支 `arch/r5-spread-metrics` / `arch/r5-d7-shared`，测试基建 only）
+
+- **状态**：**已合入**（`--no-ff` → `arch/integration`；合入后 typecheck=0、unit 77 文件/770 例全绿；产品代码零改动）。
+- **授权**：owner R5 P0-D（执行扩散专项）——D6 指标与 D7 多用户扩散的**测试基建**；架构约束同轨2（Pi First / Runtime Minimal，不新增宿主执行治理）。
+- **提交链**：`87fa5e9`（D6）→ `1a21969`（D7）；各自独立 worktree、并行写入不共享工作树。
+- **D6 指标抽取**（`scripts/eval/business-e2e/d6-metrics.ts`，261 行 + 测试）：纯函数 `extractD6(runDir) → D6Metrics`，只读 run-dir；覆盖 活跃任务数/峰值、worker 启动次数、工具调用次数分桶、in-flight 峰值、累计 token/预算、取消后残留执行、停止后资源释放。**逐指标 `{available, value, source, note}` 诚实纪律**——不可得即标不可得，不编造。**放大倍数**按 owner 口径：仅在预期调用数可明确确定时计算比值，探索性场景保留执行树归因。自测：13 用例 + 5 类绊线全红验证。
+- **D7 共享实例夹具**（`scripts/eval/business-e2e/shared-instance.ts` + 测试）：`createSharedInstanceFixture()` —— **真共享**：`createServer` 只调一次（唯一服务进程）、`<root>/shared.db` 单一 SQLite 底账、同一进程内任务管理资源；承载**双 principal**；覆盖跨 principal 查询/取消/接续/编号解析/归属，**越权=可复核拒绝证据**（非多库并发）。**产品隔离机制零改动**。
+- **独立复核**：两件均 **passed=true、integrity=false**（轨2 复核阶段实跑：真共享性、指标来自真实执行事实、产品与冻结面零改动、无过测治理代码、回归与绊线）。
+- **偏差登记（我的脚本缺陷，如实记）**：轨2 脚本只安排了**一个**「台账自写」阶段（判官支代写），故 **D6/D7 无各自条目**，本条由主会话补写；后续 R5 脚本改为**每件自带登记**。
+- **边界**：仅新增 `scripts/eval/business-e2e/` 下 4 个测试文件；`packages/`、`apps/` 零改动；不动冻结面（只**调用** `judge.ts` 既有判键，不重写）；零真实模型额度。
+- **回退**：`git revert 1a21969 87fa5e9`（纯新增测试基建，回退安全）。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
