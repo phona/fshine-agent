@@ -307,6 +307,8 @@ export async function createBackgroundDispatch(input: BackgroundDispatchInput): 
       ...(input.workerSkills === undefined ? {} : { workerSkills: input.workerSkills }),
       registry: input.registry,
       workerTurnMs: resolved.workerTurnMs,
+      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
+      workerWorkspaceRoot: input.profile.root,
     });
   }
   const runner = createTaskRunner({
@@ -454,6 +456,8 @@ export async function assembleSessionCore(input: SessionAssemblyInput): Promise<
       ...(mainSkillRegistry === undefined ? {} : { mainSkillRegistry }),
       mainTurnMs: resolved.mainTurnMs,
       workerTurnMs: resolved.workerTurnMs,
+      // 可信工作目录：装配层持有的 profile.root（绝不取模型输出/用户消息）。
+      workerWorkspaceRoot: input.profile.root,
     });
     return {
       session,

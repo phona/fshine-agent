@@ -175,6 +175,24 @@ export const WORKER_SYSTEM_PROMPT = [
   '- 不要在汇报里写内部编号、文件路径、协议原文或工具名；给宿主一段可直接向用户转述的事实。',
 ].join('\n');
 
+/**
+ * 渲染 Worker 系统提示：不传 workspaceRoot 时与 WORKER_SYSTEM_PROMPT 逐字节相同（缺省零变化）；
+ * 传入可信绝对路径时追加工作目录约束块（纵深防御提醒，不是安全控制——执行环境的实际
+ * 权限边界归执行层）。workspaceRoot 来源必须是装配层持有的可信路径（如 profile.root），
+ * 不得取模型输出或用户消息。
+ */
+export function renderWorkerSystemPrompt(workspaceRoot?: string): string {
+  if (workspaceRoot === undefined || workspaceRoot.trim() === '') return WORKER_SYSTEM_PROMPT;
+  return [
+    WORKER_SYSTEM_PROMPT,
+    '',
+    '【可信工作目录】',
+    `你的可信工作目录是：${workspaceRoot}`,
+    '不要主动访问该目录之外的文件；不要读取宿主配置、凭据、其他项目或用户主目录；该约束同样适用于你启动的任何子进程。',
+    '（以上是纵深防御提醒，不构成操作系统级隔离；执行环境的实际权限边界由执行层负责。）',
+  ].join('\n');
+}
+
 /** 装配方加载好的技能正文（Skill 优先：领域程序性知识放技能，不进宿主提示词补丁）。 */
 export interface WorkerSkill {
   name: string;
@@ -225,6 +243,12 @@ export interface RuntimeOptions {
    * 摘要在系统提示里由装配层经 renderSkillCatalog 拼入，本选项只管工具面。
    */
   mainSkillRegistry?: SkillRegistry;
+  /**
+   * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
+   * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
+   * 缺省不注入 = Worker 提示与现行常量逐字节相同。
+   */
+  workerWorkspaceRoot?: string;
 }
 
 /** 前台回合被资源策略确定性拒绝（queued 排队等晋升后不适用；携带机械 reason）。 */
@@ -541,7 +565,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
     const workerStartedAt = Date.now();
     try {
       const workerResult = await options.workerDriver.run({
-        systemPrompt: WORKER_SYSTEM_PROMPT,
+        systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
         tools: [executeOperationTool()],
         messages: [userMessage(renderWorkerDelegation({
           task: request,
@@ -684,6 +708,12 @@ export interface TaskExecutorOptions {
   workerTurnMs?: number;
   /** 注入时钟（测试确定性）；缺省系统时钟。 */
   now?: () => number;
+  /**
+   * Worker 可信工作目录（渲染进 Worker 系统提示的工作目录约束块）。
+   * 来源必须是装配层持有的可信路径（如 profile.root）；不得取模型输出或用户消息。
+   * 缺省不注入 = Worker 提示与现行常量逐字节相同。
+   */
+  workerWorkspaceRoot?: string;
 }
 
 function isAbortErrorLike(error: unknown): boolean {
@@ -759,7 +789,7 @@ export async function createTaskExecutor(options: TaskExecutorOptions): Promise<
       let workerResult: TurnDriverResult;
       try {
         workerResult = await options.workerDriver.run({
-          systemPrompt: WORKER_SYSTEM_PROMPT,
+          systemPrompt: renderWorkerSystemPrompt(options.workerWorkspaceRoot),
           tools: [executeOperationTool()],
           messages: [userMessage(renderWorkerDelegation({
             task: task.request,
