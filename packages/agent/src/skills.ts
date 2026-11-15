@@ -132,11 +132,6 @@ export function createSkillRegistry(options: FileSkillRegistryOptions = {}): Ski
   return new FileSkillRegistry(options);
 }
 
-/** Convenience API for callers that do not need a long-lived registry. */
-export async function discoverSkills(rootDir = defaultSkillRoot()): Promise<readonly SkillMetadata[]> {
-  return new FileSkillRegistry({ rootDir }).discover();
-}
-
 /**
  * Prompt-facing skill list: names + descriptions only.
  *
@@ -161,11 +156,6 @@ export function renderSkillCatalog(skills: readonly SkillSummary[]): string {
     `【可用技能（需要时用 ${READ_SKILL_TOOL} 按名称读取正文）】`,
     ...skills.map((skill) => `- ${skill.name}：${skill.description}`),
   ].join('\n');
-}
-
-/** Convenience API with the same containment checks as the registry. */
-export async function readSkill(name: string, rootDir = defaultSkillRoot()): Promise<LoadedSkill> {
-  return new FileSkillRegistry({ rootDir }).read(name);
 }
 
 async function collectSkillFiles(directory: string, output: string[]): Promise<void> {
