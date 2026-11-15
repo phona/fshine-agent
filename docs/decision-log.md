@@ -1729,6 +1729,39 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ---
 
+## 六十三、R5 Phase 3 长稳执行 · P3-A/B/C 三样本结论（2026-11-15，分支 `arch/r5-phase3`，基线 = arch/integration 启动时 HEAD）
+
+**范围**：P3-A 压缩与恢复（S1）、P3-B 长会话执行扩散（S2）、P3-C 有界失败（S3）。真实模型会话，模型显式 `LLM_MODEL=step-3.7-flash`（各 worktree `.env` 缺省是 step-5-preview，不显式固定即成独立实验，不可与既有统计混用）；窗口 `LLM_CONTEXT_WINDOW=8192`（P3 准备已实测该窗口能触发 `context_emergency_compact`，装配期 floor=6656）。装配与生产同源（`assembleSessionCore`/`resolveExecutionFace`/`createBackgroundDispatch`，`scripts/eval/p3/p3a-session.ts` 及 p3b/p3c-session）；执行器侧硬停（`scripts/eval/p3/enforce.ts`：maxModelCalls/maxTokens/墙钟）全程接线。证据根 `.runtime/r5phase3/{s1,s2,s3}/`（gitignored，未 git add）。
+
+### P3-A 六环证据链（S1，verdict.json 全部 pass）
+
+1. 压缩前需保留上下文：turn1 回复含 #1/alpha/W1；tasks.json 首任务 taskNo=1 completed。
+2. 压缩真实触发：真实模型会话中 `context_emergency_compact`=36 条、`context_compacted`=49 条（driverEvents 机械捕获，pi-driver 结构化事件）。
+3. 压缩后预期变化：transcriptTokens 4443→2414（turn3→4 下降）；「此前会话摘要」标记自 turn3 起常驻。
+4. 压缩后继续交办：turn17-20 均有回复。
+5. 正确使用保留上下文：turn17 回复正确引用 #1/alpha/W1/1200/800；探针轮（≥17）`execute_operation`=0 次（仅 task_result 读回）。
+6. 最终业务结果正确：alpha@W1 总额 2000=1200+800，turn17/18/20 三次复述一致；alpha@W1 结构化执行仅 turn1、turn11（turn11 为用户新指令重列两窗口，非压缩后重复）。无对象漂移、无重复执行。
+
+缺陷如实登记：turn13 #11 汇总任务 worker 对模糊指令探索式调用 ~18 个不存在集合（对象漂移限于该中间轮）；turn19 回复为空（`pi_driver_empty_reply` ×1，turn20 恢复正确）。
+
+### P3-B 扩散读数（S2，20 轮：交办→多任务并发→话题切换→歧义澄清→失败接续→取消→取消后核查→多任务交替读回→总清单）
+
+扩散判据通过：执行调用数无理由增长=否、任务自行裂变=否、重复执行=否、错误对象=否、取消后仍派发=否（四档 worst=A×11、B/C/D=0）。D6：workerStarts=10、execute_operation=11、inFlightPeak=6、取消残留（任务特定）=0；activeTasksPeak/tokens 口径不可比已登记。压缩后用户级退化明显，另记：3 轮上下文丢失致空答、1 轮泄漏原始 JSON、1 轮无谓澄清致取消请求悬空。样本一次采样、未重采样，全样本保留。
+
+### P3-C 终止与真停分开举证（S3，harness commit `1fb6e58`，证据含 evidence.json/verdict.json/driver-events.jsonl + s3-run.log）
+
+四类失败构造（上下文预算不足/无法生成有效回复/超时/取消）+ 双面举证：任务终态（终止有界性）与底层执行进程实际停止（在飞回合/许可归零与执行器 kill 证据）分开判定。判读：终止有界性全部通过；1 项构造子路径未触发（如实登记）+2 项用户级缺陷另记。未用硬上限即停（budgetStopped=null）。先 `--dry` 干跑（零真实模型请求，非样本）验证 harness；S3 限额 40calls/600k/30min。
+
+### 预算实际
+
+- 阶段会话 3/5（正式 3 已用完，预留 2 未动）；S1 calls=32/tokens=265450，S2 calls=30/tokens=150444，S3 calls=10/tokens=30403；三样本均 budgetStopped=null（未触硬停自然完成）。总预算 175。
+- blocked：无。
+- 独立复核结论（实际执行）：登记前在 worktree 实读 `.runtime/r5phase3/{s1,s2,s3}/verdict.json`——s1 六环逐项 pass 且 manifest model=step-3.7-flash、contextWindow=8192、budgetUsed 与上文一致；s2 verdict=pass(扩散判据)/用户级退化另记；s3 verdict=pass(终止有界性)、phaseSessionsUsed=3/5。与执行面回报一致。
+
+**状态：待合入。**
+
+---
+
 
 ## 维护规则
 
