@@ -22,6 +22,7 @@ import type { Notification, NotificationSink } from '../../../../packages/agent/
 import { createSqliteTaskRegistry } from '../../../../packages/agent/src/task-registry-sqlite';
 import type { TaskExecutionInput, TaskExecutionOutcome, TaskExecutor } from '../../../../packages/agent/src/task-runner';
 import { createServer, type Server } from '../../../../apps/server/server';
+import { WecomBotChannel, type SdkClientLike } from '../../../../packages/channel-wecom/src/index';
 import { judgeTaskContinuity, type TaskTurnFact, type TaskView, type TaskVerdict } from '../oracle';
 import {
   analyzeCompaction, judgeCompactionLifecycle, R6_COMPACTION_BOUNDS,
@@ -487,6 +488,131 @@ export function makeTempDir(prefix: string): MuTempDir {
 /** 空采集上下文（每用例一份）。 */
 export function makeCtx(plans: MuPlanTable, rendezvous: Rendezvous | null = null): MuCtx {
   return { plans, rendezvous, mainRecords: [], execRecords: [], compactions: [], trace: [], nextSeq: 0 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 投递层（MU-8 第二段）：WecomBotChannel + 记录型假 SDK（silent 观察）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 记录型假 SDK（复用 `packages/channel-wecom/adapter.silent-shadow.test.ts` 的 `DeliveryRecorder`
+ * 范式）：把每一次出站调用逐条记下。静默模式下它应当**全零**——这就是"实际用户可见投递 = 0"
+ * 的直接读数；若有人把静默闸摘掉或翻成 live，替身会记到 ack/终帧调用，断言即红。
+ *
+ * 零真实平台：本替身不触网，只 Promise.resolve 合成返回值。
+ */
+export class MuSdkRecorder implements SdkClientLike {
+  readonly replyStreams: Array<{ content: string; finish: boolean }> = [];
+  readonly sentMessages: Array<{ chatid: string; content: string }> = [];
+  readonly activeMedia: Array<{ chatid: string; mediaId: string }> = [];
+  readonly mediaReplies: Array<{ mediaType: string; mediaId: string }> = [];
+  readonly uploads: Array<{ filename: string }> = [];
+  connected = 0;
+  disconnected = 0;
+  private readonly listeners = new Map<string, Array<(...args: any[]) => void>>();
+  private uploadSeq = 0;
+
+  on(event: string, listener: (...args: any[]) => void): unknown {
+    const list = this.listeners.get(event) ?? [];
+    list.push(listener);
+    this.listeners.set(event, list);
+    return this;
+  }
+  emit(event: string, ...args: any[]): void {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+  }
+  connect(): unknown { this.connected += 1; return this; }
+  disconnect(): void { this.disconnected += 1; }
+  replyStream(_frame: unknown, _streamId: string, content: string, finish: boolean): Promise<unknown> {
+    this.replyStreams.push({ content, finish });
+    return Promise.resolve({});
+  }
+  uploadMedia(_data: Buffer, options: { type: 'image' | 'file'; filename: string }): Promise<{ media_id: string }> {
+    this.uploads.push({ filename: options.filename });
+    this.uploadSeq += 1;
+    return Promise.resolve({ media_id: `mu-rec-${this.uploadSeq}` });
+  }
+  replyMedia(_frame: unknown, mediaType: 'image' | 'file', mediaId: string): Promise<unknown> {
+    this.mediaReplies.push({ mediaType, mediaId });
+    return Promise.resolve({});
+  }
+  sendMessage(chatid: string, body: { msgtype: 'markdown'; markdown: { content: string } }): Promise<unknown> {
+    this.sentMessages.push({ chatid, content: body.markdown.content });
+    return Promise.resolve({});
+  }
+  sendMediaMessage(chatid: string, _mediaType: 'file', mediaId: string): Promise<unknown> {
+    this.activeMedia.push({ chatid, mediaId });
+    return Promise.resolve({});
+  }
+  async downloadFile(): Promise<{ buffer: Buffer; filename?: string }> {
+    return { buffer: Buffer.from('PK'), filename: 'f.xlsx' };
+  }
+
+  /** 用户可见投递调用总数（upload 不是投递本身，但也应在静默下为零）。 */
+  get userVisibleCalls(): number {
+    return this.replyStreams.length + this.sentMessages.length + this.activeMedia.length + this.mediaReplies.length;
+  }
+  get allCalls(): number {
+    return this.userVisibleCalls + this.uploads.length;
+  }
+}
+
+/** MU-8 假环境凭据（假件，零真实平台；适配器启动只校验非空）。 */
+export const MU_WECOM_ENV: Record<string, string | undefined> = {
+  WECOM_BOT_ID: 'mu-bot',
+  WECOM_BOT_SECRET: 'mu-secret',
+};
+
+export interface MuWecomChannelHandle {
+  readonly channel: WecomBotChannel;
+  readonly sdk: MuSdkRecorder;
+  stop(): Promise<void>;
+}
+
+/**
+ * 以**显式 silent** 启动 WecomBotChannel，包住给定 `ReplyHandler`（MU-8 第二段用它包 `server.handler`）。
+ * 静默模式下所有用户可见出站被闸门抑制并留 `shadowEvidence`——判据"实际用户可见投递 = 0"。
+ */
+export async function startSilentWecomChannel(handler: ReplyHandler, root: string): Promise<MuWecomChannelHandle> {
+  const sdk = new MuSdkRecorder();
+  const channel = new WecomBotChannel({
+    env: MU_WECOM_ENV,
+    clientFactory: () => sdk,
+    platformRoot: root,
+    attachmentDir: path.join(root, 'tmp', 'attachments'),
+    deliveryMode: 'silent',
+  });
+  const starting = channel.start(handler);
+  sdk.emit('authenticated');
+  await starting;
+  return { channel, sdk, stop: () => channel.stop() };
+}
+
+/**
+ * 构造一条企微文本入站帧（假件）。群聊给 chatid + chattype='group'；单聊省略 chatid
+ * （适配器据此 conversationId = userid）。
+ */
+export function wecomTextFrame(
+  reqId: string,
+  opts: { msgid: string; from: string; content: string; chattype: 'single' | 'group'; chatid?: string },
+): { headers: { req_id: string }; body: Record<string, unknown> } {
+  return {
+    headers: { req_id: reqId },
+    body: {
+      msgid: opts.msgid,
+      aibotid: 'mu-bot',
+      chattype: opts.chattype,
+      from: { userid: opts.from },
+      ...(opts.chatid === undefined ? {} : { chatid: opts.chatid }),
+      msgtype: 'text',
+      text: { content: opts.content },
+    },
+  };
+}
+
+/** 等一次宏任务，让 fire-and-forget 的投递尝试落定。 */
+export function settle(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 export type { DriverMessage, TurnDriver, TaskView, TaskVerdict };

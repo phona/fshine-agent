@@ -8,11 +8,11 @@
  *   · 逐用例记录五要素：principalId / sessionId / taskId / 请求 / 实际投递对象；
  *   · 依赖未满足的 MU-6（B1）/ MU-8（B2）**标 BLOCKED**（给理由与证据，不伪报 PASS）。
  *
- * 依赖状态（MU 基线 = arch/r6-multiuser @ b90f12f）：
+ * 依赖状态（MU 复跑基线 = arch/r6-mu8 @ 56554fb，含 B2 Silent Shadow 闸 + opt-in）：
  *   · B1 会话持久化：分支 `arch/sess-persist-impl`（91b388a）**未合入**（`packages/agent/src/
  *     session-persistence.ts` 不存在）→ MU-6 BLOCKED；
- *   · B2 企微静默闸：分支 `arch/wecom-silent-shadow` **未合入**（`packages/channel-wecom/src/
- *     silent-shadow-gate.ts` 不存在）→ MU-8 BLOCKED。
+ *   · B2 企微静默闸：**已合入**（`packages/channel-wecom/src/silent-shadow-gate.ts` 存在）
+ *     → MU-8 已接线为确定性两段用例（会话/任务层 + 投递层，零真实企微）。
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -21,7 +21,7 @@ import type { RuntimeConfig } from '@fshine/contracts';
 import {
   createMuServer, deliver, incoming, judgeMuCompactions, judgeMuTasks, makeCtx, makeTempDir, readTasks,
   MU_PRINCIPALS, MU_TAGS, MuFakeExecutor, MuPlans, MuRecordingSink, Rendezvous,
-  principalIdOf, sessionIdOf,
+  principalIdOf, sessionIdOf, settle, startSilentWecomChannel, wecomTextFrame,
   type MuCaseResult, type MuDeliveryRecord, type MuHardZero, type MuPlanTable, type MuTaskSnapshot,
 } from './mu-support';
 
@@ -418,24 +418,214 @@ export async function mu7(rt: RuntimeConfig): Promise<MuCaseResult> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MU-8 企微群聊与私聊隔离（依赖 B2 静默闸 → 未合入 → BLOCKED）
+// MU-8 企微群聊与私聊隔离（依赖 B2 静默闸 → 已合入 → 确定性两段用例）
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function mu8(_rt: RuntimeConfig): Promise<MuCaseResult> {
-  const id = 'MU-8';
-  const title = '企微群聊与私聊隔离（依赖 B2 静默闸）';
-  const b2Module = path.join(REPO_ROOT, 'packages', 'channel-wecom', 'src', 'silent-shadow-gate.ts');
-  const satisfied = existsSync(b2Module);
-  const evidence = {
-    dependency: 'B2 企微静默闸（出站机械闸门）',
-    satisfyingModule: 'packages/channel-wecom/src/silent-shadow-gate.ts',
-    modulePresentOnBaseline: satisfied,
-    upstreamBranch: 'arch/wecom-silent-shadow',
-    upstreamMergedIntoBaseline: false,
-    reason: satisfied ? 'B2 已合入' : 'B2 未合入：出站无机械静默闸，群聊/私聊出站隔离不可在无真实企微的前提下确定性验证；MU-8 的静默投递=0 判据不可满足。',
+/** 会话级标记（区别于 MU_TAGS）：同 principal 的私聊/群聊各用一枚，用于识别语料归属。 */
+const MU8_PRIV_TAG = 'PRIV-TAG';
+const MU8_GROUP_TAG = 'GROUP-TAG';
+
+/** 任务引用确定性拒绝文案（与 `TaskOwnershipError` / MU-5 同源，不泄漏存在性）。 */
+const TASK_NOT_IN_SESSION = '任务不存在或不属于当前会话';
+
+/** 从 task_status 结果里取 taskId（命中本会话 #1 时非空）。 */
+function callTaskId(call: { result: unknown } | undefined): string | null {
+  const id = (call?.result as { taskId?: unknown } | undefined)?.taskId;
+  return typeof id === 'string' ? id : null;
+}
+
+/** 某批回合的主转录里是否出现给定标记（用于检"不继承他人/他会话历史"）。 */
+function recordsHaveTag(records: readonly { userText: string; messages: readonly unknown[] }[], tag: string): boolean {
+  return records.some((record) => record.messages.some((message) => {
+    const content = (message as { content?: unknown }).content;
+    return typeof content === 'string' && content.includes(tag);
+  }));
+}
+
+interface Mu8Layer { readonly hits: MuHardZero[]; readonly records: MuDeliveryRecord[]; readonly evidence: Record<string, unknown>; readonly notes: string; }
+
+/**
+ * 第一段·会话/任务层：走 `createMuServer` 真实交互路径。同一 principal `wecom:mu-alice` 下
+ * 私聊（conversationId=mu-alice → sessionId=wecom:mu-alice）与群聊（conversationId=group-g1 →
+ * sessionId=wecom:group-g1）。断言：群**不继承**私聊的任务/授权/历史（群首查 #1 → 确定性拒绝），
+ * 群 #1 只解析到群自己的任务，私聊 #1 不对群可见且无内容泄漏。
+ */
+async function mu8SessionLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
+  const hits: MuHardZero[] = [];
+  const tmp = makeTempDir('mu8-session-');
+  const plans = new MuPlans();
+  const privDelegate = `${MU8_PRIV_TAG} 私聊交办查账`;
+  const privQuery = `${MU8_PRIV_TAG} 查自己任务 #1`;
+  const groupQueryFirst = `${MU8_GROUP_TAG} 查任务 #1`;
+  const groupDelegate = `${MU8_GROUP_TAG} 群聊交办查账`;
+  const groupQuerySecond = `${MU8_GROUP_TAG} 查群任务 #2`;
+  plans.delegate('mu-alice', privDelegate, { reply: '私聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-PRIV' }, summary: '私聊完成。' });
+  plans.turn('mu-alice', privQuery, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '这是私聊自己的任务。' });
+  plans.turn('mu-alice', groupQueryFirst, { calls: [{ tool: 'task_status', args: { ref: '#1' } }], reply: '群里没有这个任务。' });
+  plans.delegate('mu-alice', groupDelegate, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。' });
+  plans.turn('mu-alice', groupQuerySecond, { calls: [{ tool: 'task_status', args: { ref: '#2' } }], reply: '这是群聊自己的任务。' });
+
+  const ctx = makeCtx(plans.table(), null);
+  // background 派发：任务工具（task_status 等）在 Main 工具面可用（与 MU-5 同源）。
+  // 不注入假执行器——用默认后台执行器跑假 Worker 驱动，使 execute_operation 记入 ExecutionRecord
+  // （否则 completed 零执行会触发机械判据 H4 虚假完成，非本用例要测的东西）。
+  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'background', runtime: rt });
+  let evidence: Record<string, unknown> = {};
+  const records: MuDeliveryRecord[] = [];
+  try {
+    // 顺序：私聊交办（建私聊 #1）→ 私聊查 #1（命中自己的）→ 群聊查 #1（群内尚无任务，
+    // 应确定性拒绝且不得看见私聊历史）→ 群聊交办（建群 #1）→ 群聊查 #1（命中群自己的）。
+    await deliver(handle.server.handler, incoming('mu-alice', 'mu-alice', 'p-1', privDelegate, 'single'));
+    await deliver(handle.server.handler, incoming('mu-alice', 'mu-alice', 'p-2', privQuery, 'single'));
+    await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-1', groupQueryFirst, 'group'));
+    const groupDelegateReply = await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-2', groupDelegate, 'group'));
+    const groupQueryReply = await deliver(handle.server.handler, incoming('mu-alice', 'group-g1', 'g-3', groupQuerySecond, 'group'));
+
+    const tasks = readTasks(handle.dbPath);
+    const privTask = tasks.find((task) => task.principalId === principalIdOf('mu-alice') && task.sessionId === sessionIdOf('mu-alice'));
+    const groupTask = tasks.find((task) => task.principalId === principalIdOf('mu-alice') && task.sessionId === sessionIdOf('group-g1'));
+
+    // ① 两会话 Session 不同、任务分属各自 sessionId、taskId 不同（同 principal）。
+    const sessionsDistinct = privTask !== undefined && groupTask !== undefined
+      && privTask.sessionId === sessionIdOf('mu-alice') && groupTask.sessionId === sessionIdOf('group-g1')
+      && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId
+      && privTask.principalId === groupTask.principalId;
+
+    // ② 转录隔离：群回合主转录不含私聊标记（不继承群外历史）；私聊回合不含群标记。
+    const groupRecords = ctx.mainRecords.filter((record) => record.userText.includes(MU8_GROUP_TAG));
+    const privRecords = ctx.mainRecords.filter((record) => record.userText.includes(MU8_PRIV_TAG));
+    const inheritedPrivateHistory = recordsHaveTag(groupRecords, MU8_PRIV_TAG);
+    const leakedIntoPrivate = recordsHaveTag(privRecords, MU8_GROUP_TAG);
+
+    // ③ 任务引用解析：群首查确定性拒绝且无内容泄漏；群二查命中群自己的 #1；私聊查命中私聊自己的 #1。
+    const privQueryRec = ctx.mainRecords.find((record) => record.userText === privQuery);
+    const groupFirstRec = ctx.mainRecords.find((record) => record.userText === groupQueryFirst);
+    const groupSecondRec = ctx.mainRecords.find((record) => record.userText === groupQuerySecond);
+    const privCall = privQueryRec?.calls[0];
+    const groupFirstCall = groupFirstRec?.calls[0];
+    const groupSecondCall = groupSecondRec?.calls[0];
+    const groupFirstRejected = groupFirstCall !== undefined && groupFirstCall.error !== null && groupFirstCall.error.includes(TASK_NOT_IN_SESSION);
+    const groupFirstLeaked = groupFirstCall !== undefined
+      && (JSON.stringify({ result: groupFirstCall.result, error: groupFirstCall.error }).includes(MU8_PRIV_TAG)
+        || JSON.stringify({ result: groupFirstCall.result, error: groupFirstCall.error }).includes(privDelegate));
+    const privOwnResolved = privCall !== undefined && privCall.error === null && callTaskId(privCall) === (privTask?.taskId ?? null);
+    const groupOwnResolved = groupSecondCall !== undefined && groupSecondCall.error === null && callTaskId(groupSecondCall) === (groupTask?.taskId ?? null);
+
+    // ④ 归属/串线机械 Oracle（跨全批任务，H3/H4/H5/E-G）。
+    const scope = scopeViolations(plans.table(), tasks);
+    const crossover = crossoverHits(tasks);
+
+    // 硬零映射：继承历史=跨会话泄漏；越权取私聊任务/内容=越权执行；任务或投递串线=任务串线。
+    if (!sessionsDistinct || inheritedPrivateHistory || leakedIntoPrivate) hits.push('cross_principal_leak');
+    if (!groupFirstRejected || groupFirstLeaked || !groupOwnResolved) hits.push('unauthorized_execution');
+    if (!privOwnResolved) hits.push('task_crossover');
+    if (scope.length > 0) hits.push('cross_principal_leak');
+    if (crossover.hits.length > 0) hits.push('task_crossover');
+
+    if (privTask !== undefined) records.push({ caseId: 'MU-8', principalId: privTask.principalId, sessionId: privTask.sessionId, taskId: privTask.taskId, request: privTask.request, deliveredTo: sessionIdOf('mu-alice'), kind: 'reply' });
+    if (groupTask !== undefined) records.push({ caseId: 'MU-8', principalId: groupTask.principalId, sessionId: groupTask.sessionId, taskId: groupTask.taskId, request: groupTask.request, deliveredTo: sessionIdOf('group-g1'), kind: 'reply' });
+    records.push(
+      { caseId: 'MU-8', principalId: principalIdOf('mu-alice'), sessionId: sessionIdOf('mu-alice'), taskId: null, request: privQuery, deliveredTo: sessionIdOf('mu-alice'), kind: 'reply' },
+      { caseId: 'MU-8', principalId: principalIdOf('mu-alice'), sessionId: sessionIdOf('group-g1'), taskId: null, request: groupQueryFirst, deliveredTo: sessionIdOf('group-g1'), kind: 'reply' },
+      { caseId: 'MU-8', principalId: principalIdOf('mu-alice'), sessionId: sessionIdOf('group-g1'), taskId: null, request: groupQuerySecond, deliveredTo: sessionIdOf('group-g1'), kind: 'reply' },
+    );
+
+    evidence = {
+      principalId: principalIdOf('mu-alice'),
+      privSessionId: sessionIdOf('mu-alice'), groupSessionId: sessionIdOf('group-g1'),
+      privTaskId: privTask?.taskId ?? null, groupTaskId: groupTask?.taskId ?? null,
+      sessionsDistinct, inheritedPrivateHistory, leakedIntoPrivate,
+      groupFirstRejected, groupFirstLeaked, privOwnResolved, groupOwnResolved,
+      privCalls: privQueryRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
+      groupFirstCalls: groupFirstRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
+      groupSecondCalls: groupSecondRec?.calls.map((call) => ({ tool: call.tool, args: call.args, error: call.error })),
+      scopeViolations: scope, crossoverCodes: crossover.verdict,
+      groupDelegateReply, groupQueryReply,
+      allTasks: tasks.map((task) => ({ taskId: task.taskId, taskNo: task.taskNo, sessionId: task.sessionId, status: task.status, request: task.request, requestIds: task.requestIds })),
+      groupTurnTexts: groupRecords.map((record) => record.userText),
+      privTurnTexts: privRecords.map((record) => record.userText),
+    };
+  } finally { handle.close(); tmp.cleanup(); }
+
+  return {
+    hits, records, evidence,
+    notes: `会话层：同 principal 私聊/群聊各自成账=${String(evidence['sessionsDistinct'])}；群回合继承私聊历史=${String(evidence['inheritedPrivateHistory'])}（应 false）；群首查 #1 确定性拒绝=${String(evidence['groupFirstRejected'])}、泄漏=${String(evidence['groupFirstLeaked'])}（应 true/false）；私/群 #1 各命中己方=${String(evidence['privOwnResolved'])}/${String(evidence['groupOwnResolved'])}。`,
   };
-  if (!satisfied) return blocked(id, title, 'BLOCKED：依赖 B2 未合入（无企微静默闸），群聊与私聊隔离不可确定性验证。', evidence);
-  return blocked(id, title, 'BLOCKED：B2 存在但 MU-8 确定性用例未接线（本 run 不接真实企微）。', evidence);
+}
+
+/**
+ * 第二段·投递层：走 `WecomBotChannel` + 记录型假 SDK（复用 adapter.silent-shadow.test.ts 的
+ * DeliveryRecorder 范式），以**显式 silent** 包住 `server.handler`。发一条群 frame
+ * （chatid=group-g1, chattype=group, from.userid=mu-alice）与一条私 frame（chattype=single）。
+ * 断言：实际用户可见投递 = 0（`recorder.userVisibleCalls===0`）+ 抑制证据可观测 + 群/私两会话分属。
+ */
+async function mu8DeliveryLayer(rt: RuntimeConfig): Promise<Mu8Layer> {
+  const hits: MuHardZero[] = [];
+  const tmp = makeTempDir('mu8-delivery-');
+  const plans = new MuPlans();
+  const privText = `${MU8_PRIV_TAG} 私聊交办查账`;
+  const groupText = `${MU8_GROUP_TAG} 群聊交办查账`;
+  plans.delegate('mu-alice', privText, { reply: '私聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-PRIV' }, summary: '私聊完成。' });
+  plans.delegate('mu-alice', groupText, { reply: '群聊已受理。', operation: 'dummy.query', args: { '--collection': 'MU8-GROUP' }, summary: '群聊完成。' });
+  const ctx = makeCtx(plans.table(), null);
+  const handle = await createMuServer({ dir: tmp.dir, ctx, mode: 'inline', runtime: rt });
+  let evidence: Record<string, unknown> = {};
+  const records: MuDeliveryRecord[] = [];
+  try {
+    const started = await startSilentWecomChannel(handle.server.handler, tmp.dir);
+    try {
+      started.sdk.emit('message.text', wecomTextFrame('cb-mu8-group', { msgid: 'mu8-g1', from: 'mu-alice', content: groupText, chattype: 'group', chatid: 'group-g1' }));
+      started.sdk.emit('message.text', wecomTextFrame('cb-mu8-priv', { msgid: 'mu8-p1', from: 'mu-alice', content: privText, chattype: 'single' }));
+      // 静默闸下每条消息产出 ack + 终帧（2 条用户可见尝试）；等两条消息的抑制尝试都落定。
+      await waitUntil(() => started.channel.shadowEvidence().userVisibleSuppressed >= 4, 5000);
+      await settle();
+
+      const shadow = started.channel.shadowEvidence();
+      const realDeliveries = started.sdk.userVisibleCalls;
+      const tasks = readTasks(handle.dbPath);
+      const privTask = tasks.find((task) => task.sessionId === sessionIdOf('mu-alice'));
+      const groupTask = tasks.find((task) => task.sessionId === sessionIdOf('group-g1'));
+      const suppressedOk = shadow.mode === 'silent' && shadow.userVisibleSuppressed >= 4;
+      const scopedDistinct = privTask !== undefined && groupTask !== undefined
+        && privTask.sessionId !== groupTask.sessionId && privTask.taskId !== groupTask.taskId;
+
+      // 判据：真实平台零用户可见投递（若闸门被摘/翻 live，recorder 会记到 ack/终帧 → 红）。
+      if (realDeliveries !== 0) hits.push('cross_principal_leak');
+      // 抑制证据缺失 = 闸门未生效（fail-closed，无法证明零投递）。
+      if (!suppressedOk) hits.push('cross_principal_leak');
+      // 群/私投递目标串台（两会话两任务未分属各自 session）。
+      if (!scopedDistinct) hits.push('task_crossover');
+
+      if (privTask !== undefined) records.push({ caseId: 'MU-8', principalId: privTask.principalId, sessionId: privTask.sessionId, taskId: privTask.taskId, request: privTask.request, deliveredTo: sessionIdOf('mu-alice'), kind: 'reply' });
+      if (groupTask !== undefined) records.push({ caseId: 'MU-8', principalId: groupTask.principalId, sessionId: groupTask.sessionId, taskId: groupTask.taskId, request: groupTask.request, deliveredTo: sessionIdOf('group-g1'), kind: 'reply' });
+
+      evidence = {
+        deliveryMode: shadow.mode,
+        userVisibleSuppressed: shadow.userVisibleSuppressed,
+        suppressedKinds: shadow.events.map((event) => event.kind),
+        realUserVisibleCalls: realDeliveries,
+        scopedDistinct,
+        privSessionId: privTask?.sessionId ?? null, groupSessionId: groupTask?.sessionId ?? null,
+        privTaskId: privTask?.taskId ?? null, groupTaskId: groupTask?.taskId ?? null,
+      };
+    } finally { await started.stop(); }
+  } finally { handle.close(); tmp.cleanup(); }
+
+  return {
+    hits, records, evidence,
+    notes: `投递层：silent 闸下实际用户可见投递=${String(evidence['realUserVisibleCalls'])}（应 0），被抑制尝试=${String(evidence['userVisibleSuppressed'])}（应 ≥4），群/私分属各自 session=${String(evidence['scopedDistinct'])}。`,
+  };
+}
+
+export async function mu8(rt: RuntimeConfig): Promise<MuCaseResult> {
+  const id = 'MU-8';
+  const title = '企微群聊与私聊隔离（同 principal：群不继承私聊任务/授权/历史；群/私投递不串）';
+  const session = await mu8SessionLayer(rt);
+  const delivery = await mu8DeliveryLayer(rt);
+  const hardZeroHits = [...new Set([...session.hits, ...delivery.hits])];
+  return finalize(id, title, hardZeroHits, [...session.records, ...delivery.records],
+    `${session.notes} ${delivery.notes}`,
+    { sessionLayer: session.evidence, deliveryLayer: delivery.evidence });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

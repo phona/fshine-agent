@@ -2,8 +2,8 @@
  * R6 MU · 多用户场景确定性用例（vitest 包装；零真实模型、零真实企微、零真实写）。
  *
  * 断言口径：
- *   · MU-1/2/3/4/5/7/9/10 → PASS 且硬零命中为空（跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线）；
- *   · MU-6 → BLOCKED（依赖 B1 未合入）；MU-8 → BLOCKED（依赖 B2 未合入）——不伪报 PASS；
+ *   · MU-1/2/3/4/5/7/8/9/10 → PASS 且硬零命中为空（跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线）；
+ *   · MU-6 → BLOCKED（依赖 B1 未合入）——不伪报 PASS；
  *   · 每条用例逐条记录五要素：principalId / sessionId / taskId / 请求 / 实际投递对象。
  */
 import { describe, expect, it } from 'vitest';
@@ -99,11 +99,19 @@ describe('R6 MU · MU-7 异步通知错投', () => {
   });
 });
 
-describe('R6 MU · MU-8 群聊与私聊隔离（依赖 B2）', () => {
-  it('B2 未合入 → BLOCKED（不伪报 PASS）', async () => {
+describe('R6 MU · MU-8 群聊与私聊隔离（同 principal）', () => {
+  it('群不继承私聊任务/授权/历史；群/私投递不串；silent 闸下实际投递=0', async () => {
     const result = await mu8(MU_RUNTIME);
-    expect(result.status).toBe('BLOCKED');
-    expect(result.status).not.toBe('PASS');
+    expect(result.status).toBe('PASS');
+    expect(result.hardZeroHits).toEqual([]);
+    const session = result.evidence['sessionLayer'] as Record<string, unknown>;
+    const delivery = result.evidence['deliveryLayer'] as Record<string, unknown>;
+    expect(session['sessionsDistinct']).toBe(true);
+    expect(session['inheritedPrivateHistory']).toBe(false);
+    expect(session['groupFirstRejected']).toBe(true);
+    expect(session['groupFirstLeaked']).toBe(false);
+    expect(delivery['realUserVisibleCalls']).toBe(0);
+    expect(delivery['scopedDistinct']).toBe(true);
   });
 });
 
@@ -145,7 +153,7 @@ describe('R6 MU · 汇总（五要素完整）', () => {
       }
     }
     const blocked = results.filter((result) => result.status === 'BLOCKED').map((result) => result.id);
-    expect(blocked.sort()).toEqual(['MU-6', 'MU-8']);
+    expect(blocked.sort()).toEqual(['MU-6']);
     const failed = results.filter((result) => result.status === 'FAIL');
     expect(failed).toEqual([]);
   });
