@@ -1517,6 +1517,39 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十八、R5 docs 清理 · 实施与登记（2026-11-15，分支 `arch/r5-docsclean`，基线 = `arch/integration` HEAD `b24cd75`）
+
+**状态：待合入**。唯一实施记录：`docs/product/docs-cleanup-report.md`（本节为其登记摘要，冲突时以该报告为准）。处置清单来源：`docs/product/docs-cleanup-candidates.md` §3.2/§3.1。
+
+### ① 清理范围与处置统计
+
+- 范围：R5「docs 瘦身」轨 C×2 + E×1、待裁决 4、唯一权威来源索引、Phase 3 报告登记处预留、A 类计数对账（21 vs 23）。**零真实模型额度、零产品代码改动**（`packages/`、`apps/` 无变更，`git status` 核实）。
+- 处置统计：**保留原位 4 + 其余全量不动；更新（补「历史/已被取代」注记）3 篇**（C1 `docs/artifacts.md`、C2 `docs/product/r4-slice-plan.md` 指向 `docs/product/r4-slices.md`、E1 `docs/v0-functional-spec.md`，均只补文首状态注记、正文与历史读数零改动）；**删除 0；归档/移动 0**；新增 1（`docs/product/docs-cleanup-report.md`）。
+- 待裁决 4 定论：全部**保留原位、零改动**（`eval-baseline-refresh-20261107.md`、`eval-harness-measurement-20261107.md`、`interaction-skills/result-assistance.md`、`interaction-skills/task-collaboration.md`）——注记均已齐备；后两篇仍被 decision-log §八历史实验台账（:528/:536）引用，非零引用。
+- 索引与预留：复用 `docs/index.md` 作唯一入口（只指向、不复制维护，未建第二索引框架）；新增「R5 Phase 3 报告登记处（预留）」节，`docs/product/r5-phase3-*.md` 落盘后在该节登记。
+
+### ② 历史保护核对（E4）
+
+`docs/decision-log.md` 历史裁决、预注册（`business-e2e-prereg*.md`、`r4-stability-prereg.md`、`r5-phase2-prereg.md`）、已落盘 Eval 报告与历史验收报告、AGENTS.md 冻结面：**全部零改动**。C1/C2/E1 仅文首注记，diff 不触正文。
+
+### ③ 引用完整性（本轮实跑）
+
+`grep -icE 'artifact|cancel' packages/contracts/src/execution-contract.ts` = 0；`grep -rn 'validatePlanEntities' packages apps scripts config` 零命中；待裁决 4 篇入站引用仅 decision-log :528/:536；注记指向目标（execution-contract.ts、r4-slices.md、decision-log）均存在；无新增悬空引用。**删除 0 的依据**即此：无一篇可出示「无引用」证据，D 类临时产物亦然。
+
+### ④ A 类计数不一致（21 vs 23）裁定
+
+本仓代码逐项复核 **A = 23 成立**（candidates §一 A 表锚点抽查命中，如 `scripts/ci.sh:18,23`、`config/agent.example.yaml:54`、`packages/agent/src/skills.ts:34`）；另一路审计（`arch/r5-docsaudit`，A=21，文件 `docs/r5-docsaudit-candidates.md`）**未合入本 worktree、无法核对**，差异 2 篇归属待主会话对账后由该分支自行登记；**不据推测改写任何一方计数**。
+
+### ⑤ 代码与文档不一致清单（登记未改）
+
+`docs/v0-architecture.md` §8 宿主预算/计划门现时态表述；`docs/architecture-laws.md` :63/:290-298 在场守卫口径（注记不全）；`docs/product/r4-stability-prereg.md:150` 前向引用不存在的 `r4-stability-manual.md`（预注册，不改）。均保留原样供后续 PR。
+
+### ⑥ 验证与回退
+
+`npm run typecheck` 0 错误；`npm test` 全量 802 例 = **801 绿 / 1 红**，红 = D 轴 DS-3（经 `git stash` 在干净基线 `b24cd75` 重跑仍红 → 基线既有，非本次引入，登记不修）；测试面只增不减。**回退**：本节与清理改动同属单提交，`git revert` 该提交即整体回退，无产品面影响。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
