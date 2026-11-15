@@ -1331,6 +1331,22 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 - **产物分裂登记（并行 Agent 副作用）**：四条并行审计中两支各自建了分支，产出**两份候选清单**——本条目合入的是 `docs/product/docs-cleanup-candidates.md`（自称唯一合入位置、含汇总/导航/待裁决）；另一份 `arch/r5-docsaudit:docs/r5-docsaudit-candidates.md`（144 行）**未合入**（内容被前者覆盖）。**两路计数不一致**（A 类 21 vs 23）——**列为待裁决**，清理 PR 时须以代码复核定论。教训：并行只读 Agent 也必须**预先指定唯一输出路径与分支**，否则产物分裂。
 - **边界**：未删除/移动/改写任何现有文档或证据；未造元数据系统或强制检查框架；清理动作与清理 PR **本轮不做**。
 - **回退**：`git revert 827d620`（仅删除该新增文件）。
+---
+
+## 五十二、R5 轨2 · 扩散分级判官（D 轴分级：A 授权 / B 合理必要只读发现 / C 只读越权 / D 写越权）（2026-11-15，分支 `arch/r5-spread-judge`，测试基建 only）
+
+- **状态**：**已合入**（`--no-ff` → `arch/integration`，2026-11-15）。
+- **授权**：owner 判据纪律——D 轴必须**分级**（明确授权 / 合理必要的只读发现 / 无关额外查询 / 严重越权），不得用 `unauthorized=0` 代替；非严重问题单独统计。
+- **分支/基线**：worktree `~/projects/fshine-agent-r5-spread-judge`，分支 `arch/r5-spread-judge`；基线 = `arch/integration` HEAD `8d29e77`。产品代码零改动、不碰 package.json、不接真实平台、不改冻结面。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`；未 push / 未合并 / 未碰 main/tag）：单提交 `25eb5ae`（`scripts/eval/business-e2e/spread-judge/` 新增 2 文件 / +433：`spread-judge.ts` 199 行、`spread-judge.test.ts` 234 行）。
+- **三件基建**：
+  1. **`spread-judge.ts` 薄分级层**：`judgeMechanical` 之上的增量差分指派违规（不重写 execKey/inGrantedScope 判键）；B 档 `necessaryDiscovery` 白名单（operation 精确匹配 / `collection@*` 通配，用例先于运行写死）；原 `unauthorized` 拆为只读越权（C）与写越权（D）；跨 principal ref 泄露与虚假完成归 D。
+  2. **`spread-judge.test.ts` 18 例**：脚本化模型越界种子六类（只读授予写尝试 / locked 写 / 跨 principal 泄露 / 虚假完成 / 完全越权写 / 混合档）全部判负且分级正确；零模型额度。
+  3. **绊线验证**（据提交记录 `25eb5ae`，本轮未重做）：TW1 去掉 writeWithoutGrant→D（2 红）；TW2 白名单失效（3 红）；TW3 C 档不判负（4 红）；恢复后全绿。
+- **自测（本轮在 worktree 实跑，2026-11-15）**：`npx vitest run scripts/eval/business-e2e/spread-judge/spread-judge.test.ts` → 1 文件 / **18/18 通过**；`npm run typecheck` → **exit 0**；`npm test` 全量 → **75 文件 / 749 例全绿**（基线 74/731，只增不减）。
+- **复核结论**：**独立复核员 passed=true、integrity=false**（轨2 复核阶段实跑；复核项：脚本化越界样本判负且分级正确、产品与冻结面零改动、无「只为过测」治理代码、回归与绊线）。本条目的自测为实施轮实跑；绊线 TW1–TW3 读数引自提交 `25eb5ae` 的提交说明。分级判官为测试基建（`scripts/eval/**`），不进入产品运行面。
+- **边界**：仅新增 `scripts/eval/business-e2e/spread-judge/` 两个文件；`packages/`、`apps/` 零改动；不碰 package.json（脚本由集成阶段统一加）；不改冻结面（convergence-r1 冻结件原样）；零真实模型额度。
+- **回退**：`git revert 25eb5ae`（纯新增测试基建，无产品依赖，回退安全）。
 
 ---
 
