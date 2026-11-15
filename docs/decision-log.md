@@ -1517,6 +1517,41 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+## 五十八、R5 Worker 提示词 · 注入可信工作目录与工作目录约束（2026-11-15，分支 `arch/r5-workerprompt`）
+
+**状态：待合入**（提交 `fab99ef` 产品改动 + 本条 docs 追加；基线 = `arch/integration` 启动时 HEAD `b24cd75`）。
+
+### ① 改动范围与归属区分
+
+- **本条是 R5 本轮唯一的产品代码改动**，与 §五十七 Phase 2 的「产品代码零改动」证据**分开登记**：Phase 2（`4822b97`/`b24cd75`）零产品改动；本条在 Worker 系统提示装配链做最小改动，共 3 文件（`packages/agent/src/execution-runtime.ts` +34、`scripts/ask-runtime.ts` +4、新增 `packages/agent/worker-prompt.test.ts` 158 行）。
+- 改动内容：新增 `renderWorkerSystemPrompt(workspaceRoot?)`——**不传参时与现行 `WORKER_SYSTEM_PROMPT` 逐字节相同**（缺省装配路径零变化）；传入可信绝对路径时追加工作目录约束块。`RuntimeOptions`/`TaskExecutorOptions` 各增可选 `workerWorkspaceRoot`，`createSession`/`createTaskExecutor` 两个 Worker 回合消费点改经渲染函数取提示（`packages/agent/src/execution-runtime.ts:184-193、568、792`）。
+- **不新增**治理层、权限系统、路径校验器、沙箱；Worker 工具面不变（仍仅 `execute_operation`）；不动冻结面。
+
+### ② 可信目录来源
+
+- 来源 = **装配层已持有的可信值**：`scripts/ask-runtime.ts` 在 `assembleSessionCore`（createSession）与 `createBackgroundDispatch`（createTaskExecutor）两处传 `workerWorkspaceRoot: input.profile.root`（profile root，宿主物化配置时已知）。**禁止**取模型输出或用户消息——该约束写入接口注释（`execution-runtime.ts:246-251、711-716`）并由装配测试 ④ 钉住生产链两处传参。
+
+### ③ 注入位置与约束语义
+
+- 注入在 **Worker 系统提示尾部**（不动既有提示正文），追加块为：可信工作目录路径 + 四句约束（不主动访问目录外文件；不读宿主配置/凭据/其他项目/用户主目录；**同样约束其启动的子进程**；明示这是纵深防御提醒）。
+- **提示词 ≠ 安全控制**：本改动**不提供、也不声称提供**操作系统级安全隔离。它只是纵深防御中的一层提醒；**执行环境、实际文件系统权限与授权边界归执行层**（与 AGENTS.md「安全不变量必须通过最小可信边界实现，不依赖模型遵守提示词」一致）。真正的越权拦截责任不在本提示词。
+
+### ④ 为什么属最小可信做法
+
+- 未加任何新机制/新层：只把宿主已持有的可信路径渲染进既有提示词，缺省路径逐字节不变；无新状态、无新协议、无提示词外的校验逻辑。Worker 工具面与委派协议均不动。
+
+### ⑤ 装配测试与绊线（零真实模型）
+
+- 新增 `packages/agent/worker-prompt.test.ts`（7 例）：①渲染结果含实际路径与全部约束语义关键句；②缺省渲染与 `WORKER_SYSTEM_PROMPT` 逐字节相等 + 内联锚防漂移；③`createSession` 注入后假 workerDriver 捕获的 systemPrompt 含路径；④生产装配链（`scripts/ask-runtime.ts` 两处）传参结构断言；⑤既有 worker 提示相关测试不弱化（缺省逐字节相等即钉住）。
+- **反向绊线（本条登记时实测）**：把两个消费点的注入改回 `WORKER_SYSTEM_PROMPT` → `npx vitest run packages/agent/worker-prompt.test.ts` = **1 failed | 6 passed（红）**；恢复后 = **7 passed（绿）**。
+- 自检（`TMPDIR=/home/tao/.tmp`，零真实模型）：`./node_modules/.bin/tsc --noEmit` = **退出码 0**；全量 `npx vitest run` = **809 例中 808 绿、1 红**（基线 `b24cd75` 全量 = 802 例中 801 绿、同 1 红）——唯一红为 §五十六/五十七 D 轴脚手架 `spread-axis.test.ts` DS-3「取消后残留」断言的**既有毫秒级竞态**（该测试自身在取消时间戳后跑 turn-3 `task_status`，`d6-metrics.ts:243` 按严格 `>` 计入即为残留；单文件重跑基线 8 次中 5 红才 3 绿），**先于本改动存在、与本改动无关**，如实登记不顺绿、不在本条修（属 D 轴脚手架归属）。
+
+### ⑥ 回退
+
+- `git revert` 产品提交 `fab99ef` 即可整体回退（产品改动 + 测试同commit）；本条 docs 追加单独 revert。缺省路径零变化，回退无兼容残留。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
