@@ -1,7 +1,7 @@
-// Minimal-plan-B verification fixture (phase 3).
+// Plan-B verification fixture (phase 3).
 //
 // Independently built for this run. It does NOT consume the guard-authored
-// tripwire-b.mjs. It exercises the minimal-B driver in minimal-b.mjs and
+// tripwire-b.mjs. It exercises the plan-B driver in pi-harness-driver.mjs and
 // answers, with observed facts (zero real model):
 //
 //   Q1  Does the single fshine pre-request budget check cover the FIRST
@@ -14,16 +14,16 @@
 //
 // Reverse tripwire: everything the guard relies on is asserted to FAIL when the
 // single check is bypassed (allowOverWindow) — run with:
-//       FSHINE_B_REVERSE=1 node verify-minimal-b.mjs
+//       FSHINE_B_REVERSE=1 node verify-pi-harness-driver.mjs
 // which must exit non-zero.
 //
 // Exit 0 = facts observed (Q1 yes, Q2 no). Exit 1 = a check unexpectedly failed.
 
 import { Type } from 'typebox';
 import {
-  createMinimalBDriver, makeModel, makeResponder, makeModels,
+  createPiHarnessDriver, makeModel, makeResponder, makeModels,
   assistant, streamFrom, usage, toolCall, collectEvents, laneTranscript,
-} from './minimal-b.mjs';
+} from './pi-harness-driver.mjs';
 
 const REVERSE = process.env.FSHINE_B_REVERSE === '1';
 
@@ -60,7 +60,7 @@ async function q1_firstRequest(W) {
     stream: () => streamFrom(assistant({ text: 'ok', usage: usage(10) })),
     complete: () => assistant({ text: 'SUM' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     compaction: { enabled: true, reserveTokens: Math.floor(W * 0.3), keepRecentTokens: 500 },
   });
@@ -95,7 +95,7 @@ async function q1_control_overWindowIsSent(W) {
     stream: () => streamFrom(assistant({ text: 'ok', usage: usage(10) })),
     complete: () => assistant({ text: 'SUM' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     compaction: { enabled: true, reserveTokens: Math.floor(W * 0.3), keepRecentTokens: 500 },
   });
@@ -138,7 +138,7 @@ async function q2_toolResultOverflow(W, { hooks } = {}) {
     },
     complete: () => assistant({ text: 'SUM' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     tools: [bigResultTool(W, execCount)], activeToolNames: ['bigtool'],
     compaction: { enabled: true, reserveTokens: Math.floor(W * 0.3), keepRecentTokens: 500 },
@@ -186,7 +186,7 @@ async function compactible(W) {
     })),
     complete: () => assistant({ text: 'PI-SUMMARY' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     compaction: { enabled: true, reserveTokens: reserve, keepRecentTokens: Math.floor(perTurn / 2) },
   });
@@ -226,7 +226,7 @@ async function summaryFailure(W) {
     })),
     complete: () => assistant({ stopReason: 'error', errorMessage: '500 summarizer down' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     compaction: { enabled: true, reserveTokens: reserve, keepRecentTokens: Math.floor(perTurn / 2) },
     retry: { enabled: true, maxRetries: 2, baseDelayMs: 0 },
@@ -266,7 +266,7 @@ async function boundedRecovery(W) {
     },
     complete: () => assistant({ text: 'OVERFLOW-SUMMARY' }),
   });
-  const driver = await createMinimalBDriver({
+  const driver = await createPiHarnessDriver({
     model, models: makeModels(resp, model), systemPrompt: SYSPROMPT,
     compaction: { enabled: true, reserveTokens: Math.floor(W * 0.3), keepRecentTokens: 200 },
   });

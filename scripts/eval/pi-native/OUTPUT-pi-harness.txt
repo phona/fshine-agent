@@ -110,7 +110,7 @@ stream calls = 4  over-window = 0
 summary failure  bounded (no unbounded retry)  @ W=8192
 ==============================================================================
 completeSimple calls = 3
-retry_scheduled = [{"step":"01a1df37-813e-75cd-a9e7-d80a881eb9ff","attempt":2,"max":3},{"step":"01a1df37-813e-75cd-a9e7-d80a881eb9ff","attempt":3,"max":3}]
+retry_scheduled = [{"step":"01a1df3c-9e93-7255-9486-fdb9c3cf82c0","attempt":2,"max":3},{"step":"01a1df3c-9e93-7255-9486-fdb9c3cf82c0","attempt":3,"max":3}]
 compaction_end = [{"status":"failed"}]
   [PASS] W=8192: summary attempts bounded to maxAttempts (=3)  -> calls=3
   [PASS] W=8192: compaction_end reports failed
@@ -162,7 +162,7 @@ reverse-tripwire mode = false
 ==== failures=0 ====
 exit=0
 
-### REVERSE TRIPWIRE (check bypassed) - exit non-zero expected
+### REVERSE TRIPWIRE (single check bypassed) - exit non-zero expected
 
 ==============================================================================
 Q1 / D1 rerun  unfixable over-window FIRST request  @ W=8192
@@ -271,7 +271,7 @@ stream calls = 4  over-window = 0
 summary failure  bounded (no unbounded retry)  @ W=8192
 ==============================================================================
 completeSimple calls = 3
-retry_scheduled = [{"step":"01a1df37-8357-7096-b463-9635b99834e3","attempt":2,"max":3},{"step":"01a1df37-8357-7096-b463-9635b99834e3","attempt":3,"max":3}]
+retry_scheduled = [{"step":"01a1df3c-a137-73e1-8792-ff950c921c54","attempt":2,"max":3},{"step":"01a1df3c-a137-73e1-8792-ff950c921c54","attempt":3,"max":3}]
 compaction_end = [{"status":"failed"}]
   [PASS] W=8192: summary attempts bounded to maxAttempts (=3)  -> calls=3
   [PASS] W=8192: compaction_end reports failed

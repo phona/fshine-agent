@@ -1,11 +1,11 @@
-// Minimal-plan-B driver (experiment artifact, phase 3 validation).
+// Plan-B driver (experiment artifact, phase 3 validation).
 //
 // Definition B under test:
 //   Pi native Session/Harness owns ALL compaction + overflow recovery; fshine
 //   keeps EXACTLY ONE pre-request budget check (no compactTranscriptWithPi, no
 //   host summarization / trimming / degradation / retry).
 //
-// This module is the minimal-B driver itself. It contains NO host-side
+// This module is the plan-B driver itself. It contains NO host-side
 // compaction code: no summary prompt, no split, no trim, no degrade, no
 // re-compaction retry loop. The only fshine decision is the single
 // `preRequestBudgetCheck` that runs BEFORE the harness is ever invoked.
@@ -162,7 +162,7 @@ export async function laneTranscript(lane) {
 // ------------------------------------------------------------------ the driver
 
 /**
- * createMinimalBDriver: the whole minimal-B driver.
+ * createPiHarnessDriver: the whole plan-B driver.
  *
  * fshine's responsibilities are exactly two:
  *   1. hold the (read-back) transcript view;
@@ -171,7 +171,7 @@ export async function laneTranscript(lane) {
  * retaining the tail, recovering from overflow — is Pi's, driven through the
  * public AgentHarness + CompactionSettings + RetryPolicy.
  */
-export async function createMinimalBDriver({
+export async function createPiHarnessDriver({
   model,
   models,
   tools = [],
