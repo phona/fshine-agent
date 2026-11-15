@@ -23,7 +23,7 @@ import { createPiModelRuntime, createPiTurnDriver, piCompactionSettings } from '
 import type { TurnDriver, TurnDriverInput, TurnDriverResult } from '../../../packages/agent/src/driver-contract';
 import type { TaskRegistry, TaskRecord, TaskScope } from '../../../packages/agent/src/task-registry';
 import { createSqliteTaskRegistry, type SqliteTaskRegistry } from '../../../packages/agent/src/task-registry-sqlite';
-import { assembleSessionCore, createBackgroundDispatch, type AssembledSession } from '../../ask-runtime';
+import { assembleSessionCore, createBackgroundDispatch, resolveExecutionFace, type AssembledSession } from '../../ask-runtime';
 import { createResourcePolicy } from '../../../packages/agent/src/resource-policy';
 import { materializeEvalConfig } from '../../resolve-config-path';
 import { createStageDClient, type ExecCallLog, type StageDClient } from './client';
@@ -508,11 +508,16 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
   const cwd = path.join(prepared.root, 'cwd', input.key);
   for (const dir of [stateDir, sessionDir, cwd]) mkdirSync(dir, { recursive: true });
 
-  const client = createStageDClient({
-    profileRoot: prepared.profile.root,
-    gateway: prepared.profile.gateway!,
-    stateDir,
+  const emptyOperationsMessage = '执行层没有声明任何 operation——拒绝以空允许集合运行';
+  // 执行面经唯一装配点产出后注入；评测侧只包装观测/故障注入，不另组 dummy 客户端。
+  const assemblyFace = await resolveExecutionFace({
+    profile: prepared.profile,
     env: prepared.env,
+    stateDir,
+    emptyOperationsMessage,
+  });
+  const client = createStageDClient({
+    base: assemblyFace.client,
     ...(input.faultWindow === undefined ? {} : { faultWindow: input.faultWindow }),
   });
   const manifest: CapabilityManifest = await client.capabilities();
@@ -537,7 +542,6 @@ export async function buildSession(input: BuildSessionInput): Promise<SessionHan
   let mainRaw: TurnDriver | undefined;
   let workerRaw: TurnDriver | undefined;
   const policy = createResourcePolicy();
-  const emptyOperationsMessage = '执行层没有声明任何 operation——拒绝以空允许集合运行';
 
   const makeDrivers = async (driverEnv: NodeJS.ProcessEnv) => {
     const fake = input.driverFactory;

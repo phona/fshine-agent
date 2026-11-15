@@ -12,7 +12,6 @@ import type {
   ExecutionOutcome,
   ExecutionRequest,
 } from '@fshine/contracts/execution-contract';
-import { createDummyCliClient, type DummyCliClient } from '../../../packages/agent/src/dummy-cli-client';
 
 export const CREATE_RECORD_OPERATION = 'create_record';
 
@@ -27,10 +26,11 @@ export interface ExecCallLog {
 }
 
 export interface StageDClientOptions {
-  profileRoot: string;
-  gateway: string;
-  stateDir: string;
-  env: NodeJS.ProcessEnv;
+  /**
+   * 基础执行客户端：由唯一装配点产出后注入（`ask-runtime.resolveExecutionFace` 的默认
+   * 执行面），评测脚本不自行 new 一份 dummy 客户端（P0-T03 单一装配点守卫）。
+   */
+  base: ExecutionClient;
   /** 该 window 的查询确定性失败（故障注入）；其余正常。 */
   faultWindow?: string;
 }
@@ -46,18 +46,13 @@ function sameArgs(a: Readonly<Record<string, unknown>>, b: Readonly<Record<strin
 }
 
 export function createStageDClient(options: StageDClientOptions): StageDClient {
-  const dummy: DummyCliClient = createDummyCliClient({
-    root: options.profileRoot,
-    gateway: options.gateway,
-    stateDir: options.stateDir,
-    env: options.env,
-  });
+  const base = options.base;
   const log: ExecCallLog[] = [];
   const createCounts = new Map<string, number>();
   let sequence = 0;
 
   async function capabilities(): Promise<CapabilityManifest> {
-    const manifest = await dummy.capabilities();
+    const manifest = await base.capabilities();
     const already = manifest.operations.some((operation) => operation.name === CREATE_RECORD_OPERATION);
     if (already) return manifest;
     return {
@@ -112,7 +107,7 @@ export function createStageDClient(options: StageDClientOptions): StageDClient {
       return outcome;
     }
 
-    const outcome = await dummy.execute(request);
+    const outcome = await base.execute(request);
     log.push({ at, operation: request.operation, args, status: outcome.status, requestId: request.requestId });
     return outcome;
   }
