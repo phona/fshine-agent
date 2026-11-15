@@ -1949,6 +1949,55 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 
 
+## 六十九、R5 压缩机制归属审计 · 归档登记（2026-11-15，分支 `arch/r5-cmpaudit`，基线 = `arch/integration` @`76bcf8d`）状态：**待合入**
+
+> 本条目只做**决定面归档**：审计全文见 `docs/product/r5-compaction-audit.md`（提交 `7a769a7`，已落 `arch/integration`；本分支基线 `76bcf8d` 不含该文件，按 §六十八 先例如实登记跨分支）。**未实施任何修改**，删除候选一律等 owner 裁决。
+> 编号：本 worktree 基线处 decision-log 最大号 = `arch/integration` 当前最大号 = §六十八，取 §六十九。
+
+**审计范围与边界**
+- 对象：fshine 压缩管理（`packages/agent/src/pi-driver.ts`）与 Pi 原生能力（`@earendil-works/pi-agent-core@0.85.1`、`pi-ai@0.85.1`，只读）。
+- 方式：**零付费模型调用、产品代码 0 修改**；读实际源码（亲读行号见下）+ 既有 trace（`.runtime/r5p3s45/events.md`、`.runtime/r5preaudit/p0b.md`）与 §六十五/§六十八。
+- 边界：不新增 Runtime 状态机/冷却器/摘要治理器；**不得由测试窗口 W=8192 的表现外推生产 128k**（S1–S5 读数均在 W=8192 下取得）。
+
+**机制分类结论**（逐项一行；完整表见审计文档 §2）
+- **Pi Native**（fshine 直接复用）：`shouldCompact`（compaction.js:144-148）、`estimateTokens`（:166-204）、`DEFAULT_COMPACTION_SETTINGS`（:75-79）、`generateSummary`/`generateSummaryWithRequest`（:369-411，maxTokens 公式 :380）、`transformContext` 钩子（agent-loop.js:122 每请求调用 → :176-181 执行）。
+- **Integration**（接入 Pi 必需薄适配）：`Agent` 装配 + `plannerMessagesToLlm`（pi-driver.ts:688-697）、`compactTranscriptWithPi` 编排（:532-618）、`trimToBudget`（:481-491）/`degradeByDropping`（:498-515）。
+- **Necessary Extension**（Pi 在 Agent 路径无对应物且有实证）：`compactionSettingsFor` 小窗缩放 + INV 下界（:324-344）、`summarizeWithinWindow` 有界分片（:441-478）、`fixedRequestOverheadTokens` Δ_worst（:298-307）。
+- **Duplicate**（重复/失实，删除候选）：`run()` 请求前 INV 复核臂（:661-686）、emergency 阈值公式与 INV 线重复（:657 vs :661）、`:658-660` 失实注释。
+
+**55/79 成本**（审计文档 §3；证据 `.runtime/r5p3s45/events.md`）
+- 79 次 `context_compacted` 中 55 次（69.6%）tokensAfter == tokensBefore（S1=36、S2=19），全部来自 emergency 臂，且每次均跑 `summarizeWithinWindow`（记录 summaryChunks≥1 ⇒ ≥1 次真实摘要模型调用，pi-driver.ts:466-471,614）——**零收益 ≠ 零调用**。
+- 成因（结构性互锁）：`splitForCompaction` 保护当前回合（:396-405，`start ≤ lastUser`）⇒ 前缀仅剩 0–1 条旧消息、摘要换摘要；W=8192 下 emergency 线与 INV 线同值 2512（:657/:661，Δ_worst≈4656），低于无效压缩稳态（2546–8154）⇒ 逐条请求前复触发（S1 t13 单轮 10 连、205s）。
+- 有效对照：S1=13 次削 51,711 tok、S2=11 次削 34,260 tok（均回合边界）；会话总账 S1=32 calls/265,450 tok/862s、S2=30 calls/150,444 tok/596s。**核账缺口**（budget 计数 32 < emergency 36）：摘要调用是否计入 budget hook 未闭合，**登记为未验证**。
+
+**删除候选**（审计文档 §4）
+- **D1** 删 `run()` 请求前 INV 复核臂（pi-driver.ts:661-686 及事件 `pi_driver_pre_request_compacted`/`pi_driver_context_invariant_rejected`）；删后由 `transformContext`（:701-711，实测覆盖首条请求）+ `compactTranscriptWithPi` no_cut 有界失败（:553-566）承接。
+- **D2** 删/修 `pi-driver.ts:658-660` 失实注释（被 agent-loop.js:122,176-181 + P0-B ③-b 实测证伪）。
+- **D3** emergency 线与 INV 线阈值二源合一（:657 与 :661 恒等：`max(1024, Δ+1024)=Δ+1024`），保留单一来源 + 恒等断言。
+- **不删**：`compactionSettingsFor`/`summarizeWithinWindow`/`trimToBudget`/`degradeByDropping`/`splitForCompaction`（Pi 在 Agent 路径无对应物，删即失去小窗可用性）。
+- **非产品码**：评测注入 W=8192 只登记「读数不得外推生产」，不建议删。
+
+**A/B/C 推荐**（审计文档 §5；六维：正确性/长任务可靠性/交互质量/维护成本/代码规模/token 开销）
+- **A（D1+D2+D3 删重收敛，行为等价可证）**：可先做。
+- **B（A + 零收益循环最小机制修复）**：须先过新增机制准入五条（含 128k 前后 Eval）；「每回合只压一次」类门控 = 新 Runtime 状态，本审计不采。
+- **C（现状 + 摘要正文落盘/计量观测）**：B 的证据前置，可与 A 并行。
+- 推荐：**A（条件式）**；B/C 待 owner 裁决。
+
+**明确结论**
+- **是否超出必要集成职责？——部分超出，幅度有限且可精确切除**：编排面（缩放设置/有界分片摘要/裁剪/降解）是 Agent 路径上 Pi 0.85.1 未提供、且有实证必要的 Integration/Necessary Extension，**不超职责**；超出的是 fshine 内部第二道闸（`run()` INV 复核臂）+ 与 transformContext 重复的阈值公式 + 失实注释三处（Duplicate）。
+- **能否删重复？——能，且仅限 D1/D2/D3 三处**：Pi `transformContext` 实测覆盖**每条**请求（含首条，agent-loop.js:122,176-181；P0-B ③-b 亲测），删重复闸后单一把关仍成立，行为等价可证（D3 恒等断言 + P0-B 夹具反向绊线）。**不能**删到「完全交给 Pi」：Pi harness 压缩/溢出管线（`dist/harness/runtime/drive/structural.js:872-887` 的 `prepareOverflowCompaction`，`overflowRecoveryUsed` 每代一次门控）不在 `createPiTurnDriver` 的 `Agent` 路径上（pi-driver.ts:6,8,688-712）；settings 缩放/分片摘要/产物裁剪在 Pi 0.85.1 中无 Agent 路径对应物。
+- **条件**：D1 实施前先跑 P0-B 同款夹具反向绊线（不可救→有界失败、可救→首请求 ≤ W−MIN_OUTPUT）；**128k 生产窗口复测若出现 transformContext 臂拦不住的场景，则回退 D1**。
+
+**未解决问题（严格区分已证实 vs 未验证）**
+- **已证实**（机制+实测双证）：F1 55/79 零收益全为真实摘要调用、结构性互锁；F2 `pi-driver.ts:658` 注释失实；F3 INV 臂与 transformContext 臂阈值重叠（两式恒等）；F4 测试窗口 W=8192 下压缩后塌缩答（tokensAfter=15 近空摘要）的层级归 Pi 压缩层。
+- **未验证假设**（不得当事实）：H1 近空摘要直接成因（摘要正文未落盘）；H2 生产 128k 是否存在同类无效循环（**无读数，不外推**）；H3 摘要调用是否计入 budget hook（32<36）；H4 原始 JSON 泄漏（S4/S5 未复现，不归咎 Pi 压缩）；H5 取消虚答与压缩的因果共变（已判控制回执失败、**安全面无失控**）。
+
+**未实施任何修改 · 等 owner 裁决**
+- 本次登记**零产品代码改动**（仅追记本条目）、**零新增模型调用**、未 `git add` 任何 `.runtime` 证据；D1/D2/D3 及其前置（反向绊线、128k 复测）一律**待 owner 裁决后另批实施**，本条目不含实施排期。
+- **状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
