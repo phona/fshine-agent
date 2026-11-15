@@ -1321,19 +1321,40 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
-## 五十一、R5 轨1 · P0 修复登记（P0-A 任务引用契约 / P0-B 上下文不变式 / P0-C 后台预算与生命周期）（2026-11-15，分支 `arch/r4-p0fix`）
+## 五十一、R5 轨1 · P0 修复（P0-A 任务引用契约 / P0-B 上下文不变式 / P0-C 后台预算与生命周期）（2026-11-15，分支 `arch/r4-p0fix`）
 
-- **状态**：在 PR（未合入；未 push / 未合并 / 未碰 main/tag）。
+- **状态**：**待合入**（merge commit 由主会话/集成 Agent 补齐；未 push / 未合并 / 未碰 main/tag）。
 - **分支/基线**：worktree `~/projects/fshine-agent-r4-p0fix`，分支 `arch/r4-p0fix`；基线 = `arch/integration` 启动时 HEAD `8d29e7715d8bec2823257be62418780049eda185`（记录于主仓 `.runtime/r5p0/baseline.txt`）。
-- **P0-C 实施（本条目登记部分）**：
-  - **① 后台预算计入（已实施）**：`task-runner` 增可选端口 `budgetFor` + `meterRound`——后台执行回合在 settle finally 按真实 taskId `consume({calls:1, ms})`（未准入任务跳过、不造预算，§2 契约不变）；受理侧既有的 probe acquire（`execution-runtime.ts` delegate background 分支，acquire('background',{taskId}) 后 release）即预算种子，无需新增受理逻辑。
-  - **② 取消后资源释放（已验证）**：取消 → 回合落定 → finally 一次实际时长计量 + `policy.release` + 出 `inFlight`；后续 pump 不再计量（新增机械测试钉住）。
-  - **④ 幂等（已实施）**：`runner.submit` 对同 taskId 重复受理确定性拒绝（原 registry.begin 是覆盖语义：静默覆盖底账行 + 再消耗 taskNo）。
-  - **③ 状态可信（审计结论：既有覆盖充分）**：超时/限流/重启后的状态可信由既有测试覆盖（`task-runner.test.ts`：过期租约→result_unknown 不自动重放；timed_out；策略拒绝→failed/resource_limited；重启续跑）——本轮全量回归全绿，未改状态机。
-- **登记（不修，待 owner 裁定）**：
-  - **`queueCapacity>0` 上界属冻结 §2 接口：只审计、不改机制**。审计结论：① 受理侧上界只看 policy 队列（probe acquire），与「队列=底账 queued 行」的单一事实源不一致——底账 queued 行数无受理上界，policy 队列满 ≠ 拒绝受理（probe 在槽位空时放行，任务排底账）；② runner 对排队许可（state='queued'）只停止派发不直派发（正确，不绕并发上限）；③ **缺省 `queueCapacity=0` 下无 policy 排队，但底账 queued 行仍无上界**——后台受理不设底账级容量上界，属产品级开放面（建议后续切片：受理上界改为「底账 queued 行数 < queueCapacity 才受理」并加集成测试；触及冻结面，未动）。拒绝行为本身正确：`queue_full` 拒绝面既有测试覆盖（`resource-policy.test.ts`）。
-  - **messageId 幂等归属**：渠道消息防重全权归执行层/渠道装配层（B 类确定性）；通用层不建去重机制（不新增机制准入）。后续切片若要落点，最小方案是渠道装配层按 messageId 去重，不进 Runtime。
-  - **其余后续切片建议（未实施）**：queued/waiting_user 超时接线（复用 pump 时点查底账 waitingSince/createdAt，不建定时器）+ leaseMs ≥ workerTurnMs fail-fast；前台排队忙等加上界；budgets Map 终态清除（有界试用债务）。
+- **提交链**（身份显式 `Tao <34084876+phona@users.noreply.github.com>`）：`4e0c025`（P0-A）→ `dfc1944`（P0-B）→ `15777ba`（P0-C+本登记前稿）；本条目为 docs 追加提交。
+
+### P0-A 统一任务引用契约
+
+- **根因**：`resolveTaskId`（execution-runtime.ts）只认 `#N` 与完整 taskId，而工具描述示例写裸数字 `如 "3"`——描述教模型发 `"3"`、解析器只认 `"#3"`；且 inline 受理回执不含 `taskNo`，inline 模式用户无编号可引用。
+- **最小修复**（3 处 + 4 条测试，零新机制）：① 匹配条件增 `String(task.taskNo)===wanted`（`#N`/taskId 形态与 scope 内解析语义不动，跨 principal/会话仍 `TaskOwnershipError` 不泄露存在性）；② 三处描述示例 `如 "3"`→`如 "#3"`（cancel/resume 描述本无数字示例，未涉及）；③ inline 回执补 `taskNo`（task 已在上行取得），与 background 回执格式一致。未新增词法分流器（「刚才那个/取消它」归 Main 上下文理解）。
+- **回归与绊线读数**：先红（裸数字 TaskOwnershipError、inline 回执 taskNo=undefined）→ 修后绿；`npm run typecheck`=0、`npm test` 74 文件/735 例全绿（基线 731→735，只增不减）。新测试覆盖验收五轴：跨用户同编号（#与裸数字两形态）、无效引用（999）、裸数字越权、inline 回执编号、取消后查询同编号状态如实 cancelled。歧义引用经核实不存在歧义形态（taskNo 由底账单调唯一分配）。
+- **独立复核结论**：**未执行**（本轨内无独立复核 Agent 运行；待主会话/集成复核）。
+- **冻结面处置**：未触及。
+- **回退**：`git revert 4e0c025`。
+
+### P0-B 长会话输出与压缩错序
+
+- **根因**：钳制按完整请求计量、压缩按转录计量，存在动态估算差 Δ_worst=4096+sys+tools，而 reserve 只按固定常数/比例缩放——不满足「输出预算耗尽前能触发有效压缩」；且 pi-agent-core 的 transformContext 不在首条请求前执行，首请求可带着违不变式的转录直接发出。
+- **最小修复（先证不变式再写码，证明见 pi-driver.ts P0-B 注释块）**：INV = 每次请求 `W − (T + Δ_worst) ≥ MIN_OUTPUT(1024)`。① `compactionSettingsFor` 增 `fixedOverheadTokens` 参数，两臂 reserve 均 ≥ Δ+MIN_OUTPUT（缺省 0 与旧行为逐字段一致——不接受「SAFETY+固定余量」为充分条件）；② run() 按本回合 sys/tools 实测 Δ_worst，emergency 线同口径缩放；③ run() 请求前显式复核 INV（transformContext 不在首请求前执行是实测发现）：违反先 force 压缩，仍无解则有界失败 `pi_driver_context_invariant_rejected`、一次请求都不发；④ no_cut 且超 LIMIT 抛 `context_invariant_violated`；⑤ 装配期 `contextWindow < 6656`（CONTEXT_WINDOW_FLOOR_TOKENS）拒绝能力声明。不虚报 contextWindow、不改 node_modules、不建第二套摘要/记忆（复用 Pi 原生压缩）。
+- **回归与绊线读数**：新文件 pi-driver-context-invariant.test.ts 8 条，先红（no_cut 行为、运行期 calls=0）后绿；`npm run typecheck`=0、`npm test` 75 文件/743 例全绿。thinking-only 空回复（模型行为，既有 pi-driver-nudge.test.ts 收尾催问路径）与不变式违反/活锁（宿主预算，拒绝不发请求）分别验证，未并作同一根因。与任务书落点差异已核实登记：transformContext 时序要求增请求前把关；「no_cut 未超 LIMIT 原样返回」分支在 reserve ≥ Δ+MIN_OUTPUT 后数学上不可达（阈值 ≤ LIMIT 恒成立），该形态现在总是拒绝。
+- **独立复核结论**：**未执行**（待主会话/集成复核）。
+- **冻结面处置**：未触及（contextWindow 声明值不改写，仅拒绝不可行声明）。
+- **回退**：`git revert dfc1944`。
+
+### P0-C 后台预算与生命周期
+
+- **根因**：① `consume` 唯一调用点在 inline 委派（execution-runtime.ts:564），后台执行回合不计量 taskBudget；② registry.begin 是覆盖语义，同 taskId 重复受理静默覆盖底账行并再消耗 taskNo；取消后资源释放路径无测试钉住。
+- **最小修复**：① task-runner 增可选 `budgetFor` 端口 + `meterRound`——后台回合在 settle finally 按真实 taskId `consume({calls:1, ms})`（未准入任务跳过不造预算，§2 契约不变；实现期实测修复了 meterRound 解构丢 this 绑定导致的静默跳过）；受理侧既有 probe acquire(background,{taskId}) 即预算种子，受理逻辑零改动；② 任何落定都在 finally 一次实际时长计量→release→出 inFlight，之后不再消费；③ `runner.submit` 对重复 taskId 确定性拒绝；④ 状态机零改动（超时/限流/重启状态可信由既有 25 例覆盖）。
+- **回归与绊线读数**：新增 3 条测试先红（计量 metered=[] 两例）后绿；`npm run typecheck`=0、`npm test` 75 文件/746 例全绿（743→746）。
+- **独立复核结论**：**未执行**（待主会话/集成复核）。
+- **冻结面处置**：`queueCapacity>0` 上界属冻结 §2 接口——**只审计、只登记、不改机制**：受理上界只看 policy 队列，与「队列=底账 queued 行」单一事实源不一致；缺省 queueCapacity=0 下底账 queued 行仍无受理上界（开放面，建议后续切片改「底账 queued 行数 < queueCapacity 才受理」+集成测试）；queue_full 拒绝面既有 resource-policy.test.ts 覆盖正确。messageId 防重全权归执行层/渠道装配层（不建通用去重机制）。queued/waiting_user 超时接线、前台忙等上界、budgets Map 清除登记为后续切片。budgetFor 为可选调用面扩展，不改 §2 语义。
+- **回退**：`git revert 15777ba`（及本条目提交）。
+
+---
 
 ## 维护规则
 
