@@ -1,7 +1,9 @@
 /**
  * Silent Shadow 出站闸门（B2）。
  *
- * 目标：**默认静默**——缺省抑制**所有用户可见投递**；开启真实投递须**显式开关**；
+ * 目标：**显式声明才放行**——真实投递必须显式声明 `deliveryMode='live'`（或环境开关逐字
+ * `live`）；显式 `silent`/`shadow`、以及**缺失或非法**的声明一律抑制**所有用户可见投递**
+ * （fail-safe：默认缺失或非法 → 退化为 silent，绝不隐式回退到真实平台）；
  * 每次被抑制的发送**留可观测证据**；对真实平台**零用户可见投递**。
  *
  * 机械保障：真实出站传输只有一条——官方 SDK 的 `SdkClientLike`。适配器里**所有**用户可见
@@ -15,16 +17,59 @@
  *   - 放行：on / connect / disconnect（长连接是收消息的前提）
  *           downloadFile（入站附件下载，不是投递）
  *
- * 缺省静默：`resolveDeliveryMode` 只有在显式选项或显式环境开关下才放行真实投递；
- * 未设、设成其它值一律静默——**不引入向真实平台的隐式回退**。
+ * opt-in 语义：`resolveDeliveryMode` 只在显式选项或显式环境开关下才放行真实投递；
+ * 未设、设成非法值一律静默——**不引入向真实平台的隐式回退**。
  */
 
-/** 出站投递模式：silent = 抑制（缺省）；live = 真实投递（须显式开启）。 */
-export type DeliveryMode = 'silent' | 'live';
+/**
+ * 声明的出站投递模式：`live` = 真实投递（须显式声明）；`silent` / `shadow` = 抑制。
+ * `shadow` 是「影子/观察」语义的显式抑制声明，与 `silent` 等效（都退化为 silent）。
+ * **缺失或非法**的声明不在本类型内——由 `resolveDeliveryMode` 按 fail-safe 处理。
+ */
+export type DeliveryMode = 'live' | 'silent' | 'shadow';
+
+/** 闸门实际采用的有效模式：只有两种——`live` 真实投递，`silent` 抑制。 */
+export type EffectiveDeliveryMode = 'live' | 'silent';
 
 /** 显式开启真实投递的环境开关：值必须逐字等于 `live`，其余（含未设）一律静默。 */
 export const WECOM_DELIVERY_ENV = 'FSHINE_WECOM_DELIVERY';
 export const WECOM_DELIVERY_LIVE = 'live';
+
+/** 合法声明集合（供 resolveDeliveryMode / isDeliveryModeDeclared 复用）。 */
+const DECLARED_MODES: readonly string[] = ['live', 'silent', 'shadow'];
+
+/**
+ * 解析生效投递模式（opt-in）：显式 `live` → live；显式 `silent`/`shadow` → silent；
+ * **缺失或非法 → silent（fail-safe）**。
+ *
+ * 优先级：显式选项 ∈ {live, silent, shadow} 时以它为准（覆盖环境开关）；
+ * 显式选项是非法值时**直接 fail-safe 到 silent**（不因环境开关而放行——非法声明优先）；
+ * 显式选项缺失（undefined）时才回落到环境开关，且环境值必须逐字 `live` 才放行。
+ */
+export function resolveDeliveryMode(
+  explicit: string | undefined,
+  env: Record<string, string | undefined>,
+): EffectiveDeliveryMode {
+  if (explicit === 'live') return 'live';
+  if (explicit === 'silent' || explicit === 'shadow') return 'silent';
+  if (explicit !== undefined) return 'silent';
+  return (env[WECOM_DELIVERY_ENV] ?? '').trim() === WECOM_DELIVERY_LIVE ? 'live' : 'silent';
+}
+
+/**
+ * 是否**显式声明**了合法的投递模式（真实渠道据此判断「未声明 → 拒绝真实出站并留日志」）。
+ *
+ * 已声明：显式选项 ∈ {live, silent, shadow}，或显式选项缺失且环境开关逐字 `live`。
+ * 未声明：两者都缺（默认配置缺失）；或显式选项为**非法值**（配置非法）。
+ * 注意：显式选项为非法值时，即使环境开关为 `live` 也不计为已声明——非法声明优先 fail-safe。
+ */
+export function isDeliveryModeDeclared(
+  explicit: string | undefined,
+  env: Record<string, string | undefined>,
+): boolean {
+  if (explicit !== undefined) return DECLARED_MODES.includes(explicit);
+  return (env[WECOM_DELIVERY_ENV] ?? '').trim() === WECOM_DELIVERY_LIVE;
+}
 
 /** 闸门放行 / 抑制的底层传输方法（诚实登记是否用户可见）。 */
 export type ShadowSendKind =
@@ -45,7 +90,7 @@ export interface SuppressedSend {
 }
 
 export interface SilentShadowGateOptions {
-  mode: DeliveryMode;
+  mode: EffectiveDeliveryMode;
   /** 可注入的观测出口；缺省写一行结构化 JSON 到 console.warn。 */
   logger?: (line: Record<string, unknown>) => void;
 }
@@ -55,7 +100,7 @@ export interface SilentShadowGateOptions {
  * 静默模式下所有出站投递在此被拦下并登记；放行方法原样透传。
  */
 export class SilentShadowGate {
-  readonly mode: DeliveryMode;
+  readonly mode: EffectiveDeliveryMode;
   private readonly logger: (line: Record<string, unknown>) => void;
   private readonly events: SuppressedSend[] = [];
   private suppressedCount = 0;
@@ -147,18 +192,7 @@ export interface SilentShadowTransport {
   downloadFile(url: string, aesKey?: string): Promise<{ buffer: Buffer; filename?: string }>;
 }
 
-/**
- * 解析生效投递模式：显式选项 > 显式环境开关 > 缺省静默。
- * 环境开关必须逐字 `live` 才放行——任何拼写偏差、未设、空串都落到 silent。
- */
-export function resolveDeliveryMode(
-  explicit: DeliveryMode | undefined,
-  env: Record<string, string | undefined>,
-): DeliveryMode {
-  if (explicit !== undefined) return explicit;
-  return (env[WECOM_DELIVERY_ENV] ?? '').trim() === WECOM_DELIVERY_LIVE ? 'live' : 'silent';
-}
-
+/** 文本的 UTF-8 字节数（证据里记录"被闸掉了多少内容"）。 */
 function byteLen(text: string): number {
   return Buffer.byteLength(text, 'utf8');
 }

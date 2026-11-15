@@ -22,9 +22,10 @@ import {
   SilentShadowGate,
   WecomBotChannel,
   resolveDeliveryMode,
+  isDeliveryModeDeclared,
   WECOM_DELIVERY_ENV,
 } from './src/index';
-import type { SdkClientLike } from './src/index';
+import type { DeliveryMode, SdkClientLike } from './src/index';
 
 const ENV = { WECOM_BOT_ID: 'bot-shadow', WECOM_BOT_SECRET: 'shadow-secret' };
 
@@ -94,7 +95,7 @@ interface Started {
   sdk: DeliveryRecorder;
 }
 
-async function start(mode: 'silent' | 'live' | undefined, handler: ReplyHandler, root: string): Promise<Started> {
+async function start(mode: DeliveryMode | undefined, handler: ReplyHandler, root: string): Promise<Started> {
   const sdk = new DeliveryRecorder();
   const channel = new WecomBotChannel({
     env: ENV,
@@ -333,5 +334,123 @@ describe('SilentShadowGate 单元：wrap 语义', () => {
     const sdk = new DeliveryRecorder();
     const gate = new SilentShadowGate({ mode: 'live', logger: () => {} });
     expect(gate.wrap(sdk)).toBe(sdk);
+  });
+});
+
+/**
+ * B2 opt-in 语义（owner 裁决）：显式 live = 真实投递；显式 silent/shadow = 抑制；
+ * **缺失 / 非法 → 抑制（fail-safe）**。生产装配显式声明 live（保住既有产品语义）；
+ * 未声明模式的真实渠道拒绝真实出站并留日志。
+ */
+describe('B2 opt-in：显式 live / 显式 shadow / 缺失或非法 → fail-safe 抑制', () => {
+  let root: string;
+  beforeEach(() => { root = mkdtempSync(path.join(tmpdir(), 'wecom-optin-')); });
+  afterEach(() => { rmSync(root, { recursive: true, force: true }); vi.restoreAllMocks(); });
+
+  it('resolveDeliveryMode：显式 live→live；silent/shadow→silent；缺失/非法→silent', () => {
+    expect(resolveDeliveryMode('live', {})).toBe('live');
+    expect(resolveDeliveryMode('silent', {})).toBe('silent');
+    expect(resolveDeliveryMode('shadow', {})).toBe('silent');
+    // 缺失 → fail-safe
+    expect(resolveDeliveryMode(undefined, {})).toBe('silent');
+    // 非法（大小写偏差 / 拼写 / 空串 / 尾随空格）
+    expect(resolveDeliveryMode('LIVE', {})).toBe('silent');
+    expect(resolveDeliveryMode('live ', {})).toBe('silent');
+    expect(resolveDeliveryMode('', {})).toBe('silent');
+    expect(resolveDeliveryMode('on', {})).toBe('silent');
+    // 非法显式值不因环境开关被放行。
+    expect(resolveDeliveryMode('nonsense', { [WECOM_DELIVERY_ENV]: 'live' })).toBe('silent');
+    // 环境开关逐字 live 仍放行（既有语义不变）。
+    expect(resolveDeliveryMode(undefined, { [WECOM_DELIVERY_ENV]: 'live' })).toBe('live');
+  });
+
+  it('isDeliveryModeDeclared：仅显式合法模式或环境逐字 live 算已声明', () => {
+    expect(isDeliveryModeDeclared('live', {})).toBe(true);
+    expect(isDeliveryModeDeclared('silent', {})).toBe(true);
+    expect(isDeliveryModeDeclared('shadow', {})).toBe(true);
+    expect(isDeliveryModeDeclared(undefined, {})).toBe(false);
+    expect(isDeliveryModeDeclared(undefined, { [WECOM_DELIVERY_ENV]: 'live' })).toBe(true);
+    expect(isDeliveryModeDeclared('nonsense', {})).toBe(false);
+    expect(isDeliveryModeDeclared('', {})).toBe(false);
+  });
+
+  it('显式 shadow 声明：与 silent 等价——六类出站路径全抑制、投递=0、尝试可观测', async () => {
+    const handler: ReplyHandler = async (_msg, progress) => {
+      progress?.('步骤一:正在定位账套');
+      return {
+        text: '完成',
+        files: [{ data: Buffer.from('a'), filename: '工资表.xlsx' }],
+      };
+    };
+    const { channel, sdk } = await start('shadow', handler, root);
+    sdk.emit('message.text', textFrame('cb-shadow'));
+    await settle();
+    // 主动消息路径（六类之一）
+    await (channel as unknown as {
+      sendToConversation(r: ChannelRoute, reply: unknown): Promise<{ parts: unknown[] }>;
+    }).sendToConversation({ channel: 'wecom', conversationId: 'g-shadow' }, { text: '后台完成' });
+
+    expect(channel.deliveryMode).toBe('silent'); // shadow 归为 silent（抑制）
+    expect(sdk.userVisibleCalls).toBe(0);        // 实际用户可见投递 = 0
+    expect(sdk.uploads).toHaveLength(0);          // upload 也不触达（前置同断）
+    const evidence = channel.shadowEvidence();
+    // ack + 进度 + 终帧 = 3 条被抑制的用户可见流式帧
+    expect(evidence.userVisibleSuppressed).toBeGreaterThanOrEqual(3);
+    expect(evidence.events.some((event) => event.kind === 'upload_media')).toBe(true);
+    expect(evidence.events.some((event) => event.kind === 'reply_media')).toBe(true);
+    expect(evidence.events.some((event) => event.kind === 'send_message')).toBe(true);
+    await channel.stop();
+  });
+
+  it('缺失模式：真实渠道拒绝真实出站（投递=0）并留日志', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sdk = new DeliveryRecorder();
+    const channel = new WecomBotChannel({
+      env: ENV,
+      clientFactory: () => sdk,
+      platformRoot: root,
+      attachmentDir: path.join(root, 'tmp', 'attachments'),
+      // 不传 deliveryMode：缺省即“未声明”
+    });
+    const starting = channel.start(async () => '完成');
+    sdk.emit('authenticated');
+    await starting;
+    sdk.emit('message.text', textFrame('cb-missing'));
+    await settle();
+
+    expect(channel.deliveryMode).toBe('silent');
+    expect(sdk.userVisibleCalls).toBe(0);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('wecom_delivery_mode_undeclared'))).toBe(true);
+    await channel.stop();
+  });
+
+  it('非法模式：真实渠道拒绝真实出站（投递=0）并留日志', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const sdk = new DeliveryRecorder();
+    const channel = new WecomBotChannel({
+      env: ENV,
+      clientFactory: () => sdk,
+      platformRoot: root,
+      attachmentDir: path.join(root, 'tmp', 'attachments'),
+      deliveryMode: 'live ' as unknown as DeliveryMode, // 带尾随空格 = 非法
+    });
+    const starting = channel.start(async () => '完成');
+    sdk.emit('authenticated');
+    await starting;
+    sdk.emit('message.text', textFrame('cb-illegal'));
+    await settle();
+
+    expect(channel.deliveryMode).toBe('silent');
+    expect(sdk.userVisibleCalls).toBe(0);
+    expect(warn.mock.calls.some((call) => String(call[0]).includes('wecom_delivery_mode_undeclared'))).toBe(true);
+    await channel.stop();
+  });
+
+  it('反向绊线：缺失模式必须落到 silent（若被改成放行/回退 live，本用例必红）', () => {
+    expect(resolveDeliveryMode(undefined, {})).toBe('silent');
+    expect(resolveDeliveryMode(undefined, {})).not.toBe('live');
+    expect(resolveDeliveryMode('nonsense', {})).not.toBe('live');
+    // 非法显式值即使环境开关为 live，也不得放行（非法优先于 env）。
+    expect(resolveDeliveryMode('bogus', { [WECOM_DELIVERY_ENV]: 'live' })).toBe('silent');
   });
 });
