@@ -141,4 +141,4 @@ alice 的执行注入确定性失败（假执行面按 `--collection` 返回 `fa
 - **不改产品码**：仅新增 `scripts/eval/r6/multiuser/**` 与本报告；装配/执行契约/Worker 提示/D7 判据/状态机**零改动**（`git status` 仅新文件）。
 - **复用既有 R6 Harness**：机械任务 Oracle 与压缩判据直接 `import ../oracle` / `../compaction`；假件形状对齐既有 `scripts/eval/r6/fake-session.ts` 与 `apps/server/server-r4-background.test.ts`。
 - **`.runtime` 证据不 `git add`**：`scripts/eval/r6/multiuser` 的产物落 `.runtime/r6/multiuser/**`（gitignored）。
-- **未改 `docs/decision-log.md`**（集成 Agent 单点写）。
+- **`docs/decision-log.md` 由集成单点写者另行登记**（本场景组实现本身不改该文件；登记见 §八十）。
