@@ -28,8 +28,6 @@ const IDLE_TIMEOUT_MS = 90_000; // 流式空闲超时:每收到一个 chunk(含 
 const OVERALL_TIMEOUT_MS = 300_000; // 单次模型调用总上限(兜底,正常由回合预算约束)
 /** 主模型瞬时失败的原地重试延迟（与 worker 同族，只是主驱动原先没有这条腿）。 */
 const MAIN_MODEL_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000];
-/** 回合内应急压缩的触发余量：估算 token 逼近窗口上限时才压（正常增长由回合前压缩管理）。 */
-const EMERGENCY_OVERFLOW_HEADROOM_TOKENS = 1_024;
 
 /**
  * 供应商错误话术 → 是否「上下文超限」。超限重试同一条请求没有意义，必须先压缩再重发；
@@ -275,9 +273,10 @@ const COMPACTION_INSTRUCTIONS = '这是助手会话的压缩。摘要必须保�
  * 即 T ≤ W − Δ_worst − MIN_OUTPUT =: LIMIT。证明三条保证：
  *  ① 输出预算耗尽前能触发有效压缩：回合前压缩阈值 = W − reserveTokens，本函数保证
  *     reserveTokens ≥ Δ_worst + MIN_OUTPUT ⇒ 压缩产物 target = W − reserveTokens ≤ LIMIT
- *     （trimToBudget 强制产物 ≤ target）⇒ INV 在请求前成立；回合内 emergency 线
- *     headroom = max(1024, Δ_worst + MIN_OUTPUT) ⇒ 恰在 INV 将被破坏的下一条请求前触发
- *     force 压缩（见 createPiTurnDriver 的 transformContext）。
+ *     （trimToBudget 强制产物 ≤ target）⇒ INV 在请求前成立；回合内 emergency 线与
+ *     INV 线同源（headroom = Δ_worst + MIN_OUTPUT，见 invariantReserveTokens；原
+ *     max(1024, Δ_worst+MIN_OUTPUT) 因 1024=MIN_OUTPUT 且 Δ_worst≥0 恒等价）⇒ 恰在
+ *     INV 将被破坏的下一条请求前触发 force 压缩（见 createPiTurnDriver 的 transformContext）。
  *  ② 压缩后有足够空间生成有效回复：摘要请求自身有界（summaryInputAllowance =
  *     W − maxTokens − SUMMARY_PROMPT_OVERHEAD − 上一轮摘要），产物 trim 到 target ⇒
  *     压缩后仍留 ≥ MIN_OUTPUT 输出预算。
@@ -294,6 +293,24 @@ export const MIN_OUTPUT_BUDGET_TOKENS = 1_024;
 /** 装配期窗口下界：4096 + 1024 + 1024(摘要模板) + 512(keepRecent 下限)，sys/tools 未知取 0。 */
 export const CONTEXT_WINDOW_FLOOR_TOKENS =
   CONTEXT_REQUEST_FRAMING_TOKENS + MIN_OUTPUT_BUDGET_TOKENS + SUMMARY_PROMPT_OVERHEAD_TOKENS + 512;
+
+/**
+ * P0-B 单一阈值来源（D3 单源合一）：每次请求的不变式预留 = Δ_worst + MIN_OUTPUT。
+ *
+ * 原实现有两条独立阈值来源：回合内 emergency 线 headroom = max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS,
+ * Δ+MIN_OUTPUT) 与请求前 INV 线 limit = W − Δ − MIN_OUTPUT。因那第二个常量与
+ * MIN_OUTPUT_BUDGET_TOKENS 同值(1024) 且 Δ≥0：max(1024, Δ+1024) ≥ Δ+1024 恒真、且等号恒取
+ * （a≤x ⇒ max(a,x)=x），两线逐输入同一触发点。收敛为本函数单一来源后，emergency 线与 INV 线
+ * 由同一 reserve 派生，物理同源；不再保留第二常量。
+ */
+export function invariantReserveTokens(fixedOverheadTokens: number): number {
+  return fixedOverheadTokens + MIN_OUTPUT_BUDGET_TOKENS;
+}
+
+/** INV 安全上界 LIMIT = W − invariantReserveTokens(Δ)（与 emergency 线同源构造）。 */
+export function invariantLimitTokens(contextWindow: number, fixedOverheadTokens: number): number {
+  return contextWindow - invariantReserveTokens(fixedOverheadTokens);
+}
 
 /** 运行期完整请求固定开销估算：Δ_worst = 4096 + sys + tools（与 INV 同口径）。 */
 export function fixedRequestOverheadTokens(
@@ -323,7 +340,7 @@ export function fixedRequestOverheadTokens(
  * 「reserve ≥ SAFETY + 固定余量」不再当充分条件，预留必须按最坏差值缩放（证明见上）。
  */
 export function compactionSettingsFor(contextWindow: number, fixedOverheadTokens = 0): CompactionSettings {
-  const invariantReserve = fixedOverheadTokens + MIN_OUTPUT_BUDGET_TOKENS;
+  const invariantReserve = invariantReserveTokens(fixedOverheadTokens);
   // 默认设置装得下（保留尾段 + 摘要预留都在窗口内）就沿用默认阈值，但 reserve 不得
   // 低于不变式下界（大声明开销的大工具面会把 Δ_worst 推到默认 16384 之上）。
   if (!Number.isFinite(contextWindow)
@@ -671,7 +688,7 @@ export async function compactTranscriptWithPi(
     // 全部消息都在当前回合里：没有可摘要的前缀，压缩帮不上忙（不伪造摘要）。
     // P0-B 不变式③：no_cut 且转录已超 LIMIT（W − Δ_worst − MIN_OUTPUT）时，
     // INV 无解——明确拒绝（有界失败），不把必然拿空回复的请求发给模型。
-    const limit = model.contextWindow - fixedOverhead - MIN_OUTPUT_BUDGET_TOKENS;
+    const limit = invariantLimitTokens(model.contextWindow, fixedOverhead);
     if (est.tokens > limit) {
       console.error(JSON.stringify({
         event: 'context_invariant_violated',
@@ -810,14 +827,19 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       )) as unknown as AgentTool<any, any>[];
       // 转录即状态:messages 是上一轮持久化的 pi 原生转录(含工具调用与结果),直接续用
       let initialMessages = input.messages;
-      // P0-B：本次回合的完整请求固定开销 Δ_worst（sys+tools 实测于此）与 emergency 线
-      // 同口径缩放——headroom ≥ Δ_worst + MIN_OUTPUT 保证恰在 INV 将被破坏前触发压缩。
+      // P0-B：本次回合的完整请求固定开销 Δ_worst（sys+tools 实测于此），与下面两条阈值线
+      // 同口径——预留 ≥ Δ_worst + MIN_OUTPUT 保证恰在 INV 将被破坏前触发压缩。
       const fixedOverhead = fixedRequestOverheadTokens(input.systemPrompt, input.tools);
-      const emergencyHeadroom = Math.max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS, fixedOverhead + MIN_OUTPUT_BUDGET_TOKENS);
-      // P0-B INV 请求前把关：pi-agent-core 的 transformContext 只在回合内兜底，首条请求
-      // 前不经过它——这里显式复核 W − T − Δ ≥ MIN_OUTPUT；违反时先 force 压缩，仍无解
-      // （no_cut 会抛错、产物超线）则有界失败，一次请求都不发。
-      const invariantLimit = model.contextWindow - fixedOverhead - MIN_OUTPUT_BUDGET_TOKENS;
+      // P0-B 单一阈值来源（D3 单源合一）：outputReserve = Δ_worst + MIN_OUTPUT 由同一处派生
+      // 两条线——下面的请求前 INV 线与 transformContext 里的回合内 emergency 线。
+      // 两线原各自独立：emergency 线用 max(1024, Δ+1024)、INV 线用 W−Δ−1024；因那第二个
+      // 常量与 MIN_OUTPUT_BUDGET_TOKENS 同值(1024)且 Δ≥0，max(1024, Δ+1024) ≥ Δ+1024 恒真、
+      // 等号恒取，故两者逐输入同一触发点，收敛为单源（见 invariantReserveTokens）。
+      const outputReserve = invariantReserveTokens(fixedOverhead);
+      // P0-B INV 请求前把关：transformContext 对**每条**模型请求（含本回合首条）都执行，
+      // 因此本复核是纵深防御的第二道闸（不是唯一把关）——违反 W − T − Δ ≥ MIN_OUTPUT 时先
+      // force 压缩，仍无解（no_cut 会抛错、产物超线）则有界失败，一次请求都不发。
+      const invariantLimit = model.contextWindow - outputReserve;
       if (estimateContextTokens(initialMessages).tokens > invariantLimit) {
         try {
           // 关联标识把这次摘要调用与「回合前 INV 复核」这个触发点绑定（同一 id 也进触发点事件）。
@@ -868,7 +890,7 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         // 兜底；压完的视图装得下就不会在同一回合里反复触发。
         transformContext: async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
           const tokens = estimateContextTokens(messages).tokens;
-          if (tokens <= model.contextWindow - emergencyHeadroom) return messages;
+          if (tokens <= model.contextWindow - outputReserve) return messages;
           const correlationId = newCompactionCorrelationId();
           console.warn(JSON.stringify({
             event: 'context_emergency_compact',

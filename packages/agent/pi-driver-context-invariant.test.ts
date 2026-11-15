@@ -24,6 +24,8 @@ import {
   DEFAULT_CONTEXT_WINDOW,
   MIN_OUTPUT_BUDGET_TOKENS,
   CONTEXT_REQUEST_FRAMING_TOKENS,
+  invariantReserveTokens,
+  invariantLimitTokens,
   type PiModelRuntime,
 } from './src/pi-driver';
 
@@ -166,6 +168,64 @@ describe('P0-B ③ 窗口过小 / 不变式无解时明确拒绝', () => {
     } finally {
       error.mockRestore();
       warn.mockRestore();
+    }
+  });
+});
+
+/**
+ * D3 单源合一（先证后码）：原实现有两条独立阈值来源——
+ *   回合内 emergency 线：headroom = max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS, Δ+MIN_OUTPUT)
+ *   请求前 INV 线：      limit = W − Δ − MIN_OUTPUT
+ * 因 EMERGENCY_OVERFLOW_HEADROOM_TOKENS = MIN_OUTPUT_BUDGET_TOKENS = 1024 且 Δ≥0，
+ * max(1024, Δ+1024) ≥ Δ+1024 恒真、等号恒取（a≤x ⇒ max(a,x)=x），两线逐输入同一触发点。
+ * 收敛为 invariantReserveTokens/invariantLimitTokens 单一来源后，须机械证明：
+ *   (i)  单源 reserve ≡ 原 max 形式（∀ Δ≥0）；
+ *   (ii) ≥4 组窗口/配置下，给定 T，`T > emergency 线` ⇔ `T > INV 线`（触发点逐输入一致）。
+ * 反向绊线：把单源表达式改错（如 +1）⇒ 本组断言必须红。
+ */
+describe('P0-B D3 单源阈值：emergency 线 ≡ INV 线（恒等断言）', () => {
+  it('(i) 单源 reserve ≡ 原两源 max(1024, Δ+1024)，等号对 ∀ Δ≥0 恒成立', () => {
+    // 被收敛掉的第二常量取值 1024，与 MIN_OUTPUT_BUDGET_TOKENS 同值——这是等号恒取的前提。
+    expect(MIN_OUTPUT_BUDGET_TOKENS).toBe(1_024);
+    const deltas = [0, 1, 512, 1_023, 1_024, 1_025, 4_096, 13_096, 65_536, 1_000_000];
+    for (const delta of deltas) {
+      const oldMax = Math.max(1_024, delta + 1_024);
+      // max(a, x) ≥ x 恒真；此处 a 与 x 的常数项同值且 Δ≥0 ⇒ 恒取 x。
+      expect(oldMax).toBeGreaterThanOrEqual(delta + 1_024);
+      expect(oldMax).toBe(delta + 1_024);
+      // 单源必须逐值等于旧 max 形式（不是只在某个特定 W 下数值巧合相等）。
+      expect(invariantReserveTokens(delta)).toBe(oldMax);
+      expect(invariantReserveTokens(delta)).toBe(delta + MIN_OUTPUT_BUDGET_TOKENS);
+    }
+  });
+
+  it('(ii) ≥4 组窗口/配置下两条线触发点逐输入一致（T > emergency ⇔ T > INV）', () => {
+    const configs: ReadonlyArray<{ window: number; delta: number; label: string }> = [
+      { window: DEFAULT_CONTEXT_WINDOW, delta: 0, label: '缺省 128k、Δ=0' },
+      { window: DEFAULT_CONTEXT_WINDOW, delta: 13_096, label: '缺省 128k、大 Δ' },
+      { window: 40_000, delta: 6_592, label: '中窗口 40k' },
+      { window: 8_192, delta: 0, label: '小窗口 8192、Δ=0' },
+      { window: 8_192, delta: 5_120, label: '小窗口 8192、Δ 极大' },
+    ];
+    expect(configs.length).toBeGreaterThanOrEqual(4);
+    for (const { window, delta, label } of configs) {
+      const invLine = invariantLimitTokens(window, delta);
+      // 单源构造：INV 线由同一 reserve 派生。
+      expect(invLine, label).toBe(window - invariantReserveTokens(delta));
+      // 旧 emergency 线（被收敛的第二源）：window − max(1024, Δ+1024)。
+      const emergencyLine = window - Math.max(1_024, delta + 1_024);
+      expect(invLine, label).toBe(emergencyLine);
+      // 触发条件「T > 线」逐输入一致：不触发的仍不触发，触发的仍触发，边界不漂移。
+      for (const T of [0, invLine - 1, invLine, invLine + 1, window, window + 1]) {
+        expect(T > invLine, `${label} T=${T}`).toBe(T > emergencyLine);
+      }
+    }
+  });
+
+  it('(i-b) Δ 取极小/0 时单源退化为 MIN_OUTPUT，仍等于 max(1024, Δ+1024)', () => {
+    for (const delta of [0, 1]) {
+      expect(invariantReserveTokens(delta)).toBe(delta + MIN_OUTPUT_BUDGET_TOKENS);
+      expect(invariantReserveTokens(delta)).toBe(Math.max(1_024, delta + 1_024));
     }
   });
 });
