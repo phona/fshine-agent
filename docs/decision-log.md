@@ -2624,6 +2624,63 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 **指针**：`docs/product/b3-r6-call-accounting.md`、`scripts/eval/r6/accounting.ts`、`scripts/eval/r6/harness.ts`、`scripts/eval/r6/evidence.ts`；关联 §七十九（R6 预注册修订 + Harness 建设）、§七十八（R6 预注册准备档）。
 
+---
+
+## 八十二、R6 · 多用户 E2E MU 场景组 MU-1～MU-10（确定性）（2026-11-15，分支 `arch/r6-multiuser`，基线 = `arch/integration` 启动时 HEAD `b90f12f`）状态：**待合入**
+
+> 本轮 = 复用**现有 R6 Harness** 新增**多用户场景组 MU-1～MU-10** 的**确定性**实现与判定。**零真实模型调用、零真实企微、零真实写**；**产品码零改动**（`packages/**`、`apps/**` 未动，`git diff b90f12f..f0d2d18 -- packages apps` 为空）；**不改 Worker 提示、不改 D7 判据、不引 Runtime 治理机制、不引第二套压缩/会话机制**。**MU-6 依赖 B1、MU-8 依赖 B2 未合入 → 标 `BLOCKED`（不伪报 PASS）**。
+
+### 1. 复用与装配（生产同源 Main/Worker/Task Registry；非 `registry.get` 直调）
+
+- **复用既有 Harness**：机械任务 Oracle 与压缩判据直接 `import ../oracle`（H3 重复执行 / H4 虚假完成 / H5 取消虚假回执 / E-G 编号混淆）与 `../compaction`（H6）；未另造第二套判据。
+- **生产同源装配**：每个场景经 `createServer`（`apps/server/server.ts:89`）启一名 server——与 `npm start` **同一装配链**（`resolveSingleProfile` → 底账 Task Registry → 角色文本/技能装载 → 会话缓存 → 渠道 `handler`）。身份由渠道事实派生：`principalId = wecom:<userid>`、`sessionId = wecom:<conversationId>`（`apps/server/server.ts:217-218`）；会话按 **`(principal, session)` 双键**缓存（`server.ts:146-147` 的 `key = principal\u0000session`）。
+- **真实交互路径**：经 `server.handler` 投递 `IncomingChannelMessage` 驱动（`apps/server/server-r4-background.test.ts` 同源边界）；测试只注入**假件**（假 Pi 回合驱动、假执行面、假后台执行器、假通知 sink）。**不是**直接 `registry.get` 代替交互。
+- **机械 Oracle = Task Registry**：判定读 registry 只读快照并投影为 R6 `TaskView`，交 `../oracle` 判定；压缩交 `../compaction`。
+
+### 2. ≥3 principal / 多 Session / 同进程并发 / 真交错
+
+- **principal**：`wecom:mu-alice` / `wecom:mu-bob` / `wecom:mu-carol`（3 个独立 principal）；多会话由不同 `conversationId` 派生。
+- **并发见证**：会合同步栅 `Rendezvous`（`scripts/eval/r6/multiuser/mu-support.ts`）——第 N 个到达者解除全部等待；**串行假并发**只会到 1 个并触发安全超时（`timedOut=true`）→ 计入硬零 `fake_concurrency`。**不得串行假并发**。
+
+### 3. 硬零（任一命中即 FAIL；本组全部为空）
+
+`cross_principal_leak`（跨 principal 泄漏）/ `unauthorized_execution`（越权执行）/ `notification_misdelivery`（通知错投）/ `task_crossover`（任务串线，`judgeTaskContinuity` H3/H4/H5/E-G）/ `fake_concurrency`（串行假并发）。
+
+### 4. 逐条结果（PASS / FAIL / BLOCKED + 原始证据）
+
+| 用例 | 判定 | 原始证据摘录 |
+| --- | --- | --- |
+| MU-1 不同 principal 同时交办 | **PASS** | 会合栅到达 3/3、`timedOut=false`；真交错 = true（`seq0 enter alice → seq1 enter bob → seq2 enter carol → seq3 exit alice → …`，全部 `enter` 在任一 `exit` 之前）；任务数 = 3；`scopeViolations:[]` |
+| MU-2 相同 sessionId（跨 principal 同名会话） | **PASS** | 同一 `sessionId=wecom:conv-shared` 下 alice、bob 各 1 任务且 `taskId` 不同 → **会话未合并**（`server.ts:146-147` 双键生效）；`scopeViolations:[]` |
+| MU-3 同用户多会话 | **PASS** | 同 principal（alice）两会话各 1 任务、`sessionId`/`taskId` 均不同、互不可见；`scopeViolations:[]` |
+| MU-4 交错并发 | **PASS** | 3 principal × 2 轮逐轮会合栅真交错；任务数 = 6；`transcriptViolations:[]`（主转录不含他人语料标记）；`scopeViolations:[]` |
+| MU-5 跨用户越权 | **PASS** | background 模式；alice 交办得 `#1`；bob 在**自己会话**经 `task_status`/`task_result`/`task_cancel` 取 `#1` **三次全部** `error:"任务不存在或不属于当前会话。"`；alice 查自己 `#1` `error:null` |
+| MU-6 重启恢复 | **BLOCKED**（依赖 B1） | B1 未合入：`packages/agent/src/session-persistence.ts` **基线不存在**（`modulePresentOnBaseline:false`）；分支 `arch/sess-persist-impl@91b388a` 非 `HEAD` 祖先 → 会话转录无持久化，重启恢复语义不可确定性验证 |
+| MU-7 异步通知错投 | **PASS** | background 模式 + 假 sink + 假后台执行器；`bobGotFact:false` / `aliceGotFact:true` / `sinkAllAlice:true`（`sinkKinds:["accepted","started","completed"]` 三条通知全属 alice 任务）；事实注入由 `attachNotificationOutbox` 的 `taskFactProvider(principalId,sessionId)` 按 `scopeKey = principal\u0000session` 收口（`scripts/ask-runtime.ts:406-407`） |
+| MU-8 企微群聊与私聊隔离 | **BLOCKED**（依赖 B2） | B2 未合入：`packages/channel-wecom/src/silent-shadow-gate.ts` **基线不存在**；`arch/wecom-silent-shadow` 非 `HEAD` 祖先 → 无出站机械静默闸，隔离判据不可在无真实企微前提下确定性验证 |
+| MU-9 并发压缩 | **PASS** | 3 会话各 3 轮并发（逐轮会合栅）；`compactionCount:9`、`perPrincipal:{mu-alice:3,mu-bob:3,mu-carol:3}`、`contaminated:[]`；`compactionVerdict.hardZeroHits:[]`（无 H6）、`coverageSufficient:true`；证据缺口 `CMP4.summary_chunks_unexposed` 如实登记 |
+| MU-10 单用户故障隔离 | **PASS** | alice 执行注入确定性失败，bob/carol 正常；`alice:{status:"failed",reason:"failed_confirmed"}`、`bob:{status:"completed"}`、`carol:{status:"completed"}`；`scopeViolations:[]`、`crossoverCodes:[]` |
+
+**汇总：8 PASS / 0 FAIL / 2 BLOCKED**；跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线 / 串行假并发 —— **全部硬零**（命中为空）。
+
+### 5. 五要素记录（逐用例）
+
+每条用例落 `records[]`：`principalId / sessionId / taskId / request / deliveredTo`（`deliveredTo` = 实际投递对象：回复/事实/通知到达的 `(principal, session)`）。原始证据逐用例落 `.runtime/r6/multiuser/<case>/evidence.json`（**gitignored，不 `git add`**），汇总 `.runtime/r6/multiuser/summary.json`。样例：`{principalId:"wecom:mu-alice", sessionId:"wecom:conv-mu-alice", taskId:"task_3b69d0c0-…", request:"TAG-ALICE 交办：清点本用户账套", deliveredTo:"wecom:conv-mu-alice"}`。
+
+### 6. 测试读数（**本会话实跑**；cwd = R6 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key）
+
+- 定向：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → **12 passed（12）**。
+- 类型：`npm run typecheck`（`tsc --noEmit`）→ **0 错误**。
+- 全量：`npm test` → **93 文件 / 934 passed + 3 todo**；全量基线（移出 `multiuser/`）92 文件 / 922 passed + 3 todo → **例数只增不减**（+1 文件 / +12 用例，0 删除/弱化）。
+
+### 7. 未执行 / 局限（如实登记）
+
+- **零真实模型、零真实企微、零真实写**（假 Pi 驱动/假执行面/假后台/假 sink）；真实模型多用户 E2E（并发对话质量、真实压缩、跨用户误导生成）待 Pi 迁移 + R6 基础准入后**另阶段**。
+- **MU-6 / MU-8 未接线**：依赖 B1 / B2 未合入，本 run **不预造第二套会话/静默机制、不改产品码**。
+- 压缩分片（`CMP4.summary_chunks_unexposed`）与真实 token 计量未观测（假会话不暴露）。
+
+**指针**：`docs/product/r6-multiuser-acceptance.md`（逐条 PASS/FAIL/BLOCKED + 原始证据 + 依赖状态）、`scripts/eval/r6/multiuser/**`（`mu-cases.ts`/`mu-support.ts`/`mu.test.ts`）；关联 §七十九（R6 Harness/Oracle 基建）、§七十二（D7 跨 principal 越权真实模型）。
+
 **状态：待合入。**
 
 ---
