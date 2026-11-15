@@ -2506,6 +2506,96 @@ node scripts/eval/pi-native/tripwire-d1-tao.mjs      # exit 0
 
 ---
 
+## 八十一、Pi 原生替换 · 最小方案 B 验证（2026-11-15，分支 `exp/pi-native-session-compaction`）状态：**实验分支·待裁决**
+
+> 角色：**最小 B 独立验证**（本 run 唯一台账写者）。承接 §七十八（阶段一 GO 条件式）、§七十九（阶段二最小原型）、§八十（D1 反向绊线独立复核）。配套夹具：`scripts/eval/pi-native/pi-harness-driver.mjs`（最小 B 驱动，原 `minimal-b.mjs`，`acda036` 新增、`1645105` 改名避开过渡命名收敛守卫）、`scripts/eval/pi-native/verify-pi-harness.mjs`（验证夹具，原 `verify-minimal-b.mjs`，`2bd5dba` 新增、`1645105` 改名）、`scripts/eval/pi-native/OUTPUT-pi-harness.txt`（归档原始输出）。**未采信** guard 越界产物 `3c823c3` / `tripwire-b.mjs`（未经独立复核），本 run 未引用其结论/夹具。版本口径：只读锁 **`@earendil-works/pi-agent-core@0.85.1`（不升级）**。**零真实模型**：仅假 `Models`/假 `streamFn`，`baseUrl=http://localhost`，`streamDeferred`/`fetchDeferred` 均 `throw 'n/a'`。
+
+### 1. 工作区核验（本会话实跑）
+
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `.../fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；`git status --porcelain` 空。`git merge-base HEAD arch/integration` = `84a22fa`（与 §七十九 基线一致）。**通过。**
+- 本分支自 merge-base 改动文件**仅为** `docs/**` 与 `scripts/eval/pi-native/**`（`git diff --name-only 84a22fa..HEAD`）——**未动** `packages/**`、`apps/**`、`package-lock.json`；未升级 Pi；`.runtime` 未 `git add`。
+
+### 2. B 定义（严格）
+
+**Pi 原生 Session/Harness 负责全部压缩与 Overflow Recovery**（转录、压缩触发/执行、摘要、尾段保留、溢出恢复归 Pi）；fshine **只保留一处必要的「请求前预算检查」**——**不调用旧 `compactTranscriptWithPi`、不自行摘要/裁剪/降级/重试**。
+
+### 3. 最小 B 实施
+
+- `pi-harness-driver.mjs` 用**公开入口**装配 Pi 原生 Harness：`AgentHarness`+`setDefaultStreamFn`+`estimateContextTokens`（root `.`）、`MemorySessionRepo`（`./harness/session`）、`BACKGROUND_CONTEXT`（`./harness/context`）、`createAssistantMessageEventStream`（`@earendil-works/pi-ai/utils/event-stream`）（`pi-harness-driver.mjs:19-22`）。全部压缩触发/执行、尾段保留、溢出恢复经公开 `AgentHarnessOptions.compaction`/`.retry`/`.tools` 交 Pi（`pi-harness-driver.mjs:186-189`）。
+- **唯一** fshine 决策：`preRequestBudgetCheck(nextRequestMessages)`（`pi-harness-driver.mjs:208-211`），置于**调用 Pi 之前**——`run()` 先在 `lane.prompt` 之前计算并判定，超预算即抛 `PreRequestBudgetRefusal` 有界失败、**未触达 harness/provider**（`pi-harness-driver.mjs:220-233`）。
+- 文件内**无任何 host 侧压缩**：无摘要 prompt、无切分、无裁剪、无降解、无再压缩重试循环（`pi-harness-driver.mjs:8-11` 自述边界）。
+- **范围声明（重要）**：本 run **未改 `packages/**`**——真正的产品驱动切换（把 `createPiTurnDriver` 从低层 `Agent` + 自研 `transformContext`/`compactTranscriptWithPi` 编排切到 Pi 原生 `AgentHarness`）**未实施**；本 run 只在 `scripts/eval/pi-native/**` 内做实验驱动与验证。
+
+### 4. 公开前置扩展点结论与覆盖范围（只读源码/类型，本会话）
+
+- 公开 hook 注册表 `HookMap`：`node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts:485-604`，共 11 个 hook。逐一判定入参/返回契约：
+  - `transform_context`（`:510-519`）event `{messages, systemPrompt}`、result `{messages?, systemPrompt?}`——**只能变换，无中止/拒绝变体**；
+  - `before_request`（`:520-530`）event `{model, step, attempt, streamOptions}`、result `{streamOptions?}`——**无 messages、无 contextWindow、无 abort/block/decline**；
+  - `before_payload`（`:531-539`）event `{model, payload}`、result `{payload}`——**只能替换 payload，无 veto**；
+  - `before_tool`（`:550-563`）result `{args?, block?}`——**block 的是工具调用，不是模型请求**；
+  - `before_compaction`（`:582-592`）result `{decline?, compaction?}`——**decline 的是压缩，不是发送**；
+  - `before_run`（`:486-494`）event `{prompt, resources}`、result `{messages?}`——**只能追加/变换 prompt，run 起始一次，无 abort**。
+- **派发实现证实「抛错不可否决」**：`dist/harness/hooks.js` 对 `transform_context`（`:133-153`）、`before_request`（`:154-170`）、`before_payload`（`:171-184`）均 `try { handler } catch { reportError }`，捕获后**沿用原值继续**；`before_tool` 抛错则 `block={reason}`（`:121-126`，只挡工具）。→ 在公开 hook 里 throw **不能**阻止请求被发出。
+- **触发时机**：`dist/harness/runtime/drive/generation.js:58` `before_request` 每 generation step 触发；`:119-125` `transform_context` 在流内**每次请求**触发（含续发）；`:127-130` `before_payload` 每 payload 触发。三者均**只能变换/替换**，无一可返回「拒绝/中止发送」。
+- **覆盖范围结论**：单处请求前检查覆盖**每个 run 的首条请求**（在 fshine 调 Pi 之前，harness 未触达即拒）；**不能覆盖 run 内的续发请求**（工具结果超窗后的第二次 `streamSimple`）——公开面无任何 seam 能对续发请求做发送前尺寸预判并中止；`transform_context`/`before_payload` 若用于裁剪即成为 host 侧压缩（与 B 定义冲突，且属「复制 Pi 实现」，本 run 不采用）。
+
+### 5. D1 绊线重跑（本会话实跑）
+
+```
+TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs                 # failures=0 exit 0
+FSHINE_B_REVERSE=1 TMPDIR=/home/tao/.tmp node scripts/eval/pi-native/verify-pi-harness.mjs  # failures=9 exit 1
+```
+
+- **正常态**（`failures=0`、`exit 0`，与 `OUTPUT-pi-harness.txt` 逐行一致，仅 ULID 归一）：各窗首条不可救超窗请求（单条巨型消息，无可切分）被 `PreRequestBudgetRefusal` **有界拒绝**——`override` 前 `provider stream calls = 0 (over-window = 0)`、`run_end = []`；W=8192 `refused: pre-request budget exceeded: 8192 > 3066`、W=40000 `40000 > 34874`、W=128000 `128000 > 122874`。
+- **反向绊线**（`FSHINE_B_REVERSE=1`，故意旁路单处检查）：`failures=9`、`exit 1`；W=8192/40000/128000 均 `sent=1 over=1 refused=false`、`run_end=["completed"]`——**旁路后必然超窗请求被发出**。→ 证明单处检查**承重**（反路径红）。
+
+### 6. 补测矩阵（窗口 8192 / 40k / 128k；本会话实跑）
+
+| 场景 | 覆盖窗口 | 关键原始读数 | 结果 |
+|---|---|---|---|
+| 不可救超窗首请求（**不可压缩**：单条无可切分巨型消息）| 8192/40k/128k | `sent=0 over=0 refused=true` | PASS（有界拒绝） |
+| 首请求旁路对照 | 8192/40k/128k | `over=1` | PASS（单处检查承重） |
+| **工具结果导致超窗**续发 | 8192、40k（40k 另挂抛错 hook） | `stream calls=2 over-window=1`、`run_end completed` | **Q2 = NO**（续发超窗被送出；抛错 hook 无法否决） |
+| **可压缩**上下文 | 8192/40k/128k | 各 3 次 `compaction_end completed reason=threshold`、`over=0`、`turns=4` | PASS（压缩由 Pi 完成，无 host 代码） |
+| **摘要失败** | 8192 | `completeSimple calls=3`（≤ maxAttempts=3，有界）、`compaction_end failed`、`over sent=0` | PASS（有界，不无界重试） |
+| **有界恢复**（overflow→一次原生恢复→成功） | 8192/40k/128k | `compaction_start=["overflow"]`、`run_end completed`、`stream calls≤2` | PASS |
+| **任务不重复执行** | 8192、40k | 工具 `executions=1` | PASS（压缩/恢复后不重复执行） |
+
+### 7. 整体删除清单（产品代码；B 若成立将被整体删，非两套并存）
+
+若 B 成立，删除面**自包含于** `packages/agent/src/pi-driver.ts`（+ 专属测试/夹具/装配点），逐项：
+
+- 压缩编排函数：`compactionSettingsFor`（`pi-driver.ts:342`）、`splitForCompaction`（`:402`，含 `takeSummaryChunk` `:431`、`clampMessageForSummary` `:445`）、`summarizeWithinWindow`（`:534`）、`trimToBudget`（`:583`）、`degradeByDropping`（`:600`）、`compactTranscriptWithPi`（`:634`，含 `SummaryTokenUsage` `:516`、`addSummaryUsage` `:521`、`emptySummaryUsage`、`roleOf`/`lastUserIndex`/`summaryMessageTokens`/`summaryChunkTokens`/`summaryInputAllowance` `:364-400`）。
+- 三条触发臂：**请求前 force 压缩臂 D1**（`:842-876`，事件 `pi_driver_pre_request_compacted` / `pi_driver_context_invariant_rejected`）；**回合内 emergency 触发**（`transformContext` `:888-909`，事件 `context_emergency_compact`）；**溢出恢复臂**（`:944-965`，事件 `pi_driver_context_overflow_recovered`）。
+- 常量/开关：`SUMMARY_PROMPT_OVERHEAD_TOKENS`（`:260`）、`MAX_SUMMARY_CHUNKS`（`:262`）、`COMPACTION_INSTRUCTIONS`（`:263`）、`CONTEXT_REQUEST_FRAMING_TOKENS`（`:290`）、`MIN_OUTPUT_BUDGET_TOKENS`（`:292`）、`CONTEXT_WINDOW_FLOOR_TOKENS`（`:294`）、`invariantReserveTokens`（`:306`）、`invariantLimitTokens`（`:311`）、`fixedRequestOverheadTokens`（`:316`）、`COMPACTION_CAPTURE_SUMMARY_ENV`（`:496`）、`compactionCaptureEnabled`（`:499`）、`newCompactionCorrelationId`（`:511`）。
+- 专属测试/夹具：`packages/agent/compaction-window.test.ts`、`packages/agent/compaction-metrics.test.ts`、`packages/agent/compaction-product.test.ts`、`packages/agent/pi-driver-context-invariant.test.ts`、`scripts/eval/piopt/piopt-phase3.test.ts`、`scripts/eval/p3/compaction-proof.ts`（及 `scripts/eval/p3/p3c-session.ts` 内 INV/floor 断言）。
+- 调用/配置路径：生产装配 `scripts/ask-runtime.ts:305`、`:475`（main/worker）两处 `createPiTurnDriver`；环境开关 `FSHINE_CAPTURE_COMPACTION_SUMMARY`；`LLM_CONTEXT_WINDOW` 窗口接线（`scripts/ask-context-window.test.ts` 守卫）。
+
+**能否整体删**：删除面在 `pi-driver.ts` 内自洽（函数间仅内部互调），生产调用点仅 `ask-runtime.ts` 一处两行——**具备整体删而非并存的条件**。
+
+**但 B 不成立，故不可整体删——「为什么删不掉」**：**请求前 force 压缩臂 D1（`pi-driver.ts:842-876`）必须保留**。§八十 四问与本 run Q1 反向绊线一致：Pi 0.85.1 公开面无「发送前尺寸预判/拒绝」seam（`agent-harness.d.ts:520/531` 无 abort、`hooks.js:154-184` 抛错被吞），删除 D1 后必然超窗请求会被直接发出。其余臂（threshold 压缩、emergency、overflow recovery、摘要）Pi 原生可承担（§七十九 S2/S3/S4/S5 已证），但 **D1 无 Pi 公开 seam 替代，读回 Pi 转录亦无法在续发前拦截**，故该臂与 `invariantReserveTokens`/`invariantLimitTokens`/`fixedRequestOverheadTokens`/`CONTEXT_REQUEST_FRAMING_TOKENS`/`MIN_OUTPUT_BUDGET_TOKENS`/`CONTEXT_WINDOW_FLOOR_TOKENS` 一并有存在理由，不能随整体删清单一并删除。
+
+### 8. bHolds 判定
+
+**`bHolds = false`（B 不成立）。** 首条请求维度**成立**（Pi 原生 Harness 承担全部压缩/溢出恢复；fshine 仅一处 `preRequestBudgetCheck` 且置于调 Pi 之前 → D1 超窗首消息被有界拒绝、0 provider 调用、0 超窗发送）。但**工具结果续发维度不成立**：首请求过检后工具返回超窗结果，Harness 发出的续发请求仍带超窗载荷被送出（`over-window=1`，挂抛错 hook 亦不可否决），且公开面无任何可中止请求的 seam。单处检查只覆盖每个 run 的首条请求，无法约束 run 内续发。故「Pi 负责全部压缩与溢出恢复」的定义不满足，D1 的 host 请求前防线仍承重，**替换 blocked**。
+
+### 9. 未解决项
+
+- **产品驱动真正切换未实施**：`createPiTurnDriver` 仍走低层 `Agent` + 自研 `transformContext`/`compactTranscriptWithPi`；本 run 未改 `packages/**`。切换可行性（能否以公开 `AgentHarness` 等价替换 `Agent`）尚待独立实验。
+- **run 内续发请求的发送前防线**：若要求「首个请求之后、工具结果续发之前」也拒绝必然超窗请求，公开面**无 seam**；`transform_context` 虽每次请求触发但**只能替换、不能中止**，用它裁剪即落入 host 压缩（与原 B 定义冲突、且属复制 Pi 实现）。该缺口如何补（保留 D1 host 检查 / 另有设计）待 owner 裁定。
+- **成本/影响面取向**：仍须 owner 统一裁定（§七十七 `RECOMMENDED_OPTION=A` 成本导向 vs §七十八 能力导向）。
+
+### 10. 验收/回归（本会话实跑）
+
+- `TMPDIR=/home/tao/.tmp npm run typecheck` → **exit 0**（`tsc --noEmit`，无输出）。
+- `TMPDIR=/home/tao/.tmp npm test`（全量 vitest）→ `Test Files 3 failed | 83 passed (86)`、`Tests 3 failed | 868 passed | 3 todo (874)`。3 个失败文件为 `scripts/ask-replay.test.ts`、`scripts/ask-trace.test.ts`、`scripts/tasks.test.ts`，**与本 run 改动路径无关**（本 run 未改任何产品码/测试码），且**隔离复跑全绿**：`npx vitest run scripts/ask-replay.test.ts scripts/ask-trace.test.ts scripts/tasks.test.ts` → `Test Files 3 passed (3)`、`Tests 71 passed (71)`，`exit 0`——系全量并行下的 vitest-worker 超时 flaky（伴随 2 条 `Timeout calling "onTaskUpdate"`），非本 run 引入。**例数不减**：本 run 自 merge-base 未改任何测试文件。
+
+**指针**：`scripts/eval/pi-native/pi-harness-driver.mjs`、`verify-pi-harness.mjs`、`OUTPUT-pi-harness.txt`（夹具/输出）；`node_modules/@earendil-works/pi-agent-core/dist/harness/agent-harness.d.ts:485-604`、`dist/harness/hooks.js:108-184`、`dist/harness/runtime/drive/generation.js:54-147`（0.85.1 公开面）；`packages/agent/src/pi-driver.ts:260-965`（待删编排/D1 臂）；关联 §六十九、§七十、§七十七、§七十八、§七十九、§八十。
+
+**状态：实验分支·待裁决。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
