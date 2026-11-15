@@ -55,7 +55,7 @@ async function main(): Promise<void> {
     shuttingDown = true;
     console.log(JSON.stringify({ event: 'server_shutdown', signal }));
     await channel.stop();
-    server.close();
+    await server.close();
     process.exit(0);
   };
   process.on('SIGINT', () => void shutdown('SIGINT'));

@@ -2808,6 +2808,79 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十五、B1 接线 · 会话持久化接入真实会话生命周期（2026-11-15，分支 `arch/b1-wiring`，基线 = `arch/integration` 启动时 HEAD `27c690c`）状态：**待合入**
+
+> 本轮 = 把已合入的独立存储层 `packages/agent/src/session-persistence.ts`（见 §八十）接入**真实会话生命周期**：会话打开时从存储载入转录、回合结束后把**本回合新增**转录增量持久化；读/写失败 **fail-open**（不回滚回合，日志上报）；**principal / session 隔离**；**同 `dbPath` 重启原子恢复**。**零真实模型、零网络**（确定性假执行面 + 真实临时文件系统）。**不重实现** Pi 会话管理与压缩（Pi Session 仍是唯一转录所有者，**无第二套 session / compaction**）；不改 Worker 提示 / 任务账本语义 / 执行契约 / 压缩机制；`.runtime` 未 `git add`；`docs/decision-log.md` 除本条外未动。
+
+### 1. 接线点（最小改动：4 生产文件 + 2 新测试 + 1 文档）
+
+| 位置 | 改动 |
+| --- | --- |
+| `packages/agent/src/execution-runtime.ts:212` | 新增**端口**（仅类型，无实现耦合）：`export interface TranscriptStore { readTranscript(): Promise<readonly DriverMessage[]>; append(message: DriverMessage): Promise<void>; }`。runtime **不** import `JsonlSessionRepo`/`session-persistence`，保持依赖注入风格。 |
+| `execution-runtime.ts` `RuntimeOptions`（`:278`/`:280`） | 加 `transcriptStore?: TranscriptStore` 与 `onTranscriptError?: (error: unknown) => void`（缺省 `undefined` = 逐字节现行为：转录仅内存）。 |
+| `execution-runtime.ts` `createSession` 打开段（`:445-453`） | 注入存储时 `mainMessages = [...await transcriptStore.readTranscript()]`，并 `persistedCount = mainMessages.length`；读失败 fail-open。 |
+| `execution-runtime.ts` `createSession` 回合替换点后（`:689`） | 按 `persistedCount` **增量追加本回合新增**消息，逐条推进；写失败 fail-open。 |
+| `scripts/ask-runtime.ts`（`:195`/`:528`） | `SessionAssemblyInput` 加 `transcriptStore?` / `onTranscriptError?` 并透传；`assembleAskRuntime` / `assembleAskRuntimeCli` **不传** → ask/redo 单轮入口不落盘会话，现行为不变。 |
+| `apps/server/server.ts`（`:32`,`:64`,`:119-120`,`:191`,`:308`） | import `SessionPersistence`（装配层是**唯一**构造具体存储处）；`ServerDeps` 加 `sessionStoreDir?`（缺省 `<dbPath 所在目录>/sessions`）；`sessionFor` 为每个 `(principal, session)` `openOrCreate` 独立句柄并作为 `transcriptStore` 注入；`Server.close()` 改 `Promise<void>` 并 `await sessionPersistence.close()`。 |
+| `apps/server/main.ts`（`:55`） | 关停 `await server.close()`（确保存储句柄释放）。 |
+
+端口与 `PersistedSession`（`session-persistence.ts:57`）**结构化相容**，装配层直接注入后者。
+
+### 2. 写失败 fail-open（硬）
+
+- **写失败不回滚回合**：`append` 失败时，已成功的追加保留、剩余不再尝试、**回合回复照常返回**，错误经 `onTranscriptError` 上报（server 侧落 `transcript_store_error` 日志，`server.ts:195`）。
+- **读失败不阻塞打开**：`readTranscript` 失败退化为空转录，会话照常打开并可继续持久化本回合，错误同样上报。
+
+### 3. 四类确定性验证证据（零真实模型、零网络、假执行面；真实临时文件系统）
+
+文件：`apps/server/server-b1-persistence.test.ts`（server 级，3 用例）、`packages/agent/session-persistence-wiring.test.ts`（端口/失败注入，4 用例）。
+
+| 类 | 用例 | 断言要点 |
+| --- | --- | --- |
+| ① 进程重启恢复 | server「重启恢复：同 dbPath 重建 server…」 | 发消息 → `await close` → 同 `dbPath` 重建 → 再发；第二回合 driver 输入转录**含首回合用户消息与 assistant 回复**。 |
+| ② 任务恢复不重放 | server「任务恢复不重放 + 结果找回…」 | background 模式：任务经既有 runner 完成 → 重启后 `runner.pump` 与后续回合**均不再调用 executor**（新 executor `calls === 0`），恢复只重建对话上下文。 |
+| ③ 结果找回 | 同上用例 | 重启后经 `createSqliteTaskRegistry(dbPath, { readOnly: true }).get(taskId, scope)` 取回首回合**真实结果**（`replyText` 逐字等于 archiveReply 存档）。 |
+| ④ 用户隔离 | server「用户隔离：异 principal / 异 session…」 | 三回合分别落 `(user-a,conv-a)/(user-a,conv-b)/(user-b,conv-a)`；重启后 `(user-a,conv-a)` 新回合上下文**只含本会话内容**，`not.toContain` 他会话 / 他 principal 内容。 |
+| 端口语义 + fail-open | 端口层 4 用例 | ① 载入历史 + 只增量追加；② `append` 失败不回滚回合、错误上报；③ `readTranscript` 失败不阻塞打开、错误上报；④ 缺省 `undefined` = 现行为。 |
+
+**反向绊线（本轮实测）**：临时停用「打开载入」→ ①/③重启与隔离用例**红**（4 failed）；临时停用「回合后持久化」→ 5 failed。两处破坏都必须红，证明用例真实守护接线（验证后已还原）。详见 `docs/product/b1-wiring.md` §③。
+
+**隔离机制**：存储层把 `principalId` 映射成独立子树 `<rootDir>/principals/<sha256(principalId)>`；server 侧 `sessionId = <channel>:<conversationId>`、`principalId = <channel>:<userId>`，异 principal / 异 session **物理分离**。
+
+**重启恢复机制**：`sessionStoreDir` 缺省 = `<dbPath 所在目录>/sessions`（同一部署状态根）→ 同 `dbPath` 重建即恢复；`cwd` 取仓根（跨重启稳定——Pi 的 `(cwd, id)` 是会话身份的一半）。
+
+### 4. 生产准入（本 run 未实现，**不阻塞 Dummy E2E**）
+
+以下两项是**上线生产前的准入项**，本 run **明确不实现**，如实登记（不假称已解）：
+
+1. **保留策略（retention）**：Pi 追加日志**只增不减**（compaction 只作为一条 `CompactionEntry` 再追加，压缩缩小的是**模型上下文**、不是日志文件）；存储**无界（线性）增长**，需消费方自备保留/轮转。本 run 不实现。
+2. **容量上限（capacity cap）**：单 `(principal, session)` 或单部署的存储上限 / 背压未实现，超限行为未定义。
+
+**不阻塞理由**：Dummy E2E / 验收以确定性假执行面 + 真实临时目录运行，规模受控；两项不改变本接线的正确性语义（载入/追加/fail-open/隔离/重启），可在接入真实部署前单独补齐。
+
+### 5. 未重实现 Pi 会话与压缩 / 边界
+
+- **不重实现** Pi 会话管理与压缩（Pi Session 唯一转录所有者，`readTranscript()` 每次**现读**存储、宿主不留第二份可变副本）；无第二套 session / compaction；不改 Worker 提示 / 任务账本语义 / 执行契约；`.runtime` 未 `git add`。
+- **不重放**：接线只在对话上下文层载入/追加转录；任务侧仍走既有 runner（`task_cancel`/`task_resume`/`background` 的 pump），本层**无**任何执行/重放入口，也不感知 compaction。
+
+### 6. 测试读数（**本会话实跑**；cwd = B1 worktree，`TMPDIR=/home/tao/.tmp`，零网零 key）
+
+- 定向：`npx vitest run packages/agent/session-persistence-wiring.test.ts apps/server/server-b1-persistence.test.ts` → **2 文件 / 7 passed**。
+- 类型：`npm run typecheck`（`tsc --noEmit`）→ **0 错误**。
+- 全量：`npm test` → **97 文件 / 968 passed + 3 todo**；改动仅**新增** 2 个测试文件 / 7 个用例，**未删/未弱化任何既有用例**（例数只增不减）。
+
+### 7. 未执行 / 局限（如实登记）
+
+- **零真实模型、零网络**（假 Pi 驱动 / 假执行面）；真实模型会话长程记忆质量、真实重启（跨进程）待真实部署接入后另阶段。
+- **保留策略与容量上限未实现**（见 §4，生产准入项，不阻塞 Dummy E2E）。
+- 真实部署的 `sessionStoreDir` 落点（是否并入既有 `sessionTtlMs` 等生命周期策略）待裁定。
+
+**指针**：`docs/product/b1-wiring.md`（接线点 / 语义 / 四类证据 / 生产准入）；关联 §八十（B1 独立存储层实施）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
