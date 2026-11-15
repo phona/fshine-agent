@@ -97,7 +97,9 @@ export function createStageDClient(options: StageDClientOptions): StageDClient {
       return outcome;
     }
 
-    const window = typeof args['window'] === 'string' ? args['window'] : undefined;
+    const window = typeof args['window'] === 'string'
+      ? args['window']
+      : typeof args['--window'] === 'string' ? args['--window'] : undefined;
     if (options.faultWindow !== undefined && window === options.faultWindow) {
       const outcome: ExecutionOutcome = {
         status: 'failed',

@@ -274,7 +274,8 @@ function wrapRuntime(base: ModelRuntime, sink: SessionSink, meter: BudgetMeter |
   const finish = (rec: ModelCallRecord, message: unknown): void => {
     rec.ms = Date.now() - rec.startedAt;
     const usage = usageOf(message);
-    if (usage !== undefined) {
+    // `done` 事件与 `.result()` 可能都到达；usage 只累计一次，避免预算 meter 双计。
+    if (usage !== undefined && rec.usage === null) {
       rec.usage = usage;
       meter?.addTokens(usage.totalTokens);
     }

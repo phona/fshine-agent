@@ -13,7 +13,7 @@
  *
  * 硬停：任一预算达限即停全部后续回合/组，保留已完成部分，不补跑、不筛绿。
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
@@ -51,7 +51,7 @@ const DEFAULT_OUT = path.join(REPO_ROOT, '.runtime', 'pi152-stageD');
 const BUDGET_DOC = path.join(REPO_ROOT, 'scripts', 'eval', 'pi152-stageD', 'BUDGET.md');
 
 interface Args {
-  mode: 'gate' | 'selftest' | 'selftest-restart' | 'selftest-d' | 'run';
+  mode: 'gate' | 'selftest' | 'selftest-restart' | 'selftest-d' | 'recompute' | 'run';
   groups: GroupId[];
   out: string;
   maxModelCalls: number;
@@ -73,6 +73,7 @@ function parseArgs(argv: readonly string[]): Args | { error: string } {
     else if (arg === '--selftest') args.mode = 'selftest';
     else if (arg === '--selftest-restart') args.mode = 'selftest-restart';
     else if (arg === '--selftest-d') args.mode = 'selftest-d';
+    else if (arg === '--recompute') args.mode = 'recompute';
     else if (arg === '--gate' || arg === '--infra-gate') args.mode = 'gate';
     else if (arg.startsWith('--out=')) args.out = path.resolve(REPO_ROOT, arg.slice('--out='.length));
     else if (arg.startsWith('--group=') || arg.startsWith('--groups=')) {
@@ -357,6 +358,45 @@ async function runSelftest(out: string): Promise<number> {
 
 
 
+
+/** 只重算指标（不调模型、不改原始证据）：用于修正纯分析代码的缺陷。 */
+function recompute(out: string): number {
+  const evidencePath = path.join(out, 'evidence.json');
+  if (!existsSync(evidencePath)) {
+    console.error(`缺少 ${evidencePath}`);
+    return 2;
+  }
+  const evidence = JSON.parse(readFileSync(evidencePath, 'utf8')) as {
+    startedAt: string;
+    endedAt: string;
+    hardStop: string | null;
+    groups: GroupEvidence[];
+    budget: { maxModelCalls: number; maxTokens: number; wallMs: number; samplesPerGroup: Record<string, number>; maxTurnsPerSession: Record<string, number> };
+  };
+  const report = computeMetrics(evidence.groups);
+  const blocked = evidence.hardStop !== null || report.metrics.some((metric) => metric.verdict === 'FAIL');
+  const next = { ...evidence, blocked, metrics: report };
+  writeFileSync(evidencePath, JSON.stringify(next, null, 2));
+  writeFileSync(path.join(out, 'metrics.json'), JSON.stringify(report, null, 2));
+  writeFileSync(path.join(out, 'report.md'), renderReport({
+    report,
+    groups: evidence.groups,
+    budget: evidence.budget,
+    startedAt: evidence.startedAt,
+    endedAt: evidence.endedAt,
+    hardStop: evidence.hardStop,
+  }));
+  const summary = {
+    blocked,
+    hardStop: evidence.hardStop,
+    totals: report.totals,
+    metrics: report.metrics.map((metric) => ({ id: metric.id, name: metric.name, rate: metric.rate, verdict: metric.verdict })),
+  };
+  writeFileSync(path.join(out, 'summary.json'), JSON.stringify(summary, null, 2));
+  console.log(JSON.stringify(summary, null, 2));
+  return blocked ? 1 : 0;
+}
+
 /** D 组装配自检：background runner + 共享 SQLite registry + 两用户并发（假驱动，零模型）。 */
 async function runDSelftest(out: string): Promise<number> {
   const root = path.join(out, 'selftest-d');
@@ -368,6 +408,7 @@ async function runDSelftest(out: string): Promise<number> {
   });
   const aliceScope: TaskScope = { principalId: 'wecom:selftest-alice', sessionId: 'selftest-alice-s' };
   const bobScope: TaskScope = { principalId: 'wecom:selftest-bob', sessionId: 'selftest-bob-s' };
+  const daveScope: TaskScope = { principalId: 'wecom:selftest-dave', sessionId: 'selftest-dave-s' };
   seedCompletedTask({
     registry: prepared.registry, scope: aliceScope,
     request: '核对 alpha 集合 W1 的记录（alice 私事 ALICE-SECRET-7788）',
@@ -399,23 +440,43 @@ async function runDSelftest(out: string): Promise<number> {
     dispatchMode: 'background', withRunner: true,
     driverFactory: () => ({ mainDriver: mainFor('status'), workerDriver: worker() }),
   });
+  const dave = await buildSession({
+    group: 'D', prepared, key: 'dave', principalId: daveScope.principalId, sessionId: daveScope.sessionId, scope: daveScope,
+    dispatchMode: 'background', withRunner: true,
+    faultWindow: 'W2',
+    driverFactory: () => ({
+      mainDriver: mainFor('run'),
+      workerDriver: {
+        async run(input) {
+          const tool = input.tools.find((entry) => entry.name === 'execute_operation') ?? input.tools[0]!;
+          await input.exec(tool.name, { operation: 'dummy.query', args: { '--collection': 'beta', '--window': 'W2' } });
+          const text = '查询完成。';
+          return { text, messages: [...input.messages, { role: 'assistant', content: text } as never] };
+        },
+      },
+    }),
+  });
   try {
     await Promise.all([
       sendTurn(alice, { text: '核对 beta W1。', label: 'run' }, 1, { afterRestart: false }),
       sendTurn(bob, { text: '查 #1。', label: 'status' }, 1, { afterRestart: false }),
+      sendTurn(dave, { text: '核对 beta W2。', label: 'fault' }, 1, { afterRestart: false }),
     ]);
-    await Promise.all([alice.assembled.runner?.whenIdle(), bob.assembled.runner?.whenIdle()]);
+    await Promise.all([alice.assembled.runner?.whenIdle(), bob.assembled.runner?.whenIdle(), dave.assembled.runner?.whenIdle()]);
     const aliceTasks = alice.assembled.session.tasks();
     const bobTasks = bob.assembled.session.tasks();
+    const daveTasks = dave.assembled.session.tasks();
     const bobStatus = bob.sink.toolCalls.find((call) => call.tool === 'task_status');
     const assertions = [
       ['alice tasks completed', aliceTasks.length === 2 && aliceTasks.every((task) => task.status === 'completed')],
       ['bob has no task', bobTasks.length === 0],
       ['bob #1 not found', bobStatus?.isError === true],
-      ['registry has 2 tasks', prepared.registry.list().length === 2],
+      ['dave fault task failed', daveTasks.length === 1 && daveTasks[0]?.status === 'failed'],
+      ['alice unaffected by dave fault', aliceTasks.every((task) => task.status === 'completed')],
+      ['registry has 3 tasks', prepared.registry.list().length === 3],
     ] as const;
     const failed = assertions.filter(([, ok]) => !ok);
-    writeFileSync(path.join(root, 'selftest-d.json'), JSON.stringify({ assertions, aliceTasks, bobTasks, bobStatus }, null, 2));
+    writeFileSync(path.join(root, 'selftest-d.json'), JSON.stringify({ assertions, aliceTasks, bobTasks, daveTasks, bobStatus }, null, 2));
     if (failed.length > 0) {
       console.error(`selftest-d FAIL：${failed.map(([name]) => name).join('、')}`);
       return 1;
@@ -425,6 +486,7 @@ async function runDSelftest(out: string): Promise<number> {
   } finally {
     alice.close();
     bob.close();
+    dave.close();
     prepared.registry.close();
   }
 }
@@ -528,6 +590,7 @@ async function main(): Promise<number> {
   if (parsed.mode === 'selftest') return runSelftest(parsed.out);
   if (parsed.mode === 'selftest-restart') return runRestartSelftest(parsed.out);
   if (parsed.mode === 'selftest-d') return runDSelftest(parsed.out);
+  if (parsed.mode === 'recompute') return recompute(parsed.out);
   if (parsed.mode === 'gate') {
     const hasKey = (process.env.LLM_API_KEY ?? '').trim() !== '';
     console.log(JSON.stringify({
@@ -640,4 +703,4 @@ if (process.argv[1] !== undefined && path.resolve(process.argv[1]) === fileURLTo
   });
 }
 
-export { main, runDSelftest, runSelftest, runRestartSelftest };
+export { main, recompute, runDSelftest, runSelftest, runRestartSelftest };
