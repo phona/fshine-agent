@@ -1729,6 +1729,45 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 
 ---
 
+## 六十三、R5 垃圾核查 · 代码面台账登记（2026-11-15，分支 `arch/r5-junk`，基线 = arch/integration @860129e）状态：**待合入**
+
+### ① 核查范围
+
+- 生产代码面：`packages/*/src/*.ts` + `apps/server/*.ts` 共 30 个生产文件、8389 行的**全部命名导出**逐个统计引用（脚本自动扫描 + 非正常项人工 `grep -rnw` 复核）；`package.json` 依赖逐个引用核查；代码内注释与实现一致性抽查。
+- 分类口径：生产引用 / 仅测试 / 仅 eval / 零引用 / 文件内自用；动态引用（字符串拼接 import、CLI 路径、配置驱动）单独甄别。
+- **一律不动、不判垃圾**：历史证据（本日志历史裁决、预注册、落盘 Eval）、AGENTS.md 冻结面、`scripts/eval/convergence-r1` 冻结件。
+- 完整台账 = `docs/product/r5-junk-audit.md`（本节摘要 + 指针，不重写证据）。
+
+### ② 四类结论（详见台账总表 #1-9，每项含 grep 证据与 `路径:行号`）
+
+- **死代码（零引用导出）3**：`packages/agent/src/skills.ts:136` `discoverSkills`、`skills.ts:167` `readSkill`、`packages/contracts/src/config.ts:102` `resolveActiveProfileId`——全仓 .ts `grep -rnw` 仅命中定义行（#3 为 C5 已登记遗留的代码面残留）。
+- **未使用依赖 3**：`express`/`@types/express`（零 import、types 数组不含）；`@earendil-works/pi-coding-agent`（全仓零 import；pi-agent-core 依赖方向相反且 dist 无该字符串、无动态加载；docs/a2a-protocol.md:110-115 历史陈述与现状不符——**只登记，不改历史文档**）。
+- **两套实现（判保留）1**：`packages/agent/src/task-registry.ts:434-635` 内存版 `createTaskRegistry`——非完整重复（SQLite 版复用共享核心），有历史裁决 + 契约同测；不触「停用却保留两套实现」禁令。附带待裁决：生产不可达的内存缺省回退（`execution-runtime.ts:334`）可收紧。
+- **陈旧注释 2**：`packages/agent/src/step-text.ts:46-48`（点名不存在的 task_control/resend_artifact、漏 4 个真实工具，`grep -v test` 后唯一命中即该注释）；`server-paths.ts:109-110`（引用已删申报层；机制逻辑仍有效，注释措辞可随前项一并修）。
+
+### ③ 统计
+
+- 判定分布：死代码 3 / 未使用依赖 3 / 两套实现判保留 1 / 陈旧注释 2 / 未消费配置键 0（无新增）。
+- 建议分布：删除 5（#1-5）+ 删除待裁决 1（#6，历史文档陈述冲突）+ 保留（含可选收紧待裁决）2（#7、#9）+ 文字修正待批 1（#8）。
+- 大量 SELFONLY/TESTONLY 项为类型导出或测试缝，**不判死**；其余依赖（pi-agent-core 19 处、pi-ai 11 处、@wecom/aibot-node-sdk 等）全部有真实引用。
+
+### ④ 建议但未执行删除（本节不删任何东西）
+
+- 本核查**执行删除数 = 0**：删除建议 #1-5（零引用导出 ×3、express 依赖 ×2）与 #6（pi-coding-agent，待裁决）均待 owner 批准后按 TDD/绊线纪律另开改动实施；#8/#9 注释修正同样只登记。
+- 删除动作全部留待 owner 批；台账附「复核命令清单」（r5-junk-audit.md §五）供独立复跑。
+
+### ⑤ 与文档清理（§六十）的关系
+
+- 代码面与文档面**不重叠**：§六十 docs 清理路只覆盖 docs/ 文件（`docs/product/docs-cleanup-candidates.md`）；本节只覆盖生产 .ts 导出、package.json 依赖与代码内注释。#6/#8/#9 涉及的历史文档陈述（docs/a2a-protocol.md 等）只登记「与现状不符」，不进入文档清理建议，历史证据零重写。
+
+### ⑥ 复核结论
+
+- 零真实模型额度消耗（纯静态核查）；唯一新增文件 `docs/product/r5-junk-audit.md`，零代码改动、零既有文档改动（本日志本节为唯一 decision-log 写入）。
+- 冻结面核查通过：历史裁决 / 预注册 / 落盘 Eval / convergence-r1 冻结件 / AGENTS.md 冻结面均未触碰。
+- 状态：**待合入**；合入后按维护规则补 merge commit 与日期。
+
+---
+
 
 ## 维护规则
 
