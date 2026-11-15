@@ -24,8 +24,60 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const CRASH_FIXTURE = path.join(__dirname, 'fixtures', 'stage-c-crash.ts');
 const RESUME_FIXTURE = path.join(__dirname, 'fixtures', 'stage-c-resume-turn.ts');
 const OLD_RECORD_FIXTURE = path.join(__dirname, 'fixtures', 'old-b1-record.mjs');
-const OLD_PI_PACKAGE = '/home/tao/projects/fshine-agent/node_modules/@earendil-works/pi-agent-core';
 const SUMMARY_MARKER = '【此前会话摘要】';
+
+/**
+ * 旧 B1 格式产物生成器需要 `@earendil-works/pi-agent-core@0.85.x`（本 worktree 装的是 1.5.2）。
+ *
+ * 路径推导（不写死绝对路径）：
+ *   ① 显式环境变量 `FSHINE_OLD_PI_AGENT_CORE`（指向旧包目录）优先；
+ *   ② 否则经 `git rev-parse --git-common-dir` 从本 worktree 回到主仓根，取主仓 node_modules
+ *      下的旧包（linked worktree 的旧包来自主仓安装）。
+ * 只认 package.json 里 name/version 都匹配的 0.85.x 包；找不到 → 用例显式 skip 并说明原因
+ * （不静默通过）。
+ */
+const OLD_PI_PACKAGE_ENV = 'FSHINE_OLD_PI_AGENT_CORE';
+
+function resolveOldPiPackage(): string | undefined {
+  const candidates: string[] = [];
+  const explicit = process.env[OLD_PI_PACKAGE_ENV]?.trim();
+  if (explicit !== undefined && explicit.length > 0) candidates.push(explicit);
+  try {
+    const commonDir = execFileSync('git', ['rev-parse', '--git-common-dir'], {
+      cwd: REPO_ROOT,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (commonDir.length > 0) {
+      const mainRoot = path.dirname(path.resolve(REPO_ROOT, commonDir));
+      candidates.push(path.join(mainRoot, 'node_modules', '@earendil-works', 'pi-agent-core'));
+    }
+  } catch {
+    // 非 git 环境：只走显式环境变量。
+  }
+  for (const candidate of candidates) {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(candidate, 'package.json'), 'utf8')) as {
+        name?: unknown;
+        version?: unknown;
+      };
+      if (
+        pkg.name === '@earendil-works/pi-agent-core'
+        && typeof pkg.version === 'string'
+        && pkg.version.startsWith('0.85.')
+      ) {
+        return candidate;
+      }
+    } catch {
+      // 候选不存在或不是包目录：继续找下一个。
+    }
+  }
+  return undefined;
+}
+
+const OLD_PI_PACKAGE = resolveOldPiPackage();
+const OLD_PI_SKIP_REASON = `未找到 @earendil-works/pi-agent-core@0.85.x（可用 ${OLD_PI_PACKAGE_ENV} 指向旧包目录；linked worktree 缺省取主仓 node_modules）`;
+
 
 const tempDirs: string[] = [];
 function tempDir(prefix: string): string {
@@ -292,7 +344,11 @@ describe('⑤ 压缩后重启继续', () => {
 
 // ───────────────────────────────────────────── ⑥ 旧 B1 格式兼容性
 describe('⑥ 旧 B1 记录格式', () => {
-  it('旧 B1（0.85.1 v4 提交日志）不能被新 SessionManager 直接读；按 id 查找落空→静默新建空会话', () => {
+  it('旧 B1（0.85.1 v4 提交日志）不能被新 SessionManager 直接读；按 id 查找落空→静默新建空会话', (ctx) => {
+    if (OLD_PI_PACKAGE === undefined) {
+      ctx.skip(`旧 B1 生成器不可用：${OLD_PI_SKIP_REASON}`);
+      return;
+    }
     const stage = tempDir('c6-stage');
     // 一次性旧格式产物：临时目录内放 0.85.1 包的 node_modules 符号链接，走其公开子路径。
     mkdirSync(path.join(stage, 'node_modules', '@earendil-works'), { recursive: true });
