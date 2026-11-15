@@ -1800,6 +1800,38 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 ---
 
 
+## 六十五、R5 通知 A+B 通道最小实现（文案层 / payload 补 missing / A 通道 sink+drain / B 通道 user-role 注入）（2026-11-15，分支 `arch/r5-notify`，基线 = arch/integration @970c0ae）状态：**待合入**
+
+### ① 文案层（纯函数，零依赖，可单测）
+
+- `packages/agent/src/notification-render.ts`：输入只允许白名单字段（name/kind/reason/missing），输出用户语言字符串，不产自由文本。①9 类 kind 折叠成 4 类用户语言（开始办了 / 需要你一句话 / 办完了·没办成 / 已按你说的停了）；②`reason` 人话映射且失败分级——`result_unknown` 必须读作「不确定做没做完，需要再确认」**严禁读作成功**、`resource_limited`→「系统太忙，这个没接」、`timeout`→「跑太久先停了」、`cancelled_by_user`→「已按你说的停了」；③内部术语黑名单机械断言（`task_status`/`resource_limited`/`requestId`/`request_N`/uuid 形态/绝对路径/`W\d+` 窗口码，断言只针对渲染器拼装文本；`name` 为用户原话按规则④原样保留）；④每条必含 `name`，缺省机械回落「未命名任务」。测试 `packages/agent/notification-render.test.ts`（12 例）。
+
+### ② payload 补字段（冻结 §4 补字段，owner 已批，最小）
+
+- `packages/agent/src/notifications.ts` 白名单新增 `missing`：`NotificationPayload`/`NotificationFact`/`FACT_KEYS`/`validateFact`/`buildPayload` 同步（`missing?: readonly string[]`，`waiting_user` 必带非空字符串数组，与底账 `pendingQuestion.missing` 同口径形状校验）——使通知能说出「需要你补什么」。**唯一键去重与有界重试语义未动**；`docs/product/r4-joint-interfaces.md` §4 只补字段说明，不改语义。
+
+### ③ A 通道（机械推送，无守护进程）
+
+- **sink**：`apps/server/notification-file-sink.ts` 生产可用、渠道无关（追加写 JSONL）；`apps/server/main.ts:43` 接线（缺省落 `dbPath` 同目录 `notifications.jsonl`）。**真实企微 sink 仍 blocked，不接真实平台**。
+- **投递驱动（补真缺口 `Server.deliverPending()` 无人调用）**：**零定时器/零 setInterval/零守护进程**——通知落库同刻 fire-and-forget 试投一次（`server.ts` outbox `deliverOnRecord`，沿用既有机制）+ **每次用户回合开始时 drain 一次 pending**（piggyback 在已有回合上，回合闭包首行 `drainNotifications()`，与 `Server.deliverPending` 同源）。
+- **不做**定时上报与消息原地编辑（登记为后续可选，不随本节推进）。
+
+### ④ B 通道（事实进上下文，Hermes 式）
+
+- `attachNotificationOutbox` 同一事实挂钩缓冲机械事实并返回 `taskFactProvider` → `createSession` → 回合开头以**普通 user-role 消息**注入主对话消息序列（**不造 custom message type、不改 Pi 消息流不变量**）。注入**幂等**（同一事实键 FIFO 去重不重复注入，上限 1024）、**有界**（单次最多 5 条，超出汇总成一条）、**只注入白名单字段机械事实**（外包一层极短事实陈述，禁止写结论性自由文本）。**Main 润色未做**（待可读性 Eval，不预先加提示词补丁）。
+
+### ⑤ 验证与证据
+
+- 零真实模型额度；零新依赖；新增产品逻辑 ≤ ~150 行（notification-render 84 + file-sink 38 + 接线/驱动约 25）。
+- TDD 先红：实现前 4 个新测试文件红（missing 未知字段、render 模块缺失、server ⑬⑭），实现后绿。反向绊线实测：去掉回合开头 drain → ⑬ 红；去掉 kind 折叠 → 文案测试红；恢复后绿。soak RSS 不变式保持绿（初版逐回合全量扫描红过一次，改为事实挂钩缓冲零逐回合 SQL 后全量绿）。
+- 合入前复跑（本节登记时实跑）：`npm run typecheck` = 0；`npm test` 全量 84 文件 / 834 例全绿（基线 817，只增不减）。证据 `.runtime/r5notify/`（gitignored，未 git add）。
+
+### ⑥ 回退
+
+- 实现为单 commit `2bd67c0`（feat），`git revert 2bd67c0` 即整体回退；分支 `arch/r5-notify` 未 push、未合并、未触碰 main/tag。
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
