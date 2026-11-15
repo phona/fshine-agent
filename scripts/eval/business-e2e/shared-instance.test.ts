@@ -240,6 +240,34 @@ describe('共享实例：跨 principal 接续', () => {
   });
 });
 
+/** 真实模型接线面（零模型）：新选项与观察面的确定性断言。 */
+describe('共享实例：真实模型接线面（零模型）', () => {
+  it('defaultBehavior 兜底：脚本耗尽时后台回合仍落定，不 fail-fast', async () => {
+    const fx = createSharedInstanceFixture({
+      scenarioName: 'default-behavior',
+      defaultBehavior: async (input) => ({ kind: 'completed', resultText: `DEFAULT-${input.taskNo ?? '?'}` }),
+    });
+    fixtures.push(fx);
+    fx.scriptMain(
+      toolCallAssistant('run_task', { task: '查询 documents' }),
+      textAssistant('已受理。'),
+    );
+    await fx.send('alice', '帮我查 documents');
+    await fx.settleRounds();
+    expect(fx.executor.rounds.length).toBe(1);
+    expect(fx.executor.settledCount()).toBe(1);
+  });
+
+  it('send 返回观察面：假驱动下 toolCalls/modelCalls 为空数组（形状稳定）', async () => {
+    const fx = newFixture();
+    fx.scriptMain(textAssistant('好的。'));
+    const turn = await fx.send('alice', '在吗');
+    expect(Array.isArray(turn.toolCalls)).toBe(true);
+    expect(turn.toolCalls).toEqual([]);
+    expect(turn.modelCalls).toEqual([]);
+  });
+});
+
 /** 绊线（≥3）：故意破坏隔离/证据面，断言守卫必须红。 */
 describe('共享实例：绊线（破坏必须红）', () => {
   it('绊线1：B 回复若泄露 A 任务详情，证据守卫必须报红', () => {

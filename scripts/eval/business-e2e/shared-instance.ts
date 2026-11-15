@@ -20,9 +20,12 @@
 import { appendFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { MutableModels } from '@earendil-works/pi-ai';
 import type { AppConfig } from '@fshine/contracts';
+import type { TurnDriver } from '../../../packages/agent/src/driver-contract';
+import { contextWindowFrom } from '../../ask-runtime';
 import type {
   CapabilityManifest,
   ExecutionClient,
@@ -39,7 +42,7 @@ import type {
 import { createServer } from '../../../apps/server/server';
 
 /** 夹具复用的仓内 dummy 执行层根（能力清单/技能目录都在仓内，不触网）。 */
-const FIXTURE_ROOT = path.resolve(__dirname, '..', 'fixtures', 'dummy-platform');
+const FIXTURE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'dummy-platform');
 
 /** 两个 principal 共用的会话窗口：同 conversationId —— 隔离只可能来自 principal 维度。 */
 const SHARED_CONVERSATION_ID = 'shared-conv';
@@ -117,6 +120,101 @@ function queueDriverFor(queue: AgentMessage[]) {
 }
 
 // ---------------------------------------------------------------------------
+// 真实模型取证：透传式驱动包装器（只记录、不改语义；工具调用 + 逐次模型用量）
+// ---------------------------------------------------------------------------
+
+/** 一次模型工具调用的机械记录（host 侧实际解析结果；isError=true = 被宿主/执行层拒绝）。 */
+export interface DriverToolCallRecord {
+  driver: 'main' | 'worker';
+  seq: number;
+  tool: string;
+  args: unknown;
+  isError: boolean;
+  resultSummary: string;
+  at: string;
+  elapsedMs: number;
+}
+
+/** 一条 assistant 消息的用量（modelCalls 的计数口径同 convergence runner：assistant.usage）。 */
+export interface ModelCallRecord {
+  driver: 'main' | 'worker';
+  input?: number;
+  output?: number;
+  cacheRead?: number;
+  total?: number;
+}
+
+/** 驱动观察汇（夹具内部持有；send() 按回合切面返回）。 */
+export interface DriverObservations {
+  toolCalls: DriverToolCallRecord[];
+  modelCalls: ModelCallRecord[];
+}
+
+function safeJson(value: unknown): unknown {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch {
+    return String(value);
+  }
+}
+
+function summarizeResult(value: unknown): string {
+  if (value !== null && typeof value === 'object') {
+    const record = value as { status?: unknown; error?: unknown };
+    const status = typeof record.status === 'string' ? record.status : 'ok';
+    const code = record.error !== null && typeof record.error === 'object' && typeof (record.error as { code?: unknown }).code === 'string'
+      ? ` error=${(record.error as { code: string }).code}`
+      : '';
+    return `${status}${code}`;
+  }
+  return String(value).slice(0, 200);
+}
+
+function usageOf(message: unknown): Omit<ModelCallRecord, 'driver'> | undefined {
+  if (message === null || typeof message !== 'object') return undefined;
+  const usage = (message as { usage?: unknown }).usage;
+  if (usage === null || typeof usage !== 'object') return undefined;
+  const record = usage as { input?: unknown; output?: unknown; cacheRead?: unknown; totalTokens?: unknown };
+  const pick = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
+  const picked = { input: pick(record.input), output: pick(record.output), cacheRead: pick(record.cacheRead), total: pick(record.totalTokens) };
+  return Object.values(picked).some((value) => value !== undefined) ? picked : undefined;
+}
+
+/** 记录包装器：透传 inner 的 run/compact/synthesize，只旁路捕获工具调用与助手用量。 */
+function recordingDriver(inner: TurnDriver, driver: 'main' | 'worker', sink: DriverObservations): TurnDriver {
+  let seq = 0;
+  const wrapped: TurnDriver = {
+    async run(input) {
+      const wrappedInput = {
+        ...input,
+        exec: async (tool: string, args: Record<string, unknown>, signal?: AbortSignal) => {
+          seq += 1;
+          const startedMs = Date.now();
+          try {
+            const result = await input.exec(tool, args, signal);
+            sink.toolCalls.push({ driver, seq, tool, args: safeJson(args), isError: false, resultSummary: summarizeResult(result), at: new Date().toISOString(), elapsedMs: Date.now() - startedMs });
+            return result;
+          } catch (error) {
+            sink.toolCalls.push({ driver, seq, tool, args: safeJson(args), isError: true, resultSummary: error instanceof Error ? error.message : String(error), at: new Date().toISOString(), elapsedMs: Date.now() - startedMs });
+            throw error;
+          }
+        },
+      };
+      const result = await inner.run(wrappedInput);
+      for (const message of result.messages.slice(input.messages.length)) {
+        if ((message as { role?: unknown }).role !== 'assistant') continue;
+        const usage = usageOf(message);
+        sink.modelCalls.push({ driver, ...(usage ?? {}) });
+      }
+      return result;
+    },
+    ...(inner.compact ? { compact: inner.compact.bind(inner) } : {}),
+    ...(inner.synthesizeAssistant ? { synthesizeAssistant: inner.synthesizeAssistant.bind(inner) } : {}),
+  };
+  return wrapped;
+}
+
+// ---------------------------------------------------------------------------
 // 假执行客户端：只回能力清单 + 记录请求（后台回合走注入的 taskExecutor，不经此面）
 // ---------------------------------------------------------------------------
 
@@ -149,7 +247,7 @@ export interface ScriptedExecutor extends TaskExecutor {
   settledCount(): number;
 }
 
-function createScriptedExecutor(): ScriptedExecutor {
+function createScriptedExecutor(defaultBehavior?: RoundBehavior): ScriptedExecutor {
   const behaviors: RoundBehavior[] = [];
   const rounds: ScriptedExecutor['rounds'] = [];
   let settled = 0;
@@ -158,7 +256,8 @@ function createScriptedExecutor(): ScriptedExecutor {
     rounds,
     settledCount: () => settled,
     execute(input, context) {
-      const behavior = behaviors.shift();
+      // 脚本耗尽：给了 defaultBehavior（真实模型不定回合数时）用它兜底；否则 fail-fast。
+      const behavior = behaviors.shift() ?? defaultBehavior;
       if (behavior === undefined) {
         return Promise.reject(new Error('共享实例夹具：后台回合行为脚本已空（编排不完整）。'));
       }
@@ -200,6 +299,12 @@ export interface TurnEvidence {
   done: { event: string; taskIds: unknown[]; executions: unknown[] };
 }
 
+/** 回合证据 + 真实模型观察面（工具调用 / 模型用量）；假驱动下二者为空数组。 */
+export interface ObservedTurn extends TurnEvidence {
+  toolCalls: DriverToolCallRecord[];
+  modelCalls: ModelCallRecord[];
+}
+
 /** 越权拒绝证据守卫：回复不得含他人任务详情；终态不得带出他人 taskIds/executions。 */
 export function assertRefusalEvidence(entry: TurnEvidence, secrets: readonly string[]): void {
   for (const secret of secrets) {
@@ -226,6 +331,12 @@ export function assertFoundEvidence(entry: TurnEvidence): void {
 export interface SharedInstanceFixtureOptions {
   /** 证据归档名（<root>/evidence/<scenarioName>.jsonl）。 */
   scenarioName?: string;
+  /** true = 注入真实 Pi 驱动（读 env）；缺省 = 假队列驱动（零网络）。 */
+  realDrivers?: boolean;
+  /** server 生效环境（realDrivers 时须带 LLM_API_BASE_URL/LLM_API_KEY/LLM_MODEL）；缺省 { LLM_MODEL: 'test-model' }。 */
+  env?: NodeJS.ProcessEnv;
+  /** 后台回合脚本耗尽时的兜底结局（真实模型回合数不定时用）；缺省 fail-fast。 */
+  defaultBehavior?: RoundBehavior;
 }
 
 export interface SharedInstanceFixture {
@@ -241,8 +352,8 @@ export interface SharedInstanceFixture {
   logs: Array<Record<string, unknown>>;
   /** 预置下一批假模型响应（按回合消费顺序）。 */
   scriptMain(...messages: AgentMessage[]): void;
-  /** 以某 principal 身份在共享会话窗口发一条消息，返回回合证据（回复 + message_done 终态）。 */
-  send(principal: 'alice' | 'bob', text: string): Promise<TurnEvidence>;
+  /** 以某 principal 身份在共享会话窗口发一条消息，返回回合证据（回复 + message_done 终态 + 驱动观察）。 */
+  send(principal: 'alice' | 'bob', text: string): Promise<ObservedTurn>;
   /** 等待后台回合落定：不给 expected = 等当前全部（挂起中的长任务不等待需要 expected）；
    *  给 expected = 轮询等待累计落定回合数达到该值（可取消挂起场景用）。 */
   settleRounds(expected?: number): Promise<void>;
@@ -274,32 +385,41 @@ export function createSharedInstanceFixture(
 
   const queue: AgentMessage[] = [];
   const client = new RecordingClient();
-  const executor = createScriptedExecutor();
+  const observations: DriverObservations = { toolCalls: [], modelCalls: [] };
+  const executor = createScriptedExecutor(options.defaultBehavior);
   const logs: Array<Record<string, unknown>> = [];
   let messageSeq = 0;
   let serverPromise: Promise<Awaited<ReturnType<typeof createServer>>> | undefined;
 
+  const driverEnv = options.env ?? { LLM_MODEL: 'test-model' };
+  // 驱动工厂：realDrivers = 真实 Pi 驱动 ×2（外包一层记录器，只记录不改语义）；缺省 = 假队列驱动。
+  const buildDrivers = (env: NodeJS.ProcessEnv) => (options.realDrivers === true
+    ? {
+        mainDriver: recordingDriver(createPiTurnDriver({ env, ...contextWindowFrom(env) }), 'main', observations),
+        workerDriver: recordingDriver(createPiTurnDriver({ env, ...contextWindowFrom(env) }), 'worker', observations),
+      }
+    : { mainDriver: queueDriverFor(queue), workerDriver: queueDriverFor(queue) });
+
   // 唯一 createServer 调用（唯一服务进程）：身份取自渠道事实，多 principal = 消息级区分。
   const buildServer = () =>
     createServer({
-      env: { LLM_MODEL: 'test-model' },
+      env: driverEnv,
       config,
       dbPath,
       stateDir: path.join(root, 'state'),
-      createDrivers: () => ({
-        mainDriver: queueDriverFor(queue),
-        workerDriver: queueDriverFor(queue),
-      }),
+      createDrivers: buildDrivers,
       createExecutionFace: async () => ({ client, allowedOperations: ['dummy.query'] }),
       taskExecutor: executor,
       logger: (line) => logs.push(line),
     });
 
-  async function send(principal: 'alice' | 'bob', text: string): Promise<TurnEvidence> {
+  async function send(principal: 'alice' | 'bob', text: string): Promise<ObservedTurn> {
     serverPromise ??= buildServer();
     const server = await serverPromise;
     messageSeq += 1;
     const messageId = `m-${messageSeq}`;
+    const callsBefore = observations.toolCalls.length;
+    const modelsBefore = observations.modelCalls.length;
     const reply = await server.handler({
       channel: 'wecom',
       wecomUserId: principal,
@@ -310,7 +430,7 @@ export function createSharedInstanceFixture(
     });
     const replyText = typeof reply === 'string' ? reply : JSON.stringify(reply);
     const done = [...logs].reverse().find((line) => line['event'] === 'message_done' && line['messageId'] === messageId);
-    const entry: TurnEvidence = {
+    const entry: ObservedTurn = {
       principal: `wecom:${principal}`,
       text,
       reply: replyText,
@@ -319,6 +439,8 @@ export function createSharedInstanceFixture(
         taskIds: (done?.['taskIds'] as unknown[] | undefined) ?? [],
         executions: (done?.['executions'] as unknown[] | undefined) ?? [],
       },
+      toolCalls: observations.toolCalls.slice(callsBefore),
+      modelCalls: observations.modelCalls.slice(modelsBefore),
     };
     appendFileSync(evidencePath, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
     return entry;
