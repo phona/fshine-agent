@@ -1,0 +1,44 @@
+
+==============================================================================
+A  unfixable over-window input (single giant user message)
+==============================================================================
+prompt result ok = true
+assistant stream calls = 1  (over-window = 1)
+first promptTokens = 20073  budget = 7168
+compaction_start = ["threshold"]
+compaction_end   = [{"status":"completed","reason":"threshold"}]
+run_end = [{"status":"failed","error":"assistant_error"}]
+retry_scheduled count = 0
+  [PASS] A1 knowably over-window request IS sent (>=1)  -> overWindowCalls=1
+  [PASS] A2 run_end failed  -> failed
+  [PASS] A3 assistant calls bounded <= 2  -> calls=1
+  [PASS] A3 no retry_scheduled loop  -> retries=0
+
+==============================================================================
+B  hook veto probe (before_request + transform_context registered)
+==============================================================================
+before_request event = [{"keys":["attempt","lane","model","runId","step","streamOptions"],"hasMessages":false,"hasContextWindow":false,"step":"compaction"},{"keys":["attempt","lane","model","runId","step","streamOptions"],"hasMessages":false,"hasContextWindow":false,"step":"assistant"}]
+transform_context event = [{"messageCount":2}]
+assistant stream calls = 1  (over-window = 1)
+  [PASS] B1 before_request handler ran  -> n=2
+  [PASS] B1 before_request event has NO messages
+  [PASS] B1 before_request event has NO contextWindow
+  [PASS] B2 over-window request STILL sent despite hooks  -> overWindow=1
+
+==============================================================================
+C  public estimation helpers vs wired send guard
+==============================================================================
+estimateContextTokens([giant]) = 20000
+shouldCompact(20000, 8192, {...}) = true
+typeof estimateContextTokens = function
+typeof shouldCompact = function
+  [PASS] C1 estimation helpers exist publicly
+  [PASS] C1 helper says the context WOULD overflow/compact  -> shouldCompact=true
+
+DETERMINATION INPUTS:
+  knowably over-window requests sent (A) = 1
+  bounded failure (A)                    = yes (run_end failed, retries 0)
+  public veto hook available             = no (before_request is streamOptions-only; errors reported not propagated)
+  public estimation helpers              = yes (estimateContextTokens/shouldCompact) but NOT wired to send path
+==== D1 RECHECK: FACTS OBSERVED (D1 NOT deletable) ====
+EXIT_CODE=0

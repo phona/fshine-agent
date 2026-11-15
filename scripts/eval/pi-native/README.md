@@ -149,3 +149,22 @@ summary completeSimple calls = 3               # = maxAttempts，有界
 - **假 `Models`**：harness 内部对 provider 的调用点是 `lane.models.streamSimple` / `lane.models.completeSimple` / `lane.models.getModel`（见分发物 `dist/harness/runtime/drive/generation.js:134`、`structural.js:629`、`lane.js:1280`）。本 spike 用一个仅实现这三个方法的对象顶上 `Models`，其余方法为 `n/a` 桩；`setDefaultStreamFn` 亦安装假流作为公开缺省（无真实 provider 可达）。
 - 本 spike 为**证伪/证实**用途，非产品码；**未改动 `packages/**`**、未升级 Pi、未动 lockfile。
 - 随机 `id`/时间戳导致输出不可逐字复现，但断言稳定通过（多次运行均 `ALL CHECKS PASSED`）。
+
+## D1 反向绊线独立复核（阶段三）
+
+`tripwire-d1-recheck.mjs` 由**另一名 Agent**独立编写，用于复核实施 Agent 在 `tripwire-d1.mjs` 报告的 D1 结论，并补探 Pi 是否存在公开的「发送前尺寸预判/拒绝」钩子。
+
+```sh
+cd /home/tao/projects/fshine-agent-exp-pi-session
+node scripts/eval/pi-native/tripwire-d1.mjs          # 实施 Agent 的原始绊线
+node scripts/eval/pi-native/tripwire-d1-recheck.mjs  # 独立复核（含钩子探查）
+```
+
+原始输出见 `OUTPUT-tripwire-d1-recheck.txt`。复核结论（三态）：**Pi 不提供「不发送必然超窗请求」的能力** —— 新路径在发起模型请求前不拒绝、发出 1 次必然超窗请求后有界失败。因此 D1（`run()` 请求前 INV 复核臂）**不可删**。
+
+公开面证据（Pi 0.85.1）：
+
+- `before_request` 钩子（`dist/harness/agent-harness.d.ts:520-530`）仅暴露 `{model, step, attempt, streamOptions}` 与 `streamOptions` patch，**不含 messages、不含 contextWindow、无拒绝语义**；处理器抛错只被上报、不中止请求（`dist/harness/hooks.js:154-170`）。
+- `transform_context` 钩子（`dist/harness/agent-harness.d.ts:510-519`）可改写 messages/systemPrompt，但无「拒绝」返回值，事件亦不含模型窗口。
+- 公开估算助手 `estimateContextTokens`（`dist/harness/compaction/compaction.d.ts:57`）、`shouldCompact`（`:59`）存在，但**未接入发送路径**——仅在 checkpoint 的阈值压缩判定处使用（`dist/harness/runtime/drive/structural.js:863`）。
+- 无 `maxInputTokens` / `wouldOverflow` / `estimateBeforeSend` / `preflight`-类公开字段或选项（全 `dist/**/*.d.ts` grep 仅命中 `contextWindow` 于内部操作态 `dist/harness/session/types.d.ts:241`）。
