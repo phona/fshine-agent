@@ -1,0 +1,126 @@
+
+==============================================================================
+S1  跨回合转录连续性（同一 session 两次 lane.prompt）
+==============================================================================
+r1.ok=true  r2.ok=true
+tip after round1 = 01a1defd-c23c-7566-bb30-e3c448042889
+tip after round2 = 01a1defd-c240-7566-bb30-e3cfce20c8d3
+entry chain (ascending):
+  seq=4 id=01a1defd parent=null type=message role=user
+  seq=14 id=01a1defd parent=01a1defd type=message role=assistant
+  seq=23 id=01a1defd parent=01a1defd type=message role=user
+  seq=33 id=01a1defd parent=01a1defd type=message role=assistant
+provider context on 2nd prompt saw round1 user text: true
+provider context on 2nd prompt saw round1 assistant text: true
+  [PASS] both turns completed
+  [PASS] entry chain parentId contiguous
+  [PASS] tip advanced after round2  -> 01a1defd-c23c-7566-bb30-e3c448042889 -> 01a1defd-c240-7566-bb30-e3cfce20c8d3
+  [PASS] 2nd-turn provider context contains round1 user msg
+  [PASS] 2nd-turn provider context contains round1 assistant msg
+  [PASS] no compaction entry written (below threshold)
+
+==============================================================================
+S2  threshold 自动压缩（调小 reserveTokens 强制触发）
+==============================================================================
+compaction_start = {"reason":"threshold"}
+compaction_end   = {"status":"completed","reason":"threshold","entryId":"01a1defd"}
+compaction entry = {
+  "type": "compaction",
+  "tokensBefore": 5000,
+  "fromHook": false,
+  "summary": "PI-GENERATED-SUMMARY",
+  "retainedTailRoles": [
+    "user",
+    "assistant"
+  ],
+  "retainedTailLens": [
+    67,
+    67
+  ]
+}
+completeSimple (summary) calls = 1
+  [PASS] compaction_start reason=threshold
+  [PASS] compaction_end status=completed
+  [PASS] a type=compaction entry was written
+  [PASS] compaction entry carries a summary
+  [PASS] summary text came from the summary provider via Pi pipeline
+  [PASS] compaction entry carries a non-empty retainedTail
+  [PASS] retainedTail keeps the recent turn (starts at a user message)
+  [PASS] no fshine code triggered compaction (only public settings set)
+
+==============================================================================
+S3  Overflow Recovery（首答 context-overflow -> 原生恢复 -> 续跑完成）
+==============================================================================
+prompt result ok = true
+compaction_start reason = overflow
+compaction_end = {"status":"completed","reason":"overflow"}
+run_end = [{"status":"completed"}]
+assistant stream calls = 2
+summary completeSimple calls = 1
+  [PASS] compaction_start reason=overflow
+  [PASS] compaction_end status=completed
+  [PASS] run_end status=completed
+  [PASS] exactly 2 assistant calls (1 overflow + 1 recovered)
+  [PASS] prompt returned ok
+
+==============================================================================
+S4  有界失败：反复 overflow 超上界 / 当前回合无法切分
+==============================================================================
+-- S4a persistent overflow (every assistant answer overflows) --
+prompt result ok = true
+compaction_start reasons = ["overflow"]
+compaction_end = [{"status":"completed","reason":"overflow"}]
+run_end = [{"status":"failed","error":"assistant_error"}]
+retry_scheduled count = 0
+assistant stream calls = 2
+  [PASS] exactly one overflow recovery attempted
+  [PASS] run_end status=failed (bounded)
+  [PASS] exactly 2 assistant calls (no unbounded retry)
+  [PASS] no retry_scheduled loop for assistant
+-- S4b nothing to compact (empty session, manual lane.compact) --
+lane.compact ok = false
+lane.compact error = {"_tag":"NothingToCompact","message":"Lane \"main\" has nothing to compact"}
+provider calls = 0
+  [PASS] manual compact on empty history -> error
+  [PASS] error is NothingToCompact  -> NothingToCompact
+  [PASS] no provider call issued
+
+==============================================================================
+S5  工具调用与工具结果完整配对（压缩后 history 中配对不破）
+==============================================================================
+compaction_end = {"status":"completed","reason":"threshold"}
+assistant toolCall entry seq=33 ids=["tc-echo-1"]
+toolResult entry seq=43 toolCallId=tc-echo-1 toolName=echo
+compaction retainedTail roles = ["user","assistant","toolResult","assistant"]
+retainedTail toolCall ids = ["tc-echo-1"]
+retainedTail toolResult ids = ["tc-echo-1"]
+session: toolCalls=["tc-echo-1"] toolResults=["tc-echo-1"]
+  [PASS] compaction completed
+  [PASS] retainedTail keeps toolCall AND its toolResult together
+  [PASS] every toolResult in session has a matching toolCall
+  [PASS] every toolCall in session has a matching toolResult
+
+==============================================================================
+S6  摘要失败有界（摘要 provider 报错 -> 有界失败，不无界重试）
+==============================================================================
+r1.ok=true r2.ok=true
+retry_scheduled = [{"step":"01a1defd-c257-7566-bb30-e466c944004f","attempt":2,"maxAttempts":3},{"step":"01a1defd-c257-7566-bb30-e466c944004f","attempt":3,"maxAttempts":3}]
+compaction_end = [{"status":"failed","reason":"threshold","error":"summarization_failed"}]
+run_end = [{"status":"completed"},{"status":"failed","error":"summarization_failed"}]
+summary completeSimple calls = 3
+  [PASS] bounded retries scheduled (maxAttempts-1 = 2)
+  [PASS] all retries report maxAttempts=3
+  [PASS] compaction_end status=failed
+  [PASS] summary calls bounded to maxAttempts=3
+  [PASS] no compaction entry written on failure
+
+==============================================================================
+S7(extra)  JsonlSessionRepo 落盘 + 重开同一 session（证明持久化入口可用）
+==============================================================================
+session id = 01a1defd-c25b-7566-bb30-e4766dbb7a13
+tip = 01a1defd-c260-7566-bb30-e47e9ecf826c
+  [PASS] jsonl session produced a tip
+reopened entry count = 2
+  [PASS] reopened session preserves transcript
+
+==== ALL CHECKS PASSED ====
