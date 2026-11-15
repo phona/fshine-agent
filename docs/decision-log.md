@@ -2125,6 +2125,34 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 **回退**：单分支 `arch/r5-d7`，全部改动限于 `scripts/eval/**`（夹具 + 测试）与本条目；`git revert` 相应 commit 即回退；未 push、未合并、未触碰 main/tag；证据根 gitignored、未入库。
 ---
 
+## 七十三、R5 会话持久化独立设计 · 归档登记（2026-11-15，分支 `arch/r5-sesspersist`，基线 = arch/integration 启动时 HEAD `b0606db`）状态：**待合入**
+
+> 编号说明：按本 worktree 基线处 decision-log 最大号 +1 取 §七十三（合入时 §七十一/§七十二 已被 R5-C 计量 / R5-D7 占用，顺延）。合入主仓时若与他分支撞号，由主仓仲裁者统一顺延重编号（§六十九/§七十 先例）。详细设计见 `docs/product/r5-session-persistence-design.md`（提交 `5b4c28e`）；本条只做决定面登记。**未实施任何产品代码改动。**
+
+**范围**：让**会话事实**（对话转录）在进程重启后不丢（可续/可查），**且不引入第二套任务事实源**。docs-only、零产品代码改动、零真实模型调用。硬约束（owner）：① **独立于压缩方案迁移**（不与「复用 Pi Session / 迁移到 harness」绑定、不假手压缩）；② **不增加第二套任务事实源**（只承载对话转录与最小确定性事实）；③ **Pi First / Runtime Minimal**（转录即 Pi 原生结构，不自建语义层，宿主只保留不可转交的确定性责任）。
+
+**现状缺口**：回合转录**只在内存**——`createSession` 闭包变量 `mainMessages` 初值 `[]`、每回合被整体替换、只对外暴露只读快照（`packages/agent/src/execution-runtime.ts:422` / `:647` / `:665`；`Session` 接口自注「当前只存内存」`:282-283`）；`TurnDriverResult.messages` 自注「由调用方持久化」但全仓无落盘写入（`packages/agent/src/driver-contract.ts:38-40`）；Pi 驱动每回合新建 `Agent`（`packages/agent/src/pi-driver.ts:688`）；server 会话对象只在进程内 `Map`，`close()` 清空（`apps/server/server.ts:145` / `:146-179` / `:274`）。**任务事实（台账）已在同库 SQLite 持久化**：`createSqliteTaskRegistry(deps.dbPath)`（`server.ts:96`），表 `tasks`/`task_sequences`/`executions`（`packages/core/src/task-store.ts:156-188`），重启恢复完备（`server.ts:132-133`、`packages/agent/src/task-runner.ts:342/361`，策略 `:21-25`）。缺口一句话：重启后**任务底账保留、会话转录消失**，形成「对话断、任务在」的半续状态。既有审计先例见本日志第 895 行「Pi 原生会话审计（否证）：生产装配不落盘会话、无原生恢复入口」。
+
+**设计要点**：主选**按会话分文件的追加式 JSONL 快照**，位置 `.runtime/sessions/`（`.gitignore:17` 已忽略，**不得 git add**）；文件名 `<sha256(principalId + "\0" + sessionId)>.jsonl`（对身份哈希，杜绝路径注入，**绝不**把渠道文本 `sessionId=${channel}:${conversationId}`（`server.ts:218`）直接拼进路径）；每行 `{ v: 1, principalId, sessionId, at, messages: <AgentMessage[]> }`，`messages` 为 Pi 原生 `AgentMessage[]` **逐字节**、不转换/不裁剪/不造 custom 类型；追加写、读端取**最后一条可解析行**（crash-safe、半行跳过）；单行为「当前（已压缩）转录」故随回合数不无界膨胀。装配注入**可选** `transcriptStore` 端口（同 `taskRegistry` 范式，`execution-runtime.ts:221-224`），`createSession` 构造时按 `(principalId, sessionId)` 载入以**初始化 `mainMessages`**（替代 `:422` 的 `[]`）；写入点在 `:647` 之后、fail-open。重启恢复语义：只重建**对话上下文**，任务侧仍走既有 `runner.pump()`（`expireLeases → result_unknown（不重放）/ claimNextQueued`，`task-runner.ts:21-25`），**不触发任何任务重放、不自动接续在飞回合**。备选（不推荐、仅登记）：同 `dbPath` 内新增 `session_transcripts` 表（最易被误读成「第二事实源」，须更强守卫）。明确不选 Pi `harness/session` 子系统（`StorageBackedSession`/`JsonlSessionRepo`，全仓无导入）——采用即等于绑定 owner 要求**不绑定**的迁移线。
+
+**不引第二任务事实源（硬）**：会话存储**只承载转录**，字段白名单仅 `v/principalId/sessionId/at/messages`，**无任何任务状态/原因/租约/编号字段**；模块**不 import** `task-registry*`/`task-store`/`notifications`、**不发任何指向 `tasks/executions/notifications` 的 SQL**（由源码级写路径守卫按住，仿 `packages/agent/task-registry-write-path.test.ts`）。任务真相始终**唯一**在 SQLite 底账：会话持久化**不读不写**任务表，仅以 `(principalId, sessionId)` 单一 scope 键与底账**并列**、内容不相交。恢复的转录**只能作上下文**，**不得**成为授权/实体/执行范围来源（对齐 `AGENTS.md`）。**与既有 `unexecuted`/`result_unknown` 的关系**：这些是任务台账取值（源码口径：状态 9 个、原因 5 个；`result_unknown` 是 `TaskReason` 而**非状态**），归底账，会话持久化**不复制、不推断、不合成**；**禁止**用转录恢复去「还原」任务状态，也**禁止**把底账状态写回转录当事实。
+
+**不绑压缩迁移（硬）**：不依赖 `pi-driver.ts` 的 `compact`/压缩路径、Pi `harness/session`、任何 `StorageBackedSession`/`JsonlSessionRepo` 类型；格式为**朴素 `AgentMessage[]` JSON**，故「换压缩实现不影响本存储，本存储也不迫使压缩换实现」，两条线互相独立；验证测试**不得 import** `harness/session`、不依赖压缩行为（仅用假驱动）。
+
+**有界失败（硬）**：写失败（磁盘满/权限/IO）→ 记日志、**不回滚回合**（`send()` 返回不变，`execution-runtime.ts:652-656`）、保留上一条快照、**每回合至多写一次**（不重试风暴）；载入失败/文件损坏/半行 → 跳过不可解析行取最后一条可解析快照，整文件不可用则**回落空转录**（= 现行行为，会话仍能启动）、**不删损坏文件**（留证据）；`v` 超前 → **拒绝加载**并回落空转录；回合中途崩溃只丢在飞的当回合；**不自动重放**。全部落盘在 `.runtime/` 下，**不得 git add**。
+
+**回归 / 验证清单**（确定性夹具优先；重启恢复失败注入）：① 同进程往返（假驱动、零模型）：注入临时目录 `transcriptStore`（仿 `packages/agent/runtime.test.ts:26/163`）跑一回合 → 断言出现快照；同 `(principal, session)` 构造第二 Session → `transcript()`（`execution-runtime.ts:665`）初值即等于存档。② 重启恢复（假渠道、临时 `dbPath`，仿 `apps/server/server.test.ts:193-207`）：建 server、发消息、`close()`、同 `dbPath` 重建 server、发第二条 → 断言第二次 `mainDriver.run` 收到的 `messages`（`driver-contract.ts:25`）含首回合历史。③ 会话隔离：同/异 principal、同/异 sessionId 互不读到对方转录。④ 不引第二事实源**源码级守卫**（仿 `task-registry-write-path.test.ts`）+ 快照字段白名单。⑤ 失败注入（仿 `task-runner.test.ts` 与 `scripts/p7b-fault-injection.test.ts` 风格）：`write` 抛错回合仍正常返回、上一快照完好；`read` 抛错/半行/不识别 `v` 会话以空转录启动、不崩溃、不删损坏文件。⑥ 解耦守卫：测试不 import `harness/session`、不依赖压缩（可加静态检查，仿 `packages/agent/import-boundary.test.ts`）。⑦ 有界性：连续 N 回合文件 = N 行、每行大小不随 N 增长。⑧ 既有回归基线 `npm test`（`vitest run`）+ `npm run typecheck`（`tsc --noEmit`）保持全绿，任务恢复用例（`task-runner.test.ts`）行为零变化。**反向绊线**：去掉「读最后可解析行」跳过逻辑 ⇒ 半行用例必须转红。**口径说明**：以上为**拟增**用例，**本轮未运行任何测试**（ask 为只读侦察 + 设计）；实施时须**实跑并给出命令与输出**。
+
+**实施代价估计（不实施）**：粗估约 **0.5–1 人日**（1 名工程师）：新增 `packages/agent/src/session-store.ts` 约 120–200 LOC；`RuntimeOptions.transcriptStore` 注入点 + `createSession` 载入/写入（`execution-runtime.ts`）约 20–30 行；装配接线 `scripts/ask-runtime.ts`（`assembleSessionCore` `:430-545`）与 `apps/server/server.ts`（`sessionFor` `:146-179`）各一处；测试 8 类约 150–300 LOC。**改动面**：零冻结面、零 Worker 提示、零任务底账、零执行契约改动。建议：采用主选、`transcriptStore` **可选注入 + 缺省零变化**（先合入后接线、可回退）、**守卫（②④⑥）先行**、明确**不做**语义记忆/检索/投影、文件内压缩/滚动、跨进程锁。
+
+**未实施**：本次登记**零产品代码改动**（仅新增设计文档 `docs/product/r5-session-persistence-design.md` + 追记本条目）、**零新增模型调用**；`session-store.ts`、`transcriptStore` 注入点、上列全部回归/绊线用例**一律未实施**。未动冻结面、未重写 Worker 提示、未引新治理/状态机、未另建任务事实源、未为过测放宽判据、未 `git add` 任何 `.runtime` 证据。
+
+**待 owner 裁决**：是否实施该切片；是否采用主选（`.runtime/sessions/*.jsonl`）而非同库 SQLite 表；缺省不注入（零变化）先合入、后接线是否可接受；与压缩迁移线（复用 Pi Session / harness）的接口仅在将来以**独立适配切片**承接，不在本切片内预造。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
