@@ -2042,6 +2042,44 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 ---
 
 
+## 七十一、R5 企微只读影子 E2E · 准入审计（2026-11-15，分支 `arch/r5-wecom-audit`，基线 = `arch/integration` 启动时 HEAD `b0606db`）状态：**待合入**
+
+> 编号说明：本 worktree 基线处 decision-log 最大号为 §七十；按本 worktree 当前最大号 +1 取 §七十一。合入主仓时若与其它分支撞车，由主仓仲裁者统一顺延重编号（先例：§六十九/§七十、§六十九/§七十/§七十一 顺延）。
+> 详细审计见 `docs/product/r5-wecom-shadow-readonly-admission.md`（提交 `1309ef1` + 证据复核 `2678949`）；本条只做决定面登记。**未联调、零产品代码改动、零真实模型调用。**
+
+**审计对象与边界**：只回答「要在今天跑通一条『真实企微测试租户入站 + 仓内 dummy 执行层 + 用户可见出站受控』的只读影子链路，缺什么、哪些已就绪、最小接入面是什么」。**不授权生产接入、不授权真实写操作、不接真实企微/SaaS**；只做准入判断、不执行联调。判据纪律：接口/类型/函数存在**一律不读作能力已实现**（本轮出现反向案例：入站有真实实现，见 ①）。
+
+**六面「已实现 / 仅接口 / 缺失」三分类结论**（逐条 `文件:行号` 证据见审计档；此处只登记结论）：
+- ① **入站能力 = 已实现（真实实现，非仅接口）**：`WecomBotChannel` 官方 SDK 薄封装并已在 `apps/server/main.ts:45` 接线（`packages/channel-wecom/src/adapter.ts:162`），缺凭据拒启 fail-closed（`adapter.ts:194-197`）。**缺失**：无「只读影子 / 入站-only / 出站抑制」开关——凭据接入即对发起会话回帧（受理 `:457` / 进度 `:547-558` / 终帧 `:617` / 降级主动新消息 `:790-809`），无「只入不出」路径。**仅接口**：`config.channel.port/callbackPath`（HTTP 回调形态）解析但无消费方（`packages/core/src/config.ts:398-407`）。
+- ② **身份与 principal 映射 = 已实现（最小）+ 登记缺口**：`principalId = <channel>:<userid>`、`sessionId = <channel>:<conversationId>` 由宿主派生（`apps/server/server.ts:215-218`）；`enabled` 准入门 fail-closed（`server.ts:219-223`）。**缺口/残余风险**：适配层无签名校验，`userid` 直接取自 SDK 帧（`adapter.ts:439-441`），宿主无第二道机械校验，可信性**传递依赖 SDK**。**仅接口/未实现**：跨渠道独立授权未实现（契约自述 D-112）。
+- ③ **会话路由 = 已实现**：`(principalId, sessionId)` 双键会话缓存 + 同会话串行化 + 同 messageId 幂等重放 + 群聊按 principal 隔离（`server.ts:145-241`）。无独立 Router（符合 AGENTS.md）。**缺失**：无真实跨用户隔离样本（仅确定性单测）。
+- ④ **出站 NotificationSink = 缺失（真实企微 = 0）**：非测试 `NotificationSink` 实现只有渠道无关落盘 sink（`apps/server/notification-file-sink.ts:11`），生产接线 `apps/server/main.ts:38-44`（注释明示「真实企微 sink 仍 blocked」）。`WecomBotChannel.sendToConversation` 是真实主动推送实现（`adapter.ts:275-355`）但**从 outbox 不可达**（全仓非测试无消费方）。对「只读影子」而言出站落盘是合格的。**不得把 sink 类型/函数存在读作真实企微投递已实现**。
+- ⑤ **回执 = 部分实现**：入站 ack/进度/终帧/降级/附件收据已实现（`adapter.ts:457 / 547-558 / 617 / 790-809 / 712-762`）；出站**无真实企微投递回执**（无 sink）；`DeliveryReceipt` 形状存在但仅 `sendToConversation` 产出而它不可达（`packages/contracts/src/channel.ts:160-184`）。入站 ack 是流式帧、**非持久回执**（可核账仅内存幂等缓存 `server.ts:205-212`）。
+- ⑥ **授权与测试环境隔离 = 已实现（宿主侧最小）+ 一处缺口**：只读允许集合确定性拒绝（`packages/agent/src/execution-runtime.ts:454-456 / 778-779`）、worker env 白名单（`packages/agent/src/worker-env.ts:25-35`）、评测 safety-gate（`scripts/eval/safety-gate.ts:17-59`）。**缺口**：「渠道影子隔离」只有文字纪律、**无机械门**——`safety-gate` 只覆盖评测 run 的 execution 面，不覆盖 `apps/server/main.ts` 的真实渠道装配，无代码门能在启动时判定「本次 server 不得向真实用户出帧」。
+
+**总判定**：入站面就绪度高（真实实现已接线）；出站通知面**完全缺失**（真实企微 sink = 0）；「只读影子」形态**今日缺一个机械闸**——现有装配是「接真凭据即向真实用户回帧」的生产形态，**非**默认不产用户可见结果的影子形态。即**硬件在前、缺一个「默认不产用户可见结果」的机械闸**，需 owner 逐项授权 + 独立测试租户/收件人 + 补一条影子隔离判定。
+
+**最小接入方案**（本方案不执行；执行须 §准入清单全勾；原则——能不动产品代码就不动）：
+- **Step1 独立测试租户 + 只读 principal 名单**（名单只列测试 UserID、不含生产 UserID）。准入证据：owner 授权文本 + 名单文件 + `server.ts:219-223` 拒绝未列身份的机械证明。回退：改名单即可。
+- **Step2 出站受控**（只接测试租户凭据、通知保持落盘 sink、回帧只落测试租户会话）。证据：grep 证明唯一非测试 sink 是 `notification-file-sink.ts`；测试租户内观察回帧不出测试会话。回退：撤凭据 / 改测试租户成员。
+- **Step3 执行面 = 仓内 dummy 且只读**（`contextProfile.root` 在仓内、允许集合非空且 ⊆ 快照）。证据：`execution-runtime.ts:324-334` 空集合拒启；`typecheck`+单测绿。回退：改回仓内夹具。
+- **Step4 写入面关闭**（只开放 access=read；无写/确认/取消/产物）。证据：越权拒绝路径单测绿（`execution-runtime.ts:454-456`）；执行层 audit 无 write 行。回退：撤列。
+- **Step5 证据落盘**（executions 底账 + 执行层 `EXECUTION_AUDIT_PATH` + notifications.jsonl 可读回）。回退：删 `.runtime` 证据重跑。
+- **Step6 回退与熔断**（移除 `WECOM_BOT_ID/SECRET` 即拒启 `adapter.ts:194-197`；`runtime.dispatchMode:'inline'` 回同步路径）。风险：进程残留连接。回退：`SIGINT/SIGTERM` 走 `channel.stop()`（`main.ts:50-59`）。
+- 登记：若 owner 要求**完全不出帧**，需新增「影子抑制」开关——**属产品代码改动，本轮 docs-only 不做**，另立切片 + 独立评审。
+
+**准入清单**（逐项可勾，fail-closed，任一不满足即停）：owner 逐项授权 / 测试租户隔离（名单不含生产 UserID）/ 出站受控（落盘 sink，**不**实现接线真实企微 sink，当前 = 0 保持）/ 执行面 = 仓内 dummy 且只读 / 只读边界（越权拒绝路径单测绿）/ 凭据隔离（企微凭据只住 gitignored `config/agent.yaml`/`.env`；worker env 白名单）/ **影子隔离判定**（今日无机械门，须以测试租户事实 + 人工确认替代并登记残余风险）/ 证据可得 / 回退就绪 / 零真实模型口径。
+
+**只读影子 vs 长期业务试用**：只读影子 = 短会话单次/少量、测试租户/受控收件人、写关闭（只读）、出站落盘即可、**不判**稳定性、跨用户确定性单测即可。长期业务试用 = 长稳跨天/跨批、真实业务用户、按业务授权写（写/确认/取消/产物）、**须**真实企微投递 + 回执链、**须**会话恢复/续跑准入、**须**真实跨用户样本与长稳证据。**结论纪律**：影子通过**不得**读作业务试用通过；长期试用须另加长稳/会话恢复/跨用户隔离/出站真实投递准入（四轴报告为准）。
+
+**局限**：**未联调、未运行**——全档为静态阅读 + 源码核验，未启动 server、未连企微、未跑执行、未跑真实模型；「入站就绪」是**代码面**判断、非「今天实际收到真实帧」的运行证据。**真实企微出站 sink = 0**（保持；影子阶段合格）。无 SDK 认证面证据（② 残余风险只到「宿主侧无第二道机械校验」）。无真实跨用户/长稳样本。行号以本分支当前工作树为准，基线漂移后须复核。**不构成安全结论/授权**。
+
+**边界重申**：本轮**不授权真实企微生产接入、不授权真实写操作**；只做「能否进短会话只读影子」的准入判断、**不执行联调**。冻结面/治理面未动；未改产品代码；未访问真实平台；`.runtime` 未入库。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
