@@ -2521,6 +2521,68 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十、B1 会话持久化实施 · 独立存储层（复用 Pi 公开 Session 持久化；2026-11-15，分支 `arch/sess-persist-impl`，基线 = `arch/integration` 启动时 HEAD `b90f12f`）状态：**待合入**
+
+> 本轮 = B1 会话持久化**独立存储层实施**。**不接生产装配**（不改 `apps/server`、`execution-runtime`、`ask-runtime` 等生产路径；新模块 `packages/agent/src/session-persistence.ts` 未被任何生产入口 import）；**零真实模型调用、零网络、零真实凭据**；**不引第二套任务事实源、不另建第二份可变 `AgentMessage` 转录**；不升级 Pi、不复制 Pi 源码、不依赖未导出实现。
+
+### 1. 架构前提（硬，来自 owner）
+
+- **Pi Session 是唯一转录所有者**：本层不持有、不缓存、不落任何自有 `AgentMessage[]`；写走 Pi `Branch.appendMessage`、读走 Pi `Branch.findEntries`，本层只在 Pi 与调用方之间转传 Pi 原生 `AgentMessage`。
+- **优先复用 Pi 正式公开的持久化能力**，不自造存储/编解码；只读 `.d.ts`/源码确认契约，未依赖未导出实现。
+
+### 2. 复用点（全部为 Pi 公开导出，`@earendil-works/pi-agent-core@0.85.1`）
+
+| 能力 | 来源（公开导出） | 用法 |
+| --- | --- | --- |
+| 文件型会话仓库 | `JsonlSessionRepo`（`harness/session`） | 每 principal 一个仓库实例，`create`/`open`/`list`/`delete` |
+| Pi 原生 Session 语义层 | `StorageBackedSession`（`harness/session`，经 repo 暴露） | 直接持有并驱动，不自造会话状态 |
+| 单条 entry 追加日志 | `StorageBackedSession.appendToBranch` | 每次只提交 1 条 message entry + 1 条 branch-tip 值写 |
+| 顺序读回 | `Session.branch(...).findEntries` | 按 `oldestFirst` 读主 branch 的 message entry |
+| 文件系统能力 | `NodeExecutionEnv`（`.../node`） | 注入 `JsonlSessionRepo` 的 `FileSystem` |
+| 运行上下文 | `BACKGROUND_CONTEXT`（`harness/context`） | 传给所有 Pi 调用 |
+
+本层（`session-persistence.ts`，+281 行）只做**薄映射**，不含存储/编解码/编目逻辑：① `principalId` → 独立子树 `<rootDir>/principals/<sha256(principalId)>`（隔离，且对身份哈希、不拼渠道文本进路径）；② `(principalId, sessionId)` → Pi 的 `(cwd, id)`，`cwd` 由构造参数固定（跨重启稳定）；③ 暴露最小 API `openOrCreate`/`list`/`delete`/`close`，会话句柄仅 `append(message)`/`readTranscript()`/`close()`，无 `run/execute/resume/replay/start` 入口。
+
+### 3. 增长特性（未采用被否证的无界 JSONL 原方案）
+
+- **未采用** `docs/product/r5-session-persistence-design.md` 的原设计——其「每回合追加**完整转录**快照」行形状 `{ v, principalId, sessionId, at, messages: AgentMessage[] }`，随回合数逐次重写全量 `messages` 落盘，**文件总量 O(n²) 无界增长**，且损坏时「跳过不可解析行取最后一条快照 / 整文件不可用时回落空转录」——**静默回落掩盖损坏**。该方案**不得原样落地**。
+- **本层复用 Pi 的 `JsonlStorage`**，落盘增长**线性**：正常追加路径 `applyCommit` 只把本次新增写落成一行（`appendFile(path, serializeTransaction(prepared.writes))`），每次 `appendToBranch` 只产生 1 条 message entry + 1 条 tip 值写，故**文件总量 = O(已追加 entry 总数)**。唯一整文件重写点（建仓 temp+rename、fork、torn 尾修复、v3→v4 升级）不在正常追加路径。
+- **有界性如实登记（未放宽）**：Pi 追加日志**只增不减**——compaction 只作为一条 `CompactionEntry`（summary + retainedTail）再追加，不删旧 message entry；**压缩缩小的是模型上下文，不是日志文件大小**。故本层落盘**无界（线性）**，需消费方自备保留/轮转策略；本 run **不实现**保留/轮转（属装配层策略，待与 Pi 迁移一并裁定），**不假称无界已解**。
+
+### 4. 五类硬要求证据（确定性、零真实模型、零网络）
+
+文件 `packages/agent/session-persistence.test.ts`（+356 行）。**本会话实跑**：`TMPDIR=/home/tao/.tmp npx vitest run packages/agent/session-persistence.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**。
+
+| 类 | 测试要点 |
+| --- | --- |
+| **① 原子恢复** | 崩溃留下的半行（去尾换行 + 截半最后一行）重开后只恢复到最后一个完整提交，文件被修复为换行收尾、可续写不重放；崩溃停在「已建文件、未建 branch」→ 重开幂等补建、空转录、无半态；原子建仓后无 `.tmp` 残留、目录内恰 1 个 `.jsonl` |
+| **② principal/session 隔离** | 同名 `sessionId` 跨 principal（alice/bob）物理分离：各自 `list` 只见自己子树、filePath 不同、写入互不可见；同 principal 不同 `sessionId` 互不串读 |
+| **③ 损坏显式报错** | 非法 JSON 行 → `rejects.toThrow(/Invalid JSONL storage .*line N/)`；非法 header → `/invalid header/`；空文件（丢 header）→ `/missing header/`；均**显式拒绝，非静默回落** |
+| **④ 不重放任务** | 恢复含 toolCall/toolResult 的转录逐字 `toEqual`，恢复前后文件字节**完全不变**（纯读零写），续写后长度 +1（从存储 tip 接续非重放）；层无 `run/execute/resume/replay/start` 入口 |
+| **⑤ 不复制任务事实** | 原始 JSONL 不含任务台账字段（`lease_owner`/`lease_until`/`pending_question`/`waiting_since`/`task_no`/`reply_text`/`result_unknown`/`task_sequences`/`executions`）；每条写 `kind ∈ {entry,value,list,usage}` 且 entry 一律 `type:"message"` |
+
+**红→绿（反向绊线性质）证据**：③ 的两条 header 类用例首轮**红**（`Session already exists`）——暴露「Pi `list()` 静默跳过 header 损坏文件 → 本层误判不存在 → 走 create」的**静默回落风险**。据此在 `openOrCreate` 加入 orphan 文件探测（`findSessionFile`，不依赖 Pi 私有目录命名），使损坏显式抛 Pi 解析错误，三轮后全绿；损坏一旦不再显式抛出，该用例即红。
+
+### 5. 为何不是「第二份转录」
+
+本层**不拥有、不缓存、不落**任何自有 `AgentMessage[]`：写 = Pi `appendToBranch`（单条 entry 追加到 entry-log），读 = Pi `findEntries`（entry-log 回放）。因此既无「每回合重写一份随会话增长的全量转录」（无 O(n²)），也无「第二份可独立修改的转录状态」（无第二事实源）。Pi Session 是唯一转录所有者。
+
+### 6. 未接生产、待与 Pi 迁移对齐
+
+本 run **明确不接生产装配**。落地生产前须对齐：① **接线点**——现生产 `mainMessages` 是 `execution-runtime.ts` 闭包内存变量（每回合整体替换，仅 `transcript()` 只读暴露），接本层须把「写入点」与「回合语义」解耦，触及生产 `send()` 路径，**待与 Pi 迁移计划一起裁定**；② **身份来源**——`principalId` 必须取宿主已持有的可信渠道事实，不得由模型文本提供；③ **有界策略**——§3 的日志无界增长需装配层给保留/轮转；④ **与压缩关系**——本层不感知 compaction，compaction 只作为 Pi `CompactionEntry` 进同一日志；⑤ **`cwd` 稳定性**——是 Pi `(cwd,id)` 身份的一半，跨重启必须稳定。
+
+### 7. 局限（如实登记）
+
+- **零真实模型调用、零网络**；§4 的 12 项为**确定性存储测试**，不构成生产/模型行为结论。
+- 落盘日志**线性无界**（§3），保留/轮转**未实现**、待装配层裁定。
+- **未接任何生产入口**（模块未被 import），生产行为**未改变**；接线方案待与 Pi 迁移对齐。
+
+**指针**：`packages/agent/src/session-persistence.ts`、`packages/agent/session-persistence.test.ts`、`docs/product/b1-session-persistence-impl.md`；关联 §七十三（R5 会话持久化独立设计归档）、§七十七（Pi 压缩复用评估）、被否证方案 `docs/product/r5-session-persistence-design.md`。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
