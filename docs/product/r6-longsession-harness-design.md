@@ -10,7 +10,7 @@
 2. **不得演变为第二套压缩决策机制**：禁止「发现零收益就跳过下一次」「达 N 次就停推」之类**改变触发行为**的判定。允许的只有：**样本有效性门槛**（压缩计数不足 → 该会话样本无效）与**硬停**（超 calls/tokens/墙钟 → 停止本会话）；二者都不改变 fshine/Pi 的压缩触发逻辑。
 3. **零产品代码改动**：不碰 `packages/**`、`apps/**`；不动 Worker 提示、任务账本、权限；不借测试名义增 Runtime 机制。
 4. **不伪造窗口**：窗口 = 该 Wave 冻结值（Wave2 128k）。不得靠缩小 `LLM_CONTEXT_WINDOW` 或压缩注入量冒充「128k 下压缩」。
-5. **夹具隔离**：负载数据使用**独立于现有 dummy-platform seedState** 的专用夹具（新增集合/新 profile 或独立 state 根），避免改动 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:245-300` 的既有种子面而影响既有判定/评测。
+5. **夹具隔离**：负载数据使用**独立于现有 dummy-platform seedState** 的专用夹具（新增集合/新 profile 或独立 state 根），避免改动 `scripts/eval/fixtures/dummy-platform/bin/dummy.cjs:245-300` 的既有种子面而影响既有判定/评测。**跨 principal 探针（FI-8）**只在 harness 装配面追加第二 principal 的 **principalId scope**（配置/渠道事实），**不改产品权限代码、不改 seedState、不改各会话单 principal 语料**。
 6. `.runtime` gitignored、不得 `git add`；不改 `docs/decision-log.md`。
 
 ## 二、负载生成器
@@ -20,7 +20,7 @@
 | 既有 | 可复用 | 不可复用原因 |
 |---|---|---|
 | `scripts/ask-interactive.ts`（单进程单 Session 逐行 send、跨回合同一底账 scope、`--trace`） | **入口骨架**：连续多轮真实驱动 | 面向交互/手工，无「≥3 次压缩」推进器与多 Session 并行 |
-| `scripts/ask-replay.ts`（多会话共享装配 + 记录包装器 + trace，`:515-746`） | **多 Session 装配骨架** | 其模型面是确定性假计划（`:355-357` `scripted-fake`），**不可用于质量结论** |
+| `scripts/ask-replay.ts`（多会话共享装配 + 记录包装器 + trace，`:515-746`） | **多 Session 装配骨架** | 其模型面是确定性假计划（`createScriptedController`，`:398-462`：`mainDriver` 直接返回 `plan.reply`、`workerDriver` 返回 `step.summary`，无真实模型），**不可用于质量结论** |
 | `scripts/eval/p3/p3a-session.ts` / `p3s4-session.ts`（真实驱动 + recordingDriver + 压缩事件捕获 + budget 硬停） | **执行器骨架**（驱动链、事件捕获、证据写盘形态） | 全部 `LLM_CONTEXT_WINDOW:'8192'`（`:109`/`:152`），且无「≥3 次压缩」保障、无语料体量 |
 
 新 harness = 以 `p3a-session.ts` 的**驱动/事件/硬停**骨架为基，替换为：(a) 生产 128k 窗口；(b) 上下文推进器；(c) 多 Session 并行；(d) 事实/任务 Oracle；(e) 冻结 rubric 判官接线。
@@ -141,7 +141,7 @@
 - **可复判**：判官输入 = 会话原始留档（§五）；机械重判可复用 `scripts/eval/business-e2e/spread-judge/`（零模型）形态；判官版本号与 rubric 哈希登记进 `manifest.json`。
 - **判官不得覆盖硬零**：硬零项（§五）由机械事实判定，判官**无权**把硬零判为非失败（§〇.5：硬性安全失败不得被平均分抵消）。
 
-## 七、故障注入的执行形态（对齐预注册 §十 FI-1..FI-7）
+## 七、故障注入的执行形态（对齐预注册 §十 FI-1..FI-8）
 
 | # | 注入实现形态（设计，未实施） |
 |---|---|
@@ -152,6 +152,7 @@
 | FI-5 | dummy `denied-one`（`restricted`，`dummy.cjs:272`）→ GATE_REFUSE |
 | FI-6 | 取消后延迟注入执行结果（可控执行层延迟） |
 | FI-7 | 同进程 ≥2 Session 并发 + 可注入时钟（租约推进） |
+| FI-8 | **同进程注入第二 principal**：装配面追加一个 principal B 的 scope（principalId 属配置/渠道事实，非凭据）；以 B 的 scope 对 A 的任务做 `registry.get(taskA, {principalId: B, sessionId})` 越权探针，并机械扫描 B 会话留档（`replies.jsonl`/`turns.jsonl`/`tasks-final.json`）是否含 A 的任务事实。**不改各会话单 principal 语料**（harness 侧注入，不改产品） |
 
 - 全部假件/注入旋钮，**零真实平台、零真实凭据**；注入**不改产品代码**（wrapper/旋钮在 harness 侧）。
 - 每项断言「应出现的有界行为」（预注册 §十），并采集对应机械事件。
