@@ -3,7 +3,7 @@
  * 模型走原生 function calling(无自定义 JSON 协议);流式响应;空闲超时。
  * 事实类进度(重试等)由 host 钩子负责;工具级进度在本驱动的 execute 内渲染。
  */
-import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummary, serializeConversation, shouldCompact, type AgentMessage, type CompactionSettings } from '@earendil-works/pi-agent-core';
+import { Agent, type AgentTool, DEFAULT_COMPACTION_SETTINGS, estimateContextTokens, estimateTokens, generateSummaryWithUsage, serializeConversation, shouldCompact, type AgentMessage, type CompactionSettings } from '@earendil-works/pi-agent-core';
 import { BACKGROUND_CONTEXT } from '@earendil-works/pi-agent-core/harness/context';
 import {
   createModels,
@@ -15,6 +15,7 @@ import {
   type Message,
   type Model,
   type MutableModels,
+  type Usage,
 } from '@earendil-works/pi-ai';
 import { openAICompletionsApi } from '@earendil-works/pi-ai/api/openai-completions.lazy';
 import { isRetryableAssistantError } from '@earendil-works/pi-ai/utils/retry';
@@ -435,6 +436,81 @@ function clampMessageForSummary(message: AgentMessage, allowance: number): Agent
 }
 
 /**
+ * 压缩触发原因（观测枚举）。**只用于计量归因，不参与任何触发/门控判断**——
+ * 是否压缩、压缩哪一段完全由既有的阈值 / INV 复核 / overflow 逻辑决定。
+ *  · threshold     —— 阈值命中（shouldCompact 为真，非 force）
+ *  · invariant     —— 回合前 INV 复核（force，请求前把关）
+ *  · overflow      —— 回合内应急压缩 / 供应商上下文超限恢复（force）
+ *  · turn_boundary —— TurnDriver.compact() 的回合边界调用
+ */
+export type CompactionTrigger = 'threshold' | 'invariant' | 'overflow' | 'turn_boundary';
+
+/** 一次压缩运行里摘要调用的 token 用量（各分片累加；供应商未报告时按 0）。 */
+export interface SummaryTokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  totalTokens: number;
+}
+
+/** 一次压缩运行的产物形态（观测；不改变行为）。 */
+export type CompactionOutcome = 'compacted' | 'no_cut' | 'failed' | 'degraded' | 'rejected';
+
+/**
+ * 一次压缩运行的六项计量（结构化日志事件 `context_compaction_metrics` 的载荷）：
+ * 触发原因、调用与触发点的关联标识、摘要调用次数、摘要 token、耗时、压缩前后长度。
+ * `summaryText` 只在显式开关打开时出现——缺省不落盘摘要正文。
+ */
+export interface CompactionMetrics {
+  trigger: CompactionTrigger;
+  correlationId: string;
+  outcome: CompactionOutcome;
+  summaryCalls: number;
+  summaryUsage: SummaryTokenUsage;
+  elapsedMs: number;
+  tokensBefore: number;
+  tokensAfter: number;
+  /** 摘要正文：仅显式开关（见 compactionCaptureEnabled）打开时存在，缺省不落盘。 */
+  summaryText?: string;
+}
+
+/** 摘要正文捕获开关：缺省关闭；只允许在隔离测试环境显式打开（观测正文用，非生产）。 */
+export const COMPACTION_CAPTURE_SUMMARY_ENV = 'FSHINE_CAPTURE_COMPACTION_SUMMARY';
+
+/** 解析摘要正文捕获开关：空串 / `0` / `false` / 未设置一律视为关闭。 */
+export function compactionCaptureEnabled(
+  env: Record<string, string | undefined> | undefined,
+): boolean {
+  const raw = env?.[COMPACTION_CAPTURE_SUMMARY_ENV];
+  if (typeof raw !== 'string') return false;
+  const value = raw.trim().toLowerCase();
+  return value !== '' && value !== '0' && value !== 'false';
+}
+
+let compactionCorrelationSequence = 0;
+
+/** 新的一次压缩关联标识：把摘要调用（计量）与触发点（同一次压缩）关联起来。 */
+export function newCompactionCorrelationId(): string {
+  compactionCorrelationSequence += 1;
+  return `cmp_${Date.now().toString(36)}_${compactionCorrelationSequence.toString(36)}`;
+}
+
+function emptySummaryUsage(): SummaryTokenUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 };
+}
+
+/** 把一次摘要调用的 provider usage 累加进总量（缺字段按 0，供应商未报告时静默）。 */
+function addSummaryUsage(total: SummaryTokenUsage, usage: Usage | undefined): void {
+  if (!usage) return;
+  total.input += usage.input ?? 0;
+  total.output += usage.output ?? 0;
+  total.cacheRead += usage.cacheRead ?? 0;
+  total.cacheWrite += usage.cacheWrite ?? 0;
+  total.totalTokens += usage.totalTokens ?? 0;
+}
+
+/**
  * 有界摘要：每一条摘要请求的「输入 + maxTokens」都必须装进模型窗口；
  * 前缀超过单次预算时按 oldest-first 分片、携带上一条摘要续写（不丢中间段）。
  */
@@ -442,7 +518,10 @@ async function summarizeWithinWindow(
   prefix: readonly AgentMessage[],
   runtime: PiModelRuntime,
   settings: CompactionSettings,
-): Promise<{ ok: true; text: string; chunks: number } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; text: string; chunks: number; usage: SummaryTokenUsage; elapsedMs: number }
+  | { ok: false; error: string; chunks: number; usage: SummaryTokenUsage; elapsedMs: number }
+> {
   const { models, model } = runtime;
   const maxTokens = Math.min(
     Math.floor(0.8 * settings.reserveTokens),
@@ -451,30 +530,36 @@ async function summarizeWithinWindow(
   let remaining = [...prefix];
   let previous: string | undefined;
   let chunks = 0;
+  // 六项计量：调用次数=chunks、token=usage 累加、耗时=每次调用墙钟累加。
+  const usage = emptySummaryUsage();
+  let elapsedMs = 0;
   while (remaining.length > 0) {
     if (chunks >= MAX_SUMMARY_CHUNKS) {
-      return { ok: false, error: `摘要分片超过上限 ${MAX_SUMMARY_CHUNKS}（前缀 ${prefix.length} 条）` };
+      return { ok: false, error: `摘要分片超过上限 ${MAX_SUMMARY_CHUNKS}（前缀 ${prefix.length} 条）`, chunks, usage, elapsedMs };
     }
     const allowance = summaryInputAllowance(model.contextWindow, maxTokens, previous);
     // 预算连模板余量都装不下：这个窗口物理上做不了有界摘要（异常小的能力声明）。
     if (allowance <= SUMMARY_PROMPT_OVERHEAD_TOKENS) {
-      return { ok: false, error: `摘要输入预算不足（${allowance} ≤ 模板余量）` };
+      return { ok: false, error: `摘要输入预算不足（${allowance} ≤ 模板余量）`, chunks, usage, elapsedMs };
     }
     let chunk = takeSummaryChunk(remaining, allowance);
-    if (chunk.length === 0) return { ok: false, error: '摘要分片为空' };
+    if (chunk.length === 0) return { ok: false, error: '摘要分片为空', chunks, usage, elapsedMs };
     if (summaryChunkTokens(chunk) > allowance) chunk = [clampMessageForSummary(chunk[0]!, allowance)];
-    const summary = await generateSummary(
+    const startedAt = Date.now();
+    const summary = await generateSummaryWithUsage(
       plannerMessagesToLlm(chunk), models, model,
       settings.reserveTokens,
       COMPACTION_INSTRUCTIONS,
       previous, undefined, undefined, undefined, BACKGROUND_CONTEXT,
     );
-    if (!summary.ok) return { ok: false, error: String(summary.error) };
-    previous = summary.value;
+    elapsedMs += Date.now() - startedAt;
+    if (!summary.ok) return { ok: false, error: String(summary.error), chunks, usage, elapsedMs };
+    addSummaryUsage(usage, summary.value.usage);
+    previous = summary.value.text;
     remaining = remaining.slice(chunk.length);
     chunks += 1;
   }
-  return { ok: true, text: previous ?? '', chunks };
+  return { ok: true, text: previous ?? '', chunks, usage, elapsedMs };
 }
 
 /** 尾段仍超预算时，按整轮从最旧处丢；最后一个 user 消息及其之后永不丢。 */
@@ -531,14 +616,50 @@ function degradeByDropping(messages: readonly AgentMessage[], target: number): A
  */
 export async function compactTranscriptWithPi(
   messages: AgentMessage[],
-  opts: { force?: boolean; fixedOverheadTokens?: number } | undefined,
+  opts: {
+    force?: boolean;
+    fixedOverheadTokens?: number;
+    /** 触发原因（观测归因）；缺省按 force 解析为 turn_boundary / threshold。 */
+    trigger?: CompactionTrigger;
+    /** 调用与触发点关联标识；缺省生成。 */
+    correlationId?: string;
+    /** 仅显式开关打开时捕获摘要正文（缺省不落盘）。 */
+    captureSummaryText?: boolean;
+  } | undefined,
   runtime: PiModelRuntime,
 ): Promise<AgentMessage[]> {
   const { model } = runtime;
   const fixedOverhead = opts?.fixedOverheadTokens ?? 0;
+  // 六项计量只在观测面新增：是否触发压缩完全由既有 force/threshold 逻辑决定。
+  const trigger = opts?.trigger ?? (opts?.force ? 'turn_boundary' : 'threshold');
+  const correlationId = opts?.correlationId ?? newCompactionCorrelationId();
+  const captureSummaryText = opts?.captureSummaryText === true;
   const settings = compactionSettingsFor(model.contextWindow, fixedOverhead);
   const est = estimateContextTokens(messages);
   if (!opts?.force && !shouldCompact(est.tokens, model.contextWindow, settings)) return messages;
+
+  /** 发出一次压缩运行的结构化计量事件（与既有事件并存，不替换、不改行为）。 */
+  const emitMetrics = (metrics: {
+    outcome: CompactionOutcome;
+    summaryCalls: number;
+    summaryUsage: SummaryTokenUsage;
+    elapsedMs: number;
+    tokensAfter: number;
+    summaryText?: string;
+  }): void => {
+    const event: CompactionMetrics = {
+      trigger,
+      correlationId,
+      outcome: metrics.outcome,
+      summaryCalls: metrics.summaryCalls,
+      summaryUsage: metrics.summaryUsage,
+      elapsedMs: metrics.elapsedMs,
+      tokensBefore: est.tokens,
+      tokensAfter: metrics.tokensAfter,
+    };
+    if (captureSummaryText && metrics.summaryText !== undefined) event.summaryText = metrics.summaryText;
+    console.log(JSON.stringify({ event: 'context_compaction_metrics', ...event }));
+  };
 
   let { prefix, kept } = splitForCompaction(messages, settings.keepRecentTokens);
   if (prefix.length === 0 && opts?.force) {
@@ -560,6 +681,13 @@ export async function compactTranscriptWithPi(
         fixedOverhead,
         messages: messages.length,
       }));
+      emitMetrics({
+        outcome: 'rejected',
+        summaryCalls: 0,
+        summaryUsage: emptySummaryUsage(),
+        elapsedMs: 0,
+        tokensAfter: est.tokens,
+      });
       throw new Error(
         `上下文不变式不满足：转录 ${est.tokens} token 超过本窗口安全上界 ${limit}`
         + `（window=${model.contextWindow}，固定开销=${fixedOverhead}），已拒绝发请求。`,
@@ -571,6 +699,13 @@ export async function compactTranscriptWithPi(
       contextWindow: model.contextWindow,
       messages: messages.length,
     }));
+    emitMetrics({
+      outcome: 'no_cut',
+      summaryCalls: 0,
+      summaryUsage: emptySummaryUsage(),
+      elapsedMs: 0,
+      tokensAfter: est.tokens,
+    });
     return messages;
   }
 
@@ -584,8 +719,24 @@ export async function compactTranscriptWithPi(
       messages: messages.length,
     }));
     if (est.tokens > model.contextWindow) {
-      return degradeByDropping(messages, Math.max(1, model.contextWindow - settings.reserveTokens));
+      const degraded = degradeByDropping(messages, Math.max(1, model.contextWindow - settings.reserveTokens));
+      // 摘要在失败前可能已发起若干分片：次数/token/耗时照记，产物形态标 degraded。
+      emitMetrics({
+        outcome: 'degraded',
+        summaryCalls: summary.chunks,
+        summaryUsage: summary.usage,
+        elapsedMs: summary.elapsedMs,
+        tokensAfter: estimateContextTokens(degraded).tokens,
+      });
+      return degraded;
     }
+    emitMetrics({
+      outcome: 'failed',
+      summaryCalls: summary.chunks,
+      summaryUsage: summary.usage,
+      elapsedMs: summary.elapsedMs,
+      tokensAfter: est.tokens,
+    });
     return messages;
   }
 
@@ -614,6 +765,14 @@ export async function compactTranscriptWithPi(
     summaryChunks: summary.chunks,
     contextWindow: model.contextWindow,
   }));
+  emitMetrics({
+    outcome: 'compacted',
+    summaryCalls: summary.chunks,
+    summaryUsage: summary.usage,
+    elapsedMs: summary.elapsedMs,
+    tokensAfter: estimateContextTokens(output).tokens,
+    summaryText: summary.text,
+  });
   return output;
 }
 
@@ -661,15 +820,24 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
       const invariantLimit = model.contextWindow - fixedOverhead - MIN_OUTPUT_BUDGET_TOKENS;
       if (estimateContextTokens(initialMessages).tokens > invariantLimit) {
         try {
+          // 关联标识把这次摘要调用与「回合前 INV 复核」这个触发点绑定（同一 id 也进触发点事件）。
+          const correlationId = newCompactionCorrelationId();
           const compacted = await compactTranscriptWithPi(
             initialMessages,
-            { force: true, fixedOverheadTokens: fixedOverhead },
+            {
+              force: true,
+              fixedOverheadTokens: fixedOverhead,
+              trigger: 'invariant',
+              correlationId,
+              captureSummaryText: compactionCaptureEnabled(options.env),
+            },
             { models, model },
           );
           if (estimateContextTokens(compacted).tokens > invariantLimit) throw new Error('压缩产物仍超过安全上界');
           initialMessages = compacted;
           console.info(JSON.stringify({
             event: 'pi_driver_pre_request_compacted',
+            correlationId,
             contextWindow: model.contextWindow,
             fixedOverhead,
           }));
@@ -701,13 +869,21 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
         transformContext: async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
           const tokens = estimateContextTokens(messages).tokens;
           if (tokens <= model.contextWindow - emergencyHeadroom) return messages;
+          const correlationId = newCompactionCorrelationId();
           console.warn(JSON.stringify({
             event: 'context_emergency_compact',
+            correlationId,
             tokens,
             contextWindow: model.contextWindow,
             messages: messages.length,
           }));
-          return compactTranscriptWithPi(messages, { force: true, fixedOverheadTokens: fixedOverhead }, { models, model });
+          return compactTranscriptWithPi(messages, {
+            force: true,
+            fixedOverheadTokens: fixedOverhead,
+            trigger: 'overflow',
+            correlationId,
+            captureSummaryText: compactionCaptureEnabled(options.env),
+          }, { models, model });
         },
       });
 
@@ -745,12 +921,20 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
           if (modelAttempt >= MAIN_MODEL_RETRY_DELAYS_MS.length) break;
           if (isContextOverflowError(errorMessage)) {
             const tokensBefore = estimateContextTokens(agent.state.messages).tokens;
-            const compacted = await compactTranscriptWithPi(agent.state.messages, { force: true, fixedOverheadTokens: fixedOverhead }, { models, model });
+            const correlationId = newCompactionCorrelationId();
+            const compacted = await compactTranscriptWithPi(agent.state.messages, {
+              force: true,
+              fixedOverheadTokens: fixedOverhead,
+              trigger: 'overflow',
+              correlationId,
+              captureSummaryText: compactionCaptureEnabled(options.env),
+            }, { models, model });
             const tokensAfter = estimateContextTokens(compacted).tokens;
             if (tokensAfter >= tokensBefore) break; // 压不动：重发只会再撞同一面墙
             agent.state.messages = compacted;
             console.info(JSON.stringify({
               event: 'pi_driver_context_overflow_recovered',
+              correlationId,
               attempt: modelAttempt + 1,
               tokensBefore,
               tokensAfter,
@@ -874,7 +1058,11 @@ export function createPiTurnDriver(options: PiTurnDriverOptions): TurnDriver {
     /** 上下文压缩（pi 原生 compact 的宿主侧收敛，实现见 compactTranscriptWithPi）：超阈值时
      *  摘要替换旧消息、保留最近尾巴；失败不阻塞回合。 */
     async compact(messages: AgentMessage[], opts?: { force?: boolean }): Promise<AgentMessage[]> {
-      return compactTranscriptWithPi(messages, opts, { models, model });
+      return compactTranscriptWithPi(messages, {
+        ...opts,
+        correlationId: newCompactionCorrelationId(),
+        captureSummaryText: compactionCaptureEnabled(options.env),
+      }, { models, model });
     },
     // 服务端确定性回复(确认码直执)合成原生形状 assistant 消息,防止毒化下一模型回合
     synthesizeAssistant: (text: string): AgentMessage =>
