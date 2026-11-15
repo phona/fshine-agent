@@ -74,12 +74,12 @@ export const RUN_TASK_TOOL_SCHEMA: Record<string, unknown> = {
  */
 export const TASK_STATUS_TOOL = 'task_status';
 export const TASK_STATUS_TOOL_DESCRIPTION =
-  '查询本会话已有任务的状态：ref 给受理回执里的 #编号（如 "3"）查单个任务，留空列本会话全部任务。'
+  '查询本会话已有任务的状态：ref 给受理回执里的 #编号（如 "#3"）查单个任务，留空列本会话全部任务。'
   + '用户问「那个任务怎么样了 / 在等什么」时用它，不要为此新交办任务。';
 export const TASK_STATUS_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "3"）；留空列本会话全部任务。' },
+    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）；留空列本会话全部任务。' },
   },
   additionalProperties: false,
 };
@@ -90,7 +90,7 @@ export const TASK_RESULT_TOOL_DESCRIPTION =
 export const TASK_RESULT_TOOL_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
-    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "3"）。' },
+    ref: { type: 'string', description: '任务引用：受理回执里的 #编号（如 "#3"）。' },
   },
   required: ['ref'],
   additionalProperties: false,
@@ -326,7 +326,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
    */
   function resolveTaskId(ref: string): string {
     const wanted = ref.trim();
-    const hit = registry.list(scope).find((task) => (task.taskNo !== undefined && `#${task.taskNo}` === wanted) || task.taskId === wanted);
+    const hit = registry.list(scope).find((task) => (task.taskNo !== undefined && (`#${task.taskNo}` === wanted || String(task.taskNo) === wanted)) || task.taskId === wanted);
     if (hit === undefined) throw new TaskOwnershipError();
     return hit.taskId;
   }
@@ -556,7 +556,7 @@ export async function createSession(options: RuntimeOptions): Promise<Session> {
       }
       registry.complete(taskId, workerResult.text);
       const task = registry.get(taskId, { principalId: options.principalId, sessionId: options.sessionId });
-      return { taskId, summary: workerResult.text, executions: task.executions };
+      return { taskId, taskNo: task.taskNo ?? null, summary: workerResult.text, executions: task.executions };
     } catch (error) {
       registry.fail(taskId, error instanceof Error ? error.message : String(error));
       throw error;
