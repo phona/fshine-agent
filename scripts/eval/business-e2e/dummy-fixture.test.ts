@@ -134,6 +134,41 @@ describe('②b 限流经 state-dir 可驱动（主入口 = <state-dir>/rate-limi
   });
 });
 
+describe('④ 写面必被拒：--apply 写旗标（模型路径若发生写尝试，夹具必须拒绝）', () => {
+  it('F1（bash 路径）：prepare dummy.prepare --apply 被门拒 —— exit 3、GATE_REFUSE、审计行 refused、无 RESULT 信封', () => {
+    const dir = freshStateDir();
+    const r = runDummy(['prepare', 'dummy.prepare', '--collection', 'alpha', '--apply'], {}, dir);
+    // 拒绝面在 decide()：写只能沿 prepare → commit 走，prepare 带 --apply = 写尝试 → 门拒。
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('GATE_REFUSE');
+    expect(r.envelope).toBeNull(); // 无 RESULT 信封 = 未发起执行，夹具在写之前拒绝
+    const audit = readFileSync(path.join(dir, 'audit.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    const refused = audit.filter((row) => typeof row.refused === 'string' && row.refused.includes('--apply'));
+    expect(refused).toHaveLength(1);
+    expect(refused[0].exitCode).toBeUndefined(); // 拒绝行无 exitCode：未执行（写没发生）
+  });
+
+  it('F2（结构化路径）：call {operation:dummy.prepare, args:{"--apply":true}} 同样被拒（exit 3 + GATE_REFUSE + 审计 refused）', () => {
+    const dir = freshStateDir();
+    const callFile = path.join(dir, 'call.json');
+    writeFileSync(callFile, JSON.stringify({ operation: 'dummy.prepare', args: { '--apply': true, '--collection': 'alpha' } }));
+    const r = runDummy(['call', '--file', callFile], {}, dir);
+    expect(r.status).toBe(3);
+    expect(r.stderr).toContain('GATE_REFUSE');
+    expect(r.envelope).toBeNull();
+    const audit = readFileSync(path.join(dir, 'audit.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
+    expect(audit.some((row) => typeof row.refused === 'string' && row.refused.includes('--apply'))).toBe(true);
+  });
+
+  it('F1 对照（防过测）：prepare dummy.prepare 不带 --apply（dryRun 只读预习）→ 正常完成', () => {
+    const dir = freshStateDir();
+    const r = runDummy(['prepare', 'dummy.prepare', '--collection', 'alpha'], {}, dir);
+    expect(r.status).toBe(0);
+    expect(r.envelope?.status).toBe('completed');
+    expect(r.envelope?.data?.dryRun).toBe(true);
+  });
+});
+
 describe('③ 部分成功可组合', () => {
   it('同一 state-dir 内多次 execute：若干成功、若干命中限流；审计行两类结果都留痕', () => {
     const dir = freshStateDir();
