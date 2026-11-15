@@ -2042,6 +2042,44 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 ---
 
 
+## 七十四、R5 D2/D3 实施 · transformContext 注释如实 + 压缩阈值单源合一（2026-11-15，分支 `arch/r5-d23`，基线 = `arch/integration` 启动时 HEAD `b0606db`）状态：**待合入**
+
+> 编号说明：本 worktree 基线处 decision-log 最大号为 §七十；`arch/integration` 此后已落 §七十一（R5-C）/§七十二（R5-D7）/§七十三（会话持久化），本分支不可见，为避免合入冲突按主仓当前最大号 +1 取 §七十四。
+> 归属：§六十九 裁决「D1 保留、D2/D3 实施」的落地切片。**只动 `packages/agent/src/pi-driver.ts` 及其测试**；零真实模型调用（单测/夹具）；D1 未动；未触碰 `docs/decision-log.md` 之外的冻结面。
+
+**D2 · 注释如实（只改文字，不改行为）**
+- 原 `run()` 请求前复核臂注释称「`transformContext` 只在回合内兜底、首条请求前不经过它」——**失实**（`agent-loop.js:122` 对每条请求调用、`:176-181` 执行；P0-B ③-b 亲测）。
+- 改为如实陈述（`pi-driver.ts:680-682`）：`transformContext` 对**每条**模型请求（含本回合首条）都执行；`run()` 的 INV 复核臂是**纵深防御**的第二道闸（非唯一把关）。
+- 同步修正单源相关的模块 INV 文档块（`:274-280`）与 `Δ_worst` 同口径注释（`:671-672`）。仅注释文字，无行为改动。
+
+**D3 · 阈值单源合一（须行为等价）**
+- 事实：原 `emergencyHeadroom = max(EMERGENCY_OVERFLOW_HEADROOM_TOKENS, Δ+MIN_OUTPUT)`（旧 `:657`）与 `invariantLimit = W − Δ − MIN_OUTPUT`（旧 `:661`）实为**同值二源**——因 `EMERGENCY_OVERFLOW_HEADROOM_TOKENS = MIN_OUTPUT_BUDGET_TOKENS = 1024`（旧 `:31`/`:292`）⇒ `max(1024, Δ+1024) ≡ Δ+1024`（∀ Δ≥0）。
+- 收敛：删除第二常量 `EMERGENCY_OVERFLOW_HEADROOM_TOKENS`（及其注释）；新增导出纯函数 `invariantReserveTokens(Δ)=Δ+MIN_OUTPUT`（`:305`）与 `invariantLimitTokens(W,Δ)=W−invariantReserveTokens(Δ)`（`:310`）；`run()` 内 `outputReserve = invariantReserveTokens(fixedOverhead)`（`:679`）同源派生两条线——请求前 INV 线 `invariantLimit = W − outputReserve`（`:683`）与 `transformContext` emergency 线 `tokens <= W − outputReserve`（`:725`，用同一闭包变量 `outputReserve`，物理同源）；`compactionSettingsFor` 的 `invariantReserve`（`:342`）与 `compactTranscriptWithPi` 的 `limit`（`:570`）一并改用单源函数，全仓该族表达式收敛为一处。
+
+**等价性证明（不止 W=8192 数值相等）**
+- (i) `max(1024, Δ+1024) ≥ Δ+1024` 恒真（`a≤x ⇒ max(a,x)=x`），等号对 ∀ Δ≥0 恒取（Δ=0 时 `max(1024,1024)=1024`）。
+- (ii) ≥4 组窗口/配置下，给定 T，`T > emergency 线` ⇔ `T > INV 线`：缺省 128k（Δ=0 / Δ=13096）、40k（Δ=6592）、8192（Δ=0 / Δ=5120）。用例见 `packages/agent/pi-driver-context-invariant.test.ts` 的 `describe('P0-B D3 单源阈值…')`。
+- 触发点改前/改后逐输入一致（不触发仍不触发、触发仍触发、边界不漂移）。
+
+**恒等断言单测**：新增 3 例（同 `describe`）：(i) 单源 reserve ≡ 原两源 max，等号 ∀Δ≥0；(ii) ≥4 组配置两线触发点一致；(i-b) Δ 极小/0 时退化仍等 max。
+
+**代码净行数**：`pi-driver.ts` +37/−15（净 +22）；`pi-driver-context-invariant.test.ts` +60/−0（净 +60）；合计净 +82。
+
+**反向绊线（已亲跑）**：把单源表达式故意写错（`invariantReserveTokens` 返回 `…+MIN_OUTPUT+1`）→ `npx vitest run packages/agent/pi-driver-context-invariant.test.ts` 结果 `3 failed | 8 passed`，三条恒等断言全红；还原后工作树干净。未弱化既有断言、未删用例凑绿。
+
+**回归读数（已亲跑）**
+- `npm run typecheck`（`tsc --noEmit`）退出码 0。
+- 全量 `npm test`（`vitest run`）：`Test Files 84 passed (84)`、`Tests 838 passed (838)`。例数不减：本提交仅改 2 文件，测试文件 `+60/−0`、`it` 计 +3/−0，无删除。
+
+**D1 未动**：`run()` 请求前 INV 复核臂及其事件（`pi_driver_pre_request_compacted` / `pi_driver_context_invariant_rejected`）原样保留（`:684-708`）；§六十九 反向绊线（run `dwfrun-8e6c9232`）证伪「删 D1 由 transformContext 单独把关」，D1 承重，保留。
+
+**局限**：128k 生产窗口未实测——所有等价性/回归读数来自单测与夹具（缺省 128k 为常量构造，非真实 128k 会话）；生产 128k 下 emergency 线触发频率无读数、不外推。
+
+**状态：待合入。**
+
+---
+
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
