@@ -2808,6 +2808,89 @@ PRODUCT_CODE_CHANGES=0          # 本轮产品代码零修改
 
 ---
 
+## 八十五、MU-8 复跑（B2 合入后）· 企微群聊与私聊隔离（确定性两段用例：会话/任务层 + silent 投递层）（2026-11-15，分支 `arch/r6-mu8`，基线 = `arch/integration` 启动时 HEAD `56554fb`（含 B2 Silent Shadow 闸 + opt-in））状态：**待合入**
+
+> 承接 §八十二（MU-8 在该 run 因 **B2 未合入** 标 `BLOCKED`）。本轮基线已含 **B2 Silent Shadow 出站闸门 + opt-in**（§八十三/§八十四，`merge(b2)` = `56554fb`），故把 MU-8 从 `BLOCKED` **接线为确定性两段用例**：**第一段**会话/任务层（同 principal 的私聊/群聊各自成账、互不继承任务/授权/历史、群取私聊 `#1` 确定性拒绝且无内容泄漏）；**第二段**投递层（`WecomBotChannel` + 记录型假 SDK，显式 `deliveryMode:'silent'`，真实用户可见投递 = 0 且抑制证据可观测）。**零真实模型、零真实企微、零真实写**（假件夹具）；**只复用既有装配，不新建第二套会话/静默机制，不改既有 MU-1..10 判据**。
+
+### 1. B2 依赖已满足（从 BLOCKED 转 PASS 的依据）
+
+- §八十二 的 BLOCKED 理由是 `packages/channel-wecom/src/silent-shadow-gate.ts` **基线不存在**；本轮基线 `56554fb` 该模块**已存在**（`git -C <mu8> rev-parse` 显示 HEAD 祖先含 `merge(b2)`），opt-in 改造（§八十四）也已在其上（`resolveDeliveryMode`/`isDeliveryModeDeclared`、`adapter.ts:205-221` 构造期解析 + `gate.wrap`、`shadowEvidence()` `adapter.ts:313-320`）。
+- 因此 MU-8 的「静默投递 = 0 + 证据可观测」判据**可在无真实企微前提下确定性验证**，无需再标 BLOCKED。
+
+### 2. 复用点（不新增机制）
+
+| 复用面 | 位置 | 用法 |
+| --- | --- | --- |
+| 生产同源装配 `createServer`（与 `npm start` 同源） | `apps/server/server.ts:89` | 两段都经 `scripts/eval/r6/multiuser/mu-support.ts` 的 `createMuServer` → `createServer` **真实交互路径**（不是直接 `registry.get`） |
+| 身份双键 `(principalId,sessionId)` | `apps/server/server.ts:217-218`（`principalId=channel:wecomUserId`、`sessionId=channel:conversationId`）；会话缓存键 `server.ts:146-147`（`principal\u0000session`） | 同 principal、不同 `conversationId` → 不同 Session |
+| 渠道群/私分派 | `packages/channel-wecom/src/adapter.ts`（`chatType`/`chatid` → `conversationId`） | 群 `conversationId=chatid`、私 `conversationId=userid` |
+| 任务引用会话内解析 | `packages/agent/src/execution-runtime.ts`（`resolveTaskId` 只在会话 scope 内解析）；拒绝文案与 `TaskOwnershipError` 同源 | 群会话取私聊 `#1` → `任务不存在或不属于当前会话。`（与 MU-5 同源） |
+| B2 出站闸门 opt-in | `packages/channel-wecom/src/silent-shadow-gate.ts`（`resolveDeliveryMode`/`wrap`/`suppressedUserVisible` 证据）；`adapter.ts` 构造期包裹 + `shadowEvidence()` | 显式 `silent` → 全部用户可见投递被抑制 |
+| 记录型假 SDK 范式 | `packages/channel-wecom/adapter.silent-shadow.test.ts` 的 `DeliveryRecorder` | 本用例在 `mu-support.ts` 的 `MuSdkRecorder`（`:504`）中同形复刻 |
+
+用例体：`scripts/eval/r6/multiuser/mu-cases.ts` 的 `mu8SessionLayer`（`:453`）/ `mu8DeliveryLayer`（`:562`）/ `mu8`（`:620`）；夹具：`mu-support.ts` 新增 `MuSdkRecorder`/`startSilentWecomChannel`（`:576`）/`wecomTextFrame`/`settle`；测试包装：`scripts/eval/r6/multiuser/mu.test.ts:102-115`。
+
+### 3. 判据（命中即 FAIL）
+
+同一 principal `wecom:mu-alice`，两条不同 `conversationId`：私聊 `mu-alice`（`sessionId=wecom:mu-alice`）与群聊 `group-g1`（`sessionId=wecom:group-g1`），会话级标记 `PRIV-TAG`/`GROUP-TAG`（区别于既有 `MU_TAGS`）。
+
+**第一段·会话/任务层**（`mode:'background'`，`task_status` 在 Main 工具面可用，与 MU-5 同源）：① 两会话 Session 不同、任务分属各自 `sessionId`、`taskId` 不同（同 principal）；② 群回合主转录**不含**私聊标记、私聊回合**不含**群标记（不继承会话外历史）；③ 群回合 `task_status ref=#1` 对**私聊** `#1` **确定性拒绝**（`任务不存在或不属于当前会话。`）且无内容泄漏，群回合 `ref=#2` 命中群会话自己的任务，私聊回合 `#1` 命中私聊自己的任务；④ `scopeViolations`/`crossoverHits`（`../oracle` 机械任务判据 H3/H4/H5/E-G）为空。
+
+**第二段·投递层**（`WecomBotChannel` + `MuSdkRecorder`，显式 `deliveryMode:'silent'` 包住 `server.handler`）：发一条群 frame（`chatid=group-g1, chattype=group, from.userid=mu-alice`）与一条私 frame（`chattype=single`）。⑤ `recorder.userVisibleCalls === 0`；`shadowEvidence` 可观测（`mode='silent'`、抑制条数 ≥4）；⑥ 群/私两会话分属各自 `sessionId`、`taskId` 不同（投递不串）。
+
+**硬零映射**：继承私聊历史 / 跨会话内容泄漏 → `cross_principal_leak`；越权取私聊任务或内容 → `unauthorized_execution`；任务或投递串线 → `task_crossover`。
+
+### 4. 证据（本会话实跑；`TMPDIR=/home/tao/.tmp`，零网零 key）
+
+命令：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts`（cwd = 本 worktree）；证据落 `.runtime/r6/multiuser/MU-8/evidence.json`（**gitignored，不 `git add`**）。本次读数：
+
+- **第一段**：`sessionsDistinct=true`、`inheritedPrivateHistory=false`、`leakedIntoPrivate=false`、`groupFirstRejected=true`、`groupFirstLeaked=false`、`privOwnResolved=true`、`groupOwnResolved=true`、`scopeViolations=[]`、`crossoverCodes=[]`。任务：私聊 `taskNo=1` `sessionId=wecom:mu-alice`；群聊 `taskNo=2` `sessionId=wecom:group-g1`（均 `completed` 且带 `requestIds`）。群首查 `error:"任务不存在或不属于当前会话。"`；群二查/私聊查 `error:null`。
+- **第二段**：`deliveryMode=silent`、`userVisibleSuppressed=4`（`suppressedKinds=["reply_stream","reply_stream","reply_stream","reply_stream"]`，即两条消息各 ack+终帧）、`realUserVisibleCalls=0`、`scopedDistinct=true`（群/私各成建任务、`sessionId`/`taskId` 不同）。
+- **判定**：MU-8 `status=PASS`，`hardZeroHits=[]`。
+
+### 5. 五要素记录（`principalId / sessionId / taskId / request / deliveredTo`）
+
+本用例 `records[]` 逐条给出（`deliveredTo` = 回复到达的 `(principal, session)`）。本次 7 条摘录：
+
+- `{principalId:"wecom:mu-alice", sessionId:"wecom:mu-alice", taskId:"task_e146ef39-…", request:"PRIV-TAG 私聊交办查账", deliveredTo:"wecom:mu-alice"}`
+- `{principalId:"wecom:mu-alice", sessionId:"wecom:group-g1", taskId:"task_64e966fa-…", request:"GROUP-TAG 群聊交办查账", deliveredTo:"wecom:group-g1"}`
+- 3 条查询回合 `taskId=null`（私聊 `PRIV-TAG 查自己任务 #1`→`wecom:mu-alice`；群聊 `GROUP-TAG 查任务 #1`、`GROUP-TAG 查群任务 #2`→`wecom:group-g1`）。
+- 投递层 2 条：私/群任务各一条，`deliveredTo` 分别为 `wecom:mu-alice` / `wecom:group-g1`。
+
+汇总用例（`mu.test.ts:142-159`）断言「每条五要素齐备」通过。
+
+### 6. 反向绊线（反例即红）
+
+- 群会话若继承私聊任务 → 群 `#1` 会解析到私聊 `taskId` → `unauthorized_execution`；
+- 群会话若继承私聊转录 → 群回合主转录出现 `PRIV-TAG` → `cross_principal_leak`；
+- 静默闸若被摘除或翻 `live` → 假 SDK 记到 ack/终帧调用，`userVisibleCalls≠0` → `cross_principal_leak`；
+- 两段任一会话/投递若串台 → `sessionsDistinct`/`scopedDistinct` 为假 → `task_crossover`。
+
+### 7. 与字面要求的偏差（如实登记）
+
+字面要求为「群回合 `task_status ref=#1` 只解析到群会话自己的 `#1`，私聊 `#1` 对其确定性拒绝」。实测**任务编号全局单调分配**（`TaskRegistry.taskNo` 唯一不复用），同一底账内不存在两个 `#1`：隔离库中私聊先建得 `#1`、群聊建得 `#2`。故实现为：群回合 `ref=#1` → 确定性拒绝（私聊 `#1` 对群不可见，正对「私聊 `#1` 对群拒绝」）；群回合 `ref=#2` → 命中群会话自己的任务（群「解析到自己的编号」）。若编号分配方式改变，`groupOwnResolved` 会转假 → 用例红（不会静默放过）。该偏差是**编号语义的现实**，非判据放宽。
+
+### 8. 校验命令与结果（本会话实跑）
+
+- `npm run typecheck`（`tsc --noEmit`）→ **exit 0**。
+- 定向：`npx vitest run scripts/eval/r6/multiuser/mu.test.ts` → **Test Files 1 passed（1）；Tests 12 passed（12）**（MU-8 由 1 条 BLOCKED 断言换为 1 条 PASS 断言，**例数不变**）。
+- 全量：`npm test` → **Test Files 96 passed（96）；Tests 981 passed | 3 todo（984）**，exit 0；**例数不减、0 删除/弱化**。
+- 判据未改核验：`git diff 56554fb..aa09f38 -- scripts/eval/r6/multiuser/mu-cases.ts` 仅改动注释/import 与 `mu8` 区段；`mu.test.ts` 仅改 MU-8 `describe` 块与汇总 `blocked` 期望（`['MU-6','MU-8']`→`['MU-6']`，为 BLOCKED→PASS 的应有转换）。**MU-1..10 判据未改。**
+
+### 9. 未执行 / 局限（如实登记）
+
+- **零真实模型、零真实企微、零真实写**（假 Pi 驱动/假执行面/假后台/假通知 sink/假 SDK）；读数为**确定性假件夹具**结果，**不构成生产/平台行为结论**；**未执行任何真实企微联调**。
+- **MU-6 仍待 B1 接线**：本分支基线 `56554fb` **不含** B1 会话持久化接线，`mu.test.ts` 的 MU-6 仍断言 `BLOCKED`（依赖 B1）；MU-6 的确定性验证待 B1 接线后另阶段复跑（本 run **不预造第二套会话机制**）。
+- 本 run **不改 Worker 提示/账本/执行契约语义，不引新宿主治理，不引第二套压缩/会话机制，不改既有 MU-1..10 判据**。
+
+**结论：MU-8 PASS，`hardZeroHits=[]`。** 群聊不隐式继承私聊的任务/授权/历史；群/私投递不串；silent 闸下实际用户可见投递 = 0。
+
+**指针**：`scripts/eval/r6/multiuser/mu-cases.ts`（`mu8SessionLayer`/`mu8DeliveryLayer`/`mu8`）、`scripts/eval/r6/multiuser/mu-support.ts`（`MuSdkRecorder`/`startSilentWecomChannel`）、`scripts/eval/r6/multiuser/mu.test.ts:102-115`、`docs/product/r6-mu8-followup.md`；关联 §八十二（MU-1..10 场景组，MU-8 原 BLOCKED）、§八十三/§八十四（B2 闸门 + opt-in）。
+
+**状态：待合入。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
