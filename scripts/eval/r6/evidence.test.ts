@@ -5,6 +5,7 @@ import { describe, it, expect } from 'vitest';
 import { classifySample, collectEvidence, buildEvidenceSummary, type SessionEvidence, type SessionJudgement } from './evidence';
 import { analyzeCompaction, judgeCompactionLifecycle } from './compaction';
 import { judgeTaskContinuity } from './oracle';
+import { accountCalls } from './accounting';
 import { mkdtempSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -15,6 +16,7 @@ function mkEvidence(overrides: Partial<SessionEvidence> = {}): SessionEvidence {
     contextWindow: 128000, limits: {}, budgetUsed: { calls: 0, tokens: 0, tokensObserved: false, ms: 0, summaryCalls: null },
     budgetStopped: null, startedAt: 'T0', endedAt: 'T1',
     turns: [], replies: [], compactionAttempts: [], tokenCurve: [], toolCalls: [],
+    modelCalls: [], callAccounting: accountCalls([]),
     taskTurns: [], tasksFinal: [], resourceSamples: [], infraSignals: [], productFaultSignals: [],
     ...overrides,
   };
@@ -57,13 +59,13 @@ describe('三态处置（优先序：产品故障 > 环境中断 > 覆盖不足 
 });
 
 describe('证据采集器 · schema 落盘', () => {
-  it('十个 schema 文件齐全，evidence.json 含处置与硬零', () => {
+  it('schema 文件齐全，evidence.json 含处置、硬零与全量记账', () => {
     const tmp = mkdtempSync(path.join(os.tmpdir(), 'r6-ev-'));
     try {
       const evidence = mkEvidence();
       const judgement = mkJudgement({ effective: 3 });
       const { dir, summary } = collectEvidence(tmp, evidence, judgement);
-      const expected = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'evidence.json'];
+      const expected = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'model-calls.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'evidence.json'];
       const present = readdirSync(dir);
       for (const f of expected) expect(present).toContain(f);
       expect(summary['disposition']).toBe('valid');
