@@ -552,6 +552,13 @@ export function renderReport(input: {
   if (report.gaps.length === 0) lines.push('- 无。');
   else for (const gap of report.gaps) lines.push(`- ${gap}`);
   lines.push('');
+  lines.push('## 确定性注入复现的已知上游缺陷（非本轮真实模型样本，不计入 M1/M2/M4 分母）');
+  lines.push('');
+  lines.push('- `T-empty` / `T-ws`：摘要 `stopReason=stop` 且正文为空/全空白时，`summary:""` 与 `summary:"  \\n\\t "` 被持久化为 compaction 条目（Pi 1.5.2 上游缺陷；本轮阶段 D 的 7 次真实压缩摘要均非空，故 M2 为 0/7）。');
+  lines.push('- `O-empty`：溢出恢复摘要为空 → 空摘要入库、重试仍失败、`finalText=""`，只有 `pi_driver_empty_reply` 日志（有界失败，但用户侧静默空回复）。');
+  lines.push('- `D-duplicate`：溢出恢复重试再次执行同一 `create_record`（execs 长度 2）→ 非幂等重复副作用面存在。');
+  lines.push('- 证据：`.runtime/pi152-stageD/stageB-injection.json`（本会话重跑 `scripts/eval/pi152-stageB/injection.ts`，零真实模型）。');
+  lines.push('');
   lines.push('## 证据');
   lines.push('');
   lines.push('- 原始 JSON：`.runtime/pi152-stageD/evidence.json`（逐回合、逐模型调用、逐工具调用、逐压缩条目、重启记录）。');
