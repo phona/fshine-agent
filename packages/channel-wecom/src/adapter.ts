@@ -31,6 +31,16 @@ import type {
 import { formatFileReceipt } from '@fshine/contracts';
 import { MAX_REPLY_BYTES, stripMentionPrefix, truncateReply } from './text';
 import { extractMessageReference } from './quote';
+import {
+  isDeliveryModeDeclared,
+  resolveDeliveryMode,
+  SilentShadowGate,
+  WECOM_DELIVERY_ENV,
+  WECOM_DELIVERY_LIVE,
+  type DeliveryMode,
+  type EffectiveDeliveryMode,
+  type SuppressedSend,
+} from './silent-shadow-gate';
 
 const ACK_TEXT = '收到,正在处理…';
 const FALLBACK_REPLY = '处理失败,请稍后再试';
@@ -129,6 +139,13 @@ export interface WecomBotChannelOptions {
   attachmentDir?: string;
   /** 平台工作区根；用来把附件目录兜在场内。缺省用 cwd。 */
   platformRoot?: string;
+  /**
+   * 出站投递模式（Silent Shadow 闸门，opt-in）：**缺失或非法 → 抑制**（fail-safe）。
+   * 真实投递必须**显式**声明（本选项 = `'live'`，或环境变量 `FSHINE_WECOM_DELIVERY=live`）；
+   * 显式 `'silent'`/`'shadow'` 与任何非法值一律抑制。未声明的真实渠道在构造期拒绝真实出站
+   * 并留 `wecom_delivery_mode_undeclared` 日志。
+   */
+  deliveryMode?: DeliveryMode;
 }
 
 /** 终帧拒收降级的上下文：会话地址 + 本次回复的防重 latch（一次派发最多降级一条）。 */
@@ -164,6 +181,10 @@ export class WecomBotChannel implements ChannelAdapter {
   private readonly clientFactory: () => SdkClientLike;
   private readonly attachmentDir: string;
   private readonly platformRoot: string;
+  /** Silent Shadow 闸门：opt-in 抑制，包住真实出站传输的唯一出口。 */
+  private readonly gate: SilentShadowGate;
+  /** 生效投递模式（live 须显式声明；缺失/非法/显式 silent|shadow = silent）——部署与测试可读。 */
+  readonly deliveryMode: EffectiveDeliveryMode;
   private started = false;
   private handler: ReplyHandler | null = null;
   private client: SdkClientLike | null = null;
@@ -180,7 +201,24 @@ export class WecomBotChannel implements ChannelAdapter {
 
   constructor(options: WecomBotChannelOptions = {}) {
     this.env = options.env ?? process.env;
-    this.clientFactory = options.clientFactory ?? defaultClientFactory(this.env);
+    const baseFactory = options.clientFactory ?? defaultClientFactory(this.env);
+    // opt-in：真实投递必须显式声明（options.deliveryMode='live' 或 env 开关逐字 live）；
+    // 缺失/非法 → fail-safe 退化为 silent。闸门包在工厂出口上，于是首次 start() 建出的
+    // 客户端就已是被闸的替身——适配器里所有用户可见发送路径都经 this.client，机械上全覆盖。
+    this.deliveryMode = resolveDeliveryMode(options.deliveryMode, this.env);
+    // 真实渠道必须先显式声明模式：未声明（配置缺失）或非法（配置错误）时，拒绝真实出站
+    // 并留可观测日志——缺省绝不静默地连到真实平台，也不隐式放行。
+    if (!isDeliveryModeDeclared(options.deliveryMode, this.env)) {
+      console.warn(JSON.stringify({
+        event: 'wecom_delivery_mode_undeclared',
+        resolvedMode: this.deliveryMode,
+        reason: options.deliveryMode === undefined ? 'missing' : 'invalid',
+        hint: `真实出站已拒绝（fail-safe）。显式声明 deliveryMode='${WECOM_DELIVERY_LIVE}'`
+          + ` 或设置 ${WECOM_DELIVERY_ENV}=${WECOM_DELIVERY_LIVE} 才会真实投递。`,
+      }));
+    }
+    this.gate = new SilentShadowGate({ mode: this.deliveryMode });
+    this.clientFactory = () => this.gate.wrap(baseFactory());
     const platformRoot = path.resolve(options.platformRoot ?? process.cwd());
     const fallback = path.join(platformRoot, 'tmp', 'attachments');
     const configured = (options.attachmentDir ?? (this.env['FSHINE_ATTACHMENT_DIR'] ?? '').trim()).trim();
@@ -266,6 +304,19 @@ export class WecomBotChannel implements ChannelAdapter {
     this.pendingAttachmentProcessing.clear();
     this.resolveAttachmentWaitInterrupt();
     this.resetAttachmentWaitInterrupt();
+  }
+
+  /**
+   * Silent Shadow 可观测证据：被闸抑制的发送快照（拷贝）+ 计数。
+   * 判据"出站尝试可观测 / 实际用户可见投递 = 0"直接读这里。
+   */
+  shadowEvidence(): { mode: EffectiveDeliveryMode; suppressed: number; userVisibleSuppressed: number; events: SuppressedSend[] } {
+    return {
+      mode: this.deliveryMode,
+      suppressed: this.gate.suppressedTotal,
+      userVisibleSuppressed: this.gate.suppressedUserVisible,
+      events: this.gate.snapshot(),
+    };
   }
 
   /**

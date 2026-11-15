@@ -42,9 +42,12 @@ async function main(): Promise<void> {
     dbPath,
     notificationSink: createFileNotificationSink(path.join(path.dirname(dbPath), 'notifications.jsonl')),
   });
-  const channel = new WecomBotChannel({ env, platformRoot: profile.root });
+  // 生产装配**显式声明**出站投递模式：正常模式维持既有语义（渠道消息 → 回帧）。
+  // 真实渠道必须显式声明——不声明则适配器拒绝真实出站（fail-safe 退化为 silent）。
+  const channel = new WecomBotChannel({ env, platformRoot: profile.root, deliveryMode: 'live' });
   await channel.start(server.handler);
-  console.log(JSON.stringify({ event: 'server_started', configPath, profileId, dbPath }));
+  // 出站投递模式入启动日志：部署侧一眼看出真实投递的声明状态（本装配显式 live）。
+  console.log(JSON.stringify({ event: 'server_started', configPath, profileId, dbPath, deliveryMode: channel.deliveryMode }));
 
   let shuttingDown = false;
   const shutdown = async (signal: string): Promise<void> => {
