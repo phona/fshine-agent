@@ -2399,6 +2399,56 @@ S1 跨回合转录连续 · S2 threshold 自动压缩 · S3 overflow 恢复（�
 
 ---
 
+## 七十九、Pi 原生替换实验 · 阶段二「最小可运行原型」· 归档登记（2026-11-15，分支 `exp/pi-native-session-compaction`，基线 = `arch/integration` 启动时 HEAD `84a22fa`）状态：**实验分支·待裁决**
+
+> 角色：本 worktree 为阶段二原型节点，**只做最小可运行原型，不实施完整替换**。承接 §七十八 阶段一 GO（条件式）。配套：`scripts/eval/pi-native/{driver.mjs,README.md,OUTPUT.txt}`。版本口径：只读锁版本 **`@earendil-works/pi-agent-core@0.85.1`（不升级）**。**零真实模型**：全程假 stream fn 驱动，无任何真实 Provider/网络调用。
+
+### 1. 工作区核验（本会话实跑）
+
+- `pwd` / `git rev-parse --show-toplevel` = `.../fshine-agent-exp-pi-session`（**≠ 主仓** `/home/tao/projects/fshine-agent`）；`git rev-parse --abbrev-ref HEAD` = `exp/pi-native-session-compaction`；原型提交 `8aae96b`（parent `206cb19`）；`git merge-base HEAD arch/integration` = `84a22fa`（与 §七十八 基线一致）。**通过。**
+
+### 2. 接入路径实测（关闭阶段一「装配可行性未实测」条件）
+
+- 装配只用**公开入口四处**（`scripts/eval/pi-native/driver.mjs:20-24`）：`AgentHarness`+`setDefaultStreamFn`（root `.`）、`MemorySessionRepo`/`JsonlSessionRepo`（`./harness/session`）、`BACKGROUND_CONTEXT`（`./harness/context`）、`NodeExecutionEnv`（`./harness/env/nodejs`）；假 provider 流用 `createAssistantMessageEventStream`（`@earendil-works/pi-ai/utils/event-stream`）构造与 Pi 同构流。
+- 装载：`MemorySessionRepo.create({},ctx)` 得 session → `AgentHarness.create({session,models,model,compaction,retry},ctx)`（`driver.mjs:127-135`）；`models` 只用 `getModel`/`streamSimple`/`completeSimple` 三方法的假对象（`driver.mjs:91-104`）。**未 import 任何 `dist/**` 内部符号、未复制 Pi 源码。**
+- 复跑（本会话实跑 3 次）：`node scripts/eval/pi-native/driver.mjs` → 退出码 `0`，三次均 `==== ALL CHECKS PASSED ====`（37 条 `[PASS]`）。`OUTPUT.txt` 与本会话新跑输出（ULID 归一后）逐行一致。
+
+### 3. S1–S6（+附加 S7）结果
+
+| # | 场景 | 结果 | 关键原始输出（节选自 `OUTPUT.txt`） |
+|---|---|---|---|
+| S1 | 跨回合转录连续性：同一 session 两次 `lane.prompt` | PASS | `r1.ok=true r2.ok=true`；entry 链 `seq=4→14→23→33` 且 `parentId` 连续；tip 前移；第二回合 provider 实收上下文含第一回合 `hello round1` + `first-answer` |
+| S2 | threshold 自动压缩（`reserveTokens` 调小强制触发） | PASS | `compaction_start={"reason":"threshold"}`；`compaction_end={"status":"completed","reason":"threshold"}`；写入 `type=compaction` entry（`tokensBefore=5000`、`summary="PI-GENERATED-SUMMARY"`、`retainedTail` 角色 `[user,assistant]`） |
+| S3 | Overflow Recovery（首答 context-overflow → 原生恢复 → 续跑） | PASS | `compaction_start reason=overflow` → `compaction_end status=completed` → 自动续跑 → `run_end status=completed`；assistant 流调用=2 |
+| S4 | 有界失败（反复 overflow 超上界 / 无法切分） | PASS | (a) 反复 overflow：**只**恢复一次 → `run_end status=failed`、assistant 调用恒=2、`retry_scheduled=0`；(b) 空会话 `lane.compact` → `{"_tag":"NothingToCompact"}`、**零** provider 调用 |
+| S5 | 工具调用/结果完整配对 | PASS | `retainedTail` 同时含 toolCall `tc-echo-1` 与其 toolResult；全会话 toolCall/result 一一配对 |
+| S6 | 摘要失败有界 | PASS | 摘要 provider 报错 → `retry_scheduled` 至 `maxAttempts=3` → `compaction_end status=failed`、`summary completeSimple calls=3`（有界，不无界重试） |
+| S7（附加） | 持久化入口 | PASS | `JsonlSessionRepo` 落盘后重开同一 session，`reopened entry count=2` 转录保留 |
+
+### 4. 「压缩由 Pi 触发」硬证据
+
+- 所有 `compaction_start`/`compaction_end`/`retry_scheduled`/`run_end` 事件均由 `harness.events.on(...)` 从 `AgentHarness` 侧收集（`driver.mjs:119-125`），`type=compaction` entry 由 `lane.findEntries` 读出（`driver.mjs:137-140`）——**均由 `AgentHarness`/lane 路径产生**。
+- 原型**未引入任何 fshine 自研压缩触发**：`driver.mjs` 无任何压缩调用，唯一压缩相关输入是公开的 `AgentHarnessOptions.compaction`（`CompactionSettings`）与 `AgentHarnessOptions.retry`（`RetryPolicy`）；S2 断言含 `no fshine code triggered compaction (only public settings set)`（`driver.mjs:243`）；`driver.mjs:13-15` 亦自述此边界。
+- 假 provider 侧记录 `completeSimple` 调用数作为摘要次数（S2=1、S6=3），证明摘要调用由 Pi 管线发起、非原型发起。
+
+### 5. 假 stream 零真实模型
+
+- 假 stream：`setDefaultStreamFn` 装公开缺省假流（`driver.mjs:478`），并以 `createAssistantMessageEventStream` 构造 provider 侧与 Pi 同构的事件流（`driver.mjs:57-68`）；`makeModels` 的 `getProviders/getAvailable/refresh/checkAuth/login/...` 均为桩（`login` 抛错），**无真实 provider 可达**。全程无网络调用。
+
+### 6. 未动 packages
+
+- 原型提交 `8aae96b` 仅新增 `scripts/eval/pi-native/**`（3 文件：`driver.mjs` / `README.md` / `OUTPUT.txt`）；`git show --name-only 8aae96b` 无 `packages/`、无 `package-lock.json`。**未升级 Pi**、lockfile 未动、`.runtime` 未 `git add`（本会话 `git status` 干净）。
+
+### 7. 下一步（完整替换，下一阶段；本阶段未实施）
+
+- 阶段二只证「装配可行 + 压缩确由 Pi 触发」；**完整替换未实施**。下一阶段：在 `packages/` 内以 §2 三处公开入口替换 `packages/agent/src/pi-driver.ts` 的 `Agent` + 自研 `transformContext`/`compactTranscriptWithPi` 编排（§七十八 §4），按 TDD + 黑盒 Eval 验收。成本/影响面取向仍须 owner 统一裁定（§七十七 `RECOMMENDED_OPTION=A` 成本导向 vs §七十八 能力导向）。
+
+**指针**：`scripts/eval/pi-native/README.md`（场景/判据/复跑）；`scripts/eval/pi-native/OUTPUT.txt`（原始输出）；`docs/product/exp-pi-native-session-phase1.md`（阶段一）；`node_modules/@earendil-works/pi-agent-core/dist/**`（0.85.1）；关联 §六十九、§七十、§七十七、§七十八。
+
+**状态：实验分支·待裁决。**
+
+---
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
