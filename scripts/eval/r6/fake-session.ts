@@ -12,12 +12,25 @@ import type { BudgetUsage, Track } from './evidence';
 import type { CompactionAttempt, TurnObservation } from './compaction';
 import type { TaskView } from './oracle';
 import type { HarnessSession } from './harness';
+import type { CallKind, ModelCallRecord } from './accounting';
+
+/** 假会话单次调用脚本项（逐次调用账本用；缺省由 modelCalls 合成「主模型」记录）。 */
+export interface FakeCallSpec {
+  readonly kind: CallKind;
+  readonly input?: number;
+  readonly output?: number;
+  readonly total?: number;
+  readonly durationMs?: number;
+  readonly observed?: boolean;
+}
 
 export interface FakeTurnScript {
   readonly reply: string;
   readonly tasks: readonly TaskView[];
   readonly cancelCalled?: boolean;
   readonly modelCalls?: number;
+  /** 该轮实际发起的逐次调用（主/摘要/重试/溢出恢复）。给出则以此为准，否则按 modelCalls 合成主模型记录。 */
+  readonly calls?: readonly FakeCallSpec[];
   readonly tokens: number;
   readonly messages: number;
   /** 该轮结束时把新出现的压缩尝试并入会话面（顺序追加）。 */
@@ -36,6 +49,7 @@ export class FakeHarnessSession implements HarnessSession {
   private calls = 0;
   private attempts: CompactionAttempt[] = [];
   private lastCancel = false;
+  private readonly ledger: ModelCallRecord[] = [];
   private readonly scenario: FakeScenario;
 
   constructor(scenario: FakeScenario) {
@@ -46,7 +60,21 @@ export class FakeHarnessSession implements HarnessSession {
     const s = this.scenario.turns[this.index];
     if (s === undefined) throw new Error(`假会话脚本用尽：index=${this.index}`);
     this.index += 1;
-    this.calls += s.modelCalls ?? 1;
+    // 逐次调用账本：给出 calls 则以之为准，否则按 modelCalls 合成「主模型」记录（默认 1）。
+    const specs: readonly FakeCallSpec[] = s.calls
+      ?? Array.from({ length: s.modelCalls ?? 1 }, () => ({ kind: 'main' as const }));
+    for (const spec of specs) {
+      const input = spec.input ?? 0;
+      const output = spec.output ?? 0;
+      const total = spec.total ?? input + output;
+      this.ledger.push({
+        seq: this.ledger.length + 1, kind: spec.kind, sessionId: 'fake-session', turn: this.index,
+        tokens: { input, output, total },
+        tokensObserved: spec.observed ?? (input + output > 0),
+        durationMs: spec.durationMs ?? 0,
+      });
+    }
+    this.calls += specs.length;
     this.lastCancel = s.cancelCalled ?? false;
     if (s.newAttempts) this.attempts = [...this.attempts, ...s.newAttempts];
     return { reply: s.reply, taskIds: [] };
@@ -69,6 +97,8 @@ export class FakeHarnessSession implements HarnessSession {
     };
   }
   compactionAttempts(): readonly CompactionAttempt[] { return this.attempts; }
+  /** 逐次真实模型调用账本（主 / Pi 摘要 / 重试 / 溢出恢复）。 */
+  modelCallLedger(): readonly ModelCallRecord[] { return this.ledger; }
   cancelCalledLastTurn(): boolean { return this.lastCancel; }
 }
 

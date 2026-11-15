@@ -16,6 +16,7 @@ import path from 'node:path';
 import { DEFAULT_CONTEXT_WINDOW } from '../../../packages/agent/src/pi-driver';
 import { createTaskRegistry, TaskOwnershipError } from '../../../packages/agent/src/task-registry';
 import { collectEvidence, type SessionEvidence, type SessionJudgement } from './evidence';
+import { accountCalls } from './accounting';
 import { analyzeCompaction, judgeCompactionLifecycle } from './compaction';
 import { judgeTaskContinuity } from './oracle';
 
@@ -112,6 +113,7 @@ export function checkEvidenceCollection(): G3Item {
       budgetUsed: { calls: 0, tokens: 0, tokensObserved: false, ms: 0, summaryCalls: null },
       budgetStopped: null, startedAt: '2026-01-01T00:00:00Z', endedAt: '2026-01-01T00:00:00Z',
       turns: [], replies: [], compactionAttempts: [], tokenCurve: [], toolCalls: [],
+      modelCalls: [], callAccounting: accountCalls([]),
       taskTurns: [], tasksFinal: [], resourceSamples: [], infraSignals: [], productFaultSignals: [],
     };
     const judgement: SessionJudgement = {
@@ -119,12 +121,12 @@ export function checkEvidenceCollection(): G3Item {
       taskVerdict: judgeTaskContinuity([]), compactionVerdict: judgeCompactionLifecycle(analysis),
     };
     const { dir } = collectEvidence(tmp, evidence, judgement);
-    const expectedFiles = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'evidence.json'];
+    const expectedFiles = ['manifest.json', 'turns.jsonl', 'replies.jsonl', 'compaction-events.jsonl', 'token-curve.jsonl', 'model-calls.jsonl', 'tool-calls.jsonl', 'tasks-snapshots.jsonl', 'tasks-final.json', 'resource-samples.jsonl', 'evidence.json'];
     const present = new Set(readdirSync(dir));
     const missing = expectedFiles.filter((f) => !present.has(f));
     return {
       id: 'G3-E', area: '证据采集', kind: 'deterministic',
-      description: '证据 schema 十个文件齐全', status: missing.length === 0 ? 'pass' : 'fail',
+      description: '证据 schema 文件齐全（含逐次调用账本 model-calls.jsonl）', status: missing.length === 0 ? 'pass' : 'fail',
       detail: missing.length === 0 ? `全部落盘于 ${dir}` : `缺文件：${missing.join(', ')}`,
     };
   } finally {

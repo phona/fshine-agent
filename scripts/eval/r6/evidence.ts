@@ -15,6 +15,7 @@ import path from 'node:path';
 import type { CompactionAttempt, TurnObservation, CompactionVerdict } from './compaction';
 import type { TaskTurnFact, TaskView } from './oracle';
 import type { FactFailureCode, FactVerdict, TaskVerdict } from './oracle';
+import type { AccountedUsage, ModelCallRecord } from './accounting';
 
 export type Wave = 'Wave1' | 'Wave2';
 export type Track = 'LS1' | 'LS2' | 'LS3' | 'LS4' | 'LS5';
@@ -76,6 +77,10 @@ export interface SessionEvidence {
   readonly replies: readonly ReplyRecord[];
   readonly compactionAttempts: readonly CompactionAttempt[];
   readonly tokenCurve: readonly TurnObservation[];
+  /** 逐次真实模型调用明细（主 / Pi 摘要 / 重试 / 溢出恢复）。 */
+  readonly modelCalls: readonly ModelCallRecord[];
+  /** 全量记账读数（总计 + 分类别；含摘要与重试）。 */
+  readonly callAccounting: AccountedUsage;
   readonly toolCalls: readonly ToolCallRecord[];
   readonly taskTurns: readonly TaskTurnFact[];
   readonly tasksFinal: readonly TaskView[];
@@ -126,6 +131,8 @@ export function buildEvidenceSummary(evidence: SessionEvidence, judgement: Sessi
       limits: evidence.limits, budgetUsed: evidence.budgetUsed, budgetStopped: evidence.budgetStopped,
       startedAt: evidence.startedAt, endedAt: evidence.endedAt,
     },
+    callAccounting: evidence.callAccounting,
+    modelCallsByKind: evidence.callAccounting.byKind,
     effectiveCompactions: judgement.compactionVerdict.facts['effectiveCompactions'] ?? null,
     compactionFacts: judgement.compactionVerdict.facts,
     coverageSufficient: judgement.compactionVerdict.coverageSufficient,
@@ -140,6 +147,7 @@ export function buildEvidenceSummary(evidence: SessionEvidence, judgement: Sessi
     files: {
       turns: 'turns.jsonl', replies: 'replies.jsonl', compactionEvents: 'compaction-events.jsonl',
       tokenCurve: 'token-curve.jsonl', toolCalls: 'tool-calls.jsonl',
+      modelCalls: 'model-calls.jsonl',
       tasksSnapshots: 'tasks-snapshots.jsonl', tasksFinal: 'tasks-final.json',
       resourceSamples: 'resource-samples.jsonl', manifest: 'manifest.json',
     },
@@ -171,6 +179,7 @@ export function collectEvidence(root: string, evidence: SessionEvidence, judgeme
   writeFileSync(path.join(dir, 'replies.jsonl'), jsonl(evidence.replies));
   writeFileSync(path.join(dir, 'compaction-events.jsonl'), jsonl(evidence.compactionAttempts));
   writeFileSync(path.join(dir, 'token-curve.jsonl'), jsonl(evidence.tokenCurve));
+  writeFileSync(path.join(dir, 'model-calls.jsonl'), jsonl(evidence.modelCalls));
   writeFileSync(path.join(dir, 'tool-calls.jsonl'), jsonl(evidence.toolCalls));
   writeFileSync(path.join(dir, 'tasks-snapshots.jsonl'), jsonl(evidence.taskTurns.map((t) => ({
     turn: t.turn, tasks: t.tasks, reply: t.reply ?? null, cancelCalled: t.cancelCalled ?? false,

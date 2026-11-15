@@ -22,6 +22,10 @@ import {
 import type { BudgetUsage, ReplyRecord, SampleDisposition, SessionEvidence, SessionJudgement, Track, TurnRecord, Wave } from './evidence';
 import { buildEvidenceSummary, classifySample } from './evidence';
 import type { TrackPlan } from './load-generator';
+import {
+  accountCalls, CallAccountingGuard, resolveLimits, R6HardStopError,
+  type ModelCallRecord,
+} from './accounting';
 
 /** 会话面（真实 = 生产同源装配适配；测试 = 假会话）。只暴露只读事实。 */
 export interface HarnessSession {
@@ -31,6 +35,12 @@ export interface HarnessSession {
   transcriptMessages(): number;
   /** 累计真实模型调用计量（完整计量；含摘要调用；能分离则 summaryCalls 单列）。 */
   budget(): BudgetUsage;
+  /**
+   * 逐次真实模型调用明细（主 / Pi 摘要 / 重试 / 溢出恢复），供**全量记账 + 先验硬停**消费。
+   * 生产同源装配适配器**必须**提供（否则摘要/重试调用会漏账）；缺省缺省（undefined）时 harness
+   * 退化为按 budget 调用差补记「主模型」粗记录，并在证据中标注未逐次暴露。
+   */
+  modelCallLedger?(): readonly ModelCallRecord[];
   /** Pi 原生 Session 生命周期暴露的压缩尝试（顺序）。 */
   compactionAttempts(): readonly CompactionAttempt[];
   /** 刚结束的一轮机械上是否调用了 task_cancel（H5 判据）。 */
@@ -47,6 +57,8 @@ export interface HarnessRunInput {
   readonly model: string;
   readonly contextWindow: number;
   readonly limits: Readonly<Record<string, number>>;
+  /** 注入墙钟（测试确定性，用于 wallMs 硬停）；缺省 `Date.now`。 */
+  readonly now?: () => number;
   /** 起点时钟；缺省固定值保证可复现。 */
   readonly at?: (turn: number) => string;
   readonly infraSignals?: readonly string[];
@@ -78,7 +90,24 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
   const factVerdicts: FactVerdict[] = [];
   const factAnswers: { expectation: FactExpectation; reply: string }[] = [];
 
+  // 全量记账 + 单实验硬停（先验拒绝）：上限取 R6 预注册 §十三.D 冻结值（缺省），
+  // limits 仅用于测试注入更小上限做确定性验证。
+  const guard = new CallAccountingGuard(
+    resolveLimits(input.limits),
+    input.now ? { now: input.now } : {},
+  );
+  const hasLedger = typeof session.modelCallLedger === 'function';
+  const derivedRecords: ModelCallRecord[] = [];
+  let hardStop: Readonly<Record<string, unknown>> | null = null;
+
   for (const spec of plan.turns) {
+    // ① 先验：达上限即拒绝发起本回合请求（有界失败，不靠模型自觉）。
+    try {
+      guard.precheck();
+    } catch (error) {
+      if (error instanceof R6HardStopError) { hardStop = { ...error.stop }; break; }
+      throw error;
+    }
     turns.push({ index: spec.index, text: spec.text, ...(spec.fact ? { expected: JSON.stringify(spec.fact) } : {}) });
     const callsBefore = session.budget().calls;
     const tokensBefore = session.transcriptTokens();
@@ -87,6 +116,20 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
     const reply = result.reply ?? '';
     replies.push({ index: spec.index, text: reply, replyChars: reply.length, durationMs: 0 });
     const callsDelta = session.budget().calls - callsBefore;
+    // ② 回填累计逐次调用记录（摘要独立于 budget hook 计数）。
+    if (hasLedger) {
+      guard.replace((session.modelCallLedger?.() ?? []).map((r) => ({ ...r, sessionId: input.sessionId })));
+    } else {
+      // 会话面未暴露逐次明细：按 budget 调用差补记「主模型」粗记录（token 未观测，不虚增）。
+      const budgetCalls = session.budget().calls;
+      while (derivedRecords.length < budgetCalls) {
+        derivedRecords.push({
+          seq: derivedRecords.length + 1, kind: 'main', sessionId: input.sessionId, turn: spec.index,
+          tokens: { input: 0, output: 0, total: 0 }, tokensObserved: false, durationMs: 0,
+        });
+      }
+      guard.replace(derivedRecords);
+    }
     tokenCurve.push({
       turn: spec.index,
       transcriptTokens: session.transcriptTokens(),
@@ -117,9 +160,10 @@ export async function runHarnessSession(input: HarnessRunInput): Promise<Harness
   const evidence: SessionEvidence = {
     wave: input.wave, track: input.track, sessionId: input.sessionId,
     principalId: input.principalId, model: input.model, contextWindow: input.contextWindow,
-    limits: input.limits, budgetUsed: session.budget(), budgetStopped: null,
+    limits: input.limits, budgetUsed: session.budget(), budgetStopped: hardStop,
     startedAt, endedAt: at(plan.turns.length),
     turns, replies, compactionAttempts: attempts, tokenCurve,
+    modelCalls: guard.ledger(), callAccounting: guard.usage(),
     toolCalls: [], taskTurns, tasksFinal: session.tasks(), resourceSamples: [],
     infraSignals: input.infraSignals ?? [], productFaultSignals: input.productFaultSignals ?? [],
   };
