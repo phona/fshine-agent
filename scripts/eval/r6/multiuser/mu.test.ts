@@ -2,8 +2,9 @@
  * R6 MU · 多用户场景确定性用例（vitest 包装；零真实模型、零真实企微、零真实写）。
  *
  * 断言口径：
- *   · MU-1/2/3/4/5/7/9/10 → PASS 且硬零命中为空（跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线）；
- *   · MU-6 → BLOCKED（依赖 B1 未合入）；MU-8 → BLOCKED（依赖 B2 未合入）——不伪报 PASS；
+ *   · MU-1/2/3/4/5/6/7/9/10 → PASS 且硬零命中为空（跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线）；
+ *   · MU-6 重启恢复（B1 已合入基线）→ 同 dbPath 关停重建，四类断言（转录恢复/不跨读/任务不重放/结果找回）；
+ *   · MU-8 → BLOCKED（依赖 B2 未接线）——不伪报 PASS；
  *   · 每条用例逐条记录五要素：principalId / sessionId / taskId / 请求 / 实际投递对象。
  */
 import { describe, expect, it } from 'vitest';
@@ -81,11 +82,26 @@ describe('R6 MU · MU-5 跨用户越权', () => {
   });
 });
 
-describe('R6 MU · MU-6 重启恢复（依赖 B1）', () => {
-  it('B1 未合入 → BLOCKED（不伪报 PASS）', async () => {
+describe('R6 MU · MU-6 重启恢复（B1 已合入）', () => {
+  it('≥3 principal 同 dbPath 关停重建：转录恢复 / 不跨读 / 任务不重放 / 结果找回', async () => {
     const result = await mu6(MU_RUNTIME);
-    expect(result.status).toBe('BLOCKED');
-    expect(result.status).not.toBe('PASS');
+    expect(result.status).toBe('PASS');
+    expect(result.hardZeroHits).toEqual([]);
+    // ① 各自转录恢复
+    const restored = result.evidence['restored'] as Record<string, boolean>;
+    expect(Object.values(restored)).toHaveLength(MU_PRINCIPALS.length);
+    expect(Object.values(restored).every(Boolean)).toBe(true);
+    // ② 不跨 principal 串读
+    expect(result.evidence['transcriptViolations']).toEqual([]);
+    expect(result.evidence['taskViolations']).toEqual([]);
+    // ③ 任务不重放
+    expect(result.evidence['noReplay']).toBe(true);
+    expect(result.evidence['replayCallsAfterTurn']).toBe(0);
+    // ④ 结果找回
+    const retrieval = result.evidence['resultRetrieval'] as Record<string, { ok: boolean }>;
+    expect(Object.values(retrieval)).toHaveLength(MU_PRINCIPALS.length);
+    expect(Object.values(retrieval).every((entry) => entry.ok)).toBe(true);
+    expect(result.records.length).toBeGreaterThanOrEqual(MU_PRINCIPALS.length);
   });
 });
 
@@ -145,7 +161,7 @@ describe('R6 MU · 汇总（五要素完整）', () => {
       }
     }
     const blocked = results.filter((result) => result.status === 'BLOCKED').map((result) => result.id);
-    expect(blocked.sort()).toEqual(['MU-6', 'MU-8']);
+    expect(blocked.sort()).toEqual(['MU-8']);
     const failed = results.filter((result) => result.status === 'FAIL');
     expect(failed).toEqual([]);
   });

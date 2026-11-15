@@ -6,13 +6,12 @@
  *     同进程并发 / 会合栅见证真交错）——不是直接 `registry.get` 代替交互；
  *   · 硬零断言：跨 principal 泄漏 / 越权执行 / 通知错投 / 任务串线（`../oracle` 机械判据）；
  *   · 逐用例记录五要素：principalId / sessionId / taskId / 请求 / 实际投递对象；
- *   · 依赖未满足的 MU-6（B1）/ MU-8（B2）**标 BLOCKED**（给理由与证据，不伪报 PASS）。
+ *   · MU-8（B2 未接线）**标 BLOCKED**（给理由与证据，不伪报 PASS）。
  *
- * 依赖状态（MU 基线 = arch/r6-multiuser @ b90f12f）：
- *   · B1 会话持久化：分支 `arch/sess-persist-impl`（91b388a）**未合入**（`packages/agent/src/
- *     session-persistence.ts` 不存在）→ MU-6 BLOCKED；
- *   · B2 企微静默闸：分支 `arch/wecom-silent-shadow` **未合入**（`packages/channel-wecom/src/
- *     silent-shadow-gate.ts` 不存在）→ MU-8 BLOCKED。
+ * 依赖状态（本基线 = arch/r6-mu6，含 B1 接线 ebdaf71）：
+ *   · B1 会话持久化：**已合入**（`packages/agent/src/session-persistence.ts` 存在）→ MU-6 已接线
+ *     （实现见同目录 `mu6-restart.ts`）；
+ *   · B2 企微静默闸：模块存在但 MU-8 确定性用例未接线 → MU-8 BLOCKED。
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -24,6 +23,7 @@ import {
   principalIdOf, sessionIdOf,
   type MuCaseResult, type MuDeliveryRecord, type MuHardZero, type MuPlanTable, type MuTaskSnapshot,
 } from './mu-support';
+import { mu6Restart } from './mu6-restart';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(HERE, '..', '..', '..', '..');
@@ -347,25 +347,22 @@ export async function mu5(rt: RuntimeConfig): Promise<MuCaseResult> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MU-6 重启恢复（依赖 B1 会话持久化 → 未合入 → BLOCKED）
+// MU-6 重启恢复（B1 会话持久化已合入基线 → 真实确定性用例）
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function mu6(_rt: RuntimeConfig): Promise<MuCaseResult> {
-  const id = 'MU-6';
-  const title = '重启恢复（依赖 B1 会话持久化）';
+/**
+ * B1 会话持久化已合入基线（`packages/agent/src/session-persistence.ts` 存在），MU-6 的
+ * 重启恢复语义可确定性验证。用例实现落在同目录 `mu6-restart.ts`（生产同源装配 + 同 dbPath
+ * 关停重建），此处只做转接，保持单一实现（不预造第二套会话机制、不直调 registry 代替交互）。
+ */
+export async function mu6(rt: RuntimeConfig): Promise<MuCaseResult> {
   const b1Module = path.join(REPO_ROOT, 'packages', 'agent', 'src', 'session-persistence.ts');
-  const satisfied = existsSync(b1Module);
-  const evidence = {
-    dependency: 'B1 会话持久化',
-    satisfyingModule: 'packages/agent/src/session-persistence.ts',
-    modulePresentOnBaseline: satisfied,
-    upstreamBranch: 'arch/sess-persist-impl@91b388a',
-    upstreamMergedIntoBaseline: false,
-    reason: satisfied ? 'B1 已合入' : 'B1 未合入：会话（对话转录）无持久化，重启后无法恢复会话上下文；MU-6 所需的重启恢复语义不可在本基线确定性验证。',
-  };
-  if (!satisfied) return blocked(id, title, 'BLOCKED：依赖 B1 未合入（无会话持久化模块），无法验证重启恢复。', evidence);
-  // 若将来 B1 合入，此处再补确定性用例（当前不预造第二套会话机制）。
-  return blocked(id, title, 'BLOCKED：B1 存在但 MU-6 确定性用例未接线（本 run 不改产品码）。', evidence);
+  if (!existsSync(b1Module)) {
+    return blocked('MU-6', '重启恢复（依赖 B1 会话持久化）', 'BLOCKED：依赖 B1 未合入（无会话持久化模块），无法验证重启恢复。', {
+      dependency: 'B1 会话持久化', satisfyingModule: 'packages/agent/src/session-persistence.ts', modulePresentOnBaseline: false,
+    });
+  }
+  return mu6Restart(rt);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
