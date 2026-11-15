@@ -1921,6 +1921,67 @@ spread-axis.test.ts:89    expect(grade.d6?.postCancelResidue.value?.residue).toB
 ---
 
 
+## 六十八、R5 Phase 3 长稳执行 · P3-A/B/C 三样本结论（2026-11-15，分支 `arch/r5-phase3`，基线 = arch/integration 启动时 HEAD）
+
+**范围**：P3-A 压缩与恢复（S1）、P3-B 长会话执行扩散（S2）、P3-C 有界失败（S3）。真实模型会话，模型显式 `LLM_MODEL=step-3.7-flash`（各 worktree `.env` 缺省是 step-5-preview，不显式固定即成独立实验，不可与既有统计混用）；窗口 `LLM_CONTEXT_WINDOW=8192`（P3 准备已实测该窗口能触发 `context_emergency_compact`，装配期 floor=6656）。装配与生产同源（`assembleSessionCore`/`resolveExecutionFace`/`createBackgroundDispatch`，`scripts/eval/p3/p3a-session.ts` 及 p3b/p3c-session）；执行器侧硬停（`scripts/eval/p3/enforce.ts`：maxModelCalls/maxTokens/墙钟）全程接线。证据根 `.runtime/r5phase3/{s1,s2,s3}/`（gitignored，未 git add）。
+
+### P3-A 六环证据链（S1，verdict.json 全部 pass）
+
+1. 压缩前需保留上下文：turn1 回复含 #1/alpha/W1；tasks.json 首任务 taskNo=1 completed。
+2. 压缩真实触发：真实模型会话中 `context_emergency_compact`=36 条、`context_compacted`=49 条（driverEvents 机械捕获，pi-driver 结构化事件）。
+3. 压缩后预期变化：transcriptTokens 4443→2414（turn3→4 下降）；「此前会话摘要」标记自 turn3 起常驻。
+4. 压缩后继续交办：turn17-20 均有回复。
+5. 正确使用保留上下文：turn17 回复正确引用 #1/alpha/W1/1200/800；探针轮（≥17）`execute_operation`=0 次（仅 task_result 读回）。
+6. 最终业务结果正确：alpha@W1 总额 2000=1200+800，turn17/18/20 三次复述一致；alpha@W1 结构化执行仅 turn1、turn11（turn11 为用户新指令重列两窗口，非压缩后重复）。无对象漂移、无重复执行。
+
+缺陷如实登记：turn13 #11 汇总任务 worker 对模糊指令探索式调用 ~18 个不存在集合（对象漂移限于该中间轮）；turn19 回复为空（`pi_driver_empty_reply` ×1，turn20 恢复正确）。
+
+### P3-B 扩散读数（S2，20 轮：交办→多任务并发→话题切换→歧义澄清→失败接续→取消→取消后核查→多任务交替读回→总清单）
+
+扩散判据通过：执行调用数无理由增长=否、任务自行裂变=否、重复执行=否、错误对象=否、取消后仍派发=否（四档 worst=A×11、B/C/D=0）。D6：workerStarts=10、execute_operation=11、inFlightPeak=6、取消残留（任务特定）=0；activeTasksPeak/tokens 口径不可比已登记。压缩后用户级退化明显，另记：3 轮上下文丢失致空答、1 轮泄漏原始 JSON、1 轮无谓澄清致取消请求悬空。样本一次采样、未重采样，全样本保留。
+
+### P3-C 终止与真停分开举证（S3，harness commit `1fb6e58`，证据含 evidence.json/verdict.json/driver-events.jsonl + s3-run.log）
+
+四类失败构造（上下文预算不足/无法生成有效回复/超时/取消）+ 双面举证：任务终态（终止有界性）与底层执行进程实际停止（在飞回合/许可归零与执行器 kill 证据）分开判定。判读：终止有界性全部通过；1 项构造子路径未触发（如实登记）+2 项用户级缺陷另记。未用硬上限即停（budgetStopped=null）。先 `--dry` 干跑（零真实模型请求，非样本）验证 harness；S3 限额 40calls/600k/30min。
+
+### 预算实际
+
+- 阶段会话 3/5（正式 3 已用完，预留 2 未动）；S1 calls=32/tokens=265450，S2 calls=30/tokens=150444，S3 calls=10/tokens=30403；三样本均 budgetStopped=null（未触硬停自然完成）。总预算 175。
+- blocked：无。
+- 独立复核结论（实际执行）：登记前在 worktree 实读 `.runtime/r5phase3/{s1,s2,s3}/verdict.json`——s1 六环逐项 pass 且 manifest model=step-3.7-flash、contextWindow=8192、budgetUsed 与上文一致；s2 verdict=pass(扩散判据)/用户级退化另记；s3 verdict=pass(终止有界性)、phaseSessionsUsed=3/5。与执行面回报一致。
+
+**状态：待合入。**
+
+---
+
+## 六十八、R5 Phase 3 追加调查 · S4 定向对照 + S5 机制定位（2026-11-15，分支 `arch/r5-p3s45`，基线 = arch/integration @d5fe7d4）状态：**待合入**
+
+> 编号说明：本 worktree 基线处 decision-log 最大号为 §六十五；arch/integration 此后已落 §六十六/§六十七（本分支不可见），为避免合入冲突按主仓当前最大号 +1 取 §六十八。
+> 详细证据与逐轮读数见 `docs/product/r5-phase3-longrun-report.md` §追加（P3s45）（提交 6afe470）；本条只做决定面登记。
+
+**目的**：P3 长稳（§六十五）S2 出现压缩后用户级退化，本批**只定位、不修**——S4 在同一真实会话内做未压缩/真实压缩前后段定向对照（重放空答 / 原始 JSON 泄漏 / 无谓澄清致取消悬空关键交互），S5 据最强证据做机制定位（明确取消 / 指代取消 / 结果找回 / 连续多轮交办探针）。产品代码 0 修改；不重写 Worker 系统提示；不新增宿主语义治理；复用 `scripts/eval/p3/*` 既有设施（新增执行器 `p3s4-session.ts` @211ade3、`p3s5-session.ts` @6ad7e8f，均复制既有骨架仅换探针，P3S4_DRY/P3S5_DRY 干跑 0 模型调用验证装配）；压缩为真实触发（driverEvents 记录 tokensBefore/After），无人造摘要。
+
+**预算**：恰好 2 个真实模型会话（S4 1 + S5 1），step-3.7-flash、LLM_CONTEXT_WINDOW=8192、一次采样；S4 29 calls/124,157 tok/411.5s，S5 31 calls/164,162 tok/635.8s；硬停均未触发。证据 `.runtime/r5p3s45/{s4,s5}`（gitignored）。
+
+**三类退化复现结果**：①空答/上下文丢失——**复现**（S4 turn8/11/19/21、S5 turn6/13/19，塌缩轮对应回合前压缩产物均 tokensAfter=15；tokensAfter>200 的轮两会话均正常，无反例）。②原始 JSON 泄漏——**不复现**（两会话 44 轮回复扫描无裸信封，如实记）。③无谓澄清致取消悬空——前段不复现（交办即建任务、取消路由正确）；后段变体复现（近空摘要下交办丢失→取消无对象且模型不如实说明）。
+
+**压缩-退化关联与局限**：owner 判定调整②落实——S5 turn8 同为结果找回且摘要 478 tok 时靠 `task_result` 读回答对，S4 turn4 alpha 走压缩摘要答错（500≠2000）而同轮 beta 走 task_result 答对＝「摘要保留 ≠ 结果找回」的直接证据。局限：N=2 会话、每形态 3–4 实例；摘要文本未落盘，共变 ≠ 必然因果。
+
+**压缩事件生命周期**（owner ③）：36 emergency/49 compacted（S1）与 S5 19/32 为同模式三连——`transformContext` 过阈 emit `context_emergency_compact` → force 压缩 emit `context_compact_trimmed`+`context_compacted`（`packages/agent/src/pi-driver.ts:701-711`）。S1 49=36 无效（tokensBefore==After）+13 有效；S5 19 次 emergency 全部 removedMessages=0 且零 token 缩减＝纯额外模型调用开销（0 条 compact_failed，是产物零缩减后每条模型请求前复核再触发，非失败）；触发于 ~2.5–3.5k tok 系 W=8192 下 headroom/fixedOverhead 占比大（`pi-driver.ts:657,703`），机械可解释非误报。
+
+**分层归因**（owner ④）：塌缩空答→**Pi 压缩层**（近空摘要产物）；压缩后交办丢失→Pi 压缩层为主 + Main 次之；虚答「未执行过取消」（S5 t18，t15 确有 task_cancel #5）→状态恢复/摘要面；无对象取消反问（S4 t20）→Main；emergency 零缩减循环→Pi 压缩层机制开销；明确取消路由与 task_result 找回→工具路由/状态恢复均正常；JSON 泄漏未复现不判层。
+
+**取消悬空的控制意图判定**（owner ①）：底层 task_cancel 工具正确（S5 #2/#5/#10、S4 #3 全部路由正确，terminal 属预期）；任务均不在执行（取消时已轮内完成）；**无后续派发、无重复执行**（S4 t20 后 0 执行、S5 #1–#10 无重复 requestIds；S5 t20 resource_limited 未受理 + t22 取消 #10 如实闭环）。结论＝控制意图「如实回执」失败（虚答/无对象反问/指代取消退化为澄清），**安全面无失控**，非执行层失败。
+
+**最小修复建议（均未实施、零产品改动）**：①近空摘要（首要，值得改）：两会话全部塌缩轮对应 tokensAfter=15、tokensAfter>200 无反例；根因假设＝W=8192 下 `compactTranscriptWithPi`（`pi-driver.ts:529-560`）摘要预算产出空壳摘要；先加 B 类最小可观测性（落盘摘要产物）再改。②emergency 零缩减循环（值得改，纯成本）：S5 19 次全部 removedMessages=0 且 tokensBefore==tokensAfter；建议同回合产物零缩减时幂等短路（`pi-driver.ts:701-711`）。③取消回执诚实性属模型行为面：不靠提示词补丁、不新增宿主机制，可观测性缺口登记由 owner 裁定，本批不改产品代码。
+
+**四轴**：尚未全部通过（用户级退化已定位到压缩层机制面，修复未实施）。**状态：待合入。**
+
+---
+
+
+
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
