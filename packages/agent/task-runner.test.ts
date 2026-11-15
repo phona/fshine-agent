@@ -135,6 +135,10 @@ class FakeRegistry implements TaskRegistryPort {
     return this.require(taskId).status;
   }
 
+  requestOf(taskId: string): string {
+    return this.require(taskId).request;
+  }
+
   reasonOf(taskId: string): TaskReason | undefined {
     return this.require(taskId).reason;
   }
@@ -351,6 +355,19 @@ class FakePolicy implements ResourcePolicyPort {
 
   cancelQueued(taskId: string): void {
     this.cancelledQueued.push(taskId);
+  }
+
+  // --- P0-C① 后台计量：与真实 ResourcePolicy 同契约（未准入的任务抛错，不造预算） ---
+  readonly budgetTaskIds = new Set<string>();
+  readonly metered: { taskId: string; usage: { calls?: number; ms?: number } }[] = [];
+
+  budgetFor(taskId: string): { consume(usage: { calls?: number; ms?: number }): void } {
+    if (!this.budgetTaskIds.has(taskId)) throw new Error(`未知任务预算：${taskId}`);
+    return {
+      consume: (usage) => {
+        this.metered.push({ taskId, usage });
+      },
+    };
   }
 }
 
@@ -935,5 +952,61 @@ describe('安全绊线', () => {
     expect(h.registry.statusOf('t1')).toBe('failed');
     expect(h.registry.failureReasonOf('t1')).toContain('同步崩溃');
     expect(h.policy.backgroundInUse).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// P0-C 后台预算与生命周期
+// ---------------------------------------------------------------------------
+
+describe('P0-C 后台预算与生命周期', () => {
+  it('① 后台回合计入任务预算：完成回合 consume {calls:1, ms}；未准入任务跳过计量不报错', async () => {
+    const h = harness();
+    submit(h, 't1');
+    h.policy.budgetTaskIds.add('t1');
+    h.runner.pump();
+    expect(h.registry.statusOf('t1')).toBe('running');
+    h.executor.settle(0, { kind: 'completed', resultText: '（测试结果）' });
+    await h.runner.whenIdle();
+    expect(h.policy.metered.filter((entry) => entry.taskId === 't1')).toEqual([
+      { taskId: 't1', usage: { calls: 1, ms: 0 } },
+    ]);
+
+    // 未准入（受理侧 seed 被拒/假件无预算）的任务：回合照常落终态、不计量、不抛错。
+    submit(h, 't2');
+    h.runner.pump();
+    h.executor.settle(1, { kind: 'completed', resultText: '（测试结果2）' });
+    await h.runner.whenIdle();
+    expect(h.registry.statusOf('t2')).toBe('completed');
+    expect(h.policy.metered.some((entry) => entry.taskId === 't2')).toBe(false);
+  });
+
+  it('② 取消后不再消费：running 取消落定后恰好计一次实际时长、许可归还，后续 pump 不再计量', async () => {
+    const h = harness();
+    submit(h, 't1');
+    h.policy.budgetTaskIds.add('t1');
+    h.runner.pump();
+    expect(h.runner.cancel('t1').outcome).toBe('requested');
+    expect(h.executor.calls[0]!.context.signal.aborted).toBe(true);
+    h.executor.settle(0, { kind: 'cancelled' });
+    await h.runner.whenIdle();
+
+    expect(h.registry.statusOf('t1')).toBe('cancelled');
+    expect(h.policy.backgroundInUse).toBe(0);
+    expect(h.policy.metered.filter((entry) => entry.taskId === 't1')).toHaveLength(1);
+    h.runner.pump();
+    expect(h.policy.metered.filter((entry) => entry.taskId === 't1')).toHaveLength(1);
+  });
+
+  it('④ 幂等：同 taskId 重复受理被确定性拒绝，底账不覆盖、编号不重复消耗', () => {
+    const h = harness();
+    const first = submit(h, 't1', '第一个任务');
+    expect(() => submit(h, 't1', '重复任务')).toThrow('重复受理');
+    expect(h.registry.statusOf('t1')).toBe('queued');
+    expect(h.registry.requestOf('t1')).toBe('第一个任务');
+    expect(h.registry.taskNoOf('t1')).toBe(first.taskNo);
+    // 另一 taskId 不受影响。
+    submit(h, 't2', '第二个任务');
+    expect(h.registry.statusOf('t2')).toBe('queued');
   });
 });

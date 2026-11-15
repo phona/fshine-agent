@@ -164,6 +164,12 @@ export interface ResourcePolicyPort {
   acquire(kind: 'foreground' | 'background', opts?: { taskId?: string }): ResourcePermit | ResourceRejection;
   release(permit: ResourcePermit): void;
   cancelQueued(taskId: string): void;
+  /**
+   * 任务预算计量（可选；§2 真实 ResourcePolicy 提供）：后台执行回合按真实 taskId 计入
+   * taskBudget（P0-C①：原 consume 唯一调用点在 inline 委派，后台回合不计量）。
+   * 未在该策略准入过的任务可能抛错/缺省——调用方跳过计量，不造预算（policy 契约）。
+   */
+  budgetFor?(taskId: string): { consume(usage: { calls?: number; ms?: number }): void };
 }
 
 function isRejection(result: ResourcePermit | ResourceRejection): result is ResourceRejection {
@@ -366,6 +372,9 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
   function startRound(task: TaskRecordView, permit: ResourcePermit, answer?: string): void {
     const controller = new AbortController();
     controllers.set(task.taskId, controller);
+    // P0-C①：后台回合按真实 taskId 计入任务预算（calls=1 + 实际时长）；
+    // 预算不存在的任务（未准入/无该端口的假件）跳过计量，不影响任务事实。
+    const roundStartedAt = now().getTime();
     const input: TaskExecutionInput = {
       taskId: task.taskId,
       ...(task.taskNo === undefined ? {} : { taskNo: task.taskNo }),
@@ -395,11 +404,23 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
         } finally {
           controllers.delete(task.taskId);
           inFlight.delete(task.taskId);
+          meterRound(task.taskId, now().getTime() - roundStartedAt);
           policy.release(permit);
           schedulePump();
         }
       });
     inFlight.set(task.taskId, chain);
+  }
+
+  /** P0-C①：回合计量——完成/失败/取消都在 finally 各计一次实际时长，之后不再消费（P0-C②）。 */
+  function meterRound(taskId: string, ms: number): void {
+    if (policy.budgetFor === undefined) return;
+    try {
+      // 直接以 policy 调用（保 this 绑定）；未准入过的任务会抛错——§2 契约不造预算，跳过。
+      policy.budgetFor(taskId).consume({ calls: 1, ms });
+    } catch {
+      // 未在该策略准入过的任务不造预算（§2 契约）：跳过计量，不改变任务事实。
+    }
   }
 
   /**
@@ -528,13 +549,21 @@ export function createTaskRunner(options: TaskRunnerOptions): TaskRunner {
 
   return {
     submit(input) {
-      return registry.begin({
-        taskId: input.taskId,
-        principalId: input.principalId,
-        sessionId: input.sessionId,
-        request: input.request,
-        status: 'queued',
-      });
+      // P0-C④ 幂等：同 taskId 重复受理会静默覆盖底账行并再消耗编号（registry.begin 是
+      // tasks.set 覆盖语义）——确定性拒绝重复创建，不猜「同键返回原任务」的语义。
+      try {
+        registry.get(input.taskId);
+      } catch {
+        // 不存在（越权/不存在同错）：正常受理。
+        return registry.begin({
+          taskId: input.taskId,
+          principalId: input.principalId,
+          sessionId: input.sessionId,
+          request: input.request,
+          status: 'queued',
+        });
+      }
+      throw new Error(`重复受理（幂等拒绝）：任务 ${input.taskId} 已存在。`);
     },
     pump,
     whenIdle,

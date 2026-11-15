@@ -1319,6 +1319,22 @@ UX-06 的内部术语泄漏进 Wave 2b #5 定位与语料。
 
 ---
 
+---
+
+## 五十一、R5 轨1 · P0 修复登记（P0-A 任务引用契约 / P0-B 上下文不变式 / P0-C 后台预算与生命周期）（2026-11-15，分支 `arch/r4-p0fix`）
+
+- **状态**：在 PR（未合入；未 push / 未合并 / 未碰 main/tag）。
+- **分支/基线**：worktree `~/projects/fshine-agent-r4-p0fix`，分支 `arch/r4-p0fix`；基线 = `arch/integration` 启动时 HEAD `8d29e7715d8bec2823257be62418780049eda185`（记录于主仓 `.runtime/r5p0/baseline.txt`）。
+- **P0-C 实施（本条目登记部分）**：
+  - **① 后台预算计入（已实施）**：`task-runner` 增可选端口 `budgetFor` + `meterRound`——后台执行回合在 settle finally 按真实 taskId `consume({calls:1, ms})`（未准入任务跳过、不造预算，§2 契约不变）；受理侧既有的 probe acquire（`execution-runtime.ts` delegate background 分支，acquire('background',{taskId}) 后 release）即预算种子，无需新增受理逻辑。
+  - **② 取消后资源释放（已验证）**：取消 → 回合落定 → finally 一次实际时长计量 + `policy.release` + 出 `inFlight`；后续 pump 不再计量（新增机械测试钉住）。
+  - **④ 幂等（已实施）**：`runner.submit` 对同 taskId 重复受理确定性拒绝（原 registry.begin 是覆盖语义：静默覆盖底账行 + 再消耗 taskNo）。
+  - **③ 状态可信（审计结论：既有覆盖充分）**：超时/限流/重启后的状态可信由既有测试覆盖（`task-runner.test.ts`：过期租约→result_unknown 不自动重放；timed_out；策略拒绝→failed/resource_limited；重启续跑）——本轮全量回归全绿，未改状态机。
+- **登记（不修，待 owner 裁定）**：
+  - **`queueCapacity>0` 上界属冻结 §2 接口：只审计、不改机制**。审计结论：① 受理侧上界只看 policy 队列（probe acquire），与「队列=底账 queued 行」的单一事实源不一致——底账 queued 行数无受理上界，policy 队列满 ≠ 拒绝受理（probe 在槽位空时放行，任务排底账）；② runner 对排队许可（state='queued'）只停止派发不直派发（正确，不绕并发上限）；③ **缺省 `queueCapacity=0` 下无 policy 排队，但底账 queued 行仍无上界**——后台受理不设底账级容量上界，属产品级开放面（建议后续切片：受理上界改为「底账 queued 行数 < queueCapacity 才受理」并加集成测试；触及冻结面，未动）。拒绝行为本身正确：`queue_full` 拒绝面既有测试覆盖（`resource-policy.test.ts`）。
+  - **messageId 幂等归属**：渠道消息防重全权归执行层/渠道装配层（B 类确定性）；通用层不建去重机制（不新增机制准入）。后续切片若要落点，最小方案是渠道装配层按 messageId 去重，不进 Runtime。
+  - **其余后续切片建议（未实施）**：queued/waiting_user 超时接线（复用 pump 时点查底账 waitingSince/createdAt，不建定时器）+ leaseMs ≥ workerTurnMs fail-fast；前台排队忙等加上界；budgets Map 终态清除（有界试用债务）。
+
 ## 维护规则
 
 - 新增删除/保留决定：追加条目，不改旧条目；编号延续（二、三节内）。
